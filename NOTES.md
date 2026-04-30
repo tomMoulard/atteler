@@ -54,11 +54,35 @@ I should/can also include specialized tool to do the review like coderabbit.
 
 ## TODO
 
- - [ ] llm connection (claude code, codex)
- - [ ] configuration loading
-    - [ ] general configuration
-    - [ ] local configuration
-    - [ ] other harnless configurations
-        - [ ] codex
-        - [ ] claude code
-        - [ ] opencode
+ - [x] llm connection (claude code, codex)
+ - [x] configuration loading
+    - [x] general configuration
+    - [x] local configuration
+    - [x] other harness configurations
+        - [x] codex
+        - [x] claude code
+        - [x] opencode
+    - [x] YAML config template/init command
+    - [x] config path listing and validation
+ - [x] sessions + replay
+ - [x] session titles
+ - [x] session tags
+ - [x] session tag summaries
+ - [x] session discovery/listing
+ - [x] YAML session details command
+ - [x] markdown/json session export
+ - [x] transcript search
+ - [x] config-backed agent registry and `@agent` invocation
+ - [x] YAML agent description command
+ - [x] local readiness doctor
+ - [x] build-time version reporting
+ - [x] pipe-friendly stdin one-shot prompts
+ - [x] local event hooks
+ - [x] bounded local `@file` context references
+ - [x] bounded local `@directory` tree references
+ - [x] trigger-based indirect agent routing
+ - [x] global and per-agent model fallback chains
+ - [x] global/agent/CLI generation controls
+ - [x] offline built-in provider/model listing
+ - [x] black-box CLI e2e tests for common config, provider, agent, and session workflows
+ - [x] opt-in live LLM e2e tests for OpenAI and Anthropic one-shot calls
