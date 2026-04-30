@@ -60,3 +60,17 @@ I should/can also include specialized tool to do the review like coderabbit.
         - [ ] codex
         - [ ] claude code
         - [ ] opencode
+
+## Build, CI, and releases
+
+Local development uses the Makefile as the main build surface:
+
+- `make build` compiles `./atteler` from `./cmd/atteler`.
+- `make test` runs all Go tests with the race detector.
+- `make lint` runs the pinned golangci-lint version.
+- `make release-check` validates `.goreleaser.yaml`.
+- `make release-snapshot` builds local GoReleaser artifacts in `dist/` without publishing.
+
+GitHub Actions runs CI on pull requests and every branch push. CI generates, lints, tests, builds, validates GoReleaser, and builds a snapshot package set with concurrency cancellation for superseded runs on the same ref.
+
+Pushing a tag triggers the release workflow. Use semantic version tags such as `v0.1.0` for package-manager-friendly versions. GoReleaser builds cross-platform archives, Linux packages (`.deb`, `.rpm`, `.apk`), checksums, and publishes them to the GitHub Release for that tag.

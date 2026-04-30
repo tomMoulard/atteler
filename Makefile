@@ -1,8 +1,10 @@
 BINARY  := atteler
 PKG     := ./cmd/atteler
 MODULE  := github.com/tommoulard/atteler
+GORELEASER_VERSION ?= v2.15.4
+GORELEASER ?= go run github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
 
-.PHONY: all build run test lint generate clean
+.PHONY: all build run test lint generate release-check release-snapshot clean
 
 all: generate lint test build
 
@@ -26,6 +28,14 @@ lint:
 generate:
 	go generate ./...
 
+## release-check: validate the GoReleaser configuration
+release-check:
+	$(GORELEASER) check
+
+## release-snapshot: build local release artifacts without publishing
+release-snapshot:
+	$(GORELEASER) release --snapshot --clean --skip=publish
+
 ## clean: remove build artifacts
 clean:
-	rm -f $(BINARY)
+	rm -rf $(BINARY) dist

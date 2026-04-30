@@ -1,0 +1,73 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/goreleaser/goreleaser/v2.15.4/www/docs/static/schema.json
+version: 2
+
+project_name: atteler
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: atteler
+    main: ./cmd/atteler
+    binary: atteler
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: atteler
+    ids:
+      - atteler
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+nfpms:
+  - id: atteler
+    ids:
+      - atteler
+    package_name: atteler
+    vendor: Tom Moulard
+    homepage: https://github.com/tomMoulard/atteler
+    maintainer: Tom Moulard <tommoulard@users.noreply.github.com>
+    description: Terminal LLM harness and Bubble Tea TUI for multi-provider chat and agent orchestration experiments.
+    license: UNLICENSED
+    bindir: /usr/bin
+    formats:
+      - apk
+      - deb
+      - rpm
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: tomMoulard
+    name: atteler
