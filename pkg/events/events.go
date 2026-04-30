@@ -67,7 +67,7 @@ type Hook struct {
 // Runner emits events to configured hooks.
 type Runner struct {
 	logger *Logger
-	hooks map[string][]Hook
+	hooks  map[string][]Hook
 }
 
 // NewRunner creates a hook runner from config.

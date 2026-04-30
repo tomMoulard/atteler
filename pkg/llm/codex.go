@@ -54,7 +54,7 @@ func (c *CodexProvider) HealthCheck(ctx context.Context) error {
 	_ = events.EmitFromContext(ctx, events.Event{
 		Type: events.CommandExecute,
 		Metadata: map[string]string{
-			"command": "codex --version",
+			"command":  "codex --version",
 			"provider": providerCodex,
 		},
 	})
