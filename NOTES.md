@@ -24,6 +24,8 @@ It's a one of a kind LLM harness that leverage multiple LLMs. Here is the list o
  - Determinism knobs. Seed, temperature-0 mode, response recording/replay. Without these your eval and self-improvement loops are measuring noise.
  - modular: anyone can bring in code, tools, agents, and prompts from anywhere. The system should be able to integrate with any existing codebase, tool, or agent, and should be able to use them in a way that is seamless and efficient. For example, if there is an existing agent that does a specific task well, the system should be able to integrate that agent into its workflow without requiring a lot of work to adapt it to the system. kind of plugins systems.
  - SDK first: the cli tool is "just" an interface built on top of a powerful SDK that can be used to build custom workflows, agents, and tools. The SDK should be well-documented and easy to use, and should provide a lot of flexibility for users to build their own custom solutions on top of the system.
+ - autocomplete the rest of the line (a la copilot) when writing a prompt, so you can easily reference tools, agents, and other resources in your prompts without having to remember their exact names or syntax. This should be available both in the CLI and in any other interfaces that the system provides.
+ - have events hooks that can be used to trigger actions when certain events happen in the system. For example, when an agent completes a task, it can trigger an event that can be used to update the agent's performance metrics, or to trigger a feedback loop to improve the agent's performance on future tasks.
 
 Here is a more in depth list of features:
 

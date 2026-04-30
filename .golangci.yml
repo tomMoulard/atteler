@@ -1,0 +1,194 @@
+version: "2"
+
+linters:
+  enable:
+    # Bugs
+    - bodyclose
+    - contextcheck
+    - durationcheck
+    - errcheck
+    - errchkjson
+    - govet
+    - musttag
+    - nilerr
+    - nilnesserr
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+
+    # Error handling
+    - err113
+    - errorlint
+    - wrapcheck
+
+    # Unused code
+    - ineffassign
+    - unconvert
+    - unparam
+    - unused
+    - wastedassign
+
+    # Correctness
+    - copyloopvar
+    - exptostd
+    - gocheckcompilerdirectives
+    - makezero
+    - mirror
+    - recvcheck
+
+    # Style
+    - asciicheck
+    - bidichk
+    - dupword
+    - goconst
+    - gocritic
+    - godoclint
+    - goprintffuncname
+    - misspell
+    - nakedret
+    - nolintlint
+    - perfsprint
+    - predeclared
+    - reassign
+    - revive
+    - usestdlibvars
+    - whitespace
+
+    # Complexity
+    - cyclop
+    - gocognit
+    - nestif
+
+    # Security
+    - gosec
+
+    # Modernize
+    - intrange
+    - modernize
+    - usetesting
+
+    # Tests
+    - thelper
+    - tparallel
+
+  settings:
+    cyclop:
+      max-complexity: 15
+
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    gocognit:
+      min-complexity: 20
+
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - opinionated
+
+    govet:
+      enable-all: true
+
+    misspell:
+      locale: US
+
+    nakedret:
+      max-func-lines: 30
+
+    nestif:
+      min-complexity: 5
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    perfsprint:
+      int-conversion: true
+      err-error: true
+      errorf: true
+      sprintf1: true
+      strconcat: true
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-declaration
+        - name: var-naming
+
+    staticcheck:
+      checks:
+        - all
+
+    wrapcheck:
+      ignore-sig-regexps:
+        - \.Errorf\(
+        - errors\.New\(
+        - errors\.Unwrap\(
+        - \.Wrap\(
+        - \.Wrapf\(
+        - \.WithMessage\(
+        - \.WithMessagef\(
+        - \.WithStack\(
+
+  exclusions:
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      - linters:
+          - err113
+        text: "do not define dynamic errors"
+      - linters:
+          - gocritic
+        text: "hugeParam"
+      # Test files get more relaxed rules.
+      - path: _test\.go
+        linters:
+          - cyclop
+          - err113
+          - funlen
+          - gocognit
+          - wrapcheck
+
+formatters:
+  enable:
+    - goimports
+    - gofumpt
+
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/tommoulard/atteler
+
+output:
+  sort-order:
+    - linter
+    - file

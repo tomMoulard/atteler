@@ -11,8 +11,8 @@ build:
 	go build -o $(BINARY) $(PKG)
 
 ## run: build and run
-run: build
-	./$(BINARY)
+run:
+	go run $(PKG)
 
 ## test: run all tests
 test:
