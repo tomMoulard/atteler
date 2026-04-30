@@ -9,10 +9,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/tommoulard/atteler/pkg/config"
 )
 
 func TestRunner_EmitRunsHookWithPayloadAndEnv(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("ATTELER_TEST_HOOK") == "1" {
 		helperHook(t)
 		return
@@ -39,36 +43,38 @@ func TestRunner_EmitRunsHookWithPayloadAndEnv(t *testing.T) {
 		Content:   "hello",
 	})
 	if err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	data, err := os.ReadFile(out)
 	if err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	var got Event
 	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	if got.Type != AssistantMessage {
-		t.Errorf("Type = %q", got.Type)
+		assert.Failf(t, "assertion failed", "Type = %q", got.Type)
 	}
 	if got.SessionID != "session-1" {
-		t.Errorf("SessionID = %q", got.SessionID)
+		assert.Failf(t, "assertion failed", "SessionID = %q", got.SessionID)
 	}
 	if got.Agent != "reviewer" {
-		t.Errorf("Agent = %q", got.Agent)
+		assert.Failf(t, "assertion failed", "Agent = %q", got.Agent)
 	}
 }
 
 func TestRunner_EmitNoHooksIsNoop(t *testing.T) {
+	t.Parallel()
 	if err := NewRunner(nil).Emit(context.Background(), Event{Type: UserMessage}); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 }
 
 func TestLogger_LogsAnyEvent(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	runner := NewRunnerWithLogger(nil, &out)
 
@@ -81,13 +87,13 @@ func TestLogger_LogsAnyEvent(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	got := out.String()
 	for _, want := range []string{"event:file_read", "model=codex/gpt-5.5", "kind=file", "path=README.md"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("log line missing %q in %q", want, got)
+			require.Failf(t, "unexpected failure", "log line missing %q in %q", want, got)
 		}
 	}
 }
@@ -96,15 +102,15 @@ func helperHook(t *testing.T) {
 	t.Helper()
 
 	if os.Getenv("ATTELER_EVENT_TYPE") != AssistantMessage {
-		t.Fatalf("ATTELER_EVENT_TYPE = %q", os.Getenv("ATTELER_EVENT_TYPE"))
+		require.Failf(t, "unexpected failure", "ATTELER_EVENT_TYPE = %q", os.Getenv("ATTELER_EVENT_TYPE"))
 	}
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	// #nosec G703 -- test helper writes to a temp path supplied by the parent test.
 	if err := os.WriteFile(os.Getenv("ATTELER_TEST_OUT"), data, 0o600); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	os.Exit(0)
 }

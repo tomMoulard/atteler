@@ -51,7 +51,7 @@ func (c *CodexProvider) FetchModels(_ context.Context) ([]string, error) {
 // HealthCheck verifies that the codex CLI is reachable and that valid
 // credentials exist locally.
 func (c *CodexProvider) HealthCheck(ctx context.Context) error {
-	_ = events.EmitFromContext(ctx, events.Event{
+	emitActivity(ctx, events.Event{
 		Type: events.CommandExecute,
 		Metadata: map[string]string{
 			"command":  "codex --version",
@@ -67,6 +67,21 @@ func (c *CodexProvider) HealthCheck(ctx context.Context) error {
 		return errors.New("no Codex credentials found: run `codex login`")
 	}
 	return nil
+}
+
+// ModelContextWindow returns the context window size for a Codex model.
+func (c *CodexProvider) ModelContextWindow(model string) int {
+	switch model {
+	case "gpt-5.5", "gpt-5.4":
+		return 400_000
+	case "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark":
+		return 200_000
+	default:
+		if strings.HasPrefix(model, "gpt-") {
+			return 200_000
+		}
+		return 0
+	}
 }
 
 // Complete runs `codex exec` and returns the final assistant message.
@@ -110,7 +125,7 @@ func (c *CodexProvider) Complete(ctx context.Context, params CompleteParams) (*R
 		"-o", outPath,
 		codexPrompt(params.Messages),
 	}
-	_ = events.EmitFromContext(ctx, events.Event{
+	emitActivity(ctx, events.Event{
 		Type:  events.CommandExecute,
 		Model: model,
 		Metadata: map[string]string{

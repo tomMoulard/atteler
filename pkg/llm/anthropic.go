@@ -237,3 +237,22 @@ func (a *AnthropicProvider) setAuthHeaders(httpReq *http.Request) {
 		httpReq.Header.Set("X-Api-Key", a.apiKey)
 	}
 }
+
+// ModelContextWindow returns the context window size for an Anthropic model.
+func (a *AnthropicProvider) ModelContextWindow(model string) int {
+	return anthropicContextWindow(model)
+}
+
+func anthropicContextWindow(model string) int {
+	switch model {
+	case "claude-opus-4-20250514", "claude-sonnet-4-20250514",
+		"claude-haiku-4-20250414":
+		return 200_000
+	default:
+		// Newer models default to 200k; fall back for unknowns.
+		if strings.HasPrefix(model, "claude") {
+			return 200_000
+		}
+		return 0
+	}
+}

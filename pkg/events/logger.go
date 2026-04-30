@@ -11,8 +11,8 @@ import (
 type contextKey struct{}
 
 type contextEmitter struct {
-	base    Event
 	emitter *Runner
+	base    Event
 }
 
 // Logger prints one compact line for every event it receives.

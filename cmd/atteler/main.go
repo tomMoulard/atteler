@@ -132,7 +132,8 @@ type sessionSavedMsg struct {
 }
 
 type hookMsg struct {
-	err error
+	err  error
+	line string // non-empty when the event should be printed by the TUI
 }
 
 // pickerItem represents one selectable entry in the model picker.
@@ -334,10 +335,14 @@ func (m model) updateSessionSaved(msg sessionSavedMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateHook(msg hookMsg) (tea.Model, tea.Cmd) {
-	if msg.err != nil {
-		return m, tea.Println(errStyle.Render("Warning: " + msg.err.Error()))
+	var cmds []tea.Cmd
+	if msg.line != "" {
+		cmds = append(cmds, tea.Println(dimStyle.Render(msg.line)))
 	}
-	return m, nil
+	if msg.err != nil {
+		cmds = append(cmds, tea.Println(errStyle.Render("Warning: "+msg.err.Error())))
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m model) updateTextarea(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -462,7 +467,11 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 		cmds = append(cmds, tea.Println(dimStyle.Render("Context: "+referenceSummary(refs))))
 	}
 	for _, ref := range refs {
-		cmds = append(cmds, emitFileRead(m.hookRunner, m.sessionState.ID, m.sessionPath, activeAgent.name, m.sessionState.DefaultModel, ref))
+		cmds = append(
+			cmds,
+			emitFileRead(m.hookRunner, m.sessionState.ID, m.sessionPath, activeAgent.name, m.sessionState.DefaultModel, ref),
+			emitContextAdd(m.hookRunner, m.sessionState.ID, m.sessionPath, activeAgent.name, m.sessionState.DefaultModel, ref),
+		)
 	}
 	if activeAgent.ok {
 		cmds = append(cmds, emitAgentExecute(m.hookRunner, m.sessionState.ID, m.sessionPath, activeAgent.name, requestModel))
@@ -669,6 +678,9 @@ func (m model) View() string {
 		}
 		parts = append(parts, "model:"+label)
 	}
+	if ctx := m.contextUsage(); ctx != "" {
+		parts = append(parts, ctx)
+	}
 	if len(parts) > 0 {
 		status = dimStyle.Render("  [") + pickerSelectedStyle.Render(strings.Join(parts, " ")) + dimStyle.Render("]")
 	}
@@ -725,6 +737,44 @@ func (m model) viewModelScopePicker() string {
 	b.WriteString(pickerNormalStyle.Render("  3 / g      Globally") + "\n\n")
 	b.WriteString(dimStyle.Render("  Esc cancels model selection"))
 	return b.String()
+}
+
+// contextUsage returns a compact "ctx:~1.2k/200k" string showing the
+// estimated token usage relative to the model's context window. Returns ""
+// when the model is unknown or has no context window metadata.
+func (m model) contextUsage() string {
+	if m.selectedModel == "" {
+		return ""
+	}
+	limit := m.registry.ContextWindow(m.selectedModel)
+	used := llm.EstimateTokens(m.history)
+	if limit > 0 {
+		return "ctx:" + formatTokenCount(used) + "/" + formatTokenCount(limit)
+	}
+	if used > 0 {
+		return "ctx:~" + formatTokenCount(used)
+	}
+	return ""
+}
+
+// formatTokenCount formats a token count as a compact human-readable string.
+// Examples: 0 -> "0", 500 -> "500", 1500 -> "1.5k", 128000 -> "128k",
+// 1047576 -> "1.0M".
+func formatTokenCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		f := float64(n) / 1_000_000
+		s := strconv.FormatFloat(f, 'f', 1, 64)
+		return s + "M"
+	case n >= 1_000:
+		f := float64(n) / 1_000
+		s := strconv.FormatFloat(f, 'f', 1, 64)
+		// Drop ".0" for clean whole numbers like "128k" instead of "128.0k".
+		s = strings.TrimSuffix(s, ".0")
+		return s + "k"
+	default:
+		return strconv.Itoa(n)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -974,6 +1024,33 @@ func fileReadEvent(
 	}
 }
 
+func emitContextAdd(
+	runner *events.Runner,
+	sessionID, sessionPath, agentName, modelName string,
+	ref contextref.Reference,
+) tea.Cmd {
+	return emitHook(runner, contextAddEvent(sessionID, sessionPath, agentName, modelName, ref))
+}
+
+func contextAddEvent(
+	sessionID, sessionPath, agentName, modelName string,
+	ref contextref.Reference,
+) events.Event {
+	return events.Event{
+		Type:        events.ContextAdd,
+		SessionID:   sessionID,
+		SessionPath: sessionPath,
+		Agent:       agentName,
+		Model:       modelName,
+		Metadata: map[string]string{
+			"path":      ref.Path,
+			"kind":      ref.Kind,
+			"bytes":     strconv.Itoa(ref.Bytes),
+			"truncated": strconv.FormatBool(ref.Truncated),
+		},
+	}
+}
+
 func emitFileWriteWarning(
 	ctx context.Context,
 	runner *events.Runner,
@@ -1013,7 +1090,8 @@ func emitHook(runner *events.Runner, event events.Event) tea.Cmd {
 		if runner == nil {
 			return hookMsg{}
 		}
-		return hookMsg{err: runner.Emit(context.Background(), event)}
+		line := events.FormatLine(event)
+		return hookMsg{err: runner.Emit(context.Background(), event), line: line}
 	}
 }
 
@@ -1150,23 +1228,25 @@ type cliOptions struct {
 	noAutoMerge         bool
 }
 
+//nolint:govet // field order follows app state grouping; padding is not performance-sensitive.
 type appState struct {
+	sessionState        session.Session
+	contextOptions      contextref.Options
+	generationDefaults  generationSettings
+	generationOverrides generationSettings
+	hookConfig          map[string][]appconfig.HookConfig
 	agentRegistry       *agent.Registry
 	hookRunner          *events.Runner
 	sessionStore        *session.Store
 	stateStore          *appconfig.StateStore
 	registry            *llm.Registry
 	worktreeInfo        *worktree.Info
-	generationDefaults  generationSettings
-	generationOverrides generationSettings
-	selectedModel       string
-	selectedAgent       string
-	sessionState        session.Session
-	cwd                 string
 	fallbackModels      []string
 	providers           []string
 	loadedConfigPaths   []string
-	contextOptions      contextref.Options
+	selectedModel       string
+	selectedAgent       string
+	cwd                 string
 	modelLocked         bool
 	autoMergeWorktree   bool
 }
@@ -1420,6 +1500,9 @@ func runWithState(opts cliOptions, state appState) error {
 		if err != nil {
 			return err
 		}
+		// One-shot mode uses a logger-enabled runner so context-based events
+		// (e.g. tool_execute from providers) are visible on stderr.
+		state.hookRunner = events.NewRunnerWithLogger(state.hookConfig, os.Stderr)
 		runErr := runOnce(
 			context.Background(),
 			state.registry,
@@ -1451,7 +1534,7 @@ func loadAppState(opts cliOptions) (appState, error) {
 
 	reg := llm.AutoRegisterWithConfig(llmConfig(cfg))
 	agentRegistry := agent.NewRegistry(cfg.Agents)
-	hookRunner := events.NewRunnerWithLogger(cfg.Hooks, os.Stderr)
+	hookRunner := events.NewRunnerWithLogger(cfg.Hooks, nil)
 	store := session.NewStore(opts.sessionDir)
 	stateStore := appconfig.NewStateStore("")
 	persistedState, stateErr := stateStore.Load()
@@ -1520,6 +1603,7 @@ func loadAppState(opts cliOptions) (appState, error) {
 		fallbackModels:      selection.fallbackModels,
 		generationDefaults:  generationDefaults,
 		generationOverrides: generationOverrides,
+		hookConfig:          cfg.Hooks,
 		modelLocked:         selection.modelLocked,
 		autoMergeWorktree:   opts.useWorktree && !opts.noAutoMerge,
 	}, nil
@@ -1754,6 +1838,7 @@ func runOnce(
 	emitFileWriteWarning(ctx, hooks, sessionState, store.Path(sessionState.ID), activeAgent.name, "session")
 	for _, ref := range refs {
 		emitHookWarning(ctx, hooks, fileReadEvent(sessionState.ID, store.Path(sessionState.ID), activeAgent.name, sessionState.DefaultModel, ref))
+		emitHookWarning(ctx, hooks, contextAddEvent(sessionState.ID, store.Path(sessionState.ID), activeAgent.name, sessionState.DefaultModel, ref))
 	}
 	if activeAgent.ok {
 		emitHookWarning(ctx, hooks, events.Event{

@@ -7,6 +7,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCodexProvider_Complete(t *testing.T) {
@@ -37,11 +40,11 @@ done
 printf 'codex:%s' "$model" > "$out"
 `
 	if err := os.WriteFile(bin, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	//nolint:gosec // Test fixture must be executable so exec.Command can run it.
 	if err := os.Chmod(bin, 0o700); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	provider := &CodexProvider{
@@ -56,21 +59,21 @@ printf 'codex:%s' "$model" > "$out"
 		},
 	})
 	if err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	if resp.Content != "codex:gpt-5.5" {
-		t.Errorf("Content = %q, want codex:gpt-5.5", resp.Content)
+		assert.Failf(t, "assertion failed", "Content = %q, want codex:gpt-5.5", resp.Content)
 	}
 	if resp.Model != "gpt-5.5" {
-		t.Errorf("Model = %q, want gpt-5.5", resp.Model)
+		assert.Failf(t, "assertion failed", "Model = %q, want gpt-5.5", resp.Model)
 	}
 
 	args := readArgv(t, argsFile)
 	if value, ok := flagValue(args, "--sandbox"); !ok || value != "workspace-write" {
-		t.Fatalf("--sandbox = %q, %v; want workspace-write", value, ok)
+		require.Failf(t, "unexpected failure", "--sandbox = %q, %v; want workspace-write", value, ok)
 	}
 	if value, ok := flagValue(args, "--cd"); !ok || value != workDir {
-		t.Fatalf("--cd = %q, %v; want %q", value, ok, workDir)
+		require.Failf(t, "unexpected failure", "--cd = %q, %v; want %q", value, ok, workDir)
 	}
 }
 
@@ -79,25 +82,26 @@ func TestCodexConfiguredModel(t *testing.T) {
 	t.Setenv("HOME", dir)
 	codexDir := filepath.Join(dir, ".codex")
 	if err := os.MkdirAll(codexDir, 0o750); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(`
 # comment
 model = "gpt-test-codex"
 `), 0o600); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	if got := codexConfiguredModel(); got != "gpt-test-codex" {
-		t.Fatalf("codexConfiguredModel = %q, want gpt-test-codex", got)
+		require.Failf(t, "unexpected failure", "codexConfiguredModel = %q, want gpt-test-codex", got)
 	}
 	models := codexModels()
 	if len(models) == 0 || models[0] != "gpt-test-codex" {
-		t.Fatalf("codexModels = %v, want configured model first", models)
+		require.Failf(t, "unexpected failure", "codexModels = %v, want configured model first", models)
 	}
 }
 
 func TestCodexPrompt(t *testing.T) {
+	t.Parallel()
 	got := codexPrompt([]Message{
 		{Role: RoleSystem, Content: "system rules"},
 		{Role: RoleUser, Content: "hello"},
@@ -105,7 +109,7 @@ func TestCodexPrompt(t *testing.T) {
 	})
 	for _, want := range []string{"<system>", "system rules", "USER:\nhello", "ASSISTANT:\nhi"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("prompt missing %q:\n%s", want, got)
+			require.Failf(t, "unexpected failure", "prompt missing %q:\n%s", want, got)
 		}
 	}
 }

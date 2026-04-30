@@ -12,6 +12,7 @@ import (
 
 const liveTimeout = 2 * time.Minute
 
+//nolint:paralleltest // reads live provider environment and may consume provider quota.
 func TestLiveOpenAIOneShot(t *testing.T) {
 	requireLive(t)
 	apiKey := requireEnv(t, "OPENAI_API_KEY")
@@ -41,6 +42,7 @@ generation:
 	assertContains(t, result.stderr, "session:")
 }
 
+//nolint:paralleltest // reads live provider environment and may consume provider quota.
 func TestLiveAnthropicOneShot(t *testing.T) {
 	requireLive(t)
 	apiKey := requireEnv(t, "ANTHROPIC_API_KEY")
@@ -70,6 +72,7 @@ generation:
 	assertContains(t, result.stderr, "session:")
 }
 
+//nolint:paralleltest // reads live provider environment and may consume provider quota.
 func TestLiveForgeClaudeOneShot(t *testing.T) {
 	requireLive(t)
 	forgeConfig := requireForgeConfig(t)
@@ -99,6 +102,7 @@ generation:
 	assertContains(t, result.stderr, "session:")
 }
 
+//nolint:paralleltest // reads live provider environment and may consume provider quota.
 func TestLiveClaudeCodeOneShot(t *testing.T) {
 	requireLive(t)
 	requireClaudeCode(t)
@@ -132,6 +136,7 @@ generation:
 	assertContains(t, result.stderr, "session:")
 }
 
+//nolint:paralleltest // reads live provider environment and may consume provider quota.
 func TestLiveCodexOneShot(t *testing.T) {
 	requireLive(t)
 	codexHome := requireCodexHome(t)

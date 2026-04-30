@@ -6,9 +6,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoadFiles_MergesInOrder(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	global := writeConfig(t, dir, "global.yaml", `
 default_provider: anthropic
@@ -50,106 +54,108 @@ generation:
 
 	cfg, loaded, err := LoadFiles([]string{global, filepath.Join(dir, "missing.json"), local})
 	if err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	if !reflect.DeepEqual(loaded, []string{global, local}) {
-		t.Fatalf("loaded = %v, want [%s %s]", loaded, global, local)
+		require.Failf(t, "unexpected failure", "loaded = %v, want [%s %s]", loaded, global, local)
 	}
 	if cfg.DefaultProvider != "anthropic" {
-		t.Errorf("DefaultProvider = %q, want anthropic", cfg.DefaultProvider)
+		assert.Failf(t, "assertion failed", "DefaultProvider = %q, want anthropic", cfg.DefaultProvider)
 	}
 	if cfg.DefaultModel != "gpt-local" {
-		t.Errorf("DefaultModel = %q, want gpt-local", cfg.DefaultModel)
+		assert.Failf(t, "assertion failed", "DefaultModel = %q, want gpt-local", cfg.DefaultModel)
 	}
 	if !reflect.DeepEqual(cfg.FallbackModels, []string{"gpt-backup"}) {
-		t.Errorf("FallbackModels = %v", cfg.FallbackModels)
+		assert.Failf(t, "assertion failed", "FallbackModels = %v", cfg.FallbackModels)
 	}
 
 	openai := cfg.Providers["openai"]
 	if openai.Disabled {
-		t.Error("openai disabled should be overridden to false")
+		assert.Fail(t, "openai disabled should be overridden to false")
 	}
 	if openai.BaseURL != "https://openai.global" {
-		t.Errorf("openai base_url = %q", openai.BaseURL)
+		assert.Failf(t, "assertion failed", "openai base_url = %q", openai.BaseURL)
 	}
 
 	anthropic := cfg.Providers["anthropic"]
 	if anthropic.BaseURL != "https://anthropic.global" {
-		t.Errorf("anthropic base_url = %q", anthropic.BaseURL)
+		assert.Failf(t, "assertion failed", "anthropic base_url = %q", anthropic.BaseURL)
 	}
 
 	reviewer := cfg.Agents["reviewer"]
 	if reviewer.SystemPrompt != "review code" {
-		t.Errorf("reviewer system_prompt = %q", reviewer.SystemPrompt)
+		assert.Failf(t, "assertion failed", "reviewer system_prompt = %q", reviewer.SystemPrompt)
 	}
 	if !reflect.DeepEqual(reviewer.FallbackModels, []string{"gpt-review-backup"}) {
-		t.Errorf("reviewer fallback_models = %v", reviewer.FallbackModels)
+		assert.Failf(t, "assertion failed", "reviewer fallback_models = %v", reviewer.FallbackModels)
 	}
 	if reviewer.Temperature == nil || *reviewer.Temperature != 0.2 {
-		t.Errorf("reviewer temperature = %v", reviewer.Temperature)
+		assert.Failf(t, "assertion failed", "reviewer temperature = %v", reviewer.Temperature)
 	}
 	if !reflect.DeepEqual(reviewer.Triggers, []string{"review this", "code review"}) {
-		t.Errorf("reviewer triggers = %v", reviewer.Triggers)
+		assert.Failf(t, "assertion failed", "reviewer triggers = %v", reviewer.Triggers)
 	}
 
 	hooks := cfg.Hooks["assistant_message"]
 	if len(hooks) != 1 {
-		t.Fatalf("assistant hooks len = %d, want 1", len(hooks))
+		require.Failf(t, "unexpected failure", "assistant hooks len = %d, want 1", len(hooks))
 	}
 	if !reflect.DeepEqual(hooks[0].Command, []string{"logger", "--assistant"}) {
-		t.Errorf("hook command = %v", hooks[0].Command)
+		assert.Failf(t, "assertion failed", "hook command = %v", hooks[0].Command)
 	}
 	if hooks[0].TimeoutSeconds != 3 {
-		t.Errorf("hook timeout = %d", hooks[0].TimeoutSeconds)
+		assert.Failf(t, "assertion failed", "hook timeout = %d", hooks[0].TimeoutSeconds)
 	}
 	if hooks[0].Env["EXTRA"] != "1" {
-		t.Errorf("hook env EXTRA = %q", hooks[0].Env["EXTRA"])
+		assert.Failf(t, "assertion failed", "hook env EXTRA = %q", hooks[0].Env["EXTRA"])
 	}
 
 	if cfg.Context.MaxFileBytes != 123 {
-		t.Errorf("MaxFileBytes = %d, want 123", cfg.Context.MaxFileBytes)
+		assert.Failf(t, "assertion failed", "MaxFileBytes = %d, want 123", cfg.Context.MaxFileBytes)
 	}
 	if cfg.Context.MaxTotalBytes != 456 {
-		t.Errorf("MaxTotalBytes = %d, want 456", cfg.Context.MaxTotalBytes)
+		assert.Failf(t, "assertion failed", "MaxTotalBytes = %d, want 456", cfg.Context.MaxTotalBytes)
 	}
 	if cfg.Generation.Temperature == nil || *cfg.Generation.Temperature != 0 {
-		t.Errorf("generation temperature = %v", cfg.Generation.Temperature)
+		assert.Failf(t, "assertion failed", "generation temperature = %v", cfg.Generation.Temperature)
 	}
 	if cfg.Generation.TopP == nil || *cfg.Generation.TopP != 0.8 {
-		t.Errorf("generation top_p = %v", cfg.Generation.TopP)
+		assert.Failf(t, "assertion failed", "generation top_p = %v", cfg.Generation.TopP)
 	}
 	if cfg.Generation.MaxTokens != 900 {
-		t.Errorf("generation max_tokens = %d, want 900", cfg.Generation.MaxTokens)
+		assert.Failf(t, "assertion failed", "generation max_tokens = %d, want 900", cfg.Generation.MaxTokens)
 	}
 }
 
 func TestLoadFiles_JSONCompatibility(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := writeConfig(t, dir, "legacy.json", `{"default_model":"gpt-json"}`)
 
 	cfg, loaded, err := LoadFiles([]string{path})
 	if err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	if !reflect.DeepEqual(loaded, []string{path}) {
-		t.Fatalf("loaded = %v, want [%s]", loaded, path)
+		require.Failf(t, "unexpected failure", "loaded = %v, want [%s]", loaded, path)
 	}
 	if cfg.DefaultModel != "gpt-json" {
-		t.Fatalf("DefaultModel = %q, want gpt-json", cfg.DefaultModel)
+		require.Failf(t, "unexpected failure", "DefaultModel = %q, want gpt-json", cfg.DefaultModel)
 	}
 }
 
 func TestLoadFiles_InvalidYAMLIncludesPath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := writeConfig(t, dir, "bad.yaml", `default_model: [`)
 
 	_, _, err := LoadFiles([]string{path})
 	if err == nil {
-		t.Fatal("expected parse error")
+		require.FailNow(t, "expected parse error")
 	}
 	if got := err.Error(); !strings.Contains(got, path) {
-		t.Fatalf("error = %q, want path %q", got, path)
+		require.Failf(t, "unexpected failure", "error = %q, want path %q", got, path)
 	}
 }
 
@@ -158,12 +164,12 @@ func TestDefaultPaths_IncludesEnvOverrideLast(t *testing.T) {
 
 	paths := DefaultPaths()
 	if len(paths) < 2 {
-		t.Fatalf("paths = %v, want env paths included", paths)
+		require.Failf(t, "unexpected failure", "paths = %v, want env paths included", paths)
 	}
 
 	gotTail := paths[len(paths)-2:]
 	if !reflect.DeepEqual(gotTail, []string{"one", "two"}) {
-		t.Fatalf("tail = %v, want [one two]", gotTail)
+		require.Failf(t, "unexpected failure", "tail = %v, want [one two]", gotTail)
 	}
 }
 
@@ -172,7 +178,7 @@ func TestDefaultPaths_PrefersYAML(t *testing.T) {
 
 	paths := DefaultPaths()
 	if len(paths) < 3 {
-		t.Fatalf("paths = %v, want default paths", paths)
+		require.Failf(t, "unexpected failure", "paths = %v, want default paths", paths)
 	}
 
 	for i, path := range paths {
@@ -180,7 +186,7 @@ func TestDefaultPaths_PrefersYAML(t *testing.T) {
 			return
 		}
 	}
-	t.Fatalf("paths = %v, want config.yaml/config.yml before config.json", paths)
+	require.Failf(t, "unexpected failure", "paths = %v, want config.yaml/config.yml before config.json", paths)
 }
 
 func writeConfig(t *testing.T, dir, name, content string) string {
@@ -188,7 +194,7 @@ func writeConfig(t *testing.T, dir, name, content string) string {
 
 	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	return path
 }

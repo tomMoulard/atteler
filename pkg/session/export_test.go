@@ -5,10 +5,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
 func TestMarkdown_RendersTranscript(t *testing.T) {
+	t.Parallel()
 	session := Session{
 		ID:           "abc",
 		CreatedAt:    time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC),
@@ -32,19 +35,21 @@ func TestMarkdown_RendersTranscript(t *testing.T) {
 		"### Assistant\n\nhi",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("Markdown missing %q in:\n%s", want, got)
+			require.Failf(t, "unexpected failure", "Markdown missing %q in:\n%s", want, got)
 		}
 	}
 }
 
 func TestMarkdown_EmptyTranscript(t *testing.T) {
+	t.Parallel()
 	got := Markdown(Session{})
 	if !strings.Contains(got, "_No messages._") {
-		t.Fatalf("Markdown = %q, want empty marker", got)
+		require.Failf(t, "unexpected failure", "Markdown = %q, want empty marker", got)
 	}
 }
 
 func TestMarkdown_UsesTitle(t *testing.T) {
+	t.Parallel()
 	got := Markdown(Session{ID: "abc", Title: "Auth review", Tags: []string{"auth", "review"}})
 	for _, want := range []string{
 		"# Auth review",
@@ -52,7 +57,7 @@ func TestMarkdown_UsesTitle(t *testing.T) {
 		"- **Tags:** auth, review",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("Markdown missing %q in:\n%s", want, got)
+			require.Failf(t, "unexpected failure", "Markdown missing %q in:\n%s", want, got)
 		}
 	}
 }

@@ -7,6 +7,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const osWindows = "windows"
@@ -41,11 +44,11 @@ done
 printf 'claude:%s' "$model"
 `
 	if err := os.WriteFile(bin, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	//nolint:gosec // Test fixture must be executable so exec.Command can run it.
 	if err := os.Chmod(bin, 0o700); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	provider := &ClaudeCodeProvider{
@@ -60,31 +63,32 @@ printf 'claude:%s' "$model"
 		},
 	})
 	if err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	if resp.Content != "claude:claude-opus-4-6" {
-		t.Errorf("Content = %q, want claude:claude-opus-4-6", resp.Content)
+		assert.Failf(t, "assertion failed", "Content = %q, want claude:claude-opus-4-6", resp.Content)
 	}
 	if resp.Model != "claude-opus-4-6" {
-		t.Errorf("Model = %q, want claude-opus-4-6", resp.Model)
+		assert.Failf(t, "assertion failed", "Model = %q, want claude-opus-4-6", resp.Model)
 	}
 
 	args := readArgv(t, argsFile)
 	if value, ok := flagValue(args, "--permission-mode"); !ok || value != "acceptEdits" {
-		t.Fatalf("--permission-mode = %q, %v; want acceptEdits", value, ok)
+		require.Failf(t, "unexpected failure", "--permission-mode = %q, %v; want acceptEdits", value, ok)
 	}
 	if value, ok := flagValue(args, "--tools"); !ok || value != claudeCodeFileTools {
-		t.Fatalf("--tools = %q, %v; want %q", value, ok, claudeCodeFileTools)
+		require.Failf(t, "unexpected failure", "--tools = %q, %v; want %q", value, ok, claudeCodeFileTools)
 	}
 	if value, ok := flagValue(args, "--allowed-tools"); !ok || value != claudeCodeFileTools {
-		t.Fatalf("--allowed-tools = %q, %v; want %q", value, ok, claudeCodeFileTools)
+		require.Failf(t, "unexpected failure", "--allowed-tools = %q, %v; want %q", value, ok, claudeCodeFileTools)
 	}
 	if value, ok := flagValue(args, "--add-dir"); !ok || value != workDir {
-		t.Fatalf("--add-dir = %q, %v; want %q", value, ok, workDir)
+		require.Failf(t, "unexpected failure", "--add-dir = %q, %v; want %q", value, ok, workDir)
 	}
 }
 
 func TestVerifyClaudeCodeAuth(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == osWindows {
 		t.Skip("shell-script claude fake is POSIX-only")
 	}
@@ -95,16 +99,16 @@ func TestVerifyClaudeCodeAuth(t *testing.T) {
 printf '{"loggedIn":false}'
 `
 	if err := os.WriteFile(bin, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	//nolint:gosec // Test fixture must be executable so exec.Command can run it.
 	if err := os.Chmod(bin, 0o700); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	err := verifyClaudeCodeAuth(context.Background(), bin)
 	if err == nil || !strings.Contains(err.Error(), "no Claude Code credentials") {
-		t.Fatalf("verifyClaudeCodeAuth error = %v, want missing credentials", err)
+		require.Failf(t, "unexpected failure", "verifyClaudeCodeAuth error = %v, want missing credentials", err)
 	}
 }
 
@@ -113,7 +117,7 @@ func readArgv(t *testing.T, path string) []string {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 }

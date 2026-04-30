@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // initTestRepo creates a temporary git repository with one commit and
@@ -27,139 +30,144 @@ func initTestRepo(t *testing.T) string {
 		cmd := exec.CommandContext(context.Background(), args[0], args[1:]...) //nolint:gosec // Test helper runs static git commands.
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("setup %v: %s: %v", args, out, err)
+			require.Failf(t, "unexpected failure", "setup %v: %s: %v", args, out, err)
 		}
 	}
 	return dir
 }
 
 func TestCreateAndRemove(t *testing.T) {
+	t.Parallel()
 	repo := initTestRepo(t)
 
 	info, err := Create(repo, "test-session-1")
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		require.Failf(t, "unexpected failure", "Create: %v", err)
 	}
 	if info.SessionID != "test-session-1" {
-		t.Errorf("SessionID = %q, want %q", info.SessionID, "test-session-1")
+		assert.Failf(t, "assertion failed", "SessionID = %q, want %q", info.SessionID, "test-session-1")
 	}
 	if info.Branch != "atteler/test-session-1" {
-		t.Errorf("Branch = %q, want %q", info.Branch, "atteler/test-session-1")
+		assert.Failf(t, "assertion failed", "Branch = %q, want %q", info.Branch, "atteler/test-session-1")
 	}
 	if info.BaseBranch == "" {
-		t.Error("BaseBranch is empty")
+		assert.Fail(t, "BaseBranch is empty")
 	}
 	if _, err := os.Stat(info.Path); err != nil {
-		t.Errorf("worktree path does not exist: %v", err)
+		assert.Failf(t, "assertion failed", "worktree path does not exist: %v", err)
 	}
 
 	// Remove should clean up.
 	if err := Remove(repo, info); err != nil {
-		t.Fatalf("Remove: %v", err)
+		require.Failf(t, "unexpected failure", "Remove: %v", err)
 	}
 	if _, err := os.Stat(info.Path); !os.IsNotExist(err) {
-		t.Errorf("worktree path still exists after Remove")
+		assert.Failf(t, "assertion failed", "worktree path still exists after Remove")
 	}
 }
 
 func TestCreateIdempotent(t *testing.T) {
+	t.Parallel()
 	repo := initTestRepo(t)
 
 	info1, err := Create(repo, "idempotent-1")
 	if err != nil {
-		t.Fatalf("first Create: %v", err)
+		require.Failf(t, "unexpected failure", "first Create: %v", err)
 	}
 
 	// Second create for the same session should succeed (join).
 	info2, err := Create(repo, "idempotent-1")
 	if err != nil {
-		t.Fatalf("second Create: %v", err)
+		require.Failf(t, "unexpected failure", "second Create: %v", err)
 	}
 	if info2.Path != info1.Path {
-		t.Errorf("paths differ: %s vs %s", info2.Path, info1.Path)
+		assert.Failf(t, "assertion failed", "paths differ: %s vs %s", info2.Path, info1.Path)
 	}
 
 	if err := Remove(repo, info1); err != nil {
-		t.Fatalf("Remove: %v", err)
+		require.Failf(t, "unexpected failure", "Remove: %v", err)
 	}
 }
 
 func TestMerge(t *testing.T) {
+	t.Parallel()
 	repo := initTestRepo(t)
 
 	info, err := Create(repo, "merge-session")
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		require.Failf(t, "unexpected failure", "Create: %v", err)
 	}
 
 	// Write a file in the worktree and commit it.
 	testFile := filepath.Join(info.Path, "hello.txt")
 	if writeErr := os.WriteFile(testFile, []byte("hello\n"), 0o600); writeErr != nil {
-		t.Fatalf("write test file: %v", writeErr)
+		require.Failf(t, "unexpected failure", "write test file: %v", writeErr)
 	}
 
 	if mergeErr := Merge(repo, info); mergeErr != nil {
-		t.Fatalf("Merge: %v", mergeErr)
+		require.Failf(t, "unexpected failure", "Merge: %v", mergeErr)
 	}
 
 	// The file should now exist in the main repo.
 	mainFile := filepath.Join(repo, "hello.txt")
 	data, err := os.ReadFile(mainFile)
 	if err != nil {
-		t.Fatalf("read merged file: %v", err)
+		require.Failf(t, "unexpected failure", "read merged file: %v", err)
 	}
 	if string(data) != "hello\n" {
-		t.Errorf("merged content = %q, want %q", string(data), "hello\n")
+		assert.Failf(t, "assertion failed", "merged content = %q, want %q", string(data), "hello\n")
 	}
 
 	// Worktree directory should be gone.
 	if _, err := os.Stat(info.Path); !os.IsNotExist(err) {
-		t.Errorf("worktree path still exists after Merge")
+		assert.Failf(t, "assertion failed", "worktree path still exists after Merge")
 	}
 }
 
 func TestList(t *testing.T) {
+	t.Parallel()
 	repo := initTestRepo(t)
 
 	// No worktrees initially.
 	infos, err := List(repo)
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		require.Failf(t, "unexpected failure", "List: %v", err)
 	}
 	if len(infos) != 0 {
-		t.Errorf("expected 0 worktrees, got %d", len(infos))
+		assert.Failf(t, "assertion failed", "expected 0 worktrees, got %d", len(infos))
 	}
 
 	// Create two worktrees.
 	info1, err := Create(repo, "list-1")
 	if err != nil {
-		t.Fatalf("Create list-1: %v", err)
+		require.Failf(t, "unexpected failure", "Create list-1: %v", err)
 	}
 	info2, err := Create(repo, "list-2")
 	if err != nil {
-		t.Fatalf("Create list-2: %v", err)
+		require.Failf(t, "unexpected failure", "Create list-2: %v", err)
 	}
 
 	infos, err = List(repo)
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		require.Failf(t, "unexpected failure", "List: %v", err)
 	}
 	if len(infos) != 2 {
-		t.Errorf("expected 2 worktrees, got %d", len(infos))
+		assert.Failf(t, "assertion failed", "expected 2 worktrees, got %d", len(infos))
 	}
 
 	if err := Remove(repo, info1); err != nil {
-		t.Fatalf("Remove info1: %v", err)
+		require.Failf(t, "unexpected failure", "Remove info1: %v", err)
 	}
 	if err := Remove(repo, info2); err != nil {
-		t.Fatalf("Remove info2: %v", err)
+		require.Failf(t, "unexpected failure", "Remove info2: %v", err)
 	}
 }
 
 func TestStatus(t *testing.T) {
+	t.Parallel()
 	got := Status(nil)
 	if got != "no worktree" {
-		t.Errorf("Status(nil) = %q, want %q", got, "no worktree")
+		assert.Failf(t, "assertion failed", "Status(nil) = %q, want %q", got, "no worktree")
 	}
 
 	info := &Info{
@@ -169,56 +177,62 @@ func TestStatus(t *testing.T) {
 	}
 	got = Status(info)
 	if !strings.Contains(got, "/tmp/test") {
-		t.Errorf("Status missing path: %s", got)
+		assert.Failf(t, "assertion failed", "Status missing path: %s", got)
 	}
 	if !strings.Contains(got, "atteler/test") {
-		t.Errorf("Status missing branch: %s", got)
+		assert.Failf(t, "assertion failed", "Status missing branch: %s", got)
 	}
 }
 
 func TestIsGitRepo(t *testing.T) {
+	t.Parallel()
 	repo := initTestRepo(t)
 	if !IsGitRepo(repo) {
-		t.Error("IsGitRepo returned false for a git repo")
+		assert.Fail(t, "IsGitRepo returned false for a git repo")
 	}
 
 	nonRepo := t.TempDir()
 	if IsGitRepo(nonRepo) {
-		t.Error("IsGitRepo returned true for a non-git dir")
+		assert.Fail(t, "IsGitRepo returned true for a non-git dir")
 	}
 }
 
 func TestCreateEmptySessionID(t *testing.T) {
+	t.Parallel()
 	repo := initTestRepo(t)
 	_, err := Create(repo, "")
 	if err == nil {
-		t.Error("expected error for empty session ID")
+		assert.Fail(t, "expected error for empty session ID")
 	}
 }
 
 func TestCreateNotGitRepo(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	_, err := Create(dir, "test")
 	if err == nil {
-		t.Error("expected error for non-git directory")
+		assert.Fail(t, "expected error for non-git directory")
 	}
 }
 
 func TestRemoveNilInfo(t *testing.T) {
+	t.Parallel()
 	err := Remove("/tmp", nil)
 	if err == nil {
-		t.Error("expected error for nil info")
+		assert.Fail(t, "expected error for nil info")
 	}
 }
 
 func TestMergeNilInfo(t *testing.T) {
+	t.Parallel()
 	err := Merge("/tmp", nil)
 	if err == nil {
-		t.Error("expected error for nil info")
+		assert.Fail(t, "expected error for nil info")
 	}
 }
 
 func TestParseWorktreeList(t *testing.T) {
+	t.Parallel()
 	input := `worktree /home/user/project
 HEAD abc123
 branch refs/heads/main
@@ -242,15 +256,15 @@ branch refs/heads/feature/other
 	results := parseWorktreeList(input, t.TempDir())
 
 	if len(results) != 2 {
-		t.Fatalf("expected 2 atteler worktrees, got %d", len(results))
+		require.Failf(t, "unexpected failure", "expected 2 atteler worktrees, got %d", len(results))
 	}
 	if results[0].SessionID != "session-1" {
-		t.Errorf("first session ID = %q, want %q", results[0].SessionID, "session-1")
+		assert.Failf(t, "assertion failed", "first session ID = %q, want %q", results[0].SessionID, "session-1")
 	}
 	if results[1].SessionID != "session-2" {
-		t.Errorf("second session ID = %q, want %q", results[1].SessionID, "session-2")
+		assert.Failf(t, "assertion failed", "second session ID = %q, want %q", results[1].SessionID, "session-2")
 	}
 	if results[0].Branch != "atteler/session-1" {
-		t.Errorf("first branch = %q, want %q", results[0].Branch, "atteler/session-1")
+		assert.Failf(t, "assertion failed", "first branch = %q, want %q", results[0].Branch, "atteler/session-1")
 	}
 }

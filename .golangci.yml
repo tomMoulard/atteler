@@ -41,6 +41,7 @@ linters:
     - asciicheck
     - bidichk
     - dupword
+    - forbidigo
     - goconst
     - gocritic
     - godoclint
@@ -69,7 +70,9 @@ linters:
     - usetesting
 
     # Tests
+    - paralleltest
     - thelper
+    - testifylint
     - tparallel
 
   settings:
@@ -86,6 +89,12 @@ linters:
     goconst:
       min-len: 3
       min-occurrences: 3
+
+    forbidigo:
+      forbid:
+        - pattern: ^t\.(Fatal|Fatalf|Error|Errorf|Fail|FailNow)$
+          msg: use github.com/stretchr/testify/assert or require in tests
+      analyze-types: true
 
     gocritic:
       enabled-tags:

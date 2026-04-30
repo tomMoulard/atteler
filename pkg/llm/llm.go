@@ -72,6 +72,10 @@ type Provider interface {
 
 	// Complete performs a chat completion.
 	Complete(ctx context.Context, params CompleteParams) (*Response, error)
+
+	// ModelContextWindow returns the context window size (in tokens) for the
+	// given model. If the model is unknown the provider returns 0.
+	ModelContextWindow(model string) int
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +251,7 @@ func (r *Registry) resolve(params CompleteParams) (Provider, CompleteParams, err
 }
 
 func emitToolExecute(ctx context.Context, provider Provider, model string) {
-	_ = events.EmitFromContext(ctx, events.Event{
+	emitActivity(ctx, events.Event{
 		Type:  events.ToolExecute,
 		Model: model,
 		Metadata: map[string]string{
@@ -448,4 +452,52 @@ func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
 	}
 
 	return results
+}
+
+// ContextWindow returns the context window size (in tokens) for a model,
+// resolving the provider via the same logic as Complete. Returns 0 when the
+// model or provider is unknown.
+func (r *Registry) ContextWindow(model string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	p := r.providerForModelLocked(model)
+	if p == nil {
+		return 0
+	}
+
+	// Strip provider prefix if present (e.g. "openai/gpt-4.1" -> "gpt-4.1").
+	if _, providerModel, ok := splitProviderModel(model); ok {
+		return p.ModelContextWindow(providerModel)
+	}
+	return p.ModelContextWindow(model)
+}
+
+func (r *Registry) providerForModelLocked(model string) Provider {
+	if providerName, _, ok := splitProviderModel(model); ok {
+		if p, ok := r.providers[providerName]; ok {
+			return p
+		}
+		return nil
+	}
+	if p, ok := r.models[model]; ok {
+		return p
+	}
+	if p, ok := r.providerForModelPrefixLocked(model); ok {
+		return p
+	}
+	return nil
+}
+
+// EstimateTokens returns a rough token count for a slice of messages using
+// the ~4 characters per token heuristic. This is intentionally a fast
+// approximation; provider-specific tokenizers can refine it later.
+func EstimateTokens(messages []Message) int {
+	var chars int
+	for i := range messages {
+		chars += len(messages[i].Content)
+	}
+	// ~4 characters per token is the widely used GPT/Claude approximation.
+	const charsPerToken = 4
+	return (chars + charsPerToken - 1) / charsPerToken
 }

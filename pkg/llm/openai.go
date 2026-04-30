@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 )
 
 const defaultOpenAIBase = "https://api.openai.com"
@@ -223,4 +224,48 @@ func configuredBaseURL(envKey, configured, fallback string) string {
 		return configured
 	}
 	return fallback
+}
+
+// ModelContextWindow returns the context window size for an OpenAI model.
+func (o *OpenAIProvider) ModelContextWindow(model string) int {
+	return openaiContextWindow(model)
+}
+
+//nolint:cyclop // Flat model lookup table is clearer as a switch.
+func openaiContextWindow(model string) int {
+	switch model {
+	case "gpt-4.1":
+		return 1_047_576
+	case "gpt-4.1-mini":
+		return 1_047_576
+	case "gpt-4.1-nano":
+		return 1_047_576
+	case "o4-mini":
+		return 200_000
+	case "o3", "o3-pro":
+		return 200_000
+	case "o3-mini":
+		return 200_000
+	case "o1", "o1-pro":
+		return 200_000
+	case "o1-mini":
+		return 128_000
+	case "gpt-4o", "gpt-4o-mini":
+		return 128_000
+	case "gpt-4-turbo":
+		return 128_000
+	case "gpt-4":
+		return 8_192
+	default:
+		if strings.HasPrefix(model, "gpt-4.1") {
+			return 1_047_576
+		}
+		if strings.HasPrefix(model, "gpt-4o") || strings.HasPrefix(model, "gpt-4-turbo") {
+			return 128_000
+		}
+		if strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4") {
+			return 200_000
+		}
+		return 0
+	}
 }

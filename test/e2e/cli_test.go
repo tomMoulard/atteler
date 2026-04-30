@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -55,6 +57,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestConfigCommands(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	configPath := filepath.Join(workDir, "atteler.yaml")
 
@@ -65,12 +68,12 @@ func TestConfigCommands(t *testing.T) {
 	result = runOK(t, runSpec{dir: workDir}, "--init-config", configPath)
 	assertContains(t, result.stdout, "Wrote "+configPath)
 	if _, err := os.Stat(configPath); err != nil {
-		t.Fatalf("config was not written: %v", err)
+		require.Failf(t, "unexpected failure", "config was not written: %v", err)
 	}
 
 	_, err := runAtteler(t, runSpec{dir: workDir}, "--init-config", configPath)
 	if err == nil {
-		t.Fatal("expected init-config to refuse overwriting an existing file")
+		require.FailNow(t, "expected init-config to refuse overwriting an existing file")
 	}
 
 	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "--validate-config")
@@ -81,6 +84,7 @@ func TestConfigCommands(t *testing.T) {
 }
 
 func TestOfflineProviderCommands(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 
 	result := runOK(t, runSpec{dir: workDir}, "--version")
@@ -96,6 +100,7 @@ func TestOfflineProviderCommands(t *testing.T) {
 }
 
 func TestAgentCommands(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	configPath := filepath.Join(workDir, "atteler.yaml")
 	writeFile(t, configPath, `agents:
@@ -116,6 +121,7 @@ func TestAgentCommands(t *testing.T) {
 }
 
 func TestSessionCommands(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	sessionDir := filepath.Join(workDir, "sessions")
 	writeSession(t, sessionDir)
@@ -152,6 +158,7 @@ func TestSessionCommands(t *testing.T) {
 }
 
 func TestInteractiveFZFModelPickerPersistsFolderDefault(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("expect-driven TUI e2e is POSIX-only")
 	}
@@ -199,7 +206,7 @@ expect eof
 
 	stateData, err := os.ReadFile(statePath)
 	if err != nil {
-		t.Fatalf("read state: %v", err)
+		require.Failf(t, "unexpected failure", "read state: %v", err)
 	}
 	assertContains(t, string(stateData), "default_model: codex/gpt-5.5")
 	assertContains(t, string(stateData), filepath.ToSlash(workDir))
@@ -223,6 +230,62 @@ expect eof
 	})
 }
 
+func TestOneShotPrintsActivityEvents(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	toolDir := filepath.Join(workDir, "tools")
+	codexHome := filepath.Join(workDir, "codex-home")
+	configPath := filepath.Join(workDir, "atteler.yaml")
+	writeFile(t, filepath.Join(workDir, "README.md"), "hello from readme\n")
+	writeFile(t, filepath.Join(codexHome, "auth.json"), `{"tokens":{"access_token":"token"}}`)
+	writeExecutable(t, filepath.Join(toolDir, "codex"), `#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'ok' > "$out"
+`)
+	writeFile(t, configPath, `default_provider: codex
+agents:
+  reviewer:
+    model: codex/gpt-5.5
+    system_prompt: Review briefly.
+providers:
+  anthropic:
+    disabled: true
+  openai:
+    disabled: true
+`)
+
+	result := runOK(t, runSpec{
+		dir: workDir,
+		env: []string{
+			"PATH=" + toolDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"CODEX_HOME=" + codexHome,
+		},
+	}, "--config", configPath, "--agent", "reviewer", "--once", "Summarize @README.md")
+
+	for _, want := range []string{
+		"event:session_start",
+		"event:file_read",
+		"path=README.md",
+		"event:context_add",
+		"event:file_write",
+		"kind=session",
+		"event:agent_execute",
+		"agent=reviewer",
+		"event:tool_execute",
+		"provider=codex",
+		"event:command_execute",
+		`command="codex exec"`,
+	} {
+		assertContains(t, result.stderr, want)
+	}
+}
+
 type runSpec struct {
 	dir        string
 	sessionDir string
@@ -239,7 +302,7 @@ func runOK(t *testing.T, spec runSpec, args ...string) runResult {
 	t.Helper()
 	result, err := runAtteler(t, spec, args...)
 	if err != nil {
-		t.Fatalf("atteler %v failed: %v\nstdout:\n%s\nstderr:\n%s", args, err, result.stdout, result.stderr)
+		require.Failf(t, "unexpected failure", "atteler %v failed: %v\nstdout:\n%s\nstderr:\n%s", args, err, result.stdout, result.stderr)
 	}
 	return result
 }
@@ -281,7 +344,7 @@ func runExpect(t *testing.T, expectPath, scriptPath string, spec runSpec) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("expect %s failed: %v\nstdout:\n%s\nstderr:\n%s", scriptPath, err, stdout.String(), stderr.String())
+		require.Failf(t, "unexpected failure", "expect %s failed: %v\nstdout:\n%s\nstderr:\n%s", scriptPath, err, stdout.String(), stderr.String())
 	}
 }
 
@@ -335,7 +398,7 @@ func writeExecutable(t *testing.T, path, content string) {
 	writeFile(t, path, content)
 	//nolint:gosec // E2E fixtures must be executable by the spawned TUI process.
 	if err := os.Chmod(path, 0o700); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 }
 
@@ -367,23 +430,23 @@ func writeSession(t *testing.T, dir string) {
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 }
 
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {
-		t.Fatalf("missing %q in:\n%s", needle, haystack)
+		require.Failf(t, "unexpected failure", "missing %q in:\n%s", needle, haystack)
 	}
 }
 
 func assertNotContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if strings.Contains(haystack, needle) {
-		t.Fatalf("unexpected %q in:\n%s", needle, haystack)
+		require.Failf(t, "unexpected failure", "unexpected %q in:\n%s", needle, haystack)
 	}
 }

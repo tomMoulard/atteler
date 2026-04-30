@@ -3,9 +3,12 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestTemplateYAML(t *testing.T) {
+	t.Parallel()
 	template := TemplateYAML()
 	for _, want := range []string{
 		"default_provider:",
@@ -16,10 +19,10 @@ func TestTemplateYAML(t *testing.T) {
 		"context:",
 	} {
 		if !strings.Contains(template, want) {
-			t.Fatalf("TemplateYAML missing %q in:\n%s", want, template)
+			require.Failf(t, "unexpected failure", "TemplateYAML missing %q in:\n%s", want, template)
 		}
 	}
 	if strings.Contains(template, "api.openai.com/v1") {
-		t.Fatalf("TemplateYAML should use OpenAI host root, got:\n%s", template)
+		require.Failf(t, "unexpected failure", "TemplateYAML should use OpenAI host root, got:\n%s", template)
 	}
 }

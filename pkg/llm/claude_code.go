@@ -58,7 +58,7 @@ func (c *ClaudeCodeProvider) FetchModels(_ context.Context) ([]string, error) {
 // HealthCheck verifies that the claude CLI is reachable and the user is
 // authenticated by running `claude auth status`.
 func (c *ClaudeCodeProvider) HealthCheck(ctx context.Context) error {
-	_ = events.EmitFromContext(ctx, events.Event{
+	emitActivity(ctx, events.Event{
 		Type: events.CommandExecute,
 		Metadata: map[string]string{
 			"command":  "claude auth status",
@@ -66,6 +66,11 @@ func (c *ClaudeCodeProvider) HealthCheck(ctx context.Context) error {
 		},
 	})
 	return verifyClaudeCodeAuth(ctx, c.bin)
+}
+
+// ModelContextWindow returns the context window size for a Claude Code model.
+func (c *ClaudeCodeProvider) ModelContextWindow(model string) int {
+	return anthropicContextWindow(model)
 }
 
 // Complete runs `claude --print` and returns its text output.
@@ -103,7 +108,7 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 	}
 	args = append(args, conversationPrompt(params.Messages))
 
-	_ = events.EmitFromContext(ctx, events.Event{
+	emitActivity(ctx, events.Event{
 		Type:  events.CommandExecute,
 		Model: model,
 		Metadata: map[string]string{

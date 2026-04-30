@@ -33,6 +33,8 @@ const (
 	FileRead = "file_read"
 	// FileWrite is emitted when Atteler writes a local file.
 	FileWrite = "file_write"
+	// ContextAdd is emitted when a local reference is added to LLM context.
+	ContextAdd = "context_add"
 	// CommandExecute is emitted when Atteler starts a local command.
 	CommandExecute = "command_execute"
 	// ToolExecute is emitted when Atteler invokes a provider/tool.

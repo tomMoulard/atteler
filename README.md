@@ -2,14 +2,14 @@
 
 A Go program that can be run using `go run ./cmd/atteler/` or `go run github.com/tommoulard/atteler/cmd/atteler@latest`.
 
-It's a one of a kind LLM harness that leverage multiple LLMs. Here is the list of features in no particular order, on top of already exsting claude code features:
+It's a one of a kind LLM harness that leverage multiple LLMs. Here is the list of features in no particular order, on top of already existing claude code features:
 
  - auto import configuration for other coding harnesses (e.g., claude code, codex, opencode, ...).
  - async all the way: all agents should run asynchronously and in parallel, and the system should be able to handle that (e.g., if an agent is waiting for a response from an LLM, it shouldn't block other agents from doing their work).
  - does feedback improvement of the defined agents. Once a task is completed, the system should do a retrospective of the execution and actually improve the agents that were involved in the execution of the task. For example, if an agent was not able to complete its task, the system should analyze why and improve the agent's prompt or tool usage accordingly. Keep an history of the changes made to the agents and the reasons for those changes. This way, the system can learn from its mistakes and improve over time.
  - agents can spawn other agents.
  - agents can have a memory (i.e., using a local vector database).
- - Speculative parallel execution: executing a task should spawn task exploration with multiple llm thinking at the same time, and doinging 3 rounds of confrontation before executing the task. For example: it can be run with any number of agents (this should be configurable):
+ - Speculative parallel execution: executing a task should spawn task exploration with multiple llm thinking at the same time, and doing 3 rounds of confrontation before executing the task. For example: it can be run with any number of agents (this should be configurable):
    - first round: each agent thinks independently and come up with a plan to execute the task.
    - second round: agent A review the proposition of agent B to improve it's own proposition, and vice versa.
    - third round: have an agent C review all propositions and aggregate to a final proposition. the gate should be structured: tests pass, types pass, lint pass, no new flakes, behavioral diff vs baseline, optionally a property check. The judge agent should be a tiebreaker, not the primary signal. The user's input can be gathered to have a referee role in choosing the best trajectory.
@@ -63,6 +63,7 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] sessions + replay
  - [x] config-backed agent registry and `@agent` invocation
  - [x] automatic git worktree isolation per session
+ - [x] lifecycle event hooks with granular file/command/tool/agent activity events
 
 ## Configuration
 
@@ -301,10 +302,25 @@ Supported event names:
 - `assistant_message`
 - `error`
 - `session_end`
+- `file_read` -- emitted when Atteler reads a user/project file (for example
+  while expanding `@path` references).
+- `file_write` -- emitted when Atteler writes a local file.
+- `command_execute` -- emitted when Atteler starts a local subprocess (e.g.
+  `claude auth status`, `codex exec`, git operations).
+- `tool_execute` -- emitted when Atteler invokes a provider/tool such as
+  `llm.complete`.
+- `agent_execute` -- emitted when a configured agent is selected for work.
 
 Every hook also receives useful environment variables such as
 `ATTELER_EVENT_TYPE`, `ATTELER_SESSION_ID`, `ATTELER_SESSION_PATH`,
-`ATTELER_AGENT`, `ATTELER_MODEL`, and `ATTELER_ROLE`.
+`ATTELER_AGENT`, `ATTELER_MODEL`, `ATTELER_ROLE`, and `ATTELER_EVENT_UNIX`
+(the event timestamp). Hook commands additionally receive any `env` map
+declared in the hook's configuration.
+
+In addition to user-configured hooks, Atteler can stream a single compact
+line per event to a writer via the built-in `events.Logger`. This is the
+mechanism that surfaces granular file/command/tool/agent activity in
+one-shot mode without requiring any hook configuration.
 
 ## Automatic worktree isolation
 
