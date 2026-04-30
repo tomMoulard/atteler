@@ -1,10 +1,12 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/tommoulard/atteler/pkg/config"
@@ -63,6 +65,30 @@ func TestRunner_EmitRunsHookWithPayloadAndEnv(t *testing.T) {
 func TestRunner_EmitNoHooksIsNoop(t *testing.T) {
 	if err := NewRunner(nil).Emit(context.Background(), Event{Type: UserMessage}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLogger_LogsAnyEvent(t *testing.T) {
+	var out bytes.Buffer
+	runner := NewRunnerWithLogger(nil, &out)
+
+	err := runner.Emit(context.Background(), Event{
+		Type:  FileRead,
+		Model: "codex/gpt-5.5",
+		Metadata: map[string]string{
+			"path": "README.md",
+			"kind": "file",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := out.String()
+	for _, want := range []string{"event:file_read", "model=codex/gpt-5.5", "kind=file", "path=README.md"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("log line missing %q in %q", want, got)
+		}
 	}
 }
 

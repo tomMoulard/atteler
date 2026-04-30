@@ -624,7 +624,7 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 			dimStyle.Render(" ("+modelScopeLabel(scope)+")"),
 	)}
 	if scope != appconfig.ModelScopeSession {
-		cmds = append(cmds, saveModelPreference(m.stateStore, m.cwd, m.selectedModel, scope))
+		cmds = append(cmds, saveModelPreference(m.stateStore, m.cwd, m.selectedModel, scope, m.hookRunner))
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -922,6 +922,7 @@ func saveModelPreference(
 	cwd string,
 	model string,
 	scope appconfig.ModelScope,
+	runner *events.Runner,
 ) tea.Cmd {
 	return func() tea.Msg {
 		if store == nil {
@@ -935,6 +936,13 @@ func saveModelPreference(
 		if err := store.Save(state); err != nil {
 			return modelPreferenceSavedMsg{err: err, scope: scope}
 		}
+		emitHookWarning(context.Background(), runner, events.Event{
+			Type: events.FileWrite,
+			Metadata: map[string]string{
+				"path": store.Path(),
+				"kind": "state",
+			},
+		})
 		return modelPreferenceSavedMsg{scope: scope}
 	}
 }
@@ -944,7 +952,14 @@ func emitFileRead(
 	sessionID, sessionPath, agentName, modelName string,
 	ref contextref.Reference,
 ) tea.Cmd {
-	return emitHook(runner, events.Event{
+	return emitHook(runner, fileReadEvent(sessionID, sessionPath, agentName, modelName, ref))
+}
+
+func fileReadEvent(
+	sessionID, sessionPath, agentName, modelName string,
+	ref contextref.Reference,
+) events.Event {
+	return events.Event{
 		Type:        events.FileRead,
 		SessionID:   sessionID,
 		SessionPath: sessionPath,
@@ -955,6 +970,27 @@ func emitFileRead(
 			"kind":      ref.Kind,
 			"bytes":     strconv.Itoa(ref.Bytes),
 			"truncated": strconv.FormatBool(ref.Truncated),
+		},
+	}
+}
+
+func emitFileWriteWarning(
+	ctx context.Context,
+	runner *events.Runner,
+	sessionState session.Session,
+	path string,
+	agentName string,
+	kind string,
+) {
+	emitHookWarning(ctx, runner, events.Event{
+		Type:        events.FileWrite,
+		SessionID:   sessionState.ID,
+		SessionPath: path,
+		Agent:       agentName,
+		Model:       sessionState.DefaultModel,
+		Metadata: map[string]string{
+			"path": path,
+			"kind": kind,
 		},
 	})
 }
@@ -974,11 +1010,17 @@ func emitAgentExecute(runner *events.Runner, sessionID, sessionPath, agentName, 
 
 func emitHook(runner *events.Runner, event events.Event) tea.Cmd {
 	return func() tea.Msg {
+		if runner == nil {
+			return hookMsg{}
+		}
 		return hookMsg{err: runner.Emit(context.Background(), event)}
 	}
 }
 
 func emitHookWarning(ctx context.Context, runner *events.Runner, event events.Event) {
+	if runner == nil {
+		return
+	}
 	if err := runner.Emit(ctx, event); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
@@ -1709,6 +1751,22 @@ func runOnce(
 		})
 		return fmt.Errorf("save session before request: %w", saveErr)
 	}
+	emitFileWriteWarning(ctx, hooks, sessionState, store.Path(sessionState.ID), activeAgent.name, "session")
+	for _, ref := range refs {
+		emitHookWarning(ctx, hooks, fileReadEvent(sessionState.ID, store.Path(sessionState.ID), activeAgent.name, sessionState.DefaultModel, ref))
+	}
+	if activeAgent.ok {
+		emitHookWarning(ctx, hooks, events.Event{
+			Type:        events.AgentExecute,
+			SessionID:   sessionState.ID,
+			SessionPath: store.Path(sessionState.ID),
+			Agent:       activeAgent.name,
+			Model:       sessionState.DefaultModel,
+			Metadata: map[string]string{
+				"agent": activeAgent.name,
+			},
+		})
+	}
 	emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.UserMessage,
 		SessionID:   sessionState.ID,
@@ -1732,6 +1790,12 @@ func runOnce(
 	}
 	applyGenerationParams(&params, generation)
 
+	ctx = events.WithEmitter(ctx, hooks, events.Event{
+		SessionID:   sessionState.ID,
+		SessionPath: store.Path(sessionState.ID),
+		Agent:       activeAgent.name,
+		Model:       requestModel,
+	})
 	resp, err := reg.CompleteWithFallback(ctx, params, fallbackModels)
 	if err != nil {
 		emitHookWarning(ctx, hooks, events.Event{
@@ -1760,6 +1824,7 @@ func runOnce(
 		})
 		return fmt.Errorf("save session after response: %w", err)
 	}
+	emitFileWriteWarning(ctx, hooks, sessionState, store.Path(sessionState.ID), activeAgent.name, "session")
 	emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.AssistantMessage,
 		SessionID:   sessionState.ID,
