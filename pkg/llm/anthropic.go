@@ -13,6 +13,7 @@ import (
 const (
 	defaultAnthropicBase    = "https://api.anthropic.com"
 	defaultAnthropicVersion = "2023-06-01"
+	anthropicOAuthBetas     = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,structured-outputs-2025-11-13"
 )
 
 // AnthropicProvider calls the Anthropic Messages API.
@@ -26,26 +27,27 @@ type AnthropicProvider struct {
 // NewAnthropicProvider creates a provider using ResolveAnthropicKey.
 // The base URL can be overridden with ANTHROPIC_BASE_URL.
 func NewAnthropicProvider() (*AnthropicProvider, error) {
+	return NewAnthropicProviderWithConfig(ProviderConfig{})
+}
+
+// NewAnthropicProviderWithConfig creates a provider using ResolveAnthropicKey
+// and optional config values. ANTHROPIC_BASE_URL overrides cfg.BaseURL.
+func NewAnthropicProviderWithConfig(cfg ProviderConfig) (*AnthropicProvider, error) {
 	key, bearer, err := ResolveAnthropicKey()
 	if err != nil {
 		return nil, err
 	}
 
-	base := defaultAnthropicBase
-	if v := envOr("ANTHROPIC_BASE_URL", ""); v != "" {
-		base = v
-	}
-
 	return &AnthropicProvider{
 		apiKey:  key,
 		bearer:  bearer,
-		baseURL: base,
+		baseURL: configuredBaseURL("ANTHROPIC_BASE_URL", cfg.BaseURL, defaultAnthropicBase),
 		client:  &http.Client{},
 	}, nil
 }
 
 // Name returns the provider name.
-func (a *AnthropicProvider) Name() string { return "anthropic" }
+func (a *AnthropicProvider) Name() string { return providerAnthropic }
 
 // Models returns the static list of supported models (fallback).
 func (a *AnthropicProvider) Models() []string {
@@ -74,11 +76,7 @@ func (a *AnthropicProvider) FetchModels(ctx context.Context) ([]string, error) {
 	}
 
 	httpReq.Header.Set("anthropic-version", defaultAnthropicVersion)
-	if a.bearer {
-		httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
-	} else {
-		httpReq.Header.Set("X-Api-Key", a.apiKey)
-	}
+	a.setAuthHeaders(httpReq)
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -107,9 +105,12 @@ func (a *AnthropicProvider) FetchModels(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// ---------------------------------------------------------------------------
-// Anthropic Messages API request / response shapes
-// ---------------------------------------------------------------------------
+// HealthCheck verifies that the Anthropic API is reachable and the credentials
+// are valid by issuing a lightweight GET /v1/models request.
+func (a *AnthropicProvider) HealthCheck(ctx context.Context) error {
+	_, err := a.FetchModels(ctx)
+	return err
+}
 
 type anthropicRequest struct {
 	Temperature *float64           `json:"temperature,omitempty"`
@@ -166,11 +167,11 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 		System:    system,
 		Stop:      params.Stop,
 	}
-	if params.Temperature >= 0 {
-		req.Temperature = &params.Temperature
+	if params.Temperature != nil {
+		req.Temperature = params.Temperature
 	}
-	if params.TopP >= 0 {
-		req.TopP = &params.TopP
+	if params.TopP != nil {
+		req.TopP = params.TopP
 	}
 
 	body, err := json.Marshal(req)
@@ -185,11 +186,7 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("anthropic-version", defaultAnthropicVersion)
-	if a.bearer {
-		httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
-	} else {
-		httpReq.Header.Set("X-Api-Key", a.apiKey)
-	}
+	a.setAuthHeaders(httpReq)
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -226,4 +223,17 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 		InputTokens:  ar.Usage.InputTokens,
 		OutputTokens: ar.Usage.OutputTokens,
 	}, nil
+}
+
+func (a *AnthropicProvider) setAuthHeaders(httpReq *http.Request) {
+	if a.bearer {
+		httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
+		// Claude Code and ForgeCode OAuth tokens require Anthropic beta routing
+		// headers in addition to Authorization bearer auth. Keeping the header
+		// on all Anthropic bearer tokens is safer than silently sending OAuth
+		// tokens to the API-key-only path.
+		httpReq.Header.Set("anthropic-beta", anthropicOAuthBetas)
+	} else {
+		httpReq.Header.Set("X-Api-Key", a.apiKey)
+	}
 }

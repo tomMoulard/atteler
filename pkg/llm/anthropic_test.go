@@ -44,11 +44,12 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 		baseURL: srv.URL,
 		client:  srv.Client(),
 	}
+	temperature := 0.5
 
 	resp, err := p.Complete(context.Background(), CompleteParams{
 		Model:       "claude-sonnet-4-20250514",
 		MaxTokens:   100,
-		Temperature: 0.5,
+		Temperature: &temperature,
 		Messages: []Message{
 			{Role: RoleSystem, Content: "you are helpful"},
 			{Role: RoleUser, Content: "hi"},
@@ -129,6 +130,9 @@ func TestAnthropicProvider_BearerAuth(t *testing.T) {
 	if gotHeaders.Get("X-Api-Key") != "" {
 		t.Error("X-Api-Key should be empty for bearer auth")
 	}
+	if gotHeaders.Get("anthropic-beta") != anthropicOAuthBetas {
+		t.Errorf("anthropic-beta = %q, want %q", gotHeaders.Get("anthropic-beta"), anthropicOAuthBetas)
+	}
 }
 
 func TestAnthropicProvider_HTTPError(t *testing.T) {
@@ -183,14 +187,46 @@ func TestAnthropicProvider_DefaultMaxTokens(t *testing.T) {
 	if gotReq.MaxTokens != 4096 {
 		t.Errorf("default max_tokens = %d, want 4096", gotReq.MaxTokens)
 	}
+	if gotReq.Temperature != nil {
+		t.Errorf("temperature = %v, want omitted", *gotReq.Temperature)
+	}
+	if gotReq.TopP != nil {
+		t.Errorf("top_p = %v, want omitted", *gotReq.TopP)
+	}
 }
 
 func TestAnthropicProvider_NameAndModels(t *testing.T) {
 	p := &AnthropicProvider{}
-	if p.Name() != "anthropic" {
+	if p.Name() != providerAnthropic {
 		t.Errorf("Name() = %q", p.Name())
 	}
 	if len(p.Models()) == 0 {
 		t.Error("Models() returned empty")
+	}
+}
+
+func TestAnthropicProvider_ConfigBaseURL(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+
+	p, err := NewAnthropicProviderWithConfig(ProviderConfig{BaseURL: "https://anthropic.config"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.baseURL != "https://anthropic.config" {
+		t.Errorf("baseURL = %q, want config value", p.baseURL)
+	}
+}
+
+func TestAnthropicProvider_EnvBaseURLOverridesConfig(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic.env")
+
+	p, err := NewAnthropicProviderWithConfig(ProviderConfig{BaseURL: "https://anthropic.config"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.baseURL != "https://anthropic.env" {
+		t.Errorf("baseURL = %q, want env value", p.baseURL)
 	}
 }
