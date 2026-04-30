@@ -22,8 +22,8 @@ It's a one of a kind LLM harness that leverage multiple LLMs. Here is the list o
  - Cost & model routing as a first-class layer. This is literally your job. A multi-LLM harness without smart routing leaves the biggest win on the floor. Per-agent model preference with fallback chains, per-task budget caps that hard-stop runaway loops, prompt-cache reuse across speculative branches (huge if branches share prefix), TTFT-aware routing for interactive vs batch agents. Bake it in from day one — retrofitting later is painful.
  - Negative knowledge. Memory of what didn't work. "We tried X, broke Y, here's the commit." Cheap to capture, massive value — most current harnesses re-suggest the same broken approach forever.
  - Determinism knobs. Seed, temperature-0 mode, response recording/replay. Without these your eval and self-improvement loops are measuring noise.
-
-
+ - modular: anyone can bring in code, tools, agents, and prompts from anywhere. The system should be able to integrate with any existing codebase, tool, or agent, and should be able to use them in a way that is seamless and efficient. For example, if there is an existing agent that does a specific task well, the system should be able to integrate that agent into its workflow without requiring a lot of work to adapt it to the system. kind of plugins systems.
+ - SDK first: the cli tool is "just" an interface built on top of a powerful SDK that can be used to build custom workflows, agents, and tools. The SDK should be well-documented and easy to use, and should provide a lot of flexibility for users to build their own custom solutions on top of the system.
 
 Here is a more in depth list of features:
 
@@ -49,3 +49,14 @@ A separate loop that watches the repo independently of any active session — fl
 
 Should work in the same maner as the Speculative parallel execution, but for code review.
 I should/can also include specialized tool to do the review like coderabbit.
+
+## TODO
+
+ - [ ] llm connection (claude code, codex)
+ - [ ] configuration loading
+    - [ ] general configuration
+    - [ ] local configuration
+    - [ ] other harnless configurations
+        - [ ] codex
+        - [ ] claude code
+        - [ ] opencode
