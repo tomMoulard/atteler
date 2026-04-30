@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/events"
 )
 
 const claudeCodeAuthTimeout = 5 * time.Second
@@ -56,6 +58,13 @@ func (c *ClaudeCodeProvider) FetchModels(_ context.Context) ([]string, error) {
 // HealthCheck verifies that the claude CLI is reachable and the user is
 // authenticated by running `claude auth status`.
 func (c *ClaudeCodeProvider) HealthCheck(ctx context.Context) error {
+	_ = events.EmitFromContext(ctx, events.Event{
+		Type: events.CommandExecute,
+		Metadata: map[string]string{
+			"command":  "claude auth status",
+			"provider": providerClaudeCode,
+		},
+	})
 	return verifyClaudeCodeAuth(ctx, c.bin)
 }
 
@@ -94,6 +103,15 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 	}
 	args = append(args, conversationPrompt(params.Messages))
 
+	_ = events.EmitFromContext(ctx, events.Event{
+		Type:  events.CommandExecute,
+		Model: model,
+		Metadata: map[string]string{
+			"command":  "claude --print",
+			"cwd":      cwd,
+			"provider": providerClaudeCode,
+		},
+	})
 	//nolint:gosec // c.bin comes from exec.LookPath or tests; args are passed without a shell.
 	cmd := exec.CommandContext(ctx, c.bin, args...)
 	cmd.Dir = cwd

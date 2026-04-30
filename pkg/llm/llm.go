@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/tommoulard/atteler/pkg/events"
 )
 
 const (
@@ -177,6 +179,7 @@ func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Respon
 		return nil, err
 	}
 
+	emitToolExecute(ctx, p, params.Model)
 	resp, err := p.Complete(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("llm: %s: %w", p.Name(), err)
@@ -241,6 +244,17 @@ func (r *Registry) resolve(params CompleteParams) (Provider, CompleteParams, err
 	}
 
 	return p, params, nil
+}
+
+func emitToolExecute(ctx context.Context, provider Provider, model string) {
+	_ = events.EmitFromContext(ctx, events.Event{
+		Type:  events.ToolExecute,
+		Model: model,
+		Metadata: map[string]string{
+			"provider": provider.Name(),
+			"tool":     "llm.complete",
+		},
+	})
 }
 
 func (r *Registry) resolveExplicitModelLocked(params CompleteParams) (Provider, CompleteParams, error) {

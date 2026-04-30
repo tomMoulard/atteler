@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/tommoulard/atteler/pkg/events"
 )
 
 // CodexProvider shells out to Codex CLI so Atteler can reuse a ChatGPT/Codex
@@ -49,6 +51,13 @@ func (c *CodexProvider) FetchModels(_ context.Context) ([]string, error) {
 // HealthCheck verifies that the codex CLI is reachable and that valid
 // credentials exist locally.
 func (c *CodexProvider) HealthCheck(ctx context.Context) error {
+	_ = events.EmitFromContext(ctx, events.Event{
+		Type: events.CommandExecute,
+		Metadata: map[string]string{
+			"command": "codex --version",
+			"provider": providerCodex,
+		},
+	})
 	//nolint:gosec // c.bin comes from exec.LookPath; argument is static.
 	cmd := exec.CommandContext(ctx, c.bin, "--version")
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -101,6 +110,15 @@ func (c *CodexProvider) Complete(ctx context.Context, params CompleteParams) (*R
 		"-o", outPath,
 		codexPrompt(params.Messages),
 	}
+	_ = events.EmitFromContext(ctx, events.Event{
+		Type:  events.CommandExecute,
+		Model: model,
+		Metadata: map[string]string{
+			"command":  "codex exec",
+			"cwd":      cwd,
+			"provider": providerCodex,
+		},
+	})
 	//nolint:gosec // c.bin comes from exec.LookPath or tests; args are passed without a shell.
 	cmd := exec.CommandContext(ctx, c.bin, args...)
 	cmd.Dir = cwd
