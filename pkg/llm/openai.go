@@ -23,26 +23,27 @@ type OpenAIProvider struct {
 // NewOpenAIProvider creates a provider using ResolveOpenAIKey.
 // The base URL can be overridden with OPENAI_BASE_URL.
 func NewOpenAIProvider() (*OpenAIProvider, error) {
+	return NewOpenAIProviderWithConfig(ProviderConfig{})
+}
+
+// NewOpenAIProviderWithConfig creates a provider using ResolveOpenAIKey and
+// optional config values. OPENAI_BASE_URL overrides cfg.BaseURL.
+func NewOpenAIProviderWithConfig(cfg ProviderConfig) (*OpenAIProvider, error) {
 	key, bearer, err := ResolveOpenAIKey()
 	if err != nil {
 		return nil, err
 	}
 
-	base := defaultOpenAIBase
-	if v := os.Getenv("OPENAI_BASE_URL"); v != "" {
-		base = v
-	}
-
 	return &OpenAIProvider{
 		apiKey:  key,
 		bearer:  bearer,
-		baseURL: base,
+		baseURL: configuredBaseURL("OPENAI_BASE_URL", cfg.BaseURL, defaultOpenAIBase),
 		client:  &http.Client{},
 	}, nil
 }
 
 // Name returns the provider name.
-func (o *OpenAIProvider) Name() string { return "openai" }
+func (o *OpenAIProvider) Name() string { return providerOpenAI }
 
 // Models returns the static list of supported models (fallback).
 func (o *OpenAIProvider) Models() []string {
@@ -100,6 +101,13 @@ func (o *OpenAIProvider) FetchModels(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+// HealthCheck verifies that the OpenAI API is reachable and the credentials
+// are valid by issuing a lightweight GET /v1/models request.
+func (o *OpenAIProvider) HealthCheck(ctx context.Context) error {
+	_, err := o.FetchModels(ctx)
+	return err
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI Chat Completions request / response shapes
 // ---------------------------------------------------------------------------
@@ -150,11 +158,11 @@ func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*
 	if params.MaxTokens > 0 {
 		req.MaxTokens = params.MaxTokens
 	}
-	if params.Temperature >= 0 {
-		req.Temperature = &params.Temperature
+	if params.Temperature != nil {
+		req.Temperature = params.Temperature
 	}
-	if params.TopP >= 0 {
-		req.TopP = &params.TopP
+	if params.TopP != nil {
+		req.TopP = params.TopP
 	}
 
 	body, err := json.Marshal(req)
@@ -207,10 +215,12 @@ func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*
 	}, nil
 }
 
-// envOr returns the value of the environment variable named key, or fallback.
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
+func configuredBaseURL(envKey, configured, fallback string) string {
+	if v := os.Getenv(envKey); v != "" {
 		return v
+	}
+	if configured != "" {
+		return configured
 	}
 	return fallback
 }

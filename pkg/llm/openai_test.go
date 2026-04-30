@@ -48,11 +48,12 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 		baseURL: srv.URL,
 		client:  srv.Client(),
 	}
+	temperature := 0.7
 
 	resp, err := p.Complete(context.Background(), CompleteParams{
 		Model:       "gpt-4.1",
 		MaxTokens:   200,
-		Temperature: 0.7,
+		Temperature: &temperature,
 		Messages: []Message{
 			{Role: RoleSystem, Content: "you are helpful"},
 			{Role: RoleUser, Content: "hi"},
@@ -146,14 +147,46 @@ func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {
 	if gotReq.MaxTokens != 0 {
 		t.Errorf("max_tokens = %d, want 0 (omitted)", gotReq.MaxTokens)
 	}
+	if gotReq.Temperature != nil {
+		t.Errorf("temperature = %v, want omitted", *gotReq.Temperature)
+	}
+	if gotReq.TopP != nil {
+		t.Errorf("top_p = %v, want omitted", *gotReq.TopP)
+	}
 }
 
 func TestOpenAIProvider_NameAndModels(t *testing.T) {
 	p := &OpenAIProvider{}
-	if p.Name() != "openai" {
+	if p.Name() != providerOpenAI {
 		t.Errorf("Name() = %q", p.Name())
 	}
 	if len(p.Models()) == 0 {
 		t.Error("Models() returned empty")
+	}
+}
+
+func TestOpenAIProvider_ConfigBaseURL(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	t.Setenv("OPENAI_BASE_URL", "")
+
+	p, err := NewOpenAIProviderWithConfig(ProviderConfig{BaseURL: "https://openai.config"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.baseURL != "https://openai.config" {
+		t.Errorf("baseURL = %q, want config value", p.baseURL)
+	}
+}
+
+func TestOpenAIProvider_EnvBaseURLOverridesConfig(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	t.Setenv("OPENAI_BASE_URL", "https://openai.env")
+
+	p, err := NewOpenAIProviderWithConfig(ProviderConfig{BaseURL: "https://openai.config"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.baseURL != "https://openai.env" {
+		t.Errorf("baseURL = %q, want env value", p.baseURL)
 	}
 }
