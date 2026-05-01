@@ -120,6 +120,66 @@ func TestAgentCommands(t *testing.T) {
 	assertContains(t, result.stdout, "system_prompt: Review code carefully.")
 }
 
+func TestWorkflowUtilityCommands(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	sessionDir := filepath.Join(workDir, "sessions")
+	writeSession(t, sessionDir)
+
+	configPath := filepath.Join(workDir, "atteler.yaml")
+	pluginDir := filepath.Join(workDir, "plugin")
+	writeFile(t, configPath, `agents:
+  reviewer:
+    model: gpt-test
+    capabilities: ["review", "security"]
+    triggers: ["review this"]
+plugins:
+  paths: ["./plugin"]
+`)
+	writeFile(t, filepath.Join(pluginDir, "plugin.yaml"), `name: runner
+version: "1.0.0"
+description: Runner plugin
+entrypoints:
+  run: bin/run
+`)
+	writeExecutable(t, filepath.Join(pluginDir, "bin", "run"), `#!/bin/sh
+printf 'plugin-output\n'
+`)
+
+	result := runOK(t, runSpec{dir: workDir}, "--config", configPath, "--plan-agents", "review this auth change")
+	assertContains(t, result.stdout, "reviewer\tsource=trigger\tmatch=review this")
+
+	actualPath := filepath.Join(workDir, "actual.txt")
+	writeFile(t, actualPath, "hello deterministic eval\n")
+	result = runOK(t, runSpec{dir: workDir}, "--eval-output", actualPath, "--eval-expected", "deterministic", "--eval-mode", "contains")
+	assertContains(t, result.stdout, "PASS\tmode=contains")
+
+	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "--describe-plugin", "runner")
+	assertContains(t, result.stdout, "name: runner")
+	assertContains(t, result.stdout, "entrypoints:")
+
+	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "--run-plugin", "runner/run", "--plugin-dry-run")
+	assertContains(t, result.stdout, `would run plugin "runner" entrypoint "run"`)
+
+	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "--run-plugin", "runner", "--plugin-entrypoint", "run")
+	assertContains(t, result.stdout, "plugin-output")
+
+	result = runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "--memory-search", "hello auth")
+	assertContains(t, result.stdout, "session/demo/message/0")
+
+	notesPath := filepath.Join(workDir, "notes.txt")
+	memoryStore := filepath.Join(workDir, "memory.json")
+	writeFile(t, notesPath, "OAuth callback notes\n")
+	result = runOK(t, runSpec{dir: workDir}, "--memory-store", memoryStore, "--memory-index", notesPath)
+	assertContains(t, result.stdout, "Indexed")
+	result = runOK(t, runSpec{dir: workDir}, "--memory-store", memoryStore, "--memory-search", "callback")
+	assertContains(t, result.stdout, notesPath)
+
+	result = runOK(t, runSpec{dir: workDir}, "--skill-step", "plan", "--skill-step", "code", "--skill-step", "test", "--skill-step", "plan", "--skill-step", "code", "--skill-step", "test")
+	assertContains(t, result.stdout, "slug: plan-code-test")
+	assertContains(t, result.stdout, "occurrences: 2")
+}
+
 func TestSessionCommands(t *testing.T) {
 	t.Parallel()
 	workDir := t.TempDir()
