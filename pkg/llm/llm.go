@@ -37,12 +37,14 @@ type Message struct {
 
 // CompleteParams groups the knobs for a completion call.
 type CompleteParams struct {
-	Temperature *float64
-	TopP        *float64
-	Model       string
-	Messages    []Message
-	Stop        []string
-	MaxTokens   int
+	Temperature    *float64
+	TopP           *float64
+	Seed           *int
+	Model          string
+	ReasoningLevel string
+	Messages       []Message
+	Stop           []string
+	MaxTokens      int
 }
 
 // Response is the provider-normalised result of a completion.

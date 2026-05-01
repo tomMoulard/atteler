@@ -116,6 +116,7 @@ func (o *OpenAIProvider) HealthCheck(ctx context.Context) error {
 type openaiRequest struct {
 	Temperature *float64        `json:"temperature,omitempty"`
 	TopP        *float64        `json:"top_p,omitempty"`
+	Seed        *int            `json:"seed,omitempty"`
 	Model       string          `json:"model"`
 	Messages    []openaiMessage `json:"messages"`
 	Stop        []string        `json:"stop,omitempty"`
@@ -164,6 +165,9 @@ func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*
 	}
 	if params.TopP != nil {
 		req.TopP = params.TopP
+	}
+	if params.Seed != nil {
+		req.Seed = params.Seed
 	}
 
 	body, err := json.Marshal(req)

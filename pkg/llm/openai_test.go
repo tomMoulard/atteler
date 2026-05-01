@@ -51,11 +51,13 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 		client:  srv.Client(),
 	}
 	temperature := 0.7
+	seed := 123
 
 	resp, err := p.Complete(context.Background(), CompleteParams{
 		Model:       "gpt-4.1",
 		MaxTokens:   200,
 		Temperature: &temperature,
+		Seed:        &seed,
 		Messages: []Message{
 			{Role: RoleSystem, Content: "you are helpful"},
 			{Role: RoleUser, Content: "hi"},
@@ -85,6 +87,9 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 	}
 	if gotReq.Temperature == nil || *gotReq.Temperature != 0.7 {
 		assert.Failf(t, "assertion failed", "temperature = %v", gotReq.Temperature)
+	}
+	if gotReq.Seed == nil || *gotReq.Seed != 123 {
+		assert.Failf(t, "assertion failed", "seed = %v", gotReq.Seed)
 	}
 
 	// Verify auth header.
@@ -158,6 +163,9 @@ func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {
 	}
 	if gotReq.TopP != nil {
 		assert.Failf(t, "assertion failed", "top_p = %v, want omitted", *gotReq.TopP)
+	}
+	if gotReq.Seed != nil {
+		assert.Failf(t, "assertion failed", "seed = %v, want omitted", *gotReq.Seed)
 	}
 }
 
