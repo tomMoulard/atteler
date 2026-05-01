@@ -65,14 +65,17 @@ I should/can also include specialized tool to do the review like coderabbit.
     - [x] YAML config template/init command
     - [x] config path listing and validation
  - [x] sessions + replay
+ - [x] CLI compact session message listing
  - [x] session titles
  - [x] session tags
  - [x] session tag summaries
  - [x] session discovery/listing
  - [x] YAML session details command
+ - [x] compact session summary command
  - [x] markdown/json session export
  - [x] transcript search
  - [x] config-backed agent registry and `@agent` invocation
+ - [x] config-backed agent reasoning-level metadata
  - [x] YAML agent description command
  - [x] local readiness doctor
  - [x] build-time version reporting
@@ -81,8 +84,59 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] bounded local `@file` context references
  - [x] bounded local `@directory` tree references
  - [x] trigger-based indirect agent routing
+ - [x] agent metadata, capabilities, and capability-backed prompt matching
  - [x] global and per-agent model fallback chains
  - [x] global/agent/CLI generation controls
+ - [x] determinism seed knob and request input-token guardrails
+ - [x] local plugin manifest discovery/validation
+ - [x] local plugin entrypoint execution helper for SDK workflows
+ - [x] negative-knowledge capture, search, show, and export
+ - [x] CLI session negative-knowledge inventory listing
+ - [x] agent evaluation capture, search, show, and export
+ - [x] CLI session evaluation inventory listing
+ - [x] sandbox artifact manifest capture, search, show, and export
+ - [x] CLI session artifact inventory listing
+ - [x] deterministic response recording/replay fixtures
+ - [x] dependency-free agent orchestration planning
+ - [x] CLI agent orchestration preview
+ - [x] dependency-aware async agent task planning waves
+ - [x] CLI dependency-aware async task planning preview
+ - [x] agent feedback improvement proposal primitives
+ - [x] CLI feedback improvement proposal report
+ - [x] cost/model routing primitives with budget, context, cache, and latency signals
+ - [x] CLI cost/model routing preview
+ - [x] smart context compression primitives with omission accounting
+ - [x] CLI smart context compression preview
+ - [x] MCP manifest validation and capability lookup primitives
+ - [x] CLI MCP manifest validation and capability lookup
+ - [x] dependency-free evaluation helpers for agent outputs
+ - [x] CLI eval check runner
+ - [x] dependency-free local memory/RAG lexical index
+ - [x] CLI memory indexing/search over files and saved sessions
+ - [x] CLI git history lexical search for local RAG
+ - [x] CLI local vector search over indexed files
+ - [x] CLI plugin describe, dry-run, and entrypoint execution
+ - [x] skill synthesis suggestion primitive and CLI
+ - [x] interactive `@` completion for agents and local paths
+ - [x] deterministic rest-of-line prompt completion primitive and CLI preview
+ - [x] dependency-free Go code intelligence and import graph foundation
+ - [x] CLI Go code index and graph summary
+ - [x] CLI Go package inventory with file and symbol counts
+ - [x] CLI Go package file inventory
+ - [x] CLI Go symbol lookup over the local repository
+ - [x] CLI Go import-edge listing over the local repository
+ - [x] CLI Go import graph topological layers
+ - [x] CLI Go import graph cycle detection
+ - [x] CLI Go import impact lookup over the local repository
+ - [x] CLI Go import graph reachability lookup over the local repository
+ - [x] dependency-free code graph traversal and impact analysis primitives
+ - [x] dependency-free vector retrieval primitive
+ - [x] speculative three-round execution planning primitives
+ - [x] CLI speculative three-round execution plan preview
+ - [x] structured review-agent report and gate-check primitives
+ - [x] CLI structured review scan report
+ - [x] continuous background-agent repository scan primitives
+ - [x] CLI background-agent repository scan
  - [x] offline built-in provider/model listing
  - [x] black-box CLI e2e tests for common config, provider, agent, and session workflows
  - [x] opt-in live LLM e2e tests for OpenAI and Anthropic one-shot calls

@@ -62,6 +62,48 @@ I should/can also include specialized tool to do the review like coderabbit.
         - [x] opencode
  - [x] sessions + replay
  - [x] config-backed agent registry and `@agent` invocation
+ - [x] config-backed agent reasoning-level metadata
+ - [x] agent metadata, capabilities, and capability-backed prompt matching
+ - [x] determinism seed knob and request input-token guardrails
+ - [x] local plugin manifest discovery/validation
+ - [x] local plugin entrypoint execution helper for SDK workflows
+ - [x] negative-knowledge capture, search, show, and export
+ - [x] agent evaluation capture, search, show, and export
+ - [x] sandbox artifact manifest capture, search, show, and export
+ - [x] deterministic response recording/replay fixtures
+ - [x] dependency-free agent orchestration planning
+ - [x] CLI agent orchestration preview
+ - [x] dependency-aware async agent task planning waves
+ - [x] agent feedback improvement proposal primitives
+ - [x] CLI feedback improvement proposal report
+ - [x] cost/model routing primitives with budget, context, cache, and latency signals
+ - [x] CLI cost/model routing preview
+ - [x] smart context compression primitives with omission accounting
+ - [x] CLI smart context compression preview
+ - [x] MCP manifest validation and capability lookup primitives
+ - [x] CLI MCP manifest validation and capability lookup
+ - [x] dependency-free evaluation helpers for agent outputs
+ - [x] CLI eval check runner
+ - [x] dependency-free local memory/RAG lexical index
+ - [x] CLI memory indexing/search over files and saved sessions
+ - [x] CLI git history lexical search for local RAG
+ - [x] CLI local vector search over indexed files
+ - [x] CLI plugin describe, dry-run, and entrypoint execution
+ - [x] skill synthesis suggestion primitive and CLI
+ - [x] interactive `@` completion for agents and local paths
+ - [x] deterministic rest-of-line prompt completion primitive and CLI preview
+ - [x] dependency-free Go code intelligence and import graph foundation
+ - [x] CLI Go symbol lookup over the local repository
+ - [x] CLI Go import-edge listing over the local repository
+ - [x] CLI Go import impact lookup over the local repository
+ - [x] dependency-free code graph traversal and impact analysis primitives
+ - [x] dependency-free vector retrieval primitive
+ - [x] speculative three-round execution planning primitives
+ - [x] CLI speculative three-round execution plan preview
+ - [x] structured review-agent report and gate-check primitives
+ - [x] CLI structured review scan report
+ - [x] continuous background-agent repository scan primitives
+ - [x] CLI background-agent repository scan
  - [x] automatic git worktree isolation per session
  - [x] lifecycle event hooks with granular file/command/tool/agent activity events
 
@@ -98,6 +140,8 @@ fallback_models: ["gpt-4.1", "gpt-4.1-nano"]
 generation:
   temperature: 0
   top_p: 1
+  seed: 1
+  reasoning_level: medium
   max_tokens: 2048
 
 providers:
@@ -109,8 +153,12 @@ providers:
 
 agents:
   reviewer:
+    description: Code review specialist
+    personality: concise
+    capabilities: ["review", "security"]
     model: gpt-4.1-mini
     fallback_models: ["gpt-4.1-nano"]
+    reasoning_level: high
     triggers: ["review this", "code review"]
     system_prompt: >
       You are a concise code reviewer. Focus on correctness, tests, and
@@ -128,6 +176,10 @@ hooks:
 context:
   max_file_bytes: 65536
   max_total_bytes: 262144
+  max_input_tokens: 120000
+
+plugins:
+  paths: ["./.atteler/plugins/reviewer"]
 ```
 
 Credentials still come from the existing environment/keychain discovery paths.
@@ -210,9 +262,23 @@ Useful flags:
 - `--model <id>`: select a model for this run.
 - `--agent <name>`: select a configured agent persona for this run.
 - `--describe-agent <name>`: print one configured agent as YAML.
+- `--plan-agents <prompt>`: preview which configured agents match a prompt;
+  repeat `--plan-agent <name>` to force agents into the plan and use
+  `--plan-max-agents <n>` to cap the result.
 - `--temperature <value>`: override the configured request temperature.
 - `--top-p <value>`: override the configured nucleus sampling value (`0..1`).
 - `--max-tokens <value>`: override the configured max output tokens.
+- `--seed <value>`: pass a best-effort deterministic seed to providers that
+  support it.
+- `--max-input-tokens <value>`: hard-stop a request before calling an LLM when
+  the estimated prompt size exceeds the cap.
+- `--record-response <path>`: write one-shot request/response JSON for
+  deterministic fixtures.
+- `--replay-response <path>`: replay a recorded response JSON without calling
+  a provider.
+- `--eval-output <path>` with `--eval-expected <text>` or
+  `--eval-expected-file <path>`: run a deterministic output check; set
+  `--eval-mode exact|contains|normalized` as needed.
 - `--doctor`: print local readiness diagnostics without making API calls.
 - `--version`: print build version information.
 - `--list-providers`: print built-in provider names without API calls.
@@ -220,15 +286,37 @@ Useful flags:
 - `--list-models`: print provider/model IDs discovered from configured
   providers.
 - `--list-agents`: print configured agent names.
+- `--list-plugins`: validate and print configured local plugin manifests.
+- `--describe-plugin <name>`: print a configured plugin manifest and resolved
+  filesystem locations as YAML.
+- `--run-plugin <plugin>` with `--plugin-entrypoint <name>` or
+  `--run-plugin <plugin>/<entrypoint>`: execute a configured plugin entrypoint.
+  Add `--plugin-dry-run` to print the resolved command without executing it,
+  and `--plugin-timeout-seconds <n>` to set a timeout.
 - `--list-sessions`: print saved session IDs, timestamps, metadata, and paths.
 - `--list-session-tags`: print saved session tags with counts.
+- `--list-artifacts`: print artifact records for the selected session.
+- `--list-evaluations`: print agent evaluation records for the selected session.
+- `--list-failures`: print negative-knowledge records for the selected session.
+- `--list-messages`: print compact message roles, sizes, and previews for the selected session.
 - `--search-sessions <query>`: search saved session metadata and transcripts.
 - `--session <id-or-path>`: continue a previous session.
 - `--show-session <id-or-path>`: print saved session details as YAML.
+- `--session-summary <id-or-path>`: print compact saved session metadata and counts.
 - `--session-title <title>`: set or update the saved session title.
 - `--session-tag <tag>`: add a saved session tag (repeatable or
   comma-separated).
-- `--replay <id-or-path>`: print a previous transcript and exit.
+- `--record-failure <approach>` with `--failure-reason <reason>`: record
+  negative knowledge on the selected session so failed approaches are searchable
+  and exported.
+- `--record-evaluation <agent>` with `--evaluation-outcome <outcome>`:
+  append an agent evaluation to the selected session; optional
+  `--evaluation-score`, `--evaluation-notes`, and `--evaluation-reference`
+  fields are shown, searched, and exported.
+- `--record-artifact <path>` with `--artifact-kind <kind>`: append a useful
+  sandbox/research/code artifact to the selected session; optional
+  `--artifact-summary` describes why it matters.
+- `--replay <id-or-path>`: print a previous transcript and exit. Use `--list-messages --session <id-or-path>` for compact transcript previews.
 - `--export-session <id-or-path>`: export a previous transcript and exit.
 - `--export-format <markdown|json>`: choose the export format (`markdown` by
   default).
@@ -240,6 +328,13 @@ Useful flags:
 - `--list-worktrees`: list active atteler worktrees and exit.
 - `--merge-worktree <session-id>`: merge a session worktree back into its base
   branch and exit.
+- `--memory-search <query>`: search local memory. By default this indexes saved
+  sessions; combine with `--memory-store <path>` to load a JSON memory store and
+  with repeated `--memory-index <file>` to add UTF-8 files before search or
+  saving. `--memory-limit <n>` caps results.
+- `--skill-step <action>`: add observed actions for a skill-synthesis
+  suggestion. Repeat it (or pass comma-separated values), then optionally tune
+  `--skill-max-steps` and `--skill-min-occurrences`.
 
 Example session export:
 
@@ -260,6 +355,12 @@ atteler --once "@reviewer Review this diff: ..."
 Agents can declare `triggers` for indirect routing. Explicit `--agent` and
 `@agent` always win, but without those overrides a prompt containing a trigger
 phrase such as `review this` can select the matching agent automatically.
+Use `--plan-agents` to preview multi-agent routing without making an LLM call:
+
+```sh
+atteler --plan-agents "review this auth change" --plan-max-agents 3
+atteler --plan-agents "research and implement OAuth refresh" --plan-agent researcher --plan-agent coder
+```
 
 `fallback_models` defines an ordered retry chain. Global fallbacks apply to
 default routing; per-agent fallbacks apply when that agent chooses the model.
@@ -267,10 +368,11 @@ An explicit `--model` or picker selection locks the requested model and disables
 the configured fallback chain for that request.
 
 Generation settings are layered as global `generation`, then agent-specific
-values, then explicit CLI overrides (`--temperature`, `--top-p`,
+values, then explicit CLI overrides (`--temperature`, `--top-p`, `--seed`,
 `--max-tokens`). Omitted values are not sent to providers, so setting
-`temperature: 0` is an explicit deterministic choice rather than an accidental
-default.
+`temperature: 0` or `seed: 1` is an explicit deterministic choice rather than an
+accidental default. OpenAI receives `seed`; providers without seed support ignore
+the field.
 
 ## Local file and directory context
 
@@ -288,6 +390,274 @@ References are resolved relative to the current working directory, must stay
 inside that directory, and are bounded by `context.max_file_bytes` plus
 `context.max_total_bytes`. Directory references include a sorted tree listing,
 not file contents, and are capped to avoid flooding the model context.
+Set `context.max_input_tokens` or pass `--max-input-tokens` to hard-stop
+oversized requests before provider calls. In the interactive TUI, pressing Tab
+after an active `@` token completes matching configured agents or local paths.
+
+## Deterministic response fixtures
+
+For evals and regression tests, one-shot runs can record the request envelope
+and provider response to JSON, then replay that response later without a live
+LLM call:
+
+```sh
+atteler --once "Summarize @README.md" --record-response .atteler/fixtures/readme-summary.json
+atteler --once "Summarize @README.md" --replay-response .atteler/fixtures/readme-summary.json
+```
+
+Replay still writes normal session messages, so exports and searches work the
+same way while removing provider availability and sampling noise from test
+runs.
+
+Use the eval check runner to validate recorded or generated output without a
+provider call:
+
+```sh
+atteler --eval-output .atteler/fixtures/readme-summary.txt \
+  --eval-expected "package overview" \
+  --eval-mode contains
+```
+
+## Plugins, evaluations, artifacts, and negative knowledge
+
+Configured `plugins.paths` entries point at local plugin directories or manifest
+files. `atteler --list-plugins` validates `plugin.yaml`, `plugin.yml`, or
+`plugin.json` manifests with `name`, `version`, optional `description`,
+`capabilities`, and relative `entrypoints`.
+
+The SDK package `pkg/plugin` also exposes a validated `RunEntrypoint` helper
+for local workflows that want to execute a manifest entrypoint with captured
+stdout/stderr, a timeout, root-relative path resolution, and symlink escape
+protection.
+
+Plugin entrypoints can be inspected or run from the CLI:
+
+```sh
+atteler --describe-plugin reviewer
+atteler --run-plugin reviewer/check --plugin-dry-run
+atteler --run-plugin reviewer --plugin-entrypoint check
+```
+
+Record failed approaches with:
+
+```sh
+atteler --session 20260430-120000-deadbeef \
+  --record-failure "retry token refresh timer" \
+  --failure-reason "created retry storms" \
+  --failure-commit abc123
+```
+
+Negative knowledge is stored in session JSON, shown by `--show-session`, found
+by `--search-sessions`, and included in Markdown/JSON exports. Use
+`--list-failures --session <id-or-path>` for a compact negative-knowledge inventory.
+
+Record evaluations and artifacts with:
+
+```sh
+atteler --session 20260430-120000-deadbeef \
+  --record-evaluation reviewer \
+  --evaluation-outcome pass \
+  --evaluation-score 5 \
+  --evaluation-notes "caught the auth regression"
+
+atteler --session 20260430-120000-deadbeef \
+  --record-artifact docs/research.md \
+  --artifact-kind research \
+  --artifact-summary "comparison of auth refresh approaches"
+```
+
+Evaluations and artifacts are stored in session JSON, shown by
+`--show-session`, found by `--search-sessions`, and included in exports. Use
+`--list-artifacts --session <id-or-path>` for a compact artifact inventory,
+and `--list-evaluations --session <id-or-path>` for a compact evaluation inventory.
+
+## Local memory and skill suggestions
+
+Saved sessions are searchable as local memory without a separate service:
+
+```sh
+atteler --memory-search "OAuth retry storm"
+```
+
+Git history is searchable through the same local-first retrieval posture:
+
+```sh
+atteler --git-history-search "memory regression"
+```
+
+Go code index and graph counts can be summarized locally:
+
+```sh
+atteler --code-summary
+```
+
+Go packages can be inventoried with file and symbol counts:
+
+```sh
+atteler --code-packages
+```
+
+One package can be expanded to its files:
+
+```sh
+atteler --code-package llm
+```
+
+Go symbols can be located without starting an LLM call:
+
+```sh
+atteler --code-symbol NewRegistry
+```
+
+Go import edges can be listed for graph/RAG workflows:
+
+```sh
+atteler --code-imports
+```
+
+Topological import graph layers can be listed for dependency planning:
+
+```sh
+atteler --code-layers
+```
+
+Import graph cycles can be checked explicitly:
+
+```sh
+atteler --code-cycles
+```
+
+Reverse import impact can be queried locally:
+
+```sh
+atteler --code-impact context
+```
+
+Forward import graph reachability can be queried locally:
+
+```sh
+atteler --code-reachable cmd/atteler/main.go
+```
+
+Repository health findings for background-agent workflows can be scanned locally:
+
+```sh
+atteler --watch-scan
+```
+
+Speculative execution plans can be previewed locally:
+
+```sh
+atteler --speculate-plan --speculate-agent researcher --speculate-agent coder
+```
+
+Dependency-aware async task waves can also be previewed locally before spawning agents:
+
+```sh
+atteler --async-plan \
+  --async-task 'plan|planner|draft plan' \
+  --async-task 'code|coder|implement feature|plan'
+```
+
+Repository scans can also be rendered as structured review reports:
+
+```sh
+atteler --review-scan
+```
+
+You can also persist a small lexical memory store for UTF-8 files:
+
+```sh
+atteler --memory-store .atteler/memory.json --memory-index docs/research.md
+atteler --memory-store .atteler/memory.json --memory-search "redirect risks"
+```
+
+For dependency-free local vector retrieval over specific files:
+
+```sh
+atteler --vector-index docs/research.md --vector-search "redirect risks"
+```
+
+For repeated workflows, pass observed steps and Atteler suggests a reusable
+skill candidate:
+
+```sh
+atteler --skill-step plan --skill-step code --skill-step test \
+  --skill-step plan --skill-step code --skill-step test
+```
+
+Model routing decisions can be previewed locally:
+
+```sh
+atteler --route-candidate 'openai/gpt-mini,input=0.000001,output=0.000002,max=128000' \
+  --route-input-tokens 10000 --route-output-tokens 1000
+```
+
+Context compression can be previewed with role-prefixed transcript files:
+
+```sh
+atteler --context-pack-file transcript.txt --context-pack-tokens 4000
+```
+
+Recorded feedback can be summarized into agent improvement proposals:
+
+```sh
+atteler --session <id-or-path> --feedback-proposals
+```
+
+MCP manifests can be validated and queried by capability:
+
+```sh
+atteler --mcp-manifest .atteler/mcp.yaml --mcp-capability symbols
+```
+
+Prompt-line completion can also be previewed without opening the TUI:
+
+```sh
+atteler --prompt-complete "ask rev"
+```
+
+## SDK building blocks
+
+Atteler keeps workflow primitives in reusable packages so the CLI remains a
+thin interface:
+
+- `pkg/agent` includes metadata/capability matching plus deterministic
+  orchestration planning for choosing a bounded set of agents for a task.
+- `pkg/async` includes dependency-aware task graph validation, child task
+  derivation, and ready batches for parallel agent execution waves.
+- `pkg/codeintel` indexes Go packages, imports, symbols, and import edges using
+  the standard parser as a dependency-free code-intelligence foundation.
+- `pkg/codegraph` provides deterministic directed graph traversal, reverse
+  dependency impact sets, cycle detection, and topological layering for code
+  relationships.
+- `pkg/contextpack` includes smart chat-context compaction that preserves system
+  messages, newest turns, and omission statistics.
+- `pkg/eval` includes dependency-free output checks (`exact`, `contains`, and
+  normalized matching) with compact failure summaries.
+- `pkg/feedback` turns recorded evaluations and negative knowledge into stable
+  agent-improvement proposals.
+- `pkg/githistory` parses captured `git log --name-only` output and provides
+  deterministic lexical search over commit subjects, authors, and touched files.
+- `pkg/mcp` validates MCP server manifests and supports capability lookup.
+- `pkg/memory` includes a dependency-free lexical text index with ranked
+  search, snippets, file/session indexing, and JSON persistence.
+- `pkg/modelroute` ranks model candidates using estimated token cost, budget,
+  context limits, prompt-cache reuse, and latency/TTFT signals.
+- `pkg/plugin` includes manifest loading/validation and safe local entrypoint
+  execution.
+- `pkg/promptcomplete` ranks deterministic rest-of-line prompt suggestions from
+  local agents, tools, resources, and prompt templates.
+- `pkg/review` provides structured review reports, finding grouping, severity
+  summaries, and required gate-check validation for review-agent workflows.
+- `pkg/skill` includes repeated-action detection for skill synthesis
+  suggestions.
+- `pkg/speculate` models the three-round speculative execution workflow with
+  cross-review assignments and structured gate-check validation.
+- `pkg/vector` provides an in-memory cosine retrieval store plus deterministic
+  lexical feature hashing for local RAG fallbacks.
+- `pkg/watch` scans repositories for background-agent health findings such as
+  stale TODOs, large files, and Go files missing test companions.
 
 ## Event hooks
 
