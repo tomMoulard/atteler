@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -24,11 +26,28 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	attasync "github.com/tommoulard/atteler/pkg/async"
+	"github.com/tommoulard/atteler/pkg/codegraph"
+	"github.com/tommoulard/atteler/pkg/codeintel"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
+	atteval "github.com/tommoulard/atteler/pkg/eval"
 	"github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/feedback"
+	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/mcp"
+	"github.com/tommoulard/atteler/pkg/memory"
+	"github.com/tommoulard/atteler/pkg/modelroute"
+	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
+	"github.com/tommoulard/atteler/pkg/promptcomplete"
+	"github.com/tommoulard/atteler/pkg/review"
 	"github.com/tommoulard/atteler/pkg/session"
+	attskill "github.com/tommoulard/atteler/pkg/skill"
+	"github.com/tommoulard/atteler/pkg/speculate"
+	"github.com/tommoulard/atteler/pkg/vector"
+	"github.com/tommoulard/atteler/pkg/watch"
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
 
@@ -98,8 +117,10 @@ type llmResponseMsg struct {
 	model   string
 }
 
+//nolint:govet // Field order groups request concerns; padding is not performance-sensitive.
 type llmRequest struct {
 	generation     generationSettings
+	maxInputTokens int
 	model          string
 	messages       []llm.Message
 	fallbackModels []string
@@ -149,6 +170,12 @@ func (p pickerItem) label() string {
 	return p.provider + "/" + p.model
 }
 
+type completionCandidate struct {
+	label string
+	value string
+	kind  string
+}
+
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -177,13 +204,17 @@ type model struct {
 	contextOptions      contextref.Options
 	worktreeInfo        *worktree.Info
 	pickerCursor        int
+	completionCursor    int
+	maxInputTokens      int
 	width               int
 	quitting            bool
 	waiting             bool
 	pickerOpen          bool
 	pickerLoading       bool
 	scopePickerOpen     bool
+	completionOpen      bool
 	modelLocked         bool
+	completionItems     []completionCandidate
 }
 
 func initialModel(
@@ -201,6 +232,7 @@ func initialModel(
 	fallbackModels []string,
 	generationDefaults generationSettings,
 	generationOverrides generationSettings,
+	maxInputTokens int,
 	modelLocked bool,
 	wtInfo *worktree.Info,
 ) model {
@@ -232,6 +264,7 @@ func initialModel(
 		fallbackModels:      append([]string(nil), fallbackModels...),
 		generationDefaults:  generationDefaults,
 		generationOverrides: generationOverrides,
+		maxInputTokens:      maxInputTokens,
 		history:             append([]llm.Message(nil), sessionState.Messages...),
 		textarea:            ta,
 		modelLocked:         modelLocked,
@@ -391,10 +424,24 @@ func (m model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keyEnter:
 		return m.submitInput()
+
+	case "tab":
+		items, ok := completionCandidates(m.textarea.Value(), m.agentRegistry, m.contextOptions.Root, 8)
+		if !ok || len(items) == 0 {
+			break
+		}
+		m.completionOpen = true
+		m.completionItems = items
+		m.completionCursor = 0
+		m.textarea.SetValue(applyCompletionCandidate(m.textarea.Value(), items[0].value))
+		m.textarea.CursorEnd()
+		return m, nil
 	}
 
 	// Propagate to the textarea when not waiting.
 	if !m.waiting {
+		m.completionOpen = false
+		m.completionItems = nil
 		var taCmd tea.Cmd
 		m.textarea, taCmd = m.textarea.Update(msg)
 		cmds = append(cmds, taCmd)
@@ -429,13 +476,6 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 		return m, tea.Println(errStyle.Render("Error: " + err.Error()))
 	}
 
-	m.history = nextHistory
-	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
-	m.sessionState.DefaultAgent = activeAgent.name
-	if m.selectedModel != "" {
-		m.sessionState.DefaultModel = m.selectedModel
-	}
-
 	// Print the user message above the input area.
 	line := userLabel.Render("You") + " " + input
 	if activeAgent.name != "" {
@@ -444,12 +484,25 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 
 	// Launch the LLM call.
 	m.waiting = true
-	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel is stored in m.cancel and invoked on ctrl+c
+	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	msgs := make([]llm.Message, len(m.history))
+	msgs := make([]llm.Message, len(requestMessages))
 	copy(msgs, requestMessages)
 	requestModel, fallbackModels := requestModelAndFallbacks(m.selectedModel, m.modelLocked, m.fallbackModels, activeAgent)
 	generation := generationForRequest(m.generationDefaults, m.generationOverrides, activeAgent)
+	if err := validateRequestBudget(m.registry, requestModel, requestMessagesForBudget(requestModel, msgs, activeAgent, generation), m.maxInputTokens); err != nil {
+		m.waiting = false
+		m.cancel = nil
+		cancel()
+		return m, tea.Println(errStyle.Render("Error: " + err.Error()))
+	}
+
+	m.history = nextHistory
+	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
+	m.sessionState.DefaultAgent = activeAgent.name
+	if m.selectedModel != "" {
+		m.sessionState.DefaultModel = m.selectedModel
+	}
 	request := llmRequest{
 		agent:          activeAgent.agent,
 		hasAgent:       activeAgent.ok,
@@ -457,6 +510,7 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 		messages:       msgs,
 		fallbackModels: fallbackModels,
 		generation:     generation,
+		maxInputTokens: m.maxInputTokens,
 		refs:           refs,
 	}
 
@@ -684,8 +738,26 @@ func (m model) View() string {
 	if len(parts) > 0 {
 		status = dimStyle.Render("  [") + pickerSelectedStyle.Render(strings.Join(parts, " ")) + dimStyle.Render("]")
 	}
+	if m.completionOpen && len(m.completionItems) > 0 {
+		status += "\n" + m.viewCompletions()
+	}
 
 	return status + "\n" + m.textarea.View()
+}
+
+func (m model) viewCompletions() string {
+	parts := make([]string, 0, len(m.completionItems))
+	for i, item := range m.completionItems {
+		label := item.label
+		if item.kind != "" {
+			label = item.kind + ":" + label
+		}
+		if i == m.completionCursor {
+			label = pickerSelectedStyle.Render(label)
+		}
+		parts = append(parts, label)
+	}
+	return dimStyle.Render("  completions: ") + strings.Join(parts, dimStyle.Render("  "))
 }
 
 // viewPicker renders the model selection overlay.
@@ -870,6 +942,159 @@ func parseFZFSelection(selection string, items []pickerItem) (pickerItem, bool) 
 	return pickerItem{}, false
 }
 
+func completionCandidates(input string, agents *agent.Registry, root string, limit int) ([]completionCandidate, bool) {
+	_, prefix, ok := activeAtToken(input)
+	if !ok {
+		return nil, false
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+
+	var out []completionCandidate
+	prefixLower := strings.ToLower(prefix)
+	if !strings.ContainsAny(prefix, `/\.`) {
+		for _, name := range agents.List() {
+			if strings.HasPrefix(strings.ToLower(name), prefixLower) {
+				out = append(out, completionCandidate{
+					kind:  "agent",
+					label: "@" + name,
+					value: "@" + name + " ",
+				})
+				if len(out) >= limit {
+					return out, true
+				}
+			}
+		}
+	}
+
+	fileCandidates := pathCompletionCandidates(root, prefix, limit-len(out))
+	out = append(out, fileCandidates...)
+	return out, true
+}
+
+func activeAtToken(input string) (start int, prefix string, ok bool) {
+	if input == "" {
+		return 0, "", false
+	}
+	end := len(input)
+	start = end
+	for start > 0 {
+		r, size := lastRune(input[:start])
+		if r == 0 || r == '\n' || r == '\t' || r == ' ' {
+			break
+		}
+		start -= size
+	}
+	token := input[start:end]
+	if !strings.HasPrefix(token, "@") {
+		return 0, "", false
+	}
+	return start, strings.TrimPrefix(token, "@"), true
+}
+
+func lastRune(value string) (r rune, size int) {
+	if value == "" {
+		return 0, 0
+	}
+	r = rune(value[len(value)-1])
+	if r < utf8.RuneSelf {
+		return r, 1
+	}
+	r, size = utf8.DecodeLastRuneInString(value)
+	return r, size
+}
+
+func pathCompletionCandidates(root, prefix string, limit int) []completionCandidate {
+	if limit <= 0 || filepath.IsAbs(prefix) {
+		return nil
+	}
+	if root == "" {
+		var err error
+		root, err = os.Getwd()
+		if err != nil {
+			return nil
+		}
+	}
+
+	dirPart, base := pathCompletionParts(prefix)
+	dir := filepath.Join(root, dirPart)
+	if !pathInsideRoot(root, dir) {
+		return nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	out := make([]completionCandidate, 0, min(limit, len(entries)))
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(base, ".") {
+			continue
+		}
+		if base != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base)) {
+			continue
+		}
+		rel := name
+		if dirPart != "." {
+			rel = filepath.Join(dirPart, name)
+		}
+		value := "@" + filepath.ToSlash(rel)
+		if entry.IsDir() {
+			value += "/"
+		}
+		out = append(out, completionCandidate{
+			kind:  "path",
+			label: value,
+			value: value,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func pathCompletionParts(prefix string) (dirPart, base string) {
+	cleanPrefix := filepath.Clean(filepath.FromSlash(prefix))
+	if cleanPrefix == "." {
+		cleanPrefix = ""
+	}
+	dirPart = filepath.Dir(cleanPrefix)
+	base = filepath.Base(cleanPrefix)
+	if prefix == "" || !strings.ContainsAny(prefix, `/\`) {
+		return ".", cleanPrefix
+	}
+	return dirPart, base
+}
+
+func pathInsideRoot(root, path string) bool {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." && !filepath.IsAbs(rel))
+}
+
+func applyCompletionCandidate(input, value string) string {
+	start, _, ok := activeAtToken(input)
+	if !ok {
+		return input
+	}
+	return input[:start] + value
+}
+
 // callLLM sends the messages to the selected LLM and returns a command that
 // resolves with an llmResponseMsg. If no model is selected it uses the
 // registry default.
@@ -883,6 +1108,9 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 			params = request.agent.CompleteParams(request.model, request.messages)
 		}
 		applyGenerationParams(&params, request.generation)
+		if err := validateRequestBudget(reg, params.Model, params.Messages, request.maxInputTokens); err != nil {
+			return llmResponseMsg{err: err}
+		}
 
 		resp, err := reg.CompleteWithFallback(ctx, params, request.fallbackModels)
 		if err != nil {
@@ -893,6 +1121,37 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 			model:   resp.Model,
 		}
 	}
+}
+
+func requestMessagesForBudget(
+	modelName string,
+	messages []llm.Message,
+	activeAgent agentSelection,
+	generation generationSettings,
+) []llm.Message {
+	params := llm.CompleteParams{
+		Model:    modelName,
+		Messages: messages,
+	}
+	if activeAgent.ok {
+		params = activeAgent.agent.CompleteParams(modelName, messages)
+	}
+	applyGenerationParams(&params, generation)
+	return params.Messages
+}
+
+func validateRequestBudget(reg *llm.Registry, modelName string, messages []llm.Message, maxInputTokens int) error {
+	used := llm.EstimateTokens(messages)
+	if maxInputTokens > 0 && used > maxInputTokens {
+		return fmt.Errorf("estimated input tokens %s exceed configured max_input_tokens %s", formatTokenCount(used), formatTokenCount(maxInputTokens))
+	}
+	if reg == nil || modelName == "" {
+		return nil
+	}
+	if limit := reg.ContextWindow(modelName); limit > 0 && used > limit {
+		return fmt.Errorf("estimated input tokens %s exceed %s context window %s", formatTokenCount(used), modelName, formatTokenCount(limit))
+	}
+	return nil
 }
 
 func expandReferences(messages []llm.Message, opts contextref.Options) ([]llm.Message, []contextref.Reference, error) {
@@ -1166,6 +1425,32 @@ func (f *positiveIntFlag) String() string {
 	return strconv.Itoa(f.value)
 }
 
+type nonNegativeIntFlag struct {
+	name  string
+	value int
+	set   bool
+}
+
+func (f *nonNegativeIntFlag) Set(raw string) error {
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", f.name, err)
+	}
+	if value < 0 {
+		return fmt.Errorf("%s must be >= 0", f.name)
+	}
+	f.value = value
+	f.set = true
+	return nil
+}
+
+func (f *nonNegativeIntFlag) String() string {
+	if f == nil || !f.set {
+		return ""
+	}
+	return strconv.Itoa(f.value)
+}
+
 type stringListFlag []string
 
 func (f *stringListFlag) Set(raw string) error {
@@ -1186,9 +1471,11 @@ func (f *stringListFlag) String() string {
 }
 
 type generationSettings struct {
-	Temperature *float64
-	TopP        *float64
-	MaxTokens   int
+	Temperature    *float64
+	TopP           *float64
+	Seed           *int
+	ReasoningLevel string
+	MaxTokens      int
 }
 
 type cliOptions struct {
@@ -1197,33 +1484,110 @@ type cliOptions struct {
 	sessionDir          string
 	sessionRef          string
 	showSessionRef      string
+	summarySessionRef   string
 	replayRef           string
 	exportRef           string
 	exportFormat        string
 	searchQuery         string
 	initConfigPath      string
 	configPaths         string
+	contextPackPath     string
 	model               string
 	describeAgentName   string
+	codeSymbolName      string
+	codeImpactTarget    string
+	codeReachTarget     string
+	codePackageName     string
+	codeFilePath        string
 	sessionTitle        string
 	mergeWorktreeRef    string
+	recordFailure       string
+	failureReason       string
+	failureCommit       string
+	recordEvaluation    string
+	evaluationOutcome   string
+	evaluationNotes     string
+	evaluationReference string
+	planAgentsPrompt    string
+	evalOutputPath      string
+	evalExpected        string
+	evalExpectedPath    string
+	evalMode            string
+	gitHistorySearch    string
+	describePluginName  string
+	runPluginTarget     string
+	pluginEntrypoint    string
+	memorySearch        string
+	memoryStorePath     string
+	mcpManifestPath     string
+	mcpCapability       string
+	promptCompleteInput string
+	asyncTaskSpecs      stringListFlag
+	vectorSearch        string
+	recordArtifact      string
+	artifactKind        string
+	artifactSummary     string
+	recordResponsePath  string
+	replayResponsePath  string
 	sessionTags         stringListFlag
+	planAgentNames      stringListFlag
+	suggestSkillSteps   stringListFlag
+	routeCandidates     stringListFlag
+	speculateAgents     stringListFlag
+	speculateGates      stringListFlag
+	memoryIndexFiles    stringListFlag
+	vectorIndexFiles    stringListFlag
 	maxTokens           positiveIntFlag
+	maxInputTokens      positiveIntFlag
+	contextPackTokens   positiveIntFlag
+	planMaxAgents       positiveIntFlag
+	memoryLimit         positiveIntFlag
+	vectorLimit         positiveIntFlag
+	routeInputTokens    positiveIntFlag
+	routeOutputTokens   positiveIntFlag
+	gitHistoryLimit     positiveIntFlag
+	pluginTimeout       positiveIntFlag
+	promptCompleteLimit positiveIntFlag
+	watchLargeFileBytes positiveIntFlag
+	skillMaxSteps       positiveIntFlag
+	skillMinOccurrences positiveIntFlag
+	evaluationScore     nonNegativeIntFlag
+	seed                nonNegativeIntFlag
 	temperature         floatFlag
+	routeBudget         floatFlag
+	routeCacheReuse     floatFlag
 	topP                floatFlag
 	listModels          bool
 	listKnownModels     bool
 	listProviders       bool
+	speculatePlan       bool
+	routeInteractive    bool
+	routeBatch          bool
 	listAgents          bool
+	listCodeImports     bool
+	listCodeLayers      bool
+	listCodeCycles      bool
+	codeSummary         bool
+	listCodePackages    bool
 	listSessions        bool
 	listSessionTags     bool
+	listArtifacts       bool
+	listEvaluations     bool
+	listFailures        bool
+	listMessages        bool
 	listConfigPaths     bool
+	listPlugins         bool
+	watchScan           bool
+	reviewScan          bool
+	asyncPlan           bool
+	feedbackProposals   bool
 	validateConfig      bool
 	printConfigTemplate bool
 	doctor              bool
 	readStdin           bool
 	showVersion         bool
 	useWorktree         bool
+	pluginDryRun        bool
 	listWorktrees       bool
 	noAutoMerge         bool
 }
@@ -1242,11 +1606,13 @@ type appState struct {
 	registry            *llm.Registry
 	worktreeInfo        *worktree.Info
 	fallbackModels      []string
+	pluginPaths         []string
 	providers           []string
 	loadedConfigPaths   []string
 	selectedModel       string
 	selectedAgent       string
 	cwd                 string
+	maxInputTokens      int
 	modelLocked         bool
 	autoMergeWorktree   bool
 }
@@ -1255,12 +1621,18 @@ func parseOptions() cliOptions {
 	var opts cliOptions
 	opts.temperature = floatFlag{name: "temperature", min: 0}
 	opts.topP = floatFlag{name: "top-p", min: 0, max: 1, hasMax: true}
+	opts.routeBudget = floatFlag{name: "route-budget", min: 0}
+	opts.routeCacheReuse = floatFlag{name: "route-cache-reuse", min: 0, max: 1, hasMax: true}
 	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
+	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
+	opts.seed = nonNegativeIntFlag{name: "seed"}
 	flag.StringVar(&opts.configPaths, "config", "", "additional YAML/JSON config file path(s); same format as ATTELER_CONFIG")
+	flag.StringVar(&opts.contextPackPath, "context-pack-file", "", "compact a role-prefixed transcript file and exit")
 	flag.StringVar(&opts.initConfigPath, "init-config", "", "write a starter YAML config to this path without overwriting")
 	flag.StringVar(&opts.sessionDir, "session-dir", "", "directory for session JSON files")
 	flag.StringVar(&opts.sessionRef, "session", "", "session ID or path to continue")
 	flag.StringVar(&opts.showSessionRef, "show-session", "", "print saved session details as YAML and exit")
+	flag.StringVar(&opts.summarySessionRef, "session-summary", "", "print compact saved session metadata and counts and exit")
 	flag.StringVar(&opts.sessionTitle, "session-title", "", "set or update the saved session title")
 	flag.Var(&opts.sessionTags, "session-tag", "add a saved session tag (repeatable or comma-separated)")
 	flag.StringVar(&opts.replayRef, "replay", "", "session ID or path to print and exit")
@@ -1271,16 +1643,91 @@ func parseOptions() cliOptions {
 	flag.StringVar(&opts.model, "model", "", "model ID to use")
 	flag.StringVar(&opts.agentName, "agent", "", "agent name to use for prompts")
 	flag.StringVar(&opts.describeAgentName, "describe-agent", "", "print a configured agent as YAML and exit")
+	flag.StringVar(&opts.codeSymbolName, "code-symbol", "", "find Go symbols by exact name in the current repository and exit")
+	flag.StringVar(&opts.codeImpactTarget, "code-impact", "", "list Go files that directly or transitively import this path and exit")
+	flag.StringVar(&opts.codeReachTarget, "code-reachable", "", "list Go import graph nodes reachable from this file path or import path and exit")
+	flag.StringVar(&opts.codePackageName, "code-package", "", "list Go files and symbol counts for one package and exit")
+	flag.StringVar(&opts.codeFilePath, "code-file", "", "print Go package, symbols, and imports for one file and exit")
+	flag.StringVar(&opts.recordFailure, "record-failure", "", "record a failed approach/negative-knowledge note on the selected session and exit")
+	flag.StringVar(&opts.failureReason, "failure-reason", "", "reason for --record-failure")
+	flag.StringVar(&opts.failureCommit, "failure-commit", "", "commit or reference associated with --record-failure")
+	flag.StringVar(&opts.recordEvaluation, "record-evaluation", "", "record an evaluation for this agent on the selected session and exit")
+	flag.StringVar(&opts.evaluationOutcome, "evaluation-outcome", "", "outcome for --record-evaluation")
+	flag.StringVar(&opts.evaluationNotes, "evaluation-notes", "", "notes for --record-evaluation")
+	flag.StringVar(&opts.evaluationReference, "evaluation-reference", "", "reference for --record-evaluation")
+	flag.StringVar(&opts.planAgentsPrompt, "plan-agents", "", "plan configured agents for this prompt and exit")
+	flag.Var(&opts.planAgentNames, "plan-agent", "explicit agent name to include in --plan-agents (repeatable or comma-separated)")
+	flag.Var(&opts.planMaxAgents, "plan-max-agents", "maximum agents to include in --plan-agents")
+	flag.StringVar(&opts.evalOutputPath, "eval-output", "", "actual output file to compare and exit")
+	flag.StringVar(&opts.evalExpected, "eval-expected", "", "expected text for --eval-output")
+	flag.StringVar(&opts.evalExpectedPath, "eval-expected-file", "", "expected output file for --eval-output")
+	flag.StringVar(&opts.evalMode, "eval-mode", string(atteval.ModeContains), "eval mode: exact, contains, or normalized")
+	flag.StringVar(&opts.gitHistorySearch, "git-history-search", "", "search local git history subjects/files/authors and exit")
+	flag.Var(&opts.gitHistoryLimit, "git-history-limit", "maximum --git-history-search results")
+	flag.StringVar(&opts.describePluginName, "describe-plugin", "", "print a configured plugin manifest as YAML and exit")
+	flag.StringVar(&opts.runPluginTarget, "run-plugin", "", "run configured plugin name, or plugin/entrypoint when --plugin-entrypoint is omitted")
+	flag.StringVar(&opts.pluginEntrypoint, "plugin-entrypoint", "", "entrypoint name for --run-plugin")
+	flag.Var(&opts.pluginTimeout, "plugin-timeout-seconds", "timeout in seconds for --run-plugin")
+	flag.BoolVar(&opts.pluginDryRun, "plugin-dry-run", false, "describe --run-plugin without executing it")
+	flag.StringVar(&opts.memorySearch, "memory-search", "", "search local memory built from sessions, --memory-store, and --memory-index files")
+	flag.StringVar(&opts.memoryStorePath, "memory-store", "", "JSON memory store path to load and/or save")
+	flag.StringVar(&opts.mcpManifestPath, "mcp-manifest", "", "validate/list an MCP manifest YAML/JSON file and exit")
+	flag.StringVar(&opts.mcpCapability, "mcp-capability", "", "find servers declaring this capability in --mcp-manifest")
+	flag.Var(&opts.memoryIndexFiles, "memory-index", "file to add to memory before saving/searching (repeatable or comma-separated)")
+	flag.Var(&opts.memoryLimit, "memory-limit", "maximum memory search results")
+	flag.StringVar(&opts.vectorSearch, "vector-search", "", "search --vector-index files with dependency-free local vector retrieval and exit")
+	flag.Var(&opts.vectorIndexFiles, "vector-index", "file to add to vector search (repeatable or comma-separated)")
+	flag.Var(&opts.vectorLimit, "vector-limit", "maximum vector search results")
+	flag.StringVar(&opts.promptCompleteInput, "prompt-complete", "", "suggest deterministic rest-of-line prompt completions and exit")
+	flag.Var(&opts.promptCompleteLimit, "prompt-complete-limit", "maximum --prompt-complete suggestions")
+	flag.BoolVar(&opts.asyncPlan, "async-plan", false, "print dependency-aware async task batches and exit")
+	flag.Var(&opts.asyncTaskSpecs, "async-task", "task spec for --async-plan: id|agent|prompt|dep1+dep2 (repeatable or comma-separated)")
+	flag.Var(&opts.suggestSkillSteps, "skill-step", "observed action for skill suggestion (repeatable or comma-separated)")
+	flag.BoolVar(&opts.speculatePlan, "speculate-plan", false, "print a speculative three-round execution plan and exit")
+	flag.Var(&opts.routeCandidates, "route-candidate", "model route candidate spec: provider/model,key=value... (repeatable or comma-separated)")
+	flag.Var(&opts.routeInputTokens, "route-input-tokens", "estimated input tokens for model routing")
+	flag.Var(&opts.routeOutputTokens, "route-output-tokens", "estimated output tokens for model routing")
+	flag.Var(&opts.routeBudget, "route-budget", "maximum estimated request cost for model routing")
+	flag.Var(&opts.routeCacheReuse, "route-cache-reuse", "prompt-cache reuse estimate for model routing (0..1)")
+	flag.BoolVar(&opts.routeInteractive, "route-interactive", false, "rank model route candidates for low TTFT")
+	flag.BoolVar(&opts.routeBatch, "route-batch", false, "rank model route candidates for batch/cost preference")
+	flag.Var(&opts.speculateAgents, "speculate-agent", "agent name for --speculate-plan (repeatable or comma-separated)")
+	flag.Var(&opts.speculateGates, "speculate-gate", "required gate check for --speculate-plan (repeatable or comma-separated)")
+	flag.Var(&opts.skillMaxSteps, "skill-max-steps", "maximum repeated sequence length for --skill-step suggestions")
+	flag.Var(&opts.skillMinOccurrences, "skill-min-occurrences", "minimum repeated occurrences for --skill-step suggestions")
+	flag.StringVar(&opts.recordArtifact, "record-artifact", "", "record a session artifact path and exit")
+	flag.StringVar(&opts.artifactKind, "artifact-kind", "", "kind for --record-artifact")
+	flag.StringVar(&opts.artifactSummary, "artifact-summary", "", "summary for --record-artifact")
+	flag.StringVar(&opts.recordResponsePath, "record-response", "", "record a one-shot response to this JSON file")
+	flag.StringVar(&opts.replayResponsePath, "replay-response", "", "replay a recorded one-shot response JSON file without calling an LLM")
 	flag.Var(&opts.temperature, "temperature", "override request temperature")
 	flag.Var(&opts.topP, "top-p", "override request nucleus sampling value (0..1)")
 	flag.Var(&opts.maxTokens, "max-tokens", "override request max output tokens")
+	flag.Var(&opts.seed, "seed", "best-effort deterministic seed for providers that support it")
+	flag.Var(&opts.maxInputTokens, "max-input-tokens", "hard cap on estimated input tokens before an LLM call")
+	flag.Var(&opts.contextPackTokens, "context-pack-tokens", "maximum estimated tokens for --context-pack-file")
+	flag.Var(&opts.evaluationScore, "evaluation-score", "score for --record-evaluation")
 	flag.BoolVar(&opts.listModels, "list-models", false, "list available models and exit")
 	flag.BoolVar(&opts.listKnownModels, "list-known-models", false, "list built-in provider/model IDs without API calls and exit")
 	flag.BoolVar(&opts.listProviders, "list-providers", false, "list built-in provider names without API calls and exit")
 	flag.BoolVar(&opts.listAgents, "list-agents", false, "list configured agents and exit")
+	flag.BoolVar(&opts.listCodeImports, "code-imports", false, "list Go import edges in the current repository and exit")
+	flag.BoolVar(&opts.listCodeLayers, "code-layers", false, "list topological Go import graph layers for the current repository and exit")
+	flag.BoolVar(&opts.listCodeCycles, "code-cycles", false, "list Go import graph cycles for the current repository and exit")
+	flag.BoolVar(&opts.codeSummary, "code-summary", false, "print compact Go code index and import graph counts and exit")
+	flag.BoolVar(&opts.listCodePackages, "code-packages", false, "list Go packages with file and symbol counts and exit")
 	flag.BoolVar(&opts.listSessions, "list-sessions", false, "list saved sessions and exit")
 	flag.BoolVar(&opts.listSessionTags, "list-session-tags", false, "list saved session tags with counts and exit")
+	flag.BoolVar(&opts.listArtifacts, "list-artifacts", false, "list artifacts recorded on the selected session and exit")
+	flag.BoolVar(&opts.listEvaluations, "list-evaluations", false, "list agent evaluations recorded on the selected session and exit")
+	flag.BoolVar(&opts.listFailures, "list-failures", false, "list negative-knowledge records on the selected session and exit")
+	flag.BoolVar(&opts.listMessages, "list-messages", false, "list compact message records on the selected session and exit")
 	flag.BoolVar(&opts.listConfigPaths, "list-config-paths", false, "list config files in load order and exit")
+	flag.BoolVar(&opts.listPlugins, "list-plugins", false, "list configured local plugin manifests and exit")
+	flag.BoolVar(&opts.watchScan, "watch-scan", false, "scan the current repository for background-agent health findings and exit")
+	flag.BoolVar(&opts.reviewScan, "review-scan", false, "scan the current repository and print a structured review report and exit")
+	flag.BoolVar(&opts.feedbackProposals, "feedback-proposals", false, "derive agent improvement proposals from the selected session and exit")
+	flag.Var(&opts.watchLargeFileBytes, "watch-large-file-bytes", "large-file byte threshold for --watch-scan")
 	flag.BoolVar(&opts.validateConfig, "validate-config", false, "validate merged YAML/JSON config and exit")
 	flag.BoolVar(&opts.printConfigTemplate, "print-config-template", false, "print a starter YAML config and exit")
 	flag.BoolVar(&opts.doctor, "doctor", false, "print local readiness diagnostics and exit")
@@ -1472,57 +1919,212 @@ func run() error {
 }
 
 func runWithState(opts cliOptions, state appState) error {
+	if handled, err := runStateCommand(opts, state); handled {
+		return err
+	}
+
+	if opts.oncePrompt == "" && !opts.readStdin {
+		return runInteractive(state)
+	}
+
+	prompt, err := oneShotPrompt(opts.oncePrompt, opts.readStdin)
+	if err != nil {
+		return err
+	}
+	// One-shot mode uses a logger-enabled runner so context-based events
+	// (e.g. tool_execute from providers) are visible on stderr.
+	state.hookRunner = events.NewRunnerWithLogger(state.hookConfig, os.Stderr)
+	runErr := runOnce(
+		context.Background(),
+		state.registry,
+		state.agentRegistry,
+		state.hookRunner,
+		state.sessionStore,
+		state.sessionState,
+		state.contextOptions,
+		state.selectedModel,
+		state.selectedAgent,
+		state.fallbackModels,
+		state.generationDefaults,
+		state.generationOverrides,
+		state.maxInputTokens,
+		responseRecordOptions{
+			RecordPath: opts.recordResponsePath,
+			ReplayPath: opts.replayResponsePath,
+		},
+		state.modelLocked,
+		prompt,
+	)
+	finalizeWorktree(&state)
+	return runErr
+}
+
+func runStateCommand(opts cliOptions, state appState) (bool, error) {
+	if handled, err := runStateReadCommand(opts, state); handled {
+		return true, err
+	}
+	if handled, err := runStateWriteCommand(opts, state); handled {
+		return true, err
+	}
+	if handled, err := runStateUtilityCommand(opts, state); handled {
+		return true, err
+	}
+	switch {
+	case opts.listModels:
+		return true, listModels(context.Background(), state.registry)
+	case opts.planAgentsPrompt != "":
+		return true, planAgents(state.agentRegistry, opts.planAgentsPrompt, opts.planAgentNames, opts.planMaxAgents.value)
+	default:
+		return false, nil
+	}
+}
+
+func runStateUtilityCommand(opts cliOptions, state appState) (bool, error) {
+	if handled, err := runStateLocalAnalysisCommand(opts, state); handled {
+		return true, err
+	}
+	switch {
+	case opts.evalOutputPath != "":
+		return true, evalOutput(opts.evalOutputPath, opts.evalExpected, opts.evalExpectedPath, atteval.MatchMode(opts.evalMode))
+	case opts.contextPackPath != "":
+		return true, runContextPack(opts.contextPackPath, opts.contextPackTokens.value)
+	case len(opts.suggestSkillSteps) > 0:
+		suggestSkill(opts.suggestSkillSteps, opts.skillMaxSteps.value, opts.skillMinOccurrences.value)
+		return true, nil
+	case opts.promptCompleteInput != "":
+		promptComplete(state.agentRegistry, opts.promptCompleteInput, opts.promptCompleteLimit.value)
+		return true, nil
+	case opts.memorySearch != "" || len(opts.memoryIndexFiles) > 0:
+		return true, runMemoryCommand(state.sessionStore, opts)
+	case opts.vectorSearch != "" || len(opts.vectorIndexFiles) > 0:
+		return true, runVectorSearch(opts.vectorSearch, opts.vectorIndexFiles, opts.vectorLimit.value)
+	case opts.runPluginTarget != "":
+		return true, runPluginEntrypoint(state.pluginPaths, opts.runPluginTarget, opts.pluginEntrypoint, opts.pluginDryRun, opts.pluginTimeout.value)
+	case opts.mcpManifestPath != "":
+		return true, runMCPManifest(opts.mcpManifestPath, opts.mcpCapability)
+	case opts.searchQuery != "":
+		return true, searchSessions(state.sessionStore, opts.searchQuery)
+	case opts.doctor:
+		return true, doctor(state)
+	default:
+		return false, nil
+	}
+}
+
+func runStateLocalAnalysisCommand(opts cliOptions, state appState) (bool, error) {
+	if handled, err := runStateCodeAnalysisCommand(opts, state); handled {
+		return true, err
+	}
+	switch {
+	case opts.gitHistorySearch != "":
+		return true, runGitHistorySearch(state.cwd, opts.gitHistorySearch, opts.gitHistoryLimit.value)
+	case opts.watchScan:
+		return true, runWatchScan(state.cwd, opts.watchLargeFileBytes.value)
+	case opts.reviewScan:
+		return true, runReviewScan(state.cwd, opts.watchLargeFileBytes.value)
+	case opts.speculatePlan:
+		return true, runSpeculatePlan(opts.speculateAgents, opts.speculateGates)
+	case opts.asyncPlan:
+		return true, runAsyncPlan(opts.asyncTaskSpecs)
+	case opts.feedbackProposals:
+		printFeedbackProposals(state.sessionState)
+		return true, nil
+	case len(opts.routeCandidates) > 0:
+		return true, runRouteModels(opts)
+	default:
+		return false, nil
+	}
+}
+
+func runStateCodeAnalysisCommand(opts cliOptions, state appState) (bool, error) {
+	switch {
+	case opts.codeSymbolName != "":
+		return true, findCodeSymbol(state.cwd, opts.codeSymbolName)
+	case opts.listCodeImports:
+		return true, listCodeImports(state.cwd)
+	case opts.listCodeLayers:
+		return true, listCodeLayers(state.cwd)
+	case opts.listCodeCycles:
+		return true, listCodeCycles(state.cwd)
+	case opts.codeSummary:
+		return true, printCodeSummary(state.cwd)
+	case opts.listCodePackages:
+		return true, listCodePackages(state.cwd)
+	case opts.codePackageName != "":
+		return true, listCodePackageFiles(state.cwd, opts.codePackageName)
+	case opts.codeFilePath != "":
+		return true, showCodeFile(state.cwd, opts.codeFilePath)
+	case opts.codeImpactTarget != "":
+		return true, listCodeImpact(state.cwd, opts.codeImpactTarget)
+	case opts.codeReachTarget != "":
+		return true, listCodeReachable(state.cwd, opts.codeReachTarget)
+	default:
+		return false, nil
+	}
+}
+
+func runStateReadCommand(opts cliOptions, state appState) (bool, error) {
+	if handled, err := runStateSessionInventoryCommand(opts, state); handled {
+		return true, err
+	}
 	switch {
 	case opts.replayRef != "":
 		printTranscript(state.sessionState)
-		return nil
+		return true, nil
 	case opts.showSessionRef != "":
-		return showSession(state.sessionState, state.sessionStore.Path(state.sessionState.ID))
+		return true, showSession(state.sessionState, state.sessionStore.Path(state.sessionState.ID))
+	case opts.summarySessionRef != "":
+		printSessionSummary(state.sessionState, state.sessionStore.Path(state.sessionState.ID))
+		return true, nil
 	case opts.exportRef != "":
-		return exportSession(state.sessionState, opts.exportFormat)
-	case opts.listModels:
-		return listModels(context.Background(), state.registry)
+		return true, exportSession(state.sessionState, opts.exportFormat)
 	case opts.listAgents:
 		listAgents(state.agentRegistry)
-		return nil
+		return true, nil
 	case opts.describeAgentName != "":
-		return describeAgent(state.agentRegistry, opts.describeAgentName)
-	case opts.listSessions:
-		return listSessions(state.sessionStore)
-	case opts.listSessionTags:
-		return listSessionTags(state.sessionStore)
-	case opts.searchQuery != "":
-		return searchSessions(state.sessionStore, opts.searchQuery)
-	case opts.doctor:
-		return doctor(state)
-	case opts.oncePrompt != "" || opts.readStdin:
-		prompt, err := oneShotPrompt(opts.oncePrompt, opts.readStdin)
-		if err != nil {
-			return err
-		}
-		// One-shot mode uses a logger-enabled runner so context-based events
-		// (e.g. tool_execute from providers) are visible on stderr.
-		state.hookRunner = events.NewRunnerWithLogger(state.hookConfig, os.Stderr)
-		runErr := runOnce(
-			context.Background(),
-			state.registry,
-			state.agentRegistry,
-			state.hookRunner,
-			state.sessionStore,
-			state.sessionState,
-			state.contextOptions,
-			state.selectedModel,
-			state.selectedAgent,
-			state.fallbackModels,
-			state.generationDefaults,
-			state.generationOverrides,
-			state.modelLocked,
-			prompt,
-		)
-		finalizeWorktree(&state)
-		return runErr
+		return true, describeAgent(state.agentRegistry, opts.describeAgentName)
+	case opts.listPlugins:
+		return true, listPlugins(state.pluginPaths)
+	case opts.describePluginName != "":
+		return true, describePlugin(state.pluginPaths, opts.describePluginName)
 	default:
-		return runInteractive(state)
+		return false, nil
+	}
+}
+
+func runStateSessionInventoryCommand(opts cliOptions, state appState) (bool, error) {
+	switch {
+	case opts.listSessions:
+		return true, listSessions(state.sessionStore)
+	case opts.listSessionTags:
+		return true, listSessionTags(state.sessionStore)
+	case opts.listArtifacts:
+		listArtifacts(state.sessionState)
+		return true, nil
+	case opts.listEvaluations:
+		listEvaluations(state.sessionState)
+		return true, nil
+	case opts.listFailures:
+		listFailures(state.sessionState)
+		return true, nil
+	case opts.listMessages:
+		listMessages(state.sessionState)
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func runStateWriteCommand(opts cliOptions, state appState) (bool, error) {
+	switch {
+	case opts.recordFailure != "":
+		return true, recordFailure(state.sessionStore, state.sessionState, opts.recordFailure, opts.failureReason, opts.failureCommit, state.selectedAgent)
+	case opts.recordEvaluation != "":
+		return true, recordEvaluation(state.sessionStore, state.sessionState, opts.recordEvaluation, opts.evaluationOutcome, opts.evaluationNotes, opts.evaluationReference, opts.evaluationScore.value)
+	case opts.recordArtifact != "":
+		return true, recordArtifact(state.sessionStore, state.sessionState, opts.recordArtifact, opts.artifactKind, opts.artifactSummary, state.selectedAgent)
+	default:
+		return false, nil
 	}
 }
 
@@ -1548,6 +2150,7 @@ func loadAppState(opts cliOptions) (appState, error) {
 	contextOptions := contextOptionsFromConfig(cfg)
 	generationDefaults := generationFromConfig(cfg)
 	generationOverrides := generationFromOptions(opts)
+	maxInputTokens := maxInputTokensFromConfigOptions(cfg, opts)
 
 	providers := reg.ListProviders()
 	if len(providers) == 0 {
@@ -1601,8 +2204,10 @@ func loadAppState(opts cliOptions) (appState, error) {
 		selectedModel:       selection.selectedModel,
 		selectedAgent:       selection.selectedAgent,
 		fallbackModels:      selection.fallbackModels,
+		pluginPaths:         append([]string(nil), cfg.Plugins.Paths...),
 		generationDefaults:  generationDefaults,
 		generationOverrides: generationOverrides,
+		maxInputTokens:      maxInputTokens,
 		hookConfig:          cfg.Hooks,
 		modelLocked:         selection.modelLocked,
 		autoMergeWorktree:   opts.useWorktree && !opts.noAutoMerge,
@@ -1660,11 +2265,11 @@ func resolveSelection(
 }
 
 func loadRequestedSession(opts cliOptions, store *session.Store, state *selectionState) error {
-	if opts.sessionRef == "" && opts.replayRef == "" && opts.exportRef == "" && opts.showSessionRef == "" {
+	if opts.sessionRef == "" && opts.replayRef == "" && opts.exportRef == "" && opts.showSessionRef == "" && opts.summarySessionRef == "" {
 		return nil
 	}
 
-	ref := firstNonEmpty(opts.replayRef, opts.showSessionRef, opts.exportRef, opts.sessionRef)
+	ref := firstNonEmpty(opts.replayRef, opts.showSessionRef, opts.summarySessionRef, opts.exportRef, opts.sessionRef)
 	loadedSession, err := store.Load(ref)
 	if err != nil {
 		return fmt.Errorf("load session: %w", err)
@@ -1749,6 +2354,7 @@ func runInteractive(state appState) error {
 		state.fallbackModels,
 		state.generationDefaults,
 		state.generationOverrides,
+		state.maxInputTokens,
 		state.modelLocked,
 		state.worktreeInfo,
 	))
@@ -1776,6 +2382,93 @@ func runInteractive(state appState) error {
 	return nil
 }
 
+type responseRecordOptions struct {
+	RecordPath string
+	ReplayPath string
+}
+
+type responseRecordFile struct {
+	RecordedAt time.Time             `json:"recorded_at"`
+	Request    responseRecordRequest `json:"request"`
+	Response   responseRecordPayload `json:"response"`
+}
+
+//nolint:govet // JSON field order is grouped for stable recording readability.
+type responseRecordRequest struct {
+	Temperature    *float64      `json:"temperature,omitempty"`
+	TopP           *float64      `json:"top_p,omitempty"`
+	Seed           *int          `json:"seed,omitempty"`
+	Model          string        `json:"model,omitempty"`
+	FallbackModels []string      `json:"fallback_models,omitempty"`
+	Messages       []llm.Message `json:"messages"`
+	MaxTokens      int           `json:"max_tokens,omitempty"`
+	ReasoningLevel string        `json:"reasoning_level,omitempty"`
+}
+
+type responseRecordPayload struct {
+	Content      string `json:"content"`
+	Model        string `json:"model,omitempty"`
+	InputTokens  int    `json:"input_tokens,omitempty"`
+	OutputTokens int    `json:"output_tokens,omitempty"`
+}
+
+func saveRecordedResponse(path string, params llm.CompleteParams, fallbackModels []string, resp *llm.Response) error {
+	if strings.TrimSpace(path) == "" || resp == nil {
+		return nil
+	}
+	record := responseRecordFile{
+		RecordedAt: time.Now().UTC(),
+		Request: responseRecordRequest{
+			Model:          params.Model,
+			Messages:       append([]llm.Message(nil), params.Messages...),
+			FallbackModels: append([]string(nil), fallbackModels...),
+			MaxTokens:      params.MaxTokens,
+			Temperature:    params.Temperature,
+			TopP:           params.TopP,
+			Seed:           params.Seed,
+			ReasoningLevel: params.ReasoningLevel,
+		},
+		Response: responseRecordPayload{
+			Content:      resp.Content,
+			Model:        resp.Model,
+			InputTokens:  resp.InputTokens,
+			OutputTokens: resp.OutputTokens,
+		},
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil && filepath.Dir(path) != "." {
+		return fmt.Errorf("record response: create dir: %w", err)
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return fmt.Errorf("record response: marshal: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("record response: write %s: %w", path, err)
+	}
+	return nil
+}
+
+func loadRecordedResponse(path string) (*llm.Response, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("replay response: read %s: %w", path, err)
+	}
+	var record responseRecordFile
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, fmt.Errorf("replay response: parse %s: %w", path, err)
+	}
+	if strings.TrimSpace(record.Response.Content) == "" {
+		return nil, fmt.Errorf("replay response: %s has empty response content", path)
+	}
+	return &llm.Response{
+		Content:      record.Response.Content,
+		Model:        record.Response.Model,
+		InputTokens:  record.Response.InputTokens,
+		OutputTokens: record.Response.OutputTokens,
+	}, nil
+}
+
 func runOnce(
 	ctx context.Context,
 	reg *llm.Registry,
@@ -1789,6 +2482,8 @@ func runOnce(
 	fallbackModels []string,
 	generationDefaults generationSettings,
 	generationOverrides generationSettings,
+	maxInputTokens int,
+	responseOptions responseRecordOptions,
 	modelLocked bool,
 	prompt string,
 ) error {
@@ -1874,6 +2569,9 @@ func runOnce(
 		params = activeAgent.agent.CompleteParams(requestModel, params.Messages)
 	}
 	applyGenerationParams(&params, generation)
+	if budgetErr := validateRequestBudget(reg, params.Model, params.Messages, maxInputTokens); budgetErr != nil {
+		return budgetErr
+	}
 
 	ctx = events.WithEmitter(ctx, hooks, events.Event{
 		SessionID:   sessionState.ID,
@@ -1881,7 +2579,7 @@ func runOnce(
 		Agent:       activeAgent.name,
 		Model:       requestModel,
 	})
-	resp, err := reg.CompleteWithFallback(ctx, params, fallbackModels)
+	resp, err := completeWithRecording(ctx, reg, params, fallbackModels, responseOptions)
 	if err != nil {
 		emitHookWarning(ctx, hooks, events.Event{
 			Type:        events.Error,
@@ -1891,7 +2589,7 @@ func runOnce(
 			Model:       sessionState.DefaultModel,
 			Error:       err.Error(),
 		})
-		return fmt.Errorf("complete prompt: %w", err)
+		return err
 	}
 
 	sessionState.Append(llm.RoleAssistant, resp.Content)
@@ -1923,6 +2621,35 @@ func runOnce(
 	fmt.Println(resp.Content)
 	fmt.Fprintln(os.Stderr, "session: "+sessionState.ID+" ("+store.Path(sessionState.ID)+")")
 	return nil
+}
+
+func completeWithRecording(
+	ctx context.Context,
+	reg *llm.Registry,
+	params llm.CompleteParams,
+	fallbackModels []string,
+	responseOptions responseRecordOptions,
+) (*llm.Response, error) {
+	if responseOptions.ReplayPath != "" {
+		resp, err := loadRecordedResponse(responseOptions.ReplayPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := saveRecordedResponse(responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
+			return nil, err
+		}
+		return resp, nil
+	}
+
+	resp, err := reg.CompleteWithFallback(ctx, params, fallbackModels)
+	if err != nil {
+		return nil, fmt.Errorf("complete prompt: %w", err)
+	}
+	if err := saveRecordedResponse(responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
+		return nil, err
+	}
+
+	return resp, nil
 }
 
 func requestModelAndFallbacks(
@@ -1995,13 +2722,1634 @@ func listAgents(agents *agent.Registry) {
 	}
 }
 
+func listPlugins(paths []string) error {
+	if len(paths) == 0 {
+		fmt.Println("No plugins configured.")
+		return nil
+	}
+	for _, path := range paths {
+		manifest, err := attelerplugin.Load(path)
+		if err != nil {
+			return fmt.Errorf("list plugins: %w", err)
+		}
+		parts := []string{manifest.Name, manifest.Version}
+		if len(manifest.Capabilities) > 0 {
+			parts = append(parts, "capabilities="+strings.Join(manifest.Capabilities, ","))
+		}
+		if manifest.Description != "" {
+			parts = append(parts, "description="+manifest.Description)
+		}
+		parts = append(parts, path)
+		fmt.Println(strings.Join(parts, "\t"))
+	}
+	return nil
+}
+
+//nolint:govet // YAML readability is more important than pointer-byte packing here.
+type pluginDescription struct {
+	Entrypoints  map[string]string `yaml:"entrypoints,omitempty"`
+	Capabilities []string          `yaml:"capabilities,omitempty"`
+	Name         string            `yaml:"name"`
+	Version      string            `yaml:"version"`
+	Description  string            `yaml:"description,omitempty"`
+	Root         string            `yaml:"root"`
+	ManifestPath string            `yaml:"manifest_path"`
+}
+
+func describePlugin(paths []string, name string) error {
+	registry, err := attelerplugin.NewRegistry(paths)
+	if err != nil {
+		return fmt.Errorf("describe plugin: %w", err)
+	}
+	plugin, ok := registry.Get(name)
+	if !ok {
+		return fmt.Errorf("describe plugin: plugin %q not found", strings.TrimSpace(name))
+	}
+	out, err := yaml.Marshal(pluginDescription{
+		Name:         plugin.Manifest.Name,
+		Version:      plugin.Manifest.Version,
+		Description:  plugin.Manifest.Description,
+		Capabilities: append([]string(nil), plugin.Manifest.Capabilities...),
+		Entrypoints:  copyStringMap(plugin.Manifest.Entrypoints),
+		Root:         plugin.Root,
+		ManifestPath: plugin.ManifestPath,
+	})
+	if err != nil {
+		return fmt.Errorf("describe plugin: marshal %q: %w", name, err)
+	}
+	fmt.Print(string(out))
+	return nil
+}
+
+func runPluginEntrypoint(paths []string, target, entrypointName string, dryRun bool, timeoutSeconds int) error {
+	pluginName, entrypointName, err := parsePluginTarget(target, entrypointName)
+	if err != nil {
+		return err
+	}
+	registry, err := attelerplugin.NewRegistry(paths)
+	if err != nil {
+		return fmt.Errorf("run plugin: %w", err)
+	}
+	if dryRun {
+		preview, previewErr := registry.DryRunEntrypoint(pluginName, entrypointName)
+		if previewErr != nil {
+			return fmt.Errorf("run plugin: %w", previewErr)
+		}
+		fmt.Println(formatPluginDryRun(preview))
+		return nil
+	}
+
+	plugin, ok := registry.Get(pluginName)
+	if !ok {
+		return fmt.Errorf("run plugin: plugin %q not found", pluginName)
+	}
+	timeout := time.Duration(timeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	result, err := attelerplugin.RunEntrypoint(context.Background(), plugin.Root, plugin.Manifest, entrypointName, timeout)
+	if result.Stdout != "" {
+		fmt.Print(result.Stdout)
+	}
+	if result.Stderr != "" {
+		fmt.Fprint(os.Stderr, result.Stderr)
+	}
+	if err != nil {
+		return fmt.Errorf("run plugin: %w", err)
+	}
+	return nil
+}
+
+func parsePluginTarget(target, entrypointName string) (pluginName, entrypoint string, err error) {
+	target = strings.TrimSpace(target)
+	entrypointName = strings.TrimSpace(entrypointName)
+	if target == "" {
+		return "", "", errors.New("run plugin: plugin name is required")
+	}
+	if entrypointName != "" {
+		return target, entrypointName, nil
+	}
+	pluginName, entrypoint, ok := strings.Cut(target, "/")
+	if !ok || strings.TrimSpace(pluginName) == "" || strings.TrimSpace(entrypoint) == "" {
+		return "", "", errors.New("run plugin: pass --plugin-entrypoint or use plugin/entrypoint")
+	}
+	return strings.TrimSpace(pluginName), strings.TrimSpace(entrypoint), nil
+}
+
+func formatPluginDryRun(dryRun attelerplugin.DryRun) string {
+	entrypoint := dryRun.Entrypoint
+	return strings.Join([]string{
+		dryRun.Description,
+		"plugin=" + entrypoint.PluginName,
+		"entrypoint=" + entrypoint.EntrypointName,
+		"path=" + entrypoint.Path,
+		"cwd=" + entrypoint.Root,
+	}, "\n")
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	maps.Copy(out, in)
+	return out
+}
+
+func runMCPManifest(path, capability string) error {
+	manifest, err := loadMCPManifest(path)
+	if err != nil {
+		return err
+	}
+	if err := manifest.Validate(); err != nil {
+		return fmt.Errorf("mcp manifest: validate: %w", err)
+	}
+	if strings.TrimSpace(capability) != "" {
+		servers := manifest.Find(capability)
+		if len(servers) == 0 {
+			fmt.Println("No MCP servers found.")
+			return nil
+		}
+		for i := range servers {
+			fmt.Println(formatMCPServer(servers[i]))
+		}
+		return nil
+	}
+	for _, name := range manifest.List() {
+		fmt.Println(name)
+	}
+	return nil
+}
+
+func loadMCPManifest(path string) (mcp.Manifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return mcp.Manifest{}, fmt.Errorf("mcp manifest: read %s: %w", path, err)
+	}
+	var manifest mcp.Manifest
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return mcp.Manifest{}, fmt.Errorf("mcp manifest: parse %s: %w", path, err)
+	}
+	return manifest, nil
+}
+
+func formatMCPServer(server mcp.Server) string {
+	parts := []string{server.Name, "command=" + server.Command}
+	if len(server.Args) > 0 {
+		parts = append(parts, "args="+strings.Join(server.Args, ","))
+	}
+	if len(server.Capabilities) > 0 {
+		capabilities := append([]string(nil), server.Capabilities...)
+		sort.Strings(capabilities)
+		parts = append(parts, "capabilities="+strings.Join(capabilities, ","))
+	}
+	return strings.Join(parts, "\t")
+}
+
+func runContextPack(path string, maxTokens int) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("context pack: read %s: %w", path, err)
+	}
+	messages := parseContextPackMessages(string(data))
+	result := contextpack.Compact(messages, maxTokens)
+	fmt.Print(formatContextPackResult(result))
+	return nil
+}
+
+func parseContextPackMessages(text string) []llm.Message {
+	var messages []llm.Message
+	for rawLine := range strings.SplitSeq(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		line := strings.TrimRight(rawLine, "\r")
+		role, content, ok := parseRoleLine(line)
+		if ok {
+			messages = append(messages, llm.Message{Role: role, Content: content})
+			continue
+		}
+		if len(messages) == 0 {
+			if strings.TrimSpace(line) != "" {
+				messages = append(messages, llm.Message{Role: llm.RoleUser, Content: line})
+			}
+			continue
+		}
+		if line != "" {
+			messages[len(messages)-1].Content += "\n" + line
+		}
+	}
+	return messages
+}
+
+func parseRoleLine(line string) (llm.Role, string, bool) {
+	roleText, content, ok := strings.Cut(line, ":")
+	if !ok {
+		return "", "", false
+	}
+	switch strings.ToLower(strings.TrimSpace(roleText)) {
+	case string(llm.RoleSystem):
+		return llm.RoleSystem, strings.TrimSpace(content), true
+	case string(llm.RoleUser):
+		return llm.RoleUser, strings.TrimSpace(content), true
+	case string(llm.RoleAssistant):
+		return llm.RoleAssistant, strings.TrimSpace(content), true
+	default:
+		return "", "", false
+	}
+}
+
+func formatContextPackResult(result contextpack.Result) string {
+	var b strings.Builder
+	stats := result.Stats
+	fmt.Fprintf(&b, "compressed: %t\n", stats.Compressed)
+	fmt.Fprintf(&b, "messages: %d/%d\n", stats.OutputCount, stats.OriginalCount)
+	fmt.Fprintf(&b, "omitted: %d\n", stats.OmittedCount)
+	fmt.Fprintf(&b, "tokens: %d/%d", stats.OutputEstimatedTokens, stats.OriginalEstimatedTokens)
+	if stats.MaxEstimatedTokens > 0 {
+		fmt.Fprintf(&b, " max=%d", stats.MaxEstimatedTokens)
+	}
+	b.WriteString("\n")
+	b.WriteString("output:\n")
+	for _, message := range result.Messages {
+		fmt.Fprintf(&b, "  %s: %s\n", message.Role, strings.ReplaceAll(message.Content, "\n", "\n    "))
+	}
+	return b.String()
+}
+
+func runVectorSearch(query string, paths []string, limit int) error {
+	if strings.TrimSpace(query) == "" {
+		return errors.New("vector search: --vector-search is required")
+	}
+	if len(paths) == 0 {
+		return errors.New("vector search: at least one --vector-index file is required")
+	}
+	if limit == 0 {
+		limit = 5
+	}
+	vectorizer, err := vector.NewTextVectorizer(0)
+	if err != nil {
+		return fmt.Errorf("vector search: create vectorizer: %w", err)
+	}
+	store, err := vector.NewStore(vectorizer.Dimensions)
+	if err != nil {
+		return fmt.Errorf("vector search: create store: %w", err)
+	}
+	for _, path := range paths {
+		addErr := addVectorFile(store, vectorizer, path)
+		if addErr != nil {
+			return addErr
+		}
+	}
+	queryVector, err := vectorizer.Vectorize(query)
+	if err != nil {
+		return fmt.Errorf("vector search: vectorize query: %w", err)
+	}
+	results, err := store.Search(queryVector, limit)
+	if err != nil {
+		return fmt.Errorf("vector search failed: %w", err)
+	}
+	if len(results) == 0 {
+		fmt.Println("No vector results found.")
+		return nil
+	}
+	for i := range results {
+		fmt.Println(formatVectorResult(results[i]))
+	}
+	return nil
+}
+
+func addVectorFile(store *vector.Store, vectorizer *vector.TextVectorizer, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("vector search: read %s: %w", path, err)
+	}
+	if !utf8.Valid(data) {
+		return fmt.Errorf("vector search: %s is not valid UTF-8", path)
+	}
+	vec, err := vectorizer.Vectorize(string(data))
+	if err != nil {
+		return fmt.Errorf("vector search: vectorize %s: %w", path, err)
+	}
+	clean := filepath.Clean(path)
+	if err := store.Add(vector.Document{ID: clean, Text: string(data), Vector: vec, Metadata: map[string]string{"path": clean}}); err != nil {
+		return fmt.Errorf("vector search: index %s: %w", path, err)
+	}
+	return nil
+}
+
+func formatVectorResult(result vector.Result) string {
+	parts := []string{
+		result.Document.ID,
+		fmt.Sprintf("score=%.4f", result.Score),
+	}
+	if path := result.Document.Metadata["path"]; path != "" {
+		parts = append(parts, "path="+path)
+	}
+	return strings.Join(parts, "\t")
+}
+
+func runMemoryCommand(store *session.Store, opts cliOptions) error {
+	mem, err := buildMemoryStore(store, opts)
+	if err != nil {
+		return err
+	}
+	if opts.memoryStorePath != "" && len(opts.memoryIndexFiles) > 0 {
+		if saveErr := mem.Save(opts.memoryStorePath); saveErr != nil {
+			return fmt.Errorf("memory: save store: %w", saveErr)
+		}
+		if opts.memorySearch == "" {
+			fmt.Printf("Indexed %d document(s) into %s\n", len(mem.Documents), opts.memoryStorePath)
+			return nil
+		}
+	}
+	if opts.memorySearch == "" {
+		return errors.New("memory: --memory-search is required unless indexing into --memory-store")
+	}
+
+	limit := opts.memoryLimit.value
+	if limit == 0 {
+		limit = 5
+	}
+	results, err := mem.Search(opts.memorySearch, limit)
+	if err != nil {
+		return fmt.Errorf("memory: search: %w", err)
+	}
+	if len(results) == 0 {
+		fmt.Println("No memory results found.")
+		return nil
+	}
+	for i := range results {
+		fmt.Println(formatMemoryResult(results[i]))
+	}
+	return nil
+}
+
+func buildMemoryStore(store *session.Store, opts cliOptions) (*memory.Store, error) {
+	mem, err := loadMemoryStore(opts.memoryStorePath)
+	if err != nil {
+		return nil, err
+	}
+	if len(opts.memoryIndexFiles) > 0 {
+		if err := mem.AddFiles(opts.memoryIndexFiles...); err != nil {
+			return nil, fmt.Errorf("memory: index files: %w", err)
+		}
+	}
+	if opts.memoryStorePath == "" || len(mem.Documents) == 0 {
+		if err := addSessionMemory(mem, store); err != nil {
+			return nil, err
+		}
+	}
+	return mem, nil
+}
+
+func loadMemoryStore(path string) (*memory.Store, error) {
+	if strings.TrimSpace(path) == "" {
+		return memory.NewStore(), nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return memory.NewStore(), nil
+		}
+		return nil, fmt.Errorf("memory: stat store %s: %w", path, err)
+	}
+	store, err := memory.Load(path)
+	if err != nil {
+		return nil, fmt.Errorf("memory: load store: %w", err)
+	}
+	return store, nil
+}
+
+func addSessionMemory(mem *memory.Store, store *session.Store) error {
+	summaries, err := store.List()
+	if err != nil {
+		return fmt.Errorf("memory: list sessions: %w", err)
+	}
+	for i := range summaries {
+		summary := &summaries[i]
+		saved, err := store.Load(summary.Path)
+		if err != nil {
+			return fmt.Errorf("memory: load session %s: %w", summary.ID, err)
+		}
+		if err := mem.AddSession(saved); err != nil {
+			return fmt.Errorf("memory: index session %s: %w", summary.ID, err)
+		}
+	}
+	return nil
+}
+
+func formatMemoryResult(result memory.Result) string {
+	parts := []string{
+		result.Document.ID,
+		fmt.Sprintf("score=%.4f", result.Score),
+	}
+	if result.Document.Path != "" {
+		parts = append(parts, "path="+result.Document.Path)
+	}
+	if len(result.Matches) > 0 {
+		parts = append(parts, "matches="+strings.Join(result.Matches, ","))
+	}
+	if kind := result.Document.Metadata["kind"]; kind != "" {
+		parts = append(parts, "kind="+kind)
+	}
+	line := strings.Join(parts, "\t")
+	if result.Snippet == "" {
+		return line
+	}
+	return line + "\n  " + result.Snippet
+}
+
+func planAgents(registry *agent.Registry, prompt string, requested []string, maxAgents int) error {
+	plan, err := registry.PlanAgents(prompt, requested, maxAgents)
+	if err != nil {
+		return fmt.Errorf("plan agents: %w", err)
+	}
+	if len(plan.Participants) == 0 {
+		fmt.Println("No agents matched.")
+		return nil
+	}
+	for i := range plan.Participants {
+		fmt.Println(formatAgentPlanParticipant(&plan.Participants[i]))
+	}
+	return nil
+}
+
+func formatAgentPlanParticipant(participant *agent.Participant) string {
+	parts := []string{participant.Agent.Name, "source=" + participant.Source}
+	if participant.Pattern != "" {
+		parts = append(parts, "match="+participant.Pattern)
+	}
+	if len(participant.Agent.Capabilities) > 0 {
+		parts = append(parts, "capabilities="+strings.Join(participant.Agent.Capabilities, ","))
+	}
+	if participant.Agent.Model != "" {
+		parts = append(parts, "model="+participant.Agent.Model)
+	}
+	return strings.Join(parts, "\t")
+}
+
+func findCodeSymbol(root, name string) error {
+	idx, err := codeintel.IndexDir(root)
+	if err != nil {
+		return fmt.Errorf("code symbol: index %s: %w", root, err)
+	}
+	matches := idx.FindSymbol(name)
+	if len(matches) == 0 {
+		fmt.Println("No code symbols found.")
+		return nil
+	}
+	for i := range matches {
+		fmt.Println(formatCodeSymbol(root, matches[i]))
+	}
+	return nil
+}
+
+func formatCodeSymbol(root string, symbol codeintel.Symbol) string {
+	path := relativeCodePath(root, symbol.File)
+	return strings.Join([]string{
+		symbol.Name,
+		"kind=" + symbol.Kind,
+		"path=" + path,
+		"line=" + strconv.Itoa(symbol.Line),
+	}, "\t")
+}
+
+func listCodeImports(root string) error {
+	idx, err := codeintel.IndexDir(root)
+	if err != nil {
+		return fmt.Errorf("code imports: index %s: %w", root, err)
+	}
+	if len(idx.ImportEdges) == 0 {
+		fmt.Println("No code imports found.")
+		return nil
+	}
+	for i := range idx.ImportEdges {
+		fmt.Println(formatCodeImportEdge(root, idx.ImportEdges[i]))
+	}
+	return nil
+}
+
+func listCodeImpact(root, target string) error {
+	graph, err := importGraph(root)
+	if err != nil {
+		return fmt.Errorf("code impact: %w", err)
+	}
+	impact := graph.ImpactSet(normalizeCodeGraphTarget(root, target))
+	if len(impact) == 0 {
+		fmt.Println("No code impact found.")
+		return nil
+	}
+	for _, node := range impact {
+		fmt.Println("path=" + string(node))
+	}
+	return nil
+}
+
+func showCodeFile(root, target string) error {
+	idx, err := codeintel.IndexDir(root)
+	if err != nil {
+		return fmt.Errorf("code file: index %s: %w", root, err)
+	}
+	file, ok := findCodeFile(root, idx, target)
+	if !ok {
+		fmt.Println("No Go code file found.")
+		return nil
+	}
+	printCodeFile(root, file)
+	return nil
+}
+
+func findCodeFile(root string, idx codeintel.Index, target string) (codeintel.File, bool) {
+	target = filepath.ToSlash(strings.TrimSpace(target))
+	for i := range idx.Files {
+		rel := relativeCodePath(root, idx.Files[i].Path)
+		abs := filepath.ToSlash(idx.Files[i].Path)
+		if rel == target || abs == target {
+			return idx.Files[i], true
+		}
+	}
+	return codeintel.File{}, false
+}
+
+func printCodeFile(root string, file codeintel.File) {
+	fmt.Println(formatCodeFile(root, file))
+	if len(file.Imports) > 0 {
+		fmt.Println("imports:")
+		for _, imp := range file.Imports {
+			fmt.Println("  - " + imp)
+		}
+	}
+	if len(file.Symbols) > 0 {
+		fmt.Println("symbols:")
+		for i := range file.Symbols {
+			fmt.Println("  - " + formatCodeFileSymbol(file.Symbols[i]))
+		}
+	}
+}
+
+func formatCodeFile(root string, file codeintel.File) string {
+	return "path=" + relativeCodePath(root, file.Path) + "	package=" + file.Package + "	imports=" + strconv.Itoa(len(file.Imports)) + "	symbols=" + strconv.Itoa(len(file.Symbols))
+}
+
+func formatCodeFileSymbol(symbol codeintel.Symbol) string {
+	return symbol.Name + "	kind=" + symbol.Kind + "	line=" + strconv.Itoa(symbol.Line)
+}
+
+func listCodePackageFiles(root, name string) error {
+	idx, err := codeintel.IndexDir(root)
+	if err != nil {
+		return fmt.Errorf("code package: index %s: %w", root, err)
+	}
+	files := summarizeCodePackageFiles(root, idx, name)
+	if len(files) == 0 {
+		fmt.Println("No Go package files found.")
+		return nil
+	}
+	for i := range files {
+		fmt.Println(formatCodePackageFile(files[i]))
+	}
+	return nil
+}
+
+type codePackageFile struct {
+	Path    string
+	Package string
+	Symbols int
+	Imports int
+}
+
+func summarizeCodePackageFiles(root string, idx codeintel.Index, name string) []codePackageFile {
+	name = strings.TrimSpace(name)
+	files := make([]codePackageFile, 0)
+	for i := range idx.Files {
+		file := idx.Files[i]
+		if file.Package != name {
+			continue
+		}
+		files = append(files, codePackageFile{
+			Path:    relativeCodePath(root, file.Path),
+			Package: file.Package,
+			Symbols: len(file.Symbols),
+			Imports: len(file.Imports),
+		})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files
+}
+
+func formatCodePackageFile(file codePackageFile) string {
+	return "path=" + file.Path + "	package=" + file.Package + "	symbols=" + strconv.Itoa(file.Symbols) + "	imports=" + strconv.Itoa(file.Imports)
+}
+
+type codePackageSummary struct {
+	Name    string
+	Files   int
+	Symbols int
+}
+
+func listCodePackages(root string) error {
+	idx, err := codeintel.IndexDir(root)
+	if err != nil {
+		return fmt.Errorf("code packages: index %s: %w", root, err)
+	}
+	packages := summarizeCodePackages(idx)
+	if len(packages) == 0 {
+		fmt.Println("No Go packages found.")
+		return nil
+	}
+	for i := range packages {
+		fmt.Println(formatCodePackageSummary(packages[i]))
+	}
+	return nil
+}
+
+func summarizeCodePackages(idx codeintel.Index) []codePackageSummary {
+	byPackage := make(map[string]*codePackageSummary)
+	for i := range idx.Files {
+		name := idx.Files[i].Package
+		if name == "" {
+			continue
+		}
+		summary, ok := byPackage[name]
+		if !ok {
+			summary = &codePackageSummary{Name: name}
+			byPackage[name] = summary
+		}
+		summary.Files++
+		summary.Symbols += len(idx.Files[i].Symbols)
+	}
+	packages := make([]codePackageSummary, 0, len(byPackage))
+	for _, summary := range byPackage {
+		packages = append(packages, *summary)
+	}
+	sort.Slice(packages, func(i, j int) bool {
+		if packages[i].Name != packages[j].Name {
+			return packages[i].Name < packages[j].Name
+		}
+		return packages[i].Files < packages[j].Files
+	})
+	return packages
+}
+
+func formatCodePackageSummary(summary codePackageSummary) string {
+	return "package=" + summary.Name + "	files=" + strconv.Itoa(summary.Files) + "	symbols=" + strconv.Itoa(summary.Symbols)
+}
+
+type codeSummary struct {
+	Files    int
+	Packages int
+	Symbols  int
+	Imports  int
+	Nodes    int
+	Edges    int
+	Cycles   int
+	Layers   int
+}
+
+func printCodeSummary(root string) error {
+	idx, err := codeintel.IndexDir(root)
+	if err != nil {
+		return fmt.Errorf("code summary: index %s: %w", root, err)
+	}
+	graph := importGraphFromIndex(root, idx)
+	layers, layerErr := graph.TopologicalLayers()
+	summary := codeSummary{
+		Files:    len(idx.Files),
+		Packages: countPackages(idx.Files),
+		Symbols:  len(idx.Symbols),
+		Imports:  len(idx.ImportEdges),
+		Nodes:    len(graph.Nodes()),
+		Edges:    len(graph.Edges()),
+		Cycles:   len(graph.Cycles()),
+	}
+	if layerErr == nil {
+		summary.Layers = len(layers)
+	}
+	fmt.Println(formatCodeSummary(summary))
+	return nil
+}
+
+func countPackages(files []codeintel.File) int {
+	seen := make(map[string]struct{})
+	for i := range files {
+		if files[i].Package != "" {
+			seen[files[i].Package] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+func formatCodeSummary(summary codeSummary) string {
+	return strings.Join([]string{
+		"files=" + strconv.Itoa(summary.Files),
+		"packages=" + strconv.Itoa(summary.Packages),
+		"symbols=" + strconv.Itoa(summary.Symbols),
+		"imports=" + strconv.Itoa(summary.Imports),
+		"nodes=" + strconv.Itoa(summary.Nodes),
+		"edges=" + strconv.Itoa(summary.Edges),
+		"cycles=" + strconv.Itoa(summary.Cycles),
+		"layers=" + strconv.Itoa(summary.Layers),
+	}, "	")
+}
+
+func listCodeCycles(root string) error {
+	graph, err := importGraph(root)
+	if err != nil {
+		return fmt.Errorf("code cycles: %w", err)
+	}
+	cycles := graph.Cycles()
+	if len(cycles) == 0 {
+		fmt.Println("No code graph cycles found.")
+		return nil
+	}
+	for i := range cycles {
+		fmt.Println(formatCodeCycle(i+1, cycles[i]))
+	}
+	return nil
+}
+
+func formatCodeCycle(index int, cycle []codegraph.NodeID) string {
+	labels := make([]string, 0, len(cycle))
+	for _, node := range cycle {
+		labels = append(labels, string(node))
+	}
+	return "cycle=" + strconv.Itoa(index) + "	nodes=" + strings.Join(labels, " -> ")
+}
+
+func listCodeLayers(root string) error {
+	graph, err := importGraph(root)
+	if err != nil {
+		return fmt.Errorf("code layers: %w", err)
+	}
+	layers, err := graph.TopologicalLayers()
+	if err != nil {
+		return fmt.Errorf("code layers: %w", err)
+	}
+	if len(layers) == 0 {
+		fmt.Println("No code graph layers found.")
+		return nil
+	}
+	for i := range layers {
+		fmt.Println(formatCodeLayer(i+1, layers[i]))
+	}
+	return nil
+}
+
+func formatCodeLayer(index int, nodes []codegraph.NodeID) string {
+	labels := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		labels = append(labels, string(node))
+	}
+	return "layer=" + strconv.Itoa(index) + "	nodes=" + strings.Join(labels, ",")
+}
+
+func listCodeReachable(root, target string) error {
+	graph, err := importGraph(root)
+	if err != nil {
+		return fmt.Errorf("code reachable: %w", err)
+	}
+	reachable := graph.ReachableFrom(normalizeCodeGraphTarget(root, target))
+	if len(reachable) == 0 {
+		fmt.Println("No reachable code graph nodes found.")
+		return nil
+	}
+	for _, node := range reachable {
+		fmt.Println("node=" + string(node))
+	}
+	return nil
+}
+
+func importGraph(root string) (*codegraph.Graph, error) {
+	idx, err := codeintel.IndexDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("index %s: %w", root, err)
+	}
+	return importGraphFromIndex(root, idx), nil
+}
+
+func importGraphFromIndex(root string, idx codeintel.Index) *codegraph.Graph {
+	graph := codegraph.New()
+	for i := range idx.Files {
+		graph.AddNode(codegraph.NodeID(relativeCodePath(root, idx.Files[i].Path)))
+	}
+	for i := range idx.ImportEdges {
+		edge := idx.ImportEdges[i]
+		from := codegraph.NodeID(relativeCodePath(root, edge.From))
+		graph.AddEdge(from, codegraph.NodeID(edge.Import))
+	}
+	return graph
+}
+
+func normalizeCodeGraphTarget(root, target string) codegraph.NodeID {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return ""
+	}
+	if filepath.IsAbs(target) {
+		return codegraph.NodeID(relativeCodePath(root, target))
+	}
+	return codegraph.NodeID(filepath.ToSlash(target))
+}
+
+func relativeCodePath(root, path string) string {
+	if relativePath, err := filepath.Rel(root, path); err == nil {
+		return filepath.ToSlash(relativePath)
+	}
+	return filepath.ToSlash(path)
+}
+
+func formatCodeImportEdge(root string, edge codeintel.ImportEdge) string {
+	path := relativeCodePath(root, edge.From)
+	return "path=" + path + "\timport=" + edge.Import
+}
+
+func evalOutput(actualPath, expectedText, expectedPath string, mode atteval.MatchMode) error {
+	actual, err := os.ReadFile(actualPath)
+	if err != nil {
+		return fmt.Errorf("eval output: read actual %s: %w", actualPath, err)
+	}
+	expected, err := expectedEvalText(expectedText, expectedPath)
+	if err != nil {
+		return err
+	}
+	result := atteval.Check(string(actual), expected, mode)
+	if result.Passed {
+		fmt.Printf("PASS\tmode=%s\tactual=%s\n", result.Mode, actualPath)
+		return nil
+	}
+	report := result.Failure()
+	if report == "" {
+		report = result.Summary
+	}
+	fmt.Printf("FAIL\tmode=%s\tactual=%s\n%s\n", result.Mode, actualPath, report)
+	return errors.New("eval output failed")
+}
+
+func expectedEvalText(expectedText, expectedPath string) (string, error) {
+	switch {
+	case expectedText != "" && expectedPath != "":
+		return "", errors.New("eval output: pass either --eval-expected or --eval-expected-file, not both")
+	case expectedText != "":
+		return expectedText, nil
+	case expectedPath != "":
+		data, err := os.ReadFile(expectedPath)
+		if err != nil {
+			return "", fmt.Errorf("eval output: read expected %s: %w", expectedPath, err)
+		}
+		return string(data), nil
+	default:
+		return "", errors.New("eval output: expected text is required")
+	}
+}
+
+func suggestSkill(steps []string, maxSteps, minOccurrences int) {
+	suggestion, ok := attskill.SuggestWithOptions(steps, attskill.Options{
+		MaxSteps:       maxSteps,
+		MinOccurrences: minOccurrences,
+	})
+	if !ok {
+		fmt.Println("No repeated multi-step skill candidate found.")
+		return
+	}
+	fmt.Print(formatSkillSuggestion(suggestion))
+}
+
+func formatSkillSuggestion(suggestion attskill.Suggestion) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "name: %s\n", suggestion.Name)
+	fmt.Fprintf(&b, "slug: %s\n", suggestion.Slug)
+	fmt.Fprintf(&b, "occurrences: %d\n", suggestion.Occurrences)
+	b.WriteString("steps:\n")
+	for _, step := range suggestion.Steps {
+		fmt.Fprintf(&b, "  - %s\n", step)
+	}
+	if suggestion.Rationale != "" {
+		fmt.Fprintf(&b, "rationale: %s\n", suggestion.Rationale)
+	}
+	return b.String()
+}
+
+func promptComplete(registry *agent.Registry, input string, limit int) {
+	suggestions := promptcomplete.SuggestAll(promptcomplete.Context{
+		Input:     input,
+		Cursor:    len(input),
+		Agents:    promptAgentCandidates(registry),
+		Tools:     promptToolCandidates(),
+		Templates: promptTemplateCandidates(),
+	}, promptcomplete.Options{Limit: limit})
+	if len(suggestions) == 0 {
+		fmt.Println("No prompt completion found.")
+		return
+	}
+	fmt.Print(formatPromptSuggestions(suggestions))
+}
+
+func promptAgentCandidates(registry *agent.Registry) []promptcomplete.Candidate {
+	if registry == nil {
+		return nil
+	}
+	names := registry.List()
+	out := make([]promptcomplete.Candidate, 0, len(names))
+	for _, name := range names {
+		configuredAgent, _ := registry.Get(name)
+		out = append(out, promptcomplete.Candidate{
+			Text:        name,
+			Kind:        "agent",
+			Description: configuredAgent.Description,
+			Tokens:      append([]string(nil), configuredAgent.Capabilities...),
+		})
+	}
+	return out
+}
+
+func promptToolCandidates() []promptcomplete.Candidate {
+	return []promptcomplete.Candidate{
+		{Text: "memory-search", Kind: "tool", Description: "search local memory and saved sessions"},
+		{Text: "plan-agents", Kind: "tool", Description: "preview agent orchestration"},
+		{Text: "review", Kind: "tool", Description: "run a structured code review"},
+		{Text: "test", Kind: "tool", Description: "run verification tests"},
+	}
+}
+
+func promptTemplateCandidates() []promptcomplete.Candidate {
+	return []promptcomplete.Candidate{
+		{
+			Text:        "review this change for correctness, tests, and regressions",
+			Kind:        "template",
+			Description: "code review prompt",
+		},
+		{
+			Text:        "summarize this session with changed files and verification evidence",
+			Kind:        "template",
+			Description: "session summary prompt",
+		},
+		{
+			Text:        "plan agents for this task and list the verification gates",
+			Kind:        "template",
+			Description: "agent orchestration prompt",
+		},
+	}
+}
+
+func formatPromptSuggestions(suggestions []promptcomplete.Suggestion) string {
+	var b strings.Builder
+	for i := range suggestions {
+		suggestion := &suggestions[i]
+		fmt.Fprintf(&b, "text: %s\n", suggestion.Text)
+		fmt.Fprintf(&b, "suffix: %s\n", suggestion.Suffix)
+		fmt.Fprintf(&b, "kind: %s\n", suggestion.Candidate.Kind)
+		fmt.Fprintf(&b, "score: %d\n", suggestion.Score)
+		fmt.Fprintf(&b, "replace: %d:%d\n", suggestion.ReplacementStart, suggestion.ReplacementEnd)
+		if suggestion.Explanation != "" {
+			fmt.Fprintf(&b, "explanation: %s\n", suggestion.Explanation)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func printFeedbackProposals(saved session.Session) {
+	proposals := feedback.FromSession(saved)
+	if len(proposals) == 0 {
+		fmt.Println("No feedback proposals found.")
+		return
+	}
+	for i := range proposals {
+		fmt.Print(formatFeedbackProposal(proposals[i]))
+	}
+}
+
+func formatFeedbackProposal(proposal feedback.Proposal) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "agent: %s\n", proposal.Agent)
+	fmt.Fprintf(&b, "confidence: %.2f\n", proposal.Confidence)
+	fmt.Fprintf(&b, "action: %s\n", proposal.Action)
+	fmt.Fprintf(&b, "reason: %s\n", proposal.Reason)
+	if len(proposal.Evidence) > 0 {
+		b.WriteString("evidence:\n")
+		for _, evidence := range proposal.Evidence {
+			fmt.Fprintf(&b, "  - %s\n", evidence)
+		}
+	}
+	b.WriteByte('\n')
+	return b.String()
+}
+
+func runRouteModels(opts cliOptions) error {
+	candidates := make([]modelroute.Candidate, 0, len(opts.routeCandidates))
+	for _, raw := range opts.routeCandidates {
+		candidate, err := parseRouteCandidate(raw)
+		if err != nil {
+			return err
+		}
+		candidates = append(candidates, candidate)
+	}
+	profile := modelroute.RequestProfile{
+		EstimatedInputTokens:  opts.routeInputTokens.value,
+		EstimatedOutputTokens: opts.routeOutputTokens.value,
+		Interactive:           opts.routeInteractive,
+		Batch:                 opts.routeBatch,
+	}
+	if opts.routeBudget.set {
+		profile.Budget = opts.routeBudget.value
+	}
+	if opts.routeCacheReuse.set {
+		profile.PromptCacheReuseEstimate = opts.routeCacheReuse.value
+	}
+	chain := modelroute.FallbackChain(candidates, profile)
+	if len(chain) == 0 {
+		fmt.Println("No model route candidates fit.")
+		return nil
+	}
+	for i := range chain {
+		fmt.Println(formatRouteCandidate(chain[i], profile))
+	}
+	return nil
+}
+
+func parseRouteCandidate(raw string) (modelroute.Candidate, error) {
+	parts := strings.Split(raw, ",")
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+		return modelroute.Candidate{}, errors.New("route candidate: model id is required")
+	}
+	candidate := modelroute.Candidate{}
+	id := strings.TrimSpace(parts[0])
+	if provider, name, ok := strings.Cut(id, "/"); ok {
+		candidate.Provider = strings.TrimSpace(provider)
+		candidate.Name = strings.TrimSpace(name)
+	} else {
+		candidate.Name = id
+	}
+	if candidate.Name == "" && candidate.Provider == "" {
+		return modelroute.Candidate{}, errors.New("route candidate: model id is required")
+	}
+	for _, part := range parts[1:] {
+		field, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			return modelroute.Candidate{}, fmt.Errorf("route candidate %q: expected key=value", raw)
+		}
+		if err := applyRouteCandidateField(&candidate, strings.TrimSpace(field), strings.TrimSpace(value)); err != nil {
+			return modelroute.Candidate{}, err
+		}
+	}
+	return candidate, nil
+}
+
+func applyRouteCandidateField(candidate *modelroute.Candidate, field, value string) error {
+	switch field {
+	case "input", "input_cost":
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return fmt.Errorf("route candidate input cost: %w", err)
+		}
+		candidate.InputTokenCost = parsed
+	case "output", "output_cost":
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return fmt.Errorf("route candidate output cost: %w", err)
+		}
+		candidate.OutputTokenCost = parsed
+	case "priority":
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("route candidate priority: %w", err)
+		}
+		candidate.Priority = parsed
+	case "max", "max_input":
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("route candidate max input: %w", err)
+		}
+		candidate.MaxInputTokens = parsed
+	case "latency":
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("route candidate latency: %w", err)
+		}
+		candidate.ExpectedLatencyMS = parsed
+	case "ttft":
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("route candidate ttft: %w", err)
+		}
+		candidate.ExpectedTTFTMS = parsed
+	default:
+		return fmt.Errorf("route candidate: unknown field %q", field)
+	}
+	return nil
+}
+
+func formatRouteCandidate(candidate modelroute.Candidate, profile modelroute.RequestProfile) string {
+	parts := []string{
+		candidate.ID(),
+		fmt.Sprintf("cost=%.6f", modelroute.EstimateCost(candidate, profile)),
+	}
+	if candidate.Priority != 0 {
+		parts = append(parts, "priority="+strconv.Itoa(candidate.Priority))
+	}
+	if candidate.MaxInputTokens > 0 {
+		parts = append(parts, "max_input="+strconv.Itoa(candidate.MaxInputTokens))
+	}
+	if candidate.ExpectedLatencyMS > 0 {
+		parts = append(parts, "latency_ms="+strconv.Itoa(candidate.ExpectedLatencyMS))
+	}
+	if candidate.ExpectedTTFTMS > 0 {
+		parts = append(parts, "ttft_ms="+strconv.Itoa(candidate.ExpectedTTFTMS))
+	}
+	return strings.Join(parts, "\t")
+}
+
+func runReviewScan(root string, largeFileBytes int) error {
+	findings, err := watch.ScanWithOptions(root, watch.Options{LargeFileBytes: int64(largeFileBytes)})
+	if err != nil {
+		return fmt.Errorf("review scan: %w", err)
+	}
+	report := review.Report{
+		Reviewer: "watch-scan",
+		Findings: watchFindingsToReview(findings),
+	}
+	fmt.Print(formatReviewReport(report))
+	return nil
+}
+
+func watchFindingsToReview(findings []watch.Finding) []review.Finding {
+	out := make([]review.Finding, 0, len(findings))
+	for i := range findings {
+		finding := findings[i]
+		out = append(out, review.Finding{
+			Severity: reviewSeverity(finding.Severity),
+			Category: reviewCategory(finding.Kind),
+			Path:     finding.Path,
+			Message:  finding.Message,
+		})
+	}
+	return review.SortedFindings(out)
+}
+
+func reviewSeverity(severity string) review.Severity {
+	switch severity {
+	case watch.SeverityWarning:
+		return review.SeverityMedium
+	case watch.SeverityMaintenance:
+		return review.SeverityLow
+	default:
+		return review.SeverityInfo
+	}
+}
+
+func reviewCategory(kind string) review.Category {
+	switch kind {
+	case watch.KindMissingTest:
+		return review.CategoryTests
+	default:
+		return review.CategoryMaintainability
+	}
+}
+
+func formatReviewReport(report review.Report) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "reviewer: %s\n", report.Reviewer)
+	summary := report.SeveritySummary()
+	fmt.Fprintf(&b, "summary: critical=%d high=%d medium=%d low=%d info=%d total=%d\n", summary.Critical, summary.High, summary.Medium, summary.Low, summary.Info, summary.Total())
+	findings := report.SortedFindings()
+	if len(findings) == 0 {
+		b.WriteString("findings: none\n")
+		return b.String()
+	}
+	b.WriteString("findings:\n")
+	for i := range findings {
+		fmt.Fprintf(&b, "  - %s\n", formatReviewFinding(findings[i]))
+	}
+	return b.String()
+}
+
+func formatReviewFinding(finding review.Finding) string {
+	parts := []string{
+		"severity=" + string(finding.Severity),
+		"category=" + string(finding.Category),
+		"path=" + finding.Path,
+	}
+	if finding.Line > 0 {
+		parts = append(parts, "line="+strconv.Itoa(finding.Line))
+	}
+	if finding.Message != "" {
+		parts = append(parts, "message="+finding.Message)
+	}
+	if finding.Suggestion != "" {
+		parts = append(parts, "suggestion="+finding.Suggestion)
+	}
+	return strings.Join(parts, "\t")
+}
+
+func runAsyncPlan(specs []string) error {
+	if len(specs) == 0 {
+		return errors.New("async plan: at least one --async-task is required")
+	}
+	tasks := make([]attasync.Task, 0, len(specs))
+	for _, spec := range specs {
+		task, err := parseAsyncTaskSpec(spec)
+		if err != nil {
+			return err
+		}
+		tasks = append(tasks, task)
+	}
+	plan, err := attasync.NewPlan(tasks)
+	if err != nil {
+		return fmt.Errorf("async plan: %w", err)
+	}
+	fmt.Print(formatAsyncPlanBatches(plan.ReadyBatches()))
+	return nil
+}
+
+func parseAsyncTaskSpec(spec string) (attasync.Task, error) {
+	parts := strings.SplitN(spec, "|", 4)
+	if len(parts) < 3 {
+		return attasync.Task{}, fmt.Errorf("async task %q: expected id|agent|prompt|dep1+dep2", spec)
+	}
+	task := attasync.Task{
+		ID:     strings.TrimSpace(parts[0]),
+		Agent:  strings.TrimSpace(parts[1]),
+		Prompt: strings.TrimSpace(parts[2]),
+	}
+	if task.ID == "" {
+		return attasync.Task{}, fmt.Errorf("async task %q: id is required", spec)
+	}
+	if len(parts) == 4 {
+		task.DependsOn = parseAsyncDependencies(parts[3])
+	}
+	return task, nil
+}
+
+func parseAsyncDependencies(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool { return r == '+' || r == ';' })
+	deps := make([]string, 0, len(fields))
+	for _, field := range fields {
+		dep := strings.TrimSpace(field)
+		if dep != "" {
+			deps = append(deps, dep)
+		}
+	}
+	return deps
+}
+
+func formatAsyncPlanBatches(batches [][]attasync.Task) string {
+	if len(batches) == 0 {
+		return "waves: none\n"
+	}
+	var b strings.Builder
+	for i, batch := range batches {
+		fmt.Fprintf(&b, "wave %d:\n", i+1)
+		for j := range batch {
+			fmt.Fprintf(&b, "  - %s\n", formatAsyncTask(batch[j]))
+		}
+	}
+	return b.String()
+}
+
+func formatAsyncTask(task attasync.Task) string {
+	parts := []string{"id=" + task.ID}
+	if task.Agent != "" {
+		parts = append(parts, "agent="+task.Agent)
+	}
+	if len(task.DependsOn) > 0 {
+		parts = append(parts, "depends="+strings.Join(task.DependsOn, "+"))
+	}
+	if task.Prompt != "" {
+		parts = append(parts, "prompt="+task.Prompt)
+	}
+	return strings.Join(parts, "	")
+}
+
+func runSpeculatePlan(agents, gates []string) error {
+	if len(gates) == 0 {
+		gates = []string{"tests pass", "lint pass", "types pass"}
+	}
+	plan, err := speculate.NewPlan(agents, gates)
+	if err != nil {
+		return fmt.Errorf("speculate plan: %w", err)
+	}
+	fmt.Print(formatSpeculatePlan(plan))
+	return nil
+}
+
+func formatSpeculatePlan(plan speculate.Plan) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "agents: %s\n", strings.Join(plan.Agents, ","))
+	b.WriteString("rounds:\n")
+	for _, round := range plan.Rounds {
+		fmt.Fprintf(&b, "  - %d\t%s\t%s\n", round.Number, round.Name, round.Purpose)
+	}
+	proposals := make([]speculate.Proposal, 0, len(plan.Agents))
+	for _, name := range plan.Agents {
+		proposals = append(proposals, speculate.Proposal{Agent: name, Round: speculate.RoundProposal})
+	}
+	reviews, err := speculate.CrossReviews(proposals)
+	if err == nil && len(reviews) > 0 {
+		b.WriteString("cross_reviews:\n")
+		for _, review := range reviews {
+			fmt.Fprintf(&b, "  - %s -> %s\n", review.Reviewer, review.TargetAgent)
+		}
+	}
+	b.WriteString("gates:\n")
+	for _, gate := range plan.GateChecks {
+		fmt.Fprintf(&b, "  - %s\n", gate)
+	}
+	return b.String()
+}
+
+func runWatchScan(root string, largeFileBytes int) error {
+	findings, err := watch.ScanWithOptions(root, watch.Options{LargeFileBytes: int64(largeFileBytes)})
+	if err != nil {
+		return fmt.Errorf("watch scan: %w", err)
+	}
+	if len(findings) == 0 {
+		fmt.Println("No watch findings found.")
+		return nil
+	}
+	for i := range findings {
+		fmt.Println(formatWatchFinding(findings[i]))
+	}
+	return nil
+}
+
+func formatWatchFinding(finding watch.Finding) string {
+	parts := []string{
+		"path=" + finding.Path,
+		"kind=" + finding.Kind,
+		"severity=" + finding.Severity,
+	}
+	if finding.Message != "" {
+		parts = append(parts, "message="+finding.Message)
+	}
+	return strings.Join(parts, "\t")
+}
+
+func runGitHistorySearch(root, query string, limit int) error {
+	if limit == 0 {
+		limit = 5
+	}
+	logText, err := gitHistoryLog(root)
+	if err != nil {
+		return err
+	}
+	commits, err := githistory.ParseLog(logText)
+	if err != nil {
+		return fmt.Errorf("git history: parse log: %w", err)
+	}
+	results := githistory.NewIndex(commits).Search(query, limit)
+	if len(results) == 0 {
+		fmt.Println("No git history results found.")
+		return nil
+	}
+	for i := range results {
+		fmt.Println(formatGitHistoryResult(results[i]))
+	}
+	return nil
+}
+
+func gitHistoryLog(root string) (string, error) {
+	cmd := exec.CommandContext(
+		context.Background(),
+		"git",
+		"log",
+		"--name-only",
+		"--date=iso-strict",
+		"--pretty=format:%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e",
+		"--",
+	)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git history: run git log: %w", err)
+	}
+	return string(out), nil
+}
+
+func formatGitHistoryResult(result githistory.Result) string {
+	commit := result.Commit
+	parts := []string{
+		shortCommitHash(commit.Hash),
+		fmt.Sprintf("score=%d", result.Score),
+	}
+	if !commit.Date.IsZero() {
+		parts = append(parts, "date="+commit.Date.Format(time.RFC3339))
+	}
+	if commit.AuthorName != "" {
+		parts = append(parts, "author="+commit.AuthorName)
+	}
+	if commit.Subject != "" {
+		parts = append(parts, "subject="+commit.Subject)
+	}
+	for _, snippet := range result.Snippets {
+		if snippet.Text != "" {
+			parts = append(parts, snippet.Field+"="+snippet.Text)
+			break
+		}
+	}
+	return strings.Join(parts, "\t")
+}
+
+func shortCommitHash(hash string) string {
+	if len(hash) <= 12 {
+		return hash
+	}
+	return hash[:12]
+}
+
+func recordFailure(
+	store *session.Store,
+	sessionState session.Session,
+	approach string,
+	reason string,
+	commit string,
+	agentName string,
+) error {
+	if !sessionState.RecordNegativeKnowledge(approach, reason, commit, agentName) {
+		return errors.New("record failure: approach and reason are required, or this failure is already recorded")
+	}
+	if err := store.Save(sessionState); err != nil {
+		return fmt.Errorf("record failure: save session: %w", err)
+	}
+	fmt.Println("Recorded failure on session " + sessionState.ID)
+	return nil
+}
+
+func recordEvaluation(
+	store *session.Store,
+	sessionState session.Session,
+	agentName string,
+	outcome string,
+	notes string,
+	reference string,
+	score int,
+) error {
+	if !sessionState.RecordEvaluation(agentName, outcome, notes, reference, score) {
+		return errors.New("record evaluation: agent and outcome are required")
+	}
+	if err := store.Save(sessionState); err != nil {
+		return fmt.Errorf("record evaluation: save session: %w", err)
+	}
+	fmt.Println("Recorded evaluation on session " + sessionState.ID)
+	return nil
+}
+
+const messagePreviewRunes = 120
+
+func listMessages(sessionState session.Session) {
+	if len(sessionState.Messages) == 0 {
+		fmt.Println("No messages recorded.")
+		return
+	}
+	for i := range sessionState.Messages {
+		fmt.Println(formatMessageSummary(i+1, sessionState.Messages[i]))
+	}
+}
+
+func formatMessageSummary(index int, message llm.Message) string {
+	content := compactMessageWhitespace(message.Content)
+	parts := []string{
+		"index=" + strconv.Itoa(index),
+		"role=" + string(message.Role),
+		"chars=" + strconv.Itoa(len([]rune(message.Content))),
+	}
+	if content != "" {
+		parts = append(parts, "preview="+truncateRunes(content, messagePreviewRunes))
+	}
+	return strings.Join(parts, "	")
+}
+
+func compactMessageWhitespace(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit == 1 {
+		return "…"
+	}
+	return string(runes[:limit-1]) + "…"
+}
+
+func listFailures(sessionState session.Session) {
+	if len(sessionState.NegativeKnowledge) == 0 {
+		fmt.Println("No failures recorded.")
+		return
+	}
+	failures := append([]session.NegativeKnowledge(nil), sessionState.NegativeKnowledge...)
+	sort.SliceStable(failures, func(i, j int) bool {
+		return failures[i].CreatedAt.Before(failures[j].CreatedAt)
+	})
+	for i := range failures {
+		fmt.Println(formatFailure(failures[i]))
+	}
+}
+
+func formatFailure(failure session.NegativeKnowledge) string {
+	parts := []string{"approach=" + failure.Approach, "reason=" + failure.Reason}
+	if !failure.CreatedAt.IsZero() {
+		parts = append(parts, "created_at="+failure.CreatedAt.Format(time.RFC3339))
+	}
+	if failure.Agent != "" {
+		parts = append(parts, "agent="+failure.Agent)
+	}
+	if failure.Commit != "" {
+		parts = append(parts, "commit="+failure.Commit)
+	}
+	return strings.Join(parts, "	")
+}
+
+func listEvaluations(sessionState session.Session) {
+	if len(sessionState.Evaluations) == 0 {
+		fmt.Println("No evaluations recorded.")
+		return
+	}
+	evaluations := append([]session.AgentEvaluation(nil), sessionState.Evaluations...)
+	sort.SliceStable(evaluations, func(i, j int) bool {
+		return evaluations[i].CreatedAt.Before(evaluations[j].CreatedAt)
+	})
+	for i := range evaluations {
+		fmt.Println(formatEvaluation(evaluations[i]))
+	}
+}
+
+func formatEvaluation(evaluation session.AgentEvaluation) string {
+	parts := []string{"agent=" + evaluation.Agent, "outcome=" + evaluation.Outcome}
+	if !evaluation.CreatedAt.IsZero() {
+		parts = append(parts, "created_at="+evaluation.CreatedAt.Format(time.RFC3339))
+	}
+	if evaluation.Score != 0 {
+		parts = append(parts, "score="+strconv.Itoa(evaluation.Score))
+	}
+	if evaluation.Reference != "" {
+		parts = append(parts, "reference="+evaluation.Reference)
+	}
+	if evaluation.Notes != "" {
+		parts = append(parts, "notes="+evaluation.Notes)
+	}
+	return strings.Join(parts, "	")
+}
+
+func listArtifacts(sessionState session.Session) {
+	if len(sessionState.Artifacts) == 0 {
+		fmt.Println("No artifacts recorded.")
+		return
+	}
+	artifacts := append([]session.Artifact(nil), sessionState.Artifacts...)
+	sort.SliceStable(artifacts, func(i, j int) bool {
+		return artifacts[i].CreatedAt.Before(artifacts[j].CreatedAt)
+	})
+	for i := range artifacts {
+		fmt.Println(formatArtifact(artifacts[i]))
+	}
+}
+
+func formatArtifact(artifact session.Artifact) string {
+	parts := []string{"path=" + artifact.Path, "kind=" + artifact.Kind}
+	if !artifact.CreatedAt.IsZero() {
+		parts = append(parts, "created_at="+artifact.CreatedAt.Format(time.RFC3339))
+	}
+	if artifact.SourceAgent != "" {
+		parts = append(parts, "agent="+artifact.SourceAgent)
+	}
+	if artifact.Summary != "" {
+		parts = append(parts, "summary="+artifact.Summary)
+	}
+	return strings.Join(parts, "	")
+}
+
+func recordArtifact(
+	store *session.Store,
+	sessionState session.Session,
+	path string,
+	kind string,
+	summary string,
+	sourceAgent string,
+) error {
+	if !sessionState.RecordArtifact(path, kind, summary, sourceAgent) {
+		return errors.New("record artifact: path and kind are required")
+	}
+	if err := store.Save(sessionState); err != nil {
+		return fmt.Errorf("record artifact: save session: %w", err)
+	}
+	fmt.Println("Recorded artifact on session " + sessionState.ID)
+	return nil
+}
+
 type agentDescription struct {
 	Temperature    *float64 `yaml:"temperature,omitempty"`
 	TopP           *float64 `yaml:"top_p,omitempty"`
+	Seed           *int     `yaml:"seed,omitempty"`
 	Name           string   `yaml:"name"`
+	ReasoningLevel string   `yaml:"reasoning_level,omitempty"`
 	Model          string   `yaml:"model,omitempty"`
+	Description    string   `yaml:"description,omitempty"`
+	Personality    string   `yaml:"personality,omitempty"`
 	SystemPrompt   string   `yaml:"system_prompt,omitempty"`
 	FallbackModels []string `yaml:"fallback_models,omitempty"`
+	Capabilities   []string `yaml:"capabilities,omitempty"`
 	Triggers       []string `yaml:"triggers,omitempty"`
 	MaxTokens      int      `yaml:"max_tokens,omitempty"`
 }
@@ -2024,10 +4372,15 @@ func formatAgentDescription(activeAgent agent.Agent) (string, error) {
 	out, err := yaml.Marshal(agentDescription{
 		Name:           activeAgent.Name,
 		Model:          activeAgent.Model,
+		Description:    activeAgent.Description,
+		Personality:    activeAgent.Personality,
 		SystemPrompt:   activeAgent.SystemPrompt,
 		FallbackModels: activeAgent.FallbackModels,
+		Capabilities:   activeAgent.Capabilities,
 		Temperature:    activeAgent.Temperature,
 		TopP:           activeAgent.TopP,
+		Seed:           activeAgent.Seed,
+		ReasoningLevel: activeAgent.ReasoningLevel,
 		Triggers:       activeAgent.Triggers,
 		MaxTokens:      activeAgent.MaxTokens,
 	})
@@ -2206,23 +4559,60 @@ func formatSearchSnippet(snippet session.SearchSnippet) string {
 }
 
 type sessionDetails struct {
-	CreatedAt      time.Time     `yaml:"created_at"`
-	UpdatedAt      time.Time     `yaml:"updated_at"`
-	ID             string        `yaml:"id"`
-	Path           string        `yaml:"path"`
-	Title          string        `yaml:"title,omitempty"`
-	DefaultAgent   string        `yaml:"default_agent,omitempty"`
-	DefaultModel   string        `yaml:"default_model,omitempty"`
-	WorktreePath   string        `yaml:"worktree_path,omitempty"`
-	WorktreeBranch string        `yaml:"worktree_branch,omitempty"`
-	WorktreeBase   string        `yaml:"worktree_base,omitempty"`
-	Tags           []string      `yaml:"tags,omitempty"`
-	Messages       []yamlMessage `yaml:"messages,omitempty"`
+	CreatedAt         time.Time                   `yaml:"created_at"`
+	UpdatedAt         time.Time                   `yaml:"updated_at"`
+	ID                string                      `yaml:"id"`
+	Path              string                      `yaml:"path"`
+	Title             string                      `yaml:"title,omitempty"`
+	DefaultAgent      string                      `yaml:"default_agent,omitempty"`
+	DefaultModel      string                      `yaml:"default_model,omitempty"`
+	WorktreePath      string                      `yaml:"worktree_path,omitempty"`
+	WorktreeBranch    string                      `yaml:"worktree_branch,omitempty"`
+	WorktreeBase      string                      `yaml:"worktree_base,omitempty"`
+	Tags              []string                    `yaml:"tags,omitempty"`
+	Messages          []yamlMessage               `yaml:"messages,omitempty"`
+	NegativeKnowledge []session.NegativeKnowledge `yaml:"negative_knowledge,omitempty"`
+	Evaluations       []session.AgentEvaluation   `yaml:"evaluations,omitempty"`
+	Artifacts         []session.Artifact          `yaml:"artifacts,omitempty"`
 }
 
 type yamlMessage struct {
 	Role    llm.Role `yaml:"role"`
 	Content string   `yaml:"content"`
+}
+
+func printSessionSummary(sessionState session.Session, path string) {
+	fmt.Println(formatSessionDetailsSummary(sessionState, path))
+}
+
+func formatSessionDetailsSummary(sessionState session.Session, path string) string {
+	parts := []string{
+		"id=" + sessionState.ID,
+		"path=" + path,
+		"messages=" + strconv.Itoa(len(sessionState.Messages)),
+		"failures=" + strconv.Itoa(len(sessionState.NegativeKnowledge)),
+		"evaluations=" + strconv.Itoa(len(sessionState.Evaluations)),
+		"artifacts=" + strconv.Itoa(len(sessionState.Artifacts)),
+	}
+	if !sessionState.CreatedAt.IsZero() {
+		parts = append(parts, "created_at="+sessionState.CreatedAt.Format(time.RFC3339))
+	}
+	if !sessionState.UpdatedAt.IsZero() {
+		parts = append(parts, "updated_at="+sessionState.UpdatedAt.Format(time.RFC3339))
+	}
+	if sessionState.Title != "" {
+		parts = append(parts, "title="+sessionState.Title)
+	}
+	if sessionState.DefaultAgent != "" {
+		parts = append(parts, "agent="+sessionState.DefaultAgent)
+	}
+	if sessionState.DefaultModel != "" {
+		parts = append(parts, "model="+sessionState.DefaultModel)
+	}
+	if len(sessionState.Tags) > 0 {
+		parts = append(parts, "tags="+strings.Join(sessionState.Tags, ","))
+	}
+	return strings.Join(parts, "	")
 }
 
 func showSession(sessionState session.Session, path string) error {
@@ -2248,6 +4638,12 @@ func formatSessionDetails(sessionState session.Session, path string) (string, er
 		WorktreeBase:   sessionState.WorktreeBase,
 		Tags:           sessionState.Tags,
 		Messages:       yamlMessages(sessionState.Messages),
+		NegativeKnowledge: append(
+			[]session.NegativeKnowledge(nil),
+			sessionState.NegativeKnowledge...,
+		),
+		Evaluations: append([]session.AgentEvaluation(nil), sessionState.Evaluations...),
+		Artifacts:   append([]session.Artifact(nil), sessionState.Artifacts...),
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal session details: %w", err)
@@ -2317,9 +4713,11 @@ func llmConfig(cfg appconfig.Config) llm.AutoRegisterConfig {
 
 func generationFromConfig(cfg appconfig.Config) generationSettings {
 	return generationSettings{
-		Temperature: cfg.Generation.Temperature,
-		TopP:        cfg.Generation.TopP,
-		MaxTokens:   cfg.Generation.MaxTokens,
+		Temperature:    cfg.Generation.Temperature,
+		TopP:           cfg.Generation.TopP,
+		Seed:           cfg.Generation.Seed,
+		ReasoningLevel: strings.TrimSpace(cfg.Generation.ReasoningLevel),
+		MaxTokens:      cfg.Generation.MaxTokens,
 	}
 }
 
@@ -2330,6 +4728,9 @@ func generationFromOptions(opts cliOptions) generationSettings {
 	}
 	if opts.topP.set {
 		generation.TopP = &opts.topP.value
+	}
+	if opts.seed.set {
+		generation.Seed = &opts.seed.value
 	}
 	if opts.maxTokens.set {
 		generation.MaxTokens = opts.maxTokens.value
@@ -2345,9 +4746,11 @@ func generationForRequest(
 	generation := defaults
 	if activeAgent.ok {
 		generation = mergeGenerationSettings(generation, generationSettings{
-			Temperature: activeAgent.agent.Temperature,
-			TopP:        activeAgent.agent.TopP,
-			MaxTokens:   activeAgent.agent.MaxTokens,
+			Temperature:    activeAgent.agent.Temperature,
+			TopP:           activeAgent.agent.TopP,
+			Seed:           activeAgent.agent.Seed,
+			ReasoningLevel: activeAgent.agent.ReasoningLevel,
+			MaxTokens:      activeAgent.agent.MaxTokens,
 		})
 	}
 	return mergeGenerationSettings(generation, overrides)
@@ -2360,6 +4763,12 @@ func mergeGenerationSettings(base, override generationSettings) generationSettin
 	if override.TopP != nil {
 		base.TopP = override.TopP
 	}
+	if override.Seed != nil {
+		base.Seed = override.Seed
+	}
+	if override.ReasoningLevel != "" {
+		base.ReasoningLevel = strings.TrimSpace(override.ReasoningLevel)
+	}
 	if override.MaxTokens > 0 {
 		base.MaxTokens = override.MaxTokens
 	}
@@ -2369,6 +4778,8 @@ func mergeGenerationSettings(base, override generationSettings) generationSettin
 func applyGenerationParams(params *llm.CompleteParams, generation generationSettings) {
 	params.Temperature = generation.Temperature
 	params.TopP = generation.TopP
+	params.Seed = generation.Seed
+	params.ReasoningLevel = generation.ReasoningLevel
 	if generation.MaxTokens > 0 {
 		params.MaxTokens = generation.MaxTokens
 	}
@@ -2398,6 +4809,13 @@ func contextOptionsFromConfig(cfg appconfig.Config) contextref.Options {
 		opts.Root = cwd
 	}
 	return opts
+}
+
+func maxInputTokensFromConfigOptions(cfg appconfig.Config, opts cliOptions) int {
+	if opts.maxInputTokens.set {
+		return opts.maxInputTokens.value
+	}
+	return cfg.Context.MaxInputTokens
 }
 
 func firstNonEmpty(values ...string) string {
