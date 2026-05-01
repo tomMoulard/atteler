@@ -123,6 +123,7 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] CLI Go code index and graph summary
  - [x] CLI Go package inventory with file and symbol counts
  - [x] CLI Go package file inventory
+ - [x] CLI Go file import and symbol inventory
  - [x] CLI Go symbol lookup over the local repository
  - [x] CLI Go import-edge listing over the local repository
  - [x] CLI Go import graph topological layers

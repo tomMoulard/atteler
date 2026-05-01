@@ -947,6 +947,32 @@ func TestRelativeCodePath(t *testing.T) {
 	}
 }
 
+func TestFindAndFormatCodeFile(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	file := codeintel.File{
+		Path:    filepath.Join(root, "pkg", "llm", "client.go"),
+		Package: "llm",
+		Imports: []string{"context", "fmt"},
+		Symbols: []codeintel.Symbol{{Name: "Client", Kind: "type", Line: 12}},
+	}
+	idx := codeintel.Index{Files: []codeintel.File{file}}
+	found, ok := findCodeFile(root, idx, "pkg/llm/client.go")
+	if !ok || found.Path != file.Path {
+		require.Failf(t, "expected to find code file", "found=%#v ok=%v", found, ok)
+	}
+	got := formatCodeFile(root, file)
+	want := "path=pkg/llm/client.go	package=llm	imports=2	symbols=1"
+	if got != want {
+		require.Failf(t, "unexpected code file format", "got %q, want %q", got, want)
+	}
+	symbol := formatCodeFileSymbol(file.Symbols[0])
+	if symbol != "Client	kind=type	line=12" {
+		require.Failf(t, "unexpected code file symbol format", "got %q", symbol)
+	}
+}
+
 func TestSummarizeAndFormatCodePackageFiles(t *testing.T) {
 	t.Parallel()
 

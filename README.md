@@ -503,6 +503,12 @@ One package can be expanded to its files:
 atteler --code-package llm
 ```
 
+One Go file can be expanded to its imports and symbols:
+
+```sh
+atteler --code-file pkg/llm/llm.go
+```
+
 Go symbols can be located without starting an LLM call:
 
 ```sh
