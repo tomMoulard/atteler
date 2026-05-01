@@ -21,17 +21,48 @@ const EnvDir = "ATTELER_SESSION_DIR"
 
 // Session is a durable chat transcript.
 type Session struct {
-	CreatedAt      time.Time     `json:"created_at"`
-	UpdatedAt      time.Time     `json:"updated_at"`
-	ID             string        `json:"id"`
-	Title          string        `json:"title,omitempty"`
-	DefaultModel   string        `json:"default_model,omitempty"`
-	DefaultAgent   string        `json:"default_agent,omitempty"`
-	WorktreePath   string        `json:"worktree_path,omitempty"`
-	WorktreeBranch string        `json:"worktree_branch,omitempty"`
-	WorktreeBase   string        `json:"worktree_base,omitempty"`
-	Tags           []string      `json:"tags,omitempty"`
-	Messages       []llm.Message `json:"messages"`
+	CreatedAt         time.Time           `json:"created_at"`
+	UpdatedAt         time.Time           `json:"updated_at"`
+	ID                string              `json:"id"`
+	Title             string              `json:"title,omitempty"`
+	DefaultModel      string              `json:"default_model,omitempty"`
+	DefaultAgent      string              `json:"default_agent,omitempty"`
+	WorktreePath      string              `json:"worktree_path,omitempty"`
+	WorktreeBranch    string              `json:"worktree_branch,omitempty"`
+	WorktreeBase      string              `json:"worktree_base,omitempty"`
+	Tags              []string            `json:"tags,omitempty"`
+	Messages          []llm.Message       `json:"messages"`
+	NegativeKnowledge []NegativeKnowledge `json:"negative_knowledge,omitempty" yaml:"negative_knowledge,omitempty"`
+	Evaluations       []AgentEvaluation   `json:"evaluations,omitempty" yaml:"evaluations,omitempty"`
+	Artifacts         []Artifact          `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
+}
+
+// NegativeKnowledge records a failed approach so future agents can avoid repeating it.
+type NegativeKnowledge struct {
+	CreatedAt time.Time `json:"created_at" yaml:"created_at"`
+	Approach  string    `json:"approach" yaml:"approach"`
+	Reason    string    `json:"reason" yaml:"reason"`
+	Commit    string    `json:"commit,omitempty" yaml:"commit,omitempty"`
+	Agent     string    `json:"agent,omitempty" yaml:"agent,omitempty"`
+}
+
+// AgentEvaluation records a human or harness assessment for an agent output.
+type AgentEvaluation struct {
+	CreatedAt time.Time `json:"created_at" yaml:"created_at"`
+	Agent     string    `json:"agent" yaml:"agent"`
+	Outcome   string    `json:"outcome" yaml:"outcome"`
+	Notes     string    `json:"notes,omitempty" yaml:"notes,omitempty"`
+	Reference string    `json:"reference,omitempty" yaml:"reference,omitempty"`
+	Score     int       `json:"score,omitempty" yaml:"score,omitempty"`
+}
+
+// Artifact records a useful file or research artifact produced during a session.
+type Artifact struct {
+	CreatedAt   time.Time `json:"created_at" yaml:"created_at"`
+	Path        string    `json:"path" yaml:"path"`
+	Kind        string    `json:"kind" yaml:"kind"`
+	Summary     string    `json:"summary,omitempty" yaml:"summary,omitempty"`
+	SourceAgent string    `json:"source_agent,omitempty" yaml:"source_agent,omitempty"`
 }
 
 // Store reads and writes sessions under a directory.
@@ -233,6 +264,72 @@ func (s *Store) Path(ref string) string {
 // Append adds a message to the session.
 func (s *Session) Append(role llm.Role, content string) {
 	s.Messages = append(s.Messages, llm.Message{Role: role, Content: content})
+}
+
+// RecordNegativeKnowledge records a failed approach unless the same approach and reason already exist.
+func (s *Session) RecordNegativeKnowledge(approach, reason, commit, agent string) bool {
+	approach = strings.TrimSpace(approach)
+	reason = strings.TrimSpace(reason)
+	if approach == "" || reason == "" {
+		return false
+	}
+
+	approachKey := normalizeNegativeKnowledgeKey(approach)
+	reasonKey := normalizeNegativeKnowledgeKey(reason)
+	for _, entry := range s.NegativeKnowledge {
+		if normalizeNegativeKnowledgeKey(entry.Approach) == approachKey &&
+			normalizeNegativeKnowledgeKey(entry.Reason) == reasonKey {
+			return false
+		}
+	}
+
+	s.NegativeKnowledge = append(s.NegativeKnowledge, NegativeKnowledge{
+		Approach:  approach,
+		Reason:    reason,
+		Commit:    strings.TrimSpace(commit),
+		Agent:     strings.TrimSpace(agent),
+		CreatedAt: time.Now().UTC(),
+	})
+	return true
+}
+
+func normalizeNegativeKnowledgeKey(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+}
+
+// RecordEvaluation appends an agent evaluation when required fields are valid.
+func (s *Session) RecordEvaluation(agentName, outcome, notes, reference string, score int) bool {
+	agentName = strings.TrimSpace(agentName)
+	outcome = strings.TrimSpace(outcome)
+	if agentName == "" || outcome == "" {
+		return false
+	}
+	s.Evaluations = append(s.Evaluations, AgentEvaluation{
+		Agent:     agentName,
+		Outcome:   outcome,
+		Notes:     strings.TrimSpace(notes),
+		Reference: strings.TrimSpace(reference),
+		Score:     score,
+		CreatedAt: time.Now().UTC(),
+	})
+	return true
+}
+
+// RecordArtifact appends a session artifact when the path and kind are valid.
+func (s *Session) RecordArtifact(path, kind, summary, sourceAgent string) bool {
+	path = strings.TrimSpace(path)
+	kind = strings.TrimSpace(kind)
+	if path == "" || kind == "" {
+		return false
+	}
+	s.Artifacts = append(s.Artifacts, Artifact{
+		Path:        filepath.Clean(path),
+		Kind:        kind,
+		Summary:     strings.TrimSpace(summary),
+		SourceAgent: strings.TrimSpace(sourceAgent),
+		CreatedAt:   time.Now().UTC(),
+	})
+	return true
 }
 
 func (s *Store) path(ref string) string {

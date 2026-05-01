@@ -61,3 +61,74 @@ func TestMarkdown_UsesTitle(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkdown_RendersNegativeKnowledge(t *testing.T) {
+	t.Parallel()
+
+	session := Session{
+		ID: "abc",
+		NegativeKnowledge: []NegativeKnowledge{
+			{
+				Approach:  "Patch token refresh timer",
+				Reason:    "Created retry storms",
+				Commit:    "abc123",
+				Agent:     "reviewer",
+				CreatedAt: time.Date(2026, 4, 30, 11, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+
+	got := Markdown(session)
+	for _, want := range []string{
+		"## Negative Knowledge",
+		"- **Approach:** Patch token refresh timer",
+		"  - **Reason:** Created retry storms",
+		"  - **Commit:** abc123",
+		"  - **Agent:** reviewer",
+		"  - **Created:** 2026-04-30T11:00:00Z",
+		"_No messages._",
+	} {
+		if !strings.Contains(got, want) {
+			require.Failf(t, "unexpected failure", "Markdown missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestMarkdown_RendersEvaluationsAndArtifacts(t *testing.T) {
+	t.Parallel()
+
+	session := Session{
+		ID: "abc",
+		Evaluations: []AgentEvaluation{{
+			Agent:     "reviewer",
+			Outcome:   "pass",
+			Notes:     "caught issue",
+			Reference: "eval.md",
+			Score:     90,
+			CreatedAt: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC),
+		}},
+		Artifacts: []Artifact{{
+			Path:        "docs/research.md",
+			Kind:        "research",
+			Summary:     "OAuth notes",
+			SourceAgent: "researcher",
+			CreatedAt:   time.Date(2026, 4, 30, 13, 0, 0, 0, time.UTC),
+		}},
+	}
+
+	got := Markdown(session)
+	for _, want := range []string{
+		"## Agent Evaluations",
+		"- **Agent:** reviewer",
+		"  - **Outcome:** pass",
+		"  - **Score:** 90",
+		"## Artifacts",
+		"- **Path:** docs/research.md",
+		"  - **Kind:** research",
+		"  - **Source Agent:** researcher",
+	} {
+		if !strings.Contains(got, want) {
+			require.Failf(t, "unexpected failure", "Markdown missing %q in:\n%s", want, got)
+		}
+	}
+}

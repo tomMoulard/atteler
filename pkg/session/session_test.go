@@ -139,6 +139,76 @@ func TestStore_Tags(t *testing.T) {
 	}
 }
 
+func TestSession_RecordNegativeKnowledgeDeduplicatesNormalizedApproachAndReason(t *testing.T) {
+	t.Parallel()
+
+	session := New("gpt-4.1", nil)
+	if ok := session.RecordNegativeKnowledge(" Try cache bust ", " Broke auth flow ", " abc123 ", " reviewer "); !ok {
+		require.FailNow(t, "expected first negative knowledge entry to be recorded")
+	}
+	if ok := session.RecordNegativeKnowledge("try   CACHE bust", "broke   auth flow", "def456", "writer"); ok {
+		require.FailNow(t, "expected duplicate negative knowledge entry to be skipped")
+	}
+
+	require.Len(t, session.NegativeKnowledge, 1)
+	entry := session.NegativeKnowledge[0]
+	assert.Equal(t, "Try cache bust", entry.Approach)
+	assert.Equal(t, "Broke auth flow", entry.Reason)
+	assert.Equal(t, "abc123", entry.Commit)
+	assert.Equal(t, "reviewer", entry.Agent)
+	assert.False(t, entry.CreatedAt.IsZero())
+}
+
+func TestSession_RecordNegativeKnowledgeRejectsMissingApproachOrReason(t *testing.T) {
+	t.Parallel()
+
+	session := New("gpt-4.1", nil)
+	assert.False(t, session.RecordNegativeKnowledge("", "reason", "", ""))
+	assert.False(t, session.RecordNegativeKnowledge("approach", " ", "", ""))
+	assert.Empty(t, session.NegativeKnowledge)
+}
+
+func TestSession_RecordEvaluationAndArtifact(t *testing.T) {
+	t.Parallel()
+
+	session := New("gpt-4.1", nil)
+	assert.True(t, session.RecordEvaluation(" reviewer ", " pass ", " solid ", " ref.md ", 95))
+	assert.False(t, session.RecordEvaluation("", "pass", "", "", 0))
+	assert.True(t, session.RecordArtifact("./plans/../plan.md", " research ", " useful ", " reviewer "))
+	assert.False(t, session.RecordArtifact("", "research", "", ""))
+
+	require.Len(t, session.Evaluations, 1)
+	assert.Equal(t, "reviewer", session.Evaluations[0].Agent)
+	assert.Equal(t, "pass", session.Evaluations[0].Outcome)
+	assert.Equal(t, 95, session.Evaluations[0].Score)
+	assert.False(t, session.Evaluations[0].CreatedAt.IsZero())
+
+	require.Len(t, session.Artifacts, 1)
+	assert.Equal(t, "plan.md", session.Artifacts[0].Path)
+	assert.Equal(t, "research", session.Artifacts[0].Kind)
+	assert.Equal(t, "reviewer", session.Artifacts[0].SourceAgent)
+	assert.False(t, session.Artifacts[0].CreatedAt.IsZero())
+}
+
+func TestStore_LoadExistingJSONWithoutNegativeKnowledge(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.json")
+	if err := os.WriteFile(path, []byte(`{"messages":[{"role":"user","content":"hi"}]}`), 0o600); err != nil {
+		require.NoError(t, err)
+	}
+
+	loaded, err := NewStore(dir).Load(path)
+	require.NoError(t, err)
+
+	assert.Equal(t, "legacy", loaded.ID)
+	assert.Len(t, loaded.Messages, 1)
+	assert.Empty(t, loaded.NegativeKnowledge)
+	assert.Empty(t, loaded.Evaluations)
+	assert.Empty(t, loaded.Artifacts)
+}
+
 func TestDefaultDir_EnvOverride(t *testing.T) {
 	t.Setenv(EnvDir, "/tmp/custom-atteler-sessions")
 

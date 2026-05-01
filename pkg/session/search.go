@@ -56,7 +56,7 @@ func (s *Store) Search(query string) ([]SearchResult, error) {
 		if err != nil {
 			return nil, err
 		}
-		result, ok := matchSession(summarize(path, session), session.Messages, query, normalizedQuery)
+		result, ok := matchSession(summarize(path, session), session, query, normalizedQuery)
 		if ok {
 			results = append(results, result)
 		}
@@ -68,7 +68,7 @@ func (s *Store) Search(query string) ([]SearchResult, error) {
 	return results, nil
 }
 
-func matchSession(summary Summary, messages []llm.Message, query, normalizedQuery string) (SearchResult, bool) {
+func matchSession(summary Summary, session Session, query, normalizedQuery string) (SearchResult, bool) {
 	result := SearchResult{Summary: summary}
 	matched := strings.Contains(strings.ToLower(summary.ID), normalizedQuery) ||
 		strings.Contains(strings.ToLower(summary.Title), normalizedQuery) ||
@@ -76,19 +76,90 @@ func matchSession(summary Summary, messages []llm.Message, query, normalizedQuer
 		strings.Contains(strings.ToLower(summary.DefaultModel), normalizedQuery) ||
 		containsTag(summary.Tags, normalizedQuery)
 
+	result.Snippets = append(result.Snippets, messageSnippets(session.Messages, query, normalizedQuery)...)
+	result.Snippets = appendLimitedSnippets(result.Snippets, negativeKnowledgeSnippets(session.NegativeKnowledge, query, normalizedQuery)...)
+	result.Snippets = appendLimitedSnippets(result.Snippets, evaluationSnippets(session.Evaluations, query, normalizedQuery)...)
+	result.Snippets = appendLimitedSnippets(result.Snippets, artifactSnippets(session.Artifacts, query, normalizedQuery)...)
+	return result, matched || len(result.Snippets) > 0
+}
+
+func messageSnippets(messages []llm.Message, query, normalizedQuery string) []SearchSnippet {
+	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
 	for _, message := range messages {
 		if !matchesMessage(message, normalizedQuery) {
 			continue
 		}
-		matched = true
-		if len(result.Snippets) < maxSnippetsPerSession {
-			result.Snippets = append(result.Snippets, SearchSnippet{
-				Role: message.Role,
-				Text: searchSnippet(message.Content, query, snippetRadius),
-			})
+		snippets = append(snippets, SearchSnippet{
+			Role: message.Role,
+			Text: searchSnippet(message.Content, query),
+		})
+		if len(snippets) >= maxSnippetsPerSession {
+			return snippets
 		}
 	}
-	return result, matched
+	return snippets
+}
+
+func negativeKnowledgeSnippets(entries []NegativeKnowledge, query, normalizedQuery string) []SearchSnippet {
+	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
+	for _, entry := range entries {
+		if !matchesNegativeKnowledge(entry, normalizedQuery) {
+			continue
+		}
+		snippets = append(snippets, SearchSnippet{
+			Role: llm.Role("negative_knowledge"),
+			Text: searchSnippet(negativeKnowledgeSearchText(entry), query),
+		})
+		if len(snippets) >= maxSnippetsPerSession {
+			return snippets
+		}
+	}
+	return snippets
+}
+
+func evaluationSnippets(entries []AgentEvaluation, query, normalizedQuery string) []SearchSnippet {
+	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
+	for _, entry := range entries {
+		if !matchesEvaluation(entry, normalizedQuery) {
+			continue
+		}
+		snippets = append(snippets, SearchSnippet{
+			Role: llm.Role("evaluation"),
+			Text: searchSnippet(evaluationSearchText(entry), query),
+		})
+		if len(snippets) >= maxSnippetsPerSession {
+			return snippets
+		}
+	}
+	return snippets
+}
+
+func artifactSnippets(entries []Artifact, query, normalizedQuery string) []SearchSnippet {
+	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
+	for _, entry := range entries {
+		if !matchesArtifact(entry, normalizedQuery) {
+			continue
+		}
+		snippets = append(snippets, SearchSnippet{
+			Role: llm.Role("artifact"),
+			Text: searchSnippet(artifactSearchText(entry), query),
+		})
+		if len(snippets) >= maxSnippetsPerSession {
+			return snippets
+		}
+	}
+	return snippets
+}
+
+func appendLimitedSnippets(existing []SearchSnippet, candidates ...SearchSnippet) []SearchSnippet {
+	if len(existing) >= maxSnippetsPerSession {
+		return existing
+	}
+	remaining := maxSnippetsPerSession - len(existing)
+	if len(candidates) > remaining {
+		candidates = candidates[:remaining]
+	}
+	return append(existing, candidates...)
 }
 
 func containsTag(tags []string, normalizedQuery string) bool {
@@ -105,7 +176,64 @@ func matchesMessage(message llm.Message, normalizedQuery string) bool {
 		strings.Contains(strings.ToLower(message.Content), normalizedQuery)
 }
 
-func searchSnippet(content, query string, radius int) string {
+func matchesNegativeKnowledge(entry NegativeKnowledge, normalizedQuery string) bool {
+	return strings.Contains(strings.ToLower(entry.Approach), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.Reason), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.Commit), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.Agent), normalizedQuery)
+}
+
+func negativeKnowledgeSearchText(entry NegativeKnowledge) string {
+	parts := []string{"Failed attempt: " + entry.Approach, "Reason: " + entry.Reason}
+	if entry.Commit != "" {
+		parts = append(parts, "Commit: "+entry.Commit)
+	}
+	if entry.Agent != "" {
+		parts = append(parts, "Agent: "+entry.Agent)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func matchesEvaluation(entry AgentEvaluation, normalizedQuery string) bool {
+	return strings.Contains(strings.ToLower(entry.Agent), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.Outcome), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.Notes), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.Reference), normalizedQuery)
+}
+
+func evaluationSearchText(entry AgentEvaluation) string {
+	parts := []string{"Evaluation: " + entry.Agent, "Outcome: " + entry.Outcome}
+	if entry.Score != 0 {
+		parts = append(parts, fmt.Sprintf("Score: %d", entry.Score))
+	}
+	if entry.Reference != "" {
+		parts = append(parts, "Reference: "+entry.Reference)
+	}
+	if entry.Notes != "" {
+		parts = append(parts, "Notes: "+entry.Notes)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func matchesArtifact(entry Artifact, normalizedQuery string) bool {
+	return strings.Contains(strings.ToLower(entry.Path), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.Kind), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.Summary), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.SourceAgent), normalizedQuery)
+}
+
+func artifactSearchText(entry Artifact) string {
+	parts := []string{"Artifact: " + entry.Path, "Kind: " + entry.Kind}
+	if entry.Summary != "" {
+		parts = append(parts, "Summary: "+entry.Summary)
+	}
+	if entry.SourceAgent != "" {
+		parts = append(parts, "Source Agent: "+entry.SourceAgent)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func searchSnippet(content, query string) string {
 	contentRunes := []rune(content)
 	queryRunes := []rune(strings.ToLower(query))
 	index := runeIndex([]rune(strings.ToLower(content)), queryRunes)
@@ -113,8 +241,8 @@ func searchSnippet(content, query string, radius int) string {
 		return compactWhitespace(content)
 	}
 
-	start := max(0, index-radius)
-	end := min(len(contentRunes), index+len(queryRunes)+radius)
+	start := max(0, index-snippetRadius)
+	end := min(len(contentRunes), index+len(queryRunes)+snippetRadius)
 	snippet := strings.TrimSpace(string(contentRunes[start:end]))
 	if start > 0 {
 		snippet = "…" + snippet

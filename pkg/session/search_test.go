@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -83,4 +84,50 @@ func TestStore_SearchEmptyQuery(t *testing.T) {
 	if err == nil {
 		require.FailNow(t, "expected empty query error")
 	}
+}
+
+func TestStore_SearchNegativeKnowledge(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	session := New("gpt-review", []llm.Message{{Role: llm.RoleUser, Content: "Try something safe"}})
+	session.Title = "Auth repair"
+	require.True(t, session.RecordNegativeKnowledge("Patch token refresh timer", "Created retry storms", "abc123", "reviewer"))
+	require.NoError(t, store.Save(session))
+
+	results, err := store.Search("retry storms")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Snippets, 1)
+	assert.Equal(t, llm.Role("negative_knowledge"), results[0].Snippets[0].Role)
+	assert.Contains(t, results[0].Snippets[0].Text, "Failed attempt: Patch token refresh timer")
+	assert.Contains(t, results[0].Snippets[0].Text, "Reason: Created retry storms")
+
+	results, err = store.Search("abc123")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Contains(t, results[0].Snippets[0].Text, "Commit: abc123")
+}
+
+func TestStore_SearchEvaluationsAndArtifacts(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	session := New("gpt-review", nil)
+	require.True(t, session.RecordEvaluation("reviewer", "pass", "Caught OAuth bug", "eval.md", 90))
+	require.True(t, session.RecordArtifact("docs/oauth.md", "research", "OAuth findings", "researcher"))
+	require.NoError(t, store.Save(session))
+
+	results, err := store.Search("oauth bug")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Snippets, 1)
+	assert.Equal(t, llm.Role("evaluation"), results[0].Snippets[0].Role)
+	assert.Contains(t, results[0].Snippets[0].Text, "Caught OAuth bug")
+
+	results, err = store.Search("findings")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, llm.Role("artifact"), results[0].Snippets[0].Role)
+	assert.Contains(t, results[0].Snippets[0].Text, "OAuth findings")
 }
