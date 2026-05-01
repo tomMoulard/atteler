@@ -18,6 +18,8 @@ import (
 const EnvPath = "ATTELER_CONFIG"
 
 // Config is the merged application configuration.
+//
+//nolint:govet // Field order follows file/config grouping; padding is not performance-sensitive.
 type Config struct {
 	Providers       map[string]ProviderConfig `json:"providers,omitempty" yaml:"providers,omitempty"`
 	Agents          map[string]AgentConfig    `json:"agents,omitempty" yaml:"agents,omitempty"`
@@ -27,6 +29,7 @@ type Config struct {
 	DefaultModel    string                    `json:"default_model,omitempty" yaml:"default_model,omitempty"`
 	FallbackModels  []string                  `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
 	Context         ContextConfig             `json:"context" yaml:"context"`
+	Plugins         PluginConfig              `json:"plugins" yaml:"plugins"`
 }
 
 // ProviderConfig configures an individual LLM provider.
@@ -39,9 +42,14 @@ type ProviderConfig struct {
 type AgentConfig struct {
 	Temperature    *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
 	TopP           *float64 `json:"top_p,omitempty" yaml:"top_p,omitempty"`
+	Seed           *int     `json:"seed,omitempty" yaml:"seed,omitempty"`
 	Model          string   `json:"model,omitempty" yaml:"model,omitempty"`
+	ReasoningLevel string   `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
+	Description    string   `json:"description,omitempty" yaml:"description,omitempty"`
+	Personality    string   `json:"personality,omitempty" yaml:"personality,omitempty"`
 	SystemPrompt   string   `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
 	FallbackModels []string `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
+	Capabilities   []string `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 	Triggers       []string `json:"triggers,omitempty" yaml:"triggers,omitempty"`
 	MaxTokens      int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
 }
@@ -55,20 +63,29 @@ type HookConfig struct {
 
 // GenerationConfig configures default generation parameters for all requests.
 type GenerationConfig struct {
-	Temperature *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
-	TopP        *float64 `json:"top_p,omitempty" yaml:"top_p,omitempty"`
-	MaxTokens   int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+	Temperature    *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
+	TopP           *float64 `json:"top_p,omitempty" yaml:"top_p,omitempty"`
+	Seed           *int     `json:"seed,omitempty" yaml:"seed,omitempty"`
+	ReasoningLevel string   `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
+	MaxTokens      int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
 }
 
 // ContextConfig configures local @file prompt references.
 type ContextConfig struct {
-	MaxFileBytes  int `json:"max_file_bytes,omitempty" yaml:"max_file_bytes,omitempty"`
-	MaxTotalBytes int `json:"max_total_bytes,omitempty" yaml:"max_total_bytes,omitempty"`
+	MaxFileBytes   int `json:"max_file_bytes,omitempty" yaml:"max_file_bytes,omitempty"`
+	MaxTotalBytes  int `json:"max_total_bytes,omitempty" yaml:"max_total_bytes,omitempty"`
+	MaxInputTokens int `json:"max_input_tokens,omitempty" yaml:"max_input_tokens,omitempty"`
+}
+
+// PluginConfig configures local plugin manifest discovery.
+type PluginConfig struct {
+	Paths []string `json:"paths,omitempty" yaml:"paths,omitempty"`
 }
 
 type fileConfig struct {
 	Generation      fileGenerationConfig          `json:"generation" yaml:"generation"`
 	Context         fileContextConfig             `json:"context" yaml:"context"`
+	Plugins         filePluginConfig              `json:"plugins" yaml:"plugins"`
 	DefaultProvider *string                       `json:"default_provider" yaml:"default_provider"`
 	DefaultModel    *string                       `json:"default_model" yaml:"default_model"`
 	Providers       map[string]fileProviderConfig `json:"providers" yaml:"providers"`
@@ -85,22 +102,34 @@ type fileProviderConfig struct {
 type fileAgentConfig struct {
 	Temperature    *float64 `json:"temperature" yaml:"temperature"`
 	TopP           *float64 `json:"top_p" yaml:"top_p"`
+	Seed           *int     `json:"seed" yaml:"seed"`
 	Model          *string  `json:"model" yaml:"model"`
+	ReasoningLevel *string  `json:"reasoning_level" yaml:"reasoning_level"`
+	Description    *string  `json:"description" yaml:"description"`
+	Personality    *string  `json:"personality" yaml:"personality"`
 	SystemPrompt   *string  `json:"system_prompt" yaml:"system_prompt"`
 	FallbackModels []string `json:"fallback_models" yaml:"fallback_models"`
+	Capabilities   []string `json:"capabilities" yaml:"capabilities"`
 	MaxTokens      *int     `json:"max_tokens" yaml:"max_tokens"`
 	Triggers       []string `json:"triggers" yaml:"triggers"`
 }
 
 type fileContextConfig struct {
-	MaxFileBytes  *int `json:"max_file_bytes" yaml:"max_file_bytes"`
-	MaxTotalBytes *int `json:"max_total_bytes" yaml:"max_total_bytes"`
+	MaxFileBytes   *int `json:"max_file_bytes" yaml:"max_file_bytes"`
+	MaxTotalBytes  *int `json:"max_total_bytes" yaml:"max_total_bytes"`
+	MaxInputTokens *int `json:"max_input_tokens" yaml:"max_input_tokens"`
 }
 
 type fileGenerationConfig struct {
-	Temperature *float64 `json:"temperature" yaml:"temperature"`
-	TopP        *float64 `json:"top_p" yaml:"top_p"`
-	MaxTokens   *int     `json:"max_tokens" yaml:"max_tokens"`
+	Temperature    *float64 `json:"temperature" yaml:"temperature"`
+	TopP           *float64 `json:"top_p" yaml:"top_p"`
+	Seed           *int     `json:"seed" yaml:"seed"`
+	ReasoningLevel *string  `json:"reasoning_level" yaml:"reasoning_level"`
+	MaxTokens      *int     `json:"max_tokens" yaml:"max_tokens"`
+}
+
+type filePluginConfig struct {
+	Paths []string `json:"paths" yaml:"paths"`
 }
 
 // Load reads the default configuration files and returns the merged result plus
@@ -232,6 +261,7 @@ func merge(dst *Config, src fileConfig) {
 	mergeHooks(dst, src.Hooks)
 	mergeGeneration(dst, src.Generation)
 	mergeContext(dst, src.Context)
+	mergePlugins(dst, src.Plugins)
 }
 
 func mergeProviders(dst *Config, providers map[string]fileProviderConfig) {
@@ -252,34 +282,53 @@ func mergeProviders(dst *Config, providers map[string]fileProviderConfig) {
 }
 
 func mergeAgents(dst *Config, agents map[string]fileAgentConfig) {
-	for name, agent := range agents {
+	for name := range agents {
 		if dst.Agents == nil {
 			dst.Agents = make(map[string]AgentConfig)
 		}
 
 		current := dst.Agents[name]
-		if agent.Model != nil {
-			current.Model = *agent.Model
-		}
-		if agent.SystemPrompt != nil {
-			current.SystemPrompt = *agent.SystemPrompt
-		}
-		if agent.FallbackModels != nil {
-			current.FallbackModels = append([]string(nil), agent.FallbackModels...)
-		}
-		if agent.Temperature != nil {
-			current.Temperature = agent.Temperature
-		}
-		if agent.TopP != nil {
-			current.TopP = agent.TopP
-		}
-		if agent.Triggers != nil {
-			current.Triggers = append([]string(nil), agent.Triggers...)
-		}
-		if agent.MaxTokens != nil {
-			current.MaxTokens = *agent.MaxTokens
-		}
+		mergeFileAgent(&current, agents[name])
 		dst.Agents[name] = current
+	}
+}
+
+func mergeFileAgent(current *AgentConfig, agent fileAgentConfig) {
+	if agent.Model != nil {
+		current.Model = *agent.Model
+	}
+	if agent.SystemPrompt != nil {
+		current.SystemPrompt = *agent.SystemPrompt
+	}
+	if agent.ReasoningLevel != nil {
+		current.ReasoningLevel = strings.TrimSpace(*agent.ReasoningLevel)
+	}
+	if agent.Description != nil {
+		current.Description = *agent.Description
+	}
+	if agent.Personality != nil {
+		current.Personality = *agent.Personality
+	}
+	if agent.FallbackModels != nil {
+		current.FallbackModels = append([]string(nil), agent.FallbackModels...)
+	}
+	if agent.Capabilities != nil {
+		current.Capabilities = append([]string(nil), agent.Capabilities...)
+	}
+	if agent.Temperature != nil {
+		current.Temperature = agent.Temperature
+	}
+	if agent.TopP != nil {
+		current.TopP = agent.TopP
+	}
+	if agent.Seed != nil {
+		current.Seed = agent.Seed
+	}
+	if agent.Triggers != nil {
+		current.Triggers = append([]string(nil), agent.Triggers...)
+	}
+	if agent.MaxTokens != nil {
+		current.MaxTokens = *agent.MaxTokens
 	}
 }
 
@@ -309,6 +358,9 @@ func mergeContext(dst *Config, contextConfig fileContextConfig) {
 	if contextConfig.MaxTotalBytes != nil {
 		dst.Context.MaxTotalBytes = *contextConfig.MaxTotalBytes
 	}
+	if contextConfig.MaxInputTokens != nil {
+		dst.Context.MaxInputTokens = *contextConfig.MaxInputTokens
+	}
 }
 
 func mergeGeneration(dst *Config, generation fileGenerationConfig) {
@@ -318,8 +370,20 @@ func mergeGeneration(dst *Config, generation fileGenerationConfig) {
 	if generation.TopP != nil {
 		dst.Generation.TopP = generation.TopP
 	}
+	if generation.Seed != nil {
+		dst.Generation.Seed = generation.Seed
+	}
+	if generation.ReasoningLevel != nil {
+		dst.Generation.ReasoningLevel = strings.TrimSpace(*generation.ReasoningLevel)
+	}
 	if generation.MaxTokens != nil {
 		dst.Generation.MaxTokens = *generation.MaxTokens
+	}
+}
+
+func mergePlugins(dst *Config, plugins filePluginConfig) {
+	if plugins.Paths != nil {
+		dst.Plugins.Paths = append([]string(nil), plugins.Paths...)
 	}
 }
 
@@ -339,6 +403,7 @@ func mergeConfig(dst *Config, src Config) {
 	mergeConfigHooks(dst, src.Hooks)
 	mergeConfigGeneration(dst, src.Generation)
 	mergeConfigContext(dst, src.Context)
+	mergeConfigPlugins(dst, src.Plugins)
 }
 
 func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig) {
@@ -357,34 +422,53 @@ func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig) {
 }
 
 func mergeConfigAgents(dst *Config, agents map[string]AgentConfig) {
-	for name, agent := range agents {
+	for name := range agents {
 		if dst.Agents == nil {
 			dst.Agents = make(map[string]AgentConfig)
 		}
 
 		current := dst.Agents[name]
-		if agent.Model != "" {
-			current.Model = agent.Model
-		}
-		if agent.SystemPrompt != "" {
-			current.SystemPrompt = agent.SystemPrompt
-		}
-		if agent.FallbackModels != nil {
-			current.FallbackModels = append([]string(nil), agent.FallbackModels...)
-		}
-		if agent.Temperature != nil {
-			current.Temperature = agent.Temperature
-		}
-		if agent.TopP != nil {
-			current.TopP = agent.TopP
-		}
-		if agent.Triggers != nil {
-			current.Triggers = append([]string(nil), agent.Triggers...)
-		}
-		if agent.MaxTokens > 0 {
-			current.MaxTokens = agent.MaxTokens
-		}
+		mergeConfigAgent(&current, agents[name])
 		dst.Agents[name] = current
+	}
+}
+
+func mergeConfigAgent(current *AgentConfig, agent AgentConfig) {
+	if agent.Model != "" {
+		current.Model = agent.Model
+	}
+	if agent.SystemPrompt != "" {
+		current.SystemPrompt = agent.SystemPrompt
+	}
+	if agent.ReasoningLevel != "" {
+		current.ReasoningLevel = strings.TrimSpace(agent.ReasoningLevel)
+	}
+	if agent.Description != "" {
+		current.Description = agent.Description
+	}
+	if agent.Personality != "" {
+		current.Personality = agent.Personality
+	}
+	if agent.FallbackModels != nil {
+		current.FallbackModels = append([]string(nil), agent.FallbackModels...)
+	}
+	if agent.Capabilities != nil {
+		current.Capabilities = append([]string(nil), agent.Capabilities...)
+	}
+	if agent.Temperature != nil {
+		current.Temperature = agent.Temperature
+	}
+	if agent.TopP != nil {
+		current.TopP = agent.TopP
+	}
+	if agent.Seed != nil {
+		current.Seed = agent.Seed
+	}
+	if agent.Triggers != nil {
+		current.Triggers = append([]string(nil), agent.Triggers...)
+	}
+	if agent.MaxTokens > 0 {
+		current.MaxTokens = agent.MaxTokens
 	}
 }
 
@@ -404,6 +488,9 @@ func mergeConfigContext(dst *Config, contextConfig ContextConfig) {
 	if contextConfig.MaxTotalBytes > 0 {
 		dst.Context.MaxTotalBytes = contextConfig.MaxTotalBytes
 	}
+	if contextConfig.MaxInputTokens > 0 {
+		dst.Context.MaxInputTokens = contextConfig.MaxInputTokens
+	}
 }
 
 func mergeConfigGeneration(dst *Config, generation GenerationConfig) {
@@ -413,8 +500,20 @@ func mergeConfigGeneration(dst *Config, generation GenerationConfig) {
 	if generation.TopP != nil {
 		dst.Generation.TopP = generation.TopP
 	}
+	if generation.Seed != nil {
+		dst.Generation.Seed = generation.Seed
+	}
+	if generation.ReasoningLevel != "" {
+		dst.Generation.ReasoningLevel = strings.TrimSpace(generation.ReasoningLevel)
+	}
 	if generation.MaxTokens > 0 {
 		dst.Generation.MaxTokens = generation.MaxTokens
+	}
+}
+
+func mergeConfigPlugins(dst *Config, plugins PluginConfig) {
+	if plugins.Paths != nil {
+		dst.Plugins.Paths = append([]string(nil), plugins.Paths...)
 	}
 }
 

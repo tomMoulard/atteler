@@ -33,9 +33,14 @@ providers:
     disabled: false
 agents:
   reviewer:
+    description: Reviews code changes
+    personality: concise
     system_prompt: review code
     fallback_models: [gpt-review-backup]
+    capabilities: [review, security]
     temperature: 0.2
+    seed: 42
+    reasoning_level: high
     triggers: ["review this", "code review"]
 hooks:
   assistant_message:
@@ -46,10 +51,16 @@ hooks:
 context:
   max_file_bytes: 123
   max_total_bytes: 456
+  max_input_tokens: 789
 generation:
   temperature: 0
   top_p: 0.8
+  seed: 7
+  reasoning_level: medium
   max_tokens: 900
+plugins:
+  paths:
+    - ./plugin-a
 `)
 
 	cfg, loaded, err := LoadFiles([]string{global, filepath.Join(dir, "missing.json"), local})
@@ -87,11 +98,26 @@ generation:
 	if reviewer.SystemPrompt != "review code" {
 		assert.Failf(t, "assertion failed", "reviewer system_prompt = %q", reviewer.SystemPrompt)
 	}
+	if reviewer.Description != "Reviews code changes" {
+		assert.Failf(t, "assertion failed", "reviewer description = %q", reviewer.Description)
+	}
+	if reviewer.Personality != "concise" {
+		assert.Failf(t, "assertion failed", "reviewer personality = %q", reviewer.Personality)
+	}
 	if !reflect.DeepEqual(reviewer.FallbackModels, []string{"gpt-review-backup"}) {
 		assert.Failf(t, "assertion failed", "reviewer fallback_models = %v", reviewer.FallbackModels)
 	}
+	if !reflect.DeepEqual(reviewer.Capabilities, []string{"review", "security"}) {
+		assert.Failf(t, "assertion failed", "reviewer capabilities = %v", reviewer.Capabilities)
+	}
 	if reviewer.Temperature == nil || *reviewer.Temperature != 0.2 {
 		assert.Failf(t, "assertion failed", "reviewer temperature = %v", reviewer.Temperature)
+	}
+	if reviewer.Seed == nil || *reviewer.Seed != 42 {
+		assert.Failf(t, "assertion failed", "reviewer seed = %v", reviewer.Seed)
+	}
+	if reviewer.ReasoningLevel != "high" {
+		assert.Failf(t, "assertion failed", "reviewer reasoning_level = %q", reviewer.ReasoningLevel)
 	}
 	if !reflect.DeepEqual(reviewer.Triggers, []string{"review this", "code review"}) {
 		assert.Failf(t, "assertion failed", "reviewer triggers = %v", reviewer.Triggers)
@@ -117,14 +143,26 @@ generation:
 	if cfg.Context.MaxTotalBytes != 456 {
 		assert.Failf(t, "assertion failed", "MaxTotalBytes = %d, want 456", cfg.Context.MaxTotalBytes)
 	}
+	if cfg.Context.MaxInputTokens != 789 {
+		assert.Failf(t, "assertion failed", "MaxInputTokens = %d, want 789", cfg.Context.MaxInputTokens)
+	}
 	if cfg.Generation.Temperature == nil || *cfg.Generation.Temperature != 0 {
 		assert.Failf(t, "assertion failed", "generation temperature = %v", cfg.Generation.Temperature)
 	}
 	if cfg.Generation.TopP == nil || *cfg.Generation.TopP != 0.8 {
 		assert.Failf(t, "assertion failed", "generation top_p = %v", cfg.Generation.TopP)
 	}
+	if cfg.Generation.Seed == nil || *cfg.Generation.Seed != 7 {
+		assert.Failf(t, "assertion failed", "generation seed = %v", cfg.Generation.Seed)
+	}
+	if cfg.Generation.ReasoningLevel != "medium" {
+		assert.Failf(t, "assertion failed", "generation reasoning_level = %q", cfg.Generation.ReasoningLevel)
+	}
 	if cfg.Generation.MaxTokens != 900 {
 		assert.Failf(t, "assertion failed", "generation max_tokens = %d, want 900", cfg.Generation.MaxTokens)
+	}
+	if !reflect.DeepEqual(cfg.Plugins.Paths, []string{"./plugin-a"}) {
+		assert.Failf(t, "assertion failed", "plugin paths = %v", cfg.Plugins.Paths)
 	}
 }
 

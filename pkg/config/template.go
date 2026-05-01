@@ -11,6 +11,8 @@ fallback_models:
 generation:
   temperature: 0
   top_p: 1
+  seed: 1
+  reasoning_level: medium
   max_tokens: 2048
 
 providers:
@@ -21,9 +23,15 @@ providers:
 
 agents:
   reviewer:
+    description: Code review specialist
+    capabilities:
+      - review
+      - security
     model: gpt-4.1
     fallback_models:
       - gpt-4.1-mini
+    seed: 1
+    reasoning_level: high
     temperature: 0
     max_tokens: 2048
     triggers:
@@ -41,6 +49,11 @@ hooks:
 context:
   max_file_bytes: 32768
   max_total_bytes: 131072
+  max_input_tokens: 120000
+
+plugins:
+  # paths:
+  #   - ./.atteler/plugins/reviewer
 `
 
 // TemplateYAML returns a starter YAML configuration without secrets.
