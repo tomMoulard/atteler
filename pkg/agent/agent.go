@@ -13,10 +13,15 @@ import (
 type Agent struct {
 	Temperature    *float64
 	TopP           *float64
+	Seed           *int
 	Name           string
 	Model          string
+	Description    string
+	Personality    string
 	SystemPrompt   string
+	ReasoningLevel string
 	FallbackModels []string
+	Capabilities   []string
 	Triggers       []string
 	MaxTokens      int
 }
@@ -29,7 +34,8 @@ type Registry struct {
 // NewRegistry builds an agent registry from configuration.
 func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 	registry := &Registry{agents: make(map[string]Agent, len(configs))}
-	for name, cfg := range configs {
+	for name := range configs {
+		cfg := configs[name]
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
@@ -37,11 +43,16 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 		registry.agents[name] = Agent{
 			Name:           name,
 			Model:          cfg.Model,
+			Description:    strings.TrimSpace(cfg.Description),
+			Personality:    strings.TrimSpace(cfg.Personality),
 			SystemPrompt:   cfg.SystemPrompt,
+			ReasoningLevel: strings.TrimSpace(cfg.ReasoningLevel),
 			FallbackModels: normalizeModels(cfg.FallbackModels),
+			Capabilities:   normalizePhrases(cfg.Capabilities),
 			Temperature:    cfg.Temperature,
 			TopP:           cfg.TopP,
-			Triggers:       normalizeTriggers(cfg.Triggers),
+			Seed:           cfg.Seed,
+			Triggers:       normalizePhrases(cfg.Triggers),
 			MaxTokens:      cfg.MaxTokens,
 		}
 	}
@@ -79,8 +90,25 @@ func (r *Registry) List() []string {
 // MatchPrompt returns the first agent whose configured trigger appears in
 // prompt. Matching is case-insensitive and stable by sorted agent name.
 func (r *Registry) MatchPrompt(prompt string) (Agent, bool) {
+	match, ok := r.MatchPromptWithReason(prompt)
+	return match.Agent, ok
+}
+
+// Match identifies why a prompt matched an agent.
+//
+//nolint:govet // Field order groups the matched agent before reason metadata.
+type Match struct {
+	Agent   Agent
+	Kind    string
+	Pattern string
+}
+
+// MatchPromptWithReason returns the first agent whose configured trigger or
+// capability appears in prompt. Triggers take priority over capabilities, and
+// matching is case-insensitive and stable by sorted agent name.
+func (r *Registry) MatchPromptWithReason(prompt string) (Match, bool) {
 	if r == nil {
-		return Agent{}, false
+		return Match{}, false
 	}
 
 	prompt = strings.ToLower(prompt)
@@ -88,11 +116,19 @@ func (r *Registry) MatchPrompt(prompt string) (Agent, bool) {
 		agent := r.agents[name]
 		for _, trigger := range agent.Triggers {
 			if trigger != "" && strings.Contains(prompt, trigger) {
-				return agent, true
+				return Match{Agent: agent, Kind: "trigger", Pattern: trigger}, true
 			}
 		}
 	}
-	return Agent{}, false
+	for _, name := range r.List() {
+		agent := r.agents[name]
+		for _, capability := range agent.Capabilities {
+			if capability != "" && strings.Contains(prompt, capability) {
+				return Match{Agent: agent, Kind: "capability", Pattern: capability}, true
+			}
+		}
+	}
+	return Match{}, false
 }
 
 // CompleteParams applies the agent persona to an LLM completion request.
@@ -107,21 +143,23 @@ func (a Agent) CompleteParams(model string, messages []llm.Message) llm.Complete
 	}
 
 	params := llm.CompleteParams{
-		Model:       model,
-		Messages:    requestMessages,
-		MaxTokens:   a.MaxTokens,
-		Temperature: a.Temperature,
-		TopP:        a.TopP,
+		Model:          model,
+		Messages:       requestMessages,
+		MaxTokens:      a.MaxTokens,
+		Temperature:    a.Temperature,
+		TopP:           a.TopP,
+		Seed:           a.Seed,
+		ReasoningLevel: a.ReasoningLevel,
 	}
 	return params
 }
 
-func normalizeTriggers(triggers []string) []string {
-	out := make([]string, 0, len(triggers))
-	for _, trigger := range triggers {
-		trigger = strings.ToLower(strings.TrimSpace(trigger))
-		if trigger != "" {
-			out = append(out, trigger)
+func normalizePhrases(phrases []string) []string {
+	out := make([]string, 0, len(phrases))
+	for _, phrase := range phrases {
+		phrase = strings.ToLower(strings.TrimSpace(phrase))
+		if phrase != "" {
+			out = append(out, phrase)
 		}
 	}
 	return out
