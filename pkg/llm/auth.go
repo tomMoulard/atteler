@@ -20,6 +20,19 @@ import (
 // Anthropic credential resolution
 // ---------------------------------------------------------------------------
 
+var defaultContextFactory = context.Background
+
+func defaultCredentialContext() context.Context {
+	return defaultContextFactory()
+}
+
+func nonNilCredentialContext(ctx context.Context) context.Context {
+	if ctx != nil {
+		return ctx
+	}
+	return defaultCredentialContext()
+}
+
 // ResolveAnthropicKey returns an Anthropic API credential by trying, in order:
 //  1. ANTHROPIC_API_KEY env var                (Console API key -> X-Api-Key header)
 //  2. ANTHROPIC_AUTH_TOKEN env var             (bearer token)
@@ -31,6 +44,13 @@ import (
 // The second return value indicates whether the credential is a bearer token
 // (true) or a plain API key (false).
 func ResolveAnthropicKey() (key string, bearer bool, err error) {
+	return ResolveAnthropicKeyContext(defaultCredentialContext())
+}
+
+// ResolveAnthropicKeyContext returns an Anthropic API credential using ctx for
+// any credential-store command or OAuth refresh request that may block.
+func ResolveAnthropicKeyContext(ctx context.Context) (key string, bearer bool, err error) {
+	ctx = nonNilCredentialContext(ctx)
 	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
 		return v, false, nil
 	}
@@ -43,12 +63,12 @@ func ResolveAnthropicKey() (key string, bearer bool, err error) {
 
 	// Try loading from ForgeCode's credential store. Forge stores provider
 	// login state in FORGE_CONFIG/.credentials.json or the default config dir.
-	if tok, isBearer, err := resolveForgeAnthropicCredentials(); err == nil && tok != "" {
+	if tok, isBearer, err := resolveForgeAnthropicCredentials(ctx); err == nil && tok != "" {
 		return tok, isBearer, nil
 	}
 
 	// Try loading from Claude Code's local credential store.
-	if tok, err := resolveClaudeCodeCredentials(); err == nil && tok != "" {
+	if tok, err := resolveClaudeCodeCredentials(ctx); err == nil && tok != "" {
 		return tok, true, nil
 	}
 
@@ -70,10 +90,11 @@ type claudeOAuthBlock struct {
 }
 
 // resolveClaudeCodeCredentials tries platform-specific credential stores.
-func resolveClaudeCodeCredentials() (string, error) {
+func resolveClaudeCodeCredentials(ctx context.Context) (string, error) {
+	ctx = nonNilCredentialContext(ctx)
 	// macOS: read from Keychain.
 	if runtime.GOOS == "darwin" {
-		if tok, err := readClaudeCodeKeychain(); err == nil {
+		if tok, err := readClaudeCodeKeychain(ctx); err == nil {
 			return tok, nil
 		}
 	}
@@ -175,10 +196,11 @@ var (
 // built-in ClaudeCode OAuth provider first, then the plain Anthropic API-key
 // provider. The returned bool indicates whether the credential is a bearer
 // token.
-func resolveForgeAnthropicCredentials() (key string, bearer bool, err error) {
+func resolveForgeAnthropicCredentials(ctx context.Context) (key string, bearer bool, err error) {
+	ctx = nonNilCredentialContext(ctx)
 	var failures []error
 	for _, path := range forgeCredentialPaths() {
-		key, bearer, err := readForgeCredentialsFile(path)
+		key, bearer, err := readForgeCredentialsFile(ctx, path)
 		if err == nil && key != "" {
 			return key, bearer, nil
 		}
@@ -192,7 +214,8 @@ func resolveForgeAnthropicCredentials() (key string, bearer bool, err error) {
 	return "", false, fmt.Errorf("no ForgeCode Anthropic credentials found: %w", errors.Join(failures...))
 }
 
-func readForgeCredentialsFile(path string) (key string, bearer bool, err error) {
+func readForgeCredentialsFile(ctx context.Context, path string) (key string, bearer bool, err error) {
+	ctx = nonNilCredentialContext(ctx)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", false, fmt.Errorf("cannot read ForgeCode credentials %s: %w", path, err)
@@ -207,7 +230,7 @@ func readForgeCredentialsFile(path string) (key string, bearer bool, err error) 
 	}
 
 	refreshErr := error(nil)
-	if key, err := refreshForgeClaudeCodeCredential(path, data, entries); err == nil && key != "" {
+	if key, err := refreshForgeClaudeCodeCredential(ctx, path, data, entries); err == nil && key != "" {
 		return key, true, nil
 	} else if err != nil && !errors.Is(err, errForgeOAuthRefreshUnavailable) {
 		refreshErr = err
@@ -281,7 +304,8 @@ func forgeAnthropicCredentialFromEntries(entries []forgeCredentialEntry) (key st
 	return "", false, errors.New("no claude_code or anthropic credential in ForgeCode credentials")
 }
 
-func refreshForgeClaudeCodeCredential(path string, data []byte, entries []forgeCredentialEntry) (string, error) {
+func refreshForgeClaudeCodeCredential(ctx context.Context, path string, data []byte, entries []forgeCredentialEntry) (string, error) {
+	ctx = nonNilCredentialContext(ctx)
 	entry := forgeProviderEntry(entries, forgeClaudeCodeProviderID)
 	if entry == nil {
 		return "", errForgeOAuthRefreshUnavailable
@@ -294,7 +318,7 @@ func refreshForgeClaudeCodeCredential(path string, data []byte, entries []forgeC
 		return token, nil
 	}
 
-	tokens, err := refreshForgeOAuthToken(oauth.Config, oauth.Tokens.refreshToken())
+	tokens, err := refreshForgeOAuthToken(ctx, oauth.Config, oauth.Tokens.refreshToken())
 	if err != nil {
 		return "", err
 	}
@@ -315,7 +339,8 @@ type forgeOAuthRefreshResponse struct {
 	ExpiresInCamel int64  `json:"expiresIn"`
 }
 
-func refreshForgeOAuthToken(config forgeOAuthConfig, refreshToken string) (forgeOAuthTokens, error) {
+func refreshForgeOAuthToken(ctx context.Context, config forgeOAuthConfig, refreshToken string) (forgeOAuthTokens, error) {
+	ctx = nonNilCredentialContext(ctx)
 	tokenURL := config.tokenURL()
 	clientID := config.clientID()
 	if tokenURL == "" || clientID == "" {
@@ -331,7 +356,7 @@ func refreshForgeOAuthToken(config forgeOAuthConfig, refreshToken string) (forge
 		return forgeOAuthTokens{}, fmt.Errorf("ForgeCode OAuth refresh request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, tokenURL, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return forgeOAuthTokens{}, fmt.Errorf("ForgeCode OAuth refresh request: %w", err)
 	}

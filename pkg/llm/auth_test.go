@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -212,7 +213,7 @@ func TestReadForgeCredentialsFile_RefreshesExpiredClaudeCodeOAuth(t *testing.T) 
 		require.NoError(t, err)
 	}
 
-	key, bearer, err := readForgeCredentialsFile(path)
+	key, bearer, err := readForgeCredentialsFile(context.Background(), path)
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -235,6 +236,28 @@ func TestReadForgeCredentialsFile_RefreshesExpiredClaudeCodeOAuth(t *testing.T) 
 	if !containsAll(string(refreshed), "new-access", "new-refresh", "user_id") {
 		require.Failf(t, "unexpected failure", "refreshed credentials did not preserve/update expected fields: %s", refreshed)
 	}
+}
+
+func TestReadForgeCredentialsFile_RefreshHonorsCanceledContext(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".credentials.json")
+	data := `[
+		{"id":"claude_code","auth_details":{"o_auth":{
+			"config":{"token_url":"http://127.0.0.1:1/token","client_id":"client-123"},
+			"tokens":{"access_token":"expired","refresh_token":"old-refresh","expires_at":"2000-01-01T00:00:00Z"}
+		}}}
+	]`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		require.NoError(t, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := readForgeCredentialsFile(ctx, path)
+	if err == nil {
+		require.FailNow(t, "expected canceled context to stop OAuth refresh")
+	}
+	assert.Contains(t, err.Error(), "context canceled")
 }
 
 func TestParseForgeAnthropicCredentials(t *testing.T) {
