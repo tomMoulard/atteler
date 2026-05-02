@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +23,8 @@ var (
 	e2eBinary string
 	e2eTmpDir string
 )
+
+const windowsGOOS = "windows"
 
 func TestMain(m *testing.M) {
 	root, err := repoRoot()
@@ -35,7 +40,7 @@ func TestMain(m *testing.M) {
 	}
 
 	e2eBinary = filepath.Join(e2eTmpDir, "atteler")
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		e2eBinary += ".exe"
 	}
 
@@ -90,6 +95,12 @@ func TestOfflineProviderCommands(t *testing.T) {
 	result := runOK(t, runSpec{dir: workDir}, "--version")
 	assertContains(t, result.stdout, "atteler")
 
+	result = runOK(t, runSpec{dir: workDir}, "--doctor-offline")
+	assertContains(t, result.stdout, "Atteler offline doctor")
+	assertContains(t, result.stdout, "known_providers:")
+	assertContains(t, result.stdout, "ollama")
+	assertContains(t, result.stdout, "hook_events:")
+
 	result = runOK(t, runSpec{dir: workDir}, "--list-providers")
 	assertContains(t, result.stdout, "anthropic")
 	assertContains(t, result.stdout, "openai")
@@ -97,6 +108,54 @@ func TestOfflineProviderCommands(t *testing.T) {
 	result = runOK(t, runSpec{dir: workDir}, "--list-known-models")
 	assertContains(t, result.stdout, "openai/gpt-4.1")
 	assertContains(t, result.stdout, "anthropic/claude-sonnet")
+	assertContains(t, result.stdout, "ollama/llama3.2")
+
+	result = runOK(t, runSpec{dir: workDir, env: []string{"DEBUG_ATTELER_LIST_PROVIDERS=1"}})
+	assertContains(t, result.stdout, "anthropic")
+	assertContains(t, result.stdout, "openai")
+
+	result = runOK(t, runSpec{dir: workDir}, "--list-hook-events")
+	assertContains(t, result.stdout, "agent_execute")
+	assertContains(t, result.stdout, "context_add")
+	assertContains(t, result.stdout, "session_start")
+
+	result = runOK(t, runSpec{dir: workDir}, "--list-hook-events-json")
+	assertContains(t, result.stdout, `"type":"context_add"`)
+	assertContains(t, result.stdout, `"description":`)
+}
+
+func TestReadOnlyCommandsDoNotAutoRegisterProviders(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	forgeDir := filepath.Join(workDir, "forge")
+
+	var refreshRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		refreshRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte(`{"access_token":"refreshed-token","refresh_token":"refreshed-refresh","expires_in":3600}`)); err != nil {
+			t.Errorf("write refresh response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	credentials := `[
+  {"id":"claude_code","auth_details":{"o_auth":{
+    "config":{"token_url":"` + server.URL + `","client_id":"client-123"},
+    "tokens":{"access_token":"expired","refresh_token":"old-refresh","expires_at":"2000-01-01T00:00:00Z"}
+  }}}
+]
+`
+	credentialsPath := filepath.Join(forgeDir, ".credentials.json")
+	writeFile(t, credentialsPath, credentials)
+
+	result := runOK(t, runSpec{dir: workDir, env: []string{"FORGE_CONFIG=" + forgeDir}}, "--list-hook-events")
+	assertContains(t, result.stdout, "session_start")
+
+	data, err := os.ReadFile(credentialsPath)
+	require.NoError(t, err)
+	require.Equal(t, credentials, string(data))
+	require.Equal(t, int32(0), refreshRequests.Load())
 }
 
 func TestAgentCommands(t *testing.T) {
@@ -164,6 +223,31 @@ printf 'plugin-output\n'
 	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "--run-plugin", "runner", "--plugin-entrypoint", "run")
 	assertContains(t, result.stdout, "plugin-output")
 
+	if runtime.GOOS != windowsGOOS {
+		result = runOK(t, runSpec{dir: workDir}, "--bash", "printf cli-bash")
+		assertContains(t, result.stdout, "cli-bash")
+
+		mcpHelper := filepath.Join(workDir, "mcp-helper")
+		writeExecutable(t, mcpHelper, `#!/bin/sh
+read line
+printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
+`)
+		mcpManifest := filepath.Join(workDir, "mcp.yaml")
+		writeFile(t, mcpManifest, fmt.Sprintf(`servers:
+  - name: helper
+    command: %q
+    capabilities: ["tools"]
+`, mcpHelper))
+		result = runOK(t, runSpec{dir: workDir},
+			"--mcp-manifest", mcpManifest,
+			"--mcp-server", "helper",
+			"--mcp-tool", "echo",
+			"--mcp-tool-args", `{"message":"hello"}`,
+		)
+		assertContains(t, result.stdout, `"ok": true`)
+		assertContains(t, result.stdout, `"source": "mcp-helper"`)
+	}
+
 	result = runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "--memory-search", "hello auth")
 	assertContains(t, result.stdout, "session/demo/message/0")
 
@@ -178,6 +262,126 @@ printf 'plugin-output\n'
 	result = runOK(t, runSpec{dir: workDir}, "--skill-step", "plan", "--skill-step", "code", "--skill-step", "test", "--skill-step", "plan", "--skill-step", "code", "--skill-step", "test")
 	assertContains(t, result.stdout, "slug: plan-code-test")
 	assertContains(t, result.stdout, "occurrences: 2")
+
+	skillDir := filepath.Join(workDir, "skills")
+	result = runOK(t, runSpec{dir: workDir}, "--skill-save-dir", skillDir, "--skill-step", "plan", "--skill-step", "code", "--skill-step", "plan", "--skill-step", "code")
+	assertContains(t, result.stdout, "saved: "+filepath.Join(skillDir, "plan-code.md"))
+	skillData, err := os.ReadFile(filepath.Join(skillDir, "plan-code.md"))
+	require.NoError(t, err)
+	assertContains(t, string(skillData), "# Plan Code Skill")
+
+	result = runOK(t, runSpec{dir: workDir},
+		"--route-candidate", "openai/gpt-fast,input=0.001,output=0.002,max=1000",
+		"--route-input-tokens", "100",
+		"--route-output-tokens", "50",
+	)
+	assertContains(t, result.stdout, "openai/gpt-fast")
+	assertContains(t, result.stdout, "cost=0.200000")
+
+	result = runOK(t, runSpec{dir: workDir},
+		"--route-candidate", "openai/too-expensive,input=0.01,output=0.01,max=1000",
+		"--route-candidate", "openai/gpt-budget,input=0.001,output=0.001,max=1000",
+		"--route-input-tokens", "100",
+		"--route-output-tokens", "50",
+		"--route-budget", "0.2",
+	)
+	assertContains(t, result.stdout, "openai/gpt-budget")
+	assertNotContains(t, result.stdout, "openai/too-expensive")
+
+	result = runOK(t, runSpec{dir: workDir},
+		"--async-plan",
+		"--async-task", "plan|planner|draft plan",
+		"--async-task", "code|coder|implement|plan",
+	)
+	assertContains(t, result.stdout, "wave 1:")
+	assertContains(t, result.stdout, "id=plan")
+	assertContains(t, result.stdout, "wave 2:")
+	assertContains(t, result.stdout, "id=code")
+
+	result = runOK(t, runSpec{dir: workDir}, "--speculate-plan", "--speculate-agent", "alpha", "--speculate-agent", "beta", "--speculate-prompt", "implement auth flow")
+	assertContains(t, result.stdout, "agents: alpha,beta")
+	assertContains(t, result.stdout, "cross_reviews:")
+	assertContains(t, result.stdout, "alpha -> beta")
+	assertContains(t, result.stdout, "prompt_cache:")
+
+	result = runOK(t, runSpec{dir: workDir}, "--review-plan", "--review-agent", "alpha", "--review-agent", "beta", "--review-path", "pkg/auth.go", "--review-gate", "tests pass")
+	assertContains(t, result.stdout, "reviewers:")
+	assertContains(t, result.stdout, "paths:\n  - pkg/auth.go")
+	assertContains(t, result.stdout, "alpha -> beta")
+	assertContains(t, result.stdout, "gates:\n  - tests pass")
+
+	result = runOK(t, runSpec{dir: workDir}, "--spawn-agent", "reviewer|dry run this child prompt", "--spawn-dry-run")
+	assertContains(t, result.stdout, "Would spawn 1 sub-agent")
+	assertContains(t, result.stdout, "agent=reviewer")
+	assertContains(t, result.stdout, "prompt=dry run this child prompt")
+
+	writeFile(t, filepath.Join(workDir, "TODO-loop.txt"), "TODO: loop once\n")
+	result = runOK(t, runSpec{dir: workDir}, "--watch-loop", "--watch-max-iterations", "1", "--watch-interval-seconds", "1")
+	assertContains(t, result.stdout, "iteration=1")
+	assertContains(t, result.stdout, "kind=stale_todo")
+
+	result = runOK(t, runSpec{dir: workDir}, "--watch-scan", "--watch-json")
+	assertContains(t, result.stdout, `"findings":`)
+	assertContains(t, result.stdout, `"kind":"stale_todo"`)
+
+	agentMemoryFile := filepath.Join(workDir, "agent-memory-note.txt")
+	writeFile(t, agentMemoryFile, "OAuth callback retry memory\n")
+	agentMemoryStore := filepath.Join(workDir, "agent-memory.json")
+	result = runOK(t, runSpec{dir: workDir},
+		"--agent-memory-agent", "reviewer",
+		"--agent-memory-store", agentMemoryStore,
+		"--agent-memory-index", agentMemoryFile,
+		"--agent-memory-search", "callback retry",
+	)
+	assertContains(t, result.stdout, agentMemoryFile)
+
+	artifactSessionDir := filepath.Join(workDir, "artifact-sessions")
+	writeFile(t, filepath.Join(workDir, "research.md"), "artifact merge notes\n")
+	writeFile(t, filepath.Join(artifactSessionDir, "artifact.json"), `{
+  "created_at": "2026-05-02T10:00:00Z",
+  "updated_at": "2026-05-02T10:01:00Z",
+  "id": "artifact",
+  "default_model": "gpt-test",
+  "messages": [],
+  "artifacts": [
+    {"created_at": "2026-05-02T10:00:00Z", "path": "research.md", "kind": "research", "summary": "merge notes", "source_agent": "reviewer"}
+  ]
+}`)
+	mergedArtifacts := filepath.Join(workDir, "merged-artifacts.md")
+	result = runOK(t, runSpec{dir: workDir, sessionDir: artifactSessionDir},
+		"--session", "artifact",
+		"--merge-artifacts", mergedArtifacts,
+	)
+	assertContains(t, result.stdout, "Merged artifacts into "+mergedArtifacts)
+	mergedData, err := os.ReadFile(mergedArtifacts)
+	require.NoError(t, err)
+	assertContains(t, string(mergedData), "artifact merge notes")
+
+	feedbackSessionDir := filepath.Join(workDir, "feedback-sessions")
+	writeFile(t, filepath.Join(feedbackSessionDir, "feedback.json"), `{
+  "created_at": "2026-05-02T10:00:00Z",
+  "updated_at": "2026-05-02T10:01:00Z",
+  "id": "feedback",
+  "default_model": "gpt-test",
+  "messages": [],
+  "negative_knowledge": [
+    {"created_at": "2026-05-02T10:00:00Z", "approach": "skip regression tests", "reason": "hid auth regression", "agent": "reviewer"}
+  ]
+}`)
+	feedbackHistory := filepath.Join(workDir, "feedback.md")
+	result = runOK(t, runSpec{dir: workDir, sessionDir: feedbackSessionDir},
+		"--config", configPath,
+		"--session", "feedback",
+		"--feedback-apply-config", configPath,
+		"--feedback-history", feedbackHistory,
+	)
+	assertContains(t, result.stdout, "Applied 1 feedback proposal")
+	configData, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assertContains(t, string(configData), "Feedback-derived guidance:")
+	historyData, err := os.ReadFile(feedbackHistory)
+	require.NoError(t, err)
+	assertContains(t, string(historyData), "agent: reviewer")
 }
 
 func TestSessionCommands(t *testing.T) {
@@ -185,12 +389,32 @@ func TestSessionCommands(t *testing.T) {
 	workDir := t.TempDir()
 	sessionDir := filepath.Join(workDir, "sessions")
 	writeSession(t, sessionDir)
+	writeFile(t, filepath.Join(sessionDir, "perf.json"), `{
+  "created_at": "2026-05-02T10:00:00Z",
+  "updated_at": "2026-05-02T10:10:00Z",
+  "id": "perf",
+  "default_agent": "reviewer",
+  "messages": [],
+  "evaluations": [
+    {"created_at": "2026-05-02T10:05:00Z", "agent": "reviewer", "outcome": "pass", "score": 8}
+  ],
+  "negative_knowledge": [
+    {"created_at": "2026-05-02T10:06:00Z", "approach": "skip tests", "reason": "missed bug", "agent": "reviewer"}
+  ]
+}`)
 	spec := runSpec{dir: workDir, sessionDir: sessionDir}
 
 	result := runOK(t, spec, "--list-sessions")
 	assertContains(t, result.stdout, "demo")
 	assertContains(t, result.stdout, "title=Auth review")
 	assertContains(t, result.stdout, "tags=auth,review")
+
+	result = runOK(t, spec, "--list-sessions", "--list-sessions-tag", "AUTH")
+	assertContains(t, result.stdout, "demo")
+	assertContains(t, result.stdout, "tags=auth,review")
+
+	result = runOK(t, spec, "--list-sessions", "--list-sessions-tag", "missing")
+	assertContains(t, result.stdout, "No sessions found.")
 
 	result = runOK(t, spec, "--show-session", "demo")
 	assertContains(t, result.stdout, "id: demo")
@@ -215,11 +439,18 @@ func TestSessionCommands(t *testing.T) {
 	result = runOK(t, spec, "--list-session-tags")
 	assertContains(t, result.stdout, "auth\t1 sessions")
 	assertContains(t, result.stdout, "review\t1 sessions")
+
+	result = runOK(t, spec, "--agent-performance-summary")
+	assertContains(t, result.stdout, "agent=reviewer")
+	assertContains(t, result.stdout, "evaluations=1")
+	assertContains(t, result.stdout, "failures=1")
+	assertContains(t, result.stdout, "avg_score=8.00")
+	assertContains(t, result.stdout, "outcomes=pass:1")
 }
 
 func TestInteractiveFZFModelPickerPersistsFolderDefault(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("expect-driven TUI e2e is POSIX-only")
 	}
 	expectPath, err := exec.LookPath("expect")
@@ -346,6 +577,63 @@ providers:
 	}
 }
 
+func TestClaudeCodeOneShotAllowsBashTool(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("shell-script claude fake is POSIX-only")
+	}
+
+	workDir := t.TempDir()
+	toolDir := filepath.Join(workDir, "tools")
+	configPath := filepath.Join(workDir, "atteler.yaml")
+	writeExecutable(t, filepath.Join(toolDir, "claude"), `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  printf '{"loggedIn":true}'
+  exit 0
+fi
+
+tools=""
+allowed=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --tools) tools="$2"; shift 2 ;;
+    --allowed-tools) allowed="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+case ",$tools," in
+  *",Bash,"*) ;;
+  *) printf 'missing Bash in --tools: %s\n' "$tools" >&2; exit 13 ;;
+esac
+case ",$allowed," in
+  *",Bash,"*) ;;
+  *) printf 'missing Bash in --allowed-tools: %s\n' "$allowed" >&2; exit 14 ;;
+esac
+printf 'bash tool enabled'
+`)
+	writeFile(t, configPath, `default_provider: claude-code
+default_model: claude-code/claude-opus-4-7
+providers:
+  anthropic:
+    disabled: true
+  codex:
+    disabled: true
+  ollama:
+    disabled: true
+  openai:
+    disabled: true
+`)
+
+	result := runOK(t, runSpec{
+		dir: workDir,
+		env: []string{"PATH=" + toolDir + string(os.PathListSeparator) + os.Getenv("PATH")},
+	}, "--config", configPath, "execute the ls bash command")
+
+	assertContains(t, result.stdout, "bash tool enabled")
+	assertContains(t, result.stderr, `command="claude --print"`)
+}
+
 type runSpec struct {
 	dir        string
 	sessionDir string
@@ -421,6 +709,7 @@ func testEnv(t *testing.T, spec runSpec) []string {
 		"HOME":                true,
 		"OPENAI_API_KEY":      true,
 		"OPENAI_BASE_URL":     true,
+		"OLLAMA_BASE_URL":     true,
 		"XDG_CONFIG_HOME":     true,
 	}
 
@@ -447,6 +736,7 @@ func testEnv(t *testing.T, spec runSpec) []string {
 		"HOME="+home,
 		"OPENAI_API_KEY=",
 		"OPENAI_BASE_URL=",
+		"OLLAMA_BASE_URL=",
 		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 	)
 	env = append(env, spec.env...)

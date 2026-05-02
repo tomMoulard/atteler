@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/agentmemory"
 	attasync "github.com/tommoulard/atteler/pkg/async"
 	"github.com/tommoulard/atteler/pkg/codegraph"
 	"github.com/tommoulard/atteler/pkg/codeintel"
@@ -21,9 +22,11 @@ import (
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	atteval "github.com/tommoulard/atteler/pkg/eval"
+	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/feedback"
 	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/lsp"
 	"github.com/tommoulard/atteler/pkg/mcp"
 	"github.com/tommoulard/atteler/pkg/memory"
 	"github.com/tommoulard/atteler/pkg/modelroute"
@@ -33,6 +36,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/session"
 	attskill "github.com/tommoulard/atteler/pkg/skill"
 	"github.com/tommoulard/atteler/pkg/speculate"
+	"github.com/tommoulard/atteler/pkg/subagent"
 	"github.com/tommoulard/atteler/pkg/vector"
 	"github.com/tommoulard/atteler/pkg/watch"
 )
@@ -197,6 +201,26 @@ func TestFormatSessionSummary(t *testing.T) {
 	}
 }
 
+func TestListSessionSummariesFiltersByTag(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	auth := session.New("gpt-test", nil)
+	auth.Title = "Auth review"
+	auth.Tags = []string{"auth", "review"}
+	require.NoError(t, store.Save(auth))
+
+	docs := session.New("gpt-test", nil)
+	docs.Title = "Docs"
+	docs.Tags = []string{"docs"}
+	require.NoError(t, store.Save(docs))
+
+	summaries, err := listSessionSummaries(store, " AUTH ")
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	assert.Equal(t, "Auth review", summaries[0].Title)
+}
+
 func TestFormatSearchSnippet(t *testing.T) {
 	t.Parallel()
 	snippet := session.SearchSnippet{
@@ -359,6 +383,20 @@ func TestGenerationForRequest_Precedence(t *testing.T) {
 	}
 }
 
+func TestGenerationForRequest_CLIReasoningLevelOverridesAgent(t *testing.T) {
+	t.Parallel()
+
+	generation := generationForRequest(
+		generationSettings{ReasoningLevel: "medium"},
+		generationSettings{ReasoningLevel: "xhigh"},
+		agentSelection{ok: true, agent: agent.Agent{ReasoningLevel: "high"}},
+	)
+
+	if generation.ReasoningLevel != "xhigh" {
+		require.Failf(t, "unexpected failure", "reasoning level = %q, want CLI override", generation.ReasoningLevel)
+	}
+}
+
 func TestApplyGenerationParams_AllowsExplicitZeroTemperature(t *testing.T) {
 	t.Parallel()
 	temperature := 0.0
@@ -397,7 +435,7 @@ func TestRecordedResponseRoundTrip(t *testing.T) {
 		Seed:        &seed,
 		Messages:    []llm.Message{{Role: llm.RoleUser, Content: "hello"}},
 	}
-	resp := &llm.Response{Content: "hi back", Model: "gpt-test", InputTokens: 2, OutputTokens: 3}
+	resp := &llm.Response{Content: "hi back", Model: "gpt-test", InputTokens: 2, CachedInputTokens: 1, OutputTokens: 3}
 
 	if err := saveRecordedResponse(path, params, []string{"backup"}, resp); err != nil {
 		require.NoError(t, err)
@@ -406,7 +444,7 @@ func TestRecordedResponseRoundTrip(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
-	if got.Content != "hi back" || got.Model != "gpt-test" || got.InputTokens != 2 || got.OutputTokens != 3 {
+	if got.Content != "hi back" || got.Model != "gpt-test" || got.InputTokens != 2 || got.CachedInputTokens != 1 || got.OutputTokens != 3 {
 		require.Failf(t, "unexpected replay response", "got = %+v", got)
 	}
 }
@@ -616,6 +654,42 @@ func TestFormatSessionDetailsSummary(t *testing.T) {
 	}
 }
 
+func TestFormatAgentPerformanceSummary(t *testing.T) {
+	t.Parallel()
+
+	summary := session.AgentPerformanceSummary{
+		Agent:                    "reviewer",
+		EvaluationCount:          2,
+		NegativeKnowledgeCount:   1,
+		FailureCount:             1,
+		DefaultAgentSessionCount: 1,
+		ScoredEvaluationCount:    2,
+		AverageScore:             7.5,
+		MinScore:                 6,
+		MaxScore:                 9,
+		Outcomes:                 []session.OutcomeCount{{Outcome: "pass", Count: 1}, {Outcome: "fail", Count: 1}},
+		LatestActivity:           time.Date(2026, 5, 2, 10, 30, 0, 0, time.UTC),
+	}
+	got := formatAgentPerformanceSummary(summary)
+	for _, want := range []string{
+		"agent=reviewer",
+		"evaluations=2",
+		"failures=1",
+		"negative_knowledge=1",
+		"default_agent_sessions=1",
+		"scored=2",
+		"avg_score=7.50",
+		"min_score=6",
+		"max_score=9",
+		"outcomes=pass:1,fail:1",
+		"latest=2026-05-02T10:30:00Z",
+	} {
+		if !strings.Contains(got, want) {
+			require.Failf(t, "formatted agent performance missing content", "missing %q in %q", want, got)
+		}
+	}
+}
+
 func TestFormatFailure(t *testing.T) {
 	t.Parallel()
 
@@ -731,7 +805,7 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 		replayPath,
 		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
-		&llm.Response{Content: "recorded answer", Model: "gpt-test"},
+		&llm.Response{Content: "recorded answer", Model: "gpt-test", InputTokens: 2, CachedInputTokens: 1, OutputTokens: 3},
 	); err != nil {
 		require.NoError(t, err)
 	}
@@ -907,6 +981,247 @@ func TestFormatGitHistoryResult(t *testing.T) {
 	}
 }
 
+func TestSummarizeAndFormatCodeSymbolFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "B"}}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Symbols: []codeintel.Symbol{{Name: "A"}, {Name: "Run"}}},
+		{Path: filepath.Join(root, "pkg", "empty.go"), Package: "pkg"},
+		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "C"}, {Name: "Build"}}},
+	}}
+	summaries := summarizeCodeSymbolFiles(root, idx)
+	want := []codeSymbolFileSummary{
+		{Path: "cmd/a.go", Package: "main", Symbols: 2},
+		{Path: "pkg/c.go", Package: "pkg", Symbols: 2},
+		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected symbol file summaries", "got %#v, want %#v", summaries, want)
+	}
+	got := formatCodeSymbolFileSummary(summaries[0])
+	if got != "path=cmd/a.go	package=main	symbols=2" {
+		require.Failf(t, "unexpected symbol file summary format", "got %q", got)
+	}
+}
+
+func TestSummarizeAndFormatCodeSymbols(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{Symbols: []codeintel.Symbol{
+		{Kind: "func"},
+		{Kind: "type"},
+		{Kind: "func"},
+		{Kind: "const"},
+		{Kind: ""},
+	}}
+	summaries := summarizeCodeSymbols(idx)
+	want := []codeSymbolSummary{{Kind: "func", Count: 2}, {Kind: "const", Count: 1}, {Kind: "type", Count: 1}}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected symbol summaries", "got %#v, want %#v", summaries, want)
+	}
+	got := formatCodeSymbolSummary(summaries[0])
+	if got != "kind=func	symbols=2" {
+		require.Failf(t, "unexpected symbol summary format", "got %q", got)
+	}
+}
+
+func TestSummarizeCodeSymbolKindFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "type"}}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "FUNC"}}},
+		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Kind: "const"}}},
+	}}
+	summaries := summarizeCodeSymbolKindFiles(root, idx, "func")
+	want := []codeSymbolFileSummary{
+		{Path: "cmd/a.go", Package: "main", Symbols: 2},
+		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected symbol kind file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeSymbolKindFiles(root, idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing kind should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeSymbolKindFiles(root, idx, " "); got != nil {
+		require.Failf(t, "blank kind should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodeSymbolKindPackages(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: "pkg/b.go", Package: "pkg", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "type"}}},
+		{Path: "cmd/a.go", Package: "main", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "FUNC"}}},
+		{Path: "pkg/c.go", Package: "pkg", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "FUNC"}, {Kind: "const"}}},
+		{Path: "empty.go", Symbols: []codeintel.Symbol{{Kind: "func"}}},
+	}}
+	summaries := summarizeCodeSymbolKindPackages(idx, "func")
+	want := []codePackageSummary{
+		{Name: "pkg", Files: 2, Symbols: 3},
+		{Name: "main", Files: 1, Symbols: 2},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected symbol kind package summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeSymbolKindPackages(idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing kind should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeSymbolKindPackages(idx, " "); got != nil {
+		require.Failf(t, "blank kind should return nil", "got %#v", got)
+	}
+}
+
+func TestCodeSymbolsByKind(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{Symbols: []codeintel.Symbol{
+		{Name: "Run", Kind: "func", File: "b.go", Line: 20},
+		{Name: "Client", Kind: "type", File: "a.go", Line: 1},
+		{Name: "Build", Kind: "func", File: "a.go", Line: 10},
+		{Name: "Count", Kind: "var", File: "c.go", Line: 3},
+	}}
+	matches := codeSymbolsByKind(idx, " FUNC ")
+	want := []codeintel.Symbol{
+		{Name: "Build", Kind: "func", File: "a.go", Line: 10},
+		{Name: "Run", Kind: "func", File: "b.go", Line: 20},
+	}
+	if !reflect.DeepEqual(matches, want) {
+		require.Failf(t, "unexpected kind matches", "got %#v, want %#v", matches, want)
+	}
+	if got := codeSymbolsByKind(idx, " "); got != nil {
+		require.Failf(t, "blank kind should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodeSymbolNameFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Build"}}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Run"}}},
+		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Client"}}},
+	}}
+	summaries := summarizeCodeSymbolNameFiles(root, idx, "Run")
+	want := []codeSymbolFileSummary{
+		{Path: "cmd/a.go", Package: "main", Symbols: 2},
+		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected symbol name file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeSymbolNameFiles(root, idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing name should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeSymbolNameFiles(root, idx, " "); got != nil {
+		require.Failf(t, "blank name should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodeSymbolNamePackages(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: "pkg/b.go", Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Build"}}},
+		{Path: "cmd/a.go", Package: "main", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Run"}}},
+		{Path: "pkg/c.go", Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Run"}, {Name: "Client"}}},
+		{Path: "empty.go", Symbols: []codeintel.Symbol{{Name: "Run"}}},
+	}}
+	summaries := summarizeCodeSymbolNamePackages(idx, "Run")
+	want := []codePackageSummary{
+		{Name: "pkg", Files: 2, Symbols: 3},
+		{Name: "main", Files: 1, Symbols: 2},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected symbol name package summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeSymbolNamePackages(idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing name should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeSymbolNamePackages(idx, " "); got != nil {
+		require.Failf(t, "blank name should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodeSymbolPrefixFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Build"}}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Symbols: []codeintel.Symbol{{Name: "Render"}, {Name: "Run"}}},
+		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Client"}}},
+	}}
+	summaries := summarizeCodeSymbolPrefixFiles(root, idx, "R")
+	want := []codeSymbolFileSummary{
+		{Path: "cmd/a.go", Package: "main", Symbols: 2},
+		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected symbol prefix file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeSymbolPrefixFiles(root, idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing prefix should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeSymbolPrefixFiles(root, idx, " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodeSymbolPrefixPackages(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: "pkg/b.go", Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Build"}}},
+		{Path: "cmd/a.go", Package: "main", Symbols: []codeintel.Symbol{{Name: "Render"}, {Name: "Run"}}},
+		{Path: "pkg/c.go", Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Render"}, {Name: "Run"}, {Name: "Client"}}},
+		{Path: "empty.go", Symbols: []codeintel.Symbol{{Name: "Run"}}},
+	}}
+	summaries := summarizeCodeSymbolPrefixPackages(idx, "R")
+	want := []codePackageSummary{
+		{Name: "pkg", Files: 2, Symbols: 3},
+		{Name: "main", Files: 1, Symbols: 2},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected symbol prefix package summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeSymbolPrefixPackages(idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing prefix should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeSymbolPrefixPackages(idx, " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestCodeSymbolsWithPrefix(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{Symbols: []codeintel.Symbol{
+		{Name: "RunOnce", File: "b.go", Line: 20},
+		{Name: "Build", File: "a.go", Line: 1},
+		{Name: "Run", File: "a.go", Line: 10},
+		{Name: "Run", File: "a.go", Line: 8},
+	}}
+	matches := codeSymbolsWithPrefix(idx, "Run")
+	want := []codeintel.Symbol{
+		{Name: "Run", File: "a.go", Line: 8},
+		{Name: "Run", File: "a.go", Line: 10},
+		{Name: "RunOnce", File: "b.go", Line: 20},
+	}
+	if !reflect.DeepEqual(matches, want) {
+		require.Failf(t, "unexpected prefix matches", "got %#v, want %#v", matches, want)
+	}
+	if got := codeSymbolsWithPrefix(idx, " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
 func TestFormatCodeSymbol(t *testing.T) {
 	t.Parallel()
 
@@ -920,6 +1235,281 @@ func TestFormatCodeSymbol(t *testing.T) {
 	want := strings.Join([]string{"Run", "kind=method", "path=pkg/runner.go", "line=42"}, "\t")
 	if got != want {
 		require.Failf(t, "unexpected code symbol format", "got %q, want %q", got, want)
+	}
+}
+
+func TestSummarizeAndFormatCodeImportFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Imports: []string{"fmt"}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Imports: []string{"context", "fmt"}},
+		{Path: filepath.Join(root, "pkg", "empty.go"), Package: "pkg"},
+		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Imports: []string{"bytes", "errors"}},
+	}}
+	summaries := summarizeCodeImportFiles(root, idx)
+	want := []codeImportFileSummary{
+		{Path: "cmd/a.go", Package: "main", Imports: 2},
+		{Path: "pkg/c.go", Package: "pkg", Imports: 2},
+		{Path: "pkg/b.go", Package: "pkg", Imports: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected import file summaries", "got %#v, want %#v", summaries, want)
+	}
+	got := formatCodeImportFileSummary(summaries[0])
+	if got != "path=cmd/a.go	package=main	imports=2" {
+		require.Failf(t, "unexpected import file summary format", "got %q", got)
+	}
+}
+
+func TestSummarizeAndFormatCodeImports(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{ImportEdges: []codeintel.ImportEdge{
+		{From: "a.go", Import: "fmt"},
+		{From: "b.go", Import: "context"},
+		{From: "a.go", Import: "fmt"},
+		{From: "c.go", Import: "fmt"},
+		{From: "d.go", Import: "context"},
+	}}
+	summaries := summarizeCodeImports(idx)
+	want := []codeImportSummary{{Path: "context", Files: 2}, {Path: "fmt", Files: 2}}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected import summaries", "got %#v, want %#v", summaries, want)
+	}
+	got := formatCodeImportSummary(summaries[1])
+	if got != "import=fmt	files=2" {
+		require.Failf(t, "unexpected import summary format", "got %q", got)
+	}
+}
+
+func TestSummarizeCodeImportPrefix(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{ImportEdges: []codeintel.ImportEdge{
+		{From: "b.go", Import: "github.com/tommoulard/atteler/pkg/llm"},
+		{From: "a.go", Import: "context"},
+		{From: "c.go", Import: "github.com/tommoulard/atteler/pkg/agent"},
+		{From: "d.go", Import: "github.com/tommoulard/atteler/pkg/llm"},
+		{From: "d.go", Import: "github.com/tommoulard/atteler/pkg/llm"},
+	}}
+	summaries := summarizeCodeImportPrefix(idx, "github.com/tommoulard/atteler/pkg/")
+	want := []codeImportSummary{
+		{Path: "github.com/tommoulard/atteler/pkg/llm", Files: 2},
+		{Path: "github.com/tommoulard/atteler/pkg/agent", Files: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected import prefix summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeImportPrefix(idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing prefix should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeImportPrefix(idx, " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodeImportPrefixFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg"},
+			{Path: filepath.Join(root, "cmd", "a.go"), Package: "main"},
+			{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: filepath.Join(root, "pkg", "b.go"), Import: "github.com/example/beta"},
+			{From: filepath.Join(root, "pkg", "b.go"), Import: "github.com/example/beta"},
+			{From: filepath.Join(root, "cmd", "a.go"), Import: "github.com/example/alpha"},
+			{From: filepath.Join(root, "cmd", "a.go"), Import: "github.com/example/beta"},
+			{From: filepath.Join(root, "pkg", "c.go"), Import: "context"},
+		},
+	}
+	summaries := summarizeCodeImportPrefixFiles(root, idx, "github.com/example/")
+	want := []codeImportFileSummary{
+		{Path: "cmd/a.go", Package: "main", Imports: 2},
+		{Path: "pkg/b.go", Package: "pkg", Imports: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected import prefix file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeImportPrefixFiles(root, idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing prefix should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeImportPrefixFiles(root, idx, " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodeImportPrefixPackages(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: "pkg/b.go", Package: "pkg"},
+			{Path: "cmd/a.go", Package: "main"},
+			{Path: "pkg/c.go", Package: "pkg"},
+			{Path: "empty.go"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: "pkg/b.go", Import: "github.com/example/beta"},
+			{From: "pkg/b.go", Import: "github.com/example/beta"},
+			{From: "cmd/a.go", Import: "github.com/example/alpha"},
+			{From: "cmd/a.go", Import: "github.com/example/beta"},
+			{From: "pkg/c.go", Import: "context"},
+			{From: "empty.go", Import: "github.com/example/ignored"},
+		},
+	}
+	summaries := summarizeCodeImportPrefixPackages(idx, "github.com/example/")
+	want := []codePackageImportMatchSummary{
+		{Name: "main", Files: 1, Imports: 2},
+		{Name: "pkg", Files: 1, Imports: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected import prefix package summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := formatCodePackageImportMatchSummary(summaries[0]); got != "package=main\tfiles=1\timports=2" {
+		require.Failf(t, "unexpected import package summary format", "got %q", got)
+	}
+	if got := summarizeCodeImportPrefixPackages(idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing prefix should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeImportPrefixPackages(idx, " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestCodeImportEdgesWithPrefix(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{ImportEdges: []codeintel.ImportEdge{
+		{From: "b.go", Import: "github.com/tommoulard/atteler/pkg/llm"},
+		{From: "a.go", Import: "context"},
+		{From: "c.go", Import: "github.com/tommoulard/atteler/pkg/agent"},
+	}}
+	edges := codeImportEdgesWithPrefix(idx, "github.com/tommoulard/atteler/pkg/")
+	want := []codeintel.ImportEdge{
+		{From: "b.go", Import: "github.com/tommoulard/atteler/pkg/llm"},
+		{From: "c.go", Import: "github.com/tommoulard/atteler/pkg/agent"},
+	}
+	if !reflect.DeepEqual(edges, want) {
+		require.Failf(t, "unexpected import prefix edges", "got %#v, want %#v", edges, want)
+	}
+	if got := codeImportEdgesWithPrefix(idx, " "); got != nil {
+		require.Failf(t, "blank import prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestCodeImportEdgesForPath(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{ImportEdges: []codeintel.ImportEdge{
+		{From: "b.go", Import: "fmt"},
+		{From: "a.go", Import: "context"},
+		{From: "c.go", Import: "context"},
+	}}
+	edges := codeImportEdgesForPath(idx, "context")
+	want := []codeintel.ImportEdge{{From: "a.go", Import: "context"}, {From: "c.go", Import: "context"}}
+	if !reflect.DeepEqual(edges, want) {
+		require.Failf(t, "unexpected import path edges", "got %#v, want %#v", edges, want)
+	}
+	if got := codeImportEdgesForPath(idx, " "); got != nil {
+		require.Failf(t, "blank import path should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodeImportPath(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{ImportEdges: []codeintel.ImportEdge{
+		{From: "b.go", Import: "fmt"},
+		{From: "a.go", Import: "context"},
+		{From: "a.go", Import: "context"},
+		{From: "c.go", Import: "context"},
+	}}
+	summaries := summarizeCodeImportPath(idx, "context")
+	want := []codeImportSummary{{Path: "context", Files: 2}}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected import path summary", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeImportPath(idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing import path should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeImportPath(idx, " "); got != nil {
+		require.Failf(t, "blank import path should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodeImportPathFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg"},
+			{Path: filepath.Join(root, "cmd", "a.go"), Package: "main"},
+			{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: filepath.Join(root, "pkg", "b.go"), Import: "context"},
+			{From: filepath.Join(root, "pkg", "b.go"), Import: "context"},
+			{From: filepath.Join(root, "cmd", "a.go"), Import: "context"},
+			{From: filepath.Join(root, "pkg", "c.go"), Import: "fmt"},
+		},
+	}
+	summaries := summarizeCodeImportPathFiles(root, idx, "context")
+	want := []codeImportFileSummary{
+		{Path: "cmd/a.go", Package: "main", Imports: 1},
+		{Path: "pkg/b.go", Package: "pkg", Imports: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected import path file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeImportPathFiles(root, idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing import path should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeImportPathFiles(root, idx, " "); got != nil {
+		require.Failf(t, "blank import path should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeAndFormatCodeImportPathPackages(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: "pkg/b.go", Package: "pkg"},
+			{Path: "cmd/a.go", Package: "main"},
+			{Path: "pkg/c.go", Package: "pkg"},
+			{Path: "empty.go"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: "pkg/b.go", Import: "context"},
+			{From: "pkg/b.go", Import: "context"},
+			{From: "cmd/a.go", Import: "context"},
+			{From: "pkg/c.go", Import: "fmt"},
+			{From: "empty.go", Import: "context"},
+		},
+	}
+	summaries := summarizeCodeImportPathPackages(idx, "context")
+	want := []codePackageImportMatchSummary{
+		{Name: "main", Files: 1},
+		{Name: "pkg", Files: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected import path package summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := formatCodePackageImportMatchSummary(summaries[0]); got != "package=main\tfiles=1" {
+		require.Failf(t, "unexpected import package summary format", "got %q", got)
+	}
+	if got := summarizeCodeImportPathPackages(idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing import path should return empty", "got %#v", got)
+	}
+	if got := summarizeCodeImportPathPackages(idx, " "); got != nil {
+		require.Failf(t, "blank import path should return nil", "got %#v", got)
 	}
 }
 
@@ -944,6 +1534,752 @@ func TestRelativeCodePath(t *testing.T) {
 	got := relativeCodePath(root, filepath.Join(root, "cmd", "atteler", "main.go"))
 	if got != "cmd/atteler/main.go" {
 		require.Failf(t, "unexpected relative code path", "got %q", got)
+	}
+}
+
+func TestSummarizeCodePackageSymbolFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "B"}}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Symbols: []codeintel.Symbol{{Name: "A"}, {Name: "Run"}}},
+		{Path: filepath.Join(root, "pkg", "empty.go"), Package: "pkg"},
+		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "C"}, {Name: "Build"}}},
+	}}
+	summaries := summarizeCodePackageSymbolFiles(root, idx, "pkg")
+	want := []codeSymbolFileSummary{
+		{Path: "pkg/c.go", Package: "pkg", Symbols: 2},
+		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package symbol file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageSymbolFiles(root, idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing package should return empty", "got %#v", got)
+	}
+	if got := summarizeCodePackageSymbolFiles(root, idx, " "); got != nil {
+		require.Failf(t, "blank package should return nil", "got %#v", got)
+	}
+}
+
+func TestCodePackageSymbolsByName(t *testing.T) {
+	t.Parallel()
+
+	const testPackageName = "core"
+
+	packageName, name, err := parseCodeFileSymbolFilterSpec(testPackageName+":Run", "code package symbol", "package:name")
+	if err != nil {
+		require.NoError(t, err)
+	}
+	if packageName != testPackageName || name != "Run" {
+		require.Failf(t, "unexpected parsed spec", "package=%q name=%q", packageName, name)
+	}
+	if _, _, err := parseCodeFileSymbolFilterSpec(testPackageName, "code package symbol", "package:name"); err == nil {
+		require.Fail(t, "expected parse error for missing symbol name")
+	}
+
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Package: testPackageName, Symbols: []codeintel.Symbol{{Name: "Run", Kind: "func", File: "b.go", Line: 2}, {Name: "Client", Kind: "type", File: "a.go", Line: 1}}},
+		{Package: "main", Symbols: []codeintel.Symbol{{Name: "Run", Kind: "func", File: "main.go", Line: 1}}},
+		{Package: testPackageName, Symbols: []codeintel.Symbol{{Name: "Run", Kind: "method", File: "a.go", Line: 3}, {Name: "Build", Kind: "func", File: "c.go", Line: 4}}},
+	}}
+	symbols := codePackageSymbolsByName(idx, testPackageName, "Run")
+	want := []codeintel.Symbol{
+		{Name: "Run", Kind: "method", File: "a.go", Line: 3},
+		{Name: "Run", Kind: "func", File: "b.go", Line: 2},
+	}
+	if !reflect.DeepEqual(symbols, want) {
+		require.Failf(t, "unexpected package symbols by name", "got %#v, want %#v", symbols, want)
+	}
+	if got := codePackageSymbolsByName(idx, testPackageName, " "); got != nil {
+		require.Failf(t, "blank symbol name should return nil", "got %#v", got)
+	}
+	if got := codePackageSymbolsByName(idx, "missing", "Run"); got != nil {
+		require.Failf(t, "missing package should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodePackageSymbolNameFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Build"}}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Run"}}},
+		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Run"}, {Name: "Client"}}},
+	}}
+	summaries := summarizeCodePackageSymbolNameFiles(root, idx, "pkg", "Run")
+	want := []codeSymbolFileSummary{
+		{Path: "pkg/c.go", Package: "pkg", Symbols: 2},
+		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package symbol name file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageSymbolNameFiles(root, idx, "pkg", "missing"); len(got) != 0 {
+		require.Failf(t, "missing name should return empty", "got %#v", got)
+	}
+	if got := summarizeCodePackageSymbolNameFiles(root, idx, "pkg", " "); got != nil {
+		require.Failf(t, "blank name should return nil", "got %#v", got)
+	}
+	if got := summarizeCodePackageSymbolNameFiles(root, idx, "missing", "Run"); len(got) != 0 {
+		require.Failf(t, "missing package should return empty", "got %#v", got)
+	}
+	if got := summarizeCodePackageSymbolNameFiles(root, idx, " ", "Run"); got != nil {
+		require.Failf(t, "blank package should return nil", "got %#v", got)
+	}
+}
+
+func TestCodePackageSymbolsByKindAndParseSpec(t *testing.T) {
+	t.Parallel()
+
+	packageName, kind, err := parseCodePackageSymbolKindSpec("llm:func")
+	if err != nil {
+		require.NoError(t, err)
+	}
+	if packageName != "llm" || kind != "func" {
+		require.Failf(t, "unexpected parsed spec", "package=%q kind=%q", packageName, kind)
+	}
+	if _, _, err := parseCodePackageSymbolKindSpec("llm"); err == nil {
+		require.Fail(t, "expected parse error for missing kind")
+	}
+
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Package: "llm", Symbols: []codeintel.Symbol{{Name: "Run", Kind: "func", File: "b.go", Line: 2}, {Name: "Client", Kind: "type", File: "a.go", Line: 1}}},
+		{Package: "llm", Symbols: []codeintel.Symbol{{Name: "Build", Kind: "func", File: "c.go", Line: 3}}},
+	}}
+	symbols := codePackageSymbolsByKind(idx, "llm", "FUNC")
+	want := []codeintel.Symbol{
+		{Name: "Build", Kind: "func", File: "c.go", Line: 3},
+		{Name: "Run", Kind: "func", File: "b.go", Line: 2},
+	}
+	if !reflect.DeepEqual(symbols, want) {
+		require.Failf(t, "unexpected package symbols by kind", "got %#v, want %#v", symbols, want)
+	}
+}
+
+func TestSummarizeCodePackageSymbolPrefixFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Build"}}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Symbols: []codeintel.Symbol{{Name: "Render"}, {Name: "Run"}}},
+		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Render"}, {Name: "Run"}, {Name: "Client"}}},
+	}}
+	summaries := summarizeCodePackageSymbolPrefixFiles(root, idx, "pkg", "R")
+	want := []codeSymbolFileSummary{
+		{Path: "pkg/c.go", Package: "pkg", Symbols: 2},
+		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package symbol prefix file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageSymbolPrefixFiles(root, idx, "pkg", "missing"); len(got) != 0 {
+		require.Failf(t, "missing prefix should return empty", "got %#v", got)
+	}
+	if got := summarizeCodePackageSymbolPrefixFiles(root, idx, "pkg", " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+	if got := summarizeCodePackageSymbolPrefixFiles(root, idx, "missing", "R"); len(got) != 0 {
+		require.Failf(t, "missing package should return empty", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodePackageSymbolKindFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "type"}}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "FUNC"}}},
+		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "FUNC"}, {Kind: "const"}}},
+	}}
+	summaries := summarizeCodePackageSymbolKindFiles(root, idx, "pkg", "func")
+	want := []codeSymbolFileSummary{
+		{Path: "pkg/c.go", Package: "pkg", Symbols: 2},
+		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package symbol kind file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageSymbolKindFiles(root, idx, "pkg", "missing"); len(got) != 0 {
+		require.Failf(t, "missing kind should return empty", "got %#v", got)
+	}
+	if got := summarizeCodePackageSymbolKindFiles(root, idx, "pkg", " "); got != nil {
+		require.Failf(t, "blank kind should return nil", "got %#v", got)
+	}
+	if got := summarizeCodePackageSymbolKindFiles(root, idx, "missing", "func"); len(got) != 0 {
+		require.Failf(t, "missing package should return empty", "got %#v", got)
+	}
+}
+
+func TestCodePackageSymbolsWithPrefix(t *testing.T) {
+	t.Parallel()
+
+	packageName, prefix, err := parseCodeFileSymbolFilterSpec("llm:Ru", "code package symbol prefix", "package:prefix")
+	if err != nil {
+		require.NoError(t, err)
+	}
+	if packageName != "llm" || prefix != "Ru" {
+		require.Failf(t, "unexpected parsed spec", "package=%q prefix=%q", packageName, prefix)
+	}
+	if _, _, err := parseCodeFileSymbolFilterSpec("llm", "code package symbol prefix", "package:prefix"); err == nil {
+		require.Fail(t, "expected parse error for missing prefix")
+	}
+
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Package: "llm", Symbols: []codeintel.Symbol{{Name: "Run", File: "b.go", Line: 2}, {Name: "Client", File: "a.go", Line: 1}}},
+		{Package: "main", Symbols: []codeintel.Symbol{{Name: "Main", File: "main.go", Line: 1}}},
+		{Package: "llm", Symbols: []codeintel.Symbol{{Name: "Runtime", File: "c.go", Line: 3}, {Name: "Build", File: "c.go", Line: 4}}},
+	}}
+	symbols := codePackageSymbolsWithPrefix(idx, "llm", "Ru")
+	want := []codeintel.Symbol{
+		{Name: "Run", File: "b.go", Line: 2},
+		{Name: "Runtime", File: "c.go", Line: 3},
+	}
+	if !reflect.DeepEqual(symbols, want) {
+		require.Failf(t, "unexpected package symbols by prefix", "got %#v, want %#v", symbols, want)
+	}
+	if got := codePackageSymbolsWithPrefix(idx, "llm", " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+	if got := codePackageSymbolsWithPrefix(idx, "missing", "Ru"); got != nil {
+		require.Failf(t, "missing package should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeAndFormatCodePackageImportCounts(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Package: "pkg", Imports: []string{"fmt"}},
+		{Package: "main", Imports: []string{"context", "fmt"}},
+		{Package: "pkg"},
+		{Package: "pkg", Imports: []string{"bytes", "fmt"}},
+		{Package: "empty"},
+	}}
+	summaries := summarizeCodePackageImportCounts(idx)
+	want := []codePackageImportSummary{
+		{Name: "pkg", Files: 3, Imports: 3, UniqueImports: 2},
+		{Name: "main", Files: 1, Imports: 2, UniqueImports: 2},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package import summaries", "got %#v, want %#v", summaries, want)
+	}
+	got := formatCodePackageImportSummary(summaries[0])
+	if got != "package=pkg	files=3	imports=3	unique_imports=2" {
+		require.Failf(t, "unexpected package import summary format", "got %q", got)
+	}
+}
+
+func TestCodePackageSymbols(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Package: "llm", Symbols: []codeintel.Symbol{{Name: "Run", File: "b.go", Line: 2}, {Name: "Client", File: "a.go", Line: 1}}},
+		{Package: "main", Symbols: []codeintel.Symbol{{Name: "Main", File: "main.go", Line: 1}}},
+		{Package: "llm", Symbols: []codeintel.Symbol{{Name: "Build", File: "c.go", Line: 3}}},
+	}}
+	symbols := codePackageSymbols(idx, "llm")
+	want := []codeintel.Symbol{
+		{Name: "Build", File: "c.go", Line: 3},
+		{Name: "Client", File: "a.go", Line: 1},
+		{Name: "Run", File: "b.go", Line: 2},
+	}
+	if !reflect.DeepEqual(symbols, want) {
+		require.Failf(t, "unexpected package symbols", "got %#v, want %#v", symbols, want)
+	}
+	if got := codePackageSymbols(idx, " "); got != nil {
+		require.Failf(t, "blank package should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodePackageSymbols(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Package: "llm", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "type"}}},
+		{Package: "main", Symbols: []codeintel.Symbol{{Kind: "func"}}},
+		{Package: "llm", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "const"}}},
+	}}
+	summaries := summarizeCodePackageSymbols(idx, "llm")
+	want := []codeSymbolSummary{{Kind: "func", Count: 2}, {Kind: "const", Count: 1}, {Kind: "type", Count: 1}}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package symbol summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageSymbols(idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing package should return empty", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodePackageImportFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Imports: []string{"fmt"}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Imports: []string{"context", "fmt"}},
+		{Path: filepath.Join(root, "pkg", "empty.go"), Package: "pkg"},
+		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Imports: []string{"bytes", "errors"}},
+	}}
+	summaries := summarizeCodePackageImportFiles(root, idx, "pkg")
+	want := []codeImportFileSummary{
+		{Path: "pkg/c.go", Package: "pkg", Imports: 2},
+		{Path: "pkg/b.go", Package: "pkg", Imports: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package import file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageImportFiles(root, idx, "missing"); len(got) != 0 {
+		require.Failf(t, "missing package should return empty", "got %#v", got)
+	}
+	if got := summarizeCodePackageImportFiles(root, idx, " "); got != nil {
+		require.Failf(t, "blank package should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodePackageImportPrefixFiles(t *testing.T) {
+	t.Parallel()
+
+	const testImportPackageName = "core"
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: filepath.Join(root, "pkg", "core", "b.go"), Package: testImportPackageName},
+			{Path: filepath.Join(root, "pkg", "core", "a.go"), Package: testImportPackageName},
+			{Path: filepath.Join(root, "cmd", "main.go"), Package: "main"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: filepath.Join(root, "pkg", "core", "b.go"), Import: "github.com/example/beta"},
+			{From: filepath.Join(root, "pkg", "core", "b.go"), Import: "github.com/example/beta"},
+			{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "github.com/example/alpha"},
+			{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "github.com/example/beta"},
+			{From: filepath.Join(root, "cmd", "main.go"), Import: "github.com/example/alpha"},
+			{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "context"},
+		},
+	}
+	summaries := summarizeCodePackageImportPrefixFiles(root, idx, testImportPackageName, "github.com/example/")
+	want := []codeImportFileSummary{
+		{Path: "pkg/core/a.go", Package: testImportPackageName, Imports: 2},
+		{Path: "pkg/core/b.go", Package: testImportPackageName, Imports: 1},
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package import prefix file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageImportPrefixFiles(root, idx, testImportPackageName, "missing"); len(got) != 0 {
+		require.Failf(t, "missing prefix should return empty", "got %#v", got)
+	}
+	if got := summarizeCodePackageImportPrefixFiles(root, idx, testImportPackageName, " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestCodePackageImportPrefixFiles(t *testing.T) {
+	t.Parallel()
+
+	const testImportPackageName = "core"
+
+	root := filepath.Join("tmp", "repo")
+	packageName, prefix, err := parseCodeFileSymbolFilterSpec(testImportPackageName+":github.com/example/", "code package import prefix files", "package:prefix")
+	if err != nil {
+		require.NoError(t, err)
+	}
+	if packageName != testImportPackageName || prefix != "github.com/example/" {
+		require.Failf(t, "unexpected parsed spec", "package=%q prefix=%q", packageName, prefix)
+	}
+	if _, _, err := parseCodeFileSymbolFilterSpec(testImportPackageName, "code package import prefix files", "package:prefix"); err == nil {
+		require.Fail(t, "expected parse error for missing prefix")
+	}
+
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: filepath.Join(root, "pkg", "core", "b.go"), Package: testImportPackageName},
+			{Path: filepath.Join(root, "pkg", "core", "a.go"), Package: testImportPackageName},
+			{Path: filepath.Join(root, "cmd", "main.go"), Package: "main"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: filepath.Join(root, "pkg", "core", "b.go"), Import: "github.com/example/beta"},
+			{From: filepath.Join(root, "pkg", "core", "b.go"), Import: "github.com/example/beta"},
+			{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "github.com/example/alpha"},
+			{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "github.com/example/beta"},
+			{From: filepath.Join(root, "cmd", "main.go"), Import: "github.com/example/alpha"},
+			{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "context"},
+		},
+	}
+	edges := codePackageImportPrefixFiles(idx, testImportPackageName, "github.com/example/")
+	want := []codeintel.ImportEdge{
+		{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "github.com/example/alpha"},
+		{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "github.com/example/beta"},
+		{From: filepath.Join(root, "pkg", "core", "b.go"), Import: "github.com/example/beta"},
+	}
+	if !reflect.DeepEqual(edges, want) {
+		require.Failf(t, "unexpected package import prefix files", "got %#v, want %#v", edges, want)
+	}
+	if got := codePackageImportPrefixFiles(idx, testImportPackageName, "missing"); len(got) != 0 {
+		require.Failf(t, "missing prefix should return empty", "got %#v", got)
+	}
+	if got := codePackageImportPrefixFiles(idx, testImportPackageName, " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestCodePackageImportFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	packageName, importPath, err := parseCodeFileSymbolFilterSpec("core:context", "code package import files", "package:import")
+	if err != nil {
+		require.NoError(t, err)
+	}
+	if packageName != "core" || importPath != "context" {
+		require.Failf(t, "unexpected parsed spec", "package=%q import=%q", packageName, importPath)
+	}
+	if _, _, err := parseCodeFileSymbolFilterSpec("core", "code package import files", "package:import"); err == nil {
+		require.Fail(t, "expected parse error for missing import path")
+	}
+
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: filepath.Join(root, "pkg", "core", "b.go"), Package: "core"},
+			{Path: filepath.Join(root, "pkg", "core", "a.go"), Package: "core"},
+			{Path: filepath.Join(root, "cmd", "main.go"), Package: "main"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: filepath.Join(root, "pkg", "core", "b.go"), Import: "context"},
+			{From: filepath.Join(root, "pkg", "core", "b.go"), Import: "context"},
+			{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "fmt"},
+			{From: filepath.Join(root, "cmd", "main.go"), Import: "context"},
+		},
+	}
+	files := codePackageImportFiles(root, idx, "core", "context")
+	want := []string{"pkg/core/b.go"}
+	if !reflect.DeepEqual(files, want) {
+		require.Failf(t, "unexpected package import files", "got %#v, want %#v", files, want)
+	}
+	if got := codePackageImportFiles(root, idx, "core", "missing"); len(got) != 0 {
+		require.Failf(t, "missing import should return empty", "got %#v", got)
+	}
+	if got := codePackageImportFiles(root, idx, "core", " "); got != nil {
+		require.Failf(t, "blank import path should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodePackageImportPathFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: filepath.Join(root, "pkg", "core", "b.go"), Package: "core"},
+			{Path: filepath.Join(root, "pkg", "core", "a.go"), Package: "core"},
+			{Path: filepath.Join(root, "cmd", "main.go"), Package: "main"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: filepath.Join(root, "pkg", "core", "b.go"), Import: "context"},
+			{From: filepath.Join(root, "pkg", "core", "b.go"), Import: "context"},
+			{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "fmt"},
+			{From: filepath.Join(root, "cmd", "main.go"), Import: "context"},
+		},
+	}
+	summaries := summarizeCodePackageImportPathFiles(root, idx, "core", "context")
+	want := []codeImportFileSummary{{Path: "pkg/core/b.go", Package: "core", Imports: 1}}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package import path file summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageImportPathFiles(root, idx, "core", "missing"); len(got) != 0 {
+		require.Failf(t, "missing import should return empty", "got %#v", got)
+	}
+	if got := summarizeCodePackageImportPathFiles(root, idx, "core", " "); got != nil {
+		require.Failf(t, "blank import path should return nil", "got %#v", got)
+	}
+	if got := summarizeCodePackageImportPathFiles(root, idx, "missing", "context"); len(got) != 0 {
+		require.Failf(t, "missing package should return empty", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodePackageImportPath(t *testing.T) {
+	t.Parallel()
+
+	packageName, importPath, err := parseCodeFileSymbolFilterSpec("core:context", "code package import path", "package:import")
+	if err != nil {
+		require.NoError(t, err)
+	}
+	if packageName != "core" || importPath != "context" {
+		require.Failf(t, "unexpected parsed spec", "package=%q import=%q", packageName, importPath)
+	}
+	if _, _, err := parseCodeFileSymbolFilterSpec("core", "code package import path", "package:import"); err == nil {
+		require.Fail(t, "expected parse error for missing import path")
+	}
+
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: "pkg/core/a.go", Package: "core"},
+			{Path: "pkg/core/b.go", Package: "core"},
+			{Path: "cmd/main.go", Package: "main"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: "pkg/core/a.go", Import: "context"},
+			{From: "pkg/core/b.go", Import: "context"},
+			{From: "pkg/core/b.go", Import: "fmt"},
+			{From: "cmd/main.go", Import: "context"},
+		},
+	}
+	summaries := summarizeCodePackageImportPath(idx, "core", "context")
+	want := []codeImportSummary{{Path: "context", Files: 2}}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package import path summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageImportPath(idx, "core", "missing"); len(got) != 0 {
+		require.Failf(t, "missing import should return empty", "got %#v", got)
+	}
+	if got := summarizeCodePackageImportPath(idx, "core", " "); got != nil {
+		require.Failf(t, "blank import path should return nil", "got %#v", got)
+	}
+	if got := summarizeCodePackageImportPath(idx, "missing", "context"); len(got) != 0 {
+		require.Failf(t, "missing package should return empty", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodePackageImportPrefix(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: "pkg/llm/a.go", Package: "llm"},
+			{Path: "pkg/llm/b.go", Package: "llm"},
+			{Path: "cmd/main.go", Package: "main"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: "pkg/llm/a.go", Import: "github.com/tommoulard/atteler/pkg/events"},
+			{From: "pkg/llm/b.go", Import: "github.com/tommoulard/atteler/pkg/events"},
+			{From: "pkg/llm/b.go", Import: "context"},
+			{From: "cmd/main.go", Import: "github.com/tommoulard/atteler/pkg/llm"},
+		},
+	}
+	summaries := summarizeCodePackageImportPrefix(idx, "llm", "github.com/tommoulard/atteler/pkg/")
+	want := []codeImportSummary{{Path: "github.com/tommoulard/atteler/pkg/events", Files: 2}}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package import prefix summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageImportPrefix(idx, "llm", " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodePackageImports(t *testing.T) {
+	t.Parallel()
+
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: "pkg/llm/a.go", Package: "llm"},
+			{Path: "pkg/llm/b.go", Package: "llm"},
+			{Path: "cmd/main.go", Package: "main"},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: "pkg/llm/a.go", Import: "context"},
+			{From: "pkg/llm/a.go", Import: "fmt"},
+			{From: "pkg/llm/b.go", Import: "context"},
+			{From: "cmd/main.go", Import: "context"},
+		},
+	}
+	summaries := summarizeCodePackageImports(idx, "llm")
+	want := []codeImportSummary{{Path: "context", Files: 2}, {Path: "fmt", Files: 1}}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected package import summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodePackageImports(idx, "missing"); got != nil {
+		require.Failf(t, "missing package should return nil", "got %#v", got)
+	}
+}
+
+func TestCodeFileImports(t *testing.T) {
+	t.Parallel()
+
+	file := codeintel.File{Imports: []string{"fmt", "context", "errors"}}
+	imports := codeFileImports(file)
+	want := []string{"context", "errors", "fmt"}
+	if !reflect.DeepEqual(imports, want) {
+		require.Failf(t, "unexpected code file imports", "got %#v, want %#v", imports, want)
+	}
+	if got := codeFileImports(codeintel.File{}); got != nil {
+		require.Failf(t, "empty imports should return nil", "got %#v", got)
+	}
+}
+
+func TestCodeFileImportsForPath(t *testing.T) {
+	t.Parallel()
+
+	file := codeintel.File{Imports: []string{"context", "fmt", "context"}}
+	imports := codeFileImportsForPath(file, "context")
+	want := []string{"context", "context"}
+	if !reflect.DeepEqual(imports, want) {
+		require.Failf(t, "unexpected file imports by path", "got %#v, want %#v", imports, want)
+	}
+	if got := codeFileImportsForPath(file, " "); got != nil {
+		require.Failf(t, "blank import path should return nil", "got %#v", got)
+	}
+}
+
+func TestCodeFileImportsWithPrefix(t *testing.T) {
+	t.Parallel()
+
+	file := codeintel.File{Imports: []string{
+		"github.com/tommoulard/atteler/pkg/llm",
+		"context",
+		"github.com/tommoulard/atteler/pkg/agent",
+	}}
+	imports := codeFileImportsWithPrefix(file, "github.com/tommoulard/atteler/pkg/")
+	want := []string{"github.com/tommoulard/atteler/pkg/agent", "github.com/tommoulard/atteler/pkg/llm"}
+	if !reflect.DeepEqual(imports, want) {
+		require.Failf(t, "unexpected file imports by prefix", "got %#v, want %#v", imports, want)
+	}
+	if got := codeFileImportsWithPrefix(file, " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestSummarizeCodeFileSymbols(t *testing.T) {
+	t.Parallel()
+
+	file := codeintel.File{Symbols: []codeintel.Symbol{
+		{Kind: "func"},
+		{Kind: "type"},
+		{Kind: "func"},
+		{Kind: "const"},
+		{Kind: ""},
+	}}
+	summaries := summarizeCodeFileSymbols(file)
+	want := []codeSymbolSummary{{Kind: "func", Count: 2}, {Kind: "const", Count: 1}, {Kind: "type", Count: 1}}
+	if !reflect.DeepEqual(summaries, want) {
+		require.Failf(t, "unexpected file symbol summaries", "got %#v, want %#v", summaries, want)
+	}
+	if got := summarizeCodeFileSymbols(codeintel.File{}); len(got) != 0 {
+		require.Failf(t, "empty file should return empty summaries", "got %#v", got)
+	}
+}
+
+func TestCodeFileSymbols(t *testing.T) {
+	t.Parallel()
+
+	file := codeintel.File{Symbols: []codeintel.Symbol{
+		{Name: "Run", Kind: "func", File: "b.go", Line: 2},
+		{Name: "Client", Kind: "type", File: "a.go", Line: 1},
+		{Name: "Build", Kind: "func", File: "c.go", Line: 3},
+	}}
+	symbols := codeFileSymbols(file)
+	want := []codeintel.Symbol{
+		{Name: "Build", Kind: "func", File: "c.go", Line: 3},
+		{Name: "Client", Kind: "type", File: "a.go", Line: 1},
+		{Name: "Run", Kind: "func", File: "b.go", Line: 2},
+	}
+	if !reflect.DeepEqual(symbols, want) {
+		require.Failf(t, "unexpected code file symbols", "got %#v, want %#v", symbols, want)
+	}
+	if got := codeFileSymbols(codeintel.File{}); got != nil {
+		require.Failf(t, "empty symbols should return nil", "got %#v", got)
+	}
+}
+
+func TestCodeFileSymbolsByName(t *testing.T) {
+	t.Parallel()
+
+	target, name, err := parseCodeFileSymbolFilterSpec("pkg/llm/client.go:Run", "code file symbol", "path:name")
+	if err != nil {
+		require.NoError(t, err)
+	}
+	if target != "pkg/llm/client.go" || name != "Run" {
+		require.Failf(t, "unexpected parsed spec", "target=%q name=%q", target, name)
+	}
+	if _, _, err := parseCodeFileSymbolFilterSpec("pkg/llm/client.go", "code file symbol", "path:name"); err == nil {
+		require.Fail(t, "expected parse error for missing name")
+	}
+
+	file := codeintel.File{Symbols: []codeintel.Symbol{
+		{Name: "Run", Kind: "method", File: "b.go", Line: 2},
+		{Name: "Client", Kind: "type", File: "a.go", Line: 1},
+		{Name: "Run", Kind: "func", File: "a.go", Line: 3},
+	}}
+	symbols := codeFileSymbolsByName(file, "Run")
+	want := []codeintel.Symbol{
+		{Name: "Run", Kind: "func", File: "a.go", Line: 3},
+		{Name: "Run", Kind: "method", File: "b.go", Line: 2},
+	}
+	if !reflect.DeepEqual(symbols, want) {
+		require.Failf(t, "unexpected file symbols by name", "got %#v, want %#v", symbols, want)
+	}
+	if got := codeFileSymbolsByName(file, " "); got != nil {
+		require.Failf(t, "blank name should return nil", "got %#v", got)
+	}
+}
+
+func TestCodeFileSymbolsWithPrefix(t *testing.T) {
+	t.Parallel()
+
+	file := codeintel.File{Symbols: []codeintel.Symbol{
+		{Name: "NewClient", Kind: "func", File: "b.go", Line: 2},
+		{Name: "Client", Kind: "type", File: "a.go", Line: 1},
+		{Name: "NewRegistry", Kind: "func", File: "c.go", Line: 3},
+	}}
+	symbols := codeFileSymbolsWithPrefix(file, "New")
+	want := []codeintel.Symbol{
+		{Name: "NewClient", Kind: "func", File: "b.go", Line: 2},
+		{Name: "NewRegistry", Kind: "func", File: "c.go", Line: 3},
+	}
+	if !reflect.DeepEqual(symbols, want) {
+		require.Failf(t, "unexpected file symbols by prefix", "got %#v, want %#v", symbols, want)
+	}
+	if got := codeFileSymbolsWithPrefix(file, " "); got != nil {
+		require.Failf(t, "blank prefix should return nil", "got %#v", got)
+	}
+}
+
+func TestCodeFileSymbolsByKindAndParseSpec(t *testing.T) {
+	t.Parallel()
+
+	target, kind, err := parseCodeFileSymbolKindSpec("pkg/llm/llm.go:func")
+	if err != nil {
+		require.NoError(t, err)
+	}
+	if target != "pkg/llm/llm.go" || kind != "func" {
+		require.Failf(t, "unexpected parsed file symbol kind spec", "target=%q kind=%q", target, kind)
+	}
+	if _, _, err := parseCodeFileSymbolKindSpec("pkg/llm/llm.go"); err == nil {
+		require.Fail(t, "expected parse error for missing kind")
+	}
+
+	file := codeintel.File{Symbols: []codeintel.Symbol{
+		{Name: "Run", Kind: "func", File: "b.go", Line: 2},
+		{Name: "Client", Kind: "type", File: "a.go", Line: 1},
+		{Name: "Build", Kind: "func", File: "c.go", Line: 3},
+	}}
+	symbols := codeFileSymbolsByKind(file, "FUNC")
+	want := []codeintel.Symbol{
+		{Name: "Build", Kind: "func", File: "c.go", Line: 3},
+		{Name: "Run", Kind: "func", File: "b.go", Line: 2},
+	}
+	if !reflect.DeepEqual(symbols, want) {
+		require.Failf(t, "unexpected file symbols by kind", "got %#v, want %#v", symbols, want)
+	}
+}
+
+func TestSummarizeCodeFiles(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{Files: []codeintel.File{
+		{Path: filepath.Join(root, "pkg", "b.go"), Package: "pkg", Imports: []string{"fmt"}, Symbols: []codeintel.Symbol{{Name: "B"}}},
+		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Imports: []string{"context", "fmt"}, Symbols: []codeintel.Symbol{{Name: "A"}, {Name: "Run"}}},
+	}}
+	files := summarizeCodeFiles(root, idx)
+	want := []codePackageFile{
+		{Path: "cmd/a.go", Package: "main", Symbols: 2, Imports: 2},
+		{Path: "pkg/b.go", Package: "pkg", Symbols: 1, Imports: 1},
+	}
+	if !reflect.DeepEqual(files, want) {
+		require.Failf(t, "unexpected code file summaries", "got %#v, want %#v", files, want)
 	}
 }
 
@@ -1068,6 +2404,36 @@ func TestFormatCodeLayer(t *testing.T) {
 	}
 }
 
+func TestCodeGraphDirectDependencies(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("tmp", "repo")
+	idx := codeintel.Index{
+		Files: []codeintel.File{
+			{Path: filepath.Join(root, "pkg", "runner.go")},
+			{Path: filepath.Join(root, "pkg", "worker.go")},
+		},
+		ImportEdges: []codeintel.ImportEdge{
+			{From: filepath.Join(root, "pkg", "runner.go"), Import: "context"},
+			{From: filepath.Join(root, "pkg", "runner.go"), Import: "fmt"},
+			{From: filepath.Join(root, "pkg", "worker.go"), Import: "context"},
+		},
+	}
+	graph := importGraphFromIndex(root, idx)
+
+	deps := codeGraphDependencies(graph, root, "pkg/runner.go")
+	wantDeps := []codegraph.NodeID{"context", "fmt"}
+	if !reflect.DeepEqual(deps, wantDeps) {
+		require.Failf(t, "unexpected direct deps", "got %#v, want %#v", deps, wantDeps)
+	}
+
+	rdeps := codeGraphReverseDependencies(graph, root, "context")
+	wantRdeps := []codegraph.NodeID{"pkg/runner.go", "pkg/worker.go"}
+	if !reflect.DeepEqual(rdeps, wantRdeps) {
+		require.Failf(t, "unexpected direct reverse deps", "got %#v, want %#v", rdeps, wantRdeps)
+	}
+}
+
 func TestImportGraphReachableAndNormalizeTarget(t *testing.T) {
 	t.Parallel()
 
@@ -1109,6 +2475,25 @@ func TestFormatWatchFinding(t *testing.T) {
 	}, "\t")
 	if got != want {
 		require.Failf(t, "unexpected watch finding format", "got %q, want %q", got, want)
+	}
+}
+
+func TestFormatWatchIteration(t *testing.T) {
+	t.Parallel()
+
+	started := time.Date(2026, 5, 2, 9, 30, 0, 0, time.UTC)
+	got := formatWatchIteration(watch.IterationResult{
+		Iteration: 1,
+		StartedAt: started,
+		Duration:  2 * time.Second,
+		Findings: []watch.Finding{
+			{Path: "TODO.md", Kind: watch.KindStaleTODO},
+			{Path: "pkg/example/example.go", Kind: watch.KindMissingTest},
+		},
+	})
+	want := "iteration=1\tfindings=2\tstarted=2026-05-02T09:30:00Z\tduration=2s"
+	if got != want {
+		require.Failf(t, "unexpected watch iteration format", "got %q, want %q", got, want)
 	}
 }
 
@@ -1173,6 +2558,85 @@ func TestFormatSpeculatePlan(t *testing.T) {
 	}
 }
 
+func TestFormatReviewPlan(t *testing.T) {
+	t.Parallel()
+
+	plan, err := review.NewPlan(
+		[]review.Reviewer{{Name: "alpha"}, {Name: "beta"}},
+		[]string{"pkg/auth.go"},
+		[]string{"tests pass"},
+	)
+	if err != nil {
+		require.NoError(t, err)
+	}
+	got := formatReviewPlan(plan)
+	for _, want := range []string{
+		"reviewers:\n",
+		"  - alpha\n",
+		"paths:\n  - pkg/auth.go\n",
+		"rounds:\n",
+		"1\tindependent-review\tIndependent review\treviewers=alpha,beta",
+		"cross_reviews:\n",
+		"alpha -> beta",
+		"beta -> alpha",
+		"gates:\n  - tests pass\n",
+	} {
+		if !strings.Contains(got, want) {
+			require.Failf(t, "formatted review plan missing content", "missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestReviewPlanDefaults(t *testing.T) {
+	t.Parallel()
+
+	plan, err := review.NewPlan(reviewPlanReviewers(nil), reviewPlanPaths(nil), nil)
+	if err != nil {
+		require.NoError(t, err)
+	}
+	got := formatReviewPlan(plan)
+	for _, want := range []string{
+		"quality-reviewer\tcategories=correctness,maintainability",
+		"test-engineer\tcategories=tests",
+		"paths:\n  - .\n",
+		"behavioral diff reviewed",
+	} {
+		if !strings.Contains(got, want) {
+			require.Failf(t, "default review plan missing content", "missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestFormatSpeculatePromptCacheEstimate(t *testing.T) {
+	t.Parallel()
+
+	plan, err := speculate.NewPlan([]string{"alpha", "beta"}, []string{"tests pass"})
+	if err != nil {
+		require.NoError(t, err)
+	}
+	estimate, err := speculate.EstimatePromptCacheReuse(speculateBranchPrompts(plan, "implement auth flow"))
+	if err != nil {
+		require.NoError(t, err)
+	}
+
+	got := formatSpeculatePromptCacheEstimate(estimate)
+	for _, want := range []string{
+		"prompt_cache:\n",
+		"shared_prefix_bytes:",
+		"reusable_prompt_bytes:",
+		"reuse_ratio:",
+		"alpha\tprompt_bytes=",
+		"beta\tprompt_bytes=",
+	} {
+		if !strings.Contains(got, want) {
+			require.Failf(t, "formatted speculate prompt cache missing content", "missing %q in:\n%s", want, got)
+		}
+	}
+	if estimate.SharedPrefixBytes == 0 {
+		require.FailNow(t, "expected shared branch prompt prefix")
+	}
+}
+
 func TestFormatVectorResult(t *testing.T) {
 	t.Parallel()
 
@@ -1187,6 +2651,76 @@ func TestFormatVectorResult(t *testing.T) {
 	if got != want {
 		require.Failf(t, "unexpected vector result format", "got %q, want %q", got, want)
 	}
+}
+
+func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	note := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(note, []byte("OAuth callback retry memory"), 0o600); err != nil {
+		require.NoError(t, err)
+	}
+	storePath := filepath.Join(dir, "agent-memory.json")
+
+	err := runAgentMemoryCommand(dir, "reviewer", cliOptions{
+		agentMemoryStorePath:  storePath,
+		agentMemorySearch:     "callback retry",
+		agentMemoryIndexFiles: stringListFlag{note},
+		agentMemoryLimit:      positiveIntFlag{value: 1, set: true},
+	})
+
+	require.NoError(t, err)
+	loaded, err := agentmemory.Load(storePath)
+	require.NoError(t, err)
+	results, err := loaded.Search("reviewer", "callback", 1)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, filepath.Clean(note), results[0].Document.ID)
+}
+
+func TestFormatAgentMemoryResult(t *testing.T) {
+	t.Parallel()
+
+	got := formatAgentMemoryResult(agentmemory.Result{
+		Document: agentmemory.Document{
+			ID:       "docs/memory.md",
+			Path:     "docs/memory.md",
+			Metadata: map[string]string{"kind": "note"},
+		},
+		Score: 0.5,
+	})
+	want := "docs/memory.md\tscore=0.5000\tpath=docs/memory.md\tkind=note"
+	if got != want {
+		require.Failf(t, "unexpected agent memory result format", "got %q, want %q", got, want)
+	}
+}
+
+func TestMergeArtifactsWritesMarkdown(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "research.md")
+	if err := os.WriteFile(artifactPath, []byte("research notes"), 0o600); err != nil {
+		require.NoError(t, err)
+	}
+	outputPath := filepath.Join(dir, "merged.md")
+	state := appState{
+		cwd:           dir,
+		sessionState:  session.New("gpt-test", nil),
+		selectedAgent: "reviewer",
+	}
+	assert.True(t, state.sessionState.RecordArtifact("research.md", "research", "notes", "reviewer"))
+
+	err := mergeArtifacts(t.Context(), state, outputPath, 1024)
+
+	require.NoError(t, err)
+	data, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+	out := string(data)
+	assert.Contains(t, out, "# Merged Artifacts")
+	assert.Contains(t, out, "## research.md")
+	assert.Contains(t, out, "research notes")
 }
 
 func TestFormatReviewReport(t *testing.T) {
@@ -1253,6 +2787,47 @@ func TestParseAndFormatRouteCandidate(t *testing.T) {
 	}
 }
 
+func TestApplyRouteSelectionChoosesBudgetedFallbackChain(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{
+		routeCandidates: rawStringListFlag{
+			"openai/too-expensive,input=0.01,output=0.01,max=1000",
+			"openai/fast,input=0.001,output=0.001,priority=0,max=1000",
+			"openai/backup,input=0.001,output=0.001,priority=1,max=1000",
+		},
+		routeInputTokens:  positiveIntFlag{value: 100, set: true},
+		routeOutputTokens: positiveIntFlag{value: 50, set: true},
+		routeBudget:       floatFlag{value: 0.2, set: true},
+	}
+	state := selectionState{sessionState: session.New("", nil)}
+
+	err := applyRouteSelection(opts, &state)
+
+	require.NoError(t, err)
+	assert.Equal(t, "openai/fast", state.selectedModel)
+	assert.Equal(t, []string{"openai/backup"}, state.fallbackModels)
+	assert.True(t, state.modelLocked)
+	assert.Equal(t, "openai/fast", state.sessionState.DefaultModel)
+}
+
+func TestApplyRouteSelectionErrorsWhenBudgetFiltersAllCandidates(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{
+		routeCandidates:   rawStringListFlag{"openai/too-expensive,input=0.01,output=0.01,max=1000"},
+		routeInputTokens:  positiveIntFlag{value: 100, set: true},
+		routeOutputTokens: positiveIntFlag{value: 50, set: true},
+		routeBudget:       floatFlag{value: 0.01, set: true},
+	}
+	state := selectionState{sessionState: session.New("", nil)}
+
+	err := applyRouteSelection(opts, &state)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no candidates fit")
+}
+
 func TestParseAndFormatContextPack(t *testing.T) {
 	t.Parallel()
 
@@ -1303,6 +2878,41 @@ func TestFormatFeedbackProposal(t *testing.T) {
 	}
 }
 
+func TestApplyFeedbackProposalsWritesConfigAndHistory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "atteler.yaml")
+	historyPath := filepath.Join(dir, "feedback.md")
+	if err := os.WriteFile(configPath, []byte(`agents:
+  reviewer:
+    system_prompt: Review code.
+`), 0o600); err != nil {
+		require.NoError(t, err)
+	}
+	saved := session.New("gpt-test", nil)
+	if !saved.RecordNegativeKnowledge("skip regression tests", "hid an auth regression", "abc123", "reviewer") {
+		require.FailNow(t, "expected negative knowledge to be recorded")
+	}
+
+	err := applyFeedbackProposals(saved, configPath, historyPath)
+
+	require.NoError(t, err)
+	cfg, _, err := config.LoadFiles([]string{configPath})
+	require.NoError(t, err)
+	require.Contains(t, cfg.Agents, "reviewer")
+	assert.Contains(t, cfg.Agents["reviewer"].SystemPrompt, "Review code.")
+	assert.Contains(t, cfg.Agents["reviewer"].SystemPrompt, "Feedback-derived guidance:")
+	assert.Contains(t, cfg.Agents["reviewer"].SystemPrompt, "skip regression tests")
+
+	historyData, err := os.ReadFile(historyPath)
+	require.NoError(t, err)
+	history := string(historyData)
+	assert.Contains(t, history, "## Applied feedback")
+	assert.Contains(t, history, "agent: reviewer")
+	assert.Contains(t, history, "negative knowledge: skip regression tests -> hid an auth regression")
+}
+
 func TestFormatMCPServer(t *testing.T) {
 	t.Parallel()
 
@@ -1310,18 +2920,107 @@ func TestFormatMCPServer(t *testing.T) {
 		Name:         "repo",
 		Command:      "atteler-mcp",
 		Args:         []string{"--repo", "."},
+		CWD:          "/repo",
 		Capabilities: []string{"symbols", "memory"},
 	})
 	for _, want := range []string{
 		"repo",
 		"command=atteler-mcp",
 		"args=--repo,.",
+		"cwd=/repo",
 		"capabilities=memory,symbols",
 	} {
 		if !strings.Contains(got, want) {
 			require.Failf(t, "formatted MCP server missing content", "missing %q in %q", want, got)
 		}
 	}
+}
+
+func TestMCPInvokeHelpers(t *testing.T) {
+	t.Parallel()
+
+	args, err := parseMCPToolArgs(`{"query":"symbols"}`)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"query": "symbols"}, args)
+
+	param, err := parseJSONParam(`[1,"two"]`, "mcp params")
+	require.NoError(t, err)
+	assert.Equal(t, []any{float64(1), "two"}, param)
+
+	response := &mcp.Response{Result: []byte(`{"ok":true,"count":2}`)}
+	got := formatMCPResponse(response)
+	assert.Contains(t, got, `"ok": true`)
+	assert.Contains(t, got, `"count": 2`)
+}
+
+func TestFormatLSPSymbols(t *testing.T) {
+	t.Parallel()
+
+	got := formatLSPSymbols([]lsp.Symbol{{
+		Name:           "Handle",
+		Kind:           12,
+		Detail:         "func()",
+		ContainerName:  "server",
+		URI:            "file:///repo/main.go",
+		Range:          lsp.Range{Start: lsp.Position{Line: 2, Character: 1}, End: lsp.Position{Line: 4, Character: 2}},
+		SelectionRange: lsp.Range{Start: lsp.Position{Line: 2, Character: 6}, End: lsp.Position{Line: 2, Character: 12}},
+		Children: []lsp.Symbol{{
+			Name:  "child",
+			Kind:  13,
+			Range: lsp.Range{Start: lsp.Position{Line: 3, Character: 1}, End: lsp.Position{Line: 3, Character: 5}},
+		}},
+	}})
+
+	assert.Contains(t, got, "Handle\tkind=12\trange=2:1-4:2\tdetail=func()\tcontainer=server\turi=file:///repo/main.go")
+	assert.Contains(t, got, "  child\tkind=13\trange=3:1-3:5")
+}
+
+func TestFormatHookEventType(t *testing.T) {
+	t.Parallel()
+
+	got := formatHookEventType(events.SupportedEventType{
+		Type:        events.AgentExecute,
+		Description: "Emitted when a configured agent is selected for work.",
+	})
+
+	assert.Equal(t, "agent_execute\tEmitted when a configured agent is selected for work.", got)
+}
+
+func TestParseSpawnAgentSpecs(t *testing.T) {
+	t.Parallel()
+
+	requests, err := parseSpawnAgentSpecs(rawStringListFlag{
+		"architect|draft design",
+		"child-review|reviewer|check the diff",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []subagent.Request{
+		{ID: "child-1", Agent: "architect", Prompt: "draft design"},
+		{ID: "child-review", Agent: "reviewer", Prompt: "check the diff"},
+	}, requests)
+
+	got := formatSpawnDryRun(requests)
+	assert.Contains(t, got, "Would spawn 2 sub-agent(s).")
+	assert.Contains(t, got, "id=child-review\tagent=reviewer\tprompt=check the diff")
+}
+
+func TestFormatSpawnResults(t *testing.T) {
+	t.Parallel()
+
+	got := formatSpawnResults([]subagent.Result{{
+		Request:  subagent.Request{ID: "child-1", Agent: "reviewer"},
+		Output:   "done\n",
+		Duration: 1500 * time.Millisecond,
+	}, {
+		Request:  subagent.Request{ID: "child-2", Agent: "critic"},
+		Error:    "boom",
+		Duration: time.Millisecond,
+	}})
+
+	assert.Contains(t, got, "id=child-1\tagent=reviewer\tstatus=ok\tduration=1.5s")
+	assert.Contains(t, got, "output=done")
+	assert.Contains(t, got, "id=child-2\tagent=critic\tstatus=error\tduration=1ms")
+	assert.Contains(t, got, "error=boom")
 }
 
 func TestSelectModelStoresProviderQualifiedModel(t *testing.T) {
@@ -1468,6 +3167,16 @@ func TestFormatAgentDescription(t *testing.T) {
 	}
 }
 
+func TestFormatTokenUsageSummary(t *testing.T) {
+	t.Parallel()
+
+	got := formatTokenUsageSummary(tokenUsage{InputTokens: 1500, CachedInputTokens: 500, OutputTokens: 42, Responses: 2})
+	want := "tokens:\tin=1.5k\tcached=500\tout=42\tresponses=2"
+	if got != want {
+		require.Failf(t, "unexpected token usage summary", "got %q, want %q", got, want)
+	}
+}
+
 func TestFormatTokenCount(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1492,4 +3201,83 @@ func TestFormatTokenCount(t *testing.T) {
 			assert.Failf(t, "assertion failed", "formatTokenCount(%d) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
+}
+
+func TestApplyDebugEnvOptions(t *testing.T) {
+	t.Parallel()
+
+	values := map[string]string{
+		"DEBUG_ATTELER_DOCTOR":                    "true",
+		"DEBUG_ATTELER_DOCTOR_OFFLINE":            "true",
+		"DEBUG_ATTELER_LIST_HOOK_EVENTS":          "true",
+		"DEBUG_ATTELER_LIST_HOOK_EVENTS_JSON":     "true",
+		"DEBUG_ATTELER_WATCH_SCAN":                "1",
+		"DEBUG_ATTELER_WATCH_JSON":                "1",
+		"DEBUG_ATTELER_REVIEW_PLAN":               "true",
+		"DEBUG_ATTELER_AGENT_PERFORMANCE_SUMMARY": "true",
+		"DEBUG_ATTELER_MCP_MANIFEST":              "mcp.yaml",
+		"DEBUG_ATTELER_MCP_CAPABILITY":            "symbols",
+		"DEBUG_ATTELER_MCP_SERVER":                "repo",
+		"DEBUG_ATTELER_MCP_TOOL":                  "search",
+		"DEBUG_ATTELER_MCP_TOOL_ARGS":             `{"query":"symbols"}`,
+		"DEBUG_ATTELER_LSP_SYMBOLS":               "yes",
+		"DEBUG_ATTELER_LSP_COMMAND":               "gopls",
+		"DEBUG_ATTELER_LSP_ARGS":                  "serve",
+		"DEBUG_ATTELER_LSP_FILE":                  "main.go",
+		"DEBUG_ATTELER_LSP_WORKSPACE_SYMBOLS":     "Handler",
+		"DEBUG_ATTELER_WATCH_MAX_ITERATIONS":      "3",
+		"DEBUG_ATTELER_WATCH_INTERVAL_SECONDS":    "5",
+	}
+	opts := cliOptions{}
+
+	applyDebugEnvOptions(&opts, func(name string) string { return values[name] })
+
+	assert.True(t, opts.doctor)
+	assert.True(t, opts.doctorOffline)
+	assert.True(t, opts.listHookEvents)
+	assert.True(t, opts.listHookEventsJSON)
+	assert.True(t, opts.watchScan)
+	assert.True(t, opts.watchJSON)
+	assert.True(t, opts.reviewPlan)
+	assert.True(t, opts.agentPerformanceSummary)
+	assert.Equal(t, "mcp.yaml", opts.mcpManifestPath)
+	assert.Equal(t, "symbols", opts.mcpCapability)
+	assert.Equal(t, "repo", opts.mcpServerName)
+	assert.Equal(t, "search", opts.mcpToolName)
+	assert.JSONEq(t, `{"query":"symbols"}`, opts.mcpToolArgsJSON)
+	assert.True(t, opts.lspSymbols)
+	assert.Equal(t, "gopls", opts.lspCommand)
+	assert.Equal(t, rawStringListFlag{"serve"}, opts.lspArgs)
+	assert.Equal(t, "main.go", opts.lspFilePath)
+	assert.Equal(t, "Handler", opts.lspWorkspaceSymbols)
+	assert.Equal(t, 3, opts.watchMaxIterations.value)
+	assert.True(t, opts.watchMaxIterations.set)
+	assert.Equal(t, 5, opts.watchIntervalSeconds.value)
+	assert.True(t, opts.watchIntervalSeconds.set)
+}
+
+func TestApplyDebugEnvOptionsDoesNotOverrideExplicitOptions(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{
+		mcpManifestPath: "explicit.yaml",
+		watchMaxIterations: positiveIntFlag{
+			value: 2,
+			set:   true,
+		},
+	}
+
+	applyDebugEnvOptions(&opts, func(name string) string {
+		switch name {
+		case "DEBUG_ATTELER_MCP_MANIFEST":
+			return "env.yaml"
+		case "DEBUG_ATTELER_WATCH_MAX_ITERATIONS":
+			return "9"
+		default:
+			return ""
+		}
+	})
+
+	assert.Equal(t, "explicit.yaml", opts.mcpManifestPath)
+	assert.Equal(t, 2, opts.watchMaxIterations.value)
 }
