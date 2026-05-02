@@ -45,6 +45,34 @@ const (
 	defaultTimeout = 10 * time.Second
 )
 
+// SupportedEventType describes one hook event type supported by this package.
+type SupportedEventType struct {
+	Type        string `json:"type"`
+	Description string `json:"description"`
+}
+
+var supportedEventTypes = []SupportedEventType{
+	{Type: AgentExecute, Description: "Emitted when a configured agent is selected for work."},
+	{Type: AssistantMessage, Description: "Emitted after an assistant response is appended."},
+	{Type: CommandExecute, Description: "Emitted when Atteler starts a local command."},
+	{Type: ContextAdd, Description: "Emitted when a local reference is added to LLM context."},
+	{Type: Error, Description: "Emitted when an LLM request or session operation fails."},
+	{Type: FileRead, Description: "Emitted when Atteler reads a user or project file."},
+	{Type: FileWrite, Description: "Emitted when Atteler writes a local file."},
+	{Type: SessionEnd, Description: "Emitted when an interactive or one-shot session ends."},
+	{Type: SessionStart, Description: "Emitted when an interactive or one-shot session starts."},
+	{Type: ToolExecute, Description: "Emitted when Atteler invokes a provider or tool."},
+	{Type: UserMessage, Description: "Emitted after a user message is appended to a session."},
+}
+
+// SupportedEventTypes returns hook event types supported by this package.
+//
+// The result is sorted by Type and each call returns a new slice that callers
+// may modify without affecting later calls.
+func SupportedEventTypes() []SupportedEventType {
+	return append([]SupportedEventType(nil), supportedEventTypes...)
+}
+
 // Event is the JSON payload sent to hooks on stdin.
 type Event struct {
 	Metadata    map[string]string `json:"metadata,omitempty"`
