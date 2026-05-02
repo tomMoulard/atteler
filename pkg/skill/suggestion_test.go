@@ -1,9 +1,13 @@
 package skill
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestSuggest_RepeatedSequence(t *testing.T) {
@@ -82,4 +86,26 @@ func TestSuggest_NoRepeatedMultiStepSequence(t *testing.T) {
 	if got, ok := Suggest([]string{"plan", "code", "test"}); ok {
 		t.Fatalf("Suggest returned %#v, true; want no suggestion", got)
 	}
+}
+
+func TestPersistSuggestion_WritesMarkdownWithoutOverwrite(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	suggestion, ok := Suggest([]string{"plan", "code", "plan", "code"})
+	require.True(t, ok)
+
+	path, err := PersistSuggestion(dir, suggestion)
+	require.NoError(t, err)
+	require.Equal(t, "plan-code.md", filepath.Base(path))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	content := string(data)
+	for _, want := range []string{"# Plan Code Skill", "slug: plan-code", "## Steps", "- plan", "- code"} {
+		require.Contains(t, content, want)
+	}
+
+	_, err = PersistSuggestion(dir, suggestion)
+	require.Error(t, err)
 }
