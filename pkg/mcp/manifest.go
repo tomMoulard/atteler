@@ -14,6 +14,7 @@ type Server struct {
 	Command      string            `json:"command" yaml:"command"`
 	Args         []string          `json:"args,omitempty" yaml:"args,omitempty"`
 	Env          map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	CWD          string            `json:"cwd,omitempty" yaml:"cwd,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 }
 
