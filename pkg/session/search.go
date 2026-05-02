@@ -47,7 +47,7 @@ func (s *Store) Search(query string) ([]SearchResult, error) {
 	normalizedQuery := strings.ToLower(query)
 	results := make([]SearchResult, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != sessionFileExt {
 			continue
 		}
 

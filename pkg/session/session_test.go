@@ -139,6 +139,44 @@ func TestStore_Tags(t *testing.T) {
 	}
 }
 
+func TestStore_ListByTagFiltersExactNormalizedTag(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	first := New("gpt-4.1", nil)
+	first.Title = "Auth one"
+	first.Tags = []string{"auth", "review"}
+	require.NoError(t, store.Save(first))
+
+	second := New("gpt-4.1", nil)
+	second.Title = "Auth two"
+	second.Tags = []string{" Auth "}
+	require.NoError(t, store.Save(second))
+
+	third := New("gpt-4.1", nil)
+	third.Title = "Docs"
+	third.Tags = []string{"docs", "authoring"}
+	require.NoError(t, store.Save(third))
+
+	summaries, err := store.ListByTag(" AUTH ")
+	require.NoError(t, err)
+	require.Len(t, summaries, 2)
+	assert.ElementsMatch(t, []string{"Auth one", "Auth two"}, []string{summaries[0].Title, summaries[1].Title})
+
+	docs, err := store.ListByTag("docs")
+	require.NoError(t, err)
+	require.Len(t, docs, 1)
+	assert.Equal(t, "Docs", docs[0].Title)
+}
+
+func TestStore_ListByTagRejectsEmptyTag(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewStore(t.TempDir()).ListByTag(" \t ")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "tag is required")
+}
+
 func TestSession_RecordNegativeKnowledgeDeduplicatesNormalizedApproachAndReason(t *testing.T) {
 	t.Parallel()
 

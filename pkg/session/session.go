@@ -16,8 +16,12 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
-// EnvDir overrides the default session storage directory.
-const EnvDir = "ATTELER_SESSION_DIR"
+const (
+	// EnvDir overrides the default session storage directory.
+	EnvDir = "ATTELER_SESSION_DIR"
+
+	sessionFileExt = ".json"
+)
 
 // Session is a durable chat transcript.
 type Session struct {
@@ -200,7 +204,7 @@ func (s *Store) List() ([]Summary, error) {
 
 	summaries := make([]Summary, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != sessionFileExt {
 			continue
 		}
 
@@ -218,6 +222,26 @@ func (s *Store) List() ([]Summary, error) {
 	return summaries, nil
 }
 
+// ListByTag returns saved sessions containing tag, sorted by most recently updated first.
+func (s *Store) ListByTag(tag string) ([]Summary, error) {
+	key := normalizeTagKey(tag)
+	if key == "" {
+		return nil, errors.New("session: tag is required")
+	}
+	summaries, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]Summary, 0, len(summaries))
+	for i := range summaries {
+		if summaryHasTag(summaries[i], key) {
+			filtered = append(filtered, summaries[i])
+		}
+	}
+	return filtered, nil
+}
+
 // Tags returns saved session tags sorted by descending use count, then name.
 func (s *Store) Tags() ([]TagSummary, error) {
 	summaries, err := s.List()
@@ -231,7 +255,7 @@ func (s *Store) Tags() ([]TagSummary, error) {
 		summary := &summaries[i]
 		seen := make(map[string]bool, len(summary.Tags))
 		for _, tag := range summary.Tags {
-			key := strings.ToLower(strings.TrimSpace(tag))
+			key := normalizeTagKey(tag)
 			if key == "" || seen[key] {
 				continue
 			}
@@ -254,6 +278,19 @@ func (s *Store) Tags() ([]TagSummary, error) {
 		return tags[i].Sessions > tags[j].Sessions
 	})
 	return tags, nil
+}
+
+func summaryHasTag(summary Summary, want string) bool {
+	for _, tag := range summary.Tags {
+		if normalizeTagKey(tag) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeTagKey(tag string) string {
+	return strings.ToLower(strings.TrimSpace(tag))
 }
 
 // Path returns the path for a session reference.
@@ -340,10 +377,10 @@ func (s *Store) path(ref string) string {
 	if filepath.IsAbs(ref) || strings.ContainsRune(ref, rune(os.PathSeparator)) {
 		return ref
 	}
-	if strings.HasSuffix(ref, ".json") {
+	if strings.HasSuffix(ref, sessionFileExt) {
 		return filepath.Join(s.dir, ref)
 	}
-	return filepath.Join(s.dir, ref+".json")
+	return filepath.Join(s.dir, ref+sessionFileExt)
 }
 
 func newID(now time.Time) string {
