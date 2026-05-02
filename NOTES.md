@@ -55,6 +55,11 @@ I should/can also include specialized tool to do the review like coderabbit.
 ## TODO
 
  - [x] llm connection (claude code, codex)
+ - [x] Claude Code provider exposes Bash for shell-command requests
+ - [x] local Ollama provider for offline/local inference
+ - [x] auto-start local Ollama daemon for selected local Ollama runs
+ - [x] machine-readable JSON output for watch scans and hook event inventory
+ - [x] offline doctor/readiness inventory that avoids provider health checks
  - [x] configuration loading
     - [x] general configuration
     - [x] local configuration
@@ -76,6 +81,8 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] transcript search
  - [x] config-backed agent registry and `@agent` invocation
  - [x] config-backed agent reasoning-level metadata
+ - [x] CLI reasoning-level override
+ - [x] response token usage summaries with cached-input accounting
  - [x] YAML agent description command
  - [x] local readiness doctor
  - [x] build-time version reporting
@@ -94,12 +101,14 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] CLI session negative-knowledge inventory listing
  - [x] agent evaluation capture, search, show, and export
  - [x] CLI session evaluation inventory listing
+ - [x] aggregate agent performance summaries across sessions
  - [x] sandbox artifact manifest capture, search, show, and export
  - [x] CLI session artifact inventory listing
  - [x] deterministic response recording/replay fixtures
  - [x] dependency-free agent orchestration planning
  - [x] CLI agent orchestration preview
  - [x] dependency-aware async agent task planning waves
+ - [x] dependency-aware async agent task runner with same-wave concurrency
  - [x] CLI dependency-aware async task planning preview
  - [x] agent feedback improvement proposal primitives
  - [x] CLI feedback improvement proposal report
@@ -109,6 +118,7 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] CLI smart context compression preview
  - [x] MCP manifest validation and capability lookup primitives
  - [x] CLI MCP manifest validation and capability lookup
+ - [x] MCP stdio JSON-RPC client invocation primitive and CLI tool/method call
  - [x] dependency-free evaluation helpers for agent outputs
  - [x] CLI eval check runner
  - [x] dependency-free local memory/RAG lexical index
@@ -117,27 +127,97 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] CLI local vector search over indexed files
  - [x] CLI plugin describe, dry-run, and entrypoint execution
  - [x] skill synthesis suggestion primitive and CLI
+ - [x] skill acceptance and markdown persistence
  - [x] interactive `@` completion for agents and local paths
  - [x] deterministic rest-of-line prompt completion primitive and CLI preview
+ - [x] LSP document-symbol code intelligence primitive and CLI
  - [x] dependency-free Go code intelligence and import graph foundation
  - [x] CLI Go code index and graph summary
+ - [x] CLI Go file inventory with package/import/symbol counts
  - [x] CLI Go package inventory with file and symbol counts
  - [x] CLI Go package file inventory
+ - [x] CLI Go package import usage summary
+ - [x] CLI Go package import-count summary
+ - [x] CLI Go package exact import usage summary
+ - [x] CLI Go package exact import file listing
+ - [x] CLI Go package exact import file-count summary
+ - [x] CLI Go package import file-count summary
+ - [x] CLI Go package import-prefix file listing
+ - [x] CLI Go package import-prefix file-count summary
+ - [x] CLI Go package import-prefix usage summary
+ - [x] CLI Go package symbol kind summary
+ - [x] CLI Go package symbol file-count summary
+ - [x] CLI Go package symbol listing
+ - [x] CLI Go package exact symbol filtering
+ - [x] CLI Go package exact symbol-name file-count summary
+ - [x] CLI Go package symbol kind filtering
+ - [x] CLI Go package symbol-kind file-count summary
+ - [x] CLI Go package symbol prefix filtering
+ - [x] CLI Go package symbol-prefix file-count summary
  - [x] CLI Go file import and symbol inventory
+ - [x] CLI Go file import listing
+ - [x] CLI Go file symbol listing
+ - [x] CLI Go file symbol kind summary
+ - [x] CLI Go file exact import lookup
+ - [x] CLI Go file import prefix filtering
+ - [x] CLI Go file symbol kind filtering
+ - [x] CLI Go file exact symbol filtering
+ - [x] CLI Go file symbol prefix filtering
  - [x] CLI Go symbol lookup over the local repository
+ - [x] CLI Go exact symbol-name file-count summary
+ - [x] CLI Go exact symbol-name package-count summary
+ - [x] CLI Go symbol prefix lookup over the local repository
+ - [x] CLI Go symbol-prefix file-count summary
+ - [x] CLI Go symbol-prefix package-count summary
+ - [x] CLI Go symbol kind lookup over the local repository
+ - [x] CLI Go symbol-kind file-count summary
+ - [x] CLI Go symbol-kind package-count summary
+ - [x] CLI Go symbol kind summary
+ - [x] CLI Go symbol file-count summary
  - [x] CLI Go import-edge listing over the local repository
+ - [x] CLI Go import usage summary
+ - [x] CLI Go import file-count summary
+ - [x] CLI Go import-path usage lookup
+ - [x] CLI Go import-path usage summary
+ - [x] CLI Go import-path file-count summary
+ - [x] CLI Go import-path package-count summary
+ - [x] CLI Go import-prefix usage lookup
+ - [x] CLI Go import-prefix usage summary
+ - [x] CLI Go import-prefix file-count summary
+ - [x] CLI Go import-prefix package-count summary
  - [x] CLI Go import graph topological layers
  - [x] CLI Go import graph cycle detection
  - [x] CLI Go import impact lookup over the local repository
  - [x] CLI Go import graph reachability lookup over the local repository
  - [x] dependency-free code graph traversal and impact analysis primitives
+ - [x] CLI direct Go import graph dependency and reverse-dependency lookup
  - [x] dependency-free vector retrieval primitive
+ - [x] per-agent persistent vector memory primitive
+ - [x] CLI per-agent vector memory indexing/search
  - [x] speculative three-round execution planning primitives
+ - [x] speculative three-round session runner primitives
+ - [x] speculative prompt-cache shared-prefix estimate primitives
  - [x] CLI speculative three-round execution plan preview
+ - [x] CLI speculative prompt-cache reuse preview
  - [x] structured review-agent report and gate-check primitives
+ - [x] review-agent speculative plan preview
  - [x] CLI structured review scan report
  - [x] continuous background-agent repository scan primitives
  - [x] CLI background-agent repository scan
+ - [x] CLI continuous background-agent watch loop
+ - [x] background convention-drift scan for misplaced `context.Background()`
+ - [x] explicit local bash command runner
+ - [x] concurrent sub-agent spawning primitive and CLI dry-run/runner
+ - [x] CLI feedback proposal application to config and history log
+ - [x] CLI model-route budget hard-stop for one-shot/stdin requests
+ - [x] sandbox artifact merge aggregation primitive
+ - [x] CLI merged artifact markdown export
+ - [x] context-aware command propagation with a single main entry context
+ - [x] providerless local inspection commands avoid credential/network side effects
+ - [x] `DEBUG_ATTELER_*` environment aliases for local debug/inspection flags
+ - [x] LSP workspace-symbol lookup primitive and CLI
+ - [x] CLI hook-event discovery
+ - [x] CLI session inventory filtering by exact tag
  - [x] offline built-in provider/model listing
  - [x] black-box CLI e2e tests for common config, provider, agent, and session workflows
  - [x] opt-in live LLM e2e tests for OpenAI and Anthropic one-shot calls

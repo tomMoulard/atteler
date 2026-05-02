@@ -1,0 +1,30 @@
+- [x] show token in/cached/out when closing the harness
+- [x] all of the debug cli flags should be env vars that starts with `DEBUG_`
+- [x] actually run async agent waves in parallel (today only `--async-plan` previews)
+- [x] actually run a speculative three-round session (today only `--speculate-plan` previews)
+- [x] apply feedback proposals back into agent config + history log
+- [x] enforce per-task budget hard-stop using `pkg/modelroute` signals
+- [x] prompt-cache prefix reuse across speculative branches
+- [x] allow choosing the effort when selecting the llm model/provider
+- [x] agents spawning sub-agents
+- [x] per-agent persistent memory bound to `pkg/vector`
+- [x] skill acceptance + persistence (suggestion exists, no save flow)
+- [x] MCP client invocation (manifest validation exists)
+- [x] LSP / tree-sitter code intel beyond Go AST
+- [x] LSP workspace symbol lookup
+- [x] background scan convention drift checks
+- [x] hook event discovery CLI
+- [x] session list filtering by tag
+- [x] code-merge agent for sandbox artifact aggregation
+- [x] continuous background-agent loop (today only one-shot `--watch-scan`)
+- [x] run bash commands
+- [x] proper context propagation. Only one context.Background() in the main.go file, everything else should be context-aware and receive a context from its caller.
+- [x] providerless local inspection commands avoid credential/network side effects
+- [x] incorporate ollama llm models so that the harness can use local llm models for inference without needing to call out to external APIs. This will be especially useful for testing and development of the harness itself, as well as for users who want to run agents without relying on third-party providers.
+- [x] auto-start the local Ollama daemon by forking `ollama serve` when a selected local Ollama run finds no daemon available.
+- [x] add machine-readable JSON output for watch scans and hook event inventory.
+- [x] add an offline doctor/readiness inventory that avoids provider health checks.
+- [x] expose the Claude Code Bash tool so one-shot shell-command requests can run through `claude --print`.
+
+- [x] aggregate agent performance summaries across sessions
+- [x] review-agent speculative plan preview

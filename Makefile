@@ -20,6 +20,9 @@ build:
 run:
 	go run $(PKG)
 
+TESTFLAGS ?= ""
+TESTPACKAGE ?= "./..."
+
 ## test: run all tests
 test:
 	go test -race -count=1 ./...

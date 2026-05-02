@@ -22,17 +22,25 @@ Keep reusable logic in `pkg/`; keep command wiring and terminal UI concerns in `
 - `make all`: run generation, linting, tests, and build in sequence.
 - `make clean`: remove the local `atteler` binary.
 
-Use `go test ./pkg/llm` for a faster package-level feedback loop while editing LLM code.
+Use `make test TESTPACKAGE="./pkg/llm"` for a faster package-level feedback loop while editing LLM code.
 
 ## Coding Style & Naming Conventions
 
-Use standard Go formatting. The linter configuration enables `goimports` and `gofumpt`, with local imports grouped under `github.com/tommoulard/atteler`.
+Use standard Go formatting. Use "make lint" to check for style issues.
 
 Prefer small, focused packages and explicit error wrapping with context. Public exported identifiers need useful comments. Test helpers should call `t.Helper()` when appropriate. Keep provider names lowercase strings such as `"anthropic"` or `"openai"` and test names in the `TestType_Behavior` style already used in `pkg/llm`.
+
+Remember the KISS principles: keep it simple, and avoid over-engineering. Favor readability and maintainability over cleverness or premature abstraction. When in doubt, add a comment explaining the rationale for non-obvious code.
+
+Prefer a factory pattern, and NEVER use singletongs or global state for provider instances. The registry should create new instances on demand, and provider implementations should be stateless and thread-safe.
+
+proper context propagation. Only one context.Background() in the main.go file, everything else should be context-aware and receive a context from its caller.
+
 
 ## Testing Guidelines
 
 Tests use Go's standard `testing` package. Add tests next to the package under test using `_test.go` files. Cover routing, error paths, cancellation, and provider fallback behavior when touching `pkg/llm`. Run `make test` before submitting changes; run `make lint` when changing production code.
+Use asserts and require from the "github.com/stretchr/testify/assert" library
 
 ## Commit & Pull Request Guidelines
 

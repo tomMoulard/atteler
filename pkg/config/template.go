@@ -20,6 +20,10 @@ providers:
     # base_url: https://api.openai.com
   anthropic:
     # base_url: https://api.anthropic.com
+  ollama:
+    # base_url: http://127.0.0.1:11434
+    # Atteler auto-starts "ollama serve" for selected local Ollama runs unless
+    # ATTELER_OLLAMA_AUTO_START=false is set.
 
 agents:
   reviewer:

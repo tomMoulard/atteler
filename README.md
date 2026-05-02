@@ -53,6 +53,9 @@ I should/can also include specialized tool to do the review like coderabbit.
 ## TODO
 
  - [x] llm connection (claude code, codex)
+ - [x] Claude Code provider exposes Bash for shell-command requests
+ - [x] local Ollama provider for offline/local inference
+ - [x] auto-start local Ollama daemon for selected local Ollama runs
  - [x] configuration loading
     - [x] general configuration
     - [x] local configuration
@@ -63,12 +66,15 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] sessions + replay
  - [x] config-backed agent registry and `@agent` invocation
  - [x] config-backed agent reasoning-level metadata
+ - [x] CLI reasoning-level override
+ - [x] response token usage summaries with cached-input accounting
  - [x] agent metadata, capabilities, and capability-backed prompt matching
  - [x] determinism seed knob and request input-token guardrails
  - [x] local plugin manifest discovery/validation
  - [x] local plugin entrypoint execution helper for SDK workflows
  - [x] negative-knowledge capture, search, show, and export
  - [x] agent evaluation capture, search, show, and export
+ - [x] aggregate agent performance summaries across sessions
  - [x] sandbox artifact manifest capture, search, show, and export
  - [x] deterministic response recording/replay fixtures
  - [x] dependency-free agent orchestration planning
@@ -76,34 +82,56 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] dependency-aware async agent task planning waves
  - [x] agent feedback improvement proposal primitives
  - [x] CLI feedback improvement proposal report
+ - [x] CLI feedback proposal application to agent config plus history log
  - [x] cost/model routing primitives with budget, context, cache, and latency signals
  - [x] CLI cost/model routing preview
+ - [x] CLI model-route budget hard-stop for one-shot/stdin requests
  - [x] smart context compression primitives with omission accounting
  - [x] CLI smart context compression preview
  - [x] MCP manifest validation and capability lookup primitives
  - [x] CLI MCP manifest validation and capability lookup
+ - [x] MCP stdio JSON-RPC client invocation primitive and CLI tool/method call
  - [x] dependency-free evaluation helpers for agent outputs
  - [x] CLI eval check runner
  - [x] dependency-free local memory/RAG lexical index
  - [x] CLI memory indexing/search over files and saved sessions
+ - [x] per-agent persistent vector memory
+ - [x] CLI per-agent vector memory indexing/search
  - [x] CLI git history lexical search for local RAG
  - [x] CLI local vector search over indexed files
  - [x] CLI plugin describe, dry-run, and entrypoint execution
  - [x] skill synthesis suggestion primitive and CLI
+ - [x] skill acceptance and markdown persistence
  - [x] interactive `@` completion for agents and local paths
  - [x] deterministic rest-of-line prompt completion primitive and CLI preview
  - [x] dependency-free Go code intelligence and import graph foundation
+ - [x] LSP document-symbol code intelligence primitive and CLI
+ - [x] LSP workspace-symbol lookup primitive and CLI
  - [x] CLI Go symbol lookup over the local repository
  - [x] CLI Go import-edge listing over the local repository
  - [x] CLI Go import impact lookup over the local repository
  - [x] dependency-free code graph traversal and impact analysis primitives
  - [x] dependency-free vector retrieval primitive
+ - [x] concurrent sub-agent spawning primitive and CLI dry-run/runner
  - [x] speculative three-round execution planning primitives
+ - [x] speculative three-round session runner primitives
+ - [x] speculative prompt-cache prefix reuse estimates
  - [x] CLI speculative three-round execution plan preview
  - [x] structured review-agent report and gate-check primitives
+ - [x] review-agent speculative plan preview
  - [x] CLI structured review scan report
  - [x] continuous background-agent repository scan primitives
  - [x] CLI background-agent repository scan
+ - [x] CLI continuous background-agent watch loop
+ - [x] background convention-drift scan for misplaced `context.Background()`
+ - [x] explicit local bash command runner
+ - [x] sandbox artifact merge aggregation
+ - [x] CLI merged artifact markdown export
+ - [x] context-aware command propagation with a single main entry context
+ - [x] providerless local inspection commands avoid credential/network side effects
+ - [x] `DEBUG_ATTELER_*` environment aliases for local debug/inspection flags
+ - [x] CLI hook-event discovery
+ - [x] CLI session inventory filtering by exact tag
  - [x] automatic git worktree isolation per session
  - [x] lifecycle event hooks with granular file/command/tool/agent activity events
 
@@ -150,6 +178,8 @@ providers:
   anthropic:
     disabled: false
     base_url: https://api.anthropic.com
+  ollama:
+    base_url: http://127.0.0.1:11434
 
 agents:
   reviewer:
@@ -194,10 +224,11 @@ registers a separate `claude-code` provider that shells out to `claude --print`
 so models such as `claude-code/claude-opus-4-6` reuse Claude Code's
 subscription/session path instead of direct Anthropic API quota.
 The local coding providers run from Atteler's current working directory. Claude
-Code is launched with file tools (`Read`, `Write`, `Edit`, `MultiEdit`, `LS`,
-`Glob`, and `Grep`) scoped to that directory, and Codex is launched with a
-workspace-write sandbox rooted at that directory, so these providers can inspect
-and modify files in the project you started `atteler` from.
+Code is launched with file/search/edit tools (`Read`, `Write`, `Edit`,
+`MultiEdit`, `LS`, `Glob`, and `Grep`) plus `Bash` for explicit shell-command
+requests, scoped to that directory; Codex is launched with a workspace-write
+sandbox rooted at that directory, so these providers can inspect and modify
+files in the project you started `atteler` from.
 For Anthropic, Atteler also reuses ForgeCode credentials from
 `$FORGE_CONFIG/.credentials.json`, `~/forge/.credentials.json`, or
 `~/.forge/.credentials.json`; a Forge `claude_code` login is used as a bearer
@@ -205,6 +236,7 @@ OAuth credential and refreshed with Forge's stored refresh token when needed,
 while a Forge `anthropic` login is used as an API key.
 `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` override configured `base_url`
 values for one-off local runs.
+A local `ollama` provider is also available for offline inference. Set `default_provider: ollama` and a local model such as `default_model: llama3.2`, or use model IDs like `ollama/llama3.2`; `OLLAMA_BASE_URL` overrides the configured `base_url` for one-off local runs. When a selected local Ollama provider is unavailable, Atteler tries to fork `ollama serve` and waits briefly for `/api/tags` before failing; set `ATTELER_OLLAMA_AUTO_START=false` to disable that startup attempt.
 
 Atteler also imports best-effort defaults from existing harness config files at
 lower precedence than atteler config:
@@ -270,6 +302,8 @@ Useful flags:
 - `--max-tokens <value>`: override the configured max output tokens.
 - `--seed <value>`: pass a best-effort deterministic seed to providers that
   support it.
+- `--reasoning-level <value>`: override the configured model/provider effort
+  for this run.
 - `--max-input-tokens <value>`: hard-stop a request before calling an LLM when
   the estimated prompt size exceeds the cap.
 - `--record-response <path>`: write one-shot request/response JSON for
@@ -279,7 +313,9 @@ Useful flags:
 - `--eval-output <path>` with `--eval-expected <text>` or
   `--eval-expected-file <path>`: run a deterministic output check; set
   `--eval-mode exact|contains|normalized` as needed.
-- `--doctor`: print local readiness diagnostics without making API calls.
+- `--doctor`: print local readiness diagnostics and configured provider health.
+- `--doctor-offline`: print config/session/provider inventory without provider
+  health checks or API calls.
 - `--version`: print build version information.
 - `--list-providers`: print built-in provider names without API calls.
 - `--list-known-models`: print built-in provider/model IDs without API calls.
@@ -287,14 +323,42 @@ Useful flags:
   providers.
 - `--list-agents`: print configured agent names.
 - `--list-plugins`: validate and print configured local plugin manifests.
+- `--list-hook-events`: print supported lifecycle hook event names and short
+  descriptions.
+- `--list-hook-events-json`: print the same hook event inventory as JSON for
+  scripts.
 - `--describe-plugin <name>`: print a configured plugin manifest and resolved
   filesystem locations as YAML.
 - `--run-plugin <plugin>` with `--plugin-entrypoint <name>` or
   `--run-plugin <plugin>/<entrypoint>`: execute a configured plugin entrypoint.
   Add `--plugin-dry-run` to print the resolved command without executing it,
   and `--plugin-timeout-seconds <n>` to set a timeout.
+- `--bash <command>`: run an explicit local `bash -lc` command and exit.
+  Use `--bash-dir <path>` for the working directory and
+  `--bash-timeout-seconds <n>` for a timeout.
+- `DEBUG_ATTELER_*` aliases can drive local debug/inspection flags from the
+  environment, for example `DEBUG_ATTELER_LIST_PROVIDERS=1`,
+  `DEBUG_ATTELER_WATCH_SCAN=1`, or `DEBUG_ATTELER_MCP_MANIFEST=...`.
+- `--mcp-manifest <path>` with `--mcp-server <name>` and either
+  `--mcp-tool <tool>` or `--mcp-method <method>` invokes a configured MCP
+  stdio server once. Use `--mcp-tool-args` or `--mcp-params` for JSON inputs
+  and `--mcp-timeout-seconds <n>` for a timeout.
+- `--lsp-symbols --lsp-command <server> --lsp-file <path>` requests document
+  symbols from an external LSP server. Repeat `--lsp-arg` for server args, and
+  optionally pass `--lsp-root` and `--lsp-language`.
+- `--lsp-workspace-symbols <query> --lsp-command <server>` requests workspace
+  symbols from an external LSP server. Repeat `--lsp-arg` for server args and
+  optionally pass `--lsp-root`.
+- `--spawn-agent <agent|prompt>` or `--spawn-agent <id|agent|prompt>` runs
+  child Atteler one-shot prompts concurrently. Use `--spawn-dry-run` to inspect
+  the fan-out without calling an LLM, `--spawn-binary` to choose the binary, and
+  `--spawn-timeout-seconds <n>` to bound the run.
 - `--list-sessions`: print saved session IDs, timestamps, metadata, and paths.
+- `--list-sessions --list-sessions-tag <tag>`: print only sessions containing
+  that exact tag, matched case-insensitively.
 - `--list-session-tags`: print saved session tags with counts.
+- `--agent-performance-summary`: print aggregate evaluation, failure, score,
+  outcome, and latest-activity summaries grouped by agent across saved sessions.
 - `--list-artifacts`: print artifact records for the selected session.
 - `--list-evaluations`: print agent evaluation records for the selected session.
 - `--list-failures`: print negative-knowledge records for the selected session.
@@ -316,6 +380,12 @@ Useful flags:
 - `--record-artifact <path>` with `--artifact-kind <kind>`: append a useful
   sandbox/research/code artifact to the selected session; optional
   `--artifact-summary` describes why it matters.
+- `--merge-artifacts <path>`: aggregate selected-session text artifacts into a
+  deterministic Markdown file. Use `-` for stdout and
+  `--merge-artifact-max-bytes <n>` to bound each input artifact.
+- `--feedback-apply-config <path>`: apply selected-session feedback proposals
+  to configured agent prompts and append a decision record. Override the
+  default `<config>.feedback.md` log with `--feedback-history <path>`.
 - `--replay <id-or-path>`: print a previous transcript and exit. Use `--list-messages --session <id-or-path>` for compact transcript previews.
 - `--export-session <id-or-path>`: export a previous transcript and exit.
 - `--export-format <markdown|json>`: choose the export format (`markdown` by
@@ -332,6 +402,9 @@ Useful flags:
   sessions; combine with `--memory-store <path>` to load a JSON memory store and
   with repeated `--memory-index <file>` to add UTF-8 files before search or
   saving. `--memory-limit <n>` caps results.
+- `--agent-memory-agent <name>` with `--agent-memory-store <path>`: index and
+  search one agent's persistent vector memory using `--agent-memory-index`,
+  `--agent-memory-search`, and optional `--agent-memory-limit`.
 - `--skill-step <action>`: add observed actions for a skill-synthesis
   suggestion. Repeat it (or pass comma-separated values), then optionally tune
   `--skill-max-steps` and `--skill-min-occurrences`.
@@ -369,10 +442,11 @@ the configured fallback chain for that request.
 
 Generation settings are layered as global `generation`, then agent-specific
 values, then explicit CLI overrides (`--temperature`, `--top-p`, `--seed`,
-`--max-tokens`). Omitted values are not sent to providers, so setting
+`--reasoning-level`, `--max-tokens`). Omitted values are not sent to providers, so setting
 `temperature: 0` or `seed: 1` is an explicit deterministic choice rather than an
 accidental default. OpenAI receives `seed`; providers without seed support ignore
-the field.
+the field. One-shot and interactive sessions print a compact token usage summary
+when usage data is available: input, cached input, and output tokens.
 
 ## Local file and directory context
 
@@ -464,12 +538,18 @@ atteler --session 20260430-120000-deadbeef \
   --record-artifact docs/research.md \
   --artifact-kind research \
   --artifact-summary "comparison of auth refresh approaches"
+
+atteler --session 20260430-120000-deadbeef \
+  --merge-artifacts .atteler/merged-artifacts.md
 ```
 
 Evaluations and artifacts are stored in session JSON, shown by
-`--show-session`, found by `--search-sessions`, and included in exports. Use
-`--list-artifacts --session <id-or-path>` for a compact artifact inventory,
-and `--list-evaluations --session <id-or-path>` for a compact evaluation inventory.
+`--show-session`, found by `--search-sessions`, and included in exports.
+Merged artifact export reads text artifacts safely under the current repo root,
+skips unsafe or oversized entries with warnings, and writes deterministic
+Markdown for code-merge/research aggregation. Use `--list-artifacts --session
+<id-or-path>` for a compact artifact inventory, and `--list-evaluations
+--session <id-or-path>` for a compact evaluation inventory.
 
 ## Local memory and skill suggestions
 
@@ -491,10 +571,22 @@ Go code index and graph counts can be summarized locally:
 atteler --code-summary
 ```
 
+All Go files can be inventoried with package, import, and symbol counts:
+
+```sh
+atteler --code-files
+```
+
 Go packages can be inventoried with file and symbol counts:
 
 ```sh
 atteler --code-packages
+```
+
+Go packages can also be summarized by import counts:
+
+```sh
+atteler --code-package-import-summary
 ```
 
 One package can be expanded to its files:
@@ -503,10 +595,140 @@ One package can be expanded to its files:
 atteler --code-package llm
 ```
 
+One package's import usage can be summarized:
+
+```sh
+atteler --code-package-imports llm
+```
+
+One package's import usage can be filtered by exact import path or prefix:
+
+```sh
+atteler --code-package-import-path llm:context
+atteler --code-package-import-prefix llm:github.com/tommoulard/atteler/pkg/
+```
+
+Files in a package that import an exact path can also be listed:
+
+```sh
+atteler --code-package-import-files llm:context
+```
+
+Files in a package that import an exact path can be summarized:
+
+```sh
+atteler --code-package-import-path-file-summary llm:context
+```
+
+Files in one package can be summarized by import count:
+
+```sh
+atteler --code-package-import-file-summary llm
+```
+
+Files in a package that import paths with a prefix can be listed too:
+
+```sh
+atteler --code-package-import-prefix-files llm:github.com/tommoulard/atteler/pkg/
+```
+
+Files in one package can be summarized by matching import-prefix count:
+
+```sh
+atteler --code-package-import-prefix-file-summary llm:github.com/tommoulard/atteler/pkg/
+```
+
+One package's symbol kinds can be summarized:
+
+```sh
+atteler --code-package-symbols llm
+```
+
+Files in one package can be summarized by symbol count:
+
+```sh
+atteler --code-package-symbol-file-summary llm
+```
+
+One package's concrete symbols can be listed:
+
+```sh
+atteler --code-package-symbol-list llm
+```
+
+One package's symbols can be filtered by exact name, kind, or name prefix:
+
+```sh
+atteler --code-package-symbol llm:NewRegistry
+atteler --code-package-symbol-kind llm:func
+atteler --code-package-symbol-prefix llm:New
+```
+
+Files in one package can be summarized by exact symbol-name count:
+
+```sh
+atteler --code-package-symbol-name-file-summary llm:NewRegistry
+```
+
+Files in one package can be summarized by symbol-kind count:
+
+```sh
+atteler --code-package-symbol-kind-file-summary llm:func
+```
+
+Files in one package can be summarized by symbol-prefix count:
+
+```sh
+atteler --code-package-symbol-prefix-file-summary llm:New
+```
+
 One Go file can be expanded to its imports and symbols:
 
 ```sh
 atteler --code-file pkg/llm/llm.go
+```
+
+One Go file's imports can be listed directly:
+
+```sh
+atteler --code-file-imports pkg/llm/llm.go
+```
+
+One Go file's symbols can be listed directly:
+
+```sh
+atteler --code-file-symbols pkg/llm/llm.go
+```
+
+One Go file's symbol kinds can be summarized:
+
+```sh
+atteler --code-file-symbol-summary pkg/llm/llm.go
+```
+
+One Go file can be checked for an exact import path:
+
+```sh
+atteler --code-file-import-path pkg/llm/llm.go:context
+```
+
+One Go file's imports can be filtered by prefix:
+
+```sh
+atteler --code-file-import-prefix cmd/atteler/main.go:github.com/tommoulard/atteler/pkg/
+```
+
+One Go file's symbols can be filtered by exact name, kind, or prefix:
+
+```sh
+atteler --code-file-symbol pkg/llm/llm.go:NewRegistry
+atteler --code-file-symbol-kind pkg/llm/llm.go:func
+```
+
+One Go file's symbols can also be filtered by prefix:
+
+```sh
+atteler --code-file-symbol-prefix pkg/llm/llm.go:New
 ```
 
 Go symbols can be located without starting an LLM call:
@@ -515,10 +737,130 @@ Go symbols can be located without starting an LLM call:
 atteler --code-symbol NewRegistry
 ```
 
+Files can be summarized by exact symbol-name count:
+
+```sh
+atteler --code-symbol-name-file-summary NewRegistry
+```
+
+Packages can be summarized by exact symbol-name count:
+
+```sh
+atteler --code-symbol-name-package-summary NewRegistry
+```
+
+Related Go symbols can be discovered by prefix:
+
+```sh
+atteler --code-symbol-prefix New
+```
+
+Files can be summarized by matching symbol-prefix count:
+
+```sh
+atteler --code-symbol-prefix-file-summary New
+```
+
+Packages can be summarized by matching symbol-prefix count:
+
+```sh
+atteler --code-symbol-prefix-package-summary New
+```
+
+Go symbol kinds can be summarized by count:
+
+```sh
+atteler --code-symbol-summary
+```
+
+Files with symbol counts can be summarized to spot symbol-heavy files:
+
+```sh
+atteler --code-symbol-file-summary
+```
+
+Go symbols can also be listed by kind:
+
+```sh
+atteler --code-symbol-kind type
+```
+
+Files can be summarized by symbol kind count:
+
+```sh
+atteler --code-symbol-kind-file-summary func
+```
+
+Packages can be summarized by symbol kind count:
+
+```sh
+atteler --code-symbol-kind-package-summary func
+```
+
 Go import edges can be listed for graph/RAG workflows:
 
 ```sh
 atteler --code-imports
+```
+
+Import usage hotspots can be summarized by file count:
+
+```sh
+atteler --code-import-summary
+```
+
+Files with import counts can be summarized to spot import-heavy files:
+
+```sh
+atteler --code-import-file-summary
+```
+
+Files using one import path can be listed directly:
+
+```sh
+atteler --code-import-path context
+```
+
+One import path's file usage can be summarized:
+
+```sh
+atteler --code-import-path-summary context
+```
+
+Files using one import path can be summarized:
+
+```sh
+atteler --code-import-path-file-summary context
+```
+
+Packages using one import path can be summarized:
+
+```sh
+atteler --code-import-path-package-summary context
+```
+
+Files using an import path family can be listed by prefix:
+
+```sh
+atteler --code-import-prefix github.com/tommoulard/atteler/pkg/
+```
+
+Import usage for an import path family can be summarized by prefix:
+
+```sh
+atteler --code-import-prefix-summary github.com/tommoulard/atteler/pkg/
+```
+
+Files using an import path family can be summarized by matching import count:
+
+```sh
+atteler --code-import-prefix-file-summary github.com/tommoulard/atteler/pkg/
+```
+
+Packages using an import path family can be summarized:
+
+```sh
+atteler --code-import-prefix-package-summary github.com/tommoulard/atteler/pkg/
 ```
 
 Topological import graph layers can be listed for dependency planning:
@@ -545,19 +887,55 @@ Forward import graph reachability can be queried locally:
 atteler --code-reachable cmd/atteler/main.go
 ```
 
+Direct import graph edges can be queried in either direction:
+
+```sh
+atteler --code-deps cmd/atteler/main.go
+atteler --code-rdeps context
+```
+
+When a language server is available, Atteler can ask it for document symbols
+or workspace symbols without adding an LSP dependency to the binary:
+
+```sh
+atteler --lsp-symbols \
+  --lsp-command gopls \
+  --lsp-arg serve \
+  --lsp-file cmd/atteler/main.go
+
+atteler --lsp-workspace-symbols Handler \
+  --lsp-command gopls \
+  --lsp-arg serve \
+  --lsp-root .
+```
+
 Repository health findings for background-agent workflows can be scanned locally:
 
 ```sh
 atteler --watch-scan
+atteler --watch-scan --watch-json
+atteler --watch-loop --watch-interval-seconds 60 --watch-max-iterations 3
 ```
 
-Speculative execution plans can be previewed locally:
+The watch scan also flags convention drift such as production Go files that
+introduce `context.Background()` outside entrypoints or tests, including aliased
+context imports, while skipping Atteler runtime and generated artifact folders.
+
+Speculative execution plans can be previewed locally; when a base prompt is
+provided, Atteler also estimates shared-prefix prompt-cache reuse across
+branches. The SDK exposes a three-round runner for proposal, cross-review, and
+verdict aggregation:
 
 ```sh
-atteler --speculate-plan --speculate-agent researcher --speculate-agent coder
+atteler --speculate-plan \
+  --speculate-agent researcher \
+  --speculate-agent coder \
+  --speculate-prompt "plan the auth refresh migration"
 ```
 
-Dependency-aware async task waves can also be previewed locally before spawning agents:
+Dependency-aware async task waves can also be previewed locally before spawning
+agents; the SDK runner executes ready tasks in the same wave concurrently while
+preserving deterministic wave/order results:
 
 ```sh
 atteler --async-plan \
@@ -565,10 +943,28 @@ atteler --async-plan \
   --async-task 'code|coder|implement feature|plan'
 ```
 
+Sub-agent fan-out can be previewed or executed with stable child IDs:
+
+```sh
+atteler --spawn-agent 'planner|draft the migration plan' \
+  --spawn-agent 'review-1|reviewer|review the plan for risks' \
+  --spawn-dry-run
+```
+
 Repository scans can also be rendered as structured review reports:
 
 ```sh
 atteler --review-scan
+```
+
+Review-agent speculative plans mirror the three-round execution model for code review: independent reviews, cross-review of findings, and aggregate verdict gates.
+
+```sh
+atteler --review-plan \
+  --review-agent quality-reviewer \
+  --review-agent test-engineer \
+  --review-path pkg/llm/auth.go \
+  --review-gate "tests pass"
 ```
 
 You can also persist a small lexical memory store for UTF-8 files:
@@ -578,6 +974,16 @@ atteler --memory-store .atteler/memory.json --memory-index docs/research.md
 atteler --memory-store .atteler/memory.json --memory-search "redirect risks"
 ```
 
+Agent-specific memory can be persisted separately using the local vector
+fallback, so one agent's notes do not leak into another agent's search results:
+
+```sh
+atteler --agent-memory-agent reviewer \
+  --agent-memory-store .atteler/agent-memory.json \
+  --agent-memory-index docs/review-notes.md \
+  --agent-memory-search "redirect risks"
+```
+
 For dependency-free local vector retrieval over specific files:
 
 ```sh
@@ -585,18 +991,26 @@ atteler --vector-index docs/research.md --vector-search "redirect risks"
 ```
 
 For repeated workflows, pass observed steps and Atteler suggests a reusable
-skill candidate:
+skill candidate. Add `--skill-save-dir <dir>` to accept and persist the
+suggestion as a markdown artifact:
 
 ```sh
 atteler --skill-step plan --skill-step code --skill-step test \
   --skill-step plan --skill-step code --skill-step test
+atteler --skill-save-dir .atteler/skills \
+  --skill-step plan --skill-step code --skill-step plan --skill-step code
 ```
 
-Model routing decisions can be previewed locally:
+Model routing decisions can be previewed locally, and the same route candidates
+can hard-stop one-shot/stdin requests when every candidate exceeds budget or
+context limits:
 
 ```sh
 atteler --route-candidate 'openai/gpt-mini,input=0.000001,output=0.000002,max=128000' \
   --route-input-tokens 10000 --route-output-tokens 1000
+atteler --route-candidate 'openai/gpt-mini,input=0.000001,output=0.000002,max=128000' \
+  --route-input-tokens 10000 --route-output-tokens 1000 --route-budget 0.02 \
+  --once "Summarize this repository"
 ```
 
 Context compression can be previewed with role-prefixed transcript files:
@@ -605,16 +1019,24 @@ Context compression can be previewed with role-prefixed transcript files:
 atteler --context-pack-file transcript.txt --context-pack-tokens 4000
 ```
 
-Recorded feedback can be summarized into agent improvement proposals:
+Recorded feedback can be summarized into agent improvement proposals, then
+applied back to an agent config with a markdown history log:
 
 ```sh
 atteler --session <id-or-path> --feedback-proposals
+atteler --session <id-or-path> \
+  --feedback-apply-config .atteler/config.yaml \
+  --feedback-history .atteler/agent-feedback.md
 ```
 
 MCP manifests can be validated and queried by capability:
 
 ```sh
 atteler --mcp-manifest .atteler/mcp.yaml --mcp-capability symbols
+atteler --mcp-manifest .atteler/mcp.yaml \
+  --mcp-server repo \
+  --mcp-tool search \
+  --mcp-tool-args '{"query":"symbols"}'
 ```
 
 Prompt-line completion can also be previewed without opening the TUI:
@@ -630,8 +1052,13 @@ thin interface:
 
 - `pkg/agent` includes metadata/capability matching plus deterministic
   orchestration planning for choosing a bounded set of agents for a task.
+- `pkg/agentmemory` persists vectorized documents by agent namespace and
+  searches only the selected agent's memory.
+- `pkg/artifactmerge` safely reads session artifact files under a repo root and
+  renders deterministic merged Markdown for sandbox/code aggregation.
 - `pkg/async` includes dependency-aware task graph validation, child task
-  derivation, and ready batches for parallel agent execution waves.
+  derivation, ready batches, and a same-wave concurrent runner for parallel
+  agent execution waves.
 - `pkg/codeintel` indexes Go packages, imports, symbols, and import edges using
   the standard parser as a dependency-free code-intelligence foundation.
 - `pkg/codegraph` provides deterministic directed graph traversal, reverse
@@ -639,13 +1066,21 @@ thin interface:
   relationships.
 - `pkg/contextpack` includes smart chat-context compaction that preserves system
   messages, newest turns, and omission statistics.
+- `pkg/events` exposes lifecycle hook event metadata and runs configured local
+  hook commands with JSON payloads and event-specific environment variables.
 - `pkg/eval` includes dependency-free output checks (`exact`, `contains`, and
   normalized matching) with compact failure summaries.
 - `pkg/feedback` turns recorded evaluations and negative knowledge into stable
-  agent-improvement proposals.
+  agent-improvement proposals and applies them idempotently to configured
+  agent prompts with history entries.
 - `pkg/githistory` parses captured `git log --name-only` output and provides
   deterministic lexical search over commit subjects, authors, and touched files.
-- `pkg/mcp` validates MCP server manifests and supports capability lookup.
+- `pkg/lsp` runs one-shot LSP document-symbol and workspace-symbol requests
+  over stdio and normalizes `DocumentSymbol` and `SymbolInformation` responses.
+- `pkg/llm` exposes the provider-agnostic registry and built-in OpenAI,
+  Anthropic, Claude Code, Codex, and Ollama providers.
+- `pkg/mcp` validates MCP server manifests, supports capability lookup, and can
+  invoke one JSON-RPC method or `tools/call` request against a stdio server.
 - `pkg/memory` includes a dependency-free lexical text index with ranked
   search, snippets, file/session indexing, and JSON persistence.
 - `pkg/modelroute` ranks model candidates using estimated token cost, budget,
@@ -654,16 +1089,27 @@ thin interface:
   execution.
 - `pkg/promptcomplete` ranks deterministic rest-of-line prompt suggestions from
   local agents, tools, resources, and prompt templates.
-- `pkg/review` provides structured review reports, finding grouping, severity
-  summaries, and required gate-check validation for review-agent workflows.
+- `pkg/review` provides structured review reports, speculative review-agent
+  plans, finding grouping, severity summaries, and required gate-check validation
+  for review-agent workflows.
+- `pkg/session` persists sessions and supports metadata inventories, exact tag
+  filtering, transcript search, exports, evaluations, failures, artifacts, and
+  aggregate agent performance summaries.
+- `pkg/shell` runs explicit local bash commands with captured stdout/stderr,
+  timeout handling, and caller-supplied environment overlays.
 - `pkg/skill` includes repeated-action detection for skill synthesis
-  suggestions.
-- `pkg/speculate` models the three-round speculative execution workflow with
-  cross-review assignments and structured gate-check validation.
+  suggestions plus safe markdown persistence for accepted skills.
+- `pkg/speculate` models and runs the three-round speculative execution
+  workflow with concurrent proposals, concurrent cross-reviews, aggregation,
+  structured gate-check validation, and prompt-cache shared-prefix estimates.
+- `pkg/subagent` concurrently fans out child Atteler one-shot requests while
+  preserving stable input-order results.
 - `pkg/vector` provides an in-memory cosine retrieval store plus deterministic
   lexical feature hashing for local RAG fallbacks.
 - `pkg/watch` scans repositories for background-agent health findings such as
-  stale TODOs, large files, and Go files missing test companions.
+  stale TODOs, large files, Go files missing test companions, and convention
+  drift, skips runtime/generated artifact directories, and includes a
+  context-aware continuous runner for background loops.
 
 ## Event hooks
 
@@ -680,12 +1126,16 @@ Supported event names:
 - `session_end`
 - `file_read` -- emitted when Atteler reads a user/project file (for example
   while expanding `@path` references).
+- `context_add` -- emitted when a local reference is added to LLM context.
 - `file_write` -- emitted when Atteler writes a local file.
 - `command_execute` -- emitted when Atteler starts a local subprocess (e.g.
   `claude auth status`, `codex exec`, git operations).
 - `tool_execute` -- emitted when Atteler invokes a provider/tool such as
   `llm.complete`.
 - `agent_execute` -- emitted when a configured agent is selected for work.
+
+Run `atteler --list-hook-events` or `atteler --list-hook-events-json` to print
+the same supported-event inventory from the installed binary.
 
 Every hook also receives useful environment variables such as
 `ATTELER_EVENT_TYPE`, `ATTELER_SESSION_ID`, `ATTELER_SESSION_PATH`,
