@@ -4,11 +4,15 @@ package watch
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -21,6 +25,8 @@ const (
 	KindMissingTest = "missing_test"
 	// KindStaleTODO identifies files containing TODO or FIXME markers.
 	KindStaleTODO = "stale_todo"
+	// KindConventionDrift identifies code that violates repository conventions.
+	KindConventionDrift = "convention_drift"
 
 	// SeverityInfo marks informational findings.
 	SeverityInfo = "info"
@@ -32,10 +38,10 @@ const (
 
 // Finding describes a repository scan result.
 type Finding struct {
-	Path     string
-	Kind     string
-	Message  string
-	Severity string
+	Path     string `json:"path"`
+	Kind     string `json:"kind"`
+	Message  string `json:"message"`
+	Severity string `json:"severity"`
 }
 
 // Options configures repository scans.
@@ -50,8 +56,9 @@ func Scan(root string) ([]Finding, error) {
 	return ScanWithOptions(root, Options{})
 }
 
-// ScanWithOptions scans root for stale TODO/FIXME markers, large files, and Go
-// files missing same-directory _test.go companions.
+// ScanWithOptions scans root for stale TODO/FIXME markers, large files, Go
+// files missing same-directory _test.go companions, and package-level
+// convention drift.
 func ScanWithOptions(root string, options Options) ([]Finding, error) {
 	largeFileBytes := options.LargeFileBytes
 	if largeFileBytes <= 0 {
@@ -128,6 +135,15 @@ func (s *scanState) scanFile(path string, entry fs.DirEntry) error {
 			Severity: SeverityMaintenance,
 		})
 	}
+
+	if hasContextBackgroundDrift(path, relativePath) {
+		s.findings = append(s.findings, Finding{
+			Path:     relativePath,
+			Kind:     KindConventionDrift,
+			Message:  "uses context.Background() outside allowed entrypoints/tests",
+			Severity: SeverityMaintenance,
+		})
+	}
 	return nil
 }
 
@@ -146,7 +162,7 @@ func (s *scanState) addMissingTests() {
 
 func shouldSkipDir(name string) bool {
 	switch name {
-	case ".git", "vendor":
+	case ".atteler", ".cache", ".codex", ".git", ".idea", ".omx", ".vscode", "build", "dist", "node_modules", "vendor":
 		return true
 	default:
 		return false
@@ -181,8 +197,93 @@ func hasStaleTODOMarker(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", path, err)
 	}
+	if !utf8.Valid(content) {
+		return false, nil
+	}
 	text := strings.ToUpper(string(content))
 	return strings.Contains(text, "TODO") || strings.Contains(text, "FIXME"), nil
+}
+
+func hasContextBackgroundDrift(path, relativePath string) bool {
+	if !isProductionGoFile(relativePath) {
+		return false
+	}
+
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		return false
+	}
+	if isAllowedContextBackgroundFile(relativePath, file) {
+		return false
+	}
+	return usesContextBackground(file)
+}
+
+func isProductionGoFile(path string) bool {
+	return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
+}
+
+func isAllowedContextBackgroundFile(path string, file *ast.File) bool {
+	return filepath.Base(path) == "main.go" && file.Name.Name == "main"
+}
+
+func usesContextBackground(file *ast.File) bool {
+	contextNames, dotImported := contextImportNames(file)
+	if len(contextNames) == 0 && !dotImported {
+		return false
+	}
+
+	found := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fun := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			if fun.Sel.Name != "Background" {
+				return true
+			}
+			ident, ok := fun.X.(*ast.Ident)
+			if ok && contextNames[ident.Name] {
+				found = true
+				return false
+			}
+		case *ast.Ident:
+			if dotImported && fun.Name == "Background" {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func contextImportNames(file *ast.File) (map[string]bool, bool) {
+	names := make(map[string]bool)
+	dotImported := false
+	for _, spec := range file.Imports {
+		if strings.Trim(spec.Path.Value, "\"") != "context" {
+			continue
+		}
+		if spec.Name == nil {
+			names["context"] = true
+			continue
+		}
+		switch spec.Name.Name {
+		case ".":
+			dotImported = true
+		case "_":
+			continue
+		default:
+			names[spec.Name.Name] = true
+		}
+	}
+	return names, dotImported
 }
 
 func sortFindings(findings []Finding) {

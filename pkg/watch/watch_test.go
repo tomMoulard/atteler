@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestScanWithOptions_FindsRepositoryHealthIssues(t *testing.T) {
@@ -118,6 +121,112 @@ func TestScanWithOptions_ReportsLargeFilesWithStaleMarkers(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("findings = %#v, want %#v", got, want)
 	}
+}
+
+func TestScanWithOptions_ReportsContextBackgroundConventionDrift(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "pkg/service/service.go", `package service
+
+import "context"
+
+func run() {
+	_ = context.Background()
+}
+`)
+	writeFile(t, root, "pkg/service/service_test.go", `package service
+
+import "context"
+
+func TestRun() {
+	_ = context.Background()
+}
+`)
+	writeFile(t, root, "cmd/tool/main.go", `package main
+
+import "context"
+
+func main() {
+	_ = context.Background()
+}
+`)
+
+	findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
+	require.NoError(t, err)
+
+	keys := findingKeys(findings)
+	assert.Contains(t, keys, "pkg/service/service.go|convention_drift|maintenance")
+	assert.NotContains(t, keys, "pkg/service/service_test.go|convention_drift|maintenance")
+	assert.NotContains(t, keys, "cmd/tool/main.go|convention_drift|maintenance")
+}
+
+func TestScanWithOptions_ContextBackgroundDriftIgnoresCommentsAndStrings(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "pkg/service/service.go", `package service
+
+const example = "context.Background()"
+
+// context.Background() is mentioned in docs only.
+func run() {}
+`)
+
+	findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
+	require.NoError(t, err)
+
+	assert.NotContains(t, findingKeys(findings), "pkg/service/service.go|convention_drift|maintenance")
+}
+
+func TestScanWithOptions_ReportsAliasedContextBackgroundConventionDrift(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "pkg/service/alias.go", `package service
+
+import ctxpkg "context"
+
+func run() {
+	_ = ctxpkg.Background()
+}
+`)
+	writeFile(t, root, "pkg/service/dot.go", `package service
+
+import . "context"
+
+func other() {
+	_ = Background()
+}
+`)
+
+	findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
+	require.NoError(t, err)
+
+	keys := findingKeys(findings)
+	assert.Contains(t, keys, "pkg/service/alias.go|convention_drift|maintenance")
+	assert.Contains(t, keys, "pkg/service/dot.go|convention_drift|maintenance")
+}
+
+func TestScanWithOptions_SkipsRuntimeArtifactDirectoriesAndBinaryStaleMarkers(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, ".atteler/session.json", "TODO: runtime session\n")
+	writeFile(t, root, ".omx/state.json", "TODO: runtime state\n")
+	writeFile(t, root, "dist/generated.txt", "TODO: generated artifact\n")
+	writeFile(t, root, "binary.bin", string([]byte{0xff, 0xfe, 'T', 'O', 'D', 'O'}))
+	writeFile(t, root, "docs/todo.md", "TODO: real note\n")
+
+	findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
+	require.NoError(t, err)
+
+	keys := findingKeys(findings)
+	assert.Contains(t, keys, "docs/todo.md|stale_todo|maintenance")
+	assert.NotContains(t, keys, ".atteler/session.json|stale_todo|maintenance")
+	assert.NotContains(t, keys, ".omx/state.json|stale_todo|maintenance")
+	assert.NotContains(t, keys, "dist/generated.txt|stale_todo|maintenance")
+	assert.NotContains(t, keys, "binary.bin|stale_todo|maintenance")
 }
 
 func findingKeys(findings []Finding) []string {
