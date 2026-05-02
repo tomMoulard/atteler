@@ -163,6 +163,18 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestListContextCanceled(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ListContext(ctx, repo)
+	if err == nil {
+		require.FailNow(t, "expected canceled context to stop git worktree listing")
+	}
+}
+
 func TestStatus(t *testing.T) {
 	t.Parallel()
 	got := Status(nil)

@@ -22,6 +22,19 @@ import (
 // EnvDir overrides the parent directory for worktree directories.
 const EnvDir = "ATTELER_WORKTREE_DIR"
 
+var defaultContextFactory = context.Background
+
+func defaultCommandContext() context.Context {
+	return defaultContextFactory()
+}
+
+func nonNilCommandContext(ctx context.Context) context.Context {
+	if ctx != nil {
+		return ctx
+	}
+	return defaultCommandContext()
+}
+
 // Info describes an active session worktree.
 type Info struct {
 	// Path is the absolute filesystem path to the worktree directory.
@@ -43,16 +56,22 @@ type Info struct {
 //
 // repoDir must be the root of a git repository (or anywhere inside one).
 func Create(repoDir, sessionID string) (*Info, error) {
+	return CreateContext(defaultCommandContext(), repoDir, sessionID)
+}
+
+// CreateContext is Create with caller-provided cancellation for git commands.
+func CreateContext(ctx context.Context, repoDir, sessionID string) (*Info, error) {
+	ctx = nonNilCommandContext(ctx)
 	if sessionID == "" {
 		return nil, errors.New("worktree: session ID is required")
 	}
 
-	repoRoot, err := gitRepoRoot(repoDir)
+	repoRoot, err := gitRepoRoot(ctx, repoDir)
 	if err != nil {
 		return nil, fmt.Errorf("worktree: locate repo root: %w", err)
 	}
 
-	baseBranch, err := gitCurrentBranch(repoRoot)
+	baseBranch, err := gitCurrentBranch(ctx, repoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("worktree: detect current branch: %w", err)
 	}
@@ -61,7 +80,7 @@ func Create(repoDir, sessionID string) (*Info, error) {
 	wtDir := worktreeDir(repoRoot, sessionID)
 
 	// Create the branch from current HEAD.
-	if err := gitRun(repoRoot, "branch", branch); err != nil {
+	if err := gitRun(ctx, repoRoot, "branch", branch); err != nil {
 		// If the branch already exists, that's fine (e.g. re-joining a session).
 		if !strings.Contains(err.Error(), "already exists") {
 			return nil, fmt.Errorf("worktree: create branch %s: %w", branch, err)
@@ -69,7 +88,7 @@ func Create(repoDir, sessionID string) (*Info, error) {
 	}
 
 	// Add the worktree.
-	if err := gitRun(repoRoot, "worktree", "add", wtDir, branch); err != nil {
+	if err := gitRun(ctx, repoRoot, "worktree", "add", wtDir, branch); err != nil {
 		// If it already exists, treat as success (join).
 		if !strings.Contains(err.Error(), "already exists") &&
 			!strings.Contains(err.Error(), "is already checked out") {
@@ -90,44 +109,56 @@ func Create(repoDir, sessionID string) (*Info, error) {
 // If there are uncommitted changes in the worktree, they are committed first
 // with a default message.
 func Merge(repoDir string, info *Info) error {
+	return MergeContext(defaultCommandContext(), repoDir, info)
+}
+
+// MergeContext is Merge with caller-provided cancellation for git commands.
+func MergeContext(ctx context.Context, repoDir string, info *Info) error {
+	ctx = nonNilCommandContext(ctx)
 	if info == nil {
 		return errors.New("worktree: nil info")
 	}
 
-	repoRoot, err := gitRepoRoot(repoDir)
+	repoRoot, err := gitRepoRoot(ctx, repoDir)
 	if err != nil {
 		return fmt.Errorf("worktree: locate repo root: %w", err)
 	}
 
 	// Auto-commit any uncommitted changes in the worktree.
-	if err := autoCommit(info.Path, info.SessionID); err != nil {
+	if err := autoCommit(ctx, info.Path, info.SessionID); err != nil {
 		return fmt.Errorf("worktree: auto-commit: %w", err)
 	}
 
 	// Merge branch into base from the main repo.
 	mergeMsg := "atteler: merge session " + info.SessionID
-	if err := gitRun(repoRoot, "merge", "--no-ff", "-m", mergeMsg, info.Branch); err != nil {
+	if err := gitRun(ctx, repoRoot, "merge", "--no-ff", "-m", mergeMsg, info.Branch); err != nil {
 		return fmt.Errorf("worktree: merge %s into %s: %w", info.Branch, info.BaseBranch, err)
 	}
 
-	return Remove(repoDir, info)
+	return RemoveContext(ctx, repoDir, info)
 }
 
 // Remove deletes the worktree and its branch without merging.
 func Remove(repoDir string, info *Info) error {
+	return RemoveContext(defaultCommandContext(), repoDir, info)
+}
+
+// RemoveContext is Remove with caller-provided cancellation for git commands.
+func RemoveContext(ctx context.Context, repoDir string, info *Info) error {
+	ctx = nonNilCommandContext(ctx)
 	if info == nil {
 		return errors.New("worktree: nil info")
 	}
 
-	repoRoot, err := gitRepoRoot(repoDir)
+	repoRoot, err := gitRepoRoot(ctx, repoDir)
 	if err != nil {
 		return fmt.Errorf("worktree: locate repo root: %w", err)
 	}
 
 	errs := []error{
-		gitRun(repoRoot, "worktree", "remove", "--force", info.Path),
-		gitRun(repoRoot, "worktree", "prune"),
-		gitRun(repoRoot, "branch", "-D", info.Branch),
+		gitRun(ctx, repoRoot, "worktree", "remove", "--force", info.Path),
+		gitRun(ctx, repoRoot, "worktree", "prune"),
+		gitRun(ctx, repoRoot, "branch", "-D", info.Branch),
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("worktree: remove: %w", err)
@@ -137,17 +168,23 @@ func Remove(repoDir string, info *Info) error {
 
 // List returns all atteler-managed worktrees found in the repository.
 func List(repoDir string) ([]Info, error) {
-	repoRoot, err := gitRepoRoot(repoDir)
+	return ListContext(defaultCommandContext(), repoDir)
+}
+
+// ListContext is List with caller-provided cancellation for git commands.
+func ListContext(ctx context.Context, repoDir string) ([]Info, error) {
+	ctx = nonNilCommandContext(ctx)
+	repoRoot, err := gitRepoRoot(ctx, repoDir)
 	if err != nil {
 		return nil, fmt.Errorf("worktree: locate repo root: %w", err)
 	}
 
-	out, err := gitOutput(repoRoot, "worktree", "list", "--porcelain")
+	out, err := gitOutput(ctx, repoRoot, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, fmt.Errorf("worktree: list: %w", err)
 	}
 
-	return parseWorktreeList(out, repoRoot), nil
+	return parseWorktreeListContext(ctx, out, repoRoot), nil
 }
 
 // Status returns a human-readable summary of an active worktree.
@@ -160,7 +197,12 @@ func Status(info *Info) string {
 
 // IsGitRepo reports whether dir is inside a git repository.
 func IsGitRepo(dir string) bool {
-	_, err := gitRepoRoot(dir)
+	return IsGitRepoContext(defaultCommandContext(), dir)
+}
+
+// IsGitRepoContext reports whether dir is inside a git repository using ctx.
+func IsGitRepoContext(ctx context.Context, dir string) bool {
+	_, err := gitRepoRoot(nonNilCommandContext(ctx), dir)
 	return err == nil
 }
 
@@ -177,9 +219,10 @@ func worktreeDir(repoRoot, sessionID string) string {
 }
 
 // autoCommit stages and commits any dirty files in the worktree.
-func autoCommit(wtDir, sessionID string) error {
+func autoCommit(ctx context.Context, wtDir, sessionID string) error {
+	ctx = nonNilCommandContext(ctx)
 	// Check if there are changes.
-	out, err := gitOutput(wtDir, "status", "--porcelain")
+	out, err := gitOutput(ctx, wtDir, "status", "--porcelain")
 	if err != nil {
 		return err
 	}
@@ -187,19 +230,19 @@ func autoCommit(wtDir, sessionID string) error {
 		return nil // nothing to commit
 	}
 
-	if err := gitRun(wtDir, "add", "-A"); err != nil {
+	if err := gitRun(ctx, wtDir, "add", "-A"); err != nil {
 		return fmt.Errorf("stage changes: %w", err)
 	}
 
 	msg := fmt.Sprintf("atteler: auto-commit session %s at %s",
 		sessionID, time.Now().UTC().Format(time.RFC3339))
-	return gitRun(wtDir, "commit", "-m", msg)
+	return gitRun(ctx, wtDir, "commit", "-m", msg)
 }
 
 // gitRepoRoot returns the top-level directory of the git repository
 // containing dir.
-func gitRepoRoot(dir string) (string, error) {
-	out, err := gitOutput(dir, "rev-parse", "--show-toplevel")
+func gitRepoRoot(ctx context.Context, dir string) (string, error) {
+	out, err := gitOutput(nonNilCommandContext(ctx), dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", err
 	}
@@ -208,8 +251,8 @@ func gitRepoRoot(dir string) (string, error) {
 
 // gitCurrentBranch returns the current branch name. If HEAD is detached
 // it returns "HEAD".
-func gitCurrentBranch(dir string) (string, error) {
-	out, err := gitOutput(dir, "rev-parse", "--abbrev-ref", "HEAD")
+func gitCurrentBranch(ctx context.Context, dir string) (string, error) {
+	out, err := gitOutput(nonNilCommandContext(ctx), dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return "", err
 	}
@@ -217,8 +260,8 @@ func gitCurrentBranch(dir string) (string, error) {
 }
 
 // gitRun executes a git command in dir and returns any error.
-func gitRun(dir string, args ...string) error {
-	cmd := exec.CommandContext(context.Background(), "git", args...)
+func gitRun(ctx context.Context, dir string, args ...string) error {
+	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", args...)
 	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -229,8 +272,8 @@ func gitRun(dir string, args ...string) error {
 }
 
 // gitOutput executes a git command in dir and returns its stdout.
-func gitOutput(dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(context.Background(), "git", args...)
+func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -244,6 +287,11 @@ func gitOutput(dir string, args ...string) (string, error) {
 // parseWorktreeList parses the porcelain output of `git worktree list`
 // and returns only atteler-managed entries (branches starting with "atteler/").
 func parseWorktreeList(output, repoRoot string) []Info {
+	return parseWorktreeListContext(defaultCommandContext(), output, repoRoot)
+}
+
+func parseWorktreeListContext(ctx context.Context, output, repoRoot string) []Info {
+	ctx = nonNilCommandContext(ctx)
 	var results []Info
 	var current Info
 
@@ -274,7 +322,7 @@ func parseWorktreeList(output, repoRoot string) []Info {
 
 	// Try to fill in BaseBranch from the main worktree's branch.
 	if len(results) > 0 {
-		if base, err := gitCurrentBranch(repoRoot); err == nil {
+		if base, err := gitCurrentBranch(ctx, repoRoot); err == nil {
 			for i := range results {
 				results[i].BaseBranch = base
 			}
