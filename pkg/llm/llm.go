@@ -17,6 +17,7 @@ const (
 	providerClaudeCode = "claude-code"
 	providerCodex      = "codex"
 	providerOpenAI     = "openai"
+	providerOllama     = "ollama"
 )
 
 // Role represents who authored a message.
