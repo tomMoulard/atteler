@@ -38,6 +38,7 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 			}{Content: "hello back"}}},
 		}
 		resp.Usage.PromptTokens = 8
+		resp.Usage.PromptTokensDetails.CachedTokens = 2
 		resp.Usage.CompletionTokens = 3
 		w.Header().Set("Content-Type", "application/json")
 		assert.NoError(t, json.NewEncoder(w).Encode(resp))
@@ -71,8 +72,8 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 	if resp.Content != "hello back" {
 		assert.Failf(t, "assertion failed", "content = %q, want %q", resp.Content, "hello back")
 	}
-	if resp.InputTokens != 8 || resp.OutputTokens != 3 {
-		assert.Failf(t, "assertion failed", "tokens = %d/%d, want 8/3", resp.InputTokens, resp.OutputTokens)
+	if resp.InputTokens != 8 || resp.CachedInputTokens != 2 || resp.OutputTokens != 3 {
+		assert.Failf(t, "assertion failed", "tokens = %d/%d/%d, want 8/2/3", resp.InputTokens, resp.CachedInputTokens, resp.OutputTokens)
 	}
 
 	// Verify request shape — system message stays inline for OpenAI.

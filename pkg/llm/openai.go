@@ -140,8 +140,11 @@ type openaiResponse struct {
 		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		PromptTokensDetails struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -213,10 +216,11 @@ func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*
 	}
 
 	return &Response{
-		Content:      text,
-		Model:        or.Model,
-		InputTokens:  or.Usage.PromptTokens,
-		OutputTokens: or.Usage.CompletionTokens,
+		Content:           text,
+		Model:             or.Model,
+		InputTokens:       or.Usage.PromptTokens,
+		CachedInputTokens: or.Usage.PromptTokensDetails.CachedTokens,
+		OutputTokens:      or.Usage.CompletionTokens,
 	}, nil
 }
 

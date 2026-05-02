@@ -49,10 +49,11 @@ type CompleteParams struct {
 
 // Response is the provider-normalised result of a completion.
 type Response struct {
-	Content      string
-	Model        string // Model that actually answered.
-	InputTokens  int
-	OutputTokens int
+	Content           string
+	Model             string // Model that actually answered.
+	InputTokens       int
+	CachedInputTokens int
+	OutputTokens      int
 }
 
 // Provider is the interface every LLM backend must implement.

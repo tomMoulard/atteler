@@ -34,6 +34,8 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 			}{{Text: "hello back"}},
 		}
 		resp.Usage.InputTokens = 10
+		resp.Usage.CacheCreationInputTokens = 4
+		resp.Usage.CacheReadInputTokens = 6
 		resp.Usage.OutputTokens = 5
 		w.Header().Set("Content-Type", "application/json")
 		assert.NoError(t, json.NewEncoder(w).Encode(resp))
@@ -65,8 +67,8 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 	if resp.Content != "hello back" {
 		assert.Failf(t, "assertion failed", "content = %q, want %q", resp.Content, "hello back")
 	}
-	if resp.InputTokens != 10 || resp.OutputTokens != 5 {
-		assert.Failf(t, "assertion failed", "tokens = %d/%d, want 10/5", resp.InputTokens, resp.OutputTokens)
+	if resp.InputTokens != 20 || resp.CachedInputTokens != 6 || resp.OutputTokens != 5 {
+		assert.Failf(t, "assertion failed", "tokens = %d/%d/%d, want 20/6/5", resp.InputTokens, resp.CachedInputTokens, resp.OutputTokens)
 	}
 
 	// Verify request shape.

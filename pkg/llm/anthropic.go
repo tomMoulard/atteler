@@ -137,8 +137,10 @@ type anthropicResponse struct {
 		Text string `json:"text"`
 	} `json:"content"`
 	Usage struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens              int `json:"input_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
 	} `json:"usage"`
 }
 
@@ -218,10 +220,11 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 	}
 
 	return &Response{
-		Content:      b.String(),
-		Model:        ar.Model,
-		InputTokens:  ar.Usage.InputTokens,
-		OutputTokens: ar.Usage.OutputTokens,
+		Content:           b.String(),
+		Model:             ar.Model,
+		InputTokens:       ar.Usage.InputTokens + ar.Usage.CacheCreationInputTokens + ar.Usage.CacheReadInputTokens,
+		CachedInputTokens: ar.Usage.CacheReadInputTokens,
+		OutputTokens:      ar.Usage.OutputTokens,
 	}, nil
 }
 
