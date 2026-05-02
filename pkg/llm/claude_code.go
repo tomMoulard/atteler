@@ -16,7 +16,7 @@ import (
 
 const claudeCodeAuthTimeout = 5 * time.Second
 
-const claudeCodeFileTools = "Read,Write,Edit,MultiEdit,LS,Glob,Grep"
+const claudeCodeTools = "Read,Write,Edit,MultiEdit,LS,Glob,Grep,Bash"
 
 // ClaudeCodeProvider shells out to Claude Code so Atteler can reuse a working
 // Claude subscription login without consuming direct Anthropic API quota.
@@ -28,11 +28,18 @@ type ClaudeCodeProvider struct {
 // NewClaudeCodeProvider creates a provider backed by the local claude
 // executable and verifies that Claude Code is logged in.
 func NewClaudeCodeProvider() (*ClaudeCodeProvider, error) {
+	return NewClaudeCodeProviderContext(defaultCredentialContext())
+}
+
+// NewClaudeCodeProviderContext creates a provider backed by the local claude
+// executable and verifies that Claude Code is logged in using ctx.
+func NewClaudeCodeProviderContext(ctx context.Context) (*ClaudeCodeProvider, error) {
+	ctx = nonNilCredentialContext(ctx)
 	bin, err := exec.LookPath("claude")
 	if err != nil {
 		return nil, fmt.Errorf("claude executable not found: %w", err)
 	}
-	if err := verifyClaudeCodeAuth(context.Background(), bin); err != nil {
+	if err := verifyClaudeCodeAuth(ctx, bin); err != nil {
 		return nil, err
 	}
 	return &ClaudeCodeProvider{bin: bin, models: defaultClaudeCodeModels()}, nil
@@ -97,8 +104,8 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 		"--print",
 		"--no-session-persistence",
 		"--permission-mode", "acceptEdits",
-		"--tools", claudeCodeFileTools,
-		"--allowed-tools", claudeCodeFileTools,
+		"--tools", claudeCodeTools,
+		"--allowed-tools", claudeCodeTools,
 		"--add-dir", cwd,
 		"--model", model,
 		"--output-format", "text",

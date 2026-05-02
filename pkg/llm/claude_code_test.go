@@ -76,11 +76,13 @@ printf 'claude:%s' "$model"
 	if value, ok := flagValue(args, "--permission-mode"); !ok || value != "acceptEdits" {
 		require.Failf(t, "unexpected failure", "--permission-mode = %q, %v; want acceptEdits", value, ok)
 	}
-	if value, ok := flagValue(args, "--tools"); !ok || value != claudeCodeFileTools {
-		require.Failf(t, "unexpected failure", "--tools = %q, %v; want %q", value, ok, claudeCodeFileTools)
+	if value, ok := flagValue(args, "--tools"); !ok || value != claudeCodeTools {
+		require.Failf(t, "unexpected failure", "--tools = %q, %v; want %q", value, ok, claudeCodeTools)
 	}
-	if value, ok := flagValue(args, "--allowed-tools"); !ok || value != claudeCodeFileTools {
-		require.Failf(t, "unexpected failure", "--allowed-tools = %q, %v; want %q", value, ok, claudeCodeFileTools)
+	if value, ok := flagValue(args, "--allowed-tools"); !ok || value != claudeCodeTools {
+		require.Failf(t, "unexpected failure", "--allowed-tools = %q, %v; want %q", value, ok, claudeCodeTools)
+	} else {
+		assert.Contains(t, strings.Split(value, ","), "Bash")
 	}
 	if value, ok := flagValue(args, "--add-dir"); !ok || value != workDir {
 		require.Failf(t, "unexpected failure", "--add-dir = %q, %v; want %q", value, ok, workDir)
