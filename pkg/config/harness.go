@@ -324,6 +324,13 @@ func parseOpencodeConfig(path string, data []byte) Config {
 		DefaultModel:    model,
 	}
 
+	addOpenCodeProviders(&cfg, raw, provider)
+	addOpenCodeAgents(&cfg, filepath.Dir(path), raw)
+
+	return cfg
+}
+
+func addOpenCodeProviders(cfg *Config, raw map[string]any, defaultProvider string) {
 	if providers, ok := raw["provider"].(map[string]any); ok {
 		for name, value := range providers {
 			providerName := normalizeProvider(name)
@@ -333,30 +340,31 @@ func parseOpencodeConfig(path string, data []byte) Config {
 			}
 			baseURL := findString(nested, "base_url", "baseURL", "api_base", "apiBase", "api_url", "apiURL")
 			if baseURL != "" {
-				setProvider(&cfg, providerName, ProviderConfig{BaseURL: baseURL})
+				setProvider(cfg, providerName, ProviderConfig{BaseURL: baseURL})
 			}
 		}
 	}
 
 	baseURL := topLevelString(raw, "base_url", "baseURL", "api_base", "apiBase", "api_url", "apiURL")
-	if provider != "" && baseURL != "" {
-		setProvider(&cfg, provider, ProviderConfig{BaseURL: baseURL})
+	if defaultProvider != "" && baseURL != "" {
+		setProvider(cfg, defaultProvider, ProviderConfig{BaseURL: baseURL})
 	}
+}
 
-	if agents, ok := raw["agent"].(map[string]any); ok {
-		baseDir := filepath.Dir(path)
-		for name, value := range agents {
-			nested, ok := value.(map[string]any)
-			if !ok {
-				continue
-			}
-			if agentCfg, ok := parseOpenCodeAgentMap(baseDir, name, nested); ok {
-				setAgent(&cfg, name, agentCfg)
-			}
+func addOpenCodeAgents(cfg *Config, baseDir string, raw map[string]any) {
+	agents, ok := raw["agent"].(map[string]any)
+	if !ok {
+		return
+	}
+	for name, value := range agents {
+		nested, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if agentCfg, ok := parseOpenCodeAgentMap(baseDir, name, nested); ok {
+			setAgent(cfg, name, agentCfg)
 		}
 	}
-
-	return cfg
 }
 
 func loadOpencodeAgentDir(dir string) (Config, string, bool) {
@@ -438,15 +446,15 @@ func parseOpenCodeAgentFile(path string) (AgentConfig, bool) {
 }
 
 type openCodeAgentFrontmatter struct {
-	Description string   `yaml:"description"`
-	Model       string   `yaml:"model"`
-	Prompt      string   `yaml:"prompt"`
 	Temperature *float64 `yaml:"temperature"`
 	TopP        *float64 `yaml:"top_p"`
 	TopPAlt     *float64 `yaml:"topP"`
 	Hidden      *bool    `yaml:"hidden"`
-	Disable     bool     `yaml:"disable"`
+	Description string   `yaml:"description"`
+	Model       string   `yaml:"model"`
+	Prompt      string   `yaml:"prompt"`
 	MaxTokens   int      `yaml:"max_tokens"`
+	Disable     bool     `yaml:"disable"`
 }
 
 func (m openCodeAgentFrontmatter) agentConfig(baseDir string) (AgentConfig, bool) {
@@ -834,6 +842,7 @@ func readOptional(path string) ([]byte, bool) {
 	if path == "" {
 		return nil, false
 	}
+	// #nosec G304,G703 -- config import intentionally reads caller-selected paths.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false
@@ -845,59 +854,22 @@ func stripJSONComments(data []byte) []byte {
 	var out strings.Builder
 	out.Grow(len(data))
 
-	inString := false
-	escaped := false
-	inLineComment := false
-	inBlockComment := false
+	state := jsonStripState{}
 
 	for i := 0; i < len(data); i++ {
 		ch := data[i]
+		if state.skipBlockCommentEnd(data, i) {
+			i++
+			continue
+		}
+		if state.writeNext(&out, ch) {
+			continue
+		}
 
-		if inLineComment {
-			if ch == '\n' {
-				inLineComment = false
-				out.WriteByte(ch)
-			}
+		skippedComment := state.skipComment(data, i)
+		if skippedComment {
+			i++
 			continue
-		}
-		if inBlockComment {
-			if ch == '*' && i+1 < len(data) && data[i+1] == '/' {
-				inBlockComment = false
-				i++
-			}
-			continue
-		}
-		if inString {
-			out.WriteByte(ch)
-			if escaped {
-				escaped = false
-				continue
-			}
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == '"' {
-				inString = false
-			}
-			continue
-		}
-		if ch == '"' {
-			inString = true
-			out.WriteByte(ch)
-			continue
-		}
-		if ch == '/' && i+1 < len(data) {
-			switch data[i+1] {
-			case '/':
-				inLineComment = true
-				i++
-				continue
-			case '*':
-				inBlockComment = true
-				i++
-				continue
-			}
 		}
 		if ch == ',' {
 			next := nextNonSpace(data, i+1)
@@ -910,6 +882,83 @@ func stripJSONComments(data []byte) []byte {
 	}
 
 	return stripJSONTrailingCommas([]byte(out.String()))
+}
+
+type jsonStripState struct {
+	inString       bool
+	escaped        bool
+	inLineComment  bool
+	inBlockComment bool
+}
+
+func (s *jsonStripState) writeNext(out *strings.Builder, ch byte) bool {
+	switch {
+	case s.inLineComment:
+		if ch == '\n' {
+			s.inLineComment = false
+			out.WriteByte(ch)
+		}
+		return true
+	case s.inBlockComment:
+		return true
+	case s.inString:
+		s.writeStringByte(out, ch)
+		return true
+	case ch == '"':
+		s.inString = true
+		out.WriteByte(ch)
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *jsonStripState) writeStringByte(out *strings.Builder, ch byte) {
+	out.WriteByte(ch)
+	if s.escaped {
+		s.escaped = false
+		return
+	}
+	if ch == '\\' {
+		s.escaped = true
+		return
+	}
+	if ch == '"' {
+		s.inString = false
+	}
+}
+
+func (s *jsonStripState) skipComment(data []byte, i int) bool {
+	if s.inBlockComment {
+		return false
+	}
+	if i+1 >= len(data) {
+		return false
+	}
+	if data[i] != '/' {
+		return false
+	}
+	switch data[i+1] {
+	case '/':
+		s.inLineComment = true
+		return true
+	case '*':
+		s.inBlockComment = true
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *jsonStripState) skipBlockCommentEnd(data []byte, i int) bool {
+	if !s.inBlockComment || i+1 >= len(data) {
+		return false
+	}
+	if data[i] == '*' && data[i+1] == '/' {
+		s.inBlockComment = false
+		return true
+	}
+	return false
 }
 
 func nextNonSpace(data []byte, start int) byte {
@@ -930,7 +979,7 @@ func stripJSONTrailingCommas(data []byte) []byte {
 
 	inString := false
 	escaped := false
-	for i := 0; i < len(data); i++ {
+	for i := range data {
 		ch := data[i]
 		if inString {
 			out.WriteByte(ch)
@@ -964,28 +1013,24 @@ func stripJSONTrailingCommas(data []byte) []byte {
 }
 
 func findOpenCodeFallbackModel(raw map[string]any) string {
-	for _, section := range []string{"categories", "agents"} {
-		if nested, ok := raw[section].(map[string]any); ok {
-			if section == "categories" {
-				for _, name := range []string{"deep", "ultrabrain", "quick", "unspecified-high", "unspecified-low"} {
-					if model := findNamedModel(nested, name); model != "" {
-						return model
-					}
-				}
-			}
-			if section == "agents" {
-				for _, name := range []string{"oracle", "atlas", "explore"} {
-					if model := findNamedModel(nested, name); model != "" {
-						return model
-					}
-				}
-			}
-			if model := findFirstNestedModel(nested); model != "" {
-				return model
-			}
+	if model := findOpenCodeSectionModel(raw, "categories",
+		"deep", "ultrabrain", "quick", "unspecified-high", "unspecified-low"); model != "" {
+		return model
+	}
+	return findOpenCodeSectionModel(raw, "agents", "oracle", "atlas", "explore")
+}
+
+func findOpenCodeSectionModel(raw map[string]any, section string, preferredNames ...string) string {
+	nested, ok := raw[section].(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, name := range preferredNames {
+		if model := findNamedModel(nested, name); model != "" {
+			return model
 		}
 	}
-	return ""
+	return findFirstNestedModel(nested)
 }
 
 func findNamedModel(raw map[string]any, name string) string {

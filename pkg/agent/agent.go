@@ -82,7 +82,8 @@ func (r *Registry) List() []string {
 	}
 
 	names := make([]string, 0, len(r.agents))
-	for name, agent := range r.agents {
+	for name := range r.agents {
+		agent := r.agents[name]
 		if agent.Hidden {
 			continue
 		}

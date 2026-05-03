@@ -102,19 +102,19 @@ type fileProviderConfig struct {
 }
 
 type fileAgentConfig struct {
-	Temperature    *float64 `json:"temperature" yaml:"temperature"`
+	Personality    *string  `json:"personality" yaml:"personality"`
 	TopP           *float64 `json:"top_p" yaml:"top_p"`
 	Seed           *int     `json:"seed" yaml:"seed"`
 	Model          *string  `json:"model" yaml:"model"`
 	ReasoningLevel *string  `json:"reasoning_level" yaml:"reasoning_level"`
 	Description    *string  `json:"description" yaml:"description"`
-	Personality    *string  `json:"personality" yaml:"personality"`
+	Temperature    *float64 `json:"temperature" yaml:"temperature"`
 	SystemPrompt   *string  `json:"system_prompt" yaml:"system_prompt"`
+	MaxTokens      *int     `json:"max_tokens" yaml:"max_tokens"`
+	Hidden         *bool    `json:"hidden" yaml:"hidden"`
 	FallbackModels []string `json:"fallback_models" yaml:"fallback_models"`
 	Capabilities   []string `json:"capabilities" yaml:"capabilities"`
-	MaxTokens      *int     `json:"max_tokens" yaml:"max_tokens"`
 	Triggers       []string `json:"triggers" yaml:"triggers"`
-	Hidden         *bool    `json:"hidden" yaml:"hidden"`
 }
 
 type fileContextConfig struct {

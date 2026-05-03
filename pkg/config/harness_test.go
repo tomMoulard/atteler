@@ -15,6 +15,8 @@ const (
 	testClaudeCodeProvider = providerClaudeCode
 	testCodexProvider      = providerCodex
 	testOpenAIProvider     = providerOpenAI
+	testAnthropicBaseURL   = "https://anthropic.example"
+	testOpenAIGPT54        = "openai/gpt-5.4"
 )
 
 func TestParseCodexConfig(t *testing.T) {
@@ -27,7 +29,7 @@ model_provider = "openai"
 base_url = "https://openai.example"
 
 [model_providers.anthropic]
-base_url = 'https://anthropic.example'
+base_url = '` + testAnthropicBaseURL + `'
 `))
 
 	if cfg.DefaultProvider != testOpenAIProvider {
@@ -39,7 +41,7 @@ base_url = 'https://anthropic.example'
 	if cfg.Providers[testOpenAIProvider].BaseURL != "https://openai.example" {
 		assert.Failf(t, "assertion failed", "openai base_url = %q", cfg.Providers[testOpenAIProvider].BaseURL)
 	}
-	if cfg.Providers[testAnthropicProvider].BaseURL != "https://anthropic.example" {
+	if cfg.Providers[testAnthropicProvider].BaseURL != testAnthropicBaseURL {
 		assert.Failf(t, "assertion failed", "anthropic base_url = %q", cfg.Providers[testAnthropicProvider].BaseURL)
 	}
 }
@@ -57,7 +59,7 @@ func TestParseGenericJSONHarness(t *testing.T) {
 	t.Parallel()
 	cfg := parseGenericJSONHarness([]byte(`{
 		"model": "claude-sonnet-4-20250514",
-		"apiBase": "https://anthropic.example"
+		"apiBase": "`+testAnthropicBaseURL+`"
 	}`), testAnthropicProvider)
 
 	if cfg.DefaultProvider != testAnthropicProvider {
@@ -66,7 +68,7 @@ func TestParseGenericJSONHarness(t *testing.T) {
 	if cfg.DefaultModel != "claude-sonnet-4-20250514" {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q", cfg.DefaultModel)
 	}
-	if cfg.Providers[testAnthropicProvider].BaseURL != "https://anthropic.example" {
+	if cfg.Providers[testAnthropicProvider].BaseURL != testAnthropicBaseURL {
 		assert.Failf(t, "assertion failed", "base_url = %q", cfg.Providers[testAnthropicProvider].BaseURL)
 	}
 }
@@ -97,7 +99,7 @@ func TestParseOpencodeConfig_UsesTopLevelModelProviderConfigAndAgents(t *testing
 	cfg := parseOpencodeConfig(filepath.Join(dir, "opencode.json"), []byte(`{
 		"$schema": "https://opencode.ai/config.json",
 		// OpenCode supports JSONC.
-		"model": "openai/gpt-5.4",
+		"model": "`+testOpenAIGPT54+`",
 		"agent": {
 			"reviewer": {
 				"description": "Reviews code",
@@ -116,7 +118,7 @@ func TestParseOpencodeConfig_UsesTopLevelModelProviderConfigAndAgents(t *testing
 				"baseURL": "https://openai.example",
 			},
 			"anthropic": {
-				"base_url": "https://anthropic.example",
+				"base_url": "`+testAnthropicBaseURL+`",
 			},
 		},
 	}`))
@@ -124,13 +126,13 @@ func TestParseOpencodeConfig_UsesTopLevelModelProviderConfigAndAgents(t *testing
 	if cfg.DefaultProvider != testOpenAIProvider {
 		assert.Failf(t, "assertion failed", "DefaultProvider = %q, want openai", cfg.DefaultProvider)
 	}
-	if cfg.DefaultModel != "openai/gpt-5.4" {
+	if cfg.DefaultModel != testOpenAIGPT54 {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q, want openai/gpt-5.4", cfg.DefaultModel)
 	}
 	if cfg.Providers[testOpenAIProvider].BaseURL != "https://openai.example" {
 		assert.Failf(t, "assertion failed", "openai base_url = %q", cfg.Providers[testOpenAIProvider].BaseURL)
 	}
-	if cfg.Providers[testAnthropicProvider].BaseURL != "https://anthropic.example" {
+	if cfg.Providers[testAnthropicProvider].BaseURL != testAnthropicBaseURL {
 		assert.Failf(t, "assertion failed", "anthropic base_url = %q", cfg.Providers[testAnthropicProvider].BaseURL)
 	}
 	if reviewer := cfg.Agents["reviewer"]; reviewer.Description != "Reviews code" ||
@@ -203,7 +205,7 @@ func TestParseOpencodeConfig_FallsBackToOhMyOpenagentDefaults(t *testing.T) {
 		},
 		"categories": {
 			"deep": {
-				"model": "openai/gpt-5.4"
+				"model": "`+testOpenAIGPT54+`"
 			},
 			"quick": {
 				"model": "openai/gpt-5.4-mini"
@@ -214,7 +216,7 @@ func TestParseOpencodeConfig_FallsBackToOhMyOpenagentDefaults(t *testing.T) {
 	if cfg.DefaultProvider != testOpenAIProvider {
 		assert.Failf(t, "assertion failed", "DefaultProvider = %q, want openai", cfg.DefaultProvider)
 	}
-	if cfg.DefaultModel != "openai/gpt-5.4" {
+	if cfg.DefaultModel != testOpenAIGPT54 {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q, want openai/gpt-5.4", cfg.DefaultModel)
 	}
 }
@@ -229,7 +231,7 @@ func TestLoadOpencodeAgentDir_LoadsMarkdownAgents(t *testing.T) {
 	require.NoError(t, os.Symlink(outsideAgent, filepath.Join(dir, "linked.md")))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "review.md"), []byte(`---
 description: Reviews code
-model: openai/gpt-5.4
+model: `+testOpenAIGPT54+`
 temperature: 0.1
 hidden: false
 ---
@@ -248,7 +250,7 @@ Internal helper prompt.
 	assert.Contains(t, loaded, filepath.Join(dir, "review.md"))
 	if reviewer := cfg.Agents["review"]; reviewer.SystemPrompt != "Review code thoroughly." ||
 		reviewer.Description != "Reviews code" ||
-		reviewer.Model != "openai/gpt-5.4" {
+		reviewer.Model != testOpenAIGPT54 {
 		assert.Failf(t, "assertion failed", "review agent = %+v", reviewer)
 	}
 	if !cfg.Agents["internal"].Hidden {
