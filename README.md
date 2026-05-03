@@ -243,10 +243,20 @@ lower precedence than atteler config:
 
 - `~/.codex/config.toml`
 - `~/.claude/settings.json` or `~/.claude.json`
-- `~/.config/opencode/opencode.json`, `~/.config/opencode/config.json`,
-  `~/.opencode.json`, or `./opencode.json`
+- `~/.config/opencode/opencode.json` or `opencode.jsonc`,
+  `~/.config/opencode/config.json` or `config.jsonc`,
+  `~/.config/opencode/oh-my-openagent.json` or `oh-my-opencode.json`,
+  `~/.opencode.json` or `.opencode.jsonc`, any file pointed to by
+  `OPENCODE_CONFIG`, `./opencode.json` or `./opencode.jsonc`, and OpenCode
+  agent markdown files under `~/.config/opencode/agents/`,
+  `OPENCODE_CONFIG_DIR/agents/`, or `./.opencode/agents/`
 - `$FORGE_CONFIG/.forge.toml`, `~/forge/.forge.toml`, or
   `~/.forge/.forge.toml`
+
+OpenCode agent imports populate Atteler's normal agent registry, so visible
+OpenCode agents show up in the interactive TUI, prompt completion, and `@agent`
+invocation. Hidden OpenCode agents remain addressable by explicit name but are
+omitted from the normal picker/list surfaces.
 
 ## CLI usage
 

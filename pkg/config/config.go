@@ -52,6 +52,8 @@ type AgentConfig struct {
 	Capabilities   []string `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 	Triggers       []string `json:"triggers,omitempty" yaml:"triggers,omitempty"`
 	MaxTokens      int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+	Hidden         bool     `json:"hidden,omitempty" yaml:"hidden,omitempty"`
+	hiddenSet      bool
 }
 
 // HookConfig configures a local command to receive atteler lifecycle events.
@@ -112,6 +114,7 @@ type fileAgentConfig struct {
 	Capabilities   []string `json:"capabilities" yaml:"capabilities"`
 	MaxTokens      *int     `json:"max_tokens" yaml:"max_tokens"`
 	Triggers       []string `json:"triggers" yaml:"triggers"`
+	Hidden         *bool    `json:"hidden" yaml:"hidden"`
 }
 
 type fileContextConfig struct {
@@ -330,6 +333,10 @@ func mergeFileAgent(current *AgentConfig, agent fileAgentConfig) {
 	if agent.MaxTokens != nil {
 		current.MaxTokens = *agent.MaxTokens
 	}
+	if agent.Hidden != nil {
+		current.Hidden = *agent.Hidden
+		current.hiddenSet = true
+	}
 }
 
 func mergeHooks(dst *Config, hooks map[string][]HookConfig) {
@@ -469,6 +476,10 @@ func mergeConfigAgent(current *AgentConfig, agent AgentConfig) {
 	}
 	if agent.MaxTokens > 0 {
 		current.MaxTokens = agent.MaxTokens
+	}
+	if agent.hiddenSet || agent.Hidden {
+		current.Hidden = agent.Hidden
+		current.hiddenSet = true
 	}
 }
 

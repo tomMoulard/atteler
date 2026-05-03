@@ -24,6 +24,7 @@ type Agent struct {
 	Capabilities   []string
 	Triggers       []string
 	MaxTokens      int
+	Hidden         bool
 }
 
 // Registry stores agents by name.
@@ -54,6 +55,7 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 			Seed:           cfg.Seed,
 			Triggers:       normalizePhrases(cfg.Triggers),
 			MaxTokens:      cfg.MaxTokens,
+			Hidden:         cfg.Hidden,
 		}
 	}
 	return registry
@@ -80,7 +82,10 @@ func (r *Registry) List() []string {
 	}
 
 	names := make([]string, 0, len(r.agents))
-	for name := range r.agents {
+	for name, agent := range r.agents {
+		if agent.Hidden {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)

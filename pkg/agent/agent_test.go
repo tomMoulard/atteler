@@ -25,6 +25,10 @@ func TestRegistry_GetAndList(t *testing.T) {
 			Triggers:       []string{"review this"},
 		},
 		"writer": {Model: "claude-sonnet-4-20250514"},
+		"internal": {
+			Model:  "gpt-hidden",
+			Hidden: true,
+		},
 	})
 
 	names := registry.List()

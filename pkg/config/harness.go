@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -112,24 +114,95 @@ func importClaudeConfig() (Config, string, bool) {
 }
 
 func importOpencodeConfig() (Config, string, bool) {
-	paths := []string{
-		configHomePath("opencode", "opencode.json"),
-		configHomePath("opencode", "config.json"),
-		homePath(".opencode.json"),
-	}
-	if cwd, err := os.Getwd(); err == nil {
-		paths = append(paths, filepath.Join(cwd, "opencode.json"))
-	}
+	cfg := Config{}
+	loaded := make([]string, 0, 6)
+	customConfig := strings.TrimSpace(os.Getenv("OPENCODE_CONFIG"))
 
-	for _, path := range paths {
+	for _, path := range opencodeConfigPaths() {
+		if customConfig != "" && path == customConfig {
+			continue
+		}
 		data, ok := readOptional(path)
 		if !ok {
 			continue
 		}
-		cfg := parseGenericJSONHarness(data, "")
-		return cfg, path, !cfg.empty()
+		mergeConfig(&cfg, parseOpencodeConfig(path, data))
+		loaded = append(loaded, path)
 	}
-	return Config{}, "", false
+
+	for _, dir := range opencodeAgentDirs() {
+		next, path, ok := loadOpencodeAgentDir(dir)
+		if !ok {
+			continue
+		}
+		mergeConfig(&cfg, next)
+		loaded = append(loaded, path)
+	}
+
+	if customConfig != "" {
+		data, ok := readOptional(customConfig)
+		if ok {
+			mergeConfig(&cfg, parseOpencodeConfig(customConfig, data))
+			loaded = append(loaded, customConfig)
+		}
+	}
+
+	if cfg.empty() {
+		return Config{}, "", false
+	}
+	return cfg, strings.Join(loaded, ", "), true
+}
+
+func opencodeConfigPaths() []string {
+	var paths []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" || slices.Contains(paths, path) {
+			return
+		}
+		paths = append(paths, path)
+	}
+
+	add(configHomePath("opencode", "opencode.json"))
+	add(configHomePath("opencode", "opencode.jsonc"))
+	add(configHomePath("opencode", "config.json"))
+	add(configHomePath("opencode", "config.jsonc"))
+	add(configHomePath("opencode", "oh-my-openagent.json"))
+	add(configHomePath("opencode", "oh-my-opencode.json"))
+	add(homePath(".opencode.json"))
+	add(homePath(".opencode.jsonc"))
+
+	if cwd, err := os.Getwd(); err == nil {
+		add(filepath.Join(cwd, "opencode.json"))
+		add(filepath.Join(cwd, "opencode.jsonc"))
+	}
+	if custom := strings.TrimSpace(os.Getenv("OPENCODE_CONFIG")); custom != "" {
+		add(custom)
+	}
+	return paths
+}
+
+func opencodeAgentDirs() []string {
+	var dirs []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" || slices.Contains(dirs, path) {
+			return
+		}
+		dirs = append(dirs, path)
+	}
+
+	add(configHomePath("opencode", "agents"))
+	add(configHomePath("opencode", "agent"))
+	if customDir := strings.TrimSpace(os.Getenv("OPENCODE_CONFIG_DIR")); customDir != "" {
+		add(filepath.Join(customDir, "agents"))
+		add(filepath.Join(customDir, "agent"))
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		add(filepath.Join(cwd, ".opencode", "agents"))
+		add(filepath.Join(cwd, ".opencode", "agent"))
+	}
+	return dirs
 }
 
 func importForgeConfig() (Config, string, bool) {
@@ -225,6 +298,311 @@ func parseGenericJSONHarness(data []byte, fallbackProvider string) Config {
 	}
 
 	return cfg
+}
+
+func parseOpencodeConfig(path string, data []byte) Config {
+	var raw map[string]any
+	if err := json.Unmarshal(stripJSONComments(data), &raw); err != nil {
+		return Config{}
+	}
+
+	model := topLevelString(raw, "model", "default_model", "defaultModel")
+	if model == "" {
+		model = findOpenCodeFallbackModel(raw)
+	}
+
+	provider := normalizeProvider(topLevelString(raw, "default_provider", "defaultProvider"))
+	if provider == "" {
+		provider = inferProviderFromQualifiedModel(model)
+	}
+	if provider == "" {
+		provider = inferProvider(model)
+	}
+
+	cfg := Config{
+		DefaultProvider: provider,
+		DefaultModel:    model,
+	}
+
+	if providers, ok := raw["provider"].(map[string]any); ok {
+		for name, value := range providers {
+			providerName := normalizeProvider(name)
+			nested, ok := value.(map[string]any)
+			if !ok || providerName == "" {
+				continue
+			}
+			baseURL := findString(nested, "base_url", "baseURL", "api_base", "apiBase", "api_url", "apiURL")
+			if baseURL != "" {
+				setProvider(&cfg, providerName, ProviderConfig{BaseURL: baseURL})
+			}
+		}
+	}
+
+	baseURL := topLevelString(raw, "base_url", "baseURL", "api_base", "apiBase", "api_url", "apiURL")
+	if provider != "" && baseURL != "" {
+		setProvider(&cfg, provider, ProviderConfig{BaseURL: baseURL})
+	}
+
+	if agents, ok := raw["agent"].(map[string]any); ok {
+		baseDir := filepath.Dir(path)
+		for name, value := range agents {
+			nested, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if agentCfg, ok := parseOpenCodeAgentMap(baseDir, name, nested); ok {
+				setAgent(&cfg, name, agentCfg)
+			}
+		}
+	}
+
+	return cfg
+}
+
+func loadOpencodeAgentDir(dir string) (Config, string, bool) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return Config{}, "", false
+	}
+
+	cfg := Config{}
+	loadedFiles := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		if !isOpenCodeAgentFile(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		agentCfg, ok := parseOpenCodeAgentFile(path)
+		if !ok {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		setAgent(&cfg, name, agentCfg)
+		loadedFiles = append(loadedFiles, path)
+	}
+
+	if len(loadedFiles) == 0 {
+		return Config{}, "", false
+	}
+	return cfg, strings.Join(loadedFiles, ", "), true
+}
+
+func isOpenCodeAgentFile(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".md", ".markdown":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseOpenCodeAgentFile(path string) (AgentConfig, bool) {
+	data, ok := readOptional(path)
+	if !ok {
+		return AgentConfig{}, false
+	}
+
+	frontmatter, body := splitFrontmatter(string(data))
+	if strings.TrimSpace(frontmatter) == "" {
+		if prompt := strings.TrimSpace(string(data)); prompt != "" {
+			return AgentConfig{SystemPrompt: prompt}, true
+		}
+		return AgentConfig{}, false
+	}
+
+	var meta openCodeAgentFrontmatter
+	if err := yaml.Unmarshal([]byte(frontmatter), &meta); err != nil {
+		return AgentConfig{}, false
+	}
+	if meta.Disable {
+		return AgentConfig{}, false
+	}
+
+	cfg, ok := meta.agentConfig(filepath.Dir(path))
+	if !ok {
+		return AgentConfig{}, false
+	}
+	if prompt := strings.TrimSpace(body); prompt != "" {
+		cfg.SystemPrompt = prompt
+	}
+	return cfg, !agentConfigEmpty(cfg)
+}
+
+type openCodeAgentFrontmatter struct {
+	Description string   `yaml:"description"`
+	Model       string   `yaml:"model"`
+	Prompt      string   `yaml:"prompt"`
+	Temperature *float64 `yaml:"temperature"`
+	TopP        *float64 `yaml:"top_p"`
+	TopPAlt     *float64 `yaml:"topP"`
+	Hidden      *bool    `yaml:"hidden"`
+	Disable     bool     `yaml:"disable"`
+	MaxTokens   int      `yaml:"max_tokens"`
+}
+
+func (m openCodeAgentFrontmatter) agentConfig(baseDir string) (AgentConfig, bool) {
+	topP := m.TopP
+	if topP == nil {
+		topP = m.TopPAlt
+	}
+	cfg := AgentConfig{
+		Description: m.Description,
+		Model:       m.Model,
+		Temperature: m.Temperature,
+		TopP:        topP,
+		MaxTokens:   m.MaxTokens,
+	}
+	if prompt, ok := resolvePromptReference(baseDir, m.Prompt); ok {
+		cfg.SystemPrompt = prompt
+	} else {
+		return AgentConfig{}, false
+	}
+	if m.Hidden != nil {
+		cfg.Hidden = *m.Hidden
+		cfg.hiddenSet = true
+	}
+	return cfg, true
+}
+
+func parseOpenCodeAgentMap(baseDir, name string, raw map[string]any) (AgentConfig, bool) {
+	if boolValue(raw, "disable") {
+		return AgentConfig{}, false
+	}
+
+	cfg := AgentConfig{
+		Description: strings.TrimSpace(topLevelString(raw, "description")),
+		Model:       strings.TrimSpace(topLevelString(raw, "model")),
+		MaxTokens:   intValue(raw, "max_tokens", "maxTokens"),
+	}
+	prompt, ok := resolvePromptReference(baseDir, topLevelString(raw, "prompt"))
+	if !ok {
+		return AgentConfig{}, false
+	}
+	cfg.SystemPrompt = prompt
+	if hidden, ok := boolPtr(raw, "hidden"); ok {
+		cfg.Hidden = *hidden
+		cfg.hiddenSet = true
+	}
+	if value, ok := numberPtr(raw, "temperature"); ok {
+		cfg.Temperature = value
+	}
+	if value, ok := numberPtr(raw, "top_p", "topP"); ok {
+		cfg.TopP = value
+	}
+
+	if strings.TrimSpace(name) == "" || agentConfigEmpty(cfg) {
+		return AgentConfig{}, false
+	}
+	return cfg, true
+}
+
+func splitFrontmatter(data string) (frontmatter, body string) {
+	if !strings.HasPrefix(data, "---") {
+		return "", data
+	}
+
+	lines := strings.Split(data, "\n")
+	if len(lines) < 3 || strings.TrimSpace(lines[0]) != "---" {
+		return "", data
+	}
+
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "---" {
+			continue
+		}
+		return strings.Join(lines[1:i], "\n"), strings.Join(lines[i+1:], "\n")
+	}
+	return "", data
+}
+
+func resolvePromptReference(baseDir, prompt string) (string, bool) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "", true
+	}
+
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(prompt, "{file:"), "}")
+	if strings.HasPrefix(prompt, "{file:") && trimmed != prompt {
+		trimmed = strings.TrimSpace(trimmed)
+		if filepath.IsAbs(trimmed) {
+			return "", false
+		}
+		resolved := filepath.Clean(filepath.Join(baseDir, trimmed))
+		if !pathWithinDir(baseDir, resolved) {
+			return "", false
+		}
+		safePath, ok := safeRegularFilePath(resolved)
+		if !ok {
+			return "", false
+		}
+		data, ok := readOptional(safePath)
+		if !ok {
+			return "", false
+		}
+		return strings.TrimSpace(string(data)), true
+	}
+	return prompt, true
+}
+
+func pathWithinDir(baseDir, path string) bool {
+	baseEval, err := filepath.EvalSymlinks(baseDir)
+	if err != nil {
+		return false
+	}
+	pathEval, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(baseEval, pathEval)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel)
+}
+
+func safeRegularFilePath(path string) (string, bool) {
+	evaluated, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+	info, err := os.Stat(evaluated)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	return evaluated, true
+}
+
+func setAgent(cfg *Config, name string, agent AgentConfig) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	if cfg.Agents == nil {
+		cfg.Agents = make(map[string]AgentConfig)
+	}
+	current := cfg.Agents[name]
+	mergeConfigAgent(&current, agent)
+	cfg.Agents[name] = current
+}
+
+func agentConfigEmpty(cfg AgentConfig) bool {
+	return cfg.Model == "" &&
+		cfg.Description == "" &&
+		cfg.SystemPrompt == "" &&
+		cfg.Temperature == nil &&
+		cfg.TopP == nil &&
+		cfg.MaxTokens == 0 &&
+		!cfg.Hidden &&
+		!cfg.hiddenSet
 }
 
 func parseSimpleTOML(data []byte) (topLevel map[string]string, sections map[string]map[string]string) {
@@ -332,6 +710,66 @@ func findString(raw map[string]any, keys ...string) string {
 	return ""
 }
 
+func topLevelString(raw map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok {
+			if s, ok := value.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func boolValue(raw map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok {
+			if b, ok := value.(bool); ok {
+				return b
+			}
+		}
+	}
+	return false
+}
+
+func boolPtr(raw map[string]any, keys ...string) (*bool, bool) {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok {
+			if b, ok := value.(bool); ok {
+				v := b
+				return &v, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func intValue(raw map[string]any, keys ...string) int {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok {
+			switch typed := value.(type) {
+			case float64:
+				return int(typed)
+			case int:
+				return typed
+			}
+		}
+	}
+	return 0
+}
+
+func numberPtr(raw map[string]any, keys ...string) (*float64, bool) {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok {
+			if number, ok := value.(float64); ok {
+				v := number
+				return &v, true
+			}
+		}
+	}
+	return nil, false
+}
+
 func inferProvider(model string) string {
 	model = strings.ToLower(model)
 	switch {
@@ -342,6 +780,14 @@ func inferProvider(model string) string {
 	default:
 		return ""
 	}
+}
+
+func inferProviderFromQualifiedModel(model string) string {
+	provider, _, ok := strings.Cut(strings.TrimSpace(model), "/")
+	if !ok {
+		return ""
+	}
+	return normalizeProvider(provider)
 }
 
 func normalizeProvider(provider string) string {
@@ -393,6 +839,178 @@ func readOptional(path string) ([]byte, bool) {
 		return nil, false
 	}
 	return data, true
+}
+
+func stripJSONComments(data []byte) []byte {
+	var out strings.Builder
+	out.Grow(len(data))
+
+	inString := false
+	escaped := false
+	inLineComment := false
+	inBlockComment := false
+
+	for i := 0; i < len(data); i++ {
+		ch := data[i]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+				out.WriteByte(ch)
+			}
+			continue
+		}
+		if inBlockComment {
+			if ch == '*' && i+1 < len(data) && data[i+1] == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+		if inString {
+			out.WriteByte(ch)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			out.WriteByte(ch)
+			continue
+		}
+		if ch == '/' && i+1 < len(data) {
+			switch data[i+1] {
+			case '/':
+				inLineComment = true
+				i++
+				continue
+			case '*':
+				inBlockComment = true
+				i++
+				continue
+			}
+		}
+		if ch == ',' {
+			next := nextNonSpace(data, i+1)
+			if next == ']' || next == '}' {
+				continue
+			}
+		}
+
+		out.WriteByte(ch)
+	}
+
+	return stripJSONTrailingCommas([]byte(out.String()))
+}
+
+func nextNonSpace(data []byte, start int) byte {
+	for i := start; i < len(data); i++ {
+		switch data[i] {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			return data[i]
+		}
+	}
+	return 0
+}
+
+func stripJSONTrailingCommas(data []byte) []byte {
+	var out strings.Builder
+	out.Grow(len(data))
+
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); i++ {
+		ch := data[i]
+		if inString {
+			out.WriteByte(ch)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			out.WriteByte(ch)
+			continue
+		}
+		if ch == ',' {
+			next := nextNonSpace(data, i+1)
+			if next == ']' || next == '}' {
+				continue
+			}
+		}
+		out.WriteByte(ch)
+	}
+	return []byte(out.String())
+}
+
+func findOpenCodeFallbackModel(raw map[string]any) string {
+	for _, section := range []string{"categories", "agents"} {
+		if nested, ok := raw[section].(map[string]any); ok {
+			if section == "categories" {
+				for _, name := range []string{"deep", "ultrabrain", "quick", "unspecified-high", "unspecified-low"} {
+					if model := findNamedModel(nested, name); model != "" {
+						return model
+					}
+				}
+			}
+			if section == "agents" {
+				for _, name := range []string{"oracle", "atlas", "explore"} {
+					if model := findNamedModel(nested, name); model != "" {
+						return model
+					}
+				}
+			}
+			if model := findFirstNestedModel(nested); model != "" {
+				return model
+			}
+		}
+	}
+	return ""
+}
+
+func findNamedModel(raw map[string]any, name string) string {
+	value, ok := raw[name]
+	if !ok {
+		return ""
+	}
+	nested, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return findString(nested, "model")
+}
+
+func findFirstNestedModel(raw map[string]any) string {
+	for _, value := range raw {
+		nested, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if model := findString(nested, "model"); model != "" {
+			return model
+		}
+	}
+	return ""
 }
 
 func homePath(parts ...string) string {
