@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"os"
 	"os/exec"
@@ -106,9 +107,13 @@ var (
 
 // Key binding constants.
 const (
-	keyCtrlC = "ctrl+c"
-	keyEnter = "enter"
-	keyEsc   = "esc"
+	keyCtrlC         = "ctrl+c"
+	keyEnter         = "enter"
+	keyEsc           = "esc"
+	outputFormatJSON = "json"
+	outputFormatText = "text"
+
+	maxPromptHistoryEntries = 100
 )
 
 // ---------------------------------------------------------------------------
@@ -124,10 +129,10 @@ type llmResponseMsg struct {
 }
 
 type tokenUsage struct {
-	InputTokens       int
-	CachedInputTokens int
-	OutputTokens      int
-	Responses         int
+	InputTokens       int `json:"input_tokens"`
+	CachedInputTokens int `json:"cached_input_tokens"`
+	OutputTokens      int `json:"output_tokens"`
+	Responses         int `json:"responses"`
 }
 
 func (u *tokenUsage) addResponse(resp *llm.Response) {
@@ -231,12 +236,15 @@ type model struct {
 	generationOverrides generationSettings
 	sessionState        session.Session
 	history             []llm.Message
+	promptHistory       []string
+	promptHistoryDraft  string
 	pickerItems         []pickerItem
 	contextOptions      contextref.Options
 	worktreeInfo        *worktree.Info
 	tokenUsage          tokenUsage
 	pickerCursor        int
 	completionCursor    int
+	promptHistoryCursor int
 	maxInputTokens      int
 	width               int
 	quitting            bool
@@ -246,7 +254,9 @@ type model struct {
 	scopePickerOpen     bool
 	completionOpen      bool
 	modelLocked         bool
+	revampUndoActive    bool
 	completionItems     []completionCandidate
+	revampUndo          string
 }
 
 func initialModel(
@@ -300,6 +310,8 @@ func initialModel(
 		generationOverrides: generationOverrides,
 		maxInputTokens:      maxInputTokens,
 		history:             append([]llm.Message(nil), sessionState.Messages...),
+		promptHistory:       promptHistoryFromStore(store, sessionState, maxPromptHistoryEntries),
+		promptHistoryCursor: -1,
 		textarea:            ta,
 		modelLocked:         modelLocked,
 		worktreeInfo:        wtInfo,
@@ -427,49 +439,8 @@ func (m model) updateTextarea(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
-	switch msg.String() {
-	case "ctrl+d":
-		if !m.waiting {
-			m.quitting = true
-			return m, tea.Quit
-		}
-	case keyCtrlC:
-		if m.waiting {
-			if m.cancel != nil {
-				m.cancel()
-				m.cancel = nil
-			}
-			m.waiting = false
-			cmds = append(cmds, tea.Println(errStyle.Render("(canceled)")))
-			return m, tea.Batch(cmds...)
-		}
-		m.quitting = true
-		return m, tea.Quit
-
-	case "ctrl+o":
-		if m.waiting {
-			break
-		}
-		m.pickerOpen = true
-		m.pickerLoading = true
-		m.pickerItems = nil
-		m.pickerCursor = 0
-		return m, loadModels(m.ctx, m.registry)
-
-	case keyEnter:
-		return m.submitInput()
-
-	case "tab":
-		items, ok := completionCandidates(m.textarea.Value(), m.agentRegistry, m.contextOptions.Root, 8)
-		if !ok || len(items) == 0 {
-			break
-		}
-		m.completionOpen = true
-		m.completionItems = items
-		m.completionCursor = 0
-		m.textarea.SetValue(applyCompletionCandidate(m.textarea.Value(), items[0].value))
-		m.textarea.CursorEnd()
-		return m, nil
+	if next, cmd, handled := m.handleChatCommand(msg.String()); handled {
+		return next, cmd
 	}
 
 	// Propagate to the textarea when not waiting.
@@ -479,9 +450,148 @@ func (m model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var taCmd tea.Cmd
 		m.textarea, taCmd = m.textarea.Update(msg)
 		cmds = append(cmds, taCmd)
+		m.promptHistoryCursor = -1
+		m.promptHistoryDraft = ""
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m model) handleChatCommand(keyName string) (tea.Model, tea.Cmd, bool) {
+	switch keyName {
+	case "ctrl+d":
+		if m.waiting {
+			return m, nil, false
+		}
+		m.quitting = true
+		return m, tea.Quit, true
+	case keyCtrlC:
+		return m.handleCtrlC()
+	case "ctrl+o":
+		return m.openModelPicker()
+	case "ctrl+r":
+		next, cmd := m.revampPrompt()
+		return next, cmd, true
+	case "ctrl+z":
+		next, cmd := m.undoPromptRevamp()
+		return next, cmd, true
+	case "up":
+		next, ok := m.navigatePromptHistory(1)
+		return next, nil, ok
+	case "down":
+		next, ok := m.navigatePromptHistory(-1)
+		return next, nil, ok
+	case keyEnter:
+		next, cmd := m.submitInput()
+		return next, cmd, true
+	case "tab":
+		return m.acceptCompletion()
+	default:
+		return m, nil, false
+	}
+}
+
+func (m model) handleCtrlC() (tea.Model, tea.Cmd, bool) {
+	if m.waiting {
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
+		m.waiting = false
+		return m, tea.Println(errStyle.Render("(canceled)")), true
+	}
+	m.quitting = true
+	return m, tea.Quit, true
+}
+
+func (m model) openModelPicker() (tea.Model, tea.Cmd, bool) {
+	if m.waiting {
+		return m, nil, false
+	}
+	m.pickerOpen = true
+	m.pickerLoading = true
+	m.pickerItems = nil
+	m.pickerCursor = 0
+	return m, loadModels(m.ctx, m.registry), true
+}
+
+func (m model) acceptCompletion() (tea.Model, tea.Cmd, bool) {
+	items, ok := completionCandidates(m.textarea.Value(), m.agentRegistry, m.contextOptions.Root, 8)
+	if ok && len(items) > 0 {
+		m.completionOpen = true
+		m.completionItems = items
+		m.completionCursor = 0
+		m.textarea.SetValue(applyCompletionCandidate(m.textarea.Value(), items[0].value))
+		m.textarea.CursorEnd()
+		return m, nil, true
+	}
+	if suggestion, ok := m.promptSuggestion(); ok {
+		m.textarea.SetValue(applyPromptSuggestion(m.textarea.Value(), suggestion))
+		m.textarea.CursorEnd()
+		return m, nil, true
+	}
+	return m, nil, false
+}
+
+func (m model) revampPrompt() (tea.Model, tea.Cmd) {
+	if m.waiting {
+		return m, nil
+	}
+	current := m.textarea.Value()
+	revamped, ok := promptcomplete.Revamp(current, promptcomplete.RevampStyleDetailed)
+	if !ok || revamped == strings.TrimSpace(current) {
+		return m, nil
+	}
+	m.revampUndo = current
+	m.revampUndoActive = true
+	m.textarea.SetValue(revamped)
+	m.textarea.CursorEnd()
+	return m, tea.Println(dimStyle.Render("(prompt revamped; Ctrl+Z to undo)"))
+}
+
+func (m model) undoPromptRevamp() (tea.Model, tea.Cmd) {
+	if !m.revampUndoActive {
+		return m, nil
+	}
+	m.textarea.SetValue(m.revampUndo)
+	m.textarea.CursorEnd()
+	m.revampUndo = ""
+	m.revampUndoActive = false
+	return m, tea.Println(dimStyle.Render("(prompt revamp undone)"))
+}
+
+func (m model) navigatePromptHistory(delta int) (model, bool) {
+	if m.waiting || len(m.promptHistory) == 0 {
+		return m, false
+	}
+	if delta > 0 {
+		switch {
+		case m.promptHistoryCursor == -1:
+			m.promptHistoryDraft = m.textarea.Value()
+			m.promptHistoryCursor = 0
+		case m.promptHistoryCursor < len(m.promptHistory)-1:
+			m.promptHistoryCursor++
+		default:
+			return m, true
+		}
+		m.textarea.SetValue(m.promptHistory[m.promptHistoryCursor])
+		m.textarea.CursorEnd()
+		return m, true
+	}
+
+	if m.promptHistoryCursor == -1 {
+		return m, false
+	}
+	if m.promptHistoryCursor > 0 {
+		m.promptHistoryCursor--
+		m.textarea.SetValue(m.promptHistory[m.promptHistoryCursor])
+	} else {
+		m.promptHistoryCursor = -1
+		m.textarea.SetValue(m.promptHistoryDraft)
+		m.promptHistoryDraft = ""
+	}
+	m.textarea.CursorEnd()
+	return m, true
 }
 
 // submitInput handles the enter key — sends user input to the LLM.
@@ -493,6 +603,11 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 	if input == "" {
 		return m, nil
 	}
+	m.promptHistory = prependPromptHistory(input, m.promptHistory, maxPromptHistoryEntries)
+	m.promptHistoryCursor = -1
+	m.promptHistoryDraft = ""
+	m.revampUndoActive = false
+	m.revampUndo = ""
 	m.textarea.Reset()
 
 	activeAgent, prompt, err := m.resolveAgent(input)
@@ -777,7 +892,12 @@ func (m model) View() string {
 		status += "\n" + m.viewCompletions()
 	}
 
-	return status + "\n" + m.textarea.View()
+	inputView := m.textarea.View()
+	if suggestion, ok := m.promptSuggestion(); ok && !m.completionOpen {
+		inputView += dimStyle.Render(suggestion.Suffix)
+	}
+
+	return status + "\n" + inputView
 }
 
 func (m model) viewCompletions() string {
@@ -862,6 +982,49 @@ func (m model) contextUsage() string {
 		return "ctx:~" + formatTokenCount(used)
 	}
 	return ""
+}
+
+func (m model) promptSuggestion() (promptcomplete.Suggestion, bool) {
+	value := m.textarea.Value()
+	if strings.TrimSpace(value) == "" {
+		return promptcomplete.Suggestion{}, false
+	}
+	cursor := textareaCursorOffset(m.textarea)
+	if cursor != len(value) {
+		return promptcomplete.Suggestion{}, false
+	}
+	suggestion, ok := promptcomplete.Suggest(promptcomplete.Context{
+		Input:     value,
+		Cursor:    cursor,
+		Agents:    promptAgentCandidates(m.agentRegistry),
+		Tools:     promptToolCandidates(),
+		Templates: promptTemplateCandidates(),
+	}, promptcomplete.Options{Limit: 1})
+	if !ok || suggestion.Suffix == "" {
+		return promptcomplete.Suggestion{}, false
+	}
+	return suggestion, true
+}
+
+func textareaCursorOffset(input textarea.Model) int {
+	value := input.Value()
+	lines := strings.Split(value, "\n")
+	line := input.Line()
+	if line < 0 {
+		return 0
+	}
+	if line >= len(lines) {
+		return len(value)
+	}
+
+	offset := 0
+	for i := range line {
+		offset += len(lines[i]) + 1
+	}
+	info := input.LineInfo()
+	column := info.StartColumn + info.ColumnOffset
+	column = min(column, len(lines[line]))
+	return offset + column
 }
 
 // formatTokenCount formats a token count as a compact human-readable string.
@@ -1149,6 +1312,89 @@ func applyCompletionCandidate(input, value string) string {
 		return input
 	}
 	return input[:start] + value
+}
+
+func applyPromptSuggestion(input string, suggestion promptcomplete.Suggestion) string {
+	if suggestion.ReplacementStart < 0 ||
+		suggestion.ReplacementEnd < suggestion.ReplacementStart ||
+		suggestion.ReplacementEnd > len(input) {
+		return input + suggestion.Suffix
+	}
+	return input[:suggestion.ReplacementStart] + suggestion.Text + input[suggestion.ReplacementEnd:]
+}
+
+func promptHistoryFromStore(store *session.Store, current session.Session, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	out := appendUserPromptsNewestFirst(nil, seen, current.Messages, limit)
+	if len(out) >= limit || store == nil {
+		return out
+	}
+
+	summaries, err := store.List()
+	if err != nil {
+		return out
+	}
+	for i := range summaries {
+		summary := &summaries[i]
+		if summary.ID == current.ID {
+			continue
+		}
+		saved, err := store.Load(summary.ID)
+		if err != nil {
+			continue
+		}
+		out = appendUserPromptsNewestFirst(out, seen, saved.Messages, limit)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func appendUserPromptsNewestFirst(out []string, seen map[string]bool, messages []llm.Message, limit int) []string {
+	for i := len(messages) - 1; i >= 0 && len(out) < limit; i-- {
+		if messages[i].Role != llm.RoleUser {
+			continue
+		}
+		prompt := strings.TrimSpace(messages[i].Content)
+		promptKey := normalizePromptHistoryKey(prompt)
+		if promptKey == "" || seen[promptKey] {
+			continue
+		}
+		seen[promptKey] = true
+		out = append(out, prompt)
+	}
+	return out
+}
+
+func prependPromptHistory(prompt string, history []string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	prompt = strings.TrimSpace(prompt)
+	promptKey := normalizePromptHistoryKey(prompt)
+	if promptKey == "" {
+		return append([]string(nil), history...)
+	}
+
+	out := []string{prompt}
+	for _, item := range history {
+		if normalizePromptHistoryKey(item) == promptKey {
+			continue
+		}
+		out = append(out, item)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func normalizePromptHistoryKey(prompt string) string {
+	return strings.ToLower(strings.Join(strings.Fields(prompt), " "))
 }
 
 // callLLM sends the messages to the selected LLM and returns a command that
@@ -1570,7 +1816,9 @@ type cliOptions struct {
 	replayRef                          string
 	exportRef                          string
 	exportFormat                       string
+	outputFormat                       string
 	listSessionsTag                    string
+	streamHeadlessID                   string
 	searchQuery                        string
 	initConfigPath                     string
 	configPaths                        string
@@ -1738,6 +1986,7 @@ type cliOptions struct {
 	listCodePackageImportSummary       bool
 	listCodePackages                   bool
 	listSessions                       bool
+	listHeadless                       bool
 	listSessionTags                    bool
 	agentPerformanceSummary            bool
 	listArtifacts                      bool
@@ -1761,6 +2010,7 @@ type cliOptions struct {
 	doctor                             bool
 	doctorOffline                      bool
 	readStdin                          bool
+	headless                           bool
 	showVersion                        bool
 	useWorktree                        bool
 	pluginDryRun                       bool
@@ -1816,6 +2066,7 @@ func parseOptions() cliOptions {
 	flag.StringVar(&opts.replayRef, "replay", "", "session ID or path to print and exit")
 	flag.StringVar(&opts.exportRef, "export-session", "", "session ID or path to export and exit")
 	flag.StringVar(&opts.exportFormat, "export-format", "markdown", "session export format: markdown or json")
+	flag.StringVar(&opts.outputFormat, "output", outputFormatText, "one-shot output format: text or json")
 	flag.StringVar(&opts.searchQuery, "search-sessions", "", "search saved session transcripts and exit")
 	flag.StringVar(&opts.oncePrompt, "once", "", "send one prompt and exit")
 	flag.StringVar(&opts.model, "model", "", "model ID to use")
@@ -1977,6 +2228,8 @@ func parseOptions() cliOptions {
 	flag.BoolVar(&opts.listCodePackages, "code-packages", false, "list Go packages with file and symbol counts and exit")
 	flag.BoolVar(&opts.listCodePackageImportSummary, "code-package-import-summary", false, "list Go packages with import counts and exit")
 	flag.BoolVar(&opts.listSessions, "list-sessions", false, "list saved sessions and exit")
+	flag.BoolVar(&opts.listHeadless, "list-headless", false, "list active headless sessions and exit")
+	flag.StringVar(&opts.streamHeadlessID, "stream-headless", "", "stream one headless session log by headless ID and exit when it finishes")
 	flag.BoolVar(&opts.listSessionTags, "list-session-tags", false, "list saved session tags with counts and exit")
 	flag.BoolVar(&opts.agentPerformanceSummary, "agent-performance-summary", false, "summarize recorded agent performance across saved sessions and exit")
 	flag.BoolVar(&opts.listArtifacts, "list-artifacts", false, "list artifacts recorded on the selected session and exit")
@@ -2004,6 +2257,7 @@ func parseOptions() cliOptions {
 	flag.BoolVar(&opts.doctor, "doctor", false, "print local readiness diagnostics and exit")
 	flag.BoolVar(&opts.doctorOffline, "doctor-offline", false, "print offline readiness diagnostics without provider health checks and exit")
 	flag.BoolVar(&opts.readStdin, "stdin", false, "append stdin to a one-shot prompt")
+	flag.BoolVar(&opts.headless, "headless", false, "run one-shot prompt without TUI output while recording headless metadata and logs")
 	flag.BoolVar(&opts.showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&opts.useWorktree, "worktree", false, "isolate session in a git worktree")
 	flag.BoolVar(&opts.listWorktrees, "list-worktrees", false, "list active atteler worktrees and exit")
@@ -2181,6 +2435,19 @@ func oneShotPrompt(prompt string, readStdin bool) (string, error) {
 	return prompt, nil
 }
 
+func normalizeOutputFormat(format string) (string, error) {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		return outputFormatText, nil
+	}
+	switch format {
+	case outputFormatText, outputFormatJSON:
+		return format, nil
+	default:
+		return "", fmt.Errorf("unsupported output format %q (supported: %s, %s)", format, outputFormatText, outputFormatJSON)
+	}
+}
+
 func appendStdinContext(prompt, stdin string) string {
 	stdin = strings.TrimRight(stdin, "\n")
 	if strings.TrimSpace(stdin) == "" {
@@ -2307,7 +2574,7 @@ func runProviderlessCommand(ctx context.Context, opts cliOptions) (bool, error) 
 	ctx = nonNilContext(ctx)
 	store := session.NewStore(opts.sessionDir)
 
-	if handled, err := runProviderlessSessionCommand(opts, store); handled {
+	if handled, err := runProviderlessSessionCommand(ctx, opts, store); handled {
 		return true, err
 	}
 	if handled, err := runProviderlessUtilityCommand(ctx, opts, store); handled {
@@ -2330,10 +2597,15 @@ func runProviderlessCommand(ctx context.Context, opts cliOptions) (bool, error) 
 	return false, nil
 }
 
-func runProviderlessSessionCommand(opts cliOptions, store *session.Store) (bool, error) {
+func runProviderlessSessionCommand(ctx context.Context, opts cliOptions, store *session.Store) (bool, error) {
+	ctx = nonNilContext(ctx)
 	switch {
 	case opts.listHookEvents || opts.listHookEventsJSON:
 		return true, listHookEvents(opts.listHookEventsJSON)
+	case opts.listHeadless:
+		return true, listHeadlessRuns(store)
+	case opts.streamHeadlessID != "":
+		return true, streamHeadlessLog(ctx, store, opts.streamHeadlessID)
 	case opts.listSessions:
 		return true, listSessions(store, opts.listSessionsTag)
 	case opts.listSessionTags:
@@ -2547,6 +2819,14 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		return err
 	}
 
+	outputFormat, err := normalizeOutputFormat(opts.outputFormat)
+	if err != nil {
+		return err
+	}
+	if opts.headless && opts.oncePrompt == "" && !opts.readStdin {
+		return errors.New("headless mode requires --once, positional prompt text, or --stdin")
+	}
+
 	if opts.oncePrompt == "" && !opts.readStdin {
 		return runInteractive(ctx, state)
 	}
@@ -2557,8 +2837,12 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 	}
 	// One-shot mode uses a logger-enabled runner so context-based events
 	// (e.g. tool_execute from providers) are visible on stderr.
-	state.hookRunner = events.NewRunnerWithLogger(state.hookConfig, os.Stderr)
-	runErr := runOnce(
+	if opts.headless {
+		state.hookRunner = events.NewRunner(state.hookConfig)
+	} else {
+		state.hookRunner = events.NewRunnerWithLogger(state.hookConfig, os.Stderr)
+	}
+	runErr := runOnceWithOptions(
 		ctx,
 		state.registry,
 		state.agentRegistry,
@@ -2572,9 +2856,13 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		state.generationDefaults,
 		state.generationOverrides,
 		state.maxInputTokens,
-		responseRecordOptions{
-			RecordPath: opts.recordResponsePath,
-			ReplayPath: opts.replayResponsePath,
+		runOnceExecutionOptions{
+			Response: responseRecordOptions{
+				RecordPath: opts.recordResponsePath,
+				ReplayPath: opts.replayResponsePath,
+			},
+			OutputFormat: outputFormat,
+			Headless:     opts.headless,
 		},
 		state.modelLocked,
 		prompt,
@@ -2985,14 +3273,14 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		return appState{}, err
 	}
 
-	reg := llm.AutoRegisterWithConfigContext(ctx, llmConfig(cfg, selection.selectedModel))
+	reg := autoRegisterForOptions(ctx, opts, cfg, selection.selectedModel)
 	contextOptions := contextOptionsFromConfig(cfg)
 	generationDefaults := generationFromConfig(cfg)
 	generationOverrides := generationFromOptions(opts)
 	maxInputTokens := maxInputTokensFromConfigOptions(cfg, opts)
 
 	providers := reg.ListProviders()
-	if len(providers) == 0 {
+	if len(providers) == 0 && !opts.headless {
 		fmt.Fprintln(os.Stderr, "warning: no LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY")
 	}
 
@@ -3046,6 +3334,16 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		modelLocked:         selection.modelLocked,
 		autoMergeWorktree:   opts.useWorktree && !opts.noAutoMerge,
 	}, nil
+}
+
+func autoRegisterForOptions(ctx context.Context, opts cliOptions, cfg appconfig.Config, selectedModel string) *llm.Registry {
+	if !opts.headless {
+		return llm.AutoRegisterWithConfigContext(ctx, llmConfig(cfg, selectedModel))
+	}
+	previousLogOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(previousLogOutput)
+	return llm.AutoRegisterWithConfigContext(ctx, llmConfig(cfg, selectedModel))
 }
 
 type selectionState struct {
@@ -3230,6 +3528,34 @@ type responseRecordOptions struct {
 	ReplayPath string
 }
 
+type runOnceExecutionOptions struct {
+	OutputFormat string
+	HeadlessID   string
+	Response     responseRecordOptions
+	Headless     bool
+}
+
+type runOnceResult struct {
+	SessionID   string     `json:"session_id"`
+	SessionPath string     `json:"session_path"`
+	HeadlessID  string     `json:"headless_id,omitempty"`
+	Agent       string     `json:"agent,omitempty"`
+	Model       string     `json:"model,omitempty"`
+	Content     string     `json:"content"`
+	TokenUsage  tokenUsage `json:"token_usage"`
+}
+
+//nolint:govet // Field order follows request-preparation flow; padding is irrelevant here.
+type runOncePrepared struct {
+	activeAgent     agentSelection
+	generation      generationSettings
+	requestMessages []llm.Message
+	refs            []contextref.Reference
+	fallbackModels  []string
+	prompt          string
+	requestModel    string
+}
+
 type responseRecordFile struct {
 	RecordedAt time.Time             `json:"recorded_at"`
 	Request    responseRecordRequest `json:"request"`
@@ -3333,88 +3659,94 @@ func runOnce(
 	modelLocked bool,
 	prompt string,
 ) error {
-	activeAgent, userPrompt, selectionErr := resolveAgent(agents, selectedAgent, prompt)
-	if selectionErr != nil {
-		return selectionErr
-	}
-	prompt = userPrompt
-	requestMessages, refs, err := expandReferences([]llm.Message{{Role: llm.RoleUser, Content: prompt}}, contextOptions)
+	return runOnceWithOptions(
+		ctx,
+		reg,
+		agents,
+		hooks,
+		store,
+		sessionState,
+		contextOptions,
+		selectedModel,
+		selectedAgent,
+		fallbackModels,
+		generationDefaults,
+		generationOverrides,
+		maxInputTokens,
+		runOnceExecutionOptions{Response: responseOptions},
+		modelLocked,
+		prompt,
+	)
+}
+
+func runOnceWithOptions(
+	ctx context.Context,
+	reg *llm.Registry,
+	agents *agent.Registry,
+	hooks *events.Runner,
+	store *session.Store,
+	sessionState session.Session,
+	contextOptions contextref.Options,
+	selectedModel string,
+	selectedAgent string,
+	fallbackModels []string,
+	generationDefaults generationSettings,
+	generationOverrides generationSettings,
+	maxInputTokens int,
+	executionOptions runOnceExecutionOptions,
+	modelLocked bool,
+	prompt string,
+) error {
+	outputFormat, err := normalizeOutputFormat(executionOptions.OutputFormat)
 	if err != nil {
 		return err
 	}
-	requestModel, fallbackModels := requestModelAndFallbacks(selectedModel, modelLocked, fallbackModels, activeAgent)
-	generation := generationForRequest(generationDefaults, generationOverrides, activeAgent)
-	if requestModel != "" {
-		sessionState.DefaultModel = requestModel
+	prepared, err := prepareRunOnceRequest(
+		agents,
+		contextOptions,
+		selectedModel,
+		selectedAgent,
+		fallbackModels,
+		generationDefaults,
+		generationOverrides,
+		modelLocked,
+		prompt,
+	)
+	if err != nil {
+		return err
 	}
-	sessionState.DefaultAgent = activeAgent.name
+	if prepared.requestModel != "" {
+		sessionState.DefaultModel = prepared.requestModel
+	}
+	sessionState.DefaultAgent = prepared.activeAgent.name
 
 	emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.SessionStart,
 		SessionID:   sessionState.ID,
 		SessionPath: store.Path(sessionState.ID),
-		Agent:       activeAgent.name,
+		Agent:       prepared.activeAgent.name,
 		Model:       sessionState.DefaultModel,
 	})
 	defer emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.SessionEnd,
 		SessionID:   sessionState.ID,
 		SessionPath: store.Path(sessionState.ID),
-		Agent:       activeAgent.name,
+		Agent:       prepared.activeAgent.name,
 		Model:       sessionState.DefaultModel,
 	})
 
-	sessionState.Append(llm.RoleUser, prompt)
-	if saveErr := store.Save(sessionState); saveErr != nil {
-		emitHookWarning(ctx, hooks, events.Event{
-			Type:        events.Error,
-			SessionID:   sessionState.ID,
-			SessionPath: store.Path(sessionState.ID),
-			Agent:       activeAgent.name,
-			Model:       sessionState.DefaultModel,
-			Error:       saveErr.Error(),
-		})
-		return fmt.Errorf("save session before request: %w", saveErr)
-	}
-	emitFileWriteWarning(ctx, hooks, sessionState, store.Path(sessionState.ID), activeAgent.name, "session")
-	for _, ref := range refs {
-		emitHookWarning(ctx, hooks, fileReadEvent(sessionState.ID, store.Path(sessionState.ID), activeAgent.name, sessionState.DefaultModel, ref))
-		emitHookWarning(ctx, hooks, contextAddEvent(sessionState.ID, store.Path(sessionState.ID), activeAgent.name, sessionState.DefaultModel, ref))
-	}
-	if activeAgent.ok {
-		emitHookWarning(ctx, hooks, events.Event{
-			Type:        events.AgentExecute,
-			SessionID:   sessionState.ID,
-			SessionPath: store.Path(sessionState.ID),
-			Agent:       activeAgent.name,
-			Model:       sessionState.DefaultModel,
-			Metadata: map[string]string{
-				"agent": activeAgent.name,
-			},
-		})
-	}
-	emitHookWarning(ctx, hooks, events.Event{
-		Type:        events.UserMessage,
-		SessionID:   sessionState.ID,
-		SessionPath: store.Path(sessionState.ID),
-		Agent:       activeAgent.name,
-		Model:       sessionState.DefaultModel,
-		Role:        string(llm.RoleUser),
-		Content:     prompt,
-		Metadata:    referenceMetadata(refs),
-	})
-	if len(refs) > 0 {
-		fmt.Fprintln(os.Stderr, "context: "+referenceSummary(refs))
+	if userSaveErr := saveRunOnceUserMessage(ctx, hooks, store, &sessionState, prepared); userSaveErr != nil {
+		return userSaveErr
 	}
 
 	params := llm.CompleteParams{
-		Model:    requestModel,
-		Messages: append(append([]llm.Message(nil), sessionState.Messages[:len(sessionState.Messages)-1]...), requestMessages...),
+		Model:    prepared.requestModel,
+		Messages: append(append([]llm.Message(nil), sessionState.Messages[:len(sessionState.Messages)-1]...), prepared.requestMessages...),
 	}
-	if activeAgent.ok {
-		params = activeAgent.agent.CompleteParams(requestModel, params.Messages)
+	if prepared.activeAgent.ok {
+		params = prepared.activeAgent.agent.CompleteParams(prepared.requestModel, params.Messages)
 	}
-	applyGenerationParams(&params, generation)
+	applyGenerationParams(&params, prepared.generation)
 	if budgetErr := validateRequestBudget(reg, params.Model, params.Messages, maxInputTokens); budgetErr != nil {
 		return budgetErr
 	}
@@ -3422,54 +3754,252 @@ func runOnce(
 	ctx = events.WithEmitter(ctx, hooks, events.Event{
 		SessionID:   sessionState.ID,
 		SessionPath: store.Path(sessionState.ID),
-		Agent:       activeAgent.name,
-		Model:       requestModel,
+		Agent:       prepared.activeAgent.name,
+		Model:       prepared.requestModel,
 	})
-	resp, err := completeWithRecording(ctx, reg, params, fallbackModels, responseOptions)
+	headlessRun, err := startHeadlessRun(store, executionOptions, sessionState, prepared.prompt, prepared.requestModel, prepared.activeAgent.name)
+	if err != nil {
+		return err
+	}
+
+	resp, err := completeWithRecording(ctx, reg, params, prepared.fallbackModels, executionOptions.Response)
 	if err != nil {
 		emitHookWarning(ctx, hooks, events.Event{
 			Type:        events.Error,
 			SessionID:   sessionState.ID,
 			SessionPath: store.Path(sessionState.ID),
-			Agent:       activeAgent.name,
+			Agent:       prepared.activeAgent.name,
 			Model:       sessionState.DefaultModel,
 			Error:       err.Error(),
 		})
+		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, err.Error())
 		return err
 	}
 
-	sessionState.Append(llm.RoleAssistant, resp.Content)
-	if resp.Model != "" {
-		sessionState.DefaultModel = resp.Model
+	if err := saveRunOnceAssistantResponse(ctx, hooks, store, &sessionState, prepared.activeAgent.name, resp); err != nil {
+		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, err.Error())
+		return err
 	}
-	if err := store.Save(sessionState); err != nil {
+
+	var usage tokenUsage
+	usage.addResponse(resp)
+	result := runOnceResult{
+		SessionID:   sessionState.ID,
+		SessionPath: store.Path(sessionState.ID),
+		Agent:       prepared.activeAgent.name,
+		Model:       resp.Model,
+		Content:     resp.Content,
+		TokenUsage:  usage,
+	}
+	if headlessRun != nil {
+		result.HeadlessID = headlessRun.ID
+		if resp.Model != "" {
+			headlessRun.Model = resp.Model
+		}
+		if err := store.AppendHeadlessLog(headlessRun.ID, fmt.Sprintf("assistant_message\t%s\tbytes=%d\n", time.Now().UTC().Format(time.RFC3339), len(resp.Content))); err != nil {
+			fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+		}
+		finishHeadlessRun(store, headlessRun, session.HeadlessStatusCompleted, "")
+	}
+	return writeRunOnceResult(os.Stdout, os.Stderr, result, outputFormat, executionOptions.Headless)
+}
+
+func prepareRunOnceRequest(
+	agents *agent.Registry,
+	contextOptions contextref.Options,
+	selectedModel string,
+	selectedAgent string,
+	fallbackModels []string,
+	generationDefaults generationSettings,
+	generationOverrides generationSettings,
+	modelLocked bool,
+	prompt string,
+) (runOncePrepared, error) {
+	activeAgent, userPrompt, err := resolveAgent(agents, selectedAgent, prompt)
+	if err != nil {
+		return runOncePrepared{}, err
+	}
+	requestMessages, refs, err := expandReferences([]llm.Message{{Role: llm.RoleUser, Content: userPrompt}}, contextOptions)
+	if err != nil {
+		return runOncePrepared{}, err
+	}
+	requestModel, fallbackModels := requestModelAndFallbacks(selectedModel, modelLocked, fallbackModels, activeAgent)
+	return runOncePrepared{
+		activeAgent:     activeAgent,
+		generation:      generationForRequest(generationDefaults, generationOverrides, activeAgent),
+		requestMessages: requestMessages,
+		refs:            refs,
+		fallbackModels:  fallbackModels,
+		prompt:          userPrompt,
+		requestModel:    requestModel,
+	}, nil
+}
+
+func saveRunOnceUserMessage(
+	ctx context.Context,
+	hooks *events.Runner,
+	store *session.Store,
+	sessionState *session.Session,
+	prepared runOncePrepared,
+) error {
+	sessionState.Append(llm.RoleUser, prepared.prompt)
+	if err := store.Save(*sessionState); err != nil {
 		emitHookWarning(ctx, hooks, events.Event{
 			Type:        events.Error,
 			SessionID:   sessionState.ID,
 			SessionPath: store.Path(sessionState.ID),
-			Agent:       activeAgent.name,
+			Agent:       prepared.activeAgent.name,
+			Model:       sessionState.DefaultModel,
+			Error:       err.Error(),
+		})
+		return fmt.Errorf("save session before request: %w", err)
+	}
+	emitFileWriteWarning(ctx, hooks, *sessionState, store.Path(sessionState.ID), prepared.activeAgent.name, "session")
+	for _, ref := range prepared.refs {
+		emitHookWarning(ctx, hooks, fileReadEvent(sessionState.ID, store.Path(sessionState.ID), prepared.activeAgent.name, sessionState.DefaultModel, ref))
+		emitHookWarning(ctx, hooks, contextAddEvent(sessionState.ID, store.Path(sessionState.ID), prepared.activeAgent.name, sessionState.DefaultModel, ref))
+	}
+	if prepared.activeAgent.ok {
+		emitHookWarning(ctx, hooks, events.Event{
+			Type:        events.AgentExecute,
+			SessionID:   sessionState.ID,
+			SessionPath: store.Path(sessionState.ID),
+			Agent:       prepared.activeAgent.name,
+			Model:       sessionState.DefaultModel,
+			Metadata: map[string]string{
+				"agent": prepared.activeAgent.name,
+			},
+		})
+	}
+	emitHookWarning(ctx, hooks, events.Event{
+		Type:        events.UserMessage,
+		SessionID:   sessionState.ID,
+		SessionPath: store.Path(sessionState.ID),
+		Agent:       prepared.activeAgent.name,
+		Model:       sessionState.DefaultModel,
+		Role:        string(llm.RoleUser),
+		Content:     prepared.prompt,
+		Metadata:    referenceMetadata(prepared.refs),
+	})
+	if len(prepared.refs) > 0 {
+		fmt.Fprintln(os.Stderr, "context: "+referenceSummary(prepared.refs))
+	}
+	return nil
+}
+
+func saveRunOnceAssistantResponse(
+	ctx context.Context,
+	hooks *events.Runner,
+	store *session.Store,
+	sessionState *session.Session,
+	agentName string,
+	resp *llm.Response,
+) error {
+	sessionState.Append(llm.RoleAssistant, resp.Content)
+	if resp.Model != "" {
+		sessionState.DefaultModel = resp.Model
+	}
+	if err := store.Save(*sessionState); err != nil {
+		emitHookWarning(ctx, hooks, events.Event{
+			Type:        events.Error,
+			SessionID:   sessionState.ID,
+			SessionPath: store.Path(sessionState.ID),
+			Agent:       agentName,
 			Model:       sessionState.DefaultModel,
 			Error:       err.Error(),
 		})
 		return fmt.Errorf("save session after response: %w", err)
 	}
-	emitFileWriteWarning(ctx, hooks, sessionState, store.Path(sessionState.ID), activeAgent.name, "session")
+	emitFileWriteWarning(ctx, hooks, *sessionState, store.Path(sessionState.ID), agentName, "session")
 	emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.AssistantMessage,
 		SessionID:   sessionState.ID,
 		SessionPath: store.Path(sessionState.ID),
-		Agent:       activeAgent.name,
+		Agent:       agentName,
 		Model:       resp.Model,
 		Role:        string(llm.RoleAssistant),
 		Content:     resp.Content,
 	})
-
-	fmt.Println(resp.Content)
-	var usage tokenUsage
-	usage.addResponse(resp)
-	printTokenUsageSummary(os.Stderr, usage)
-	fmt.Fprintln(os.Stderr, "session: "+sessionState.ID+" ("+store.Path(sessionState.ID)+")")
 	return nil
+}
+
+func startHeadlessRun(
+	store *session.Store,
+	options runOnceExecutionOptions,
+	sessionState session.Session,
+	prompt string,
+	modelName string,
+	agentName string,
+) (*session.HeadlessRun, error) {
+	if !options.Headless {
+		return nil, nil
+	}
+	if store == nil {
+		return nil, errors.New("headless mode requires a session store")
+	}
+	id := strings.TrimSpace(options.HeadlessID)
+	if id == "" {
+		id = session.New("", nil).ID
+	}
+	run := session.HeadlessRun{
+		ID:          id,
+		SessionID:   sessionState.ID,
+		SessionPath: store.Path(sessionState.ID),
+		Prompt:      strings.TrimSpace(prompt),
+		Model:       modelName,
+		Agent:       agentName,
+		Status:      session.HeadlessStatusRunning,
+	}
+	if err := store.SaveHeadlessRun(run); err != nil {
+		return nil, fmt.Errorf("start headless run: %w", err)
+	}
+	saved, err := store.LoadHeadlessRun(id)
+	if err != nil {
+		return nil, fmt.Errorf("load started headless run: %w", err)
+	}
+	if err := store.AppendHeadlessLog(id, "started\t"+time.Now().UTC().Format(time.RFC3339)+"\tsession="+sessionState.ID+"\n"); err != nil {
+		return nil, fmt.Errorf("write headless start log: %w", err)
+	}
+	return &saved, nil
+}
+
+func finishHeadlessRun(store *session.Store, run *session.HeadlessRun, status session.HeadlessStatus, message string) {
+	if store == nil || run == nil {
+		return
+	}
+	now := time.Now().UTC()
+	run.Status = status
+	run.CompletedAt = &now
+	run.Error = strings.TrimSpace(message)
+	if err := store.SaveHeadlessRun(*run); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+	}
+	logLine := string(status) + "\t" + now.Format(time.RFC3339)
+	if run.Error != "" {
+		logLine += "\terror=" + run.Error
+	}
+	if err := store.AppendHeadlessLog(run.ID, logLine+"\n"); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+	}
+}
+
+func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFormat string, headless bool) error {
+	switch outputFormat {
+	case outputFormatJSON:
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(result); err != nil {
+			return fmt.Errorf("encode one-shot result: %w", err)
+		}
+		return nil
+	default:
+		if !headless {
+			fmt.Fprintln(stdout, result.Content)
+			printTokenUsageSummary(stderr, result.TokenUsage)
+			fmt.Fprintln(stderr, "session: "+result.SessionID+" ("+result.SessionPath+")")
+		}
+		return nil
+	}
 }
 
 func completeWithRecording(
@@ -8323,6 +8853,64 @@ func listSessions(store *session.Store, tag string) error {
 	return nil
 }
 
+func listHeadlessRuns(store *session.Store) error {
+	runs, err := store.ListHeadlessRuns()
+	if err != nil {
+		return fmt.Errorf("list headless sessions: %w", err)
+	}
+	active := make([]session.HeadlessRun, 0, len(runs))
+	for i := range runs {
+		run := &runs[i]
+		if run.Status == session.HeadlessStatusRunning {
+			active = append(active, *run)
+		}
+	}
+	if len(active) == 0 {
+		fmt.Println("No active headless sessions found.")
+		return nil
+	}
+	for i := range active {
+		fmt.Println(formatHeadlessRun(active[i]))
+	}
+	return nil
+}
+
+func streamHeadlessLog(ctx context.Context, store *session.Store, id string) error {
+	ctx = nonNilContext(ctx)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("stream headless: id is required")
+	}
+
+	offset := 0
+	for {
+		text, err := store.ReadHeadlessLog(id)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("stream headless: %w", err)
+		}
+		if len(text) > offset {
+			fmt.Print(text[offset:])
+			offset = len(text)
+		}
+
+		run, err := store.LoadHeadlessRun(id)
+		if err != nil {
+			return fmt.Errorf("stream headless: %w", err)
+		}
+		if run.Status != session.HeadlessStatusRunning {
+			return nil
+		}
+
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("stream headless: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
 func listSessionSummaries(store *session.Store, tag string) ([]session.Summary, error) {
 	tag = strings.TrimSpace(tag)
 	if tag == "" {
@@ -8472,6 +9060,40 @@ func formatSessionSummary(summary session.Summary) string {
 	}
 	parts = append(parts, summary.Path)
 	return strings.Join(parts, "\t")
+}
+
+func formatHeadlessRun(run session.HeadlessRun) string {
+	started := "-"
+	if !run.StartedAt.IsZero() {
+		started = run.StartedAt.UTC().Format(time.RFC3339)
+	}
+	updated := "-"
+	if !run.UpdatedAt.IsZero() {
+		updated = run.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+	agentName := fallbackDash(run.Agent)
+	modelName := fallbackDash(run.Model)
+	parts := []string{
+		run.ID,
+		"status=" + string(run.Status),
+		"session=" + fallbackDash(run.SessionID),
+		"agent=" + agentName,
+		"model=" + modelName,
+		"started=" + started,
+		"updated=" + updated,
+		"log=" + fallbackDash(run.LogPath),
+	}
+	if run.Error != "" {
+		parts = append(parts, "error="+run.Error)
+	}
+	return strings.Join(parts, "\t")
+}
+
+func fallbackDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
 }
 
 func formatSearchSnippet(snippet session.SearchSnippet) string {

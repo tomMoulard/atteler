@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -914,6 +917,204 @@ func TestCompletionCandidates_AgentAndPath(t *testing.T) {
 	}
 	if !found {
 		require.Failf(t, "README completion missing", "items = %+v", items)
+	}
+}
+
+func TestPromptHistoryFromStore_LoadsNewestUserPrompts(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	older := session.New("gpt-test", []llm.Message{
+		{Role: llm.RoleUser, Content: "older prompt"},
+		{Role: llm.RoleAssistant, Content: "answer"},
+		{Role: llm.RoleUser, Content: "duplicate prompt"},
+	})
+	require.NoError(t, store.Save(older))
+
+	current := session.New("gpt-test", []llm.Message{
+		{Role: llm.RoleUser, Content: "duplicate prompt"},
+		{Role: llm.RoleAssistant, Content: "answer"},
+		{Role: llm.RoleUser, Content: "current prompt"},
+	})
+
+	got := promptHistoryFromStore(store, current, 4)
+
+	assert.Equal(t, []string{"current prompt", "duplicate prompt", "older prompt"}, got)
+}
+
+func TestNavigatePromptHistory_CyclesAndRestoresDraft(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea:            textarea.New(),
+		promptHistory:       []string{"latest prompt", "older prompt"},
+		promptHistoryCursor: -1,
+	}
+	m.textarea.SetValue("draft")
+
+	next, ok := m.navigatePromptHistory(1)
+	require.True(t, ok)
+	assert.Equal(t, "latest prompt", next.textarea.Value())
+
+	next, ok = next.navigatePromptHistory(1)
+	require.True(t, ok)
+	assert.Equal(t, "older prompt", next.textarea.Value())
+
+	next, ok = next.navigatePromptHistory(-1)
+	require.True(t, ok)
+	assert.Equal(t, "latest prompt", next.textarea.Value())
+
+	next, ok = next.navigatePromptHistory(-1)
+	require.True(t, ok)
+	assert.Equal(t, "draft", next.textarea.Value())
+}
+
+func TestPromptSuggestionAndApply(t *testing.T) {
+	t.Parallel()
+
+	m := model{textarea: textarea.New()}
+	m.textarea.SetValue("summ")
+	suggestion, ok := m.promptSuggestion()
+	require.True(t, ok)
+
+	assert.Equal(t, "summarize this session with changed files and verification evidence", applyPromptSuggestion(m.textarea.Value(), suggestion))
+
+	m.textarea.SetValue("summ now")
+	m.textarea.SetCursor(len("summ"))
+	_, ok = m.promptSuggestion()
+	assert.False(t, ok)
+}
+
+func TestRevampPromptAndUndo(t *testing.T) {
+	t.Parallel()
+
+	m := model{textarea: textarea.New()}
+	m.textarea.SetValue("write release notes")
+
+	nextModel, _ := m.revampPrompt()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	assert.Contains(t, next.textarea.Value(), "Goal:")
+	assert.True(t, next.revampUndoActive)
+
+	undoneModel, _ := next.undoPromptRevamp()
+	undone, ok := undoneModel.(model)
+	require.True(t, ok)
+	assert.Equal(t, "write release notes", undone.textarea.Value())
+	assert.False(t, undone.revampUndoActive)
+}
+
+func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
+	t.Parallel()
+
+	result := runOnceResult{
+		SessionID:   "session-id",
+		SessionPath: "/tmp/session.json",
+		HeadlessID:  "headless-id",
+		Model:       "gpt-test",
+		Content:     "answer",
+		TokenUsage:  tokenUsage{InputTokens: 1, CachedInputTokens: 2, OutputTokens: 3, Responses: 1},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	require.NoError(t, writeRunOnceResult(&stdout, &stderr, result, "json", true))
+	var decoded runOnceResult
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded))
+	assert.Equal(t, result.SessionID, decoded.SessionID)
+	assert.Equal(t, result.HeadlessID, decoded.HeadlessID)
+	assert.Equal(t, result.TokenUsage.OutputTokens, decoded.TokenUsage.OutputTokens)
+	assert.Empty(t, stderr.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	require.NoError(t, writeRunOnceResult(&stdout, &stderr, result, "text", true))
+	assert.Empty(t, stdout.String())
+	assert.Empty(t, stderr.String())
+}
+
+func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
+		nil,
+		&llm.Response{Content: "recorded answer", Model: "gpt-test", InputTokens: 2, CachedInputTokens: 1, OutputTokens: 3},
+	))
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	headlessID := "test-headless"
+
+	err := runOnceWithOptions(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		nil,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat: outputFormatText,
+			HeadlessID:   headlessID,
+			Response:     responseRecordOptions{ReplayPath: replayPath},
+			Headless:     true,
+		},
+		true,
+		"hello",
+	)
+	require.NoError(t, err)
+
+	run, err := store.LoadHeadlessRun(headlessID)
+	require.NoError(t, err)
+	assert.Equal(t, session.HeadlessStatusCompleted, run.Status)
+	assert.Equal(t, "gpt-test", run.Model)
+	assert.NotNil(t, run.CompletedAt)
+
+	log, err := store.ReadHeadlessLog(headlessID)
+	require.NoError(t, err)
+	assert.Contains(t, log, "started")
+	assert.Contains(t, log, "assistant_message")
+	assert.Contains(t, log, "completed")
+
+	runs, err := store.ListHeadlessRuns()
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, headlessID, runs[0].ID)
+	require.NoError(t, streamHeadlessLog(context.Background(), store, headlessID))
+}
+
+func TestFormatHeadlessRun(t *testing.T) {
+	t.Parallel()
+
+	run := session.HeadlessRun{
+		ID:        "headless-id",
+		SessionID: "session-id",
+		LogPath:   "/tmp/headless.log",
+		Model:     "gpt-test",
+		Status:    session.HeadlessStatusRunning,
+		StartedAt: time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 5, 3, 10, 1, 0, 0, time.UTC),
+	}
+
+	got := formatHeadlessRun(run)
+	for _, want := range []string{
+		"headless-id",
+		"status=running",
+		"session=session-id",
+		"model=gpt-test",
+		"started=2026-05-03T10:00:00Z",
+		"updated=2026-05-03T10:01:00Z",
+		"log=/tmp/headless.log",
+	} {
+		assert.Contains(t, got, want)
 	}
 }
 
