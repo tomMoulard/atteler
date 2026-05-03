@@ -267,6 +267,16 @@ long it should remain the default:
 - `Globally`: reuse the model everywhere unless a folder/session/CLI selection
   is more specific.
 
+The prompt input keeps useful editing state:
+
+- `Up` / `Down`: cycle through recent user prompts from the current and saved
+  sessions.
+- `Tab`: accept the visible gray rest-of-line suggestion, or an active `@`
+  agent/path completion.
+- `Ctrl+R`: deterministically revamp the current prompt with goal/context/
+  constraints/output-format guidance.
+- `Ctrl+Z`: undo the latest `Ctrl+R` prompt revamp.
+
 Folder and global choices are stored as YAML in Atteler state. Override the
 state file with `ATTELER_STATE`; otherwise Atteler uses
 `$XDG_STATE_HOME/atteler/state.yaml` or `~/.local/state/atteler/state.yaml`.
@@ -279,6 +289,12 @@ atteler --once "Explain this repository in one paragraph"
 atteler "Explain this repository in one paragraph"
 # with piped context:
 git diff | atteler --stdin --once "Review this diff"
+# machine-readable result:
+atteler --output json --once "Explain this repository in one paragraph"
+# headless run metadata/logs for CI or library-style callers:
+atteler --headless --output json --once "Summarize @README.md"
+atteler --list-headless
+atteler --stream-headless <headless-id>
 ```
 
 Useful flags:
@@ -310,6 +326,12 @@ Useful flags:
   deterministic fixtures.
 - `--replay-response <path>`: replay a recorded response JSON without calling
   a provider.
+- `--output text|json`: choose plain text or machine-readable JSON for one-shot
+  prompt results.
+- `--headless`: run a one-shot prompt without TUI/plain output while recording
+  headless run metadata and logs under the session store.
+- `--list-headless`: list active headless runs.
+- `--stream-headless <id>`: stream one headless run log until it exits.
 - `--eval-output <path>` with `--eval-expected <text>` or
   `--eval-expected-file <path>`: run a deterministic output check; set
   `--eval-mode exact|contains|normalized` as needed.
