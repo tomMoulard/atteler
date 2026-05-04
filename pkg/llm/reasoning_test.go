@@ -1,33 +1,44 @@
 package llm
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 func TestNormalizeReasoningLevel(t *testing.T) {
-	cases := map[string]string{
-		"":            "",
-		"  ":          "",
-		"LOW":         "low",
-		"Low":         "low",
-		"x-high":      "xhigh",
-		"X-High":      "xhigh",
-		"x_high":      "xhigh",
-		"extra-high":  "xhigh",
-		"extra_high":  "xhigh",
-		"extra":       "xhigh",
-		"medium":      "medium",
-		"none":        "none",
-		"max":         "max",
-		"unknown":     "unknown",
-		"  medium  ":  "medium",
+	t.Parallel()
+
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: ""},
+		{input: "  ", want: ""},
+		{input: "LOW", want: "low"},
+		{input: "Low", want: "low"},
+		{input: "x-high", want: "xhigh"},
+		{input: "X-High", want: "xhigh"},
+		{input: "x_high", want: "xhigh"},
+		{input: "extra-high", want: "xhigh"},
+		{input: "extra_high", want: "xhigh"},
+		{input: "extra", want: "xhigh"},
+		{input: "medium", want: "medium"},
+		{input: "none", want: "none"},
+		{input: "max", want: "max"},
+		{input: "unknown", want: "unknown"},
+		{input: "  medium  ", want: "medium"},
 	}
-	for in, want := range cases {
-		if got := normalizeReasoningLevel(in); got != want {
-			t.Errorf("normalizeReasoningLevel(%q) = %q, want %q", in, got, want)
-		}
+
+	for _, tt := range cases {
+		assert.Equal(t, tt.want, normalizeReasoningLevel(tt.input), tt.input)
 	}
 }
 
 func TestReasoningEffortRank(t *testing.T) {
+	t.Parallel()
+
 	cases := map[string]int{
 		ReasoningLevelDefault: 0,
 		"none":                1,
@@ -40,34 +51,39 @@ func TestReasoningEffortRank(t *testing.T) {
 		"max":                 -1,
 		"bogus":               -1,
 	}
-	for in, want := range cases {
-		if got := ReasoningEffortRank(in); got != want {
-			t.Errorf("ReasoningEffortRank(%q) = %d, want %d", in, got, want)
-		}
+
+	for input, want := range cases {
+		assert.Equal(t, want, ReasoningEffortRank(input), input)
 	}
 }
 
 func TestOpenAIReasoningEffort(t *testing.T) {
-	cases := map[string]string{
-		"":           "",
-		"none":       "none",
-		"minimal":    "minimal",
-		"low":        "low",
-		"medium":     "medium",
-		"high":       "high",
-		"xhigh":      "xhigh",
-		"x-high":     "xhigh",
-		"max":        "xhigh",
-		"  custom ": "custom",
+	t.Parallel()
+
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: ""},
+		{input: "none", want: "none"},
+		{input: "minimal", want: "minimal"},
+		{input: "low", want: "low"},
+		{input: "medium", want: "medium"},
+		{input: "high", want: "high"},
+		{input: "xhigh", want: "xhigh"},
+		{input: "x-high", want: "xhigh"},
+		{input: "max", want: "xhigh"},
+		{input: "  custom ", want: "custom"},
 	}
-	for in, want := range cases {
-		if got := openAIReasoningEffort(in); got != want {
-			t.Errorf("openAIReasoningEffort(%q) = %q, want %q", in, got, want)
-		}
+
+	for _, tt := range cases {
+		assert.Equal(t, tt.want, openAIReasoningEffort(tt.input), tt.input)
 	}
 }
 
 func TestCLIReasoningEffort(t *testing.T) {
+	t.Parallel()
+
 	cases := map[string]string{
 		"":        "",
 		"none":    "",
@@ -79,18 +95,20 @@ func TestCLIReasoningEffort(t *testing.T) {
 		"x-high":  "xhigh",
 		"max":     "max",
 	}
-	for in, want := range cases {
-		if got := cliReasoningEffort(in); got != want {
-			t.Errorf("cliReasoningEffort(%q) = %q, want %q", in, got, want)
-		}
+
+	for input, want := range cases {
+		assert.Equal(t, want, cliReasoningEffort(input), input)
 	}
 }
 
 func TestOllamaThink(t *testing.T) {
+	t.Parallel()
+
 	type result struct {
 		val any
 		ok  bool
 	}
+
 	cases := map[string]result{
 		"":        {nil, false},
 		"none":    {false, true},
@@ -103,38 +121,41 @@ func TestOllamaThink(t *testing.T) {
 		"max":     {"high", true},
 		"custom":  {"custom", true},
 	}
-	for in, want := range cases {
-		gotVal, gotOK := ollamaThink(in)
-		if gotOK != want.ok || gotVal != want.val {
-			t.Errorf("ollamaThink(%q) = (%v, %v), want (%v, %v)", in, gotVal, gotOK, want.val, want.ok)
-		}
+
+	for input, want := range cases {
+		gotVal, gotOK := ollamaThink(input)
+
+		assert.Equal(t, want.ok, gotOK, input)
+		assert.Equal(t, want.val, gotVal, input)
 	}
 }
 
 func TestAnthropicThinkingBudgetDisabled(t *testing.T) {
-	cases := []string{"", "none", "minimal"}
-	for _, level := range cases {
+	t.Parallel()
+
+	for _, level := range []string{"", "none", "minimal"} {
 		budget, enabled, err := anthropicThinkingBudget(level, 8192)
-		if err != nil {
-			t.Errorf("anthropicThinkingBudget(%q): unexpected error %v", level, err)
-		}
-		if enabled || budget != 0 {
-			t.Errorf("anthropicThinkingBudget(%q) = (%d, %v), want (0, false)", level, budget, enabled)
-		}
+
+		require.NoError(t, err)
+		assert.False(t, enabled, level)
+		assert.Zero(t, budget, level)
 	}
 }
 
 func TestAnthropicThinkingBudgetMaxTokensTooSmall(t *testing.T) {
+	t.Parallel()
+
 	for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
 		_, _, err := anthropicThinkingBudget(level, 1024)
-		if err == nil {
-			t.Errorf("anthropicThinkingBudget(%q, 1024): expected error, got nil", level)
-		}
+		assert.Error(t, err, level)
 	}
 }
 
 func TestAnthropicThinkingBudgetMappings(t *testing.T) {
+	t.Parallel()
+
 	const maxTokens = 8192
+
 	cases := map[string]int{
 		"low":    1024,
 		"medium": maxTokens / 3,
@@ -142,49 +163,40 @@ func TestAnthropicThinkingBudgetMappings(t *testing.T) {
 		"xhigh":  (maxTokens * 3) / 4,
 		"max":    (maxTokens * 3) / 4,
 	}
+
 	for level, wantBudget := range cases {
 		budget, enabled, err := anthropicThinkingBudget(level, maxTokens)
-		if err != nil {
-			t.Fatalf("anthropicThinkingBudget(%q, %d): unexpected error %v", level, maxTokens, err)
-		}
-		if !enabled {
-			t.Errorf("anthropicThinkingBudget(%q): enabled=false, want true", level)
-		}
-		if budget != wantBudget {
-			t.Errorf("anthropicThinkingBudget(%q) budget = %d, want %d", level, budget, wantBudget)
-		}
+
+		require.NoError(t, err)
+		assert.True(t, enabled, level)
+		assert.Equal(t, wantBudget, budget, level)
 	}
 }
 
 func TestAnthropicThinkingBudgetClampedBelowMaxTokens(t *testing.T) {
+	t.Parallel()
+
 	// xhigh wants (maxTokens*3)/4. Pick a maxTokens where that's >= maxTokens (impossible
 	// arithmetically, but mediumish levels at small maxTokens can land just under). Force
 	// the clamp by checking budget < maxTokens for several boundary sizes.
 	for _, mx := range []int{1025, 1100, 2048, 4096, 8192} {
 		budget, enabled, err := anthropicThinkingBudget("xhigh", mx)
-		if err != nil {
-			t.Fatalf("xhigh @ maxTokens=%d: unexpected error %v", mx, err)
-		}
-		if !enabled {
-			t.Fatalf("xhigh @ maxTokens=%d: not enabled", mx)
-		}
-		if budget >= mx {
-			t.Errorf("xhigh @ maxTokens=%d: budget %d should be < maxTokens", mx, budget)
-		}
+
+		require.NoError(t, err)
+		require.True(t, enabled)
+		assert.Less(t, budget, mx)
 	}
 }
 
 func TestAnthropicThinkingBudgetUnknownLevelDefaults(t *testing.T) {
+	t.Parallel()
+
 	// Unknown non-empty levels fall through to the medium-equivalent default.
 	const maxTokens = 8192
+
 	budget, enabled, err := anthropicThinkingBudget("unknown", maxTokens)
-	if err != nil {
-		t.Fatalf("unknown level: unexpected error %v", err)
-	}
-	if !enabled {
-		t.Fatalf("unknown level: not enabled")
-	}
-	if want := maxTokens / 3; budget != want {
-		t.Errorf("unknown level: budget = %d, want %d (medium fallthrough)", budget, want)
-	}
+
+	require.NoError(t, err)
+	require.True(t, enabled)
+	assert.Equal(t, maxTokens/3, budget)
 }
