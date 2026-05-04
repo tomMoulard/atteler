@@ -99,6 +99,7 @@ func (o *OpenAIProvider) FetchModels(ctx context.Context) ([]string, error) {
 	for _, m := range mr.Data {
 		out = append(out, m.ID)
 	}
+
 	return out, nil
 }
 
@@ -114,13 +115,14 @@ func (o *OpenAIProvider) HealthCheck(ctx context.Context) error {
 // ---------------------------------------------------------------------------
 
 type openaiRequest struct {
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	Seed        *int            `json:"seed,omitempty"`
-	Model       string          `json:"model"`
-	Messages    []openaiMessage `json:"messages"`
-	Stop        []string        `json:"stop,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            *float64        `json:"top_p,omitempty"`
+	Seed            *int            `json:"seed,omitempty"`
+	Model           string          `json:"model"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	Messages        []openaiMessage `json:"messages"`
+	Stop            []string        `json:"stop,omitempty"`
+	MaxTokens       int             `json:"max_tokens,omitempty"`
 }
 
 type openaiMessage struct {
@@ -163,14 +165,21 @@ func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*
 	if params.MaxTokens > 0 {
 		req.MaxTokens = params.MaxTokens
 	}
+
 	if params.Temperature != nil {
 		req.Temperature = params.Temperature
 	}
+
 	if params.TopP != nil {
 		req.TopP = params.TopP
 	}
+
 	if params.Seed != nil {
 		req.Seed = params.Seed
+	}
+
+	if effort := openAIReasoningEffort(params.ReasoningLevel); effort != "" {
+		req.ReasoningEffort = effort
 	}
 
 	body, err := json.Marshal(req)
@@ -228,9 +237,11 @@ func configuredBaseURL(envKey, configured, fallback string) string {
 	if v := os.Getenv(envKey); v != "" {
 		return v
 	}
+
 	if configured != "" {
 		return configured
 	}
+
 	return fallback
 }
 
@@ -268,12 +279,15 @@ func openaiContextWindow(model string) int {
 		if strings.HasPrefix(model, "gpt-4.1") {
 			return 1_047_576
 		}
+
 		if strings.HasPrefix(model, "gpt-4o") || strings.HasPrefix(model, "gpt-4-turbo") {
 			return 128_000
 		}
+
 		if strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4") {
 			return 200_000
 		}
+
 		return 0
 	}
 }

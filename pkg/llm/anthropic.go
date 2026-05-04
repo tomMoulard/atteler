@@ -115,6 +115,7 @@ func (a *AnthropicProvider) FetchModels(ctx context.Context) ([]string, error) {
 	for _, m := range mr.Data {
 		out = append(out, m.ID)
 	}
+
 	return out, nil
 }
 
@@ -130,9 +131,15 @@ type anthropicRequest struct {
 	TopP        *float64           `json:"top_p,omitempty"`
 	Model       string             `json:"model"`
 	System      string             `json:"system,omitempty"`
+	Thinking    *anthropicThinking `json:"thinking,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 	Stop        []string           `json:"stop_sequences,omitempty"`
 	MaxTokens   int                `json:"max_tokens"`
+}
+
+type anthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 type anthropicMessage struct {
@@ -159,34 +166,9 @@ type anthropicResponse struct {
 
 // Complete performs a chat completion using the Anthropic Messages API.
 func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
-	// Separate system message from the rest.
-	var system string
-	msgs := make([]anthropicMessage, 0, len(params.Messages))
-	for _, m := range params.Messages {
-		if m.Role == RoleSystem {
-			system = m.Content
-			continue
-		}
-		msgs = append(msgs, anthropicMessage{Role: string(m.Role), Content: m.Content})
-	}
-
-	maxTok := params.MaxTokens
-	if maxTok <= 0 {
-		maxTok = 4096
-	}
-
-	req := anthropicRequest{
-		Model:     params.Model,
-		MaxTokens: maxTok,
-		Messages:  msgs,
-		System:    system,
-		Stop:      params.Stop,
-	}
-	if params.Temperature != nil {
-		req.Temperature = params.Temperature
-	}
-	if params.TopP != nil {
-		req.TopP = params.TopP
+	req, err := buildAnthropicRequest(params)
+	if err != nil {
+		return nil, err
 	}
 
 	body, err := json.Marshal(req)
@@ -241,6 +223,46 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 	}, nil
 }
 
+func buildAnthropicRequest(params CompleteParams) (anthropicRequest, error) {
+	var system string
+
+	msgs := make([]anthropicMessage, 0, len(params.Messages))
+	for _, m := range params.Messages {
+		if m.Role == RoleSystem {
+			system = m.Content
+			continue
+		}
+
+		msgs = append(msgs, anthropicMessage{Role: string(m.Role), Content: m.Content})
+	}
+
+	maxTok := params.MaxTokens
+	if maxTok <= 0 {
+		maxTok = 4096
+	}
+
+	req := anthropicRequest{
+		Model:       params.Model,
+		MaxTokens:   maxTok,
+		Messages:    msgs,
+		System:      system,
+		Stop:        params.Stop,
+		Temperature: params.Temperature,
+		TopP:        params.TopP,
+	}
+
+	budget, ok, err := anthropicThinkingBudget(params.ReasoningLevel, maxTok)
+	if err != nil {
+		return anthropicRequest{}, fmt.Errorf("anthropic: %w", err)
+	}
+
+	if ok {
+		req.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: budget}
+	}
+
+	return req, nil
+}
+
 func (a *AnthropicProvider) setAuthHeaders(httpReq *http.Request) {
 	if a.bearer {
 		httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
@@ -269,6 +291,7 @@ func anthropicContextWindow(model string) int {
 		if strings.HasPrefix(model, "claude") {
 			return 200_000
 		}
+
 		return 0
 	}
 }

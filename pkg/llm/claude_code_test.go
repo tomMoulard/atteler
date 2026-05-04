@@ -22,10 +22,12 @@ func TestClaudeCodeProvider_Complete(t *testing.T) {
 	dir := t.TempDir()
 	workDir := t.TempDir()
 	argsFile := filepath.Join(dir, "args.txt")
+
 	t.Chdir(workDir)
 	t.Setenv("ATTELER_ARGS_FILE", argsFile)
 
 	bin := filepath.Join(dir, "claude")
+
 	script := `#!/bin/sh
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
   printf '{"loggedIn":true}'
@@ -55,8 +57,10 @@ printf 'claude:%s' "$model"
 		bin:    bin,
 		models: []string{"claude-opus-4-6"},
 	}
+
 	resp, err := provider.Complete(context.Background(), CompleteParams{
-		Model: "claude-opus-4-6",
+		Model:          "claude-opus-4-6",
+		ReasoningLevel: "xhigh",
 		Messages: []Message{
 			{Role: RoleSystem, Content: "be brief"},
 			{Role: RoleUser, Content: "say ok"},
@@ -65,9 +69,11 @@ printf 'claude:%s' "$model"
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if resp.Content != "claude:claude-opus-4-6" {
 		assert.Failf(t, "assertion failed", "Content = %q, want claude:claude-opus-4-6", resp.Content)
 	}
+
 	if resp.Model != "claude-opus-4-6" {
 		assert.Failf(t, "assertion failed", "Model = %q, want claude-opus-4-6", resp.Model)
 	}
@@ -76,27 +82,36 @@ printf 'claude:%s' "$model"
 	if value, ok := flagValue(args, "--permission-mode"); !ok || value != "acceptEdits" {
 		require.Failf(t, "unexpected failure", "--permission-mode = %q, %v; want acceptEdits", value, ok)
 	}
+
 	if value, ok := flagValue(args, "--tools"); !ok || value != claudeCodeTools {
 		require.Failf(t, "unexpected failure", "--tools = %q, %v; want %q", value, ok, claudeCodeTools)
 	}
+
 	if value, ok := flagValue(args, "--allowed-tools"); !ok || value != claudeCodeTools {
 		require.Failf(t, "unexpected failure", "--allowed-tools = %q, %v; want %q", value, ok, claudeCodeTools)
 	} else {
 		assert.Contains(t, strings.Split(value, ","), "Bash")
 	}
+
 	if value, ok := flagValue(args, "--add-dir"); !ok || value != workDir {
 		require.Failf(t, "unexpected failure", "--add-dir = %q, %v; want %q", value, ok, workDir)
+	}
+
+	if value, ok := flagValue(args, "--effort"); !ok || value != "xhigh" {
+		require.Failf(t, "unexpected failure", "--effort = %q, %v; want xhigh", value, ok)
 	}
 }
 
 func TestVerifyClaudeCodeAuth(t *testing.T) {
 	t.Parallel()
+
 	if runtime.GOOS == osWindows {
 		t.Skip("shell-script claude fake is POSIX-only")
 	}
 
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "claude")
+
 	script := `#!/bin/sh
 printf '{"loggedIn":false}'
 `
@@ -121,6 +136,7 @@ func readArgv(t *testing.T, path string) []string {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 }
 
@@ -130,5 +146,6 @@ func flagValue(args []string, flag string) (string, bool) {
 			return args[i+1], true
 		}
 	}
+
 	return "", false
 }

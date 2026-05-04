@@ -55,20 +55,25 @@ func NewOllamaProviderWithConfigContext(ctx context.Context, cfg ProviderConfig)
 	if ollamaExplicitlyConfigured(cfg) && !p.autoStart {
 		return p, nil
 	}
+
 	healthErr := p.HealthCheck(ctx)
 	if healthErr == nil {
 		return p, nil
 	}
+
 	if p.autoStart && isOllamaDaemonUnavailable(healthErr) {
 		startErr := p.startDaemonAndWait(ctx)
 		if startErr == nil {
 			return p, nil
 		}
+
 		return nil, errors.Join(healthErr, startErr)
 	}
+
 	if ollamaExplicitlyConfigured(cfg) {
 		return p, nil
 	}
+
 	return nil, healthErr
 }
 
@@ -87,11 +92,13 @@ func (o *OllamaProvider) startDaemonAndWait(ctx context.Context) error {
 	if o.startAttempted {
 		return errors.New("ollama: daemon start already attempted")
 	}
+
 	o.startAttempted = true
 
 	if err := callOllamaServeStarter(o.baseURL); err != nil {
 		return err
 	}
+
 	return o.waitForDaemon(ctx)
 }
 
@@ -99,6 +106,7 @@ func callOllamaServeStarter(baseURL string) error {
 	ollamaServeStarterMu.Lock()
 	starter := startOllamaServe
 	ollamaServeStarterMu.Unlock()
+
 	return starter(baseURL)
 }
 
@@ -107,18 +115,22 @@ func startOllamaServeProcess(baseURL string) error {
 	// killed when the short provider-readiness context is canceled.
 	cmd := exec.CommandContext(context.Background(), ollamaServeCommand, "serve")
 	cmd.Stdout = io.Discard
+
 	cmd.Stderr = io.Discard
 	if host := ollamaHostForBaseURL(baseURL); host != "" {
 		cmd.Env = append(os.Environ(), "OLLAMA_HOST="+host)
 	}
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("ollama: start daemon: %w", err)
 	}
+
 	go func() {
 		if err := cmd.Wait(); err != nil {
 			log.Printf("ollama: daemon exited: %v", err)
 		}
 	}()
+
 	return nil
 }
 
@@ -130,11 +142,13 @@ func (o *OllamaProvider) waitForDaemon(ctx context.Context) error {
 	defer ticker.Stop()
 
 	var lastErr error
+
 	for {
 		err := o.HealthCheck(waitCtx)
 		if err == nil {
 			return nil
 		}
+
 		lastErr = err
 
 		select {
@@ -159,7 +173,9 @@ func isLocalOllamaBaseURL(baseURL string) bool {
 	if err != nil {
 		return false
 	}
+
 	host := strings.ToLower(parsed.Hostname())
+
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
@@ -168,6 +184,7 @@ func ollamaHostForBaseURL(baseURL string) string {
 	if err != nil {
 		return ""
 	}
+
 	return parsed.Host
 }
 
@@ -178,6 +195,7 @@ func isOllamaDaemonUnavailable(err error) bool {
 	}
 
 	var netErr net.Error
+
 	return errors.As(err, &netErr)
 }
 
@@ -209,6 +227,7 @@ func (o *OllamaProvider) FetchModels(ctx context.Context) ([]string, error) {
 	if o.client == nil {
 		o.client = &http.Client{}
 	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/api/tags", http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("ollama: new models request: %w", err)
@@ -240,6 +259,7 @@ func (o *OllamaProvider) FetchModels(ctx context.Context) ([]string, error) {
 			out = append(out, model.Name)
 		}
 	}
+
 	return out, nil
 }
 
@@ -250,6 +270,7 @@ func (o *OllamaProvider) HealthCheck(ctx context.Context) error {
 }
 
 type ollamaChatRequest struct {
+	Think    any             `json:"think,omitempty"`
 	Model    string          `json:"model"`
 	Messages []ollamaMessage `json:"messages"`
 	Options  ollamaOptions   `json:"options"`
@@ -282,6 +303,7 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 	if params.Model == "" {
 		return nil, errors.New("ollama: model is required")
 	}
+
 	if o.client == nil {
 		o.client = &http.Client{}
 	}
@@ -306,6 +328,10 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 		req.Options.NumPredict = params.MaxTokens
 	}
 
+	if think, ok := ollamaThink(params.ReasoningLevel); ok {
+		req.Think = think
+	}
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("ollama: marshal: %w", err)
@@ -315,6 +341,7 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 	if err != nil {
 		return nil, fmt.Errorf("ollama: new request: %w", err)
 	}
+
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := o.client.Do(httpReq)
@@ -336,6 +363,7 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 	if err := json.Unmarshal(respBody, &or); err != nil {
 		return nil, fmt.Errorf("ollama: unmarshal: %w", err)
 	}
+
 	if or.Error != "" {
 		return nil, fmt.Errorf("ollama: %s", or.Error)
 	}
@@ -344,6 +372,7 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 	if model == "" {
 		model = params.Model
 	}
+
 	return &Response{
 		Content:      or.Message.Content,
 		Model:        model,
@@ -355,6 +384,7 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 // ModelContextWindow returns known default context windows for common Ollama models.
 func (o *OllamaProvider) ModelContextWindow(model string) int {
 	model = strings.ToLower(strings.TrimSpace(model))
+
 	model, _, _ = strings.Cut(model, ":")
 	switch model {
 	case "llama3.2", "llama3.1", "qwen2.5", "mistral", "gemma3", "deepseek-r1":

@@ -14,15 +14,20 @@ import (
 
 func TestOpenAIProvider_Complete(t *testing.T) {
 	t.Parallel()
-	var gotReq openaiRequest
-	var gotHeaders http.Header
+
+	var (
+		gotReq     openaiRequest
+		gotHeaders http.Header
+	)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotHeaders = r.Header.Clone()
+
 		body, err := io.ReadAll(r.Body)
 		if !assert.NoError(t, err) {
 			return
 		}
+
 		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
 			return
 		}
@@ -40,6 +45,7 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 		resp.Usage.PromptTokens = 8
 		resp.Usage.PromptTokensDetails.CachedTokens = 2
 		resp.Usage.CompletionTokens = 3
+
 		w.Header().Set("Content-Type", "application/json")
 		assert.NoError(t, json.NewEncoder(w).Encode(resp))
 	}))
@@ -55,10 +61,11 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 	seed := 123
 
 	resp, err := p.Complete(context.Background(), CompleteParams{
-		Model:       "gpt-4.1",
-		MaxTokens:   200,
-		Temperature: &temperature,
-		Seed:        &seed,
+		Model:          "gpt-4.1",
+		MaxTokens:      200,
+		Temperature:    &temperature,
+		Seed:           &seed,
+		ReasoningLevel: "high",
 		Messages: []Message{
 			{Role: RoleSystem, Content: "you are helpful"},
 			{Role: RoleUser, Content: "hi"},
@@ -72,6 +79,7 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 	if resp.Content != "hello back" {
 		assert.Failf(t, "assertion failed", "content = %q, want %q", resp.Content, "hello back")
 	}
+
 	if resp.InputTokens != 8 || resp.CachedInputTokens != 2 || resp.OutputTokens != 3 {
 		assert.Failf(t, "assertion failed", "tokens = %d/%d/%d, want 8/2/3", resp.InputTokens, resp.CachedInputTokens, resp.OutputTokens)
 	}
@@ -80,17 +88,25 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 	if len(gotReq.Messages) != 2 {
 		require.Failf(t, "unexpected failure", "messages len = %d, want 2", len(gotReq.Messages))
 	}
+
 	if gotReq.Messages[0].Role != "system" {
 		assert.Failf(t, "assertion failed", "messages[0].role = %q", gotReq.Messages[0].Role)
 	}
+
 	if gotReq.MaxTokens != 200 {
 		assert.Failf(t, "assertion failed", "max_tokens = %d", gotReq.MaxTokens)
 	}
+
 	if gotReq.Temperature == nil || *gotReq.Temperature != 0.7 {
 		assert.Failf(t, "assertion failed", "temperature = %v", gotReq.Temperature)
 	}
+
 	if gotReq.Seed == nil || *gotReq.Seed != 123 {
 		assert.Failf(t, "assertion failed", "seed = %v", gotReq.Seed)
+	}
+
+	if gotReq.ReasoningEffort != "high" {
+		assert.Failf(t, "assertion failed", "reasoning_effort = %q, want high", gotReq.ReasoningEffort)
 	}
 
 	// Verify auth header.
@@ -101,8 +117,10 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 
 func TestOpenAIProvider_HTTPError(t *testing.T) {
 	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
+
 		if _, err := w.Write([]byte(`{"error":{"type":"invalid_api_key","message":"bad key"}}`)); err != nil {
 			return // best-effort in test handler
 		}
@@ -110,6 +128,7 @@ func TestOpenAIProvider_HTTPError(t *testing.T) {
 	defer srv.Close()
 
 	p := &OpenAIProvider{apiKey: "k", baseURL: srv.URL, client: srv.Client()}
+
 	_, err := p.Complete(context.Background(), CompleteParams{
 		Model:    "gpt-4.1",
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
@@ -121,6 +140,7 @@ func TestOpenAIProvider_HTTPError(t *testing.T) {
 
 func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {
 	t.Parallel()
+
 	var gotReq openaiRequest
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,11 +149,14 @@ func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		if err := json.Unmarshal(body, &gotReq); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
 		w.Header().Set("Content-Type", "application/json")
+
 		if err := json.NewEncoder(w).Encode(openaiResponse{
 			Choices: []struct {
 				Message struct {
@@ -149,6 +172,7 @@ func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {
 	defer srv.Close()
 
 	p := &OpenAIProvider{apiKey: "k", baseURL: srv.URL, client: srv.Client()}
+
 	_, err := p.Complete(context.Background(), CompleteParams{
 		Model:    "gpt-4.1",
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
@@ -156,26 +180,36 @@ func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if gotReq.MaxTokens != 0 {
 		assert.Failf(t, "assertion failed", "max_tokens = %d, want 0 (omitted)", gotReq.MaxTokens)
 	}
+
 	if gotReq.Temperature != nil {
 		assert.Failf(t, "assertion failed", "temperature = %v, want omitted", *gotReq.Temperature)
 	}
+
 	if gotReq.TopP != nil {
 		assert.Failf(t, "assertion failed", "top_p = %v, want omitted", *gotReq.TopP)
 	}
+
 	if gotReq.Seed != nil {
 		assert.Failf(t, "assertion failed", "seed = %v, want omitted", *gotReq.Seed)
+	}
+
+	if gotReq.ReasoningEffort != "" {
+		assert.Failf(t, "assertion failed", "reasoning_effort = %q, want omitted", gotReq.ReasoningEffort)
 	}
 }
 
 func TestOpenAIProvider_NameAndModels(t *testing.T) {
 	t.Parallel()
+
 	p := &OpenAIProvider{}
 	if p.Name() != providerOpenAI {
 		assert.Failf(t, "assertion failed", "Name() = %q", p.Name())
 	}
+
 	if len(p.Models()) == 0 {
 		assert.Fail(t, "Models() returned empty")
 	}
@@ -189,6 +223,7 @@ func TestOpenAIProvider_ConfigBaseURL(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if p.baseURL != "https://openai.config" {
 		assert.Failf(t, "assertion failed", "baseURL = %q, want config value", p.baseURL)
 	}
@@ -202,6 +237,7 @@ func TestOpenAIProvider_EnvBaseURLOverridesConfig(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if p.baseURL != "https://openai.env" {
 		assert.Failf(t, "assertion failed", "baseURL = %q, want env value", p.baseURL)
 	}

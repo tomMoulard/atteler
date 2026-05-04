@@ -35,13 +35,16 @@ func NewClaudeCodeProvider() (*ClaudeCodeProvider, error) {
 // executable and verifies that Claude Code is logged in using ctx.
 func NewClaudeCodeProviderContext(ctx context.Context) (*ClaudeCodeProvider, error) {
 	ctx = nonNilCredentialContext(ctx)
+
 	bin, err := exec.LookPath("claude")
 	if err != nil {
 		return nil, fmt.Errorf("claude executable not found: %w", err)
 	}
+
 	if err := verifyClaudeCodeAuth(ctx, bin); err != nil {
 		return nil, err
 	}
+
 	return &ClaudeCodeProvider{bin: bin, models: defaultClaudeCodeModels()}, nil
 }
 
@@ -53,6 +56,7 @@ func (c *ClaudeCodeProvider) Models() []string {
 	if len(c.models) == 0 {
 		return defaultClaudeCodeModels()
 	}
+
 	return append([]string(nil), c.models...)
 }
 
@@ -72,6 +76,7 @@ func (c *ClaudeCodeProvider) HealthCheck(ctx context.Context) error {
 			"provider": providerClaudeCode,
 		},
 	})
+
 	return verifyClaudeCodeAuth(ctx, c.bin)
 }
 
@@ -97,6 +102,7 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 		if len(models) == 0 {
 			return nil, errors.New("claude code model not configured")
 		}
+
 		model = models[0]
 	}
 
@@ -110,9 +116,14 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 		"--model", model,
 		"--output-format", "text",
 	}
+	if effort := cliReasoningEffort(params.ReasoningLevel); effort != "" {
+		args = append(args, "--effort", effort)
+	}
+
 	if system := systemPrompt(params.Messages); system != "" {
 		args = append(args, "--system-prompt", system)
 	}
+
 	args = append(args, conversationPrompt(params.Messages))
 
 	emitActivity(ctx, events.Event{
@@ -127,8 +138,11 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 	//nolint:gosec // c.bin comes from exec.LookPath or tests; args are passed without a shell.
 	cmd := exec.CommandContext(ctx, c.bin, args...)
 	cmd.Dir = cwd
+
 	var stdout, stderr bytes.Buffer
+
 	cmd.Stdout = &stdout
+
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("claude code: %w: %s", err, stderr.String())
@@ -138,6 +152,7 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 	if content == "" {
 		return nil, errors.New("claude code returned an empty response")
 	}
+
 	return &Response{Content: content, Model: model}, nil
 }
 
@@ -146,6 +161,7 @@ func verifyClaudeCodeAuth(ctx context.Context, bin string) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, bin, "auth", "status")
+
 	output, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("claude auth status failed: %w", err)
@@ -157,9 +173,11 @@ func verifyClaudeCodeAuth(ctx context.Context, bin string) error {
 	if err := json.Unmarshal(output, &status); err != nil {
 		return fmt.Errorf("claude auth status parse: %w", err)
 	}
+
 	if !status.LoggedIn {
 		return errors.New("no Claude Code credentials found: run `claude auth login`")
 	}
+
 	return nil
 }
 
@@ -182,24 +200,29 @@ func defaultClaudeCodeModels() []string {
 
 func systemPrompt(messages []Message) string {
 	var system []string
+
 	for _, msg := range messages {
 		if msg.Role == RoleSystem {
 			system = append(system, msg.Content)
 		}
 	}
+
 	return strings.Join(system, "\n\n")
 }
 
 func conversationPrompt(messages []Message) string {
 	var b strings.Builder
+
 	for _, msg := range messages {
 		if msg.Role == RoleSystem {
 			continue
 		}
+
 		b.WriteString(strings.ToUpper(string(msg.Role)))
 		b.WriteString(":\n")
 		b.WriteString(msg.Content)
 		b.WriteString("\n\n")
 	}
+
 	return strings.TrimSpace(b.String())
 }

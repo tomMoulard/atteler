@@ -18,17 +18,22 @@ import (
 
 func TestOllamaProvider_Complete(t *testing.T) {
 	t.Parallel()
-	var gotReq ollamaChatRequest
-	var gotPath string
-	var gotContentType string
+
+	var (
+		gotReq         ollamaChatRequest
+		gotPath        string
+		gotContentType string
+	)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotContentType = r.Header.Get("Content-Type")
+
 		body, err := io.ReadAll(r.Body)
 		if !assert.NoError(t, err) {
 			return
 		}
+
 		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
 			return
 		}
@@ -49,12 +54,13 @@ func TestOllamaProvider_Complete(t *testing.T) {
 	seed := 42
 
 	resp, err := p.Complete(context.Background(), CompleteParams{
-		Model:       "llama3.2",
-		MaxTokens:   128,
-		Temperature: &temperature,
-		TopP:        &topP,
-		Seed:        &seed,
-		Stop:        []string{"</stop>"},
+		Model:          "llama3.2",
+		MaxTokens:      128,
+		Temperature:    &temperature,
+		TopP:           &topP,
+		Seed:           &seed,
+		Stop:           []string{"</stop>"},
+		ReasoningLevel: "xhigh",
 		Messages: []Message{
 			{Role: RoleSystem, Content: "be brief"},
 			{Role: RoleUser, Content: "hi"},
@@ -77,6 +83,7 @@ func TestOllamaProvider_Complete(t *testing.T) {
 	require.NotNil(t, gotReq.Options.Seed)
 	assert.Equal(t, 42, *gotReq.Options.Seed)
 	assert.Equal(t, []string{"</stop>"}, gotReq.Options.Stop)
+	assert.Equal(t, "high", gotReq.Think)
 
 	assert.Equal(t, "hello from ollama", resp.Content)
 	assert.Equal(t, "llama3.2", resp.Model)
@@ -86,9 +93,12 @@ func TestOllamaProvider_Complete(t *testing.T) {
 
 func TestOllamaProvider_FetchModels(t *testing.T) {
 	t.Parallel()
+
 	var gotPath string
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+
 		w.Header().Set("Content-Type", "application/json")
 		_, err := w.Write([]byte(`{"models":[{"name":"llama3.2:latest"},{"name":"qwen2.5:7b"}]}`))
 		assert.NoError(t, err)
@@ -132,26 +142,35 @@ func TestOllamaProvider_AutoStartStartsDaemonWhenUnavailable(t *testing.T) {
 	t.Setenv(envOllamaAutoStart, "")
 
 	baseURL := unusedLocalOllamaURL(t)
-	var calls int
-	var srv *http.Server
+
+	var (
+		calls int
+		srv   *http.Server
+	)
+
 	withOllamaServeStarter(t, func(gotBaseURL string) error {
 		calls++
+
 		assert.Equal(t, baseURL, gotBaseURL)
 
 		var err error
+
 		srv, err = startOllamaTagsServer(t, gotBaseURL)
+
 		return err
 	})
 	t.Cleanup(func() {
 		if srv != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
+
 			assert.NoError(t, srv.Shutdown(ctx))
 		}
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	p, err := NewOllamaProviderWithConfigContext(ctx, ProviderConfig{BaseURL: baseURL, AutoStart: true})
 	require.NoError(t, err)
 	assert.Equal(t, baseURL, p.baseURL)
@@ -172,6 +191,7 @@ func TestOllamaProvider_AutoStartDoesNotStartWhenReachable(t *testing.T) {
 	defer srv.Close()
 
 	var calls int
+
 	withOllamaServeStarter(t, func(string) error {
 		calls++
 		return errors.New("unexpected starter call")
@@ -195,6 +215,7 @@ func TestOllamaProvider_AutoStartReturnsStarterError(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	_, err := NewOllamaProviderWithConfigContext(ctx, ProviderConfig{BaseURL: baseURL, AutoStart: true})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ollama: start daemon: binary not found")
@@ -205,6 +226,7 @@ func TestOllamaProvider_AutoStartSkipsRemoteAndDisabled(t *testing.T) {
 	t.Setenv(envOllamaAutoStart, "false")
 
 	var calls int
+
 	withOllamaServeStarter(t, func(string) error {
 		calls++
 		return errors.New("unexpected starter call")
@@ -215,6 +237,7 @@ func TestOllamaProvider_AutoStartSkipsRemoteAndDisabled(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:1", disabled.baseURL)
 
 	t.Setenv(envOllamaAutoStart, "")
+
 	remote, err := NewOllamaProviderWithConfigContext(context.Background(), ProviderConfig{BaseURL: "http://ollama.example", AutoStart: true})
 	require.NoError(t, err)
 	assert.Equal(t, "http://ollama.example", remote.baseURL)
@@ -247,6 +270,7 @@ func TestAutoRegisterWithConfigContext_RegistersConfiguredOllama(t *testing.T) {
 	p, ok := r.Provider(providerOllama)
 	require.True(t, ok)
 	assert.Equal(t, providerOllama, p.Name())
+
 	providerName, ok := r.ProviderForModel("llama3.2")
 	require.True(t, ok)
 	assert.Equal(t, providerOllama, providerName)
@@ -257,17 +281,23 @@ func TestAutoRegisterWithConfigContext_StartsLocalOllamaForDefaultProvider(t *te
 	t.Setenv(envOllamaAutoStart, "")
 
 	baseURL := unusedLocalOllamaURL(t)
+
 	var srv *http.Server
+
 	withOllamaServeStarter(t, func(gotBaseURL string) error {
 		assert.Equal(t, baseURL, gotBaseURL)
+
 		var err error
+
 		srv, err = startOllamaTagsServer(t, gotBaseURL)
+
 		return err
 	})
 	t.Cleanup(func() {
 		if srv != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
+
 			assert.NoError(t, srv.Shutdown(ctx))
 		}
 	})
@@ -313,6 +343,7 @@ func TestShouldAutoStartOllama(t *testing.T) {
 
 func TestKnownProvidersIncludesOllama(t *testing.T) {
 	t.Parallel()
+
 	providers := KnownProviders()
 	for _, provider := range providers {
 		if provider.Name == providerOllama {
@@ -320,6 +351,7 @@ func TestKnownProvidersIncludesOllama(t *testing.T) {
 			return
 		}
 	}
+
 	require.Fail(t, "KnownProviders missing ollama")
 }
 
@@ -339,10 +371,13 @@ func withOllamaServeStarter(t *testing.T, starter ollamaServeStarter) {
 
 func unusedLocalOllamaURL(t *testing.T) string {
 	t.Helper()
+
 	ln, err := new(net.ListenConfig).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+
 	addr := ln.Addr().String()
 	require.NoError(t, ln.Close())
+
 	return "http://" + addr
 }
 
@@ -353,10 +388,12 @@ func startOllamaTagsServer(t *testing.T, baseURL string) (*http.Server, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	ln, err := new(net.ListenConfig).Listen(context.Background(), "tcp", parsed.Host)
 	if err != nil {
 		return nil, err
 	}
+
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal(t, "/api/tags", r.URL.Path)
@@ -366,10 +403,12 @@ func startOllamaTagsServer(t *testing.T, baseURL string) (*http.Server, error) {
 		}),
 		ReadHeaderTimeout: time.Second,
 	}
+
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			t.Errorf("serve fake ollama tags: %v", err)
 		}
 	}()
+
 	return srv, nil
 }
