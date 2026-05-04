@@ -130,6 +130,26 @@ func NewRunnerWithLogger(configured map[string][]config.HookConfig, logWriter io
 	return &Runner{hooks: hooks, logger: NewLogger(logWriter)}
 }
 
+// WithLogger returns a runner with the same hooks and a new optional logger.
+func (r *Runner) WithLogger(logWriter io.Writer) *Runner {
+	if r == nil {
+		return NewRunnerWithLogger(nil, logWriter)
+	}
+
+	hooks := make(map[string][]Hook, len(r.hooks))
+	for eventType, configured := range r.hooks {
+		for _, hook := range configured {
+			hooks[eventType] = append(hooks[eventType], Hook{
+				Command: append([]string(nil), hook.Command...),
+				Env:     cloneMap(hook.Env),
+				Timeout: hook.Timeout,
+			})
+		}
+	}
+
+	return &Runner{hooks: hooks, logger: NewLogger(logWriter)}
+}
+
 // Emit sends event to every hook registered for event.Type.
 func (r *Runner) Emit(ctx context.Context, event Event) error {
 	if r == nil || event.Type == "" {
