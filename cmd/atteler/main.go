@@ -128,6 +128,14 @@ type llmResponseMsg struct {
 	tokenUsage tokenUsage
 }
 
+// shellResultMsg is sent when a `!command` finishes executing.
+type shellResultMsg struct {
+	err     error
+	command string
+	stdout  string
+	stderr  string
+}
+
 type tokenUsage struct {
 	InputTokens       int `json:"input_tokens"`
 	CachedInputTokens int `json:"cached_input_tokens"`
@@ -139,6 +147,7 @@ func (u *tokenUsage) addResponse(resp *llm.Response) {
 	if resp == nil {
 		return
 	}
+
 	u.InputTokens += resp.InputTokens
 	u.CachedInputTokens += resp.CachedInputTokens
 	u.OutputTokens += resp.OutputTokens
@@ -164,10 +173,12 @@ type llmRequest struct {
 	hasAgent       bool
 }
 
-// modelsLoadedMsg is sent when model discovery from the API completes.
+// modelsLoadedMsg is sent when one provider's model discovery completes.
 type modelsLoadedMsg struct {
-	err   error
-	items []pickerItem
+	err      error
+	provider string
+	items    []pickerItem
+	fetchID  int
 }
 
 // fzfModelSelectedMsg is sent after the external fzf model picker exits.
@@ -192,17 +203,35 @@ type hookMsg struct {
 	line string // non-empty when the event should be printed by the TUI
 }
 
-// pickerItem represents one selectable entry in the model picker.
+// pickerItem represents one selectable entry in the model picker. An empty
+// reasoning means "do not change the reasoning override"; otherwise the value
+// is one of llm.ReasoningPickerLevels (a mappable level or "default" to clear).
 type pickerItem struct {
-	provider string
-	model    string
+	provider  string
+	model     string
+	reasoning string
 }
 
-func (p pickerItem) label() string {
+// modelID returns the provider-qualified model identifier (no reasoning
+// suffix). This is what gets stored as the active model and routed through the
+// registry.
+func (p pickerItem) modelID() string {
 	if p.provider == "" {
 		return p.model
 	}
+
 	return p.provider + "/" + p.model
+}
+
+// label returns the picker display string, including the reasoning suffix
+// when set so each effort variant has a unique row in the picker.
+func (p pickerItem) label() string {
+	id := p.modelID()
+	if p.reasoning == "" {
+		return id
+	}
+
+	return id + ":" + p.reasoning
 }
 
 type completionCandidate struct {
@@ -243,6 +272,8 @@ type model struct {
 	worktreeInfo        *worktree.Info
 	tokenUsage          tokenUsage
 	pickerCursor        int
+	modelFetchID        int
+	modelFetchesPending int
 	completionCursor    int
 	promptHistoryCursor int
 	maxInputTokens      int
@@ -291,6 +322,7 @@ func initialModel(
 	// the same \r byte for both), so Alt+Enter is the only reliable modifier.
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"))
 	selectedProvider, _ := reg.ProviderForModel(selectedModel)
+
 	return model{
 		ctx:                 nonNilContext(ctx),
 		registry:            reg,
@@ -329,6 +361,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.textarea.SetWidth(msg.Width)
+
 		return m.updateTextarea(msg)
 
 	case modelsLoadedMsg:
@@ -344,13 +377,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.scopePickerOpen {
 			return m.updateModelScopePicker(msg)
 		}
+
 		if m.pickerOpen {
 			return m.updatePicker(msg)
 		}
+
 		return m.updateChat(msg)
 
 	case llmResponseMsg:
 		return m.updateLLMResponse(msg)
+
+	case shellResultMsg:
+		return m.updateShellResult(msg)
 
 	case sessionSavedMsg:
 		return m.updateSessionSaved(msg)
@@ -363,29 +401,62 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateModelsLoaded(msg modelsLoadedMsg) (tea.Model, tea.Cmd) {
-	m.pickerLoading = false
+	if msg.fetchID != m.modelFetchID {
+		return m, nil
+	}
+
+	if msg.provider == "" {
+		m.pickerLoading = false
+
+		m.modelFetchesPending = 0
+		if msg.err != nil {
+			m.pickerOpen = false
+			return m, tea.Println(errStyle.Render("Error loading models: " + msg.err.Error()))
+		}
+
+		if fzfPath, ok := findFZF(); ok {
+			m.pickerOpen = false
+
+			return m, tea.Batch(
+				emitHook(m.ctx, m.hookRunner, events.Event{
+					Type:        events.CommandExecute,
+					SessionID:   m.sessionState.ID,
+					SessionPath: m.sessionPath,
+					Agent:       m.selectedAgent,
+					Model:       m.selectedModel,
+					Metadata: map[string]string{
+						"command": "fzf",
+					},
+				}),
+				runFZFModelPicker(m.ctx, fzfPath, msg.items),
+			)
+		}
+
+		m.pickerItems = msg.items
+		m.pickerCursor = 0
+
+		return m, nil
+	}
+
+	if m.modelFetchesPending > 0 {
+		m.modelFetchesPending--
+	}
+
+	m.pickerLoading = m.modelFetchesPending > 0
 	if msg.err != nil {
-		m.pickerOpen = false
-		return m, tea.Println(errStyle.Render("Error loading models: " + msg.err.Error()))
+		if len(m.pickerItems) == 0 && !m.pickerLoading {
+			m.pickerOpen = false
+			return m, tea.Println(errStyle.Render("Error loading models: " + msg.err.Error()))
+		}
+
+		return m, nil
 	}
-	if fzfPath, ok := findFZF(); ok {
-		m.pickerOpen = false
-		return m, tea.Batch(
-			emitHook(m.ctx, m.hookRunner, events.Event{
-				Type:        events.CommandExecute,
-				SessionID:   m.sessionState.ID,
-				SessionPath: m.sessionPath,
-				Agent:       m.selectedAgent,
-				Model:       m.selectedModel,
-				Metadata: map[string]string{
-					"command": "fzf",
-				},
-			}),
-			runFZFModelPicker(m.ctx, fzfPath, msg.items),
-		)
+
+	m.pickerItems = mergeProviderPickerItems(m.pickerItems, msg.provider, msg.items)
+	if m.pickerCursor >= len(m.pickerItems) {
+		m.pickerCursor = max(0, len(m.pickerItems)-1)
 	}
-	m.pickerItems = msg.items
-	m.pickerCursor = 0
+
 	return m, nil
 }
 
@@ -393,9 +464,11 @@ func (m model) updateFZFModelSelected(msg fzfModelSelectedMsg) (tea.Model, tea.C
 	if msg.err != nil {
 		return m, tea.Println(errStyle.Render("Error selecting model: " + msg.err.Error()))
 	}
+
 	if !msg.selected {
 		return m, nil
 	}
+
 	return m.openModelScopePicker(msg.item)
 }
 
@@ -403,6 +476,7 @@ func (m model) updateModelPreferenceSaved(msg modelPreferenceSavedMsg) (tea.Mode
 	if msg.err != nil {
 		return m, tea.Println(errStyle.Render("Warning: " + msg.err.Error()))
 	}
+
 	return m, nil
 }
 
@@ -410,6 +484,7 @@ func (m model) updateSessionSaved(msg sessionSavedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		return m, tea.Println(errStyle.Render("Warning: " + msg.err.Error()))
 	}
+
 	return m, nil
 }
 
@@ -418,16 +493,20 @@ func (m model) updateHook(msg hookMsg) (tea.Model, tea.Cmd) {
 	if msg.line != "" {
 		cmds = append(cmds, tea.Println(dimStyle.Render(msg.line)))
 	}
+
 	if msg.err != nil {
 		cmds = append(cmds, tea.Println(errStyle.Render("Warning: "+msg.err.Error())))
 	}
+
 	return m, tea.Batch(cmds...)
 }
 
 func (m model) updateTextarea(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
 	if !m.waiting && !m.pickerOpen && !m.scopePickerOpen {
 		var taCmd tea.Cmd
+
 		m.textarea, taCmd = m.textarea.Update(msg)
 		cmds = append(cmds, taCmd)
 	}
@@ -447,7 +526,9 @@ func (m model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !m.waiting {
 		m.completionOpen = false
 		m.completionItems = nil
+
 		var taCmd tea.Cmd
+
 		m.textarea, taCmd = m.textarea.Update(msg)
 		cmds = append(cmds, taCmd)
 		m.promptHistoryCursor = -1
@@ -463,7 +544,9 @@ func (m model) handleChatCommand(keyName string) (tea.Model, tea.Cmd, bool) {
 		if m.waiting {
 			return m, nil, false
 		}
+
 		m.quitting = true
+
 		return m, tea.Quit, true
 	case keyCtrlC:
 		return m.handleCtrlC()
@@ -497,10 +580,14 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd, bool) {
 			m.cancel()
 			m.cancel = nil
 		}
+
 		m.waiting = false
+
 		return m, tea.Println(errStyle.Render("(canceled)")), true
 	}
+
 	m.quitting = true
+
 	return m, tea.Quit, true
 }
 
@@ -508,11 +595,25 @@ func (m model) openModelPicker() (tea.Model, tea.Cmd, bool) {
 	if m.waiting {
 		return m, nil, false
 	}
+
 	m.pickerOpen = true
-	m.pickerLoading = true
-	m.pickerItems = nil
+	m.pickerItems = fallbackModelPickerItems(m.registry)
 	m.pickerCursor = 0
-	return m, loadModels(m.ctx, m.registry), true
+
+	m.modelFetchID++
+	if _, ok := findFZF(); ok {
+		m.pickerLoading = true
+		m.modelFetchesPending = 1
+
+		return m, loadModelsForFZF(m.ctx, m.registry, m.modelFetchID), true
+	}
+
+	providers := m.registry.ListProviders()
+	sort.Strings(providers)
+	m.modelFetchesPending = len(providers)
+	m.pickerLoading = m.modelFetchesPending > 0
+
+	return m, loadModels(m.ctx, m.registry, providers, m.modelFetchID), true
 }
 
 func (m model) acceptCompletion() (tea.Model, tea.Cmd, bool) {
@@ -523,13 +624,17 @@ func (m model) acceptCompletion() (tea.Model, tea.Cmd, bool) {
 		m.completionCursor = 0
 		m.textarea.SetValue(applyCompletionCandidate(m.textarea.Value(), items[0].value))
 		m.textarea.CursorEnd()
+
 		return m, nil, true
 	}
+
 	if suggestion, ok := m.promptSuggestion(); ok {
 		m.textarea.SetValue(applyPromptSuggestion(m.textarea.Value(), suggestion))
 		m.textarea.CursorEnd()
+
 		return m, nil, true
 	}
+
 	return m, nil, false
 }
 
@@ -537,15 +642,19 @@ func (m model) revampPrompt() (tea.Model, tea.Cmd) {
 	if m.waiting {
 		return m, nil
 	}
+
 	current := m.textarea.Value()
+
 	revamped, ok := promptcomplete.Revamp(current, promptcomplete.RevampStyleDetailed)
 	if !ok || revamped == strings.TrimSpace(current) {
 		return m, nil
 	}
+
 	m.revampUndo = current
 	m.revampUndoActive = true
 	m.textarea.SetValue(revamped)
 	m.textarea.CursorEnd()
+
 	return m, tea.Println(dimStyle.Render("(prompt revamped; Ctrl+Z to undo)"))
 }
 
@@ -553,10 +662,12 @@ func (m model) undoPromptRevamp() (tea.Model, tea.Cmd) {
 	if !m.revampUndoActive {
 		return m, nil
 	}
+
 	m.textarea.SetValue(m.revampUndo)
 	m.textarea.CursorEnd()
 	m.revampUndo = ""
 	m.revampUndoActive = false
+
 	return m, tea.Println(dimStyle.Render("(prompt revamp undone)"))
 }
 
@@ -564,6 +675,7 @@ func (m model) navigatePromptHistory(delta int) (model, bool) {
 	if m.waiting || len(m.promptHistory) == 0 {
 		return m, false
 	}
+
 	if delta > 0 {
 		switch {
 		case m.promptHistoryCursor == -1:
@@ -574,14 +686,17 @@ func (m model) navigatePromptHistory(delta int) (model, bool) {
 		default:
 			return m, true
 		}
+
 		m.textarea.SetValue(m.promptHistory[m.promptHistoryCursor])
 		m.textarea.CursorEnd()
+
 		return m, true
 	}
 
 	if m.promptHistoryCursor == -1 {
 		return m, false
 	}
+
 	if m.promptHistoryCursor > 0 {
 		m.promptHistoryCursor--
 		m.textarea.SetValue(m.promptHistory[m.promptHistoryCursor])
@@ -590,7 +705,9 @@ func (m model) navigatePromptHistory(delta int) (model, bool) {
 		m.textarea.SetValue(m.promptHistoryDraft)
 		m.promptHistoryDraft = ""
 	}
+
 	m.textarea.CursorEnd()
+
 	return m, true
 }
 
@@ -599,10 +716,12 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 	if m.waiting {
 		return m, nil
 	}
+
 	input := strings.TrimSpace(m.textarea.Value())
 	if input == "" {
 		return m, nil
 	}
+
 	m.promptHistory = prependPromptHistory(input, m.promptHistory, maxPromptHistoryEntries)
 	m.promptHistoryCursor = -1
 	m.promptHistoryDraft = ""
@@ -610,16 +729,22 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 	m.revampUndo = ""
 	m.textarea.Reset()
 
+	if strings.HasPrefix(input, "!") {
+		return m.runShellCommand(strings.TrimSpace(input[1:]))
+	}
+
 	activeAgent, prompt, err := m.resolveAgent(input)
 	if err != nil {
 		return m, tea.Println(errStyle.Render("Error: " + err.Error()))
 	}
+
 	input = prompt
 
 	nextHistory := append(append([]llm.Message(nil), m.history...), llm.Message{
 		Role:    llm.RoleUser,
 		Content: input,
 	})
+
 	requestMessages, refs, err := expandReferences(nextHistory, m.contextOptions)
 	if err != nil {
 		return m, tea.Println(errStyle.Render("Error: " + err.Error()))
@@ -637,21 +762,26 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 	m.cancel = cancel
 	msgs := make([]llm.Message, len(requestMessages))
 	copy(msgs, requestMessages)
+
 	requestModel, fallbackModels := requestModelAndFallbacks(m.selectedModel, m.modelLocked, m.fallbackModels, activeAgent)
+
 	generation := generationForRequest(m.generationDefaults, m.generationOverrides, activeAgent)
 	if err := validateRequestBudget(m.registry, requestModel, requestMessagesForBudget(requestModel, msgs, activeAgent, generation), m.maxInputTokens); err != nil {
 		m.waiting = false
 		m.cancel = nil
 		cancel()
+
 		return m, tea.Println(errStyle.Render("Error: " + err.Error()))
 	}
 
 	m.history = nextHistory
 	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
+
 	m.sessionState.DefaultAgent = activeAgent.name
 	if m.selectedModel != "" {
 		m.sessionState.DefaultModel = m.selectedModel
 	}
+
 	request := llmRequest{
 		agent:          activeAgent.agent,
 		hasAgent:       activeAgent.ok,
@@ -669,6 +799,7 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 	if len(refs) > 0 {
 		cmds = append(cmds, tea.Println(dimStyle.Render("Context: "+referenceSummary(refs))))
 	}
+
 	for _, ref := range refs {
 		cmds = append(
 			cmds,
@@ -676,9 +807,11 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 			emitContextAdd(m.ctx, m.hookRunner, m.sessionState.ID, m.sessionPath, activeAgent.name, m.sessionState.DefaultModel, ref),
 		)
 	}
+
 	if activeAgent.ok {
 		cmds = append(cmds, emitAgentExecute(m.ctx, m.hookRunner, m.sessionState.ID, m.sessionPath, activeAgent.name, requestModel))
 	}
+
 	cmds = append(cmds,
 		saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner),
 		emitHook(m.ctx, m.hookRunner, events.Event{
@@ -693,7 +826,110 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 		}),
 		callLLM(m.eventContext(ctx, activeAgent.name, requestModel), m.registry, request),
 	)
+
 	return m, tea.Sequence(cmds...)
+}
+
+// runShellCommand executes a `!command` and queues the result for display
+// and inclusion in the chat history (so future LLM calls see it as context).
+func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
+	if command == "" {
+		return m, nil
+	}
+
+	line := userLabel.Render("$") + " " + command
+	m.waiting = true
+	// cancel is stored in m.cancel and invoked from handleCtrlC and
+	// updateShellResult once the command finishes; gosec can't see that.
+	ctx, cancel := context.WithCancel(nonNilContext(m.ctx)) //nolint:gosec // see comment above
+	m.cancel = cancel
+
+	return m, tea.Sequence(
+		tea.Println(line),
+		emitHook(m.ctx, m.hookRunner, events.Event{
+			Type:        events.CommandExecute,
+			SessionID:   m.sessionState.ID,
+			SessionPath: m.sessionPath,
+			Agent:       m.selectedAgent,
+			Model:       m.sessionState.DefaultModel,
+			Metadata: map[string]string{
+				"command": command,
+				"cwd":     m.cwd,
+			},
+		}),
+		runShellCommandCmd(ctx, command, m.cwd),
+	)
+}
+
+func runShellCommandCmd(ctx context.Context, command, dir string) tea.Cmd {
+	return func() tea.Msg {
+		result, err := attshell.RunBash(ctx, attshell.Options{
+			Command: command,
+			Dir:     dir,
+		})
+
+		return shellResultMsg{
+			err:     err,
+			command: command,
+			stdout:  result.Stdout,
+			stderr:  result.Stderr,
+		}
+	}
+}
+
+// updateShellResult appends the executed command and its output to the chat
+// history as a synthetic user message and prints the output.
+func (m model) updateShellResult(msg shellResultMsg) (tea.Model, tea.Cmd) {
+	m.waiting = false
+	m.cancel = nil
+
+	content := formatShellContext(msg)
+	m.history = append(m.history, llm.Message{
+		Role:    llm.RoleUser,
+		Content: content,
+	})
+	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
+
+	cmds := []tea.Cmd{}
+	if msg.stdout != "" {
+		cmds = append(cmds, tea.Println(strings.TrimRight(msg.stdout, "\n")))
+	}
+
+	if msg.stderr != "" {
+		cmds = append(cmds, tea.Println(errStyle.Render(strings.TrimRight(msg.stderr, "\n"))))
+	}
+
+	if msg.err != nil {
+		cmds = append(cmds, tea.Println(errStyle.Render("(command error: "+msg.err.Error()+")")))
+	}
+
+	cmds = append(cmds, saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner))
+
+	return m, tea.Sequence(cmds...)
+}
+
+// formatShellContext renders an executed shell command and its output as a
+// chat-history entry that future LLM calls can use as context.
+func formatShellContext(msg shellResultMsg) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "$ %s\n", msg.command)
+
+	if msg.stdout != "" {
+		b.WriteString(strings.TrimRight(msg.stdout, "\n"))
+		b.WriteString("\n")
+	}
+
+	if msg.stderr != "" {
+		b.WriteString("[stderr]\n")
+		b.WriteString(strings.TrimRight(msg.stderr, "\n"))
+		b.WriteString("\n")
+	}
+
+	if msg.err != nil {
+		fmt.Fprintf(&b, "[error] %s\n", msg.err.Error())
+	}
+
+	return strings.TrimRight(b.String(), "\n")
 }
 
 type agentSelection struct {
@@ -718,6 +954,7 @@ func (m model) eventContext(ctx context.Context, agentName, modelName string) co
 // updateLLMResponse handles the message received when an LLM call completes.
 func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 	m.waiting = false
+
 	m.cancel = nil
 	if msg.err != nil {
 		return m, tea.Batch(
@@ -738,6 +975,7 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 		Role:    llm.RoleAssistant,
 		Content: msg.content,
 	})
+
 	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
 	if msg.model != "" {
 		m.sessionState.DefaultModel = msg.model
@@ -745,8 +983,10 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 			m.sessionState.DefaultModel = m.selectedModel
 		}
 	}
+
 	header := assistantLabel.Render("Assistant") + " " +
 		dimStyle.Render("("+msg.model+")")
+
 	return m, tea.Batch(
 		tea.Println(header+"\n"+msg.content),
 		saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner),
@@ -764,18 +1004,12 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 
 // updatePicker handles key events while the model picker is open.
 func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.pickerLoading {
-		// Only allow escape while loading.
-		if msg.String() == keyEsc || msg.String() == keyCtrlC {
-			m.pickerOpen = false
-			m.pickerLoading = false
-		}
-		return m, nil
-	}
-
 	switch msg.String() {
 	case keyEsc, keyCtrlC, "ctrl+o":
 		m.pickerOpen = false
+		m.pickerLoading = false
+		m.modelFetchesPending = 0
+
 		return m, nil
 
 	case "up", "k":
@@ -792,6 +1026,7 @@ func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.pickerItems) > 0 {
 			item := m.pickerItems[m.pickerCursor]
 			m.pickerOpen = false
+
 			return m.openModelScopePicker(item)
 		}
 	}
@@ -802,6 +1037,7 @@ func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) openModelScopePicker(item pickerItem) (tea.Model, tea.Cmd) {
 	m.pendingModel = item
 	m.scopePickerOpen = true
+
 	return m, nil
 }
 
@@ -810,6 +1046,7 @@ func (m model) updateModelScopePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keyEsc, keyCtrlC:
 		m.scopePickerOpen = false
 		m.pendingModel = pickerItem{}
+
 		return m, nil
 	case "1", "s", keyEnter:
 		return m.selectModel(m.pendingModel, appconfig.ModelScopeSession)
@@ -818,6 +1055,7 @@ func (m model) updateModelScopePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "3", "g":
 		return m.selectModel(m.pendingModel, appconfig.ModelScopeGlobal)
 	}
+
 	return m, nil
 }
 
@@ -825,20 +1063,37 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 	m.scopePickerOpen = false
 	m.pendingModel = pickerItem{}
 	m.selectedProvider = item.provider
-	m.selectedModel = item.label()
+	m.selectedModel = item.modelID()
 	m.fallbackModels = nil
 	m.modelLocked = true
 	m.sessionState.DefaultModel = m.selectedModel
+
+	switch item.reasoning {
+	case "":
+		// No reasoning information attached — leave the override unchanged.
+	case llm.ReasoningLevelDefault:
+		m.generationOverrides.ReasoningLevel = ""
+	default:
+		m.generationOverrides.ReasoningLevel = item.reasoning
+	}
+
+	suffix := ""
+	if item.reasoning != "" {
+		suffix = dimStyle.Render(":") + pickerSelectedStyle.Render(item.reasoning)
+	}
+
 	cmds := []tea.Cmd{tea.Println(
 		dimStyle.Render("Model set to ") +
 			pickerProviderStyle.Render(item.provider) +
 			dimStyle.Render("/") +
 			pickerSelectedStyle.Render(item.model) +
+			suffix +
 			dimStyle.Render(" ("+modelScopeLabel(scope)+")"),
 	)}
 	if scope != appconfig.ModelScopeSession {
 		cmds = append(cmds, saveModelPreference(m.ctx, m.stateStore, m.cwd, m.selectedModel, scope, m.hookRunner))
 	}
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -862,6 +1117,7 @@ func (m model) View() string {
 	if m.pickerOpen {
 		return m.viewPicker()
 	}
+
 	if m.scopePickerOpen {
 		return m.viewModelScopePicker()
 	}
@@ -870,24 +1126,32 @@ func (m model) View() string {
 		return statusStyle.Render("  Thinking... (Ctrl+C to cancel)")
 	}
 
-	var status string
-	var parts []string
+	var (
+		status string
+		parts  []string
+	)
+
 	if m.selectedAgent != "" {
 		parts = append(parts, "agent:"+m.selectedAgent)
 	}
+
 	if m.selectedModel != "" {
 		label := m.selectedModel
 		if m.selectedProvider != "" && !strings.Contains(label, "/") {
 			label = m.selectedProvider + "/" + label
 		}
+
 		parts = append(parts, "model:"+label)
 	}
+
 	if ctx := m.contextUsage(); ctx != "" {
 		parts = append(parts, ctx)
 	}
+
 	if len(parts) > 0 {
 		status = dimStyle.Render("  [") + pickerSelectedStyle.Render(strings.Join(parts, " ")) + dimStyle.Render("]")
 	}
+
 	if m.completionOpen && len(m.completionItems) > 0 {
 		status += "\n" + m.viewCompletions()
 	}
@@ -907,11 +1171,14 @@ func (m model) viewCompletions() string {
 		if item.kind != "" {
 			label = item.kind + ":" + label
 		}
+
 		if i == m.completionCursor {
 			label = pickerSelectedStyle.Render(label)
 		}
+
 		parts = append(parts, label)
 	}
+
 	return dimStyle.Render("  completions: ") + strings.Join(parts, dimStyle.Render("  "))
 }
 
@@ -923,12 +1190,11 @@ func (m model) viewPicker() string {
 		dimStyle.Render("  (j/k to move, Enter to select, Esc to cancel)") + "\n\n")
 
 	if m.pickerLoading {
-		b.WriteString(statusStyle.Render("  Loading models from API..."))
-		return b.String()
+		b.WriteString(statusStyle.Render("  Refreshing models from providers...") + "\n\n")
 	}
 
 	if len(m.pickerItems) == 0 {
-		b.WriteString(errStyle.Render("  No models available. Check your API keys."))
+		b.WriteString(errStyle.Render("  No models available yet. Check your API keys."))
 		return b.String()
 	}
 
@@ -939,17 +1205,25 @@ func (m model) viewPicker() string {
 			if currentProvider != "" {
 				b.WriteString("\n")
 			}
+
 			currentProvider = item.provider
 			b.WriteString("  " + pickerProviderStyle.Render(item.provider) + "\n")
 		}
 
 		cursor := "    "
 		style := pickerNormalStyle
+
 		if i == m.pickerCursor {
 			cursor = "  > "
 			style = pickerSelectedStyle
 		}
-		b.WriteString(cursor + style.Render(item.model) + "\n")
+
+		row := item.model
+		if item.reasoning != "" {
+			row += ":" + item.reasoning
+		}
+
+		b.WriteString(cursor + style.Render(row) + "\n")
 	}
 
 	return b.String()
@@ -963,6 +1237,7 @@ func (m model) viewModelScopePicker() string {
 	b.WriteString(pickerNormalStyle.Render("  2 / f      This folder") + "\n")
 	b.WriteString(pickerNormalStyle.Render("  3 / g      Globally") + "\n\n")
 	b.WriteString(dimStyle.Render("  Esc cancels model selection"))
+
 	return b.String()
 }
 
@@ -973,14 +1248,18 @@ func (m model) contextUsage() string {
 	if m.selectedModel == "" {
 		return ""
 	}
+
 	limit := m.registry.ContextWindow(m.selectedModel)
+
 	used := llm.EstimateTokens(m.history)
 	if limit > 0 {
 		return "ctx:" + formatTokenCount(used) + "/" + formatTokenCount(limit)
 	}
+
 	if used > 0 {
 		return "ctx:~" + formatTokenCount(used)
 	}
+
 	return ""
 }
 
@@ -989,10 +1268,12 @@ func (m model) promptSuggestion() (promptcomplete.Suggestion, bool) {
 	if strings.TrimSpace(value) == "" {
 		return promptcomplete.Suggestion{}, false
 	}
+
 	cursor := textareaCursorOffset(m.textarea)
 	if cursor != len(value) {
 		return promptcomplete.Suggestion{}, false
 	}
+
 	suggestion, ok := promptcomplete.Suggest(promptcomplete.Context{
 		Input:     value,
 		Cursor:    cursor,
@@ -1003,16 +1284,19 @@ func (m model) promptSuggestion() (promptcomplete.Suggestion, bool) {
 	if !ok || suggestion.Suffix == "" {
 		return promptcomplete.Suggestion{}, false
 	}
+
 	return suggestion, true
 }
 
 func textareaCursorOffset(input textarea.Model) int {
 	value := input.Value()
 	lines := strings.Split(value, "\n")
+
 	line := input.Line()
 	if line < 0 {
 		return 0
 	}
+
 	if line >= len(lines) {
 		return len(value)
 	}
@@ -1021,9 +1305,11 @@ func textareaCursorOffset(input textarea.Model) int {
 	for i := range line {
 		offset += len(lines[i]) + 1
 	}
+
 	info := input.LineInfo()
 	column := info.StartColumn + info.ColumnOffset
 	column = min(column, len(lines[line]))
+
 	return offset + column
 }
 
@@ -1035,12 +1321,14 @@ func formatTokenCount(n int) string {
 	case n >= 1_000_000:
 		f := float64(n) / 1_000_000
 		s := strconv.FormatFloat(f, 'f', 1, 64)
+
 		return s + "M"
 	case n >= 1_000:
 		f := float64(n) / 1_000
 		s := strconv.FormatFloat(f, 'f', 1, 64)
 		// Drop ".0" for clean whole numbers like "128k" instead of "128.0k".
 		s = strings.TrimSuffix(s, ".0")
+
 		return s + "k"
 	default:
 		return strconv.Itoa(n)
@@ -1057,6 +1345,7 @@ func formatTokenUsageSummary(usage tokenUsage) string {
 	if usage.Responses > 0 {
 		parts = append(parts, "responses="+strconv.Itoa(usage.Responses))
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -1064,6 +1353,7 @@ func printTokenUsageSummary(w io.Writer, usage tokenUsage) {
 	if usage.InputTokens == 0 && usage.CachedInputTokens == 0 && usage.OutputTokens == 0 {
 		return
 	}
+
 	fmt.Fprintln(w, formatTokenUsageSummary(usage))
 }
 
@@ -1071,30 +1361,122 @@ func printTokenUsageSummary(w io.Writer, usage tokenUsage) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// loadModels fetches the model list from all registered providers.
-func loadModels(ctx context.Context, reg *llm.Registry) tea.Cmd {
+// loadModels starts one background fetch per provider so the picker can update
+// incrementally as live model catalogs return.
+func loadModels(ctx context.Context, reg *llm.Registry, providers []string, fetchID int) tea.Cmd {
 	ctx = nonNilContext(ctx)
+
+	cmds := make([]tea.Cmd, 0, len(providers))
+	for _, provider := range providers {
+		cmds = append(cmds, func() tea.Msg {
+			models, err := reg.ProviderModels(ctx, provider)
+			if err != nil {
+				return modelsLoadedMsg{provider: provider, fetchID: fetchID, err: err}
+			}
+
+			items := pickerItemsForProvider(provider, models)
+			if len(items) == 0 {
+				return modelsLoadedMsg{provider: provider, fetchID: fetchID, err: fmt.Errorf("no models available from %s", provider)}
+			}
+
+			return modelsLoadedMsg{provider: provider, fetchID: fetchID, items: items}
+		})
+	}
+
+	return tea.Batch(cmds...)
+}
+
+func loadModelsForFZF(ctx context.Context, reg *llm.Registry, fetchID int) tea.Cmd {
+	ctx = nonNilContext(ctx)
+
 	return func() tea.Msg {
 		providers := reg.ListProviders()
 		sort.Strings(providers)
 
 		var items []pickerItem
-		for _, pName := range providers {
-			models, err := reg.ProviderModels(ctx, pName)
+
+		for _, provider := range providers {
+			models, err := reg.ProviderModels(ctx, provider)
 			if err != nil {
 				continue
 			}
-			sort.Strings(models)
-			for _, m := range models {
-				items = append(items, pickerItem{provider: pName, model: m})
-			}
+
+			items = append(items, pickerItemsForProvider(provider, models)...)
 		}
 
 		if len(items) == 0 {
-			return modelsLoadedMsg{err: errors.New("no models available from any provider")}
+			return modelsLoadedMsg{fetchID: fetchID, err: errors.New("no models available from any provider")}
 		}
-		return modelsLoadedMsg{items: items}
+
+		return modelsLoadedMsg{fetchID: fetchID, items: sortPickerItems(items)}
 	}
+}
+
+func fallbackModelPickerItems(reg *llm.Registry) []pickerItem {
+	providers := reg.ListProviders()
+	sort.Strings(providers)
+
+	items := make([]pickerItem, 0)
+
+	for _, providerName := range providers {
+		provider, ok := reg.Provider(providerName)
+		if !ok {
+			continue
+		}
+
+		items = append(items, pickerItemsForProvider(providerName, provider.Models())...)
+	}
+
+	return sortPickerItems(items)
+}
+
+func pickerItemsForProvider(provider string, models []string) []pickerItem {
+	models = append([]string(nil), models...)
+	sort.Strings(models)
+
+	levels := llm.ReasoningPickerLevels()
+
+	items := make([]pickerItem, 0, len(models)*len(levels))
+	for _, modelName := range models {
+		if modelName == "" {
+			continue
+		}
+
+		for _, level := range levels {
+			items = append(items, pickerItem{provider: provider, model: modelName, reasoning: level})
+		}
+	}
+
+	return items
+}
+
+func mergeProviderPickerItems(items []pickerItem, provider string, providerItems []pickerItem) []pickerItem {
+	merged := make([]pickerItem, 0, len(items)+len(providerItems))
+	for _, item := range items {
+		if item.provider != provider {
+			merged = append(merged, item)
+		}
+	}
+
+	merged = append(merged, providerItems...)
+
+	return sortPickerItems(merged)
+}
+
+func sortPickerItems(items []pickerItem) []pickerItem {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].provider != items[j].provider {
+			return items[i].provider < items[j].provider
+		}
+
+		if items[i].model != items[j].model {
+			return items[i].model < items[j].model
+		}
+
+		return llm.ReasoningEffortRank(items[i].reasoning) < llm.ReasoningEffortRank(items[j].reasoning)
+	})
+
+	return items
 }
 
 var execLookPath = exec.LookPath
@@ -1104,11 +1486,13 @@ func findFZF() (string, bool) {
 	if err != nil {
 		return "", false
 	}
+
 	return path, true
 }
 
 func runFZFModelPicker(ctx context.Context, fzfPath string, items []pickerItem) tea.Cmd {
 	var stdout bytes.Buffer
+
 	input := fzfInput(items)
 	ctx = nonNilContext(ctx)
 	cmd := exec.CommandContext(
@@ -1127,9 +1511,11 @@ func runFZFModelPicker(ctx context.Context, fzfPath string, items []pickerItem) 
 		if item, ok := parseFZFSelection(stdout.String(), items); ok {
 			return fzfModelSelectedMsg{item: item, selected: true}
 		}
+
 		if err != nil {
 			return fzfModelSelectedMsg{}
 		}
+
 		return fzfModelSelectedMsg{}
 	})
 }
@@ -1142,8 +1528,11 @@ func fzfInput(items []pickerItem) string {
 		b.WriteString(item.provider)
 		b.WriteString("\t")
 		b.WriteString(item.model)
+		b.WriteString("\t")
+		b.WriteString(item.reasoning)
 		b.WriteString("\n")
 	}
+
 	return b.String()
 }
 
@@ -1152,12 +1541,14 @@ func parseFZFSelection(selection string, items []pickerItem) (pickerItem, bool) 
 	if selection == "" {
 		return pickerItem{}, false
 	}
+
 	label, _, _ := strings.Cut(selection, "\t")
 	for _, item := range items {
 		if item.label() == label {
 			return item, true
 		}
 	}
+
 	return pickerItem{}, false
 }
 
@@ -1166,11 +1557,13 @@ func completionCandidates(input string, agents *agent.Registry, root string, lim
 	if !ok {
 		return nil, false
 	}
+
 	if limit <= 0 {
 		limit = 8
 	}
 
 	var out []completionCandidate
+
 	prefixLower := strings.ToLower(prefix)
 	if !strings.ContainsAny(prefix, `/\.`) {
 		for _, name := range agents.List() {
@@ -1189,6 +1582,7 @@ func completionCandidates(input string, agents *agent.Registry, root string, lim
 
 	fileCandidates := pathCompletionCandidates(root, prefix, limit-len(out))
 	out = append(out, fileCandidates...)
+
 	return out, true
 }
 
@@ -1196,19 +1590,24 @@ func activeAtToken(input string) (start int, prefix string, ok bool) {
 	if input == "" {
 		return 0, "", false
 	}
+
 	end := len(input)
+
 	start = end
 	for start > 0 {
 		r, size := lastRune(input[:start])
 		if r == 0 || r == '\n' || r == '\t' || r == ' ' {
 			break
 		}
+
 		start -= size
 	}
+
 	token := input[start:end]
 	if !strings.HasPrefix(token, "@") {
 		return 0, "", false
 	}
+
 	return start, strings.TrimPrefix(token, "@"), true
 }
 
@@ -1216,11 +1615,14 @@ func lastRune(value string) (r rune, size int) {
 	if value == "" {
 		return 0, 0
 	}
+
 	r = rune(value[len(value)-1])
 	if r < utf8.RuneSelf {
 		return r, 1
 	}
+
 	r, size = utf8.DecodeLastRuneInString(value)
+
 	return r, size
 }
 
@@ -1228,8 +1630,10 @@ func pathCompletionCandidates(root, prefix string, limit int) []completionCandid
 	if limit <= 0 || filepath.IsAbs(prefix) {
 		return nil
 	}
+
 	if root == "" {
 		var err error
+
 		root, err = os.Getwd()
 		if err != nil {
 			return nil
@@ -1237,6 +1641,7 @@ func pathCompletionCandidates(root, prefix string, limit int) []completionCandid
 	}
 
 	dirPart, base := pathCompletionParts(prefix)
+
 	dir := filepath.Join(root, dirPart)
 	if !pathInsideRoot(root, dir) {
 		return nil
@@ -1246,6 +1651,7 @@ func pathCompletionCandidates(root, prefix string, limit int) []completionCandid
 	if err != nil {
 		return nil
 	}
+
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
 	out := make([]completionCandidate, 0, min(limit, len(entries)))
@@ -1254,17 +1660,21 @@ func pathCompletionCandidates(root, prefix string, limit int) []completionCandid
 		if strings.HasPrefix(name, ".") && !strings.HasPrefix(base, ".") {
 			continue
 		}
+
 		if base != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base)) {
 			continue
 		}
+
 		rel := name
 		if dirPart != "." {
 			rel = filepath.Join(dirPart, name)
 		}
+
 		value := "@" + filepath.ToSlash(rel)
 		if entry.IsDir() {
 			value += "/"
 		}
+
 		out = append(out, completionCandidate{
 			kind:  "path",
 			label: value,
@@ -1274,6 +1684,7 @@ func pathCompletionCandidates(root, prefix string, limit int) []completionCandid
 			break
 		}
 	}
+
 	return out
 }
 
@@ -1282,11 +1693,14 @@ func pathCompletionParts(prefix string) (dirPart, base string) {
 	if cleanPrefix == "." {
 		cleanPrefix = ""
 	}
+
 	dirPart = filepath.Dir(cleanPrefix)
+
 	base = filepath.Base(cleanPrefix)
 	if prefix == "" || !strings.ContainsAny(prefix, `/\`) {
 		return ".", cleanPrefix
 	}
+
 	return dirPart, base
 }
 
@@ -1295,14 +1709,17 @@ func pathInsideRoot(root, path string) bool {
 	if err != nil {
 		return false
 	}
+
 	pathAbs, err := filepath.Abs(path)
 	if err != nil {
 		return false
 	}
+
 	rel, err := filepath.Rel(rootAbs, pathAbs)
 	if err != nil {
 		return false
 	}
+
 	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." && !filepath.IsAbs(rel))
 }
 
@@ -1311,6 +1728,7 @@ func applyCompletionCandidate(input, value string) string {
 	if !ok {
 		return input
 	}
+
 	return input[:start] + value
 }
 
@@ -1320,6 +1738,7 @@ func applyPromptSuggestion(input string, suggestion promptcomplete.Suggestion) s
 		suggestion.ReplacementEnd > len(input) {
 		return input + suggestion.Suffix
 	}
+
 	return input[:suggestion.ReplacementStart] + suggestion.Text + input[suggestion.ReplacementEnd:]
 }
 
@@ -1327,7 +1746,9 @@ func promptHistoryFromStore(store *session.Store, current session.Session, limit
 	if limit <= 0 {
 		return nil
 	}
+
 	seen := make(map[string]bool)
+
 	out := appendUserPromptsNewestFirst(nil, seen, current.Messages, limit)
 	if len(out) >= limit || store == nil {
 		return out
@@ -1337,20 +1758,24 @@ func promptHistoryFromStore(store *session.Store, current session.Session, limit
 	if err != nil {
 		return out
 	}
+
 	for i := range summaries {
 		summary := &summaries[i]
 		if summary.ID == current.ID {
 			continue
 		}
+
 		saved, err := store.Load(summary.ID)
 		if err != nil {
 			continue
 		}
+
 		out = appendUserPromptsNewestFirst(out, seen, saved.Messages, limit)
 		if len(out) >= limit {
 			break
 		}
 	}
+
 	return out
 }
 
@@ -1359,14 +1784,19 @@ func appendUserPromptsNewestFirst(out []string, seen map[string]bool, messages [
 		if messages[i].Role != llm.RoleUser {
 			continue
 		}
+
 		prompt := strings.TrimSpace(messages[i].Content)
+
 		promptKey := normalizePromptHistoryKey(prompt)
 		if promptKey == "" || seen[promptKey] {
 			continue
 		}
+
 		seen[promptKey] = true
+
 		out = append(out, prompt)
 	}
+
 	return out
 }
 
@@ -1374,22 +1804,27 @@ func prependPromptHistory(prompt string, history []string, limit int) []string {
 	if limit <= 0 {
 		return nil
 	}
+
 	prompt = strings.TrimSpace(prompt)
+
 	promptKey := normalizePromptHistoryKey(prompt)
 	if promptKey == "" {
 		return append([]string(nil), history...)
 	}
 
 	out := []string{prompt}
+
 	for _, item := range history {
 		if normalizePromptHistoryKey(item) == promptKey {
 			continue
 		}
+
 		out = append(out, item)
 		if len(out) >= limit {
 			break
 		}
 	}
+
 	return out
 }
 
@@ -1409,7 +1844,9 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 		if request.hasAgent {
 			params = request.agent.CompleteParams(request.model, request.messages)
 		}
+
 		applyGenerationParams(&params, request.generation)
+
 		if err := validateRequestBudget(reg, params.Model, params.Messages, request.maxInputTokens); err != nil {
 			return llmResponseMsg{err: err}
 		}
@@ -1418,8 +1855,10 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 		if err != nil {
 			return llmResponseMsg{err: err}
 		}
+
 		var usage tokenUsage
 		usage.addResponse(resp)
+
 		return llmResponseMsg{
 			content:    resp.Content,
 			model:      resp.Model,
@@ -1441,7 +1880,9 @@ func requestMessagesForBudget(
 	if activeAgent.ok {
 		params = activeAgent.agent.CompleteParams(modelName, messages)
 	}
+
 	applyGenerationParams(&params, generation)
+
 	return params.Messages
 }
 
@@ -1450,12 +1891,15 @@ func validateRequestBudget(reg *llm.Registry, modelName string, messages []llm.M
 	if maxInputTokens > 0 && used > maxInputTokens {
 		return fmt.Errorf("estimated input tokens %s exceed configured max_input_tokens %s", formatTokenCount(used), formatTokenCount(maxInputTokens))
 	}
+
 	if reg == nil || modelName == "" {
 		return nil
 	}
+
 	if limit := reg.ContextWindow(modelName); limit > 0 && used > limit {
 		return fmt.Errorf("estimated input tokens %s exceed %s context window %s", formatTokenCount(used), modelName, formatTokenCount(limit))
 	}
+
 	return nil
 }
 
@@ -1474,7 +1918,9 @@ func expandReferences(messages []llm.Message, opts contextref.Options) ([]llm.Me
 		if err != nil {
 			return nil, nil, fmt.Errorf("expand context references: %w", err)
 		}
+
 		out[i].Content = result.Prompt
+
 		return out, result.References, nil
 	}
 
@@ -1488,13 +1934,16 @@ func referenceSummary(refs []contextref.Reference) string {
 		if ref.Kind != "" && ref.Kind != "file" {
 			path = ref.Kind + ":" + path
 		}
+
 		label := fmt.Sprintf("%s (%d bytes", path, ref.Bytes)
 		if ref.Truncated {
 			label += ", truncated"
 		}
+
 		label += ")"
 		parts = append(parts, label)
 	}
+
 	return strings.Join(parts, ", ")
 }
 
@@ -1510,13 +1959,16 @@ func referenceMetadata(refs []contextref.Reference) map[string]string {
 
 func saveSession(ctx context.Context, store *session.Store, sessionState session.Session, runner *events.Runner) tea.Cmd {
 	ctx = nonNilContext(ctx)
+
 	return func() tea.Msg {
 		if store == nil || sessionState.ID == "" {
 			return sessionSavedMsg{}
 		}
+
 		if err := store.Save(sessionState); err != nil {
 			return sessionSavedMsg{err: err}
 		}
+
 		emitHookWarning(ctx, runner, events.Event{
 			Type:        events.FileWrite,
 			SessionID:   sessionState.ID,
@@ -1528,6 +1980,7 @@ func saveSession(ctx context.Context, store *session.Store, sessionState session
 				"kind": "session",
 			},
 		})
+
 		return sessionSavedMsg{}
 	}
 }
@@ -1541,18 +1994,23 @@ func saveModelPreference(
 	runner *events.Runner,
 ) tea.Cmd {
 	ctx = nonNilContext(ctx)
+
 	return func() tea.Msg {
 		if store == nil {
 			return modelPreferenceSavedMsg{scope: scope}
 		}
+
 		state, err := store.Load()
 		if err != nil {
 			return modelPreferenceSavedMsg{err: err, scope: scope}
 		}
+
 		state.SetModel(scope, cwd, model)
+
 		if err := store.Save(state); err != nil {
 			return modelPreferenceSavedMsg{err: err, scope: scope}
 		}
+
 		emitHookWarning(ctx, runner, events.Event{
 			Type: events.FileWrite,
 			Metadata: map[string]string{
@@ -1560,6 +2018,7 @@ func saveModelPreference(
 				"kind": "state",
 			},
 		})
+
 		return modelPreferenceSavedMsg{scope: scope}
 	}
 }
@@ -1656,11 +2115,14 @@ func emitAgentExecute(ctx context.Context, runner *events.Runner, sessionID, ses
 
 func emitHook(ctx context.Context, runner *events.Runner, event events.Event) tea.Cmd {
 	ctx = nonNilContext(ctx)
+
 	return func() tea.Msg {
 		if runner == nil {
 			return hookMsg{}
 		}
+
 		line := events.FormatLine(event)
+
 		return hookMsg{err: runner.Emit(ctx, event), line: line}
 	}
 }
@@ -1669,6 +2131,7 @@ func emitHookWarning(ctx context.Context, runner *events.Runner, event events.Ev
 	if runner == nil {
 		return
 	}
+
 	if err := runner.Emit(ctx, event); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
@@ -1692,14 +2155,18 @@ func (f *floatFlag) Set(raw string) error {
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", f.name, err)
 	}
+
 	if value < f.min {
 		return fmt.Errorf("%s must be >= %g", f.name, f.min)
 	}
+
 	if f.hasMax && value > f.max {
 		return fmt.Errorf("%s must be <= %g", f.name, f.max)
 	}
+
 	f.value = value
 	f.set = true
+
 	return nil
 }
 
@@ -1707,6 +2174,7 @@ func (f *floatFlag) String() string {
 	if f == nil || !f.set {
 		return ""
 	}
+
 	return strconv.FormatFloat(f.value, 'f', -1, 64)
 }
 
@@ -1721,11 +2189,14 @@ func (f *positiveIntFlag) Set(raw string) error {
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", f.name, err)
 	}
+
 	if value <= 0 {
 		return fmt.Errorf("%s must be > 0", f.name)
 	}
+
 	f.value = value
 	f.set = true
+
 	return nil
 }
 
@@ -1733,6 +2204,7 @@ func (f *positiveIntFlag) String() string {
 	if f == nil || !f.set {
 		return ""
 	}
+
 	return strconv.Itoa(f.value)
 }
 
@@ -1747,11 +2219,14 @@ func (f *nonNegativeIntFlag) Set(raw string) error {
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", f.name, err)
 	}
+
 	if value < 0 {
 		return fmt.Errorf("%s must be >= 0", f.name)
 	}
+
 	f.value = value
 	f.set = true
+
 	return nil
 }
 
@@ -1759,6 +2234,7 @@ func (f *nonNegativeIntFlag) String() string {
 	if f == nil || !f.set {
 		return ""
 	}
+
 	return strconv.Itoa(f.value)
 }
 
@@ -1771,6 +2247,7 @@ func (f *stringListFlag) Set(raw string) error {
 			*f = append(*f, value)
 		}
 	}
+
 	return nil
 }
 
@@ -1778,6 +2255,7 @@ func (f *stringListFlag) String() string {
 	if f == nil {
 		return ""
 	}
+
 	return strings.Join(*f, ",")
 }
 
@@ -1788,6 +2266,7 @@ func (f *rawStringListFlag) Set(raw string) error {
 	if raw != "" {
 		*f = append(*f, raw)
 	}
+
 	return nil
 }
 
@@ -1795,6 +2274,7 @@ func (f *rawStringListFlag) String() string {
 	if f == nil {
 		return ""
 	}
+
 	return strings.Join(*f, ",")
 }
 
@@ -2045,6 +2525,7 @@ type appState struct {
 
 func parseOptions() cliOptions {
 	var opts cliOptions
+
 	opts.temperature = floatFlag{name: "temperature", min: 0}
 	opts.topP = floatFlag{name: "top-p", min: 0, max: 1, hasMax: true}
 	opts.routeBudget = floatFlag{name: "route-budget", min: 0}
@@ -2330,6 +2811,7 @@ func applyDebugBool(getenv func(string) string, name string, target *bool) {
 	if target == nil || *target {
 		return
 	}
+
 	switch strings.ToLower(strings.TrimSpace(getenv(name))) {
 	case "1", "true", "yes", "on":
 		*target = true
@@ -2340,6 +2822,7 @@ func applyDebugString(getenv func(string) string, name string, target *string) {
 	if target == nil || strings.TrimSpace(*target) != "" {
 		return
 	}
+
 	if value := strings.TrimSpace(getenv(name)); value != "" {
 		*target = value
 	}
@@ -2349,6 +2832,7 @@ func applyDebugRawStringList(getenv func(string) string, name string, target *ra
 	if target == nil || len(*target) > 0 {
 		return
 	}
+
 	if value := strings.TrimSpace(getenv(name)); value != "" {
 		*target = append(*target, value)
 	}
@@ -2358,10 +2842,12 @@ func applyDebugPositiveInt(getenv func(string) string, name string, target *posi
 	if target == nil || target.set {
 		return
 	}
+
 	value := strings.TrimSpace(getenv(name))
 	if value == "" {
 		return
 	}
+
 	if err := target.Set(value); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: ignoring "+name+": "+err.Error())
 	}
@@ -2382,6 +2868,7 @@ func nonNilContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		return rootContext()
 	}
+
 	return ctx
 }
 
@@ -2407,17 +2894,21 @@ func initConfig(path string) error {
 		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("config %s already exists", path)
 		}
+
 		return fmt.Errorf("create config %s: %w", path, err)
 	}
+
 	if _, err := file.WriteString(appconfig.TemplateYAML()); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
+
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close config %s: %w", path, err)
 	}
 
 	fmt.Println("Wrote " + path)
+
 	return nil
 }
 
@@ -2427,11 +2918,14 @@ func oneShotPrompt(prompt string, readStdin bool) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read stdin: %w", err)
 		}
+
 		prompt = appendStdinContext(prompt, string(data))
 	}
+
 	if strings.TrimSpace(prompt) == "" {
 		return "", errors.New("one-shot prompt is empty")
 	}
+
 	return prompt, nil
 }
 
@@ -2440,6 +2934,7 @@ func normalizeOutputFormat(format string) (string, error) {
 	if format == "" {
 		return outputFormatText, nil
 	}
+
 	switch format {
 	case outputFormatText, outputFormatJSON:
 		return format, nil
@@ -2453,9 +2948,11 @@ func appendStdinContext(prompt, stdin string) string {
 	if strings.TrimSpace(stdin) == "" {
 		return prompt
 	}
+
 	if strings.TrimSpace(prompt) == "" {
 		return stdin
 	}
+
 	return prompt + "\n\n<stdin>\n" + stdin + "\n</stdin>"
 }
 
@@ -2470,11 +2967,14 @@ func validateConfig() error {
 	if err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
+
 	if len(loaded) == 0 {
 		fmt.Println("Config valid: no config files loaded.")
 		return nil
 	}
+
 	fmt.Println("Config valid: " + strings.Join(loaded, ", "))
+
 	return nil
 }
 
@@ -2484,11 +2984,14 @@ func configPathStatus(path string) string {
 		if errors.Is(err, os.ErrNotExist) {
 			return "missing"
 		}
+
 		return "error: " + err.Error()
 	}
+
 	if info.IsDir() {
 		return "directory"
 	}
+
 	return "present"
 }
 
@@ -2501,6 +3004,7 @@ func listKnownProviders() {
 func listKnownModels() {
 	for _, provider := range knownProvidersSorted() {
 		sort.Strings(provider.Models)
+
 		for _, model := range provider.Models {
 			fmt.Println(provider.Name + "/" + model)
 		}
@@ -2512,52 +3016,65 @@ func knownProvidersSorted() []llm.ProviderInfo {
 	sort.Slice(providers, func(i, j int) bool {
 		return providers[i].Name < providers[j].Name
 	})
+
 	return providers
 }
 
 func run(ctx context.Context) error {
 	ctx = nonNilContext(ctx)
+
 	opts := parseOptions()
 	if opts.configPaths != "" {
 		if err := os.Setenv(appconfig.EnvPath, opts.configPaths); err != nil {
 			fmt.Fprintln(os.Stderr, "warning: cannot set config path override: "+err.Error())
 		}
 	}
+
 	if opts.printConfigTemplate {
 		fmt.Print(appconfig.TemplateYAML())
 		return nil
 	}
+
 	if opts.showVersion {
 		fmt.Println(versionString())
 		return nil
 	}
+
 	if opts.initConfigPath != "" {
 		return initConfig(opts.initConfigPath)
 	}
+
 	if opts.listConfigPaths {
 		listConfigPaths()
 		return nil
 	}
+
 	if opts.validateConfig {
 		return validateConfig()
 	}
+
 	if opts.doctorOffline {
 		return doctorOffline(opts)
 	}
+
 	if opts.listProviders {
 		listKnownProviders()
 		return nil
 	}
+
 	if opts.listKnownModels {
 		listKnownModels()
 		return nil
 	}
+
 	if opts.listWorktrees {
 		return listWorktrees(ctx)
 	}
+
 	if opts.mergeWorktreeRef != "" {
 		return mergeWorktreeBySession(ctx, opts.mergeWorktreeRef)
 	}
+
 	if handled, err := runProviderlessCommand(ctx, opts); handled {
 		return err
 	}
@@ -2577,9 +3094,11 @@ func runProviderlessCommand(ctx context.Context, opts cliOptions) (bool, error) 
 	if handled, err := runProviderlessSessionCommand(ctx, opts, store); handled {
 		return true, err
 	}
+
 	if handled, err := runProviderlessUtilityCommand(ctx, opts, store); handled {
 		return true, err
 	}
+
 	if !providerlessConfigCommandRequested(opts) && !providerlessLocalAnalysisRequested(opts) {
 		return false, nil
 	}
@@ -2588,17 +3107,21 @@ func runProviderlessCommand(ctx context.Context, opts cliOptions) (bool, error) 
 	if stateErr != nil {
 		return true, stateErr
 	}
+
 	if handled, err := runProviderlessConfigCommand(ctx, opts, state); handled {
 		return true, err
 	}
+
 	if handled, err := runProviderlessLocalAnalysisCommand(ctx, opts, state); handled {
 		return true, err
 	}
+
 	return false, nil
 }
 
 func runProviderlessSessionCommand(ctx context.Context, opts cliOptions, store *session.Store) (bool, error) {
 	ctx = nonNilContext(ctx)
+
 	switch {
 	case opts.listHookEvents || opts.listHookEventsJSON:
 		return true, listHookEvents(opts.listHookEventsJSON)
@@ -2623,6 +3146,7 @@ func runProviderlessUtilityCommand(ctx context.Context, opts cliOptions, store *
 	if handled, err := runProviderlessFileUtilityCommand(ctx, opts, store); handled {
 		return true, err
 	}
+
 	return runProviderlessPlanningUtilityCommand(ctx, opts)
 }
 
@@ -2674,6 +3198,7 @@ func providerlessConfigCommandRequested(opts cliOptions) bool {
 		opts.describePluginName != "",
 		opts.runPluginTarget != "",
 	}
+
 	return anyTrue(requested)
 }
 
@@ -2685,6 +3210,7 @@ func providerlessLocalAnalysisRequested(opts cliOptions) bool {
 		opts.reviewScan,
 		providerlessCodeAnalysisRequested(opts),
 	}
+
 	return anyTrue(requested)
 }
 
@@ -2741,6 +3267,7 @@ func providerlessCodeAnalysisRequested(opts cliOptions) bool {
 		opts.codeDepsTarget != "",
 		opts.codeRdepsTarget != "",
 	}
+
 	return anyTrue(requested)
 }
 
@@ -2750,6 +3277,7 @@ func anyTrue(values []bool) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -2763,6 +3291,7 @@ func providerlessState(store *session.Store) (appState, error) {
 	if cfgErr != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+cfgErr.Error())
 	}
+
 	return appState{
 		agentRegistry:     agent.NewRegistry(cfg.Agents),
 		sessionStore:      store,
@@ -2799,6 +3328,7 @@ func runProviderlessLocalAnalysisCommand(ctx context.Context, opts cliOptions, s
 	if handled, err := runStateCodeAnalysisCommand(opts, state); handled {
 		return true, err
 	}
+
 	switch {
 	case opts.gitHistorySearch != "":
 		return true, runGitHistorySearch(ctx, state.cwd, opts.gitHistorySearch, opts.gitHistoryLimit.value)
@@ -2823,6 +3353,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 	if err != nil {
 		return err
 	}
+
 	if opts.headless && opts.oncePrompt == "" && !opts.readStdin {
 		return errors.New("headless mode requires --once, positional prompt text, or --stdin")
 	}
@@ -2835,13 +3366,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 	if err != nil {
 		return err
 	}
-	// One-shot mode uses a logger-enabled runner so context-based events
-	// (e.g. tool_execute from providers) are visible on stderr.
-	if opts.headless {
-		state.hookRunner = events.NewRunner(state.hookConfig)
-	} else {
-		state.hookRunner = events.NewRunnerWithLogger(state.hookConfig, os.Stderr)
-	}
+
 	runErr := runOnceWithOptions(
 		ctx,
 		state.registry,
@@ -2868,6 +3393,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		prompt,
 	)
 	finalizeWorktree(ctx, &state)
+
 	return runErr
 }
 
@@ -2875,12 +3401,15 @@ func runStateCommand(ctx context.Context, opts cliOptions, state appState) (bool
 	if handled, err := runStateReadCommand(opts, state); handled {
 		return true, err
 	}
+
 	if handled, err := runStateWriteCommand(opts, state); handled {
 		return true, err
 	}
+
 	if handled, err := runStateUtilityCommand(ctx, opts, state); handled {
 		return true, err
 	}
+
 	switch {
 	case opts.listModels:
 		return true, listModels(ctx, state.registry)
@@ -2895,12 +3424,15 @@ func runStateUtilityCommand(ctx context.Context, opts cliOptions, state appState
 	if handled, err := runStateLocalAnalysisCommand(ctx, opts, state); handled {
 		return true, err
 	}
+
 	if handled, err := runStateExecutionCommand(ctx, opts, state); handled {
 		return true, err
 	}
+
 	if handled, err := runStateRetrievalCommand(ctx, opts, state); handled {
 		return true, err
 	}
+
 	switch {
 	case opts.evalOutputPath != "":
 		return true, evalOutput(opts.evalOutputPath, opts.evalExpected, opts.evalExpectedPath, atteval.MatchMode(opts.evalMode))
@@ -2956,9 +3488,11 @@ func runStateLocalAnalysisCommand(ctx context.Context, opts cliOptions, state ap
 	if handled, err := runStateCodeAnalysisCommand(opts, state); handled {
 		return true, err
 	}
+
 	if handled, err := runStateWorkflowAnalysisCommand(ctx, opts, state); handled {
 		return true, err
 	}
+
 	switch {
 	case opts.gitHistorySearch != "":
 		return true, runGitHistorySearch(ctx, state.cwd, opts.gitHistorySearch, opts.gitHistoryLimit.value)
@@ -2997,15 +3531,19 @@ func runStateCodeAnalysisCommand(opts cliOptions, state appState) (bool, error) 
 	if handled, err := runStateCodeSymbolCommand(opts, state); handled {
 		return true, err
 	}
+
 	if handled, err := runStateCodeImportCommand(opts, state); handled {
 		return true, err
 	}
+
 	if handled, err := runStateCodePackageCommand(opts, state); handled {
 		return true, err
 	}
+
 	if handled, err := runStateCodeFileCommand(opts, state); handled {
 		return true, err
 	}
+
 	switch {
 	case opts.listCodeLayers:
 		return true, listCodeLayers(state.cwd)
@@ -3090,9 +3628,11 @@ func runStateCodePackageCommand(opts cliOptions, state appState) (bool, error) {
 	if handled, err := runStateCodePackageImportCommand(opts, state); handled {
 		return true, err
 	}
+
 	if handled, err := runStateCodePackageSymbolCommand(opts, state); handled {
 		return true, err
 	}
+
 	switch {
 	case opts.listCodePackages:
 		return true, listCodePackages(state.cwd)
@@ -3182,6 +3722,7 @@ func runStateReadCommand(opts cliOptions, state appState) (bool, error) {
 	if handled, err := runStateSessionInventoryCommand(opts, state); handled {
 		return true, err
 	}
+
 	switch {
 	case opts.replayRef != "":
 		printTranscript(state.sessionState)
@@ -3251,23 +3792,36 @@ func runStateWriteCommand(opts cliOptions, state appState) (bool, error) {
 
 func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	ctx = nonNilContext(ctx)
+
 	cfg, loadedConfigPaths, err := appconfig.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
 
 	agentRegistry := agent.NewRegistry(cfg.Agents)
-	hookRunner := events.NewRunnerWithLogger(cfg.Hooks, nil)
+	// Default to a stderr logger so events from utility commands (--bash,
+	// --mcp, one-shot, etc.) are visible without extra configuration. Headless
+	// runs stay quiet so JSON output isn't polluted; runInteractive replaces
+	// this with a logger-less runner so stderr writes don't bleed onto the TUI.
+	var hookLogWriter io.Writer
+	if !opts.headless {
+		hookLogWriter = os.Stderr
+	}
+
+	hookRunner := events.NewRunnerWithLogger(cfg.Hooks, hookLogWriter)
 	store := session.NewStore(opts.sessionDir)
 	stateStore := appconfig.NewStateStore("")
+
 	persistedState, stateErr := stateStore.Load()
 	if stateErr != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+stateErr.Error())
 	}
+
 	cwd, cwdErr := os.Getwd()
 	if cwdErr != nil {
 		cwd = ""
 	}
+
 	selection, err := resolveSelection(opts, cfg, persistedState.ModelForFolder(cwd), agentRegistry, store)
 	if err != nil {
 		return appState{}, err
@@ -3286,6 +3840,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	// Set up git worktree isolation when requested.
 	var wtInfo *worktree.Info
+
 	if opts.useWorktree && cwd != "" {
 		// If continuing a session that already has a worktree, re-use it.
 		if selection.sessionState.WorktreePath != "" {
@@ -3301,6 +3856,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 			if err != nil {
 				return appState{}, fmt.Errorf("worktree setup: %w", err)
 			}
+
 			selection.sessionState.WorktreePath = wtInfo.Path
 			selection.sessionState.WorktreeBranch = wtInfo.Branch
 			selection.sessionState.WorktreeBase = wtInfo.BaseBranch
@@ -3340,9 +3896,12 @@ func autoRegisterForOptions(ctx context.Context, opts cliOptions, cfg appconfig.
 	if !opts.headless {
 		return llm.AutoRegisterWithConfigContext(ctx, llmConfig(cfg, selectedModel))
 	}
+
 	previousLogOutput := log.Writer()
+
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(previousLogOutput)
+
 	return llm.AutoRegisterWithConfigContext(ctx, llmConfig(cfg, selectedModel))
 }
 
@@ -3375,27 +3934,35 @@ func resolveSelection(
 	if err := loadRequestedSession(opts, store, &state); err != nil {
 		return selectionState{}, err
 	}
+
 	if err := applySelectedAgent(opts, agentRegistry, &state); err != nil {
 		return selectionState{}, err
 	}
+
 	if err := applyRouteSelection(opts, &state); err != nil {
 		return selectionState{}, err
 	}
+
 	if state.selectedModel == "" {
 		state.selectedModel = persistedModel
 	}
+
 	if state.selectedModel == "" {
 		state.selectedModel = cfg.DefaultModel
 	}
+
 	if state.selectedModel != "" {
 		state.sessionState.DefaultModel = state.selectedModel
 	}
+
 	if opts.sessionTitle != "" {
 		state.sessionState.Title = opts.sessionTitle
 	}
+
 	if len(opts.sessionTags) > 0 {
 		state.sessionState.Tags = mergeTags(state.sessionState.Tags, opts.sessionTags)
 	}
+
 	return state, nil
 }
 
@@ -3405,17 +3972,21 @@ func loadRequestedSession(opts cliOptions, store *session.Store, state *selectio
 	}
 
 	ref := firstNonEmpty(opts.replayRef, opts.showSessionRef, opts.summarySessionRef, opts.exportRef, opts.sessionRef)
+
 	loadedSession, err := store.Load(ref)
 	if err != nil {
 		return fmt.Errorf("load session: %w", err)
 	}
+
 	state.sessionState = loadedSession
 	if state.selectedAgent == "" {
 		state.selectedAgent = state.sessionState.DefaultAgent
 	}
+
 	if state.selectedModel == "" {
 		state.selectedModel = state.sessionState.DefaultModel
 	}
+
 	return nil
 }
 
@@ -3428,44 +3999,63 @@ func applySelectedAgent(opts cliOptions, agentRegistry *agent.Registry, state *s
 	if !ok {
 		return fmt.Errorf("unknown agent %q", state.selectedAgent)
 	}
+
 	if state.selectedModel == "" {
 		state.selectedModel = activeAgent.Model
 	}
+
 	if !state.modelLocked && len(activeAgent.FallbackModels) > 0 {
 		state.fallbackModels = activeAgent.FallbackModels
 	}
+
 	state.sessionState.DefaultAgent = state.selectedAgent
+
 	return nil
 }
 
 func runInteractive(ctx context.Context, state appState) error {
 	ctx = nonNilContext(ctx)
+
 	fmt.Println(promptStyle.Render("atteler") + dimStyle.Render("  Ctrl+D to quit, Ctrl+O to pick model"))
+
 	if len(state.loadedConfigPaths) > 0 {
 		fmt.Println(dimStyle.Render("  Config: " + strings.Join(state.loadedConfigPaths, ", ")))
 	}
+
 	fmt.Println(dimStyle.Render("  Session: " + state.sessionState.ID + " (" + state.sessionStore.Path(state.sessionState.ID) + ")"))
+
 	if state.sessionState.Title != "" {
 		fmt.Println(dimStyle.Render("  Title: ") + pickerSelectedStyle.Render(state.sessionState.Title))
 	}
+
 	if len(state.sessionState.Tags) > 0 {
 		fmt.Println(dimStyle.Render("  Tags: ") + pickerSelectedStyle.Render(strings.Join(state.sessionState.Tags, ", ")))
 	}
+
 	if len(state.providers) > 0 {
 		sort.Strings(state.providers)
 		fmt.Println(dimStyle.Render("  Connected providers: ") + pickerProviderStyle.Render(strings.Join(state.providers, ", ")))
 	}
+
 	if agents := state.agentRegistry.List(); len(agents) > 0 {
 		fmt.Println(dimStyle.Render("  Agents: ") + pickerProviderStyle.Render(strings.Join(agents, ", ")))
 	}
+
 	if state.worktreeInfo != nil {
 		fmt.Println(dimStyle.Render("  Worktree: ") + pickerProviderStyle.Render(state.worktreeInfo.Path) +
 			dimStyle.Render(" (branch ") + pickerSelectedStyle.Render(state.worktreeInfo.Branch) + dimStyle.Render(")"))
 	}
+
 	if len(state.sessionState.Messages) > 0 {
 		fmt.Println(dimStyle.Render("  Loaded transcript:"))
 		printTranscript(state.sessionState)
 	}
+
+	// In TUI mode the runner's logger has to stay quiet — stderr writes would
+	// bleed onto bubbletea's alt-screen rendering. Replace the stderr-logger
+	// runner that loadAppState set up with a logger-less one. Utility commands
+	// and one-shot mode keep the stderr logger.
+	state.hookRunner = events.NewRunner(state.hookConfig)
 
 	emitHookWarning(ctx, state.hookRunner, events.Event{
 		Type:        events.SessionStart,
@@ -3495,7 +4085,13 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.modelLocked,
 		state.worktreeInfo,
 	))
+
 	finalModel, err := p.Run()
+
+	// Once the program exits, restore the stderr logger so SessionEnd / Error
+	// events are visible after the TUI has released the screen.
+	state.hookRunner = events.NewRunnerWithLogger(state.hookConfig, os.Stderr)
+
 	if err != nil {
 		emitHookWarning(ctx, state.hookRunner, events.Event{
 			Type:        events.Error,
@@ -3505,11 +4101,14 @@ func runInteractive(ctx context.Context, state appState) error {
 			Model:       state.selectedModel,
 			Error:       err.Error(),
 		})
+
 		return fmt.Errorf("run TUI: %w", err)
 	}
+
 	if m, ok := finalModel.(model); ok {
 		printTokenUsageSummary(os.Stderr, m.tokenUsage)
 	}
+
 	emitHookWarning(ctx, state.hookRunner, events.Event{
 		Type:        events.SessionEnd,
 		SessionID:   state.sessionState.ID,
@@ -3586,6 +4185,7 @@ func saveRecordedResponse(path string, params llm.CompleteParams, fallbackModels
 	if strings.TrimSpace(path) == "" || resp == nil {
 		return nil
 	}
+
 	record := responseRecordFile{
 		RecordedAt: time.Now().UTC(),
 		Request: responseRecordRequest{
@@ -3606,17 +4206,21 @@ func saveRecordedResponse(path string, params llm.CompleteParams, fallbackModels
 			OutputTokens:      resp.OutputTokens,
 		},
 	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil && filepath.Dir(path) != "." {
 		return fmt.Errorf("record response: create dir: %w", err)
 	}
+
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return fmt.Errorf("record response: marshal: %w", err)
 	}
+
 	data = append(data, '\n')
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("record response: write %s: %w", path, err)
 	}
+
 	return nil
 }
 
@@ -3625,13 +4229,16 @@ func loadRecordedResponse(path string) (*llm.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("replay response: read %s: %w", path, err)
 	}
+
 	var record responseRecordFile
 	if err := json.Unmarshal(data, &record); err != nil {
 		return nil, fmt.Errorf("replay response: parse %s: %w", path, err)
 	}
+
 	if strings.TrimSpace(record.Response.Content) == "" {
 		return nil, fmt.Errorf("replay response: %s has empty response content", path)
 	}
+
 	return &llm.Response{
 		Content:           record.Response.Content,
 		Model:             record.Response.Model,
@@ -3701,6 +4308,7 @@ func runOnceWithOptions(
 	if err != nil {
 		return err
 	}
+
 	prepared, err := prepareRunOnceRequest(
 		agents,
 		contextOptions,
@@ -3715,9 +4323,11 @@ func runOnceWithOptions(
 	if err != nil {
 		return err
 	}
+
 	if prepared.requestModel != "" {
 		sessionState.DefaultModel = prepared.requestModel
 	}
+
 	sessionState.DefaultAgent = prepared.activeAgent.name
 
 	emitHookWarning(ctx, hooks, events.Event{
@@ -3746,7 +4356,9 @@ func runOnceWithOptions(
 	if prepared.activeAgent.ok {
 		params = prepared.activeAgent.agent.CompleteParams(prepared.requestModel, params.Messages)
 	}
+
 	applyGenerationParams(&params, prepared.generation)
+
 	if budgetErr := validateRequestBudget(reg, params.Model, params.Messages, maxInputTokens); budgetErr != nil {
 		return budgetErr
 	}
@@ -3757,6 +4369,7 @@ func runOnceWithOptions(
 		Agent:       prepared.activeAgent.name,
 		Model:       prepared.requestModel,
 	})
+
 	headlessRun, err := startHeadlessRun(store, executionOptions, sessionState, prepared.prompt, prepared.requestModel, prepared.activeAgent.name)
 	if err != nil {
 		return err
@@ -3773,6 +4386,7 @@ func runOnceWithOptions(
 			Error:       err.Error(),
 		})
 		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, err.Error())
+
 		return err
 	}
 
@@ -3783,6 +4397,7 @@ func runOnceWithOptions(
 
 	var usage tokenUsage
 	usage.addResponse(resp)
+
 	result := runOnceResult{
 		SessionID:   sessionState.ID,
 		SessionPath: store.Path(sessionState.ID),
@@ -3796,11 +4411,14 @@ func runOnceWithOptions(
 		if resp.Model != "" {
 			headlessRun.Model = resp.Model
 		}
+
 		if err := store.AppendHeadlessLog(headlessRun.ID, fmt.Sprintf("assistant_message\t%s\tbytes=%d\n", time.Now().UTC().Format(time.RFC3339), len(resp.Content))); err != nil {
 			fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 		}
+
 		finishHeadlessRun(store, headlessRun, session.HeadlessStatusCompleted, "")
 	}
+
 	return writeRunOnceResult(os.Stdout, os.Stderr, result, outputFormat, executionOptions.Headless)
 }
 
@@ -3819,11 +4437,14 @@ func prepareRunOnceRequest(
 	if err != nil {
 		return runOncePrepared{}, err
 	}
+
 	requestMessages, refs, err := expandReferences([]llm.Message{{Role: llm.RoleUser, Content: userPrompt}}, contextOptions)
 	if err != nil {
 		return runOncePrepared{}, err
 	}
+
 	requestModel, fallbackModels := requestModelAndFallbacks(selectedModel, modelLocked, fallbackModels, activeAgent)
+
 	return runOncePrepared{
 		activeAgent:     activeAgent,
 		generation:      generationForRequest(generationDefaults, generationOverrides, activeAgent),
@@ -3843,6 +4464,7 @@ func saveRunOnceUserMessage(
 	prepared runOncePrepared,
 ) error {
 	sessionState.Append(llm.RoleUser, prepared.prompt)
+
 	if err := store.Save(*sessionState); err != nil {
 		emitHookWarning(ctx, hooks, events.Event{
 			Type:        events.Error,
@@ -3852,13 +4474,17 @@ func saveRunOnceUserMessage(
 			Model:       sessionState.DefaultModel,
 			Error:       err.Error(),
 		})
+
 		return fmt.Errorf("save session before request: %w", err)
 	}
+
 	emitFileWriteWarning(ctx, hooks, *sessionState, store.Path(sessionState.ID), prepared.activeAgent.name, "session")
+
 	for _, ref := range prepared.refs {
 		emitHookWarning(ctx, hooks, fileReadEvent(sessionState.ID, store.Path(sessionState.ID), prepared.activeAgent.name, sessionState.DefaultModel, ref))
 		emitHookWarning(ctx, hooks, contextAddEvent(sessionState.ID, store.Path(sessionState.ID), prepared.activeAgent.name, sessionState.DefaultModel, ref))
 	}
+
 	if prepared.activeAgent.ok {
 		emitHookWarning(ctx, hooks, events.Event{
 			Type:        events.AgentExecute,
@@ -3871,6 +4497,7 @@ func saveRunOnceUserMessage(
 			},
 		})
 	}
+
 	emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.UserMessage,
 		SessionID:   sessionState.ID,
@@ -3881,9 +4508,11 @@ func saveRunOnceUserMessage(
 		Content:     prepared.prompt,
 		Metadata:    referenceMetadata(prepared.refs),
 	})
+
 	if len(prepared.refs) > 0 {
 		fmt.Fprintln(os.Stderr, "context: "+referenceSummary(prepared.refs))
 	}
+
 	return nil
 }
 
@@ -3896,9 +4525,11 @@ func saveRunOnceAssistantResponse(
 	resp *llm.Response,
 ) error {
 	sessionState.Append(llm.RoleAssistant, resp.Content)
+
 	if resp.Model != "" {
 		sessionState.DefaultModel = resp.Model
 	}
+
 	if err := store.Save(*sessionState); err != nil {
 		emitHookWarning(ctx, hooks, events.Event{
 			Type:        events.Error,
@@ -3908,8 +4539,10 @@ func saveRunOnceAssistantResponse(
 			Model:       sessionState.DefaultModel,
 			Error:       err.Error(),
 		})
+
 		return fmt.Errorf("save session after response: %w", err)
 	}
+
 	emitFileWriteWarning(ctx, hooks, *sessionState, store.Path(sessionState.ID), agentName, "session")
 	emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.AssistantMessage,
@@ -3920,6 +4553,7 @@ func saveRunOnceAssistantResponse(
 		Role:        string(llm.RoleAssistant),
 		Content:     resp.Content,
 	})
+
 	return nil
 }
 
@@ -3934,13 +4568,16 @@ func startHeadlessRun(
 	if !options.Headless {
 		return nil, nil
 	}
+
 	if store == nil {
 		return nil, errors.New("headless mode requires a session store")
 	}
+
 	id := strings.TrimSpace(options.HeadlessID)
 	if id == "" {
 		id = session.New("", nil).ID
 	}
+
 	run := session.HeadlessRun{
 		ID:          id,
 		SessionID:   sessionState.ID,
@@ -3953,13 +4590,16 @@ func startHeadlessRun(
 	if err := store.SaveHeadlessRun(run); err != nil {
 		return nil, fmt.Errorf("start headless run: %w", err)
 	}
+
 	saved, err := store.LoadHeadlessRun(id)
 	if err != nil {
 		return nil, fmt.Errorf("load started headless run: %w", err)
 	}
+
 	if err := store.AppendHeadlessLog(id, "started\t"+time.Now().UTC().Format(time.RFC3339)+"\tsession="+sessionState.ID+"\n"); err != nil {
 		return nil, fmt.Errorf("write headless start log: %w", err)
 	}
+
 	return &saved, nil
 }
 
@@ -3967,17 +4607,21 @@ func finishHeadlessRun(store *session.Store, run *session.HeadlessRun, status se
 	if store == nil || run == nil {
 		return
 	}
+
 	now := time.Now().UTC()
 	run.Status = status
 	run.CompletedAt = &now
+
 	run.Error = strings.TrimSpace(message)
 	if err := store.SaveHeadlessRun(*run); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
+
 	logLine := string(status) + "\t" + now.Format(time.RFC3339)
 	if run.Error != "" {
 		logLine += "\terror=" + run.Error
 	}
+
 	if err := store.AppendHeadlessLog(run.ID, logLine+"\n"); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
@@ -3988,9 +4632,11 @@ func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFo
 	case outputFormatJSON:
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
+
 		if err := encoder.Encode(result); err != nil {
 			return fmt.Errorf("encode one-shot result: %w", err)
 		}
+
 		return nil
 	default:
 		if !headless {
@@ -3998,6 +4644,7 @@ func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFo
 			printTokenUsageSummary(stderr, result.TokenUsage)
 			fmt.Fprintln(stderr, "session: "+result.SessionID+" ("+result.SessionPath+")")
 		}
+
 		return nil
 	}
 }
@@ -4014,9 +4661,11 @@ func completeWithRecording(
 		if err != nil {
 			return nil, err
 		}
+
 		if err := saveRecordedResponse(responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
 			return nil, err
 		}
+
 		return resp, nil
 	}
 
@@ -4024,6 +4673,7 @@ func completeWithRecording(
 	if err != nil {
 		return nil, fmt.Errorf("complete prompt: %w", err)
 	}
+
 	if err := saveRecordedResponse(responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
 		return nil, err
 	}
@@ -4038,30 +4688,37 @@ func requestModelAndFallbacks(
 	activeAgent agentSelection,
 ) (requestModel string, modelFallbacks []string) {
 	requestModel = selectedModel
+
 	modelFallbacks = fallbackModels
 	if !activeAgent.ok || modelLocked {
 		return requestModel, modelFallbacks
 	}
+
 	if activeAgent.agent.Model != "" {
 		requestModel = activeAgent.agent.Model
 	}
+
 	if len(activeAgent.agent.FallbackModels) > 0 {
 		modelFallbacks = activeAgent.agent.FallbackModels
 	}
+
 	return requestModel, modelFallbacks
 }
 
 func resolveAgent(agents *agent.Registry, selectedAgent, input string) (agentSelection, string, error) {
 	agentName := selectedAgent
+
 	prompt := input
 	if inlineName, inlinePrompt, ok := agent.ParseInvocation(input); ok {
 		agentName = inlineName
 		prompt = inlinePrompt
 	}
+
 	if agentName == "" {
 		if matchedAgent, ok := agents.MatchPrompt(prompt); ok {
 			return agentSelection{name: matchedAgent.Name, agent: matchedAgent, ok: true}, prompt, nil
 		}
+
 		return agentSelection{}, prompt, nil
 	}
 
@@ -4069,15 +4726,18 @@ func resolveAgent(agents *agent.Registry, selectedAgent, input string) (agentSel
 	if !ok {
 		return agentSelection{}, input, fmt.Errorf("unknown agent %q", agentName)
 	}
+
 	if strings.TrimSpace(prompt) == "" {
 		return agentSelection{}, input, fmt.Errorf("agent %q needs a prompt", agentName)
 	}
+
 	return agentSelection{name: agentName, agent: activeAgent, ok: true}, prompt, nil
 }
 
 func listModels(ctx context.Context, reg *llm.Registry) error {
 	providers := reg.ListProviders()
 	sort.Strings(providers)
+
 	if len(providers) == 0 {
 		return errors.New("no providers registered")
 	}
@@ -4087,11 +4747,14 @@ func listModels(ctx context.Context, reg *llm.Registry) error {
 		if err != nil {
 			return fmt.Errorf("list %s models: %w", provider, err)
 		}
+
 		sort.Strings(models)
+
 		for _, model := range models {
 			fmt.Println(provider + "/" + model)
 		}
 	}
+
 	return nil
 }
 
@@ -4106,21 +4769,26 @@ func listPlugins(paths []string) error {
 		fmt.Println("No plugins configured.")
 		return nil
 	}
+
 	for _, path := range paths {
 		manifest, err := attelerplugin.Load(path)
 		if err != nil {
 			return fmt.Errorf("list plugins: %w", err)
 		}
+
 		parts := []string{manifest.Name, manifest.Version}
 		if len(manifest.Capabilities) > 0 {
 			parts = append(parts, "capabilities="+strings.Join(manifest.Capabilities, ","))
 		}
+
 		if manifest.Description != "" {
 			parts = append(parts, "description="+manifest.Description)
 		}
+
 		parts = append(parts, path)
 		fmt.Println(strings.Join(parts, "\t"))
 	}
+
 	return nil
 }
 
@@ -4140,10 +4808,12 @@ func describePlugin(paths []string, name string) error {
 	if err != nil {
 		return fmt.Errorf("describe plugin: %w", err)
 	}
+
 	plugin, ok := registry.Get(name)
 	if !ok {
 		return fmt.Errorf("describe plugin: plugin %q not found", strings.TrimSpace(name))
 	}
+
 	out, err := yaml.Marshal(pluginDescription{
 		Name:         plugin.Manifest.Name,
 		Version:      plugin.Manifest.Version,
@@ -4156,7 +4826,9 @@ func describePlugin(paths []string, name string) error {
 	if err != nil {
 		return fmt.Errorf("describe plugin: marshal %q: %w", name, err)
 	}
+
 	fmt.Print(string(out))
+
 	return nil
 }
 
@@ -4168,20 +4840,25 @@ func runPluginEntrypoint(
 	timeoutSeconds int,
 ) error {
 	ctx = nonNilContext(ctx)
+
 	pluginName, entrypointName, err := parsePluginTarget(target, entrypointName)
 	if err != nil {
 		return err
 	}
+
 	registry, err := attelerplugin.NewRegistry(paths)
 	if err != nil {
 		return fmt.Errorf("run plugin: %w", err)
 	}
+
 	if dryRun {
 		preview, previewErr := registry.DryRunEntrypoint(pluginName, entrypointName)
 		if previewErr != nil {
 			return fmt.Errorf("run plugin: %w", previewErr)
 		}
+
 		fmt.Println(formatPluginDryRun(preview))
+
 		return nil
 	}
 
@@ -4189,30 +4866,37 @@ func runPluginEntrypoint(
 	if !ok {
 		return fmt.Errorf("run plugin: plugin %q not found", pluginName)
 	}
+
 	timeout := time.Duration(timeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+
 	result, err := attelerplugin.RunEntrypoint(ctx, plugin.Root, plugin.Manifest, entrypointName, timeout)
 	if result.Stdout != "" {
 		fmt.Print(result.Stdout)
 	}
+
 	if result.Stderr != "" {
 		fmt.Fprint(os.Stderr, result.Stderr)
 	}
+
 	if err != nil {
 		return fmt.Errorf("run plugin: %w", err)
 	}
+
 	return nil
 }
 
 func runBashCommand(ctx context.Context, state appState, opts cliOptions) error {
 	ctx = nonNilContext(ctx)
 	timeout := time.Duration(opts.bashTimeout.value) * time.Second
+
 	dir := strings.TrimSpace(opts.bashDir)
 	if dir == "" {
 		dir = state.cwd
 	}
+
 	emitHookWarning(ctx, state.hookRunner, events.Event{
 		Type:        events.CommandExecute,
 		SessionID:   state.sessionState.ID,
@@ -4224,6 +4908,7 @@ func runBashCommand(ctx context.Context, state appState, opts cliOptions) error 
 			"cwd":     dir,
 		},
 	})
+
 	result, err := attshell.RunBash(ctx, attshell.Options{
 		Command: opts.bashCommand,
 		Dir:     dir,
@@ -4232,12 +4917,15 @@ func runBashCommand(ctx context.Context, state appState, opts cliOptions) error 
 	if result.Stdout != "" {
 		fmt.Print(result.Stdout)
 	}
+
 	if result.Stderr != "" {
 		fmt.Fprint(os.Stderr, result.Stderr)
 	}
+
 	if err != nil {
 		return fmt.Errorf("run bash: %w", err)
 	}
+
 	return nil
 }
 
@@ -4246,14 +4934,17 @@ func runSpawnAgents(ctx context.Context, state appState, opts cliOptions) error 
 	if err != nil {
 		return err
 	}
+
 	if opts.spawnDryRun {
 		fmt.Print(formatSpawnDryRun(requests))
 		return nil
 	}
 
 	ctx = nonNilContext(ctx)
+
 	if opts.spawnTimeout.value > 0 {
 		var cancel context.CancelFunc
+
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(opts.spawnTimeout.value)*time.Second)
 		defer cancel()
 	}
@@ -4261,6 +4952,7 @@ func runSpawnAgents(ctx context.Context, state appState, opts cliOptions) error 
 	binary := strings.TrimSpace(opts.spawnBinary)
 	if binary == "" {
 		var exeErr error
+
 		binary, exeErr = os.Executable()
 		if exeErr != nil || strings.TrimSpace(binary) == "" {
 			binary = os.Args[0]
@@ -4284,9 +4976,11 @@ func runSpawnAgents(ctx context.Context, state appState, opts cliOptions) error 
 		Dir:    state.cwd,
 	}))
 	fmt.Print(formatSpawnResults(results))
+
 	if runErr != nil {
 		return fmt.Errorf("spawn agents: %w", runErr)
 	}
+
 	return nil
 }
 
@@ -4297,11 +4991,14 @@ func parseSpawnAgentSpecs(specs rawStringListFlag) ([]subagent.Request, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		requests = append(requests, request)
 	}
+
 	if err := validateSpawnRequests(requests); err != nil {
 		return nil, err
 	}
+
 	return requests, nil
 }
 
@@ -4331,26 +5028,33 @@ func validateSpawnRequests(requests []subagent.Request) error {
 		if strings.TrimSpace(request.ID) == "" {
 			return fmt.Errorf("spawn agent request %d: id is required", i)
 		}
+
 		if strings.TrimSpace(request.Agent) == "" {
 			return fmt.Errorf("spawn agent request %q: agent is required", request.ID)
 		}
+
 		if strings.TrimSpace(request.Prompt) == "" {
 			return fmt.Errorf("spawn agent request %q: prompt is required", request.ID)
 		}
+
 		if _, ok := seen[request.ID]; ok {
 			return fmt.Errorf("spawn agent: duplicate request id %q", request.ID)
 		}
+
 		seen[request.ID] = struct{}{}
 	}
+
 	return nil
 }
 
 func formatSpawnDryRun(requests []subagent.Request) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Would spawn %d sub-agent(s).\n", len(requests))
+
 	for _, request := range requests {
 		fmt.Fprintf(&b, "id=%s\tagent=%s\tprompt=%s\n", request.ID, request.Agent, request.Prompt)
 	}
+
 	return b.String()
 }
 
@@ -4358,12 +5062,15 @@ func formatSpawnResults(results []subagent.Result) string {
 	if len(results) == 0 {
 		return ""
 	}
+
 	var b strings.Builder
+
 	for _, result := range results {
 		status := "ok"
 		if result.Error != "" {
 			status = "error"
 		}
+
 		fmt.Fprintf(
 			&b,
 			"id=%s\tagent=%s\tstatus=%s\tduration=%s\n",
@@ -4372,34 +5079,42 @@ func formatSpawnResults(results []subagent.Result) string {
 			status,
 			result.Duration.Round(time.Millisecond),
 		)
+
 		if strings.TrimSpace(result.Output) != "" {
 			fmt.Fprintf(&b, "output=%s\n", strings.TrimSpace(result.Output))
 		}
+
 		if result.Error != "" {
 			fmt.Fprintf(&b, "error=%s\n", result.Error)
 		}
 	}
+
 	return b.String()
 }
 
 func parsePluginTarget(target, entrypointName string) (pluginName, entrypoint string, err error) {
 	target = strings.TrimSpace(target)
 	entrypointName = strings.TrimSpace(entrypointName)
+
 	if target == "" {
 		return "", "", errors.New("run plugin: plugin name is required")
 	}
+
 	if entrypointName != "" {
 		return target, entrypointName, nil
 	}
+
 	pluginName, entrypoint, ok := strings.Cut(target, "/")
 	if !ok || strings.TrimSpace(pluginName) == "" || strings.TrimSpace(entrypoint) == "" {
 		return "", "", errors.New("run plugin: pass --plugin-entrypoint or use plugin/entrypoint")
 	}
+
 	return strings.TrimSpace(pluginName), strings.TrimSpace(entrypoint), nil
 }
 
 func formatPluginDryRun(dryRun attelerplugin.DryRun) string {
 	entrypoint := dryRun.Entrypoint
+
 	return strings.Join([]string{
 		dryRun.Description,
 		"plugin=" + entrypoint.PluginName,
@@ -4413,8 +5128,10 @@ func copyStringMap(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return nil
 	}
+
 	out := make(map[string]string, len(in))
 	maps.Copy(out, in)
+
 	return out
 }
 
@@ -4423,67 +5140,85 @@ func runMCPManifest(path, capability string) error {
 	if err != nil {
 		return err
 	}
+
 	if err := manifest.Validate(); err != nil {
 		return fmt.Errorf("mcp manifest: validate: %w", err)
 	}
+
 	if strings.TrimSpace(capability) != "" {
 		servers := manifest.Find(capability)
 		if len(servers) == 0 {
 			fmt.Println("No MCP servers found.")
 			return nil
 		}
+
 		for i := range servers {
 			fmt.Println(formatMCPServer(servers[i]))
 		}
+
 		return nil
 	}
+
 	for _, name := range manifest.List() {
 		fmt.Println(name)
 	}
+
 	return nil
 }
 
 func runMCPInvoke(ctx context.Context, opts cliOptions) error {
 	ctx = nonNilContext(ctx)
+
 	if strings.TrimSpace(opts.mcpMethod) != "" && strings.TrimSpace(opts.mcpToolName) != "" {
 		return errors.New("mcp invoke: use either --mcp-method or --mcp-tool, not both")
 	}
+
 	if strings.TrimSpace(opts.mcpServerName) == "" {
 		return errors.New("mcp invoke: --mcp-server is required")
 	}
+
 	manifest, err := loadMCPManifest(opts.mcpManifestPath)
 	if err != nil {
 		return err
 	}
+
 	if validateErr := manifest.Validate(); validateErr != nil {
 		return fmt.Errorf("mcp invoke: validate manifest: %w", validateErr)
 	}
+
 	server, ok := findMCPServer(manifest, opts.mcpServerName)
 	if !ok {
 		return fmt.Errorf("mcp invoke: server %q not found", strings.TrimSpace(opts.mcpServerName))
 	}
 
 	timeout := time.Duration(opts.mcpTimeout.value) * time.Second
+
 	var response *mcp.Response
+
 	if strings.TrimSpace(opts.mcpToolName) != "" {
 		args, parseErr := parseMCPToolArgs(opts.mcpToolArgsJSON)
 		if parseErr != nil {
 			return parseErr
 		}
+
 		response, err = mcp.CallTool(ctx, server, opts.mcpToolName, args, timeout)
 	} else {
 		params, parseErr := parseJSONParam(opts.mcpParamsJSON, "mcp params")
 		if parseErr != nil {
 			return parseErr
 		}
+
 		response, err = mcp.Invoke(ctx, server, mcp.Request{Method: opts.mcpMethod, Params: params}, timeout)
 	}
+
 	if response != nil {
 		fmt.Println(formatMCPResponse(response))
 	}
+
 	if err != nil {
 		return fmt.Errorf("mcp invoke: %w", err)
 	}
+
 	return nil
 }
 
@@ -4492,10 +5227,12 @@ func loadMCPManifest(path string) (mcp.Manifest, error) {
 	if err != nil {
 		return mcp.Manifest{}, fmt.Errorf("mcp manifest: read %s: %w", path, err)
 	}
+
 	var manifest mcp.Manifest
 	if err := yaml.Unmarshal(data, &manifest); err != nil {
 		return mcp.Manifest{}, fmt.Errorf("mcp manifest: parse %s: %w", path, err)
 	}
+
 	return manifest, nil
 }
 
@@ -4504,11 +5241,13 @@ func findMCPServer(manifest mcp.Manifest, name string) (mcp.Server, bool) {
 	if name == "" {
 		return mcp.Server{}, false
 	}
+
 	for _, server := range manifest.Servers {
 		if strings.TrimSpace(server.Name) == name {
 			return server, true
 		}
 	}
+
 	return mcp.Server{}, false
 }
 
@@ -4517,14 +5256,17 @@ func formatMCPServer(server mcp.Server) string {
 	if len(server.Args) > 0 {
 		parts = append(parts, "args="+strings.Join(server.Args, ","))
 	}
+
 	if strings.TrimSpace(server.CWD) != "" {
 		parts = append(parts, "cwd="+strings.TrimSpace(server.CWD))
 	}
+
 	if len(server.Capabilities) > 0 {
 		capabilities := append([]string(nil), server.Capabilities...)
 		sort.Strings(capabilities)
 		parts = append(parts, "capabilities="+strings.Join(capabilities, ","))
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -4533,13 +5275,16 @@ func parseMCPToolArgs(raw string) (map[string]any, error) {
 	if raw == "" {
 		return nil, nil
 	}
+
 	var args map[string]any
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
 		return nil, fmt.Errorf("mcp tool args: parse JSON object: %w", err)
 	}
+
 	if args == nil {
 		return nil, errors.New("mcp tool args: expected JSON object")
 	}
+
 	return args, nil
 }
 
@@ -4548,10 +5293,12 @@ func parseJSONParam(raw, label string) (any, error) {
 	if raw == "" {
 		return nil, nil
 	}
+
 	var value any
 	if err := json.Unmarshal([]byte(raw), &value); err != nil {
 		return nil, fmt.Errorf("%s: parse JSON: %w", label, err)
 	}
+
 	return value, nil
 }
 
@@ -4559,24 +5306,30 @@ func formatMCPResponse(response *mcp.Response) string {
 	if response == nil {
 		return ""
 	}
+
 	if response.Error != nil {
 		data, err := json.MarshalIndent(response.Error, "", "  ")
 		if err == nil {
 			return string(data)
 		}
+
 		return response.Error.Message
 	}
+
 	if len(response.Result) == 0 {
 		return "{}"
 	}
+
 	var value any
 	if err := json.Unmarshal(response.Result, &value); err != nil {
 		return string(response.Result)
 	}
+
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return string(response.Result)
 	}
+
 	return string(data)
 }
 
@@ -4588,6 +5341,7 @@ func runLSPSymbols(ctx context.Context, opts cliOptions) error {
 		RootPath:   strings.TrimSpace(opts.lspRootPath),
 		LanguageID: strings.TrimSpace(opts.lspLanguageID),
 	}
+
 	var (
 		symbols []lsp.Symbol
 		err     error
@@ -4597,10 +5351,13 @@ func runLSPSymbols(ctx context.Context, opts cliOptions) error {
 	} else {
 		symbols, err = lsp.DocumentSymbols(nonNilContext(ctx), lspOptions)
 	}
+
 	if err != nil {
 		return fmt.Errorf("lsp symbols: %w", err)
 	}
+
 	fmt.Print(formatLSPSymbols(symbols))
+
 	return nil
 }
 
@@ -4608,15 +5365,19 @@ func formatLSPSymbols(symbols []lsp.Symbol) string {
 	if len(symbols) == 0 {
 		return "No LSP symbols found.\n"
 	}
+
 	var b strings.Builder
 	writeLSPSymbols(&b, symbols, 0)
+
 	return b.String()
 }
 
 func writeLSPSymbols(b *strings.Builder, symbols []lsp.Symbol, depth int) {
 	indent := strings.Repeat("  ", depth)
+
 	for i := range symbols {
 		symbol := symbols[i]
+
 		parts := []string{
 			indent + symbol.Name,
 			"kind=" + strconv.Itoa(symbol.Kind),
@@ -4625,12 +5386,15 @@ func writeLSPSymbols(b *strings.Builder, symbols []lsp.Symbol, depth int) {
 		if symbol.Detail != "" {
 			parts = append(parts, "detail="+symbol.Detail)
 		}
+
 		if symbol.ContainerName != "" {
 			parts = append(parts, "container="+symbol.ContainerName)
 		}
+
 		if symbol.URI != "" {
 			parts = append(parts, "uri="+symbol.URI)
 		}
+
 		b.WriteString(strings.Join(parts, "\t"))
 		b.WriteString("\n")
 		writeLSPSymbols(b, symbol.Children, depth+1)
@@ -4646,31 +5410,39 @@ func runContextPack(path string, maxTokens int) error {
 	if err != nil {
 		return fmt.Errorf("context pack: read %s: %w", path, err)
 	}
+
 	messages := parseContextPackMessages(string(data))
 	result := contextpack.Compact(messages, maxTokens)
 	fmt.Print(formatContextPackResult(result))
+
 	return nil
 }
 
 func parseContextPackMessages(text string) []llm.Message {
 	var messages []llm.Message
+
 	for rawLine := range strings.SplitSeq(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		line := strings.TrimRight(rawLine, "\r")
+
 		role, content, ok := parseRoleLine(line)
 		if ok {
 			messages = append(messages, llm.Message{Role: role, Content: content})
 			continue
 		}
+
 		if len(messages) == 0 {
 			if strings.TrimSpace(line) != "" {
 				messages = append(messages, llm.Message{Role: llm.RoleUser, Content: line})
 			}
+
 			continue
 		}
+
 		if line != "" {
 			messages[len(messages)-1].Content += "\n" + line
 		}
 	}
+
 	return messages
 }
 
@@ -4679,6 +5451,7 @@ func parseRoleLine(line string) (llm.Role, string, bool) {
 	if !ok {
 		return "", "", false
 	}
+
 	switch strings.ToLower(strings.TrimSpace(roleText)) {
 	case string(llm.RoleSystem):
 		return llm.RoleSystem, strings.TrimSpace(content), true
@@ -4693,19 +5466,24 @@ func parseRoleLine(line string) (llm.Role, string, bool) {
 
 func formatContextPackResult(result contextpack.Result) string {
 	var b strings.Builder
+
 	stats := result.Stats
 	fmt.Fprintf(&b, "compressed: %t\n", stats.Compressed)
 	fmt.Fprintf(&b, "messages: %d/%d\n", stats.OutputCount, stats.OriginalCount)
 	fmt.Fprintf(&b, "omitted: %d\n", stats.OmittedCount)
 	fmt.Fprintf(&b, "tokens: %d/%d", stats.OutputEstimatedTokens, stats.OriginalEstimatedTokens)
+
 	if stats.MaxEstimatedTokens > 0 {
 		fmt.Fprintf(&b, " max=%d", stats.MaxEstimatedTokens)
 	}
+
 	b.WriteString("\n")
 	b.WriteString("output:\n")
+
 	for _, message := range result.Messages {
 		fmt.Fprintf(&b, "  %s: %s\n", message.Role, strings.ReplaceAll(message.Content, "\n", "\n    "))
 	}
+
 	return b.String()
 }
 
@@ -4713,41 +5491,51 @@ func runVectorSearch(query string, paths []string, limit int) error {
 	if strings.TrimSpace(query) == "" {
 		return errors.New("vector search: --vector-search is required")
 	}
+
 	if len(paths) == 0 {
 		return errors.New("vector search: at least one --vector-index file is required")
 	}
+
 	if limit == 0 {
 		limit = 5
 	}
+
 	vectorizer, err := vector.NewTextVectorizer(0)
 	if err != nil {
 		return fmt.Errorf("vector search: create vectorizer: %w", err)
 	}
+
 	store, err := vector.NewStore(vectorizer.Dimensions)
 	if err != nil {
 		return fmt.Errorf("vector search: create store: %w", err)
 	}
+
 	for _, path := range paths {
 		addErr := addVectorFile(store, vectorizer, path)
 		if addErr != nil {
 			return addErr
 		}
 	}
+
 	queryVector, err := vectorizer.Vectorize(query)
 	if err != nil {
 		return fmt.Errorf("vector search: vectorize query: %w", err)
 	}
+
 	results, err := store.Search(queryVector, limit)
 	if err != nil {
 		return fmt.Errorf("vector search failed: %w", err)
 	}
+
 	if len(results) == 0 {
 		fmt.Println("No vector results found.")
 		return nil
 	}
+
 	for i := range results {
 		fmt.Println(formatVectorResult(results[i]))
 	}
+
 	return nil
 }
 
@@ -4756,17 +5544,21 @@ func addVectorFile(store *vector.Store, vectorizer *vector.TextVectorizer, path 
 	if err != nil {
 		return fmt.Errorf("vector search: read %s: %w", path, err)
 	}
+
 	if !utf8.Valid(data) {
 		return fmt.Errorf("vector search: %s is not valid UTF-8", path)
 	}
+
 	vec, err := vectorizer.Vectorize(string(data))
 	if err != nil {
 		return fmt.Errorf("vector search: vectorize %s: %w", path, err)
 	}
+
 	clean := filepath.Clean(path)
 	if err := store.Add(vector.Document{ID: clean, Text: string(data), Vector: vec, Metadata: map[string]string{"path": clean}}); err != nil {
 		return fmt.Errorf("vector search: index %s: %w", path, err)
 	}
+
 	return nil
 }
 
@@ -4778,6 +5570,7 @@ func formatVectorResult(result vector.Result) string {
 	if path := result.Document.Metadata["path"]; path != "" {
 		parts = append(parts, "path="+path)
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -4786,6 +5579,7 @@ func runAgentMemoryCommand(root, selectedAgent string, opts cliOptions) error {
 	if agentName == "" {
 		agentName = strings.TrimSpace(selectedAgent)
 	}
+
 	if agentName == "" {
 		return errors.New("agent memory: --agent-memory-agent or --agent is required")
 	}
@@ -4799,35 +5593,44 @@ func runAgentMemoryCommand(root, selectedAgent string, opts cliOptions) error {
 	if err != nil {
 		return err
 	}
+
 	for _, path := range opts.agentMemoryIndexFiles {
 		if addErr := store.AddFile(agentName, path); addErr != nil {
 			return fmt.Errorf("agent memory: index %s: %w", path, addErr)
 		}
 	}
+
 	if len(opts.agentMemoryIndexFiles) > 0 {
 		if saveErr := store.Save(storePath); saveErr != nil {
 			return fmt.Errorf("agent memory: save store: %w", saveErr)
 		}
+
 		fmt.Printf("Indexed %d file(s) for agent %s in %s\n", len(opts.agentMemoryIndexFiles), agentName, storePath)
 	}
+
 	if strings.TrimSpace(opts.agentMemorySearch) == "" {
 		return nil
 	}
+
 	limit := opts.agentMemoryLimit.value
 	if limit == 0 {
 		limit = 5
 	}
+
 	results, err := store.Search(agentName, opts.agentMemorySearch, limit)
 	if err != nil {
 		return fmt.Errorf("agent memory: search: %w", err)
 	}
+
 	if len(results) == 0 {
 		fmt.Println("No agent memory results found.")
 		return nil
 	}
+
 	for i := range results {
 		fmt.Println(formatAgentMemoryResult(results[i]))
 	}
+
 	return nil
 }
 
@@ -4838,14 +5641,18 @@ func loadAgentMemoryStore(path string) (*agentmemory.Store, error) {
 			if newErr != nil {
 				return nil, fmt.Errorf("agent memory: create store: %w", newErr)
 			}
+
 			return store, nil
 		}
+
 		return nil, fmt.Errorf("agent memory: stat store %s: %w", path, err)
 	}
+
 	store, err := agentmemory.Load(path)
 	if err != nil {
 		return nil, fmt.Errorf("agent memory: load store: %w", err)
 	}
+
 	return store, nil
 }
 
@@ -4857,9 +5664,11 @@ func formatAgentMemoryResult(result agentmemory.Result) string {
 	if result.Document.Path != "" {
 		parts = append(parts, "path="+result.Document.Path)
 	}
+
 	if kind := result.Document.Metadata["kind"]; kind != "" {
 		parts = append(parts, "kind="+kind)
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -4868,15 +5677,18 @@ func runMemoryCommand(store *session.Store, opts cliOptions) error {
 	if err != nil {
 		return err
 	}
+
 	if opts.memoryStorePath != "" && len(opts.memoryIndexFiles) > 0 {
 		if saveErr := mem.Save(opts.memoryStorePath); saveErr != nil {
 			return fmt.Errorf("memory: save store: %w", saveErr)
 		}
+
 		if opts.memorySearch == "" {
 			fmt.Printf("Indexed %d document(s) into %s\n", len(mem.Documents), opts.memoryStorePath)
 			return nil
 		}
 	}
+
 	if opts.memorySearch == "" {
 		return errors.New("memory: --memory-search is required unless indexing into --memory-store")
 	}
@@ -4885,17 +5697,21 @@ func runMemoryCommand(store *session.Store, opts cliOptions) error {
 	if limit == 0 {
 		limit = 5
 	}
+
 	results, err := mem.Search(opts.memorySearch, limit)
 	if err != nil {
 		return fmt.Errorf("memory: search: %w", err)
 	}
+
 	if len(results) == 0 {
 		fmt.Println("No memory results found.")
 		return nil
 	}
+
 	for i := range results {
 		fmt.Println(formatMemoryResult(results[i]))
 	}
+
 	return nil
 }
 
@@ -4904,16 +5720,19 @@ func buildMemoryStore(store *session.Store, opts cliOptions) (*memory.Store, err
 	if err != nil {
 		return nil, err
 	}
+
 	if len(opts.memoryIndexFiles) > 0 {
 		if err := mem.AddFiles(opts.memoryIndexFiles...); err != nil {
 			return nil, fmt.Errorf("memory: index files: %w", err)
 		}
 	}
+
 	if opts.memoryStorePath == "" || len(mem.Documents) == 0 {
 		if err := addSessionMemory(mem, store); err != nil {
 			return nil, err
 		}
 	}
+
 	return mem, nil
 }
 
@@ -4921,16 +5740,20 @@ func loadMemoryStore(path string) (*memory.Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return memory.NewStore(), nil
 	}
+
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return memory.NewStore(), nil
 		}
+
 		return nil, fmt.Errorf("memory: stat store %s: %w", path, err)
 	}
+
 	store, err := memory.Load(path)
 	if err != nil {
 		return nil, fmt.Errorf("memory: load store: %w", err)
 	}
+
 	return store, nil
 }
 
@@ -4939,16 +5762,20 @@ func addSessionMemory(mem *memory.Store, store *session.Store) error {
 	if err != nil {
 		return fmt.Errorf("memory: list sessions: %w", err)
 	}
+
 	for i := range summaries {
 		summary := &summaries[i]
+
 		saved, err := store.Load(summary.Path)
 		if err != nil {
 			return fmt.Errorf("memory: load session %s: %w", summary.ID, err)
 		}
+
 		if err := mem.AddSession(saved); err != nil {
 			return fmt.Errorf("memory: index session %s: %w", summary.ID, err)
 		}
 	}
+
 	return nil
 }
 
@@ -4960,16 +5787,20 @@ func formatMemoryResult(result memory.Result) string {
 	if result.Document.Path != "" {
 		parts = append(parts, "path="+result.Document.Path)
 	}
+
 	if len(result.Matches) > 0 {
 		parts = append(parts, "matches="+strings.Join(result.Matches, ","))
 	}
+
 	if kind := result.Document.Metadata["kind"]; kind != "" {
 		parts = append(parts, "kind="+kind)
 	}
+
 	line := strings.Join(parts, "\t")
 	if result.Snippet == "" {
 		return line
 	}
+
 	return line + "\n  " + result.Snippet
 }
 
@@ -4978,13 +5809,16 @@ func planAgents(registry *agent.Registry, prompt string, requested []string, max
 	if err != nil {
 		return fmt.Errorf("plan agents: %w", err)
 	}
+
 	if len(plan.Participants) == 0 {
 		fmt.Println("No agents matched.")
 		return nil
 	}
+
 	for i := range plan.Participants {
 		fmt.Println(formatAgentPlanParticipant(&plan.Participants[i]))
 	}
+
 	return nil
 }
 
@@ -4993,12 +5827,15 @@ func formatAgentPlanParticipant(participant *agent.Participant) string {
 	if participant.Pattern != "" {
 		parts = append(parts, "match="+participant.Pattern)
 	}
+
 	if len(participant.Agent.Capabilities) > 0 {
 		parts = append(parts, "capabilities="+strings.Join(participant.Agent.Capabilities, ","))
 	}
+
 	if participant.Agent.Model != "" {
 		parts = append(parts, "model="+participant.Agent.Model)
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -5007,14 +5844,17 @@ func findCodeSymbol(root, name string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol: index %s: %w", root, err)
 	}
+
 	matches := idx.FindSymbol(name)
 	if len(matches) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range matches {
 		fmt.Println(formatCodeSymbol(root, matches[i]))
 	}
+
 	return nil
 }
 
@@ -5029,36 +5869,44 @@ func listCodeSymbolFileSummary(root string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeSymbolFiles(root, idx)
 	if len(summaries) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodeSymbolFiles(root string, idx codeintel.Index) []codeSymbolFileSummary {
 	summaries := make([]codeSymbolFileSummary, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if len(file.Symbols) == 0 {
 			continue
 		}
+
 		summaries = append(summaries, codeSymbolFileSummary{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
 			Symbols: len(file.Symbols),
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -5076,34 +5924,42 @@ func listCodeSymbolSummary(root string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeSymbols(idx)
 	if len(summaries) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodeSymbols(idx codeintel.Index) []codeSymbolSummary {
 	counts := make(map[string]int)
+
 	for i := range idx.Symbols {
 		if idx.Symbols[i].Kind != "" {
 			counts[idx.Symbols[i].Kind]++
 		}
 	}
+
 	summaries := make([]codeSymbolSummary, 0, len(counts))
 	for kind, count := range counts {
 		summaries = append(summaries, codeSymbolSummary{Kind: kind, Count: count})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Count != summaries[j].Count {
 			return summaries[i].Count > summaries[j].Count
 		}
+
 		return summaries[i].Kind < summaries[j].Kind
 	})
+
 	return summaries
 }
 
@@ -5116,14 +5972,17 @@ func listCodeSymbolKindFileSummary(root, kind string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol kind file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeSymbolKindFiles(root, idx, kind)
 	if len(summaries) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5132,30 +5991,38 @@ func summarizeCodeSymbolKindFiles(root string, idx codeintel.Index, kind string)
 	if kind == "" {
 		return nil
 	}
+
 	summaries := make([]codeSymbolFileSummary, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		count := 0
+
 		for j := range file.Symbols {
 			if strings.EqualFold(file.Symbols[j].Kind, kind) {
 				count++
 			}
 		}
+
 		if count == 0 {
 			continue
 		}
+
 		summaries = append(summaries, codeSymbolFileSummary{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
 			Symbols: count,
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -5164,14 +6031,17 @@ func listCodeSymbolKindPackageSummary(root, kind string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol kind package summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeSymbolKindPackages(idx, kind)
 	if len(summaries) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodePackageSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5180,45 +6050,57 @@ func summarizeCodeSymbolKindPackages(idx codeintel.Index, kind string) []codePac
 	if kind == "" {
 		return nil
 	}
+
 	byPackage := make(map[string]*codePackageSummary)
 	filesByPackage := make(map[string]map[string]struct{})
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if file.Package == "" {
 			continue
 		}
+
 		count := 0
+
 		for j := range file.Symbols {
 			if strings.EqualFold(file.Symbols[j].Kind, kind) {
 				count++
 			}
 		}
+
 		if count == 0 {
 			continue
 		}
+
 		summary, ok := byPackage[file.Package]
 		if !ok {
 			summary = &codePackageSummary{Name: file.Package}
 			byPackage[file.Package] = summary
 			filesByPackage[file.Package] = make(map[string]struct{})
 		}
+
 		summary.Symbols += count
 		filesByPackage[file.Package][file.Path] = struct{}{}
 	}
+
 	summaries := make([]codePackageSummary, 0, len(byPackage))
 	for packageName, summary := range byPackage {
 		summary.Files = len(filesByPackage[packageName])
 		summaries = append(summaries, *summary)
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		if summaries[i].Files != summaries[j].Files {
 			return summaries[i].Files > summaries[j].Files
 		}
+
 		return summaries[i].Name < summaries[j].Name
 	})
+
 	return summaries
 }
 
@@ -5227,14 +6109,17 @@ func findCodeSymbolsByKind(root, kind string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol kind: index %s: %w", root, err)
 	}
+
 	matches := codeSymbolsByKind(idx, kind)
 	if len(matches) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range matches {
 		fmt.Println(formatCodeSymbol(root, matches[i]))
 	}
+
 	return nil
 }
 
@@ -5243,13 +6128,17 @@ func codeSymbolsByKind(idx codeintel.Index, kind string) []codeintel.Symbol {
 	if kind == "" {
 		return nil
 	}
+
 	matches := make([]codeintel.Symbol, 0)
+
 	for i := range idx.Symbols {
 		if strings.EqualFold(idx.Symbols[i].Kind, kind) {
 			matches = append(matches, idx.Symbols[i])
 		}
 	}
+
 	sortCodeSymbols(matches)
+
 	return matches
 }
 
@@ -5258,14 +6147,17 @@ func listCodeSymbolPrefixFileSummary(root, prefix string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol prefix file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeSymbolPrefixFiles(root, idx, prefix)
 	if len(summaries) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5274,30 +6166,38 @@ func summarizeCodeSymbolPrefixFiles(root string, idx codeintel.Index, prefix str
 	if prefix == "" {
 		return nil
 	}
+
 	summaries := make([]codeSymbolFileSummary, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		count := 0
+
 		for j := range file.Symbols {
 			if strings.HasPrefix(file.Symbols[j].Name, prefix) {
 				count++
 			}
 		}
+
 		if count == 0 {
 			continue
 		}
+
 		summaries = append(summaries, codeSymbolFileSummary{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
 			Symbols: count,
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -5306,14 +6206,17 @@ func listCodeSymbolPrefixPackageSummary(root, prefix string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol prefix package summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeSymbolPrefixPackages(idx, prefix)
 	if len(summaries) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodePackageSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5322,45 +6225,57 @@ func summarizeCodeSymbolPrefixPackages(idx codeintel.Index, prefix string) []cod
 	if prefix == "" {
 		return nil
 	}
+
 	byPackage := make(map[string]*codePackageSummary)
 	filesByPackage := make(map[string]map[string]struct{})
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if file.Package == "" {
 			continue
 		}
+
 		count := 0
+
 		for j := range file.Symbols {
 			if strings.HasPrefix(file.Symbols[j].Name, prefix) {
 				count++
 			}
 		}
+
 		if count == 0 {
 			continue
 		}
+
 		summary, ok := byPackage[file.Package]
 		if !ok {
 			summary = &codePackageSummary{Name: file.Package}
 			byPackage[file.Package] = summary
 			filesByPackage[file.Package] = make(map[string]struct{})
 		}
+
 		summary.Symbols += count
 		filesByPackage[file.Package][file.Path] = struct{}{}
 	}
+
 	summaries := make([]codePackageSummary, 0, len(byPackage))
 	for packageName, summary := range byPackage {
 		summary.Files = len(filesByPackage[packageName])
 		summaries = append(summaries, *summary)
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		if summaries[i].Files != summaries[j].Files {
 			return summaries[i].Files > summaries[j].Files
 		}
+
 		return summaries[i].Name < summaries[j].Name
 	})
+
 	return summaries
 }
 
@@ -5369,14 +6284,17 @@ func listCodeSymbolNameFileSummary(root, name string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol name file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeSymbolNameFiles(root, idx, name)
 	if len(summaries) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5385,30 +6303,38 @@ func summarizeCodeSymbolNameFiles(root string, idx codeintel.Index, name string)
 	if name == "" {
 		return nil
 	}
+
 	summaries := make([]codeSymbolFileSummary, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		count := 0
+
 		for j := range file.Symbols {
 			if file.Symbols[j].Name == name {
 				count++
 			}
 		}
+
 		if count == 0 {
 			continue
 		}
+
 		summaries = append(summaries, codeSymbolFileSummary{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
 			Symbols: count,
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -5417,14 +6343,17 @@ func listCodeSymbolNamePackageSummary(root, name string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol name package summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeSymbolNamePackages(idx, name)
 	if len(summaries) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodePackageSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5433,45 +6362,57 @@ func summarizeCodeSymbolNamePackages(idx codeintel.Index, name string) []codePac
 	if name == "" {
 		return nil
 	}
+
 	byPackage := make(map[string]*codePackageSummary)
 	filesByPackage := make(map[string]map[string]struct{})
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if file.Package == "" {
 			continue
 		}
+
 		count := 0
+
 		for j := range file.Symbols {
 			if file.Symbols[j].Name == name {
 				count++
 			}
 		}
+
 		if count == 0 {
 			continue
 		}
+
 		summary, ok := byPackage[file.Package]
 		if !ok {
 			summary = &codePackageSummary{Name: file.Package}
 			byPackage[file.Package] = summary
 			filesByPackage[file.Package] = make(map[string]struct{})
 		}
+
 		summary.Symbols += count
 		filesByPackage[file.Package][file.Path] = struct{}{}
 	}
+
 	summaries := make([]codePackageSummary, 0, len(byPackage))
 	for packageName, summary := range byPackage {
 		summary.Files = len(filesByPackage[packageName])
 		summaries = append(summaries, *summary)
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		if summaries[i].Files != summaries[j].Files {
 			return summaries[i].Files > summaries[j].Files
 		}
+
 		return summaries[i].Name < summaries[j].Name
 	})
+
 	return summaries
 }
 
@@ -5480,14 +6421,17 @@ func findCodeSymbolPrefix(root, prefix string) error {
 	if err != nil {
 		return fmt.Errorf("code symbol prefix: index %s: %w", root, err)
 	}
+
 	matches := codeSymbolsWithPrefix(idx, prefix)
 	if len(matches) == 0 {
 		fmt.Println("No code symbols found.")
 		return nil
 	}
+
 	for i := range matches {
 		fmt.Println(formatCodeSymbol(root, matches[i]))
 	}
+
 	return nil
 }
 
@@ -5496,13 +6440,17 @@ func codeSymbolsWithPrefix(idx codeintel.Index, prefix string) []codeintel.Symbo
 	if prefix == "" {
 		return nil
 	}
+
 	matches := make([]codeintel.Symbol, 0)
+
 	for i := range idx.Symbols {
 		if strings.HasPrefix(idx.Symbols[i].Name, prefix) {
 			matches = append(matches, idx.Symbols[i])
 		}
 	}
+
 	sortCodeSymbols(matches)
+
 	return matches
 }
 
@@ -5511,15 +6459,18 @@ func sortCodeSymbols(symbols []codeintel.Symbol) {
 		if symbols[i].Name != symbols[j].Name {
 			return symbols[i].Name < symbols[j].Name
 		}
+
 		if symbols[i].File != symbols[j].File {
 			return symbols[i].File < symbols[j].File
 		}
+
 		return symbols[i].Line < symbols[j].Line
 	})
 }
 
 func formatCodeSymbol(root string, symbol codeintel.Symbol) string {
 	path := relativeCodePath(root, symbol.File)
+
 	return strings.Join([]string{
 		symbol.Name,
 		"kind=" + symbol.Kind,
@@ -5539,36 +6490,44 @@ func listCodeImportFileSummary(root string) error {
 	if err != nil {
 		return fmt.Errorf("code import file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeImportFiles(root, idx)
 	if len(summaries) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodeImportFiles(root string, idx codeintel.Index) []codeImportFileSummary {
 	summaries := make([]codeImportFileSummary, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if len(file.Imports) == 0 {
 			continue
 		}
+
 		summaries = append(summaries, codeImportFileSummary{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
 			Imports: len(file.Imports),
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Imports != summaries[j].Imports {
 			return summaries[i].Imports > summaries[j].Imports
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -5586,39 +6545,49 @@ func listCodeImportSummary(root string) error {
 	if err != nil {
 		return fmt.Errorf("code import summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeImports(idx)
 	if len(summaries) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodeImports(idx codeintel.Index) []codeImportSummary {
 	filesByImport := make(map[string]map[string]struct{})
+
 	for i := range idx.ImportEdges {
 		edge := idx.ImportEdges[i]
 		if edge.Import == "" {
 			continue
 		}
+
 		if _, ok := filesByImport[edge.Import]; !ok {
 			filesByImport[edge.Import] = make(map[string]struct{})
 		}
+
 		filesByImport[edge.Import][edge.From] = struct{}{}
 	}
+
 	summaries := make([]codeImportSummary, 0, len(filesByImport))
 	for importPath, files := range filesByImport {
 		summaries = append(summaries, codeImportSummary{Path: importPath, Files: len(files)})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Files != summaries[j].Files {
 			return summaries[i].Files > summaries[j].Files
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -5631,14 +6600,17 @@ func listCodeImportPrefixSummary(root, prefix string) error {
 	if err != nil {
 		return fmt.Errorf("code import prefix summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeImportPrefix(idx, prefix)
 	if len(summaries) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5647,12 +6619,14 @@ func summarizeCodeImportPrefix(idx codeintel.Index, prefix string) []codeImportS
 	if prefix == "" {
 		return nil
 	}
+
 	filtered := codeintel.Index{ImportEdges: make([]codeintel.ImportEdge, 0)}
 	for i := range idx.ImportEdges {
 		if strings.HasPrefix(idx.ImportEdges[i].Import, prefix) {
 			filtered.ImportEdges = append(filtered.ImportEdges, idx.ImportEdges[i])
 		}
 	}
+
 	return summarizeCodeImports(filtered)
 }
 
@@ -5661,14 +6635,17 @@ func listCodeImportPrefixFileSummary(root, prefix string) error {
 	if err != nil {
 		return fmt.Errorf("code import prefix file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeImportPrefixFiles(root, idx, prefix)
 	if len(summaries) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5677,21 +6654,27 @@ func summarizeCodeImportPrefixFiles(root string, idx codeintel.Index, prefix str
 	if prefix == "" {
 		return nil
 	}
+
 	packagesByFile := make(map[string]string, len(idx.Files))
 	for i := range idx.Files {
 		packagesByFile[idx.Files[i].Path] = idx.Files[i].Package
 	}
+
 	importsByFile := make(map[string]map[string]struct{})
+
 	for i := range idx.ImportEdges {
 		edge := idx.ImportEdges[i]
 		if !strings.HasPrefix(edge.Import, prefix) {
 			continue
 		}
+
 		if _, ok := importsByFile[edge.From]; !ok {
 			importsByFile[edge.From] = make(map[string]struct{})
 		}
+
 		importsByFile[edge.From][edge.Import] = struct{}{}
 	}
+
 	summaries := make([]codeImportFileSummary, 0, len(importsByFile))
 	for file, imports := range importsByFile {
 		summaries = append(summaries, codeImportFileSummary{
@@ -5700,12 +6683,15 @@ func summarizeCodeImportPrefixFiles(root string, idx codeintel.Index, prefix str
 			Imports: len(imports),
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Imports != summaries[j].Imports {
 			return summaries[i].Imports > summaries[j].Imports
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -5714,14 +6700,17 @@ func listCodeImportPrefixPackageSummary(root, prefix string) error {
 	if err != nil {
 		return fmt.Errorf("code import prefix package summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeImportPrefixPackages(idx, prefix)
 	if len(summaries) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodePackageImportMatchSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5730,28 +6719,35 @@ func summarizeCodeImportPrefixPackages(idx codeintel.Index, prefix string) []cod
 	if prefix == "" {
 		return nil
 	}
+
 	packagesByFile := make(map[string]string, len(idx.Files))
 	for i := range idx.Files {
 		packagesByFile[idx.Files[i].Path] = idx.Files[i].Package
 	}
+
 	filesByPackage := make(map[string]map[string]struct{})
 	importsByPackage := make(map[string]map[string]struct{})
+
 	for i := range idx.ImportEdges {
 		edge := idx.ImportEdges[i]
 		if !strings.HasPrefix(edge.Import, prefix) {
 			continue
 		}
+
 		packageName := packagesByFile[edge.From]
 		if packageName == "" {
 			continue
 		}
+
 		if _, ok := filesByPackage[packageName]; !ok {
 			filesByPackage[packageName] = make(map[string]struct{})
 			importsByPackage[packageName] = make(map[string]struct{})
 		}
+
 		filesByPackage[packageName][edge.From] = struct{}{}
 		importsByPackage[packageName][edge.Import] = struct{}{}
 	}
+
 	summaries := make([]codePackageImportMatchSummary, 0, len(filesByPackage))
 	for packageName, files := range filesByPackage {
 		summaries = append(summaries, codePackageImportMatchSummary{
@@ -5760,7 +6756,9 @@ func summarizeCodeImportPrefixPackages(idx codeintel.Index, prefix string) []cod
 			Imports: len(importsByPackage[packageName]),
 		})
 	}
+
 	sortCodePackageImportMatchSummaries(summaries)
+
 	return summaries
 }
 
@@ -5769,14 +6767,17 @@ func listCodeImportPrefix(root, prefix string) error {
 	if err != nil {
 		return fmt.Errorf("code import prefix: index %s: %w", root, err)
 	}
+
 	edges := codeImportEdgesWithPrefix(idx, prefix)
 	if len(edges) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range edges {
 		fmt.Println(formatCodeImportEdge(root, edges[i]))
 	}
+
 	return nil
 }
 
@@ -5785,13 +6786,17 @@ func codeImportEdgesWithPrefix(idx codeintel.Index, prefix string) []codeintel.I
 	if prefix == "" {
 		return nil
 	}
+
 	edges := make([]codeintel.ImportEdge, 0)
+
 	for i := range idx.ImportEdges {
 		if strings.HasPrefix(idx.ImportEdges[i].Import, prefix) {
 			edges = append(edges, idx.ImportEdges[i])
 		}
 	}
+
 	sortCodeImportEdges(edges)
+
 	return edges
 }
 
@@ -5800,14 +6805,17 @@ func listCodeImportPath(root, importPath string) error {
 	if err != nil {
 		return fmt.Errorf("code import path: index %s: %w", root, err)
 	}
+
 	edges := codeImportEdgesForPath(idx, importPath)
 	if len(edges) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range edges {
 		fmt.Println(formatCodeImportEdge(root, edges[i]))
 	}
+
 	return nil
 }
 
@@ -5816,13 +6824,17 @@ func codeImportEdgesForPath(idx codeintel.Index, importPath string) []codeintel.
 	if importPath == "" {
 		return nil
 	}
+
 	edges := make([]codeintel.ImportEdge, 0)
+
 	for i := range idx.ImportEdges {
 		if idx.ImportEdges[i].Import == importPath {
 			edges = append(edges, idx.ImportEdges[i])
 		}
 	}
+
 	sortCodeImportEdges(edges)
+
 	return edges
 }
 
@@ -5831,14 +6843,17 @@ func listCodeImportPathSummary(root, importPath string) error {
 	if err != nil {
 		return fmt.Errorf("code import path summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeImportPath(idx, importPath)
 	if len(summaries) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5847,6 +6862,7 @@ func summarizeCodeImportPath(idx codeintel.Index, importPath string) []codeImpor
 	if len(edges) == 0 {
 		return nil
 	}
+
 	return summarizeCodeImports(codeintel.Index{ImportEdges: edges})
 }
 
@@ -5855,14 +6871,17 @@ func listCodeImportPathFileSummary(root, importPath string) error {
 	if err != nil {
 		return fmt.Errorf("code import path file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeImportPathFiles(root, idx, importPath)
 	if len(summaries) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5871,17 +6890,21 @@ func summarizeCodeImportPathFiles(root string, idx codeintel.Index, importPath s
 	if importPath == "" {
 		return nil
 	}
+
 	packagesByFile := make(map[string]string, len(idx.Files))
 	for i := range idx.Files {
 		packagesByFile[idx.Files[i].Path] = idx.Files[i].Package
 	}
+
 	files := make(map[string]struct{})
+
 	for i := range idx.ImportEdges {
 		edge := idx.ImportEdges[i]
 		if edge.Import == importPath {
 			files[edge.From] = struct{}{}
 		}
 	}
+
 	summaries := make([]codeImportFileSummary, 0, len(files))
 	for file := range files {
 		summaries = append(summaries, codeImportFileSummary{
@@ -5890,9 +6913,11 @@ func summarizeCodeImportPathFiles(root string, idx codeintel.Index, importPath s
 			Imports: 1,
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -5901,14 +6926,17 @@ func listCodeImportPathPackageSummary(root, importPath string) error {
 	if err != nil {
 		return fmt.Errorf("code import path package summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodeImportPathPackages(idx, importPath)
 	if len(summaries) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodePackageImportMatchSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -5917,25 +6945,32 @@ func summarizeCodeImportPathPackages(idx codeintel.Index, importPath string) []c
 	if importPath == "" {
 		return nil
 	}
+
 	packagesByFile := make(map[string]string, len(idx.Files))
 	for i := range idx.Files {
 		packagesByFile[idx.Files[i].Path] = idx.Files[i].Package
 	}
+
 	filesByPackage := make(map[string]map[string]struct{})
+
 	for i := range idx.ImportEdges {
 		edge := idx.ImportEdges[i]
 		if edge.Import != importPath {
 			continue
 		}
+
 		packageName := packagesByFile[edge.From]
 		if packageName == "" {
 			continue
 		}
+
 		if _, ok := filesByPackage[packageName]; !ok {
 			filesByPackage[packageName] = make(map[string]struct{})
 		}
+
 		filesByPackage[packageName][edge.From] = struct{}{}
 	}
+
 	summaries := make([]codePackageImportMatchSummary, 0, len(filesByPackage))
 	for packageName, files := range filesByPackage {
 		summaries = append(summaries, codePackageImportMatchSummary{
@@ -5943,7 +6978,9 @@ func summarizeCodeImportPathPackages(idx codeintel.Index, importPath string) []c
 			Files: len(files),
 		})
 	}
+
 	sortCodePackageImportMatchSummaries(summaries)
+
 	return summaries
 }
 
@@ -5952,6 +6989,7 @@ func sortCodeImportEdges(edges []codeintel.ImportEdge) {
 		if edges[i].From != edges[j].From {
 			return edges[i].From < edges[j].From
 		}
+
 		return edges[i].Import < edges[j].Import
 	})
 }
@@ -5961,13 +6999,16 @@ func listCodeImports(root string) error {
 	if err != nil {
 		return fmt.Errorf("code imports: index %s: %w", root, err)
 	}
+
 	if len(idx.ImportEdges) == 0 {
 		fmt.Println("No code imports found.")
 		return nil
 	}
+
 	for i := range idx.ImportEdges {
 		fmt.Println(formatCodeImportEdge(root, idx.ImportEdges[i]))
 	}
+
 	return nil
 }
 
@@ -5976,14 +7017,17 @@ func listCodeImpact(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("code impact: %w", err)
 	}
+
 	impact := graph.ImpactSet(normalizeCodeGraphTarget(root, target))
 	if len(impact) == 0 {
 		fmt.Println("No code impact found.")
 		return nil
 	}
+
 	for _, node := range impact {
 		fmt.Println("path=" + string(node))
 	}
+
 	return nil
 }
 
@@ -5992,19 +7036,23 @@ func listCodeFileImports(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("code file imports: index %s: %w", root, err)
 	}
+
 	file, ok := findCodeFile(root, idx, target)
 	if !ok {
 		fmt.Println("No Go code file found.")
 		return nil
 	}
+
 	imports := codeFileImports(file)
 	if len(imports) == 0 {
 		fmt.Println("No Go code file imports found.")
 		return nil
 	}
+
 	for _, imp := range imports {
 		fmt.Println("import=" + imp)
 	}
+
 	return nil
 }
 
@@ -6012,8 +7060,10 @@ func codeFileImports(file codeintel.File) []string {
 	if len(file.Imports) == 0 {
 		return nil
 	}
+
 	imports := append([]string(nil), file.Imports...)
 	sort.Strings(imports)
+
 	return imports
 }
 
@@ -6022,23 +7072,28 @@ func listCodeFileImportPath(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code file import path: index %s: %w", root, err)
 	}
+
 	file, ok := findCodeFile(root, idx, target)
 	if !ok {
 		fmt.Println("No Go code file found.")
 		return nil
 	}
+
 	imports := codeFileImportsForPath(file, importPath)
 	if len(imports) == 0 {
 		fmt.Println("No Go code file imports found.")
 		return nil
 	}
+
 	for _, imp := range imports {
 		fmt.Println("import=" + imp)
 	}
+
 	return nil
 }
 
@@ -6047,13 +7102,17 @@ func codeFileImportsForPath(file codeintel.File, importPath string) []string {
 	if importPath == "" {
 		return nil
 	}
+
 	imports := make([]string, 0, 1)
+
 	for _, imp := range file.Imports {
 		if imp == importPath {
 			imports = append(imports, imp)
 		}
 	}
+
 	sort.Strings(imports)
+
 	return imports
 }
 
@@ -6062,23 +7121,28 @@ func listCodeFileImportPrefix(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code file import prefix: index %s: %w", root, err)
 	}
+
 	file, ok := findCodeFile(root, idx, target)
 	if !ok {
 		fmt.Println("No Go code file found.")
 		return nil
 	}
+
 	imports := codeFileImportsWithPrefix(file, prefix)
 	if len(imports) == 0 {
 		fmt.Println("No Go code file imports found.")
 		return nil
 	}
+
 	for _, imp := range imports {
 		fmt.Println("import=" + imp)
 	}
+
 	return nil
 }
 
@@ -6087,13 +7151,17 @@ func codeFileImportsWithPrefix(file codeintel.File, prefix string) []string {
 	if prefix == "" {
 		return nil
 	}
+
 	imports := make([]string, 0)
+
 	for _, imp := range file.Imports {
 		if strings.HasPrefix(imp, prefix) {
 			imports = append(imports, imp)
 		}
 	}
+
 	sort.Strings(imports)
+
 	return imports
 }
 
@@ -6102,19 +7170,23 @@ func listCodeFileSymbolSummary(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("code file symbol summary: index %s: %w", root, err)
 	}
+
 	file, ok := findCodeFile(root, idx, target)
 	if !ok {
 		fmt.Println("No Go code file found.")
 		return nil
 	}
+
 	summaries := summarizeCodeFileSymbols(file)
 	if len(summaries) == 0 {
 		fmt.Println("No Go code file symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -6127,19 +7199,23 @@ func listCodeFileSymbols(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("code file symbols: index %s: %w", root, err)
 	}
+
 	file, ok := findCodeFile(root, idx, target)
 	if !ok {
 		fmt.Println("No Go code file found.")
 		return nil
 	}
+
 	symbols := codeFileSymbols(file)
 	if len(symbols) == 0 {
 		fmt.Println("No Go code file symbols found.")
 		return nil
 	}
+
 	for i := range symbols {
 		fmt.Println(formatCodeFileSymbol(symbols[i]))
 	}
+
 	return nil
 }
 
@@ -6147,8 +7223,10 @@ func codeFileSymbols(file codeintel.File) []codeintel.Symbol {
 	if len(file.Symbols) == 0 {
 		return nil
 	}
+
 	symbols := append([]codeintel.Symbol(nil), file.Symbols...)
 	sortCodeSymbols(symbols)
+
 	return symbols
 }
 
@@ -6157,23 +7235,28 @@ func listCodeFileSymbol(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code file symbol: index %s: %w", root, err)
 	}
+
 	file, ok := findCodeFile(root, idx, target)
 	if !ok {
 		fmt.Println("No Go code file found.")
 		return nil
 	}
+
 	symbols := codeFileSymbolsByName(file, name)
 	if len(symbols) == 0 {
 		fmt.Println("No Go code file symbols found.")
 		return nil
 	}
+
 	for i := range symbols {
 		fmt.Println(formatCodeFileSymbol(symbols[i]))
 	}
+
 	return nil
 }
 
@@ -6182,13 +7265,17 @@ func codeFileSymbolsByName(file codeintel.File, name string) []codeintel.Symbol 
 	if name == "" {
 		return nil
 	}
+
 	symbols := make([]codeintel.Symbol, 0)
+
 	for i := range file.Symbols {
 		if file.Symbols[i].Name == name {
 			symbols = append(symbols, file.Symbols[i])
 		}
 	}
+
 	sortCodeSymbols(symbols)
+
 	return symbols
 }
 
@@ -6197,23 +7284,28 @@ func listCodeFileSymbolPrefix(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code file symbol prefix: index %s: %w", root, err)
 	}
+
 	file, ok := findCodeFile(root, idx, target)
 	if !ok {
 		fmt.Println("No Go code file found.")
 		return nil
 	}
+
 	symbols := codeFileSymbolsWithPrefix(file, prefix)
 	if len(symbols) == 0 {
 		fmt.Println("No Go code file symbols found.")
 		return nil
 	}
+
 	for i := range symbols {
 		fmt.Println(formatCodeFileSymbol(symbols[i]))
 	}
+
 	return nil
 }
 
@@ -6222,13 +7314,17 @@ func codeFileSymbolsWithPrefix(file codeintel.File, prefix string) []codeintel.S
 	if prefix == "" {
 		return nil
 	}
+
 	symbols := make([]codeintel.Symbol, 0)
+
 	for i := range file.Symbols {
 		if strings.HasPrefix(file.Symbols[i].Name, prefix) {
 			symbols = append(symbols, file.Symbols[i])
 		}
 	}
+
 	sortCodeSymbols(symbols)
+
 	return symbols
 }
 
@@ -6237,23 +7333,28 @@ func listCodeFileSymbolKind(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code file symbol kind: index %s: %w", root, err)
 	}
+
 	file, ok := findCodeFile(root, idx, target)
 	if !ok {
 		fmt.Println("No Go code file found.")
 		return nil
 	}
+
 	symbols := codeFileSymbolsByKind(file, kind)
 	if len(symbols) == 0 {
 		fmt.Println("No Go code file symbols found.")
 		return nil
 	}
+
 	for i := range symbols {
 		fmt.Println(formatCodeFileSymbol(symbols[i]))
 	}
+
 	return nil
 }
 
@@ -6266,11 +7367,14 @@ func parseCodeFileSymbolFilterSpec(spec, label, expected string) (target, value 
 	if len(parts) != 2 {
 		return "", "", fmt.Errorf("%s: expected %s", label, expected)
 	}
+
 	target = strings.TrimSpace(parts[0])
+
 	value = strings.TrimSpace(parts[1])
 	if target == "" || value == "" {
 		return "", "", fmt.Errorf("%s: path and value are required", label)
 	}
+
 	return target, value, nil
 }
 
@@ -6279,13 +7383,17 @@ func codeFileSymbolsByKind(file codeintel.File, kind string) []codeintel.Symbol 
 	if kind == "" {
 		return nil
 	}
+
 	symbols := make([]codeintel.Symbol, 0)
+
 	for i := range file.Symbols {
 		if strings.EqualFold(file.Symbols[i].Kind, kind) {
 			symbols = append(symbols, file.Symbols[i])
 		}
 	}
+
 	sortCodeSymbols(symbols)
+
 	return symbols
 }
 
@@ -6294,37 +7402,47 @@ func showCodeFile(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("code file: index %s: %w", root, err)
 	}
+
 	file, ok := findCodeFile(root, idx, target)
 	if !ok {
 		fmt.Println("No Go code file found.")
 		return nil
 	}
+
 	printCodeFile(root, file)
+
 	return nil
 }
 
 func findCodeFile(root string, idx codeintel.Index, target string) (codeintel.File, bool) {
 	target = filepath.ToSlash(strings.TrimSpace(target))
+
 	for i := range idx.Files {
 		rel := relativeCodePath(root, idx.Files[i].Path)
+
 		abs := filepath.ToSlash(idx.Files[i].Path)
 		if rel == target || abs == target {
 			return idx.Files[i], true
 		}
 	}
+
 	return codeintel.File{}, false
 }
 
 func printCodeFile(root string, file codeintel.File) {
 	fmt.Println(formatCodeFile(root, file))
+
 	if len(file.Imports) > 0 {
 		fmt.Println("imports:")
+
 		for _, imp := range file.Imports {
 			fmt.Println("  - " + imp)
 		}
 	}
+
 	if len(file.Symbols) > 0 {
 		fmt.Println("symbols:")
+
 		for i := range file.Symbols {
 			fmt.Println("  - " + formatCodeFileSymbol(file.Symbols[i]))
 		}
@@ -6344,14 +7462,17 @@ func listCodePackageSymbolFileSummary(root, packageName string) error {
 	if err != nil {
 		return fmt.Errorf("code package symbol file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageSymbolFiles(root, idx, packageName)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -6360,24 +7481,30 @@ func summarizeCodePackageSymbolFiles(root string, idx codeintel.Index, packageNa
 	if packageName == "" {
 		return nil
 	}
+
 	summaries := make([]codeSymbolFileSummary, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if file.Package != packageName || len(file.Symbols) == 0 {
 			continue
 		}
+
 		summaries = append(summaries, codeSymbolFileSummary{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
 			Symbols: len(file.Symbols),
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -6386,18 +7513,22 @@ func listCodePackageSymbol(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package symbol: index %s: %w", root, err)
 	}
+
 	symbols := codePackageSymbolsByName(idx, packageName, name)
 	if len(symbols) == 0 {
 		fmt.Println("No Go package symbols found.")
 		return nil
 	}
+
 	for i := range symbols {
 		fmt.Println(formatCodeSymbol(root, symbols[i]))
 	}
+
 	return nil
 }
 
@@ -6406,16 +7537,19 @@ func codePackageSymbolsByName(idx codeintel.Index, packageName, name string) []c
 	if len(symbols) == 0 {
 		return nil
 	}
+
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil
 	}
+
 	filtered := make([]codeintel.Symbol, 0, len(symbols))
 	for i := range symbols {
 		if symbols[i].Name == name {
 			filtered = append(filtered, symbols[i])
 		}
 	}
+
 	return filtered
 }
 
@@ -6424,54 +7558,68 @@ func listCodePackageSymbolNameFileSummary(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package symbol name file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageSymbolNameFiles(root, idx, packageName, name)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodePackageSymbolNameFiles(root string, idx codeintel.Index, packageName, name string) []codeSymbolFileSummary {
 	packageName = strings.TrimSpace(packageName)
+
 	name = strings.TrimSpace(name)
 	if packageName == "" || name == "" {
 		return nil
 	}
+
 	summaries := make([]codeSymbolFileSummary, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if file.Package != packageName {
 			continue
 		}
+
 		count := 0
+
 		for j := range file.Symbols {
 			if file.Symbols[j].Name == name {
 				count++
 			}
 		}
+
 		if count == 0 {
 			continue
 		}
+
 		summaries = append(summaries, codeSymbolFileSummary{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
 			Symbols: count,
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -6480,18 +7628,22 @@ func listCodePackageSymbolKind(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package symbol kind: index %s: %w", root, err)
 	}
+
 	symbols := codePackageSymbolsByKind(idx, packageName, kind)
 	if len(symbols) == 0 {
 		fmt.Println("No Go package symbols found.")
 		return nil
 	}
+
 	for i := range symbols {
 		fmt.Println(formatCodeSymbol(root, symbols[i]))
 	}
+
 	return nil
 }
 
@@ -6500,11 +7652,14 @@ func parseCodePackageSymbolKindSpec(spec string) (packageName, kind string, err 
 	if len(parts) != 2 {
 		return "", "", errors.New("code package symbol kind: expected package:kind")
 	}
+
 	packageName = strings.TrimSpace(parts[0])
+
 	kind = strings.TrimSpace(parts[1])
 	if packageName == "" || kind == "" {
 		return "", "", errors.New("code package symbol kind: package and kind are required")
 	}
+
 	return packageName, kind, nil
 }
 
@@ -6513,16 +7668,19 @@ func codePackageSymbolsByKind(idx codeintel.Index, packageName, kind string) []c
 	if len(symbols) == 0 {
 		return nil
 	}
+
 	kind = strings.TrimSpace(kind)
 	if kind == "" {
 		return nil
 	}
+
 	filtered := make([]codeintel.Symbol, 0, len(symbols))
 	for i := range symbols {
 		if strings.EqualFold(symbols[i].Kind, kind) {
 			filtered = append(filtered, symbols[i])
 		}
 	}
+
 	return filtered
 }
 
@@ -6531,54 +7689,68 @@ func listCodePackageSymbolPrefixFileSummary(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package symbol prefix file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageSymbolPrefixFiles(root, idx, packageName, prefix)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodePackageSymbolPrefixFiles(root string, idx codeintel.Index, packageName, prefix string) []codeSymbolFileSummary {
 	packageName = strings.TrimSpace(packageName)
+
 	prefix = strings.TrimSpace(prefix)
 	if packageName == "" || prefix == "" {
 		return nil
 	}
+
 	summaries := make([]codeSymbolFileSummary, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if file.Package != packageName {
 			continue
 		}
+
 		count := 0
+
 		for j := range file.Symbols {
 			if strings.HasPrefix(file.Symbols[j].Name, prefix) {
 				count++
 			}
 		}
+
 		if count == 0 {
 			continue
 		}
+
 		summaries = append(summaries, codeSymbolFileSummary{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
 			Symbols: count,
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -6587,54 +7759,68 @@ func listCodePackageSymbolKindFileSummary(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package symbol kind file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageSymbolKindFiles(root, idx, packageName, kind)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodePackageSymbolKindFiles(root string, idx codeintel.Index, packageName, kind string) []codeSymbolFileSummary {
 	packageName = strings.TrimSpace(packageName)
+
 	kind = strings.TrimSpace(kind)
 	if packageName == "" || kind == "" {
 		return nil
 	}
+
 	summaries := make([]codeSymbolFileSummary, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if file.Package != packageName {
 			continue
 		}
+
 		count := 0
+
 		for j := range file.Symbols {
 			if strings.EqualFold(file.Symbols[j].Kind, kind) {
 				count++
 			}
 		}
+
 		if count == 0 {
 			continue
 		}
+
 		summaries = append(summaries, codeSymbolFileSummary{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
 			Symbols: count,
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Symbols != summaries[j].Symbols {
 			return summaries[i].Symbols > summaries[j].Symbols
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -6643,18 +7829,22 @@ func listCodePackageSymbolPrefix(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package symbol prefix: index %s: %w", root, err)
 	}
+
 	symbols := codePackageSymbolsWithPrefix(idx, packageName, prefix)
 	if len(symbols) == 0 {
 		fmt.Println("No Go package symbols found.")
 		return nil
 	}
+
 	for i := range symbols {
 		fmt.Println(formatCodeSymbol(root, symbols[i]))
 	}
+
 	return nil
 }
 
@@ -6663,16 +7853,19 @@ func codePackageSymbolsWithPrefix(idx codeintel.Index, packageName, prefix strin
 	if len(symbols) == 0 {
 		return nil
 	}
+
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
 		return nil
 	}
+
 	filtered := make([]codeintel.Symbol, 0, len(symbols))
 	for i := range symbols {
 		if strings.HasPrefix(symbols[i].Name, prefix) {
 			filtered = append(filtered, symbols[i])
 		}
 	}
+
 	return filtered
 }
 
@@ -6681,14 +7874,17 @@ func listCodePackageSymbolList(root, packageName string) error {
 	if err != nil {
 		return fmt.Errorf("code package symbol list: index %s: %w", root, err)
 	}
+
 	symbols := codePackageSymbols(idx, packageName)
 	if len(symbols) == 0 {
 		fmt.Println("No Go package symbols found.")
 		return nil
 	}
+
 	for i := range symbols {
 		fmt.Println(formatCodeSymbol(root, symbols[i]))
 	}
+
 	return nil
 }
 
@@ -6697,13 +7893,17 @@ func codePackageSymbols(idx codeintel.Index, packageName string) []codeintel.Sym
 	if packageName == "" {
 		return nil
 	}
+
 	symbols := make([]codeintel.Symbol, 0)
+
 	for i := range idx.Files {
 		if idx.Files[i].Package == packageName {
 			symbols = append(symbols, idx.Files[i].Symbols...)
 		}
 	}
+
 	sortCodeSymbols(symbols)
+
 	return symbols
 }
 
@@ -6712,14 +7912,17 @@ func listCodePackageSymbols(root, packageName string) error {
 	if err != nil {
 		return fmt.Errorf("code package symbols: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageSymbols(idx, packageName)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package symbols found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeSymbolSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -6728,12 +7931,15 @@ func summarizeCodePackageSymbols(idx codeintel.Index, packageName string) []code
 	if packageName == "" {
 		return nil
 	}
+
 	filtered := codeintel.Index{Symbols: make([]codeintel.Symbol, 0)}
+
 	for i := range idx.Files {
 		if idx.Files[i].Package == packageName {
 			filtered.Symbols = append(filtered.Symbols, idx.Files[i].Symbols...)
 		}
 	}
+
 	return summarizeCodeSymbols(filtered)
 }
 
@@ -6742,14 +7948,17 @@ func listCodePackageImportFileSummary(root, packageName string) error {
 	if err != nil {
 		return fmt.Errorf("code package import file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageImportFiles(root, idx, packageName)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -6758,24 +7967,30 @@ func summarizeCodePackageImportFiles(root string, idx codeintel.Index, packageNa
 	if packageName == "" {
 		return nil
 	}
+
 	summaries := make([]codeImportFileSummary, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if file.Package != packageName || len(file.Imports) == 0 {
 			continue
 		}
+
 		summaries = append(summaries, codeImportFileSummary{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
 			Imports: len(file.Imports),
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Imports != summaries[j].Imports {
 			return summaries[i].Imports > summaries[j].Imports
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -6784,18 +7999,22 @@ func listCodePackageImportPrefixFileSummary(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package import prefix file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageImportPrefixFiles(root, idx, packageName, prefix)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package import files found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -6804,6 +8023,7 @@ func summarizeCodePackageImportPrefixFiles(root string, idx codeintel.Index, pac
 	if len(edges) == 0 {
 		return edgesToCodeImportFileSummaries(root, idx, nil)
 	}
+
 	return edgesToCodeImportFileSummaries(root, idx, edges)
 }
 
@@ -6811,18 +8031,23 @@ func edgesToCodeImportFileSummaries(root string, idx codeintel.Index, edges []co
 	if len(edges) == 0 {
 		return nil
 	}
+
 	packagesByFile := make(map[string]string, len(idx.Files))
 	for i := range idx.Files {
 		packagesByFile[idx.Files[i].Path] = idx.Files[i].Package
 	}
+
 	importsByFile := make(map[string]map[string]struct{})
+
 	for i := range edges {
 		edge := edges[i]
 		if _, ok := importsByFile[edge.From]; !ok {
 			importsByFile[edge.From] = make(map[string]struct{})
 		}
+
 		importsByFile[edge.From][edge.Import] = struct{}{}
 	}
+
 	summaries := make([]codeImportFileSummary, 0, len(importsByFile))
 	for file, imports := range importsByFile {
 		summaries = append(summaries, codeImportFileSummary{
@@ -6831,12 +8056,15 @@ func edgesToCodeImportFileSummaries(root string, idx codeintel.Index, edges []co
 			Imports: len(imports),
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Imports != summaries[j].Imports {
 			return summaries[i].Imports > summaries[j].Imports
 		}
+
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -6845,54 +8073,70 @@ func listCodePackageImportPrefixFiles(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package import prefix files: index %s: %w", root, err)
 	}
+
 	edges := codePackageImportPrefixFiles(idx, packageName, prefix)
 	if len(edges) == 0 {
 		fmt.Println("No Go package import files found.")
 		return nil
 	}
+
 	for i := range edges {
 		fmt.Println(formatCodeImportEdge(root, edges[i]))
 	}
+
 	return nil
 }
 
 func codePackageImportPrefixFiles(idx codeintel.Index, packageName, prefix string) []codeintel.ImportEdge {
 	packageName = strings.TrimSpace(packageName)
+
 	prefix = strings.TrimSpace(prefix)
 	if packageName == "" || prefix == "" {
 		return nil
 	}
+
 	packageFiles := make(map[string]struct{})
+
 	for i := range idx.Files {
 		if idx.Files[i].Package == packageName {
 			packageFiles[idx.Files[i].Path] = struct{}{}
 		}
 	}
+
 	if len(packageFiles) == 0 {
 		return nil
 	}
+
 	seen := make(map[string]struct{})
 	edges := make([]codeintel.ImportEdge, 0)
+
 	for i := range idx.ImportEdges {
 		edge := idx.ImportEdges[i]
 		if !strings.HasPrefix(edge.Import, prefix) {
 			continue
 		}
+
 		if _, ok := packageFiles[edge.From]; !ok {
 			continue
 		}
+
 		seenKey := edge.From + "\x00" + edge.Import
 		if _, ok := seen[seenKey]; ok {
 			continue
 		}
+
 		seen[seenKey] = struct{}{}
+
 		edges = append(edges, edge)
 	}
+
 	sortCodeImportEdges(edges)
+
 	return edges
 }
 
@@ -6901,54 +8145,69 @@ func listCodePackageImportFiles(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package import files: index %s: %w", root, err)
 	}
+
 	files := codePackageImportFiles(root, idx, packageName, importPath)
 	if len(files) == 0 {
 		fmt.Println("No Go package import files found.")
 		return nil
 	}
+
 	for _, file := range files {
 		fmt.Println("path=" + file + "	import=" + importPath)
 	}
+
 	return nil
 }
 
 func codePackageImportFiles(root string, idx codeintel.Index, packageName, importPath string) []string {
 	packageName = strings.TrimSpace(packageName)
+
 	importPath = strings.TrimSpace(importPath)
 	if packageName == "" || importPath == "" {
 		return nil
 	}
+
 	packageFiles := make(map[string]struct{})
+
 	for i := range idx.Files {
 		if idx.Files[i].Package == packageName {
 			packageFiles[idx.Files[i].Path] = struct{}{}
 		}
 	}
+
 	if len(packageFiles) == 0 {
 		return nil
 	}
+
 	seen := make(map[string]struct{})
 	files := make([]string, 0)
+
 	for i := range idx.ImportEdges {
 		edge := idx.ImportEdges[i]
 		if edge.Import != importPath {
 			continue
 		}
+
 		if _, ok := packageFiles[edge.From]; !ok {
 			continue
 		}
+
 		rel := relativeCodePath(root, edge.From)
 		if _, ok := seen[rel]; ok {
 			continue
 		}
+
 		seen[rel] = struct{}{}
 		files = append(files, rel)
 	}
+
 	sort.Strings(files)
+
 	return files
 }
 
@@ -6957,47 +8216,60 @@ func listCodePackageImportPathFileSummary(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package import path file summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageImportPathFiles(root, idx, packageName, importPath)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package import files found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportFileSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodePackageImportPathFiles(root string, idx codeintel.Index, packageName, importPath string) []codeImportFileSummary {
 	packageName = strings.TrimSpace(packageName)
+
 	importPath = strings.TrimSpace(importPath)
 	if packageName == "" || importPath == "" {
 		return nil
 	}
+
 	packageFiles := make(map[string]struct{})
+
 	for i := range idx.Files {
 		if idx.Files[i].Package == packageName {
 			packageFiles[idx.Files[i].Path] = struct{}{}
 		}
 	}
+
 	if len(packageFiles) == 0 {
 		return nil
 	}
+
 	files := make(map[string]struct{})
+
 	for i := range idx.ImportEdges {
 		edge := idx.ImportEdges[i]
 		if edge.Import != importPath {
 			continue
 		}
+
 		if _, ok := packageFiles[edge.From]; !ok {
 			continue
 		}
+
 		files[edge.From] = struct{}{}
 	}
+
 	summaries := make([]codeImportFileSummary, 0, len(files))
 	for file := range files {
 		summaries = append(summaries, codeImportFileSummary{
@@ -7006,9 +8278,11 @@ func summarizeCodePackageImportPathFiles(root string, idx codeintel.Index, packa
 			Imports: 1,
 		})
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		return summaries[i].Path < summaries[j].Path
 	})
+
 	return summaries
 }
 
@@ -7017,34 +8291,42 @@ func listCodePackageImportPath(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package import path: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageImportPath(idx, packageName, importPath)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodePackageImportPath(idx codeintel.Index, packageName, importPath string) []codeImportSummary {
 	packageName = strings.TrimSpace(packageName)
+
 	importPath = strings.TrimSpace(importPath)
 	if packageName == "" || importPath == "" {
 		return nil
 	}
+
 	all := summarizeCodePackageImports(idx, packageName)
 	filtered := make([]codeImportSummary, 0, 1)
+
 	for i := range all {
 		if all[i].Path == importPath {
 			filtered = append(filtered, all[i])
 		}
 	}
+
 	return filtered
 }
 
@@ -7053,34 +8335,42 @@ func listCodePackageImportPrefix(root, spec string) error {
 	if err != nil {
 		return err
 	}
+
 	idx, err := codeintel.IndexDir(root)
 	if err != nil {
 		return fmt.Errorf("code package import prefix: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageImportPrefix(idx, packageName, prefix)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodePackageImportPrefix(idx codeintel.Index, packageName, prefix string) []codeImportSummary {
 	packageName = strings.TrimSpace(packageName)
+
 	prefix = strings.TrimSpace(prefix)
 	if packageName == "" || prefix == "" {
 		return nil
 	}
+
 	all := summarizeCodePackageImports(idx, packageName)
+
 	filtered := make([]codeImportSummary, 0, len(all))
 	for i := range all {
 		if strings.HasPrefix(all[i].Path, prefix) {
 			filtered = append(filtered, all[i])
 		}
 	}
+
 	return filtered
 }
 
@@ -7089,14 +8379,17 @@ func listCodePackageImports(root, packageName string) error {
 	if err != nil {
 		return fmt.Errorf("code package imports: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageImports(idx, packageName)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodeImportSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -7105,21 +8398,26 @@ func summarizeCodePackageImports(idx codeintel.Index, packageName string) []code
 	if packageName == "" {
 		return nil
 	}
+
 	files := make(map[string]struct{})
+
 	for i := range idx.Files {
 		if idx.Files[i].Package == packageName {
 			files[idx.Files[i].Path] = struct{}{}
 		}
 	}
+
 	if len(files) == 0 {
 		return nil
 	}
+
 	filtered := codeintel.Index{ImportEdges: make([]codeintel.ImportEdge, 0)}
 	for i := range idx.ImportEdges {
 		if _, ok := files[idx.ImportEdges[i].From]; ok {
 			filtered.ImportEdges = append(filtered.ImportEdges, idx.ImportEdges[i])
 		}
 	}
+
 	return summarizeCodeImports(filtered)
 }
 
@@ -7128,14 +8426,17 @@ func listCodeFiles(root string) error {
 	if err != nil {
 		return fmt.Errorf("code files: index %s: %w", root, err)
 	}
+
 	files := summarizeCodeFiles(root, idx)
 	if len(files) == 0 {
 		fmt.Println("No Go files found.")
 		return nil
 	}
+
 	for i := range files {
 		fmt.Println(formatCodePackageFile(files[i]))
 	}
+
 	return nil
 }
 
@@ -7150,7 +8451,9 @@ func summarizeCodeFiles(root string, idx codeintel.Index) []codePackageFile {
 			Imports: len(file.Imports),
 		})
 	}
+
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+
 	return files
 }
 
@@ -7159,14 +8462,17 @@ func listCodePackageFiles(root, name string) error {
 	if err != nil {
 		return fmt.Errorf("code package: index %s: %w", root, err)
 	}
+
 	files := summarizeCodePackageFiles(root, idx, name)
 	if len(files) == 0 {
 		fmt.Println("No Go package files found.")
 		return nil
 	}
+
 	for i := range files {
 		fmt.Println(formatCodePackageFile(files[i]))
 	}
+
 	return nil
 }
 
@@ -7180,11 +8486,13 @@ type codePackageFile struct {
 func summarizeCodePackageFiles(root string, idx codeintel.Index, name string) []codePackageFile {
 	name = strings.TrimSpace(name)
 	files := make([]codePackageFile, 0)
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if file.Package != name {
 			continue
 		}
+
 		files = append(files, codePackageFile{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
@@ -7192,7 +8500,9 @@ func summarizeCodePackageFiles(root string, idx codeintel.Index, name string) []
 			Imports: len(file.Imports),
 		})
 	}
+
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+
 	return files
 }
 
@@ -7221,6 +8531,7 @@ func formatCodePackageImportMatchSummary(summary codePackageImportMatchSummary) 
 	if summary.Imports > 0 {
 		parts = append(parts, "imports="+strconv.Itoa(summary.Imports))
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -7229,9 +8540,11 @@ func sortCodePackageImportMatchSummaries(summaries []codePackageImportMatchSumma
 		if summaries[i].Imports != summaries[j].Imports {
 			return summaries[i].Imports > summaries[j].Imports
 		}
+
 		if summaries[i].Files != summaries[j].Files {
 			return summaries[i].Files > summaries[j].Files
 		}
+
 		return summaries[i].Name < summaries[j].Name
 	})
 }
@@ -7241,32 +8554,39 @@ func listCodePackageImportSummary(root string) error {
 	if err != nil {
 		return fmt.Errorf("code package import summary: index %s: %w", root, err)
 	}
+
 	summaries := summarizeCodePackageImportCounts(idx)
 	if len(summaries) == 0 {
 		fmt.Println("No Go package imports found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatCodePackageImportSummary(summaries[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodePackageImportCounts(idx codeintel.Index) []codePackageImportSummary {
 	byPackage := make(map[string]*codePackageImportSummary)
 	uniqueByPackage := make(map[string]map[string]struct{})
+
 	for i := range idx.Files {
 		file := idx.Files[i]
 		if file.Package == "" {
 			continue
 		}
+
 		summary, ok := byPackage[file.Package]
 		if !ok {
 			summary = &codePackageImportSummary{Name: file.Package}
 			byPackage[file.Package] = summary
 			uniqueByPackage[file.Package] = make(map[string]struct{})
 		}
+
 		summary.Files++
+
 		summary.Imports += len(file.Imports)
 		for _, imp := range file.Imports {
 			if imp != "" {
@@ -7274,20 +8594,25 @@ func summarizeCodePackageImportCounts(idx codeintel.Index) []codePackageImportSu
 			}
 		}
 	}
+
 	summaries := make([]codePackageImportSummary, 0, len(byPackage))
 	for name, summary := range byPackage {
 		summary.UniqueImports = len(uniqueByPackage[name])
 		if summary.Imports == 0 {
 			continue
 		}
+
 		summaries = append(summaries, *summary)
 	}
+
 	sort.Slice(summaries, func(i, j int) bool {
 		if summaries[i].Imports != summaries[j].Imports {
 			return summaries[i].Imports > summaries[j].Imports
 		}
+
 		return summaries[i].Name < summaries[j].Name
 	})
+
 	return summaries
 }
 
@@ -7306,42 +8631,52 @@ func listCodePackages(root string) error {
 	if err != nil {
 		return fmt.Errorf("code packages: index %s: %w", root, err)
 	}
+
 	packages := summarizeCodePackages(idx)
 	if len(packages) == 0 {
 		fmt.Println("No Go packages found.")
 		return nil
 	}
+
 	for i := range packages {
 		fmt.Println(formatCodePackageSummary(packages[i]))
 	}
+
 	return nil
 }
 
 func summarizeCodePackages(idx codeintel.Index) []codePackageSummary {
 	byPackage := make(map[string]*codePackageSummary)
+
 	for i := range idx.Files {
 		name := idx.Files[i].Package
 		if name == "" {
 			continue
 		}
+
 		summary, ok := byPackage[name]
 		if !ok {
 			summary = &codePackageSummary{Name: name}
 			byPackage[name] = summary
 		}
+
 		summary.Files++
 		summary.Symbols += len(idx.Files[i].Symbols)
 	}
+
 	packages := make([]codePackageSummary, 0, len(byPackage))
 	for _, summary := range byPackage {
 		packages = append(packages, *summary)
 	}
+
 	sort.Slice(packages, func(i, j int) bool {
 		if packages[i].Name != packages[j].Name {
 			return packages[i].Name < packages[j].Name
 		}
+
 		return packages[i].Files < packages[j].Files
 	})
+
 	return packages
 }
 
@@ -7365,8 +8700,10 @@ func printCodeSummary(root string) error {
 	if err != nil {
 		return fmt.Errorf("code summary: index %s: %w", root, err)
 	}
+
 	graph := importGraphFromIndex(root, idx)
 	layers, layerErr := graph.TopologicalLayers()
+
 	summary := codeSummary{
 		Files:    len(idx.Files),
 		Packages: countPackages(idx.Files),
@@ -7379,17 +8716,21 @@ func printCodeSummary(root string) error {
 	if layerErr == nil {
 		summary.Layers = len(layers)
 	}
+
 	fmt.Println(formatCodeSummary(summary))
+
 	return nil
 }
 
 func countPackages(files []codeintel.File) int {
 	seen := make(map[string]struct{})
+
 	for i := range files {
 		if files[i].Package != "" {
 			seen[files[i].Package] = struct{}{}
 		}
 	}
+
 	return len(seen)
 }
 
@@ -7411,14 +8752,17 @@ func listCodeCycles(root string) error {
 	if err != nil {
 		return fmt.Errorf("code cycles: %w", err)
 	}
+
 	cycles := graph.Cycles()
 	if len(cycles) == 0 {
 		fmt.Println("No code graph cycles found.")
 		return nil
 	}
+
 	for i := range cycles {
 		fmt.Println(formatCodeCycle(i+1, cycles[i]))
 	}
+
 	return nil
 }
 
@@ -7427,6 +8771,7 @@ func formatCodeCycle(index int, cycle []codegraph.NodeID) string {
 	for _, node := range cycle {
 		labels = append(labels, string(node))
 	}
+
 	return "cycle=" + strconv.Itoa(index) + "	nodes=" + strings.Join(labels, " -> ")
 }
 
@@ -7435,17 +8780,21 @@ func listCodeLayers(root string) error {
 	if err != nil {
 		return fmt.Errorf("code layers: %w", err)
 	}
+
 	layers, err := graph.TopologicalLayers()
 	if err != nil {
 		return fmt.Errorf("code layers: %w", err)
 	}
+
 	if len(layers) == 0 {
 		fmt.Println("No code graph layers found.")
 		return nil
 	}
+
 	for i := range layers {
 		fmt.Println(formatCodeLayer(i+1, layers[i]))
 	}
+
 	return nil
 }
 
@@ -7454,6 +8803,7 @@ func formatCodeLayer(index int, nodes []codegraph.NodeID) string {
 	for _, node := range nodes {
 		labels = append(labels, string(node))
 	}
+
 	return "layer=" + strconv.Itoa(index) + "	nodes=" + strings.Join(labels, ",")
 }
 
@@ -7462,14 +8812,17 @@ func listCodeDeps(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("code deps: %w", err)
 	}
+
 	deps := codeGraphDependencies(graph, root, target)
 	if len(deps) == 0 {
 		fmt.Println("No direct code dependencies found.")
 		return nil
 	}
+
 	for _, node := range deps {
 		fmt.Println("node=" + string(node))
 	}
+
 	return nil
 }
 
@@ -7478,14 +8831,17 @@ func listCodeReverseDeps(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("code rdeps: %w", err)
 	}
+
 	rdeps := codeGraphReverseDependencies(graph, root, target)
 	if len(rdeps) == 0 {
 		fmt.Println("No direct code reverse dependencies found.")
 		return nil
 	}
+
 	for _, node := range rdeps {
 		fmt.Println("node=" + string(node))
 	}
+
 	return nil
 }
 
@@ -7502,14 +8858,17 @@ func listCodeReachable(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("code reachable: %w", err)
 	}
+
 	reachable := graph.ReachableFrom(normalizeCodeGraphTarget(root, target))
 	if len(reachable) == 0 {
 		fmt.Println("No reachable code graph nodes found.")
 		return nil
 	}
+
 	for _, node := range reachable {
 		fmt.Println("node=" + string(node))
 	}
+
 	return nil
 }
 
@@ -7518,6 +8877,7 @@ func importGraph(root string) (*codegraph.Graph, error) {
 	if err != nil {
 		return nil, fmt.Errorf("index %s: %w", root, err)
 	}
+
 	return importGraphFromIndex(root, idx), nil
 }
 
@@ -7526,11 +8886,13 @@ func importGraphFromIndex(root string, idx codeintel.Index) *codegraph.Graph {
 	for i := range idx.Files {
 		graph.AddNode(codegraph.NodeID(relativeCodePath(root, idx.Files[i].Path)))
 	}
+
 	for i := range idx.ImportEdges {
 		edge := idx.ImportEdges[i]
 		from := codegraph.NodeID(relativeCodePath(root, edge.From))
 		graph.AddEdge(from, codegraph.NodeID(edge.Import))
 	}
+
 	return graph
 }
 
@@ -7539,9 +8901,11 @@ func normalizeCodeGraphTarget(root, target string) codegraph.NodeID {
 	if target == "" {
 		return ""
 	}
+
 	if filepath.IsAbs(target) {
 		return codegraph.NodeID(relativeCodePath(root, target))
 	}
+
 	return codegraph.NodeID(filepath.ToSlash(target))
 }
 
@@ -7549,6 +8913,7 @@ func relativeCodePath(root, path string) string {
 	if relativePath, err := filepath.Rel(root, path); err == nil {
 		return filepath.ToSlash(relativePath)
 	}
+
 	return filepath.ToSlash(path)
 }
 
@@ -7562,20 +8927,25 @@ func evalOutput(actualPath, expectedText, expectedPath string, mode atteval.Matc
 	if err != nil {
 		return fmt.Errorf("eval output: read actual %s: %w", actualPath, err)
 	}
+
 	expected, err := expectedEvalText(expectedText, expectedPath)
 	if err != nil {
 		return err
 	}
+
 	result := atteval.Check(string(actual), expected, mode)
 	if result.Passed {
 		fmt.Printf("PASS\tmode=%s\tactual=%s\n", result.Mode, actualPath)
 		return nil
 	}
+
 	report := result.Failure()
 	if report == "" {
 		report = result.Summary
 	}
+
 	fmt.Printf("FAIL\tmode=%s\tactual=%s\n%s\n", result.Mode, actualPath, report)
+
 	return errors.New("eval output failed")
 }
 
@@ -7590,6 +8960,7 @@ func expectedEvalText(expectedText, expectedPath string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("eval output: read expected %s: %w", expectedPath, err)
 		}
+
 		return string(data), nil
 	default:
 		return "", errors.New("eval output: expected text is required")
@@ -7605,15 +8976,20 @@ func suggestSkill(steps []string, maxSteps, minOccurrences int, saveDir string) 
 		fmt.Println("No repeated multi-step skill candidate found.")
 		return nil
 	}
+
 	fmt.Print(formatSkillSuggestion(suggestion))
+
 	if strings.TrimSpace(saveDir) == "" {
 		return nil
 	}
+
 	path, err := attskill.PersistSuggestion(saveDir, suggestion)
 	if err != nil {
 		return fmt.Errorf("save skill suggestion: %w", err)
 	}
+
 	fmt.Println("saved: " + path)
+
 	return nil
 }
 
@@ -7623,12 +8999,15 @@ func formatSkillSuggestion(suggestion attskill.Suggestion) string {
 	fmt.Fprintf(&b, "slug: %s\n", suggestion.Slug)
 	fmt.Fprintf(&b, "occurrences: %d\n", suggestion.Occurrences)
 	b.WriteString("steps:\n")
+
 	for _, step := range suggestion.Steps {
 		fmt.Fprintf(&b, "  - %s\n", step)
 	}
+
 	if suggestion.Rationale != "" {
 		fmt.Fprintf(&b, "rationale: %s\n", suggestion.Rationale)
 	}
+
 	return b.String()
 }
 
@@ -7644,6 +9023,7 @@ func promptComplete(registry *agent.Registry, input string, limit int) {
 		fmt.Println("No prompt completion found.")
 		return
 	}
+
 	fmt.Print(formatPromptSuggestions(suggestions))
 }
 
@@ -7651,7 +9031,9 @@ func promptAgentCandidates(registry *agent.Registry) []promptcomplete.Candidate 
 	if registry == nil {
 		return nil
 	}
+
 	names := registry.List()
+
 	out := make([]promptcomplete.Candidate, 0, len(names))
 	for _, name := range names {
 		configuredAgent, _ := registry.Get(name)
@@ -7662,6 +9044,7 @@ func promptAgentCandidates(registry *agent.Registry) []promptcomplete.Candidate 
 			Tokens:      append([]string(nil), configuredAgent.Capabilities...),
 		})
 	}
+
 	return out
 }
 
@@ -7696,6 +9079,7 @@ func promptTemplateCandidates() []promptcomplete.Candidate {
 
 func formatPromptSuggestions(suggestions []promptcomplete.Suggestion) string {
 	var b strings.Builder
+
 	for i := range suggestions {
 		suggestion := &suggestions[i]
 		fmt.Fprintf(&b, "text: %s\n", suggestion.Text)
@@ -7703,11 +9087,14 @@ func formatPromptSuggestions(suggestions []promptcomplete.Suggestion) string {
 		fmt.Fprintf(&b, "kind: %s\n", suggestion.Candidate.Kind)
 		fmt.Fprintf(&b, "score: %d\n", suggestion.Score)
 		fmt.Fprintf(&b, "replace: %d:%d\n", suggestion.ReplacementStart, suggestion.ReplacementEnd)
+
 		if suggestion.Explanation != "" {
 			fmt.Fprintf(&b, "explanation: %s\n", suggestion.Explanation)
 		}
+
 		b.WriteByte('\n')
 	}
+
 	return b.String()
 }
 
@@ -7717,6 +9104,7 @@ func printFeedbackProposals(saved session.Session) {
 		fmt.Println("No feedback proposals found.")
 		return
 	}
+
 	for i := range proposals {
 		fmt.Print(formatFeedbackProposal(proposals[i]))
 	}
@@ -7728,13 +9116,17 @@ func formatFeedbackProposal(proposal feedback.Proposal) string {
 	fmt.Fprintf(&b, "confidence: %.2f\n", proposal.Confidence)
 	fmt.Fprintf(&b, "action: %s\n", proposal.Action)
 	fmt.Fprintf(&b, "reason: %s\n", proposal.Reason)
+
 	if len(proposal.Evidence) > 0 {
 		b.WriteString("evidence:\n")
+
 		for _, evidence := range proposal.Evidence {
 			fmt.Fprintf(&b, "  - %s\n", evidence)
 		}
 	}
+
 	b.WriteByte('\n')
+
 	return b.String()
 }
 
@@ -7748,6 +9140,7 @@ func applyFeedbackProposals(saved session.Session, configPath, historyPath strin
 	if err != nil {
 		return fmt.Errorf("feedback apply: load config: %w", err)
 	}
+
 	if len(loaded) == 0 {
 		return fmt.Errorf("feedback apply: config %s not found", configPath)
 	}
@@ -7771,6 +9164,7 @@ func applyFeedbackProposals(saved session.Session, configPath, historyPath strin
 	fmt.Printf("Applied %d feedback proposal(s).\n", len(history))
 	fmt.Println("config: " + configPath)
 	fmt.Println("history: " + historyPath)
+
 	return nil
 }
 
@@ -7779,6 +9173,7 @@ func feedbackHistoryDefault(configPath, historyPath string) string {
 	if historyPath != "" {
 		return historyPath
 	}
+
 	return configPath + ".feedback.md"
 }
 
@@ -7787,9 +9182,11 @@ func writeConfigFile(path string, cfg appconfig.Config) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
+
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
+
 	return nil
 }
 
@@ -7805,23 +9202,28 @@ func appendFeedbackHistory(path string, entries []feedback.HistoryEntry, applied
 	if err != nil {
 		return fmt.Errorf("open feedback history %s: %w", path, err)
 	}
+
 	if _, err := file.WriteString(formatFeedbackHistory(entries, appliedAt)); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("write feedback history %s: %w", path, err)
 	}
+
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close feedback history %s: %w", path, err)
 	}
+
 	return nil
 }
 
 func formatFeedbackHistory(entries []feedback.HistoryEntry, appliedAt time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Applied feedback %s\n\n", appliedAt.Format(time.RFC3339))
+
 	for i := range entries {
 		b.WriteString(feedback.FormatHistoryEntry(entries[i]))
 		b.WriteByte('\n')
 	}
+
 	return b.String()
 }
 
@@ -7830,14 +9232,17 @@ func runRouteModels(opts cliOptions) error {
 	if err != nil {
 		return err
 	}
+
 	chain := modelroute.FallbackChain(candidates, profile)
 	if len(chain) == 0 {
 		fmt.Println("No model route candidates fit.")
 		return nil
 	}
+
 	for i := range chain {
 		fmt.Println(formatRouteCandidate(chain[i], profile))
 	}
+
 	return nil
 }
 
@@ -7848,8 +9253,10 @@ func routeCandidatesAndProfile(opts cliOptions) ([]modelroute.Candidate, modelro
 		if err != nil {
 			return nil, modelroute.RequestProfile{}, err
 		}
+
 		candidates = append(candidates, candidate)
 	}
+
 	profile := modelroute.RequestProfile{
 		EstimatedInputTokens:  opts.routeInputTokens.value,
 		EstimatedOutputTokens: opts.routeOutputTokens.value,
@@ -7859,9 +9266,11 @@ func routeCandidatesAndProfile(opts cliOptions) ([]modelroute.Candidate, modelro
 	if opts.routeBudget.set {
 		profile.Budget = opts.routeBudget.value
 	}
+
 	if opts.routeCacheReuse.set {
 		profile.PromptCacheReuseEstimate = opts.routeCacheReuse.value
 	}
+
 	return candidates, profile, nil
 }
 
@@ -7869,18 +9278,22 @@ func applyRouteSelection(opts cliOptions, state *selectionState) error {
 	if len(opts.routeCandidates) == 0 {
 		return nil
 	}
+
 	candidates, profile, err := routeCandidatesAndProfile(opts)
 	if err != nil {
 		return err
 	}
+
 	chain := modelroute.FallbackChain(candidates, profile)
 	if len(chain) == 0 {
 		return errors.New("model route: no candidates fit request budget/context")
 	}
+
 	state.selectedModel = chain[0].ID()
 	state.fallbackModels = routeFallbackIDs(chain[1:])
 	state.modelLocked = true
 	state.sessionState.DefaultModel = state.selectedModel
+
 	return nil
 }
 
@@ -7888,10 +9301,12 @@ func routeFallbackIDs(candidates []modelroute.Candidate) []string {
 	if len(candidates) == 0 {
 		return nil
 	}
+
 	out := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		out = append(out, candidate.ID())
 	}
+
 	return out
 }
 
@@ -7900,7 +9315,9 @@ func parseRouteCandidate(raw string) (modelroute.Candidate, error) {
 	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
 		return modelroute.Candidate{}, errors.New("route candidate: model id is required")
 	}
+
 	candidate := modelroute.Candidate{}
+
 	id := strings.TrimSpace(parts[0])
 	if provider, name, ok := strings.Cut(id, "/"); ok {
 		candidate.Provider = strings.TrimSpace(provider)
@@ -7908,18 +9325,22 @@ func parseRouteCandidate(raw string) (modelroute.Candidate, error) {
 	} else {
 		candidate.Name = id
 	}
+
 	if candidate.Name == "" && candidate.Provider == "" {
 		return modelroute.Candidate{}, errors.New("route candidate: model id is required")
 	}
+
 	for _, part := range parts[1:] {
 		field, value, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok {
 			return modelroute.Candidate{}, fmt.Errorf("route candidate %q: expected key=value", raw)
 		}
+
 		if err := applyRouteCandidateField(&candidate, strings.TrimSpace(field), strings.TrimSpace(value)); err != nil {
 			return modelroute.Candidate{}, err
 		}
 	}
+
 	return candidate, nil
 }
 
@@ -7930,40 +9351,47 @@ func applyRouteCandidateField(candidate *modelroute.Candidate, field, value stri
 		if err != nil {
 			return fmt.Errorf("route candidate input cost: %w", err)
 		}
+
 		candidate.InputTokenCost = parsed
 	case "output", "output_cost":
 		parsed, err := strconv.ParseFloat(value, 64)
 		if err != nil {
 			return fmt.Errorf("route candidate output cost: %w", err)
 		}
+
 		candidate.OutputTokenCost = parsed
 	case "priority":
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
 			return fmt.Errorf("route candidate priority: %w", err)
 		}
+
 		candidate.Priority = parsed
 	case "max", "max_input":
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
 			return fmt.Errorf("route candidate max input: %w", err)
 		}
+
 		candidate.MaxInputTokens = parsed
 	case "latency":
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
 			return fmt.Errorf("route candidate latency: %w", err)
 		}
+
 		candidate.ExpectedLatencyMS = parsed
 	case "ttft":
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
 			return fmt.Errorf("route candidate ttft: %w", err)
 		}
+
 		candidate.ExpectedTTFTMS = parsed
 	default:
 		return fmt.Errorf("route candidate: unknown field %q", field)
 	}
+
 	return nil
 }
 
@@ -7975,15 +9403,19 @@ func formatRouteCandidate(candidate modelroute.Candidate, profile modelroute.Req
 	if candidate.Priority != 0 {
 		parts = append(parts, "priority="+strconv.Itoa(candidate.Priority))
 	}
+
 	if candidate.MaxInputTokens > 0 {
 		parts = append(parts, "max_input="+strconv.Itoa(candidate.MaxInputTokens))
 	}
+
 	if candidate.ExpectedLatencyMS > 0 {
 		parts = append(parts, "latency_ms="+strconv.Itoa(candidate.ExpectedLatencyMS))
 	}
+
 	if candidate.ExpectedTTFTMS > 0 {
 		parts = append(parts, "ttft_ms="+strconv.Itoa(candidate.ExpectedTTFTMS))
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -7992,7 +9424,9 @@ func runReviewPlan(reviewerNames, paths, gates []string) error {
 	if err != nil {
 		return fmt.Errorf("review plan: %w", err)
 	}
+
 	fmt.Print(formatReviewPlan(plan))
+
 	return nil
 }
 
@@ -8003,10 +9437,12 @@ func reviewPlanReviewers(names []string) []review.Reviewer {
 			{Name: "test-engineer", Categories: []review.Category{review.CategoryTests}},
 		}
 	}
+
 	reviewers := make([]review.Reviewer, 0, len(names))
 	for _, name := range names {
 		reviewers = append(reviewers, review.Reviewer{Name: strings.TrimSpace(name)})
 	}
+
 	return reviewers
 }
 
@@ -8014,35 +9450,46 @@ func reviewPlanPaths(paths []string) []string {
 	if len(paths) == 0 {
 		return []string{"."}
 	}
+
 	return append([]string(nil), paths...)
 }
 
 func formatReviewPlan(plan review.Plan) string {
 	var b strings.Builder
 	b.WriteString("reviewers:\n")
+
 	for _, reviewer := range plan.Reviewers() {
 		fmt.Fprintf(&b, "  - %s\n", formatReviewPlanReviewer(reviewer))
 	}
+
 	b.WriteString("paths:\n")
+
 	for _, path := range plan.Paths() {
 		fmt.Fprintf(&b, "  - %s\n", path)
 	}
+
 	b.WriteString("rounds:\n")
+
 	rounds := plan.Rounds()
 	for i := range rounds {
 		round := rounds[i]
 		fmt.Fprintf(&b, "  - %d\t%s\t%s\treviewers=%s\n", round.Number, round.Kind, round.Name, strings.Join(round.Reviewers, ","))
 	}
+
 	if crossReviews := plan.CrossReviews(); len(crossReviews) > 0 {
 		b.WriteString("cross_reviews:\n")
+
 		for _, crossReview := range crossReviews {
 			fmt.Fprintf(&b, "  - %s -> %s\n", crossReview.Reviewer, crossReview.ReviewedReviewer)
 		}
 	}
+
 	b.WriteString("gates:\n")
+
 	for _, gate := range plan.RequiredGates() {
 		fmt.Fprintf(&b, "  - %s\n", gate)
 	}
+
 	return b.String()
 }
 
@@ -8053,8 +9500,10 @@ func formatReviewPlanReviewer(reviewer review.Reviewer) string {
 		for _, category := range reviewer.Categories {
 			categories = append(categories, string(category))
 		}
+
 		parts = append(parts, "categories="+strings.Join(categories, ","))
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -8063,11 +9512,13 @@ func runReviewScan(root string, largeFileBytes int) error {
 	if err != nil {
 		return fmt.Errorf("review scan: %w", err)
 	}
+
 	report := review.Report{
 		Reviewer: "watch-scan",
 		Findings: watchFindingsToReview(findings),
 	}
 	fmt.Print(formatReviewReport(report))
+
 	return nil
 }
 
@@ -8082,6 +9533,7 @@ func watchFindingsToReview(findings []watch.Finding) []review.Finding {
 			Message:  finding.Message,
 		})
 	}
+
 	return review.SortedFindings(out)
 }
 
@@ -8112,15 +9564,19 @@ func formatReviewReport(report review.Report) string {
 	fmt.Fprintf(&b, "reviewer: %s\n", report.Reviewer)
 	summary := report.SeveritySummary()
 	fmt.Fprintf(&b, "summary: critical=%d high=%d medium=%d low=%d info=%d total=%d\n", summary.Critical, summary.High, summary.Medium, summary.Low, summary.Info, summary.Total())
+
 	findings := report.SortedFindings()
 	if len(findings) == 0 {
 		b.WriteString("findings: none\n")
 		return b.String()
 	}
+
 	b.WriteString("findings:\n")
+
 	for i := range findings {
 		fmt.Fprintf(&b, "  - %s\n", formatReviewFinding(findings[i]))
 	}
+
 	return b.String()
 }
 
@@ -8133,12 +9589,15 @@ func formatReviewFinding(finding review.Finding) string {
 	if finding.Line > 0 {
 		parts = append(parts, "line="+strconv.Itoa(finding.Line))
 	}
+
 	if finding.Message != "" {
 		parts = append(parts, "message="+finding.Message)
 	}
+
 	if finding.Suggestion != "" {
 		parts = append(parts, "suggestion="+finding.Suggestion)
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -8146,19 +9605,24 @@ func runAsyncPlan(specs []string) error {
 	if len(specs) == 0 {
 		return errors.New("async plan: at least one --async-task is required")
 	}
+
 	tasks := make([]attasync.Task, 0, len(specs))
 	for _, spec := range specs {
 		task, err := parseAsyncTaskSpec(spec)
 		if err != nil {
 			return err
 		}
+
 		tasks = append(tasks, task)
 	}
+
 	plan, err := attasync.NewPlan(tasks)
 	if err != nil {
 		return fmt.Errorf("async plan: %w", err)
 	}
+
 	fmt.Print(formatAsyncPlanBatches(plan.ReadyBatches()))
+
 	return nil
 }
 
@@ -8167,6 +9631,7 @@ func parseAsyncTaskSpec(spec string) (attasync.Task, error) {
 	if len(parts) < 3 {
 		return attasync.Task{}, fmt.Errorf("async task %q: expected id|agent|prompt|dep1+dep2", spec)
 	}
+
 	task := attasync.Task{
 		ID:     strings.TrimSpace(parts[0]),
 		Agent:  strings.TrimSpace(parts[1]),
@@ -8175,14 +9640,17 @@ func parseAsyncTaskSpec(spec string) (attasync.Task, error) {
 	if task.ID == "" {
 		return attasync.Task{}, fmt.Errorf("async task %q: id is required", spec)
 	}
+
 	if len(parts) == 4 {
 		task.DependsOn = parseAsyncDependencies(parts[3])
 	}
+
 	return task, nil
 }
 
 func parseAsyncDependencies(raw string) []string {
 	fields := strings.FieldsFunc(raw, func(r rune) bool { return r == '+' || r == ';' })
+
 	deps := make([]string, 0, len(fields))
 	for _, field := range fields {
 		dep := strings.TrimSpace(field)
@@ -8190,6 +9658,7 @@ func parseAsyncDependencies(raw string) []string {
 			deps = append(deps, dep)
 		}
 	}
+
 	return deps
 }
 
@@ -8197,13 +9666,16 @@ func formatAsyncPlanBatches(batches [][]attasync.Task) string {
 	if len(batches) == 0 {
 		return "waves: none\n"
 	}
+
 	var b strings.Builder
 	for i, batch := range batches {
 		fmt.Fprintf(&b, "wave %d:\n", i+1)
+
 		for j := range batch {
 			fmt.Fprintf(&b, "  - %s\n", formatAsyncTask(batch[j]))
 		}
 	}
+
 	return b.String()
 }
 
@@ -8212,12 +9684,15 @@ func formatAsyncTask(task attasync.Task) string {
 	if task.Agent != "" {
 		parts = append(parts, "agent="+task.Agent)
 	}
+
 	if len(task.DependsOn) > 0 {
 		parts = append(parts, "depends="+strings.Join(task.DependsOn, "+"))
 	}
+
 	if task.Prompt != "" {
 		parts = append(parts, "prompt="+task.Prompt)
 	}
+
 	return strings.Join(parts, "	")
 }
 
@@ -8225,18 +9700,23 @@ func runSpeculatePlan(agents, gates []string, prompt string) error {
 	if len(gates) == 0 {
 		gates = []string{"tests pass", "lint pass", "types pass"}
 	}
+
 	plan, err := speculate.NewPlan(agents, gates)
 	if err != nil {
 		return fmt.Errorf("speculate plan: %w", err)
 	}
+
 	fmt.Print(formatSpeculatePlan(plan))
+
 	if strings.TrimSpace(prompt) != "" {
 		estimate, estimateErr := speculate.EstimatePromptCacheReuse(speculateBranchPrompts(plan, prompt))
 		if estimateErr != nil {
 			return fmt.Errorf("speculate prompt cache: %w", estimateErr)
 		}
+
 		fmt.Print(formatSpeculatePromptCacheEstimate(estimate))
 	}
+
 	return nil
 }
 
@@ -8244,24 +9724,31 @@ func formatSpeculatePlan(plan speculate.Plan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "agents: %s\n", strings.Join(plan.Agents, ","))
 	b.WriteString("rounds:\n")
+
 	for _, round := range plan.Rounds {
 		fmt.Fprintf(&b, "  - %d\t%s\t%s\n", round.Number, round.Name, round.Purpose)
 	}
+
 	proposals := make([]speculate.Proposal, 0, len(plan.Agents))
 	for _, name := range plan.Agents {
 		proposals = append(proposals, speculate.Proposal{Agent: name, Round: speculate.RoundProposal})
 	}
+
 	reviews, err := speculate.CrossReviews(proposals)
 	if err == nil && len(reviews) > 0 {
 		b.WriteString("cross_reviews:\n")
+
 		for _, review := range reviews {
 			fmt.Fprintf(&b, "  - %s -> %s\n", review.Reviewer, review.TargetAgent)
 		}
 	}
+
 	b.WriteString("gates:\n")
+
 	for _, gate := range plan.GateChecks {
 		fmt.Fprintf(&b, "  - %s\n", gate)
 	}
+
 	return b.String()
 }
 
@@ -8275,11 +9762,13 @@ func speculateBranchPrompts(plan speculate.Plan, prompt string) []speculate.Bran
 	shared.WriteString("Task:\n")
 	shared.WriteString(prompt)
 	shared.WriteString("\n\nRequired gate checks:\n")
+
 	for _, gate := range plan.GateChecks {
 		shared.WriteString("- ")
 		shared.WriteString(gate)
 		shared.WriteByte('\n')
 	}
+
 	shared.WriteString("\nSpeculative round: independent proposal\n")
 
 	branches := make([]speculate.BranchPrompt, 0, len(plan.Agents))
@@ -8291,6 +9780,7 @@ func speculateBranchPrompts(plan speculate.Plan, prompt string) []speculate.Bran
 				"Produce a self-contained proposal that can be cross-reviewed.\n",
 		})
 	}
+
 	return branches
 }
 
@@ -8302,6 +9792,7 @@ func formatSpeculatePromptCacheEstimate(estimate speculate.PromptCacheReuseEstim
 	fmt.Fprintf(&b, "  total_prompt_bytes: %d\n", estimate.TotalPromptBytes)
 	fmt.Fprintf(&b, "  reuse_ratio: %.4f\n", estimate.ReuseRatio)
 	b.WriteString("  branches:\n")
+
 	for _, branch := range estimate.Branches {
 		fmt.Fprintf(&b, "    - %s\tprompt_bytes=%d\tshared_prefix_bytes=%d\treuse_ratio=%.4f\n",
 			branch.Branch,
@@ -8310,6 +9801,7 @@ func formatSpeculatePromptCacheEstimate(estimate speculate.PromptCacheReuseEstim
 			branch.ReuseRatio,
 		)
 	}
+
 	return b.String()
 }
 
@@ -8318,29 +9810,36 @@ func runWatchScan(root string, largeFileBytes int, jsonOutput bool) error {
 	if err != nil {
 		return fmt.Errorf("watch scan: %w", err)
 	}
+
 	if jsonOutput {
 		if findings == nil {
 			findings = []watch.Finding{}
 		}
+
 		if err := json.NewEncoder(os.Stdout).Encode(struct {
 			Findings []watch.Finding `json:"findings"`
 		}{Findings: findings}); err != nil {
 			return fmt.Errorf("watch scan: encode JSON: %w", err)
 		}
+
 		return nil
 	}
+
 	if len(findings) == 0 {
 		fmt.Println("No watch findings found.")
 		return nil
 	}
+
 	for i := range findings {
 		fmt.Println(formatWatchFinding(findings[i]))
 	}
+
 	return nil
 }
 
 func runWatchLoop(ctx context.Context, root string, largeFileBytes, intervalSeconds, maxIterations int) error {
 	interval := time.Duration(intervalSeconds) * time.Second
+
 	results, err := watch.Run(ctx, root, watch.RunOptions{
 		ScanOptions:   watch.Options{LargeFileBytes: int64(largeFileBytes)},
 		Interval:      interval,
@@ -8348,17 +9847,21 @@ func runWatchLoop(ctx context.Context, root string, largeFileBytes, intervalSeco
 	})
 	for i := range results {
 		fmt.Println(formatWatchIteration(results[i]))
+
 		if len(results[i].Findings) == 0 {
 			fmt.Println("No watch findings found.")
 			continue
 		}
+
 		for j := range results[i].Findings {
 			fmt.Println(formatWatchFinding(results[i].Findings[j]))
 		}
 	}
+
 	if err != nil {
 		return fmt.Errorf("watch loop: %w", err)
 	}
+
 	return nil
 }
 
@@ -8370,9 +9873,11 @@ func formatWatchIteration(result watch.IterationResult) string {
 	if !result.StartedAt.IsZero() {
 		parts = append(parts, "started="+result.StartedAt.Format(time.RFC3339))
 	}
+
 	if result.Duration > 0 {
 		parts = append(parts, "duration="+result.Duration.String())
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -8385,6 +9890,7 @@ func formatWatchFinding(finding watch.Finding) string {
 	if finding.Message != "" {
 		parts = append(parts, "message="+finding.Message)
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -8392,22 +9898,27 @@ func runGitHistorySearch(ctx context.Context, root, query string, limit int) err
 	if limit == 0 {
 		limit = 5
 	}
+
 	logText, err := gitHistoryLog(ctx, root)
 	if err != nil {
 		return err
 	}
+
 	commits, err := githistory.ParseLog(logText)
 	if err != nil {
 		return fmt.Errorf("git history: parse log: %w", err)
 	}
+
 	results := githistory.NewIndex(commits).Search(query, limit)
 	if len(results) == 0 {
 		fmt.Println("No git history results found.")
 		return nil
 	}
+
 	for i := range results {
 		fmt.Println(formatGitHistoryResult(results[i]))
 	}
+
 	return nil
 }
 
@@ -8422,15 +9933,18 @@ func gitHistoryLog(ctx context.Context, root string) (string, error) {
 		"--",
 	)
 	cmd.Dir = root
+
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("git history: run git log: %w", err)
 	}
+
 	return string(out), nil
 }
 
 func formatGitHistoryResult(result githistory.Result) string {
 	commit := result.Commit
+
 	parts := []string{
 		shortCommitHash(commit.Hash),
 		fmt.Sprintf("score=%d", result.Score),
@@ -8438,18 +9952,22 @@ func formatGitHistoryResult(result githistory.Result) string {
 	if !commit.Date.IsZero() {
 		parts = append(parts, "date="+commit.Date.Format(time.RFC3339))
 	}
+
 	if commit.AuthorName != "" {
 		parts = append(parts, "author="+commit.AuthorName)
 	}
+
 	if commit.Subject != "" {
 		parts = append(parts, "subject="+commit.Subject)
 	}
+
 	for _, snippet := range result.Snippets {
 		if snippet.Text != "" {
 			parts = append(parts, snippet.Field+"="+snippet.Text)
 			break
 		}
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -8457,6 +9975,7 @@ func shortCommitHash(hash string) string {
 	if len(hash) <= 12 {
 		return hash
 	}
+
 	return hash[:12]
 }
 
@@ -8471,10 +9990,13 @@ func recordFailure(
 	if !sessionState.RecordNegativeKnowledge(approach, reason, commit, agentName) {
 		return errors.New("record failure: approach and reason are required, or this failure is already recorded")
 	}
+
 	if err := store.Save(sessionState); err != nil {
 		return fmt.Errorf("record failure: save session: %w", err)
 	}
+
 	fmt.Println("Recorded failure on session " + sessionState.ID)
+
 	return nil
 }
 
@@ -8490,10 +10012,13 @@ func recordEvaluation(
 	if !sessionState.RecordEvaluation(agentName, outcome, notes, reference, score) {
 		return errors.New("record evaluation: agent and outcome are required")
 	}
+
 	if err := store.Save(sessionState); err != nil {
 		return fmt.Errorf("record evaluation: save session: %w", err)
 	}
+
 	fmt.Println("Recorded evaluation on session " + sessionState.ID)
+
 	return nil
 }
 
@@ -8504,6 +10029,7 @@ func listMessages(sessionState session.Session) {
 		fmt.Println("No messages recorded.")
 		return
 	}
+
 	for i := range sessionState.Messages {
 		fmt.Println(formatMessageSummary(i+1, sessionState.Messages[i]))
 	}
@@ -8511,6 +10037,7 @@ func listMessages(sessionState session.Session) {
 
 func formatMessageSummary(index int, message llm.Message) string {
 	content := compactMessageWhitespace(message.Content)
+
 	parts := []string{
 		"index=" + strconv.Itoa(index),
 		"role=" + string(message.Role),
@@ -8519,6 +10046,7 @@ func formatMessageSummary(index int, message llm.Message) string {
 	if content != "" {
 		parts = append(parts, "preview="+truncateRunes(content, messagePreviewRunes))
 	}
+
 	return strings.Join(parts, "	")
 }
 
@@ -8530,13 +10058,16 @@ func truncateRunes(value string, limit int) string {
 	if limit <= 0 {
 		return ""
 	}
+
 	runes := []rune(value)
 	if len(runes) <= limit {
 		return value
 	}
+
 	if limit == 1 {
 		return "…"
 	}
+
 	return string(runes[:limit-1]) + "…"
 }
 
@@ -8545,10 +10076,12 @@ func listFailures(sessionState session.Session) {
 		fmt.Println("No failures recorded.")
 		return
 	}
+
 	failures := append([]session.NegativeKnowledge(nil), sessionState.NegativeKnowledge...)
 	sort.SliceStable(failures, func(i, j int) bool {
 		return failures[i].CreatedAt.Before(failures[j].CreatedAt)
 	})
+
 	for i := range failures {
 		fmt.Println(formatFailure(failures[i]))
 	}
@@ -8559,12 +10092,15 @@ func formatFailure(failure session.NegativeKnowledge) string {
 	if !failure.CreatedAt.IsZero() {
 		parts = append(parts, "created_at="+failure.CreatedAt.Format(time.RFC3339))
 	}
+
 	if failure.Agent != "" {
 		parts = append(parts, "agent="+failure.Agent)
 	}
+
 	if failure.Commit != "" {
 		parts = append(parts, "commit="+failure.Commit)
 	}
+
 	return strings.Join(parts, "	")
 }
 
@@ -8573,10 +10109,12 @@ func listEvaluations(sessionState session.Session) {
 		fmt.Println("No evaluations recorded.")
 		return
 	}
+
 	evaluations := append([]session.AgentEvaluation(nil), sessionState.Evaluations...)
 	sort.SliceStable(evaluations, func(i, j int) bool {
 		return evaluations[i].CreatedAt.Before(evaluations[j].CreatedAt)
 	})
+
 	for i := range evaluations {
 		fmt.Println(formatEvaluation(evaluations[i]))
 	}
@@ -8587,15 +10125,19 @@ func formatEvaluation(evaluation session.AgentEvaluation) string {
 	if !evaluation.CreatedAt.IsZero() {
 		parts = append(parts, "created_at="+evaluation.CreatedAt.Format(time.RFC3339))
 	}
+
 	if evaluation.Score != 0 {
 		parts = append(parts, "score="+strconv.Itoa(evaluation.Score))
 	}
+
 	if evaluation.Reference != "" {
 		parts = append(parts, "reference="+evaluation.Reference)
 	}
+
 	if evaluation.Notes != "" {
 		parts = append(parts, "notes="+evaluation.Notes)
 	}
+
 	return strings.Join(parts, "	")
 }
 
@@ -8604,10 +10146,12 @@ func listArtifacts(sessionState session.Session) {
 		fmt.Println("No artifacts recorded.")
 		return
 	}
+
 	artifacts := append([]session.Artifact(nil), sessionState.Artifacts...)
 	sort.SliceStable(artifacts, func(i, j int) bool {
 		return artifacts[i].CreatedAt.Before(artifacts[j].CreatedAt)
 	})
+
 	for i := range artifacts {
 		fmt.Println(formatArtifact(artifacts[i]))
 	}
@@ -8618,12 +10162,15 @@ func formatArtifact(artifact session.Artifact) string {
 	if !artifact.CreatedAt.IsZero() {
 		parts = append(parts, "created_at="+artifact.CreatedAt.Format(time.RFC3339))
 	}
+
 	if artifact.SourceAgent != "" {
 		parts = append(parts, "agent="+artifact.SourceAgent)
 	}
+
 	if artifact.Summary != "" {
 		parts = append(parts, "summary="+artifact.Summary)
 	}
+
 	return strings.Join(parts, "	")
 }
 
@@ -8631,25 +10178,32 @@ func mergeArtifacts(ctx context.Context, state appState, outputPath string, maxB
 	if maxBytes == 0 {
 		maxBytes = int(watch.DefaultLargeFileBytes)
 	}
+
 	result, err := artifactmerge.Merge(state.cwd, state.sessionState.Artifacts, int64(maxBytes))
 	if err != nil {
 		return fmt.Errorf("merge artifacts: %w", err)
 	}
+
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(os.Stderr, "warning: artifact %s skipped: %s\n", warning.Path, warning.Reason)
 	}
+
 	if strings.TrimSpace(outputPath) == "-" {
 		fmt.Print(result.Markdown)
 		return nil
 	}
+
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o750); err != nil {
 		return fmt.Errorf("merge artifacts: create output dir: %w", err)
 	}
+
 	if err := os.WriteFile(outputPath, []byte(result.Markdown), 0o600); err != nil {
 		return fmt.Errorf("merge artifacts: write %s: %w", outputPath, err)
 	}
+
 	emitFileWriteWarning(ctx, state.hookRunner, state.sessionState, outputPath, state.selectedAgent, "merged-artifacts")
 	fmt.Println("Merged artifacts into " + outputPath)
+
 	return nil
 }
 
@@ -8664,10 +10218,13 @@ func recordArtifact(
 	if !sessionState.RecordArtifact(path, kind, summary, sourceAgent) {
 		return errors.New("record artifact: path and kind are required")
 	}
+
 	if err := store.Save(sessionState); err != nil {
 		return fmt.Errorf("record artifact: save session: %w", err)
 	}
+
 	fmt.Println("Recorded artifact on session " + sessionState.ID)
+
 	return nil
 }
 
@@ -8697,7 +10254,9 @@ func describeAgent(agents *agent.Registry, name string) error {
 	if err != nil {
 		return fmt.Errorf("format agent %q: %w", name, err)
 	}
+
 	fmt.Print(out)
+
 	return nil
 }
 
@@ -8720,21 +10279,26 @@ func formatAgentDescription(activeAgent agent.Agent) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal agent description: %w", err)
 	}
+
 	return string(out), nil
 }
 
 func doctor(ctx context.Context, state appState) error {
 	ctx = nonNilContext(ctx)
+
 	fmt.Println("Atteler doctor")
+
 	if len(state.loadedConfigPaths) == 0 {
 		fmt.Println("config: no config files loaded")
 	} else {
 		fmt.Println("config: " + strings.Join(state.loadedConfigPaths, ", "))
 	}
+
 	fmt.Println("sessions: " + state.sessionStore.Dir() + " (" + pathStatus(state.sessionStore.Dir()) + ")")
 
 	providers := state.registry.ListProviders()
 	sort.Strings(providers)
+
 	if len(providers) == 0 {
 		fmt.Println("providers: none registered")
 	} else {
@@ -8758,18 +10322,22 @@ func doctor(ctx context.Context, state appState) error {
 
 	// Health check every registered provider and list their models.
 	fmt.Println()
+
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	results := state.registry.CheckHealth(ctx)
 	healthy := 0
+
 	for _, r := range results {
 		if r.Healthy {
 			fmt.Printf("  [ok] %s\n", r.Name)
+
 			healthy++
 		} else {
 			fmt.Printf("  [FAIL] %s: %v\n", r.Name, r.Error)
 		}
+
 		for _, m := range r.Models {
 			fmt.Printf("         - %s\n", m)
 		}
@@ -8778,6 +10346,7 @@ func doctor(ctx context.Context, state appState) error {
 	if healthy == 0 {
 		return errors.New("doctor: all providers failed their health check")
 	}
+
 	return nil
 }
 
@@ -8788,11 +10357,13 @@ func doctorOffline(opts cliOptions) error {
 	}
 
 	fmt.Println("Atteler offline doctor")
+
 	if len(loadedConfigPaths) == 0 {
 		fmt.Println("config: no config files loaded")
 	} else {
 		fmt.Println("config: " + strings.Join(loadedConfigPaths, ", "))
 	}
+
 	store := session.NewStore(opts.sessionDir)
 	fmt.Println("sessions: " + store.Dir() + " (" + pathStatus(store.Dir()) + ")")
 
@@ -8800,7 +10371,9 @@ func doctorOffline(opts cliOptions) error {
 	for _, provider := range llm.KnownProviders() {
 		providerNames = append(providerNames, provider.Name)
 	}
+
 	sort.Strings(providerNames)
+
 	if len(providerNames) == 0 {
 		fmt.Println("known_providers: none")
 	} else {
@@ -8815,11 +10388,13 @@ func doctorOffline(opts cliOptions) error {
 	}
 
 	fmt.Println("hook_events: " + strconv.Itoa(len(events.SupportedEventTypes())))
+
 	if len(cfg.Plugins.Paths) == 0 {
 		fmt.Println("plugins: none configured")
 	} else {
 		fmt.Println("plugins: " + strings.Join(cfg.Plugins.Paths, ", "))
 	}
+
 	return nil
 }
 
@@ -8829,11 +10404,14 @@ func pathStatus(path string) string {
 		if errors.Is(err, os.ErrNotExist) {
 			return "will be created on first save"
 		}
+
 		return "error: " + err.Error()
 	}
+
 	if !info.IsDir() {
 		return "not a directory"
 	}
+
 	return "ok"
 }
 
@@ -8842,6 +10420,7 @@ func listSessions(store *session.Store, tag string) error {
 	if err != nil {
 		return fmt.Errorf("list sessions: %w", err)
 	}
+
 	if len(summaries) == 0 {
 		fmt.Println("No sessions found.")
 		return nil
@@ -8850,6 +10429,7 @@ func listSessions(store *session.Store, tag string) error {
 	for i := range summaries {
 		fmt.Println(formatSessionSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -8858,6 +10438,7 @@ func listHeadlessRuns(store *session.Store) error {
 	if err != nil {
 		return fmt.Errorf("list headless sessions: %w", err)
 	}
+
 	active := make([]session.HeadlessRun, 0, len(runs))
 	for i := range runs {
 		run := &runs[i]
@@ -8865,29 +10446,35 @@ func listHeadlessRuns(store *session.Store) error {
 			active = append(active, *run)
 		}
 	}
+
 	if len(active) == 0 {
 		fmt.Println("No active headless sessions found.")
 		return nil
 	}
+
 	for i := range active {
 		fmt.Println(formatHeadlessRun(active[i]))
 	}
+
 	return nil
 }
 
 func streamHeadlessLog(ctx context.Context, store *session.Store, id string) error {
 	ctx = nonNilContext(ctx)
+
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return errors.New("stream headless: id is required")
 	}
 
 	offset := 0
+
 	for {
 		text, err := store.ReadHeadlessLog(id)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("stream headless: %w", err)
 		}
+
 		if len(text) > offset {
 			fmt.Print(text[offset:])
 			offset = len(text)
@@ -8897,6 +10484,7 @@ func streamHeadlessLog(ctx context.Context, store *session.Store, id string) err
 		if err != nil {
 			return fmt.Errorf("stream headless: %w", err)
 		}
+
 		if run.Status != session.HeadlessStatusRunning {
 			return nil
 		}
@@ -8918,12 +10506,15 @@ func listSessionSummaries(store *session.Store, tag string) ([]session.Summary, 
 		if err != nil {
 			return nil, fmt.Errorf("list all sessions: %w", err)
 		}
+
 		return summaries, nil
 	}
+
 	summaries, err := store.ListByTag(tag)
 	if err != nil {
 		return nil, fmt.Errorf("list sessions by tag %q: %w", tag, err)
 	}
+
 	return summaries, nil
 }
 
@@ -8932,13 +10523,16 @@ func listAgentPerformance(store *session.Store) error {
 	if err != nil {
 		return fmt.Errorf("agent performance summary: %w", err)
 	}
+
 	if len(summaries) == 0 {
 		fmt.Println("No agent performance records found.")
 		return nil
 	}
+
 	for i := range summaries {
 		fmt.Println(formatAgentPerformanceSummary(summaries[i]))
 	}
+
 	return nil
 }
 
@@ -8958,12 +10552,15 @@ func formatAgentPerformanceSummary(summary session.AgentPerformanceSummary) stri
 			"max_score="+strconv.Itoa(summary.MaxScore),
 		)
 	}
+
 	if len(summary.Outcomes) > 0 {
 		parts = append(parts, "outcomes="+formatOutcomeCounts(summary.Outcomes))
 	}
+
 	if !summary.LatestActivity.IsZero() {
 		parts = append(parts, "latest="+summary.LatestActivity.UTC().Format(time.RFC3339))
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -8972,6 +10569,7 @@ func formatOutcomeCounts(outcomes []session.OutcomeCount) string {
 	for _, outcome := range outcomes {
 		parts = append(parts, outcome.Outcome+":"+strconv.Itoa(outcome.Count))
 	}
+
 	return strings.Join(parts, ",")
 }
 
@@ -8980,13 +10578,16 @@ func listSessionTags(store *session.Store) error {
 	if err != nil {
 		return fmt.Errorf("list session tags: %w", err)
 	}
+
 	if len(tags) == 0 {
 		fmt.Println("No session tags found.")
 		return nil
 	}
+
 	for _, tag := range tags {
 		fmt.Println(formatTagSummary(tag))
 	}
+
 	return nil
 }
 
@@ -8999,11 +10600,14 @@ func listHookEvents(jsonOutput bool) error {
 		if err := json.NewEncoder(os.Stdout).Encode(events.SupportedEventTypes()); err != nil {
 			return fmt.Errorf("list hook events: encode JSON: %w", err)
 		}
+
 		return nil
 	}
+
 	for _, eventType := range events.SupportedEventTypes() {
 		fmt.Println(formatHookEventType(eventType))
 	}
+
 	return nil
 }
 
@@ -9016,6 +10620,7 @@ func searchSessions(store *session.Store, query string) error {
 	if err != nil {
 		return fmt.Errorf("search sessions: %w", err)
 	}
+
 	if len(results) == 0 {
 		fmt.Println("No matching sessions found.")
 		return nil
@@ -9024,10 +10629,12 @@ func searchSessions(store *session.Store, query string) error {
 	for i := range results {
 		result := &results[i]
 		fmt.Println(formatSessionSummary(result.Summary))
+
 		for _, snippet := range result.Snippets {
 			fmt.Println(formatSearchSnippet(snippet))
 		}
 	}
+
 	return nil
 }
 
@@ -9036,10 +10643,12 @@ func formatSessionSummary(summary session.Summary) string {
 	if !summary.UpdatedAt.IsZero() {
 		updated = summary.UpdatedAt.UTC().Format(time.RFC3339)
 	}
+
 	agentName := "-"
 	if summary.DefaultAgent != "" {
 		agentName = summary.DefaultAgent
 	}
+
 	modelName := "-"
 	if summary.DefaultModel != "" {
 		modelName = summary.DefaultModel
@@ -9055,10 +10664,13 @@ func formatSessionSummary(summary session.Summary) string {
 	if summary.Title != "" {
 		parts = append(parts, "title="+summary.Title)
 	}
+
 	if len(summary.Tags) > 0 {
 		parts = append(parts, "tags="+strings.Join(summary.Tags, ","))
 	}
+
 	parts = append(parts, summary.Path)
+
 	return strings.Join(parts, "\t")
 }
 
@@ -9067,12 +10679,15 @@ func formatHeadlessRun(run session.HeadlessRun) string {
 	if !run.StartedAt.IsZero() {
 		started = run.StartedAt.UTC().Format(time.RFC3339)
 	}
+
 	updated := "-"
 	if !run.UpdatedAt.IsZero() {
 		updated = run.UpdatedAt.UTC().Format(time.RFC3339)
 	}
+
 	agentName := fallbackDash(run.Agent)
 	modelName := fallbackDash(run.Model)
+
 	parts := []string{
 		run.ID,
 		"status=" + string(run.Status),
@@ -9086,6 +10701,7 @@ func formatHeadlessRun(run session.HeadlessRun) string {
 	if run.Error != "" {
 		parts = append(parts, "error="+run.Error)
 	}
+
 	return strings.Join(parts, "\t")
 }
 
@@ -9093,6 +10709,7 @@ func fallbackDash(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return "-"
 	}
+
 	return value
 }
 
@@ -9101,9 +10718,11 @@ func formatSearchSnippet(snippet session.SearchSnippet) string {
 	if role == "" {
 		role = "message"
 	}
+
 	if snippet.Text == "" {
 		return "  " + role + ":"
 	}
+
 	return "  " + role + ": " + snippet.Text
 }
 
@@ -9146,21 +10765,27 @@ func formatSessionDetailsSummary(sessionState session.Session, path string) stri
 	if !sessionState.CreatedAt.IsZero() {
 		parts = append(parts, "created_at="+sessionState.CreatedAt.Format(time.RFC3339))
 	}
+
 	if !sessionState.UpdatedAt.IsZero() {
 		parts = append(parts, "updated_at="+sessionState.UpdatedAt.Format(time.RFC3339))
 	}
+
 	if sessionState.Title != "" {
 		parts = append(parts, "title="+sessionState.Title)
 	}
+
 	if sessionState.DefaultAgent != "" {
 		parts = append(parts, "agent="+sessionState.DefaultAgent)
 	}
+
 	if sessionState.DefaultModel != "" {
 		parts = append(parts, "model="+sessionState.DefaultModel)
 	}
+
 	if len(sessionState.Tags) > 0 {
 		parts = append(parts, "tags="+strings.Join(sessionState.Tags, ","))
 	}
+
 	return strings.Join(parts, "	")
 }
 
@@ -9169,7 +10794,9 @@ func showSession(sessionState session.Session, path string) error {
 	if err != nil {
 		return fmt.Errorf("format session %q: %w", sessionState.ID, err)
 	}
+
 	fmt.Print(out)
+
 	return nil
 }
 
@@ -9197,6 +10824,7 @@ func formatSessionDetails(sessionState session.Session, path string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("marshal session details: %w", err)
 	}
+
 	return string(out), nil
 }
 
@@ -9208,6 +10836,7 @@ func yamlMessages(messages []llm.Message) []yamlMessage {
 			Content: message.Content,
 		})
 	}
+
 	return out
 }
 
@@ -9218,12 +10847,14 @@ func exportSession(sessionState session.Session, format string) error {
 	case "json":
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
+
 		if err := encoder.Encode(sessionState); err != nil {
 			return fmt.Errorf("encode session json: %w", err)
 		}
 	default:
 		return fmt.Errorf("unsupported export format %q (supported: markdown, json)", format)
 	}
+
 	return nil
 }
 
@@ -9276,18 +10907,23 @@ func generationFromOptions(opts cliOptions) generationSettings {
 	if opts.temperature.set {
 		generation.Temperature = &opts.temperature.value
 	}
+
 	if opts.topP.set {
 		generation.TopP = &opts.topP.value
 	}
+
 	if opts.seed.set {
 		generation.Seed = &opts.seed.value
 	}
+
 	if opts.maxTokens.set {
 		generation.MaxTokens = opts.maxTokens.value
 	}
+
 	if strings.TrimSpace(opts.reasoningLevel) != "" {
 		generation.ReasoningLevel = strings.TrimSpace(opts.reasoningLevel)
 	}
+
 	return generation
 }
 
@@ -9306,6 +10942,7 @@ func generationForRequest(
 			MaxTokens:      activeAgent.agent.MaxTokens,
 		})
 	}
+
 	return mergeGenerationSettings(generation, overrides)
 }
 
@@ -9313,18 +10950,23 @@ func mergeGenerationSettings(base, override generationSettings) generationSettin
 	if override.Temperature != nil {
 		base.Temperature = override.Temperature
 	}
+
 	if override.TopP != nil {
 		base.TopP = override.TopP
 	}
+
 	if override.Seed != nil {
 		base.Seed = override.Seed
 	}
+
 	if override.ReasoningLevel != "" {
 		base.ReasoningLevel = strings.TrimSpace(override.ReasoningLevel)
 	}
+
 	if override.MaxTokens > 0 {
 		base.MaxTokens = override.MaxTokens
 	}
+
 	return base
 }
 
@@ -9332,6 +10974,7 @@ func applyGenerationParams(params *llm.CompleteParams, generation generationSett
 	params.Temperature = generation.Temperature
 	params.TopP = generation.TopP
 	params.Seed = generation.Seed
+
 	params.ReasoningLevel = generation.ReasoningLevel
 	if generation.MaxTokens > 0 {
 		params.MaxTokens = generation.MaxTokens
@@ -9340,16 +10983,21 @@ func applyGenerationParams(params *llm.CompleteParams, generation generationSett
 
 func mergeTags(existing, next []string) []string {
 	out := make([]string, 0, len(existing)+len(next))
+
 	seen := make(map[string]bool, len(existing)+len(next))
 	for _, tag := range append(append([]string(nil), existing...), next...) {
 		tag = strings.TrimSpace(tag)
+
 		tagKey := strings.ToLower(tag)
 		if tag == "" || seen[tagKey] {
 			continue
 		}
+
 		seen[tagKey] = true
+
 		out = append(out, tag)
 	}
+
 	return out
 }
 
@@ -9361,6 +11009,7 @@ func contextOptionsFromConfig(cfg appconfig.Config) contextref.Options {
 	if cwd, err := os.Getwd(); err == nil {
 		opts.Root = cwd
 	}
+
 	return opts
 }
 
@@ -9368,6 +11017,7 @@ func maxInputTokensFromConfigOptions(cfg appconfig.Config, opts cliOptions) int 
 	if opts.maxInputTokens.set {
 		return opts.maxInputTokens.value
 	}
+
 	return cfg.Context.MaxInputTokens
 }
 
@@ -9377,6 +11027,7 @@ func firstNonEmpty(values ...string) string {
 			return value
 		}
 	}
+
 	return ""
 }
 
@@ -9388,6 +11039,7 @@ func firstNonEmpty(values ...string) string {
 // a reminder for manual merge.
 func finalizeWorktree(ctx context.Context, state *appState) {
 	ctx = nonNilContext(ctx)
+
 	if state.worktreeInfo == nil {
 		return
 	}
@@ -9395,6 +11047,7 @@ func finalizeWorktree(ctx context.Context, state *appState) {
 	if !state.autoMergeWorktree {
 		fmt.Fprintln(os.Stderr, "worktree: session files are in "+state.worktreeInfo.Path)
 		fmt.Fprintln(os.Stderr, "worktree: merge with: atteler --merge-worktree "+state.sessionState.ID)
+
 		return
 	}
 
@@ -9404,24 +11057,29 @@ func finalizeWorktree(ctx context.Context, state *appState) {
 		fmt.Fprintln(os.Stderr, "worktree: auto-merge failed: "+err.Error())
 		fmt.Fprintln(os.Stderr, "worktree: files preserved in "+state.worktreeInfo.Path)
 		fmt.Fprintln(os.Stderr, "worktree: retry with: atteler --merge-worktree "+state.sessionState.ID)
+
 		return
 	}
 
 	state.sessionState.WorktreePath = ""
 	state.sessionState.WorktreeBranch = ""
+
 	state.sessionState.WorktreeBase = ""
 	if saveErr := state.sessionStore.Save(state.sessionState); saveErr != nil {
 		fmt.Fprintln(os.Stderr, "warning: could not update session after merge: "+saveErr.Error())
 	}
+
 	fmt.Fprintln(os.Stderr, "worktree: merged and cleaned up")
 }
 
 func listWorktrees(ctx context.Context) error {
 	ctx = nonNilContext(ctx)
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("list worktrees: %w", err)
 	}
+
 	if !worktree.IsGitRepoContext(ctx, cwd) {
 		return errors.New("list worktrees: not inside a git repository")
 	}
@@ -9430,33 +11088,40 @@ func listWorktrees(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list worktrees: %w", err)
 	}
+
 	if len(infos) == 0 {
 		fmt.Println("No active atteler worktrees.")
 		return nil
 	}
+
 	for i := range infos {
 		info := &infos[i]
 		fmt.Printf("%s\tbranch=%s\tbase=%s\tsession=%s\n",
 			info.Path, info.Branch, info.BaseBranch, info.SessionID)
 	}
+
 	return nil
 }
 
 func mergeWorktreeBySession(ctx context.Context, sessionRef string) error {
 	ctx = nonNilContext(ctx)
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("merge worktree: %w", err)
 	}
+
 	if !worktree.IsGitRepoContext(ctx, cwd) {
 		return errors.New("merge worktree: not inside a git repository")
 	}
 
 	store := session.NewStore("")
+
 	sess, err := store.Load(sessionRef)
 	if err != nil {
 		return fmt.Errorf("merge worktree: load session: %w", err)
 	}
+
 	if sess.WorktreePath == "" {
 		return fmt.Errorf("merge worktree: session %s has no worktree", sess.ID)
 	}
@@ -9469,6 +11134,7 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "worktree: merging %s into %s...\n", info.Branch, info.BaseBranch)
+
 	if err := worktree.MergeContext(ctx, cwd, info); err != nil {
 		return fmt.Errorf("merge worktree: %w", err)
 	}
@@ -9476,11 +11142,13 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string) error {
 	// Clear worktree metadata from the session.
 	sess.WorktreePath = ""
 	sess.WorktreeBranch = ""
+
 	sess.WorktreeBase = ""
 	if err := store.Save(sess); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not update session after merge: %v\n", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "worktree: merged and cleaned up session %s\n", sess.ID)
+
 	return nil
 }

@@ -45,12 +45,14 @@ import (
 )
 
 const (
-	testCodexModel   = "codex/gpt-5.5"
-	testReviewerName = "reviewer"
+	testCodexModel     = "codex/gpt-5.5"
+	testReviewerName   = "reviewer"
+	testReasoningXHigh = "xhigh"
 )
 
 func TestResolveAgent_InlineOverridesSelected(t *testing.T) {
 	t.Parallel()
+
 	registry := agent.NewRegistry(map[string]config.AgentConfig{
 		"default":        {SystemPrompt: "default"},
 		testReviewerName: {SystemPrompt: "review"},
@@ -60,9 +62,11 @@ func TestResolveAgent_InlineOverridesSelected(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if selected.name != testReviewerName {
 		assert.Failf(t, "assertion failed", "agent = %q, want reviewer", selected.name)
 	}
+
 	if prompt != "check this" {
 		assert.Failf(t, "assertion failed", "prompt = %q, want check this", prompt)
 	}
@@ -70,6 +74,7 @@ func TestResolveAgent_InlineOverridesSelected(t *testing.T) {
 
 func TestResolveAgent_Unknown(t *testing.T) {
 	t.Parallel()
+
 	_, _, err := resolveAgent(agent.NewRegistry(nil), "", "@missing hi")
 	if err == nil {
 		require.FailNow(t, "expected unknown agent error")
@@ -78,10 +83,12 @@ func TestResolveAgent_Unknown(t *testing.T) {
 
 func TestResolveSelection_ExportSkipsUnknownSavedAgent(t *testing.T) {
 	t.Parallel()
+
 	const removedAgent = "removed-agent"
 
 	store := session.NewStore(t.TempDir())
 	saved := session.New("gpt-test", nil)
+
 	saved.DefaultAgent = removedAgent
 	if err := store.Save(saved); err != nil {
 		require.NoError(t, err)
@@ -97,6 +104,7 @@ func TestResolveSelection_ExportSkipsUnknownSavedAgent(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if selection.sessionState.DefaultAgent != removedAgent {
 		require.Failf(t, "unexpected failure", "DefaultAgent = %q, want saved agent", selection.sessionState.DefaultAgent)
 	}
@@ -104,10 +112,12 @@ func TestResolveSelection_ExportSkipsUnknownSavedAgent(t *testing.T) {
 
 func TestResolveSelection_ShowSkipsUnknownSavedAgent(t *testing.T) {
 	t.Parallel()
+
 	const removedAgent = "removed-agent"
 
 	store := session.NewStore(t.TempDir())
 	saved := session.New("gpt-test", nil)
+
 	saved.DefaultAgent = removedAgent
 	if err := store.Save(saved); err != nil {
 		require.NoError(t, err)
@@ -123,6 +133,7 @@ func TestResolveSelection_ShowSkipsUnknownSavedAgent(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if selection.sessionState.DefaultAgent != removedAgent {
 		require.Failf(t, "unexpected failure", "DefaultAgent = %q, want saved agent", selection.sessionState.DefaultAgent)
 	}
@@ -130,6 +141,7 @@ func TestResolveSelection_ShowSkipsUnknownSavedAgent(t *testing.T) {
 
 func TestResolveSelection_UsesPersistedModelBeforeConfigDefault(t *testing.T) {
 	t.Parallel()
+
 	selection, err := resolveSelection(
 		cliOptions{},
 		config.Config{DefaultModel: "config-model"},
@@ -140,6 +152,7 @@ func TestResolveSelection_UsesPersistedModelBeforeConfigDefault(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if selection.selectedModel != testCodexModel {
 		require.Failf(t, "unexpected failure", "selectedModel = %q", selection.selectedModel)
 	}
@@ -148,6 +161,7 @@ func TestResolveSelection_UsesPersistedModelBeforeConfigDefault(t *testing.T) {
 func TestResolveSelection_LoadedSessionWinsOverPersistedModel(t *testing.T) {
 	t.Parallel()
 	store := session.NewStore(t.TempDir())
+
 	saved := session.New("session-model", nil)
 	if err := store.Save(saved); err != nil {
 		require.NoError(t, err)
@@ -163,6 +177,7 @@ func TestResolveSelection_LoadedSessionWinsOverPersistedModel(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if selection.selectedModel != "session-model" {
 		require.Failf(t, "unexpected failure", "selectedModel = %q", selection.selectedModel)
 	}
@@ -170,6 +185,7 @@ func TestResolveSelection_LoadedSessionWinsOverPersistedModel(t *testing.T) {
 
 func TestVersionString(t *testing.T) {
 	t.Parallel()
+
 	got := versionString()
 	for _, want := range []string{"atteler", "commit", "built"} {
 		if !strings.Contains(got, want) {
@@ -180,6 +196,7 @@ func TestVersionString(t *testing.T) {
 
 func TestFormatSessionSummary(t *testing.T) {
 	t.Parallel()
+
 	summary := session.Summary{
 		ID:           "abc",
 		Path:         "/tmp/abc.json",
@@ -190,6 +207,7 @@ func TestFormatSessionSummary(t *testing.T) {
 	}
 
 	got := formatSessionSummary(summary)
+
 	want := "abc\t2026-04-30T12:00:00Z\t3 messages\tagent=reviewer\tmodel=gpt-test\t/tmp/abc.json"
 	if got != want {
 		require.Failf(t, "unexpected failure", "summary = %q, want %q", got, want)
@@ -198,6 +216,7 @@ func TestFormatSessionSummary(t *testing.T) {
 	summary.Title = "Auth review"
 	summary.Tags = []string{"auth", "review"}
 	got = formatSessionSummary(summary)
+
 	want = "abc\t2026-04-30T12:00:00Z\t3 messages\tagent=reviewer\tmodel=gpt-test\ttitle=Auth review\ttags=auth,review\t/tmp/abc.json"
 	if got != want {
 		require.Failf(t, "unexpected failure", "titled summary = %q, want %q", got, want)
@@ -226,12 +245,14 @@ func TestListSessionSummariesFiltersByTag(t *testing.T) {
 
 func TestFormatSearchSnippet(t *testing.T) {
 	t.Parallel()
+
 	snippet := session.SearchSnippet{
 		Role: "assistant",
 		Text: "matching excerpt",
 	}
 
 	got := formatSearchSnippet(snippet)
+
 	want := "  assistant: matching excerpt"
 	if got != want {
 		require.Failf(t, "unexpected failure", "snippet = %q, want %q", got, want)
@@ -240,7 +261,9 @@ func TestFormatSearchSnippet(t *testing.T) {
 
 func TestFormatTagSummary(t *testing.T) {
 	t.Parallel()
+
 	got := formatTagSummary(session.TagSummary{Tag: "auth", Sessions: 2})
+
 	want := "auth\t2 sessions"
 	if got != want {
 		require.Failf(t, "unexpected failure", "tag summary = %q, want %q", got, want)
@@ -249,6 +272,7 @@ func TestFormatTagSummary(t *testing.T) {
 
 func TestFormatSessionDetails(t *testing.T) {
 	t.Parallel()
+
 	sessionState := session.New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
 	sessionState.Title = "Demo"
 	sessionState.Tags = []string{"demo"}
@@ -260,6 +284,7 @@ func TestFormatSessionDetails(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	for _, want := range []string{
 		"id: " + sessionState.ID,
 		"path: /tmp/session.json",
@@ -292,9 +317,11 @@ func TestInitConfigWritesTemplateWithoutOverwrite(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if string(data) != config.TemplateYAML() {
 		require.Failf(t, "unexpected failure", "config template mismatch")
 	}
+
 	if err := initConfig(path); err == nil {
 		require.FailNow(t, "expected existing config error")
 	}
@@ -302,7 +329,9 @@ func TestInitConfigWritesTemplateWithoutOverwrite(t *testing.T) {
 
 func TestAppendStdinContext(t *testing.T) {
 	t.Parallel()
+
 	got := appendStdinContext("Review this diff", "diff --git a/file b/file\n")
+
 	want := "Review this diff\n\n<stdin>\ndiff --git a/file b/file\n</stdin>"
 	if got != want {
 		require.Failf(t, "unexpected failure", "prompt = %q, want %q", got, want)
@@ -317,6 +346,7 @@ func TestAppendStdinContext(t *testing.T) {
 func TestConfigPathStatus(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte("default_model: test\n"), 0o600); err != nil {
 		require.NoError(t, err)
@@ -325,9 +355,11 @@ func TestConfigPathStatus(t *testing.T) {
 	if got := configPathStatus(path); got != "present" {
 		require.Failf(t, "unexpected failure", "configPathStatus(file) = %q, want present", got)
 	}
+
 	if got := configPathStatus(dir); got != "directory" {
 		require.Failf(t, "unexpected failure", "configPathStatus(dir) = %q, want directory", got)
 	}
+
 	if got := configPathStatus(filepath.Join(dir, "missing.yaml")); got != "missing" {
 		require.Failf(t, "unexpected failure", "configPathStatus(missing) = %q, want missing", got)
 	}
@@ -335,10 +367,12 @@ func TestConfigPathStatus(t *testing.T) {
 
 func TestKnownProvidersSorted(t *testing.T) {
 	t.Parallel()
+
 	providers := knownProvidersSorted()
 	if len(providers) < 2 {
 		require.Failf(t, "unexpected failure", "providers len = %d, want at least 2", len(providers))
 	}
+
 	for i := 1; i < len(providers); i++ {
 		if providers[i-1].Name > providers[i].Name {
 			require.Failf(t, "unexpected failure", "providers not sorted: %+v", providers)
@@ -348,6 +382,7 @@ func TestKnownProvidersSorted(t *testing.T) {
 
 func TestGenerationForRequest_Precedence(t *testing.T) {
 	t.Parallel()
+
 	globalTemp := 0.7
 	agentTemp := 0.2
 	cliTopP := 0.9
@@ -372,15 +407,19 @@ func TestGenerationForRequest_Precedence(t *testing.T) {
 	if generation.Temperature == nil || *generation.Temperature != agentTemp {
 		require.Failf(t, "unexpected failure", "temperature = %v, want agent override", generation.Temperature)
 	}
+
 	if generation.TopP == nil || *generation.TopP != cliTopP {
 		require.Failf(t, "unexpected failure", "top_p = %v, want CLI override", generation.TopP)
 	}
+
 	if generation.Seed == nil || *generation.Seed != cliSeed {
 		require.Failf(t, "unexpected failure", "seed = %v, want CLI override", generation.Seed)
 	}
+
 	if generation.ReasoningLevel != "high" {
 		require.Failf(t, "unexpected failure", "reasoning level = %q, want agent override", generation.ReasoningLevel)
 	}
+
 	if generation.MaxTokens != 100 {
 		require.Failf(t, "unexpected failure", "max tokens = %d, want agent override", generation.MaxTokens)
 	}
@@ -402,6 +441,7 @@ func TestGenerationForRequest_CLIReasoningLevelOverridesAgent(t *testing.T) {
 
 func TestApplyGenerationParams_AllowsExplicitZeroTemperature(t *testing.T) {
 	t.Parallel()
+
 	temperature := 0.0
 	seed := 0
 	params := llm.CompleteParams{}
@@ -411,6 +451,7 @@ func TestApplyGenerationParams_AllowsExplicitZeroTemperature(t *testing.T) {
 	if params.Temperature == nil || *params.Temperature != 0 {
 		require.Failf(t, "unexpected failure", "temperature = %v, want explicit zero", params.Temperature)
 	}
+
 	if params.Seed == nil || *params.Seed != 0 {
 		require.Failf(t, "unexpected failure", "seed = %v, want explicit zero", params.Seed)
 	}
@@ -418,10 +459,12 @@ func TestApplyGenerationParams_AllowsExplicitZeroTemperature(t *testing.T) {
 
 func TestValidateRequestBudget_MaxInputTokens(t *testing.T) {
 	t.Parallel()
+
 	err := validateRequestBudget(nil, "", []llm.Message{{Role: llm.RoleUser, Content: strings.Repeat("x", 80)}}, 10)
 	if err == nil {
 		require.FailNow(t, "expected budget error")
 	}
+
 	if got := err.Error(); !strings.Contains(got, "max_input_tokens") {
 		require.Failf(t, "unexpected error", "error = %q", got)
 	}
@@ -443,10 +486,12 @@ func TestRecordedResponseRoundTrip(t *testing.T) {
 	if err := saveRecordedResponse(path, params, []string{"backup"}, resp); err != nil {
 		require.NoError(t, err)
 	}
+
 	got, err := loadRecordedResponse(path)
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if got.Content != "hi back" || got.Model != "gpt-test" || got.InputTokens != 2 || got.CachedInputTokens != 1 || got.OutputTokens != 3 {
 		require.Failf(t, "unexpected replay response", "got = %+v", got)
 	}
@@ -454,6 +499,7 @@ func TestRecordedResponseRoundTrip(t *testing.T) {
 
 func TestFormatAgentPlanParticipant(t *testing.T) {
 	t.Parallel()
+
 	got := formatAgentPlanParticipant(&agent.Participant{
 		Agent: agent.Agent{
 			Name:         "reviewer",
@@ -470,6 +516,7 @@ func TestFormatAgentPlanParticipant(t *testing.T) {
 func TestEvalOutput_PassAndFail(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+
 	actual := filepath.Join(dir, "actual.txt")
 	if err := os.WriteFile(actual, []byte("hello brave world\n"), 0o600); err != nil {
 		require.NoError(t, err)
@@ -481,12 +528,14 @@ func TestEvalOutput_PassAndFail(t *testing.T) {
 
 func TestExpectedEvalText_RejectsAmbiguousInput(t *testing.T) {
 	t.Parallel()
+
 	_, err := expectedEvalText("inline", "file.txt")
 	require.Error(t, err)
 }
 
 func TestFormatSkillSuggestion(t *testing.T) {
 	t.Parallel()
+
 	got := formatSkillSuggestion(attskill.Suggestion{
 		Name:        "Plan Code Test Skill",
 		Slug:        "plan-code-test",
@@ -507,6 +556,7 @@ func TestFormatSkillSuggestion(t *testing.T) {
 
 func TestParsePluginTarget(t *testing.T) {
 	t.Parallel()
+
 	pluginName, entrypoint, err := parsePluginTarget("reviewer/check", "")
 	require.NoError(t, err)
 	assert.Equal(t, "reviewer", pluginName)
@@ -523,6 +573,7 @@ func TestParsePluginTarget(t *testing.T) {
 
 func TestFormatPluginDryRun(t *testing.T) {
 	t.Parallel()
+
 	got := formatPluginDryRun(attelerplugin.DryRun{
 		Description: "would run plugin",
 		Entrypoint: attelerplugin.Entrypoint{
@@ -545,6 +596,7 @@ func TestFormatPluginDryRun(t *testing.T) {
 
 func TestFormatMemoryResult(t *testing.T) {
 	t.Parallel()
+
 	got := formatMemoryResult(memory.Result{
 		Score:   1.25,
 		Matches: []string{"oauth", "token"},
@@ -591,6 +643,7 @@ func TestFormatMessageSummary(t *testing.T) {
 	t.Parallel()
 
 	message := llm.Message{Role: llm.RoleAssistant, Content: "hello\nworld " + strings.Repeat("x", 140)}
+
 	got := formatMessageSummary(2, message)
 	for _, want := range []string{
 		"index=2",
@@ -602,6 +655,7 @@ func TestFormatMessageSummary(t *testing.T) {
 			require.Failf(t, "formatted message summary missing content", "missing %q in %q", want, got)
 		}
 	}
+
 	if !strings.HasSuffix(got, "…") {
 		require.Failf(t, "formatted message summary should truncate", "got %q", got)
 	}
@@ -613,6 +667,7 @@ func TestTruncateRunes(t *testing.T) {
 	if got := truncateRunes("abcd", 3); got != "ab…" {
 		require.Failf(t, "unexpected truncated string", "got %q", got)
 	}
+
 	if got := truncateRunes("éclair", 20); got != "éclair" {
 		require.Failf(t, "unexpected untruncated string", "got %q", got)
 	}
@@ -636,6 +691,7 @@ func TestFormatSessionDetailsSummary(t *testing.T) {
 		Evaluations: []session.AgentEvaluation{{Agent: "reviewer", Outcome: "pass"}},
 		Artifacts:   []session.Artifact{{Path: "plan.md", Kind: "plan"}},
 	}
+
 	got := formatSessionDetailsSummary(sessionState, "/tmp/demo.json")
 	for _, want := range []string{
 		"id=demo",
@@ -673,6 +729,7 @@ func TestFormatAgentPerformanceSummary(t *testing.T) {
 		Outcomes:                 []session.OutcomeCount{{Outcome: "pass", Count: 1}, {Outcome: "fail", Count: 1}},
 		LatestActivity:           time.Date(2026, 5, 2, 10, 30, 0, 0, time.UTC),
 	}
+
 	got := formatAgentPerformanceSummary(summary)
 	for _, want := range []string{
 		"agent=reviewer",
@@ -703,6 +760,7 @@ func TestFormatFailure(t *testing.T) {
 		Agent:     "debugger",
 		CreatedAt: time.Date(2026, 5, 1, 13, 0, 0, 0, time.UTC),
 	}
+
 	got := formatFailure(failure)
 	for _, want := range []string{
 		"approach=retry timer",
@@ -728,6 +786,7 @@ func TestFormatEvaluation(t *testing.T) {
 		Score:     9,
 		CreatedAt: time.Date(2026, 5, 1, 12, 45, 0, 0, time.UTC),
 	}
+
 	got := formatEvaluation(evaluation)
 	for _, want := range []string{
 		"agent=reviewer",
@@ -753,6 +812,7 @@ func TestFormatArtifact(t *testing.T) {
 		SourceAgent: "reviewer",
 		CreatedAt:   time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC),
 	}
+
 	got := formatArtifact(artifact)
 	for _, want := range []string{
 		"path=docs/research.md",
@@ -770,6 +830,7 @@ func TestFormatArtifact(t *testing.T) {
 func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 	t.Parallel()
 	store := session.NewStore(t.TempDir())
+
 	sessionState := session.New("gpt-test", nil)
 	if err := store.Save(sessionState); err != nil {
 		require.NoError(t, err)
@@ -779,10 +840,12 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	loaded, err := store.Load(sessionState.ID)
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	require.Len(t, loaded.Evaluations, 1)
 	assert.Equal(t, "reviewer", loaded.Evaluations[0].Agent)
 	assert.Equal(t, 9, loaded.Evaluations[0].Score)
@@ -791,10 +854,12 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	loaded, err = store.Load(sessionState.ID)
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	require.Len(t, loaded.Artifacts, 1)
 	assert.Equal(t, "docs/research.md", loaded.Artifacts[0].Path)
 	assert.Equal(t, "reviewer", loaded.Artifacts[0].SourceAgent)
@@ -803,6 +868,7 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+
 	replayPath := filepath.Join(dir, "response.json")
 	if err := saveRecordedResponse(
 		replayPath,
@@ -812,6 +878,7 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	); err != nil {
 		require.NoError(t, err)
 	}
+
 	store := session.NewStore(filepath.Join(dir, "sessions"))
 
 	err := runOnce(
@@ -835,17 +902,21 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	summaries, err := store.List()
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if len(summaries) != 1 {
 		require.Failf(t, "unexpected sessions", "summaries = %+v", summaries)
 	}
+
 	loaded, err := store.Load(summaries[0].ID)
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if len(loaded.Messages) != 2 || loaded.Messages[1].Content != "recorded answer" {
 		require.Failf(t, "unexpected replayed session", "messages = %+v", loaded.Messages)
 	}
@@ -853,27 +924,31 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 
 func TestFZFInputAndSelection(t *testing.T) {
 	t.Parallel()
+
 	items := []pickerItem{
 		{provider: "claude-code", model: "claude-opus-4-6"},
 		{provider: "codex", model: "gpt-5.5"},
+		{provider: "codex", model: "gpt-5.5", reasoning: testReasoningXHigh},
 	}
 
 	input := fzfInput(items)
 	for _, want := range []string{
-		"claude-code/claude-opus-4-6\tclaude-code\tclaude-opus-4-6\n",
-		"codex/gpt-5.5\tcodex\tgpt-5.5\n",
+		"claude-code/claude-opus-4-6\tclaude-code\tclaude-opus-4-6\t\n",
+		"codex/gpt-5.5\tcodex\tgpt-5.5\t\n",
+		"codex/gpt-5.5:xhigh\tcodex\tgpt-5.5\txhigh\n",
 	} {
 		if !strings.Contains(input, want) {
 			require.Failf(t, "unexpected failure", "fzf input missing %q in:\n%s", want, input)
 		}
 	}
 
-	item, ok := parseFZFSelection("codex/gpt-5.5\tcodex\tgpt-5.5\n", items)
+	item, ok := parseFZFSelection("codex/gpt-5.5:xhigh\tcodex\tgpt-5.5\txhigh\n", items)
 	if !ok {
 		require.FailNow(t, "expected fzf selection to parse")
 	}
-	if item.provider != "codex" || item.model != "gpt-5.5" {
-		require.Failf(t, "unexpected failure", "selection = %+v, want codex/gpt-5.5", item)
+
+	if item.provider != "codex" || item.model != "gpt-5.5" || item.reasoning != testReasoningXHigh {
+		require.Failf(t, "unexpected failure", "selection = %+v, want codex/gpt-5.5:xhigh", item)
 	}
 
 	if _, ok := parseFZFSelection("", items); ok {
@@ -881,15 +956,134 @@ func TestFZFInputAndSelection(t *testing.T) {
 	}
 }
 
+type modelPickerProvider struct {
+	name          string
+	models        []string
+	fetchedModels []string
+}
+
+func (p modelPickerProvider) Name() string { return p.name }
+
+func (p modelPickerProvider) Models() []string { return p.models }
+
+func (p modelPickerProvider) FetchModels(context.Context) ([]string, error) {
+	return p.fetchedModels, nil
+}
+
+func (p modelPickerProvider) HealthCheck(context.Context) error { return nil }
+
+func (p modelPickerProvider) Complete(context.Context, llm.CompleteParams) (*llm.Response, error) {
+	return &llm.Response{}, nil
+}
+
+func (p modelPickerProvider) ModelContextWindow(string) int { return 0 }
+
+func TestOpenModelPickerFetchesProviderModelsInBackground(t *testing.T) {
+	t.Parallel()
+
+	originalLookPath := execLookPath
+	execLookPath = func(string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	t.Cleanup(func() {
+		execLookPath = originalLookPath
+	})
+
+	registry := llm.NewRegistry()
+	registry.Register(modelPickerProvider{
+		name:          "beta",
+		models:        []string{"beta-static"},
+		fetchedModels: []string{"beta-live"},
+	})
+	registry.Register(modelPickerProvider{
+		name:          "alpha",
+		models:        []string{"alpha-static"},
+		fetchedModels: []string{"alpha-live"},
+	})
+
+	next, cmd, handled := (model{ctx: context.Background(), registry: registry}).openModelPicker()
+	require.True(t, handled)
+
+	picker, ok := next.(model)
+	require.True(t, ok)
+	require.True(t, picker.pickerOpen)
+	require.True(t, picker.pickerLoading)
+	assert.Equal(t, 2, picker.modelFetchesPending)
+	assert.Equal(t,
+		expandReasoningItems([]pickerItem{
+			{provider: "alpha", model: "alpha-static"},
+			{provider: "beta", model: "beta-static"},
+		}),
+		picker.pickerItems,
+	)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 2)
+
+	alphaMsg, ok := batch[0]().(modelsLoadedMsg)
+	require.True(t, ok)
+	require.Equal(t, "alpha", alphaMsg.provider)
+	next, _ = picker.updateModelsLoaded(alphaMsg)
+	picker, ok = next.(model)
+	require.True(t, ok)
+	require.True(t, picker.pickerLoading)
+	assert.Equal(t, 1, picker.modelFetchesPending)
+	assert.Equal(t,
+		expandReasoningItems([]pickerItem{
+			{provider: "alpha", model: "alpha-live"},
+			{provider: "beta", model: "beta-static"},
+		}),
+		picker.pickerItems,
+	)
+
+	betaMsg, ok := batch[1]().(modelsLoadedMsg)
+	require.True(t, ok)
+	require.Equal(t, "beta", betaMsg.provider)
+	next, _ = picker.updateModelsLoaded(betaMsg)
+	picker, ok = next.(model)
+	require.True(t, ok)
+	require.False(t, picker.pickerLoading)
+	assert.Equal(t, 0, picker.modelFetchesPending)
+	assert.Equal(t,
+		expandReasoningItems([]pickerItem{
+			{provider: "alpha", model: "alpha-live"},
+			{provider: "beta", model: "beta-live"},
+		}),
+		picker.pickerItems,
+	)
+}
+
+// expandReasoningItems expands each base picker item into one entry per picker
+// reasoning level (default + each canonical level), matching the shape
+// produced by pickerItemsForProvider.
+func expandReasoningItems(bases []pickerItem) []pickerItem {
+	levels := llm.ReasoningPickerLevels()
+
+	out := make([]pickerItem, 0, len(bases)*len(levels))
+	for _, base := range bases {
+		for _, level := range levels {
+			out = append(out, pickerItem{provider: base.provider, model: base.model, reasoning: level})
+		}
+	}
+
+	return out
+}
+
 func TestCompletionCandidates_AgentAndPath(t *testing.T) {
 	t.Parallel()
+
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# demo\n"), 0o600); err != nil {
 		require.NoError(t, err)
 	}
+
 	if err := os.Mkdir(filepath.Join(dir, "pkg"), 0o750); err != nil {
 		require.NoError(t, err)
 	}
+
 	registry := agent.NewRegistry(map[string]config.AgentConfig{
 		"reviewer": {Description: "reviews code"},
 	})
@@ -898,9 +1092,11 @@ func TestCompletionCandidates_AgentAndPath(t *testing.T) {
 	if !ok {
 		require.FailNow(t, "expected active completion token")
 	}
+
 	if len(items) == 0 || items[0].value != "@reviewer " {
 		require.Failf(t, "unexpected candidates", "items = %+v", items)
 	}
+
 	if got := applyCompletionCandidate("Ask @rev", items[0].value); got != "Ask @reviewer " {
 		require.Failf(t, "unexpected completion", "got %q", got)
 	}
@@ -909,12 +1105,15 @@ func TestCompletionCandidates_AgentAndPath(t *testing.T) {
 	if !ok {
 		require.FailNow(t, "expected path completion token")
 	}
+
 	found := false
+
 	for _, item := range items {
 		if item.value == "@README.md" {
 			found = true
 		}
 	}
+
 	if !found {
 		require.Failf(t, "README completion missing", "items = %+v", items)
 	}
@@ -1015,10 +1214,14 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 		Content:     "answer",
 		TokenUsage:  tokenUsage{InputTokens: 1, CachedInputTokens: 2, OutputTokens: 3, Responses: 1},
 	}
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+
+	var (
+		stdout bytes.Buffer
+		stderr bytes.Buffer
+	)
 
 	require.NoError(t, writeRunOnceResult(&stdout, &stderr, result, "json", true))
+
 	var decoded runOnceResult
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded))
 	assert.Equal(t, result.SessionID, decoded.SessionID)
@@ -1044,6 +1247,7 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 		nil,
 		&llm.Response{Content: "recorded answer", Model: "gpt-test", InputTokens: 2, CachedInputTokens: 1, OutputTokens: 3},
 	))
+
 	store := session.NewStore(filepath.Join(dir, "sessions"))
 	headlessID := "test-headless"
 
@@ -1136,6 +1340,7 @@ func TestPromptComplete_AgentCandidatesAndFormatting(t *testing.T) {
 	if len(suggestions) == 0 {
 		require.FailNow(t, "expected prompt completion suggestion")
 	}
+
 	if suggestions[0].Text != testReviewerName {
 		require.Failf(t, "unexpected suggestion", "got %+v", suggestions[0])
 	}
@@ -1193,6 +1398,7 @@ func TestSummarizeAndFormatCodeSymbolFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "C"}, {Name: "Build"}}},
 	}}
 	summaries := summarizeCodeSymbolFiles(root, idx)
+
 	want := []codeSymbolFileSummary{
 		{Path: "cmd/a.go", Package: "main", Symbols: 2},
 		{Path: "pkg/c.go", Package: "pkg", Symbols: 2},
@@ -1201,6 +1407,7 @@ func TestSummarizeAndFormatCodeSymbolFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected symbol file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	got := formatCodeSymbolFileSummary(summaries[0])
 	if got != "path=cmd/a.go	package=main	symbols=2" {
 		require.Failf(t, "unexpected symbol file summary format", "got %q", got)
@@ -1218,10 +1425,12 @@ func TestSummarizeAndFormatCodeSymbols(t *testing.T) {
 		{Kind: ""},
 	}}
 	summaries := summarizeCodeSymbols(idx)
+
 	want := []codeSymbolSummary{{Kind: "func", Count: 2}, {Kind: "const", Count: 1}, {Kind: "type", Count: 1}}
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected symbol summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	got := formatCodeSymbolSummary(summaries[0])
 	if got != "kind=func	symbols=2" {
 		require.Failf(t, "unexpected symbol summary format", "got %q", got)
@@ -1238,6 +1447,7 @@ func TestSummarizeCodeSymbolKindFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Kind: "const"}}},
 	}}
 	summaries := summarizeCodeSymbolKindFiles(root, idx, "func")
+
 	want := []codeSymbolFileSummary{
 		{Path: "cmd/a.go", Package: "main", Symbols: 2},
 		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
@@ -1245,9 +1455,11 @@ func TestSummarizeCodeSymbolKindFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected symbol kind file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeSymbolKindFiles(root, idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing kind should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeSymbolKindFiles(root, idx, " "); got != nil {
 		require.Failf(t, "blank kind should return nil", "got %#v", got)
 	}
@@ -1263,6 +1475,7 @@ func TestSummarizeCodeSymbolKindPackages(t *testing.T) {
 		{Path: "empty.go", Symbols: []codeintel.Symbol{{Kind: "func"}}},
 	}}
 	summaries := summarizeCodeSymbolKindPackages(idx, "func")
+
 	want := []codePackageSummary{
 		{Name: "pkg", Files: 2, Symbols: 3},
 		{Name: "main", Files: 1, Symbols: 2},
@@ -1270,9 +1483,11 @@ func TestSummarizeCodeSymbolKindPackages(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected symbol kind package summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeSymbolKindPackages(idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing kind should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeSymbolKindPackages(idx, " "); got != nil {
 		require.Failf(t, "blank kind should return nil", "got %#v", got)
 	}
@@ -1288,6 +1503,7 @@ func TestCodeSymbolsByKind(t *testing.T) {
 		{Name: "Count", Kind: "var", File: "c.go", Line: 3},
 	}}
 	matches := codeSymbolsByKind(idx, " FUNC ")
+
 	want := []codeintel.Symbol{
 		{Name: "Build", Kind: "func", File: "a.go", Line: 10},
 		{Name: "Run", Kind: "func", File: "b.go", Line: 20},
@@ -1295,6 +1511,7 @@ func TestCodeSymbolsByKind(t *testing.T) {
 	if !reflect.DeepEqual(matches, want) {
 		require.Failf(t, "unexpected kind matches", "got %#v, want %#v", matches, want)
 	}
+
 	if got := codeSymbolsByKind(idx, " "); got != nil {
 		require.Failf(t, "blank kind should return nil", "got %#v", got)
 	}
@@ -1310,6 +1527,7 @@ func TestSummarizeCodeSymbolNameFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Client"}}},
 	}}
 	summaries := summarizeCodeSymbolNameFiles(root, idx, "Run")
+
 	want := []codeSymbolFileSummary{
 		{Path: "cmd/a.go", Package: "main", Symbols: 2},
 		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
@@ -1317,9 +1535,11 @@ func TestSummarizeCodeSymbolNameFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected symbol name file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeSymbolNameFiles(root, idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing name should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeSymbolNameFiles(root, idx, " "); got != nil {
 		require.Failf(t, "blank name should return nil", "got %#v", got)
 	}
@@ -1335,6 +1555,7 @@ func TestSummarizeCodeSymbolNamePackages(t *testing.T) {
 		{Path: "empty.go", Symbols: []codeintel.Symbol{{Name: "Run"}}},
 	}}
 	summaries := summarizeCodeSymbolNamePackages(idx, "Run")
+
 	want := []codePackageSummary{
 		{Name: "pkg", Files: 2, Symbols: 3},
 		{Name: "main", Files: 1, Symbols: 2},
@@ -1342,9 +1563,11 @@ func TestSummarizeCodeSymbolNamePackages(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected symbol name package summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeSymbolNamePackages(idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing name should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeSymbolNamePackages(idx, " "); got != nil {
 		require.Failf(t, "blank name should return nil", "got %#v", got)
 	}
@@ -1360,6 +1583,7 @@ func TestSummarizeCodeSymbolPrefixFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Client"}}},
 	}}
 	summaries := summarizeCodeSymbolPrefixFiles(root, idx, "R")
+
 	want := []codeSymbolFileSummary{
 		{Path: "cmd/a.go", Package: "main", Symbols: 2},
 		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
@@ -1367,9 +1591,11 @@ func TestSummarizeCodeSymbolPrefixFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected symbol prefix file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeSymbolPrefixFiles(root, idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing prefix should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeSymbolPrefixFiles(root, idx, " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -1385,6 +1611,7 @@ func TestSummarizeCodeSymbolPrefixPackages(t *testing.T) {
 		{Path: "empty.go", Symbols: []codeintel.Symbol{{Name: "Run"}}},
 	}}
 	summaries := summarizeCodeSymbolPrefixPackages(idx, "R")
+
 	want := []codePackageSummary{
 		{Name: "pkg", Files: 2, Symbols: 3},
 		{Name: "main", Files: 1, Symbols: 2},
@@ -1392,9 +1619,11 @@ func TestSummarizeCodeSymbolPrefixPackages(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected symbol prefix package summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeSymbolPrefixPackages(idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing prefix should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeSymbolPrefixPackages(idx, " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -1410,6 +1639,7 @@ func TestCodeSymbolsWithPrefix(t *testing.T) {
 		{Name: "Run", File: "a.go", Line: 8},
 	}}
 	matches := codeSymbolsWithPrefix(idx, "Run")
+
 	want := []codeintel.Symbol{
 		{Name: "Run", File: "a.go", Line: 8},
 		{Name: "Run", File: "a.go", Line: 10},
@@ -1418,6 +1648,7 @@ func TestCodeSymbolsWithPrefix(t *testing.T) {
 	if !reflect.DeepEqual(matches, want) {
 		require.Failf(t, "unexpected prefix matches", "got %#v, want %#v", matches, want)
 	}
+
 	if got := codeSymbolsWithPrefix(idx, " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -1433,6 +1664,7 @@ func TestFormatCodeSymbol(t *testing.T) {
 		File: filepath.Join(root, "pkg", "runner.go"),
 		Line: 42,
 	})
+
 	want := strings.Join([]string{"Run", "kind=method", "path=pkg/runner.go", "line=42"}, "\t")
 	if got != want {
 		require.Failf(t, "unexpected code symbol format", "got %q, want %q", got, want)
@@ -1450,6 +1682,7 @@ func TestSummarizeAndFormatCodeImportFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Imports: []string{"bytes", "errors"}},
 	}}
 	summaries := summarizeCodeImportFiles(root, idx)
+
 	want := []codeImportFileSummary{
 		{Path: "cmd/a.go", Package: "main", Imports: 2},
 		{Path: "pkg/c.go", Package: "pkg", Imports: 2},
@@ -1458,6 +1691,7 @@ func TestSummarizeAndFormatCodeImportFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected import file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	got := formatCodeImportFileSummary(summaries[0])
 	if got != "path=cmd/a.go	package=main	imports=2" {
 		require.Failf(t, "unexpected import file summary format", "got %q", got)
@@ -1475,10 +1709,12 @@ func TestSummarizeAndFormatCodeImports(t *testing.T) {
 		{From: "d.go", Import: "context"},
 	}}
 	summaries := summarizeCodeImports(idx)
+
 	want := []codeImportSummary{{Path: "context", Files: 2}, {Path: "fmt", Files: 2}}
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected import summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	got := formatCodeImportSummary(summaries[1])
 	if got != "import=fmt	files=2" {
 		require.Failf(t, "unexpected import summary format", "got %q", got)
@@ -1496,6 +1732,7 @@ func TestSummarizeCodeImportPrefix(t *testing.T) {
 		{From: "d.go", Import: "github.com/tommoulard/atteler/pkg/llm"},
 	}}
 	summaries := summarizeCodeImportPrefix(idx, "github.com/tommoulard/atteler/pkg/")
+
 	want := []codeImportSummary{
 		{Path: "github.com/tommoulard/atteler/pkg/llm", Files: 2},
 		{Path: "github.com/tommoulard/atteler/pkg/agent", Files: 1},
@@ -1503,9 +1740,11 @@ func TestSummarizeCodeImportPrefix(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected import prefix summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeImportPrefix(idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing prefix should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeImportPrefix(idx, " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -1530,6 +1769,7 @@ func TestSummarizeCodeImportPrefixFiles(t *testing.T) {
 		},
 	}
 	summaries := summarizeCodeImportPrefixFiles(root, idx, "github.com/example/")
+
 	want := []codeImportFileSummary{
 		{Path: "cmd/a.go", Package: "main", Imports: 2},
 		{Path: "pkg/b.go", Package: "pkg", Imports: 1},
@@ -1537,9 +1777,11 @@ func TestSummarizeCodeImportPrefixFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected import prefix file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeImportPrefixFiles(root, idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing prefix should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeImportPrefixFiles(root, idx, " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -1565,6 +1807,7 @@ func TestSummarizeCodeImportPrefixPackages(t *testing.T) {
 		},
 	}
 	summaries := summarizeCodeImportPrefixPackages(idx, "github.com/example/")
+
 	want := []codePackageImportMatchSummary{
 		{Name: "main", Files: 1, Imports: 2},
 		{Name: "pkg", Files: 1, Imports: 1},
@@ -1572,12 +1815,15 @@ func TestSummarizeCodeImportPrefixPackages(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected import prefix package summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := formatCodePackageImportMatchSummary(summaries[0]); got != "package=main\tfiles=1\timports=2" {
 		require.Failf(t, "unexpected import package summary format", "got %q", got)
 	}
+
 	if got := summarizeCodeImportPrefixPackages(idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing prefix should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeImportPrefixPackages(idx, " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -1592,6 +1838,7 @@ func TestCodeImportEdgesWithPrefix(t *testing.T) {
 		{From: "c.go", Import: "github.com/tommoulard/atteler/pkg/agent"},
 	}}
 	edges := codeImportEdgesWithPrefix(idx, "github.com/tommoulard/atteler/pkg/")
+
 	want := []codeintel.ImportEdge{
 		{From: "b.go", Import: "github.com/tommoulard/atteler/pkg/llm"},
 		{From: "c.go", Import: "github.com/tommoulard/atteler/pkg/agent"},
@@ -1599,6 +1846,7 @@ func TestCodeImportEdgesWithPrefix(t *testing.T) {
 	if !reflect.DeepEqual(edges, want) {
 		require.Failf(t, "unexpected import prefix edges", "got %#v, want %#v", edges, want)
 	}
+
 	if got := codeImportEdgesWithPrefix(idx, " "); got != nil {
 		require.Failf(t, "blank import prefix should return nil", "got %#v", got)
 	}
@@ -1613,10 +1861,12 @@ func TestCodeImportEdgesForPath(t *testing.T) {
 		{From: "c.go", Import: "context"},
 	}}
 	edges := codeImportEdgesForPath(idx, "context")
+
 	want := []codeintel.ImportEdge{{From: "a.go", Import: "context"}, {From: "c.go", Import: "context"}}
 	if !reflect.DeepEqual(edges, want) {
 		require.Failf(t, "unexpected import path edges", "got %#v, want %#v", edges, want)
 	}
+
 	if got := codeImportEdgesForPath(idx, " "); got != nil {
 		require.Failf(t, "blank import path should return nil", "got %#v", got)
 	}
@@ -1632,13 +1882,16 @@ func TestSummarizeCodeImportPath(t *testing.T) {
 		{From: "c.go", Import: "context"},
 	}}
 	summaries := summarizeCodeImportPath(idx, "context")
+
 	want := []codeImportSummary{{Path: "context", Files: 2}}
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected import path summary", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeImportPath(idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing import path should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeImportPath(idx, " "); got != nil {
 		require.Failf(t, "blank import path should return nil", "got %#v", got)
 	}
@@ -1662,6 +1915,7 @@ func TestSummarizeCodeImportPathFiles(t *testing.T) {
 		},
 	}
 	summaries := summarizeCodeImportPathFiles(root, idx, "context")
+
 	want := []codeImportFileSummary{
 		{Path: "cmd/a.go", Package: "main", Imports: 1},
 		{Path: "pkg/b.go", Package: "pkg", Imports: 1},
@@ -1669,9 +1923,11 @@ func TestSummarizeCodeImportPathFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected import path file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeImportPathFiles(root, idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing import path should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeImportPathFiles(root, idx, " "); got != nil {
 		require.Failf(t, "blank import path should return nil", "got %#v", got)
 	}
@@ -1696,6 +1952,7 @@ func TestSummarizeAndFormatCodeImportPathPackages(t *testing.T) {
 		},
 	}
 	summaries := summarizeCodeImportPathPackages(idx, "context")
+
 	want := []codePackageImportMatchSummary{
 		{Name: "main", Files: 1},
 		{Name: "pkg", Files: 1},
@@ -1703,12 +1960,15 @@ func TestSummarizeAndFormatCodeImportPathPackages(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected import path package summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := formatCodePackageImportMatchSummary(summaries[0]); got != "package=main\tfiles=1" {
 		require.Failf(t, "unexpected import package summary format", "got %q", got)
 	}
+
 	if got := summarizeCodeImportPathPackages(idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing import path should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodeImportPathPackages(idx, " "); got != nil {
 		require.Failf(t, "blank import path should return nil", "got %#v", got)
 	}
@@ -1722,6 +1982,7 @@ func TestFormatCodeImportEdge(t *testing.T) {
 		From:   filepath.Join(root, "pkg", "runner.go"),
 		Import: "context",
 	})
+
 	want := "path=pkg/runner.go\timport=context"
 	if got != want {
 		require.Failf(t, "unexpected code import format", "got %q, want %q", got, want)
@@ -1732,6 +1993,7 @@ func TestRelativeCodePath(t *testing.T) {
 	t.Parallel()
 
 	root := filepath.Join("tmp", "repo")
+
 	got := relativeCodePath(root, filepath.Join(root, "cmd", "atteler", "main.go"))
 	if got != "cmd/atteler/main.go" {
 		require.Failf(t, "unexpected relative code path", "got %q", got)
@@ -1749,6 +2011,7 @@ func TestSummarizeCodePackageSymbolFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "C"}, {Name: "Build"}}},
 	}}
 	summaries := summarizeCodePackageSymbolFiles(root, idx, "pkg")
+
 	want := []codeSymbolFileSummary{
 		{Path: "pkg/c.go", Package: "pkg", Symbols: 2},
 		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
@@ -1756,9 +2019,11 @@ func TestSummarizeCodePackageSymbolFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package symbol file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageSymbolFiles(root, idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing package should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageSymbolFiles(root, idx, " "); got != nil {
 		require.Failf(t, "blank package should return nil", "got %#v", got)
 	}
@@ -1773,9 +2038,11 @@ func TestCodePackageSymbolsByName(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if packageName != testPackageName || name != "Run" {
 		require.Failf(t, "unexpected parsed spec", "package=%q name=%q", packageName, name)
 	}
+
 	if _, _, err := parseCodeFileSymbolFilterSpec(testPackageName, "code package symbol", "package:name"); err == nil {
 		require.Fail(t, "expected parse error for missing symbol name")
 	}
@@ -1786,6 +2053,7 @@ func TestCodePackageSymbolsByName(t *testing.T) {
 		{Package: testPackageName, Symbols: []codeintel.Symbol{{Name: "Run", Kind: "method", File: "a.go", Line: 3}, {Name: "Build", Kind: "func", File: "c.go", Line: 4}}},
 	}}
 	symbols := codePackageSymbolsByName(idx, testPackageName, "Run")
+
 	want := []codeintel.Symbol{
 		{Name: "Run", Kind: "method", File: "a.go", Line: 3},
 		{Name: "Run", Kind: "func", File: "b.go", Line: 2},
@@ -1793,9 +2061,11 @@ func TestCodePackageSymbolsByName(t *testing.T) {
 	if !reflect.DeepEqual(symbols, want) {
 		require.Failf(t, "unexpected package symbols by name", "got %#v, want %#v", symbols, want)
 	}
+
 	if got := codePackageSymbolsByName(idx, testPackageName, " "); got != nil {
 		require.Failf(t, "blank symbol name should return nil", "got %#v", got)
 	}
+
 	if got := codePackageSymbolsByName(idx, "missing", "Run"); got != nil {
 		require.Failf(t, "missing package should return nil", "got %#v", got)
 	}
@@ -1811,6 +2081,7 @@ func TestSummarizeCodePackageSymbolNameFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Run"}, {Name: "Run"}, {Name: "Client"}}},
 	}}
 	summaries := summarizeCodePackageSymbolNameFiles(root, idx, "pkg", "Run")
+
 	want := []codeSymbolFileSummary{
 		{Path: "pkg/c.go", Package: "pkg", Symbols: 2},
 		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
@@ -1818,15 +2089,19 @@ func TestSummarizeCodePackageSymbolNameFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package symbol name file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageSymbolNameFiles(root, idx, "pkg", "missing"); len(got) != 0 {
 		require.Failf(t, "missing name should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageSymbolNameFiles(root, idx, "pkg", " "); got != nil {
 		require.Failf(t, "blank name should return nil", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageSymbolNameFiles(root, idx, "missing", "Run"); len(got) != 0 {
 		require.Failf(t, "missing package should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageSymbolNameFiles(root, idx, " ", "Run"); got != nil {
 		require.Failf(t, "blank package should return nil", "got %#v", got)
 	}
@@ -1839,9 +2114,11 @@ func TestCodePackageSymbolsByKindAndParseSpec(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if packageName != "llm" || kind != "func" {
 		require.Failf(t, "unexpected parsed spec", "package=%q kind=%q", packageName, kind)
 	}
+
 	if _, _, err := parseCodePackageSymbolKindSpec("llm"); err == nil {
 		require.Fail(t, "expected parse error for missing kind")
 	}
@@ -1851,6 +2128,7 @@ func TestCodePackageSymbolsByKindAndParseSpec(t *testing.T) {
 		{Package: "llm", Symbols: []codeintel.Symbol{{Name: "Build", Kind: "func", File: "c.go", Line: 3}}},
 	}}
 	symbols := codePackageSymbolsByKind(idx, "llm", "FUNC")
+
 	want := []codeintel.Symbol{
 		{Name: "Build", Kind: "func", File: "c.go", Line: 3},
 		{Name: "Run", Kind: "func", File: "b.go", Line: 2},
@@ -1870,6 +2148,7 @@ func TestSummarizeCodePackageSymbolPrefixFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Name: "Render"}, {Name: "Run"}, {Name: "Client"}}},
 	}}
 	summaries := summarizeCodePackageSymbolPrefixFiles(root, idx, "pkg", "R")
+
 	want := []codeSymbolFileSummary{
 		{Path: "pkg/c.go", Package: "pkg", Symbols: 2},
 		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
@@ -1877,12 +2156,15 @@ func TestSummarizeCodePackageSymbolPrefixFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package symbol prefix file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageSymbolPrefixFiles(root, idx, "pkg", "missing"); len(got) != 0 {
 		require.Failf(t, "missing prefix should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageSymbolPrefixFiles(root, idx, "pkg", " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageSymbolPrefixFiles(root, idx, "missing", "R"); len(got) != 0 {
 		require.Failf(t, "missing package should return empty", "got %#v", got)
 	}
@@ -1898,6 +2180,7 @@ func TestSummarizeCodePackageSymbolKindFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "FUNC"}, {Kind: "const"}}},
 	}}
 	summaries := summarizeCodePackageSymbolKindFiles(root, idx, "pkg", "func")
+
 	want := []codeSymbolFileSummary{
 		{Path: "pkg/c.go", Package: "pkg", Symbols: 2},
 		{Path: "pkg/b.go", Package: "pkg", Symbols: 1},
@@ -1905,12 +2188,15 @@ func TestSummarizeCodePackageSymbolKindFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package symbol kind file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageSymbolKindFiles(root, idx, "pkg", "missing"); len(got) != 0 {
 		require.Failf(t, "missing kind should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageSymbolKindFiles(root, idx, "pkg", " "); got != nil {
 		require.Failf(t, "blank kind should return nil", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageSymbolKindFiles(root, idx, "missing", "func"); len(got) != 0 {
 		require.Failf(t, "missing package should return empty", "got %#v", got)
 	}
@@ -1923,9 +2209,11 @@ func TestCodePackageSymbolsWithPrefix(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if packageName != "llm" || prefix != "Ru" {
 		require.Failf(t, "unexpected parsed spec", "package=%q prefix=%q", packageName, prefix)
 	}
+
 	if _, _, err := parseCodeFileSymbolFilterSpec("llm", "code package symbol prefix", "package:prefix"); err == nil {
 		require.Fail(t, "expected parse error for missing prefix")
 	}
@@ -1936,6 +2224,7 @@ func TestCodePackageSymbolsWithPrefix(t *testing.T) {
 		{Package: "llm", Symbols: []codeintel.Symbol{{Name: "Runtime", File: "c.go", Line: 3}, {Name: "Build", File: "c.go", Line: 4}}},
 	}}
 	symbols := codePackageSymbolsWithPrefix(idx, "llm", "Ru")
+
 	want := []codeintel.Symbol{
 		{Name: "Run", File: "b.go", Line: 2},
 		{Name: "Runtime", File: "c.go", Line: 3},
@@ -1943,9 +2232,11 @@ func TestCodePackageSymbolsWithPrefix(t *testing.T) {
 	if !reflect.DeepEqual(symbols, want) {
 		require.Failf(t, "unexpected package symbols by prefix", "got %#v, want %#v", symbols, want)
 	}
+
 	if got := codePackageSymbolsWithPrefix(idx, "llm", " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
+
 	if got := codePackageSymbolsWithPrefix(idx, "missing", "Ru"); got != nil {
 		require.Failf(t, "missing package should return nil", "got %#v", got)
 	}
@@ -1962,6 +2253,7 @@ func TestSummarizeAndFormatCodePackageImportCounts(t *testing.T) {
 		{Package: "empty"},
 	}}
 	summaries := summarizeCodePackageImportCounts(idx)
+
 	want := []codePackageImportSummary{
 		{Name: "pkg", Files: 3, Imports: 3, UniqueImports: 2},
 		{Name: "main", Files: 1, Imports: 2, UniqueImports: 2},
@@ -1969,6 +2261,7 @@ func TestSummarizeAndFormatCodePackageImportCounts(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package import summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	got := formatCodePackageImportSummary(summaries[0])
 	if got != "package=pkg	files=3	imports=3	unique_imports=2" {
 		require.Failf(t, "unexpected package import summary format", "got %q", got)
@@ -1984,6 +2277,7 @@ func TestCodePackageSymbols(t *testing.T) {
 		{Package: "llm", Symbols: []codeintel.Symbol{{Name: "Build", File: "c.go", Line: 3}}},
 	}}
 	symbols := codePackageSymbols(idx, "llm")
+
 	want := []codeintel.Symbol{
 		{Name: "Build", File: "c.go", Line: 3},
 		{Name: "Client", File: "a.go", Line: 1},
@@ -1992,6 +2286,7 @@ func TestCodePackageSymbols(t *testing.T) {
 	if !reflect.DeepEqual(symbols, want) {
 		require.Failf(t, "unexpected package symbols", "got %#v, want %#v", symbols, want)
 	}
+
 	if got := codePackageSymbols(idx, " "); got != nil {
 		require.Failf(t, "blank package should return nil", "got %#v", got)
 	}
@@ -2006,10 +2301,12 @@ func TestSummarizeCodePackageSymbols(t *testing.T) {
 		{Package: "llm", Symbols: []codeintel.Symbol{{Kind: "func"}, {Kind: "const"}}},
 	}}
 	summaries := summarizeCodePackageSymbols(idx, "llm")
+
 	want := []codeSymbolSummary{{Kind: "func", Count: 2}, {Kind: "const", Count: 1}, {Kind: "type", Count: 1}}
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package symbol summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageSymbols(idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing package should return empty", "got %#v", got)
 	}
@@ -2026,6 +2323,7 @@ func TestSummarizeCodePackageImportFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "c.go"), Package: "pkg", Imports: []string{"bytes", "errors"}},
 	}}
 	summaries := summarizeCodePackageImportFiles(root, idx, "pkg")
+
 	want := []codeImportFileSummary{
 		{Path: "pkg/c.go", Package: "pkg", Imports: 2},
 		{Path: "pkg/b.go", Package: "pkg", Imports: 1},
@@ -2033,9 +2331,11 @@ func TestSummarizeCodePackageImportFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package import file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageImportFiles(root, idx, "missing"); len(got) != 0 {
 		require.Failf(t, "missing package should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageImportFiles(root, idx, " "); got != nil {
 		require.Failf(t, "blank package should return nil", "got %#v", got)
 	}
@@ -2063,6 +2363,7 @@ func TestSummarizeCodePackageImportPrefixFiles(t *testing.T) {
 		},
 	}
 	summaries := summarizeCodePackageImportPrefixFiles(root, idx, testImportPackageName, "github.com/example/")
+
 	want := []codeImportFileSummary{
 		{Path: "pkg/core/a.go", Package: testImportPackageName, Imports: 2},
 		{Path: "pkg/core/b.go", Package: testImportPackageName, Imports: 1},
@@ -2070,9 +2371,11 @@ func TestSummarizeCodePackageImportPrefixFiles(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package import prefix file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageImportPrefixFiles(root, idx, testImportPackageName, "missing"); len(got) != 0 {
 		require.Failf(t, "missing prefix should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageImportPrefixFiles(root, idx, testImportPackageName, " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -2084,13 +2387,16 @@ func TestCodePackageImportPrefixFiles(t *testing.T) {
 	const testImportPackageName = "core"
 
 	root := filepath.Join("tmp", "repo")
+
 	packageName, prefix, err := parseCodeFileSymbolFilterSpec(testImportPackageName+":github.com/example/", "code package import prefix files", "package:prefix")
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if packageName != testImportPackageName || prefix != "github.com/example/" {
 		require.Failf(t, "unexpected parsed spec", "package=%q prefix=%q", packageName, prefix)
 	}
+
 	if _, _, err := parseCodeFileSymbolFilterSpec(testImportPackageName, "code package import prefix files", "package:prefix"); err == nil {
 		require.Fail(t, "expected parse error for missing prefix")
 	}
@@ -2111,6 +2417,7 @@ func TestCodePackageImportPrefixFiles(t *testing.T) {
 		},
 	}
 	edges := codePackageImportPrefixFiles(idx, testImportPackageName, "github.com/example/")
+
 	want := []codeintel.ImportEdge{
 		{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "github.com/example/alpha"},
 		{From: filepath.Join(root, "pkg", "core", "a.go"), Import: "github.com/example/beta"},
@@ -2119,9 +2426,11 @@ func TestCodePackageImportPrefixFiles(t *testing.T) {
 	if !reflect.DeepEqual(edges, want) {
 		require.Failf(t, "unexpected package import prefix files", "got %#v, want %#v", edges, want)
 	}
+
 	if got := codePackageImportPrefixFiles(idx, testImportPackageName, "missing"); len(got) != 0 {
 		require.Failf(t, "missing prefix should return empty", "got %#v", got)
 	}
+
 	if got := codePackageImportPrefixFiles(idx, testImportPackageName, " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -2131,13 +2440,16 @@ func TestCodePackageImportFiles(t *testing.T) {
 	t.Parallel()
 
 	root := filepath.Join("tmp", "repo")
+
 	packageName, importPath, err := parseCodeFileSymbolFilterSpec("core:context", "code package import files", "package:import")
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if packageName != "core" || importPath != "context" {
 		require.Failf(t, "unexpected parsed spec", "package=%q import=%q", packageName, importPath)
 	}
+
 	if _, _, err := parseCodeFileSymbolFilterSpec("core", "code package import files", "package:import"); err == nil {
 		require.Fail(t, "expected parse error for missing import path")
 	}
@@ -2156,13 +2468,16 @@ func TestCodePackageImportFiles(t *testing.T) {
 		},
 	}
 	files := codePackageImportFiles(root, idx, "core", "context")
+
 	want := []string{"pkg/core/b.go"}
 	if !reflect.DeepEqual(files, want) {
 		require.Failf(t, "unexpected package import files", "got %#v, want %#v", files, want)
 	}
+
 	if got := codePackageImportFiles(root, idx, "core", "missing"); len(got) != 0 {
 		require.Failf(t, "missing import should return empty", "got %#v", got)
 	}
+
 	if got := codePackageImportFiles(root, idx, "core", " "); got != nil {
 		require.Failf(t, "blank import path should return nil", "got %#v", got)
 	}
@@ -2186,16 +2501,20 @@ func TestSummarizeCodePackageImportPathFiles(t *testing.T) {
 		},
 	}
 	summaries := summarizeCodePackageImportPathFiles(root, idx, "core", "context")
+
 	want := []codeImportFileSummary{{Path: "pkg/core/b.go", Package: "core", Imports: 1}}
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package import path file summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageImportPathFiles(root, idx, "core", "missing"); len(got) != 0 {
 		require.Failf(t, "missing import should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageImportPathFiles(root, idx, "core", " "); got != nil {
 		require.Failf(t, "blank import path should return nil", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageImportPathFiles(root, idx, "missing", "context"); len(got) != 0 {
 		require.Failf(t, "missing package should return empty", "got %#v", got)
 	}
@@ -2208,9 +2527,11 @@ func TestSummarizeCodePackageImportPath(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if packageName != "core" || importPath != "context" {
 		require.Failf(t, "unexpected parsed spec", "package=%q import=%q", packageName, importPath)
 	}
+
 	if _, _, err := parseCodeFileSymbolFilterSpec("core", "code package import path", "package:import"); err == nil {
 		require.Fail(t, "expected parse error for missing import path")
 	}
@@ -2229,16 +2550,20 @@ func TestSummarizeCodePackageImportPath(t *testing.T) {
 		},
 	}
 	summaries := summarizeCodePackageImportPath(idx, "core", "context")
+
 	want := []codeImportSummary{{Path: "context", Files: 2}}
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package import path summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageImportPath(idx, "core", "missing"); len(got) != 0 {
 		require.Failf(t, "missing import should return empty", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageImportPath(idx, "core", " "); got != nil {
 		require.Failf(t, "blank import path should return nil", "got %#v", got)
 	}
+
 	if got := summarizeCodePackageImportPath(idx, "missing", "context"); len(got) != 0 {
 		require.Failf(t, "missing package should return empty", "got %#v", got)
 	}
@@ -2261,10 +2586,12 @@ func TestSummarizeCodePackageImportPrefix(t *testing.T) {
 		},
 	}
 	summaries := summarizeCodePackageImportPrefix(idx, "llm", "github.com/tommoulard/atteler/pkg/")
+
 	want := []codeImportSummary{{Path: "github.com/tommoulard/atteler/pkg/events", Files: 2}}
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package import prefix summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageImportPrefix(idx, "llm", " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -2287,10 +2614,12 @@ func TestSummarizeCodePackageImports(t *testing.T) {
 		},
 	}
 	summaries := summarizeCodePackageImports(idx, "llm")
+
 	want := []codeImportSummary{{Path: "context", Files: 2}, {Path: "fmt", Files: 1}}
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected package import summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodePackageImports(idx, "missing"); got != nil {
 		require.Failf(t, "missing package should return nil", "got %#v", got)
 	}
@@ -2301,10 +2630,12 @@ func TestCodeFileImports(t *testing.T) {
 
 	file := codeintel.File{Imports: []string{"fmt", "context", "errors"}}
 	imports := codeFileImports(file)
+
 	want := []string{"context", "errors", "fmt"}
 	if !reflect.DeepEqual(imports, want) {
 		require.Failf(t, "unexpected code file imports", "got %#v, want %#v", imports, want)
 	}
+
 	if got := codeFileImports(codeintel.File{}); got != nil {
 		require.Failf(t, "empty imports should return nil", "got %#v", got)
 	}
@@ -2315,10 +2646,12 @@ func TestCodeFileImportsForPath(t *testing.T) {
 
 	file := codeintel.File{Imports: []string{"context", "fmt", "context"}}
 	imports := codeFileImportsForPath(file, "context")
+
 	want := []string{"context", "context"}
 	if !reflect.DeepEqual(imports, want) {
 		require.Failf(t, "unexpected file imports by path", "got %#v, want %#v", imports, want)
 	}
+
 	if got := codeFileImportsForPath(file, " "); got != nil {
 		require.Failf(t, "blank import path should return nil", "got %#v", got)
 	}
@@ -2333,10 +2666,12 @@ func TestCodeFileImportsWithPrefix(t *testing.T) {
 		"github.com/tommoulard/atteler/pkg/agent",
 	}}
 	imports := codeFileImportsWithPrefix(file, "github.com/tommoulard/atteler/pkg/")
+
 	want := []string{"github.com/tommoulard/atteler/pkg/agent", "github.com/tommoulard/atteler/pkg/llm"}
 	if !reflect.DeepEqual(imports, want) {
 		require.Failf(t, "unexpected file imports by prefix", "got %#v, want %#v", imports, want)
 	}
+
 	if got := codeFileImportsWithPrefix(file, " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -2353,10 +2688,12 @@ func TestSummarizeCodeFileSymbols(t *testing.T) {
 		{Kind: ""},
 	}}
 	summaries := summarizeCodeFileSymbols(file)
+
 	want := []codeSymbolSummary{{Kind: "func", Count: 2}, {Kind: "const", Count: 1}, {Kind: "type", Count: 1}}
 	if !reflect.DeepEqual(summaries, want) {
 		require.Failf(t, "unexpected file symbol summaries", "got %#v, want %#v", summaries, want)
 	}
+
 	if got := summarizeCodeFileSymbols(codeintel.File{}); len(got) != 0 {
 		require.Failf(t, "empty file should return empty summaries", "got %#v", got)
 	}
@@ -2371,6 +2708,7 @@ func TestCodeFileSymbols(t *testing.T) {
 		{Name: "Build", Kind: "func", File: "c.go", Line: 3},
 	}}
 	symbols := codeFileSymbols(file)
+
 	want := []codeintel.Symbol{
 		{Name: "Build", Kind: "func", File: "c.go", Line: 3},
 		{Name: "Client", Kind: "type", File: "a.go", Line: 1},
@@ -2379,6 +2717,7 @@ func TestCodeFileSymbols(t *testing.T) {
 	if !reflect.DeepEqual(symbols, want) {
 		require.Failf(t, "unexpected code file symbols", "got %#v, want %#v", symbols, want)
 	}
+
 	if got := codeFileSymbols(codeintel.File{}); got != nil {
 		require.Failf(t, "empty symbols should return nil", "got %#v", got)
 	}
@@ -2391,9 +2730,11 @@ func TestCodeFileSymbolsByName(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if target != "pkg/llm/client.go" || name != "Run" {
 		require.Failf(t, "unexpected parsed spec", "target=%q name=%q", target, name)
 	}
+
 	if _, _, err := parseCodeFileSymbolFilterSpec("pkg/llm/client.go", "code file symbol", "path:name"); err == nil {
 		require.Fail(t, "expected parse error for missing name")
 	}
@@ -2404,6 +2745,7 @@ func TestCodeFileSymbolsByName(t *testing.T) {
 		{Name: "Run", Kind: "func", File: "a.go", Line: 3},
 	}}
 	symbols := codeFileSymbolsByName(file, "Run")
+
 	want := []codeintel.Symbol{
 		{Name: "Run", Kind: "func", File: "a.go", Line: 3},
 		{Name: "Run", Kind: "method", File: "b.go", Line: 2},
@@ -2411,6 +2753,7 @@ func TestCodeFileSymbolsByName(t *testing.T) {
 	if !reflect.DeepEqual(symbols, want) {
 		require.Failf(t, "unexpected file symbols by name", "got %#v, want %#v", symbols, want)
 	}
+
 	if got := codeFileSymbolsByName(file, " "); got != nil {
 		require.Failf(t, "blank name should return nil", "got %#v", got)
 	}
@@ -2425,6 +2768,7 @@ func TestCodeFileSymbolsWithPrefix(t *testing.T) {
 		{Name: "NewRegistry", Kind: "func", File: "c.go", Line: 3},
 	}}
 	symbols := codeFileSymbolsWithPrefix(file, "New")
+
 	want := []codeintel.Symbol{
 		{Name: "NewClient", Kind: "func", File: "b.go", Line: 2},
 		{Name: "NewRegistry", Kind: "func", File: "c.go", Line: 3},
@@ -2432,6 +2776,7 @@ func TestCodeFileSymbolsWithPrefix(t *testing.T) {
 	if !reflect.DeepEqual(symbols, want) {
 		require.Failf(t, "unexpected file symbols by prefix", "got %#v, want %#v", symbols, want)
 	}
+
 	if got := codeFileSymbolsWithPrefix(file, " "); got != nil {
 		require.Failf(t, "blank prefix should return nil", "got %#v", got)
 	}
@@ -2444,9 +2789,11 @@ func TestCodeFileSymbolsByKindAndParseSpec(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if target != "pkg/llm/llm.go" || kind != "func" {
 		require.Failf(t, "unexpected parsed file symbol kind spec", "target=%q kind=%q", target, kind)
 	}
+
 	if _, _, err := parseCodeFileSymbolKindSpec("pkg/llm/llm.go"); err == nil {
 		require.Fail(t, "expected parse error for missing kind")
 	}
@@ -2457,6 +2804,7 @@ func TestCodeFileSymbolsByKindAndParseSpec(t *testing.T) {
 		{Name: "Build", Kind: "func", File: "c.go", Line: 3},
 	}}
 	symbols := codeFileSymbolsByKind(file, "FUNC")
+
 	want := []codeintel.Symbol{
 		{Name: "Build", Kind: "func", File: "c.go", Line: 3},
 		{Name: "Run", Kind: "func", File: "b.go", Line: 2},
@@ -2475,6 +2823,7 @@ func TestSummarizeCodeFiles(t *testing.T) {
 		{Path: filepath.Join(root, "cmd", "a.go"), Package: "main", Imports: []string{"context", "fmt"}, Symbols: []codeintel.Symbol{{Name: "A"}, {Name: "Run"}}},
 	}}
 	files := summarizeCodeFiles(root, idx)
+
 	want := []codePackageFile{
 		{Path: "cmd/a.go", Package: "main", Symbols: 2, Imports: 2},
 		{Path: "pkg/b.go", Package: "pkg", Symbols: 1, Imports: 1},
@@ -2495,15 +2844,19 @@ func TestFindAndFormatCodeFile(t *testing.T) {
 		Symbols: []codeintel.Symbol{{Name: "Client", Kind: "type", Line: 12}},
 	}
 	idx := codeintel.Index{Files: []codeintel.File{file}}
+
 	found, ok := findCodeFile(root, idx, "pkg/llm/client.go")
 	if !ok || found.Path != file.Path {
 		require.Failf(t, "expected to find code file", "found=%#v ok=%v", found, ok)
 	}
+
 	got := formatCodeFile(root, file)
+
 	want := "path=pkg/llm/client.go	package=llm	imports=2	symbols=1"
 	if got != want {
 		require.Failf(t, "unexpected code file format", "got %q, want %q", got, want)
 	}
+
 	symbol := formatCodeFileSymbol(file.Symbols[0])
 	if symbol != "Client	kind=type	line=12" {
 		require.Failf(t, "unexpected code file symbol format", "got %q", symbol)
@@ -2520,6 +2873,7 @@ func TestSummarizeAndFormatCodePackageFiles(t *testing.T) {
 		{Path: filepath.Join(root, "pkg", "llm", "b.go"), Package: "llm", Symbols: []codeintel.Symbol{{Name: "B"}, {Name: "C"}}, Imports: []string{"errors"}},
 	}}
 	files := summarizeCodePackageFiles(root, idx, "llm")
+
 	wantFiles := []codePackageFile{
 		{Path: "pkg/llm/a.go", Package: "llm", Symbols: 1, Imports: 2},
 		{Path: "pkg/llm/b.go", Package: "llm", Symbols: 2, Imports: 1},
@@ -2527,7 +2881,9 @@ func TestSummarizeAndFormatCodePackageFiles(t *testing.T) {
 	if !reflect.DeepEqual(files, wantFiles) {
 		require.Failf(t, "unexpected package files", "got %#v, want %#v", files, wantFiles)
 	}
+
 	got := formatCodePackageFile(files[0])
+
 	want := "path=pkg/llm/a.go	package=llm	symbols=1	imports=2"
 	if got != want {
 		require.Failf(t, "unexpected package file format", "got %q, want %q", got, want)
@@ -2543,6 +2899,7 @@ func TestSummarizeAndFormatCodePackages(t *testing.T) {
 		{Package: "main", Symbols: []codeintel.Symbol{{Name: "Config"}}},
 		{Package: ""},
 	}})
+
 	wantPackages := []codePackageSummary{
 		{Name: "llm", Files: 1, Symbols: 1},
 		{Name: "main", Files: 2, Symbols: 3},
@@ -2550,7 +2907,9 @@ func TestSummarizeAndFormatCodePackages(t *testing.T) {
 	if !reflect.DeepEqual(packages, wantPackages) {
 		require.Failf(t, "unexpected package summaries", "got %#v, want %#v", packages, wantPackages)
 	}
+
 	got := formatCodePackageSummary(packages[1])
+
 	want := "package=main	files=2	symbols=3"
 	if got != want {
 		require.Failf(t, "unexpected package summary format", "got %q, want %q", got, want)
@@ -2570,6 +2929,7 @@ func TestFormatCodeSummary(t *testing.T) {
 		Cycles:   1,
 		Layers:   4,
 	})
+
 	want := "files=3	packages=2	symbols=7	imports=5	nodes=6	edges=5	cycles=1	layers=4"
 	if got != want {
 		require.Failf(t, "unexpected code summary format", "got %q, want %q", got, want)
@@ -2589,6 +2949,7 @@ func TestFormatCodeCycle(t *testing.T) {
 	t.Parallel()
 
 	got := formatCodeCycle(1, []codegraph.NodeID{"pkg/a", "pkg/b", "pkg/a"})
+
 	want := "cycle=1	nodes=pkg/a -> pkg/b -> pkg/a"
 	if got != want {
 		require.Failf(t, "unexpected code cycle format", "got %q, want %q", got, want)
@@ -2599,6 +2960,7 @@ func TestFormatCodeLayer(t *testing.T) {
 	t.Parallel()
 
 	got := formatCodeLayer(2, []codegraph.NodeID{"pkg/a", "pkg/b"})
+
 	want := "layer=2	nodes=pkg/a,pkg/b"
 	if got != want {
 		require.Failf(t, "unexpected code layer format", "got %q, want %q", got, want)
@@ -2623,12 +2985,14 @@ func TestCodeGraphDirectDependencies(t *testing.T) {
 	graph := importGraphFromIndex(root, idx)
 
 	deps := codeGraphDependencies(graph, root, "pkg/runner.go")
+
 	wantDeps := []codegraph.NodeID{"context", "fmt"}
 	if !reflect.DeepEqual(deps, wantDeps) {
 		require.Failf(t, "unexpected direct deps", "got %#v, want %#v", deps, wantDeps)
 	}
 
 	rdeps := codeGraphReverseDependencies(graph, root, "context")
+
 	wantRdeps := []codegraph.NodeID{"pkg/runner.go", "pkg/worker.go"}
 	if !reflect.DeepEqual(rdeps, wantRdeps) {
 		require.Failf(t, "unexpected direct reverse deps", "got %#v, want %#v", rdeps, wantRdeps)
@@ -2639,10 +3003,12 @@ func TestImportGraphReachableAndNormalizeTarget(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
+
 	file := filepath.Join(root, "pkg", "runner.go")
 	if err := os.MkdirAll(filepath.Dir(file), 0o750); err != nil {
 		require.NoError(t, err)
 	}
+
 	if err := os.WriteFile(file, []byte("package runner\nimport \"context\"\n"), 0o600); err != nil {
 		require.NoError(t, err)
 	}
@@ -2651,9 +3017,11 @@ func TestImportGraphReachableAndNormalizeTarget(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if got := normalizeCodeGraphTarget(root, file); got != "pkg/runner.go" {
 		require.Failf(t, "unexpected normalized absolute target", "got %q", got)
 	}
+
 	if got := graph.ReachableFrom("pkg/runner.go"); !reflect.DeepEqual(got, []codegraph.NodeID{"context"}) {
 		require.Failf(t, "unexpected reachable nodes", "got %#v", got)
 	}
@@ -2668,6 +3036,7 @@ func TestFormatWatchFinding(t *testing.T) {
 		Severity: watch.SeverityInfo,
 		Message:  "missing _test.go companion",
 	})
+
 	want := strings.Join([]string{
 		"path=pkg/example/example.go",
 		"kind=missing_test",
@@ -2692,6 +3061,7 @@ func TestFormatWatchIteration(t *testing.T) {
 			{Path: "pkg/example/example.go", Kind: watch.KindMissingTest},
 		},
 	})
+
 	want := "iteration=1\tfindings=2\tstarted=2026-05-02T09:30:00Z\tduration=2s"
 	if got != want {
 		require.Failf(t, "unexpected watch iteration format", "got %q, want %q", got, want)
@@ -2705,9 +3075,11 @@ func TestParseAndFormatAsyncPlan(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if task.ID != "code" || task.Agent != "coder" || task.Prompt != "implement feature" {
 		require.Failf(t, "unexpected parsed async task", "task = %+v", task)
 	}
+
 	if !reflect.DeepEqual(task.DependsOn, []string{"plan", "review"}) {
 		require.Failf(t, "unexpected parsed dependencies", "deps = %#v", task.DependsOn)
 	}
@@ -2743,6 +3115,7 @@ func TestFormatSpeculatePlan(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	got := formatSpeculatePlan(plan)
 	for _, want := range []string{
 		"agents: alpha,beta\n",
@@ -2770,6 +3143,7 @@ func TestFormatReviewPlan(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	got := formatReviewPlan(plan)
 	for _, want := range []string{
 		"reviewers:\n",
@@ -2795,6 +3169,7 @@ func TestReviewPlanDefaults(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	got := formatReviewPlan(plan)
 	for _, want := range []string{
 		"quality-reviewer\tcategories=correctness,maintainability",
@@ -2815,6 +3190,7 @@ func TestFormatSpeculatePromptCacheEstimate(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	estimate, err := speculate.EstimatePromptCacheReuse(speculateBranchPrompts(plan, "implement auth flow"))
 	if err != nil {
 		require.NoError(t, err)
@@ -2833,6 +3209,7 @@ func TestFormatSpeculatePromptCacheEstimate(t *testing.T) {
 			require.Failf(t, "formatted speculate prompt cache missing content", "missing %q in:\n%s", want, got)
 		}
 	}
+
 	if estimate.SharedPrefixBytes == 0 {
 		require.FailNow(t, "expected shared branch prompt prefix")
 	}
@@ -2848,6 +3225,7 @@ func TestFormatVectorResult(t *testing.T) {
 		},
 		Score: 0.75,
 	})
+
 	want := "docs/research.md\tscore=0.7500\tpath=docs/research.md"
 	if got != want {
 		require.Failf(t, "unexpected vector result format", "got %q, want %q", got, want)
@@ -2858,10 +3236,12 @@ func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+
 	note := filepath.Join(dir, "note.txt")
 	if err := os.WriteFile(note, []byte("OAuth callback retry memory"), 0o600); err != nil {
 		require.NoError(t, err)
 	}
+
 	storePath := filepath.Join(dir, "agent-memory.json")
 
 	err := runAgentMemoryCommand(dir, "reviewer", cliOptions{
@@ -2891,6 +3271,7 @@ func TestFormatAgentMemoryResult(t *testing.T) {
 		},
 		Score: 0.5,
 	})
+
 	want := "docs/memory.md\tscore=0.5000\tpath=docs/memory.md\tkind=note"
 	if got != want {
 		require.Failf(t, "unexpected agent memory result format", "got %q, want %q", got, want)
@@ -2901,10 +3282,12 @@ func TestMergeArtifactsWritesMarkdown(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+
 	artifactPath := filepath.Join(dir, "research.md")
 	if err := os.WriteFile(artifactPath, []byte("research notes"), 0o600); err != nil {
 		require.NoError(t, err)
 	}
+
 	outputPath := filepath.Join(dir, "merged.md")
 	state := appState{
 		cwd:           dir,
@@ -2918,6 +3301,7 @@ func TestMergeArtifactsWritesMarkdown(t *testing.T) {
 	require.NoError(t, err)
 	data, err := os.ReadFile(outputPath)
 	require.NoError(t, err)
+
 	out := string(data)
 	assert.Contains(t, out, "# Merged Artifacts")
 	assert.Contains(t, out, "## research.md")
@@ -2966,6 +3350,7 @@ func TestParseAndFormatRouteCandidate(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if candidate.Provider != "openai" || candidate.Name != "gpt-mini" {
 		require.Failf(t, "unexpected route candidate id", "candidate = %+v", candidate)
 	}
@@ -3036,11 +3421,13 @@ func TestParseAndFormatContextPack(t *testing.T) {
 	if len(messages) != 3 {
 		require.Failf(t, "unexpected parsed message count", "messages = %#v", messages)
 	}
+
 	if messages[2].Content != "second\ncontinued" {
 		require.Failf(t, "unexpected continuation", "content = %q", messages[2].Content)
 	}
 
 	result := contextpack.Compact(messages, 12)
+
 	got := formatContextPackResult(result)
 	for _, want := range []string{
 		"compressed: true\n",
@@ -3085,12 +3472,14 @@ func TestApplyFeedbackProposalsWritesConfigAndHistory(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "atteler.yaml")
 	historyPath := filepath.Join(dir, "feedback.md")
+
 	if err := os.WriteFile(configPath, []byte(`agents:
   reviewer:
     system_prompt: Review code.
 `), 0o600); err != nil {
 		require.NoError(t, err)
 	}
+
 	saved := session.New("gpt-test", nil)
 	if !saved.RecordNegativeKnowledge("skip regression tests", "hid an auth regression", "abc123", "reviewer") {
 		require.FailNow(t, "expected negative knowledge to be recorded")
@@ -3108,6 +3497,7 @@ func TestApplyFeedbackProposalsWritesConfigAndHistory(t *testing.T) {
 
 	historyData, err := os.ReadFile(historyPath)
 	require.NoError(t, err)
+
 	history := string(historyData)
 	assert.Contains(t, history, "## Applied feedback")
 	assert.Contains(t, history, "agent: reviewer")
@@ -3226,20 +3616,75 @@ func TestFormatSpawnResults(t *testing.T) {
 
 func TestSelectModelStoresProviderQualifiedModel(t *testing.T) {
 	t.Parallel()
+
 	m := model{}
 	next, _ := m.selectModel(pickerItem{provider: "codex", model: "gpt-5.5"}, config.ModelScopeSession)
+
 	selected, ok := next.(model)
 	if !ok {
 		require.Failf(t, "unexpected failure", "selectModel returned %T, want model", next)
 	}
+
 	if selected.selectedModel != testCodexModel {
 		require.Failf(t, "unexpected failure", "selectedModel = %q, want codex/gpt-5.5", selected.selectedModel)
 	}
+
 	if selected.sessionState.DefaultModel != testCodexModel {
 		require.Failf(t, "unexpected failure", "DefaultModel = %q, want codex/gpt-5.5", selected.sessionState.DefaultModel)
 	}
+
 	if !selected.modelLocked {
 		require.FailNow(t, "model should be locked after selection")
+	}
+
+	if selected.generationOverrides.ReasoningLevel != "" {
+		require.Failf(t, "unexpected failure", "ReasoningLevel = %q, want empty", selected.generationOverrides.ReasoningLevel)
+	}
+}
+
+func TestSelectModelDefaultReasoningClearsOverride(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		generationOverrides: generationSettings{ReasoningLevel: testReasoningXHigh},
+	}
+	next, _ := m.selectModel(
+		pickerItem{provider: "codex", model: "gpt-5.5", reasoning: llm.ReasoningLevelDefault},
+		config.ModelScopeSession,
+	)
+	selected, ok := next.(model)
+	require.True(t, ok)
+
+	if selected.selectedModel != testCodexModel {
+		require.Failf(t, "unexpected failure", "selectedModel = %q, want codex/gpt-5.5", selected.selectedModel)
+	}
+
+	if selected.generationOverrides.ReasoningLevel != "" {
+		require.Failf(t, "unexpected failure", "ReasoningLevel = %q, want cleared", selected.generationOverrides.ReasoningLevel)
+	}
+}
+
+func TestSelectModelAppliesReasoningOverride(t *testing.T) {
+	t.Parallel()
+
+	m := model{}
+	next, _ := m.selectModel(
+		pickerItem{provider: "codex", model: "gpt-5.5", reasoning: testReasoningXHigh},
+		config.ModelScopeSession,
+	)
+	selected, ok := next.(model)
+	require.True(t, ok)
+
+	if selected.selectedModel != testCodexModel {
+		require.Failf(t, "unexpected failure", "selectedModel = %q, want codex/gpt-5.5 (no reasoning suffix)", selected.selectedModel)
+	}
+
+	if selected.sessionState.DefaultModel != testCodexModel {
+		require.Failf(t, "unexpected failure", "DefaultModel = %q, want codex/gpt-5.5", selected.sessionState.DefaultModel)
+	}
+
+	if selected.generationOverrides.ReasoningLevel != testReasoningXHigh {
+		require.Failf(t, "unexpected failure", "ReasoningLevel = %q, want xhigh", selected.generationOverrides.ReasoningLevel)
 	}
 }
 
@@ -3253,26 +3698,34 @@ func TestSelectModelPersistsFolderModel(t *testing.T) {
 		pickerItem{provider: "claude-code", model: "claude-opus-4-6"},
 		config.ModelScopeFolder,
 	)
+
 	selected, ok := next.(model)
 	if !ok {
 		require.Failf(t, "unexpected failure", "selectModel returned %T, want model", next)
 	}
+
 	if !selected.modelLocked {
 		require.FailNow(t, "model should be locked")
 	}
+
 	raw := cmd()
+
 	batch, ok := raw.(tea.BatchMsg)
 	if !ok {
 		require.Failf(t, "unexpected failure", "cmd returned %T, want tea.BatchMsg", raw)
 	}
+
 	if len(batch) != 2 {
 		require.Failf(t, "unexpected failure", "batched commands = %d, want 2", len(batch))
 	}
+
 	saveRaw := batch[1]()
+
 	saveMsg, ok := saveRaw.(modelPreferenceSavedMsg)
 	if !ok {
 		require.Failf(t, "unexpected failure", "save cmd returned %T, want modelPreferenceSavedMsg", saveRaw)
 	}
+
 	if saveMsg.err != nil {
 		require.NoError(t, saveMsg.err)
 	}
@@ -3281,6 +3734,7 @@ func TestSelectModelPersistsFolderModel(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if got := state.ModelForFolder(dir); got != "claude-code/claude-opus-4-6" {
 		require.Failf(t, "unexpected failure", "folder model = %q", got)
 	}
@@ -3288,7 +3742,9 @@ func TestSelectModelPersistsFolderModel(t *testing.T) {
 
 func TestMergeTags_DeduplicatesCaseInsensitive(t *testing.T) {
 	t.Parallel()
+
 	got := mergeTags([]string{"auth"}, []string{"Auth", "review", " "})
+
 	want := []string{"auth", "review"}
 	if !reflect.DeepEqual(got, want) {
 		require.Failf(t, "unexpected failure", "tags = %v, want %v", got, want)
@@ -3303,13 +3759,16 @@ func TestRecordFailure_SavesNegativeKnowledge(t *testing.T) {
 	if err := recordFailure(store, sessionState, "try cache bust", "broke auth", "abc123", "reviewer"); err != nil {
 		require.NoError(t, err)
 	}
+
 	loaded, err := store.Load(sessionState.ID)
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if len(loaded.NegativeKnowledge) != 1 {
 		require.Failf(t, "unexpected negative knowledge", "entries = %+v", loaded.NegativeKnowledge)
 	}
+
 	entry := loaded.NegativeKnowledge[0]
 	if entry.Approach != "try cache bust" || entry.Reason != "broke auth" || entry.Commit != "abc123" || entry.Agent != "reviewer" {
 		require.Failf(t, "unexpected negative knowledge", "entry = %+v", entry)
@@ -3318,6 +3777,7 @@ func TestRecordFailure_SavesNegativeKnowledge(t *testing.T) {
 
 func TestPathStatus(t *testing.T) {
 	t.Parallel()
+
 	dir := t.TempDir()
 	if got := pathStatus(dir); got != "ok" {
 		require.Failf(t, "unexpected failure", "pathStatus(dir) = %q, want ok", got)
@@ -3331,8 +3791,10 @@ func TestPathStatus(t *testing.T) {
 
 func TestFormatAgentDescription(t *testing.T) {
 	t.Parallel()
+
 	temperature := 0.1
 	seed := 99
+
 	out, err := formatAgentDescription(agent.Agent{
 		Name:           "reviewer",
 		Model:          "gpt-test",
@@ -3349,6 +3811,7 @@ func TestFormatAgentDescription(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	for _, want := range []string{
 		"name: reviewer",
 		"model: gpt-test",
@@ -3372,6 +3835,7 @@ func TestFormatTokenUsageSummary(t *testing.T) {
 	t.Parallel()
 
 	got := formatTokenUsageSummary(tokenUsage{InputTokens: 1500, CachedInputTokens: 500, OutputTokens: 42, Responses: 2})
+
 	want := "tokens:\tin=1.5k\tcached=500\tout=42\tresponses=2"
 	if got != want {
 		require.Failf(t, "unexpected token usage summary", "got %q, want %q", got, want)
@@ -3380,6 +3844,7 @@ func TestFormatTokenUsageSummary(t *testing.T) {
 
 func TestFormatTokenCount(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
 		want  string
 		input int
@@ -3481,4 +3946,40 @@ func TestApplyDebugEnvOptionsDoesNotOverrideExplicitOptions(t *testing.T) {
 
 	assert.Equal(t, "explicit.yaml", opts.mcpManifestPath)
 	assert.Equal(t, 2, opts.watchMaxIterations.value)
+}
+
+func TestFormatShellContext(t *testing.T) {
+	t.Parallel()
+
+	t.Run("stdout only", func(t *testing.T) {
+		t.Parallel()
+
+		got := formatShellContext(shellResultMsg{
+			command: "ls",
+			stdout:  "a.go\nb.go\n",
+		})
+		assert.Equal(t, "$ ls\na.go\nb.go", got)
+	})
+
+	t.Run("stdout and stderr", func(t *testing.T) {
+		t.Parallel()
+
+		got := formatShellContext(shellResultMsg{
+			command: "ls /nope",
+			stdout:  "",
+			stderr:  "ls: /nope: No such file or directory\n",
+		})
+		assert.Equal(t, "$ ls /nope\n[stderr]\nls: /nope: No such file or directory", got)
+	})
+
+	t.Run("includes error message", func(t *testing.T) {
+		t.Parallel()
+
+		got := formatShellContext(shellResultMsg{
+			command: "false",
+			err:     assert.AnError,
+		})
+		assert.Contains(t, got, "$ false")
+		assert.Contains(t, got, "[error] "+assert.AnError.Error())
+	})
 }
