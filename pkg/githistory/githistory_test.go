@@ -17,6 +17,7 @@ func TestParseLog_ParsesHeadersAndFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseLog() error = %v", err)
 	}
+
 	if len(commits) != 2 {
 		t.Fatalf("len(commits) = %d, want 2: %#v", len(commits), commits)
 	}
@@ -25,6 +26,7 @@ func TestParseLog_ParsesHeadersAndFiles(t *testing.T) {
 	if commits[0].Hash != "bbb" || commits[0].AuthorName != "Bob" || !commits[0].Date.Equal(wantDate) {
 		t.Fatalf("first commit metadata = %#v, want parsed metadata", commits[0])
 	}
+
 	if !reflect.DeepEqual(commits[0].Files, []string{"pkg/memory/memory.go", "README.md"}) {
 		t.Fatalf("Files = %#v, want memory and README", commits[0].Files)
 	}
@@ -36,6 +38,7 @@ func TestParseLog_RejectsMalformedInput(t *testing.T) {
 	if _, err := ParseLog("pkg/memory/memory.go\n"); err == nil || !strings.Contains(err.Error(), "file listed before commit header") {
 		t.Fatalf("ParseLog(file before header) error = %v, want file-before-header error", err)
 	}
+
 	if _, err := ParseLog("bad\x1fBob\x1fbob@example.com\x1fnot-a-date\x1fSubject\n"); err == nil || !strings.Contains(err.Error(), "invalid author date") {
 		t.Fatalf("ParseLog(bad date) error = %v, want date error", err)
 	}
@@ -48,15 +51,18 @@ func TestIndex_SearchRanksSubjectFilesAndAuthor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseLog() error = %v", err)
 	}
+
 	idx := NewIndex(commits)
 
 	results := idx.Search("memory regression", 0)
 	if len(results) != 1 {
 		t.Fatalf("Search(memory regression) returned %#v, want one result", results)
 	}
+
 	if results[0].Commit.Hash != "bbb" {
 		t.Fatalf("Search(memory regression) first hash = %q, want bbb", results[0].Commit.Hash)
 	}
+
 	if results[0].Score == 0 || len(results[0].Snippets) == 0 {
 		t.Fatalf("Search(memory regression) result = %#v, want score and snippets", results[0])
 	}
@@ -67,6 +73,7 @@ func TestIndex_SearchRanksSubjectFilesAndAuthor(t *testing.T) {
 	}
 
 	commits[1].Body = "Durable NOTES local RAG context"
+
 	results = NewIndex(commits).Search("durable rag", 1)
 	if len(results) != 1 || results[0].Commit.Hash != "aaa" {
 		t.Fatalf("Search(body) = %#v, want aaa only", results)
@@ -96,7 +103,9 @@ func TestIndex_SearchDefensivelyCopiesCommits(t *testing.T) {
 	if results[0].Commit.Files[0] != "a.go" {
 		t.Fatalf("indexed file = %q, want defensive copy", results[0].Commit.Files[0])
 	}
+
 	results[0].Commit.Files[0] = "mutated-result.go"
+
 	results = idx.Search("memory", 1)
 	if results[0].Commit.Files[0] != "a.go" {
 		t.Fatalf("result mutation leaked into index: %#v", results[0].Commit.Files)
@@ -109,6 +118,7 @@ func TestIndex_SearchEmptyInputsReturnNoResults(t *testing.T) {
 	if got := NewIndex(nil).Search("memory", 0); len(got) != 0 {
 		t.Fatalf("Search on empty index = %#v, want none", got)
 	}
+
 	if got := NewIndex([]Commit{{Hash: "abc", Subject: "memory"}}).Search("   ", 0); len(got) != 0 {
 		t.Fatalf("Search empty query = %#v, want none", got)
 	}
@@ -119,5 +129,6 @@ func commitHashes(results []Result) []string {
 	for i := range results {
 		hashes = append(hashes, results[i].Commit.Hash)
 	}
+
 	return hashes
 }

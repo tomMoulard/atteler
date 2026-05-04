@@ -49,15 +49,20 @@ func TestMain(m *testing.M) {
 	cmd.Dir = root
 	cmd.Env = os.Environ()
 	output, err := cmd.CombinedOutput()
+
 	cancel()
+
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "build atteler: %v\n%s", err, output)
+
 		_ = os.RemoveAll(e2eTmpDir)
+
 		os.Exit(1)
 	}
 
 	code := m.Run()
 	_ = os.RemoveAll(e2eTmpDir)
+
 	os.Exit(code)
 }
 
@@ -72,6 +77,7 @@ func TestConfigCommands(t *testing.T) {
 
 	result = runOK(t, runSpec{dir: workDir}, "--init-config", configPath)
 	assertContains(t, result.stdout, "Wrote "+configPath)
+
 	if _, err := os.Stat(configPath); err != nil {
 		require.Failf(t, "unexpected failure", "config was not written: %v", err)
 	}
@@ -130,9 +136,11 @@ func TestReadOnlyCommandsDoNotAutoRegisterProviders(t *testing.T) {
 	forgeDir := filepath.Join(workDir, "forge")
 
 	var refreshRequests atomic.Int32
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		refreshRequests.Add(1)
 		w.Header().Set("Content-Type", "application/json")
+
 		if _, err := w.Write([]byte(`{"access_token":"refreshed-token","refresh_token":"refreshed-refresh","expires_in":3600}`)); err != nil {
 			t.Errorf("write refresh response: %v", err)
 		}
@@ -187,6 +195,7 @@ func TestWorkflowUtilityCommands(t *testing.T) {
 
 	configPath := filepath.Join(workDir, "atteler.yaml")
 	pluginDir := filepath.Join(workDir, "plugin")
+
 	writeFile(t, configPath, `agents:
   reviewer:
     model: gpt-test
@@ -232,6 +241,7 @@ printf 'plugin-output\n'
 read line
 printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 `)
+
 		mcpManifest := filepath.Join(workDir, "mcp.yaml")
 		writeFile(t, mcpManifest, fmt.Sprintf(`servers:
   - name: helper
@@ -253,6 +263,7 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 
 	notesPath := filepath.Join(workDir, "notes.txt")
 	memoryStore := filepath.Join(workDir, "memory.json")
+
 	writeFile(t, notesPath, "OAuth callback notes\n")
 	result = runOK(t, runSpec{dir: workDir}, "--memory-store", memoryStore, "--memory-index", notesPath)
 	assertContains(t, result.stdout, "Indexed")
@@ -326,6 +337,7 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 
 	agentMemoryFile := filepath.Join(workDir, "agent-memory-note.txt")
 	writeFile(t, agentMemoryFile, "OAuth callback retry memory\n")
+
 	agentMemoryStore := filepath.Join(workDir, "agent-memory.json")
 	result = runOK(t, runSpec{dir: workDir},
 		"--agent-memory-agent", "reviewer",
@@ -376,9 +388,11 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 		"--feedback-history", feedbackHistory,
 	)
 	assertContains(t, result.stdout, "Applied 1 feedback proposal")
+
 	configData, err := os.ReadFile(configPath)
 	require.NoError(t, err)
 	assertContains(t, string(configData), "Feedback-derived guidance:")
+
 	historyData, err := os.ReadFile(feedbackHistory)
 	require.NoError(t, err)
 	assertContains(t, string(historyData), "agent: reviewer")
@@ -450,9 +464,11 @@ func TestSessionCommands(t *testing.T) {
 
 func TestInteractiveFZFModelPickerPersistsFolderDefault(t *testing.T) {
 	t.Parallel()
+
 	if runtime.GOOS == windowsGOOS {
 		t.Skip("expect-driven TUI e2e is POSIX-only")
 	}
+
 	expectPath, err := exec.LookPath("expect")
 	if err != nil {
 		t.Skip("expect is required for interactive TUI e2e tests")
@@ -499,6 +515,7 @@ expect eof
 	if err != nil {
 		require.Failf(t, "unexpected failure", "read state: %v", err)
 	}
+
 	assertContains(t, string(stateData), "default_model: codex/gpt-5.5")
 	assertContains(t, string(stateData), filepath.ToSlash(workDir))
 
@@ -579,6 +596,7 @@ providers:
 
 func TestClaudeCodeOneShotAllowsBashTool(t *testing.T) {
 	t.Parallel()
+
 	if runtime.GOOS == windowsGOOS {
 		t.Skip("shell-script claude fake is POSIX-only")
 	}
@@ -648,10 +666,12 @@ type runResult struct {
 
 func runOK(t *testing.T, spec runSpec, args ...string) runResult {
 	t.Helper()
+
 	result, err := runAtteler(t, spec, args...)
 	if err != nil {
 		require.Failf(t, "unexpected failure", "atteler %v failed: %v\nstdout:\n%s\nstderr:\n%s", args, err, result.stdout, result.stderr)
 	}
+
 	return result
 }
 
@@ -662,16 +682,20 @@ func runAtteler(t *testing.T, spec runSpec, args ...string) (runResult, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
 	cmd := exec.CommandContext(ctx, e2eBinary, args...)
 	cmd.Dir = spec.dir
 	cmd.Env = testEnv(t, spec)
 
 	var stdout, stderr bytes.Buffer
+
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+
 	return runResult{stdout: stdout.String(), stderr: stderr.String()}, err
 }
 
@@ -682,14 +706,18 @@ func runExpect(t *testing.T, expectPath, scriptPath string, spec runSpec) {
 	if timeout <= 0 {
 		timeout = 20 * time.Second
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
 	cmd := exec.CommandContext(ctx, expectPath, "-f", scriptPath)
 	cmd.Dir = spec.dir
 	cmd.Env = testEnv(t, spec)
 
 	var stdout, stderr bytes.Buffer
+
 	cmd.Stdout = &stdout
+
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		require.Failf(t, "unexpected failure", "expect %s failed: %v\nstdout:\n%s\nstderr:\n%s", scriptPath, err, stdout.String(), stderr.String())
@@ -722,10 +750,12 @@ func testEnv(t *testing.T, spec runSpec) []string {
 	}
 
 	home := filepath.Join(t.TempDir(), "home")
+
 	sessionDir := spec.sessionDir
 	if sessionDir == "" {
 		sessionDir = filepath.Join(home, "sessions")
 	}
+
 	env = append(env,
 		"ANTHROPIC_API_KEY=",
 		"ANTHROPIC_BASE_URL=",
@@ -740,6 +770,7 @@ func testEnv(t *testing.T, spec runSpec) []string {
 		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 	)
 	env = append(env, spec.env...)
+
 	return env
 }
 
@@ -757,6 +788,7 @@ func repoRoot() (string, error) {
 	if !ok {
 		return "", errors.New("locate e2e test file")
 	}
+
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..")), nil
 }
 
@@ -779,9 +811,11 @@ func writeSession(t *testing.T, dir string) {
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		require.NoError(t, err)
 	}
+
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		require.NoError(t, err)
 	}
@@ -789,6 +823,7 @@ func writeFile(t *testing.T, path, content string) {
 
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()
+
 	if !strings.Contains(haystack, needle) {
 		require.Failf(t, "unexpected failure", "missing %q in:\n%s", needle, haystack)
 	}
@@ -796,6 +831,7 @@ func assertContains(t *testing.T, haystack, needle string) {
 
 func assertNotContains(t *testing.T, haystack, needle string) {
 	t.Helper()
+
 	if strings.Contains(haystack, needle) {
 		require.Failf(t, "unexpected failure", "unexpected %q in:\n%s", needle, haystack)
 	}

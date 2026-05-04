@@ -77,6 +77,7 @@ func ScanWithOptions(root string, options Options) ([]Finding, error) {
 
 	state.addMissingTests()
 	sortFindings(state.findings)
+
 	return state.findings, nil
 }
 
@@ -93,12 +94,15 @@ func (s *scanState) visit(path string, entry fs.DirEntry, err error) error {
 	if err != nil {
 		return fmt.Errorf("visit %s: %w", path, err)
 	}
+
 	if entry.IsDir() {
 		if shouldSkipDir(entry.Name()) && path != s.root {
 			return filepath.SkipDir
 		}
+
 		return nil
 	}
+
 	return s.scanFile(path, entry)
 }
 
@@ -107,6 +111,7 @@ func (s *scanState) scanFile(path string, entry fs.DirEntry) error {
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", path, err)
 	}
+
 	relativePath, err := relative(s.root, path)
 	if err != nil {
 		return err
@@ -127,6 +132,7 @@ func (s *scanState) scanFile(path string, entry fs.DirEntry) error {
 	if err != nil {
 		return err
 	}
+
 	if ok {
 		s.findings = append(s.findings, Finding{
 			Path:     relativePath,
@@ -144,6 +150,7 @@ func (s *scanState) scanFile(path string, entry fs.DirEntry) error {
 			Severity: SeverityMaintenance,
 		})
 	}
+
 	return nil
 }
 
@@ -174,6 +181,7 @@ func relative(root, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("relative path %s from %s: %w", path, root, err)
 	}
+
 	return filepath.ToSlash(relativePath), nil
 }
 
@@ -181,10 +189,12 @@ func recordGoFile(path string, goFiles, testFiles map[string]bool) {
 	if !strings.HasSuffix(path, ".go") {
 		return
 	}
+
 	if strings.HasSuffix(path, "_test.go") {
 		testFiles[path] = true
 		return
 	}
+
 	goFiles[path] = true
 }
 
@@ -197,10 +207,13 @@ func hasStaleTODOMarker(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", path, err)
 	}
+
 	if !utf8.Valid(content) {
 		return false, nil
 	}
+
 	text := strings.ToUpper(string(content))
+
 	return strings.Contains(text, "TODO") || strings.Contains(text, "FIXME"), nil
 }
 
@@ -213,9 +226,11 @@ func hasContextBackgroundDrift(path, relativePath string) bool {
 	if err != nil {
 		return false
 	}
+
 	if isAllowedContextBackgroundFile(relativePath, file) {
 		return false
 	}
+
 	return usesContextBackground(file)
 }
 
@@ -234,19 +249,23 @@ func usesContextBackground(file *ast.File) bool {
 	}
 
 	found := false
+
 	ast.Inspect(file, func(node ast.Node) bool {
 		if found {
 			return false
 		}
+
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
+
 		switch fun := call.Fun.(type) {
 		case *ast.SelectorExpr:
 			if fun.Sel.Name != "Background" {
 				return true
 			}
+
 			ident, ok := fun.X.(*ast.Ident)
 			if ok && contextNames[ident.Name] {
 				found = true
@@ -258,22 +277,27 @@ func usesContextBackground(file *ast.File) bool {
 				return false
 			}
 		}
+
 		return true
 	})
+
 	return found
 }
 
 func contextImportNames(file *ast.File) (map[string]bool, bool) {
 	names := make(map[string]bool)
 	dotImported := false
+
 	for _, spec := range file.Imports {
 		if strings.Trim(spec.Path.Value, "\"") != "context" {
 			continue
 		}
+
 		if spec.Name == nil {
 			names["context"] = true
 			continue
 		}
+
 		switch spec.Name.Name {
 		case ".":
 			dotImported = true
@@ -283,6 +307,7 @@ func contextImportNames(file *ast.File) (map[string]bool, bool) {
 			names[spec.Name.Name] = true
 		}
 	}
+
 	return names, dotImported
 }
 
@@ -291,12 +316,15 @@ func sortFindings(findings []Finding) {
 		if findings[i].Path != findings[j].Path {
 			return findings[i].Path < findings[j].Path
 		}
+
 		if findings[i].Kind != findings[j].Kind {
 			return findings[i].Kind < findings[j].Kind
 		}
+
 		if findings[i].Message != findings[j].Message {
 			return findings[i].Message < findings[j].Message
 		}
+
 		return findings[i].Severity < findings[j].Severity
 	})
 }

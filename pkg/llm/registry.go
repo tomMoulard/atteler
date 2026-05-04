@@ -52,6 +52,7 @@ func KnownProviders() []ProviderInfo {
 		&OpenAIProvider{},
 		&OllamaProvider{},
 	}
+
 	out := make([]ProviderInfo, 0, len(providers))
 	for _, provider := range providers {
 		out = append(out, ProviderInfo{
@@ -59,6 +60,7 @@ func KnownProviders() []ProviderInfo {
 			Models: append([]string(nil), provider.Models()...),
 		})
 	}
+
 	return out
 }
 
@@ -83,6 +85,7 @@ func AutoRegisterWithConfigContext(ctx context.Context, cfg AutoRegisterConfig) 
 	registerConfiguredProvider(r, cfg, providerOllama, func() (Provider, error) {
 		ollamaConfig := providerConfig(cfg, providerOllama)
 		ollamaConfig.AutoStart = ollamaConfig.AutoStart || shouldAutoStartOllama(cfg)
+
 		return NewOllamaProviderWithConfigContext(ctx, ollamaConfig)
 	})
 	registerConfiguredProvider(r, cfg, providerClaudeCode, func() (Provider, error) {
@@ -102,11 +105,13 @@ func registerConfiguredProvider(r *Registry, cfg AutoRegisterConfig, providerNam
 		log.Printf("llm: %s skipped: disabled by config", providerName)
 		return
 	}
+
 	p, err := factory()
 	if err != nil {
 		logProviderSkip(providerName, err)
 		return
 	}
+
 	r.Register(p)
 }
 
@@ -122,6 +127,7 @@ func applyDefaultSelection(r *Registry, cfg AutoRegisterConfig) {
 		if err != nil && cfg.DefaultProvider != "" {
 			err = r.SetDefaultProviderModel(cfg.DefaultProvider, cfg.DefaultModel)
 		}
+
 		if err != nil {
 			log.Printf("llm: default model ignored: %v", err)
 		}
@@ -132,6 +138,7 @@ func logProviderSkip(providerName string, err error) {
 	if isMissingCredentialError(err) {
 		return
 	}
+
 	log.Printf("llm: %s skipped: %v", providerName, err)
 }
 
@@ -139,7 +146,9 @@ func isMissingCredentialError(err error) bool {
 	if err == nil {
 		return false
 	}
+
 	msg := strings.ToLower(err.Error())
+
 	return strings.Contains(msg, "no ") &&
 		(strings.Contains(msg, "credentials") || strings.Contains(msg, "api key found"))
 }
@@ -148,6 +157,7 @@ func providerConfig(cfg AutoRegisterConfig, name string) ProviderConfig {
 	if cfg.Providers == nil {
 		return ProviderConfig{}
 	}
+
 	return cfg.Providers[name]
 }
 
@@ -155,6 +165,7 @@ func shouldAutoStartOllama(cfg AutoRegisterConfig) bool {
 	if strings.EqualFold(cfg.DefaultProvider, providerOllama) {
 		return true
 	}
+
 	return modelNamesProvider(cfg.DefaultModel, providerOllama) ||
 		modelNamesProvider(cfg.SelectedModel, providerOllama) ||
 		isKnownOllamaModelName(cfg.DefaultModel) ||
@@ -166,20 +177,25 @@ func modelNamesProvider(model, provider string) bool {
 	if model == "" {
 		return false
 	}
+
 	prefix, _, ok := strings.Cut(model, "/")
+
 	return ok && strings.EqualFold(prefix, provider)
 }
 
 func isKnownOllamaModelName(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
+
 	model, _, _ = strings.Cut(model, ":")
 	if model == "" {
 		return false
 	}
+
 	for _, known := range (&OllamaProvider{}).Models() {
 		if strings.EqualFold(model, known) {
 			return true
 		}
 	}
+
 	return false
 }

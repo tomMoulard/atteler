@@ -40,8 +40,10 @@ func (err CycleError) Error() string {
 		for _, node := range cycle {
 			labels = append(labels, string(node))
 		}
+
 		parts = append(parts, strings.Join(labels, " -> "))
 	}
+
 	return "codegraph: graph contains cycle(s): " + strings.Join(parts, "; ")
 }
 
@@ -73,7 +75,9 @@ func (g *Graph) HasNode(id NodeID) bool {
 	if g == nil {
 		return false
 	}
+
 	_, ok := g.out[id]
+
 	return ok
 }
 
@@ -82,11 +86,14 @@ func (g *Graph) HasEdge(from, to NodeID) bool {
 	if g == nil {
 		return false
 	}
+
 	neighbors, ok := g.out[from]
 	if !ok {
 		return false
 	}
+
 	_, ok = neighbors[to]
+
 	return ok
 }
 
@@ -95,6 +102,7 @@ func (g *Graph) Nodes() []NodeID {
 	if g == nil {
 		return nil
 	}
+
 	return sortedKeys(g.out)
 }
 
@@ -105,17 +113,21 @@ func (g *Graph) Edges() []Edge {
 	}
 
 	var edges []Edge
+
 	for from, neighbors := range g.out {
 		for to := range neighbors {
 			edges = append(edges, Edge{From: from, To: to})
 		}
 	}
+
 	sort.Slice(edges, func(i, j int) bool {
 		if edges[i].From != edges[j].From {
 			return edges[i].From < edges[j].From
 		}
+
 		return edges[i].To < edges[j].To
 	})
+
 	return edges
 }
 
@@ -124,6 +136,7 @@ func (g *Graph) Neighbors(id NodeID) []NodeID {
 	if g == nil {
 		return nil
 	}
+
 	return sortedKeys(g.out[id])
 }
 
@@ -132,6 +145,7 @@ func (g *Graph) ReverseDependencies(id NodeID) []NodeID {
 	if g == nil {
 		return nil
 	}
+
 	return sortedKeys(g.in[id])
 }
 
@@ -141,6 +155,7 @@ func (g *Graph) ReachableFrom(roots ...NodeID) []NodeID {
 	if g == nil {
 		return nil
 	}
+
 	return g.walk(g.out, roots...)
 }
 
@@ -150,6 +165,7 @@ func (g *Graph) ImpactSet(changed ...NodeID) []NodeID {
 	if g == nil {
 		return nil
 	}
+
 	return g.walk(g.in, changed...)
 }
 
@@ -160,14 +176,17 @@ func (g *Graph) Cycles() [][]NodeID {
 	}
 
 	var cycles [][]NodeID
+
 	for _, component := range g.stronglyConnectedComponents() {
 		if len(component) == 1 && !g.HasEdge(component[0], component[0]) {
 			continue
 		}
+
 		cycles = append(cycles, g.canonicalCycle(component))
 	}
 
 	sortCycles(cycles)
+
 	return cycles
 }
 
@@ -189,7 +208,9 @@ func (g *Graph) TopologicalLayers() ([][]NodeID, error) {
 	}
 
 	current := zeroIndegreeNodes(indegree)
+
 	var layers [][]NodeID
+
 	visited := 0
 
 	for len(current) > 0 {
@@ -201,14 +222,17 @@ func (g *Graph) TopologicalLayers() ([][]NodeID, error) {
 			for _, to := range g.Neighbors(from) {
 				indegree[to]--
 			}
+
 			delete(indegree, from)
 		}
+
 		current = zeroIndegreeNodes(indegree)
 	}
 
 	if visited != len(g.out) {
 		return nil, CycleError{Cycles: g.Cycles()}
 	}
+
 	return layers, nil
 }
 
@@ -216,6 +240,7 @@ func (g *Graph) ensure() {
 	if g.out == nil {
 		g.out = make(map[NodeID]map[NodeID]struct{})
 	}
+
 	if g.in == nil {
 		g.in = make(map[NodeID]map[NodeID]struct{})
 	}
@@ -225,6 +250,7 @@ func (g *Graph) addNode(id NodeID) {
 	if _, ok := g.out[id]; !ok {
 		g.out[id] = make(map[NodeID]struct{})
 	}
+
 	if _, ok := g.in[id]; !ok {
 		g.in[id] = make(map[NodeID]struct{})
 	}
@@ -241,20 +267,25 @@ func (g *Graph) walk(edges map[NodeID]map[NodeID]struct{}, roots ...NodeID) []No
 			frontier = append(frontier, root)
 		}
 	}
+
 	slices.Sort(frontier)
 
 	seen := make(map[NodeID]struct{})
+
 	for len(frontier) > 0 {
 		node := frontier[0]
 		frontier = frontier[1:]
+
 		for _, next := range sortedKeys(edges[node]) {
 			if _, ok := seen[next]; ok {
 				continue
 			}
+
 			seen[next] = struct{}{}
 			frontier = append(frontier, next)
 		}
 	}
+
 	return sortedKeys(seen)
 }
 
@@ -269,10 +300,12 @@ func (g *Graph) stronglyConnectedComponents() [][]NodeID {
 	)
 
 	var visit func(NodeID)
+
 	visit = func(node NodeID) {
 		indexes[node] = index
 		lowLinks[node] = index
 		index++
+
 		stack = append(stack, node)
 		onStack[node] = true
 
@@ -290,15 +323,18 @@ func (g *Graph) stronglyConnectedComponents() [][]NodeID {
 		}
 
 		var component []NodeID
+
 		for {
 			last := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			onStack[last] = false
+
 			component = append(component, last)
 			if last == node {
 				break
 			}
 		}
+
 		slices.Sort(component)
 		components = append(components, component)
 	}
@@ -308,6 +344,7 @@ func (g *Graph) stronglyConnectedComponents() [][]NodeID {
 			visit(node)
 		}
 	}
+
 	return components
 }
 
@@ -326,6 +363,7 @@ func (g *Graph) canonicalCycle(component []NodeID) []NodeID {
 
 	start := nodes[0]
 	path := []NodeID{start}
+
 	onPath := map[NodeID]struct{}{start: {}}
 	if cycle, ok := g.findCyclePath(start, start, inComponent, path, onPath); ok {
 		return cycle
@@ -340,20 +378,25 @@ func (g *Graph) findCyclePath(start, current NodeID, inComponent map[NodeID]stru
 		if _, ok := inComponent[next]; !ok {
 			continue
 		}
+
 		if next == start && len(path) > 1 {
 			return append(append([]NodeID(nil), path...), start), true
 		}
+
 		if _, ok := onPath[next]; ok {
 			continue
 		}
 
 		onPath[next] = struct{}{}
+
 		nextPath := append(append([]NodeID(nil), path...), next)
 		if cycle, ok := g.findCyclePath(start, next, inComponent, nextPath, onPath); ok {
 			return cycle, true
 		}
+
 		delete(onPath, next)
 	}
+
 	return nil, false
 }
 
@@ -361,22 +404,28 @@ func sortedKeys[V any](m map[NodeID]V) []NodeID {
 	if len(m) == 0 {
 		return nil
 	}
+
 	keys := make([]NodeID, 0, len(m))
 	for key := range m {
 		keys = append(keys, key)
 	}
+
 	slices.Sort(keys)
+
 	return keys
 }
 
 func zeroIndegreeNodes(indegree map[NodeID]int) []NodeID {
 	var nodes []NodeID
+
 	for node, degree := range indegree {
 		if degree == 0 {
 			nodes = append(nodes, node)
 		}
 	}
+
 	slices.Sort(nodes)
+
 	return nodes
 }
 
@@ -384,6 +433,7 @@ func sortCycles(cycles [][]NodeID) {
 	sort.Slice(cycles, func(i, j int) bool {
 		left := cycleKey(cycles[i])
 		right := cycleKey(cycles[j])
+
 		return left < right
 	})
 }
@@ -393,5 +443,6 @@ func cycleKey(cycle []NodeID) string {
 	for _, node := range cycle {
 		parts = append(parts, string(node))
 	}
+
 	return strings.Join(parts, "\x00")
 }

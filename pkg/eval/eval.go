@@ -35,9 +35,11 @@ func (r Result) Failure() string {
 	if r.Passed {
 		return ""
 	}
+
 	if r.Diff == "" {
 		return r.Summary
 	}
+
 	return r.Summary + "\n" + r.Diff
 }
 
@@ -61,6 +63,7 @@ func Check(actual, expected string, mode MatchMode) Result {
 	case ModeNormalized:
 		normalizedExpected := Normalize(expected)
 		normalizedActual := Normalize(actual)
+
 		result.Passed = normalizedActual == normalizedExpected
 		if !result.Passed {
 			result.Summary = "expected normalized match"
@@ -95,13 +98,16 @@ func diffSnippet(expected, actual string) string {
 	suffix := commonSuffix(expectedRunes[prefix:], actualRunes[prefix:])
 
 	const context = 40
+
 	expectedStart := max(prefix-context, 0)
 	actualStart := max(prefix-context, 0)
 	expectedEnd := min(len(expectedRunes)-suffix, prefix+context)
 	actualEnd := min(len(actualRunes)-suffix, prefix+context)
+
 	if expectedStart > expectedEnd {
 		expectedEnd = expectedStart
 	}
+
 	if actualStart > actualEnd {
 		actualEnd = actualStart
 	}
@@ -121,6 +127,7 @@ func commonPrefix(a, b []rune) int {
 			return i
 		}
 	}
+
 	return limit
 }
 
@@ -131,6 +138,7 @@ func commonSuffix(a, b []rune) int {
 			return i
 		}
 	}
+
 	return limit
 }
 
@@ -139,21 +147,27 @@ func withEllipsis(runes []rune, start, end int) string {
 	if start > 0 {
 		builder.WriteString("…")
 	}
+
 	builder.WriteString(string(runes[start:end]))
+
 	if end < len(runes) {
 		builder.WriteString("…")
 	}
+
 	return builder.String()
 }
 
 func compact(s string, limit int) string {
 	s = strings.Join(strings.Fields(s), " ")
+
 	runes := []rune(s)
 	if len(runes) <= limit {
 		return s
 	}
+
 	if limit <= 1 {
 		return "…"
 	}
+
 	return string(runes[:limit-1]) + "…"
 }

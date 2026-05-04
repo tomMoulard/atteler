@@ -92,6 +92,7 @@ func TestMerge_SkipsSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside.txt")
 	require.NoError(t, os.WriteFile(outside, []byte("outside"), 0o600))
+
 	link := filepath.Join(root, "link.txt")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
@@ -122,6 +123,7 @@ func TestMerge_ValidatesInputsAndRendersEmptyDocument(t *testing.T) {
 
 func writeFile(t *testing.T, root, relPath, content string) {
 	t.Helper()
+
 	path := filepath.Join(root, relPath)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
@@ -129,20 +131,24 @@ func writeFile(t *testing.T, root, relPath, content string) {
 
 func assertWarning(t *testing.T, warnings []Warning, path, reason string) {
 	t.Helper()
+
 	for _, warning := range warnings {
 		if warning.Path == path && warning.Reason == reason {
 			return
 		}
 	}
+
 	assert.Failf(t, "warning not found", "path=%q reason=%q warnings=%v", path, reason, warnings)
 }
 
 func assertWarningContains(t *testing.T, warnings []Warning, path, reasonPart string) {
 	t.Helper()
+
 	for _, warning := range warnings {
 		if warning.Path == path && strings.Contains(warning.Reason, reasonPart) {
 			return
 		}
 	}
+
 	assert.Failf(t, "warning not found", "path=%q reason containing %q warnings=%v", path, reasonPart, warnings)
 }

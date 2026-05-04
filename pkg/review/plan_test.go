@@ -161,6 +161,7 @@ func TestNewPlan_ProtectsInputsAndReturnedSlices(t *testing.T) {
 	returnedGates[0] = mutatedAgain
 	returnedRounds := plan.Rounds()
 	returnedRounds[0].Reviewers[0] = mutatedAgain
+
 	returnedCrossReviews := plan.CrossReviews()
 	if len(returnedCrossReviews) > 0 {
 		returnedCrossReviews[0].Reviewer = mutatedAgain
@@ -207,6 +208,7 @@ func roundKinds(rounds []Round) []RoundKind {
 		round := rounds[i]
 		kinds[i] = round.Kind
 	}
+
 	return kinds
 }
 
@@ -216,5 +218,6 @@ func roundNumbers(rounds []Round) []int {
 		round := rounds[i]
 		numbers[i] = round.Number
 	}
+
 	return numbers
 }

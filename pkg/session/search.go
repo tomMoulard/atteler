@@ -41,10 +41,12 @@ func (s *Store) Search(query string) ([]SearchResult, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
+
 		return nil, fmt.Errorf("session: search %s: %w", s.dir, err)
 	}
 
 	normalizedQuery := strings.ToLower(query)
+
 	results := make([]SearchResult, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != sessionFileExt {
@@ -52,10 +54,12 @@ func (s *Store) Search(query string) ([]SearchResult, error) {
 		}
 
 		path := filepath.Join(s.dir, entry.Name())
+
 		session, err := s.Load(path)
 		if err != nil {
 			return nil, err
 		}
+
 		result, ok := matchSession(summarize(path, session), session, query, normalizedQuery)
 		if ok {
 			results = append(results, result)
@@ -65,6 +69,7 @@ func (s *Store) Search(query string) ([]SearchResult, error) {
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Summary.UpdatedAt.After(results[j].Summary.UpdatedAt)
 	})
+
 	return results, nil
 }
 
@@ -80,15 +85,18 @@ func matchSession(summary Summary, session Session, query, normalizedQuery strin
 	result.Snippets = appendLimitedSnippets(result.Snippets, negativeKnowledgeSnippets(session.NegativeKnowledge, query, normalizedQuery)...)
 	result.Snippets = appendLimitedSnippets(result.Snippets, evaluationSnippets(session.Evaluations, query, normalizedQuery)...)
 	result.Snippets = appendLimitedSnippets(result.Snippets, artifactSnippets(session.Artifacts, query, normalizedQuery)...)
+
 	return result, matched || len(result.Snippets) > 0
 }
 
 func messageSnippets(messages []llm.Message, query, normalizedQuery string) []SearchSnippet {
 	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
+
 	for _, message := range messages {
 		if !matchesMessage(message, normalizedQuery) {
 			continue
 		}
+
 		snippets = append(snippets, SearchSnippet{
 			Role: message.Role,
 			Text: searchSnippet(message.Content, query),
@@ -97,15 +105,18 @@ func messageSnippets(messages []llm.Message, query, normalizedQuery string) []Se
 			return snippets
 		}
 	}
+
 	return snippets
 }
 
 func negativeKnowledgeSnippets(entries []NegativeKnowledge, query, normalizedQuery string) []SearchSnippet {
 	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
+
 	for _, entry := range entries {
 		if !matchesNegativeKnowledge(entry, normalizedQuery) {
 			continue
 		}
+
 		snippets = append(snippets, SearchSnippet{
 			Role: llm.Role("negative_knowledge"),
 			Text: searchSnippet(negativeKnowledgeSearchText(entry), query),
@@ -114,15 +125,18 @@ func negativeKnowledgeSnippets(entries []NegativeKnowledge, query, normalizedQue
 			return snippets
 		}
 	}
+
 	return snippets
 }
 
 func evaluationSnippets(entries []AgentEvaluation, query, normalizedQuery string) []SearchSnippet {
 	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
+
 	for _, entry := range entries {
 		if !matchesEvaluation(entry, normalizedQuery) {
 			continue
 		}
+
 		snippets = append(snippets, SearchSnippet{
 			Role: llm.Role("evaluation"),
 			Text: searchSnippet(evaluationSearchText(entry), query),
@@ -131,15 +145,18 @@ func evaluationSnippets(entries []AgentEvaluation, query, normalizedQuery string
 			return snippets
 		}
 	}
+
 	return snippets
 }
 
 func artifactSnippets(entries []Artifact, query, normalizedQuery string) []SearchSnippet {
 	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
+
 	for _, entry := range entries {
 		if !matchesArtifact(entry, normalizedQuery) {
 			continue
 		}
+
 		snippets = append(snippets, SearchSnippet{
 			Role: llm.Role("artifact"),
 			Text: searchSnippet(artifactSearchText(entry), query),
@@ -148,6 +165,7 @@ func artifactSnippets(entries []Artifact, query, normalizedQuery string) []Searc
 			return snippets
 		}
 	}
+
 	return snippets
 }
 
@@ -155,10 +173,12 @@ func appendLimitedSnippets(existing []SearchSnippet, candidates ...SearchSnippet
 	if len(existing) >= maxSnippetsPerSession {
 		return existing
 	}
+
 	remaining := maxSnippetsPerSession - len(existing)
 	if len(candidates) > remaining {
 		candidates = candidates[:remaining]
 	}
+
 	return append(existing, candidates...)
 }
 
@@ -168,6 +188,7 @@ func containsTag(tags []string, normalizedQuery string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -188,9 +209,11 @@ func negativeKnowledgeSearchText(entry NegativeKnowledge) string {
 	if entry.Commit != "" {
 		parts = append(parts, "Commit: "+entry.Commit)
 	}
+
 	if entry.Agent != "" {
 		parts = append(parts, "Agent: "+entry.Agent)
 	}
+
 	return strings.Join(parts, " | ")
 }
 
@@ -206,12 +229,15 @@ func evaluationSearchText(entry AgentEvaluation) string {
 	if entry.Score != 0 {
 		parts = append(parts, fmt.Sprintf("Score: %d", entry.Score))
 	}
+
 	if entry.Reference != "" {
 		parts = append(parts, "Reference: "+entry.Reference)
 	}
+
 	if entry.Notes != "" {
 		parts = append(parts, "Notes: "+entry.Notes)
 	}
+
 	return strings.Join(parts, " | ")
 }
 
@@ -227,15 +253,18 @@ func artifactSearchText(entry Artifact) string {
 	if entry.Summary != "" {
 		parts = append(parts, "Summary: "+entry.Summary)
 	}
+
 	if entry.SourceAgent != "" {
 		parts = append(parts, "Source Agent: "+entry.SourceAgent)
 	}
+
 	return strings.Join(parts, " | ")
 }
 
 func searchSnippet(content, query string) string {
 	contentRunes := []rune(content)
 	queryRunes := []rune(strings.ToLower(query))
+
 	index := runeIndex([]rune(strings.ToLower(content)), queryRunes)
 	if index < 0 {
 		return compactWhitespace(content)
@@ -243,13 +272,16 @@ func searchSnippet(content, query string) string {
 
 	start := max(0, index-snippetRadius)
 	end := min(len(contentRunes), index+len(queryRunes)+snippetRadius)
+
 	snippet := strings.TrimSpace(string(contentRunes[start:end]))
 	if start > 0 {
 		snippet = "…" + snippet
 	}
+
 	if end < len(contentRunes) {
 		snippet += "…"
 	}
+
 	return compactWhitespace(snippet)
 }
 
@@ -257,11 +289,13 @@ func runeIndex(haystack, needle []rune) int {
 	if len(needle) == 0 || len(needle) > len(haystack) {
 		return -1
 	}
+
 	for i := 0; i <= len(haystack)-len(needle); i++ {
 		if slices.Equal(haystack[i:i+len(needle)], needle) {
 			return i
 		}
 	}
+
 	return -1
 }
 

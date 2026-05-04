@@ -46,6 +46,7 @@ func ApplyProposals(agents map[string]config.AgentConfig, proposals []Proposal) 
 		if strings.Contains(agent.SystemPrompt, guidance) {
 			continue
 		}
+
 		agent.SystemPrompt = appendSystemPromptGuidance(agent.SystemPrompt, guidance)
 		updated[agentName] = agent
 
@@ -66,19 +67,24 @@ func FormatHistoryEntry(entry HistoryEntry) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "agent: %s\n", strings.TrimSpace(entry.Agent))
 	fmt.Fprintf(&b, "confidence: %.2f\n", entry.Confidence)
+
 	if action := strings.TrimSpace(entry.Action); action != "" {
 		fmt.Fprintf(&b, "action: %s\n", action)
 	}
+
 	if reason := strings.TrimSpace(entry.Reason); reason != "" {
 		fmt.Fprintf(&b, "reason: %s\n", reason)
 	}
+
 	evidence := cleanStrings(entry.Evidence)
 	if len(evidence) > 0 {
 		b.WriteString("evidence:\n")
+
 		for _, item := range evidence {
 			fmt.Fprintf(&b, "  - %s\n", item)
 		}
 	}
+
 	return b.String()
 }
 
@@ -91,25 +97,30 @@ func copyAgents(agents map[string]config.AgentConfig) map[string]config.AgentCon
 	for name := range agents {
 		copied[name] = copyAgentConfig(agents[name])
 	}
+
 	return copied
 }
 
 func copyAgentConfig(agent config.AgentConfig) config.AgentConfig {
 	agent.FallbackModels = append([]string(nil), agent.FallbackModels...)
 	agent.Capabilities = append([]string(nil), agent.Capabilities...)
+
 	agent.Triggers = append([]string(nil), agent.Triggers...)
 	if agent.Temperature != nil {
 		value := *agent.Temperature
 		agent.Temperature = &value
 	}
+
 	if agent.TopP != nil {
 		value := *agent.TopP
 		agent.TopP = &value
 	}
+
 	if agent.Seed != nil {
 		value := *agent.Seed
 		agent.Seed = &value
 	}
+
 	return agent
 }
 
@@ -118,38 +129,47 @@ func configuredAgentName(agents map[string]config.AgentConfig, proposalAgent str
 	if trimmed == "" {
 		return "", false
 	}
+
 	if _, ok := agents[trimmed]; ok {
 		return trimmed, true
 	}
 
 	normalized := strings.ToLower(trimmed)
 	matches := make([]string, 0, 1)
+
 	for name := range agents {
 		if strings.ToLower(strings.TrimSpace(name)) == normalized {
 			matches = append(matches, name)
 		}
 	}
+
 	if len(matches) != 1 {
 		return "", false
 	}
+
 	return matches[0], true
 }
 
 func proposalGuidance(proposal Proposal) string {
 	var lines []string
+
 	lines = append(lines, feedbackGuidanceHeader)
 	if action := strings.TrimSpace(proposal.Action); action != "" {
 		lines = append(lines, "- Action: "+action)
 	}
+
 	if reason := strings.TrimSpace(proposal.Reason); reason != "" {
 		lines = append(lines, "- Reason: "+reason)
 	}
+
 	for _, evidence := range cleanStrings(proposal.Evidence) {
 		lines = append(lines, "- Evidence: "+evidence)
 	}
+
 	if len(lines) == 1 {
 		return ""
 	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -158,6 +178,7 @@ func appendSystemPromptGuidance(systemPrompt, guidance string) string {
 	if trimmedPrompt == "" {
 		return guidance
 	}
+
 	return trimmedPrompt + "\n\n" + guidance
 }
 
@@ -168,5 +189,6 @@ func cleanStrings(values []string) []string {
 			cleaned = append(cleaned, trimmed)
 		}
 	}
+
 	return cleaned
 }

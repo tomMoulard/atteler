@@ -66,11 +66,13 @@ func (s *Store) AddFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("read memory file %q: %w", path, err)
 	}
+
 	if !utf8.Valid(data) {
 		return fmt.Errorf("read memory file %q: %w", path, ErrInvalidUTF8)
 	}
 
 	clean := filepath.Clean(path)
+
 	return s.Add(Document{ID: clean, Path: clean, Text: string(data)})
 }
 
@@ -81,6 +83,7 @@ func (s *Store) AddFiles(paths ...string) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -100,6 +103,7 @@ func (s *Store) Add(doc Document) error {
 	if doc.ID == "" {
 		return ErrMissingID
 	}
+
 	if doc.Metadata != nil && len(doc.Metadata) == 0 {
 		doc.Metadata = nil
 	}
@@ -110,7 +114,9 @@ func (s *Store) Add(doc Document) error {
 			return nil
 		}
 	}
+
 	s.Documents = append(s.Documents, doc)
+
 	return nil
 }
 
@@ -126,6 +132,7 @@ func (s *Store) Search(query string, limit int) ([]Result, error) {
 	if len(queryTerms) == 0 {
 		return nil, ErrEmptyQuery
 	}
+
 	querySet := make(map[string]struct{}, len(queryTerms))
 	for _, term := range queryTerms {
 		querySet[term] = struct{}{}
@@ -139,11 +146,13 @@ func (s *Store) Search(query string, limit int) ([]Result, error) {
 		}
 
 		counts := make(map[string]int)
+
 		for _, token := range tokens {
 			if _, ok := querySet[token]; ok {
 				counts[token]++
 			}
 		}
+
 		if len(counts) == 0 {
 			continue
 		}
@@ -161,11 +170,14 @@ func (s *Store) Search(query string, limit int) ([]Result, error) {
 		if results[i].Score != results[j].Score {
 			return results[i].Score > results[j].Score
 		}
+
 		return results[i].Document.ID < results[j].Document.ID
 	})
+
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
 	}
+
 	return results, nil
 }
 
@@ -175,13 +187,17 @@ func (s *Store) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("marshal memory store: %w", err)
 	}
+
 	data = append(data, '\n')
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("create memory store dir: %w", err)
 	}
+
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write memory store %q: %w", path, err)
 	}
+
 	return nil
 }
 
@@ -191,10 +207,12 @@ func Load(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read memory store %q: %w", path, err)
 	}
+
 	var store Store
 	if err := json.Unmarshal(data, &store); err != nil {
 		return nil, fmt.Errorf("decode memory store %q: %w", path, err)
 	}
+
 	return &store, nil
 }
 
@@ -208,34 +226,44 @@ var (
 )
 
 func tokenize(text string) []string {
-	var tokens []string
-	var b strings.Builder
+	var (
+		tokens []string
+		b      strings.Builder
+	)
+
 	for _, r := range text {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			b.WriteRune(unicode.ToLower(r))
 			continue
 		}
+
 		if b.Len() > 0 {
 			tokens = append(tokens, b.String())
 			b.Reset()
 		}
 	}
+
 	if b.Len() > 0 {
 		tokens = append(tokens, b.String())
 	}
+
 	return tokens
 }
 
 func uniqueTokens(text string) []string {
 	seen := make(map[string]struct{})
+
 	var terms []string
+
 	for _, token := range tokenize(text) {
 		if _, ok := seen[token]; ok {
 			continue
 		}
+
 		seen[token] = struct{}{}
 		terms = append(terms, token)
 	}
+
 	return terms
 }
 
@@ -244,7 +272,9 @@ func sortedKeys(counts map[string]int) []string {
 	for key := range counts {
 		keys = append(keys, key)
 	}
+
 	sort.Strings(keys)
+
 	return keys
 }
 
@@ -253,8 +283,10 @@ func score(counts map[string]int, queryTerms, documentTokens int) float64 {
 	for _, count := range counts {
 		frequency += count
 	}
+
 	coverage := float64(len(counts)) / float64(queryTerms)
 	density := float64(frequency) / float64(documentTokens)
+
 	return coverage + density
 }
 
@@ -265,6 +297,7 @@ func snippet(text string, terms []string, maxRunes int) string {
 	}
 
 	firstRune := -1
+
 	for _, term := range terms {
 		idx := runeIndexFold(clean, term)
 		if idx >= 0 && (firstRune < 0 || idx < firstRune) {
@@ -281,34 +314,43 @@ func snippet(text string, terms []string, maxRunes int) string {
 	if start > len(runes) {
 		start = 0
 	}
+
 	end := min(start+maxRunes, len(runes))
+
 	out := strings.TrimSpace(string(runes[start:end]))
 	if start > 0 {
 		out = "…" + out
 	}
+
 	if end < len(runes) {
 		out += "…"
 	}
+
 	return out
 }
 
 func runeIndexFold(text, term string) int {
 	textRunes := []rune(strings.ToLower(text))
+
 	termRunes := []rune(strings.ToLower(term))
 	if len(termRunes) == 0 || len(termRunes) > len(textRunes) {
 		return -1
 	}
+
 	for i := 0; i <= len(textRunes)-len(termRunes); i++ {
 		match := true
+
 		for j, termRune := range termRunes {
 			if textRunes[i+j] != termRune {
 				match = false
 				break
 			}
 		}
+
 		if match {
 			return i
 		}
 	}
+
 	return -1
 }

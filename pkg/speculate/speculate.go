@@ -138,6 +138,7 @@ func NewPlan(agents, gateChecks []string) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
+
 	if len(normalizedAgents) == 0 {
 		return Plan{}, errors.New("at least one agent is required")
 	}
@@ -231,6 +232,7 @@ func EstimatePromptCacheReuse(branches []BranchPrompt) (PromptCacheReuseEstimate
 			ReuseRatio:        ratio(sharedPrefixBytes, promptBytes),
 		}
 	}
+
 	estimate.ReuseRatio = ratio(estimate.ReusablePromptBytes, estimate.TotalPromptBytes)
 
 	return estimate, nil
@@ -243,15 +245,19 @@ func Run(ctx context.Context, plan Plan, runner Runner) (Result, error) {
 	if ctx == nil {
 		return Result{}, errors.New("context is required")
 	}
+
 	if err := validateRunnablePlan(plan); err != nil {
 		return Result{}, err
 	}
+
 	if runner.Propose == nil {
 		return Result{}, errors.New("proposal runner is required")
 	}
+
 	if runner.Review == nil {
 		return Result{}, errors.New("review runner is required")
 	}
+
 	if runner.Aggregate == nil {
 		return Result{}, errors.New("aggregator is required")
 	}
@@ -259,22 +265,26 @@ func Run(ctx context.Context, plan Plan, runner Runner) (Result, error) {
 	session := Session{Plan: plan}
 
 	proposals, err := runProposals(ctx, plan.Agents, runner.Propose)
+
 	session.Proposals = proposals
 	if err != nil {
 		return Result{Session: session}, err
 	}
 
 	reviews, err := runReviews(ctx, proposals, runner.Review)
+
 	session.Reviews = reviews
 	if err != nil {
 		return Result{Session: session}, err
 	}
 
 	verdict, err := runner.Aggregate(ctx, session)
+
 	session.Verdict = verdict
 	if err != nil {
 		return Result{Session: session}, fmt.Errorf("aggregate: %w", err)
 	}
+
 	if err := ValidateVerdict(verdict, plan.GateChecks); err != nil {
 		return Result{Session: session}, err
 	}
@@ -296,6 +306,7 @@ func CrossReviews(proposals []Proposal) ([]Review, error) {
 		if proposal.Round != RoundProposal {
 			return nil, fmt.Errorf("proposal from %q is in round %d, want round %d", proposal.Agent, proposal.Round, RoundProposal)
 		}
+
 		agents = append(agents, proposal.Agent)
 	}
 
@@ -310,6 +321,7 @@ func CrossReviews(proposals []Proposal) ([]Review, error) {
 			if reviewer == target {
 				continue
 			}
+
 			reviews = append(reviews, Review{
 				Reviewer:    reviewer,
 				TargetAgent: target,
@@ -334,9 +346,11 @@ func ValidateGateChecks(required []string, checks []GateCheck) error {
 		if name == "" {
 			return errors.New("gate check name is required")
 		}
+
 		if _, exists := seen[name]; exists {
 			return fmt.Errorf("duplicate gate check %q", name)
 		}
+
 		check.Name = name
 		seen[name] = check
 	}
@@ -352,6 +366,7 @@ func ValidateGateChecks(required []string, checks []GateCheck) error {
 		if !ok {
 			return fmt.Errorf("missing gate check %q", name)
 		}
+
 		if !check.Passed {
 			return fmt.Errorf("gate check %q failed", name)
 		}
@@ -365,9 +380,11 @@ func ValidateVerdict(verdict Verdict, requiredGateChecks []string) error {
 	if strings.TrimSpace(verdict.Winner) == "" {
 		return errors.New("verdict winner is required")
 	}
+
 	if strings.TrimSpace(verdict.Reason) == "" {
 		return errors.New("verdict reason is required")
 	}
+
 	return ValidateGateChecks(requiredGateChecks, verdict.GateChecks)
 }
 
@@ -377,22 +394,27 @@ func runProposals(ctx context.Context, agents []string, propose ProposalRunner) 
 
 	var wg sync.WaitGroup
 	wg.Add(len(agents))
+
 	for i, agent := range agents {
 		go func(i int, agent string) {
 			defer wg.Done()
+
 			content, err := propose(ctx, agent)
 			if err != nil {
 				errs[i] = fmt.Errorf("proposal %q: %w", agent, err)
 				return
 			}
+
 			proposals[i] = Proposal{Agent: agent, Round: RoundProposal, Content: content}
 		}(i, agent)
 	}
+
 	wg.Wait()
 
 	if err := firstError(errs); err != nil {
 		return proposals, err
 	}
+
 	return proposals, nil
 }
 
@@ -412,24 +434,30 @@ func runReviews(ctx context.Context, proposals []Proposal, review ReviewRunner) 
 
 	var wg sync.WaitGroup
 	wg.Add(len(assignments))
+
 	for i, assignment := range assignments {
 		go func(i int, assignment Review) {
 			defer wg.Done()
+
 			targetProposal := proposalByAgent[assignment.TargetAgent]
+
 			notes, err := review(ctx, assignment, targetProposal)
 			if err != nil {
 				errs[i] = fmt.Errorf("review %q -> %q: %w", assignment.Reviewer, assignment.TargetAgent, err)
 				return
 			}
+
 			assignment.Notes = notes
 			reviews[i] = assignment
 		}(i, assignment)
 	}
+
 	wg.Wait()
 
 	if err := firstError(errs); err != nil {
 		return reviews, err
 	}
+
 	return reviews, nil
 }
 
@@ -437,9 +465,11 @@ func validateRunnablePlan(plan Plan) error {
 	if _, err := normalizeUnique("agent", plan.Agents); err != nil {
 		return err
 	}
+
 	if len(plan.Agents) == 0 {
 		return errors.New("at least one agent is required")
 	}
+
 	if _, err := normalizeUnique("gate check", plan.GateChecks); err != nil {
 		return err
 	}
@@ -460,47 +490,58 @@ func firstError(errs []error) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
 func normalizeBranchPrompts(branches []BranchPrompt) ([]BranchPrompt, error) {
 	normalized := make([]BranchPrompt, 0, len(branches))
+
 	seen := make(map[string]struct{}, len(branches))
 	for _, branch := range branches {
 		name := strings.TrimSpace(branch.Branch)
 		if name == "" {
 			return nil, errors.New("branch name is required")
 		}
+
 		if _, exists := seen[name]; exists {
 			return nil, fmt.Errorf("duplicate branch %q", name)
 		}
+
 		seen[name] = struct{}{}
 		normalized = append(normalized, BranchPrompt{
 			Branch: name,
 			Prompt: branch.Prompt,
 		})
 	}
+
 	return normalized, nil
 }
 
 func sharedStringPrefix(left, right string) string {
 	limit := min(len(left), len(right))
 	lastMatch := 0
+
 	for i := range left {
 		if i > limit {
 			break
 		}
+
 		if !strings.HasPrefix(right, left[:i]) {
 			break
 		}
+
 		lastMatch = i
 	}
+
 	if limit == len(left) && strings.HasPrefix(right, left) {
 		lastMatch = len(left)
 	}
+
 	if limit == len(right) && strings.HasPrefix(left, right) {
 		lastMatch = len(right)
 	}
+
 	return left[:lastMatch]
 }
 
@@ -508,23 +549,28 @@ func ratio(numerator, denominator int) float64 {
 	if denominator == 0 {
 		return 0
 	}
+
 	return float64(numerator) / float64(denominator)
 }
 
 func normalizeUnique(label string, values []string) ([]string, error) {
 	normalized := make([]string, 0, len(values))
+
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return nil, fmt.Errorf("%s name is required", label)
 		}
+
 		if _, exists := seen[value]; exists {
 			return nil, fmt.Errorf("duplicate %s %q", label, value)
 		}
+
 		seen[value] = struct{}{}
 		normalized = append(normalized, value)
 	}
+
 	return normalized, nil
 }
 

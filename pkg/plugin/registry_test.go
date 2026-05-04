@@ -165,6 +165,7 @@ entrypoints:
 `)
 	link := filepath.Join(root, "bin", "outside")
 	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o700))
+
 	if err := os.Symlink(outsideScript, link); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
@@ -179,11 +180,13 @@ entrypoints:
 
 func TestRegistry_NilRegistryIsSafeForLookup(t *testing.T) {
 	t.Parallel()
+
 	var registry *Registry
 
 	require.Nil(t, registry.List())
 	_, ok := registry.Get("anything")
 	require.False(t, ok)
+
 	_, err := registry.ResolveEntrypoint("anything", "run")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `plugin: "anything" not found`)
@@ -191,8 +194,10 @@ func TestRegistry_NilRegistryIsSafeForLookup(t *testing.T) {
 
 func absPath(t *testing.T, path string) string {
 	t.Helper()
+
 	abs, err := filepath.Abs(path)
 	require.NoError(t, err)
+
 	return abs
 }
 
@@ -201,5 +206,6 @@ func evalAbsPath(t *testing.T, path string) string {
 	abs := absPath(t, path)
 	evaluated, err := filepath.EvalSymlinks(abs)
 	require.NoError(t, err)
+
 	return evaluated
 }

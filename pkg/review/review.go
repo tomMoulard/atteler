@@ -125,18 +125,22 @@ func ValidateReviewer(reviewer Reviewer) error {
 	if strings.TrimSpace(reviewer.Name) == "" {
 		return errors.New("reviewer name is required")
 	}
+
 	_, err := normalizeCategories(reviewer.Categories)
+
 	return err
 }
 
 // ValidateRequest verifies that a review request names at least one target path.
 func ValidateRequest(request Request) error {
 	paths := make([]string, 0, len(request.Paths)+len(request.ChangedFiles))
+
 	paths = append(paths, request.Paths...)
 	for _, file := range request.ChangedFiles {
 		if strings.TrimSpace(file.Status) == "" {
 			return fmt.Errorf("changed file %q status is required", strings.TrimSpace(file.Path))
 		}
+
 		paths = append(paths, file.Path)
 	}
 
@@ -144,9 +148,11 @@ func ValidateRequest(request Request) error {
 	if err != nil {
 		return err
 	}
+
 	if len(normalized) == 0 {
 		return errors.New("at least one review path is required")
 	}
+
 	return nil
 }
 
@@ -155,18 +161,23 @@ func ValidateFinding(finding Finding) error {
 	if !validSeverity(finding.Severity) {
 		return fmt.Errorf("invalid severity %q", finding.Severity)
 	}
+
 	if strings.TrimSpace(string(finding.Category)) == "" {
 		return errors.New("finding category is required")
 	}
+
 	if strings.TrimSpace(finding.Path) == "" {
 		return errors.New("finding path is required")
 	}
+
 	if finding.Line < 0 {
 		return fmt.Errorf("finding line must be non-negative, got %d", finding.Line)
 	}
+
 	if strings.TrimSpace(finding.Message) == "" {
 		return errors.New("finding message is required")
 	}
+
 	return nil
 }
 
@@ -175,11 +186,13 @@ func ValidateReport(report Report, requiredGates []string) error {
 	if strings.TrimSpace(report.Reviewer) == "" {
 		return errors.New("report reviewer is required")
 	}
+
 	for i, finding := range report.Findings {
 		if err := ValidateFinding(finding); err != nil {
 			return fmt.Errorf("finding %d: %w", i, err)
 		}
 	}
+
 	return ValidateGateChecks(requiredGates, report.GateChecks)
 }
 
@@ -201,12 +214,15 @@ func ValidateGateChecks(required []string, checks []GateCheck) error {
 		if name == "" {
 			return errors.New("gate check name is required")
 		}
+
 		if _, exists := seen[name]; exists {
 			return fmt.Errorf("duplicate gate check %q", name)
 		}
+
 		if _, ok := requiredSet[name]; !ok {
 			return fmt.Errorf("unknown gate check %q", name)
 		}
+
 		check.Name = name
 		seen[name] = check
 	}
@@ -216,10 +232,12 @@ func ValidateGateChecks(required []string, checks []GateCheck) error {
 		if !ok {
 			return fmt.Errorf("missing gate check %q", name)
 		}
+
 		if !check.Passed {
 			return fmt.Errorf("gate check %q failed", name)
 		}
 	}
+
 	return nil
 }
 
@@ -229,6 +247,7 @@ func SortedFindings(findings []Finding) []Finding {
 	sort.SliceStable(sorted, func(i, j int) bool {
 		return lessFinding(sorted[i], sorted[j])
 	})
+
 	return sorted
 }
 
@@ -241,6 +260,7 @@ func (report Report) SortedFindings() []Finding {
 func GroupFindingsBySeverity(findings []Finding) []FindingGroup {
 	sorted := SortedFindings(findings)
 	groups := make([]FindingGroup, 0, len(severityRank))
+
 	for _, severity := range []Severity{SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityInfo} {
 		group := FindingGroup{Key: string(severity)}
 		for _, finding := range sorted {
@@ -248,10 +268,12 @@ func GroupFindingsBySeverity(findings []Finding) []FindingGroup {
 				group.Findings = append(group.Findings, finding)
 			}
 		}
+
 		if len(group.Findings) > 0 {
 			groups = append(groups, group)
 		}
 	}
+
 	return groups
 }
 
@@ -260,25 +282,30 @@ func GroupFindingsByCategory(findings []Finding) []FindingGroup {
 	sorted := SortedFindings(findings)
 	byCategory := make(map[string][]Finding)
 	keys := make([]string, 0)
+
 	for _, finding := range sorted {
 		key := string(finding.Category)
 		if _, ok := byCategory[key]; !ok {
 			keys = append(keys, key)
 		}
+
 		byCategory[key] = append(byCategory[key], finding)
 	}
+
 	sort.Strings(keys)
 
 	groups := make([]FindingGroup, 0, len(keys))
 	for _, key := range keys {
 		groups = append(groups, FindingGroup{Key: key, Findings: byCategory[key]})
 	}
+
 	return groups
 }
 
 // Summary returns counts of findings by severity.
 func Summary(findings []Finding) SeveritySummary {
 	var summary SeveritySummary
+
 	for _, finding := range findings {
 		switch finding.Severity {
 		case SeverityCritical:
@@ -293,6 +320,7 @@ func Summary(findings []Finding) SeveritySummary {
 			summary.Info++
 		}
 	}
+
 	return summary
 }
 
@@ -308,22 +336,28 @@ func (summary SeveritySummary) Total() int {
 
 func lessFinding(left, right Finding) bool {
 	leftRank := severityRank[left.Severity]
+
 	rightRank := severityRank[right.Severity]
 	if leftRank != rightRank {
 		return leftRank < rightRank
 	}
+
 	if left.Path != right.Path {
 		return left.Path < right.Path
 	}
+
 	if left.Line != right.Line {
 		return left.Line < right.Line
 	}
+
 	if left.Category != right.Category {
 		return left.Category < right.Category
 	}
+
 	if left.Message != right.Message {
 		return left.Message < right.Message
 	}
+
 	return left.Suggestion < right.Suggestion
 }
 
@@ -334,34 +368,42 @@ func validSeverity(severity Severity) bool {
 
 func normalizeCategories(categories []Category) ([]Category, error) {
 	normalized := make([]Category, 0, len(categories))
+
 	seen := make(map[Category]struct{}, len(categories))
 	for _, category := range categories {
 		category = Category(strings.TrimSpace(string(category)))
 		if category == "" {
 			return nil, errors.New("reviewer category is required")
 		}
+
 		if _, exists := seen[category]; exists {
 			return nil, fmt.Errorf("duplicate reviewer category %q", category)
 		}
+
 		seen[category] = struct{}{}
 		normalized = append(normalized, category)
 	}
+
 	return normalized, nil
 }
 
 func normalizeUnique(label string, values []string) ([]string, error) {
 	normalized := make([]string, 0, len(values))
+
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return nil, fmt.Errorf("%s is required", label)
 		}
+
 		if _, exists := seen[value]; exists {
 			return nil, fmt.Errorf("duplicate %s %q", label, value)
 		}
+
 		seen[value] = struct{}{}
 		normalized = append(normalized, value)
 	}
+
 	return normalized, nil
 }

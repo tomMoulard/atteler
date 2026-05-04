@@ -118,6 +118,7 @@ func NewRunnerWithLogger(configured map[string][]config.HookConfig, logWriter io
 			if cfg.TimeoutSeconds > 0 {
 				timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
 			}
+
 			hooks[eventType] = append(hooks[eventType], Hook{
 				Command: append([]string(nil), cfg.Command...),
 				Env:     cloneMap(cfg.Env),
@@ -125,6 +126,7 @@ func NewRunnerWithLogger(configured map[string][]config.HookConfig, logWriter io
 			})
 		}
 	}
+
 	return &Runner{hooks: hooks, logger: NewLogger(logWriter)}
 }
 
@@ -133,12 +135,15 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 	if r == nil || event.Type == "" {
 		return nil
 	}
+
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
+
 	if r.logger != nil {
 		r.logger.Log(event)
 	}
+
 	if len(r.hooks) == 0 {
 		return nil
 	}
@@ -152,9 +157,11 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 	if err != nil {
 		return fmt.Errorf("events: marshal %s: %w", event.Type, err)
 	}
+
 	payload = append(payload, '\n')
 
 	var failures []error
+
 	for _, hook := range hooks {
 		if err := runHook(ctx, hook, event, payload); err != nil {
 			failures = append(failures, err)
@@ -175,15 +182,18 @@ func runHook(ctx context.Context, hook Hook, event Event, payload []byte) error 
 
 	cmd := exec.CommandContext(hookCtx, hook.Command[0], hook.Command[1:]...) //nolint:gosec // commands are explicit user-configured local hooks
 	cmd.Stdin = bytes.NewReader(payload)
+
 	cmd.Env = append(os.Environ(), eventEnv(event, hook.Env)...)
 
 	var stderr bytes.Buffer
+
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		detail := strings.TrimSpace(stderr.String())
 		if detail != "" {
 			return fmt.Errorf("events: %s hook %q failed: %w: %s", event.Type, strings.Join(hook.Command, " "), err, detail)
 		}
+
 		return fmt.Errorf("events: %s hook %q failed: %w", event.Type, strings.Join(hook.Command, " "), err)
 	}
 
@@ -202,9 +212,11 @@ func eventEnv(event Event, extra map[string]string) []string {
 	if !event.Timestamp.IsZero() {
 		env = append(env, "ATTELER_EVENT_UNIX="+strconv.FormatInt(event.Timestamp.Unix(), 10))
 	}
+
 	for key, value := range extra {
 		env = append(env, key+"="+value)
 	}
+
 	return env
 }
 
@@ -215,5 +227,6 @@ func cloneMap(in map[string]string) map[string]string {
 
 	out := make(map[string]string, len(in))
 	maps.Copy(out, in)
+
 	return out
 }

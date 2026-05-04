@@ -71,12 +71,15 @@ plugins:
 	if !reflect.DeepEqual(loaded, []string{global, local}) {
 		require.Failf(t, "unexpected failure", "loaded = %v, want [%s %s]", loaded, global, local)
 	}
+
 	if cfg.DefaultProvider != "anthropic" {
 		assert.Failf(t, "assertion failed", "DefaultProvider = %q, want anthropic", cfg.DefaultProvider)
 	}
+
 	if cfg.DefaultModel != "gpt-local" {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q, want gpt-local", cfg.DefaultModel)
 	}
+
 	if !reflect.DeepEqual(cfg.FallbackModels, []string{"gpt-backup"}) {
 		assert.Failf(t, "assertion failed", "FallbackModels = %v", cfg.FallbackModels)
 	}
@@ -85,6 +88,7 @@ plugins:
 	if openai.Disabled {
 		assert.Fail(t, "openai disabled should be overridden to false")
 	}
+
 	if openai.BaseURL != "https://openai.global" {
 		assert.Failf(t, "assertion failed", "openai base_url = %q", openai.BaseURL)
 	}
@@ -98,27 +102,35 @@ plugins:
 	if reviewer.SystemPrompt != "review code" {
 		assert.Failf(t, "assertion failed", "reviewer system_prompt = %q", reviewer.SystemPrompt)
 	}
+
 	if reviewer.Description != "Reviews code changes" {
 		assert.Failf(t, "assertion failed", "reviewer description = %q", reviewer.Description)
 	}
+
 	if reviewer.Personality != "concise" {
 		assert.Failf(t, "assertion failed", "reviewer personality = %q", reviewer.Personality)
 	}
+
 	if !reflect.DeepEqual(reviewer.FallbackModels, []string{"gpt-review-backup"}) {
 		assert.Failf(t, "assertion failed", "reviewer fallback_models = %v", reviewer.FallbackModels)
 	}
+
 	if !reflect.DeepEqual(reviewer.Capabilities, []string{"review", "security"}) {
 		assert.Failf(t, "assertion failed", "reviewer capabilities = %v", reviewer.Capabilities)
 	}
+
 	if reviewer.Temperature == nil || *reviewer.Temperature != 0.2 {
 		assert.Failf(t, "assertion failed", "reviewer temperature = %v", reviewer.Temperature)
 	}
+
 	if reviewer.Seed == nil || *reviewer.Seed != 42 {
 		assert.Failf(t, "assertion failed", "reviewer seed = %v", reviewer.Seed)
 	}
+
 	if reviewer.ReasoningLevel != "high" {
 		assert.Failf(t, "assertion failed", "reviewer reasoning_level = %q", reviewer.ReasoningLevel)
 	}
+
 	if !reflect.DeepEqual(reviewer.Triggers, []string{"review this", "code review"}) {
 		assert.Failf(t, "assertion failed", "reviewer triggers = %v", reviewer.Triggers)
 	}
@@ -127,12 +139,15 @@ plugins:
 	if len(hooks) != 1 {
 		require.Failf(t, "unexpected failure", "assistant hooks len = %d, want 1", len(hooks))
 	}
+
 	if !reflect.DeepEqual(hooks[0].Command, []string{"logger", "--assistant"}) {
 		assert.Failf(t, "assertion failed", "hook command = %v", hooks[0].Command)
 	}
+
 	if hooks[0].TimeoutSeconds != 3 {
 		assert.Failf(t, "assertion failed", "hook timeout = %d", hooks[0].TimeoutSeconds)
 	}
+
 	if hooks[0].Env["EXTRA"] != "1" {
 		assert.Failf(t, "assertion failed", "hook env EXTRA = %q", hooks[0].Env["EXTRA"])
 	}
@@ -140,27 +155,35 @@ plugins:
 	if cfg.Context.MaxFileBytes != 123 {
 		assert.Failf(t, "assertion failed", "MaxFileBytes = %d, want 123", cfg.Context.MaxFileBytes)
 	}
+
 	if cfg.Context.MaxTotalBytes != 456 {
 		assert.Failf(t, "assertion failed", "MaxTotalBytes = %d, want 456", cfg.Context.MaxTotalBytes)
 	}
+
 	if cfg.Context.MaxInputTokens != 789 {
 		assert.Failf(t, "assertion failed", "MaxInputTokens = %d, want 789", cfg.Context.MaxInputTokens)
 	}
+
 	if cfg.Generation.Temperature == nil || *cfg.Generation.Temperature != 0 {
 		assert.Failf(t, "assertion failed", "generation temperature = %v", cfg.Generation.Temperature)
 	}
+
 	if cfg.Generation.TopP == nil || *cfg.Generation.TopP != 0.8 {
 		assert.Failf(t, "assertion failed", "generation top_p = %v", cfg.Generation.TopP)
 	}
+
 	if cfg.Generation.Seed == nil || *cfg.Generation.Seed != 7 {
 		assert.Failf(t, "assertion failed", "generation seed = %v", cfg.Generation.Seed)
 	}
+
 	if cfg.Generation.ReasoningLevel != "medium" {
 		assert.Failf(t, "assertion failed", "generation reasoning_level = %q", cfg.Generation.ReasoningLevel)
 	}
+
 	if cfg.Generation.MaxTokens != 900 {
 		assert.Failf(t, "assertion failed", "generation max_tokens = %d, want 900", cfg.Generation.MaxTokens)
 	}
+
 	if !reflect.DeepEqual(cfg.Plugins.Paths, []string{"./plugin-a"}) {
 		assert.Failf(t, "assertion failed", "plugin paths = %v", cfg.Plugins.Paths)
 	}
@@ -175,9 +198,11 @@ func TestLoadFiles_JSONCompatibility(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if !reflect.DeepEqual(loaded, []string{path}) {
 		require.Failf(t, "unexpected failure", "loaded = %v, want [%s]", loaded, path)
 	}
+
 	if cfg.DefaultModel != "gpt-json" {
 		require.Failf(t, "unexpected failure", "DefaultModel = %q, want gpt-json", cfg.DefaultModel)
 	}
@@ -192,6 +217,7 @@ func TestLoadFiles_InvalidYAMLIncludesPath(t *testing.T) {
 	if err == nil {
 		require.FailNow(t, "expected parse error")
 	}
+
 	if got := err.Error(); !strings.Contains(got, path) {
 		require.Failf(t, "unexpected failure", "error = %q, want path %q", got, path)
 	}
@@ -224,6 +250,7 @@ func TestDefaultPaths_PrefersYAML(t *testing.T) {
 			return
 		}
 	}
+
 	require.Failf(t, "unexpected failure", "paths = %v, want config.yaml/config.yml before config.json", paths)
 }
 
@@ -234,5 +261,6 @@ func writeConfig(t *testing.T, dir, name, content string) string {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		require.NoError(t, err)
 	}
+
 	return path
 }

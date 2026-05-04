@@ -42,6 +42,7 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 	if command == "" {
 		return Result{}, errors.New("shell: command is required")
 	}
+
 	if ctx == nil {
 		return Result{}, errors.New("shell: context is required")
 	}
@@ -60,17 +61,21 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	started := time.Now().UTC()
+
 	cmd := exec.CommandContext(runCtx, bin, args...)
 	if strings.TrimSpace(opts.Dir) != "" {
 		cmd.Dir = opts.Dir
 	}
+
 	cmd.Env = mergeEnv(opts.Env)
 
 	var stdout, stderr bytes.Buffer
+
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	runErr := cmd.Run()
+
 	result := Result{
 		StartedAt: started,
 		Duration:  time.Since(started),
@@ -80,10 +85,12 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 	if runCtx.Err() != nil {
 		return result, fmt.Errorf("shell: bash command timed out after %s: %w", timeout, runCtx.Err())
 	}
+
 	if runErr != nil {
 		result.ExitError = runErr.Error()
 		return result, fmt.Errorf("shell: bash command failed: %w", runErr)
 	}
+
 	return result, nil
 }
 
@@ -93,19 +100,24 @@ func bashInvocation(command string) (bin string, args []string, err error) {
 		if err != nil {
 			return "", nil, fmt.Errorf("shell: bash executable not found: %w", err)
 		}
+
 		return bin, []string{"-lc", command}, nil
 	}
+
 	return "bash", []string{"-lc", command}, nil
 }
 
 func mergeEnv(extra map[string]string) []string {
 	env := os.Environ()
+
 	for key, value := range extra {
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
+
 		env = append(env, key+"="+value)
 	}
+
 	return env
 }

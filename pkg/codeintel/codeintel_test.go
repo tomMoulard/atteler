@@ -39,6 +39,7 @@ func (Runner) Run(context.Context) error {
 	if err != nil {
 		t.Fatalf("IndexFiles() error = %v", err)
 	}
+
 	if len(idx.Files) != 1 {
 		t.Fatalf("len(Files) = %d, want 1", len(idx.Files))
 	}
@@ -47,9 +48,11 @@ func (Runner) Run(context.Context) error {
 	if file.Path != path {
 		t.Fatalf("Path = %q, want %q", file.Path, path)
 	}
+
 	if file.Package != "alpha" {
 		t.Fatalf("Package = %q, want alpha", file.Package)
 	}
+
 	if !reflect.DeepEqual(file.Imports, []string{"context", "fmt"}) {
 		t.Fatalf("Imports = %#v, want context/fmt", file.Imports)
 	}
@@ -83,6 +86,7 @@ type Nested struct{}
 
 func Ignored() {}
 `)
+
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("not go"), 0o600); err != nil {
 		t.Fatalf("write notes: %v", err)
 	}
@@ -96,6 +100,7 @@ func Ignored() {}
 	for _, file := range idx.Files {
 		files = append(files, file.Path)
 	}
+
 	if !reflect.DeepEqual(files, []string{nestedFile, rootFile}) {
 		t.Fatalf("Files = %#v, want root and nested files", files)
 	}
@@ -104,10 +109,12 @@ func Ignored() {}
 	if !reflect.DeepEqual(rootMatches, []Symbol{{Name: "Root", Kind: "func", File: rootFile, Line: 5}}) {
 		t.Fatalf("FindSymbol(Root) = %#v", rootMatches)
 	}
+
 	nestedMatches := idx.FindSymbol("Nested")
 	if !reflect.DeepEqual(nestedMatches, []Symbol{{Name: "Nested", Kind: "type", File: nestedFile, Line: 3}}) {
 		t.Fatalf("FindSymbol(Nested) = %#v", nestedMatches)
 	}
+
 	if matches := idx.FindSymbol("Ignored"); len(matches) != 0 {
 		t.Fatalf("FindSymbol(Ignored) = %#v, want none", matches)
 	}
@@ -123,6 +130,7 @@ func TestIndexFiles_ReturnsParseErrorWithPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("IndexFiles() error = nil, want parse error")
 	}
+
 	if got := err.Error(); !strings.Contains(got, "parse") || !strings.Contains(got, path) {
 		t.Fatalf("error = %q, want parse error with path", got)
 	}
@@ -134,6 +142,7 @@ func assertSymbol(t *testing.T, symbols []Symbol, want Symbol) {
 	if slices.Contains(symbols, want) {
 		return
 	}
+
 	t.Fatalf("symbols missing %#v in %#v", want, symbols)
 }
 
@@ -144,9 +153,11 @@ func writeGoFile(t *testing.T, dir, name, content string) string {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
+
 	return path
 }
 
@@ -172,8 +183,10 @@ func Alpha() {}
 	for _, sym := range idx.Symbols {
 		names = append(names, sym.Name)
 	}
+
 	sorted := append([]string(nil), names...)
 	sort.Strings(sorted)
+
 	if !reflect.DeepEqual(names, sorted) {
 		t.Fatalf("Symbols order = %#v, want sorted by name", names)
 	}

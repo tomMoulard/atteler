@@ -47,6 +47,7 @@ func NewStateStore(path string) *StateStore {
 	if path == "" {
 		path = DefaultStatePath()
 	}
+
 	return &StateStore{path: path}
 }
 
@@ -55,13 +56,16 @@ func DefaultStatePath() string {
 	if path := strings.TrimSpace(os.Getenv(EnvStatePath)); path != "" {
 		return path
 	}
+
 	if dir := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); dir != "" {
 		return filepath.Join(dir, "atteler", "state.yaml")
 	}
+
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return filepath.Join(os.TempDir(), "atteler", "state.yaml")
 	}
+
 	return filepath.Join(home, ".local", "state", "atteler", "state.yaml")
 }
 
@@ -77,12 +81,15 @@ func (s *StateStore) Load() (State, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return State{}, nil
 		}
+
 		return State{}, fmt.Errorf("state: read %s: %w", s.path, err)
 	}
+
 	var state State
 	if err := yaml.Unmarshal(data, &state); err != nil {
 		return State{}, fmt.Errorf("state: parse %s: %w", s.path, err)
 	}
+
 	return state, nil
 }
 
@@ -91,13 +98,16 @@ func (s *StateStore) Save(state State) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o750); err != nil {
 		return fmt.Errorf("state: create dir: %w", err)
 	}
+
 	data, err := yaml.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("state: marshal: %w", err)
 	}
+
 	if err := os.WriteFile(s.path, data, 0o600); err != nil {
 		return fmt.Errorf("state: write %s: %w", s.path, err)
 	}
+
 	return nil
 }
 
@@ -107,12 +117,14 @@ func (s *State) ModelForFolder(cwd string) string {
 	if s == nil {
 		return ""
 	}
+
 	key := FolderKey(cwd)
 	if key != "" && s.Folders != nil {
 		if folder := s.Folders[key]; folder.DefaultModel != "" {
 			return folder.DefaultModel
 		}
 	}
+
 	return s.DefaultModel
 }
 
@@ -120,6 +132,7 @@ func (s *State) ModelForFolder(cwd string) string {
 // not persisted.
 func (s *State) SetModel(scope ModelScope, cwd, model string) {
 	model = strings.TrimSpace(model)
+
 	switch scope {
 	case ModelScopeGlobal:
 		s.DefaultModel = model
@@ -128,9 +141,11 @@ func (s *State) SetModel(scope ModelScope, cwd, model string) {
 		if key == "" {
 			return
 		}
+
 		if s.Folders == nil {
 			s.Folders = make(map[string]FolderState)
 		}
+
 		s.Folders[key] = FolderState{DefaultModel: model}
 	}
 }
@@ -141,12 +156,15 @@ func FolderKey(cwd string) string {
 	if cwd == "" {
 		return ""
 	}
+
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
 		return filepath.Clean(cwd)
 	}
+
 	if evaluated, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = evaluated
 	}
+
 	return filepath.Clean(abs)
 }

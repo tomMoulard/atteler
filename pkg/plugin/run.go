@@ -35,6 +35,7 @@ func RunEntrypoint(
 	if entrypointName == "" {
 		return RunResult{}, errors.New("plugin: empty entrypoint name")
 	}
+
 	if err := manifest.Validate(root); err != nil {
 		return RunResult{}, fmt.Errorf("plugin: validate manifest: %w", err)
 	}
@@ -56,17 +57,21 @@ func RunEntrypoint(
 	cmd.Dir = rootAbs
 
 	var stdout, stderr bytes.Buffer
+
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	runErr := cmd.Run()
+
 	result := RunResult{Stdout: stdout.String(), Stderr: stderr.String()}
 	if runCtx.Err() != nil {
 		return result, fmt.Errorf("plugin: run entrypoint %q: %w", entrypointName, runCtx.Err())
 	}
+
 	if runErr != nil {
 		return result, fmt.Errorf("plugin: run entrypoint %q: %w", entrypointName, runErr)
 	}
+
 	return result, nil
 }
 
@@ -79,6 +84,7 @@ func resolveEntrypoint(root, entrypoint string) (resolvedRoot, resolvedTarget st
 	if err != nil {
 		return "", "", fmt.Errorf("resolve plugin root: %w", err)
 	}
+
 	rootResolved, err := filepath.EvalSymlinks(rootAbs)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve plugin root symlinks: %w", err)
@@ -88,6 +94,7 @@ func resolveEntrypoint(root, entrypoint string) (resolvedRoot, resolvedTarget st
 	if err != nil {
 		return "", "", fmt.Errorf("resolve path: %w", err)
 	}
+
 	targetResolved, err := filepath.EvalSymlinks(targetAbs)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve path symlinks: %w", err)
@@ -97,6 +104,7 @@ func resolveEntrypoint(root, entrypoint string) (resolvedRoot, resolvedTarget st
 	if err != nil {
 		return "", "", fmt.Errorf("compare with plugin root: %w", err)
 	}
+
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return "", "", fmt.Errorf("path %q escapes plugin root %q", entrypoint, root)
 	}

@@ -12,6 +12,7 @@ import (
 
 func TestStore_SearchMessagesAndMetadata(t *testing.T) {
 	t.Parallel()
+
 	const (
 		authQuery = "auth"
 		reviewer  = "reviewer"
@@ -24,6 +25,7 @@ func TestStore_SearchMessagesAndMetadata(t *testing.T) {
 		{Role: llm.RoleUser, Content: "Please review the auth flow"},
 		{Role: llm.RoleAssistant, Content: "The auth flow needs tests."},
 	})
+
 	reviewerSession.DefaultAgent = reviewer
 	if err := store.Save(reviewerSession); err != nil {
 		require.NoError(t, err)
@@ -34,6 +36,7 @@ func TestStore_SearchMessagesAndMetadata(t *testing.T) {
 	})
 	writerSession.DefaultAgent = writer
 	writerSession.Title = "Release planning"
+
 	writerSession.Tags = []string{"docs", "release"}
 	if err := store.Save(writerSession); err != nil {
 		require.NoError(t, err)
@@ -43,12 +46,15 @@ func TestStore_SearchMessagesAndMetadata(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if len(results) != 1 {
 		require.Failf(t, "unexpected failure", "results len = %d, want 1: %+v", len(results), results)
 	}
+
 	if results[0].Summary.DefaultAgent != reviewer {
 		require.Failf(t, "unexpected failure", "agent = %q, want reviewer", results[0].Summary.DefaultAgent)
 	}
+
 	if len(results[0].Snippets) == 0 || !strings.Contains(results[0].Snippets[0].Text, authQuery) {
 		require.Failf(t, "unexpected failure", "snippet = %+v, want auth excerpt", results[0].Snippets)
 	}
@@ -57,6 +63,7 @@ func TestStore_SearchMessagesAndMetadata(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if len(results) != 1 || results[0].Summary.DefaultAgent != writer {
 		require.Failf(t, "unexpected failure", "metadata results = %+v, want writer session", results)
 	}
@@ -65,6 +72,7 @@ func TestStore_SearchMessagesAndMetadata(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if len(results) != 1 || results[0].Summary.Title != writerSession.Title {
 		require.Failf(t, "unexpected failure", "title results = %+v, want writer session title", results)
 	}
@@ -73,6 +81,7 @@ func TestStore_SearchMessagesAndMetadata(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if len(results) != 1 || results[0].Summary.DefaultAgent != writer {
 		require.Failf(t, "unexpected failure", "tag results = %+v, want writer session", results)
 	}
@@ -80,6 +89,7 @@ func TestStore_SearchMessagesAndMetadata(t *testing.T) {
 
 func TestStore_SearchEmptyQuery(t *testing.T) {
 	t.Parallel()
+
 	_, err := NewStore(t.TempDir()).Search(" ")
 	if err == nil {
 		require.FailNow(t, "expected empty query error")

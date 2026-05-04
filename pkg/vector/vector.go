@@ -44,6 +44,7 @@ func NewStore(dimensions int) (*Store, error) {
 	if dimensions < 0 {
 		return nil, ErrInvalidDimensions
 	}
+
 	return &Store{Dimensions: dimensions}, nil
 }
 
@@ -53,9 +54,11 @@ func (s *Store) Add(doc Document) error {
 	if doc.ID == "" {
 		return ErrMissingID
 	}
+
 	if err := s.validateVector(doc.Vector, true); err != nil {
 		return err
 	}
+
 	doc.Vector = cloneVector(doc.Vector)
 	doc.Metadata = cloneMetadata(doc.Metadata)
 
@@ -65,7 +68,9 @@ func (s *Store) Add(doc Document) error {
 			return nil
 		}
 	}
+
 	s.Documents = append(s.Documents, doc)
+
 	return nil
 }
 
@@ -82,9 +87,11 @@ func (s *Store) Search(query Vector, limit int) ([]Result, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		if score == 0 {
 			continue
 		}
+
 		results = append(results, Result{
 			Document: cloneDocument(doc),
 			Score:    score,
@@ -95,11 +102,14 @@ func (s *Store) Search(query Vector, limit int) ([]Result, error) {
 		if results[i].Score != results[j].Score {
 			return results[i].Score > results[j].Score
 		}
+
 		return results[i].Document.ID < results[j].Document.ID
 	})
+
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
 	}
+
 	return results, nil
 }
 
@@ -108,22 +118,27 @@ func CosineSimilarity(a, b Vector) (float64, error) {
 	if len(a) == 0 || len(b) == 0 {
 		return 0, ErrEmptyVector
 	}
+
 	if len(a) != len(b) {
 		return 0, fmt.Errorf("%w: got %d and %d", ErrDimensionMismatch, len(a), len(b))
 	}
 
 	var dot, normA, normB float64
+
 	for i := range a {
 		if !isFinite(a[i]) || !isFinite(b[i]) {
 			return 0, ErrInvalidVector
 		}
+
 		dot += a[i] * b[i]
 		normA += a[i] * a[i]
 		normB += b[i] * b[i]
 	}
+
 	if normA == 0 || normB == 0 {
 		return 0, ErrZeroVector
 	}
+
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB)), nil
 }
 
@@ -140,9 +155,11 @@ func NewTextVectorizer(dimensions int) (*TextVectorizer, error) {
 	if dimensions < 0 {
 		return nil, ErrInvalidDimensions
 	}
+
 	if dimensions == 0 {
 		dimensions = defaultVectorizerDimensions
 	}
+
 	return &TextVectorizer{Dimensions: dimensions}, nil
 }
 
@@ -161,6 +178,7 @@ func (v TextVectorizer) Vectorize(text string) (Vector, error) {
 	for _, token := range tokens {
 		out[hashToken(token)%uint64(v.Dimensions)]++
 	}
+
 	return out, nil
 }
 
@@ -168,26 +186,33 @@ func (s *Store) validateVector(vec Vector, adoptDimensions bool) error {
 	if len(vec) == 0 {
 		return ErrEmptyVector
 	}
+
 	if s.Dimensions == 0 && adoptDimensions {
 		s.Dimensions = len(vec)
 	}
+
 	if s.Dimensions > 0 && len(vec) != s.Dimensions {
 		return fmt.Errorf("%w: got %d, want %d", ErrDimensionMismatch, len(vec), s.Dimensions)
 	}
+
 	return validateVector(vec)
 }
 
 func validateVector(vec Vector) error {
 	var norm float64
+
 	for _, value := range vec {
 		if !isFinite(value) {
 			return ErrInvalidVector
 		}
+
 		norm += value * value
 	}
+
 	if norm == 0 {
 		return ErrZeroVector
 	}
+
 	return nil
 }
 
@@ -198,12 +223,14 @@ func isFinite(value float64) bool {
 func cloneDocument(doc Document) Document {
 	doc.Vector = cloneVector(doc.Vector)
 	doc.Metadata = cloneMetadata(doc.Metadata)
+
 	return doc
 }
 
 func cloneVector(vec Vector) Vector {
 	out := make(Vector, len(vec))
 	copy(out, vec)
+
 	return out
 }
 
@@ -211,33 +238,42 @@ func cloneMetadata(metadata map[string]string) map[string]string {
 	if len(metadata) == 0 {
 		return nil
 	}
+
 	out := make(map[string]string, len(metadata))
 	maps.Copy(out, metadata)
+
 	return out
 }
 
 func tokenize(text string) []string {
-	var tokens []string
-	var b strings.Builder
+	var (
+		tokens []string
+		b      strings.Builder
+	)
+
 	for _, r := range text {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			b.WriteRune(unicode.ToLower(r))
 			continue
 		}
+
 		if b.Len() > 0 {
 			tokens = append(tokens, b.String())
 			b.Reset()
 		}
 	}
+
 	if b.Len() > 0 {
 		tokens = append(tokens, b.String())
 	}
+
 	return tokens
 }
 
 func hashToken(token string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(token))
+
 	return h.Sum64()
 }
 

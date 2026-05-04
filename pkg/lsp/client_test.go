@@ -19,16 +19,20 @@ func TestMain(m *testing.M) {
 	if mode := os.Getenv("ATTELER_LSP_FAKE_SERVER"); mode != "" {
 		if err := runFakeServer(os.Stdin, os.Stdout, mode); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
+
 			os.Exit(2)
 		}
+
 		return
 	}
+
 	os.Exit(m.Run())
 }
 
 func TestDocumentSymbols_NormalizesDocumentSymbols(t *testing.T) {
 	t.Parallel()
 	file := writeTempSource(t, "package main\nfunc main() {}\n")
+
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -52,6 +56,7 @@ func TestDocumentSymbols_NormalizesDocumentSymbols(t *testing.T) {
 func TestDocumentSymbols_NormalizesSymbolInformation(t *testing.T) {
 	t.Parallel()
 	file := writeTempSource(t, "package main\nconst answer = 42\n")
+
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -72,6 +77,7 @@ func TestDocumentSymbols_NormalizesSymbolInformation(t *testing.T) {
 
 func TestWorkspaceSymbols_NormalizesSymbolInformation(t *testing.T) {
 	t.Parallel()
+
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -92,6 +98,7 @@ func TestWorkspaceSymbols_NormalizesSymbolInformation(t *testing.T) {
 
 func TestWorkspaceSymbols_WrapsServerErrors(t *testing.T) {
 	t.Parallel()
+
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -109,6 +116,7 @@ func TestWorkspaceSymbols_WrapsServerErrors(t *testing.T) {
 func TestDocumentSymbols_WrapsServerErrors(t *testing.T) {
 	t.Parallel()
 	file := writeTempSource(t, "package main\n")
+
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -127,6 +135,7 @@ func writeTempSource(t *testing.T, content string) string {
 	t.Helper()
 	path := t.TempDir() + "/main.go"
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
 	return path
 }
 
@@ -140,18 +149,22 @@ type fakeRequest struct {
 func runFakeServer(input io.Reader, output io.Writer, mode string) error {
 	reader := bufio.NewReader(input)
 	didOpen := false
+
 	for {
 		payload, err := readFrame(reader)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
+
 			return err
 		}
+
 		var req fakeRequest
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return fmt.Errorf("fake server decode request: %w", err)
 		}
+
 		switch req.Method {
 		case "initialize":
 			if err := fakeRespond(output, req.ID, map[string]any{"capabilities": map[string]any{"documentSymbolProvider": true, "workspaceSymbolProvider": true}}, nil); err != nil {
@@ -163,14 +176,17 @@ func runFakeServer(input io.Reader, output io.Writer, mode string) error {
 			if err := json.Unmarshal(req.Params, &params); err != nil {
 				return fmt.Errorf("fake server decode didOpen: %w", err)
 			}
+
 			if params.TextDocument.URI == "" || params.TextDocument.Text == "" || params.TextDocument.LanguageID != "go" {
 				return fmt.Errorf("fake server got incomplete didOpen: %+v", params.TextDocument)
 			}
+
 			didOpen = true
 		case "textDocument/documentSymbol":
 			if !didOpen {
 				return fakeRespond(output, req.ID, nil, &rpcError{Code: -32000, Message: "document was not opened"})
 			}
+
 			switch mode {
 			case "document":
 				if err := fakeRespond(output, req.ID, fakeDocumentSymbols(), nil); err != nil {
@@ -192,9 +208,11 @@ func runFakeServer(input io.Reader, output io.Writer, mode string) error {
 			if err := json.Unmarshal(req.Params, &params); err != nil {
 				return fmt.Errorf("fake server decode workspace symbol: %w", err)
 			}
+
 			if params.Query != "answer" {
 				return fmt.Errorf("fake server got workspace query %q", params.Query)
 			}
+
 			switch mode {
 			case "workspace":
 				if err := fakeRespond(output, req.ID, fakeSymbolInformation(), nil); err != nil {
@@ -230,13 +248,16 @@ func fakeRespond(output io.Writer, id json.RawMessage, result any, rpcErr *rpcEr
 	} else {
 		response["result"] = result
 	}
+
 	payload, err := json.Marshal(response)
 	if err != nil {
 		return fmt.Errorf("fake server marshal response: %w", err)
 	}
+
 	if err := writeFrame(output, payload); err != nil {
 		return fmt.Errorf("fake server write response: %w", err)
 	}
+
 	return nil
 }
 

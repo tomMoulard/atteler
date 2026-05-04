@@ -21,6 +21,7 @@ func PersistSuggestion(dir string, suggestion Suggestion) (string, error) {
 	if slug == "" {
 		return "", errors.New("skill: suggestion slug is required")
 	}
+
 	if filepath.Base(slug) != slug || strings.Contains(slug, string(filepath.Separator)) {
 		return "", fmt.Errorf("skill: invalid suggestion slug %q", slug)
 	}
@@ -34,6 +35,7 @@ func PersistSuggestion(dir string, suggestion Suggestion) (string, error) {
 	}
 
 	path := filepath.Join(dir, slug+".md")
+
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("skill: save suggestion %s: %w", path, err)
@@ -43,6 +45,7 @@ func PersistSuggestion(dir string, suggestion Suggestion) (string, error) {
 	if _, err := file.WriteString(formatPersistedSuggestion(suggestion)); err != nil {
 		return "", fmt.Errorf("skill: write suggestion %s: %w", path, err)
 	}
+
 	return path, nil
 }
 
@@ -52,11 +55,14 @@ func formatPersistedSuggestion(suggestion Suggestion) string {
 	fmt.Fprintf(&b, "slug: %s\n", suggestion.Slug)
 	fmt.Fprintf(&b, "occurrences: %d\n\n", suggestion.Occurrences)
 	b.WriteString("## Steps\n\n")
+
 	for _, step := range suggestion.Steps {
 		fmt.Fprintf(&b, "- %s\n", step)
 	}
+
 	if strings.TrimSpace(suggestion.Rationale) != "" {
 		fmt.Fprintf(&b, "\n## Rationale\n\n%s\n", suggestion.Rationale)
 	}
+
 	return b.String()
 }

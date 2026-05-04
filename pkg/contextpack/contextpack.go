@@ -43,6 +43,7 @@ func Compact(messages []llm.Message, maxEstimatedTokens int) Result {
 	originalTokens := EstimateMessages(messages)
 	if maxEstimatedTokens <= 0 || originalTokens <= maxEstimatedTokens {
 		out := cloneMessages(messages)
+
 		return Result{
 			Messages: out,
 			Stats: Stats{
@@ -58,6 +59,7 @@ func Compact(messages []llm.Message, maxEstimatedTokens int) Result {
 	nonSystemCount := countNonSystem(messages)
 	if nonSystemCount == 0 {
 		out := cloneMessages(messages)
+
 		return Result{
 			Messages: out,
 			Stats: Stats{
@@ -72,6 +74,7 @@ func Compact(messages []llm.Message, maxEstimatedTokens int) Result {
 
 	selected := make([]bool, len(messages))
 	used := 0
+
 	for i, msg := range messages {
 		if msg.Role == llm.RoleSystem {
 			selected[i] = true
@@ -85,15 +88,18 @@ func Compact(messages []llm.Message, maxEstimatedTokens int) Result {
 	used += EstimateMessage(marker)
 
 	selectedNonSystem := 0
+
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
 		if msg.Role == llm.RoleSystem {
 			continue
 		}
+
 		cost := EstimateMessage(msg)
 		if used+cost > maxEstimatedTokens {
 			break
 		}
+
 		selected[i] = true
 		selectedNonSystem++
 		used += cost
@@ -102,6 +108,7 @@ func Compact(messages []llm.Message, maxEstimatedTokens int) Result {
 	omitted := nonSystemCount - selectedNonSystem
 	if omitted <= 0 {
 		out := cloneMessages(messages)
+
 		return Result{
 			Messages: out,
 			Stats: Stats{
@@ -117,16 +124,19 @@ func Compact(messages []llm.Message, maxEstimatedTokens int) Result {
 	marker = OmissionMarker(omitted)
 	out := make([]llm.Message, 0, len(messages)-omitted+1)
 	markerAdded := false
+
 	for i, msg := range messages {
 		if selected[i] {
 			out = append(out, msg)
 			continue
 		}
+
 		if !markerAdded {
 			out = append(out, marker)
 			markerAdded = true
 		}
 	}
+
 	if !markerAdded {
 		out = append(out, marker)
 	}
@@ -151,6 +161,7 @@ func EstimateMessages(messages []llm.Message) int {
 	for _, msg := range messages {
 		total += EstimateMessage(msg)
 	}
+
 	return total
 }
 
@@ -158,6 +169,7 @@ func EstimateMessages(messages []llm.Message) int {
 func EstimateMessage(msg llm.Message) int {
 	contentTokens := estimateTextTokens(msg.Content)
 	roleTokens := estimateTextTokens(string(msg.Role))
+
 	return messageOverheadTokens + roleTokens + contentTokens
 }
 
@@ -167,10 +179,12 @@ func OmissionMarker(omittedCount int) llm.Message {
 	if omittedCount < 0 {
 		omittedCount = 0
 	}
+
 	plural := "messages"
 	if omittedCount == 1 {
 		plural = "message"
 	}
+
 	return llm.Message{
 		Role:    llm.RoleSystem,
 		Content: fmt.Sprintf("[context compressed: %d older non-system %s omitted]", omittedCount, plural),
@@ -182,22 +196,27 @@ func estimateTextTokens(text string) int {
 	if text == "" {
 		return 0
 	}
+
 	runes := utf8.RuneCountInString(text)
+
 	return (runes + charsPerToken - 1) / charsPerToken
 }
 
 func cloneMessages(messages []llm.Message) []llm.Message {
 	out := make([]llm.Message, len(messages))
 	copy(out, messages)
+
 	return out
 }
 
 func countNonSystem(messages []llm.Message) int {
 	count := 0
+
 	for _, msg := range messages {
 		if msg.Role != llm.RoleSystem {
 			count++
 		}
 	}
+
 	return count
 }

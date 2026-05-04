@@ -135,8 +135,10 @@ func writeSessionSnapshot(t *testing.T, store *Store, session Session) {
 	t.Helper()
 	require.NotEmpty(t, session.ID)
 	require.NoError(t, os.MkdirAll(store.Dir(), 0o750))
+
 	data, err := json.MarshalIndent(session, "", "  ")
 	require.NoError(t, err)
+
 	data = append(data, '\n')
 	require.NoError(t, os.WriteFile(filepath.Join(store.Dir(), session.ID+sessionFileExt), data, 0o600))
 }

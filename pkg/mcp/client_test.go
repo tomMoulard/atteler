@@ -45,6 +45,7 @@ func TestCallTool_UsesToolsCallMethod(t *testing.T) {
 	response, err := CallTool(t.Context(), server, "search", map[string]any{"query": "mcp"}, time.Second)
 
 	require.NoError(t, err)
+
 	var result callToolResult
 	require.NoError(t, json.Unmarshal(response.Result, &result))
 	assert.Equal(t, "tools/call", result.Method)
@@ -98,6 +99,7 @@ func helperServer(t *testing.T, mode string) Server {
 	t.Helper()
 
 	cwd := t.TempDir()
+
 	return Server{
 		Name:    "helper",
 		Command: os.Args[0],
@@ -120,7 +122,9 @@ func TestMCPHelperProcess(_ *testing.T) {
 	if os.Getenv("GO_WANT_MCP_HELPER_PROCESS") != "1" {
 		return
 	}
+
 	mode := "echo"
+
 	for i, arg := range os.Args {
 		if arg == "--" && i+1 < len(os.Args) {
 			mode = os.Args[i+1]
@@ -140,6 +144,7 @@ func TestMCPHelperProcess(_ *testing.T) {
 		fmt.Fprintf(os.Stderr, "unknown helper mode %q", mode)
 		os.Exit(2)
 	}
+
 	os.Exit(0)
 }
 
@@ -165,15 +170,18 @@ func readHelperRequest() Request {
 		fmt.Fprintf(os.Stderr, "read request: %v", err)
 		os.Exit(2)
 	}
+
 	if !strings.HasSuffix(line, "\n") {
 		fmt.Fprint(os.Stderr, "request was not newline-delimited")
 		os.Exit(2)
 	}
+
 	var request Request
 	if err := json.Unmarshal([]byte(line), &request); err != nil {
 		fmt.Fprintf(os.Stderr, "decode request: %v", err)
 		os.Exit(2)
 	}
+
 	return request
 }
 
@@ -183,6 +191,7 @@ func writeHelperResponse(response Response) {
 		fmt.Fprintf(os.Stderr, "marshal response: %v", err)
 		os.Exit(2)
 	}
+
 	fmt.Printf("%s\n", data)
 }
 
@@ -192,13 +201,16 @@ func mustMarshal(value any) json.RawMessage {
 		fmt.Fprintf(os.Stderr, "marshal result: %v", err)
 		os.Exit(2)
 	}
+
 	return data
 }
 
 func realPath(t *testing.T, path string) string {
 	t.Helper()
+
 	resolved, err := filepath.EvalSymlinks(path)
 	require.NoError(t, err)
+
 	return filepath.Clean(resolved)
 }
 
@@ -208,5 +220,6 @@ func mustGetwd() string {
 		fmt.Fprintf(os.Stderr, "getwd: %v", err)
 		os.Exit(2)
 	}
+
 	return filepath.Clean(wd)
 }

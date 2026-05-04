@@ -142,13 +142,17 @@ func Load() (Config, []string, error) {
 
 	fileCfg, fileLoaded, err := LoadFiles(DefaultPaths())
 	mergeConfig(&cfg, fileCfg)
+
 	loaded = append(loaded, fileLoaded...)
+
 	if len(cfg.Providers) == 0 {
 		cfg.Providers = nil
 	}
+
 	if len(cfg.Agents) == 0 {
 		cfg.Agents = nil
 	}
+
 	if len(cfg.Hooks) == 0 {
 		cfg.Hooks = nil
 	}
@@ -202,6 +206,7 @@ func LoadFiles(paths []string) (Config, []string, error) {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
+
 			return cfg, loaded, fmt.Errorf("config: read %s: %w", path, err)
 		}
 
@@ -211,15 +216,18 @@ func LoadFiles(paths []string) (Config, []string, error) {
 		}
 
 		merge(&cfg, next)
+
 		loaded = append(loaded, path)
 	}
 
 	if len(cfg.Providers) == 0 {
 		cfg.Providers = nil
 	}
+
 	if len(cfg.Agents) == 0 {
 		cfg.Agents = nil
 	}
+
 	if len(cfg.Hooks) == 0 {
 		cfg.Hooks = nil
 	}
@@ -236,11 +244,13 @@ func globalPaths() []string {
 	if err != nil || home == "" {
 		return nil
 	}
+
 	return configPaths(filepath.Join(home, ".config"))
 }
 
 func configPaths(configHome string) []string {
 	dir := filepath.Join(configHome, "atteler")
+
 	return []string{
 		filepath.Join(dir, "config.yaml"),
 		filepath.Join(dir, "config.yml"),
@@ -252,9 +262,11 @@ func merge(dst *Config, src fileConfig) {
 	if src.DefaultProvider != nil {
 		dst.DefaultProvider = *src.DefaultProvider
 	}
+
 	if src.DefaultModel != nil {
 		dst.DefaultModel = *src.DefaultModel
 	}
+
 	if src.FallbackModels != nil {
 		dst.FallbackModels = append([]string(nil), src.FallbackModels...)
 	}
@@ -277,9 +289,11 @@ func mergeProviders(dst *Config, providers map[string]fileProviderConfig) {
 		if provider.Disabled != nil {
 			current.Disabled = *provider.Disabled
 		}
+
 		if provider.BaseURL != nil {
 			current.BaseURL = *provider.BaseURL
 		}
+
 		dst.Providers[name] = current
 	}
 }
@@ -300,39 +314,51 @@ func mergeFileAgent(current *AgentConfig, agent fileAgentConfig) {
 	if agent.Model != nil {
 		current.Model = *agent.Model
 	}
+
 	if agent.SystemPrompt != nil {
 		current.SystemPrompt = *agent.SystemPrompt
 	}
+
 	if agent.ReasoningLevel != nil {
 		current.ReasoningLevel = strings.TrimSpace(*agent.ReasoningLevel)
 	}
+
 	if agent.Description != nil {
 		current.Description = *agent.Description
 	}
+
 	if agent.Personality != nil {
 		current.Personality = *agent.Personality
 	}
+
 	if agent.FallbackModels != nil {
 		current.FallbackModels = append([]string(nil), agent.FallbackModels...)
 	}
+
 	if agent.Capabilities != nil {
 		current.Capabilities = append([]string(nil), agent.Capabilities...)
 	}
+
 	if agent.Temperature != nil {
 		current.Temperature = agent.Temperature
 	}
+
 	if agent.TopP != nil {
 		current.TopP = agent.TopP
 	}
+
 	if agent.Seed != nil {
 		current.Seed = agent.Seed
 	}
+
 	if agent.Triggers != nil {
 		current.Triggers = append([]string(nil), agent.Triggers...)
 	}
+
 	if agent.MaxTokens != nil {
 		current.MaxTokens = *agent.MaxTokens
 	}
+
 	if agent.Hidden != nil {
 		current.Hidden = *agent.Hidden
 		current.hiddenSet = true
@@ -354,6 +380,7 @@ func mergeHooks(dst *Config, hooks map[string][]HookConfig) {
 			next.TimeoutSeconds = hook.TimeoutSeconds
 			merged = append(merged, next)
 		}
+
 		dst.Hooks[eventType] = merged
 	}
 }
@@ -362,9 +389,11 @@ func mergeContext(dst *Config, contextConfig fileContextConfig) {
 	if contextConfig.MaxFileBytes != nil {
 		dst.Context.MaxFileBytes = *contextConfig.MaxFileBytes
 	}
+
 	if contextConfig.MaxTotalBytes != nil {
 		dst.Context.MaxTotalBytes = *contextConfig.MaxTotalBytes
 	}
+
 	if contextConfig.MaxInputTokens != nil {
 		dst.Context.MaxInputTokens = *contextConfig.MaxInputTokens
 	}
@@ -374,15 +403,19 @@ func mergeGeneration(dst *Config, generation fileGenerationConfig) {
 	if generation.Temperature != nil {
 		dst.Generation.Temperature = generation.Temperature
 	}
+
 	if generation.TopP != nil {
 		dst.Generation.TopP = generation.TopP
 	}
+
 	if generation.Seed != nil {
 		dst.Generation.Seed = generation.Seed
 	}
+
 	if generation.ReasoningLevel != nil {
 		dst.Generation.ReasoningLevel = strings.TrimSpace(*generation.ReasoningLevel)
 	}
+
 	if generation.MaxTokens != nil {
 		dst.Generation.MaxTokens = *generation.MaxTokens
 	}
@@ -398,9 +431,11 @@ func mergeConfig(dst *Config, src Config) {
 	if src.DefaultProvider != "" {
 		dst.DefaultProvider = src.DefaultProvider
 	}
+
 	if src.DefaultModel != "" {
 		dst.DefaultModel = src.DefaultModel
 	}
+
 	if src.FallbackModels != nil {
 		dst.FallbackModels = append([]string(nil), src.FallbackModels...)
 	}
@@ -423,6 +458,7 @@ func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig) {
 		if provider.BaseURL != "" {
 			current.BaseURL = provider.BaseURL
 		}
+
 		current.Disabled = provider.Disabled
 		dst.Providers[name] = current
 	}
@@ -444,39 +480,51 @@ func mergeConfigAgent(current *AgentConfig, agent AgentConfig) {
 	if agent.Model != "" {
 		current.Model = agent.Model
 	}
+
 	if agent.SystemPrompt != "" {
 		current.SystemPrompt = agent.SystemPrompt
 	}
+
 	if agent.ReasoningLevel != "" {
 		current.ReasoningLevel = strings.TrimSpace(agent.ReasoningLevel)
 	}
+
 	if agent.Description != "" {
 		current.Description = agent.Description
 	}
+
 	if agent.Personality != "" {
 		current.Personality = agent.Personality
 	}
+
 	if agent.FallbackModels != nil {
 		current.FallbackModels = append([]string(nil), agent.FallbackModels...)
 	}
+
 	if agent.Capabilities != nil {
 		current.Capabilities = append([]string(nil), agent.Capabilities...)
 	}
+
 	if agent.Temperature != nil {
 		current.Temperature = agent.Temperature
 	}
+
 	if agent.TopP != nil {
 		current.TopP = agent.TopP
 	}
+
 	if agent.Seed != nil {
 		current.Seed = agent.Seed
 	}
+
 	if agent.Triggers != nil {
 		current.Triggers = append([]string(nil), agent.Triggers...)
 	}
+
 	if agent.MaxTokens > 0 {
 		current.MaxTokens = agent.MaxTokens
 	}
+
 	if agent.hiddenSet || agent.Hidden {
 		current.Hidden = agent.Hidden
 		current.hiddenSet = true
@@ -488,6 +536,7 @@ func mergeConfigHooks(dst *Config, hooks map[string][]HookConfig) {
 		if dst.Hooks == nil {
 			dst.Hooks = make(map[string][]HookConfig)
 		}
+
 		dst.Hooks[eventType] = cloneHooks(eventHooks)
 	}
 }
@@ -496,9 +545,11 @@ func mergeConfigContext(dst *Config, contextConfig ContextConfig) {
 	if contextConfig.MaxFileBytes > 0 {
 		dst.Context.MaxFileBytes = contextConfig.MaxFileBytes
 	}
+
 	if contextConfig.MaxTotalBytes > 0 {
 		dst.Context.MaxTotalBytes = contextConfig.MaxTotalBytes
 	}
+
 	if contextConfig.MaxInputTokens > 0 {
 		dst.Context.MaxInputTokens = contextConfig.MaxInputTokens
 	}
@@ -508,15 +559,19 @@ func mergeConfigGeneration(dst *Config, generation GenerationConfig) {
 	if generation.Temperature != nil {
 		dst.Generation.Temperature = generation.Temperature
 	}
+
 	if generation.TopP != nil {
 		dst.Generation.TopP = generation.TopP
 	}
+
 	if generation.Seed != nil {
 		dst.Generation.Seed = generation.Seed
 	}
+
 	if generation.ReasoningLevel != "" {
 		dst.Generation.ReasoningLevel = strings.TrimSpace(generation.ReasoningLevel)
 	}
+
 	if generation.MaxTokens > 0 {
 		dst.Generation.MaxTokens = generation.MaxTokens
 	}
@@ -537,6 +592,7 @@ func cloneHooks(hooks []HookConfig) []HookConfig {
 			TimeoutSeconds: hook.TimeoutSeconds,
 		})
 	}
+
 	return out
 }
 
@@ -547,5 +603,6 @@ func cloneMap(in map[string]string) map[string]string {
 
 	out := make(map[string]string, len(in))
 	maps.Copy(out, in)
+
 	return out
 }

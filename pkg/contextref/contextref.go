@@ -55,17 +55,22 @@ func Expand(prompt string, opts Options) (Result, error) {
 	}
 
 	seen := make(map[string]bool, len(candidates))
+
 	var refs []expandedReference
+
 	total := 0
 	for _, candidate := range candidates {
 		ref, nextTotal, ok, err := expandCandidate(candidate, opts, total, seen)
 		if err != nil {
 			return Result{}, err
 		}
+
 		if !ok {
 			continue
 		}
+
 		total = nextTotal
+
 		refs = append(refs, ref)
 	}
 
@@ -102,21 +107,26 @@ func normalizeOptions(opts Options) Options {
 			opts.Root = cwd
 		}
 	}
+
 	if opts.MaxFileBytes <= 0 {
 		opts.MaxFileBytes = DefaultMaxFileBytes
 	}
+
 	if opts.MaxTotalBytes <= 0 {
 		opts.MaxTotalBytes = DefaultMaxTotalBytes
 	}
+
 	return opts
 }
 
 func parseCandidates(prompt string) []string {
 	var out []string
+
 	for i := 0; i < len(prompt); i++ {
 		if prompt[i] != '@' {
 			continue
 		}
+
 		if i > 0 && isWord(rune(prompt[i-1])) {
 			continue
 		}
@@ -125,6 +135,7 @@ func parseCandidates(prompt string) []string {
 		for j < len(prompt) && isPathRune(rune(prompt[j])) {
 			j++
 		}
+
 		if j == i+1 {
 			continue
 		}
@@ -133,8 +144,10 @@ func parseCandidates(prompt string) []string {
 		if candidate != "" {
 			out = append(out, candidate)
 		}
+
 		i = j - 1
 	}
+
 	return out
 }
 
@@ -172,15 +185,19 @@ func expandCandidate(
 		if !pathLike(candidate) && errors.Is(err, os.ErrNotExist) {
 			return expandedReference{}, total, false, nil
 		}
+
 		return expandedReference{}, total, false, fmt.Errorf("context: stat @%s: %w", candidate, err)
 	}
+
 	resolved, err = resolveSymlinksInsideRoot(opts.Root, resolved, candidate)
 	if err != nil {
 		return expandedReference{}, total, false, err
 	}
+
 	if seen[resolved] {
 		return expandedReference{}, total, false, nil
 	}
+
 	seen[resolved] = true
 
 	if info.IsDir() {
@@ -188,11 +205,14 @@ func expandCandidate(
 		if remaining <= 0 {
 			return expandedReference{}, total, false, errors.New("context: max_total_bytes exceeded")
 		}
+
 		limit := min(opts.MaxFileBytes, remaining)
+
 		content, truncated, treeErr := directoryTree(resolved, limit)
 		if treeErr != nil {
 			return expandedReference{}, total, false, fmt.Errorf("context: list @%s: %w", candidate, treeErr)
 		}
+
 		return expandedReference{
 			Path:      displayPath,
 			Kind:      "directory",
@@ -201,6 +221,7 @@ func expandCandidate(
 			content:   string(content),
 		}, total + len(content), true, nil
 	}
+
 	if !info.Mode().IsRegular() {
 		return expandedReference{}, total, false, fmt.Errorf("context: @%s is not a regular file", candidate)
 	}
@@ -209,6 +230,7 @@ func expandCandidate(
 	if remaining <= 0 {
 		return expandedReference{}, total, false, errors.New("context: max_total_bytes exceeded")
 	}
+
 	limit := min(opts.MaxFileBytes, remaining)
 
 	content, truncated, err := readLimited(resolved, limit)
@@ -235,6 +257,7 @@ func resolve(root, candidate string) (resolved, displayPath string, err error) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(root, filepath.FromSlash(candidate))
 	}
+
 	path, err = filepath.Abs(filepath.Clean(path))
 	if err != nil {
 		return "", "", fmt.Errorf("context: resolve @%s: %w", candidate, err)
@@ -244,9 +267,11 @@ func resolve(root, candidate string) (resolved, displayPath string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("context: resolve @%s: %w", candidate, err)
 	}
+
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return "", "", fmt.Errorf("context: @%s escapes root %s", candidate, root)
 	}
+
 	return path, filepath.ToSlash(rel), nil
 }
 
@@ -255,6 +280,7 @@ func resolveSymlinksInsideRoot(root, path, candidate string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("context: resolve root: %w", err)
 	}
+
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		return "", fmt.Errorf("context: resolve root symlinks: %w", err)
@@ -269,9 +295,11 @@ func resolveSymlinksInsideRoot(root, path, candidate string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("context: resolve @%s: %w", candidate, err)
 	}
+
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("context: @%s escapes root %s", candidate, root)
 	}
+
 	return resolved, nil
 }
 
@@ -281,17 +309,22 @@ func directoryTree(root string, limit int) (data []byte, truncated bool, err err
 	}
 
 	var b strings.Builder
+
 	entries := 0
+
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
+
 		if path == root {
 			return nil
 		}
+
 		if entry.IsDir() && entry.Name() == ".git" {
 			return filepath.SkipDir
 		}
+
 		if entries >= maxDirectoryEntries {
 			truncated = true
 			return errDirectoryLimit
@@ -301,10 +334,12 @@ func directoryTree(root string, limit int) (data []byte, truncated bool, err err
 		if relErr != nil {
 			return fmt.Errorf("rel: %w", relErr)
 		}
+
 		line := filepath.ToSlash(rel)
 		if entry.IsDir() {
 			line += "/"
 		}
+
 		line += "\n"
 		if b.Len()+len(line) > limit {
 			truncated = true
@@ -312,12 +347,15 @@ func directoryTree(root string, limit int) (data []byte, truncated bool, err err
 		}
 
 		b.WriteString(line)
+
 		entries++
+
 		return nil
 	})
 	if errors.Is(err, errDirectoryLimit) {
 		err = nil
 	}
+
 	return []byte(b.String()), truncated, err
 }
 
@@ -325,6 +363,7 @@ func readLimited(path string, limit int) (data []byte, truncated bool, err error
 	if limit <= 0 {
 		return nil, false, nil
 	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, false, fmt.Errorf("open: %w", err)
@@ -335,9 +374,11 @@ func readLimited(path string, limit int) (data []byte, truncated bool, err error
 	if err != nil {
 		return nil, false, fmt.Errorf("read: %w", err)
 	}
+
 	if len(data) > limit {
 		return data[:limit], true, nil
 	}
+
 	return data, false, nil
 }
 
@@ -345,11 +386,13 @@ func appendReferences(prompt string, refs []expandedReference) string {
 	var b strings.Builder
 	b.WriteString(prompt)
 	b.WriteString("\n\n<context_references>\n")
+
 	for _, ref := range refs {
 		tag := ref.Kind
 		if tag == "" {
 			tag = "file"
 		}
+
 		b.WriteString(`<`)
 		b.WriteString(tag)
 		b.WriteString(` path="`)
@@ -358,14 +401,18 @@ func appendReferences(prompt string, refs []expandedReference) string {
 		b.WriteString(strconv.FormatBool(ref.Truncated))
 		b.WriteString("\">\n")
 		b.WriteString(ref.content)
+
 		if !strings.HasSuffix(ref.content, "\n") {
 			b.WriteString("\n")
 		}
+
 		b.WriteString("</")
 		b.WriteString(tag)
 		b.WriteString(">\n")
 	}
+
 	b.WriteString("</context_references>")
+
 	return b.String()
 }
 
@@ -373,6 +420,7 @@ func escapeAttr(value string) string {
 	value = strings.ReplaceAll(value, "&", "&amp;")
 	value = strings.ReplaceAll(value, `"`, "&quot;")
 	value = strings.ReplaceAll(value, "<", "&lt;")
+
 	return value
 }
 
@@ -381,5 +429,6 @@ func references(refs []expandedReference) []Reference {
 	for _, ref := range refs {
 		out = append(out, ref.Reference())
 	}
+
 	return out
 }

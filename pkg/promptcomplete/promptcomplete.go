@@ -90,6 +90,7 @@ func Suggest(ctx Context, opts Options) (Suggestion, bool) {
 	if len(suggestions) == 0 {
 		return Suggestion{}, false
 	}
+
 	return suggestions[0], true
 }
 
@@ -99,6 +100,7 @@ func Suggest(ctx Context, opts Options) (Suggestion, bool) {
 // whitespace.
 func SuggestAll(ctx Context, opts Options) []Suggestion {
 	opts = normalizeOptions(opts)
+
 	before, prefix, start, end, ok := currentLine(ctx.Input, ctx.Cursor)
 	if !ok || len(prefix) < opts.MinPrefix {
 		return nil
@@ -106,18 +108,22 @@ func SuggestAll(ctx Context, opts Options) []Suggestion {
 
 	contextTokens := tokensBefore(before)
 	candidates := collectCandidates(ctx)
+
 	scored := make([]scoredCandidate, 0, len(candidates))
 	for i, candidate := range candidates {
 		candidate = normalizeCandidate(candidate)
 		if candidate.Text == "" || strings.ContainsAny(candidate.Text, "\r\n") {
 			continue
 		}
+
 		score, matched := score(candidate, prefix, contextTokens, opts)
 		if !matched {
 			continue
 		}
+
 		scored = append(scored, scoredCandidate{candidate: candidate, score: score, index: i})
 	}
+
 	if len(scored) == 0 {
 		return nil
 	}
@@ -126,12 +132,15 @@ func SuggestAll(ctx Context, opts Options) []Suggestion {
 		if scored[i].score != scored[j].score {
 			return scored[i].score > scored[j].score
 		}
+
 		if scored[i].candidate.Kind != scored[j].candidate.Kind {
 			return scored[i].candidate.Kind < scored[j].candidate.Kind
 		}
+
 		if scored[i].candidate.Text != scored[j].candidate.Text {
 			return scored[i].candidate.Text < scored[j].candidate.Text
 		}
+
 		return scored[i].index < scored[j].index
 	})
 
@@ -143,6 +152,7 @@ func SuggestAll(ctx Context, opts Options) []Suggestion {
 	for _, item := range scored {
 		out = append(out, buildSuggestion(item.candidate, prefix, start, end, item.score, opts))
 	}
+
 	return out
 }
 
@@ -154,8 +164,10 @@ func CandidatesFromNames(kind string, names ...string) []Candidate {
 		if text == "" {
 			continue
 		}
+
 		out = append(out, Candidate{Text: text, Kind: kind})
 	}
+
 	return out
 }
 
@@ -163,9 +175,11 @@ func normalizeOptions(opts Options) Options {
 	if opts.Limit <= 0 {
 		opts.Limit = defaultLimit
 	}
+
 	if opts.MinPrefix <= 0 {
 		opts.MinPrefix = defaultMinPrefix
 	}
+
 	return opts
 }
 
@@ -177,6 +191,7 @@ func collectCandidates(ctx Context) []Candidate {
 	out = appendWithKind(out, "resource", ctx.Resources)
 	out = appendWithKind(out, "tool", ctx.Tools)
 	out = appendWithKind(out, "template", ctx.Templates)
+
 	return out
 }
 
@@ -185,8 +200,10 @@ func appendWithKind(out []Candidate, kind string, candidates []Candidate) []Cand
 		if candidate.Kind == "" {
 			candidate.Kind = kind
 		}
+
 		out = append(out, candidate)
 	}
+
 	return out
 }
 
@@ -194,12 +211,15 @@ func currentLine(input string, cursor int) (before, prefix string, start, end in
 	if cursor < 0 || cursor > len(input) {
 		return "", "", 0, 0, false
 	}
+
 	lineStart := strings.LastIndex(input[:cursor], "\n") + 1
 	nextNewline := strings.Index(input[cursor:], "\n")
+
 	lineEnd := len(input)
 	if nextNewline >= 0 {
 		lineEnd = cursor + nextNewline
 	}
+
 	if strings.TrimSpace(input[cursor:lineEnd]) != "" {
 		return "", "", 0, 0, false
 	}
@@ -208,21 +228,26 @@ func currentLine(input string, cursor int) (before, prefix string, start, end in
 	for start > lineStart && isPromptTokenRune(rune(input[start-1])) {
 		start--
 	}
+
 	if start > lineStart && input[start-1] == '\\' {
 		return "", "", 0, 0, false
 	}
+
 	prefix = input[start:cursor]
 	before = input[lineStart:start]
+
 	return before, prefix, start, cursor, true
 }
 
 func score(candidate Candidate, prefix string, contextTokens []string, opts Options) (int, bool) {
 	text := candidate.Text
 	needle := prefix
+
 	if !opts.CaseSensitive {
 		text = strings.ToLower(text)
 		needle = strings.ToLower(needle)
 	}
+
 	if !strings.HasPrefix(text, needle) {
 		return 0, false
 	}
@@ -231,8 +256,10 @@ func score(candidate Candidate, prefix string, contextTokens []string, opts Opti
 	if len(candidate.Text) == len(prefix) {
 		score += 50
 	}
+
 	score += contextScore(candidate, contextTokens, opts)
 	score -= len(candidate.Text)
+
 	return score, true
 }
 
@@ -240,6 +267,7 @@ func contextScore(candidate Candidate, contextTokens []string, opts Options) int
 	if len(contextTokens) == 0 {
 		return 0
 	}
+
 	candidateTokens := candidateContextTokens(candidate)
 	if !opts.CaseSensitive {
 		for i, token := range candidateTokens {
@@ -248,14 +276,17 @@ func contextScore(candidate Candidate, contextTokens []string, opts Options) int
 	}
 
 	score := 0
+
 	for _, token := range contextTokens {
 		if !opts.CaseSensitive {
 			token = strings.ToLower(token)
 		}
+
 		if slices.Contains(candidateTokens, token) {
 			score += 80
 		}
 	}
+
 	return score
 }
 
@@ -265,6 +296,7 @@ func candidateContextTokens(candidate Candidate) []string {
 	tokens = append(tokens, candidate.Tokens...)
 	tokens = append(tokens, splitTokens(candidate.Text)...)
 	tokens = append(tokens, splitTokens(candidate.Description)...)
+
 	return compactTokens(tokens)
 }
 
@@ -274,19 +306,23 @@ func normalizeCandidate(candidate Candidate) Candidate {
 	candidate.Description = strings.TrimSpace(candidate.Description)
 	candidate.Explanation = strings.TrimSpace(candidate.Explanation)
 	candidate.Tokens = compactTokens(candidate.Tokens)
+
 	return candidate
 }
 
 func buildSuggestion(candidate Candidate, prefix string, start, end, score int, opts Options) Suggestion {
 	suffixStart := len(prefix)
+
 	text := candidate.Text
 	if !opts.CaseSensitive {
 		suffixStart = len(commonPrefixFold(text, prefix))
 	}
+
 	explanation := candidate.Explanation
 	if explanation == "" {
 		explanation = defaultExplanation(candidate, prefix)
 	}
+
 	return Suggestion{
 		Text:             text,
 		Suffix:           text[suffixStart:],
@@ -302,6 +338,7 @@ func defaultExplanation(candidate Candidate, prefix string) string {
 	if candidate.Kind == "" {
 		return "Matches the current prompt-line prefix " + quote(prefix) + "."
 	}
+
 	return "Matches the current prompt-line prefix " + quote(prefix) + " as a local " + candidate.Kind + " candidate."
 }
 
@@ -311,39 +348,49 @@ func tokensBefore(line string) []string {
 
 func splitTokens(s string) []string {
 	var out []string
+
 	start := -1
+
 	for i, r := range s {
 		if isTokenLetter(r) {
 			if start == -1 {
 				start = i
 			}
+
 			continue
 		}
+
 		if start != -1 {
 			out = append(out, s[start:i])
 			start = -1
 		}
 	}
+
 	if start != -1 {
 		out = append(out, s[start:])
 	}
+
 	return compactTokens(out)
 }
 
 func compactTokens(tokens []string) []string {
 	out := make([]string, 0, len(tokens))
+
 	seen := make(map[string]bool, len(tokens))
 	for _, token := range tokens {
 		token = strings.TrimSpace(token)
 		if token == "" {
 			continue
 		}
+
 		if seen[token] {
 			continue
 		}
+
 		seen[token] = true
 		out = append(out, token)
 	}
+
 	return out
 }
 
@@ -351,11 +398,13 @@ func commonPrefixFold(text, prefix string) string {
 	if len(prefix) > len(text) {
 		return text
 	}
+
 	for i := range len(prefix) {
 		if unicode.ToLower(rune(text[i])) != unicode.ToLower(rune(prefix[i])) {
 			return text[:i]
 		}
 	}
+
 	return text[:len(prefix)]
 }
 

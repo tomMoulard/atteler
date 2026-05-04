@@ -37,10 +37,12 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 	registry := &Registry{agents: make(map[string]Agent, len(configs))}
 	for name := range configs {
 		cfg := configs[name]
+
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
 		}
+
 		registry.agents[name] = Agent{
 			Name:           name,
 			Model:          cfg.Model,
@@ -58,6 +60,7 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 			Hidden:         cfg.Hidden,
 		}
 	}
+
 	return registry
 }
 
@@ -71,7 +74,9 @@ func (r *Registry) Get(name string) (Agent, bool) {
 	if r == nil {
 		return Agent{}, false
 	}
+
 	agent, ok := r.agents[name]
+
 	return agent, ok
 }
 
@@ -87,9 +92,12 @@ func (r *Registry) List() []string {
 		if agent.Hidden {
 			continue
 		}
+
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	return names
 }
 
@@ -118,6 +126,7 @@ func (r *Registry) MatchPromptWithReason(prompt string) (Match, bool) {
 	}
 
 	prompt = strings.ToLower(prompt)
+
 	for _, name := range r.List() {
 		agent := r.agents[name]
 		for _, trigger := range agent.Triggers {
@@ -126,6 +135,7 @@ func (r *Registry) MatchPromptWithReason(prompt string) (Match, bool) {
 			}
 		}
 	}
+
 	for _, name := range r.List() {
 		agent := r.agents[name]
 		for _, capability := range agent.Capabilities {
@@ -134,6 +144,7 @@ func (r *Registry) MatchPromptWithReason(prompt string) (Match, bool) {
 			}
 		}
 	}
+
 	return Match{}, false
 }
 
@@ -157,6 +168,7 @@ func (a Agent) CompleteParams(model string, messages []llm.Message) llm.Complete
 		Seed:           a.Seed,
 		ReasoningLevel: a.ReasoningLevel,
 	}
+
 	return params
 }
 
@@ -168,6 +180,7 @@ func normalizePhrases(phrases []string) []string {
 			out = append(out, phrase)
 		}
 	}
+
 	return out
 }
 
@@ -179,11 +192,13 @@ func normalizeModels(models []string) []string {
 			out = append(out, model)
 		}
 	}
+
 	return out
 }
 
 func modelChain(primary string, fallbacks []string) []string {
 	var out []string
+
 	seen := make(map[string]bool, len(fallbacks)+1)
 	for _, model := range append([]string{primary}, fallbacks...) {
 		model = strings.TrimSpace(model)
@@ -192,6 +207,7 @@ func modelChain(primary string, fallbacks []string) []string {
 			seen[model] = true
 		}
 	}
+
 	return out
 }
 
@@ -204,12 +220,15 @@ func ParseInvocation(input string) (name, prompt string, ok bool) {
 
 	withoutAt := strings.TrimPrefix(trimmed, "@")
 	name, prompt, hasPrompt := strings.Cut(withoutAt, " ")
+
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return "", input, false
 	}
+
 	if !hasPrompt {
 		return name, "", true
 	}
+
 	return name, strings.TrimSpace(prompt), true
 }

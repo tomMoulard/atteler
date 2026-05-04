@@ -21,6 +21,7 @@ const (
 
 func TestParseCodexConfig(t *testing.T) {
 	t.Parallel()
+
 	cfg := parseCodexConfig([]byte(`
 model = "gpt-4.1-mini" # top-level default
 model_provider = "openai"
@@ -35,12 +36,15 @@ base_url = '` + testAnthropicBaseURL + `'
 	if cfg.DefaultProvider != testOpenAIProvider {
 		assert.Failf(t, "assertion failed", "DefaultProvider = %q, want openai", cfg.DefaultProvider)
 	}
+
 	if cfg.DefaultModel != "gpt-4.1-mini" {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q, want gpt-4.1-mini", cfg.DefaultModel)
 	}
+
 	if cfg.Providers[testOpenAIProvider].BaseURL != "https://openai.example" {
 		assert.Failf(t, "assertion failed", "openai base_url = %q", cfg.Providers[testOpenAIProvider].BaseURL)
 	}
+
 	if cfg.Providers[testAnthropicProvider].BaseURL != testAnthropicBaseURL {
 		assert.Failf(t, "assertion failed", "anthropic base_url = %q", cfg.Providers[testAnthropicProvider].BaseURL)
 	}
@@ -48,6 +52,7 @@ base_url = '` + testAnthropicBaseURL + `'
 
 func TestParseCodexConfig_DefaultsToCodexProvider(t *testing.T) {
 	t.Parallel()
+
 	cfg := parseCodexConfig([]byte(`model = "gpt-5.5"`))
 
 	if cfg.DefaultProvider != testCodexProvider {
@@ -57,6 +62,7 @@ func TestParseCodexConfig_DefaultsToCodexProvider(t *testing.T) {
 
 func TestParseGenericJSONHarness(t *testing.T) {
 	t.Parallel()
+
 	cfg := parseGenericJSONHarness([]byte(`{
 		"model": "claude-sonnet-4-20250514",
 		"apiBase": "`+testAnthropicBaseURL+`"
@@ -65,9 +71,11 @@ func TestParseGenericJSONHarness(t *testing.T) {
 	if cfg.DefaultProvider != testAnthropicProvider {
 		assert.Failf(t, "assertion failed", "DefaultProvider = %q, want anthropic", cfg.DefaultProvider)
 	}
+
 	if cfg.DefaultModel != "claude-sonnet-4-20250514" {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q", cfg.DefaultModel)
 	}
+
 	if cfg.Providers[testAnthropicProvider].BaseURL != testAnthropicBaseURL {
 		assert.Failf(t, "assertion failed", "base_url = %q", cfg.Providers[testAnthropicProvider].BaseURL)
 	}
@@ -75,6 +83,7 @@ func TestParseGenericJSONHarness(t *testing.T) {
 
 func TestParseGenericJSONHarness_NestedKeys(t *testing.T) {
 	t.Parallel()
+
 	cfg := parseGenericJSONHarness([]byte(`{
 		"llm": {
 			"provider": "openai",
@@ -85,6 +94,7 @@ func TestParseGenericJSONHarness_NestedKeys(t *testing.T) {
 	if cfg.DefaultProvider != testOpenAIProvider {
 		assert.Failf(t, "assertion failed", "DefaultProvider = %q, want openai", cfg.DefaultProvider)
 	}
+
 	if cfg.DefaultModel != "gpt-4.1" {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q, want gpt-4.1", cfg.DefaultModel)
 	}
@@ -126,26 +136,33 @@ func TestParseOpencodeConfig_UsesTopLevelModelProviderConfigAndAgents(t *testing
 	if cfg.DefaultProvider != testOpenAIProvider {
 		assert.Failf(t, "assertion failed", "DefaultProvider = %q, want openai", cfg.DefaultProvider)
 	}
+
 	if cfg.DefaultModel != testOpenAIGPT54 {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q, want openai/gpt-5.4", cfg.DefaultModel)
 	}
+
 	if cfg.Providers[testOpenAIProvider].BaseURL != "https://openai.example" {
 		assert.Failf(t, "assertion failed", "openai base_url = %q", cfg.Providers[testOpenAIProvider].BaseURL)
 	}
+
 	if cfg.Providers[testAnthropicProvider].BaseURL != testAnthropicBaseURL {
 		assert.Failf(t, "assertion failed", "anthropic base_url = %q", cfg.Providers[testAnthropicProvider].BaseURL)
 	}
+
 	if reviewer := cfg.Agents["reviewer"]; reviewer.Description != "Reviews code" ||
 		reviewer.Model != "anthropic/claude-sonnet-4-20250514" ||
 		reviewer.SystemPrompt != "Review code carefully." {
 		assert.Failf(t, "assertion failed", "reviewer = %+v", reviewer)
 	}
+
 	if reviewer := cfg.Agents["reviewer"]; reviewer.Temperature == nil || *reviewer.Temperature != 0.1 {
 		assert.Failf(t, "assertion failed", "reviewer temperature = %v", reviewer.Temperature)
 	}
+
 	if reviewer := cfg.Agents["reviewer"]; reviewer.TopP == nil || *reviewer.TopP != 0.8 {
 		assert.Failf(t, "assertion failed", "reviewer top_p = %v", reviewer.TopP)
 	}
+
 	if !cfg.Agents["hidden-helper"].Hidden {
 		assert.FailNow(t, "expected hidden-helper to be hidden")
 	}
@@ -197,6 +214,7 @@ prompt: "{file:../secret.txt}"
 
 func TestParseOpencodeConfig_FallsBackToOhMyOpenagentDefaults(t *testing.T) {
 	t.Parallel()
+
 	cfg := parseOpencodeConfig("opencode.json", []byte(`{
 		"agents": {
 			"sisyphus": {
@@ -216,6 +234,7 @@ func TestParseOpencodeConfig_FallsBackToOhMyOpenagentDefaults(t *testing.T) {
 	if cfg.DefaultProvider != testOpenAIProvider {
 		assert.Failf(t, "assertion failed", "DefaultProvider = %q, want openai", cfg.DefaultProvider)
 	}
+
 	if cfg.DefaultModel != testOpenAIGPT54 {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q, want openai/gpt-5.4", cfg.DefaultModel)
 	}
@@ -247,15 +266,19 @@ Internal helper prompt.
 	if !ok {
 		require.FailNow(t, "expected markdown agents to load")
 	}
+
 	assert.Contains(t, loaded, filepath.Join(dir, "review.md"))
+
 	if reviewer := cfg.Agents["review"]; reviewer.SystemPrompt != "Review code thoroughly." ||
 		reviewer.Description != "Reviews code" ||
 		reviewer.Model != testOpenAIGPT54 {
 		assert.Failf(t, "assertion failed", "review agent = %+v", reviewer)
 	}
+
 	if !cfg.Agents["internal"].Hidden {
 		assert.FailNow(t, "expected internal agent to be hidden")
 	}
+
 	assert.NotContains(t, cfg.Agents, "README")
 	assert.NotContains(t, cfg.Agents, ".hidden")
 	assert.NotContains(t, cfg.Agents, "linked")
@@ -263,6 +286,7 @@ Internal helper prompt.
 
 func TestMergeConfigAgent_CanClearExplicitHidden(t *testing.T) {
 	t.Parallel()
+
 	current := AgentConfig{Hidden: true, hiddenSet: true}
 
 	mergeConfigAgent(&current, AgentConfig{Hidden: false, hiddenSet: true})
@@ -272,6 +296,7 @@ func TestMergeConfigAgent_CanClearExplicitHidden(t *testing.T) {
 
 func TestParseOpencodeConfig_PreservesHiddenFalseOnlyOverride(t *testing.T) {
 	t.Parallel()
+
 	cfg := parseOpencodeConfig("opencode.json", []byte(`{
 		"agent": {
 			"reviewer": {
@@ -330,6 +355,7 @@ func TestOpenCodeConfigPaths_EnvConfigHasHighestPrecedence(t *testing.T) {
 
 func TestNormalizeProvider_ClaudeCode(t *testing.T) {
 	t.Parallel()
+
 	if got := normalizeProvider("claude-code"); got != testClaudeCodeProvider {
 		require.Failf(t, "unexpected failure", "normalizeProvider(claude-code) = %q, want claude-code", got)
 	}
@@ -337,6 +363,7 @@ func TestNormalizeProvider_ClaudeCode(t *testing.T) {
 
 func TestParseForgeConfig(t *testing.T) {
 	t.Parallel()
+
 	cfg := parseForgeConfig([]byte(`
 "$schema" = "https://forgecode.dev/schema.json"
 
@@ -348,6 +375,7 @@ model_id = "claude-opus-4-6"
 	if cfg.DefaultProvider != testClaudeCodeProvider {
 		assert.Failf(t, "assertion failed", "DefaultProvider = %q, want claude-code", cfg.DefaultProvider)
 	}
+
 	if cfg.DefaultModel != "claude-opus-4-6" {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q, want claude-opus-4-6", cfg.DefaultModel)
 	}

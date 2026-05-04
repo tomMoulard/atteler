@@ -40,10 +40,12 @@ func Proposals(evaluations []session.AgentEvaluation, negativeKnowledge []sessio
 
 	for _, entry := range negativeKnowledge {
 		approach := strings.TrimSpace(entry.Approach)
+
 		reason := strings.TrimSpace(entry.Reason)
 		if approach == "" && reason == "" {
 			continue
 		}
+
 		group := groupFor(groups, entry.Agent)
 		group.negativeEvidence = append(group.negativeEvidence, negativeKnowledgeEvidence(entry))
 	}
@@ -52,6 +54,7 @@ func Proposals(evaluations []session.AgentEvaluation, negativeKnowledge []sessio
 		if !isImprovementSignal(entry) {
 			continue
 		}
+
 		group := groupFor(groups, entry.Agent)
 		group.evaluationEvidence = append(group.evaluationEvidence, evaluationEvidence(entry))
 	}
@@ -60,10 +63,12 @@ func Proposals(evaluations []session.AgentEvaluation, negativeKnowledge []sessio
 	for _, group := range groups {
 		evidence := make([]string, 0, len(group.negativeEvidence)+len(group.evaluationEvidence))
 		evidence = append(evidence, group.negativeEvidence...)
+
 		evidence = append(evidence, group.evaluationEvidence...)
 		if len(evidence) == 0 {
 			continue
 		}
+
 		proposals = append(proposals, Proposal{
 			Agent:      group.agent,
 			Action:     proposalAction(group),
@@ -75,10 +80,12 @@ func Proposals(evaluations []session.AgentEvaluation, negativeKnowledge []sessio
 
 	sort.SliceStable(proposals, func(i, j int) bool {
 		leftPriority := proposalPriority(proposals[i])
+
 		rightPriority := proposalPriority(proposals[j])
 		if leftPriority != rightPriority {
 			return leftPriority > rightPriority
 		}
+
 		return proposals[i].Agent < proposals[j].Agent
 	})
 
@@ -90,12 +97,15 @@ func groupFor(groups map[string]*proposalGroup, agent string) *proposalGroup {
 	if displayAgent == "" {
 		displayAgent = unknownAgent
 	}
+
 	key := strings.ToLower(displayAgent)
+
 	group, ok := groups[key]
 	if !ok {
 		group = &proposalGroup{agent: displayAgent}
 		groups[key] = group
 	}
+
 	return group
 }
 
@@ -104,11 +114,13 @@ func isImprovementSignal(entry session.AgentEvaluation) bool {
 	if outcome == "" {
 		return false
 	}
+
 	if entry.Score > 0 && entry.Score <= 2 {
 		return true
 	}
 
 	normalized := strings.ToLower(outcome)
+
 	failureTerms := []string{"fail", "error", "reject", "regress", "block", "timeout", "flaky", "incomplete"}
 	for _, term := range failureTerms {
 		if strings.Contains(normalized, term) {
@@ -125,11 +137,13 @@ func isImprovementSignal(entry session.AgentEvaluation) bool {
 		"accepted":  true,
 		"approved":  true,
 	}
+
 	return !positiveOutcomes[normalized] && strings.TrimSpace(entry.Notes) != ""
 }
 
 func negativeKnowledgeEvidence(entry session.NegativeKnowledge) string {
 	approach := strings.TrimSpace(entry.Approach)
+
 	reason := strings.TrimSpace(entry.Reason)
 	switch {
 	case approach != "" && reason != "":
@@ -146,12 +160,15 @@ func evaluationEvidence(entry session.AgentEvaluation) string {
 	if entry.Score != 0 {
 		parts = append(parts, fmt.Sprintf("score %d", entry.Score))
 	}
+
 	if notes := strings.TrimSpace(entry.Notes); notes != "" {
 		parts = append(parts, notes)
 	}
+
 	if reference := strings.TrimSpace(entry.Reference); reference != "" {
 		parts = append(parts, "ref "+reference)
 	}
+
 	return strings.Join(parts, "; ")
 }
 
@@ -159,6 +176,7 @@ func proposalAction(group *proposalGroup) string {
 	if len(group.negativeEvidence) > 0 {
 		return "Revise the agent instructions to avoid repeated failed approaches and add explicit fallback guidance."
 	}
+
 	return "Revise the agent instructions to address failed evaluation patterns."
 }
 
@@ -187,12 +205,15 @@ func proposalConfidence(group *proposalGroup) float64 {
 
 func proposalPriority(proposal Proposal) int {
 	priority := 0
+
 	for _, evidence := range proposal.Evidence {
 		if strings.HasPrefix(evidence, "negative knowledge:") {
 			priority += 2
 			continue
 		}
+
 		priority++
 	}
+
 	return priority
 }

@@ -61,8 +61,11 @@ func ParseLog(text string) ([]Commit, error) {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, recordSeparator, "\n")
 
-	var commits []Commit
-	var current *Commit
+	var (
+		commits []Commit
+		current *Commit
+	)
+
 	for lineNumber, rawLine := range strings.Split(text, "\n") {
 		line := strings.TrimRight(rawLine, "\r")
 		if strings.TrimSpace(line) == "" {
@@ -78,19 +81,23 @@ func ParseLog(text string) ([]Commit, error) {
 			if err != nil {
 				return nil, fmt.Errorf("githistory: parse line %d: %w", lineNumber+1, err)
 			}
+
 			current = &commit
+
 			continue
 		}
 
 		if current == nil {
 			return nil, fmt.Errorf("githistory: parse line %d: file listed before commit header", lineNumber+1)
 		}
+
 		current.Files = append(current.Files, strings.TrimSpace(line))
 	}
 
 	if current != nil {
 		commits = append(commits, cloneCommit(*current))
 	}
+
 	return commits, nil
 }
 
@@ -103,6 +110,7 @@ func NewIndex(commits []Commit) *Index {
 			order:  i,
 		})
 	}
+
 	return idx
 }
 
@@ -118,15 +126,18 @@ func (idx *Index) Search(query string, limit int) []Result {
 	if len(terms) == 0 {
 		return nil
 	}
+
 	normalizedQuery := normalize(query)
 
 	results := make([]rankedResult, 0, len(idx.commits))
 	for i := range idx.commits {
 		entry := &idx.commits[i]
+
 		score, snippets := scoreCommit(entry.commit, terms, normalizedQuery, query)
 		if score == 0 {
 			continue
 		}
+
 		results = append(results, rankedResult{
 			result: Result{
 				Commit:   cloneCommit(entry.commit),
@@ -142,12 +153,15 @@ func (idx *Index) Search(query string, limit int) []Result {
 		if left.result.Score != right.result.Score {
 			return left.result.Score > right.result.Score
 		}
+
 		if !left.result.Commit.Date.Equal(right.result.Commit.Date) {
 			return left.result.Commit.Date.After(right.result.Commit.Date)
 		}
+
 		if left.result.Commit.Hash != right.result.Commit.Hash {
 			return left.result.Commit.Hash < right.result.Commit.Hash
 		}
+
 		return left.order < right.order
 	})
 
@@ -159,6 +173,7 @@ func (idx *Index) Search(query string, limit int) []Result {
 	for i := range results {
 		out = append(out, results[i].result)
 	}
+
 	return out
 }
 
@@ -188,9 +203,11 @@ func parseHeader(line string) (Commit, error) {
 	if len(fields) == 6 {
 		commit.Body = strings.TrimSpace(fields[5])
 	}
+
 	if commit.Hash == "" {
 		return Commit{}, errors.New("commit hash is required")
 	}
+
 	return commit, nil
 }
 
@@ -208,7 +225,9 @@ func scoreCommit(commit Commit, terms []string, normalizedQuery, originalQuery s
 	}
 
 	var score int
+
 	snippets := make([]Snippet, 0, maxSnippets)
+
 	for _, field := range fields {
 		normalizedText := normalize(field.text)
 		if normalizedText == "" {
@@ -219,6 +238,7 @@ func scoreCommit(commit Commit, terms []string, normalizedQuery, originalQuery s
 		if strings.Contains(normalizedText, normalizedQuery) {
 			fieldScore += field.weight * 2
 		}
+
 		for _, term := range terms {
 			if strings.Contains(normalizedText, term) {
 				fieldScore += field.weight
@@ -228,7 +248,9 @@ func scoreCommit(commit Commit, terms []string, normalizedQuery, originalQuery s
 		if fieldScore == 0 {
 			continue
 		}
+
 		score += fieldScore
+
 		if len(snippets) < maxSnippets {
 			snippets = append(snippets, Snippet{
 				Field: field.name,
@@ -236,6 +258,7 @@ func scoreCommit(commit Commit, terms []string, normalizedQuery, originalQuery s
 			})
 		}
 	}
+
 	return score, snippets
 }
 
@@ -253,6 +276,7 @@ func makeSnippet(text, query string, terms []string) string {
 
 	normalizedText := normalize(text)
 	normalizedQuery := normalize(query)
+
 	index := strings.Index(normalizedText, normalizedQuery)
 	if index < 0 {
 		for _, term := range terms {
@@ -262,10 +286,12 @@ func makeSnippet(text, query string, terms []string) string {
 			}
 		}
 	}
+
 	if index < 0 {
 		if len(text) <= snippetRadius*2 {
 			return text
 		}
+
 		return text[:snippetRadius*2] + "..."
 	}
 
@@ -276,28 +302,36 @@ func makeSnippet(text, query string, terms []string) string {
 	if start > 0 {
 		snippet = "..." + snippet
 	}
+
 	if end < len(text) {
 		snippet += "..."
 	}
+
 	return snippet
 }
 
 func tokenize(text string) []string {
 	seen := make(map[string]struct{})
+
 	var terms []string
+
 	for _, term := range strings.FieldsFunc(normalize(text), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}) {
 		if term == "" {
 			continue
 		}
+
 		if _, ok := seen[term]; ok {
 			continue
 		}
+
 		seen[term] = struct{}{}
 		terms = append(terms, term)
 	}
+
 	sort.Strings(terms)
+
 	return terms
 }
 

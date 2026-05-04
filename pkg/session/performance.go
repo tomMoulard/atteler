@@ -54,6 +54,7 @@ func (s *Store) AgentPerformanceSummary() ([]AgentPerformanceSummary, error) {
 	}
 
 	byAgent := make(map[string]*agentPerformanceAccumulator)
+
 	for i := range sessions {
 		session := &sessions[i]
 		sessionActivity := fallbackActivity(session.UpdatedAt, session.CreatedAt)
@@ -69,6 +70,7 @@ func (s *Store) AgentPerformanceSummary() ([]AgentPerformanceSummary, error) {
 			if agent == "" {
 				continue
 			}
+
 			acc := agentAccumulator(byAgent, agent)
 			acc.evaluationCount++
 			acc.observeActivity(fallbackActivity(evaluation.CreatedAt, sessionActivity))
@@ -81,6 +83,7 @@ func (s *Store) AgentPerformanceSummary() ([]AgentPerformanceSummary, error) {
 			if agent == "" {
 				continue
 			}
+
 			acc := agentAccumulator(byAgent, agent)
 			acc.negativeKnowledgeCount++
 			acc.failureCount++
@@ -105,17 +108,21 @@ func (s *Store) AgentPerformanceSummary() ([]AgentPerformanceSummary, error) {
 		if acc.scoredEvaluationCount > 0 {
 			summary.AverageScore = float64(acc.scoreTotal) / float64(acc.scoredEvaluationCount)
 		}
+
 		summaries = append(summaries, summary)
 	}
 
 	sort.Slice(summaries, func(i, j int) bool {
 		left := strings.ToLower(summaries[i].Agent)
+
 		right := strings.ToLower(summaries[j].Agent)
 		if left == right {
 			return summaries[i].Agent < summaries[j].Agent
 		}
+
 		return left < right
 	})
+
 	return summaries, nil
 }
 
@@ -125,6 +132,7 @@ func (s *Store) loadAllSessions() ([]Session, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
+
 		return nil, fmt.Errorf("session: list %s: %w", s.dir, err)
 	}
 
@@ -133,27 +141,33 @@ func (s *Store) loadAllSessions() ([]Session, error) {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != sessionFileExt {
 			continue
 		}
+
 		session, err := s.Load(filepath.Join(s.dir, entry.Name()))
 		if err != nil {
 			return nil, err
 		}
+
 		sessions = append(sessions, session)
 	}
+
 	return sessions, nil
 }
 
 func agentAccumulator(byAgent map[string]*agentPerformanceAccumulator, agent string) *agentPerformanceAccumulator {
 	key := normalizeAgentKey(agent)
+
 	acc, ok := byAgent[key]
 	if ok {
 		return acc
 	}
+
 	acc = &agentPerformanceAccumulator{
 		agent:          strings.TrimSpace(agent),
 		outcomeDisplay: make(map[string]string),
 		outcomeCounts:  make(map[string]int),
 	}
 	byAgent[key] = acc
+
 	return acc
 }
 
@@ -168,10 +182,12 @@ func (a *agentPerformanceAccumulator) observeOutcome(outcome string) {
 	if outcome == "" {
 		return
 	}
+
 	key := strings.ToLower(outcome)
 	if _, ok := a.outcomeDisplay[key]; !ok {
 		a.outcomeDisplay[key] = outcome
 	}
+
 	a.outcomeCounts[key]++
 }
 
@@ -179,11 +195,14 @@ func (a *agentPerformanceAccumulator) observeScore(score int) {
 	if score == 0 {
 		return
 	}
+
 	a.scoredEvaluationCount++
+
 	a.scoreTotal += score
 	if a.scoredEvaluationCount == 1 || score < a.minScore {
 		a.minScore = score
 	}
+
 	if a.scoredEvaluationCount == 1 || score > a.maxScore {
 		a.maxScore = score
 	}
@@ -194,17 +213,22 @@ func (a *agentPerformanceAccumulator) outcomes() []OutcomeCount {
 	for key, count := range a.outcomeCounts {
 		outcomes = append(outcomes, OutcomeCount{Outcome: a.outcomeDisplay[key], Count: count})
 	}
+
 	sort.Slice(outcomes, func(i, j int) bool {
 		if outcomes[i].Count == outcomes[j].Count {
 			left := strings.ToLower(outcomes[i].Outcome)
+
 			right := strings.ToLower(outcomes[j].Outcome)
 			if left == right {
 				return outcomes[i].Outcome < outcomes[j].Outcome
 			}
+
 			return left < right
 		}
+
 		return outcomes[i].Count > outcomes[j].Count
 	})
+
 	return outcomes
 }
 
@@ -212,6 +236,7 @@ func fallbackActivity(primary, fallback time.Time) time.Time {
 	if !primary.IsZero() {
 		return primary
 	}
+
 	return fallback
 }
 

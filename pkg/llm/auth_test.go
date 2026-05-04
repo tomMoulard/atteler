@@ -28,9 +28,11 @@ func TestResolveAnthropicKey_EnvAPIKey(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "sk-ant-test" {
 		assert.Failf(t, "assertion failed", "expected sk-ant-test, got %q", key)
 	}
+
 	if bearer {
 		assert.Fail(t, "expected bearer=false for API key")
 	}
@@ -46,6 +48,7 @@ func TestResolveAnthropicKey_EnvAuthToken(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "bearer-tok" || !bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want bearer-tok/true", key, bearer)
 	}
@@ -61,6 +64,7 @@ func TestResolveAnthropicKey_ClaudeCodeOAuth(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "oauth-tok" || !bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want oauth-tok/true", key, bearer)
 	}
@@ -89,6 +93,7 @@ func TestResolveAnthropicKey_CredentialsFile(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "sk-from-file" || !bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want sk-from-file/true", key, bearer)
 	}
@@ -119,6 +124,7 @@ func TestResolveAnthropicKey_ForgeClaudeCodeCredentials(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "forge-oauth" || !bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want forge-oauth/true", key, bearer)
 	}
@@ -141,16 +147,20 @@ func TestResolveAnthropicKey_NoCreds(t *testing.T) {
 
 func TestParseClaudeCodeCredentials(t *testing.T) {
 	t.Parallel()
+
 	good := `{"claudeAiOauth":{"accessToken":"tok123","refreshToken":"rt","expiresAt":9999999999999}}`
+
 	tok, err := parseClaudeCodeCredentials([]byte(good))
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if tok != "tok123" {
 		assert.Failf(t, "assertion failed", "got %q, want tok123", tok)
 	}
 
 	expired := `{"claudeAiOauth":{"accessToken":"tok123","refreshToken":"rt","expiresAt":1}}`
+
 	_, err = parseClaudeCodeCredentials([]byte(expired))
 	if err == nil {
 		require.FailNow(t, "expected error for expired accessToken")
@@ -158,6 +168,7 @@ func TestParseClaudeCodeCredentials(t *testing.T) {
 
 	// Missing token.
 	empty := `{"claudeAiOauth":{"accessToken":"","refreshToken":"rt","expiresAt":1}}`
+
 	_, err = parseClaudeCodeCredentials([]byte(empty))
 	if err == nil {
 		require.FailNow(t, "expected error for empty accessToken")
@@ -165,6 +176,7 @@ func TestParseClaudeCodeCredentials(t *testing.T) {
 
 	// No claudeAiOauth block.
 	noBlock := `{}`
+
 	_, err = parseClaudeCodeCredentials([]byte(noBlock))
 	if err == nil {
 		require.FailNow(t, "expected error for missing block")
@@ -179,18 +191,24 @@ func TestParseClaudeCodeCredentials(t *testing.T) {
 
 func TestReadForgeCredentialsFile_RefreshesExpiredClaudeCodeOAuth(t *testing.T) {
 	t.Parallel()
+
 	var got map[string]string
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			assert.Failf(t, "assertion failed", "method = %s, want POST", r.Method)
 		}
+
 		if r.Header.Get("Content-Type") != "application/json" {
 			assert.Failf(t, "assertion failed", "Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
 		}
+
 		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&got)) {
 			return
 		}
+
 		w.Header().Set("Content-Type", "application/json")
+
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"access_token":  "new-access",
 			"refresh_token": "new-refresh",
@@ -202,6 +220,7 @@ func TestReadForgeCredentialsFile_RefreshesExpiredClaudeCodeOAuth(t *testing.T) 
 	defer srv.Close()
 
 	path := filepath.Join(t.TempDir(), ".credentials.json")
+
 	data := `[
 		{"id":"forge_services","auth_details":{"api_key":"forge-service-key"},"url_params":{"user_id":"kept"}},
 		{"id":"claude_code","auth_details":{"o_auth":{
@@ -217,9 +236,11 @@ func TestReadForgeCredentialsFile_RefreshesExpiredClaudeCodeOAuth(t *testing.T) 
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "new-access" || !bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want new-access/true", key, bearer)
 	}
+
 	if got["grant_type"] != forgeOAuthRefreshGrantType ||
 		got["refresh_token"] != "old-refresh" ||
 		got["client_id"] != "client-123" {
@@ -230,9 +251,11 @@ func TestReadForgeCredentialsFile_RefreshesExpiredClaudeCodeOAuth(t *testing.T) 
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if !json.Valid(refreshed) {
 		require.Failf(t, "unexpected failure", "refreshed credentials are not valid JSON: %s", refreshed)
 	}
+
 	if !containsAll(string(refreshed), "new-access", "new-refresh", "user_id") {
 		require.Failf(t, "unexpected failure", "refreshed credentials did not preserve/update expected fields: %s", refreshed)
 	}
@@ -241,6 +264,7 @@ func TestReadForgeCredentialsFile_RefreshesExpiredClaudeCodeOAuth(t *testing.T) 
 func TestReadForgeCredentialsFile_RefreshHonorsCanceledContext(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".credentials.json")
+
 	data := `[
 		{"id":"claude_code","auth_details":{"o_auth":{
 			"config":{"token_url":"http://127.0.0.1:1/token","client_id":"client-123"},
@@ -253,15 +277,18 @@ func TestReadForgeCredentialsFile_RefreshHonorsCanceledContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	_, _, err := readForgeCredentialsFile(ctx, path)
 	if err == nil {
 		require.FailNow(t, "expected canceled context to stop OAuth refresh")
 	}
+
 	assert.Contains(t, err.Error(), "context canceled")
 }
 
 func TestParseForgeAnthropicCredentials(t *testing.T) {
 	t.Parallel()
+
 	data := `[
 		{"id":"anthropic","auth_details":{"api_key":"sk-api"}},
 		{"id":"claude_code","auth_details":{"o_auth":{"tokens":{"access_token":"oauth-token"}}}}
@@ -271,15 +298,18 @@ func TestParseForgeAnthropicCredentials(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "oauth-token" || !bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want oauth-token/true", key, bearer)
 	}
 
 	data = `[{"id":"anthropic","auth_details":{"api_key":"sk-api"}}]`
+
 	key, bearer, err = parseForgeAnthropicCredentials([]byte(data))
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "sk-api" || bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want sk-api/false", key, bearer)
 	}
@@ -288,10 +318,12 @@ func TestParseForgeAnthropicCredentials(t *testing.T) {
 		{"id":"anthropic","auth_details":{"api_key":"sk-api"}},
 		{"id":"claude_code","auth_details":{"o_auth":{"tokens":{"access_token":"expired","expires_at":"2000-01-01T00:00:00Z"}}}}
 	]`
+
 	key, bearer, err = parseForgeAnthropicCredentials([]byte(data))
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "sk-api" || bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want expired OAuth to fall back to sk-api/false", key, bearer)
 	}
@@ -308,6 +340,7 @@ func containsAll(value string, needles ...string) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -338,6 +371,7 @@ func TestResolveOpenAIKey_EnvVar(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "sk-openai-test" || bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want sk-openai-test/false", key, bearer)
 	}
@@ -363,6 +397,7 @@ func TestResolveOpenAIKey_CodexAuthJSON_APIKey(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if key != "sk-from-codex" || bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want sk-from-codex/false", key, bearer)
 	}

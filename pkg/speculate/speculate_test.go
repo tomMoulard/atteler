@@ -24,11 +24,13 @@ func TestNewPlan_CreatesThreeRoundWorkflow(t *testing.T) {
 	if !reflect.DeepEqual(plan.Agents, []string{"architect", "executor"}) {
 		t.Fatalf("Agents = %v, want requested agents", plan.Agents)
 	}
+
 	if !reflect.DeepEqual(plan.GateChecks, []string{"tests", "scope"}) {
 		t.Fatalf("GateChecks = %v, want requested gates", plan.GateChecks)
 	}
 
 	gotRounds := roundNumbers(plan.Rounds)
+
 	wantRounds := []int{RoundProposal, RoundReview, RoundAggregate}
 	if !reflect.DeepEqual(gotRounds, wantRounds) {
 		t.Fatalf("Rounds = %v, want %v", gotRounds, wantRounds)
@@ -57,6 +59,7 @@ func TestCrossReviews_MapsEveryAgentToOtherProposals(t *testing.T) {
 	}
 
 	got := reviewPairs(reviews)
+
 	want := []string{
 		"architect->executor",
 		"architect->verifier",
@@ -187,6 +190,7 @@ func TestEstimatePromptCacheReuse_FullPartialAndNoSharedPrefix(t *testing.T) {
 
 			assert.Equal(t, tt.wantPrefix, estimate.SharedPrefix)
 			assert.InDelta(t, tt.wantRatio, estimate.ReuseRatio, 0.000001)
+
 			for _, branch := range estimate.Branches {
 				assert.Equal(t, len(tt.wantPrefix), branch.SharedPrefixBytes)
 			}
@@ -277,6 +281,7 @@ func roundNumbers(rounds []Round) []int {
 	for i, round := range rounds {
 		numbers[i] = round.Number
 	}
+
 	return numbers
 }
 
@@ -285,6 +290,7 @@ func reviewPairs(reviews []Review) []string {
 	for i, review := range reviews {
 		pairs[i] = review.Reviewer + "->" + review.TargetAgent
 	}
+
 	return pairs
 }
 
@@ -310,24 +316,29 @@ func TestRun_ExecutesThreeRoundSession(t *testing.T) {
 			if arrivalErr := proposalGate.arrive(ctx); arrivalErr != nil {
 				return "", arrivalErr
 			}
+
 			return "proposal from " + agent, nil
 		},
 		Review: func(ctx context.Context, assignment Review, proposal Proposal) (string, error) {
 			if arrivalErr := reviewGate.arrive(ctx); arrivalErr != nil {
 				return "", arrivalErr
 			}
+
 			if proposal.Agent != assignment.TargetAgent {
 				return "", errors.New("target proposal did not match assignment")
 			}
+
 			return assignment.Reviewer + " reviewed " + proposal.Content, nil
 		},
 		Aggregate: func(_ context.Context, session Session) (Verdict, error) {
 			if len(session.Proposals) != len(plan.Agents) {
 				t.Fatalf("aggregate saw %d proposals, want %d", len(session.Proposals), len(plan.Agents))
 			}
+
 			if len(session.Reviews) != wantReviewCount {
 				t.Fatalf("aggregate saw %d reviews, want %d", len(session.Reviews), wantReviewCount)
 			}
+
 			return Verdict{
 				Winner: executorAgent,
 				Reason: "best supported by reviews",
@@ -345,6 +356,7 @@ func TestRun_ExecutesThreeRoundSession(t *testing.T) {
 	if result.Winner != executorAgent {
 		t.Fatalf("Winner = %q, want executor", result.Winner)
 	}
+
 	if result.Session.Verdict.Reason != "best supported by reviews" {
 		t.Fatalf("Verdict reason = %q, want aggregator reason", result.Session.Verdict.Reason)
 	}
@@ -356,11 +368,13 @@ func TestRun_ExecutesThreeRoundSession(t *testing.T) {
 			t.Fatalf("proposal round = %d, want %d", proposal.Round, RoundProposal)
 		}
 	}
+
 	if !reflect.DeepEqual(gotProposalAgents, plan.Agents) {
 		t.Fatalf("proposal order = %v, want %v", gotProposalAgents, plan.Agents)
 	}
 
 	gotReviews := reviewPairs(result.Session.Reviews)
+
 	wantReviews := []string{
 		"architect->executor",
 		"architect->verifier",
@@ -387,6 +401,7 @@ func TestRun_ReturnsPartialSessionWhenProposalFails(t *testing.T) {
 			if agent == "executor" {
 				return "", errors.New("boom")
 			}
+
 			return "proposal", nil
 		},
 		Review: func(context.Context, Review, Proposal) (string, error) {
@@ -399,9 +414,11 @@ func TestRun_ReturnsPartialSessionWhenProposalFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `proposal "executor": boom`) {
 		t.Fatalf("Run() error = %v, want proposal error", err)
 	}
+
 	if len(result.Session.Proposals) != len(plan.Agents) {
 		t.Fatalf("partial proposals = %d, want %d", len(result.Session.Proposals), len(plan.Agents))
 	}
+
 	if len(result.Session.Reviews) != 0 {
 		t.Fatalf("partial reviews = %d, want 0", len(result.Session.Reviews))
 	}
@@ -435,6 +452,7 @@ func TestRun_ValidatesAggregatorVerdictGates(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `missing gate check "scope"`) {
 		t.Fatalf("Run() error = %v, want missing gate error", err)
 	}
+
 	if result.Session.Verdict.Winner != "executor" {
 		t.Fatalf("partial verdict winner = %q, want executor", result.Session.Verdict.Winner)
 	}
@@ -471,6 +489,7 @@ func newConcurrentGate(needed int) *concurrentGate {
 
 func (gate *concurrentGate) arrive(ctx context.Context) error {
 	gate.mu.Lock()
+
 	gate.count++
 	if gate.count == gate.needed {
 		gate.once.Do(func() { close(gate.ready) })

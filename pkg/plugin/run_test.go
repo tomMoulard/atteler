@@ -14,10 +14,12 @@ import (
 
 func TestRunEntrypoint_CapturesOutputAndUsesPluginRoot(t *testing.T) {
 	t.Parallel()
+
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "data.txt"), []byte("root-data"), 0o600); err != nil {
 		require.NoError(t, err)
 	}
+
 	writeScript(t, root, "bin/run", `#!/bin/sh
 set -eu
 if [ ! -f data.txt ]; then
@@ -27,6 +29,7 @@ fi
 printf 'stdout:%s\n' "$(cat data.txt)"
 printf 'stderr:%s\n' "$(cat data.txt)" >&2
 `)
+
 	manifest := Manifest{
 		Name:        "runner",
 		Version:     "1.0.0",
@@ -47,6 +50,7 @@ printf 'before failure\n'
 printf 'problem\n' >&2
 exit 7
 `)
+
 	manifest := Manifest{
 		Name:        "runner",
 		Version:     "1.0.0",
@@ -55,6 +59,7 @@ exit 7
 
 	result, err := RunEntrypoint(context.Background(), root, manifest, "fail", 5*time.Second)
 	require.Error(t, err)
+
 	var exitErr *exec.ExitError
 	require.ErrorAs(t, err, &exitErr)
 	require.Equal(t, "before failure\n", result.Stdout)
@@ -67,6 +72,7 @@ func TestRunEntrypoint_TimesOutWithCapturedOutput(t *testing.T) {
 	writeScript(t, root, "bin/slow", `#!/bin/sh
 sleep 5 >/dev/null 2>&1
 `)
+
 	manifest := Manifest{
 		Name:        "runner",
 		Version:     "1.0.0",
@@ -104,13 +110,16 @@ func TestRunEntrypoint_RejectsSymlinkEscape(t *testing.T) {
 	outsideScript := writeScript(t, outside, "outside", `#!/bin/sh
 printf 'escaped\n'
 `)
+
 	link := filepath.Join(root, "bin", "outside")
 	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
 		require.NoError(t, err)
 	}
+
 	if err := os.Symlink(outsideScript, link); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
+
 	manifest := Manifest{
 		Name:        "runner",
 		Version:     "1.0.0",
@@ -128,10 +137,12 @@ func writeScript(t *testing.T, root, relativePath, content string) string {
 	if !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
+
 	path := filepath.Join(root, relativePath)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		require.NoError(t, err)
 	}
+
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		require.NoError(t, err)
 	}
@@ -139,5 +150,6 @@ func writeScript(t *testing.T, root, relativePath, content string) string {
 	if err := os.Chmod(path, 0o700); err != nil {
 		require.NoError(t, err)
 	}
+
 	return path
 }

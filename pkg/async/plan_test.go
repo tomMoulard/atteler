@@ -26,6 +26,7 @@ func TestPlan_ReadyBatches(t *testing.T) {
 	}
 
 	got := batchIDs(plan.ReadyBatches())
+
 	want := [][]string{{"design", "docs"}, {"build"}, {"review"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ReadyBatches() = %v, want %v", got, want)
@@ -107,12 +108,15 @@ func TestPlan_RunExecutesSameWaveConcurrently(t *testing.T) {
 	started := make(chan string, 3)
 	release := make(chan struct{})
 	done := make(chan error, 1)
+
 	var results []TaskResult
 
 	go func() {
 		var err error
+
 		results, err = plan.Run(context.Background(), func(ctx context.Context, task Task) (string, error) {
 			started <- task.ID
+
 			select {
 			case <-release:
 				return task.ID + "-done", nil
@@ -124,6 +128,7 @@ func TestPlan_RunExecutesSameWaveConcurrently(t *testing.T) {
 	}()
 
 	gotStarted := make([]string, 0, 3)
+
 	for range 3 {
 		select {
 		case id := <-started:
@@ -140,6 +145,7 @@ func TestPlan_RunExecutesSameWaveConcurrently(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, results, 3)
 		assert.Equal(t, []string{"a", "b", "c"}, resultIDs(results))
+
 		for i := range results {
 			result := results[i]
 			assert.Equal(t, 0, result.Wave)
@@ -167,6 +173,7 @@ func TestPlan_RunPreservesWaveOrderDespiteCompletionOrder(t *testing.T) {
 		if task.ID == "slow" {
 			time.Sleep(25 * time.Millisecond)
 		}
+
 		return task.ID + "-output", nil
 	})
 
@@ -191,6 +198,7 @@ func TestPlan_RunSkipsDownstreamWavesAfterFailure(t *testing.T) {
 		if task.ID == "fail" {
 			return "partial", errors.New("boom")
 		}
+
 		return task.ID + "-output", nil
 	})
 
@@ -223,6 +231,7 @@ func batchIDs(batches [][]Task) [][]string {
 			ids[i][j] = task.ID
 		}
 	}
+
 	return ids
 }
 
@@ -231,6 +240,7 @@ func resultIDs(results []TaskResult) []string {
 	for i := range results {
 		ids[i] = results[i].Task.ID
 	}
+
 	return ids
 }
 
@@ -239,6 +249,7 @@ func resultWaves(results []TaskResult) []int {
 	for i := range results {
 		waves[i] = results[i].Wave
 	}
+
 	return waves
 }
 
@@ -247,5 +258,6 @@ func resultOrders(results []TaskResult) []int {
 	for i := range results {
 		orders[i] = results[i].Order
 	}
+
 	return orders
 }

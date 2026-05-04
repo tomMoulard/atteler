@@ -37,9 +37,11 @@ func Load(path string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, fmt.Errorf("plugin: stat %s: %w", path, err)
 	}
+
 	if info.IsDir() {
 		return LoadDir(path)
 	}
+
 	return LoadFile(path)
 }
 
@@ -50,6 +52,7 @@ func LoadDir(dir string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
+
 	return loadFile(path, dir)
 }
 
@@ -63,14 +66,17 @@ func LoadFile(path string) (Manifest, error) {
 func FindManifest(dir string) (string, error) {
 	for _, name := range manifestFilenames {
 		path := filepath.Join(dir, name)
+
 		info, err := os.Stat(path)
 		if err == nil && !info.IsDir() {
 			return path, nil
 		}
+
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("plugin: stat %s: %w", path, err)
 		}
 	}
+
 	return "", fmt.Errorf("plugin: no manifest found in %s", dir)
 }
 
@@ -84,9 +90,11 @@ func loadFile(path, root string) (Manifest, error) {
 	if err := yaml.Unmarshal(data, &manifest); err != nil {
 		return Manifest{}, fmt.Errorf("plugin: parse %s: %w", path, err)
 	}
+
 	if err := manifest.Validate(root); err != nil {
 		return Manifest{}, fmt.Errorf("plugin: validate %s: %w", path, err)
 	}
+
 	return manifest, nil
 }
 
@@ -96,6 +104,7 @@ func (m Manifest) Validate(root string) error {
 	if strings.TrimSpace(m.Name) == "" {
 		return errors.New("missing name")
 	}
+
 	if strings.TrimSpace(m.Version) == "" {
 		return errors.New("missing version")
 	}
@@ -104,10 +113,12 @@ func (m Manifest) Validate(root string) error {
 		if strings.TrimSpace(name) == "" {
 			return errors.New("entrypoint has empty name")
 		}
+
 		if err := validateEntrypoint(root, path); err != nil {
 			return fmt.Errorf("entrypoint %q: %w", name, err)
 		}
 	}
+
 	return nil
 }
 
@@ -116,6 +127,7 @@ func validateEntrypoint(root, entrypoint string) error {
 	if entrypoint == "" {
 		return errors.New("empty path")
 	}
+
 	if filepath.IsAbs(entrypoint) {
 		return fmt.Errorf("path %q escapes plugin root %q", entrypoint, root)
 	}
@@ -124,6 +136,7 @@ func validateEntrypoint(root, entrypoint string) error {
 	if err != nil {
 		return fmt.Errorf("resolve plugin root: %w", err)
 	}
+
 	targetAbs, err := filepath.Abs(filepath.Join(rootAbs, entrypoint))
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
@@ -133,8 +146,10 @@ func validateEntrypoint(root, entrypoint string) error {
 	if err != nil {
 		return fmt.Errorf("compare with plugin root: %w", err)
 	}
+
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return fmt.Errorf("path %q escapes plugin root %q", entrypoint, root)
 	}
+
 	return nil
 }

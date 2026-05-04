@@ -32,6 +32,7 @@ func (p OrchestrationPlan) Agents() []Agent {
 	for i := range p.Participants {
 		agents = append(agents, p.Participants[i].Agent)
 	}
+
 	return agents
 }
 
@@ -55,6 +56,7 @@ func (e UnknownAgentsError) Error() string {
 	if len(e.Known) == 0 {
 		return fmt.Sprintf("unknown agent(s): %s; no agents are registered", strings.Join(e.Names, ", "))
 	}
+
 	return fmt.Sprintf("unknown agent(s): %s; known agents: %s", strings.Join(e.Names, ", "), strings.Join(e.Known, ", "))
 }
 
@@ -79,6 +81,7 @@ func (r *Registry) PlanOrchestration(request OrchestrationRequest) (Orchestratio
 	}
 
 	known := r.List()
+
 	unknown := unknownRequestedNames(r, request.RequestedNames)
 	if len(unknown) > 0 {
 		return OrchestrationPlan{}, UnknownAgentsError{Names: unknown, Known: known}
@@ -94,9 +97,11 @@ func (r *Registry) PlanOrchestration(request OrchestrationRequest) (Orchestratio
 	if !planner.addRequested(request.RequestedNames) {
 		return planner.plan, nil
 	}
+
 	if !planner.addPhraseMatches(known, ParticipantSourceTrigger) {
 		return planner.plan, nil
 	}
+
 	planner.addPhraseMatches(known, ParticipantSourceCapability)
 
 	return planner.plan, nil
@@ -116,11 +121,13 @@ func (p *orchestrationPlanner) addRequested(names []string) bool {
 		if name == "" {
 			continue
 		}
+
 		agent, _ := p.registry.Get(name)
 		if !p.add(agent, ParticipantSourceRequested, "") {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -131,6 +138,7 @@ func (p *orchestrationPlanner) addPhraseMatches(names []string, source string) b
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -139,11 +147,13 @@ func (p *orchestrationPlanner) firstMatch(agent Agent, source string) (string, b
 	if source == ParticipantSourceTrigger {
 		patterns = agent.Triggers
 	}
+
 	for _, pattern := range patterns {
 		if p.matches(pattern) {
 			return pattern, true
 		}
 	}
+
 	return "", false
 }
 
@@ -151,15 +161,18 @@ func (p *orchestrationPlanner) add(agent Agent, source, pattern string) bool {
 	if p.selected[agent.Name] {
 		return true
 	}
+
 	if p.maxParticipants > 0 && len(p.plan.Participants) >= p.maxParticipants {
 		return false
 	}
+
 	p.plan.Participants = append(p.plan.Participants, Participant{
 		Agent:   agent,
 		Source:  source,
 		Pattern: pattern,
 	})
 	p.selected[agent.Name] = true
+
 	return true
 }
 
@@ -170,15 +183,18 @@ func (p *orchestrationPlanner) matches(pattern string) bool {
 func unknownRequestedNames(r *Registry, names []string) []string {
 	seen := make(map[string]bool, len(names))
 	unknown := make([]string, 0)
+
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" || seen[name] {
 			continue
 		}
+
 		seen[name] = true
 		if _, ok := r.Get(name); !ok {
 			unknown = append(unknown, name)
 		}
 	}
+
 	return unknown
 }

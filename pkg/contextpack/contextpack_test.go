@@ -22,12 +22,15 @@ func TestCompact_NoOpWhenWithinBudget(t *testing.T) {
 	if !reflect.DeepEqual(result.Messages, messages) {
 		t.Fatalf("messages changed on no-op: got %+v want %+v", result.Messages, messages)
 	}
+
 	if result.Stats.Compressed {
 		t.Fatal("expected no compression")
 	}
+
 	if result.Stats.OriginalCount != len(messages) || result.Stats.OutputCount != len(messages) {
 		t.Fatalf("unexpected counts: %+v", result.Stats)
 	}
+
 	if result.Stats.OmittedCount != 0 {
 		t.Fatalf("omitted count = %d, want 0", result.Stats.OmittedCount)
 	}
@@ -60,9 +63,11 @@ func TestCompact_TrimsOlderMessagesAndPreservesOrder(t *testing.T) {
 	if !reflect.DeepEqual(result.Messages, want) {
 		t.Fatalf("unexpected compacted messages:\ngot  %+v\nwant %+v", result.Messages, want)
 	}
+
 	if !result.Stats.Compressed {
 		t.Fatal("expected compression")
 	}
+
 	if result.Stats.OriginalCount != len(messages) || result.Stats.OutputCount != len(want) || result.Stats.OmittedCount != 2 {
 		t.Fatalf("unexpected stats: %+v", result.Stats)
 	}
@@ -84,12 +89,15 @@ func TestCompact_StaysWithinBudgetWhenPossible(t *testing.T) {
 	if got := EstimateMessages(result.Messages); got > budget {
 		t.Fatalf("estimated tokens = %d, budget = %d, messages = %+v", got, budget, result.Messages)
 	}
+
 	if result.Stats.OutputEstimatedTokens > budget {
 		t.Fatalf("stats output tokens = %d, budget = %d", result.Stats.OutputEstimatedTokens, budget)
 	}
+
 	if result.Stats.OmittedCount != 2 {
 		t.Fatalf("omitted count = %d, want 2", result.Stats.OmittedCount)
 	}
+
 	if got := result.Messages[len(result.Messages)-1]; got != messages[3] {
 		t.Fatalf("newest message not preserved: got %+v want %+v", got, messages[3])
 	}

@@ -24,12 +24,15 @@ func TestSpawnAll_RunsRequestsConcurrently(t *testing.T) {
 	started := make(chan string, len(requests))
 	release := make(chan struct{})
 	done := make(chan error, 1)
+
 	var results []Result
 
 	go func() {
 		var err error
+
 		results, err = SpawnAll(context.Background(), requests, func(ctx context.Context, request Request) (string, error) {
 			started <- request.ID
+
 			select {
 			case <-release:
 				return request.ID + "-output", nil
@@ -57,6 +60,7 @@ func TestSpawnAll_RunsRequestsConcurrently(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, results, len(requests))
 		assert.Equal(t, []string{"a", "b", "c"}, resultIDs(results))
+
 		for i := range results {
 			assert.Equal(t, requests[i], results[i].Request)
 			assert.Equal(t, requests[i].ID+"-output", results[i].Output)
@@ -81,6 +85,7 @@ func TestSpawnAll_PreservesInputOrderDespiteCompletionOrder(t *testing.T) {
 		if request.ID == "slow" {
 			time.Sleep(25 * time.Millisecond)
 		}
+
 		return request.ID + "-done", nil
 	})
 
@@ -101,6 +106,7 @@ func TestSpawnAll_RecordsErrorsAndReturnsWrappedFailure(t *testing.T) {
 		if request.ID == "fail" {
 			return "partial", errors.New("boom")
 		}
+
 		return "done", nil
 	})
 
@@ -126,6 +132,7 @@ func TestSpawnAll_ValidatesInputs(t *testing.T) {
 		runner   Runner
 		want     string
 	}
+
 	tests := []validationCase{
 		{name: "nil context", ctx: nil, requests: []Request{{ID: "a", Agent: "executor", Prompt: "prompt"}}, runner: runner, want: "context is required"},
 		{name: "nil runner", ctx: context.Background(), requests: []Request{{ID: "a", Agent: "executor", Prompt: "prompt"}}, runner: nil, want: "runner is required"},
@@ -167,6 +174,7 @@ printf 'ran:%s:%s' "$2" "$4"
 
 	require.NoError(t, err)
 	assert.Equal(t, "ran:architect:draft plan", output)
+
 	contents, err := os.ReadFile(argsFile)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"--agent", "architect", "--once", "draft plan"}, strings.Split(strings.TrimSpace(string(contents)), "\n"))
@@ -202,6 +210,7 @@ func resultIDs(results []Result) []string {
 	for i := range results {
 		ids[i] = results[i].Request.ID
 	}
+
 	return ids
 }
 
@@ -210,5 +219,6 @@ func resultOutputs(results []Result) []string {
 	for i := range results {
 		outputs[i] = results[i].Output
 	}
+
 	return outputs
 }

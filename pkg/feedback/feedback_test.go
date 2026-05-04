@@ -23,16 +23,20 @@ func TestProposals_GroupsEvidenceByAgent(t *testing.T) {
 	if len(proposals) != 1 {
 		t.Fatalf("len(proposals) = %d, want 1: %+v", len(proposals), proposals)
 	}
+
 	proposal := proposals[0]
 	if proposal.Agent != "reviewer" {
 		t.Fatalf("Agent = %q, want reviewer", proposal.Agent)
 	}
+
 	if proposal.Action == "" {
 		t.Fatal("Action is empty")
 	}
+
 	if proposal.Reason != "Recorded negative knowledge and failed evaluations indicate recurring improvement opportunities." {
 		t.Fatalf("Reason = %q", proposal.Reason)
 	}
+
 	wantEvidence := []string{
 		"negative knowledge: skip integration tests -> missed OAuth breakage",
 		"evaluation: fail; score 1; missed auth regression; ref eval-1",
@@ -40,6 +44,7 @@ func TestProposals_GroupsEvidenceByAgent(t *testing.T) {
 	if !reflect.DeepEqual(proposal.Evidence, wantEvidence) {
 		t.Fatalf("Evidence = %#v, want %#v", proposal.Evidence, wantEvidence)
 	}
+
 	if proposal.Confidence != 0.8 {
 		t.Fatalf("Confidence = %v, want 0.8", proposal.Confidence)
 	}
@@ -82,7 +87,9 @@ func TestProposals_StableOrderingPrioritizesFailedEvidence(t *testing.T) {
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("Proposals were not stable:\nfirst:  %#v\nsecond: %#v", first, second)
 	}
+
 	gotAgents := proposalAgents(first)
+
 	wantAgents := []string{"architect", "planner", "writer"}
 	if !reflect.DeepEqual(gotAgents, wantAgents) {
 		t.Fatalf("agents = %#v, want %#v", gotAgents, wantAgents)
@@ -100,6 +107,7 @@ func TestFromSession_DerivesProposals(t *testing.T) {
 	if len(proposals) != 1 {
 		t.Fatalf("len(proposals) = %d, want 1: %+v", len(proposals), proposals)
 	}
+
 	if proposals[0].Agent != "executor" {
 		t.Fatalf("Agent = %q, want executor", proposals[0].Agent)
 	}
@@ -110,5 +118,6 @@ func proposalAgents(proposals []Proposal) []string {
 	for _, proposal := range proposals {
 		agents = append(agents, proposal.Agent)
 	}
+
 	return agents
 }

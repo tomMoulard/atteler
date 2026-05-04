@@ -51,6 +51,7 @@ func (s *Store) SaveHeadlessRun(run HeadlessRun) error {
 	if run.StartedAt.IsZero() {
 		run.StartedAt = now
 	}
+
 	run.UpdatedAt = now
 	if run.LogPath == "" {
 		run.LogPath = s.headlessLogPath(run.ID)
@@ -65,13 +66,16 @@ func (s *Store) SaveHeadlessRun(run HeadlessRun) error {
 	if err != nil {
 		return fmt.Errorf("session: marshal headless run: %w", err)
 	}
+
 	data = append(data, '\n')
 
 	path := s.headlessJSONPath(run.ID)
+
 	tmp, err := os.CreateTemp(dir, ".headless-*.json")
 	if err != nil {
 		return fmt.Errorf("session: create headless temp: %w", err)
 	}
+
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 
@@ -79,9 +83,11 @@ func (s *Store) SaveHeadlessRun(run HeadlessRun) error {
 		_ = tmp.Close()
 		return fmt.Errorf("session: write headless temp: %w", err)
 	}
+
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("session: close headless temp: %w", err)
 	}
+
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("session: replace headless %s: %w", path, err)
 	}
@@ -96,6 +102,7 @@ func (s *Store) LoadHeadlessRun(id string) (HeadlessRun, error) {
 	}
 
 	path := s.headlessJSONPath(id)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return HeadlessRun{}, fmt.Errorf("session: read headless %s: %w", path, err)
@@ -105,20 +112,24 @@ func (s *Store) LoadHeadlessRun(id string) (HeadlessRun, error) {
 	if err := json.Unmarshal(data, &run); err != nil {
 		return HeadlessRun{}, fmt.Errorf("session: parse headless %s: %w", path, err)
 	}
+
 	if run.ID == "" {
 		run.ID = idFromPath(path)
 	}
+
 	return run, nil
 }
 
 // ListHeadlessRuns returns saved headless runs sorted by most recently updated first.
 func (s *Store) ListHeadlessRuns() ([]HeadlessRun, error) {
 	dir := s.headlessDir()
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
+
 		return nil, fmt.Errorf("session: list headless %s: %w", dir, err)
 	}
 
@@ -127,10 +138,12 @@ func (s *Store) ListHeadlessRuns() ([]HeadlessRun, error) {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != sessionFileExt {
 			continue
 		}
+
 		run, err := s.LoadHeadlessRun(idFromPath(entry.Name()))
 		if err != nil {
 			return nil, err
 		}
+
 		runs = append(runs, run)
 	}
 
@@ -138,8 +151,10 @@ func (s *Store) ListHeadlessRuns() ([]HeadlessRun, error) {
 		if runs[i].UpdatedAt.Equal(runs[j].UpdatedAt) {
 			return runs[i].StartedAt.After(runs[j].StartedAt)
 		}
+
 		return runs[i].UpdatedAt.After(runs[j].UpdatedAt)
 	})
+
 	return runs, nil
 }
 
@@ -155,6 +170,7 @@ func (s *Store) AppendHeadlessLog(id, text string) error {
 	}
 
 	path := s.headlessLogPath(id)
+
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("session: open headless log %s: %w", path, err)
@@ -164,6 +180,7 @@ func (s *Store) AppendHeadlessLog(id, text string) error {
 	if _, err := file.WriteString(text); err != nil {
 		return fmt.Errorf("session: append headless log %s: %w", path, err)
 	}
+
 	return nil
 }
 
@@ -174,10 +191,12 @@ func (s *Store) ReadHeadlessLog(id string) (string, error) {
 	}
 
 	path := s.headlessLogPath(id)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("session: read headless log %s: %w", path, err)
 	}
+
 	return string(data), nil
 }
 
@@ -185,9 +204,11 @@ func validateHeadlessID(id string) error {
 	if strings.TrimSpace(id) == "" {
 		return errors.New("session: headless id is required")
 	}
+
 	if id == "." || id == ".." || filepath.Base(id) != id {
 		return errors.New("session: headless id must be a file name")
 	}
+
 	return nil
 }
 

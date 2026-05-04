@@ -57,9 +57,11 @@ func LoadRegistry(paths []string) (*Registry, error) {
 				plugin.ManifestPath,
 			)
 		}
+
 		registry.plugins[name] = plugin
 		registry.order = append(registry.order, name)
 	}
+
 	return registry, nil
 }
 
@@ -73,7 +75,9 @@ func (r *Registry) List() []string {
 	if r == nil || len(r.order) == 0 {
 		return nil
 	}
+
 	names := append([]string(nil), r.order...)
+
 	return names
 }
 
@@ -82,7 +86,9 @@ func (r *Registry) Get(name string) (Plugin, bool) {
 	if r == nil {
 		return Plugin{}, false
 	}
+
 	plugin, ok := r.plugins[strings.TrimSpace(name)]
+
 	return plugin, ok
 }
 
@@ -99,6 +105,7 @@ func (r *Registry) ResolveEntrypoint(pluginName, entrypointName string) (Entrypo
 	if entrypointName == "" {
 		return Entrypoint{}, errors.New("plugin: empty entrypoint name")
 	}
+
 	if err := plugin.Manifest.Validate(plugin.Root); err != nil {
 		return Entrypoint{}, fmt.Errorf("plugin: validate manifest: %w", err)
 	}
@@ -107,6 +114,7 @@ func (r *Registry) ResolveEntrypoint(pluginName, entrypointName string) (Entrypo
 	if !ok {
 		return Entrypoint{}, fmt.Errorf("plugin: entrypoint %q not found", entrypointName)
 	}
+
 	root, target, err := resolveEntrypoint(plugin.Root, relativePath)
 	if err != nil {
 		return Entrypoint{}, fmt.Errorf("plugin: resolve entrypoint %q: %w", entrypointName, err)
@@ -136,6 +144,7 @@ func (r *Registry) DryRunEntrypoint(pluginName, entrypointName string) (DryRun, 
 		entrypoint.Path,
 		entrypoint.Root,
 	)
+
 	return DryRun{Entrypoint: entrypoint, Description: description}, nil
 }
 
@@ -149,15 +158,18 @@ func loadPlugin(path string) (Plugin, error) {
 	if err != nil {
 		return Plugin{}, fmt.Errorf("plugin: resolve %s: %w", path, err)
 	}
+
 	info, err := os.Stat(absPath)
 	if err != nil {
 		return Plugin{}, fmt.Errorf("plugin: stat %s: %w", absPath, err)
 	}
 
 	root := filepath.Dir(absPath)
+
 	manifestPath := absPath
 	if info.IsDir() {
 		root = absPath
+
 		manifestPath, err = FindManifest(root)
 		if err != nil {
 			return Plugin{}, err
@@ -168,5 +180,6 @@ func loadPlugin(path string) (Plugin, error) {
 	if err != nil {
 		return Plugin{}, err
 	}
+
 	return Plugin{Manifest: manifest, Root: root, ManifestPath: manifestPath}, nil
 }

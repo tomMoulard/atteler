@@ -64,6 +64,7 @@ func Suggest(observed []string) (Suggestion, bool) {
 // (steps × occurrences), then longer step sequences, then earlier appearance.
 func SuggestWithOptions(observed []string, opts Options) (Suggestion, bool) {
 	opts = normalizeOptions(opts)
+
 	actions := normalizeActions(observed)
 	if len(actions) < opts.MinSteps*opts.MinOccurrences {
 		return Suggestion{}, false
@@ -74,13 +75,17 @@ func SuggestWithOptions(observed []string, opts Options) (Suggestion, bool) {
 	}
 
 	var best candidate
+
 	found := false
+
 	for size := opts.MinSteps; size <= opts.MaxSteps; size++ {
 		startsByKey := make(map[string][]int)
 		stepsByKey := make(map[string][]string)
+
 		for start := 0; start+size <= len(actions); start++ {
 			steps := actions[start : start+size]
 			key := strings.Join(steps, "\x00")
+
 			startsByKey[key] = append(startsByKey[key], start)
 			if _, ok := stepsByKey[key]; !ok {
 				stepsByKey[key] = append([]string(nil), steps...)
@@ -92,6 +97,7 @@ func SuggestWithOptions(observed []string, opts Options) (Suggestion, bool) {
 			if occurrences < opts.MinOccurrences {
 				continue
 			}
+
 			cand := candidate{steps: stepsByKey[key], occurrences: occurrences, firstIndex: starts[0]}
 			if !found || better(cand, best) {
 				best = cand
@@ -111,15 +117,19 @@ func normalizeOptions(opts Options) Options {
 	if opts.MinSteps < defaultMinSteps {
 		opts.MinSteps = defaultMinSteps
 	}
+
 	if opts.MaxSteps <= 0 {
 		opts.MaxSteps = defaultMaxSteps
 	}
+
 	if opts.MaxSteps < opts.MinSteps {
 		opts.MaxSteps = opts.MinSteps
 	}
+
 	if opts.MinOccurrences < defaultMinOccurrences {
 		opts.MinOccurrences = defaultMinOccurrences
 	}
+
 	return opts
 }
 
@@ -130,8 +140,10 @@ func normalizeActions(observed []string) []string {
 		if normalized == "" {
 			continue
 		}
+
 		actions = append(actions, normalized)
 	}
+
 	return actions
 }
 
@@ -141,34 +153,42 @@ func normalizeStep(action string) string {
 
 func countNonOverlapping(starts []int, size int) int {
 	count := 0
+
 	nextAllowed := 0
 	for _, start := range starts {
 		if start < nextAllowed {
 			continue
 		}
+
 		count++
 		nextAllowed = start + size
 	}
+
 	return count
 }
 
 func better(cand, best candidate) bool {
 	candScore := len(cand.steps) * cand.occurrences
+
 	bestScore := len(best.steps) * best.occurrences
 	if candScore != bestScore {
 		return candScore > bestScore
 	}
+
 	if len(cand.steps) != len(best.steps) {
 		return len(cand.steps) > len(best.steps)
 	}
+
 	if cand.occurrences != best.occurrences {
 		return cand.occurrences > best.occurrences
 	}
+
 	return cand.firstIndex < best.firstIndex
 }
 
 func buildSuggestion(c candidate) Suggestion {
 	slug := slugForSteps(c.steps)
+
 	return Suggestion{
 		Name:        nameFromSlug(slug),
 		Slug:        slug,
@@ -185,11 +205,13 @@ func slugForSteps(steps []string) string {
 	parts := make([]string, 0, len(steps))
 	for _, step := range steps {
 		part := separators.ReplaceAllString(strings.ToLower(step), "-")
+
 		part = strings.Trim(part, "-")
 		if part != "" {
 			parts = append(parts, part)
 		}
 	}
+
 	return strings.Join(parts, "-")
 }
 
@@ -199,9 +221,11 @@ func nameFromSlug(slug string) string {
 		if word == "" {
 			continue
 		}
+
 		letters := []rune(word)
 		letters[0] = unicode.ToUpper(letters[0])
 		words[i] = string(letters)
 	}
+
 	return strings.Join(words, " ") + " Skill"
 }

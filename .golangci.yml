@@ -55,6 +55,7 @@ linters:
     - revive
     - usestdlibvars
     - whitespace
+    - wsl_v5
 
     # Complexity
     - cyclop

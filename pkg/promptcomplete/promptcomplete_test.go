@@ -21,12 +21,15 @@ func TestSuggest_AgentSuffixAndReplacementRange(t *testing.T) {
 	if got.Text != "researcher" {
 		t.Fatalf("Text = %q, want researcher", got.Text)
 	}
+
 	if got.Suffix != "earcher" {
 		t.Fatalf("Suffix = %q, want earcher", got.Suffix)
 	}
+
 	if got.ReplacementStart != len("ask ") || got.ReplacementEnd != len("ask res") {
 		t.Fatalf("replacement = [%d:%d], want [%d:%d]", got.ReplacementStart, got.ReplacementEnd, len("ask "), len("ask res"))
 	}
+
 	if !strings.Contains(got.Explanation, "agent") || !strings.Contains(got.Explanation, `"res"`) {
 		t.Fatalf("Explanation = %q, want agent prefix context", got.Explanation)
 	}
@@ -49,9 +52,11 @@ func TestSuggestAll_RanksPrefixThenContextTokens(t *testing.T) {
 	if len(got) < 2 {
 		t.Fatalf("SuggestAll returned %d suggestions, want at least 2: %#v", len(got), got)
 	}
+
 	if got[0].Text != "format" {
 		t.Fatalf("first Text = %q, want format; all = %#v", got[0].Text, got)
 	}
+
 	if got[0].Score <= got[1].Score {
 		t.Fatalf("scores = %d, %d; want context-ranked tool first", got[0].Score, got[1].Score)
 	}
@@ -72,6 +77,7 @@ func TestSuggestAll_UsesCandidateTokensForContext(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("SuggestAll returned %d suggestions, want 2: %#v", len(got), got)
 	}
+
 	if got[0].Text != "explore" {
 		t.Fatalf("first Text = %q, want explore; all = %#v", got[0].Text, got)
 	}
@@ -98,9 +104,11 @@ func TestSuggestAll_TemplateCompletionAndCustomExplanation(t *testing.T) {
 	if got.Suffix != "view this change for regressions" {
 		t.Fatalf("Suffix = %q, want template suffix", got.Suffix)
 	}
+
 	if got.Candidate.Kind != "template" {
 		t.Fatalf("Candidate.Kind = %q, want template", got.Candidate.Kind)
 	}
+
 	if got.Explanation != "Completes a local code review prompt template." {
 		t.Fatalf("Explanation = %q, want custom explanation", got.Explanation)
 	}
@@ -156,6 +164,7 @@ func TestSuggestAll_CompletesCurrentLineInMultilineInput(t *testing.T) {
 	t.Parallel()
 
 	input := "first line\nuse res"
+
 	got, ok := Suggest(Context{
 		Input:  input,
 		Cursor: len(input),
@@ -168,6 +177,7 @@ func TestSuggestAll_CompletesCurrentLineInMultilineInput(t *testing.T) {
 	if got.ReplacementStart != len("first line\nuse ") {
 		t.Fatalf("ReplacementStart = %d, want %d", got.ReplacementStart, len("first line\nuse "))
 	}
+
 	if got.Suffix != "earcher" {
 		t.Fatalf("Suffix = %q, want earcher", got.Suffix)
 	}
@@ -184,9 +194,11 @@ func TestSuggestAll_OptionsLimitMinPrefixAndCaseSensitivity(t *testing.T) {
 	if got := SuggestAll(ctx, Options{MinPrefix: 2}); len(got) != 0 {
 		t.Fatalf("SuggestAll with MinPrefix returned %#v, want none", got)
 	}
+
 	if got := SuggestAll(ctx, Options{Limit: 1}); len(got) != 1 {
 		t.Fatalf("SuggestAll with Limit returned %d suggestions, want 1", len(got))
 	}
+
 	if got := SuggestAll(ctx, Options{CaseSensitive: true}); len(got) != 0 {
 		t.Fatalf("SuggestAll with CaseSensitive returned %#v, want none", got)
 	}
@@ -196,6 +208,7 @@ func TestCandidatesFromNames_TrimsAndSkipsEmptyNames(t *testing.T) {
 	t.Parallel()
 
 	got := CandidatesFromNames("tool", " format ", "", "test")
+
 	want := []Candidate{
 		{Text: "format", Kind: "tool"},
 		{Text: "test", Kind: "tool"},

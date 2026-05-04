@@ -45,19 +45,24 @@ type Index struct {
 // IndexDir parses all Go source files under root.
 func IndexDir(root string) (Index, error) {
 	var files []string
+
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+
 		if entry.IsDir() {
 			if path != root && skipDir(entry.Name()) {
 				return filepath.SkipDir
 			}
+
 			return nil
 		}
+
 		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".go") {
 			files = append(files, path)
 		}
+
 		return nil
 	})
 	if err != nil {
@@ -65,6 +70,7 @@ func IndexDir(root string) (Index, error) {
 	}
 
 	sort.Strings(files)
+
 	return IndexFiles(files)
 }
 
@@ -72,8 +78,11 @@ func IndexDir(root string) (Index, error) {
 func IndexFiles(paths []string) (Index, error) {
 	fset := token.NewFileSet()
 	fileSummaries := make([]File, 0, len(paths))
-	var symbols []Symbol
-	var edges []ImportEdge
+
+	var (
+		symbols []Symbol
+		edges   []ImportEdge
+	)
 
 	for _, path := range paths {
 		parsed, err := parser.ParseFile(fset, path, nil, 0)
@@ -83,6 +92,7 @@ func IndexFiles(paths []string) (Index, error) {
 
 		summary := summarizeFile(fset, path, parsed)
 		fileSummaries = append(fileSummaries, summary)
+
 		symbols = append(symbols, summary.Symbols...)
 		for _, imp := range summary.Imports {
 			edges = append(edges, ImportEdge{
@@ -96,9 +106,11 @@ func IndexFiles(paths []string) (Index, error) {
 		if symbols[i].Name != symbols[j].Name {
 			return symbols[i].Name < symbols[j].Name
 		}
+
 		if symbols[i].File != symbols[j].File {
 			return symbols[i].File < symbols[j].File
 		}
+
 		return symbols[i].Line < symbols[j].Line
 	})
 
@@ -112,11 +124,13 @@ func IndexFiles(paths []string) (Index, error) {
 // FindSymbol returns symbols with the exact name.
 func (idx Index) FindSymbol(name string) []Symbol {
 	var matches []Symbol
+
 	for _, sym := range idx.Symbols {
 		if sym.Name == name {
 			matches = append(matches, sym)
 		}
 	}
+
 	return matches
 }
 
@@ -131,8 +145,10 @@ func summarizeFile(fset *token.FileSet, path string, file *ast.File) File {
 		if err != nil {
 			importPath = imp.Path.Value
 		}
+
 		summary.Imports = append(summary.Imports, importPath)
 	}
+
 	sort.Strings(summary.Imports)
 
 	for _, decl := range file.Decls {
@@ -152,6 +168,7 @@ func funcSymbol(fset *token.FileSet, path string, decl *ast.FuncDecl) Symbol {
 	if decl.Recv != nil {
 		kind = "method"
 	}
+
 	return Symbol{
 		Name: decl.Name.Name,
 		Kind: kind,
@@ -162,6 +179,7 @@ func funcSymbol(fset *token.FileSet, path string, decl *ast.FuncDecl) Symbol {
 
 func genDeclSymbols(fset *token.FileSet, path string, decl *ast.GenDecl) []Symbol {
 	var symbols []Symbol
+
 	for _, spec := range decl.Specs {
 		switch spec := spec.(type) {
 		case *ast.TypeSpec:
@@ -173,10 +191,12 @@ func genDeclSymbols(fset *token.FileSet, path string, decl *ast.GenDecl) []Symbo
 			})
 		case *ast.ValueSpec:
 			kind := tokenKind(decl.Tok)
+
 			for _, name := range spec.Names {
 				if name.Name == "_" {
 					continue
 				}
+
 				symbols = append(symbols, Symbol{
 					Name: name.Name,
 					Kind: kind,
@@ -186,6 +206,7 @@ func genDeclSymbols(fset *token.FileSet, path string, decl *ast.GenDecl) []Symbo
 			}
 		}
 	}
+
 	return symbols
 }
 

@@ -106,6 +106,7 @@ func normalizePlanReviewers(reviewers []Reviewer) ([]Reviewer, error) {
 	}
 
 	normalized := make([]Reviewer, 0, len(reviewers))
+
 	seen := make(map[string]struct{}, len(reviewers))
 	for i, reviewer := range reviewers {
 		if err := ValidateReviewer(reviewer); err != nil {
@@ -116,12 +117,14 @@ func normalizePlanReviewers(reviewers []Reviewer) ([]Reviewer, error) {
 		if _, exists := seen[name]; exists {
 			return nil, fmt.Errorf("duplicate reviewer %q", name)
 		}
+
 		seen[name] = struct{}{}
 
 		categories, err := normalizeCategories(reviewer.Categories)
 		if err != nil {
 			return nil, fmt.Errorf("reviewer %d: %w", i, err)
 		}
+
 		slices.Sort(categories)
 
 		normalized = append(normalized, Reviewer{Name: name, Categories: categories})
@@ -130,6 +133,7 @@ func normalizePlanReviewers(reviewers []Reviewer) ([]Reviewer, error) {
 	slices.SortStableFunc(normalized, func(left, right Reviewer) int {
 		return strings.Compare(left.Name, right.Name)
 	})
+
 	return normalized, nil
 }
 
@@ -137,11 +141,14 @@ func normalizePlanPaths(paths []string) ([]string, error) {
 	if err := ValidateRequest(Request{Paths: paths}); err != nil {
 		return nil, err
 	}
+
 	normalized, err := normalizeUnique("review path", paths)
 	if err != nil {
 		return nil, err
 	}
+
 	slices.Sort(normalized)
+
 	return normalized, nil
 }
 
@@ -149,6 +156,7 @@ func normalizePlanGates(gates []string) ([]string, error) {
 	if len(gates) == 0 {
 		return append([]string(nil), DefaultRequiredGates...), nil
 	}
+
 	return normalizeUnique("required gate", gates)
 }
 
@@ -157,6 +165,7 @@ func reviewerNames(reviewers []Reviewer) []string {
 	for i, reviewer := range reviewers {
 		names[i] = reviewer.Name
 	}
+
 	return names
 }
 
@@ -167,12 +176,14 @@ func buildCrossReviews(reviewers []string) []CrossReview {
 			if reviewer == reviewedReviewer {
 				continue
 			}
+
 			crossReviews = append(crossReviews, CrossReview{
 				Reviewer:         reviewer,
 				ReviewedReviewer: reviewedReviewer,
 			})
 		}
 	}
+
 	return crossReviews
 }
 
@@ -214,6 +225,7 @@ func cloneReviewers(reviewers []Reviewer) []Reviewer {
 			Categories: append([]Category(nil), reviewer.Categories...),
 		}
 	}
+
 	return cloned
 }
 
@@ -231,5 +243,6 @@ func cloneRounds(rounds []Round) []Round {
 			Number:        round.Number,
 		}
 	}
+
 	return cloned
 }

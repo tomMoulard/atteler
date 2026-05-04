@@ -12,6 +12,7 @@ import (
 
 func TestMarkdown_RendersTranscript(t *testing.T) {
 	t.Parallel()
+
 	session := Session{
 		ID:           "abc",
 		CreatedAt:    time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC),
@@ -42,6 +43,7 @@ func TestMarkdown_RendersTranscript(t *testing.T) {
 
 func TestMarkdown_EmptyTranscript(t *testing.T) {
 	t.Parallel()
+
 	got := Markdown(Session{})
 	if !strings.Contains(got, "_No messages._") {
 		require.Failf(t, "unexpected failure", "Markdown = %q, want empty marker", got)
@@ -50,6 +52,7 @@ func TestMarkdown_EmptyTranscript(t *testing.T) {
 
 func TestMarkdown_UsesTitle(t *testing.T) {
 	t.Parallel()
+
 	got := Markdown(Session{ID: "abc", Title: "Auth review", Tags: []string{"auth", "review"}})
 	for _, want := range []string{
 		"# Auth review",

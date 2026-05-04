@@ -28,6 +28,7 @@ func TestScanWithOptions_FindsRepositoryHealthIssues(t *testing.T) {
 	}
 
 	got := findingKeys(findings)
+
 	want := []string{
 		"assets/blob.txt|large_file|warning",
 		"docs/notes.md|stale_todo|maintenance",
@@ -48,9 +49,11 @@ func TestScan_UsesDefaultOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
 	}
+
 	if len(findings) != 1 {
 		t.Fatalf("len(findings) = %d, want 1: %#v", len(findings), findings)
 	}
+
 	if findings[0].Path != "todo.txt" || findings[0].Kind != "stale_todo" {
 		t.Fatalf("finding = %#v, want stale_todo for todo.txt", findings[0])
 	}
@@ -70,6 +73,7 @@ func TestScanWithOptions_SortsFindingsDeterministically(t *testing.T) {
 	}
 
 	got := findingKeys(findings)
+
 	want := []string{
 		"a/a.go|missing_test|info",
 		"a/a.txt|stale_todo|maintenance",
@@ -93,6 +97,7 @@ func TestScanWithOptions_ReportsStaleMarkers(t *testing.T) {
 	}
 
 	got := findingMessages(findings)
+
 	want := []string{
 		"contains stale TODO/FIXME marker",
 		"contains stale TODO/FIXME marker",
@@ -114,6 +119,7 @@ func TestScanWithOptions_ReportsLargeFilesWithStaleMarkers(t *testing.T) {
 	}
 
 	got := findingKeys(findings)
+
 	want := []string{
 		"large-todo.txt|large_file|warning",
 		"large-todo.txt|stale_todo|maintenance",
@@ -234,6 +240,7 @@ func findingKeys(findings []Finding) []string {
 	for _, finding := range findings {
 		keys = append(keys, finding.Path+"|"+finding.Kind+"|"+finding.Severity)
 	}
+
 	return keys
 }
 
@@ -242,6 +249,7 @@ func findingMessages(findings []Finding) []string {
 	for _, finding := range findings {
 		messages = append(messages, finding.Message)
 	}
+
 	return messages
 }
 
@@ -252,6 +260,7 @@ func writeFile(t *testing.T, root, path, content string) {
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0o750); err != nil {
 		t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(fullPath), err)
 	}
+
 	if err := os.WriteFile(fullPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", fullPath, err)
 	}

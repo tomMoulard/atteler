@@ -30,6 +30,7 @@ func nonNilCredentialContext(ctx context.Context) context.Context {
 	if ctx != nil {
 		return ctx
 	}
+
 	return defaultCredentialContext()
 }
 
@@ -51,12 +52,15 @@ func ResolveAnthropicKey() (key string, bearer bool, err error) {
 // any credential-store command or OAuth refresh request that may block.
 func ResolveAnthropicKeyContext(ctx context.Context) (key string, bearer bool, err error) {
 	ctx = nonNilCredentialContext(ctx)
+
 	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
 		return v, false, nil
 	}
+
 	if v := os.Getenv("ANTHROPIC_AUTH_TOKEN"); v != "" {
 		return v, true, nil
 	}
+
 	if v := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); v != "" {
 		return v, true, nil
 	}
@@ -124,12 +128,15 @@ func parseClaudeCodeCredentials(data []byte) (string, error) {
 	if err := json.Unmarshal(data, &creds); err != nil {
 		return "", fmt.Errorf("invalid Claude Code credentials JSON: %w", err)
 	}
+
 	if creds.ClaudeAIOAuth != nil && creds.ClaudeAIOAuth.AccessToken != "" {
 		if creds.ClaudeAIOAuth.expired(time.Now().Add(forgeTokenExpirySkew)) {
 			return "", errors.New("claude code accessToken expired")
 		}
+
 		return creds.ClaudeAIOAuth.AccessToken, nil
 	}
+
 	return "", errors.New("no accessToken in Claude Code credentials")
 }
 
@@ -137,6 +144,7 @@ func (c claudeOAuthBlock) expired(cutoff time.Time) bool {
 	if c.ExpiresAt <= 0 {
 		return false
 	}
+
 	return !time.UnixMilli(c.ExpiresAt).After(cutoff)
 }
 
@@ -198,28 +206,35 @@ var (
 // token.
 func resolveForgeAnthropicCredentials(ctx context.Context) (key string, bearer bool, err error) {
 	ctx = nonNilCredentialContext(ctx)
+
 	var failures []error
+
 	for _, path := range forgeCredentialPaths() {
 		key, bearer, err := readForgeCredentialsFile(ctx, path)
 		if err == nil && key != "" {
 			return key, bearer, nil
 		}
+
 		if err != nil {
 			failures = append(failures, err)
 		}
 	}
+
 	if len(failures) == 0 {
 		return "", false, errors.New("no ForgeCode credential paths")
 	}
+
 	return "", false, fmt.Errorf("no ForgeCode Anthropic credentials found: %w", errors.Join(failures...))
 }
 
 func readForgeCredentialsFile(ctx context.Context, path string) (key string, bearer bool, err error) {
 	ctx = nonNilCredentialContext(ctx)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", false, fmt.Errorf("cannot read ForgeCode credentials %s: %w", path, err)
 	}
+
 	entries, err := parseForgeCredentialEntries(data)
 	if err != nil {
 		return "", false, err
@@ -230,6 +245,7 @@ func readForgeCredentialsFile(ctx context.Context, path string) (key string, bea
 	}
 
 	refreshErr := error(nil)
+
 	if key, err := refreshForgeClaudeCodeCredential(ctx, path, data, entries); err == nil && key != "" {
 		return key, true, nil
 	} else if err != nil && !errors.Is(err, errForgeOAuthRefreshUnavailable) {
@@ -239,22 +255,27 @@ func readForgeCredentialsFile(ctx context.Context, path string) (key string, bea
 	if key := forgeCredentialForProvider(entries, providerAnthropic); key != "" {
 		return key, false, nil
 	}
+
 	if refreshErr != nil {
 		return "", false, refreshErr
 	}
+
 	return "", false, errors.New("no claude_code or anthropic credential in ForgeCode credentials")
 }
 
 func forgeCredentialPaths() []string {
 	var paths []string
+
 	add := func(path string) {
 		path = strings.TrimSpace(path)
 		if path == "" {
 			return
 		}
+
 		if slices.Contains(paths, path) {
 			return
 		}
+
 		paths = append(paths, path)
 	}
 
@@ -272,6 +293,7 @@ func forgeCredentialPaths() []string {
 	// release's path convention.
 	add(filepath.Join(home, "forge", ".credentials.json"))
 	add(filepath.Join(home, ".forge", ".credentials.json"))
+
 	return paths
 }
 
@@ -282,6 +304,7 @@ func parseForgeAnthropicCredentials(data []byte) (key string, bearer bool, err e
 	if err != nil {
 		return "", false, err
 	}
+
 	return forgeAnthropicCredentialFromEntries(entries)
 }
 
@@ -290,6 +313,7 @@ func parseForgeCredentialEntries(data []byte) ([]forgeCredentialEntry, error) {
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil, fmt.Errorf("invalid ForgeCode credentials JSON: %w", err)
 	}
+
 	return entries, nil
 }
 
@@ -297,6 +321,7 @@ func forgeAnthropicCredentialFromEntries(entries []forgeCredentialEntry) (key st
 	if key := forgeCredentialForProvider(entries, forgeClaudeCodeProviderID); key != "" {
 		return key, true, nil
 	}
+
 	if key := forgeCredentialForProvider(entries, providerAnthropic); key != "" {
 		return key, false, nil
 	}
@@ -306,14 +331,17 @@ func forgeAnthropicCredentialFromEntries(entries []forgeCredentialEntry) (key st
 
 func refreshForgeClaudeCodeCredential(ctx context.Context, path string, data []byte, entries []forgeCredentialEntry) (string, error) {
 	ctx = nonNilCredentialContext(ctx)
+
 	entry := forgeProviderEntry(entries, forgeClaudeCodeProviderID)
 	if entry == nil {
 		return "", errForgeOAuthRefreshUnavailable
 	}
+
 	oauth := entry.authDetails().oauth()
 	if oauth == nil || oauth.Tokens.refreshToken() == "" {
 		return "", errForgeOAuthRefreshUnavailable
 	}
+
 	if token := oauth.Tokens.validAccessToken(); token != "" {
 		return token, nil
 	}
@@ -322,9 +350,11 @@ func refreshForgeClaudeCodeCredential(ctx context.Context, path string, data []b
 	if err != nil {
 		return "", err
 	}
+
 	if err := writeRefreshedForgeCredentials(path, data, tokens); err != nil {
 		return "", err
 	}
+
 	return tokens.accessToken(), nil
 }
 
@@ -342,6 +372,7 @@ type forgeOAuthRefreshResponse struct {
 func refreshForgeOAuthToken(ctx context.Context, config forgeOAuthConfig, refreshToken string) (forgeOAuthTokens, error) {
 	ctx = nonNilCredentialContext(ctx)
 	tokenURL := config.tokenURL()
+
 	clientID := config.clientID()
 	if tokenURL == "" || clientID == "" {
 		return forgeOAuthTokens{}, errForgeOAuthRefreshUnavailable
@@ -360,6 +391,7 @@ func refreshForgeOAuthToken(ctx context.Context, config forgeOAuthConfig, refres
 	if err != nil {
 		return forgeOAuthTokens{}, fmt.Errorf("ForgeCode OAuth refresh request: %w", err)
 	}
+
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 
@@ -373,6 +405,7 @@ func refreshForgeOAuthToken(ctx context.Context, config forgeOAuthConfig, refres
 	if err != nil {
 		return forgeOAuthTokens{}, fmt.Errorf("ForgeCode OAuth refresh read response: %w", err)
 	}
+
 	if resp.StatusCode != http.StatusOK {
 		return forgeOAuthTokens{}, fmt.Errorf("ForgeCode OAuth refresh HTTP %d: %s", resp.StatusCode, body)
 	}
@@ -381,10 +414,12 @@ func refreshForgeOAuthToken(ctx context.Context, config forgeOAuthConfig, refres
 	if err := json.Unmarshal(body, &refreshed); err != nil {
 		return forgeOAuthTokens{}, fmt.Errorf("ForgeCode OAuth refresh response: %w", err)
 	}
+
 	tokens := refreshed.tokens(refreshToken)
 	if tokens.accessToken() == "" {
 		return forgeOAuthTokens{}, errors.New("ForgeCode OAuth refresh response missing access token")
 	}
+
 	return tokens, nil
 }
 
@@ -395,21 +430,27 @@ func writeRefreshedForgeCredentials(path string, data []byte, tokens forgeOAuthT
 	}
 
 	updated := false
+
 	for i := range raw {
 		id, ok := raw[i]["id"].(string)
 		if !ok || !strings.EqualFold(strings.TrimSpace(id), forgeClaudeCodeProviderID) {
 			continue
 		}
+
 		tokenMap := forgeTokenMap(raw[i])
 		if tokenMap == nil {
 			return errForgeOAuthRefreshUnavailable
 		}
+
 		setCredentialString(tokenMap, "access_token", "accessToken", tokens.accessToken())
 		setCredentialString(tokenMap, "refresh_token", "refreshToken", tokens.refreshToken())
 		setCredentialString(tokenMap, "expires_at", "expiresAt", tokens.expiresAt())
+
 		updated = true
+
 		break
 	}
+
 	if !updated {
 		return errForgeOAuthRefreshUnavailable
 	}
@@ -418,10 +459,12 @@ func writeRefreshedForgeCredentials(path string, data []byte, tokens forgeOAuthT
 	if err != nil {
 		return fmt.Errorf("marshal refreshed ForgeCode credentials: %w", err)
 	}
+
 	out = append(out, '\n')
 	if err := os.WriteFile(path, out, 0o600); err != nil {
 		return fmt.Errorf("write refreshed ForgeCode credentials: %w", err)
 	}
+
 	return nil
 }
 
@@ -430,15 +473,18 @@ func forgeTokenMap(entry map[string]any) map[string]any {
 	if authDetails == nil {
 		return nil
 	}
+
 	oauth := mapStringAny(authDetails, "o_auth", "oAuth")
 	if oauth == nil {
 		return nil
 	}
+
 	tokens, ok := oauth["tokens"].(map[string]any)
 	if !ok {
 		tokens = make(map[string]any)
 		oauth["tokens"] = tokens
 	}
+
 	return tokens
 }
 
@@ -449,6 +495,7 @@ func mapStringAny(raw map[string]any, keys ...string) map[string]any {
 			return nested
 		}
 	}
+
 	return nil
 }
 
@@ -456,10 +503,12 @@ func setCredentialString(raw map[string]any, snakeKey, camelKey, value string) {
 	if value == "" {
 		return
 	}
+
 	if _, ok := raw[camelKey]; ok {
 		raw[camelKey] = value
 		return
 	}
+
 	raw[snakeKey] = value
 }
 
@@ -470,6 +519,7 @@ func (r forgeOAuthRefreshResponse) tokens(currentRefreshToken string) forgeOAuth
 			expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second).UTC().Format(time.RFC3339Nano)
 		}
 	}
+
 	return forgeOAuthTokens{
 		AccessToken:  firstNonEmptyString(r.AccessToken, r.AccessCamel),
 		RefreshToken: firstNonEmptyString(r.RefreshToken, r.RefreshCamel, currentRefreshToken),
@@ -484,6 +534,7 @@ func forgeProviderEntry(entries []forgeCredentialEntry, providerID string) *forg
 			return entry
 		}
 	}
+
 	return nil
 }
 
@@ -492,6 +543,7 @@ func forgeCredentialForProvider(entries []forgeCredentialEntry, providerID strin
 	if entry == nil {
 		return ""
 	}
+
 	return entry.authDetails().credential()
 }
 
@@ -499,6 +551,7 @@ func (e forgeCredentialEntry) authDetails() forgeAuthDetails {
 	if !e.AuthDetails.empty() {
 		return e.AuthDetails
 	}
+
 	return e.AuthDetailsCamel
 }
 
@@ -508,6 +561,7 @@ func (a forgeAuthDetails) credential() string {
 			return token
 		}
 	}
+
 	return firstNonEmptyString(a.APIKey, a.APIKeyCamel, a.AccessToken, a.AccessCamel, a.Token)
 }
 
@@ -515,6 +569,7 @@ func (a forgeAuthDetails) oauth() *forgeOAuth {
 	if a.OAuth != nil {
 		return a.OAuth
 	}
+
 	return a.OAuthCamel
 }
 
@@ -545,6 +600,7 @@ func (t forgeOAuthTokens) validAccessToken() string {
 	if token == "" || t.expired(time.Now().Add(forgeTokenExpirySkew)) {
 		return ""
 	}
+
 	return token
 }
 
@@ -553,10 +609,12 @@ func (t forgeOAuthTokens) expired(cutoff time.Time) bool {
 	if expiresAt == "" {
 		return false
 	}
+
 	expiry, err := time.Parse(time.RFC3339Nano, expiresAt)
 	if err != nil {
 		return false
 	}
+
 	return !expiry.After(cutoff)
 }
 
@@ -566,6 +624,7 @@ func firstNonEmptyString(values ...string) string {
 			return value
 		}
 	}
+
 	return ""
 }
 
@@ -575,6 +634,7 @@ func firstNonZeroInt64(values ...int64) int64 {
 			return value
 		}
 	}
+
 	return 0
 }
 
@@ -641,9 +701,11 @@ func hasCodexAuth() bool {
 	if err != nil {
 		return false
 	}
+
 	var auth codexAuth
 	if err := json.Unmarshal(data, &auth); err != nil {
 		return false
 	}
+
 	return (auth.APIKey != nil && *auth.APIKey != "") || auth.Tokens.AccessToken != ""
 }

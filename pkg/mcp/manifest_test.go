@@ -37,6 +37,7 @@ func TestManifest_ValidateRejectsMissingRequiredFields(t *testing.T) {
 			if err == nil {
 				t.Fatal("Validate() error = nil, want error")
 			}
+
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("Validate() error = %q, want containing %q", err.Error(), want)
 			}
@@ -82,6 +83,7 @@ func TestManifest_ValidateRejectsDuplicateNames(t *testing.T) {
 	if err == nil {
 		t.Fatal("Validate() error = nil, want duplicate error")
 	}
+
 	if !strings.Contains(err.Error(), `duplicate server name "git"`) {
 		t.Fatalf("Validate() error = %q, want duplicate server name", err.Error())
 	}
@@ -97,6 +99,7 @@ func TestManifest_ListReturnsSortedNames(t *testing.T) {
 	}}
 
 	got := manifest.List()
+
 	want := []string{"alpha", "middle", "zeta"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("List() = %#v, want %#v", got, want)
@@ -114,10 +117,12 @@ func TestManifest_FindByCapability(t *testing.T) {
 
 	matches := manifest.Find(" search ")
 	got := serverNames(matches)
+
 	want := []string{"alpha", "zeta"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Find() names = %#v, want %#v", got, want)
 	}
+
 	if matches[0].Command != "a" || matches[1].Command != "z" {
 		t.Fatalf("Find() matches = %#v, want original server data", matches)
 	}
@@ -131,6 +136,7 @@ func TestManifest_FindEmptyOrMissingCapability(t *testing.T) {
 	if got := manifest.Find(" "); got != nil {
 		t.Fatalf("Find(blank) = %#v, want nil", got)
 	}
+
 	if got := manifest.Find("write"); got != nil {
 		t.Fatalf("Find(missing) = %#v, want nil", got)
 	}
@@ -140,9 +146,11 @@ func serverNames(servers []Server) []string {
 	if len(servers) == 0 {
 		return nil
 	}
+
 	names := make([]string, 0, len(servers))
 	for _, server := range servers {
 		names = append(names, strings.TrimSpace(server.Name))
 	}
+
 	return names
 }

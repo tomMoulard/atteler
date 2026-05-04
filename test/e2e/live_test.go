@@ -106,6 +106,7 @@ generation:
 func TestLiveClaudeCodeOneShot(t *testing.T) {
 	requireLive(t)
 	requireClaudeCode(t)
+
 	model := envOrDefault("ATTELER_E2E_CLAUDE_CODE_MODEL", "claude-haiku-4-5")
 	marker := "atteler-live-claude-code-ok"
 
@@ -170,6 +171,7 @@ generation:
 
 func requireLive(t *testing.T) {
 	t.Helper()
+
 	if os.Getenv("ATTELER_E2E_LIVE") != "1" {
 		t.Skip("set ATTELER_E2E_LIVE=1 to run live LLM e2e tests")
 	}
@@ -177,21 +179,26 @@ func requireLive(t *testing.T) {
 
 func requireEnv(t *testing.T, name string) string {
 	t.Helper()
+
 	value := os.Getenv(name)
 	if value == "" {
 		t.Skipf("%s is required for this live e2e test", name)
 	}
+
 	return value
 }
 
 func requireClaudeCode(t *testing.T) {
 	t.Helper()
+
 	path, err := exec.LookPath("claude")
 	if err != nil {
 		t.Skip("claude executable is required for this live Claude Code test")
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
 	output, err := exec.CommandContext(ctx, path, "auth", "status").CombinedOutput()
 	if err != nil || !strings.Contains(string(output), `"loggedIn": true`) {
 		t.Skipf("Claude Code login is required for this live test: %s", output)
@@ -200,6 +207,7 @@ func requireClaudeCode(t *testing.T) {
 
 func requireCodexHome(t *testing.T) string {
 	t.Helper()
+
 	dir := os.Getenv("ATTELER_E2E_CODEX_HOME")
 	if dir == "" {
 		dir = filepath.Join(os.Getenv("HOME"), ".codex")
@@ -208,11 +216,13 @@ func requireCodexHome(t *testing.T) string {
 	if _, err := os.Stat(filepath.Join(dir, "auth.json")); err != nil {
 		t.Skipf("Codex credentials not available in %s: %v", dir, err)
 	}
+
 	return dir
 }
 
 func requireForgeConfig(t *testing.T) string {
 	t.Helper()
+
 	dir := os.Getenv("ATTELER_E2E_FORGE_CONFIG")
 	if dir == "" {
 		t.Skip("ATTELER_E2E_FORGE_CONFIG is required for this live ForgeCode test")
@@ -221,6 +231,7 @@ func requireForgeConfig(t *testing.T) string {
 	if _, err := os.Stat(filepath.Join(dir, ".credentials.json")); err != nil {
 		t.Skipf("ForgeCode credentials not available in %s: %v", dir, err)
 	}
+
 	return dir
 }
 
@@ -228,5 +239,6 @@ func envOrDefault(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value
 	}
+
 	return fallback
 }

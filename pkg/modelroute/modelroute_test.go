@@ -16,6 +16,7 @@ func TestEstimateCost_UsesOutputAndCachedInput(t *testing.T) {
 	}
 
 	got := EstimateCost(candidate, profile)
+
 	want := 0.00175 // 750 billable input tokens + 250 output tokens.
 	if got != want {
 		t.Fatalf("EstimateCost() = %v, want %v", got, want)
@@ -70,6 +71,7 @@ func TestSelectBest_PrefersPriorityThenCostThenInteractiveTTFT(t *testing.T) {
 	if !ok {
 		t.Fatal("SelectBest() ok = false, want true")
 	}
+
 	if got.Name != "best" {
 		t.Fatalf("SelectBest().Name = %q, want %q", got.Name, "best")
 	}
@@ -88,6 +90,7 @@ func TestFallbackChain_IsStableForEqualCandidates(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("FallbackChain() len = %d, want 3", len(got))
 	}
+
 	for i, want := range []string{"first", "second", "third"} {
 		if got[i].Name != want {
 			t.Fatalf("FallbackChain()[%d].Name = %q, want %q", i, got[i].Name, want)
@@ -115,9 +118,11 @@ func TestID(t *testing.T) {
 	if got := (Candidate{Provider: "openai", Name: "fast"}).ID(); got != "openai/fast" {
 		t.Fatalf("ID() = %q, want openai/fast", got)
 	}
+
 	if got := (Candidate{Name: "fast"}).ID(); got != "fast" {
 		t.Fatalf("ID() = %q, want fast", got)
 	}
+
 	if got := (Candidate{Provider: "openai"}).ID(); got != "openai" {
 		t.Fatalf("ID() = %q, want openai", got)
 	}

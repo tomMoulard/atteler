@@ -48,12 +48,15 @@ func SpawnAll(ctx context.Context, requests []Request, run Runner) ([]Result, er
 	if ctx == nil {
 		return nil, errors.New("subagent: context is required")
 	}
+
 	if run == nil {
 		return nil, errors.New("subagent: runner is required")
 	}
+
 	if err := validateRequests(requests); err != nil {
 		return nil, err
 	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("subagent: context canceled before spawning: %w", err)
 	}
@@ -63,12 +66,14 @@ func SpawnAll(ctx context.Context, requests []Request, run Runner) ([]Result, er
 
 	var wg sync.WaitGroup
 	wg.Add(len(requests))
+
 	for i, request := range requests {
 		go func() {
 			defer wg.Done()
 
 			started := time.Now().UTC()
 			output, err := run(ctx, request)
+
 			results[i] = Result{
 				StartedAt: started,
 				Duration:  time.Since(started),
@@ -81,6 +86,7 @@ func SpawnAll(ctx context.Context, requests []Request, run Runner) ([]Result, er
 			}
 		}()
 	}
+
 	wg.Wait()
 
 	return results, errors.Join(errs...)
@@ -99,6 +105,7 @@ func AttelerCommandWithOptions(opts CommandOptions) Runner {
 		if ctx == nil {
 			return "", errors.New("subagent: context is required")
 		}
+
 		binary := strings.TrimSpace(opts.Binary)
 		if binary == "" {
 			return "", errors.New("subagent: atteler binary is required")
@@ -108,9 +115,11 @@ func AttelerCommandWithOptions(opts CommandOptions) Runner {
 		if strings.TrimSpace(opts.Dir) != "" {
 			cmd.Dir = opts.Dir
 		}
+
 		cmd.Env = mergeEnv(opts.Env)
 
 		var stdout, stderr bytes.Buffer
+
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 
@@ -119,6 +128,7 @@ func AttelerCommandWithOptions(opts CommandOptions) Runner {
 			if message == "" {
 				message = err.Error()
 			}
+
 			return stdout.String(), fmt.Errorf("subagent: atteler command failed: %s: %w", message, err)
 		}
 
@@ -133,17 +143,22 @@ func validateRequests(requests []Request) error {
 		if id == "" {
 			return fmt.Errorf("subagent: request %d ID is required", i)
 		}
+
 		if strings.TrimSpace(request.Agent) == "" {
 			return fmt.Errorf("subagent: request %q agent is required", request.ID)
 		}
+
 		if strings.TrimSpace(request.Prompt) == "" {
 			return fmt.Errorf("subagent: request %q prompt is required", request.ID)
 		}
+
 		if _, exists := seen[id]; exists {
 			return fmt.Errorf("subagent: duplicate request ID %q", id)
 		}
+
 		seen[id] = struct{}{}
 	}
+
 	return nil
 }
 
@@ -151,13 +166,17 @@ func mergeEnv(extra map[string]string) []string {
 	if len(extra) == 0 {
 		return nil
 	}
+
 	env := os.Environ()
+
 	for key, value := range extra {
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
+
 		env = append(env, key+"="+value)
 	}
+
 	return env
 }

@@ -235,6 +235,7 @@ func TestValidateReport_ValidatesReviewerFindingsAndGates(t *testing.T) {
 	}
 
 	report.Findings[0].Message = ""
+
 	err := ValidateReport(report, []string{"tests pass"})
 	if err == nil || !strings.Contains(err.Error(), "finding 0: finding message is required") {
 		t.Fatalf("ValidateReport() error = %v, want wrapped finding error", err)
@@ -265,6 +266,7 @@ func TestSortedFindings_IsDeterministicAndDoesNotMutateInput(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SortedFindings() = %#v, want %#v", got, want)
 	}
+
 	if !reflect.DeepEqual(input, original) {
 		t.Fatalf("SortedFindings() mutated input: %#v", input)
 	}
@@ -281,6 +283,7 @@ func TestReport_SortedFindingsUsesReportFindings(t *testing.T) {
 	}
 
 	got := report.SortedFindings()
+
 	want := []Finding{
 		{Severity: SeverityHigh, Category: CategorySecurity, Path: "a.go", Message: "auth"},
 		{Severity: SeverityLow, Category: CategoryStyle, Path: "z.go", Message: "style"},
@@ -302,10 +305,12 @@ func TestGroupFindingsBySeverity_UsesSeverityOrder(t *testing.T) {
 
 	groups := GroupFindingsBySeverity(findings)
 	gotKeys := groupKeys(groups)
+
 	wantKeys := []string{"critical", "high", "low"}
 	if !reflect.DeepEqual(gotKeys, wantKeys) {
 		t.Fatalf("GroupFindingsBySeverity() keys = %v, want %v", gotKeys, wantKeys)
 	}
+
 	if got := groups[1].Findings[0].Path; got != "a.go" {
 		t.Fatalf("high group first path = %q, want a.go", got)
 	}
@@ -322,6 +327,7 @@ func TestGroupFindingsByCategory_UsesCategoryNameOrder(t *testing.T) {
 
 	groups := GroupFindingsByCategory(findings)
 	gotKeys := groupKeys(groups)
+
 	wantKeys := []string{"correctness", "security", "style"}
 	if !reflect.DeepEqual(gotKeys, wantKeys) {
 		t.Fatalf("GroupFindingsByCategory() keys = %v, want %v", gotKeys, wantKeys)
@@ -345,6 +351,7 @@ func TestSummary_CountsSeveritiesAndTotal(t *testing.T) {
 	if summary != want {
 		t.Fatalf("Summary() = %#v, want %#v", summary, want)
 	}
+
 	if got := summary.Total(); got != 6 {
 		t.Fatalf("Total() = %d, want 6", got)
 	}
@@ -362,6 +369,7 @@ func TestReport_SeveritySummaryUsesReportFindings(t *testing.T) {
 	}
 
 	got := report.SeveritySummary()
+
 	want := SeveritySummary{Critical: 1, Medium: 2}
 	if got != want {
 		t.Fatalf("SeveritySummary() = %#v, want %#v", got, want)
@@ -398,5 +406,6 @@ func groupKeys(groups []FindingGroup) []string {
 	for i, group := range groups {
 		keys[i] = group.Key
 	}
+
 	return keys
 }

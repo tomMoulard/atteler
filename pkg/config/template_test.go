@@ -9,6 +9,7 @@ import (
 
 func TestTemplateYAML(t *testing.T) {
 	t.Parallel()
+
 	template := TemplateYAML()
 	for _, want := range []string{
 		"default_provider:",
@@ -22,6 +23,7 @@ func TestTemplateYAML(t *testing.T) {
 			require.Failf(t, "unexpected failure", "TemplateYAML missing %q in:\n%s", want, template)
 		}
 	}
+
 	if strings.Contains(template, "api.openai.com/v1") {
 		require.Failf(t, "unexpected failure", "TemplateYAML should use OpenAI host root, got:\n%s", template)
 	}

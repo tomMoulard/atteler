@@ -60,14 +60,18 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 	if ctx == nil {
 		return nil, errors.New("invoke mcp server: nil context")
 	}
+
 	if timeout > 0 {
 		var cancel context.CancelFunc
+
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+
 	if err := server.Validate(); err != nil {
 		return nil, fmt.Errorf("invoke mcp server: %w", err)
 	}
+
 	if err := request.Validate(); err != nil {
 		return nil, fmt.Errorf("invoke mcp server %q: %w", strings.TrimSpace(server.Name), err)
 	}
@@ -82,16 +86,19 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 	if strings.TrimSpace(server.CWD) != "" {
 		cmd.Dir = server.CWD
 	}
+
 	cmd.Env = mergedEnv(server.Env)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open stdin for mcp server %q: %w", strings.TrimSpace(server.Name), err)
 	}
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open stdout for mcp server %q: %w", strings.TrimSpace(server.Name), err)
 	}
+
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open stderr for mcp server %q: %w", strings.TrimSpace(server.Name), err)
@@ -113,19 +120,25 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 	if waitErr != nil && ctx.Err() != nil {
 		return nil, withProcessOutput(fmt.Errorf("mcp server %q timed out or was canceled: %w", strings.TrimSpace(server.Name), ctx.Err()), stderrText)
 	}
+
 	if writeErr != nil {
 		return nil, withProcessOutput(fmt.Errorf("write request to mcp server %q: %w", strings.TrimSpace(server.Name), writeErr), stderrText)
 	}
+
 	if readResult.err != nil {
 		return nil, withProcessOutput(fmt.Errorf("read response from mcp server %q: %w", strings.TrimSpace(server.Name), readResult.err), stderrText)
 	}
+
 	response := readResult.response
+
 	if waitErr != nil && !killed {
 		return nil, withProcessOutput(fmt.Errorf("mcp server %q exited: %w", strings.TrimSpace(server.Name), waitErr), stderrText)
 	}
+
 	if response.Error != nil {
 		return response, fmt.Errorf("mcp server %q returned error %d: %s", strings.TrimSpace(server.Name), response.Error.Code, response.Error.Message)
 	}
+
 	return response, nil
 }
 
@@ -151,12 +164,15 @@ func (s Server) Validate() error {
 	if name == "" {
 		return errors.New("missing name")
 	}
+
 	if strings.TrimSpace(s.Command) == "" {
 		return fmt.Errorf("server %q: missing command", name)
 	}
+
 	if err := validateCapabilities(name, s.Capabilities); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -165,29 +181,35 @@ func (r Request) Validate() error {
 	if strings.TrimSpace(r.Method) == "" {
 		return errors.New("missing method")
 	}
+
 	return nil
 }
 
 func writeRequest(w io.WriteCloser, request Request) error {
 	defer w.Close()
+
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("marshal json-rpc request: %w", err)
 	}
+
 	encoded = append(encoded, '\n')
 	if _, err := w.Write(encoded); err != nil {
 		return fmt.Errorf("write newline-delimited json: %w", err)
 	}
+
 	return nil
 }
 
 func readResponse(r io.Reader, wantID any) <-chan responseResult {
 	ch := make(chan responseResult, 1)
+
 	go func() {
 		defer close(ch)
 
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
 		for scanner.Scan() {
 			line := bytes.TrimSpace(scanner.Bytes())
 			if len(line) == 0 {
@@ -199,38 +221,47 @@ func readResponse(r io.Reader, wantID any) <-chan responseResult {
 				ch <- responseResult{err: fmt.Errorf("decode newline-delimited json response: %w", err)}
 				return
 			}
+
 			if sameJSONValue(response.ID, wantID) {
 				ch <- responseResult{response: &response}
 				return
 			}
 		}
+
 		if err := scanner.Err(); err != nil {
 			ch <- responseResult{err: fmt.Errorf("scan response: %w", err)}
 			return
 		}
+
 		ch <- responseResult{err: io.ErrUnexpectedEOF}
 	}()
+
 	return ch
 }
 
 func readAll(r io.Reader) <-chan string {
 	ch := make(chan string, 1)
+
 	go func() {
 		data, err := io.ReadAll(r)
 		if err != nil {
 			ch <- string(data)
 			return
 		}
+
 		ch <- string(data)
 	}()
+
 	return ch
 }
 
 func waitFor(cmd *exec.Cmd) <-chan error {
 	ch := make(chan error, 1)
+
 	go func() {
 		ch <- cmd.Wait()
 	}()
+
 	return ch
 }
 
@@ -248,6 +279,7 @@ func finishProcess(ctx context.Context, cmd *exec.Cmd, waitCh <-chan error) (boo
 				return false, fmt.Errorf("kill mcp server process: %w", err)
 			}
 		}
+
 		return true, <-waitCh
 	}
 }
@@ -260,6 +292,7 @@ type responseResult struct {
 func sameJSONValue(got, want any) bool {
 	gotJSON, gotErr := json.Marshal(got)
 	wantJSON, wantErr := json.Marshal(want)
+
 	return gotErr == nil && wantErr == nil && bytes.Equal(gotJSON, wantJSON)
 }
 
@@ -269,13 +302,16 @@ func mergedEnv(overrides map[string]string) []string {
 	}
 
 	env := os.Environ()
+
 	for key, value := range overrides {
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
+
 		env = append(env, key+"="+value)
 	}
+
 	return env
 }
 
@@ -283,5 +319,6 @@ func withProcessOutput(err error, stderr string) error {
 	if stderr == "" {
 		return err
 	}
+
 	return fmt.Errorf("%w: stderr: %s", err, stderr)
 }

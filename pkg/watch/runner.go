@@ -62,6 +62,7 @@ func Run(ctx context.Context, root string, options RunOptions) ([]IterationResul
 		startedAt := options.Now()
 		findings, err := options.Scan(ctx, root, options.ScanOptions)
 		finishedAt := options.Now()
+
 		results = append(results, IterationResult{
 			Iteration:  iteration,
 			StartedAt:  startedAt,
@@ -72,16 +73,20 @@ func Run(ctx context.Context, root string, options RunOptions) ([]IterationResul
 		if err != nil {
 			return results, fmt.Errorf("watch iteration %d: %w", iteration, err)
 		}
+
 		if err := ctx.Err(); err != nil {
 			return results, fmt.Errorf("watch run: context after iteration %d: %w", iteration, err)
 		}
+
 		if options.MaxIterations > 0 && iteration == options.MaxIterations {
 			return results, nil
 		}
+
 		if err := options.Wait(ctx, options.Interval); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return results, fmt.Errorf("watch run: context while waiting after iteration %d: %w", iteration, ctxErr)
 			}
+
 			return results, fmt.Errorf("wait for next watch iteration: %w", err)
 		}
 	}
@@ -93,27 +98,35 @@ func normalizeRunOptions(ctx context.Context, root string, options RunOptions) (
 	if ctx == nil {
 		return RunOptions{}, errors.New("watch run: nil context")
 	}
+
 	if root == "" {
 		return RunOptions{}, errors.New("watch run: root is required")
 	}
+
 	if options.Interval < 0 {
 		return RunOptions{}, fmt.Errorf("watch run: interval must be non-negative: %s", options.Interval)
 	}
+
 	if options.Interval == 0 {
 		options.Interval = DefaultRunInterval
 	}
+
 	if options.MaxIterations < 0 {
 		return RunOptions{}, fmt.Errorf("watch run: max iterations must be non-negative: %d", options.MaxIterations)
 	}
+
 	if options.Scan == nil {
 		options.Scan = defaultScanFunc
 	}
+
 	if options.Now == nil {
 		options.Now = time.Now
 	}
+
 	if options.Wait == nil {
 		options.Wait = waitWithContext
 	}
+
 	return options, nil
 }
 
@@ -121,13 +134,16 @@ func defaultScanFunc(ctx context.Context, root string, options Options) ([]Findi
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("watch scan: context before scan: %w", err)
 	}
+
 	findings, err := ScanWithOptions(root, options)
 	if err != nil {
 		return nil, err
 	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("watch scan: context after scan: %w", err)
 	}
+
 	return findings, nil
 }
 
@@ -147,5 +163,6 @@ func resultCapacity(maxIterations int) int {
 	if maxIterations > 0 {
 		return maxIterations
 	}
+
 	return 0
 }

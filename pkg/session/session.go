@@ -98,6 +98,7 @@ func NewStore(dir string) *Store {
 	if dir == "" {
 		dir = DefaultDir()
 	}
+
 	return &Store{dir: dir}
 }
 
@@ -106,9 +107,11 @@ func DefaultDir() string {
 	if dir := os.Getenv(EnvDir); dir != "" {
 		return dir
 	}
+
 	if cwd, err := os.Getwd(); err == nil {
 		return filepath.Join(cwd, ".atteler", "sessions")
 	}
+
 	return filepath.Join(os.TempDir(), "atteler", "sessions")
 }
 
@@ -120,7 +123,9 @@ func (s *Store) Dir() string {
 // New creates a new unsaved session.
 func New(defaultModel string, messages []llm.Message) Session {
 	now := time.Now().UTC()
+
 	copied := append([]llm.Message(nil), messages...)
+
 	return Session{
 		ID:           newID(now),
 		CreatedAt:    now,
@@ -133,6 +138,7 @@ func New(defaultModel string, messages []llm.Message) Session {
 // Load reads a session by ID or path.
 func (s *Store) Load(ref string) (Session, error) {
 	path := s.path(ref)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Session{}, fmt.Errorf("session: read %s: %w", path, err)
@@ -142,9 +148,11 @@ func (s *Store) Load(ref string) (Session, error) {
 	if err := json.Unmarshal(data, &session); err != nil {
 		return Session{}, fmt.Errorf("session: parse %s: %w", path, err)
 	}
+
 	if session.ID == "" {
 		session.ID = idFromPath(path)
 	}
+
 	return session, nil
 }
 
@@ -158,6 +166,7 @@ func (s *Store) Save(session Session) error {
 	if session.CreatedAt.IsZero() {
 		session.CreatedAt = now
 	}
+
 	session.UpdatedAt = now
 
 	if err := os.MkdirAll(s.dir, 0o750); err != nil {
@@ -168,13 +177,16 @@ func (s *Store) Save(session Session) error {
 	if err != nil {
 		return fmt.Errorf("session: marshal: %w", err)
 	}
+
 	data = append(data, '\n')
 
 	path := s.path(session.ID)
+
 	tmp, err := os.CreateTemp(s.dir, ".session-*.json")
 	if err != nil {
 		return fmt.Errorf("session: create temp: %w", err)
 	}
+
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 
@@ -182,9 +194,11 @@ func (s *Store) Save(session Session) error {
 		_ = tmp.Close()
 		return fmt.Errorf("session: write temp: %w", err)
 	}
+
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("session: close temp: %w", err)
 	}
+
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("session: replace %s: %w", path, err)
 	}
@@ -199,6 +213,7 @@ func (s *Store) List() ([]Summary, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
+
 		return nil, fmt.Errorf("session: list %s: %w", s.dir, err)
 	}
 
@@ -209,16 +224,19 @@ func (s *Store) List() ([]Summary, error) {
 		}
 
 		path := filepath.Join(s.dir, entry.Name())
+
 		session, err := s.Load(path)
 		if err != nil {
 			return nil, err
 		}
+
 		summaries = append(summaries, summarize(path, session))
 	}
 
 	sort.Slice(summaries, func(i, j int) bool {
 		return summaries[i].UpdatedAt.After(summaries[j].UpdatedAt)
 	})
+
 	return summaries, nil
 }
 
@@ -228,6 +246,7 @@ func (s *Store) ListByTag(tag string) ([]Summary, error) {
 	if key == "" {
 		return nil, errors.New("session: tag is required")
 	}
+
 	summaries, err := s.List()
 	if err != nil {
 		return nil, err
@@ -239,6 +258,7 @@ func (s *Store) ListByTag(tag string) ([]Summary, error) {
 			filtered = append(filtered, summaries[i])
 		}
 	}
+
 	return filtered, nil
 }
 
@@ -251,15 +271,19 @@ func (s *Store) Tags() ([]TagSummary, error) {
 
 	counts := make(map[string]int)
 	display := make(map[string]string)
+
 	for i := range summaries {
 		summary := &summaries[i]
+
 		seen := make(map[string]bool, len(summary.Tags))
 		for _, tag := range summary.Tags {
 			key := normalizeTagKey(tag)
 			if key == "" || seen[key] {
 				continue
 			}
+
 			seen[key] = true
+
 			counts[key]++
 			if _, ok := display[key]; !ok {
 				display[key] = strings.TrimSpace(tag)
@@ -271,12 +295,15 @@ func (s *Store) Tags() ([]TagSummary, error) {
 	for key, count := range counts {
 		tags = append(tags, TagSummary{Tag: display[key], Sessions: count})
 	}
+
 	sort.Slice(tags, func(i, j int) bool {
 		if tags[i].Sessions == tags[j].Sessions {
 			return strings.ToLower(tags[i].Tag) < strings.ToLower(tags[j].Tag)
 		}
+
 		return tags[i].Sessions > tags[j].Sessions
 	})
+
 	return tags, nil
 }
 
@@ -286,6 +313,7 @@ func summaryHasTag(summary Summary, want string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -306,12 +334,14 @@ func (s *Session) Append(role llm.Role, content string) {
 // RecordNegativeKnowledge records a failed approach unless the same approach and reason already exist.
 func (s *Session) RecordNegativeKnowledge(approach, reason, commit, agent string) bool {
 	approach = strings.TrimSpace(approach)
+
 	reason = strings.TrimSpace(reason)
 	if approach == "" || reason == "" {
 		return false
 	}
 
 	approachKey := normalizeNegativeKnowledgeKey(approach)
+
 	reasonKey := normalizeNegativeKnowledgeKey(reason)
 	for _, entry := range s.NegativeKnowledge {
 		if normalizeNegativeKnowledgeKey(entry.Approach) == approachKey &&
@@ -327,6 +357,7 @@ func (s *Session) RecordNegativeKnowledge(approach, reason, commit, agent string
 		Agent:     strings.TrimSpace(agent),
 		CreatedAt: time.Now().UTC(),
 	})
+
 	return true
 }
 
@@ -337,10 +368,12 @@ func normalizeNegativeKnowledgeKey(value string) string {
 // RecordEvaluation appends an agent evaluation when required fields are valid.
 func (s *Session) RecordEvaluation(agentName, outcome, notes, reference string, score int) bool {
 	agentName = strings.TrimSpace(agentName)
+
 	outcome = strings.TrimSpace(outcome)
 	if agentName == "" || outcome == "" {
 		return false
 	}
+
 	s.Evaluations = append(s.Evaluations, AgentEvaluation{
 		Agent:     agentName,
 		Outcome:   outcome,
@@ -349,16 +382,19 @@ func (s *Session) RecordEvaluation(agentName, outcome, notes, reference string, 
 		Score:     score,
 		CreatedAt: time.Now().UTC(),
 	})
+
 	return true
 }
 
 // RecordArtifact appends a session artifact when the path and kind are valid.
 func (s *Session) RecordArtifact(path, kind, summary, sourceAgent string) bool {
 	path = strings.TrimSpace(path)
+
 	kind = strings.TrimSpace(kind)
 	if path == "" || kind == "" {
 		return false
 	}
+
 	s.Artifacts = append(s.Artifacts, Artifact{
 		Path:        filepath.Clean(path),
 		Kind:        kind,
@@ -366,6 +402,7 @@ func (s *Session) RecordArtifact(path, kind, summary, sourceAgent string) bool {
 		SourceAgent: strings.TrimSpace(sourceAgent),
 		CreatedAt:   time.Now().UTC(),
 	})
+
 	return true
 }
 
@@ -377,9 +414,11 @@ func (s *Store) path(ref string) string {
 	if filepath.IsAbs(ref) || strings.ContainsRune(ref, rune(os.PathSeparator)) {
 		return ref
 	}
+
 	if strings.HasSuffix(ref, sessionFileExt) {
 		return filepath.Join(s.dir, ref)
 	}
+
 	return filepath.Join(s.dir, ref+sessionFileExt)
 }
 
@@ -388,6 +427,7 @@ func newID(now time.Time) string {
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return now.Format("20060102-150405")
 	}
+
 	return now.Format("20060102-150405") + "-" + hex.EncodeToString(suffix[:])
 }
 

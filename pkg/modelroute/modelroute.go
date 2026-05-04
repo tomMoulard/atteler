@@ -49,6 +49,7 @@ func (c Candidate) ID() string {
 	if c.Provider == "" {
 		return c.Name
 	}
+
 	if c.Name == "" {
 		return c.Provider
 	}
@@ -117,6 +118,7 @@ func better(left, right Candidate, profile RequestProfile) bool {
 	}
 
 	leftCost := EstimateCost(left, profile)
+
 	rightCost := EstimateCost(right, profile)
 	if leftCost != rightCost {
 		return leftCost < rightCost
@@ -145,6 +147,7 @@ func clamp01(value float64) float64 {
 	if value < 0 {
 		return 0
 	}
+
 	if value > 1 {
 		return 1
 	}

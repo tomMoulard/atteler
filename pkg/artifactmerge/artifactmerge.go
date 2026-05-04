@@ -42,6 +42,7 @@ func Merge(root string, artifacts []session.Artifact, maxBytes int64) (Result, e
 	if strings.TrimSpace(root) == "" {
 		return Result{}, errors.New("artifactmerge: root is required")
 	}
+
 	if maxBytes <= 0 {
 		return Result{}, errors.New("artifactmerge: maxBytes must be positive")
 	}
@@ -50,25 +51,31 @@ func Merge(root string, artifacts []session.Artifact, maxBytes int64) (Result, e
 	if err != nil {
 		return Result{}, fmt.Errorf("artifactmerge: resolve root: %w", err)
 	}
+
 	rootAbs = filepath.Clean(rootAbs)
+
 	rootReal, err := filepath.EvalSymlinks(rootAbs)
 	if err != nil {
 		return Result{}, fmt.Errorf("artifactmerge: resolve root symlinks: %w", err)
 	}
+
 	rootReal = filepath.Clean(rootReal)
 
 	seen := make(map[string]struct{}, len(artifacts))
 	result := Result{}
+
 	for _, artifact := range artifacts {
 		relPath, fullPath, ok := normalizePath(rootAbs, artifact.Path)
 		if !ok {
 			result.Warnings = append(result.Warnings, Warning{Path: strings.TrimSpace(artifact.Path), Reason: "path escapes root"})
 			continue
 		}
+
 		if _, exists := seen[relPath]; exists {
 			result.Warnings = append(result.Warnings, Warning{Path: relPath, Reason: "duplicate artifact"})
 			continue
 		}
+
 		seen[relPath] = struct{}{}
 
 		resolvedPath, safe, err := resolveSafePath(rootReal, fullPath)
@@ -76,6 +83,7 @@ func Merge(root string, artifacts []session.Artifact, maxBytes int64) (Result, e
 			result.Warnings = append(result.Warnings, Warning{Path: relPath, Reason: "read failed: " + err.Error()})
 			continue
 		}
+
 		if !safe {
 			result.Warnings = append(result.Warnings, Warning{Path: relPath, Reason: "path escapes root"})
 			continue
@@ -85,6 +93,7 @@ func Merge(root string, artifacts []session.Artifact, maxBytes int64) (Result, e
 		if !ok {
 			warning.Path = relPath
 			result.Warnings = append(result.Warnings, warning)
+
 			continue
 		}
 
@@ -101,6 +110,7 @@ func Merge(root string, artifacts []session.Artifact, maxBytes int64) (Result, e
 		return result.Entries[i].Path < result.Entries[j].Path
 	})
 	result.Markdown = renderMarkdown(result.Entries)
+
 	return result, nil
 }
 
@@ -114,12 +124,14 @@ func normalizePath(rootAbs, artifactPath string) (relPath, fullPath string, ok b
 	if !filepath.IsAbs(fullPath) {
 		fullPath = filepath.Join(rootAbs, fullPath)
 	}
+
 	fullPath = filepath.Clean(fullPath)
 
 	rel, err := filepath.Rel(rootAbs, fullPath)
 	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." || filepath.IsAbs(rel) {
 		return "", "", false
 	}
+
 	return filepath.ToSlash(rel), fullPath, true
 }
 
@@ -128,14 +140,18 @@ func resolveSafePath(rootReal, fullPath string) (resolvedPath string, safe bool,
 	if err != nil {
 		return "", false, fmt.Errorf("resolve symlink %s: %w", fullPath, err)
 	}
+
 	resolved = filepath.Clean(resolved)
+
 	rel, err := filepath.Rel(rootReal, resolved)
 	if err != nil {
 		return "", false, fmt.Errorf("relative resolved path %s: %w", resolved, err)
 	}
+
 	if rel == "." || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return "", false, nil
 	}
+
 	return resolved, true, nil
 }
 
@@ -150,9 +166,11 @@ func readTextFile(path string, maxBytes int64) (string, Warning, bool) {
 	if err != nil {
 		return "", Warning{Reason: "stat failed: " + err.Error()}, false
 	}
+
 	if info.IsDir() {
 		return "", Warning{Reason: "not a file"}, false
 	}
+
 	if info.Size() > maxBytes {
 		return "", Warning{Reason: fmt.Sprintf("too large: %d bytes exceeds limit %d", info.Size(), maxBytes)}, false
 	}
@@ -161,18 +179,22 @@ func readTextFile(path string, maxBytes int64) (string, Warning, bool) {
 	if err != nil {
 		return "", Warning{Reason: "read failed: " + err.Error()}, false
 	}
+
 	if int64(len(data)) > maxBytes {
 		return "", Warning{Reason: fmt.Sprintf("too large: exceeds limit %d", maxBytes)}, false
 	}
+
 	if !utf8.Valid(data) || bytes.Contains(data, []byte{0}) {
 		return "", Warning{Reason: "non-text artifact"}, false
 	}
+
 	return string(data), Warning{}, true
 }
 
 func renderMarkdown(entries []Entry) string {
 	var b strings.Builder
 	b.WriteString("# Merged Artifacts\n")
+
 	if len(entries) == 0 {
 		b.WriteString("\n_No text artifacts included._\n")
 		return b.String()
@@ -185,13 +207,17 @@ func renderMarkdown(entries []Entry) string {
 		writeMetadata(&b, "Source", entry.Source)
 		writeMetadata(&b, "Summary", entry.Summary)
 		b.WriteString("\n")
+
 		fence := fenceFor(entry.Content)
 		fmt.Fprintf(&b, "%stext\n%s", fence, entry.Content)
+
 		if !strings.HasSuffix(entry.Content, "\n") {
 			b.WriteString("\n")
 		}
+
 		fmt.Fprintf(&b, "%s\n", fence)
 	}
+
 	return b.String()
 }
 
@@ -200,6 +226,7 @@ func writeMetadata(b *strings.Builder, key, value string) {
 	if value == "" {
 		value = "-"
 	}
+
 	fmt.Fprintf(b, "- **%s:** %s\n", key, value)
 }
 
@@ -210,20 +237,25 @@ func oneLine(value string) string {
 func fenceFor(content string) string {
 	longest := 0
 	current := 0
+
 	for _, r := range content {
 		if r == '`' {
 			current++
 			if current > longest {
 				longest = current
 			}
+
 			continue
 		}
+
 		current = 0
 	}
+
 	if longest < 3 {
 		longest = 3
 	} else {
 		longest++
 	}
+
 	return strings.Repeat("`", longest)
 }

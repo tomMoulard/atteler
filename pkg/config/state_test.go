@@ -15,6 +15,7 @@ func TestStateStore_SaveLoadYAML(t *testing.T) {
 
 	state := State{DefaultModel: "codex/gpt-5.5"}
 	state.SetModel(ModelScopeFolder, t.TempDir(), "claude-code/claude-opus-4-6")
+
 	if err := store.Save(state); err != nil {
 		require.NoError(t, err)
 	}
@@ -23,6 +24,7 @@ func TestStateStore_SaveLoadYAML(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if len(data) == 0 || data[0] == '{' {
 		require.Failf(t, "unexpected failure", "state should be YAML, got: %s", data)
 	}
@@ -31,6 +33,7 @@ func TestStateStore_SaveLoadYAML(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if loaded.DefaultModel != "codex/gpt-5.5" {
 		require.Failf(t, "unexpected failure", "DefaultModel = %q", loaded.DefaultModel)
 	}
@@ -45,6 +48,7 @@ func TestState_ModelForFolderPrefersFolder(t *testing.T) {
 	if got := state.ModelForFolder(dir); got != "claude-code/claude-opus-4-6" {
 		require.Failf(t, "unexpected failure", "folder model = %q", got)
 	}
+
 	if got := state.ModelForFolder(t.TempDir()); got != "codex/gpt-5.5" {
 		require.Failf(t, "unexpected failure", "global fallback model = %q", got)
 	}

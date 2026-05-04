@@ -32,6 +32,7 @@ func nonNilCommandContext(ctx context.Context) context.Context {
 	if ctx != nil {
 		return ctx
 	}
+
 	return defaultCommandContext()
 }
 
@@ -62,6 +63,7 @@ func Create(repoDir, sessionID string) (*Info, error) {
 // CreateContext is Create with caller-provided cancellation for git commands.
 func CreateContext(ctx context.Context, repoDir, sessionID string) (*Info, error) {
 	ctx = nonNilCommandContext(ctx)
+
 	if sessionID == "" {
 		return nil, errors.New("worktree: session ID is required")
 	}
@@ -115,6 +117,7 @@ func Merge(repoDir string, info *Info) error {
 // MergeContext is Merge with caller-provided cancellation for git commands.
 func MergeContext(ctx context.Context, repoDir string, info *Info) error {
 	ctx = nonNilCommandContext(ctx)
+
 	if info == nil {
 		return errors.New("worktree: nil info")
 	}
@@ -146,6 +149,7 @@ func Remove(repoDir string, info *Info) error {
 // RemoveContext is Remove with caller-provided cancellation for git commands.
 func RemoveContext(ctx context.Context, repoDir string, info *Info) error {
 	ctx = nonNilCommandContext(ctx)
+
 	if info == nil {
 		return errors.New("worktree: nil info")
 	}
@@ -163,6 +167,7 @@ func RemoveContext(ctx context.Context, repoDir string, info *Info) error {
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("worktree: remove: %w", err)
 	}
+
 	return nil
 }
 
@@ -174,6 +179,7 @@ func List(repoDir string) ([]Info, error) {
 // ListContext is List with caller-provided cancellation for git commands.
 func ListContext(ctx context.Context, repoDir string) ([]Info, error) {
 	ctx = nonNilCommandContext(ctx)
+
 	repoRoot, err := gitRepoRoot(ctx, repoDir)
 	if err != nil {
 		return nil, fmt.Errorf("worktree: locate repo root: %w", err)
@@ -192,6 +198,7 @@ func Status(info *Info) string {
 	if info == nil {
 		return "no worktree"
 	}
+
 	return fmt.Sprintf("worktree: %s (branch %s, base %s)", info.Path, info.Branch, info.BaseBranch)
 }
 
@@ -215,6 +222,7 @@ func worktreeDir(repoRoot, sessionID string) string {
 	if dir := os.Getenv(EnvDir); dir != "" {
 		return filepath.Join(dir, "atteler-"+sessionID)
 	}
+
 	return filepath.Join(repoRoot, ".atteler", "worktrees", sessionID)
 }
 
@@ -226,6 +234,7 @@ func autoCommit(ctx context.Context, wtDir, sessionID string) error {
 	if err != nil {
 		return err
 	}
+
 	if strings.TrimSpace(out) == "" {
 		return nil // nothing to commit
 	}
@@ -236,6 +245,7 @@ func autoCommit(ctx context.Context, wtDir, sessionID string) error {
 
 	msg := fmt.Sprintf("atteler: auto-commit session %s at %s",
 		sessionID, time.Now().UTC().Format(time.RFC3339))
+
 	return gitRun(ctx, wtDir, "commit", "-m", msg)
 }
 
@@ -246,6 +256,7 @@ func gitRepoRoot(ctx context.Context, dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	return strings.TrimSpace(out), nil
 }
 
@@ -256,6 +267,7 @@ func gitCurrentBranch(ctx context.Context, dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	return strings.TrimSpace(out), nil
 }
 
@@ -263,11 +275,14 @@ func gitCurrentBranch(ctx context.Context, dir string) (string, error) {
 func gitRun(ctx context.Context, dir string, args ...string) error {
 	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", args...)
 	cmd.Dir = dir
+
 	var stderr bytes.Buffer
+
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), err)
 	}
+
 	return nil
 }
 
@@ -275,12 +290,16 @@ func gitRun(ctx context.Context, dir string, args ...string) error {
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", args...)
 	cmd.Dir = dir
+
 	var stdout, stderr bytes.Buffer
+
 	cmd.Stdout = &stdout
+
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), err)
 	}
+
 	return stdout.String(), nil
 }
 
@@ -292,8 +311,11 @@ func parseWorktreeList(output, repoRoot string) []Info {
 
 func parseWorktreeListContext(ctx context.Context, output, repoRoot string) []Info {
 	ctx = nonNilCommandContext(ctx)
-	var results []Info
-	var current Info
+
+	var (
+		results []Info
+		current Info
+	)
 
 	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimSpace(line)
@@ -302,13 +324,16 @@ func parseWorktreeListContext(ctx context.Context, output, repoRoot string) []In
 				current.SessionID = strings.TrimPrefix(current.Branch, "atteler/")
 				results = append(results, current)
 			}
+
 			current = Info{}
+
 			continue
 		}
 
 		if path, ok := strings.CutPrefix(line, "worktree "); ok {
 			current.Path = path
 		}
+
 		if branch, ok := strings.CutPrefix(line, "branch refs/heads/"); ok {
 			current.Branch = branch
 		}

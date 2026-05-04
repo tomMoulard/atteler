@@ -25,6 +25,7 @@ func NewLogger(w io.Writer) *Logger {
 	if w == nil {
 		return nil
 	}
+
 	return &Logger{w: w}
 }
 
@@ -33,6 +34,7 @@ func (l *Logger) Log(event Event) {
 	if l == nil || l.w == nil || event.Type == "" {
 		return
 	}
+
 	fmt.Fprintln(l.w, FormatLine(event))
 }
 
@@ -42,18 +44,23 @@ func FormatLine(event Event) string {
 	if event.Agent != "" {
 		parts = append(parts, "agent="+event.Agent)
 	}
+
 	if event.Model != "" {
 		parts = append(parts, "model="+event.Model)
 	}
+
 	if event.SessionID != "" {
 		parts = append(parts, "session="+event.SessionID)
 	}
+
 	for _, key := range sortedMetadataKeys(event.Metadata) {
 		parts = append(parts, key+"="+quoteValue(event.Metadata[key]))
 	}
+
 	if event.Error != "" {
 		parts = append(parts, "error="+quoteValue(event.Error))
 	}
+
 	return strings.Join(parts, " ")
 }
 
@@ -62,6 +69,7 @@ func WithEmitter(ctx context.Context, emitter *Runner, base Event) context.Conte
 	if emitter == nil {
 		return ctx
 	}
+
 	return context.WithValue(ctx, contextKey{}, contextEmitter{emitter: emitter, base: base})
 }
 
@@ -71,7 +79,9 @@ func EmitFromContext(ctx context.Context, event Event) error {
 	if !ok || value.emitter == nil {
 		return nil
 	}
+
 	event = mergeBase(value.base, event)
+
 	return value.emitter.Emit(ctx, event)
 }
 
@@ -79,15 +89,19 @@ func mergeBase(base, event Event) Event {
 	if event.SessionID == "" {
 		event.SessionID = base.SessionID
 	}
+
 	if event.SessionPath == "" {
 		event.SessionPath = base.SessionPath
 	}
+
 	if event.Agent == "" {
 		event.Agent = base.Agent
 	}
+
 	if event.Model == "" {
 		event.Model = base.Model
 	}
+
 	return event
 }
 
@@ -96,7 +110,9 @@ func sortedMetadataKeys(metadata map[string]string) []string {
 	for key := range metadata {
 		keys = append(keys, key)
 	}
+
 	sort.Strings(keys)
+
 	return keys
 }
 
@@ -104,8 +120,10 @@ func quoteValue(value string) string {
 	if value == "" {
 		return `""`
 	}
+
 	if strings.ContainsAny(value, " \t\n\r") {
 		return fmt.Sprintf("%q", value)
 	}
+
 	return value
 }

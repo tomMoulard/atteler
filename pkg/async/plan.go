@@ -61,6 +61,7 @@ func NewPlan(tasks []Task) (*Plan, error) {
 		if _, exists := plan.byID[task.ID]; exists {
 			return nil, fmt.Errorf("duplicate task %q", task.ID)
 		}
+
 		plan.tasks[i] = cloneTask(task)
 		plan.byID[task.ID] = plan.tasks[i]
 	}
@@ -104,6 +105,7 @@ func (p *Plan) Tasks() []Task {
 	for i, task := range p.tasks {
 		tasks[i] = cloneTask(task)
 	}
+
 	return tasks
 }
 
@@ -123,10 +125,12 @@ func (p *Plan) ReadyBatches() [][]Task {
 
 	for len(remaining) > 0 {
 		batch := make([]Task, 0)
+
 		for _, task := range p.tasks {
 			if _, ok := remaining[task.ID]; !ok {
 				continue
 			}
+
 			if depsComplete(task, completed) {
 				batch = append(batch, cloneTask(task))
 			}
@@ -140,6 +144,7 @@ func (p *Plan) ReadyBatches() [][]Task {
 			delete(remaining, task.ID)
 			completed[task.ID] = struct{}{}
 		}
+
 		batches = append(batches, batch)
 	}
 
@@ -153,15 +158,18 @@ func (p *Plan) Run(ctx context.Context, run TaskRunner) ([]TaskResult, error) {
 	if run == nil {
 		return nil, errors.New("task runner is nil")
 	}
+
 	if p == nil {
 		return nil, nil
 	}
+
 	if ctx == nil {
 		return nil, errors.New("context is nil")
 	}
 
 	batches := p.ReadyBatches()
 	results := make([]TaskResult, 0, len(p.tasks))
+
 	for wave, batch := range batches {
 		if err := ctx.Err(); err != nil {
 			return results, fmt.Errorf("context canceled before wave %d: %w", wave, err)
@@ -180,16 +188,19 @@ func (p *Plan) Run(ctx context.Context, run TaskRunner) ([]TaskResult, error) {
 
 func runBatch(ctx context.Context, wave int, batch []Task, run TaskRunner) []TaskResult {
 	results := make([]TaskResult, len(batch))
+
 	var wg sync.WaitGroup
 	wg.Add(len(batch))
 
 	for i, task := range batch {
 		taskCopy := cloneTask(task)
+
 		go func() {
 			defer wg.Done()
 
 			started := time.Now()
 			output, err := run(ctx, taskCopy)
+
 			results[i] = TaskResult{
 				Task:     taskCopy,
 				Wave:     wave,
@@ -204,6 +215,7 @@ func runBatch(ctx context.Context, wave int, batch []Task, run TaskRunner) []Tas
 	}
 
 	wg.Wait()
+
 	return results
 }
 
@@ -213,6 +225,7 @@ func firstFailedResult(results []TaskResult) (TaskResult, bool) {
 			return results[i], true
 		}
 	}
+
 	return TaskResult{}, false
 }
 
@@ -226,6 +239,7 @@ func (p *Plan) validateAcyclic() error {
 	state := make(map[string]int, len(p.tasks))
 
 	var visit func(Task) error
+
 	visit = func(task Task) error {
 		switch state[task.ID] {
 		case visiting:
@@ -240,7 +254,9 @@ func (p *Plan) validateAcyclic() error {
 				return err
 			}
 		}
+
 		state[task.ID] = visited
+
 		return nil
 	}
 
@@ -261,6 +277,7 @@ func depsComplete(task Task, completed map[string]struct{}) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -271,5 +288,6 @@ func cloneTask(task Task) Task {
 
 	clone := task
 	clone.DependsOn = append([]string(nil), task.DependsOn...)
+
 	return clone
 }

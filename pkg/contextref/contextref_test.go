@@ -23,15 +23,19 @@ func TestExpand_AppendsReferencedFile(t *testing.T) {
 	if len(result.References) != 1 {
 		require.Failf(t, "unexpected failure", "references len = %d, want 1", len(result.References))
 	}
+
 	if result.References[0].Path != "README.md" {
 		assert.Failf(t, "assertion failed", "path = %q", result.References[0].Path)
 	}
+
 	if result.References[0].Kind != "file" {
 		assert.Failf(t, "assertion failed", "kind = %q, want file", result.References[0].Kind)
 	}
+
 	if !strings.Contains(result.Prompt, `<file path="README.md" truncated="false">`) {
 		require.Failf(t, "unexpected failure", "prompt missing file tag:\n%s", result.Prompt)
 	}
+
 	if !strings.Contains(result.Prompt, "hello\n") {
 		require.Failf(t, "unexpected failure", "prompt missing content:\n%s", result.Prompt)
 	}
@@ -54,6 +58,7 @@ func TestExpand_TruncatesByLimit(t *testing.T) {
 	if !result.References[0].Truncated {
 		require.FailNow(t, "expected truncated reference")
 	}
+
 	if !strings.Contains(result.Prompt, "abc\n</file>") {
 		require.Failf(t, "unexpected failure", "prompt = %q", result.Prompt)
 	}
@@ -73,12 +78,15 @@ func TestExpand_AppendsDirectoryTree(t *testing.T) {
 	if len(result.References) != 1 {
 		require.Failf(t, "unexpected failure", "references len = %d, want 1", len(result.References))
 	}
+
 	if result.References[0].Kind != "directory" {
 		require.Failf(t, "unexpected failure", "kind = %q, want directory", result.References[0].Kind)
 	}
+
 	if !strings.Contains(result.Prompt, `<directory path="pkg" truncated="false">`) {
 		require.Failf(t, "unexpected failure", "prompt missing directory tag:\n%s", result.Prompt)
 	}
+
 	for _, want := range []string{"a.go", "nested/", "nested/b.go"} {
 		if !strings.Contains(result.Prompt, want) {
 			require.Failf(t, "unexpected failure", "prompt missing %q:\n%s", want, result.Prompt)
@@ -100,6 +108,7 @@ func TestExpand_TruncatesDirectoryTree(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if !result.References[0].Truncated {
 		require.FailNow(t, "expected truncated directory reference")
 	}
@@ -122,6 +131,7 @@ func TestExpand_RejectsSymlinkEscapingRoot(t *testing.T) {
 	dir := t.TempDir()
 	outsideDir := t.TempDir()
 	outsidePath := writeFile(t, outsideDir, "outside.txt", "secret")
+
 	linkPath := filepath.Join(dir, "linked.txt")
 	if err := os.Symlink(outsidePath, linkPath); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
@@ -131,6 +141,7 @@ func TestExpand_RejectsSymlinkEscapingRoot(t *testing.T) {
 	if err == nil {
 		require.FailNow(t, "expected symlink escape error")
 	}
+
 	if !strings.Contains(err.Error(), "escapes root") {
 		require.Failf(t, "unexpected failure", "error = %q, want root escape", err)
 	}
@@ -144,9 +155,11 @@ func TestExpand_IgnoresMentionsAndEmails(t *testing.T) {
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if result.Prompt != "email a@example.com and ask @reviewer" {
 		require.Failf(t, "unexpected failure", "prompt = %q", result.Prompt)
 	}
+
 	if len(result.References) != 0 {
 		require.Failf(t, "unexpected failure", "references = %+v", result.References)
 	}
@@ -159,8 +172,10 @@ func writeFile(t *testing.T, dir, name, content string) string {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		require.NoError(t, err)
 	}
+
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		require.NoError(t, err)
 	}
+
 	return path
 }

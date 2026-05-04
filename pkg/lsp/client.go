@@ -24,6 +24,7 @@ func DocumentSymbols(ctx context.Context, opts Options) ([]Symbol, error) {
 	if ctx == nil {
 		return nil, errors.New("lsp symbols: nil context")
 	}
+
 	if err := validateOptions(opts); err != nil {
 		return nil, err
 	}
@@ -32,14 +33,17 @@ func DocumentSymbols(ctx context.Context, opts Options) ([]Symbol, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve file path: %w", err)
 	}
+
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("read file %q: %w", filePath, err)
 	}
+
 	rootPath := opts.RootPath
 	if rootPath == "" {
 		rootPath = filepath.Dir(filePath)
 	}
+
 	rootPath, err = filepath.Abs(rootPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root path: %w", err)
@@ -53,6 +57,7 @@ func DocumentSymbols(ctx context.Context, opts Options) ([]Symbol, error) {
 
 	documentURI := fileURI(filePath)
 	rootURI := fileURI(rootPath)
+
 	languageID := opts.LanguageID
 	if languageID == "" {
 		languageID = inferLanguageID(filePath)
@@ -61,9 +66,11 @@ func DocumentSymbols(ctx context.Context, opts Options) ([]Symbol, error) {
 	if _, requestErr := client.request(ctx, "initialize", initializeParams{ProcessID: os.Getpid(), RootURI: rootURI, Capabilities: map[string]any{}}); requestErr != nil {
 		return nil, fmt.Errorf("initialize language server: %w", requestErr)
 	}
+
 	if notifyErr := client.notify(ctx, "initialized", map[string]any{}); notifyErr != nil {
 		return nil, fmt.Errorf("send initialized notification: %w", notifyErr)
 	}
+
 	if notifyErr := client.notify(ctx, "textDocument/didOpen", didOpenParams{TextDocument: textDocumentItem{URI: documentURI, LanguageID: languageID, Version: 1, Text: string(content)}}); notifyErr != nil {
 		return nil, fmt.Errorf("open document: %w", notifyErr)
 	}
@@ -72,6 +79,7 @@ func DocumentSymbols(ctx context.Context, opts Options) ([]Symbol, error) {
 	if err != nil {
 		return nil, fmt.Errorf("request document symbols: %w", err)
 	}
+
 	symbols, err := normalizeSymbols(raw)
 	if err != nil {
 		return nil, fmt.Errorf("normalize document symbols: %w", err)
@@ -80,9 +88,11 @@ func DocumentSymbols(ctx context.Context, opts Options) ([]Symbol, error) {
 	if _, requestErr := client.request(ctx, "shutdown", nil); requestErr != nil {
 		return nil, fmt.Errorf("shutdown language server: %w", requestErr)
 	}
+
 	if notifyErr := client.notify(ctx, "exit", nil); notifyErr != nil {
 		return nil, fmt.Errorf("send exit notification: %w", notifyErr)
 	}
+
 	return symbols, nil
 }
 
@@ -92,6 +102,7 @@ func WorkspaceSymbols(ctx context.Context, opts Options, query string) ([]Symbol
 	if ctx == nil {
 		return nil, errors.New("lsp workspace symbols: nil context")
 	}
+
 	if err := validateWorkspaceOptions(opts); err != nil {
 		return nil, err
 	}
@@ -99,11 +110,13 @@ func WorkspaceSymbols(ctx context.Context, opts Options, query string) ([]Symbol
 	rootPath := opts.RootPath
 	if rootPath == "" {
 		var err error
+
 		rootPath, err = os.Getwd()
 		if err != nil {
 			return nil, fmt.Errorf("resolve current directory: %w", err)
 		}
 	}
+
 	rootPath, err := filepath.Abs(rootPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root path: %w", err)
@@ -119,6 +132,7 @@ func WorkspaceSymbols(ctx context.Context, opts Options, query string) ([]Symbol
 	if _, requestErr := client.request(ctx, "initialize", initializeParams{ProcessID: os.Getpid(), RootURI: rootURI, Capabilities: map[string]any{}}); requestErr != nil {
 		return nil, fmt.Errorf("initialize language server: %w", requestErr)
 	}
+
 	if notifyErr := client.notify(ctx, "initialized", map[string]any{}); notifyErr != nil {
 		return nil, fmt.Errorf("send initialized notification: %w", notifyErr)
 	}
@@ -127,6 +141,7 @@ func WorkspaceSymbols(ctx context.Context, opts Options, query string) ([]Symbol
 	if err != nil {
 		return nil, fmt.Errorf("request workspace symbols: %w", err)
 	}
+
 	symbols, err := normalizeSymbols(raw)
 	if err != nil {
 		return nil, fmt.Errorf("normalize workspace symbols: %w", err)
@@ -135,9 +150,11 @@ func WorkspaceSymbols(ctx context.Context, opts Options, query string) ([]Symbol
 	if _, requestErr := client.request(ctx, "shutdown", nil); requestErr != nil {
 		return nil, fmt.Errorf("shutdown language server: %w", requestErr)
 	}
+
 	if notifyErr := client.notify(ctx, "exit", nil); notifyErr != nil {
 		return nil, fmt.Errorf("send exit notification: %w", notifyErr)
 	}
+
 	return symbols, nil
 }
 
@@ -145,9 +162,11 @@ func validateOptions(opts Options) error {
 	if err := validateWorkspaceOptions(opts); err != nil {
 		return err
 	}
+
 	if opts.FilePath == "" {
 		return errors.New("file path is required")
 	}
+
 	return nil
 }
 
@@ -155,6 +174,7 @@ func validateWorkspaceOptions(opts Options) error {
 	if opts.Command == "" {
 		return errors.New("lsp command is required")
 	}
+
 	return nil
 }
 
@@ -199,21 +219,27 @@ func (e *rpcError) Error() string {
 
 func startClient(ctx context.Context, command string, args, env []string) (*rpcClient, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
+
 	cmd.Env = append(os.Environ(), env...)
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open language server stdin: %w", err)
 	}
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open language server stdout: %w", err)
 	}
+
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start language server %q: %w", command, err)
 	}
+
 	client := &rpcClient{cmd: cmd, stdin: stdin, pending: make(map[int]chan rpcResponse), done: make(chan error, 1)}
 	go client.readLoop(stdout)
+
 	return client, nil
 }
 
@@ -223,16 +249,19 @@ func (c *rpcClient) request(ctx context.Context, method string, params any) (jso
 		c.unregisterRequest(id)
 		return nil, err
 	}
+
 	select {
 	case response := <-ch:
 		if response.Error != nil {
 			return nil, response.Error
 		}
+
 		return response.Result, nil
 	case err := <-c.done:
 		if err == nil {
 			err = io.EOF
 		}
+
 		return nil, fmt.Errorf("language server stopped before %s response: %w", method, err)
 	case <-ctx.Done():
 		c.unregisterRequest(id)
@@ -247,10 +276,12 @@ func (c *rpcClient) notify(ctx context.Context, method string, params any) error
 func (c *rpcClient) registerRequest() (id int, ch chan rpcResponse) {
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
+
 	c.nextID++
 	id = c.nextID
 	ch = make(chan rpcResponse, 1)
 	c.pending[id] = ch
+
 	return id, ch
 }
 
@@ -265,17 +296,22 @@ func (c *rpcClient) write(ctx context.Context, message rpcMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal json-rpc message: %w", err)
 	}
+
 	framed := fmt.Appendf(nil, "Content-Length: %d\r\n\r\n%s", len(payload), payload)
+
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("write json-rpc message: %w", ctx.Err())
 	default:
 	}
+
 	if _, err := c.stdin.Write(framed); err != nil {
 		return fmt.Errorf("write json-rpc message: %w", err)
 	}
+
 	return nil
 }
 
@@ -287,19 +323,23 @@ func (c *rpcClient) readLoop(reader io.Reader) {
 			c.done <- err
 			return
 		}
+
 		var message rpcMessage
 		if err := json.Unmarshal(payload, &message); err != nil {
 			c.done <- fmt.Errorf("decode json-rpc response: %w", err)
 			return
 		}
+
 		id, ok := numericID(message.ID)
 		if !ok {
 			continue
 		}
+
 		c.pendingMu.Lock()
 		ch := c.pending[id]
 		delete(c.pending, id)
 		c.pendingMu.Unlock()
+
 		if ch != nil {
 			ch <- rpcResponse{Result: message.Result, Error: message.Error}
 		}
@@ -313,6 +353,7 @@ func (c *rpcClient) close() {
 			return
 		}
 	}
+
 	if err := c.cmd.Wait(); err != nil {
 		return
 	}
@@ -334,39 +375,50 @@ func readFrame(reader io.Reader) ([]byte, error) {
 	if !ok {
 		buffered = bufio.NewReader(reader)
 	}
+
 	length := -1
+
 	for {
 		line, err := buffered.ReadString('\n')
 		if err != nil {
 			return nil, fmt.Errorf("read json-rpc header: %w", err)
 		}
+
 		line = strings.TrimSpace(line)
 		if line == "" {
 			break
 		}
+
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("read json-rpc header: malformed header %q", line)
 		}
+
 		if !strings.EqualFold(parts[0], "Content-Length") {
 			continue
 		}
+
 		parsed, err := strconv.Atoi(strings.TrimSpace(parts[1]))
 		if err != nil {
 			return nil, fmt.Errorf("parse content length %q: %w", strings.TrimSpace(parts[1]), err)
 		}
+
 		if parsed < 0 {
 			return nil, fmt.Errorf("parse content length %q: negative length", strings.TrimSpace(parts[1]))
 		}
+
 		length = parsed
 	}
+
 	if length < 0 {
 		return nil, errors.New("read json-rpc header: missing Content-Length")
 	}
+
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(buffered, payload); err != nil {
 		return nil, fmt.Errorf("read json-rpc payload: %w", err)
 	}
+
 	return payload, nil
 }
 
@@ -375,6 +427,7 @@ func writeFrame(writer io.Writer, payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("write json-rpc frame: %w", err)
 	}
+
 	return nil
 }
 

@@ -33,15 +33,19 @@ entrypoints:
 	if manifest.Name != "reviewer" {
 		require.Failf(t, "unexpected manifest", "Name = %q, want reviewer", manifest.Name)
 	}
+
 	if manifest.Version != "1.2.3" {
 		require.Failf(t, "unexpected manifest", "Version = %q, want 1.2.3", manifest.Version)
 	}
+
 	if manifest.Description != "Reviews code changes" {
 		require.Failf(t, "unexpected manifest", "Description = %q", manifest.Description)
 	}
+
 	if !reflect.DeepEqual(manifest.Capabilities, []string{"review", "summarize"}) {
 		require.Failf(t, "unexpected manifest", "Capabilities = %v", manifest.Capabilities)
 	}
+
 	if !reflect.DeepEqual(manifest.Entrypoints, map[string]string{"run": "bin/reviewer", "setup": "scripts/setup.sh"}) {
 		require.Failf(t, "unexpected manifest", "Entrypoints = %v", manifest.Entrypoints)
 	}
@@ -65,12 +69,15 @@ func TestLoad_LoadsExplicitJSONManifest(t *testing.T) {
 	if manifest.Name != "json-plugin" {
 		require.Failf(t, "unexpected manifest", "Name = %q", manifest.Name)
 	}
+
 	if manifest.Version != "0.1.0" {
 		require.Failf(t, "unexpected manifest", "Version = %q", manifest.Version)
 	}
+
 	if !reflect.DeepEqual(manifest.Capabilities, []string{"chat"}) {
 		require.Failf(t, "unexpected manifest", "Capabilities = %v", manifest.Capabilities)
 	}
+
 	if !reflect.DeepEqual(manifest.Entrypoints, map[string]string{"run": "main.js"}) {
 		require.Failf(t, "unexpected manifest", "Entrypoints = %v", manifest.Entrypoints)
 	}
@@ -91,6 +98,7 @@ version: "1"
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if path != yamlPath {
 		require.Failf(t, "unexpected path", "path = %s, want %s", path, yamlPath)
 	}
@@ -98,10 +106,12 @@ version: "1"
 	if removeErr := os.Remove(yamlPath); removeErr != nil {
 		require.NoError(t, removeErr)
 	}
+
 	path, err = FindManifest(dir)
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if path != ymlPath {
 		require.Failf(t, "unexpected path", "path = %s, want %s", path, ymlPath)
 	}
@@ -109,10 +119,12 @@ version: "1"
 	if removeErr := os.Remove(ymlPath); removeErr != nil {
 		require.NoError(t, removeErr)
 	}
+
 	path, err = FindManifest(dir)
 	if err != nil {
 		require.NoError(t, err)
 	}
+
 	if path != jsonPath {
 		require.Failf(t, "unexpected path", "path = %s, want %s", path, jsonPath)
 	}
@@ -120,6 +132,7 @@ version: "1"
 
 func TestLoadDir_RejectsMissingNameOrVersion(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
 		name    string
 		content string
@@ -139,6 +152,7 @@ func TestLoadDir_RejectsMissingNameOrVersion(t *testing.T) {
 			if err == nil {
 				require.FailNow(t, "expected validation error")
 			}
+
 			if got := err.Error(); !strings.Contains(got, tt.want) {
 				require.Failf(t, "unexpected error", "error = %q, want %q", got, tt.want)
 			}
@@ -148,6 +162,7 @@ func TestLoadDir_RejectsMissingNameOrVersion(t *testing.T) {
 
 func TestLoadDir_RejectsEntrypointEscapingRoot(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
 		name       string
 		entrypoint string
@@ -171,6 +186,7 @@ entrypoints:
 			if err == nil {
 				require.FailNow(t, "expected validation error")
 			}
+
 			if got := err.Error(); !strings.Contains(got, "escapes plugin root") {
 				require.Failf(t, "unexpected error", "error = %q", got)
 			}
@@ -186,6 +202,7 @@ func TestLoadDir_ErrorsWhenManifestMissing(t *testing.T) {
 	if err == nil {
 		require.FailNow(t, "expected missing manifest error")
 	}
+
 	if got := err.Error(); !strings.Contains(got, "no manifest found") {
 		require.Failf(t, "unexpected error", "error = %q", got)
 	}
@@ -198,5 +215,6 @@ func writeManifest(t *testing.T, dir, name, content string) string {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		require.NoError(t, err)
 	}
+
 	return path
 }

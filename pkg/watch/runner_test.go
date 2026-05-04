@@ -18,6 +18,7 @@ func TestRun_RepeatsScansWithIterationMetadata(t *testing.T) {
 	started := time.Date(2026, 5, 2, 9, 0, 0, 0, time.UTC)
 	nowCalls := 0
 	scanCalls := 0
+
 	var waited []time.Duration
 
 	results, err := Run(context.Background(), root, RunOptions{
@@ -27,7 +28,9 @@ func TestRun_RepeatsScansWithIterationMetadata(t *testing.T) {
 			require.NoError(t, ctx.Err())
 			assert.Equal(t, root, gotRoot)
 			assert.Equal(t, int64(128), options.LargeFileBytes)
+
 			scanCalls++
+
 			return []Finding{{Path: "file.go", Kind: KindMissingTest, Severity: SeverityInfo}}, nil
 		},
 		ScanOptions: Options{LargeFileBytes: 128},
@@ -58,6 +61,7 @@ func TestRun_StopsWhenContextCanceledDuringWait(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
+
 	var scanCalls int
 
 	results, err := Run(ctx, t.TempDir(), RunOptions{
@@ -152,6 +156,7 @@ func TestRun_DefaultScannerUsesScanWithOptions(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	got := findingKeys(results[0].Findings)
+
 	want := []string{"todo.txt|stale_todo|maintenance"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("findings = %#v, want %#v", got, want)

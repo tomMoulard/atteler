@@ -12,6 +12,7 @@ const keychainService = "Claude Code-credentials"
 // readClaudeCodeKeychain reads the Claude Code OAuth token from the macOS Keychain.
 func readClaudeCodeKeychain(ctx context.Context) (string, error) {
 	ctx = nonNilCredentialContext(ctx)
+
 	out, err := exec.CommandContext(ctx,
 		"security", "find-generic-password",
 		"-s", keychainService,

@@ -17,6 +17,7 @@ import (
 
 func TestRunner_EmitRunsHookWithPayloadAndEnv(t *testing.T) {
 	t.Parallel()
+
 	if os.Getenv("ATTELER_TEST_HOOK") == "1" {
 		helperHook(t)
 		return
@@ -55,12 +56,15 @@ func TestRunner_EmitRunsHookWithPayloadAndEnv(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		require.NoError(t, err)
 	}
+
 	if got.Type != AssistantMessage {
 		assert.Failf(t, "assertion failed", "Type = %q", got.Type)
 	}
+
 	if got.SessionID != "session-1" {
 		assert.Failf(t, "assertion failed", "SessionID = %q", got.SessionID)
 	}
+
 	if got.Agent != "reviewer" {
 		assert.Failf(t, "assertion failed", "Agent = %q", got.Agent)
 	}
@@ -68,6 +72,7 @@ func TestRunner_EmitRunsHookWithPayloadAndEnv(t *testing.T) {
 
 func TestRunner_EmitNoHooksIsNoop(t *testing.T) {
 	t.Parallel()
+
 	if err := NewRunner(nil).Emit(context.Background(), Event{Type: UserMessage}); err != nil {
 		require.NoError(t, err)
 	}
@@ -75,7 +80,9 @@ func TestRunner_EmitNoHooksIsNoop(t *testing.T) {
 
 func TestLogger_LogsAnyEvent(t *testing.T) {
 	t.Parallel()
+
 	var out bytes.Buffer
+
 	runner := NewRunnerWithLogger(nil, &out)
 
 	err := runner.Emit(context.Background(), Event{
@@ -104,6 +111,7 @@ func helperHook(t *testing.T) {
 	if os.Getenv("ATTELER_EVENT_TYPE") != AssistantMessage {
 		require.Failf(t, "unexpected failure", "ATTELER_EVENT_TYPE = %q", os.Getenv("ATTELER_EVENT_TYPE"))
 	}
+
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		require.NoError(t, err)
@@ -112,5 +120,6 @@ func helperHook(t *testing.T) {
 	if err := os.WriteFile(os.Getenv("ATTELER_TEST_OUT"), data, 0o600); err != nil {
 		require.NoError(t, err)
 	}
+
 	os.Exit(0)
 }

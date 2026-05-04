@@ -29,9 +29,11 @@ func TestGraph_AddNodesEdgesAndDeterministicQueries(t *testing.T) {
 	if !graph.HasNode("pkg/d") {
 		t.Fatal("HasNode(pkg/d) = false, want true")
 	}
+
 	if !graph.HasEdge("pkg/a", "pkg/b") {
 		t.Fatal("HasEdge(pkg/a, pkg/b) = false, want true")
 	}
+
 	if graph.HasEdge("pkg/c", "pkg/a") {
 		t.Fatal("HasEdge(pkg/c, pkg/a) = true, want false")
 	}
@@ -107,6 +109,7 @@ func TestGraph_TopologicalLayersReturnsCycleError(t *testing.T) {
 	if err == nil {
 		t.Fatal("TopologicalLayers() error = nil, want cycle error")
 	}
+
 	if layers != nil {
 		t.Fatalf("TopologicalLayers() layers = %#v, want nil", layers)
 	}
@@ -115,10 +118,12 @@ func TestGraph_TopologicalLayersReturnsCycleError(t *testing.T) {
 	if !errors.As(err, &cycleErr) {
 		t.Fatalf("TopologicalLayers() error = %T, want CycleError", err)
 	}
+
 	assertCycles(t, cycleErr.Cycles, [][]NodeID{
 		{"a", "b", "c", "a"},
 		{"d", "d"},
 	})
+
 	if !strings.Contains(err.Error(), "a -> b -> c -> a") {
 		t.Fatalf("CycleError.Error() = %q, want cycle details", err.Error())
 	}
@@ -130,18 +135,22 @@ func TestGraph_CyclesDetectsNoneSimpleAndSelfCycles(t *testing.T) {
 	acyclic := New()
 	acyclic.AddEdge("a", "b")
 	acyclic.AddEdge("b", "c")
+
 	if acyclic.HasCycle() {
 		t.Fatal("acyclic.HasCycle() = true, want false")
 	}
+
 	assertCycles(t, acyclic.Cycles(), nil)
 
 	cyclic := New()
 	cyclic.AddEdge("x", "y")
 	cyclic.AddEdge("y", "x")
 	cyclic.AddEdge("self", "self")
+
 	if !cyclic.HasCycle() {
 		t.Fatal("cyclic.HasCycle() = false, want true")
 	}
+
 	assertCycles(t, cyclic.Cycles(), [][]NodeID{
 		{"self", "self"},
 		{"x", "y", "x"},
@@ -164,6 +173,7 @@ func TestNilGraphQueriesAreSafe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TopologicalLayers() error = %v, want nil", err)
 	}
+
 	if layers != nil {
 		t.Fatalf("TopologicalLayers() = %#v, want nil", layers)
 	}

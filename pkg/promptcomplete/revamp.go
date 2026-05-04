@@ -49,12 +49,15 @@ func detailedRevamp(input string) string {
 	if !hasAny(lower, "goal:", "objective:", "task:") {
 		sections = append(sections, "Goal: clarify the desired outcome.")
 	}
+
 	if !hasAny(lower, "context:", "background:") {
 		sections = append(sections, "Context: include relevant background or inputs.")
 	}
+
 	if !hasAny(lower, "constraint:", "constraints:", "requirements:", "must ", "avoid ") {
 		sections = append(sections, "Constraints: note limits, preferences, and must-haves.")
 	}
+
 	if !hasAny(lower, "output format:", "format:", "respond with", "return ") {
 		sections = append(sections, "Output format: specify the expected structure.")
 	}
@@ -72,5 +75,6 @@ func hasAny(input string, needles ...string) bool {
 			return true
 		}
 	}
+
 	return false
 }

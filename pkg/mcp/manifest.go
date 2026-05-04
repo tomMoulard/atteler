@@ -31,18 +31,22 @@ func (m Manifest) Validate() error {
 		if name == "" {
 			return fmt.Errorf("server %d: missing name", i)
 		}
+
 		if _, ok := seen[name]; ok {
 			return fmt.Errorf("duplicate server name %q", name)
 		}
+
 		seen[name] = struct{}{}
 
 		if strings.TrimSpace(server.Command) == "" {
 			return fmt.Errorf("server %q: missing command", name)
 		}
+
 		if err := validateCapabilities(name, server.Capabilities); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -59,7 +63,9 @@ func (m Manifest) List() []string {
 			names = append(names, name)
 		}
 	}
+
 	sort.Strings(names)
+
 	return names
 }
 
@@ -71,17 +77,21 @@ func (m Manifest) Find(capability string) []Server {
 	}
 
 	matches := make([]Server, 0)
+
 	for _, server := range m.Servers {
 		if hasCapability(server.Capabilities, capability) {
 			matches = append(matches, server)
 		}
 	}
+
 	if len(matches) == 0 {
 		return nil
 	}
+
 	sort.Slice(matches, func(i, j int) bool {
 		return strings.TrimSpace(matches[i].Name) < strings.TrimSpace(matches[j].Name)
 	})
+
 	return matches
 }
 
@@ -91,6 +101,7 @@ func validateCapabilities(serverName string, capabilities []string) error {
 			return fmt.Errorf("server %q: capability %d: %w", serverName, i, errors.New("empty capability"))
 		}
 	}
+
 	return nil
 }
 
@@ -100,5 +111,6 @@ func hasCapability(capabilities []string, want string) bool {
 			return true
 		}
 	}
+
 	return false
 }
