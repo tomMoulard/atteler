@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -67,6 +68,10 @@ var (
 	date    = "unknown"
 )
 
+var runInteractiveProgram = func(m model) (tea.Model, error) {
+	return tea.NewProgram(m).Run()
+}
+
 var (
 	promptStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("170")).
@@ -114,6 +119,7 @@ const (
 	outputFormatText = "text"
 
 	maxPromptHistoryEntries = 100
+	taskTickInterval        = time.Second
 )
 
 // ---------------------------------------------------------------------------
@@ -122,18 +128,25 @@ const (
 
 // llmResponseMsg is sent when the LLM call completes.
 type llmResponseMsg struct {
-	err        error
-	content    string
-	model      string
-	tokenUsage tokenUsage
+	err         error
+	completedAt time.Time
+	content     string
+	model       string
+	eventLines  []string
+	tokenUsage  tokenUsage
 }
 
 // shellResultMsg is sent when a `!command` finishes executing.
 type shellResultMsg struct {
-	err     error
-	command string
-	stdout  string
-	stderr  string
+	err         error
+	completedAt time.Time
+	command     string
+	stdout      string
+	stderr      string
+}
+
+type taskTickMsg struct {
+	id int
 }
 
 type tokenUsage struct {
@@ -163,6 +176,8 @@ func (u *tokenUsage) add(next tokenUsage) {
 
 //nolint:govet // Field order groups request concerns; padding is not performance-sensitive.
 type llmRequest struct {
+	eventBase      events.Event
+	hookRunner     *events.Runner
 	generation     generationSettings
 	maxInputTokens int
 	model          string
@@ -244,7 +259,7 @@ type completionCandidate struct {
 // Model
 // ---------------------------------------------------------------------------
 
-//nolint:govet // Field order groups related TUI state instead of optimizing padding.
+//nolint:govet,recvcheck // Field order groups related TUI state; task helpers mutate the local Bubble Tea model copy before returning it.
 type model struct {
 	ctx                 context.Context
 	textarea            textarea.Model
@@ -266,16 +281,19 @@ type model struct {
 	sessionState        session.Session
 	history             []llm.Message
 	promptHistory       []string
+	queuedPrompts       []string
 	promptHistoryDraft  string
 	pickerItems         []pickerItem
 	contextOptions      contextref.Options
 	worktreeInfo        *worktree.Info
 	tokenUsage          tokenUsage
+	runningTaskStarted  time.Time
 	pickerCursor        int
 	modelFetchID        int
 	modelFetchesPending int
 	completionCursor    int
 	promptHistoryCursor int
+	runningTaskID       int
 	maxInputTokens      int
 	width               int
 	quitting            bool
@@ -287,6 +305,7 @@ type model struct {
 	modelLocked         bool
 	revampUndoActive    bool
 	completionItems     []completionCandidate
+	runningTaskLabel    string
 	revampUndo          string
 }
 
@@ -395,6 +414,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case hookMsg:
 		return m.updateHook(msg)
+
+	case taskTickMsg:
+		return m.updateTaskTick(msg)
 	}
 
 	return m.updateTextarea(msg)
@@ -501,10 +523,18 @@ func (m model) updateHook(msg hookMsg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m model) updateTaskTick(msg taskTickMsg) (tea.Model, tea.Cmd) {
+	if !m.waiting || msg.id != m.runningTaskID {
+		return m, nil
+	}
+
+	return m, taskTickCmd(msg.id)
+}
+
 func (m model) updateTextarea(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
-	if !m.waiting && !m.pickerOpen && !m.scopePickerOpen {
+	if !m.pickerOpen && !m.scopePickerOpen {
 		var taCmd tea.Cmd
 
 		m.textarea, taCmd = m.textarea.Update(msg)
@@ -522,8 +552,9 @@ func (m model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 
-	// Propagate to the textarea when not waiting.
-	if !m.waiting {
+	// Propagate to the textarea in chat mode. While an agent is running, this
+	// keeps the input editable so the next prompt can be queued.
+	if !m.pickerOpen && !m.scopePickerOpen {
 		m.completionOpen = false
 		m.completionItems = nil
 
@@ -542,7 +573,7 @@ func (m model) handleChatCommand(keyName string) (tea.Model, tea.Cmd, bool) {
 	switch keyName {
 	case "ctrl+d":
 		if m.waiting {
-			return m, nil, false
+			return m, nil, true
 		}
 
 		m.quitting = true
@@ -551,6 +582,10 @@ func (m model) handleChatCommand(keyName string) (tea.Model, tea.Cmd, bool) {
 	case keyCtrlC:
 		return m.handleCtrlC()
 	case "ctrl+o":
+		if m.waiting {
+			return m, nil, true
+		}
+
 		return m.openModelPicker()
 	case "ctrl+r":
 		next, cmd := m.revampPrompt()
@@ -581,9 +616,10 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd, bool) {
 			m.cancel = nil
 		}
 
+		elapsed := m.finishRunningTask(time.Now())
 		m.waiting = false
 
-		return m, tea.Println(errStyle.Render("(canceled)")), true
+		return m, tea.Println(errStyle.Render("(canceled" + taskDurationSuffix(elapsed) + ")")), true
 	}
 
 	m.quitting = true
@@ -713,10 +749,6 @@ func (m model) navigatePromptHistory(delta int) (model, bool) {
 
 // submitInput handles the enter key — sends user input to the LLM.
 func (m model) submitInput() (tea.Model, tea.Cmd) {
-	if m.waiting {
-		return m, nil
-	}
-
 	input := strings.TrimSpace(m.textarea.Value())
 	if input == "" {
 		return m, nil
@@ -729,6 +761,16 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 	m.revampUndo = ""
 	m.textarea.Reset()
 
+	if m.waiting {
+		m.queuedPrompts = append(m.queuedPrompts, input)
+		return m, tea.Println(dimStyle.Render(fmt.Sprintf("(queued follow-up #%d)", len(m.queuedPrompts))))
+	}
+
+	return m.submitPrompt(input)
+}
+
+// submitPrompt sends a prompt that is already detached from the textarea.
+func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(input, "!") {
 		return m.runShellCommand(strings.TrimSpace(input[1:]))
 	}
@@ -756,10 +798,6 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 		line = userLabel.Render("You") + dimStyle.Render(" (@"+activeAgent.name+") ") + input
 	}
 
-	// Launch the LLM call.
-	m.waiting = true
-	ctx, cancel := context.WithCancel(nonNilContext(m.ctx))
-	m.cancel = cancel
 	msgs := make([]llm.Message, len(requestMessages))
 	copy(msgs, requestMessages)
 
@@ -767,12 +805,15 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 
 	generation := generationForRequest(m.generationDefaults, m.generationOverrides, activeAgent)
 	if err := validateRequestBudget(m.registry, requestModel, requestMessagesForBudget(requestModel, msgs, activeAgent, generation), m.maxInputTokens); err != nil {
-		m.waiting = false
-		m.cancel = nil
-		cancel()
-
 		return m, tea.Println(errStyle.Render("Error: " + err.Error()))
 	}
+
+	// Launch the LLM call.
+	// cancel is stored in m.cancel and invoked from handleCtrlC and
+	// updateLLMResponse once the request finishes; gosec can't see that.
+	ctx, cancel := context.WithCancel(nonNilContext(m.ctx)) //nolint:gosec // see comment above
+	m.cancel = cancel
+	tickCmd := m.startRunningTask("LLM")
 
 	m.history = nextHistory
 	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
@@ -783,6 +824,13 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 	}
 
 	request := llmRequest{
+		eventBase: events.Event{
+			SessionID:   m.sessionState.ID,
+			SessionPath: m.sessionPath,
+			Agent:       activeAgent.name,
+			Model:       requestModel,
+		},
+		hookRunner:     m.hookRunner,
 		agent:          activeAgent.agent,
 		hasAgent:       activeAgent.ok,
 		model:          requestModel,
@@ -824,10 +872,10 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 			Content:     input,
 			Metadata:    referenceMetadata(refs),
 		}),
-		callLLM(m.eventContext(ctx, activeAgent.name, requestModel), m.registry, request),
+		callLLM(ctx, m.registry, request),
 	)
 
-	return m, tea.Sequence(cmds...)
+	return m, tea.Batch(tea.Sequence(cmds...), tickCmd)
 }
 
 // runShellCommand executes a `!command` and queues the result for display
@@ -838,13 +886,13 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 	}
 
 	line := userLabel.Render("$") + " " + command
-	m.waiting = true
 	// cancel is stored in m.cancel and invoked from handleCtrlC and
 	// updateShellResult once the command finishes; gosec can't see that.
 	ctx, cancel := context.WithCancel(nonNilContext(m.ctx)) //nolint:gosec // see comment above
 	m.cancel = cancel
+	tickCmd := m.startRunningTask("command")
 
-	return m, tea.Sequence(
+	return m, tea.Batch(tea.Sequence(
 		tea.Println(line),
 		emitHook(m.ctx, m.hookRunner, events.Event{
 			Type:        events.CommandExecute,
@@ -858,7 +906,7 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 			},
 		}),
 		runShellCommandCmd(ctx, command, m.cwd),
-	)
+	), tickCmd)
 }
 
 func runShellCommandCmd(ctx context.Context, command, dir string) tea.Cmd {
@@ -869,10 +917,11 @@ func runShellCommandCmd(ctx context.Context, command, dir string) tea.Cmd {
 		})
 
 		return shellResultMsg{
-			err:     err,
-			command: command,
-			stdout:  result.Stdout,
-			stderr:  result.Stderr,
+			err:         err,
+			completedAt: time.Now(),
+			command:     command,
+			stdout:      result.Stdout,
+			stderr:      result.Stderr,
 		}
 	}
 }
@@ -882,6 +931,7 @@ func runShellCommandCmd(ctx context.Context, command, dir string) tea.Cmd {
 func (m model) updateShellResult(msg shellResultMsg) (tea.Model, tea.Cmd) {
 	m.waiting = false
 	m.cancel = nil
+	elapsed := m.finishRunningTask(msg.completedAt)
 
 	content := formatShellContext(msg)
 	m.history = append(m.history, llm.Message{
@@ -903,9 +953,13 @@ func (m model) updateShellResult(msg shellResultMsg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, tea.Println(errStyle.Render("(command error: "+msg.err.Error()+")")))
 	}
 
+	if elapsed > 0 {
+		cmds = append(cmds, tea.Println(dimStyle.Render("(command ran for "+formatTaskDuration(elapsed)+")")))
+	}
+
 	cmds = append(cmds, saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner))
 
-	return m, tea.Sequence(cmds...)
+	return m.continueWithQueuedPrompt(tea.Sequence(cmds...))
 }
 
 // formatShellContext renders an executed shell command and its output as a
@@ -942,23 +996,23 @@ func (m model) resolveAgent(input string) (agentSelection, string, error) {
 	return resolveAgent(m.agentRegistry, m.selectedAgent, input)
 }
 
-func (m model) eventContext(ctx context.Context, agentName, modelName string) context.Context {
-	return events.WithEmitter(ctx, m.hookRunner, events.Event{
-		SessionID:   m.sessionState.ID,
-		SessionPath: m.sessionPath,
-		Agent:       agentName,
-		Model:       modelName,
-	})
-}
-
 // updateLLMResponse handles the message received when an LLM call completes.
 func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 	m.waiting = false
 
 	m.cancel = nil
+	elapsed := m.finishRunningTask(msg.completedAt)
+
+	cmds := eventLineCommands(msg.eventLines)
 	if msg.err != nil {
-		return m, tea.Batch(
-			tea.Println(errStyle.Render("Error: "+msg.err.Error())),
+		errorLine := "Error: " + msg.err.Error()
+		if elapsed > 0 {
+			errorLine += " (ran for " + formatTaskDuration(elapsed) + ")"
+		}
+
+		cmds = append(
+			cmds,
+			tea.Println(errStyle.Render(errorLine)),
 			emitHook(m.ctx, m.hookRunner, events.Event{
 				Type:        events.Error,
 				SessionID:   m.sessionState.ID,
@@ -968,6 +1022,8 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 				Error:       msg.err.Error(),
 			}),
 		)
+
+		return m.continueWithQueuedPrompt(tea.Sequence(cmds...))
 	}
 
 	m.tokenUsage.add(msg.tokenUsage)
@@ -986,8 +1042,12 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 
 	header := assistantLabel.Render("Assistant") + " " +
 		dimStyle.Render("("+msg.model+")")
+	if elapsed > 0 {
+		header += dimStyle.Render(" (ran for " + formatTaskDuration(elapsed) + ")")
+	}
 
-	return m, tea.Batch(
+	cmds = append(
+		cmds,
 		tea.Println(header+"\n"+msg.content),
 		saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner),
 		emitHook(m.ctx, m.hookRunner, events.Event{
@@ -1000,6 +1060,63 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 			Content:     msg.content,
 		}),
 	)
+
+	return m.continueWithQueuedPrompt(tea.Sequence(cmds...))
+}
+
+func (m model) continueWithQueuedPrompt(current tea.Cmd) (tea.Model, tea.Cmd) {
+	if len(m.queuedPrompts) == 0 {
+		return m, current
+	}
+
+	nextPrompt := m.queuedPrompts[0]
+	m.queuedPrompts = append([]string(nil), m.queuedPrompts[1:]...)
+
+	nextModel, nextCmd := m.submitPrompt(nextPrompt)
+
+	next, ok := nextModel.(model)
+	if !ok {
+		return m, current
+	}
+
+	return next, tea.Sequence(current, nextCmd)
+}
+
+func (m *model) startRunningTask(label string) tea.Cmd {
+	m.waiting = true
+	m.runningTaskID++
+	m.runningTaskLabel = label
+	m.runningTaskStarted = time.Now()
+
+	return taskTickCmd(m.runningTaskID)
+}
+
+func (m *model) finishRunningTask(completedAt time.Time) time.Duration {
+	if m.runningTaskStarted.IsZero() {
+		m.clearRunningTask()
+		return 0
+	}
+
+	if completedAt.IsZero() {
+		completedAt = time.Now()
+	}
+
+	elapsed := max(completedAt.Sub(m.runningTaskStarted), 0)
+
+	m.clearRunningTask()
+
+	return elapsed
+}
+
+func (m *model) clearRunningTask() {
+	m.runningTaskLabel = ""
+	m.runningTaskStarted = time.Time{}
+}
+
+func taskTickCmd(id int) tea.Cmd {
+	return tea.Tick(taskTickInterval, func(time.Time) tea.Msg {
+		return taskTickMsg{id: id}
+	})
 }
 
 // updatePicker handles key events while the model picker is open.
@@ -1122,14 +1239,19 @@ func (m model) View() string {
 		return m.viewModelScopePicker()
 	}
 
-	if m.waiting {
-		return statusStyle.Render("  Thinking... (Ctrl+C to cancel)")
-	}
-
 	var (
 		status string
 		parts  []string
 	)
+
+	if m.waiting {
+		status = statusStyle.Render(m.waitingStatus())
+		if m.completionOpen && len(m.completionItems) > 0 {
+			status += "\n" + m.viewCompletions()
+		}
+
+		return status + "\n" + m.viewInput()
+	}
 
 	if m.selectedAgent != "" {
 		parts = append(parts, "agent:"+m.selectedAgent)
@@ -1156,12 +1278,60 @@ func (m model) View() string {
 		status += "\n" + m.viewCompletions()
 	}
 
-	inputView := m.textarea.View()
-	if suggestion, ok := m.promptSuggestion(); ok && !m.completionOpen {
-		inputView += dimStyle.Render(suggestion.Suffix)
+	return status + "\n" + m.viewInput()
+}
+
+func (m model) waitingStatus() string {
+	return m.waitingStatusAt(time.Now())
+}
+
+func (m model) waitingStatusAt(now time.Time) string {
+	parts := make([]string, 0, 3)
+
+	if !m.runningTaskStarted.IsZero() {
+		label := m.runningTaskLabel
+		if label == "" {
+			label = "task"
+		}
+
+		elapsed := max(now.Sub(m.runningTaskStarted), 0)
+
+		parts = append(parts, label+" running for "+formatTaskDuration(elapsed))
 	}
 
-	return status + "\n" + inputView
+	if len(m.queuedPrompts) > 0 {
+		parts = append(parts, fmt.Sprintf("%d queued", len(m.queuedPrompts)))
+	}
+
+	parts = append(parts, "Ctrl+C to cancel")
+
+	return "  Thinking... (" + strings.Join(parts, ", ") + ")"
+}
+
+func (m model) viewInput() string {
+	inputView := m.textarea.View()
+	if suggestion, ok := m.promptSuggestion(); ok && !m.completionOpen {
+		inputView = renderInlinePromptSuggestion(m.textarea, inputView, suggestion.Suffix)
+	}
+
+	return inputView
+}
+
+func renderInlinePromptSuggestion(input textarea.Model, inputView, suffix string) string {
+	if suffix == "" || inputView == "" {
+		return inputView
+	}
+
+	lines := strings.Split(inputView, "\n")
+	line := max(input.Line(), 0)
+
+	if line >= len(lines) {
+		line = len(lines) - 1
+	}
+
+	lines[line] = strings.TrimRight(lines[line], " ") + dimStyle.Render(suffix)
+
+	return strings.Join(lines, "\n")
 }
 
 func (m model) viewCompletions() string {
@@ -1311,6 +1481,37 @@ func textareaCursorOffset(input textarea.Model) int {
 	column = min(column, len(lines[line]))
 
 	return offset + column
+}
+
+func taskDurationSuffix(elapsed time.Duration) string {
+	if elapsed <= 0 {
+		return ""
+	}
+
+	return " after " + formatTaskDuration(elapsed)
+}
+
+func formatTaskDuration(elapsed time.Duration) string {
+	if elapsed < 0 {
+		elapsed = 0
+	}
+
+	if elapsed < time.Second {
+		return strconv.FormatInt(elapsed.Milliseconds(), 10) + "ms"
+	}
+
+	if elapsed < time.Minute {
+		elapsed = elapsed.Round(100 * time.Millisecond)
+
+		seconds := elapsed.Seconds()
+		if elapsed%time.Second == 0 {
+			return strconv.Itoa(int(seconds)) + "s"
+		}
+
+		return fmt.Sprintf("%.1fs", seconds)
+	}
+
+	return elapsed.Truncate(time.Second).String()
 }
 
 // formatTokenCount formats a token count as a compact human-readable string.
@@ -1542,9 +1743,51 @@ func parseFZFSelection(selection string, items []pickerItem) (pickerItem, bool) 
 		return pickerItem{}, false
 	}
 
-	label, _, _ := strings.Cut(selection, "\t")
+	fields := strings.Split(selection, "\t")
+	label := fields[0]
+
 	for _, item := range items {
 		if item.label() == label {
+			return item, true
+		}
+	}
+
+	if len(fields) >= 3 {
+		provider := strings.TrimSpace(fields[1])
+		model := strings.TrimSpace(fields[2])
+		reasoning := ""
+
+		if len(fields) >= 4 {
+			reasoning = strings.TrimSpace(fields[3])
+		}
+
+		if item, ok := findPickerItemByColumns(items, provider, model, reasoning); ok {
+			return item, true
+		}
+	}
+
+	return pickerItem{}, false
+}
+
+func findPickerItemByColumns(items []pickerItem, provider, model, reasoning string) (pickerItem, bool) {
+	for _, item := range items {
+		if item.provider == provider && item.model == model && item.reasoning == reasoning {
+			return item, true
+		}
+	}
+
+	if reasoning != "" {
+		return pickerItem{}, false
+	}
+
+	for _, item := range items {
+		if item.provider == provider && item.model == model && item.reasoning == llm.ReasoningLevelDefault {
+			return item, true
+		}
+	}
+
+	for _, item := range items {
+		if item.provider == provider && item.model == model && item.reasoning == "" {
 			return item, true
 		}
 	}
@@ -1837,6 +2080,13 @@ func normalizePromptHistoryKey(prompt string) string {
 // registry default.
 func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd {
 	return func() tea.Msg {
+		eventLines := newEventLineBuffer()
+		ctx = events.WithEmitter(
+			ctx,
+			request.hookRunner.WithLogger(eventLines),
+			request.eventBase,
+		)
+
 		params := llm.CompleteParams{
 			Model:    request.model,
 			Messages: request.messages,
@@ -1848,21 +2098,23 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 		applyGenerationParams(&params, request.generation)
 
 		if err := validateRequestBudget(reg, params.Model, params.Messages, request.maxInputTokens); err != nil {
-			return llmResponseMsg{err: err}
+			return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines()}
 		}
 
 		resp, err := reg.CompleteWithFallback(ctx, params, request.fallbackModels)
 		if err != nil {
-			return llmResponseMsg{err: err}
+			return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines()}
 		}
 
 		var usage tokenUsage
 		usage.addResponse(resp)
 
 		return llmResponseMsg{
-			content:    resp.Content,
-			model:      resp.Model,
-			tokenUsage: usage,
+			completedAt: time.Now(),
+			content:     resp.Content,
+			model:       resp.Model,
+			eventLines:  eventLines.Lines(),
+			tokenUsage:  usage,
 		}
 	}
 }
@@ -1955,6 +2207,64 @@ func referenceMetadata(refs []contextref.Reference) map[string]string {
 	return map[string]string{
 		"context_references": referenceSummary(refs),
 	}
+}
+
+type eventLineBuffer struct {
+	lines []string
+	mu    sync.Mutex
+}
+
+func newEventLineBuffer() *eventLineBuffer {
+	return &eventLineBuffer{}
+}
+
+func (b *eventLineBuffer) Write(p []byte) (int, error) {
+	if b == nil {
+		return len(p), nil
+	}
+
+	text := strings.TrimRight(string(p), "\r\n")
+	if text == "" {
+		return len(p), nil
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for line := range strings.SplitSeq(text, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+
+		b.lines = append(b.lines, line)
+	}
+
+	return len(p), nil
+}
+
+func (b *eventLineBuffer) Lines() []string {
+	if b == nil {
+		return nil
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return append([]string(nil), b.lines...)
+}
+
+func eventLineCommands(lines []string) []tea.Cmd {
+	cmds := make([]tea.Cmd, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		cmds = append(cmds, tea.Println(dimStyle.Render(line)))
+	}
+
+	return cmds
 }
 
 func saveSession(ctx context.Context, store *session.Store, sessionState session.Session, runner *events.Runner) tea.Cmd {
@@ -4065,7 +4375,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		Model:       state.selectedModel,
 	})
 
-	p := tea.NewProgram(initialModel(
+	finalModel, err := runInteractiveProgram(initialModel(
 		ctx,
 		state.registry,
 		state.agentRegistry,
@@ -4085,8 +4395,6 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.modelLocked,
 		state.worktreeInfo,
 	))
-
-	finalModel, err := p.Run()
 
 	// Once the program exits, restore the stderr logger so SessionEnd / Error
 	// events are visible after the TUI has released the screen.

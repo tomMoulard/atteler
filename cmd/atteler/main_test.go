@@ -951,6 +951,13 @@ func TestFZFInputAndSelection(t *testing.T) {
 		require.Failf(t, "unexpected failure", "selection = %+v, want codex/gpt-5.5:xhigh", item)
 	}
 
+	item, ok = parseFZFSelection("codex/gpt-5.5\tcodex\tgpt-5.5\n", []pickerItem{
+		{provider: "codex", model: "gpt-5.5", reasoning: llm.ReasoningLevelDefault},
+		{provider: "codex", model: "gpt-5.5", reasoning: testReasoningXHigh},
+	})
+	require.True(t, ok)
+	assert.Equal(t, llm.ReasoningLevelDefault, item.reasoning)
+
 	if _, ok := parseFZFSelection("", items); ok {
 		require.FailNow(t, "empty fzf selection should be canceled")
 	}
@@ -977,6 +984,64 @@ func (p modelPickerProvider) Complete(context.Context, llm.CompleteParams) (*llm
 }
 
 func (p modelPickerProvider) ModelContextWindow(string) int { return 0 }
+
+type activityLoggingProvider struct{}
+
+func (p activityLoggingProvider) Name() string { return "activity" }
+
+func (p activityLoggingProvider) Models() []string { return []string{"activity-model"} }
+
+func (p activityLoggingProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p activityLoggingProvider) HealthCheck(context.Context) error { return nil }
+
+func (p activityLoggingProvider) Complete(ctx context.Context, params llm.CompleteParams) (*llm.Response, error) {
+	if err := events.EmitFromContext(ctx, events.Event{
+		Type: events.CommandExecute,
+		Metadata: map[string]string{
+			"command": "fake-provider-command",
+		},
+	}); err != nil {
+		return nil, err
+	}
+
+	return &llm.Response{Content: "ok", Model: params.Model}, nil
+}
+
+func (p activityLoggingProvider) ModelContextWindow(string) int { return 0 }
+
+func TestCallLLMBuffersProviderActivityEvents(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(activityLoggingProvider{})
+
+	msg, ok := callLLM(context.Background(), registry, llmRequest{
+		eventBase: events.Event{
+			SessionID: "session-1",
+			Model:     "activity/activity-model",
+		},
+		hookRunner: events.NewRunner(nil),
+		model:      "activity/activity-model",
+		messages: []llm.Message{{
+			Role:    llm.RoleUser,
+			Content: "hello",
+		}},
+	})().(llmResponseMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+	assert.Equal(t, "ok", msg.content)
+
+	lines := strings.Join(msg.eventLines, "\n")
+	assert.Contains(t, lines, "event:tool_execute")
+	assert.Contains(t, lines, "provider=activity")
+	assert.Contains(t, lines, "tool=llm.complete")
+	assert.Contains(t, lines, "event:command_execute")
+	assert.Contains(t, lines, "command=fake-provider-command")
+	assert.Contains(t, lines, "session=session-1")
+}
 
 func TestOpenModelPickerFetchesProviderModelsInBackground(t *testing.T) {
 	t.Parallel()
@@ -1184,6 +1249,197 @@ func TestPromptSuggestionAndApply(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestFormatTaskDuration(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "250ms", formatTaskDuration(250*time.Millisecond))
+	assert.Equal(t, "1.2s", formatTaskDuration(1200*time.Millisecond))
+	assert.Equal(t, "2s", formatTaskDuration(2*time.Second))
+	assert.Equal(t, "1m30s", formatTaskDuration(90*time.Second))
+}
+
+func TestWaitingStatus_RendersRunningDurationAndQueue(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	m := model{
+		runningTaskLabel:   "LLM",
+		runningTaskStarted: now.Add(-90 * time.Second),
+		queuedPrompts:      []string{"next"},
+	}
+
+	got := m.waitingStatusAt(now)
+	assert.Contains(t, got, "LLM running for 1m30s")
+	assert.Contains(t, got, "1 queued")
+	assert.Contains(t, got, "Ctrl+C to cancel")
+}
+
+func TestSubmitPrompt_StartsLLMTaskTimer(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		ctx:            context.Background(),
+		textarea:       textarea.New(),
+		registry:       llm.NewRegistry(),
+		agentRegistry:  agent.NewRegistry(nil),
+		sessionState:   session.New("gpt-test", nil),
+		contextOptions: contextref.Options{Root: t.TempDir()},
+	}
+
+	nextModel, cmd := m.submitPrompt("hello")
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, cmd)
+	assert.True(t, next.waiting)
+	assert.Equal(t, "LLM", next.runningTaskLabel)
+	assert.False(t, next.runningTaskStarted.IsZero())
+	assert.Equal(t, 1, next.runningTaskID)
+}
+
+func TestRunShellCommand_StartsTaskTimer(t *testing.T) {
+	t.Parallel()
+
+	nextModel, cmd := (model{ctx: context.Background()}).runShellCommand("echo hi")
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, cmd)
+	assert.True(t, next.waiting)
+	assert.Equal(t, "command", next.runningTaskLabel)
+	assert.False(t, next.runningTaskStarted.IsZero())
+	assert.Equal(t, 1, next.runningTaskID)
+}
+
+func TestView_RendersInlinePromptSuggestion(t *testing.T) {
+	t.Parallel()
+
+	m := model{textarea: textarea.New()}
+	m.textarea.SetHeight(3)
+	m.textarea.ShowLineNumbers = false
+	m.textarea.SetValue("summ")
+
+	plain := stripANSI(m.View())
+	lines := strings.Split(plain, "\n")
+	require.NotEmpty(t, lines)
+	assert.Contains(t, lines[1], "summarize this session with changed files and verification evidence")
+}
+
+func TestView_SuppressesInlineSuggestionWhenCompletionMenuOpen(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea:        textarea.New(),
+		completionOpen:  true,
+		completionItems: []completionCandidate{{kind: "agent", label: "@reviewer", value: "@reviewer "}},
+	}
+	m.textarea.SetValue("summ")
+
+	plain := stripANSI(m.View())
+	assert.Contains(t, plain, "completions:")
+	assert.NotContains(t, plain, "summarize this session")
+}
+
+func TestSubmitInput_QueuesFollowUpWhileWaiting(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea:            textarea.New(),
+		waiting:             true,
+		promptHistoryCursor: -1,
+	}
+	m.textarea.SetValue("follow up")
+
+	nextModel, cmd := m.submitInput()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, cmd)
+	assert.True(t, next.waiting)
+	assert.Empty(t, next.textarea.Value())
+	assert.Equal(t, []string{"follow up"}, next.queuedPrompts)
+	assert.Equal(t, []string{"follow up"}, next.promptHistory)
+}
+
+func TestUpdateLLMResponse_DrainsQueuedPrompt(t *testing.T) {
+	t.Parallel()
+
+	initialHistory := []llm.Message{{Role: llm.RoleUser, Content: "first"}}
+	sessionState := session.New("gpt-test", initialHistory)
+	m := model{
+		ctx:            context.Background(),
+		textarea:       textarea.New(),
+		registry:       llm.NewRegistry(),
+		agentRegistry:  agent.NewRegistry(nil),
+		sessionStore:   session.NewStore(t.TempDir()),
+		sessionState:   sessionState,
+		sessionPath:    "/tmp/session.json",
+		selectedModel:  "gpt-test",
+		history:        append([]llm.Message(nil), initialHistory...),
+		queuedPrompts:  []string{"follow up", "third"},
+		contextOptions: contextref.Options{Root: t.TempDir()},
+	}
+
+	nextModel, cmd := m.updateLLMResponse(llmResponseMsg{content: "answer", model: "gpt-test"})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, cmd)
+	assert.True(t, next.waiting)
+	assert.Len(t, next.queuedPrompts, 1)
+	assert.Equal(t, "third", next.queuedPrompts[0])
+	assert.Equal(t, []llm.Message{
+		{Role: llm.RoleUser, Content: "first"},
+		{Role: llm.RoleAssistant, Content: "answer"},
+		{Role: llm.RoleUser, Content: "follow up"},
+	}, next.history)
+	assert.Equal(t, next.history, next.sessionState.Messages)
+}
+
+func TestUpdateLLMResponse_ClearsCompletedTaskTimer(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	m := model{
+		textarea:           textarea.New(),
+		runningTaskLabel:   "LLM",
+		runningTaskStarted: startedAt,
+		runningTaskID:      7,
+		sessionState:       session.New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "hello"}}),
+		history:            []llm.Message{{Role: llm.RoleUser, Content: "hello"}},
+	}
+
+	nextModel, cmd := m.updateLLMResponse(llmResponseMsg{
+		completedAt: startedAt.Add(1500 * time.Millisecond),
+		content:     "answer",
+		model:       "gpt-test",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, cmd)
+	assert.False(t, next.waiting)
+	assert.Empty(t, next.runningTaskLabel)
+	assert.True(t, next.runningTaskStarted.IsZero())
+}
+
+func stripANSI(value string) string {
+	var b strings.Builder
+
+	for i := 0; i < len(value); i++ {
+		if value[i] != '\x1b' {
+			b.WriteByte(value[i])
+			continue
+		}
+
+		i++
+		if i >= len(value) || value[i] != '[' {
+			continue
+		}
+
+		for i < len(value) && (value[i] < '@' || value[i] > '~') {
+			i++
+		}
+	}
+
+	return b.String()
+}
+
 func TestRevampPromptAndUndo(t *testing.T) {
 	t.Parallel()
 
@@ -1320,6 +1576,38 @@ func TestFormatHeadlessRun(t *testing.T) {
 	} {
 		assert.Contains(t, got, want)
 	}
+}
+
+//nolint:paralleltest // Mutates the package-level runInteractiveProgram seam.
+func TestRunInteractive_ReplacesHookLoggerBeforeSessionStart(t *testing.T) {
+	originalRunInteractiveProgram := runInteractiveProgram
+	runInteractiveProgram = func(m model) (tea.Model, error) {
+		return m, nil
+	}
+
+	t.Cleanup(func() {
+		runInteractiveProgram = originalRunInteractiveProgram
+	})
+
+	store := session.NewStore(t.TempDir())
+	state := appState{
+		registry:       llm.NewRegistry(),
+		agentRegistry:  agent.NewRegistry(nil),
+		hookRunner:     events.NewRunnerWithLogger(nil, panicWriter{}),
+		sessionStore:   store,
+		sessionState:   session.New("gpt-test", nil),
+		contextOptions: contextref.Options{Root: t.TempDir()},
+		selectedModel:  "gpt-test",
+		cwd:            t.TempDir(),
+	}
+
+	require.NoError(t, runInteractive(context.Background(), state))
+}
+
+type panicWriter struct{}
+
+func (panicWriter) Write([]byte) (int, error) {
+	panic("hook logger should not be used before the TUI program starts")
 }
 
 func TestPromptComplete_AgentCandidatesAndFormatting(t *testing.T) {
@@ -3982,4 +4270,28 @@ func TestFormatShellContext(t *testing.T) {
 		assert.Contains(t, got, "$ false")
 		assert.Contains(t, got, "[error] "+assert.AnError.Error())
 	})
+}
+
+func TestUpdateShellResult_ClearsCompletedTaskTimer(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	m := model{
+		runningTaskLabel:   "command",
+		runningTaskStarted: startedAt,
+		runningTaskID:      3,
+		sessionState:       session.New("gpt-test", nil),
+	}
+
+	nextModel, cmd := m.updateShellResult(shellResultMsg{
+		completedAt: startedAt.Add(2 * time.Second),
+		command:     "echo hi",
+		stdout:      "hi\n",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, cmd)
+	assert.False(t, next.waiting)
+	assert.Empty(t, next.runningTaskLabel)
+	assert.True(t, next.runningTaskStarted.IsZero())
 }
