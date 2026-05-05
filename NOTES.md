@@ -109,6 +109,7 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] CLI agent orchestration preview
  - [x] dependency-aware async agent task planning waves
  - [x] dependency-aware async agent task runner with same-wave concurrency
+ - [x] persistent agent task/TODO list with add, assign, complete, and list commands
  - [x] CLI dependency-aware async task planning preview
  - [x] agent feedback improvement proposal primitives
  - [x] CLI feedback improvement proposal report

@@ -40,6 +40,7 @@ import (
 	attskill "github.com/tommoulard/atteler/pkg/skill"
 	"github.com/tommoulard/atteler/pkg/speculate"
 	"github.com/tommoulard/atteler/pkg/subagent"
+	"github.com/tommoulard/atteler/pkg/tasklist"
 	"github.com/tommoulard/atteler/pkg/vector"
 	"github.com/tommoulard/atteler/pkg/watch"
 )
@@ -3394,6 +3395,87 @@ func TestParseAndFormatAsyncPlan(t *testing.T) {
 			require.Failf(t, "formatted async plan missing content", "missing %q in:\n%s", want, got)
 		}
 	}
+}
+
+func TestTaskListHelpers(t *testing.T) {
+	t.Parallel()
+
+	id, agentName, err := parseTaskAssignmentSpec("todo-1:reviewer")
+	require.NoError(t, err)
+	assert.Equal(t, "todo-1", id)
+	assert.Equal(t, "reviewer", agentName)
+
+	_, _, err = parseTaskAssignmentSpec("todo-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected id:agent")
+
+	completedAt := time.Date(2026, 5, 5, 12, 30, 0, 0, time.UTC)
+	got := formatTaskListItem(tasklist.Task{
+		ID:          "todo-1",
+		Title:       "wire CLI",
+		Status:      tasklist.StatusCompleted,
+		Agent:       "reviewer",
+		CreatedAt:   completedAt.Add(-time.Hour),
+		UpdatedAt:   completedAt,
+		CompletedAt: &completedAt,
+		Metadata:    map[string]string{"priority": "high", "scope": "cmd"},
+	})
+
+	for _, want := range []string{
+		"id=todo-1",
+		"status=completed",
+		"title=wire CLI",
+		"agent=reviewer",
+		"created_at=2026-05-05T11:30:00Z",
+		"updated_at=2026-05-05T12:30:00Z",
+		"completed_at=2026-05-05T12:30:00Z",
+		"metadata=priority:high,scope:cmd",
+	} {
+		assert.Contains(t, got, want)
+	}
+}
+
+func TestRunTaskListCommandPersistsTaskLifecycle(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	taskFile := filepath.Join(t.TempDir(), "tasks.json")
+	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
+
+	err := runTaskListCommand(ctx, store, cliOptions{
+		taskFilePath: taskFile,
+		taskAddID:    "todo-1",
+		taskAddTitle: "draft task package",
+		taskAgent:    "planner",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, cliOptions{
+		taskFilePath:   taskFile,
+		taskAssignSpec: "todo-1:executor",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, cliOptions{
+		taskFilePath:   taskFile,
+		taskCompleteID: "todo-1",
+		taskAgent:      "verifier",
+	})
+	require.NoError(t, err)
+
+	tasks, err := tasklist.NewStore(taskFile).List(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, tasklist.StatusCompleted, tasks[0].Status)
+	assert.Equal(t, "verifier", tasks[0].Agent)
+
+	history, err := tasklist.NewStore(taskFile).History(ctx)
+	require.NoError(t, err)
+	assert.Len(t, history, 3)
+
+	err = runTaskListCommand(ctx, store, cliOptions{taskFilePath: taskFile, taskAddTitle: "new", taskList: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "choose only one")
 }
 
 func TestFormatSpeculatePlan(t *testing.T) {

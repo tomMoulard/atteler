@@ -82,6 +82,7 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] dependency-aware async agent task planning waves
  - [x] agent feedback improvement proposal primitives
  - [x] CLI feedback improvement proposal report
+ - [x] persistent agent task/TODO list with add, assign, complete, and list commands
  - [x] CLI feedback proposal application to agent config plus history log
  - [x] cost/model routing primitives with budget, context, cache, and latency signals
  - [x] CLI cost/model routing preview
@@ -974,6 +975,18 @@ atteler --async-plan \
   --async-task 'plan|planner|draft plan' \
   --async-task 'code|coder|implement feature|plan'
 ```
+
+Agents and sub-agents can coordinate through a small persistent task/TODO list:
+
+```sh
+atteler --task-add "draft the migration plan" --task-id plan --task-agent planner
+atteler --task-assign plan:executor
+atteler --task-complete plan --task-agent verifier
+atteler --task-list
+```
+
+Use `--task-file <path>` to point several sessions or agents at the same JSON
+task list. When omitted, Atteler stores tasks at `.atteler/tasks.json`.
 
 Sub-agent fan-out can be previewed or executed with stable child IDs:
 

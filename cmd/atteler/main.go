@@ -53,6 +53,7 @@ import (
 	attskill "github.com/tommoulard/atteler/pkg/skill"
 	"github.com/tommoulard/atteler/pkg/speculate"
 	"github.com/tommoulard/atteler/pkg/subagent"
+	"github.com/tommoulard/atteler/pkg/tasklist"
 	"github.com/tommoulard/atteler/pkg/vector"
 	"github.com/tommoulard/atteler/pkg/watch"
 	"github.com/tommoulard/atteler/pkg/worktree"
@@ -2683,6 +2684,12 @@ type cliOptions struct {
 	pluginEntrypoint                   string
 	bashCommand                        string
 	bashDir                            string
+	taskFilePath                       string
+	taskAddTitle                       string
+	taskAddID                          string
+	taskAgent                          string
+	taskAssignSpec                     string
+	taskCompleteID                     string
 	feedbackApplyConfig                string
 	feedbackHistoryPath                string
 	agentMemoryAgent                   string
@@ -2759,6 +2766,7 @@ type cliOptions struct {
 	listModels                         bool
 	listKnownModels                    bool
 	listProviders                      bool
+	taskList                           bool
 	speculatePlan                      bool
 	reviewPlan                         bool
 	routeInteractive                   bool
@@ -2935,6 +2943,12 @@ func parseOptions() cliOptions {
 	flag.StringVar(&opts.bashCommand, "bash", "", "run an explicit local bash command and exit")
 	flag.StringVar(&opts.bashDir, "bash-dir", "", "working directory for --bash")
 	flag.Var(&opts.bashTimeout, "bash-timeout-seconds", "timeout in seconds for --bash")
+	flag.StringVar(&opts.taskFilePath, "task-file", "", "JSON task-list file; defaults to .atteler/tasks.json")
+	flag.StringVar(&opts.taskAddTitle, "task-add", "", "add a persistent agent task/TODO item and exit")
+	flag.StringVar(&opts.taskAddID, "task-id", "", "optional stable ID for --task-add")
+	flag.StringVar(&opts.taskAgent, "task-agent", "", "agent for --task-add or --task-complete")
+	flag.StringVar(&opts.taskAssignSpec, "task-assign", "", "assign a task as id:agent and exit")
+	flag.StringVar(&opts.taskCompleteID, "task-complete", "", "mark a task complete by ID and exit")
 	flag.StringVar(&opts.memorySearch, "memory-search", "", "search local memory built from sessions, --memory-store, and --memory-index files")
 	flag.StringVar(&opts.memoryStorePath, "memory-store", "", "JSON memory store path to load and/or save")
 	flag.StringVar(&opts.mcpManifestPath, "mcp-manifest", "", "validate/list or invoke an MCP manifest YAML/JSON file and exit")
@@ -3021,6 +3035,7 @@ func parseOptions() cliOptions {
 	flag.BoolVar(&opts.listSessions, "list-sessions", false, "list saved sessions and exit")
 	flag.BoolVar(&opts.listHeadless, "list-headless", false, "list active headless sessions and exit")
 	flag.StringVar(&opts.streamHeadlessID, "stream-headless", "", "stream one headless session log by headless ID and exit when it finishes")
+	flag.BoolVar(&opts.taskList, "task-list", false, "list persistent agent task/TODO items and exit")
 	flag.BoolVar(&opts.listSessionTags, "list-session-tags", false, "list saved session tags with counts and exit")
 	flag.BoolVar(&opts.agentPerformanceSummary, "agent-performance-summary", false, "summarize recorded agent performance across saved sessions and exit")
 	flag.BoolVar(&opts.listArtifacts, "list-artifacts", false, "list artifacts recorded on the selected session and exit")
@@ -3462,6 +3477,8 @@ func runProviderlessUtilityCommand(ctx context.Context, opts cliOptions, store *
 
 func runProviderlessFileUtilityCommand(ctx context.Context, opts cliOptions, store *session.Store) (bool, error) {
 	switch {
+	case taskCommandRequested(opts):
+		return true, runTaskListCommand(ctx, store, opts)
 	case opts.evalOutputPath != "":
 		return true, evalOutput(opts.evalOutputPath, opts.evalExpected, opts.evalExpectedPath, atteval.MatchMode(opts.evalMode))
 	case opts.contextPackPath != "":
@@ -10002,6 +10019,177 @@ func formatAsyncTask(task attasync.Task) string {
 	}
 
 	return strings.Join(parts, "	")
+}
+
+func taskCommandRequested(opts cliOptions) bool {
+	return opts.taskAddTitle != "" || opts.taskList || opts.taskAssignSpec != "" || opts.taskCompleteID != ""
+}
+
+func runTaskListCommand(ctx context.Context, sessionStore *session.Store, opts cliOptions) error {
+	if err := validateSingleTaskOperation(opts); err != nil {
+		return err
+	}
+
+	store := tasklist.NewStore(taskListPath(sessionStore, opts.taskFilePath))
+	switch {
+	case opts.taskAddTitle != "":
+		task, err := store.Add(ctx, tasklist.AddRequest{
+			ID:    opts.taskAddID,
+			Title: opts.taskAddTitle,
+			Agent: opts.taskAgent,
+		})
+		if err != nil {
+			return fmt.Errorf("task add: %w", err)
+		}
+
+		fmt.Println(formatTaskListItem(task))
+
+		return nil
+	case opts.taskAssignSpec != "":
+		id, agentName, err := parseTaskAssignmentSpec(opts.taskAssignSpec)
+		if err != nil {
+			return err
+		}
+
+		task, err := store.Assign(ctx, id, agentName)
+		if err != nil {
+			return fmt.Errorf("task assign: %w", err)
+		}
+
+		fmt.Println(formatTaskListItem(task))
+
+		return nil
+	case opts.taskCompleteID != "":
+		task, err := store.Complete(ctx, opts.taskCompleteID, opts.taskAgent)
+		if err != nil {
+			return fmt.Errorf("task complete: %w", err)
+		}
+
+		fmt.Println(formatTaskListItem(task))
+
+		return nil
+	case opts.taskList:
+		tasks, err := store.List(ctx)
+		if err != nil {
+			return fmt.Errorf("task list: %w", err)
+		}
+
+		if len(tasks) == 0 {
+			fmt.Println("No tasks found.")
+			return nil
+		}
+
+		for i := range tasks {
+			fmt.Println(formatTaskListItem(tasks[i]))
+		}
+
+		return nil
+	default:
+		return errors.New("task list: no task operation requested")
+	}
+}
+
+func validateSingleTaskOperation(opts cliOptions) error {
+	operations := 0
+
+	for _, requested := range []bool{
+		opts.taskAddTitle != "",
+		opts.taskList,
+		opts.taskAssignSpec != "",
+		opts.taskCompleteID != "",
+	} {
+		if requested {
+			operations++
+		}
+	}
+
+	if operations > 1 {
+		return errors.New("task list: choose only one of --task-add, --task-list, --task-assign, or --task-complete")
+	}
+
+	return nil
+}
+
+func taskListPath(sessionStore *session.Store, explicit string) string {
+	if path := strings.TrimSpace(explicit); path != "" {
+		return path
+	}
+
+	if sessionStore == nil || strings.TrimSpace(sessionStore.Dir()) == "" {
+		return filepath.Join(".atteler", "tasks.json")
+	}
+
+	return filepath.Join(filepath.Dir(sessionStore.Dir()), "tasks.json")
+}
+
+func parseTaskAssignmentSpec(raw string) (id, agentName string, err error) {
+	id, agentName, ok := strings.Cut(raw, ":")
+	if !ok {
+		return "", "", fmt.Errorf("task assign %q: expected id:agent", raw)
+	}
+
+	id = strings.TrimSpace(id)
+	agentName = strings.TrimSpace(agentName)
+
+	if id == "" {
+		return "", "", fmt.Errorf("task assign %q: id is required", raw)
+	}
+
+	if agentName == "" {
+		return "", "", fmt.Errorf("task assign %q: agent is required", raw)
+	}
+
+	return id, agentName, nil
+}
+
+func formatTaskListItem(task tasklist.Task) string {
+	parts := []string{
+		"id=" + task.ID,
+		"status=" + string(task.Status),
+		"title=" + task.Title,
+	}
+
+	if task.Agent != "" {
+		parts = append(parts, "agent="+task.Agent)
+	}
+
+	if !task.CreatedAt.IsZero() {
+		parts = append(parts, "created_at="+task.CreatedAt.UTC().Format(time.RFC3339))
+	}
+
+	if !task.UpdatedAt.IsZero() {
+		parts = append(parts, "updated_at="+task.UpdatedAt.UTC().Format(time.RFC3339))
+	}
+
+	if task.CompletedAt != nil && !task.CompletedAt.IsZero() {
+		parts = append(parts, "completed_at="+task.CompletedAt.UTC().Format(time.RFC3339))
+	}
+
+	if metadata := formatTaskMetadata(task.Metadata); metadata != "" {
+		parts = append(parts, "metadata="+metadata)
+	}
+
+	return strings.Join(parts, "	")
+}
+
+func formatTaskMetadata(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+":"+metadata[key])
+	}
+
+	return strings.Join(parts, ",")
 }
 
 func runSpeculatePlan(agents, gates []string, prompt string) error {

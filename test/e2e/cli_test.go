@@ -326,6 +326,23 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 	assertContains(t, result.stdout, "agent=reviewer")
 	assertContains(t, result.stdout, "prompt=dry run this child prompt")
 
+	taskFile := filepath.Join(workDir, "tasks.json")
+	result = runOK(t, runSpec{dir: workDir}, "--task-file", taskFile, "--task-add", "draft the task list CLI", "--task-id", "todo-1", "--task-agent", "planner")
+	assertContains(t, result.stdout, "id=todo-1")
+	assertContains(t, result.stdout, "status=assigned")
+	assertContains(t, result.stdout, "agent=planner")
+
+	result = runOK(t, runSpec{dir: workDir}, "--task-file", taskFile, "--task-assign", "todo-1:executor")
+	assertContains(t, result.stdout, "agent=executor")
+
+	result = runOK(t, runSpec{dir: workDir}, "--task-file", taskFile, "--task-complete", "todo-1", "--task-agent", "verifier")
+	assertContains(t, result.stdout, "status=completed")
+	assertContains(t, result.stdout, "agent=verifier")
+
+	result = runOK(t, runSpec{dir: workDir}, "--task-file", taskFile, "--task-list")
+	assertContains(t, result.stdout, "id=todo-1")
+	assertContains(t, result.stdout, "status=completed")
+
 	writeFile(t, filepath.Join(workDir, "TODO-loop.txt"), "TODO: loop once\n")
 	result = runOK(t, runSpec{dir: workDir}, "--watch-loop", "--watch-max-iterations", "1", "--watch-interval-seconds", "1")
 	assertContains(t, result.stdout, "iteration=1")
