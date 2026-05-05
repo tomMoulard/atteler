@@ -80,6 +80,7 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] dependency-free agent orchestration planning
  - [x] CLI agent orchestration preview
  - [x] dependency-aware async agent task planning waves
+ - [x] CLI dependency-aware async task execution by spawning sub-agents
  - [x] agent feedback improvement proposal primitives
  - [x] CLI feedback improvement proposal report
  - [x] persistent agent task/TODO list with add, assign, complete, and list commands
@@ -966,12 +967,16 @@ atteler --speculate-plan \
   --speculate-prompt "plan the auth refresh migration"
 ```
 
-Dependency-aware async task waves can also be previewed locally before spawning
-agents; the SDK runner executes ready tasks in the same wave concurrently while
-preserving deterministic wave/order results:
+Dependency-aware async task waves can also be previewed locally or executed by
+spawning Atteler sub-agents. Ready tasks in the same wave run concurrently while
+downstream waves wait for their declared dependencies:
 
 ```sh
 atteler --async-plan \
+  --async-task 'plan|planner|draft plan' \
+  --async-task 'code|coder|implement feature|plan'
+
+atteler --async-run \
   --async-task 'plan|planner|draft plan' \
   --async-task 'code|coder|implement feature|plan'
 ```

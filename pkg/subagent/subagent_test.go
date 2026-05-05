@@ -180,6 +180,40 @@ printf 'ran:%s:%s' "$2" "$4"
 	assert.Equal(t, []string{"--agent", "architect", "--once", "draft plan"}, strings.Split(strings.TrimSpace(string(contents)), "\n"))
 }
 
+func TestAttelerCommand_PrependsConfiguredArguments(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	fake := filepath.Join(dir, "fake-atteler")
+	writeFakeCommand(t, fake, `#!/bin/sh
+printf '%s\n' "$@" > "$ATTELER_ARGS_FILE"
+`)
+
+	runner := AttelerCommandWithOptions(CommandOptions{
+		Args:   []string{"--model", "codex/gpt-5.5", "--session-dir", dir},
+		Binary: fake,
+		Env:    map[string]string{"ATTELER_ARGS_FILE": argsFile},
+	})
+
+	_, err := runner(context.Background(), Request{ID: "child", Agent: "architect", Prompt: "draft plan"})
+
+	require.NoError(t, err)
+
+	contents, err := os.ReadFile(argsFile)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"--model",
+		"codex/gpt-5.5",
+		"--session-dir",
+		dir,
+		"--agent",
+		"architect",
+		"--once",
+		"draft plan",
+	}, strings.Split(strings.TrimSpace(string(contents)), "\n"))
+}
+
 func TestAttelerCommand_ReturnsOutputAndWrappedCommandError(t *testing.T) {
 	t.Parallel()
 

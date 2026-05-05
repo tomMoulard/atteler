@@ -2801,6 +2801,7 @@ type cliOptions struct {
 	reviewScan                         bool
 	lspSymbols                         bool
 	asyncPlan                          bool
+	asyncRun                           bool
 	spawnDryRun                        bool
 	feedbackProposals                  bool
 	validateConfig                     bool
@@ -2979,7 +2980,8 @@ func parseOptions() cliOptions {
 	flag.StringVar(&opts.promptCompleteInput, "prompt-complete", "", "suggest deterministic rest-of-line prompt completions and exit")
 	flag.Var(&opts.promptCompleteLimit, "prompt-complete-limit", "maximum --prompt-complete suggestions")
 	flag.BoolVar(&opts.asyncPlan, "async-plan", false, "print dependency-aware async task batches and exit")
-	flag.Var(&opts.asyncTaskSpecs, "async-task", "task spec for --async-plan: id|agent|prompt|dep1+dep2 (repeatable or comma-separated)")
+	flag.BoolVar(&opts.asyncRun, "async-run", false, "execute dependency-aware async tasks by spawning Atteler sub-agents and exit")
+	flag.Var(&opts.asyncTaskSpecs, "async-task", "task spec for --async-plan/--async-run: id|agent|prompt|dep1+dep2 (repeatable or comma-separated)")
 	flag.Var(&opts.spawnAgentSpecs, "spawn-agent", "spawn sub-agent spec: id|agent|prompt or agent|prompt (repeatable)")
 	flag.BoolVar(&opts.spawnDryRun, "spawn-dry-run", false, "print --spawn-agent invocations without executing them")
 	flag.StringVar(&opts.spawnBinary, "spawn-binary", "", "atteler binary for --spawn-agent; defaults to the current executable")
@@ -3798,6 +3800,8 @@ func runStateExecutionCommand(ctx context.Context, opts cliOptions, state appSta
 	switch {
 	case opts.runPluginTarget != "":
 		return true, runPluginEntrypoint(ctx, state.pluginPaths, opts.runPluginTarget, opts.pluginEntrypoint, opts.pluginDryRun, opts.pluginTimeout.value)
+	case opts.asyncRun:
+		return true, runAsyncTasks(ctx, state, opts)
 	case len(opts.spawnAgentSpecs) > 0:
 		return true, runSpawnAgents(ctx, state, opts)
 	case opts.bashCommand != "":
@@ -5274,16 +5278,6 @@ func runSpawnAgents(ctx context.Context, state appState, opts cliOptions) error 
 		defer cancel()
 	}
 
-	binary := strings.TrimSpace(opts.spawnBinary)
-	if binary == "" {
-		var exeErr error
-
-		binary, exeErr = os.Executable()
-		if exeErr != nil || strings.TrimSpace(binary) == "" {
-			binary = os.Args[0]
-		}
-	}
-
 	emitHookWarning(ctx, state.hookRunner, events.Event{
 		Type:        events.CommandExecute,
 		SessionID:   state.sessionState.ID,
@@ -5297,7 +5291,7 @@ func runSpawnAgents(ctx context.Context, state appState, opts cliOptions) error 
 	})
 
 	results, runErr := subagent.SpawnAll(ctx, requests, subagent.AttelerCommandWithOptions(subagent.CommandOptions{
-		Binary: binary,
+		Binary: resolveSpawnBinary(opts.spawnBinary),
 		Dir:    state.cwd,
 	}))
 	fmt.Print(formatSpawnResults(results))
@@ -5307,6 +5301,32 @@ func runSpawnAgents(ctx context.Context, state appState, opts cliOptions) error 
 	}
 
 	return nil
+}
+
+func resolveSpawnBinary(explicit string) string {
+	if binary := strings.TrimSpace(explicit); binary != "" {
+		return binary
+	}
+
+	binary, err := os.Executable()
+	if err != nil || strings.TrimSpace(binary) == "" {
+		return os.Args[0]
+	}
+
+	return binary
+}
+
+func subagentCommandArgs(state appState) []string {
+	var args []string
+	if strings.TrimSpace(state.selectedModel) != "" {
+		args = append(args, "--model", state.selectedModel)
+	}
+
+	if state.sessionStore != nil && strings.TrimSpace(state.sessionStore.Dir()) != "" {
+		args = append(args, "--session-dir", state.sessionStore.Dir())
+	}
+
+	return args
 }
 
 func parseSpawnAgentSpecs(specs rawStringListFlag) ([]subagent.Request, error) {
@@ -9927,15 +9947,81 @@ func formatReviewFinding(finding review.Finding) string {
 }
 
 func runAsyncPlan(specs []string) error {
+	plan, err := asyncPlanFromSpecs(specs)
+	if err != nil {
+		return fmt.Errorf("async plan: %w", err)
+	}
+
+	fmt.Print(formatAsyncPlanBatches(plan.ReadyBatches()))
+
+	return nil
+}
+
+func runAsyncTasks(ctx context.Context, state appState, opts cliOptions) error {
+	plan, err := asyncPlanFromSpecs(opts.asyncTaskSpecs)
+	if err != nil {
+		return fmt.Errorf("async run: %w", err)
+	}
+
+	tasks := plan.Tasks()
+	if err := validateAsyncRunTasks(tasks); err != nil {
+		return fmt.Errorf("async run: %w", err)
+	}
+
+	ctx = nonNilContext(ctx)
+
+	if opts.spawnTimeout.value > 0 {
+		var cancel context.CancelFunc
+
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(opts.spawnTimeout.value)*time.Second)
+		defer cancel()
+	}
+
+	emitHookWarning(ctx, state.hookRunner, events.Event{
+		Type:        events.CommandExecute,
+		SessionID:   state.sessionState.ID,
+		SessionPath: state.sessionStore.Path(state.sessionState.ID),
+		Agent:       state.selectedAgent,
+		Model:       state.selectedModel,
+		Metadata: map[string]string{
+			"command": "async-run",
+			"count":   strconv.Itoa(len(tasks)),
+			"waves":   strconv.Itoa(len(plan.ReadyBatches())),
+		},
+	})
+
+	runner := subagent.AttelerCommandWithOptions(subagent.CommandOptions{
+		Args:   subagentCommandArgs(state),
+		Binary: resolveSpawnBinary(opts.spawnBinary),
+		Dir:    state.cwd,
+	})
+	results, runErr := plan.Run(ctx, func(ctx context.Context, task attasync.Task) (string, error) {
+		return runner(ctx, subagent.Request{
+			ID:     task.ID,
+			Agent:  task.Agent,
+			Prompt: task.Prompt,
+		})
+	})
+
+	fmt.Print(formatAsyncRunResults(results))
+
+	if runErr != nil {
+		return fmt.Errorf("async run: %w", runErr)
+	}
+
+	return nil
+}
+
+func asyncPlanFromSpecs(specs []string) (*attasync.Plan, error) {
 	if len(specs) == 0 {
-		return errors.New("async plan: at least one --async-task is required")
+		return nil, errors.New("at least one --async-task is required")
 	}
 
 	tasks := make([]attasync.Task, 0, len(specs))
 	for _, spec := range specs {
 		task, err := parseAsyncTaskSpec(spec)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		tasks = append(tasks, task)
@@ -9943,10 +10029,22 @@ func runAsyncPlan(specs []string) error {
 
 	plan, err := attasync.NewPlan(tasks)
 	if err != nil {
-		return fmt.Errorf("async plan: %w", err)
+		return nil, fmt.Errorf("new async plan: %w", err)
 	}
 
-	fmt.Print(formatAsyncPlanBatches(plan.ReadyBatches()))
+	return plan, nil
+}
+
+func validateAsyncRunTasks(tasks []attasync.Task) error {
+	for _, task := range tasks {
+		if strings.TrimSpace(task.Agent) == "" {
+			return fmt.Errorf("task %q agent is required for --async-run", task.ID)
+		}
+
+		if strings.TrimSpace(task.Prompt) == "" {
+			return fmt.Errorf("task %q prompt is required for --async-run", task.ID)
+		}
+	}
 
 	return nil
 }
@@ -10019,6 +10117,44 @@ func formatAsyncTask(task attasync.Task) string {
 	}
 
 	return strings.Join(parts, "	")
+}
+
+func formatAsyncRunResults(results []attasync.TaskResult) string {
+	if len(results) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+
+	for i := range results {
+		result := results[i]
+
+		status := "ok"
+		if result.Error != "" {
+			status = "error"
+		}
+
+		fmt.Fprintf(
+			&b,
+			"wave=%d\torder=%d\tid=%s\tagent=%s\tstatus=%s\tduration=%s\n",
+			result.Wave+1,
+			result.Order+1,
+			result.Task.ID,
+			result.Task.Agent,
+			status,
+			result.Duration.Round(time.Millisecond),
+		)
+
+		if strings.TrimSpace(result.Output) != "" {
+			fmt.Fprintf(&b, "output=%s\n", strings.TrimSpace(result.Output))
+		}
+
+		if result.Error != "" {
+			fmt.Fprintf(&b, "error=%s\n", result.Error)
+		}
+	}
+
+	return b.String()
 }
 
 func taskCommandRequested(opts cliOptions) bool {

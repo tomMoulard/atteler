@@ -39,6 +39,7 @@ type CommandOptions struct {
 	Env    map[string]string
 	Binary string
 	Dir    string
+	Args   []string
 }
 
 // SpawnAll runs all requests concurrently and returns results in the same order
@@ -111,7 +112,10 @@ func AttelerCommandWithOptions(opts CommandOptions) Runner {
 			return "", errors.New("subagent: atteler binary is required")
 		}
 
-		cmd := exec.CommandContext(ctx, binary, "--agent", request.Agent, "--once", request.Prompt)
+		args := append([]string(nil), opts.Args...)
+		args = append(args, "--agent", request.Agent, "--once", request.Prompt)
+
+		cmd := exec.CommandContext(ctx, binary, args...)
 		if strings.TrimSpace(opts.Dir) != "" {
 			cmd.Dir = opts.Dir
 		}

@@ -1,6 +1,6 @@
 - [x] show token in/cached/out when closing the harness
 - [x] all of the debug cli flags should be env vars that starts with `DEBUG_`
-- [x] actually run async agent waves in parallel (today only `--async-plan` previews)
+- [x] actually run async agent waves in parallel with `--async-run` (not only `--async-plan` previews)
 - [x] actually run a speculative three-round session (today only `--speculate-plan` previews)
 - [x] apply feedback proposals back into agent config + history log
 - [x] enforce per-task budget hard-stop using `pkg/modelroute` signals

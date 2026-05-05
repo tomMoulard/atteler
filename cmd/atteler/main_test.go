@@ -3397,6 +3397,40 @@ func TestParseAndFormatAsyncPlan(t *testing.T) {
 	}
 }
 
+func TestValidateAndFormatAsyncRun(t *testing.T) {
+	t.Parallel()
+
+	err := validateAsyncRunTasks([]attasync.Task{{ID: "plan", Prompt: "draft"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent is required")
+
+	err = validateAsyncRunTasks([]attasync.Task{{ID: "plan", Agent: "planner"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prompt is required")
+
+	err = validateAsyncRunTasks([]attasync.Task{{ID: "plan", Agent: "planner", Prompt: "draft"}})
+	require.NoError(t, err)
+
+	got := formatAsyncRunResults([]attasync.TaskResult{{
+		Wave:     0,
+		Order:    0,
+		Task:     attasync.Task{ID: "plan", Agent: "planner"},
+		Output:   "done\n",
+		Duration: 1500 * time.Millisecond,
+	}, {
+		Wave:     1,
+		Order:    0,
+		Task:     attasync.Task{ID: "code", Agent: "coder"},
+		Error:    "boom",
+		Duration: time.Millisecond,
+	}})
+
+	assert.Contains(t, got, "wave=1\torder=1\tid=plan\tagent=planner\tstatus=ok\tduration=1.5s")
+	assert.Contains(t, got, "output=done")
+	assert.Contains(t, got, "wave=2\torder=1\tid=code\tagent=coder\tstatus=error\tduration=1ms")
+	assert.Contains(t, got, "error=boom")
+}
+
 func TestTaskListHelpers(t *testing.T) {
 	t.Parallel()
 
