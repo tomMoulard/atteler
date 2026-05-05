@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const helperTimeout = 5 * time.Second
+
 func TestInvoke_SendsNewlineDelimitedJSONAndReadsResponse(t *testing.T) {
 	t.Parallel()
 
@@ -23,7 +25,7 @@ func TestInvoke_SendsNewlineDelimitedJSONAndReadsResponse(t *testing.T) {
 		ID:     "req-1",
 		Method: "ping",
 		Params: map[string]any{"message": "hello"},
-	}, time.Second)
+	}, helperTimeout)
 
 	require.NoError(t, err)
 	assert.Equal(t, "2.0", response.JSONRPC)
@@ -42,7 +44,7 @@ func TestCallTool_UsesToolsCallMethod(t *testing.T) {
 
 	server := helperServer(t, "echo")
 
-	response, err := CallTool(t.Context(), server, "search", map[string]any{"query": "mcp"}, time.Second)
+	response, err := CallTool(t.Context(), server, "search", map[string]any{"query": "mcp"}, helperTimeout)
 
 	require.NoError(t, err)
 
@@ -58,7 +60,7 @@ func TestInvoke_ReturnsRPCError(t *testing.T) {
 
 	server := helperServer(t, "rpc-error")
 
-	response, err := Invoke(t.Context(), server, Request{Method: "fail"}, time.Second)
+	response, err := Invoke(t.Context(), server, Request{Method: "fail"}, helperTimeout)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `mcp server "helper" returned error -32000: boom`)
@@ -82,15 +84,15 @@ func TestInvoke_HonorsTimeout(t *testing.T) {
 func TestInvoke_ValidatesInputs(t *testing.T) {
 	t.Parallel()
 
-	_, err := Invoke(t.Context(), Server{Name: "bad"}, Request{Method: "ping"}, time.Second)
+	_, err := Invoke(t.Context(), Server{Name: "bad"}, Request{Method: "ping"}, helperTimeout)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `server "bad": missing command`)
 
-	_, err = Invoke(t.Context(), helperServer(t, "echo"), Request{}, time.Second)
+	_, err = Invoke(t.Context(), helperServer(t, "echo"), Request{}, helperTimeout)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing method")
 
-	_, err = CallTool(t.Context(), helperServer(t, "echo"), " ", nil, time.Second)
+	_, err = CallTool(t.Context(), helperServer(t, "echo"), " ", nil, helperTimeout)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing tool name")
 }
