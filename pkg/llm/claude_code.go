@@ -6,46 +6,47 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
+	"io"
+	"net/http"
 	"strings"
-	"time"
 
 	"github.com/tommoulard/atteler/pkg/events"
 )
 
-const claudeCodeAuthTimeout = 5 * time.Second
-
-const claudeCodeTools = "Read,Write,Edit,MultiEdit,LS,Glob,Grep,Bash"
-
-// ClaudeCodeProvider shells out to Claude Code so Atteler can reuse a working
-// Claude subscription login without consuming direct Anthropic API quota.
+// ClaudeCodeProvider calls the Anthropic Messages API directly using the
+// OAuth access token Claude Code stored at login. It auto-refreshes the
+// access token on 401 and persists refreshed tokens back to whichever store
+// they came from (macOS keychain or ~/.claude/.credentials.json), so atteler
+// and the claude CLI keep a shared session.
 type ClaudeCodeProvider struct {
-	bin    string
-	models []string
+	client  *http.Client
+	auth    *claudeCodeAuth
+	baseURL string
+	models  []string
 }
 
-// NewClaudeCodeProvider creates a provider backed by the local claude
-// executable and verifies that Claude Code is logged in.
+// NewClaudeCodeProvider creates a provider backed by the Claude Code OAuth
+// credentials discovered on the local machine.
 func NewClaudeCodeProvider() (*ClaudeCodeProvider, error) {
 	return NewClaudeCodeProviderContext(defaultCredentialContext())
 }
 
-// NewClaudeCodeProviderContext creates a provider backed by the local claude
-// executable and verifies that Claude Code is logged in using ctx.
+// NewClaudeCodeProviderContext creates a provider using ctx for credential
+// discovery (keychain probe / file reads).
 func NewClaudeCodeProviderContext(ctx context.Context) (*ClaudeCodeProvider, error) {
 	ctx = nonNilCredentialContext(ctx)
 
-	bin, err := exec.LookPath("claude")
+	auth, err := loadClaudeCodeAuth(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("claude executable not found: %w", err)
-	}
-
-	if err := verifyClaudeCodeAuth(ctx, bin); err != nil {
 		return nil, err
 	}
 
-	return &ClaudeCodeProvider{bin: bin, models: defaultClaudeCodeModels()}, nil
+	return &ClaudeCodeProvider{
+		client:  &http.Client{},
+		auth:    auth,
+		baseURL: configuredBaseURL("ANTHROPIC_BASE_URL", "", defaultAnthropicBase),
+		models:  defaultClaudeCodeModels(),
+	}, nil
 }
 
 // Name returns the provider name.
@@ -60,24 +61,30 @@ func (c *ClaudeCodeProvider) Models() []string {
 	return append([]string(nil), c.models...)
 }
 
-// FetchModels returns the local Claude Code model catalog. Claude Code owns
-// model availability, so Atteler does not make a separate Anthropic API call.
+// FetchModels returns the local Claude Code model catalog. The OAuth-mode
+// /v1/models endpoint is gated separately; we keep a static list to avoid an
+// extra round-trip for what is effectively a UI-only listing.
 func (c *ClaudeCodeProvider) FetchModels(_ context.Context) ([]string, error) {
 	return c.Models(), nil
 }
 
-// HealthCheck verifies that the claude CLI is reachable and the user is
-// authenticated by running `claude auth status`.
+// HealthCheck verifies that we have an OAuth access token loaded. It does not
+// hit the network — provider-level credential validity is asserted lazily on
+// the next Complete call (with auto-refresh on 401).
 func (c *ClaudeCodeProvider) HealthCheck(ctx context.Context) error {
 	emitActivity(ctx, events.Event{
 		Type: events.CommandExecute,
 		Metadata: map[string]string{
-			"command":  "claude auth status",
+			"command":  "claude_code.auth.check",
 			"provider": providerClaudeCode,
 		},
 	})
 
-	return verifyClaudeCodeAuth(ctx, c.bin)
+	if c.auth == nil || c.auth.snapshot() == "" {
+		return errors.New("no Claude Code OAuth access token: run `claude` to log in")
+	}
+
+	return nil
 }
 
 // ModelContextWindow returns the context window size for a Claude Code model.
@@ -85,17 +92,9 @@ func (c *ClaudeCodeProvider) ModelContextWindow(model string) int {
 	return anthropicContextWindow(model)
 }
 
-// Complete runs `claude --print` and returns its text output.
+// Complete performs a chat completion against the Anthropic Messages API,
+// refreshing the OAuth access token once on 401 and retrying transparently.
 func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
-	if c.bin == "" {
-		return nil, errors.New("claude executable not configured")
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("claude code working directory: %w", err)
-	}
-
 	model := params.Model
 	if model == "" {
 		models := c.Models()
@@ -106,79 +105,119 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 		model = models[0]
 	}
 
-	args := []string{
-		"--print",
-		"--no-session-persistence",
-		"--permission-mode", "acceptEdits",
-		"--tools", claudeCodeTools,
-		"--allowed-tools", claudeCodeTools,
-		"--add-dir", cwd,
-		"--model", model,
-		"--output-format", "text",
-	}
-	if effort := cliReasoningEffort(params.ReasoningLevel); effort != "" {
-		args = append(args, "--effort", effort)
+	params.Model = model
+
+	req, err := buildAnthropicRequest(params)
+	if err != nil {
+		return nil, err
 	}
 
-	if system := systemPrompt(params.Messages); system != "" {
-		args = append(args, "--system-prompt", system)
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("claude code: marshal: %w", err)
 	}
-
-	args = append(args, conversationPrompt(params.Messages))
 
 	emitActivity(ctx, events.Event{
 		Type:  events.CommandExecute,
 		Model: model,
 		Metadata: map[string]string{
-			"command":  "claude --print",
-			"cwd":      cwd,
+			"command":  "claude_code.messages",
 			"provider": providerClaudeCode,
 		},
 	})
-	//nolint:gosec // c.bin comes from exec.LookPath or tests; args are passed without a shell.
-	cmd := exec.CommandContext(ctx, c.bin, args...)
-	cmd.Dir = cwd
 
-	var stdout, stderr bytes.Buffer
-
-	cmd.Stdout = &stdout
-
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("claude code: %w: %s", err, stderr.String())
+	resp, err := c.doMessagesRequest(ctx, body)
+	if err != nil {
+		return nil, err
 	}
 
-	content := strings.TrimSpace(stdout.String())
-	if content == "" {
-		return nil, errors.New("claude code returned an empty response")
-	}
+	resp.Model = firstNonEmptyString(resp.Model, model)
 
-	return &Response{Content: content, Model: model}, nil
+	return resp, nil
 }
 
-func verifyClaudeCodeAuth(ctx context.Context, bin string) error {
-	ctx, cancel := context.WithTimeout(ctx, claudeCodeAuthTimeout)
-	defer cancel()
+func (c *ClaudeCodeProvider) doMessagesRequest(ctx context.Context, body []byte) (*Response, error) {
+	access := c.auth.snapshot()
 
-	cmd := exec.CommandContext(ctx, bin, "auth", "status")
+	resp, err := c.sendMessages(ctx, body, access)
+	if err == nil {
+		return resp, nil
+	}
 
-	output, err := cmd.Output()
+	var unauthorized *claudeCodeUnauthorizedError
+	if !errors.As(err, &unauthorized) {
+		return nil, err
+	}
+
+	if refreshErr := c.auth.refresh(ctx, access); refreshErr != nil {
+		return nil, fmt.Errorf("claude code refresh after 401: %w", refreshErr)
+	}
+
+	access = c.auth.snapshot()
+
+	return c.sendMessages(ctx, body, access)
+}
+
+type claudeCodeUnauthorizedError struct {
+	body string
+}
+
+func (e *claudeCodeUnauthorizedError) Error() string {
+	return "claude code: HTTP 401: " + e.body
+}
+
+func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, access string) (*Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("claude auth status failed: %w", err)
+		return nil, fmt.Errorf("claude code: new request: %w", err)
 	}
 
-	var status struct {
-		LoggedIn bool `json:"loggedIn"`
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("anthropic-version", defaultAnthropicVersion)
+	httpReq.Header.Set("anthropic-beta", anthropicOAuthBetas)
+	httpReq.Header.Set("Authorization", "Bearer "+access)
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("claude code: request: %w", err)
 	}
-	if err := json.Unmarshal(output, &status); err != nil {
-		return fmt.Errorf("claude auth status parse: %w", err)
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes)) //nolint:errcheck // best-effort body capture for the error message
+		return nil, &claudeCodeUnauthorizedError{body: string(raw)}
 	}
 
-	if !status.LoggedIn {
-		return errors.New("no Claude Code credentials found: run `claude auth login`")
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("claude code: read body: %w", err)
 	}
 
-	return nil
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("claude code: HTTP %d: %s", resp.StatusCode, respBody)
+	}
+
+	var ar anthropicResponse
+	if err := json.Unmarshal(respBody, &ar); err != nil {
+		return nil, fmt.Errorf("claude code: unmarshal: %w", err)
+	}
+
+	if ar.Error != nil {
+		return nil, fmt.Errorf("claude code: %s: %s", ar.Error.Type, ar.Error.Message)
+	}
+
+	var b strings.Builder
+	for _, c := range ar.Content {
+		b.WriteString(c.Text)
+	}
+
+	return &Response{
+		Content:           b.String(),
+		Model:             ar.Model,
+		InputTokens:       ar.Usage.InputTokens + ar.Usage.CacheCreationInputTokens + ar.Usage.CacheReadInputTokens,
+		CachedInputTokens: ar.Usage.CacheReadInputTokens,
+		OutputTokens:      ar.Usage.OutputTokens,
+	}, nil
 }
 
 func defaultClaudeCodeModels() []string {
@@ -196,33 +235,4 @@ func defaultClaudeCodeModels() []string {
 		"sonnet",
 		"haiku",
 	}
-}
-
-func systemPrompt(messages []Message) string {
-	var system []string
-
-	for _, msg := range messages {
-		if msg.Role == RoleSystem {
-			system = append(system, msg.Content)
-		}
-	}
-
-	return strings.Join(system, "\n\n")
-}
-
-func conversationPrompt(messages []Message) string {
-	var b strings.Builder
-
-	for _, msg := range messages {
-		if msg.Role == RoleSystem {
-			continue
-		}
-
-		b.WriteString(strings.ToUpper(string(msg.Role)))
-		b.WriteString(":\n")
-		b.WriteString(msg.Content)
-		b.WriteString("\n\n")
-	}
-
-	return strings.TrimSpace(b.String())
 }

@@ -504,7 +504,7 @@ printf 'codex/gpt-5.5\tcodex\tgpt-5.5\n'
 	writeExecutable(t, filepath.Join(toolDir, "codex"), `#!/bin/sh
 exit 0
 `)
-	writeFile(t, filepath.Join(codexHome, "auth.json"), `{"tokens":{"access_token":"token"}}`)
+	writeFile(t, filepath.Join(codexHome, "auth.json"), `{"auth_mode":"chatgpt","tokens":{"access_token":"token","refresh_token":"refresh","account_id":"acct"}}`)
 
 	selectScript := filepath.Join(workDir, "select-model.exp")
 	writeFile(t, selectScript, `set timeout 10
@@ -558,21 +558,14 @@ expect eof
 func TestOneShotPrintsActivityEvents(t *testing.T) {
 	t.Parallel()
 	workDir := t.TempDir()
-	toolDir := filepath.Join(workDir, "tools")
 	codexHome := filepath.Join(workDir, "codex-home")
 	configPath := filepath.Join(workDir, "atteler.yaml")
 	writeFile(t, filepath.Join(workDir, "README.md"), "hello from readme\n")
-	writeFile(t, filepath.Join(codexHome, "auth.json"), `{"tokens":{"access_token":"token"}}`)
-	writeExecutable(t, filepath.Join(toolDir, "codex"), `#!/bin/sh
-out=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -o) out="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-printf 'ok' > "$out"
-`)
+	writeFile(t, filepath.Join(codexHome, "auth.json"), `{"auth_mode":"chatgpt","tokens":{"access_token":"token","refresh_token":"refresh","account_id":"acct"}}`)
+
+	codexAPI := startFakeCodexResponses(t, "ok", "gpt-5.5")
+	defer codexAPI.Close()
+
 	writeFile(t, configPath, `default_provider: codex
 agents:
   reviewer:
@@ -588,8 +581,8 @@ providers:
 	result := runOK(t, runSpec{
 		dir: workDir,
 		env: []string{
-			"PATH=" + toolDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"CODEX_HOME=" + codexHome,
+			"CODEX_BASE_URL=" + codexAPI.URL,
 		},
 	}, "--config", configPath, "--agent", "reviewer", "--once", "Summarize @README.md")
 
@@ -605,48 +598,57 @@ providers:
 		"event:tool_execute",
 		"provider=codex",
 		"event:command_execute",
-		`command="codex exec"`,
+		`command=codex.responses`,
 	} {
 		assertContains(t, result.stderr, want)
 	}
 }
 
-func TestClaudeCodeOneShotAllowsBashTool(t *testing.T) {
+// startFakeCodexResponses spins up an httptest server that mimics the codex
+// chatgpt backend's /responses endpoint, returning a minimal SSE stream that
+// completes with the given assistant text.
+func startFakeCodexResponses(t *testing.T, text, model string) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/responses") {
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		write := func(payload string) {
+			fmt.Fprintf(w, "data: %s\n\n", payload)
+
+			flusher.Flush()
+		}
+
+		write(fmt.Sprintf(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}}`, text))
+		write(fmt.Sprintf(`{"type":"response.completed","response":{"model":%q,"usage":{"input_tokens":1,"output_tokens":1,"input_tokens_details":{"cached_tokens":0}}}}`, model))
+	}))
+
+	return srv
+}
+
+func TestClaudeCodeOneShotCallsAnthropicAPI(t *testing.T) {
 	t.Parallel()
 
-	if runtime.GOOS == windowsGOOS {
-		t.Skip("shell-script claude fake is POSIX-only")
-	}
-
 	workDir := t.TempDir()
-	toolDir := filepath.Join(workDir, "tools")
+	homeDir := filepath.Join(workDir, "home")
 	configPath := filepath.Join(workDir, "atteler.yaml")
-	writeExecutable(t, filepath.Join(toolDir, "claude"), `#!/bin/sh
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  printf '{"loggedIn":true}'
-  exit 0
-fi
+	credPath := filepath.Join(homeDir, ".claude", ".credentials.json")
+	writeFile(t, credPath, `{"claudeAiOauth":{"accessToken":"test-access","refreshToken":"test-refresh","expiresAt":9999999999999}}`)
 
-tools=""
-allowed=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --tools) tools="$2"; shift 2 ;;
-    --allowed-tools) allowed="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
+	anthropicAPI := startFakeAnthropicMessages(t, "claude code reply", "claude-opus-4-7")
+	defer anthropicAPI.Close()
 
-case ",$tools," in
-  *",Bash,"*) ;;
-  *) printf 'missing Bash in --tools: %s\n' "$tools" >&2; exit 13 ;;
-esac
-case ",$allowed," in
-  *",Bash,"*) ;;
-  *) printf 'missing Bash in --allowed-tools: %s\n' "$allowed" >&2; exit 14 ;;
-esac
-printf 'bash tool enabled'
-`)
 	writeFile(t, configPath, `default_provider: claude-code
 default_model: claude-code/claude-opus-4-7
 providers:
@@ -662,11 +664,34 @@ providers:
 
 	result := runOK(t, runSpec{
 		dir: workDir,
-		env: []string{"PATH=" + toolDir + string(os.PathListSeparator) + os.Getenv("PATH")},
-	}, "--config", configPath, "execute the ls bash command")
+		env: []string{
+			"HOME=" + homeDir,
+			"ANTHROPIC_BASE_URL=" + anthropicAPI.URL,
+			"ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN=1",
+		},
+	}, "--config", configPath, "--once", "say hi")
 
-	assertContains(t, result.stdout, "bash tool enabled")
-	assertContains(t, result.stderr, `command="claude --print"`)
+	assertContains(t, result.stdout, "claude code reply")
+	assertContains(t, result.stderr, `command=claude_code.messages`)
+	assertContains(t, result.stderr, "provider=claude-code")
+}
+
+// startFakeAnthropicMessages spins up an httptest server that mimics the
+// Anthropic /v1/messages endpoint, returning the given assistant text.
+func startFakeAnthropicMessages(t *testing.T, text, model string) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/messages") {
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"model":%q,"content":[{"type":"text","text":%q}],"usage":{"input_tokens":1,"output_tokens":1}}`, model, text)
+	}))
+
+	return srv
 }
 
 type runSpec struct {

@@ -5,7 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -191,17 +191,24 @@ func requireEnv(t *testing.T, name string) string {
 func requireClaudeCode(t *testing.T) {
 	t.Helper()
 
-	path, err := exec.LookPath("claude")
-	if err != nil {
-		t.Skip("claude executable is required for this live Claude Code test")
+	// Probe the same credential sources the ClaudeCodeProvider uses so we skip
+	// — rather than fail — on machines where the user has not logged in via
+	// the claude CLI. We don't shell out to `claude` here because the provider
+	// itself no longer depends on the binary being on PATH.
+	if runtime.GOOS == "darwin" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "Claude Code-credentials").Run()
+		if err == nil {
+			return
+		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	output, err := exec.CommandContext(ctx, path, "auth", "status").CombinedOutput()
-	if err != nil || !strings.Contains(string(output), `"loggedIn": true`) {
-		t.Skipf("Claude Code login is required for this live test: %s", output)
+	credPath := filepath.Join(os.Getenv("HOME"), ".claude", ".credentials.json")
+	//nolint:gosec // Live test probes the user's own Claude credentials path and never opens arbitrary input.
+	if _, err := os.Stat(credPath); err != nil {
+		t.Skipf("Claude Code login is required for this live test: %v", err)
 	}
 }
 

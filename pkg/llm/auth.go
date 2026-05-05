@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -91,6 +92,28 @@ type claudeOAuthBlock struct {
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken"`
 	ExpiresAt    int64  `json:"expiresAt"` // epoch ms
+}
+
+// parseClaudeCodeCredentialsRaw extracts the OAuth block without enforcing
+// expiry. Used by the auto-refreshing ClaudeCodeProvider, which can recover
+// from an expired access token by exchanging the refresh token. Callers that
+// only have an access token to use as-is should call parseClaudeCodeCredentials
+// instead.
+func parseClaudeCodeCredentialsRaw(data []byte) (claudeOAuthBlock, error) {
+	var creds claudeCodeCredentials
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return claudeOAuthBlock{}, fmt.Errorf("invalid Claude Code credentials JSON: %w", err)
+	}
+
+	if creds.ClaudeAIOAuth == nil {
+		return claudeOAuthBlock{}, errors.New("no claudeAiOauth block in Claude Code credentials")
+	}
+
+	if creds.ClaudeAIOAuth.RefreshToken == "" && creds.ClaudeAIOAuth.AccessToken == "" {
+		return claudeOAuthBlock{}, errors.New("claude code credentials contain neither access nor refresh token")
+	}
+
+	return *creds.ClaudeAIOAuth, nil
 }
 
 // resolveClaudeCodeCredentials tries platform-specific credential stores.
@@ -660,6 +683,248 @@ type codexAuth struct {
 type codexTokens struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	AccountID    string `json:"account_id"`
+}
+
+// codexChatGPTAuth is a thread-safe handle to a ChatGPT-mode codex auth.json
+// file. It reads the access/refresh tokens and persists refreshed tokens back
+// to disk atomically so concurrent codex CLI invocations stay in sync.
+type codexChatGPTAuth struct {
+	httpClient   *http.Client
+	refreshURL   string // overridable for tests
+	authPath     string
+	accessToken  string
+	refreshToken string
+	accountID    string
+	mu           sync.Mutex
+}
+
+// codexChatGPTOAuthClientID is the OAuth client_id codex uses for the
+// ChatGPT-login refresh flow. It is published in the open-source codex
+// repository (Apache 2.0) and is not a secret.
+const codexChatGPTOAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+
+// codexChatGPTRefreshURL is the OpenAI OAuth token endpoint codex uses for
+// chatgpt-mode refresh.
+const codexChatGPTRefreshURL = "https://auth.openai.com/oauth/token"
+
+var codexChatGPTHTTPClient = &http.Client{Timeout: forgeOAuthRefreshTimeout}
+
+// loadCodexChatGPTAuth returns a chatgpt-mode auth handle for the codex
+// auth.json under codexHome (which may be empty to use ~/.codex or
+// $CODEX_HOME). It returns an error if auth.json is missing, malformed, or
+// not in chatgpt mode.
+func loadCodexChatGPTAuth(codexHome string) (*codexChatGPTAuth, error) {
+	if codexHome == "" {
+		codexHome = codexConfigDir()
+	}
+
+	if codexHome == "" {
+		return nil, errors.New("cannot determine codex home directory")
+	}
+
+	authPath := filepath.Join(codexHome, "auth.json")
+
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", authPath, err)
+	}
+
+	var auth codexAuth
+	if err := json.Unmarshal(data, &auth); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", authPath, err)
+	}
+
+	if !strings.EqualFold(auth.AuthMode, "chatgpt") {
+		return nil, fmt.Errorf("codex auth_mode is %q, want chatgpt", auth.AuthMode)
+	}
+
+	if auth.Tokens.AccessToken == "" || auth.Tokens.RefreshToken == "" {
+		return nil, fmt.Errorf("codex %s missing tokens", authPath)
+	}
+
+	return &codexChatGPTAuth{
+		authPath:     authPath,
+		accessToken:  auth.Tokens.AccessToken,
+		refreshToken: auth.Tokens.RefreshToken,
+		accountID:    auth.Tokens.AccountID,
+		httpClient:   codexChatGPTHTTPClient,
+		refreshURL:   codexChatGPTRefreshURL,
+	}, nil
+}
+
+// snapshot returns a copy of the current tokens for use in an outgoing
+// request. Reads are mutex-protected so they observe the latest refresh.
+func (a *codexChatGPTAuth) snapshot() (access, account string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.accessToken, a.accountID
+}
+
+// refresh exchanges the stored refresh_token for fresh tokens and writes the
+// new state back to auth.json. The caller may pass a previously observed
+// access token to skip the refresh if another goroutine has already refreshed.
+func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if observedAccess != "" && observedAccess != a.accessToken {
+		// Another caller refreshed concurrently; the stored token is already new.
+		return nil
+	}
+
+	body, err := json.Marshal(map[string]string{
+		"client_id":     codexChatGPTOAuthClientID,
+		"grant_type":    forgeOAuthRefreshGrantType,
+		"refresh_token": a.refreshToken,
+	})
+	if err != nil {
+		return fmt.Errorf("codex chatgpt refresh: marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.refreshURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("codex chatgpt refresh: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("codex chatgpt refresh: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes))
+	if err != nil {
+		return fmt.Errorf("codex chatgpt refresh: read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("codex chatgpt refresh: HTTP %d: %s", resp.StatusCode, respBody)
+	}
+
+	var refreshed struct {
+		IDToken      string `json:"id_token"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(respBody, &refreshed); err != nil {
+		return fmt.Errorf("codex chatgpt refresh: decode response: %w", err)
+	}
+
+	if refreshed.AccessToken == "" {
+		return errors.New("codex chatgpt refresh: response missing access_token")
+	}
+
+	a.accessToken = refreshed.AccessToken
+	if refreshed.RefreshToken != "" {
+		a.refreshToken = refreshed.RefreshToken
+	}
+
+	return persistRefreshedCodexAuth(a.authPath, refreshed.AccessToken, refreshed.RefreshToken, refreshed.IDToken)
+}
+
+// persistRefreshedCodexAuth merges the refreshed tokens into auth.json while
+// preserving any unrelated fields. The write is atomic via tempfile + rename.
+func persistRefreshedCodexAuth(path, accessToken, refreshToken, idToken string) error {
+	raw, err := readCodexAuthMap(path)
+	if err != nil {
+		return err
+	}
+
+	mergeCodexTokens(raw, accessToken, refreshToken, idToken)
+	raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("codex auth.json marshal: %w", err)
+	}
+
+	return atomicWriteFile(path, append(out, '\n'), 0o600)
+}
+
+func readCodexAuthMap(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("codex auth.json read: %w", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("codex auth.json parse: %w", err)
+	}
+
+	if raw == nil {
+		raw = map[string]any{}
+	}
+
+	return raw, nil
+}
+
+func mergeCodexTokens(raw map[string]any, accessToken, refreshToken, idToken string) {
+	tokens, ok := raw["tokens"].(map[string]any)
+	if !ok {
+		tokens = map[string]any{}
+		raw["tokens"] = tokens
+	}
+
+	if accessToken != "" {
+		tokens["access_token"] = accessToken
+	}
+
+	if refreshToken != "" {
+		tokens["refresh_token"] = refreshToken
+	}
+
+	if idToken != "" {
+		tokens["id_token"] = idToken
+	}
+}
+
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".auth.json.tmp-*")
+	if err != nil {
+		return fmt.Errorf("codex auth.json tempfile: %w", err)
+	}
+
+	tmpPath := tmp.Name()
+	cleanup := true
+
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("codex auth.json chmod tempfile: %w", err)
+	}
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("codex auth.json write tempfile: %w", err)
+	}
+
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("codex auth.json sync tempfile: %w", err)
+	}
+
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("codex auth.json close tempfile: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("codex auth.json rename: %w", err)
+	}
+
+	cleanup = false
+
+	return nil
 }
 
 // ResolveOpenAIKey returns an OpenAI Platform API credential by trying, in order:
@@ -696,16 +961,254 @@ func ResolveOpenAIKey() (key string, bearer bool, err error) {
 	return "", false, errors.New("no OpenAI Platform API key found in OPENAI_API_KEY or ~/.codex/auth.json")
 }
 
-func hasCodexAuth() bool {
-	data, err := os.ReadFile(filepath.Join(codexConfigDir(), "auth.json"))
+// ---------------------------------------------------------------------------
+// Claude Code OAuth credential resolution + auto-refresh
+// ---------------------------------------------------------------------------
+
+// claudeCodeOAuthClientID is the OAuth client_id Claude Code embeds for its
+// `claude login` flow. It is a public identifier shipped in every Claude Code
+// distribution (verified by reading the bundled `claude` binary) and is not a
+// secret.
+const claudeCodeOAuthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+// claudeCodeRefreshURL is the OAuth token endpoint Claude Code uses for the
+// refresh_token grant.
+const claudeCodeRefreshURL = "https://platform.claude.com/v1/oauth/token"
+
+// keychainService is the macOS Keychain "service" attribute under which the
+// claude CLI stores its OAuth credentials.
+const keychainService = "Claude Code-credentials"
+
+// claudeCodeKeychainSource is the diagnostic location string used when
+// credentials originate from the macOS keychain.
+const claudeCodeKeychainSource = "keychain:" + keychainService
+
+var claudeCodeHTTPClient = &http.Client{Timeout: forgeOAuthRefreshTimeout}
+
+// claudeCodeCredentialPersister writes a refreshed OAuth block back to wherever
+// the credentials originated, preserving any unrelated fields in the stored
+// JSON. Used by claudeCodeAuth.refresh so atteler stays in sync with whatever
+// store the claude CLI itself reads.
+type claudeCodeCredentialPersister interface {
+	persist(ctx context.Context, accessToken, refreshToken string, expiresAtMs int64) error
+	location() string
+}
+
+// claudeCodeAuth is a thread-safe handle to Claude Code's OAuth credentials.
+// It refreshes access tokens against the Claude Code OAuth endpoint and writes
+// the refreshed state back atomically, mirroring the codex chatgpt-mode flow.
+type claudeCodeAuth struct {
+	httpClient   *http.Client
+	refreshURL   string
+	persist      claudeCodeCredentialPersister
+	accessToken  string
+	refreshToken string
+	expiresAt    int64 // epoch ms; 0 means "unknown"
+	mu           sync.Mutex
+}
+
+// loadClaudeCodeAuth discovers Claude Code OAuth credentials, in order:
+//  1. macOS Keychain "Claude Code-credentials" (darwin only)
+//  2. ~/.claude/.credentials.json
+//
+// The returned handle can refresh and persist credentials back to the same
+// source so the claude CLI continues to see fresh tokens.
+func loadClaudeCodeAuth(ctx context.Context) (*claudeCodeAuth, error) {
+	ctx = nonNilCredentialContext(ctx)
+
+	// Allow tests to opt out of the keychain probe even on darwin.
+	if os.Getenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN") != "1" {
+		if block, persister, err := readClaudeCodeKeychainAuth(ctx); err == nil {
+			return newClaudeCodeAuthFromBlock(block, persister), nil
+		}
+	}
+
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return false
+		return nil, fmt.Errorf("no Claude Code credentials: cannot determine home: %w", err)
 	}
 
-	var auth codexAuth
-	if err := json.Unmarshal(data, &auth); err != nil {
-		return false
+	path := filepath.Join(home, ".claude", ".credentials.json")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("no Claude Code credentials: %w (run `claude` to log in)", err)
 	}
 
-	return (auth.APIKey != nil && *auth.APIKey != "") || auth.Tokens.AccessToken != ""
+	block, err := parseClaudeCodeCredentialsRaw(data)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	return newClaudeCodeAuthFromBlock(block, &claudeCodeFilePersister{path: path}), nil
+}
+
+func newClaudeCodeAuthFromBlock(block claudeOAuthBlock, persister claudeCodeCredentialPersister) *claudeCodeAuth {
+	return &claudeCodeAuth{
+		httpClient:   claudeCodeHTTPClient,
+		refreshURL:   claudeCodeRefreshURL,
+		persist:      persister,
+		accessToken:  block.AccessToken,
+		refreshToken: block.RefreshToken,
+		expiresAt:    block.ExpiresAt,
+	}
+}
+
+// snapshot returns the current access token for an outgoing request.
+func (a *claudeCodeAuth) snapshot() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.accessToken
+}
+
+// refresh exchanges the stored refresh_token for fresh tokens and writes the
+// new state back to the credential source. The caller may pass the access
+// token it observed; if another goroutine has already refreshed since then,
+// this call is a no-op.
+func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if observedAccess != "" && observedAccess != a.accessToken {
+		return nil
+	}
+
+	if a.refreshToken == "" {
+		return errors.New("claude code refresh: no refresh_token available")
+	}
+
+	body, err := json.Marshal(map[string]string{
+		"client_id":     claudeCodeOAuthClientID,
+		"grant_type":    forgeOAuthRefreshGrantType,
+		"refresh_token": a.refreshToken,
+	})
+	if err != nil {
+		return fmt.Errorf("claude code refresh: marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.refreshURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("claude code refresh: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("claude code refresh: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes))
+	if err != nil {
+		return fmt.Errorf("claude code refresh: read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("claude code refresh: HTTP %d: %s", resp.StatusCode, respBody)
+	}
+
+	var refreshed struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	if err := json.Unmarshal(respBody, &refreshed); err != nil {
+		return fmt.Errorf("claude code refresh: decode response: %w", err)
+	}
+
+	if refreshed.AccessToken == "" {
+		return errors.New("claude code refresh: response missing access_token")
+	}
+
+	expiresAtMs := int64(0)
+	if refreshed.ExpiresIn > 0 {
+		expiresAtMs = time.Now().Add(time.Duration(refreshed.ExpiresIn) * time.Second).UnixMilli()
+	}
+
+	a.accessToken = refreshed.AccessToken
+	if refreshed.RefreshToken != "" {
+		a.refreshToken = refreshed.RefreshToken
+	}
+
+	if expiresAtMs > 0 {
+		a.expiresAt = expiresAtMs
+	}
+
+	return a.persist.persist(ctx, a.accessToken, a.refreshToken, a.expiresAt)
+}
+
+// claudeCodeFilePersister writes refreshed credentials back to ~/.claude/.credentials.json.
+type claudeCodeFilePersister struct {
+	path string
+}
+
+func (p *claudeCodeFilePersister) location() string { return p.path }
+
+func (p *claudeCodeFilePersister) persist(_ context.Context, accessToken, refreshToken string, expiresAtMs int64) error {
+	raw, err := readJSONObject(p.path)
+	if err != nil {
+		return err
+	}
+
+	mergeClaudeCodeOAuth(raw, accessToken, refreshToken, expiresAtMs)
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("claude code credentials marshal: %w", err)
+	}
+
+	return atomicWriteFile(p.path, append(out, '\n'), 0o600)
+}
+
+// readJSONObject reads a JSON object from path, returning an empty map when the
+// file is missing so callers can write a fresh blob.
+func readJSONObject(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return map[string]any{}, nil
+	case err != nil:
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	if len(bytes.TrimSpace(data)) == 0 {
+		return map[string]any{}, nil
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	if raw == nil {
+		raw = map[string]any{}
+	}
+
+	return raw, nil
+}
+
+// mergeClaudeCodeOAuth updates the claudeAiOauth fields in place, preserving
+// any unrelated fields the claude CLI may have stored alongside.
+func mergeClaudeCodeOAuth(raw map[string]any, accessToken, refreshToken string, expiresAtMs int64) {
+	block, ok := raw["claudeAiOauth"].(map[string]any)
+	if !ok {
+		block = map[string]any{}
+		raw["claudeAiOauth"] = block
+	}
+
+	if accessToken != "" {
+		block["accessToken"] = accessToken
+	}
+
+	if refreshToken != "" {
+		block["refreshToken"] = refreshToken
+	}
+
+	if expiresAtMs > 0 {
+		block["expiresAt"] = expiresAtMs
+	}
 }
