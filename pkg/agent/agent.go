@@ -23,6 +23,7 @@ type Agent struct {
 	FallbackModels []string
 	Capabilities   []string
 	Triggers       []string
+	References     []string
 	MaxTokens      int
 	Hidden         bool
 }
@@ -56,6 +57,7 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 			TopP:           cfg.TopP,
 			Seed:           cfg.Seed,
 			Triggers:       normalizePhrases(cfg.Triggers),
+			References:     append([]string(nil), cfg.References...),
 			MaxTokens:      cfg.MaxTokens,
 			Hidden:         cfg.Hidden,
 		}

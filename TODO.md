@@ -71,3 +71,4 @@ make: *** [run] Error 1
 ```
 
 - [x] have a TODO list that agents/subagents can interact with, so that they can add items to the TODO list for themselves or other agents to complete, and check off items as they are completed. This would help agents keep track of their tasks and progress, and allow for better coordination and delegation among multiple agents working on the same session.
+- [ ] give a list of links or paths to a repository that can be used as a reference that the LLM can use to improve the quality of suggestions.

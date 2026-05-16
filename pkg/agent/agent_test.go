@@ -155,3 +155,25 @@ func TestParseInvocation(t *testing.T) {
 		require.FailNow(t, "expected no invocation")
 	}
 }
+
+func TestRegistry_ReferencesFromConfig(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"reviewer": {
+			Description: "Reviews code",
+			References:  []string{"./docs/guide.md", "https://example.com/style-guide"},
+		},
+		"writer": {
+			Model: "gpt-4.1",
+		},
+	})
+
+	reviewer, ok := registry.Get("reviewer")
+	require.True(t, ok)
+	assert.Equal(t, []string{"./docs/guide.md", "https://example.com/style-guide"}, reviewer.References)
+
+	writer, ok := registry.Get("writer")
+	require.True(t, ok)
+	assert.Empty(t, writer.References)
+}

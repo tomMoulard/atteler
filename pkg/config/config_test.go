@@ -254,6 +254,87 @@ func TestDefaultPaths_PrefersYAML(t *testing.T) {
 	require.Failf(t, "unexpected failure", "paths = %v, want config.yaml/config.yml before config.json", paths)
 }
 
+func TestLoadFiles_ContextReferences(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "refs.yaml", `
+context:
+  references:
+    - ./docs/guide.md
+    - https://example.com/api-docs
+`)
+
+	cfg, loaded, err := LoadFiles([]string{path})
+	require.NoError(t, err)
+	require.Equal(t, []string{path}, loaded)
+	assert.Equal(t, []string{"./docs/guide.md", "https://example.com/api-docs"}, cfg.Context.References)
+}
+
+func TestLoadFiles_ContextReferencesOverride(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	first := writeConfig(t, dir, "first.yaml", `
+context:
+  references:
+    - ./old-docs.md
+`)
+	second := writeConfig(t, dir, "second.yaml", `
+context:
+  references:
+    - ./new-docs.md
+    - https://example.com/ref
+`)
+
+	cfg, _, err := LoadFiles([]string{first, second})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"./new-docs.md", "https://example.com/ref"}, cfg.Context.References)
+}
+
+func TestLoadFiles_AgentReferences(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "agent-refs.yaml", `
+agents:
+  reviewer:
+    description: Reviews code
+    references:
+      - ./review-guidelines.md
+      - https://example.com/style-guide
+`)
+
+	cfg, _, err := LoadFiles([]string{path})
+	require.NoError(t, err)
+
+	reviewer := cfg.Agents["reviewer"]
+	assert.Equal(t, "Reviews code", reviewer.Description)
+	assert.Equal(t, []string{"./review-guidelines.md", "https://example.com/style-guide"}, reviewer.References)
+}
+
+func TestLoadFiles_AgentReferencesOverride(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	first := writeConfig(t, dir, "first.yaml", `
+agents:
+  reviewer:
+    references:
+      - ./old-guide.md
+`)
+	second := writeConfig(t, dir, "second.yaml", `
+agents:
+  reviewer:
+    references:
+      - ./new-guide.md
+`)
+
+	cfg, _, err := LoadFiles([]string{first, second})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"./new-guide.md"}, cfg.Agents["reviewer"].References)
+}
+
 func writeConfig(t *testing.T, dir, name, content string) string {
 	t.Helper()
 

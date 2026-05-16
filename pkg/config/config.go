@@ -19,7 +19,7 @@ const EnvPath = "ATTELER_CONFIG"
 
 // Config is the merged application configuration.
 //
-//nolint:govet // Field order follows file/config grouping; padding is not performance-sensitive.
+//nolint:govet // fieldalignment: field order follows config-file grouping.
 type Config struct {
 	Providers       map[string]ProviderConfig `json:"providers,omitempty" yaml:"providers,omitempty"`
 	Agents          map[string]AgentConfig    `json:"agents,omitempty" yaml:"agents,omitempty"`
@@ -51,6 +51,7 @@ type AgentConfig struct {
 	FallbackModels []string `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
 	Capabilities   []string `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 	Triggers       []string `json:"triggers,omitempty" yaml:"triggers,omitempty"`
+	References     []string `json:"references,omitempty" yaml:"references,omitempty"`
 	MaxTokens      int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
 	Hidden         bool     `json:"hidden,omitempty" yaml:"hidden,omitempty"`
 	hiddenSet      bool
@@ -74,9 +75,10 @@ type GenerationConfig struct {
 
 // ContextConfig configures local @file prompt references.
 type ContextConfig struct {
-	MaxFileBytes   int `json:"max_file_bytes,omitempty" yaml:"max_file_bytes,omitempty"`
-	MaxTotalBytes  int `json:"max_total_bytes,omitempty" yaml:"max_total_bytes,omitempty"`
-	MaxInputTokens int `json:"max_input_tokens,omitempty" yaml:"max_input_tokens,omitempty"`
+	References     []string `json:"references,omitempty" yaml:"references,omitempty"`
+	MaxFileBytes   int      `json:"max_file_bytes,omitempty" yaml:"max_file_bytes,omitempty"`
+	MaxTotalBytes  int      `json:"max_total_bytes,omitempty" yaml:"max_total_bytes,omitempty"`
+	MaxInputTokens int      `json:"max_input_tokens,omitempty" yaml:"max_input_tokens,omitempty"`
 }
 
 // PluginConfig configures local plugin manifest discovery.
@@ -115,12 +117,14 @@ type fileAgentConfig struct {
 	FallbackModels []string `json:"fallback_models" yaml:"fallback_models"`
 	Capabilities   []string `json:"capabilities" yaml:"capabilities"`
 	Triggers       []string `json:"triggers" yaml:"triggers"`
+	References     []string `json:"references" yaml:"references"`
 }
 
 type fileContextConfig struct {
-	MaxFileBytes   *int `json:"max_file_bytes" yaml:"max_file_bytes"`
-	MaxTotalBytes  *int `json:"max_total_bytes" yaml:"max_total_bytes"`
-	MaxInputTokens *int `json:"max_input_tokens" yaml:"max_input_tokens"`
+	MaxFileBytes   *int     `json:"max_file_bytes" yaml:"max_file_bytes"`
+	MaxTotalBytes  *int     `json:"max_total_bytes" yaml:"max_total_bytes"`
+	MaxInputTokens *int     `json:"max_input_tokens" yaml:"max_input_tokens"`
+	References     []string `json:"references" yaml:"references"`
 }
 
 type fileGenerationConfig struct {
@@ -355,6 +359,10 @@ func mergeFileAgent(current *AgentConfig, agent fileAgentConfig) {
 		current.Triggers = append([]string(nil), agent.Triggers...)
 	}
 
+	if agent.References != nil {
+		current.References = append([]string(nil), agent.References...)
+	}
+
 	if agent.MaxTokens != nil {
 		current.MaxTokens = *agent.MaxTokens
 	}
@@ -396,6 +404,10 @@ func mergeContext(dst *Config, contextConfig fileContextConfig) {
 
 	if contextConfig.MaxInputTokens != nil {
 		dst.Context.MaxInputTokens = *contextConfig.MaxInputTokens
+	}
+
+	if contextConfig.References != nil {
+		dst.Context.References = append([]string(nil), contextConfig.References...)
 	}
 }
 
@@ -497,6 +509,19 @@ func mergeConfigAgent(current *AgentConfig, agent AgentConfig) {
 		current.Personality = agent.Personality
 	}
 
+	mergeConfigAgentSlicesAndPointers(current, agent)
+
+	if agent.MaxTokens > 0 {
+		current.MaxTokens = agent.MaxTokens
+	}
+
+	if agent.hiddenSet || agent.Hidden {
+		current.Hidden = agent.Hidden
+		current.hiddenSet = true
+	}
+}
+
+func mergeConfigAgentSlicesAndPointers(current *AgentConfig, agent AgentConfig) {
 	if agent.FallbackModels != nil {
 		current.FallbackModels = append([]string(nil), agent.FallbackModels...)
 	}
@@ -521,13 +546,8 @@ func mergeConfigAgent(current *AgentConfig, agent AgentConfig) {
 		current.Triggers = append([]string(nil), agent.Triggers...)
 	}
 
-	if agent.MaxTokens > 0 {
-		current.MaxTokens = agent.MaxTokens
-	}
-
-	if agent.hiddenSet || agent.Hidden {
-		current.Hidden = agent.Hidden
-		current.hiddenSet = true
+	if agent.References != nil {
+		current.References = append([]string(nil), agent.References...)
 	}
 }
 
@@ -552,6 +572,10 @@ func mergeConfigContext(dst *Config, contextConfig ContextConfig) {
 
 	if contextConfig.MaxInputTokens > 0 {
 		dst.Context.MaxInputTokens = contextConfig.MaxInputTokens
+	}
+
+	if contextConfig.References != nil {
+		dst.Context.References = append([]string(nil), contextConfig.References...)
 	}
 }
 

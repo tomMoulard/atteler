@@ -177,16 +177,17 @@ func (u *tokenUsage) add(next tokenUsage) {
 
 //nolint:govet // Field order groups request concerns; padding is not performance-sensitive.
 type llmRequest struct {
-	eventBase      events.Event
-	hookRunner     *events.Runner
-	generation     generationSettings
-	maxInputTokens int
-	model          string
-	messages       []llm.Message
-	fallbackModels []string
-	refs           []contextref.Reference
-	agent          agent.Agent
-	hasAgent       bool
+	eventBase        events.Event
+	hookRunner       *events.Runner
+	generation       generationSettings
+	maxInputTokens   int
+	model            string
+	referenceContext string
+	messages         []llm.Message
+	fallbackModels   []string
+	refs             []contextref.Reference
+	agent            agent.Agent
+	hasAgent         bool
 }
 
 // modelsLoadedMsg is sent when one provider's model discovery completes.
@@ -286,6 +287,7 @@ type model struct {
 	promptHistoryDraft  string
 	pickerItems         []pickerItem
 	contextOptions      contextref.Options
+	referenceContext    string
 	worktreeInfo        *worktree.Info
 	tokenUsage          tokenUsage
 	runningTaskStarted  time.Time
@@ -319,6 +321,7 @@ func initialModel(
 	stateStore *appconfig.StateStore,
 	sessionState session.Session,
 	contextOptions contextref.Options,
+	referenceContext string,
 	sessionPath string,
 	cwd string,
 	selectedModel string,
@@ -352,6 +355,7 @@ func initialModel(
 		stateStore:          stateStore,
 		sessionState:        sessionState,
 		contextOptions:      contextOptions,
+		referenceContext:    referenceContext,
 		sessionPath:         sessionPath,
 		cwd:                 cwd,
 		selectedModel:       selectedModel,
@@ -831,15 +835,16 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 			Agent:       activeAgent.name,
 			Model:       requestModel,
 		},
-		hookRunner:     m.hookRunner,
-		agent:          activeAgent.agent,
-		hasAgent:       activeAgent.ok,
-		model:          requestModel,
-		messages:       msgs,
-		fallbackModels: fallbackModels,
-		generation:     generation,
-		maxInputTokens: m.maxInputTokens,
-		refs:           refs,
+		hookRunner:       m.hookRunner,
+		agent:            activeAgent.agent,
+		hasAgent:         activeAgent.ok,
+		model:            requestModel,
+		referenceContext: buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions),
+		messages:         msgs,
+		fallbackModels:   fallbackModels,
+		generation:       generation,
+		maxInputTokens:   m.maxInputTokens,
+		refs:             refs,
 	}
 
 	cmds := []tea.Cmd{
@@ -2096,6 +2101,8 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 			params = request.agent.CompleteParams(request.model, request.messages)
 		}
 
+		prependReferenceContext(&params, request.referenceContext)
+
 		applyGenerationParams(&params, request.generation)
 
 		if err := validateRequestBudget(reg, params.Model, params.Messages, request.maxInputTokens); err != nil {
@@ -2118,6 +2125,21 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 			tokenUsage:  usage,
 		}
 	}
+}
+
+// prependReferenceContext injects pre-rendered reference content as a system
+// message at the beginning of the messages array. This makes configured
+// repository paths, documentation links, and other reference material available
+// to the LLM for every request.
+func prependReferenceContext(params *llm.CompleteParams, refCtx string) {
+	if refCtx == "" {
+		return
+	}
+
+	params.Messages = append(
+		[]llm.Message{{Role: llm.RoleSystem, Content: refCtx}},
+		params.Messages...,
+	)
 }
 
 func requestMessagesForBudget(
@@ -2834,6 +2856,7 @@ type appState struct {
 	pluginPaths         []string
 	providers           []string
 	loadedConfigPaths   []string
+	referenceContext    string
 	selectedModel       string
 	selectedAgent       string
 	cwd                 string
@@ -3704,6 +3727,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		state.sessionStore,
 		state.sessionState,
 		state.contextOptions,
+		state.referenceContext,
 		state.selectedModel,
 		state.selectedAgent,
 		state.fallbackModels,
@@ -4160,6 +4184,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	reg := autoRegisterForOptions(ctx, opts, cfg, selection.selectedModel)
 	contextOptions := contextOptionsFromConfig(cfg)
+	referenceContext := loadConfiguredReferences(ctx, cfg.Context.References, contextOptions)
 	generationDefaults := generationFromConfig(cfg)
 	generationOverrides := generationFromOptions(opts)
 	maxInputTokens := maxInputTokensFromConfigOptions(cfg, opts)
@@ -4205,6 +4230,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		sessionStore:        store,
 		stateStore:          stateStore,
 		contextOptions:      contextOptions,
+		referenceContext:    referenceContext,
 		sessionState:        selection.sessionState,
 		worktreeInfo:        wtInfo,
 		cwd:                 cwd,
@@ -4405,6 +4431,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.stateStore,
 		state.sessionState,
 		state.contextOptions,
+		state.referenceContext,
 		state.sessionStore.Path(state.sessionState.ID),
 		state.cwd,
 		state.selectedModel,
@@ -4585,6 +4612,7 @@ func runOnce(
 	store *session.Store,
 	sessionState session.Session,
 	contextOptions contextref.Options,
+	referenceContext string,
 	selectedModel string,
 	selectedAgent string,
 	fallbackModels []string,
@@ -4603,6 +4631,7 @@ func runOnce(
 		store,
 		sessionState,
 		contextOptions,
+		referenceContext,
 		selectedModel,
 		selectedAgent,
 		fallbackModels,
@@ -4623,6 +4652,7 @@ func runOnceWithOptions(
 	store *session.Store,
 	sessionState session.Session,
 	contextOptions contextref.Options,
+	referenceContext string,
 	selectedModel string,
 	selectedAgent string,
 	fallbackModels []string,
@@ -4685,6 +4715,9 @@ func runOnceWithOptions(
 	if prepared.activeAgent.ok {
 		params = prepared.activeAgent.agent.CompleteParams(prepared.requestModel, params.Messages)
 	}
+
+	refCtx := buildReferenceContext(ctx, referenceContext, prepared.activeAgent, contextOptions)
+	prependReferenceContext(&params, refCtx)
 
 	applyGenerationParams(&params, prepared.generation)
 
@@ -11643,6 +11676,43 @@ func contextOptionsFromConfig(cfg appconfig.Config) contextref.Options {
 	}
 
 	return opts
+}
+
+// loadConfiguredReferences resolves the configured reference paths/URLs at
+// startup and returns a pre-rendered reference block that can be injected into
+// every LLM request as additional context. Errors are logged but not fatal so
+// the session can still start with whatever references succeeded.
+func loadConfiguredReferences(ctx context.Context, refs []string, opts contextref.Options) string {
+	if len(refs) == 0 {
+		return ""
+	}
+
+	loaded, err := contextref.LoadReferences(ctx, refs, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: loading configured references: %v\n", err)
+	}
+
+	return contextref.FormatReferences(loaded)
+}
+
+// buildReferenceContext combines the pre-loaded global reference context with
+// any agent-specific references. If the agent has its own references they are
+// loaded on the fly and appended after the global block.
+func buildReferenceContext(ctx context.Context, globalRefCtx string, activeAgent agentSelection, opts contextref.Options) string {
+	if !activeAgent.ok || len(activeAgent.agent.References) == 0 {
+		return globalRefCtx
+	}
+
+	agentRefCtx := loadConfiguredReferences(ctx, activeAgent.agent.References, opts)
+	if agentRefCtx == "" {
+		return globalRefCtx
+	}
+
+	if globalRefCtx == "" {
+		return agentRefCtx
+	}
+
+	return globalRefCtx + "\n\n" + agentRefCtx
 }
 
 func maxInputTokensFromConfigOptions(cfg appconfig.Config, opts cliOptions) int {

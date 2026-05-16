@@ -19,6 +19,9 @@ const (
 	// DefaultMaxTotalBytes is the default aggregate reference cap.
 	DefaultMaxTotalBytes = 256 * 1024
 	maxDirectoryEntries  = 200
+
+	// kindFile is the reference kind for regular files.
+	kindFile = "file"
 )
 
 var errDirectoryLimit = errors.New("directory reference limit reached")
@@ -240,7 +243,7 @@ func expandCandidate(
 
 	return expandedReference{
 		Path:      displayPath,
-		Kind:      "file",
+		Kind:      kindFile,
 		Bytes:     len(content),
 		Truncated: truncated,
 		content:   string(content),
@@ -390,7 +393,7 @@ func appendReferences(prompt string, refs []expandedReference) string {
 	for _, ref := range refs {
 		tag := ref.Kind
 		if tag == "" {
-			tag = "file"
+			tag = kindFile
 		}
 
 		b.WriteString(`<`)
