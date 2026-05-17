@@ -13,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -1421,25 +1422,7 @@ func TestUpdateLLMResponse_ClearsCompletedTaskTimer(t *testing.T) {
 }
 
 func stripANSI(value string) string {
-	var b strings.Builder
-
-	for i := 0; i < len(value); i++ {
-		if value[i] != '\x1b' {
-			b.WriteByte(value[i])
-			continue
-		}
-
-		i++
-		if i >= len(value) || value[i] != '[' {
-			continue
-		}
-
-		for i < len(value) && (value[i] < '@' || value[i] > '~') {
-			i++
-		}
-	}
-
-	return b.String()
+	return ansi.Strip(value)
 }
 
 func TestRevampPromptAndUndo(t *testing.T) {
