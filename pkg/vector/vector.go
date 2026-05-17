@@ -10,6 +10,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 )
 
@@ -32,9 +33,11 @@ type Result struct {
 	Score    float64
 }
 
-// Store is an in-memory vector document store.
+// Store is an in-memory vector document store. All exported methods are safe
+// for concurrent use.
 type Store struct {
 	Documents  []Document
+	mu         sync.RWMutex
 	Dimensions int
 }
 
@@ -55,12 +58,19 @@ func (s *Store) Add(doc Document) error {
 		return ErrMissingID
 	}
 
-	if err := s.validateVector(doc.Vector, true); err != nil {
+	if err := validateVector(doc.Vector); err != nil {
 		return err
 	}
 
 	doc.Vector = cloneVector(doc.Vector)
 	doc.Metadata = cloneMetadata(doc.Metadata)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.adoptDimensionsLocked(doc.Vector); err != nil {
+		return err
+	}
 
 	for i, existing := range s.Documents {
 		if existing.ID == doc.ID {
@@ -77,7 +87,37 @@ func (s *Store) Add(doc Document) error {
 // Search ranks documents by cosine similarity to query and returns up to limit
 // results. A limit less than one returns every document with a non-zero score.
 func (s *Store) Search(query Vector, limit int) ([]Result, error) {
-	if err := s.validateVector(query, false); err != nil {
+	if err := validateVector(query); err != nil {
+		return nil, err
+	}
+
+	results, err := s.searchLocked(query)
+	if err != nil {
+		return nil, err
+	}
+
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+
+		return results[i].Document.ID < results[j].Document.ID
+	})
+
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+
+	return results, nil
+}
+
+// searchLocked performs the read-locked portion of Search, cloning results
+// so callers can sort/slice without holding the lock.
+func (s *Store) searchLocked(query Vector) ([]Result, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := s.checkDimensionsLocked(query); err != nil {
 		return nil, err
 	}
 
@@ -96,18 +136,6 @@ func (s *Store) Search(query Vector, limit int) ([]Result, error) {
 			Document: cloneDocument(doc),
 			Score:    score,
 		})
-	}
-
-	sort.SliceStable(results, func(i, j int) bool {
-		if results[i].Score != results[j].Score {
-			return results[i].Score > results[j].Score
-		}
-
-		return results[i].Document.ID < results[j].Document.ID
-	})
-
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
 	}
 
 	return results, nil
@@ -182,23 +210,35 @@ func (v TextVectorizer) Vectorize(text string) (Vector, error) {
 	return out, nil
 }
 
-func (s *Store) validateVector(vec Vector, adoptDimensions bool) error {
-	if len(vec) == 0 {
-		return ErrEmptyVector
-	}
-
-	if s.Dimensions == 0 && adoptDimensions {
+// adoptDimensionsLocked sets the store dimensions from the first added vector.
+// Caller must hold s.mu (write lock).
+func (s *Store) adoptDimensionsLocked(vec Vector) error {
+	if s.Dimensions == 0 {
 		s.Dimensions = len(vec)
 	}
 
+	if len(vec) != s.Dimensions {
+		return fmt.Errorf("%w: got %d, want %d", ErrDimensionMismatch, len(vec), s.Dimensions)
+	}
+
+	return nil
+}
+
+// checkDimensionsLocked validates query dimensions. Caller must hold s.mu
+// (at least read lock).
+func (s *Store) checkDimensionsLocked(vec Vector) error {
 	if s.Dimensions > 0 && len(vec) != s.Dimensions {
 		return fmt.Errorf("%w: got %d, want %d", ErrDimensionMismatch, len(vec), s.Dimensions)
 	}
 
-	return validateVector(vec)
+	return nil
 }
 
 func validateVector(vec Vector) error {
+	if len(vec) == 0 {
+		return ErrEmptyVector
+	}
+
 	var norm float64
 
 	for _, value := range vec {
