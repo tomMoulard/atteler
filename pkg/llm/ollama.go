@@ -48,7 +48,7 @@ func NewOllamaProviderWithConfigContext(ctx context.Context, cfg ProviderConfig)
 	baseURL := strings.TrimRight(configuredBaseURL("OLLAMA_BASE_URL", cfg.BaseURL, defaultOllamaBase), "/")
 	p := &OllamaProvider{
 		baseURL:   baseURL,
-		client:    &http.Client{},
+		client:    providerHTTPClient(cfg),
 		autoStart: cfg.AutoStart && ollamaAutoStartEnabled() && isLocalOllamaBaseURL(baseURL),
 	}
 
@@ -225,7 +225,7 @@ type ollamaTagsResponse struct {
 // FetchModels queries GET /api/tags to discover locally available Ollama models.
 func (o *OllamaProvider) FetchModels(ctx context.Context) ([]string, error) {
 	if o.client == nil {
-		o.client = &http.Client{}
+		o.client = providerHTTPClient(ProviderConfig{})
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/api/tags", http.NoBody)
@@ -305,7 +305,7 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 	}
 
 	if o.client == nil {
-		o.client = &http.Client{}
+		o.client = providerHTTPClient(ProviderConfig{})
 	}
 
 	msgs := make([]ollamaMessage, 0, len(params.Messages))

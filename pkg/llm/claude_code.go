@@ -42,7 +42,7 @@ func NewClaudeCodeProviderContext(ctx context.Context) (*ClaudeCodeProvider, err
 	}
 
 	return &ClaudeCodeProvider{
-		client:  &http.Client{},
+		client:  providerHTTPClient(ProviderConfig{}),
 		auth:    auth,
 		baseURL: configuredBaseURL("ANTHROPIC_BASE_URL", "", defaultAnthropicBase),
 		models:  defaultClaudeCodeModels(),

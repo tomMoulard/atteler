@@ -3,10 +3,28 @@ package llm
 import (
 	"context"
 	"log"
+	"net/http"
 	"strings"
+	"time"
 )
 
 type providerFactory func() (Provider, error)
+
+// defaultHTTPTimeout is the timeout applied to provider HTTP clients when no
+// explicit timeout is configured. LLM completion calls can be long-running, so
+// the default is generous.
+const defaultHTTPTimeout = 120 * time.Second
+
+// providerHTTPClient returns an *http.Client with a timeout derived from the
+// provider config. A zero or negative TimeoutSeconds uses defaultHTTPTimeout.
+func providerHTTPClient(cfg ProviderConfig) *http.Client {
+	timeout := defaultHTTPTimeout
+	if cfg.TimeoutSeconds > 0 {
+		timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
+	}
+
+	return &http.Client{Timeout: timeout}
+}
 
 // ProviderInfo describes a built-in provider without requiring credentials.
 type ProviderInfo struct {
@@ -17,17 +35,31 @@ type ProviderInfo struct {
 // AutoRegisterConfig configures provider auto-registration and fallback
 // selection.
 type AutoRegisterConfig struct {
+	// Logger receives registration progress messages. When nil, the standard
+	// log package is used. Set to log.New(io.Discard, "", 0) to suppress
+	// output without mutating global state.
+	Logger          *log.Logger
 	Providers       map[string]ProviderConfig
 	DefaultProvider string
 	DefaultModel    string
 	SelectedModel   string
 }
 
+// logger returns the configured logger, falling back to the standard default.
+func (c AutoRegisterConfig) logger() *log.Logger {
+	if c.Logger != nil {
+		return c.Logger
+	}
+
+	return log.Default()
+}
+
 // ProviderConfig configures one LLM provider.
 type ProviderConfig struct {
-	BaseURL   string
-	Disabled  bool
-	AutoStart bool
+	BaseURL        string
+	Disabled       bool
+	AutoStart      bool
+	TimeoutSeconds int
 }
 
 // AutoRegister tries to create every known provider and registers the ones
@@ -102,13 +134,13 @@ func AutoRegisterWithConfigContext(ctx context.Context, cfg AutoRegisterConfig) 
 
 func registerConfiguredProvider(r *Registry, cfg AutoRegisterConfig, providerName string, factory providerFactory) {
 	if providerConfig(cfg, providerName).Disabled {
-		log.Printf("llm: %s skipped: disabled by config", providerName)
+		cfg.logger().Printf("llm: %s skipped: disabled by config", providerName)
 		return
 	}
 
 	p, err := factory()
 	if err != nil {
-		logProviderSkip(providerName, err)
+		logProviderSkip(cfg.logger(), providerName, err)
 		return
 	}
 
@@ -116,9 +148,11 @@ func registerConfiguredProvider(r *Registry, cfg AutoRegisterConfig, providerNam
 }
 
 func applyDefaultSelection(r *Registry, cfg AutoRegisterConfig) {
+	logger := cfg.logger()
+
 	if cfg.DefaultProvider != "" {
 		if err := r.SetDefault(cfg.DefaultProvider); err != nil {
-			log.Printf("llm: default provider ignored: %v", err)
+			logger.Printf("llm: default provider ignored: %v", err)
 		}
 	}
 
@@ -129,17 +163,17 @@ func applyDefaultSelection(r *Registry, cfg AutoRegisterConfig) {
 		}
 
 		if err != nil {
-			log.Printf("llm: default model ignored: %v", err)
+			logger.Printf("llm: default model ignored: %v", err)
 		}
 	}
 }
 
-func logProviderSkip(providerName string, err error) {
+func logProviderSkip(logger *log.Logger, providerName string, err error) {
 	if isMissingCredentialError(err) {
 		return
 	}
 
-	log.Printf("llm: %s skipped: %v", providerName, err)
+	logger.Printf("llm: %s skipped: %v", providerName, err)
 }
 
 func isMissingCredentialError(err error) bool {

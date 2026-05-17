@@ -93,14 +93,25 @@ type Registry struct {
 	fallback     string
 	defaultModel string
 	mu           sync.RWMutex
+	retry        retryConfig
 }
 
-// NewRegistry creates an empty registry.
+// NewRegistry creates an empty registry with default retry settings.
 func NewRegistry() *Registry {
 	return &Registry{
 		providers: make(map[string]Provider),
 		models:    make(map[string]Provider),
+		retry:     defaultRetryConfig(),
 	}
+}
+
+// SetRetry overrides the default retry policy. Pass a zero MaxAttempts to
+// disable retries entirely, which is useful for fast test runs.
+func (r *Registry) SetRetry(cfg retryConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.retry = cfg
 }
 
 // Register adds a provider and indexes all of its models.
@@ -188,20 +199,29 @@ func (r *Registry) SetDefaultProviderModel(providerName, model string) error {
 
 // Complete resolves the provider for params.Model and calls it.
 // If Model is empty the default provider is used with its first listed model.
+// Transient errors (429, 5xx) are retried according to the registry's retry
+// configuration.
 func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
 	p, params, err := r.resolve(params)
 	if err != nil {
 		return nil, err
 	}
 
+	// Snapshot retry config under the lock so concurrent SetRetry calls are safe.
+	r.mu.RLock()
+	retryCfg := r.retry
+	r.mu.RUnlock()
+
 	emitToolExecute(ctx, p, params.Model)
 
-	resp, err := p.Complete(ctx, params)
-	if err != nil {
-		return nil, fmt.Errorf("llm: %s: %w", p.Name(), err)
-	}
+	return completeWithRetry(ctx, retryCfg, func(ctx context.Context) (*Response, error) {
+		resp, err := p.Complete(ctx, params)
+		if err != nil {
+			return nil, fmt.Errorf("llm: %s: %w", p.Name(), err)
+		}
 
-	return resp, nil
+		return resp, nil
+	})
 }
 
 // CompleteWithFallback tries params.Model followed by fallbackModels until one

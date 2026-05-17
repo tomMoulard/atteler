@@ -46,7 +46,7 @@ func NewCodexProvider() (*CodexProvider, error) {
 	}
 
 	return &CodexProvider{
-		client:  &http.Client{},
+		client:  providerHTTPClient(ProviderConfig{}),
 		auth:    auth,
 		baseURL: configuredBaseURL("CODEX_BASE_URL", "", codexChatGPTAPIBase),
 		models:  codexModels(),
@@ -252,12 +252,10 @@ func (c *CodexProvider) sendResponses(ctx context.Context, body []byte, access, 
 }
 
 // codexStreamState accumulates partial state from an SSE response stream.
-//
-//nolint:govet // Field order keeps streaming buffers and output state readable.
 type codexStreamState struct {
+	finalText string
 	deltaBuf  strings.Builder
 	out       Response
-	finalText string
 	finished  bool
 }
 

@@ -55,7 +55,7 @@ func NewAnthropicProviderWithConfigContext(ctx context.Context, cfg ProviderConf
 		apiKey:  key,
 		bearer:  bearer,
 		baseURL: configuredBaseURL("ANTHROPIC_BASE_URL", cfg.BaseURL, defaultAnthropicBase),
-		client:  &http.Client{},
+		client:  providerHTTPClient(cfg),
 	}, nil
 }
 

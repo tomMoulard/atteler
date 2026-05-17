@@ -39,7 +39,7 @@ func NewOpenAIProviderWithConfig(cfg ProviderConfig) (*OpenAIProvider, error) {
 		apiKey:  key,
 		bearer:  bearer,
 		baseURL: configuredBaseURL("OPENAI_BASE_URL", cfg.BaseURL, defaultOpenAIBase),
-		client:  &http.Client{},
+		client:  providerHTTPClient(cfg),
 	}, nil
 }
 
