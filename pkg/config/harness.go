@@ -924,6 +924,11 @@ func setProvider(cfg *Config, name string, provider ProviderConfig) {
 	}
 
 	current.Disabled = provider.Disabled
+
+	if provider.TimeoutSeconds > 0 {
+		current.TimeoutSeconds = provider.TimeoutSeconds
+	}
+
 	cfg.Providers[name] = current
 }
 

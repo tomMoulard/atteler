@@ -2,8 +2,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -34,8 +36,9 @@ type Config struct {
 
 // ProviderConfig configures an individual LLM provider.
 type ProviderConfig struct {
-	BaseURL  string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	Disabled bool   `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+	BaseURL        string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	Disabled       bool   `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
 }
 
 // AgentConfig configures a named agent persona.
@@ -99,8 +102,9 @@ type fileConfig struct {
 }
 
 type fileProviderConfig struct {
-	Disabled *bool   `json:"disabled" yaml:"disabled"`
-	BaseURL  *string `json:"base_url" yaml:"base_url"`
+	Disabled       *bool   `json:"disabled" yaml:"disabled"`
+	BaseURL        *string `json:"base_url" yaml:"base_url"`
+	TimeoutSeconds *int    `json:"timeout_seconds" yaml:"timeout_seconds"`
 }
 
 type fileAgentConfig struct {
@@ -215,7 +219,17 @@ func LoadFiles(paths []string) (Config, []string, error) {
 		}
 
 		var next fileConfig
-		if err := yaml.Unmarshal(data, &next); err != nil {
+
+		dec := yaml.NewDecoder(bytes.NewReader(data))
+		dec.KnownFields(true)
+
+		if err := dec.Decode(&next); err != nil {
+			// An empty or whitespace-only file produces io.EOF; treat it
+			// as a no-op rather than a parse error.
+			if errors.Is(err, io.EOF) {
+				continue
+			}
+
 			return cfg, loaded, fmt.Errorf("config: parse %s: %w", path, err)
 		}
 
@@ -296,6 +310,10 @@ func mergeProviders(dst *Config, providers map[string]fileProviderConfig) {
 
 		if provider.BaseURL != nil {
 			current.BaseURL = *provider.BaseURL
+		}
+
+		if provider.TimeoutSeconds != nil {
+			current.TimeoutSeconds = *provider.TimeoutSeconds
 		}
 
 		dst.Providers[name] = current
@@ -472,6 +490,11 @@ func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig) {
 		}
 
 		current.Disabled = provider.Disabled
+
+		if provider.TimeoutSeconds > 0 {
+			current.TimeoutSeconds = provider.TimeoutSeconds
+		}
+
 		dst.Providers[name] = current
 	}
 }
