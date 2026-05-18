@@ -1444,6 +1444,70 @@ func TestRevampPromptAndUndo(t *testing.T) {
 	assert.False(t, undone.revampUndoActive)
 }
 
+func TestHandleCtrlC_ClearsDraftBeforeQuit(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea:       textarea.New(),
+		completionOpen: true,
+		completionItems: []completionCandidate{{
+			kind:  "agent",
+			label: "@reviewer",
+			value: "@reviewer ",
+		}},
+		revampUndoActive: true,
+		revampUndo:       "original",
+	}
+	m.textarea.SetValue("draft prompt")
+
+	nextModel, cmd, handled := m.handleCtrlC()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	assert.Nil(t, cmd)
+	assert.False(t, next.quitting)
+	assert.Empty(t, next.textarea.Value())
+	assert.False(t, next.completionOpen)
+	assert.Empty(t, next.completionItems)
+	assert.False(t, next.revampUndoActive)
+	assert.Empty(t, next.revampUndo)
+
+	nextModel, cmd, handled = next.handleCtrlC()
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	assert.True(t, next.quitting)
+	require.NotNil(t, cmd)
+}
+
+func TestHandleCtrlC_CancelsWaitingWhenDraftEmpty(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m := model{
+		textarea:           textarea.New(),
+		waiting:            true,
+		cancel:             cancel,
+		runningTaskLabel:   "LLM",
+		runningTaskStarted: time.Now(),
+	}
+
+	nextModel, cmd, handled := m.handleCtrlC()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	assert.False(t, next.waiting)
+	assert.Nil(t, next.cancel)
+	assert.False(t, next.quitting)
+	require.NotNil(t, cmd)
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		require.Fail(t, "cancel function was not called")
+	}
+}
+
 func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	t.Parallel()
 

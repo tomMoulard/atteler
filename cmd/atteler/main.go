@@ -657,6 +657,18 @@ func (m model) handleChatCommand(keyName string) (tea.Model, tea.Cmd, bool) {
 }
 
 func (m model) handleCtrlC() (tea.Model, tea.Cmd, bool) {
+	if m.textarea.Value() != "" {
+		m.textarea.Reset()
+		m.promptHistoryCursor = -1
+		m.promptHistoryDraft = ""
+		m.completionOpen = false
+		m.completionItems = nil
+		m.revampUndoActive = false
+		m.revampUndo = ""
+
+		return m, nil, true
+	}
+
 	if m.waiting {
 		if m.cancel != nil {
 			m.cancel()
