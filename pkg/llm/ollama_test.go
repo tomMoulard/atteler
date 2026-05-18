@@ -148,14 +148,14 @@ func TestOllamaProvider_AutoStartStartsDaemonWhenUnavailable(t *testing.T) {
 		srv   *http.Server
 	)
 
-	withOllamaServeStarter(t, func(gotBaseURL string) error {
+	withOllamaServeStarter(t, func(ctx context.Context, gotBaseURL string) error {
 		calls++
 
 		assert.Equal(t, baseURL, gotBaseURL)
 
 		var err error
 
-		srv, err = startOllamaTagsServer(t, gotBaseURL)
+		srv, err = startOllamaTagsServer(ctx, t, gotBaseURL)
 
 		return err
 	})
@@ -192,7 +192,7 @@ func TestOllamaProvider_AutoStartDoesNotStartWhenReachable(t *testing.T) {
 
 	var calls int
 
-	withOllamaServeStarter(t, func(string) error {
+	withOllamaServeStarter(t, func(context.Context, string) error {
 		calls++
 		return errors.New("unexpected starter call")
 	})
@@ -209,7 +209,7 @@ func TestOllamaProvider_AutoStartReturnsStarterError(t *testing.T) {
 	t.Setenv(envOllamaAutoStart, "")
 
 	baseURL := unusedLocalOllamaURL(t)
-	withOllamaServeStarter(t, func(string) error {
+	withOllamaServeStarter(t, func(context.Context, string) error {
 		return errors.New("ollama: start daemon: binary not found")
 	})
 
@@ -227,7 +227,7 @@ func TestOllamaProvider_AutoStartSkipsRemoteAndDisabled(t *testing.T) {
 
 	var calls int
 
-	withOllamaServeStarter(t, func(string) error {
+	withOllamaServeStarter(t, func(context.Context, string) error {
 		calls++
 		return errors.New("unexpected starter call")
 	})
@@ -284,12 +284,12 @@ func TestAutoRegisterWithConfigContext_StartsLocalOllamaForDefaultProvider(t *te
 
 	var srv *http.Server
 
-	withOllamaServeStarter(t, func(gotBaseURL string) error {
+	withOllamaServeStarter(t, func(ctx context.Context, gotBaseURL string) error {
 		assert.Equal(t, baseURL, gotBaseURL)
 
 		var err error
 
-		srv, err = startOllamaTagsServer(t, gotBaseURL)
+		srv, err = startOllamaTagsServer(ctx, t, gotBaseURL)
 
 		return err
 	})
@@ -381,7 +381,7 @@ func unusedLocalOllamaURL(t *testing.T) string {
 	return "http://" + addr
 }
 
-func startOllamaTagsServer(t *testing.T, baseURL string) (*http.Server, error) {
+func startOllamaTagsServer(ctx context.Context, t *testing.T, baseURL string) (*http.Server, error) {
 	t.Helper()
 
 	parsed, err := url.Parse(baseURL)
@@ -389,7 +389,7 @@ func startOllamaTagsServer(t *testing.T, baseURL string) (*http.Server, error) {
 		return nil, err
 	}
 
-	ln, err := new(net.ListenConfig).Listen(context.Background(), "tcp", parsed.Host)
+	ln, err := new(net.ListenConfig).Listen(ctx, "tcp", parsed.Host)
 	if err != nil {
 		return nil, err
 	}

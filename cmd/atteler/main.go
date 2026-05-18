@@ -117,6 +117,7 @@ const (
 	keyEsc           = "esc"
 	outputFormatJSON = "json"
 	outputFormatText = "text"
+	statusError      = "error"
 
 	maxPromptHistoryEntries = 100
 	taskTickInterval        = time.Second
@@ -3562,7 +3563,7 @@ func formatSpawnResults(results []subagent.Result) string {
 	for _, result := range results {
 		status := "ok"
 		if result.Error != "" {
-			status = "error"
+			status = statusError
 		}
 
 		fmt.Fprintf(
@@ -3579,7 +3580,7 @@ func formatSpawnResults(results []subagent.Result) string {
 		}
 
 		if result.Error != "" {
-			fmt.Fprintf(&b, "error=%s\n", result.Error)
+			fmt.Fprintf(&b, "%s=%s\n", statusError, result.Error)
 		}
 	}
 
@@ -5193,7 +5194,7 @@ func formatAsyncRunResults(results []attasync.TaskResult) string {
 
 		status := "ok"
 		if result.Error != "" {
-			status = "error"
+			status = statusError
 		}
 
 		fmt.Fprintf(
@@ -5212,7 +5213,7 @@ func formatAsyncRunResults(results []attasync.TaskResult) string {
 		}
 
 		if result.Error != "" {
-			fmt.Fprintf(&b, "error=%s\n", result.Error)
+			fmt.Fprintf(&b, "%s=%s\n", statusError, result.Error)
 		}
 	}
 

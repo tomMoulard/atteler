@@ -788,7 +788,7 @@ func configureSlog() {
 		level = slog.LevelDebug
 	case "warn", "warning":
 		level = slog.LevelWarn
-	case "error": //nolint:goconst // clarity over a constant for a single switch case
+	case statusError:
 		level = slog.LevelError
 	}
 

@@ -81,7 +81,7 @@ func ollamaExplicitlyConfigured(cfg ProviderConfig) bool {
 	return os.Getenv("OLLAMA_BASE_URL") != "" || cfg.BaseURL != ""
 }
 
-type ollamaServeStarter func(baseURL string) error
+type ollamaServeStarter func(ctx context.Context, baseURL string) error
 
 var (
 	ollamaServeStarterMu sync.Mutex
@@ -95,25 +95,23 @@ func (o *OllamaProvider) startDaemonAndWait(ctx context.Context) error {
 
 	o.startAttempted = true
 
-	if err := callOllamaServeStarter(o.baseURL); err != nil {
+	if err := callOllamaServeStarter(ctx, o.baseURL); err != nil {
 		return err
 	}
 
 	return o.waitForDaemon(ctx)
 }
 
-func callOllamaServeStarter(baseURL string) error {
+func callOllamaServeStarter(ctx context.Context, baseURL string) error {
 	ollamaServeStarterMu.Lock()
 	starter := startOllamaServe
 	ollamaServeStarterMu.Unlock()
 
-	return starter(baseURL)
+	return starter(ctx, baseURL)
 }
 
-func startOllamaServeProcess(baseURL string) error {
-	// Use a detached background context so a successful daemon fork is not
-	// killed when the short provider-readiness context is canceled.
-	cmd := exec.CommandContext(context.Background(), ollamaServeCommand, "serve")
+func startOllamaServeProcess(ctx context.Context, baseURL string) error {
+	cmd := exec.CommandContext(ctx, ollamaServeCommand, "serve")
 	cmd.Stdout = io.Discard
 
 	cmd.Stderr = io.Discard

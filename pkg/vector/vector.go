@@ -295,7 +295,7 @@ func NewEmbeddingVectorizer(opts ...EmbeddingOption) *EmbeddingVectorizer {
 
 // Vectorize sends text to the embedding API and returns the resulting vector.
 func (v *EmbeddingVectorizer) Vectorize(text string) (Vector, error) {
-	return v.VectorizeContext(context.Background(), text)
+	return v.VectorizeContext(context.TODO(), text)
 }
 
 // VectorizeContext is Vectorize with caller-provided cancellation.
@@ -350,8 +350,8 @@ func (v *EmbeddingVectorizer) VectorizeContext(ctx context.Context, text string)
 
 // ollamaEmbedRequest is the Ollama /api/embed request format.
 type ollamaEmbedRequest struct {
-	Model string `json:"model"`
 	Input any    `json:"input"`
+	Model string `json:"model"`
 }
 
 // ollamaEmbedResponse is the Ollama /api/embed response format.
