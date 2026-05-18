@@ -177,3 +177,98 @@ func TestRegistry_ReferencesFromConfig(t *testing.T) {
 	require.True(t, ok)
 	assert.Empty(t, writer.References)
 }
+
+func TestAgent_HasToolPermission_NilPermissions(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{Name: "default"}
+	assert.True(t, a.HasToolPermission("bash"), "nil ToolPermissions should allow all tools")
+	assert.True(t, a.HasToolPermission("write"), "nil ToolPermissions should allow all tools")
+	assert.True(t, a.HasToolPermission("anything"), "nil ToolPermissions should allow all tools")
+}
+
+func TestAgent_HasToolPermission_ExplicitPermissions(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{
+		Name:            "restricted",
+		ToolPermissions: map[string]bool{"bash": true, "read": true, "write": false},
+	}
+
+	assert.True(t, a.HasToolPermission("bash"))
+	assert.True(t, a.HasToolPermission("read"))
+	assert.False(t, a.HasToolPermission("write"), "explicitly false should deny")
+	assert.False(t, a.HasToolPermission("edit"), "missing key should deny")
+}
+
+func TestAgent_FilterTools_NilPermissions(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{Name: "default"}
+	tools := llm.DefaultTools()
+	filtered := a.FilterTools(tools)
+	assert.Equal(t, tools, filtered, "nil ToolPermissions should return all tools")
+}
+
+func TestAgent_FilterTools_ExplicitPermissions(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{
+		Name:            "restricted",
+		ToolPermissions: map[string]bool{"bash": true},
+	}
+	tools := []llm.ToolDefinition{
+		{Name: "bash", Description: "Run commands"},
+		{Name: "write", Description: "Write files"},
+		{Name: "read", Description: "Read files"},
+	}
+
+	filtered := a.FilterTools(tools)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "bash", filtered[0].Name)
+}
+
+func TestAgent_FilterTools_EmptyPermissions(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{
+		Name:            "no-tools",
+		ToolPermissions: map[string]bool{},
+	}
+	tools := llm.DefaultTools()
+	filtered := a.FilterTools(tools)
+	assert.Empty(t, filtered, "empty map should deny all tools")
+}
+
+func TestRegistry_ModeAndToolPermissions(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"cr": {
+			Description: "Code review agent",
+			Mode:        "subagent",
+			ToolPermissions: map[string]bool{
+				"bash":  true,
+				"read":  true,
+				"write": true,
+			},
+		},
+		"simple": {
+			Description: "No tools configured",
+		},
+	})
+
+	cr, ok := registry.Get("cr")
+	require.True(t, ok)
+	assert.Equal(t, "subagent", cr.Mode)
+	assert.True(t, cr.HasToolPermission("bash"))
+	assert.True(t, cr.HasToolPermission("read"))
+	assert.True(t, cr.HasToolPermission("write"))
+	assert.False(t, cr.HasToolPermission("edit"))
+
+	simple, ok := registry.Get("simple")
+	require.True(t, ok)
+	assert.Empty(t, simple.Mode)
+	assert.Nil(t, simple.ToolPermissions)
+	assert.True(t, simple.HasToolPermission("bash"), "nil map should allow all")
+}

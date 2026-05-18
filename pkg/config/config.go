@@ -43,10 +43,14 @@ type ProviderConfig struct {
 
 // AgentConfig configures a named agent persona.
 type AgentConfig struct {
-	Temperature    *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
-	TopP           *float64 `json:"top_p,omitempty" yaml:"top_p,omitempty"`
-	Seed           *int     `json:"seed,omitempty" yaml:"seed,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
+	TopP        *float64 `json:"top_p,omitempty" yaml:"top_p,omitempty"`
+	Seed        *int     `json:"seed,omitempty" yaml:"seed,omitempty"`
+
+	ToolPermissions map[string]bool `json:"tools,omitempty" yaml:"tools,omitempty"`
+
 	Model          string   `json:"model,omitempty" yaml:"model,omitempty"`
+	Mode           string   `json:"mode,omitempty" yaml:"mode,omitempty"`
 	ReasoningLevel string   `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
 	Description    string   `json:"description,omitempty" yaml:"description,omitempty"`
 	Personality    string   `json:"personality,omitempty" yaml:"personality,omitempty"`
@@ -57,7 +61,8 @@ type AgentConfig struct {
 	References     []string `json:"references,omitempty" yaml:"references,omitempty"`
 	MaxTokens      int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
 	Hidden         bool     `json:"hidden,omitempty" yaml:"hidden,omitempty"`
-	hiddenSet      bool
+
+	hiddenSet bool
 }
 
 // HookConfig configures a local command to receive atteler lifecycle events.
@@ -108,20 +113,22 @@ type fileProviderConfig struct {
 }
 
 type fileAgentConfig struct {
-	Personality    *string  `json:"personality" yaml:"personality"`
-	TopP           *float64 `json:"top_p" yaml:"top_p"`
-	Seed           *int     `json:"seed" yaml:"seed"`
-	Model          *string  `json:"model" yaml:"model"`
-	ReasoningLevel *string  `json:"reasoning_level" yaml:"reasoning_level"`
-	Description    *string  `json:"description" yaml:"description"`
-	Temperature    *float64 `json:"temperature" yaml:"temperature"`
-	SystemPrompt   *string  `json:"system_prompt" yaml:"system_prompt"`
-	MaxTokens      *int     `json:"max_tokens" yaml:"max_tokens"`
-	Hidden         *bool    `json:"hidden" yaml:"hidden"`
-	FallbackModels []string `json:"fallback_models" yaml:"fallback_models"`
-	Capabilities   []string `json:"capabilities" yaml:"capabilities"`
-	Triggers       []string `json:"triggers" yaml:"triggers"`
-	References     []string `json:"references" yaml:"references"`
+	Personality     *string         `json:"personality" yaml:"personality"`
+	TopP            *float64        `json:"top_p" yaml:"top_p"`
+	Seed            *int            `json:"seed" yaml:"seed"`
+	Model           *string         `json:"model" yaml:"model"`
+	Mode            *string         `json:"mode" yaml:"mode"`
+	ReasoningLevel  *string         `json:"reasoning_level" yaml:"reasoning_level"`
+	Description     *string         `json:"description" yaml:"description"`
+	Temperature     *float64        `json:"temperature" yaml:"temperature"`
+	SystemPrompt    *string         `json:"system_prompt" yaml:"system_prompt"`
+	ToolPermissions map[string]bool `json:"tools" yaml:"tools"`
+	MaxTokens       *int            `json:"max_tokens" yaml:"max_tokens"`
+	Hidden          *bool           `json:"hidden" yaml:"hidden"`
+	FallbackModels  []string        `json:"fallback_models" yaml:"fallback_models"`
+	Capabilities    []string        `json:"capabilities" yaml:"capabilities"`
+	Triggers        []string        `json:"triggers" yaml:"triggers"`
+	References      []string        `json:"references" yaml:"references"`
 }
 
 type fileContextConfig struct {
@@ -332,9 +339,19 @@ func mergeAgents(dst *Config, agents map[string]fileAgentConfig) {
 	}
 }
 
+//nolint:cyclop // Sequential nil-guarded field copies; splitting would reduce clarity.
 func mergeFileAgent(current *AgentConfig, agent fileAgentConfig) {
 	if agent.Model != nil {
 		current.Model = *agent.Model
+	}
+
+	if agent.Mode != nil {
+		current.Mode = strings.TrimSpace(*agent.Mode)
+	}
+
+	if agent.ToolPermissions != nil {
+		current.ToolPermissions = make(map[string]bool, len(agent.ToolPermissions))
+		maps.Copy(current.ToolPermissions, agent.ToolPermissions)
 	}
 
 	if agent.SystemPrompt != nil {
@@ -514,6 +531,15 @@ func mergeConfigAgents(dst *Config, agents map[string]AgentConfig) {
 func mergeConfigAgent(current *AgentConfig, agent AgentConfig) {
 	if agent.Model != "" {
 		current.Model = agent.Model
+	}
+
+	if agent.Mode != "" {
+		current.Mode = agent.Mode
+	}
+
+	if agent.ToolPermissions != nil {
+		current.ToolPermissions = make(map[string]bool, len(agent.ToolPermissions))
+		maps.Copy(current.ToolPermissions, agent.ToolPermissions)
 	}
 
 	if agent.SystemPrompt != "" {

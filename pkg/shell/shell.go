@@ -121,3 +121,56 @@ func mergeEnv(extra map[string]string) []string {
 
 	return env
 }
+
+// RunInteractive runs a command with stdin/stdout/stderr connected directly to
+// the parent terminal so that interactive programs (vim, less, nested CLIs)
+// work correctly. The caller's Bubble Tea program should be suspended before
+// calling this function and resumed after it returns.
+//
+// Unlike RunBash, output is not captured -- it goes straight to the terminal.
+// The returned Result only contains timing metadata.
+func RunInteractive(ctx context.Context, opts Options) (Result, error) {
+	command := strings.TrimSpace(opts.Command)
+	if command == "" {
+		return Result{}, errors.New("shell: command is required")
+	}
+
+	if ctx == nil {
+		return Result{}, errors.New("shell: context is required")
+	}
+
+	bin, args, err := bashInvocation(command)
+	if err != nil {
+		return Result{}, err
+	}
+
+	started := time.Now().UTC()
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if strings.TrimSpace(opts.Dir) != "" {
+		cmd.Dir = opts.Dir
+	}
+
+	cmd.Env = mergeEnv(opts.Env)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	runErr := cmd.Run()
+
+	result := Result{
+		StartedAt: started,
+		Duration:  time.Since(started),
+	}
+
+	if ctx.Err() != nil {
+		return result, fmt.Errorf("shell: interactive command canceled: %w", ctx.Err())
+	}
+
+	if runErr != nil {
+		result.ExitError = runErr.Error()
+		return result, fmt.Errorf("shell: interactive command failed: %w", runErr)
+	}
+
+	return result, nil
+}

@@ -306,6 +306,168 @@ func TestCodexBuildInput_SkipsSystemAndPicksContentType(t *testing.T) {
 	assert.Equal(t, "output_text", got[1].Content[0].Type)
 }
 
+func TestCodexBuildInput_ToolCallAndResultMessages(t *testing.T) {
+	t.Parallel()
+
+	got := codexBuildInput([]Message{
+		{Role: RoleUser, Content: "run ls"},
+		{
+			Role:    RoleAssistant,
+			Content: "",
+			ToolCalls: []ToolCall{{
+				ID:    "call-1",
+				Name:  "bash",
+				Input: map[string]any{"command": "ls"},
+			}},
+		},
+		{
+			Role: RoleTool,
+			ToolResult: &ToolResult{
+				ToolCallID: "call-1",
+				Content:    "file1.go\nfile2.go",
+			},
+		},
+		{Role: RoleAssistant, Content: "Here are the files."},
+	})
+
+	require.Len(t, got, 4)
+
+	// 1) user message
+	assert.Equal(t, "message", got[0].Type)
+	assert.Equal(t, "user", got[0].Role)
+
+	// 2) function_call
+	assert.Equal(t, "function_call", got[1].Type)
+	assert.Equal(t, "call-1", got[1].CallID)
+	assert.Equal(t, "bash", got[1].Name)
+	assert.Contains(t, got[1].Arguments, `"command"`)
+
+	// 3) function_call_output
+	assert.Equal(t, "function_call_output", got[2].Type)
+	assert.Equal(t, "call-1", got[2].CallID)
+	assert.Equal(t, "file1.go\nfile2.go", got[2].Output)
+
+	// 4) final assistant message
+	assert.Equal(t, "message", got[3].Type)
+	assert.Equal(t, "assistant", got[3].Role)
+}
+
+func TestCodexBuildTools(t *testing.T) {
+	t.Parallel()
+
+	tools := codexBuildTools([]ToolDefinition{BashTool()})
+	require.Len(t, tools, 1)
+	assert.Equal(t, "function", tools[0].Type)
+	assert.Equal(t, "bash", tools[0].Name)
+	assert.NotEmpty(t, tools[0].Description)
+	assert.NotNil(t, tools[0].Parameters)
+}
+
+func TestCodexBuildTools_NilReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, codexBuildTools(nil))
+}
+
+func TestCodexProvider_Complete_WithToolUse(t *testing.T) {
+	t.Parallel()
+
+	var gotReq codexResponsesRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Return a function_call response.
+		events := []map[string]any{
+			{
+				"type": "response.output_item.done",
+				"item": map[string]any{
+					"type":      "function_call",
+					"call_id":   "call-abc",
+					"name":      "bash",
+					"arguments": `{"command":"ls -la"}`,
+				},
+			},
+			{
+				"type": "response.completed",
+				"response": map[string]any{
+					"model": "gpt-5.5",
+					"usage": map[string]any{
+						"input_tokens":  10,
+						"output_tokens": 5,
+					},
+				},
+			},
+		}
+		writeCodexSSE(t, w, events)
+	}))
+	defer srv.Close()
+
+	auth := newTestCodexAuth(t, "access-1", "refresh-1", "acct-42")
+	p := &CodexProvider{
+		client:  srv.Client(),
+		auth:    auth,
+		baseURL: srv.URL,
+		models:  []string{"gpt-5.5"},
+	}
+
+	resp, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: RoleUser, Content: "list files"}},
+		Tools:    DefaultTools(),
+	})
+	require.NoError(t, err)
+
+	// Tools should be sent in the request.
+	require.Len(t, gotReq.Tools, 1)
+	assert.Equal(t, "function", gotReq.Tools[0].Type)
+	assert.Equal(t, "bash", gotReq.Tools[0].Name)
+
+	// Response should contain tool calls.
+	assert.Equal(t, StopToolUse, resp.StopReason)
+	require.Len(t, resp.ToolCalls, 1)
+	assert.Equal(t, "call-abc", resp.ToolCalls[0].ID)
+	assert.Equal(t, "bash", resp.ToolCalls[0].Name)
+	assert.Equal(t, "ls -la", resp.ToolCalls[0].Input["command"])
+}
+
+func TestCodexExtractFunctionCall(t *testing.T) {
+	t.Parallel()
+
+	tc, ok := codexExtractFunctionCall(&codexEventItem{
+		Type:      "function_call",
+		CallID:    "call-99",
+		Name:      "bash",
+		Arguments: `{"command":"pwd"}`,
+	})
+	require.True(t, ok)
+	assert.Equal(t, "call-99", tc.ID)
+	assert.Equal(t, "bash", tc.Name)
+	assert.Equal(t, "pwd", tc.Input["command"])
+}
+
+func TestCodexExtractFunctionCall_NilItem(t *testing.T) {
+	t.Parallel()
+
+	_, ok := codexExtractFunctionCall(nil)
+	assert.False(t, ok)
+}
+
+func TestCodexExtractFunctionCall_NonFunctionCallType(t *testing.T) {
+	t.Parallel()
+
+	_, ok := codexExtractFunctionCall(&codexEventItem{Type: "message"})
+	assert.False(t, ok)
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

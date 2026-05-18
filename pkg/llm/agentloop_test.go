@@ -150,6 +150,126 @@ func TestAgentLoop_MaxIterationsExceeded(t *testing.T) {
 	assert.Contains(t, err.Error(), "exceeded")
 }
 
+func TestAgentLoop_CheckpointContinue(t *testing.T) {
+	t.Parallel()
+
+	// 5 tool-call iterations then a final text response.
+	responses := make([]*Response, 6)
+	for i := range 5 {
+		responses[i] = &Response{
+			Model:      "test-model",
+			StopReason: StopToolUse,
+			ToolCalls:  []ToolCall{{ID: "call", Name: "bash", Input: map[string]any{"command": "step"}}},
+		}
+	}
+
+	responses[5] = &Response{Content: "done", Model: "test-model", StopReason: StopEndTurn}
+
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{responses: responses})
+
+	params := CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "work"}},
+		Tools:    DefaultTools(),
+	}
+
+	executor := func(_ context.Context, call ToolCall) ToolResult {
+		return ToolResult{ToolCallID: call.ID, Content: "ok"}
+	}
+
+	var checkpoints []int
+
+	resp, _, err := AgentLoop(context.Background(), reg, params, nil, executor, AgentLoopConfig{
+		MaxIterations:      10,
+		CheckpointInterval: 3,
+		ConfirmContinue: func(iterations int) bool {
+			checkpoints = append(checkpoints, iterations)
+			return true // always continue
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "done", resp.Content)
+	// Checkpoint fires at iteration 3 (0-indexed, so 3 is the 4th iteration).
+	assert.Equal(t, []int{3}, checkpoints)
+}
+
+func TestAgentLoop_CheckpointStop(t *testing.T) {
+	t.Parallel()
+
+	// Provider always requests tool calls.
+	responses := make([]*Response, 20)
+	for i := range responses {
+		responses[i] = &Response{
+			Model:      "test-model",
+			StopReason: StopToolUse,
+			ToolCalls:  []ToolCall{{ID: "call", Name: "bash", Input: map[string]any{"command": "loop"}}},
+		}
+	}
+
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{responses: responses})
+
+	params := CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "loop"}},
+		Tools:    DefaultTools(),
+	}
+
+	executor := func(_ context.Context, call ToolCall) ToolResult {
+		return ToolResult{ToolCallID: call.ID, Content: "ok"}
+	}
+
+	_, _, err := AgentLoop(context.Background(), reg, params, nil, executor, AgentLoopConfig{
+		MaxIterations:      100,
+		CheckpointInterval: 5,
+		ConfirmContinue: func(_ int) bool {
+			return false // stop immediately at first checkpoint
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stopped by user")
+	assert.Contains(t, err.Error(), "5 iterations")
+}
+
+func TestAgentLoop_CheckpointNilAlwaysContinues(t *testing.T) {
+	t.Parallel()
+
+	// 5 tool-call iterations then final response.
+	responses := make([]*Response, 6)
+	for i := range 5 {
+		responses[i] = &Response{
+			Model:      "test-model",
+			StopReason: StopToolUse,
+			ToolCalls:  []ToolCall{{ID: "call", Name: "bash", Input: map[string]any{"command": "step"}}},
+		}
+	}
+
+	responses[5] = &Response{Content: "done", Model: "test-model", StopReason: StopEndTurn}
+
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{responses: responses})
+
+	params := CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "work"}},
+		Tools:    DefaultTools(),
+	}
+
+	executor := func(_ context.Context, call ToolCall) ToolResult {
+		return ToolResult{ToolCallID: call.ID, Content: "ok"}
+	}
+
+	// nil ConfirmContinue should not block.
+	resp, _, err := AgentLoop(context.Background(), reg, params, nil, executor, AgentLoopConfig{
+		MaxIterations:      10,
+		CheckpointInterval: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "done", resp.Content)
+}
+
 func TestAgentLoop_ContextCancellation(t *testing.T) {
 	t.Parallel()
 

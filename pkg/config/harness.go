@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -499,15 +501,17 @@ func parseOpenCodeAgentFile(path string) (AgentConfig, bool) {
 }
 
 type openCodeAgentFrontmatter struct {
-	Temperature *float64 `yaml:"temperature"`
-	TopP        *float64 `yaml:"top_p"`
-	TopPAlt     *float64 `yaml:"topP"`
-	Hidden      *bool    `yaml:"hidden"`
-	Description string   `yaml:"description"`
-	Model       string   `yaml:"model"`
-	Prompt      string   `yaml:"prompt"`
-	MaxTokens   int      `yaml:"max_tokens"`
-	Disable     bool     `yaml:"disable"`
+	Temperature *float64        `yaml:"temperature"`
+	TopP        *float64        `yaml:"top_p"`
+	TopPAlt     *float64        `yaml:"topP"`
+	Hidden      *bool           `yaml:"hidden"`
+	Tools       map[string]bool `yaml:"tools"`
+	Description string          `yaml:"description"`
+	Model       string          `yaml:"model"`
+	Mode        string          `yaml:"mode"`
+	Prompt      string          `yaml:"prompt"`
+	MaxTokens   int             `yaml:"max_tokens"`
+	Disable     bool            `yaml:"disable"`
 }
 
 func (m openCodeAgentFrontmatter) agentConfig(baseDir string) (AgentConfig, bool) {
@@ -517,11 +521,13 @@ func (m openCodeAgentFrontmatter) agentConfig(baseDir string) (AgentConfig, bool
 	}
 
 	cfg := AgentConfig{
-		Description: m.Description,
-		Model:       m.Model,
-		Temperature: m.Temperature,
-		TopP:        topP,
-		MaxTokens:   m.MaxTokens,
+		Description:     m.Description,
+		Model:           m.Model,
+		Mode:            m.Mode,
+		ToolPermissions: m.Tools,
+		Temperature:     m.Temperature,
+		TopP:            topP,
+		MaxTokens:       m.MaxTokens,
 	}
 	if prompt, ok := resolvePromptReference(baseDir, m.Prompt); ok {
 		cfg.SystemPrompt = prompt
@@ -545,7 +551,25 @@ func parseOpenCodeAgentMap(baseDir, name string, raw map[string]any) (AgentConfi
 	cfg := AgentConfig{
 		Description: strings.TrimSpace(topLevelString(raw, "description")),
 		Model:       strings.TrimSpace(topLevelString(raw, "model")),
+		Mode:        strings.TrimSpace(topLevelString(raw, "mode")),
 		MaxTokens:   intValue(raw, "max_tokens", "maxTokens"),
+	}
+
+	// Parse tool permissions from "tools" key (map[string]bool).
+	if toolsRaw, ok := raw["tools"]; ok {
+		if toolsMap, ok := toolsRaw.(map[string]any); ok {
+			cfg.ToolPermissions = make(map[string]bool, len(toolsMap))
+			for k, v := range toolsMap {
+				bv, ok := v.(bool)
+				if !ok {
+					slog.Warn("opencode agent tool permission ignored: expected boolean", "agent", name, "tool", k, "type", fmt.Sprintf("%T", v))
+
+					continue
+				}
+
+				cfg.ToolPermissions[k] = bv
+			}
+		}
 	}
 
 	prompt, ok := resolvePromptReference(baseDir, topLevelString(raw, "prompt"))

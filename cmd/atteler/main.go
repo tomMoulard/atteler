@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"os/exec"
@@ -79,6 +80,9 @@ var (
 	errStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196"))
 
+	warnStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214"))
+
 	assistantLabel = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("39")).
 			Bold(true)
@@ -146,6 +150,15 @@ type taskTickMsg struct {
 	id int
 }
 
+// loopCheckpointMsg is sent from the agent loop goroutine when it reaches a
+// checkpoint interval. The TUI displays a prompt and sends the user's answer
+// back on responseCh.
+type loopCheckpointMsg struct {
+	responseCh chan<- bool
+	requestCh  <-chan int // kept so we can re-listen after confirming
+	iterations int
+}
+
 type tokenUsage struct {
 	InputTokens       int `json:"input_tokens"`
 	CachedInputTokens int `json:"cached_input_tokens"`
@@ -186,6 +199,13 @@ type llmRequest struct {
 	agent            agent.Agent
 	hasAgent         bool
 	useTools         bool
+
+	// confirmContinueCh is used by the agent loop to ask the caller whether
+	// to continue when a checkpoint interval is reached. The agent loop
+	// goroutine sends the iteration count on this channel and blocks until
+	// it receives a boolean on confirmResponseCh.
+	confirmContinueCh chan int
+	confirmResponseCh chan bool
 }
 
 type completionCandidate struct {
@@ -248,6 +268,13 @@ type model struct {
 	completionItems     []completionCandidate
 	runningTaskLabel    string
 	revampUndo          string
+
+	// checkpointResponseCh is non-nil when the TUI is waiting for the user
+	// to confirm whether to continue the agent loop. The Y/N key handler
+	// sends the answer and nils this field.
+	checkpointResponseCh chan<- bool
+	checkpointRequestCh  <-chan int
+	checkpointIterations int
 }
 
 func initialModel(
@@ -336,6 +363,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateModelPreferenceSaved(msg)
 
 	case tea.KeyMsg:
+		// When waiting for user confirmation on an agent loop checkpoint,
+		// intercept Y/N before any other key handler.
+		if m.checkpointResponseCh != nil {
+			return m.handleCheckpointKey(msg)
+		}
+
 		if m.scopePickerOpen {
 			return m.updateModelScopePicker(msg)
 		}
@@ -360,6 +393,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskTickMsg:
 		return m.updateTaskTick(msg)
+
+	case loopCheckpointMsg:
+		return m.updateLoopCheckpoint(msg)
 	}
 
 	return m.updateTextarea(msg)
@@ -472,6 +508,73 @@ func (m model) updateTaskTick(msg taskTickMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, taskTickCmd(msg.id)
+}
+
+// updateLoopCheckpoint handles the agent loop reaching a checkpoint. It shows
+// a prompt and waits for the user to press Y or N.
+func (m model) updateLoopCheckpoint(msg loopCheckpointMsg) (tea.Model, tea.Cmd) {
+	m.checkpointResponseCh = msg.responseCh
+	m.checkpointRequestCh = msg.requestCh
+	m.checkpointIterations = msg.iterations
+
+	prompt := fmt.Sprintf(
+		"Agent loop reached %d iterations. Continue? [Y/n] ",
+		msg.iterations,
+	)
+
+	return m, tea.Println(warnStyle.Render(prompt))
+}
+
+// handleCheckpointKey handles Y/N key presses during a checkpoint prompt.
+// Y (or Enter) continues the loop, N (or Esc) stops it.
+func (m model) handleCheckpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ch := m.checkpointResponseCh
+	reqCh := m.checkpointRequestCh
+
+	switch msg.String() {
+	case "y", "Y", "enter":
+		m.checkpointResponseCh = nil
+		m.checkpointRequestCh = nil
+		m.checkpointIterations = 0
+
+		ch <- true
+
+		// Re-listen for the next checkpoint.
+		return m, tea.Batch(
+			tea.Println(dimStyle.Render("Continuing agent loop...")),
+			relistenForCheckpoint(reqCh, ch),
+		)
+
+	case "n", "N", "esc":
+		m.checkpointResponseCh = nil
+		m.checkpointRequestCh = nil
+		m.checkpointIterations = 0
+
+		ch <- false
+
+		return m, tea.Println(warnStyle.Render("Stopping agent loop."))
+
+	default:
+		// Ignore other keys; keep waiting for Y/N.
+		return m, nil
+	}
+}
+
+// relistenForCheckpoint wraps the response channel back into a bidirectional
+// chan so listenForCheckpoint can be reused for subsequent checkpoints.
+func relistenForCheckpoint(requestCh <-chan int, responseCh chan<- bool) tea.Cmd {
+	return func() tea.Msg {
+		iterations, ok := <-requestCh
+		if !ok {
+			return nil
+		}
+
+		return loopCheckpointMsg{
+			iterations: iterations,
+			responseCh: responseCh,
+			requestCh:  requestCh,
+		}
+	}
 }
 
 func (m model) updateTextarea(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -741,6 +844,9 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		m.sessionState.DefaultModel = m.selectedModel
 	}
 
+	confirmCh := make(chan int, 1)
+	responseCh := make(chan bool, 1)
+
 	request := llmRequest{
 		eventBase: events.Event{
 			SessionID:   m.sessionState.ID,
@@ -748,18 +854,20 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 			Agent:       activeAgent.name,
 			Model:       requestModel,
 		},
-		hookRunner:       m.hookRunner,
-		agent:            activeAgent.agent,
-		hasAgent:         activeAgent.ok,
-		model:            requestModel,
-		referenceContext: buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions),
-		workingDir:       m.cwd,
-		messages:         msgs,
-		fallbackModels:   fallbackModels,
-		generation:       generation,
-		maxInputTokens:   m.maxInputTokens,
-		refs:             refs,
-		useTools:         true,
+		hookRunner:        m.hookRunner,
+		agent:             activeAgent.agent,
+		hasAgent:          activeAgent.ok,
+		model:             requestModel,
+		referenceContext:  buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions),
+		workingDir:        m.cwd,
+		messages:          msgs,
+		fallbackModels:    fallbackModels,
+		generation:        generation,
+		maxInputTokens:    m.maxInputTokens,
+		refs:              refs,
+		useTools:          true,
+		confirmContinueCh: confirmCh,
+		confirmResponseCh: responseCh,
 	}
 
 	cmds := []tea.Cmd{
@@ -797,17 +905,24 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		callLLM(ctx, m.registry, request),
 	)
 
-	return m, tea.Batch(tea.Sequence(cmds...), tickCmd)
+	return m, tea.Batch(tea.Sequence(cmds...), tickCmd, listenForCheckpoint(confirmCh, responseCh))
 }
 
 // runShellCommand executes a `!command` and queues the result for display
 // and inclusion in the chat history (so future LLM calls see it as context).
+// When the command is interactive (e.g. vim, less), the TUI suspends and the
+// command takes over the terminal via tea.ExecProcess.
 func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 	if command == "" {
 		return m, nil
 	}
 
 	line := userLabel.Render("$") + " " + command
+
+	if isInteractiveCommand(command) {
+		return m.runInteractiveShellCommand(command, line)
+	}
+
 	// cancel is stored in m.cancel and invoked from handleCtrlC and
 	// updateShellResult once the command finishes; gosec can't see that.
 	ctx, cancel := context.WithCancel(m.ctx) //nolint:gosec // see comment above
@@ -829,6 +944,123 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 		}),
 		runShellCommandCmd(ctx, command, m.cwd),
 	), tickCmd)
+}
+
+// runInteractiveShellCommand hands the terminal to a child process via
+// tea.ExecProcess so interactive programs (vim, less, htop, nested atteler)
+// can use the PTY directly.
+func (m model) runInteractiveShellCommand(command, line string) (model, tea.Cmd) {
+	cmd := exec.CommandContext(m.ctx, "bash", "-lc", command)
+	if m.cwd != "" {
+		cmd.Dir = m.cwd
+	}
+
+	return m, tea.Sequence(
+		tea.Println(line),
+		emitHook(m.ctx, m.hookRunner, events.Event{
+			Type:        events.CommandExecute,
+			SessionID:   m.sessionState.ID,
+			SessionPath: m.sessionPath,
+			Agent:       m.selectedAgent,
+			Model:       m.sessionState.DefaultModel,
+			Metadata: map[string]string{
+				"command": command,
+				"cwd":     m.cwd,
+				"mode":    "interactive",
+			},
+		}),
+		tea.ExecProcess(cmd, func(err error) tea.Msg {
+			exitError := ""
+			if err != nil {
+				exitError = err.Error()
+			}
+
+			return shellResultMsg{
+				err:         err,
+				completedAt: time.Now(),
+				command:     command,
+				stdout:      "(interactive session" + exitErrorSuffix(exitError) + ")",
+			}
+		}),
+	)
+}
+
+// interactiveCommands is the set of commands known to require a PTY.
+var interactiveCommands = map[string]struct{}{
+	"vim": {}, "nvim": {}, "vi": {}, "nano": {}, "emacs": {},
+	"less": {}, "more": {}, "top": {}, "htop": {}, "btop": {},
+	"ssh": {}, "tmux": {}, "screen": {},
+	"atteler": {}, "python": {}, "python3": {}, "node": {}, "irb": {},
+}
+
+// prependToolReminder injects a system message that tells the model which
+// tools are available. This prevents the LLM from refusing tool use when
+// the agent's system prompt mentions tools (e.g. "Edit tool", "Read tool")
+// that are not actually wired up -- the model might otherwise conclude its
+// tool environment is broken and fall back to plain text.
+func prependToolReminder(params *llm.CompleteParams, tools []llm.ToolDefinition) {
+	var names []string
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+
+	reminder := llm.Message{
+		Role: "system",
+		Content: "You have the following tools available and MUST use them " +
+			"when the task requires running commands or inspecting files: " +
+			strings.Join(names, ", ") + ". " +
+			"Do NOT say you are unable to run commands. " +
+			"Use the bash tool to execute shell commands.",
+	}
+
+	// Prepend so the reminder sits right before the conversation history.
+	params.Messages = append([]llm.Message{reminder}, params.Messages...)
+}
+
+// listenForCheckpoint returns a tea.Cmd that waits for the agent loop to
+// request a checkpoint confirmation. When the loop sends the iteration count
+// on requestCh, this produces a loopCheckpointMsg for the TUI. The goroutine
+// exits when requestCh is closed (i.e. when callLLMWithTools finishes).
+func listenForCheckpoint(requestCh <-chan int, responseCh chan bool) tea.Cmd {
+	return func() tea.Msg {
+		iterations, ok := <-requestCh
+		if !ok {
+			// Channel closed -- agent loop finished without hitting a checkpoint.
+			return nil
+		}
+
+		return loopCheckpointMsg{
+			iterations: iterations,
+			responseCh: responseCh,
+			requestCh:  requestCh,
+		}
+	}
+}
+
+// isInteractiveCommand returns true when the command's base name is a known
+// interactive program or the command is prefixed with "!!" as a user hint.
+func isInteractiveCommand(command string) bool {
+	if strings.HasPrefix(command, "!") {
+		return true // "!!" prefix signals interactive mode
+	}
+
+	base := strings.Fields(command)
+	if len(base) == 0 {
+		return false
+	}
+
+	name := filepath.Base(base[0])
+	_, ok := interactiveCommands[name]
+
+	return ok
+}
+
+func exitErrorSuffix(exitError string) string {
+	if exitError == "" {
+		return ""
+	}
+
+	return ": " + exitError
 }
 
 func runShellCommandCmd(ctx context.Context, command, dir string) tea.Cmd {
@@ -903,6 +1135,13 @@ func formatShellContext(msg shellResultMsg) string {
 
 	if msg.err != nil {
 		fmt.Fprintf(&b, "[error] %s\n", msg.err.Error())
+
+		// Include a recovery hint for timeouts so the LLM can reason about
+		// retry strategies when this context appears in subsequent prompts.
+		if strings.Contains(msg.err.Error(), "timed out") {
+			b.WriteString("[timeout] The command exceeded its time limit. " +
+				"Consider retrying with a smaller scope or splitting the work.\n")
+		}
 	}
 
 	return strings.TrimRight(b.String(), "\n")
@@ -1687,7 +1926,32 @@ func callLLMWithTools(
 	request llmRequest,
 	eventLines *eventLineBuffer,
 ) llmResponseMsg {
-	params.Tools = llm.DefaultTools()
+	tools := llm.DefaultTools()
+	if request.hasAgent {
+		tools = request.agent.FilterTools(tools)
+	}
+
+	params.Tools = tools
+
+	// Inject a tool-availability reminder so the model knows it can (and
+	// should) use the bash tool, even when the agent's system prompt
+	// mentions other tools that are not wired up in this environment.
+	if len(tools) > 0 {
+		prependToolReminder(&params, tools)
+	}
+
+	toolNames := make([]string, 0, len(tools))
+	for _, t := range tools {
+		toolNames = append(toolNames, t.Name)
+	}
+
+	slog.Debug("callLLMWithTools",
+		"agent", request.agent.Name,
+		"hasAgent", request.hasAgent,
+		"model", params.Model,
+		"tools", toolNames,
+		"messages", len(params.Messages),
+	)
 
 	var toolLog []string
 
@@ -1724,9 +1988,21 @@ func callLLMWithTools(
 		toolLog = append(toolLog, output)
 
 		if err != nil {
+			content := output
+			// When the command timed out, append a recovery hint so the LLM
+			// can decide to retry with a smaller scope or take corrective
+			// action autonomously.
+			if strings.Contains(err.Error(), "timed out") {
+				content += "\n\n[TIMEOUT RECOVERY] The command timed out after the configured limit. " +
+					"Consider: (1) retrying with a smaller scope or simpler command, " +
+					"(2) splitting the work into smaller steps, " +
+					"(3) checking if the command is hanging on user input, or " +
+					"(4) increasing the timeout if the operation legitimately requires more time."
+			}
+
 			return llm.ToolResult{
 				ToolCallID: call.ID,
-				Content:    output,
+				Content:    content,
 				IsError:    true,
 			}
 		}
@@ -1737,9 +2013,27 @@ func callLLMWithTools(
 		}
 	}
 
+	// Build the ConfirmContinue callback for the checkpoint mechanism.
+	// This sends the iteration count to the TUI and blocks until the user
+	// responds. When channels are nil (e.g. one-shot path), no prompting
+	// occurs.
+	var confirmFn func(int) bool
+	if request.confirmContinueCh != nil {
+		confirmFn = func(iterations int) bool {
+			request.confirmContinueCh <- iterations
+			return <-request.confirmResponseCh
+		}
+	}
+
 	resp, _, err := llm.AgentLoop(ctx, reg, params, request.fallbackModels, executor, llm.AgentLoopConfig{
-		MaxIterations: 20,
+		ConfirmContinue: confirmFn,
 	})
+
+	// Close the request channel so the listenForCheckpoint goroutine exits.
+	if request.confirmContinueCh != nil {
+		close(request.confirmContinueCh)
+	}
+
 	if err != nil {
 		return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines(), toolLog: toolLog}
 	}
@@ -2464,7 +2758,24 @@ func runOnceWithOptions(
 	}
 
 	// Enable tool use for one-shot calls: the LLM can invoke bash commands.
-	params.Tools = llm.DefaultTools()
+	// Apply agent-level tool filtering when an agent is active.
+	tools := llm.DefaultTools()
+	if prepared.activeAgent.ok {
+		tools = prepared.activeAgent.agent.FilterTools(tools)
+	}
+
+	params.Tools = tools
+
+	if len(tools) > 0 {
+		prependToolReminder(&params, tools)
+	}
+
+	slog.Debug("one-shot LLM request",
+		"agent", prepared.activeAgent.name,
+		"model", params.Model,
+		"tools", len(params.Tools),
+		"messages", len(params.Messages),
+	)
 
 	resp, err := runOnceComplete(ctx, reg, params, prepared.fallbackModels, executionOptions.Response)
 	if err != nil {
@@ -2771,7 +3082,7 @@ func runOnceComplete(
 	executor := newBashExecutor(cwd, os.Stderr)
 
 	resp, _, err := llm.AgentLoop(ctx, reg, params, fallbackModels, executor, llm.AgentLoopConfig{
-		MaxIterations: 20,
+		ConfirmContinue: confirmContinueStdin,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agent loop: %w", err)
@@ -2782,6 +3093,22 @@ func runOnceComplete(
 	}
 
 	return resp, nil
+}
+
+// confirmContinueStdin prompts the user on stdin/stderr when the agent loop
+// reaches a checkpoint. Used in one-shot (non-TUI) mode.
+func confirmContinueStdin(iterations int) bool {
+	fmt.Fprintf(os.Stderr, "\nAgent loop reached %d iterations. Continue? [Y/n] ", iterations)
+
+	var answer string
+	if _, err := fmt.Scanln(&answer); err != nil {
+		// On EOF or error, treat as "yes" to avoid blocking headless runs.
+		return true
+	}
+
+	answer = strings.TrimSpace(strings.ToLower(answer))
+
+	return answer == "" || answer == "y" || answer == "yes"
 }
 
 // newBashExecutor creates a ToolExecutor that runs bash commands in the given
@@ -3033,7 +3360,17 @@ func runPluginEntrypoint(
 }
 
 func runBashCommand(ctx context.Context, state appState, opts cliOptions) error {
-	timeout := time.Duration(opts.bashTimeout.value) * time.Second
+	// Default to 120s for the CLI --bash command (builds, tests, etc. can be
+	// long-running). The shell package has its own 30s default for interactive
+	// TUI commands which is intentionally shorter.
+	const defaultBashCLITimeout = 120
+
+	timeoutSeconds := opts.bashTimeout.value
+	if timeoutSeconds == 0 {
+		timeoutSeconds = defaultBashCLITimeout
+	}
+
+	timeout := time.Duration(timeoutSeconds) * time.Second
 
 	dir := strings.TrimSpace(opts.bashDir)
 	if dir == "" {
@@ -5075,6 +5412,126 @@ func runSpeculatePlan(agents, gates []string, prompt string) error {
 	}
 
 	return nil
+}
+
+// registryCompleter adapts the llm.Registry to the speculate.LLMCompleter
+// interface so the speculative execution pipeline can make real LLM calls.
+type registryCompleter struct {
+	registry       *llm.Registry
+	fallbackModels []string
+	generation     generationSettings
+}
+
+func (rc *registryCompleter) Complete(ctx context.Context, model, systemPrompt, userPrompt string) (string, error) {
+	params := llm.CompleteParams{
+		Model: model,
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: systemPrompt},
+			{Role: llm.RoleUser, Content: userPrompt},
+		},
+	}
+
+	applyGenerationParams(&params, rc.generation)
+
+	resp, err := rc.registry.CompleteWithFallback(ctx, params, rc.fallbackModels)
+	if err != nil {
+		return "", fmt.Errorf("speculate LLM complete: %w", err)
+	}
+
+	return resp.Content, nil
+}
+
+func runSpeculateExecution(ctx context.Context, state appState, opts cliOptions) error {
+	prompt := strings.TrimSpace(opts.speculatePrompt)
+	if prompt == "" {
+		return errors.New("speculate-run requires --speculate-prompt")
+	}
+
+	agents := []string(opts.speculateAgents)
+	if len(agents) == 0 {
+		return errors.New("speculate-run requires at least one --speculate-agent")
+	}
+
+	gates := []string(opts.speculateGates)
+	if len(gates) == 0 {
+		gates = []string{"tests pass", "lint pass", "types pass"}
+	}
+
+	plan, err := speculate.NewPlan(agents, gates)
+	if err != nil {
+		return fmt.Errorf("speculate-run: %w", err)
+	}
+
+	completer := &registryCompleter{
+		registry:       state.registry,
+		fallbackModels: state.fallbackModels,
+		generation:     mergeGenerationSettings(state.generationDefaults, state.generationOverrides),
+	}
+
+	fmt.Fprintln(os.Stderr, "speculate: running three-round pipeline with "+strings.Join(agents, ", ")+"...")
+
+	result, err := speculate.RunWithLLM(ctx, plan, completer, prompt)
+	if err != nil {
+		// Print partial results even on error.
+		if len(result.Session.Proposals) > 0 {
+			fmt.Println(formatSpeculateResult(result))
+		}
+
+		return fmt.Errorf("speculate-run: %w", err)
+	}
+
+	fmt.Print(formatSpeculateResult(result))
+
+	return nil
+}
+
+func formatSpeculateResult(result speculate.Result) string {
+	var b strings.Builder
+
+	b.WriteString("winner: " + result.Winner + "\n")
+	b.WriteString("reason: " + result.Reason + "\n")
+
+	if len(result.Session.Proposals) > 0 {
+		b.WriteString("proposals:\n")
+
+		for _, p := range result.Session.Proposals {
+			fmt.Fprintf(&b, "  - agent: %s\n    content: %s\n", p.Agent, truncatePreview(p.Content, 200))
+		}
+	}
+
+	if len(result.Session.Reviews) > 0 {
+		b.WriteString("reviews:\n")
+
+		for _, r := range result.Session.Reviews {
+			fmt.Fprintf(&b, "  - reviewer: %s -> %s\n    notes: %s\n", r.Reviewer, r.TargetAgent, truncatePreview(r.Notes, 200))
+		}
+	}
+
+	if len(result.Session.Verdict.GateChecks) > 0 {
+		b.WriteString("gates:\n")
+
+		for _, gc := range result.Session.Verdict.GateChecks {
+			status := "FAIL"
+			if gc.Passed {
+				status = "PASS"
+			}
+
+			fmt.Fprintf(&b, "  - %s: %s %s\n", gc.Name, status, gc.Notes)
+		}
+	}
+
+	return b.String()
+}
+
+func truncatePreview(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\n", " ")
+
+	if len(s) <= maxLen {
+		return s
+	}
+
+	return s[:maxLen] + "..."
 }
 
 func formatSpeculatePlan(plan speculate.Plan) string {

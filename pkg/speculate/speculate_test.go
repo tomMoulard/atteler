@@ -503,3 +503,106 @@ func (gate *concurrentGate) arrive(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
+
+// ---------------------------------------------------------------------------
+// RunWithLLM and verdict parsing tests
+// ---------------------------------------------------------------------------
+
+type mockCompleter struct {
+	responses map[string]string
+	mu        sync.Mutex
+	callCount int
+}
+
+func (m *mockCompleter) Complete(_ context.Context, agent, _, _ string) (string, error) {
+	m.mu.Lock()
+	m.callCount++
+	m.mu.Unlock()
+
+	if resp, ok := m.responses[agent]; ok {
+		return resp, nil
+	}
+
+	return "response from " + agent, nil
+}
+
+func TestRunWithLLM_FullPipeline(t *testing.T) {
+	t.Parallel()
+
+	completer := &mockCompleter{
+		responses: map[string]string{
+			"planner":  "plan: refactor the auth module",
+			"executor": "plan: rewrite the auth module",
+			"judge": "WINNER: planner\n" +
+				"REASON: more incremental and safer approach\n" +
+				"GATE tests pass: PASS all unit tests green\n" +
+				"GATE lint pass: PASS no new warnings",
+		},
+	}
+
+	plan, err := NewPlan([]string{"planner", "executor"}, []string{"tests pass", "lint pass"})
+	require.NoError(t, err)
+
+	result, err := RunWithLLM(context.Background(), plan, completer, "refactor auth")
+	require.NoError(t, err)
+	assert.Equal(t, "planner", result.Winner)
+	assert.Contains(t, result.Reason, "incremental")
+	assert.Len(t, result.Session.Proposals, 2)
+	assert.Len(t, result.Session.Reviews, 2) // 2 agents = 2 cross-reviews
+
+	completer.mu.Lock()
+	calls := completer.callCount
+	completer.mu.Unlock()
+	// 2 proposals + 2 cross-reviews + 1 aggregation = 5 LLM calls
+	assert.Equal(t, 5, calls)
+}
+
+func TestRunWithLLM_NilCompleter(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]string{"a"}, nil)
+	require.NoError(t, err)
+
+	_, err = RunWithLLM(context.Background(), plan, nil, "task")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "completer")
+}
+
+func TestRunWithLLM_EmptyTask(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]string{"a"}, nil)
+	require.NoError(t, err)
+
+	_, err = RunWithLLM(context.Background(), plan, &mockCompleter{}, "  ")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "task prompt")
+}
+
+func TestParseVerdictFromLLM_StructuredOutput(t *testing.T) {
+	t.Parallel()
+
+	content := "WINNER: architect\nREASON: best coverage\nGATE tests: PASS all green\nGATE lint: FAIL missing import"
+	verdict := parseVerdictFromLLM(content, []string{"tests", "lint"}, []string{"architect", "reviewer"})
+
+	assert.Equal(t, "architect", verdict.Winner)
+	assert.Equal(t, "best coverage", verdict.Reason)
+	require.Len(t, verdict.GateChecks, 2)
+	assert.True(t, verdict.GateChecks[0].Passed)
+	assert.Equal(t, "tests", verdict.GateChecks[0].Name)
+	assert.False(t, verdict.GateChecks[1].Passed)
+	assert.Equal(t, "lint", verdict.GateChecks[1].Name)
+}
+
+func TestParseVerdictFromLLM_FallbackWhenUnstructured(t *testing.T) {
+	t.Parallel()
+
+	content := "I think the architect proposal is better overall."
+	verdict := parseVerdictFromLLM(content, []string{"tests"}, nil)
+
+	assert.Equal(t, "unknown", verdict.Winner)
+	assert.Equal(t, content, verdict.Reason)
+	// Gates should be inferred as passing.
+	require.Len(t, verdict.GateChecks, 1)
+	assert.True(t, verdict.GateChecks[0].Passed)
+}

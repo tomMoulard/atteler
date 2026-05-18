@@ -3,14 +3,19 @@
 package vector
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"maps"
 	"math"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 )
 
@@ -208,6 +213,150 @@ func (v TextVectorizer) Vectorize(text string) (Vector, error) {
 	}
 
 	return out, nil
+}
+
+// Vectorizer abstracts text-to-vector conversion so callers can swap between
+// the zero-dependency TextVectorizer and a model-backed EmbeddingVectorizer.
+//
+// Prefer VectorizerContext when a context is available; the plain Vectorize
+// method exists for callers that do not have a context handy.
+type Vectorizer interface {
+	Vectorize(text string) (Vector, error)
+}
+
+// VectorizerContext extends Vectorizer with context-aware vectorization.
+// Implementations that make network calls should implement this interface.
+type VectorizerContext interface {
+	Vectorizer
+	VectorizeContext(ctx context.Context, text string) (Vector, error)
+}
+
+// EmbeddingVectorizer calls an external embedding API (e.g. Ollama or OpenAI)
+// to produce dense vectors from text. It is the recommended vectorizer when
+// search quality matters and a model endpoint is available.
+type EmbeddingVectorizer struct {
+	client  *http.Client
+	baseURL string
+	model   string
+}
+
+const (
+	defaultEmbeddingBaseURL = "http://127.0.0.1:11434"
+	defaultEmbeddingModel   = "nomic-embed-text"
+	embeddingTimeout        = 30 * time.Second
+)
+
+// EmbeddingOption configures an EmbeddingVectorizer.
+type EmbeddingOption func(*EmbeddingVectorizer)
+
+// WithEmbeddingBaseURL sets the API endpoint. Default is the local Ollama URL.
+func WithEmbeddingBaseURL(baseURL string) EmbeddingOption {
+	return func(v *EmbeddingVectorizer) {
+		if u := strings.TrimSpace(baseURL); u != "" {
+			v.baseURL = u
+		}
+	}
+}
+
+// WithEmbeddingModel sets the model name. Default is "nomic-embed-text".
+func WithEmbeddingModel(model string) EmbeddingOption {
+	return func(v *EmbeddingVectorizer) {
+		if m := strings.TrimSpace(model); m != "" {
+			v.model = m
+		}
+	}
+}
+
+// WithEmbeddingHTTPClient overrides the default HTTP client.
+func WithEmbeddingHTTPClient(client *http.Client) EmbeddingOption {
+	return func(v *EmbeddingVectorizer) {
+		if client != nil {
+			v.client = client
+		}
+	}
+}
+
+// NewEmbeddingVectorizer returns a vectorizer that calls an Ollama-compatible
+// /api/embed endpoint. The zero-value options use the local Ollama default URL
+// and "nomic-embed-text" as the model.
+func NewEmbeddingVectorizer(opts ...EmbeddingOption) *EmbeddingVectorizer {
+	v := &EmbeddingVectorizer{
+		baseURL: defaultEmbeddingBaseURL,
+		model:   defaultEmbeddingModel,
+		client:  &http.Client{Timeout: embeddingTimeout},
+	}
+
+	for _, opt := range opts {
+		opt(v)
+	}
+
+	return v
+}
+
+// Vectorize sends text to the embedding API and returns the resulting vector.
+func (v *EmbeddingVectorizer) Vectorize(text string) (Vector, error) {
+	return v.VectorizeContext(context.Background(), text)
+}
+
+// VectorizeContext is Vectorize with caller-provided cancellation.
+func (v *EmbeddingVectorizer) VectorizeContext(ctx context.Context, text string) (Vector, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, ErrEmptyText
+	}
+
+	body, err := json.Marshal(ollamaEmbedRequest{
+		Model: v.model,
+		Input: text,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("embedding: marshal request: %w", err)
+	}
+
+	endpoint := strings.TrimRight(v.baseURL, "/") + "/api/embed"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("embedding: create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("embedding: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("embedding: unexpected status %d", resp.StatusCode)
+	}
+
+	var result ollamaEmbedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("embedding: decode response: %w", err)
+	}
+
+	if len(result.Embeddings) == 0 {
+		return nil, fmt.Errorf("embedding: empty response from %s", v.model)
+	}
+
+	if len(result.Embeddings[0]) == 0 {
+		return nil, fmt.Errorf("embedding: empty vector response from %s", v.model)
+	}
+
+	return Vector(result.Embeddings[0]), nil
+}
+
+// ollamaEmbedRequest is the Ollama /api/embed request format.
+type ollamaEmbedRequest struct {
+	Model string `json:"model"`
+	Input any    `json:"input"`
+}
+
+// ollamaEmbedResponse is the Ollama /api/embed response format.
+type ollamaEmbedResponse struct {
+	Embeddings [][]float64 `json:"embeddings"`
 }
 
 // adoptDimensionsLocked sets the store dimensions from the first added vector.

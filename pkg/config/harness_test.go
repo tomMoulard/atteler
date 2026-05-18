@@ -284,6 +284,61 @@ Internal helper prompt.
 	assert.NotContains(t, cfg.Agents, "linked")
 }
 
+func TestLoadOpencodeAgentDir_ParsesModeAndToolPermissions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "cr.md"), []byte(`---
+mode: subagent
+description: Code review agent
+tools:
+  write: true
+  edit: true
+  bash: true
+  read: true
+  grep: true
+  glob: true
+---
+Run coderabbit review.
+`), 0o600))
+
+	cfg, _, ok := loadOpencodeAgentDir(dir)
+	require.True(t, ok)
+
+	cr, exists := cfg.Agents["cr"]
+	require.True(t, exists, "cr agent should exist")
+	assert.Equal(t, "subagent", cr.Mode)
+	assert.Equal(t, "Run coderabbit review.", cr.SystemPrompt)
+	assert.Equal(t, "Code review agent", cr.Description)
+
+	require.NotNil(t, cr.ToolPermissions)
+	assert.True(t, cr.ToolPermissions["bash"])
+	assert.True(t, cr.ToolPermissions["write"])
+	assert.True(t, cr.ToolPermissions["edit"])
+	assert.True(t, cr.ToolPermissions["read"])
+	assert.True(t, cr.ToolPermissions["grep"])
+	assert.True(t, cr.ToolPermissions["glob"])
+}
+
+func TestLoadOpencodeAgentDir_NilToolPermissionsWhenOmitted(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "basic.md"), []byte(`---
+description: Basic agent
+---
+Do basic things.
+`), 0o600))
+
+	cfg, _, ok := loadOpencodeAgentDir(dir)
+	require.True(t, ok)
+
+	basic, exists := cfg.Agents["basic"]
+	require.True(t, exists)
+	assert.Nil(t, basic.ToolPermissions, "should be nil when not specified in frontmatter")
+	assert.Empty(t, basic.Mode)
+}
+
 func TestMergeConfigAgent_CanClearExplicitHidden(t *testing.T) {
 	t.Parallel()
 

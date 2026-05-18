@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strings"
 )
@@ -34,6 +35,33 @@ func (l *Logger) Log(event Event) {
 	if l == nil || l.w == nil || event.Type == "" {
 		return
 	}
+
+	// Also emit to slog for structured logging consumers.
+	attrs := []any{
+		slog.String("event_type", event.Type),
+	}
+
+	if event.Agent != "" {
+		attrs = append(attrs, slog.String("agent", event.Agent))
+	}
+
+	if event.Model != "" {
+		attrs = append(attrs, slog.String("model", event.Model))
+	}
+
+	if event.SessionID != "" {
+		attrs = append(attrs, slog.String("session_id", event.SessionID))
+	}
+
+	if event.Error != "" {
+		attrs = append(attrs, slog.String("error", event.Error))
+	}
+
+	for _, key := range sortedMetadataKeys(event.Metadata) {
+		attrs = append(attrs, slog.String(key, event.Metadata[key]))
+	}
+
+	slog.Debug("lifecycle event", attrs...)
 
 	fmt.Fprintln(l.w, FormatLine(event))
 }

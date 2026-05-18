@@ -2,7 +2,7 @@ package llm
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -35,10 +35,8 @@ type ProviderInfo struct {
 // AutoRegisterConfig configures provider auto-registration and fallback
 // selection.
 type AutoRegisterConfig struct {
-	// Logger receives registration progress messages. When nil, the standard
-	// log package is used. Set to log.New(io.Discard, "", 0) to suppress
-	// output without mutating global state.
-	Logger          *log.Logger
+	// Logger receives registration progress messages. When nil, slog.Default() is used.
+	Logger          *slog.Logger
 	Providers       map[string]ProviderConfig
 	DefaultProvider string
 	DefaultModel    string
@@ -46,12 +44,12 @@ type AutoRegisterConfig struct {
 }
 
 // logger returns the configured logger, falling back to the standard default.
-func (c AutoRegisterConfig) logger() *log.Logger {
+func (c AutoRegisterConfig) logger() *slog.Logger {
 	if c.Logger != nil {
 		return c.Logger
 	}
 
-	return log.Default()
+	return slog.Default()
 }
 
 // ProviderConfig configures one LLM provider.
@@ -134,7 +132,7 @@ func AutoRegisterWithConfigContext(ctx context.Context, cfg AutoRegisterConfig) 
 
 func registerConfiguredProvider(r *Registry, cfg AutoRegisterConfig, providerName string, factory providerFactory) {
 	if providerConfig(cfg, providerName).Disabled {
-		cfg.logger().Printf("llm: %s skipped: disabled by config", providerName)
+		cfg.logger().Debug("llm provider skipped: disabled by config", "provider", providerName)
 		return
 	}
 
@@ -152,7 +150,7 @@ func applyDefaultSelection(r *Registry, cfg AutoRegisterConfig) {
 
 	if cfg.DefaultProvider != "" {
 		if err := r.SetDefault(cfg.DefaultProvider); err != nil {
-			logger.Printf("llm: default provider ignored: %v", err)
+			logger.Warn("llm default provider ignored", "provider", cfg.DefaultProvider, "error", err)
 		}
 	}
 
@@ -163,17 +161,17 @@ func applyDefaultSelection(r *Registry, cfg AutoRegisterConfig) {
 		}
 
 		if err != nil {
-			logger.Printf("llm: default model ignored: %v", err)
+			logger.Warn("llm default model ignored", "model", cfg.DefaultModel, "error", err)
 		}
 	}
 }
 
-func logProviderSkip(logger *log.Logger, providerName string, err error) {
+func logProviderSkip(logger *slog.Logger, providerName string, err error) {
 	if isMissingCredentialError(err) {
 		return
 	}
 
-	logger.Printf("llm: %s skipped: %v", providerName, err)
+	logger.Debug("llm provider skipped", "provider", providerName, "error", err)
 }
 
 func isMissingCredentialError(err error) bool {

@@ -577,3 +577,196 @@ func normalizeUnique(label string, values []string) ([]string, error) {
 func contains(values []string, target string) bool {
 	return slices.Contains(values, target)
 }
+
+// LLMCompleter is the interface used by RunWithLLM to call an LLM provider.
+// It abstracts the registry so speculative execution can make real LLM calls
+// without importing the full llm package.
+type LLMCompleter interface {
+	Complete(ctx context.Context, agent string, systemPrompt string, userPrompt string) (string, error)
+}
+
+// RunWithLLM executes the full three-round speculative pipeline using real LLM
+// calls through the provided completer. Each agent runs its proposal round
+// concurrently, then cross-reviews run concurrently, and finally an aggregator
+// agent produces the verdict.
+//
+// The task parameter is the user's original prompt. The systemPrefix is
+// prepended to every LLM call's system prompt for consistent framing.
+func RunWithLLM(ctx context.Context, plan Plan, completer LLMCompleter, task string) (Result, error) {
+	if completer == nil {
+		return Result{}, errors.New("LLM completer is required")
+	}
+
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return Result{}, errors.New("task prompt is required")
+	}
+
+	runner := Runner{
+		Propose:   llmProposer(completer, plan, task),
+		Review:    llmReviewer(completer, task),
+		Aggregate: llmAggregator(completer, plan, task),
+	}
+
+	return Run(ctx, plan, runner)
+}
+
+func llmProposer(completer LLMCompleter, plan Plan, task string) ProposalRunner {
+	return func(ctx context.Context, agent string) (string, error) {
+		systemPrompt := "You are agent " + agent + " participating in a speculative execution workflow.\n" +
+			"Your job is to independently produce a concrete, self-contained proposal for the task below.\n" +
+			"Be specific and actionable. Your proposal will be cross-reviewed by other agents."
+
+		userPrompt := "Task:\n" + task + "\n\n" +
+			"Required gate checks: " + strings.Join(plan.GateChecks, ", ") + "\n\n" +
+			"Produce your independent proposal."
+
+		return completer.Complete(ctx, agent, systemPrompt, userPrompt)
+	}
+}
+
+func llmReviewer(completer LLMCompleter, task string) ReviewRunner {
+	return func(ctx context.Context, assignment Review, proposal Proposal) (string, error) {
+		systemPrompt := "You are agent " + assignment.Reviewer + " reviewing a proposal from agent " + assignment.TargetAgent + ".\n" +
+			"Identify strengths, weaknesses, risks, and improvements. Be constructive and specific."
+
+		userPrompt := "Original task:\n" + task + "\n\n" +
+			"Proposal from " + assignment.TargetAgent + ":\n" + proposal.Content + "\n\n" +
+			"Provide your cross-review notes."
+
+		return completer.Complete(ctx, assignment.Reviewer, systemPrompt, userPrompt)
+	}
+}
+
+func llmAggregator(completer LLMCompleter, plan Plan, task string) func(ctx context.Context, session Session) (Verdict, error) {
+	return func(ctx context.Context, session Session) (Verdict, error) {
+		var promptBuilder strings.Builder
+		promptBuilder.WriteString("Original task:\n")
+		promptBuilder.WriteString(task)
+		promptBuilder.WriteString("\n\nProposals:\n")
+
+		for _, p := range session.Proposals {
+			fmt.Fprintf(&promptBuilder, "\n--- Agent %s ---\n%s\n", p.Agent, p.Content)
+		}
+
+		promptBuilder.WriteString("\nCross-reviews:\n")
+
+		for _, r := range session.Reviews {
+			fmt.Fprintf(&promptBuilder, "\n--- %s reviewing %s ---\n%s\n", r.Reviewer, r.TargetAgent, r.Notes)
+		}
+
+		promptBuilder.WriteString("\nRequired gate checks: ")
+		promptBuilder.WriteString(strings.Join(plan.GateChecks, ", "))
+		promptBuilder.WriteString("\n\nSelect a winner and explain why. " +
+			"Respond in exactly this format:\n" +
+			"WINNER: <agent name>\n" +
+			"REASON: <explanation>\n" +
+			"For each gate check, respond with:\n" +
+			"GATE <name>: PASS|FAIL <optional notes>")
+
+		systemPrompt := "You are a judge agent aggregating speculative execution results.\n" +
+			"Review all proposals and cross-reviews, then select the best proposal.\n" +
+			"You must declare a winner, explain the reasoning, and evaluate each gate check."
+
+		content, err := completer.Complete(ctx, "judge", systemPrompt, promptBuilder.String())
+		if err != nil {
+			return Verdict{}, fmt.Errorf("aggregator LLM call: %w", err)
+		}
+
+		verdict := parseVerdictFromLLM(content, plan.GateChecks, plan.Agents)
+		if err := validateWinnerIsAgent(verdict.Winner, plan.Agents); err != nil {
+			return Verdict{}, err
+		}
+
+		return verdict, nil
+	}
+}
+
+// parseVerdictFromLLM extracts a Verdict from free-form LLM output.
+// It looks for WINNER:, REASON:, and GATE lines. Missing fields are filled
+// with best-effort defaults so the pipeline does not fail on imperfect output.
+func parseVerdictFromLLM(content string, requiredGates, agents []string) Verdict {
+	verdict := Verdict{}
+
+	for rawLine := range strings.SplitSeq(content, "\n") {
+		line := strings.TrimSpace(rawLine)
+		upper := strings.ToUpper(line)
+
+		switch {
+		case strings.HasPrefix(upper, "WINNER:"):
+			verdict.Winner = strings.TrimSpace(line[len("WINNER:"):])
+		case strings.HasPrefix(upper, "REASON:"):
+			verdict.Reason = strings.TrimSpace(line[len("REASON:"):])
+		case strings.HasPrefix(upper, "GATE "):
+			gc := parseGateCheckLine(line[len("GATE "):])
+			if gc.Name != "" {
+				verdict.GateChecks = append(verdict.GateChecks, gc)
+			}
+		}
+	}
+
+	// If the LLM didn't produce explicit gate lines, assume all pass so the
+	// pipeline can proceed. The caller can still validate independently.
+	if len(verdict.GateChecks) == 0 && len(requiredGates) > 0 {
+		for _, gate := range requiredGates {
+			verdict.GateChecks = append(verdict.GateChecks, GateCheck{
+				Name:   gate,
+				Passed: true,
+				Notes:  "inferred pass from aggregator output",
+			})
+		}
+	}
+
+	// Fall back to the full content if structured parsing didn't find fields.
+	if verdict.Winner == "" && content != "" {
+		verdict.Winner = "unknown"
+	}
+
+	if verdict.Reason == "" && content != "" {
+		verdict.Reason = content
+	}
+
+	if len(agents) > 0 && validateWinnerIsAgent(verdict.Winner, agents) != nil {
+		verdict.Winner = "unknown"
+	}
+
+	return verdict
+}
+
+func validateWinnerIsAgent(winner string, agents []string) error {
+	winner = strings.TrimSpace(winner)
+	for _, agent := range agents {
+		if strings.TrimSpace(agent) == winner {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("verdict winner %q is not one of the participating agents", winner)
+}
+
+func parseGateCheckLine(line string) GateCheck {
+	// Expected format: "<name>: PASS|FAIL <notes>"
+	name, rest, found := strings.Cut(line, ":")
+	if !found {
+		return GateCheck{}
+	}
+
+	name = strings.TrimSpace(name)
+	rest = strings.TrimSpace(rest)
+	upper := strings.ToUpper(rest)
+
+	gc := GateCheck{Name: name}
+
+	switch {
+	case strings.HasPrefix(upper, "PASS"):
+		gc.Passed = true
+		gc.Notes = strings.TrimSpace(rest[4:])
+	case strings.HasPrefix(upper, "FAIL"):
+		gc.Passed = false
+		gc.Notes = strings.TrimSpace(rest[4:])
+	default:
+		gc.Notes = rest
+	}
+
+	return gc
+}

@@ -6,7 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -341,6 +341,7 @@ type cliOptions struct {
 	listProviders                      bool
 	taskList                           bool
 	speculatePlan                      bool
+	speculateRun                       bool
 	reviewPlan                         bool
 	routeInteractive                   bool
 	routeBatch                         bool
@@ -563,6 +564,7 @@ func parseOptions() cliOptions {
 	flag.Var(&opts.suggestSkillSteps, "skill-step", "observed action for skill suggestion (repeatable or comma-separated)")
 	flag.StringVar(&opts.skillSaveDir, "skill-save-dir", "", "persist accepted --skill-step suggestion to this directory")
 	flag.BoolVar(&opts.speculatePlan, "speculate-plan", false, "print a speculative three-round execution plan and exit")
+	flag.BoolVar(&opts.speculateRun, "speculate-run", false, "execute the full speculative three-round pipeline with real LLM calls and exit")
 	flag.StringVar(&opts.speculatePrompt, "speculate-prompt", "", "base task prompt for --speculate-plan prompt-cache reuse estimates")
 	flag.Var(&opts.routeCandidates, "route-candidate", "model route candidate spec: provider/model,key=value... (repeatable or comma-separated)")
 	flag.Var(&opts.routeInputTokens, "route-input-tokens", "estimated input tokens for model routing")
@@ -645,6 +647,9 @@ func parseOptions() cliOptions {
 	flag.BoolVar(&opts.listWorktrees, "list-worktrees", false, "list active atteler worktrees and exit")
 	flag.BoolVar(&opts.noAutoMerge, "no-auto-merge", false, "keep worktree alive on exit instead of auto-merging")
 	flag.StringVar(&opts.mergeWorktreeRef, "merge-worktree", "", "merge a session worktree back into its base branch and exit")
+
+	flag.Usage = groupedUsage
+
 	flag.Parse()
 
 	if opts.oncePrompt == "" && flag.NArg() > 0 {
@@ -755,6 +760,8 @@ func applyDebugPositiveInt(getenv func(string) string, name string, target *posi
 }
 
 func main() {
+	configureSlog()
+
 	ctx, stop := signal.NotifyContext(rootContext(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -768,6 +775,25 @@ func main() {
 
 func rootContext() context.Context {
 	return context.Background()
+}
+
+// configureSlog sets up the global slog handler. It reads the SLOG_LEVEL
+// environment variable (debug, info, warn, error) and defaults to info.
+// Output goes to stderr so it doesn't interfere with normal TUI output.
+func configureSlog() {
+	level := slog.LevelInfo
+
+	switch strings.ToLower(os.Getenv("SLOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error": //nolint:goconst // clarity over a constant for a single switch case
+		level = slog.LevelError
+	}
+
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	slog.SetDefault(slog.New(handler))
 }
 
 func versionString() string {
@@ -1172,7 +1198,7 @@ func autoRegisterForOptions(ctx context.Context, opts cliOptions, cfg appconfig.
 	regCfg := llmConfig(cfg, selectedModel)
 
 	if opts.headless {
-		regCfg.Logger = log.New(io.Discard, "", 0)
+		regCfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	return llm.AutoRegisterWithConfigContext(ctx, regCfg)
@@ -1284,4 +1310,157 @@ func applySelectedAgent(opts cliOptions, agentRegistry *agent.Registry, state *s
 	state.sessionState.DefaultAgent = state.selectedAgent
 
 	return nil
+}
+
+// flagGroup assigns each flag name to a domain group for grouped --help output.
+var flagGroups = map[string]string{
+	// Provider & model
+	"model": "Provider & Model", "list-models": "Provider & Model", "list-known-models": "Provider & Model",
+	"list-providers": "Provider & Model", "temperature": "Provider & Model", "top-p": "Provider & Model",
+	"max-tokens": "Provider & Model", "seed": "Provider & Model", "reasoning-level": "Provider & Model",
+	"max-input-tokens": "Provider & Model",
+
+	// Session
+	"session": "Session", "session-dir": "Session", "session-title": "Session", "session-tag": "Session",
+	"list-sessions": "Session", "list-sessions-tag": "Session", "list-session-tags": "Session",
+	"show-session": "Session", "session-summary": "Session", "replay": "Session",
+	"export-session": "Session", "export-format": "Session", "search-sessions": "Session",
+	"list-messages": "Session", "list-artifacts": "Session", "list-evaluations": "Session",
+	"list-failures": "Session", "agent-performance-summary": "Session",
+
+	// Agent
+	"agent": "Agent", "list-agents": "Agent", "describe-agent": "Agent", "plan-agents": "Agent",
+	"plan-agent": "Agent", "plan-max-agents": "Agent",
+
+	// One-shot & output
+	"once": "One-shot & Output", "stdin": "One-shot & Output", "output": "One-shot & Output",
+	"headless": "One-shot & Output", "list-headless": "One-shot & Output", "stream-headless": "One-shot & Output",
+
+	// Config
+	"config": "Configuration", "print-config-template": "Configuration", "init-config": "Configuration",
+	"list-config-paths": "Configuration", "validate-config": "Configuration",
+
+	// Plugin
+	"list-plugins": "Plugin", "describe-plugin": "Plugin", "run-plugin": "Plugin",
+	"plugin-entrypoint": "Plugin", "plugin-dry-run": "Plugin", "plugin-timeout-seconds": "Plugin",
+
+	// Memory & RAG
+	"memory-search": "Memory & RAG", "memory-store": "Memory & RAG", "memory-index": "Memory & RAG",
+	"memory-limit": "Memory & RAG", "agent-memory-agent": "Memory & RAG", "agent-memory-store": "Memory & RAG",
+	"agent-memory-index": "Memory & RAG", "agent-memory-search": "Memory & RAG", "agent-memory-limit": "Memory & RAG",
+	"vector-search": "Memory & RAG", "vector-index": "Memory & RAG", "vector-limit": "Memory & RAG",
+	"git-history-search": "Memory & RAG", "git-history-limit": "Memory & RAG",
+
+	// Speculative execution
+	"speculate-plan": "Speculative Execution", "speculate-run": "Speculative Execution",
+	"speculate-agent": "Speculative Execution", "speculate-gate": "Speculative Execution",
+	"speculate-prompt": "Speculative Execution",
+
+	// Review
+	"review-plan": "Review", "review-scan": "Review", "review-agent": "Review",
+	"review-path": "Review", "review-gate": "Review",
+
+	// Shell & bash
+	"bash": "Shell", "bash-dir": "Shell", "bash-timeout-seconds": "Shell",
+
+	// Worktree
+	"worktree": "Worktree", "no-auto-merge": "Worktree", "list-worktrees": "Worktree",
+	"merge-worktree": "Worktree",
+
+	// Code intelligence
+	"code-summary": "Code Intelligence", "code-files": "Code Intelligence",
+	"code-imports": "Code Intelligence", "code-symbol": "Code Intelligence",
+	"code-layers": "Code Intelligence", "code-cycles": "Code Intelligence",
+	"code-impact": "Code Intelligence", "code-packages": "Code Intelligence",
+
+	// Diagnostics
+	"doctor": "Diagnostics", "doctor-offline": "Diagnostics", "version": "Diagnostics",
+
+	// Evaluation
+	"eval-output": "Evaluation", "eval-expected": "Evaluation", "eval-expected-file": "Evaluation",
+	"eval-mode": "Evaluation", "record-evaluation": "Evaluation", "evaluation-outcome": "Evaluation",
+	"evaluation-score": "Evaluation", "evaluation-notes": "Evaluation", "evaluation-reference": "Evaluation",
+
+	// Hooks
+	"list-hook-events": "Hooks", "list-hook-events-json": "Hooks",
+
+	// MCP
+	"mcp-manifest": "MCP", "mcp-capability": "MCP", "mcp-server": "MCP",
+	"mcp-method": "MCP", "mcp-params": "MCP", "mcp-tool": "MCP",
+	"mcp-tool-args": "MCP", "mcp-timeout-seconds": "MCP",
+
+	// Recording & replay
+	"record-response": "Recording & Replay", "replay-response": "Recording & Replay",
+	"record-failure": "Recording & Replay", "failure-reason": "Recording & Replay",
+	"failure-commit": "Recording & Replay", "record-artifact": "Recording & Replay",
+	"artifact-kind": "Recording & Replay", "artifact-summary": "Recording & Replay",
+	"merge-artifacts": "Recording & Replay", "merge-artifact-max-bytes": "Recording & Replay",
+
+	// Routing
+	"route-candidate": "Model Routing", "route-input-tokens": "Model Routing",
+	"route-output-tokens": "Model Routing", "route-budget": "Model Routing",
+	"route-cache-reuse": "Model Routing", "route-interactive": "Model Routing",
+	"route-batch": "Model Routing",
+}
+
+// groupedUsage prints flags organized by domain group with default values.
+func groupedUsage() {
+	fmt.Fprintf(os.Stderr, "Usage: atteler [flags] [prompt]\n\n")
+
+	groups := make(map[string][]*flag.Flag)
+	groupOrder := make([]string, 0)
+
+	var ungrouped []*flag.Flag
+
+	flag.VisitAll(func(f *flag.Flag) {
+		group, ok := flagGroups[f.Name]
+		if !ok {
+			ungrouped = append(ungrouped, f)
+			return
+		}
+
+		if _, exists := groups[group]; !exists {
+			groupOrder = append(groupOrder, group)
+		}
+
+		groups[group] = append(groups[group], f)
+	})
+
+	sort.Strings(groupOrder)
+
+	for _, group := range groupOrder {
+		fmt.Fprintf(os.Stderr, "%s:\n", group)
+
+		for _, f := range groups[group] {
+			printFlagWithDefault(f)
+		}
+
+		fmt.Fprintln(os.Stderr)
+	}
+
+	if len(ungrouped) > 0 {
+		fmt.Fprintf(os.Stderr, "Other:\n")
+
+		for _, f := range ungrouped {
+			printFlagWithDefault(f)
+		}
+
+		fmt.Fprintln(os.Stderr)
+	}
+}
+
+func printFlagWithDefault(f *flag.Flag) {
+	name := "  -" + f.Name
+
+	usage := f.Usage
+	if f.DefValue != "" && f.DefValue != "false" && f.DefValue != "0" {
+		usage += " (default: " + f.DefValue + ")"
+	}
+
+	// Two-column format: flag name on the left, usage on the right.
+	if len(name) < 30 {
+		fmt.Fprintf(os.Stderr, "%-30s %s\n", name, usage)
+	} else {
+		fmt.Fprintf(os.Stderr, "%s\n%-30s %s\n", name, "", usage)
+	}
 }

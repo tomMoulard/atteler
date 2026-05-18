@@ -212,6 +212,18 @@ func buildCommandRegistry() []command {
 				return runSpeculatePlan(o.speculateAgents, o.speculateGates, o.speculatePrompt)
 			},
 		},
+
+		// ---------------------------------------------------------------
+		// Tier: stateful -- speculate-run (requires LLM registry)
+		// ---------------------------------------------------------------
+		{
+			name:  "speculate-run",
+			tier:  tierStateful,
+			match: func(o cliOptions) bool { return o.speculateRun },
+			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
+				return runSpeculateExecution(ctx, s, o)
+			},
+		},
 		{
 			name:  "review-plan",
 			tier:  tierProviderless,

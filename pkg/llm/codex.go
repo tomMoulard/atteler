@@ -110,6 +110,7 @@ func (c *CodexProvider) ModelContextWindow(model string) int {
 // the codex backend accepts.
 type codexResponsesRequest struct {
 	Reasoning    *codexRequestReasoning `json:"reasoning,omitempty"`
+	Tools        []codexTool            `json:"tools,omitempty"`
 	Model        string                 `json:"model"`
 	Instructions string                 `json:"instructions,omitempty"`
 	Input        []codexInputItem       `json:"input"`
@@ -121,10 +122,22 @@ type codexRequestReasoning struct {
 	Effort string `json:"effort,omitempty"`
 }
 
+// codexTool is the Responses API tool definition format.
+type codexTool struct {
+	Parameters  map[string]any `json:"parameters,omitempty"`
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+}
+
 type codexInputItem struct {
-	Type    string              `json:"type"`
-	Role    string              `json:"role"`
-	Content []codexInputContent `json:"content"`
+	Type      string              `json:"type"`
+	Role      string              `json:"role,omitempty"`
+	CallID    string              `json:"call_id,omitempty"`
+	Name      string              `json:"name,omitempty"`
+	Arguments string              `json:"arguments,omitempty"`
+	Output    string              `json:"output,omitempty"`
+	Content   []codexInputContent `json:"content,omitempty"`
 }
 
 type codexInputContent struct {
@@ -149,6 +162,7 @@ func (c *CodexProvider) Complete(ctx context.Context, params CompleteParams) (*R
 		Model:        model,
 		Instructions: codexInstructions(params.Messages),
 		Input:        codexBuildInput(params.Messages),
+		Tools:        codexBuildTools(params.Tools),
 		Stream:       true,
 	}
 
@@ -253,6 +267,7 @@ func (c *CodexProvider) sendResponses(ctx context.Context, body []byte, access, 
 
 // codexStreamState accumulates partial state from an SSE response stream.
 type codexStreamState struct {
+	toolCalls []ToolCall
 	finalText string
 	deltaBuf  strings.Builder
 	out       Response
@@ -303,7 +318,9 @@ func (s *codexStreamState) handleEventPayload(payload string) error {
 	case "response.output_text.delta":
 		s.deltaBuf.WriteString(event.Delta)
 	case "response.output_item.done":
-		if text := codexExtractMessageText(event.Item); text != "" {
+		if tc, ok := codexExtractFunctionCall(event.Item); ok {
+			s.toolCalls = append(s.toolCalls, tc)
+		} else if text := codexExtractMessageText(event.Item); text != "" {
 			s.finalText = text
 		}
 	case "response.completed":
@@ -342,6 +359,15 @@ func (s *codexStreamState) finalize() (*Response, error) {
 		s.out.Content = s.deltaBuf.String()
 	}
 
+	// If the model returned tool calls, set them on the response and mark
+	// the stop reason so the AgentLoop knows to execute them.
+	if len(s.toolCalls) > 0 {
+		s.out.ToolCalls = s.toolCalls
+		s.out.StopReason = StopToolUse
+
+		return &s.out, nil
+	}
+
 	if s.out.Content == "" && !s.finished {
 		return nil, errors.New("codex stream ended before response.completed")
 	}
@@ -361,9 +387,13 @@ type codexStreamEvent struct {
 }
 
 type codexEventItem struct {
-	Type    string                  `json:"type"`
-	Role    string                  `json:"role"`
-	Content []codexEventItemContent `json:"content"`
+	Arguments string                  `json:"arguments"`
+	Type      string                  `json:"type"`
+	Role      string                  `json:"role"`
+	ID        string                  `json:"id"`
+	CallID    string                  `json:"call_id"`
+	Name      string                  `json:"name"`
+	Content   []codexEventItemContent `json:"content"`
 }
 
 type codexEventItemContent struct {
@@ -403,6 +433,31 @@ func codexExtractMessageText(item *codexEventItem) string {
 	return b.String()
 }
 
+// codexExtractFunctionCall detects a function_call output item and converts it
+// to a ToolCall. Returns false when the item is not a function_call.
+func codexExtractFunctionCall(item *codexEventItem) (ToolCall, bool) {
+	if item == nil || item.Type != "function_call" {
+		return ToolCall{}, false
+	}
+
+	var input map[string]any
+	if err := json.Unmarshal([]byte(item.Arguments), &input); err != nil {
+		input = map[string]any{"raw": item.Arguments}
+	}
+
+	// The Responses API uses call_id, but some backends populate id instead.
+	callID := item.CallID
+	if callID == "" {
+		callID = item.ID
+	}
+
+	return ToolCall{
+		ID:    callID,
+		Name:  item.Name,
+		Input: input,
+	}, true
+}
+
 // codexDefaultInstructions is sent when the caller provided no system prompt.
 // The chatgpt codex backend rejects requests with empty `instructions`.
 const codexDefaultInstructions = "You are a helpful assistant."
@@ -427,22 +482,87 @@ func codexBuildInput(messages []Message) []codexInputItem {
 	out := make([]codexInputItem, 0, len(messages))
 
 	for _, msg := range messages {
-		if msg.Role == RoleSystem {
+		switch {
+		case msg.Role == RoleSystem:
 			continue
+		case msg.Role == RoleAssistant && len(msg.ToolCalls) > 0:
+			out = appendCodexToolCallItems(out, msg)
+		case msg.Role == RoleTool && msg.ToolResult != nil:
+			out = append(out, codexInputItem{
+				Type:   "function_call_output",
+				CallID: msg.ToolResult.ToolCallID,
+				Output: msg.ToolResult.Content,
+			})
+		default:
+			out = appendCodexMessageItem(out, msg)
 		}
+	}
 
-		contentType := "input_text"
-		if msg.Role == RoleAssistant {
-			contentType = "output_text"
+	return out
+}
+
+// appendCodexToolCallItems appends the assistant text (if any) and each tool
+// call as separate Responses API items.
+func appendCodexToolCallItems(out []codexInputItem, msg Message) []codexInputItem {
+	if msg.Content != "" {
+		out = append(out, codexInputItem{
+			Type: "message",
+			Role: string(RoleAssistant),
+			Content: []codexInputContent{{
+				Type: "output_text",
+				Text: msg.Content,
+			}},
+		})
+	}
+
+	for _, tc := range msg.ToolCalls {
+		args, err := json.Marshal(tc.Input)
+		if err != nil {
+			args = []byte("{}")
 		}
 
 		out = append(out, codexInputItem{
-			Type: "message",
-			Role: string(msg.Role),
-			Content: []codexInputContent{{
-				Type: contentType,
-				Text: msg.Content,
-			}},
+			Type:      "function_call",
+			CallID:    tc.ID,
+			Name:      tc.Name,
+			Arguments: string(args),
+		})
+	}
+
+	return out
+}
+
+// appendCodexMessageItem appends a plain user or assistant message.
+func appendCodexMessageItem(out []codexInputItem, msg Message) []codexInputItem {
+	contentType := "input_text"
+	if msg.Role == RoleAssistant {
+		contentType = "output_text"
+	}
+
+	return append(out, codexInputItem{
+		Type: "message",
+		Role: string(msg.Role),
+		Content: []codexInputContent{{
+			Type: contentType,
+			Text: msg.Content,
+		}},
+	})
+}
+
+// codexBuildTools converts internal tool definitions to the Responses API
+// format (type=function with a name, description, and JSON Schema parameters).
+func codexBuildTools(tools []ToolDefinition) []codexTool {
+	if len(tools) == 0 {
+		return nil
+	}
+
+	out := make([]codexTool, 0, len(tools))
+	for _, td := range tools {
+		out = append(out, codexTool{
+			Type:        "function",
+			Name:        td.Name,
+			Description: td.Description,
+			Parameters:  td.Parameters,
 		})
 	}
 

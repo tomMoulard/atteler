@@ -1,9 +1,15 @@
 package vector
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStore_SearchCosineRanking(t *testing.T) {
@@ -173,4 +179,158 @@ func scores(results []Result) []float64 {
 	}
 
 	return scores
+}
+
+// ---------------------------------------------------------------------------
+// Vectorizer interface conformance
+// ---------------------------------------------------------------------------
+
+func TestTextVectorizer_ImplementsVectorizer(t *testing.T) {
+	t.Parallel()
+
+	tv, err := NewTextVectorizer(0)
+	require.NoError(t, err)
+
+	var _ Vectorizer = tv
+}
+
+func TestEmbeddingVectorizer_ImplementsVectorizer(t *testing.T) {
+	t.Parallel()
+
+	var _ Vectorizer = NewEmbeddingVectorizer()
+
+	var _ VectorizerContext = NewEmbeddingVectorizer()
+}
+
+// ---------------------------------------------------------------------------
+// EmbeddingVectorizer tests
+// ---------------------------------------------------------------------------
+
+func TestEmbeddingVectorizer_CallsAPI(t *testing.T) {
+	t.Parallel()
+
+	embedding := []float64{0.1, 0.2, 0.3, 0.4}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/embed", r.URL.Path)
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+		var req ollamaEmbedRequest
+
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "nomic-embed-text", req.Model)
+		assert.Equal(t, "hello world", req.Input)
+
+		w.Header().Set("Content-Type", "application/json")
+
+		resp := ollamaEmbedResponse{Embeddings: [][]float64{embedding}}
+
+		assert.NoError(t, json.NewEncoder(w).Encode(resp))
+	}))
+	defer server.Close()
+
+	v := NewEmbeddingVectorizer(
+		WithEmbeddingBaseURL(server.URL),
+	)
+
+	vec, err := v.Vectorize("hello world")
+	require.NoError(t, err)
+	assert.Equal(t, Vector(embedding), vec)
+}
+
+func TestEmbeddingVectorizer_EmptyTextReturnsError(t *testing.T) {
+	t.Parallel()
+
+	v := NewEmbeddingVectorizer()
+
+	_, err := v.Vectorize("  ")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEmptyText)
+}
+
+func TestEmbeddingVectorizer_CustomModel(t *testing.T) {
+	t.Parallel()
+
+	var receivedModel string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollamaEmbedRequest
+
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+
+		receivedModel = req.Model
+
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(ollamaEmbedResponse{Embeddings: [][]float64{{1.0}}}))
+	}))
+	defer server.Close()
+
+	v := NewEmbeddingVectorizer(
+		WithEmbeddingBaseURL(server.URL),
+		WithEmbeddingModel("mxbai-embed-large"),
+	)
+
+	_, err := v.Vectorize("test")
+	require.NoError(t, err)
+	assert.Equal(t, "mxbai-embed-large", receivedModel)
+}
+
+func TestEmbeddingVectorizer_ServerError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	v := NewEmbeddingVectorizer(WithEmbeddingBaseURL(server.URL))
+
+	_, err := v.Vectorize("test")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected status 500")
+}
+
+func TestEmbeddingVectorizer_EmptyEmbeddingsResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(ollamaEmbedResponse{Embeddings: [][]float64{}}))
+	}))
+	defer server.Close()
+
+	v := NewEmbeddingVectorizer(WithEmbeddingBaseURL(server.URL))
+
+	_, err := v.Vectorize("test")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty response")
+}
+
+func TestEmbeddingVectorizer_WithCustomHTTPClient(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(ollamaEmbedResponse{Embeddings: [][]float64{{0.5, 0.5}}}))
+	}))
+	defer server.Close()
+
+	customClient := &http.Client{}
+	v := NewEmbeddingVectorizer(
+		WithEmbeddingBaseURL(server.URL),
+		WithEmbeddingHTTPClient(customClient),
+	)
+
+	vec, err := v.Vectorize("test")
+	require.NoError(t, err)
+	assert.Equal(t, Vector{0.5, 0.5}, vec)
+}
+
+func TestNewEmbeddingVectorizer_Defaults(t *testing.T) {
+	t.Parallel()
+
+	v := NewEmbeddingVectorizer()
+	assert.Equal(t, defaultEmbeddingBaseURL, v.baseURL)
+	assert.Equal(t, defaultEmbeddingModel, v.model)
+	assert.NotNil(t, v.client)
 }

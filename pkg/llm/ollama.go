@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -127,7 +127,7 @@ func startOllamaServeProcess(baseURL string) error {
 
 	go func() {
 		if err := cmd.Wait(); err != nil {
-			log.Printf("ollama: daemon exited: %v", err)
+			slog.Warn("ollama daemon exited", "error", err)
 		}
 	}()
 

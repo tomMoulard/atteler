@@ -49,3 +49,47 @@ func TestRunBash_RejectsBlankCommand(t *testing.T) {
 	_, err := RunBash(context.Background(), Options{Command: " \t"})
 	require.Error(t, err)
 }
+
+func TestRunInteractive_RejectsBlankCommand(t *testing.T) {
+	t.Parallel()
+
+	_, err := RunInteractive(context.Background(), Options{Command: ""})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "command is required")
+}
+
+func TestRunInteractive_RejectsNilContext(t *testing.T) {
+	t.Parallel()
+
+	_, err := RunInteractive(nil, Options{Command: "echo hello"}) //nolint:staticcheck // intentional nil context for test
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "context is required")
+}
+
+func TestRunInteractive_RunsSimpleCommand(t *testing.T) {
+	t.Parallel()
+
+	result, err := RunInteractive(context.Background(), Options{Command: "true"})
+	require.NoError(t, err)
+	require.Positive(t, result.Duration)
+	require.Empty(t, result.ExitError)
+}
+
+func TestRunInteractive_ReportsNonZeroExit(t *testing.T) {
+	t.Parallel()
+
+	result, err := RunInteractive(context.Background(), Options{Command: "exit 42"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "interactive command failed")
+	require.NotEmpty(t, result.ExitError)
+}
+
+func TestRunInteractive_RespectsCancel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := RunInteractive(ctx, Options{Command: "sleep 10"})
+	require.Error(t, err)
+}

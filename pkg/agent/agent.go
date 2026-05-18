@@ -2,6 +2,7 @@
 package agent
 
 import (
+	"maps"
 	"sort"
 	"strings"
 
@@ -11,21 +12,23 @@ import (
 
 // Agent is a named LLM persona with optional model and generation knobs.
 type Agent struct {
-	Temperature    *float64
-	TopP           *float64
-	Seed           *int
-	Name           string
-	Model          string
-	Description    string
-	Personality    string
-	SystemPrompt   string
-	ReasoningLevel string
-	FallbackModels []string
-	Capabilities   []string
-	Triggers       []string
-	References     []string
-	MaxTokens      int
-	Hidden         bool
+	Temperature     *float64
+	TopP            *float64
+	Seed            *int
+	ToolPermissions map[string]bool
+	Name            string
+	Model           string
+	Mode            string
+	Description     string
+	Personality     string
+	SystemPrompt    string
+	ReasoningLevel  string
+	FallbackModels  []string
+	Capabilities    []string
+	Triggers        []string
+	References      []string
+	MaxTokens       int
+	Hidden          bool
 }
 
 // Registry stores agents by name.
@@ -45,30 +48,71 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 		}
 
 		registry.agents[name] = Agent{
-			Name:           name,
-			Model:          cfg.Model,
-			Description:    strings.TrimSpace(cfg.Description),
-			Personality:    strings.TrimSpace(cfg.Personality),
-			SystemPrompt:   cfg.SystemPrompt,
-			ReasoningLevel: strings.TrimSpace(cfg.ReasoningLevel),
-			FallbackModels: normalizeModels(cfg.FallbackModels),
-			Capabilities:   normalizePhrases(cfg.Capabilities),
-			Temperature:    cfg.Temperature,
-			TopP:           cfg.TopP,
-			Seed:           cfg.Seed,
-			Triggers:       normalizePhrases(cfg.Triggers),
-			References:     append([]string(nil), cfg.References...),
-			MaxTokens:      cfg.MaxTokens,
-			Hidden:         cfg.Hidden,
+			Name:            name,
+			Model:           cfg.Model,
+			Mode:            strings.TrimSpace(cfg.Mode),
+			ToolPermissions: cloneToolPermissions(cfg.ToolPermissions),
+			Description:     strings.TrimSpace(cfg.Description),
+			Personality:     strings.TrimSpace(cfg.Personality),
+			SystemPrompt:    cfg.SystemPrompt,
+			ReasoningLevel:  strings.TrimSpace(cfg.ReasoningLevel),
+			FallbackModels:  normalizeModels(cfg.FallbackModels),
+			Capabilities:    normalizePhrases(cfg.Capabilities),
+			Temperature:     cfg.Temperature,
+			TopP:            cfg.TopP,
+			Seed:            cfg.Seed,
+			Triggers:        normalizePhrases(cfg.Triggers),
+			References:      append([]string(nil), cfg.References...),
+			MaxTokens:       cfg.MaxTokens,
+			Hidden:          cfg.Hidden,
 		}
 	}
 
 	return registry
 }
 
+func cloneToolPermissions(in map[string]bool) map[string]bool {
+	if in == nil {
+		return nil
+	}
+
+	out := make(map[string]bool, len(in))
+	maps.Copy(out, in)
+
+	return out
+}
+
 // ModelChain returns the ordered model preference chain for this agent.
 func (a Agent) ModelChain() []string {
 	return modelChain(a.Model, a.FallbackModels)
+}
+
+// HasToolPermission reports whether the agent is allowed to use the named tool.
+// When ToolPermissions is nil (not configured), all tools are permitted.
+// When ToolPermissions is non-nil, only tools explicitly set to true are allowed.
+func (a Agent) HasToolPermission(tool string) bool {
+	if a.ToolPermissions == nil {
+		return true
+	}
+
+	return a.ToolPermissions[tool]
+}
+
+// FilterTools returns only the tools the agent is permitted to use.
+// When ToolPermissions is nil, all tools pass through unchanged.
+func (a Agent) FilterTools(tools []llm.ToolDefinition) []llm.ToolDefinition {
+	if a.ToolPermissions == nil {
+		return tools
+	}
+
+	filtered := make([]llm.ToolDefinition, 0, len(tools))
+	for _, tool := range tools {
+		if a.HasToolPermission(tool.Name) {
+			filtered = append(filtered, tool)
+		}
+	}
+
+	return filtered
 }
 
 // Get returns a named agent.
