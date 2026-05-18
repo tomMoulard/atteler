@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/tommoulard/atteler/pkg/events"
 )
@@ -206,18 +205,7 @@ func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, acce
 		return nil, fmt.Errorf("claude code: %s: %s", ar.Error.Type, ar.Error.Message)
 	}
 
-	var b strings.Builder
-	for _, c := range ar.Content {
-		b.WriteString(c.Text)
-	}
-
-	return &Response{
-		Content:           b.String(),
-		Model:             ar.Model,
-		InputTokens:       ar.Usage.InputTokens + ar.Usage.CacheCreationInputTokens + ar.Usage.CacheReadInputTokens,
-		CachedInputTokens: ar.Usage.CacheReadInputTokens,
-		OutputTokens:      ar.Usage.OutputTokens,
-	}, nil
+	return parseAnthropicResponse(ar), nil
 }
 
 func defaultClaudeCodeModels() []string {

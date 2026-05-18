@@ -122,12 +122,37 @@ type openaiRequest struct {
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 	Messages        []openaiMessage `json:"messages"`
 	Stop            []string        `json:"stop,omitempty"`
+	Tools           []openaiTool    `json:"tools,omitempty"`
 	MaxTokens       int             `json:"max_tokens,omitempty"`
 }
 
+type openaiTool struct {
+	Function openaiToolFunction `json:"function"`
+	Type     string             `json:"type"`
+}
+
+type openaiToolFunction struct {
+	Parameters  map[string]any `json:"parameters"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+}
+
 type openaiMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	ToolCalls  []openaiToolCall `json:"tool_calls,omitempty"`
+}
+
+type openaiToolCall struct {
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Function openaiToolCallFunction `json:"function"`
+}
+
+type openaiToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string.
 }
 
 type openaiResponse struct {
@@ -137,8 +162,10 @@ type openaiResponse struct {
 	} `json:"error"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
+		FinishReason string `json:"finish_reason"`
+		Message      struct {
+			Content   string           `json:"content"`
+			ToolCalls []openaiToolCall `json:"tool_calls,omitempty"`
 		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
@@ -152,10 +179,7 @@ type openaiResponse struct {
 
 // Complete performs a chat completion using the OpenAI Chat Completions API.
 func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
-	msgs := make([]openaiMessage, 0, len(params.Messages))
-	for _, m := range params.Messages {
-		msgs = append(msgs, openaiMessage{Role: string(m.Role), Content: m.Content})
-	}
+	msgs := buildOpenAIMessages(params.Messages)
 
 	req := openaiRequest{
 		Model:    params.Model,
@@ -180,6 +204,14 @@ func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*
 
 	if effort := openAIReasoningEffort(params.ReasoningLevel); effort != "" {
 		req.ReasoningEffort = effort
+	}
+
+	// Add tool definitions.
+	for _, tool := range params.Tools {
+		req.Tools = append(req.Tools, openaiTool{
+			Type:     "function",
+			Function: openaiToolFunction(tool),
+		})
 	}
 
 	body, err := json.Marshal(req)
@@ -219,18 +251,95 @@ func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*
 		return nil, fmt.Errorf("openai: %s: %s", or.Error.Type, or.Error.Message)
 	}
 
-	var text string
-	if len(or.Choices) > 0 {
-		text = or.Choices[0].Message.Content
-	}
-
-	return &Response{
-		Content:           text,
+	result := &Response{
 		Model:             or.Model,
 		InputTokens:       or.Usage.PromptTokens,
 		CachedInputTokens: or.Usage.PromptTokensDetails.CachedTokens,
 		OutputTokens:      or.Usage.CompletionTokens,
-	}, nil
+	}
+
+	if len(or.Choices) > 0 {
+		choice := or.Choices[0]
+		result.Content = choice.Message.Content
+		result.StopReason = openaiStopReason(choice.FinishReason)
+		result.ToolCalls = parseOpenAIToolCalls(choice.Message.ToolCalls)
+	}
+
+	return result, nil
+}
+
+func buildOpenAIMessages(messages []Message) []openaiMessage {
+	msgs := make([]openaiMessage, 0, len(messages))
+
+	for _, m := range messages {
+		omsg := openaiMessage{Role: string(m.Role), Content: m.Content}
+
+		// Marshal assistant messages with tool calls.
+		if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				args, err := json.Marshal(tc.Input)
+				if err != nil {
+					args = []byte("{}")
+				}
+
+				omsg.ToolCalls = append(omsg.ToolCalls, openaiToolCall{
+					ID:   tc.ID,
+					Type: "function",
+					Function: openaiToolCallFunction{
+						Name:      tc.Name,
+						Arguments: string(args),
+					},
+				})
+			}
+		}
+
+		// Marshal tool result messages.
+		if m.Role == RoleTool && m.ToolResult != nil {
+			omsg.ToolCallID = m.ToolResult.ToolCallID
+			omsg.Content = m.ToolResult.Content
+		}
+
+		msgs = append(msgs, omsg)
+	}
+
+	return msgs
+}
+
+func parseOpenAIToolCalls(calls []openaiToolCall) []ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+
+	out := make([]ToolCall, 0, len(calls))
+
+	for _, tc := range calls {
+		var input map[string]any
+
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
+			input = map[string]any{"raw": tc.Function.Arguments}
+		}
+
+		out = append(out, ToolCall{
+			ID:    tc.ID,
+			Name:  tc.Function.Name,
+			Input: input,
+		})
+	}
+
+	return out
+}
+
+func openaiStopReason(reason string) StopReason {
+	switch reason {
+	case "stop":
+		return StopEndTurn
+	case "tool_calls":
+		return StopToolUse
+	case "length":
+		return StopMaxToks
+	default:
+		return StopUnknown
+	}
 }
 
 func configuredBaseURL(envKey, configured, fallback string) string {

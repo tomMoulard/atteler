@@ -134,6 +134,7 @@ type anthropicRequest struct {
 	Thinking    *anthropicThinking `json:"thinking,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 	Stop        []string           `json:"stop_sequences,omitempty"`
+	Tools       []anthropicTool    `json:"tools,omitempty"`
 	MaxTokens   int                `json:"max_tokens"`
 }
 
@@ -142,9 +143,30 @@ type anthropicThinking struct {
 	BudgetTokens int    `json:"budget_tokens"`
 }
 
+type anthropicTool struct {
+	InputSchema map[string]any `json:"input_schema"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+}
+
+// anthropicMessage uses json.RawMessage for Content so it can be either
+// a plain string (user text) or an array of content blocks (tool results,
+// assistant tool_use responses).
 type anthropicMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+// anthropicContentBlock is a single block in an Anthropic message content array.
+type anthropicContentBlock struct {
+	Type      string         `json:"type"`
+	Text      string         `json:"text,omitempty"`
+	ID        string         `json:"id,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	Input     map[string]any `json:"input,omitempty"`
+	ToolUseID string         `json:"tool_use_id,omitempty"`
+	Content   string         `json:"content,omitempty"`
+	IsError   bool           `json:"is_error,omitempty"`
 }
 
 type anthropicResponse struct {
@@ -152,11 +174,10 @@ type anthropicResponse struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
 	} `json:"error"`
-	Model   string `json:"model"`
-	Content []struct {
-		Text string `json:"text"`
-	} `json:"content"`
-	Usage struct {
+	Model      string                  `json:"model"`
+	StopReason string                  `json:"stop_reason"`
+	Content    []anthropicContentBlock `json:"content"`
+	Usage      struct {
 		InputTokens              int `json:"input_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
@@ -209,18 +230,49 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 		return nil, fmt.Errorf("anthropic: %s: %s", ar.Error.Type, ar.Error.Message)
 	}
 
-	var b strings.Builder
-	for _, c := range ar.Content {
-		b.WriteString(c.Text)
-	}
+	return parseAnthropicResponse(ar), nil
+}
 
-	return &Response{
-		Content:           b.String(),
+func parseAnthropicResponse(ar anthropicResponse) *Response {
+	result := &Response{
 		Model:             ar.Model,
+		StopReason:        anthropicStopReason(ar.StopReason),
 		InputTokens:       ar.Usage.InputTokens + ar.Usage.CacheCreationInputTokens + ar.Usage.CacheReadInputTokens,
 		CachedInputTokens: ar.Usage.CacheReadInputTokens,
 		OutputTokens:      ar.Usage.OutputTokens,
-	}, nil
+	}
+
+	var textParts strings.Builder
+
+	for _, block := range ar.Content {
+		switch block.Type {
+		case "text":
+			textParts.WriteString(block.Text)
+		case "tool_use":
+			result.ToolCalls = append(result.ToolCalls, ToolCall{
+				ID:    block.ID,
+				Name:  block.Name,
+				Input: block.Input,
+			})
+		}
+	}
+
+	result.Content = textParts.String()
+
+	return result
+}
+
+func anthropicStopReason(reason string) StopReason {
+	switch reason {
+	case "end_turn":
+		return StopEndTurn
+	case "tool_use":
+		return StopToolUse
+	case "max_tokens":
+		return StopMaxToks
+	default:
+		return StopUnknown
+	}
 }
 
 func buildAnthropicRequest(params CompleteParams) (anthropicRequest, error) {
@@ -233,7 +285,7 @@ func buildAnthropicRequest(params CompleteParams) (anthropicRequest, error) {
 			continue
 		}
 
-		msgs = append(msgs, anthropicMessage{Role: string(m.Role), Content: m.Content})
+		msgs = append(msgs, buildAnthropicMessage(m))
 	}
 
 	maxTok := params.MaxTokens
@@ -251,6 +303,15 @@ func buildAnthropicRequest(params CompleteParams) (anthropicRequest, error) {
 		TopP:        params.TopP,
 	}
 
+	// Add tool definitions.
+	for _, tool := range params.Tools {
+		req.Tools = append(req.Tools, anthropicTool{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: tool.Parameters,
+		})
+	}
+
 	budget, ok, err := anthropicThinkingBudget(params.ReasoningLevel, maxTok)
 	if err != nil {
 		return anthropicRequest{}, fmt.Errorf("anthropic: %w", err)
@@ -261,6 +322,58 @@ func buildAnthropicRequest(params CompleteParams) (anthropicRequest, error) {
 	}
 
 	return req, nil
+}
+
+// buildAnthropicMessage converts an llm.Message to the Anthropic wire format.
+// Plain user/assistant text is sent as a JSON string; tool-use and tool-result
+// messages use the content-block array format.
+func buildAnthropicMessage(m Message) anthropicMessage {
+	// Assistant message with tool calls -> content block array.
+	if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
+		var blocks []anthropicContentBlock
+		if m.Content != "" {
+			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
+		}
+
+		for _, tc := range m.ToolCalls {
+			blocks = append(blocks, anthropicContentBlock{
+				Type:  "tool_use",
+				ID:    tc.ID,
+				Name:  tc.Name,
+				Input: tc.Input,
+			})
+		}
+
+		content, err := json.Marshal(blocks)
+		if err != nil {
+			// Fallback: serialize text-only as plain string.
+			content, _ = json.Marshal(m.Content) //nolint:errcheck,errchkjson // string marshal cannot fail.
+		}
+
+		return anthropicMessage{Role: "assistant", Content: content}
+	}
+
+	// Tool result message -> user role with tool_result content blocks.
+	if m.Role == RoleTool && m.ToolResult != nil {
+		blocks := []anthropicContentBlock{{
+			Type:      "tool_result",
+			ToolUseID: m.ToolResult.ToolCallID,
+			Content:   m.ToolResult.Content,
+			IsError:   m.ToolResult.IsError,
+		}}
+
+		content, err := json.Marshal(blocks)
+		if err != nil {
+			content, _ = json.Marshal(m.ToolResult.Content) //nolint:errcheck,errchkjson // string marshal cannot fail.
+		}
+
+		return anthropicMessage{Role: "user", Content: content}
+	}
+
+	// Plain text message.
+	content, _ := json.Marshal(m.Content) //nolint:errcheck,errchkjson // string marshal cannot fail.
+
+	return anthropicMessage{Role: string(m.Role), Content: content}
 }
 
 func (a *AnthropicProvider) setAuthHeaders(httpReq *http.Request) {

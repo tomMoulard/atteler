@@ -28,12 +28,47 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
 )
+
+// StopReason indicates why the model stopped generating.
+type StopReason string
+
+// Known stop reasons.
+const (
+	StopEndTurn StopReason = "end_turn" // Model finished normally.
+	StopToolUse StopReason = "tool_use" // Model wants to call a tool.
+	StopMaxToks StopReason = "max_tokens"
+	StopUnknown StopReason = ""
+)
+
+// ToolDefinition describes a tool the model can call.
+type ToolDefinition struct {
+	Parameters  map[string]any `json:"parameters"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+}
+
+// ToolCall is a tool invocation requested by the model.
+type ToolCall struct {
+	Input map[string]any `json:"input"`
+	ID    string         `json:"id"`
+	Name  string         `json:"name"`
+}
+
+// ToolResult is the outcome of executing a tool call.
+type ToolResult struct {
+	ToolCallID string `json:"tool_call_id"`
+	Content    string `json:"content"`
+	IsError    bool   `json:"is_error,omitempty"`
+}
 
 // Message is a single turn in a conversation.
 type Message struct {
-	Role    Role   `json:"role"`
-	Content string `json:"content"`
+	ToolResult *ToolResult `json:"tool_result,omitempty"`
+	Role       Role        `json:"role"`
+	Content    string      `json:"content"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 }
 
 // CompleteParams groups the knobs for a completion call.
@@ -45,6 +80,7 @@ type CompleteParams struct {
 	ReasoningLevel string
 	Messages       []Message
 	Stop           []string
+	Tools          []ToolDefinition
 	MaxTokens      int
 }
 
@@ -52,9 +88,16 @@ type CompleteParams struct {
 type Response struct {
 	Content           string
 	Model             string // Model that actually answered.
+	StopReason        StopReason
+	ToolCalls         []ToolCall
 	InputTokens       int
 	CachedInputTokens int
 	OutputTokens      int
+}
+
+// WantsToolUse returns true if the model stopped because it wants to call tools.
+func (r *Response) WantsToolUse() bool {
+	return r.StopReason == StopToolUse || len(r.ToolCalls) > 0
 }
 
 // Provider is the interface every LLM backend must implement.

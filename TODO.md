@@ -148,3 +148,9 @@
 - [ ] **Clean up old deadlock trace from this file.**
   The previous `TODO.md` included a pasted deadlock stacktrace from a bug that
   was fixed. It is now removed. Keep this file focused on actionable items only.
+
+## Misc
+- [ ] When executing a command (with `!<command>`):
+    - [ ] the command can take over the shell (e.g., you should be able to run atteler inside atteler, or vim inside atteler, etc.) -> add integration test.
+    - [ ] the output of the command should be both visiblie in the TUI, the logs, and the llm context.
+    - [ ] There should be a sensible default value for bash-timeout-seconds. When reaching this limit, the llm should be notified that the command timed out, and either it should launch another command to resolve the timeout (e.g., launch a smaller sections of the tests), launch another command to debug the issue, or solve the issue whatsoever it thinks is best.

@@ -35,12 +35,18 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 		resp := openaiResponse{
 			Model: gotReq.Model,
 			Choices: []struct {
-				Message struct {
-					Content string `json:"content"`
+				FinishReason string `json:"finish_reason"`
+				Message      struct {
+					Content   string           `json:"content"`
+					ToolCalls []openaiToolCall `json:"tool_calls,omitempty"`
 				} `json:"message"`
-			}{{Message: struct {
-				Content string `json:"content"`
-			}{Content: "hello back"}}},
+			}{{
+				FinishReason: "stop",
+				Message: struct {
+					Content   string           `json:"content"`
+					ToolCalls []openaiToolCall `json:"tool_calls,omitempty"`
+				}{Content: "hello back"},
+			}},
 		}
 		resp.Usage.PromptTokens = 8
 		resp.Usage.PromptTokensDetails.CachedTokens = 2
@@ -159,12 +165,18 @@ func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {
 
 		if err := json.NewEncoder(w).Encode(openaiResponse{
 			Choices: []struct {
-				Message struct {
-					Content string `json:"content"`
+				FinishReason string `json:"finish_reason"`
+				Message      struct {
+					Content   string           `json:"content"`
+					ToolCalls []openaiToolCall `json:"tool_calls,omitempty"`
 				} `json:"message"`
-			}{{Message: struct {
-				Content string `json:"content"`
-			}{Content: "ok"}}},
+			}{{
+				FinishReason: "stop",
+				Message: struct {
+					Content   string           `json:"content"`
+					ToolCalls []openaiToolCall `json:"tool_calls,omitempty"`
+				}{Content: "ok"},
+			}},
 		}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}

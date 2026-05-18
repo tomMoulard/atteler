@@ -80,7 +80,7 @@ func TestClaudeCodeProvider_Complete(t *testing.T) {
 	assert.Equal(t, "be brief", gotReq.System)
 	require.Len(t, gotReq.Messages, 1)
 	assert.Equal(t, "user", gotReq.Messages[0].Role)
-	assert.Equal(t, "say ok", gotReq.Messages[0].Content)
+	assert.JSONEq(t, `"say ok"`, string(gotReq.Messages[0].Content))
 	assert.Equal(t, "claude-opus-4-7", gotReq.Model)
 
 	assert.Equal(t, "Bearer access-1", gotHeaders.Get("Authorization"))

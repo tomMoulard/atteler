@@ -129,6 +129,7 @@ type llmResponseMsg struct {
 	content     string
 	model       string
 	eventLines  []string
+	toolLog     []string // tool call summaries (command + truncated output)
 	tokenUsage  tokenUsage
 }
 
@@ -178,11 +179,13 @@ type llmRequest struct {
 	maxInputTokens   int
 	model            string
 	referenceContext string
+	workingDir       string
 	messages         []llm.Message
 	fallbackModels   []string
 	refs             []contextref.Reference
 	agent            agent.Agent
 	hasAgent         bool
+	useTools         bool
 }
 
 type completionCandidate struct {
@@ -750,11 +753,13 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		hasAgent:         activeAgent.ok,
 		model:            requestModel,
 		referenceContext: buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions),
+		workingDir:       m.cwd,
 		messages:         msgs,
 		fallbackModels:   fallbackModels,
 		generation:       generation,
 		maxInputTokens:   m.maxInputTokens,
 		refs:             refs,
+		useTools:         true,
 	}
 
 	cmds := []tea.Cmd{
@@ -961,6 +966,15 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 		dimStyle.Render("("+msg.model+")")
 	if elapsed > 0 {
 		header += dimStyle.Render(" (ran for " + formatTaskDuration(elapsed) + ")")
+	}
+
+	if len(msg.toolLog) > 0 {
+		header += dimStyle.Render(fmt.Sprintf(" [%d tool calls]", len(msg.toolLog)))
+	}
+
+	// Print tool call logs before the final response.
+	for _, entry := range msg.toolLog {
+		cmds = append(cmds, tea.Println(dimStyle.Render("  "+entry)))
 	}
 
 	cmds = append(
@@ -1615,7 +1629,8 @@ func normalizePromptHistoryKey(prompt string) string {
 
 // callLLM sends the messages to the selected LLM and returns a command that
 // resolves with an llmResponseMsg. If no model is selected it uses the
-// registry default.
+// registry default. When useTools is true, the call runs an agentic loop
+// that lets the LLM invoke tools (bash commands) iteratively.
 func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd {
 	return func() tea.Msg {
 		eventLines := newEventLineBuffer()
@@ -1641,6 +1656,11 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 			return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines()}
 		}
 
+		// When tools are enabled, run the agentic loop.
+		if request.useTools {
+			return callLLMWithTools(ctx, reg, params, request, eventLines)
+		}
+
 		resp, err := reg.CompleteWithFallback(ctx, params, request.fallbackModels)
 		if err != nil {
 			return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines()}
@@ -1656,6 +1676,84 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 			eventLines:  eventLines.Lines(),
 			tokenUsage:  usage,
 		}
+	}
+}
+
+// callLLMWithTools runs an agent loop where the LLM can execute bash commands.
+func callLLMWithTools(
+	ctx context.Context,
+	reg *llm.Registry,
+	params llm.CompleteParams,
+	request llmRequest,
+	eventLines *eventLineBuffer,
+) llmResponseMsg {
+	params.Tools = llm.DefaultTools()
+
+	var toolLog []string
+
+	executor := func(ctx context.Context, call llm.ToolCall) llm.ToolResult {
+		if call.Name != "bash" {
+			return llm.ToolResult{
+				ToolCallID: call.ID,
+				Content:    "unknown tool: " + call.Name,
+				IsError:    true,
+			}
+		}
+
+		command, ok := call.Input["command"].(string)
+		if !ok || command == "" {
+			return llm.ToolResult{
+				ToolCallID: call.ID,
+				Content:    "error: empty command",
+				IsError:    true,
+			}
+		}
+
+		result, err := attshell.RunBash(ctx, attshell.Options{
+			Command: command,
+			Dir:     request.workingDir,
+			Timeout: 5 * time.Minute, // Generous timeout for tool calls.
+		})
+
+		output := formatShellContext(shellResultMsg{
+			command: command,
+			stdout:  result.Stdout,
+			stderr:  result.Stderr,
+			err:     err,
+		})
+		toolLog = append(toolLog, output)
+
+		if err != nil {
+			return llm.ToolResult{
+				ToolCallID: call.ID,
+				Content:    output,
+				IsError:    true,
+			}
+		}
+
+		return llm.ToolResult{
+			ToolCallID: call.ID,
+			Content:    output,
+		}
+	}
+
+	resp, _, err := llm.AgentLoop(ctx, reg, params, request.fallbackModels, executor, llm.AgentLoopConfig{
+		MaxIterations: 20,
+	})
+	if err != nil {
+		return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines(), toolLog: toolLog}
+	}
+
+	var usage tokenUsage
+	usage.addResponse(resp)
+
+	return llmResponseMsg{
+		completedAt: time.Now(),
+		content:     resp.Content,
+		model:       resp.Model,
+		eventLines:  eventLines.Lines(),
+		toolLog:     toolLog,
+		tokenUsage:  usage,
 	}
 }
 
@@ -2365,7 +2463,10 @@ func runOnceWithOptions(
 		return err
 	}
 
-	resp, err := completeWithRecording(ctx, reg, params, prepared.fallbackModels, executionOptions.Response)
+	// Enable tool use for one-shot calls: the LLM can invoke bash commands.
+	params.Tools = llm.DefaultTools()
+
+	resp, err := runOnceComplete(ctx, reg, params, prepared.fallbackModels, executionOptions.Response)
 	if err != nil {
 		emitHookWarning(ctx, hooks, events.Event{
 			Type:        events.Error,
@@ -2377,7 +2478,7 @@ func runOnceWithOptions(
 		})
 		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, err.Error())
 
-		return err
+		return fmt.Errorf("one-shot complete: %w", err)
 	}
 
 	if err := saveRunOnceAssistantResponse(ctx, hooks, store, &sessionState, prepared.activeAgent.name, resp); err != nil {
@@ -2639,7 +2740,10 @@ func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFo
 	}
 }
 
-func completeWithRecording(
+// runOnceComplete handles replay or live agent-loop completion for one-shot
+// mode. If a replay path is set, it loads the recorded response; otherwise it
+// runs the agentic loop with tool execution support.
+func runOnceComplete(
 	ctx context.Context,
 	reg *llm.Registry,
 	params llm.CompleteParams,
@@ -2659,9 +2763,18 @@ func completeWithRecording(
 		return resp, nil
 	}
 
-	resp, err := reg.CompleteWithFallback(ctx, params, fallbackModels)
+	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("complete prompt: %w", err)
+		return nil, fmt.Errorf("get working directory: %w", err)
+	}
+
+	executor := newBashExecutor(cwd, os.Stderr)
+
+	resp, _, err := llm.AgentLoop(ctx, reg, params, fallbackModels, executor, llm.AgentLoopConfig{
+		MaxIterations: 20,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agent loop: %w", err)
 	}
 
 	if err := saveRecordedResponse(responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
@@ -2669,6 +2782,49 @@ func completeWithRecording(
 	}
 
 	return resp, nil
+}
+
+// newBashExecutor creates a ToolExecutor that runs bash commands in the given
+// working directory, logging output to the provided writer.
+func newBashExecutor(cwd string, logw io.Writer) llm.ToolExecutor {
+	return func(ctx context.Context, call llm.ToolCall) llm.ToolResult {
+		if call.Name != "bash" {
+			return llm.ToolResult{
+				ToolCallID: call.ID,
+				Content:    "unknown tool: " + call.Name,
+				IsError:    true,
+			}
+		}
+
+		command, ok := call.Input["command"].(string)
+		if !ok || command == "" {
+			return llm.ToolResult{
+				ToolCallID: call.ID,
+				Content:    "error: empty command",
+				IsError:    true,
+			}
+		}
+
+		result, shellErr := attshell.RunBash(ctx, attshell.Options{
+			Command: command,
+			Dir:     cwd,
+			Timeout: 5 * time.Minute,
+		})
+
+		output := formatShellContext(shellResultMsg{
+			command: command,
+			stdout:  result.Stdout,
+			stderr:  result.Stderr,
+			err:     shellErr,
+		})
+		fmt.Fprintln(logw, dimStyle.Render("  "+output))
+
+		if shellErr != nil {
+			return llm.ToolResult{ToolCallID: call.ID, Content: output, IsError: true}
+		}
+
+		return llm.ToolResult{ToolCallID: call.ID, Content: output}
+	}
 }
 
 func requestModelAndFallbacks(

@@ -98,7 +98,7 @@ func TestCompact_StaysWithinBudgetWhenPossible(t *testing.T) {
 		t.Fatalf("omitted count = %d, want 2", result.Stats.OmittedCount)
 	}
 
-	if got := result.Messages[len(result.Messages)-1]; got != messages[3] {
+	if got := result.Messages[len(result.Messages)-1]; !reflect.DeepEqual(got, messages[3]) {
 		t.Fatalf("newest message not preserved: got %+v want %+v", got, messages[3])
 	}
 }

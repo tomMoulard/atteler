@@ -273,6 +273,7 @@ type ollamaChatRequest struct {
 	Think    any             `json:"think,omitempty"`
 	Model    string          `json:"model"`
 	Messages []ollamaMessage `json:"messages"`
+	Tools    []ollamaTool    `json:"tools,omitempty"`
 	Options  ollamaOptions   `json:"options"`
 	Stream   bool            `json:"stream"`
 }
@@ -285,9 +286,30 @@ type ollamaOptions struct {
 	NumPredict  int      `json:"num_predict,omitempty"`
 }
 
+type ollamaTool struct {
+	Function ollamaToolFunction `json:"function"`
+	Type     string             `json:"type"`
+}
+
+type ollamaToolFunction struct {
+	Parameters  map[string]any `json:"parameters"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+}
+
 type ollamaMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
+}
+
+type ollamaToolCall struct {
+	Function ollamaToolCallFunction `json:"function"`
+}
+
+type ollamaToolCallFunction struct {
+	Arguments map[string]any `json:"arguments"`
+	Name      string         `json:"name"`
 }
 
 type ollamaChatResponse struct {
@@ -308,10 +330,7 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 		o.client = providerHTTPClient(ProviderConfig{})
 	}
 
-	msgs := make([]ollamaMessage, 0, len(params.Messages))
-	for _, m := range params.Messages {
-		msgs = append(msgs, ollamaMessage{Role: string(m.Role), Content: m.Content})
-	}
+	msgs := buildOllamaMessages(params.Messages)
 
 	req := ollamaChatRequest{
 		Model:    params.Model,
@@ -330,6 +349,14 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 
 	if think, ok := ollamaThink(params.ReasoningLevel); ok {
 		req.Think = think
+	}
+
+	// Add tool definitions.
+	for _, tool := range params.Tools {
+		req.Tools = append(req.Tools, ollamaTool{
+			Type:     "function",
+			Function: ollamaToolFunction(tool),
+		})
 	}
 
 	body, err := json.Marshal(req)
@@ -373,12 +400,67 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 		model = params.Model
 	}
 
-	return &Response{
+	result := &Response{
 		Content:      or.Message.Content,
 		Model:        model,
 		InputTokens:  or.PromptEvalCount,
 		OutputTokens: or.EvalCount,
-	}, nil
+	}
+
+	// Parse tool calls from response.
+	result.ToolCalls = parseOllamaToolCalls(or.Message.ToolCalls)
+	if len(result.ToolCalls) > 0 {
+		result.StopReason = StopToolUse
+	}
+
+	return result, nil
+}
+
+func buildOllamaMessages(messages []Message) []ollamaMessage {
+	msgs := make([]ollamaMessage, 0, len(messages))
+
+	for _, m := range messages {
+		omsg := ollamaMessage{Role: string(m.Role), Content: m.Content}
+
+		// Marshal assistant messages with tool calls.
+		if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				omsg.ToolCalls = append(omsg.ToolCalls, ollamaToolCall{
+					Function: ollamaToolCallFunction{
+						Name:      tc.Name,
+						Arguments: tc.Input,
+					},
+				})
+			}
+		}
+
+		// Tool result messages use the "tool" role in Ollama.
+		if m.Role == RoleTool && m.ToolResult != nil {
+			omsg.Content = m.ToolResult.Content
+		}
+
+		msgs = append(msgs, omsg)
+	}
+
+	return msgs
+}
+
+func parseOllamaToolCalls(calls []ollamaToolCall) []ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+
+	out := make([]ToolCall, 0, len(calls))
+
+	for i, tc := range calls {
+		out = append(out, ToolCall{
+			ID:    fmt.Sprintf("ollama_%d", i),
+			Name:  tc.Function.Name,
+			Input: tc.Function.Arguments,
+		})
+	}
+
+	return out
 }
 
 // ModelContextWindow returns known default context windows for common Ollama models.

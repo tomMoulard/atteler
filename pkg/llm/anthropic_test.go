@@ -35,9 +35,9 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 
 		resp := anthropicResponse{
 			Model: gotReq.Model,
-			Content: []struct {
-				Text string `json:"text"`
-			}{{Text: "hello back"}},
+			Content: []anthropicContentBlock{
+				{Type: "text", Text: "hello back"},
+			},
 		}
 		resp.Usage.InputTokens = 10
 		resp.Usage.CacheCreationInputTokens = 4
@@ -125,9 +125,9 @@ func TestAnthropicProvider_BearerAuth(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if err := json.NewEncoder(w).Encode(anthropicResponse{
-			Content: []struct {
-				Text string `json:"text"`
-			}{{Text: "ok"}},
+			Content: []anthropicContentBlock{
+				{Type: "text", Text: "ok"},
+			},
 		}); err != nil {
 			assert.NoError(t, err)
 		}
@@ -203,9 +203,9 @@ func TestAnthropicProvider_DefaultMaxTokens(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		if err := json.NewEncoder(w).Encode(anthropicResponse{
-			Content: []struct {
-				Text string `json:"text"`
-			}{{Text: "ok"}},
+			Content: []anthropicContentBlock{
+				{Type: "text", Text: "ok"},
+			},
 		}); err != nil {
 			assert.NoError(t, err)
 		}

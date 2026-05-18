@@ -25,7 +25,7 @@ TESTPACKAGE ?= "./..."
 
 ## test: run all tests
 test:
-	go test -race -count=1 ./...
+	go test -race ./...
 
 ## e2e: run black-box CLI end-to-end tests
 e2e:
