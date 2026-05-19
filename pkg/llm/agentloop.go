@@ -28,13 +28,13 @@ type AgentLoopConfig struct {
 	// CheckpointInterval is the number of iterations between continuation
 	// prompts. When the loop reaches a multiple of this value,
 	// ConfirmContinue is called. If zero, defaults to
-	// defaultCheckpointInterval (20).
+	// defaultCheckpointInterval (2000).
 	CheckpointInterval int
 }
 
-const defaultCheckpointInterval = 20
-
 const defaultMaxIterations = 2000
+
+const defaultCheckpointInterval = defaultMaxIterations
 
 // AgentLoop runs a multi-turn completion loop where the LLM can request
 // tool executions. It keeps calling Complete until the model stops asking

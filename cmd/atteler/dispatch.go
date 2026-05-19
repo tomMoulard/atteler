@@ -1403,6 +1403,30 @@ var flagGroups = map[string]string{
 	"route-batch": "Model Routing",
 }
 
+var implicitFlagDefaults = map[string]string{
+	"agent-memory-limit":       "5",
+	"bash-timeout-seconds":     "120",
+	"context-pack-tokens":      "unlimited",
+	"git-history-limit":        "5",
+	"mcp-timeout-seconds":      "none",
+	"memory-limit":             "5",
+	"merge-artifact-max-bytes": strconv.FormatInt(watchDefaultLargeFileBytes(), 10),
+	"plan-max-agents":          "unlimited",
+	"plugin-timeout-seconds":   "30",
+	"prompt-complete-limit":    "5",
+	"skill-max-steps":          "6",
+	"skill-min-occurrences":    "2",
+	"spawn-timeout-seconds":    "none",
+	"vector-limit":             "5",
+	"watch-interval-seconds":   "60",
+	"watch-large-file-bytes":   strconv.FormatInt(watchDefaultLargeFileBytes(), 10),
+	"watch-max-iterations":     "unlimited",
+}
+
+func watchDefaultLargeFileBytes() int64 {
+	return 1 << 20
+}
+
 // groupedUsage prints flags organized by domain group with default values.
 func groupedUsage() {
 	fmt.Fprintf(os.Stderr, "Usage: atteler [flags] [prompt]\n\n")
@@ -1452,10 +1476,7 @@ func groupedUsage() {
 func printFlagWithDefault(f *flag.Flag) {
 	name := "  -" + f.Name
 
-	usage := f.Usage
-	if f.DefValue != "" && f.DefValue != "false" && f.DefValue != "0" {
-		usage += " (default: " + f.DefValue + ")"
-	}
+	usage := f.Usage + " (default: " + defaultValueForFlag(f) + ")"
 
 	// Two-column format: flag name on the left, usage on the right.
 	if len(name) < 30 {
@@ -1463,4 +1484,20 @@ func printFlagWithDefault(f *flag.Flag) {
 	} else {
 		fmt.Fprintf(os.Stderr, "%s\n%-30s %s\n", name, "", usage)
 	}
+}
+
+func defaultValueForFlag(f *flag.Flag) string {
+	if f == nil {
+		return strconv.Quote("")
+	}
+
+	if value, ok := implicitFlagDefaults[f.Name]; ok {
+		return value
+	}
+
+	if f.DefValue == "" {
+		return strconv.Quote("")
+	}
+
+	return f.DefValue
 }

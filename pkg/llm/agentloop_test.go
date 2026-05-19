@@ -150,6 +150,57 @@ func TestAgentLoop_MaxIterationsExceeded(t *testing.T) {
 	assert.Contains(t, err.Error(), "exceeded")
 }
 
+func TestAgentLoop_DefaultCheckpointIntervalMatchesMaxIterations(t *testing.T) {
+	t.Parallel()
+
+	// With the default config, the continuation checkpoint should line up with
+	// the loop's hard limit. A value of 20 here would reintroduce the noisy
+	// prompt long before the 2000-iteration safety cap.
+	assert.Equal(t, defaultMaxIterations, defaultCheckpointInterval)
+}
+
+func TestAgentLoop_ZeroCheckpointIntervalDefaultsToMaxIterations(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]*Response, 21)
+	for i := range 20 {
+		responses[i] = &Response{
+			Model:      "test-model",
+			StopReason: StopToolUse,
+			ToolCalls:  []ToolCall{{ID: "call", Name: "bash", Input: map[string]any{"command": "step"}}},
+		}
+	}
+
+	responses[20] = &Response{Content: "done", Model: "test-model", StopReason: StopEndTurn}
+
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{responses: responses})
+
+	params := CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "work"}},
+		Tools:    DefaultTools(),
+	}
+
+	executor := func(_ context.Context, call ToolCall) ToolResult {
+		return ToolResult{ToolCallID: call.ID, Content: "ok"}
+	}
+
+	var checkpoints []int
+
+	resp, _, err := AgentLoop(context.Background(), reg, params, nil, executor, AgentLoopConfig{
+		MaxIterations: 100,
+		ConfirmContinue: func(iterations int) bool {
+			checkpoints = append(checkpoints, iterations)
+			return true
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "done", resp.Content)
+	assert.Empty(t, checkpoints)
+}
+
 func TestAgentLoop_CheckpointContinue(t *testing.T) {
 	t.Parallel()
 

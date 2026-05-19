@@ -276,6 +276,8 @@ type model struct {
 	checkpointResponseCh chan<- bool
 	checkpointRequestCh  <-chan int
 	checkpointIterations int
+	pinnedMessages       map[int]bool
+	executionMode        string
 }
 
 func initialModel(
@@ -337,6 +339,8 @@ func initialModel(
 		textarea:            ta,
 		modelLocked:         modelLocked,
 		worktreeInfo:        wtInfo,
+		pinnedMessages:      make(map[int]bool),
+		executionMode:       "execute",
 	}
 }
 
@@ -788,6 +792,14 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if strings.HasPrefix(input, "/") {
+		next, cmd, handled := m.handleSlashCommand(input)
+		if handled {
+			next.textarea.Reset()
+			return next, cmd
+		}
+	}
+
 	m.promptHistory = prependPromptHistory(input, m.promptHistory, maxPromptHistoryEntries)
 	m.promptHistoryCursor = -1
 	m.promptHistoryDraft = ""
@@ -878,7 +890,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		generation:        generation,
 		maxInputTokens:    m.maxInputTokens,
 		refs:              refs,
-		useTools:          true,
+		useTools:          m.executionMode != "plan",
 		confirmContinueCh: confirmCh,
 		confirmResponseCh: responseCh,
 	}
@@ -1318,13 +1330,16 @@ func (m model) View() string {
 		return m.viewModelScopePicker()
 	}
 
-	var (
-		status string
-		parts  []string
-	)
+	status := m.statusLine()
 
 	if m.waiting {
-		status = statusStyle.Render(m.waitingStatus())
+		waiting := statusStyle.Render(m.waitingStatus())
+		if status != "" {
+			status = status + "\n" + waiting
+		} else {
+			status = waiting
+		}
+
 		if m.completionOpen && len(m.completionItems) > 0 {
 			status += "\n" + m.viewCompletions()
 		}
@@ -1332,32 +1347,70 @@ func (m model) View() string {
 		return status + "\n" + m.viewInput()
 	}
 
+	if m.completionOpen && len(m.completionItems) > 0 {
+		status += "\n" + m.viewCompletions()
+	}
+
+	return status + "\n" + m.viewInput()
+}
+
+func (m model) statusLine() string {
+	parts := make([]string, 0, 5)
+
 	if m.selectedAgent != "" {
 		parts = append(parts, "agent:"+m.selectedAgent)
 	}
 
-	if m.selectedModel != "" {
-		label := m.selectedModel
-		if m.selectedProvider != "" && !strings.Contains(label, "/") {
-			label = m.selectedProvider + "/" + label
-		}
+	if m.executionMode != "" {
+		parts = append(parts, "mode:"+m.executionMode)
+	}
 
-		parts = append(parts, "model:"+label)
+	if modelLabel := m.modelStatusLabel(); modelLabel != "" {
+		parts = append(parts, "model:"+modelLabel)
+	}
+
+	if reasoningLabel := m.reasoningStatusLabel(); reasoningLabel != "" {
+		parts = append(parts, "effort:"+reasoningLabel)
 	}
 
 	if ctx := m.contextUsage(); ctx != "" {
 		parts = append(parts, ctx)
 	}
 
-	if len(parts) > 0 {
-		status = dimStyle.Render("  [") + pickerSelectedStyle.Render(strings.Join(parts, " ")) + dimStyle.Render("]")
+	if len(parts) == 0 {
+		return ""
 	}
 
-	if m.completionOpen && len(m.completionItems) > 0 {
-		status += "\n" + m.viewCompletions()
+	return dimStyle.Render("  [") + pickerSelectedStyle.Render(strings.Join(parts, " ")) + dimStyle.Render("]")
+}
+
+func (m model) modelStatusLabel() string {
+	if m.selectedModel == "" {
+		return ""
 	}
 
-	return status + "\n" + m.viewInput()
+	label := m.selectedModel
+	if m.selectedProvider != "" && !strings.Contains(label, "/") {
+		label = m.selectedProvider + "/" + label
+	}
+
+	return label
+}
+
+func (m model) reasoningStatusLabel() string {
+	if level := strings.TrimSpace(m.generationOverrides.ReasoningLevel); level != "" {
+		return level
+	}
+
+	if m.selectedAgent != "" && m.agentRegistry != nil {
+		if activeAgent, ok := m.agentRegistry.Get(m.selectedAgent); ok {
+			if level := strings.TrimSpace(activeAgent.ReasoningLevel); level != "" {
+				return level
+			}
+		}
+	}
+
+	return strings.TrimSpace(m.generationDefaults.ReasoningLevel)
 }
 
 func (m model) waitingStatus() string {
@@ -1445,7 +1498,10 @@ func (m model) contextUsage() string {
 		return ""
 	}
 
-	limit := m.registry.ContextWindow(m.selectedModel)
+	limit := 0
+	if m.registry != nil {
+		limit = m.registry.ContextWindow(m.selectedModel)
+	}
 
 	used := llm.EstimateTokens(m.history)
 	if limit > 0 {

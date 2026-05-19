@@ -45,3 +45,6 @@ multi-agent runs.
   Add a sensible default for `bash-timeout-seconds`. When a command times out,
   notify the LLM so it can decide to retry with a smaller scope, debug the
   issue, or take corrective action autonomously.
+
+- [ ] hook when executing the command (with the command input and command iteself), and hook with the command output
+- [ ] on exit, it should print the command to run to reuse the last session (e.g., `$0 --session-id <session-id>`).

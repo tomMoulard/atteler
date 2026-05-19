@@ -58,6 +58,8 @@ context:
 plugins:
   # paths:
   #   - ./.atteler/plugins/reviewer
+
+#vim: setf=conf
 `
 
 // TemplateYAML returns a starter YAML configuration without secrets.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -38,6 +39,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/promptcomplete"
 	"github.com/tommoulard/atteler/pkg/review"
 	"github.com/tommoulard/atteler/pkg/session"
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 	attskill "github.com/tommoulard/atteler/pkg/skill"
 	"github.com/tommoulard/atteler/pkg/speculate"
 	"github.com/tommoulard/atteler/pkg/subagent"
@@ -1339,6 +1341,56 @@ func TestView_SuppressesInlineSuggestionWhenCompletionMenuOpen(t *testing.T) {
 	plain := stripANSI(m.View())
 	assert.Contains(t, plain, "completions:")
 	assert.NotContains(t, plain, "summarize this session")
+}
+
+func TestStatusLineShowsReasoningEffortOverride(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		selectedModel:       testCodexModel,
+		executionMode:       "execute",
+		generationOverrides: generationSettings{ReasoningLevel: testReasoningXHigh},
+	}
+
+	plain := stripANSI(m.statusLine())
+	assert.Contains(t, plain, "model:"+testCodexModel)
+	assert.Contains(t, plain, "effort:"+testReasoningXHigh)
+}
+
+func TestStatusLineShowsAgentReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	agents := agent.NewRegistry(map[string]config.AgentConfig{
+		testReviewerName: {ReasoningLevel: "high"},
+	})
+	m := model{
+		agentRegistry:      agents,
+		selectedAgent:      testReviewerName,
+		selectedModel:      "gpt-test",
+		generationDefaults: generationSettings{ReasoningLevel: "medium"},
+	}
+
+	plain := stripANSI(m.statusLine())
+	assert.Contains(t, plain, "agent:"+testReviewerName)
+	assert.Contains(t, plain, "effort:high")
+}
+
+func TestViewShowsReasoningEffortWhileWaiting(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	m := model{
+		textarea:           textarea.New(),
+		selectedModel:      testCodexModel,
+		generationDefaults: generationSettings{ReasoningLevel: "medium"},
+		runningTaskLabel:   "LLM",
+		runningTaskStarted: now.Add(-time.Second),
+		waiting:            true,
+	}
+
+	plain := stripANSI(m.View())
+	assert.Contains(t, plain, "effort:medium")
+	assert.Contains(t, plain, "Thinking")
 }
 
 func TestSubmitInput_QueuesFollowUpWhileWaiting(t *testing.T) {
@@ -4459,4 +4511,85 @@ func TestUpdateShellResult_ClearsCompletedTaskTimer(t *testing.T) {
 	assert.False(t, next.waiting)
 	assert.Empty(t, next.runningTaskLabel)
 	assert.True(t, next.runningTaskStarted.IsZero())
+}
+
+func TestPruneToPinned_ReindexesPinnedMessages(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		history: []llm.Message{
+			{Role: llm.RoleUser, Content: "drop"},
+			{Role: llm.RoleAssistant, Content: "keep one"},
+			{Role: llm.RoleUser, Content: "drop too"},
+			{Role: llm.RoleAssistant, Content: "keep two"},
+		},
+		sessionState:   session.New("gpt-test", nil),
+		pinnedMessages: map[int]bool{1: true, 3: true},
+	}
+
+	m.pruneToPinned()
+
+	require.Len(t, m.history, 2)
+	assert.Equal(t, "keep one", m.history[0].Content)
+	assert.Equal(t, "keep two", m.history[1].Content)
+	assert.Equal(t, m.history, m.sessionState.Messages)
+	assert.Equal(t, map[int]bool{0: true, 1: true}, m.pinnedMessages)
+}
+
+func TestMarshalJSONLines_CompactsAndTerminatesLines(t *testing.T) {
+	t.Parallel()
+
+	got, err := marshalJSONLines([]llm.Message{{Role: llm.RoleUser, Content: "hello"}, {Role: llm.RoleAssistant, Content: "world"}})
+	require.NoError(t, err)
+
+	assert.Equal(t, "{\"role\":\"user\",\"content\":\"hello\"}\n{\"role\":\"assistant\",\"content\":\"world\"}\n", string(got))
+}
+
+func TestApplyPatch_UsesTempFileAndQuotesPath(t *testing.T) {
+	t.Parallel()
+
+	patch := "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
+	m := model{ctx: context.Background(), history: []llm.Message{{Role: llm.RoleAssistant, Content: patch}}}
+
+	next, cmd, handled := m.applyPatch()
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	require.True(t, next.waiting)
+	command := gitApplyPatchCommand("/tmp/atteler-patch-a'b.diff")
+	require.Contains(t, command, "git apply --check")
+	require.NotContains(t, command, "<<")
+	require.NotContains(t, command, patch)
+	assert.Contains(t, command, shellQuote("/tmp/atteler-patch-a'b.diff"))
+}
+
+func TestShellQuote_HandlesSingleQuotes(t *testing.T) {
+	t.Parallel()
+
+	quoted := shellQuote("/tmp/a'b.diff")
+	assert.Equal(t, "'/tmp/a'\\''b.diff'", quoted)
+
+	result, err := attshell.RunBash(context.Background(), attshell.Options{Command: "printf %s " + quoted})
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/a'b.diff", result.Stdout)
+}
+
+func TestDefaultValueForFlag_IncludesZeroAndImplicitDefaults(t *testing.T) {
+	tests := []struct {
+		name string
+		flag *flag.Flag
+		want string
+	}{
+		{name: "empty string", flag: &flag.Flag{Name: "agent", DefValue: ""}, want: `""`},
+		{name: "false bool", flag: &flag.Flag{Name: "doctor", DefValue: "false"}, want: "false"},
+		{name: "zero numeric", flag: &flag.Flag{Name: "evaluation-score", DefValue: "0"}, want: "0"},
+		{name: "implicit runtime default", flag: &flag.Flag{Name: "memory-limit", DefValue: ""}, want: "5"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := defaultValueForFlag(tt.flag); got != tt.want {
+				t.Fatalf("defaultValueForFlag() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
