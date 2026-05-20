@@ -123,12 +123,12 @@ func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 
-	case "up", "k":
+	case keyUp, "k":
 		if m.pickerCursor > 0 {
 			m.pickerCursor--
 		}
 
-	case "down", "j":
+	case keyDown, "j":
 		if m.pickerCursor < len(m.pickerItems)-1 {
 			m.pickerCursor++
 		}
@@ -179,6 +179,7 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 	m.modelLocked = true
 	m.sessionState.DefaultModel = m.selectedModel
 
+	reasoningSelected := item.reasoning != ""
 	switch item.reasoning {
 	case "":
 		// No reasoning information attached — leave the override unchanged.
@@ -188,9 +189,18 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 		m.generationOverrides.ReasoningLevel = item.reasoning
 	}
 
+	if reasoningSelected {
+		m.sessionState.DefaultReasoningLevel = strings.TrimSpace(m.generationOverrides.ReasoningLevel)
+	}
+
 	suffix := ""
 	if item.reasoning != "" {
 		suffix = dimStyle.Render(":") + pickerSelectedStyle.Render(item.reasoning)
+	}
+
+	persistedReasoningLevel := m.sessionState.DefaultReasoningLevel
+	if item.reasoning == llm.ReasoningLevelDefault {
+		persistedReasoningLevel = llm.ReasoningLevelDefault
 	}
 
 	cmds := []tea.Cmd{tea.Println(
@@ -202,7 +212,16 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 			dimStyle.Render(" ("+modelScopeLabel(scope)+")"),
 	)}
 	if scope != appconfig.ModelScopeSession {
-		cmds = append(cmds, saveModelPreference(m.ctx, m.stateStore, m.cwd, m.selectedModel, scope, m.hookRunner))
+		cmds = append(cmds, saveModelPreference(
+			m.ctx,
+			m.stateStore,
+			m.cwd,
+			m.selectedModel,
+			persistedReasoningLevel,
+			reasoningSelected,
+			scope,
+			m.hookRunner,
+		))
 	}
 
 	return m, tea.Batch(cmds...)

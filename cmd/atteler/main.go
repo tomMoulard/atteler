@@ -113,15 +113,21 @@ var (
 // Key binding constants.
 const (
 	keyCtrlC         = "ctrl+c"
+	keyDown          = "down"
 	keyEnter         = "enter"
 	keyEsc           = "esc"
+	keyUp            = "up"
 	outputFormatJSON = "json"
 	outputFormatText = "text"
 	statusError      = "error"
 
 	maxPromptHistoryEntries = 100
 	taskTickInterval        = time.Second
+	idleSuggestionDelay     = time.Second
+	idleSuggestionTimeout   = 8 * time.Second
 )
+
+var terminalTitleSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // ---------------------------------------------------------------------------
 // Messages (tea.Msg)
@@ -145,6 +151,18 @@ type shellResultMsg struct {
 	command     string
 	stdout      string
 	stderr      string
+}
+
+type idleSuggestionRequestMsg struct {
+	input string
+	id    int
+}
+
+type idleSuggestionMsg struct {
+	err        error
+	input      string
+	suggestion string
+	id         int
 }
 
 type taskTickMsg struct {
@@ -250,7 +268,11 @@ type model struct {
 	worktreeInfo        *worktree.Info
 	tokenUsage          tokenUsage
 	runningTaskStarted  time.Time
+	idleSuggestionInput string
+	idleSuggestionText  string
 	pickerCursor        int
+	idleSuggestionID    int
+	terminalTitleFrame  int
 	modelFetchID        int
 	modelFetchesPending int
 	completionCursor    int
@@ -390,11 +412,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellResultMsg:
 		return m.updateShellResult(msg)
 
-	case sessionSavedMsg:
-		return m.updateSessionSaved(msg)
+	case idleSuggestionRequestMsg, idleSuggestionMsg:
+		return m.updateIdleSuggestionMessage(msg)
 
-	case hookMsg:
-		return m.updateHook(msg)
+	case sessionSavedMsg, hookMsg:
+		return m.updateLifecycleMessage(msg)
 
 	case taskTickMsg:
 		return m.updateTaskTick(msg)
@@ -404,6 +426,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m.updateTextarea(msg)
+}
+
+func (m model) updateIdleSuggestionMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case idleSuggestionRequestMsg:
+		return m.updateIdleSuggestionRequest(msg)
+	case idleSuggestionMsg:
+		return m.updateIdleSuggestion(msg)
+	default:
+		return m, nil
+	}
 }
 
 func (m model) updateModelsLoaded(msg modelsLoadedMsg) (tea.Model, tea.Cmd) {
@@ -494,6 +527,17 @@ func (m model) updateSessionSaved(msg sessionSavedMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateLifecycleMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case sessionSavedMsg:
+		return m.updateSessionSaved(msg)
+	case hookMsg:
+		return m.updateHook(msg)
+	default:
+		return m, nil
+	}
+}
+
 func (m model) updateHook(msg hookMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	if msg.line != "" {
@@ -512,7 +556,13 @@ func (m model) updateTaskTick(msg taskTickMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	return m, taskTickCmd(msg.id)
+	if m.checkpointResponseCh != nil {
+		return m, tea.SetWindowTitle(terminalIdleTitle())
+	}
+
+	m.terminalTitleFrame++
+
+	return m, tea.Batch(taskTickCmd(msg.id), tea.SetWindowTitle(m.terminalWorkingTitle()))
 }
 
 // updateLoopCheckpoint handles the agent loop reaching a checkpoint. It shows
@@ -527,7 +577,7 @@ func (m model) updateLoopCheckpoint(msg loopCheckpointMsg) (tea.Model, tea.Cmd) 
 		msg.iterations,
 	)
 
-	return m, tea.Println(warnStyle.Render(prompt))
+	return m, tea.Batch(tea.Println(warnStyle.Render(prompt)), tea.SetWindowTitle(terminalIdleTitle()))
 }
 
 // handleCheckpointKey handles Y/N key presses during a checkpoint prompt.
@@ -547,6 +597,8 @@ func (m model) handleCheckpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Re-listen for the next checkpoint.
 		return m, tea.Batch(
 			tea.Println(dimStyle.Render("Continuing agent loop...")),
+			tea.SetWindowTitle(m.terminalWorkingTitle()),
+			taskTickCmd(m.runningTaskID),
 			relistenForCheckpoint(reqCh, ch),
 		)
 
@@ -557,7 +609,7 @@ func (m model) handleCheckpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		ch <- false
 
-		return m, tea.Println(warnStyle.Render("Stopping agent loop."))
+		return m, tea.Batch(tea.Println(warnStyle.Render("Stopping agent loop.")), tea.SetWindowTitle(m.terminalWorkingTitle()))
 
 	default:
 		// Ignore other keys; keep waiting for Y/N.
@@ -615,6 +667,11 @@ func (m model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, taCmd)
 		m.promptHistoryCursor = -1
 		m.promptHistoryDraft = ""
+		m.clearIdleSuggestion()
+
+		if cmd := m.scheduleIdleSuggestion(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -644,11 +701,21 @@ func (m model) handleChatCommand(keyName string) (tea.Model, tea.Cmd, bool) {
 	case "ctrl+z":
 		next, cmd := m.undoPromptRevamp()
 		return next, cmd, true
-	case "up":
+	case keyUp:
+		if next, ok := m.moveCursorForHistoryEdge(keyUp); ok {
+			return next, nil, true
+		}
+
 		next, ok := m.navigatePromptHistory(1)
+
 		return next, nil, ok
-	case "down":
+	case keyDown:
+		if next, ok := m.moveCursorForHistoryEdge(keyDown); ok {
+			return next, nil, true
+		}
+
 		next, ok := m.navigatePromptHistory(-1)
+
 		return next, nil, ok
 	case keyEnter:
 		next, cmd := m.submitInput()
@@ -667,6 +734,7 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd, bool) {
 		m.promptHistoryDraft = ""
 		m.completionOpen = false
 		m.completionItems = nil
+		m.clearIdleSuggestion()
 		m.revampUndoActive = false
 		m.revampUndo = ""
 
@@ -682,7 +750,10 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd, bool) {
 		elapsed := m.finishRunningTask(time.Now())
 		m.waiting = false
 
-		return m, tea.Println(errStyle.Render("(canceled" + taskDurationSuffix(elapsed) + ")")), true
+		return m, tea.Batch(
+			tea.Println(errStyle.Render("(canceled"+taskDurationSuffix(elapsed)+")")),
+			tea.SetWindowTitle(terminalIdleTitle()),
+		), true
 	}
 
 	m.quitting = true
@@ -705,6 +776,15 @@ func (m model) acceptCompletion() (tea.Model, tea.Cmd, bool) {
 	if suggestion, ok := m.promptSuggestion(); ok {
 		m.textarea.SetValue(applyPromptSuggestion(m.textarea.Value(), suggestion))
 		m.textarea.CursorEnd()
+		m.clearIdleSuggestion()
+
+		return m, nil, true
+	}
+
+	if suffix, ok := m.visibleIdleSuggestion(); ok {
+		m.textarea.SetValue(m.textarea.Value() + suffix)
+		m.textarea.CursorEnd()
+		m.clearIdleSuggestion()
 
 		return m, nil, true
 	}
@@ -745,8 +825,31 @@ func (m model) undoPromptRevamp() (tea.Model, tea.Cmd) {
 	return m, tea.Println(dimStyle.Render("(prompt revamp undone)"))
 }
 
+func (m model) moveCursorForHistoryEdge(direction string) (model, bool) {
+	value := m.textarea.Value()
+	if value == "" {
+		return m, false
+	}
+
+	cursor := textareaCursorOffset(m.textarea)
+	if cursor <= 0 || cursor >= len(value) {
+		return m, false
+	}
+
+	switch direction {
+	case keyUp:
+		m.textarea.CursorStart()
+	case keyDown:
+		m.textarea.CursorEnd()
+	default:
+		return m, false
+	}
+
+	return m, true
+}
+
 func (m model) navigatePromptHistory(delta int) (model, bool) {
-	if m.waiting || len(m.promptHistory) == 0 {
+	if len(m.promptHistory) == 0 {
 		return m, false
 	}
 
@@ -805,6 +908,7 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 	m.promptHistoryDraft = ""
 	m.revampUndoActive = false
 	m.revampUndo = ""
+	m.clearIdleSuggestion()
 	m.textarea.Reset()
 
 	if m.waiting {
@@ -868,6 +972,8 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 	if m.selectedModel != "" {
 		m.sessionState.DefaultModel = m.selectedModel
 	}
+
+	m.sessionState.DefaultReasoningLevel = strings.TrimSpace(m.generationOverrides.ReasoningLevel)
 
 	confirmCh := make(chan int, 1)
 	responseCh := make(chan bool, 1)
@@ -962,9 +1068,12 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 			SessionPath: m.sessionPath,
 			Agent:       m.selectedAgent,
 			Model:       m.sessionState.DefaultModel,
+			Content:     command,
 			Metadata: map[string]string{
 				"command": command,
 				"cwd":     m.cwd,
+				"input":   "!" + command,
+				"source":  "user",
 			},
 		}),
 		runShellCommandCmd(ctx, command, m.cwd),
@@ -988,10 +1097,13 @@ func (m model) runInteractiveShellCommand(command, line string) (model, tea.Cmd)
 			SessionPath: m.sessionPath,
 			Agent:       m.selectedAgent,
 			Model:       m.sessionState.DefaultModel,
+			Content:     command,
 			Metadata: map[string]string{
 				"command": command,
 				"cwd":     m.cwd,
+				"input":   "!" + command,
 				"mode":    "interactive",
+				"source":  "user",
 			},
 		}),
 		tea.ExecProcess(cmd, func(err error) tea.Msg {
@@ -1113,13 +1225,24 @@ func (m model) updateShellResult(msg shellResultMsg) (tea.Model, tea.Cmd) {
 	elapsed := m.finishRunningTask(msg.completedAt)
 
 	content := formatShellContext(msg)
+	outputEvent := commandOutputEvent(
+		m.sessionState.ID,
+		m.sessionPath,
+		m.selectedAgent,
+		m.sessionState.DefaultModel,
+		m.cwd,
+		msg.command,
+		content,
+		msg.err,
+		map[string]string{"source": "user"},
+	)
 	m.history = append(m.history, llm.Message{
 		Role:    llm.RoleUser,
 		Content: content,
 	})
 	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
 
-	cmds := []tea.Cmd{}
+	cmds := []tea.Cmd{tea.SetWindowTitle(terminalIdleTitle()), emitHook(m.ctx, m.hookRunner, outputEvent)}
 	if msg.stdout != "" {
 		cmds = append(cmds, tea.Println(strings.TrimRight(msg.stdout, "\n")))
 	}
@@ -1172,6 +1295,33 @@ func formatShellContext(msg shellResultMsg) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func commandOutputEvent(
+	sessionID, sessionPath, agentName, modelName, cwd, command, content string,
+	err error,
+	extra map[string]string,
+) events.Event {
+	metadata := map[string]string{
+		"command": command,
+		"cwd":     cwd,
+	}
+	maps.Copy(metadata, extra)
+
+	event := events.Event{
+		Type:        events.CommandOutput,
+		SessionID:   sessionID,
+		SessionPath: sessionPath,
+		Agent:       agentName,
+		Model:       modelName,
+		Content:     content,
+		Metadata:    metadata,
+	}
+	if err != nil {
+		event.Error = err.Error()
+	}
+
+	return event
+}
+
 type agentSelection struct {
 	name  string
 	agent agent.Agent
@@ -1189,7 +1339,7 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 	m.cancel = nil
 	elapsed := m.finishRunningTask(msg.completedAt)
 
-	cmds := eventLineCommands(msg.eventLines)
+	cmds := append(eventLineCommands(msg.eventLines), tea.SetWindowTitle(terminalIdleTitle()))
 	if msg.err != nil {
 		errorLine := "Error: " + msg.err.Error()
 		if elapsed > 0 {
@@ -1282,8 +1432,9 @@ func (m *model) startRunningTask(label string) tea.Cmd {
 	m.runningTaskID++
 	m.runningTaskLabel = label
 	m.runningTaskStarted = time.Now()
+	m.terminalTitleFrame = 0
 
-	return taskTickCmd(m.runningTaskID)
+	return tea.Batch(tea.SetWindowTitle(m.terminalWorkingTitle()), taskTickCmd(m.runningTaskID))
 }
 
 func (m *model) finishRunningTask(completedAt time.Time) time.Duration {
@@ -1312,6 +1463,24 @@ func taskTickCmd(id int) tea.Cmd {
 	return tea.Tick(taskTickInterval, func(time.Time) tea.Msg {
 		return taskTickMsg{id: id}
 	})
+}
+
+func terminalIdleTitle() string {
+	return "atteler"
+}
+
+func (m model) terminalWorkingTitle() string {
+	label := strings.TrimSpace(m.runningTaskLabel)
+	if label == "" {
+		label = "working"
+	}
+
+	frame := "-"
+	if len(terminalTitleSpinnerFrames) > 0 {
+		frame = terminalTitleSpinnerFrames[m.terminalTitleFrame%len(terminalTitleSpinnerFrames)]
+	}
+
+	return frame + " atteler — " + label
 }
 
 // updatePicker handles key events while the model picker is open.
@@ -1444,6 +1613,8 @@ func (m model) viewInput() string {
 	inputView := m.textarea.View()
 	if suggestion, ok := m.promptSuggestion(); ok && !m.completionOpen {
 		inputView = renderInlinePromptSuggestion(m.textarea, inputView, suggestion.Suffix)
+	} else if suffix, ok := m.visibleIdleSuggestion(); ok && !m.completionOpen {
+		inputView = renderInlinePromptSuggestion(m.textarea, inputView, suffix)
 	}
 
 	return inputView
@@ -1538,6 +1709,172 @@ func (m model) promptSuggestion() (promptcomplete.Suggestion, bool) {
 	}
 
 	return suggestion, true
+}
+
+func (m *model) clearIdleSuggestion() {
+	m.idleSuggestionID++
+	m.idleSuggestionInput = ""
+	m.idleSuggestionText = ""
+}
+
+func (m *model) scheduleIdleSuggestion() tea.Cmd {
+	value := m.textarea.Value()
+	if m.waiting ||
+		m.registry == nil ||
+		strings.TrimSpace(value) == "" ||
+		textareaCursorOffset(m.textarea) != len(value) {
+		return nil
+	}
+
+	m.idleSuggestionID++
+	m.idleSuggestionInput = value
+	m.idleSuggestionText = ""
+	id := m.idleSuggestionID
+
+	return tea.Tick(idleSuggestionDelay, func(time.Time) tea.Msg {
+		return idleSuggestionRequestMsg{id: id, input: value}
+	})
+}
+
+func (m model) updateIdleSuggestionRequest(msg idleSuggestionRequestMsg) (tea.Model, tea.Cmd) {
+	if msg.id != m.idleSuggestionID ||
+		msg.input != m.idleSuggestionInput ||
+		msg.input != m.textarea.Value() ||
+		m.waiting ||
+		m.registry == nil {
+		return m, nil
+	}
+
+	return m, requestIdleSuggestion(m.ctx, m.registry, m.selectedModel, m.fallbackModels, m.generationDefaults, m.generationOverrides, msg.id, msg.input)
+}
+
+func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) {
+	if msg.id != m.idleSuggestionID ||
+		msg.input != m.idleSuggestionInput ||
+		msg.input != m.textarea.Value() ||
+		textareaCursorOffset(m.textarea) != len(m.textarea.Value()) {
+		return m, nil
+	}
+
+	if msg.err != nil {
+		// Idle suggestions are opportunistic; avoid interrupting the user for
+		// provider/network failures.
+		slog.Debug("idle prompt suggestion failed", "error", msg.err)
+		return m, nil
+	}
+
+	m.idleSuggestionText = normalizeIdleSuggestion(msg.input, msg.suggestion)
+
+	return m, nil
+}
+
+func (m model) visibleIdleSuggestion() (string, bool) {
+	value := m.textarea.Value()
+	if strings.TrimSpace(value) == "" ||
+		m.idleSuggestionInput != value ||
+		m.idleSuggestionText == "" ||
+		textareaCursorOffset(m.textarea) != len(value) {
+		return "", false
+	}
+
+	return m.idleSuggestionText, true
+}
+
+func requestIdleSuggestion(
+	ctx context.Context,
+	reg *llm.Registry,
+	modelName string,
+	fallbackModels []string,
+	defaults generationSettings,
+	overrides generationSettings,
+	id int,
+	input string,
+) tea.Cmd {
+	return func() tea.Msg {
+		if ctx == nil {
+			return idleSuggestionMsg{id: id, input: input, err: errors.New("idle suggestion: context is required")}
+		}
+
+		reqCtx, cancel := context.WithTimeout(ctx, idleSuggestionTimeout)
+		defer cancel()
+
+		generation := mergeGenerationSettings(defaults, overrides)
+		generation.MaxTokens = 32
+
+		params := llm.CompleteParams{
+			Model: modelName,
+			Messages: []llm.Message{
+				{
+					Role: llm.RoleSystem,
+					Content: "You complete an in-progress CLI prompt. " +
+						"Return only a short suffix that should be appended to the user's current text. " +
+						"Do not repeat the current text, do not add explanations, and return an empty response if no useful suffix exists.",
+				},
+				{
+					Role:    llm.RoleUser,
+					Content: "Current text:\n" + input,
+				},
+			},
+		}
+		applyGenerationParams(&params, generation)
+
+		resp, err := reg.CompleteWithFallback(reqCtx, params, fallbackModels)
+		if err != nil {
+			return idleSuggestionMsg{id: id, input: input, err: err}
+		}
+
+		return idleSuggestionMsg{id: id, input: input, suggestion: resp.Content}
+	}
+}
+
+func normalizeIdleSuggestion(input, suggestion string) string {
+	suggestion = strings.TrimSpace(suggestion)
+	suggestion = strings.Trim(suggestion, "`\"'")
+
+	suggestion = strings.Join(strings.Fields(suggestion), " ")
+	if suggestion == "" {
+		return ""
+	}
+
+	if suffix, ok := strings.CutPrefix(suggestion, input); ok {
+		suggestion = suffix
+	}
+
+	suggestion = strings.TrimLeft(suggestion, " \t")
+	if suggestion == "" {
+		return ""
+	}
+
+	if needsSuggestionSeparator(input, suggestion) {
+		suggestion = " " + suggestion
+	}
+
+	const maxSuggestionRunes = 160
+	if utf8.RuneCountInString(suggestion) > maxSuggestionRunes {
+		runes := []rune(suggestion)
+		suggestion = string(runes[:maxSuggestionRunes])
+	}
+
+	return suggestion
+}
+
+func needsSuggestionSeparator(input, suggestion string) bool {
+	if input == "" || suggestion == "" {
+		return false
+	}
+
+	last, _ := utf8.DecodeLastRuneInString(input)
+
+	first, _ := utf8.DecodeRuneInString(suggestion)
+	if last == utf8.RuneError || first == utf8.RuneError {
+		return false
+	}
+
+	return !isPromptBoundary(last) && !isPromptBoundary(first)
+}
+
+func isPromptBoundary(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || strings.ContainsRune(".,;:!?)]}/", r)
 }
 
 func textareaCursorOffset(input textarea.Model) int {
@@ -2042,6 +2379,18 @@ func callLLMWithTools(
 			}
 		}
 
+		emitFromContextWarning(ctx, events.Event{
+			Type:    events.CommandExecute,
+			Content: command,
+			Metadata: map[string]string{
+				"command":      command,
+				"cwd":          request.workingDir,
+				"input":        command,
+				"source":       "llm_tool",
+				"tool_call_id": call.ID,
+			},
+		})
+
 		result, err := attshell.RunBash(ctx, attshell.Options{
 			Command: command,
 			Dir:     request.workingDir,
@@ -2055,6 +2404,13 @@ func callLLMWithTools(
 			err:     err,
 		})
 		toolLog = append(toolLog, output)
+		emitFromContextWarning(ctx, commandOutputEvent(
+			"", "", "", "", request.workingDir, command, output, err,
+			map[string]string{
+				"source":       "llm_tool",
+				"tool_call_id": call.ID,
+			},
+		))
 
 		if err != nil {
 			content := output
@@ -2314,6 +2670,8 @@ func saveModelPreference(
 	store *appconfig.StateStore,
 	cwd string,
 	model string,
+	reasoningLevel string,
+	reasoningSelected bool,
 	scope appconfig.ModelScope,
 	runner *events.Runner,
 ) tea.Cmd {
@@ -2328,6 +2686,10 @@ func saveModelPreference(
 		}
 
 		state.SetModel(scope, cwd, model)
+
+		if reasoningSelected {
+			state.SetReasoningLevel(scope, cwd, reasoningLevel)
+		}
 
 		if err := store.Save(state); err != nil {
 			return modelPreferenceSavedMsg{err: err, scope: scope}
@@ -2457,6 +2819,12 @@ func emitHookWarning(ctx context.Context, runner *events.Runner, event events.Ev
 	}
 }
 
+func emitFromContextWarning(ctx context.Context, event events.Event) {
+	if err := events.EmitFromContext(ctx, event); err != nil {
+		slog.Warn("emit hook from context", "event_type", event.Type, "error", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -2550,21 +2918,94 @@ func runInteractive(ctx context.Context, state appState) error {
 		return fmt.Errorf("run TUI: %w", err)
 	}
 
+	finalSession := state.sessionState
+
 	if m, ok := finalModel.(model); ok {
 		printTokenUsageSummary(os.Stderr, m.tokenUsage)
+		finalSession = m.sessionState
+	}
+
+	if state.sessionStore != nil && finalSession.ID != "" {
+		if err := state.sessionStore.Save(finalSession); err != nil {
+			fmt.Fprintln(os.Stderr, "warning: could not save session on exit: "+err.Error())
+		} else {
+			emitFileWriteWarning(ctx, state.hookRunner, finalSession, state.sessionStore.Path(finalSession.ID), finalSession.DefaultAgent, "session")
+		}
+
+		printSessionReuseHint(os.Stderr, resolveSpawnBinary(""), state.sessionStore, finalSession.ID)
 	}
 
 	emitHookWarning(ctx, state.hookRunner, events.Event{
 		Type:        events.SessionEnd,
-		SessionID:   state.sessionState.ID,
-		SessionPath: state.sessionStore.Path(state.sessionState.ID),
-		Agent:       state.selectedAgent,
-		Model:       state.selectedModel,
+		SessionID:   finalSession.ID,
+		SessionPath: state.sessionStore.Path(finalSession.ID),
+		Agent:       finalSession.DefaultAgent,
+		Model:       finalSession.DefaultModel,
 	})
 
 	finalizeWorktree(ctx, &state)
 
 	return nil
+}
+
+func printSessionReuseHint(w io.Writer, binary string, store *session.Store, sessionID string) {
+	command := formatSessionReuseCommand(binary, store, sessionID)
+	if command == "" || w == nil {
+		return
+	}
+
+	fmt.Fprintln(w, "reuse session: "+command)
+}
+
+func formatSessionReuseCommand(binary string, store *session.Store, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+
+	binary = strings.TrimSpace(binary)
+	if binary == "" {
+		binary = "atteler"
+	}
+
+	args := []string{binary}
+	if store != nil && strings.TrimSpace(store.Dir()) != "" {
+		args = append(args, "--session-dir", store.Dir())
+	}
+
+	args = append(args, "--session-id", sessionID)
+
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		if isSimpleShellWord(arg) {
+			quoted[i] = arg
+		} else {
+			quoted[i] = shellQuote(arg)
+		}
+	}
+
+	return strings.Join(quoted, " ")
+}
+
+func isSimpleShellWord(value string) bool {
+	if value == "" {
+		return false
+	}
+
+	for _, r := range value {
+		if !isSimpleShellWordRune(r) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func isSimpleShellWordRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9') ||
+		strings.ContainsRune("@%_+=:,./-", r)
 }
 
 type responseRecordOptions struct {
@@ -2772,10 +3213,7 @@ func runOnceWithOptions(
 		return err
 	}
 
-	if prepared.requestModel != "" {
-		sessionState.DefaultModel = prepared.requestModel
-	}
-
+	applyRunOnceSessionDefaults(&sessionState, prepared, generationOverrides)
 	sessionState.DefaultAgent = prepared.activeAgent.name
 
 	emitHookWarning(ctx, hooks, events.Event{
@@ -2891,6 +3329,16 @@ func runOnceWithOptions(
 	}
 
 	return writeRunOnceResult(os.Stdout, os.Stderr, result, outputFormat, executionOptions.Headless)
+}
+
+func applyRunOnceSessionDefaults(sessionState *session.Session, prepared runOncePrepared, generationOverrides generationSettings) {
+	if prepared.requestModel != "" {
+		sessionState.DefaultModel = prepared.requestModel
+	}
+
+	if level := strings.TrimSpace(generationOverrides.ReasoningLevel); level != "" {
+		sessionState.DefaultReasoningLevel = level
+	}
 }
 
 func prepareRunOnceRequest(
@@ -3201,6 +3649,18 @@ func newBashExecutor(cwd string, logw io.Writer) llm.ToolExecutor {
 			}
 		}
 
+		emitFromContextWarning(ctx, events.Event{
+			Type:    events.CommandExecute,
+			Content: command,
+			Metadata: map[string]string{
+				"command":      command,
+				"cwd":          cwd,
+				"input":        command,
+				"source":       "llm_tool",
+				"tool_call_id": call.ID,
+			},
+		})
+
 		result, shellErr := attshell.RunBash(ctx, attshell.Options{
 			Command: command,
 			Dir:     cwd,
@@ -3214,6 +3674,13 @@ func newBashExecutor(cwd string, logw io.Writer) llm.ToolExecutor {
 			err:     shellErr,
 		})
 		fmt.Fprintln(logw, dimStyle.Render("  "+output))
+		emitFromContextWarning(ctx, commandOutputEvent(
+			"", "", "", "", cwd, command, output, shellErr,
+			map[string]string{
+				"source":       "llm_tool",
+				"tool_call_id": call.ID,
+			},
+		))
 
 		if shellErr != nil {
 			return llm.ToolResult{ToolCallID: call.ID, Content: output, IsError: true}
@@ -3374,6 +3841,94 @@ func describePlugin(paths []string, name string) error {
 	return nil
 }
 
+func initRTKPlugin(dir string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return errors.New("init rtk plugin: directory is required")
+	}
+
+	files := map[string]rtkPluginFile{
+		"plugin.yaml": {
+			mode: 0o600,
+			content: `name: rtk
+version: "0.1.0"
+description: RTK token-saving CLI proxy helpers for Atteler.
+capabilities:
+  - rtk
+  - shell-output
+  - token-optimization
+entrypoints:
+  version: bin/version
+  gain: bin/gain
+  show: bin/show
+  init-codex: bin/init-codex
+`,
+		},
+		"bin/version": {
+			mode:    0o700,
+			content: "#!/bin/sh\nexec rtk --version \"$@\"\n",
+		},
+		"bin/gain": {
+			mode:    0o700,
+			content: "#!/bin/sh\nexec rtk gain \"$@\"\n",
+		},
+		"bin/show": {
+			mode:    0o700,
+			content: "#!/bin/sh\nexec rtk init --show \"$@\"\n",
+		},
+		"bin/init-codex": {
+			mode:    0o700,
+			content: "#!/bin/sh\nexec rtk init -g --codex \"$@\"\n",
+		},
+	}
+
+	for name, file := range files {
+		path := filepath.Join(dir, name)
+		if err := writeRTKPluginFile(path, file.content, file.mode); err != nil {
+			return err
+		}
+	}
+
+	fmt.Println("RTK plugin written to " + dir)
+	fmt.Println("Add this to your atteler config:")
+	fmt.Println("plugins:")
+	fmt.Println("  paths: [" + strconv.Quote(dir) + "]")
+	fmt.Println("Then run: atteler --run-plugin rtk/version")
+
+	return nil
+}
+
+type rtkPluginFile struct {
+	content string
+	mode    os.FileMode
+}
+
+func writeRTKPluginFile(path, content string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("init rtk plugin: create dir: %w", err)
+	}
+
+	if existing, err := os.ReadFile(path); err == nil {
+		if string(existing) != content {
+			return fmt.Errorf("init rtk plugin: refusing to overwrite modified file %s", path)
+		}
+
+		if chmodErr := os.Chmod(path, mode); chmodErr != nil {
+			return fmt.Errorf("init rtk plugin: chmod %s: %w", path, chmodErr)
+		}
+
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("init rtk plugin: read %s: %w", path, err)
+	}
+
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		return fmt.Errorf("init rtk plugin: write %s: %w", path, err)
+	}
+
+	return nil
+}
+
 func runPluginEntrypoint(
 	ctx context.Context,
 	paths []string,
@@ -3452,9 +4007,12 @@ func runBashCommand(ctx context.Context, state appState, opts cliOptions) error 
 		SessionPath: state.sessionStore.Path(state.sessionState.ID),
 		Agent:       state.selectedAgent,
 		Model:       state.selectedModel,
+		Content:     opts.bashCommand,
 		Metadata: map[string]string{
-			"command": "bash -lc",
+			"command": opts.bashCommand,
 			"cwd":     dir,
+			"input":   opts.bashCommand,
+			"source":  "cli",
 		},
 	})
 
@@ -3470,6 +4028,24 @@ func runBashCommand(ctx context.Context, state appState, opts cliOptions) error 
 	if result.Stderr != "" {
 		fmt.Fprint(os.Stderr, result.Stderr)
 	}
+
+	output := formatShellContext(shellResultMsg{
+		command: opts.bashCommand,
+		stdout:  result.Stdout,
+		stderr:  result.Stderr,
+		err:     err,
+	})
+	emitHookWarning(ctx, state.hookRunner, commandOutputEvent(
+		state.sessionState.ID,
+		state.sessionStore.Path(state.sessionState.ID),
+		state.selectedAgent,
+		state.selectedModel,
+		dir,
+		opts.bashCommand,
+		output,
+		err,
+		map[string]string{"source": "cli"},
+	))
 
 	if err != nil {
 		return fmt.Errorf("run bash: %w", err)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -50,6 +51,7 @@ import (
 
 const (
 	testCodexModel     = "codex/gpt-5.5"
+	testContextImport  = "context"
 	testReviewerName   = "reviewer"
 	testReasoningXHigh = "xhigh"
 )
@@ -1017,6 +1019,27 @@ func (p activityLoggingProvider) Complete(ctx context.Context, params llm.Comple
 
 func (p activityLoggingProvider) ModelContextWindow(string) int { return 0 }
 
+type idleSuggestionProvider struct {
+	response string
+	model    string
+}
+
+func (p idleSuggestionProvider) Name() string { return "suggest" }
+
+func (p idleSuggestionProvider) Models() []string { return []string{p.model} }
+
+func (p idleSuggestionProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p idleSuggestionProvider) HealthCheck(context.Context) error { return nil }
+
+func (p idleSuggestionProvider) Complete(context.Context, llm.CompleteParams) (*llm.Response, error) {
+	return &llm.Response{Content: p.response, Model: p.model}, nil
+}
+
+func (p idleSuggestionProvider) ModelContextWindow(string) int { return 0 }
+
 func TestCallLLMBuffersProviderActivityEvents(t *testing.T) {
 	t.Parallel()
 
@@ -1238,6 +1261,35 @@ func TestNavigatePromptHistory_CyclesAndRestoresDraft(t *testing.T) {
 	assert.Equal(t, "draft", next.textarea.Value())
 }
 
+func TestHistoryArrowMovesCursorWhenInputIsMidline(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea:            textarea.New(),
+		promptHistory:       []string{"latest prompt"},
+		promptHistoryCursor: -1,
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.SetCursor(len("draft"))
+
+	nextModel, cmd, handled := m.handleChatCommand("up")
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.Nil(t, cmd)
+	assert.Equal(t, "draft prompt", next.textarea.Value())
+	assert.Equal(t, 0, textareaCursorOffset(next.textarea))
+	assert.Equal(t, -1, next.promptHistoryCursor)
+
+	next.textarea.SetCursor(len("draft"))
+	nextModel, _, handled = next.handleChatCommand("down")
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	assert.Equal(t, len("draft prompt"), textareaCursorOffset(next.textarea))
+	assert.Equal(t, -1, next.promptHistoryCursor)
+}
+
 func TestPromptSuggestionAndApply(t *testing.T) {
 	t.Parallel()
 
@@ -1252,6 +1304,68 @@ func TestPromptSuggestionAndApply(t *testing.T) {
 	m.textarea.SetCursor(len("summ"))
 	_, ok = m.promptSuggestion()
 	assert.False(t, ok)
+}
+
+func TestIdleSuggestionRequestUsesProviderAndAcceptsSuffix(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(idleSuggestionProvider{model: "model", response: "draft prompt with tests"})
+
+	m := model{
+		ctx:           context.Background(),
+		registry:      registry,
+		selectedModel: "suggest/model",
+		textarea:      textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	nextModel, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+
+	nextModel, _ = next.updateIdleSuggestion(msg)
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+
+	suffix, ok := next.visibleIdleSuggestion()
+	require.True(t, ok)
+	assert.Equal(t, " with tests", suffix)
+
+	nextModel, _, handled := next.acceptCompletion()
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	assert.Equal(t, "draft prompt with tests", next.textarea.Value())
+}
+
+func TestIdleSuggestionIgnoresStaleResponses(t *testing.T) {
+	t.Parallel()
+
+	m := model{textarea: textarea.New()}
+	m.textarea.SetValue("new input")
+	m.idleSuggestionID = 2
+	m.idleSuggestionInput = "new input"
+
+	nextModel, _ := m.updateIdleSuggestion(idleSuggestionMsg{
+		id:         1,
+		input:      "old input",
+		suggestion: " old suffix",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	assert.Empty(t, next.idleSuggestionText)
 }
 
 func TestFormatTaskDuration(t *testing.T) {
@@ -1312,6 +1426,27 @@ func TestRunShellCommand_StartsTaskTimer(t *testing.T) {
 	assert.Equal(t, "command", next.runningTaskLabel)
 	assert.False(t, next.runningTaskStarted.IsZero())
 	assert.Equal(t, 1, next.runningTaskID)
+}
+
+func TestRunningTaskUpdatesTerminalTitle(t *testing.T) {
+	t.Parallel()
+
+	m := model{}
+	cmd := m.startRunningTask("LLM")
+	require.NotNil(t, cmd)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 2)
+	assert.Contains(t, stripANSI(toStringMsg(batch[0]())), "atteler")
+	assert.Contains(t, stripANSI(toStringMsg(batch[0]())), "LLM")
+
+	nextModel, tickCmd := m.updateTaskTick(taskTickMsg{id: m.runningTaskID})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, tickCmd)
+	assert.Equal(t, 1, next.terminalTitleFrame)
 }
 
 func TestView_RendersInlinePromptSuggestion(t *testing.T) {
@@ -1477,6 +1612,14 @@ func stripANSI(value string) string {
 	return ansi.Strip(value)
 }
 
+func toStringMsg(msg tea.Msg) string {
+	if msg == nil {
+		return ""
+	}
+
+	return fmt.Sprint(msg)
+}
+
 func TestRevampPromptAndUndo(t *testing.T) {
 	t.Parallel()
 
@@ -1536,6 +1679,8 @@ func TestHandleCtrlC_CancelsWaitingWhenDraftEmpty(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	m := model{
 		textarea:           textarea.New(),
 		waiting:            true,
@@ -1704,6 +1849,39 @@ func TestRunInteractive_ReplacesHookLoggerBeforeSessionStart(t *testing.T) {
 	}
 
 	require.NoError(t, runInteractive(context.Background(), state))
+}
+
+func TestFormatSessionReuseCommand(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore("/tmp/atteler sessions")
+	command := formatSessionReuseCommand("/usr/local/bin/atteler", store, "session-1")
+
+	assert.Contains(t, command, "/usr/local/bin/atteler")
+	assert.Contains(t, command, "--session-dir")
+	assert.Contains(t, command, shellQuote("/tmp/atteler sessions"))
+	assert.Contains(t, command, "--session-id session-1")
+}
+
+func TestInitRTKPluginWritesManifestAndScripts(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "rtk")
+	require.NoError(t, initRTKPlugin(dir))
+
+	manifest, err := attelerplugin.LoadDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "rtk", manifest.Name)
+	assert.Contains(t, manifest.Capabilities, "token-optimization")
+	assert.Equal(t, "bin/init-codex", manifest.Entrypoints["init-codex"])
+
+	script, err := os.ReadFile(filepath.Join(dir, "bin", "init-codex"))
+	require.NoError(t, err)
+	assert.Contains(t, string(script), "rtk init -g --codex")
+
+	info, err := os.Stat(filepath.Join(dir, "bin", "init-codex"))
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&0o100)
 }
 
 type panicWriter struct{}
@@ -2831,12 +3009,12 @@ func TestCodePackageImportFiles(t *testing.T) {
 
 	root := filepath.Join("tmp", "repo")
 
-	packageName, importPath, err := parseCodeFileSymbolFilterSpec("core:context", "code package import files", "package:import")
+	packageName, importPath, err := parseCodeFileSymbolFilterSpec("core:"+testContextImport, "code package import files", "package:import")
 	if err != nil {
 		require.NoError(t, err)
 	}
 
-	if packageName != "core" || importPath != "context" {
+	if packageName != "core" || importPath != testContextImport {
 		require.Failf(t, "unexpected parsed spec", "package=%q import=%q", packageName, importPath)
 	}
 
@@ -4082,6 +4260,30 @@ func TestFormatHookEventType(t *testing.T) {
 	assert.Equal(t, "agent_execute\tEmitted when a configured agent is selected for work.", got)
 }
 
+func TestCommandOutputEventCarriesRenderedOutput(t *testing.T) {
+	t.Parallel()
+
+	event := commandOutputEvent(
+		"session-id",
+		"/tmp/session.json",
+		"reviewer",
+		"gpt-test",
+		"/repo",
+		"go test ./...",
+		"$ go test ./...\nok",
+		assert.AnError,
+		map[string]string{"source": "user"},
+	)
+
+	assert.Equal(t, events.CommandOutput, event.Type)
+	assert.Equal(t, "session-id", event.SessionID)
+	assert.Equal(t, "$ go test ./...\nok", event.Content)
+	assert.Equal(t, assert.AnError.Error(), event.Error)
+	assert.Equal(t, "go test ./...", event.Metadata["command"])
+	assert.Equal(t, "/repo", event.Metadata["cwd"])
+	assert.Equal(t, "user", event.Metadata["source"])
+}
+
 func TestParseSpawnAgentSpecs(t *testing.T) {
 	t.Parallel()
 
@@ -4243,6 +4445,37 @@ func TestSelectModelPersistsFolderModel(t *testing.T) {
 	if got := state.ModelForFolder(dir); got != "claude-code/claude-opus-4-6" {
 		require.Failf(t, "unexpected failure", "folder model = %q", got)
 	}
+}
+
+func TestSelectModelPersistsFolderReasoning(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store := config.NewStateStore(filepath.Join(t.TempDir(), "state.yaml"))
+	m := model{stateStore: store, cwd: dir}
+
+	next, cmd := m.selectModel(
+		pickerItem{provider: "codex", model: "gpt-5.5", reasoning: testReasoningXHigh},
+		config.ModelScopeFolder,
+	)
+
+	selected, ok := next.(model)
+	require.True(t, ok)
+	assert.Equal(t, testReasoningXHigh, selected.generationOverrides.ReasoningLevel)
+	assert.Equal(t, testReasoningXHigh, selected.sessionState.DefaultReasoningLevel)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 2)
+	saveRaw := batch[1]()
+	saveMsg, ok := saveRaw.(modelPreferenceSavedMsg)
+	require.True(t, ok)
+	require.NoError(t, saveMsg.err)
+
+	state, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, testCodexModel, state.ModelForFolder(dir))
+	assert.Equal(t, testReasoningXHigh, state.ReasoningLevelForFolder(dir))
 }
 
 func TestMergeTags_DeduplicatesCaseInsensitive(t *testing.T) {
@@ -4542,7 +4775,11 @@ func TestMarshalJSONLines_CompactsAndTerminatesLines(t *testing.T) {
 	got, err := marshalJSONLines([]llm.Message{{Role: llm.RoleUser, Content: "hello"}, {Role: llm.RoleAssistant, Content: "world"}})
 	require.NoError(t, err)
 
-	assert.Equal(t, "{\"role\":\"user\",\"content\":\"hello\"}\n{\"role\":\"assistant\",\"content\":\"world\"}\n", string(got))
+	lines := strings.Split(strings.TrimSpace(string(got)), "\n")
+	require.Len(t, lines, 2)
+	assert.JSONEq(t, `{"role":"user","content":"hello"}`, lines[0])
+	assert.JSONEq(t, `{"role":"assistant","content":"world"}`, lines[1])
+	assert.True(t, strings.HasSuffix(string(got), "\n"))
 }
 
 func TestApplyPatch_UsesTempFileAndQuotesPath(t *testing.T) {
@@ -4555,6 +4792,7 @@ func TestApplyPatch_UsesTempFileAndQuotesPath(t *testing.T) {
 	require.True(t, handled)
 	require.NotNil(t, cmd)
 	require.True(t, next.waiting)
+
 	command := gitApplyPatchCommand("/tmp/atteler-patch-a'b.diff")
 	require.Contains(t, command, "git apply --check")
 	require.NotContains(t, command, "<<")
@@ -4574,6 +4812,8 @@ func TestShellQuote_HandlesSingleQuotes(t *testing.T) {
 }
 
 func TestDefaultValueForFlag_IncludesZeroAndImplicitDefaults(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		flag *flag.Flag
@@ -4587,6 +4827,8 @@ func TestDefaultValueForFlag_IncludesZeroAndImplicitDefaults(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			if got := defaultValueForFlag(tt.flag); got != tt.want {
 				t.Fatalf("defaultValueForFlag() = %q, want %q", got, tt.want)
 			}

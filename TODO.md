@@ -46,5 +46,10 @@ multi-agent runs.
   notify the LLM so it can decide to retry with a smaller scope, debug the
   issue, or take corrective action autonomously.
 
-- [ ] hook when executing the command (with the command input and command iteself), and hook with the command output
-- [ ] on exit, it should print the command to run to reuse the last session (e.g., `$0 --session-id <session-id>`).
+- [x] hook when executing the command (with the command input and command iteself), and hook with the command output
+- [x] on exit, it should print the command to run to reuse the last session (e.g., `$0 --session-id <session-id>`).
+- [x] add rtk (https://github.com/rtk-ai/rtk) integration/plugin
+- [x] change the title of the terminal to add a spinner when the harness is doing work, and stop it when it waits for user input. This is a nice-to-have UX improvement to give feedback that the system is working on something.
+- [x] in the TUI, when no input as been set for 1s, do a call to the llm provider to get a suggestion to complete the input. This is a nice-to-have feature to give suggestions to the user and help them complete their thoughts.
+- [x] in the TUI, pressing the up/down arrow keys should cycle through the input history. But if the cursor is in the middle of the input, it should not cyrl e through the history, but instead move the cursor to the beginning/end of the input. This is a nice-to-have UX improvement to make it easier to navigate the input history.
+- [x] in the TUI, when selecting an effort process, it should be stored and reused across sessions

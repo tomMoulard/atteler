@@ -22,6 +22,7 @@ func Markdown(session Session) string {
 	writeMetadata(&b, "Updated", session.UpdatedAt)
 	writeMetadataString(&b, "Agent", session.DefaultAgent)
 	writeMetadataString(&b, "Model", session.DefaultModel)
+	writeMetadataString(&b, "Effort", session.DefaultReasoningLevel)
 	writeMetadataString(&b, "Tags", strings.Join(session.Tags, ", "))
 
 	writeNegativeKnowledge(&b, session.NegativeKnowledge)

@@ -22,18 +22,25 @@ const (
 	ModelScopeSession ModelScope = "session"
 	ModelScopeFolder  ModelScope = "folder"
 	ModelScopeGlobal  ModelScope = "global"
+
+	stateReasoningLevelDefault = "default"
 )
 
 // State stores user choices that are not part of durable project config.
 type State struct {
 	Folders      map[string]FolderState `json:"folders,omitempty" yaml:"folders,omitempty"`
 	DefaultModel string                 `json:"default_model,omitempty" yaml:"default_model,omitempty"`
+	// DefaultReasoningLevel stores the global default effort/reasoning level
+	// selected interactively. It intentionally lives in state rather than
+	// config because it is a user preference, not project policy.
+	DefaultReasoningLevel string `json:"default_reasoning_level,omitempty" yaml:"default_reasoning_level,omitempty"`
 }
 
 // FolderState stores choices that only apply when Atteler starts from a
 // specific working directory.
 type FolderState struct {
-	DefaultModel string `json:"default_model,omitempty" yaml:"default_model,omitempty"`
+	DefaultModel          string `json:"default_model,omitempty" yaml:"default_model,omitempty"`
+	DefaultReasoningLevel string `json:"default_reasoning_level,omitempty" yaml:"default_reasoning_level,omitempty"`
 }
 
 // StateStore reads and writes Atteler's persisted interactive state as YAML.
@@ -128,6 +135,31 @@ func (s *State) ModelForFolder(cwd string) string {
 	return s.DefaultModel
 }
 
+// ReasoningLevelForFolder resolves the persisted effort for cwd, preferring
+// folder state over the global default.
+func (s *State) ReasoningLevelForFolder(cwd string) string {
+	if s == nil {
+		return ""
+	}
+
+	key := FolderKey(cwd)
+	if key != "" && s.Folders != nil {
+		if folder, ok := s.Folders[key]; ok && folder.DefaultReasoningLevel != "" {
+			if folder.DefaultReasoningLevel == stateReasoningLevelDefault {
+				return ""
+			}
+
+			return folder.DefaultReasoningLevel
+		}
+	}
+
+	if s.DefaultReasoningLevel == stateReasoningLevelDefault {
+		return ""
+	}
+
+	return s.DefaultReasoningLevel
+}
+
 // SetModel stores model at the requested scope. Session scope is intentionally
 // not persisted.
 func (s *State) SetModel(scope ModelScope, cwd, model string) {
@@ -146,7 +178,37 @@ func (s *State) SetModel(scope ModelScope, cwd, model string) {
 			s.Folders = make(map[string]FolderState)
 		}
 
-		s.Folders[key] = FolderState{DefaultModel: model}
+		folder := s.Folders[key]
+		folder.DefaultModel = model
+		s.Folders[key] = folder
+	}
+}
+
+// SetReasoningLevel stores effort at the requested scope. Session scope is
+// intentionally not persisted. An empty level clears that persisted override.
+func (s *State) SetReasoningLevel(scope ModelScope, cwd, level string) {
+	level = strings.TrimSpace(level)
+
+	switch scope {
+	case ModelScopeGlobal:
+		if level == stateReasoningLevelDefault {
+			level = ""
+		}
+
+		s.DefaultReasoningLevel = level
+	case ModelScopeFolder:
+		key := FolderKey(cwd)
+		if key == "" {
+			return
+		}
+
+		if s.Folders == nil {
+			s.Folders = make(map[string]FolderState)
+		}
+
+		folder := s.Folders[key]
+		folder.DefaultReasoningLevel = level
+		s.Folders[key] = folder
 	}
 }
 

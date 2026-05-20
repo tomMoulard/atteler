@@ -13,7 +13,7 @@ func TestStateStore_SaveLoadYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.yaml")
 	store := NewStateStore(path)
 
-	state := State{DefaultModel: "codex/gpt-5.5"}
+	state := State{DefaultModel: "codex/gpt-5.5", DefaultReasoningLevel: "high"}
 	state.SetModel(ModelScopeFolder, t.TempDir(), "claude-code/claude-opus-4-6")
 
 	if err := store.Save(state); err != nil {
@@ -37,20 +37,44 @@ func TestStateStore_SaveLoadYAML(t *testing.T) {
 	if loaded.DefaultModel != "codex/gpt-5.5" {
 		require.Failf(t, "unexpected failure", "DefaultModel = %q", loaded.DefaultModel)
 	}
+
+	if loaded.DefaultReasoningLevel != "high" {
+		require.Failf(t, "unexpected failure", "DefaultReasoningLevel = %q", loaded.DefaultReasoningLevel)
+	}
 }
 
 func TestState_ModelForFolderPrefersFolder(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	state := State{DefaultModel: "codex/gpt-5.5"}
+	state := State{DefaultModel: "codex/gpt-5.5", DefaultReasoningLevel: "medium"}
 	state.SetModel(ModelScopeFolder, dir, "claude-code/claude-opus-4-6")
+	state.SetReasoningLevel(ModelScopeFolder, dir, "xhigh")
 
 	if got := state.ModelForFolder(dir); got != "claude-code/claude-opus-4-6" {
 		require.Failf(t, "unexpected failure", "folder model = %q", got)
 	}
 
+	if got := state.ReasoningLevelForFolder(dir); got != "xhigh" {
+		require.Failf(t, "unexpected failure", "folder reasoning = %q", got)
+	}
+
 	if got := state.ModelForFolder(t.TempDir()); got != "codex/gpt-5.5" {
 		require.Failf(t, "unexpected failure", "global fallback model = %q", got)
+	}
+
+	if got := state.ReasoningLevelForFolder(t.TempDir()); got != "medium" {
+		require.Failf(t, "unexpected failure", "global fallback reasoning = %q", got)
+	}
+}
+
+func TestState_FolderReasoningDefaultOverridesGlobal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	state := State{DefaultReasoningLevel: "high"}
+	state.SetReasoningLevel(ModelScopeFolder, dir, "default")
+
+	if got := state.ReasoningLevelForFolder(dir); got != "" {
+		require.Failf(t, "unexpected failure", "folder default reasoning = %q", got)
 	}
 }
 

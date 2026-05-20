@@ -152,6 +152,14 @@ func buildCommandRegistry() []command {
 			},
 		},
 		{
+			name:  "init-rtk-plugin",
+			tier:  tierProviderless,
+			match: func(o cliOptions) bool { return o.initRTKPluginDir != "" },
+			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
+				return initRTKPlugin(o.initRTKPluginDir)
+			},
+		},
+		{
 			name: "lsp-symbols",
 			tier: tierProviderless,
 			match: func(o cliOptions) bool {

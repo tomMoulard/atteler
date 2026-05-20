@@ -279,15 +279,22 @@ long it should remain the default:
 - `Globally`: reuse the model everywhere unless a folder/session/CLI selection
   is more specific.
 
+When a picker row includes a reasoning/effort suffix, that effort is persisted
+with the same scope and reused for the session, folder, or global default.
+
 The prompt input keeps useful editing state:
 
 - `Up` / `Down`: cycle through recent user prompts from the current and saved
-  sessions.
+  sessions. If the cursor is in the middle of the current input, `Up` moves to
+  the beginning and `Down` moves to the end instead of replacing the draft.
 - `Tab`: accept the visible gray rest-of-line suggestion, or an active `@`
   agent/path completion.
 - `Ctrl+R`: deterministically revamp the current prompt with goal/context/
   constraints/output-format guidance.
 - `Ctrl+Z`: undo the latest `Ctrl+R` prompt revamp.
+
+After one second of idle typing, Atteler may ask the selected LLM for a short
+append-only prompt suffix; stale suggestions are ignored if you keep typing.
 
 Folder and global choices are stored as YAML in Atteler state. Override the
 state file with `ATTELER_STATE`; otherwise Atteler uses
@@ -367,6 +374,8 @@ Useful flags:
   `--run-plugin <plugin>/<entrypoint>`: execute a configured plugin entrypoint.
   Add `--plugin-dry-run` to print the resolved command without executing it,
   and `--plugin-timeout-seconds <n>` to set a timeout.
+- `--init-rtk-plugin <dir>`: scaffold an RTK helper plugin with `version`,
+  `gain`, `show`, and `init-codex` entrypoints.
 - `--bash <command>`: run an explicit local `bash -lc` command and exit.
   Use `--bash-dir <path>` for the working directory and
   `--bash-timeout-seconds <n>` for a timeout.
@@ -398,7 +407,8 @@ Useful flags:
 - `--list-failures`: print negative-knowledge records for the selected session.
 - `--list-messages`: print compact message roles, sizes, and previews for the selected session.
 - `--search-sessions <query>`: search saved session metadata and transcripts.
-- `--session <id-or-path>`: continue a previous session.
+- `--session <id-or-path>` / `--session-id <id-or-path>`: continue a previous
+  session. Interactive exit prints a ready-to-run reuse command.
 - `--show-session <id-or-path>`: print saved session details as YAML.
 - `--session-summary <id-or-path>`: print compact saved session metadata and counts.
 - `--session-title <title>`: set or update the saved session title.
@@ -544,6 +554,15 @@ Plugin entrypoints can be inspected or run from the CLI:
 atteler --describe-plugin reviewer
 atteler --run-plugin reviewer/check --plugin-dry-run
 atteler --run-plugin reviewer --plugin-entrypoint check
+```
+
+RTK users can scaffold a local plugin and then add the printed path to
+`plugins.paths`:
+
+```sh
+atteler --init-rtk-plugin .atteler/plugins/rtk
+atteler --run-plugin rtk/version
+atteler --run-plugin rtk/init-codex
 ```
 
 Record failed approaches with:
@@ -1180,6 +1199,8 @@ Supported event names:
 - `file_write` -- emitted when Atteler writes a local file.
 - `command_execute` -- emitted when Atteler starts a local subprocess (e.g.
   `claude auth status`, `codex exec`, git operations).
+- `command_output` -- emitted after a local command finishes, with the rendered
+  output in the event `content`.
 - `tool_execute` -- emitted when Atteler invokes a provider/tool such as
   `llm.complete`.
 - `agent_execute` -- emitted when a configured agent is selected for work.

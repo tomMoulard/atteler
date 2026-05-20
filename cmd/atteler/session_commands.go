@@ -588,6 +588,7 @@ type sessionDetails struct {
 	Title             string                      `yaml:"title,omitempty"`
 	DefaultAgent      string                      `yaml:"default_agent,omitempty"`
 	DefaultModel      string                      `yaml:"default_model,omitempty"`
+	DefaultReasoning  string                      `yaml:"default_reasoning_level,omitempty"`
 	WorktreePath      string                      `yaml:"worktree_path,omitempty"`
 	WorktreeBranch    string                      `yaml:"worktree_branch,omitempty"`
 	WorktreeBase      string                      `yaml:"worktree_base,omitempty"`
@@ -636,6 +637,10 @@ func formatSessionDetailsSummary(sessionState session.Session, path string) stri
 		parts = append(parts, "model="+sessionState.DefaultModel)
 	}
 
+	if sessionState.DefaultReasoningLevel != "" {
+		parts = append(parts, "effort="+sessionState.DefaultReasoningLevel)
+	}
+
 	if len(sessionState.Tags) > 0 {
 		parts = append(parts, "tags="+strings.Join(sessionState.Tags, ","))
 	}
@@ -656,18 +661,19 @@ func showSession(sessionState session.Session, path string) error {
 
 func formatSessionDetails(sessionState session.Session, path string) (string, error) {
 	out, err := yaml.Marshal(sessionDetails{
-		ID:             sessionState.ID,
-		Path:           path,
-		Title:          sessionState.Title,
-		CreatedAt:      sessionState.CreatedAt,
-		UpdatedAt:      sessionState.UpdatedAt,
-		DefaultAgent:   sessionState.DefaultAgent,
-		DefaultModel:   sessionState.DefaultModel,
-		WorktreePath:   sessionState.WorktreePath,
-		WorktreeBranch: sessionState.WorktreeBranch,
-		WorktreeBase:   sessionState.WorktreeBase,
-		Tags:           sessionState.Tags,
-		Messages:       yamlMessages(sessionState.Messages),
+		ID:               sessionState.ID,
+		Path:             path,
+		Title:            sessionState.Title,
+		CreatedAt:        sessionState.CreatedAt,
+		UpdatedAt:        sessionState.UpdatedAt,
+		DefaultAgent:     sessionState.DefaultAgent,
+		DefaultModel:     sessionState.DefaultModel,
+		DefaultReasoning: sessionState.DefaultReasoningLevel,
+		WorktreePath:     sessionState.WorktreePath,
+		WorktreeBranch:   sessionState.WorktreeBranch,
+		WorktreeBase:     sessionState.WorktreeBase,
+		Tags:             sessionState.Tags,
+		Messages:         yamlMessages(sessionState.Messages),
 		NegativeKnowledge: append(
 			[]session.NegativeKnowledge(nil),
 			sessionState.NegativeKnowledge...,

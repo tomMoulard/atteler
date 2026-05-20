@@ -255,6 +255,7 @@ type cliOptions struct {
 	describePluginName                 string
 	runPluginTarget                    string
 	pluginEntrypoint                   string
+	initRTKPluginDir                   string
 	bashCommand                        string
 	bashDir                            string
 	taskFilePath                       string
@@ -434,6 +435,7 @@ func parseOptions() cliOptions {
 	flag.StringVar(&opts.initConfigPath, "init-config", "", "write a starter YAML config to this path without overwriting")
 	flag.StringVar(&opts.sessionDir, "session-dir", "", "directory for session JSON files")
 	flag.StringVar(&opts.sessionRef, "session", "", "session ID or path to continue")
+	flag.StringVar(&opts.sessionRef, "session-id", "", "alias for --session")
 	flag.StringVar(&opts.showSessionRef, "show-session", "", "print saved session details as YAML and exit")
 	flag.StringVar(&opts.summarySessionRef, "session-summary", "", "print compact saved session metadata and counts and exit")
 	flag.StringVar(&opts.sessionTitle, "session-title", "", "set or update the saved session title")
@@ -514,6 +516,7 @@ func parseOptions() cliOptions {
 	flag.StringVar(&opts.describePluginName, "describe-plugin", "", "print a configured plugin manifest as YAML and exit")
 	flag.StringVar(&opts.runPluginTarget, "run-plugin", "", "run configured plugin name, or plugin/entrypoint when --plugin-entrypoint is omitted")
 	flag.StringVar(&opts.pluginEntrypoint, "plugin-entrypoint", "", "entrypoint name for --run-plugin")
+	flag.StringVar(&opts.initRTKPluginDir, "init-rtk-plugin", "", "write an RTK plugin scaffold to this directory and exit")
 	flag.Var(&opts.pluginTimeout, "plugin-timeout-seconds", "timeout in seconds for --run-plugin")
 	flag.BoolVar(&opts.pluginDryRun, "plugin-dry-run", false, "describe --run-plugin without executing it")
 	flag.StringVar(&opts.bashCommand, "bash", "", "run an explicit local bash command and exit")
@@ -1131,7 +1134,8 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	contextOptions := contextOptionsFromConfig(cfg)
 	referenceContext := loadConfiguredReferences(ctx, cfg.Context.References, contextOptions)
 	generationDefaults := generationFromConfig(cfg)
-	generationOverrides := generationFromOptions(opts)
+	generationOverrides := generationOverridesFromState(opts, selection, persistedState, cwd)
+
 	maxInputTokens := maxInputTokensFromConfigOptions(cfg, opts)
 
 	providers := reg.ListProviders()
@@ -1202,6 +1206,24 @@ func autoRegisterForOptions(ctx context.Context, opts cliOptions, cfg appconfig.
 	}
 
 	return llm.AutoRegisterWithConfigContext(ctx, regCfg)
+}
+
+func generationOverridesFromState(opts cliOptions, selection selectionState, persistedState appconfig.State, cwd string) generationSettings {
+	generation := generationFromOptions(opts)
+	if generation.ReasoningLevel != "" {
+		return generation
+	}
+
+	if level := strings.TrimSpace(selection.sessionState.DefaultReasoningLevel); level != "" {
+		generation.ReasoningLevel = level
+		return generation
+	}
+
+	if level := strings.TrimSpace(persistedState.ReasoningLevelForFolder(cwd)); level != "" {
+		generation.ReasoningLevel = level
+	}
+
+	return generation
 }
 
 type selectionState struct {
@@ -1321,7 +1343,7 @@ var flagGroups = map[string]string{
 	"max-input-tokens": "Provider & Model",
 
 	// Session
-	"session": "Session", "session-dir": "Session", "session-title": "Session", "session-tag": "Session",
+	"session": "Session", "session-id": "Session", "session-dir": "Session", "session-title": "Session", "session-tag": "Session",
 	"list-sessions": "Session", "list-sessions-tag": "Session", "list-session-tags": "Session",
 	"show-session": "Session", "session-summary": "Session", "replay": "Session",
 	"export-session": "Session", "export-format": "Session", "search-sessions": "Session",
@@ -1341,7 +1363,7 @@ var flagGroups = map[string]string{
 	"list-config-paths": "Configuration", "validate-config": "Configuration",
 
 	// Plugin
-	"list-plugins": "Plugin", "describe-plugin": "Plugin", "run-plugin": "Plugin",
+	"list-plugins": "Plugin", "describe-plugin": "Plugin", "run-plugin": "Plugin", "init-rtk-plugin": "Plugin",
 	"plugin-entrypoint": "Plugin", "plugin-dry-run": "Plugin", "plugin-timeout-seconds": "Plugin",
 
 	// Memory & RAG

@@ -25,20 +25,21 @@ const (
 
 // Session is a durable chat transcript.
 type Session struct {
-	CreatedAt         time.Time           `json:"created_at"`
-	UpdatedAt         time.Time           `json:"updated_at"`
-	ID                string              `json:"id"`
-	Title             string              `json:"title,omitempty"`
-	DefaultModel      string              `json:"default_model,omitempty"`
-	DefaultAgent      string              `json:"default_agent,omitempty"`
-	WorktreePath      string              `json:"worktree_path,omitempty"`
-	WorktreeBranch    string              `json:"worktree_branch,omitempty"`
-	WorktreeBase      string              `json:"worktree_base,omitempty"`
-	Tags              []string            `json:"tags,omitempty"`
-	Messages          []llm.Message       `json:"messages"`
-	NegativeKnowledge []NegativeKnowledge `json:"negative_knowledge,omitempty" yaml:"negative_knowledge,omitempty"`
-	Evaluations       []AgentEvaluation   `json:"evaluations,omitempty" yaml:"evaluations,omitempty"`
-	Artifacts         []Artifact          `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
+	CreatedAt             time.Time           `json:"created_at"`
+	UpdatedAt             time.Time           `json:"updated_at"`
+	ID                    string              `json:"id"`
+	Title                 string              `json:"title,omitempty"`
+	DefaultModel          string              `json:"default_model,omitempty"`
+	DefaultReasoningLevel string              `json:"default_reasoning_level,omitempty"`
+	DefaultAgent          string              `json:"default_agent,omitempty"`
+	WorktreePath          string              `json:"worktree_path,omitempty"`
+	WorktreeBranch        string              `json:"worktree_branch,omitempty"`
+	WorktreeBase          string              `json:"worktree_base,omitempty"`
+	Tags                  []string            `json:"tags,omitempty"`
+	Messages              []llm.Message       `json:"messages"`
+	NegativeKnowledge     []NegativeKnowledge `json:"negative_knowledge,omitempty" yaml:"negative_knowledge,omitempty"`
+	Evaluations           []AgentEvaluation   `json:"evaluations,omitempty" yaml:"evaluations,omitempty"`
+	Artifacts             []Artifact          `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
 }
 
 // NegativeKnowledge records a failed approach so future agents can avoid repeating it.
