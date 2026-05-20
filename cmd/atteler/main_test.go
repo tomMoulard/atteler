@@ -4026,6 +4026,58 @@ func TestFormatReviewReport(t *testing.T) {
 	}
 }
 
+func TestBuildReviewContext_LoadsPathsAndInstructions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.go")
+	require.NoError(t, os.WriteFile(path, []byte("package auth\n"), 0o600))
+
+	got, err := buildReviewContext(
+		t.Context(),
+		[]string{"auth.go"},
+		"focus on cancellation",
+		contextref.Options{Root: dir, MaxFileBytes: 1024, MaxTotalBytes: 1024},
+	)
+	require.NoError(t, err)
+
+	assert.Contains(t, got, "Review instructions:\nfocus on cancellation")
+	assert.Contains(t, got, `<file source="auth.go" truncated="false">`)
+	assert.Contains(t, got, "package auth")
+}
+
+func TestFormatReviewRunResult(t *testing.T) {
+	t.Parallel()
+
+	result := review.Result{
+		Report: review.Report{
+			Reviewer: "aggregate-verdict",
+			Findings: []review.Finding{
+				{Severity: review.SeverityHigh, Category: review.CategoryCorrectness, Path: "pkg/auth.go", Line: 12, Message: "nil token panic"},
+			},
+		},
+		Session: review.Session{
+			Reports: []review.Report{
+				{Reviewer: "quality", Findings: []review.Finding{{Severity: review.SeverityMedium, Category: review.CategoryTests, Path: "pkg/auth_test.go", Message: "missing test"}}},
+			},
+			CrossReviews: []review.CrossReviewNote{
+				{Reviewer: "tests", ReviewedReviewer: "quality", Notes: "keep finding"},
+			},
+		},
+	}
+
+	got := formatReviewRunResult(result)
+	for _, want := range []string{
+		"independent_reports:\n",
+		"reviewer=quality\tfindings=1",
+		"cross_reviews:\n  - tests -> quality\tnotes=keep finding\n",
+		"aggregate_report:\nreviewer: aggregate-verdict\n",
+		"severity=high\tcategory=correctness\tpath=pkg/auth.go\tline=12\tmessage=nil token panic",
+	} {
+		assert.Contains(t, got, want)
+	}
+}
+
 func TestParseAndFormatRouteCandidate(t *testing.T) {
 	t.Parallel()
 
@@ -4618,6 +4670,7 @@ func TestApplyDebugEnvOptions(t *testing.T) {
 		"DEBUG_ATTELER_WATCH_SCAN":                "1",
 		"DEBUG_ATTELER_WATCH_JSON":                "1",
 		"DEBUG_ATTELER_REVIEW_PLAN":               "true",
+		"DEBUG_ATTELER_REVIEW_RUN":                "true",
 		"DEBUG_ATTELER_AGENT_PERFORMANCE_SUMMARY": "true",
 		"DEBUG_ATTELER_MCP_MANIFEST":              "mcp.yaml",
 		"DEBUG_ATTELER_MCP_CAPABILITY":            "symbols",
@@ -4643,6 +4696,7 @@ func TestApplyDebugEnvOptions(t *testing.T) {
 	assert.True(t, opts.watchScan)
 	assert.True(t, opts.watchJSON)
 	assert.True(t, opts.reviewPlan)
+	assert.True(t, opts.reviewRun)
 	assert.True(t, opts.agentPerformanceSummary)
 	assert.Equal(t, "mcp.yaml", opts.mcpManifestPath)
 	assert.Equal(t, "symbols", opts.mcpCapability)

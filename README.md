@@ -121,6 +121,7 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] CLI speculative three-round execution plan preview
  - [x] structured review-agent report and gate-check primitives
  - [x] review-agent speculative plan preview
+ - [x] review-agent three-round LLM execution pipeline
  - [x] CLI structured review scan report
  - [x] continuous background-agent repository scan primitives
  - [x] CLI background-agent repository scan
@@ -1036,6 +1037,21 @@ atteler --review-plan \
   --review-gate "tests pass"
 ```
 
+Use `--review-run` to execute that same three-round workflow with real LLM
+calls. `--review-agent` names configured agents when present; otherwise the
+current selected model is used with the reviewer name as a role label. Review
+paths are loaded through the bounded local reference loader, and the final
+aggregate report must satisfy every `--review-gate`.
+
+```sh
+atteler --review-run \
+  --review-agent quality-reviewer \
+  --review-agent test-engineer \
+  --review-path pkg/llm/auth.go \
+  --review-gate "tests pass" \
+  --review-prompt "Focus on auth fallback and cancellation regressions."
+```
+
 You can also persist a small lexical memory store for UTF-8 files:
 
 ```sh
@@ -1159,8 +1175,8 @@ thin interface:
 - `pkg/promptcomplete` ranks deterministic rest-of-line prompt suggestions from
   local agents, tools, resources, and prompt templates.
 - `pkg/review` provides structured review reports, speculative review-agent
-  plans, finding grouping, severity summaries, and required gate-check validation
-  for review-agent workflows.
+  plans, finding grouping, severity summaries, required gate-check validation,
+  and a three-round LLM-backed review runner for review-agent workflows.
 - `pkg/session` persists sessions and supports metadata inventories, exact tag
   filtering, transcript search, exports, evaluations, failures, artifacts, and
   aggregate agent performance summaries.

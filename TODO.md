@@ -30,6 +30,11 @@ multi-agent runs.
   sub-linear search. Keep the current implementation as the zero-dependency
   fallback.
 
+- [x] **Wire up end-to-end review-agent execution.**
+  The review-agent plan and structured scan primitives now have a full
+  three-round LLM-backed workflow: independent reviews, cross-review of findings,
+  aggregate verdict, and required gate checks surfaced through `--review-run`.
+
 ## Misc -- Shell execution improvements
 
 - [x] **Interactive shell takeover for `!<command>`.**

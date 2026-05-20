@@ -241,6 +241,14 @@ func buildCommandRegistry() []command {
 			},
 		},
 		{
+			name:  "review-run",
+			tier:  tierStateful,
+			match: func(o cliOptions) bool { return o.reviewRun },
+			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
+				return runReviewExecution(ctx, s, o)
+			},
+		},
+		{
 			name:  "async-plan",
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.asyncPlan },

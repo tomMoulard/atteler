@@ -286,6 +286,7 @@ type cliOptions struct {
 	spawnBinary                        string
 	promptCompleteInput                string
 	speculatePrompt                    string
+	reviewPrompt                       string
 	skillSaveDir                       string
 	asyncTaskSpecs                     stringListFlag
 	reviewAgents                       stringListFlag
@@ -344,6 +345,7 @@ type cliOptions struct {
 	speculatePlan                      bool
 	speculateRun                       bool
 	reviewPlan                         bool
+	reviewRun                          bool
 	routeInteractive                   bool
 	routeBatch                         bool
 	listAgents                         bool
@@ -578,9 +580,9 @@ func parseOptions() cliOptions {
 	flag.BoolVar(&opts.routeBatch, "route-batch", false, "rank model route candidates for batch/cost preference")
 	flag.Var(&opts.speculateAgents, "speculate-agent", "agent name for --speculate-plan (repeatable or comma-separated)")
 	flag.Var(&opts.speculateGates, "speculate-gate", "required gate check for --speculate-plan (repeatable or comma-separated)")
-	flag.Var(&opts.reviewAgents, "review-agent", "reviewer name for --review-plan (repeatable or comma-separated)")
-	flag.Var(&opts.reviewPaths, "review-path", "path for --review-plan review surface (repeatable or comma-separated)")
-	flag.Var(&opts.reviewGates, "review-gate", "required gate check for --review-plan (repeatable or comma-separated)")
+	flag.Var(&opts.reviewAgents, "review-agent", "reviewer name for --review-plan/--review-run (repeatable or comma-separated)")
+	flag.Var(&opts.reviewPaths, "review-path", "path for --review-plan/--review-run review surface (repeatable or comma-separated)")
+	flag.Var(&opts.reviewGates, "review-gate", "required gate check for --review-plan/--review-run (repeatable or comma-separated)")
 	flag.Var(&opts.skillMaxSteps, "skill-max-steps", "maximum repeated sequence length for --skill-step suggestions")
 	flag.Var(&opts.skillMinOccurrences, "skill-min-occurrences", "minimum repeated occurrences for --skill-step suggestions")
 	flag.StringVar(&opts.recordArtifact, "record-artifact", "", "record a session artifact path and exit")
@@ -634,6 +636,8 @@ func parseOptions() cliOptions {
 	flag.Var(&opts.watchIntervalSeconds, "watch-interval-seconds", "seconds between --watch-loop scans")
 	flag.Var(&opts.watchMaxIterations, "watch-max-iterations", "maximum --watch-loop scans before exiting; omit to run until interrupted")
 	flag.BoolVar(&opts.reviewPlan, "review-plan", false, "print speculative review-agent plan and exit")
+	flag.BoolVar(&opts.reviewRun, "review-run", false, "execute the full review-agent three-round pipeline with real LLM calls and exit")
+	flag.StringVar(&opts.reviewPrompt, "review-prompt", "", "additional review instructions for --review-run")
 	flag.BoolVar(&opts.reviewScan, "review-scan", false, "scan the current repository and print a structured review report and exit")
 	flag.BoolVar(&opts.feedbackProposals, "feedback-proposals", false, "derive agent improvement proposals from the selected session and exit")
 	flag.StringVar(&opts.feedbackApplyConfig, "feedback-apply-config", "", "apply feedback proposals from the selected session to this agent config file")
@@ -688,6 +692,7 @@ func applyDebugEnvOptions(opts *cliOptions, getenv func(string) string) {
 	applyDebugBool(getenv, "DEBUG_ATTELER_CODE_LAYERS", &opts.listCodeLayers)
 	applyDebugBool(getenv, "DEBUG_ATTELER_CODE_CYCLES", &opts.listCodeCycles)
 	applyDebugBool(getenv, "DEBUG_ATTELER_REVIEW_PLAN", &opts.reviewPlan)
+	applyDebugBool(getenv, "DEBUG_ATTELER_REVIEW_RUN", &opts.reviewRun)
 	applyDebugBool(getenv, "DEBUG_ATTELER_REVIEW_SCAN", &opts.reviewScan)
 	applyDebugBool(getenv, "DEBUG_ATTELER_AGENT_PERFORMANCE_SUMMARY", &opts.agentPerformanceSummary)
 	applyDebugBool(getenv, "DEBUG_ATTELER_WATCH_SCAN", &opts.watchScan)

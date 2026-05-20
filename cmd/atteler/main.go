@@ -5655,6 +5655,170 @@ func formatReviewFinding(finding review.Finding) string {
 	return strings.Join(parts, "\t")
 }
 
+type reviewCompleter struct {
+	registry       *llm.Registry
+	agents         *agent.Registry
+	selectedModel  string
+	fallbackModels []string
+	generationBase generationSettings
+	generationOver generationSettings
+	modelLocked    bool
+}
+
+func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt, userPrompt string) (string, error) {
+	activeAgent := agentSelection{name: reviewer}
+	if configuredAgent, ok := rc.agents.Get(reviewer); ok {
+		activeAgent = agentSelection{name: reviewer, agent: configuredAgent, ok: true}
+	}
+
+	requestModel, fallbackModels := requestModelAndFallbacks(
+		rc.selectedModel,
+		rc.modelLocked,
+		rc.fallbackModels,
+		activeAgent,
+	)
+	generation := generationForRequest(rc.generationBase, rc.generationOver, activeAgent)
+
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: systemPrompt},
+		{Role: llm.RoleUser, Content: userPrompt},
+	}
+
+	params := llm.CompleteParams{
+		Model:    requestModel,
+		Messages: messages,
+	}
+	if activeAgent.ok {
+		params = activeAgent.agent.CompleteParams(requestModel, messages)
+	}
+
+	applyGenerationParams(&params, generation)
+
+	resp, err := rc.registry.CompleteWithFallback(ctx, params, fallbackModels)
+	if err != nil {
+		return "", fmt.Errorf("review LLM complete: %w", err)
+	}
+
+	return resp.Content, nil
+}
+
+func runReviewExecution(ctx context.Context, state appState, opts cliOptions) error {
+	plan, err := review.NewPlan(reviewPlanReviewers(opts.reviewAgents), reviewPlanPaths(opts.reviewPaths), opts.reviewGates)
+	if err != nil {
+		return fmt.Errorf("review-run: %w", err)
+	}
+
+	reviewContext, err := buildReviewContext(ctx, plan.Paths(), opts.reviewPrompt, state.contextOptions)
+	if err != nil {
+		return fmt.Errorf("review-run context: %w", err)
+	}
+
+	completer := &reviewCompleter{
+		registry:       state.registry,
+		agents:         state.agentRegistry,
+		selectedModel:  state.selectedModel,
+		fallbackModels: state.fallbackModels,
+		generationBase: state.generationDefaults,
+		generationOver: state.generationOverrides,
+		modelLocked:    state.modelLocked,
+	}
+
+	reviewerNames := make([]string, 0, len(plan.Reviewers()))
+	for _, reviewer := range plan.Reviewers() {
+		reviewerNames = append(reviewerNames, reviewer.Name)
+	}
+
+	fmt.Fprintln(os.Stderr, "review: running three-round pipeline with "+strings.Join(reviewerNames, ", ")+"...")
+
+	result, err := review.RunWithLLM(ctx, plan, completer, reviewContext)
+	if err != nil {
+		if len(result.Session.Reports) > 0 || result.Session.Verdict.Reviewer != "" {
+			fmt.Print(formatReviewRunResult(result))
+		}
+
+		return fmt.Errorf("review-run: %w", err)
+	}
+
+	fmt.Print(formatReviewRunResult(result))
+
+	return nil
+}
+
+func buildReviewContext(ctx context.Context, paths []string, prompt string, opts contextref.Options) (string, error) {
+	refs, err := contextref.LoadReferences(ctx, paths, opts)
+	if err != nil {
+		return "", fmt.Errorf("load review references: %w", err)
+	}
+
+	var b strings.Builder
+
+	prompt = strings.TrimSpace(prompt)
+	if prompt != "" {
+		b.WriteString("Review instructions:\n")
+		b.WriteString(prompt)
+		b.WriteString("\n\n")
+	}
+
+	if formatted := contextref.FormatReferences(refs); formatted != "" {
+		b.WriteString(formatted)
+	}
+
+	if strings.TrimSpace(b.String()) == "" {
+		return "", errors.New("no review context loaded")
+	}
+
+	return b.String(), nil
+}
+
+func formatReviewRunResult(result review.Result) string {
+	var b strings.Builder
+
+	if len(result.Session.Reports) > 0 {
+		b.WriteString("independent_reports:\n")
+
+		for _, report := range result.Session.Reports {
+			summary := report.SeveritySummary()
+			fmt.Fprintf(
+				&b,
+				"  - reviewer=%s\tfindings=%d\tcritical=%d\thigh=%d\tmedium=%d\tlow=%d\tinfo=%d\n",
+				report.Reviewer,
+				summary.Total(),
+				summary.Critical,
+				summary.High,
+				summary.Medium,
+				summary.Low,
+				summary.Info,
+			)
+		}
+	}
+
+	if len(result.Session.CrossReviews) > 0 {
+		b.WriteString("cross_reviews:\n")
+
+		for _, note := range result.Session.CrossReviews {
+			fmt.Fprintf(
+				&b,
+				"  - %s -> %s\tnotes=%s\n",
+				note.Reviewer,
+				note.ReviewedReviewer,
+				truncatePreview(note.Notes, 160),
+			)
+		}
+	}
+
+	report := result.Report
+	if report.Reviewer == "" {
+		report = result.Session.Verdict
+	}
+
+	if report.Reviewer != "" {
+		b.WriteString("aggregate_report:\n")
+		b.WriteString(formatReviewReport(report))
+	}
+
+	return b.String()
+}
+
 func runAsyncPlan(specs []string) error {
 	plan, err := asyncPlanFromSpecs(specs)
 	if err != nil {

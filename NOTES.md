@@ -203,6 +203,7 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] CLI speculative prompt-cache reuse preview
  - [x] structured review-agent report and gate-check primitives
  - [x] review-agent speculative plan preview
+ - [x] review-agent three-round LLM execution pipeline
  - [x] CLI structured review scan report
  - [x] continuous background-agent repository scan primitives
  - [x] CLI background-agent repository scan
