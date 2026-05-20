@@ -9,6 +9,8 @@ import (
 	"sync"
 )
 
+const reviewJudgeName = "review-judge"
+
 // CrossReviewNote captures one reviewer's challenge of another reviewer's
 // independent report.
 type CrossReviewNote struct {
@@ -274,7 +276,7 @@ func llmIndependentReviewer(completer LLMCompleter, plan Plan, reviewContext str
 			return Report{}, fmt.Errorf("independent review LLM call: %w", err)
 		}
 
-		return parseReportFromLLM(content, reviewer.Name, plan.RequiredGates()), nil
+		return parseReportFromLLM(content, reviewer.Name), nil
 	}
 }
 
@@ -319,12 +321,12 @@ func llmReviewAggregator(completer LLMCompleter, plan Plan, reviewContext string
 			"Use reviewer findings and cross-review challenges as evidence, not as authority.\n" +
 			structuredReviewFormatInstructions()
 
-		content, err := completer.Complete(ctx, "review-judge", systemPrompt, prompt.String())
+		content, err := completer.Complete(ctx, reviewJudgeName, systemPrompt, prompt.String())
 		if err != nil {
 			return Report{}, fmt.Errorf("aggregator LLM call: %w", err)
 		}
 
-		return parseReportFromLLM(content, "aggregate-verdict", plan.RequiredGates()), nil
+		return parseReportFromLLM(content, "aggregate-verdict"), nil
 	}
 }
 
@@ -332,10 +334,10 @@ func structuredReviewFormatInstructions() string {
 	return "Respond using only these line formats:\n" +
 		"FINDING: <critical|high|medium|low|info>|<correctness|security|tests|performance|maintainability|style>|<path>|<line>|<message>|<suggestion>\n" +
 		"GATE <gate name>: PASS|FAIL <notes>\n" +
-		"Omit FINDING lines when there are no actionable findings."
+		"Emit one explicit GATE line for every required gate. Omit FINDING lines when there are no actionable findings."
 }
 
-func parseReportFromLLM(content, reviewer string, requiredGates []string) Report {
+func parseReportFromLLM(content, reviewer string) Report {
 	report := Report{Reviewer: strings.TrimSpace(reviewer)}
 
 	for rawLine := range strings.SplitSeq(content, "\n") {
@@ -357,7 +359,6 @@ func parseReportFromLLM(content, reviewer string, requiredGates []string) Report
 	}
 
 	report.Findings = SortedFindings(report.Findings)
-	report.GateChecks = ensureGateChecks(requiredGates, report.GateChecks)
 
 	return report
 }
@@ -422,40 +423,6 @@ func parseGateCheckLine(line string) GateCheck {
 	}
 
 	return check
-}
-
-func ensureGateChecks(required []string, checks []GateCheck) []GateCheck {
-	if len(required) == 0 {
-		return checks
-	}
-
-	seen := make(map[string]struct{}, len(checks))
-	for _, check := range checks {
-		if name := strings.TrimSpace(check.Name); name != "" {
-			seen[name] = struct{}{}
-		}
-	}
-
-	out := append([]GateCheck(nil), checks...)
-
-	for _, gate := range required {
-		gate = strings.TrimSpace(gate)
-		if gate == "" {
-			continue
-		}
-
-		if _, ok := seen[gate]; ok {
-			continue
-		}
-
-		out = append(out, GateCheck{
-			Name:   gate,
-			Passed: true,
-			Notes:  "inferred pass from LLM output",
-		})
-	}
-
-	return out
 }
 
 func normalizeSeverity(value string) Severity {

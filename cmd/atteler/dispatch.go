@@ -781,10 +781,6 @@ func main() {
 	}
 }
 
-func rootContext() context.Context {
-	return context.Background()
-}
-
 // configureSlog sets up the global slog handler. It reads the SLOG_LEVEL
 // environment variable (debug, info, warn, error) and defaults to info.
 // Output goes to stderr so it doesn't interfere with normal TUI output.

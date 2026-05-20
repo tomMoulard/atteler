@@ -21,7 +21,7 @@ func (f *fakeReviewCompleter) Complete(_ context.Context, reviewer, systemPrompt
 	f.mu.Unlock()
 
 	switch {
-	case reviewer == "review-judge":
+	case reviewer == reviewJudgeName:
 		return "FINDING: high|correctness|pkg/auth.go|12|nil token can panic|guard token before use" + "\n" +
 			"GATE tests pass: PASS covered by regression", nil
 	case strings.Contains(systemPrompt, "cross-reviewing"):
@@ -63,7 +63,7 @@ func TestRunWithLLM_ExecutesReviewRoundsAndAggregatesVerdict(t *testing.T) {
 
 	assert.Contains(t, completer.calls, "quality")
 	assert.Contains(t, completer.calls, "tests")
-	assert.Contains(t, completer.calls, "review-judge")
+	assert.Contains(t, completer.calls, reviewJudgeName)
 }
 
 func TestRunWithLLM_ReturnsPartialSessionWhenVerdictGateFails(t *testing.T) {
@@ -77,7 +77,7 @@ func TestRunWithLLM_ReturnsPartialSessionWhenVerdictGateFails(t *testing.T) {
 	require.NoError(t, err)
 
 	completer := staticReviewCompleter(func(reviewer string) string {
-		if reviewer == "review-judge" {
+		if reviewer == reviewJudgeName {
 			return "GATE tests pass: FAIL tests were not run"
 		}
 
@@ -89,6 +89,32 @@ func TestRunWithLLM_ReturnsPartialSessionWhenVerdictGateFails(t *testing.T) {
 	assert.Contains(t, err.Error(), `gate check "tests pass" failed`)
 	assert.Len(t, result.Session.Reports, 1)
 	assert.Equal(t, "aggregate-verdict", result.Session.Verdict.Reviewer)
+}
+
+func TestRunWithLLM_ReturnsPartialSessionWhenVerdictOmitsRequiredGate(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan(
+		[]Reviewer{{Name: "quality", Categories: []Category{CategoryCorrectness}}},
+		[]string{"pkg/auth.go"},
+		[]string{"tests pass"},
+	)
+	require.NoError(t, err)
+
+	completer := staticReviewCompleter(func(reviewer string) string {
+		if reviewer == reviewJudgeName {
+			return "FINDING: high|correctness|pkg/auth.go|12|nil token can panic|guard token before use"
+		}
+
+		return "GATE tests pass: PASS independent reviewer"
+	})
+
+	result, err := RunWithLLM(t.Context(), plan, completer, "diff -- pkg/auth.go")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `missing gate check "tests pass"`)
+	assert.Len(t, result.Session.Reports, 1)
+	assert.Equal(t, "aggregate-verdict", result.Session.Verdict.Reviewer)
+	assert.Empty(t, result.Session.Verdict.GateChecks)
 }
 
 func TestRunWithLLM_RequiresCompleterAndContext(t *testing.T) {
@@ -106,14 +132,14 @@ func TestRunWithLLM_RequiresCompleterAndContext(t *testing.T) {
 	assert.Contains(t, err.Error(), "review context is required")
 }
 
-func TestParseReportFromLLM_NormalizesFindingsAndFillsMissingGates(t *testing.T) {
+func TestParseReportFromLLM_NormalizesFindingsAndPreservesOnlyExplicitGates(t *testing.T) {
 	t.Parallel()
 
 	report := parseReportFromLLM(strings.Join([]string{
 		"FINDING: urgent|unknown|pkg/auth.go|abc|message|suggestion",
 		"FINDING: high|tests||1|missing path|skip",
 		"GATE lint pass: PASS clean",
-	}, "\n"), "judge", []string{"tests pass", "lint pass"})
+	}, "\n"), "judge")
 
 	require.Len(t, report.Findings, 1)
 	assert.Equal(t, SeverityInfo, report.Findings[0].Severity)
@@ -121,7 +147,6 @@ func TestParseReportFromLLM_NormalizesFindingsAndFillsMissingGates(t *testing.T)
 	assert.Zero(t, report.Findings[0].Line)
 	assert.Equal(t, []GateCheck{
 		{Name: "lint pass", Passed: true, Notes: "clean"},
-		{Name: "tests pass", Passed: true, Notes: "inferred pass from LLM output"},
 	}, report.GateChecks)
 }
 

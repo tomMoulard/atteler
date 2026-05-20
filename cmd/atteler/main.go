@@ -59,6 +59,10 @@ import (
 // Styles
 // ---------------------------------------------------------------------------
 
+func rootContext() context.Context {
+	return context.Background()
+}
+
 var (
 	version = "dev"
 	commit  = "none"
@@ -5581,10 +5585,11 @@ func watchFindingsToReview(findings []watch.Finding) []review.Finding {
 	for i := range findings {
 		finding := findings[i]
 		out = append(out, review.Finding{
-			Severity: reviewSeverity(finding.Severity),
-			Category: reviewCategory(finding.Kind),
-			Path:     finding.Path,
-			Message:  finding.Message,
+			Severity:   reviewSeverity(finding.Severity),
+			Category:   reviewCategory(finding.Kind),
+			Path:       finding.Path,
+			Message:    finding.Message,
+			Suggestion: finding.Help,
 		})
 	}
 
@@ -6513,6 +6518,14 @@ func formatWatchFinding(finding watch.Finding) string {
 	}
 	if finding.Message != "" {
 		parts = append(parts, "message="+finding.Message)
+	}
+
+	if finding.RuleID != "" {
+		parts = append(parts, "rule_id="+finding.RuleID)
+	}
+
+	if finding.Help != "" {
+		parts = append(parts, "help="+finding.Help)
 	}
 
 	return strings.Join(parts, "\t")

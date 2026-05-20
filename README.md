@@ -1041,7 +1041,9 @@ Use `--review-run` to execute that same three-round workflow with real LLM
 calls. `--review-agent` names configured agents when present; otherwise the
 current selected model is used with the reviewer name as a role label. Review
 paths are loaded through the bounded local reference loader, and the final
-aggregate report must satisfy every `--review-gate`.
+aggregate report must explicitly satisfy every `--review-gate`; omitted gates
+are treated as missing evidence and fail the run instead of being inferred as
+passing.
 
 ```sh
 atteler --review-run \

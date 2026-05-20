@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -233,6 +234,74 @@ func TestScanWithOptions_SkipsRuntimeArtifactDirectoriesAndBinaryStaleMarkers(t 
 	assert.NotContains(t, keys, ".omx/state.json|stale_todo|maintenance")
 	assert.NotContains(t, keys, "dist/generated.txt|stale_todo|maintenance")
 	assert.NotContains(t, keys, "binary.bin|stale_todo|maintenance")
+}
+
+func TestScanWithOptions_RespectsRootGitIgnore(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, ".gitignore", strings.Join([]string{
+		"/atteler",
+		"ignored.log",
+		"ignored-dir/",
+		"*.tmp",
+		"!keep.tmp",
+	}, "\n"))
+	writeFile(t, root, "atteler", strings.Repeat("x", 128))
+	writeFile(t, root, "ignored.log", "TODO: ignored log\n")
+	writeFile(t, root, "ignored-dir/ignored.go", "package ignored\n")
+	writeFile(t, root, "src/generated.tmp", "TODO: ignored generated tmp\n")
+	writeFile(t, root, "keep.tmp", "TODO: keep negated file\n")
+	writeFile(t, root, "visible.txt", "TODO: visible marker\n")
+
+	findings, err := ScanWithOptions(root, Options{LargeFileBytes: 64})
+	require.NoError(t, err)
+
+	keys := findingKeys(findings)
+	assert.Contains(t, keys, "keep.tmp|stale_todo|maintenance")
+	assert.Contains(t, keys, "visible.txt|stale_todo|maintenance")
+	assert.NotContains(t, keys, "atteler|large_file|warning")
+	assert.NotContains(t, keys, "ignored.log|stale_todo|maintenance")
+	assert.NotContains(t, keys, "ignored-dir/ignored.go|missing_test|info")
+	assert.NotContains(t, keys, "src/generated.tmp|stale_todo|maintenance")
+}
+
+func TestScanWithOptions_IgnoresRoadmapHeadingsAndTestFixtures(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "README.md", "# Project\n\n## TODO\n\n- [x] persistent task/TODO list\n")
+	writeFile(t, root, "TODO.md", "# atteler TODO\n\n## P4 -- Feature gaps\n\n- [x] completed work\n")
+	writeFile(t, root, "pkg/watch/watch_test.go", `package watch
+
+func TestFixture() {
+	_ = "TODO: fixture text"
+}
+`)
+	writeFile(t, root, "docs/action.md", "TODO: convert this real marker into an issue\n")
+
+	findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
+	require.NoError(t, err)
+
+	keys := findingKeys(findings)
+	assert.Contains(t, keys, "docs/action.md|stale_todo|maintenance")
+	assert.NotContains(t, keys, "README.md|stale_todo|maintenance")
+	assert.NotContains(t, keys, "TODO.md|stale_todo|maintenance")
+	assert.NotContains(t, keys, "pkg/watch/watch_test.go|stale_todo|maintenance")
+}
+
+func TestScanWithOptions_AddsRuleMetadata(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "todo.txt", "TODO: real work\n")
+
+	findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+
+	assert.Equal(t, "watch.stale_todo", findings[0].RuleID)
+	assert.Contains(t, findings[0].Help, "tracked issues")
 }
 
 func findingKeys(findings []Finding) []string {

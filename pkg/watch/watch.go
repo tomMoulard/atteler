@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	pathmatch "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -42,6 +43,8 @@ type Finding struct {
 	Kind     string `json:"kind"`
 	Message  string `json:"message"`
 	Severity string `json:"severity"`
+	RuleID   string `json:"rule_id,omitempty"`
+	Help     string `json:"help,omitempty"`
 }
 
 // Options configures repository scans.
@@ -68,6 +71,7 @@ func ScanWithOptions(root string, options Options) ([]Finding, error) {
 	state := scanState{
 		root:           root,
 		largeFileBytes: largeFileBytes,
+		ignore:         loadGitIgnore(root),
 		goFiles:        make(map[string]bool),
 		testFiles:      make(map[string]bool),
 	}
@@ -85,84 +89,247 @@ func ScanWithOptions(root string, options Options) ([]Finding, error) {
 type scanState struct {
 	root           string
 	largeFileBytes int64
+	ignore         ignoreMatcher
 	findings       []Finding
 	goFiles        map[string]bool
 	testFiles      map[string]bool
 }
 
-func (s *scanState) visit(path string, entry fs.DirEntry, err error) error {
+func (s *scanState) visit(filePath string, entry fs.DirEntry, err error) error {
 	if err != nil {
-		return fmt.Errorf("visit %s: %w", path, err)
+		return fmt.Errorf("visit %s: %w", filePath, err)
 	}
 
 	if entry.IsDir() {
-		if shouldSkipDir(entry.Name()) && path != s.root {
+		if shouldSkipDir(entry.Name()) && filePath != s.root {
+			return filepath.SkipDir
+		}
+
+		relativePath, relativeErr := relative(s.root, filePath)
+		if relativeErr != nil {
+			return relativeErr
+		}
+
+		if relativePath != "." && s.ignore.ignored(relativePath, true) {
 			return filepath.SkipDir
 		}
 
 		return nil
 	}
 
-	return s.scanFile(path, entry)
+	return s.scanFile(filePath, entry)
 }
 
-func (s *scanState) scanFile(path string, entry fs.DirEntry) error {
-	info, err := entry.Info()
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", path, err)
-	}
-
-	relativePath, err := relative(s.root, path)
+func (s *scanState) scanFile(filePath string, entry fs.DirEntry) error {
+	relativePath, err := relative(s.root, filePath)
 	if err != nil {
 		return err
 	}
 
+	if s.ignore.ignored(relativePath, false) {
+		return nil
+	}
+
+	info, err := entry.Info()
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", filePath, err)
+	}
+
 	if info.Size() > s.largeFileBytes {
-		s.findings = append(s.findings, Finding{
-			Path:     relativePath,
-			Kind:     KindLargeFile,
-			Message:  fmt.Sprintf("file is %d bytes, above %d byte threshold", info.Size(), s.largeFileBytes),
-			Severity: SeverityWarning,
-		})
+		s.findings = append(s.findings, newFinding(
+			relativePath,
+			KindLargeFile,
+			fmt.Sprintf("file is %d bytes, above %d byte threshold", info.Size(), s.largeFileBytes),
+			SeverityWarning,
+		))
 	}
 
 	recordGoFile(relativePath, s.goFiles, s.testFiles)
 
-	ok, err := hasStaleTODOMarker(path)
-	if err != nil {
-		return err
+	if shouldScanStaleMarkers(relativePath) {
+		ok, err := hasStaleTODOMarker(filePath)
+		if err != nil {
+			return err
+		}
+
+		if ok {
+			s.findings = append(s.findings, newFinding(
+				relativePath,
+				KindStaleTODO,
+				"contains stale TODO/FIXME marker",
+				SeverityMaintenance,
+			))
+		}
 	}
 
-	if ok {
-		s.findings = append(s.findings, Finding{
-			Path:     relativePath,
-			Kind:     KindStaleTODO,
-			Message:  "contains stale TODO/FIXME marker",
-			Severity: SeverityMaintenance,
-		})
-	}
-
-	if hasContextBackgroundDrift(path, relativePath) {
-		s.findings = append(s.findings, Finding{
-			Path:     relativePath,
-			Kind:     KindConventionDrift,
-			Message:  "uses context.Background() outside allowed entrypoints/tests",
-			Severity: SeverityMaintenance,
-		})
+	if hasContextBackgroundDrift(filePath, relativePath) {
+		s.findings = append(s.findings, newFinding(
+			relativePath,
+			KindConventionDrift,
+			"uses context.Background() outside allowed entrypoints/tests",
+			SeverityMaintenance,
+		))
 	}
 
 	return nil
 }
 
+func newFinding(path, kind, message, severity string) Finding {
+	return Finding{
+		Path:     path,
+		Kind:     kind,
+		Message:  message,
+		Severity: severity,
+		RuleID:   "watch." + kind,
+		Help:     findingHelp(kind),
+	}
+}
+
+func findingHelp(kind string) string {
+	switch kind {
+	case KindLargeFile:
+		return "Remove the large file, move it to release artifacts, or ignore generated/binary output through .gitignore."
+	case KindMissingTest:
+		return "Add a same-directory _test.go companion or move generated/adapter code behind an ignored path."
+	case KindStaleTODO:
+		return "Convert stale TODO/FIXME markers into tracked issues or remove completed notes."
+	case KindConventionDrift:
+		return "Propagate caller contexts; only the process entrypoint should create the root context."
+	default:
+		return ""
+	}
+}
+
+func shouldScanStaleMarkers(path string) bool {
+	return !strings.HasSuffix(path, "_test.go")
+}
+
+func loadGitIgnore(root string) ignoreMatcher {
+	content, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		return ignoreMatcher{}
+	}
+
+	var matcher ignoreMatcher
+
+	for rawLine := range strings.SplitSeq(string(content), "\n") {
+		rule, ok := parseIgnoreRule(rawLine)
+		if ok {
+			matcher.rules = append(matcher.rules, rule)
+		}
+	}
+
+	return matcher
+}
+
+type ignoreMatcher struct {
+	rules []ignoreRule
+}
+
+func (m ignoreMatcher) ignored(relativePath string, isDir bool) bool {
+	relativePath = strings.TrimPrefix(filepath.ToSlash(relativePath), "./")
+	if relativePath == "." || relativePath == "" {
+		return false
+	}
+
+	ignored := false
+
+	for _, rule := range m.rules {
+		if rule.matches(relativePath, isDir) {
+			ignored = !rule.negated
+		}
+	}
+
+	return ignored
+}
+
+type ignoreRule struct {
+	pattern       string
+	negated       bool
+	rooted        bool
+	directoryOnly bool
+}
+
+func parseIgnoreRule(line string) (ignoreRule, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return ignoreRule{}, false
+	}
+
+	rule := ignoreRule{}
+	if strings.HasPrefix(line, "!") {
+		rule.negated = true
+		line = strings.TrimSpace(strings.TrimPrefix(line, "!"))
+	}
+
+	if line == "" {
+		return ignoreRule{}, false
+	}
+
+	if strings.HasSuffix(line, "/") {
+		rule.directoryOnly = true
+		line = strings.TrimSuffix(line, "/")
+	}
+
+	if strings.HasPrefix(line, "/") {
+		rule.rooted = true
+		line = strings.TrimPrefix(line, "/")
+	}
+
+	line = filepath.ToSlash(strings.TrimPrefix(line, "./"))
+	if line == "" {
+		return ignoreRule{}, false
+	}
+
+	rule.pattern = line
+
+	return rule, true
+}
+
+func (r ignoreRule) matches(relativePath string, isDir bool) bool {
+	if r.directoryOnly && !isDir && !hasPathPrefix(relativePath, r.pattern) {
+		return false
+	}
+
+	if r.rooted {
+		return pathMatches(r.pattern, relativePath) || hasPathPrefix(relativePath, r.pattern)
+	}
+
+	if strings.Contains(r.pattern, "/") {
+		return pathMatches(r.pattern, relativePath) || strings.HasSuffix(relativePath, "/"+r.pattern)
+	}
+
+	for segment := range strings.SplitSeq(relativePath, "/") {
+		if pathMatches(r.pattern, segment) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func pathMatches(pattern, value string) bool {
+	ok, err := pathmatch.Match(pattern, value)
+	if err == nil && ok {
+		return true
+	}
+
+	return pattern == value
+}
+
+func hasPathPrefix(relativePath, prefix string) bool {
+	return relativePath == prefix || strings.HasPrefix(relativePath, prefix+"/")
+}
+
 func (s *scanState) addMissingTests() {
 	for path := range s.goFiles {
 		if !s.testFiles[testPath(path)] {
-			s.findings = append(s.findings, Finding{
-				Path:     path,
-				Kind:     KindMissingTest,
-				Message:  "missing _test.go companion",
-				Severity: SeverityInfo,
-			})
+			s.findings = append(s.findings, newFinding(
+				path,
+				KindMissingTest,
+				"missing _test.go companion",
+				SeverityInfo,
+			))
 		}
 	}
 }
@@ -212,9 +379,34 @@ func hasStaleTODOMarker(path string) (bool, error) {
 		return false, nil
 	}
 
-	text := strings.ToUpper(string(content))
+	for line := range strings.SplitSeq(string(content), "\n") {
+		if isStaleTODOLine(line) {
+			return true, nil
+		}
+	}
 
-	return strings.Contains(text, "TODO") || strings.Contains(text, "FIXME"), nil
+	return false, nil
+}
+
+func isStaleTODOLine(line string) bool {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "//")
+	line = strings.TrimPrefix(line, "#")
+	line = strings.TrimPrefix(line, "--")
+	line = strings.TrimPrefix(line, "/*")
+	line = strings.TrimPrefix(line, "*")
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "-")
+	line = strings.TrimSpace(line)
+
+	upper := strings.ToUpper(line)
+	for _, marker := range []string{"TODO", "FIXME"} {
+		if strings.HasPrefix(upper, marker+":") || strings.HasPrefix(upper, marker+"(") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func hasContextBackgroundDrift(path, relativePath string) bool {
