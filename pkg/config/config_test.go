@@ -292,6 +292,36 @@ context:
 	assert.Equal(t, []string{"./new-docs.md", "https://example.com/ref"}, cfg.Context.References)
 }
 
+func TestLoadFiles_ContextReferencePolicy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "refs-policy.yaml", `
+context:
+  reference_policy:
+    allowed_schemes: [https]
+    allowed_hosts:
+      - docs.example.com
+      - "*.trusted.example"
+    local_roots:
+      - ../shared-style
+    max_redirects: 2
+    content_types:
+      - text/*
+      - application/json
+    allow_private_networks: false
+`)
+
+	cfg, _, err := LoadFiles([]string{path})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"https"}, cfg.Context.ReferencePolicy.AllowedSchemes)
+	assert.Equal(t, []string{"docs.example.com", "*.trusted.example"}, cfg.Context.ReferencePolicy.AllowedHosts)
+	assert.Equal(t, []string{"../shared-style"}, cfg.Context.ReferencePolicy.LocalRoots)
+	assert.Equal(t, 2, cfg.Context.ReferencePolicy.MaxRedirects)
+	assert.Equal(t, []string{"text/*", "application/json"}, cfg.Context.ReferencePolicy.ContentTypes)
+	assert.False(t, cfg.Context.ReferencePolicy.AllowPrivateNetworks)
+}
+
 func TestLoadFiles_AgentReferences(t *testing.T) {
 	t.Parallel()
 

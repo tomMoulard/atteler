@@ -54,6 +54,21 @@ context:
   max_file_bytes: 32768
   max_total_bytes: 131072
   max_input_tokens: 120000
+  # Configured references cross a trust boundary before every model request.
+  # Local paths are limited to the working directory plus explicit local_roots.
+  # Remote URLs are rejected unless both scheme and host are allowed.
+  # references:
+  #   - ./docs/style-guide.md
+  #   - https://docs.example.com/llm-style.md
+  reference_policy:
+    # allowed_schemes: [https]
+    # allowed_hosts:
+    #   - docs.example.com
+    # local_roots:
+    #   - ../shared-style-guides
+    # max_redirects: 0
+    # content_types: [text/*, application/json]
+    # allow_private_networks: false
 
 plugins:
   # paths:

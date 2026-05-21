@@ -288,6 +288,8 @@ func runReviewExecution(ctx context.Context, state appState, opts cliOptions) er
 }
 
 func buildReviewContext(ctx context.Context, paths []string, prompt string, opts contextref.Options) (string, error) {
+	opts.ReferenceScope = contextref.ReferenceScopeReview
+
 	refs, err := contextref.LoadReferences(ctx, paths, opts)
 	if err != nil {
 		return "", fmt.Errorf("load review references: %w", err)

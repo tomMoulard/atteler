@@ -27,10 +27,18 @@ const (
 var errDirectoryLimit = errors.New("directory reference limit reached")
 
 // Options configures reference expansion.
+//
+//nolint:govet // field order keeps root/size options first for callers.
 type Options struct {
 	Root          string
 	MaxFileBytes  int
 	MaxTotalBytes int
+	// ReferencePolicy constrains configured reference ingestion. It is used by
+	// LoadReferences; inline @path expansion remains rooted under Root.
+	ReferencePolicy ReferencePolicy
+	// ReferenceScope records where configured references came from, for example
+	// "global" or "agent:reviewer".
+	ReferenceScope string
 }
 
 // Reference describes one expanded local file or directory tree.
@@ -403,7 +411,7 @@ func appendReferences(prompt string, refs []expandedReference) string {
 		b.WriteString(`" truncated="`)
 		b.WriteString(strconv.FormatBool(ref.Truncated))
 		b.WriteString("\">\n")
-		b.WriteString(ref.content)
+		b.WriteString(escapeText(ref.content))
 
 		if !strings.HasSuffix(ref.content, "\n") {
 			b.WriteString("\n")
