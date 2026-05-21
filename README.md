@@ -137,6 +137,31 @@ I should/can also include specialized tool to do the review like coderabbit.
  - [x] CLI session inventory filtering by exact tag
  - [x] automatic git worktree isolation per session
  - [x] lifecycle event hooks with granular file/command/tool/agent activity events
+ - [x] standalone Symphony issue scheduler command with Linear and GitHub Issues trackers
+
+## Symphony
+
+Symphony is a standalone service command, not part of the main interactive
+`atteler` CLI surface:
+
+```sh
+go run ./cmd/symphony --validate
+go run ./cmd/symphony ./WORKFLOW.md
+make run-symphony
+make build-symphony
+```
+
+It loads a repository-owned `WORKFLOW.md`, polls Linear or GitHub Issues,
+creates per-issue workspaces, and runs Codex app-server turns with bounded
+concurrency and retry/reconciliation logic. GitHub workflows can also publish
+successful runs by committing locally, pushing a branch, opening a PR, and
+removing the dispatch label from the issue. Published PRs can be monitored for
+failing checks and reworked on the same branch without putting the source issue
+back into the dispatch queue. A local debug API can expose `/debug/status` for
+live scheduler state and recent decisions. See
+[`docs/symphony.md`](docs/symphony.md) for workflow config, GitHub tracker
+settings, publishing, debug endpoints, hooks, and the documented
+approval/sandbox posture.
 
 ## Configuration
 

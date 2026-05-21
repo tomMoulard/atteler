@@ -1,5 +1,7 @@
 BINARY  := atteler
 PKG     := ./cmd/atteler
+SYMPHONY_BINARY := symphony
+SYMPHONY_PKG := ./cmd/symphony
 MODULE  := github.com/tommoulard/atteler
 GORELEASER_VERSION ?= v2.15.4
 GORELEASER ?= go run github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
@@ -8,7 +10,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS ?= -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: all build run test e2e e2e-live lint generate release-check release-snapshot clean
+.PHONY: all build build-symphony run run-symphony test e2e e2e-live lint generate release-check release-snapshot clean
 
 all: generate lint test build
 
@@ -16,9 +18,17 @@ all: generate lint test build
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) $(PKG)
 
+## build-symphony: compile the standalone Symphony service binary
+build-symphony:
+	go build -o $(SYMPHONY_BINARY) $(SYMPHONY_PKG)
+
 ## run: build and run
 run:
 	go run $(PKG)
+
+## run-symphony: run the standalone Symphony service command
+run-symphony:
+	go run $(SYMPHONY_PKG)
 
 TESTFLAGS ?= ""
 TESTPACKAGE ?= "./..."
@@ -53,4 +63,4 @@ release-snapshot:
 
 ## clean: remove build artifacts
 clean:
-	rm -rf $(BINARY) dist
+	rm -rf $(BINARY) $(SYMPHONY_BINARY) dist
