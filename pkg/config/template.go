@@ -15,6 +15,11 @@ generation:
   reasoning_level: medium
   max_tokens: 2048
 
+agent_loop:
+  # Set 0 for no ceiling.
+  max_output_bytes: 0
+  max_total_tokens: 0
+
 providers:
   openai:
     # base_url: https://api.openai.com

@@ -58,6 +58,9 @@ generation:
   seed: 7
   reasoning_level: medium
   max_tokens: 900
+agent_loop:
+  max_output_bytes: 0
+  max_total_tokens: 0
 plugins:
   paths:
     - ./plugin-a
@@ -184,6 +187,14 @@ plugins:
 		assert.Failf(t, "assertion failed", "generation max_tokens = %d, want 900", cfg.Generation.MaxTokens)
 	}
 
+	if cfg.AgentLoop.MaxOutputBytes == nil || *cfg.AgentLoop.MaxOutputBytes != 0 {
+		assert.Failf(t, "assertion failed", "agent_loop.max_output_bytes = %v, want 0", cfg.AgentLoop.MaxOutputBytes)
+	}
+
+	if cfg.AgentLoop.MaxTotalTokens == nil || *cfg.AgentLoop.MaxTotalTokens != 0 {
+		assert.Failf(t, "assertion failed", "agent_loop.max_total_tokens = %v, want 0", cfg.AgentLoop.MaxTotalTokens)
+	}
+
 	if !reflect.DeepEqual(cfg.Plugins.Paths, []string{"./plugin-a"}) {
 		assert.Failf(t, "assertion failed", "plugin paths = %v", cfg.Plugins.Paths)
 	}
@@ -268,10 +279,16 @@ func TestLoadFilesWithOrigins_TracksScalarOverwriteAndSliceReplacement(t *testin
 	first := writeConfig(t, dir, "first.yaml", `
 default_model: gpt-first
 fallback_models: [gpt-first-fallback]
+agent_loop:
+  max_output_bytes: 1048576
+  max_total_tokens: 200000
 `)
 	second := writeConfig(t, dir, "second.yaml", `
 default_model: gpt-second
 fallback_models: [gpt-second-fallback]
+agent_loop:
+  max_output_bytes: 0
+  max_total_tokens: 0
 `)
 
 	cfg, loaded, origins, err := LoadFilesWithOrigins([]string{first, second})
@@ -279,6 +296,10 @@ fallback_models: [gpt-second-fallback]
 	require.Equal(t, []string{first, second}, loaded)
 	assert.Equal(t, "gpt-second", cfg.DefaultModel)
 	assert.Equal(t, []string{"gpt-second-fallback"}, cfg.FallbackModels)
+	require.NotNil(t, cfg.AgentLoop.MaxOutputBytes)
+	assert.EqualValues(t, 0, *cfg.AgentLoop.MaxOutputBytes)
+	require.NotNil(t, cfg.AgentLoop.MaxTotalTokens)
+	assert.Equal(t, 0, *cfg.AgentLoop.MaxTotalTokens)
 
 	modelOrigin := origins["default_model"].Chain
 	require.Len(t, modelOrigin, 2)
@@ -293,6 +314,18 @@ fallback_models: [gpt-second-fallback]
 	assert.Equal(t, OriginReplace, fallbackOrigin[1].Operation)
 	assert.Equal(t, second, fallbackOrigin[1].Source)
 	assert.Contains(t, fallbackOrigin[1].Note, "replaces")
+
+	outputBytesOrigin := origins["agent_loop.max_output_bytes"].Chain
+	require.Len(t, outputBytesOrigin, 2)
+	assert.Equal(t, OriginOverride, outputBytesOrigin[1].Operation)
+	assert.Equal(t, second, outputBytesOrigin[1].Source)
+	assert.Equal(t, "0", outputBytesOrigin[1].Value)
+
+	totalTokensOrigin := origins["agent_loop.max_total_tokens"].Chain
+	require.Len(t, totalTokensOrigin, 2)
+	assert.Equal(t, OriginOverride, totalTokensOrigin[1].Operation)
+	assert.Equal(t, second, totalTokensOrigin[1].Source)
+	assert.Equal(t, "0", totalTokensOrigin[1].Value)
 }
 
 func TestLoadFilesWithOrigins_TracksMapMergeProviderAgentAndPluginReplacement(t *testing.T) {

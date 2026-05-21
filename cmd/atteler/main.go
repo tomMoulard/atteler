@@ -189,6 +189,7 @@ type llmRequest struct {
 	eventBase               events.Event
 	hookRunner              *events.Runner
 	generation              generationSettings
+	agentLoopBudget         llm.AgentLoopBudget
 	maxInputTokens          int
 	model                   string
 	agentLoopCheckpointPath string
@@ -240,6 +241,7 @@ type model struct {
 	fallbackModels       []string
 	generationDefaults   generationSettings
 	generationOverrides  generationSettings
+	agentLoopBudget      llm.AgentLoopBudget
 	sessionState         session.Session
 	history              []llm.Message
 	promptHistory        []string
@@ -304,6 +306,7 @@ func initialModel(
 	fallbackModels []string,
 	generationDefaults generationSettings,
 	generationOverrides generationSettings,
+	agentLoopBudget llm.AgentLoopBudget,
 	maxInputTokens int,
 	modelLocked bool,
 	promptLocalOnly bool,
@@ -340,6 +343,7 @@ func initialModel(
 		fallbackModels:      append([]string(nil), fallbackModels...),
 		generationDefaults:  generationDefaults,
 		generationOverrides: generationOverrides,
+		agentLoopBudget:     agentLoopBudget,
 		maxInputTokens:      maxInputTokens,
 		history:             append([]llm.Message(nil), sessionState.Messages...),
 		promptHistory:       promptHistoryFromStore(store, sessionState, maxPromptHistoryEntries),

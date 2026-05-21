@@ -642,6 +642,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		messages:                msgs,
 		fallbackModels:          fallbackModels,
 		generation:              generation,
+		agentLoopBudget:         m.agentLoopBudget,
 		maxInputTokens:          m.maxInputTokens,
 		refs:                    refs,
 		useTools:                m.executionMode != "plan",

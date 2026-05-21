@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
+	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
@@ -30,6 +32,30 @@ func agentLoopCheckpointSink(path string) llm.AgentLoopCheckpointSink {
 	}
 
 	return llm.NewAgentLoopJSONLCheckpoint(path)
+}
+
+func agentLoopBudgetFromConfig(cfg appconfig.Config) (llm.AgentLoopBudget, error) {
+	var budget llm.AgentLoopBudget
+
+	if cfg.AgentLoop.MaxOutputBytes != nil {
+		maxOutputBytes := *cfg.AgentLoop.MaxOutputBytes
+		if maxOutputBytes < 0 {
+			return budget, errors.New("agent_loop.max_output_bytes must be >= 0")
+		}
+
+		budget.MaxOutputBytes = maxOutputBytes
+	}
+
+	if cfg.AgentLoop.MaxTotalTokens != nil {
+		maxTotalTokens := *cfg.AgentLoop.MaxTotalTokens
+		if maxTotalTokens < 0 {
+			return budget, errors.New("agent_loop.max_total_tokens must be >= 0")
+		}
+
+		budget.MaxTotalTokens = maxTotalTokens
+	}
+
+	return budget, nil
 }
 
 func agentLoopToolOutputLimit(ctx context.Context) int64 {

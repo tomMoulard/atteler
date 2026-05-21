@@ -400,6 +400,7 @@ type appState struct {
 	contextOptions      contextref.Options
 	generationDefaults  generationSettings
 	generationOverrides generationSettings
+	agentLoopBudget     llm.AgentLoopBudget
 	hookConfig          map[string][]appconfig.HookConfig
 	agentRegistry       *agent.Registry
 	hookRunner          *events.Runner

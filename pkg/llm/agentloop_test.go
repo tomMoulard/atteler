@@ -596,6 +596,30 @@ func TestAgentLoop_TokenBudgetStopIsCheckpointed(t *testing.T) {
 	assert.Equal(t, AgentLoopStopTokenBudget, ledger.Steps[1].StopCondition.Kind)
 }
 
+func TestAgentLoop_DefaultTotalTokenBudgetIsUnlimited(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{
+				Content:      "large token response",
+				Model:        "test-model",
+				StopReason:   StopEndTurn,
+				InputTokens:  120_000,
+				OutputTokens: 90_000,
+			},
+		},
+	})
+
+	resp, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, nil, AgentLoopConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, 210_000, resp.InputTokens+resp.OutputTokens)
+}
+
 func TestAgentLoop_CostBudgetRequiresEstimatorAndStops(t *testing.T) {
 	t.Parallel()
 
@@ -740,6 +764,38 @@ func TestAgentLoop_OutputBudgetStopsAndKeepsFullResultOutOfHistory(t *testing.T)
 	assert.NotEqual(t, toolStep.ToolResult.Content, toolStep.PromptResult.Content)
 	require.NotNil(t, ledger.Steps[2].StopCondition)
 	assert.Equal(t, AgentLoopStopOutputBytes, ledger.Steps[2].StopCondition.Kind)
+}
+
+func TestAgentLoop_DefaultOutputBudgetIsUnlimited(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{
+				Model:      "test-model",
+				StopReason: StopToolUse,
+				ToolCalls:  []ToolCall{{ID: "call_1", Name: "bash", Input: map[string]any{"command": "cat big"}}},
+			},
+			{Content: "done", Model: "test-model", StopReason: StopEndTurn},
+		},
+	})
+
+	executor := func(ctx context.Context, call ToolCall) ToolResult {
+		snapshot, ok := AgentLoopBudgetSnapshotFromContext(ctx)
+		assert.True(t, ok)
+		assert.Zero(t, snapshot.RemainingOutputBytes)
+
+		return ToolResult{ToolCallID: call.ID, Content: strings.Repeat("x", 1<<20+1)}
+	}
+
+	resp, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "run"}},
+		Tools:    DefaultTools(),
+	}, nil, executor, AgentLoopConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, "done", resp.Content)
 }
 
 func TestPromptToolResultCapsHistoryBytes(t *testing.T) {

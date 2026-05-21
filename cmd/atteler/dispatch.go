@@ -316,8 +316,12 @@ func listConfigPaths() {
 }
 
 func validateConfig() error {
-	_, loaded, err := appconfig.Load()
+	cfg, loaded, err := appconfig.Load()
 	if err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
+	if _, err := agentLoopBudgetFromConfig(cfg); err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
@@ -514,6 +518,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		state.generationOverrides,
 		state.maxInputTokens,
 		runOnceExecutionOptions{
+			AgentLoopBudget: state.agentLoopBudget,
 			Response: responseRecordOptions{
 				RecordPath: opts.recordResponsePath,
 				ReplayPath: opts.replayResponsePath,
@@ -572,6 +577,11 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	maxInputTokens := maxInputTokensFromConfigOptions(cfg, opts)
 
+	agentLoopBudget, err := agentLoopBudgetFromConfig(cfg)
+	if err != nil {
+		return appState{}, err
+	}
+
 	providers := reg.ListProviders()
 	if len(providers) == 0 && !opts.headless {
 		fmt.Fprintln(os.Stderr, "warning: no LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY")
@@ -627,6 +637,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		pluginPolicy:        clonePluginPolicy(cfg.Plugins.Policy),
 		generationDefaults:  generationDefaults,
 		generationOverrides: generationOverrides,
+		agentLoopBudget:     agentLoopBudget,
 		maxInputTokens:      maxInputTokens,
 		hookConfig:          cfg.Hooks,
 		modelLocked:         selection.modelLocked,

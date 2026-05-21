@@ -183,6 +183,7 @@ func callLLMWithTools(
 	resp, _, err := llm.AgentLoop(ctx, reg, params, request.fallbackModels, executor, llm.AgentLoopConfig{
 		ConfirmContinue: confirmContinueFn,
 		ConfirmToolCall: confirmToolFn,
+		Budget:          request.agentLoopBudget,
 		Policy:          llm.BashToolPolicy,
 		CheckpointSink:  agentLoopCheckpointSink(request.agentLoopCheckpointPath),
 	})

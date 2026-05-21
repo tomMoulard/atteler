@@ -14,6 +14,9 @@ func TestTemplateYAML(t *testing.T) {
 	for _, want := range []string{
 		"default_provider:",
 		"generation:",
+		"agent_loop:",
+		"max_output_bytes:",
+		"max_total_tokens:",
 		"providers:",
 		"agents:",
 		"hooks:",

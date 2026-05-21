@@ -29,6 +29,7 @@ type Config struct {
 	Agents          map[string]AgentConfig    `json:"agents,omitempty" yaml:"agents,omitempty"`
 	Hooks           map[string][]HookConfig   `json:"hooks,omitempty" yaml:"hooks,omitempty"`
 	Generation      GenerationConfig          `json:"generation" yaml:"generation"`
+	AgentLoop       AgentLoopConfig           `json:"agent_loop" yaml:"agent_loop"`
 	DefaultProvider string                    `json:"default_provider,omitempty" yaml:"default_provider,omitempty"`
 	DefaultModel    string                    `json:"default_model,omitempty" yaml:"default_model,omitempty"`
 	FallbackModels  []string                  `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
@@ -83,6 +84,16 @@ type GenerationConfig struct {
 	MaxTokens      int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
 }
 
+// AgentLoopConfig configures the multi-turn tool execution loop.
+type AgentLoopConfig struct {
+	// MaxOutputBytes caps cumulative raw tool output per agent loop. Zero or nil
+	// disables the cap.
+	MaxOutputBytes *int64 `json:"max_output_bytes,omitempty" yaml:"max_output_bytes,omitempty"`
+	// MaxTotalTokens caps cumulative model input plus output tokens per agent
+	// loop. Zero or nil disables the cap.
+	MaxTotalTokens *int `json:"max_total_tokens,omitempty" yaml:"max_total_tokens,omitempty"`
+}
+
 // ContextConfig configures local @file prompt references and configured
 // references that are loaded at startup or per-agent.
 //
@@ -113,6 +124,7 @@ type PluginConfig struct {
 
 type fileConfig struct {
 	Generation      fileGenerationConfig          `json:"generation" yaml:"generation"`
+	AgentLoop       fileAgentLoopConfig           `json:"agent_loop" yaml:"agent_loop"`
 	Context         fileContextConfig             `json:"context" yaml:"context"`
 	Plugins         filePluginConfig              `json:"plugins" yaml:"plugins"`
 	DefaultProvider *string                       `json:"default_provider" yaml:"default_provider"`
@@ -173,6 +185,11 @@ type fileGenerationConfig struct {
 	Seed           *int     `json:"seed" yaml:"seed"`
 	ReasoningLevel *string  `json:"reasoning_level" yaml:"reasoning_level"`
 	MaxTokens      *int     `json:"max_tokens" yaml:"max_tokens"`
+}
+
+type fileAgentLoopConfig struct {
+	MaxOutputBytes *int64 `json:"max_output_bytes" yaml:"max_output_bytes"`
+	MaxTotalTokens *int   `json:"max_total_tokens" yaml:"max_total_tokens"`
 }
 
 type filePluginConfig struct {
@@ -384,6 +401,7 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 	mergeAgents(dst, src.Agents, rec, source)
 	mergeHooks(dst, src.Hooks, rec, source)
 	mergeGeneration(dst, src.Generation, rec, source)
+	mergeAgentLoop(dst, src.AgentLoop, rec, source)
 	mergeContext(dst, src.Context, rec, source)
 	mergePlugins(dst, src.Plugins, rec, source)
 }
@@ -627,6 +645,20 @@ func mergeGeneration(dst *Config, generation fileGenerationConfig, rec *originRe
 	}
 }
 
+func mergeAgentLoop(dst *Config, agentLoop fileAgentLoopConfig, rec *originRecorder, source originSource) {
+	if agentLoop.MaxOutputBytes != nil {
+		value := *agentLoop.MaxOutputBytes
+		dst.AgentLoop.MaxOutputBytes = &value
+		rec.set("agent_loop.max_output_bytes", source, value)
+	}
+
+	if agentLoop.MaxTotalTokens != nil {
+		value := *agentLoop.MaxTotalTokens
+		dst.AgentLoop.MaxTotalTokens = &value
+		rec.set("agent_loop.max_total_tokens", source, value)
+	}
+}
+
 func mergePlugins(dst *Config, plugins filePluginConfig, rec *originRecorder, source originSource) {
 	if plugins.Paths != nil {
 		dst.Plugins.Paths = append([]string(nil), plugins.Paths...)
@@ -663,6 +695,7 @@ func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source 
 	mergeConfigAgents(dst, src.Agents, rec, source)
 	mergeConfigHooks(dst, src.Hooks, rec, source)
 	mergeConfigGeneration(dst, src.Generation, rec, source)
+	mergeConfigAgentLoop(dst, src.AgentLoop, rec, source)
 	mergeConfigContext(dst, src.Context, rec, source)
 	mergeConfigPlugins(dst, src.Plugins, rec, source)
 }
@@ -896,6 +929,20 @@ func mergeConfigGeneration(dst *Config, generation GenerationConfig, rec *origin
 	}
 }
 
+func mergeConfigAgentLoop(dst *Config, agentLoop AgentLoopConfig, rec *originRecorder, source originSource) {
+	if agentLoop.MaxOutputBytes != nil {
+		value := *agentLoop.MaxOutputBytes
+		dst.AgentLoop.MaxOutputBytes = &value
+		rec.set("agent_loop.max_output_bytes", source, value)
+	}
+
+	if agentLoop.MaxTotalTokens != nil {
+		value := *agentLoop.MaxTotalTokens
+		dst.AgentLoop.MaxTotalTokens = &value
+		rec.set("agent_loop.max_total_tokens", source, value)
+	}
+}
+
 func mergeConfigPlugins(dst *Config, plugins PluginConfig, rec *originRecorder, source originSource) {
 	if plugins.Paths != nil {
 		dst.Plugins.Paths = append([]string(nil), plugins.Paths...)
@@ -926,6 +973,7 @@ func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins Orig
 	mergeConfigAgentsFromOrigins(dst, src.Agents, dstOrigins, srcOrigins)
 	mergeConfigHooksFromOrigins(dst, src.Hooks, dstOrigins, srcOrigins)
 	mergeConfigGenerationFromOrigins(dst, src.Generation, dstOrigins, srcOrigins)
+	mergeConfigAgentLoopFromOrigins(dst, src.AgentLoop, dstOrigins, srcOrigins)
 	mergeConfigContextFromOrigins(dst, src.Context, dstOrigins, srcOrigins)
 	mergeConfigPluginsFromOrigins(dst, src.Plugins, dstOrigins, srcOrigins)
 }
@@ -1162,6 +1210,22 @@ func mergeConfigGenerationFromOrigins(dst *Config, generation GenerationConfig, 
 		dst.Generation.MaxTokens = generation.MaxTokens
 
 		appendOriginChain(dstOrigins, "generation.max_tokens", srcOrigins, false)
+	}
+}
+
+func mergeConfigAgentLoopFromOrigins(dst *Config, agentLoop AgentLoopConfig, dstOrigins, srcOrigins OriginMap) {
+	if agentLoop.MaxOutputBytes != nil {
+		value := *agentLoop.MaxOutputBytes
+		dst.AgentLoop.MaxOutputBytes = &value
+
+		appendOriginChain(dstOrigins, "agent_loop.max_output_bytes", srcOrigins, false)
+	}
+
+	if agentLoop.MaxTotalTokens != nil {
+		value := *agentLoop.MaxTotalTokens
+		dst.AgentLoop.MaxTotalTokens = &value
+
+		appendOriginChain(dstOrigins, "agent_loop.max_total_tokens", srcOrigins, false)
 	}
 }
 

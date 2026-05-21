@@ -79,6 +79,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.fallbackModels,
 		state.generationDefaults,
 		state.generationOverrides,
+		state.agentLoopBudget,
 		state.maxInputTokens,
 		state.modelLocked,
 		state.promptLocalOnly,

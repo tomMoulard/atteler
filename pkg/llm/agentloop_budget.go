@@ -7,19 +7,17 @@ import (
 )
 
 const (
-	defaultMaxIterations             = 20
-	defaultCheckpointInterval        = defaultMaxIterations
-	defaultMaxModelCalls             = 25
-	defaultMaxToolCalls              = 50
-	defaultMaxWallTime               = 30 * time.Minute
-	defaultMaxOutputBytes      int64 = 1 << 20 // 1 MiB of raw tool output per loop.
-	defaultMaxTotalTokens            = 200_000
-	defaultMaxHistoryToolBytes       = 16 << 10 // 16 KiB per tool result in prompt history.
+	defaultMaxIterations       = 20
+	defaultCheckpointInterval  = defaultMaxIterations
+	defaultMaxModelCalls       = 25
+	defaultMaxToolCalls        = 50
+	defaultMaxWallTime         = 30 * time.Minute
+	defaultMaxHistoryToolBytes = 16 << 10 // 16 KiB per tool result in prompt history.
 )
 
 // AgentLoopBudget is the hard-stop envelope for an agentic tool loop.
-// Non-positive fields use conservative defaults, except MaxCostMicros which is
-// disabled when zero because callers must provide a cost estimator.
+// Most non-positive fields use conservative defaults. MaxOutputBytes,
+// MaxCostMicros, and MaxTotalTokens are disabled when zero.
 type AgentLoopBudget struct {
 	MaxWallTime     time.Duration `json:"max_wall_time"`
 	MaxOutputBytes  int64         `json:"max_output_bytes"`
@@ -105,14 +103,6 @@ func normalizeAgentLoopBudget(b AgentLoopBudget, legacyMaxIterations int) AgentL
 
 	if b.MaxToolCalls <= 0 {
 		b.MaxToolCalls = defaultMaxToolCalls
-	}
-
-	if b.MaxOutputBytes <= 0 {
-		b.MaxOutputBytes = defaultMaxOutputBytes
-	}
-
-	if b.MaxTotalTokens <= 0 {
-		b.MaxTotalTokens = defaultMaxTotalTokens
 	}
 
 	return b

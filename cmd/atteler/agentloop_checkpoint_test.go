@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
@@ -57,6 +58,51 @@ func TestAgentLoopToolOutputLimitDefaultsToUnlimitedWithoutLoopContext(t *testin
 	t.Parallel()
 
 	assert.Zero(t, agentLoopToolOutputLimit(context.Background()))
+}
+
+func TestAgentLoopBudgetFromConfig(t *testing.T) {
+	t.Parallel()
+
+	budget, err := agentLoopBudgetFromConfig(appconfig.Config{})
+	require.NoError(t, err)
+	assert.Zero(t, budget.MaxOutputBytes)
+	assert.Zero(t, budget.MaxTotalTokens)
+
+	zeroBytes := int64(0)
+	zeroTokens := 0
+	budget, err = agentLoopBudgetFromConfig(appconfig.Config{
+		AgentLoop: appconfig.AgentLoopConfig{
+			MaxOutputBytes: &zeroBytes,
+			MaxTotalTokens: &zeroTokens,
+		},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, budget.MaxOutputBytes)
+	assert.Zero(t, budget.MaxTotalTokens)
+
+	byteLimit := int64(4096)
+	tokenLimit := 200000
+	budget, err = agentLoopBudgetFromConfig(appconfig.Config{
+		AgentLoop: appconfig.AgentLoopConfig{
+			MaxOutputBytes: &byteLimit,
+			MaxTotalTokens: &tokenLimit,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, byteLimit, budget.MaxOutputBytes)
+	assert.Equal(t, tokenLimit, budget.MaxTotalTokens)
+
+	negativeBytes := int64(-1)
+	_, err = agentLoopBudgetFromConfig(appconfig.Config{
+		AgentLoop: appconfig.AgentLoopConfig{MaxOutputBytes: &negativeBytes},
+	})
+	require.ErrorContains(t, err, "agent_loop.max_output_bytes must be >= 0")
+
+	negativeTokens := -1
+	_, err = agentLoopBudgetFromConfig(appconfig.Config{
+		AgentLoop: appconfig.AgentLoopConfig{MaxTotalTokens: &negativeTokens},
+	})
+	require.ErrorContains(t, err, "agent_loop.max_total_tokens must be >= 0")
 }
 
 func TestAgentLoopConfirmCallbacksSendToolConfirmationToTUI(t *testing.T) {
