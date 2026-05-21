@@ -316,7 +316,8 @@ func negativeKnowledgeSnippets(entries []NegativeKnowledge, query, normalizedQue
 func evaluationSnippets(entries []AgentEvaluation, query, normalizedQuery string) []SearchSnippet {
 	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
 
-	for i, entry := range entries {
+	for i := range entries {
+		entry := &entries[i]
 		if !matchesEvaluation(entry, normalizedQuery) {
 			continue
 		}
@@ -395,7 +396,9 @@ func matchesNegativeKnowledge(entry NegativeKnowledge, normalizedQuery string) b
 	return strings.Contains(strings.ToLower(entry.Approach), normalizedQuery) ||
 		strings.Contains(strings.ToLower(entry.Reason), normalizedQuery) ||
 		strings.Contains(strings.ToLower(entry.Commit), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.Agent), normalizedQuery)
+		strings.Contains(strings.ToLower(entry.Agent), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.TaskType), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.Severity), normalizedQuery)
 }
 
 func negativeKnowledgeSearchText(entry NegativeKnowledge) string {
@@ -408,17 +411,22 @@ func negativeKnowledgeSearchText(entry NegativeKnowledge) string {
 		parts = append(parts, "Agent: "+entry.Agent)
 	}
 
+	if entry.TaskType != "" {
+		parts = append(parts, "Task Type: "+entry.TaskType)
+	}
+
+	if entry.Severity != "" {
+		parts = append(parts, "Severity: "+entry.Severity)
+	}
+
 	return strings.Join(parts, " | ")
 }
 
-func matchesEvaluation(entry AgentEvaluation, normalizedQuery string) bool {
-	return strings.Contains(strings.ToLower(entry.Agent), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.Outcome), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.Notes), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.Reference), normalizedQuery)
+func matchesEvaluation(entry *AgentEvaluation, normalizedQuery string) bool {
+	return strings.Contains(strings.ToLower(evaluationSearchText(entry)), normalizedQuery)
 }
 
-func evaluationSearchText(entry AgentEvaluation) string {
+func evaluationSearchText(entry *AgentEvaluation) string {
 	parts := []string{"Evaluation: " + entry.Agent, "Outcome: " + entry.Outcome}
 	if entry.Score != 0 {
 		parts = append(parts, fmt.Sprintf("Score: %d", entry.Score))
@@ -428,11 +436,65 @@ func evaluationSearchText(entry AgentEvaluation) string {
 		parts = append(parts, "Reference: "+entry.Reference)
 	}
 
+	parts = appendEvaluationSearchMetadata(parts, entry)
+
 	if entry.Notes != "" {
 		parts = append(parts, "Notes: "+entry.Notes)
 	}
 
 	return strings.Join(parts, " | ")
+}
+
+func appendEvaluationSearchMetadata(parts []string, entry *AgentEvaluation) []string {
+	if entry.Source != "" {
+		parts = append(parts, "Source: "+entry.Source)
+	}
+
+	if entry.Evaluator != "" {
+		parts = append(parts, "Evaluator: "+entry.Evaluator)
+	}
+
+	if entry.RubricVersion != "" {
+		parts = append(parts, "Rubric Version: "+entry.RubricVersion)
+	}
+
+	if entry.TaskType != "" {
+		parts = append(parts, "Task Type: "+entry.TaskType)
+	}
+
+	if entry.Difficulty != "" {
+		parts = append(parts, "Difficulty: "+entry.Difficulty)
+	}
+
+	if entry.ExpectedOutcome != "" {
+		parts = append(parts, "Expected Outcome: "+entry.ExpectedOutcome)
+	}
+
+	if entry.Model != "" {
+		parts = append(parts, "Model: "+entry.Model)
+	}
+
+	if entry.AgentVersion != "" {
+		parts = append(parts, "Agent Version: "+entry.AgentVersion)
+	}
+
+	if entry.SchemaVersion != 0 {
+		parts = append(parts, fmt.Sprintf("Schema Version: %d", entry.SchemaVersion))
+	}
+
+	if entry.DurationMillis != 0 {
+		parts = append(parts, fmt.Sprintf("Duration Millis: %d", entry.DurationMillis))
+	}
+
+	if entry.Cost != 0 {
+		parts = append(parts, fmt.Sprintf("Cost: %.6f", entry.Cost))
+	}
+
+	if entry.Confidence != 0 {
+		parts = append(parts, fmt.Sprintf("Confidence: %.2f", entry.Confidence))
+	}
+
+	return parts
 }
 
 func matchesArtifact(entry Artifact, normalizedQuery string) bool {

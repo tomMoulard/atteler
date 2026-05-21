@@ -25,7 +25,20 @@ func recordFailure(
 	commit string,
 	agentName string,
 ) error {
-	if !sessionState.RecordNegativeKnowledge(approach, reason, commit, agentName) {
+	return recordFailureDetails(store, sessionState, session.NegativeKnowledge{
+		Approach: approach,
+		Reason:   reason,
+		Commit:   commit,
+		Agent:    agentName,
+	})
+}
+
+func recordFailureDetails(
+	store *session.Store,
+	sessionState session.Session,
+	failure session.NegativeKnowledge,
+) error {
+	if !sessionState.RecordNegativeKnowledgeDetails(failure) {
 		return errors.New("record failure: approach and reason are required, or this failure is already recorded")
 	}
 
@@ -47,8 +60,26 @@ func recordEvaluation(
 	reference string,
 	score int,
 ) error {
-	if !sessionState.RecordEvaluation(agentName, outcome, notes, reference, score) {
-		return errors.New("record evaluation: agent and outcome are required")
+	return recordEvaluationDetails(store, sessionState, session.AgentEvaluation{
+		Agent:     agentName,
+		Outcome:   outcome,
+		Notes:     notes,
+		Reference: reference,
+		Score:     score,
+	})
+}
+
+func recordEvaluationDetails(
+	store *session.Store,
+	sessionState session.Session,
+	evaluation session.AgentEvaluation,
+) error {
+	if strings.TrimSpace(evaluation.Model) == "" {
+		evaluation.Model = strings.TrimSpace(sessionState.DefaultModel)
+	}
+
+	if !sessionState.RecordEvaluationDetails(evaluation) {
+		return errors.New("record evaluation: agent, outcome, and valid evaluation metadata are required")
 	}
 
 	if err := store.Save(sessionState); err != nil {
@@ -58,6 +89,20 @@ func recordEvaluation(
 	fmt.Println("Recorded evaluation on session " + sessionState.ID)
 
 	return nil
+}
+
+func evaluationModelForRecord(modelOverride string, state appState) string {
+	for _, candidate := range []string{
+		modelOverride,
+		state.selectedModel,
+		state.sessionState.DefaultModel,
+	} {
+		if value := strings.TrimSpace(candidate); value != "" {
+			return value
+		}
+	}
+
+	return ""
 }
 
 const messagePreviewRunes = 120
@@ -139,6 +184,14 @@ func formatFailure(failure session.NegativeKnowledge) string {
 		parts = append(parts, "commit="+failure.Commit)
 	}
 
+	if failure.TaskType != "" {
+		parts = append(parts, "task_type="+failure.TaskType)
+	}
+
+	if failure.Severity != "" {
+		parts = append(parts, "severity="+failure.Severity)
+	}
+
 	return strings.Join(parts, "	")
 }
 
@@ -164,19 +217,60 @@ func formatEvaluation(evaluation session.AgentEvaluation) string {
 		parts = append(parts, "created_at="+evaluation.CreatedAt.Format(time.RFC3339))
 	}
 
+	parts = appendEvaluationNumbers(parts, evaluation)
+	parts = appendEvaluationStrings(parts, evaluation)
+
+	return strings.Join(parts, "	")
+}
+
+func appendEvaluationNumbers(parts []string, evaluation session.AgentEvaluation) []string {
 	if evaluation.Score != 0 {
 		parts = append(parts, "score="+strconv.Itoa(evaluation.Score))
 	}
 
-	if evaluation.Reference != "" {
-		parts = append(parts, "reference="+evaluation.Reference)
+	if evaluation.SchemaVersion != 0 {
+		parts = append(parts, "schema_version="+strconv.Itoa(evaluation.SchemaVersion))
 	}
 
-	if evaluation.Notes != "" {
-		parts = append(parts, "notes="+evaluation.Notes)
+	if evaluation.DurationMillis != 0 {
+		parts = append(parts, "duration_millis="+strconv.FormatInt(evaluation.DurationMillis, 10))
 	}
 
-	return strings.Join(parts, "	")
+	if evaluation.Cost != 0 {
+		parts = append(parts, fmt.Sprintf("cost=%.6f", evaluation.Cost))
+	}
+
+	if evaluation.Confidence != 0 {
+		parts = append(parts, fmt.Sprintf("confidence=%.2f", evaluation.Confidence))
+	}
+
+	return parts
+}
+
+func appendEvaluationStrings(parts []string, evaluation session.AgentEvaluation) []string {
+	fields := []struct {
+		key   string
+		value string
+	}{
+		{key: "source", value: evaluation.Source},
+		{key: "evaluator", value: evaluation.Evaluator},
+		{key: "rubric_version", value: evaluation.RubricVersion},
+		{key: "task_type", value: evaluation.TaskType},
+		{key: "difficulty", value: evaluation.Difficulty},
+		{key: "expected_outcome", value: evaluation.ExpectedOutcome},
+		{key: "model", value: evaluation.Model},
+		{key: "agent_version", value: evaluation.AgentVersion},
+		{key: "reference", value: evaluation.Reference},
+		{key: "notes", value: evaluation.Notes},
+	}
+
+	for _, field := range fields {
+		if field.value != "" {
+			parts = append(parts, field.key+"="+field.value)
+		}
+	}
+
+	return parts
 }
 
 func listArtifacts(sessionState session.Session) {

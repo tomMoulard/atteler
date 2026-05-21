@@ -35,12 +35,16 @@ func parseOptions() cliOptions {
 	opts.topP = floatFlag{name: "top-p", min: 0, max: 1, hasMax: true}
 	opts.routeBudget = floatFlag{name: "route-budget", min: 0}
 	opts.routeCacheReuse = floatFlag{name: "route-cache-reuse", min: 0, max: 1, hasMax: true}
+	opts.evaluationCost = floatFlag{name: "evaluation-cost", min: 0}
+	opts.evaluationConfidence = floatFlag{name: "evaluation-confidence", min: 0, max: 1, hasMax: true}
+	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
 	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
 	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
 	opts.seed = nonNegativeIntFlag{name: "seed"}
 	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
 	opts.memoryTTL = positiveIntFlag{name: "memory-ttl-seconds"}
 	opts.agentMemoryTTL = positiveIntFlag{name: "agent-memory-ttl-seconds"}
+	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}
 	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
 	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
 	registerCLIFlags(&opts)

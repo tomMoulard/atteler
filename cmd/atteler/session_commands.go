@@ -301,8 +301,26 @@ func formatAgentPerformanceSummary(summary session.AgentPerformanceSummary) stri
 		"failures=" + strconv.Itoa(summary.FailureCount),
 		"negative_knowledge=" + strconv.Itoa(summary.NegativeKnowledgeCount),
 		"default_agent_sessions=" + strconv.Itoa(summary.DefaultAgentSessionCount),
+		"routing_eligible=" + strconv.FormatBool(summary.Validity.RoutingEligible),
+		"recency_window_days=" + strconv.Itoa(summary.RecentWindowDays),
 	}
-	if summary.ScoredEvaluationCount > 0 {
+	if len(summary.EvaluationProvenance) > 0 {
+		parts = append(parts, "provenance="+formatProvenanceCounts(summary.EvaluationProvenance))
+	}
+
+	if len(summary.RubricVersions) > 0 {
+		parts = append(parts, "rubrics="+formatRubricVersionCounts(summary.RubricVersions))
+	}
+
+	if len(summary.Evaluators) > 0 {
+		parts = append(parts, "evaluators="+formatEvaluatorCounts(summary.Evaluators))
+	}
+
+	if len(summary.ScoreBuckets) > 0 {
+		parts = append(parts, "score_buckets="+formatScoreBuckets(summary.ScoreBuckets))
+	}
+
+	if summary.ScoredEvaluationCount > 0 && len(summary.ScoreBuckets) == 1 {
 		parts = append(
 			parts,
 			"scored="+strconv.Itoa(summary.ScoredEvaluationCount),
@@ -316,11 +334,146 @@ func formatAgentPerformanceSummary(summary session.AgentPerformanceSummary) stri
 		parts = append(parts, "outcomes="+formatOutcomeCounts(summary.Outcomes))
 	}
 
+	if len(summary.NegativeKnowledgeBreakdown) > 0 {
+		parts = append(parts, "negative_knowledge_breakdown="+formatNegativeKnowledgeBreakdown(summary.NegativeKnowledgeBreakdown))
+	}
+
+	parts = append(parts, formatPerformanceValidity(summary.Validity)...)
+
+	if len(summary.Validity.Checks) > 0 {
+		parts = append(parts, "validity_checks="+strings.Join(summary.Validity.Checks, ","))
+	}
+
+	if len(summary.Validity.Reasons) > 0 {
+		parts = append(parts, "validity_reasons="+strings.Join(summary.Validity.Reasons, ","))
+	}
+
 	if !summary.LatestActivity.IsZero() {
 		parts = append(parts, "latest="+summary.LatestActivity.UTC().Format(time.RFC3339))
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func formatPerformanceValidity(validity session.PerformanceValidity) []string {
+	if validity.MinimumSampleSize == 0 &&
+		validity.MinimumRecentSamples == 0 &&
+		validity.MaximumStandardError == 0 &&
+		validity.MinimumMeanConfidence == 0 {
+		return nil
+	}
+
+	return []string{
+		"validity_eligible_buckets=" + strconv.Itoa(validity.EligibleScoreBuckets),
+		"validity_min_sample_size=" + strconv.Itoa(validity.MinimumSampleSize),
+		"validity_min_recent_samples=" + strconv.Itoa(validity.MinimumRecentSamples),
+		fmt.Sprintf("validity_max_stderr=%.2f", validity.MaximumStandardError),
+		fmt.Sprintf("validity_min_confidence=%.2f", validity.MinimumMeanConfidence),
+	}
+}
+
+func formatProvenanceCounts(counts []session.ProvenanceCount) string {
+	parts := make([]string, 0, len(counts))
+	for _, count := range counts {
+		parts = append(parts, count.Source+":"+strconv.Itoa(count.Count))
+	}
+
+	return strings.Join(parts, ",")
+}
+
+func formatRubricVersionCounts(counts []session.RubricVersionCount) string {
+	parts := make([]string, 0, len(counts))
+	for _, count := range counts {
+		parts = append(parts, count.RubricVersion+":"+strconv.Itoa(count.Count))
+	}
+
+	return strings.Join(parts, ",")
+}
+
+func formatEvaluatorCounts(counts []session.EvaluatorCount) string {
+	parts := make([]string, 0, len(counts))
+	for _, count := range counts {
+		parts = append(parts, count.Evaluator+":"+strconv.Itoa(count.Count))
+	}
+
+	return strings.Join(parts, ",")
+}
+
+func formatScoreBuckets(buckets []session.ScoreBucketSummary) string {
+	parts := make([]string, 0, len(buckets))
+	for i := range buckets {
+		bucket := &buckets[i]
+
+		fields := []string{
+			"source=" + bucket.Source,
+			"rubric=" + bucket.RubricVersion,
+			"task=" + bucket.TaskType,
+			"difficulty=" + bucket.Difficulty,
+			"model=" + bucket.Model,
+			"agent_version=" + bucket.AgentVersion,
+			"routing_eligible=" + strconv.FormatBool(bucket.RoutingEligible),
+			"sample=" + strconv.Itoa(bucket.SampleSize),
+			fmt.Sprintf("avg=%.2f", bucket.AverageScore),
+			fmt.Sprintf("ci95=%.2f..%.2f", bucket.ConfidenceIntervalLow, bucket.ConfidenceIntervalHigh),
+			fmt.Sprintf("stderr=%.2f", bucket.StandardError),
+			"uncertainty=" + bucket.Uncertainty,
+			"recent_sample=" + strconv.Itoa(bucket.RecentSampleSize),
+			fmt.Sprintf("recent_avg=%.2f", bucket.RecentAverageScore),
+			"previous_sample=" + strconv.Itoa(bucket.PreviousSampleSize),
+			fmt.Sprintf("previous_avg=%.2f", bucket.PreviousAverageScore),
+			"regression=" + bucket.RegressionStatus,
+		}
+		if bucket.RecentSampleSize > 0 && bucket.PreviousSampleSize > 0 {
+			fields = append(fields, fmt.Sprintf("regression_delta=%.2f", bucket.RegressionDelta))
+		}
+
+		if !bucket.LatestScoreAt.IsZero() {
+			fields = append(fields, "latest_score="+bucket.LatestScoreAt.UTC().Format(time.RFC3339))
+		}
+
+		if !bucket.RecentWindowStart.IsZero() {
+			fields = append(fields, "recent_since="+bucket.RecentWindowStart.UTC().Format(time.RFC3339))
+		}
+
+		if bucket.ConfidenceSampleCount > 0 {
+			fields = append(fields,
+				"confidence_sample="+strconv.Itoa(bucket.ConfidenceSampleCount),
+				fmt.Sprintf("avg_confidence=%.2f", bucket.AverageConfidence),
+			)
+		}
+
+		if bucket.DurationSampleCount > 0 {
+			fields = append(fields,
+				"duration_sample="+strconv.Itoa(bucket.DurationSampleCount),
+				fmt.Sprintf("avg_duration_ms=%.2f", bucket.AverageDurationMillis),
+			)
+		}
+
+		if bucket.CostSampleCount > 0 {
+			fields = append(fields,
+				"cost_sample="+strconv.Itoa(bucket.CostSampleCount),
+				fmt.Sprintf("total_cost=%.6f", bucket.TotalCost),
+				fmt.Sprintf("avg_cost=%.6f", bucket.AverageCost),
+			)
+		}
+
+		if len(bucket.ValidityReasons) > 0 {
+			fields = append(fields, "validity_reasons="+strings.Join(bucket.ValidityReasons, "|"))
+		}
+
+		parts = append(parts, strings.Join(fields, "/"))
+	}
+
+	return strings.Join(parts, ";")
+}
+
+func formatNegativeKnowledgeBreakdown(counts []session.NegativeKnowledgeCategoryCount) string {
+	parts := make([]string, 0, len(counts))
+	for _, count := range counts {
+		parts = append(parts, count.TaskType+"/"+count.Severity+":"+strconv.Itoa(count.Count))
+	}
+
+	return strings.Join(parts, ",")
 }
 
 func formatOutcomeCounts(outcomes []session.OutcomeCount) string {

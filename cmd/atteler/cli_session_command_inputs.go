@@ -28,35 +28,61 @@ func sessionReadCommandInputFromOptions(opts cliOptions) sessionReadCommandInput
 
 //nolint:govet // field order follows session write flags; value is short-lived.
 type sessionWriteCommandInput struct {
-	RecordFailure       string
-	FailureReason       string
-	FailureCommit       string
-	RecordEvaluation    string
-	EvaluationOutcome   string
-	EvaluationNotes     string
-	EvaluationReference string
-	EvaluationScore     int
-	RecordArtifact      string
-	ArtifactKind        string
-	ArtifactSummary     string
-	FeedbackApplyConfig string
-	FeedbackHistoryPath string
+	RecordFailure             string
+	FailureReason             string
+	FailureCommit             string
+	FailureTaskType           string
+	FailureSeverity           string
+	RecordEvaluation          string
+	EvaluationOutcome         string
+	EvaluationNotes           string
+	EvaluationReference       string
+	EvaluationSource          string
+	EvaluationEvaluator       string
+	EvaluationRubricVersion   string
+	EvaluationTaskType        string
+	EvaluationDifficulty      string
+	EvaluationExpectedOutcome string
+	EvaluationModel           string
+	EvaluationAgentVersion    string
+	EvaluationScore           int
+	EvaluationDurationMillis  int
+	EvaluationCost            float64
+	EvaluationConfidence      float64
+	RecordArtifact            string
+	ArtifactKind              string
+	ArtifactSummary           string
+	FeedbackApplyConfig       string
+	FeedbackHistoryPath       string
 }
 
 func sessionWriteCommandInputFromOptions(opts cliOptions) sessionWriteCommandInput {
 	return sessionWriteCommandInput{
-		RecordFailure:       opts.recordFailure,
-		FailureReason:       opts.failureReason,
-		FailureCommit:       opts.failureCommit,
-		RecordEvaluation:    opts.recordEvaluation,
-		EvaluationOutcome:   opts.evaluationOutcome,
-		EvaluationNotes:     opts.evaluationNotes,
-		EvaluationReference: opts.evaluationReference,
-		EvaluationScore:     opts.evaluationScore.value,
-		RecordArtifact:      opts.recordArtifact,
-		ArtifactKind:        opts.artifactKind,
-		ArtifactSummary:     opts.artifactSummary,
-		FeedbackApplyConfig: opts.feedbackApplyConfig,
-		FeedbackHistoryPath: opts.feedbackHistoryPath,
+		RecordFailure:             opts.recordFailure,
+		FailureReason:             opts.failureReason,
+		FailureCommit:             opts.failureCommit,
+		FailureTaskType:           opts.failureTaskType,
+		FailureSeverity:           opts.failureSeverity,
+		RecordEvaluation:          opts.recordEvaluation,
+		EvaluationOutcome:         opts.evaluationOutcome,
+		EvaluationNotes:           opts.evaluationNotes,
+		EvaluationReference:       opts.evaluationReference,
+		EvaluationSource:          opts.evaluationSource,
+		EvaluationEvaluator:       opts.evaluationEvaluator,
+		EvaluationRubricVersion:   opts.evaluationRubricVersion,
+		EvaluationTaskType:        opts.evaluationTaskType,
+		EvaluationDifficulty:      opts.evaluationDifficulty,
+		EvaluationExpectedOutcome: opts.evaluationExpectedOutcome,
+		EvaluationModel:           opts.evaluationModel,
+		EvaluationAgentVersion:    opts.evaluationAgentVersion,
+		EvaluationScore:           opts.evaluationScore.value,
+		EvaluationDurationMillis:  opts.evaluationDurationMillis.value,
+		EvaluationCost:            opts.evaluationCost.value,
+		EvaluationConfidence:      opts.evaluationConfidence.value,
+		RecordArtifact:            opts.recordArtifact,
+		ArtifactKind:              opts.artifactKind,
+		ArtifactSummary:           opts.artifactSummary,
+		FeedbackApplyConfig:       opts.feedbackApplyConfig,
+		FeedbackHistoryPath:       opts.feedbackHistoryPath,
 	}
 }

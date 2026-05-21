@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/tommoulard/atteler/pkg/session"
 )
 
 type statefulSessionCommand[T any] struct {
@@ -190,11 +192,37 @@ func statefulSessionWriteCommandSet() []statefulSessionCommand[sessionWriteComma
 	return []statefulSessionCommand[sessionWriteCommandInput]{
 		statefulSessionCmd("record-failure", func(input sessionWriteCommandInput) bool { return input.RecordFailure != "" },
 			func(_ context.Context, input sessionWriteCommandInput, s appState) error {
-				return recordFailure(s.sessionStore, s.sessionState, input.RecordFailure, input.FailureReason, input.FailureCommit, s.selectedAgent)
+				return recordFailureDetails(s.sessionStore, s.sessionState, session.NegativeKnowledge{
+					Approach: input.RecordFailure,
+					Reason:   input.FailureReason,
+					Commit:   input.FailureCommit,
+					Agent:    s.selectedAgent,
+					TaskType: input.FailureTaskType,
+					Severity: input.FailureSeverity,
+				})
 			}),
 		statefulSessionCmd("record-evaluation", func(input sessionWriteCommandInput) bool { return input.RecordEvaluation != "" },
 			func(_ context.Context, input sessionWriteCommandInput, s appState) error {
-				return recordEvaluation(s.sessionStore, s.sessionState, input.RecordEvaluation, input.EvaluationOutcome, input.EvaluationNotes, input.EvaluationReference, input.EvaluationScore)
+				evaluation := session.AgentEvaluation{
+					Agent:           input.RecordEvaluation,
+					Outcome:         input.EvaluationOutcome,
+					Notes:           input.EvaluationNotes,
+					Reference:       input.EvaluationReference,
+					Source:          input.EvaluationSource,
+					Evaluator:       input.EvaluationEvaluator,
+					RubricVersion:   input.EvaluationRubricVersion,
+					TaskType:        input.EvaluationTaskType,
+					Difficulty:      input.EvaluationDifficulty,
+					ExpectedOutcome: input.EvaluationExpectedOutcome,
+					Model:           evaluationModelForRecord(input.EvaluationModel, s),
+					AgentVersion:    input.EvaluationAgentVersion,
+					Score:           input.EvaluationScore,
+					DurationMillis:  int64(input.EvaluationDurationMillis),
+					Cost:            input.EvaluationCost,
+					Confidence:      input.EvaluationConfidence,
+				}
+
+				return recordEvaluationDetails(s.sessionStore, s.sessionState, evaluation)
 			}),
 		statefulSessionCmd("record-artifact", func(input sessionWriteCommandInput) bool { return input.RecordArtifact != "" },
 			func(_ context.Context, input sessionWriteCommandInput, s appState) error {

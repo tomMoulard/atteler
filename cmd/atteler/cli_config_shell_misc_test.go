@@ -72,6 +72,28 @@ func TestRecordFailure_SavesNegativeKnowledge(t *testing.T) {
 	}
 }
 
+func TestRecordFailureDetails_SavesCategorizedNegativeKnowledge(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	sessionState := session.New("gpt-test", nil)
+
+	err := recordFailureDetails(store, sessionState, session.NegativeKnowledge{
+		Approach: "skip tests",
+		Reason:   "missed regression",
+		Agent:    "reviewer",
+		TaskType: "migration",
+		Severity: "high",
+	})
+	require.NoError(t, err)
+
+	loaded, err := store.Load(sessionState.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.NegativeKnowledge, 1)
+	assert.Equal(t, "migration", loaded.NegativeKnowledge[0].TaskType)
+	assert.Equal(t, "high", loaded.NegativeKnowledge[0].Severity)
+}
+
 func TestPathStatus(t *testing.T) {
 	t.Parallel()
 

@@ -433,7 +433,14 @@ func commandContractsByName() map[string]commandContract {
 		),
 		"session-write": commandContractFor(
 			"write selected session records or audited feedback patches",
-			[]string{"--record-failure", "--failure-reason", "--failure-commit", "--record-evaluation", "--evaluation-outcome", "--evaluation-notes", "--evaluation-reference", "--evaluation-score", "--record-artifact", "--artifact-kind", "--artifact-summary", "--feedback-apply-config", "--feedback-history"},
+			[]string{
+				"--record-failure", "--failure-reason", "--failure-commit", "--failure-task-type", "--failure-severity",
+				"--record-evaluation", "--evaluation-outcome", "--evaluation-notes", "--evaluation-reference",
+				"--evaluation-source", "--evaluation-evaluator", "--evaluation-rubric-version", "--evaluation-task-type",
+				"--evaluation-difficulty", "--evaluation-expected-outcome", "--evaluation-model", "--evaluation-agent-version",
+				"--evaluation-score", "--evaluation-duration-millis", "--evaluation-cost", "--evaluation-confidence",
+				"--record-artifact", "--artifact-kind", "--artifact-summary", "--feedback-apply-config", "--feedback-history",
+			},
 			[]string{commandEffectFilesystemWrite, commandEffectSessionRead, commandEffectSessionWrite, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("sessionWriteCommandInput"),

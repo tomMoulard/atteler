@@ -923,9 +923,64 @@ func TestSessionCommands(t *testing.T) {
 	result = runOK(t, spec, "--agent-performance-summary")
 	assertContains(t, result.stdout, "agent=reviewer")
 	assertContains(t, result.stdout, "evaluations=1")
-	assertContains(t, result.stdout, "failures=1")
+	assertContains(t, result.stdout, "failures=0")
+	assertContains(t, result.stdout, "routing_eligible=false")
+	assertContains(t, result.stdout, "validity_eligible_buckets=0")
+	assertContains(t, result.stdout, "validity_min_sample_size=10")
+	assertContains(t, result.stdout, "validity_min_recent_samples=3")
+	assertContains(t, result.stdout, "validity_max_stderr=5.00")
+	assertContains(t, result.stdout, "validity_min_confidence=0.70")
+	assertContains(t, result.stdout, "provenance=legacy:1")
+	assertContains(t, result.stdout, "rubrics=legacy-unversioned:1")
 	assertContains(t, result.stdout, "avg_score=8.00")
+	assertContains(t, result.stdout, "score_buckets=source=legacy/rubric=legacy-unversioned")
+	assertContains(t, result.stdout, "negative_knowledge_breakdown=unspecified/unspecified:1")
 	assertContains(t, result.stdout, "outcomes=pass:1")
+
+	result = runOK(t, spec,
+		"--session", "demo",
+		"--record-evaluation", "planner",
+		"--evaluation-outcome", "pass",
+		"--evaluation-source", "ci",
+		"--evaluation-evaluator", "ci-eval",
+		"--evaluation-rubric-version", "planning/v3",
+		"--evaluation-task-type", "planning",
+		"--evaluation-difficulty", "hard",
+		"--evaluation-expected-outcome", "accepted plan",
+		"--evaluation-agent-version", "planner@2",
+		"--evaluation-score", "88",
+		"--evaluation-duration-millis", "2500",
+		"--evaluation-cost", "0.02",
+		"--evaluation-confidence", "0.90",
+	)
+	assertContains(t, result.stdout, "Recorded evaluation on session demo")
+
+	result = runOK(t, spec, "--session", "demo", "--list-evaluations")
+	assertContains(t, result.stdout, "agent=planner")
+	assertContains(t, result.stdout, "source=ci")
+	assertContains(t, result.stdout, "evaluator=ci-eval")
+	assertContains(t, result.stdout, "rubric_version=planning/v3")
+	assertContains(t, result.stdout, "task_type=planning")
+	assertContains(t, result.stdout, "difficulty=hard")
+	assertContains(t, result.stdout, "expected_outcome=accepted plan")
+	assertContains(t, result.stdout, "model=gpt-test")
+	assertContains(t, result.stdout, "agent_version=planner@2")
+	assertContains(t, result.stdout, "duration_millis=2500")
+	assertContains(t, result.stdout, "cost=0.020000")
+	assertContains(t, result.stdout, "confidence=0.90")
+
+	result = runOK(t, spec,
+		"--session", "demo",
+		"--record-failure", "skip migration dry-run",
+		"--failure-reason", "missed data loss",
+		"--failure-task-type", "migration",
+		"--failure-severity", "critical",
+	)
+	assertContains(t, result.stdout, "Recorded failure on session demo")
+
+	result = runOK(t, spec, "--session", "demo", "--list-failures")
+	assertContains(t, result.stdout, "task_type=migration")
+	assertContains(t, result.stdout, "severity=critical")
 }
 
 func TestInteractiveFZFModelPickerPersistsFolderDefault(t *testing.T) {

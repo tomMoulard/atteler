@@ -109,16 +109,30 @@ type ExportNegativeKnowledge struct {
 	Reason    string    `json:"reason,omitempty"`
 	Commit    string    `json:"commit,omitempty"`
 	Agent     string    `json:"agent,omitempty"`
+	TaskType  string    `json:"task_type,omitempty"`
+	Severity  string    `json:"severity,omitempty"`
 }
 
 // ExportAgentEvaluation is a redaction-aware exported evaluation record.
 type ExportAgentEvaluation struct {
-	CreatedAt time.Time `json:"created_at,omitzero"`
-	Agent     string    `json:"agent"`
-	Outcome   string    `json:"outcome,omitempty"`
-	Notes     string    `json:"notes,omitempty"`
-	Reference string    `json:"reference,omitempty"`
-	Score     int       `json:"score,omitempty"`
+	CreatedAt       time.Time `json:"created_at,omitzero"`
+	Agent           string    `json:"agent"`
+	Outcome         string    `json:"outcome,omitempty"`
+	Notes           string    `json:"notes,omitempty"`
+	Reference       string    `json:"reference,omitempty"`
+	Source          string    `json:"source,omitempty"`
+	Evaluator       string    `json:"evaluator,omitempty"`
+	RubricVersion   string    `json:"rubric_version,omitempty"`
+	TaskType        string    `json:"task_type,omitempty"`
+	Difficulty      string    `json:"difficulty,omitempty"`
+	ExpectedOutcome string    `json:"expected_outcome,omitempty"`
+	Model           string    `json:"model,omitempty"`
+	AgentVersion    string    `json:"agent_version,omitempty"`
+	SchemaVersion   int       `json:"schema_version,omitempty"`
+	Score           int       `json:"score,omitempty"`
+	DurationMillis  int64     `json:"duration_millis,omitempty"`
+	Cost            float64   `json:"cost,omitempty"`
+	Confidence      float64   `json:"confidence,omitempty"`
 }
 
 // ExportArtifact is a redaction-aware exported artifact record.
@@ -354,6 +368,8 @@ func (builder *exportBuilder) exportNegativeKnowledge(entries []NegativeKnowledg
 			Reason:    builder.sanitize(prefix+".reason", entry.Reason),
 			Commit:    builder.sanitize(prefix+".commit", entry.Commit),
 			Agent:     builder.sanitize(prefix+".agent", entry.Agent),
+			TaskType:  builder.sanitize(prefix+".task_type", entry.TaskType),
+			Severity:  builder.sanitize(prefix+".severity", entry.Severity),
 		})
 	}
 
@@ -373,12 +389,24 @@ func (builder *exportBuilder) exportEvaluations(entries []AgentEvaluation) []Exp
 
 		prefix := fmt.Sprintf("evaluations[%d]", index+1)
 		exported = append(exported, ExportAgentEvaluation{
-			CreatedAt: entry.CreatedAt,
-			Agent:     builder.sanitize(prefix+".agent", entry.Agent),
-			Outcome:   builder.sanitize(prefix+".outcome", entry.Outcome),
-			Notes:     builder.sanitize(prefix+".notes", entry.Notes),
-			Reference: builder.sanitize(prefix+".reference", entry.Reference),
-			Score:     entry.Score,
+			CreatedAt:       entry.CreatedAt,
+			Agent:           builder.sanitize(prefix+".agent", entry.Agent),
+			Outcome:         builder.sanitize(prefix+".outcome", entry.Outcome),
+			Notes:           builder.sanitize(prefix+".notes", entry.Notes),
+			Reference:       builder.sanitize(prefix+".reference", entry.Reference),
+			Source:          builder.sanitize(prefix+".source", entry.Source),
+			Evaluator:       builder.sanitize(prefix+".evaluator", entry.Evaluator),
+			RubricVersion:   builder.sanitize(prefix+".rubric_version", entry.RubricVersion),
+			TaskType:        builder.sanitize(prefix+".task_type", entry.TaskType),
+			Difficulty:      builder.sanitize(prefix+".difficulty", entry.Difficulty),
+			ExpectedOutcome: builder.sanitize(prefix+".expected_outcome", entry.ExpectedOutcome),
+			Model:           builder.sanitize(prefix+".model", entry.Model),
+			AgentVersion:    builder.sanitize(prefix+".agent_version", entry.AgentVersion),
+			SchemaVersion:   entry.SchemaVersion,
+			Score:           entry.Score,
+			DurationMillis:  entry.DurationMillis,
+			Cost:            entry.Cost,
+			Confidence:      entry.Confidence,
 		})
 	}
 
@@ -649,7 +677,8 @@ func writeEvaluations(b *strings.Builder, entries []ExportAgentEvaluation) {
 
 	b.WriteString("\n## Agent Evaluations\n\n")
 
-	for _, entry := range entries {
+	for i := range entries {
+		entry := &entries[i]
 		if entry.Agent == "" && entry.Outcome == "" {
 			continue
 		}
@@ -664,6 +693,8 @@ func writeEvaluations(b *strings.Builder, entries []ExportAgentEvaluation) {
 			fmt.Fprintf(b, "  - **Score:** %d\n", entry.Score)
 		}
 
+		writeEvaluationMetadata(b, entry)
+
 		if entry.Reference != "" {
 			fmt.Fprintf(b, "  - **Reference:** %s\n", markdownInline(entry.Reference))
 		}
@@ -675,6 +706,33 @@ func writeEvaluations(b *strings.Builder, entries []ExportAgentEvaluation) {
 		if !entry.CreatedAt.IsZero() {
 			fmt.Fprintf(b, "  - **Created:** %s\n", entry.CreatedAt.UTC().Format(time.RFC3339))
 		}
+	}
+}
+
+func writeEvaluationMetadata(b *strings.Builder, entry *ExportAgentEvaluation) {
+	writeIndentedMetadataString(b, "Source", entry.Source)
+	writeIndentedMetadataString(b, "Evaluator", entry.Evaluator)
+	writeIndentedMetadataString(b, "Rubric Version", entry.RubricVersion)
+	writeIndentedMetadataString(b, "Task Type", entry.TaskType)
+	writeIndentedMetadataString(b, "Difficulty", entry.Difficulty)
+	writeIndentedMetadataString(b, "Expected Outcome", entry.ExpectedOutcome)
+	writeIndentedMetadataString(b, "Model", entry.Model)
+	writeIndentedMetadataString(b, "Agent Version", entry.AgentVersion)
+
+	if entry.SchemaVersion != 0 {
+		fmt.Fprintf(b, "  - **Schema Version:** %d\n", entry.SchemaVersion)
+	}
+
+	if entry.DurationMillis != 0 {
+		fmt.Fprintf(b, "  - **Duration Millis:** %d\n", entry.DurationMillis)
+	}
+
+	if entry.Cost != 0 {
+		fmt.Fprintf(b, "  - **Cost:** %.6f\n", entry.Cost)
+	}
+
+	if entry.Confidence != 0 {
+		fmt.Fprintf(b, "  - **Confidence:** %.2f\n", entry.Confidence)
 	}
 }
 
@@ -734,6 +792,14 @@ func writeNegativeKnowledge(b *strings.Builder, entries []ExportNegativeKnowledg
 
 		if entry.Agent != "" {
 			fmt.Fprintf(b, "  - **Agent:** %s\n", markdownInline(entry.Agent))
+		}
+
+		if entry.TaskType != "" {
+			fmt.Fprintf(b, "  - **Task Type:** %s\n", markdownInline(entry.TaskType))
+		}
+
+		if entry.Severity != "" {
+			fmt.Fprintf(b, "  - **Severity:** %s\n", markdownInline(entry.Severity))
 		}
 
 		if !entry.CreatedAt.IsZero() {
@@ -888,6 +954,15 @@ func hashJSON(value any) string {
 	sum := sha256.Sum256(data)
 
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func writeIndentedMetadataString(b *strings.Builder, label, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+
+	fmt.Fprintf(b, "  - **%s:** %s\n", label, markdownInline(value))
 }
 
 func roleTitle(role llm.Role) string {

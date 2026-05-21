@@ -220,6 +220,25 @@ func TestSession_RecordNegativeKnowledgeDeduplicatesNormalizedApproachAndReason(
 	assert.False(t, entry.CreatedAt.IsZero())
 }
 
+func TestSession_RecordNegativeKnowledgeDetailsCategorizesIncident(t *testing.T) {
+	t.Parallel()
+
+	session := New("gpt-4.1", nil)
+	ok := session.RecordNegativeKnowledgeDetails(NegativeKnowledge{
+		Approach: " rewrite router ",
+		Reason:   " hid regression ",
+		Agent:    " reviewer ",
+		TaskType: " migration ",
+		Severity: " high ",
+	})
+	require.True(t, ok)
+
+	require.Len(t, session.NegativeKnowledge, 1)
+	entry := session.NegativeKnowledge[0]
+	assert.Equal(t, "migration", entry.TaskType)
+	assert.Equal(t, "high", entry.Severity)
+}
+
 func TestSession_RecordNegativeKnowledgeRejectsMissingApproachOrReason(t *testing.T) {
 	t.Parallel()
 
@@ -242,6 +261,9 @@ func TestSession_RecordEvaluationAndArtifact(t *testing.T) {
 	assert.Equal(t, "reviewer", session.Evaluations[0].Agent)
 	assert.Equal(t, "pass", session.Evaluations[0].Outcome)
 	assert.Equal(t, 95, session.Evaluations[0].Score)
+	assert.Equal(t, EvaluationSourceHuman, session.Evaluations[0].Source)
+	assert.Equal(t, RubricVersionLegacy, session.Evaluations[0].RubricVersion)
+	assert.Equal(t, AgentEvaluationSchemaVersion, session.Evaluations[0].SchemaVersion)
 	assert.False(t, session.Evaluations[0].CreatedAt.IsZero())
 
 	require.Len(t, session.Artifacts, 1)
@@ -249,6 +271,86 @@ func TestSession_RecordEvaluationAndArtifact(t *testing.T) {
 	assert.Equal(t, "research", session.Artifacts[0].Kind)
 	assert.Equal(t, "reviewer", session.Artifacts[0].SourceAgent)
 	assert.False(t, session.Artifacts[0].CreatedAt.IsZero())
+}
+
+func TestSession_RecordEvaluationDetailsStoresVersionedMetadata(t *testing.T) {
+	t.Parallel()
+
+	session := New("gpt-4.1", nil)
+	ok := session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:           " reviewer ",
+		Outcome:         " pass ",
+		Source:          EvaluationSourceHarness,
+		Evaluator:       " eval-bot ",
+		RubricVersion:   "review-rubric/v2",
+		TaskType:        "code-review",
+		Difficulty:      "medium",
+		ExpectedOutcome: "find regression",
+		Model:           "gpt-test",
+		AgentVersion:    "reviewer@abc123",
+		Score:           88,
+		DurationMillis:  1200,
+		Cost:            0.0123,
+		Confidence:      0.91,
+	})
+	require.True(t, ok)
+
+	require.Len(t, session.Evaluations, 1)
+	entry := session.Evaluations[0]
+	assert.Equal(t, EvaluationSourceHarness, entry.Source)
+	assert.Equal(t, "eval-bot", entry.Evaluator)
+	assert.Equal(t, "review-rubric/v2", entry.RubricVersion)
+	assert.Equal(t, "code-review", entry.TaskType)
+	assert.Equal(t, "medium", entry.Difficulty)
+	assert.Equal(t, "find regression", entry.ExpectedOutcome)
+	assert.Equal(t, "gpt-test", entry.Model)
+	assert.Equal(t, "reviewer@abc123", entry.AgentVersion)
+	assert.Equal(t, AgentEvaluationSchemaVersion, entry.SchemaVersion)
+	assert.Equal(t, int64(1200), entry.DurationMillis)
+	assert.InEpsilon(t, 0.0123, entry.Cost, 0.0001)
+	assert.InEpsilon(t, 0.91, entry.Confidence, 0.0001)
+}
+
+func TestSession_RecordEvaluationDetailsRejectsInvalidCalibration(t *testing.T) {
+	t.Parallel()
+
+	session := New("gpt-4.1", nil)
+	assert.False(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:      "reviewer",
+		Outcome:    "pass",
+		Confidence: 1.1,
+	}))
+	assert.False(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:   "reviewer",
+		Outcome: "pass",
+		Score:   -1,
+	}))
+	assert.False(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:          "reviewer",
+		Outcome:        "pass",
+		DurationMillis: -1,
+	}))
+	assert.False(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:   "reviewer",
+		Outcome: "pass",
+		Cost:    -0.01,
+	}))
+	assert.False(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:         "reviewer",
+		Outcome:       "pass",
+		SchemaVersion: -1,
+	}))
+	assert.False(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:         "reviewer",
+		Outcome:       "pass",
+		SchemaVersion: AgentEvaluationSchemaVersion + 1,
+	}))
+	assert.False(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:   "reviewer",
+		Outcome: "pass",
+		Source:  "spreadsheet",
+	}))
+	assert.Empty(t, session.Evaluations)
 }
 
 func TestStore_LoadExistingJSONWithoutNegativeKnowledge(t *testing.T) {

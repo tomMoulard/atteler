@@ -173,7 +173,9 @@ func (s *Store) addSessionNegativeKnowledge(saved session.Session) error {
 }
 
 func (s *Store) addSessionEvaluations(saved session.Session) error {
-	for i, entry := range saved.Evaluations {
+	for i := range saved.Evaluations {
+		entry := &saved.Evaluations[i]
+
 		text := evaluationText(entry)
 		if text == "" {
 			continue
@@ -313,6 +315,8 @@ func negativeKnowledgeText(entry session.NegativeKnowledge) string {
 	appendPart(&parts, "Reason", entry.Reason)
 	appendPart(&parts, "Commit", entry.Commit)
 	appendPart(&parts, "Agent", entry.Agent)
+	appendPart(&parts, "Task type", entry.TaskType)
+	appendPart(&parts, "Severity", entry.Severity)
 
 	if !entry.CreatedAt.IsZero() {
 		appendPart(&parts, "Created", entry.CreatedAt.UTC().Format(time.RFC3339))
@@ -321,13 +325,38 @@ func negativeKnowledgeText(entry session.NegativeKnowledge) string {
 	return strings.Join(parts, "\n")
 }
 
-func evaluationText(entry session.AgentEvaluation) string {
+func evaluationText(entry *session.AgentEvaluation) string {
 	var parts []string
 	appendPart(&parts, "Evaluation", entry.Agent)
 	appendPart(&parts, "Outcome", entry.Outcome)
 
 	if entry.Score != 0 {
 		appendPart(&parts, "Score", strconv.Itoa(entry.Score))
+	}
+
+	appendPart(&parts, "Source", entry.Source)
+	appendPart(&parts, "Evaluator", entry.Evaluator)
+	appendPart(&parts, "Rubric version", entry.RubricVersion)
+	appendPart(&parts, "Task type", entry.TaskType)
+	appendPart(&parts, "Difficulty", entry.Difficulty)
+	appendPart(&parts, "Expected outcome", entry.ExpectedOutcome)
+	appendPart(&parts, "Model", entry.Model)
+	appendPart(&parts, "Agent version", entry.AgentVersion)
+
+	if entry.SchemaVersion != 0 {
+		appendPart(&parts, "Schema version", strconv.Itoa(entry.SchemaVersion))
+	}
+
+	if entry.DurationMillis != 0 {
+		appendPart(&parts, "Duration millis", strconv.FormatInt(entry.DurationMillis, 10))
+	}
+
+	if entry.Cost != 0 {
+		appendPart(&parts, "Cost", strconv.FormatFloat(entry.Cost, 'f', 6, 64))
+	}
+
+	if entry.Confidence != 0 {
+		appendPart(&parts, "Confidence", strconv.FormatFloat(entry.Confidence, 'f', 2, 64))
 	}
 
 	appendPart(&parts, "Reference", entry.Reference)

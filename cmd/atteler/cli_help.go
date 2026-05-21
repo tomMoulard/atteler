@@ -312,7 +312,7 @@ func lookupFlagDomain(name string) (string, bool) {
 		strings.HasPrefix(name, "export-session") || name == "export-format" ||
 		name == "search-sessions" || name == "list-messages" || name == "list-artifacts" ||
 		name == "list-failures" || name == "record-failure" || name == "failure-reason" ||
-		name == "failure-commit" || name == "record-artifact" || strings.HasPrefix(name, "artifact-") ||
+		strings.HasPrefix(name, "failure-") || name == "record-artifact" || strings.HasPrefix(name, "artifact-") ||
 		strings.HasPrefix(name, "merge-artifacts") || name == "merge-artifact-max-bytes":
 		return "chat/session", true
 	case name == "config" || name == "print-config-template" || name == "init-config" ||

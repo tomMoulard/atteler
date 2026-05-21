@@ -303,6 +303,27 @@ For non-interactive checks, `atteler agents prompt-complete "ask @rev"` previews
 the same local completion engine with source attribution, replacement ranges,
 rank signals, and a short explanation of what accepting the completion inserts.
 
+### Session evaluations and performance summaries
+
+Saved sessions can record agent evaluations, negative-knowledge incidents, and
+artifacts for later review. Evaluation records include versioned metadata for
+provenance (`human`, `harness`, or `ci`), evaluator identity, rubric version,
+task type, difficulty, expected outcome, model, agent version, duration, cost,
+and evaluator confidence. Negative knowledge is tracked separately by task type
+and severity instead of being flattened into a score.
+
+`atteler agents performance` is a diagnostic summary, not an automatic routing
+signal. Scores are grouped into compatible source, rubric, task, difficulty,
+model, and agent-version buckets before any average is shown; incompatible
+rubrics are not averaged together. Each bucket reports sample size,
+small-sample-adjusted confidence interval, standard error, runtime/cost
+coverage, recency-window bounds and counts, latest score timestamp, and
+regression status plus bucket-level routing eligibility and validity reasons.
+The summary also prints explicit routing validity checks and remains
+`routing_eligible=false` until a compatible bucket has enough total and recent
+samples, known provenance, a versioned rubric, task class, difficulty, model,
+agent version, confidence coverage, and bounded uncertainty.
+
 ### Local file and directory context
 
 Prompts can reference local files or directories with `@path` tokens. Atteler
