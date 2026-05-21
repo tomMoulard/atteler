@@ -186,3 +186,156 @@ func TestHandlePullRequestCheckDue_DispatchesReworkForFailedChecks(t *testing.T)
 	cancel()
 	orchestrator.wg.Wait()
 }
+
+func TestHandleWorkerExit_CanceledPullRequestReworkSchedulesFinalCheck(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	cfg := Config{
+		Publish: PublishConfig{
+			Enabled:       true,
+			MonitorChecks: true,
+			CheckInterval: time.Hour,
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 2,
+		},
+	}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		logger: slog.Default(),
+		events: make(chan orchestratorEvent, 4),
+		state: runtimeState{
+			Running: map[string]*runningEntry{
+				issue.ID: {
+					Issue:        issue,
+					StartedAt:    time.Now().Add(-time.Second),
+					State:        issue.State,
+					RunKind:      RunKindPullRequestRework,
+					CancelReason: cancelTerminal,
+					PullRequest: &PullRequestReworkContext{
+						Number: 31,
+					},
+				},
+			},
+			Claimed:       map[string]struct{}{issue.ID: {}},
+			RetryAttempts: map[string]*RetryEntry{},
+			PullRequests: map[int]*pullRequestMonitorEntry{
+				31: {
+					Issue:    issue,
+					Number:   31,
+					InRework: true,
+				},
+			},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.handleWorkerExit(workerExitEvent{issueID: issue.ID})
+
+	_, claimed := orchestrator.state.Claimed[issue.ID]
+	assert.False(t, claimed)
+
+	monitor := orchestrator.state.PullRequests[31]
+	require.NotNil(t, monitor)
+	assert.False(t, monitor.InRework)
+	assert.Contains(t, monitor.LastError, "terminal")
+	assert.False(t, monitor.NextCheckAt.IsZero())
+	require.NotNil(t, monitor.Timer)
+	monitor.Timer.Stop()
+}
+
+func TestRecoverPullRequestMonitorTimersRearmsStaleMonitor(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	orchestrator := &Orchestrator{
+		logger: slog.Default(),
+		events: make(chan orchestratorEvent, 4),
+		state: runtimeState{
+			PullRequests: map[int]*pullRequestMonitorEntry{
+				31: {
+					Issue:          issue,
+					Branch:         "symphony/GH-2",
+					PullRequestURL: "https://github.com/owner/repo/pull/31",
+					Number:         31,
+				},
+			},
+			RecentEvents:          []DebugEvent{},
+			CompletedPullRequests: map[int]struct{}{},
+		},
+	}
+
+	orchestrator.recoverPullRequestMonitorTimers(Config{
+		Publish: PublishConfig{
+			Enabled:       true,
+			MonitorChecks: true,
+		},
+	})
+
+	monitor := orchestrator.state.PullRequests[31]
+	assert.False(t, monitor.NextCheckAt.IsZero())
+	assert.Contains(t, monitor.LastError, "recovered")
+	require.NotNil(t, monitor.Timer)
+	monitor.Timer.Stop()
+}
+
+func TestHandlePullRequestCheckDue_CompletesClosedPullRequest(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	cfg := Config{
+		Publish: PublishConfig{
+			Enabled:                true,
+			MonitorChecks:          true,
+			CheckInterval:          time.Hour,
+			MaxCheckReworkAttempts: 3,
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 2,
+		},
+	}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker: checkTracker{checks: PullRequestCheckSnapshot{
+			CheckedAt:         time.Now().UTC(),
+			PullRequestURL:    "https://github.com/owner/repo/pull/31",
+			HeadRef:           "symphony/GH-2",
+			State:             PullRequestChecksPassed,
+			Summary:           "pull request is closed; no rework will be scheduled",
+			PullRequestClosed: true,
+			PullRequestNumber: 31,
+		}},
+		logger: slog.Default(),
+		events: make(chan orchestratorEvent, 4),
+		state: runtimeState{
+			Running:       map[string]*runningEntry{},
+			Claimed:       map[string]struct{}{},
+			RetryAttempts: map[string]*RetryEntry{},
+			PullRequests: map[int]*pullRequestMonitorEntry{
+				31: {
+					Issue:          issue,
+					Branch:         "symphony/GH-2",
+					PullRequestURL: "https://github.com/owner/repo/pull/31",
+					Number:         31,
+				},
+			},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.handlePullRequestCheckDue(t.Context(), 31)
+
+	assert.NotContains(t, orchestrator.state.PullRequests, 31)
+	assert.Contains(t, orchestrator.state.CompletedPullRequests, 31)
+}

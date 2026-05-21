@@ -226,6 +226,7 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	}
 
 	o.discoverPullRequestMonitors(ctx, snapshot.Config)
+	o.recoverPullRequestMonitorTimers(snapshot.Config)
 
 	issues, err := o.tracker.FetchCandidateIssues(ctx)
 	if err != nil {
@@ -399,6 +400,33 @@ func (o *Orchestrator) discoverPullRequestMonitors(ctx context.Context, cfg Conf
 		if monitor.Timer == nil && !monitor.InRework && !monitor.Exhausted && monitor.NextCheckAt.IsZero() {
 			o.reschedulePullRequestCheck(monitor, cfg.Publish.CheckInterval, "")
 		}
+	}
+}
+
+func (o *Orchestrator) recoverPullRequestMonitorTimers(cfg Config) {
+	if !cfg.Publish.Enabled || !cfg.Publish.MonitorChecks {
+		return
+	}
+
+	o.ensurePullRequestState()
+	now := time.Now().UTC()
+	for _, monitor := range o.state.PullRequests {
+		if monitor == nil || monitor.Number <= 0 || monitor.Timer != nil || monitor.InRework || monitor.Exhausted {
+			continue
+		}
+
+		delay := time.Millisecond
+		if !monitor.NextCheckAt.IsZero() && monitor.NextCheckAt.After(now) {
+			delay = monitor.NextCheckAt.Sub(now)
+		}
+
+		o.reschedulePullRequestCheck(monitor, delay, "monitor timer recovered")
+		o.recordIssueEvent(
+			"pr_monitor_timer_recovered", monitor.Issue, "pull request monitor timer recovered",
+			"pull_request_number", monitor.Number,
+			"pull_request_url", monitor.PullRequestURL,
+			"next_check_at", monitor.NextCheckAt,
+		)
 	}
 }
 
@@ -617,18 +645,7 @@ func (o *Orchestrator) handleWorkerExit(event workerExitEvent) {
 		o.markPullRequestReworkFinished(entry.PullRequest.Number)
 	}
 
-	if entry.CancelReason == cancelTerminal || entry.CancelReason == cancelNonActive || entry.CancelReason == cancelShutdown {
-		delete(o.state.Claimed, event.issueID)
-		o.recordIssueEvent(
-			"worker_released", entry.Issue, "worker released",
-			"reason", string(entry.CancelReason),
-		)
-		o.logger.Info(
-			"symphony worker released",
-			"issue_id", entry.Issue.ID,
-			"issue_identifier", entry.Issue.Identifier,
-			"reason", entry.CancelReason,
-		)
+	if o.releaseCanceledWorker(event.issueID, entry) {
 		return
 	}
 
@@ -720,6 +737,30 @@ func (o *Orchestrator) handleWorkerExit(event workerExitEvent) {
 		"issue_identifier", entry.Issue.Identifier,
 		"error", errText,
 	)
+}
+
+func (o *Orchestrator) releaseCanceledWorker(issueID string, entry *runningEntry) bool {
+	if entry.CancelReason != cancelTerminal && entry.CancelReason != cancelNonActive && entry.CancelReason != cancelShutdown {
+		return false
+	}
+
+	delete(o.state.Claimed, issueID)
+	if entry.RunKind == RunKindPullRequestRework && entry.CancelReason != cancelShutdown {
+		o.schedulePullRequestCheckRetry(entry.PullRequest, "rework canceled because issue became "+string(entry.CancelReason))
+	}
+
+	o.recordIssueEvent(
+		"worker_released", entry.Issue, "worker released",
+		"reason", string(entry.CancelReason),
+	)
+	o.logger.Info(
+		"symphony worker released",
+		"issue_id", entry.Issue.ID,
+		"issue_identifier", entry.Issue.Identifier,
+		"reason", entry.CancelReason,
+	)
+
+	return true
 }
 
 func (o *Orchestrator) handleRetryDue(ctx context.Context, issueID string) {
