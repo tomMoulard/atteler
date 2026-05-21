@@ -24,6 +24,7 @@ func initTestRepo(t *testing.T) string {
 		{"git", "config", "user.email", "test@test.com"},
 		{"git", "config", "user.name", "Test"},
 		{"git", "config", "commit.gpgsign", "false"},
+		{"git", "config", "core.excludesFile", os.DevNull},
 		{"git", "commit", "--allow-empty", "-m", "init"},
 	}
 	for _, args := range cmds {
@@ -329,6 +330,28 @@ func TestMergeRefusesModifiedBaseWorktree(t *testing.T) {
 	assert.Contains(t, err.Error(), "tracked.txt")
 
 	runGit(t, repo, "checkout", "--", "tracked.txt")
+	require.NoError(t, Remove(repo, info))
+}
+
+func TestGitStatusSummaryExcludesManagedWorktreePath(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := Create(repo, "status-exclude")
+	require.NoError(t, err)
+	repoRoot, err := gitRepoRoot(t.Context(), repo)
+	require.NoError(t, err)
+
+	writeFile(t, filepath.Join(info.Path, "worktree.txt"), "worktree\n")
+	writeFile(t, filepath.Join(repoRoot, ".atteler", "main.txt"), "main\n")
+
+	summary, err := gitStatusSummary(t.Context(), repoRoot, info.Path)
+	require.NoError(t, err)
+
+	assert.Contains(t, summary.String(), ".atteler/main.txt")
+	assert.NotContains(t, summary.String(), ".atteler/worktrees/status-exclude")
+
+	require.NoError(t, os.Remove(filepath.Join(repoRoot, ".atteler", "main.txt")))
 	require.NoError(t, Remove(repo, info))
 }
 

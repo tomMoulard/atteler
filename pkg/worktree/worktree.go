@@ -482,7 +482,7 @@ func preflightMainRepo(ctx context.Context, repoRoot string, info *Info, opts Me
 		return err
 	}
 
-	if err := preflightCleanState(ctx, repoRoot); err != nil {
+	if err := preflightCleanState(ctx, repoRoot, info); err != nil {
 		return err
 	}
 
@@ -510,7 +510,7 @@ func preflightCurrentBranch(ctx context.Context, repoRoot string, info *Info, op
 	return nil
 }
 
-func preflightCleanState(ctx context.Context, repoRoot string) error {
+func preflightCleanState(ctx context.Context, repoRoot string, info *Info) error {
 	pending, err := gitPendingOperation(ctx, repoRoot)
 	if err != nil {
 		return fmt.Errorf("detect pending git operation: %w", err)
@@ -520,7 +520,7 @@ func preflightCleanState(ctx context.Context, repoRoot string) error {
 		return fmt.Errorf("main worktree has pending %s; finish or abort it before merging", pending)
 	}
 
-	summary, err := gitStatusSummary(ctx, repoRoot)
+	summary, err := gitStatusSummary(ctx, repoRoot, info.Path)
 	if err != nil {
 		return fmt.Errorf("read main worktree status: %w", err)
 	}
@@ -688,8 +688,14 @@ func (s statusSummary) String() string {
 	return strings.Join(s.lines, "\n")
 }
 
-func gitStatusSummary(ctx context.Context, dir string) (statusSummary, error) {
-	out, err := gitOutput(ctx, dir, "status", "--porcelain")
+func gitStatusSummary(ctx context.Context, dir string, excludePaths ...string) (statusSummary, error) {
+	args := []string{"status", "--porcelain", "--untracked-files=all"}
+	if pathspecs := statusPathspecs(dir, excludePaths); len(pathspecs) > 0 {
+		args = append(args, "--")
+		args = append(args, pathspecs...)
+	}
+
+	out, err := gitOutput(ctx, dir, args...)
 	if err != nil {
 		return statusSummary{}, err
 	}
@@ -706,6 +712,39 @@ func gitStatusSummary(ctx context.Context, dir string) (statusSummary, error) {
 	}
 
 	return statusSummary{lines: lines}, nil
+}
+
+func statusPathspecs(repoRoot string, excludePaths []string) []string {
+	var pathspecs []string
+
+	for _, path := range excludePaths {
+		rel, ok := statusRelativePath(repoRoot, path)
+		if !ok {
+			continue
+		}
+
+		if len(pathspecs) == 0 {
+			pathspecs = append(pathspecs, ".")
+		}
+
+		pathspecs = append(pathspecs, ":(exclude,literal)"+rel)
+	}
+
+	return pathspecs
+}
+
+func statusRelativePath(repoRoot, path string) (string, bool) {
+	rel, err := filepath.Rel(repoRoot, path)
+	if err != nil {
+		return "", false
+	}
+
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", false
+	}
+
+	return rel, true
 }
 
 type transactionLog struct {
