@@ -27,7 +27,7 @@ func (m model) handleSlashCommand(input string) (model, tea.Cmd, bool) {
 	args := fields[1:]
 
 	switch cmd {
-	case "help":
+	case helpCommandName:
 		return m, tea.Println(slashHelp()), true
 	case "clear":
 		m.history = nil

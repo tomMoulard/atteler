@@ -16,11 +16,13 @@ runs, and JSON output mode. This is essential for debugging concurrent
 multi-agent runs.
 
 - [x] **Improve CLI discoverability for 220+ flags.**
-  There is no `--help` grouping, no subcommands, no man page. With 220 flags,
-  the flat `--help` output is unusable. Group flags by domain (provider, session,
-  agent, code-intel, memory, etc.) in the help output. Consider generating a man
-  page or adopting a subcommand structure for the inspection/utility commands.
-  Also, add the default values to the help output for better discoverability.
+  The top-level `--help` output now stays short and points users at grouped
+  domains (`atteler help <domain>`), while `atteler help legacy` keeps the full
+  compatibility flag catalog with defaults for scripts that still use flat
+  flags. No existing script-facing flag is deprecated in this release.
+  Inspection and utility commands have grouped aliases across chat/session,
+  config, providers, agents, memory/RAG, code-intel, review, watch, plugins,
+  worktrees, and eval.
 
 - [x] **Upgrade the vector store for real-world RAG.**
   `pkg/vector/vector.go` uses lexical feature hashing (FNV on bigrams into 128
