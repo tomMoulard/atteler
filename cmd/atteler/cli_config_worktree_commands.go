@@ -501,8 +501,8 @@ func finalizeWorktree(ctx context.Context, state *appState) {
 	fmt.Fprintln(os.Stderr, "worktree: merging "+state.worktreeInfo.Branch+" into "+state.worktreeInfo.BaseBranch+"...")
 
 	if err := worktree.MergeWithOptionsContext(ctx, state.cwd, state.worktreeInfo, worktree.MergeOptions{
-		AutoCommit: true,
 		AutoMerge:  true,
+		Strategy:   worktree.MergeStrategyMerge,
 		Provenance: worktreeMergeProvenance(state.sessionState),
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "worktree: auto-merge failed: "+err.Error())

@@ -398,9 +398,12 @@ atteler worktrees list
 atteler worktrees merge 20260430-120000-deadbeef
 ```
 
-`atteler worktrees run` creates an isolated git worktree for a session and can
-auto-merge or preserve it for later review. See `atteler help worktrees` for the
-current command contract.
+`atteler worktrees run` creates an isolated git worktree for a session with an
+ownership manifest under `.git/atteler/worktrees/`. Merge-back now runs as a
+reviewed transaction: the base worktree must be clean, session changes must be
+committed (or explicitly reviewed for auto-commit by an API caller), a dry-run
+merge must pass, and failed merges preserve the branch/worktree with recovery
+commands. See `atteler help worktrees` for the current command contract.
 
 ## Symphony
 
