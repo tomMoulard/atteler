@@ -438,10 +438,12 @@ func TestAgentLoop_MultipleToolCalls(t *testing.T) {
 	assert.Len(t, history, 4)
 }
 
-func TestAgentLoop_DefaultBudgetStopsHighMaxIterationsToolLoop(t *testing.T) {
+func TestAgentLoop_ExplicitModelCallBudgetStopsHighMaxIterationsToolLoop(t *testing.T) {
 	t.Parallel()
 
-	responses := make([]*Response, defaultMaxModelCalls+5)
+	const modelCallBudget = 25
+
+	responses := make([]*Response, modelCallBudget+5)
 	for i := range responses {
 		responses[i] = &Response{
 			Model:      "test-model",
@@ -466,12 +468,13 @@ func TestAgentLoop_DefaultBudgetStopsHighMaxIterationsToolLoop(t *testing.T) {
 		Messages: []Message{{Role: RoleUser, Content: "loop forever"}},
 		Tools:    DefaultTools(),
 	}, nil, executor, AgentLoopConfig{
+		Budget:        AgentLoopBudget{MaxModelCalls: modelCallBudget},
 		MaxIterations: 2000,
 	})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "model call budget exhausted")
-	assert.Equal(t, defaultMaxModelCalls, provider.calls)
-	assert.Equal(t, defaultMaxModelCalls, executions)
+	assert.Equal(t, modelCallBudget, provider.calls)
+	assert.Equal(t, modelCallBudget, executions)
 }
 
 func TestAgentLoop_ModelCallBudgetStopsBeforeNextModelCall(t *testing.T) {

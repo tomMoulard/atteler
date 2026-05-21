@@ -127,6 +127,10 @@ type AgentLoopConfig struct {
 	// response or another budget — model calls, tool calls, wall time —
 	// trips). Defaults to nil (unlimited).
 	MaxIterations *int `json:"max_iterations,omitempty" yaml:"max_iterations,omitempty"`
+	// MaxModelCalls caps the number of model completions per agent loop. Zero
+	// or nil disables the cap (the loop runs until the model returns a final
+	// response or another budget trips). Defaults to nil (unlimited).
+	MaxModelCalls *int `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
 }
 
 // ContextConfig configures local @file prompt references and configured
@@ -227,6 +231,7 @@ type fileAgentLoopConfig struct {
 	MaxOutputBytes *int64 `json:"max_output_bytes" yaml:"max_output_bytes"`
 	MaxTotalTokens *int   `json:"max_total_tokens" yaml:"max_total_tokens"`
 	MaxIterations  *int   `json:"max_iterations" yaml:"max_iterations"`
+	MaxModelCalls  *int   `json:"max_model_calls" yaml:"max_model_calls"`
 }
 
 type filePluginConfig struct {
@@ -705,6 +710,12 @@ func mergeAgentLoop(dst *Config, agentLoop fileAgentLoopConfig, rec *originRecor
 		dst.AgentLoop.MaxIterations = &value
 		rec.set("agent_loop.max_iterations", source, value)
 	}
+
+	if agentLoop.MaxModelCalls != nil {
+		value := *agentLoop.MaxModelCalls
+		dst.AgentLoop.MaxModelCalls = &value
+		rec.set("agent_loop.max_model_calls", source, value)
+	}
 }
 
 func mergePlugins(dst *Config, plugins filePluginConfig, rec *originRecorder, source originSource) {
@@ -999,6 +1010,12 @@ func mergeConfigAgentLoop(dst *Config, agentLoop AgentLoopConfig, rec *originRec
 		value := *agentLoop.MaxIterations
 		dst.AgentLoop.MaxIterations = &value
 		rec.set("agent_loop.max_iterations", source, value)
+	}
+
+	if agentLoop.MaxModelCalls != nil {
+		value := *agentLoop.MaxModelCalls
+		dst.AgentLoop.MaxModelCalls = &value
+		rec.set("agent_loop.max_model_calls", source, value)
 	}
 }
 
@@ -1298,6 +1315,13 @@ func mergeConfigAgentLoopFromOrigins(dst *Config, agentLoop AgentLoopConfig, dst
 		dst.AgentLoop.MaxIterations = &value
 
 		appendOriginChain(dstOrigins, "agent_loop.max_iterations", srcOrigins, false)
+	}
+
+	if agentLoop.MaxModelCalls != nil {
+		value := *agentLoop.MaxModelCalls
+		dst.AgentLoop.MaxModelCalls = &value
+
+		appendOriginChain(dstOrigins, "agent_loop.max_model_calls", srcOrigins, false)
 	}
 }
 
