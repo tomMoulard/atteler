@@ -214,6 +214,50 @@ References are resolved relative to the current working directory, must stay
 inside that directory, and are bounded by `context.max_file_bytes`,
 `context.max_total_bytes`, and optional `context.max_input_tokens` settings.
 
+### Configured references trust boundary
+
+`context.references` and agent-level `references` are loaded automatically and
+prepended to model requests. Treat them as untrusted ingestion inputs: a local
+file can contain prompt-injection text, and a remote URL can become an SSRF
+target if it is not constrained. Atteler escapes reference content before
+placing it in `<configured_references>`, records provenance (scope, local vs
+remote, size, truncation, digest, fetch time, and policy decision), and prints a
+stderr line for every loaded, truncated, skipped, or rejected configured
+reference. If any configured reference is rejected, that configured-reference
+block is omitted instead of silently sending partial context.
+
+By default, configured local references must stay under the current working
+directory. Add explicit `local_roots` for audited outside-root reads. Remote
+references support only HTTP(S) URLs and are denied unless
+`reference_policy.allowed_hosts` allows the host; private, loopback, link-local,
+and multicast targets remain blocked unless `allow_private_networks: true` is
+set deliberately. Host wildcards such as
+`*.docs.example.com` match subdomains only; list `docs.example.com` separately
+if the apex host should also be trusted.
+
+```yaml
+context:
+  references:
+    - ./docs/style-guide.md
+    - https://docs.example.com/llm-style.md
+  reference_policy:
+    allowed_schemes: [https]
+    allowed_hosts:
+      - docs.example.com
+    local_roots:
+      - ../shared-style-guides
+    max_redirects: 0
+    content_types:
+      - text/*
+      - application/json
+    allow_private_networks: false
+
+agents:
+  reviewer:
+    references:
+      - ./docs/reviewer-rubric.md
+```
+
 ### Deterministic response fixtures and eval checks
 
 ```sh
@@ -309,7 +353,7 @@ linked from the row.
 | OpenAI, Anthropic, Codex CLI, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
 | Configuration loading, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
 | Sessions, transcript search/export, evaluations, failures, artifacts, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |
-| Bounded local context references for files and directories | [`pkg/contextref/references.go`](pkg/contextref/references.go), [`pkg/contextref/references_test.go`](pkg/contextref/references_test.go), [`pkg/contextref/contextref.go`](pkg/contextref/contextref.go), [`pkg/contextref/contextref_test.go`](pkg/contextref/contextref_test.go) |
+| Bounded and policy-gated context references for local files, directories, globs, and remote URLs | [`pkg/contextref/references.go`](pkg/contextref/references.go), [`pkg/contextref/references_test.go`](pkg/contextref/references_test.go), [`pkg/contextref/contextref.go`](pkg/contextref/contextref.go), [`pkg/contextref/contextref_test.go`](pkg/contextref/contextref_test.go) |
 | Agent metadata, matching, orchestration planning, async waves, and sub-agent fan-out | [`pkg/agent/agent.go`](pkg/agent/agent.go), [`pkg/agent/orchestration.go`](pkg/agent/orchestration.go), [`pkg/agent/orchestration_test.go`](pkg/agent/orchestration_test.go), [`pkg/async/plan.go`](pkg/async/plan.go), [`pkg/async/plan_test.go`](pkg/async/plan_test.go), [`pkg/subagent/subagent.go`](pkg/subagent/subagent.go), [`pkg/subagent/subagent_test.go`](pkg/subagent/subagent_test.go), [`cmd/atteler/cli_async_commands.go`](cmd/atteler/cli_async_commands.go) |
 | Speculative and review-agent planning/execution primitives | [`pkg/speculate/speculate.go`](pkg/speculate/speculate.go), [`pkg/speculate/speculate_test.go`](pkg/speculate/speculate_test.go), [`pkg/review/review.go`](pkg/review/review.go), [`pkg/review/review_test.go`](pkg/review/review_test.go), [`pkg/review/llm.go`](pkg/review/llm.go), [`pkg/review/llm_test.go`](pkg/review/llm_test.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
 | Memory/RAG, local vector search, git-history search, Go code intelligence, import graphs, and optional LSP lookups | [`pkg/memory/memory.go`](pkg/memory/memory.go), [`pkg/memory/memory_test.go`](pkg/memory/memory_test.go), [`pkg/vector/vector.go`](pkg/vector/vector.go), [`pkg/vector/vector_test.go`](pkg/vector/vector_test.go), [`pkg/githistory/githistory.go`](pkg/githistory/githistory.go), [`pkg/githistory/githistory_test.go`](pkg/githistory/githistory_test.go), [`pkg/codeintel/codeintel.go`](pkg/codeintel/codeintel.go), [`pkg/codeintel/codeintel_test.go`](pkg/codeintel/codeintel_test.go), [`pkg/codegraph/codegraph.go`](pkg/codegraph/codegraph.go), [`pkg/codegraph/codegraph_test.go`](pkg/codegraph/codegraph_test.go), [`pkg/lsp/client.go`](pkg/lsp/client.go), [`pkg/lsp/client_test.go`](pkg/lsp/client_test.go) |

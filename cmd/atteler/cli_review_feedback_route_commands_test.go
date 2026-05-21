@@ -99,7 +99,8 @@ func TestBuildReviewContext_LoadsPathsAndInstructions(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, got, "Review instructions:\nfocus on cancellation")
-	assert.Contains(t, got, `<file source="auth.go" truncated="false">`)
+	assert.Contains(t, got, `<file source="auth.go" truncated="false"`)
+	assert.Contains(t, got, `scope="review"`)
 	assert.Contains(t, got, "package auth")
 }
 

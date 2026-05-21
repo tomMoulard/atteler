@@ -81,12 +81,26 @@ type GenerationConfig struct {
 	MaxTokens      int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
 }
 
-// ContextConfig configures local @file prompt references.
+// ContextConfig configures local @file prompt references and configured
+// references that are loaded at startup or per-agent.
+//
+//nolint:govet // field order follows config-file grouping.
 type ContextConfig struct {
-	References     []string `json:"references,omitempty" yaml:"references,omitempty"`
-	MaxFileBytes   int      `json:"max_file_bytes,omitempty" yaml:"max_file_bytes,omitempty"`
-	MaxTotalBytes  int      `json:"max_total_bytes,omitempty" yaml:"max_total_bytes,omitempty"`
-	MaxInputTokens int      `json:"max_input_tokens,omitempty" yaml:"max_input_tokens,omitempty"`
+	References      []string              `json:"references,omitempty" yaml:"references,omitempty"`
+	MaxFileBytes    int                   `json:"max_file_bytes,omitempty" yaml:"max_file_bytes,omitempty"`
+	MaxTotalBytes   int                   `json:"max_total_bytes,omitempty" yaml:"max_total_bytes,omitempty"`
+	MaxInputTokens  int                   `json:"max_input_tokens,omitempty" yaml:"max_input_tokens,omitempty"`
+	ReferencePolicy ReferencePolicyConfig `json:"reference_policy" yaml:"reference_policy"`
+}
+
+// ReferencePolicyConfig controls which configured references may be ingested.
+type ReferencePolicyConfig struct {
+	AllowedSchemes       []string `json:"allowed_schemes,omitempty" yaml:"allowed_schemes,omitempty"`
+	AllowedHosts         []string `json:"allowed_hosts,omitempty" yaml:"allowed_hosts,omitempty"`
+	LocalRoots           []string `json:"local_roots,omitempty" yaml:"local_roots,omitempty"`
+	ContentTypes         []string `json:"content_types,omitempty" yaml:"content_types,omitempty"`
+	MaxRedirects         int      `json:"max_redirects,omitempty" yaml:"max_redirects,omitempty"`
+	AllowPrivateNetworks bool     `json:"allow_private_networks,omitempty" yaml:"allow_private_networks,omitempty"`
 }
 
 // PluginConfig configures local plugin manifest discovery.
@@ -131,11 +145,23 @@ type fileAgentConfig struct {
 	References      []string        `json:"references" yaml:"references"`
 }
 
+//nolint:govet // field order follows config-file grouping.
 type fileContextConfig struct {
-	MaxFileBytes   *int     `json:"max_file_bytes" yaml:"max_file_bytes"`
-	MaxTotalBytes  *int     `json:"max_total_bytes" yaml:"max_total_bytes"`
-	MaxInputTokens *int     `json:"max_input_tokens" yaml:"max_input_tokens"`
-	References     []string `json:"references" yaml:"references"`
+	MaxFileBytes    *int                      `json:"max_file_bytes" yaml:"max_file_bytes"`
+	MaxTotalBytes   *int                      `json:"max_total_bytes" yaml:"max_total_bytes"`
+	MaxInputTokens  *int                      `json:"max_input_tokens" yaml:"max_input_tokens"`
+	References      []string                  `json:"references" yaml:"references"`
+	ReferencePolicy fileReferencePolicyConfig `json:"reference_policy" yaml:"reference_policy"`
+}
+
+//nolint:govet // field order follows config-file grouping.
+type fileReferencePolicyConfig struct {
+	AllowedSchemes       []string `json:"allowed_schemes" yaml:"allowed_schemes"`
+	AllowedHosts         []string `json:"allowed_hosts" yaml:"allowed_hosts"`
+	LocalRoots           []string `json:"local_roots" yaml:"local_roots"`
+	ContentTypes         []string `json:"content_types" yaml:"content_types"`
+	MaxRedirects         *int     `json:"max_redirects" yaml:"max_redirects"`
+	AllowPrivateNetworks *bool    `json:"allow_private_networks" yaml:"allow_private_networks"`
 }
 
 type fileGenerationConfig struct {
@@ -540,6 +566,34 @@ func mergeContext(dst *Config, contextConfig fileContextConfig, rec *originRecor
 		dst.Context.References = append([]string(nil), contextConfig.References...)
 		rec.replace("context.references", source, dst.Context.References, "replaces the entire configured reference list")
 	}
+
+	mergeReferencePolicy(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy)
+}
+
+func mergeReferencePolicy(dst *ReferencePolicyConfig, policy fileReferencePolicyConfig) {
+	if policy.AllowedSchemes != nil {
+		dst.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
+	}
+
+	if policy.AllowedHosts != nil {
+		dst.AllowedHosts = append([]string(nil), policy.AllowedHosts...)
+	}
+
+	if policy.LocalRoots != nil {
+		dst.LocalRoots = append([]string(nil), policy.LocalRoots...)
+	}
+
+	if policy.MaxRedirects != nil {
+		dst.MaxRedirects = *policy.MaxRedirects
+	}
+
+	if policy.ContentTypes != nil {
+		dst.ContentTypes = append([]string(nil), policy.ContentTypes...)
+	}
+
+	if policy.AllowPrivateNetworks != nil {
+		dst.AllowPrivateNetworks = *policy.AllowPrivateNetworks
+	}
 }
 
 func mergeGeneration(dst *Config, generation fileGenerationConfig, rec *originRecorder, source originSource) {
@@ -775,6 +829,34 @@ func mergeConfigContext(dst *Config, contextConfig ContextConfig, rec *originRec
 	if contextConfig.References != nil {
 		dst.Context.References = append([]string(nil), contextConfig.References...)
 		rec.replace("context.references", source, dst.Context.References, "replaces the entire configured reference list")
+	}
+
+	mergeConfigReferencePolicy(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy)
+}
+
+func mergeConfigReferencePolicy(dst *ReferencePolicyConfig, policy ReferencePolicyConfig) {
+	if policy.AllowedSchemes != nil {
+		dst.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
+	}
+
+	if policy.AllowedHosts != nil {
+		dst.AllowedHosts = append([]string(nil), policy.AllowedHosts...)
+	}
+
+	if policy.LocalRoots != nil {
+		dst.LocalRoots = append([]string(nil), policy.LocalRoots...)
+	}
+
+	if policy.MaxRedirects > 0 {
+		dst.MaxRedirects = policy.MaxRedirects
+	}
+
+	if policy.ContentTypes != nil {
+		dst.ContentTypes = append([]string(nil), policy.ContentTypes...)
+	}
+
+	if policy.AllowPrivateNetworks {
+		dst.AllowPrivateNetworks = true
 	}
 }
 

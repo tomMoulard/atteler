@@ -340,8 +340,9 @@ func mergeTags(existing, next []string) []string {
 
 func contextOptionsFromConfig(cfg appconfig.Config) contextref.Options {
 	opts := contextref.Options{
-		MaxFileBytes:  cfg.Context.MaxFileBytes,
-		MaxTotalBytes: cfg.Context.MaxTotalBytes,
+		MaxFileBytes:    cfg.Context.MaxFileBytes,
+		MaxTotalBytes:   cfg.Context.MaxTotalBytes,
+		ReferencePolicy: referencePolicyFromConfig(cfg.Context.ReferencePolicy),
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		opts.Root = cwd
@@ -350,21 +351,88 @@ func contextOptionsFromConfig(cfg appconfig.Config) contextref.Options {
 	return opts
 }
 
+func referencePolicyFromConfig(policy appconfig.ReferencePolicyConfig) contextref.ReferencePolicy {
+	return contextref.ReferencePolicy{
+		AllowedSchemes:       append([]string(nil), policy.AllowedSchemes...),
+		AllowedHosts:         append([]string(nil), policy.AllowedHosts...),
+		LocalRoots:           append([]string(nil), policy.LocalRoots...),
+		MaxRedirects:         policy.MaxRedirects,
+		ContentTypes:         append([]string(nil), policy.ContentTypes...),
+		AllowPrivateNetworks: policy.AllowPrivateNetworks,
+	}
+}
+
 // loadConfiguredReferences resolves the configured reference paths/URLs at
 // startup and returns a pre-rendered reference block that can be injected into
-// every LLM request as additional context. Errors are logged but not fatal so
-// the session can still start with whatever references succeeded.
+// every LLM request as additional context. Errors are logged and fail closed for
+// the configured-reference block so rejected entries do not silently leave a
+// partial context behind.
 func loadConfiguredReferences(ctx context.Context, refs []string, opts contextref.Options) string {
+	if opts.ReferenceScope == "" {
+		opts.ReferenceScope = contextref.ReferenceScopeGlobal
+	}
+
+	return loadConfiguredReferencesForScope(ctx, refs, opts)
+}
+
+func loadConfiguredReferencesForScope(ctx context.Context, refs []string, opts contextref.Options) string {
 	if len(refs) == 0 {
 		return ""
 	}
 
-	loaded, err := contextref.LoadReferences(ctx, refs, opts)
+	loaded, referenceEvents, err := contextref.LoadReferencesWithReport(ctx, refs, opts)
+	for i := range referenceEvents {
+		fmt.Fprintln(os.Stderr, formatReferenceEvent(referenceEvents[i]))
+	}
+
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: loading configured references: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: loading configured references failed; omitting configured reference context: %v\n", err)
+		return ""
 	}
 
 	return contextref.FormatReferences(loaded)
+}
+
+func formatReferenceEvent(event contextref.ReferenceEvent) string {
+	parts := []string{"reference", event.PolicyDecision}
+
+	if event.Scope != "" {
+		parts = append(parts, "scope="+event.Scope)
+	}
+
+	if event.Kind != "" {
+		parts = append(parts, "kind="+event.Kind)
+	}
+
+	if event.Location != "" {
+		parts = append(parts, "location="+event.Location)
+	}
+
+	if event.Source != "" {
+		parts = append(parts, "source="+strconv.Quote(event.Source))
+	}
+
+	if event.Bytes > 0 || event.PolicyDecision == contextref.ReferenceDecisionLoaded || event.PolicyDecision == contextref.ReferenceDecisionTruncated {
+		parts = append(parts, fmt.Sprintf("bytes=%d", event.Bytes))
+	}
+
+	if event.Truncated {
+		parts = append(parts, "truncated=true")
+	}
+
+	if event.DigestSHA256 != "" {
+		parts = append(parts, "sha256="+event.DigestSHA256)
+	}
+
+	if !event.FetchedAt.IsZero() {
+		parts = append(parts, "fetched_at="+event.FetchedAt.UTC().Format(time.RFC3339))
+	}
+
+	if event.PolicyReason != "" {
+		parts = append(parts, "reason="+strconv.Quote(event.PolicyReason))
+	}
+
+	return strings.Join(parts, " ")
 }
 
 // buildReferenceContext combines the pre-loaded global reference context with
@@ -375,7 +443,14 @@ func buildReferenceContext(ctx context.Context, globalRefCtx string, activeAgent
 		return globalRefCtx
 	}
 
-	agentRefCtx := loadConfiguredReferences(ctx, activeAgent.agent.References, opts)
+	agentOpts := opts
+	agentOpts.ReferenceScope = contextref.ReferenceScopeAgent
+
+	if activeAgent.name != "" {
+		agentOpts.ReferenceScope += ":" + activeAgent.name
+	}
+
+	agentRefCtx := loadConfiguredReferencesForScope(ctx, activeAgent.agent.References, agentOpts)
 	if agentRefCtx == "" {
 		return globalRefCtx
 	}
