@@ -50,6 +50,21 @@ func TestRunBash_RejectsBlankCommand(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestRunBash_LimitsCapturedOutputBytes(t *testing.T) {
+	t.Parallel()
+
+	result, err := RunBash(context.Background(), Options{
+		Command:        `printf abcdef`,
+		MaxOutputBytes: 3,
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "output exceeded 3 bytes")
+	require.Equal(t, "abc", result.Stdout)
+	require.Empty(t, result.Stderr)
+	require.True(t, result.OutputTruncated)
+}
+
 func TestRunInteractive_RejectsBlankCommand(t *testing.T) {
 	t.Parallel()
 

@@ -22,6 +22,8 @@ import (
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
 
+const affirmativeYes = "yes"
+
 func parseOptions() cliOptions {
 	var opts cliOptions
 
@@ -124,7 +126,7 @@ func applyDebugBool(getenv func(string) string, name string, target *bool) {
 	}
 
 	switch strings.ToLower(strings.TrimSpace(getenv(name))) {
-	case "1", "true", "yes", "on":
+	case "1", "true", affirmativeYes, "on":
 		*target = true
 	}
 }

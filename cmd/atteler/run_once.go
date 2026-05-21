@@ -33,13 +33,14 @@ type runOnceExecutionOptions struct {
 }
 
 type runOnceResult struct {
-	SessionID   string     `json:"session_id"`
-	SessionPath string     `json:"session_path"`
-	HeadlessID  string     `json:"headless_id,omitempty"`
-	Agent       string     `json:"agent,omitempty"`
-	Model       string     `json:"model,omitempty"`
-	Content     string     `json:"content"`
-	TokenUsage  tokenUsage `json:"token_usage"`
+	SessionID               string     `json:"session_id"`
+	SessionPath             string     `json:"session_path"`
+	AgentLoopCheckpointPath string     `json:"agent_loop_checkpoint_path,omitempty"`
+	HeadlessID              string     `json:"headless_id,omitempty"`
+	Agent                   string     `json:"agent,omitempty"`
+	Model                   string     `json:"model,omitempty"`
+	Content                 string     `json:"content"`
+	TokenUsage              tokenUsage `json:"token_usage"`
 }
 
 //nolint:govet // Field order follows request-preparation flow; padding is irrelevant here.
@@ -296,7 +297,12 @@ func runOnceWithOptions(
 		"messages", len(params.Messages),
 	)
 
-	resp, err := runOnceComplete(ctx, reg, params, prepared.fallbackModels, executionOptions.Response)
+	checkpointPath := agentLoopCheckpointPath(store.Path(sessionState.ID))
+	if executionOptions.Response.ReplayPath != "" {
+		checkpointPath = ""
+	}
+
+	resp, err := runOnceComplete(ctx, reg, params, prepared.fallbackModels, executionOptions.Response, checkpointPath)
 	if err != nil {
 		emitHookWarning(ctx, hooks, events.Event{
 			Type:        events.Error,
@@ -320,12 +326,13 @@ func runOnceWithOptions(
 	usage.addResponse(resp)
 
 	result := runOnceResult{
-		SessionID:   sessionState.ID,
-		SessionPath: store.Path(sessionState.ID),
-		Agent:       prepared.activeAgent.name,
-		Model:       resp.Model,
-		Content:     resp.Content,
-		TokenUsage:  usage,
+		SessionID:               sessionState.ID,
+		SessionPath:             store.Path(sessionState.ID),
+		AgentLoopCheckpointPath: checkpointPath,
+		Agent:                   prepared.activeAgent.name,
+		Model:                   resp.Model,
+		Content:                 resp.Content,
+		TokenUsage:              usage,
 	}
 	if headlessRun != nil {
 		result.HeadlessID = headlessRun.ID
@@ -574,6 +581,10 @@ func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFo
 			fmt.Fprintln(stdout, result.Content)
 			printTokenUsageSummary(stderr, result.TokenUsage)
 			fmt.Fprintln(stderr, "session: "+result.SessionID+" ("+result.SessionPath+")")
+
+			if result.AgentLoopCheckpointPath != "" {
+				fmt.Fprintln(stderr, "agent loop checkpoint: "+result.AgentLoopCheckpointPath)
+			}
 		}
 
 		return nil
@@ -589,6 +600,7 @@ func runOnceComplete(
 	params llm.CompleteParams,
 	fallbackModels []string,
 	responseOptions responseRecordOptions,
+	checkpointPath string,
 ) (*llm.Response, error) {
 	if responseOptions.ReplayPath != "" {
 		resp, err := loadRecordedResponse(responseOptions.ReplayPath)
@@ -612,9 +624,12 @@ func runOnceComplete(
 
 	resp, _, err := llm.AgentLoop(ctx, reg, params, fallbackModels, executor, llm.AgentLoopConfig{
 		ConfirmContinue: confirmContinueStdin,
+		ConfirmToolCall: confirmToolCallStdin,
+		Policy:          llm.BashToolPolicy,
+		CheckpointSink:  agentLoopCheckpointSink(checkpointPath),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("agent loop: %w", err)
+		return nil, agentLoopError(err, checkpointPath)
 	}
 
 	if err := saveRecordedResponse(responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
@@ -637,7 +652,33 @@ func confirmContinueStdin(iterations int) bool {
 
 	answer = strings.TrimSpace(strings.ToLower(answer))
 
-	return answer == "" || answer == "y" || answer == "yes"
+	return answer == "" || answer == "y" || answer == affirmativeYes
+}
+
+// confirmToolCallStdin prompts before commands that the built-in tool policy
+// marks as require-confirm in one-shot mode.
+func confirmToolCallStdin(_ context.Context, call llm.ToolCall, decision llm.ToolPolicyDecision) bool {
+	command, ok := call.Input["command"].(string)
+	if !ok {
+		command = "<missing command>"
+	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"\nAgent tool call requires confirmation (%s): %s\n$ %s\nExecute? [y/N] ",
+		decision.MatchedRule,
+		decision.Reason,
+		command,
+	)
+
+	var answer string
+	if _, err := fmt.Scanln(&answer); err != nil {
+		return false
+	}
+
+	answer = strings.TrimSpace(strings.ToLower(answer))
+
+	return answer == "y" || answer == affirmativeYes
 }
 
 // newBashExecutor creates a ToolExecutor that runs bash commands in the given
@@ -674,9 +715,10 @@ func newBashExecutor(cwd string, logw io.Writer) llm.ToolExecutor {
 		})
 
 		result, shellErr := attshell.RunBash(ctx, attshell.Options{
-			Command: command,
-			Dir:     cwd,
-			Timeout: 5 * time.Minute,
+			Command:        command,
+			Dir:            cwd,
+			Timeout:        5 * time.Minute,
+			MaxOutputBytes: agentLoopToolOutputLimit(ctx),
 		})
 
 		output := formatShellContext(shellResultMsg{
