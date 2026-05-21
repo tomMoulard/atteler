@@ -181,13 +181,15 @@ func TestAgentLoop_MaxIterationsExceeded(t *testing.T) {
 	assert.Contains(t, err.Error(), "exceeded")
 }
 
-func TestAgentLoop_DefaultCheckpointIntervalMatchesMaxIterations(t *testing.T) {
+func TestAgentLoop_DefaultMaxIterationsIsUnlimited(t *testing.T) {
 	t.Parallel()
 
-	// With the default config, the continuation checkpoint should line up with
-	// the loop's default hard limit. Durable checkpoints are now emitted per
-	// step; this interval only controls the legacy user-facing prompt.
-	assert.Equal(t, defaultMaxIterations, defaultCheckpointInterval)
+	// With no caller-supplied MaxIterations, the budget should not impose a
+	// per-iteration hard stop — model and tool call ceilings remain the
+	// primary safeguards against runaway loops.
+	normalized := normalizeAgentLoopBudget(AgentLoopBudget{}, 0)
+	assert.Equal(t, 0, normalized.MaxIterations)
+	assert.Nil(t, budgetExceededStop(normalized, AgentLoopUsage{Iterations: 10_000}))
 }
 
 func TestAgentLoop_ZeroCheckpointIntervalDefaultsToMaxIterations(t *testing.T) {

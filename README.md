@@ -147,6 +147,10 @@ agent_loop:
   # 0 means no ceiling.
   max_output_bytes: 0
   max_total_tokens: 0
+  # max_iterations caps the number of tool-use turns per agent loop. Omit (or
+  # set to 0) to run unlimited turns until the model returns a final response
+  # or another budget — model calls, tool calls, wall time — trips.
+  max_iterations: 0
 
 providers:
   openai:

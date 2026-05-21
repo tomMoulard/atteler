@@ -55,6 +55,15 @@ func agentLoopBudgetFromConfig(cfg appconfig.Config) (llm.AgentLoopBudget, error
 		budget.MaxTotalTokens = maxTotalTokens
 	}
 
+	if cfg.AgentLoop.MaxIterations != nil {
+		maxIterations := *cfg.AgentLoop.MaxIterations
+		if maxIterations < 0 {
+			return budget, errors.New("agent_loop.max_iterations must be >= 0")
+		}
+
+		budget.MaxIterations = maxIterations
+	}
+
 	return budget, nil
 }
 
