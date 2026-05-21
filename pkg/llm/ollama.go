@@ -44,7 +44,10 @@ func NewOllamaProvider(ctx context.Context) (*OllamaProvider, error) {
 // NewOllamaProviderWithConfigContext creates a provider using OLLAMA_BASE_URL,
 // cfg.BaseURL, or the local Ollama default. OLLAMA_BASE_URL overrides cfg.BaseURL.
 func NewOllamaProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) (*OllamaProvider, error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	baseURL := strings.TrimRight(configuredBaseURL("OLLAMA_BASE_URL", cfg.BaseURL, defaultOllamaBase), "/")
 	p := &OllamaProvider{
 		baseURL:   baseURL,

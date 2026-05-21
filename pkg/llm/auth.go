@@ -17,25 +17,35 @@ import (
 	"time"
 )
 
+// ErrContextRequired is returned by APIs that may perform blocking credential
+// or network work when the caller does not provide a context.
+var ErrContextRequired = errors.New("llm: context is required")
+
+func requireCredentialContext(ctx context.Context) error {
+	if ctx == nil {
+		return ErrContextRequired
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("llm: context already done: %w", err)
+	}
+
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Anthropic credential resolution
 // ---------------------------------------------------------------------------
 
-var defaultContextFactory = context.Background
-
-func defaultCredentialContext() context.Context {
-	return defaultContextFactory()
+// ResolveAnthropicKey is kept for source compatibility only.
+//
+// Deprecated: use ResolveAnthropicKeyContext so credential-store commands and
+// OAuth refresh requests inherit caller cancellation and deadlines.
+func ResolveAnthropicKey() (key string, bearer bool, err error) {
+	return "", false, ErrContextRequired
 }
 
-func nonNilCredentialContext(ctx context.Context) context.Context {
-	if ctx != nil {
-		return ctx
-	}
-
-	return defaultCredentialContext()
-}
-
-// ResolveAnthropicKey returns an Anthropic API credential by trying, in order:
+// ResolveAnthropicKeyContext returns an Anthropic API credential by trying, in order:
 //  1. ANTHROPIC_API_KEY env var                (Console API key -> X-Api-Key header)
 //  2. ANTHROPIC_AUTH_TOKEN env var             (bearer token)
 //  3. CLAUDE_CODE_OAUTH_TOKEN env var         (long-lived OAuth from `claude setup-token`)
@@ -45,14 +55,10 @@ func nonNilCredentialContext(ctx context.Context) context.Context {
 //
 // The second return value indicates whether the credential is a bearer token
 // (true) or a plain API key (false).
-func ResolveAnthropicKey() (key string, bearer bool, err error) {
-	return ResolveAnthropicKeyContext(defaultCredentialContext())
-}
-
-// ResolveAnthropicKeyContext returns an Anthropic API credential using ctx for
-// any credential-store command or OAuth refresh request that may block.
 func ResolveAnthropicKeyContext(ctx context.Context) (key string, bearer bool, err error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return "", false, err
+	}
 
 	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
 		return v, false, nil
@@ -70,17 +76,25 @@ func ResolveAnthropicKeyContext(ctx context.Context) (key string, bearer bool, e
 	// login state in FORGE_CONFIG/.credentials.json or the default config dir.
 	if tok, isBearer, err := resolveForgeAnthropicCredentials(ctx); err == nil && tok != "" {
 		return tok, isBearer, nil
+	} else if isContextError(err) {
+		return "", false, err
 	}
 
 	// Try loading from Claude Code's local credential store.
 	if tok, err := resolveClaudeCodeCredentials(ctx); err == nil && tok != "" {
 		return tok, true, nil
+	} else if isContextError(err) {
+		return "", false, err
 	}
 
 	return "", false, errors.New(
 		"no Anthropic credentials found: set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, " +
 			"CLAUDE_CODE_OAUTH_TOKEN, log in with `forge provider login claude_code`, or log in with `claude` CLI",
 	)
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // claudeCodeCredentials is the JSON stored in the Keychain / credentials file.
@@ -118,7 +132,10 @@ func parseClaudeCodeCredentialsRaw(data []byte) (claudeOAuthBlock, error) {
 
 // resolveClaudeCodeCredentials tries platform-specific credential stores.
 func resolveClaudeCodeCredentials(ctx context.Context) (string, error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return "", err
+	}
+
 	// macOS: read from Keychain.
 	if runtime.GOOS == "darwin" {
 		if tok, err := readClaudeCodeKeychain(ctx); err == nil {
@@ -127,11 +144,15 @@ func resolveClaudeCodeCredentials(ctx context.Context) (string, error) {
 	}
 
 	// Linux / Windows / fallback: read plaintext credentials file.
-	return readClaudeCodeCredentialsFile()
+	return readClaudeCodeCredentialsFile(ctx)
 }
 
 // readClaudeCodeCredentialsFile reads ~/.claude/.credentials.json (Linux/Windows).
-func readClaudeCodeCredentialsFile() (string, error) {
+func readClaudeCodeCredentialsFile(ctx context.Context) (string, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return "", err
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
@@ -140,6 +161,10 @@ func readClaudeCodeCredentialsFile() (string, error) {
 	data, err := os.ReadFile(filepath.Join(home, ".claude", ".credentials.json"))
 	if err != nil {
 		return "", fmt.Errorf("cannot read Claude Code credentials: %w", err)
+	}
+
+	if err := requireCredentialContext(ctx); err != nil {
+		return "", err
 	}
 
 	return parseClaudeCodeCredentials(data)
@@ -228,7 +253,9 @@ var (
 // provider. The returned bool indicates whether the credential is a bearer
 // token.
 func resolveForgeAnthropicCredentials(ctx context.Context) (key string, bearer bool, err error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return "", false, err
+	}
 
 	var failures []error
 
@@ -251,7 +278,9 @@ func resolveForgeAnthropicCredentials(ctx context.Context) (key string, bearer b
 }
 
 func readForgeCredentialsFile(ctx context.Context, path string) (key string, bearer bool, err error) {
-	ctx = nonNilCredentialContext(ctx)
+	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
+		return "", false, ctxErr
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -271,6 +300,8 @@ func readForgeCredentialsFile(ctx context.Context, path string) (key string, bea
 
 	if key, err := refreshForgeClaudeCodeCredential(ctx, path, data, entries); err == nil && key != "" {
 		return key, true, nil
+	} else if isContextError(err) {
+		return "", false, err
 	} else if err != nil && !errors.Is(err, errForgeOAuthRefreshUnavailable) {
 		refreshErr = err
 	}
@@ -353,7 +384,9 @@ func forgeAnthropicCredentialFromEntries(entries []forgeCredentialEntry) (key st
 }
 
 func refreshForgeClaudeCodeCredential(ctx context.Context, path string, data []byte, entries []forgeCredentialEntry) (string, error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return "", err
+	}
 
 	entry := forgeProviderEntry(entries, forgeClaudeCodeProviderID)
 	if entry == nil {
@@ -374,7 +407,7 @@ func refreshForgeClaudeCodeCredential(ctx context.Context, path string, data []b
 		return "", err
 	}
 
-	if err := writeRefreshedForgeCredentials(path, data, tokens); err != nil {
+	if err := writeRefreshedForgeCredentials(ctx, path, data, tokens); err != nil {
 		return "", err
 	}
 
@@ -393,7 +426,10 @@ type forgeOAuthRefreshResponse struct {
 }
 
 func refreshForgeOAuthToken(ctx context.Context, config forgeOAuthConfig, refreshToken string) (forgeOAuthTokens, error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return forgeOAuthTokens{}, err
+	}
+
 	tokenURL := config.tokenURL()
 
 	clientID := config.clientID()
@@ -446,7 +482,11 @@ func refreshForgeOAuthToken(ctx context.Context, config forgeOAuthConfig, refres
 	return tokens, nil
 }
 
-func writeRefreshedForgeCredentials(path string, data []byte, tokens forgeOAuthTokens) error {
+func writeRefreshedForgeCredentials(ctx context.Context, path string, data []byte, tokens forgeOAuthTokens) error {
+	if err := requireCredentialContext(ctx); err != nil {
+		return err
+	}
+
 	var raw []map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("update ForgeCode credentials: %w", err)
@@ -481,6 +521,10 @@ func writeRefreshedForgeCredentials(path string, data []byte, tokens forgeOAuthT
 	out, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal refreshed ForgeCode credentials: %w", err)
+	}
+
+	if err := requireCredentialContext(ctx); err != nil {
+		return err
 	}
 
 	out = append(out, '\n')
@@ -710,11 +754,15 @@ const codexChatGPTRefreshURL = "https://auth.openai.com/oauth/token"
 
 var codexChatGPTHTTPClient = &http.Client{Timeout: forgeOAuthRefreshTimeout}
 
-// loadCodexChatGPTAuth returns a chatgpt-mode auth handle for the codex
+// loadCodexChatGPTAuthContext returns a chatgpt-mode auth handle for the codex
 // auth.json under codexHome (which may be empty to use ~/.codex or
 // $CODEX_HOME). It returns an error if auth.json is missing, malformed, or
 // not in chatgpt mode.
-func loadCodexChatGPTAuth(codexHome string) (*codexChatGPTAuth, error) {
+func loadCodexChatGPTAuthContext(ctx context.Context, codexHome string) (*codexChatGPTAuth, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	if codexHome == "" {
 		codexHome = codexConfigDir()
 	}
@@ -728,6 +776,10 @@ func loadCodexChatGPTAuth(codexHome string) (*codexChatGPTAuth, error) {
 	data, err := os.ReadFile(authPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", authPath, err)
+	}
+
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
 	}
 
 	var auth codexAuth
@@ -766,6 +818,10 @@ func (a *codexChatGPTAuth) snapshot() (access, account string) {
 // new state back to auth.json. The caller may pass a previously observed
 // access token to skip the refresh if another goroutine has already refreshed.
 func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) error {
+	if err := requireCredentialContext(ctx); err != nil {
+		return err
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -819,18 +875,30 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 		return errors.New("codex chatgpt refresh: response missing access_token")
 	}
 
+	if err := requireCredentialContext(ctx); err != nil {
+		return err
+	}
+
+	if err := persistRefreshedCodexAuth(ctx, a.authPath, refreshed.AccessToken, refreshed.RefreshToken, refreshed.IDToken); err != nil {
+		return err
+	}
+
 	a.accessToken = refreshed.AccessToken
 	if refreshed.RefreshToken != "" {
 		a.refreshToken = refreshed.RefreshToken
 	}
 
-	return persistRefreshedCodexAuth(a.authPath, refreshed.AccessToken, refreshed.RefreshToken, refreshed.IDToken)
+	return nil
 }
 
 // persistRefreshedCodexAuth merges the refreshed tokens into auth.json while
 // preserving any unrelated fields. The write is atomic via tempfile + rename.
-func persistRefreshedCodexAuth(path, accessToken, refreshToken, idToken string) error {
-	raw, err := readCodexAuthMap(path)
+func persistRefreshedCodexAuth(ctx context.Context, path, accessToken, refreshToken, idToken string) error {
+	if err := requireCredentialContext(ctx); err != nil {
+		return err
+	}
+
+	raw, err := readCodexAuthMap(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -843,13 +911,25 @@ func persistRefreshedCodexAuth(path, accessToken, refreshToken, idToken string) 
 		return fmt.Errorf("codex auth.json marshal: %w", err)
 	}
 
+	if err := requireCredentialContext(ctx); err != nil {
+		return err
+	}
+
 	return atomicWriteFile(path, append(out, '\n'), 0o600)
 }
 
-func readCodexAuthMap(path string) (map[string]any, error) {
+func readCodexAuthMap(ctx context.Context, path string) (map[string]any, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("codex auth.json read: %w", err)
+	}
+
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
 	}
 
 	var raw map[string]any
@@ -927,13 +1007,25 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
-// ResolveOpenAIKey returns an OpenAI Platform API credential by trying, in order:
+// ResolveOpenAIKey is kept for source compatibility only.
+//
+// Deprecated: use ResolveOpenAIKeyContext so credential reads can honor caller
+// cancellation checks before and after filesystem access.
+func ResolveOpenAIKey() (key string, bearer bool, err error) {
+	return "", false, ErrContextRequired
+}
+
+// ResolveOpenAIKeyContext returns an OpenAI Platform API credential by trying, in order:
 //  1. OPENAI_API_KEY env var
 //  2. ~/.codex/auth.json  ->  OPENAI_API_KEY field  (if non-null)
 //
 // The second return value indicates whether the credential is a bearer token
 // (true) or a plain API key (false).
-func ResolveOpenAIKey() (key string, bearer bool, err error) {
+func ResolveOpenAIKeyContext(ctx context.Context) (key string, bearer bool, err error) {
+	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
+		return "", false, ctxErr
+	}
+
 	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
 		return v, false, nil
 	}
@@ -946,6 +1038,10 @@ func ResolveOpenAIKey() (key string, bearer bool, err error) {
 	data, err := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
 	if err != nil {
 		return "", false, errors.New("no OpenAI credentials found: set OPENAI_API_KEY or log in with `codex` CLI")
+	}
+
+	if err := requireCredentialContext(ctx); err != nil {
+		return "", false, err
 	}
 
 	var auth codexAuth
@@ -1006,7 +1102,9 @@ type claudeCodeAuth struct {
 // The returned handle can refresh and persist credentials back to the same
 // source so the claude CLI continues to see fresh tokens.
 func loadClaudeCodeAuth(ctx context.Context) (*claudeCodeAuth, error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
 
 	// Allow tests to opt out of the keychain probe even on darwin.
 	if os.Getenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN") != "1" {
@@ -1025,6 +1123,10 @@ func loadClaudeCodeAuth(ctx context.Context) (*claudeCodeAuth, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("no Claude Code credentials: %w (run `claude` to log in)", err)
+	}
+
+	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
+		return nil, ctxErr
 	}
 
 	block, err := parseClaudeCodeCredentialsRaw(data)
@@ -1059,6 +1161,10 @@ func (a *claudeCodeAuth) snapshot() string {
 // token it observed; if another goroutine has already refreshed since then,
 // this call is a no-op.
 func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) error {
+	if err := requireCredentialContext(ctx); err != nil {
+		return err
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -1070,18 +1176,46 @@ func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) err
 		return errors.New("claude code refresh: no refresh_token available")
 	}
 
+	refreshed, err := a.exchangeClaudeCodeRefreshToken(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := requireCredentialContext(ctx); err != nil {
+		return err
+	}
+
+	accessToken, refreshToken, expiresAt := a.refreshedClaudeCodeState(refreshed)
+	if err := a.persist.persist(ctx, accessToken, refreshToken, expiresAt); err != nil {
+		return err
+	}
+
+	a.accessToken = accessToken
+	a.refreshToken = refreshToken
+	a.expiresAt = expiresAt
+
+	return nil
+}
+
+type claudeCodeRefreshResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
+}
+
+func (a *claudeCodeAuth) exchangeClaudeCodeRefreshToken(ctx context.Context) (claudeCodeRefreshResponse, error) {
 	body, err := json.Marshal(map[string]string{
 		"client_id":     claudeCodeOAuthClientID,
 		"grant_type":    forgeOAuthRefreshGrantType,
 		"refresh_token": a.refreshToken,
 	})
 	if err != nil {
-		return fmt.Errorf("claude code refresh: marshal: %w", err)
+		return claudeCodeRefreshResponse{}, fmt.Errorf("claude code refresh: marshal: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.refreshURL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("claude code refresh: %w", err)
+		return claudeCodeRefreshResponse{}, fmt.Errorf("claude code refresh: %w", err)
 	}
 
 	req.Header.Set("Accept", "application/json")
@@ -1089,47 +1223,50 @@ func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) err
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("claude code refresh: %w", err)
+		return claudeCodeRefreshResponse{}, fmt.Errorf("claude code refresh: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes))
 	if err != nil {
-		return fmt.Errorf("claude code refresh: read response: %w", err)
+		return claudeCodeRefreshResponse{}, fmt.Errorf("claude code refresh: read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("claude code refresh: HTTP %d: %s", resp.StatusCode, respBody)
+		return claudeCodeRefreshResponse{}, fmt.Errorf("claude code refresh: HTTP %d: %s", resp.StatusCode, respBody)
 	}
 
-	var refreshed struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-	}
+	var refreshed claudeCodeRefreshResponse
 	if err := json.Unmarshal(respBody, &refreshed); err != nil {
-		return fmt.Errorf("claude code refresh: decode response: %w", err)
+		return claudeCodeRefreshResponse{}, fmt.Errorf("claude code refresh: decode response: %w", err)
 	}
 
 	if refreshed.AccessToken == "" {
-		return errors.New("claude code refresh: response missing access_token")
+		return claudeCodeRefreshResponse{}, errors.New("claude code refresh: response missing access_token")
 	}
 
+	return refreshed, nil
+}
+
+func (a *claudeCodeAuth) refreshedClaudeCodeState(refreshed claudeCodeRefreshResponse) (accessToken, refreshToken string, expiresAt int64) {
 	expiresAtMs := int64(0)
 	if refreshed.ExpiresIn > 0 {
 		expiresAtMs = time.Now().Add(time.Duration(refreshed.ExpiresIn) * time.Second).UnixMilli()
 	}
 
-	a.accessToken = refreshed.AccessToken
+	accessToken = refreshed.AccessToken
+
+	refreshToken = a.refreshToken
 	if refreshed.RefreshToken != "" {
-		a.refreshToken = refreshed.RefreshToken
+		refreshToken = refreshed.RefreshToken
 	}
 
+	expiresAt = a.expiresAt
 	if expiresAtMs > 0 {
-		a.expiresAt = expiresAtMs
+		expiresAt = expiresAtMs
 	}
 
-	return a.persist.persist(ctx, a.accessToken, a.refreshToken, a.expiresAt)
+	return accessToken, refreshToken, expiresAt
 }
 
 // claudeCodeFilePersister writes refreshed credentials back to ~/.claude/.credentials.json.
@@ -1139,10 +1276,18 @@ type claudeCodeFilePersister struct {
 
 func (p *claudeCodeFilePersister) location() string { return p.path }
 
-func (p *claudeCodeFilePersister) persist(_ context.Context, accessToken, refreshToken string, expiresAtMs int64) error {
+func (p *claudeCodeFilePersister) persist(ctx context.Context, accessToken, refreshToken string, expiresAtMs int64) error {
+	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
+		return ctxErr
+	}
+
 	raw, err := readJSONObject(p.path)
 	if err != nil {
 		return err
+	}
+
+	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
+		return ctxErr
 	}
 
 	mergeClaudeCodeOAuth(raw, accessToken, refreshToken, expiresAtMs)
@@ -1150,6 +1295,10 @@ func (p *claudeCodeFilePersister) persist(_ context.Context, accessToken, refres
 	out, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return fmt.Errorf("claude code credentials marshal: %w", err)
+	}
+
+	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
+		return ctxErr
 	}
 
 	return atomicWriteFile(p.path, append(out, '\n'), 0o600)

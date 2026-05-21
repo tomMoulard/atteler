@@ -60,11 +60,12 @@ type ProviderConfig struct {
 	TimeoutSeconds int
 }
 
-// AutoRegister tries to create every known provider and registers the ones
-// whose credentials are available. It returns a ready-to-use Registry.
-// Providers that fail to initialize (missing credentials) are silently skipped.
+// AutoRegister is kept for source compatibility only and does not perform
+// credential or network work without a caller-provided context.
+//
+// Deprecated: use AutoRegisterContext.
 func AutoRegister() *Registry {
-	return AutoRegisterContext(defaultCredentialContext())
+	return NewRegistry()
 }
 
 // AutoRegisterContext is AutoRegister with caller-provided cancellation.
@@ -94,23 +95,34 @@ func KnownProviders() []ProviderInfo {
 	return out
 }
 
-// AutoRegisterWithConfig tries to create every known provider and applies the
-// configured fallback provider/model after registration.
+// AutoRegisterWithConfig is kept for source compatibility only and does not
+// perform credential or network work without a caller-provided context.
+//
+// Deprecated: use AutoRegisterWithConfigContext.
 func AutoRegisterWithConfig(cfg AutoRegisterConfig) *Registry {
-	return AutoRegisterWithConfigContext(defaultCredentialContext(), cfg)
+	r := NewRegistry()
+	applyDefaultSelection(r, cfg)
+
+	return r
 }
 
 // AutoRegisterWithConfigContext is AutoRegisterWithConfig with caller-provided
 // cancellation for credential discovery and provider readiness checks.
 func AutoRegisterWithConfigContext(ctx context.Context, cfg AutoRegisterConfig) *Registry {
-	ctx = nonNilCredentialContext(ctx)
 	r := NewRegistry()
+
+	if err := requireCredentialContext(ctx); err != nil {
+		logProviderSkip(cfg.logger(), "all", err)
+		applyDefaultSelection(r, cfg)
+
+		return r
+	}
 
 	registerConfiguredProvider(r, cfg, providerAnthropic, func() (Provider, error) {
 		return NewAnthropicProviderWithConfigContext(ctx, providerConfig(cfg, providerAnthropic))
 	})
 	registerConfiguredProvider(r, cfg, providerOpenAI, func() (Provider, error) {
-		return NewOpenAIProviderWithConfig(providerConfig(cfg, providerOpenAI))
+		return NewOpenAIProviderWithConfigContext(ctx, providerConfig(cfg, providerOpenAI))
 	})
 	registerConfiguredProvider(r, cfg, providerOllama, func() (Provider, error) {
 		ollamaConfig := providerConfig(cfg, providerOllama)
@@ -122,7 +134,7 @@ func AutoRegisterWithConfigContext(ctx context.Context, cfg AutoRegisterConfig) 
 		return NewClaudeCodeProviderContext(ctx)
 	})
 	registerConfiguredProvider(r, cfg, providerCodex, func() (Provider, error) {
-		return NewCodexProvider()
+		return NewCodexProviderContext(ctx)
 	})
 
 	applyDefaultSelection(r, cfg)

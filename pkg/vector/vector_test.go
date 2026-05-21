@@ -1,6 +1,7 @@
 package vector
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -233,7 +234,7 @@ func TestEmbeddingVectorizer_CallsAPI(t *testing.T) {
 		WithEmbeddingBaseURL(server.URL),
 	)
 
-	vec, err := v.Vectorize("hello world")
+	vec, err := v.VectorizeContext(context.Background(), "hello world")
 	require.NoError(t, err)
 	assert.Equal(t, Vector(embedding), vec)
 }
@@ -243,9 +244,61 @@ func TestEmbeddingVectorizer_EmptyTextReturnsError(t *testing.T) {
 
 	v := NewEmbeddingVectorizer()
 
-	_, err := v.Vectorize("  ")
+	_, err := v.VectorizeContext(context.Background(), "  ")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrEmptyText)
+}
+
+func TestEmbeddingVectorizer_VectorizeRequiresContext(t *testing.T) {
+	t.Parallel()
+
+	v := NewEmbeddingVectorizer()
+
+	_, err := v.Vectorize("hello world")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContextRequired)
+
+	_, err = v.VectorizeContext(nil, "hello world") //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContextRequired)
+}
+
+func TestEmbeddingVectorizer_VectorizeContextHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	requestStarted := make(chan struct{})
+	release := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+
+		select {
+		case <-r.Context().Done():
+			return
+		case <-release:
+			w.Header().Set("Content-Type", "application/json")
+			assert.NoError(t, json.NewEncoder(w).Encode(ollamaEmbedResponse{Embeddings: [][]float64{{1.0}}}))
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	v := NewEmbeddingVectorizer(WithEmbeddingBaseURL(server.URL))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		_, err := v.VectorizeContext(ctx, "hello world")
+		errCh <- err
+	}()
+
+	<-requestStarted
+	cancel()
+
+	err := <-errCh
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func TestEmbeddingVectorizer_CustomModel(t *testing.T) {
@@ -270,7 +323,7 @@ func TestEmbeddingVectorizer_CustomModel(t *testing.T) {
 		WithEmbeddingModel("mxbai-embed-large"),
 	)
 
-	_, err := v.Vectorize("test")
+	_, err := v.VectorizeContext(context.Background(), "test")
 	require.NoError(t, err)
 	assert.Equal(t, "mxbai-embed-large", receivedModel)
 }
@@ -285,7 +338,7 @@ func TestEmbeddingVectorizer_ServerError(t *testing.T) {
 
 	v := NewEmbeddingVectorizer(WithEmbeddingBaseURL(server.URL))
 
-	_, err := v.Vectorize("test")
+	_, err := v.VectorizeContext(context.Background(), "test")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected status 500")
 }
@@ -301,7 +354,7 @@ func TestEmbeddingVectorizer_EmptyEmbeddingsResponse(t *testing.T) {
 
 	v := NewEmbeddingVectorizer(WithEmbeddingBaseURL(server.URL))
 
-	_, err := v.Vectorize("test")
+	_, err := v.VectorizeContext(context.Background(), "test")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty response")
 }
@@ -321,7 +374,7 @@ func TestEmbeddingVectorizer_WithCustomHTTPClient(t *testing.T) {
 		WithEmbeddingHTTPClient(customClient),
 	)
 
-	vec, err := v.Vectorize("test")
+	vec, err := v.VectorizeContext(context.Background(), "test")
 	require.NoError(t, err)
 	assert.Equal(t, Vector{0.5, 0.5}, vec)
 }

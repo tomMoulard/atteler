@@ -159,6 +159,10 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 		return nil
 	}
 
+	if ctx == nil {
+		return errors.New("events: context is required")
+	}
+
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}

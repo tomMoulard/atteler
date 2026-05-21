@@ -37,10 +37,22 @@ type CodexProvider struct {
 	models  []string
 }
 
-// NewCodexProvider creates a provider backed by ~/.codex/auth.json.
-// It returns an error when no chatgpt-mode credentials are present.
+// NewCodexProvider is kept for source compatibility only.
+//
+// Deprecated: use NewCodexProviderContext so auth-file reads inherit caller
+// cancellation checks.
 func NewCodexProvider() (*CodexProvider, error) {
-	auth, err := loadCodexChatGPTAuth(codexConfigDir())
+	return nil, ErrContextRequired
+}
+
+// NewCodexProviderContext creates a provider backed by ~/.codex/auth.json.
+// It returns an error when no chatgpt-mode credentials are present.
+func NewCodexProviderContext(ctx context.Context) (*CodexProvider, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	auth, err := loadCodexChatGPTAuthContext(ctx, codexConfigDir())
 	if err != nil {
 		return nil, fmt.Errorf("no Codex credentials found: %w (run `codex login`)", err)
 	}

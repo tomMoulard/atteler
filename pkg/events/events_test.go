@@ -78,6 +78,18 @@ func TestRunner_EmitNoHooksIsNoop(t *testing.T) {
 	}
 }
 
+func TestRunner_EmitRequiresContext(t *testing.T) {
+	t.Parallel()
+
+	err := NewRunner(map[string][]config.HookConfig{
+		UserMessage: {{
+			Command: []string{"echo", "unused"},
+		}},
+	}).Emit(nil, Event{Type: UserMessage}) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context is required")
+}
+
 func TestLogger_LogsAnyEvent(t *testing.T) {
 	t.Parallel()
 

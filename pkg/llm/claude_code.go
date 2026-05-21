@@ -24,16 +24,20 @@ type ClaudeCodeProvider struct {
 	models  []string
 }
 
-// NewClaudeCodeProvider creates a provider backed by the Claude Code OAuth
-// credentials discovered on the local machine.
+// NewClaudeCodeProvider is kept for source compatibility only.
+//
+// Deprecated: use NewClaudeCodeProviderContext so keychain and credential-file
+// access inherits caller cancellation and deadlines.
 func NewClaudeCodeProvider() (*ClaudeCodeProvider, error) {
-	return NewClaudeCodeProviderContext(defaultCredentialContext())
+	return nil, ErrContextRequired
 }
 
 // NewClaudeCodeProviderContext creates a provider using ctx for credential
 // discovery (keychain probe / file reads).
 func NewClaudeCodeProviderContext(ctx context.Context) (*ClaudeCodeProvider, error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
 
 	auth, err := loadClaudeCodeAuth(ctx)
 	if err != nil {

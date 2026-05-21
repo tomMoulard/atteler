@@ -21,16 +21,33 @@ type OpenAIProvider struct {
 	bearer  bool
 }
 
-// NewOpenAIProvider creates a provider using ResolveOpenAIKey.
-// The base URL can be overridden with OPENAI_BASE_URL.
+// NewOpenAIProvider is kept for source compatibility only.
+//
+// Deprecated: use NewOpenAIProviderContext so credential reads inherit caller
+// cancellation checks.
 func NewOpenAIProvider() (*OpenAIProvider, error) {
-	return NewOpenAIProviderWithConfig(ProviderConfig{})
+	return nil, ErrContextRequired
 }
 
-// NewOpenAIProviderWithConfig creates a provider using ResolveOpenAIKey and
-// optional config values. OPENAI_BASE_URL overrides cfg.BaseURL.
-func NewOpenAIProviderWithConfig(cfg ProviderConfig) (*OpenAIProvider, error) {
-	key, bearer, err := ResolveOpenAIKey()
+// NewOpenAIProviderContext creates a provider using ResolveOpenAIKeyContext.
+// The base URL can be overridden with OPENAI_BASE_URL.
+func NewOpenAIProviderContext(ctx context.Context) (*OpenAIProvider, error) {
+	return NewOpenAIProviderWithConfigContext(ctx, ProviderConfig{})
+}
+
+// NewOpenAIProviderWithConfig is kept for source compatibility only.
+//
+// Deprecated: use NewOpenAIProviderWithConfigContext so credential reads
+// inherit caller cancellation checks.
+func NewOpenAIProviderWithConfig(_ ProviderConfig) (*OpenAIProvider, error) {
+	return nil, ErrContextRequired
+}
+
+// NewOpenAIProviderWithConfigContext creates a provider using
+// ResolveOpenAIKeyContext and optional config values. OPENAI_BASE_URL overrides
+// cfg.BaseURL.
+func NewOpenAIProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) (*OpenAIProvider, error) {
+	key, bearer, err := ResolveOpenAIKeyContext(ctx)
 	if err != nil {
 		return nil, err
 	}

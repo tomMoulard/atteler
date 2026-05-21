@@ -142,6 +142,20 @@ func run() {
 	_ = context.Background()
 }
 `)
+	writeFile(t, root, "pkg/service/todo.go", `package service
+
+import "context"
+
+func runLater() {
+	_ = context.TODO()
+}
+`)
+	writeFile(t, root, "pkg/service/factory.go", `package service
+
+import "context"
+
+var defaultContextFactory = context.Background
+`)
 	writeFile(t, root, "pkg/service/service_test.go", `package service
 
 import "context"
@@ -158,14 +172,25 @@ func main() {
 	_ = context.Background()
 }
 `)
+	writeFile(t, root, "cmd/atteler/main.go", `package main
+
+import "context"
+
+func main() {
+	_ = context.Background()
+}
+`)
 
 	findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
 	require.NoError(t, err)
 
 	keys := findingKeys(findings)
 	assert.Contains(t, keys, "pkg/service/service.go|convention_drift|maintenance")
+	assert.Contains(t, keys, "pkg/service/todo.go|convention_drift|maintenance")
+	assert.Contains(t, keys, "pkg/service/factory.go|convention_drift|maintenance")
+	assert.Contains(t, keys, "cmd/tool/main.go|convention_drift|maintenance")
 	assert.NotContains(t, keys, "pkg/service/service_test.go|convention_drift|maintenance")
-	assert.NotContains(t, keys, "cmd/tool/main.go|convention_drift|maintenance")
+	assert.NotContains(t, keys, "cmd/atteler/main.go|convention_drift|maintenance")
 }
 
 func TestScanWithOptions_ContextBackgroundDriftIgnoresCommentsAndStrings(t *testing.T) {
@@ -302,6 +327,26 @@ func TestScanWithOptions_AddsRuleMetadata(t *testing.T) {
 
 	assert.Equal(t, "watch.stale_todo", findings[0].RuleID)
 	assert.Contains(t, findings[0].Help, "tracked issues")
+}
+
+func TestRepositoryContextRootsStayAtEntrypoints(t *testing.T) {
+	t.Parallel()
+
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+
+	findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1 << 30})
+	require.NoError(t, err)
+
+	var drift []Finding
+
+	for _, finding := range findings {
+		if finding.Kind == KindConventionDrift {
+			drift = append(drift, finding)
+		}
+	}
+
+	require.Empty(t, drift, "production context roots must stay in process entrypoints")
 }
 
 func findingKeys(findings []Finding) []string {

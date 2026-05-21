@@ -24,10 +24,12 @@ type AnthropicProvider struct {
 	bearer  bool
 }
 
-// NewAnthropicProvider creates a provider using ResolveAnthropicKey.
-// The base URL can be overridden with ANTHROPIC_BASE_URL.
+// NewAnthropicProvider is kept for source compatibility only.
+//
+// Deprecated: use NewAnthropicProviderContext so credential discovery inherits
+// caller cancellation and deadlines.
 func NewAnthropicProvider() (*AnthropicProvider, error) {
-	return NewAnthropicProviderContext(defaultCredentialContext())
+	return nil, ErrContextRequired
 }
 
 // NewAnthropicProviderContext creates a provider using ResolveAnthropicKeyContext.
@@ -36,10 +38,12 @@ func NewAnthropicProviderContext(ctx context.Context) (*AnthropicProvider, error
 	return NewAnthropicProviderWithConfigContext(ctx, ProviderConfig{})
 }
 
-// NewAnthropicProviderWithConfig creates a provider using ResolveAnthropicKey
-// and optional config values. ANTHROPIC_BASE_URL overrides cfg.BaseURL.
-func NewAnthropicProviderWithConfig(cfg ProviderConfig) (*AnthropicProvider, error) {
-	return NewAnthropicProviderWithConfigContext(defaultCredentialContext(), cfg)
+// NewAnthropicProviderWithConfig is kept for source compatibility only.
+//
+// Deprecated: use NewAnthropicProviderWithConfigContext so credential
+// discovery inherits caller cancellation and deadlines.
+func NewAnthropicProviderWithConfig(_ ProviderConfig) (*AnthropicProvider, error) {
+	return nil, ErrContextRequired
 }
 
 // NewAnthropicProviderWithConfigContext creates a provider using

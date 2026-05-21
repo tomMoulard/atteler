@@ -21,7 +21,9 @@ const claudeCodeKeychainSource = "keychain:" + keychainService
 
 // readClaudeCodeKeychain reads the Claude Code OAuth token from the macOS Keychain.
 func readClaudeCodeKeychain(ctx context.Context) (string, error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return "", err
+	}
 
 	raw, err := readClaudeCodeKeychainPassword(ctx)
 	if err != nil {

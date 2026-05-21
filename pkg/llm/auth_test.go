@@ -24,7 +24,7 @@ func TestResolveAnthropicKey_EnvAPIKey(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 	t.Setenv("FORGE_CONFIG", "")
 
-	key, bearer, err := ResolveAnthropicKey()
+	key, bearer, err := ResolveAnthropicKeyContext(context.Background())
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -44,7 +44,7 @@ func TestResolveAnthropicKey_EnvAuthToken(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 	t.Setenv("FORGE_CONFIG", "")
 
-	key, bearer, err := ResolveAnthropicKey()
+	key, bearer, err := ResolveAnthropicKeyContext(context.Background())
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -60,7 +60,7 @@ func TestResolveAnthropicKey_ClaudeCodeOAuth(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok")
 	t.Setenv("FORGE_CONFIG", "")
 
-	key, bearer, err := ResolveAnthropicKey()
+	key, bearer, err := ResolveAnthropicKeyContext(context.Background())
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -89,7 +89,7 @@ func TestResolveAnthropicKey_CredentialsFile(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	key, bearer, err := ResolveAnthropicKey()
+	key, bearer, err := ResolveAnthropicKeyContext(context.Background())
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -120,7 +120,7 @@ func TestResolveAnthropicKey_ForgeClaudeCodeCredentials(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	key, bearer, err := ResolveAnthropicKey()
+	key, bearer, err := ResolveAnthropicKeyContext(context.Background())
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -139,10 +139,67 @@ func TestResolveAnthropicKey_NoCreds(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	_, _, err := ResolveAnthropicKey()
+	_, _, err := ResolveAnthropicKeyContext(context.Background())
 	if err == nil {
 		require.FailNow(t, "expected error when no credentials set")
 	}
+}
+
+func TestResolveAnthropicKey_CompatibilityHelperRequiresContext(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := ResolveAnthropicKey()
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContextRequired)
+}
+
+func TestResolveAnthropicKeyContext_RefreshHonorsCanceledContext(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+
+	requestStarted := make(chan struct{})
+	release := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+
+		select {
+		case <-r.Context().Done():
+			return
+		case <-release:
+			return
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	dir := t.TempDir()
+	t.Setenv("FORGE_CONFIG", dir)
+	t.Setenv("HOME", t.TempDir())
+
+	data := `[
+		{"id":"claude_code","auth_details":{"o_auth":{
+			"config":{"token_url":"` + srv.URL + `","client_id":"client-123"},
+			"tokens":{"access_token":"expired","refresh_token":"old-refresh","expires_at":"2000-01-01T00:00:00Z"}
+		}}}
+	]`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(data), 0o600))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		_, _, err := ResolveAnthropicKeyContext(ctx)
+		errCh <- err
+	}()
+
+	<-requestStarted
+	cancel()
+
+	err := <-errCh
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func TestParseClaudeCodeCredentials(t *testing.T) {
@@ -286,6 +343,51 @@ func TestReadForgeCredentialsFile_RefreshHonorsCanceledContext(t *testing.T) {
 	assert.Contains(t, err.Error(), "context canceled")
 }
 
+func TestReadForgeCredentialsFile_CanceledRefreshDoesNotFallBackToAPIKey(t *testing.T) {
+	t.Parallel()
+
+	requestStarted := make(chan struct{})
+	release := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+
+		select {
+		case <-r.Context().Done():
+			return
+		case <-release:
+			return
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	path := filepath.Join(t.TempDir(), ".credentials.json")
+	data := `[
+		{"id":"claude_code","auth_details":{"o_auth":{
+			"config":{"token_url":"` + srv.URL + `","client_id":"client-123"},
+			"tokens":{"access_token":"expired","refresh_token":"old-refresh","expires_at":"2000-01-01T00:00:00Z"}
+		}}},
+		{"id":"anthropic","auth_details":{"api_key":"sk-api"}}
+	]`
+	require.NoError(t, os.WriteFile(path, []byte(data), 0o600))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		_, _, err := readForgeCredentialsFile(ctx, path)
+		errCh <- err
+	}()
+
+	<-requestStarted
+	cancel()
+
+	err := <-errCh
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
 func TestParseForgeAnthropicCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -350,7 +452,7 @@ func TestResolveAnthropicKey_Precedence(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
 	t.Setenv("FORGE_CONFIG", "")
 
-	key, bearer, err := ResolveAnthropicKey()
+	key, bearer, err := ResolveAnthropicKeyContext(context.Background())
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -367,7 +469,7 @@ func TestResolveAnthropicKey_Precedence(t *testing.T) {
 func TestResolveOpenAIKey_EnvVar(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-openai-test")
 
-	key, bearer, err := ResolveOpenAIKey()
+	key, bearer, err := ResolveOpenAIKeyContext(context.Background())
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -375,6 +477,14 @@ func TestResolveOpenAIKey_EnvVar(t *testing.T) {
 	if key != "sk-openai-test" || bearer {
 		assert.Failf(t, "assertion failed", "got key=%q bearer=%v, want sk-openai-test/false", key, bearer)
 	}
+}
+
+func TestResolveOpenAIKey_CompatibilityHelperRequiresContext(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := ResolveOpenAIKey()
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContextRequired)
 }
 
 func TestResolveOpenAIKey_CodexAuthJSON_APIKey(t *testing.T) {
@@ -393,7 +503,7 @@ func TestResolveOpenAIKey_CodexAuthJSON_APIKey(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	key, bearer, err := ResolveOpenAIKey()
+	key, bearer, err := ResolveOpenAIKeyContext(context.Background())
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -419,7 +529,7 @@ func TestResolveOpenAIKey_CodexAuthJSON_OAuthTokenIsNotPlatformKey(t *testing.T)
 		require.NoError(t, err)
 	}
 
-	_, _, err := ResolveOpenAIKey()
+	_, _, err := ResolveOpenAIKeyContext(context.Background())
 	if err == nil {
 		require.FailNow(t, "expected Codex ChatGPT OAuth token not to be used as an OpenAI Platform API key")
 	}
@@ -431,7 +541,7 @@ func TestResolveOpenAIKey_NoCreds(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	_, _, err := ResolveOpenAIKey()
+	_, _, err := ResolveOpenAIKeyContext(context.Background())
 	if err == nil {
 		require.FailNow(t, "expected error when no credentials available")
 	}

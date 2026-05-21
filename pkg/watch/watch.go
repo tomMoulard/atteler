@@ -166,7 +166,7 @@ func (s *scanState) scanFile(filePath string, entry fs.DirEntry) error {
 		s.findings = append(s.findings, newFinding(
 			relativePath,
 			KindConventionDrift,
-			"uses context.Background() outside allowed entrypoints/tests",
+			"uses context.Background()/context.TODO() outside allowed entrypoints/tests",
 			SeverityMaintenance,
 		))
 	}
@@ -194,7 +194,7 @@ func findingHelp(kind string) string {
 	case KindStaleTODO:
 		return "Convert stale TODO/FIXME markers into tracked issues or remove completed notes."
 	case KindConventionDrift:
-		return "Propagate caller contexts; only the process entrypoint should create the root context."
+		return "Propagate caller contexts; only registered process entrypoints should create root contexts."
 	default:
 		return ""
 	}
@@ -423,7 +423,7 @@ func hasContextBackgroundDrift(path, relativePath string) bool {
 		return false
 	}
 
-	return usesContextBackground(file)
+	return usesHiddenRootContext(file)
 }
 
 func isProductionGoFile(path string) bool {
@@ -431,10 +431,15 @@ func isProductionGoFile(path string) bool {
 }
 
 func isAllowedContextBackgroundFile(path string, file *ast.File) bool {
-	return filepath.Base(path) == "main.go" && file.Name.Name == "main"
+	return file.Name.Name == "main" && allowedContextRootFiles[path]
 }
 
-func usesContextBackground(file *ast.File) bool {
+var allowedContextRootFiles = map[string]bool{
+	"cmd/atteler/main.go":  true,
+	"cmd/symphony/main.go": true,
+}
+
+func usesHiddenRootContext(file *ast.File) bool {
 	contextNames, dotImported := contextImportNames(file)
 	if len(contextNames) == 0 && !dotImported {
 		return false
@@ -447,24 +452,20 @@ func usesContextBackground(file *ast.File) bool {
 			return false
 		}
 
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-
-		switch fun := call.Fun.(type) {
+		switch fun := node.(type) {
 		case *ast.SelectorExpr:
-			if fun.Sel.Name != "Background" {
+			if !isHiddenRootContextName(fun.Sel.Name) {
 				return true
 			}
 
 			ident, ok := fun.X.(*ast.Ident)
 			if ok && contextNames[ident.Name] {
 				found = true
-				return false
 			}
+
+			return false
 		case *ast.Ident:
-			if dotImported && fun.Name == "Background" {
+			if dotImported && isHiddenRootContextName(fun.Name) {
 				found = true
 				return false
 			}
@@ -474,6 +475,10 @@ func usesContextBackground(file *ast.File) bool {
 	})
 
 	return found
+}
+
+func isHiddenRootContextName(name string) bool {
+	return name == "Background" || name == "TODO"
 }
 
 func contextImportNames(file *ast.File) (map[string]bool, bool) {

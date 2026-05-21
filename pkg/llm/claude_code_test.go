@@ -280,6 +280,24 @@ func TestPersistRefreshedClaudeCodeFile_AtomicAndPreservesUnknown(t *testing.T) 
 	assert.Equal(t, "user:inference", scopes[0])
 }
 
+func TestPersistRefreshedClaudeCodeFile_RequiresActiveContext(t *testing.T) {
+	t.Parallel()
+
+	path := writeClaudeCodeCredentialsFile(t, "old-access", "old-refresh", futureExpiry())
+	persister := &claudeCodeFilePersister{path: path}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := persister.persist(ctx, "new-access", "new-refresh", 9999999999999)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+
+	auth, err := loadClaudeCodeAuthFromFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "old-access", auth.snapshot())
+}
+
 func TestLoadClaudeCodeAuth_FilePath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
