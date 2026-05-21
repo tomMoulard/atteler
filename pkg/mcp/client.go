@@ -109,11 +109,15 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 	}
 
 	stderrCh := readAll(stderr)
-	waitCh := waitFor(cmd)
 	responseCh := readResponse(stdout, request.ID)
 	writeErr := writeRequest(stdin, request)
 
 	readResult := <-responseCh
+	// Start Wait only after the stdout reader has delivered a response. Cmd.Wait
+	// closes command pipes after the process exits; racing it against
+	// readResponse can turn a valid one-shot server response into
+	// "file already closed" on fast-exiting helpers.
+	waitCh := waitFor(cmd)
 	killed, waitErr := finishProcess(ctx, cmd, waitCh)
 	stderrText := strings.TrimSpace(<-stderrCh)
 
