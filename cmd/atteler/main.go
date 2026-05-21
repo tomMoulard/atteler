@@ -221,58 +221,61 @@ type completionCandidate struct {
 
 //nolint:govet,recvcheck // Field order groups related TUI state; task helpers mutate the local Bubble Tea model copy before returning it.
 type model struct {
-	ctx                 context.Context
-	textarea            textarea.Model
-	registry            *llm.Registry
-	agentRegistry       *agent.Registry
-	hookRunner          *events.Runner
-	sessionStore        *session.Store
-	stateStore          *appconfig.StateStore
-	cancel              context.CancelFunc
-	pickerCancel        context.CancelFunc
-	pendingModel        pickerItem
-	selectedModel       string
-	selectedAgent       string
-	sessionPath         string
-	cwd                 string
-	selectedProvider    string
-	fallbackModels      []string
-	generationDefaults  generationSettings
-	generationOverrides generationSettings
-	sessionState        session.Session
-	history             []llm.Message
-	promptHistory       []string
-	queuedPrompts       []string
-	promptHistoryDraft  string
-	pickerItems         []pickerItem
-	contextOptions      contextref.Options
-	referenceContext    string
-	worktreeInfo        *worktree.Info
-	tokenUsage          tokenUsage
-	runningTaskStarted  time.Time
-	idleSuggestionInput string
-	idleSuggestionText  string
-	pickerCursor        int
-	idleSuggestionID    int
-	terminalTitleFrame  int
-	modelFetchID        int
-	modelFetchesPending int
-	completionCursor    int
-	promptHistoryCursor int
-	runningTaskID       int
-	maxInputTokens      int
-	width               int
-	quitting            bool
-	waiting             bool
-	pickerOpen          bool
-	pickerLoading       bool
-	scopePickerOpen     bool
-	completionOpen      bool
-	modelLocked         bool
-	revampUndoActive    bool
-	completionItems     []completionCandidate
-	runningTaskLabel    string
-	revampUndo          string
+	ctx                  context.Context
+	textarea             textarea.Model
+	registry             *llm.Registry
+	agentRegistry        *agent.Registry
+	hookRunner           *events.Runner
+	sessionStore         *session.Store
+	stateStore           *appconfig.StateStore
+	cancel               context.CancelFunc
+	pickerCancel         context.CancelFunc
+	idleSuggestionCancel context.CancelFunc
+	pendingModel         pickerItem
+	selectedModel        string
+	selectedAgent        string
+	sessionPath          string
+	cwd                  string
+	selectedProvider     string
+	fallbackModels       []string
+	generationDefaults   generationSettings
+	generationOverrides  generationSettings
+	sessionState         session.Session
+	history              []llm.Message
+	promptHistory        []string
+	queuedPrompts        []string
+	promptHistoryDraft   string
+	pickerItems          []pickerItem
+	contextOptions       contextref.Options
+	referenceContext     string
+	worktreeInfo         *worktree.Info
+	tokenUsage           tokenUsage
+	runningTaskStarted   time.Time
+	idleSuggestionInput  string
+	idleSuggestionText   string
+	idleSuggestionStatus string
+	pickerCursor         int
+	idleSuggestionID     int
+	terminalTitleFrame   int
+	modelFetchID         int
+	modelFetchesPending  int
+	completionCursor     int
+	promptHistoryCursor  int
+	runningTaskID        int
+	maxInputTokens       int
+	width                int
+	quitting             bool
+	waiting              bool
+	pickerOpen           bool
+	pickerLoading        bool
+	scopePickerOpen      bool
+	completionOpen       bool
+	modelLocked          bool
+	promptLocalOnly      bool
+	revampUndoActive     bool
+	completionItems      []completionCandidate
+	runningTaskLabel     string
+	revampUndo           string
 
 	// checkpointResponseCh is non-nil when the TUI is waiting for the user to
 	// confirm whether to continue the agent loop or execute a require-confirm
@@ -303,6 +306,7 @@ func initialModel(
 	generationOverrides generationSettings,
 	maxInputTokens int,
 	modelLocked bool,
+	promptLocalOnly bool,
 	wtInfo *worktree.Info,
 ) model {
 	ta := textarea.New()
@@ -342,6 +346,7 @@ func initialModel(
 		promptHistoryCursor: -1,
 		textarea:            ta,
 		modelLocked:         modelLocked,
+		promptLocalOnly:     promptLocalOnly,
 		worktreeInfo:        wtInfo,
 		pinnedMessages:      make(map[int]bool),
 		executionMode:       "execute",

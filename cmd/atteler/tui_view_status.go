@@ -138,6 +138,10 @@ func (m model) statusLine() string {
 		parts = append(parts, ctx)
 	}
 
+	if m.idleSuggestionStatus != "" {
+		parts = append(parts, "suggestion:"+m.idleSuggestionStatus)
+	}
+
 	if len(parts) == 0 {
 		return ""
 	}
@@ -289,30 +293,58 @@ func (m model) promptSuggestion() (promptcomplete.Suggestion, bool) {
 		return promptcomplete.Suggestion{}, false
 	}
 
-	suggestion, ok := promptcomplete.Suggest(promptcomplete.Context{
-		Input:     value,
-		Cursor:    cursor,
-		Agents:    promptAgentCandidates(m.agentRegistry),
-		Tools:     promptToolCandidates(),
-		Templates: promptTemplateCandidates(),
-	}, promptcomplete.Options{Limit: 1})
+	suggestion, ok := promptcomplete.Suggest(promptCompletionContext(m.ctx, appState{
+		agentRegistry: m.agentRegistry,
+		sessionStore:  m.sessionStore,
+		sessionState:  m.sessionState,
+		selectedAgent: m.selectedAgent,
+		cwd:           m.cwd,
+	}, value, false), promptcomplete.Options{Limit: 1})
 	if !ok || suggestion.Suffix == "" {
+		return promptcomplete.Suggestion{}, false
+	}
+
+	if !promptSuggestionAppendable(value, suggestion) {
 		return promptcomplete.Suggestion{}, false
 	}
 
 	return suggestion, true
 }
 
+func promptSuggestionAppendable(input string, suggestion promptcomplete.Suggestion) bool {
+	if suggestion.ReplacementStart < 0 ||
+		suggestion.ReplacementStart > suggestion.ReplacementEnd ||
+		suggestion.ReplacementEnd > len(input) {
+		return false
+	}
+
+	current := input[suggestion.ReplacementStart:suggestion.ReplacementEnd]
+
+	return strings.HasPrefix(strings.ToLower(suggestion.Text), strings.ToLower(current))
+}
+
 func (m *model) clearIdleSuggestion() {
+	m.cancelIdleSuggestionRequest()
 	m.idleSuggestionID++
 	m.idleSuggestionInput = ""
 	m.idleSuggestionText = ""
+	m.idleSuggestionStatus = ""
+}
+
+func (m *model) cancelIdleSuggestionRequest() {
+	if m.idleSuggestionCancel == nil {
+		return
+	}
+
+	m.idleSuggestionCancel()
+	m.idleSuggestionCancel = nil
 }
 
 func (m *model) scheduleIdleSuggestion() tea.Cmd {
 	value := m.textarea.Value()
 	if m.waiting ||
 		m.registry == nil ||
+		m.promptLocalOnly ||
 		strings.TrimSpace(value) == "" ||
 		textareaCursorOffset(m.textarea) != len(value) {
 		return nil
@@ -321,6 +353,7 @@ func (m *model) scheduleIdleSuggestion() tea.Cmd {
 	m.idleSuggestionID++
 	m.idleSuggestionInput = value
 	m.idleSuggestionText = ""
+	m.idleSuggestionStatus = "pending"
 	id := m.idleSuggestionID
 
 	return tea.Tick(idleSuggestionDelay, func(time.Time) tea.Msg {
@@ -332,12 +365,24 @@ func (m model) updateIdleSuggestionRequest(msg idleSuggestionRequestMsg) (tea.Mo
 	if msg.id != m.idleSuggestionID ||
 		msg.input != m.idleSuggestionInput ||
 		msg.input != m.textarea.Value() ||
+		textareaCursorOffset(m.textarea) != len(m.textarea.Value()) ||
 		m.waiting ||
 		m.registry == nil {
+		m.idleSuggestionStatus = "rejected:stale"
 		return m, nil
 	}
 
-	return m, requestIdleSuggestion(m.ctx, m.registry, m.selectedModel, m.fallbackModels, m.generationDefaults, m.generationOverrides, msg.id, msg.input)
+	requestCtx := m.ctx
+	if requestCtx != nil {
+		var cancel context.CancelFunc
+
+		requestCtx, cancel = context.WithCancel(requestCtx)
+
+		m.cancelIdleSuggestionRequest()
+		m.idleSuggestionCancel = cancel
+	}
+
+	return m, requestIdleSuggestion(requestCtx, m.registry, m.selectedModel, m.fallbackModels, m.generationDefaults, m.generationOverrides, msg.id, msg.input, m.idleSuggestionContext())
 }
 
 func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) {
@@ -345,17 +390,35 @@ func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) 
 		msg.input != m.idleSuggestionInput ||
 		msg.input != m.textarea.Value() ||
 		textareaCursorOffset(m.textarea) != len(m.textarea.Value()) {
+		m.idleSuggestionStatus = "rejected:stale"
 		return m, nil
 	}
+
+	m.cancelIdleSuggestionRequest()
 
 	if msg.err != nil {
 		// Idle suggestions are opportunistic; avoid interrupting the user for
 		// provider/network failures.
 		slog.Debug("idle prompt suggestion failed", "error", msg.err)
+
+		m.idleSuggestionStatus = "rejected:error"
+
+		return m, nil
+	}
+
+	if reason := unsafeIdleSuggestionReason(msg.suggestion); reason != "" {
+		m.idleSuggestionText = ""
+		m.idleSuggestionStatus = "rejected:" + reason
+
 		return m, nil
 	}
 
 	m.idleSuggestionText = normalizeIdleSuggestion(msg.input, msg.suggestion)
+	if m.idleSuggestionText == "" {
+		m.idleSuggestionStatus = "rejected:empty"
+	} else {
+		m.idleSuggestionStatus = "ready:model"
+	}
 
 	return m, nil
 }
@@ -381,6 +444,7 @@ func requestIdleSuggestion(
 	overrides generationSettings,
 	id int,
 	input string,
+	contextSummary string,
 ) tea.Cmd {
 	return func() tea.Msg {
 		if ctx == nil {
@@ -400,11 +464,12 @@ func requestIdleSuggestion(
 					Role: llm.RoleSystem,
 					Content: "You complete an in-progress CLI prompt. " +
 						"Return only a short suffix that should be appended to the user's current text. " +
+						"Use the supplied local context for relevance and do not invent files, tools, agents, tasks, or issue IDs. " +
 						"Do not repeat the current text, do not add explanations, and return an empty response if no useful suffix exists.",
 				},
 				{
 					Role:    llm.RoleUser,
-					Content: "Current text:\n" + input,
+					Content: "Current text:\n" + input + "\n\nLocal context:\n" + contextSummary,
 				},
 			},
 		}
@@ -417,6 +482,61 @@ func requestIdleSuggestion(
 
 		return idleSuggestionMsg{id: id, input: input, suggestion: resp.Content}
 	}
+}
+
+func (m model) idleSuggestionContext() string {
+	completionContext := promptCompletionContext(m.ctx, appState{
+		agentRegistry: m.agentRegistry,
+		sessionStore:  m.sessionStore,
+		sessionState:  m.sessionState,
+		selectedAgent: m.selectedAgent,
+		cwd:           m.cwd,
+	}, m.textarea.Value(), false)
+
+	var lines []string
+
+	appendCandidates := func(label string, candidates []promptcomplete.Candidate, limit int) {
+		for i, candidate := range candidates {
+			if i >= limit {
+				break
+			}
+
+			lines = append(lines, label+": "+candidate.Text+" — "+candidate.Description)
+		}
+	}
+
+	appendCandidates("agent", completionContext.Agents, 4)
+	appendCandidates("tool", completionContext.Tools, 4)
+	appendCandidates("slash", completionContext.SlashCommands, 6)
+	appendCandidates("file", completionContext.RecentFiles, 4)
+	appendCandidates("task", completionContext.Tasks, 4)
+	appendCandidates("issue", completionContext.Issues, 4)
+	appendCandidates("permission", completionContext.Permissions, 4)
+
+	if len(lines) == 0 {
+		return "local-only deterministic context available; no live context candidates matched."
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func unsafeIdleSuggestionReason(suggestion string) string {
+	if strings.ContainsRune(suggestion, '\x00') {
+		return "unsafe-control"
+	}
+
+	if strings.ContainsAny(suggestion, "\r\n") {
+		return "unsafe-multiline"
+	}
+
+	normalized := strings.ToLower(strings.Join(strings.Fields(suggestion), " "))
+	for _, marker := range []string{"rm -rf /", "curl | sh", "curl | bash", "wget | sh", "wget | bash"} {
+		if strings.Contains(normalized, marker) {
+			return "unsafe-shell"
+		}
+	}
+
+	return ""
 }
 
 func normalizeIdleSuggestion(input, suggestion string) string {

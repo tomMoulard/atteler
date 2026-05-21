@@ -43,26 +43,77 @@ func conciseRevamp(input string) string {
 }
 
 func detailedRevamp(input string) string {
+	if hasEnoughPromptStructure(input) {
+		return input
+	}
+
 	sections := []string{input}
 	lower := strings.ToLower(input)
 
 	if !hasAny(lower, "goal:", "objective:", "task:") {
-		sections = append(sections, "Goal: clarify the desired outcome.")
+		sections = append(sections, "Goal: "+sentenceFromPrompt(input))
 	}
 
 	if !hasAny(lower, "context:", "background:") {
-		sections = append(sections, "Context: include relevant background or inputs.")
+		sections = append(sections, "Context to add: relevant files, errors, prior attempts, or session state.")
 	}
 
 	if !hasAny(lower, "constraint:", "constraints:", "requirements:", "must ", "avoid ") {
-		sections = append(sections, "Constraints: note limits, preferences, and must-haves.")
+		sections = append(sections, "Constraints to preserve: scope, safety, and behavior that must not change.")
 	}
 
 	if !hasAny(lower, "output format:", "format:", "respond with", "return ") {
-		sections = append(sections, "Output format: specify the expected structure.")
+		sections = append(sections, "Output: the concrete answer, patch, or verification evidence expected.")
 	}
 
 	return strings.Join(sections, "\n")
+}
+
+func hasEnoughPromptStructure(input string) bool {
+	lower := strings.ToLower(input)
+	sections := 0
+
+	if hasAny(lower, "goal:", "objective:", "task:") {
+		sections++
+	}
+
+	if hasAny(lower, "context:", "background:") {
+		sections++
+	}
+
+	if hasAny(lower, "constraint:", "constraints:", "requirements:", "must ", "avoid ") {
+		sections++
+	}
+
+	if hasAny(lower, "output format:", "format:", "respond with", "return ", "deliverable:") {
+		sections++
+	}
+
+	return sections >= 2 || bulletLineCount(input) >= 2
+}
+
+func bulletLineCount(input string) int {
+	count := 0
+
+	for line := range strings.SplitSeq(input, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
+			count++
+		}
+	}
+
+	return count
+}
+
+func sentenceFromPrompt(input string) string {
+	sentence := compactWhitespace(input)
+
+	sentence = strings.TrimRight(sentence, ".!?")
+	if sentence == "" {
+		return "state the desired outcome."
+	}
+
+	return sentence + "."
 }
 
 func compactWhitespace(input string) string {

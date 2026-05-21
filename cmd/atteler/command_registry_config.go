@@ -1,6 +1,9 @@
 package main
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 func providerlessConfigAgentPluginCommands() []command {
 	return []command{
@@ -36,8 +39,19 @@ func providerlessConfigAgentPluginCommands() []command {
 			name:  "prompt-complete-providerless",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.promptCompleteInput != "" },
-			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
-				promptComplete(s.agentRegistry, o.promptCompleteInput, o.promptCompleteLimit.value)
+			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
+				if o.sessionRef != "" {
+					saved, err := s.sessionStore.Load(o.sessionRef)
+					if err != nil {
+						return fmt.Errorf("load session for prompt completion: %w", err)
+					}
+
+					s.sessionState = saved
+				}
+
+				s.selectedAgent = o.agentName
+				promptComplete(ctx, s, o.promptCompleteInput, o.promptCompleteLimit.value)
+
 				return nil
 			},
 		},

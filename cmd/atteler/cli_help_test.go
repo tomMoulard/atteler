@@ -785,6 +785,7 @@ func TestFlagDomain_CoversAcceptanceDomains(t *testing.T) {
 		"validate-config":                    "config",
 		"list-providers":                     "providers",
 		"plan-agents":                        "agents",
+		"prompt-local-only":                  "agents",
 		"memory-search":                      "memory/rag",
 		"code-symbol-prefix":                 "code-intel",
 		"review-plan":                        "review",
