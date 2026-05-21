@@ -13,8 +13,8 @@ import (
 	"github.com/tommoulard/atteler/pkg/subagent"
 )
 
-func runAsyncPlan(specs []string) error {
-	plan, err := asyncPlanFromSpecs(specs)
+func runAsyncPlan(input asyncPlanCommandInput) error {
+	plan, err := asyncPlanFromSpecs(input.TaskSpecs)
 	if err != nil {
 		return fmt.Errorf("async plan: %w", err)
 	}
@@ -24,8 +24,8 @@ func runAsyncPlan(specs []string) error {
 	return nil
 }
 
-func runAsyncTasks(ctx context.Context, state appState, opts cliOptions) error {
-	plan, err := asyncPlanFromSpecs(opts.asyncTaskSpecs)
+func runAsyncTasks(ctx context.Context, state appState, input asyncRunCommandInput) error {
+	plan, err := asyncPlanFromSpecs(input.TaskSpecs)
 	if err != nil {
 		return fmt.Errorf("async run: %w", err)
 	}
@@ -35,10 +35,10 @@ func runAsyncTasks(ctx context.Context, state appState, opts cliOptions) error {
 		return fmt.Errorf("async run: %w", err)
 	}
 
-	if opts.spawnTimeout.value > 0 {
+	if input.TimeoutSeconds > 0 {
 		var cancel context.CancelFunc
 
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(opts.spawnTimeout.value)*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
 		defer cancel()
 	}
 
@@ -57,7 +57,7 @@ func runAsyncTasks(ctx context.Context, state appState, opts cliOptions) error {
 
 	runner := subagent.AttelerCommandWithOptions(subagent.CommandOptions{
 		Args:   subagentCommandArgs(state),
-		Binary: resolveSpawnBinary(opts.spawnBinary),
+		Binary: resolveSpawnBinary(input.SpawnBinary),
 		Dir:    state.cwd,
 	})
 	results, runErr := plan.Run(ctx, func(ctx context.Context, task attasync.Task) (string, error) {

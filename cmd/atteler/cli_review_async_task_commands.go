@@ -15,8 +15,8 @@ import (
 	"github.com/tommoulard/atteler/pkg/watch"
 )
 
-func runReviewPlan(reviewerNames, paths, gates []string) error {
-	plan, err := review.NewPlan(reviewPlanReviewers(reviewerNames), reviewPlanPaths(paths), gates)
+func runReviewPlan(input reviewPlanCommandInput) error {
+	plan, err := review.NewPlan(reviewPlanReviewers(input.Agents), reviewPlanPaths(input.Paths), input.Gates)
 	if err != nil {
 		return fmt.Errorf("review plan: %w", err)
 	}
@@ -245,13 +245,13 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 	return resp.Content, nil
 }
 
-func runReviewExecution(ctx context.Context, state appState, opts cliOptions) error {
-	plan, err := review.NewPlan(reviewPlanReviewers(opts.reviewAgents), reviewPlanPaths(opts.reviewPaths), opts.reviewGates)
+func runReviewExecution(ctx context.Context, state appState, input reviewRunCommandInput) error {
+	plan, err := review.NewPlan(reviewPlanReviewers(input.Agents), reviewPlanPaths(input.Paths), input.Gates)
 	if err != nil {
 		return fmt.Errorf("review-run: %w", err)
 	}
 
-	reviewContext, err := buildReviewContext(ctx, plan.Paths(), opts.reviewPrompt, state.contextOptions)
+	reviewContext, err := buildReviewContext(ctx, plan.Paths(), input.Prompt, state.contextOptions)
 	if err != nil {
 		return fmt.Errorf("review-run context: %w", err)
 	}

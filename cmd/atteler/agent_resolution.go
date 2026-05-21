@@ -114,7 +114,7 @@ func resolveSelection(
 		return selectionState{}, err
 	}
 
-	if err := applyRouteSelection(opts, &state); err != nil {
+	if err := applyRouteSelection(routeModelsCommandInputFromOptions(opts), &state); err != nil {
 		return selectionState{}, err
 	}
 

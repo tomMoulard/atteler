@@ -19,21 +19,21 @@ import (
 	"github.com/tommoulard/atteler/pkg/vector"
 )
 
-func runLSPSymbols(ctx context.Context, opts cliOptions) error {
+func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
 	lspOptions := lsp.Options{
-		Command:    strings.TrimSpace(opts.lspCommand),
-		Args:       append([]string(nil), opts.lspArgs...),
-		FilePath:   strings.TrimSpace(opts.lspFilePath),
-		RootPath:   strings.TrimSpace(opts.lspRootPath),
-		LanguageID: strings.TrimSpace(opts.lspLanguageID),
+		Command:    strings.TrimSpace(input.Command),
+		Args:       append([]string(nil), input.Args...),
+		FilePath:   strings.TrimSpace(input.FilePath),
+		RootPath:   strings.TrimSpace(input.RootPath),
+		LanguageID: strings.TrimSpace(input.LanguageID),
 	}
 
 	var (
 		symbols []lsp.Symbol
 		err     error
 	)
-	if strings.TrimSpace(opts.lspWorkspaceSymbols) != "" {
-		symbols, err = lsp.WorkspaceSymbols(ctx, lspOptions, opts.lspWorkspaceSymbols)
+	if strings.TrimSpace(input.WorkspaceSymbols) != "" {
+		symbols, err = lsp.WorkspaceSymbols(ctx, lspOptions, input.WorkspaceSymbols)
 	} else {
 		symbols, err = lsp.DocumentSymbols(ctx, lspOptions)
 	}
@@ -173,15 +173,16 @@ func formatContextPackResult(result contextpack.Result) string {
 	return b.String()
 }
 
-func runVectorSearch(query string, paths []string, limit int) error {
-	if strings.TrimSpace(query) == "" {
+func runVectorSearch(input vectorSearchCommandInput) error {
+	if strings.TrimSpace(input.Query) == "" {
 		return errors.New("vector search: --vector-search is required")
 	}
 
-	if len(paths) == 0 {
+	if len(input.IndexFiles) == 0 {
 		return errors.New("vector search: at least one --vector-index file is required")
 	}
 
+	limit := input.Limit
 	if limit == 0 {
 		limit = 5
 	}
@@ -196,14 +197,14 @@ func runVectorSearch(query string, paths []string, limit int) error {
 		return fmt.Errorf("vector search: create store: %w", err)
 	}
 
-	for _, path := range paths {
+	for _, path := range input.IndexFiles {
 		addErr := addVectorFile(store, vectorizer, path)
 		if addErr != nil {
 			return addErr
 		}
 	}
 
-	queryVector, err := vectorizer.Vectorize(query)
+	queryVector, err := vectorizer.Vectorize(input.Query)
 	if err != nil {
 		return fmt.Errorf("vector search: vectorize query: %w", err)
 	}
@@ -260,8 +261,8 @@ func formatVectorResult(result vector.Result) string {
 	return strings.Join(parts, "\t")
 }
 
-func runAgentMemoryCommand(root, selectedAgent string, opts cliOptions) error {
-	agentName := strings.TrimSpace(opts.agentMemoryAgent)
+func runAgentMemoryCommand(root, selectedAgent string, input agentMemoryCommandInput) error {
+	agentName := strings.TrimSpace(input.Agent)
 	if agentName == "" {
 		agentName = strings.TrimSpace(selectedAgent)
 	}
@@ -270,7 +271,7 @@ func runAgentMemoryCommand(root, selectedAgent string, opts cliOptions) error {
 		return errors.New("agent memory: --agent-memory-agent or --agent is required")
 	}
 
-	storePath := strings.TrimSpace(opts.agentMemoryStorePath)
+	storePath := strings.TrimSpace(input.StorePath)
 	if storePath == "" {
 		storePath = filepath.Join(root, ".atteler", "agent-memory.json")
 	}
@@ -280,30 +281,30 @@ func runAgentMemoryCommand(root, selectedAgent string, opts cliOptions) error {
 		return err
 	}
 
-	for _, path := range opts.agentMemoryIndexFiles {
+	for _, path := range input.IndexFiles {
 		if addErr := store.AddFile(agentName, path); addErr != nil {
 			return fmt.Errorf("agent memory: index %s: %w", path, addErr)
 		}
 	}
 
-	if len(opts.agentMemoryIndexFiles) > 0 {
+	if len(input.IndexFiles) > 0 {
 		if saveErr := store.Save(storePath); saveErr != nil {
 			return fmt.Errorf("agent memory: save store: %w", saveErr)
 		}
 
-		fmt.Printf("Indexed %d file(s) for agent %s in %s\n", len(opts.agentMemoryIndexFiles), agentName, storePath)
+		fmt.Printf("Indexed %d file(s) for agent %s in %s\n", len(input.IndexFiles), agentName, storePath)
 	}
 
-	if strings.TrimSpace(opts.agentMemorySearch) == "" {
+	if strings.TrimSpace(input.Search) == "" {
 		return nil
 	}
 
-	limit := opts.agentMemoryLimit.value
+	limit := input.Limit
 	if limit == 0 {
 		limit = 5
 	}
 
-	results, err := store.Search(agentName, opts.agentMemorySearch, limit)
+	results, err := store.Search(agentName, input.Search, limit)
 	if err != nil {
 		return fmt.Errorf("agent memory: search: %w", err)
 	}
@@ -358,33 +359,33 @@ func formatAgentMemoryResult(result agentmemory.Result) string {
 	return strings.Join(parts, "\t")
 }
 
-func runMemoryCommand(store *session.Store, opts cliOptions) error {
-	mem, err := buildMemoryStore(store, opts)
+func runMemoryCommand(store *session.Store, input memoryCommandInput) error {
+	mem, err := buildMemoryStore(store, input)
 	if err != nil {
 		return err
 	}
 
-	if opts.memoryStorePath != "" && len(opts.memoryIndexFiles) > 0 {
-		if saveErr := mem.Save(opts.memoryStorePath); saveErr != nil {
+	if input.StorePath != "" && len(input.IndexFiles) > 0 {
+		if saveErr := mem.Save(input.StorePath); saveErr != nil {
 			return fmt.Errorf("memory: save store: %w", saveErr)
 		}
 
-		if opts.memorySearch == "" {
-			fmt.Printf("Indexed %d document(s) into %s\n", len(mem.Documents), opts.memoryStorePath)
+		if input.Search == "" {
+			fmt.Printf("Indexed %d document(s) into %s\n", len(mem.Documents), input.StorePath)
 			return nil
 		}
 	}
 
-	if opts.memorySearch == "" {
+	if input.Search == "" {
 		return errors.New("memory: --memory-search is required unless indexing into --memory-store")
 	}
 
-	limit := opts.memoryLimit.value
+	limit := input.Limit
 	if limit == 0 {
 		limit = 5
 	}
 
-	results, err := mem.Search(opts.memorySearch, limit)
+	results, err := mem.Search(input.Search, limit)
 	if err != nil {
 		return fmt.Errorf("memory: search: %w", err)
 	}
@@ -401,19 +402,19 @@ func runMemoryCommand(store *session.Store, opts cliOptions) error {
 	return nil
 }
 
-func buildMemoryStore(store *session.Store, opts cliOptions) (*memory.Store, error) {
-	mem, err := loadMemoryStore(opts.memoryStorePath)
+func buildMemoryStore(store *session.Store, input memoryCommandInput) (*memory.Store, error) {
+	mem, err := loadMemoryStore(input.StorePath)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(opts.memoryIndexFiles) > 0 {
-		if err := mem.AddFiles(opts.memoryIndexFiles...); err != nil {
+	if len(input.IndexFiles) > 0 {
+		if err := mem.AddFiles(input.IndexFiles...); err != nil {
 			return nil, fmt.Errorf("memory: index files: %w", err)
 		}
 	}
 
-	if opts.memoryStorePath == "" || len(mem.Documents) == 0 {
+	if input.StorePath == "" || len(mem.Documents) == 0 {
 		if err := addSessionMemory(mem, store); err != nil {
 			return nil, err
 		}

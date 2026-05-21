@@ -91,6 +91,8 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "doctor", Summary: "run provider-aware readiness diagnostics", Legacy: []string{"--doctor"}},
 			{Name: "doctor-offline", Summary: "run offline readiness diagnostics", Legacy: []string{"--doctor-offline"}},
 			{Name: "state", Summary: "show interactive state path, revision, and selected preference sources", Legacy: []string{"--state-diagnostics"}},
+			{Name: "commands-json", Summary: "dump the inspectable CLI command surface as JSON", Legacy: []string{"--command-surface-json"}},
+			{Name: "commands-docs", Summary: "render command surface docs from the dispatch contract", Legacy: []string{"--command-surface-docs"}},
 			{Name: "hooks", Summary: "list supported lifecycle hook events", Legacy: []string{"--list-hook-events"}},
 			{Name: "hooks-json", Summary: "list hook events as JSON", Legacy: []string{"--list-hook-events-json"}},
 			{Name: "version", Summary: "print build version information", Legacy: []string{"--version"}},

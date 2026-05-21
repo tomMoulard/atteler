@@ -17,18 +17,40 @@ func taskCommandRequested(opts cliOptions) bool {
 	return opts.taskAddTitle != "" || opts.taskList || opts.taskAssignSpec != "" || opts.taskCompleteID != ""
 }
 
-func runTaskListCommand(ctx context.Context, sessionStore *session.Store, opts cliOptions) error {
-	if err := validateSingleTaskOperation(opts); err != nil {
+type taskCommandInput struct {
+	FilePath   string
+	AddTitle   string
+	AddID      string
+	Agent      string
+	AssignSpec string
+	CompleteID string
+	List       bool
+}
+
+func taskCommandInputFromOptions(opts cliOptions) taskCommandInput {
+	return taskCommandInput{
+		FilePath:   opts.taskFilePath,
+		AddTitle:   opts.taskAddTitle,
+		AddID:      opts.taskAddID,
+		Agent:      opts.taskAgent,
+		AssignSpec: opts.taskAssignSpec,
+		CompleteID: opts.taskCompleteID,
+		List:       opts.taskList,
+	}
+}
+
+func runTaskListCommand(ctx context.Context, sessionStore *session.Store, input taskCommandInput) error {
+	if err := validateSingleTaskOperation(input); err != nil {
 		return err
 	}
 
-	store := tasklist.NewStore(taskListPath(sessionStore, opts.taskFilePath))
+	store := tasklist.NewStore(taskListPath(sessionStore, input.FilePath))
 	switch {
-	case opts.taskAddTitle != "":
+	case input.AddTitle != "":
 		task, err := store.Add(ctx, tasklist.AddRequest{
-			ID:    opts.taskAddID,
-			Title: opts.taskAddTitle,
-			Agent: opts.taskAgent,
+			ID:    input.AddID,
+			Title: input.AddTitle,
+			Agent: input.Agent,
 		})
 		if err != nil {
 			return fmt.Errorf("task add: %w", err)
@@ -37,8 +59,8 @@ func runTaskListCommand(ctx context.Context, sessionStore *session.Store, opts c
 		fmt.Println(formatTaskListItem(task))
 
 		return nil
-	case opts.taskAssignSpec != "":
-		id, agentName, err := parseTaskAssignmentSpec(opts.taskAssignSpec)
+	case input.AssignSpec != "":
+		id, agentName, err := parseTaskAssignmentSpec(input.AssignSpec)
 		if err != nil {
 			return err
 		}
@@ -51,8 +73,8 @@ func runTaskListCommand(ctx context.Context, sessionStore *session.Store, opts c
 		fmt.Println(formatTaskListItem(task))
 
 		return nil
-	case opts.taskCompleteID != "":
-		task, err := store.Complete(ctx, opts.taskCompleteID, opts.taskAgent)
+	case input.CompleteID != "":
+		task, err := store.Complete(ctx, input.CompleteID, input.Agent)
 		if err != nil {
 			return fmt.Errorf("task complete: %w", err)
 		}
@@ -60,7 +82,7 @@ func runTaskListCommand(ctx context.Context, sessionStore *session.Store, opts c
 		fmt.Println(formatTaskListItem(task))
 
 		return nil
-	case opts.taskList:
+	case input.List:
 		tasks, err := store.List(ctx)
 		if err != nil {
 			return fmt.Errorf("task list: %w", err)
@@ -81,14 +103,14 @@ func runTaskListCommand(ctx context.Context, sessionStore *session.Store, opts c
 	}
 }
 
-func validateSingleTaskOperation(opts cliOptions) error {
+func validateSingleTaskOperation(input taskCommandInput) error {
 	operations := 0
 
 	for _, requested := range []bool{
-		opts.taskAddTitle != "",
-		opts.taskList,
-		opts.taskAssignSpec != "",
-		opts.taskCompleteID != "",
+		input.AddTitle != "",
+		input.List,
+		input.AssignSpec != "",
+		input.CompleteID != "",
 	} {
 		if requested {
 			operations++

@@ -992,46 +992,7 @@ func markedReadmeBlockForTest(readme, name string) (string, bool) {
 }
 
 func readmeDomainTableForTest() string {
-	var table strings.Builder
-
-	table.WriteString("<!-- atteler:cli-domains:start -->\n")
-	table.WriteString("| Domain | Examples |\n")
-	table.WriteString("|--------|----------|\n")
-
-	for _, domain := range cliHelpDomains {
-		table.WriteString("| ")
-		table.WriteString(readmeDomainLabelForTest(domain))
-		table.WriteString(" | ")
-		table.WriteString(readmeExamplesForTest(domain.Examples))
-		table.WriteString(" |\n")
-	}
-
-	table.WriteString("<!-- atteler:cli-domains:end -->")
-
-	return table.String()
-}
-
-func readmeDomainLabelForTest(domain cliHelpDomain) string {
-	parts := strings.Split(domain.Name, "/")
-	if len(parts) > 1 {
-		labels := make([]string, 0, len(parts))
-		for _, part := range parts {
-			labels = append(labels, "`"+part+"`")
-		}
-
-		return strings.Join(labels, " / ")
-	}
-
-	return "`" + domain.Name + "`"
-}
-
-func readmeExamplesForTest(examples []string) string {
-	quoted := make([]string, 0, len(examples))
-	for _, example := range examples {
-		quoted = append(quoted, "`"+example+"`")
-	}
-
-	return strings.Join(quoted, ", ")
+	return renderReadmeDomainTable(cliHelpDomains)
 }
 
 func newRegisteredFlagSetForTest(t *testing.T) *flag.FlagSet {
