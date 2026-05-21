@@ -29,6 +29,22 @@ func TestMergeTags_DeduplicatesCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestWorktreeMergeProvenance_IncludesSessionMetadata(t *testing.T) {
+	t.Parallel()
+
+	got := worktreeMergeProvenance(session.Session{
+		ID:    "session-123",
+		Title: "GH-83 worktree hardening",
+		Tags:  []string{"security", "symphony"},
+	})
+
+	assert.Equal(t, []string{
+		"session=session-123",
+		"title=GH-83 worktree hardening",
+		"tags=security,symphony",
+	}, got)
+}
+
 func TestRecordFailure_SavesNegativeKnowledge(t *testing.T) {
 	t.Parallel()
 	store := session.NewStore(t.TempDir())

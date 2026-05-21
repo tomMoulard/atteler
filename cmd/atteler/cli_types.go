@@ -381,6 +381,7 @@ type cliOptions struct {
 	headless                           bool
 	showVersion                        bool
 	useWorktree                        bool
+	mergeWorktreeAllowBaseMismatch     bool
 	pluginDryRun                       bool
 	listWorktrees                      bool
 	noAutoMerge                        bool

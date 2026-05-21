@@ -425,7 +425,11 @@ func finalizeWorktree(ctx context.Context, state *appState) {
 
 	fmt.Fprintln(os.Stderr, "worktree: merging "+state.worktreeInfo.Branch+" into "+state.worktreeInfo.BaseBranch+"...")
 
-	if err := worktree.MergeContext(ctx, state.cwd, state.worktreeInfo); err != nil {
+	if err := worktree.MergeWithOptionsContext(ctx, state.cwd, state.worktreeInfo, worktree.MergeOptions{
+		AutoCommit: true,
+		AutoMerge:  true,
+		Provenance: worktreeMergeProvenance(state.sessionState),
+	}); err != nil {
 		fmt.Fprintln(os.Stderr, "worktree: auto-merge failed: "+err.Error())
 		fmt.Fprintln(os.Stderr, "worktree: files preserved in "+state.worktreeInfo.Path)
 		fmt.Fprintln(os.Stderr, "worktree: retry with: atteler --merge-worktree "+state.sessionState.ID)

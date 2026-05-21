@@ -419,7 +419,7 @@ func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
 	case opts.listWorktrees:
 		return true, listWorktrees(ctx)
 	case opts.mergeWorktreeRef != "":
-		return true, mergeWorktreeBySession(ctx, opts.mergeWorktreeRef)
+		return true, mergeWorktreeBySession(ctx, opts.mergeWorktreeRef, opts.mergeWorktreeAllowBaseMismatch)
 	default:
 		return false, nil
 	}

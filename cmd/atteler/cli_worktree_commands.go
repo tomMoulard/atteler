@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/worktree"
@@ -39,7 +40,7 @@ func listWorktrees(ctx context.Context) error {
 	return nil
 }
 
-func mergeWorktreeBySession(ctx context.Context, sessionRef string) error {
+func mergeWorktreeBySession(ctx context.Context, sessionRef string, allowBaseMismatch bool) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("merge worktree: %w", err)
@@ -69,7 +70,12 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string) error {
 
 	fmt.Fprintf(os.Stderr, "worktree: merging %s into %s...\n", info.Branch, info.BaseBranch)
 
-	if err := worktree.MergeContext(ctx, cwd, info); err != nil {
+	if err := worktree.MergeWithOptionsContext(ctx, cwd, info, worktree.MergeOptions{
+		AutoCommit:              true,
+		AutoMerge:               true,
+		AllowBaseBranchMismatch: allowBaseMismatch,
+		Provenance:              worktreeMergeProvenance(sess),
+	}); err != nil {
 		return fmt.Errorf("merge worktree: %w", err)
 	}
 
@@ -85,4 +91,18 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string) error {
 	fmt.Fprintf(os.Stderr, "worktree: merged and cleaned up session %s\n", sess.ID)
 
 	return nil
+}
+
+func worktreeMergeProvenance(sess session.Session) []string {
+	provenance := []string{"session=" + sess.ID}
+
+	if sess.Title != "" {
+		provenance = append(provenance, "title="+sess.Title)
+	}
+
+	if len(sess.Tags) > 0 {
+		provenance = append(provenance, "tags="+strings.Join(sess.Tags, ","))
+	}
+
+	return provenance
 }
