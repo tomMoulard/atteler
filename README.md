@@ -155,8 +155,10 @@ It loads a repository-owned `WORKFLOW.md`, polls Linear or GitHub Issues,
 creates per-issue workspaces, and runs Codex app-server turns with bounded
 concurrency and retry/reconciliation logic. GitHub workflows can also publish
 successful runs by committing locally, pushing a branch, opening a PR, and
-removing the dispatch label from the issue. A local debug API can expose
-`/debug/status` for live scheduler state and recent decisions. See
+removing the dispatch label from the issue. Published PRs can be monitored for
+failing checks and reworked on the same branch without putting the source issue
+back into the dispatch queue. A local debug API can expose `/debug/status` for
+live scheduler state and recent decisions. See
 [`docs/symphony.md`](docs/symphony.md) for workflow config, GitHub tracker
 settings, publishing, debug endpoints, hooks, and the documented
 approval/sandbox posture.

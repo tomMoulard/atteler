@@ -285,6 +285,16 @@ type PullRequestStatus struct {
 	TargetURL   string `json:"target_url,omitempty"`
 }
 
+// MonitoredPullRequest ties an open GitHub PR back to the issue branch
+// convention used by Symphony.
+//
+//nolint:govet // Keep Issue and PullRequest grouped for caller readability; this is not a hot-path allocation.
+type MonitoredPullRequest struct {
+	Issue       Issue
+	PullRequest GitHubPullRequest
+	Branch      string
+}
+
 // AttemptStatus is a normalized worker attempt terminal state.
 type AttemptStatus string
 

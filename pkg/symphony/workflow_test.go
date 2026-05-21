@@ -83,6 +83,31 @@ func TestResolveConfig_PublishDefaultsRemoveTrackerLabels(t *testing.T) {
 	assert.Equal(t, "symphony@users.noreply.github.com", cfg.Publish.GitUserEmail)
 }
 
+func TestResolveConfig_PublishCheckMonitorConfig(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	cfg, err := ResolveConfig(t.Context(), map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+			"labels":     []any{"symphony"},
+		},
+		"publish": map[string]any{
+			"enabled":                   true,
+			"monitor_checks":            true,
+			"check_interval_ms":         1234,
+			"max_check_rework_attempts": 5,
+		},
+	}, path)
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Publish.MonitorChecks)
+	assert.Equal(t, 1234*time.Millisecond, cfg.Publish.CheckInterval)
+	assert.Equal(t, 5, cfg.Publish.MaxCheckReworkAttempts)
+}
+
 func TestResolveConfig_DebugConfig(t *testing.T) {
 	t.Setenv(githubTokenEnv, "token")
 	dir := t.TempDir()

@@ -14,6 +14,9 @@ publish:
   branch_prefix: symphony
   draft: false
   remove_labels: [symphony]
+  monitor_checks: true
+  check_interval_ms: 30000
+  max_check_rework_attempts: 3
 debug:
   enabled: true
   address: 127.0.0.1:34000

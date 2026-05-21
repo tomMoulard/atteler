@@ -50,3 +50,34 @@ func TestRenderPrompt_UnknownFilterFails(t *testing.T) {
 	require.ErrorAs(t, err, &classed)
 	assert.Equal(t, ErrTemplateRender, classed.Class)
 }
+
+func TestTurnPrompt_IncludesPullRequestReworkContext(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := turnPrompt(
+		WorkflowDefinition{PromptTemplate: "Work on {{ issue.identifier }}"},
+		Issue{ID: "1", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"},
+		nil,
+		&RunContext{
+			Kind: RunKindPullRequestRework,
+			PullRequest: &PullRequestReworkContext{
+				URL:           "https://github.com/owner/repo/pull/31",
+				Branch:        "symphony/GH-2",
+				HeadSHA:       "abc123",
+				Summary:       "failing checks: test",
+				FailedChecks:  []string{"test"},
+				Number:        31,
+				ReworkAttempt: 2,
+			},
+		},
+		1,
+		8,
+	)
+	require.NoError(t, err)
+
+	assert.Contains(t, prompt, "Work on GH-2")
+	assert.Contains(t, prompt, "Symphony PR rework context")
+	assert.Contains(t, prompt, "Pull request: #31 https://github.com/owner/repo/pull/31")
+	assert.Contains(t, prompt, "test")
+	assert.Contains(t, prompt, "same branch")
+}

@@ -38,6 +38,9 @@ publish:
   branch_prefix: symphony
   draft: false
   remove_labels: [codex]
+  monitor_checks: true
+  check_interval_ms: 30000
+  max_check_rework_attempts: 3
 debug:
   enabled: true
   address: 127.0.0.1:34000
@@ -111,6 +114,14 @@ Removing the dispatch label is the finalization signal for GitHub-backed
 workflows: once the PR exists, the issue no longer matches the tracker label
 filter and Symphony will not redispatch it.
 
+With `publish.monitor_checks: true`, published PRs enter a separate check
+monitor lane. Symphony polls GitHub check runs and commit-status contexts for
+the PR head. Passing checks complete the monitor. Failing checks dispatch a PR
+rework worker on the same branch, then the publish path commits, pushes, and
+reuses the existing PR. This loop is capped by
+`publish.max_check_rework_attempts`; it does not re-add the source issue label
+or put the issue back into the normal dispatch queue.
+
 Publishing is currently supported for `tracker.kind: github`. The GitHub token
 is the same resolved token used by the tracker, including `gh auth token`; git
 pushes use a temporary `GIT_ASKPASS` helper so the token is not required in the
@@ -123,8 +134,9 @@ workflow file.
 
 - `GET /debug/healthz` returns `ok`
 - `GET /debug/status` returns workflow/config summaries, running workers,
-  queued retries, recent events, token totals, and a `summary` object with
-  `what_happened`, `what_is_going_on`, and `what_will_do`
+  queued retries, watched pull requests, recent events, token totals, and a
+  `summary` object with `what_happened`, `what_is_going_on`, and
+  `what_will_do`
 - `GET /debug/events` returns the recent scheduler event ring
 
 The API is intended for local debugging and does not expose tracker tokens.
@@ -207,6 +219,9 @@ The orchestrator:
   reconciliation
 - schedules one-second continuation retries after clean worker exits unless a
   publish step opened or reused a pull request and finalized the issue
+- monitors published pull requests for failed checks when
+  `publish.monitor_checks` is enabled, and dispatches same-branch rework without
+  putting the source issue back into the issue queue
 - schedules exponential failure retries capped by `agent.max_retry_backoff_ms`
 
 Logs are emitted through `slog` as `key=value` text on stderr. Set

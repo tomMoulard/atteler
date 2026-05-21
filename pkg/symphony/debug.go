@@ -31,6 +31,7 @@ type DebugSnapshot struct {
 	Summary           DebugSummary          `json:"summary"`
 	Running           []DebugRunningIssue   `json:"running"`
 	Retries           []DebugRetry          `json:"retries"`
+	PullRequests      []DebugPullRequest    `json:"pull_requests"`
 	RecentEvents      []DebugEvent          `json:"recent_events"`
 	ClaimedIssueIDs   []string              `json:"claimed_issue_ids"`
 	CompletedIssueIDs []string              `json:"completed_issue_ids"`
@@ -56,22 +57,25 @@ type DebugWorkflowSnapshot struct {
 
 // DebugConfigSnapshot reports non-secret operational config.
 type DebugConfigSnapshot struct {
-	WorkflowPath        string   `json:"workflow_path"`
-	WorkspaceRoot       string   `json:"workspace_root"`
-	TrackerKind         string   `json:"tracker_kind"`
-	TrackerRepository   string   `json:"tracker_repository,omitempty"`
-	TrackerActiveStates []string `json:"tracker_active_states,omitempty"`
-	TrackerLabels       []string `json:"tracker_labels,omitempty"`
-	PollIntervalMS      int64    `json:"poll_interval_ms"`
-	MaxConcurrentAgents int      `json:"max_concurrent_agents"`
-	MaxTurns            int      `json:"max_turns"`
-	StallTimeoutMS      int64    `json:"stall_timeout_ms"`
-	PublishEnabled      bool     `json:"publish_enabled"`
-	PublishBaseBranch   string   `json:"publish_base_branch,omitempty"`
-	PublishBranchPrefix string   `json:"publish_branch_prefix,omitempty"`
-	PublishRemoveLabels []string `json:"publish_remove_labels,omitempty"`
-	DebugEnabled        bool     `json:"debug_enabled"`
-	DebugAddress        string   `json:"debug_address,omitempty"`
+	WorkflowPath                  string   `json:"workflow_path"`
+	WorkspaceRoot                 string   `json:"workspace_root"`
+	TrackerKind                   string   `json:"tracker_kind"`
+	TrackerRepository             string   `json:"tracker_repository,omitempty"`
+	TrackerActiveStates           []string `json:"tracker_active_states,omitempty"`
+	TrackerLabels                 []string `json:"tracker_labels,omitempty"`
+	PollIntervalMS                int64    `json:"poll_interval_ms"`
+	MaxConcurrentAgents           int      `json:"max_concurrent_agents"`
+	MaxTurns                      int      `json:"max_turns"`
+	StallTimeoutMS                int64    `json:"stall_timeout_ms"`
+	PublishEnabled                bool     `json:"publish_enabled"`
+	PublishBaseBranch             string   `json:"publish_base_branch,omitempty"`
+	PublishBranchPrefix           string   `json:"publish_branch_prefix,omitempty"`
+	PublishRemoveLabels           []string `json:"publish_remove_labels,omitempty"`
+	PublishMonitorChecks          bool     `json:"publish_monitor_checks"`
+	PublishCheckIntervalMS        int64    `json:"publish_check_interval_ms,omitempty"`
+	PublishMaxCheckReworkAttempts int      `json:"publish_max_check_rework_attempts,omitempty"`
+	DebugEnabled                  bool     `json:"debug_enabled"`
+	DebugAddress                  string   `json:"debug_address,omitempty"`
 }
 
 // DebugCounts summarizes scheduler queues.
@@ -79,6 +83,7 @@ type DebugCounts struct {
 	Running             int `json:"running"`
 	Claimed             int `json:"claimed"`
 	Retries             int `json:"retries"`
+	PullRequests        int `json:"pull_requests"`
 	Completed           int `json:"completed"`
 	MaxConcurrentAgents int `json:"max_concurrent_agents"`
 	AvailableSlots      int `json:"available_slots"`
@@ -131,6 +136,23 @@ type DebugRetry struct {
 	Identifier string    `json:"identifier"`
 	Error      string    `json:"error,omitempty"`
 	Attempt    int       `json:"attempt"`
+}
+
+// DebugPullRequest describes one PR check monitor.
+type DebugPullRequest struct {
+	LastSnapshot   PullRequestCheckSnapshot `json:"last_snapshot,omitzero"`
+	NextCheckAt    time.Time                `json:"next_check_at,omitzero"`
+	LastCheckAt    time.Time                `json:"last_check_at,omitzero"`
+	LastReworkAt   time.Time                `json:"last_rework_at,omitzero"`
+	DelayMS        int64                    `json:"delay_ms"`
+	Issue          Issue                    `json:"issue"`
+	LastError      string                   `json:"last_error,omitempty"`
+	Branch         string                   `json:"branch,omitempty"`
+	PullRequestURL string                   `json:"pull_request_url,omitempty"`
+	ReworkAttempts int                      `json:"rework_attempts"`
+	Number         int                      `json:"number"`
+	InRework       bool                     `json:"in_rework"`
+	Exhausted      bool                     `json:"exhausted"`
 }
 
 // DebugEvent is an append-only recent event entry for operator history.
@@ -333,6 +355,7 @@ func (o *Orchestrator) buildDebugSnapshot(now time.Time) DebugSnapshot {
 	cfg := snapshot.Config
 	running := o.debugRunning(now, cfg)
 	retries := o.debugRetries(now)
+	pullRequests := o.debugPullRequests(now)
 	claimed := sortedKeys(o.state.Claimed)
 	completed := sortedKeys(o.state.Completed)
 	recentEvents := append([]DebugEvent(nil), o.state.RecentEvents...)
@@ -340,6 +363,7 @@ func (o *Orchestrator) buildDebugSnapshot(now time.Time) DebugSnapshot {
 		Running:             len(running),
 		Claimed:             len(claimed),
 		Retries:             len(retries),
+		PullRequests:        len(pullRequests),
 		Completed:           len(completed),
 		MaxConcurrentAgents: cfg.Agent.MaxConcurrentAgents,
 		AvailableSlots:      o.availableSlots(cfg),
@@ -364,9 +388,10 @@ func (o *Orchestrator) buildDebugSnapshot(now time.Time) DebugSnapshot {
 		Config:            debugConfigSnapshot(cfg),
 		Counts:            counts,
 		Codex:             debugCodexSnapshot(o.state.CodexTotals, o.state.CodexRateLimits),
-		Summary:           debugSummary(now, running, retries, recentEvents, cfg, counts),
+		Summary:           debugSummary(now, running, retries, pullRequests, recentEvents, cfg, counts),
 		Running:           running,
 		Retries:           retries,
+		PullRequests:      pullRequests,
 		RecentEvents:      recentEvents,
 		ClaimedIssueIDs:   claimed,
 		CompletedIssueIDs: completed,
@@ -434,24 +459,55 @@ func (o *Orchestrator) debugRetries(now time.Time) []DebugRetry {
 	return retries
 }
 
+func (o *Orchestrator) debugPullRequests(now time.Time) []DebugPullRequest {
+	pullRequests := make([]DebugPullRequest, 0, len(o.state.PullRequests))
+	for _, monitor := range o.state.PullRequests {
+		entry := DebugPullRequest{
+			LastSnapshot:   monitor.LastSnapshot,
+			NextCheckAt:    monitor.NextCheckAt,
+			LastCheckAt:    monitor.LastCheckAt,
+			LastReworkAt:   monitor.LastReworkAt,
+			DelayMS:        max(monitor.NextCheckAt.Sub(now).Milliseconds(), 0),
+			Issue:          monitor.Issue,
+			LastError:      monitor.LastError,
+			Branch:         monitor.Branch,
+			PullRequestURL: monitor.PullRequestURL,
+			ReworkAttempts: monitor.ReworkAttempts,
+			Number:         monitor.Number,
+			InRework:       monitor.InRework,
+			Exhausted:      monitor.Exhausted,
+		}
+		pullRequests = append(pullRequests, entry)
+	}
+
+	sort.Slice(pullRequests, func(i, j int) bool {
+		return pullRequests[i].Number < pullRequests[j].Number
+	})
+
+	return pullRequests
+}
+
 func debugConfigSnapshot(cfg Config) DebugConfigSnapshot {
 	return DebugConfigSnapshot{
-		WorkflowPath:        cfg.WorkflowPath,
-		WorkspaceRoot:       cfg.Workspace.Root,
-		TrackerKind:         cfg.Tracker.Kind,
-		TrackerRepository:   firstNonEmpty(cfg.Tracker.Repository, cfg.Tracker.Owner+"/"+cfg.Tracker.Repo),
-		TrackerActiveStates: append([]string(nil), cfg.Tracker.ActiveStates...),
-		TrackerLabels:       append([]string(nil), cfg.Tracker.Labels...),
-		PollIntervalMS:      cfg.Polling.Interval.Milliseconds(),
-		MaxConcurrentAgents: cfg.Agent.MaxConcurrentAgents,
-		MaxTurns:            cfg.Agent.MaxTurns,
-		StallTimeoutMS:      cfg.Codex.StallTimeout.Milliseconds(),
-		PublishEnabled:      cfg.Publish.Enabled,
-		PublishBaseBranch:   cfg.Publish.BaseBranch,
-		PublishBranchPrefix: cfg.Publish.BranchPrefix,
-		PublishRemoveLabels: append([]string(nil), cfg.Publish.RemoveLabels...),
-		DebugEnabled:        cfg.Debug.Enabled,
-		DebugAddress:        cfg.Debug.Address,
+		WorkflowPath:                  cfg.WorkflowPath,
+		WorkspaceRoot:                 cfg.Workspace.Root,
+		TrackerKind:                   cfg.Tracker.Kind,
+		TrackerRepository:             firstNonEmpty(cfg.Tracker.Repository, cfg.Tracker.Owner+"/"+cfg.Tracker.Repo),
+		TrackerActiveStates:           append([]string(nil), cfg.Tracker.ActiveStates...),
+		TrackerLabels:                 append([]string(nil), cfg.Tracker.Labels...),
+		PollIntervalMS:                cfg.Polling.Interval.Milliseconds(),
+		MaxConcurrentAgents:           cfg.Agent.MaxConcurrentAgents,
+		MaxTurns:                      cfg.Agent.MaxTurns,
+		StallTimeoutMS:                cfg.Codex.StallTimeout.Milliseconds(),
+		PublishEnabled:                cfg.Publish.Enabled,
+		PublishBaseBranch:             cfg.Publish.BaseBranch,
+		PublishBranchPrefix:           cfg.Publish.BranchPrefix,
+		PublishRemoveLabels:           append([]string(nil), cfg.Publish.RemoveLabels...),
+		PublishMonitorChecks:          cfg.Publish.MonitorChecks,
+		PublishCheckIntervalMS:        cfg.Publish.CheckInterval.Milliseconds(),
+		PublishMaxCheckReworkAttempts: cfg.Publish.MaxCheckReworkAttempts,
+		DebugEnabled:                  cfg.Debug.Enabled,
+		DebugAddress:                  cfg.Debug.Address,
 	}
 }
 
@@ -465,11 +521,11 @@ func debugCodexSnapshot(totals codexTotals, rateLimits jsonRaw) DebugCodexSnapsh
 	}
 }
 
-func debugSummary(now time.Time, running []DebugRunningIssue, retries []DebugRetry, events []DebugEvent, cfg Config, counts DebugCounts) DebugSummary {
+func debugSummary(now time.Time, running []DebugRunningIssue, retries []DebugRetry, pullRequests []DebugPullRequest, events []DebugEvent, cfg Config, counts DebugCounts) DebugSummary {
 	return DebugSummary{
 		WhatHappened:  recentEventSummaries(events),
-		WhatIsGoingOn: currentActivitySummaries(running, retries),
-		WhatWillDo:    nextActionSummaries(now, running, retries, cfg, counts),
+		WhatIsGoingOn: currentActivitySummaries(running, retries, pullRequests),
+		WhatWillDo:    nextActionSummaries(now, running, retries, pullRequests, cfg, counts),
 	}
 }
 
@@ -494,7 +550,7 @@ func recentEventSummaries(events []DebugEvent) []string {
 	return out
 }
 
-func currentActivitySummaries(running []DebugRunningIssue, retries []DebugRetry) []string {
+func currentActivitySummaries(running []DebugRunningIssue, retries []DebugRetry, pullRequests []DebugPullRequest) []string {
 	var out []string
 	for index := range running {
 		entry := &running[index]
@@ -506,6 +562,23 @@ func currentActivitySummaries(running []DebugRunningIssue, retries []DebugRetry)
 		out = append(out, fmt.Sprintf("%s retry attempt %d is queued for %s", retry.Identifier, retry.Attempt, retry.DueAt.Format(time.RFC3339)))
 	}
 
+	for index := range pullRequests {
+		pr := &pullRequests[index]
+		state := string(pr.LastSnapshot.State)
+		if state == "" {
+			state = "unknown"
+		}
+
+		switch {
+		case pr.InRework:
+			out = append(out, fmt.Sprintf("PR #%d is being reworked on %s after %d attempt(s).", pr.Number, firstNonEmpty(pr.Branch, "its branch"), pr.ReworkAttempts))
+		case pr.Exhausted:
+			out = append(out, fmt.Sprintf("PR #%d checks are %s and rework is exhausted: %s", pr.Number, state, pr.LastError))
+		default:
+			out = append(out, fmt.Sprintf("PR #%d checks are %s; next check at %s.", pr.Number, state, pr.NextCheckAt.Format(time.RFC3339)))
+		}
+	}
+
 	if len(out) == 0 {
 		return []string{"No workers are running and no retries are queued."}
 	}
@@ -513,7 +586,7 @@ func currentActivitySummaries(running []DebugRunningIssue, retries []DebugRetry)
 	return out
 }
 
-func nextActionSummaries(now time.Time, running []DebugRunningIssue, retries []DebugRetry, cfg Config, counts DebugCounts) []string {
+func nextActionSummaries(now time.Time, running []DebugRunningIssue, retries []DebugRetry, pullRequests []DebugPullRequest, cfg Config, counts DebugCounts) []string {
 	var out []string
 	for index := range running {
 		entry := &running[index]
@@ -528,12 +601,32 @@ func nextActionSummaries(now time.Time, running []DebugRunningIssue, retries []D
 		out = append(out, fmt.Sprintf("Retry %s attempt %d in %s.", retry.Identifier, retry.Attempt, delay))
 	}
 
+	for index := range pullRequests {
+		pr := &pullRequests[index]
+		if pr.Exhausted {
+			out = append(out, fmt.Sprintf("PR #%d will wait for human attention because the check rework budget is exhausted.", pr.Number))
+			continue
+		}
+
+		if pr.InRework {
+			out = append(out, fmt.Sprintf("PR #%d will be published back to the same branch when the rework worker succeeds.", pr.Number))
+			continue
+		}
+
+		delay := max(pr.NextCheckAt.Sub(now).Round(time.Second), 0)
+		out = append(out, fmt.Sprintf("Check PR #%d again in %s; if checks fail, dispatch a PR rework worker.", pr.Number, delay))
+	}
+
 	if counts.AvailableSlots > 0 {
 		out = append(out, fmt.Sprintf("On the next poll, fetch %s issues with labels %s and dispatch up to %d worker(s).", strings.Join(cfg.Tracker.ActiveStates, ","), strings.Join(cfg.Tracker.Labels, ","), counts.AvailableSlots))
 	}
 
 	if cfg.Publish.Enabled {
 		out = append(out, fmt.Sprintf("Successful GitHub workers will publish PRs to %s and remove labels %s.", cfg.Publish.BaseBranch, strings.Join(cfg.Publish.RemoveLabels, ",")))
+	}
+
+	if cfg.Publish.MonitorChecks {
+		out = append(out, fmt.Sprintf("Published PRs are monitored every %s and can be reworked up to %d time(s).", cfg.Publish.CheckInterval.Round(time.Second), cfg.Publish.MaxCheckReworkAttempts))
 	}
 
 	if len(out) == 0 {

@@ -514,6 +514,63 @@ func (c *GitHubClient) FetchOpenPullRequestByHead(ctx context.Context, branch st
 	return &payload[0], nil
 }
 
+// FetchOpenPullRequestsByHeadPrefix returns open PRs whose head branch follows
+// the Symphony branch prefix convention, along with the source issue inferred
+// from that branch.
+func (c *GitHubClient) FetchOpenPullRequestsByHeadPrefix(ctx context.Context, branchPrefix string) ([]MonitoredPullRequest, error) {
+	prefix := strings.Trim(strings.TrimSpace(branchPrefix), "/")
+	if prefix == "" {
+		return nil, nil
+	}
+
+	var out []MonitoredPullRequest
+	for page := 1; ; page++ {
+		values := url.Values{}
+		values.Set("state", "open")
+		values.Set("per_page", "100")
+		values.Set("page", strconv.Itoa(page))
+
+		var payload []GitHubPullRequest
+		if err := c.get(ctx, "/repos/"+url.PathEscape(c.cfg.Owner)+"/"+url.PathEscape(c.cfg.Repo)+"/pulls?"+values.Encode(), &payload); err != nil {
+			return nil, err
+		}
+
+		if len(payload) == 0 {
+			break
+		}
+
+		for _, pr := range payload {
+			branch := strings.TrimSpace(pr.Head.Ref)
+			identifier, ok := strings.CutPrefix(branch, prefix+"/")
+			if !ok || strings.TrimSpace(identifier) == "" {
+				continue
+			}
+
+			number, err := githubIssueNumber(Issue{Identifier: identifier})
+			if err != nil {
+				continue
+			}
+
+			issue, err := c.fetchOne(ctx, number)
+			if err != nil {
+				return nil, err
+			}
+
+			out = append(out, MonitoredPullRequest{
+				Issue:       issue,
+				PullRequest: pr,
+				Branch:      branch,
+			})
+		}
+
+		if len(payload) < 100 {
+			break
+		}
+	}
+
+	return out, nil
+}
+
 // CreatePullRequest opens a PR from branch into base.
 func (c *GitHubClient) CreatePullRequest(ctx context.Context, branch, base, title, body string, draft bool) (GitHubPullRequest, error) {
 	var payload GitHubPullRequest
@@ -754,9 +811,11 @@ type githubLabel struct {
 
 // GitHubPullRequest is the subset of GitHub's PR payload needed by Symphony.
 type GitHubPullRequest struct {
+	Body    *string               `json:"body,omitempty"`
 	Head    githubPullRequestHead `json:"head"`
 	HTMLURL string                `json:"html_url"`
 	State   string                `json:"state"`
+	Title   string                `json:"title,omitempty"`
 	Number  int                   `json:"number"`
 }
 

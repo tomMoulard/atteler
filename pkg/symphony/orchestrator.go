@@ -24,19 +24,20 @@ type Orchestrator struct {
 }
 
 type runtimeState struct {
-	Running             map[string]*runningEntry
-	Claimed             map[string]struct{}
-	RetryAttempts       map[string]*RetryEntry
-	PullRequests        map[int]*pullRequestMonitorEntry
-	Completed           map[string]struct{}
-	CodexRateLimits     jsonRaw
-	RecentEvents        []DebugEvent
-	StartedAt           time.Time
-	LastTickAt          time.Time
-	NextTickAt          time.Time
-	PollInterval        time.Duration
-	MaxConcurrentAgents int
-	CodexTotals         codexTotals
+	Running               map[string]*runningEntry
+	Claimed               map[string]struct{}
+	RetryAttempts         map[string]*RetryEntry
+	PullRequests          map[int]*pullRequestMonitorEntry
+	Completed             map[string]struct{}
+	CompletedPullRequests map[int]struct{}
+	CodexRateLimits       jsonRaw
+	RecentEvents          []DebugEvent
+	StartedAt             time.Time
+	LastTickAt            time.Time
+	NextTickAt            time.Time
+	PollInterval          time.Duration
+	MaxConcurrentAgents   int
+	CodexTotals           codexTotals
 }
 
 type jsonRaw []byte
@@ -156,14 +157,15 @@ func NewOrchestrator(manager *WorkflowManager, tracker TrackerClient, runner Age
 		logger:     loggerOrDefault(logger),
 		events:     make(chan orchestratorEvent, 128),
 		state: runtimeState{
-			Running:             map[string]*runningEntry{},
-			Claimed:             map[string]struct{}{},
-			RetryAttempts:       map[string]*RetryEntry{},
-			PullRequests:        map[int]*pullRequestMonitorEntry{},
-			Completed:           map[string]struct{}{},
-			StartedAt:           time.Now().UTC(),
-			PollInterval:        snapshot.Config.Polling.Interval,
-			MaxConcurrentAgents: snapshot.Config.Agent.MaxConcurrentAgents,
+			Running:               map[string]*runningEntry{},
+			Claimed:               map[string]struct{}{},
+			RetryAttempts:         map[string]*RetryEntry{},
+			PullRequests:          map[int]*pullRequestMonitorEntry{},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now().UTC(),
+			PollInterval:          snapshot.Config.Polling.Interval,
+			MaxConcurrentAgents:   snapshot.Config.Agent.MaxConcurrentAgents,
 		},
 	}, nil
 }
@@ -222,6 +224,8 @@ func (o *Orchestrator) tick(ctx context.Context) {
 		o.logger.Error("symphony dispatch validation failed", "error", err)
 		return
 	}
+
+	o.discoverPullRequestMonitors(ctx, snapshot.Config)
 
 	issues, err := o.tracker.FetchCandidateIssues(ctx)
 	if err != nil {
@@ -339,6 +343,61 @@ func (o *Orchestrator) reconcile(ctx context.Context, cfg Config) {
 		default:
 			entry.CancelReason = cancelNonActive
 			entry.Cancel()
+		}
+	}
+}
+
+func (o *Orchestrator) discoverPullRequestMonitors(ctx context.Context, cfg Config) {
+	if !cfg.Publish.Enabled || !cfg.Publish.MonitorChecks || normalizeState(cfg.Tracker.Kind) != trackerKindGitHub {
+		return
+	}
+	o.ensurePullRequestState()
+
+	prClient, ok := o.tracker.(interface {
+		FetchOpenPullRequestsByHeadPrefix(context.Context, string) ([]MonitoredPullRequest, error)
+	})
+	if !ok {
+		return
+	}
+
+	pullRequests, err := prClient.FetchOpenPullRequestsByHeadPrefix(ctx, cfg.Publish.BranchPrefix)
+	if err != nil {
+		o.recordEvent("pr_discovery_failed", "pull request monitor discovery failed", "error", err.Error())
+		o.logger.Warn("symphony pull request monitor discovery failed", "error", err)
+		return
+	}
+
+	for _, pr := range pullRequests {
+		number := pr.PullRequest.Number
+		if number <= 0 {
+			continue
+		}
+		if _, completed := o.state.CompletedPullRequests[number]; completed {
+			continue
+		}
+
+		monitor := o.state.PullRequests[number]
+		if monitor == nil {
+			monitor = &pullRequestMonitorEntry{Number: number}
+			o.state.PullRequests[number] = monitor
+			monitor.Issue = pr.Issue
+			monitor.Branch = firstNonEmpty(pr.Branch, pr.PullRequest.Head.Ref)
+			monitor.PullRequestURL = pr.PullRequest.HTMLURL
+			o.reschedulePullRequestCheck(monitor, minPositiveDuration(cfg.Publish.CheckInterval, time.Second), "")
+			o.recordIssueEvent(
+				"pr_monitor_discovered", pr.Issue, "open Symphony pull request monitor discovered",
+				"pull_request_number", number,
+				"pull_request_url", pr.PullRequest.HTMLURL,
+				"branch", monitor.Branch,
+			)
+			continue
+		}
+
+		monitor.Issue = pr.Issue
+		monitor.Branch = firstNonEmpty(pr.Branch, pr.PullRequest.Head.Ref, monitor.Branch)
+		monitor.PullRequestURL = firstNonEmpty(pr.PullRequest.HTMLURL, monitor.PullRequestURL)
+		if monitor.Timer == nil && !monitor.InRework && !monitor.Exhausted && monitor.NextCheckAt.IsZero() {
+			o.reschedulePullRequestCheck(monitor, cfg.Publish.CheckInterval, "")
 		}
 	}
 }
@@ -733,6 +792,276 @@ func (o *Orchestrator) handleRetryDue(ctx context.Context, issueID string) {
 	o.dispatch(ctx, snapshot, *found, &attempt, nil)
 }
 
+func (o *Orchestrator) handlePullRequestCheckDue(ctx context.Context, number int) {
+	monitor, ok := o.state.PullRequests[number]
+	if !ok {
+		return
+	}
+
+	monitor.Timer = nil
+	monitor.NextCheckAt = time.Time{}
+	monitor.LastError = ""
+
+	snapshot, ok := o.manager.Current()
+	if !ok {
+		o.reschedulePullRequestCheck(monitor, defaultPRCheckInterval, "workflow snapshot is unavailable")
+		return
+	}
+
+	cfg := snapshot.Config
+	if !cfg.Publish.Enabled || !cfg.Publish.MonitorChecks {
+		delete(o.state.PullRequests, number)
+		o.recordIssueEvent(
+			"pr_monitor_disabled", monitor.Issue, "pull request monitor disabled",
+			"pull_request_number", number,
+		)
+		return
+	}
+
+	checkClient, ok := o.tracker.(interface {
+		FetchPullRequestChecks(context.Context, int) (PullRequestCheckSnapshot, error)
+	})
+	if !ok {
+		monitor.Exhausted = true
+		monitor.LastError = "tracker does not support pull request checks"
+		o.recordIssueEvent(
+			"pr_monitor_failed", monitor.Issue, monitor.LastError,
+			"pull_request_number", number,
+		)
+		return
+	}
+
+	checks, err := checkClient.FetchPullRequestChecks(ctx, number)
+	if err != nil {
+		o.reschedulePullRequestCheck(monitor, cfg.Publish.CheckInterval, err.Error())
+		o.recordIssueEvent(
+			"pr_check_failed", monitor.Issue, "pull request check polling failed",
+			"pull_request_number", number,
+			"error", err.Error(),
+		)
+		return
+	}
+
+	monitor.LastSnapshot = checks
+	monitor.LastCheckAt = checks.CheckedAt
+	monitor.PullRequestURL = firstNonEmpty(checks.PullRequestURL, monitor.PullRequestURL)
+	monitor.Branch = firstNonEmpty(checks.HeadRef, monitor.Branch)
+
+	o.recordIssueEvent(
+		"pr_checks_polled", monitor.Issue, "pull request checks polled",
+		"pull_request_number", number,
+		"state", checks.State,
+		"summary", checks.Summary,
+	)
+
+	switch checks.State {
+	case PullRequestChecksPassed:
+		delete(o.state.PullRequests, number)
+		o.ensurePullRequestState()
+		o.state.CompletedPullRequests[number] = struct{}{}
+		o.recordIssueEvent(
+			"pr_checks_passed", monitor.Issue, "pull request checks passed; monitor complete",
+			"pull_request_number", number,
+			"pull_request_url", monitor.PullRequestURL,
+		)
+		o.logger.Info(
+			"symphony pull request checks passed; monitor complete",
+			"issue_id", monitor.Issue.ID,
+			"issue_identifier", monitor.Issue.Identifier,
+			"pull_request_number", number,
+			"pull_request_url", monitor.PullRequestURL,
+		)
+	case PullRequestChecksFailed:
+		o.handleFailedPullRequestChecks(ctx, snapshot, monitor, checks)
+	default:
+		o.reschedulePullRequestCheck(monitor, cfg.Publish.CheckInterval, "")
+	}
+}
+
+func (o *Orchestrator) handleFailedPullRequestChecks(ctx context.Context, snapshot WorkflowSnapshot, monitor *pullRequestMonitorEntry, checks PullRequestCheckSnapshot) {
+	cfg := snapshot.Config
+	if monitor.ReworkAttempts >= cfg.Publish.MaxCheckReworkAttempts {
+		monitor.Exhausted = true
+		monitor.LastError = fmt.Sprintf("max PR rework attempts reached (%d)", cfg.Publish.MaxCheckReworkAttempts)
+		o.recordIssueEvent(
+			"pr_checks_failed_exhausted", monitor.Issue, "pull request checks still fail; max rework attempts reached",
+			"pull_request_number", monitor.Number,
+			"rework_attempts", monitor.ReworkAttempts,
+			"summary", checks.Summary,
+		)
+		o.logger.Warn(
+			"symphony pull request checks failed; max rework attempts reached",
+			"issue_id", monitor.Issue.ID,
+			"issue_identifier", monitor.Issue.Identifier,
+			"pull_request_number", monitor.Number,
+			"rework_attempts", monitor.ReworkAttempts,
+			"summary", checks.Summary,
+		)
+		return
+	}
+
+	if monitor.InRework {
+		o.reschedulePullRequestCheck(monitor, cfg.Publish.CheckInterval, "rework already running")
+		return
+	}
+
+	if _, running := o.state.Running[monitor.Issue.ID]; running || o.availableSlots(cfg) <= 0 {
+		o.reschedulePullRequestCheck(monitor, cfg.Publish.CheckInterval, "no available orchestrator slots")
+		o.recordIssueEvent(
+			"pr_rework_deferred", monitor.Issue, "pull request rework deferred; no available slots",
+			"pull_request_number", monitor.Number,
+		)
+		return
+	}
+
+	monitor.ReworkAttempts++
+	monitor.InRework = true
+	monitor.LastReworkAt = time.Now().UTC()
+	attempt := monitor.ReworkAttempts
+	runContext := &RunContext{
+		Kind: RunKindPullRequestRework,
+		PullRequest: &PullRequestReworkContext{
+			URL:           monitor.PullRequestURL,
+			Branch:        monitor.Branch,
+			HeadSHA:       checks.HeadSHA,
+			Summary:       checks.Summary,
+			FailedChecks:  append([]string(nil), checks.FailedCheckNames...),
+			Number:        monitor.Number,
+			ReworkAttempt: attempt,
+		},
+	}
+
+	o.recordIssueEvent(
+		"pr_rework_dispatched", monitor.Issue, "pull request rework dispatched",
+		"pull_request_number", monitor.Number,
+		"rework_attempt", attempt,
+		"summary", checks.Summary,
+	)
+	o.logger.Info(
+		"symphony dispatching pull request rework",
+		"issue_id", monitor.Issue.ID,
+		"issue_identifier", monitor.Issue.Identifier,
+		"pull_request_number", monitor.Number,
+		"rework_attempt", attempt,
+		"summary", checks.Summary,
+	)
+
+	o.dispatch(ctx, snapshot, monitor.Issue, &attempt, runContext)
+}
+
+func (o *Orchestrator) schedulePullRequestMonitor(issue Issue, result *PublishResult, reworkAttempts int, reason string) {
+	if result == nil || result.PullRequestNumber <= 0 {
+		return
+	}
+	o.ensurePullRequestState()
+
+	snapshot, ok := o.manager.Current()
+	if !ok || !snapshot.Config.Publish.MonitorChecks {
+		return
+	}
+
+	monitor := o.state.PullRequests[result.PullRequestNumber]
+	if monitor == nil {
+		monitor = &pullRequestMonitorEntry{Number: result.PullRequestNumber}
+		o.state.PullRequests[result.PullRequestNumber] = monitor
+	}
+	delete(o.state.CompletedPullRequests, result.PullRequestNumber)
+
+	if monitor.Timer != nil {
+		monitor.Timer.Stop()
+	}
+
+	monitor.Issue = issue
+	monitor.Branch = firstNonEmpty(result.Branch, monitor.Branch)
+	monitor.PullRequestURL = firstNonEmpty(result.PullRequestURL, monitor.PullRequestURL)
+	monitor.ReworkAttempts = max(monitor.ReworkAttempts, reworkAttempts)
+	monitor.Exhausted = false
+	monitor.InRework = false
+	o.reschedulePullRequestCheck(monitor, snapshot.Config.Publish.CheckInterval, "")
+	o.recordIssueEvent(
+		"pr_monitor_scheduled", issue, "pull request monitor scheduled",
+		"pull_request_number", result.PullRequestNumber,
+		"pull_request_url", result.PullRequestURL,
+		"reason", reason,
+		"next_check_at", monitor.NextCheckAt,
+	)
+}
+
+func (o *Orchestrator) schedulePullRequestCheckRetry(runContext *PullRequestReworkContext, reason string) {
+	if runContext == nil || runContext.Number <= 0 {
+		return
+	}
+
+	monitor := o.state.PullRequests[runContext.Number]
+	if monitor == nil {
+		return
+	}
+
+	delay := defaultPRCheckInterval
+	if snapshot, ok := o.manager.Current(); ok && snapshot.Config.Publish.CheckInterval > 0 {
+		delay = snapshot.Config.Publish.CheckInterval
+	}
+
+	o.reschedulePullRequestCheck(monitor, delay, reason)
+}
+
+func (o *Orchestrator) reschedulePullRequestCheck(monitor *pullRequestMonitorEntry, delay time.Duration, reason string) {
+	if monitor == nil || monitor.Number <= 0 {
+		return
+	}
+
+	if delay <= 0 {
+		delay = defaultPRCheckInterval
+	}
+
+	if monitor.Timer != nil {
+		monitor.Timer.Stop()
+	}
+
+	monitor.LastError = strings.TrimSpace(reason)
+	monitor.Exhausted = false
+	monitor.NextCheckAt = time.Now().UTC().Add(delay)
+	number := monitor.Number
+	monitor.Timer = time.AfterFunc(delay, func() {
+		o.events <- pullRequestCheckDueEvent{number: number}
+	})
+}
+
+func (o *Orchestrator) markPullRequestReworkFinished(number int) {
+	if number <= 0 {
+		return
+	}
+
+	if monitor := o.state.PullRequests[number]; monitor != nil {
+		monitor.InRework = false
+	}
+}
+
+func (o *Orchestrator) ensurePullRequestState() {
+	if o.state.PullRequests == nil {
+		o.state.PullRequests = map[int]*pullRequestMonitorEntry{}
+	}
+	if o.state.CompletedPullRequests == nil {
+		o.state.CompletedPullRequests = map[int]struct{}{}
+	}
+}
+
+func pullRequestNumber(entry *runningEntry) int {
+	if entry == nil || entry.PullRequest == nil {
+		return 0
+	}
+
+	return entry.PullRequest.Number
+}
+
+func pullRequestReworkAttempt(entry *runningEntry) int {
+	if entry == nil || entry.PullRequest == nil {
+		return 0
+	}
+
+	return entry.PullRequest.ReworkAttempt
+}
+
 func (o *Orchestrator) scheduleRetry(issueID, identifier string, attempt int, errorText string, delayOrCap time.Duration) {
 	if existing := o.state.RetryAttempts[issueID]; existing != nil && existing.Timer != nil {
 		existing.Timer.Stop()
@@ -794,6 +1123,12 @@ func (o *Orchestrator) shutdown() {
 	for _, retry := range o.state.RetryAttempts {
 		if retry.Timer != nil {
 			retry.Timer.Stop()
+		}
+	}
+
+	for _, monitor := range o.state.PullRequests {
+		if monitor.Timer != nil {
+			monitor.Timer.Stop()
 		}
 	}
 
@@ -865,6 +1200,18 @@ func retryBackoff(attempt int, maxDelay time.Duration) time.Duration {
 	}
 
 	return delay
+}
+
+func minPositiveDuration(value, fallback time.Duration) time.Duration {
+	if value <= 0 {
+		return fallback
+	}
+
+	if fallback <= 0 || value < fallback {
+		return value
+	}
+
+	return fallback
 }
 
 func nextAttempt(current int) int {
