@@ -302,8 +302,8 @@ func (v *EmbeddingVectorizer) Vectorize(_ string) (Vector, error) {
 
 // VectorizeContext is Vectorize with caller-provided cancellation.
 func (v *EmbeddingVectorizer) VectorizeContext(ctx context.Context, text string) (Vector, error) {
-	if ctx == nil {
-		return nil, ErrContextRequired
+	if err := requireEmbeddingContext(ctx); err != nil {
+		return nil, err
 	}
 
 	text = strings.TrimSpace(text)
@@ -491,3 +491,15 @@ var (
 	// cancellation but no context was provided.
 	ErrContextRequired = errors.New("vector context is required")
 )
+
+func requireEmbeddingContext(ctx context.Context) error {
+	if ctx == nil {
+		return ErrContextRequired
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("vector context already done: %w", err)
+	}
+
+	return nil
+}

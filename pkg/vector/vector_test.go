@@ -301,6 +301,20 @@ func TestEmbeddingVectorizer_VectorizeContextHonorsCancellation(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
+func TestEmbeddingVectorizer_VectorizeContextRejectsAlreadyCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	v := NewEmbeddingVectorizer()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := v.VectorizeContext(ctx, "  ")
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotErrorIs(t, err, ErrEmptyText)
+}
+
 func TestEmbeddingVectorizer_CustomModel(t *testing.T) {
 	t.Parallel()
 
