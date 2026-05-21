@@ -226,31 +226,62 @@ func (s *StateStore) saveLocked(state State, revision int64) error {
 		return fmt.Errorf("state: marshal %s: %w", s.path, err)
 	}
 
-	return writeStateFileAtomic(s.path, data, 0o600)
+	if err := writeStateFileAtomic(s.path, data, 0o600); err != nil {
+		return fmt.Errorf(
+			"state: write %s atomically: %w; check permissions and available disk space, or set %s to a writable state file",
+			s.path,
+			err,
+			EnvStatePath,
+		)
+	}
+
+	return nil
 }
 
 func (s *StateStore) withLock(fn func() error) (err error) {
 	dir := filepath.Dir(s.path)
 
 	if mkdirErr := os.MkdirAll(dir, 0o750); mkdirErr != nil {
-		return fmt.Errorf("state: create dir %s: %w", dir, mkdirErr)
+		return fmt.Errorf(
+			"state: prepare %s: create dir %s: %w; set %s to a writable state file or repair the parent path",
+			s.path,
+			dir,
+			mkdirErr,
+			EnvStatePath,
+		)
 	}
 
 	lockPath := s.path + ".lock"
 
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return fmt.Errorf("state: open lock %s: %w", lockPath, err)
+		return fmt.Errorf(
+			"state: prepare %s: open lock %s: %w; check permissions or set %s to a writable state file",
+			s.path,
+			lockPath,
+			err,
+			EnvStatePath,
+		)
 	}
 	defer lockFile.Close()
 
 	if lockErr := lockStateFile(lockFile); lockErr != nil {
-		return fmt.Errorf("state: lock %s: %w", lockPath, lockErr)
+		return fmt.Errorf(
+			"state: prepare %s: lock %s: %w; close other stuck Atteler processes or retry after checking this state file",
+			s.path,
+			lockPath,
+			lockErr,
+		)
 	}
 
 	defer func() {
 		if unlockErr := unlockStateFile(lockFile); unlockErr != nil && err == nil {
-			err = fmt.Errorf("state: unlock %s: %w", lockPath, unlockErr)
+			err = fmt.Errorf(
+				"state: prepare %s: unlock %s: %w; retry after checking this state file",
+				s.path,
+				lockPath,
+				unlockErr,
+			)
 		}
 	}()
 

@@ -159,6 +159,20 @@ func TestStateStore_LoadEmptyFileFailsLoudly(t *testing.T) {
 	assert.Contains(t, err.Error(), "move this file aside")
 }
 
+func TestStateStore_SaveErrorNamesFileAndRecovery(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	parentFile := filepath.Join(dir, "not-a-dir")
+	require.NoError(t, os.WriteFile(parentFile, []byte("blocks state dir"), 0o600))
+
+	path := filepath.Join(parentFile, "state.yaml")
+	err := NewStateStore(path).Save(State{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), path)
+	assert.Contains(t, err.Error(), EnvStatePath)
+	assert.Contains(t, err.Error(), "writable state file")
+}
+
 func TestStateStore_SaveDetectsStaleRevision(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "state.yaml")
