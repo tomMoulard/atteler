@@ -116,18 +116,16 @@ func saveModelPreference(
 			return modelPreferenceSavedMsg{scope: scope}
 		}
 
-		state, err := store.Load()
+		_, err := store.Update(func(state *appconfig.State) error {
+			state.SetModel(scope, cwd, model)
+
+			if reasoningSelected {
+				state.SetReasoningLevel(scope, cwd, reasoningLevel)
+			}
+
+			return nil
+		})
 		if err != nil {
-			return modelPreferenceSavedMsg{err: err, scope: scope}
-		}
-
-		state.SetModel(scope, cwd, model)
-
-		if reasoningSelected {
-			state.SetReasoningLevel(scope, cwd, reasoningLevel)
-		}
-
-		if err := store.Save(state); err != nil {
 			return modelPreferenceSavedMsg{err: err, scope: scope}
 		}
 

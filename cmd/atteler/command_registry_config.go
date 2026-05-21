@@ -8,6 +8,14 @@ func providerlessConfigAgentPluginCommands() []command {
 		// Tier: providerless config -- agents, plugins, prompt-complete
 		// ---------------------------------------------------------------
 		{
+			name:  "state-diagnostics",
+			tier:  tierProviderlessConfig,
+			match: func(o cliOptions) bool { return o.stateDiagnostics },
+			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
+				return printStateDiagnostics(o, s)
+			},
+		},
+		{
 			name:  "list-agents",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.listAgents },

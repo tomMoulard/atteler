@@ -360,6 +360,7 @@ type cliOptions struct {
 	listFailures                       bool
 	listMessages                       bool
 	listConfigPaths                    bool
+	stateDiagnostics                   bool
 	listPlugins                        bool
 	listHookEvents                     bool
 	listHookEventsJSON                 bool
@@ -390,6 +391,7 @@ type cliOptions struct {
 
 //nolint:govet // field order follows app state grouping; padding is not performance-sensitive.
 type appState struct {
+	config              appconfig.Config
 	sessionState        session.Session
 	contextOptions      contextref.Options
 	generationDefaults  generationSettings

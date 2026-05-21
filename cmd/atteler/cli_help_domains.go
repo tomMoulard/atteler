@@ -89,6 +89,7 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "validate", Summary: "validate merged YAML/JSON config", Legacy: []string{"--validate-config"}},
 			{Name: "doctor", Summary: "run provider-aware readiness diagnostics", Legacy: []string{"--doctor"}},
 			{Name: "doctor-offline", Summary: "run offline readiness diagnostics", Legacy: []string{"--doctor-offline"}},
+			{Name: "state", Summary: "show interactive state path, revision, and selected preference sources", Legacy: []string{"--state-diagnostics"}},
 			{Name: "hooks", Summary: "list supported lifecycle hook events", Legacy: []string{"--list-hook-events"}},
 			{Name: "hooks-json", Summary: "list hook events as JSON", Legacy: []string{"--list-hook-events-json"}},
 			{Name: "version", Summary: "print build version information", Legacy: []string{"--version"}},
