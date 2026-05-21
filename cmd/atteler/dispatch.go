@@ -471,6 +471,7 @@ func providerlessState(store *session.Store) (appState, error) {
 		cwd:               cwd,
 		loadedConfigPaths: loadedConfigPaths,
 		pluginPaths:       append([]string(nil), cfg.Plugins.Paths...),
+		pluginPolicy:      clonePluginPolicy(cfg.Plugins.Policy),
 	}, nil
 }
 
@@ -623,6 +624,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		selectedAgent:       selection.selectedAgent,
 		fallbackModels:      selection.fallbackModels,
 		pluginPaths:         append([]string(nil), cfg.Plugins.Paths...),
+		pluginPolicy:        clonePluginPolicy(cfg.Plugins.Policy),
 		generationDefaults:  generationDefaults,
 		generationOverrides: generationOverrides,
 		maxInputTokens:      maxInputTokens,

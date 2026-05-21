@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
 )
 
 // EnvPath names one or more configuration files that should override the
@@ -91,7 +93,8 @@ type ContextConfig struct {
 
 // PluginConfig configures local plugin manifest discovery.
 type PluginConfig struct {
-	Paths []string `json:"paths,omitempty" yaml:"paths,omitempty"`
+	Policy *attelerplugin.Policy `json:"policy,omitempty" yaml:"policy,omitempty"`
+	Paths  []string              `json:"paths,omitempty" yaml:"paths,omitempty"`
 }
 
 type fileConfig struct {
@@ -147,7 +150,8 @@ type fileGenerationConfig struct {
 }
 
 type filePluginConfig struct {
-	Paths []string `json:"paths" yaml:"paths"`
+	Policy *attelerplugin.Policy `json:"policy" yaml:"policy"`
+	Paths  []string              `json:"paths" yaml:"paths"`
 }
 
 // Load reads the default configuration files and returns the merged result plus
@@ -573,6 +577,11 @@ func mergePlugins(dst *Config, plugins filePluginConfig, rec *originRecorder, so
 	if plugins.Paths != nil {
 		dst.Plugins.Paths = append([]string(nil), plugins.Paths...)
 		rec.replace("plugins.paths", source, dst.Plugins.Paths, "replaces the entire plugin path list")
+	}
+
+	if plugins.Policy != nil {
+		policy := attelerplugin.ClonePolicy(*plugins.Policy)
+		dst.Plugins.Policy = &policy
 	}
 }
 
@@ -1079,6 +1088,11 @@ func mergeConfigPluginsFromOrigins(dst *Config, plugins PluginConfig, dstOrigins
 		dst.Plugins.Paths = append([]string(nil), plugins.Paths...)
 
 		appendOriginChain(dstOrigins, "plugins.paths", srcOrigins, true)
+	}
+
+	if plugins.Policy != nil {
+		policy := attelerplugin.ClonePolicy(*plugins.Policy)
+		dst.Plugins.Policy = &policy
 	}
 }
 

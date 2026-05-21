@@ -58,6 +58,23 @@ context:
 plugins:
   # paths:
   #   - ./.atteler/plugins/reviewer
+  # policy:
+  #   permissions:
+  #     filesystem:
+  #       read: ["."]
+  #       write: []
+  #     network:
+  #       allow: false
+  #       hosts: []
+  #     shell:
+  #       allow: false
+  #     env: []
+  #     secrets: []
+  #     tools: []
+  #   output:
+  #     stdout_max_bytes: 65536
+  #     stderr_max_bytes: 65536
+  #   trusted_install_sources: ["local"]
 
 #vim: setf=conf
 `

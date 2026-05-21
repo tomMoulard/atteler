@@ -84,7 +84,15 @@ func providerlessConfigAgentPluginCommands() []command {
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.runPluginTarget != "" },
 			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
-				return runPluginEntrypoint(ctx, s.pluginPaths, o.runPluginTarget, o.pluginEntrypoint, o.pluginDryRun, o.pluginTimeout.value)
+				return runPluginEntrypoint(
+					ctx,
+					s.pluginPaths,
+					s.pluginPolicy,
+					o.runPluginTarget,
+					o.pluginEntrypoint,
+					o.pluginDryRun,
+					o.pluginTimeout.value,
+				)
 			},
 		},
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
@@ -406,6 +407,7 @@ type appState struct {
 	stateStore          *appconfig.StateStore
 	registry            *llm.Registry
 	worktreeInfo        *worktree.Info
+	pluginPolicy        *attelerplugin.Policy
 	fallbackModels      []string
 	pluginPaths         []string
 	providers           []string

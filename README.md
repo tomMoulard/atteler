@@ -227,7 +227,86 @@ atteler eval output .atteler/fixtures/readme-summary.txt \
 Replay writes normal session messages while avoiding provider availability and
 sampling noise in tests.
 
+### Plugins and local run policy
+
+Configured `plugins.paths` entries point at local plugin directories or manifest
+files. `atteler plugins list` validates `plugin.yaml`, `plugin.yml`, or
+`plugin.json` manifests with `name`, `version`, optional `description`,
+`capabilities`, relative `entrypoints`, and optional security metadata.
+
+Executable plugin entrypoints must declare their runtime contract before they
+can run:
+
+```yaml
+entrypoints:
+  check: bin/check
+entrypoint_args:
+  check: []
+permissions:
+  filesystem:
+    read: ["."]
+    write: []
+  network:
+    allow: false
+    hosts: []
+  shell:
+    allow: false
+  env: []
+  secrets: []
+  tools: []
+output:
+  stdout_max_bytes: 65536
+  stderr_max_bytes: 65536
+trust:
+  enabled: true
+  install_source: local
+  checksum: sha256:<manifest-or-package-checksum>
+  revoked: false
+  audit:
+    - action: accepted
+      actor: local-admin
+      at: "2026-05-21T00:00:00Z"
+```
+
+CLI plugin runs also require an accepted local policy in config. The policy is
+an upper bound: manifests requesting anything outside it fail before execution.
+
+```yaml
+plugins:
+  paths: ["./plugins/reviewer"]
+  policy:
+    permissions:
+      filesystem:
+        read: ["."]
+        write: []
+      network:
+        allow: false
+        hosts: []
+      shell:
+        allow: false
+      env: []
+      secrets: []
+      tools: []
+    output:
+      stdout_max_bytes: 65536
+      stderr_max_bytes: 65536
+    trusted_install_sources: ["local"]
+```
+
+The SDK package `pkg/plugin` also exposes validated run helpers for local
+workflows that want to execute a manifest entrypoint. Runs resolve paths under
+the plugin root, keep the process working directory at that root, reject
+undeclared/unaccepted permissions at the policy layer, require an explicit
+accepted policy, require shell permission for shell-script entrypoints, pass
+only allowlisted environment variables, validate declared args, and return
+stdout/stderr after size limiting plus secret redaction.
+
+Plugin entrypoints can be inspected or run with `atteler plugins list`,
+`atteler plugins describe reviewer`, and
+`atteler plugins run reviewer/check --plugin-dry-run`.
+
 ### Review, watch, memory, and code intelligence
+
 
 ```sh
 atteler review scan
