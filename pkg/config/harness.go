@@ -23,6 +23,17 @@ const (
 // harnesses. These imported values are intentionally lowest-precedence; any
 // atteler config file loaded by Load overrides them.
 func LoadHarnessDefaults() (cfg Config, loaded []string) {
+	cfg, loaded, _ = LoadHarnessDefaultsWithOrigins()
+
+	return cfg, loaded
+}
+
+// LoadHarnessDefaultsWithOrigins imports best-effort defaults from other local
+// coding harnesses and records them as lowest-precedence harness-import origins.
+func LoadHarnessDefaultsWithOrigins() (cfg Config, loaded []string, origins OriginMap) {
+	origins = OriginMap{}
+	recorder := newOriginRecorder(origins)
+
 	for _, importer := range []func() (Config, string, bool){
 		importCodexConfig,
 		importClaudeConfig,
@@ -34,16 +45,17 @@ func LoadHarnessDefaults() (cfg Config, loaded []string) {
 			continue
 		}
 
-		mergeConfig(&cfg, next)
+		mergeConfigFromSource(&cfg, next, recorder, originSource{
+			kind:   OriginHarnessImport,
+			source: path,
+		})
 
 		loaded = append(loaded, path)
 	}
 
-	if len(cfg.Providers) == 0 {
-		cfg.Providers = nil
-	}
+	normalizeEmptyMaps(&cfg)
 
-	return cfg, loaded
+	return cfg, loaded, origins
 }
 
 func importCodexConfig() (Config, string, bool) {
@@ -697,7 +709,7 @@ func setAgent(cfg *Config, name string, agent AgentConfig) {
 	}
 
 	current := cfg.Agents[name]
-	mergeConfigAgent(&current, agent)
+	mergeConfigAgent(&current, agent, nil, originSource{}, name)
 	cfg.Agents[name] = current
 }
 
