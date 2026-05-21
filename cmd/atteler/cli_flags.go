@@ -233,4 +233,5 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.BoolVar(&opts.listWorktrees, "list-worktrees", false, "list active atteler worktrees and exit")
 	fs.BoolVar(&opts.noAutoMerge, "no-auto-merge", false, "keep worktree alive on exit instead of auto-merging")
 	fs.StringVar(&opts.mergeWorktreeRef, "merge-worktree", "", "merge a session worktree back into its base branch and exit")
+	fs.BoolVar(&opts.mergeWorktreeAllowBaseMismatch, "merge-worktree-allow-base-mismatch", false, "allow manual worktree merge when current branch differs from recorded base")
 }

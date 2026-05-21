@@ -15,12 +15,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
 
 // EnvDir overrides the parent directory for worktree directories.
 const EnvDir = "ATTELER_WORKTREE_DIR"
+
+const (
+	worktreeBranchPrefix = "atteler/"
+	maxSessionIDLength   = 128
+	transactionLogGitDir = "atteler/worktree-transactions"
+)
+
+var safeSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 var defaultContextFactory = context.Background
 
@@ -48,6 +57,59 @@ type Info struct {
 	SessionID string
 }
 
+// MergeOptions is the explicit safety policy for merging a session worktree.
+type MergeOptions struct {
+	// Provenance adds optional caller-provided context to auto-commit messages.
+	Provenance []string
+	// AutoCommit permits atteler to stage and commit dirty worktree files before
+	// merging. If false, MergeWithOptionsContext refuses dirty worktrees.
+	AutoCommit bool
+	// AutoMerge permits atteler to run git merge in the base repository. This
+	// makes auto-merge call sites opt in instead of reaching the merge path by
+	// accident.
+	AutoMerge bool
+	// AllowBaseBranchMismatch permits merging even when the main worktree is not
+	// checked out to Info.BaseBranch. Keep false for normal session finalization.
+	AllowBaseBranchMismatch bool
+}
+
+// MergeError describes a failed merge transaction and how to recover it.
+type MergeError struct {
+	Err            error
+	Step           string
+	Branch         string
+	WorktreePath   string
+	TransactionLog string
+	RolledBack     bool
+}
+
+func (e *MergeError) Error() string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "worktree: %s failed for branch %s at %s: %v",
+		e.Step, printable(e.Branch), printable(e.WorktreePath), e.Err)
+
+	if e.RolledBack {
+		b.WriteString("\nrecovery: failed merge was rolled back with git merge --abort")
+	}
+
+	b.WriteString("\nrecovery: failed step: " + printable(e.Step))
+	b.WriteString("\nrecovery: branch: " + printable(e.Branch))
+	b.WriteString("\nrecovery: worktree path: " + printable(e.WorktreePath))
+
+	if e.TransactionLog != "" {
+		b.WriteString("\nrecovery: transaction log: " + e.TransactionLog)
+	}
+
+	b.WriteString("\nrecovery: inspect the worktree, fix the failed step, then retry the merge")
+
+	return b.String()
+}
+
+func (e *MergeError) Unwrap() error {
+	return e.Err
+}
+
 // Create sets up a new git worktree for the given session.
 //
 // It creates a new branch named "atteler/<sessionID>" from the current HEAD,
@@ -64,8 +126,9 @@ func Create(repoDir, sessionID string) (*Info, error) {
 func CreateContext(ctx context.Context, repoDir, sessionID string) (*Info, error) {
 	ctx = nonNilCommandContext(ctx)
 
-	if sessionID == "" {
-		return nil, errors.New("worktree: session ID is required")
+	branch, err := branchForSessionID(sessionID)
+	if err != nil {
+		return nil, err
 	}
 
 	repoRoot, err := gitRepoRoot(ctx, repoDir)
@@ -78,23 +141,47 @@ func CreateContext(ctx context.Context, repoDir, sessionID string) (*Info, error
 		return nil, fmt.Errorf("worktree: detect current branch: %w", err)
 	}
 
-	branch := "atteler/" + sessionID
+	if baseBranch == "HEAD" {
+		return nil, errors.New("worktree: cannot create worktree from detached HEAD")
+	}
+
 	wtDir := worktreeDir(repoRoot, sessionID)
 
-	// Create the branch from current HEAD.
-	if err := gitRun(ctx, repoRoot, "branch", branch); err != nil {
-		// If the branch already exists, that's fine (e.g. re-joining a session).
-		if !strings.Contains(err.Error(), "already exists") {
-			return nil, fmt.Errorf("worktree: create branch %s: %w", branch, err)
+	branchExists, err := gitBranchExists(ctx, repoRoot, branch)
+	if err != nil {
+		return nil, fmt.Errorf("worktree: check branch %s: %w", branch, err)
+	}
+
+	if branchExists {
+		if err := verifyExistingWorktree(ctx, repoRoot, branch, wtDir); err != nil {
+			return nil, fmt.Errorf("worktree: branch %s already exists without matching worktree: %w", branch, err)
 		}
+
+		return &Info{
+			Path:       wtDir,
+			Branch:     branch,
+			BaseBranch: baseBranch,
+			SessionID:  sessionID,
+		}, nil
+	} else if err := gitRun(ctx, repoRoot, "branch", branch); err != nil {
+		return nil, fmt.Errorf("worktree: create branch %s: %w", branch, err)
 	}
 
 	// Add the worktree.
 	if err := gitRun(ctx, repoRoot, "worktree", "add", wtDir, branch); err != nil {
-		// If it already exists, treat as success (join).
+		// If the same session worktree already exists, treat as success (join).
 		if !strings.Contains(err.Error(), "already exists") &&
-			!strings.Contains(err.Error(), "is already checked out") {
-			return nil, fmt.Errorf("worktree: add %s: %w", wtDir, err)
+			!strings.Contains(err.Error(), "is already checked out") &&
+			!strings.Contains(err.Error(), "is already used by worktree") {
+			addErr := fmt.Errorf("worktree: add %s: %w", wtDir, err)
+
+			return nil, rollbackCreatedBranch(ctx, repoRoot, branch, addErr)
+		}
+
+		if joinErr := verifyExistingWorktree(ctx, repoRoot, branch, wtDir); joinErr != nil {
+			addErr := fmt.Errorf("worktree: add %s: %w", wtDir, errors.Join(err, joinErr))
+
+			return nil, rollbackCreatedBranch(ctx, repoRoot, branch, addErr)
 		}
 	}
 
@@ -106,39 +193,70 @@ func CreateContext(ctx context.Context, repoDir, sessionID string) (*Info, error
 	}, nil
 }
 
-// Merge merges the worktree branch back into the base branch and removes
-// the worktree. The merge uses --no-ff to keep the branch history visible.
-// If there are uncommitted changes in the worktree, they are committed first
-// with a default message.
+// Merge refuses to merge without an explicit MergeOptions policy.
+//
+// Use MergeWithOptionsContext when a caller intentionally permits auto-commit
+// and auto-merge behavior.
 func Merge(repoDir string, info *Info) error {
 	return MergeContext(defaultCommandContext(), repoDir, info)
 }
 
 // MergeContext is Merge with caller-provided cancellation for git commands.
 func MergeContext(ctx context.Context, repoDir string, info *Info) error {
+	return MergeWithOptionsContext(ctx, repoDir, info, MergeOptions{})
+}
+
+// MergeWithOptionsContext merges the worktree using an explicit safety policy.
+func MergeWithOptionsContext(ctx context.Context, repoDir string, info *Info, opts MergeOptions) error {
 	ctx = nonNilCommandContext(ctx)
 
 	if info == nil {
 		return errors.New("worktree: nil info")
 	}
 
-	repoRoot, err := gitRepoRoot(ctx, repoDir)
-	if err != nil {
-		return fmt.Errorf("worktree: locate repo root: %w", err)
+	if err := validateInfo(info, true); err != nil {
+		return err
 	}
 
-	// Auto-commit any uncommitted changes in the worktree.
-	if err := autoCommit(ctx, info.Path, info.SessionID); err != nil {
-		return fmt.Errorf("worktree: auto-commit: %w", err)
+	repoRoot, rootErr := gitRepoRoot(ctx, repoDir)
+	if rootErr != nil {
+		return fmt.Errorf("worktree: locate repo root: %w", rootErr)
 	}
 
-	// Merge branch into base from the main repo.
-	mergeMsg := "atteler: merge session " + info.SessionID
-	if err := gitRun(ctx, repoRoot, "merge", "--no-ff", "-m", mergeMsg, info.Branch); err != nil {
-		return fmt.Errorf("worktree: merge %s into %s: %w", info.Branch, info.BaseBranch, err)
+	log, startErr := startMergeTransaction(ctx, repoRoot, info, opts)
+	if startErr != nil {
+		return startErr
 	}
 
-	return RemoveContext(ctx, repoDir, info)
+	if policyErr := requireAutoMergePolicy(opts); policyErr != nil {
+		return mergeFailure("auto-merge policy", info, log, policyErr)
+	}
+
+	if preflightErr := preflightMainRepo(ctx, repoRoot, info, opts); preflightErr != nil {
+		return mergeFailure("preflight main repository", info, log, preflightErr)
+	}
+
+	if appendErr := log.append("preflight main repository", "ok"); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	if commitErr := autoCommitIfNeeded(ctx, info, opts, log); commitErr != nil {
+		return commitErr
+	}
+
+	if mergeErr := mergeBranch(ctx, repoRoot, info, log); mergeErr != nil {
+		return mergeErr
+	}
+
+	if cleanupErr := cleanupMergedWorktree(ctx, repoDir, info, log); cleanupErr != nil {
+		return cleanupErr
+	}
+
+	if appendErr := log.append("complete", "ok"); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	return nil
 }
 
 // Remove deletes the worktree and its branch without merging.
@@ -154,18 +272,40 @@ func RemoveContext(ctx context.Context, repoDir string, info *Info) error {
 		return errors.New("worktree: nil info")
 	}
 
-	repoRoot, err := gitRepoRoot(ctx, repoDir)
-	if err != nil {
-		return fmt.Errorf("worktree: locate repo root: %w", err)
+	if err := validateInfo(info, false); err != nil {
+		return err
 	}
 
-	errs := []error{
-		gitRun(ctx, repoRoot, "worktree", "remove", "--force", info.Path),
-		gitRun(ctx, repoRoot, "worktree", "prune"),
-		gitRun(ctx, repoRoot, "branch", "-D", info.Branch),
+	repoRoot, rootErr := gitRepoRoot(ctx, repoDir)
+	if rootErr != nil {
+		return fmt.Errorf("worktree: locate repo root: %w", rootErr)
 	}
-	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("worktree: remove: %w", err)
+
+	if removeErr := gitRun(ctx, repoRoot, "worktree", "remove", "--force", info.Path); removeErr != nil {
+		return fmt.Errorf("worktree: remove path %s: %w", info.Path, removeErr)
+	}
+
+	if pruneErr := gitRun(ctx, repoRoot, "worktree", "prune"); pruneErr != nil {
+		return fmt.Errorf("worktree: prune: %w", pruneErr)
+	}
+
+	if branchErr := gitRun(ctx, repoRoot, "branch", "-D", info.Branch); branchErr != nil {
+		return fmt.Errorf("worktree: delete branch %s: %w", info.Branch, branchErr)
+	}
+
+	if exists, err := pathExists(info.Path); err != nil {
+		return fmt.Errorf("worktree: verify path cleanup %s: %w", info.Path, err)
+	} else if exists {
+		return fmt.Errorf("worktree: verify path cleanup %s: still exists", info.Path)
+	}
+
+	branchExists, err := gitBranchExists(ctx, repoRoot, info.Branch)
+	if err != nil {
+		return fmt.Errorf("worktree: verify branch cleanup %s: %w", info.Branch, err)
+	}
+
+	if branchExists {
+		return fmt.Errorf("worktree: verify branch cleanup %s: still exists", info.Branch)
 	}
 
 	return nil
@@ -226,27 +366,450 @@ func worktreeDir(repoRoot, sessionID string) string {
 	return filepath.Join(repoRoot, ".atteler", "worktrees", sessionID)
 }
 
-// autoCommit stages and commits any dirty files in the worktree.
-func autoCommit(ctx context.Context, wtDir, sessionID string) error {
-	ctx = nonNilCommandContext(ctx)
-	// Check if there are changes.
-	out, err := gitOutput(ctx, wtDir, "status", "--porcelain")
+func branchForSessionID(sessionID string) (string, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return "", err
+	}
+
+	return worktreeBranchPrefix + sessionID, nil
+}
+
+func validateSessionID(sessionID string) error {
+	if sessionID == "" {
+		return errors.New("worktree: session ID is required")
+	}
+
+	if len(sessionID) > maxSessionIDLength {
+		return fmt.Errorf("worktree: session ID %q is too long", sessionID)
+	}
+
+	if sessionID == "." || sessionID == ".." {
+		return fmt.Errorf("worktree: unsafe session ID %q", sessionID)
+	}
+
+	if !safeSessionIDPattern.MatchString(sessionID) ||
+		strings.Contains(sessionID, "..") ||
+		strings.Contains(sessionID, "@{") ||
+		strings.HasSuffix(sessionID, ".") ||
+		strings.HasSuffix(sessionID, ".lock") {
+		return fmt.Errorf("worktree: unsafe session ID %q: use only letters, numbers, dot, underscore, and dash", sessionID)
+	}
+
+	return nil
+}
+
+func validateInfo(info *Info, requireBase bool) error {
+	if info == nil {
+		return errors.New("worktree: nil info")
+	}
+
+	if err := validateSessionID(info.SessionID); err != nil {
+		return err
+	}
+
+	wantBranch := worktreeBranchPrefix + info.SessionID
+	if info.Branch != wantBranch {
+		return fmt.Errorf("worktree: branch %q does not match session branch %q", info.Branch, wantBranch)
+	}
+
+	if strings.TrimSpace(info.Path) == "" {
+		return errors.New("worktree: worktree path is required")
+	}
+
+	if requireBase && strings.TrimSpace(info.BaseBranch) == "" {
+		return errors.New("worktree: base branch is required")
+	}
+
+	return nil
+}
+
+func startMergeTransaction(ctx context.Context, repoRoot string, info *Info, opts MergeOptions) (*transactionLog, error) {
+	log, err := newTransactionLog(ctx, repoRoot, info.SessionID)
+	if err != nil {
+		return nil, mergeFailure("create transaction log", info, nil, err)
+	}
+
+	detail := fmt.Sprintf("session=%s branch=%s base=%s worktree=%s auto_commit=%t auto_merge=%t allow_base_mismatch=%t",
+		info.SessionID, info.Branch, info.BaseBranch, info.Path, opts.AutoCommit, opts.AutoMerge, opts.AllowBaseBranchMismatch)
+	if appendErr := log.append("start", detail); appendErr != nil {
+		return nil, mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	return log, nil
+}
+
+func requireAutoMergePolicy(opts MergeOptions) error {
+	if !opts.AutoMerge {
+		return errors.New("merge policy does not permit running git merge")
+	}
+
+	return nil
+}
+
+func rollbackCreatedBranch(ctx context.Context, repoRoot, branch string, cause error) error {
+	if err := gitRun(ctx, repoRoot, "branch", "-D", branch); err != nil {
+		return errors.Join(cause, fmt.Errorf("rollback created branch %s: %w", branch, err))
+	}
+
+	return cause
+}
+
+func verifyExistingWorktree(ctx context.Context, repoRoot, branch, expectedPath string) error {
+	actualPath, ok, err := gitWorktreePathForBranch(ctx, repoRoot, branch)
 	if err != nil {
 		return err
 	}
 
-	if strings.TrimSpace(out) == "" {
+	if !ok {
+		return fmt.Errorf("branch %s is not checked out at %s", branch, expectedPath)
+	}
+
+	if !samePath(actualPath, expectedPath) {
+		return fmt.Errorf("branch %s is already checked out at %s, expected %s", branch, actualPath, expectedPath)
+	}
+
+	if exists, err := pathExists(expectedPath); err != nil {
+		return fmt.Errorf("check existing worktree path %s: %w", expectedPath, err)
+	} else if !exists {
+		return fmt.Errorf("branch %s is checked out at missing path %s", branch, expectedPath)
+	}
+
+	return nil
+}
+
+func preflightMainRepo(ctx context.Context, repoRoot string, info *Info, opts MergeOptions) error {
+	if err := preflightCurrentBranch(ctx, repoRoot, info, opts); err != nil {
+		return err
+	}
+
+	if err := preflightCleanState(ctx, repoRoot); err != nil {
+		return err
+	}
+
+	if err := preflightWorktreeCheckout(ctx, repoRoot, info); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func preflightCurrentBranch(ctx context.Context, repoRoot string, info *Info, opts MergeOptions) error {
+	currentBranch, err := gitCurrentBranch(ctx, repoRoot)
+	if err != nil {
+		return fmt.Errorf("detect current branch: %w", err)
+	}
+
+	if currentBranch == "HEAD" {
+		return errors.New("main worktree is in detached HEAD; check out the recorded base branch before merging")
+	}
+
+	if currentBranch != info.BaseBranch && !opts.AllowBaseBranchMismatch {
+		return fmt.Errorf("main worktree is on branch %s, expected recorded base branch %s", currentBranch, info.BaseBranch)
+	}
+
+	return nil
+}
+
+func preflightCleanState(ctx context.Context, repoRoot string) error {
+	pending, err := gitPendingOperation(ctx, repoRoot)
+	if err != nil {
+		return fmt.Errorf("detect pending git operation: %w", err)
+	}
+
+	if pending != "" {
+		return fmt.Errorf("main worktree has pending %s; finish or abort it before merging", pending)
+	}
+
+	summary, err := gitStatusSummary(ctx, repoRoot)
+	if err != nil {
+		return fmt.Errorf("read main worktree status: %w", err)
+	}
+
+	if !summary.empty() {
+		return fmt.Errorf("main worktree has uncommitted or untracked files:\n%s", summary.String())
+	}
+
+	return nil
+}
+
+func preflightWorktreeCheckout(ctx context.Context, repoRoot string, info *Info) error {
+	branchExists, err := gitBranchExists(ctx, repoRoot, info.Branch)
+	if err != nil {
+		return fmt.Errorf("check worktree branch: %w", err)
+	}
+
+	if !branchExists {
+		return fmt.Errorf("worktree branch %s does not exist", info.Branch)
+	}
+
+	actualPath, ok, err := gitWorktreePathForBranch(ctx, repoRoot, info.Branch)
+	if err != nil {
+		return fmt.Errorf("check worktree branch checkout: %w", err)
+	}
+
+	if !ok {
+		return fmt.Errorf("worktree branch %s is not checked out in a worktree", info.Branch)
+	}
+
+	if !samePath(actualPath, info.Path) {
+		return fmt.Errorf("worktree branch %s is checked out at %s, expected %s", info.Branch, actualPath, info.Path)
+	}
+
+	if exists, err := pathExists(info.Path); err != nil {
+		return fmt.Errorf("check worktree path %s: %w", info.Path, err)
+	} else if !exists {
+		return fmt.Errorf("worktree path %s does not exist", info.Path)
+	}
+
+	return nil
+}
+
+func autoCommitIfNeeded(ctx context.Context, info *Info, opts MergeOptions, log *transactionLog) error {
+	summary, err := gitStatusSummary(ctx, info.Path)
+	if err != nil {
+		return mergeFailure("diff summary", info, log, err)
+	}
+
+	if summary.empty() {
+		if appendErr := log.append("diff summary", "clean"); appendErr != nil {
+			return mergeFailure("write transaction log", info, log, appendErr)
+		}
+
+		return nil
+	}
+
+	if appendErr := log.append("diff summary", summary.String()); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	if !opts.AutoCommit {
+		err := fmt.Errorf("worktree has uncommitted changes:\n%s", summary.String())
+
+		return mergeFailure("auto-commit policy", info, log, err)
+	}
+
+	if err := autoCommit(ctx, info, summary, opts); err != nil {
+		return mergeFailure("auto-commit", info, log, err)
+	}
+
+	if appendErr := log.append("auto-commit", "ok"); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	return nil
+}
+
+func mergeBranch(ctx context.Context, repoRoot string, info *Info, log *transactionLog) error {
+	mergeMsg := "atteler: merge session " + info.SessionID
+
+	detail := fmt.Sprintf("git merge --no-ff %s into %s", info.Branch, info.BaseBranch)
+	if appendErr := log.append("merge branch", detail); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	if err := gitRun(ctx, repoRoot, "merge", "--no-ff", "-m", mergeMsg, info.Branch); err != nil {
+		rolledBack, rollbackErr := rollbackFailedMerge(ctx, repoRoot, log)
+		if rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("rollback failed: %w", rollbackErr))
+		}
+
+		return mergeFailureWithRollback("merge branch", info, log, err, rolledBack)
+	}
+
+	if appendErr := log.append("merge branch", "ok"); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	return nil
+}
+
+func cleanupMergedWorktree(ctx context.Context, repoDir string, info *Info, log *transactionLog) error {
+	if appendErr := log.append("cleanup worktree", "start"); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	if err := RemoveContext(ctx, repoDir, info); err != nil {
+		return mergeFailure("cleanup worktree", info, log, err)
+	}
+
+	if appendErr := log.append("cleanup worktree", "ok"); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	return nil
+}
+
+// autoCommit stages and commits any dirty files in the worktree.
+func autoCommit(ctx context.Context, info *Info, summary statusSummary, opts MergeOptions) error {
+	ctx = nonNilCommandContext(ctx)
+
+	if summary.empty() {
 		return nil // nothing to commit
 	}
 
-	if err := gitRun(ctx, wtDir, "add", "-A"); err != nil {
+	if err := gitRun(ctx, info.Path, "add", "-A"); err != nil {
 		return fmt.Errorf("stage changes: %w", err)
 	}
 
-	msg := fmt.Sprintf("atteler: auto-commit session %s at %s",
-		sessionID, time.Now().UTC().Format(time.RFC3339))
+	body := []string{
+		"Session: " + info.SessionID,
+		"Branch: " + info.Branch,
+		"Base: " + info.BaseBranch,
+		"Committed-at: " + time.Now().UTC().Format(time.RFC3339),
+	}
 
-	return gitRun(ctx, wtDir, "commit", "-m", msg)
+	for _, provenance := range opts.Provenance {
+		provenance = strings.TrimSpace(provenance)
+		if provenance != "" {
+			body = append(body, "Provenance: "+provenance)
+		}
+	}
+
+	body = append(body, "", "Changed files:")
+
+	for _, line := range summary.lines {
+		body = append(body, "- "+line)
+	}
+
+	msg := "atteler: auto-commit session " + info.SessionID
+
+	return gitRun(ctx, info.Path, "commit", "-m", msg, "-m", strings.Join(body, "\n"))
+}
+
+type statusSummary struct {
+	lines []string
+}
+
+func (s statusSummary) empty() bool {
+	return len(s.lines) == 0
+}
+
+func (s statusSummary) String() string {
+	return strings.Join(s.lines, "\n")
+}
+
+func gitStatusSummary(ctx context.Context, dir string) (statusSummary, error) {
+	out, err := gitOutput(ctx, dir, "status", "--porcelain")
+	if err != nil {
+		return statusSummary{}, err
+	}
+
+	var lines []string
+
+	for line := range strings.SplitSeq(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		lines = append(lines, line)
+	}
+
+	return statusSummary{lines: lines}, nil
+}
+
+type transactionLog struct {
+	path string
+}
+
+func newTransactionLog(ctx context.Context, repoRoot, sessionID string) (*transactionLog, error) {
+	dir, err := gitPath(ctx, repoRoot, transactionLogGitDir)
+	if err != nil {
+		return nil, err
+	}
+
+	if mkdirErr := os.MkdirAll(dir, 0o700); mkdirErr != nil {
+		return nil, fmt.Errorf("create transaction log dir %s: %w", dir, mkdirErr)
+	}
+
+	name := fmt.Sprintf("%s-%s.log", sessionID, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	path := filepath.Join(dir, name)
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("create transaction log %s: %w", path, err)
+	}
+	defer file.Close()
+
+	if _, err := fmt.Fprintf(file, "# atteler worktree merge transaction\n"); err != nil {
+		return nil, fmt.Errorf("write transaction log header %s: %w", path, err)
+	}
+
+	return &transactionLog{path: path}, nil
+}
+
+func (l *transactionLog) append(step, detail string) error {
+	if l == nil {
+		return nil
+	}
+
+	file, err := os.OpenFile(l.path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("open transaction log %s: %w", l.path, err)
+	}
+	defer file.Close()
+
+	for line := range strings.SplitSeq(detail, "\n") {
+		if _, err := fmt.Fprintf(file, "%s\t%s\t%s\n", time.Now().UTC().Format(time.RFC3339Nano), step, line); err != nil {
+			return fmt.Errorf("append transaction log %s: %w", l.path, err)
+		}
+	}
+
+	return nil
+}
+
+func mergeFailure(step string, info *Info, log *transactionLog, err error) error {
+	return mergeFailureWithRollback(step, info, log, err, false)
+}
+
+func mergeFailureWithRollback(step string, info *Info, log *transactionLog, err error, rolledBack bool) error {
+	if log != nil {
+		if appendErr := log.append("failed: "+step, err.Error()); appendErr != nil {
+			err = errors.Join(err, fmt.Errorf("write transaction log: %w", appendErr))
+		}
+	}
+
+	return &MergeError{
+		Err:            err,
+		Step:           step,
+		Branch:         info.Branch,
+		WorktreePath:   info.Path,
+		TransactionLog: transactionLogPath(log),
+		RolledBack:     rolledBack,
+	}
+}
+
+func transactionLogPath(log *transactionLog) string {
+	if log == nil {
+		return ""
+	}
+
+	return log.path
+}
+
+func rollbackFailedMerge(ctx context.Context, repoRoot string, log *transactionLog) (bool, error) {
+	pending, err := gitPendingOperation(ctx, repoRoot)
+	if err != nil {
+		return false, err
+	}
+
+	if pending != "merge" {
+		return false, nil
+	}
+
+	if err := log.append("rollback", "git merge --abort"); err != nil {
+		return false, err
+	}
+
+	if err := gitRun(ctx, repoRoot, "merge", "--abort"); err != nil {
+		return false, err
+	}
+
+	if err := log.append("rollback", "ok"); err != nil {
+		return true, err
+	}
+
+	return true, nil
 }
 
 // gitRepoRoot returns the top-level directory of the git repository
@@ -269,6 +832,124 @@ func gitCurrentBranch(ctx context.Context, dir string) (string, error) {
 	}
 
 	return strings.TrimSpace(out), nil
+}
+
+func gitPath(ctx context.Context, dir, name string) (string, error) {
+	out, err := gitOutput(nonNilCommandContext(ctx), dir, "rev-parse", "--git-path", name)
+	if err != nil {
+		return "", err
+	}
+
+	path := strings.TrimSpace(out)
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+
+	return filepath.Join(dir, path), nil
+}
+
+func gitPendingOperation(ctx context.Context, dir string) (string, error) {
+	checks := []struct {
+		name string
+		path string
+	}{
+		{name: "merge", path: "MERGE_HEAD"},
+		{name: "cherry-pick", path: "CHERRY_PICK_HEAD"},
+		{name: "revert", path: "REVERT_HEAD"},
+		{name: "rebase", path: "rebase-merge"},
+		{name: "rebase", path: "rebase-apply"},
+	}
+
+	for _, check := range checks {
+		path, err := gitPath(ctx, dir, check.path)
+		if err != nil {
+			return "", err
+		}
+
+		exists, err := pathExists(path)
+		if err != nil {
+			return "", err
+		}
+
+		if exists {
+			return check.name, nil
+		}
+	}
+
+	return "", nil
+}
+
+func gitBranchExists(ctx context.Context, repoRoot, branch string) (bool, error) {
+	out, err := gitOutput(ctx, repoRoot, "branch", "--list", branch)
+	if err != nil {
+		return false, err
+	}
+
+	return strings.TrimSpace(out) != "", nil
+}
+
+func gitWorktreePathForBranch(ctx context.Context, repoRoot, branch string) (path string, ok bool, err error) {
+	out, err := gitOutput(ctx, repoRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", false, err
+	}
+
+	var currentPath string
+
+	for line := range strings.SplitSeq(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			currentPath = ""
+			continue
+		}
+
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			currentPath = path
+			continue
+		}
+
+		if currentBranch, ok := strings.CutPrefix(line, "branch refs/heads/"); ok && currentBranch == branch {
+			return currentPath, true, nil
+		}
+	}
+
+	return "", false, nil
+}
+
+func pathExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+
+	return false, fmt.Errorf("stat %s: %w", path, err)
+}
+
+func samePath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+
+	if leftErr == nil {
+		left = leftAbs
+	}
+
+	if rightErr == nil {
+		right = rightAbs
+	}
+
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+
+func printable(value string) string {
+	if value == "" {
+		return "<unknown>"
+	}
+
+	return value
 }
 
 // gitRun executes a git command in dir and returns any error.

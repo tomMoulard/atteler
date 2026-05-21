@@ -266,7 +266,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Commands: []cliCommandAlias{
 			{Name: "run", Args: "[prompt]", Summary: "enable worktree isolation for this session", Legacy: []string{"--worktree"}, JoinArgs: true},
 			{Name: "list", Summary: "list active atteler worktrees", Legacy: []string{"--list-worktrees"}},
-			{Name: "merge", Args: "<session-id>", Summary: "merge a session worktree back into its base branch", Legacy: []string{"--merge-worktree"}},
+			{Name: "merge", Args: "<session-id>", Summary: "merge a session worktree back into its base branch; add --merge-worktree-allow-base-mismatch to override the recorded-base preflight", Legacy: []string{"--merge-worktree"}},
 		},
 		Examples: []string{
 			`atteler worktrees run "Add unit tests for auth"`,

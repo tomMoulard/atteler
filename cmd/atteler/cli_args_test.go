@@ -278,6 +278,7 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "watch", args: []string{"watch", "json"}, want: []string{"--watch-scan", "--watch-json"}},
 		{name: "plugins", args: []string{"plugins", "describe", "reviewer"}, want: []string{"--describe-plugin", "reviewer"}},
 		{name: "worktrees", args: []string{"worktrees", "merge", "session-123"}, want: []string{"--merge-worktree", "session-123"}},
+		{name: "worktrees merge base mismatch override", args: []string{"worktrees", "merge", "session-123", "--merge-worktree-allow-base-mismatch"}, want: []string{"--merge-worktree", "session-123", "--merge-worktree-allow-base-mismatch"}},
 		{name: "worktrees run prompt", args: []string{"worktrees", "run", "add", "tests"}, want: []string{"--worktree", "add tests"}},
 		{name: "eval", args: []string{"eval", "output", "actual.txt"}, want: []string{"--eval-output", "actual.txt"}},
 		{name: "eval list", args: []string{"eval", "list"}, want: []string{"--list-evaluations"}},
