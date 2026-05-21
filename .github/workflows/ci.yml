@@ -40,6 +40,9 @@ jobs:
       - name: Lint
         run: make lint
 
+      - name: Context convention scan
+        run: go test ./pkg/watch -run TestRepositoryContextRootsStayAtEntrypoints -count=1
+
       - name: Test
         run: make test
 
