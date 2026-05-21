@@ -208,6 +208,59 @@ func TestLoadFiles_JSONCompatibility(t *testing.T) {
 	}
 }
 
+func TestLoadFiles_PluginPolicy(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "plugins.yaml", `
+plugins:
+  paths:
+    - ./plugin-a
+  policy:
+    permissions:
+      filesystem:
+        read:
+          - "."
+        write:
+          - tmp
+      network:
+        allow: true
+        hosts:
+          - api.example.com
+      shell:
+        allow: true
+      env:
+        - PATH
+      secrets:
+        - API_TOKEN
+      tools:
+        - git
+    output:
+      stdout_max_bytes: 4096
+      stderr_max_bytes: 1024
+    trusted_install_sources:
+      - local
+    require_signature: true
+`)
+
+	cfg, loaded, err := LoadFiles([]string{path})
+	require.NoError(t, err)
+	require.Equal(t, []string{path}, loaded)
+	require.NotNil(t, cfg.Plugins.Policy)
+	assert.Equal(t, []string{"./plugin-a"}, cfg.Plugins.Paths)
+	assert.Equal(t, []string{"."}, cfg.Plugins.Policy.Permissions.Filesystem.Read)
+	assert.Equal(t, []string{"tmp"}, cfg.Plugins.Policy.Permissions.Filesystem.Write)
+	assert.True(t, cfg.Plugins.Policy.Permissions.Network.Allow)
+	assert.Equal(t, []string{"api.example.com"}, cfg.Plugins.Policy.Permissions.Network.Hosts)
+	assert.True(t, cfg.Plugins.Policy.Permissions.Shell.Allow)
+	assert.Equal(t, []string{"PATH"}, cfg.Plugins.Policy.Permissions.Env)
+	assert.Equal(t, []string{"API_TOKEN"}, cfg.Plugins.Policy.Permissions.Secrets)
+	assert.Equal(t, []string{"git"}, cfg.Plugins.Policy.Permissions.Tools)
+	assert.Equal(t, 4096, cfg.Plugins.Policy.Output.StdoutMaxBytes)
+	assert.Equal(t, 1024, cfg.Plugins.Policy.Output.StderrMaxBytes)
+	assert.Equal(t, []string{"local"}, cfg.Plugins.Policy.TrustedInstallSources)
+	assert.True(t, cfg.Plugins.Policy.RequireSignature)
+}
+
 func TestLoadFilesWithOrigins_TracksScalarOverwriteAndSliceReplacement(t *testing.T) {
 	t.Parallel()
 

@@ -83,6 +83,69 @@ func TestLoad_LoadsExplicitJSONManifest(t *testing.T) {
 	}
 }
 
+func TestLoadDir_LoadsSecurityDeclarations(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeManifest(t, dir, "plugin.yaml", `
+name: secure
+version: "1.0.0"
+entrypoints:
+  run: bin/run
+entrypoint_args:
+  run:
+    - name: mode
+      required: true
+      allowed:
+        - safe
+permissions:
+  filesystem:
+    read:
+      - "."
+    write:
+      - tmp
+  network:
+    allow: true
+    hosts:
+      - api.example.com
+  shell:
+    allow: true
+  env:
+    - PATH
+  secrets:
+    - API_TOKEN
+  tools:
+    - reviewer
+output:
+  stdout_max_bytes: 4096
+  stderr_max_bytes: 1024
+trust:
+  enabled: true
+  install_source: gh:tomMoulard/example
+  checksum: sha256:abc123
+  audit:
+    - action: accepted
+      actor: test
+      at: "2026-05-21T00:00:00Z"
+`)
+
+	manifest, err := LoadDir(dir)
+	require.NoError(t, err)
+	require.Equal(t, []string{"."}, manifest.Permissions.Filesystem.Read)
+	require.Equal(t, []string{"tmp"}, manifest.Permissions.Filesystem.Write)
+	require.True(t, manifest.Permissions.Network.Allow)
+	require.Equal(t, []string{"api.example.com"}, manifest.Permissions.Network.Hosts)
+	require.Equal(t, []string{"PATH"}, manifest.Permissions.Env)
+	require.Equal(t, []string{"API_TOKEN"}, manifest.Permissions.Secrets)
+	require.Equal(t, []string{"reviewer"}, manifest.Permissions.Tools)
+	require.Equal(t, 4096, manifest.Output.StdoutMaxBytes)
+	require.Equal(t, "gh:tomMoulard/example", manifest.Trust.InstallSource)
+	require.Equal(t, []ArgumentSpec{{
+		Name:     "mode",
+		Allowed:  []string{"safe"},
+		Required: true,
+	}}, manifest.EntrypointArgs["run"])
+}
+
 func TestFindManifest_PrefersYAMLThenYMLThenJSON(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -190,6 +253,99 @@ entrypoints:
 			if got := err.Error(); !strings.Contains(got, "escapes plugin root") {
 				require.Failf(t, "unexpected error", "error = %q", got)
 			}
+		})
+	}
+}
+
+func TestLoadDir_RejectsInvalidSecurityDeclarations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name: "filesystem write escapes root",
+			content: `
+name: escape
+version: "1"
+permissions:
+  filesystem:
+    write:
+      - ../outside
+`,
+			want: "escapes plugin root",
+		},
+		{
+			name: "invalid env name",
+			content: `
+name: bad-env
+version: "1"
+permissions:
+  env:
+    - BAD-NAME
+`,
+			want: "not a valid environment variable name",
+		},
+		{
+			name: "network hosts without allow",
+			content: `
+name: bad-network
+version: "1"
+permissions:
+  network:
+    hosts:
+      - api.example.com
+`,
+			want: "network hosts require allow: true",
+		},
+		{
+			name: "missing output limit",
+			content: `
+name: bad-output
+version: "1"
+output:
+  stdout_max_bytes: 4096
+`,
+			want: "stderr_max_bytes must be positive",
+		},
+		{
+			name: "entrypoint args without entrypoint",
+			content: `
+name: bad-args
+version: "1"
+entrypoint_args:
+  run: []
+`,
+			want: `entrypoint_args "run" has no matching entrypoint`,
+		},
+		{
+			name: "required arg after optional",
+			content: `
+name: bad-args
+version: "1"
+entrypoints:
+  run: bin/run
+entrypoint_args:
+  run:
+    - name: optional
+    - name: required
+      required: true
+`,
+			want: `required after optional argument`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeManifest(t, dir, "plugin.yaml", tt.content)
+
+			_, err := LoadDir(dir)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.want)
 		})
 	}
 }

@@ -440,6 +440,109 @@ func TestFormatPluginDryRun(t *testing.T) {
 	}
 }
 
+func TestRunPluginEntrypointRequiresConfiguredPolicy(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	marker := filepath.Join(root, "executed")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "bin"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "plugin.yaml"), []byte(`
+name: runner
+version: "1.0.0"
+entrypoints:
+  run: bin/run
+entrypoint_args:
+  run: []
+permissions:
+  filesystem:
+    read:
+      - "."
+    write: []
+  network:
+    allow: false
+    hosts: []
+  shell:
+    allow: true
+  env: []
+  secrets: []
+  tools: []
+output:
+  stdout_max_bytes: 4096
+  stderr_max_bytes: 4096
+trust:
+  enabled: true
+  install_source: test
+  checksum: sha256:test
+  audit:
+    - action: accepted
+`), 0o600))
+	scriptPath := filepath.Join(root, "bin", "run")
+	require.NoError(t, os.WriteFile(scriptPath, []byte(`#!/bin/sh
+printf executed > executed
+`), 0o600))
+	//nolint:gosec // Test fixture intentionally creates an executable plugin script.
+	require.NoError(t, os.Chmod(scriptPath, 0o700))
+
+	err := runPluginEntrypoint(t.Context(), []string{root}, nil, "runner/run", "", false, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plugins.policy must accept requested permissions")
+	require.NoFileExists(t, marker)
+}
+
+func TestFormatPluginDescriptionIncludesSecurityMetadata(t *testing.T) {
+	t.Parallel()
+
+	out, err := formatPluginDescription(attelerplugin.Plugin{
+		Manifest: attelerplugin.Manifest{
+			Name:        "reviewer",
+			Version:     "1.0.0",
+			Description: "Reviews code",
+			Entrypoints: map[string]string{
+				"run": "bin/run",
+			},
+			EntrypointArgs: map[string][]attelerplugin.ArgumentSpec{
+				"run": nil,
+			},
+			Permissions: &attelerplugin.PermissionSet{
+				Filesystem: attelerplugin.FilesystemPermissions{
+					Read: []string{"."},
+				},
+				Env: []string{"PATH"},
+			},
+			Output: &attelerplugin.OutputLimits{
+				StdoutMaxBytes: 4096,
+				StderrMaxBytes: 4096,
+			},
+			Trust: &attelerplugin.Trust{
+				Enabled:       true,
+				InstallSource: "test",
+				Checksum:      "sha256:test",
+				Audit: []attelerplugin.TrustAudit{{
+					Action: "accepted",
+					Actor:  "test",
+				}},
+			},
+		},
+		Root:         "/tmp/plugin",
+		ManifestPath: "/tmp/plugin/plugin.yaml",
+	})
+	require.NoError(t, err)
+
+	for _, want := range []string{
+		"permissions:",
+		"filesystem:",
+		"env:",
+		"entrypoint_args:",
+		"output:",
+		"stdout_max_bytes: 4096",
+		"trust:",
+		"install_source: test",
+		"checksum: sha256:test",
+	} {
+		assert.Contains(t, out, want)
+	}
+}
+
 func TestFormatMemoryResult(t *testing.T) {
 	t.Parallel()
 
@@ -734,6 +837,22 @@ func TestInitRTKPluginWritesManifestAndScripts(t *testing.T) {
 	assert.Equal(t, "rtk", manifest.Name)
 	assert.Contains(t, manifest.Capabilities, "token-optimization")
 	assert.Equal(t, "bin/init-codex", manifest.Entrypoints["init-codex"])
+	require.NotNil(t, manifest.Permissions)
+	assert.Equal(t, []string{"."}, manifest.Permissions.Filesystem.Read)
+	assert.True(t, manifest.Permissions.Shell.Allow)
+	assert.Contains(t, manifest.Permissions.Env, "PATH")
+	require.NotNil(t, manifest.Output)
+	assert.Equal(t, 65536, manifest.Output.StdoutMaxBytes)
+	require.NotNil(t, manifest.Trust)
+	assert.True(t, manifest.Trust.Enabled)
+	assert.Equal(t, "atteler plugins init-rtk", manifest.Trust.InstallSource)
+	_, ok := manifest.EntrypointArgs["init-codex"]
+	assert.True(t, ok)
+
+	snippet := rtkPluginConfigSnippet(dir)
+	assert.Contains(t, snippet, "policy:")
+	assert.Contains(t, snippet, "trusted_install_sources:")
+	assert.Contains(t, snippet, "atteler plugins init-rtk")
 
 	script, err := os.ReadFile(filepath.Join(dir, "bin", "init-codex"))
 	require.NoError(t, err)

@@ -46,13 +46,17 @@ func listPlugins(paths []string) error {
 
 //nolint:govet // YAML readability is more important than pointer-byte packing here.
 type pluginDescription struct {
-	Entrypoints  map[string]string `yaml:"entrypoints,omitempty"`
-	Capabilities []string          `yaml:"capabilities,omitempty"`
-	Name         string            `yaml:"name"`
-	Version      string            `yaml:"version"`
-	Description  string            `yaml:"description,omitempty"`
-	Root         string            `yaml:"root"`
-	ManifestPath string            `yaml:"manifest_path"`
+	Permissions    *attelerplugin.PermissionSet            `yaml:"permissions,omitempty"`
+	Output         *attelerplugin.OutputLimits             `yaml:"output,omitempty"`
+	Trust          *attelerplugin.Trust                    `yaml:"trust,omitempty"`
+	EntrypointArgs map[string][]attelerplugin.ArgumentSpec `yaml:"entrypoint_args,omitempty"`
+	Entrypoints    map[string]string                       `yaml:"entrypoints,omitempty"`
+	Capabilities   []string                                `yaml:"capabilities,omitempty"`
+	Name           string                                  `yaml:"name"`
+	Version        string                                  `yaml:"version"`
+	Description    string                                  `yaml:"description,omitempty"`
+	Root           string                                  `yaml:"root"`
+	ManifestPath   string                                  `yaml:"manifest_path"`
 }
 
 func describePlugin(paths []string, name string) error {
@@ -66,22 +70,37 @@ func describePlugin(paths []string, name string) error {
 		return fmt.Errorf("describe plugin: plugin %q not found", strings.TrimSpace(name))
 	}
 
+	out, err := formatPluginDescription(plugin)
+	if err != nil {
+		return fmt.Errorf("describe plugin: marshal %q: %w", name, err)
+	}
+
+	fmt.Print(out)
+
+	return nil
+}
+
+func formatPluginDescription(plugin attelerplugin.Plugin) (string, error) {
 	out, err := yaml.Marshal(pluginDescription{
 		Name:         plugin.Manifest.Name,
 		Version:      plugin.Manifest.Version,
 		Description:  plugin.Manifest.Description,
 		Capabilities: append([]string(nil), plugin.Manifest.Capabilities...),
 		Entrypoints:  copyStringMap(plugin.Manifest.Entrypoints),
+		EntrypointArgs: copyEntrypointArgsMap(
+			plugin.Manifest.EntrypointArgs,
+		),
+		Permissions:  copyPermissions(plugin.Manifest.Permissions),
+		Output:       copyOutputLimits(plugin.Manifest.Output),
+		Trust:        copyTrust(plugin.Manifest.Trust),
 		Root:         plugin.Root,
 		ManifestPath: plugin.ManifestPath,
 	})
 	if err != nil {
-		return fmt.Errorf("describe plugin: marshal %q: %w", name, err)
+		return "", fmt.Errorf("marshal plugin description: %w", err)
 	}
 
-	fmt.Print(string(out))
-
-	return nil
+	return string(out), nil
 }
 
 func initRTKPlugin(dir string) error {
@@ -105,6 +124,38 @@ entrypoints:
   gain: bin/gain
   show: bin/show
   init-codex: bin/init-codex
+entrypoint_args:
+  version: []
+  gain: []
+  show: []
+  init-codex: []
+permissions:
+  filesystem:
+    read:
+      - "."
+    write: []
+  network:
+    allow: false
+    hosts: []
+  shell:
+    allow: true
+  env:
+    - PATH
+  secrets: []
+  tools:
+    - rtk
+output:
+  stdout_max_bytes: 65536
+  stderr_max_bytes: 65536
+trust:
+  enabled: true
+  install_source: atteler plugins init-rtk
+  checksum: generated-local-scaffold
+  revoked: false
+  audit:
+    - action: accepted
+      actor: atteler
+      at: scaffold
 `,
 		},
 		"bin/version": {
@@ -134,11 +185,36 @@ entrypoints:
 
 	fmt.Println("RTK plugin written to " + dir)
 	fmt.Println("Add this to your atteler config:")
-	fmt.Println("plugins:")
-	fmt.Println("  paths: [" + strconv.Quote(dir) + "]")
+	fmt.Println(rtkPluginConfigSnippet(dir))
 	fmt.Println("Then run: atteler --run-plugin rtk/version")
 
 	return nil
+}
+
+func rtkPluginConfigSnippet(dir string) string {
+	return `plugins:
+  paths: [` + strconv.Quote(dir) + `]
+  policy:
+    permissions:
+      filesystem:
+        read:
+          - "."
+        write: []
+      network:
+        allow: false
+        hosts: []
+      shell:
+        allow: true
+      env:
+        - PATH
+      secrets: []
+      tools:
+        - rtk
+    output:
+      stdout_max_bytes: 65536
+      stderr_max_bytes: 65536
+    trusted_install_sources:
+      - atteler plugins init-rtk`
 }
 
 type rtkPluginFile struct {
@@ -175,6 +251,7 @@ func writeRTKPluginFile(path, content string, mode os.FileMode) error {
 func runPluginEntrypoint(
 	ctx context.Context,
 	paths []string,
+	policy *attelerplugin.Policy,
 	target, entrypointName string,
 	dryRun bool,
 	timeoutSeconds int,
@@ -210,7 +287,16 @@ func runPluginEntrypoint(
 		timeout = 30 * time.Second
 	}
 
-	result, err := attelerplugin.RunEntrypoint(ctx, plugin.Root, plugin.Manifest, entrypointName, timeout)
+	if policy == nil {
+		return errors.New("run plugin: plugins.policy must accept requested permissions before execution")
+	}
+
+	acceptedPolicy := attelerplugin.ClonePolicy(*policy)
+
+	result, err := attelerplugin.RunEntrypointWithOptions(ctx, plugin.Root, plugin.Manifest, entrypointName, attelerplugin.RunOptions{
+		Policy:  &acceptedPolicy,
+		Timeout: timeout,
+	})
 	if result.Stdout != "" {
 		fmt.Print(result.Stdout)
 	}
@@ -267,4 +353,64 @@ func copyStringMap(in map[string]string) map[string]string {
 	maps.Copy(out, in)
 
 	return out
+}
+
+func copyEntrypointArgsMap(in map[string][]attelerplugin.ArgumentSpec) map[string][]attelerplugin.ArgumentSpec {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string][]attelerplugin.ArgumentSpec, len(in))
+	for name, args := range in {
+		out[name] = append([]attelerplugin.ArgumentSpec(nil), args...)
+	}
+
+	return out
+}
+
+func copyPermissions(in *attelerplugin.PermissionSet) *attelerplugin.PermissionSet {
+	if in == nil {
+		return nil
+	}
+
+	out := *in
+	out.Filesystem.Read = append([]string(nil), in.Filesystem.Read...)
+	out.Filesystem.Write = append([]string(nil), in.Filesystem.Write...)
+	out.Network.Hosts = append([]string(nil), in.Network.Hosts...)
+	out.Env = append([]string(nil), in.Env...)
+	out.Secrets = append([]string(nil), in.Secrets...)
+	out.Tools = append([]string(nil), in.Tools...)
+
+	return &out
+}
+
+func copyOutputLimits(in *attelerplugin.OutputLimits) *attelerplugin.OutputLimits {
+	if in == nil {
+		return nil
+	}
+
+	out := *in
+
+	return &out
+}
+
+func copyTrust(in *attelerplugin.Trust) *attelerplugin.Trust {
+	if in == nil {
+		return nil
+	}
+
+	out := *in
+	out.Audit = append([]attelerplugin.TrustAudit(nil), in.Audit...)
+
+	return &out
+}
+
+func clonePluginPolicy(in *attelerplugin.Policy) *attelerplugin.Policy {
+	if in == nil {
+		return nil
+	}
+
+	out := attelerplugin.ClonePolicy(*in)
+
+	return &out
 }

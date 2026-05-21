@@ -150,6 +150,25 @@ func TestGroupedCLIHelpAndRouting(t *testing.T) {
     system_prompt: Review code carefully.
 plugins:
   paths: ["./plugin"]
+  policy:
+    permissions:
+      filesystem:
+        read:
+          - "."
+        write: []
+      network:
+        allow: false
+        hosts: []
+      shell:
+        allow: true
+      env: []
+      secrets: []
+      tools: []
+    output:
+      stdout_max_bytes: 4096
+      stderr_max_bytes: 4096
+    trusted_install_sources:
+      - e2e
 `)
 	writeFile(t, filepath.Join(pluginDir, "plugin.yaml"), `name: runner
 version: "1.0.0"
@@ -376,12 +395,57 @@ func TestWorkflowUtilityCommands(t *testing.T) {
     triggers: ["review this"]
 plugins:
   paths: ["./plugin"]
+  policy:
+    permissions:
+      filesystem:
+        read:
+          - "."
+        write: []
+      network:
+        allow: false
+        hosts: []
+      shell:
+        allow: true
+      env: []
+      secrets: []
+      tools: []
+    output:
+      stdout_max_bytes: 4096
+      stderr_max_bytes: 4096
+    trusted_install_sources:
+      - e2e
 `)
 	writeFile(t, filepath.Join(pluginDir, "plugin.yaml"), `name: runner
 version: "1.0.0"
 description: Runner plugin
 entrypoints:
   run: bin/run
+entrypoint_args:
+  run: []
+permissions:
+  filesystem:
+    read:
+      - "."
+    write: []
+  network:
+    allow: false
+    hosts: []
+  shell:
+    allow: true
+  env: []
+  secrets: []
+  tools: []
+output:
+  stdout_max_bytes: 4096
+  stderr_max_bytes: 4096
+trust:
+  enabled: true
+  install_source: e2e
+  checksum: sha256:e2e
+  revoked: false
+  audit:
+    - action: accepted
+      actor: e2e
 `)
 	writeExecutable(t, filepath.Join(pluginDir, "bin", "run"), `#!/bin/sh
 printf 'plugin-output\n'
@@ -398,6 +462,10 @@ printf 'plugin-output\n'
 	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "--describe-plugin", "runner")
 	assertContains(t, result.stdout, "name: runner")
 	assertContains(t, result.stdout, "entrypoints:")
+	assertContains(t, result.stdout, "permissions:")
+	assertContains(t, result.stdout, "output:")
+	assertContains(t, result.stdout, "trust:")
+	assertContains(t, result.stdout, "install_source: e2e")
 
 	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "--run-plugin", "runner/run", "--plugin-dry-run")
 	assertContains(t, result.stdout, `would run plugin "runner" entrypoint "run"`)
