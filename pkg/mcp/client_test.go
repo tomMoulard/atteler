@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,28 @@ func TestInvoke_SendsNewlineDelimitedJSONAndReadsResponse(t *testing.T) {
 	assert.Equal(t, map[string]any{"message": "hello"}, result["params"])
 	assert.Equal(t, "from-test", result["env"])
 	assert.Equal(t, realPath(t, server.CWD), result["cwd"])
+}
+
+func TestInvoke_ReadsFastExitingOneShotServerResponse(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("shell helper uses POSIX sh")
+	}
+
+	helper := filepath.Join(t.TempDir(), "mcp-helper")
+	script := "#!/bin/sh\n" +
+		"read line\n" +
+		"printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"source\":\"fast-helper\"}}\\n'\n"
+	require.NoError(t, os.WriteFile(helper, []byte(script), 0o600))
+
+	response, err := Invoke(t.Context(), Server{Name: "helper", Command: "sh", Args: []string{helper}}, Request{
+		ID:     1,
+		Method: "ping",
+	}, helperTimeout)
+
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"ok":true,"source":"fast-helper"}`, string(response.Result))
 }
 
 func TestCallTool_UsesToolsCallMethod(t *testing.T) {
