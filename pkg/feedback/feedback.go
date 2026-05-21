@@ -2,6 +2,8 @@
 package feedback
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,6 +11,17 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/session"
 )
+
+func evidenceReference(kind, description string) string {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		kind = "evidence"
+	}
+
+	sum := sha256.Sum256([]byte(kind + "\n" + strings.TrimSpace(description)))
+
+	return kind + ":" + hex.EncodeToString(sum[:8])
+}
 
 const unknownAgent = "unknown"
 
@@ -59,9 +72,13 @@ const (
 
 // Proposal describes a focused agent improvement suggested by session feedback.
 type Proposal struct {
+	ExpiresAt            *time.Time
+	ID                   string
 	Agent                string
 	Action               string
 	Reason               string
+	SourceRun            string
+	Reviewer             string
 	RootCause            RootCauseClassification
 	TargetBehavior       string
 	RejectedAlternatives []RejectedAlternative
@@ -82,6 +99,10 @@ type proposalGroup struct {
 func FromSession(saved session.Session) []Proposal {
 	proposals := Proposals(saved.Evaluations, saved.NegativeKnowledge)
 	attachFixtureProofs(proposals, saved.Artifacts, latestSignalTimes(saved.Evaluations, saved.NegativeKnowledge))
+
+	for i := range proposals {
+		proposals[i].SourceRun = strings.TrimSpace(saved.ID)
+	}
 
 	return proposals
 }

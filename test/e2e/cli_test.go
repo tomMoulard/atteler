@@ -649,19 +649,19 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 		"--feedback-apply-config", configPath,
 		"--feedback-history", feedbackHistory,
 	)
-	assertContains(t, result.stdout, "Applied 1 feedback proposal")
+	assertContains(t, result.stdout, "Recorded 1 pending feedback guidance decision")
 
 	configData, err := os.ReadFile(configPath)
 	require.NoError(t, err)
-	assertContains(t, string(configData), "Feedback-derived guidance:")
+	assertContains(t, string(configData), "feedback_guidance:")
+	assertContains(t, string(configData), "status: pending")
+	assertContains(t, string(configData), "source_run: feedback")
+	assertNotContains(t, string(configData), "Feedback-derived guidance:")
 
 	historyData, err := os.ReadFile(feedbackHistory)
 	require.NoError(t, err)
 	assertContains(t, string(historyData), "agent: reviewer")
-	assertContains(t, string(historyData), "status: accepted")
-	assertContains(t, string(historyData), "before_prompt_hash: sha256:")
-	assertContains(t, string(historyData), "after_prompt_hash: sha256:")
-	assertContains(t, string(historyData), "phase=after\tkind=eval\tpassed=true")
+	assertContains(t, string(historyData), "status: pending")
 }
 
 func TestSessionCommands(t *testing.T) {

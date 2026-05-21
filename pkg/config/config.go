@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -52,20 +53,49 @@ type AgentConfig struct {
 
 	ToolPermissions map[string]bool `json:"tools,omitempty" yaml:"tools,omitempty"`
 
-	Model          string   `json:"model,omitempty" yaml:"model,omitempty"`
-	Mode           string   `json:"mode,omitempty" yaml:"mode,omitempty"`
-	ReasoningLevel string   `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
-	Description    string   `json:"description,omitempty" yaml:"description,omitempty"`
-	Personality    string   `json:"personality,omitempty" yaml:"personality,omitempty"`
-	SystemPrompt   string   `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
-	FallbackModels []string `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
-	Capabilities   []string `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
-	Triggers       []string `json:"triggers,omitempty" yaml:"triggers,omitempty"`
-	References     []string `json:"references,omitempty" yaml:"references,omitempty"`
-	MaxTokens      int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
-	Hidden         bool     `json:"hidden,omitempty" yaml:"hidden,omitempty"`
+	Model            string             `json:"model,omitempty" yaml:"model,omitempty"`
+	Mode             string             `json:"mode,omitempty" yaml:"mode,omitempty"`
+	ReasoningLevel   string             `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
+	Description      string             `json:"description,omitempty" yaml:"description,omitempty"`
+	Personality      string             `json:"personality,omitempty" yaml:"personality,omitempty"`
+	SystemPrompt     string             `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
+	FallbackModels   []string           `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
+	Capabilities     []string           `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+	Triggers         []string           `json:"triggers,omitempty" yaml:"triggers,omitempty"`
+	References       []string           `json:"references,omitempty" yaml:"references,omitempty"`
+	FeedbackGuidance []FeedbackGuidance `json:"feedback_guidance,omitempty" yaml:"feedback_guidance,omitempty"`
+	MaxTokens        int                `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+	Hidden           bool               `json:"hidden,omitempty" yaml:"hidden,omitempty"`
 
 	hiddenSet bool
+}
+
+// FeedbackGuidance stores an auditable feedback-derived prompt instruction.
+//
+//nolint:govet // Field order keeps persisted YAML provenance/audit records readable.
+type FeedbackGuidance struct {
+	ID             string                       `json:"id,omitempty" yaml:"id,omitempty"`
+	Status         string                       `json:"status,omitempty" yaml:"status,omitempty"`
+	SourceRun      string                       `json:"source_run,omitempty" yaml:"source_run,omitempty"`
+	Action         string                       `json:"action,omitempty" yaml:"action,omitempty"`
+	Reason         string                       `json:"reason,omitempty" yaml:"reason,omitempty"`
+	Evidence       []string                     `json:"evidence,omitempty" yaml:"evidence,omitempty"`
+	Confidence     float64                      `json:"confidence,omitempty" yaml:"confidence,omitempty"`
+	Reviewer       string                       `json:"reviewer,omitempty" yaml:"reviewer,omitempty"`
+	CreatedAt      time.Time                    `json:"created_at,omitzero" yaml:"created_at,omitempty"`
+	UpdatedAt      time.Time                    `json:"updated_at,omitzero" yaml:"updated_at,omitempty"`
+	ExpiresAt      *time.Time                   `json:"expires_at,omitempty" yaml:"expires_at,omitempty"`
+	ConflictWith   []string                     `json:"conflict_with,omitempty" yaml:"conflict_with,omitempty"`
+	RollbackReason string                       `json:"rollback_reason,omitempty" yaml:"rollback_reason,omitempty"`
+	Audit          []FeedbackGuidanceAuditEvent `json:"audit,omitempty" yaml:"audit,omitempty"`
+}
+
+// FeedbackGuidanceAuditEvent records a lifecycle transition for feedback guidance.
+type FeedbackGuidanceAuditEvent struct {
+	At     time.Time `json:"at,omitzero" yaml:"at,omitempty"`
+	Actor  string    `json:"actor,omitempty" yaml:"actor,omitempty"`
+	Action string    `json:"action,omitempty" yaml:"action,omitempty"`
+	Reason string    `json:"reason,omitempty" yaml:"reason,omitempty"`
 }
 
 // HookConfig configures a local command to receive atteler lifecycle events.
@@ -147,22 +177,23 @@ type fileProviderConfig struct {
 }
 
 type fileAgentConfig struct {
-	Personality     *string         `json:"personality" yaml:"personality"`
-	TopP            *float64        `json:"top_p" yaml:"top_p"`
-	Seed            *int            `json:"seed" yaml:"seed"`
-	Model           *string         `json:"model" yaml:"model"`
-	Mode            *string         `json:"mode" yaml:"mode"`
-	ReasoningLevel  *string         `json:"reasoning_level" yaml:"reasoning_level"`
-	Description     *string         `json:"description" yaml:"description"`
-	Temperature     *float64        `json:"temperature" yaml:"temperature"`
-	SystemPrompt    *string         `json:"system_prompt" yaml:"system_prompt"`
-	ToolPermissions map[string]bool `json:"tools" yaml:"tools"`
-	MaxTokens       *int            `json:"max_tokens" yaml:"max_tokens"`
-	Hidden          *bool           `json:"hidden" yaml:"hidden"`
-	FallbackModels  []string        `json:"fallback_models" yaml:"fallback_models"`
-	Capabilities    []string        `json:"capabilities" yaml:"capabilities"`
-	Triggers        []string        `json:"triggers" yaml:"triggers"`
-	References      []string        `json:"references" yaml:"references"`
+	Personality      *string            `json:"personality" yaml:"personality"`
+	TopP             *float64           `json:"top_p" yaml:"top_p"`
+	Seed             *int               `json:"seed" yaml:"seed"`
+	Model            *string            `json:"model" yaml:"model"`
+	Mode             *string            `json:"mode" yaml:"mode"`
+	ReasoningLevel   *string            `json:"reasoning_level" yaml:"reasoning_level"`
+	Description      *string            `json:"description" yaml:"description"`
+	Temperature      *float64           `json:"temperature" yaml:"temperature"`
+	SystemPrompt     *string            `json:"system_prompt" yaml:"system_prompt"`
+	ToolPermissions  map[string]bool    `json:"tools" yaml:"tools"`
+	MaxTokens        *int               `json:"max_tokens" yaml:"max_tokens"`
+	Hidden           *bool              `json:"hidden" yaml:"hidden"`
+	FallbackModels   []string           `json:"fallback_models" yaml:"fallback_models"`
+	Capabilities     []string           `json:"capabilities" yaml:"capabilities"`
+	Triggers         []string           `json:"triggers" yaml:"triggers"`
+	References       []string           `json:"references" yaml:"references"`
+	FeedbackGuidance []FeedbackGuidance `json:"feedback_guidance" yaml:"feedback_guidance"`
 }
 
 //nolint:govet // field order follows config-file grouping.
@@ -536,6 +567,11 @@ func mergeFileAgent(current *AgentConfig, agent fileAgentConfig, rec *originReco
 		rec.replace(agentFieldPath(name, "references"), source, current.References, "replaces the entire reference list")
 	}
 
+	if agent.FeedbackGuidance != nil {
+		current.FeedbackGuidance = cloneFeedbackGuidance(agent.FeedbackGuidance)
+		rec.replace(agentFieldPath(name, "feedback_guidance"), source, current.FeedbackGuidance, "replaces the entire feedback guidance list")
+	}
+
 	if agent.MaxTokens != nil {
 		current.MaxTokens = *agent.MaxTokens
 		rec.set(agentFieldPath(name, "max_tokens"), source, *agent.MaxTokens)
@@ -847,6 +883,11 @@ func mergeConfigAgentSlicesAndPointers(current *AgentConfig, agent AgentConfig, 
 		current.References = append([]string(nil), agent.References...)
 		rec.replace(agentFieldPath(name, "references"), source, current.References, "replaces the entire reference list")
 	}
+
+	if agent.FeedbackGuidance != nil {
+		current.FeedbackGuidance = cloneFeedbackGuidance(agent.FeedbackGuidance)
+		rec.replace(agentFieldPath(name, "feedback_guidance"), source, current.FeedbackGuidance, "replaces the entire feedback guidance list")
+	}
 }
 
 func mergeConfigHooks(dst *Config, hooks map[string][]HookConfig, rec *originRecorder, source originSource) {
@@ -1155,6 +1196,12 @@ func mergeConfigAgentSlicesAndPointersFromOrigins(
 
 		appendOriginChain(dstOrigins, agentFieldPath(name, "references"), srcOrigins, true)
 	}
+
+	if agent.FeedbackGuidance != nil {
+		current.FeedbackGuidance = cloneFeedbackGuidance(agent.FeedbackGuidance)
+
+		appendOriginChain(dstOrigins, agentFieldPath(name, "feedback_guidance"), srcOrigins, true)
+	}
 }
 
 func mergeConfigHooksFromOrigins(dst *Config, hooks map[string][]HookConfig, dstOrigins, srcOrigins OriginMap) {
@@ -1275,6 +1322,30 @@ func cloneHooks(hooks []HookConfig) []HookConfig {
 			Env:            cloneMap(hook.Env),
 			TimeoutSeconds: hook.TimeoutSeconds,
 		})
+	}
+
+	return out
+}
+
+func cloneFeedbackGuidance(records []FeedbackGuidance) []FeedbackGuidance {
+	if len(records) == 0 {
+		return nil
+	}
+
+	out := make([]FeedbackGuidance, 0, len(records))
+	for i := range records {
+		record := &records[i]
+		next := *record
+		next.Evidence = append([]string(nil), record.Evidence...)
+		next.ConflictWith = append([]string(nil), record.ConflictWith...)
+		next.Audit = append([]FeedbackGuidanceAuditEvent(nil), record.Audit...)
+
+		if record.ExpiresAt != nil {
+			expiresAt := *record.ExpiresAt
+			next.ExpiresAt = &expiresAt
+		}
+
+		out = append(out, next)
 	}
 
 	return out

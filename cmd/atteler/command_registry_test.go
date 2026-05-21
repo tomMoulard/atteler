@@ -202,6 +202,18 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			wantTier: tierStateful,
 		},
 		{
+			name:     "agents feedback rollback routes providerless config",
+			args:     []string{"agents", "--feedback-rollback-agent", "reviewer", "--feedback-rollback-id", "fg-1", "feedback-rollback", "agents.yaml"},
+			wantName: "feedback-rollback",
+			wantTier: tierProviderlessConfig,
+		},
+		{
+			name:     "agents feedback approve routes providerless config",
+			args:     []string{"agents", "--feedback-approve-agent", "reviewer", "--feedback-approve-id", "fg-1", "feedback-approve", "agents.yaml"},
+			wantName: "feedback-approve",
+			wantTier: tierProviderlessConfig,
+		},
+		{
 			name:     "agents bash routes stateful local execution",
 			args:     []string{"agents", "bash", "echo", "hello"},
 			wantName: "bash-command",

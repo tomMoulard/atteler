@@ -324,29 +324,26 @@ func TestApplyFeedbackProposalsWritesConfigAndHistory(t *testing.T) {
 	cfg, _, err := config.LoadFiles([]string{configPath})
 	require.NoError(t, err)
 	require.Contains(t, cfg.Agents, "reviewer")
-	assert.Contains(t, cfg.Agents["reviewer"].SystemPrompt, "Review code.")
-	assert.Contains(t, cfg.Agents["reviewer"].SystemPrompt, "Feedback-derived guidance:")
-	assert.Contains(t, cfg.Agents["reviewer"].SystemPrompt, "skip regression tests")
+	assert.Equal(t, "Review code.", cfg.Agents["reviewer"].SystemPrompt)
+	require.Len(t, cfg.Agents["reviewer"].FeedbackGuidance, 1)
+	record := cfg.Agents["reviewer"].FeedbackGuidance[0]
+	assert.NotEmpty(t, record.ID)
+	assert.Equal(t, feedback.GuidanceStatusPending, record.Status)
+	assert.Equal(t, saved.ID, record.SourceRun)
+	assert.Equal(t, "feedback-apply", record.Reviewer)
+	assert.Contains(t, record.Evidence, "negative knowledge: skip regression tests -> hid an auth regression")
+	rendered := feedback.RenderSystemPrompt(cfg.Agents["reviewer"].SystemPrompt, cfg.Agents["reviewer"].FeedbackGuidance, record.CreatedAt)
+	assert.Equal(t, "Review code.", rendered)
 
 	historyData, err := os.ReadFile(historyPath)
 	require.NoError(t, err)
 
 	history := string(historyData)
-	assert.Contains(t, history, "## Applied feedback")
+	assert.Contains(t, history, "## Feedback guidance decisions")
+	assert.Contains(t, history, "status: pending")
+	assert.Contains(t, history, "source_run: "+saved.ID)
 	assert.Contains(t, history, "agent: reviewer")
-	assert.Contains(t, history, "status: accepted")
-	assert.Contains(t, history, "author: atteler feedback apply")
-	assert.Contains(t, history, "source: session:"+saved.ID)
-	assert.Contains(t, history, "before_prompt_hash: sha256:")
-	assert.Contains(t, history, "after_prompt_hash: sha256:")
 	assert.Contains(t, history, "negative knowledge: skip regression tests -> hid an auth regression")
-	assert.Contains(t, history, "linked_evidence:")
-	assert.Contains(t, history, "verification:")
-	assert.Contains(t, history, "phase=before\tkind=eval\tpassed=false")
-	assert.Contains(t, history, "phase=after\tkind=eval\tpassed=true")
-	assert.Contains(t, history, "rollback:")
-	assert.Contains(t, history, "diff:")
-	assert.Contains(t, history, "rollback_diff:")
 }
 
 func TestApplyFeedbackProposalsRestoresConfigWhenHistoryWriteFails(t *testing.T) {
@@ -378,4 +375,158 @@ func TestApplyFeedbackProposalsRestoresConfigWhenHistoryWriteFails(t *testing.T)
 	require.NoError(t, loadErr)
 	require.Contains(t, cfg.Agents, "reviewer")
 	assert.Equal(t, "Review code.", cfg.Agents["reviewer"].SystemPrompt)
+}
+
+func TestApproveFeedbackGuidanceWritesConfigAndHistory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "atteler.yaml")
+	historyPath := filepath.Join(dir, "feedback.md")
+
+	if err := os.WriteFile(configPath, []byte(`agents:
+  reviewer:
+    system_prompt: Review code.
+    feedback_guidance:
+      - id: fg-approve
+        status: pending
+        source_run: run-123
+        action: Always run focused tests.
+        reason: Previous run skipped tests.
+        evidence:
+          - "evaluation: fail"
+        confidence: 0.8
+        reviewer: alice
+        created_at: "2026-05-21T10:00:00Z"
+        updated_at: "2026-05-21T10:00:00Z"
+        audit:
+          - at: "2026-05-21T10:00:00Z"
+            actor: alice
+            action: pending
+`), 0o600); err != nil {
+		require.NoError(t, err)
+	}
+
+	err := approveFeedbackGuidance(configPath, historyPath, "reviewer", "fg-approve")
+
+	require.NoError(t, err)
+	cfg, _, err := config.LoadFiles([]string{configPath})
+	require.NoError(t, err)
+	require.Contains(t, cfg.Agents, "reviewer")
+	require.Len(t, cfg.Agents["reviewer"].FeedbackGuidance, 1)
+	record := cfg.Agents["reviewer"].FeedbackGuidance[0]
+	assert.Equal(t, feedback.GuidanceStatusApproved, record.Status)
+	assert.Equal(t, "feedback-approve", record.Reviewer)
+	assert.NotEmpty(t, record.Audit)
+	assert.Equal(t, "feedback-approve", record.Audit[len(record.Audit)-1].Actor)
+	assert.Contains(t, feedback.RenderSystemPrompt(cfg.Agents["reviewer"].SystemPrompt, cfg.Agents["reviewer"].FeedbackGuidance, record.UpdatedAt), "Always run focused tests.")
+
+	historyData, err := os.ReadFile(historyPath)
+	require.NoError(t, err)
+
+	history := string(historyData)
+	assert.Contains(t, history, "status: approved")
+	assert.Contains(t, history, "reviewer: feedback-approve")
+	assert.Contains(t, history, "id: fg-approve")
+}
+
+func TestApproveFeedbackGuidanceQuarantinesUnapprovableGuidance(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "atteler.yaml")
+	historyPath := filepath.Join(dir, "feedback.md")
+
+	if err := os.WriteFile(configPath, []byte(`agents:
+  reviewer:
+    system_prompt: Review code.
+    feedback_guidance:
+      - id: fg-missing-source
+        status: pending
+        source_run: unknown
+        action: Always run focused tests.
+        reason: Previous run skipped tests.
+        evidence:
+          - "evaluation: fail"
+        confidence: 0.8
+        reviewer: alice
+        created_at: "2026-05-21T10:00:00Z"
+        updated_at: "2026-05-21T10:00:00Z"
+        audit:
+          - at: "2026-05-21T10:00:00Z"
+            actor: alice
+            action: pending
+`), 0o600); err != nil {
+		require.NoError(t, err)
+	}
+
+	err := approveFeedbackGuidance(configPath, historyPath, "reviewer", "fg-missing-source")
+
+	require.NoError(t, err)
+	cfg, _, err := config.LoadFiles([]string{configPath})
+	require.NoError(t, err)
+	require.Contains(t, cfg.Agents, "reviewer")
+	require.Len(t, cfg.Agents["reviewer"].FeedbackGuidance, 1)
+	record := cfg.Agents["reviewer"].FeedbackGuidance[0]
+	assert.Equal(t, feedback.GuidanceStatusQuarantined, record.Status)
+	assert.Equal(t, "feedback-approve", record.Reviewer)
+	require.NotEmpty(t, record.Audit)
+	assert.Equal(t, "feedback-approve", record.Audit[len(record.Audit)-1].Actor)
+	assert.Equal(t, "Review code.", feedback.RenderSystemPrompt(cfg.Agents["reviewer"].SystemPrompt, cfg.Agents["reviewer"].FeedbackGuidance, record.UpdatedAt))
+
+	historyData, err := os.ReadFile(historyPath)
+	require.NoError(t, err)
+
+	history := string(historyData)
+	assert.Contains(t, history, "status: quarantined")
+	assert.Contains(t, history, "reviewer: feedback-approve")
+	assert.Contains(t, history, "id: fg-missing-source")
+}
+
+func TestRollbackFeedbackGuidanceWritesConfigAndHistory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "atteler.yaml")
+	historyPath := filepath.Join(dir, "feedback.md")
+
+	if err := os.WriteFile(configPath, []byte(`agents:
+  reviewer:
+    system_prompt: Review code.
+    feedback_guidance:
+      - id: fg-rollback
+        status: approved
+        source_run: run-123
+        action: Always run focused tests.
+        reason: Previous run skipped tests.
+        evidence:
+          - "evaluation: fail"
+        confidence: 0.8
+        reviewer: alice
+        created_at: "2026-05-21T10:00:00Z"
+        updated_at: "2026-05-21T10:00:00Z"
+`), 0o600); err != nil {
+		require.NoError(t, err)
+	}
+
+	err := rollbackFeedbackGuidance(configPath, historyPath, "reviewer", "fg-rollback", "superseded")
+
+	require.NoError(t, err)
+	cfg, _, err := config.LoadFiles([]string{configPath})
+	require.NoError(t, err)
+	require.Contains(t, cfg.Agents, "reviewer")
+	require.Len(t, cfg.Agents["reviewer"].FeedbackGuidance, 1)
+	record := cfg.Agents["reviewer"].FeedbackGuidance[0]
+	assert.Equal(t, feedback.GuidanceStatusRolledBack, record.Status)
+	assert.Equal(t, "superseded", record.RollbackReason)
+	assert.NotEmpty(t, record.Audit)
+	assert.Equal(t, "Review code.", feedback.RenderSystemPrompt(cfg.Agents["reviewer"].SystemPrompt, cfg.Agents["reviewer"].FeedbackGuidance, record.UpdatedAt))
+
+	historyData, err := os.ReadFile(historyPath)
+	require.NoError(t, err)
+
+	history := string(historyData)
+	assert.Contains(t, history, "status: rolled_back")
+	assert.Contains(t, history, "rollback_reason: superseded")
+	assert.Contains(t, history, "id: fg-rollback")
 }
