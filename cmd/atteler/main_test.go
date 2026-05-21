@@ -767,12 +767,24 @@ func TestPromptComplete_AgentCandidatesAndFormatting(t *testing.T) {
 		require.Failf(t, "unexpected suggestion", "got %+v", suggestions[0])
 	}
 
+	atSuggestions := promptcomplete.SuggestAll(promptcomplete.Context{
+		Input:  "ask @rev",
+		Cursor: len("ask @rev"),
+		Agents: promptAgentCandidates(registry),
+	}, promptcomplete.Options{})
+	require.NotEmpty(t, atSuggestions)
+	assert.Equal(t, "@"+testReviewerName, atSuggestions[0].Text)
+	assert.Equal(t, "iewer", atSuggestions[0].Suffix)
+
 	formatted := formatPromptSuggestions(suggestions[:1])
 	for _, want := range []string{
 		"text: " + testReviewerName + "\n",
 		"suffix: iewer\n",
 		"kind: agent\n",
+		"source: configured agents\n",
 		"replace: 4:7\n",
+		"rank:\n",
+		"  - prefix",
 	} {
 		if !strings.Contains(formatted, want) {
 			require.Failf(t, "formatted suggestion missing content", "missing %q in:\n%s", want, formatted)

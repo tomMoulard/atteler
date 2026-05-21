@@ -327,6 +327,7 @@ func lookupFlagDomain(name string) (string, bool) {
 	case name == "agent" || name == "list-agents" || name == "describe-agent" ||
 		name == "agent-performance-summary" ||
 		strings.HasPrefix(name, "plan-") || strings.HasPrefix(name, "prompt-complete") ||
+		name == "prompt-local-only" ||
 		strings.HasPrefix(name, "async-") || strings.HasPrefix(name, "spawn-") ||
 		strings.HasPrefix(name, "speculate-") || strings.HasPrefix(name, "task-") ||
 		strings.HasPrefix(name, "skill-") || strings.HasPrefix(name, "feedback-") ||

@@ -378,6 +378,7 @@ type cliOptions struct {
 	doctorOffline                      bool
 	helpRequested                      bool
 	readStdin                          bool
+	promptLocalOnly                    bool
 	headless                           bool
 	showVersion                        bool
 	useWorktree                        bool
@@ -412,4 +413,5 @@ type appState struct {
 	maxInputTokens      int
 	modelLocked         bool
 	autoMergeWorktree   bool
+	promptLocalOnly     bool
 }

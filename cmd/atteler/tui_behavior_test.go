@@ -21,6 +21,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
+	"github.com/tommoulard/atteler/pkg/tasklist"
 )
 
 func TestFZFInputAndSelection(t *testing.T) {
@@ -133,6 +134,62 @@ func (p idleSuggestionProvider) Complete(context.Context, llm.CompleteParams) (*
 }
 
 func (p idleSuggestionProvider) ModelContextWindow(string) int { return 0 }
+
+type capturingIdleSuggestionProvider struct {
+	params   *llm.CompleteParams
+	response string
+	model    string
+}
+
+func (p *capturingIdleSuggestionProvider) Name() string { return "capture" }
+
+func (p *capturingIdleSuggestionProvider) Models() []string { return []string{p.model} }
+
+func (p *capturingIdleSuggestionProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p *capturingIdleSuggestionProvider) HealthCheck(context.Context) error { return nil }
+
+func (p *capturingIdleSuggestionProvider) Complete(_ context.Context, params llm.CompleteParams) (*llm.Response, error) {
+	p.params = &params
+
+	return &llm.Response{Content: p.response, Model: p.model}, nil
+}
+
+func (p *capturingIdleSuggestionProvider) ModelContextWindow(string) int { return 0 }
+
+type cancelAwareIdleSuggestionProvider struct {
+	model  string
+	called bool
+}
+
+func (p *cancelAwareIdleSuggestionProvider) Name() string { return "cancel" }
+
+func (p *cancelAwareIdleSuggestionProvider) Models() []string { return []string{p.model} }
+
+func (p *cancelAwareIdleSuggestionProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p *cancelAwareIdleSuggestionProvider) HealthCheck(context.Context) error { return nil }
+
+func (p *cancelAwareIdleSuggestionProvider) Complete(ctx context.Context, params llm.CompleteParams) (*llm.Response, error) {
+	p.called = true
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(10 * time.Millisecond):
+		return &llm.Response{Content: "unused", Model: params.Model}, nil
+	}
+}
+
+func (p *cancelAwareIdleSuggestionProvider) ModelContextWindow(string) int { return 0 }
 
 func TestCallLLMBuffersProviderActivityEvents(t *testing.T) {
 	t.Parallel()
@@ -400,6 +457,33 @@ func TestPromptSuggestionAndApply(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestPromptSuggestionUsesTaskIDsWithoutModel(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	taskStore := tasklist.NewStore(taskListPath(store, ""))
+	_, err := taskStore.Add(context.Background(), tasklist.AddRequest{
+		ID:    "GH-27",
+		Title: "Make prompt completion context-aware",
+	})
+	require.NoError(t, err)
+
+	m := model{
+		ctx:          context.Background(),
+		sessionStore: store,
+		cwd:          dir,
+		textarea:     textarea.New(),
+	}
+	m.textarea.SetValue("task GH")
+	m.textarea.CursorEnd()
+
+	suggestion, ok := m.promptSuggestion()
+	require.True(t, ok)
+	assert.Equal(t, "GH-27", suggestion.Text)
+	assert.Equal(t, "task GH-27", applyPromptSuggestion(m.textarea.Value(), suggestion))
+}
+
 func TestIdleSuggestionRequestUsesProviderAndAcceptsSuffix(t *testing.T) {
 	t.Parallel()
 
@@ -444,6 +528,158 @@ func TestIdleSuggestionRequestUsesProviderAndAcceptsSuffix(t *testing.T) {
 	assert.Equal(t, "draft prompt with tests", next.textarea.Value())
 }
 
+func TestIdleSuggestionRequestIncludesLocalContext(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	taskStore := tasklist.NewStore(taskListPath(store, ""))
+	_, err := taskStore.Add(context.Background(), tasklist.AddRequest{
+		ID:    "GH-27",
+		Title: "Make prompt completion context-aware",
+	})
+	require.NoError(t, err)
+
+	provider := &capturingIdleSuggestionProvider{model: "model", response: "draft prompt with GH-27"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:      context.Background(),
+		registry: registry,
+		agentRegistry: agent.NewRegistry(map[string]config.AgentConfig{
+			"planner": {
+				Description:     "plans implementation work",
+				ToolPermissions: map[string]bool{"bash": true},
+			},
+		}),
+		sessionStore:  store,
+		sessionState:  session.Session{Title: "Follow up on #15", Artifacts: []session.Artifact{{Path: "docs/notes.md", Kind: "notes"}}},
+		selectedAgent: "planner",
+		selectedModel: "capture/model",
+		cwd:           dir,
+		textarea:      textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	_, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+	require.NotNil(t, provider.params)
+	require.Len(t, provider.params.Messages, 2)
+
+	localContext := provider.params.Messages[1].Content
+	for _, want := range []string{
+		"Local context:",
+		"agent: planner",
+		"slash: /help",
+		"file: docs/notes.md",
+		"task: GH-27",
+		"issue: #15",
+		"issue: GH-27",
+		"permission: bash",
+	} {
+		assert.Contains(t, localContext, want)
+	}
+}
+
+func TestPromptLocalOnlySkipsIdleModelSuggestion(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(idleSuggestionProvider{model: "model", response: "draft prompt with tests"})
+
+	m := model{
+		ctx:             context.Background(),
+		registry:        registry,
+		selectedModel:   "suggest/model",
+		promptLocalOnly: true,
+		textarea:        textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	assert.Nil(t, m.scheduleIdleSuggestion())
+	assert.Empty(t, m.idleSuggestionInput)
+	assert.Empty(t, m.idleSuggestionStatus)
+}
+
+func TestIdleSuggestionRequestRejectsCursorMoved(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(idleSuggestionProvider{model: "model", response: "draft prompt with tests"})
+
+	m := model{
+		ctx:           context.Background(),
+		registry:      registry,
+		selectedModel: "suggest/model",
+		textarea:      textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	m.textarea.SetCursor(len("draft"))
+	require.NotEqual(t, len(m.textarea.Value()), textareaCursorOffset(m.textarea))
+
+	nextModel, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	assert.Nil(t, requestCmd)
+	assert.Equal(t, "rejected:stale", next.idleSuggestionStatus)
+}
+
+func TestClearIdleSuggestionCancelsInFlightRequest(t *testing.T) {
+	t.Parallel()
+
+	provider := &cancelAwareIdleSuggestionProvider{model: "model"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:           context.Background(),
+		registry:      registry,
+		selectedModel: "cancel/model",
+		textarea:      textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	nextModel, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, requestCmd)
+	require.NotNil(t, next.idleSuggestionCancel)
+
+	next.clearIdleSuggestion()
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.Error(t, msg.err)
+	assert.Contains(t, msg.err.Error(), "canceled")
+	assert.False(t, provider.called)
+	assert.Nil(t, next.idleSuggestionCancel)
+}
+
 func TestIdleSuggestionIgnoresStaleResponses(t *testing.T) {
 	t.Parallel()
 
@@ -460,6 +696,27 @@ func TestIdleSuggestionIgnoresStaleResponses(t *testing.T) {
 	next, ok := nextModel.(model)
 	require.True(t, ok)
 	assert.Empty(t, next.idleSuggestionText)
+	assert.Equal(t, "rejected:stale", next.idleSuggestionStatus)
+}
+
+func TestIdleSuggestionRejectsUnsafeResponses(t *testing.T) {
+	t.Parallel()
+
+	m := model{textarea: textarea.New()}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	m.idleSuggestionID = 1
+	m.idleSuggestionInput = "draft prompt"
+
+	nextModel, _ := m.updateIdleSuggestion(idleSuggestionMsg{
+		id:         1,
+		input:      "draft prompt",
+		suggestion: "with tests\nrm -rf /",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	assert.Empty(t, next.idleSuggestionText)
+	assert.Equal(t, "rejected:unsafe-multiline", next.idleSuggestionStatus)
 }
 
 func TestFormatTaskDuration(t *testing.T) {

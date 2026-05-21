@@ -127,7 +127,7 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "performance", Summary: "summarize saved-session agent performance", Legacy: []string{"--agent-performance-summary"}},
 			{Name: "describe", Args: "<name>", Summary: "print one configured agent as YAML", Legacy: []string{"--describe-agent"}},
 			{Name: "plan", Args: "<prompt>", Summary: "preview configured agents for a prompt", Legacy: []string{"--plan-agents"}, JoinArgs: true},
-			{Name: "prompt-complete", Args: "<input>", Summary: "preview deterministic prompt completions", Legacy: []string{"--prompt-complete"}, JoinArgs: true},
+			{Name: "prompt-complete", Args: "<input>", Summary: "preview local context-aware prompt completions", Legacy: []string{"--prompt-complete"}, JoinArgs: true},
 			{Name: "task-list", Summary: "list persistent agent tasks", Legacy: []string{"--task-list"}},
 			{Name: "task-add", Args: "<title>", Summary: "add a persistent agent task", Legacy: []string{"--task-add"}, JoinArgs: true},
 			{Name: "task-assign", Args: "<id:agent>", Summary: "assign a persistent task", Legacy: []string{"--task-assign"}},

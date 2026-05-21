@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -145,14 +146,8 @@ func formatSkillSuggestion(suggestion attskill.Suggestion) string {
 	return b.String()
 }
 
-func promptComplete(registry *agent.Registry, input string, limit int) {
-	suggestions := promptcomplete.SuggestAll(promptcomplete.Context{
-		Input:     input,
-		Cursor:    len(input),
-		Agents:    promptAgentCandidates(registry),
-		Tools:     promptToolCandidates(),
-		Templates: promptTemplateCandidates(),
-	}, promptcomplete.Options{Limit: limit})
+func promptComplete(ctx context.Context, state appState, input string, limit int) {
+	suggestions := promptcomplete.SuggestAll(promptCompletionContext(ctx, state, input, true), promptcomplete.Options{Limit: limit})
 	if len(suggestions) == 0 {
 		fmt.Println("No prompt completion found.")
 		return
@@ -219,11 +214,30 @@ func formatPromptSuggestions(suggestions []promptcomplete.Suggestion) string {
 		fmt.Fprintf(&b, "text: %s\n", suggestion.Text)
 		fmt.Fprintf(&b, "suffix: %s\n", suggestion.Suffix)
 		fmt.Fprintf(&b, "kind: %s\n", suggestion.Candidate.Kind)
+
+		if suggestion.Source != "" {
+			fmt.Fprintf(&b, "source: %s\n", suggestion.Source)
+		}
+
 		fmt.Fprintf(&b, "score: %d\n", suggestion.Score)
 		fmt.Fprintf(&b, "replace: %d:%d\n", suggestion.ReplacementStart, suggestion.ReplacementEnd)
 
 		if suggestion.Explanation != "" {
 			fmt.Fprintf(&b, "explanation: %s\n", suggestion.Explanation)
+		}
+
+		if len(suggestion.RankSignals) > 0 {
+			b.WriteString("rank:\n")
+
+			for _, signal := range suggestion.RankSignals {
+				fmt.Fprintf(&b, "  - %s %+d", signal.Name, signal.Score)
+
+				if signal.Detail != "" {
+					fmt.Fprintf(&b, ": %s", signal.Detail)
+				}
+
+				b.WriteByte('\n')
+			}
 		}
 
 		b.WriteByte('\n')

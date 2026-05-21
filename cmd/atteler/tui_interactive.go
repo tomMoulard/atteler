@@ -81,6 +81,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.generationOverrides,
 		state.maxInputTokens,
 		state.modelLocked,
+		state.promptLocalOnly,
 		state.worktreeInfo,
 	))
 

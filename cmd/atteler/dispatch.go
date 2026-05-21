@@ -599,6 +599,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		hookConfig:          cfg.Hooks,
 		modelLocked:         selection.modelLocked,
 		autoMergeWorktree:   opts.useWorktree && !opts.noAutoMerge,
+		promptLocalOnly:     opts.promptLocalOnly,
 	}, nil
 }
 

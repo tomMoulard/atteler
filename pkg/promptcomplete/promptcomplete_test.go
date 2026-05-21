@@ -4,6 +4,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSuggest_AgentSuffixAndReplacementRange(t *testing.T) {
@@ -33,6 +36,44 @@ func TestSuggest_AgentSuffixAndReplacementRange(t *testing.T) {
 	if !strings.Contains(got.Explanation, "agent") || !strings.Contains(got.Explanation, `"res"`) {
 		t.Fatalf("Explanation = %q, want agent prefix context", got.Explanation)
 	}
+}
+
+func TestSuggest_AgentAtMentionPreservesSigil(t *testing.T) {
+	t.Parallel()
+
+	got, ok := Suggest(Context{
+		Input:  "ask @res",
+		Cursor: len("ask @res"),
+		Agents: CandidatesFromNames("agent", "researcher"),
+	}, Options{})
+
+	require.True(t, ok)
+	assert.Equal(t, "@researcher", got.Text)
+	assert.Equal(t, "earcher", got.Suffix)
+	assert.Equal(t, len("ask "), got.ReplacementStart)
+	assert.Equal(t, len("ask @res"), got.ReplacementEnd)
+	assert.Equal(t, "researcher", got.Candidate.Text)
+	assert.Contains(t, got.Explanation, `"@researcher"`)
+}
+
+func TestSuggest_AtMentionPathCanReplaceBasenamePrefix(t *testing.T) {
+	t.Parallel()
+
+	got, ok := Suggest(Context{
+		Input:  "open @promptc",
+		Cursor: len("open @promptc"),
+		RecentFiles: []Candidate{{
+			Text:        "pkg/promptcomplete/promptcomplete.go",
+			Description: "recently touched prompt completion source",
+		}},
+	}, Options{})
+
+	require.True(t, ok)
+	assert.Equal(t, "@pkg/promptcomplete/promptcomplete.go", got.Text)
+	assert.Equal(t, got.Text, got.Suffix)
+	assert.Equal(t, len("open "), got.ReplacementStart)
+	assert.Equal(t, len("open @promptc"), got.ReplacementEnd)
+	assert.True(t, hasRankSignal(got, "segment-prefix"), "signals = %#v", got.RankSignals)
 }
 
 func TestSuggestAll_RanksPrefixThenContextTokens(t *testing.T) {
@@ -81,6 +122,113 @@ func TestSuggestAll_UsesCandidateTokensForContext(t *testing.T) {
 	if got[0].Text != "explore" {
 		t.Fatalf("first Text = %q, want explore; all = %#v", got[0].Text, got)
 	}
+}
+
+func TestSuggestAll_UsesLiveContextSourcesAndTelemetry(t *testing.T) {
+	t.Parallel()
+
+	got := SuggestAll(Context{
+		Input:  "fix symbol Su",
+		Cursor: len("fix symbol Su"),
+		ProjectSymbols: []Candidate{{
+			Text:        "SuggestAll",
+			Description: "function in pkg/promptcomplete/promptcomplete.go",
+			Tokens:      []string{"func", "promptcomplete"},
+		}},
+		Templates: []Candidate{{
+			Text:        "summary",
+			Description: "summarize the current session",
+		}},
+	}, Options{})
+
+	require.Len(t, got, 2)
+	assert.Equal(t, "SuggestAll", got[0].Text)
+	assert.Equal(t, "project-symbol", got[0].Candidate.Kind)
+	assert.Equal(t, "project symbol index", got[0].Source)
+	assert.Contains(t, got[0].Explanation, "project-symbol")
+	assert.Contains(t, got[0].Explanation, "project symbol index")
+	assert.True(t, hasRankSignal(got[0], "source-cue"), "signals = %#v", got[0].RankSignals)
+	assert.Greater(t, got[0].Score, got[1].Score)
+}
+
+func TestSuggestAll_MatchesPathBasenameAndReportsReplacement(t *testing.T) {
+	t.Parallel()
+
+	got, ok := Suggest(Context{
+		Input:  "open promptc",
+		Cursor: len("open promptc"),
+		RecentFiles: []Candidate{{
+			Text:        "pkg/promptcomplete/promptcomplete.go",
+			Description: "modified Go source",
+		}},
+	}, Options{})
+
+	require.True(t, ok)
+	assert.Equal(t, "pkg/promptcomplete/promptcomplete.go", got.Text)
+	assert.Equal(t, len("open "), got.ReplacementStart)
+	assert.Equal(t, len("open promptc"), got.ReplacementEnd)
+	assert.Equal(t, got.Text, got.Suffix)
+	assert.Equal(t, "recent-file", got.Candidate.Kind)
+	assert.Contains(t, got.Explanation, "recently touched files")
+	assert.True(t, hasRankSignal(got, "segment-prefix"), "signals = %#v", got.RankSignals)
+}
+
+func TestSuggestAll_ReturnsSeparatePathAmbiguityCandidates(t *testing.T) {
+	t.Parallel()
+
+	got := SuggestAll(Context{
+		Input:  "open config",
+		Cursor: len("open config"),
+		RecentFiles: []Candidate{
+			{Text: "cmd/atteler/config.go", Description: "CLI config file"},
+			{Text: "pkg/config/config.go", Description: "package config file"},
+		},
+	}, Options{})
+
+	require.Len(t, got, 2)
+	assert.ElementsMatch(t, []string{"cmd/atteler/config.go", "pkg/config/config.go"}, []string{got[0].Text, got[1].Text})
+
+	for _, suggestion := range got {
+		assert.Equal(t, len("open "), suggestion.ReplacementStart)
+		assert.Equal(t, len("open config"), suggestion.ReplacementEnd)
+		assert.Equal(t, suggestion.Text, suggestion.Suffix)
+		assert.True(t, hasRankSignal(suggestion, "segment-prefix"), "signals = %#v", suggestion.RankSignals)
+	}
+}
+
+func TestSuggestAll_SkipsHiddenCandidates(t *testing.T) {
+	t.Parallel()
+
+	got := SuggestAll(Context{
+		Input:  "ask int",
+		Cursor: len("ask int"),
+		Agents: []Candidate{
+			{Text: "internal", Hidden: true},
+			{Text: "integrator"},
+		},
+	}, Options{})
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "integrator", got[0].Text)
+}
+
+func TestSuggestAll_IssueReferenceUsesHashToken(t *testing.T) {
+	t.Parallel()
+
+	got, ok := Suggest(Context{
+		Input:  "related #2",
+		Cursor: len("related #2"),
+		Issues: []Candidate{{
+			Text:        "#27",
+			Description: "Make prompt completion context-aware",
+		}},
+	}, Options{})
+
+	require.True(t, ok)
+	assert.Equal(t, "#27", got.Text)
+	assert.Equal(t, len("related "), got.ReplacementStart)
+	assert.Equal(t, "issue", got.Candidate.Kind)
+	assert.True(t, hasRankSignal(got, "source-cue"), "signals = %#v", got.RankSignals)
 }
 
 func TestSuggestAll_TemplateCompletionAndCustomExplanation(t *testing.T) {
@@ -230,4 +378,14 @@ func TestSuggest_InvalidCursorAndEmptyPrefix(t *testing.T) {
 	if got, ok := Suggest(ctx, Options{}); ok {
 		t.Fatalf("Suggest returned %#v, true; want no suggestion for invalid cursor", got)
 	}
+}
+
+func hasRankSignal(suggestion Suggestion, name string) bool {
+	for _, signal := range suggestion.RankSignals {
+		if signal.Name == name {
+			return true
+		}
+	}
+
+	return false
 }

@@ -170,8 +170,16 @@ atteler session stream-headless <headless-id>
 ```
 
 In the interactive TUI, `Ctrl+O` opens the model picker, `Tab` accepts visible
-prompt completion, `Ctrl+R` rewrites the current prompt with more structure, and
-`Ctrl+Z` undoes the latest rewrite.
+local prompt completions (agents, slash commands, session context, and safe
+model-backed suffixes when configured), `Ctrl+R` rewrites under-specified
+prompts without adding boilerplate to already-structured drafts, and `Ctrl+Z`
+undoes the latest rewrite.
+Use `--prompt-local-only` to keep interactive prompt assistance on the
+deterministic no-network completion path even when providers are configured.
+
+For non-interactive checks, `atteler agents prompt-complete "ask @rev"` previews
+the same local completion engine with source attribution, replacement ranges,
+rank signals, and a short explanation of what accepting the completion inserts.
 
 ### Local file and directory context
 
