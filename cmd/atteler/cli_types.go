@@ -256,7 +256,14 @@ type cliOptions struct {
 	taskAgent                          string
 	taskAssignSpec                     string
 	taskCompleteID                     string
+	feedbackApproveAgent               string
+	feedbackApproveConfig              string
+	feedbackApproveID                  string
 	feedbackApplyConfig                string
+	feedbackRollbackAgent              string
+	feedbackRollbackConfig             string
+	feedbackRollbackID                 string
+	feedbackRollbackReason             string
 	feedbackHistoryPath                string
 	agentMemoryAgent                   string
 	agentMemorySearch                  string

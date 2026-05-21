@@ -5,8 +5,10 @@ import (
 	"maps"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/feedback"
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
@@ -39,6 +41,8 @@ type Registry struct {
 // NewRegistry builds an agent registry from configuration.
 func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 	registry := &Registry{agents: make(map[string]Agent, len(configs))}
+	now := time.Now().UTC()
+
 	for name := range configs {
 		cfg := configs[name]
 
@@ -54,7 +58,7 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 			ToolPermissions: cloneToolPermissions(cfg.ToolPermissions),
 			Description:     strings.TrimSpace(cfg.Description),
 			Personality:     strings.TrimSpace(cfg.Personality),
-			SystemPrompt:    cfg.SystemPrompt,
+			SystemPrompt:    feedback.RenderSystemPrompt(cfg.SystemPrompt, cfg.FeedbackGuidance, now),
 			ReasoningLevel:  strings.TrimSpace(cfg.ReasoningLevel),
 			FallbackModels:  normalizeModels(cfg.FallbackModels),
 			Capabilities:    normalizePhrases(cfg.Capabilities),

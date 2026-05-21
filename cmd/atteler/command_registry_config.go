@@ -64,6 +64,33 @@ func providerlessConfigAgentPluginCommands() []command {
 			},
 		},
 		{
+			name:  "feedback-rollback",
+			tier:  tierProviderlessConfig,
+			match: func(o cliOptions) bool { return o.feedbackRollbackConfig != "" },
+			runProviderlessConfig: func(_ context.Context, o cliOptions, _ appState) error {
+				return rollbackFeedbackGuidance(
+					o.feedbackRollbackConfig,
+					o.feedbackHistoryPath,
+					o.feedbackRollbackAgent,
+					o.feedbackRollbackID,
+					o.feedbackRollbackReason,
+				)
+			},
+		},
+		{
+			name:  "feedback-approve",
+			tier:  tierProviderlessConfig,
+			match: func(o cliOptions) bool { return o.feedbackApproveConfig != "" },
+			runProviderlessConfig: func(_ context.Context, o cliOptions, _ appState) error {
+				return approveFeedbackGuidance(
+					o.feedbackApproveConfig,
+					o.feedbackHistoryPath,
+					o.feedbackApproveAgent,
+					o.feedbackApproveID,
+				)
+			},
+		},
+		{
 			name:  "list-plugins",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.listPlugins },

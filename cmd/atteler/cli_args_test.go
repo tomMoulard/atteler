@@ -272,6 +272,8 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "agents", args: []string{"agents", "plan", "review", "auth"}, want: []string{"--plan-agents", "review auth"}},
 		{name: "agents performance", args: []string{"agents", "performance"}, want: []string{"--agent-performance-summary"}},
 		{name: "agents feedback apply", args: []string{"agents", "feedback-apply", "agents.yaml"}, want: []string{"--feedback-apply-config", "agents.yaml"}},
+		{name: "agents feedback approve", args: []string{"agents", "--feedback-approve-agent", "reviewer", "--feedback-approve-id", "fg-1", "feedback-approve", "agents.yaml"}, want: []string{"--feedback-approve-agent", "reviewer", "--feedback-approve-id", "fg-1", "--feedback-approve-config", "agents.yaml"}},
+		{name: "agents feedback rollback", args: []string{"agents", "--feedback-rollback-agent", "reviewer", "--feedback-rollback-id", "fg-1", "feedback-rollback", "agents.yaml"}, want: []string{"--feedback-rollback-agent", "reviewer", "--feedback-rollback-id", "fg-1", "--feedback-rollback-config", "agents.yaml"}},
 		{name: "agents bash", args: []string{"agents", "bash", "go", "test", "./cmd/atteler"}, want: []string{"--bash", "go test ./cmd/atteler"}},
 		{name: "memory rag", args: []string{"memory", "search", "OAuth", "retry"}, want: []string{"--memory-search", "OAuth retry"}},
 		{name: "code intel", args: []string{"code-intel", "summary"}, want: []string{"--code-summary"}},

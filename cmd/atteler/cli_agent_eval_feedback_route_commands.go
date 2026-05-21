@@ -260,7 +260,21 @@ func printFeedbackProposals(saved session.Session) {
 
 func formatFeedbackProposal(proposal feedback.Proposal) string {
 	var b strings.Builder
+	fmt.Fprintf(&b, "id: %s\n", feedback.ProposalID(proposal))
 	writeFeedbackProposalHeader(&b, proposal)
+
+	if sourceRun := strings.TrimSpace(proposal.SourceRun); sourceRun != "" {
+		fmt.Fprintf(&b, "source_run: %s\n", sourceRun)
+	}
+
+	if reviewer := strings.TrimSpace(proposal.Reviewer); reviewer != "" {
+		fmt.Fprintf(&b, "reviewer: %s\n", reviewer)
+	}
+
+	if proposal.ExpiresAt != nil {
+		fmt.Fprintf(&b, "expires_at: %s\n", proposal.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+
 	writeFeedbackRejectedAlternatives(&b, proposal.RejectedAlternatives)
 	writeFeedbackEvidence(&b, proposal.Evidence)
 	writeFeedbackLinkedEvidence(&b, proposal.LinkedEvidence)
@@ -407,13 +421,16 @@ func applyFeedbackProposals(saved session.Session, configPath, historyPath strin
 	}
 
 	originalCfg := cfg
+	appliedAt := time.Now().UTC()
 
 	updatedAgents, history := feedback.ApplyProposalsWithOptions(cfg.Agents, feedback.FromSession(saved), feedback.ApplyOptions{
-		Author: "atteler feedback apply",
-		Source: "session:" + saved.ID,
+		SourceRun: saved.ID,
+		Reviewer:  "feedback-apply",
+		Status:    feedback.GuidanceStatusPending,
+		Now:       appliedAt,
 	})
 	if len(history) == 0 {
-		fmt.Println("No accepted feedback proposals applied. A passing after-phase eval or fixture is required.")
+		fmt.Println("No feedback proposals recorded.")
 		return nil
 	}
 
@@ -423,7 +440,7 @@ func applyFeedbackProposals(saved session.Session, configPath, historyPath strin
 	}
 
 	historyPath = feedbackHistoryDefault(configPath, historyPath)
-	if err := appendFeedbackHistory(historyPath, history, time.Now().UTC()); err != nil {
+	if err := appendFeedbackHistory(historyPath, history, appliedAt); err != nil {
 		if restoreErr := writeConfigFile(configPath, originalCfg); restoreErr != nil {
 			return fmt.Errorf("feedback apply: append history failed and restore config failed: %w", errors.Join(err, restoreErr))
 		}
@@ -431,7 +448,126 @@ func applyFeedbackProposals(saved session.Session, configPath, historyPath strin
 		return fmt.Errorf("feedback apply: %w", err)
 	}
 
-	fmt.Printf("Applied %d feedback proposal(s).\n", len(history))
+	fmt.Printf("Recorded %d pending feedback guidance decision(s).\n", len(history))
+	fmt.Println("config: " + configPath)
+	fmt.Println("history: " + historyPath)
+
+	return nil
+}
+
+func approveFeedbackGuidance(configPath, historyPath, agentName, guidanceID string) error {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return errors.New("feedback approve: config path is required")
+	}
+
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return errors.New("feedback approve: agent is required")
+	}
+
+	guidanceID = strings.TrimSpace(guidanceID)
+	if guidanceID == "" {
+		return errors.New("feedback approve: guidance id is required")
+	}
+
+	cfg, loaded, err := appconfig.LoadFiles([]string{configPath})
+	if err != nil {
+		return fmt.Errorf("feedback approve: load config: %w", err)
+	}
+
+	if len(loaded) == 0 {
+		return fmt.Errorf("feedback approve: config %s not found", configPath)
+	}
+
+	approvedAt := time.Now().UTC()
+
+	updatedAgents, history, ok := feedback.ApproveGuidance(
+		cfg.Agents,
+		agentName,
+		guidanceID,
+		"feedback-approve",
+		approvedAt,
+	)
+	if !ok {
+		return fmt.Errorf("feedback approve: guidance %s for agent %s was not found, pending, or approvable", guidanceID, agentName)
+	}
+
+	cfg.Agents = updatedAgents
+	if err := writeConfigFile(configPath, cfg); err != nil {
+		return fmt.Errorf("feedback approve: %w", err)
+	}
+
+	historyPath = feedbackHistoryDefault(configPath, historyPath)
+	if err := appendFeedbackHistory(historyPath, []feedback.HistoryEntry{history}, approvedAt); err != nil {
+		return fmt.Errorf("feedback approve: %w", err)
+	}
+
+	switch history.Status {
+	case feedback.GuidanceStatusApproved:
+		fmt.Printf("Approved feedback guidance %s for agent %s.\n", guidanceID, agentName)
+	case feedback.GuidanceStatusQuarantined:
+		fmt.Printf("Quarantined feedback guidance %s for agent %s.\n", guidanceID, agentName)
+	default:
+		fmt.Printf("Recorded feedback guidance %s for agent %s with status %s.\n", guidanceID, agentName, history.Status)
+	}
+
+	fmt.Println("config: " + configPath)
+	fmt.Println("history: " + historyPath)
+
+	return nil
+}
+
+func rollbackFeedbackGuidance(configPath, historyPath, agentName, guidanceID, reason string) error {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return errors.New("feedback rollback: config path is required")
+	}
+
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return errors.New("feedback rollback: agent is required")
+	}
+
+	guidanceID = strings.TrimSpace(guidanceID)
+	if guidanceID == "" {
+		return errors.New("feedback rollback: guidance id is required")
+	}
+
+	cfg, loaded, err := appconfig.LoadFiles([]string{configPath})
+	if err != nil {
+		return fmt.Errorf("feedback rollback: load config: %w", err)
+	}
+
+	if len(loaded) == 0 {
+		return fmt.Errorf("feedback rollback: config %s not found", configPath)
+	}
+
+	rolledBackAt := time.Now().UTC()
+
+	updatedAgents, history, ok := feedback.RollbackGuidance(
+		cfg.Agents,
+		agentName,
+		guidanceID,
+		"feedback-rollback",
+		reason,
+		rolledBackAt,
+	)
+	if !ok {
+		return fmt.Errorf("feedback rollback: guidance %s for agent %s was not found or is already rolled back", guidanceID, agentName)
+	}
+
+	cfg.Agents = updatedAgents
+	if err := writeConfigFile(configPath, cfg); err != nil {
+		return fmt.Errorf("feedback rollback: %w", err)
+	}
+
+	historyPath = feedbackHistoryDefault(configPath, historyPath)
+	if err := appendFeedbackHistory(historyPath, []feedback.HistoryEntry{history}, rolledBackAt); err != nil {
+		return fmt.Errorf("feedback rollback: %w", err)
+	}
+
+	fmt.Printf("Rolled back feedback guidance %s for agent %s.\n", guidanceID, agentName)
 	fmt.Println("config: " + configPath)
 	fmt.Println("history: " + historyPath)
 
@@ -487,7 +623,7 @@ func appendFeedbackHistory(path string, entries []feedback.HistoryEntry, applied
 
 func formatFeedbackHistory(entries []feedback.HistoryEntry, appliedAt time.Time) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Applied feedback %s\n\n", appliedAt.Format(time.RFC3339))
+	fmt.Fprintf(&b, "## Feedback guidance decisions %s\n\n", appliedAt.Format(time.RFC3339))
 
 	for i := range entries {
 		b.WriteString(feedback.FormatHistoryEntry(entries[i]))

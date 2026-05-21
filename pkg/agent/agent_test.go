@@ -3,11 +3,13 @@ package agent
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/feedback"
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
@@ -176,6 +178,59 @@ func TestRegistry_ReferencesFromConfig(t *testing.T) {
 	writer, ok := registry.Get("writer")
 	require.True(t, ok)
 	assert.Empty(t, writer.References)
+}
+
+func TestRegistry_RendersApprovedFeedbackGuidanceAtRuntime(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"reviewer": {
+			SystemPrompt: "Review code.",
+			FeedbackGuidance: []config.FeedbackGuidance{
+				{
+					ID:         "fg-runtime",
+					Status:     feedback.GuidanceStatusApproved,
+					SourceRun:  "run-123",
+					Reviewer:   "alice",
+					Action:     "Always run focused regression tests.",
+					Reason:     "Previous review missed a regression.",
+					Evidence:   []string{"evaluation: fail"},
+					Confidence: 0.8,
+					CreatedAt:  time.Date(2026, 5, 21, 10, 0, 0, 0, time.UTC),
+					UpdatedAt:  time.Date(2026, 5, 21, 10, 0, 0, 0, time.UTC),
+					Audit: []config.FeedbackGuidanceAuditEvent{{
+						At:     time.Date(2026, 5, 21, 10, 0, 0, 0, time.UTC),
+						Actor:  "alice",
+						Action: feedback.GuidanceStatusApproved,
+					}},
+				},
+				{
+					ID:        "fg-pending",
+					Status:    feedback.GuidanceStatusPending,
+					SourceRun: "run-456",
+					Reviewer:  "alice",
+					Action:    "Always run pending checks.",
+					Reason:    "Not approved.",
+					Evidence:  []string{"evaluation: fail"},
+					CreatedAt: time.Date(2026, 5, 21, 9, 0, 0, 0, time.UTC),
+					UpdatedAt: time.Date(2026, 5, 21, 9, 0, 0, 0, time.UTC),
+					Audit: []config.FeedbackGuidanceAuditEvent{{
+						At:     time.Date(2026, 5, 21, 9, 0, 0, 0, time.UTC),
+						Actor:  "alice",
+						Action: feedback.GuidanceStatusPending,
+					}},
+				},
+			},
+		},
+	})
+
+	reviewer, ok := registry.Get("reviewer")
+	require.True(t, ok)
+	assert.Contains(t, reviewer.SystemPrompt, "Review code.")
+	assert.Contains(t, reviewer.SystemPrompt, "Feedback-derived guidance:")
+	assert.Contains(t, reviewer.SystemPrompt, "Always run focused regression tests.")
+	assert.Contains(t, reviewer.SystemPrompt, "Source run: run-123")
+	assert.NotContains(t, reviewer.SystemPrompt, "pending checks")
 }
 
 func TestAgent_HasToolPermission_NilPermissions(t *testing.T) {
