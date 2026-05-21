@@ -344,6 +344,7 @@ type cliOptions struct {
 	taskList                           bool
 	speculatePlan                      bool
 	speculateRun                       bool
+	skillReviewOnly                    bool
 	reviewPlan                         bool
 	reviewRun                          bool
 	routeInteractive                   bool

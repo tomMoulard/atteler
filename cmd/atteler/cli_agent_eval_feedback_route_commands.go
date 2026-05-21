@@ -102,7 +102,7 @@ func expectedEvalText(expectedText, expectedPath string) (string, error) {
 	}
 }
 
-func suggestSkill(steps []string, maxSteps, minOccurrences int, saveDir string) error {
+func suggestSkill(steps []string, maxSteps, minOccurrences int, saveDir string, reviewOnly bool) error {
 	suggestion, ok := attskill.SuggestWithOptions(steps, attskill.Options{
 		MaxSteps:       maxSteps,
 		MinOccurrences: minOccurrences,
@@ -115,10 +115,27 @@ func suggestSkill(steps []string, maxSteps, minOccurrences int, saveDir string) 
 	fmt.Print(formatSkillSuggestion(suggestion))
 
 	if strings.TrimSpace(saveDir) == "" {
+		if reviewOnly {
+			return errors.New("skill review: --skill-review-only requires --skill-save-dir")
+		}
+
 		return nil
 	}
 
-	path, err := attskill.PersistSuggestion(saveDir, suggestion)
+	review, err := attskill.BuildReview(saveDir, suggestion)
+	if err != nil {
+		return fmt.Errorf("review skill suggestion: %w", err)
+	}
+
+	fmt.Print(review.Diff)
+	fmt.Print(formatSkillTriggerResults(review.TriggerResults))
+
+	if reviewOnly {
+		fmt.Println("review-only: no files written")
+		return nil
+	}
+
+	path, err := attskill.PersistReview(review)
 	if err != nil {
 		return fmt.Errorf("save skill suggestion: %w", err)
 	}
@@ -139,8 +156,42 @@ func formatSkillSuggestion(suggestion attskill.Suggestion) string {
 		fmt.Fprintf(&b, "  - %s\n", step)
 	}
 
+	if len(suggestion.Parameters) > 0 {
+		b.WriteString("parameters:\n")
+
+		for _, parameter := range suggestion.Parameters {
+			fmt.Fprintf(&b, "  - %s=%s", parameter.Name, parameter.Placeholder)
+
+			if len(parameter.Examples) > 0 {
+				fmt.Fprintf(&b, " examples=%s", strings.Join(parameter.Examples, ","))
+			}
+
+			b.WriteByte('\n')
+		}
+	}
+
 	if suggestion.Rationale != "" {
 		fmt.Fprintf(&b, "rationale: %s\n", suggestion.Rationale)
+	}
+
+	return b.String()
+}
+
+func formatSkillTriggerResults(results []attskill.TriggerEvalResult) string {
+	if len(results) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "trigger-evals: pass %d cases\n", len(results))
+
+	for _, result := range results {
+		label := "reject"
+		if result.Expected {
+			label = "trigger"
+		}
+
+		fmt.Fprintf(&b, "  - %s: %s\n", label, result.Prompt)
 	}
 
 	return b.String()

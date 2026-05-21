@@ -208,7 +208,7 @@ func providerlessPlanningCommands() []command {
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return len(o.suggestSkillSteps) > 0 },
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return suggestSkill(o.suggestSkillSteps, o.skillMaxSteps.value, o.skillMinOccurrences.value, o.skillSaveDir)
+				return suggestSkill(o.suggestSkillSteps, o.skillMaxSteps.value, o.skillMinOccurrences.value, o.skillSaveDir, o.skillReviewOnly)
 			},
 		},
 	}

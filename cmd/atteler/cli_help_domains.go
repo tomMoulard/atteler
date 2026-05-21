@@ -146,7 +146,7 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "feedback-apply", Args: "<config>", Summary: "record selected-session feedback proposals as pending guidance", Legacy: []string{"--feedback-apply-config"}},
 			{Name: "feedback-approve", Args: "<config>", Summary: "approve pending feedback guidance with --feedback-approve-agent and --feedback-approve-id", Legacy: []string{"--feedback-approve-config"}},
 			{Name: "feedback-rollback", Args: "<config>", Summary: "roll back feedback guidance with --feedback-rollback-agent and --feedback-rollback-id", Legacy: []string{"--feedback-rollback-config"}},
-			{Name: "skill-suggest", Args: "<step>", Summary: "suggest reusable skills from repeated observed actions", Legacy: []string{"--skill-step"}, JoinArgs: true},
+			{Name: "skill-suggest", Args: "<step>", Summary: "suggest reviewed skill directories from repeated workflows", Legacy: []string{"--skill-step"}, JoinArgs: true},
 			{Name: bashCommandName, Args: "<command>", Summary: "run an explicit local bash command", Legacy: []string{"--bash"}, JoinArgs: true, OpaqueArgs: true},
 		},
 		Examples: []string{

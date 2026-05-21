@@ -515,12 +515,32 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 	assertContains(t, result.stdout, "slug: plan-code-test")
 	assertContains(t, result.stdout, "occurrences: 2")
 
+	reviewOnlySkillDir := filepath.Join(workDir, "review-only-skills")
+	result = runOK(t, runSpec{dir: workDir}, "--skill-review-only", "--skill-save-dir", reviewOnlySkillDir, "--skill-step", "plan", "--skill-step", "code", "--skill-step", "plan", "--skill-step", "code")
+	assertContains(t, result.stdout, "diff --git a/plan-code/SKILL.md b/plan-code/SKILL.md")
+	assertContains(t, result.stdout, "trigger-evals: pass 4 cases")
+	assertContains(t, result.stdout, "review-only: no files written")
+
+	_, err := os.Stat(filepath.Join(reviewOnlySkillDir, "plan-code", "SKILL.md"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+
 	skillDir := filepath.Join(workDir, "skills")
 	result = runOK(t, runSpec{dir: workDir}, "--skill-save-dir", skillDir, "--skill-step", "plan", "--skill-step", "code", "--skill-step", "plan", "--skill-step", "code")
-	assertContains(t, result.stdout, "saved: "+filepath.Join(skillDir, "plan-code.md"))
-	skillData, err := os.ReadFile(filepath.Join(skillDir, "plan-code.md"))
+	assertContains(t, result.stdout, "diff --git a/plan-code/SKILL.md b/plan-code/SKILL.md")
+	assertContains(t, result.stdout, "trigger-evals: pass 4 cases")
+	assertContains(t, result.stdout, "saved: "+filepath.Join(skillDir, "plan-code", "SKILL.md"))
+	skillData, err := os.ReadFile(filepath.Join(skillDir, "plan-code", "SKILL.md"))
 	require.NoError(t, err)
 	assertContains(t, string(skillData), "# Plan Code Skill")
+	assertContains(t, string(skillData), "## Workflow")
+
+	evalData, err := os.ReadFile(filepath.Join(skillDir, "plan-code", "evals", "triggers.yaml"))
+	require.NoError(t, err)
+	assertContains(t, string(evalData), "should_trigger: true")
+	assertContains(t, string(evalData), "should_trigger: false")
+
+	_, err = os.Stat(filepath.Join(skillDir, "plan-code.md"))
+	require.ErrorIs(t, err, os.ErrNotExist)
 
 	result = runOK(t, runSpec{dir: workDir},
 		"--route-candidate", "openai/gpt-fast,input=0.001,output=0.002,max=1000",

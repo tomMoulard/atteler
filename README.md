@@ -392,6 +392,15 @@ atteler agents async-plan \
   --async-task 'plan|planner|draft plan' \
   --async-task 'code|coder|implement feature|plan'
 atteler agents spawn 'planner|draft the migration plan' --spawn-dry-run
+atteler agents skill-suggest plan --skill-step code --skill-step test \
+  --skill-step plan --skill-step code --skill-step test
+atteler agents skill-suggest "open GH-15|tool=github|prompt=Fix GH-15" \
+  --skill-step "edit pkg/skill|tool=file-edit|input=pkg/skill" \
+  --skill-step "run go test ./pkg/skill|tool=shell|verify=go test ./pkg/skill" \
+  --skill-step "open GH-16|tool=github|prompt=Fix GH-16" \
+  --skill-step "edit pkg/skill|tool=file-edit|input=pkg/skill" \
+  --skill-step "run go test ./pkg/skill|tool=shell|verify=go test ./pkg/skill" \
+  --skill-save-dir .atteler/skills --skill-review-only
 
 atteler plugins list
 atteler plugins describe reviewer
@@ -408,6 +417,19 @@ atteler worktrees run "Add unit tests for the auth package"
 atteler worktrees list
 atteler worktrees merge 20260430-120000-deadbeef
 ```
+
+Skill synthesis looks for repeated multi-step workflows and, when saved, writes
+a reviewable skill directory (`<slug>/SKILL.md` plus `evals/triggers.yaml`)
+instead of a loose markdown note. The generated skill front matter controls
+triggering, the body records parameters, workflow steps, tool boundaries,
+failure modes, verification, and provenance, and the eval fixture includes
+positive and negative trigger prompts so synthesized skills do not become
+over-broad repeated-string trophies. `--skill-save-dir` prints the generated
+diff before persisting the accepted skill. For richer provenance, each
+`--skill-step` may append `|prompt=...`, `|tool=...`, `|input=...`,
+`|output=...`, `|verify=...`, and `|stop=...` metadata after the action label.
+Use `--skill-review-only` to inspect the generated diff without writing files;
+rerun without that flag after approving the skill.
 
 `atteler worktrees run` creates an isolated git worktree for a session with an
 ownership manifest under `.git/atteler/worktrees/`. Merge-back now runs as a
@@ -448,6 +470,7 @@ linked from the row.
 | Sessions, transcript search/export, evaluations, failures, artifacts, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |
 | Bounded and policy-gated context references for local files, directories, globs, and remote URLs | [`pkg/contextref/references.go`](pkg/contextref/references.go), [`pkg/contextref/references_test.go`](pkg/contextref/references_test.go), [`pkg/contextref/contextref.go`](pkg/contextref/contextref.go), [`pkg/contextref/contextref_test.go`](pkg/contextref/contextref_test.go) |
 | Agent metadata, matching, orchestration planning, async waves, and sub-agent fan-out | [`pkg/agent/agent.go`](pkg/agent/agent.go), [`pkg/agent/orchestration.go`](pkg/agent/orchestration.go), [`pkg/agent/orchestration_test.go`](pkg/agent/orchestration_test.go), [`pkg/async/plan.go`](pkg/async/plan.go), [`pkg/async/plan_test.go`](pkg/async/plan_test.go), [`pkg/subagent/subagent.go`](pkg/subagent/subagent.go), [`pkg/subagent/subagent_test.go`](pkg/subagent/subagent_test.go), [`cmd/atteler/cli_async_commands.go`](cmd/atteler/cli_async_commands.go) |
+| Skill synthesis into reviewable `SKILL.md` directories with trigger eval fixtures | [`pkg/skill/suggestion.go`](pkg/skill/suggestion.go), [`pkg/skill/persist.go`](pkg/skill/persist.go), [`pkg/skill/trigger.go`](pkg/skill/trigger.go), [`pkg/skill/suggestion_test.go`](pkg/skill/suggestion_test.go), [`test/e2e/cli_test.go`](test/e2e/cli_test.go) |
 | Speculative and review-agent planning/execution primitives | [`pkg/speculate/speculate.go`](pkg/speculate/speculate.go), [`pkg/speculate/speculate_test.go`](pkg/speculate/speculate_test.go), [`pkg/review/review.go`](pkg/review/review.go), [`pkg/review/review_test.go`](pkg/review/review_test.go), [`pkg/review/llm.go`](pkg/review/llm.go), [`pkg/review/llm_test.go`](pkg/review/llm_test.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
 | Memory/RAG, local vector search, git-history search, Go code intelligence, import graphs, and optional LSP lookups | [`pkg/memory/memory.go`](pkg/memory/memory.go), [`pkg/memory/memory_test.go`](pkg/memory/memory_test.go), [`pkg/vector/vector.go`](pkg/vector/vector.go), [`pkg/vector/vector_test.go`](pkg/vector/vector_test.go), [`pkg/githistory/githistory.go`](pkg/githistory/githistory.go), [`pkg/githistory/githistory_test.go`](pkg/githistory/githistory_test.go), [`pkg/codeintel/codeintel.go`](pkg/codeintel/codeintel.go), [`pkg/codeintel/codeintel_test.go`](pkg/codeintel/codeintel_test.go), [`pkg/codegraph/codegraph.go`](pkg/codegraph/codegraph.go), [`pkg/codegraph/codegraph_test.go`](pkg/codegraph/codegraph_test.go), [`pkg/lsp/client.go`](pkg/lsp/client.go), [`pkg/lsp/client_test.go`](pkg/lsp/client_test.go) |
 | Plugin manifests, safe local entrypoint execution, MCP manifest validation, and stdio JSON-RPC calls | [`pkg/plugin/manifest.go`](pkg/plugin/manifest.go), [`pkg/plugin/manifest_test.go`](pkg/plugin/manifest_test.go), [`pkg/plugin/run.go`](pkg/plugin/run.go), [`pkg/plugin/run_test.go`](pkg/plugin/run_test.go), [`pkg/mcp/manifest.go`](pkg/mcp/manifest.go), [`pkg/mcp/manifest_test.go`](pkg/mcp/manifest_test.go), [`pkg/mcp/client.go`](pkg/mcp/client.go), [`pkg/mcp/client_test.go`](pkg/mcp/client_test.go), [`cmd/atteler/cli_plugin_commands.go`](cmd/atteler/cli_plugin_commands.go), [`cmd/atteler/cli_mcp_commands.go`](cmd/atteler/cli_mcp_commands.go) |
