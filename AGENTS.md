@@ -7,7 +7,7 @@ This repository is a Go module for the `atteler` CLI and supporting LLM package.
 - `cmd/atteler/`: executable Bubble Tea TUI entrypoint.
 - `pkg/llm/`: provider-agnostic LLM interfaces, registry, auth, and provider implementations.
 - `pkg/llm/*_test.go`: unit tests for provider and registry behavior.
-- `README.md`: product notes, usage examples, and roadmap.
+- `README.md`: product overview, quickstart, stable user-facing features, and evidence-backed feature map.
 - `Makefile`: canonical local build, test, lint, generation, and cleanup targets.
 
 Keep reusable logic in `pkg/`; keep command wiring and terminal UI concerns in `cmd/atteler/`.
