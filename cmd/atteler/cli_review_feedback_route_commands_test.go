@@ -253,15 +253,37 @@ func TestFormatFeedbackProposal(t *testing.T) {
 		Confidence: 0.8,
 		Action:     "Revise instructions.",
 		Reason:     "Failed evaluations.",
-		Evidence:   []string{"evaluation: fail; score 1"},
+		RootCause: feedback.RootCauseClassification{
+			Category: "evaluation-regression",
+			Summary:  "Failed eval caught missed auth regression.",
+			Signals:  []string{"failed-evaluation"},
+		},
+		TargetBehavior: "Run auth regression checks before approval.",
+		RejectedAlternatives: []feedback.RejectedAlternative{{
+			Alternative: "Append generic guidance",
+			Reason:      "not auditable",
+		}},
+		Evidence:       []string{"evaluation: fail; score 1"},
+		LinkedEvidence: []feedback.EvidenceLink{{Kind: feedback.VerificationKindEval, Reference: "eval-before.md", Description: "missed auth regression"}},
+		Verification: []feedback.VerificationRecord{
+			{Kind: feedback.VerificationKindEval, Phase: feedback.VerificationPhaseBefore, Outcome: "fail", Reference: "eval-before.md", Score: 1, Passed: false},
+			{Kind: feedback.VerificationKindEval, Phase: feedback.VerificationPhaseAfter, Outcome: "pass", Reference: "eval-after.md", Score: 5, Passed: true},
+		},
 	})
 	for _, want := range []string{
 		"agent: reviewer\n",
 		"confidence: 0.80\n",
+		"root_cause: evaluation-regression",
+		"target_behavior: Run auth regression checks before approval.\n",
 		"action: Revise instructions.\n",
 		"reason: Failed evaluations.\n",
+		"rejected_alternatives:\n",
 		"evidence:\n",
 		"  - evaluation: fail; score 1\n",
+		"linked_evidence:\n",
+		"verification:\n",
+		"phase=before\tkind=eval\tpassed=false",
+		"phase=after\tkind=eval\tpassed=true",
 	} {
 		if !strings.Contains(got, want) {
 			require.Failf(t, "formatted feedback proposal missing content", "missing %q in:\n%s", want, got)
@@ -288,6 +310,14 @@ func TestApplyFeedbackProposalsWritesConfigAndHistory(t *testing.T) {
 		require.FailNow(t, "expected negative knowledge to be recorded")
 	}
 
+	if !saved.RecordEvaluation("reviewer", "fail", "missed auth regression", "eval-before.md", 1) {
+		require.FailNow(t, "expected before evaluation to be recorded")
+	}
+
+	if !saved.RecordEvaluation("reviewer", "pass", "auth regression covered", "eval-after.md", 5) {
+		require.FailNow(t, "expected after evaluation to be recorded")
+	}
+
 	err := applyFeedbackProposals(saved, configPath, historyPath)
 
 	require.NoError(t, err)
@@ -304,5 +334,48 @@ func TestApplyFeedbackProposalsWritesConfigAndHistory(t *testing.T) {
 	history := string(historyData)
 	assert.Contains(t, history, "## Applied feedback")
 	assert.Contains(t, history, "agent: reviewer")
+	assert.Contains(t, history, "status: accepted")
+	assert.Contains(t, history, "author: atteler feedback apply")
+	assert.Contains(t, history, "source: session:"+saved.ID)
+	assert.Contains(t, history, "before_prompt_hash: sha256:")
+	assert.Contains(t, history, "after_prompt_hash: sha256:")
 	assert.Contains(t, history, "negative knowledge: skip regression tests -> hid an auth regression")
+	assert.Contains(t, history, "linked_evidence:")
+	assert.Contains(t, history, "verification:")
+	assert.Contains(t, history, "phase=before\tkind=eval\tpassed=false")
+	assert.Contains(t, history, "phase=after\tkind=eval\tpassed=true")
+	assert.Contains(t, history, "rollback:")
+	assert.Contains(t, history, "diff:")
+	assert.Contains(t, history, "rollback_diff:")
+}
+
+func TestApplyFeedbackProposalsRestoresConfigWhenHistoryWriteFails(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "atteler.yaml")
+	historyPath := filepath.Join(dir, "history-dir")
+
+	if err := os.WriteFile(configPath, []byte(`agents:
+  reviewer:
+    system_prompt: Review code.
+`), 0o600); err != nil {
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, os.Mkdir(historyPath, 0o750))
+
+	saved := session.New("gpt-test", nil)
+	require.True(t, saved.RecordNegativeKnowledge("skip regression tests", "hid an auth regression", "abc123", "reviewer"))
+	require.True(t, saved.RecordEvaluation("reviewer", "fail", "missed auth regression", "eval-before.md", 1))
+	require.True(t, saved.RecordEvaluation("reviewer", "pass", "auth regression covered", "eval-after.md", 5))
+
+	err := applyFeedbackProposals(saved, configPath, historyPath)
+
+	require.Error(t, err)
+
+	cfg, _, loadErr := config.LoadFiles([]string{configPath})
+	require.NoError(t, loadErr)
+	require.Contains(t, cfg.Agents, "reviewer")
+	assert.Equal(t, "Review code.", cfg.Agents["reviewer"].SystemPrompt)
 }

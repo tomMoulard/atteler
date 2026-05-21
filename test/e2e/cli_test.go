@@ -634,6 +634,10 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
   "id": "feedback",
   "default_model": "gpt-test",
   "messages": [],
+  "evaluations": [
+    {"created_at": "2026-05-02T10:00:30Z", "agent": "reviewer", "outcome": "fail", "notes": "missed auth regression", "reference": "eval-before.md", "score": 1},
+    {"created_at": "2026-05-02T10:01:00Z", "agent": "reviewer", "outcome": "pass", "notes": "auth regression covered", "reference": "eval-after.md", "score": 5}
+  ],
   "negative_knowledge": [
     {"created_at": "2026-05-02T10:00:00Z", "approach": "skip regression tests", "reason": "hid auth regression", "agent": "reviewer"}
   ]
@@ -654,6 +658,10 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 	historyData, err := os.ReadFile(feedbackHistory)
 	require.NoError(t, err)
 	assertContains(t, string(historyData), "agent: reviewer")
+	assertContains(t, string(historyData), "status: accepted")
+	assertContains(t, string(historyData), "before_prompt_hash: sha256:")
+	assertContains(t, string(historyData), "after_prompt_hash: sha256:")
+	assertContains(t, string(historyData), "phase=after\tkind=eval\tpassed=true")
 }
 
 func TestSessionCommands(t *testing.T) {

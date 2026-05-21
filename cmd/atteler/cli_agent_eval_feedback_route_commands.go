@@ -260,22 +260,135 @@ func printFeedbackProposals(saved session.Session) {
 
 func formatFeedbackProposal(proposal feedback.Proposal) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "agent: %s\n", proposal.Agent)
-	fmt.Fprintf(&b, "confidence: %.2f\n", proposal.Confidence)
-	fmt.Fprintf(&b, "action: %s\n", proposal.Action)
-	fmt.Fprintf(&b, "reason: %s\n", proposal.Reason)
-
-	if len(proposal.Evidence) > 0 {
-		b.WriteString("evidence:\n")
-
-		for _, evidence := range proposal.Evidence {
-			fmt.Fprintf(&b, "  - %s\n", evidence)
-		}
-	}
+	writeFeedbackProposalHeader(&b, proposal)
+	writeFeedbackRejectedAlternatives(&b, proposal.RejectedAlternatives)
+	writeFeedbackEvidence(&b, proposal.Evidence)
+	writeFeedbackLinkedEvidence(&b, proposal.LinkedEvidence)
+	writeFeedbackVerification(&b, proposal.Verification)
 
 	b.WriteByte('\n')
 
 	return b.String()
+}
+
+func writeFeedbackProposalHeader(b *strings.Builder, proposal feedback.Proposal) {
+	fmt.Fprintf(b, "agent: %s\n", proposal.Agent)
+	fmt.Fprintf(b, "confidence: %.2f\n", proposal.Confidence)
+
+	if rootCause := formatFeedbackRootCause(proposal.RootCause); rootCause != "" {
+		fmt.Fprintf(b, "root_cause: %s\n", rootCause)
+	}
+
+	if target := strings.TrimSpace(proposal.TargetBehavior); target != "" {
+		fmt.Fprintf(b, "target_behavior: %s\n", target)
+	}
+
+	fmt.Fprintf(b, "action: %s\n", proposal.Action)
+	fmt.Fprintf(b, "reason: %s\n", proposal.Reason)
+}
+
+func writeFeedbackRejectedAlternatives(b *strings.Builder, rejected []feedback.RejectedAlternative) {
+	if len(rejected) == 0 {
+		return
+	}
+
+	b.WriteString("rejected_alternatives:\n")
+
+	for _, item := range rejected {
+		if alternative := strings.TrimSpace(item.Alternative); alternative != "" {
+			fmt.Fprintf(b, "  - alternative: %s\n", alternative)
+		}
+
+		if reason := strings.TrimSpace(item.Reason); reason != "" {
+			fmt.Fprintf(b, "    reason: %s\n", reason)
+		}
+	}
+}
+
+func writeFeedbackEvidence(b *strings.Builder, evidence []string) {
+	if len(evidence) == 0 {
+		return
+	}
+
+	b.WriteString("evidence:\n")
+
+	for _, item := range evidence {
+		fmt.Fprintf(b, "  - %s\n", item)
+	}
+}
+
+func writeFeedbackLinkedEvidence(b *strings.Builder, links []feedback.EvidenceLink) {
+	if len(links) == 0 {
+		return
+	}
+
+	b.WriteString("linked_evidence:\n")
+
+	for _, link := range links {
+		fmt.Fprintf(b, "  - kind=%s\tref=%s", link.Kind, link.Reference)
+
+		if description := strings.TrimSpace(link.Description); description != "" {
+			fmt.Fprintf(b, "\tdescription=%s", description)
+		}
+
+		b.WriteByte('\n')
+	}
+}
+
+func writeFeedbackVerification(b *strings.Builder, records []feedback.VerificationRecord) {
+	if len(records) == 0 {
+		return
+	}
+
+	b.WriteString("verification:\n")
+
+	for _, record := range records {
+		fmt.Fprintf(b, "  - phase=%s\tkind=%s\tpassed=%t", record.Phase, record.Kind, record.Passed)
+
+		if record.Outcome != "" {
+			fmt.Fprintf(b, "\toutcome=%s", record.Outcome)
+		}
+
+		if record.Score != 0 {
+			fmt.Fprintf(b, "\tscore=%d", record.Score)
+		}
+
+		if record.Reference != "" {
+			fmt.Fprintf(b, "\tref=%s", record.Reference)
+		}
+
+		b.WriteByte('\n')
+	}
+}
+
+func formatFeedbackRootCause(rootCause feedback.RootCauseClassification) string {
+	category := strings.TrimSpace(rootCause.Category)
+	summary := strings.TrimSpace(rootCause.Summary)
+
+	signals := cleanFeedbackStrings(rootCause.Signals)
+	switch {
+	case category == "" && summary == "":
+		return ""
+	case category == "":
+		return summary
+	case summary == "":
+		return category
+	case len(signals) == 0:
+		return category + " — " + summary
+	default:
+		return fmt.Sprintf("%s — %s (signals: %s)", category, summary, strings.Join(signals, ", "))
+	}
+}
+
+func cleanFeedbackStrings(values []string) []string {
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+
+	return cleaned
 }
 
 func applyFeedbackProposals(saved session.Session, configPath, historyPath string) error {
@@ -293,9 +406,14 @@ func applyFeedbackProposals(saved session.Session, configPath, historyPath strin
 		return fmt.Errorf("feedback apply: config %s not found", configPath)
 	}
 
-	updatedAgents, history := feedback.ApplyProposals(cfg.Agents, feedback.FromSession(saved))
+	originalCfg := cfg
+
+	updatedAgents, history := feedback.ApplyProposalsWithOptions(cfg.Agents, feedback.FromSession(saved), feedback.ApplyOptions{
+		Author: "atteler feedback apply",
+		Source: "session:" + saved.ID,
+	})
 	if len(history) == 0 {
-		fmt.Println("No feedback proposals applied.")
+		fmt.Println("No accepted feedback proposals applied. A passing after-phase eval or fixture is required.")
 		return nil
 	}
 
@@ -306,6 +424,10 @@ func applyFeedbackProposals(saved session.Session, configPath, historyPath strin
 
 	historyPath = feedbackHistoryDefault(configPath, historyPath)
 	if err := appendFeedbackHistory(historyPath, history, time.Now().UTC()); err != nil {
+		if restoreErr := writeConfigFile(configPath, originalCfg); restoreErr != nil {
+			return fmt.Errorf("feedback apply: append history failed and restore config failed: %w", errors.Join(err, restoreErr))
+		}
+
 		return fmt.Errorf("feedback apply: %w", err)
 	}
 
