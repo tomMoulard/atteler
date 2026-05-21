@@ -41,11 +41,11 @@ func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {
 
 	storePath := filepath.Join(dir, "agent-memory.json")
 
-	err := runAgentMemoryCommand(dir, "reviewer", cliOptions{
-		agentMemoryStorePath:  storePath,
-		agentMemorySearch:     "callback retry",
-		agentMemoryIndexFiles: stringListFlag{note},
-		agentMemoryLimit:      positiveIntFlag{value: 1, set: true},
+	err := runAgentMemoryCommand(dir, "reviewer", agentMemoryCommandInput{
+		StorePath:  storePath,
+		Search:     "callback retry",
+		IndexFiles: []string{note},
+		Limit:      1,
 	})
 
 	require.NoError(t, err)

@@ -61,11 +61,44 @@ func TestMCPInvokeHelpers(t *testing.T) {
 func TestRunMCPInvokeRequiresManifest(t *testing.T) {
 	t.Parallel()
 
-	err := runMCPInvoke(t.Context(), cliOptions{mcpToolName: "lookup"})
+	err := runMCPInvoke(t.Context(), mcpInvokeCommandInput{ToolName: "lookup"})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--mcp-manifest")
 	assert.Contains(t, err.Error(), "atteler help plugins")
+}
+
+func TestMCPCommandInputsFromOptions(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{
+		mcpManifestPath: "mcp.yaml",
+		mcpCapability:   "symbols",
+		mcpServerName:   "repo",
+		mcpMethod:       "tools/list",
+		mcpParamsJSON:   `{"cursor":"next"}`,
+		mcpToolName:     "lookup",
+		mcpToolArgsJSON: `{"query":"Registry"}`,
+		mcpTimeout: positiveIntFlag{
+			value: 3,
+			set:   true,
+		},
+	}
+
+	assert.Equal(t, mcpManifestCommandInput{
+		Path:       "mcp.yaml",
+		Capability: "symbols",
+	}, mcpManifestCommandInputFromOptions(opts))
+
+	assert.Equal(t, mcpInvokeCommandInput{
+		ManifestPath:   "mcp.yaml",
+		ServerName:     "repo",
+		Method:         "tools/list",
+		ParamsJSON:     `{"cursor":"next"}`,
+		ToolName:       "lookup",
+		ToolArgsJSON:   `{"query":"Registry"}`,
+		TimeoutSeconds: 3,
+	}, mcpInvokeCommandInputFromOptions(opts))
 }
 
 func TestFormatLSPSymbols(t *testing.T) {
@@ -125,10 +158,43 @@ func TestCommandOutputEventCarriesRenderedOutput(t *testing.T) {
 	assert.Equal(t, "user", event.Metadata["source"])
 }
 
+func TestShellCommandInputsFromOptions(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{
+		bashCommand: "go test ./cmd/atteler",
+		bashDir:     "cmd/atteler",
+		bashTimeout: positiveIntFlag{
+			value: 10,
+			set:   true,
+		},
+		spawnAgentSpecs: rawStringListFlag{"reviewer|check diff"},
+		spawnBinary:     "atteler-dev",
+		spawnTimeout: positiveIntFlag{
+			value: 20,
+			set:   true,
+		},
+		spawnDryRun: true,
+	}
+
+	assert.Equal(t, bashCommandInput{
+		Command:        "go test ./cmd/atteler",
+		Dir:            "cmd/atteler",
+		TimeoutSeconds: 10,
+	}, bashCommandInputFromOptions(opts))
+
+	assert.Equal(t, spawnAgentsCommandInput{
+		Specs:          []string{"reviewer|check diff"},
+		Binary:         "atteler-dev",
+		TimeoutSeconds: 20,
+		DryRun:         true,
+	}, spawnAgentsCommandInputFromOptions(opts))
+}
+
 func TestParseSpawnAgentSpecs(t *testing.T) {
 	t.Parallel()
 
-	requests, err := parseSpawnAgentSpecs(rawStringListFlag{
+	requests, err := parseSpawnAgentSpecs([]string{
 		"architect|draft design",
 		"child-review|reviewer|check the diff",
 	})

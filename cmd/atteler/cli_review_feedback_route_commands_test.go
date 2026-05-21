@@ -169,7 +169,7 @@ func TestParseAndFormatRouteCandidate(t *testing.T) {
 func TestApplyRouteSelectionChoosesBudgetedFallbackChain(t *testing.T) {
 	t.Parallel()
 
-	opts := cliOptions{
+	input := routeModelsCommandInputFromOptions(cliOptions{
 		routeCandidates: rawStringListFlag{
 			"openai/too-expensive,input=0.01,output=0.01,max=1000",
 			"openai/fast,input=0.001,output=0.001,priority=0,max=1000",
@@ -178,10 +178,10 @@ func TestApplyRouteSelectionChoosesBudgetedFallbackChain(t *testing.T) {
 		routeInputTokens:  positiveIntFlag{value: 100, set: true},
 		routeOutputTokens: positiveIntFlag{value: 50, set: true},
 		routeBudget:       floatFlag{value: 0.2, set: true},
-	}
+	})
 	state := selectionState{sessionState: session.New("", nil)}
 
-	err := applyRouteSelection(opts, &state)
+	err := applyRouteSelection(input, &state)
 
 	require.NoError(t, err)
 	assert.Equal(t, "openai/fast", state.selectedModel)
@@ -193,15 +193,15 @@ func TestApplyRouteSelectionChoosesBudgetedFallbackChain(t *testing.T) {
 func TestApplyRouteSelectionErrorsWhenBudgetFiltersAllCandidates(t *testing.T) {
 	t.Parallel()
 
-	opts := cliOptions{
+	input := routeModelsCommandInputFromOptions(cliOptions{
 		routeCandidates:   rawStringListFlag{"openai/too-expensive,input=0.01,output=0.01,max=1000"},
 		routeInputTokens:  positiveIntFlag{value: 100, set: true},
 		routeOutputTokens: positiveIntFlag{value: 50, set: true},
 		routeBudget:       floatFlag{value: 0.01, set: true},
-	}
+	})
 	state := selectionState{sessionState: session.New("", nil)}
 
-	err := applyRouteSelection(opts, &state)
+	err := applyRouteSelection(input, &state)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no candidates fit")
@@ -210,11 +210,33 @@ func TestApplyRouteSelectionErrorsWhenBudgetFiltersAllCandidates(t *testing.T) {
 func TestRunRouteModelsRequiresCandidate(t *testing.T) {
 	t.Parallel()
 
-	err := runRouteModels(cliOptions{routeInteractive: true})
+	err := runRouteModels(routeModelsCommandInputFromOptions(cliOptions{routeInteractive: true}))
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--route-candidate")
 	assert.Contains(t, err.Error(), "atteler help providers")
+}
+
+func TestRouteModelsCommandInputFromOptions(t *testing.T) {
+	t.Parallel()
+
+	got := routeModelsCommandInputFromOptions(cliOptions{
+		routeCandidates:   rawStringListFlag{"openai/fast,input=0.001,output=0.002,max=1000"},
+		routeInputTokens:  positiveIntFlag{value: 100, set: true},
+		routeOutputTokens: positiveIntFlag{value: 50, set: true},
+		routeBudget:       floatFlag{value: 0.25, set: true},
+		routeCacheReuse:   floatFlag{value: 0.75, set: true},
+		routeInteractive:  true,
+	})
+
+	assert.Equal(t, []string{"openai/fast,input=0.001,output=0.002,max=1000"}, got.Candidates)
+	assert.Equal(t, modelroute.RequestProfile{
+		EstimatedInputTokens:     100,
+		EstimatedOutputTokens:    50,
+		Budget:                   0.25,
+		Interactive:              true,
+		PromptCacheReuseEstimate: 0.75,
+	}, got.Profile)
 }
 
 func TestParseAndFormatContextPack(t *testing.T) {

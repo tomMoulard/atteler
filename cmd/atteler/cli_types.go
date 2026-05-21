@@ -370,6 +370,8 @@ type cliOptions struct {
 	listMessages                       bool
 	listConfigPaths                    bool
 	stateDiagnostics                   bool
+	commandSurfaceJSON                 bool
+	commandSurfaceDocs                 bool
 	listPlugins                        bool
 	listHookEvents                     bool
 	listHookEventsJSON                 bool

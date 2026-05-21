@@ -13,20 +13,51 @@ import (
 	"github.com/tommoulard/atteler/pkg/subagent"
 )
 
-func runBashCommand(ctx context.Context, state appState, opts cliOptions) error {
+type bashCommandInput struct {
+	Command        string
+	Dir            string
+	TimeoutSeconds int
+}
+
+//nolint:govet // field order follows CLI flag grouping instead of byte packing.
+type spawnAgentsCommandInput struct {
+	Specs          []string
+	Binary         string
+	TimeoutSeconds int
+	DryRun         bool
+}
+
+func bashCommandInputFromOptions(opts cliOptions) bashCommandInput {
+	return bashCommandInput{
+		Command:        opts.bashCommand,
+		Dir:            opts.bashDir,
+		TimeoutSeconds: opts.bashTimeout.value,
+	}
+}
+
+func spawnAgentsCommandInputFromOptions(opts cliOptions) spawnAgentsCommandInput {
+	return spawnAgentsCommandInput{
+		Specs:          append([]string(nil), opts.spawnAgentSpecs...),
+		Binary:         opts.spawnBinary,
+		TimeoutSeconds: opts.spawnTimeout.value,
+		DryRun:         opts.spawnDryRun,
+	}
+}
+
+func runBashCommand(ctx context.Context, state appState, input bashCommandInput) error {
 	// Default to 120s for the CLI --bash command (builds, tests, etc. can be
 	// long-running). The shell package has its own 30s default for interactive
 	// TUI commands which is intentionally shorter.
 	const defaultBashCLITimeout = 120
 
-	timeoutSeconds := opts.bashTimeout.value
+	timeoutSeconds := input.TimeoutSeconds
 	if timeoutSeconds == 0 {
 		timeoutSeconds = defaultBashCLITimeout
 	}
 
 	timeout := time.Duration(timeoutSeconds) * time.Second
 
-	dir := strings.TrimSpace(opts.bashDir)
+	dir := strings.TrimSpace(input.Dir)
 	if dir == "" {
 		dir = state.cwd
 	}
@@ -37,17 +68,17 @@ func runBashCommand(ctx context.Context, state appState, opts cliOptions) error 
 		SessionPath: state.sessionStore.Path(state.sessionState.ID),
 		Agent:       state.selectedAgent,
 		Model:       state.selectedModel,
-		Content:     opts.bashCommand,
+		Content:     input.Command,
 		Metadata: map[string]string{
-			"command": opts.bashCommand,
+			"command": input.Command,
 			"cwd":     dir,
-			"input":   opts.bashCommand,
+			"input":   input.Command,
 			"source":  "cli",
 		},
 	})
 
 	result, err := attshell.RunBash(ctx, attshell.Options{
-		Command: opts.bashCommand,
+		Command: input.Command,
 		Dir:     dir,
 		Timeout: timeout,
 	})
@@ -60,7 +91,7 @@ func runBashCommand(ctx context.Context, state appState, opts cliOptions) error 
 	}
 
 	output := formatShellContext(shellResultMsg{
-		command: opts.bashCommand,
+		command: input.Command,
 		stdout:  result.Stdout,
 		stderr:  result.Stderr,
 		err:     err,
@@ -71,7 +102,7 @@ func runBashCommand(ctx context.Context, state appState, opts cliOptions) error 
 		state.selectedAgent,
 		state.selectedModel,
 		dir,
-		opts.bashCommand,
+		input.Command,
 		output,
 		err,
 		map[string]string{"source": "cli"},
@@ -84,21 +115,21 @@ func runBashCommand(ctx context.Context, state appState, opts cliOptions) error 
 	return nil
 }
 
-func runSpawnAgents(ctx context.Context, state appState, opts cliOptions) error {
-	requests, err := parseSpawnAgentSpecs(opts.spawnAgentSpecs)
+func runSpawnAgents(ctx context.Context, state appState, input spawnAgentsCommandInput) error {
+	requests, err := parseSpawnAgentSpecs(input.Specs)
 	if err != nil {
 		return err
 	}
 
-	if opts.spawnDryRun {
+	if input.DryRun {
 		fmt.Print(formatSpawnDryRun(requests))
 		return nil
 	}
 
-	if opts.spawnTimeout.value > 0 {
+	if input.TimeoutSeconds > 0 {
 		var cancel context.CancelFunc
 
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(opts.spawnTimeout.value)*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(input.TimeoutSeconds)*time.Second)
 		defer cancel()
 	}
 
@@ -115,7 +146,7 @@ func runSpawnAgents(ctx context.Context, state appState, opts cliOptions) error 
 	})
 
 	results, runErr := subagent.SpawnAll(ctx, requests, subagent.AttelerCommandWithOptions(subagent.CommandOptions{
-		Binary: resolveSpawnBinary(opts.spawnBinary),
+		Binary: resolveSpawnBinary(input.Binary),
 		Dir:    state.cwd,
 	}))
 	fmt.Print(formatSpawnResults(results))
@@ -153,7 +184,7 @@ func subagentCommandArgs(state appState) []string {
 	return args
 }
 
-func parseSpawnAgentSpecs(specs rawStringListFlag) ([]subagent.Request, error) {
+func parseSpawnAgentSpecs(specs []string) ([]subagent.Request, error) {
 	requests := make([]subagent.Request, 0, len(specs))
 	for i, raw := range specs {
 		request, err := parseSpawnAgentSpec(raw, i+1)

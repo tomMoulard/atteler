@@ -211,6 +211,8 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.BoolVar(&opts.listHookEvents, "list-hook-events", false, "list supported lifecycle hook event types and exit")
 	fs.BoolVar(&opts.listHookEventsJSON, "list-hook-events-json", false, "list supported lifecycle hook event types as JSON and exit")
 	fs.BoolVar(&opts.stateDiagnostics, "state-diagnostics", false, "print persisted interactive state diagnostics and exit")
+	fs.BoolVar(&opts.commandSurfaceJSON, "command-surface-json", false, "dump the inspectable CLI command surface as JSON and exit")
+	fs.BoolVar(&opts.commandSurfaceDocs, "command-surface-docs", false, "render the inspectable CLI command surface as Markdown and exit")
 	fs.BoolVar(&opts.watchScan, "watch-scan", false, "scan the current repository for background-agent health findings and exit")
 	fs.BoolVar(&opts.watchJSON, "watch-json", false, "emit --watch-scan findings as JSON")
 	fs.BoolVar(&opts.watchLoop, "watch-loop", false, "continuously scan the current repository for background-agent health findings")

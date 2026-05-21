@@ -60,7 +60,9 @@ owns it.
 
 Domain help is rendered from structured command metadata and covered by routing tests,
 so README examples stay representative instead of duplicating the whole flag
-catalog.
+catalog. The same contract can be dumped for documentation, shell completion,
+and tests with `atteler config commands-json`; Markdown docs can be rendered
+from that dispatch contract with `atteler config commands-docs`.
 
 <!-- atteler:cli-domains:start -->
 | Domain | Examples |

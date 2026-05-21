@@ -318,7 +318,8 @@ func lookupFlagDomain(name string) (string, bool) {
 		name == "list-config-paths" || name == "validate-config" ||
 		name == "explain-config" || name == "explain-config-field" ||
 		name == "doctor" || name == "doctor-offline" || name == "version" ||
-		name == "state-diagnostics" || strings.HasPrefix(name, "list-hook-events"):
+		name == "state-diagnostics" || strings.HasPrefix(name, "command-surface-") ||
+		strings.HasPrefix(name, "list-hook-events"):
 		return "config", true
 	case name == "model" || name == "list-models" || name == "list-known-models" ||
 		name == "list-providers" || name == "temperature" || name == "top-p" ||

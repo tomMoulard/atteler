@@ -581,7 +581,7 @@ func TestBuildMemoryStore_IndexesSessionsAndFiles(t *testing.T) {
 	sessionState.ID = "demo"
 	require.NoError(t, store.Save(sessionState))
 
-	mem, err := buildMemoryStore(store, cliOptions{memoryIndexFiles: stringListFlag{filePath}})
+	mem, err := buildMemoryStore(store, memoryCommandInput{IndexFiles: []string{filePath}})
 	require.NoError(t, err)
 	results, err := mem.Search("oauth", 10)
 	require.NoError(t, err)

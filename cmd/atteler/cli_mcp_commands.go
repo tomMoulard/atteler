@@ -15,8 +15,42 @@ import (
 	"github.com/tommoulard/atteler/pkg/mcp"
 )
 
-func runMCPManifest(path, capability string) error {
-	manifest, err := loadMCPManifest(path)
+type mcpManifestCommandInput struct {
+	Path       string
+	Capability string
+}
+
+type mcpInvokeCommandInput struct {
+	ManifestPath   string
+	ServerName     string
+	Method         string
+	ParamsJSON     string
+	ToolName       string
+	ToolArgsJSON   string
+	TimeoutSeconds int
+}
+
+func mcpManifestCommandInputFromOptions(opts cliOptions) mcpManifestCommandInput {
+	return mcpManifestCommandInput{
+		Path:       opts.mcpManifestPath,
+		Capability: opts.mcpCapability,
+	}
+}
+
+func mcpInvokeCommandInputFromOptions(opts cliOptions) mcpInvokeCommandInput {
+	return mcpInvokeCommandInput{
+		ManifestPath:   opts.mcpManifestPath,
+		ServerName:     opts.mcpServerName,
+		Method:         opts.mcpMethod,
+		ParamsJSON:     opts.mcpParamsJSON,
+		ToolName:       opts.mcpToolName,
+		ToolArgsJSON:   opts.mcpToolArgsJSON,
+		TimeoutSeconds: opts.mcpTimeout.value,
+	}
+}
+
+func runMCPManifest(input mcpManifestCommandInput) error {
+	manifest, err := loadMCPManifest(input.Path)
 	if err != nil {
 		return err
 	}
@@ -25,8 +59,8 @@ func runMCPManifest(path, capability string) error {
 		return fmt.Errorf("mcp manifest: validate: %w", err)
 	}
 
-	if strings.TrimSpace(capability) != "" {
-		servers := manifest.Find(capability)
+	if strings.TrimSpace(input.Capability) != "" {
+		servers := manifest.Find(input.Capability)
 		if len(servers) == 0 {
 			fmt.Println("No MCP servers found.")
 			return nil
@@ -46,20 +80,20 @@ func runMCPManifest(path, capability string) error {
 	return nil
 }
 
-func runMCPInvoke(ctx context.Context, opts cliOptions) error {
-	if strings.TrimSpace(opts.mcpMethod) != "" && strings.TrimSpace(opts.mcpToolName) != "" {
+func runMCPInvoke(ctx context.Context, input mcpInvokeCommandInput) error {
+	if strings.TrimSpace(input.Method) != "" && strings.TrimSpace(input.ToolName) != "" {
 		return errors.New("mcp invoke: use either --mcp-method or --mcp-tool, not both")
 	}
 
-	if strings.TrimSpace(opts.mcpManifestPath) == "" {
+	if strings.TrimSpace(input.ManifestPath) == "" {
 		return errors.New("mcp invoke: --mcp-manifest is required; run `atteler help plugins`")
 	}
 
-	if strings.TrimSpace(opts.mcpServerName) == "" {
+	if strings.TrimSpace(input.ServerName) == "" {
 		return errors.New("mcp invoke: --mcp-server is required")
 	}
 
-	manifest, err := loadMCPManifest(opts.mcpManifestPath)
+	manifest, err := loadMCPManifest(input.ManifestPath)
 	if err != nil {
 		return err
 	}
@@ -68,29 +102,29 @@ func runMCPInvoke(ctx context.Context, opts cliOptions) error {
 		return fmt.Errorf("mcp invoke: validate manifest: %w", validateErr)
 	}
 
-	server, ok := findMCPServer(manifest, opts.mcpServerName)
+	server, ok := findMCPServer(manifest, input.ServerName)
 	if !ok {
-		return fmt.Errorf("mcp invoke: server %q not found", strings.TrimSpace(opts.mcpServerName))
+		return fmt.Errorf("mcp invoke: server %q not found", strings.TrimSpace(input.ServerName))
 	}
 
-	timeout := time.Duration(opts.mcpTimeout.value) * time.Second
+	timeout := time.Duration(input.TimeoutSeconds) * time.Second
 
 	var response *mcp.Response
 
-	if strings.TrimSpace(opts.mcpToolName) != "" {
-		args, parseErr := parseMCPToolArgs(opts.mcpToolArgsJSON)
+	if strings.TrimSpace(input.ToolName) != "" {
+		args, parseErr := parseMCPToolArgs(input.ToolArgsJSON)
 		if parseErr != nil {
 			return parseErr
 		}
 
-		response, err = mcp.CallTool(ctx, server, opts.mcpToolName, args, timeout)
+		response, err = mcp.CallTool(ctx, server, input.ToolName, args, timeout)
 	} else {
-		params, parseErr := parseJSONParam(opts.mcpParamsJSON, "mcp params")
+		params, parseErr := parseJSONParam(input.ParamsJSON, "mcp params")
 		if parseErr != nil {
 			return parseErr
 		}
 
-		response, err = mcp.Invoke(ctx, server, mcp.Request{Method: opts.mcpMethod, Params: params}, timeout)
+		response, err = mcp.Invoke(ctx, server, mcp.Request{Method: input.Method, Params: params}, timeout)
 	}
 
 	if response != nil {

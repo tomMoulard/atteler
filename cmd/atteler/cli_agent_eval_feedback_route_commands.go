@@ -633,12 +633,38 @@ func formatFeedbackHistory(entries []feedback.HistoryEntry, appliedAt time.Time)
 	return b.String()
 }
 
-func runRouteModels(opts cliOptions) error {
-	if len(opts.routeCandidates) == 0 {
+type routeModelsCommandInput struct {
+	Candidates []string
+	Profile    modelroute.RequestProfile
+}
+
+func routeModelsCommandInputFromOptions(opts cliOptions) routeModelsCommandInput {
+	input := routeModelsCommandInput{
+		Candidates: append([]string(nil), opts.routeCandidates...),
+		Profile: modelroute.RequestProfile{
+			EstimatedInputTokens:  opts.routeInputTokens.value,
+			EstimatedOutputTokens: opts.routeOutputTokens.value,
+			Interactive:           opts.routeInteractive,
+			Batch:                 opts.routeBatch,
+		},
+	}
+	if opts.routeBudget.set {
+		input.Profile.Budget = opts.routeBudget.value
+	}
+
+	if opts.routeCacheReuse.set {
+		input.Profile.PromptCacheReuseEstimate = opts.routeCacheReuse.value
+	}
+
+	return input
+}
+
+func runRouteModels(input routeModelsCommandInput) error {
+	if len(input.Candidates) == 0 {
 		return errors.New("model route: at least one --route-candidate is required; run `atteler help providers`")
 	}
 
-	candidates, profile, err := routeCandidatesAndProfile(opts)
+	candidates, profile, err := routeCandidatesAndProfile(input)
 	if err != nil {
 		return err
 	}
@@ -656,9 +682,9 @@ func runRouteModels(opts cliOptions) error {
 	return nil
 }
 
-func routeCandidatesAndProfile(opts cliOptions) ([]modelroute.Candidate, modelroute.RequestProfile, error) {
-	candidates := make([]modelroute.Candidate, 0, len(opts.routeCandidates))
-	for _, raw := range opts.routeCandidates {
+func routeCandidatesAndProfile(input routeModelsCommandInput) ([]modelroute.Candidate, modelroute.RequestProfile, error) {
+	candidates := make([]modelroute.Candidate, 0, len(input.Candidates))
+	for _, raw := range input.Candidates {
 		candidate, err := parseRouteCandidate(raw)
 		if err != nil {
 			return nil, modelroute.RequestProfile{}, err
@@ -667,29 +693,15 @@ func routeCandidatesAndProfile(opts cliOptions) ([]modelroute.Candidate, modelro
 		candidates = append(candidates, candidate)
 	}
 
-	profile := modelroute.RequestProfile{
-		EstimatedInputTokens:  opts.routeInputTokens.value,
-		EstimatedOutputTokens: opts.routeOutputTokens.value,
-		Interactive:           opts.routeInteractive,
-		Batch:                 opts.routeBatch,
-	}
-	if opts.routeBudget.set {
-		profile.Budget = opts.routeBudget.value
-	}
-
-	if opts.routeCacheReuse.set {
-		profile.PromptCacheReuseEstimate = opts.routeCacheReuse.value
-	}
-
-	return candidates, profile, nil
+	return candidates, input.Profile, nil
 }
 
-func applyRouteSelection(opts cliOptions, state *selectionState) error {
-	if len(opts.routeCandidates) == 0 {
+func applyRouteSelection(input routeModelsCommandInput, state *selectionState) error {
+	if len(input.Candidates) == 0 {
 		return nil
 	}
 
-	candidates, profile, err := routeCandidatesAndProfile(opts)
+	candidates, profile, err := routeCandidatesAndProfile(input)
 	if err != nil {
 		return err
 	}

@@ -1,10 +1,14 @@
 package main
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 type codeIntelCommand struct {
-	match func(cliOptions) bool
-	run   func(cwd string, opts cliOptions) error
+	match func(codeIntelCommandInput) bool
+	run   func(cwd string, input codeIntelCommandInput) error
 	name  string
 }
 
@@ -15,35 +19,72 @@ func providerlessConfigCodeIntelCommands() []command {
 			tier:  tierProviderlessConfig,
 			match: codeIntelCommandRequested,
 			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
-				return runCodeIntelCommand(s.cwd, o)
+				return runCodeIntelCommand(s.cwd, codeIntelCommandInputFromOptions(o))
 			},
 		},
 	}
 }
 
 func codeIntelCommandRequested(opts cliOptions) bool {
-	return matchingCodeIntelCommand(opts) != nil
+	return matchingCodeIntelCommand(codeIntelCommandInputFromOptions(opts)) != nil
 }
 
-func runCodeIntelCommand(cwd string, opts cliOptions) error {
-	cmd := matchingCodeIntelCommand(opts)
+func runCodeIntelCommand(cwd string, input codeIntelCommandInput) error {
+	cmd, err := selectCodeIntelCommand(input)
+	if err != nil {
+		return err
+	}
+
 	if cmd == nil {
 		return nil
 	}
 
-	return cmd.run(cwd, opts)
+	return cmd.run(cwd, input)
 }
 
-func matchingCodeIntelCommand(opts cliOptions) *codeIntelCommand {
+func matchingCodeIntelCommand(input codeIntelCommandInput) *codeIntelCommand {
+	matches := matchingCodeIntelCommands(input)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	return matches[0]
+}
+
+func selectCodeIntelCommand(input codeIntelCommandInput) (*codeIntelCommand, error) {
+	matches := matchingCodeIntelCommands(input)
+	switch len(matches) {
+	case 0:
+		return nil, nil
+	case 1:
+		return matches[0], nil
+	default:
+		return nil, fmt.Errorf("ambiguous CLI command: flags match multiple code-intel commands (%s); choose one command or remove conflicting flags",
+			codeIntelCommandNames(matches))
+	}
+}
+
+func matchingCodeIntelCommands(input codeIntelCommandInput) []*codeIntelCommand {
+	matches := make([]*codeIntelCommand, 0, 1)
 	commands := codeIntelCommands()
+
 	for i := range commands {
 		cmd := &commands[i]
-		if cmd.match(opts) {
-			return cmd
+		if cmd.match(input) {
+			matches = append(matches, cmd)
 		}
 	}
 
-	return nil
+	return matches
+}
+
+func codeIntelCommandNames(commands []*codeIntelCommand) string {
+	names := make([]string, 0, len(commands))
+	for _, command := range commands {
+		names = append(names, command.name)
+	}
+
+	return strings.Join(names, ", ")
 }
 
 func codeIntelCommands() []codeIntelCommand {
@@ -51,181 +92,223 @@ func codeIntelCommands() []codeIntelCommand {
 		// ---------------------------------------------------------------
 		// Tier: providerless config -- code analysis
 		// ---------------------------------------------------------------
-		codeSymbolCmd("code-symbol-name", func(o cliOptions) bool { return o.codeSymbolName != "" },
-			func(cwd string, o cliOptions) error { return findCodeSymbol(cwd, o.codeSymbolName) }),
-		codeSymbolCmd("code-symbol-file-summary", func(o cliOptions) bool { return o.codeSymbolFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeSymbolNameFileSummary(cwd, o.codeSymbolFileSummary)
+		codeSymbolCmd("code-symbol-name", func(input codeIntelCommandInput) bool { return input.SymbolName != "" },
+			func(cwd string, input codeIntelCommandInput) error { return findCodeSymbol(cwd, input.SymbolName) }),
+		codeSymbolCmd("code-symbol-file-summary", func(input codeIntelCommandInput) bool { return input.SymbolFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeSymbolNameFileSummary(cwd, input.SymbolFileSummary)
 			}),
-		codeSymbolCmd("code-symbol-package-summary", func(o cliOptions) bool { return o.codeSymbolPackageSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeSymbolNamePackageSummary(cwd, o.codeSymbolPackageSummary)
+		codeSymbolCmd("code-symbol-package-summary", func(input codeIntelCommandInput) bool { return input.SymbolPackageSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeSymbolNamePackageSummary(cwd, input.SymbolPackageSummary)
 			}),
-		codeSymbolCmd("code-symbol-prefix", func(o cliOptions) bool { return o.codeSymbolPrefix != "" },
-			func(cwd string, o cliOptions) error { return findCodeSymbolPrefix(cwd, o.codeSymbolPrefix) }),
-		codeSymbolCmd("code-symbol-prefix-file-summary", func(o cliOptions) bool { return o.codeSymbolPrefixFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeSymbolPrefixFileSummary(cwd, o.codeSymbolPrefixFileSummary)
+		codeSymbolCmd("code-symbol-prefix", func(input codeIntelCommandInput) bool { return input.SymbolPrefix != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return findCodeSymbolPrefix(cwd, input.SymbolPrefix)
 			}),
-		codeSymbolCmd("code-symbol-prefix-package-summary", func(o cliOptions) bool { return o.codeSymbolPrefixPackageSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeSymbolPrefixPackageSummary(cwd, o.codeSymbolPrefixPackageSummary)
+		codeSymbolCmd("code-symbol-prefix-file-summary", func(input codeIntelCommandInput) bool { return input.SymbolPrefixFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeSymbolPrefixFileSummary(cwd, input.SymbolPrefixFileSummary)
 			}),
-		codeSymbolCmd("code-symbol-kind", func(o cliOptions) bool { return o.codeSymbolKind != "" },
-			func(cwd string, o cliOptions) error { return findCodeSymbolsByKind(cwd, o.codeSymbolKind) }),
-		codeSymbolCmd("code-symbol-kind-file-summary", func(o cliOptions) bool { return o.codeSymbolKindFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeSymbolKindFileSummary(cwd, o.codeSymbolKindFileSummary)
+		codeSymbolCmd("code-symbol-prefix-package-summary", func(input codeIntelCommandInput) bool { return input.SymbolPrefixPackageSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeSymbolPrefixPackageSummary(cwd, input.SymbolPrefixPackageSummary)
 			}),
-		codeSymbolCmd("code-symbol-kind-package-summary", func(o cliOptions) bool { return o.codeSymbolKindPackageSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeSymbolKindPackageSummary(cwd, o.codeSymbolKindPackageSummary)
+		codeSymbolCmd("code-symbol-kind", func(input codeIntelCommandInput) bool { return input.SymbolKind != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return findCodeSymbolsByKind(cwd, input.SymbolKind)
 			}),
-		codeSymbolCmd("list-code-symbol-summary", func(o cliOptions) bool { return o.listCodeSymbolSummary },
-			func(cwd string, _ cliOptions) error { return listCodeSymbolSummary(cwd) }),
-		codeSymbolCmd("list-code-symbol-file-summary", func(o cliOptions) bool { return o.listCodeSymbolFileSummary },
-			func(cwd string, _ cliOptions) error { return listCodeSymbolFileSummary(cwd) }),
+		codeSymbolCmd("code-symbol-kind-file-summary", func(input codeIntelCommandInput) bool { return input.SymbolKindFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeSymbolKindFileSummary(cwd, input.SymbolKindFileSummary)
+			}),
+		codeSymbolCmd("code-symbol-kind-package-summary", func(input codeIntelCommandInput) bool { return input.SymbolKindPackageSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeSymbolKindPackageSummary(cwd, input.SymbolKindPackageSummary)
+			}),
+		codeSymbolCmd("list-code-symbol-summary", func(input codeIntelCommandInput) bool { return input.ListSymbolSummary },
+			func(cwd string, _ codeIntelCommandInput) error { return listCodeSymbolSummary(cwd) }),
+		codeSymbolCmd("list-code-symbol-file-summary", func(input codeIntelCommandInput) bool { return input.ListSymbolFileSummary },
+			func(cwd string, _ codeIntelCommandInput) error { return listCodeSymbolFileSummary(cwd) }),
 
 		// Code imports
-		codeSymbolCmd("list-code-imports", func(o cliOptions) bool { return o.listCodeImports },
-			func(cwd string, _ cliOptions) error { return listCodeImports(cwd) }),
-		codeSymbolCmd("list-code-import-summary", func(o cliOptions) bool { return o.listCodeImportSummary },
-			func(cwd string, _ cliOptions) error { return listCodeImportSummary(cwd) }),
-		codeSymbolCmd("list-code-import-file-summary", func(o cliOptions) bool { return o.listCodeImportFileSummary },
-			func(cwd string, _ cliOptions) error { return listCodeImportFileSummary(cwd) }),
-		codeSymbolCmd("code-import-path", func(o cliOptions) bool { return o.codeImportPath != "" },
-			func(cwd string, o cliOptions) error { return listCodeImportPath(cwd, o.codeImportPath) }),
-		codeSymbolCmd("code-import-path-summary", func(o cliOptions) bool { return o.codeImportPathSummary != "" },
-			func(cwd string, o cliOptions) error { return listCodeImportPathSummary(cwd, o.codeImportPathSummary) }),
-		codeSymbolCmd("code-import-path-file-summary", func(o cliOptions) bool { return o.codeImportPathFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeImportPathFileSummary(cwd, o.codeImportPathFileSummary)
+		codeSymbolCmd("list-code-imports", func(input codeIntelCommandInput) bool { return input.ListImports },
+			func(cwd string, _ codeIntelCommandInput) error { return listCodeImports(cwd) }),
+		codeSymbolCmd("list-code-import-summary", func(input codeIntelCommandInput) bool { return input.ListImportSummary },
+			func(cwd string, _ codeIntelCommandInput) error { return listCodeImportSummary(cwd) }),
+		codeSymbolCmd("list-code-import-file-summary", func(input codeIntelCommandInput) bool { return input.ListImportFileSummary },
+			func(cwd string, _ codeIntelCommandInput) error { return listCodeImportFileSummary(cwd) }),
+		codeSymbolCmd("code-import-path", func(input codeIntelCommandInput) bool { return input.ImportPath != "" },
+			func(cwd string, input codeIntelCommandInput) error { return listCodeImportPath(cwd, input.ImportPath) }),
+		codeSymbolCmd("code-import-path-summary", func(input codeIntelCommandInput) bool { return input.ImportPathSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeImportPathSummary(cwd, input.ImportPathSummary)
 			}),
-		codeSymbolCmd("code-import-path-package-summary", func(o cliOptions) bool { return o.codeImportPathPackageSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeImportPathPackageSummary(cwd, o.codeImportPathPackageSummary)
+		codeSymbolCmd("code-import-path-file-summary", func(input codeIntelCommandInput) bool { return input.ImportPathFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeImportPathFileSummary(cwd, input.ImportPathFileSummary)
 			}),
-		codeSymbolCmd("code-import-prefix", func(o cliOptions) bool { return o.codeImportPrefix != "" },
-			func(cwd string, o cliOptions) error { return listCodeImportPrefix(cwd, o.codeImportPrefix) }),
-		codeSymbolCmd("code-import-prefix-summary", func(o cliOptions) bool { return o.codeImportPrefixSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeImportPrefixSummary(cwd, o.codeImportPrefixSummary)
+		codeSymbolCmd("code-import-path-package-summary", func(input codeIntelCommandInput) bool { return input.ImportPathPackageSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeImportPathPackageSummary(cwd, input.ImportPathPackageSummary)
 			}),
-		codeSymbolCmd("code-import-prefix-file-summary", func(o cliOptions) bool { return o.codeImportPrefixFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeImportPrefixFileSummary(cwd, o.codeImportPrefixFileSummary)
+		codeSymbolCmd("code-import-prefix", func(input codeIntelCommandInput) bool { return input.ImportPrefix != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeImportPrefix(cwd, input.ImportPrefix)
 			}),
-		codeSymbolCmd("code-import-prefix-package-summary", func(o cliOptions) bool { return o.codeImportPrefixPackageSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodeImportPrefixPackageSummary(cwd, o.codeImportPrefixPackageSummary)
+		codeSymbolCmd("code-import-prefix-summary", func(input codeIntelCommandInput) bool { return input.ImportPrefixSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeImportPrefixSummary(cwd, input.ImportPrefixSummary)
+			}),
+		codeSymbolCmd("code-import-prefix-file-summary", func(input codeIntelCommandInput) bool { return input.ImportPrefixFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeImportPrefixFileSummary(cwd, input.ImportPrefixFileSummary)
+			}),
+		codeSymbolCmd("code-import-prefix-package-summary", func(input codeIntelCommandInput) bool { return input.ImportPrefixPackageSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeImportPrefixPackageSummary(cwd, input.ImportPrefixPackageSummary)
 			}),
 
 		// Code packages
-		codeSymbolCmd("list-code-packages", func(o cliOptions) bool { return o.listCodePackages },
-			func(cwd string, _ cliOptions) error { return listCodePackages(cwd) }),
-		codeSymbolCmd("code-package-name", func(o cliOptions) bool { return o.codePackageName != "" },
-			func(cwd string, o cliOptions) error { return listCodePackageFiles(cwd, o.codePackageName) }),
-		codeSymbolCmd("list-code-package-import-summary", func(o cliOptions) bool { return o.listCodePackageImportSummary },
-			func(cwd string, _ cliOptions) error { return listCodePackageImportSummary(cwd) }),
-		codeSymbolCmd("code-package-imports", func(o cliOptions) bool { return o.codePackageImports != "" },
-			func(cwd string, o cliOptions) error { return listCodePackageImports(cwd, o.codePackageImports) }),
-		codeSymbolCmd("code-package-import-path", func(o cliOptions) bool { return o.codePackageImportPath != "" },
-			func(cwd string, o cliOptions) error { return listCodePackageImportPath(cwd, o.codePackageImportPath) }),
-		codeSymbolCmd("code-package-import-files", func(o cliOptions) bool { return o.codePackageImportFiles != "" },
-			func(cwd string, o cliOptions) error { return listCodePackageImportFiles(cwd, o.codePackageImportFiles) }),
-		codeSymbolCmd("code-package-import-path-file-summary", func(o cliOptions) bool { return o.codePackageImportPathFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodePackageImportPathFileSummary(cwd, o.codePackageImportPathFileSummary)
+		codeSymbolCmd("list-code-packages", func(input codeIntelCommandInput) bool { return input.ListPackages },
+			func(cwd string, _ codeIntelCommandInput) error { return listCodePackages(cwd) }),
+		codeSymbolCmd("code-package-name", func(input codeIntelCommandInput) bool { return input.PackageName != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageFiles(cwd, input.PackageName)
 			}),
-		codeSymbolCmd("code-package-import-prefix", func(o cliOptions) bool { return o.codePackageImportPrefix != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodePackageImportPrefix(cwd, o.codePackageImportPrefix)
+		codeSymbolCmd("list-code-package-import-summary", func(input codeIntelCommandInput) bool { return input.ListPackageImportSummary },
+			func(cwd string, _ codeIntelCommandInput) error { return listCodePackageImportSummary(cwd) }),
+		codeSymbolCmd("code-package-imports", func(input codeIntelCommandInput) bool { return input.PackageImports != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageImports(cwd, input.PackageImports)
 			}),
-		codeSymbolCmd("code-package-import-prefix-files", func(o cliOptions) bool { return o.codePackageImportPrefixFiles != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodePackageImportPrefixFiles(cwd, o.codePackageImportPrefixFiles)
+		codeSymbolCmd("code-package-import-path", func(input codeIntelCommandInput) bool { return input.PackageImportPath != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageImportPath(cwd, input.PackageImportPath)
 			}),
-		codeSymbolCmd("code-package-import-prefix-file-summary", func(o cliOptions) bool { return o.codePackageImportPrefixFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodePackageImportPrefixFileSummary(cwd, o.codePackageImportPrefixFileSummary)
+		codeSymbolCmd("code-package-import-files", func(input codeIntelCommandInput) bool { return input.PackageImportFiles != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageImportFiles(cwd, input.PackageImportFiles)
 			}),
-		codeSymbolCmd("code-package-import-file-summary", func(o cliOptions) bool { return o.codePackageImportFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodePackageImportFileSummary(cwd, o.codePackageImportFileSummary)
+		codeSymbolCmd("code-package-import-path-file-summary", func(input codeIntelCommandInput) bool { return input.PackageImportPathFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageImportPathFileSummary(cwd, input.PackageImportPathFileSummary)
 			}),
-		codeSymbolCmd("code-package-symbols", func(o cliOptions) bool { return o.codePackageSymbols != "" },
-			func(cwd string, o cliOptions) error { return listCodePackageSymbols(cwd, o.codePackageSymbols) }),
-		codeSymbolCmd("code-package-symbol-file-summary", func(o cliOptions) bool { return o.codePackageSymbolFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodePackageSymbolFileSummary(cwd, o.codePackageSymbolFileSummary)
+		codeSymbolCmd("code-package-import-prefix", func(input codeIntelCommandInput) bool { return input.PackageImportPrefix != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageImportPrefix(cwd, input.PackageImportPrefix)
 			}),
-		codeSymbolCmd("code-package-symbol-name", func(o cliOptions) bool { return o.codePackageSymbolName != "" },
-			func(cwd string, o cliOptions) error { return listCodePackageSymbol(cwd, o.codePackageSymbolName) }),
-		codeSymbolCmd("code-package-symbol-name-file-summary", func(o cliOptions) bool { return o.codePackageSymbolNameFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodePackageSymbolNameFileSummary(cwd, o.codePackageSymbolNameFileSummary)
+		codeSymbolCmd("code-package-import-prefix-files", func(input codeIntelCommandInput) bool { return input.PackageImportPrefixFiles != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageImportPrefixFiles(cwd, input.PackageImportPrefixFiles)
 			}),
-		codeSymbolCmd("code-package-symbol-list", func(o cliOptions) bool { return o.codePackageSymbolList != "" },
-			func(cwd string, o cliOptions) error { return listCodePackageSymbolList(cwd, o.codePackageSymbolList) }),
-		codeSymbolCmd("code-package-symbol-kind", func(o cliOptions) bool { return o.codePackageSymbolKind != "" },
-			func(cwd string, o cliOptions) error { return listCodePackageSymbolKind(cwd, o.codePackageSymbolKind) }),
-		codeSymbolCmd("code-package-symbol-kind-file-summary", func(o cliOptions) bool { return o.codePackageSymbolKindFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodePackageSymbolKindFileSummary(cwd, o.codePackageSymbolKindFileSummary)
+		codeSymbolCmd("code-package-import-prefix-file-summary", func(input codeIntelCommandInput) bool { return input.PackageImportPrefixFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageImportPrefixFileSummary(cwd, input.PackageImportPrefixFileSummary)
 			}),
-		codeSymbolCmd("code-package-symbol-prefix", func(o cliOptions) bool { return o.codePackageSymbolPrefix != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodePackageSymbolPrefix(cwd, o.codePackageSymbolPrefix)
+		codeSymbolCmd("code-package-import-file-summary", func(input codeIntelCommandInput) bool { return input.PackageImportFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageImportFileSummary(cwd, input.PackageImportFileSummary)
 			}),
-		codeSymbolCmd("code-package-symbol-prefix-file-summary", func(o cliOptions) bool { return o.codePackageSymbolPrefixFileSummary != "" },
-			func(cwd string, o cliOptions) error {
-				return listCodePackageSymbolPrefixFileSummary(cwd, o.codePackageSymbolPrefixFileSummary)
+		codeSymbolCmd("code-package-symbols", func(input codeIntelCommandInput) bool { return input.PackageSymbols != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageSymbols(cwd, input.PackageSymbols)
+			}),
+		codeSymbolCmd("code-package-symbol-file-summary", func(input codeIntelCommandInput) bool { return input.PackageSymbolFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageSymbolFileSummary(cwd, input.PackageSymbolFileSummary)
+			}),
+		codeSymbolCmd("code-package-symbol-name", func(input codeIntelCommandInput) bool { return input.PackageSymbolName != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageSymbol(cwd, input.PackageSymbolName)
+			}),
+		codeSymbolCmd("code-package-symbol-name-file-summary", func(input codeIntelCommandInput) bool { return input.PackageSymbolNameFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageSymbolNameFileSummary(cwd, input.PackageSymbolNameFileSummary)
+			}),
+		codeSymbolCmd("code-package-symbol-list", func(input codeIntelCommandInput) bool { return input.PackageSymbolList != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageSymbolList(cwd, input.PackageSymbolList)
+			}),
+		codeSymbolCmd("code-package-symbol-kind", func(input codeIntelCommandInput) bool { return input.PackageSymbolKind != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageSymbolKind(cwd, input.PackageSymbolKind)
+			}),
+		codeSymbolCmd("code-package-symbol-kind-file-summary", func(input codeIntelCommandInput) bool { return input.PackageSymbolKindFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageSymbolKindFileSummary(cwd, input.PackageSymbolKindFileSummary)
+			}),
+		codeSymbolCmd("code-package-symbol-prefix", func(input codeIntelCommandInput) bool { return input.PackageSymbolPrefix != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageSymbolPrefix(cwd, input.PackageSymbolPrefix)
+			}),
+		codeSymbolCmd("code-package-symbol-prefix-file-summary", func(input codeIntelCommandInput) bool { return input.PackageSymbolPrefixFileSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodePackageSymbolPrefixFileSummary(cwd, input.PackageSymbolPrefixFileSummary)
 			}),
 
 		// Code files
-		codeSymbolCmd("code-file-path", func(o cliOptions) bool { return o.codeFilePath != "" },
-			func(cwd string, o cliOptions) error { return showCodeFile(cwd, o.codeFilePath) }),
-		codeSymbolCmd("code-file-imports", func(o cliOptions) bool { return o.codeFileImports != "" },
-			func(cwd string, o cliOptions) error { return listCodeFileImports(cwd, o.codeFileImports) }),
-		codeSymbolCmd("code-file-symbols", func(o cliOptions) bool { return o.codeFileSymbols != "" },
-			func(cwd string, o cliOptions) error { return listCodeFileSymbols(cwd, o.codeFileSymbols) }),
-		codeSymbolCmd("code-file-symbol-summary", func(o cliOptions) bool { return o.codeFileSymbolSummary != "" },
-			func(cwd string, o cliOptions) error { return listCodeFileSymbolSummary(cwd, o.codeFileSymbolSummary) }),
-		codeSymbolCmd("code-file-symbol-name", func(o cliOptions) bool { return o.codeFileSymbolName != "" },
-			func(cwd string, o cliOptions) error { return listCodeFileSymbol(cwd, o.codeFileSymbolName) }),
-		codeSymbolCmd("code-file-symbol-kind", func(o cliOptions) bool { return o.codeFileSymbolKind != "" },
-			func(cwd string, o cliOptions) error { return listCodeFileSymbolKind(cwd, o.codeFileSymbolKind) }),
-		codeSymbolCmd("code-file-symbol-prefix", func(o cliOptions) bool { return o.codeFileSymbolPrefix != "" },
-			func(cwd string, o cliOptions) error { return listCodeFileSymbolPrefix(cwd, o.codeFileSymbolPrefix) }),
-		codeSymbolCmd("code-file-import-prefix", func(o cliOptions) bool { return o.codeFileImportPrefix != "" },
-			func(cwd string, o cliOptions) error { return listCodeFileImportPrefix(cwd, o.codeFileImportPrefix) }),
-		codeSymbolCmd("code-file-import-path", func(o cliOptions) bool { return o.codeFileImportPath != "" },
-			func(cwd string, o cliOptions) error { return listCodeFileImportPath(cwd, o.codeFileImportPath) }),
+		codeSymbolCmd("code-file-path", func(input codeIntelCommandInput) bool { return input.FilePath != "" },
+			func(cwd string, input codeIntelCommandInput) error { return showCodeFile(cwd, input.FilePath) }),
+		codeSymbolCmd("code-file-imports", func(input codeIntelCommandInput) bool { return input.FileImports != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeFileImports(cwd, input.FileImports)
+			}),
+		codeSymbolCmd("code-file-symbols", func(input codeIntelCommandInput) bool { return input.FileSymbols != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeFileSymbols(cwd, input.FileSymbols)
+			}),
+		codeSymbolCmd("code-file-symbol-summary", func(input codeIntelCommandInput) bool { return input.FileSymbolSummary != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeFileSymbolSummary(cwd, input.FileSymbolSummary)
+			}),
+		codeSymbolCmd("code-file-symbol-name", func(input codeIntelCommandInput) bool { return input.FileSymbolName != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeFileSymbol(cwd, input.FileSymbolName)
+			}),
+		codeSymbolCmd("code-file-symbol-kind", func(input codeIntelCommandInput) bool { return input.FileSymbolKind != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeFileSymbolKind(cwd, input.FileSymbolKind)
+			}),
+		codeSymbolCmd("code-file-symbol-prefix", func(input codeIntelCommandInput) bool { return input.FileSymbolPrefix != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeFileSymbolPrefix(cwd, input.FileSymbolPrefix)
+			}),
+		codeSymbolCmd("code-file-import-prefix", func(input codeIntelCommandInput) bool { return input.FileImportPrefix != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeFileImportPrefix(cwd, input.FileImportPrefix)
+			}),
+		codeSymbolCmd("code-file-import-path", func(input codeIntelCommandInput) bool { return input.FileImportPath != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeFileImportPath(cwd, input.FileImportPath)
+			}),
 
 		// Code graph / structure
-		codeSymbolCmd("list-code-layers", func(o cliOptions) bool { return o.listCodeLayers },
-			func(cwd string, _ cliOptions) error { return listCodeLayers(cwd) }),
-		codeSymbolCmd("list-code-cycles", func(o cliOptions) bool { return o.listCodeCycles },
-			func(cwd string, _ cliOptions) error { return listCodeCycles(cwd) }),
-		codeSymbolCmd("code-summary", func(o cliOptions) bool { return o.codeSummary },
-			func(cwd string, _ cliOptions) error { return printCodeSummary(cwd) }),
-		codeSymbolCmd("list-code-files", func(o cliOptions) bool { return o.listCodeFiles },
-			func(cwd string, _ cliOptions) error { return listCodeFiles(cwd) }),
-		codeSymbolCmd("code-impact-target", func(o cliOptions) bool { return o.codeImpactTarget != "" },
-			func(cwd string, o cliOptions) error { return listCodeImpact(cwd, o.codeImpactTarget) }),
-		codeSymbolCmd("code-reach-target", func(o cliOptions) bool { return o.codeReachTarget != "" },
-			func(cwd string, o cliOptions) error { return listCodeReachable(cwd, o.codeReachTarget) }),
-		codeSymbolCmd("code-deps-target", func(o cliOptions) bool { return o.codeDepsTarget != "" },
-			func(cwd string, o cliOptions) error { return listCodeDeps(cwd, o.codeDepsTarget) }),
-		codeSymbolCmd("code-rdeps-target", func(o cliOptions) bool { return o.codeRdepsTarget != "" },
-			func(cwd string, o cliOptions) error { return listCodeReverseDeps(cwd, o.codeRdepsTarget) }),
+		codeSymbolCmd("list-code-layers", func(input codeIntelCommandInput) bool { return input.ListLayers },
+			func(cwd string, _ codeIntelCommandInput) error { return listCodeLayers(cwd) }),
+		codeSymbolCmd("list-code-cycles", func(input codeIntelCommandInput) bool { return input.ListCycles },
+			func(cwd string, _ codeIntelCommandInput) error { return listCodeCycles(cwd) }),
+		codeSymbolCmd("code-summary", func(input codeIntelCommandInput) bool { return input.Summary },
+			func(cwd string, _ codeIntelCommandInput) error { return printCodeSummary(cwd) }),
+		codeSymbolCmd("list-code-files", func(input codeIntelCommandInput) bool { return input.ListFiles },
+			func(cwd string, _ codeIntelCommandInput) error { return listCodeFiles(cwd) }),
+		codeSymbolCmd("code-impact-target", func(input codeIntelCommandInput) bool { return input.ImpactTarget != "" },
+			func(cwd string, input codeIntelCommandInput) error { return listCodeImpact(cwd, input.ImpactTarget) }),
+		codeSymbolCmd("code-reach-target", func(input codeIntelCommandInput) bool { return input.ReachTarget != "" },
+			func(cwd string, input codeIntelCommandInput) error { return listCodeReachable(cwd, input.ReachTarget) }),
+		codeSymbolCmd("code-deps-target", func(input codeIntelCommandInput) bool { return input.DepsTarget != "" },
+			func(cwd string, input codeIntelCommandInput) error { return listCodeDeps(cwd, input.DepsTarget) }),
+		codeSymbolCmd("code-rdeps-target", func(input codeIntelCommandInput) bool { return input.RDepsTarget != "" },
+			func(cwd string, input codeIntelCommandInput) error {
+				return listCodeReverseDeps(cwd, input.RDepsTarget)
+			}),
 	}
 }
 
 func codeSymbolCmd(
 	name string,
-	matchFn func(cliOptions) bool,
-	handler func(cwd string, opts cliOptions) error,
+	matchFn func(codeIntelCommandInput) bool,
+	handler func(cwd string, input codeIntelCommandInput) error,
 ) codeIntelCommand {
 	return codeIntelCommand{
 		name:  name,

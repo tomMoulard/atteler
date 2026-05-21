@@ -385,6 +385,14 @@ func run(ctx context.Context) error {
 		}
 	}
 
+	if handled, err := runParseControlCommand(opts); handled {
+		return err
+	}
+
+	if err := validateCLICommandSelection(opts); err != nil {
+		return err
+	}
+
 	if handled, err := runInlineCommand(ctx, opts); handled {
 		return err
 	}
@@ -417,14 +425,42 @@ func run(ctx context.Context) error {
 	return runWithState(ctx, opts, state)
 }
 
-// runInlineCommand handles trivial early-exit commands (version, config
-// template, etc.) that need no session store or provider.
-func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
+func runParseControlCommand(opts cliOptions) (bool, error) {
 	switch {
 	case opts.parseErr != nil:
 		return true, opts.parseErr
 	case opts.helpRequested:
 		return true, printCLIHelp(os.Stdout, flag.CommandLine, opts.helpDomain)
+	default:
+		return false, nil
+	}
+}
+
+// runInlineCommand handles trivial early-exit commands (version, config
+// template, etc.) that need no session store or provider.
+func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
+	if handled, err := runInlineConfigCommand(opts); handled {
+		return true, err
+	}
+
+	switch {
+	case opts.listProviders:
+		listKnownProviders()
+		return true, nil
+	case opts.listKnownModels:
+		listKnownModels()
+		return true, nil
+	case opts.listWorktrees:
+		return true, listWorktrees(ctx)
+	case opts.mergeWorktreeRef != "":
+		return true, mergeWorktreeBySession(ctx, opts.mergeWorktreeRef, opts.mergeWorktreeAllowBaseMismatch)
+	default:
+		return false, nil
+	}
+}
+
+func runInlineConfigCommand(opts cliOptions) (bool, error) {
+	switch {
 	case opts.printConfigTemplate:
 		fmt.Print(appconfig.TemplateYAML())
 		return true, nil
@@ -440,18 +476,12 @@ func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
 		return true, validateConfig()
 	case opts.explainConfig:
 		return true, explainConfig(opts)
+	case opts.commandSurfaceJSON:
+		return true, printCommandSurfaceJSON(os.Stdout)
+	case opts.commandSurfaceDocs:
+		return true, printCommandSurfaceMarkdown(os.Stdout)
 	case opts.doctorOffline:
 		return true, doctorOffline(opts)
-	case opts.listProviders:
-		listKnownProviders()
-		return true, nil
-	case opts.listKnownModels:
-		listKnownModels()
-		return true, nil
-	case opts.listWorktrees:
-		return true, listWorktrees(ctx)
-	case opts.mergeWorktreeRef != "":
-		return true, mergeWorktreeBySession(ctx, opts.mergeWorktreeRef, opts.mergeWorktreeAllowBaseMismatch)
 	default:
 		return false, nil
 	}

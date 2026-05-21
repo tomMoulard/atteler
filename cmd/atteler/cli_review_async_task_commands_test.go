@@ -137,6 +137,24 @@ func TestValidateAndFormatAsyncRun(t *testing.T) {
 func TestTaskListHelpers(t *testing.T) {
 	t.Parallel()
 
+	assert.Equal(t, taskCommandInput{
+		FilePath:   "tasks.json",
+		AddTitle:   "write contract tests",
+		AddID:      "todo-1",
+		Agent:      "planner",
+		AssignSpec: "todo-1:executor",
+		CompleteID: "todo-1",
+		List:       true,
+	}, taskCommandInputFromOptions(cliOptions{
+		taskFilePath:   "tasks.json",
+		taskAddTitle:   "write contract tests",
+		taskAddID:      "todo-1",
+		taskAgent:      "planner",
+		taskAssignSpec: "todo-1:executor",
+		taskCompleteID: "todo-1",
+		taskList:       true,
+	}))
+
 	id, agentName, err := parseTaskAssignmentSpec("todo-1:reviewer")
 	require.NoError(t, err)
 	assert.Equal(t, "todo-1", id)
@@ -179,24 +197,24 @@ func TestRunTaskListCommandPersistsTaskLifecycle(t *testing.T) {
 	taskFile := filepath.Join(t.TempDir(), "tasks.json")
 	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
 
-	err := runTaskListCommand(ctx, store, cliOptions{
-		taskFilePath: taskFile,
-		taskAddID:    "todo-1",
-		taskAddTitle: "draft task package",
-		taskAgent:    "planner",
+	err := runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		AddID:    "todo-1",
+		AddTitle: "draft task package",
+		Agent:    "planner",
 	})
 	require.NoError(t, err)
 
-	err = runTaskListCommand(ctx, store, cliOptions{
-		taskFilePath:   taskFile,
-		taskAssignSpec: "todo-1:executor",
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:   taskFile,
+		AssignSpec: "todo-1:executor",
 	})
 	require.NoError(t, err)
 
-	err = runTaskListCommand(ctx, store, cliOptions{
-		taskFilePath:   taskFile,
-		taskCompleteID: "todo-1",
-		taskAgent:      "verifier",
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:   taskFile,
+		CompleteID: "todo-1",
+		Agent:      "verifier",
 	})
 	require.NoError(t, err)
 
@@ -210,7 +228,7 @@ func TestRunTaskListCommandPersistsTaskLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, history, 3)
 
-	err = runTaskListCommand(ctx, store, cliOptions{taskFilePath: taskFile, taskAddTitle: "new", taskList: true})
+	err = runTaskListCommand(ctx, store, taskCommandInput{FilePath: taskFile, AddTitle: "new", List: true})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "choose only one")
 }

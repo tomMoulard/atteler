@@ -17,20 +17,21 @@ import (
 	"github.com/tommoulard/atteler/pkg/watch"
 )
 
-func runSpeculatePlan(agents, gates []string, prompt string) error {
+func runSpeculatePlan(input speculatePlanCommandInput) error {
+	gates := input.Gates
 	if len(gates) == 0 {
 		gates = []string{"tests pass", "lint pass", "types pass"}
 	}
 
-	plan, err := speculate.NewPlan(agents, gates)
+	plan, err := speculate.NewPlan(input.Agents, gates)
 	if err != nil {
 		return fmt.Errorf("speculate plan: %w", err)
 	}
 
 	fmt.Print(formatSpeculatePlan(plan))
 
-	if strings.TrimSpace(prompt) != "" {
-		estimate, estimateErr := speculate.EstimatePromptCacheReuse(speculateBranchPrompts(plan, prompt))
+	if strings.TrimSpace(input.Prompt) != "" {
+		estimate, estimateErr := speculate.EstimatePromptCacheReuse(speculateBranchPrompts(plan, input.Prompt))
 		if estimateErr != nil {
 			return fmt.Errorf("speculate prompt cache: %w", estimateErr)
 		}
@@ -68,18 +69,18 @@ func (rc *registryCompleter) Complete(ctx context.Context, model, systemPrompt, 
 	return resp.Content, nil
 }
 
-func runSpeculateExecution(ctx context.Context, state appState, opts cliOptions) error {
-	prompt := strings.TrimSpace(opts.speculatePrompt)
+func runSpeculateExecution(ctx context.Context, state appState, input speculateRunCommandInput) error {
+	prompt := strings.TrimSpace(input.Prompt)
 	if prompt == "" {
 		return errors.New("speculate-run requires --speculate-prompt")
 	}
 
-	agents := []string(opts.speculateAgents)
+	agents := input.Agents
 	if len(agents) == 0 {
 		return errors.New("speculate-run requires at least one --speculate-agent")
 	}
 
-	gates := []string(opts.speculateGates)
+	gates := input.Gates
 	if len(gates) == 0 {
 		gates = []string{"tests pass", "lint pass", "types pass"}
 	}

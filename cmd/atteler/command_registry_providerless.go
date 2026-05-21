@@ -83,7 +83,7 @@ func providerlessFileCommands() []command {
 			tier:  tierProviderless,
 			match: taskCommandRequested,
 			runProviderless: func(ctx context.Context, o cliOptions, s *session.Store) error {
-				return runTaskListCommand(ctx, s, o)
+				return runTaskListCommand(ctx, s, taskCommandInputFromOptions(o))
 			},
 		},
 		{
@@ -117,7 +117,7 @@ func providerlessFileCommands() []command {
 				return o.lspSymbols || o.lspWorkspaceSymbols != ""
 			},
 			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
-				return runLSPSymbols(ctx, o)
+				return runLSPSymbols(ctx, lspSymbolsCommandInputFromOptions(o))
 			},
 		},
 		{
@@ -127,7 +127,7 @@ func providerlessFileCommands() []command {
 				return o.memorySearch != "" || len(o.memoryIndexFiles) > 0
 			},
 			runProviderless: func(_ context.Context, o cliOptions, s *session.Store) error {
-				return runMemoryCommand(s, o)
+				return runMemoryCommand(s, memoryCommandInputFromOptions(o))
 			},
 		},
 		{
@@ -137,7 +137,7 @@ func providerlessFileCommands() []command {
 				return o.vectorSearch != "" || len(o.vectorIndexFiles) > 0
 			},
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return runVectorSearch(o.vectorSearch, o.vectorIndexFiles, o.vectorLimit.value)
+				return runVectorSearch(vectorSearchCommandInputFromOptions(o))
 			},
 		},
 	}
@@ -156,7 +156,7 @@ func providerlessPlanningCommands() []command {
 				return o.mcpMethod != "" || o.mcpToolName != ""
 			},
 			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
-				return runMCPInvoke(ctx, o)
+				return runMCPInvoke(ctx, mcpInvokeCommandInputFromOptions(o))
 			},
 		},
 		{
@@ -164,7 +164,7 @@ func providerlessPlanningCommands() []command {
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.mcpManifestPath != "" },
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return runMCPManifest(o.mcpManifestPath, o.mcpCapability)
+				return runMCPManifest(mcpManifestCommandInputFromOptions(o))
 			},
 		},
 		{
@@ -172,7 +172,7 @@ func providerlessPlanningCommands() []command {
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.speculatePlan },
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return runSpeculatePlan(o.speculateAgents, o.speculateGates, o.speculatePrompt)
+				return runSpeculatePlan(speculatePlanCommandInputFromOptions(o))
 			},
 		},
 		{
@@ -180,7 +180,7 @@ func providerlessPlanningCommands() []command {
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.reviewPlan },
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return runReviewPlan(o.reviewAgents, o.reviewPaths, o.reviewGates)
+				return runReviewPlan(reviewPlanCommandInputFromOptions(o))
 			},
 		},
 		{
@@ -188,7 +188,7 @@ func providerlessPlanningCommands() []command {
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.asyncPlan },
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return runAsyncPlan(o.asyncTaskSpecs)
+				return runAsyncPlan(asyncPlanCommandInputFromOptions(o))
 			},
 		},
 		{
@@ -200,7 +200,7 @@ func providerlessPlanningCommands() []command {
 				return routeRequested && o.oncePrompt == "" && !o.readStdin
 			},
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return runRouteModels(o)
+				return runRouteModels(routeModelsCommandInputFromOptions(o))
 			},
 		},
 		{
