@@ -141,7 +141,7 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "speculate-plan", Summary: "print a speculative three-round plan", Legacy: []string{"--speculate-plan"}},
 			{Name: "speculate-run", Summary: "execute the speculative three-round pipeline", Legacy: []string{"--speculate-run"}},
 			{Name: "feedback", Summary: "derive improvement proposals from --session", Legacy: []string{"--feedback-proposals"}},
-			{Name: "feedback-apply", Args: "<config>", Summary: "apply selected-session feedback proposals to agent config", Legacy: []string{"--feedback-apply-config"}},
+			{Name: "feedback-apply", Args: "<config>", Summary: "apply accepted audited feedback patches to agent config", Legacy: []string{"--feedback-apply-config"}},
 			{Name: "skill-suggest", Args: "<step>", Summary: "suggest reusable skills from repeated observed actions", Legacy: []string{"--skill-step"}, JoinArgs: true},
 			{Name: bashCommandName, Args: "<command>", Summary: "run an explicit local bash command", Legacy: []string{"--bash"}, JoinArgs: true, OpaqueArgs: true},
 		},
