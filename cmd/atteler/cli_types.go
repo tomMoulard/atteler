@@ -175,6 +175,7 @@ type cliOptions struct {
 	streamHeadlessID                   string
 	searchQuery                        string
 	initConfigPath                     string
+	explainConfigPath                  string
 	configPaths                        string
 	contextPackPath                    string
 	model                              string
@@ -374,6 +375,7 @@ type cliOptions struct {
 	spawnDryRun                        bool
 	feedbackProposals                  bool
 	validateConfig                     bool
+	explainConfig                      bool
 	printConfigTemplate                bool
 	doctor                             bool
 	doctorOffline                      bool

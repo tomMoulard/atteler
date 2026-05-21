@@ -293,6 +293,12 @@ func TestCommandRegistry_GroupedInlineCommandsBypassRegistry(t *testing.T) {
 		t.Helper()
 		assert.True(t, opts.validateConfig)
 	})
+	assertInlineGroupedRoute(t, []string{"config", "explain", "default_model"}, func(t *testing.T, opts cliOptions) {
+		t.Helper()
+		assert.True(t, opts.explainConfig)
+		assert.Equal(t, "default_model", opts.explainConfigPath)
+		assert.Empty(t, opts.oncePrompt)
+	})
 	assertInlineGroupedRoute(t, []string{"config", testCommandVersion}, func(t *testing.T, opts cliOptions) {
 		t.Helper()
 		assert.True(t, opts.showVersion)
@@ -313,6 +319,28 @@ func TestCommandRegistry_GroupedInlineCommandsBypassRegistry(t *testing.T) {
 		t.Helper()
 		assert.Equal(t, "session-123", opts.mergeWorktreeRef)
 	})
+}
+
+func TestApplyPositionalOptions_ConfigExplainOwnsPositionalFilter(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{explainConfig: true}
+	applyPositionalOptions(&opts, []string{"providers.openai"})
+
+	assert.True(t, opts.explainConfig)
+	assert.Equal(t, "providers.openai", opts.explainConfigPath)
+	assert.Empty(t, opts.oncePrompt)
+}
+
+func TestApplyPositionalOptions_ConfigExplainFieldEnablesExplain(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{explainConfigPath: "providers.openai"}
+	applyPositionalOptions(&opts, []string{"ignored"})
+
+	assert.True(t, opts.explainConfig)
+	assert.Equal(t, "providers.openai", opts.explainConfigPath)
+	assert.Empty(t, opts.oncePrompt)
 }
 
 func TestCommandRegistry_GroupedPromptCommandsBypassRegistry(t *testing.T) {
@@ -491,9 +519,7 @@ func parseGroupedOptionsForRouteTest(t *testing.T, args []string) cliOptions {
 	require.False(t, plan.Help)
 	require.NoError(t, fs.Parse(plan.Args), "translated args should parse: %#v", plan.Args)
 
-	if opts.oncePrompt == "" && fs.NArg() > 0 {
-		opts.oncePrompt = strings.Join(fs.Args(), " ")
-	}
+	applyPositionalOptions(opts, fs.Args())
 
 	return *opts
 }
@@ -612,7 +638,7 @@ func isDocumentedInlineCommandForTest(domain cliHelpDomain, command cliCommandAl
 	switch domain.Name {
 	case testDomainConfig:
 		switch command.Name {
-		case "paths", testCommandTemplate, "init", "validate", testCommandDoctorOffline, testCommandVersion:
+		case "paths", testCommandTemplate, "init", "validate", "explain", testCommandDoctorOffline, testCommandVersion:
 			return true
 		}
 	case testDomainProviders:
@@ -661,6 +687,8 @@ func assertInlineOptionSetForTest(t *testing.T, domain cliHelpDomain, command cl
 		assert.NotEmpty(t, opts.initConfigPath)
 	case domain.Name == testDomainConfig && command.Name == "validate":
 		assert.True(t, opts.validateConfig)
+	case domain.Name == testDomainConfig && command.Name == "explain":
+		assert.True(t, opts.explainConfig)
 	case domain.Name == testDomainConfig && command.Name == testCommandDoctorOffline:
 		assert.True(t, opts.doctorOffline)
 	case domain.Name == testDomainConfig && command.Name == testCommandVersion:

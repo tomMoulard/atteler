@@ -58,13 +58,39 @@ func parseOptions() cliOptions {
 		return opts
 	}
 
-	if opts.oncePrompt == "" && flag.NArg() > 0 {
-		opts.oncePrompt = strings.Join(flag.Args(), " ")
-	}
+	applyPositionalOptions(&opts, flag.Args())
 
 	applyDebugEnvOptions(&opts, os.Getenv)
 
 	return opts
+}
+
+func applyPositionalOptions(opts *cliOptions, args []string) {
+	if opts == nil {
+		return
+	}
+
+	if opts.explainConfigPath != "" {
+		opts.explainConfig = true
+	}
+
+	if len(args) == 0 {
+		return
+	}
+
+	positional := strings.Join(args, " ")
+
+	if opts.explainConfig {
+		if opts.explainConfigPath == "" {
+			opts.explainConfigPath = positional
+		}
+
+		return
+	}
+
+	if opts.oncePrompt == "" {
+		opts.oncePrompt = positional
+	}
 }
 
 func applyDebugEnvOptions(opts *cliOptions, getenv func(string) string) {
@@ -408,6 +434,8 @@ func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
 		return true, nil
 	case opts.validateConfig:
 		return true, validateConfig()
+	case opts.explainConfig:
+		return true, explainConfig(opts)
 	case opts.doctorOffline:
 		return true, doctorOffline(opts)
 	case opts.listProviders:

@@ -316,6 +316,7 @@ func lookupFlagDomain(name string) (string, bool) {
 		return "chat/session", true
 	case name == "config" || name == "print-config-template" || name == "init-config" ||
 		name == "list-config-paths" || name == "validate-config" ||
+		name == "explain-config" || name == "explain-config-field" ||
 		name == "doctor" || name == "doctor-offline" || name == "version" ||
 		name == "state-diagnostics" || strings.HasPrefix(name, "list-hook-events"):
 		return "config", true

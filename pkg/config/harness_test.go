@@ -60,6 +60,34 @@ func TestParseCodexConfig_DefaultsToCodexProvider(t *testing.T) {
 	}
 }
 
+func TestLoadHarnessDefaultsWithOrigins_RecordsHarnessImport(t *testing.T) {
+	tempDir := t.TempDir()
+	codexHome := filepath.Join(tempDir, "codex")
+	require.NoError(t, os.MkdirAll(codexHome, 0o700))
+	codexConfig := filepath.Join(codexHome, "config.toml")
+	require.NoError(t, os.WriteFile(codexConfig, []byte(`
+model = "gpt-5.5"
+model_provider = "codex"
+`), 0o600))
+
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", "")
+
+	cfg, loaded, origins := LoadHarnessDefaultsWithOrigins()
+
+	require.Equal(t, []string{codexConfig}, loaded)
+	assert.Equal(t, "gpt-5.5", cfg.DefaultModel)
+
+	final, ok := origins.Final("default_model")
+	require.True(t, ok)
+	assert.Equal(t, OriginHarnessImport, final.Kind)
+	assert.Equal(t, codexConfig, final.Source)
+}
+
 func TestParseGenericJSONHarness(t *testing.T) {
 	t.Parallel()
 
@@ -344,7 +372,7 @@ func TestMergeConfigAgent_CanClearExplicitHidden(t *testing.T) {
 
 	current := AgentConfig{Hidden: true, hiddenSet: true}
 
-	mergeConfigAgent(&current, AgentConfig{Hidden: false, hiddenSet: true})
+	mergeConfigAgent(&current, AgentConfig{Hidden: false, hiddenSet: true}, nil, originSource{}, "reviewer")
 
 	assert.False(t, current.Hidden)
 }

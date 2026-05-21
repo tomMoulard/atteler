@@ -225,6 +225,8 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.StringVar(&opts.feedbackHistoryPath, "feedback-history", "", "append --feedback-apply-config decisions to this history log")
 	fs.Var(&opts.watchLargeFileBytes, "watch-large-file-bytes", "large-file byte threshold for --watch-scan")
 	fs.BoolVar(&opts.validateConfig, "validate-config", false, "validate merged YAML/JSON config and exit")
+	fs.BoolVar(&opts.explainConfig, "explain-config", false, "print merged config values with per-field provenance and exit")
+	fs.StringVar(&opts.explainConfigPath, "explain-config-field", "", "limit --explain-config output to this field path prefix")
 	fs.BoolVar(&opts.printConfigTemplate, "print-config-template", false, "print a starter YAML config and exit")
 	fs.BoolVar(&opts.doctor, "doctor", false, "print local readiness diagnostics and exit")
 	fs.BoolVar(&opts.doctorOffline, "doctor-offline", false, "print offline readiness diagnostics without provider health checks and exit")

@@ -66,7 +66,7 @@ catalog.
 | Domain | Examples |
 |--------|----------|
 | `chat` / `session` | `atteler chat once "Explain this repository in one paragraph"`, `atteler session list`, `atteler session search "auth retry"` |
-| `config` | `atteler config paths`, `atteler config validate`, `atteler config doctor-offline` |
+| `config` | `atteler config paths`, `atteler config validate`, `atteler config explain default_model`, `atteler config doctor-offline` |
 | `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models` |
 | `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
 | `memory` / `rag` | `atteler memory search "OAuth retry storm"`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"` |
@@ -90,17 +90,28 @@ script-facing flag.
 
 ## Configuration
 
-Atteler loads optional YAML configuration in this order; later files override
-earlier files:
+Atteler loads optional YAML/JSON configuration in this order; later layers
+override earlier layers:
 
-1. `$XDG_CONFIG_HOME/atteler/config.yaml` / `config.yml`, or
-   `~/.config/atteler/config.yaml` / `config.yml`
-2. `./.atteler/config.yaml` or `./.atteler/config.yml`
-3. `./.atteler.yaml` or `./.atteler.yml`
-4. Any paths listed in `ATTELER_CONFIG` using the platform path-list separator
+1. Best-effort imports from local coding harnesses (Codex, Claude Code,
+   opencode, Forge). These are lowest precedence and are shown by
+   `atteler config explain` so imported defaults are visible.
+2. Global Atteler config:
+   `$XDG_CONFIG_HOME/atteler/config.yaml`, `config.yml`, then `config.json`, or
+   `~/.config/atteler/config.yaml`, `config.yml`, then `config.json`.
+3. Project config in the current working directory:
+   `./.atteler/config.yaml`, `config.yml`, `config.json`, then
+   `./.atteler.yaml`, `.atteler.yml`, `.atteler.json`.
+4. Any paths listed in `ATTELER_CONFIG` or `--config`, using the platform
+   path-list separator. These env-provided files are highest-precedence config
+   files.
+5. Runtime choices after files load: persisted state, CLI flags such as
+   `--model` and generation overrides, and runtime agent/model selection.
 
-Legacy `.json` config files are still accepted after the YAML candidates at the
-same scope.
+Provider and agent maps merge by name, and fields inside the same provider or
+agent override independently. Lists replace the earlier value in full when set
+later, including `fallback_models`, `context.references`, agent list fields, hook
+lists, and `plugins.paths`. Per-agent `tools` maps also replace in full.
 
 Bootstrap or inspect configuration:
 
@@ -109,7 +120,14 @@ atteler config template
 atteler config init ~/.config/atteler/config.yaml
 atteler config paths
 atteler config validate
+atteler config explain default_model
 ```
+
+Use `atteler config explain` without a field prefix to print every tracked
+field, or pass a prefix such as `default_model`, `providers.openai`, or
+`agents.reviewer` to focus on one model, provider, or agent. Runtime diagnostic
+paths such as `runtime.selected_model` and `runtime.selected_provider` explain
+the selected request model/provider after state, flags, and agent selection.
 
 Minimal example:
 

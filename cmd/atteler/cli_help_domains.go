@@ -87,6 +87,7 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "template", Summary: "print a starter YAML config", Legacy: []string{"--print-config-template"}},
 			{Name: "init", Args: "<path>", Summary: "write a starter YAML config without overwriting", Legacy: []string{"--init-config"}},
 			{Name: "validate", Summary: "validate merged YAML/JSON config", Legacy: []string{"--validate-config"}},
+			{Name: "explain", Args: "[field-prefix]", Summary: "print merged config values with per-field provenance", Legacy: []string{"--explain-config"}},
 			{Name: "doctor", Summary: "run provider-aware readiness diagnostics", Legacy: []string{"--doctor"}},
 			{Name: "doctor-offline", Summary: "run offline readiness diagnostics", Legacy: []string{"--doctor-offline"}},
 			{Name: "state", Summary: "show interactive state path, revision, and selected preference sources", Legacy: []string{"--state-diagnostics"}},
@@ -97,6 +98,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Examples: []string{
 			`atteler config paths`,
 			`atteler config validate`,
+			`atteler config explain default_model`,
 			`atteler config doctor-offline`,
 		},
 	},

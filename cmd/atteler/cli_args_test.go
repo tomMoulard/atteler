@@ -267,6 +267,7 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "chat session", args: []string{"session", "list"}, want: []string{"--list-sessions"}},
 		{name: "chat session record failure", args: []string{"session", "record-failure", "tried", "cache"}, want: []string{"--record-failure", "tried cache"}},
 		{name: "config", args: []string{"config", "validate"}, want: []string{"--validate-config"}},
+		{name: "config explain", args: []string{"config", "explain", "default_model"}, want: []string{"--explain-config", "default_model"}},
 		{name: "providers", args: []string{"providers", "list"}, want: []string{"--list-providers"}},
 		{name: "agents", args: []string{"agents", "plan", "review", "auth"}, want: []string{"--plan-agents", "review auth"}},
 		{name: "agents performance", args: []string{"agents", "performance"}, want: []string{"--agent-performance-summary"}},
