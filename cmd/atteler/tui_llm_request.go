@@ -131,9 +131,10 @@ func callLLMWithTools(
 		})
 
 		result, err := attshell.RunBash(ctx, attshell.Options{
-			Command: command,
-			Dir:     request.workingDir,
-			Timeout: 5 * time.Minute, // Generous timeout for tool calls.
+			Command:        command,
+			Dir:            request.workingDir,
+			Timeout:        5 * time.Minute, // Generous timeout for tool calls.
+			MaxOutputBytes: agentLoopToolOutputLimit(ctx),
 		})
 
 		output := formatShellContext(shellResultMsg{
@@ -177,29 +178,27 @@ func callLLMWithTools(
 		}
 	}
 
-	// Build the ConfirmContinue callback for the checkpoint mechanism.
-	// This sends the iteration count to the TUI and blocks until the user
-	// responds. When channels are nil (e.g. one-shot path), no prompting
-	// occurs.
-	var confirmFn func(int) bool
-	if request.confirmContinueCh != nil {
-		confirmFn = func(iterations int) bool {
-			request.confirmContinueCh <- iterations
-			return <-request.confirmResponseCh
-		}
-	}
+	confirmContinueFn, confirmToolFn := agentLoopConfirmCallbacks(ctx, request)
 
 	resp, _, err := llm.AgentLoop(ctx, reg, params, request.fallbackModels, executor, llm.AgentLoopConfig{
-		ConfirmContinue: confirmFn,
+		ConfirmContinue: confirmContinueFn,
+		ConfirmToolCall: confirmToolFn,
+		Policy:          llm.BashToolPolicy,
+		CheckpointSink:  agentLoopCheckpointSink(request.agentLoopCheckpointPath),
 	})
 
 	// Close the request channel so the listenForCheckpoint goroutine exits.
-	if request.confirmContinueCh != nil {
-		close(request.confirmContinueCh)
+	if request.confirmRequestCh != nil {
+		close(request.confirmRequestCh)
 	}
 
 	if err != nil {
-		return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines(), toolLog: toolLog}
+		return llmResponseMsg{
+			err:         agentLoopError(err, request.agentLoopCheckpointPath),
+			completedAt: time.Now(),
+			eventLines:  eventLines.Lines(),
+			toolLog:     toolLog,
+		}
 	}
 
 	var usage tokenUsage
@@ -213,6 +212,65 @@ func callLLMWithTools(
 		toolLog:     toolLog,
 		tokenUsage:  usage,
 	}
+}
+
+// agentLoopConfirmCallbacks builds TUI-backed callbacks for both legacy loop
+// continuation checkpoints and require-confirm tool policy decisions.
+func agentLoopConfirmCallbacks(ctx context.Context, request llmRequest) (func(int) bool, llm.ConfirmToolCallFunc) {
+	if request.confirmRequestCh == nil || request.confirmResponseCh == nil {
+		return nil, nil
+	}
+
+	confirmContinue := func(iterations int) bool {
+		return sendAgentLoopConfirmation(ctx, request.confirmRequestCh, request.confirmResponseCh, agentLoopConfirmRequest{
+			kind:       agentLoopConfirmCheckpoint,
+			iterations: iterations,
+			prompt:     fmt.Sprintf("Agent loop reached %d iterations. Continue? [Y/n] ", iterations),
+		})
+	}
+
+	confirmTool := func(ctx context.Context, call llm.ToolCall, decision llm.ToolPolicyDecision) bool {
+		return sendAgentLoopConfirmation(ctx, request.confirmRequestCh, request.confirmResponseCh, agentLoopConfirmRequest{
+			kind:   agentLoopConfirmToolCall,
+			prompt: agentLoopToolConfirmPrompt(call, decision),
+		})
+	}
+
+	return confirmContinue, confirmTool
+}
+
+func sendAgentLoopConfirmation(
+	ctx context.Context,
+	requestCh chan<- agentLoopConfirmRequest,
+	responseCh <-chan bool,
+	request agentLoopConfirmRequest,
+) bool {
+	select {
+	case requestCh <- request:
+	case <-ctx.Done():
+		return false
+	}
+
+	select {
+	case answer := <-responseCh:
+		return answer
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func agentLoopToolConfirmPrompt(call llm.ToolCall, decision llm.ToolPolicyDecision) string {
+	command, ok := call.Input["command"].(string)
+	if !ok {
+		command = "<missing command>"
+	}
+
+	return fmt.Sprintf(
+		"Agent tool call requires confirmation (%s): %s\n$ %s\nExecute? [y/N] ",
+		decision.MatchedRule,
+		decision.Reason,
+		command,
+	)
 }
 
 // prependReferenceContext injects pre-rendered reference content as a system

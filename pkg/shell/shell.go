@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,21 +18,23 @@ const defaultTimeout = 30 * time.Second
 
 // Options controls one explicit shell command invocation.
 type Options struct {
-	Env     map[string]string
-	Command string
-	Dir     string
-	Timeout time.Duration
+	Env            map[string]string
+	Command        string
+	Dir            string
+	Timeout        time.Duration
+	MaxOutputBytes int64
 }
 
 // Result captures stdout, stderr, and timing for a command run.
 //
 //nolint:govet // Public field order groups lifecycle, timing, and captured output.
 type Result struct {
-	StartedAt time.Time
-	Duration  time.Duration
-	Stdout    string
-	Stderr    string
-	ExitError string
+	StartedAt       time.Time
+	Duration        time.Duration
+	Stdout          string
+	Stderr          string
+	ExitError       string
+	OutputTruncated bool
 }
 
 // RunBash runs Command through bash -lc with a timeout. The command string is
@@ -69,21 +72,26 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 
 	cmd.Env = mergeEnv(opts.Env)
 
-	var stdout, stderr bytes.Buffer
+	stdout, stderr, outputLimit := commandOutputWriters(opts.MaxOutputBytes)
 
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	runErr := cmd.Run()
 
 	result := Result{
-		StartedAt: started,
-		Duration:  time.Since(started),
-		Stdout:    stdout.String(),
-		Stderr:    stderr.String(),
+		StartedAt:       started,
+		Duration:        time.Since(started),
+		Stdout:          stdout.String(),
+		Stderr:          stderr.String(),
+		OutputTruncated: outputLimit.truncatedOutput(),
 	}
 	if runCtx.Err() != nil {
 		return result, fmt.Errorf("shell: bash command timed out after %s: %w", timeout, runCtx.Err())
+	}
+
+	if result.OutputTruncated {
+		return result, fmt.Errorf("shell: bash command output exceeded %d bytes", opts.MaxOutputBytes)
 	}
 
 	if runErr != nil {
@@ -92,6 +100,76 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	return result, nil
+}
+
+type commandOutputLimiter struct {
+	mu        sync.Mutex
+	remaining int64
+	limited   bool
+	truncated bool
+}
+
+type limitedOutputBuffer struct {
+	limiter *commandOutputLimiter
+	buffer  bytes.Buffer
+}
+
+func commandOutputWriters(maxBytes int64) (stdout, stderr *limitedOutputBuffer, limiter *commandOutputLimiter) {
+	limiter = &commandOutputLimiter{remaining: maxBytes, limited: maxBytes > 0}
+
+	return &limitedOutputBuffer{limiter: limiter}, &limitedOutputBuffer{limiter: limiter}, limiter
+}
+
+func (w *limitedOutputBuffer) Write(p []byte) (int, error) {
+	if w == nil || w.limiter == nil {
+		return len(p), nil
+	}
+
+	w.limiter.mu.Lock()
+	defer w.limiter.mu.Unlock()
+
+	if !w.limiter.limited {
+		_, _ = w.buffer.Write(p)
+
+		return len(p), nil
+	}
+
+	if w.limiter.remaining <= 0 {
+		w.limiter.truncated = true
+
+		return len(p), nil
+	}
+
+	writeBytes := min(int64(len(p)), w.limiter.remaining)
+	if writeBytes > 0 {
+		_, _ = w.buffer.Write(p[:writeBytes])
+		w.limiter.remaining -= writeBytes
+	}
+
+	if writeBytes < int64(len(p)) {
+		w.limiter.truncated = true
+	}
+
+	return len(p), nil
+}
+
+func (w *limitedOutputBuffer) String() string {
+	if w == nil {
+		return ""
+	}
+
+	return w.buffer.String()
+}
+
+func (l *commandOutputLimiter) truncatedOutput() bool {
+	if l == nil {
+		return false
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.truncated
 }
 
 func bashInvocation(command string) (bin string, args []string, err error) {

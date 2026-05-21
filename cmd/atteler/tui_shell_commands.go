@@ -128,19 +128,19 @@ func prependToolReminder(params *llm.CompleteParams, tools []llm.ToolDefinition)
 }
 
 // listenForCheckpoint returns a tea.Cmd that waits for the agent loop to
-// request a checkpoint confirmation. When the loop sends the iteration count
-// on requestCh, this produces a loopCheckpointMsg for the TUI. The goroutine
-// exits when requestCh is closed (i.e. when callLLMWithTools finishes).
-func listenForCheckpoint(requestCh <-chan int, responseCh chan bool) tea.Cmd {
+// request a continuation/tool confirmation. When the loop sends a request on
+// requestCh, this produces a loopCheckpointMsg for the TUI. The goroutine exits
+// when requestCh is closed (i.e. when callLLMWithTools finishes).
+func listenForCheckpoint(requestCh <-chan agentLoopConfirmRequest, responseCh chan bool) tea.Cmd {
 	return func() tea.Msg {
-		iterations, ok := <-requestCh
+		request, ok := <-requestCh
 		if !ok {
-			// Channel closed -- agent loop finished without hitting a checkpoint.
+			// Channel closed -- agent loop finished without hitting a confirmation.
 			return nil
 		}
 
 		return loopCheckpointMsg{
-			iterations: iterations,
+			request:    request,
 			responseCh: responseCh,
 			requestCh:  requestCh,
 		}

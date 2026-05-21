@@ -38,8 +38,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateModelPreferenceSaved(msg)
 
 	case tea.KeyMsg:
-		// When waiting for user confirmation on an agent loop checkpoint,
-		// intercept Y/N before any other key handler.
+		// When waiting for user confirmation from the agent loop, intercept Y/N
+		// before any other key handler.
 		if m.checkpointResponseCh != nil {
 			return m.handleCheckpointKey(msg)
 		}
@@ -213,22 +213,21 @@ func (m model) updateTaskTick(msg taskTickMsg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(taskTickCmd(msg.id), tea.SetWindowTitle(m.terminalWorkingTitle()))
 }
 
-// updateLoopCheckpoint handles the agent loop reaching a checkpoint. It shows
-// a prompt and waits for the user to press Y or N.
+// updateLoopCheckpoint handles the agent loop requesting confirmation. It
+// shows a prompt and waits for the user to press Y or N.
 func (m model) updateLoopCheckpoint(msg loopCheckpointMsg) (tea.Model, tea.Cmd) {
 	m.checkpointResponseCh = msg.responseCh
 	m.checkpointRequestCh = msg.requestCh
-	m.checkpointIterations = msg.iterations
+	m.checkpointPrompt = msg.request.prompt
 
-	prompt := fmt.Sprintf(
-		"Agent loop reached %d iterations. Continue? [Y/n] ",
-		msg.iterations,
-	)
+	if m.checkpointPrompt == "" {
+		m.checkpointPrompt = fmt.Sprintf("Agent loop reached %d iterations. Continue? [Y/n] ", msg.request.iterations)
+	}
 
-	return m, tea.Batch(tea.Println(warnStyle.Render(prompt)), tea.SetWindowTitle(terminalIdleTitle()))
+	return m, tea.Batch(tea.Println(warnStyle.Render(m.checkpointPrompt)), tea.SetWindowTitle(terminalIdleTitle()))
 }
 
-// handleCheckpointKey handles Y/N key presses during a checkpoint prompt.
+// handleCheckpointKey handles Y/N key presses during an agent-loop prompt.
 // Y (or Enter) continues the loop, N (or Esc) stops it.
 func (m model) handleCheckpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	ch := m.checkpointResponseCh
@@ -238,11 +237,11 @@ func (m model) handleCheckpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "y", "Y", "enter":
 		m.checkpointResponseCh = nil
 		m.checkpointRequestCh = nil
-		m.checkpointIterations = 0
+		m.checkpointPrompt = ""
 
 		ch <- true
 
-		// Re-listen for the next checkpoint.
+		// Re-listen for the next checkpoint or require-confirm tool call.
 		return m, tea.Batch(
 			tea.Println(dimStyle.Render("Continuing agent loop...")),
 			tea.SetWindowTitle(m.terminalWorkingTitle()),
@@ -253,7 +252,7 @@ func (m model) handleCheckpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n", "N", "esc":
 		m.checkpointResponseCh = nil
 		m.checkpointRequestCh = nil
-		m.checkpointIterations = 0
+		m.checkpointPrompt = ""
 
 		ch <- false
 
@@ -266,16 +265,16 @@ func (m model) handleCheckpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // relistenForCheckpoint wraps the response channel back into a bidirectional
-// chan so listenForCheckpoint can be reused for subsequent checkpoints.
-func relistenForCheckpoint(requestCh <-chan int, responseCh chan<- bool) tea.Cmd {
+// chan so listenForCheckpoint can be reused for subsequent confirmations.
+func relistenForCheckpoint(requestCh <-chan agentLoopConfirmRequest, responseCh chan<- bool) tea.Cmd {
 	return func() tea.Msg {
-		iterations, ok := <-requestCh
+		request, ok := <-requestCh
 		if !ok {
 			return nil
 		}
 
 		return loopCheckpointMsg{
-			iterations: iterations,
+			request:    request,
 			responseCh: responseCh,
 			requestCh:  requestCh,
 		}
@@ -623,7 +622,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 
 	m.sessionState.DefaultReasoningLevel = strings.TrimSpace(m.generationOverrides.ReasoningLevel)
 
-	confirmCh := make(chan int, 1)
+	confirmCh := make(chan agentLoopConfirmRequest, 1)
 	responseCh := make(chan bool, 1)
 
 	request := llmRequest{
@@ -633,20 +632,21 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 			Agent:       activeAgent.name,
 			Model:       requestModel,
 		},
-		hookRunner:        m.hookRunner,
-		agent:             activeAgent.agent,
-		hasAgent:          activeAgent.ok,
-		model:             requestModel,
-		referenceContext:  buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions),
-		workingDir:        m.cwd,
-		messages:          msgs,
-		fallbackModels:    fallbackModels,
-		generation:        generation,
-		maxInputTokens:    m.maxInputTokens,
-		refs:              refs,
-		useTools:          m.executionMode != "plan",
-		confirmContinueCh: confirmCh,
-		confirmResponseCh: responseCh,
+		hookRunner:              m.hookRunner,
+		agent:                   activeAgent.agent,
+		hasAgent:                activeAgent.ok,
+		model:                   requestModel,
+		agentLoopCheckpointPath: agentLoopCheckpointPath(m.sessionPath),
+		referenceContext:        buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions),
+		workingDir:              m.cwd,
+		messages:                msgs,
+		fallbackModels:          fallbackModels,
+		generation:              generation,
+		maxInputTokens:          m.maxInputTokens,
+		refs:                    refs,
+		useTools:                m.executionMode != "plan",
+		confirmRequestCh:        confirmCh,
+		confirmResponseCh:       responseCh,
 	}
 
 	cmds := []tea.Cmd{

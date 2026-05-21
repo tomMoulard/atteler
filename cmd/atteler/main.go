@@ -137,13 +137,26 @@ type taskTickMsg struct {
 	id int
 }
 
+type agentLoopConfirmKind string
+
+const (
+	agentLoopConfirmCheckpoint agentLoopConfirmKind = "checkpoint"
+	agentLoopConfirmToolCall   agentLoopConfirmKind = "tool_call"
+)
+
+type agentLoopConfirmRequest struct {
+	kind       agentLoopConfirmKind
+	prompt     string
+	iterations int
+}
+
 // loopCheckpointMsg is sent from the agent loop goroutine when it reaches a
-// checkpoint interval. The TUI displays a prompt and sends the user's answer
-// back on responseCh.
+// checkpoint interval or a tool policy requires confirmation. The TUI displays
+// a prompt and sends the user's answer back on responseCh.
 type loopCheckpointMsg struct {
 	responseCh chan<- bool
-	requestCh  <-chan int // kept so we can re-listen after confirming
-	iterations int
+	requestCh  <-chan agentLoopConfirmRequest // kept so we can re-listen after confirming
+	request    agentLoopConfirmRequest
 }
 
 type tokenUsage struct {
@@ -173,25 +186,26 @@ func (u *tokenUsage) add(next tokenUsage) {
 
 //nolint:govet // Field order groups request concerns; padding is not performance-sensitive.
 type llmRequest struct {
-	eventBase        events.Event
-	hookRunner       *events.Runner
-	generation       generationSettings
-	maxInputTokens   int
-	model            string
-	referenceContext string
-	workingDir       string
-	messages         []llm.Message
-	fallbackModels   []string
-	refs             []contextref.Reference
-	agent            agent.Agent
-	hasAgent         bool
-	useTools         bool
+	eventBase               events.Event
+	hookRunner              *events.Runner
+	generation              generationSettings
+	maxInputTokens          int
+	model                   string
+	agentLoopCheckpointPath string
+	referenceContext        string
+	workingDir              string
+	messages                []llm.Message
+	fallbackModels          []string
+	refs                    []contextref.Reference
+	agent                   agent.Agent
+	hasAgent                bool
+	useTools                bool
 
-	// confirmContinueCh is used by the agent loop to ask the caller whether
-	// to continue when a checkpoint interval is reached. The agent loop
-	// goroutine sends the iteration count on this channel and blocks until
-	// it receives a boolean on confirmResponseCh.
-	confirmContinueCh chan int
+	// confirmRequestCh is used by the agent loop to ask the caller whether to
+	// continue at checkpoint intervals or execute require-confirm tool calls.
+	// The agent loop goroutine sends the request and blocks until it receives a
+	// boolean on confirmResponseCh.
+	confirmRequestCh  chan agentLoopConfirmRequest
 	confirmResponseCh chan bool
 }
 
@@ -260,12 +274,12 @@ type model struct {
 	runningTaskLabel    string
 	revampUndo          string
 
-	// checkpointResponseCh is non-nil when the TUI is waiting for the user
-	// to confirm whether to continue the agent loop. The Y/N key handler
-	// sends the answer and nils this field.
+	// checkpointResponseCh is non-nil when the TUI is waiting for the user to
+	// confirm whether to continue the agent loop or execute a require-confirm
+	// tool call. The Y/N key handler sends the answer and nils this field.
 	checkpointResponseCh chan<- bool
-	checkpointRequestCh  <-chan int
-	checkpointIterations int
+	checkpointRequestCh  <-chan agentLoopConfirmRequest
+	checkpointPrompt     string
 	pinnedMessages       map[int]bool
 	executionMode        string
 }

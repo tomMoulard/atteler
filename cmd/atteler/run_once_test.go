@@ -79,12 +79,13 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	t.Parallel()
 
 	result := runOnceResult{
-		SessionID:   "session-id",
-		SessionPath: "/tmp/session.json",
-		HeadlessID:  "headless-id",
-		Model:       "gpt-test",
-		Content:     "answer",
-		TokenUsage:  tokenUsage{InputTokens: 1, CachedInputTokens: 2, OutputTokens: 3, Responses: 1},
+		SessionID:               "session-id",
+		SessionPath:             "/tmp/session.json",
+		AgentLoopCheckpointPath: "/tmp/session.agentloop.jsonl",
+		HeadlessID:              "headless-id",
+		Model:                   "gpt-test",
+		Content:                 "answer",
+		TokenUsage:              tokenUsage{InputTokens: 1, CachedInputTokens: 2, OutputTokens: 3, Responses: 1},
 	}
 
 	var (
@@ -98,6 +99,7 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded))
 	assert.Equal(t, result.SessionID, decoded.SessionID)
 	assert.Equal(t, result.HeadlessID, decoded.HeadlessID)
+	assert.Equal(t, result.AgentLoopCheckpointPath, decoded.AgentLoopCheckpointPath)
 	assert.Equal(t, result.TokenUsage.OutputTokens, decoded.TokenUsage.OutputTokens)
 	assert.Empty(t, stderr.String())
 
@@ -106,6 +108,9 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	require.NoError(t, writeRunOnceResult(&stdout, &stderr, result, "text", true))
 	assert.Empty(t, stdout.String())
 	assert.Empty(t, stderr.String())
+
+	require.NoError(t, writeRunOnceResult(&stdout, &stderr, result, "text", false))
+	assert.Contains(t, stderr.String(), "agent loop checkpoint: /tmp/session.agentloop.jsonl")
 }
 
 func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
