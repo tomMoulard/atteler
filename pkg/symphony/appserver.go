@@ -53,8 +53,8 @@ func (e *appServerError) Error() string {
 
 // StartAppServer launches the configured Codex app-server command.
 func StartAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, emit func(CodexEvent)) (*AppServerClient, error) {
-	if ctx == nil {
-		return nil, errors.New("codex app-server: context is required")
+	if err := requireAppServerContext(ctx); err != nil {
+		return nil, err
 	}
 
 	command := strings.TrimSpace(cfg.Command)
@@ -110,6 +110,18 @@ func StartAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 	return client, nil
 }
 
+func requireAppServerContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("codex app-server: context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("codex app-server: context already done: %w", err)
+	}
+
+	return nil
+}
+
 // Close stops the app-server subprocess.
 func (c *AppServerClient) Close() error {
 	if c == nil {
@@ -126,6 +138,10 @@ func (c *AppServerClient) Close() error {
 
 // StartThread starts a Codex app-server thread and returns the thread ID.
 func (c *AppServerClient) StartThread(ctx context.Context, cfg Config, issue Issue, workspacePath string) (string, error) {
+	if err := requireAppServerContext(ctx); err != nil {
+		return "", err
+	}
+
 	params := map[string]any{
 		"cwd":                   workspacePath,
 		"runtimeWorkspaceRoots": []string{workspacePath},
@@ -277,10 +293,14 @@ func (c *AppServerClient) initialize(ctx context.Context, cfg CodexConfig) error
 		return err
 	}
 
-	return c.notify("initialized", nil)
+	return c.notify(ctx, "initialized", nil)
 }
 
 func (c *AppServerClient) call(ctx context.Context, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+	if err := requireAppServerContext(ctx); err != nil {
+		return nil, err
+	}
+
 	if timeout <= 0 {
 		timeout = defaultCodexReadTimeout
 	}
@@ -289,7 +309,7 @@ func (c *AppServerClient) call(ctx context.Context, method string, params any, t
 	defer cancel()
 
 	id := c.nextRequestID()
-	if err := c.write(appServerMessage{ID: id, Method: method, Params: mustRaw(params)}); err != nil {
+	if err := c.writeContext(callCtx, appServerMessage{ID: id, Method: method, Params: mustRaw(params)}); err != nil {
 		return nil, err
 	}
 
@@ -319,8 +339,8 @@ func (c *AppServerClient) call(ctx context.Context, method string, params any, t
 	}
 }
 
-func (c *AppServerClient) notify(method string, params any) error {
-	return c.write(appServerMessage{Method: method, Params: mustRaw(params)})
+func (c *AppServerClient) notify(ctx context.Context, method string, params any) error {
+	return c.writeContext(ctx, appServerMessage{Method: method, Params: mustRaw(params)})
 }
 
 func (c *AppServerClient) handleMessageDuringTurn(ctx context.Context, msg appServerMessage, threadID, turnID string) (bool, error) {
@@ -402,13 +422,11 @@ func (c *AppServerClient) handleServerRequest(ctx context.Context, msg appServer
 }
 
 func (c *AppServerClient) respond(ctx context.Context, id any, result any) error {
-	_ = ctx
-	return c.write(appServerMessage{ID: id, Result: mustRaw(result)})
+	return c.writeContext(ctx, appServerMessage{ID: id, Result: mustRaw(result)})
 }
 
 func (c *AppServerClient) respondError(ctx context.Context, id any, code int64, message string) error {
-	_ = ctx
-	return c.write(appServerMessage{
+	return c.writeContext(ctx, appServerMessage{
 		ID: id,
 		Error: &appServerError{
 			Code:    code,
@@ -483,6 +501,14 @@ func (c *AppServerClient) nextRequestID() int64 {
 	c.nextID++
 
 	return id
+}
+
+func (c *AppServerClient) writeContext(ctx context.Context, msg appServerMessage) error {
+	if err := requireAppServerContext(ctx); err != nil {
+		return err
+	}
+
+	return c.write(msg)
 }
 
 func (c *AppServerClient) write(msg appServerMessage) error {

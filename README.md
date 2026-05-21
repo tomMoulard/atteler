@@ -449,6 +449,9 @@ Migrate SDK-style callers as follows:
   `VectorizeContext(ctx, text)`.
 - `worktree.Create`, `Merge`, `Remove`, `List`, and `IsGitRepo` →
   their `Context` variants.
+- Symphony app-server calls (`StartAppServer`, `StartThread`, `RunTurn`) must
+  receive an active caller context; nil or already-canceled contexts are rejected
+  before process launch or protocol writes.
 
 `cmd/atteler` and `cmd/symphony` create process-root contexts at startup and
 pass them down; package code should propagate those contexts instead of calling
