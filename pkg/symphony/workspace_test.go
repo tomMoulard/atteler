@@ -39,3 +39,22 @@ func TestWorkspaceManager_EnsureSanitizesAndRunsCreateHookOnce(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "created", string(data))
 }
+
+func TestRunHookRequiresActiveContext(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{Hooks: HooksConfig{AfterCreate: "echo unused", Timeout: time.Second}}
+	issue := Issue{ID: "1", Identifier: "GH-1", Title: "Fix", State: "OPEN"}
+	workspace := Workspace{Path: t.TempDir(), WorkspaceKey: "GH-1"}
+
+	err := RunHook(nil, cfg, issue, workspace, "after_create", cfg.Hooks.AfterCreate) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context is required")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = RunHook(ctx, cfg, issue, workspace, "after_create", cfg.Hooks.AfterCreate)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}

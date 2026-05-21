@@ -90,6 +90,21 @@ func TestRunner_EmitRequiresContext(t *testing.T) {
 	assert.Contains(t, err.Error(), "context is required")
 }
 
+func TestRunner_EmitRejectsCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := NewRunner(map[string][]config.HookConfig{
+		UserMessage: {{
+			Command: []string{"echo", "unused"},
+		}},
+	}).Emit(ctx, Event{Type: UserMessage})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestLogger_LogsAnyEvent(t *testing.T) {
 	t.Parallel()
 

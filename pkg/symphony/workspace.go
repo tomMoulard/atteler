@@ -125,6 +125,10 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 		return errors.New("hook: context is required")
 	}
 
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("hook: context already done: %w", err)
+	}
+
 	script = strings.TrimSpace(script)
 	if script == "" {
 		return nil
