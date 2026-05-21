@@ -71,8 +71,8 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string, allowBaseMis
 	fmt.Fprintf(os.Stderr, "worktree: merging %s into %s...\n", info.Branch, info.BaseBranch)
 
 	if err := worktree.MergeWithOptionsContext(ctx, cwd, info, worktree.MergeOptions{
-		AutoCommit:              true,
 		AutoMerge:               true,
+		Strategy:                worktree.MergeStrategyMerge,
 		AllowBaseBranchMismatch: allowBaseMismatch,
 		Provenance:              worktreeMergeProvenance(sess),
 	}); err != nil {

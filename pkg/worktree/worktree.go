@@ -26,6 +26,7 @@ const EnvDir = "ATTELER_WORKTREE_DIR"
 const (
 	worktreeBranchPrefix = "atteler/"
 	maxSessionIDLength   = 128
+	worktreeManifestDir  = "atteler/worktrees"
 	transactionLogGitDir = "atteler/worktree-transactions"
 )
 
@@ -57,13 +58,30 @@ type Info struct {
 	SessionID string
 }
 
+// MergeStrategy is the explicit strategy used to bring a session branch back.
+type MergeStrategy string
+
+const (
+	// MergeStrategyMerge uses git merge --no-ff after a dry-run merge check.
+	MergeStrategyMerge MergeStrategy = "merge"
+)
+
 // MergeOptions is the explicit safety policy for merging a session worktree.
 type MergeOptions struct {
+	// Strategy is the explicit merge-back strategy. Use MergeStrategyMerge for
+	// the currently supported reviewed merge transaction.
+	Strategy MergeStrategy
 	// Provenance adds optional caller-provided context to auto-commit messages.
 	Provenance []string
 	// AutoCommit permits atteler to stage and commit dirty worktree files before
 	// merging. If false, MergeWithOptionsContext refuses dirty worktrees.
+	//
+	// AutoCommit only takes effect when ReviewedAutoCommit is also true. This
+	// keeps legacy callers from silently manufacturing unreviewed commits.
 	AutoCommit bool
+	// ReviewedAutoCommit confirms the caller has reviewed the worktree diff and
+	// intentionally permits atteler to create the generated session commit.
+	ReviewedAutoCommit bool
 	// AutoMerge permits atteler to run git merge in the base repository. This
 	// makes auto-merge call sites opt in instead of reaching the merge path by
 	// accident.
@@ -73,11 +91,21 @@ type MergeOptions struct {
 	AllowBaseBranchMismatch bool
 }
 
+// RemoveOptions controls destructive cleanup of a session worktree.
+type RemoveOptions struct {
+	// Force permits removing dirty or unmerged worktrees and force-deleting the
+	// branch. Keep false for normal cleanup so failed transactions remain
+	// recoverable.
+	Force bool
+}
+
 // MergeError describes a failed merge transaction and how to recover it.
 type MergeError struct {
 	Err            error
 	Step           string
 	Branch         string
+	BaseBranch     string
+	SessionID      string
 	WorktreePath   string
 	TransactionLog string
 	RolledBack     bool
@@ -99,6 +127,18 @@ func (e *MergeError) Error() string {
 
 	if e.TransactionLog != "" {
 		b.WriteString("\nrecovery: transaction log: " + e.TransactionLog)
+	}
+
+	if e.WorktreePath != "" {
+		b.WriteString("\nrecovery: inspect with: git -C " + e.WorktreePath + " status --short")
+	}
+
+	if e.BaseBranch != "" && e.Branch != "" {
+		b.WriteString("\nrecovery: review diff with: git diff --stat " + e.BaseBranch + "..." + e.Branch)
+	}
+
+	if e.SessionID != "" {
+		b.WriteString("\nrecovery: retry with: atteler --merge-worktree " + e.SessionID)
 	}
 
 	b.WriteString("\nrecovery: inspect the worktree, fix the failed step, then retry the merge")
@@ -126,77 +166,145 @@ func Create(repoDir, sessionID string) (*Info, error) {
 func CreateContext(ctx context.Context, repoDir, sessionID string) (*Info, error) {
 	ctx = nonNilCommandContext(ctx)
 
-	branch, err := branchForSessionID(sessionID)
+	plan, err := planCreateWorktree(ctx, repoDir, sessionID)
 	if err != nil {
 		return nil, err
 	}
 
+	if plan.hasExistingState() {
+		return joinOrResumeExistingWorktree(ctx, plan)
+	}
+
+	return createNewWorktree(ctx, plan)
+}
+
+type createPlan struct {
+	manifest      *worktreeManifest
+	repoRoot      string
+	sessionID     string
+	branch        string
+	baseBranch    string
+	baseHEAD      string
+	wtDir         string
+	manifestFound bool
+	branchExists  bool
+	wtPathExists  bool
+}
+
+func (p createPlan) hasExistingState() bool {
+	return p.branchExists || p.wtPathExists || p.manifestFound
+}
+
+func planCreateWorktree(ctx context.Context, repoDir, sessionID string) (createPlan, error) {
+	branch, err := branchForSessionID(sessionID)
+	if err != nil {
+		return createPlan{}, err
+	}
+
 	repoRoot, err := gitRepoRoot(ctx, repoDir)
 	if err != nil {
-		return nil, fmt.Errorf("worktree: locate repo root: %w", err)
+		return createPlan{}, fmt.Errorf("worktree: locate repo root: %w", err)
 	}
 
 	baseBranch, err := gitCurrentBranch(ctx, repoRoot)
 	if err != nil {
-		return nil, fmt.Errorf("worktree: detect current branch: %w", err)
+		return createPlan{}, fmt.Errorf("worktree: detect current branch: %w", err)
 	}
 
-	if baseBranch == "HEAD" {
-		return nil, errors.New("worktree: cannot create worktree from detached HEAD")
+	baseHEAD, err := gitRevParse(ctx, repoRoot, "HEAD")
+	if err != nil {
+		return createPlan{}, fmt.Errorf("worktree: detect current HEAD: %w", err)
 	}
 
 	wtDir := worktreeDir(repoRoot, sessionID)
 
+	manifest, manifestExists, err := loadWorktreeManifest(ctx, repoRoot, sessionID)
+	if err != nil {
+		return createPlan{}, fmt.Errorf("worktree: load ownership manifest: %w", err)
+	}
+
+	if manifestExists {
+		validateErr := validateManifestOwnership(repoRoot, manifest, sessionID, branch, wtDir)
+		if validateErr != nil {
+			return createPlan{}, fmt.Errorf("worktree: invalid ownership manifest: %w", validateErr)
+		}
+	}
+
 	branchExists, err := gitBranchExists(ctx, repoRoot, branch)
 	if err != nil {
-		return nil, fmt.Errorf("worktree: check branch %s: %w", branch, err)
+		return createPlan{}, fmt.Errorf("worktree: check branch %s: %w", branch, err)
 	}
 
-	if branchExists {
-		if err := verifyExistingWorktree(ctx, repoRoot, branch, wtDir); err != nil {
-			return nil, fmt.Errorf("worktree: branch %s already exists without matching worktree: %w", branch, err)
-		}
-
-		return &Info{
-			Path:       wtDir,
-			Branch:     branch,
-			BaseBranch: baseBranch,
-			SessionID:  sessionID,
-		}, nil
-	} else if err := gitRun(ctx, repoRoot, "branch", branch); err != nil {
-		return nil, fmt.Errorf("worktree: create branch %s: %w", branch, err)
+	wtPathExists, err := pathExists(wtDir)
+	if err != nil {
+		return createPlan{}, fmt.Errorf("worktree: check path %s: %w", wtDir, err)
 	}
 
-	// Add the worktree.
-	if err := gitRun(ctx, repoRoot, "worktree", "add", wtDir, branch); err != nil {
-		// If the same session worktree already exists, treat as success (join).
-		if !strings.Contains(err.Error(), "already exists") &&
-			!strings.Contains(err.Error(), "is already checked out") &&
-			!strings.Contains(err.Error(), "is already used by worktree") {
-			addErr := fmt.Errorf("worktree: add %s: %w", wtDir, err)
-
-			return nil, rollbackCreatedBranch(ctx, repoRoot, branch, addErr)
+	// Dirty base worktrees are only unsafe before creating new ownership.
+	// Existing manifests make Create idempotent: rejoin/resume uses the
+	// recorded BaseHEAD instead of guessing from the caller's current dirt.
+	if !manifestExists && !branchExists && !wtPathExists {
+		if baseBranch == "HEAD" {
+			return createPlan{}, errors.New("worktree: cannot create worktree from detached HEAD")
 		}
 
-		if joinErr := verifyExistingWorktree(ctx, repoRoot, branch, wtDir); joinErr != nil {
-			addErr := fmt.Errorf("worktree: add %s: %w", wtDir, errors.Join(err, joinErr))
-
-			return nil, rollbackCreatedBranch(ctx, repoRoot, branch, addErr)
+		preflightErr := preflightCreateCleanState(ctx, repoRoot, wtDir)
+		if preflightErr != nil {
+			return createPlan{}, preflightErr
 		}
 	}
 
-	return &Info{
-		Path:       wtDir,
-		Branch:     branch,
-		BaseBranch: baseBranch,
-		SessionID:  sessionID,
+	return createPlan{
+		manifest:      manifest,
+		repoRoot:      repoRoot,
+		sessionID:     sessionID,
+		branch:        branch,
+		baseBranch:    baseBranch,
+		baseHEAD:      baseHEAD,
+		wtDir:         wtDir,
+		manifestFound: manifestExists,
+		branchExists:  branchExists,
+		wtPathExists:  wtPathExists,
 	}, nil
+}
+
+func createNewWorktree(ctx context.Context, plan createPlan) (*Info, error) {
+	created := newWorktreeManifest(plan.sessionID, plan.branch, plan.baseBranch, plan.baseHEAD, plan.repoRoot, plan.wtDir)
+
+	err := writeWorktreeManifest(ctx, plan.repoRoot, &created, "create-preflight", "recorded ownership before branch creation")
+	if err != nil {
+		return nil, fmt.Errorf("worktree: write ownership manifest: %w", err)
+	}
+
+	if err := gitRun(ctx, plan.repoRoot, "branch", plan.branch, plan.baseHEAD); err != nil {
+		cause := fmt.Errorf("worktree: create branch %s: %w", plan.branch, err)
+		return nil, markManifestFailed(ctx, plan.repoRoot, &created, "create-branch-failed", cause)
+	}
+
+	created.State = manifestStateBranchCreated
+	if err := writeWorktreeManifest(ctx, plan.repoRoot, &created, "branch-created", plan.branch); err != nil {
+		return nil, rollbackCreatedBranch(ctx, plan.repoRoot, plan.branch, fmt.Errorf("worktree: update ownership manifest: %w", err))
+	}
+
+	if err := gitRun(ctx, plan.repoRoot, "worktree", "add", plan.wtDir, plan.branch); err != nil {
+		addErr := fmt.Errorf("worktree: add %s: %w", plan.wtDir, err)
+		manifestErr := markManifestFailed(ctx, plan.repoRoot, &created, "worktree-add-failed", addErr)
+
+		return nil, rollbackCreatedBranch(ctx, plan.repoRoot, plan.branch, manifestErr)
+	}
+
+	created.State = manifestStateActive
+	if err := writeWorktreeManifest(ctx, plan.repoRoot, &created, "active", plan.wtDir); err != nil {
+		return nil, fmt.Errorf("worktree: update ownership manifest: %w", err)
+	}
+
+	return manifestInfo(&created), nil
 }
 
 // Merge refuses to merge without an explicit MergeOptions policy.
 //
-// Use MergeWithOptionsContext when a caller intentionally permits auto-commit
-// and auto-merge behavior.
+// Use MergeWithOptionsContext when a caller intentionally permits reviewed
+// auto-commit and auto-merge behavior.
 func Merge(repoDir string, info *Info) error {
 	return MergeContext(defaultCommandContext(), repoDir, info)
 }
@@ -210,29 +318,35 @@ func MergeContext(ctx context.Context, repoDir string, info *Info) error {
 func MergeWithOptionsContext(ctx context.Context, repoDir string, info *Info, opts MergeOptions) error {
 	ctx = nonNilCommandContext(ctx)
 
-	if info == nil {
-		return errors.New("worktree: nil info")
-	}
-
-	if err := validateInfo(info, true); err != nil {
+	repoRoot, manifest, log, err := beginMergeTransaction(ctx, repoDir, info, opts)
+	if err != nil {
 		return err
 	}
 
-	repoRoot, rootErr := gitRepoRoot(ctx, repoDir)
-	if rootErr != nil {
-		return fmt.Errorf("worktree: locate repo root: %w", rootErr)
+	if err := runMergeTransaction(ctx, repoRoot, info, opts, manifest, log); err != nil {
+		if markErr := markMergeFailed(ctx, repoRoot, manifest, err); markErr != nil {
+			return errors.Join(err, markErr)
+		}
+
+		return err
 	}
 
-	log, startErr := startMergeTransaction(ctx, repoRoot, info, opts)
-	if startErr != nil {
-		return startErr
-	}
+	return completeMergeTransaction(ctx, repoRoot, info, manifest, log)
+}
 
+func runMergeTransaction(
+	ctx context.Context,
+	repoRoot string,
+	info *Info,
+	opts MergeOptions,
+	manifest *worktreeManifest,
+	log *transactionLog,
+) error {
 	if policyErr := requireAutoMergePolicy(opts); policyErr != nil {
 		return mergeFailure("auto-merge policy", info, log, policyErr)
 	}
 
-	if preflightErr := preflightMainRepo(ctx, repoRoot, info, opts); preflightErr != nil {
+	if preflightErr := preflightMainRepo(ctx, repoRoot, info, opts, manifest); preflightErr != nil {
 		return mergeFailure("preflight main repository", info, log, preflightErr)
 	}
 
@@ -244,12 +358,85 @@ func MergeWithOptionsContext(ctx context.Context, repoDir string, info *Info, op
 		return commitErr
 	}
 
-	if mergeErr := mergeBranch(ctx, repoRoot, info, log); mergeErr != nil {
+	if dryRunErr := dryRunMerge(ctx, repoRoot, info, log); dryRunErr != nil {
+		return dryRunErr
+	}
+
+	if mergeErr := mergeBranch(ctx, repoRoot, info, log, manifest); mergeErr != nil {
 		return mergeErr
 	}
 
-	if cleanupErr := cleanupMergedWorktree(ctx, repoDir, info, log); cleanupErr != nil {
+	if cleanupErr := cleanupMergedWorktree(ctx, repoRoot, info, log, manifest); cleanupErr != nil {
 		return cleanupErr
+	}
+
+	return nil
+}
+
+func beginMergeTransaction(
+	ctx context.Context,
+	repoDir string,
+	info *Info,
+	opts MergeOptions,
+) (string, *worktreeManifest, *transactionLog, error) {
+	if info == nil {
+		return "", nil, nil, errors.New("worktree: nil info")
+	}
+
+	if err := validateInfo(info, true); err != nil {
+		return "", nil, nil, err
+	}
+
+	repoRoot, rootErr := gitRepoRoot(ctx, repoDir)
+	if rootErr != nil {
+		return "", nil, nil, fmt.Errorf("worktree: locate repo root: %w", rootErr)
+	}
+
+	manifest, manifestErr := requireOwnedManifest(ctx, repoRoot, info)
+	if manifestErr != nil {
+		return "", nil, nil, manifestErr
+	}
+
+	log, startErr := startMergeTransaction(ctx, repoRoot, info, opts)
+	if startErr != nil {
+		return "", nil, nil, startErr
+	}
+
+	manifest.State = manifestStateMerging
+	manifest.LastTransaction = transactionLogPath(log)
+	manifest.LastError = ""
+
+	writeErr := writeWorktreeManifest(ctx, repoRoot, manifest, "merge-start", "transaction="+transactionLogPath(log))
+	if writeErr != nil {
+		return "", nil, nil, mergeFailure("write ownership manifest", info, log, writeErr)
+	}
+
+	return repoRoot, manifest, log, nil
+}
+
+func markMergeFailed(ctx context.Context, repoRoot string, manifest *worktreeManifest, cause error) error {
+	if manifest == nil || cause == nil {
+		return nil
+	}
+
+	manifest.State = manifestStateFailed
+	manifest.LastError = cause.Error()
+
+	return writeWorktreeManifest(ctx, repoRoot, manifest, "merge-failed", cause.Error())
+}
+
+func completeMergeTransaction(
+	ctx context.Context,
+	repoRoot string,
+	info *Info,
+	manifest *worktreeManifest,
+	log *transactionLog,
+) error {
+	manifest.State = manifestStateMerged
+	manifest.LastError = ""
+
+	if writeErr := writeWorktreeManifest(ctx, repoRoot, manifest, "merge-complete", "merged and cleaned up"); writeErr != nil {
+		return mergeFailure("write ownership manifest", info, log, writeErr)
 	}
 
 	if appendErr := log.append("complete", "ok"); appendErr != nil {
@@ -259,29 +446,125 @@ func MergeWithOptionsContext(ctx context.Context, repoDir string, info *Info, op
 	return nil
 }
 
-// Remove deletes the worktree and its branch without merging.
+// Remove deletes a clean, already-merged worktree and its branch.
+//
+// Use RemoveWithOptionsContext with Force=true for explicitly destructive
+// cleanup of dirty or unmerged session work.
 func Remove(repoDir string, info *Info) error {
 	return RemoveContext(defaultCommandContext(), repoDir, info)
 }
 
 // RemoveContext is Remove with caller-provided cancellation for git commands.
 func RemoveContext(ctx context.Context, repoDir string, info *Info) error {
+	return RemoveWithOptionsContext(ctx, repoDir, info, RemoveOptions{})
+}
+
+// RemoveWithOptionsContext removes a session worktree with an explicit
+// destructive-cleanup policy.
+func RemoveWithOptionsContext(ctx context.Context, repoDir string, info *Info, opts RemoveOptions) error {
 	ctx = nonNilCommandContext(ctx)
 
+	plan, err := prepareRemove(ctx, repoDir, info, opts)
+	if err != nil {
+		return err
+	}
+
+	if plan.alreadyRemoved {
+		return nil
+	}
+
+	if err := removeWorktreePath(ctx, plan.repoRoot, info, opts); err != nil {
+		return err
+	}
+
+	if err := deleteWorktreeBranch(ctx, plan.repoRoot, info, opts); err != nil {
+		return err
+	}
+
+	if err := verifyWorktreeRemoved(ctx, plan.repoRoot, info); err != nil {
+		return err
+	}
+
+	return markManifestRemoved(ctx, plan.repoRoot, info)
+}
+
+type removePlan struct {
+	repoRoot       string
+	alreadyRemoved bool
+}
+
+func prepareRemove(ctx context.Context, repoDir string, info *Info, opts RemoveOptions) (removePlan, error) {
 	if info == nil {
-		return errors.New("worktree: nil info")
+		return removePlan{}, errors.New("worktree: nil info")
 	}
 
 	if err := validateInfo(info, false); err != nil {
-		return err
+		return removePlan{}, err
 	}
 
 	repoRoot, rootErr := gitRepoRoot(ctx, repoDir)
 	if rootErr != nil {
-		return fmt.Errorf("worktree: locate repo root: %w", rootErr)
+		return removePlan{}, fmt.Errorf("worktree: locate repo root: %w", rootErr)
 	}
 
-	if removeErr := gitRun(ctx, repoRoot, "worktree", "remove", "--force", info.Path); removeErr != nil {
+	if !opts.Force {
+		if _, err := requireOwnedManifest(ctx, repoRoot, info); err != nil {
+			return removePlan{}, err
+		}
+	}
+
+	gitStateRemoved, gitStateErr := removedGitState(ctx, repoRoot, info)
+	if gitStateErr != nil {
+		return removePlan{}, gitStateErr
+	}
+
+	if gitStateRemoved {
+		if err := markManifestRemoved(ctx, repoRoot, info); err != nil {
+			return removePlan{}, err
+		}
+
+		return removePlan{repoRoot: repoRoot, alreadyRemoved: true}, nil
+	}
+
+	removed, removedErr := alreadyRemoved(ctx, repoRoot, info)
+	if removedErr != nil {
+		return removePlan{}, removedErr
+	}
+
+	if removed {
+		return removePlan{repoRoot: repoRoot, alreadyRemoved: true}, nil
+	}
+
+	if !opts.Force {
+		if err := preflightSafeRemove(ctx, repoRoot, info); err != nil {
+			return removePlan{}, err
+		}
+	}
+
+	return removePlan{repoRoot: repoRoot}, nil
+}
+
+func removeWorktreePath(ctx context.Context, repoRoot string, info *Info, opts RemoveOptions) error {
+	exists, existsErr := pathExists(info.Path)
+	if existsErr != nil {
+		return fmt.Errorf("worktree: check path %s before remove: %w", info.Path, existsErr)
+	}
+
+	if !exists {
+		if pruneErr := gitRun(ctx, repoRoot, "worktree", "prune"); pruneErr != nil {
+			return fmt.Errorf("worktree: prune: %w", pruneErr)
+		}
+
+		return nil
+	}
+
+	removeArgs := []string{"worktree", "remove"}
+	if opts.Force {
+		removeArgs = append(removeArgs, "--force")
+	}
+
+	removeArgs = append(removeArgs, info.Path)
+	if removeErr := gitRun(ctx, repoRoot, removeArgs...); removeErr != nil {
 		return fmt.Errorf("worktree: remove path %s: %w", info.Path, removeErr)
 	}
 
@@ -289,10 +572,89 @@ func RemoveContext(ctx context.Context, repoDir string, info *Info) error {
 		return fmt.Errorf("worktree: prune: %w", pruneErr)
 	}
 
-	if branchErr := gitRun(ctx, repoRoot, "branch", "-D", info.Branch); branchErr != nil {
+	return nil
+}
+
+func removedGitState(ctx context.Context, repoRoot string, info *Info) (bool, error) {
+	pathExists, pathErr := pathExists(info.Path)
+	if pathErr != nil {
+		return false, fmt.Errorf("worktree: check path %s: %w", info.Path, pathErr)
+	}
+
+	branchExists, branchErr := gitBranchExists(ctx, repoRoot, info.Branch)
+	if branchErr != nil {
+		return false, fmt.Errorf("worktree: check branch %s: %w", info.Branch, branchErr)
+	}
+
+	return !pathExists && !branchExists, nil
+}
+
+func alreadyRemoved(ctx context.Context, repoRoot string, info *Info) (bool, error) {
+	manifest, ok, err := loadWorktreeManifest(ctx, repoRoot, info.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("worktree: load ownership manifest: %w", err)
+	}
+
+	if !ok || (manifest.State != manifestStateRemoved && manifest.State != manifestStateMerged) {
+		return false, nil
+	}
+
+	pathExists, pathErr := pathExists(info.Path)
+	if pathErr != nil {
+		return false, fmt.Errorf("worktree: check path %s: %w", info.Path, pathErr)
+	}
+
+	branchExists, branchErr := gitBranchExists(ctx, repoRoot, info.Branch)
+	if branchErr != nil {
+		return false, fmt.Errorf("worktree: check branch %s: %w", info.Branch, branchErr)
+	}
+
+	return !pathExists && !branchExists, nil
+}
+
+func markManifestRemoved(ctx context.Context, repoRoot string, info *Info) error {
+	manifest, ok, err := loadWorktreeManifest(ctx, repoRoot, info.SessionID)
+	if err != nil {
+		return fmt.Errorf("worktree: load ownership manifest: %w", err)
+	}
+
+	if !ok {
+		return nil
+	}
+
+	manifest.State = manifestStateRemoved
+	manifest.LastError = ""
+
+	if err := writeWorktreeManifest(ctx, repoRoot, manifest, "remove-complete", "removed worktree and branch"); err != nil {
+		return fmt.Errorf("worktree: update ownership manifest: %w", err)
+	}
+
+	return nil
+}
+
+func deleteWorktreeBranch(ctx context.Context, repoRoot string, info *Info, opts RemoveOptions) error {
+	exists, existsErr := gitBranchExists(ctx, repoRoot, info.Branch)
+	if existsErr != nil {
+		return fmt.Errorf("worktree: check branch %s before delete: %w", info.Branch, existsErr)
+	}
+
+	if !exists {
+		return nil
+	}
+
+	branchDeleteFlag := "-d"
+	if opts.Force {
+		branchDeleteFlag = "-D"
+	}
+
+	if branchErr := gitRun(ctx, repoRoot, "branch", branchDeleteFlag, info.Branch); branchErr != nil {
 		return fmt.Errorf("worktree: delete branch %s: %w", info.Branch, branchErr)
 	}
 
+	return nil
+}
+
+func verifyWorktreeRemoved(ctx context.Context, repoRoot string, info *Info) error {
 	if exists, err := pathExists(info.Path); err != nil {
 		return fmt.Errorf("worktree: verify path cleanup %s: %w", info.Path, err)
 	} else if exists {
@@ -443,6 +805,14 @@ func requireAutoMergePolicy(opts MergeOptions) error {
 		return errors.New("merge policy does not permit running git merge")
 	}
 
+	if opts.Strategy == "" {
+		return errors.New("merge policy must choose an explicit strategy")
+	}
+
+	if opts.Strategy != MergeStrategyMerge {
+		return fmt.Errorf("merge strategy %q is not supported", opts.Strategy)
+	}
+
 	return nil
 }
 
@@ -454,30 +824,219 @@ func rollbackCreatedBranch(ctx context.Context, repoRoot, branch string, cause e
 	return cause
 }
 
-func verifyExistingWorktree(ctx context.Context, repoRoot, branch, expectedPath string) error {
-	actualPath, ok, err := gitWorktreePathForBranch(ctx, repoRoot, branch)
+func preflightCreateCleanState(ctx context.Context, repoRoot, wtDir string) error {
+	excludes, err := managedWorktreePaths(ctx, repoRoot)
 	if err != nil {
-		return err
+		return fmt.Errorf("worktree: list managed worktrees for create preflight: %w", err)
 	}
 
-	if !ok {
-		return fmt.Errorf("branch %s is not checked out at %s", branch, expectedPath)
+	excludes = append(excludes, wtDir)
+
+	summary, err := gitStatusSummary(ctx, repoRoot, excludes...)
+	if err != nil {
+		return fmt.Errorf("worktree: read main worktree status: %w", err)
 	}
 
-	if !samePath(actualPath, expectedPath) {
-		return fmt.Errorf("branch %s is already checked out at %s, expected %s", branch, actualPath, expectedPath)
-	}
-
-	if exists, err := pathExists(expectedPath); err != nil {
-		return fmt.Errorf("check existing worktree path %s: %w", expectedPath, err)
-	} else if !exists {
-		return fmt.Errorf("branch %s is checked out at missing path %s", branch, expectedPath)
+	if !summary.empty() {
+		return fmt.Errorf("worktree: main worktree has uncommitted or untracked files before isolation:\n%s", summary.String())
 	}
 
 	return nil
 }
 
-func preflightMainRepo(ctx context.Context, repoRoot string, info *Info, opts MergeOptions) error {
+func markManifestFailed(ctx context.Context, repoRoot string, manifest *worktreeManifest, event string, cause error) error {
+	manifest.State = manifestStateFailed
+	manifest.LastError = cause.Error()
+
+	writeErr := writeWorktreeManifest(ctx, repoRoot, manifest, event, cause.Error())
+	if writeErr != nil {
+		return errors.Join(cause, fmt.Errorf("worktree: update ownership manifest: %w", writeErr))
+	}
+
+	return cause
+}
+
+func joinOrResumeExistingWorktree(ctx context.Context, plan createPlan) (*Info, error) {
+	if !plan.manifestFound {
+		if plan.branchExists {
+			return nil, fmt.Errorf("worktree: branch %s already exists without ownership metadata", plan.branch)
+		}
+
+		return nil, fmt.Errorf("worktree: path %s already exists without ownership metadata", plan.wtDir)
+	}
+
+	if plan.manifest.State == manifestStateMerged || plan.manifest.State == manifestStateRemoved {
+		return nil, fmt.Errorf("worktree: session %s was already merged; start a new session instead", plan.sessionID)
+	}
+
+	if err := preflightManifestBranch(ctx, plan); err != nil {
+		return nil, err
+	}
+
+	actualPath, checkedOut, err := gitWorktreePathForBranch(ctx, plan.repoRoot, plan.branch)
+	if err != nil {
+		return nil, fmt.Errorf("worktree: check worktree checkout: %w", err)
+	}
+
+	if plan.branchExists && checkedOut {
+		return rejoinCheckedOutWorktree(ctx, plan, actualPath)
+	}
+
+	if plan.wtPathExists {
+		return nil, fmt.Errorf("worktree: path %s exists but is not the owned checkout for branch %s", plan.wtDir, plan.branch)
+	}
+
+	if !plan.branchExists {
+		if err := resumeMissingBranch(ctx, plan); err != nil {
+			return nil, err
+		}
+	}
+
+	return resumeWorktreeCheckout(ctx, plan)
+}
+
+func preflightManifestBranch(ctx context.Context, plan createPlan) error {
+	if !plan.branchExists {
+		return nil
+	}
+
+	baseIsAncestor, err := gitIsAncestor(ctx, plan.repoRoot, plan.manifest.BaseHEAD, plan.branch)
+	if err != nil {
+		return fmt.Errorf("worktree: verify branch %s against ownership manifest: %w", plan.branch, err)
+	}
+
+	if !baseIsAncestor {
+		return fmt.Errorf("worktree: branch %s does not descend from recorded base HEAD %s in ownership manifest", plan.branch, plan.manifest.BaseHEAD)
+	}
+
+	return nil
+}
+
+func rejoinCheckedOutWorktree(ctx context.Context, plan createPlan, actualPath string) (*Info, error) {
+	if !samePath(actualPath, plan.wtDir) {
+		return nil, fmt.Errorf("worktree: branch %s is checked out at %s, ownership manifest expects %s", plan.branch, actualPath, plan.wtDir)
+	}
+
+	if !plan.wtPathExists {
+		if err := gitRun(ctx, plan.repoRoot, "worktree", "prune"); err != nil {
+			cause := fmt.Errorf("worktree: prune missing checkout %s: %w", plan.wtDir, err)
+			return nil, markManifestFailed(ctx, plan.repoRoot, plan.manifest, "rejoin-prune-failed", cause)
+		}
+
+		plan.manifest.State = manifestStateBranchCreated
+		if err := writeWorktreeManifest(ctx, plan.repoRoot, plan.manifest, "rejoin-pruned-missing", plan.wtDir); err != nil {
+			return nil, fmt.Errorf("worktree: update ownership manifest: %w", err)
+		}
+
+		return resumeWorktreeCheckout(ctx, plan)
+	}
+
+	plan.manifest.State = manifestStateActive
+
+	err := writeWorktreeManifest(ctx, plan.repoRoot, plan.manifest, "rejoin-active", "verified existing branch and worktree")
+	if err != nil {
+		return nil, fmt.Errorf("worktree: update ownership manifest: %w", err)
+	}
+
+	return manifestInfo(plan.manifest), nil
+}
+
+func resumeMissingBranch(ctx context.Context, plan createPlan) error {
+	if plan.manifest.State != manifestStateCreating &&
+		plan.manifest.State != manifestStateBranchCreated &&
+		plan.manifest.State != manifestStateFailed {
+		return fmt.Errorf("worktree: ownership manifest says session %s is %s but branch %s is missing", plan.sessionID, plan.manifest.State, plan.branch)
+	}
+
+	if err := gitRun(ctx, plan.repoRoot, "branch", plan.branch, plan.manifest.BaseHEAD); err != nil {
+		cause := fmt.Errorf("worktree: resume branch %s: %w", plan.branch, err)
+		return markManifestFailed(ctx, plan.repoRoot, plan.manifest, "resume-branch-failed", cause)
+	}
+
+	plan.manifest.State = manifestStateBranchCreated
+	if err := writeWorktreeManifest(ctx, plan.repoRoot, plan.manifest, "resume-branch-created", plan.branch); err != nil {
+		return rollbackCreatedBranch(ctx, plan.repoRoot, plan.branch, fmt.Errorf("worktree: update ownership manifest: %w", err))
+	}
+
+	return nil
+}
+
+func resumeWorktreeCheckout(ctx context.Context, plan createPlan) (*Info, error) {
+	if err := gitRun(ctx, plan.repoRoot, "worktree", "add", plan.wtDir, plan.branch); err != nil {
+		cause := fmt.Errorf("worktree: resume worktree %s: %w", plan.wtDir, err)
+		return nil, markManifestFailed(ctx, plan.repoRoot, plan.manifest, "resume-worktree-add-failed", cause)
+	}
+
+	plan.manifest.State = manifestStateActive
+	plan.manifest.LastError = ""
+
+	if err := writeWorktreeManifest(ctx, plan.repoRoot, plan.manifest, "resume-active", plan.wtDir); err != nil {
+		return nil, fmt.Errorf("worktree: update ownership manifest: %w", err)
+	}
+
+	return manifestInfo(plan.manifest), nil
+}
+
+func preflightSafeRemove(ctx context.Context, repoRoot string, info *Info) error {
+	exists, existsErr := pathExists(info.Path)
+	if existsErr != nil {
+		return fmt.Errorf("worktree: check path %s before remove: %w", info.Path, existsErr)
+	}
+
+	if exists {
+		summary, err := gitStatusSummary(ctx, info.Path)
+		if err != nil {
+			return fmt.Errorf("worktree: read worktree status before remove: %w", err)
+		}
+
+		if !summary.empty() {
+			return fmt.Errorf("worktree: refusing to remove dirty worktree without force:\n%s", summary.String())
+		}
+	}
+
+	branchExists, err := gitBranchExists(ctx, repoRoot, info.Branch)
+	if err != nil {
+		return fmt.Errorf("worktree: check branch %s before remove: %w", info.Branch, err)
+	}
+
+	if !branchExists {
+		return fmt.Errorf("worktree: branch %s is missing before remove", info.Branch)
+	}
+
+	merged, err := gitIsAncestor(ctx, repoRoot, info.Branch, "HEAD")
+	if err != nil {
+		return fmt.Errorf("worktree: verify branch %s merged before remove: %w", info.Branch, err)
+	}
+
+	if !merged {
+		return fmt.Errorf("worktree: refusing to remove unmerged branch %s without force", info.Branch)
+	}
+
+	return nil
+}
+
+func requireOwnedManifest(ctx context.Context, repoRoot string, info *Info) (*worktreeManifest, error) {
+	manifest, ok, err := loadWorktreeManifest(ctx, repoRoot, info.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("worktree: load ownership manifest: %w", err)
+	}
+
+	if !ok {
+		return nil, fmt.Errorf("worktree: missing ownership metadata for session %s", info.SessionID)
+	}
+
+	if err := validateManifestOwnership(repoRoot, manifest, info.SessionID, info.Branch, info.Path); err != nil {
+		return nil, fmt.Errorf("worktree: invalid ownership manifest: %w", err)
+	}
+
+	if info.BaseBranch != "" && manifest.BaseBranch != info.BaseBranch {
+		return nil, fmt.Errorf("worktree: ownership manifest base branch %s does not match requested base %s", manifest.BaseBranch, info.BaseBranch)
+	}
+
+	return manifest, nil
+}
+
+func preflightMainRepo(ctx context.Context, repoRoot string, info *Info, opts MergeOptions, manifest *worktreeManifest) error {
 	if err := preflightCurrentBranch(ctx, repoRoot, info, opts); err != nil {
 		return err
 	}
@@ -487,6 +1046,10 @@ func preflightMainRepo(ctx context.Context, repoRoot string, info *Info, opts Me
 	}
 
 	if err := preflightWorktreeCheckout(ctx, repoRoot, info); err != nil {
+		return err
+	}
+
+	if err := preflightMergeBase(ctx, repoRoot, info, manifest); err != nil {
 		return err
 	}
 
@@ -520,7 +1083,14 @@ func preflightCleanState(ctx context.Context, repoRoot string, info *Info) error
 		return fmt.Errorf("main worktree has pending %s; finish or abort it before merging", pending)
 	}
 
-	summary, err := gitStatusSummary(ctx, repoRoot, info.Path)
+	excludes, err := managedWorktreePaths(ctx, repoRoot)
+	if err != nil {
+		return fmt.Errorf("list managed worktrees: %w", err)
+	}
+
+	excludes = append(excludes, info.Path)
+
+	summary, err := gitStatusSummary(ctx, repoRoot, excludes...)
 	if err != nil {
 		return fmt.Errorf("read main worktree status: %w", err)
 	}
@@ -564,6 +1134,47 @@ func preflightWorktreeCheckout(ctx context.Context, repoRoot string, info *Info)
 	return nil
 }
 
+func preflightMergeBase(ctx context.Context, repoRoot string, info *Info, manifest *worktreeManifest) error {
+	if manifest == nil {
+		return errors.New("ownership manifest is required")
+	}
+
+	currentHead, err := gitRevParse(ctx, repoRoot, "HEAD")
+	if err != nil {
+		return fmt.Errorf("detect current HEAD: %w", err)
+	}
+
+	branchHead, err := gitRevParse(ctx, repoRoot, info.Branch)
+	if err != nil {
+		return fmt.Errorf("detect worktree branch HEAD: %w", err)
+	}
+
+	_, mergeBaseErr := gitMergeBase(ctx, repoRoot, currentHead, branchHead)
+	if mergeBaseErr != nil {
+		return fmt.Errorf("find merge base between %s and %s: %w", info.BaseBranch, info.Branch, mergeBaseErr)
+	}
+
+	baseIsAncestor, err := gitIsAncestor(ctx, repoRoot, manifest.BaseHEAD, branchHead)
+	if err != nil {
+		return fmt.Errorf("verify recorded base HEAD: %w", err)
+	}
+
+	if !baseIsAncestor {
+		return fmt.Errorf("recorded base HEAD %s is not an ancestor of %s", manifest.BaseHEAD, info.Branch)
+	}
+
+	baseInCurrent, err := gitIsAncestor(ctx, repoRoot, manifest.BaseHEAD, currentHead)
+	if err != nil {
+		return fmt.Errorf("verify current HEAD contains recorded base HEAD: %w", err)
+	}
+
+	if !baseInCurrent {
+		return fmt.Errorf("recorded base HEAD %s is not an ancestor of current HEAD %s; check out or restore recorded base branch %s before merging", manifest.BaseHEAD, currentHead, info.BaseBranch)
+	}
+
+	return nil
+}
+
 func autoCommitIfNeeded(ctx context.Context, info *Info, opts MergeOptions, log *transactionLog) error {
 	summary, err := gitStatusSummary(ctx, info.Path)
 	if err != nil {
@@ -588,6 +1199,12 @@ func autoCommitIfNeeded(ctx context.Context, info *Info, opts MergeOptions, log 
 		return mergeFailure("auto-commit policy", info, log, err)
 	}
 
+	if !opts.ReviewedAutoCommit {
+		err := fmt.Errorf("worktree has uncommitted changes and auto-commit was not marked reviewed:\n%s", summary.String())
+
+		return mergeFailure("auto-commit review", info, log, err)
+	}
+
 	if err := autoCommit(ctx, info, summary, opts); err != nil {
 		return mergeFailure("auto-commit", info, log, err)
 	}
@@ -599,7 +1216,54 @@ func autoCommitIfNeeded(ctx context.Context, info *Info, opts MergeOptions, log 
 	return nil
 }
 
-func mergeBranch(ctx context.Context, repoRoot string, info *Info, log *transactionLog) error {
+func dryRunMerge(ctx context.Context, repoRoot string, info *Info, log *transactionLog) error {
+	currentHead, err := gitRevParse(ctx, repoRoot, "HEAD")
+	if err != nil {
+		return mergeFailure("dry-run merge", info, log, fmt.Errorf("detect current HEAD: %w", err))
+	}
+
+	branchHead, err := gitRevParse(ctx, repoRoot, info.Branch)
+	if err != nil {
+		return mergeFailure("dry-run merge", info, log, fmt.Errorf("detect worktree branch HEAD: %w", err))
+	}
+
+	mergeBase, err := gitMergeBase(ctx, repoRoot, currentHead, branchHead)
+	if err != nil {
+		return mergeFailure("dry-run merge", info, log, fmt.Errorf("find merge base: %w", err))
+	}
+
+	diffSummary, err := gitDiffSummary(ctx, repoRoot, currentHead, info.Branch)
+	if err != nil {
+		return mergeFailure("dry-run merge", info, log, fmt.Errorf("build diff summary: %w", err))
+	}
+
+	if strings.TrimSpace(diffSummary) == "" {
+		diffSummary = "no file changes"
+	}
+
+	detail := fmt.Sprintf("strategy=%s base=%s current=%s branch=%s\n%s", MergeStrategyMerge, mergeBase, currentHead, branchHead, strings.TrimSpace(diffSummary))
+	if appendErr := log.append("dry-run merge", detail); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	output, err := gitCombinedOutput(ctx, repoRoot, "merge-tree", "--write-tree", currentHead, info.Branch)
+	if err != nil {
+		report := strings.TrimSpace(output)
+		if report == "" {
+			report = err.Error()
+		}
+
+		return mergeFailure("dry-run merge", info, log, fmt.Errorf("merge dry-run reported conflicts:\n%s", report))
+	}
+
+	if appendErr := log.append("dry-run merge", "ok"); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	return nil
+}
+
+func mergeBranch(ctx context.Context, repoRoot string, info *Info, log *transactionLog, manifest *worktreeManifest) error {
 	mergeMsg := "atteler: merge session " + info.SessionID
 
 	detail := fmt.Sprintf("git merge --no-ff %s into %s", info.Branch, info.BaseBranch)
@@ -616,6 +1280,27 @@ func mergeBranch(ctx context.Context, repoRoot string, info *Info, log *transact
 		return mergeFailureWithRollback("merge branch", info, log, err, rolledBack)
 	}
 
+	merged, verifyErr := gitIsAncestor(ctx, repoRoot, info.Branch, "HEAD")
+	if verifyErr != nil {
+		return mergeFailure("verify merge", info, log, verifyErr)
+	}
+
+	if !merged {
+		return mergeFailure("verify merge", info, log, fmt.Errorf("branch %s is not an ancestor of HEAD after merge", info.Branch))
+	}
+
+	mergeHead, headErr := gitRevParse(ctx, repoRoot, "HEAD")
+	if headErr != nil {
+		return mergeFailure("verify merge", info, log, fmt.Errorf("detect merged HEAD: %w", headErr))
+	}
+
+	if manifest != nil {
+		manifest.LastError = ""
+		if writeErr := writeWorktreeManifest(ctx, repoRoot, manifest, "merge-verified", "head="+mergeHead); writeErr != nil {
+			return mergeFailure("write ownership manifest", info, log, writeErr)
+		}
+	}
+
 	if appendErr := log.append("merge branch", "ok"); appendErr != nil {
 		return mergeFailure("write transaction log", info, log, appendErr)
 	}
@@ -623,13 +1308,20 @@ func mergeBranch(ctx context.Context, repoRoot string, info *Info, log *transact
 	return nil
 }
 
-func cleanupMergedWorktree(ctx context.Context, repoDir string, info *Info, log *transactionLog) error {
+func cleanupMergedWorktree(ctx context.Context, repoRoot string, info *Info, log *transactionLog, manifest *worktreeManifest) error {
 	if appendErr := log.append("cleanup worktree", "start"); appendErr != nil {
 		return mergeFailure("write transaction log", info, log, appendErr)
 	}
 
-	if err := RemoveContext(ctx, repoDir, info); err != nil {
+	if err := RemoveContext(ctx, repoRoot, info); err != nil {
 		return mergeFailure("cleanup worktree", info, log, err)
+	}
+
+	if manifest != nil {
+		manifest.State = manifestStateMerged
+		if writeErr := writeWorktreeManifest(ctx, repoRoot, manifest, "cleanup-complete", "removed worktree and branch"); writeErr != nil {
+			return mergeFailure("write ownership manifest", info, log, writeErr)
+		}
 	}
 
 	if appendErr := log.append("cleanup worktree", "ok"); appendErr != nil {
@@ -812,6 +1504,8 @@ func mergeFailureWithRollback(step string, info *Info, log *transactionLog, err 
 		Err:            err,
 		Step:           step,
 		Branch:         info.Branch,
+		BaseBranch:     info.BaseBranch,
+		SessionID:      info.SessionID,
 		WorktreePath:   info.Path,
 		TransactionLog: transactionLogPath(log),
 		RolledBack:     rolledBack,
@@ -871,6 +1565,48 @@ func gitCurrentBranch(ctx context.Context, dir string) (string, error) {
 	}
 
 	return strings.TrimSpace(out), nil
+}
+
+func gitRevParse(ctx context.Context, dir, rev string) (string, error) {
+	out, err := gitOutput(nonNilCommandContext(ctx), dir, "rev-parse", "--verify", rev)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(out), nil
+}
+
+func gitMergeBase(ctx context.Context, dir, left, right string) (string, error) {
+	out, err := gitOutput(nonNilCommandContext(ctx), dir, "merge-base", left, right)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(out), nil
+}
+
+func gitIsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
+	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = dir
+
+	var stderr bytes.Buffer
+
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %s: %w", ancestor, descendant, strings.TrimSpace(stderr.String()), err)
+	}
+
+	return true, nil
+}
+
+func gitDiffSummary(ctx context.Context, dir, base, branch string) (string, error) {
+	return gitOutput(nonNilCommandContext(ctx), dir, "diff", "--stat", "--find-renames", base+"..."+branch)
 }
 
 func gitPath(ctx context.Context, dir, name string) (string, error) {
@@ -955,6 +1691,37 @@ func gitWorktreePathForBranch(ctx context.Context, repoRoot, branch string) (pat
 	return "", false, nil
 }
 
+func managedWorktreePaths(ctx context.Context, repoRoot string) ([]string, error) {
+	out, err := gitOutput(ctx, repoRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		paths       []string
+		currentPath string
+	)
+
+	for line := range strings.SplitSeq(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			currentPath = ""
+			continue
+		}
+
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			currentPath = path
+			continue
+		}
+
+		if branch, ok := strings.CutPrefix(line, "branch refs/heads/"); ok && strings.HasPrefix(branch, worktreeBranchPrefix) && currentPath != "" {
+			paths = append(paths, currentPath)
+		}
+	}
+
+	return paths, nil
+}
+
 func pathExists(path string) (bool, error) {
 	_, err := os.Stat(path)
 	if err == nil {
@@ -1006,6 +1773,18 @@ func gitRun(ctx context.Context, dir string, args ...string) error {
 	return nil
 }
 
+func gitCombinedOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", args...)
+	cmd.Dir = dir
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+
+	return string(out), nil
+}
+
 // gitOutput executes a git command in dir and returns its stdout.
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", args...)
@@ -1032,6 +1811,13 @@ func parseWorktreeList(output, repoRoot string) []Info {
 func parseWorktreeListContext(ctx context.Context, output, repoRoot string) []Info {
 	ctx = nonNilCommandContext(ctx)
 
+	results := parseWorktreeListEntries(output)
+	hydrateWorktreeListFromManifests(ctx, repoRoot, results)
+
+	return results
+}
+
+func parseWorktreeListEntries(output string) []Info {
 	var (
 		results []Info
 		current Info
@@ -1040,10 +1826,7 @@ func parseWorktreeListContext(ctx context.Context, output, repoRoot string) []In
 	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
-			if current.Branch != "" && strings.HasPrefix(current.Branch, "atteler/") {
-				current.SessionID = strings.TrimPrefix(current.Branch, "atteler/")
-				results = append(results, current)
-			}
+			results = appendAttelerWorktree(results, current)
 
 			current = Info{}
 
@@ -1060,19 +1843,40 @@ func parseWorktreeListContext(ctx context.Context, output, repoRoot string) []In
 	}
 
 	// Flush last entry.
-	if current.Branch != "" && strings.HasPrefix(current.Branch, "atteler/") {
-		current.SessionID = strings.TrimPrefix(current.Branch, "atteler/")
-		results = append(results, current)
-	}
-
-	// Try to fill in BaseBranch from the main worktree's branch.
-	if len(results) > 0 {
-		if base, err := gitCurrentBranch(ctx, repoRoot); err == nil {
-			for i := range results {
-				results[i].BaseBranch = base
-			}
-		}
-	}
+	results = appendAttelerWorktree(results, current)
 
 	return results
+}
+
+func appendAttelerWorktree(results []Info, current Info) []Info {
+	if current.Branch == "" || !strings.HasPrefix(current.Branch, worktreeBranchPrefix) {
+		return results
+	}
+
+	current.SessionID = strings.TrimPrefix(current.Branch, worktreeBranchPrefix)
+
+	return append(results, current)
+}
+
+func hydrateWorktreeListFromManifests(ctx context.Context, repoRoot string, results []Info) {
+	if len(results) == 0 {
+		return
+	}
+
+	base, baseErr := gitCurrentBranch(ctx, repoRoot)
+
+	for i := range results {
+		manifest, ok, err := loadWorktreeManifest(ctx, repoRoot, results[i].SessionID)
+		if err == nil && ok {
+			results[i].BaseBranch = manifest.BaseBranch
+			results[i].Path = manifest.WorktreePath
+			results[i].Branch = manifest.Branch
+
+			continue
+		}
+
+		if baseErr == nil {
+			results[i].BaseBranch = base
+		}
+	}
 }

@@ -89,10 +89,26 @@ func commitConflictFile(t *testing.T, repo, content, message string) {
 	runGit(t, repo, "commit", "-m", message)
 }
 
+func commitAll(t *testing.T, repo, message string) {
+	t.Helper()
+
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-m", message)
+}
+
 func mergeOptions() MergeOptions {
 	return MergeOptions{
-		AutoCommit: true,
-		AutoMerge:  true,
+		AutoMerge: true,
+		Strategy:  MergeStrategyMerge,
+	}
+}
+
+func reviewedAutoCommitMergeOptions() MergeOptions {
+	return MergeOptions{
+		AutoCommit:         true,
+		ReviewedAutoCommit: true,
+		AutoMerge:          true,
+		Strategy:           MergeStrategyMerge,
 	}
 }
 
@@ -129,6 +145,8 @@ func TestCreateAndRemove(t *testing.T) {
 	if _, err := os.Stat(info.Path); !os.IsNotExist(err) {
 		assert.Failf(t, "assertion failed", "worktree path still exists after Remove")
 	}
+
+	require.NoError(t, Remove(repo, info))
 }
 
 func TestCreateIdempotent(t *testing.T) {
@@ -139,6 +157,8 @@ func TestCreateIdempotent(t *testing.T) {
 	if err != nil {
 		require.Failf(t, "unexpected failure", "first Create: %v", err)
 	}
+
+	writeFile(t, filepath.Join(repo, "dirty-after-create.txt"), "dirty\n")
 
 	// Second create for the same session should succeed (join).
 	info2, err := Create(repo, "idempotent-1")
@@ -155,6 +175,181 @@ func TestCreateIdempotent(t *testing.T) {
 	}
 }
 
+func TestCreateRejoinsExistingManifestFromDetachedHead(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info1, err := Create(repo, "detached-rejoin")
+	require.NoError(t, err)
+
+	runGit(t, repo, "checkout", "--detach")
+
+	info2, err := Create(repo, "detached-rejoin")
+	require.NoError(t, err)
+	assert.Equal(t, info1.Path, info2.Path)
+	assert.Equal(t, info1.BaseBranch, info2.BaseBranch)
+
+	require.NoError(t, Remove(repo, info1))
+}
+
+func TestCreateRejectsNewSessionFromDetachedHead(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	runGit(t, repo, "checkout", "--detach")
+
+	_, err := Create(repo, "new-detached")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "detached HEAD")
+
+	_, ok, manifestErr := loadWorktreeManifest(t.Context(), repo, "new-detached")
+	require.NoError(t, manifestErr)
+	assert.False(t, ok)
+}
+
+func TestCreateWritesManifestAndRejoinsWithRecordedBase(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info1, err := Create(repo, "manifest-rejoin")
+	require.NoError(t, err)
+
+	manifest, ok, err := loadWorktreeManifest(t.Context(), repo, "manifest-rejoin")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, manifestStateActive, manifest.State)
+	assert.Equal(t, info1.Branch, manifest.Branch)
+	assert.Equal(t, info1.Path, manifest.WorktreePath)
+	assert.NotEmpty(t, manifest.BaseHEAD)
+
+	runGit(t, repo, "checkout", "-b", "other")
+
+	info2, err := Create(repo, "manifest-rejoin")
+	require.NoError(t, err)
+	assert.Equal(t, info1.Path, info2.Path)
+	assert.Equal(t, info1.BaseBranch, info2.BaseBranch)
+
+	require.NoError(t, Remove(repo, info1))
+}
+
+func TestCreateRefusesDirtyBaseBeforeManifest(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	writeFile(t, filepath.Join(repo, "dirty.txt"), "dirty\n")
+
+	_, err := Create(repo, "dirty-create")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "before isolation")
+	assert.Contains(t, err.Error(), "dirty.txt")
+
+	branchExists, branchErr := gitBranchExists(t.Context(), repo, "atteler/dirty-create")
+	require.NoError(t, branchErr)
+	assert.False(t, branchExists)
+
+	_, ok, manifestErr := loadWorktreeManifest(t.Context(), repo, "dirty-create")
+	require.NoError(t, manifestErr)
+	assert.False(t, ok)
+}
+
+func TestCreateResumesStaleManifestWithBranch(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	sessionID := "resume-stale"
+	branch := "atteler/" + sessionID
+	repoRoot, err := gitRepoRoot(t.Context(), repo)
+	require.NoError(t, err)
+	baseBranch, err := gitCurrentBranch(t.Context(), repoRoot)
+	require.NoError(t, err)
+	baseHEAD, err := gitRevParse(t.Context(), repoRoot, "HEAD")
+	require.NoError(t, err)
+
+	wtDir := worktreeDir(repoRoot, sessionID)
+
+	manifest := newWorktreeManifest(sessionID, branch, baseBranch, baseHEAD, repoRoot, wtDir)
+	manifest.State = manifestStateBranchCreated
+	require.NoError(t, writeWorktreeManifest(t.Context(), repoRoot, &manifest, "test-stale", "branch exists without worktree"))
+	runGit(t, repoRoot, "branch", branch, baseHEAD)
+
+	info, err := Create(repo, sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, wtDir, info.Path)
+
+	_, statErr := os.Stat(info.Path)
+	require.NoError(t, statErr)
+
+	loaded, ok, err := loadWorktreeManifest(t.Context(), repo, sessionID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, manifestStateActive, loaded.State)
+
+	require.NoError(t, Remove(repo, info))
+}
+
+func TestCreateRepairsMissingRegisteredWorktreePath(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := Create(repo, "missing-registered-path")
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(info.Path))
+
+	rejoined, err := Create(repo, "missing-registered-path")
+	require.NoError(t, err)
+	assert.Equal(t, info.Path, rejoined.Path)
+
+	exists, existsErr := pathExists(rejoined.Path)
+	require.NoError(t, existsErr)
+	assert.True(t, exists)
+
+	require.NoError(t, Remove(repo, rejoined))
+}
+
+func TestCreateRejectsManifestBranchWithWrongBase(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	sessionID := "branch-base-mismatch"
+	branch := "atteler/" + sessionID
+	repoRoot, err := gitRepoRoot(t.Context(), repo)
+	require.NoError(t, err)
+	baseBranch, err := gitCurrentBranch(t.Context(), repoRoot)
+	require.NoError(t, err)
+	baseHEAD, err := gitRevParse(t.Context(), repoRoot, "HEAD")
+	require.NoError(t, err)
+
+	manifest := newWorktreeManifest(sessionID, branch, baseBranch, baseHEAD, repoRoot, worktreeDir(repoRoot, sessionID))
+	manifest.State = manifestStateBranchCreated
+	require.NoError(t, writeWorktreeManifest(t.Context(), repoRoot, &manifest, "test-branch-collision", "branch points at unrelated history"))
+
+	runGit(t, repoRoot, "checkout", "--orphan", "unrelated-base")
+	writeFile(t, filepath.Join(repoRoot, "unrelated.txt"), "unrelated\n")
+	runGit(t, repoRoot, "add", "-A")
+	runGit(t, repoRoot, "commit", "-m", "unrelated")
+	unrelatedHead, err := gitRevParse(t.Context(), repoRoot, "HEAD")
+	require.NoError(t, err)
+	runGit(t, repoRoot, "checkout", baseBranch)
+	runGit(t, repoRoot, "branch", branch, unrelatedHead)
+
+	_, err = Create(repo, sessionID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not descend from recorded base HEAD")
+}
+
+func TestCreateRejectsRemovedManifest(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := Create(repo, "removed-session")
+	require.NoError(t, err)
+	require.NoError(t, Remove(repo, info))
+
+	_, err = Create(repo, "removed-session")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already merged")
+}
+
 func TestMergeWithExplicitPolicy(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
@@ -169,6 +364,8 @@ func TestMergeWithExplicitPolicy(t *testing.T) {
 	if writeErr := os.WriteFile(testFile, []byte("hello\n"), 0o600); writeErr != nil {
 		require.Failf(t, "unexpected failure", "write test file: %v", writeErr)
 	}
+
+	commitAll(t, info.Path, "session change")
 
 	if mergeErr := MergeWithOptionsContext(t.Context(), repo, info, mergeOptions()); mergeErr != nil {
 		require.Failf(t, "unexpected failure", "Merge: %v", mergeErr)
@@ -202,6 +399,12 @@ func TestMergeRequiresExplicitAutoMergePolicy(t *testing.T) {
 	err = Merge(repo, info)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auto-merge policy")
+
+	manifest, ok, manifestErr := loadWorktreeManifest(t.Context(), repo, info.SessionID)
+	require.NoError(t, manifestErr)
+	require.True(t, ok)
+	assert.Equal(t, manifestStateFailed, manifest.State)
+	assert.Contains(t, manifest.LastError, "auto-merge policy")
 
 	require.NoError(t, Remove(repo, info))
 }
@@ -239,8 +442,8 @@ func TestCreateRejectsBranchAlreadyCheckedOutElsewhere(t *testing.T) {
 
 	_, err := Create(repo, "checked-out")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already exists without matching worktree")
-	assert.Contains(t, err.Error(), filepath.Join(repo, ".atteler", "worktrees", "checked-out"))
+	assert.Contains(t, err.Error(), "already exists without ownership metadata")
+	assert.Contains(t, err.Error(), "atteler/checked-out")
 }
 
 func TestCreateRejectsExistingBranchWithoutMatchingWorktree(t *testing.T) {
@@ -251,11 +454,11 @@ func TestCreateRejectsExistingBranchWithoutMatchingWorktree(t *testing.T) {
 
 	_, err := Create(repo, "stale")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already exists without matching worktree")
+	assert.Contains(t, err.Error(), "already exists without ownership metadata")
 	assert.Contains(t, err.Error(), "atteler/stale")
 }
 
-func TestCreateRollsBackSessionBranchWhenAddFails(t *testing.T) {
+func TestCreateRejectsExistingPathWithoutOwnershipMetadata(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
 
@@ -265,7 +468,7 @@ func TestCreateRollsBackSessionBranchWhenAddFails(t *testing.T) {
 
 	_, err := Create(repo, "add-fail")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "worktree: add")
+	assert.Contains(t, err.Error(), "already exists without ownership metadata")
 
 	branchExists, branchErr := gitBranchExists(t.Context(), repo, "atteler/add-fail")
 	require.NoError(t, branchErr)
@@ -287,9 +490,192 @@ func TestMergeRequiresExplicitPolicies(t *testing.T) {
 
 	err = MergeWithOptionsContext(t.Context(), repo, info, MergeOptions{AutoMerge: true})
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "explicit strategy")
+
+	err = MergeWithOptionsContext(t.Context(), repo, info, MergeOptions{AutoMerge: true, Strategy: MergeStrategyMerge})
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auto-commit policy")
 
+	require.NoError(t, RemoveWithOptionsContext(t.Context(), repo, info, RemoveOptions{Force: true}))
+}
+
+func TestMergeRefusesUnreviewedAutoCommitAndPreservesWork(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := Create(repo, "unreviewed-auto-commit")
+	require.NoError(t, err)
+	writeFile(t, filepath.Join(info.Path, "unreviewed.txt"), "unreviewed\n")
+
+	opts := mergeOptions()
+	opts.AutoCommit = true
+
+	err = MergeWithOptionsContext(t.Context(), repo, info, opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auto-commit review")
+	assert.Contains(t, err.Error(), "not marked reviewed")
+
+	_, readErr := os.ReadFile(filepath.Join(repo, "unreviewed.txt"))
+	assert.True(t, os.IsNotExist(readErr))
+
+	exists, existsErr := pathExists(info.Path)
+	require.NoError(t, existsErr)
+	assert.True(t, exists)
+	branchExists, branchErr := gitBranchExists(t.Context(), repo, info.Branch)
+	require.NoError(t, branchErr)
+	assert.True(t, branchExists)
+
+	require.NoError(t, RemoveWithOptionsContext(t.Context(), repo, info, RemoveOptions{Force: true}))
+}
+
+func TestMergeInterruptedAutoCommitPreservesBranchAndWorktree(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := Create(repo, "interrupted-auto-commit")
+	require.NoError(t, err)
+	writeFile(t, filepath.Join(info.Path, "blocked.txt"), "blocked\n")
+
+	lockPath, err := gitPath(t.Context(), info.Path, "index.lock")
+	require.NoError(t, err)
+	writeFile(t, lockPath, "locked\n")
+
+	err = MergeWithOptionsContext(t.Context(), repo, info, reviewedAutoCommitMergeOptions())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auto-commit")
+
+	exists, existsErr := pathExists(info.Path)
+	require.NoError(t, existsErr)
+	assert.True(t, exists)
+	branchExists, branchErr := gitBranchExists(t.Context(), repo, info.Branch)
+	require.NoError(t, branchErr)
+	assert.True(t, branchExists)
+
+	require.NoError(t, os.Remove(lockPath))
+	require.NoError(t, RemoveWithOptionsContext(t.Context(), repo, info, RemoveOptions{Force: true}))
+}
+
+func TestRemoveRefusesUnmergedBranchWithoutForce(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := Create(repo, "remove-unmerged")
+	require.NoError(t, err)
+	writeFile(t, filepath.Join(info.Path, "unmerged.txt"), "unmerged\n")
+	commitAll(t, info.Path, "unmerged")
+
+	err = Remove(repo, info)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to remove unmerged branch")
+
+	exists, existsErr := pathExists(info.Path)
+	require.NoError(t, existsErr)
+	assert.True(t, exists)
+	branchExists, branchErr := gitBranchExists(t.Context(), repo, info.Branch)
+	require.NoError(t, branchErr)
+	assert.True(t, branchExists)
+
+	require.NoError(t, RemoveWithOptionsContext(t.Context(), repo, info, RemoveOptions{Force: true}))
+}
+
+func TestRemoveReportsFailedBranchDeletionAndPreservesBranch(t *testing.T) {
+	repo := initTestRepo(t)
+
+	info, err := Create(repo, "delete-fails")
+	require.NoError(t, err)
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+
+	fakeBin := t.TempDir()
+	fakeGit := filepath.Join(fakeBin, "git")
+	marker := filepath.Join(fakeBin, "fail-once")
+	writeFile(t, marker, "fail\n")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"branch\" ] && [ \"$2\" = \"-d\" ] && [ \"$3\" = \"atteler/delete-fails\" ] && [ -f " + marker + " ]; then\n" +
+		"  rm " + marker + "\n" +
+		"  echo simulated branch delete failure >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"exec " + realGit + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o600))
+	require.NoError(t, os.Chmod(fakeGit, 0o700)) //nolint:gosec // Test creates an executable fake git wrapper.
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err = Remove(repo, info)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "delete branch")
+	assert.Contains(t, err.Error(), "simulated branch delete failure")
+
+	exists, existsErr := pathExists(info.Path)
+	require.NoError(t, existsErr)
+	assert.False(t, exists)
+
+	branchExists, branchErr := gitBranchExists(t.Context(), repo, info.Branch)
+	require.NoError(t, branchErr)
+	assert.True(t, branchExists)
+
 	require.NoError(t, Remove(repo, info))
+
+	branchExists, branchErr = gitBranchExists(t.Context(), repo, info.Branch)
+	require.NoError(t, branchErr)
+	assert.False(t, branchExists)
+}
+
+func TestRemoveRepairsStaleManifestAfterCompletedGitCleanup(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := Create(repo, "stale-remove-manifest")
+	require.NoError(t, err)
+	require.NoError(t, Remove(repo, info))
+
+	manifest, ok, err := loadWorktreeManifest(t.Context(), repo, info.SessionID)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	manifest.State = manifestStateActive
+	require.NoError(t, writeWorktreeManifest(t.Context(), repo, manifest, "test-stale-remove", "simulate interrupted manifest update"))
+
+	require.NoError(t, Remove(repo, info))
+
+	manifest, ok, err = loadWorktreeManifest(t.Context(), repo, info.SessionID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, manifestStateRemoved, manifest.State)
+}
+
+func TestRemoveRequiresOwnershipMetadataEvenWhenGitStateIsGone(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info := &Info{
+		Path:       filepath.Join(repo, ".atteler", "worktrees", "missing-owned-state"),
+		Branch:     "atteler/missing-owned-state",
+		BaseBranch: "main",
+		SessionID:  "missing-owned-state",
+	}
+
+	err := Remove(repo, info)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing ownership metadata")
+
+	require.NoError(t, RemoveWithOptionsContext(t.Context(), repo, info, RemoveOptions{Force: true}))
+}
+
+func TestForceRemoveCleansPathWhenBranchAlreadyMissing(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := Create(repo, "missing-branch-force")
+	require.NoError(t, err)
+	runGit(t, repo, "update-ref", "-d", "refs/heads/"+info.Branch)
+
+	require.NoError(t, RemoveWithOptionsContext(t.Context(), repo, info, RemoveOptions{Force: true}))
+
+	exists, existsErr := pathExists(info.Path)
+	require.NoError(t, existsErr)
+	assert.False(t, exists)
 }
 
 func TestMergeRefusesDirtyBaseWorktree(t *testing.T) {
@@ -352,7 +738,7 @@ func TestGitStatusSummaryExcludesManagedWorktreePath(t *testing.T) {
 	assert.NotContains(t, summary.String(), ".atteler/worktrees/status-exclude")
 
 	require.NoError(t, os.Remove(filepath.Join(repoRoot, ".atteler", "main.txt")))
-	require.NoError(t, Remove(repo, info))
+	require.NoError(t, RemoveWithOptionsContext(t.Context(), repo, info, RemoveOptions{Force: true}))
 }
 
 func TestMergeRefusesDetachedHead(t *testing.T) {
@@ -447,6 +833,7 @@ func TestMergeRefusesBaseBranchMismatchUnlessOverride(t *testing.T) {
 	info, err := Create(repo, "base-mismatch")
 	require.NoError(t, err)
 	writeFile(t, filepath.Join(info.Path, "override.txt"), "override\n")
+	commitAll(t, info.Path, "override")
 	runGit(t, repo, "checkout", "-b", "other")
 
 	err = MergeWithOptionsContext(t.Context(), repo, info, mergeOptions())
@@ -462,6 +849,35 @@ func TestMergeRefusesBaseBranchMismatchUnlessOverride(t *testing.T) {
 	assert.Equal(t, "override\n", string(data))
 }
 
+func TestMergeRefusesCurrentHeadThatLostRecordedBase(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	writeFile(t, filepath.Join(repo, "base.txt"), "base\n")
+	commitAll(t, repo, "recorded base")
+
+	info, err := Create(repo, "base-head-lost")
+	require.NoError(t, err)
+	writeFile(t, filepath.Join(info.Path, "branch.txt"), "branch\n")
+	commitAll(t, info.Path, "branch")
+
+	runGit(t, repo, "reset", "--hard", "HEAD~1")
+
+	err = MergeWithOptionsContext(t.Context(), repo, info, mergeOptions())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded base HEAD")
+	assert.Contains(t, err.Error(), "current HEAD")
+
+	exists, existsErr := pathExists(info.Path)
+	require.NoError(t, existsErr)
+	assert.True(t, exists)
+	branchExists, branchErr := gitBranchExists(t.Context(), repo, info.Branch)
+	require.NoError(t, branchErr)
+	assert.True(t, branchExists)
+
+	require.NoError(t, RemoveWithOptionsContext(t.Context(), repo, info, RemoveOptions{Force: true}))
+}
+
 func TestMergeConflictRollsBackAndReportsRecovery(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
@@ -471,6 +887,7 @@ func TestMergeConflictRollsBackAndReportsRecovery(t *testing.T) {
 	require.NoError(t, err)
 
 	writeFile(t, filepath.Join(info.Path, "conflict.txt"), "branch\n")
+	commitAll(t, info.Path, "branch")
 	commitConflictFile(t, repo, "main\n", "main")
 
 	err = MergeWithOptionsContext(t.Context(), repo, info, mergeOptions())
@@ -478,15 +895,15 @@ func TestMergeConflictRollsBackAndReportsRecovery(t *testing.T) {
 
 	var mergeErr *MergeError
 	require.ErrorAs(t, err, &mergeErr)
-	assert.Equal(t, "merge branch", mergeErr.Step)
-	assert.True(t, mergeErr.RolledBack)
+	assert.Equal(t, "dry-run merge", mergeErr.Step)
+	assert.False(t, mergeErr.RolledBack)
 	assert.Equal(t, info.Branch, mergeErr.Branch)
 	assert.Equal(t, info.Path, mergeErr.WorktreePath)
 	assert.NotEmpty(t, mergeErr.TransactionLog)
-	assert.Contains(t, err.Error(), "recovery: failed merge was rolled back")
 	assert.Contains(t, err.Error(), "recovery: branch: "+info.Branch)
 	assert.Contains(t, err.Error(), "recovery: worktree path: "+info.Path)
-	assert.Contains(t, err.Error(), "recovery: failed step: merge branch")
+	assert.Contains(t, err.Error(), "recovery: failed step: dry-run merge")
+	assert.Contains(t, err.Error(), "merge dry-run reported conflicts")
 
 	data, readErr := os.ReadFile(filepath.Join(repo, "conflict.txt"))
 	require.NoError(t, readErr)
@@ -512,7 +929,7 @@ func TestMergeAutoCommitMessageIncludesProvenanceAndSummary(t *testing.T) {
 	require.NoError(t, err)
 	writeFile(t, filepath.Join(info.Path, "hello.txt"), "hello\n")
 
-	opts := mergeOptions()
+	opts := reviewedAutoCommitMergeOptions()
 	opts.Provenance = []string{"issue GH-83"}
 	require.NoError(t, MergeWithOptionsContext(t.Context(), repo, info, opts))
 
@@ -541,6 +958,7 @@ func TestMergeReportsFailedCleanupAndPreservesWorktree(t *testing.T) {
 	info, err := Create(repo, "cleanup-failure")
 	require.NoError(t, err)
 	writeFile(t, filepath.Join(info.Path, "cleanup.txt"), "cleanup\n")
+	commitAll(t, info.Path, "cleanup")
 	runGit(t, repo, "worktree", "lock", info.Path)
 	t.Cleanup(func() {
 		if unlockErr := exec.CommandContext(defaultCommandContext(), "git", "-C", repo, "worktree", "unlock", info.Path).Run(); unlockErr != nil {
@@ -572,6 +990,16 @@ func TestMergeReportsFailedCleanupAndPreservesWorktree(t *testing.T) {
 	branchExists, branchErr := gitBranchExists(t.Context(), repo, info.Branch)
 	require.NoError(t, branchErr)
 	assert.True(t, branchExists)
+
+	runGit(t, repo, "worktree", "unlock", info.Path)
+	require.NoError(t, MergeWithOptionsContext(t.Context(), repo, info, mergeOptions()))
+
+	exists, existsErr = pathExists(info.Path)
+	require.NoError(t, existsErr)
+	assert.False(t, exists)
+	branchExists, branchErr = gitBranchExists(t.Context(), repo, info.Branch)
+	require.NoError(t, branchErr)
+	assert.False(t, branchExists)
 }
 
 func TestList(t *testing.T) {
