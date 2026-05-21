@@ -106,6 +106,12 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			wantTier: tierStateful,
 		},
 		{
+			name:     "config state routes providerless diagnostics",
+			args:     []string{"config", "state"},
+			wantName: "state-diagnostics",
+			wantTier: tierProviderlessConfig,
+		},
+		{
 			name:     "providers models routes stateful provider inventory",
 			args:     []string{"providers", "models"},
 			wantName: "list-models",

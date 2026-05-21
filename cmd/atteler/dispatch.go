@@ -437,6 +437,7 @@ func providerlessState(store *session.Store) (appState, error) {
 	}
 
 	return appState{
+		config:            cfg,
 		agentRegistry:     agent.NewRegistry(cfg.Agents),
 		sessionStore:      store,
 		cwd:               cwd,
@@ -577,6 +578,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	}
 
 	return appState{
+		config:              cfg,
 		registry:            reg,
 		agentRegistry:       agentRegistry,
 		hookRunner:          hookRunner,
