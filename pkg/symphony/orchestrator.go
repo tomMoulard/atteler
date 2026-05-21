@@ -13,15 +13,18 @@ import (
 
 // Orchestrator owns Symphony scheduling state and state transitions.
 type Orchestrator struct {
-	manager    *WorkflowManager
-	tracker    TrackerClient
-	runner     AgentRunner
-	workspaces *WorkspaceManager
-	logger     *slog.Logger
-	events     chan orchestratorEvent
-	state      runtimeState
-	wg         sync.WaitGroup
+	manager                 *WorkflowManager
+	tracker                 TrackerClient
+	runner                  AgentRunner
+	workspaces              *WorkspaceManager
+	logger                  *slog.Logger
+	events                  chan orchestratorEvent
+	state                   runtimeState
+	updatePullRequestBranch pullRequestBranchUpdater
+	wg                      sync.WaitGroup
 }
+
+type pullRequestBranchUpdater func(context.Context, Config, Issue, string, *slog.Logger) (string, error)
 
 type runtimeState struct {
 	Running               map[string]*runningEntry
@@ -150,12 +153,13 @@ func NewOrchestrator(manager *WorkflowManager, tracker TrackerClient, runner Age
 	}
 
 	return &Orchestrator{
-		manager:    manager,
-		tracker:    tracker,
-		runner:     runner,
-		workspaces: NewWorkspaceManager(logger),
-		logger:     loggerOrDefault(logger),
-		events:     make(chan orchestratorEvent, 128),
+		manager:                 manager,
+		tracker:                 tracker,
+		runner:                  runner,
+		workspaces:              NewWorkspaceManager(logger),
+		logger:                  loggerOrDefault(logger),
+		events:                  make(chan orchestratorEvent, 128),
+		updatePullRequestBranch: UpdatePullRequestBranch,
 		state: runtimeState{
 			Running:               map[string]*runningEntry{},
 			Claimed:               map[string]struct{}{},
@@ -893,7 +897,14 @@ func (o *Orchestrator) handlePullRequestCheckDue(ctx context.Context, number int
 		"pull_request_number", number,
 		"state", checks.State,
 		"summary", checks.Summary,
+		"needs_branch_update", checks.NeedsBranchUpdate,
+		"branch_update_reason", checks.BranchUpdateReason,
 	)
+
+	if checks.NeedsBranchUpdate {
+		o.handlePullRequestBranchUpdate(ctx, snapshot, monitor, checks)
+		return
+	}
 
 	switch checks.State {
 	case PullRequestChecksPassed:
@@ -917,6 +928,75 @@ func (o *Orchestrator) handlePullRequestCheckDue(ctx context.Context, number int
 	default:
 		o.reschedulePullRequestCheck(monitor, cfg.Publish.CheckInterval, "")
 	}
+}
+
+func (o *Orchestrator) handlePullRequestBranchUpdate(ctx context.Context, snapshot WorkflowSnapshot, monitor *pullRequestMonitorEntry, checks PullRequestCheckSnapshot) {
+	branch := firstNonEmpty(checks.HeadRef, monitor.Branch)
+	if strings.TrimSpace(branch) == "" {
+		o.reschedulePullRequestCheck(monitor, snapshot.Config.Publish.CheckInterval, "pull request head branch is not available yet")
+		return
+	}
+
+	update := o.updatePullRequestBranch
+	if update == nil {
+		update = UpdatePullRequestBranch
+	}
+
+	o.recordIssueEvent(
+		"pr_branch_update_needed", monitor.Issue, "pull request branch update needed",
+		"pull_request_number", monitor.Number,
+		"branch", branch,
+		"reason", checks.BranchUpdateReason,
+	)
+	o.logger.Info(
+		"symphony pull request branch update needed",
+		"issue_id", monitor.Issue.ID,
+		"issue_identifier", monitor.Issue.Identifier,
+		"pull_request_number", monitor.Number,
+		"branch", branch,
+		"reason", checks.BranchUpdateReason,
+	)
+
+	commitSHA, err := update(ctx, snapshot.Config, monitor.Issue, branch, o.logger)
+	if err != nil {
+		failed := checks
+		failed.State = PullRequestChecksFailed
+		failed.Summary = "branch update failed: " + err.Error()
+		failed.FailedCheckNames = []string{"branch update"}
+		o.recordIssueEvent(
+			"pr_branch_update_failed", monitor.Issue, "pull request branch update failed; rework will be attempted",
+			"pull_request_number", monitor.Number,
+			"branch", branch,
+			"error", err.Error(),
+		)
+		o.logger.Warn(
+			"symphony pull request branch update failed; rework will be attempted",
+			"issue_id", monitor.Issue.ID,
+			"issue_identifier", monitor.Issue.Identifier,
+			"pull_request_number", monitor.Number,
+			"branch", branch,
+			"error", err,
+		)
+		o.handleFailedPullRequestChecks(ctx, snapshot, monitor, failed)
+		return
+	}
+
+	monitor.Branch = branch
+	o.reschedulePullRequestCheck(monitor, snapshot.Config.Publish.CheckInterval, "branch update pushed; waiting for fresh checks")
+	o.recordIssueEvent(
+		"pr_branch_updated", monitor.Issue, "pull request branch updated",
+		"pull_request_number", monitor.Number,
+		"branch", branch,
+		"head_sha", commitSHA,
+	)
+	o.logger.Info(
+		"symphony pull request branch updated",
+		"issue_id", monitor.Issue.ID,
+		"issue_identifier", monitor.Issue.Identifier,
+		"pull_request_number", monitor.Number,
+		"branch", branch,
+		"head_sha", commitSHA,
+	)
 }
 
 func (o *Orchestrator) handleFailedPullRequestChecks(ctx context.Context, snapshot WorkflowSnapshot, monitor *pullRequestMonitorEntry, checks PullRequestCheckSnapshot) {

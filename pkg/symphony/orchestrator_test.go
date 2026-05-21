@@ -2,6 +2,7 @@ package symphony
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -182,6 +183,153 @@ func TestHandlePullRequestCheckDue_DispatchesReworkForFailedChecks(t *testing.T)
 	assert.Equal(t, 1, req.Context.PullRequest.ReworkAttempt)
 	assert.Contains(t, orchestrator.state.Running, issue.ID)
 	assert.Contains(t, orchestrator.state.Claimed, issue.ID)
+
+	cancel()
+	orchestrator.wg.Wait()
+}
+
+func TestHandlePullRequestCheckDue_UpdatesBranchBeforeCompletingChecks(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind: trackerKindGitHub,
+		},
+		Publish: PublishConfig{
+			Enabled:                true,
+			MonitorChecks:          true,
+			CheckInterval:          time.Hour,
+			MaxCheckReworkAttempts: 3,
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 2,
+		},
+	}
+
+	var updatedBranch string
+
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker: checkTracker{checks: PullRequestCheckSnapshot{
+			CheckedAt:          time.Now().UTC(),
+			PullRequestURL:     "https://github.com/owner/repo/pull/31",
+			HeadRef:            "symphony/GH-2",
+			HeadSHA:            "abc123",
+			Summary:            "all reported checks have passed",
+			State:              PullRequestChecksPassed,
+			NeedsBranchUpdate:  true,
+			BranchUpdateReason: "pull request branch is behind main",
+		}},
+		logger: slog.Default(),
+		events: make(chan orchestratorEvent, 4),
+		updatePullRequestBranch: func(_ context.Context, _ Config, _ Issue, branch string, _ *slog.Logger) (string, error) {
+			updatedBranch = branch
+			return "def456", nil
+		},
+		state: runtimeState{
+			Running:       map[string]*runningEntry{},
+			Claimed:       map[string]struct{}{},
+			RetryAttempts: map[string]*RetryEntry{},
+			PullRequests: map[int]*pullRequestMonitorEntry{
+				31: {
+					Issue:          issue,
+					Branch:         "symphony/GH-2",
+					PullRequestURL: "https://github.com/owner/repo/pull/31",
+					Number:         31,
+				},
+			},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.handlePullRequestCheckDue(t.Context(), 31)
+
+	assert.Equal(t, "symphony/GH-2", updatedBranch)
+	require.Contains(t, orchestrator.state.PullRequests, 31)
+	assert.NotContains(t, orchestrator.state.CompletedPullRequests, 31)
+	monitor := orchestrator.state.PullRequests[31]
+	assert.Contains(t, monitor.LastError, "branch update pushed")
+	assert.False(t, monitor.NextCheckAt.IsZero())
+	require.NotNil(t, monitor.Timer)
+	monitor.Timer.Stop()
+}
+
+func TestHandlePullRequestCheckDue_DispatchesReworkWhenBranchUpdateFails(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind: trackerKindGitHub,
+		},
+		Publish: PublishConfig{
+			Enabled:                true,
+			MonitorChecks:          true,
+			CheckInterval:          time.Hour,
+			MaxCheckReworkAttempts: 3,
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 2,
+		},
+	}
+	runner := captureRunner{requests: make(chan RunRequest, 1)}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker: checkTracker{checks: PullRequestCheckSnapshot{
+			CheckedAt:          time.Now().UTC(),
+			PullRequestURL:     "https://github.com/owner/repo/pull/31",
+			HeadRef:            "symphony/GH-2",
+			HeadSHA:            "abc123",
+			Summary:            "all reported checks have passed",
+			State:              PullRequestChecksPassed,
+			NeedsBranchUpdate:  true,
+			BranchUpdateReason: "pull request branch has merge conflicts with main",
+		}},
+		runner: runner,
+		logger: slog.Default(),
+		events: make(chan orchestratorEvent, 4),
+		updatePullRequestBranch: func(context.Context, Config, Issue, string, *slog.Logger) (string, error) {
+			return "", errors.New("rebase conflict")
+		},
+		state: runtimeState{
+			Running:       map[string]*runningEntry{},
+			Claimed:       map[string]struct{}{},
+			RetryAttempts: map[string]*RetryEntry{},
+			PullRequests: map[int]*pullRequestMonitorEntry{
+				31: {
+					Issue:          issue,
+					Branch:         "symphony/GH-2",
+					PullRequestURL: "https://github.com/owner/repo/pull/31",
+					Number:         31,
+				},
+			},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.handlePullRequestCheckDue(ctx, 31)
+
+	req := <-runner.requests
+
+	require.NotNil(t, req.Context)
+	require.NotNil(t, req.Context.PullRequest)
+	assert.Equal(t, RunKindPullRequestRework, req.Context.Kind)
+	assert.Equal(t, []string{"branch update"}, req.Context.PullRequest.FailedChecks)
+	assert.Contains(t, req.Context.PullRequest.Summary, "rebase conflict")
 
 	cancel()
 	orchestrator.wg.Wait()

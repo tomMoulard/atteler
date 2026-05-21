@@ -255,17 +255,22 @@ const (
 //
 //nolint:govet // Field order keeps timestamps and PR identity before check details for JSON/debug readability.
 type PullRequestCheckSnapshot struct {
-	CheckedAt         time.Time             `json:"checked_at"`
-	PullRequestURL    string                `json:"pull_request_url,omitempty"`
-	HeadRef           string                `json:"head_ref,omitempty"`
-	HeadSHA           string                `json:"head_sha,omitempty"`
-	Summary           string                `json:"summary,omitempty"`
-	FailedCheckNames  []string              `json:"failed_check_names,omitempty"`
-	CheckRuns         []PullRequestCheckRun `json:"check_runs,omitempty"`
-	StatusContexts    []PullRequestStatus   `json:"status_contexts,omitempty"`
-	PullRequestNumber int                   `json:"pull_request_number"`
-	State             PullRequestCheckState `json:"state"`
-	PullRequestClosed bool                  `json:"pull_request_closed"`
+	CheckedAt          time.Time             `json:"checked_at"`
+	PullRequestURL     string                `json:"pull_request_url,omitempty"`
+	HeadRef            string                `json:"head_ref,omitempty"`
+	HeadSHA            string                `json:"head_sha,omitempty"`
+	BaseRef            string                `json:"base_ref,omitempty"`
+	BaseSHA            string                `json:"base_sha,omitempty"`
+	MergeableState     string                `json:"mergeable_state,omitempty"`
+	Summary            string                `json:"summary,omitempty"`
+	BranchUpdateReason string                `json:"branch_update_reason,omitempty"`
+	FailedCheckNames   []string              `json:"failed_check_names,omitempty"`
+	CheckRuns          []PullRequestCheckRun `json:"check_runs,omitempty"`
+	StatusContexts     []PullRequestStatus   `json:"status_contexts,omitempty"`
+	PullRequestNumber  int                   `json:"pull_request_number"`
+	State              PullRequestCheckState `json:"state"`
+	PullRequestClosed  bool                  `json:"pull_request_closed"`
+	NeedsBranchUpdate  bool                  `json:"needs_branch_update"`
 }
 
 // PullRequestCheckRun is a single GitHub Checks API run.

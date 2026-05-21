@@ -665,11 +665,22 @@ func (c *GitHubClient) FetchPullRequestChecks(ctx context.Context, number int) (
 		PullRequestURL:    pr.HTMLURL,
 		HeadRef:           pr.Head.Ref,
 		HeadSHA:           pr.Head.SHA,
+		BaseRef:           pr.Base.Ref,
+		BaseSHA:           pr.Base.SHA,
+		MergeableState:    pr.MergeableState,
 		PullRequestClosed: strings.EqualFold(pr.State, "closed"),
 	}
 	if snapshot.PullRequestClosed {
 		snapshot.State = PullRequestChecksPassed
 		snapshot.Summary = "pull request is closed; no rework will be scheduled"
+		return snapshot, nil
+	}
+
+	if reason := pullRequestBranchUpdateReason(pr); reason != "" {
+		snapshot.NeedsBranchUpdate = true
+		snapshot.BranchUpdateReason = reason
+		snapshot.State = PullRequestChecksPending
+		snapshot.Summary = reason
 		return snapshot, nil
 	}
 
@@ -775,6 +786,18 @@ func isFailingCheckConclusion(conclusion string) bool {
 	}
 }
 
+func pullRequestBranchUpdateReason(pr GitHubPullRequest) string {
+	base := firstNonEmpty(pr.Base.Ref, "base")
+	switch normalizeState(pr.MergeableState) {
+	case "behind":
+		return "pull request branch is behind " + base
+	case "dirty":
+		return "pull request branch has merge conflicts with " + base
+	default:
+		return ""
+	}
+}
+
 type githubAPIStatusError struct {
 	Body       string
 	StatusCode int
@@ -811,15 +834,22 @@ type githubLabel struct {
 
 // GitHubPullRequest is the subset of GitHub's PR payload needed by Symphony.
 type GitHubPullRequest struct {
-	Body    *string               `json:"body,omitempty"`
-	Head    githubPullRequestHead `json:"head"`
-	HTMLURL string                `json:"html_url"`
-	State   string                `json:"state"`
-	Title   string                `json:"title,omitempty"`
-	Number  int                   `json:"number"`
+	Body           *string               `json:"body,omitempty"`
+	Base           githubPullRequestBase `json:"base"`
+	Head           githubPullRequestHead `json:"head"`
+	HTMLURL        string                `json:"html_url"`
+	MergeableState string                `json:"mergeable_state,omitempty"`
+	State          string                `json:"state"`
+	Title          string                `json:"title,omitempty"`
+	Number         int                   `json:"number"`
 }
 
 type githubPullRequestHead struct {
+	Ref string `json:"ref"`
+	SHA string `json:"sha"`
+}
+
+type githubPullRequestBase struct {
 	Ref string `json:"ref"`
 	SHA string `json:"sha"`
 }

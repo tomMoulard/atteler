@@ -45,6 +45,40 @@ func TestGitHubClient_FetchPullRequestChecksClassifiesFailure(t *testing.T) {
 	assert.Contains(t, checks.Summary, "test")
 }
 
+func TestGitHubClient_FetchPullRequestChecksFlagsBranchUpdate(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/pulls/31":
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","mergeable_state":"behind","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecks(t.Context(), 31)
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksPending, checks.State)
+	assert.True(t, checks.NeedsBranchUpdate)
+	assert.Equal(t, "behind", checks.MergeableState)
+	assert.Equal(t, "main", checks.BaseRef)
+	assert.Equal(t, "base123", checks.BaseSHA)
+	assert.Contains(t, checks.BranchUpdateReason, "behind main")
+}
+
 func TestGitHubClient_FetchOpenPullRequestsByHeadPrefixInfersIssue(t *testing.T) {
 	t.Parallel()
 

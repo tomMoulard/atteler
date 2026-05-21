@@ -116,9 +116,13 @@ filter and Symphony will not redispatch it.
 
 With `publish.monitor_checks: true`, published PRs enter a separate check
 monitor lane. Symphony polls GitHub check runs and commit-status contexts for
-the PR head. Passing checks complete the monitor. Failing checks dispatch a PR
-rework worker on the same branch, then the publish path commits, pushes, and
-reuses the existing PR. This loop is capped by
+the PR head. If GitHub reports that the PR branch is behind the base branch or
+has merge conflicts, Symphony fetches the PR branch and base branch, rebases
+locally, and pushes the updated PR branch with `--force-with-lease`. Rebase
+failures or dirty workspaces dispatch a PR rework worker on the same branch so
+Codex can resolve conflicts. Passing checks complete the monitor. Failing
+checks dispatch the same PR rework lane, then the publish path commits, pushes,
+and reuses the existing PR. This loop is capped by
 `publish.max_check_rework_attempts`; it does not re-add the source issue label
 or put the issue back into the normal dispatch queue.
 

@@ -179,7 +179,7 @@ func runContextPrompt(runContext *RunContext) string {
 	}
 
 	fmt.Fprintln(&builder)
-	fmt.Fprintln(&builder, "Inspect the existing PR workspace and make the smallest focused fix needed for the failing CI. Keep working on the same branch; Symphony will commit, push, and reuse the existing PR when this run succeeds.")
+	fmt.Fprintln(&builder, "Inspect the existing PR workspace and make the smallest focused fix needed for the failing CI, branch update, or rebase conflict. Keep working on the same branch; Symphony will commit, push, and reuse the existing PR when this run succeeds.")
 
 	return strings.TrimSpace(builder.String())
 }

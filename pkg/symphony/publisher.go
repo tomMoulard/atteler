@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -40,6 +41,69 @@ func PublishWorkspace(ctx context.Context, cfg Config, issue Issue, workspace Wo
 	}
 
 	return publisher.Publish(ctx, issue, workspace)
+}
+
+// UpdatePullRequestBranch refreshes a monitored PR branch from its base branch
+// and pushes the rebased branch back to GitHub. Rebase conflicts are returned
+// to the orchestrator so it can dispatch a PR rework worker on the same branch.
+func UpdatePullRequestBranch(ctx context.Context, cfg Config, issue Issue, branch string, logger *slog.Logger) (string, error) {
+	if ctx == nil {
+		return "", errors.New("publish: context is required")
+	}
+
+	if normalizeState(cfg.Tracker.Kind) != trackerKindGitHub {
+		return "", errors.New("publish: only github tracker publishing is supported")
+	}
+
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return "", errors.New("publish: pull request branch is required")
+	}
+
+	workspaces := NewWorkspaceManager(logger)
+	workspace, err := workspaces.Ensure(ctx, cfg, issue)
+	if err != nil {
+		return "", err
+	}
+
+	if err := ensureGitWorkspaceForBranchUpdate(ctx, cfg, issue, workspace); err != nil {
+		return "", err
+	}
+
+	publisher := &githubPublisher{
+		cfg:    cfg,
+		client: NewGitHubClient(cfg.Tracker),
+		runGit: defaultGitCommandRunner,
+		logger: loggerOrDefault(logger),
+	}
+
+	return publisher.updatePullRequestBranch(ctx, workspace.Path, branch)
+}
+
+func ensureGitWorkspaceForBranchUpdate(ctx context.Context, cfg Config, issue Issue, workspace Workspace) error {
+	gitPath := filepath.Join(workspace.Path, ".git")
+	if _, err := os.Stat(gitPath); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("publish: inspect git checkout %s: %w", gitPath, err)
+	}
+
+	if strings.TrimSpace(cfg.Hooks.BeforeRun) == "" {
+		return fmt.Errorf("publish: workspace %s is not a git checkout", workspace.Path)
+	}
+
+	if err := RunHook(ctx, cfg, issue, workspace, "before_run", cfg.Hooks.BeforeRun); err != nil {
+		return fmt.Errorf("publish: before_run hook failed before branch update: %w", err)
+	}
+
+	if _, err := os.Stat(gitPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("publish: workspace %s is not a git checkout after before_run hook", workspace.Path)
+		}
+		return fmt.Errorf("publish: inspect git checkout %s after before_run hook: %w", gitPath, err)
+	}
+
+	return nil
 }
 
 //nolint:govet // Keep the heavyweight config first; this struct is not allocated in hot paths.
@@ -226,7 +290,76 @@ func (p *githubPublisher) setRemote(ctx context.Context, dir string) error {
 	return err
 }
 
+func (p *githubPublisher) updatePullRequestBranch(ctx context.Context, dir, branch string) (string, error) {
+	branch = strings.TrimSpace(branch)
+	base := strings.TrimSpace(p.cfg.Publish.BaseBranch)
+	remote := strings.TrimSpace(p.cfg.Publish.Remote)
+	if branch == "" {
+		return "", errors.New("publish: pull request branch is required")
+	}
+	if base == "" {
+		return "", errors.New("publish: base branch is required")
+	}
+	if remote == "" {
+		return "", errors.New("publish: git remote is required")
+	}
+
+	if err := p.setRemote(ctx, dir); err != nil {
+		return "", err
+	}
+
+	baseRemote := remote + "/" + base
+	branchRemote := remote + "/" + branch
+	if err := p.fetchBranchUpdateRefs(ctx, dir, remote, base, branch); err != nil {
+		return "", err
+	}
+
+	if _, err := p.git(ctx, dir, nil, "checkout", "-B", branch, branchRemote); err != nil {
+		return "", fmt.Errorf("publish: checkout pull request branch %s: %w", branch, err)
+	}
+
+	dirty, err := p.hasChanges(ctx, dir)
+	if err != nil {
+		return "", err
+	}
+	if dirty {
+		return "", errors.New("publish: workspace has uncommitted changes before branch update")
+	}
+
+	if _, rebaseErr := p.git(ctx, dir, nil, "rebase", baseRemote); rebaseErr != nil {
+		if _, abortErr := p.git(context.WithoutCancel(ctx), dir, nil, "rebase", "--abort"); abortErr != nil {
+			return "", fmt.Errorf("publish: rebase %s onto %s failed and abort failed: %w; abort: %w", branch, baseRemote, rebaseErr, abortErr)
+		}
+		return "", fmt.Errorf("publish: rebase %s onto %s: %w", branch, baseRemote, rebaseErr)
+	}
+
+	commitSHA, err := p.currentCommit(ctx, dir)
+	if err != nil {
+		return "", err
+	}
+
+	if err := p.pushForceWithLease(ctx, dir, branch); err != nil {
+		return "", err
+	}
+
+	return commitSHA, nil
+}
+
+func (p *githubPublisher) fetchBranchUpdateRefs(ctx context.Context, dir, remote, base, branch string) error {
+	baseSpec := "+refs/heads/" + base + ":refs/remotes/" + remote + "/" + base
+	branchSpec := "+refs/heads/" + branch + ":refs/remotes/" + remote + "/" + branch
+	return p.gitWithAuth(ctx, dir, "fetch", remote, baseSpec, branchSpec)
+}
+
 func (p *githubPublisher) push(ctx context.Context, dir, branch string) error {
+	return p.gitWithAuth(ctx, dir, "push", "-u", p.cfg.Publish.Remote, branch)
+}
+
+func (p *githubPublisher) pushForceWithLease(ctx context.Context, dir, branch string) error {
+	return p.gitWithAuth(ctx, dir, "push", "--force-with-lease", p.cfg.Publish.Remote, branch)
+}
+
+func (p *githubPublisher) gitWithAuth(ctx context.Context, dir string, args ...string) error {
 	askPassDir, err := os.MkdirTemp("", "symphony-git-askpass-*")
 	if err != nil {
 		return fmt.Errorf("publish: create git askpass directory: %w", err)
@@ -252,7 +385,7 @@ esac
 		"GIT_TERMINAL_PROMPT=0",
 		"GITHUB_TOKEN=" + p.cfg.Tracker.APIKey,
 	}
-	_, err = p.git(ctx, dir, env, "push", "-u", p.cfg.Publish.Remote, branch)
+	_, err = p.git(ctx, dir, env, args...)
 	return err
 }
 
@@ -406,7 +539,7 @@ func publishPRBody(issue Issue) string {
 	}
 
 	if number, err := githubIssueNumber(issue); err == nil {
-		fmt.Fprintf(&body, "Refs #%d\n\n", number)
+		fmt.Fprintf(&body, "Closes #%d\n\n", number)
 	}
 
 	fmt.Fprintln(&body, "## Verification")

@@ -14,7 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const githubPullsPath = "/repos/owner/repo/pulls"
+const (
+	githubPullsPath    = "/repos/owner/repo/pulls"
+	gitStatusPorcelain = "status --porcelain"
+)
 
 func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
 	t.Parallel()
@@ -42,6 +45,7 @@ func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
 			assert.Equal(t, "GH-12: Make the CLI smaller", body["title"])
 			assert.Equal(t, "symphony/GH-12", body["head"])
 			assert.Equal(t, "main", body["base"])
+			assert.Contains(t, body["body"], "Closes #12")
 			w.WriteHeader(http.StatusCreated)
 			writeTestResponse(t, w, `{"number":7,"html_url":"https://github.com/owner/repo/pull/7"}`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/repos/owner/repo/issues/12/labels/symphony":
@@ -72,7 +76,7 @@ func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
 		switch {
 		case joined == "checkout -B symphony/GH-12":
 			return nil, nil
-		case joined == "status --porcelain":
+		case joined == gitStatusPorcelain:
 			return []byte(" M file.go\n"), nil
 		case joined == "config user.name Atteler Symphony":
 			return nil, nil
@@ -148,6 +152,72 @@ func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
 	assert.Contains(t, requests, "DELETE /repos/owner/repo/issues/12/labels/symphony?")
 }
 
+func TestGitHubPublisher_RebasesAndForcePushesPullRequestBranch(t *testing.T) {
+	t.Parallel()
+
+	var commands []string
+	var fetchEnv []string
+	var pushEnv []string
+	runner := func(_ context.Context, _ string, env []string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		commands = append(commands, joined)
+		switch joined {
+		case "remote get-url origin":
+			return []byte("/local/origin\n"), nil
+		case "remote set-url origin https://github.example/owner/repo.git":
+			return nil, nil
+		case "fetch origin +refs/heads/main:refs/remotes/origin/main +refs/heads/symphony/GH-12:refs/remotes/origin/symphony/GH-12":
+			fetchEnv = append([]string(nil), env...)
+			return nil, nil
+		case "checkout -B symphony/GH-12 origin/symphony/GH-12":
+			return nil, nil
+		case gitStatusPorcelain:
+			return nil, nil
+		case "rebase origin/main":
+			return nil, nil
+		case "rev-parse HEAD":
+			return []byte("def456\n"), nil
+		case "push --force-with-lease origin symphony/GH-12":
+			pushEnv = append([]string(nil), env...)
+			return nil, nil
+		default:
+			t.Fatalf("unexpected git command: %s", joined)
+			return nil, nil
+		}
+	}
+
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind:   trackerKindGitHub,
+			APIKey: "token",
+			Owner:  "owner",
+			Repo:   "repo",
+		},
+		Publish: PublishConfig{
+			Remote:     "origin",
+			RemoteURL:  "https://github.example/owner/repo.git",
+			BaseBranch: "main",
+		},
+	}
+	publisher := &githubPublisher{
+		cfg:    cfg,
+		client: NewGitHubClient(cfg.Tracker),
+		runGit: runner,
+		logger: loggerOrDefault(nil),
+	}
+
+	commitSHA, err := publisher.updatePullRequestBranch(t.Context(), t.TempDir(), "symphony/GH-12")
+	require.NoError(t, err)
+
+	assert.Equal(t, "def456", commitSHA)
+	assert.Contains(t, commands, "rebase origin/main")
+	assert.Contains(t, commands, "push --force-with-lease origin symphony/GH-12")
+	assert.Contains(t, fetchEnv, "GIT_TERMINAL_PROMPT=0")
+	assert.Contains(t, fetchEnv, "GITHUB_TOKEN=token")
+	assert.Contains(t, pushEnv, "GIT_TERMINAL_PROMPT=0")
+	assert.Contains(t, pushEnv, "GITHUB_TOKEN=token")
+}
+
 func TestGitHubPublisher_SkipsCleanWorkspaceWithoutPullRequest(t *testing.T) {
 	t.Parallel()
 
@@ -168,7 +238,7 @@ func TestGitHubPublisher_SkipsCleanWorkspaceWithoutPullRequest(t *testing.T) {
 		switch joined {
 		case "checkout -B symphony/GH-12":
 			return nil, nil
-		case "status --porcelain":
+		case gitStatusPorcelain:
 			return nil, nil
 		case "rev-list --count main..HEAD":
 			return []byte("0\n"), nil
