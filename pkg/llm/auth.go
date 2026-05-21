@@ -975,14 +975,6 @@ const claudeCodeOAuthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 // refresh_token grant.
 const claudeCodeRefreshURL = "https://platform.claude.com/v1/oauth/token"
 
-// keychainService is the macOS Keychain "service" attribute under which the
-// claude CLI stores its OAuth credentials.
-const keychainService = "Claude Code-credentials"
-
-// claudeCodeKeychainSource is the diagnostic location string used when
-// credentials originate from the macOS keychain.
-const claudeCodeKeychainSource = "keychain:" + keychainService
-
 var claudeCodeHTTPClient = &http.Client{Timeout: forgeOAuthRefreshTimeout}
 
 // claudeCodeCredentialPersister writes a refreshed OAuth block back to wherever

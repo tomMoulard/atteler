@@ -11,6 +11,14 @@ import (
 	"strings"
 )
 
+// keychainService is the macOS Keychain "service" attribute under which the
+// claude CLI stores its OAuth credentials.
+const keychainService = "Claude Code-credentials"
+
+// claudeCodeKeychainSource is the diagnostic location string used when
+// credentials originate from the macOS keychain.
+const claudeCodeKeychainSource = "keychain:" + keychainService
+
 // readClaudeCodeKeychain reads the Claude Code OAuth token from the macOS Keychain.
 func readClaudeCodeKeychain(ctx context.Context) (string, error) {
 	ctx = nonNilCredentialContext(ctx)

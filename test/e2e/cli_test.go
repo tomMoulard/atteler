@@ -24,7 +24,10 @@ var (
 	e2eTmpDir string
 )
 
-const windowsGOOS = "windows"
+const (
+	noLegacyDeprecationNotice = "No legacy flag is deprecated in this release."
+	windowsGOOS               = "windows"
+)
 
 func TestMain(m *testing.M) {
 	root, err := repoRoot()
@@ -128,6 +131,176 @@ func TestOfflineProviderCommands(t *testing.T) {
 	result = runOK(t, runSpec{dir: workDir}, "--list-hook-events-json")
 	assertContains(t, result.stdout, `"type":"context_add"`)
 	assertContains(t, result.stdout, `"description":`)
+}
+
+func TestGroupedCLIHelpAndRouting(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	sessionDir := filepath.Join(workDir, "sessions")
+	writeSession(t, sessionDir)
+
+	configPath := filepath.Join(workDir, "atteler.yaml")
+	pluginDir := filepath.Join(workDir, "plugin")
+
+	writeFile(t, configPath, `agents:
+  reviewer:
+    model: gpt-test
+    triggers: ["review this"]
+    system_prompt: Review code carefully.
+plugins:
+  paths: ["./plugin"]
+`)
+	writeFile(t, filepath.Join(pluginDir, "plugin.yaml"), `name: runner
+version: "1.0.0"
+description: Runner plugin
+entrypoints:
+  check: bin/check
+`)
+	writeExecutable(t, filepath.Join(pluginDir, "bin", "check"), `#!/bin/sh
+printf 'plugin-check\n'
+	`)
+	actualPath := filepath.Join(workDir, "actual.txt")
+	writeFile(t, actualPath, "hello deterministic eval\n")
+
+	mcpManifest := filepath.Join(workDir, "mcp.yaml")
+	writeFile(t, mcpManifest, `servers:
+  - name: helper
+    command: helper-bin
+    capabilities: ["tools"]
+`)
+
+	replayPath := filepath.Join(workDir, "once.json")
+	writeFile(t, replayPath, `{"response":{"content":"fixture replayed","model":"replay/model"}}`)
+
+	writeFile(t, filepath.Join(workDir, "main.go"), "package main\nfunc main() {}\n")
+
+	result := runOK(t, runSpec{dir: workDir}, "--help")
+	assertContains(t, result.stdout, "atteler <domain> <command> [args]")
+	assertContains(t, result.stdout, "chat/session")
+	assertContains(t, result.stdout, "code-intel")
+	assertContains(t, result.stdout, "atteler help legacy")
+	assertContains(t, result.stdout, noLegacyDeprecationNotice)
+	require.Zero(t, countIndentedFlagLines(result.stdout), "top-level help should not print the legacy flag catalog")
+
+	result = runOK(t, runSpec{dir: workDir}, "--model", "test/model", "-help")
+	assertContains(t, result.stdout, "atteler help [domain]")
+	require.Zero(t, countIndentedFlagLines(result.stdout), "flag-prefixed help should stay focused")
+
+	result = runOK(t, runSpec{dir: workDir}, "help", "code-intel")
+	assertContains(t, result.stdout, "Code intelligence")
+	assertContains(t, result.stdout, "atteler code-intel summary")
+	assertContains(t, result.stdout, "--code-summary")
+	assertContains(t, result.stdout, noLegacyDeprecationNotice)
+	assertNotContains(t, result.stdout, "--review-scan")
+
+	result = runOK(t, runSpec{dir: workDir}, "help", "session")
+	assertContains(t, result.stdout, "Chat & sessions")
+	assertContains(t, result.stdout, "Usage: atteler session <command> [args]")
+	assertContains(t, result.stdout, noLegacyDeprecationNotice)
+
+	result = runOK(t, runSpec{dir: workDir}, "session", "help")
+	assertContains(t, result.stdout, "Chat & sessions")
+	assertContains(t, result.stdout, "Usage: atteler session <command> [args]")
+	assertContains(t, result.stdout, noLegacyDeprecationNotice)
+
+	result = runOK(t, runSpec{dir: workDir}, "session", "--session", "--help")
+	assertContains(t, result.stdout, "Chat & sessions")
+	assertContains(t, result.stdout, "Usage: atteler session <command> [args]")
+
+	for _, domain := range []string{
+		"config",
+		"providers",
+		"agents",
+		"memory",
+		"code-intel",
+		"review",
+		"watch",
+		"plugins",
+		"worktrees",
+		"eval",
+	} {
+		result = runOK(t, runSpec{dir: workDir}, "help", domain)
+		assertContains(t, result.stdout, "Usage: atteler "+domain+" <command> [args]")
+		assertContains(t, result.stdout, "Examples:")
+		assertContains(t, result.stdout, noLegacyDeprecationNotice)
+		assertNotContains(t, result.stdout, "Compatibility flag catalog:")
+	}
+
+	result = runOK(t, runSpec{dir: workDir}, "help", "--code-summary")
+	assertContains(t, result.stdout, "Code intelligence")
+	assertContains(t, result.stdout, "--code-summary")
+	assertContains(t, result.stdout, noLegacyDeprecationNotice)
+	assertNotContains(t, result.stdout, "--review-scan")
+
+	result = runOK(t, runSpec{dir: workDir}, "help", "legacy")
+	assertContains(t, result.stdout, "Compatibility flag catalog:")
+	assertContains(t, result.stdout, noLegacyDeprecationNotice)
+	assertContains(t, result.stdout, "--code-summary")
+
+	result = runOK(t, runSpec{dir: workDir}, "help", "help")
+	assertContains(t, result.stdout, "atteler help [domain]")
+	assertContains(t, result.stdout, "Domains:")
+
+	failedHelp, helpErr := runAtteler(t, runSpec{dir: workDir}, "help", "wat")
+	require.Error(t, helpErr)
+	assertContains(t, failedHelp.stderr, `unknown help domain "wat"`)
+	assertNotContains(t, failedHelp.stderr, "event:session_start")
+
+	result = runOK(t, runSpec{dir: workDir}, "providers", "list")
+	assertContains(t, result.stdout, "anthropic")
+	assertContains(t, result.stdout, "openai")
+
+	result = runOK(t, runSpec{dir: workDir}, "config", "paths")
+	assertContains(t, result.stdout, "atteler/config.yaml")
+
+	result = runOK(t, runSpec{dir: workDir}, "watch", "json", "--model", "test/model")
+	assertContains(t, result.stdout, `"findings":`)
+
+	result = runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "session", "list")
+	assertContains(t, result.stdout, "demo")
+
+	result = runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "session", "--session", "demo", "messages")
+	assertContains(t, result.stdout, "preview=hello auth")
+
+	result = runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "memory", "search", "hello", "auth")
+	assertContains(t, result.stdout, "session/demo/message/0")
+
+	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "agents", "list")
+	assertContains(t, result.stdout, "reviewer")
+
+	result = runOK(t, runSpec{dir: workDir}, "code-intel", "summary")
+	assertContains(t, result.stdout, "files=")
+
+	result = runOK(t, runSpec{dir: workDir}, "review", "scan")
+	assertContains(t, result.stdout, "reviewer: watch-scan")
+
+	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "plugins", "describe", "runner")
+	assertContains(t, result.stdout, "name: runner")
+
+	result = runOK(t, runSpec{dir: workDir}, "plugins", "manifest", mcpManifest, "--mcp-capability", "tools")
+	assertContains(t, result.stdout, "helper")
+	assertContains(t, result.stdout, "command=helper-bin")
+
+	root, err := repoRoot()
+	require.NoError(t, err)
+	result = runOK(t, runSpec{dir: root}, "worktrees", "list")
+	assertContains(t, result.stdout, "active atteler worktrees")
+
+	result = runOK(t, runSpec{dir: workDir}, "eval", "output", actualPath, "--eval-expected", "deterministic")
+	assertContains(t, result.stdout, "PASS\tmode=contains")
+
+	result = runOK(t, runSpec{dir: workDir}, "eval", "replay-response", replayPath, "summarize", "fixture")
+	assertContains(t, result.stdout, "fixture replayed")
+
+	result = runOK(t, runSpec{dir: workDir, stdin: "summarize fixture from stdin\n"}, "eval", "replay-response", replayPath, "--stdin")
+	assertContains(t, result.stdout, "fixture replayed")
+
+	result = runOK(t, runSpec{dir: workDir, stdin: "stdin-only prompt\n"}, "chat", "once", "--stdin", "--replay-response", replayPath)
+	assertContains(t, result.stdout, "fixture replayed")
+
+	result = runOK(t, runSpec{dir: workDir, stdin: "stdin before command\n"}, "chat", "--stdin", "once", "--replay-response", replayPath)
+	assertContains(t, result.stdout, "fixture replayed")
 }
 
 func TestReadOnlyCommandsDoNotAutoRegisterProviders(t *testing.T) {
@@ -697,6 +870,7 @@ func startFakeAnthropicMessages(t *testing.T, text, model string) *httptest.Serv
 type runSpec struct {
 	dir        string
 	sessionDir string
+	stdin      string
 	env        []string
 	timeout    time.Duration
 }
@@ -736,6 +910,11 @@ func runAtteler(t *testing.T, spec runSpec, args ...string) (runResult, error) {
 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+
+	if spec.stdin != "" {
+		cmd.Stdin = strings.NewReader(spec.stdin)
+	}
+
 	err := cmd.Run()
 
 	return runResult{stdout: stdout.String(), stderr: stderr.String()}, err
@@ -877,4 +1056,16 @@ func assertNotContains(t *testing.T, haystack, needle string) {
 	if strings.Contains(haystack, needle) {
 		require.Failf(t, "unexpected failure", "unexpected %q in:\n%s", needle, haystack)
 	}
+}
+
+func countIndentedFlagLines(text string) int {
+	count := 0
+
+	for line := range strings.SplitSeq(text, "\n") {
+		if strings.HasPrefix(line, "  -") {
+			count++
+		}
+	}
+
+	return count
 }

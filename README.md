@@ -180,10 +180,10 @@ same scope.
 Bootstrap a YAML config:
 
 ```sh
-atteler --print-config-template
-atteler --init-config ~/.config/atteler/config.yaml
-atteler --list-config-paths
-atteler --validate-config
+atteler config template
+atteler config init ~/.config/atteler/config.yaml
+atteler config paths
+atteler config validate
 ```
 
 Example:
@@ -329,180 +329,84 @@ state file with `ATTELER_STATE`; otherwise Atteler uses
 One-shot prompt:
 
 ```sh
-atteler --once "Explain this repository in one paragraph"
+atteler chat once "Explain this repository in one paragraph"
 # or:
 atteler "Explain this repository in one paragraph"
 # with piped context:
-git diff | atteler --stdin --once "Review this diff"
+git diff | atteler chat once "Review this diff" --stdin
+# stdin can be the whole prompt:
+cat README.md | atteler chat once --stdin
 # machine-readable result:
-atteler --output json --once "Explain this repository in one paragraph"
+atteler chat once "Explain this repository in one paragraph" --output json
 # headless run metadata/logs for CI or library-style callers:
-atteler --headless --output json --once "Summarize @README.md"
-atteler --list-headless
-atteler --stream-headless <headless-id>
+atteler chat once "Summarize @README.md" --headless --output json
+atteler session headless
+atteler session stream-headless <headless-id>
 ```
 
-Useful flags:
+Grouped command surface:
 
-- `--config <path>`: add an overriding config file path. Use the platform
-  path-list separator to pass more than one path.
-- `--print-config-template`: print a starter YAML config.
-- `--init-config <path>`: write a starter YAML config without overwriting an
-  existing file.
-- `--list-config-paths`: print config files in load order with present/missing
-  status.
-- `--validate-config`: parse and merge config files, then exit.
-- `--model <id>`: select a model for this run.
-- `--agent <name>`: select a configured agent persona for this run.
-- `--describe-agent <name>`: print one configured agent as YAML.
-- `--plan-agents <prompt>`: preview which configured agents match a prompt;
-  repeat `--plan-agent <name>` to force agents into the plan and use
-  `--plan-max-agents <n>` to cap the result.
-- `--temperature <value>`: override the configured request temperature.
-- `--top-p <value>`: override the configured nucleus sampling value (`0..1`).
-- `--max-tokens <value>`: override the configured max output tokens.
-- `--seed <value>`: pass a best-effort deterministic seed to providers that
-  support it.
-- `--reasoning-level <value>`: override the configured model/provider effort
-  for this run.
-- `--max-input-tokens <value>`: hard-stop a request before calling an LLM when
-  the estimated prompt size exceeds the cap.
-- `--record-response <path>`: write one-shot request/response JSON for
-  deterministic fixtures.
-- `--replay-response <path>`: replay a recorded response JSON without calling
-  a provider.
-- `--output text|json`: choose plain text or machine-readable JSON for one-shot
-  prompt results.
-- `--headless`: run a one-shot prompt without TUI/plain output while recording
-  headless run metadata and logs under the session store.
-- `--list-headless`: list active headless runs.
-- `--stream-headless <id>`: stream one headless run log until it exits.
-- `--eval-output <path>` with `--eval-expected <text>` or
-  `--eval-expected-file <path>`: run a deterministic output check; set
-  `--eval-mode exact|contains|normalized` as needed.
-- `--doctor`: print local readiness diagnostics and configured provider health.
-- `--doctor-offline`: print config/session/provider inventory without provider
-  health checks or API calls.
-- `--version`: print build version information.
-- `--list-providers`: print built-in provider names without API calls.
-- `--list-known-models`: print built-in provider/model IDs without API calls.
-- `--list-models`: print provider/model IDs discovered from configured
-  providers.
-- `--list-agents`: print configured agent names.
-- `--list-plugins`: validate and print configured local plugin manifests.
-- `--list-hook-events`: print supported lifecycle hook event names and short
-  descriptions.
-- `--list-hook-events-json`: print the same hook event inventory as JSON for
-  scripts.
-- `--describe-plugin <name>`: print a configured plugin manifest and resolved
-  filesystem locations as YAML.
-- `--run-plugin <plugin>` with `--plugin-entrypoint <name>` or
-  `--run-plugin <plugin>/<entrypoint>`: execute a configured plugin entrypoint.
-  Add `--plugin-dry-run` to print the resolved command without executing it,
-  and `--plugin-timeout-seconds <n>` to set a timeout.
-- `--init-rtk-plugin <dir>`: scaffold an RTK helper plugin with `version`,
-  `gain`, `show`, and `init-codex` entrypoints.
-- `--bash <command>`: run an explicit local `bash -lc` command and exit.
-  Use `--bash-dir <path>` for the working directory and
-  `--bash-timeout-seconds <n>` for a timeout.
-- `DEBUG_ATTELER_*` aliases can drive local debug/inspection flags from the
-  environment, for example `DEBUG_ATTELER_LIST_PROVIDERS=1`,
-  `DEBUG_ATTELER_WATCH_SCAN=1`, or `DEBUG_ATTELER_MCP_MANIFEST=...`.
-- `--mcp-manifest <path>` with `--mcp-server <name>` and either
-  `--mcp-tool <tool>` or `--mcp-method <method>` invokes a configured MCP
-  stdio server once. Use `--mcp-tool-args` or `--mcp-params` for JSON inputs
-  and `--mcp-timeout-seconds <n>` for a timeout.
-- `--lsp-symbols --lsp-command <server> --lsp-file <path>` requests document
-  symbols from an external LSP server. Repeat `--lsp-arg` for server args, and
-  optionally pass `--lsp-root` and `--lsp-language`.
-- `--lsp-workspace-symbols <query> --lsp-command <server>` requests workspace
-  symbols from an external LSP server. Repeat `--lsp-arg` for server args and
-  optionally pass `--lsp-root`.
-- `--spawn-agent <agent|prompt>` or `--spawn-agent <id|agent|prompt>` runs
-  child Atteler one-shot prompts concurrently. Use `--spawn-dry-run` to inspect
-  the fan-out without calling an LLM, `--spawn-binary` to choose the binary, and
-  `--spawn-timeout-seconds <n>` to bound the run.
-- `--list-sessions`: print saved session IDs, timestamps, metadata, and paths.
-- `--list-sessions --list-sessions-tag <tag>`: print only sessions containing
-  that exact tag, matched case-insensitively.
-- `--list-session-tags`: print saved session tags with counts.
-- `--agent-performance-summary`: print aggregate evaluation, failure, score,
-  outcome, and latest-activity summaries grouped by agent across saved sessions.
-- `--list-artifacts`: print artifact records for the selected session.
-- `--list-evaluations`: print agent evaluation records for the selected session.
-- `--list-failures`: print negative-knowledge records for the selected session.
-- `--list-messages`: print compact message roles, sizes, and previews for the selected session.
-- `--search-sessions <query>`: search saved session metadata and transcripts.
-- `--session <id-or-path>` / `--session-id <id-or-path>`: continue a previous
-  session. Interactive exit prints a ready-to-run reuse command.
-- `--show-session <id-or-path>`: print saved session details as YAML.
-- `--session-summary <id-or-path>`: print compact saved session metadata and counts.
-- `--session-title <title>`: set or update the saved session title.
-- `--session-tag <tag>`: add a saved session tag (repeatable or
-  comma-separated).
-- `--record-failure <approach>` with `--failure-reason <reason>`: record
-  negative knowledge on the selected session so failed approaches are searchable
-  and exported.
-- `--record-evaluation <agent>` with `--evaluation-outcome <outcome>`:
-  append an agent evaluation to the selected session; optional
-  `--evaluation-score`, `--evaluation-notes`, and `--evaluation-reference`
-  fields are shown, searched, and exported.
-- `--record-artifact <path>` with `--artifact-kind <kind>`: append a useful
-  sandbox/research/code artifact to the selected session; optional
-  `--artifact-summary` describes why it matters.
-- `--merge-artifacts <path>`: aggregate selected-session text artifacts into a
-  deterministic Markdown file. Use `-` for stdout and
-  `--merge-artifact-max-bytes <n>` to bound each input artifact.
-- `--feedback-apply-config <path>`: apply selected-session feedback proposals
-  to configured agent prompts and append a decision record. Override the
-  default `<config>.feedback.md` log with `--feedback-history <path>`.
-- `--replay <id-or-path>`: print a previous transcript and exit. Use `--list-messages --session <id-or-path>` for compact transcript previews.
-- `--export-session <id-or-path>`: export a previous transcript and exit.
-- `--export-format <markdown|json>`: choose the export format (`markdown` by
-  default).
-- `--session-dir <path>`: store session JSON files somewhere other than
-  `./.atteler/sessions` (also available as `ATTELER_SESSION_DIR`).
-- `--stdin`: append stdin to a one-shot prompt.
-- `--worktree`: isolate the session in a dedicated git worktree.
-- `--no-auto-merge`: keep the worktree alive on exit instead of auto-merging.
-- `--list-worktrees`: list active atteler worktrees and exit.
-- `--merge-worktree <session-id>`: merge a session worktree back into its base
-  branch and exit.
-- `--memory-search <query>`: search local memory. By default this indexes saved
-  sessions; combine with `--memory-store <path>` to load a JSON memory store and
-  with repeated `--memory-index <file>` to add UTF-8 files before search or
-  saving. `--memory-limit <n>` caps results.
-- `--agent-memory-agent <name>` with `--agent-memory-store <path>`: index and
-  search one agent's persistent vector memory using `--agent-memory-index`,
-  `--agent-memory-search`, and optional `--agent-memory-limit`.
-- `--skill-step <action>`: add observed actions for a skill-synthesis
-  suggestion. Repeat it (or pass comma-separated values), then optionally tune
-  `--skill-max-steps` and `--skill-min-occurrences`.
+Atteler keeps the top-level help short and routes feature discovery through
+focused domains. Run `atteler help` for the domain list, `atteler help <domain>`
+for commands/examples in one area, and `atteler help legacy` for the full
+compatibility flag catalog. Existing `--flag` aliases remain supported for
+scripts. If you know an old flag name, `atteler help --code-summary` jumps to
+the focused domain that owns it.
+
+Domain help is rendered from structured command metadata and covered by routing tests,
+so README examples stay representative instead of duplicating the whole flag
+catalog.
+
+<!-- atteler:cli-domains:start -->
+| Domain | Examples |
+|--------|----------|
+| `chat` / `session` | `atteler chat once "Explain this repository in one paragraph"`, `atteler session list`, `atteler session search "auth retry"` |
+| `config` | `atteler config paths`, `atteler config validate`, `atteler config doctor-offline` |
+| `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models` |
+| `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
+| `memory` / `rag` | `atteler memory search "OAuth retry storm"`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"` |
+| `code-intel` | `atteler code-intel summary`, `atteler code-intel symbol NewRegistry`, `atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/` |
+| `review` | `atteler review scan`, `atteler review plan`, `atteler review run` |
+| `watch` | `atteler watch scan`, `atteler watch json`, `atteler watch loop` |
+| `plugins` | `atteler plugins list`, `atteler plugins run reviewer/check`, `atteler plugins manifest .atteler/mcp.yaml` |
+| `worktrees` | `atteler worktrees run "Add unit tests for auth"`, `atteler worktrees list`, `atteler worktrees merge 20260430-120000-deadbeef` |
+| `eval` | `atteler eval output .atteler/fixtures/readme-summary.txt --eval-expected "package overview"`, `atteler eval record reviewer`, `atteler eval replay-response .atteler/fixtures/once.json "Summarize @README.md"` |
+<!-- atteler:cli-domains:end -->
+
+Common options such as `--model`, `--agent`, `--output`, generation settings,
+provider routing settings, and compatibility flags can still be combined with
+domain commands before or after the focused subcommand, for example
+`atteler session --session <id> messages` or
+`atteler chat once "Summarize" --model openai/gpt-5.4`. Prefer the grouped form
+for humans and the legacy flags for existing automation until scripts are
+migrated. No legacy flag is deprecated in this release; future deprecations
+should add an explicit warning before removing or changing an existing
+script-facing flag.
 
 Example session export:
 
 ```sh
-atteler --session-title "Auth review" --session-tag auth,review --once "Review @pkg/auth.go"
-atteler --export-session 20260430-120000-deadbeef > transcript.md
-atteler --export-session 20260430-120000-deadbeef --export-format json > transcript.json
-atteler --show-session 20260430-120000-deadbeef
-atteler --search-sessions "auth flow"
+atteler chat once "Review @pkg/auth.go" --session-title "Auth review" --session-tag auth,review
+atteler session export 20260430-120000-deadbeef > transcript.md
+atteler session export 20260430-120000-deadbeef --export-format json > transcript.json
+atteler session show 20260430-120000-deadbeef
+atteler session search "auth flow"
 ```
 
 Configured agents can also be invoked per prompt with an `@agent` prefix:
 
 ```sh
-atteler --once "@reviewer Review this diff: ..."
+atteler chat once "@reviewer Review this diff: ..."
 ```
 
 Agents can declare `triggers` for indirect routing. Explicit `--agent` and
 `@agent` always win, but without those overrides a prompt containing a trigger
 phrase such as `review this` can select the matching agent automatically.
-Use `--plan-agents` to preview multi-agent routing without making an LLM call:
+Use `atteler agents plan` to preview multi-agent routing without making an LLM call:
 
 ```sh
-atteler --plan-agents "review this auth change" --plan-max-agents 3
-atteler --plan-agents "research and implement OAuth refresh" --plan-agent researcher --plan-agent coder
+atteler agents plan "review this auth change" --plan-max-agents 3
+atteler agents plan "research and implement OAuth refresh" --plan-agent researcher --plan-agent coder
 ```
 
 `fallback_models` defines an ordered retry chain. Global fallbacks apply to
@@ -526,8 +430,8 @@ contents or bounded directory trees to the LLM request inside a
 `<context_references>` block.
 
 ```sh
-atteler --once "Summarize @README.md and @pkg/llm/llm.go"
-atteler --once "Map the package layout in @pkg"
+atteler chat once "Summarize @README.md and @pkg/llm/llm.go"
+atteler chat once "Map the package layout in @pkg"
 ```
 
 References are resolved relative to the current working directory, must stay
@@ -545,8 +449,8 @@ and provider response to JSON, then replay that response later without a live
 LLM call:
 
 ```sh
-atteler --once "Summarize @README.md" --record-response .atteler/fixtures/readme-summary.json
-atteler --once "Summarize @README.md" --replay-response .atteler/fixtures/readme-summary.json
+atteler chat once "Summarize @README.md" --record-response .atteler/fixtures/readme-summary.json
+atteler chat once "Summarize @README.md" --replay-response .atteler/fixtures/readme-summary.json
 ```
 
 Replay still writes normal session messages, so exports and searches work the
@@ -557,7 +461,7 @@ Use the eval check runner to validate recorded or generated output without a
 provider call:
 
 ```sh
-atteler --eval-output .atteler/fixtures/readme-summary.txt \
+atteler eval output .atteler/fixtures/readme-summary.txt \
   --eval-expected "package overview" \
   --eval-mode contains
 ```
@@ -565,7 +469,7 @@ atteler --eval-output .atteler/fixtures/readme-summary.txt \
 ## Plugins, evaluations, artifacts, and negative knowledge
 
 Configured `plugins.paths` entries point at local plugin directories or manifest
-files. `atteler --list-plugins` validates `plugin.yaml`, `plugin.yml`, or
+files. `atteler plugins list` validates `plugin.yaml`, `plugin.yml`, or
 `plugin.json` manifests with `name`, `version`, optional `description`,
 `capabilities`, and relative `entrypoints`.
 
@@ -577,585 +481,133 @@ protection.
 Plugin entrypoints can be inspected or run from the CLI:
 
 ```sh
-atteler --describe-plugin reviewer
-atteler --run-plugin reviewer/check --plugin-dry-run
-atteler --run-plugin reviewer --plugin-entrypoint check
+atteler plugins describe reviewer
+atteler plugins run reviewer/check --plugin-dry-run
+atteler plugins run reviewer --plugin-entrypoint check
 ```
 
 RTK users can scaffold a local plugin and then add the printed path to
 `plugins.paths`:
 
 ```sh
-atteler --init-rtk-plugin .atteler/plugins/rtk
-atteler --run-plugin rtk/version
-atteler --run-plugin rtk/init-codex
+atteler plugins init-rtk .atteler/plugins/rtk
+atteler plugins run rtk/version
+atteler plugins run rtk/init-codex
 ```
 
 Record failed approaches with:
 
 ```sh
-atteler --session 20260430-120000-deadbeef \
-  --record-failure "retry token refresh timer" \
+atteler session record-failure "retry token refresh timer" \
+  --session 20260430-120000-deadbeef \
   --failure-reason "created retry storms" \
   --failure-commit abc123
 ```
 
-Negative knowledge is stored in session JSON, shown by `--show-session`, found
-by `--search-sessions`, and included in Markdown/JSON exports. Use
-`--list-failures --session <id-or-path>` for a compact negative-knowledge inventory.
+Negative knowledge is stored in session JSON, shown by `atteler session show`,
+found by `atteler session search`, and included in Markdown/JSON exports. Use
+`atteler session failures --session <id-or-path>` for a compact
+negative-knowledge inventory.
 
 Record evaluations and artifacts with:
 
 ```sh
-atteler --session 20260430-120000-deadbeef \
-  --record-evaluation reviewer \
+atteler eval record reviewer \
+  --session 20260430-120000-deadbeef \
   --evaluation-outcome pass \
   --evaluation-score 5 \
   --evaluation-notes "caught the auth regression"
 
-atteler --session 20260430-120000-deadbeef \
-  --record-artifact docs/research.md \
+atteler session record-artifact docs/research.md \
+  --session 20260430-120000-deadbeef \
   --artifact-kind research \
   --artifact-summary "comparison of auth refresh approaches"
 
-atteler --session 20260430-120000-deadbeef \
-  --merge-artifacts .atteler/merged-artifacts.md
+atteler session merge-artifacts .atteler/merged-artifacts.md \
+  --session 20260430-120000-deadbeef
 ```
 
 Evaluations and artifacts are stored in session JSON, shown by
-`--show-session`, found by `--search-sessions`, and included in exports.
+`atteler session show`, found by `atteler session search`, and included in exports.
 Merged artifact export reads text artifacts safely under the current repo root,
 skips unsafe or oversized entries with warnings, and writes deterministic
-Markdown for code-merge/research aggregation. Use `--list-artifacts --session
-<id-or-path>` for a compact artifact inventory, and `--list-evaluations
+Markdown for code-merge/research aggregation. Use `atteler session artifacts
+--session <id-or-path>` for a compact artifact inventory, and `atteler eval list
 --session <id-or-path>` for a compact evaluation inventory.
 
-## Local memory and skill suggestions
+## Local memory, code intelligence, review, and workflow domains
 
-Saved sessions are searchable as local memory without a separate service:
+The high-volume local tools are grouped behind domain help instead of being
+documented as hundreds of one-off flags. Use the focused help as the generated
+catalog and keep README examples to the common paths:
 
 ```sh
-atteler --memory-search "OAuth retry storm"
+atteler help memory
+atteler help code-intel
+atteler help agents
+atteler help review
+atteler help watch
 ```
 
-Git history is searchable through the same local-first retrieval posture:
+Saved sessions, UTF-8 memory stores, agent memory, local vector indexes, and
+git history all live under the memory/RAG domain:
 
 ```sh
-atteler --git-history-search "memory regression"
+atteler memory search "OAuth retry storm"
+atteler memory git-history "memory regression"
+atteler memory vector-search "redirect risks" --vector-index docs/research.md
+atteler memory agent-search "redirect risks" \
+  --agent-memory-agent reviewer \
+  --agent-memory-store .atteler/agent-memory.json \
+  --agent-memory-index docs/review-notes.md
 ```
 
-Go code index and graph counts can be summarized locally:
+Code intelligence commands expose the Go index, import graph, symbol lookup,
+impact queries, and optional LSP lookups without an LLM call:
 
 ```sh
-atteler --code-summary
-```
-
-All Go files can be inventoried with package, import, and symbol counts:
-
-```sh
-atteler --code-files
-```
-
-Go packages can be inventoried with file and symbol counts:
-
-```sh
-atteler --code-packages
-```
-
-Go packages can also be summarized by import counts:
-
-```sh
-atteler --code-package-import-summary
-```
-
-One package can be expanded to its files:
-
-```sh
-atteler --code-package llm
-```
-
-One package's import usage can be summarized:
-
-```sh
-atteler --code-package-imports llm
-```
-
-One package's import usage can be filtered by exact import path or prefix:
-
-```sh
-atteler --code-package-import-path llm:context
-atteler --code-package-import-prefix llm:github.com/tommoulard/atteler/pkg/
-```
-
-Files in a package that import an exact path can also be listed:
-
-```sh
-atteler --code-package-import-files llm:context
-```
-
-Files in a package that import an exact path can be summarized:
-
-```sh
-atteler --code-package-import-path-file-summary llm:context
-```
-
-Files in one package can be summarized by import count:
-
-```sh
-atteler --code-package-import-file-summary llm
-```
-
-Files in a package that import paths with a prefix can be listed too:
-
-```sh
-atteler --code-package-import-prefix-files llm:github.com/tommoulard/atteler/pkg/
-```
-
-Files in one package can be summarized by matching import-prefix count:
-
-```sh
-atteler --code-package-import-prefix-file-summary llm:github.com/tommoulard/atteler/pkg/
-```
-
-One package's symbol kinds can be summarized:
-
-```sh
-atteler --code-package-symbols llm
-```
-
-Files in one package can be summarized by symbol count:
-
-```sh
-atteler --code-package-symbol-file-summary llm
-```
-
-One package's concrete symbols can be listed:
-
-```sh
-atteler --code-package-symbol-list llm
-```
-
-One package's symbols can be filtered by exact name, kind, or name prefix:
-
-```sh
-atteler --code-package-symbol llm:NewRegistry
-atteler --code-package-symbol-kind llm:func
-atteler --code-package-symbol-prefix llm:New
-```
-
-Files in one package can be summarized by exact symbol-name count:
-
-```sh
-atteler --code-package-symbol-name-file-summary llm:NewRegistry
-```
-
-Files in one package can be summarized by symbol-kind count:
-
-```sh
-atteler --code-package-symbol-kind-file-summary llm:func
-```
-
-Files in one package can be summarized by symbol-prefix count:
-
-```sh
-atteler --code-package-symbol-prefix-file-summary llm:New
-```
-
-One Go file can be expanded to its imports and symbols:
-
-```sh
-atteler --code-file pkg/llm/llm.go
-```
-
-One Go file's imports can be listed directly:
-
-```sh
-atteler --code-file-imports pkg/llm/llm.go
-```
-
-One Go file's symbols can be listed directly:
-
-```sh
-atteler --code-file-symbols pkg/llm/llm.go
-```
-
-One Go file's symbol kinds can be summarized:
-
-```sh
-atteler --code-file-symbol-summary pkg/llm/llm.go
-```
-
-One Go file can be checked for an exact import path:
-
-```sh
-atteler --code-file-import-path pkg/llm/llm.go:context
-```
-
-One Go file's imports can be filtered by prefix:
-
-```sh
-atteler --code-file-import-prefix cmd/atteler/main.go:github.com/tommoulard/atteler/pkg/
-```
-
-One Go file's symbols can be filtered by exact name, kind, or prefix:
-
-```sh
-atteler --code-file-symbol pkg/llm/llm.go:NewRegistry
-atteler --code-file-symbol-kind pkg/llm/llm.go:func
-```
-
-One Go file's symbols can also be filtered by prefix:
-
-```sh
-atteler --code-file-symbol-prefix pkg/llm/llm.go:New
-```
-
-Go symbols can be located without starting an LLM call:
-
-```sh
-atteler --code-symbol NewRegistry
-```
-
-Files can be summarized by exact symbol-name count:
-
-```sh
-atteler --code-symbol-name-file-summary NewRegistry
-```
-
-Packages can be summarized by exact symbol-name count:
-
-```sh
-atteler --code-symbol-name-package-summary NewRegistry
-```
-
-Related Go symbols can be discovered by prefix:
-
-```sh
-atteler --code-symbol-prefix New
-```
-
-Files can be summarized by matching symbol-prefix count:
-
-```sh
-atteler --code-symbol-prefix-file-summary New
-```
-
-Packages can be summarized by matching symbol-prefix count:
-
-```sh
-atteler --code-symbol-prefix-package-summary New
-```
-
-Go symbol kinds can be summarized by count:
-
-```sh
-atteler --code-symbol-summary
-```
-
-Files with symbol counts can be summarized to spot symbol-heavy files:
-
-```sh
-atteler --code-symbol-file-summary
-```
-
-Go symbols can also be listed by kind:
-
-```sh
-atteler --code-symbol-kind type
-```
-
-Files can be summarized by symbol kind count:
-
-```sh
-atteler --code-symbol-kind-file-summary func
-```
-
-Packages can be summarized by symbol kind count:
-
-```sh
-atteler --code-symbol-kind-package-summary func
-```
-
-Go import edges can be listed for graph/RAG workflows:
-
-```sh
-atteler --code-imports
-```
-
-Import usage hotspots can be summarized by file count:
-
-```sh
-atteler --code-import-summary
-```
-
-Files with import counts can be summarized to spot import-heavy files:
-
-```sh
-atteler --code-import-file-summary
-```
-
-Files using one import path can be listed directly:
-
-```sh
-atteler --code-import-path context
-```
-
-One import path's file usage can be summarized:
-
-```sh
-atteler --code-import-path-summary context
-```
-
-Files using one import path can be summarized:
-
-```sh
-atteler --code-import-path-file-summary context
-```
-
-Packages using one import path can be summarized:
-
-```sh
-atteler --code-import-path-package-summary context
-```
-
-Files using an import path family can be listed by prefix:
-
-```sh
-atteler --code-import-prefix github.com/tommoulard/atteler/pkg/
-```
-
-Import usage for an import path family can be summarized by prefix:
-
-```sh
-atteler --code-import-prefix-summary github.com/tommoulard/atteler/pkg/
-```
-
-Files using an import path family can be summarized by matching import count:
-
-```sh
-atteler --code-import-prefix-file-summary github.com/tommoulard/atteler/pkg/
-```
-
-Packages using an import path family can be summarized:
-
-```sh
-atteler --code-import-prefix-package-summary github.com/tommoulard/atteler/pkg/
-```
-
-Topological import graph layers can be listed for dependency planning:
-
-```sh
-atteler --code-layers
-```
-
-Import graph cycles can be checked explicitly:
-
-```sh
-atteler --code-cycles
-```
-
-Reverse import impact can be queried locally:
-
-```sh
-atteler --code-impact context
-```
-
-Forward import graph reachability can be queried locally:
-
-```sh
-atteler --code-reachable cmd/atteler/main.go
-```
-
-Direct import graph edges can be queried in either direction:
-
-```sh
-atteler --code-deps cmd/atteler/main.go
-atteler --code-rdeps context
-```
-
-When a language server is available, Atteler can ask it for document symbols
-or workspace symbols without adding an LSP dependency to the binary:
-
-```sh
-atteler --lsp-symbols \
+atteler code-intel summary
+atteler code-intel symbol NewRegistry
+atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/
+atteler code-intel lsp-symbols \
   --lsp-command gopls \
   --lsp-arg serve \
   --lsp-file cmd/atteler/main.go
-
-atteler --lsp-workspace-symbols Handler \
-  --lsp-command gopls \
-  --lsp-arg serve \
-  --lsp-root .
 ```
 
-Repository health findings for background-agent workflows can be scanned locally:
+Background health and review workflows have their own focused surfaces:
 
 ```sh
-atteler --watch-scan
-atteler --watch-scan --watch-json
-atteler --watch-loop --watch-interval-seconds 60 --watch-max-iterations 3
-```
+atteler watch scan
+atteler watch json
+atteler watch loop --watch-interval-seconds 60 --watch-max-iterations 3
 
-The watch scan also flags convention drift such as production Go files that
-introduce `context.Background()` outside entrypoints or tests, including aliased
-context imports, while skipping Atteler runtime and generated artifact folders.
-
-Speculative execution plans can be previewed locally; when a base prompt is
-provided, Atteler also estimates shared-prefix prompt-cache reuse across
-branches. The SDK exposes a three-round runner for proposal, cross-review, and
-verdict aggregation:
-
-```sh
-atteler --speculate-plan \
-  --speculate-agent researcher \
-  --speculate-agent coder \
-  --speculate-prompt "plan the auth refresh migration"
-```
-
-Dependency-aware async task waves can also be previewed locally or executed by
-spawning Atteler sub-agents. Ready tasks in the same wave run concurrently while
-downstream waves wait for their declared dependencies:
-
-```sh
-atteler --async-plan \
-  --async-task 'plan|planner|draft plan' \
-  --async-task 'code|coder|implement feature|plan'
-
-atteler --async-run \
-  --async-task 'plan|planner|draft plan' \
-  --async-task 'code|coder|implement feature|plan'
-```
-
-Agents and sub-agents can coordinate through a small persistent task/TODO list:
-
-```sh
-atteler --task-add "draft the migration plan" --task-id plan --task-agent planner
-atteler --task-assign plan:executor
-atteler --task-complete plan --task-agent verifier
-atteler --task-list
-```
-
-Use `--task-file <path>` to point several sessions or agents at the same JSON
-task list. When omitted, Atteler stores tasks at `.atteler/tasks.json`.
-
-Sub-agent fan-out can be previewed or executed with stable child IDs:
-
-```sh
-atteler --spawn-agent 'planner|draft the migration plan' \
-  --spawn-agent 'review-1|reviewer|review the plan for risks' \
-  --spawn-dry-run
-```
-
-Repository scans can also be rendered as structured review reports:
-
-```sh
-atteler --review-scan
-```
-
-Review-agent speculative plans mirror the three-round execution model for code review: independent reviews, cross-review of findings, and aggregate verdict gates.
-
-```sh
-atteler --review-plan \
+atteler review scan
+atteler review plan \
   --review-agent quality-reviewer \
   --review-agent test-engineer \
   --review-path pkg/llm/auth.go \
   --review-gate "tests pass"
 ```
 
-Use `--review-run` to execute that same three-round workflow with real LLM
-calls. `--review-agent` names configured agents when present; otherwise the
-current selected model is used with the reviewer name as a role label. Review
-paths are loaded through the bounded local reference loader, and the final
-aggregate report must explicitly satisfy every `--review-gate`; omitted gates
-are treated as missing evidence and fail the run instead of being inferred as
-passing.
+Agent orchestration commands cover speculative plans, async task waves,
+persistent tasks, prompt completion, feedback proposals, and sub-agent fan-out:
 
 ```sh
-atteler --review-run \
-  --review-agent quality-reviewer \
-  --review-agent test-engineer \
-  --review-path pkg/llm/auth.go \
-  --review-gate "tests pass" \
-  --review-prompt "Focus on auth fallback and cancellation regressions."
+atteler agents plan "review this auth change" --plan-max-agents 3
+atteler agents async-plan \
+  --async-task 'plan|planner|draft plan' \
+  --async-task 'code|coder|implement feature|plan'
+atteler agents task-add "draft the migration plan" --task-id plan --task-agent planner
+atteler agents spawn 'planner|draft the migration plan' --spawn-dry-run
+atteler agents prompt-complete "ask rev"
 ```
 
-You can also persist a small lexical memory store for UTF-8 files:
-
-```sh
-atteler --memory-store .atteler/memory.json --memory-index docs/research.md
-atteler --memory-store .atteler/memory.json --memory-search "redirect risks"
-```
-
-Agent-specific memory can be persisted separately using the local vector
-fallback, so one agent's notes do not leak into another agent's search results:
-
-```sh
-atteler --agent-memory-agent reviewer \
-  --agent-memory-store .atteler/agent-memory.json \
-  --agent-memory-index docs/review-notes.md \
-  --agent-memory-search "redirect risks"
-```
-
-For dependency-free local vector retrieval over specific files:
-
-```sh
-atteler --vector-index docs/research.md --vector-search "redirect risks"
-```
-
-For repeated workflows, pass observed steps and Atteler suggests a reusable
-skill candidate. Add `--skill-save-dir <dir>` to accept and persist the
-suggestion as a markdown artifact:
-
-```sh
-atteler --skill-step plan --skill-step code --skill-step test \
-  --skill-step plan --skill-step code --skill-step test
-atteler --skill-save-dir .atteler/skills \
-  --skill-step plan --skill-step code --skill-step plan --skill-step code
-```
-
-Model routing decisions can be previewed locally, and the same route candidates
-can hard-stop one-shot/stdin requests when every candidate exceeds budget or
-context limits:
-
-```sh
-atteler --route-candidate 'openai/gpt-mini,input=0.000001,output=0.000002,max=128000' \
-  --route-input-tokens 10000 --route-output-tokens 1000
-atteler --route-candidate 'openai/gpt-mini,input=0.000001,output=0.000002,max=128000' \
-  --route-input-tokens 10000 --route-output-tokens 1000 --route-budget 0.02 \
-  --once "Summarize this repository"
-```
-
-Context compression can be previewed with role-prefixed transcript files:
-
-```sh
-atteler --context-pack-file transcript.txt --context-pack-tokens 4000
-```
-
-Recorded feedback can be summarized into agent improvement proposals, then
-applied back to an agent config with a markdown history log:
-
-```sh
-atteler --session <id-or-path> --feedback-proposals
-atteler --session <id-or-path> \
-  --feedback-apply-config .atteler/config.yaml \
-  --feedback-history .atteler/agent-feedback.md
-```
-
-MCP manifests can be validated and queried by capability:
-
-```sh
-atteler --mcp-manifest .atteler/mcp.yaml --mcp-capability symbols
-atteler --mcp-manifest .atteler/mcp.yaml \
-  --mcp-server repo \
-  --mcp-tool search \
-  --mcp-tool-args '{"query":"symbols"}'
-```
-
-Prompt-line completion can also be previewed without opening the TUI:
-
-```sh
-atteler --prompt-complete "ask rev"
-```
+Supporting local workflow helpers remain available as compatibility flags and
+are discoverable from the relevant domain help: MCP/plugin commands under
+`plugins`, deterministic output checks and response fixtures under `eval`,
+context compression under `memory`, model routing under `providers`, and local
+bash/task utilities under `agents`.
 
 ## SDK building blocks
 
@@ -1248,7 +700,7 @@ Supported event names:
   `llm.complete`.
 - `agent_execute` -- emitted when a configured agent is selected for work.
 
-Run `atteler --list-hook-events` or `atteler --list-hook-events-json` to print
+Run `atteler config hooks` or `atteler config hooks-json` to print
 the same supported-event inventory from the installed binary.
 
 Every hook also receives useful environment variables such as
@@ -1264,7 +716,7 @@ one-shot mode without requiring any hook configuration.
 
 ## Automatic worktree isolation
 
-When you pass `--worktree`, Atteler creates a dedicated git worktree for the
+When you run `atteler worktrees run`, Atteler creates a dedicated git worktree for the
 session so that file changes made during the conversation do not touch your
 working copy. This is especially useful when several sessions run in the same
 repository at the same time, or when you want to review LLM-generated edits
@@ -1272,7 +724,7 @@ before they land on your branch.
 
 ### How it works
 
-1. **Create** -- On session start, `atteler --worktree` runs
+1. **Create** -- On session start, `atteler worktrees run` runs
    `git branch atteler/<session-id>` from the current HEAD and then
    `git worktree add` to check it out under
    `.atteler/worktrees/<session-id>` (or `$ATTELER_WORKTREE_DIR`).
@@ -1280,7 +732,7 @@ before they land on your branch.
    directory so providers that operate on the filesystem see the isolated copy.
 
 2. **Re-join** -- Continuing an existing session that already has a worktree
-   (`atteler --session <id> --worktree`) re-uses the same worktree directory
+   (`atteler worktrees run --session <id>`) re-uses the same worktree directory
    instead of creating a new one. The session JSON stores the worktree path,
    branch, and base branch so this works across invocations.
 
@@ -1296,22 +748,22 @@ before they land on your branch.
    merge later:
 
    ```sh
-   atteler --worktree --no-auto-merge --once "Refactor auth flow"
+   atteler worktrees run "Refactor auth flow" --no-auto-merge
    # later:
-   atteler --merge-worktree <session-id>
+   atteler worktrees merge <session-id>
    ```
 
-5. **List and inspect** -- `atteler --list-worktrees` prints all active
+5. **List and inspect** -- `atteler worktrees list` prints all active
    atteler-managed worktrees with their branch, base branch, and session ID.
 
-### CLI flags
+### Worktree commands
 
-| Flag | Description |
-|------|-------------|
-| `--worktree` | Isolate the session in a git worktree |
-| `--no-auto-merge` | Keep the worktree alive on exit instead of auto-merging |
-| `--list-worktrees` | List active atteler worktrees and exit |
-| `--merge-worktree <session-id>` | Merge a session worktree back and clean up |
+| Command | Description |
+|---------|-------------|
+| `atteler worktrees run [prompt]` | Isolate the session in a git worktree |
+| `atteler worktrees run --no-auto-merge [prompt]` | Keep the worktree alive on exit instead of auto-merging |
+| `atteler worktrees list` | List active atteler worktrees and exit |
+| `atteler worktrees merge <session-id>` | Merge a session worktree back and clean up |
 
 ### Environment variables
 
@@ -1327,34 +779,34 @@ When a worktree is active, the session JSON includes three additional fields:
 - `worktree_branch` -- the `atteler/<session-id>` branch name.
 - `worktree_base` -- the branch from which the worktree was created.
 
-These fields are cleared after a successful merge. `--show-session` and session
-export include them when present.
+These fields are cleared after a successful merge. `atteler session show` and
+session export include them when present.
 
 ### Examples
 
 ```sh
 # Interactive session with worktree isolation
-atteler --worktree
+atteler worktrees run
 
 # One-shot with worktree, auto-merge on exit
-atteler --worktree --once "Add unit tests for the auth package"
+atteler worktrees run "Add unit tests for the auth package"
 
 # One-shot with worktree, keep worktree after exit
-atteler --worktree --no-auto-merge --once "Rewrite the config loader"
+atteler worktrees run "Rewrite the config loader" --no-auto-merge
 
 # Continue a previous worktree session
-atteler --session 20260430-120000-deadbeef --worktree
+atteler worktrees run --session 20260430-120000-deadbeef
 
 # List active worktrees
-atteler --list-worktrees
+atteler worktrees list
 
 # Manually merge a deferred worktree
-atteler --merge-worktree 20260430-120000-deadbeef
+atteler worktrees merge 20260430-120000-deadbeef
 ```
 
 ### Diagnostics
 
-`atteler --doctor` includes worktree status when one is active. The interactive
+`atteler config doctor` includes worktree status when one is active. The interactive
 TUI header also displays the worktree path and branch name.
 
 ## Build, CI, and releases
