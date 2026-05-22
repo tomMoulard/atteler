@@ -113,15 +113,17 @@ type Provider interface {
 	Name() string
 
 	// Models lists the models this provider can serve.
-	// It returns a static fallback list; use FetchModels for a live API query.
+	// It returns the offline/static catalog used by --list-known-models.
 	Models() []string
 
-	// FetchModels queries the provider's API for the list of available models.
-	// If the API call fails it falls back to Models().
+	// FetchModels returns the configured provider's current model list. Some
+	// providers hit the network or local daemon; others return a local catalog.
+	// Callers that need an offline fallback should use Models().
 	FetchModels(ctx context.Context) ([]string, error)
 
-	// HealthCheck pings the provider to verify that credentials are valid and
-	// the service is reachable. It returns nil when the provider is healthy.
+	// HealthCheck verifies provider readiness. Some providers hit the network;
+	// others only validate local credentials or daemon reachability. It returns
+	// nil when the provider is healthy.
 	HealthCheck(ctx context.Context) error
 
 	// Complete performs a chat completion.
@@ -853,7 +855,8 @@ type ProviderHealth struct {
 // CheckHealth returns one ProviderHealth entry per provider, sorted by name.
 // Providers with structured diagnostics report their adapter contract and
 // readiness dimensions; other providers are pinged via HealthCheck and then
-// queried for models.
+// queried for models. Some providers perform network requests here; others
+// only check local credentials or daemon reachability.
 func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
 	ctxErr := requireCredentialContext(ctx)
 

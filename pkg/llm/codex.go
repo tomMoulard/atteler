@@ -99,7 +99,7 @@ func NewCodexProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) 
 // Name returns the provider name.
 func (c *CodexProvider) Name() string { return providerCodex }
 
-// Models returns Codex CLI model IDs.
+// Models returns Codex model IDs.
 func (c *CodexProvider) Models() []string {
 	if len(c.models) == 0 {
 		return defaultCodexModels()

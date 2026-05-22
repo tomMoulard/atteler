@@ -222,11 +222,77 @@ the same catalog-backed estimates; `--route-input-tokens`,
 `--route-cache-write-tokens` let operators model prompt-cache read/write costs
 before a live call.
 
-Credentials come from environment variables, supported local harness config, or
-provider-specific command-line tools. OpenAI Platform calls require
-`OPENAI_API_KEY`; direct Anthropic calls require Anthropic credentials. The
-`codex`, `claude-code`, and `ollama` providers use their local CLIs or daemons
-when available.
+Credentials come from environment variables, supported local harness config,
+provider-owned credential stores, or local daemons depending on the provider.
+Do not infer subprocess sandboxing from a provider name: the `codex` and
+`claude-code` adapters reuse those tools' credentials but send HTTPS requests
+directly from atteler.
+
+### Provider runtime and trust boundaries
+
+`atteler --list-providers` and `atteler --list-known-models` read the built-in
+provider inventory from `llm.KnownProviders()` without credentials or network
+calls. `atteler --doctor` registers the configured providers and then runs the
+provider-specific health check described below, so some health checks hit the
+network while Codex and Claude Code only validate loaded local credentials.
+
+The following generated block is checked by `go test ./pkg/llm`; update
+[`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go) when an execution
+path, credential source, token refresh behavior, endpoint, sandbox/tool
+boundary, health check, or model inventory changes. Refresh the block with
+`UPDATE_PROVIDER_RUNTIME_DOCS=1 go test ./pkg/llm -run TestProviderRuntimeDocs_ReadmeSectionMatchesMetadata`.
+
+<!-- BEGIN GENERATED PROVIDER RUNTIME DOCS -->
+#### `anthropic`
+
+- Execution path: Direct HTTPS calls from atteler to the Anthropic Messages API.
+- Credential source: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, ForgeCode credential files (`$FORGE_CONFIG/.credentials.json`, `~/forge/.credentials.json`, `~/.forge/.credentials.json`), then Claude Code keychain or `~/.claude/.credentials.json`.
+- Token refresh: ForgeCode OAuth credentials may refresh during credential resolution; the Anthropic adapter itself does not refresh on 401.
+- Network endpoint: `ANTHROPIC_BASE_URL` or provider config, default `https://api.anthropic.com`; `POST /v1/messages` for completions and `GET /v1/models` for model/health checks.
+- Sandbox and tools: No subprocess or workspace sandbox. Atteler sends tool definitions in the Messages request; any tool execution happens in Atteler's agent loop.
+- Model inventory: `--list-known-models` prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.
+- Health check: Network check: calls `GET /v1/models` through `FetchModels`.
+
+#### `claude-code`
+
+- Execution path: Direct HTTPS calls from atteler to the Anthropic Messages API using Claude Code OAuth; it does not run `claude --print`.
+- Credential source: Claude Code OAuth from macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json`.
+- Token refresh: On 401, exchanges the stored refresh token at `https://platform.claude.com/v1/oauth/token` and persists refreshed tokens back to the same Claude Code credential store.
+- Network endpoint: `ANTHROPIC_BASE_URL`, default `https://api.anthropic.com`; `POST /v1/messages` for completions. Model listing is static for this provider.
+- Sandbox and tools: No Claude Code subprocess, file/search/edit tool sandbox, or workspace sandbox. Atteler only forwards configured request tools.
+- Model inventory: `--list-known-models` and `FetchModels` both return the static Claude Code model/alias catalog; no model-list network call is made.
+- Health check: Local credential check only: verifies an OAuth access token is loaded; no network call.
+
+#### `codex`
+
+- Execution path: Direct HTTPS Responses request from atteler to the ChatGPT Codex backend; it does not run `codex exec`.
+- Credential source: `$CODEX_HOME/auth.json` or `~/.codex/auth.json` in `auth_mode=chatgpt` with ChatGPT access and refresh tokens.
+- Token refresh: On 401, exchanges the stored refresh token at `https://auth.openai.com/oauth/token` and atomically updates `auth.json`.
+- Network endpoint: `CODEX_BASE_URL`, default `https://chatgpt.com/backend-api/codex`; `POST /responses` for completions. Model listing is static plus any model from Codex config.
+- Sandbox and tools: No Codex subprocess, file/search/edit tool sandbox, or workspace sandbox. Atteler sends Responses API function-tool definitions only.
+- Model inventory: `--list-known-models` prints the static Codex catalog; registered providers prepend any model configured in Codex config and `FetchModels` stays local.
+- Health check: Local credential check only: verifies parsed ChatGPT-mode auth has an access token; no network call.
+
+#### `ollama`
+
+- Execution path: HTTP calls to a local or configured Ollama daemon; when auto-start is enabled for a local base URL, atteler may start `ollama serve`.
+- Credential source: No API credential is used by the built-in adapter.
+- Token refresh: None.
+- Network endpoint: `OLLAMA_BASE_URL` or provider config, default `http://127.0.0.1:11434`; `POST /api/chat` for completions and `GET /api/tags` for model/health checks.
+- Sandbox and tools: No workspace sandbox. Local model execution and any model tool behavior are governed by the Ollama daemon; Atteler serializes configured tool definitions.
+- Model inventory: `--list-known-models` prints useful static defaults without contacting Ollama; registered providers call `GET /api/tags` for live local model names.
+- Health check: Network/local daemon check: calls `GET /api/tags` and may first auto-start `ollama serve` during provider creation.
+
+#### `openai`
+
+- Execution path: Direct HTTPS calls from atteler to the OpenAI Chat Completions API.
+- Credential source: `OPENAI_API_KEY`, then the `OPENAI_API_KEY` field in `~/.codex/auth.json`.
+- Token refresh: None; the API key is sent as a bearer token and is not refreshed.
+- Network endpoint: `OPENAI_BASE_URL` or provider config, default `https://api.openai.com`; `POST /v1/chat/completions` for completions and `GET /v1/models` for model/health checks.
+- Sandbox and tools: No subprocess or workspace sandbox. Atteler sends function-tool definitions in the chat request; any tool execution happens in Atteler's agent loop.
+- Model inventory: `--list-known-models` prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.
+- Health check: Network check: calls `GET /v1/models` through `FetchModels`.
+<!-- END GENERATED PROVIDER RUNTIME DOCS -->
 
 ### Private provider adapter contracts
 
@@ -862,7 +928,7 @@ linked from the row.
 | --- | --- |
 | CLI command routing, grouped help, and compatibility flags | [`cmd/atteler/cli_args.go`](cmd/atteler/cli_args.go), [`cmd/atteler/cli_help_domains.go`](cmd/atteler/cli_help_domains.go), [`cmd/atteler/cli_args_test.go`](cmd/atteler/cli_args_test.go), [`cmd/atteler/cli_help_test.go`](cmd/atteler/cli_help_test.go) |
 | Error-aware streaming completion contract with bounded-buffer guidance | [`pkg/llm/stream.go`](pkg/llm/stream.go), [`pkg/llm/stream_test.go`](pkg/llm/stream_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
-| OpenAI, Anthropic, Codex CLI, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go), [`pkg/llm/capabilities.go`](pkg/llm/capabilities.go), [`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go) |
+| OpenAI, Anthropic, Codex, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go), [`pkg/llm/capabilities.go`](pkg/llm/capabilities.go), [`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go), [`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go), [`pkg/llm/provider_runtime_test.go`](pkg/llm/provider_runtime_test.go) |
 | Evidence-backed model routing with catalog metadata, per-agent policy, route-decision artifacts, and usage telemetry | [`pkg/modelroute/catalog.go`](pkg/modelroute/catalog.go), [`pkg/modelroute/decision.go`](pkg/modelroute/decision.go), [`pkg/modelroute/telemetry.go`](pkg/modelroute/telemetry.go), [`pkg/modelroute/modelroute_test.go`](pkg/modelroute/modelroute_test.go), [`pkg/llm/llm.go`](pkg/llm/llm.go), [`cmd/atteler/route_decision_event.go`](cmd/atteler/route_decision_event.go), [`cmd/atteler/agent_resolution_test.go`](cmd/atteler/agent_resolution_test.go) |
 | Configuration loading, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
 | Sessions, transcript search/export, evaluations, failures, artifacts, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |
@@ -902,6 +968,17 @@ Local development uses the Makefile as the main build surface:
 GitHub Actions runs CI on pull requests and branch pushes. Pushing a semantic
 version tag such as `v0.1.0` triggers the release workflow and GoReleaser
 packaging.
+
+Release checklist:
+
+- When a provider implementation changes its execution path, credential source,
+  token refresh, endpoint, sandbox/tool boundary, health check, or built-in
+  model catalog, update
+  [`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go) and refresh the
+  generated README provider block before tagging with
+  `UPDATE_PROVIDER_RUNTIME_DOCS=1 go test ./pkg/llm -run TestProviderRuntimeDocs_ReadmeSectionMatchesMetadata`.
+  `go test ./pkg/llm` verifies that the README block still matches metadata
+  keyed to the provider inventory.
 
 ## License
 

@@ -335,6 +335,26 @@ func TestDoctorHonorsPrivateAdapterKillSwitchesWithoutFailingNormalProvider(t *t
 	assert.NotContains(t, stdout, "[FAIL] claude-code")
 }
 
+func TestDoctorIncludesProviderRuntimeMetadata(t *testing.T) { //nolint:paralleltest // captures process-global stdout.
+	registry := llm.NewRegistry()
+	registry.Register(doctorHealthyProvider{name: "openai", models: []string{"gpt-4.1"}})
+
+	state := appState{
+		registry:      registry,
+		agentRegistry: agent.NewRegistry(nil),
+		sessionStore:  session.NewStore(t.TempDir()),
+	}
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		require.NoError(t, doctor(t.Context(), state))
+	})
+
+	assert.Contains(t, stdout, "  [ok] openai")
+	assert.Contains(t, stdout, "         - gpt-4.1")
+	assert.Contains(t, stdout, "         runtime: Direct HTTPS calls from atteler to the OpenAI Chat Completions API.")
+	assert.Contains(t, stdout, "         health: Network check: calls `GET /v1/models` through `FetchModels`.")
+}
+
 type doctorDiagnosticsProvider struct{}
 
 const doctorDiagnosticsProviderName = "codex"
