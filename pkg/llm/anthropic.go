@@ -87,6 +87,10 @@ type anthropicModelsResponse struct {
 
 // FetchModels queries GET /v1/models to discover available models.
 func (a *AnthropicProvider) FetchModels(ctx context.Context) ([]string, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/models", http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: new request: %w", err)
@@ -191,6 +195,10 @@ type anthropicResponse struct {
 
 // Complete performs a chat completion using the Anthropic Messages API.
 func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	req, err := buildAnthropicRequest(params)
 	if err != nil {
 		return nil, err

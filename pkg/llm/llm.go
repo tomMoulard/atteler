@@ -245,6 +245,10 @@ func (r *Registry) SetDefaultProviderModel(providerName, model string) error {
 // Transient errors (429, 5xx) are retried according to the registry's retry
 // configuration.
 func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	p, params, err := r.resolve(params)
 	if err != nil {
 		return nil, err
@@ -275,6 +279,10 @@ func (r *Registry) CompleteWithFallback(
 	params CompleteParams,
 	fallbackModels []string,
 ) (*Response, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	models := modelFallbackChain(params.Model, fallbackModels)
 	if len(models) == 0 {
 		return r.Complete(ctx, params)
@@ -483,6 +491,10 @@ func (r *Registry) ListProviders() []string {
 // ProviderModels returns the model list for a specific provider, trying the
 // live API first (FetchModels) and falling back to the static list.
 func (r *Registry) ProviderModels(ctx context.Context, providerName string) ([]string, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	r.mu.RLock()
 	p, ok := r.providers[providerName]
 	r.mu.RUnlock()
@@ -524,6 +536,8 @@ type ProviderHealth struct {
 // CheckHealth pings every registered provider and fetches its models. It
 // returns one ProviderHealth entry per provider, sorted by name.
 func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
+	ctxErr := requireCredentialContext(ctx)
+
 	r.mu.RLock()
 
 	names := make([]string, 0, len(r.providers))
@@ -543,7 +557,10 @@ func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
 
 		ph := ProviderHealth{Name: name}
 
-		if err := p.HealthCheck(ctx); err != nil {
+		if ctxErr != nil {
+			ph.Error = ctxErr
+			ph.Models = p.Models()
+		} else if err := p.HealthCheck(ctx); err != nil {
 			ph.Error = err
 			ph.Models = p.Models()
 		} else {

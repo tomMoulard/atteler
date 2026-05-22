@@ -72,6 +72,27 @@ func TestCompleteStreamOrFallback_FallsBackToNonStream(t *testing.T) {
 	assert.True(t, chunks[0].Done)
 }
 
+func TestStreamHelpers_RequireActiveContext(t *testing.T) {
+	t.Parallel()
+
+	p := &fakeProvider{
+		name:   "non-stream",
+		models: []string{"n-1"},
+		resp:   &Response{Content: "full response", Model: "n-1"},
+	}
+
+	_, err := StreamFromComplete(nil, p, CompleteParams{Model: "n-1"}) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContextRequired)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = CompleteStreamOrFallback(ctx, p, CompleteParams{Model: "n-1"})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestCollectStream_AssemblesResponse(t *testing.T) {
 	t.Parallel()
 

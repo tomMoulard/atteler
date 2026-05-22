@@ -101,7 +101,7 @@ func TestCompleteWithRetry_RespectsContextCancellation(t *testing.T) {
 		return nil, errors.New("openai: HTTP 429: rate limited")
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "retry canceled")
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestIsRetryableStatus(t *testing.T) {

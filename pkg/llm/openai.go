@@ -85,6 +85,10 @@ type openaiModelsResponse struct {
 
 // FetchModels queries GET /v1/models to discover available models.
 func (o *OpenAIProvider) FetchModels(ctx context.Context) ([]string, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/v1/models", http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("openai: new request: %w", err)
@@ -196,6 +200,14 @@ type openaiResponse struct {
 
 // Complete performs a chat completion using the OpenAI Chat Completions API.
 func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	return o.complete(ctx, params)
+}
+
+func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*Response, error) {
 	msgs := buildOpenAIMessages(params.Messages)
 
 	req := openaiRequest{

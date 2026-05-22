@@ -79,13 +79,21 @@ func (c *CodexProvider) Models() []string {
 
 // FetchModels returns the local Codex model catalog. The chatgpt backend does
 // not expose a /models endpoint for this auth mode.
-func (c *CodexProvider) FetchModels(_ context.Context) ([]string, error) {
+func (c *CodexProvider) FetchModels(ctx context.Context) ([]string, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	return c.Models(), nil
 }
 
 // HealthCheck verifies that auth.json parses and contains a chatgpt-mode token.
 // It does not contact the network.
 func (c *CodexProvider) HealthCheck(ctx context.Context) error {
+	if err := requireCredentialContext(ctx); err != nil {
+		return err
+	}
+
 	emitActivity(ctx, events.Event{
 		Type: events.CommandExecute,
 		Metadata: map[string]string{
@@ -160,6 +168,10 @@ type codexInputContent struct {
 // Complete runs an OpenAI Responses API request against the chatgpt codex
 // backend, refreshing the access token once on a 401.
 func (c *CodexProvider) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	model := params.Model
 	if model == "" {
 		models := c.Models()

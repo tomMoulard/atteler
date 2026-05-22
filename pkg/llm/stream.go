@@ -44,6 +44,10 @@ type StreamProvider interface {
 // stream. This is useful as a fallback for providers that do not implement
 // StreamProvider.
 func StreamFromComplete(ctx context.Context, p Provider, params CompleteParams) (<-chan Chunk, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	resp, err := p.Complete(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("stream fallback: %w", err)
@@ -67,6 +71,10 @@ func StreamFromComplete(ctx context.Context, p Provider, params CompleteParams) 
 // CompleteStreamOrFallback attempts to use the streaming interface if the
 // provider supports it, otherwise falls back to StreamFromComplete.
 func CompleteStreamOrFallback(ctx context.Context, p Provider, params CompleteParams) (<-chan Chunk, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	if sp, ok := p.(StreamProvider); ok {
 		ch, err := sp.CompleteStream(ctx, params)
 		if err != nil {

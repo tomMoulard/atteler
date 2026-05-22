@@ -97,6 +97,37 @@ func TestKnownProviders(t *testing.T) {
 	}
 }
 
+func TestRegistry_RequiresActiveContextForBlockingMethods(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   alphaProvider,
+		models: []string{"a-1"},
+		resp:   &Response{Content: "ok"},
+	})
+
+	_, err := r.Complete(nil, CompleteParams{Model: "a-1"}) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContextRequired)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = r.CompleteWithFallback(ctx, CompleteParams{Model: "a-1"}, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, err = r.ProviderModels(nil, alphaProvider) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContextRequired)
+
+	health := r.CheckHealth(nil) //nolint:staticcheck // Verify nil contexts are reported without provider calls.
+	require.Len(t, health, 1)
+	require.ErrorIs(t, health[0].Error, ErrContextRequired)
+	assert.False(t, health[0].Healthy)
+}
+
 func TestRegistry_CompleteRoutesToCorrectProvider(t *testing.T) {
 	t.Parallel()
 
