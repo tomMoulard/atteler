@@ -251,6 +251,7 @@ func TestSortedFindings_IsDeterministicAndDoesNotMutateInput(t *testing.T) {
 		{Severity: SeverityHigh, Category: CategoryTests, Path: "a.go", Line: 8, Message: "missing test"},
 		{Severity: SeverityCritical, Category: CategoryCorrectness, Path: "a.go", Line: 3, Message: "panic"},
 		{Severity: SeverityHigh, Category: CategoryCorrectness, Path: "a.go", Line: 2, Message: "wrong branch"},
+		{Severity: SeverityHigh, Category: CategoryCorrectness, Path: "a.go", Line: 2, EndLine: 4, Message: "wide branch"},
 	}
 	original := append([]Finding(nil), input...)
 
@@ -258,6 +259,7 @@ func TestSortedFindings_IsDeterministicAndDoesNotMutateInput(t *testing.T) {
 	want := []Finding{
 		{Severity: SeverityCritical, Category: CategoryCorrectness, Path: "a.go", Line: 3, Message: "panic"},
 		{Severity: SeverityHigh, Category: CategoryCorrectness, Path: "a.go", Line: 2, Message: "wrong branch"},
+		{Severity: SeverityHigh, Category: CategoryCorrectness, Path: "a.go", Line: 2, EndLine: 4, Message: "wide branch"},
 		{Severity: SeverityHigh, Category: CategoryTests, Path: "a.go", Line: 8, Message: "missing test"},
 		{Severity: SeverityHigh, Category: CategorySecurity, Path: "b.go", Line: 4, Message: "auth"},
 		{Severity: SeverityLow, Category: CategoryStyle, Path: "z.go", Line: 9, Message: "style"},

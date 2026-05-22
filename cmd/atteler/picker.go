@@ -212,7 +212,10 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 			dimStyle.Render(" ("+modelScopeLabel(scope)+")"),
 	)}
 	if scope != appconfig.ModelScopeSession {
-		cmds = append(cmds, saveModelPreference(
+		// Persist before printing the final confirmation so a user can quit as
+		// soon as they see "folder default" or "global default" without racing
+		// the asynchronous Bubble Tea command runner.
+		saveMsg := saveModelPreference(
 			m.ctx,
 			m.stateStore,
 			m.cwd,
@@ -221,7 +224,9 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 			reasoningSelected,
 			scope,
 			m.hookRunner,
-		))
+		)()
+
+		cmds = append(cmds, func() tea.Msg { return saveMsg })
 	}
 
 	return m, tea.Batch(cmds...)

@@ -535,6 +535,11 @@ atteler review plan \
   --review-agent test-engineer \
   --review-path pkg/llm/auth.go
 
+atteler review run \
+  --review-agent quality-reviewer \
+  --review-path pkg/llm/auth.go \
+  --review-gate "tests pass"
+
 atteler watch scan
 atteler watch json
 atteler watch loop
@@ -576,6 +581,19 @@ the token comes from the watch token option, `GITHUB_TOKEN`, or `GH_TOKEN`, and
 labels default to `quality,watch`. `atteler review scan` can also emit the
 watch gate as a structured review gate check.
 
+`atteler review run` loads the review paths into the reviewed snapshot and
+requires LLM reviewers to return strict JSON with no unknown or duplicate
+fields. Findings must cite validated file and line-range evidence, include an
+evidence excerpt found in that reviewed range, severity rationale, suggested
+verification, and provenance with both reviewer judgment and a reviewed-context
+line/range source. Gate checks must include review-context proof or command/test
+proof from an explicit `Command output` section after the reviewed snapshot,
+with command-output gate proof including the provenance source command and
+summary output, or an explicit not-run reason backed by reviewer model-judgment
+provenance; test, type, lint, and flake gates cannot cite model judgment as
+proof. Malformed review responses fail the run and are surfaced in the partial
+session output.
+
 `atteler memory retrieve` prints the shared retrieval contract fields agents
 should cite before injecting context: `source`, `document`, `stable_id`,
 `chunk`, `range`, `scorer`, `inject_allowed`, freshness flags, and an optional
@@ -584,16 +602,15 @@ Memory and vector stores persist schema, source-hash, provenance, redaction
 policy version, timestamps, TTL, and embedding/vectorizer metadata where
 vectors are stored, so stale embeddings or stale privacy policy provenance fail
 closed until explicitly migrated. Use
-`atteler memory migrate --memory-store <path>` or
-`atteler memory agent-migrate --agent-memory-store <path>` after changing a
+`atteler memory migrate` or `atteler memory agent-migrate` after changing a
 store schema, redaction policy, or vectorizer. Use `atteler memory delete`,
 `atteler memory agent-delete`, `atteler memory compact`, and
 `atteler memory agent-compact` to prove deleted or expired content is removed
-from persisted JSON. Use `--memory-ttl-seconds` or
-`--agent-memory-ttl-seconds` when indexing intentionally short-lived content.
+from persisted JSON. Set the memory TTL options when indexing intentionally
+short-lived content.
 Saved-session transcript messages and worktree paths are
-excluded from local memory by default; opt in only when needed with
-`--memory-include-session-messages` or `--memory-include-worktree-metadata`.
+excluded from local memory by default; opt in to those metadata/session-message
+options only when needed.
 
 ### Agents, plugins, artifacts, and worktrees
 

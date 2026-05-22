@@ -148,7 +148,36 @@ func TestFormatReviewRunResult(t *testing.T) {
 		Report: review.Report{
 			Reviewer: "aggregate-verdict",
 			Findings: []review.Finding{
-				{Severity: review.SeverityHigh, Category: review.CategoryCorrectness, Path: "pkg/auth.go", Line: 12, Message: "nil token panic"},
+				{
+					Severity:              review.SeverityHigh,
+					Category:              review.CategoryCorrectness,
+					Path:                  "pkg/auth.go",
+					Line:                  12,
+					EndLine:               13,
+					Message:               "nil token panic",
+					Evidence:              "token dereference lacks nil guard",
+					SeverityRationale:     "can panic on missing token",
+					SuggestedVerification: "add nil-token regression test",
+					Confidence:            "medium",
+					Provenance: []review.EvidenceSource{
+						{Type: review.EvidenceModelJudgment, Source: "quality", Summary: "reviewer identified the panic"},
+						{Type: review.EvidenceReviewContext, Source: "pkg/auth.go:12-13", Summary: "nil guard is absent"},
+					},
+					Dissent: []review.EvidenceSource{
+						{Type: review.EvidenceModelJudgment, Source: "tests", Summary: "uncertain until a regression test is added"},
+					},
+				},
+			},
+			GateChecks: []review.GateCheck{
+				{
+					Name:   "tests pass",
+					Passed: true,
+					Notes:  "unit tests passed",
+					Proof:  "go test ./... PASS",
+					Provenance: []review.EvidenceSource{
+						{Type: review.EvidenceCommandOutput, Source: "go test ./...", Summary: "PASS"},
+					},
+				},
 			},
 		},
 		Session: review.Session{
@@ -158,6 +187,9 @@ func TestFormatReviewRunResult(t *testing.T) {
 			CrossReviews: []review.CrossReviewNote{
 				{Reviewer: "tests", ReviewedReviewer: "quality", Notes: "keep finding"},
 			},
+			Errors: []review.RunError{
+				{Stage: "aggregate-verdict", Reviewer: "review-judge", Message: "missing gate proof"},
+			},
 		},
 	}
 
@@ -166,8 +198,16 @@ func TestFormatReviewRunResult(t *testing.T) {
 		"independent_reports:\n",
 		"reviewer=quality\tfindings=1",
 		"cross_reviews:\n  - tests -> quality\tnotes=keep finding\n",
+		"errors:\n  - stage=aggregate-verdict\treviewer=review-judge\tmessage=missing gate proof\n",
 		"aggregate_report:\nreviewer: aggregate-verdict\n",
-		"severity=high\tcategory=correctness\tpath=pkg/auth.go\tline=12\tmessage=nil token panic",
+		"severity=high\tcategory=correctness\tpath=pkg/auth.go\tline=12-13\tmessage=nil token panic",
+		"evidence=token dereference lacks nil guard",
+		"severity_rationale=can panic on missing token",
+		"suggested_verification=add nil-token regression test",
+		"confidence=medium",
+		"provenance=model-judgment:quality:reviewer identified the panic;review-context:pkg/auth.go:12-13:nil guard is absent",
+		"dissent=model-judgment:tests:uncertain until a regression test is added",
+		"gate_checks:\n  - name=tests pass\tpassed=true\tnotes=unit tests passed\tproof=go test ./... PASS\tprovenance=command-output:go test ./...:PASS",
 	} {
 		assert.Contains(t, got, want)
 	}
