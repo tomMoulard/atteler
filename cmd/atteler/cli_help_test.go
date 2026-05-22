@@ -1027,20 +1027,7 @@ func newCLIOptionsAndFlagSetForTest(t *testing.T) (*cliOptions, *flag.FlagSet) {
 
 	var opts cliOptions
 
-	opts.temperature = floatFlag{name: "temperature", min: 0}
-	opts.topP = floatFlag{name: "top-p", min: 0, max: 1, hasMax: true}
-	opts.routeBudget = floatFlag{name: "route-budget", min: 0}
-	opts.routeCacheReuse = floatFlag{name: "route-cache-reuse", min: 0, max: 1, hasMax: true}
-	opts.evaluationCost = floatFlag{name: "evaluation-cost", min: 0}
-	opts.evaluationConfidence = floatFlag{name: "evaluation-confidence", min: 0, max: 1, hasMax: true}
-	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
-	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
-	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
-	opts.seed = nonNegativeIntFlag{name: "seed"}
-	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
-	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}
-	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
-	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
+	initCLIFlagValues(&opts)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

@@ -31,22 +31,7 @@ const (
 func parseOptions() cliOptions {
 	var opts cliOptions
 
-	opts.temperature = floatFlag{name: "temperature", min: 0}
-	opts.topP = floatFlag{name: "top-p", min: 0, max: 1, hasMax: true}
-	opts.routeBudget = floatFlag{name: "route-budget", min: 0}
-	opts.routeCacheReuse = floatFlag{name: "route-cache-reuse", min: 0, max: 1, hasMax: true}
-	opts.evaluationCost = floatFlag{name: "evaluation-cost", min: 0}
-	opts.evaluationConfidence = floatFlag{name: "evaluation-confidence", min: 0, max: 1, hasMax: true}
-	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
-	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
-	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
-	opts.seed = nonNegativeIntFlag{name: "seed"}
-	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
-	opts.memoryTTL = positiveIntFlag{name: "memory-ttl-seconds"}
-	opts.agentMemoryTTL = positiveIntFlag{name: "agent-memory-ttl-seconds"}
-	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}
-	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
-	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
+	initCLIFlagValues(&opts)
 	registerCLIFlags(&opts)
 
 	flag.Usage = groupedUsage
@@ -74,6 +59,32 @@ func parseOptions() cliOptions {
 	applyDebugEnvOptions(&opts, os.Getenv)
 
 	return opts
+}
+
+func initCLIFlagValues(opts *cliOptions) {
+	opts.temperature = floatFlag{name: "temperature", min: 0}
+	opts.topP = floatFlag{name: "top-p", min: 0, max: 1, hasMax: true}
+	opts.routeBudget = floatFlag{name: "route-budget", min: 0}
+	opts.routeCacheReuse = floatFlag{name: "route-cache-reuse", min: 0, max: 1, hasMax: true}
+	opts.evaluationCost = floatFlag{name: "evaluation-cost", min: 0}
+	opts.evaluationConfidence = floatFlag{name: "evaluation-confidence", min: 0, max: 1, hasMax: true}
+	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
+	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
+	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
+	opts.seed = nonNegativeIntFlag{name: "seed"}
+	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
+	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}
+	opts.memoryTTL = positiveIntFlag{name: "memory-ttl-seconds"}
+	opts.agentMemoryTTL = positiveIntFlag{name: "agent-memory-ttl-seconds"}
+	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
+	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
+	opts.spawnTaskTimeout = positiveIntFlag{name: "spawn-task-timeout-seconds"}
+	opts.spawnMaxConcurrency = positiveIntFlag{name: "spawn-max-concurrency"}
+	opts.spawnTokenBudget = positiveIntFlag{name: "spawn-token-budget"}
+	opts.spawnCostBudgetMicros = positiveIntFlag{name: "spawn-cost-budget-micros"}
+	opts.spawnOutputBudgetBytes = positiveIntFlag{name: "spawn-output-budget-bytes"}
+	opts.spawnRetryBackoff = positiveIntFlag{name: "spawn-retry-backoff-seconds"}
+	opts.spawnRetries = nonNegativeIntFlag{name: "spawn-retries"}
 }
 
 func applyPositionalOptions(opts *cliOptions, args []string) {

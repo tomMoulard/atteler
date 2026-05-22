@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ type spawnAgentsCommandInput struct {
 	Binary         string
 	TimeoutSeconds int
 	DryRun         bool
+	Execution      childExecutionCommandInput
 }
 
 func bashCommandInputFromOptions(opts cliOptions) bashCommandInput {
@@ -41,6 +43,7 @@ func spawnAgentsCommandInputFromOptions(opts cliOptions) spawnAgentsCommandInput
 		Binary:         opts.spawnBinary,
 		TimeoutSeconds: opts.spawnTimeout.value,
 		DryRun:         opts.spawnDryRun,
+		Execution:      childExecutionCommandInputFromOptions(opts),
 	}
 }
 
@@ -145,10 +148,17 @@ func runSpawnAgents(ctx context.Context, state appState, input spawnAgentsComman
 		},
 	})
 
-	results, runErr := subagent.SpawnAll(ctx, requests, subagent.AttelerCommandWithOptions(subagent.CommandOptions{
-		Binary: resolveSpawnBinary(input.Binary),
-		Dir:    state.cwd,
-	}))
+	spawnOpts, err := subagentOptionsFromInput(state, input.Execution, "spawn")
+	if err != nil {
+		return err
+	}
+
+	results, runErr := subagent.SpawnAllDetailed(ctx, requests, subagent.AttelerCommandDetailedWithOptions(subagent.CommandOptions{
+		Args:           subagentCommandArgs(state),
+		Binary:         resolveSpawnBinary(input.Binary),
+		Dir:            state.cwd,
+		MaxOutputBytes: int64(input.Execution.OutputBudgetBytes),
+	}), spawnOpts)
 	fmt.Print(formatSpawnResults(results))
 
 	if runErr != nil {
@@ -182,6 +192,111 @@ func subagentCommandArgs(state appState) []string {
 	}
 
 	return args
+}
+
+func subagentOptions(state appState, opts cliOptions, kind string) (subagent.Options, error) {
+	return subagentOptionsFromInput(state, childExecutionCommandInputFromOptions(opts), kind)
+}
+
+func subagentOptionsFromInput(state appState, input childExecutionCommandInput, kind string) (subagent.Options, error) {
+	ledgerPath, err := childExecutionLedgerPathFromInput(state, input, kind)
+	if err != nil {
+		return subagent.Options{}, err
+	}
+
+	spawnOpts := subagent.Options{
+		LedgerPath:        ledgerPath,
+		AllowedWriteScope: state.cwd,
+		WorkspaceID:       state.sessionState.ID,
+		Model:             state.selectedModel,
+		Provider:          providerNameFromModel(state.selectedModel),
+		CancelOnFailure:   input.CancelOnFailure,
+		Resume:            input.Resume,
+	}
+
+	if input.MaxConcurrency > 0 {
+		spawnOpts.MaxConcurrency = input.MaxConcurrency
+	}
+
+	if input.TaskTimeoutSeconds > 0 {
+		spawnOpts.Timeout = time.Duration(input.TaskTimeoutSeconds) * time.Second
+	}
+
+	if input.RetriesSet {
+		spawnOpts.RetryPolicy.MaxAttempts = input.Retries + 1
+	}
+
+	if input.RetryBackoffSeconds > 0 {
+		spawnOpts.RetryPolicy.Backoff = time.Duration(input.RetryBackoffSeconds) * time.Second
+	}
+
+	if input.TokenBudget > 0 {
+		spawnOpts.Budget.MaxPromptTokens = input.TokenBudget
+	}
+
+	if input.CostBudgetMicros > 0 {
+		spawnOpts.Budget.MaxCostMicros = int64(input.CostBudgetMicros)
+	}
+
+	if input.OutputBudgetBytes > 0 {
+		spawnOpts.Budget.MaxOutputBytes = int64(input.OutputBudgetBytes)
+	}
+
+	return spawnOpts, nil
+}
+
+func childExecutionLedgerPath(state appState, opts cliOptions, kind string) (string, error) {
+	return childExecutionLedgerPathFromInput(state, childExecutionCommandInputFromOptions(opts), kind)
+}
+
+func childExecutionLedgerPathFromInput(state appState, input childExecutionCommandInput, kind string) (string, error) {
+	if strings.TrimSpace(input.LedgerPath) != "" {
+		return strings.TrimSpace(input.LedgerPath), nil
+	}
+
+	if input.Resume {
+		return "", fmt.Errorf("%s resume requires --spawn-ledger", kind)
+	}
+
+	cwd := strings.TrimSpace(state.cwd)
+	if cwd == "" {
+		cwd = "."
+	}
+
+	runID := state.sessionState.ID
+	if strings.TrimSpace(runID) == "" {
+		runID = time.Now().UTC().Format("20060102-150405.000000000")
+	}
+
+	return filepath.Join(cwd, ".atteler", "runs", kind+"-"+runID+"-"+time.Now().UTC().Format("150405.000000000"), "ledger.json"), nil
+}
+
+func providerNameFromModel(model string) string {
+	provider, _, ok := strings.Cut(strings.TrimSpace(model), "/")
+	if !ok {
+		return ""
+	}
+
+	return strings.TrimSpace(provider)
+}
+
+func childStatusForDisplay(status, errText string) string {
+	if strings.TrimSpace(status) == "" {
+		if errText != "" {
+			return statusError
+		}
+
+		return "ok"
+	}
+
+	switch status {
+	case "succeeded":
+		return "ok"
+	case "failed":
+		return statusError
+	default:
+		return status
+	}
 }
 
 func parseSpawnAgentSpecs(specs []string) ([]subagent.Request, error) {
@@ -224,7 +339,8 @@ func parseSpawnAgentSpec(raw string, index int) (subagent.Request, error) {
 
 func validateSpawnRequests(requests []subagent.Request) error {
 	seen := make(map[string]struct{}, len(requests))
-	for i, request := range requests {
+	for i := range requests {
+		request := requests[i]
 		if strings.TrimSpace(request.ID) == "" {
 			return fmt.Errorf("spawn agent request %d: id is required", i)
 		}
@@ -251,7 +367,8 @@ func formatSpawnDryRun(requests []subagent.Request) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Would spawn %d sub-agent(s).\n", len(requests))
 
-	for _, request := range requests {
+	for i := range requests {
+		request := requests[i]
 		fmt.Fprintf(&b, "id=%s\tagent=%s\tprompt=%s\n", request.ID, request.Agent, request.Prompt)
 	}
 
@@ -265,11 +382,9 @@ func formatSpawnResults(results []subagent.Result) string {
 
 	var b strings.Builder
 
-	for _, result := range results {
-		status := "ok"
-		if result.Error != "" {
-			status = statusError
-		}
+	for i := range results {
+		result := results[i]
+		status := childStatusForDisplay(result.Status, result.Error)
 
 		fmt.Fprintf(
 			&b,
@@ -279,6 +394,20 @@ func formatSpawnResults(results []subagent.Result) string {
 			status,
 			result.Duration.Round(time.Millisecond),
 		)
+
+		if strings.TrimSpace(result.LedgerPath) != "" {
+			fmt.Fprintf(&b, "ledger=%s\n", result.LedgerPath)
+		}
+
+		if strings.TrimSpace(result.TranscriptPath) != "" {
+			fmt.Fprintf(&b, "transcript=%s\n", result.TranscriptPath)
+		}
+
+		for _, artifact := range result.Artifacts {
+			if strings.TrimSpace(artifact) != "" {
+				fmt.Fprintf(&b, "artifact=%s\n", artifact)
+			}
+		}
 
 		if strings.TrimSpace(result.Output) != "" {
 			fmt.Fprintf(&b, "output=%s\n", strings.TrimSpace(result.Output))
