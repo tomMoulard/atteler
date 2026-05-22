@@ -3,12 +3,15 @@
 package githistory
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 const (
@@ -177,9 +180,152 @@ func (idx *Index) Search(query string, limit int) []Result {
 	return out
 }
 
+// SearchRetrieval returns git history matches using the shared retrieval
+// contract.
+func (idx *Index) SearchRetrieval(ctx context.Context, query retrieval.Query) ([]retrieval.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("githistory retrieval: %w", err)
+	}
+
+	results := idx.Search(query.Text, query.Limit)
+	out := make([]retrieval.Result, 0, len(results))
+
+	for i := range results {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("githistory retrieval: %w", err)
+		}
+
+		result := results[i]
+		out = append(out, gitRetrievalResult(result, query))
+	}
+
+	return out, nil
+}
+
 type rankedResult struct {
 	result Result
 	order  int
+}
+
+func gitRetrievalResult(result Result, query retrieval.Query) retrieval.Result {
+	commit := result.Commit
+	documentID := commit.Hash
+	source := retrieval.Source{Type: retrieval.SourceGitHistory, Name: "git log"}
+	text, safety := retrieval.Sanitize(commitText(commit), retrieval.PolicyContext{
+		Source:     source,
+		DocumentID: documentID,
+	})
+	chunk := retrieval.BestChunkForTerms(documentID, text, tokenize(query.Text), retrieval.ChunkOptions{})
+
+	snippet := retrieval.Snippet(chunk.Text, snippetRadius*2)
+	if len(result.Snippets) > 0 && result.Snippets[0].Text != "" {
+		var snippetSafety retrieval.Safety
+
+		snippet, snippetSafety = retrieval.Sanitize(result.Snippets[0].Text, retrieval.PolicyContext{
+			Source:     source,
+			DocumentID: documentID,
+		})
+		safety = retrieval.MergeSafety(safety, snippetSafety)
+	}
+
+	metadata := map[string]string{
+		"hash": commit.Hash,
+	}
+
+	if subject := sanitizedGitMetadata(commit.Subject, source, documentID, "subject", &safety); subject != "" {
+		metadata["subject"] = subject
+	}
+
+	if commit.AuthorName != "" {
+		metadata["author_name"] = sanitizedGitMetadata(commit.AuthorName, source, documentID, "author_name", &safety)
+	}
+
+	if commit.AuthorEmail != "" {
+		metadata["author_email"] = sanitizedGitMetadata(commit.AuthorEmail, source, documentID, "author_email", &safety)
+	}
+
+	if len(commit.Files) > 0 {
+		metadata["files"] = sanitizedGitMetadata(strings.Join(commit.Files, "\n"), source, documentID, "files", &safety)
+	}
+
+	if len(result.Snippets) > 0 {
+		metadata["matched_field"] = result.Snippets[0].Field
+	}
+
+	var metadataSafety retrieval.Safety
+
+	metadata, metadataSafety = retrieval.SanitizeMetadata(metadata, retrieval.PolicyContext{
+		Source:     source,
+		Metadata:   metadata,
+		DocumentID: documentID,
+	})
+	safety = retrieval.MergeSafety(safety, metadataSafety)
+
+	if !retrieval.IsDefaultSafety(safety) {
+		metadata = retrieval.MergeSafetyMetadata(metadata, safety)
+	}
+
+	scorer := retrieval.Scorer{
+		Name: "git-history-weighted-lexical",
+		Raw:  float64(result.Score),
+		Details: map[string]float64{
+			"weighted_score": float64(result.Score),
+		},
+	}
+	if query.Explain {
+		scorer.Explanation = []string{"ranked by weighted lexical matches across subject, body, files, author, and hash"}
+	}
+
+	return retrieval.NormalizeResult(retrieval.Result{
+		Source:     source,
+		DocumentID: documentID,
+		Chunk:      chunk.Chunk,
+		Score:      retrieval.NormalizeRawScore(float64(result.Score)),
+		Scorer:     scorer,
+		Snippet:    snippet,
+		Metadata:   metadata,
+		Freshness: retrieval.Freshness{
+			SourceUpdatedAt: commit.Date,
+			Status:          "current",
+		},
+		Safety: safety,
+	})
+}
+
+func sanitizedGitMetadata(value string, source retrieval.Source, documentID, field string, safety *retrieval.Safety) string {
+	sanitized, fieldSafety := retrieval.Sanitize(value, retrieval.PolicyContext{
+		Source:     source,
+		Metadata:   map[string]string{"field": field},
+		DocumentID: documentID,
+	})
+	*safety = retrieval.MergeSafety(*safety, fieldSafety)
+
+	return sanitized
+}
+
+func commitText(commit Commit) string {
+	var parts []string
+	if commit.Subject != "" {
+		parts = append(parts, commit.Subject)
+	}
+
+	if commit.Body != "" {
+		parts = append(parts, commit.Body)
+	}
+
+	if len(commit.Files) > 0 {
+		parts = append(parts, strings.Join(commit.Files, "\n"))
+	}
+
+	if commit.AuthorName != "" || commit.AuthorEmail != "" {
+		parts = append(parts, commit.AuthorName+" "+commit.AuthorEmail)
+	}
+
+	if commit.Hash != "" {
+		parts = append(parts, commit.Hash)
+	}
+
+	return strings.Join(parts, "\n")
 }
 
 func parseHeader(line string) (Commit, error) {

@@ -2,10 +2,12 @@ package memory
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -73,6 +75,36 @@ func TestFromSessions_IndexesMessagesAndMetadataWithStableSource(t *testing.T) {
 
 	if !reflect.DeepEqual(results[0].Matches, []string{"oauth", "tokens"}) {
 		t.Fatalf("matches = %#v, want oauth/tokens", results[0].Matches)
+	}
+}
+
+func TestStore_AddSession_RedactsPrivateTranscriptBeforeStorage(t *testing.T) {
+	t.Parallel()
+
+	saved := session.Session{
+		ID: "session-secret",
+		Messages: []llm.Message{{
+			Role:    llm.RoleUser,
+			Content: "OAuth callback api_key=super-secret-token",
+		}},
+	}
+
+	store := NewStore()
+	if err := store.AddSession(saved); err != nil {
+		t.Fatalf("AddSession() error = %v", err)
+	}
+
+	message := findDocument(t, store, "session/session-secret/message/0")
+	if strings.Contains(message.Text, "super-secret-token") {
+		t.Fatalf("stored session text leaked secret: %q", message.Text)
+	}
+
+	if message.Metadata[retrieval.MetadataSafetyInjectAllowed] != "false" {
+		t.Fatalf("inject_allowed = %q, want false for private transcript", message.Metadata[retrieval.MetadataSafetyInjectAllowed])
+	}
+
+	if message.Metadata[retrieval.MetadataSafetyPrivate] != "true" || message.Metadata[retrieval.MetadataSafetyRedacted] != "true" {
+		t.Fatalf("safety metadata = %#v, want private redacted transcript", message.Metadata)
 	}
 }
 

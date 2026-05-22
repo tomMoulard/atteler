@@ -1,0 +1,22 @@
+{
+  "documents": [
+    {
+      "id": "oauth-callback",
+      "text": "OAuth callback handlers must validate state and rotate retry tokens after failures."
+    },
+    {
+      "id": "release-notes",
+      "text": "Release notes summarize documentation updates and migration steps."
+    },
+    {
+      "id": "agent-memory",
+      "text": "Agent memory stores reusable debugging context for future retrieval."
+    }
+  ],
+  "queries": [
+    {
+      "text": "oauth callback tokens",
+      "want_top": "oauth-callback"
+    }
+  ]
+}

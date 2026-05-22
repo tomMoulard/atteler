@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 func TestStore_SearchCosineRanking(t *testing.T) {
@@ -400,4 +402,62 @@ func TestNewEmbeddingVectorizer_Defaults(t *testing.T) {
 	assert.Equal(t, defaultEmbeddingBaseURL, v.baseURL)
 	assert.Equal(t, defaultEmbeddingModel, v.model)
 	assert.NotNil(t, v.client)
+}
+
+func TestSearcher_SearchRetrievalRedactsUnsafeSnippets(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+	vec, err := vectorizer.Vectorize("oauth callback api_key=super-secret-token")
+	require.NoError(t, err)
+
+	store, err := NewStore(16)
+	require.NoError(t, err)
+	require.NoError(t, store.Add(Document{ID: "secret", Text: "oauth callback api_key=super-secret-token", Vector: vec, Metadata: map[string]string{"path": ".env"}}))
+
+	results, err := Searcher{Store: store, Vectorizer: vectorizer, Source: retrieval.Source{Type: retrieval.SourceVector, Name: "fixture"}}.SearchRetrieval(context.Background(), retrieval.Query{Text: "oauth callback", IncludeUnsafe: true, Explain: true})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, retrieval.SourceVector, results[0].Source.Type)
+	assert.False(t, results[0].Safety.InjectAllowed)
+	assert.True(t, results[0].Safety.Redacted)
+	assert.NotContains(t, results[0].Snippet, "super-secret-token")
+	assert.NotEmpty(t, results[0].Metadata[retrieval.MetadataStableID])
+	assert.NotEmpty(t, results[0].Metadata[retrieval.MetadataContentHash])
+	assert.Equal(t, "hashed-vector-cosine", results[0].Scorer.Name)
+	assert.NotEmpty(t, results[0].Scorer.Explanation)
+}
+
+func TestSearcher_SearchRetrievalRedactsPreFlaggedRawText(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+	vec, err := vectorizer.Vectorize("oauth callback api_key=super-secret-token")
+	require.NoError(t, err)
+
+	store, err := NewStore(16)
+	require.NoError(t, err)
+	require.NoError(t, store.Add(Document{
+		ID:     "secret",
+		Text:   "oauth callback api_key=super-secret-token",
+		Vector: vec,
+		Metadata: map[string]string{
+			retrieval.MetadataSafetyInjectAllowed: "false",
+			retrieval.MetadataSafetySensitive:     "true",
+			"api_key":                             "metadata-secret-token",
+		},
+	}))
+
+	results, err := Searcher{Store: store, Vectorizer: vectorizer, Source: retrieval.Source{Type: retrieval.SourceVector, Name: "fixture"}}.SearchRetrieval(context.Background(), retrieval.Query{Text: "oauth callback", IncludeUnsafe: true})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.False(t, results[0].Safety.InjectAllowed)
+	assert.True(t, results[0].Safety.Redacted)
+	assert.NotContains(t, results[0].Snippet, "super-secret-token")
+	assert.Contains(t, results[0].Snippet, "[REDACTED]")
+	assert.Equal(t, "[REDACTED]", results[0].Metadata["api_key"])
+	assert.NotContains(t, results[0].Metadata["api_key"], "metadata-secret-token")
+	assert.NotContains(t, results[0].Metadata[retrieval.MetadataSafetyReasons], ";;")
 }

@@ -139,6 +139,14 @@ func providerlessConfigLocalAnalysisCommands() []command {
 			},
 		},
 		{
+			name:  "retrieval-search",
+			tier:  tierProviderlessConfig,
+			match: func(o cliOptions) bool { return o.retrievalSearch != "" },
+			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
+				return runRetrievalCommand(ctx, s, retrievalCommandInputFromOptions(o))
+			},
+		},
+		{
 			name:  "watch-loop-providerless",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.watchLoop },

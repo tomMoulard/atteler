@@ -1,15 +1,19 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 const (
@@ -23,10 +27,16 @@ type SearchResult struct {
 	Summary  Summary
 }
 
-// SearchSnippet is a matching transcript excerpt.
+// SearchSnippet is a matching transcript excerpt with enough provenance to cite
+// the original session item instead of only the session file.
+//
+//nolint:govet // Layout prioritizes API readability over pointer-byte packing.
 type SearchSnippet struct {
-	Role llm.Role
-	Text string
+	Range retrieval.Range
+	Role  llm.Role
+	Kind  string
+	Text  string
+	Index int
 }
 
 // Search returns saved sessions whose metadata or transcript contains query.
@@ -73,6 +83,35 @@ func (s *Store) Search(query string) ([]SearchResult, error) {
 	return results, nil
 }
 
+// SearchRetrieval returns saved session matches using the shared retrieval
+// contract.
+func (s *Store) SearchRetrieval(ctx context.Context, query retrieval.Query) ([]retrieval.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("session retrieval: %w", err)
+	}
+
+	results, err := s.Search(query.Text)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]retrieval.Result, 0, len(results))
+	for i := range results {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("session retrieval: %w", err)
+		}
+
+		result := results[i]
+		out = append(out, sessionRetrievalResults(result, query)...)
+
+		if query.Limit > 0 && len(out) >= query.Limit {
+			return out[:query.Limit], nil
+		}
+	}
+
+	return out, nil
+}
+
 func matchSession(summary Summary, session Session, query, normalizedQuery string) (SearchResult, bool) {
 	result := SearchResult{Summary: summary}
 	matched := strings.Contains(strings.ToLower(summary.ID), normalizedQuery) ||
@@ -89,17 +128,157 @@ func matchSession(summary Summary, session Session, query, normalizedQuery strin
 	return result, matched || len(result.Snippets) > 0
 }
 
+func sessionRetrievalResults(result SearchResult, query retrieval.Query) []retrieval.Result {
+	documentID := "session/" + result.Summary.ID
+	rawScore := 1 + float64(len(result.Snippets))
+
+	baseMetadata := map[string]string{
+		"session_id": result.Summary.ID,
+	}
+
+	if result.Summary.Title != "" {
+		baseMetadata["session_title"] = result.Summary.Title
+	}
+
+	if result.Summary.DefaultAgent != "" {
+		baseMetadata["default_agent"] = result.Summary.DefaultAgent
+	}
+
+	if result.Summary.DefaultModel != "" {
+		baseMetadata["default_model"] = result.Summary.DefaultModel
+	}
+
+	if len(result.Snippets) == 0 {
+		text := strings.TrimSpace(result.Summary.Title)
+		if text == "" {
+			text = result.Summary.ID
+		}
+
+		metadata := cloneStringMap(baseMetadata)
+		metadata["kind"] = "metadata"
+
+		return []retrieval.Result{sessionRetrievalResult(
+			documentID,
+			0,
+			text,
+			retrieval.Range{Unit: retrieval.RangeUnitRuneOffset, Start: 0, End: len([]rune(text))},
+			metadata,
+			result.Summary,
+			rawScore,
+			query,
+		)}
+	}
+
+	out := make([]retrieval.Result, 0, len(result.Snippets))
+	for i, snippet := range result.Snippets {
+		metadata := cloneStringMap(baseMetadata)
+
+		metadata["role"] = string(snippet.Role)
+		if snippet.Kind != "" {
+			metadata["kind"] = snippet.Kind
+			metadata["index"] = strconv.Itoa(snippet.Index)
+		}
+
+		out = append(out, sessionRetrievalResult(documentID, i, snippet.Text, snippet.Range, metadata, result.Summary, rawScore, query))
+	}
+
+	return out
+}
+
+func sessionRetrievalResult(
+	documentID string,
+	index int,
+	text string,
+	sourceRange retrieval.Range,
+	metadata map[string]string,
+	summary Summary,
+	rawScore float64,
+	query retrieval.Query,
+) retrieval.Result {
+	source := retrieval.Source{Type: retrieval.SourceSession, Name: summary.ID, URI: summary.Path}
+
+	policyContext := retrieval.PolicyContext{
+		Source:     source,
+		Metadata:   metadata,
+		DocumentID: documentID,
+		Path:       summary.Path,
+	}
+	text, safety := retrieval.Sanitize(text, policyContext)
+
+	var metadataSafety retrieval.Safety
+
+	metadata, metadataSafety = retrieval.SanitizeMetadata(metadata, policyContext)
+	safety = retrieval.MergeSafety(safety, metadataSafety)
+
+	if !retrieval.IsDefaultSafety(safety) {
+		metadata = retrieval.MergeSafetyMetadata(metadata, safety)
+	}
+
+	if sourceRange.Unit == "" {
+		sourceRange = retrieval.Range{Unit: retrieval.RangeUnitRuneOffset, Start: 0, End: len([]rune(text))}
+	}
+
+	chunk := retrieval.Chunk{
+		ID:          retrieval.StableChunkID(documentID, index, sourceRange.Start, sourceRange.End, text),
+		Index:       index,
+		Range:       sourceRange,
+		ContentHash: retrieval.TextHash(text),
+	}
+
+	scorer := retrieval.Scorer{
+		Name: "session-recency-lexical",
+		Raw:  rawScore,
+		Details: map[string]float64{
+			"snippets": max(0, rawScore-1),
+		},
+	}
+	if query.Explain {
+		scorer.Explanation = []string{"session matched metadata or transcript text; session search preserves newest-updated ordering"}
+	}
+
+	return retrieval.NormalizeResult(retrieval.Result{
+		Source:     source,
+		DocumentID: documentID,
+		Chunk:      chunk,
+		Score:      retrieval.NormalizeRawScore(rawScore),
+		Scorer:     scorer,
+		Snippet:    retrieval.Snippet(text, snippetRadius*2),
+		Metadata:   metadata,
+		Freshness: retrieval.Freshness{
+			SourceUpdatedAt: summary.UpdatedAt,
+			Status:          "current",
+		},
+		Safety: retrieval.SafetyFromMetadata(metadata),
+	})
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(in))
+	maps.Copy(out, in)
+
+	return out
+}
+
 func messageSnippets(messages []llm.Message, query, normalizedQuery string) []SearchSnippet {
 	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
 
-	for _, message := range messages {
+	for i, message := range messages {
 		if !matchesMessage(message, normalizedQuery) {
 			continue
 		}
 
+		snippet := searchSnippet(message.Content, query)
+
 		snippets = append(snippets, SearchSnippet{
-			Role: message.Role,
-			Text: searchSnippet(message.Content, query),
+			Kind:  "message",
+			Index: i,
+			Role:  message.Role,
+			Text:  snippet.Text,
+			Range: snippet.Range,
 		})
 		if len(snippets) >= maxSnippetsPerSession {
 			return snippets
@@ -112,14 +291,19 @@ func messageSnippets(messages []llm.Message, query, normalizedQuery string) []Se
 func negativeKnowledgeSnippets(entries []NegativeKnowledge, query, normalizedQuery string) []SearchSnippet {
 	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
 
-	for _, entry := range entries {
+	for i, entry := range entries {
 		if !matchesNegativeKnowledge(entry, normalizedQuery) {
 			continue
 		}
 
+		snippet := searchSnippet(negativeKnowledgeSearchText(entry), query)
+
 		snippets = append(snippets, SearchSnippet{
-			Role: llm.Role("negative_knowledge"),
-			Text: searchSnippet(negativeKnowledgeSearchText(entry), query),
+			Kind:  "negative_knowledge",
+			Index: i,
+			Role:  llm.Role("negative_knowledge"),
+			Text:  snippet.Text,
+			Range: snippet.Range,
 		})
 		if len(snippets) >= maxSnippetsPerSession {
 			return snippets
@@ -132,14 +316,19 @@ func negativeKnowledgeSnippets(entries []NegativeKnowledge, query, normalizedQue
 func evaluationSnippets(entries []AgentEvaluation, query, normalizedQuery string) []SearchSnippet {
 	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
 
-	for _, entry := range entries {
+	for i, entry := range entries {
 		if !matchesEvaluation(entry, normalizedQuery) {
 			continue
 		}
 
+		snippet := searchSnippet(evaluationSearchText(entry), query)
+
 		snippets = append(snippets, SearchSnippet{
-			Role: llm.Role("evaluation"),
-			Text: searchSnippet(evaluationSearchText(entry), query),
+			Kind:  "evaluation",
+			Index: i,
+			Role:  llm.Role("evaluation"),
+			Text:  snippet.Text,
+			Range: snippet.Range,
 		})
 		if len(snippets) >= maxSnippetsPerSession {
 			return snippets
@@ -152,14 +341,19 @@ func evaluationSnippets(entries []AgentEvaluation, query, normalizedQuery string
 func artifactSnippets(entries []Artifact, query, normalizedQuery string) []SearchSnippet {
 	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
 
-	for _, entry := range entries {
+	for i, entry := range entries {
 		if !matchesArtifact(entry, normalizedQuery) {
 			continue
 		}
 
+		snippet := searchSnippet(artifactSearchText(entry), query)
+
 		snippets = append(snippets, SearchSnippet{
-			Role: llm.Role("artifact"),
-			Text: searchSnippet(artifactSearchText(entry), query),
+			Kind:  "artifact",
+			Index: i,
+			Role:  llm.Role("artifact"),
+			Text:  snippet.Text,
+			Range: snippet.Range,
 		})
 		if len(snippets) >= maxSnippetsPerSession {
 			return snippets
@@ -261,13 +455,22 @@ func artifactSearchText(entry Artifact) string {
 	return strings.Join(parts, " | ")
 }
 
-func searchSnippet(content, query string) string {
+//nolint:govet // Layout prioritizes API readability over pointer-byte packing.
+type rangedSnippet struct {
+	Range retrieval.Range
+	Text  string
+}
+
+func searchSnippet(content, query string) rangedSnippet {
 	contentRunes := []rune(content)
 	queryRunes := []rune(strings.ToLower(query))
 
 	index := runeIndex([]rune(strings.ToLower(content)), queryRunes)
 	if index < 0 {
-		return compactWhitespace(content)
+		return rangedSnippet{
+			Text:  compactWhitespace(content),
+			Range: retrieval.Range{Unit: retrieval.RangeUnitRuneOffset, Start: 0, End: len(contentRunes)},
+		}
 	}
 
 	start := max(0, index-snippetRadius)
@@ -282,7 +485,10 @@ func searchSnippet(content, query string) string {
 		snippet += "…"
 	}
 
-	return compactWhitespace(snippet)
+	return rangedSnippet{
+		Text:  compactWhitespace(snippet),
+		Range: retrieval.Range{Unit: retrieval.RangeUnitRuneOffset, Start: start, End: end},
+	}
 }
 
 func runeIndex(haystack, needle []rune) int {

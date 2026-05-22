@@ -8,15 +8,23 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/tommoulard/atteler/pkg/agentmemory"
 	"github.com/tommoulard/atteler/pkg/contextpack"
+	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/lsp"
 	"github.com/tommoulard/atteler/pkg/memory"
+	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/vector"
+)
+
+const (
+	retrievalSourceAll     = "all"
+	retrievalSourceSession = "session"
 )
 
 func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
@@ -360,13 +368,28 @@ func addVectorFile(store *vector.Store, vectorizer *vector.TextVectorizer, path 
 		return fmt.Errorf("vector search: %s is not valid UTF-8", path)
 	}
 
-	vec, err := vectorizer.Vectorize(string(data))
+	clean := filepath.Clean(path)
+	text, safety := retrieval.Sanitize(string(data), retrieval.PolicyContext{
+		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: clean, URI: clean},
+		DocumentID: clean,
+		Path:       clean,
+	})
+
+	vec, err := vectorizer.Vectorize(text)
 	if err != nil {
 		return fmt.Errorf("vector search: vectorize %s: %w", path, err)
 	}
 
-	clean := filepath.Clean(path)
-	if err := store.Add(vector.Document{ID: clean, Text: string(data), Vector: vec, Metadata: map[string]string{"path": clean}}); err != nil {
+	metadata := map[string]string{"path": clean}
+	if info, statErr := os.Stat(path); statErr == nil && !info.ModTime().IsZero() {
+		metadata[retrieval.MetadataSourceUpdatedAt] = info.ModTime().UTC().Format(time.RFC3339Nano)
+	}
+
+	if !retrieval.IsDefaultSafety(safety) {
+		metadata = retrieval.MergeSafetyMetadata(metadata, safety)
+	}
+
+	if err := store.Add(vector.Document{ID: clean, Text: text, Vector: vec, Metadata: metadata}); err != nil {
 		return fmt.Errorf("vector search: index %s: %w", path, err)
 	}
 
@@ -481,6 +504,375 @@ func formatAgentMemoryResult(result agentmemory.Result) string {
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func runRetrievalCommand(ctx context.Context, state appState, input retrievalCommandInput) error {
+	query := strings.TrimSpace(input.Search)
+	if query == "" {
+		return errors.New("retrieval: --retrieval-search is required")
+	}
+
+	limit := input.Limit
+	if limit == 0 {
+		limit = 5
+	}
+
+	sources, err := selectedRetrievalSources(input)
+	if err != nil {
+		return err
+	}
+
+	filters, err := retrievalFilters(input.Filters)
+	if err != nil {
+		return err
+	}
+
+	searchers, err := retrievalSearchers(ctx, state, input, sources)
+	if err != nil {
+		return err
+	}
+
+	if len(searchers) == 0 {
+		return errors.New("retrieval: no searchable sources selected")
+	}
+
+	results, err := retrieval.Search(ctx, retrieval.Query{
+		Text:          query,
+		Limit:         limit,
+		Filters:       filters,
+		Sources:       sources,
+		Explain:       input.Explain,
+		IncludeUnsafe: input.IncludeUnsafe,
+	}, searchers...)
+	if err != nil {
+		return fmt.Errorf("retrieval: search: %w", err)
+	}
+
+	if len(results) == 0 {
+		fmt.Println("No retrieval results found.")
+		return nil
+	}
+
+	for i := range results {
+		fmt.Println(formatRetrievalResult(results[i], input.Explain))
+	}
+
+	return nil
+}
+
+func retrievalFilters(rawFilters []string) (map[string]string, error) {
+	if len(rawFilters) == 0 {
+		return nil, nil
+	}
+
+	filters := make(map[string]string, len(rawFilters))
+	for _, raw := range rawFilters {
+		key, value, ok := strings.Cut(raw, "=")
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+
+		if !ok || key == "" {
+			return nil, fmt.Errorf("retrieval: invalid --retrieval-filter %q, want key=value", raw)
+		}
+
+		filters[key] = value
+	}
+
+	return filters, nil
+}
+
+func selectedRetrievalSources(input retrievalCommandInput) ([]retrieval.SourceType, error) {
+	if len(input.Sources) == 0 {
+		return []retrieval.SourceType{retrieval.SourceMemory, retrieval.SourceFile, retrieval.SourceSession}, nil
+	}
+
+	seen := make(map[retrieval.SourceType]struct{}, len(input.Sources))
+
+	out := make([]retrieval.SourceType, 0, len(input.Sources))
+	for _, raw := range input.Sources {
+		source, all, err := parseRetrievalSource(raw)
+		if err != nil {
+			return nil, err
+		}
+
+		if all {
+			return allRetrievalSources(input), nil
+		}
+
+		if _, ok := seen[source]; ok {
+			continue
+		}
+
+		seen[source] = struct{}{}
+		out = append(out, source)
+	}
+
+	return out, nil
+}
+
+func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {
+	switch strings.ToLower(strings.TrimSpace(strings.ReplaceAll(raw, "-", "_"))) {
+	case retrievalSourceAll:
+		return "", true, nil
+	case "memory", "mem":
+		return retrieval.SourceMemory, false, nil
+	case "file", "files":
+		return retrieval.SourceFile, false, nil
+	case retrievalSourceSession, "sessions":
+		return retrieval.SourceSession, false, nil
+	case "git", "history", "git_history", "githistory":
+		return retrieval.SourceGitHistory, false, nil
+	case "vector", "vectors":
+		return retrieval.SourceVector, false, nil
+	case "agent", "agent_memory", "agentmemory":
+		return retrieval.SourceAgentMemory, false, nil
+	default:
+		return "", false, fmt.Errorf("retrieval: unknown source %q", raw)
+	}
+}
+
+func allRetrievalSources(input retrievalCommandInput) []retrieval.SourceType {
+	sources := []retrieval.SourceType{
+		retrieval.SourceMemory,
+		retrieval.SourceFile,
+		retrieval.SourceSession,
+		retrieval.SourceGitHistory,
+	}
+	if len(input.VectorIndexFiles) > 0 {
+		sources = append(sources, retrieval.SourceVector)
+	}
+
+	if strings.TrimSpace(input.AgentMemoryAgent) != "" || strings.TrimSpace(input.AgentName) != "" || strings.TrimSpace(input.AgentMemoryStorePath) != "" {
+		sources = append(sources, retrieval.SourceAgentMemory)
+	}
+
+	return sources
+}
+
+func retrievalSearchers(
+	ctx context.Context,
+	state appState,
+	input retrievalCommandInput,
+	sources []retrieval.SourceType,
+) ([]retrieval.Searcher, error) {
+	searchers := make([]retrieval.Searcher, 0, len(sources))
+
+	sourceSet := retrievalSourceSet(sources)
+	if sourceSet[retrieval.SourceMemory] || sourceSet[retrieval.SourceFile] {
+		searcher, err := buildRetrievalMemoryStore(state.sessionStore, input, !sourceSet[retrieval.SourceSession])
+		if err != nil {
+			return nil, err
+		}
+
+		searchers = append(searchers, searcher)
+	}
+
+	for _, source := range sources {
+		if source == retrieval.SourceMemory || source == retrieval.SourceFile {
+			continue
+		}
+
+		searcher, err := retrievalSearcher(ctx, state, input, source)
+		if err != nil {
+			return nil, err
+		}
+
+		if searcher != nil {
+			searchers = append(searchers, searcher)
+		}
+	}
+
+	return searchers, nil
+}
+
+func retrievalSourceSet(sources []retrieval.SourceType) map[retrieval.SourceType]bool {
+	out := make(map[retrieval.SourceType]bool, len(sources))
+	for _, source := range sources {
+		out[source] = true
+	}
+
+	return out
+}
+
+func retrievalSearcher(ctx context.Context, state appState, input retrievalCommandInput, source retrieval.SourceType) (retrieval.Searcher, error) {
+	switch source {
+	case retrieval.SourceSession:
+		return state.sessionStore, nil
+	case retrieval.SourceGitHistory:
+		logText, err := gitHistoryLog(ctx, state.cwd)
+		if err != nil {
+			return nil, err
+		}
+
+		commits, err := githistory.ParseLog(logText)
+		if err != nil {
+			return nil, fmt.Errorf("git history: parse log: %w", err)
+		}
+
+		return githistory.NewIndex(commits), nil
+	case retrieval.SourceVector:
+		return buildVectorRetrievalSearcher(input.VectorIndexFiles)
+	case retrieval.SourceAgentMemory:
+		return buildAgentMemoryRetrievalSearcher(state.cwd, state.selectedAgent, input)
+	default:
+		return nil, fmt.Errorf("retrieval: unsupported source %q", source)
+	}
+}
+
+func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput, includeSessions bool) (*memory.Store, error) {
+	mem, err := loadMemoryStore(input.MemoryStorePath)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(input.MemoryIndexFiles) > 0 {
+		if err := mem.AddFiles(input.MemoryIndexFiles...); err != nil {
+			return nil, fmt.Errorf("retrieval: index memory files: %w", err)
+		}
+	}
+
+	if includeSessions && strings.TrimSpace(input.MemoryStorePath) == "" && len(input.MemoryIndexFiles) == 0 {
+		if err := addSessionMemory(mem, store); err != nil {
+			return nil, err
+		}
+	}
+
+	return mem, nil
+}
+
+func buildVectorRetrievalSearcher(paths []string) (retrieval.Searcher, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("retrieval: --vector-index is required for --retrieval-source vector")
+	}
+
+	vectorizer, err := vector.NewTextVectorizer(0)
+	if err != nil {
+		return nil, fmt.Errorf("retrieval: create vectorizer: %w", err)
+	}
+
+	store, err := vector.NewStore(vectorizer.Dimensions)
+	if err != nil {
+		return nil, fmt.Errorf("retrieval: create vector store: %w", err)
+	}
+
+	for _, path := range paths {
+		if err := addVectorFile(store, vectorizer, path); err != nil {
+			return nil, err
+		}
+	}
+
+	return vector.Searcher{
+		Store:      store,
+		Vectorizer: vectorizer,
+		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: "local-vector-index"},
+	}, nil
+}
+
+func buildAgentMemoryRetrievalSearcher(root, selectedAgent string, input retrievalCommandInput) (retrieval.Searcher, error) {
+	agentName := strings.TrimSpace(input.AgentMemoryAgent)
+	if agentName == "" {
+		agentName = strings.TrimSpace(input.AgentName)
+	}
+
+	if agentName == "" {
+		agentName = strings.TrimSpace(selectedAgent)
+	}
+
+	if agentName == "" {
+		return nil, errors.New("retrieval: --agent-memory-agent, --agent, or a configured selected agent is required for --retrieval-source agent-memory")
+	}
+
+	storePath := strings.TrimSpace(input.AgentMemoryStorePath)
+	if storePath == "" {
+		storePath = filepath.Join(root, ".atteler", "agent-memory.json")
+	}
+
+	store, err := loadAgentMemoryStore(storePath)
+	if err != nil {
+		return nil, err
+	}
+
+	return agentmemory.Searcher{Store: store, Agent: agentName}, nil
+}
+
+func formatRetrievalResult(result retrieval.Result, explain bool) string {
+	result = retrieval.NormalizeResult(result)
+
+	parts := []string{
+		"source=" + string(result.Source.Type),
+		"document=" + result.DocumentID,
+		fmt.Sprintf("score=%.4f", result.Score),
+		"scorer=" + result.Scorer.Name,
+	}
+
+	if stableID := result.Metadata[retrieval.MetadataStableID]; stableID != "" {
+		parts = append(parts, "stable_id="+stableID)
+	}
+
+	parts = appendRetrievalSourceParts(parts, result.Source)
+
+	if result.Chunk.ID != "" {
+		parts = append(parts, "chunk="+result.Chunk.ID)
+	}
+
+	if result.Chunk.Range.Unit != "" {
+		parts = append(parts, fmt.Sprintf("range=%s:%d-%d", result.Chunk.Range.Unit, result.Chunk.Range.Start, result.Chunk.Range.End))
+	}
+
+	parts = append(parts, "inject_allowed="+strconv.FormatBool(result.Safety.InjectAllowed))
+	if result.Safety.Private {
+		parts = append(parts, "private=true")
+	}
+
+	if result.Safety.Sensitive {
+		parts = append(parts, "sensitive=true")
+	}
+
+	if result.Safety.Redacted {
+		parts = append(parts, "redacted=true")
+	}
+
+	if len(result.Safety.Reasons) > 0 {
+		parts = append(parts, "safety_reasons="+strings.Join(result.Safety.Reasons, ";"))
+	}
+
+	if result.Freshness.Status != "" {
+		parts = append(parts, "freshness="+result.Freshness.Status)
+	}
+
+	if result.Freshness.Deleted {
+		parts = append(parts, "deleted=true")
+	}
+
+	if !result.Freshness.SourceUpdatedAt.IsZero() {
+		parts = append(parts, "source_updated_at="+result.Freshness.SourceUpdatedAt.Format(time.RFC3339))
+	}
+
+	if !result.Freshness.IndexedAt.IsZero() {
+		parts = append(parts, "indexed_at="+result.Freshness.IndexedAt.Format(time.RFC3339))
+	}
+
+	if result.Snippet != "" {
+		parts = append(parts, "snippet="+result.Snippet)
+	}
+
+	if explain && len(result.Scorer.Explanation) > 0 {
+		parts = append(parts, "why="+strings.Join(result.Scorer.Explanation, " | "))
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func appendRetrievalSourceParts(parts []string, source retrieval.Source) []string {
+	if source.Name != "" {
+		parts = append(parts, "source_name="+source.Name)
+	}
+
+	if source.URI != "" {
+		parts = append(parts, "source_uri="+source.URI)
+	}
+
+	return parts
 }
 
 func runMemoryCommand(store *session.Store, input memoryCommandInput) error {

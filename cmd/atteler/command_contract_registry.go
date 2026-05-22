@@ -412,6 +412,14 @@ func commandContractsByName() map[string]commandContract {
 			withInputType("searchSessionsCommandInput"),
 			withExamples(`atteler session search "auth retry"`),
 		),
+		"retrieval-search": commandContractFor(
+			"search selected retrieval sources with the shared result contract",
+			[]string{"--retrieval-search", "--retrieval-source", "--retrieval-filter", "--retrieval-limit", "--retrieval-explain", "--retrieval-include-unsafe", "--memory-store", "--memory-index", "--vector-index", "--agent-memory-store", "--agent-memory-agent", "--agent"},
+			[]string{commandEffectConfigRead, commandEffectFilesystemRead, commandEffectGitRead, commandEffectSessionRead, commandEffectUserOutput},
+			[]string{commandOutputText},
+			withInputType("retrievalCommandInput"),
+			withExamples(`atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain`),
+		),
 		"session-read": commandContractFor(
 			"read selected session details, transcripts, summaries, and records",
 			[]string{"--show-session", "--session-summary", "--replay", "--export-session", "--export-format", "--list-artifacts", "--list-evaluations", "--list-failures", "--list-messages"},

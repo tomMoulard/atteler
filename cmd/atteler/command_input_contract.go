@@ -192,6 +192,21 @@ type memoryCommandInput struct {
 	Limit      int
 }
 
+type retrievalCommandInput struct {
+	Search               string
+	AgentName            string
+	AgentMemoryAgent     string
+	AgentMemoryStorePath string
+	MemoryStorePath      string
+	Filters              []string
+	MemoryIndexFiles     []string
+	Sources              []string
+	VectorIndexFiles     []string
+	Limit                int
+	Explain              bool
+	IncludeUnsafe        bool
+}
+
 type mergeArtifactsCommandInput struct {
 	OutputPath string
 	MaxBytes   int
@@ -337,6 +352,7 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"mcpInvokeCommandInput":               func(opts cliOptions) any { return mcpInvokeCommandInputFromOptions(opts) },
 		"mcpManifestCommandInput":             func(opts cliOptions) any { return mcpManifestCommandInputFromOptions(opts) },
 		"memoryCommandInput":                  func(opts cliOptions) any { return memoryCommandInputFromOptions(opts) },
+		"retrievalCommandInput":               func(opts cliOptions) any { return retrievalCommandInputFromOptions(opts) },
 		"mergeArtifactsCommandInput":          func(opts cliOptions) any { return mergeArtifactsCommandInputFromOptions(opts) },
 		"mergeWorktreeCommandInput":           func(opts cliOptions) any { return mergeWorktreeCommandInputFromOptions(opts) },
 		"planAgentsCommandInput":              func(opts cliOptions) any { return planAgentsCommandInputFromOptions(opts) },
@@ -597,6 +613,23 @@ func memoryCommandInputFromOptions(opts cliOptions) memoryCommandInput {
 		StorePath:  opts.memoryStorePath,
 		IndexFiles: append([]string(nil), opts.memoryIndexFiles...),
 		Limit:      opts.memoryLimit.value,
+	}
+}
+
+func retrievalCommandInputFromOptions(opts cliOptions) retrievalCommandInput {
+	return retrievalCommandInput{
+		Search:               opts.retrievalSearch,
+		AgentName:            opts.agentName,
+		AgentMemoryAgent:     opts.agentMemoryAgent,
+		AgentMemoryStorePath: opts.agentMemoryStorePath,
+		MemoryStorePath:      opts.memoryStorePath,
+		Filters:              append([]string(nil), opts.retrievalFilters...),
+		MemoryIndexFiles:     append([]string(nil), opts.memoryIndexFiles...),
+		Sources:              append([]string(nil), opts.retrievalSources...),
+		VectorIndexFiles:     append([]string(nil), opts.vectorIndexFiles...),
+		Limit:                opts.retrievalLimit.value,
+		Explain:              opts.retrievalExplain,
+		IncludeUnsafe:        opts.retrievalIncludeUnsafe,
 	}
 }
 

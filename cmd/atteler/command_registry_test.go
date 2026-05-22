@@ -919,6 +919,12 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			wantTier: tierProviderless,
 		},
 		{
+			name:     "memory retrieve routes unified retrieval search",
+			args:     []string{"memory", "--retrieval-source", "session", "--retrieval-filter", "default_model=gpt-review", "--retrieval-explain", "retrieve", "oauth callback"},
+			wantName: "retrieval-search",
+			wantTier: tierProviderlessConfig,
+		},
+		{
 			name:     "session show routes stateful session reader",
 			args:     []string{"session", "show", "demo"},
 			wantName: "session-read",

@@ -1,12 +1,19 @@
 package memory
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 func TestTokenize_NormalizesUnicodeWordsAndDigits(t *testing.T) {
@@ -156,4 +163,109 @@ func TestStore_SaveLoadJSONRoundTrip(t *testing.T) {
 	if len(results) != 1 || results[0].Document.ID != "design" {
 		t.Fatalf("loaded search results = %#v, want design", results)
 	}
+}
+
+func TestStore_SearchRetrievalAddsContractSafetyAndRange(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	require.NoError(t, store.Add(Document{ID: "secret", Path: ".env", Text: "api_key=super-secret-token oauth callback"}))
+
+	results, err := store.SearchRetrieval(context.Background(), retrieval.Query{Text: "oauth callback", Limit: 1, Explain: true, IncludeUnsafe: true})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	result := results[0]
+	assert.Equal(t, retrieval.SourceMemory, result.Source.Type)
+	assert.Equal(t, "secret", result.DocumentID)
+	assert.NotEmpty(t, result.Chunk.ID)
+	assert.Equal(t, retrieval.RangeUnitRuneOffset, result.Chunk.Range.Unit)
+	assert.False(t, result.Safety.InjectAllowed)
+	assert.True(t, result.Safety.Sensitive)
+	assert.True(t, result.Safety.Redacted)
+	assert.NotContains(t, result.Snippet, "super-secret-token")
+	assert.NotEmpty(t, result.Scorer.Explanation)
+}
+
+func TestLoad_NormalizesLegacyDocumentsBeforeRetrieval(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "legacy-memory.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{
+  "documents": [
+    {"id": "legacy", "path": ".env", "text": "api_key=super-secret-token oauth callback", "metadata": {"api_key": "metadata-secret-token"}}
+  ]
+}`), 0o600))
+
+	store, err := Load(path)
+	require.NoError(t, err)
+	require.Len(t, store.Documents, 1)
+	assert.NotContains(t, store.Documents[0].Text, "super-secret-token")
+	assert.Equal(t, "[REDACTED]", store.Documents[0].Metadata["api_key"])
+	assert.NotContains(t, store.Documents[0].Metadata["api_key"], "metadata-secret-token")
+
+	results, err := store.SearchRetrieval(context.Background(), retrieval.Query{
+		Text:          "oauth callback",
+		Limit:         1,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.False(t, results[0].Safety.InjectAllowed)
+	assert.True(t, results[0].Safety.Redacted)
+	assert.NotContains(t, results[0].Snippet, "super-secret-token")
+	assert.NotContains(t, results[0].Metadata["api_key"], "metadata-secret-token")
+	assert.Equal(t, "[REDACTED]", results[0].Metadata["api_key"])
+}
+
+func TestStore_SearchRetrievalReportsFileFreshness(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.txt")
+	require.NoError(t, os.WriteFile(path, []byte("oauth callback notes"), 0o600))
+
+	store := NewStore()
+	require.NoError(t, store.AddFile(path))
+
+	results, err := store.SearchRetrieval(context.Background(), retrieval.Query{Text: "oauth callback", Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "current", results[0].Freshness.Status)
+	assert.False(t, results[0].Freshness.Deleted)
+
+	future := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	require.NoError(t, os.Chtimes(path, future, future))
+
+	results, err = store.SearchRetrieval(context.Background(), retrieval.Query{Text: "oauth callback", Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "stale", results[0].Freshness.Status)
+	assert.False(t, results[0].Freshness.Deleted)
+
+	require.NoError(t, os.Remove(path))
+
+	results, err = store.SearchRetrieval(context.Background(), retrieval.Query{Text: "oauth callback", Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "deleted", results[0].Freshness.Status)
+	assert.True(t, results[0].Freshness.Deleted)
+}
+
+func TestStore_SyncFilesDeletesRemovedFileDocuments(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	keep := filepath.Join(dir, "keep.txt")
+	gone := filepath.Join(dir, "gone.txt")
+
+	require.NoError(t, os.WriteFile(keep, []byte("keep oauth context"), 0o600))
+	require.NoError(t, os.WriteFile(gone, []byte("gone oauth context"), 0o600))
+
+	store := NewStore()
+	require.NoError(t, store.SyncFiles(keep, gone))
+	require.NoError(t, store.SyncFiles(keep))
+
+	require.Len(t, store.Documents, 1)
+	assert.Equal(t, filepath.Clean(keep), store.Documents[0].ID)
 }
