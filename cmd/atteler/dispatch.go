@@ -119,6 +119,7 @@ func applyDebugEnvOptions(opts *cliOptions, getenv func(string) string) {
 	applyDebugBool(getenv, "DEBUG_ATTELER_LIST_PROVIDERS", &opts.listProviders)
 	applyDebugBool(getenv, "DEBUG_ATTELER_LIST_KNOWN_MODELS", &opts.listKnownModels)
 	applyDebugBool(getenv, "DEBUG_ATTELER_LIST_MODELS", &opts.listModels)
+	applyDebugBool(getenv, "DEBUG_ATTELER_OLLAMA_STATUS", &opts.ollamaStatus)
 	applyDebugBool(getenv, "DEBUG_ATTELER_LIST_AGENTS", &opts.listAgents)
 	applyDebugBool(getenv, "DEBUG_ATTELER_LIST_PLUGINS", &opts.listPlugins)
 	applyDebugBool(getenv, "DEBUG_ATTELER_LIST_HOOK_EVENTS", &opts.listHookEvents)
@@ -485,6 +486,10 @@ func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
 	case opts.listKnownModels:
 		listKnownModels()
 		return true, nil
+	case opts.ollamaStatus:
+		return true, printOllamaStatus(ctx)
+	case opts.ollamaStop:
+		return true, stopOllamaDaemon(ctx)
 	case opts.listWorktrees:
 		return true, listWorktrees(ctx)
 	case opts.mergeWorktreeRef != "":
@@ -693,7 +698,14 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		return appState{}, err
 	}
 
-	reg, providerReadiness := autoRegisterForOptions(ctx, opts, cfg, selection.selectedModel, selection.fallbackModels)
+	reg, providerReadiness := autoRegisterForOptions(
+		ctx,
+		opts,
+		cfg,
+		selection.selectedModel,
+		selection.fallbackModels,
+		selection.sessionState.ID,
+	)
 	contextOptions := contextOptionsFromConfig(cfg)
 	contextOptions = contextOptionsForRequestModels(contextOptions, reg, selection.selectedModel, selection.fallbackModels)
 	generationDefaults := generationFromConfig(cfg)
@@ -808,8 +820,13 @@ func autoRegisterForOptions(
 	cfg appconfig.Config,
 	selectedModel string,
 	fallbackModels []string,
+	sessionID string,
 ) (*llm.Registry, llm.ProviderReadinessReport) {
-	regCfg := llmConfig(cfg, selectedModel, fallbackModels)
+	regCfg := llmConfig(cfg, selectedModel, fallbackModels, sessionID, os.Args)
+
+	if providerInspectionUtilityRequested(opts) {
+		regCfg.DisableAutoStart = true
+	}
 
 	if opts.headless {
 		regCfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))

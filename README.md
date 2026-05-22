@@ -71,7 +71,7 @@ from the same descriptors that route the commands.
 |--------|----------|
 | `chat` / `session` | `atteler chat once "Explain this repository in one paragraph"`, `atteler session list`, `atteler session search "auth retry"` |
 | `config` | `atteler config paths`, `atteler config validate`, `atteler config explain default_model`, `atteler config doctor-offline` |
-| `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models` |
+| `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models`, `atteler providers ollama-status`, `atteler providers ollama-stop` |
 | `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
 | `memory` / `rag` | `atteler memory search "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"` |
 | `code-intel` | `atteler code-intel summary`, `atteler code-intel summary --json`, `atteler code-intel symbol NewRegistry`, `atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/` |
@@ -190,6 +190,8 @@ providers:
     # disable_private_adapter: true
   ollama:
     base_url: http://127.0.0.1:11434
+    # Opt in before Atteler starts a local long-lived "ollama serve" daemon.
+    auto_start: false
 
 agents:
   reviewer:
@@ -321,6 +323,16 @@ with `providers.codex.disable_private_adapter: true`,
 credentials enabled while blocking Anthropic fallback to borrowed Claude
 Code/Forge credential stores.
 
+Ollama daemon auto-start is explicit: set `providers.ollama.auto_start: true`
+or `ATTELER_OLLAMA_AUTO_START=true` before Atteler may launch `ollama serve` for
+a selected local Ollama endpoint. `ATTELER_OLLAMA_AUTO_START=false` disables it
+even when config opts in. Use `atteler providers ollama-status` (or
+`--ollama-status`) to inspect whether Ollama is remote, unavailable, already
+running, or started by Atteler. When Atteler owns a recorded daemon,
+`atteler providers ollama-stop` (or `--ollama-stop`) stops it and removes the
+ownership record. Startup logs and ownership metadata are kept under Atteler's
+state directory for diagnostics.
+
 ### Provider protocol contracts
 
 Provider adapters intentionally expose `llm.ProviderCapabilities` metadata via
@@ -379,8 +391,8 @@ status, so crashed local PIDs do not stay `running` forever.
 `atteler session cancel-headless <id>` records a durable `canceled` status
 before signaling the recorded local PID or process group; on Unix-like hosts it
 escalates to a kill signal if the process ignores cancellation briefly.
-Use `--headless-id <id>` when launching a one-shot headless run if another
-process needs a stable handle for `status-headless`, `cancel-headless`, or
+Set a stable headless ID when launching a one-shot headless run if another
+process needs a handle for `status-headless`, `cancel-headless`, or
 `stream-headless`; explicit IDs must be portable file names (no leading or
 trailing whitespace, path separators, control characters, or `<>:"|?*`), must
 be unique, and reuse is rejected while metadata, logs, events, or artifacts for

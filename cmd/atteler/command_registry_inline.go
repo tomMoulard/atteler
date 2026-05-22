@@ -59,6 +59,16 @@ func buildInlineCommandRegistry() []command {
 			match: func(o cliOptions) bool { return o.listKnownModels },
 		},
 		{
+			name:  commandOllamaStatus,
+			tier:  tierInline,
+			match: func(o cliOptions) bool { return o.ollamaStatus },
+		},
+		{
+			name:  commandOllamaStop,
+			tier:  tierInline,
+			match: func(o cliOptions) bool { return o.ollamaStop },
+		},
+		{
 			name:  "list-worktrees",
 			tier:  tierInline,
 			match: func(o cliOptions) bool { return o.listWorktrees },

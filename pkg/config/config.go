@@ -41,6 +41,7 @@ type Config struct {
 type ProviderConfig struct {
 	BaseURL               string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
 	Disabled              bool   `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+	AutoStart             bool   `json:"auto_start,omitempty" yaml:"auto_start,omitempty"`
 	DisablePrivateAdapter bool   `json:"disable_private_adapter,omitempty" yaml:"disable_private_adapter,omitempty"`
 	TimeoutSeconds        int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
 }
@@ -213,6 +214,7 @@ type fileConfig struct {
 
 type fileProviderConfig struct {
 	Disabled              *bool   `json:"disabled" yaml:"disabled"`
+	AutoStart             *bool   `json:"auto_start" yaml:"auto_start"`
 	DisablePrivateAdapter *bool   `json:"disable_private_adapter" yaml:"disable_private_adapter"`
 	BaseURL               *string `json:"base_url" yaml:"base_url"`
 	TimeoutSeconds        *int    `json:"timeout_seconds" yaml:"timeout_seconds"`
@@ -526,6 +528,11 @@ func mergeProviders(dst *Config, providers map[string]fileProviderConfig, rec *o
 		if provider.Disabled != nil {
 			current.Disabled = *provider.Disabled
 			rec.set(providerFieldPath(name, "disabled"), source, *provider.Disabled)
+		}
+
+		if provider.AutoStart != nil {
+			current.AutoStart = *provider.AutoStart
+			rec.set(providerFieldPath(name, "auto_start"), source, *provider.AutoStart)
 		}
 
 		if provider.BaseURL != nil {
@@ -912,6 +919,9 @@ func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec 
 			rec.set(providerFieldPath(name, "disable_private_adapter"), source, provider.DisablePrivateAdapter)
 		}
 
+		current.AutoStart = provider.AutoStart
+		rec.set(providerFieldPath(name, "auto_start"), source, provider.AutoStart)
+
 		if provider.TimeoutSeconds > 0 {
 			current.TimeoutSeconds = provider.TimeoutSeconds
 			rec.set(providerFieldPath(name, "timeout_seconds"), source, provider.TimeoutSeconds)
@@ -1282,6 +1292,10 @@ func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderC
 
 			appendOriginChain(dstOrigins, disablePrivateAdapterPath, srcOrigins, false)
 		}
+
+		current.AutoStart = provider.AutoStart
+
+		appendOriginChain(dstOrigins, providerFieldPath(name, "auto_start"), srcOrigins, false)
 
 		if provider.TimeoutSeconds > 0 {
 			current.TimeoutSeconds = provider.TimeoutSeconds

@@ -122,6 +122,8 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "list", Summary: "list built-in provider names without API calls", Legacy: []string{"--list-providers"}},
 			{Name: "known-models", Summary: "list built-in provider/model IDs without API calls", Legacy: []string{"--list-known-models"}},
 			{Name: "models", Summary: "list models discovered from configured providers", Legacy: []string{"--list-models"}},
+			{Name: commandOllamaStatus, Summary: "print Ollama daemon lifecycle status without starting it", Legacy: []string{"--ollama-status"}},
+			{Name: commandOllamaStop, Summary: "stop and clean up an Atteler-owned Ollama daemon", Legacy: []string{"--ollama-stop"}},
 			{Name: "route-interactive", Summary: "rank --route-candidate values for low TTFT", Legacy: []string{"--route-interactive"}},
 			{Name: "route-batch", Summary: "rank --route-candidate values for batch/cost preference", Legacy: []string{"--route-batch"}},
 		},
@@ -129,6 +131,8 @@ var cliHelpDomains = []cliHelpDomain{
 			`atteler providers list`,
 			`atteler providers known-models`,
 			`atteler providers models`,
+			`atteler providers ` + commandOllamaStatus,
+			`atteler providers ` + commandOllamaStop,
 		},
 	},
 	{

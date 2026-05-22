@@ -54,9 +54,11 @@ type AutoRegisterConfig struct {
 
 	Providers      map[string]ProviderConfig
 	FallbackModels []string
+	CommandLine    []string
 
 	DefaultProvider string
 	DefaultModel    string
+	SessionID       string
 	SelectedModel   string
 
 	// ReadinessCacheTTL controls the in-process cache for provider readiness
@@ -71,6 +73,10 @@ type AutoRegisterConfig struct {
 	// while still reporting registration, disabled providers, and credential
 	// failures.
 	DisableReadinessChecks bool
+
+	// DisableAutoStart prevents auto-registration from starting local daemons
+	// for inspection-only commands.
+	DisableAutoStart bool
 }
 
 // logger returns the configured logger, falling back to the standard default.
@@ -83,12 +89,19 @@ func (c AutoRegisterConfig) logger() *slog.Logger {
 }
 
 // ProviderConfig configures one LLM provider.
+//
+//nolint:govet // Field order keeps externally useful provider settings grouped.
 type ProviderConfig struct {
 	BaseURL               string
+	OwnershipPath         string
+	SessionID             string
+	CommandLine           []string
+	DisablePrivateAdapter bool
 	Disabled              bool
 	AutoStart             bool
-	DisablePrivateAdapter bool
 	TimeoutSeconds        int
+
+	autoStartBlocked bool
 }
 
 // AutoRegister is kept for source compatibility only and does not perform
@@ -253,7 +266,7 @@ func builtinProviderRegistrations(ctx context.Context, cfg AutoRegisterConfig) [
 			staticModels: (&OllamaProvider{}).Models(),
 			factory: func() (Provider, error) {
 				ollamaConfig := providerConfig(cfg, providerOllama)
-				ollamaConfig.AutoStart = ollamaConfig.AutoStart || shouldAutoStartOllama(cfg)
+				ollamaConfig.autoStartBlocked = cfg.DisableAutoStart || !shouldAutoStartOllama(cfg)
 
 				return NewOllamaProviderWithConfigContext(ctx, ollamaConfig)
 			},
@@ -545,11 +558,22 @@ func isMissingCredentialError(err error) bool {
 }
 
 func providerConfig(cfg AutoRegisterConfig, name string) ProviderConfig {
+	var provider ProviderConfig
 	if cfg.Providers == nil {
-		return ProviderConfig{}
+		provider = ProviderConfig{}
+	} else {
+		provider = cfg.Providers[name]
 	}
 
-	return cfg.Providers[name]
+	if provider.SessionID == "" {
+		provider.SessionID = cfg.SessionID
+	}
+
+	if len(provider.CommandLine) == 0 {
+		provider.CommandLine = append([]string(nil), cfg.CommandLine...)
+	}
+
+	return provider
 }
 
 func providerConfigured(cfg AutoRegisterConfig, name string) bool {

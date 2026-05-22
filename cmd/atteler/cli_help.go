@@ -336,7 +336,8 @@ func lookupFlagDomain(name string) (string, bool) {
 		strings.HasPrefix(name, "list-hook-events"):
 		return "config", true
 	case name == "model" || name == "list-models" || name == "list-known-models" ||
-		name == "list-providers" || name == "temperature" || name == "top-p" ||
+		name == "list-providers" || name == commandOllamaStatus || name == commandOllamaStop ||
+		name == "temperature" || name == "top-p" ||
 		name == "max-tokens" || name == "seed" || name == "reasoning-level" ||
 		name == "max-input-tokens" || strings.HasPrefix(name, "route-"):
 		return "providers", true

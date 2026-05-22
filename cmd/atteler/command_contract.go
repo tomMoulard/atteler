@@ -1285,6 +1285,8 @@ func flagRequiresFixtureValue(flag string) bool {
 		"list-sessions",
 		"list-worktrees",
 		codeIntelLSPSymbolsName,
+		commandOllamaStatus,
+		commandOllamaStop,
 		"print-config-template",
 		"recover-headless",
 		"review-plan",

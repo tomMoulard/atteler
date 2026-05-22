@@ -811,6 +811,7 @@ func TestFlagDomain_CoversAcceptanceDomains(t *testing.T) {
 		"stream-headless":                    "chat/session",
 		"validate-config":                    "config",
 		"list-providers":                     "providers",
+		commandOllamaStatus:                  "providers",
 		"plan-agents":                        "agents",
 		"prompt-local-only":                  "agents",
 		"memory-search":                      "memory/rag",

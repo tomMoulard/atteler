@@ -392,6 +392,8 @@ type cliOptions struct {
 	listModels                         bool
 	listKnownModels                    bool
 	listProviders                      bool
+	ollamaStatus                       bool
+	ollamaStop                         bool
 	taskList                           bool
 	speculatePlan                      bool
 	speculateRun                       bool

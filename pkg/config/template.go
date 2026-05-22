@@ -30,8 +30,10 @@ providers:
     # disable_private_adapter: true
   ollama:
     # base_url: http://127.0.0.1:11434
-    # Atteler auto-starts "ollama serve" for selected local Ollama runs unless
-    # ATTELER_OLLAMA_AUTO_START=false is set.
+    # Auto-start is opt-in because it launches a local long-lived daemon.
+    # Set auto_start: true (or ATTELER_OLLAMA_AUTO_START=true) to let Atteler
+    # start "ollama serve" for selected local Ollama runs.
+    auto_start: false
   codex:
     # Private/borrowed-credential adapter for Codex CLI ChatGPT login.
     # Set disable_private_adapter: true (or ATTELER_DISABLE_CODEX_ADAPTER=1)

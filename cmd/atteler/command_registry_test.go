@@ -1319,6 +1319,14 @@ func TestCommandRegistry_GroupedInlineCommandsBypassRegistry(t *testing.T) {
 		t.Helper()
 		assert.True(t, opts.listKnownModels)
 	})
+	assertInlineGroupedRoute(t, []string{"providers", commandOllamaStatus}, func(t *testing.T, opts cliOptions) {
+		t.Helper()
+		assert.True(t, opts.ollamaStatus)
+	})
+	assertInlineGroupedRoute(t, []string{"providers", commandOllamaStop}, func(t *testing.T, opts cliOptions) {
+		t.Helper()
+		assert.True(t, opts.ollamaStop)
+	})
 	assertInlineGroupedRoute(t, []string{"worktrees", testCommandList}, func(t *testing.T, opts cliOptions) {
 		t.Helper()
 		assert.True(t, opts.listWorktrees)
@@ -1930,7 +1938,7 @@ func isDocumentedInlineCommandForTest(domain cliHelpDomain, command cliCommandAl
 		}
 	case testDomainProviders:
 		switch command.Name {
-		case testCommandList, "known-models":
+		case testCommandList, "known-models", commandOllamaStatus, commandOllamaStop:
 			return true
 		}
 	case testDomainWorktrees:
@@ -1988,6 +1996,10 @@ func assertInlineOptionSetForTest(t *testing.T, domain cliHelpDomain, command cl
 		assert.True(t, opts.listProviders)
 	case domain.Name == testDomainProviders && command.Name == "known-models":
 		assert.True(t, opts.listKnownModels)
+	case domain.Name == testDomainProviders && command.Name == commandOllamaStatus:
+		assert.True(t, opts.ollamaStatus)
+	case domain.Name == testDomainProviders && command.Name == commandOllamaStop:
+		assert.True(t, opts.ollamaStop)
 	case domain.Name == testDomainWorktrees && command.Name == testCommandList:
 		assert.True(t, opts.listWorktrees)
 	case domain.Name == testDomainWorktrees && command.Name == "merge":
