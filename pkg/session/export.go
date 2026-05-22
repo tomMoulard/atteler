@@ -41,7 +41,9 @@ type ExportOptions struct {
 	ExportedAt time.Time
 	// Profile selects the export redaction/omission behavior. Zero uses ExportProfileShareable.
 	Profile ExportProfile
-	// SensitiveFields adds field names to redact in safe profiles, such as "tenant_secret".
+	// ExcludedFields omits field families from exports, such as SearchFieldTranscript or SearchFieldFailures.
+	ExcludedFields []SearchField
+	// SensitiveFields adds field names to redact, such as "tenant_secret".
 	SensitiveFields []string
 	// MaxContentRunes limits each text field. Zero uses the profile default; negative disables the limit.
 	MaxContentRunes int
@@ -51,7 +53,7 @@ type ExportOptions struct {
 
 // ExportManifest records how an export was produced so reviewers can reason about provenance.
 type ExportManifest struct {
-	ExportedAt       time.Time         `json:"exported_at"`
+	ExportedAt       time.Time         `json:"exported_at,omitzero"`
 	ContentHashes    map[string]string `json:"content_hashes"`
 	SessionID        string            `json:"session_id"`
 	RedactionProfile ExportProfile     `json:"redaction_profile"`
@@ -161,6 +163,7 @@ type ExportArtifact struct {
 type normalizedExportOptions struct {
 	exportedAt            time.Time
 	profile               ExportProfile
+	excludedFields        map[SearchField]struct{}
 	sensitiveFields       []string
 	maxContentRunes       int
 	maxTranscriptMessages int
@@ -261,23 +264,23 @@ func BuildMachineReadableExport(session Session, options ExportOptions) MachineR
 
 	export := MachineReadableExport{
 		Manifest: ExportManifest{
-			SessionID:        builder.sanitize("manifest.session_id", fallback(session.ID, "untitled")),
-			ExportedAt:       builder.options.exportedAt,
+			SessionID:        builder.exportString("manifest.session_id", SearchFieldSession, fallback(session.ID, "untitled")),
+			ExportedAt:       builder.exportTime("manifest.exported_at", builder.options.exportedAt),
 			RedactionProfile: builder.options.profile,
-			PrivacyNotice:    privacyNotice(builder.options.profile),
+			PrivacyNotice:    privacyNotice(builder.options),
 		},
 		Session: ExportSessionMetadata{
-			ID:                     builder.sanitize("session.id", fallback(session.ID, "untitled")),
-			Title:                  builder.sanitize("session.title", session.Title),
-			CreatedAt:              session.CreatedAt,
-			UpdatedAt:              session.UpdatedAt,
-			DefaultAgent:           builder.sanitize("session.default_agent", session.DefaultAgent),
-			DefaultModel:           builder.sanitize("session.default_model", session.DefaultModel),
-			DefaultReasoningLevel:  builder.sanitize("session.default_reasoning_level", session.DefaultReasoningLevel),
-			WorktreePath:           builder.sanitize("session.worktree_path", session.WorktreePath),
-			WorktreeBranch:         builder.sanitize("session.worktree_branch", session.WorktreeBranch),
-			WorktreeBase:           builder.sanitize("session.worktree_base", session.WorktreeBase),
-			Tags:                   builder.sanitizeSlice("session.tags", session.Tags),
+			ID:                     builder.exportString("session.id", SearchFieldSession, fallback(session.ID, "untitled")),
+			Title:                  builder.exportString("session.title", SearchFieldTitle, session.Title),
+			CreatedAt:              builder.exportTime("session.created_at", session.CreatedAt),
+			UpdatedAt:              builder.exportTime("session.updated_at", session.UpdatedAt),
+			DefaultAgent:           builder.exportString("session.default_agent", SearchFieldAgent, session.DefaultAgent),
+			DefaultModel:           builder.exportString("session.default_model", SearchFieldModel, session.DefaultModel),
+			DefaultReasoningLevel:  builder.exportString("session.default_reasoning_level", SearchFieldModel, session.DefaultReasoningLevel),
+			WorktreePath:           builder.exportString("session.worktree_path", SearchFieldRepo, session.WorktreePath),
+			WorktreeBranch:         builder.exportString("session.worktree_branch", SearchFieldRepo, session.WorktreeBranch),
+			WorktreeBase:           builder.exportString("session.worktree_base", SearchFieldRepo, session.WorktreeBase),
+			Tags:                   builder.exportSlice("session.tags", SearchFieldTags, session.Tags),
 			MessageCount:           len(session.Messages),
 			NegativeKnowledgeCount: len(session.NegativeKnowledge),
 			EvaluationCount:        len(session.Evaluations),
@@ -297,9 +300,13 @@ func BuildMachineReadableExport(session Session, options ExportOptions) MachineR
 	return export
 }
 
-func privacyNotice(profile ExportProfile) string {
-	if profile != ExportProfilePrivate {
+func privacyNotice(options normalizedExportOptions) string {
+	if options.profile != ExportProfilePrivate {
 		return ""
+	}
+
+	if options.redact {
+		return "Private export with sensitive-field redaction. Tool attachments are omitted to avoid leaking raw sensitive content."
 	}
 
 	return "Private full-fidelity export. Do not share unless recipients are allowed to see raw session content."
@@ -332,10 +339,12 @@ func normalizeExportOptions(options ExportOptions) normalizedExportOptions {
 		exportedAt = exportedAt.UTC()
 	}
 
+	sensitiveFields := normalizeStringList(options.SensitiveFields)
 	normalized := normalizedExportOptions{
 		profile:         profile,
 		exportedAt:      exportedAt,
-		sensitiveFields: append([]string(nil), options.SensitiveFields...),
+		excludedFields:  normalizedExportFieldSet(options.ExcludedFields),
+		sensitiveFields: sensitiveFields,
 		redact:          profile != ExportProfilePrivate,
 	}
 
@@ -361,11 +370,38 @@ func normalizeExportOptions(options ExportOptions) normalizedExportOptions {
 		normalized.maxTranscriptMessages = options.MaxTranscriptMessages
 	}
 
+	if len(normalized.sensitiveFields) > 0 {
+		normalized.redact = true
+	}
+
 	return normalized
+}
+
+func normalizedExportFieldSet(fields []SearchField) map[SearchField]struct{} {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	set := make(map[SearchField]struct{}, len(fields))
+	for _, field := range fields {
+		if field == "" {
+			continue
+		}
+
+		set[field] = struct{}{}
+	}
+
+	return set
 }
 
 func (builder *exportBuilder) exportNegativeKnowledge(entries []NegativeKnowledge) []ExportNegativeKnowledge {
 	if len(entries) == 0 {
+		return nil
+	}
+
+	if builder.excludes(SearchFieldFailures) {
+		builder.omit("negative knowledge omitted by export field policy")
+
 		return nil
 	}
 
@@ -377,13 +413,13 @@ func (builder *exportBuilder) exportNegativeKnowledge(entries []NegativeKnowledg
 
 		prefix := fmt.Sprintf("negative_knowledge[%d]", index+1)
 		exported = append(exported, ExportNegativeKnowledge{
-			CreatedAt: entry.CreatedAt,
-			Approach:  builder.sanitize(prefix+".approach", entry.Approach),
-			Reason:    builder.sanitize(prefix+".reason", entry.Reason),
-			Commit:    builder.sanitize(prefix+".commit", entry.Commit),
-			Agent:     builder.sanitize(prefix+".agent", entry.Agent),
-			TaskType:  builder.sanitize(prefix+".task_type", entry.TaskType),
-			Severity:  builder.sanitize(prefix+".severity", entry.Severity),
+			CreatedAt: builder.exportTime(prefix+".created_at", entry.CreatedAt),
+			Approach:  builder.exportString(prefix+".approach", SearchFieldFailures, entry.Approach),
+			Reason:    builder.exportString(prefix+".reason", SearchFieldFailures, entry.Reason),
+			Commit:    builder.exportString(prefix+".commit", SearchFieldFailures, entry.Commit),
+			Agent:     builder.exportString(prefix+".agent", SearchFieldAgent, entry.Agent),
+			TaskType:  builder.exportString(prefix+".task_type", SearchFieldFailures, entry.TaskType),
+			Severity:  builder.exportString(prefix+".severity", SearchFieldFailures, entry.Severity),
 		})
 	}
 
@@ -392,6 +428,12 @@ func (builder *exportBuilder) exportNegativeKnowledge(entries []NegativeKnowledg
 
 func (builder *exportBuilder) exportEvaluations(entries []AgentEvaluation) []ExportAgentEvaluation {
 	if len(entries) == 0 {
+		return nil
+	}
+
+	if builder.excludes(SearchFieldEvaluations) {
+		builder.omit("evaluations omitted by export field policy")
+
 		return nil
 	}
 
@@ -404,19 +446,19 @@ func (builder *exportBuilder) exportEvaluations(entries []AgentEvaluation) []Exp
 
 		prefix := fmt.Sprintf("evaluations[%d]", index+1)
 		exported = append(exported, ExportAgentEvaluation{
-			CreatedAt:       entry.CreatedAt,
-			Agent:           builder.sanitize(prefix+".agent", entry.Agent),
-			Outcome:         builder.sanitize(prefix+".outcome", entry.Outcome),
-			Notes:           builder.sanitize(prefix+".notes", entry.Notes),
-			Reference:       builder.sanitize(prefix+".reference", entry.Reference),
-			Source:          builder.sanitize(prefix+".source", entry.Source),
-			Evaluator:       builder.sanitize(prefix+".evaluator", entry.Evaluator),
-			RubricVersion:   builder.sanitize(prefix+".rubric_version", entry.RubricVersion),
-			TaskType:        builder.sanitize(prefix+".task_type", entry.TaskType),
-			Difficulty:      builder.sanitize(prefix+".difficulty", entry.Difficulty),
-			ExpectedOutcome: builder.sanitize(prefix+".expected_outcome", entry.ExpectedOutcome),
-			Model:           builder.sanitize(prefix+".model", entry.Model),
-			AgentVersion:    builder.sanitize(prefix+".agent_version", entry.AgentVersion),
+			CreatedAt:       builder.exportTime(prefix+".created_at", entry.CreatedAt),
+			Agent:           builder.exportString(prefix+".agent", SearchFieldAgent, entry.Agent),
+			Outcome:         builder.exportString(prefix+".outcome", SearchFieldEvaluations, entry.Outcome),
+			Notes:           builder.exportString(prefix+".notes", SearchFieldEvaluations, entry.Notes),
+			Reference:       builder.exportString(prefix+".reference", SearchFieldEvaluations, entry.Reference),
+			Source:          builder.exportString(prefix+".source", SearchFieldEvaluations, entry.Source),
+			Evaluator:       builder.exportString(prefix+".evaluator", SearchFieldEvaluations, entry.Evaluator),
+			RubricVersion:   builder.exportString(prefix+".rubric_version", SearchFieldEvaluations, entry.RubricVersion),
+			TaskType:        builder.exportString(prefix+".task_type", SearchFieldEvaluations, entry.TaskType),
+			Difficulty:      builder.exportString(prefix+".difficulty", SearchFieldEvaluations, entry.Difficulty),
+			ExpectedOutcome: builder.exportString(prefix+".expected_outcome", SearchFieldEvaluations, entry.ExpectedOutcome),
+			Model:           builder.exportString(prefix+".model", SearchFieldModel, entry.Model),
+			AgentVersion:    builder.exportString(prefix+".agent_version", SearchFieldEvaluations, entry.AgentVersion),
 			SchemaVersion:   entry.SchemaVersion,
 			Score:           entry.Score,
 			DurationMillis:  entry.DurationMillis,
@@ -430,6 +472,12 @@ func (builder *exportBuilder) exportEvaluations(entries []AgentEvaluation) []Exp
 
 func (builder *exportBuilder) exportArtifacts(entries []Artifact) []ExportArtifact {
 	if len(entries) == 0 {
+		return nil
+	}
+
+	if builder.excludes(SearchFieldArtifacts) {
+		builder.omit("artifacts omitted by export field policy")
+
 		return nil
 	}
 
@@ -450,22 +498,22 @@ func (builder *exportBuilder) exportArtifacts(entries []Artifact) []ExportArtifa
 
 		prefix := fmt.Sprintf("artifacts[%d]", index+1)
 		exported = append(exported, ExportArtifact{
-			CreatedAt:       entry.CreatedAt,
+			CreatedAt:       builder.exportTime(prefix+".created_at", entry.CreatedAt),
 			ConsumedAt:      consumedAt,
-			Path:            builder.sanitize(prefix+".path", entry.Path),
-			LogicalPath:     builder.sanitize(prefix+".logical_path", entry.LogicalPath),
-			Kind:            builder.sanitize(prefix+".kind", entry.Kind),
-			Summary:         builder.sanitize(prefix+".summary", entry.Summary),
-			SourceAgent:     builder.sanitize(prefix+".source_agent", entry.SourceAgent),
-			SourceSessionID: builder.sanitize(prefix+".source_session_id", entry.SourceSessionID),
-			SourceCommand:   builder.sanitize(prefix+".source_command", entry.SourceCommand),
-			SourceTool:      builder.sanitize(prefix+".source_tool", entry.SourceTool),
-			SourceCommit:    builder.sanitize(prefix+".source_commit", entry.SourceCommit),
-			WorktreePath:    builder.sanitize(prefix+".worktree_path", entry.WorktreePath),
-			WorktreeBranch:  builder.sanitize(prefix+".worktree_branch", entry.WorktreeBranch),
-			WorktreeBase:    builder.sanitize(prefix+".worktree_base", entry.WorktreeBase),
-			SHA256:          builder.sanitize(prefix+".sha256", entry.SHA256),
-			ReviewStatus:    builder.sanitize(prefix+".review_status", entry.ReviewStatus),
+			Path:            builder.exportString(prefix+".path", SearchFieldArtifacts, entry.Path),
+			LogicalPath:     builder.exportString(prefix+".logical_path", SearchFieldArtifacts, entry.LogicalPath),
+			Kind:            builder.exportString(prefix+".kind", SearchFieldArtifacts, entry.Kind),
+			Summary:         builder.exportString(prefix+".summary", SearchFieldArtifacts, entry.Summary),
+			SourceAgent:     builder.exportString(prefix+".source_agent", SearchFieldAgent, entry.SourceAgent),
+			SourceSessionID: builder.exportString(prefix+".source_session_id", SearchFieldSession, entry.SourceSessionID),
+			SourceCommand:   builder.exportString(prefix+".source_command", SearchFieldArtifacts, entry.SourceCommand),
+			SourceTool:      builder.exportString(prefix+".source_tool", SearchFieldArtifacts, entry.SourceTool),
+			SourceCommit:    builder.exportString(prefix+".source_commit", SearchFieldArtifacts, entry.SourceCommit),
+			WorktreePath:    builder.exportString(prefix+".worktree_path", SearchFieldRepo, entry.WorktreePath),
+			WorktreeBranch:  builder.exportString(prefix+".worktree_branch", SearchFieldRepo, entry.WorktreeBranch),
+			WorktreeBase:    builder.exportString(prefix+".worktree_base", SearchFieldRepo, entry.WorktreeBase),
+			SHA256:          builder.exportString(prefix+".sha256", SearchFieldArtifacts, entry.SHA256),
+			ReviewStatus:    builder.exportString(prefix+".review_status", SearchFieldArtifacts, entry.ReviewStatus),
 			SizeBytes:       entry.SizeBytes,
 			SourceTurn:      entry.SourceTurn,
 			WorktreeDirty:   entry.WorktreeDirty,
@@ -477,6 +525,12 @@ func (builder *exportBuilder) exportArtifacts(entries []Artifact) []ExportArtifa
 
 func (builder *exportBuilder) exportMessages(messages []llm.Message) []ExportMessage {
 	if len(messages) == 0 {
+		return nil
+	}
+
+	if builder.excludes(SearchFieldTranscript) {
+		builder.omit("transcript omitted by export field policy")
+
 		return nil
 	}
 
@@ -497,27 +551,27 @@ func (builder *exportBuilder) exportMessages(messages []llm.Message) []ExportMes
 		exportedMessage := ExportMessage{
 			Index:   index + 1,
 			Role:    message.Role,
-			Content: builder.sanitize(fmt.Sprintf("messages[%d].content", index+1), message.Content),
+			Content: builder.exportString(fmt.Sprintf("messages[%d].content", index+1), SearchFieldTranscript, message.Content),
 		}
 
 		if len(message.ToolCalls) > 0 {
-			if builder.options.profile == ExportProfilePrivate {
+			if builder.exportsRawAttachments() {
 				exportedMessage.ToolCalls = append([]llm.ToolCall(nil), message.ToolCalls...)
 			} else {
 				exportedMessage.ToolCallCount = len(message.ToolCalls)
 
-				builder.omit(fmt.Sprintf("messages[%d].tool_calls omitted from shareable export", index+1))
+				builder.omit(fmt.Sprintf("messages[%d].tool_calls omitted from %s", index+1, builder.attachmentOmissionScope()))
 			}
 		}
 
 		if message.ToolResult != nil {
-			if builder.options.profile == ExportProfilePrivate {
+			if builder.exportsRawAttachments() {
 				result := *message.ToolResult
 				exportedMessage.ToolResult = &result
 			} else {
 				exportedMessage.ToolResultOmitted = true
 
-				builder.omit(fmt.Sprintf("messages[%d].tool_result omitted from shareable export", index+1))
+				builder.omit(fmt.Sprintf("messages[%d].tool_result omitted from %s", index+1, builder.attachmentOmissionScope()))
 			}
 		}
 
@@ -527,8 +581,26 @@ func (builder *exportBuilder) exportMessages(messages []llm.Message) []ExportMes
 	return exported
 }
 
-func (builder *exportBuilder) sanitizeSlice(field string, values []string) []string {
+func (builder *exportBuilder) exportsRawAttachments() bool {
+	return builder.options.profile == ExportProfilePrivate && !builder.options.redact
+}
+
+func (builder *exportBuilder) attachmentOmissionScope() string {
+	if builder.options.profile == ExportProfilePrivate {
+		return "redacted private export"
+	}
+
+	return "shareable export"
+}
+
+func (builder *exportBuilder) exportSlice(field string, searchField SearchField, values []string) []string {
 	if len(values) == 0 {
+		return nil
+	}
+
+	if builder.excludes(searchField) {
+		builder.omit(field + " omitted by export field policy")
+
 		return nil
 	}
 
@@ -540,13 +612,47 @@ func (builder *exportBuilder) sanitizeSlice(field string, values []string) []str
 	return out
 }
 
+func (builder *exportBuilder) exportString(field string, searchField SearchField, value string) string {
+	if value == "" {
+		return ""
+	}
+
+	if builder.excludes(searchField) {
+		builder.omit(field + " omitted by export field policy")
+
+		return ""
+	}
+
+	return builder.sanitize(field, value)
+}
+
+func (builder *exportBuilder) exportTime(field string, value time.Time) time.Time {
+	if value.IsZero() {
+		return time.Time{}
+	}
+
+	if builder.excludes(SearchFieldDate) {
+		builder.omit(field + " omitted by export field policy")
+
+		return time.Time{}
+	}
+
+	return value
+}
+
+func (builder *exportBuilder) excludes(field SearchField) bool {
+	_, ok := builder.options.excludedFields[field]
+
+	return ok
+}
+
 func (builder *exportBuilder) sanitize(field, value string) string {
 	if value == "" {
 		return ""
 	}
 
 	if builder.options.redact {
-		value = redactSensitive(value, builder.options.sensitiveFields)
+		value = redactSensitiveField(field, value, builder.options.sensitiveFields)
 	}
 
 	return builder.limit(field, value)
@@ -606,7 +712,31 @@ func redactSensitive(value string, sensitiveFields []string) string {
 	return value
 }
 
+func redactSensitiveField(field, value string, sensitiveFields []string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+
+	if sensitiveFieldNameRE(sensitiveFields).MatchString(field) {
+		return "[REDACTED]"
+	}
+
+	return redactSensitive(value, sensitiveFields)
+}
+
 func sensitiveFieldRE(extraFields []string) *regexp.Regexp {
+	patterns := sensitiveFieldPatterns(extraFields)
+
+	return regexp.MustCompile(`(?i)(["']?\b(?:` + strings.Join(patterns, "|") + `)\b["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)`)
+}
+
+func sensitiveFieldNameRE(extraFields []string) *regexp.Regexp {
+	patterns := sensitiveFieldPatterns(extraFields)
+
+	return regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:` + strings.Join(patterns, "|") + `)(?:$|[^a-z0-9])`)
+}
+
+func sensitiveFieldPatterns(extraFields []string) []string {
 	patterns := append([]string(nil), defaultSensitiveFieldPatterns...)
 
 	for _, field := range extraFields {
@@ -618,7 +748,7 @@ func sensitiveFieldRE(extraFields []string) *regexp.Regexp {
 		patterns = append(patterns, regexp.QuoteMeta(field))
 	}
 
-	return regexp.MustCompile(`(?i)(["']?\b(?:` + strings.Join(patterns, "|") + `)\b["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)`)
+	return patterns
 }
 
 func renderMarkdown(export MachineReadableExport) string {
@@ -633,7 +763,7 @@ func renderMarkdown(export MachineReadableExport) string {
 	}
 
 	if export.Manifest.RedactionProfile == ExportProfilePrivate {
-		b.WriteString("> [!WARNING]\n> Private full-fidelity export. Do not share unless the recipients are allowed to see raw session content.\n\n")
+		fmt.Fprintf(&b, "> [!WARNING]\n> %s\n\n", markdownInline(export.Manifest.PrivacyNotice))
 	}
 
 	writeMetadata(&b, "Created", export.Session.CreatedAt)

@@ -11,18 +11,26 @@ import (
 )
 
 func lockHeadlessFile(file *os.File) error {
+	return lockSessionFile(file, "headless lock")
+}
+
+func unlockHeadlessFile(file *os.File) error {
+	return unlockSessionFile(file, "headless lock")
+}
+
+func lockSessionFile(file *os.File, label string) error {
 	//nolint:gosec // os.File descriptors are OS-provided small integers used by flock.
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("session: flock headless lock %s: %w", file.Name(), err)
+		return fmt.Errorf("session: flock %s %s: %w", label, file.Name(), err)
 	}
 
 	return nil
 }
 
-func unlockHeadlessFile(file *os.File) error {
+func unlockSessionFile(file *os.File, label string) error {
 	//nolint:gosec // os.File descriptors are OS-provided small integers used by flock.
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_UN); err != nil {
-		return fmt.Errorf("session: unlock headless lock %s: %w", file.Name(), err)
+		return fmt.Errorf("session: unlock %s %s: %w", label, file.Name(), err)
 	}
 
 	return nil

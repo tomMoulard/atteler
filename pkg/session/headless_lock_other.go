@@ -12,6 +12,14 @@ func unlockHeadlessFile(_ *os.File) error {
 	return nil
 }
 
+func lockSessionFile(_ *os.File, _ string) error {
+	return nil
+}
+
+func unlockSessionFile(_ *os.File, _ string) error {
+	return nil
+}
+
 func headlessProcessAlive(_ int) bool {
 	return false
 }

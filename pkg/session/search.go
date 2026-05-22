@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/retrieval"
@@ -21,64 +22,160 @@ const (
 	snippetRadius         = 80
 )
 
-// SearchResult is one matching saved session plus representative snippets.
-type SearchResult struct {
-	Snippets []SearchSnippet
-	Summary  Summary
+// SearchField names a field family in the saved-session search index.
+type SearchField string
+
+const (
+	// SearchFieldTranscript matches chat transcript messages.
+	SearchFieldTranscript SearchField = "transcript"
+	// SearchFieldTags matches session tags.
+	SearchFieldTags SearchField = "tags"
+	// SearchFieldEvaluations matches agent evaluation records.
+	SearchFieldEvaluations SearchField = "evaluations"
+	// SearchFieldFailures matches negative-knowledge / failed-approach records.
+	SearchFieldFailures SearchField = "failures"
+	// SearchFieldArtifacts matches recorded artifact metadata.
+	SearchFieldArtifacts SearchField = "artifacts"
+	// SearchFieldAgent matches agent metadata and per-record source agents.
+	SearchFieldAgent SearchField = "agent"
+	// SearchFieldModel matches model metadata.
+	SearchFieldModel SearchField = "model"
+	// SearchFieldDate matches indexed created/updated timestamps.
+	SearchFieldDate SearchField = "date"
+	// SearchFieldRepo matches worktree/repository metadata.
+	SearchFieldRepo SearchField = "repo"
+	// SearchFieldSession matches the stable session ID.
+	SearchFieldSession SearchField = "session"
+	// SearchFieldTitle matches the session title.
+	SearchFieldTitle SearchField = "title"
+)
+
+// SearchOptions scopes saved-session search without requiring callers to load
+// each session file. Empty filters search all indexed fields and sessions.
+type SearchOptions struct {
+	// DateFrom keeps sessions whose latest indexed activity is on or after this time.
+	DateFrom time.Time
+	// DateTo keeps sessions whose latest indexed activity is on or before this time.
+	DateTo time.Time
+	// Agent keeps sessions indexed for this default or per-record source agent.
+	Agent string
+	// Model keeps sessions indexed for this default model.
+	Model string
+	// Repo keeps sessions whose worktree path basename matches this repo name.
+	Repo string
+	// Fields restricts matching evidence to the listed indexed field families.
+	Fields []SearchField
+	// Tags keeps sessions that contain every non-empty tag in this list.
+	Tags []string
+	// SessionIDs keeps sessions whose stable ID is in this list, when session identity is indexed.
+	SessionIDs []string
+	// Limit caps returned results after ranking; non-positive values return all results.
+	Limit int
 }
 
-// SearchSnippet is a matching transcript excerpt with enough provenance to cite
-// the original session item instead of only the session file.
+// SearchResult is one matching saved session plus ranked evidence.
+type SearchResult struct {
+	Snippets []SearchSnippet
+	Matches  []SearchMatch
+	Summary  Summary
+	Score    float64
+}
+
+// SearchMatch is field-level evidence for a search hit.
+type SearchMatch struct {
+	Role  llm.Role
+	Field SearchField
+	// Label is a stable field path within the saved session, such as messages[1].content.
+	Label string
+	// Text is a compact excerpt from the indexed field value.
+	Text string
+	// Offset and End are rune offsets into the indexed field value, not the excerpt.
+	Offset      int
+	End         int
+	ExactPhrase bool
+	Score       float64
+}
+
+// SearchSnippet is a backward-compatible matching excerpt. Field, Label, Range
+// and offsets identify stable evidence in the indexed field text.
 //
 //nolint:govet // Layout prioritizes API readability over pointer-byte packing.
 type SearchSnippet struct {
 	Range retrieval.Range
 	Role  llm.Role
+	Field SearchField
+	Label string
 	Kind  string
 	Text  string
 	Index int
+	// Offset and End are rune offsets into the indexed field value, not the excerpt.
+	Offset int
+	End    int
 }
 
-// Search returns saved sessions whose metadata or transcript contains query.
+type normalizedSearchQuery struct {
+	normalized string
+	tokens     []string
+}
+
+type fieldMatch struct {
+	matchedTokens []string
+	offset        int
+	end           int
+	occurrences   int
+	exactPhrase   bool
+}
+
+// Search returns saved sessions whose indexed metadata or transcript contains query.
 func (s *Store) Search(query string) ([]SearchResult, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return nil, errors.New("session: search query is required")
-	}
+	return s.SearchWithOptions(query, SearchOptions{})
+}
 
-	entries, err := os.ReadDir(s.dir)
+// SearchWithOptions returns indexed saved-session search results using field,
+// date, agent/model, repo and session scopes from options.
+func (s *Store) SearchWithOptions(query string, options SearchOptions) ([]SearchResult, error) {
+	normalizedQuery, err := normalizeSearchQuery(query)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-
-		return nil, fmt.Errorf("session: search %s: %w", s.dir, err)
+		return nil, err
 	}
 
-	normalizedQuery := strings.ToLower(query)
+	index, err := s.ensureSearchIndex()
+	if err != nil {
+		return nil, err
+	}
 
-	results := make([]SearchResult, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != sessionFileExt {
+	documents := searchCandidateSessions(index, normalizedQuery.tokens)
+	fieldFilter := normalizedFieldFilter(options.Fields)
+	now := time.Now().UTC()
+
+	results := make([]SearchResult, 0, len(documents))
+	for _, document := range documents {
+		if !searchDocumentMatchesFilters(document, options) {
 			continue
 		}
 
-		path := filepath.Join(s.dir, entry.Name())
-
-		session, err := s.Load(path)
-		if err != nil {
-			return nil, err
-		}
-
-		result, ok := matchSession(summarize(path, session), session, query, normalizedQuery)
+		result, ok := searchDocument(document, normalizedQuery, fieldFilter, now)
 		if ok {
+			result.Summary.Path = s.indexedSessionPath(document)
 			results = append(results, result)
 		}
 	}
 
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Summary.UpdatedAt.After(results[j].Summary.UpdatedAt)
+	sort.SliceStable(results, func(i, j int) bool {
+		if math.Abs(results[i].Score-results[j].Score) > 0.000001 {
+			return results[i].Score > results[j].Score
+		}
+
+		if !results[i].Summary.UpdatedAt.Equal(results[j].Summary.UpdatedAt) {
+			return results[i].Summary.UpdatedAt.After(results[j].Summary.UpdatedAt)
+		}
+
+		return results[i].Summary.ID < results[j].Summary.ID
 	})
+
+	if options.Limit > 0 && len(results) > options.Limit {
+		results = results[:options.Limit]
+	}
 
 	return results, nil
 }
@@ -112,25 +209,12 @@ func (s *Store) SearchRetrieval(ctx context.Context, query retrieval.Query) ([]r
 	return out, nil
 }
 
-func matchSession(summary Summary, session Session, query, normalizedQuery string) (SearchResult, bool) {
-	result := SearchResult{Summary: summary}
-	matched := strings.Contains(strings.ToLower(summary.ID), normalizedQuery) ||
-		strings.Contains(strings.ToLower(summary.Title), normalizedQuery) ||
-		strings.Contains(strings.ToLower(summary.DefaultAgent), normalizedQuery) ||
-		strings.Contains(strings.ToLower(summary.DefaultModel), normalizedQuery) ||
-		containsTag(summary.Tags, normalizedQuery)
-
-	result.Snippets = append(result.Snippets, messageSnippets(session.Messages, query, normalizedQuery)...)
-	result.Snippets = appendLimitedSnippets(result.Snippets, negativeKnowledgeSnippets(session.NegativeKnowledge, query, normalizedQuery)...)
-	result.Snippets = appendLimitedSnippets(result.Snippets, evaluationSnippets(session.Evaluations, query, normalizedQuery)...)
-	result.Snippets = appendLimitedSnippets(result.Snippets, artifactSnippets(session.Artifacts, query, normalizedQuery)...)
-
-	return result, matched || len(result.Snippets) > 0
-}
-
 func sessionRetrievalResults(result SearchResult, query retrieval.Query) []retrieval.Result {
 	documentID := "session/" + result.Summary.ID
-	rawScore := 1 + float64(len(result.Snippets))
+	rawScore := result.Score
+	if rawScore <= 0 {
+		rawScore = 1 + float64(len(result.Snippets))
+	}
 
 	baseMetadata := map[string]string{
 		"session_id": result.Summary.ID,
@@ -174,12 +258,21 @@ func sessionRetrievalResults(result SearchResult, query retrieval.Query) []retri
 		metadata := cloneStringMap(baseMetadata)
 
 		metadata["role"] = string(snippet.Role)
+		metadata["field"] = string(snippet.Field)
+		metadata["label"] = snippet.Label
 		if snippet.Kind != "" {
 			metadata["kind"] = snippet.Kind
+		}
+		if snippet.Index >= 0 {
 			metadata["index"] = strconv.Itoa(snippet.Index)
 		}
 
-		out = append(out, sessionRetrievalResult(documentID, i, snippet.Text, snippet.Range, metadata, result.Summary, rawScore, query))
+		sourceRange := snippet.Range
+		if sourceRange.Unit == "" && snippet.End > snippet.Offset {
+			sourceRange = retrieval.Range{Unit: retrieval.RangeUnitRuneOffset, Start: snippet.Offset, End: snippet.End}
+		}
+
+		out = append(out, sessionRetrievalResult(documentID, i, snippet.Text, sourceRange, metadata, result.Summary, rawScore, query))
 	}
 
 	return out
@@ -226,14 +319,14 @@ func sessionRetrievalResult(
 	}
 
 	scorer := retrieval.Scorer{
-		Name: "session-recency-lexical",
+		Name: "session-index-lexical-recency",
 		Raw:  rawScore,
 		Details: map[string]float64{
-			"snippets": max(0, rawScore-1),
+			"matches": float64(max(0, len(metadata)-len(baseSessionRetrievalMetadataKeys()))),
 		},
 	}
 	if query.Explain {
-		scorer.Explanation = []string{"session matched metadata or transcript text; session search preserves newest-updated ordering"}
+		scorer.Explanation = []string{"session search matched indexed metadata or transcript text and ranks by field weight plus recency"}
 	}
 
 	return retrieval.NormalizeResult(retrieval.Result{
@@ -252,6 +345,10 @@ func sessionRetrievalResult(
 	})
 }
 
+func baseSessionRetrievalMetadataKeys() []string {
+	return []string{"session_id", "session_title", "default_agent", "default_model"}
+}
+
 func cloneStringMap(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return nil
@@ -263,124 +360,443 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
-func messageSnippets(messages []llm.Message, query, normalizedQuery string) []SearchSnippet {
-	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
+func normalizeSearchQuery(query string) (normalizedSearchQuery, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return normalizedSearchQuery{}, errors.New("session: search query is required")
+	}
 
-	for i, message := range messages {
-		if !matchesMessage(message, normalizedQuery) {
+	tokens := tokenizeSearchText(query)
+	if len(tokens) == 0 {
+		return normalizedSearchQuery{}, errors.New("session: search query is required")
+	}
+
+	return normalizedSearchQuery{
+		normalized: strings.ToLower(query),
+		tokens:     tokens,
+	}, nil
+}
+
+func searchCandidateSessions(index sessionSearchIndex, tokens []string) []*indexedSession {
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	counts := make(map[string]int)
+
+	for _, token := range tokens {
+		ids := matchingSessionIDsForToken(index.Terms, token)
+
+		seen := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+
+			seen[id] = struct{}{}
+			counts[id]++
+		}
+	}
+
+	byKey := make(map[string]*indexedSession, len(index.Sessions))
+	for i := range index.Sessions {
+		document := &index.Sessions[i]
+		byKey[document.Key] = document
+	}
+
+	documents := make([]*indexedSession, 0, len(counts))
+	for key, count := range counts {
+		if count != len(tokens) {
 			continue
 		}
 
-		snippet := searchSnippet(message.Content, query)
-
-		snippets = append(snippets, SearchSnippet{
-			Kind:  "message",
-			Index: i,
-			Role:  message.Role,
-			Text:  snippet.Text,
-			Range: snippet.Range,
-		})
-		if len(snippets) >= maxSnippetsPerSession {
-			return snippets
+		document, ok := byKey[key]
+		if ok {
+			documents = append(documents, document)
 		}
+	}
+
+	sort.Slice(documents, func(i, j int) bool {
+		if !documents[i].Summary.UpdatedAt.Equal(documents[j].Summary.UpdatedAt) {
+			return documents[i].Summary.UpdatedAt.After(documents[j].Summary.UpdatedAt)
+		}
+
+		if documents[i].Summary.ID != documents[j].Summary.ID {
+			return documents[i].Summary.ID < documents[j].Summary.ID
+		}
+
+		return documents[i].Key < documents[j].Key
+	})
+
+	return documents
+}
+
+func matchingSessionIDsForToken(terms map[string][]string, token string) []string {
+	matches := make(map[string]struct{})
+
+	for indexedToken, ids := range terms {
+		if indexedToken != token && !strings.Contains(indexedToken, token) {
+			continue
+		}
+
+		for _, id := range ids {
+			matches[id] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(matches))
+	for id := range matches {
+		out = append(out, id)
+	}
+
+	sort.Strings(out)
+
+	return out
+}
+
+func searchDocument(
+	document *indexedSession,
+	query normalizedSearchQuery,
+	fieldFilter map[SearchField]struct{},
+	now time.Time,
+) (SearchResult, bool) {
+	matches := make([]SearchMatch, 0, len(document.Fields))
+	completeMatches := make([]SearchMatch, 0, len(document.Fields))
+	coveredTokens := make(map[string]struct{}, len(query.tokens))
+
+	for _, field := range document.Fields {
+		if !searchFieldAllowed(field.Field, fieldFilter) {
+			continue
+		}
+
+		match, ok := matchIndexedField(field.Value, query)
+		if !ok {
+			continue
+		}
+
+		score := scoreFieldMatch(field, match)
+		searchMatch := SearchMatch{
+			Role:        field.Role,
+			Field:       field.Field,
+			Label:       field.Label,
+			Text:        searchSnippetAt(field.Value, match.offset, match.end),
+			Offset:      match.offset,
+			End:         match.end,
+			ExactPhrase: match.exactPhrase,
+			Score:       score,
+		}
+
+		matches = append(matches, searchMatch)
+
+		if coversAllSearchTokens(query.tokens, tokenSet(match.matchedTokens)) {
+			completeMatches = append(completeMatches, searchMatch)
+		}
+
+		for _, token := range match.matchedTokens {
+			coveredTokens[token] = struct{}{}
+		}
+	}
+
+	if len(matches) == 0 || !coversAllSearchTokens(query.tokens, coveredTokens) {
+		return SearchResult{}, false
+	}
+
+	if len(completeMatches) > 0 {
+		matches = completeMatches
+	}
+
+	sort.SliceStable(matches, func(i, j int) bool {
+		if math.Abs(matches[i].Score-matches[j].Score) > 0.000001 {
+			return matches[i].Score > matches[j].Score
+		}
+
+		if matches[i].Field == matches[j].Field {
+			if matches[i].Label != matches[j].Label {
+				return matches[i].Label < matches[j].Label
+			}
+
+			return matches[i].Offset < matches[j].Offset
+		}
+
+		return matches[i].Field < matches[j].Field
+	})
+
+	score := recencyScore(document.Summary, now)
+	for _, match := range matches {
+		score += match.Score
+	}
+
+	result := SearchResult{
+		Summary: document.Summary,
+		Matches: matches,
+		Score:   score,
+	}
+	result.Snippets = snippetsFromMatches(matches)
+
+	return result, true
+}
+
+func matchIndexedField(value string, query normalizedSearchQuery) (fieldMatch, bool) {
+	normalizedValue := strings.ToLower(value)
+
+	queryRunes := []rune(query.normalized)
+	if offset := runeIndex([]rune(normalizedValue), queryRunes); offset >= 0 {
+		return fieldMatch{
+			offset:        offset,
+			end:           offset + len(queryRunes),
+			occurrences:   countRuneOccurrences([]rune(normalizedValue), queryRunes),
+			exactPhrase:   true,
+			matchedTokens: append([]string(nil), query.tokens...),
+		}, true
+	}
+
+	start := -1
+	end := -1
+	occurrences := 0
+	matchedTokens := make([]string, 0, len(query.tokens))
+	normalizedRunes := []rune(normalizedValue)
+
+	for _, token := range query.tokens {
+		tokenRunes := []rune(token)
+		offset := runeIndex(normalizedRunes, tokenRunes)
+
+		if offset < 0 {
+			continue
+		}
+
+		if start < 0 || offset < start {
+			start = offset
+		}
+
+		tokenEnd := offset + len(tokenRunes)
+		if tokenEnd > end {
+			end = tokenEnd
+		}
+
+		occurrences += countRuneOccurrences(normalizedRunes, tokenRunes)
+
+		matchedTokens = append(matchedTokens, token)
+	}
+
+	if len(matchedTokens) == 0 {
+		return fieldMatch{}, false
+	}
+
+	return fieldMatch{offset: start, end: end, occurrences: occurrences, matchedTokens: matchedTokens}, true
+}
+
+func coversAllSearchTokens(tokens []string, covered map[string]struct{}) bool {
+	for _, token := range tokens {
+		if _, ok := covered[token]; !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func tokenSet(tokens []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		set[token] = struct{}{}
+	}
+
+	return set
+}
+
+func scoreFieldMatch(field indexedField, match fieldMatch) float64 {
+	weight := searchFieldWeight(field.Field)
+	score := weight
+
+	if match.exactPhrase {
+		score += weight * 2
+	}
+
+	if match.occurrences > 1 {
+		score += float64(match.occurrences-1) * (weight / 2)
+	}
+
+	if field.Field == SearchFieldFailures {
+		score += 4 // Failed approaches are deliberately stronger than transcript echoes.
+	}
+
+	return score
+}
+
+func searchFieldWeight(field SearchField) float64 {
+	switch field {
+	case SearchFieldFailures:
+		return 8
+	case SearchFieldTags:
+		return 6
+	case SearchFieldTitle:
+		return 5
+	case SearchFieldEvaluations:
+		return 5
+	case SearchFieldArtifacts:
+		return 4
+	case SearchFieldAgent, SearchFieldModel, SearchFieldRepo, SearchFieldSession:
+		return 3
+	case SearchFieldDate:
+		return 1
+	case SearchFieldTranscript:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func recencyScore(summary Summary, now time.Time) float64 {
+	activity := fallbackActivity(summary.UpdatedAt, summary.CreatedAt)
+	if activity.IsZero() {
+		return 0
+	}
+
+	ageDays := now.Sub(activity).Hours() / 24
+	if ageDays < 0 {
+		ageDays = 0
+	}
+
+	return 2 / (1 + ageDays/30)
+}
+
+func snippetsFromMatches(matches []SearchMatch) []SearchSnippet {
+	limit := min(maxSnippetsPerSession, len(matches))
+	snippets := make([]SearchSnippet, 0, limit)
+
+	for i := range limit {
+		match := matches[i]
+		kind, index := snippetKindIndex(match.Label, match.Field)
+		snippets = append(snippets, SearchSnippet{
+			Range:  retrieval.Range{Unit: retrieval.RangeUnitRuneOffset, Start: match.Offset, End: match.End},
+			Role:   match.Role,
+			Field:  match.Field,
+			Label:  match.Label,
+			Kind:   kind,
+			Text:   match.Text,
+			Index:  index,
+			Offset: match.Offset,
+			End:    match.End,
+		})
 	}
 
 	return snippets
 }
 
-func negativeKnowledgeSnippets(entries []NegativeKnowledge, query, normalizedQuery string) []SearchSnippet {
-	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
+func snippetKindIndex(label string, field SearchField) (string, int) {
+	for _, candidate := range []struct {
+		prefix string
+		kind   string
+	}{
+		{prefix: "messages[", kind: "message"},
+		{prefix: "negative_knowledge[", kind: "negative_knowledge"},
+		{prefix: "evaluations[", kind: "evaluation"},
+		{prefix: "artifacts[", kind: "artifact"},
+	} {
+		if strings.HasPrefix(label, candidate.prefix) {
+			return candidate.kind, parseOneBasedLabelIndex(label, len(candidate.prefix))
+		}
+	}
 
-	for i, entry := range entries {
-		if !matchesNegativeKnowledge(entry, normalizedQuery) {
+	return "metadata", -1
+}
+
+func parseOneBasedLabelIndex(label string, start int) int {
+	end := strings.IndexByte(label[start:], ']')
+	if end < 0 {
+		return -1
+	}
+
+	index, err := strconv.Atoi(label[start : start+end])
+	if err != nil || index <= 0 {
+		return -1
+	}
+
+	return index - 1
+}
+
+func normalizedFieldFilter(fields []SearchField) map[SearchField]struct{} {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	filter := make(map[SearchField]struct{}, len(fields))
+	for _, field := range fields {
+		if field == "" {
 			continue
 		}
 
-		snippet := searchSnippet(negativeKnowledgeSearchText(entry), query)
-
-		snippets = append(snippets, SearchSnippet{
-			Kind:  "negative_knowledge",
-			Index: i,
-			Role:  llm.Role("negative_knowledge"),
-			Text:  snippet.Text,
-			Range: snippet.Range,
-		})
-		if len(snippets) >= maxSnippetsPerSession {
-			return snippets
-		}
+		filter[field] = struct{}{}
 	}
 
-	return snippets
+	return filter
 }
 
-func evaluationSnippets(entries []AgentEvaluation, query, normalizedQuery string) []SearchSnippet {
-	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
+func searchFieldAllowed(field SearchField, filter map[SearchField]struct{}) bool {
+	if len(filter) == 0 {
+		return true
+	}
 
-	for i := range entries {
-		entry := &entries[i]
-		if !matchesEvaluation(entry, normalizedQuery) {
+	_, ok := filter[field]
+
+	return ok
+}
+
+func searchDocumentMatchesFilters(document *indexedSession, options SearchOptions) bool {
+	if !sessionIDFilterMatches(document.Summary.ID, options.SessionIDs) {
+		return false
+	}
+
+	if !stringSetFilterMatches(document.Agents, options.Agent) {
+		return false
+	}
+
+	if !stringSetFilterMatches(document.Models, options.Model) {
+		return false
+	}
+
+	if !repoFilterMatches(document.Repositories, options.Repo) {
+		return false
+	}
+
+	if !tagFiltersMatch(document.Tags, options.Tags) {
+		return false
+	}
+
+	return dateFilterMatches(document.Summary, options.DateFrom, options.DateTo)
+}
+
+func sessionIDFilterMatches(id string, ids []string) bool {
+	if len(ids) == 0 {
+		return true
+	}
+
+	hasFilter := false
+
+	for _, want := range ids {
+		want = strings.TrimSpace(want)
+		if want == "" {
 			continue
 		}
 
-		snippet := searchSnippet(evaluationSearchText(entry), query)
+		hasFilter = true
 
-		snippets = append(snippets, SearchSnippet{
-			Kind:  "evaluation",
-			Index: i,
-			Role:  llm.Role("evaluation"),
-			Text:  snippet.Text,
-			Range: snippet.Range,
-		})
-		if len(snippets) >= maxSnippetsPerSession {
-			return snippets
+		if want == id {
+			return true
 		}
 	}
 
-	return snippets
+	return !hasFilter
 }
 
-func artifactSnippets(entries []Artifact, query, normalizedQuery string) []SearchSnippet {
-	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
-
-	for i := range entries {
-		entry := &entries[i]
-		if !matchesArtifact(entry, normalizedQuery) {
-			continue
-		}
-
-		snippet := searchSnippet(artifactSearchText(entry), query)
-
-		snippets = append(snippets, SearchSnippet{
-			Kind:  "artifact",
-			Index: i,
-			Role:  llm.Role("artifact"),
-			Text:  snippet.Text,
-			Range: snippet.Range,
-		})
-		if len(snippets) >= maxSnippetsPerSession {
-			return snippets
-		}
+func stringSetFilterMatches(values []string, want string) bool {
+	want = normalizeFilterValue(want)
+	if want == "" {
+		return true
 	}
 
-	return snippets
-}
-
-func appendLimitedSnippets(existing []SearchSnippet, candidates ...SearchSnippet) []SearchSnippet {
-	if len(existing) >= maxSnippetsPerSession {
-		return existing
-	}
-
-	remaining := maxSnippetsPerSession - len(existing)
-	if len(candidates) > remaining {
-		candidates = candidates[:remaining]
-	}
-
-	return append(existing, candidates...)
-}
-
-func containsTag(tags []string, normalizedQuery string) bool {
-	for _, tag := range tags {
-		if strings.Contains(strings.ToLower(tag), normalizedQuery) {
+	for _, value := range values {
+		if normalizeFilterValue(value) == want {
 			return true
 		}
 	}
@@ -388,199 +804,124 @@ func containsTag(tags []string, normalizedQuery string) bool {
 	return false
 }
 
-func matchesMessage(message llm.Message, normalizedQuery string) bool {
-	return strings.Contains(strings.ToLower(string(message.Role)), normalizedQuery) ||
-		strings.Contains(strings.ToLower(message.Content), normalizedQuery)
-}
-
-func matchesNegativeKnowledge(entry NegativeKnowledge, normalizedQuery string) bool {
-	return strings.Contains(strings.ToLower(entry.Approach), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.Reason), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.Commit), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.Agent), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.TaskType), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.Severity), normalizedQuery)
-}
-
-func negativeKnowledgeSearchText(entry NegativeKnowledge) string {
-	parts := []string{"Failed attempt: " + entry.Approach, "Reason: " + entry.Reason}
-	if entry.Commit != "" {
-		parts = append(parts, "Commit: "+entry.Commit)
+func repoFilterMatches(values []string, want string) bool {
+	want = normalizeRepoFilterValue(want)
+	if want == "" {
+		return true
 	}
 
-	if entry.Agent != "" {
-		parts = append(parts, "Agent: "+entry.Agent)
-	}
-
-	if entry.TaskType != "" {
-		parts = append(parts, "Task Type: "+entry.TaskType)
-	}
-
-	if entry.Severity != "" {
-		parts = append(parts, "Severity: "+entry.Severity)
-	}
-
-	return strings.Join(parts, " | ")
-}
-
-func matchesEvaluation(entry *AgentEvaluation, normalizedQuery string) bool {
-	return strings.Contains(strings.ToLower(evaluationSearchText(entry)), normalizedQuery)
-}
-
-func evaluationSearchText(entry *AgentEvaluation) string {
-	parts := []string{"Evaluation: " + entry.Agent, "Outcome: " + entry.Outcome}
-	if entry.Score != 0 {
-		parts = append(parts, fmt.Sprintf("Score: %d", entry.Score))
-	}
-
-	if entry.Reference != "" {
-		parts = append(parts, "Reference: "+entry.Reference)
-	}
-
-	parts = appendEvaluationSearchMetadata(parts, entry)
-
-	if entry.Notes != "" {
-		parts = append(parts, "Notes: "+entry.Notes)
-	}
-
-	return strings.Join(parts, " | ")
-}
-
-func appendEvaluationSearchMetadata(parts []string, entry *AgentEvaluation) []string {
-	if entry.Source != "" {
-		parts = append(parts, "Source: "+entry.Source)
-	}
-
-	if entry.Evaluator != "" {
-		parts = append(parts, "Evaluator: "+entry.Evaluator)
-	}
-
-	if entry.RubricVersion != "" {
-		parts = append(parts, "Rubric Version: "+entry.RubricVersion)
-	}
-
-	if entry.TaskType != "" {
-		parts = append(parts, "Task Type: "+entry.TaskType)
-	}
-
-	if entry.Difficulty != "" {
-		parts = append(parts, "Difficulty: "+entry.Difficulty)
-	}
-
-	if entry.ExpectedOutcome != "" {
-		parts = append(parts, "Expected Outcome: "+entry.ExpectedOutcome)
-	}
-
-	if entry.Model != "" {
-		parts = append(parts, "Model: "+entry.Model)
-	}
-
-	if entry.AgentVersion != "" {
-		parts = append(parts, "Agent Version: "+entry.AgentVersion)
-	}
-
-	if entry.SchemaVersion != 0 {
-		parts = append(parts, fmt.Sprintf("Schema Version: %d", entry.SchemaVersion))
-	}
-
-	if entry.DurationMillis != 0 {
-		parts = append(parts, fmt.Sprintf("Duration Millis: %d", entry.DurationMillis))
-	}
-
-	if entry.Cost != 0 {
-		parts = append(parts, fmt.Sprintf("Cost: %.6f", entry.Cost))
-	}
-
-	if entry.Confidence != 0 {
-		parts = append(parts, fmt.Sprintf("Confidence: %.2f", entry.Confidence))
-	}
-
-	return parts
-}
-
-func matchesArtifact(entry *Artifact, normalizedQuery string) bool {
-	return strings.Contains(strings.ToLower(entry.Path), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.LogicalPath), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.Kind), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.Summary), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.SourceAgent), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.SourceSessionID), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.SourceCommand), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.SourceTool), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.SourceCommit), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.WorktreePath), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.WorktreeBranch), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.WorktreeBase), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.SHA256), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.ReviewStatus), normalizedQuery)
-}
-
-func artifactSearchText(entry *Artifact) string {
-	parts := []string{"Artifact: " + entry.Path, "Kind: " + entry.Kind}
-	if entry.LogicalPath != "" && entry.LogicalPath != entry.Path {
-		parts = append(parts, "Logical Path: "+entry.LogicalPath)
-	}
-
-	artifactTextFields := []struct {
-		label string
-		value string
-	}{
-		{label: "Summary", value: entry.Summary},
-		{label: "Source Agent", value: entry.SourceAgent},
-		{label: "Source Session", value: entry.SourceSessionID},
-		{label: "Source Command", value: entry.SourceCommand},
-		{label: "Source Tool", value: entry.SourceTool},
-		{label: "Source Commit", value: entry.SourceCommit},
-		{label: "Worktree", value: entry.WorktreePath},
-		{label: "Worktree Branch", value: entry.WorktreeBranch},
-		{label: "Worktree Base", value: entry.WorktreeBase},
-		{label: "SHA256", value: entry.SHA256},
-		{label: "Review Status", value: entry.ReviewStatus},
-	}
-
-	for _, field := range artifactTextFields {
-		if field.value != "" {
-			parts = append(parts, field.label+": "+field.value)
+	for _, value := range values {
+		normalizedValue := normalizeFilterValue(value)
+		if normalizedValue == want {
+			return true
 		}
 	}
 
-	return strings.Join(parts, " | ")
+	return false
 }
 
-//nolint:govet // Layout prioritizes API readability over pointer-byte packing.
-type rangedSnippet struct {
-	Range retrieval.Range
-	Text  string
+func normalizeRepoFilterValue(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.ContainsAny(value, `/\`) {
+		value = pathBase(value)
+	}
+
+	return normalizeFilterValue(value)
 }
 
-func searchSnippet(content, query string) rangedSnippet {
+func tagFiltersMatch(tags, wantTags []string) bool {
+	if len(wantTags) == 0 {
+		return true
+	}
+
+	indexed := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		key := normalizeTagKey(tag)
+		if key != "" {
+			indexed[key] = struct{}{}
+		}
+	}
+
+	for _, want := range wantTags {
+		key := normalizeTagKey(want)
+		if key == "" {
+			continue
+		}
+
+		if _, ok := indexed[key]; !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func dateFilterMatches(summary Summary, from, to time.Time) bool {
+	activity := fallbackActivity(summary.UpdatedAt, summary.CreatedAt)
+	if activity.IsZero() {
+		return from.IsZero() && to.IsZero()
+	}
+
+	if !from.IsZero() && activity.Before(from.UTC()) {
+		return false
+	}
+
+	if !to.IsZero() && activity.After(to.UTC()) {
+		return false
+	}
+
+	return true
+}
+
+func normalizeFilterValue(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func tokenizeSearchText(value string) []string {
+	tokens := make([]string, 0)
+	seen := make(map[string]struct{})
+
+	for _, token := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+		return !isSearchTokenRune(r)
+	}) {
+		if token == "" {
+			continue
+		}
+
+		if _, ok := seen[token]; ok {
+			continue
+		}
+
+		seen[token] = struct{}{}
+		tokens = append(tokens, token)
+	}
+
+	return tokens
+}
+
+func isSearchTokenRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r)
+}
+
+func searchSnippetAt(content string, offset, end int) string {
 	contentRunes := []rune(content)
-	queryRunes := []rune(strings.ToLower(query))
-
-	index := runeIndex([]rune(strings.ToLower(content)), queryRunes)
-	if index < 0 {
-		return rangedSnippet{
-			Text:  compactWhitespace(content),
-			Range: retrieval.Range{Unit: retrieval.RangeUnitRuneOffset, Start: 0, End: len(contentRunes)},
-		}
+	if offset < 0 || end < offset || offset >= len(contentRunes) {
+		return compactWhitespace(content)
 	}
 
-	start := max(0, index-snippetRadius)
-	end := min(len(contentRunes), index+len(queryRunes)+snippetRadius)
+	start := max(0, offset-snippetRadius)
+	snippetEnd := min(len(contentRunes), end+snippetRadius)
 
-	snippet := strings.TrimSpace(string(contentRunes[start:end]))
+	snippet := strings.TrimSpace(string(contentRunes[start:snippetEnd]))
 	if start > 0 {
 		snippet = "…" + snippet
 	}
 
-	if end < len(contentRunes) {
+	if snippetEnd < len(contentRunes) {
 		snippet += "…"
 	}
 
-	return rangedSnippet{
-		Text:  compactWhitespace(snippet),
-		Range: retrieval.Range{Unit: retrieval.RangeUnitRuneOffset, Start: start, End: end},
-	}
+	return compactWhitespace(snippet)
 }
 
 func runeIndex(haystack, needle []rune) int {
@@ -595,6 +936,22 @@ func runeIndex(haystack, needle []rune) int {
 	}
 
 	return -1
+}
+
+func countRuneOccurrences(haystack, needle []rune) int {
+	if len(needle) == 0 || len(needle) > len(haystack) {
+		return 0
+	}
+
+	count := 0
+
+	for i := 0; i <= len(haystack)-len(needle); i++ {
+		if slices.Equal(haystack[i:i+len(needle)], needle) {
+			count++
+		}
+	}
+
+	return count
 }
 
 func compactWhitespace(value string) string {

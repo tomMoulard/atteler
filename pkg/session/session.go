@@ -117,20 +117,24 @@ type Artifact struct {
 
 // Store reads and writes sessions under a directory.
 type Store struct {
-	dir string
+	dir         string
+	indexPolicy SearchIndexPolicy
 }
 
 // Summary is lightweight session metadata for listing.
 type Summary struct {
-	UpdatedAt    time.Time
-	CreatedAt    time.Time
-	Path         string
-	ID           string
-	Title        string
-	DefaultModel string
-	DefaultAgent string
-	Tags         []string
-	Messages     int
+	UpdatedAt      time.Time `json:"updated_at,omitzero"`
+	CreatedAt      time.Time `json:"created_at,omitzero"`
+	Path           string    `json:"path"`
+	ID             string    `json:"id"`
+	Title          string    `json:"title,omitempty"`
+	DefaultModel   string    `json:"default_model,omitempty"`
+	DefaultAgent   string    `json:"default_agent,omitempty"`
+	WorktreePath   string    `json:"worktree_path,omitempty"`
+	WorktreeBranch string    `json:"worktree_branch,omitempty"`
+	WorktreeBase   string    `json:"worktree_base,omitempty"`
+	Tags           []string  `json:"tags,omitempty"`
+	Messages       int       `json:"messages"`
 }
 
 // TagSummary counts how many saved sessions use a tag.
@@ -141,11 +145,17 @@ type TagSummary struct {
 
 // NewStore creates a session store. If dir is empty, DefaultDir is used.
 func NewStore(dir string) *Store {
+	return NewStoreWithSearchIndexPolicy(dir, SearchIndexPolicy{})
+}
+
+// NewStoreWithSearchIndexPolicy creates a session store using policy for the
+// saved-session search index. The zero policy preserves safe defaults.
+func NewStoreWithSearchIndexPolicy(dir string, policy SearchIndexPolicy) *Store {
 	if dir == "" {
 		dir = DefaultDir()
 	}
 
-	return &Store{dir: dir}
+	return &Store{dir: dir, indexPolicy: policy}
 }
 
 // DefaultDir returns the default session storage directory.
@@ -247,6 +257,10 @@ func (s *Store) Save(session Session) error {
 
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("session: replace %s: %w", path, err)
+	}
+
+	if err := s.indexSavedSession(path); err != nil {
+		return fmt.Errorf("session: update search index: %w", err)
 	}
 
 	return nil
@@ -675,14 +689,17 @@ func idFromPath(path string) string {
 
 func summarize(path string, session Session) Summary {
 	return Summary{
-		ID:           session.ID,
-		Title:        session.Title,
-		Path:         path,
-		CreatedAt:    session.CreatedAt,
-		UpdatedAt:    session.UpdatedAt,
-		DefaultModel: session.DefaultModel,
-		DefaultAgent: session.DefaultAgent,
-		Tags:         append([]string(nil), session.Tags...),
-		Messages:     len(session.Messages),
+		ID:             session.ID,
+		Title:          session.Title,
+		Path:           path,
+		CreatedAt:      session.CreatedAt,
+		UpdatedAt:      session.UpdatedAt,
+		DefaultModel:   session.DefaultModel,
+		DefaultAgent:   session.DefaultAgent,
+		WorktreePath:   session.WorktreePath,
+		WorktreeBranch: session.WorktreeBranch,
+		WorktreeBase:   session.WorktreeBase,
+		Tags:           append([]string(nil), session.Tags...),
+		Messages:       len(session.Messages),
 	}
 }
