@@ -297,6 +297,10 @@ func Run(ctx context.Context, plan Plan, runner Runner) (Result, error) {
 		return Result{Session: session}, err
 	}
 
+	if err := validateWinnerIsAgent(verdict.Winner, plan.Agents); err != nil {
+		return Result{Session: session}, err
+	}
+
 	return Result{
 		Session: session,
 		Winner:  strings.TrimSpace(verdict.Winner),
@@ -360,43 +364,81 @@ func ValidateGateChecks(required []string, checks []GateCheck) error {
 		return err
 	}
 
+	requiredSet := make(map[string]struct{}, len(required))
+	for _, name := range required {
+		requiredSet[name] = struct{}{}
+	}
+
 	seen := make(map[string]GateCheck, len(checks))
 	for _, check := range checks {
-		name := strings.TrimSpace(check.Name)
-		if name == "" {
-			return errors.New("gate check name is required")
+		name, err := gateCheckName(check)
+		if err != nil {
+			return err
 		}
 
 		if _, exists := seen[name]; exists {
 			return fmt.Errorf("duplicate gate check %q", name)
 		}
 
+		if _, ok := requiredSet[name]; !ok {
+			return fmt.Errorf("unknown gate check %q", name)
+		}
+
 		check.Name = name
 		seen[name] = check
 	}
 
-	for _, check := range checks {
-		if !contains(required, check.Name) {
-			return fmt.Errorf("unknown gate check %q", check.Name)
+	missing := make([]string, 0)
+
+	for _, name := range required {
+		if _, ok := seen[name]; !ok {
+			missing = append(missing, name)
 		}
 	}
 
+	if len(missing) > 0 {
+		return fmt.Errorf("missing gate checks: %s", quotedList(missing))
+	}
+
 	for _, name := range required {
-		check, ok := seen[name]
-		if !ok {
-			return fmt.Errorf("missing gate check %q", name)
+		check := seen[name]
+		if check.Passed {
+			continue
 		}
 
-		if !check.Passed {
-			return fmt.Errorf("gate check %q failed", name)
-		}
+		return failedGateCheckError(name, check)
 	}
 
 	return nil
 }
 
+func gateCheckName(check GateCheck) (string, error) {
+	name := strings.TrimSpace(check.Name)
+	if name != "" {
+		return name, nil
+	}
+
+	if strings.TrimSpace(check.Notes) != "" {
+		return "", fmt.Errorf("malformed gate check: %s", check.Notes)
+	}
+
+	return "", errors.New("gate check name is required")
+}
+
+func failedGateCheckError(name string, check GateCheck) error {
+	if strings.TrimSpace(check.Notes) != "" {
+		return fmt.Errorf("gate check %q failed: %s", name, check.Notes)
+	}
+
+	return fmt.Errorf("gate check %q failed", name)
+}
+
 // ValidateVerdict validates winner metadata and required gate checks.
 func ValidateVerdict(verdict Verdict, requiredGateChecks []string) error {
+	if err := ValidateGateChecks(requiredGateChecks, verdict.GateChecks); err != nil {
+		return err
+	}
+
 	if strings.TrimSpace(verdict.Winner) == "" {
 		return errors.New("verdict winner is required")
 	}
@@ -405,7 +447,7 @@ func ValidateVerdict(verdict Verdict, requiredGateChecks []string) error {
 		return errors.New("verdict reason is required")
 	}
 
-	return ValidateGateChecks(requiredGateChecks, verdict.GateChecks)
+	return nil
 }
 
 func runProposals(ctx context.Context, agents []string, propose ProposalRunner) ([]Proposal, error) {
@@ -594,10 +636,6 @@ func normalizeUnique(label string, values []string) ([]string, error) {
 	return normalized, nil
 }
 
-func contains(values []string, target string) bool {
-	return slices.Contains(values, target)
-}
-
 // LLMCompleter is the interface used by RunWithLLM to call an LLM provider.
 // It abstracts the registry so speculative execution can make real LLM calls
 // without importing the full llm package.
@@ -682,7 +720,8 @@ func llmAggregator(completer LLMCompleter, plan Plan, task string) func(ctx cont
 			"WINNER: <agent name>\n" +
 			"REASON: <explanation>\n" +
 			"For each gate check, respond with:\n" +
-			"GATE <name>: PASS|FAIL <optional notes>")
+			"GATE <name>: PASS|FAIL <optional notes>\n" +
+			"Emit exactly one explicit GATE line for every required gate; missing, malformed, duplicate, unknown, or failed gates invalidate the run.")
 
 		systemPrompt := "You are a judge agent aggregating speculative execution results.\n" +
 			"Review all proposals and cross-reviews, then select the best proposal.\n" +
@@ -693,19 +732,18 @@ func llmAggregator(completer LLMCompleter, plan Plan, task string) func(ctx cont
 			return Verdict{}, fmt.Errorf("aggregator LLM call: %w", err)
 		}
 
-		verdict := parseVerdictFromLLM(content, plan.GateChecks, plan.Agents)
-		if err := validateWinnerIsAgent(verdict.Winner, plan.Agents); err != nil {
-			return Verdict{}, err
-		}
-
-		return verdict, nil
+		return parseVerdictFromLLM(content, plan.GateChecks, plan.Agents), nil
 	}
 }
 
 // parseVerdictFromLLM extracts a Verdict from free-form LLM output.
-// It looks for WINNER:, REASON:, and GATE lines. Missing fields are filled
-// with best-effort defaults so the pipeline does not fail on imperfect output.
+// It looks for WINNER:, REASON:, and GATE lines. Missing gate lines are left
+// absent so validation fails closed instead of inventing safety evidence.
 func parseVerdictFromLLM(content string, requiredGates, agents []string) Verdict {
+	// Required gates are validated after parsing. Keep this parser evidence-only:
+	// never synthesize missing gate checks from this list.
+	_ = requiredGates
+
 	verdict := Verdict{}
 
 	for rawLine := range strings.SplitSeq(content, "\n") {
@@ -718,22 +756,7 @@ func parseVerdictFromLLM(content string, requiredGates, agents []string) Verdict
 		case strings.HasPrefix(upper, "REASON:"):
 			verdict.Reason = strings.TrimSpace(line[len("REASON:"):])
 		case strings.HasPrefix(upper, "GATE "):
-			gc := parseGateCheckLine(line[len("GATE "):])
-			if gc.Name != "" {
-				verdict.GateChecks = append(verdict.GateChecks, gc)
-			}
-		}
-	}
-
-	// If the LLM didn't produce explicit gate lines, assume all pass so the
-	// pipeline can proceed. The caller can still validate independently.
-	if len(verdict.GateChecks) == 0 && len(requiredGates) > 0 {
-		for _, gate := range requiredGates {
-			verdict.GateChecks = append(verdict.GateChecks, GateCheck{
-				Name:   gate,
-				Passed: true,
-				Notes:  "inferred pass from aggregator output",
-			})
+			verdict.GateChecks = append(verdict.GateChecks, parseGateCheckLine(line[len("GATE "):]))
 		}
 	}
 
@@ -768,25 +791,46 @@ func parseGateCheckLine(line string) GateCheck {
 	// Expected format: "<name>: PASS|FAIL <notes>"
 	name, rest, found := strings.Cut(line, ":")
 	if !found {
-		return GateCheck{}
+		return GateCheck{
+			Notes: fmt.Sprintf("expected %q, got %q", "<name>: PASS|FAIL <notes>", strings.TrimSpace(line)),
+		}
 	}
 
 	name = strings.TrimSpace(name)
 	rest = strings.TrimSpace(rest)
-	upper := strings.ToUpper(rest)
-
 	gc := GateCheck{Name: name}
 
+	fields := strings.Fields(rest)
+	status := ""
+	notes := ""
+
+	if len(fields) > 0 {
+		status = fields[0]
+		notes = strings.TrimSpace(rest[len(status):])
+	}
+
 	switch {
-	case strings.HasPrefix(upper, "PASS"):
+	case strings.EqualFold(status, "PASS"):
 		gc.Passed = true
-		gc.Notes = strings.TrimSpace(rest[4:])
-	case strings.HasPrefix(upper, "FAIL"):
+		gc.Notes = notes
+	case strings.EqualFold(status, "FAIL"):
 		gc.Passed = false
-		gc.Notes = strings.TrimSpace(rest[4:])
+		gc.Notes = notes
 	default:
-		gc.Notes = rest
+		gc.Notes = "malformed gate status: expected PASS or FAIL"
+		if rest != "" {
+			gc.Notes += ", got " + rest
+		}
 	}
 
 	return gc
+}
+
+func quotedList(values []string) string {
+	quoted := make([]string, len(values))
+	for i, value := range values {
+		quoted[i] = fmt.Sprintf("%q", value)
+	}
+
+	return strings.Join(quoted, ", ")
 }

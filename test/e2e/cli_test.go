@@ -601,6 +601,32 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 	assertContains(t, result.stdout, "alpha -> beta")
 	assertContains(t, result.stdout, "prompt_cache:")
 
+	openAIAPI := startFakeOpenAIChatCompletions(t, []string{
+		"proposal from gpt-4.1",
+		"WINNER: gpt-4.1\nREASON: no structured gate output",
+	})
+	defer openAIAPI.Close()
+
+	speculateConfigPath := filepath.Join(workDir, "speculate-openai.yaml")
+	writeSpeculateOpenAIConfig(t, speculateConfigPath)
+
+	result, err = runAtteler(t, runSpec{
+		dir: workDir,
+		env: []string{
+			"OPENAI_API_KEY=e2e-test-key",
+			"OPENAI_BASE_URL=" + openAIAPI.URL,
+		},
+	}, "--config", speculateConfigPath,
+		"--speculate-run",
+		"--speculate-agent", "gpt-4.1",
+		"--speculate-gate", "tests pass",
+		"--speculate-gate", "lint pass",
+		"--speculate-prompt", "ship safely")
+	require.Error(t, err)
+	assertContains(t, result.stdout, "winner: gpt-4.1")
+	assertContains(t, result.stdout, `error: missing gate checks: "tests pass", "lint pass"`)
+	assertContains(t, result.stderr, `error: speculate-run: missing gate checks: "tests pass", "lint pass"`)
+
 	result = runOK(t, runSpec{dir: workDir}, "--review-plan", "--review-agent", "alpha", "--review-agent", "beta", "--review-path", "pkg/auth.go", "--review-gate", "tests pass")
 	assertContains(t, result.stdout, "reviewers:")
 	assertContains(t, result.stdout, "paths:\n  - pkg/auth.go")
@@ -707,6 +733,85 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 	require.NoError(t, err)
 	assertContains(t, string(historyData), "agent: reviewer")
 	assertContains(t, string(historyData), "status: pending")
+}
+
+func TestSpeculateRunFailsClosedWhenJudgeGatesInvalid(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		judgeOutput string
+		wantErr     string
+	}{
+		{
+			name:        "missing",
+			judgeOutput: "WINNER: gpt-4.1\nREASON: no structured gates",
+			wantErr:     `missing gate checks: "tests pass", "lint pass"`,
+		},
+		{
+			name: "malformed",
+			judgeOutput: "WINNER: gpt-4.1\nREASON: malformed gate\n" +
+				"GATE tests pass: PASSING maybe\n" +
+				"GATE lint pass: PASS clean",
+			wantErr: `gate check "tests pass" failed: malformed gate status`,
+		},
+		{
+			name: "duplicate",
+			judgeOutput: "WINNER: gpt-4.1\nREASON: duplicate gate\n" +
+				"GATE tests pass: PASS first\n" +
+				"GATE tests pass: PASS second\n" +
+				"GATE lint pass: PASS clean",
+			wantErr: `duplicate gate check "tests pass"`,
+		},
+		{
+			name: "unknown",
+			judgeOutput: "WINNER: gpt-4.1\nREASON: unknown gate\n" +
+				"GATE tests pass: PASS covered\n" +
+				"GATE lint pass: PASS clean\n" +
+				"GATE deploy pass: PASS shipped",
+			wantErr: `unknown gate check "deploy pass"`,
+		},
+		{
+			name: "failed",
+			judgeOutput: "WINNER: gpt-4.1\nREASON: explicit failure\n" +
+				"GATE tests pass: FAIL tests red\n" +
+				"GATE lint pass: PASS clean",
+			wantErr: `gate check "tests pass" failed: tests red`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			workDir := t.TempDir()
+			configPath := filepath.Join(workDir, "atteler.yaml")
+			writeSpeculateOpenAIConfig(t, configPath)
+
+			openAIAPI := startFakeOpenAIChatCompletions(t, []string{
+				"proposal from gpt-4.1",
+				tt.judgeOutput,
+			})
+			defer openAIAPI.Close()
+
+			result, err := runAtteler(t, runSpec{
+				dir: workDir,
+				env: []string{
+					"OPENAI_API_KEY=e2e-test-key",
+					"OPENAI_BASE_URL=" + openAIAPI.URL,
+				},
+			}, "--config", configPath,
+				"--speculate-run",
+				"--speculate-agent", "gpt-4.1",
+				"--speculate-gate", "tests pass",
+				"--speculate-gate", "lint pass",
+				"--speculate-prompt", "ship safely")
+			require.Error(t, err)
+			assertContains(t, result.stdout, "winner: gpt-4.1")
+			assertContains(t, result.stdout, "error: "+tt.wantErr)
+			assertContains(t, result.stderr, "error: speculate-run: "+tt.wantErr)
+		})
+	}
 }
 
 func TestSessionCommands(t *testing.T) {
@@ -929,6 +1034,51 @@ func startFakeCodexResponses(t *testing.T, text, model string) *httptest.Server 
 	}))
 
 	return srv
+}
+
+// startFakeOpenAIChatCompletions spins up an httptest server that mimics the
+// OpenAI /v1/chat/completions endpoint, returning one assistant text per call.
+func startFakeOpenAIChatCompletions(t *testing.T, texts []string) *httptest.Server {
+	t.Helper()
+
+	var calls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.NotFound(w, r)
+			return
+		}
+
+		index := int(calls.Add(1)) - 1
+		if index >= len(texts) {
+			index = len(texts) - 1
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"model":"gpt-4.1","choices":[{"finish_reason":"stop","message":{"content":%q}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`, texts[index])
+	}))
+
+	return srv
+}
+
+func writeSpeculateOpenAIConfig(t *testing.T, path string) {
+	t.Helper()
+
+	writeFile(t, path, `default_provider: openai
+default_model: gpt-4.1
+fallback_models:
+  - gpt-4.1
+providers:
+  anthropic:
+    disabled: true
+  claude-code:
+    disabled: true
+  codex:
+    disabled: true
+  ollama:
+    disabled: true
+  openai:
+`)
 }
 
 func TestClaudeCodeOneShotCallsAnthropicAPI(t *testing.T) {
