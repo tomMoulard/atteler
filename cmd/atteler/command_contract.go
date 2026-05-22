@@ -73,9 +73,10 @@ type commandFixture struct {
 }
 
 type commandSurface struct {
-	Schema   string                  `json:"schema"`
-	Domains  []commandSurfaceDomain  `json:"domains"`
-	Commands []commandSurfaceCommand `json:"commands"`
+	Schema        string                       `json:"schema"`
+	Domains       []commandSurfaceDomain       `json:"domains"`
+	Commands      []commandSurfaceCommand      `json:"commands"`
+	SlashCommands []commandSurfaceSlashCommand `json:"slash_commands"`
 }
 
 type commandSurfaceDomain struct {
@@ -115,6 +116,24 @@ type commandSurfaceCommand struct {
 	OutputModes   []string              `json:"output_modes"`
 	Fixtures      []commandFixture      `json:"fixtures"`
 	Overrides     []string              `json:"overrides,omitempty"`
+}
+
+type commandSurfaceSlashCommand struct {
+	Name               string                 `json:"name"`
+	Usage              string                 `json:"usage"`
+	Summary            string                 `json:"summary"`
+	InputType          string                 `json:"input_type"`
+	InputFields        []string               `json:"input_fields,omitempty"`
+	Arguments          []slashCommandArgument `json:"arguments,omitempty"`
+	Aliases            []string               `json:"aliases,omitempty"`
+	HelpAliases        []string               `json:"help_aliases,omitempty"`
+	SharedCLICommands  []string               `json:"shared_cli_commands,omitempty"`
+	Variants           []slashCommandVariant  `json:"variants,omitempty"`
+	CompletionTokens   []string               `json:"completion_tokens,omitempty"`
+	SideEffects        []string               `json:"side_effects"`
+	OutputModes        []string               `json:"output_modes"`
+	PolicyRequirements []string               `json:"policy_requirements,omitempty"`
+	HelpGroup          int                    `json:"help_group"`
 }
 
 func commandContractFor(
@@ -488,10 +507,39 @@ func buildCommandSurface(registry []command) commandSurface {
 	}
 
 	return commandSurface{
-		Schema:   commandSurfaceSchema,
-		Domains:  commandSurfaceDomains(commands),
-		Commands: commands,
+		Schema:        commandSurfaceSchema,
+		Domains:       commandSurfaceDomains(commands),
+		Commands:      commands,
+		SlashCommands: commandSurfaceSlashCommands(),
 	}
+}
+
+func commandSurfaceSlashCommands() []commandSurfaceSlashCommand {
+	descriptors := slashCommandDescriptors()
+	out := make([]commandSurfaceSlashCommand, 0, len(descriptors))
+
+	for i := range descriptors {
+		descriptor := &descriptors[i]
+		out = append(out, commandSurfaceSlashCommand{
+			Name:               descriptor.Name,
+			Usage:              descriptor.Usage,
+			Summary:            descriptor.Summary,
+			InputType:          descriptor.InputType,
+			InputFields:        append([]string(nil), descriptor.InputFields...),
+			Arguments:          copySlashArguments(descriptor.Arguments),
+			Aliases:            append([]string(nil), descriptor.Aliases...),
+			HelpAliases:        append([]string(nil), descriptor.HelpAliases...),
+			SharedCLICommands:  append([]string(nil), descriptor.SharedCLICommands...),
+			Variants:           copySlashVariants(descriptor.Variants),
+			CompletionTokens:   append([]string(nil), descriptor.CompletionTokens...),
+			SideEffects:        append([]string(nil), descriptor.SideEffects...),
+			OutputModes:        append([]string(nil), descriptor.OutputModes...),
+			PolicyRequirements: append([]string(nil), descriptor.PolicyRequirements...),
+			HelpGroup:          descriptor.HelpGroup,
+		})
+	}
+
+	return out
 }
 
 func commandInputFieldNames(inputType string) []string {
@@ -759,6 +807,8 @@ func renderCommandSurfaceMarkdown(surface commandSurface) string {
 		}
 	}
 
+	renderSlashCommandSurfaceMarkdown(&out, surface.SlashCommands)
+
 	out.WriteString("## Dispatch commands\n\n")
 
 	for i := range surface.Commands {
@@ -785,12 +835,165 @@ func renderCommandSurfaceMarkdown(surface commandSurface) string {
 	return out.String()
 }
 
+func renderSlashCommandSurfaceMarkdown(out *strings.Builder, commands []commandSurfaceSlashCommand) {
+	if len(commands) == 0 {
+		return
+	}
+
+	out.WriteString("## Interactive slash commands\n\n")
+	out.WriteString("Slash help:\n\n")
+	out.WriteString("```text\n")
+	out.WriteString(renderCommandSurfaceSlashHelp(commands))
+	out.WriteString("\n```\n\n")
+	out.WriteString("Commands:\n")
+
+	for i := range commands {
+		command := &commands[i]
+
+		out.WriteString("- `")
+		out.WriteString(command.Usage)
+		out.WriteString("`: ")
+		out.WriteString(command.Summary)
+		out.WriteString("\n")
+		writeMarkdownListDetail(out, "Input", []string{command.InputType})
+		writeMarkdownListDetail(out, "Input fields", command.InputFields)
+		writeMarkdownListDetail(out, "Arguments", slashArgumentLabels(command.Arguments))
+		writeMarkdownListDetail(out, "Aliases", command.Aliases)
+		writeMarkdownListDetail(out, "Help aliases", command.HelpAliases)
+		writeMarkdownListDetail(out, "Shared CLI commands", command.SharedCLICommands)
+		writeMarkdownListDetail(out, "Completion tokens", command.CompletionTokens)
+		writeSlashVariantDetails(out, command.Variants)
+		writeMarkdownListDetail(out, "Side effects", command.SideEffects)
+		writeMarkdownListDetail(out, "Outputs", command.OutputModes)
+		writeMarkdownListDetail(out, "Policy", command.PolicyRequirements)
+	}
+
+	out.WriteString("\n")
+}
+
+func renderCommandSurfaceSlashHelp(commands []commandSurfaceSlashCommand) string {
+	var (
+		out  []string
+		line []string
+	)
+
+	currentGroup := -1
+
+	for i := range commands {
+		command := &commands[i]
+		if currentGroup == -1 {
+			currentGroup = command.HelpGroup
+		}
+
+		if command.HelpGroup != currentGroup {
+			out = append(out, strings.Join(line, " "))
+			line = nil
+			currentGroup = command.HelpGroup
+		}
+
+		line = append(line, command.Usage)
+		for _, alias := range command.HelpAliases {
+			line = append(line, "/"+alias)
+		}
+	}
+
+	if len(line) > 0 {
+		out = append(out, strings.Join(line, " "))
+	}
+
+	return strings.Join(out, "\n")
+}
+
+func copySlashArguments(arguments []slashCommandArgument) []slashCommandArgument {
+	if len(arguments) == 0 {
+		return nil
+	}
+
+	out := make([]slashCommandArgument, 0, len(arguments))
+	for i := range arguments {
+		argument := arguments[i]
+		argument.Values = append([]string(nil), argument.Values...)
+		out = append(out, argument)
+	}
+
+	return out
+}
+
+func copySlashVariants(variants []slashCommandVariant) []slashCommandVariant {
+	if len(variants) == 0 {
+		return nil
+	}
+
+	out := make([]slashCommandVariant, 0, len(variants))
+	for i := range variants {
+		variant := variants[i]
+		variant.SideEffects = append([]string(nil), variant.SideEffects...)
+		variant.OutputModes = append([]string(nil), variant.OutputModes...)
+		variant.PolicyRequirements = append([]string(nil), variant.PolicyRequirements...)
+		out = append(out, variant)
+	}
+
+	return out
+}
+
+func slashArgumentLabels(arguments []slashCommandArgument) []string {
+	labels := make([]string, 0, len(arguments))
+	for i := range arguments {
+		argument := &arguments[i]
+		label := argument.Name + ":" + argument.Type
+
+		if len(argument.Values) > 0 {
+			label += "(" + strings.Join(argument.Values, "|") + ")"
+		}
+
+		if argument.Required {
+			label += " required"
+		} else {
+			label += " optional"
+		}
+
+		if argument.Variadic {
+			label += ", variadic"
+		}
+
+		labels = append(labels, label)
+	}
+
+	return labels
+}
+
+func writeSlashVariantDetails(out *strings.Builder, variants []slashCommandVariant) {
+	if len(variants) == 0 {
+		return
+	}
+
+	out.WriteString("  - Variants:\n")
+
+	for i := range variants {
+		variant := &variants[i]
+
+		out.WriteString("    - `")
+		out.WriteString(variant.Usage)
+		out.WriteString("`: ")
+		out.WriteString(variant.Summary)
+		out.WriteString("\n")
+		writeMarkdownIndentedListDetail(out, "Side effects", variant.SideEffects, "      ")
+		writeMarkdownIndentedListDetail(out, "Outputs", variant.OutputModes, "      ")
+		writeMarkdownIndentedListDetail(out, "Policy", variant.PolicyRequirements, "      ")
+	}
+}
+
 func writeMarkdownListDetail(out *strings.Builder, label string, values []string) {
+	writeMarkdownIndentedListDetail(out, label, values, "  ")
+}
+
+func writeMarkdownIndentedListDetail(out *strings.Builder, label string, values []string, indent string) {
 	if len(values) == 0 {
 		return
 	}
 
-	out.WriteString("  - ")
+	out.WriteString(indent)
+	out.WriteString("- ")
 	out.WriteString(label)
 	out.WriteString(": ")
 

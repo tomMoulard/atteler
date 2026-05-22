@@ -7,11 +7,12 @@ import (
 )
 
 const (
-	bashCommandName = "bash"
-	helpCommandName = "help"
-	helpLongFlag    = "--help"
-	helpGoFlag      = "-help"
-	helpShortFlag   = "-h"
+	bashCommandName    = "bash"
+	helpCommandName    = "help"
+	sessionCommandName = "session"
+	helpLongFlag       = "--help"
+	helpGoFlag         = "-help"
+	helpShortFlag      = "-h"
 )
 
 type cliCommandAlias struct {
@@ -51,7 +52,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Name:    "chat/session",
 		Title:   "Chat & sessions",
 		Summary: "Run the TUI or one-shot prompts, manage saved sessions, transcripts, headless runs, and artifacts.",
-		Aliases: []string{"chat", "session", "sessions"},
+		Aliases: []string{"chat", sessionCommandName, "sessions"},
 		Commands: []cliCommandAlias{
 			{Name: "run", Args: "[prompt]", Summary: "start chat or run positional one-shot prompt text", JoinArgs: true},
 			{Name: "once", Args: "<prompt|--stdin>", Summary: "send one prompt and exit", Legacy: []string{"--once"}, JoinArgs: true, PromptFromStdin: true},

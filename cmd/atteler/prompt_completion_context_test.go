@@ -79,6 +79,33 @@ func TestPromptCompletionContext_ExcludesHiddenAgents(t *testing.T) {
 	assert.NotContains(t, candidateTexts(completionContext.Agents), "internal")
 }
 
+func TestPromptSlashCommandCandidates_DeriveFromDescriptors(t *testing.T) {
+	t.Parallel()
+
+	candidates := promptSlashCommandCandidates()
+
+	byText := make(map[string]promptcomplete.Candidate, len(candidates))
+	for _, candidate := range candidates {
+		require.Equal(t, "slash-command", candidate.Kind)
+		require.Equal(t, "interactive slash commands", candidate.Source)
+		byText[candidate.Text] = candidate
+	}
+
+	for _, command := range slashCommandDescriptors() {
+		candidate, ok := byText["/"+command.Name]
+		require.True(t, ok, "descriptor %q should produce a completion candidate", command.Name)
+		assert.Equal(t, command.Summary, candidate.Description)
+		assert.Equal(t, command.CompletionTokens, candidate.Tokens)
+
+		for _, alias := range command.Aliases {
+			aliasCandidate, aliasOK := byText["/"+alias]
+			require.True(t, aliasOK, "descriptor alias %q should produce a completion candidate", alias)
+			assert.Equal(t, command.Summary, aliasCandidate.Description)
+			assert.Equal(t, command.CompletionTokens, aliasCandidate.Tokens)
+		}
+	}
+}
+
 func candidateTexts(candidates []promptcomplete.Candidate) []string {
 	out := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
