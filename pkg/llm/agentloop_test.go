@@ -192,10 +192,22 @@ func TestAgentLoop_DefaultMaxIterationsIsUnlimited(t *testing.T) {
 	assert.Nil(t, budgetExceededStop(normalized, AgentLoopUsage{Iterations: 10_000}))
 }
 
-func TestAgentLoop_ZeroCheckpointIntervalDefaultsToMaxIterations(t *testing.T) {
+func TestAgentLoop_DefaultMaxWallTimeIsUnlimited(t *testing.T) {
 	t.Parallel()
 
-	toolTurns := defaultCheckpointInterval - 1
+	// With no caller-supplied MaxWallTime, normalization must not silently
+	// install a 30-minute (or any) ceiling — long-running loops would
+	// otherwise be killed without the caller opting in.
+	normalized := normalizeAgentLoopBudget(AgentLoopBudget{}, 0)
+	assert.Zero(t, normalized.MaxWallTime)
+	assert.Nil(t, budgetExceededStop(normalized, AgentLoopUsage{Elapsed: 24 * time.Hour}))
+}
+
+func TestAgentLoop_ZeroCheckpointIntervalNeverPrompts(t *testing.T) {
+	t.Parallel()
+
+	const toolTurns = 50
+
 	responses := make([]*Response, toolTurns+1)
 
 	for i := range toolTurns {
@@ -225,6 +237,8 @@ func TestAgentLoop_ZeroCheckpointIntervalDefaultsToMaxIterations(t *testing.T) {
 
 	resp, _, err := AgentLoop(context.Background(), reg, params, nil, executor, AgentLoopConfig{
 		MaxIterations: 100,
+		// CheckpointInterval intentionally left at zero — the loop must run
+		// to completion without ever invoking ConfirmContinue.
 		ConfirmContinue: func(iterations int) bool {
 			checkpoints = append(checkpoints, iterations)
 			return true

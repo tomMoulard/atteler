@@ -186,21 +186,22 @@ func (u *tokenUsage) add(next tokenUsage) {
 
 //nolint:govet // Field order groups request concerns; padding is not performance-sensitive.
 type llmRequest struct {
-	eventBase               events.Event
-	hookRunner              *events.Runner
-	generation              generationSettings
-	agentLoopBudget         llm.AgentLoopBudget
-	maxInputTokens          int
-	model                   string
-	agentLoopCheckpointPath string
-	referenceContext        string
-	workingDir              string
-	messages                []llm.Message
-	fallbackModels          []string
-	refs                    []contextref.Reference
-	agent                   agent.Agent
-	hasAgent                bool
-	useTools                bool
+	eventBase                   events.Event
+	hookRunner                  *events.Runner
+	generation                  generationSettings
+	agentLoopBudget             llm.AgentLoopBudget
+	agentLoopCheckpointInterval int
+	maxInputTokens              int
+	model                       string
+	agentLoopCheckpointPath     string
+	referenceContext            string
+	workingDir                  string
+	messages                    []llm.Message
+	fallbackModels              []string
+	refs                        []contextref.Reference
+	agent                       agent.Agent
+	hasAgent                    bool
+	useTools                    bool
 
 	// confirmRequestCh is used by the agent loop to ask the caller whether to
 	// continue at checkpoint intervals or execute require-confirm tool calls.
@@ -239,9 +240,12 @@ type model struct {
 	cwd                  string
 	selectedProvider     string
 	fallbackModels       []string
-	generationDefaults   generationSettings
-	generationOverrides  generationSettings
-	agentLoopBudget      llm.AgentLoopBudget
+
+	generationDefaults          generationSettings
+	generationOverrides         generationSettings
+	agentLoopBudget             llm.AgentLoopBudget
+	agentLoopCheckpointInterval int
+
 	sessionState         session.Session
 	history              []llm.Message
 	promptHistory        []string
@@ -307,6 +311,7 @@ func initialModel(
 	generationDefaults generationSettings,
 	generationOverrides generationSettings,
 	agentLoopBudget llm.AgentLoopBudget,
+	agentLoopCheckpointInterval int,
 	maxInputTokens int,
 	modelLocked bool,
 	promptLocalOnly bool,
@@ -326,33 +331,34 @@ func initialModel(
 	selectedProvider, _ := reg.ProviderForModel(selectedModel)
 
 	return model{
-		ctx:                 ctx,
-		registry:            reg,
-		agentRegistry:       agents,
-		hookRunner:          hooks,
-		sessionStore:        store,
-		stateStore:          stateStore,
-		sessionState:        sessionState,
-		contextOptions:      contextOptions,
-		referenceContext:    referenceContext,
-		sessionPath:         sessionPath,
-		cwd:                 cwd,
-		selectedModel:       selectedModel,
-		selectedAgent:       selectedAgent,
-		selectedProvider:    selectedProvider,
-		fallbackModels:      append([]string(nil), fallbackModels...),
-		generationDefaults:  generationDefaults,
-		generationOverrides: generationOverrides,
-		agentLoopBudget:     agentLoopBudget,
-		maxInputTokens:      maxInputTokens,
-		history:             append([]llm.Message(nil), sessionState.Messages...),
-		promptHistory:       promptHistoryFromStore(store, sessionState, maxPromptHistoryEntries),
-		promptHistoryCursor: -1,
-		textarea:            ta,
-		modelLocked:         modelLocked,
-		promptLocalOnly:     promptLocalOnly,
-		worktreeInfo:        wtInfo,
-		pinnedMessages:      make(map[int]bool),
-		executionMode:       "execute",
+		ctx:                         ctx,
+		registry:                    reg,
+		agentRegistry:               agents,
+		hookRunner:                  hooks,
+		sessionStore:                store,
+		stateStore:                  stateStore,
+		sessionState:                sessionState,
+		contextOptions:              contextOptions,
+		referenceContext:            referenceContext,
+		sessionPath:                 sessionPath,
+		cwd:                         cwd,
+		selectedModel:               selectedModel,
+		selectedAgent:               selectedAgent,
+		selectedProvider:            selectedProvider,
+		fallbackModels:              append([]string(nil), fallbackModels...),
+		generationDefaults:          generationDefaults,
+		generationOverrides:         generationOverrides,
+		agentLoopBudget:             agentLoopBudget,
+		agentLoopCheckpointInterval: agentLoopCheckpointInterval,
+		maxInputTokens:              maxInputTokens,
+		history:                     append([]llm.Message(nil), sessionState.Messages...),
+		promptHistory:               promptHistoryFromStore(store, sessionState, maxPromptHistoryEntries),
+		promptHistoryCursor:         -1,
+		textarea:                    ta,
+		modelLocked:                 modelLocked,
+		promptLocalOnly:             promptLocalOnly,
+		worktreeInfo:                wtInfo,
+		pinnedMessages:              make(map[int]bool),
+		executionMode:               "execute",
 	}
 }

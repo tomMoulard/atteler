@@ -405,30 +405,31 @@ type cliOptions struct {
 
 //nolint:govet // field order follows app state grouping; padding is not performance-sensitive.
 type appState struct {
-	config              appconfig.Config
-	sessionState        session.Session
-	contextOptions      contextref.Options
-	generationDefaults  generationSettings
-	generationOverrides generationSettings
-	agentLoopBudget     llm.AgentLoopBudget
-	hookConfig          map[string][]appconfig.HookConfig
-	agentRegistry       *agent.Registry
-	hookRunner          *events.Runner
-	sessionStore        *session.Store
-	stateStore          *appconfig.StateStore
-	registry            *llm.Registry
-	worktreeInfo        *worktree.Info
-	pluginPolicy        *attelerplugin.Policy
-	fallbackModels      []string
-	pluginPaths         []string
-	providers           []string
-	loadedConfigPaths   []string
-	referenceContext    string
-	selectedModel       string
-	selectedAgent       string
-	cwd                 string
-	maxInputTokens      int
-	modelLocked         bool
-	autoMergeWorktree   bool
-	promptLocalOnly     bool
+	config                      appconfig.Config
+	sessionState                session.Session
+	contextOptions              contextref.Options
+	generationDefaults          generationSettings
+	generationOverrides         generationSettings
+	agentLoopBudget             llm.AgentLoopBudget
+	agentLoopCheckpointInterval int
+	hookConfig                  map[string][]appconfig.HookConfig
+	agentRegistry               *agent.Registry
+	hookRunner                  *events.Runner
+	sessionStore                *session.Store
+	stateStore                  *appconfig.StateStore
+	registry                    *llm.Registry
+	worktreeInfo                *worktree.Info
+	pluginPolicy                *attelerplugin.Policy
+	fallbackModels              []string
+	pluginPaths                 []string
+	providers                   []string
+	loadedConfigPaths           []string
+	referenceContext            string
+	selectedModel               string
+	selectedAgent               string
+	cwd                         string
+	maxInputTokens              int
+	modelLocked                 bool
+	autoMergeWorktree           bool
+	promptLocalOnly             bool
 }

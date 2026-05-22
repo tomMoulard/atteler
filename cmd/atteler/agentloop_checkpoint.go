@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -73,7 +74,54 @@ func agentLoopBudgetFromConfig(cfg appconfig.Config) (llm.AgentLoopBudget, error
 		budget.MaxModelCalls = maxModelCalls
 	}
 
+	wallTime, err := agentLoopMaxWallTimeFromConfig(cfg)
+	if err != nil {
+		return budget, err
+	}
+
+	budget.MaxWallTime = wallTime
+
 	return budget, nil
+}
+
+// agentLoopMaxWallTimeFromConfig parses the configured wall-time ceiling.
+// Zero means no cap (the default when the field is unset or empty).
+func agentLoopMaxWallTimeFromConfig(cfg appconfig.Config) (time.Duration, error) {
+	if cfg.AgentLoop.MaxWallTime == nil {
+		return 0, nil
+	}
+
+	raw := strings.TrimSpace(*cfg.AgentLoop.MaxWallTime)
+	if raw == "" {
+		return 0, nil
+	}
+
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("agent_loop.max_wall_time: %w", err)
+	}
+
+	if parsed < 0 {
+		return 0, errors.New("agent_loop.max_wall_time must be >= 0")
+	}
+
+	return parsed, nil
+}
+
+// agentLoopCheckpointIntervalFromConfig returns the configured checkpoint
+// interval. Zero (the default when unset) disables the interactive
+// "continue?" prompt entirely.
+func agentLoopCheckpointIntervalFromConfig(cfg appconfig.Config) (int, error) {
+	if cfg.AgentLoop.CheckpointInterval == nil {
+		return 0, nil
+	}
+
+	interval := *cfg.AgentLoop.CheckpointInterval
+	if interval < 0 {
+		return 0, errors.New("agent_loop.checkpoint_interval must be >= 0")
+	}
+
+	return interval, nil
 }
 
 func agentLoopToolOutputLimit(ctx context.Context) int64 {

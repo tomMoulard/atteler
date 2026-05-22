@@ -58,9 +58,9 @@ type AgentLoopConfig struct {
 	// MaxIterations is a legacy shortcut for Budget.MaxIterations.
 	MaxIterations int
 
-	// CheckpointInterval is the legacy number of completed tool-use iterations
-	// between ConfirmContinue prompts. When zero, defaults to
-	// defaultCheckpointInterval.
+	// CheckpointInterval is the number of completed tool-use iterations
+	// between ConfirmContinue prompts. Zero or negative disables the prompt
+	// entirely — the loop runs without asking the user to confirm continuation.
 	CheckpointInterval int
 
 	// MaxHistoryToolResultBytes caps each tool result appended back into model
@@ -111,10 +111,7 @@ func AgentLoop(
 		return nil, state.messages, err
 	}
 
-	checkpoint := cfg.CheckpointInterval
-	if checkpoint <= 0 {
-		checkpoint = defaultCheckpointInterval
-	}
+	checkpoint := max(cfg.CheckpointInterval, 0)
 
 	policy := cfg.Policy
 	if policy == nil {
@@ -442,8 +439,11 @@ func (s *agentLoopState) refreshElapsed() {
 func (s *agentLoopState) budgetSnapshot() AgentLoopBudgetSnapshot {
 	s.refreshElapsed()
 
-	remainingDuration := s.budget.MaxWallTime - s.usage.Elapsed
-	remainingDuration = max(remainingDuration, 0)
+	var remainingDuration time.Duration
+	if s.budget.MaxWallTime > 0 {
+		remainingDuration = s.budget.MaxWallTime - s.usage.Elapsed
+		remainingDuration = max(remainingDuration, 0)
+	}
 
 	return AgentLoopBudgetSnapshot{
 		Budget:                s.budget,

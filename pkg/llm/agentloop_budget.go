@@ -7,17 +7,12 @@ import (
 )
 
 const (
-	// defaultCheckpointInterval is the number of completed tool-use iterations
-	// between continuation prompts when callers do not configure their own
-	// interval. The iteration ceiling itself defaults to unlimited.
-	defaultCheckpointInterval  = 20
 	defaultMaxToolCalls        = 50
-	defaultMaxWallTime         = 30 * time.Minute
 	defaultMaxHistoryToolBytes = 16 << 10 // 16 KiB per tool result in prompt history.
 )
 
 // AgentLoopBudget is the hard-stop envelope for an agentic tool loop.
-// MaxWallTime and MaxToolCalls fall back to conservative defaults when zero.
+// MaxToolCalls falls back to a conservative default when zero. MaxWallTime,
 // MaxIterations, MaxModelCalls, MaxOutputBytes, MaxCostMicros, and
 // MaxTotalTokens are disabled when zero — callers that want a hard ceiling on
 // those must set them explicitly.
@@ -100,8 +95,8 @@ func normalizeAgentLoopBudget(b AgentLoopBudget, legacyMaxIterations int) AgentL
 		b.MaxModelCalls = 0
 	}
 
-	if b.MaxWallTime <= 0 {
-		b.MaxWallTime = defaultMaxWallTime
+	if b.MaxWallTime < 0 {
+		b.MaxWallTime = 0
 	}
 
 	if b.MaxToolCalls <= 0 {

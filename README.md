@@ -153,6 +153,13 @@ agent_loop:
   # set to 0) to run unlimited turns until the model returns a final response
   # or another budget — model calls, tool calls, wall time — trips.
   max_iterations: 0
+  # max_wall_time caps the wall-clock duration of an agent loop. Parsed via
+  # Go's time.ParseDuration (e.g. "30m", "1h30m"). Omit, leave empty, or set
+  # to "0" for no wall-clock cap (the default).
+  # max_wall_time: 30m
+  # checkpoint_interval prompts the user to confirm continuation every N
+  # tool-use iterations. Omit (or set to 0) to never prompt — the default.
+  # checkpoint_interval: 40
 
 providers:
   openai:

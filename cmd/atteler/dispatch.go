@@ -325,6 +325,10 @@ func validateConfig() error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
+	if _, err := agentLoopCheckpointIntervalFromConfig(cfg); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
 	if len(loaded) == 0 {
 		fmt.Println("Config valid: no config files loaded.")
 		return nil
@@ -548,7 +552,8 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		state.generationOverrides,
 		state.maxInputTokens,
 		runOnceExecutionOptions{
-			AgentLoopBudget: state.agentLoopBudget,
+			AgentLoopBudget:             state.agentLoopBudget,
+			AgentLoopCheckpointInterval: state.agentLoopCheckpointInterval,
 			Response: responseRecordOptions{
 				RecordPath: opts.recordResponsePath,
 				ReplayPath: opts.replayResponsePath,
@@ -612,6 +617,11 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		return appState{}, err
 	}
 
+	agentLoopCheckpointInterval, err := agentLoopCheckpointIntervalFromConfig(cfg)
+	if err != nil {
+		return appState{}, err
+	}
+
 	providers := reg.ListProviders()
 	if len(providers) == 0 && !opts.headless {
 		fmt.Fprintln(os.Stderr, "warning: no LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY")
@@ -647,32 +657,33 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	}
 
 	return appState{
-		config:              cfg,
-		registry:            reg,
-		agentRegistry:       agentRegistry,
-		hookRunner:          hookRunner,
-		sessionStore:        store,
-		stateStore:          stateStore,
-		contextOptions:      contextOptions,
-		referenceContext:    referenceContext,
-		sessionState:        selection.sessionState,
-		worktreeInfo:        wtInfo,
-		cwd:                 cwd,
-		loadedConfigPaths:   loadedConfigPaths,
-		providers:           providers,
-		selectedModel:       selection.selectedModel,
-		selectedAgent:       selection.selectedAgent,
-		fallbackModels:      selection.fallbackModels,
-		pluginPaths:         append([]string(nil), cfg.Plugins.Paths...),
-		pluginPolicy:        clonePluginPolicy(cfg.Plugins.Policy),
-		generationDefaults:  generationDefaults,
-		generationOverrides: generationOverrides,
-		agentLoopBudget:     agentLoopBudget,
-		maxInputTokens:      maxInputTokens,
-		hookConfig:          cfg.Hooks,
-		modelLocked:         selection.modelLocked,
-		autoMergeWorktree:   opts.useWorktree && !opts.noAutoMerge,
-		promptLocalOnly:     opts.promptLocalOnly,
+		config:                      cfg,
+		registry:                    reg,
+		agentRegistry:               agentRegistry,
+		hookRunner:                  hookRunner,
+		sessionStore:                store,
+		stateStore:                  stateStore,
+		contextOptions:              contextOptions,
+		referenceContext:            referenceContext,
+		sessionState:                selection.sessionState,
+		worktreeInfo:                wtInfo,
+		cwd:                         cwd,
+		loadedConfigPaths:           loadedConfigPaths,
+		providers:                   providers,
+		selectedModel:               selection.selectedModel,
+		selectedAgent:               selection.selectedAgent,
+		fallbackModels:              selection.fallbackModels,
+		pluginPaths:                 append([]string(nil), cfg.Plugins.Paths...),
+		pluginPolicy:                clonePluginPolicy(cfg.Plugins.Policy),
+		generationDefaults:          generationDefaults,
+		generationOverrides:         generationOverrides,
+		agentLoopBudget:             agentLoopBudget,
+		agentLoopCheckpointInterval: agentLoopCheckpointInterval,
+		maxInputTokens:              maxInputTokens,
+		hookConfig:                  cfg.Hooks,
+		modelLocked:                 selection.modelLocked,
+		autoMergeWorktree:           opts.useWorktree && !opts.noAutoMerge,
+		promptLocalOnly:             opts.promptLocalOnly,
 	}, nil
 }
 

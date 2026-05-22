@@ -181,11 +181,12 @@ func callLLMWithTools(
 	confirmContinueFn, confirmToolFn := agentLoopConfirmCallbacks(ctx, request)
 
 	resp, _, err := llm.AgentLoop(ctx, reg, params, request.fallbackModels, executor, llm.AgentLoopConfig{
-		ConfirmContinue: confirmContinueFn,
-		ConfirmToolCall: confirmToolFn,
-		Budget:          request.agentLoopBudget,
-		Policy:          llm.BashToolPolicy,
-		CheckpointSink:  agentLoopCheckpointSink(request.agentLoopCheckpointPath),
+		ConfirmContinue:    confirmContinueFn,
+		ConfirmToolCall:    confirmToolFn,
+		Budget:             request.agentLoopBudget,
+		CheckpointInterval: request.agentLoopCheckpointInterval,
+		Policy:             llm.BashToolPolicy,
+		CheckpointSink:     agentLoopCheckpointSink(request.agentLoopCheckpointPath),
 	})
 
 	// Close the request channel so the listenForCheckpoint goroutine exits.

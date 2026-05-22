@@ -80,6 +80,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.generationDefaults,
 		state.generationOverrides,
 		state.agentLoopBudget,
+		state.agentLoopCheckpointInterval,
 		state.maxInputTokens,
 		state.modelLocked,
 		state.promptLocalOnly,

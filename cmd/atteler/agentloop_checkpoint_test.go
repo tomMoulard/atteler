@@ -68,36 +68,43 @@ func TestAgentLoopBudgetFromConfig(t *testing.T) {
 	assert.Zero(t, budget.MaxOutputBytes)
 	assert.Zero(t, budget.MaxTotalTokens)
 	assert.Zero(t, budget.MaxIterations)
+	assert.Zero(t, budget.MaxWallTime, "MaxWallTime defaults to unlimited (zero)")
 
 	zeroBytes := int64(0)
 	zeroTokens := 0
 	zeroIterations := 0
+	emptyWallTime := ""
 	budget, err = agentLoopBudgetFromConfig(appconfig.Config{
 		AgentLoop: appconfig.AgentLoopConfig{
 			MaxOutputBytes: &zeroBytes,
 			MaxTotalTokens: &zeroTokens,
 			MaxIterations:  &zeroIterations,
+			MaxWallTime:    &emptyWallTime,
 		},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, budget.MaxOutputBytes)
 	assert.Zero(t, budget.MaxTotalTokens)
 	assert.Zero(t, budget.MaxIterations)
+	assert.Zero(t, budget.MaxWallTime)
 
 	byteLimit := int64(4096)
 	tokenLimit := 200000
 	iterationLimit := 50
+	wallTime := "1h30m"
 	budget, err = agentLoopBudgetFromConfig(appconfig.Config{
 		AgentLoop: appconfig.AgentLoopConfig{
 			MaxOutputBytes: &byteLimit,
 			MaxTotalTokens: &tokenLimit,
 			MaxIterations:  &iterationLimit,
+			MaxWallTime:    &wallTime,
 		},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, byteLimit, budget.MaxOutputBytes)
 	assert.Equal(t, tokenLimit, budget.MaxTotalTokens)
 	assert.Equal(t, iterationLimit, budget.MaxIterations)
+	assert.Equal(t, 90*time.Minute, budget.MaxWallTime)
 
 	negativeBytes := int64(-1)
 	_, err = agentLoopBudgetFromConfig(appconfig.Config{
@@ -116,6 +123,39 @@ func TestAgentLoopBudgetFromConfig(t *testing.T) {
 		AgentLoop: appconfig.AgentLoopConfig{MaxIterations: &negativeIterations},
 	})
 	require.ErrorContains(t, err, "agent_loop.max_iterations must be >= 0")
+
+	negativeWallTime := "-5m"
+	_, err = agentLoopBudgetFromConfig(appconfig.Config{
+		AgentLoop: appconfig.AgentLoopConfig{MaxWallTime: &negativeWallTime},
+	})
+	require.ErrorContains(t, err, "agent_loop.max_wall_time must be >= 0")
+
+	invalidWallTime := "not-a-duration"
+	_, err = agentLoopBudgetFromConfig(appconfig.Config{
+		AgentLoop: appconfig.AgentLoopConfig{MaxWallTime: &invalidWallTime},
+	})
+	require.ErrorContains(t, err, "agent_loop.max_wall_time")
+}
+
+func TestAgentLoopCheckpointIntervalFromConfig(t *testing.T) {
+	t.Parallel()
+
+	interval, err := agentLoopCheckpointIntervalFromConfig(appconfig.Config{})
+	require.NoError(t, err)
+	assert.Zero(t, interval, "default checkpoint interval is zero — no continuation prompt")
+
+	custom := 10
+	interval, err = agentLoopCheckpointIntervalFromConfig(appconfig.Config{
+		AgentLoop: appconfig.AgentLoopConfig{CheckpointInterval: &custom},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 10, interval)
+
+	negative := -1
+	_, err = agentLoopCheckpointIntervalFromConfig(appconfig.Config{
+		AgentLoop: appconfig.AgentLoopConfig{CheckpointInterval: &negative},
+	})
+	require.ErrorContains(t, err, "agent_loop.checkpoint_interval must be >= 0")
 }
 
 func TestAgentLoopConfirmCallbacksSendToolConfirmationToTUI(t *testing.T) {

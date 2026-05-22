@@ -131,6 +131,14 @@ type AgentLoopConfig struct {
 	// or nil disables the cap (the loop runs until the model returns a final
 	// response or another budget trips). Defaults to nil (unlimited).
 	MaxModelCalls *int `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
+	// MaxWallTime caps the wall-clock duration of an agent loop, parsed via
+	// time.ParseDuration (e.g. "30m", "1h30m"). An empty string, "0", or nil
+	// disables the cap (the loop runs without a wall-clock ceiling).
+	MaxWallTime *string `json:"max_wall_time,omitempty" yaml:"max_wall_time,omitempty"`
+	// CheckpointInterval is the number of completed tool-use iterations between
+	// interactive "continue?" prompts. Zero or nil disables the prompt entirely
+	// — the loop runs without asking the user to confirm continuation.
+	CheckpointInterval *int `json:"checkpoint_interval,omitempty" yaml:"checkpoint_interval,omitempty"`
 }
 
 // ContextConfig configures local @file prompt references and configured
@@ -228,10 +236,12 @@ type fileGenerationConfig struct {
 }
 
 type fileAgentLoopConfig struct {
-	MaxOutputBytes *int64 `json:"max_output_bytes" yaml:"max_output_bytes"`
-	MaxTotalTokens *int   `json:"max_total_tokens" yaml:"max_total_tokens"`
-	MaxIterations  *int   `json:"max_iterations" yaml:"max_iterations"`
-	MaxModelCalls  *int   `json:"max_model_calls" yaml:"max_model_calls"`
+	MaxOutputBytes     *int64  `json:"max_output_bytes" yaml:"max_output_bytes"`
+	MaxTotalTokens     *int    `json:"max_total_tokens" yaml:"max_total_tokens"`
+	MaxIterations      *int    `json:"max_iterations" yaml:"max_iterations"`
+	MaxModelCalls      *int    `json:"max_model_calls" yaml:"max_model_calls"`
+	MaxWallTime        *string `json:"max_wall_time" yaml:"max_wall_time"`
+	CheckpointInterval *int    `json:"checkpoint_interval" yaml:"checkpoint_interval"`
 }
 
 type filePluginConfig struct {
@@ -716,6 +726,18 @@ func mergeAgentLoop(dst *Config, agentLoop fileAgentLoopConfig, rec *originRecor
 		dst.AgentLoop.MaxModelCalls = &value
 		rec.set("agent_loop.max_model_calls", source, value)
 	}
+
+	if agentLoop.MaxWallTime != nil {
+		value := *agentLoop.MaxWallTime
+		dst.AgentLoop.MaxWallTime = &value
+		rec.set("agent_loop.max_wall_time", source, value)
+	}
+
+	if agentLoop.CheckpointInterval != nil {
+		value := *agentLoop.CheckpointInterval
+		dst.AgentLoop.CheckpointInterval = &value
+		rec.set("agent_loop.checkpoint_interval", source, value)
+	}
 }
 
 func mergePlugins(dst *Config, plugins filePluginConfig, rec *originRecorder, source originSource) {
@@ -1016,6 +1038,18 @@ func mergeConfigAgentLoop(dst *Config, agentLoop AgentLoopConfig, rec *originRec
 		value := *agentLoop.MaxModelCalls
 		dst.AgentLoop.MaxModelCalls = &value
 		rec.set("agent_loop.max_model_calls", source, value)
+	}
+
+	if agentLoop.MaxWallTime != nil {
+		value := *agentLoop.MaxWallTime
+		dst.AgentLoop.MaxWallTime = &value
+		rec.set("agent_loop.max_wall_time", source, value)
+	}
+
+	if agentLoop.CheckpointInterval != nil {
+		value := *agentLoop.CheckpointInterval
+		dst.AgentLoop.CheckpointInterval = &value
+		rec.set("agent_loop.checkpoint_interval", source, value)
 	}
 }
 
@@ -1322,6 +1356,20 @@ func mergeConfigAgentLoopFromOrigins(dst *Config, agentLoop AgentLoopConfig, dst
 		dst.AgentLoop.MaxModelCalls = &value
 
 		appendOriginChain(dstOrigins, "agent_loop.max_model_calls", srcOrigins, false)
+	}
+
+	if agentLoop.MaxWallTime != nil {
+		value := *agentLoop.MaxWallTime
+		dst.AgentLoop.MaxWallTime = &value
+
+		appendOriginChain(dstOrigins, "agent_loop.max_wall_time", srcOrigins, false)
+	}
+
+	if agentLoop.CheckpointInterval != nil {
+		value := *agentLoop.CheckpointInterval
+		dst.AgentLoop.CheckpointInterval = &value
+
+		appendOriginChain(dstOrigins, "agent_loop.checkpoint_interval", srcOrigins, false)
 	}
 }
 

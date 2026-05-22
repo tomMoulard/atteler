@@ -26,11 +26,12 @@ type responseRecordOptions struct {
 }
 
 type runOnceExecutionOptions struct {
-	OutputFormat    string
-	HeadlessID      string
-	Response        responseRecordOptions
-	AgentLoopBudget llm.AgentLoopBudget
-	Headless        bool
+	OutputFormat                string
+	HeadlessID                  string
+	Response                    responseRecordOptions
+	AgentLoopBudget             llm.AgentLoopBudget
+	AgentLoopCheckpointInterval int
+	Headless                    bool
 }
 
 type runOnceResult struct {
@@ -309,6 +310,7 @@ func runOnceWithOptions(
 		params,
 		prepared.fallbackModels,
 		executionOptions.AgentLoopBudget,
+		executionOptions.AgentLoopCheckpointInterval,
 		executionOptions.Response,
 		checkpointPath,
 	)
@@ -609,6 +611,7 @@ func runOnceComplete(
 	params llm.CompleteParams,
 	fallbackModels []string,
 	agentLoopBudget llm.AgentLoopBudget,
+	agentLoopCheckpointInterval int,
 	responseOptions responseRecordOptions,
 	checkpointPath string,
 ) (*llm.Response, error) {
@@ -633,11 +636,12 @@ func runOnceComplete(
 	executor := newBashExecutor(cwd, os.Stderr)
 
 	resp, _, err := llm.AgentLoop(ctx, reg, params, fallbackModels, executor, llm.AgentLoopConfig{
-		ConfirmContinue: confirmContinueStdin,
-		ConfirmToolCall: confirmToolCallStdin,
-		Budget:          agentLoopBudget,
-		Policy:          llm.BashToolPolicy,
-		CheckpointSink:  agentLoopCheckpointSink(checkpointPath),
+		ConfirmContinue:    confirmContinueStdin,
+		ConfirmToolCall:    confirmToolCallStdin,
+		Budget:             agentLoopBudget,
+		CheckpointInterval: agentLoopCheckpointInterval,
+		Policy:             llm.BashToolPolicy,
+		CheckpointSink:     agentLoopCheckpointSink(checkpointPath),
 	})
 	if err != nil {
 		return nil, agentLoopError(err, checkpointPath)
