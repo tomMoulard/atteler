@@ -18,7 +18,9 @@ const defaultTimeout = 30 * time.Second
 
 // Options controls one explicit shell command invocation.
 type Options struct {
+	Policy         *Policy
 	Env            map[string]string
+	Audit          AuditContext
 	Command        string
 	Dir            string
 	Timeout        time.Duration
@@ -65,17 +67,23 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 
 	started := time.Now().UTC()
 
-	cmd := exec.CommandContext(runCtx, bin, args...)
-	if strings.TrimSpace(opts.Dir) != "" {
-		cmd.Dir = opts.Dir
-	}
-
-	cmd.Env = mergeEnv(opts.Env)
-
 	stdout, stderr, outputLimit := commandOutputWriters(opts.MaxOutputBytes)
 
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
+	cmd, invocation, err := CommandContext(runCtx, CommandOptions{
+		Program: bin,
+		Args:    args,
+		Command: command,
+		Dir:     opts.Dir,
+		Env:     opts.Env,
+		Policy:  opts.Policy,
+		Audit:   opts.Audit,
+		Mode:    ModeCaptured,
+		Stdout:  stdout,
+		Stderr:  stderr,
+	})
+	if err != nil {
+		return Result{}, err
+	}
 
 	runErr := cmd.Run()
 
@@ -86,6 +94,16 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 		Stderr:          stderr.String(),
 		OutputTruncated: outputLimit.truncatedOutput(),
 	}
+	if runErr != nil {
+		result.ExitError = runErr.Error()
+	}
+
+	finishErr := invocation.Finish(FinishOptions{
+		Stdout:        result.Stdout,
+		Stderr:        result.Stderr,
+		Error:         runErr,
+		OutputCapture: OutputCaptured,
+	})
 	if runCtx.Err() != nil {
 		return result, fmt.Errorf("shell: bash command timed out after %s: %w", timeout, runCtx.Err())
 	}
@@ -95,8 +113,11 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	if runErr != nil {
-		result.ExitError = runErr.Error()
 		return result, fmt.Errorf("shell: bash command failed: %w", runErr)
+	}
+
+	if finishErr != nil {
+		return result, finishErr
 	}
 
 	return result, nil
@@ -179,25 +200,10 @@ func bashInvocation(command string) (bin string, args []string, err error) {
 			return "", nil, fmt.Errorf("shell: bash executable not found: %w", err)
 		}
 
-		return bin, []string{"-lc", command}, nil
+		return bin, []string{"--noprofile", "--norc", "-lc", command}, nil
 	}
 
-	return "bash", []string{"-lc", command}, nil
-}
-
-func mergeEnv(extra map[string]string) []string {
-	env := os.Environ()
-
-	for key, value := range extra {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-
-		env = append(env, key+"="+value)
-	}
-
-	return env
+	return "bash", []string{"--noprofile", "--norc", "-lc", command}, nil
 }
 
 // RunInteractive runs a command with stdin/stdout/stderr connected directly to
@@ -224,15 +230,22 @@ func RunInteractive(ctx context.Context, opts Options) (Result, error) {
 
 	started := time.Now().UTC()
 
-	cmd := exec.CommandContext(ctx, bin, args...)
-	if strings.TrimSpace(opts.Dir) != "" {
-		cmd.Dir = opts.Dir
+	cmd, invocation, err := CommandContext(ctx, CommandOptions{
+		Program: bin,
+		Args:    args,
+		Command: command,
+		Dir:     opts.Dir,
+		Env:     opts.Env,
+		Policy:  opts.Policy,
+		Audit:   opts.Audit,
+		Mode:    ModeInteractive,
+		Stdin:   os.Stdin,
+		Stdout:  os.Stdout,
+		Stderr:  os.Stderr,
+	})
+	if err != nil {
+		return Result{}, err
 	}
-
-	cmd.Env = mergeEnv(opts.Env)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 
 	runErr := cmd.Run()
 
@@ -240,14 +253,26 @@ func RunInteractive(ctx context.Context, opts Options) (Result, error) {
 		StartedAt: started,
 		Duration:  time.Since(started),
 	}
+	if runErr != nil {
+		result.ExitError = runErr.Error()
+	}
+
+	finishErr := invocation.Finish(FinishOptions{
+		Error:         runErr,
+		OutputCapture: OutputNotCaptured,
+		OutputNote:    "interactive terminal takeover; stdout/stderr not captured",
+	})
 
 	if ctx.Err() != nil {
 		return result, fmt.Errorf("shell: interactive command canceled: %w", ctx.Err())
 	}
 
 	if runErr != nil {
-		result.ExitError = runErr.Error()
 		return result, fmt.Errorf("shell: interactive command failed: %w", runErr)
+	}
+
+	if finishErr != nil {
+		return result, finishErr
 	}
 
 	return result, nil

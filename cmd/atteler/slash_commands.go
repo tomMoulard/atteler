@@ -18,6 +18,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 func (m model) handleSlashCommand(input string) (model, tea.Cmd, bool) {
@@ -456,16 +457,31 @@ func copyToClipboard(ctx context.Context, text string) error {
 
 	cmds := [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}}
 	for _, c := range cmds {
-		if _, err := exec.LookPath(c[0]); err == nil {
-			cmd := exec.CommandContext(ctx, c[0], c[1:]...) //nolint:gosec // clipboard commands are selected from the fixed allowlist above.
-
-			cmd.Stdin = strings.NewReader(text)
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("run %s: %w", c[0], err)
-			}
-
-			return nil
+		if _, err := exec.LookPath(c[0]); err != nil {
+			continue
 		}
+
+		cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+			Program: c[0],
+			Args:    c[1:],
+			Stdin:   strings.NewReader(text),
+			Mode:    shell.ModeCaptured,
+			Audit:   shell.AuditContext{Caller: "atteler.clipboard"},
+		})
+		if err != nil {
+			return fmt.Errorf("authorize %s: %w", c[0], err)
+		}
+
+		runErr := cmd.Run()
+		if finishErr := invocation.Finish(shell.FinishOptions{Error: runErr, OutputCapture: shell.OutputSensitive, OutputNote: "clipboard input is intentionally not captured"}); finishErr != nil {
+			return fmt.Errorf("finish %s: %w", c[0], finishErr)
+		}
+
+		if runErr != nil {
+			return fmt.Errorf("run %s: %w", c[0], runErr)
+		}
+
+		return nil
 	}
 
 	return errors.New("no clipboard command found")

@@ -8,11 +8,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 var workspaceUnsafeCharPattern = regexp.MustCompile(`[^A-Za-z0-9._-]`)
@@ -142,16 +143,36 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 	hookCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(hookCtx, "bash", "-lc", script)
-	cmd.Dir = workspace.Path
-	cmd.Env = hookEnv(issue, workspace, hookName)
-
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd, invocation, err := shell.CommandContext(hookCtx, shell.CommandOptions{
+		Program: "bash",
+		Args:    []string{"--noprofile", "--norc", "-lc", script},
+		Command: script,
+		Dir:     workspace.Path,
+		EnvList: hookEnv(issue, workspace, hookName),
+		Mode:    shell.ModeCaptured,
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Audit: shell.AuditContext{
+			Caller:          "symphony.hook." + hookName,
+			IssueID:         issue.ID,
+			IssueIdentifier: issue.Identifier,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("hook %s authorize: %w", hookName, err)
+	}
 
 	started := time.Now()
-	err := cmd.Run()
+	err = cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{
+		Stdout:        stdout.String(),
+		Stderr:        stderr.String(),
+		Error:         err,
+		OutputCapture: shell.OutputCaptured,
+	}); finishErr != nil && err == nil {
+		return fmt.Errorf("hook %s audit failed: %w", hookName, finishErr)
+	}
 	if hookCtx.Err() != nil {
 		return fmt.Errorf("hook %s timed out after %s: %w", hookName, timeout, hookCtx.Err())
 	}
@@ -173,19 +194,15 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 }
 
 func hookEnv(issue Issue, workspace Workspace, hookName string) []string {
-	env := os.Environ()
-	env = append(
-		env,
-		"SYMPHONY_HOOK="+hookName,
-		"SYMPHONY_WORKSPACE_PATH="+workspace.Path,
-		"SYMPHONY_WORKSPACE_KEY="+workspace.WorkspaceKey,
-		"SYMPHONY_ISSUE_ID="+issue.ID,
-		"SYMPHONY_ISSUE_IDENTIFIER="+issue.Identifier,
-		"SYMPHONY_ISSUE_TITLE="+issue.Title,
-		"SYMPHONY_ISSUE_STATE="+issue.State,
-	)
-
-	return env
+	return []string{
+		"SYMPHONY_HOOK=" + hookName,
+		"SYMPHONY_WORKSPACE_PATH=" + workspace.Path,
+		"SYMPHONY_WORKSPACE_KEY=" + workspace.WorkspaceKey,
+		"SYMPHONY_ISSUE_ID=" + issue.ID,
+		"SYMPHONY_ISSUE_IDENTIFIER=" + issue.Identifier,
+		"SYMPHONY_ISSUE_TITLE=" + issue.Title,
+		"SYMPHONY_ISSUE_STATE=" + issue.State,
+	}
 }
 
 func ensureUnderRoot(root, path string) error {

@@ -13,10 +13,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 const (
@@ -115,20 +116,39 @@ func callOllamaServeStarter(ctx context.Context, baseURL string) error {
 }
 
 func startOllamaServeProcess(ctx context.Context, baseURL string) error {
-	cmd := exec.CommandContext(ctx, ollamaServeCommand, "serve")
-	cmd.Stdout = io.Discard
-
-	cmd.Stderr = io.Discard
+	env := map[string]string(nil)
 	if host := ollamaHostForBaseURL(baseURL); host != "" {
-		cmd.Env = append(os.Environ(), "OLLAMA_HOST="+host)
+		env = map[string]string{"OLLAMA_HOST": host}
+	}
+
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+		Program: ollamaServeCommand,
+		Args:    []string{"serve"},
+		Env:     env,
+		Stdout:  io.Discard,
+		Stderr:  io.Discard,
+		Mode:    shell.ModeStreaming,
+		Audit:   shell.AuditContext{Caller: "atteler.ollama.serve"},
+	})
+	if err != nil {
+		return fmt.Errorf("ollama: authorize daemon: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
+		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "ollama daemon failed before output capture"}); finishErr != nil {
+			return fmt.Errorf("ollama: start daemon: %w", errors.Join(err, finishErr))
+		}
+
 		return fmt.Errorf("ollama: start daemon: %w", err)
 	}
 
 	go func() {
-		if err := cmd.Wait(); err != nil {
+		err := cmd.Wait()
+		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "ollama daemon output discarded"}); finishErr != nil {
+			slog.Warn("ollama daemon audit failed", "error", finishErr)
+		}
+
+		if err != nil {
 			slog.Warn("ollama daemon exited", "error", err)
 		}
 	}()

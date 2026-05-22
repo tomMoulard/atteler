@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
 // RunResult contains the output captured while running a plugin entrypoint.
@@ -45,9 +46,12 @@ func RunEntrypoint(
 }
 
 // RunEntrypointWithOptions validates manifest, authorizes declared permissions
+//
 // against policy, builds a scrubbed allowlisted environment, validates
 // positional args against the entrypoint schema, and runs the entrypoint with
 // root as the working directory.
+//
+//nolint:cyclop // Plugin authorization is a linear sequence of independent gates.
 func RunEntrypointWithOptions(
 	ctx context.Context,
 	root string,
@@ -105,15 +109,26 @@ func RunEntrypointWithOptions(
 	runCtx, cancel := context.WithTimeout(ctx, options.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, targetAbs, args...)
-	cmd.Dir = rootAbs
-	cmd.Env = env
-
 	stdout := newBoundedBuffer(manifest.Output.StdoutMaxBytes)
 	stderr := newBoundedBuffer(manifest.Output.StderrMaxBytes)
 
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
+	cmd, invocation, err := attshell.CommandContext(runCtx, attshell.CommandOptions{
+		Program: targetAbs,
+		Args:    args,
+		Dir:     rootAbs,
+		EnvList: env,
+		EnvMode: attshell.EnvModeExplicitOnly,
+		Mode:    attshell.ModeCaptured,
+		Stdout:  stdout,
+		Stderr:  stderr,
+		Policy: &attshell.Policy{
+			AllowCredentialEnv: secretNames(secrets),
+		},
+		Audit: attshell.AuditContext{Caller: "atteler.plugin." + entrypointName},
+	})
+	if err != nil {
+		return RunResult{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, err)
+	}
 
 	runErr := cmd.Run()
 
@@ -123,12 +138,23 @@ func RunEntrypointWithOptions(
 		Stdout: stdout.String(redactor),
 		Stderr: stderr.String(redactor),
 	}
+
+	finishErr := invocation.Finish(attshell.FinishOptions{
+		Stdout:        result.Stdout,
+		Stderr:        result.Stderr,
+		Error:         runErr,
+		OutputCapture: attshell.OutputCaptured,
+	})
 	if runCtx.Err() != nil {
 		return result, fmt.Errorf("plugin: run entrypoint %q: %w", entrypointName, runCtx.Err())
 	}
 
 	if runErr != nil {
 		return result, fmt.Errorf("plugin: run entrypoint %q: %w", entrypointName, runErr)
+	}
+
+	if finishErr != nil {
+		return result, fmt.Errorf("plugin: audit entrypoint %q: %w", entrypointName, finishErr)
 	}
 
 	return result, nil
@@ -196,6 +222,15 @@ func validateRunArgs(entrypointName string, schema []ArgumentSpec, args []string
 	}
 
 	return copied, nil
+}
+
+func secretNames(secrets []secretValue) []string {
+	names := make([]string, 0, len(secrets))
+	for _, secret := range secrets {
+		names = append(names, secret.name)
+	}
+
+	return names
 }
 
 func buildPluginEnvironment(manifest Manifest, explicit map[string]string) ([]string, []secretValue, error) {

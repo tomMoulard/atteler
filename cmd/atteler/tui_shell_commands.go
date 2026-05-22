@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -49,7 +48,7 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 				"source":  "user",
 			},
 		}),
-		runShellCommandCmd(ctx, command, m.cwd),
+		runShellCommandCmd(ctx, command, m.cwd, m.sessionState.ID, m.sessionPath),
 	), tickCmd)
 }
 
@@ -57,9 +56,30 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 // tea.ExecProcess so interactive programs (vim, less, htop, nested atteler)
 // can use the PTY directly.
 func (m model) runInteractiveShellCommand(command, line string) (model, tea.Cmd) {
-	cmd := exec.CommandContext(m.ctx, "bash", "-lc", command)
-	if m.cwd != "" {
-		cmd.Dir = m.cwd
+	cmd, invocation, err := attshell.CommandContext(m.ctx, attshell.CommandOptions{
+		Program: "bash",
+		Args:    []string{"--noprofile", "--norc", "-lc", command},
+		Command: command,
+		Dir:     m.cwd,
+		Mode:    attshell.ModeInteractive,
+		Audit: attshell.AuditContext{
+			Caller:      "atteler.tui.interactive_shell",
+			SessionID:   m.sessionState.ID,
+			SessionPath: m.sessionPath,
+		},
+	})
+	if err != nil {
+		return m, tea.Sequence(
+			tea.Println(line),
+			func() tea.Msg {
+				return shellResultMsg{
+					err:         err,
+					completedAt: time.Now(),
+					command:     command,
+					stdout:      "(interactive session" + exitErrorSuffix(err.Error()) + ")",
+				}
+			},
+		)
 	}
 
 	return m, tea.Sequence(
@@ -83,6 +103,15 @@ func (m model) runInteractiveShellCommand(command, line string) (model, tea.Cmd)
 			exitError := ""
 			if err != nil {
 				exitError = err.Error()
+			}
+
+			if finishErr := invocation.Finish(attshell.FinishOptions{
+				Error:         err,
+				OutputCapture: attshell.OutputNotCaptured,
+				OutputNote:    "interactive terminal takeover; stdout/stderr not captured",
+			}); finishErr != nil && exitError == "" {
+				exitError = finishErr.Error()
+				err = finishErr
 			}
 
 			return shellResultMsg{
@@ -173,11 +202,16 @@ func exitErrorSuffix(exitError string) string {
 	return ": " + exitError
 }
 
-func runShellCommandCmd(ctx context.Context, command, dir string) tea.Cmd {
+func runShellCommandCmd(ctx context.Context, command, dir, sessionID, sessionPath string) tea.Cmd {
 	return func() tea.Msg {
 		result, err := attshell.RunBash(ctx, attshell.Options{
 			Command: command,
 			Dir:     dir,
+			Audit: attshell.AuditContext{
+				Caller:      "atteler.tui.shell",
+				SessionID:   sessionID,
+				SessionPath: sessionPath,
+			},
 		})
 
 		return shellResultMsg{

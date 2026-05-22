@@ -9,13 +9,12 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 const (
@@ -283,21 +282,41 @@ func runHook(ctx context.Context, hook Hook, event Event, payload []byte) error 
 	hookCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(hookCtx, hook.Command[0], hook.Command[1:]...) //nolint:gosec // commands are explicit user-configured local hooks
-	cmd.Stdin = bytes.NewReader(payload)
-
-	cmd.Env = append(os.Environ(), eventEnv(event, hook.Env)...)
-
 	var stderr bytes.Buffer
 
-	cmd.Stderr = &stderr
+	cmd, invocation, err := shell.CommandContext(hookCtx, shell.CommandOptions{
+		Program: hook.Command[0],
+		Args:    hook.Command[1:],
+		Command: strings.Join(hook.Command, " "),
+		Stdin:   bytes.NewReader(payload),
+		Stderr:  &stderr,
+		EnvList: eventEnv(event, hook.Env),
+		Mode:    shell.ModeCaptured,
+		Audit: shell.AuditContext{
+			Caller:      "atteler.event_hook." + event.Type,
+			SessionID:   event.SessionID,
+			SessionPath: event.SessionPath,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("events: authorize hook %q: %w", strings.Join(hook.Command, " "), err)
+	}
+
 	if err := cmd.Run(); err != nil {
+		if finishErr := invocation.Finish(shell.FinishOptions{Stderr: stderr.String(), Error: err, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+			return fmt.Errorf("events: audit hook %q: %w", strings.Join(hook.Command, " "), finishErr)
+		}
+
 		detail := strings.TrimSpace(stderr.String())
 		if detail != "" {
 			return fmt.Errorf("events: %s hook %q failed: %w: %s", event.Type, strings.Join(hook.Command, " "), err, detail)
 		}
 
 		return fmt.Errorf("events: %s hook %q failed: %w", event.Type, strings.Join(hook.Command, " "), err)
+	}
+
+	if err := invocation.Finish(shell.FinishOptions{Stderr: stderr.String(), OutputCapture: shell.OutputCaptured}); err != nil {
+		return fmt.Errorf("events: audit hook %q: %w", strings.Join(hook.Command, " "), err)
 	}
 
 	return nil

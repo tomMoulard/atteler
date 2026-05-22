@@ -9,13 +9,14 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
-type gitCommandRunner func(context.Context, string, []string, ...string) ([]byte, error)
+type gitCommandRunner func(context.Context, string, []string, shell.AuditContext, ...string) ([]byte, error)
 
 // PublishWorkspace commits a successful worker workspace, pushes it to GitHub,
 // opens or updates a pull request, then removes dispatch labels from the source
@@ -75,6 +76,7 @@ func UpdatePullRequestBranch(ctx context.Context, cfg Config, issue Issue, branc
 		client: NewGitHubClient(cfg.Tracker),
 		runGit: defaultGitCommandRunner,
 		logger: loggerOrDefault(logger),
+		audit:  symphonyIssueAudit("symphony.git", issue),
 	}
 
 	return publisher.updatePullRequestBranch(ctx, workspace.Path, branch)
@@ -157,6 +159,7 @@ type githubPublisher struct {
 	client *GitHubClient
 	runGit gitCommandRunner
 	logger *slog.Logger
+	audit  shell.AuditContext
 }
 
 func (p *githubPublisher) Publish(ctx context.Context, issue Issue, workspace Workspace) (*PublishResult, error) {
@@ -168,6 +171,8 @@ func (p *githubPublisher) Publish(ctx context.Context, issue Issue, workspace Wo
 	if err != nil {
 		return nil, err
 	}
+
+	p.audit = symphonyIssueAudit("symphony.git", issue)
 
 	branch := publishBranchName(p.cfg.Publish, issue)
 	result := &PublishResult{Branch: branch}
@@ -572,25 +577,75 @@ func (p *githubPublisher) git(ctx context.Context, dir string, env []string, arg
 		p.runGit = defaultGitCommandRunner
 	}
 
-	return p.runGit(ctx, dir, env, args...)
+	audit := p.audit
+	if strings.TrimSpace(audit.Caller) == "" {
+		audit.Caller = "symphony.git"
+	}
+
+	return p.runGit(ctx, dir, env, audit, args...)
 }
 
-func defaultGitCommandRunner(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
-
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		return output, nil
+func defaultGitCommandRunner(ctx context.Context, dir string, env []string, audit shell.AuditContext, args ...string) ([]byte, error) {
+	var output bytes.Buffer
+	if strings.TrimSpace(audit.Caller) == "" {
+		audit.Caller = "symphony.git"
 	}
 
-	message := strings.TrimSpace(string(output))
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+		Program: "git",
+		Args:    args,
+		Dir:     dir,
+		EnvList: env,
+		Stdout:  &output,
+		Stderr:  &output,
+		Mode:    shell.ModeCaptured,
+		Policy: &shell.Policy{
+			AllowCredentialEnv: envNames(env),
+		},
+		Audit: audit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("git %s authorize: %w", strings.Join(args, " "), err)
+	}
+
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{
+		Stdout:        output.String(),
+		Error:         runErr,
+		OutputCapture: shell.OutputCaptured,
+	}); finishErr != nil {
+		return output.Bytes(), fmt.Errorf("git %s audit: %w", strings.Join(args, " "), finishErr)
+	}
+	if runErr == nil {
+		return output.Bytes(), nil
+	}
+
+	message := strings.TrimSpace(output.String())
 	if message == "" {
-		message = err.Error()
+		message = runErr.Error()
 	}
 
-	return output, fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), message, err)
+	return output.Bytes(), fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), message, runErr)
+}
+
+func envNames(env []string) []string {
+	names := make([]string, 0, len(env))
+	for _, pair := range env {
+		name, _, ok := strings.Cut(pair, "=")
+		if ok && strings.TrimSpace(name) != "" {
+			names = append(names, name)
+		}
+	}
+
+	return names
+}
+
+func symphonyIssueAudit(caller string, issue Issue) shell.AuditContext {
+	return shell.AuditContext{
+		Caller:          caller,
+		IssueID:         issue.ID,
+		IssueIdentifier: issue.Identifier,
+	}
 }
 
 func publishBranchName(cfg PublishConfig, issue Issue) string {

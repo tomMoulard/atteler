@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 // Request is a JSON-RPC 2.0 request sent to an MCP server over stdio.
@@ -81,30 +83,38 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 		request.ID = 1
 	}
 
-	//nolint:gosec // Command and args come from an explicit local MCP manifest.
-	cmd := exec.CommandContext(ctx, strings.TrimSpace(server.Command), server.Args...)
-	if strings.TrimSpace(server.CWD) != "" {
-		cmd.Dir = server.CWD
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+		Program: strings.TrimSpace(server.Command),
+		Args:    server.Args,
+		Dir:     server.CWD,
+		Env:     server.Env,
+		Mode:    shell.ModeStreaming,
+		Audit:   shell.AuditContext{Caller: "atteler.mcp." + strings.TrimSpace(server.Name)},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("authorize mcp server %q: %w", strings.TrimSpace(server.Name), err)
 	}
-
-	cmd.Env = mergedEnv(server.Env)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("open stdin for mcp server %q: %w", strings.TrimSpace(server.Name), err)
+		return nil, fmt.Errorf("open stdin for mcp server %q: %w", strings.TrimSpace(server.Name), finishMCPSetupError(invocation, err))
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("open stdout for mcp server %q: %w", strings.TrimSpace(server.Name), err)
+		return nil, fmt.Errorf("open stdout for mcp server %q: %w", strings.TrimSpace(server.Name), finishMCPSetupError(invocation, err))
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("open stderr for mcp server %q: %w", strings.TrimSpace(server.Name), err)
+		return nil, fmt.Errorf("open stderr for mcp server %q: %w", strings.TrimSpace(server.Name), finishMCPSetupError(invocation, err))
 	}
 
 	if err := cmd.Start(); err != nil {
+		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "MCP server failed before JSON-RPC streaming"}); finishErr != nil {
+			return nil, fmt.Errorf("start mcp server %q: %w", strings.TrimSpace(server.Name), errors.Join(err, finishErr))
+		}
+
 		return nil, fmt.Errorf("start mcp server %q: %w", strings.TrimSpace(server.Name), err)
 	}
 
@@ -119,7 +129,11 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 	// "file already closed" on fast-exiting helpers.
 	waitCh := waitFor(cmd)
 	killed, waitErr := finishProcess(ctx, cmd, waitCh)
+
 	stderrText := strings.TrimSpace(<-stderrCh)
+	if finishErr := invocation.Finish(shell.FinishOptions{Stderr: stderrText, Error: waitErr, OutputCapture: shell.OutputNotCaptured, OutputNote: "MCP JSON-RPC protocol output was not captured"}); finishErr != nil {
+		return nil, fmt.Errorf("audit mcp server %q: %w", strings.TrimSpace(server.Name), finishErr)
+	}
 
 	if waitErr != nil && ctx.Err() != nil {
 		return nil, withProcessOutput(fmt.Errorf("mcp server %q timed out or was canceled: %w", strings.TrimSpace(server.Name), ctx.Err()), stderrText)
@@ -156,6 +170,18 @@ func requireInvokeContext(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func finishMCPSetupError(invocation *shell.Invocation, err error) error {
+	if finishErr := invocation.Finish(shell.FinishOptions{
+		Error:         err,
+		OutputCapture: shell.OutputNotCaptured,
+		OutputNote:    "MCP server failed before JSON-RPC streaming",
+	}); finishErr != nil {
+		return errors.Join(err, finishErr)
+	}
+
+	return err
 }
 
 // CallTool invokes the MCP tools/call method for toolName.
@@ -310,25 +336,6 @@ func sameJSONValue(got, want any) bool {
 	wantJSON, wantErr := json.Marshal(want)
 
 	return gotErr == nil && wantErr == nil && bytes.Equal(gotJSON, wantJSON)
-}
-
-func mergedEnv(overrides map[string]string) []string {
-	if len(overrides) == 0 {
-		return os.Environ()
-	}
-
-	env := os.Environ()
-
-	for key, value := range overrides {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-
-		env = append(env, key+"="+value)
-	}
-
-	return env
 }
 
 func withProcessOutput(err error, stderr string) error {

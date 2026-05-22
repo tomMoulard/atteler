@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -13,6 +13,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/codeintel"
 	"github.com/tommoulard/atteler/pkg/promptcomplete"
 	"github.com/tommoulard/atteler/pkg/session"
+	"github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/tasklist"
 )
 
@@ -166,9 +167,7 @@ func promptGitRecentFileCandidates(ctx context.Context, root string) []promptcom
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "status", "--short")
-
-	output, err := cmd.Output()
+	output, err := promptGitOutput(ctx, root, "status", "--short")
 	if err != nil {
 		return nil
 	}
@@ -176,7 +175,7 @@ func promptGitRecentFileCandidates(ctx context.Context, root string) []promptcom
 	seen := make(map[string]struct{})
 	files := make([]string, 0)
 
-	for line := range strings.SplitSeq(string(output), "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		file := parseGitStatusPath(line)
 		if file == "" {
 			continue
@@ -216,14 +215,40 @@ func promptGitIssueCandidates(ctx context.Context, root string) []promptcomplete
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "branch", "--show-current")
-
-	output, err := cmd.Output()
+	output, err := promptGitOutput(ctx, root, "branch", "--show-current")
 	if err != nil {
 		return nil
 	}
 
-	return issueCandidatesFromText("git branch", string(output))
+	return issueCandidatesFromText("git branch", output)
+}
+
+func promptGitOutput(ctx context.Context, root string, args ...string) (string, error) {
+	var stdout, stderr bytes.Buffer
+
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+		Program: "git",
+		Args:    args,
+		Dir:     root,
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Mode:    shell.ModeCaptured,
+		Audit:   shell.AuditContext{Caller: "atteler.prompt_completion.git"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("prompt git: authorize: %w", err)
+	}
+
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Stderr: stderr.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+		return "", fmt.Errorf("prompt git: audit: %w", finishErr)
+	}
+
+	if runErr != nil {
+		return "", fmt.Errorf("prompt git: run: %w", runErr)
+	}
+
+	return stdout.String(), nil
 }
 
 func parseGitStatusPath(line string) string {

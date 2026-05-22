@@ -19,6 +19,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/speculate"
 	"github.com/tommoulard/atteler/pkg/symphony"
 	"github.com/tommoulard/atteler/pkg/watch"
@@ -1125,23 +1126,33 @@ func runGitHistorySearch(ctx context.Context, root, query string, limit int) err
 }
 
 func gitHistoryLog(ctx context.Context, root string) (string, error) {
-	cmd := exec.CommandContext(
-		ctx,
-		"git",
-		"log",
-		"--name-only",
-		"--date=iso-strict",
-		"--pretty=format:%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e",
-		"--",
-	)
-	cmd.Dir = root
+	var stdout, stderr bytes.Buffer
 
-	out, err := cmd.Output()
+	args := []string{"log", "--name-only", "--date=iso-strict", "--pretty=format:%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e", "--"}
+
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+		Program: "git",
+		Args:    args,
+		Dir:     root,
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Mode:    shell.ModeCaptured,
+		Audit:   shell.AuditContext{Caller: "atteler.git_history"},
+	})
 	if err != nil {
-		return "", fmt.Errorf("git history: run git log: %w", err)
+		return "", fmt.Errorf("git history: authorize git log: %w", err)
 	}
 
-	return string(out), nil
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Stderr: stderr.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+		return "", fmt.Errorf("git history: audit git log: %w", finishErr)
+	}
+
+	if runErr != nil {
+		return "", fmt.Errorf("git history: run git log: %w", runErr)
+	}
+
+	return stdout.String(), nil
 }
 
 func formatGitHistoryResult(result githistory.Result) string {

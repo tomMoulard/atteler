@@ -1,19 +1,26 @@
-//nolint:gosec,gocritic,paralleltest,wsl_v5 // The fake executable script is local to this protocol test.
+//nolint:gosec,gocritic,wsl_v5 // The fake executable script is local to this protocol test.
 package symphony
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 func TestAppServerClient_RunTurnJSONLProtocol(t *testing.T) {
 	dir := t.TempDir()
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	t.Setenv(shell.EnvAuditDir, auditDir)
+
 	script := filepath.Join(dir, "fake-app-server.sh")
 	require.NoError(t, os.WriteFile(script, []byte(`#!/usr/bin/env bash
 read -r line
@@ -37,13 +44,21 @@ sleep 2
 		},
 	}
 
-	client, err := StartAppServer(context.Background(), cfg.Codex, dir, func(event CodexEvent) {
+	issue := Issue{ID: "issue-node-1", Identifier: "GH-1", Title: "Fix", State: "OPEN"}
+
+	client, err := StartAppServerForIssue(context.Background(), cfg.Codex, issue, dir, func(event CodexEvent) {
 		events = append(events, event)
 	})
 	require.NoError(t, err)
 	defer client.Close()
 
-	threadID, err := client.StartThread(context.Background(), cfg, Issue{ID: "1", Identifier: "GH-1", Title: "Fix", State: "OPEN"}, dir)
+	records := readAppServerAuditRecords(t, auditDir)
+	require.NotEmpty(t, records)
+	assert.Equal(t, "symphony.codex_app_server", records[0].Caller)
+	assert.Equal(t, issue.ID, records[0].IssueID)
+	assert.Equal(t, issue.Identifier, records[0].IssueIdentifier)
+
+	threadID, err := client.StartThread(context.Background(), cfg, issue, dir)
 	require.NoError(t, err)
 	assert.Equal(t, "thread-1", threadID)
 
@@ -104,6 +119,27 @@ func TestAppServerClient_RejectsCanceledContextBeforeProtocolWrite(t *testing.T)
 	err = client.respond(ctx, 1, map[string]any{"ok": true})
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func readAppServerAuditRecords(t *testing.T, auditDir string) []shell.AuditRecord {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	records := make([]shell.AuditRecord, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record shell.AuditRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+
+	return records
 }
 
 func eventNames(events []CodexEvent) []string {
