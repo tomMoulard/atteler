@@ -1082,26 +1082,7 @@ func newCLIOptionsAndFlagSetForTest(t *testing.T) (*cliOptions, *flag.FlagSet) {
 	t.Helper()
 
 	var opts cliOptions
-
-	opts.temperature = floatFlag{name: "temperature", min: 0}
-	opts.topP = floatFlag{name: "top-p", min: 0, max: 1, hasMax: true}
-	opts.routeBudget = floatFlag{name: "route-budget", min: 0}
-	opts.routeCacheReuse = floatFlag{name: "route-cache-reuse", min: 0, max: 1, hasMax: true}
-	opts.routeCacheWriteTokens = positiveIntFlag{name: "route-cache-write-tokens"}
-	opts.evaluationCost = floatFlag{name: "evaluation-cost", min: 0}
-	opts.evaluationConfidence = floatFlag{name: "evaluation-confidence", min: 0, max: 1, hasMax: true}
-	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
-	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
-	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
-	opts.codeLimit = positiveIntFlag{name: "code-limit"}
-	opts.codeOffset = nonNegativeIntFlag{name: "code-offset"}
-	opts.seed = nonNegativeIntFlag{name: "seed"}
-	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
-	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}
-	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
-	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
-	opts.memoryLimit = positiveIntFlag{name: "memory-limit"}
-	opts.memoryRetentionDays = positiveIntFlag{name: "memory-retention-days"}
+	initCLIFlagValues(&opts)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

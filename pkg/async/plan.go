@@ -3,18 +3,22 @@ package async
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"sync"
 	"time"
 )
 
 // Task describes a planning-only unit of work for an agent.
 type Task struct {
-	ID        string
-	Agent     string
-	Prompt    string
-	DependsOn []string
+	ID                    string   `json:"id"`
+	Agent                 string   `json:"agent,omitempty"`
+	Prompt                string   `json:"prompt,omitempty"`
+	WorkspaceID           string   `json:"workspace_id,omitempty"`
+	AllowedWriteScope     string   `json:"allowed_write_scope,omitempty"`
+	Model                 string   `json:"model,omitempty"`
+	Provider              string   `json:"provider,omitempty"`
+	DependsOn             []string `json:"depends_on,omitempty"`
+	EstimatedPromptTokens int      `json:"estimated_prompt_tokens,omitempty"`
+	EstimatedCostMicros   int64    `json:"estimated_cost_micros,omitempty"`
 }
 
 // TaskRunner runs one task and returns caller-defined text for later display.
@@ -24,12 +28,23 @@ type TaskRunner func(context.Context, Task) (string, error)
 //
 //nolint:govet // Field order keeps execution metadata before task payload for CLI readability.
 type TaskResult struct {
-	Duration time.Duration
-	Wave     int
-	Order    int
-	Task     Task
-	Output   string
-	Error    string
+	StartedAt      time.Time     `json:"started_at,omitzero"`
+	FinishedAt     time.Time     `json:"finished_at,omitzero"`
+	Duration       time.Duration `json:"duration,omitempty"`
+	Wave           int           `json:"wave"`
+	Order          int           `json:"order"`
+	Attempts       int           `json:"attempts,omitempty"`
+	Task           Task          `json:"task"`
+	Output         string        `json:"output,omitempty"`
+	Stderr         string        `json:"stderr,omitempty"`
+	Error          string        `json:"error,omitempty"`
+	Status         string        `json:"status,omitempty"`
+	LedgerPath     string        `json:"ledger_path,omitempty"`
+	TranscriptPath string        `json:"transcript_path,omitempty"`
+	Artifacts      []string      `json:"artifacts,omitempty"`
+	ExitStatus     int           `json:"exit_status,omitempty"`
+	Resumed        bool          `json:"resumed,omitempty"`
+	Usage          Usage         `json:"usage,omitzero"`
 }
 
 // Spawn derives a child task from parent with an added dependency on parent.ID.
@@ -57,7 +72,8 @@ func NewPlan(tasks []Task) (*Plan, error) {
 		byID:  make(map[string]Task, len(tasks)),
 	}
 
-	for i, task := range tasks {
+	for i := range tasks {
+		task := tasks[i]
 		if _, exists := plan.byID[task.ID]; exists {
 			return nil, fmt.Errorf("duplicate task %q", task.ID)
 		}
@@ -66,7 +82,8 @@ func NewPlan(tasks []Task) (*Plan, error) {
 		plan.byID[task.ID] = plan.tasks[i]
 	}
 
-	for _, task := range plan.tasks {
+	for i := range plan.tasks {
+		task := plan.tasks[i]
 		for _, dep := range task.DependsOn {
 			if _, exists := plan.byID[dep]; !exists {
 				return nil, fmt.Errorf("task %q depends on missing task %q", task.ID, dep)
@@ -102,8 +119,8 @@ func (p *Plan) Tasks() []Task {
 	}
 
 	tasks := make([]Task, len(p.tasks))
-	for i, task := range p.tasks {
-		tasks[i] = cloneTask(task)
+	for i := range p.tasks {
+		tasks[i] = cloneTask(p.tasks[i])
 	}
 
 	return tasks
@@ -116,7 +133,8 @@ func (p *Plan) ReadyBatches() [][]Task {
 	}
 
 	remaining := make(map[string]Task, len(p.tasks))
-	for _, task := range p.tasks {
+	for i := range p.tasks {
+		task := p.tasks[i]
 		remaining[task.ID] = task
 	}
 
@@ -126,7 +144,8 @@ func (p *Plan) ReadyBatches() [][]Task {
 	for len(remaining) > 0 {
 		batch := make([]Task, 0)
 
-		for _, task := range p.tasks {
+		for i := range p.tasks {
+			task := p.tasks[i]
 			if _, ok := remaining[task.ID]; !ok {
 				continue
 			}
@@ -140,7 +159,8 @@ func (p *Plan) ReadyBatches() [][]Task {
 			return nil
 		}
 
-		for _, task := range batch {
+		for i := range batch {
+			task := batch[i]
 			delete(remaining, task.ID)
 			completed[task.ID] = struct{}{}
 		}
@@ -155,71 +175,16 @@ func (p *Plan) ReadyBatches() [][]Task {
 // It returns results in wave/order order. If a task fails, the current wave is
 // allowed to finish, downstream waves are skipped, and the task error is returned.
 func (p *Plan) Run(ctx context.Context, run TaskRunner) ([]TaskResult, error) {
-	if run == nil {
-		return nil, errors.New("task runner is nil")
-	}
-
-	if p == nil {
-		return nil, nil
-	}
-
-	if ctx == nil {
-		return nil, errors.New("context is nil")
-	}
-
-	batches := p.ReadyBatches()
-	results := make([]TaskResult, 0, len(p.tasks))
-
-	for wave, batch := range batches {
-		if err := ctx.Err(); err != nil {
-			return results, fmt.Errorf("context canceled before wave %d: %w", wave, err)
-		}
-
-		waveResults := runBatch(ctx, wave, batch, run)
-		results = append(results, waveResults...)
-
-		if result, ok := firstFailedResult(waveResults); ok {
-			return results, fmt.Errorf("task %q failed: %s", result.Task.ID, result.Error)
-		}
-	}
-
-	return results, nil
-}
-
-func runBatch(ctx context.Context, wave int, batch []Task, run TaskRunner) []TaskResult {
-	results := make([]TaskResult, len(batch))
-
-	var wg sync.WaitGroup
-	wg.Add(len(batch))
-
-	for i, task := range batch {
-		taskCopy := cloneTask(task)
-
-		go func() {
-			defer wg.Done()
-
-			started := time.Now()
-			output, err := run(ctx, taskCopy)
-
-			results[i] = TaskResult{
-				Task:     taskCopy,
-				Wave:     wave,
-				Order:    i,
-				Output:   output,
-				Duration: time.Since(started),
-			}
-			if err != nil {
-				results[i].Error = err.Error()
-			}
-		}()
-	}
-
-	wg.Wait()
-
-	return results
+	return p.RunWithOptions(ctx, run, RunOptions{})
 }
 
 func firstFailedResult(results []TaskResult) (TaskResult, bool) {
+	for i := range results {
+		if results[i].Error != "" && results[i].Status != StatusCanceled {
+			return results[i], true
+		}
+	}
+
 	for i := range results {
 		if results[i].Error != "" {
 			return results[i], true
@@ -260,7 +225,8 @@ func (p *Plan) validateAcyclic() error {
 		return nil
 	}
 
-	for _, task := range p.tasks {
+	for i := range p.tasks {
+		task := p.tasks[i]
 		if state[task.ID] == unvisited {
 			if err := visit(task); err != nil {
 				return err

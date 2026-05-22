@@ -31,8 +31,8 @@ func runAsyncTasks(ctx context.Context, state appState, input asyncRunCommandInp
 	}
 
 	tasks := plan.Tasks()
-	if err := validateAsyncRunTasks(tasks); err != nil {
-		return fmt.Errorf("async run: %w", err)
+	if validateErr := validateAsyncRunTasks(tasks); validateErr != nil {
+		return fmt.Errorf("async run: %w", validateErr)
 	}
 
 	if input.TimeoutSeconds > 0 {
@@ -55,18 +55,44 @@ func runAsyncTasks(ctx context.Context, state appState, input asyncRunCommandInp
 		},
 	})
 
-	runner := subagent.AttelerCommandWithOptions(subagent.CommandOptions{
-		Args:   subagentCommandArgs(state),
-		Binary: resolveSpawnBinary(input.SpawnBinary),
-		Dir:    state.cwd,
+	asyncOpts, err := asyncRunOptionsFromInput(state, input.Execution)
+	if err != nil {
+		return err
+	}
+
+	runner := subagent.AttelerCommandDetailedWithOptions(subagent.CommandOptions{
+		Args:           subagentCommandArgs(state),
+		Binary:         resolveSpawnBinary(input.SpawnBinary),
+		Dir:            state.cwd,
+		MaxOutputBytes: int64(input.Execution.OutputBudgetBytes),
 	})
-	results, runErr := plan.Run(ctx, func(ctx context.Context, task attasync.Task) (string, error) {
-		return runner(ctx, subagent.Request{
-			ID:     task.ID,
-			Agent:  task.Agent,
-			Prompt: task.Prompt,
+	results, runErr := plan.RunDetailedWithOptions(ctx, func(ctx context.Context, task attasync.Task) (attasync.TaskRunOutput, error) {
+		if outputBytesRemaining := attasync.OutputByteLimit(ctx); outputBytesRemaining > 0 {
+			ctx = subagent.WithOutputByteLimit(ctx, outputBytesRemaining)
+		}
+
+		out, err := runner(ctx, subagent.Request{
+			ID:                    task.ID,
+			Agent:                 task.Agent,
+			Prompt:                task.Prompt,
+			WorkspaceID:           task.WorkspaceID,
+			AllowedWriteScope:     task.AllowedWriteScope,
+			Model:                 task.Model,
+			Provider:              task.Provider,
+			EstimatedPromptTokens: task.EstimatedPromptTokens,
+			EstimatedCostMicros:   task.EstimatedCostMicros,
 		})
-	})
+
+		return attasync.TaskRunOutput{
+			Stdout:              out.Stdout,
+			Stderr:              out.Stderr,
+			Artifacts:           out.Artifacts,
+			ExitStatus:          out.ExitStatus,
+			PromptTokens:        out.PromptTokens,
+			EstimatedCostMicros: out.EstimatedCostMicros,
+			BudgetExhausted:     out.BudgetExhausted,
+		}, err
+	}, asyncOpts)
 
 	fmt.Print(formatAsyncRunResults(results))
 
@@ -101,7 +127,8 @@ func asyncPlanFromSpecs(specs []string) (*attasync.Plan, error) {
 }
 
 func validateAsyncRunTasks(tasks []attasync.Task) error {
-	for _, task := range tasks {
+	for i := range tasks {
+		task := tasks[i]
 		if strings.TrimSpace(task.Agent) == "" {
 			return fmt.Errorf("task %q agent is required for --async-run", task.ID)
 		}
@@ -112,6 +139,57 @@ func validateAsyncRunTasks(tasks []attasync.Task) error {
 	}
 
 	return nil
+}
+
+func asyncRunOptions(state appState, opts cliOptions) (attasync.RunOptions, error) {
+	return asyncRunOptionsFromInput(state, childExecutionCommandInputFromOptions(opts))
+}
+
+func asyncRunOptionsFromInput(state appState, input childExecutionCommandInput) (attasync.RunOptions, error) {
+	ledgerPath, err := childExecutionLedgerPathFromInput(state, input, "async")
+	if err != nil {
+		return attasync.RunOptions{}, err
+	}
+
+	runOpts := attasync.RunOptions{
+		LedgerPath:        ledgerPath,
+		AllowedWriteScope: state.cwd,
+		WorkspaceID:       state.sessionState.ID,
+		Model:             state.selectedModel,
+		Provider:          providerNameFromModel(state.selectedModel),
+		CancelOnFailure:   input.CancelOnFailure,
+		Resume:            input.Resume,
+	}
+
+	if input.MaxConcurrency > 0 {
+		runOpts.MaxConcurrency = input.MaxConcurrency
+	}
+
+	if input.TaskTimeoutSeconds > 0 {
+		runOpts.Timeout = time.Duration(input.TaskTimeoutSeconds) * time.Second
+	}
+
+	if input.RetriesSet {
+		runOpts.RetryPolicy.MaxAttempts = input.Retries + 1
+	}
+
+	if input.RetryBackoffSeconds > 0 {
+		runOpts.RetryPolicy.Backoff = time.Duration(input.RetryBackoffSeconds) * time.Second
+	}
+
+	if input.TokenBudget > 0 {
+		runOpts.Budget.MaxPromptTokens = input.TokenBudget
+	}
+
+	if input.CostBudgetMicros > 0 {
+		runOpts.Budget.MaxCostMicros = int64(input.CostBudgetMicros)
+	}
+
+	if input.OutputBudgetBytes > 0 {
+		runOpts.Budget.MaxOutputBytes = int64(input.OutputBudgetBytes)
+	}
+
+	return runOpts, nil
 }
 
 func parseAsyncTaskSpec(spec string) (attasync.Task, error) {
@@ -194,10 +272,7 @@ func formatAsyncRunResults(results []attasync.TaskResult) string {
 	for i := range results {
 		result := results[i]
 
-		status := "ok"
-		if result.Error != "" {
-			status = statusError
-		}
+		status := childStatusForDisplay(result.Status, result.Error)
 
 		fmt.Fprintf(
 			&b,
@@ -209,6 +284,20 @@ func formatAsyncRunResults(results []attasync.TaskResult) string {
 			status,
 			result.Duration.Round(time.Millisecond),
 		)
+
+		if strings.TrimSpace(result.LedgerPath) != "" {
+			fmt.Fprintf(&b, "ledger=%s\n", result.LedgerPath)
+		}
+
+		if strings.TrimSpace(result.TranscriptPath) != "" {
+			fmt.Fprintf(&b, "transcript=%s\n", result.TranscriptPath)
+		}
+
+		for _, artifact := range result.Artifacts {
+			if strings.TrimSpace(artifact) != "" {
+				fmt.Fprintf(&b, "artifact=%s\n", artifact)
+			}
+		}
 
 		if strings.TrimSpace(result.Output) != "" {
 			fmt.Fprintf(&b, "output=%s\n", strings.TrimSpace(result.Output))

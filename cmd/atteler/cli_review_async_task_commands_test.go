@@ -743,23 +743,94 @@ func TestValidateAndFormatAsyncRun(t *testing.T) {
 	require.NoError(t, err)
 
 	got := formatAsyncRunResults([]attasync.TaskResult{{
-		Wave:     0,
-		Order:    0,
-		Task:     attasync.Task{ID: "plan", Agent: "planner"},
-		Output:   "done\n",
-		Duration: 1500 * time.Millisecond,
+		Wave:           0,
+		Order:          0,
+		Task:           attasync.Task{ID: "plan", Agent: "planner"},
+		Output:         "done\n",
+		Status:         attasync.StatusSucceeded,
+		LedgerPath:     "/tmp/async-ledger.json",
+		TranscriptPath: "/tmp/transcripts/plan.txt",
+		Artifacts:      []string{"/tmp/artifacts/plan.patch"},
+		Duration:       1500 * time.Millisecond,
 	}, {
 		Wave:     1,
 		Order:    0,
 		Task:     attasync.Task{ID: "code", Agent: "coder"},
 		Error:    "boom",
+		Status:   attasync.StatusFailed,
 		Duration: time.Millisecond,
 	}})
 
 	assert.Contains(t, got, "wave=1\torder=1\tid=plan\tagent=planner\tstatus=ok\tduration=1.5s")
+	assert.Contains(t, got, "ledger=/tmp/async-ledger.json")
+	assert.Contains(t, got, "transcript=/tmp/transcripts/plan.txt")
+	assert.Contains(t, got, "artifact=/tmp/artifacts/plan.patch")
 	assert.Contains(t, got, "output=done")
 	assert.Contains(t, got, "wave=2\torder=1\tid=code\tagent=coder\tstatus=error\tduration=1ms")
 	assert.Contains(t, got, "error=boom")
+}
+
+func TestChildExecutionOptionsFromCLIFlags(t *testing.T) {
+	t.Parallel()
+
+	state := appState{
+		cwd:           t.TempDir(),
+		selectedModel: "openai/gpt-test",
+		sessionState:  session.Session{ID: "session-1"},
+	}
+	ledgerPath := filepath.Join(t.TempDir(), "ledger.json")
+	opts := cliOptions{
+		spawnLedgerPath:      ledgerPath,
+		spawnCancelOnFailure: true,
+		spawnResume:          true,
+	}
+	opts.spawnMaxConcurrency = positiveIntFlag{value: 2}
+	opts.spawnTaskTimeout = positiveIntFlag{value: 7}
+	opts.spawnRetries = nonNegativeIntFlag{value: 2, set: true}
+	opts.spawnRetryBackoff = positiveIntFlag{value: 4, set: true}
+	opts.spawnTokenBudget = positiveIntFlag{value: 100}
+	opts.spawnCostBudgetMicros = positiveIntFlag{value: 200}
+	opts.spawnOutputBudgetBytes = positiveIntFlag{value: 300}
+
+	spawnOpts, err := subagentOptions(state, opts, "spawn")
+	require.NoError(t, err)
+	assert.Equal(t, ledgerPath, spawnOpts.LedgerPath)
+	assert.Equal(t, 2, spawnOpts.MaxConcurrency)
+	assert.Equal(t, 7*time.Second, spawnOpts.Timeout)
+	assert.Equal(t, 3, spawnOpts.RetryPolicy.MaxAttempts)
+	assert.Equal(t, 4*time.Second, spawnOpts.RetryPolicy.Backoff)
+	assert.Equal(t, 100, spawnOpts.Budget.MaxPromptTokens)
+	assert.Equal(t, int64(200), spawnOpts.Budget.MaxCostMicros)
+	assert.Equal(t, int64(300), spawnOpts.Budget.MaxOutputBytes)
+	assert.Equal(t, "openai/gpt-test", spawnOpts.Model)
+	assert.Equal(t, "openai", spawnOpts.Provider)
+	assert.True(t, spawnOpts.CancelOnFailure)
+	assert.True(t, spawnOpts.Resume)
+
+	asyncOpts, err := asyncRunOptions(state, opts)
+	require.NoError(t, err)
+	assert.Equal(t, ledgerPath, asyncOpts.LedgerPath)
+	assert.Equal(t, spawnOpts.MaxConcurrency, asyncOpts.MaxConcurrency)
+	assert.Equal(t, spawnOpts.Timeout, asyncOpts.Timeout)
+	assert.Equal(t, spawnOpts.RetryPolicy.MaxAttempts, asyncOpts.RetryPolicy.MaxAttempts)
+	assert.Equal(t, spawnOpts.RetryPolicy.Backoff, asyncOpts.RetryPolicy.Backoff)
+	assert.Equal(t, spawnOpts.Budget.MaxPromptTokens, asyncOpts.Budget.MaxPromptTokens)
+}
+
+func TestChildExecutionLedgerPathDefaultsUnderIgnoredRunsDir(t *testing.T) {
+	t.Parallel()
+
+	cwd := t.TempDir()
+	state := appState{cwd: cwd, sessionState: session.Session{ID: "session-1"}}
+
+	ledgerPath, err := childExecutionLedgerPath(state, cliOptions{}, "spawn")
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(ledgerPath, filepath.Join(cwd, ".atteler", "runs", "spawn-session-1-")))
+	assert.True(t, strings.HasSuffix(ledgerPath, filepath.Join("", "ledger.json")))
+
+	_, err = childExecutionLedgerPath(state, cliOptions{spawnResume: true}, "spawn")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "resume requires --spawn-ledger")
 }
 
 func TestTaskListHelpers(t *testing.T) {

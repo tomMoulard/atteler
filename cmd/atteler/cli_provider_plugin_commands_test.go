@@ -230,16 +230,24 @@ func TestFormatSpawnResults(t *testing.T) {
 	t.Parallel()
 
 	got := formatSpawnResults([]subagent.Result{{
-		Request:  subagent.Request{ID: "child-1", Agent: "reviewer"},
-		Output:   "done\n",
-		Duration: 1500 * time.Millisecond,
+		Request:        subagent.Request{ID: "child-1", Agent: "reviewer"},
+		Output:         "done\n",
+		Status:         subagent.StatusSucceeded,
+		LedgerPath:     "/tmp/spawn-ledger.json",
+		TranscriptPath: "/tmp/transcripts/child-1.txt",
+		Artifacts:      []string{"/tmp/artifacts/child-1.patch"},
+		Duration:       1500 * time.Millisecond,
 	}, {
 		Request:  subagent.Request{ID: "child-2", Agent: "critic"},
 		Error:    "boom",
+		Status:   subagent.StatusFailed,
 		Duration: time.Millisecond,
 	}})
 
 	assert.Contains(t, got, "id=child-1\tagent=reviewer\tstatus=ok\tduration=1.5s")
+	assert.Contains(t, got, "ledger=/tmp/spawn-ledger.json")
+	assert.Contains(t, got, "transcript=/tmp/transcripts/child-1.txt")
+	assert.Contains(t, got, "artifact=/tmp/artifacts/child-1.patch")
 	assert.Contains(t, got, "output=done")
 	assert.Contains(t, got, "id=child-2\tagent=critic\tstatus=error\tduration=1ms")
 	assert.Contains(t, got, "error=boom")

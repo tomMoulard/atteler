@@ -259,6 +259,32 @@ func TestTranslateCLIArgs_DomainWordsCanStartPositionalPrompts(t *testing.T) {
 	}
 }
 
+func TestCLIFlags_ParseSpawnExecutionBudgets(t *testing.T) {
+	t.Parallel()
+
+	opts, fs := newCLIOptionsAndFlagSetForTest(t)
+	err := fs.Parse([]string{
+		"--spawn-task-timeout-seconds", "5",
+		"--spawn-max-concurrency", "2",
+		"--spawn-retries", "1",
+		"--spawn-retry-backoff-seconds", "3",
+		"--spawn-token-budget", "100",
+		"--spawn-cost-budget-micros", "200",
+		"--spawn-output-budget-bytes", "300",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 5, opts.spawnTaskTimeout.value)
+	assert.Equal(t, 2, opts.spawnMaxConcurrency.value)
+	assert.Equal(t, 1, opts.spawnRetries.value)
+	assert.True(t, opts.spawnRetries.set)
+	assert.Equal(t, 3, opts.spawnRetryBackoff.value)
+	assert.True(t, opts.spawnRetryBackoff.set)
+	assert.Equal(t, 100, opts.spawnTokenBudget.value)
+	assert.Equal(t, 200, opts.spawnCostBudgetMicros.value)
+	assert.Equal(t, 300, opts.spawnOutputBudgetBytes.value)
+}
+
 func TestTranslateCLIArgs_DomainLevelFlagsCanPrecedeCommands(t *testing.T) {
 	t.Parallel()
 
