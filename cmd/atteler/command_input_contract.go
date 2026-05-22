@@ -152,6 +152,8 @@ type listConfigPathsCommandInput struct{}
 
 type listHeadlessCommandInput struct{}
 
+type recoverHeadlessCommandInput struct{}
+
 type listHookEventsCommandInput struct {
 	JSON bool
 }
@@ -321,6 +323,7 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"listAgentsCommandInput":              func(opts cliOptions) any { return listAgentsCommandInputFromOptions(opts) },
 		"listConfigPathsCommandInput":         func(opts cliOptions) any { return listConfigPathsCommandInputFromOptions(opts) },
 		"listHeadlessCommandInput":            func(opts cliOptions) any { return listHeadlessCommandInputFromOptions(opts) },
+		"recoverHeadlessCommandInput":         func(opts cliOptions) any { return recoverHeadlessCommandInputFromOptions(opts) },
 		"listHookEventsCommandInput":          func(opts cliOptions) any { return listHookEventsCommandInputFromOptions(opts) },
 		"listKnownModelsCommandInput":         func(opts cliOptions) any { return listKnownModelsCommandInputFromOptions(opts) },
 		"listModelsCommandInput":              func(opts cliOptions) any { return listModelsCommandInputFromOptions(opts) },
@@ -537,6 +540,10 @@ func listConfigPathsCommandInputFromOptions(_ cliOptions) listConfigPathsCommand
 
 func listHeadlessCommandInputFromOptions(_ cliOptions) listHeadlessCommandInput {
 	return listHeadlessCommandInput{}
+}
+
+func recoverHeadlessCommandInputFromOptions(_ cliOptions) recoverHeadlessCommandInput {
+	return recoverHeadlessCommandInput{}
 }
 
 func listHookEventsCommandInputFromOptions(opts cliOptions) listHookEventsCommandInput {

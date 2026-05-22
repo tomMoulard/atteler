@@ -41,7 +41,7 @@ func listHeadlessRuns(store *session.Store) error {
 	active := make([]session.HeadlessRun, 0, len(runs))
 	for i := range runs {
 		run := &runs[i]
-		if run.Status == session.HeadlessStatusRunning {
+		if run.Status == session.HeadlessStatusRunning || run.Status == session.HeadlessStatusStale {
 			active = append(active, *run)
 		}
 	}
@@ -58,24 +58,43 @@ func listHeadlessRuns(store *session.Store) error {
 	return nil
 }
 
+func recoverHeadlessRuns(store *session.Store) error {
+	recovered, err := store.RecoverStaleHeadlessRuns(0)
+	if err != nil {
+		return fmt.Errorf("recover headless sessions: %w", err)
+	}
+
+	if len(recovered) == 0 {
+		fmt.Println("No recoverable stale headless sessions found.")
+		return nil
+	}
+
+	for i := range recovered {
+		fmt.Println(formatHeadlessRun(recovered[i]))
+	}
+
+	return nil
+}
+
 func streamHeadlessLog(ctx context.Context, store *session.Store, id string) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return errors.New("stream headless: id is required")
 	}
 
-	offset := 0
+	offset := session.HeadlessLogOffset{}
 
 	for {
-		text, err := store.ReadHeadlessLog(id)
+		tail, err := store.TailHeadlessLog(id, session.HeadlessLogTailOptions{Offset: offset})
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("stream headless: %w", err)
 		}
 
-		if len(text) > offset {
-			fmt.Print(text[offset:])
-			offset = len(text)
+		if tail.Text != "" {
+			fmt.Print(tail.Text)
 		}
+
+		offset = tail.NextOffset
 
 		run, err := store.LoadHeadlessRun(id)
 		if err != nil {
@@ -296,6 +315,26 @@ func formatHeadlessRun(run session.HeadlessRun) string {
 		"updated=" + updated,
 		"log=" + fallbackDash(run.LogPath),
 	}
+	if run.PID != 0 {
+		parts = append(parts, "pid="+strconv.Itoa(run.PID))
+	}
+
+	if run.ExitCode != nil {
+		parts = append(parts, "exit_code="+strconv.Itoa(*run.ExitCode))
+	}
+
+	if run.ArtifactDir != "" {
+		parts = append(parts, "artifacts="+run.ArtifactDir)
+	}
+
+	if run.StaleReason != "" {
+		parts = append(parts, "stale_reason="+run.StaleReason)
+	}
+
+	if run.Status == session.HeadlessStatusStale {
+		parts = append(parts, "recover=atteler session recover-headless")
+	}
+
 	if run.Error != "" {
 		parts = append(parts, "error="+run.Error)
 	}

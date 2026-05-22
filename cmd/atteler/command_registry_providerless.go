@@ -31,6 +31,14 @@ func providerlessSessionCommands() []command {
 			},
 		},
 		{
+			name:  "recover-headless",
+			tier:  tierProviderless,
+			match: func(o cliOptions) bool { return o.recoverHeadless },
+			runProviderless: func(_ context.Context, _ cliOptions, s *session.Store) error {
+				return recoverHeadlessRuns(s)
+			},
+		},
+		{
 			name:  "stream-headless",
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.streamHeadlessID != "" },

@@ -32,6 +32,7 @@ type runOnceExecutionOptions struct {
 	AgentLoopBudget             llm.AgentLoopBudget
 	AgentLoopCheckpointInterval int
 	Headless                    bool
+	HeadlessPrivateLog          bool
 }
 
 type runOnceResult struct {
@@ -528,13 +529,15 @@ func startHeadlessRun(
 	}
 
 	run := session.HeadlessRun{
-		ID:          id,
-		SessionID:   sessionState.ID,
-		SessionPath: store.Path(sessionState.ID),
-		Prompt:      strings.TrimSpace(prompt),
-		Model:       modelName,
-		Agent:       agentName,
-		Status:      session.HeadlessStatusRunning,
+		ID:             id,
+		SessionID:      sessionState.ID,
+		SessionPath:    store.Path(sessionState.ID),
+		Prompt:         strings.TrimSpace(prompt),
+		Model:          modelName,
+		Agent:          agentName,
+		StartedCommand: strings.Join(os.Args, " "),
+		Status:         session.HeadlessStatusRunning,
+		PrivateLogs:    options.HeadlessPrivateLog,
 	}
 	if err := store.SaveHeadlessRun(run); err != nil {
 		return nil, fmt.Errorf("start headless run: %w", err)
@@ -562,6 +565,16 @@ func finishHeadlessRun(store *session.Store, run *session.HeadlessRun, status se
 	run.CompletedAt = &now
 
 	run.Error = strings.TrimSpace(message)
+	if run.CancellationReason == "" && isCancellationMessage(run.Error) {
+		run.CancellationReason = run.Error
+	}
+
+	exitCode := 0
+	if status != session.HeadlessStatusCompleted {
+		exitCode = 1
+	}
+
+	run.ExitCode = &exitCode
 	if err := store.SaveHeadlessRun(*run); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
@@ -574,6 +587,17 @@ func finishHeadlessRun(store *session.Store, run *session.HeadlessRun, status se
 	if err := store.AppendHeadlessLog(run.ID, logLine+"\n"); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
+}
+
+func isCancellationMessage(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+
+	return strings.Contains(message, "context canceled") ||
+		strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "canceled")
 }
 
 func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFormat string, headless bool) error {

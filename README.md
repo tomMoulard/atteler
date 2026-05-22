@@ -202,8 +202,13 @@ atteler chat once "Explain this repository in one paragraph"
 git diff | atteler chat once "Review this diff" --stdin
 atteler chat once "Summarize @README.md" --headless --output json
 atteler session headless
+atteler session recover-headless
 atteler session stream-headless <headless-id>
 ```
+
+Headless metadata and logs are redacted by default; reserve
+`--headless-private-log` for local private runs that intentionally keep raw
+prompts, errors, and provider output.
 
 In the interactive TUI, `Ctrl+O` opens the model picker, `Tab` accepts visible
 local prompt completions (agents, slash commands, session context, and safe

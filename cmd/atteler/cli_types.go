@@ -363,6 +363,7 @@ type cliOptions struct {
 	listCodePackages                   bool
 	listSessions                       bool
 	listHeadless                       bool
+	recoverHeadless                    bool
 	listSessionTags                    bool
 	agentPerformanceSummary            bool
 	listArtifacts                      bool
@@ -394,6 +395,7 @@ type cliOptions struct {
 	readStdin                          bool
 	promptLocalOnly                    bool
 	headless                           bool
+	headlessPrivateLog                 bool
 	showVersion                        bool
 	useWorktree                        bool
 	mergeWorktreeAllowBaseMismatch     bool

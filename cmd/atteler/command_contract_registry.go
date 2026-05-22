@@ -259,6 +259,14 @@ func commandContractsByName() map[string]commandContract {
 			withInputType("listHeadlessCommandInput"),
 			withExamples("atteler session headless"),
 		),
+		"recover-headless": commandContractFor(
+			"mark stale/crashed headless sessions recovered",
+			[]string{"--recover-headless"},
+			[]string{commandEffectSessionRead, commandEffectSessionWrite, commandEffectUserOutput},
+			[]string{commandOutputText},
+			withInputType("recoverHeadlessCommandInput"),
+			withExamples("atteler session recover-headless"),
+		),
 		"list-hook-events": commandContractFor(
 			"list supported lifecycle hook event types",
 			[]string{"--list-hook-events", "--list-hook-events-json"},
