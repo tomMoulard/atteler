@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 
-	atteval "github.com/tommoulard/atteler/pkg/eval"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -89,9 +88,9 @@ func providerlessFileCommands() []command {
 		{
 			name:  "eval-output",
 			tier:  tierProviderless,
-			match: func(o cliOptions) bool { return o.evalOutputPath != "" },
+			match: evalCommandRequested,
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return evalOutput(o.evalOutputPath, o.evalExpected, o.evalExpectedPath, atteval.MatchMode(o.evalMode))
+				return evalOutputCommand(o)
 			},
 		},
 		{

@@ -284,10 +284,12 @@ var cliHelpDomains = []cliHelpDomain{
 	{
 		Name:    "eval",
 		Title:   "Evaluation & fixtures",
-		Summary: "Compare deterministic outputs, record/replay one-shot response fixtures, and record agent evaluations.",
+		Summary: "Compare deterministic outputs with text or structured assertions, record/replay one-shot response fixtures, and record agent evaluations.",
 		Aliases: []string{"evaluation", "evaluations"},
 		Commands: []cliCommandAlias{
 			{Name: "output", Args: "<path>", Summary: "compare actual output against expected text/file", Legacy: []string{"--eval-output"}},
+			{Name: "run", Args: "<path>", Summary: "run a structured YAML/JSON assertion file", Legacy: []string{"--eval-assertions"}},
+			{Name: "fixtures", Args: "<dir>", Summary: "discover and run structured eval fixtures in a directory", Legacy: []string{"--eval-fixture-dir"}},
 			{Name: "list", Summary: "list agent evaluations on --session", Legacy: []string{"--list-evaluations"}},
 			{Name: "record", Args: "<agent>", Summary: "append an evaluation to --session", Legacy: []string{"--record-evaluation"}},
 			{Name: "record-response", Args: "<path> <prompt|--stdin>", Summary: "run one prompt and write request/response JSON", Legacy: []string{"--record-response"}, PromptAfterValue: true},
@@ -295,6 +297,8 @@ var cliHelpDomains = []cliHelpDomain{
 		},
 		Examples: []string{
 			`atteler eval output .atteler/fixtures/readme-summary.txt --eval-expected "package overview"`,
+			`atteler eval run .atteler/evals/readme.eval.yaml --eval-json`,
+			`atteler eval fixtures .atteler/evals --eval-report .atteler/eval-report.json`,
 			`atteler eval record reviewer`,
 			`atteler eval replay-response .atteler/fixtures/once.json "Summarize @README.md"`,
 		},

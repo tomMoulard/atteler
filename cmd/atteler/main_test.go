@@ -372,6 +372,76 @@ func TestEvalOutput_PassAndFail(t *testing.T) {
 	require.Error(t, evalOutput(actual, "missing", "", atteval.ModeContains))
 }
 
+func TestEvalOutputCommand_StructuredAssertionsReport(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	actual := filepath.Join(dir, "actual.json")
+	report := filepath.Join(dir, "report.json")
+	suite := filepath.Join(dir, "suite.eval.yaml")
+
+	require.NoError(t, os.WriteFile(actual, []byte(`{"status":"bad","debug":"api_key=supersecret"}`), 0o600))
+	require.NoError(t, os.WriteFile(suite, []byte(`
+version: 1
+assertions:
+  - id: status
+    type: json_path
+    path: $.status
+    equals: ok
+  - id: no-secret
+    type: not_contains
+    value: api_key=supersecret
+`), 0o600))
+
+	err := evalOutputCommand(cliOptions{
+		evalOutputPath:     actual,
+		evalAssertionsPath: suite,
+		evalReportPath:     report,
+	})
+	require.Error(t, err)
+
+	data, err := os.ReadFile(report)
+	require.NoError(t, err)
+
+	reportData := string(data)
+	assert.Contains(t, reportData, `"id": "status"`)
+	assert.Contains(t, reportData, `"status": "fail"`)
+	assert.Contains(t, reportData, "[REDACTED]")
+	assert.NotContains(t, reportData, "supersecret")
+}
+
+func TestEvalOutputCommand_StructuredExitCodeOnlyReport(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	report := filepath.Join(dir, "report.json")
+	suite := filepath.Join(dir, "suite.eval.yaml")
+	require.NoError(t, os.WriteFile(suite, []byte(`
+version: 1
+exit_code: 5
+`), 0o600))
+
+	err := evalOutputCommand(cliOptions{
+		evalAssertionsPath: suite,
+		evalReportPath:     report,
+		evalExitCode:       nonNegativeIntFlag{value: 5, set: true},
+	})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(report)
+	require.NoError(t, err)
+
+	reportData := string(data)
+	assert.Contains(t, reportData, `"id": "exit_code"`)
+	assert.Contains(t, reportData, `"passed": true`)
+}
+
+func TestEvalOutputCommand_RejectsEvalReportWithoutTarget(t *testing.T) {
+	t.Parallel()
+
+	require.ErrorContains(t, evalOutputCommand(cliOptions{evalJSON: true}), "--eval-output")
+}
+
 func TestExpectedEvalText_RejectsAmbiguousInput(t *testing.T) {
 	t.Parallel()
 

@@ -57,7 +57,7 @@ func Check(actual, expected string, mode MatchMode) Result {
 	case ModeContains:
 		result.Passed = strings.Contains(actual, expected)
 		if !result.Passed {
-			result.Summary = fmt.Sprintf("expected output to contain %q", compact(expected, 80))
+			result.Summary = fmt.Sprintf("expected output to contain %q", compact(Redact(expected), 80))
 			result.Diff = containsSnippet(expected, actual)
 		}
 	case ModeNormalized:
@@ -88,10 +88,13 @@ func Normalize(s string) string {
 }
 
 func containsSnippet(expected, actual string) string {
-	return fmt.Sprintf("missing: %q\nactual:  %q", compact(expected, 120), compact(actual, 160))
+	return fmt.Sprintf("missing: %q\nactual:  %q", compact(Redact(expected), 120), compact(Redact(actual), 160))
 }
 
 func diffSnippet(expected, actual string) string {
+	expected = Redact(expected)
+	actual = Redact(actual)
+
 	expectedRunes := []rune(expected)
 	actualRunes := []rune(actual)
 	prefix := commonPrefix(expectedRunes, actualRunes)
