@@ -19,17 +19,18 @@ type documentSymbol struct {
 type symbolInformation struct {
 	Name          string   `json:"name"`
 	Kind          int      `json:"kind"`
-	Location      location `json:"location"`
+	Location      Location `json:"location"`
 	ContainerName string   `json:"containerName"`
 }
 
-type location struct {
-	URI   string `json:"uri"`
-	Range Range  `json:"range"`
+type locationLink struct {
+	TargetURI            string `json:"targetUri"`
+	TargetRange          Range  `json:"targetRange"`
+	TargetSelectionRange Range  `json:"targetSelectionRange"`
 }
 
 func normalizeSymbols(raw json.RawMessage) ([]Symbol, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if len(raw) == 0 || string(raw) == jsonNull {
 		return nil, nil
 	}
 
@@ -71,6 +72,61 @@ func normalizeSymbols(raw json.RawMessage) ([]Symbol, error) {
 	return normalizeDocumentSymbols(docs), nil
 }
 
+func normalizeLocations(raw json.RawMessage) ([]Location, error) {
+	if len(raw) == 0 || string(raw) == jsonNull {
+		return nil, nil
+	}
+
+	if raw[0] == '[' {
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil, fmt.Errorf("decode location list: %w", err)
+		}
+
+		locations := make([]Location, 0, len(items))
+		for _, item := range items {
+			loc, err := normalizeLocation(item)
+			if err != nil {
+				return nil, err
+			}
+
+			locations = append(locations, loc)
+		}
+
+		return locations, nil
+	}
+
+	loc, err := normalizeLocation(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	return []Location{loc}, nil
+}
+
+func normalizeLocation(raw json.RawMessage) (Location, error) {
+	if hasField(raw, "targetUri") {
+		var link locationLink
+		if err := json.Unmarshal(raw, &link); err != nil {
+			return Location{}, fmt.Errorf("decode LocationLink: %w", err)
+		}
+
+		rangeValue := link.TargetSelectionRange
+		if rangeValue == (Range{}) {
+			rangeValue = link.TargetRange
+		}
+
+		return Location{URI: link.TargetURI, Range: rangeValue}, nil
+	}
+
+	var loc Location
+	if err := json.Unmarshal(raw, &loc); err != nil {
+		return Location{}, fmt.Errorf("decode Location: %w", err)
+	}
+
+	return loc, nil
+}
+
 func hasField(raw json.RawMessage, field string) bool {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err != nil {
@@ -98,4 +154,13 @@ func normalizeDocumentSymbols(docs []documentSymbol) []Symbol {
 	}
 
 	return symbols
+}
+
+func cloneSymbols(in []Symbol) []Symbol {
+	out := append([]Symbol(nil), in...)
+	for i := range out {
+		out[i].Children = cloneSymbols(out[i].Children)
+	}
+
+	return out
 }
