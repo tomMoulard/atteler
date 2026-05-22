@@ -23,7 +23,7 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.Var(&opts.sessionTags, "session-tag", "add a saved session tag (repeatable or comma-separated)")
 	fs.StringVar(&opts.replayRef, "replay", "", "session ID or path to print and exit")
 	fs.StringVar(&opts.exportRef, "export-session", "", "session ID or path to export and exit")
-	fs.StringVar(&opts.exportFormat, "export-format", "markdown", "session export format: markdown or json")
+	fs.StringVar(&opts.exportFormat, "export-format", "markdown", "session export format: markdown, json, private-markdown, private-json, issue, or issue-json")
 	fs.StringVar(&opts.outputFormat, "output", outputFormatText, "one-shot output format: text or json")
 	fs.StringVar(&opts.searchQuery, "search-sessions", "", "search saved session transcripts and exit")
 	fs.StringVar(&opts.oncePrompt, "once", "", "send one prompt and exit")

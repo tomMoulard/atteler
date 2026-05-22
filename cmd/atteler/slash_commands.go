@@ -124,7 +124,7 @@ func writeSessionExport(s session.Session, path string) error {
 	var err error
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".json":
-		data, err = json.MarshalIndent(s, "", "  ")
+		data, err = session.JSON(s)
 	case ".jsonl":
 		data, err = marshalJSONLines(s)
 	case ".txt":
