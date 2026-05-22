@@ -192,6 +192,29 @@ provider-specific command-line tools. OpenAI Platform calls require
 `codex`, `claude-code`, and `ollama` providers use their local CLIs or daemons
 when available.
 
+### Provider protocol contracts
+
+Provider adapters intentionally expose `llm.ProviderCapabilities` metadata via
+`llm.ProviderCapabilitiesFor` and `llm.KnownProviders` so callers can check
+whether a provider supports seed, tools, reasoning, cached-token accounting,
+streaming, and network model discovery before setting provider-specific knobs.
+The same metadata documents lossy and unsupported `CompleteParams` fields:
+
+| Provider | Intentionally lossy mappings | Unsupported or unavailable fields |
+| --- | --- | --- |
+| OpenAI | `ToolResult.IsError` is not represented by Chat Completions tool messages. | None currently documented. |
+| Anthropic | Reasoning levels become thinking token budgets; system messages are lifted to `system`; tool results become user-role content blocks. | `Seed` |
+| Claude Code | Same request/response mapping as Anthropic over the Claude Code OAuth path. | `Seed` |
+| Codex | System messages become Responses `instructions`; chat/tool history becomes Responses input items; `ToolResult.IsError` is not represented. | `Temperature`, `TopP`, `Seed`, `Stop`, `MaxTokens` |
+| Ollama | Reasoning levels become Ollama `think` values; tool-call IDs, tool-result IDs, and `ToolResult.IsError` are not represented in Ollama chat messages. | Cached-token accounting is not reported by Ollama responses. |
+
+Unsupported non-zero knobs, non-finite sampling values, and
+non-JSON-serializable tool schemas or tool-call inputs are rejected instead of
+silently dropped.
+`SupportsStreaming` in the capability metadata means caller-facing
+`llm.StreamProvider` support, not whether an adapter happens to use a streaming
+wire transport internally.
+
 ## Common workflows
 
 ### One-shot and interactive chat
@@ -580,7 +603,7 @@ linked from the row.
 | --- | --- |
 | CLI command routing, grouped help, and compatibility flags | [`cmd/atteler/cli_args.go`](cmd/atteler/cli_args.go), [`cmd/atteler/cli_help_domains.go`](cmd/atteler/cli_help_domains.go), [`cmd/atteler/cli_args_test.go`](cmd/atteler/cli_args_test.go), [`cmd/atteler/cli_help_test.go`](cmd/atteler/cli_help_test.go) |
 | Error-aware streaming completion contract with bounded-buffer guidance | [`pkg/llm/stream.go`](pkg/llm/stream.go), [`pkg/llm/stream_test.go`](pkg/llm/stream_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
-| OpenAI, Anthropic, Codex CLI, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
+| OpenAI, Anthropic, Codex CLI, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go), [`pkg/llm/capabilities.go`](pkg/llm/capabilities.go), [`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go) |
 | Configuration loading, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
 | Sessions, transcript search/export, evaluations, failures, artifacts, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |
 | Bounded and policy-gated context references for local files, directories, globs, and remote URLs | [`pkg/contextref/references.go`](pkg/contextref/references.go), [`pkg/contextref/references_test.go`](pkg/contextref/references_test.go), [`pkg/contextref/contextref.go`](pkg/contextref/contextref.go), [`pkg/contextref/contextref_test.go`](pkg/contextref/contextref_test.go) |

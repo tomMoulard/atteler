@@ -199,7 +199,7 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 		return nil, err
 	}
 
-	req, err := buildAnthropicRequest(params)
+	req, err := buildAnthropicRequestForProvider(providerAnthropic, params)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,7 @@ func parseAnthropicResponse(ar anthropicResponse) *Response {
 
 func anthropicStopReason(reason string) StopReason {
 	switch reason {
-	case "end_turn":
+	case "end_turn", "stop_sequence":
 		return StopEndTurn
 	case "tool_use":
 		return StopToolUse
@@ -287,7 +287,11 @@ func anthropicStopReason(reason string) StopReason {
 	}
 }
 
-func buildAnthropicRequest(params CompleteParams) (anthropicRequest, error) {
+func buildAnthropicRequestForProvider(providerName string, params CompleteParams) (anthropicRequest, error) {
+	if err := validateCompleteParamsSupported(providerName, params); err != nil {
+		return anthropicRequest{}, err
+	}
+
 	var system string
 
 	msgs := make([]anthropicMessage, 0, len(params.Messages))
@@ -326,7 +330,7 @@ func buildAnthropicRequest(params CompleteParams) (anthropicRequest, error) {
 
 	budget, ok, err := anthropicThinkingBudget(params.ReasoningLevel, maxTok)
 	if err != nil {
-		return anthropicRequest{}, fmt.Errorf("anthropic: %w", err)
+		return anthropicRequest{}, fmt.Errorf("%s: %w", providerName, err)
 	}
 
 	if ok {

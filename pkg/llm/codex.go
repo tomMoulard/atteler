@@ -213,16 +213,11 @@ func (c *CodexProvider) buildResponsesBody(ctx context.Context, params CompleteP
 		model = models[0]
 	}
 
-	req := codexResponsesRequest{
-		Model:        model,
-		Instructions: codexInstructions(params.Messages),
-		Input:        codexBuildInput(params.Messages),
-		Tools:        codexBuildTools(params.Tools),
-		Stream:       true,
-	}
+	params.Model = model
 
-	if effort := openAIReasoningEffort(params.ReasoningLevel); effort != "" {
-		req.Reasoning = &codexRequestReasoning{Effort: effort}
+	req, err := buildCodexResponsesRequest(params)
+	if err != nil {
+		return "", nil, err
 	}
 
 	body, err = json.Marshal(req)
@@ -240,6 +235,30 @@ func (c *CodexProvider) buildResponsesBody(ctx context.Context, params CompleteP
 	})
 
 	return model, body, nil
+}
+
+func buildCodexResponsesRequest(params CompleteParams) (codexResponsesRequest, error) {
+	if err := validateCompleteParamsSupported(providerCodex, params); err != nil {
+		return codexResponsesRequest{}, err
+	}
+
+	if params.Model == "" {
+		return codexResponsesRequest{}, errors.New("codex model not configured")
+	}
+
+	req := codexResponsesRequest{
+		Model:        params.Model,
+		Instructions: codexInstructions(params.Messages),
+		Input:        codexBuildInput(params.Messages),
+		Tools:        codexBuildTools(params.Tools),
+		Stream:       true,
+	}
+
+	if effort := openAIReasoningEffort(params.ReasoningLevel); effort != "" {
+		req.Reasoning = &codexRequestReasoning{Effort: effort}
+	}
+
+	return req, nil
 }
 
 func (c *CodexProvider) doResponsesRequest(ctx context.Context, body []byte) (*Response, error) {
@@ -564,6 +583,10 @@ func (s *codexStreamState) applyCompleted(resp *codexEventPayload) {
 		s.out.Model = resp.Model
 	}
 
+	if stopReason := codexStopReason(resp); stopReason != StopUnknown {
+		s.out.StopReason = stopReason
+	}
+
 	if u := resp.Usage; u != nil {
 		s.out.InputTokens = u.InputTokens
 		s.out.OutputTokens = u.OutputTokens
@@ -598,7 +621,9 @@ func (s *codexStreamState) finalize() (*Response, error) {
 		return nil, errors.New("codex stream completed with empty assistant message")
 	}
 
-	s.out.StopReason = StopEndTurn
+	if s.out.StopReason == StopUnknown {
+		s.out.StopReason = StopEndTurn
+	}
 
 	return &s.out, nil
 }
@@ -634,7 +659,10 @@ func (s *codexStreamState) completedChunk() (Chunk, error) {
 		return Chunk{}, errors.New("codex stream completed with empty assistant message")
 	}
 
-	chunk.StopReason = StopEndTurn
+	chunk.StopReason = s.out.StopReason
+	if chunk.StopReason == StopUnknown {
+		chunk.StopReason = StopEndTurn
+	}
 
 	return chunk, nil
 }
@@ -662,8 +690,14 @@ type codexEventItemContent struct {
 }
 
 type codexEventPayload struct {
-	Usage *codexEventUsage `json:"usage,omitempty"`
-	Model string           `json:"model,omitempty"`
+	IncompleteDetails *codexIncompleteDetails `json:"incomplete_details,omitempty"`
+	Usage             *codexEventUsage        `json:"usage,omitempty"`
+	Model             string                  `json:"model,omitempty"`
+	Status            string                  `json:"status,omitempty"`
+}
+
+type codexIncompleteDetails struct {
+	Reason string `json:"reason,omitempty"`
 }
 
 type codexEventUsage struct {
@@ -675,6 +709,28 @@ type codexEventUsage struct {
 
 type codexEventTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+func codexStopReason(resp *codexEventPayload) StopReason {
+	if resp == nil {
+		return StopUnknown
+	}
+
+	if resp.IncompleteDetails != nil {
+		switch resp.IncompleteDetails.Reason {
+		case "max_output_tokens", "max_tokens":
+			return StopMaxToks
+		}
+	}
+
+	switch resp.Status {
+	case "completed":
+		return StopEndTurn
+	case "incomplete":
+		return StopUnknown
+	default:
+		return StopUnknown
+	}
 }
 
 func codexExtractMessageText(item *codexEventItem) string {

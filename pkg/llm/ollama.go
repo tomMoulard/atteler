@@ -321,6 +321,7 @@ type ollamaToolCallFunction struct {
 type ollamaChatResponse struct {
 	Error           string        `json:"error"`
 	Model           string        `json:"model"`
+	DoneReason      string        `json:"done_reason,omitempty"`
 	Message         ollamaMessage `json:"message"`
 	PromptEvalCount int           `json:"prompt_eval_count"`
 	EvalCount       int           `json:"eval_count"`
@@ -377,15 +378,61 @@ func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*
 		return nil, fmt.Errorf("ollama: %s", or.Error)
 	}
 
+	return parseOllamaChatResponse(or, params.Model), nil
+}
+
+func buildOllamaChatRequest(params CompleteParams) (ollamaChatRequest, error) {
+	return buildOllamaChatRequestForStream(params, false)
+}
+
+func buildOllamaChatRequestForStream(params CompleteParams, stream bool) (ollamaChatRequest, error) {
+	if params.Model == "" {
+		return ollamaChatRequest{}, errors.New("ollama: model is required")
+	}
+
+	if err := validateCompleteParamsSupported(providerOllama, params); err != nil {
+		return ollamaChatRequest{}, err
+	}
+
+	req := ollamaChatRequest{
+		Model:    params.Model,
+		Messages: buildOllamaMessages(params.Messages),
+		Stream:   stream,
+		Options: ollamaOptions{
+			Temperature: params.Temperature,
+			TopP:        params.TopP,
+			Seed:        params.Seed,
+			Stop:        params.Stop,
+		},
+	}
+	if params.MaxTokens > 0 {
+		req.Options.NumPredict = params.MaxTokens
+	}
+
+	if think, ok := ollamaThink(params.ReasoningLevel); ok {
+		req.Think = think
+	}
+
+	for _, tool := range params.Tools {
+		req.Tools = append(req.Tools, ollamaTool{
+			Type:     "function",
+			Function: ollamaToolFunction(tool),
+		})
+	}
+
+	return req, nil
+}
+
+func parseOllamaChatResponse(or ollamaChatResponse, fallbackModel string) *Response {
 	model := or.Model
 	if model == "" {
-		model = params.Model
+		model = fallbackModel
 	}
 
 	result := &Response{
 		Content:      or.Message.Content,
 		Model:        model,
-		StopReason:   StopEndTurn,
+		StopReason:   ollamaCompletionStopReason(or.DoneReason),
 		InputTokens:  or.PromptEvalCount,
 		OutputTokens: or.EvalCount,
 	}
@@ -396,7 +443,7 @@ func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*
 		result.StopReason = StopToolUse
 	}
 
-	return result, nil
+	return result
 }
 
 // CompleteStream performs a streaming chat completion using Ollama's /api/chat
@@ -452,35 +499,9 @@ func (o *OllamaProvider) CompleteStream(ctx context.Context, params CompletePara
 }
 
 func buildOllamaChatRequestBody(params CompleteParams, stream bool) ([]byte, error) {
-	if params.Model == "" {
-		return nil, errors.New("ollama: model is required")
-	}
-
-	req := ollamaChatRequest{
-		Model:    params.Model,
-		Messages: buildOllamaMessages(params.Messages),
-		Stream:   stream,
-		Options: ollamaOptions{
-			Temperature: params.Temperature,
-			TopP:        params.TopP,
-			Seed:        params.Seed,
-			Stop:        params.Stop,
-		},
-	}
-	if params.MaxTokens > 0 {
-		req.Options.NumPredict = params.MaxTokens
-	}
-
-	if think, ok := ollamaThink(params.ReasoningLevel); ok {
-		req.Think = think
-	}
-
-	// Add tool definitions.
-	for _, tool := range params.Tools {
-		req.Tools = append(req.Tools, ollamaTool{
-			Type:     "function",
-			Function: ollamaToolFunction(tool),
-		})
+	req, err := buildOllamaChatRequestForStream(params, stream)
+	if err != nil {
+		return nil, err
 	}
 
 	body, err := json.Marshal(req)
@@ -557,7 +578,7 @@ func streamOllamaChatResponse(ctx context.Context, r io.Reader, ch chan<- Chunk,
 func ollamaFinalChunk(resp ollamaChatResponse, model string) Chunk {
 	toolCalls := parseOllamaToolCalls(resp.Message.ToolCalls)
 
-	stopReason := StopEndTurn
+	stopReason := ollamaCompletionStopReason(resp.DoneReason)
 	if len(toolCalls) > 0 {
 		stopReason = StopToolUse
 	}
@@ -645,6 +666,25 @@ func parseOllamaToolCalls(calls []ollamaToolCall) []ToolCall {
 	}
 
 	return out
+}
+
+func ollamaStopReason(reason string) StopReason {
+	switch reason {
+	case "stop":
+		return StopEndTurn
+	case "length":
+		return StopMaxToks
+	default:
+		return StopUnknown
+	}
+}
+
+func ollamaCompletionStopReason(reason string) StopReason {
+	if strings.TrimSpace(reason) == "" {
+		return StopEndTurn
+	}
+
+	return ollamaStopReason(reason)
 }
 
 // ModelContextWindow returns known default context windows for common Ollama models.
