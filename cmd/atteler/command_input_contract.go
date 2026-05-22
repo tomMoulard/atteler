@@ -118,6 +118,21 @@ type explainConfigCommandInput struct {
 
 type feedbackProposalsCommandInput struct{}
 
+type feedbackApproveCommandInput struct {
+	ConfigPath  string
+	HistoryPath string
+	Agent       string
+	ID          string
+}
+
+type feedbackRollbackCommandInput struct {
+	ConfigPath  string
+	HistoryPath string
+	Agent       string
+	ID          string
+	Reason      string
+}
+
 type gitHistorySearchCommandInput struct {
 	Query string
 	Limit int
@@ -298,6 +313,8 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"evalOutputCommandInput":              func(opts cliOptions) any { return evalOutputCommandInputFromOptions(opts) },
 		"explainConfigCommandInput":           func(opts cliOptions) any { return explainConfigCommandInputFromOptions(opts) },
 		"feedbackProposalsCommandInput":       func(opts cliOptions) any { return feedbackProposalsCommandInputFromOptions(opts) },
+		"feedbackApproveCommandInput":         func(opts cliOptions) any { return feedbackApproveCommandInputFromOptions(opts) },
+		"feedbackRollbackCommandInput":        func(opts cliOptions) any { return feedbackRollbackCommandInputFromOptions(opts) },
 		"gitHistorySearchCommandInput":        func(opts cliOptions) any { return gitHistorySearchCommandInputFromOptions(opts) },
 		"initConfigCommandInput":              func(opts cliOptions) any { return initConfigCommandInputFromOptions(opts) },
 		"initRTKPluginCommandInput":           func(opts cliOptions) any { return initRTKPluginCommandInputFromOptions(opts) },
@@ -477,6 +494,25 @@ func explainConfigCommandInputFromOptions(opts cliOptions) explainConfigCommandI
 
 func feedbackProposalsCommandInputFromOptions(_ cliOptions) feedbackProposalsCommandInput {
 	return feedbackProposalsCommandInput{}
+}
+
+func feedbackApproveCommandInputFromOptions(opts cliOptions) feedbackApproveCommandInput {
+	return feedbackApproveCommandInput{
+		ConfigPath:  opts.feedbackApproveConfig,
+		HistoryPath: opts.feedbackHistoryPath,
+		Agent:       opts.feedbackApproveAgent,
+		ID:          opts.feedbackApproveID,
+	}
+}
+
+func feedbackRollbackCommandInputFromOptions(opts cliOptions) feedbackRollbackCommandInput {
+	return feedbackRollbackCommandInput{
+		ConfigPath:  opts.feedbackRollbackConfig,
+		HistoryPath: opts.feedbackHistoryPath,
+		Agent:       opts.feedbackRollbackAgent,
+		ID:          opts.feedbackRollbackID,
+		Reason:      opts.feedbackRollbackReason,
+	}
 }
 
 func gitHistorySearchCommandInputFromOptions(opts cliOptions) gitHistorySearchCommandInput {

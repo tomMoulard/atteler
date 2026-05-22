@@ -211,6 +211,22 @@ func commandContractsByName() map[string]commandContract {
 			withInputType("feedbackProposalsCommandInput"),
 			withExamples("atteler agents feedback --session demo"),
 		),
+		"feedback-approve": commandContractFor(
+			"approve and apply a pending feedback proposal to an agent config",
+			[]string{"--feedback-approve-config", "--feedback-approve-agent", "--feedback-approve-id", "--feedback-history"},
+			[]string{commandEffectConfigRead, commandEffectFilesystemWrite, commandEffectUserOutput},
+			[]string{commandOutputFilesystem, commandOutputText},
+			withInputType("feedbackApproveCommandInput"),
+			withExamples(`atteler agents feedback approve agents.yaml --feedback-approve-agent reviewer --feedback-approve-id fg-1`),
+		),
+		"feedback-rollback": commandContractFor(
+			"roll back a previously applied feedback guidance entry in an agent config",
+			[]string{"--feedback-rollback-config", "--feedback-rollback-agent", "--feedback-rollback-id", "--feedback-rollback-reason", "--feedback-history"},
+			[]string{commandEffectConfigRead, commandEffectFilesystemWrite, commandEffectUserOutput},
+			[]string{commandOutputFilesystem, commandOutputText},
+			withInputType("feedbackRollbackCommandInput"),
+			withExamples(`atteler agents feedback rollback agents.yaml --feedback-rollback-agent reviewer --feedback-rollback-id fg-1`),
+		),
 		"git-history-search-providerless": commandContractFor(
 			"search local git history subjects, files, and authors",
 			[]string{"--git-history-search", "--git-history-limit"},
