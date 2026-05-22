@@ -72,45 +72,28 @@ func dedupePromptCandidates(candidates []promptcomplete.Candidate) []promptcompl
 }
 
 func promptSlashCommandCandidates() []promptcomplete.Candidate {
-	commands := []struct {
-		name        string
-		description string
-		tokens      []string
-	}{
-		{name: "/help", description: "show interactive slash command help"},
-		{name: "/model", description: "show or change the active model", tokens: []string{"provider"}},
-		{name: "/profile", description: "switch to a configured agent profile", tokens: []string{"agent"}},
-		{name: "/save", description: "save the current session"},
-		{name: "/export", description: "export the current session transcript", tokens: []string{"session"}},
-		{name: "/clear", description: "clear the visible conversation"},
-		{name: "/retry", description: "regenerate the last user prompt", tokens: []string{"regenerate"}},
-		{name: "/edit", description: "edit the last user prompt"},
-		{name: "/fork", description: "fork the current session at a message index", tokens: []string{"session"}},
-		{name: "/tokens", description: "show token usage", tokens: []string{"cost"}},
-		{name: "/cost", description: "show token cost summary", tokens: []string{"tokens"}},
-		{name: "/search", description: "search the current conversation", tokens: []string{"session"}},
-		{name: "/pin", description: "pin a message before pruning context", tokens: []string{"context"}},
-		{name: "/unpin", description: "unpin a message", tokens: []string{"context"}},
-		{name: "/context", description: "show or prune conversation context"},
-		{name: "/mode", description: "switch between plan and execute modes", tokens: []string{"plan", "execute"}},
-		{name: "/template", description: "insert a local prompt template"},
-		{name: "/codeblocks", description: "list code blocks from the last assistant response", tokens: []string{"code"}},
-		{name: "/save-code", description: "save a code block from the last assistant response", tokens: []string{"code"}},
-		{name: "/copy", description: "copy the last answer or full session"},
-		{name: "/copy-code", description: "copy a code block"},
-		{name: "/apply-patch", description: "apply the last assistant patch", tokens: []string{"patch"}},
-		{name: "/eval", description: "run local evaluation commands", tokens: []string{"test"}},
-	}
+	descriptors := slashCommandDescriptors()
 
-	out := make([]promptcomplete.Candidate, 0, len(commands))
-	for _, command := range commands {
+	out := make([]promptcomplete.Candidate, 0, len(descriptors))
+	for i := range descriptors {
+		command := &descriptors[i]
 		out = append(out, promptcomplete.Candidate{
-			Text:        command.name,
+			Text:        "/" + command.Name,
 			Kind:        "slash-command",
 			Source:      "interactive slash commands",
-			Description: command.description,
-			Tokens:      command.tokens,
+			Description: command.Summary,
+			Tokens:      append([]string(nil), command.CompletionTokens...),
 		})
+
+		for _, alias := range command.Aliases {
+			out = append(out, promptcomplete.Candidate{
+				Text:        "/" + alias,
+				Kind:        "slash-command",
+				Source:      "interactive slash commands",
+				Description: command.Summary,
+				Tokens:      append([]string(nil), command.CompletionTokens...),
+			})
+		}
 	}
 
 	return out

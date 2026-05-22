@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -17,6 +18,8 @@ import (
 	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
+
+const testUnifiedDiffPatch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
 
 func TestMergeTags_DeduplicatesCaseInsensitive(t *testing.T) {
 	t.Parallel()
@@ -340,22 +343,74 @@ func TestMarshalJSONLines_CompactsAndTerminatesLines(t *testing.T) {
 	assert.True(t, strings.HasSuffix(string(got), "\n"))
 }
 
-func TestApplyPatch_UsesTempFileAndQuotesPath(t *testing.T) {
+func TestApplyPatch_UsesDirectGitApplyCommand(t *testing.T) {
 	t.Parallel()
 
-	patch := "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
-	m := model{ctx: context.Background(), history: []llm.Message{{Role: llm.RoleAssistant, Content: patch}}}
+	m := model{ctx: context.Background(), history: []llm.Message{{Role: llm.RoleAssistant, Content: testUnifiedDiffPatch}}}
 
-	next, cmd, handled := m.applyPatch()
+	next, cmd, handled := m.handleSlashCommand("/apply-patch")
 	require.True(t, handled)
 	require.NotNil(t, cmd)
 	require.True(t, next.waiting)
+}
 
-	command := gitApplyPatchCommand("/tmp/atteler-patch-a'b.diff")
-	require.Contains(t, command, "git apply --check")
-	require.NotContains(t, command, "<<")
-	require.NotContains(t, command, patch)
-	assert.Contains(t, command, shellQuote("/tmp/atteler-patch-a'b.diff"))
+func TestRunGitApplyPatchCmd_InvokesGitDirectlyWithPatchOnStdin(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "git.log")
+	stdinPath := filepath.Join(dir, "stdin.log")
+	fakeGit := filepath.Join(dir, "git")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$ATTELER_FAKE_GIT_LOG\"\n" +
+		"payload=$(cat)\n" +
+		"printf '%s\\n---stdin---\\n' \"$payload\" >> \"$ATTELER_FAKE_GIT_STDIN\"\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o600))
+	require.NoError(t, os.Chmod(fakeGit, 0o700)) //nolint:gosec // the test creates an executable fake git shim in a private temp directory.
+	t.Setenv("ATTELER_FAKE_GIT_LOG", logPath)
+	t.Setenv("ATTELER_FAKE_GIT_STDIN", stdinPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := runGitApplyPatchCmd(context.Background(), testUnifiedDiffPatch, "", "git apply --check - && git apply -")
+
+	msg, ok := cmd().(shellResultMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+	assert.Equal(t, "git apply --check - && git apply -", msg.command)
+
+	log, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.Equal(t, "apply --check -\napply -\n", string(log))
+
+	stdin, err := os.ReadFile(stdinPath)
+	require.NoError(t, err)
+	assert.Equal(t, testUnifiedDiffPatch+"---stdin---\n"+testUnifiedDiffPatch+"---stdin---\n", string(stdin))
+}
+
+func TestRunGitApplyPatchCmd_StopsWhenCheckFails(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "git.log")
+	fakeGit := filepath.Join(dir, "git")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$ATTELER_FAKE_GIT_LOG\"\n" +
+		"if [ \"$1\" = \"apply\" ] && [ \"$2\" = \"--check\" ]; then\n" +
+		"  printf 'bad patch\\n' >&2\n" +
+		"  exit 42\n" +
+		"fi\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o600))
+	require.NoError(t, os.Chmod(fakeGit, 0o700)) //nolint:gosec // the test creates an executable fake git shim in a private temp directory.
+	t.Setenv("ATTELER_FAKE_GIT_LOG", logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := runGitApplyPatchCmd(context.Background(), testUnifiedDiffPatch, "", "git apply --check - && git apply -")
+
+	msg, ok := cmd().(shellResultMsg)
+	require.True(t, ok)
+	require.Error(t, msg.err)
+	assert.Contains(t, msg.err.Error(), "git apply --check -")
+	assert.Contains(t, msg.stderr, "bad patch")
+
+	log, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.Equal(t, "apply --check -\n", string(log))
 }
 
 func TestShellQuote_HandlesSingleQuotes(t *testing.T) {

@@ -526,6 +526,73 @@ func TestCommandRegistry_ExplicitPrecedenceResolvesDeclaredOverlap(t *testing.T)
 	assert.Contains(t, got.contract.Overrides, "mcp-manifest")
 }
 
+func TestCommandRegistry_OrderingDoesNotSilentlyShadowAmbiguousMatches(t *testing.T) {
+	t.Parallel()
+
+	registry := []command{
+		{
+			name:  "first-match",
+			tier:  tierProviderless,
+			match: func(cliOptions) bool { return true },
+			contract: commandContract{
+				InputFlags: []string{"--first"},
+			},
+		},
+		{
+			name:  "shadowed-match",
+			tier:  tierProviderless,
+			match: func(cliOptions) bool { return true },
+			contract: commandContract{
+				InputFlags: []string{"--second"},
+			},
+		},
+	}
+
+	_, handled, err := selectRegistryCommand(registry, tierProviderless, cliOptions{})
+	require.Error(t, err)
+	assert.True(t, handled)
+	assert.Contains(t, err.Error(), "first-match")
+	assert.Contains(t, err.Error(), "shadowed-match")
+}
+
+func TestCommandRegistry_ExplicitPrecedenceMustCoverEveryShadowedMatch(t *testing.T) {
+	t.Parallel()
+
+	registry := []command{
+		{
+			name:  "declared-winner",
+			tier:  tierProviderless,
+			match: func(cliOptions) bool { return true },
+			contract: commandContract{
+				InputFlags: []string{"--winner"},
+				Overrides:  []string{"known-overlap"},
+			},
+		},
+		{
+			name:  "known-overlap",
+			tier:  tierProviderless,
+			match: func(cliOptions) bool { return true },
+			contract: commandContract{
+				InputFlags: []string{"--known"},
+			},
+		},
+		{
+			name:  "new-shadow",
+			tier:  tierProviderless,
+			match: func(cliOptions) bool { return true },
+			contract: commandContract{
+				InputFlags: []string{"--new"},
+			},
+		},
+	}
+
+	_, handled, err := selectRegistryCommand(registry, tierProviderless, cliOptions{})
+	require.Error(t, err)
+	assert.True(t, handled)
+	assert.Contains(t, err.Error(), "declared-winner")
+	assert.Contains(t, err.Error(), "new-shadow")
+}
+
 func TestCommandSurface_JSONDumpIncludesDispatchContract(t *testing.T) {
 	t.Parallel()
 
@@ -538,6 +605,7 @@ func TestCommandSurface_JSONDumpIncludesDispatchContract(t *testing.T) {
 	assert.Equal(t, commandSurfaceSchema, surface.Schema)
 	require.NotEmpty(t, surface.Domains)
 	require.NotEmpty(t, surface.Commands)
+	require.NotEmpty(t, surface.SlashCommands)
 
 	domains := make(map[string]commandSurfaceDomain, len(surface.Domains))
 	for _, domain := range surface.Domains {
@@ -547,6 +615,11 @@ func TestCommandSurface_JSONDumpIncludesDispatchContract(t *testing.T) {
 	commands := make(map[string]commandSurfaceCommand, len(surface.Commands))
 	for _, command := range surface.Commands {
 		commands[command.Name] = command
+	}
+
+	slashCommands := make(map[string]commandSurfaceSlashCommand, len(surface.SlashCommands))
+	for _, command := range surface.SlashCommands {
+		slashCommands[command.Name] = command
 	}
 
 	require.Contains(t, domains, "config")
@@ -567,6 +640,18 @@ func TestCommandSurface_JSONDumpIncludesDispatchContract(t *testing.T) {
 	assert.Contains(t, commands["mcp-invoke"].Overrides, "mcp-manifest")
 	assert.Contains(t, commands["mcp-invoke"].OutputModes, commandOutputJSON)
 	assert.Contains(t, commands["list-sessions"].SideEffects, commandEffectSessionRead)
+
+	require.Contains(t, slashCommands, "apply-patch")
+	assert.Equal(t, "/apply-patch", slashCommands["apply-patch"].Usage)
+	assert.Contains(t, slashCommands["apply-patch"].SideEffects, commandEffectWorktreeWrite)
+	assert.Contains(t, slashCommands["apply-patch"].PolicyRequirements, slashPolicyMutatesWorktree)
+	require.Contains(t, slashCommands, "eval")
+	assert.Contains(t, slashCommands["eval"].PolicyRequirements, slashPolicyMutatesFilesystem)
+	require.Len(t, slashCommands["eval"].Variants, 2)
+	assert.Equal(t, "/eval add", slashCommands["eval"].Variants[0].Usage)
+	require.Contains(t, slashCommands, "tokens")
+	assert.Equal(t, []string{"cost"}, slashCommands["tokens"].HelpAliases)
+	assert.Equal(t, 1, slashCommands["tokens"].HelpGroup)
 }
 
 func TestCommandSurface_DomainCommandsLinkToDispatchContract(t *testing.T) {
@@ -651,6 +736,53 @@ func TestCommandSurface_MarkdownDocsRenderFromSurface(t *testing.T) {
 	assert.Contains(t, docs, "- Flags: `--bash`, `--bash-dir`, `--bash-timeout-seconds`")
 	assert.Contains(t, docs, "`mcp-invoke` (providerless)")
 	assert.Contains(t, docs, "- Overrides: `mcp-manifest`")
+	assert.Contains(t, docs, "## Interactive slash commands")
+	assert.Contains(t, docs, "`/apply-patch`: apply the last assistant unified diff with git apply")
+	assert.Contains(t, docs, "`/save-code <n> <path>`: save a code block from the last assistant response")
+	assert.Contains(t, docs, "- Input fields: `Path`, `Block`")
+	assert.Contains(t, docs, "- Arguments: `n:int required`, `path:string required`")
+	assert.Contains(t, docs, "- Arguments: `mode:enum(plan|execute) optional`")
+	assert.Contains(t, docs, "- Completion tokens: `patch`")
+	assert.Contains(t, docs, "- Completion tokens: `plan`, `execute`")
+	assert.Contains(t, docs, "- `/eval add`: add the current session to local evaluation cases")
+	assert.Contains(t, docs, "Policy: `mutates-filesystem`")
+	assert.Contains(t, docs, "- Policy: `runs-local-process`, `mutates-worktree`")
+}
+
+func TestCommandSurface_MarkdownSlashHelpRendersFromSurface(t *testing.T) {
+	t.Parallel()
+
+	docs := renderCommandSurfaceMarkdown(commandSurface{
+		Schema: commandSurfaceSchema,
+		SlashCommands: []commandSurfaceSlashCommand{
+			{
+				Name:               "demo",
+				Usage:              "/demo",
+				Summary:            "demo command",
+				InputType:          "slashNoArgsInput",
+				SideEffects:        []string{commandEffectUserOutput},
+				OutputModes:        []string{commandOutputText},
+				PolicyRequirements: nil,
+			},
+			{
+				Name:               "next",
+				Usage:              "/next [value]",
+				Summary:            "next command",
+				InputType:          "slashOptionalValueInput",
+				HelpAliases:        []string{"n"},
+				CompletionTokens:   []string{"next-token"},
+				SideEffects:        []string{commandEffectUserOutput},
+				OutputModes:        []string{commandOutputText},
+				PolicyRequirements: nil,
+				HelpGroup:          1,
+			},
+		},
+	})
+
+	assert.Contains(t, docs, "```text\n/demo\n/next [value] /n\n```")
+	assert.NotContains(t, docs, "/apply-patch", "markdown rendering should use the provided command surface, not global descriptors")
+	assert.Contains(t, docs, "- Help aliases: `n`")
+	assert.Contains(t, docs, "- Completion tokens: `next-token`")
 }
 
 func TestCommandSurface_MarkdownDocsCommandWritesContractDocs(t *testing.T) {
