@@ -304,7 +304,7 @@ var cliHelpDomains = []cliHelpDomain{
 var implicitFlagDefaults = map[string]string{
 	"agent-memory-limit":       "5",
 	"bash-timeout-seconds":     "120",
-	"context-pack-tokens":      "unlimited",
+	"context-pack-tokens":      "unlimited; capped by --model window when known",
 	"git-history-limit":        "5",
 	"mcp-timeout-seconds":      "none",
 	"memory-limit":             "5",

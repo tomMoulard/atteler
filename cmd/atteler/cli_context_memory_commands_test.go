@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agentmemory"
+	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/vector"
 )
 
@@ -27,6 +28,46 @@ func TestFormatVectorResult(t *testing.T) {
 	if got != want {
 		require.Failf(t, "unexpected vector result format", "got %q, want %q", got, want)
 	}
+}
+
+func TestParseContextPackMessagesMapsDeveloperAndToolRoles(t *testing.T) {
+	t.Parallel()
+
+	messages, metadata := parseContextPackMessagesWithMetadata("developer[2026-05-22T10:00:00Z]: keep secret policy\ntool: grep output\nuser: continue\n")
+
+	require.Len(t, messages, 3)
+	require.Len(t, metadata, 3)
+	assert.Equal(t, llm.RoleSystem, messages[0].Role)
+	assert.Equal(t, "keep secret policy", messages[0].Content)
+	assert.Equal(t, "2026-05-22T10:00:00Z", metadata[0].Timestamp)
+	assert.Equal(t, llm.RoleTool, messages[1].Role)
+	assert.Equal(t, "grep output", messages[1].Content)
+	assert.Empty(t, metadata[1].Timestamp)
+	assert.Equal(t, llm.RoleUser, messages[2].Role)
+}
+
+func TestParseContextPackMessagesDoesNotMistakeContentBracketForTimestamp(t *testing.T) {
+	t.Parallel()
+
+	messages, metadata := parseContextPackMessagesWithMetadata("user: keep literal ]: marker in content\n")
+
+	require.Len(t, messages, 1)
+	require.Len(t, metadata, 1)
+	assert.Equal(t, llm.RoleUser, messages[0].Role)
+	assert.Equal(t, "keep literal ]: marker in content", messages[0].Content)
+	assert.Empty(t, metadata[0].Timestamp)
+}
+
+func TestParseContextPackTimestampWithoutSpaceKeepsContent(t *testing.T) {
+	t.Parallel()
+
+	messages, metadata := parseContextPackMessagesWithMetadata("user[2026-05-22T10:00:00Z]:continue without losing first byte\n")
+
+	require.Len(t, messages, 1)
+	require.Len(t, metadata, 1)
+	assert.Equal(t, llm.RoleUser, messages[0].Role)
+	assert.Equal(t, "continue without losing first byte", messages[0].Content)
+	assert.Equal(t, "2026-05-22T10:00:00Z", metadata[0].Timestamp)
 }
 
 func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {

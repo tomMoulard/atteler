@@ -165,7 +165,7 @@ func commandContractsByName() map[string]commandContract {
 		),
 		"context-pack": commandContractFor(
 			"compact a role-prefixed transcript file",
-			[]string{"--context-pack-file", "--context-pack-tokens"},
+			[]string{"--context-pack-file", "--context-pack-tokens", "--model"},
 			[]string{commandEffectFilesystemRead, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("contextPackCommandInput"),

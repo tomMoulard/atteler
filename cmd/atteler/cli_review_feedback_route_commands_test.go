@@ -251,13 +251,23 @@ func TestParseAndFormatContextPack(t *testing.T) {
 		require.Failf(t, "unexpected continuation", "content = %q", messages[2].Content)
 	}
 
-	result := contextpack.Compact(messages, 12)
+	estimator := contextpack.NewEstimator("", "openai/gpt-4.1")
+	result := contextpack.CompactWithOptions(messages, contextpack.Options{
+		Model:     "openai/gpt-4.1",
+		MaxTokens: estimator.EstimateMessages(messages).UpperBoundTokens,
+	})
 
 	got := formatContextPackResult(result)
 	for _, want := range []string{
-		"compressed: true\n",
+		"compressed:",
 		"omitted:",
 		"tokens:",
+		"upper=",
+		"error_bound=",
+		"estimator:",
+		"openai-calibrated",
+		"model=gpt-4.1",
+		"policy:",
 		"output:\n",
 		"system: keep rules",
 	} {

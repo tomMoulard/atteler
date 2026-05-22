@@ -84,6 +84,7 @@ type codeIntelCommandInput struct {
 
 type contextPackCommandInput struct {
 	Path      string
+	Model     string
 	MaxTokens int
 }
 
@@ -460,7 +461,7 @@ func commandSurfaceJSONCommandInputFromOptions(_ cliOptions) commandSurfaceJSONC
 }
 
 func contextPackCommandInputFromOptions(opts cliOptions) contextPackCommandInput {
-	return contextPackCommandInput{Path: opts.contextPackPath, MaxTokens: opts.contextPackTokens.value}
+	return contextPackCommandInput{Path: opts.contextPackPath, Model: opts.model, MaxTokens: opts.contextPackTokens.value}
 }
 
 func describeAgentCommandInputFromOptions(opts cliOptions) describeAgentCommandInput {
