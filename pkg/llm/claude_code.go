@@ -24,16 +24,20 @@ type ClaudeCodeProvider struct {
 	models  []string
 }
 
-// NewClaudeCodeProvider creates a provider backed by the Claude Code OAuth
-// credentials discovered on the local machine.
+// NewClaudeCodeProvider is kept for source compatibility only.
+//
+// Deprecated: use NewClaudeCodeProviderContext so keychain and credential-file
+// access inherits caller cancellation and deadlines.
 func NewClaudeCodeProvider() (*ClaudeCodeProvider, error) {
-	return NewClaudeCodeProviderContext(defaultCredentialContext())
+	return nil, ErrContextRequired
 }
 
 // NewClaudeCodeProviderContext creates a provider using ctx for credential
 // discovery (keychain probe / file reads).
 func NewClaudeCodeProviderContext(ctx context.Context) (*ClaudeCodeProvider, error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
 
 	auth, err := loadClaudeCodeAuth(ctx)
 	if err != nil {
@@ -63,7 +67,11 @@ func (c *ClaudeCodeProvider) Models() []string {
 // FetchModels returns the local Claude Code model catalog. The OAuth-mode
 // /v1/models endpoint is gated separately; we keep a static list to avoid an
 // extra round-trip for what is effectively a UI-only listing.
-func (c *ClaudeCodeProvider) FetchModels(_ context.Context) ([]string, error) {
+func (c *ClaudeCodeProvider) FetchModels(ctx context.Context) ([]string, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	return c.Models(), nil
 }
 
@@ -71,6 +79,10 @@ func (c *ClaudeCodeProvider) FetchModels(_ context.Context) ([]string, error) {
 // hit the network — provider-level credential validity is asserted lazily on
 // the next Complete call (with auto-refresh on 401).
 func (c *ClaudeCodeProvider) HealthCheck(ctx context.Context) error {
+	if err := requireCredentialContext(ctx); err != nil {
+		return err
+	}
+
 	emitActivity(ctx, events.Event{
 		Type: events.CommandExecute,
 		Metadata: map[string]string{
@@ -94,6 +106,10 @@ func (c *ClaudeCodeProvider) ModelContextWindow(model string) int {
 // Complete performs a chat completion against the Anthropic Messages API,
 // refreshing the OAuth access token once on 401 and retrying transparently.
 func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	model := params.Model
 	if model == "" {
 		models := c.Models()

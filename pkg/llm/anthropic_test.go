@@ -272,7 +272,7 @@ func TestAnthropicProvider_ConfigBaseURL(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 
-	p, err := NewAnthropicProviderWithConfig(ProviderConfig{BaseURL: "https://anthropic.config"})
+	p, err := NewAnthropicProviderWithConfigContext(context.Background(), ProviderConfig{BaseURL: "https://anthropic.config"})
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -286,7 +286,7 @@ func TestAnthropicProvider_EnvBaseURLOverridesConfig(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic.env")
 
-	p, err := NewAnthropicProviderWithConfig(ProviderConfig{BaseURL: "https://anthropic.config"})
+	p, err := NewAnthropicProviderWithConfigContext(context.Background(), ProviderConfig{BaseURL: "https://anthropic.config"})
 	if err != nil {
 		require.NoError(t, err)
 	}

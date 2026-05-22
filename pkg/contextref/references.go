@@ -159,6 +159,10 @@ func LoadReferences(ctx context.Context, refs []string, opts Options) ([]LoadedR
 // LoadReferencesWithReport is LoadReferences plus per-reference policy and
 // loading events suitable for CLI diagnostics.
 func LoadReferencesWithReport(ctx context.Context, refs []string, opts Options) ([]LoadedReference, []ReferenceEvent, error) {
+	if err := requireReferenceContext(ctx); err != nil {
+		return nil, nil, err
+	}
+
 	if len(refs) == 0 {
 		return nil, nil, nil
 	}
@@ -182,6 +186,10 @@ func LoadReferencesWithReport(ctx context.Context, refs []string, opts Options) 
 	)
 
 	for _, raw := range refs {
+		if err := requireReferenceContext(ctx); err != nil {
+			return out, events, errors.Join(append(errs, err)...)
+		}
+
 		ref := strings.TrimSpace(raw)
 		if ref == "" {
 			events = append(events, newReferenceEvent(raw, "", "", opts, ReferenceDecisionSkipped, "empty reference"))
@@ -208,6 +216,18 @@ func LoadReferencesWithReport(ctx context.Context, refs []string, opts Options) 
 	}
 
 	return out, events, errors.Join(errs...)
+}
+
+func requireReferenceContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("context references: context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("context references: context already done: %w", err)
+	}
+
+	return nil
 }
 
 // loadReference dispatches a single reference string to the appropriate

@@ -242,8 +242,8 @@ func EstimatePromptCacheReuse(branches []BranchPrompt) (PromptCacheReuseEstimate
 // concurrent round 2 cross-reviews, then caller-supplied round 3 aggregation.
 // It returns partial session data alongside any error encountered.
 func Run(ctx context.Context, plan Plan, runner Runner) (Result, error) {
-	if ctx == nil {
-		return Result{}, errors.New("context is required")
+	if err := requireRunContext(ctx); err != nil {
+		return Result{}, err
 	}
 
 	if err := validateRunnablePlan(plan); err != nil {
@@ -271,11 +271,19 @@ func Run(ctx context.Context, plan Plan, runner Runner) (Result, error) {
 		return Result{Session: session}, err
 	}
 
+	if ctxErr := requireRunContext(ctx); ctxErr != nil {
+		return Result{Session: session}, ctxErr
+	}
+
 	reviews, err := runReviews(ctx, proposals, runner.Review)
 
 	session.Reviews = reviews
 	if err != nil {
 		return Result{Session: session}, err
+	}
+
+	if ctxErr := requireRunContext(ctx); ctxErr != nil {
+		return Result{Session: session}, ctxErr
 	}
 
 	verdict, err := runner.Aggregate(ctx, session)
@@ -294,6 +302,18 @@ func Run(ctx context.Context, plan Plan, runner Runner) (Result, error) {
 		Winner:  strings.TrimSpace(verdict.Winner),
 		Reason:  strings.TrimSpace(verdict.Reason),
 	}, nil
+}
+
+func requireRunContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("speculate: context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("speculate: context already done: %w", err)
+	}
+
+	return nil
 }
 
 // CrossReviews maps proposal authors to cross-review assignments.

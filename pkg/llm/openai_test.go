@@ -231,7 +231,7 @@ func TestOpenAIProvider_ConfigBaseURL(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-test")
 	t.Setenv("OPENAI_BASE_URL", "")
 
-	p, err := NewOpenAIProviderWithConfig(ProviderConfig{BaseURL: "https://openai.config"})
+	p, err := NewOpenAIProviderWithConfigContext(context.Background(), ProviderConfig{BaseURL: "https://openai.config"})
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -245,7 +245,7 @@ func TestOpenAIProvider_EnvBaseURLOverridesConfig(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-test")
 	t.Setenv("OPENAI_BASE_URL", "https://openai.env")
 
-	p, err := NewOpenAIProviderWithConfig(ProviderConfig{BaseURL: "https://openai.config"})
+	p, err := NewOpenAIProviderWithConfigContext(context.Background(), ProviderConfig{BaseURL: "https://openai.config"})
 	if err != nil {
 		require.NoError(t, err)
 	}

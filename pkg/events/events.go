@@ -159,6 +159,14 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 		return nil
 	}
 
+	if ctx == nil {
+		return errors.New("events: context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("events: context already done: %w", err)
+	}
+
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}

@@ -32,18 +32,20 @@ const (
 
 var safeSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
-var defaultContextFactory = context.Background
+// ErrContextRequired is returned by compatibility helpers that would otherwise
+// need to manufacture a hidden root context for git commands.
+var ErrContextRequired = errors.New("worktree: context is required")
 
-func defaultCommandContext() context.Context {
-	return defaultContextFactory()
-}
-
-func nonNilCommandContext(ctx context.Context) context.Context {
-	if ctx != nil {
-		return ctx
+func requireCommandContext(ctx context.Context) error {
+	if ctx == nil {
+		return ErrContextRequired
 	}
 
-	return defaultCommandContext()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("worktree: context already done: %w", err)
+	}
+
+	return nil
 }
 
 // Info describes an active session worktree.
@@ -150,7 +152,16 @@ func (e *MergeError) Unwrap() error {
 	return e.Err
 }
 
-// Create sets up a new git worktree for the given session.
+// Create is kept for source compatibility only.
+//
+// Deprecated: use CreateContext so git commands inherit caller cancellation
+// and deadlines.
+func Create(_, _ string) (*Info, error) {
+	return nil, ErrContextRequired
+}
+
+// CreateContext sets up a new git worktree for the given session using
+// caller-provided cancellation for git commands.
 //
 // It creates a new branch named "atteler/<sessionID>" from the current HEAD,
 // then adds a git worktree at a well-known path derived from the session ID.
@@ -158,13 +169,10 @@ func (e *MergeError) Unwrap() error {
 // the worktree.
 //
 // repoDir must be the root of a git repository (or anywhere inside one).
-func Create(repoDir, sessionID string) (*Info, error) {
-	return CreateContext(defaultCommandContext(), repoDir, sessionID)
-}
-
-// CreateContext is Create with caller-provided cancellation for git commands.
 func CreateContext(ctx context.Context, repoDir, sessionID string) (*Info, error) {
-	ctx = nonNilCommandContext(ctx)
+	if err := requireCommandContext(ctx); err != nil {
+		return nil, err
+	}
 
 	plan, err := planCreateWorktree(ctx, repoDir, sessionID)
 	if err != nil {
@@ -305,8 +313,11 @@ func createNewWorktree(ctx context.Context, plan createPlan) (*Info, error) {
 //
 // Use MergeWithOptionsContext when a caller intentionally permits reviewed
 // auto-commit and auto-merge behavior.
-func Merge(repoDir string, info *Info) error {
-	return MergeContext(defaultCommandContext(), repoDir, info)
+//
+// Deprecated: use MergeContext or MergeWithOptionsContext so git commands
+// inherit caller cancellation and deadlines.
+func Merge(_ string, _ *Info) error {
+	return ErrContextRequired
 }
 
 // MergeContext is Merge with caller-provided cancellation for git commands.
@@ -316,7 +327,9 @@ func MergeContext(ctx context.Context, repoDir string, info *Info) error {
 
 // MergeWithOptionsContext merges the worktree using an explicit safety policy.
 func MergeWithOptionsContext(ctx context.Context, repoDir string, info *Info, opts MergeOptions) error {
-	ctx = nonNilCommandContext(ctx)
+	if err := requireCommandContext(ctx); err != nil {
+		return err
+	}
 
 	repoRoot, manifest, log, err := beginMergeTransaction(ctx, repoDir, info, opts)
 	if err != nil {
@@ -450,8 +463,11 @@ func completeMergeTransaction(
 //
 // Use RemoveWithOptionsContext with Force=true for explicitly destructive
 // cleanup of dirty or unmerged session work.
-func Remove(repoDir string, info *Info) error {
-	return RemoveContext(defaultCommandContext(), repoDir, info)
+//
+// Deprecated: use RemoveContext or RemoveWithOptionsContext so git commands
+// inherit caller cancellation and deadlines.
+func Remove(_ string, _ *Info) error {
+	return ErrContextRequired
 }
 
 // RemoveContext is Remove with caller-provided cancellation for git commands.
@@ -462,7 +478,9 @@ func RemoveContext(ctx context.Context, repoDir string, info *Info) error {
 // RemoveWithOptionsContext removes a session worktree with an explicit
 // destructive-cleanup policy.
 func RemoveWithOptionsContext(ctx context.Context, repoDir string, info *Info, opts RemoveOptions) error {
-	ctx = nonNilCommandContext(ctx)
+	if err := requireCommandContext(ctx); err != nil {
+		return err
+	}
 
 	plan, err := prepareRemove(ctx, repoDir, info, opts)
 	if err != nil {
@@ -673,14 +691,20 @@ func verifyWorktreeRemoved(ctx context.Context, repoRoot string, info *Info) err
 	return nil
 }
 
-// List returns all atteler-managed worktrees found in the repository.
-func List(repoDir string) ([]Info, error) {
-	return ListContext(defaultCommandContext(), repoDir)
+// List is kept for source compatibility only.
+//
+// Deprecated: use ListContext so git commands inherit caller cancellation and
+// deadlines.
+func List(_ string) ([]Info, error) {
+	return nil, ErrContextRequired
 }
 
-// ListContext is List with caller-provided cancellation for git commands.
+// ListContext returns all atteler-managed worktrees found in the repository
+// using caller-provided cancellation for git commands.
 func ListContext(ctx context.Context, repoDir string) ([]Info, error) {
-	ctx = nonNilCommandContext(ctx)
+	if err := requireCommandContext(ctx); err != nil {
+		return nil, err
+	}
 
 	repoRoot, err := gitRepoRoot(ctx, repoDir)
 	if err != nil {
@@ -704,14 +728,17 @@ func Status(info *Info) string {
 	return fmt.Sprintf("worktree: %s (branch %s, base %s)", info.Path, info.Branch, info.BaseBranch)
 }
 
-// IsGitRepo reports whether dir is inside a git repository.
-func IsGitRepo(dir string) bool {
-	return IsGitRepoContext(defaultCommandContext(), dir)
+// IsGitRepo is kept for source compatibility only.
+//
+// Deprecated: use IsGitRepoContext so git commands inherit caller cancellation
+// and deadlines.
+func IsGitRepo(_ string) bool {
+	return false
 }
 
 // IsGitRepoContext reports whether dir is inside a git repository using ctx.
 func IsGitRepoContext(ctx context.Context, dir string) bool {
-	_, err := gitRepoRoot(nonNilCommandContext(ctx), dir)
+	_, err := gitRepoRoot(ctx, dir)
 	return err == nil
 }
 
@@ -1333,7 +1360,9 @@ func cleanupMergedWorktree(ctx context.Context, repoRoot string, info *Info, log
 
 // autoCommit stages and commits any dirty files in the worktree.
 func autoCommit(ctx context.Context, info *Info, summary statusSummary, opts MergeOptions) error {
-	ctx = nonNilCommandContext(ctx)
+	if err := requireCommandContext(ctx); err != nil {
+		return err
+	}
 
 	if summary.empty() {
 		return nil // nothing to commit
@@ -1548,7 +1577,7 @@ func rollbackFailedMerge(ctx context.Context, repoRoot string, log *transactionL
 // gitRepoRoot returns the top-level directory of the git repository
 // containing dir.
 func gitRepoRoot(ctx context.Context, dir string) (string, error) {
-	out, err := gitOutput(nonNilCommandContext(ctx), dir, "rev-parse", "--show-toplevel")
+	out, err := gitOutput(ctx, dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", err
 	}
@@ -1559,7 +1588,7 @@ func gitRepoRoot(ctx context.Context, dir string) (string, error) {
 // gitCurrentBranch returns the current branch name. If HEAD is detached
 // it returns "HEAD".
 func gitCurrentBranch(ctx context.Context, dir string) (string, error) {
-	out, err := gitOutput(nonNilCommandContext(ctx), dir, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := gitOutput(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return "", err
 	}
@@ -1568,7 +1597,7 @@ func gitCurrentBranch(ctx context.Context, dir string) (string, error) {
 }
 
 func gitRevParse(ctx context.Context, dir, rev string) (string, error) {
-	out, err := gitOutput(nonNilCommandContext(ctx), dir, "rev-parse", "--verify", rev)
+	out, err := gitOutput(ctx, dir, "rev-parse", "--verify", rev)
 	if err != nil {
 		return "", err
 	}
@@ -1577,7 +1606,7 @@ func gitRevParse(ctx context.Context, dir, rev string) (string, error) {
 }
 
 func gitMergeBase(ctx context.Context, dir, left, right string) (string, error) {
-	out, err := gitOutput(nonNilCommandContext(ctx), dir, "merge-base", left, right)
+	out, err := gitOutput(ctx, dir, "merge-base", left, right)
 	if err != nil {
 		return "", err
 	}
@@ -1586,7 +1615,11 @@ func gitMergeBase(ctx context.Context, dir, left, right string) (string, error) 
 }
 
 func gitIsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
-	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", "merge-base", "--is-ancestor", ancestor, descendant)
+	if err := requireCommandContext(ctx); err != nil {
+		return false, err
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", ancestor, descendant)
 	cmd.Dir = dir
 
 	var stderr bytes.Buffer
@@ -1606,11 +1639,11 @@ func gitIsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool,
 }
 
 func gitDiffSummary(ctx context.Context, dir, base, branch string) (string, error) {
-	return gitOutput(nonNilCommandContext(ctx), dir, "diff", "--stat", "--find-renames", base+"..."+branch)
+	return gitOutput(ctx, dir, "diff", "--stat", "--find-renames", base+"..."+branch)
 }
 
 func gitPath(ctx context.Context, dir, name string) (string, error) {
-	out, err := gitOutput(nonNilCommandContext(ctx), dir, "rev-parse", "--git-path", name)
+	out, err := gitOutput(ctx, dir, "rev-parse", "--git-path", name)
 	if err != nil {
 		return "", err
 	}
@@ -1760,7 +1793,11 @@ func printable(value string) string {
 
 // gitRun executes a git command in dir and returns any error.
 func gitRun(ctx context.Context, dir string, args ...string) error {
-	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", args...)
+	if err := requireCommandContext(ctx); err != nil {
+		return err
+	}
+
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 
 	var stderr bytes.Buffer
@@ -1774,7 +1811,11 @@ func gitRun(ctx context.Context, dir string, args ...string) error {
 }
 
 func gitCombinedOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", args...)
+	if err := requireCommandContext(ctx); err != nil {
+		return "", err
+	}
+
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 
 	out, err := cmd.CombinedOutput()
@@ -1787,7 +1828,11 @@ func gitCombinedOutput(ctx context.Context, dir string, args ...string) (string,
 
 // gitOutput executes a git command in dir and returns its stdout.
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(nonNilCommandContext(ctx), "git", args...)
+	if err := requireCommandContext(ctx); err != nil {
+		return "", err
+	}
+
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 
 	var stdout, stderr bytes.Buffer
@@ -1804,14 +1849,18 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 
 // parseWorktreeList parses the porcelain output of `git worktree list`
 // and returns only atteler-managed entries (branches starting with "atteler/").
-func parseWorktreeList(output, repoRoot string) []Info {
-	return parseWorktreeListContext(defaultCommandContext(), output, repoRoot)
+//
+// Deprecated: use parseWorktreeListContext when manifest hydration is needed.
+func parseWorktreeList(output, _ string) []Info {
+	return parseWorktreeListEntries(output)
 }
 
 func parseWorktreeListContext(ctx context.Context, output, repoRoot string) []Info {
-	ctx = nonNilCommandContext(ctx)
-
 	results := parseWorktreeListEntries(output)
+	if requireCommandContext(ctx) != nil {
+		return results
+	}
+
 	hydrateWorktreeListFromManifests(ctx, repoRoot, results)
 
 	return results

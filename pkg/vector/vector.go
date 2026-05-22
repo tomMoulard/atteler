@@ -215,11 +215,10 @@ func (v TextVectorizer) Vectorize(text string) (Vector, error) {
 	return out, nil
 }
 
-// Vectorizer abstracts text-to-vector conversion so callers can swap between
-// the zero-dependency TextVectorizer and a model-backed EmbeddingVectorizer.
+// Vectorizer abstracts local text-to-vector conversion.
 //
-// Prefer VectorizerContext when a context is available; the plain Vectorize
-// method exists for callers that do not have a context handy.
+// Model-backed implementations should expose VectorizerContext and may reject
+// Vectorize calls that would otherwise need a hidden root context.
 type Vectorizer interface {
 	Vectorize(text string) (Vector, error)
 }
@@ -293,13 +292,20 @@ func NewEmbeddingVectorizer(opts ...EmbeddingOption) *EmbeddingVectorizer {
 	return v
 }
 
-// Vectorize sends text to the embedding API and returns the resulting vector.
-func (v *EmbeddingVectorizer) Vectorize(text string) (Vector, error) {
-	return v.VectorizeContext(context.TODO(), text)
+// Vectorize is kept for source compatibility only.
+//
+// Deprecated: use VectorizeContext so embedding HTTP requests inherit caller
+// cancellation and deadlines.
+func (v *EmbeddingVectorizer) Vectorize(_ string) (Vector, error) {
+	return nil, ErrContextRequired
 }
 
 // VectorizeContext is Vectorize with caller-provided cancellation.
 func (v *EmbeddingVectorizer) VectorizeContext(ctx context.Context, text string) (Vector, error) {
+	if err := requireEmbeddingContext(ctx); err != nil {
+		return nil, err
+	}
+
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, ErrEmptyText
@@ -481,4 +487,19 @@ var (
 	ErrInvalidVector = errors.New("vector contains invalid value")
 	// ErrEmptyText is returned when text vectorization has no tokens.
 	ErrEmptyText = errors.New("vector text has no tokens")
+	// ErrContextRequired is returned when embedding vectorization needs caller
+	// cancellation but no context was provided.
+	ErrContextRequired = errors.New("vector context is required")
 )
+
+func requireEmbeddingContext(ctx context.Context) error {
+	if ctx == nil {
+		return ErrContextRequired
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("vector context already done: %w", err)
+	}
+
+	return nil
+}

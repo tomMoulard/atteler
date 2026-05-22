@@ -87,6 +87,10 @@ func completeWithRetry(
 	cfg retryConfig,
 	fn func(context.Context) (*Response, error),
 ) (*Response, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	resp, err := fn(ctx)
 	if err == nil || cfg.MaxAttempts <= 0 {
 		return resp, err

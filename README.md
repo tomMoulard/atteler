@@ -456,6 +456,33 @@ concurrency and retry/reconciliation logic. See
 [`docs/symphony.md`](docs/symphony.md) for tracker configuration, publishing,
 debug endpoints, hooks, and sandbox posture.
 
+## Go package context migration notes
+
+Library APIs that can touch credential stores, refresh OAuth tokens, start
+local processes, or call embedding/model endpoints require caller-provided
+contexts. Compatibility helpers without a `Context` suffix remain only to avoid
+source breaks and return a context-required error before doing blocking work.
+
+Migrate SDK-style callers as follows:
+
+- `llm.ResolveAnthropicKey()` → `llm.ResolveAnthropicKeyContext(ctx)`
+- `llm.ResolveOpenAIKey()` → `llm.ResolveOpenAIKeyContext(ctx)`
+- `llm.New*Provider(...)` / `llm.AutoRegisterWithConfig(...)` →
+  the matching `*Context(ctx, ...)` variant.
+- `(*vector.EmbeddingVectorizer).Vectorize(text)` →
+  `VectorizeContext(ctx, text)`.
+- `worktree.Create`, `Merge`, `Remove`, `List`, and `IsGitRepo` →
+  their `Context` variants.
+- Process-backed helpers such as shell execution, plugin entrypoints, MCP
+  calls, LSP lookups, sub-agent spawning, hooks, and Symphony app-server calls
+  already require `context.Context`; pass the caller's context through instead
+  of constructing a new root. Nil or already-canceled contexts are rejected
+  before process launch, protocol writes, or later orchestration rounds.
+
+`cmd/atteler` and `cmd/symphony` create process-root contexts at startup and
+pass them down; package code should propagate those contexts instead of calling
+`context.Background()`, `context.TODO()`, or `context.WithoutCancel()`.
+
 ## Evidence-backed feature map
 
 This section is intentionally small and evidence-linked. Add new completed

@@ -49,7 +49,7 @@ func (r *DefaultAgentRunner) Run(ctx context.Context, req RunRequest, emit func(
 			return
 		}
 
-		if err := RunHook(context.WithoutCancel(ctx), req.Config, req.Issue, workspace, "after_run", req.Config.Hooks.AfterRun); err != nil {
+		if err := RunHook(ctx, req.Config, req.Issue, workspace, "after_run", req.Config.Hooks.AfterRun); err != nil {
 			r.logger.Warn(
 				"symphony hook failed; ignoring",
 				"hook", "after_run",

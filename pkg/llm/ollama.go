@@ -44,7 +44,10 @@ func NewOllamaProvider(ctx context.Context) (*OllamaProvider, error) {
 // NewOllamaProviderWithConfigContext creates a provider using OLLAMA_BASE_URL,
 // cfg.BaseURL, or the local Ollama default. OLLAMA_BASE_URL overrides cfg.BaseURL.
 func NewOllamaProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) (*OllamaProvider, error) {
-	ctx = nonNilCredentialContext(ctx)
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	baseURL := strings.TrimRight(configuredBaseURL("OLLAMA_BASE_URL", cfg.BaseURL, defaultOllamaBase), "/")
 	p := &OllamaProvider{
 		baseURL:   baseURL,
@@ -222,6 +225,10 @@ type ollamaTagsResponse struct {
 
 // FetchModels queries GET /api/tags to discover locally available Ollama models.
 func (o *OllamaProvider) FetchModels(ctx context.Context) ([]string, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	if o.client == nil {
 		o.client = providerHTTPClient(ProviderConfig{})
 	}
@@ -320,6 +327,14 @@ type ollamaChatResponse struct {
 
 // Complete performs a non-streaming chat completion using Ollama's /api/chat endpoint.
 func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	return o.complete(ctx, params)
+}
+
+func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*Response, error) {
 	if params.Model == "" {
 		return nil, errors.New("ollama: model is required")
 	}

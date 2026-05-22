@@ -226,11 +226,45 @@ func (s *DebugServer) Shutdown(ctx context.Context) error {
 		return nil
 	}
 
+	if ctx == nil {
+		return errors.New("debug server shutdown: context is required")
+	}
+
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("debug server shutdown: %w", err)
 	}
 
 	return nil
+}
+
+// Close immediately stops the debug HTTP server without waiting for active
+// requests. It is used after caller cancellation, when a graceful Shutdown
+// would be rejected by the already-canceled context.
+func (s *DebugServer) Close() error {
+	if s == nil || s.server == nil {
+		return nil
+	}
+
+	if err := s.server.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("debug server close: %w", err)
+	}
+
+	return nil
+}
+
+func (s *DebugServer) stop(ctx context.Context, timeout time.Duration) error {
+	if ctx == nil || ctx.Err() != nil {
+		return s.Close()
+	}
+
+	if timeout <= 0 {
+		return s.Shutdown(ctx)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	return s.Shutdown(shutdownCtx)
 }
 
 func (s *DebugServer) serve() {
@@ -243,10 +277,7 @@ func (s *DebugServer) serve() {
 func (s *DebugServer) shutdownOnContext(ctx context.Context) {
 	<-ctx.Done()
 
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-
-	if err := s.Shutdown(shutdownCtx); err != nil {
+	if err := s.Close(); err != nil {
 		s.logger.Warn("symphony debug server shutdown failed", "error", err)
 	}
 }

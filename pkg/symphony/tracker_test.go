@@ -1,6 +1,7 @@
 package symphony
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -8,6 +9,36 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTrackerClients_RequireActiveContext(t *testing.T) {
+	t.Parallel()
+
+	linear := NewLinearClient(TrackerConfig{
+		Endpoint:     "http://127.0.0.1:1/graphql",
+		APIKey:       "token",
+		ProjectSlug:  "project",
+		ActiveStates: []string{"Todo"},
+	})
+
+	_, err := linear.FetchCandidateIssues(nil) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "context is required")
+
+	github := NewGitHubClient(TrackerConfig{
+		Endpoint:     "http://127.0.0.1:1",
+		APIKey:       "token",
+		Owner:        "owner",
+		Repo:         "repo",
+		ActiveStates: []string{"OPEN"},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = github.FetchCandidateIssues(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
 
 func TestGitHubClient_FetchPullRequestChecksClassifiesFailure(t *testing.T) {
 	t.Parallel()

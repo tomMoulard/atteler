@@ -130,15 +130,6 @@ func AgentLoop(
 		state.refreshElapsed()
 
 		if err := ctx.Err(); err != nil {
-			cond := AgentLoopStopCondition{
-				Kind:        AgentLoopStopCanceled,
-				Reason:      "context canceled",
-				MatchedRule: "context",
-			}
-			if recordErr := state.recordStop(context.WithoutCancel(ctx), cfg.CheckpointSink, cond); recordErr != nil {
-				return nil, state.messages, recordErr
-			}
-
 			return nil, state.messages, fmt.Errorf("llm: agent loop canceled: %w", err)
 		}
 

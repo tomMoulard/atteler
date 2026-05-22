@@ -392,6 +392,30 @@ func TestAgentLoop_ContextCancellation(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestAgentLoop_ContextCancellationDoesNotCheckpointAfterCallerCanceled(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{{Content: "should not run", Model: "test-model", StopReason: StopEndTurn}},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	ledger := &AgentLoopLedger{}
+	_, _, err := AgentLoop(ctx, reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "test"}},
+	}, nil, nil, AgentLoopConfig{
+		CheckpointSink: ledger,
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, ledger.Steps)
+}
+
 func TestAgentLoop_MultipleToolCalls(t *testing.T) {
 	t.Parallel()
 

@@ -56,6 +56,56 @@ sleep 2
 	assert.Contains(t, eventNames(events), "notification")
 }
 
+func TestAppServerClient_RequiresActiveContext(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{Codex: CodexConfig{Command: "unused"}}
+
+	_, err := StartAppServer(nil, cfg.Codex, t.TempDir(), nil) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context is required")
+
+	client := &AppServerClient{}
+
+	_, err = client.StartThread(nil, cfg, Issue{}, t.TempDir()) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context is required")
+
+	err = client.RunTurn(nil, cfg, "thread-1", "prompt", t.TempDir()) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context is required")
+
+	err = client.respond(nil, 1, map[string]any{"ok": true}) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context is required")
+}
+
+func TestAppServerClient_RejectsCanceledContextBeforeProtocolWrite(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client := &AppServerClient{}
+	cfg := Config{Codex: CodexConfig{Command: "unused"}}
+
+	_, err := StartAppServer(ctx, cfg.Codex, t.TempDir(), nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, err = client.StartThread(ctx, cfg, Issue{}, t.TempDir())
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+
+	err = client.RunTurn(ctx, cfg, "thread-1", "prompt", t.TempDir())
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+
+	err = client.respond(ctx, 1, map[string]any{"ok": true})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func eventNames(events []CodexEvent) []string {
 	names := make([]string, 0, len(events))
 	for _, event := range events {

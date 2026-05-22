@@ -135,7 +135,7 @@ func TestCodexProvider_RefreshOn401(t *testing.T) {
 
 	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
 
-	auth, err := loadCodexChatGPTAuth(filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	auth.refreshURL = refreshSrv.URL
@@ -188,7 +188,7 @@ func TestCodexProvider_RefreshFailureSurfaced(t *testing.T) {
 
 	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
 
-	auth, err := loadCodexChatGPTAuth(filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	auth.refreshURL = refreshSrv.URL
@@ -204,12 +204,80 @@ func TestCodexProvider_RefreshFailureSurfaced(t *testing.T) {
 	assert.Contains(t, err.Error(), "refresh after 401")
 }
 
+func TestCodexProvider_RefreshHonorsCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	requestStarted := make(chan struct{})
+	release := make(chan struct{})
+
+	refreshSrv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+
+		select {
+		case <-r.Context().Done():
+			return
+		case <-release:
+			return
+		}
+	}))
+	defer refreshSrv.Close()
+	defer close(release)
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, err := w.Write([]byte(`{"error":"invalid_token"}`))
+		assert.NoError(t, err)
+	}))
+	defer apiSrv.Close()
+
+	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
+
+	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	require.NoError(t, err)
+
+	auth.refreshURL = refreshSrv.URL
+	auth.httpClient = refreshSrv.Client()
+
+	p := &CodexProvider{client: apiSrv.Client(), auth: auth, baseURL: apiSrv.URL, models: []string{"gpt-5.5"}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		_, completeErr := p.Complete(ctx, CompleteParams{
+			Model:    "gpt-5.5",
+			Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		})
+		errCh <- completeErr
+	}()
+
+	<-requestStarted
+	cancel()
+
+	err = <-errCh
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+
+	access, accountID := auth.snapshot()
+	assert.Equal(t, "access-1", access)
+	assert.Equal(t, "acct-42", accountID)
+
+	persisted, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+
+	var diskAuth codexAuth
+	require.NoError(t, json.Unmarshal(persisted, &diskAuth))
+	assert.Equal(t, "access-1", diskAuth.Tokens.AccessToken)
+	assert.Equal(t, "refresh-1", diskAuth.Tokens.RefreshToken)
+	assert.Equal(t, "acct-42", diskAuth.Tokens.AccountID)
+}
+
 func TestLoadCodexChatGPTAuth(t *testing.T) {
 	t.Parallel()
 
 	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
 
-	auth, err := loadCodexChatGPTAuth(filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	access, accountID := auth.snapshot()
@@ -224,7 +292,7 @@ func TestLoadCodexChatGPTAuth_RejectsAPIKeyMode(t *testing.T) {
 	authJSON := `{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test","tokens":{"access_token":"","refresh_token":""}}`
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "auth.json"), []byte(authJSON), 0o600))
 
-	_, err := loadCodexChatGPTAuth(dir)
+	_, err := loadCodexChatGPTAuthContext(context.Background(), dir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auth_mode")
 }
@@ -248,7 +316,7 @@ func TestPersistRefreshedCodexAuth_AtomicAndPreservesUnknown(t *testing.T) {
 	}`
 	require.NoError(t, os.WriteFile(authPath, []byte(original), 0o600))
 
-	require.NoError(t, persistRefreshedCodexAuth(authPath, "new-access", "new-refresh", "new-id"))
+	require.NoError(t, persistRefreshedCodexAuth(context.Background(), authPath, "new-access", "new-refresh", "new-id"))
 
 	updated, err := os.ReadFile(authPath)
 	require.NoError(t, err)
@@ -265,6 +333,26 @@ func TestPersistRefreshedCodexAuth_AtomicAndPreservesUnknown(t *testing.T) {
 	assert.Equal(t, "new-refresh", tokens["refresh_token"])
 	assert.Equal(t, "new-id", tokens["id_token"])
 	assert.Equal(t, "acct-9", tokens["account_id"], "account_id should be preserved")
+}
+
+func TestPersistRefreshedCodexAuth_RequiresActiveContext(t *testing.T) {
+	t.Parallel()
+
+	authPath := writeCodexAuthFile(t, "old-access", "old-refresh", "acct-9")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := persistRefreshedCodexAuth(ctx, authPath, "new-access", "new-refresh", "new-id")
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+
+	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	require.NoError(t, err)
+
+	access, accountID := auth.snapshot()
+	assert.Equal(t, "old-access", access)
+	assert.Equal(t, "acct-9", accountID)
 }
 
 func TestCodexConfiguredModel(t *testing.T) {
@@ -477,7 +565,7 @@ func newTestCodexAuth(t *testing.T, access, refresh, accountID string) *codexCha
 
 	authPath := writeCodexAuthFile(t, access, refresh, accountID)
 
-	auth, err := loadCodexChatGPTAuth(filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	return auth

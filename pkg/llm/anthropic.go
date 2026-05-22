@@ -24,10 +24,12 @@ type AnthropicProvider struct {
 	bearer  bool
 }
 
-// NewAnthropicProvider creates a provider using ResolveAnthropicKey.
-// The base URL can be overridden with ANTHROPIC_BASE_URL.
+// NewAnthropicProvider is kept for source compatibility only.
+//
+// Deprecated: use NewAnthropicProviderContext so credential discovery inherits
+// caller cancellation and deadlines.
 func NewAnthropicProvider() (*AnthropicProvider, error) {
-	return NewAnthropicProviderContext(defaultCredentialContext())
+	return nil, ErrContextRequired
 }
 
 // NewAnthropicProviderContext creates a provider using ResolveAnthropicKeyContext.
@@ -36,10 +38,12 @@ func NewAnthropicProviderContext(ctx context.Context) (*AnthropicProvider, error
 	return NewAnthropicProviderWithConfigContext(ctx, ProviderConfig{})
 }
 
-// NewAnthropicProviderWithConfig creates a provider using ResolveAnthropicKey
-// and optional config values. ANTHROPIC_BASE_URL overrides cfg.BaseURL.
-func NewAnthropicProviderWithConfig(cfg ProviderConfig) (*AnthropicProvider, error) {
-	return NewAnthropicProviderWithConfigContext(defaultCredentialContext(), cfg)
+// NewAnthropicProviderWithConfig is kept for source compatibility only.
+//
+// Deprecated: use NewAnthropicProviderWithConfigContext so credential
+// discovery inherits caller cancellation and deadlines.
+func NewAnthropicProviderWithConfig(_ ProviderConfig) (*AnthropicProvider, error) {
+	return nil, ErrContextRequired
 }
 
 // NewAnthropicProviderWithConfigContext creates a provider using
@@ -83,6 +87,10 @@ type anthropicModelsResponse struct {
 
 // FetchModels queries GET /v1/models to discover available models.
 func (a *AnthropicProvider) FetchModels(ctx context.Context) ([]string, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/models", http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: new request: %w", err)
@@ -187,6 +195,10 @@ type anthropicResponse struct {
 
 // Complete performs a chat completion using the Anthropic Messages API.
 func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
 	req, err := buildAnthropicRequest(params)
 	if err != nil {
 		return nil, err

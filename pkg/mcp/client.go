@@ -57,8 +57,8 @@ type CallToolParams struct {
 //
 //nolint:cyclop // Stdio process lifecycle has several distinct error exits.
 func Invoke(ctx context.Context, server Server, request Request, timeout time.Duration) (*Response, error) {
-	if ctx == nil {
-		return nil, errors.New("invoke mcp server: nil context")
+	if err := requireInvokeContext(ctx); err != nil {
+		return nil, err
 	}
 
 	if timeout > 0 {
@@ -144,6 +144,18 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 	}
 
 	return response, nil
+}
+
+func requireInvokeContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("invoke mcp server: context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("invoke mcp server: context already done: %w", err)
+	}
+
+	return nil
 }
 
 // CallTool invokes the MCP tools/call method for toolName.

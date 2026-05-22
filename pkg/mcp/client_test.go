@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -118,6 +119,21 @@ func TestInvoke_ValidatesInputs(t *testing.T) {
 	_, err = CallTool(t.Context(), helperServer(t, "echo"), " ", nil, helperTimeout)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing tool name")
+}
+
+func TestInvoke_RequiresActiveContext(t *testing.T) {
+	t.Parallel()
+
+	_, err := Invoke(nil, helperServer(t, "echo"), Request{Method: "ping"}, helperTimeout) //nolint:staticcheck // Verifies the required-context contract.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context is required")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = Invoke(ctx, helperServer(t, "echo"), Request{Method: "ping"}, helperTimeout)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func helperServer(t *testing.T, mode string) Server {

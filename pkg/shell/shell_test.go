@@ -50,6 +50,21 @@ func TestRunBash_RejectsBlankCommand(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestRunBash_RequiresActiveContext(t *testing.T) {
+	t.Parallel()
+
+	_, err := RunBash(nil, Options{Command: "echo hello"}) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "context is required")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = RunBash(ctx, Options{Command: " \t"})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestRunBash_LimitsCapturedOutputBytes(t *testing.T) {
 	t.Parallel()
 
@@ -79,6 +94,17 @@ func TestRunInteractive_RejectsNilContext(t *testing.T) {
 	_, err := RunInteractive(nil, Options{Command: "echo hello"}) //nolint:staticcheck // intentional nil context for test
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "context is required")
+}
+
+func TestRunInteractive_RejectsCanceledContextBeforeCommandValidation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := RunInteractive(ctx, Options{Command: " \t"})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestRunInteractive_RunsSimpleCommand(t *testing.T) {

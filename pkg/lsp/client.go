@@ -21,8 +21,8 @@ import (
 //
 //nolint:cyclop // The one-shot LSP lifecycle is deliberately linear and explicit.
 func DocumentSymbols(ctx context.Context, opts Options) ([]Symbol, error) {
-	if ctx == nil {
-		return nil, errors.New("lsp symbols: nil context")
+	if err := requireContext(ctx, "symbols"); err != nil {
+		return nil, err
 	}
 
 	if err := validateOptions(opts); err != nil {
@@ -99,8 +99,8 @@ func DocumentSymbols(ctx context.Context, opts Options) ([]Symbol, error) {
 // WorkspaceSymbols starts an external language server, requests workspace/symbol
 // for query, normalizes SymbolInformation results, and shuts down.
 func WorkspaceSymbols(ctx context.Context, opts Options, query string) ([]Symbol, error) {
-	if ctx == nil {
-		return nil, errors.New("lsp workspace symbols: nil context")
+	if err := requireContext(ctx, "workspace symbols"); err != nil {
+		return nil, err
 	}
 
 	if err := validateWorkspaceOptions(opts); err != nil {
@@ -156,6 +156,18 @@ func WorkspaceSymbols(ctx context.Context, opts Options, query string) ([]Symbol
 	}
 
 	return symbols, nil
+}
+
+func requireContext(ctx context.Context, scope string) error {
+	if ctx == nil {
+		return fmt.Errorf("lsp %s: context is required", scope)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("lsp %s: context already done: %w", scope, err)
+	}
+
+	return nil
 }
 
 func validateOptions(opts Options) error {
