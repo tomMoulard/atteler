@@ -60,8 +60,16 @@ func (r *DefaultAgentRunner) Run(ctx context.Context, req RunRequest, emit func(
 		}
 	}()
 
-	if strings.TrimSpace(req.Config.Hooks.BeforeRun) != "" {
+	if shouldRunBeforeRunHook(req, workspace) {
 		if err := RunHook(ctx, req.Config, req.Issue, workspace, "before_run", req.Config.Hooks.BeforeRun); err != nil {
+			result.CompletedAt = time.Now().UTC()
+			result.Error = err.Error()
+			return result, err
+		}
+	}
+
+	if req.Context != nil && req.Context.Kind == RunKindPullRequestRework {
+		if err := PreparePullRequestReworkWorkspace(ctx, req.Config, req.Context.PullRequest, workspace, r.logger); err != nil {
 			result.CompletedAt = time.Now().UTC()
 			result.Error = err.Error()
 			return result, err
@@ -130,6 +138,19 @@ func (r *DefaultAgentRunner) Run(ctx context.Context, req RunRequest, emit func(
 	return result, nil
 }
 
+func shouldRunBeforeRunHook(req RunRequest, workspace Workspace) bool {
+	if strings.TrimSpace(req.Config.Hooks.BeforeRun) == "" {
+		return false
+	}
+
+	if req.Context == nil || req.Context.Kind != RunKindPullRequestRework {
+		return true
+	}
+
+	hasGit, err := workspaceHasGitCheckout(workspace)
+	return err != nil || !hasGit
+}
+
 func turnPrompt(def WorkflowDefinition, issue Issue, attempt *int, runContext *RunContext, turnNumber, maxTurns int) (string, error) {
 	if turnNumber <= 1 {
 		prompt, err := RenderPrompt(def.PromptTemplate, issue, attempt)
@@ -180,6 +201,7 @@ func runContextPrompt(runContext *RunContext) string {
 
 	fmt.Fprintln(&builder)
 	fmt.Fprintln(&builder, "Inspect the existing PR workspace and make the smallest focused fix needed for the failing CI, branch update, or rebase conflict. Keep working on the same branch; Symphony will commit, push, and reuse the existing PR when this run succeeds.")
+	fmt.Fprintln(&builder, "If the workspace is in a rebase conflict, resolve the conflicted files, stage them, and run `git rebase --continue` before finishing. If it is not already in a rebase, fetch the base branch, rebase this PR branch onto it, resolve any conflicts, and continue the rebase. Do not skip the Symphony commit unless the change is genuinely obsolete.")
 
 	return strings.TrimSpace(builder.String())
 }

@@ -80,4 +80,5 @@ func TestTurnPrompt_IncludesPullRequestReworkContext(t *testing.T) {
 	assert.Contains(t, prompt, "Pull request: #31 https://github.com/owner/repo/pull/31")
 	assert.Contains(t, prompt, "test")
 	assert.Contains(t, prompt, "same branch")
+	assert.Contains(t, prompt, "git rebase --continue")
 }

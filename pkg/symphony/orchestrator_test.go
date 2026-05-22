@@ -335,6 +335,104 @@ func TestHandlePullRequestCheckDue_DispatchesReworkWhenBranchUpdateFails(t *test
 	orchestrator.wg.Wait()
 }
 
+func TestHandlePullRequestCheckDue_DoesNotRepeatFailedBranchUpdateWhileReworkQueued(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind: trackerKindGitHub,
+		},
+		Publish: PublishConfig{
+			Enabled:                true,
+			MonitorChecks:          true,
+			CheckInterval:          time.Hour,
+			MaxCheckReworkAttempts: 3,
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 1,
+		},
+	}
+	checks := PullRequestCheckSnapshot{
+		CheckedAt:          time.Now().UTC(),
+		PullRequestURL:     "https://github.com/owner/repo/pull/31",
+		HeadRef:            "symphony/GH-2",
+		HeadSHA:            "abc123",
+		BaseSHA:            "base123",
+		Summary:            "pull request branch has merge conflicts with main",
+		State:              PullRequestChecksPending,
+		NeedsBranchUpdate:  true,
+		BranchUpdateReason: "pull request branch has merge conflicts with main",
+	}
+
+	updateCalls := 0
+	runner := captureRunner{requests: make(chan RunRequest, 1)}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker: checkTracker{checks: checks},
+		runner:  runner,
+		logger:  slog.Default(),
+		events:  make(chan orchestratorEvent, 4),
+		updatePullRequestBranch: func(context.Context, Config, Issue, string, *slog.Logger) (string, error) {
+			updateCalls++
+			return "", errors.New("rebase conflict")
+		},
+		state: runtimeState{
+			Running: map[string]*runningEntry{
+				"other-issue": {
+					Issue: Issue{ID: "other-issue", Identifier: "GH-3", Title: "Busy", State: "OPEN"},
+					State: "OPEN",
+				},
+			},
+			Claimed:       map[string]struct{}{},
+			RetryAttempts: map[string]*RetryEntry{},
+			PullRequests: map[int]*pullRequestMonitorEntry{
+				31: {
+					Issue:          issue,
+					Branch:         "symphony/GH-2",
+					PullRequestURL: "https://github.com/owner/repo/pull/31",
+					Number:         31,
+				},
+			},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.handlePullRequestCheckDue(ctx, 31)
+
+	require.Equal(t, 1, updateCalls)
+
+	monitor := orchestrator.state.PullRequests[31]
+	require.NotNil(t, monitor.PendingRework)
+	assert.Contains(t, monitor.LastError, "no available orchestrator slots")
+	require.NotNil(t, monitor.Timer)
+	monitor.Timer.Stop()
+
+	orchestrator.state.Running = map[string]*runningEntry{}
+	monitor.Timer = nil
+
+	orchestrator.handlePullRequestCheckDue(ctx, 31)
+
+	req := <-runner.requests
+
+	assert.Equal(t, 1, updateCalls)
+	require.NotNil(t, req.Context)
+	require.NotNil(t, req.Context.PullRequest)
+	assert.Equal(t, RunKindPullRequestRework, req.Context.Kind)
+	assert.Contains(t, req.Context.PullRequest.Summary, "rebase conflict")
+
+	cancel()
+	orchestrator.wg.Wait()
+}
+
 func TestHandleWorkerExit_CanceledPullRequestReworkSchedulesFinalCheck(t *testing.T) {
 	t.Parallel()
 

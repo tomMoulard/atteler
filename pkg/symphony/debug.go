@@ -140,19 +140,20 @@ type DebugRetry struct {
 
 // DebugPullRequest describes one PR check monitor.
 type DebugPullRequest struct {
-	LastSnapshot   PullRequestCheckSnapshot `json:"last_snapshot,omitzero"`
-	NextCheckAt    time.Time                `json:"next_check_at,omitzero"`
-	LastCheckAt    time.Time                `json:"last_check_at,omitzero"`
-	LastReworkAt   time.Time                `json:"last_rework_at,omitzero"`
-	DelayMS        int64                    `json:"delay_ms"`
-	Issue          Issue                    `json:"issue"`
-	LastError      string                   `json:"last_error,omitempty"`
-	Branch         string                   `json:"branch,omitempty"`
-	PullRequestURL string                   `json:"pull_request_url,omitempty"`
-	ReworkAttempts int                      `json:"rework_attempts"`
-	Number         int                      `json:"number"`
-	InRework       bool                     `json:"in_rework"`
-	Exhausted      bool                     `json:"exhausted"`
+	LastSnapshot   PullRequestCheckSnapshot  `json:"last_snapshot,omitzero"`
+	PendingRework  *PullRequestCheckSnapshot `json:"pending_rework,omitempty"`
+	NextCheckAt    time.Time                 `json:"next_check_at,omitzero"`
+	LastCheckAt    time.Time                 `json:"last_check_at,omitzero"`
+	LastReworkAt   time.Time                 `json:"last_rework_at,omitzero"`
+	DelayMS        int64                     `json:"delay_ms"`
+	Issue          Issue                     `json:"issue"`
+	LastError      string                    `json:"last_error,omitempty"`
+	Branch         string                    `json:"branch,omitempty"`
+	PullRequestURL string                    `json:"pull_request_url,omitempty"`
+	ReworkAttempts int                       `json:"rework_attempts"`
+	Number         int                       `json:"number"`
+	InRework       bool                      `json:"in_rework"`
+	Exhausted      bool                      `json:"exhausted"`
 }
 
 // DebugEvent is an append-only recent event entry for operator history.
@@ -495,6 +496,7 @@ func (o *Orchestrator) debugPullRequests(now time.Time) []DebugPullRequest {
 	for _, monitor := range o.state.PullRequests {
 		entry := DebugPullRequest{
 			LastSnapshot:   monitor.LastSnapshot,
+			PendingRework:  monitor.PendingRework,
 			NextCheckAt:    monitor.NextCheckAt,
 			LastCheckAt:    monitor.LastCheckAt,
 			LastReworkAt:   monitor.LastReworkAt,

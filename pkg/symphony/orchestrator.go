@@ -84,19 +84,21 @@ type RetryEntry struct {
 }
 
 type pullRequestMonitorEntry struct {
-	Issue          Issue
-	LastSnapshot   PullRequestCheckSnapshot
-	Timer          *time.Timer
-	NextCheckAt    time.Time
-	LastCheckAt    time.Time
-	LastReworkAt   time.Time
-	LastError      string
-	Branch         string
-	PullRequestURL string
-	ReworkAttempts int
-	Number         int
-	InRework       bool
-	Exhausted      bool
+	PendingRework    *PullRequestCheckSnapshot
+	Issue            Issue
+	LastSnapshot     PullRequestCheckSnapshot
+	Timer            *time.Timer
+	NextCheckAt      time.Time
+	LastCheckAt      time.Time
+	LastReworkAt     time.Time
+	LastError        string
+	Branch           string
+	PullRequestURL   string
+	PendingReworkKey string
+	ReworkAttempts   int
+	Number           int
+	InRework         bool
+	Exhausted        bool
 }
 
 type cancelReason string
@@ -891,6 +893,7 @@ func (o *Orchestrator) handlePullRequestCheckDue(ctx context.Context, number int
 	monitor.LastCheckAt = checks.CheckedAt
 	monitor.PullRequestURL = firstNonEmpty(checks.PullRequestURL, monitor.PullRequestURL)
 	monitor.Branch = firstNonEmpty(checks.HeadRef, monitor.Branch)
+	o.clearStalePendingRework(monitor, checks)
 
 	o.recordIssueEvent(
 		"pr_checks_polled", monitor.Issue, "pull request checks polled",
@@ -937,6 +940,22 @@ func (o *Orchestrator) handlePullRequestBranchUpdate(ctx context.Context, snapsh
 		return
 	}
 
+	if monitor.InRework {
+		o.reschedulePullRequestCheck(monitor, snapshot.Config.Publish.CheckInterval, "rework already running")
+		return
+	}
+
+	if monitor.PendingRework != nil && monitor.PendingReworkKey == pullRequestPendingReworkKey(checks) {
+		o.recordIssueEvent(
+			"pr_branch_update_rework_pending", monitor.Issue, "pull request branch update already failed; waiting for rework capacity",
+			"pull_request_number", monitor.Number,
+			"branch", branch,
+			"reason", monitor.PendingRework.Summary,
+		)
+		o.handleFailedPullRequestChecks(ctx, snapshot, monitor, *monitor.PendingRework)
+		return
+	}
+
 	update := o.updatePullRequestBranch
 	if update == nil {
 		update = UpdatePullRequestBranch
@@ -963,6 +982,8 @@ func (o *Orchestrator) handlePullRequestBranchUpdate(ctx context.Context, snapsh
 		failed.State = PullRequestChecksFailed
 		failed.Summary = "branch update failed: " + err.Error()
 		failed.FailedCheckNames = []string{"branch update"}
+		monitor.PendingRework = clonePullRequestCheckSnapshot(failed)
+		monitor.PendingReworkKey = pullRequestPendingReworkKey(checks)
 		o.recordIssueEvent(
 			"pr_branch_update_failed", monitor.Issue, "pull request branch update failed; rework will be attempted",
 			"pull_request_number", monitor.Number,
@@ -982,6 +1003,8 @@ func (o *Orchestrator) handlePullRequestBranchUpdate(ctx context.Context, snapsh
 	}
 
 	monitor.Branch = branch
+	monitor.PendingRework = nil
+	monitor.PendingReworkKey = ""
 	o.reschedulePullRequestCheck(monitor, snapshot.Config.Publish.CheckInterval, "branch update pushed; waiting for fresh checks")
 	o.recordIssueEvent(
 		"pr_branch_updated", monitor.Issue, "pull request branch updated",
@@ -997,6 +1020,35 @@ func (o *Orchestrator) handlePullRequestBranchUpdate(ctx context.Context, snapsh
 		"branch", branch,
 		"head_sha", commitSHA,
 	)
+}
+
+func (o *Orchestrator) clearStalePendingRework(monitor *pullRequestMonitorEntry, checks PullRequestCheckSnapshot) {
+	if monitor == nil || monitor.PendingRework == nil {
+		return
+	}
+
+	if monitor.PendingReworkKey == pullRequestPendingReworkKey(checks) {
+		return
+	}
+
+	monitor.PendingRework = nil
+	monitor.PendingReworkKey = ""
+}
+
+func pullRequestPendingReworkKey(checks PullRequestCheckSnapshot) string {
+	return strings.Join([]string{
+		checks.HeadSHA,
+		checks.BaseSHA,
+		checks.BranchUpdateReason,
+	}, "\x00")
+}
+
+func clonePullRequestCheckSnapshot(snapshot PullRequestCheckSnapshot) *PullRequestCheckSnapshot {
+	clone := snapshot
+	clone.FailedCheckNames = append([]string(nil), snapshot.FailedCheckNames...)
+	clone.CheckRuns = append([]PullRequestCheckRun(nil), snapshot.CheckRuns...)
+	clone.StatusContexts = append([]PullRequestStatus(nil), snapshot.StatusContexts...)
+	return &clone
 }
 
 func (o *Orchestrator) handleFailedPullRequestChecks(ctx context.Context, snapshot WorkflowSnapshot, monitor *pullRequestMonitorEntry, checks PullRequestCheckSnapshot) {
@@ -1098,6 +1150,8 @@ func (o *Orchestrator) schedulePullRequestMonitor(issue Issue, result *PublishRe
 	monitor.ReworkAttempts = max(monitor.ReworkAttempts, reworkAttempts)
 	monitor.Exhausted = false
 	monitor.InRework = false
+	monitor.PendingRework = nil
+	monitor.PendingReworkKey = ""
 	o.reschedulePullRequestCheck(monitor, snapshot.Config.Publish.CheckInterval, "")
 	o.recordIssueEvent(
 		"pr_monitor_scheduled", issue, "pull request monitor scheduled",

@@ -4,6 +4,7 @@ package symphony
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,7 @@ import (
 const (
 	githubPullsPath    = "/repos/owner/repo/pulls"
 	gitStatusPorcelain = "status --porcelain"
+	gitRemoteGetOrigin = "remote get-url origin"
 )
 
 func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
@@ -90,7 +92,7 @@ func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
 			return []byte("abc123\n"), nil
 		case joined == "rev-list --count main..HEAD":
 			return []byte("1\n"), nil
-		case joined == "remote get-url origin":
+		case joined == gitRemoteGetOrigin:
 			return []byte("/local/origin\n"), nil
 		case joined == "remote set-url origin "+server.URL+"/owner/repo.git":
 			return nil, nil
@@ -162,7 +164,7 @@ func TestGitHubPublisher_RebasesAndForcePushesPullRequestBranch(t *testing.T) {
 		joined := strings.Join(args, " ")
 		commands = append(commands, joined)
 		switch joined {
-		case "remote get-url origin":
+		case gitRemoteGetOrigin:
 			return []byte("/local/origin\n"), nil
 		case "remote set-url origin https://github.example/owner/repo.git":
 			return nil, nil
@@ -216,6 +218,64 @@ func TestGitHubPublisher_RebasesAndForcePushesPullRequestBranch(t *testing.T) {
 	assert.Contains(t, fetchEnv, "GITHUB_TOKEN=token")
 	assert.Contains(t, pushEnv, "GIT_TERMINAL_PROMPT=0")
 	assert.Contains(t, pushEnv, "GITHUB_TOKEN=token")
+}
+
+func TestGitHubPublisher_PreparesReworkWorkspaceAndLeavesRebaseConflict(t *testing.T) {
+	t.Parallel()
+
+	var commands []string
+	runner := func(_ context.Context, _ string, _ []string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		commands = append(commands, joined)
+		switch joined {
+		case "rev-parse --git-path rebase-merge":
+			return []byte(".git/rebase-merge\n"), nil
+		case "rev-parse --git-path rebase-apply":
+			return []byte(".git/rebase-apply\n"), nil
+		case gitStatusPorcelain:
+			return nil, nil
+		case gitRemoteGetOrigin:
+			return []byte("/local/origin\n"), nil
+		case "remote set-url origin https://github.example/owner/repo.git":
+			return nil, nil
+		case "fetch origin +refs/heads/main:refs/remotes/origin/main +refs/heads/symphony/GH-12:refs/remotes/origin/symphony/GH-12":
+			return nil, nil
+		case "checkout -B symphony/GH-12 origin/symphony/GH-12":
+			return nil, nil
+		case "rebase origin/main":
+			return nil, errors.New("conflict")
+		default:
+			t.Fatalf("unexpected git command: %s", joined)
+			return nil, nil
+		}
+	}
+
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind:   trackerKindGitHub,
+			APIKey: "token",
+			Owner:  "owner",
+			Repo:   "repo",
+		},
+		Publish: PublishConfig{
+			Remote:     "origin",
+			RemoteURL:  "https://github.example/owner/repo.git",
+			BaseBranch: "main",
+		},
+	}
+	publisher := &githubPublisher{
+		cfg:    cfg,
+		client: NewGitHubClient(cfg.Tracker),
+		runGit: runner,
+		logger: loggerOrDefault(nil),
+	}
+
+	err := publisher.preparePullRequestReworkWorkspace(t.Context(), t.TempDir(), "symphony/GH-12")
+	require.NoError(t, err)
+
+	assert.Contains(t, commands, "checkout -B symphony/GH-12 origin/symphony/GH-12")
+	assert.Contains(t, commands, "rebase origin/main")
+	assert.NotContains(t, commands, "rebase --abort")
 }
 
 func TestGitHubPublisher_SkipsCleanWorkspaceWithoutPullRequest(t *testing.T) {

@@ -120,7 +120,12 @@ the PR head. If GitHub reports that the PR branch is behind the base branch or
 has merge conflicts, Symphony fetches the PR branch and base branch, rebases
 locally, and pushes the updated PR branch with `--force-with-lease`. Rebase
 failures or dirty workspaces dispatch a PR rework worker on the same branch so
-Codex can resolve conflicts. Passing checks complete the monitor. Failing
+Codex can resolve conflicts. Once an automatic branch update fails for a given
+PR head/base pair, Symphony keeps that failure as pending rework instead of
+retrying the same rebase on every poll. When the worker starts, Symphony
+prepares the workspace on the PR branch and leaves the rebase conflict in place
+when possible, so the worker can resolve files, run `git rebase --continue`,
+and publish the fixed branch. Passing checks complete the monitor. Failing
 checks dispatch the same PR rework lane, then the publish path commits, pushes,
 and reuses the existing PR. This loop is capped by
 `publish.max_check_rework_attempts`; it does not re-add the source issue label

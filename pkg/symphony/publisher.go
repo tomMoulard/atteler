@@ -80,30 +80,75 @@ func UpdatePullRequestBranch(ctx context.Context, cfg Config, issue Issue, branc
 	return publisher.updatePullRequestBranch(ctx, workspace.Path, branch)
 }
 
-func ensureGitWorkspaceForBranchUpdate(ctx context.Context, cfg Config, issue Issue, workspace Workspace) error {
-	gitPath := filepath.Join(workspace.Path, ".git")
-	if _, err := os.Stat(gitPath); err == nil {
+// PreparePullRequestReworkWorkspace puts a PR rework worker on the PR branch
+// and, when possible, leaves any base-branch rebase conflict in the workspace
+// for Codex to resolve.
+func PreparePullRequestReworkWorkspace(ctx context.Context, cfg Config, pullRequest *PullRequestReworkContext, workspace Workspace, logger *slog.Logger) error {
+	if pullRequest == nil || strings.TrimSpace(pullRequest.Branch) == "" {
 		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("publish: inspect git checkout %s: %w", gitPath, err)
+	}
+
+	if normalizeState(cfg.Tracker.Kind) != trackerKindGitHub {
+		return nil
+	}
+
+	hasGit, err := workspaceHasGitCheckout(workspace)
+	if err != nil {
+		return err
+	}
+	if !hasGit {
+		return fmt.Errorf("publish: workspace %s is not a git checkout", workspace.Path)
+	}
+
+	publisher := &githubPublisher{
+		cfg:    cfg,
+		client: NewGitHubClient(cfg.Tracker),
+		runGit: defaultGitCommandRunner,
+		logger: loggerOrDefault(logger),
+	}
+
+	return publisher.preparePullRequestReworkWorkspace(ctx, workspace.Path, pullRequest.Branch)
+}
+
+func ensureGitWorkspaceForBranchUpdate(ctx context.Context, cfg Config, issue Issue, workspace Workspace) error {
+	hasGit, err := workspaceHasGitCheckout(workspace)
+	if err == nil && hasGit {
+		return nil
+	}
+	if err != nil {
+		return err
 	}
 
 	if strings.TrimSpace(cfg.Hooks.BeforeRun) == "" {
 		return fmt.Errorf("publish: workspace %s is not a git checkout", workspace.Path)
 	}
 
-	if err := RunHook(ctx, cfg, issue, workspace, "before_run", cfg.Hooks.BeforeRun); err != nil {
-		return fmt.Errorf("publish: before_run hook failed before branch update: %w", err)
+	if hookErr := RunHook(ctx, cfg, issue, workspace, "before_run", cfg.Hooks.BeforeRun); hookErr != nil {
+		return fmt.Errorf("publish: before_run hook failed before branch update: %w", hookErr)
 	}
 
-	if _, err := os.Stat(gitPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("publish: workspace %s is not a git checkout after before_run hook", workspace.Path)
-		}
-		return fmt.Errorf("publish: inspect git checkout %s after before_run hook: %w", gitPath, err)
+	hasGit, err = workspaceHasGitCheckout(workspace)
+	if err != nil {
+		return err
+	}
+	if !hasGit {
+		return fmt.Errorf("publish: workspace %s is not a git checkout after before_run hook", workspace.Path)
 	}
 
 	return nil
+}
+
+func workspaceHasGitCheckout(workspace Workspace) (bool, error) {
+	gitPath := filepath.Join(workspace.Path, ".git")
+	_, err := os.Stat(gitPath)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+
+	return false, fmt.Errorf("publish: inspect git checkout %s: %w", gitPath, err)
 }
 
 //nolint:govet // Keep the heavyweight config first; this struct is not allocated in hot paths.
@@ -343,6 +388,84 @@ func (p *githubPublisher) updatePullRequestBranch(ctx context.Context, dir, bran
 	}
 
 	return commitSHA, nil
+}
+
+func (p *githubPublisher) preparePullRequestReworkWorkspace(ctx context.Context, dir, branch string) error {
+	branch = strings.TrimSpace(branch)
+	base := strings.TrimSpace(p.cfg.Publish.BaseBranch)
+	remote := strings.TrimSpace(p.cfg.Publish.Remote)
+	if branch == "" || base == "" || remote == "" {
+		return nil
+	}
+
+	inRebase, err := p.rebaseInProgress(ctx, dir)
+	if err != nil {
+		return err
+	}
+	if inRebase {
+		p.logger.Info("symphony PR rework workspace already has a rebase in progress", "branch", branch)
+		return nil
+	}
+
+	dirty, err := p.hasChanges(ctx, dir)
+	if err != nil {
+		return err
+	}
+	if dirty {
+		p.logger.Info("symphony PR rework workspace has local changes; preserving them for rework", "branch", branch)
+		return nil
+	}
+
+	if err := p.setRemote(ctx, dir); err != nil {
+		return err
+	}
+
+	baseRemote := remote + "/" + base
+	branchRemote := remote + "/" + branch
+	if err := p.fetchBranchUpdateRefs(ctx, dir, remote, base, branch); err != nil {
+		return err
+	}
+
+	if _, err := p.git(ctx, dir, nil, "checkout", "-B", branch, branchRemote); err != nil {
+		return fmt.Errorf("publish: checkout pull request branch %s for rework: %w", branch, err)
+	}
+
+	if _, err := p.git(ctx, dir, nil, "rebase", baseRemote); err != nil {
+		p.logger.Warn(
+			"symphony PR rework workspace rebase needs conflict resolution",
+			"branch", branch,
+			"base", baseRemote,
+			"error", err,
+		)
+		return nil
+	}
+
+	return nil
+}
+
+func (p *githubPublisher) rebaseInProgress(ctx context.Context, dir string) (bool, error) {
+	for _, name := range []string{"rebase-merge", "rebase-apply"} {
+		output, err := p.git(ctx, dir, nil, "rev-parse", "--git-path", name)
+		if err != nil {
+			return false, err
+		}
+
+		path := strings.TrimSpace(string(output))
+		if path == "" {
+			continue
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(dir, path)
+		}
+
+		if _, statErr := os.Stat(path); statErr == nil {
+			return true, nil
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return false, fmt.Errorf("publish: inspect rebase state %s: %w", path, statErr)
+		}
+	}
+
+	return false, nil
 }
 
 func (p *githubPublisher) fetchBranchUpdateRefs(ctx context.Context, dir, remote, base, branch string) error {
