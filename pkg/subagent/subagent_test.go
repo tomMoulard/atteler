@@ -255,8 +255,24 @@ exit 7
 func writeFakeCommand(t *testing.T, path, contents string) {
 	t.Helper()
 
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
+	require.NoError(t, err)
+
+	tmpPath := tmp.Name()
+
+	t.Cleanup(func() {
+		_ = os.Remove(tmpPath)
+	})
+
+	_, writeErr := tmp.WriteString(contents)
+	closeErr := tmp.Close()
+
+	require.NoError(t, writeErr)
+	require.NoError(t, closeErr)
+
 	//nolint:gosec // Test fixtures must be executable by the spawned process.
-	require.NoError(t, os.WriteFile(path, []byte(contents), 0o755))
+	require.NoError(t, os.Chmod(tmpPath, 0o755))
+	require.NoError(t, os.Rename(tmpPath, path))
 }
 
 func resultIDs(results []Result) []string {
