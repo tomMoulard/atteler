@@ -29,6 +29,21 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestSymbols_RequireActiveContext(t *testing.T) {
+	t.Parallel()
+
+	_, err := DocumentSymbols(nil, Options{Command: os.Args[0], FilePath: "missing.go"}) //nolint:staticcheck // Verifies the required-context contract.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context is required")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = WorkspaceSymbols(ctx, Options{Command: os.Args[0], RootPath: t.TempDir()}, "answer")
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestDocumentSymbols_NormalizesDocumentSymbols(t *testing.T) {
 	t.Parallel()
 	file := writeTempSource(t, "package main\nfunc main() {}\n")

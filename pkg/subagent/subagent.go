@@ -46,8 +46,8 @@ type CommandOptions struct {
 // as the input requests. Every started request is allowed to finish; request
 // failures are recorded in their Result and returned as a joined error.
 func SpawnAll(ctx context.Context, requests []Request, run Runner) ([]Result, error) {
-	if ctx == nil {
-		return nil, errors.New("subagent: context is required")
+	if err := requireContext(ctx); err != nil {
+		return nil, err
 	}
 
 	if run == nil {
@@ -56,10 +56,6 @@ func SpawnAll(ctx context.Context, requests []Request, run Runner) ([]Result, er
 
 	if err := validateRequests(requests); err != nil {
 		return nil, err
-	}
-
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("subagent: context canceled before spawning: %w", err)
 	}
 
 	results := make([]Result, len(requests))
@@ -103,8 +99,8 @@ func AttelerCommand(binary string) Runner {
 // per request with --agent and --once arguments.
 func AttelerCommandWithOptions(opts CommandOptions) Runner {
 	return func(ctx context.Context, request Request) (string, error) {
-		if ctx == nil {
-			return "", errors.New("subagent: context is required")
+		if err := requireContext(ctx); err != nil {
+			return "", err
 		}
 
 		binary := strings.TrimSpace(opts.Binary)
@@ -138,6 +134,18 @@ func AttelerCommandWithOptions(opts CommandOptions) Runner {
 
 		return stdout.String(), nil
 	}
+}
+
+func requireContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("subagent: context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("subagent: context already done: %w", err)
+	}
+
+	return nil
 }
 
 func validateRequests(requests []Request) error {

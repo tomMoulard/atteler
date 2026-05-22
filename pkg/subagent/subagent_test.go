@@ -123,6 +123,8 @@ func TestSpawnAll_ValidatesInputs(t *testing.T) {
 	t.Parallel()
 
 	runner := func(context.Context, Request) (string, error) { return "", nil }
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
 
 	//nolint:govet // Test case readability is more useful than padding optimization.
 	type validationCase struct {
@@ -135,6 +137,7 @@ func TestSpawnAll_ValidatesInputs(t *testing.T) {
 
 	tests := []validationCase{
 		{name: "nil context", ctx: nil, requests: []Request{{ID: "a", Agent: "executor", Prompt: "prompt"}}, runner: runner, want: "context is required"},
+		{name: "canceled context", ctx: canceledCtx, requests: []Request{{ID: "a", Agent: "executor", Prompt: "prompt"}}, runner: runner, want: "context canceled"},
 		{name: "nil runner", ctx: context.Background(), requests: []Request{{ID: "a", Agent: "executor", Prompt: "prompt"}}, runner: nil, want: "runner is required"},
 		{name: "missing id", ctx: context.Background(), requests: []Request{{Agent: "executor", Prompt: "prompt"}}, runner: runner, want: "ID is required"},
 		{name: "missing agent", ctx: context.Background(), requests: []Request{{ID: "a", Prompt: "prompt"}}, runner: runner, want: "agent is required"},
@@ -152,6 +155,23 @@ func TestSpawnAll_ValidatesInputs(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+func TestAttelerCommand_RequiresActiveContext(t *testing.T) {
+	t.Parallel()
+
+	runner := AttelerCommandWithOptions(CommandOptions{Binary: "atteler"})
+
+	_, err := runner(nil, Request{ID: "child", Agent: "architect", Prompt: "draft plan"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context is required")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = runner(ctx, Request{ID: "child", Agent: "architect", Prompt: "draft plan"})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestAttelerCommand_ConstructsExpectedArguments(t *testing.T) {
