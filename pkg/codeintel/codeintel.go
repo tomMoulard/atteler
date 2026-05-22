@@ -287,12 +287,16 @@ func (idxr *Indexer) IndexDirContext(ctx context.Context, root string) (Index, e
 
 // IndexDirWithOptions parses all active Go source files under root using options.
 func (idxr *Indexer) IndexDirWithOptions(root string, opts IndexOptions) (Index, error) {
-	return idxr.IndexDirWithOptionsContext(context.TODO(), root, opts)
+	return idxr.indexDirWithOptions(root, opts, loadRequest{})
 }
 
 // IndexDirWithOptionsContext parses all active Go source files under root using
 // options and ctx for package-loading cancellation.
 func (idxr *Indexer) IndexDirWithOptionsContext(ctx context.Context, root string, opts IndexOptions) (Index, error) {
+	return idxr.indexDirWithOptions(root, opts, loadRequest{Context: ctx})
+}
+
+func (idxr *Indexer) indexDirWithOptions(root string, opts IndexOptions, req loadRequest) (Index, error) {
 	paths, err := goFilePaths(root)
 	if err != nil {
 		return Index{}, err
@@ -312,13 +316,12 @@ func (idxr *Indexer) IndexDirWithOptionsContext(ctx context.Context, root string
 	reused := idxr.reusedFileCount(cacheKey, fingerprints)
 
 	loadDir, patterns := packageLoadTarget(root, paths)
-	index, err := loadIndex(loadRequest{
-		Context:      ctx,
-		Dir:          loadDir,
-		Patterns:     patterns,
-		Options:      opts,
-		Fingerprints: fingerprints,
-	})
+	req.Dir = loadDir
+	req.Patterns = patterns
+	req.Options = opts
+	req.Fingerprints = fingerprints
+
+	index, err := loadIndex(req)
 	if err != nil {
 		return Index{}, err
 	}
@@ -342,12 +345,16 @@ func IndexFilesContext(ctx context.Context, paths []string) (Index, error) {
 
 // IndexFiles parses the provided Go source files using this indexer's cache.
 func (idxr *Indexer) IndexFiles(paths []string) (Index, error) {
-	return idxr.IndexFilesContext(context.TODO(), paths)
+	return idxr.indexFiles(paths, loadRequest{})
 }
 
 // IndexFilesContext parses the provided Go source files using this indexer's
 // cache and ctx for package-loading cancellation.
 func (idxr *Indexer) IndexFilesContext(ctx context.Context, paths []string) (Index, error) {
+	return idxr.indexFiles(paths, loadRequest{Context: ctx})
+}
+
+func (idxr *Indexer) indexFiles(paths []string, req loadRequest) (Index, error) {
 	paths = normalizedGoFiles(paths)
 	if len(paths) == 0 {
 		return Index{Graph: codegraph.NewEvidence()}, nil
@@ -372,12 +379,11 @@ func (idxr *Indexer) IndexFilesContext(ctx context.Context, paths []string) (Ind
 		patterns = append(patterns, "file="+path)
 	}
 
-	index, err := loadIndex(loadRequest{
-		Context:      ctx,
-		Dir:          root,
-		Patterns:     patterns,
-		Fingerprints: fingerprints,
-	})
+	req.Dir = root
+	req.Patterns = patterns
+	req.Fingerprints = fingerprints
+
+	index, err := loadIndex(req)
 	if err != nil {
 		return Index{}, err
 	}
