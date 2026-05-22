@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -422,6 +423,73 @@ func TestRun_ReturnsPartialSessionWhenProposalFails(t *testing.T) {
 	if len(result.Session.Reviews) != 0 {
 		t.Fatalf("partial reviews = %d, want 0", len(result.Session.Reviews))
 	}
+}
+
+func TestRun_StopsBeforeStartingWhenContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]string{"architect"}, []string{"tests"})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	var called atomic.Bool
+
+	_, err = Run(ctx, plan, Runner{
+		Propose: func(context.Context, string) (string, error) {
+			called.Store(true)
+			return "", nil
+		},
+		Review: func(context.Context, Review, Proposal) (string, error) {
+			called.Store(true)
+			return "", nil
+		},
+		Aggregate: func(context.Context, Session) (Verdict, error) {
+			called.Store(true)
+			return Verdict{}, nil
+		},
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called.Load())
+}
+
+func TestRun_StopsBeforeReviewsWhenContextCanceledAfterProposals(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]string{"architect", "executor"}, []string{"tests"})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var (
+		reviewCalled    atomic.Bool
+		aggregateCalled atomic.Bool
+	)
+
+	result, err := Run(ctx, plan, Runner{
+		Propose: func(_ context.Context, agent string) (string, error) {
+			cancel()
+			return "proposal from " + agent, nil
+		},
+		Review: func(context.Context, Review, Proposal) (string, error) {
+			reviewCalled.Store(true)
+			return "should not run", nil
+		},
+		Aggregate: func(context.Context, Session) (Verdict, error) {
+			aggregateCalled.Store(true)
+			return Verdict{}, nil
+		},
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Len(t, result.Session.Proposals, 2)
+	assert.False(t, reviewCalled.Load())
+	assert.False(t, aggregateCalled.Load())
 }
 
 func TestRun_ValidatesAggregatorVerdictGates(t *testing.T) {

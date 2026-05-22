@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -130,6 +131,84 @@ func TestRunWithLLM_RequiresCompleterAndContext(t *testing.T) {
 	_, err = RunWithLLM(t.Context(), plan, staticReviewCompleter(func(string) string { return "" }), " ")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "review context is required")
+}
+
+func TestRun_StopsBeforeStartingWhenContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]Reviewer{{Name: "quality"}}, []string{"pkg/auth.go"}, []string{"tests pass"})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	var called atomic.Bool
+
+	_, err = Run(ctx, plan, Runner{
+		Review: func(context.Context, Reviewer) (Report, error) {
+			called.Store(true)
+			return Report{}, nil
+		},
+		CrossReview: func(context.Context, CrossReview, Report) (string, error) {
+			called.Store(true)
+			return "", nil
+		},
+		Aggregate: func(context.Context, Session) (Report, error) {
+			called.Store(true)
+			return Report{}, nil
+		},
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called.Load())
+}
+
+func TestRun_StopsBeforeCrossReviewsWhenContextCanceledAfterReports(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan(
+		[]Reviewer{{Name: "quality"}, {Name: "tests"}},
+		[]string{"pkg/auth.go"},
+		[]string{"tests pass"},
+	)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var (
+		crossReviewCalled atomic.Bool
+		aggregateCalled   atomic.Bool
+	)
+
+	result, err := Run(ctx, plan, Runner{
+		Review: func(_ context.Context, reviewer Reviewer) (Report, error) {
+			cancel()
+
+			return Report{
+				Reviewer: reviewer.Name,
+				GateChecks: []GateCheck{{
+					Name:   "tests pass",
+					Passed: true,
+				}},
+			}, nil
+		},
+		CrossReview: func(context.Context, CrossReview, Report) (string, error) {
+			crossReviewCalled.Store(true)
+			return "should not run", nil
+		},
+		Aggregate: func(context.Context, Session) (Report, error) {
+			aggregateCalled.Store(true)
+			return Report{}, nil
+		},
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Len(t, result.Session.Reports, 2)
+	assert.False(t, crossReviewCalled.Load())
+	assert.False(t, aggregateCalled.Load())
 }
 
 func TestParseReportFromLLM_NormalizesFindingsAndPreservesOnlyExplicitGates(t *testing.T) {
