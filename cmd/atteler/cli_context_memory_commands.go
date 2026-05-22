@@ -91,34 +91,49 @@ func formatLSPRange(r lsp.Range) string {
 	return fmt.Sprintf("%d:%d-%d:%d", r.Start.Line, r.Start.Character, r.End.Line, r.End.Character)
 }
 
-func runContextPack(path string, maxTokens int) error {
+func runContextPack(path string, maxTokens int, model string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("context pack: read %s: %w", path, err)
 	}
 
-	messages := parseContextPackMessages(string(data))
-	result := contextpack.Compact(messages, maxTokens)
+	messages, metadata := parseContextPackMessagesWithMetadata(string(data))
+	result := contextpack.CompactWithOptions(messages, contextpack.Options{
+		Model:     model,
+		Metadata:  metadata,
+		MaxTokens: maxTokens,
+	})
 	fmt.Print(formatContextPackResult(result))
 
 	return nil
 }
 
 func parseContextPackMessages(text string) []llm.Message {
+	messages, _ := parseContextPackMessagesWithMetadata(text)
+
+	return messages
+}
+
+func parseContextPackMessagesWithMetadata(text string) ([]llm.Message, []contextpack.MessageMetadata) {
 	var messages []llm.Message
+
+	var metadata []contextpack.MessageMetadata
 
 	for rawLine := range strings.SplitSeq(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		line := strings.TrimRight(rawLine, "\r")
 
-		role, content, ok := parseRoleLine(line)
+		role, content, messageMetadata, ok := parseRoleLineWithMetadata(line)
 		if ok {
 			messages = append(messages, llm.Message{Role: role, Content: content})
+			metadata = append(metadata, messageMetadata)
+
 			continue
 		}
 
 		if len(messages) == 0 {
 			if strings.TrimSpace(line) != "" {
 				messages = append(messages, llm.Message{Role: llm.RoleUser, Content: line})
+				metadata = append(metadata, contextpack.MessageMetadata{})
 			}
 
 			continue
@@ -129,25 +144,83 @@ func parseContextPackMessages(text string) []llm.Message {
 		}
 	}
 
-	return messages
+	return messages, metadata
 }
 
-func parseRoleLine(line string) (llm.Role, string, bool) {
-	roleText, content, ok := strings.Cut(line, ":")
+func parseRoleLineWithMetadata(line string) (llm.Role, string, contextpack.MessageMetadata, bool) {
+	roleText, content, ok := splitContextPackRoleLine(line)
 	if !ok {
-		return "", "", false
+		return "", "", contextpack.MessageMetadata{}, false
 	}
 
-	switch strings.ToLower(strings.TrimSpace(roleText)) {
-	case string(llm.RoleSystem):
-		return llm.RoleSystem, strings.TrimSpace(content), true
+	roleName, timestamp := parseRoleNameAndTimestamp(roleText)
+	metadata := contextpack.MessageMetadata{Timestamp: timestamp}
+
+	switch strings.ToLower(roleName) {
+	case string(llm.RoleSystem), "developer":
+		return llm.RoleSystem, strings.TrimSpace(content), metadata, true
 	case string(llm.RoleUser):
-		return llm.RoleUser, strings.TrimSpace(content), true
+		return llm.RoleUser, strings.TrimSpace(content), metadata, true
 	case string(llm.RoleAssistant):
-		return llm.RoleAssistant, strings.TrimSpace(content), true
+		return llm.RoleAssistant, strings.TrimSpace(content), metadata, true
+	case string(llm.RoleTool):
+		return llm.RoleTool, strings.TrimSpace(content), metadata, true
 	default:
-		return "", "", false
+		return "", "", contextpack.MessageMetadata{}, false
 	}
+}
+
+func splitContextPackRoleLine(line string) (roleText, content string, ok bool) {
+	lower := strings.ToLower(strings.TrimLeft(line, " 	"))
+	trimmedPrefixBytes := len(line) - len(strings.TrimLeft(line, " 	"))
+
+	for _, roleName := range []string{
+		string(llm.RoleSystem),
+		"developer",
+		string(llm.RoleUser),
+		string(llm.RoleAssistant),
+		string(llm.RoleTool),
+	} {
+		if strings.HasPrefix(lower, roleName+":") {
+			cut := trimmedPrefixBytes + len(roleName)
+
+			return line[:cut], line[cut+1:], true
+		}
+
+		if strings.HasPrefix(lower, roleName+"[") {
+			closeBracket := strings.Index(line[trimmedPrefixBytes:], "]:")
+			if closeBracket < 0 {
+				continue
+			}
+
+			cut := trimmedPrefixBytes + closeBracket + 1
+
+			return line[:cut], line[cut+1:], true
+		}
+	}
+
+	return "", "", false
+}
+
+func parseRoleNameAndTimestamp(roleText string) (roleName, timestamp string) {
+	roleText = strings.TrimSpace(roleText)
+	if !strings.HasSuffix(roleText, "]") {
+		return roleText, ""
+	}
+
+	start := strings.LastIndex(roleText, "[")
+	if start <= 0 {
+		return roleText, ""
+	}
+
+	roleName = strings.TrimSpace(roleText[:start])
+
+	timestamp = strings.TrimSpace(roleText[start+1 : len(roleText)-1])
+	if roleName == "" || timestamp == "" {
+		return roleText, ""
+	}
+
+	return roleName, timestamp
 }
 
 func formatContextPackResult(result contextpack.Result) string {
@@ -159,11 +232,32 @@ func formatContextPackResult(result contextpack.Result) string {
 	fmt.Fprintf(&b, "omitted: %d\n", stats.OmittedCount)
 	fmt.Fprintf(&b, "tokens: %d/%d", stats.OutputEstimatedTokens, stats.OriginalEstimatedTokens)
 
+	if stats.OutputEstimatedUpperBound > 0 || stats.OriginalEstimatedUpperBound > 0 {
+		fmt.Fprintf(&b, " upper=%d/%d", stats.OutputEstimatedUpperBound, stats.OriginalEstimatedUpperBound)
+	}
+
+	if stats.OutputEstimateErrorBound > 0 || stats.OriginalEstimateErrorBound > 0 {
+		fmt.Fprintf(&b, " error_bound=%d/%d", stats.OutputEstimateErrorBound, stats.OriginalEstimateErrorBound)
+	}
+
 	if stats.MaxEstimatedTokens > 0 {
-		fmt.Fprintf(&b, " max=%d", stats.MaxEstimatedTokens)
+		fmt.Fprintf(&b, " max=%d fits=%t", stats.MaxEstimatedTokens, stats.FitsBudget)
 	}
 
 	b.WriteString("\n")
+
+	if stats.Estimator != "" {
+		fmt.Fprintf(&b, "estimator: %s\n", stats.Estimator)
+	}
+
+	if stats.Policy != "" {
+		fmt.Fprintf(&b, "policy: %s\n", stats.Policy)
+	}
+
+	if stats.HardBudgetFailure {
+		fmt.Fprintf(&b, "budget_failure: %s\n", stats.BudgetFailureReason)
+	}
+
 	b.WriteString("output:\n")
 
 	for _, message := range result.Messages {

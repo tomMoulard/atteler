@@ -107,7 +107,7 @@ func providerlessFileCommands() []command {
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.contextPackPath != "" },
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return runContextPack(o.contextPackPath, o.contextPackTokens.value)
+				return runContextPack(o.contextPackPath, o.contextPackTokens.value, o.model)
 			},
 		},
 		{

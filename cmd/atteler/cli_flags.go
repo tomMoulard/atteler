@@ -179,7 +179,7 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.Var(&opts.seed, "seed", "best-effort deterministic seed for providers that support it")
 	fs.StringVar(&opts.reasoningLevel, "reasoning-level", "", "override request reasoning level/effort")
 	fs.Var(&opts.maxInputTokens, "max-input-tokens", "hard cap on estimated input tokens before an LLM call")
-	fs.Var(&opts.contextPackTokens, "context-pack-tokens", "maximum estimated tokens for --context-pack-file")
+	fs.Var(&opts.contextPackTokens, "context-pack-tokens", "maximum estimated tokens for --context-pack-file; capped by --model context window when known")
 	fs.Var(&opts.evaluationScore, "evaluation-score", "score for --record-evaluation")
 	fs.BoolVar(&opts.listModels, "list-models", false, "list available models and exit")
 	fs.BoolVar(&opts.listKnownModels, "list-known-models", false, "list built-in provider/model IDs without API calls and exit")
