@@ -419,39 +419,58 @@ func hasContextBackgroundDrift(path, relativePath string) bool {
 		return false
 	}
 
-	if isAllowedContextBackgroundFile(relativePath, file) {
-		return false
+	uses := hiddenRootContextUses(file)
+	if allowedContextRootCount(relativePath, file) > 0 {
+		return allowedContextRootHasDrift(relativePath, uses)
 	}
 
-	return usesHiddenRootContext(file)
+	return hasHiddenRootContextUse(uses)
 }
 
 func isProductionGoFile(path string) bool {
 	return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
 }
 
-func isAllowedContextBackgroundFile(path string, file *ast.File) bool {
-	return file.Name.Name == "main" && allowedContextRootFiles[path]
-}
-
-var allowedContextRootFiles = map[string]bool{
-	"cmd/atteler/main.go":  true,
-	"cmd/symphony/main.go": true,
-}
-
-func usesHiddenRootContext(file *ast.File) bool {
-	contextNames, dotImported := contextImportNames(file)
-	if len(contextNames) == 0 && !dotImported {
-		return false
+func allowedContextRootCount(path string, file *ast.File) int {
+	if file.Name.Name != "main" {
+		return 0
 	}
 
-	found := false
+	return allowedContextRootFiles[path]
+}
+
+var allowedContextRootFiles = map[string]int{
+	"cmd/atteler/main.go":  1,
+	"cmd/symphony/main.go": 1,
+}
+
+func allowedContextRootHasDrift(path string, uses map[string]int) bool {
+	if uses["TODO"] > 0 || uses["WithoutCancel"] > 0 {
+		return true
+	}
+
+	return uses["Background"] > allowedContextRootFiles[path]
+}
+
+func hasHiddenRootContextUse(uses map[string]int) bool {
+	for _, count := range uses {
+		if count > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hiddenRootContextUses(file *ast.File) map[string]int {
+	contextNames, dotImported := contextImportNames(file)
+	if len(contextNames) == 0 && !dotImported {
+		return nil
+	}
+
+	uses := make(map[string]int)
 
 	ast.Inspect(file, func(node ast.Node) bool {
-		if found {
-			return false
-		}
-
 		switch fun := node.(type) {
 		case *ast.SelectorExpr:
 			if !isHiddenRootContextName(fun.Sel.Name) {
@@ -460,13 +479,13 @@ func usesHiddenRootContext(file *ast.File) bool {
 
 			ident, ok := fun.X.(*ast.Ident)
 			if ok && contextNames[ident.Name] {
-				found = true
+				uses[fun.Sel.Name]++
 			}
 
 			return false
 		case *ast.Ident:
 			if dotImported && isHiddenRootContextName(fun.Name) {
-				found = true
+				uses[fun.Name]++
 				return false
 			}
 		}
@@ -474,7 +493,7 @@ func usesHiddenRootContext(file *ast.File) bool {
 		return true
 	})
 
-	return found
+	return uses
 }
 
 func isHiddenRootContextName(name string) bool {

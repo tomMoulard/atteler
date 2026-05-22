@@ -258,6 +258,83 @@ func other() {
 	assert.Contains(t, keys, "pkg/service/dot.go|convention_drift|maintenance")
 }
 
+func TestScanWithOptions_EntrypointsAllowOnlyOneBackgroundRoot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("allows one background root", func(t *testing.T) {
+		t.Parallel()
+
+		root := t.TempDir()
+		writeFile(t, root, "cmd/atteler/main.go", `package main
+
+import "context"
+
+func rootContext() context.Context {
+	return context.Background()
+}
+`)
+
+		findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
+		require.NoError(t, err)
+		assert.NotContains(t, findingKeys(findings), "cmd/atteler/main.go|convention_drift|maintenance")
+	})
+
+	t.Run("flags extra background roots", func(t *testing.T) {
+		t.Parallel()
+
+		root := t.TempDir()
+		writeFile(t, root, "cmd/atteler/main.go", `package main
+
+import "context"
+
+func rootContext() context.Context {
+	_ = context.Background()
+	return context.Background()
+}
+`)
+
+		findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
+		require.NoError(t, err)
+		assert.Contains(t, findingKeys(findings), "cmd/atteler/main.go|convention_drift|maintenance")
+	})
+
+	t.Run("flags TODO roots", func(t *testing.T) {
+		t.Parallel()
+
+		root := t.TempDir()
+		writeFile(t, root, "cmd/atteler/main.go", `package main
+
+import "context"
+
+func rootContext() context.Context {
+	return context.TODO()
+}
+`)
+
+		findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
+		require.NoError(t, err)
+		assert.Contains(t, findingKeys(findings), "cmd/atteler/main.go|convention_drift|maintenance")
+	})
+
+	t.Run("flags context detachment", func(t *testing.T) {
+		t.Parallel()
+
+		root := t.TempDir()
+		writeFile(t, root, "cmd/atteler/main.go", `package main
+
+import "context"
+
+func detached(ctx context.Context) context.Context {
+	return context.WithoutCancel(ctx)
+}
+`)
+
+		findings, err := ScanWithOptions(root, Options{LargeFileBytes: 1024})
+		require.NoError(t, err)
+		assert.Contains(t, findingKeys(findings), "cmd/atteler/main.go|convention_drift|maintenance")
+	})
+}
+
 func TestScanWithOptions_SkipsRuntimeArtifactDirectoriesAndBinaryStaleMarkers(t *testing.T) {
 	t.Parallel()
 
