@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,7 +43,7 @@ func TestCodexProvider_Complete(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	auth := newTestCodexAuth(t, "access-1", "refresh-1", "acct-42")
+	auth := newTestCodexAuth(t)
 	p := &CodexProvider{
 		client:  srv.Client(),
 		auth:    auth,
@@ -62,6 +63,7 @@ func TestCodexProvider_Complete(t *testing.T) {
 
 	assert.Equal(t, "hello back", resp.Content)
 	assert.Equal(t, "gpt-5.5", resp.Model)
+	assert.Equal(t, StopEndTurn, resp.StopReason)
 	assert.Equal(t, 12, resp.InputTokens)
 	assert.Equal(t, 4, resp.CachedInputTokens)
 	assert.Equal(t, 3, resp.OutputTokens)
@@ -83,6 +85,279 @@ func TestCodexProvider_Complete(t *testing.T) {
 	// Auth headers carry the chatgpt access token + account id.
 	assert.Equal(t, "Bearer access-1", gotHeaders.Get("Authorization"))
 	assert.Equal(t, "acct-42", gotHeaders.Get("ChatGPT-Account-ID"))
+}
+
+func TestCodexProvider_CompleteStream_Success(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeCodexSSE(t, w, codexFakeSuccess("hello stream", "gpt-5.5", 8, 2, 4))
+	}))
+	defer srv.Close()
+
+	p := &CodexProvider{
+		client:  srv.Client(),
+		auth:    newTestCodexAuth(t),
+		baseURL: srv.URL,
+		models:  []string{"gpt-5.5"},
+	}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+	assert.Equal(t, "hello stream", resp.Content)
+	assert.Equal(t, "gpt-5.5", resp.Model)
+	assert.Equal(t, StopEndTurn, resp.StopReason)
+	assert.Equal(t, 8, resp.InputTokens)
+	assert.Equal(t, 2, resp.CachedInputTokens)
+	assert.Equal(t, 4, resp.OutputTokens)
+}
+
+func TestCodexProvider_CompleteStream_ToolUseStopReason(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeCodexSSE(t, w, []map[string]any{
+			{
+				"type": "response.output_item.done",
+				"item": map[string]any{
+					"type":      "function_call",
+					"call_id":   "call-abc",
+					"name":      "bash",
+					"arguments": `{"command":"pwd"}`,
+				},
+			},
+			{
+				"type": "response.completed",
+				"response": map[string]any{
+					"model": "gpt-5.5",
+					"usage": map[string]any{
+						"input_tokens":  3,
+						"output_tokens": 1,
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := &CodexProvider{
+		client:  srv.Client(),
+		auth:    newTestCodexAuth(t),
+		baseURL: srv.URL,
+		models:  []string{"gpt-5.5"},
+	}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: RoleUser, Content: "run pwd"}},
+		Tools:    DefaultTools(),
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-5.5", resp.Model)
+	assert.Equal(t, StopToolUse, resp.StopReason)
+	require.Len(t, resp.ToolCalls, 1)
+	assert.Equal(t, "call-abc", resp.ToolCalls[0].ID)
+	assert.Equal(t, "bash", resp.ToolCalls[0].Name)
+	assert.Equal(t, "pwd", resp.ToolCalls[0].Input["command"])
+	assert.Equal(t, 3, resp.InputTokens)
+	assert.Equal(t, 1, resp.OutputTokens)
+}
+
+func TestCodexProvider_CompleteStream_MidStreamErrorReturnsPartial(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeCodexSSE(t, w, []map[string]any{
+			{"type": "response.output_text.delta", "delta": "partial "},
+			{"type": "response.failed", "response": map[string]any{"error": "provider exploded"}},
+		})
+	}))
+	defer srv.Close()
+
+	p := &CodexProvider{
+		client:  srv.Client(),
+		auth:    newTestCodexAuth(t),
+		baseURL: srv.URL,
+		models:  []string{"gpt-5.5"},
+	}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "codex stream error")
+	assert.Equal(t, "partial ", resp.Content)
+}
+
+func TestCodexProvider_CompleteStream_CancellationReturnsPartial(t *testing.T) {
+	t.Parallel()
+
+	streamStarted := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeCodexSSE(t, w, []map[string]any{
+			{"type": "response.output_text.delta", "delta": "partial"},
+		})
+		close(streamStarted)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	p := &CodexProvider{
+		client:  srv.Client(),
+		auth:    newTestCodexAuth(t),
+		baseURL: srv.URL,
+		models:  []string{"gpt-5.5"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, err := p.CompleteStream(ctx, CompleteParams{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	select {
+	case first := <-ch:
+		assert.Equal(t, "partial", first.Content)
+	case <-time.After(time.Second):
+		require.Fail(t, "timed out waiting for first stream chunk")
+	}
+
+	select {
+	case <-streamStarted:
+	case <-time.After(time.Second):
+		require.Fail(t, "timed out waiting for stream handler")
+	}
+
+	cancel()
+
+	select {
+	case terminal := <-ch:
+		require.Error(t, terminal.Err)
+		require.ErrorIs(t, terminal.Err, context.Canceled)
+	case <-time.After(time.Second):
+		require.Fail(t, "timed out waiting for terminal cancellation error")
+	}
+}
+
+func TestCodexProvider_CompleteStream_MissingFinalChunkIsIncomplete(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeCodexSSE(t, w, []map[string]any{
+			{"type": "response.output_text.delta", "delta": "partial"},
+		})
+	}))
+	defer srv.Close()
+
+	p := &CodexProvider{
+		client:  srv.Client(),
+		auth:    newTestCodexAuth(t),
+		baseURL: srv.URL,
+		models:  []string{"gpt-5.5"},
+	}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrStreamIncomplete)
+	assert.Equal(t, "partial", resp.Content)
+}
+
+func TestParseCodexSSE_MissingCompletedIsIncomplete(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseCodexSSE(context.Background(), strings.NewReader(codexSSEString(t, []map[string]any{
+		{"type": "response.output_text.delta", "delta": "partial"},
+	})))
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrStreamIncomplete)
+}
+
+func TestCodexStreamSSE_CancelUnblocksBackpressuredContentSend(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := make(chan Chunk, DefaultStreamBuffer)
+	done := make(chan struct{})
+	payload := codexSSEString(t, []map[string]any{
+		{"type": "response.output_text.delta", "delta": "one"},
+		{"type": "response.output_text.delta", "delta": "two"},
+		{"type": "response.output_text.delta", "delta": "three"},
+	})
+
+	go func() {
+		defer close(done)
+
+		streamCodexSSE(ctx, strings.NewReader(payload), ch, "gpt-5.5")
+	}()
+
+	waitForBufferedChunks(t, ch, DefaultStreamBuffer)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		require.Fail(t, "stream goroutine stayed blocked after cancellation")
+	}
+}
+
+func TestCodexStreamSSE_CancelUnblocksBackpressuredTerminalError(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := make(chan Chunk, DefaultStreamBuffer)
+	done := make(chan struct{})
+	payload := codexSSEString(t, []map[string]any{
+		{"type": "response.output_text.delta", "delta": "one"},
+		{"type": "response.output_text.delta", "delta": "two"},
+		{"type": "response.failed", "response": map[string]any{"error": "provider failed"}},
+	})
+
+	go func() {
+		defer close(done)
+
+		streamCodexSSE(ctx, strings.NewReader(payload), ch, "gpt-5.5")
+	}()
+
+	waitForBufferedChunks(t, ch, DefaultStreamBuffer)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		require.Fail(t, "stream goroutine stayed blocked on terminal error after cancellation")
+	}
 }
 
 func TestCodexProvider_RefreshOn401(t *testing.T) {
@@ -499,7 +774,7 @@ func TestCodexProvider_Complete_WithToolUse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	auth := newTestCodexAuth(t, "access-1", "refresh-1", "acct-42")
+	auth := newTestCodexAuth(t)
 	p := &CodexProvider{
 		client:  srv.Client(),
 		auth:    auth,
@@ -560,10 +835,10 @@ func TestCodexExtractFunctionCall_NonFunctionCallType(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func newTestCodexAuth(t *testing.T, access, refresh, accountID string) *codexChatGPTAuth {
+func newTestCodexAuth(t *testing.T) *codexChatGPTAuth {
 	t.Helper()
 
-	authPath := writeCodexAuthFile(t, access, refresh, accountID)
+	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
 
 	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
 	require.NoError(t, err)
@@ -620,21 +895,53 @@ func writeCodexSSE(t *testing.T, w http.ResponseWriter, events []map[string]any)
 
 	flusher, hasFlusher := w.(http.Flusher)
 
+	payload := codexSSEString(t, events)
+
+	_, err := w.Write([]byte(payload))
+	require.NoError(t, err)
+
+	if hasFlusher {
+		flusher.Flush()
+	}
+}
+
+func codexSSEString(t *testing.T, events []map[string]any) string {
+	t.Helper()
+
+	var b strings.Builder
+
 	for _, ev := range events {
 		payload, err := json.Marshal(ev)
 		require.NoError(t, err)
 
-		_, err = w.Write([]byte("event: " + asString(ev["type"]) + "\n"))
-		require.NoError(t, err)
-		_, err = w.Write([]byte("data: "))
-		require.NoError(t, err)
-		_, err = w.Write(payload)
-		require.NoError(t, err)
-		_, err = w.Write([]byte("\n\n"))
-		require.NoError(t, err)
+		b.WriteString("event: ")
+		b.WriteString(asString(ev["type"]))
+		b.WriteString("\n")
+		b.WriteString("data: ")
+		b.Write(payload)
+		b.WriteString("\n\n")
+	}
 
-		if hasFlusher {
-			flusher.Flush()
+	return b.String()
+}
+
+func waitForBufferedChunks(t *testing.T, ch <-chan Chunk, want int) {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+
+	defer ticker.Stop()
+
+	for {
+		if len(ch) == want {
+			return
+		}
+
+		select {
+		case <-deadline:
+			require.Failf(t, "timed out waiting for buffered chunks", "len(ch) = %d, want %d", len(ch), want)
+		case <-ticker.C:
 		}
 	}
 }

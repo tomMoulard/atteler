@@ -534,6 +534,31 @@ Migrate SDK-style callers as follows:
 pass them down; package code should propagate those contexts instead of calling
 `context.Background()`, `context.TODO()`, or `context.WithoutCancel()`.
 
+## Streaming completion contract
+
+`llm.StreamProvider` implementations deliver `llm.Chunk` events. A stream must
+finish with exactly one terminal event:
+
+- success: `Chunk{Done: true}` with optional usage, model, tool-call, and
+  `StopReason` metadata.
+- failure: `Chunk{Err: err}` for provider failures or context cancellation
+  after the stream has started.
+
+Channel close by itself is not success. `llm.CollectStream` returns
+`(*Response, error)` and reports `llm.ErrStreamIncomplete` when a channel closes
+without a successful final chunk, so callers can keep any partial content while
+still treating the response as failed. Rendering callers should stop on either
+terminal form and surface `Err` instead of assuming a quiet close means the
+model completed.
+
+Provider adapters should use `llm.DefaultStreamBuffer` (or an unbuffered
+channel) and select on the caller's context when sending chunks. Avoid
+unbounded queues: a slow renderer should apply backpressure instead of allowing
+tokens to accumulate in memory. Callers that stop reading early should cancel
+the stream context so provider goroutines can close network bodies promptly.
+Codex and Ollama expose native streaming adapters; other providers use
+`StreamFromComplete` unless they implement `StreamProvider`.
+
 ## Evidence-backed feature map
 
 This section is intentionally small and evidence-linked. Add new completed
@@ -543,6 +568,7 @@ linked from the row.
 | Stable capability | Evidence |
 | --- | --- |
 | CLI command routing, grouped help, and compatibility flags | [`cmd/atteler/cli_args.go`](cmd/atteler/cli_args.go), [`cmd/atteler/cli_help_domains.go`](cmd/atteler/cli_help_domains.go), [`cmd/atteler/cli_args_test.go`](cmd/atteler/cli_args_test.go), [`cmd/atteler/cli_help_test.go`](cmd/atteler/cli_help_test.go) |
+| Error-aware streaming completion contract with bounded-buffer guidance | [`pkg/llm/stream.go`](pkg/llm/stream.go), [`pkg/llm/stream_test.go`](pkg/llm/stream_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
 | OpenAI, Anthropic, Codex CLI, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
 | Configuration loading, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
 | Sessions, transcript search/export, evaluations, failures, artifacts, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |

@@ -2,7 +2,9 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,6 +19,8 @@ func TestStreamFromComplete_SingleChunk(t *testing.T) {
 		resp: &Response{
 			Content:      "hello",
 			Model:        "m-1",
+			StopReason:   StopEndTurn,
+			ToolCalls:    []ToolCall{{ID: "tool-1", Name: "bash", Input: map[string]any{"command": "pwd"}}},
 			InputTokens:  10,
 			OutputTokens: 5,
 		},
@@ -30,6 +34,9 @@ func TestStreamFromComplete_SingleChunk(t *testing.T) {
 	assert.Equal(t, "hello", chunks[0].Content)
 	assert.Equal(t, "m-1", chunks[0].Model)
 	assert.True(t, chunks[0].Done)
+	assert.Equal(t, StopEndTurn, chunks[0].StopReason)
+	require.Len(t, chunks[0].ToolCalls, 1)
+	assert.Equal(t, "tool-1", chunks[0].ToolCalls[0].ID)
 	assert.Equal(t, 10, chunks[0].InputTokens)
 	assert.Equal(t, 5, chunks[0].OutputTokens)
 }
@@ -43,6 +50,10 @@ func TestCompleteStreamOrFallback_UsesStreamProvider(t *testing.T) {
 			models: []string{"s-1"},
 			resp:   &Response{Content: "streamed"},
 		},
+		chunks: []Chunk{
+			{Content: "token1"},
+			{Content: "token2", Done: true, StopReason: StopMaxToks, InputTokens: 5, OutputTokens: 2},
+		},
 	}
 
 	ch, err := CompleteStreamOrFallback(context.Background(), sp, CompleteParams{Model: "s-1"})
@@ -52,6 +63,7 @@ func TestCompleteStreamOrFallback_UsesStreamProvider(t *testing.T) {
 	require.NotEmpty(t, chunks)
 	assert.Equal(t, "token1", chunks[0].Content)
 	assert.True(t, chunks[len(chunks)-1].Done)
+	assert.Equal(t, StopMaxToks, chunks[len(chunks)-1].StopReason)
 }
 
 func TestCompleteStreamOrFallback_FallsBackToNonStream(t *testing.T) {
@@ -60,16 +72,17 @@ func TestCompleteStreamOrFallback_FallsBackToNonStream(t *testing.T) {
 	p := &fakeProvider{
 		name:   "non-stream",
 		models: []string{"n-1"},
-		resp:   &Response{Content: "full response", Model: "n-1"},
+		resp:   &Response{Content: "full response", Model: "n-1", StopReason: StopEndTurn},
 	}
 
 	ch, err := CompleteStreamOrFallback(context.Background(), p, CompleteParams{Model: "n-1"})
 	require.NoError(t, err)
 
-	chunks := drainChunks(ch)
-	require.Len(t, chunks, 1)
-	assert.Equal(t, "full response", chunks[0].Content)
-	assert.True(t, chunks[0].Done)
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+	assert.Equal(t, "full response", resp.Content)
+	assert.Equal(t, "n-1", resp.Model)
+	assert.Equal(t, StopEndTurn, resp.StopReason)
 }
 
 func TestStreamHelpers_RequireActiveContext(t *testing.T) {
@@ -102,13 +115,15 @@ func TestCollectStream_AssemblesResponse(t *testing.T) {
 
 	ch <- Chunk{Content: "world", Model: "m-1"}
 
-	ch <- Chunk{Content: "!", Done: true, InputTokens: 10, OutputTokens: 3, Model: "m-1"}
+	ch <- Chunk{Content: "!", Done: true, StopReason: StopEndTurn, InputTokens: 10, OutputTokens: 3, Model: "m-1"}
 
 	close(ch)
 
-	resp := CollectStream(ch)
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
 	assert.Equal(t, "Hello world!", resp.Content)
 	assert.Equal(t, "m-1", resp.Model)
+	assert.Equal(t, StopEndTurn, resp.StopReason)
 	assert.Equal(t, 10, resp.InputTokens)
 	assert.Equal(t, 3, resp.OutputTokens)
 }
@@ -119,7 +134,9 @@ func TestCollectStream_EmptyChannel(t *testing.T) {
 	ch := make(chan Chunk)
 	close(ch)
 
-	resp := CollectStream(ch)
+	resp, err := CollectStream(ch)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrStreamIncomplete)
 	assert.Empty(t, resp.Content)
 	assert.Empty(t, resp.Model)
 	assert.Equal(t, 0, resp.InputTokens)
@@ -128,22 +145,146 @@ func TestCollectStream_EmptyChannel(t *testing.T) {
 func TestCollectStream_NilChannel(t *testing.T) {
 	t.Parallel()
 
-	resp := CollectStream(nil)
+	resp, err := CollectStream(nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrStreamIncomplete)
 	assert.Empty(t, resp.Content)
 	assert.Empty(t, resp.Model)
 }
 
+func TestCollectStream_MissingFinalChunkIsIncomplete(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan Chunk, 1)
+	ch <- Chunk{Content: "partial"}
+
+	close(ch)
+
+	resp, err := CollectStream(ch)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrStreamIncomplete)
+	assert.Equal(t, "partial", resp.Content)
+}
+
+func TestCollectStream_MidStreamErrorReturnsPartialAndError(t *testing.T) {
+	t.Parallel()
+
+	providerErr := errors.New("provider failed after first token")
+
+	ch := make(chan Chunk, 2)
+	ch <- Chunk{Content: "partial "}
+
+	ch <- Chunk{Err: providerErr}
+
+	close(ch)
+
+	resp, err := CollectStream(ch)
+	require.Error(t, err)
+	require.ErrorIs(t, err, providerErr)
+	assert.Equal(t, "partial ", resp.Content)
+}
+
+func TestCompleteStreamOrFallback_MidStreamProviderErrorReachesCaller(t *testing.T) {
+	t.Parallel()
+
+	providerErr := errors.New("provider stream broke")
+	sp := &fakeStreamProvider{
+		fakeProvider: fakeProvider{
+			name:   "stream-test",
+			models: []string{"s-1"},
+			resp:   &Response{Content: "unused"},
+		},
+		chunks: []Chunk{
+			{Content: "token1"},
+			{Err: providerErr},
+		},
+	}
+
+	ch, err := CompleteStreamOrFallback(context.Background(), sp, CompleteParams{Model: "s-1"})
+	require.NoError(t, err)
+
+	chunks := drainChunks(ch)
+	require.Len(t, chunks, 2)
+	assert.Equal(t, "token1", chunks[0].Content)
+	require.Error(t, chunks[1].Err)
+	require.ErrorIs(t, chunks[1].Err, providerErr)
+	assert.False(t, chunks[1].Done)
+}
+
+func TestCollectStream_ContextCancellationReturnsPartialAndError(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sp := &cancelingStreamProvider{
+		fakeProvider: fakeProvider{
+			name:   "canceling-stream",
+			models: []string{"s-1"},
+			resp:   &Response{Content: "unused"},
+		},
+		firstSent: make(chan struct{}),
+	}
+
+	ch, err := CompleteStreamOrFallback(ctx, sp, CompleteParams{Model: "s-1"})
+	require.NoError(t, err)
+
+	select {
+	case <-sp.firstSent:
+	case <-time.After(time.Second):
+		require.Fail(t, "timed out waiting for first stream chunk")
+	}
+
+	cancel()
+
+	resp, err := CollectStream(ch)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, "partial", resp.Content)
+}
+
 type fakeStreamProvider struct {
+	fakeProvider
+	chunks []Chunk
+}
+
+func (f *fakeStreamProvider) CompleteStream(ctx context.Context, _ CompleteParams) (<-chan Chunk, error) {
+	ch := make(chan Chunk, DefaultStreamBuffer)
+
+	go func() {
+		defer close(ch)
+
+		for _, chunk := range f.chunks {
+			select {
+			case ch <- chunk:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+type cancelingStreamProvider struct {
+	firstSent chan struct{}
 	fakeProvider
 }
 
-func (f *fakeStreamProvider) CompleteStream(_ context.Context, _ CompleteParams) (<-chan Chunk, error) {
-	ch := make(chan Chunk, 2)
-	ch <- Chunk{Content: "token1"}
+func (f *cancelingStreamProvider) CompleteStream(ctx context.Context, _ CompleteParams) (<-chan Chunk, error) {
+	ch := make(chan Chunk, DefaultStreamBuffer)
 
-	ch <- Chunk{Content: "token2", Done: true, InputTokens: 5, OutputTokens: 2}
+	go func() {
+		defer close(ch)
 
-	close(ch)
+		ch <- Chunk{Content: "partial"}
+
+		close(f.firstSent)
+
+		<-ctx.Done()
+
+		ch <- Chunk{Err: ctx.Err()}
+	}()
 
 	return ch, nil
 }
