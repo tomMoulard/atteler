@@ -73,7 +73,6 @@ func (e *rpcError) Error() string {
 
 func startClient(
 	startCtx context.Context,
-	processCtx context.Context,
 	command string,
 	args []string,
 	env []string,
@@ -85,7 +84,12 @@ func startClient(
 	default:
 	}
 
-	cmd := exec.CommandContext(processCtx, command, args...)
+	cmd := exec.CommandContext(startCtx, command, args...)
+	// A managed language server should outlive a single request context. Keep
+	// CommandContext's pre-start cancellation check for startup timeouts while
+	// leaving shutdown/force-close as the only process termination paths after
+	// the server has started.
+	cmd.Cancel = nil
 	cmd.Env = append(os.Environ(), env...)
 
 	stdin, err := cmd.StdinPipe()

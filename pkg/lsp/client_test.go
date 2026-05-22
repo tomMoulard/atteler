@@ -184,6 +184,37 @@ func TestServerPool_ReusesHealthyServer(t *testing.T) {
 	assert.Equal(t, 1, fakeLaunchCount(t, launchFile))
 }
 
+func TestServerPool_ReusesServerAfterRequestContextCanceled(t *testing.T) {
+	t.Parallel()
+	pool := newTestPool(t)
+	file := writeTempSource(t, "package main\nfunc main() {}\n")
+	launchFile := t.TempDir() + "/launches.log"
+	opts := Options{
+		Command:  os.Args[0],
+		Env:      []string{"ATTELER_LSP_FAKE_SERVER=document", "ATTELER_LSP_FAKE_LAUNCH_FILE=" + launchFile},
+		FilePath: file,
+		Pool:     pool,
+	}
+
+	firstCtx, firstCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	_, err := pool.DocumentSymbols(firstCtx, opts)
+	require.NoError(t, err)
+	firstCancel()
+
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		healthy, healthErr := pool.Healthy(opts)
+		require.NoError(collect, healthErr)
+		assert.True(collect, healthy)
+	}, time.Second, 10*time.Millisecond)
+
+	secondCtx, secondCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer secondCancel()
+	_, err = pool.DocumentSymbols(secondCtx, opts)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, fakeLaunchCount(t, launchFile))
+}
+
 func TestServerPool_RestartsAfterCrash(t *testing.T) {
 	t.Parallel()
 	pool := newTestPool(t)
@@ -276,7 +307,7 @@ func TestServerPool_TimesOutAndDropsHungServer(t *testing.T) {
 
 func TestServerPool_StartTimeoutKillsUninitializedServer(t *testing.T) {
 	t.Parallel()
-	pool := NewServerPool(PoolOptions{StartTimeout: 50 * time.Millisecond, ShutdownTimeout: time.Second})
+	pool := NewServerPool(PoolOptions{StartTimeout: time.Second, ShutdownTimeout: time.Second})
 	file := writeTempSource(t, "package main\nfunc main() {}\n")
 	launchFile := t.TempDir() + "/launches.log"
 

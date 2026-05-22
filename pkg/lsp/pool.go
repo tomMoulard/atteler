@@ -460,15 +460,12 @@ func (p *ServerPool) startSession(ctx context.Context, key serverKey, spec Comma
 	startCtx, cancel := context.WithTimeout(ctx, p.opts.StartTimeout)
 	defer cancel()
 
-	processCtx, stopProcess := context.WithCancel(context.WithoutCancel(ctx))
-
-	client, err := startClient(startCtx, processCtx, spec.Command, spec.Args, spec.Env, p.opts.MaxDiagnosticBytes)
+	client, err := startClient(startCtx, spec.Command, spec.Args, spec.Env, p.opts.MaxDiagnosticBytes)
 	if err != nil {
-		stopProcess()
 		return nil, err
 	}
 
-	session := newServerSession(key, spec, client, stopProcess)
+	session := newServerSession(key, spec, client)
 	client.setNotificationHandler(session.handleNotification)
 
 	rootURI := fileURI(spec.RootPath)
@@ -614,10 +611,9 @@ type cachedWorkspaceSymbols struct {
 
 //nolint:govet // Field order groups identity, transport, state, caches, and diagnostics.
 type serverSession struct {
-	key         serverKey
-	spec        CommandSpec
-	client      *rpcClient
-	stopProcess context.CancelFunc
+	key    serverKey
+	spec   CommandSpec
+	client *rpcClient
 
 	mu               sync.Mutex
 	capabilities     serverCapabilities
@@ -628,12 +624,11 @@ type serverSession struct {
 	diagnosticsByURI map[string][]Diagnostic
 }
 
-func newServerSession(key serverKey, spec CommandSpec, client *rpcClient, stopProcess context.CancelFunc) *serverSession {
+func newServerSession(key serverKey, spec CommandSpec, client *rpcClient) *serverSession {
 	return &serverSession{
 		key:              key,
 		spec:             cloneCommandSpec(spec),
 		client:           client,
-		stopProcess:      stopProcess,
 		openDocs:         make(map[string]openDocumentState),
 		docCache:         make(map[string]cachedDocumentSymbols),
 		workspaceCache:   make(map[string]cachedWorkspaceSymbols),
@@ -932,7 +927,6 @@ func (s *serverSession) shutdown(ctx context.Context) error {
 	if err := s.client.closeGraceful(ctx); err != nil {
 		errs = append(errs, err)
 	}
-	s.stopProcess()
 
 	return errors.Join(errs...)
 }
@@ -945,7 +939,6 @@ func (s *serverSession) forceClose() {
 }
 
 func (s *serverSession) forceCloseLocked() {
-	s.stopProcess()
 	s.client.kill()
 }
 

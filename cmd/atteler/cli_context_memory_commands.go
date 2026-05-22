@@ -23,7 +23,7 @@ func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
 	pool := lsp.NewServerPool(lsp.PoolOptions{CommandPolicy: authorizeLSPCommand})
 
 	defer func() {
-		if shutdownErr := pool.Shutdown(context.WithoutCancel(ctx)); shutdownErr != nil {
+		if shutdownErr := pool.Shutdown(ctx); shutdownErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "lsp shutdown: %v\n", shutdownErr)
 		}
 	}()
