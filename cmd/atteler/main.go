@@ -95,6 +95,8 @@ const (
 	outputFormatJSON = "json"
 	outputFormatText = "text"
 	statusError      = "error"
+	statusFail       = "FAIL"
+	statusWarn       = "WARN"
 
 	maxPromptHistoryEntries = 100
 	taskTickInterval        = time.Second

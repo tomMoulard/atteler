@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,7 @@ const (
 // fakeProvider is a minimal Provider for testing the Registry.
 type fakeProvider struct {
 	err            error
+	fetchErr       error
 	healthCheckErr error
 	fetchModelsErr error
 	resp           *Response
@@ -34,6 +36,8 @@ type fakeProvider struct {
 	fetchedModels  []string
 	warnings       []string
 	calls          []CompleteParams
+	fetchCalls     int
+	healthCalls    int
 }
 
 func (f *fakeProvider) Name() string { return f.name }
@@ -41,8 +45,14 @@ func (f *fakeProvider) Name() string { return f.name }
 func (f *fakeProvider) Models() []string { return f.models }
 
 func (f *fakeProvider) FetchModels(_ context.Context) ([]string, error) {
+	f.fetchCalls++
+
 	if f.fetchModelsErr != nil {
 		return nil, f.fetchModelsErr
+	}
+
+	if f.fetchErr != nil {
+		return nil, f.fetchErr
 	}
 
 	if f.fetchedModels != nil {
@@ -53,6 +63,8 @@ func (f *fakeProvider) FetchModels(_ context.Context) ([]string, error) {
 }
 
 func (f *fakeProvider) HealthCheck(_ context.Context) error {
+	f.healthCalls++
+
 	return f.healthCheckErr
 }
 
@@ -201,6 +213,206 @@ func TestRegistry_RequiresActiveContextForBlockingMethods(t *testing.T) {
 	require.Len(t, health, 1)
 	require.ErrorIs(t, health[0].Error, ErrContextRequired)
 	assert.False(t, health[0].Healthy)
+}
+
+func TestAutoRegisterWithConfigContextReport_ReportsDisabledAndMissingCredentialProviders(t *testing.T) {
+	t.Parallel()
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		Providers: map[string]ProviderConfig{
+			alphaProvider: {Disabled: true},
+			"beta":        {},
+		},
+		DefaultProvider:        "beta",
+		DisableReadinessChecks: true,
+		ReadinessCheckTimeout:  time.Second,
+		ReadinessCacheTTL:      time.Minute,
+	}, []providerRegistration{
+		{
+			name:         alphaProvider,
+			staticModels: []string{"a-1"},
+			factory: func() (Provider, error) {
+				return &fakeProvider{name: alphaProvider, models: []string{"a-1"}, resp: &Response{}}, nil
+			},
+		},
+		{
+			name:         "beta",
+			staticModels: []string{betaModel},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no beta credentials found")
+			},
+		},
+	})
+
+	report := r.ReadinessReport()
+	alpha := requireReadinessProvider(t, report, alphaProvider)
+	assert.Equal(t, ProviderStatusDisabled, alpha.Status)
+	assert.False(t, alpha.Registered)
+	assert.True(t, alpha.Configured)
+	assert.Equal(t, []string{"a-1"}, alpha.StaticModels)
+
+	beta := requireReadinessProvider(t, report, "beta")
+	assert.Equal(t, ProviderStatusMissingCredential, beta.Status)
+	assert.True(t, beta.Configured)
+	assert.True(t, beta.Requested)
+	assert.False(t, beta.Registered)
+	assert.Contains(t, beta.Error.Error(), "no beta credentials")
+}
+
+func TestAutoRegisterWithConfigContextReport_LogsMissingCredentialsOnlyWhenVisible(t *testing.T) {
+	t.Parallel()
+
+	registration := providerRegistration{
+		name:         alphaProvider,
+		staticModels: []string{"a-1"},
+		factory: func() (Provider, error) {
+			return nil, errors.New("no alpha credentials found")
+		},
+	}
+
+	var quiet bytes.Buffer
+	autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		Logger:                 slog.New(slog.NewTextHandler(&quiet, nil)),
+		DisableReadinessChecks: true,
+	}, []providerRegistration{registration})
+	assert.Empty(t, quiet.String())
+
+	var visible bytes.Buffer
+	autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		Logger: slog.New(slog.NewTextHandler(&visible, nil)),
+		Providers: map[string]ProviderConfig{
+			alphaProvider: {},
+		},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{registration})
+	assert.Contains(t, visible.String(), "level=WARN")
+	assert.Contains(t, visible.String(), "llm provider unavailable")
+	assert.Contains(t, visible.String(), "no alpha credentials found")
+}
+
+func TestAutoRegisterWithConfigContextReport_ReportsConfiguredBrokenProviderHealth(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:           alphaProvider,
+		models:         []string{"a-1"},
+		healthCheckErr: errors.New("bad token"),
+		resp:           &Response{},
+	}
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		Providers: map[string]ProviderConfig{
+			alphaProvider: {},
+		},
+		ReadinessCheckTimeout: time.Second,
+		ReadinessCacheTTL:     time.Minute,
+	}, []providerRegistration{
+		{
+			name:         alphaProvider,
+			staticModels: provider.models,
+			factory: func() (Provider, error) {
+				return provider, nil
+			},
+		},
+	})
+
+	entry := requireReadinessProvider(t, r.ReadinessReport(), alphaProvider)
+	assert.Equal(t, ProviderStatusFailedHealthCheck, entry.Status)
+	assert.True(t, entry.Registered)
+	assert.True(t, entry.Configured)
+	assert.True(t, entry.HealthChecked)
+	assert.False(t, entry.Healthy)
+	assert.Equal(t, "bad token", entry.HealthError.Error())
+	assert.Equal(t, 1, provider.healthCalls)
+}
+
+func TestAutoRegisterWithConfigContextReport_ReportsLiveModelFetchFailure(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:     providerOpenAI,
+		models:   []string{"gpt-static"},
+		fetchErr: errors.New("models unavailable"),
+		resp:     &Response{},
+	}
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		Providers: map[string]ProviderConfig{
+			providerOpenAI: {},
+		},
+		ReadinessCheckTimeout: time.Second,
+		ReadinessCacheTTL:     time.Minute,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: provider.models,
+			factory: func() (Provider, error) {
+				return provider, nil
+			},
+		},
+	})
+
+	entry := requireReadinessProvider(t, r.ReadinessReport(), providerOpenAI)
+	assert.Equal(t, ProviderStatusFailedHealthCheck, entry.Status)
+	assert.Equal(t, ModelCatalogSourceStatic, entry.ModelCatalogSource)
+	assert.Equal(t, []string{"gpt-static"}, entry.Models)
+	assert.Equal(t, "models unavailable", entry.ModelFetchError.Error())
+	assert.Equal(t, 1, provider.fetchCalls)
+}
+
+func TestAutoRegisterWithConfigContextReport_ReportsDefaultModelProviderMismatch(t *testing.T) {
+	t.Parallel()
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultProvider:        alphaProvider,
+		DefaultModel:           "beta/" + betaModel,
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         alphaProvider,
+			staticModels: []string{"a-1"},
+			factory: func() (Provider, error) {
+				return &fakeProvider{name: alphaProvider, models: []string{"a-1"}, resp: &Response{Content: "ok"}}, nil
+			},
+		},
+	})
+
+	report := r.ReadinessReport()
+	require.Error(t, report.Default.ModelError)
+	assert.Contains(t, report.Default.ModelError.Error(), "not default provider")
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "a-1", resp.Model)
+}
+
+func TestAutoRegisterWithConfigContextReport_QualifiedModelRequestsOnlyNamedProvider(t *testing.T) {
+	t.Parallel()
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		SelectedModel:          providerCodex + "/gpt-5.5",
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: []string{"gpt-static"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no OpenAI credentials found")
+			},
+		},
+		{
+			name:         providerCodex,
+			staticModels: []string{"gpt-5.5"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no Codex credentials found")
+			},
+		},
+	})
+
+	report := r.ReadinessReport()
+	openai := requireReadinessProvider(t, report, providerOpenAI)
+	assert.False(t, openai.Requested)
+
+	codex := requireReadinessProvider(t, report, providerCodex)
+	assert.True(t, codex.Requested)
 }
 
 func TestRegistry_CompleteRoutesToCorrectProvider(t *testing.T) {
@@ -654,9 +866,9 @@ func TestRegistry_CompleteWithFallbackAllFail(t *testing.T) {
 	})
 
 	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "a-1"}, []string{"missing"})
-	if err == nil {
-		require.FailNow(t, "expected fallback failure")
-	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "a-1 via alpha/a-1")
+	assert.Contains(t, err.Error(), "missing via missing unresolved")
 }
 
 func TestRegistry_CompleteFallsBackToDefault(t *testing.T) {
@@ -967,6 +1179,210 @@ func TestRegistry_CheckHealthFailureKeepsFallbackModelsIndexed(t *testing.T) {
 	assert.True(t, r.ProviderHasModel(alphaProvider, "static-model"))
 }
 
+func TestRegistry_ProviderModelCatalogReportsStaticFallbackOnFetchFailure(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:     alphaProvider,
+		models:   []string{"static-model"},
+		fetchErr: errors.New("fetch failed"),
+		resp:     &Response{Content: "ok"},
+	})
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), alphaProvider)
+	require.NoError(t, err)
+	assert.Equal(t, ModelCatalogSourceStatic, catalog.Source)
+	assert.Equal(t, []string{"static-model"}, catalog.Models)
+	assert.Equal(t, []string{"static-model"}, catalog.StaticModels)
+	require.Error(t, catalog.Error)
+	assert.Contains(t, catalog.Error.Error(), "fetch failed")
+}
+
+func TestRegistry_ProviderModelCatalogClearsStaleFetchFailure(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:     alphaProvider,
+		models:   []string{"static-model"},
+		fetchErr: errors.New("first fetch failed"),
+		resp:     &Response{Content: "ok"},
+	}
+
+	r := NewRegistry()
+	r.Register(provider)
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), alphaProvider)
+	require.NoError(t, err)
+	require.Error(t, catalog.Error)
+
+	provider.fetchErr = nil
+	provider.fetchedModels = []string{"live-model"}
+
+	catalog, err = r.ProviderModelCatalog(context.Background(), alphaProvider)
+	require.NoError(t, err)
+	require.NoError(t, catalog.Error)
+	assert.Equal(t, ModelCatalogSourceLive, catalog.Source)
+	assert.Equal(t, []string{"live-model"}, catalog.Models)
+
+	entry := requireReadinessProvider(t, r.ReadinessReport(), alphaProvider)
+	require.NoError(t, entry.Error)
+	require.NoError(t, entry.ModelFetchError)
+	assert.Equal(t, ModelCatalogSourceLive, entry.ModelCatalogSource)
+}
+
+func TestRegistry_ProviderModelCatalogDoesNotFetchStaticOnlyProviders(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:     providerCodex,
+		models:   []string{"codex-static"},
+		fetchErr: errors.New("should not fetch"),
+		resp:     &Response{Content: "ok"},
+	}
+
+	r := NewRegistry()
+	r.Register(provider)
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), providerCodex)
+	require.NoError(t, err)
+	assert.Equal(t, ModelCatalogSourceStatic, catalog.Source)
+	assert.Equal(t, []string{"codex-static"}, catalog.Models)
+	require.NoError(t, catalog.Error)
+	assert.Zero(t, provider.fetchCalls)
+}
+
+func TestRegistry_CheckHealthWithTTLUsesCachedReadiness(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:   alphaProvider,
+		models: []string{"a-1"},
+		resp:   &Response{Content: "ok"},
+	}
+	r := NewRegistry()
+	r.Register(provider)
+
+	first := r.CheckHealthWithTTL(context.Background(), time.Hour)
+	require.Len(t, first, 1)
+	assert.False(t, first[0].Cached)
+	assert.True(t, first[0].Healthy)
+
+	second := r.CheckHealthWithTTL(context.Background(), time.Hour)
+	require.Len(t, second, 1)
+	assert.True(t, second[0].Cached)
+	assert.Equal(t, 1, provider.healthCalls)
+}
+
+func TestRegistry_ResolutionErrorIncludesReadinessContext(t *testing.T) {
+	t.Parallel()
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultProvider:        alphaProvider,
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         alphaProvider,
+			staticModels: []string{"a-1"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no alpha credentials found")
+			},
+		},
+	})
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: "a-1"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "provider readiness")
+	assert.Contains(t, err.Error(), "missing_credentials")
+}
+
+func TestRegistry_ResolutionErrorHidesUnrequestedMissingCredentials(t *testing.T) {
+	t.Parallel()
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultProvider:        "beta",
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         alphaProvider,
+			staticModels: []string{"a-1"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no alpha credentials found")
+			},
+		},
+		{
+			name:         "beta",
+			staticModels: []string{betaModel},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no beta credentials found")
+			},
+		},
+	})
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: betaModel})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "beta=missing_credentials")
+	assert.NotContains(t, err.Error(), "alpha=missing_credentials")
+	assert.NotContains(t, err.Error(), "no alpha credentials")
+}
+
+func TestRegistry_ResolutionErrorIncludesDynamicallyRequestedProvider(t *testing.T) {
+	t.Parallel()
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: []string{"gpt-static"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no OpenAI credentials found")
+			},
+		},
+		{
+			name:         providerCodex,
+			staticModels: []string{"gpt-5.5"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no Codex credentials found")
+			},
+		},
+	})
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: providerCodex + "/gpt-5.5"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "codex=missing_credentials")
+	assert.NotContains(t, err.Error(), "openai=missing_credentials")
+
+	_, err = r.Complete(context.Background(), CompleteParams{Model: "gpt-4.1"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "openai=missing_credentials")
+	assert.NotContains(t, err.Error(), "codex=missing_credentials")
+}
+
+func TestRegistry_ResolutionErrorIncludesDefaultSelectionContext(t *testing.T) {
+	t.Parallel()
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultProvider:        alphaProvider,
+		DefaultModel:           "beta/" + betaModel,
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         alphaProvider,
+			staticModels: []string{"a-1"},
+			factory: func() (Provider, error) {
+				return &fakeProvider{name: alphaProvider, models: []string{"a-1"}, resp: &Response{}}, nil
+			},
+		},
+	})
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: "missing-model"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default selection")
+	assert.Contains(t, err.Error(), "default_model=beta/"+betaModel)
+	assert.Contains(t, err.Error(), "not default provider")
+}
+
 func TestRegistry_CheckHealth(t *testing.T) {
 	t.Parallel()
 
@@ -1259,4 +1675,19 @@ func providerHealthByName(results []ProviderHealth) map[string]ProviderHealth {
 	}
 
 	return out
+}
+
+func requireReadinessProvider(t *testing.T, report ProviderReadinessReport, providerName string) ProviderReadiness {
+	t.Helper()
+
+	for i := range report.Providers {
+		provider := &report.Providers[i]
+		if provider.Name == providerName {
+			return *provider
+		}
+	}
+
+	require.Failf(t, "provider missing", "readiness report missing provider %q: %+v", providerName, report.Providers)
+
+	return ProviderReadiness{}
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -44,6 +45,10 @@ func runInteractive(ctx context.Context, state appState) error {
 	if len(state.providers) > 0 {
 		sort.Strings(state.providers)
 		fmt.Println(dimStyle.Render("  Connected providers: ") + pickerProviderStyle.Render(strings.Join(state.providers, ", ")))
+	}
+
+	if summary := startupProviderReadinessSummary(state.providerReadiness); summary != "" {
+		fmt.Println(warnStyle.Render("  Provider readiness: " + summary))
 	}
 
 	if agents := state.agentRegistry.List(); len(agents) > 0 {
@@ -152,6 +157,78 @@ func runInteractive(ctx context.Context, state appState) error {
 	finalizeWorktree(ctx, &state)
 
 	return nil
+}
+
+func startupProviderReadinessSummary(report llm.ProviderReadinessReport) string {
+	var unavailable []string
+
+	unavailable = append(unavailable, startupDefaultSelectionWarnings(report.Default)...)
+
+	for i := range report.Providers {
+		provider := &report.Providers[i]
+		if !provider.Configured && !provider.Requested {
+			continue
+		}
+
+		switch provider.Status {
+		case llm.ProviderStatusDisabled:
+			unavailable = append(unavailable, provider.Name+" disabled")
+		case llm.ProviderStatusMissingCredential:
+			unavailable = append(unavailable, provider.Name+" missing credentials")
+		case llm.ProviderStatusFailed, llm.ProviderStatusFailedHealthCheck:
+			reason := provider.Name + " " + string(provider.Status)
+			if provider.Error != nil {
+				reason += ": " + truncateStartupReadinessError(provider.Error.Error())
+			}
+
+			unavailable = append(unavailable, reason)
+		}
+	}
+
+	if len(unavailable) == 0 {
+		return ""
+	}
+
+	sort.Strings(unavailable)
+
+	return strings.Join(unavailable, "; ")
+}
+
+func startupDefaultSelectionWarnings(report llm.DefaultSelectionReport) []string {
+	var warnings []string
+
+	if report.ProviderError != nil {
+		provider := strings.TrimSpace(report.Provider)
+		if provider == "" {
+			provider = "<empty>"
+		}
+
+		warnings = append(warnings, "default provider "+provider+" ignored: "+
+			truncateStartupReadinessError(report.ProviderError.Error()))
+	}
+
+	if report.ModelError != nil {
+		model := strings.TrimSpace(report.Model)
+		if model == "" {
+			model = "<empty>"
+		}
+
+		warnings = append(warnings, "default model "+model+" ignored: "+
+			truncateStartupReadinessError(report.ModelError.Error()))
+	}
+
+	return warnings
+}
+
+func truncateStartupReadinessError(msg string) string {
+	msg = strings.TrimSpace(msg)
+
+	const maxLen = 120
+	if len(msg) <= maxLen {
+		return msg
+	}
+
+	return msg[:maxLen] + "…"
 }
 
 func printSessionReuseHint(w io.Writer, binary string, store *session.Store, sessionID string) {

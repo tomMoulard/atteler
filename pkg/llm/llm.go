@@ -144,10 +144,13 @@ type Provider interface {
 type Registry struct {
 	providers          map[string]Provider
 	models             map[string]Provider
+	catalogs           map[string]ProviderModelCatalog
+	healthCache        map[string]providerHealthCacheEntry
 	providerModels     map[string]map[string]bool
 	providerModelsLive map[string]bool
 	fallback           string
 	defaultModel       string
+	readiness          ProviderReadinessReport
 	routeTelemetry     *modelroute.Telemetry
 	mu                 sync.RWMutex
 	retry              retryConfig
@@ -158,6 +161,8 @@ func NewRegistry() *Registry {
 	return &Registry{
 		providers:          make(map[string]Provider),
 		models:             make(map[string]Provider),
+		catalogs:           make(map[string]ProviderModelCatalog),
+		healthCache:        make(map[string]providerHealthCacheEntry),
 		providerModels:     make(map[string]map[string]bool),
 		providerModelsLive: make(map[string]bool),
 		retry:              defaultRetryConfig(),
@@ -200,6 +205,8 @@ func (r *Registry) Register(p Provider) {
 	r.providers[providerName] = p
 	r.providerModelsLive[providerName] = false
 	r.indexProviderModelsLocked(providerName, p.Models())
+	r.setStaticProviderCatalogLocked(providerName, p.Models())
+	r.markProviderRegisteredLocked(providerName, p.Models())
 
 	// First registered provider becomes the default.
 	if r.fallback == "" {
@@ -366,10 +373,10 @@ func (r *Registry) CompleteWithFallback(
 			return resp, nil
 		}
 
-		failures = append(failures, fmt.Errorf("%s: %w", model, err))
+		failures = append(failures, fmt.Errorf("%s via %s: %w", model, r.modelResolutionLabel(model), err))
 	}
 
-	return nil, fmt.Errorf("llm: all fallback models failed: %w", errors.Join(failures...))
+	return nil, r.withReadinessContext(fmt.Errorf("llm: all fallback models failed: %w", joinFallbackFailures(failures)))
 }
 
 func (r *Registry) resolve(params CompleteParams) (Provider, CompleteParams, error) {
@@ -383,7 +390,10 @@ func (r *Registry) resolve(params CompleteParams) (Provider, CompleteParams, err
 	if r.defaultModel != "" {
 		p, ok := r.models[r.defaultModel]
 		if !ok {
-			return nil, params, fmt.Errorf("llm: unknown default model %q", r.defaultModel)
+			return nil, params, r.resolutionErrorForModelLocked(
+				fmt.Errorf("llm: unknown default model %q", r.defaultModel),
+				r.defaultModel,
+			)
 		}
 
 		params.Model = r.defaultModel
@@ -393,7 +403,7 @@ func (r *Registry) resolve(params CompleteParams) (Provider, CompleteParams, err
 
 	p, ok := r.providers[r.fallback]
 	if !ok {
-		return nil, params, errors.New("llm: no providers registered")
+		return nil, params, r.resolutionErrorLocked(errors.New("llm: no providers registered"))
 	}
 
 	if models := p.Models(); len(models) > 0 {
@@ -538,7 +548,10 @@ func (r *Registry) resolveExplicitModelLocked(params CompleteParams) (Provider, 
 	if providerName, providerModel, ok := splitProviderModel(params.Model); ok {
 		p, ok := r.providers[providerName]
 		if !ok {
-			return nil, params, fmt.Errorf("llm: unknown provider %q", providerName)
+			return nil, params, r.resolutionErrorForModelLocked(
+				fmt.Errorf("llm: unknown provider %q", providerName),
+				params.Model,
+			)
 		}
 
 		params.Model = providerModel
@@ -554,7 +567,7 @@ func (r *Registry) resolveExplicitModelLocked(params CompleteParams) (Provider, 
 		return p, params, nil
 	}
 
-	return nil, params, fmt.Errorf("llm: unknown model %q", params.Model)
+	return nil, params, r.resolutionErrorForModelLocked(fmt.Errorf("llm: unknown model %q", params.Model), params.Model)
 }
 
 func (r *Registry) providerForModelPrefixLocked(model string) (Provider, bool) {
@@ -755,24 +768,12 @@ func (r *Registry) ProviderModels(ctx context.Context, providerName string) ([]s
 		return nil, err
 	}
 
-	r.mu.RLock()
-	p, ok := r.providers[providerName]
-	r.mu.RUnlock()
-
-	if !ok {
-		return nil, fmt.Errorf("llm: unknown provider %q", providerName)
+	catalog, err := r.ProviderModelCatalog(ctx, providerName)
+	if err != nil {
+		return nil, err
 	}
 
-	models, err := p.FetchModels(ctx)
-	if err == nil && len(models) > 0 {
-		r.storeFetchedProviderModels(providerName, models, providerModelsVerified(p))
-
-		return models, nil
-	}
-
-	r.markProviderModelsUnverified(providerName, p.Models())
-
-	return p.Models(), nil
+	return catalog.Models, nil
 }
 
 func (r *Registry) indexProviderModelsLocked(providerName string, models []string) {
@@ -866,14 +867,23 @@ func (r *Registry) indexProviderModelLocked(providerName, model string) {
 }
 
 // ProviderHealth describes the outcome of a single provider health check.
+//
+//nolint:govet // Field order keeps diagnostics, errors, timing, model provenance, and booleans grouped.
 type ProviderHealth struct {
-	Contract *AdapterContract
-	Error    error
-	Name     string
-	Models   []string
-	Checks   []ReadinessCheck
-	Warnings []string
-	Healthy  bool
+	Contract        *AdapterContract
+	Error           error
+	ModelFetchError error
+	CheckedAt       time.Time
+	CacheTTL        time.Duration
+	Name            string
+	Models          []string
+	StaticModels    []string
+	LiveModels      []string
+	Checks          []ReadinessCheck
+	Warnings        []string
+	ModelSource     ModelCatalogSource
+	Healthy         bool
+	Cached          bool
 }
 
 // CheckHealth returns one ProviderHealth entry per provider, sorted by name.
@@ -882,78 +892,7 @@ type ProviderHealth struct {
 // queried for models. Some providers perform network requests here; others
 // only check local credentials or daemon reachability.
 func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
-	ctxErr := requireCredentialContext(ctx)
-
-	r.mu.RLock()
-
-	names := make([]string, 0, len(r.providers))
-	for name := range r.providers {
-		names = append(names, name)
-	}
-
-	r.mu.RUnlock()
-
-	sort.Strings(names)
-
-	results := make([]ProviderHealth, 0, len(names))
-	for _, name := range names {
-		r.mu.RLock()
-		p := r.providers[name]
-		r.mu.RUnlock()
-
-		ph := ProviderHealth{Name: name}
-
-		if ctxErr != nil {
-			ph.Error = ctxErr
-			ph.Models = p.Models()
-			ph.Warnings = appendProviderWarnings(ph.Warnings, p)
-
-			r.markProviderModelsUnverified(name, ph.Models)
-			results = append(results, ph)
-
-			continue
-		}
-
-		if diagnosticProvider, ok := p.(DiagnosticsProvider); ok {
-			ph = providerHealthFromDiagnostics(name, diagnosticProvider.AdapterDiagnostics())
-			if len(ph.Models) == 0 {
-				ph.Models = p.Models()
-			}
-
-			ph.Warnings = appendProviderWarnings(ph.Warnings, p)
-
-			r.markProviderModelsUnverified(name, ph.Models)
-			results = append(results, ph)
-
-			continue
-		}
-
-		ph.Warnings = appendProviderWarnings(ph.Warnings, p)
-
-		if err := p.HealthCheck(ctx); err != nil {
-			ph.Error = err
-			ph.Models = p.Models()
-
-			r.markProviderModelsUnverified(name, ph.Models)
-		} else {
-			ph.Healthy = true
-
-			models, fetchErr := p.FetchModels(ctx)
-			if fetchErr != nil || len(models) == 0 {
-				models = p.Models()
-
-				r.markProviderModelsUnverified(name, models)
-			} else {
-				r.storeFetchedProviderModels(name, models, providerModelsVerified(p))
-			}
-
-			ph.Models = models
-		}
-
-		results = append(results, ph)
-	}
-
-	return results
+	return r.CheckHealthWithTTL(ctx, 0)
 }
 
 func appendProviderWarnings(current []string, p Provider) []string {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/agent"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -266,6 +268,135 @@ func TestStateDiagnostics_FallsBackToConfigSources(t *testing.T) {
 	assert.Equal(t, testReasoningLow, reasoning.Selected)
 	assert.Equal(t, "config.generation.reasoning_level", reasoning.Source)
 	assert.Equal(t, "config", reasoning.Scope)
+}
+
+func TestProviderReportsExposeReadinessReasons(t *testing.T) {
+	t.Parallel()
+
+	reports := providerReports(llm.ProviderReadinessReport{
+		Providers: []llm.ProviderReadiness{
+			{
+				Name:               "openai",
+				Status:             llm.ProviderStatusFailedHealthCheck,
+				Registered:         true,
+				Configured:         true,
+				Requested:          true,
+				HealthChecked:      true,
+				ModelCatalogSource: llm.ModelCatalogSourceStatic,
+				Models:             []string{"gpt-static"},
+				StaticModels:       []string{"gpt-static"},
+				Error:              assert.AnError,
+			},
+		},
+	})
+
+	require.Len(t, reports, 1)
+	assert.Equal(t, "openai", reports[0].Name)
+	assert.Equal(t, string(llm.ProviderStatusFailedHealthCheck), reports[0].Status)
+	assert.True(t, reports[0].Configured)
+	assert.True(t, reports[0].Requested)
+	assert.Equal(t, string(llm.ModelCatalogSourceStatic), reports[0].ModelCatalogSource)
+	assert.Equal(t, []string{"gpt-static"}, reports[0].Models)
+	assert.Contains(t, reports[0].Error, "assert")
+}
+
+func TestPrintProviderReadinessReport_ShowsStatusReasonAndModelSource(t *testing.T) { //nolint:paralleltest // Captures process stdout.
+	report := llm.ProviderReadinessReport{
+		Default: llm.DefaultSelectionReport{
+			Provider: "openai",
+			Model:    "gpt-test",
+		},
+		Providers: []llm.ProviderReadiness{
+			{
+				Name:               "openai",
+				Status:             llm.ProviderStatusFailedHealthCheck,
+				Registered:         true,
+				Configured:         true,
+				Requested:          true,
+				HealthChecked:      true,
+				ModelCatalogSource: llm.ModelCatalogSourceStatic,
+				Models:             []string{"gpt-static"},
+				StaticModels:       []string{"gpt-static"},
+				Error:              errors.New("models HTTP 401"),
+			},
+			{
+				Name:               "ollama",
+				Status:             llm.ProviderStatusRegistered,
+				Registered:         true,
+				Healthy:            true,
+				HealthChecked:      true,
+				ModelCatalogSource: llm.ModelCatalogSourceLive,
+				Models:             []string{"llama3.2"},
+				LiveModels:         []string{"llama3.2"},
+			},
+			{
+				Name:               "custom",
+				Status:             llm.ProviderStatusRegistered,
+				Registered:         true,
+				Healthy:            true,
+				HealthChecked:      true,
+				ModelCatalogSource: llm.ModelCatalogSourceStatic,
+				Models:             []string{"custom-static"},
+				StaticModels:       []string{"custom-static"},
+				ModelFetchError:    errors.New("live models timeout"),
+			},
+		},
+	}
+
+	var healthy int
+
+	out := captureStdoutForStateDiagnostics(t, func() {
+		healthy = printProviderReadinessReport(report)
+	})
+
+	assert.Equal(t, 2, healthy)
+	assert.Contains(t, out, "default_selection:")
+	assert.Contains(t, out, "[FAIL] openai configured requested")
+	assert.Contains(t, out, "reason: models HTTP 401")
+	assert.Contains(t, out, "models: static fallback")
+	assert.Contains(t, out, "[ok] ollama")
+	assert.Contains(t, out, "models: live")
+	assert.Contains(t, out, "[WARN] custom")
+	assert.Contains(t, out, "model_fetch: live models timeout")
+}
+
+func TestStartupProviderReadinessSummary_FiltersUnrequestedProviders(t *testing.T) {
+	t.Parallel()
+
+	summary := startupProviderReadinessSummary(llm.ProviderReadinessReport{
+		Providers: []llm.ProviderReadiness{
+			{
+				Name:       "openai",
+				Status:     llm.ProviderStatusMissingCredential,
+				Configured: true,
+				Error:      errors.New("no OpenAI credentials found"),
+			},
+			{
+				Name:   "anthropic",
+				Status: llm.ProviderStatusMissingCredential,
+				Error:  errors.New("no Anthropic credentials found"),
+			},
+		},
+	})
+
+	assert.Contains(t, summary, "openai missing credentials")
+	assert.NotContains(t, summary, "anthropic")
+}
+
+func TestStartupProviderReadinessSummary_IncludesDefaultSelectionWarnings(t *testing.T) {
+	t.Parallel()
+
+	summary := startupProviderReadinessSummary(llm.ProviderReadinessReport{
+		Default: llm.DefaultSelectionReport{
+			Provider:      "missing-provider",
+			Model:         "other/model",
+			ProviderError: errors.New("unknown provider"),
+			ModelError:    errors.New("model belongs to another provider"),
+		},
+	})
+
+	assert.Contains(t, summary, "default provider missing-provider ignored: unknown provider")
+	assert.Contains(t, summary, "default model other/model ignored: model belongs to another provider")
 }
 
 func stateDiagnosticsTestApp(cfg appconfig.Config) appState {
