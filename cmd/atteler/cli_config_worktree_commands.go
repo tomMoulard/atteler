@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/agent"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -490,6 +492,18 @@ func contextOptionsFromConfig(cfg appconfig.Config) contextref.Options {
 	return opts
 }
 
+func contextOptionsForProviderModel(opts contextref.Options, providerName, model string) contextref.Options {
+	opts.TokenEstimator = contextpack.NewEstimator(providerName, model)
+
+	return opts
+}
+
+func contextOptionsForRequestModels(opts contextref.Options, reg *llm.Registry, model string, fallbackModels []string) contextref.Options {
+	providerName, estimatorModel := requestManifestModelIdentity(reg, model, fallbackModels)
+
+	return contextOptionsForProviderModel(opts, providerName, estimatorModel)
+}
+
 func referencePolicyFromConfig(policy appconfig.ReferencePolicyConfig) contextref.ReferencePolicy {
 	return contextref.ReferencePolicy{
 		AllowedSchemes:       append([]string(nil), policy.AllowedSchemes...),
@@ -507,32 +521,130 @@ func referencePolicyFromConfig(policy appconfig.ReferencePolicyConfig) contextre
 // the configured-reference block so rejected entries do not silently leave a
 // partial context behind.
 func loadConfiguredReferences(ctx context.Context, refs []string, opts contextref.Options) string {
+	return loadConfiguredReferenceContext(ctx, refs, opts).Content
+}
+
+//nolint:govet // Field order keeps manifest before rendered content in reports.
+type configuredReferenceContext struct {
+	Manifest  contextref.ReferenceManifest
+	Content   string
+	Estimator string
+}
+
+func loadConfiguredReferenceContext(ctx context.Context, refs []string, opts contextref.Options) configuredReferenceContext {
 	if opts.ReferenceScope == "" {
 		opts.ReferenceScope = contextref.ReferenceScopeGlobal
 	}
 
-	return loadConfiguredReferencesForScope(ctx, refs, opts)
+	return loadConfiguredReferenceContextForScope(ctx, refs, opts)
 }
 
-func loadConfiguredReferencesForScope(ctx context.Context, refs []string, opts contextref.Options) string {
+func loadConfiguredReferenceContextForScope(ctx context.Context, refs []string, opts contextref.Options) configuredReferenceContext {
+	estimatorSummary := estimatorSummaryForContextOptions(opts)
 	if len(refs) == 0 {
-		return ""
+		return configuredReferenceContext{Estimator: estimatorSummary}
 	}
 
 	loaded, referenceEvents, err := contextref.LoadReferencesWithReport(ctx, refs, opts)
+	manifest := withReferenceManifestEstimator(contextref.BuildReferenceManifest(referenceEvents), estimatorSummary)
+
 	for i := range referenceEvents {
 		fmt.Fprintln(os.Stderr, formatReferenceEvent(referenceEvents[i]))
 	}
 
 	if err != nil {
+		omittedEvents := omitLoadedConfiguredReferenceEvents(referenceEvents, "configured reference block omitted because loading failed")
+		for i := range omittedEvents {
+			if omittedEvents[i].PolicyDecision == contextref.ReferenceDecisionOmitted {
+				fmt.Fprintln(os.Stderr, formatReferenceEvent(omittedEvents[i]))
+			}
+		}
+
+		manifest = withReferenceManifestEstimator(contextref.BuildReferenceManifest(omittedEvents), estimatorSummary)
+		if len(referenceEvents) > 0 {
+			fmt.Fprintln(os.Stderr, formatReferenceManifest(manifest))
+		}
+
 		fmt.Fprintf(os.Stderr, "warning: loading configured references failed; omitting configured reference context: %v\n", err)
-		return ""
+
+		return configuredReferenceContext{Manifest: manifest, Estimator: estimatorSummary}
 	}
 
-	return contextref.FormatReferences(loaded)
+	if len(referenceEvents) > 0 {
+		fmt.Fprintln(os.Stderr, formatReferenceManifest(manifest))
+	}
+
+	return configuredReferenceContext{
+		Content:   contextref.FormatReferences(loaded),
+		Manifest:  manifest,
+		Estimator: estimatorSummary,
+	}
+}
+
+func withReferenceManifestEstimator(manifest contextref.ReferenceManifest, estimatorSummary string) contextref.ReferenceManifest {
+	if manifest.TokenEstimator == "" {
+		manifest.TokenEstimator = estimatorSummary
+	}
+
+	return manifest
+}
+
+func configuredReferenceContextForRequest(ctx context.Context, refs []string, current configuredReferenceContext, opts contextref.Options) configuredReferenceContext {
+	if len(refs) == 0 {
+		return current
+	}
+
+	if current.Estimator == estimatorSummaryForContextOptions(opts) {
+		return current
+	}
+
+	return loadConfiguredReferenceContext(ctx, refs, opts)
+}
+
+func estimatorSummaryForContextOptions(opts contextref.Options) string {
+	estimator := opts.TokenEstimator
+	if estimator == nil {
+		estimator = contextpack.DefaultEstimator()
+	}
+
+	return contextEstimatorSummary(estimator.Profile())
+}
+
+func omitLoadedConfiguredReferenceEvents(referenceEvents []contextref.ReferenceEvent, reason string) []contextref.ReferenceEvent {
+	omittedEvents := append([]contextref.ReferenceEvent(nil), referenceEvents...)
+	for i := range omittedEvents {
+		switch omittedEvents[i].PolicyDecision {
+		case contextref.ReferenceDecisionLoaded, contextref.ReferenceDecisionTruncated:
+			omittedEvents[i].PolicyDecision = contextref.ReferenceDecisionOmitted
+			omittedEvents[i].PolicyReason = reason
+			omittedEvents[i].PolicyReasonCode = contextref.ReferenceReasonCode(contextref.ReferenceDecisionOmitted, reason)
+		}
+	}
+
+	return omittedEvents
+}
+
+func omitIncludedReferenceManifestEntries(manifest contextref.ReferenceManifest, reason string) contextref.ReferenceManifest {
+	return withReferenceManifestEstimator(
+		contextref.BuildReferenceManifest(omitLoadedConfiguredReferenceEvents(manifest.Entries, reason)),
+		manifest.TokenEstimator,
+	)
+}
+
+func formatReferenceManifest(manifest contextref.ReferenceManifest) string {
+	manifest = sanitizeReferenceManifestForAudit(manifest)
+
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Sprintf("reference manifest {\"error\":%q}", err.Error())
+	}
+
+	return "reference manifest " + string(data)
 }
 
 func formatReferenceEvent(event contextref.ReferenceEvent) string {
+	event = sanitizeReferenceEventForDisplay(event)
+
 	parts := []string{"reference", event.PolicyDecision}
 
 	if event.Scope != "" {
@@ -551,8 +663,23 @@ func formatReferenceEvent(event contextref.ReferenceEvent) string {
 		parts = append(parts, "source="+strconv.Quote(event.Source))
 	}
 
+	if event.ResolvedSource != "" {
+		parts = append(parts, "resolved_source="+strconv.Quote(event.ResolvedSource))
+	}
+
 	if event.Bytes > 0 || event.PolicyDecision == contextref.ReferenceDecisionLoaded || event.PolicyDecision == contextref.ReferenceDecisionTruncated {
 		parts = append(parts, fmt.Sprintf("bytes=%d", event.Bytes))
+	}
+
+	if event.TokenEstimate.Tokens > 0 || event.TokenEstimate.UpperBoundTokens > 0 {
+		parts = append(parts,
+			fmt.Sprintf("tokens=%d", event.TokenEstimate.Tokens),
+			fmt.Sprintf("token_upper=%d", event.TokenEstimate.UpperBoundTokens),
+		)
+	}
+
+	if event.TokenEstimator != "" {
+		parts = append(parts, "token_estimator="+strconv.Quote(event.TokenEstimator))
 	}
 
 	if event.Truncated {
@@ -567,17 +694,33 @@ func formatReferenceEvent(event contextref.ReferenceEvent) string {
 		parts = append(parts, "fetched_at="+event.FetchedAt.UTC().Format(time.RFC3339))
 	}
 
-	if event.PolicyReason != "" {
-		parts = append(parts, "reason="+strconv.Quote(event.PolicyReason))
-	}
+	parts = appendReferenceReasonFields(parts, event)
 
 	return strings.Join(parts, " ")
 }
 
-// buildReferenceContext combines the pre-loaded global reference context with
-// any agent-specific references. If the agent has its own references they are
-// loaded on the fly and appended after the global block.
-func buildReferenceContext(ctx context.Context, globalRefCtx string, activeAgent agentSelection, opts contextref.Options) string {
+func sanitizeReferenceEventForDisplay(event contextref.ReferenceEvent) contextref.ReferenceEvent {
+	manifest := contextref.BuildReferenceManifest([]contextref.ReferenceEvent{event})
+	if len(manifest.Entries) == 0 {
+		return event
+	}
+
+	return manifest.Entries[0]
+}
+
+func appendReferenceReasonFields(parts []string, event contextref.ReferenceEvent) []string {
+	if event.PolicyReason != "" {
+		parts = append(parts, "reason="+strconv.Quote(event.PolicyReason))
+	}
+
+	if event.PolicyReasonCode != "" {
+		parts = append(parts, "reason_code="+strconv.Quote(event.PolicyReasonCode))
+	}
+
+	return parts
+}
+
+func buildReferenceContextWithManifest(ctx context.Context, globalRefCtx configuredReferenceContext, activeAgent agentSelection, opts contextref.Options) configuredReferenceContext {
 	if !activeAgent.ok || len(activeAgent.agent.References) == 0 {
 		return globalRefCtx
 	}
@@ -589,16 +732,32 @@ func buildReferenceContext(ctx context.Context, globalRefCtx string, activeAgent
 		agentOpts.ReferenceScope += ":" + activeAgent.name
 	}
 
-	agentRefCtx := loadConfiguredReferencesForScope(ctx, activeAgent.agent.References, agentOpts)
-	if agentRefCtx == "" {
+	agentRefCtx := loadConfiguredReferenceContextForScope(ctx, activeAgent.agent.References, agentOpts)
+	mergedManifest := mergeReferenceManifests(globalRefCtx.Manifest, agentRefCtx.Manifest)
+	estimatorSummary := estimatorSummaryForContextOptions(opts)
+
+	if agentRefCtx.Content == "" {
+		globalRefCtx.Manifest = mergedManifest
+		if globalRefCtx.Estimator == "" {
+			globalRefCtx.Estimator = estimatorSummary
+		}
+
 		return globalRefCtx
 	}
 
-	if globalRefCtx == "" {
-		return agentRefCtx
+	if globalRefCtx.Content == "" {
+		return configuredReferenceContext{
+			Content:   agentRefCtx.Content,
+			Manifest:  mergedManifest,
+			Estimator: estimatorSummary,
+		}
 	}
 
-	return globalRefCtx + "\n\n" + agentRefCtx
+	return configuredReferenceContext{
+		Content:   globalRefCtx.Content + "\n\n" + agentRefCtx.Content,
+		Manifest:  mergedManifest,
+		Estimator: estimatorSummary,
+	}
 }
 
 func maxInputTokensFromConfigOptions(cfg appconfig.Config, opts cliOptions) int {

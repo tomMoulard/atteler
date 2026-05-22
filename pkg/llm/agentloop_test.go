@@ -146,6 +146,60 @@ func TestAgentLoop_ToolCallThenFinalResponse(t *testing.T) {
 	assert.Len(t, history, 3)
 }
 
+func TestAgentLoop_BeforeModelCallSeesEachIterationAndCanStop(t *testing.T) {
+	t.Parallel()
+
+	provider := &agentTestProvider{
+		responses: []*Response{
+			{
+				Model:      "test-model",
+				StopReason: StopToolUse,
+				ToolCalls: []ToolCall{
+					{ID: "call_1", Name: "bash", Input: map[string]any{"command": "echo ok"}},
+				},
+			},
+			{Content: "should not be called", Model: "test-model", StopReason: StopEndTurn},
+		},
+	}
+	reg := NewRegistry()
+	reg.Register(provider)
+
+	var messageCounts []int
+
+	_, history, err := AgentLoop(
+		context.Background(),
+		reg,
+		CompleteParams{
+			Model:    "test-model",
+			Messages: []Message{{Role: RoleUser, Content: "run echo ok"}},
+			Tools:    DefaultTools(),
+		},
+		nil,
+		func(_ context.Context, call ToolCall) ToolResult {
+			return ToolResult{ToolCallID: call.ID, Content: "ok\n"}
+		},
+		AgentLoopConfig{
+			MaxIterations: 5,
+			BeforeModelCall: func(iteration int, params CompleteParams) error {
+				messageCounts = append(messageCounts, len(params.Messages))
+
+				if iteration == 1 {
+					return errors.New("token budget exceeded")
+				}
+
+				return nil
+			},
+		},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preflight")
+	assert.Contains(t, err.Error(), "token budget exceeded")
+	assert.Equal(t, []int{1, 3}, messageCounts)
+	assert.Equal(t, 1, provider.calls, "second provider call should be blocked by preflight")
+	assert.Len(t, history, 3)
+}
+
 func TestAgentLoop_MaxIterationsExceeded(t *testing.T) {
 	t.Parallel()
 

@@ -601,9 +601,37 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		Content: input,
 	})
 
-	requestMessages, refs, err := expandReferences(nextHistory, m.contextOptions)
+	requestModel := m.selectedModel
+	fallbackModels := append([]string(nil), m.fallbackModels...)
+	if activeAgent.ok && !m.modelLocked {
+		requestModel, fallbackModels = effectiveAgentModelSelection(m.selectedModel, m.fallbackModels, activeAgent)
+	}
+
+	contextOptions := contextOptionsForRequestModels(m.contextOptions, m.registry, requestModel, fallbackModels)
+
+	requestMessages, refs, inlineEvents, err := expandReferences(nextHistory, contextOptions)
 	if err != nil {
-		return m, tea.Println(errStyle.Render("Error: " + err.Error()))
+		cmds := []tea.Cmd{tea.Println(errStyle.Render("Error: " + err.Error()))}
+
+		if len(inlineEvents) > 0 {
+			configuredManifest := omitIncludedReferenceManifestEntries(m.referenceManifest, "request assembly aborted before configured reference context was sent")
+			manifestEvent := requestContextManifestEvent(newRequestContextManifestForModelsWithInlineEvents(
+				m.registry,
+				requestModel,
+				fallbackModels,
+				nextHistory,
+				m.maxInputTokens,
+				inlineEvents,
+				configuredManifest,
+			))
+			manifestEvent.SessionID = m.sessionState.ID
+			manifestEvent.SessionPath = m.sessionPath
+			manifestEvent.Agent = activeAgent.name
+			setExplicitContextManifestEventModel(&manifestEvent, requestModel)
+			cmds = append([]tea.Cmd{emitHook(m.ctx, m.hookRunner, manifestEvent)}, cmds...)
+		}
+
+		return m, tea.Sequence(cmds...)
 	}
 
 	// Print the user message above the input area.
@@ -616,8 +644,13 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 	copy(msgs, requestMessages)
 
 	generation := generationForRequest(m.generationDefaults, m.generationOverrides, activeAgent)
-	referenceContext := buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions)
-	budgetMessages := requestMessagesForBudget(m.selectedModel, msgs, activeAgent, generation, referenceContext)
+	routeGlobalReferenceContext := configuredReferenceContextForRequest(m.ctx, m.configuredReferences, configuredReferenceContext{
+		Content:   m.referenceContext,
+		Manifest:  m.referenceManifest,
+		Estimator: m.referenceContextEstimator,
+	}, contextOptions)
+	routeReferenceContext := buildReferenceContextWithManifest(m.ctx, routeGlobalReferenceContext, activeAgent, contextOptions)
+	budgetMessages := requestMessagesForBudget(requestModel, msgs, activeAgent, generation, routeReferenceContext.Content, m.executionMode != executionModePlan)
 
 	requestModel, fallbackModels, routeDecision, err := requestModelAndFallbacks(
 		m.selectedModel,
@@ -637,8 +670,70 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 
-	if err := validateRequestBudget(m.registry, requestModel, budgetMessages, m.maxInputTokens); err != nil {
-		return m, tea.Println(errStyle.Render("Error: " + err.Error()))
+	contextOptions = contextOptionsForRequestModels(m.contextOptions, m.registry, requestModel, fallbackModels)
+	requestMessages, refs, inlineEvents, err = expandReferences(nextHistory, contextOptions)
+	if err != nil {
+		cmds := []tea.Cmd{tea.Println(errStyle.Render("Error: " + err.Error()))}
+
+		if len(inlineEvents) > 0 {
+			configuredManifest := omitIncludedReferenceManifestEntries(m.referenceManifest, "request assembly aborted before configured reference context was sent")
+			manifestEvent := requestContextManifestEvent(newRequestContextManifestForModelsWithInlineEvents(
+				m.registry,
+				requestModel,
+				fallbackModels,
+				nextHistory,
+				m.maxInputTokens,
+				inlineEvents,
+				configuredManifest,
+			))
+			manifestEvent.SessionID = m.sessionState.ID
+			manifestEvent.SessionPath = m.sessionPath
+			manifestEvent.Agent = activeAgent.name
+			setExplicitContextManifestEventModel(&manifestEvent, requestModel)
+			cmds = append([]tea.Cmd{emitHook(m.ctx, m.hookRunner, manifestEvent)}, cmds...)
+		}
+
+		return m, tea.Sequence(cmds...)
+	}
+
+	msgs = make([]llm.Message, len(requestMessages))
+	copy(msgs, requestMessages)
+
+	globalReferenceContext := configuredReferenceContextForRequest(m.ctx, m.configuredReferences, configuredReferenceContext{
+		Content:   m.referenceContext,
+		Manifest:  m.referenceManifest,
+		Estimator: m.referenceContextEstimator,
+	}, contextOptions)
+	m.referenceContext = globalReferenceContext.Content
+	m.referenceManifest = globalReferenceContext.Manifest
+	m.referenceContextEstimator = globalReferenceContext.Estimator
+
+	referenceContext := buildReferenceContextWithManifest(m.ctx, globalReferenceContext, activeAgent, contextOptions)
+	referenceContext.Content = appendReferenceContext(
+		referenceContext.Content,
+		generatedSkillReferenceContext(input, m.skillLearningStoreDir, m.skillLearningSkillDir, m.skillLearningEnabled),
+	)
+
+	preflightMessages := requestMessagesForBudget(requestModel, msgs, activeAgent, generation, referenceContext.Content, m.executionMode != executionModePlan)
+	if err := validateRequestBudgetWithFallbacks(m.registry, requestModel, fallbackModels, preflightMessages, m.maxInputTokens); err != nil {
+		manifestEvent := requestContextManifestEvent(newRequestContextManifestForModelsWithInlineEvents(
+			m.registry,
+			requestModel,
+			fallbackModels,
+			preflightMessages,
+			m.maxInputTokens,
+			inlineEvents,
+			referenceContext.Manifest,
+		))
+		manifestEvent.SessionID = m.sessionState.ID
+		manifestEvent.SessionPath = m.sessionPath
+		manifestEvent.Agent = activeAgent.name
+		setExplicitContextManifestEventModel(&manifestEvent, requestModel)
+
+		return m, tea.Sequence(
+			emitHook(m.ctx, m.hookRunner, manifestEvent),
+			tea.Println(errStyle.Render("Error: "+err.Error())),
+		)
 	}
 
 	// Launch the LLM call.
@@ -662,11 +757,6 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 
 	confirmCh := make(chan agentLoopConfirmRequest, 1)
 	responseCh := make(chan bool, 1)
-	referenceContext = appendReferenceContext(
-		buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions),
-		generatedSkillReferenceContext(input, m.skillLearningStoreDir, m.skillLearningSkillDir, m.skillLearningEnabled),
-	)
-
 	request := llmRequest{
 		eventBase: events.Event{
 			SessionID:   m.sessionState.ID,
@@ -679,7 +769,8 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		hasAgent:                    activeAgent.ok,
 		model:                       requestModel,
 		agentLoopCheckpointPath:     agentLoopCheckpointPath(m.sessionPath),
-		referenceContext:            referenceContext,
+		referenceContext:            referenceContext.Content,
+		referenceManifest:           referenceContext.Manifest,
 		workingDir:                  m.cwd,
 		messages:                    msgs,
 		fallbackModels:              fallbackModels,
@@ -689,7 +780,8 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		maxInputTokens:              m.maxInputTokens,
 		routeDecision:               routeDecision,
 		refs:                        refs,
-		useTools:                    m.executionMode != "plan",
+		inlineReferenceEvents:       inlineEvents,
+		useTools:                    m.executionMode != executionModePlan,
 		confirmRequestCh:            confirmCh,
 		confirmResponseCh:           responseCh,
 	}

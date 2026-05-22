@@ -55,15 +55,15 @@ type runOnceResult struct {
 
 //nolint:govet // Field order follows request-preparation flow; padding is irrelevant here.
 type runOncePrepared struct {
-	activeAgent     agentSelection
-	generation      generationSettings
-	requestMessages []llm.Message
-	refs            []contextref.Reference
-	routeDecision   *modelroute.Decision
-	fallbackModels  []string
-	prompt          string
-	referenceCtx    string
-	requestModel    string
+	activeAgent           agentSelection
+	generation            generationSettings
+	requestMessages       []llm.Message
+	refs                  []contextref.Reference
+	inlineReferenceEvents []contextref.ReferenceEvent
+	routeDecision         *modelroute.Decision
+	fallbackModels        []string
+	prompt                string
+	requestModel          string
 }
 
 type responseRecordFile struct {
@@ -196,6 +196,9 @@ func runOnce(
 	sessionState session.Session,
 	contextOptions contextref.Options,
 	referenceContext string,
+	referenceManifest contextref.ReferenceManifest,
+	referenceContextEstimator string,
+	configuredReferences []string,
 	selectedModel string,
 	selectedAgent string,
 	fallbackModels []string,
@@ -215,6 +218,9 @@ func runOnce(
 		sessionState,
 		contextOptions,
 		referenceContext,
+		referenceManifest,
+		referenceContextEstimator,
+		configuredReferences,
 		selectedModel,
 		selectedAgent,
 		fallbackModels,
@@ -236,6 +242,9 @@ func runOnceWithOptions(
 	sessionState session.Session,
 	contextOptions contextref.Options,
 	referenceContext string,
+	referenceManifest contextref.ReferenceManifest,
+	referenceContextEstimator string,
+	configuredReferences []string,
 	selectedModel string,
 	selectedAgent string,
 	fallbackModels []string,
@@ -268,6 +277,10 @@ func runOnceWithOptions(
 		prompt,
 	)
 	if err != nil {
+		if len(prepared.inlineReferenceEvents) > 0 {
+			return handleRunOncePrepareError(ctx, hooks, reg, store, sessionState, prepared, referenceManifest, maxInputTokens, executionOptions, err)
+		}
+
 		recordHeadlessPreflightFailure(store, executionOptions, sessionState, prompt, selectedModel, selectedAgent, err)
 		emitRouteDecisionWarning(
 			ctx,
@@ -300,44 +313,20 @@ func runOnceWithOptions(
 		Model:       sessionState.DefaultModel,
 	})
 
-	headlessRun, err := startHeadlessRun(store, executionOptions, sessionState, prepared.prompt, prepared.requestModel, prepared.activeAgent.name)
-	if err != nil {
-		return err
-	}
-
-	stopHeadlessHeartbeat := startHeadlessHeartbeat(ctx, store, headlessRun)
-	defer stopHeadlessHeartbeat()
-
-	if userSaveErr := saveRunOnceUserMessage(ctx, hooks, store, &sessionState, prepared); userSaveErr != nil {
-		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, userSaveErr.Error())
-
-		return userSaveErr
-	}
-
 	params := llm.CompleteParams{
 		Model:    prepared.requestModel,
-		Messages: append(append([]llm.Message(nil), sessionState.Messages[:len(sessionState.Messages)-1]...), prepared.requestMessages...),
+		Messages: append(append([]llm.Message(nil), sessionState.Messages...), prepared.requestMessages...),
 	}
 	if prepared.activeAgent.ok {
 		params = prepared.activeAgent.agent.CompleteParams(prepared.requestModel, params.Messages)
 	}
 
-	prependReferenceContext(&params, prepared.referenceCtx)
+	requestContextOptions := contextOptionsForRequestModels(contextOptions, reg, prepared.requestModel, prepared.fallbackModels)
+	globalRefCtx := configuredReferenceContextForRunOnce(ctx, configuredReferences, referenceContext, referenceManifest, referenceContextEstimator, requestContextOptions)
+	refCtx := buildReferenceContextWithManifest(ctx, globalRefCtx, prepared.activeAgent, requestContextOptions)
+	prependReferenceContext(&params, refCtx.Content)
 
 	applyGenerationParams(&params, prepared.generation)
-
-	ctx = events.WithEmitter(ctx, hooks, events.Event{
-		SessionID:   sessionState.ID,
-		SessionPath: store.Path(sessionState.ID),
-		Agent:       prepared.activeAgent.name,
-		Model:       prepared.requestModel,
-	})
-
-	if budgetErr := validateRequestBudget(reg, params.Model, params.Messages, maxInputTokens); budgetErr != nil {
-		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, budgetErr.Error())
-
-		return budgetErr
-	}
 
 	// Enable tool use for one-shot calls: the LLM can invoke bash commands.
 	// Apply agent-level tool filtering when an agent is active.
@@ -352,6 +341,56 @@ func runOnceWithOptions(
 		prependToolReminder(&params, tools)
 	}
 
+	manifestEvent := requestContextManifestEvent(newRequestContextManifestForModelsWithInlineEvents(reg, params.Model, prepared.fallbackModels, params.Messages, maxInputTokens, prepared.inlineReferenceEvents, refCtx.Manifest))
+	manifestEvent.SessionID = sessionState.ID
+	manifestEvent.SessionPath = store.Path(sessionState.ID)
+	manifestEvent.Agent = prepared.activeAgent.name
+	setExplicitContextManifestEventModel(&manifestEvent, params.Model)
+	emitHookWarning(ctx, hooks, manifestEvent)
+
+	ctx = events.WithEmitter(ctx, hooks, events.Event{
+		SessionID:   sessionState.ID,
+		SessionPath: store.Path(sessionState.ID),
+		Agent:       prepared.activeAgent.name,
+		Model:       prepared.requestModel,
+	})
+
+	headlessRun, err := startHeadlessRun(
+		store,
+		executionOptions,
+		sessionState,
+		prepared.prompt,
+		prepared.requestModel,
+		prepared.activeAgent.name,
+		manifestEvent.Metadata["context_manifest"],
+	)
+	if err != nil {
+		return err
+	}
+
+	stopHeadlessHeartbeat := startHeadlessHeartbeat(ctx, store, headlessRun)
+	defer stopHeadlessHeartbeat()
+
+	if userSaveErr := saveRunOnceUserMessage(ctx, hooks, store, &sessionState, prepared); userSaveErr != nil {
+		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, userSaveErr.Error())
+
+		return userSaveErr
+	}
+
+	if budgetErr := validateRequestBudgetWithFallbacks(reg, params.Model, prepared.fallbackModels, params.Messages, maxInputTokens); budgetErr != nil {
+		emitHookWarning(ctx, hooks, events.Event{
+			Type:        events.Error,
+			SessionID:   sessionState.ID,
+			SessionPath: store.Path(sessionState.ID),
+			Agent:       prepared.activeAgent.name,
+			Model:       sessionState.DefaultModel,
+			Error:       budgetErr.Error(),
+		})
+		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, budgetErr.Error())
+
+		return budgetErr
+	}
+
 	slog.Debug("one-shot LLM request",
 		"agent", prepared.activeAgent.name,
 		"model", params.Model,
@@ -364,6 +403,8 @@ func runOnceWithOptions(
 		checkpointPath = ""
 	}
 
+	agentLoopPreflight := runOnceAgentLoopManifestPreflight(ctx, hooks, reg, store, headlessRun, store.Path(sessionState.ID), sessionState.ID, prepared.activeAgent.name, prepared.fallbackModels, prepared.inlineReferenceEvents, refCtx.Manifest, maxInputTokens)
+
 	resp, err := runOnceComplete(
 		ctx,
 		reg,
@@ -373,6 +414,7 @@ func runOnceWithOptions(
 		executionOptions.AgentLoopCheckpointInterval,
 		executionOptions.Response,
 		checkpointPath,
+		agentLoopPreflight,
 	)
 	if err != nil {
 		emitHookWarning(ctx, hooks, events.Event{
@@ -476,6 +518,102 @@ func applyRunOnceSessionDefaults(sessionState *session.Session, prepared runOnce
 	}
 }
 
+func handleRunOncePrepareError(
+	ctx context.Context,
+	hooks *events.Runner,
+	reg *llm.Registry,
+	store *session.Store,
+	sessionState session.Session,
+	prepared runOncePrepared,
+	referenceManifest contextref.ReferenceManifest,
+	maxInputTokens int,
+	executionOptions runOnceExecutionOptions,
+	prepareErr error,
+) error {
+	manifestEvent, ok := runOncePrepareContextManifestEvent(reg, store, sessionState, prepared, referenceManifest, maxInputTokens)
+	if !ok {
+		return prepareErr
+	}
+
+	emitHookWarning(ctx, hooks, manifestEvent)
+
+	headlessRun, headlessErr := startHeadlessRun(
+		store,
+		executionOptions,
+		sessionState,
+		prepared.prompt,
+		prepared.requestModel,
+		prepared.activeAgent.name,
+		manifestEvent.Metadata["context_manifest"],
+	)
+	if headlessErr != nil {
+		return errors.Join(prepareErr, headlessErr)
+	}
+
+	finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, prepareErr.Error())
+
+	return prepareErr
+}
+
+func runOncePrepareContextManifestEvent(
+	reg *llm.Registry,
+	store *session.Store,
+	sessionState session.Session,
+	prepared runOncePrepared,
+	referenceManifest contextref.ReferenceManifest,
+	maxInputTokens int,
+) (events.Event, bool) {
+	if len(prepared.inlineReferenceEvents) == 0 {
+		return events.Event{}, false
+	}
+
+	referenceManifest = omitIncludedReferenceManifestEntries(referenceManifest, "request assembly aborted before configured reference context was sent")
+
+	prompt := prepared.prompt
+	if strings.TrimSpace(prompt) == "" && len(prepared.requestMessages) > 0 {
+		prompt = prepared.requestMessages[len(prepared.requestMessages)-1].Content
+	}
+
+	manifestEvent := requestContextManifestEvent(newRequestContextManifestForModelsWithInlineEvents(
+		reg,
+		prepared.requestModel,
+		prepared.fallbackModels,
+		[]llm.Message{{Role: llm.RoleUser, Content: prompt}},
+		maxInputTokens,
+		prepared.inlineReferenceEvents,
+		referenceManifest,
+	))
+	manifestEvent.SessionID = sessionState.ID
+
+	if store != nil {
+		manifestEvent.SessionPath = store.Path(sessionState.ID)
+	}
+
+	manifestEvent.Agent = prepared.activeAgent.name
+	setExplicitContextManifestEventModel(&manifestEvent, prepared.requestModel)
+
+	return manifestEvent, true
+}
+
+func configuredReferenceContextForRunOnce(
+	ctx context.Context,
+	configuredReferences []string,
+	referenceContext string,
+	referenceManifest contextref.ReferenceManifest,
+	referenceContextEstimator string,
+	contextOptions contextref.Options,
+) configuredReferenceContext {
+	if referenceContextEstimator == "" {
+		referenceContextEstimator = referenceManifest.TokenEstimator
+	}
+
+	return configuredReferenceContextForRequest(ctx, configuredReferences, configuredReferenceContext{
+		Content:   referenceContext,
+		Manifest:  referenceManifest,
+		Estimator: referenceContextEstimator,
+	}, contextOptions)
+}
+
 func prepareRunOnceRequest(
 	ctx context.Context,
 	reg *llm.Registry,
@@ -495,14 +633,31 @@ func prepareRunOnceRequest(
 		return runOncePrepared{}, err
 	}
 
-	requestMessages, refs, err := expandReferences([]llm.Message{{Role: llm.RoleUser, Content: userPrompt}}, contextOptions)
+	requestModel := selectedModel
+	if activeAgent.ok && !modelLocked {
+		requestModel, fallbackModels = effectiveAgentModelSelection(selectedModel, fallbackModels, activeAgent)
+	}
+
+	contextOptions = contextOptionsForRequestModels(contextOptions, reg, requestModel, fallbackModels)
+
+	requestMessages, refs, inlineEvents, err := expandReferences([]llm.Message{{Role: llm.RoleUser, Content: userPrompt}}, contextOptions)
 	if err != nil {
-		return runOncePrepared{}, err
+		return runOncePrepared{
+			activeAgent:           activeAgent,
+			generation:            generationForRequest(generationDefaults, generationOverrides, activeAgent),
+			inlineReferenceEvents: inlineEvents,
+			fallbackModels:        fallbackModels,
+			prompt:                userPrompt,
+			requestModel:          requestModel,
+		}, err
 	}
 
 	generation := generationForRequest(generationDefaults, generationOverrides, activeAgent)
-	requestReferenceContext := buildReferenceContext(ctx, referenceContext, activeAgent, contextOptions)
-	budgetMessages := requestMessagesForBudget(selectedModel, requestMessages, activeAgent, generation, requestReferenceContext)
+	requestReferenceContext := buildReferenceContextWithManifest(ctx, configuredReferenceContext{
+		Content:   referenceContext,
+		Estimator: estimatorSummaryForContextOptions(contextOptions),
+	}, activeAgent, contextOptions)
+	budgetMessages := requestMessagesForBudget(requestModel, requestMessages, activeAgent, generation, requestReferenceContext.Content, true)
 
 	requestModel, fallbackModels, routeDecision, err := requestModelAndFallbacks(
 		selectedModel,
@@ -514,19 +669,27 @@ func prepareRunOnceRequest(
 		routeAvailabilityFromRegistryWithRefresh(ctx, reg, effectiveRouteCandidateChain(selectedModel, fallbackModels, activeAgent, modelLocked)),
 	)
 	if err != nil {
-		return runOncePrepared{activeAgent: activeAgent, routeDecision: routeDecision}, err
+		return runOncePrepared{
+			activeAgent:           activeAgent,
+			generation:            generation,
+			inlineReferenceEvents: inlineEvents,
+			routeDecision:         routeDecision,
+			fallbackModels:        fallbackModels,
+			prompt:                userPrompt,
+			requestModel:          requestModel,
+		}, err
 	}
 
 	return runOncePrepared{
-		activeAgent:     activeAgent,
-		generation:      generation,
-		requestMessages: requestMessages,
-		refs:            refs,
-		routeDecision:   routeDecision,
-		fallbackModels:  fallbackModels,
-		prompt:          userPrompt,
-		referenceCtx:    requestReferenceContext,
-		requestModel:    requestModel,
+		activeAgent:           activeAgent,
+		generation:            generation,
+		requestMessages:       requestMessages,
+		refs:                  refs,
+		inlineReferenceEvents: inlineEvents,
+		routeDecision:         routeDecision,
+		fallbackModels:        fallbackModels,
+		prompt:                userPrompt,
+		requestModel:          requestModel,
 	}, nil
 }
 
@@ -796,6 +959,7 @@ func startHeadlessRun(
 	prompt string,
 	modelName string,
 	agentName string,
+	contextManifestJSON ...string,
 ) (*session.HeadlessRun, error) {
 	if !options.Headless {
 		return nil, nil
@@ -883,6 +1047,15 @@ func startHeadlessRun(
 		}
 	}
 
+	manifestJSON := ""
+	if len(contextManifestJSON) > 0 {
+		manifestJSON = contextManifestJSON[0]
+	}
+
+	if err := appendHeadlessContextManifestLog(store, &saved, manifestJSON); err != nil {
+		return nil, err
+	}
+
 	return &saved, nil
 }
 
@@ -930,6 +1103,19 @@ func failStartedHeadlessRun(store *session.Store, run *session.HeadlessRun, err 
 func saveStartedHeadlessRun(store *session.Store, run session.HeadlessRun) error {
 	if err := store.SaveNewHeadlessRun(run); err != nil {
 		return fmt.Errorf("save new headless run: %w", err)
+	}
+
+	return nil
+}
+
+func appendHeadlessContextManifestLog(store *session.Store, run *session.HeadlessRun, manifestJSON string) error {
+	if store == nil || run == nil || strings.TrimSpace(manifestJSON) == "" {
+		return nil
+	}
+
+	line := "context_manifest\t" + time.Now().UTC().Format(time.RFC3339) + "\tjson=" + manifestJSON + "\n"
+	if err := store.AppendHeadlessLog(run.ID, line); err != nil {
+		return fmt.Errorf("write headless context manifest log: %w", err)
 	}
 
 	return nil
@@ -1155,6 +1341,46 @@ func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFo
 // runOnceComplete handles replay or live agent-loop completion for one-shot
 // mode. If a replay path is set, it loads the recorded response; otherwise it
 // runs the agentic loop with tool execution support.
+func runOnceAgentLoopManifestPreflight(
+	ctx context.Context,
+	hooks *events.Runner,
+	reg *llm.Registry,
+	store *session.Store,
+	headlessRun *session.HeadlessRun,
+	sessionPath string,
+	sessionID string,
+	agentName string,
+	fallbackModels []string,
+	inlineEvents []contextref.ReferenceEvent,
+	referenceManifest contextref.ReferenceManifest,
+	maxInputTokens int,
+) func(iteration int, params llm.CompleteParams) error {
+	return func(iteration int, params llm.CompleteParams) error {
+		if iteration > 0 {
+			manifestEvent := requestContextManifestEvent(newRequestContextManifestForModelsWithInlineEvents(
+				reg,
+				params.Model,
+				fallbackModels,
+				params.Messages,
+				maxInputTokens,
+				inlineEvents,
+				referenceManifest,
+			))
+			manifestEvent.SessionID = sessionID
+			manifestEvent.SessionPath = sessionPath
+			manifestEvent.Agent = agentName
+			setExplicitContextManifestEventModel(&manifestEvent, params.Model)
+			emitHookWarning(ctx, hooks, manifestEvent)
+
+			if err := appendHeadlessContextManifestLog(store, headlessRun, manifestEvent.Metadata["context_manifest"]); err != nil {
+				return err
+			}
+		}
+
+		return validateRequestBudgetWithFallbacks(reg, params.Model, fallbackModels, params.Messages, maxInputTokens)
+	}
+}
+
 func runOnceComplete(
 	ctx context.Context,
 	reg *llm.Registry,
@@ -1164,6 +1390,7 @@ func runOnceComplete(
 	agentLoopCheckpointInterval int,
 	responseOptions responseRecordOptions,
 	checkpointPath string,
+	beforeModelCall func(iteration int, params llm.CompleteParams) error,
 ) (*llm.Response, error) {
 	if responseOptions.ReplayPath != "" {
 		resp, err := loadRecordedResponse(responseOptions.ReplayPath)
@@ -1188,6 +1415,7 @@ func runOnceComplete(
 	resp, _, err := llm.AgentLoop(ctx, reg, params, fallbackModels, executor, llm.AgentLoopConfig{
 		ConfirmContinue:    confirmContinueStdin,
 		ConfirmToolCall:    confirmToolCallStdin,
+		BeforeModelCall:    beforeModelCall,
 		Budget:             agentLoopBudget,
 		CheckpointInterval: agentLoopCheckpointInterval,
 		Policy:             llm.BashToolPolicy,

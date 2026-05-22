@@ -35,6 +35,8 @@ const (
 	FileWrite = "file_write"
 	// ContextAdd is emitted when a local reference is added to LLM context.
 	ContextAdd = "context_add"
+	// ContextManifest is emitted with an audit manifest before an LLM request.
+	ContextManifest = "context_manifest"
 	// CommandExecute is emitted when Atteler starts a local command.
 	CommandExecute = "command_execute"
 	// CommandOutput is emitted when a local command finishes and output is available.
@@ -61,6 +63,7 @@ var supportedEventTypes = []SupportedEventType{
 	{Type: CommandExecute, Description: "Emitted when Atteler starts a local command."},
 	{Type: CommandOutput, Description: "Emitted when a local command finishes and captured output is available."},
 	{Type: ContextAdd, Description: "Emitted when a local reference is added to LLM context."},
+	{Type: ContextManifest, Description: "Emitted before an LLM request with context audit metadata."},
 	{Type: Error, Description: "Emitted when an LLM request or session operation fails."},
 	{Type: FileRead, Description: "Emitted when Atteler reads a user or project file."},
 	{Type: FileWrite, Description: "Emitted when Atteler writes a local file."},

@@ -37,6 +37,11 @@ var runInteractiveProgram = func(m model) (tea.Model, error) {
 	return tea.NewProgram(m).Run()
 }
 
+const (
+	executionModePlan    = "plan"
+	executionModeExecute = "execute"
+)
+
 var (
 	promptStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("170")).
@@ -204,9 +209,11 @@ type llmRequest struct {
 	agentLoopCheckpointPath     string
 	referenceContext            string
 	workingDir                  string
+	referenceManifest           contextref.ReferenceManifest
 	messages                    []llm.Message
 	fallbackModels              []string
 	refs                        []contextref.Reference
+	inlineReferenceEvents       []contextref.ReferenceEvent
 	agent                       agent.Agent
 	hasAgent                    bool
 	useTools                    bool
@@ -254,45 +261,48 @@ type model struct {
 	agentLoopBudget             llm.AgentLoopBudget
 	agentLoopCheckpointInterval int
 
-	sessionState          session.Session
-	history               []llm.Message
-	promptHistory         []string
-	queuedPrompts         []string
-	promptHistoryDraft    string
-	pickerItems           []pickerItem
-	contextOptions        contextref.Options
-	referenceContext      string
-	skillLearningStoreDir string
-	skillLearningSkillDir string
-	worktreeInfo          *worktree.Info
-	tokenUsage            tokenUsage
-	runningTaskStarted    time.Time
-	idleSuggestionInput   string
-	idleSuggestionText    string
-	idleSuggestionStatus  string
-	pickerCursor          int
-	idleSuggestionID      int
-	terminalTitleFrame    int
-	modelFetchID          int
-	modelFetchesPending   int
-	completionCursor      int
-	promptHistoryCursor   int
-	runningTaskID         int
-	maxInputTokens        int
-	width                 int
-	quitting              bool
-	waiting               bool
-	pickerOpen            bool
-	pickerLoading         bool
-	scopePickerOpen       bool
-	completionOpen        bool
-	modelLocked           bool
-	promptLocalOnly       bool
-	skillLearningEnabled  bool
-	revampUndoActive      bool
-	completionItems       []completionCandidate
-	runningTaskLabel      string
-	revampUndo            string
+	sessionState              session.Session
+	history                   []llm.Message
+	promptHistory             []string
+	queuedPrompts             []string
+	promptHistoryDraft        string
+	pickerItems               []pickerItem
+	contextOptions            contextref.Options
+	configuredReferences      []string
+	referenceContext          string
+	referenceManifest         contextref.ReferenceManifest
+	referenceContextEstimator string
+	skillLearningStoreDir     string
+	skillLearningSkillDir     string
+	worktreeInfo              *worktree.Info
+	tokenUsage                tokenUsage
+	runningTaskStarted        time.Time
+	idleSuggestionInput       string
+	idleSuggestionText        string
+	idleSuggestionStatus      string
+	pickerCursor              int
+	idleSuggestionID          int
+	terminalTitleFrame        int
+	modelFetchID              int
+	modelFetchesPending       int
+	completionCursor          int
+	promptHistoryCursor       int
+	runningTaskID             int
+	maxInputTokens            int
+	width                     int
+	quitting                  bool
+	waiting                   bool
+	pickerOpen                bool
+	pickerLoading             bool
+	scopePickerOpen           bool
+	completionOpen            bool
+	modelLocked               bool
+	promptLocalOnly           bool
+	skillLearningEnabled      bool
+	revampUndoActive          bool
+	completionItems           []completionCandidate
+	runningTaskLabel          string
+	revampUndo                string
 
 	// checkpointResponseCh is non-nil when the TUI is waiting for the user to
 	// confirm whether to continue the agent loop or execute a require-confirm
@@ -313,7 +323,10 @@ func initialModel(
 	stateStore *appconfig.StateStore,
 	sessionState session.Session,
 	contextOptions contextref.Options,
+	configuredReferences []string,
 	referenceContext string,
+	referenceManifest contextref.ReferenceManifest,
+	referenceContextEstimator string,
 	skillLearningStoreDir string,
 	skillLearningSkillDir string,
 	skillLearningEnabled bool,
@@ -343,7 +356,10 @@ func initialModel(
 		stateStore:                  stateStore,
 		sessionState:                sessionState,
 		contextOptions:              contextOptions,
+		configuredReferences:        append([]string(nil), configuredReferences...),
 		referenceContext:            referenceContext,
+		referenceManifest:           referenceManifest,
+		referenceContextEstimator:   referenceContextEstimator,
 		skillLearningStoreDir:       skillLearningStoreDir,
 		skillLearningSkillDir:       skillLearningSkillDir,
 		skillLearningEnabled:        skillLearningEnabled,
@@ -366,6 +382,6 @@ func initialModel(
 		promptLocalOnly:             promptLocalOnly,
 		worktreeInfo:                wtInfo,
 		pinnedMessages:              make(map[int]bool),
-		executionMode:               "execute",
+		executionMode:               executionModeExecute,
 	}
 }

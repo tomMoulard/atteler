@@ -10,6 +10,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/agent"
 	"github.com/tommoulard/atteler/pkg/contextref"
+	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/review"
 	"github.com/tommoulard/atteler/pkg/watch"
@@ -260,13 +261,17 @@ func formatReviewFinding(finding review.Finding) string {
 }
 
 type reviewCompleter struct {
-	registry       *llm.Registry
-	agents         *agent.Registry
-	selectedModel  string
-	fallbackModels []string
-	generationBase generationSettings
-	generationOver generationSettings
-	modelLocked    bool
+	registry          *llm.Registry
+	agents            *agent.Registry
+	hookRunner        *events.Runner
+	selectedModel     string
+	fallbackModels    []string
+	generationBase    generationSettings
+	generationOver    generationSettings
+	contextOptions    contextref.Options
+	referenceManifest contextref.ReferenceManifest
+	maxInputTokens    int
+	modelLocked       bool
 }
 
 func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt, userPrompt string) (string, error) {
@@ -287,7 +292,7 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 		rc.modelLocked,
 		rc.fallbackModels,
 		activeAgent,
-		routeProfileForMessages(requestMessagesForBudget(rc.selectedModel, messages, activeAgent, generation, ""), generation),
+		routeProfileForMessages(requestMessagesForBudget(rc.selectedModel, messages, activeAgent, generation, "", false), generation),
 		routeTelemetryFromRegistry(rc.registry),
 		routeAvailabilityFromRegistryWithRefresh(ctx, rc.registry, effectiveRouteCandidateChain(rc.selectedModel, rc.fallbackModels, activeAgent, rc.modelLocked)),
 	)
@@ -305,6 +310,38 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 
 	applyGenerationParams(&params, generation)
 
+	manifest := contextref.ReferenceManifest{}
+	if reviewPromptIncludesReferenceContext(userPrompt) {
+		manifest = rc.referenceManifest
+	}
+
+	if activeAgent.ok && len(activeAgent.agent.References) > 0 {
+		contextOptions := contextOptionsForRequestModels(rc.contextOptions, rc.registry, params.Model, fallbackModels)
+		referenceContext := buildReferenceContextWithManifest(ctx, configuredReferenceContext{
+			Manifest:  manifest,
+			Estimator: estimatorSummaryForContextOptions(contextOptions),
+		}, activeAgent, contextOptions)
+
+		prependReferenceContext(&params, referenceContext.Content)
+		manifest = referenceContext.Manifest
+	}
+
+	manifestEvent := requestContextManifestEvent(newRequestContextManifestForModels(
+		rc.registry,
+		params.Model,
+		fallbackModels,
+		params.Messages,
+		rc.maxInputTokens,
+		manifest,
+	))
+	manifestEvent.Agent = reviewer
+	setExplicitContextManifestEventModel(&manifestEvent, params.Model)
+	emitHookWarning(ctx, rc.hookRunner, manifestEvent)
+
+	if err := validateRequestBudgetWithFallbacks(rc.registry, params.Model, fallbackModels, params.Messages, rc.maxInputTokens); err != nil {
+		return "", fmt.Errorf("review LLM budget: %w", err)
+	}
+
 	resp, err := rc.registry.CompleteWithFallback(ctx, params, fallbackModels)
 	if err != nil {
 		return "", fmt.Errorf("review LLM complete: %w", err)
@@ -319,19 +356,23 @@ func runReviewExecution(ctx context.Context, state appState, input reviewRunComm
 		return fmt.Errorf("review-run: %w", err)
 	}
 
-	reviewContext, err := buildReviewContext(ctx, plan.Paths(), input.Prompt, state.contextOptions)
+	reviewContext, err := buildReviewContextWithManifest(ctx, plan.Paths(), input.Prompt, state.contextOptions)
 	if err != nil {
 		return fmt.Errorf("review-run context: %w", err)
 	}
 
 	completer := &reviewCompleter{
-		registry:       state.registry,
-		agents:         state.agentRegistry,
-		selectedModel:  state.selectedModel,
-		fallbackModels: state.fallbackModels,
-		generationBase: state.generationDefaults,
-		generationOver: state.generationOverrides,
-		modelLocked:    state.modelLocked,
+		registry:          state.registry,
+		agents:            state.agentRegistry,
+		hookRunner:        state.hookRunner,
+		contextOptions:    state.contextOptions,
+		selectedModel:     state.selectedModel,
+		fallbackModels:    state.fallbackModels,
+		generationBase:    state.generationDefaults,
+		generationOver:    state.generationOverrides,
+		referenceManifest: reviewContext.Manifest,
+		maxInputTokens:    state.maxInputTokens,
+		modelLocked:       state.modelLocked,
 	}
 
 	reviewerNames := make([]string, 0, len(plan.Reviewers()))
@@ -341,7 +382,7 @@ func runReviewExecution(ctx context.Context, state appState, input reviewRunComm
 
 	fmt.Fprintln(os.Stderr, "review: running three-round pipeline with "+strings.Join(reviewerNames, ", ")+"...")
 
-	result, err := review.RunWithLLM(ctx, plan, completer, reviewContext)
+	result, err := review.RunWithLLM(ctx, plan, completer, reviewContext.Content)
 	if err != nil {
 		if len(result.Session.Reports) > 0 || result.Session.Verdict.Reviewer != "" {
 			fmt.Print(formatReviewRunResult(result))
@@ -355,12 +396,49 @@ func runReviewExecution(ctx context.Context, state appState, input reviewRunComm
 	return nil
 }
 
+func reviewPromptIncludesReferenceContext(userPrompt string) bool {
+	return strings.Contains(userPrompt, "Review context:\n")
+}
+
 func buildReviewContext(ctx context.Context, paths []string, prompt string, opts contextref.Options) (string, error) {
+	reviewContext, err := buildReviewContextWithManifest(ctx, paths, prompt, opts)
+	if err != nil {
+		return "", err
+	}
+
+	return reviewContext.Content, nil
+}
+
+func buildReviewContextWithManifest(ctx context.Context, paths []string, prompt string, opts contextref.Options) (configuredReferenceContext, error) {
 	opts.ReferenceScope = contextref.ReferenceScopeReview
 
-	refs, err := contextref.LoadReferences(ctx, paths, opts)
+	refs, referenceEvents, err := contextref.LoadReferencesWithReport(ctx, paths, opts)
+	estimatorSummary := estimatorSummaryForContextOptions(opts)
+
+	manifest := withReferenceManifestEstimator(contextref.BuildReferenceManifest(referenceEvents), estimatorSummary)
+
+	for i := range referenceEvents {
+		fmt.Fprintln(os.Stderr, formatReferenceEvent(referenceEvents[i]))
+	}
+
 	if err != nil {
-		return "", fmt.Errorf("load review references: %w", err)
+		omittedEvents := omitLoadedConfiguredReferenceEvents(referenceEvents, "review reference context omitted because loading failed")
+		for i := range omittedEvents {
+			if omittedEvents[i].PolicyDecision == contextref.ReferenceDecisionOmitted {
+				fmt.Fprintln(os.Stderr, formatReferenceEvent(omittedEvents[i]))
+			}
+		}
+
+		manifest = withReferenceManifestEstimator(contextref.BuildReferenceManifest(omittedEvents), estimatorSummary)
+		if len(referenceEvents) > 0 {
+			fmt.Fprintln(os.Stderr, formatReferenceManifest(manifest))
+		}
+
+		return configuredReferenceContext{Manifest: manifest, Estimator: estimatorSummary}, fmt.Errorf("load review references: %w", err)
+	}
+
+	if len(referenceEvents) > 0 {
+		fmt.Fprintln(os.Stderr, formatReferenceManifest(manifest))
 	}
 
 	var b strings.Builder
@@ -377,10 +455,14 @@ func buildReviewContext(ctx context.Context, paths []string, prompt string, opts
 	}
 
 	if strings.TrimSpace(b.String()) == "" {
-		return "", errors.New("no review context loaded")
+		return configuredReferenceContext{Manifest: manifest, Estimator: estimatorSummary}, errors.New("no review context loaded")
 	}
 
-	return b.String(), nil
+	return configuredReferenceContext{
+		Content:   b.String(),
+		Manifest:  manifest,
+		Estimator: estimatorSummary,
+	}, nil
 }
 
 func formatReviewRunResult(result review.Result) string {

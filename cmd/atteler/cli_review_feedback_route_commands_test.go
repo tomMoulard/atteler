@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,10 +11,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/agent"
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
+	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/feedback"
+	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/review"
 	"github.com/tommoulard/atteler/pkg/session"
@@ -120,25 +124,209 @@ func TestWatchGateChecksToReview(t *testing.T) {
 	assert.Equal(t, "new findings meet or exceed high severity (blocking_findings=1)", checks[0].Notes)
 }
 
-func TestBuildReviewContext_LoadsPathsAndInstructions(t *testing.T) {
-	t.Parallel()
-
+func TestBuildReviewContext_LoadsPathsAndInstructions(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "auth.go")
 	require.NoError(t, os.WriteFile(path, []byte("package auth\n"), 0o600))
 
-	got, err := buildReviewContext(
-		t.Context(),
-		[]string{"auth.go"},
-		"focus on cancellation",
-		contextref.Options{Root: dir, MaxFileBytes: 1024, MaxTotalBytes: 1024},
-	)
-	require.NoError(t, err)
+	var got string
+
+	captureStderr(t, func() {
+		var err error
+
+		got, err = buildReviewContext(
+			t.Context(),
+			[]string{"auth.go"},
+			"focus on cancellation",
+			contextref.Options{Root: dir, MaxFileBytes: 1024, MaxTotalBytes: 1024},
+		)
+		require.NoError(t, err)
+	})
 
 	assert.Contains(t, got, "Review instructions:\nfocus on cancellation")
 	assert.Contains(t, got, `<file source="auth.go" truncated="false"`)
 	assert.Contains(t, got, `scope="review"`)
 	assert.Contains(t, got, "package auth")
+}
+
+func TestBuildReviewContextWithManifestReportsReviewReferences(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.go")
+	require.NoError(t, os.WriteFile(path, []byte("package auth\n"), 0o600))
+
+	var reviewContext configuredReferenceContext
+
+	stderr := captureStderr(t, func() {
+		var err error
+
+		reviewContext, err = buildReviewContextWithManifest(
+			t.Context(),
+			[]string{"auth.go"},
+			"",
+			contextOptionsForProviderModel(contextref.Options{Root: dir, MaxFileBytes: 1024, MaxTotalBytes: 1024}, "openai", "gpt-test"),
+		)
+		require.NoError(t, err)
+	})
+
+	require.NotEmpty(t, reviewContext.Content)
+	assert.Equal(t, 1, reviewContext.Manifest.IncludedCount)
+	assert.Equal(t, 0, reviewContext.Manifest.RejectedCount)
+	assert.Contains(t, reviewContext.Manifest.TokenEstimator, "openai-calibrated")
+	require.Len(t, reviewContext.Manifest.Entries, 1)
+	assert.Equal(t, contextref.ReferenceScopeReview, reviewContext.Manifest.Entries[0].Scope)
+	assert.Contains(t, stderr, "reference loaded")
+	assert.Contains(t, stderr, "reference manifest")
+}
+
+func TestBuildReviewContextWithManifestMarksLoadedReferencesOmittedOnFailure(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
+	dir := t.TempDir()
+	root := filepath.Join(dir, "project")
+	require.NoError(t, os.MkdirAll(root, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "auth.go"), []byte("package auth\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "secret.go"), []byte("package secret\n"), 0o600))
+
+	var reviewContext configuredReferenceContext
+
+	stderr := captureStderr(t, func() {
+		var err error
+
+		reviewContext, err = buildReviewContextWithManifest(
+			t.Context(),
+			[]string{"auth.go", "../secret.go"},
+			"",
+			contextOptionsForProviderModel(contextref.Options{Root: root, MaxFileBytes: 1024, MaxTotalBytes: 1024}, "openai", "gpt-test"),
+		)
+		require.Error(t, err)
+	})
+
+	assert.Empty(t, reviewContext.Content)
+	assert.Equal(t, 0, reviewContext.Manifest.IncludedCount)
+	assert.Equal(t, 1, reviewContext.Manifest.OmittedCount)
+	assert.Equal(t, 1, reviewContext.Manifest.RejectedCount)
+	require.Len(t, reviewContext.Manifest.Entries, 2)
+	assert.Equal(t, contextref.ReferenceDecisionOmitted, reviewContext.Manifest.Entries[0].PolicyDecision)
+	assert.Contains(t, reviewContext.Manifest.Entries[0].PolicyReason, "review reference context omitted")
+	assert.Equal(t, "omitted.omitted", reviewContext.Manifest.Entries[0].PolicyReasonCode)
+	assert.Equal(t, contextref.ReferenceDecisionRejected, reviewContext.Manifest.Entries[1].PolicyDecision)
+	assert.Contains(t, stderr, "reference loaded")
+	assert.Contains(t, stderr, "reference omitted")
+	assert.Contains(t, stderr, `"included_count":0`)
+	assert.Contains(t, stderr, `"omitted_count":1`)
+	assert.Contains(t, stderr, `"rejected_count":1`)
+}
+
+func TestReviewCompleterEmitsContextManifestBeforeBudgetFailure(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(modelPickerProvider{name: "openai", models: []string{"gpt-test"}})
+
+	var eventLog bytes.Buffer
+
+	referenceManifest := contextref.BuildReferenceManifest([]contextref.ReferenceEvent{
+		{
+			Source:         "auth.go",
+			Kind:           "file",
+			Scope:          contextref.ReferenceScopeReview,
+			Location:       "local",
+			PolicyDecision: contextref.ReferenceDecisionLoaded,
+			PolicyReason:   "allowed by policy",
+			TokenEstimate:  contextpack.TokenEstimate{Tokens: 2, ErrorBoundTokens: 1, UpperBoundTokens: 3},
+			TokenEstimator: "test-estimator",
+			Bytes:          12,
+		},
+	})
+
+	completer := reviewCompleter{
+		registry:          registry,
+		agents:            agent.NewRegistry(nil),
+		hookRunner:        events.NewRunnerWithLogger(nil, &eventLog),
+		selectedModel:     "gpt-test",
+		referenceManifest: referenceManifest,
+		maxInputTokens:    1,
+	}
+
+	_, err := completer.Complete(
+		t.Context(),
+		"quality-reviewer",
+		"system",
+		"Review context:\n"+strings.Repeat("x", 80),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "review LLM budget")
+
+	log := eventLog.String()
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, "agent=quality-reviewer")
+	assert.Contains(t, log, "configured_reference_entry_count=1")
+	assert.Contains(t, log, "fits_configured_token_budget=false")
+}
+
+func TestReviewCompleterIncludesAgentReferencesInPromptAndManifest(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "rubric.md"), []byte("review rubric"), 0o600))
+
+	provider := &capturingIdleSuggestionProvider{model: "gpt-test", response: "ok"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	var eventLog bytes.Buffer
+
+	completer := reviewCompleter{
+		registry:       registry,
+		agents:         agent.NewRegistry(map[string]config.AgentConfig{"quality-reviewer": {References: []string{"rubric.md"}}}),
+		hookRunner:     events.NewRunnerWithLogger(nil, &eventLog),
+		contextOptions: contextref.Options{Root: dir},
+		selectedModel:  "gpt-test",
+		maxInputTokens: 10_000,
+	}
+
+	captureStderr(t, func() {
+		_, err := completer.Complete(
+			t.Context(),
+			"quality-reviewer",
+			"system",
+			"Review context:\nprimary review surface",
+		)
+		require.NoError(t, err)
+	})
+
+	require.NotNil(t, provider.params)
+	require.NotEmpty(t, provider.params.Messages)
+	assert.Contains(t, provider.params.Messages[0].Content, "<configured_references>")
+	assert.Contains(t, provider.params.Messages[0].Content, `source="rubric.md"`)
+
+	log := eventLog.String()
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, "configured_reference_entry_count=1")
+	assert.Contains(t, log, "rubric.md")
+}
+
+func TestRegistryCompleterEmitsContextManifestBeforeBudgetFailure(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(modelPickerProvider{name: "openai", models: []string{"gpt-test"}})
+
+	var eventLog bytes.Buffer
+
+	completer := registryCompleter{
+		registry:       registry,
+		hookRunner:     events.NewRunnerWithLogger(nil, &eventLog),
+		maxInputTokens: 1,
+	}
+
+	_, err := completer.Complete(t.Context(), "gpt-test", "system", strings.Repeat("x", 80))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "speculate LLM budget")
+
+	log := eventLog.String()
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, "agent=gpt-test")
+	assert.Contains(t, log, "fits_configured_token_budget=false")
+	assert.Contains(t, log, "estimated_token_upper_bound=")
 }
 
 func TestFormatReviewRunResult(t *testing.T) {

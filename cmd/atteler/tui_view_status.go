@@ -15,6 +15,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/tommoulard/atteler/pkg/contextref"
+	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/promptcomplete"
 )
@@ -270,13 +272,15 @@ func (m model) contextUsage() string {
 		limit = m.registry.ContextWindow(m.selectedModel)
 	}
 
-	used := llm.EstimateTokens(m.history)
+	estimate, _ := estimateMessagesForModel(m.registry, m.selectedModel, m.history)
+
+	used := estimate.UpperBoundTokens
 	if limit > 0 {
-		return "ctx:" + formatTokenCount(used) + "/" + formatTokenCount(limit)
+		return "ctx≤" + formatTokenCount(used) + "/" + formatTokenCount(limit)
 	}
 
 	if used > 0 {
-		return "ctx:~" + formatTokenCount(used)
+		return "ctx≤" + formatTokenCount(used)
 	}
 
 	return ""
@@ -382,7 +386,19 @@ func (m model) updateIdleSuggestionRequest(msg idleSuggestionRequestMsg) (tea.Mo
 		m.idleSuggestionCancel = cancel
 	}
 
-	return m, requestIdleSuggestion(requestCtx, m.registry, m.selectedModel, m.fallbackModels, m.generationDefaults, m.generationOverrides, msg.id, msg.input, m.idleSuggestionContext())
+	return m, requestIdleSuggestion(
+		requestCtx,
+		m.registry,
+		m.selectedModel,
+		m.fallbackModels,
+		m.generationDefaults,
+		m.generationOverrides,
+		m.hookRunner,
+		m.maxInputTokens,
+		msg.id,
+		msg.input,
+		m.idleSuggestionContext(),
+	)
 }
 
 func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) {
@@ -442,6 +458,8 @@ func requestIdleSuggestion(
 	fallbackModels []string,
 	defaults generationSettings,
 	overrides generationSettings,
+	hookRunner *events.Runner,
+	maxInputTokens int,
 	id int,
 	input string,
 	contextSummary string,
@@ -474,6 +492,21 @@ func requestIdleSuggestion(
 			},
 		}
 		applyGenerationParams(&params, generation)
+
+		manifestEvent := requestContextManifestEvent(newRequestContextManifestForModels(
+			reg,
+			params.Model,
+			fallbackModels,
+			params.Messages,
+			maxInputTokens,
+			contextref.ReferenceManifest{},
+		))
+		setExplicitContextManifestEventModel(&manifestEvent, params.Model)
+		emitHookWarning(reqCtx, hookRunner, manifestEvent)
+
+		if err := validateRequestBudgetWithFallbacks(reg, params.Model, fallbackModels, params.Messages, maxInputTokens); err != nil {
+			return idleSuggestionMsg{id: id, input: input, err: err}
+		}
 
 		resp, err := reg.CompleteWithFallback(reqCtx, params, fallbackModels)
 		if err != nil {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/agent"
 	"github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -48,6 +49,9 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 		session.New("gpt-test", nil),
 		contextref.Options{Root: dir},
 		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
 		"gpt-test",
 		"",
 		nil,
@@ -167,6 +171,9 @@ func TestRunOnceWithOptions_EmitsEstimatedAndActualRouteDecisionEvents(t *testin
 		session.New("", nil),
 		contextref.Options{Root: dir},
 		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
 		"",
 		"reviewer",
 		nil,
@@ -197,6 +204,213 @@ func TestRunOnceWithOptions_EmitsEstimatedAndActualRouteDecisionEvents(t *testin
 	assert.Contains(t, log, "actual_selected=openai/gpt-4.1-nano")
 	assert.Contains(t, log, "fallback_order=openai/gpt-4.1-nano,openai/gpt-4.1-mini")
 	assert.Contains(t, log, "verified_provider_model_count=1")
+}
+
+func TestRunOnce_EmitsContextManifestBeforeBudgetFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+
+	var eventLog bytes.Buffer
+
+	hooks := events.NewRunnerWithLogger(nil, &eventLog)
+
+	err := runOnce(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		hooks,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		1,
+		responseRecordOptions{},
+		true,
+		strings.Repeat("x", 200),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_input_tokens")
+
+	log := eventLog.String()
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, "fits_configured_token_budget=false")
+	assert.Contains(t, log, "estimated_token_upper_bound")
+	assert.Contains(t, log, "max_input_tokens=1")
+}
+
+func TestRunOnce_EmitsContextManifestForRejectedInlineReference(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "repo")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(parent, "outside.txt"), []byte("secret"), 0o600))
+
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+
+	var eventLog bytes.Buffer
+
+	hooks := events.NewRunnerWithLogger(nil, &eventLog)
+	referenceManifest := contextref.BuildReferenceManifest([]contextref.ReferenceEvent{
+		{
+			Source:         "style.md",
+			Kind:           "file",
+			Scope:          contextref.ReferenceScopeGlobal,
+			Location:       "local",
+			Bytes:          12,
+			PolicyDecision: contextref.ReferenceDecisionLoaded,
+			PolicyReason:   "allowed by policy",
+			TokenEstimate:  contextpack.TokenEstimate{Tokens: 3, ErrorBoundTokens: 1, UpperBoundTokens: 4},
+			TokenEstimator: "test-estimator",
+		},
+	})
+
+	err := runOnce(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		hooks,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		referenceManifest,
+		"",
+		nil,
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		responseRecordOptions{},
+		true,
+		"read @../outside.txt",
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expand context references")
+
+	log := eventLog.String()
+	assert.Contains(t, log, "event:context_manifest")
+	assert.Contains(t, log, "inline_reference_count=1")
+	assert.Contains(t, log, "included_reference_count=0")
+	assert.Contains(t, log, "omitted_reference_count=1")
+	assert.Contains(t, log, "rejected_reference_count=1")
+	assert.Contains(t, log, "context_manifest=")
+	assert.Contains(t, log, "escapes root")
+	assert.Contains(t, log, "rejected.root_escape")
+	assert.Contains(t, log, "omitted.request_aborted")
+}
+
+func TestRunOnceWithOptions_HeadlessRejectedInlineReferenceWritesManifest(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "repo")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(parent, "outside.txt"), []byte("secret"), 0o600))
+
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	headlessID := "test-headless-rejected-inline"
+
+	err := runOnceWithOptions(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		nil,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat: outputFormatText,
+			HeadlessID:   headlessID,
+			Headless:     true,
+		},
+		true,
+		"read @../outside.txt",
+	)
+	require.Error(t, err)
+
+	run, err := store.LoadHeadlessRun(headlessID)
+	require.NoError(t, err)
+	assert.Equal(t, session.HeadlessStatusFailed, run.Status)
+	assert.Contains(t, run.Error, "expand context references")
+	require.NotNil(t, run.ExitCode)
+	assert.Equal(t, 1, *run.ExitCode)
+
+	log, err := store.ReadHeadlessLog(headlessID)
+	require.NoError(t, err)
+	assert.Contains(t, log, "started")
+	assert.Contains(t, log, "context_manifest")
+
+	manifest := decodeHeadlessContextManifest(t, log)
+	assert.Equal(t, 1, manifest.InlineReferenceCount)
+	assert.Equal(t, 1, manifest.RejectedReferenceCount)
+	require.Len(t, manifest.InlineReferences, 1)
+	assert.Equal(t, contextref.ReferenceDecisionRejected, manifest.InlineReferences[0].PolicyDecision)
+	assert.Contains(t, manifest.InlineReferences[0].PolicyReason, "escapes root")
+	assert.Equal(t, "rejected.root_escape", manifest.InlineReferences[0].PolicyReasonCode)
+	assert.NotContains(t, manifest.InlineReferences[0].PolicyReason, dir)
+}
+
+func TestRunOnceAgentLoopPreflightAppendsFollowupHeadlessManifest(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	headlessRun := session.HeadlessRun{
+		ID:        "run-manifest",
+		SessionID: "session-manifest",
+		Status:    session.HeadlessStatusRunning,
+	}
+	require.NoError(t, store.SaveHeadlessRun(headlessRun))
+
+	preflight := runOnceAgentLoopManifestPreflight(
+		context.Background(),
+		nil,
+		llm.NewRegistry(),
+		store,
+		&headlessRun,
+		filepath.Join(dir, "sessions", "session-manifest.json"),
+		headlessRun.SessionID,
+		"agent-a",
+		nil,
+		nil,
+		contextref.ReferenceManifest{},
+		10_000,
+	)
+
+	err := preflight(1, llm.CompleteParams{
+		Model:    "gpt-test",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "follow-up after tool output"}},
+	})
+	require.NoError(t, err)
+
+	log, err := store.ReadHeadlessLog(headlessRun.ID)
+	require.NoError(t, err)
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, `"schema_version":1`)
+	assert.Contains(t, log, `"message_count":1`)
 }
 
 func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
@@ -261,6 +475,9 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 		session.New("gpt-test", nil),
 		contextref.Options{Root: dir},
 		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
 		"gpt-test",
 		"",
 		nil,
@@ -288,6 +505,8 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 	log, err := store.ReadHeadlessLog(headlessID)
 	require.NoError(t, err)
 	assert.Contains(t, log, "started")
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, `"schema_version":1`)
 	assert.Contains(t, log, "assistant_message")
 	assert.Contains(t, log, "completed")
 
@@ -499,6 +718,134 @@ func TestFailStartedHeadlessRunRecordsFailedStatus(t *testing.T) {
 	assert.Equal(t, headlessEvents[0].Error, headlessEvents[0].TerminalReason)
 }
 
+func TestRunOnceWithOptions_HeadlessBudgetFailureLogsManifest(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	headlessID := "test-headless-budget"
+
+	err := runOnceWithOptions(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		nil,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		1,
+		runOnceExecutionOptions{
+			OutputFormat: outputFormatText,
+			HeadlessID:   headlessID,
+			Headless:     true,
+		},
+		true,
+		strings.Repeat("x", 200),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_input_tokens")
+
+	run, err := store.LoadHeadlessRun(headlessID)
+	require.NoError(t, err)
+	assert.Equal(t, session.HeadlessStatusFailed, run.Status)
+	assert.Contains(t, run.Error, "max_input_tokens")
+
+	log, err := store.ReadHeadlessLog(headlessID)
+	require.NoError(t, err)
+	assert.Contains(t, log, "started")
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, `"schema_version":1`)
+	assert.Contains(t, log, "failed")
+}
+
+func TestRunOnceWithOptions_HeadlessManifestIncludesInlineReferenceAudit(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs"), 0o750))
+
+	referenceContent := "guide content\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docs", "guide.md"), []byte(referenceContent), 0o600))
+
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "fallback/tiny", Messages: []llm.Message{{Role: llm.RoleUser, Content: "summarize @docs/guide.md"}}},
+		nil,
+		&llm.Response{Content: "recorded answer", Model: "fallback/tiny"},
+	))
+
+	registry := llm.NewRegistry()
+	registry.Register(contextManifestBudgetProvider{name: "fallback", models: []string{"tiny"}, window: 10_000})
+
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	headlessID := "test-headless-inline-manifest"
+
+	var eventLog bytes.Buffer
+
+	err := runOnceWithOptions(
+		context.Background(),
+		registry,
+		agent.NewRegistry(nil),
+		events.NewRunnerWithLogger(nil, &eventLog),
+		store,
+		session.New("", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"",
+		"",
+		[]string{"fallback/tiny"},
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat: outputFormatText,
+			HeadlessID:   headlessID,
+			Response:     responseRecordOptions{ReplayPath: replayPath},
+			Headless:     true,
+		},
+		true,
+		"summarize @docs/guide.md",
+	)
+	require.NoError(t, err)
+
+	assert.Contains(t, eventLog.String(), "event:context_manifest model=fallback/tiny")
+
+	log, err := store.ReadHeadlessLog(headlessID)
+	require.NoError(t, err)
+
+	manifest := decodeHeadlessContextManifest(t, log)
+	assert.Equal(t, "fallback/tiny", manifest.Model)
+	assert.Equal(t, 1, manifest.InlineReferenceCount)
+	assert.Equal(t, 1, manifest.IncludedReferenceCount)
+	assert.Equal(t, len(referenceContent), manifest.ReferenceBytes)
+	assert.Positive(t, manifest.ReferenceEstimatedUpperBound)
+	require.Len(t, manifest.InlineReferences, 1)
+	assert.Equal(t, "docs/guide.md", manifest.InlineReferences[0].Source)
+	assert.Equal(t, "file", manifest.InlineReferences[0].Kind)
+	assert.Equal(t, contextref.ReferenceScopeInline, manifest.InlineReferences[0].Scope)
+	assert.Equal(t, "local", manifest.InlineReferences[0].Location)
+	assert.Equal(t, contextref.ReferenceDecisionLoaded, manifest.InlineReferences[0].PolicyDecision)
+	assert.Equal(t, "loaded.allowed", manifest.InlineReferences[0].PolicyReasonCode)
+	assert.Equal(t, len(referenceContent), manifest.InlineReferences[0].Bytes)
+	assert.NotEmpty(t, manifest.InlineReferences[0].DigestSHA256)
+	assert.Positive(t, manifest.InlineReferences[0].TokenEstimate.UpperBoundTokens)
+	assert.Contains(t, manifest.InlineReferences[0].TokenEstimator, "provider=fallback")
+	assert.Contains(t, manifest.InlineReferences[0].TokenEstimator, "model=tiny")
+}
+
 func TestRunOnceWithOptions_HeadlessPrivateLogKeepsPrompt(t *testing.T) {
 	t.Parallel()
 
@@ -524,6 +871,9 @@ func TestRunOnceWithOptions_HeadlessPrivateLogKeepsPrompt(t *testing.T) {
 		session.New("gpt-test", nil),
 		contextref.Options{Root: dir},
 		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
 		"gpt-test",
 		"",
 		nil,
@@ -580,6 +930,9 @@ func TestRunOnceWithOptions_HeadlessRedactsPromptByDefault(t *testing.T) {
 		session.New("gpt-test", nil),
 		contextref.Options{Root: dir},
 		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
 		"gpt-test",
 		"",
 		nil,
@@ -628,6 +981,9 @@ func TestRunOnceWithOptions_HeadlessRecordsOutputFormatFailure(t *testing.T) {
 		session.New("gpt-test", nil),
 		contextref.Options{Root: dir},
 		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
 		"gpt-test",
 		"",
 		nil,
@@ -743,6 +1099,9 @@ func TestRunOnceWithOptions_HeadlessRecordsReferenceExpansionFailure(t *testing.
 		session.New("gpt-test", nil),
 		contextref.Options{Root: dir},
 		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
 		"gpt-test",
 		"",
 		nil,
@@ -791,6 +1150,9 @@ func TestRunOnceWithOptions_HeadlessRecordsBudgetFailure(t *testing.T) {
 		session.New("gpt-test", nil),
 		contextref.Options{Root: dir},
 		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
 		"gpt-test",
 		"",
 		nil,
@@ -821,6 +1183,26 @@ func TestRunOnceWithOptions_HeadlessRecordsBudgetFailure(t *testing.T) {
 	assert.Equal(t, session.HeadlessEventStarted, headlessEvents[0].Type)
 	assert.Equal(t, session.HeadlessEventUserMessage, headlessEvents[1].Type)
 	assert.Equal(t, session.HeadlessEventFailed, headlessEvents[2].Type)
+}
+
+func decodeHeadlessContextManifest(t *testing.T, log string) requestContextManifest {
+	t.Helper()
+
+	for line := range strings.SplitSeq(log, "\n") {
+		_, manifestJSON, ok := strings.Cut(line, "\tjson=")
+		if !ok || !strings.HasPrefix(line, "context_manifest\t") {
+			continue
+		}
+
+		var manifest requestContextManifest
+		require.NoError(t, json.Unmarshal([]byte(manifestJSON), &manifest))
+
+		return manifest
+	}
+
+	require.FailNow(t, "headless log did not contain a context manifest", "log:\n%s", log)
+
+	return requestContextManifest{}
 }
 
 func TestFinishHeadlessRunRecordsCancellationReason(t *testing.T) {

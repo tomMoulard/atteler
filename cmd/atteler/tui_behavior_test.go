@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -526,6 +527,45 @@ func TestIdleSuggestionRequestUsesProviderAndAcceptsSuffix(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, handled)
 	assert.Equal(t, "draft prompt with tests", next.textarea.Value())
+}
+
+func TestIdleSuggestionRequestEmitsContextManifestBeforeBudgetFailure(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(idleSuggestionProvider{model: "model", response: "draft prompt with tests"})
+
+	var eventLog bytes.Buffer
+
+	m := model{
+		ctx:            context.Background(),
+		registry:       registry,
+		hookRunner:     events.NewRunnerWithLogger(nil, &eventLog),
+		selectedModel:  "suggest/model",
+		maxInputTokens: 1,
+		textarea:       textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	_, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.Error(t, msg.err)
+	assert.Contains(t, msg.err.Error(), "max_input_tokens")
+
+	log := eventLog.String()
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, "model=suggest/model")
+	assert.Contains(t, log, "fits_configured_token_budget=false")
+	assert.Contains(t, log, "max_input_tokens=1")
 }
 
 func TestIdleSuggestionRequestIncludesLocalContext(t *testing.T) {
@@ -1153,6 +1193,44 @@ func TestStatusLineShowsAgentReasoningEffort(t *testing.T) {
 	plain := stripANSI(m.statusLine())
 	assert.Contains(t, plain, "agent:"+testReviewerName)
 	assert.Contains(t, plain, "effort:high")
+}
+
+func TestContextUsageUsesProviderAwareUpperBound(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(modelPickerProvider{name: "anthropic", models: []string{"claude-test"}})
+
+	m := model{
+		registry:      registry,
+		selectedModel: "claude-test",
+		history:       []llm.Message{{Role: llm.RoleUser, Content: strings.Repeat("context ", 20)}},
+	}
+	estimate, _ := estimateMessagesForModel(registry, m.selectedModel, m.history)
+
+	got := m.contextUsage()
+	assert.Contains(t, got, "ctx≤")
+	assert.Contains(t, got, formatTokenCount(estimate.UpperBoundTokens))
+}
+
+func TestContextSummaryUsesProviderAwareUpperBound(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(modelPickerProvider{name: "anthropic", models: []string{"claude-test"}})
+
+	m := model{
+		registry:       registry,
+		selectedModel:  "claude-test",
+		history:        []llm.Message{{Role: llm.RoleUser, Content: strings.Repeat("context ", 20)}},
+		pinnedMessages: map[int]bool{0: true},
+	}
+	estimate, _ := estimateMessagesForModel(registry, m.selectedModel, m.history)
+
+	got := m.contextSummary()
+	assert.Contains(t, got, "pinned=1")
+	assert.Contains(t, got, "upper_bound="+formatTokenCount(estimate.UpperBoundTokens))
+	assert.Contains(t, got, "estimator=anthropic-calibrated")
 }
 
 func TestViewShowsReasoningEffortWhileWaiting(t *testing.T) {

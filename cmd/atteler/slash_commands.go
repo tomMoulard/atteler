@@ -352,7 +352,9 @@ func (m *model) pruneToPinned() {
 }
 
 func (m model) contextSummary() string {
-	return fmt.Sprintf("messages=%d pinned=%d tokens~%s", len(m.history), len(m.pinnedMessages), formatTokenCount(llm.EstimateTokens(m.history)))
+	estimate, estimatorSummary := estimateMessagesForModel(m.registry, m.selectedModel, m.history)
+
+	return fmt.Sprintf("messages=%d pinned=%d tokens=%s upper_bound=%s error_bound=%s estimator=%s", len(m.history), len(m.pinnedMessages), formatTokenCount(estimate.Tokens), formatTokenCount(estimate.UpperBoundTokens), formatTokenCount(estimate.ErrorBoundTokens), estimatorSummary)
 }
 
 // fenced code helpers

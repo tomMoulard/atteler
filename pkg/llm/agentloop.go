@@ -23,6 +23,12 @@ type AgentLoopConfig struct {
 	OnToolResult func(call ToolCall, result ToolResult)
 	OnContent    func(content string)
 
+	// BeforeModelCall is invoked immediately before each model call with the
+	// exact request that will be sent. Returning an error stops the loop before
+	// the provider sees the request; callers can use this for token preflight
+	// checks and audit manifests.
+	BeforeModelCall func(iteration int, params CompleteParams) error
+
 	// ConfirmContinue is called when the legacy human checkpoint interval is
 	// reached. Durable checkpoints are emitted per loop step through
 	// CheckpointSink; this callback is only for user-facing continuation gates.
@@ -162,6 +168,21 @@ func AgentLoop(
 		iterParams := params
 
 		iterParams.Messages = append([]Message(nil), state.messages...)
+		if cfg.BeforeModelCall != nil {
+			if err := cfg.BeforeModelCall(state.usage.Iterations, iterParams); err != nil {
+				cond := AgentLoopStopCondition{
+					Kind:        AgentLoopStopModelError,
+					Reason:      fmt.Sprintf("model request rejected on iteration %d: %v", state.usage.Iterations, err),
+					MatchedRule: "model.before_call",
+				}
+				if recordErr := state.recordStop(ctx, cfg.CheckpointSink, cond); recordErr != nil {
+					return nil, state.messages, recordErr
+				}
+
+				return nil, state.messages, fmt.Errorf("llm: agent loop iteration %d preflight: %w", state.usage.Iterations, err)
+			}
+		}
+
 		requestSummary := summarizeModelRequest(iterParams, fallbackModels)
 
 		resp, err := reg.CompleteWithFallback(ctx, iterParams, fallbackModels)

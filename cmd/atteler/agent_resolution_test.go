@@ -159,6 +159,7 @@ func TestRequestMessagesForBudgetIncludesReferenceContext(t *testing.T) {
 		agentSelection{},
 		generationSettings{},
 		referenceContext,
+		false,
 	)
 
 	require.Len(t, messages, 2)

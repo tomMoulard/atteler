@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,6 +113,16 @@ func TestRegistry_RegisterAndListModels(t *testing.T) {
 			assert.Failf(t, "assertion failed", "unexpected model %q", m)
 		}
 	}
+}
+
+func TestEstimateTokensReturnsConservativeUpperBound(t *testing.T) {
+	t.Parallel()
+
+	oldFourCharsPerTokenEstimate := 3
+	got := EstimateTokens([]Message{{Role: RoleUser, Content: strings.Repeat("x", 12)}})
+
+	assert.Greater(t, got, oldFourCharsPerTokenEstimate)
+	assert.Equal(t, 15, got)
 }
 
 func TestKnownProviders(t *testing.T) {
@@ -789,6 +800,22 @@ func TestRegistry_ProviderForModelProviderQualified(t *testing.T) {
 	if _, ok := r.ProviderForModel("missing/live-only"); ok {
 		require.FailNow(t, "expected unknown provider to not resolve")
 	}
+}
+
+func TestRegistry_ResolveModelAndContextWindowUseDefaultForEmptyModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{name: alphaProvider, models: []string{"a-1"}, resp: &Response{}})
+
+	provider, model, ok := r.ResolveModel("")
+	if !ok {
+		require.FailNow(t, "expected empty request model to resolve to default provider/model")
+	}
+
+	assert.Equal(t, alphaProvider, provider)
+	assert.Equal(t, "a-1", model)
+	assert.Equal(t, 128_000, r.ContextWindow(""))
 }
 
 func TestRegistry_ProviderModelsIndexesFetchedModels(t *testing.T) {

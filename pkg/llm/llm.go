@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/modelroute"
@@ -612,23 +613,25 @@ func (r *Registry) Provider(name string) (Provider, bool) {
 
 // ProviderForModel returns the provider name currently indexed for a model.
 func (r *Registry) ProviderForModel(model string) (string, bool) {
+	providerName, _, ok := r.ResolveModel(model)
+
+	return providerName, ok
+}
+
+// ResolveModel returns the provider and provider-local model that would be used
+// for a request model. An empty model resolves through the same default-provider
+// path as Complete, which lets callers preflight budget and context-window
+// checks before making a provider call.
+func (r *Registry) ResolveModel(model string) (providerName, providerModel string, ok bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if providerName, _, ok := splitProviderModel(model); ok {
-		if _, ok := r.providers[providerName]; ok {
-			return providerName, true
-		}
-
-		return "", false
-	}
-
-	p, ok := r.models[model]
+	p, providerModel, ok := r.resolveModelLocked(model)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 
-	return p.Name(), true
+	return p.Name(), providerModel, true
 }
 
 // ProviderHasModel reports whether providerName has model in the registry's
@@ -954,30 +957,16 @@ func (r *Registry) ContextWindow(model string) int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// Strip provider prefix if present (e.g. "openai/gpt-4.1" -> "gpt-4.1").
-	if providerName, providerModel, ok := splitProviderModel(model); ok {
-		p, ok := r.providers[providerName]
-		if !ok {
-			return 0
-		}
-
-		if limit := catalogContextWindow(providerName, providerModel); limit > 0 {
-			return limit
-		}
-
-		return p.ModelContextWindow(providerModel)
-	}
-
-	p := r.providerForModelLocked(model)
-	if p == nil {
+	p, providerModel, ok := r.resolveModelLocked(model)
+	if !ok {
 		return 0
 	}
 
-	if limit := catalogContextWindow(p.Name(), model); limit > 0 {
+	if limit := catalogContextWindow(p.Name(), providerModel); limit > 0 {
 		return limit
 	}
 
-	return p.ModelContextWindow(model)
+	return p.ModelContextWindow(providerModel)
 }
 
 func catalogContextWindow(providerName, model string) int {
@@ -989,36 +978,106 @@ func catalogContextWindow(providerName, model string) int {
 	return metadata.ContextWindow
 }
 
-func (r *Registry) providerForModelLocked(model string) Provider {
-	if providerName, _, ok := splitProviderModel(model); ok {
-		if p, ok := r.providers[providerName]; ok {
-			return p
+func (r *Registry) resolveModelLocked(model string) (Provider, string, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return r.resolveDefaultModelLocked()
+	}
+
+	if providerName, providerModel, ok := splitProviderModel(model); ok {
+		p, ok := r.providers[providerName]
+		if !ok {
+			return nil, "", false
 		}
 
-		return nil
+		return p, providerModel, true
 	}
 
 	if p, ok := r.models[model]; ok {
-		return p
+		return p, model, true
 	}
 
 	if p, ok := r.providerForModelPrefixLocked(model); ok {
-		return p
+		return p, model, true
 	}
 
-	return nil
+	return nil, "", false
 }
 
-// EstimateTokens returns a rough token count for a slice of messages using
-// the ~4 characters per token heuristic. This is intentionally a fast
-// approximation; provider-specific tokenizers can refine it later.
-func EstimateTokens(messages []Message) int {
-	var chars int
-	for i := range messages {
-		chars += len(messages[i].Content)
-	}
-	// ~4 characters per token is the widely used GPT/Claude approximation.
-	const charsPerToken = 4
+func (r *Registry) resolveDefaultModelLocked() (Provider, string, bool) {
+	if r.defaultModel != "" {
+		p, ok := r.models[r.defaultModel]
+		if !ok {
+			return nil, "", false
+		}
 
-	return (chars + charsPerToken - 1) / charsPerToken
+		return p, r.defaultModel, true
+	}
+
+	p, ok := r.providers[r.fallback]
+	if !ok {
+		return nil, "", false
+	}
+
+	models := p.Models()
+	if len(models) == 0 {
+		return p, "", true
+	}
+
+	return p, models[0], true
+}
+
+const (
+	legacyEstimateCharsPerToken         = 3
+	legacyEstimateErrorBoundPercent     = 25
+	legacyEstimateMessageOverheadTokens = 6
+)
+
+// EstimateTokens returns a conservative provider-agnostic upper-bound estimate
+// for a slice of messages. It is retained for legacy callers that only accept a
+// single integer; provider/model-aware code should use contextpack.NewEstimator
+// so the point estimate, error bound, and upper bound stay auditable.
+func EstimateTokens(messages []Message) int {
+	var total int
+
+	for i := range messages {
+		msg := messages[i]
+		base := legacyEstimateMessageOverheadTokens +
+			estimateLegacyTextTokens(string(msg.Role)) +
+			estimateLegacyTextTokens(msg.Content)
+
+		if len(msg.ToolCalls) > 0 {
+			base += estimateLegacyTextTokens(fmt.Sprint(msg.ToolCalls))
+		}
+
+		if msg.ToolResult != nil {
+			base += estimateLegacyTextTokens(fmt.Sprint(msg.ToolResult))
+		}
+
+		errorBound := ceilLegacyEstimateDiv(base*legacyEstimateErrorBoundPercent, 100)
+		total += base + errorBound
+	}
+
+	return total
+}
+
+func estimateLegacyTextTokens(text string) int {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0
+	}
+
+	return ceilLegacyEstimateDiv(utf8.RuneCountInString(text), legacyEstimateCharsPerToken)
+}
+
+func ceilLegacyEstimateDiv(value, divisor int) int {
+	if value <= 0 {
+		return 0
+	}
+
+	if divisor <= 0 {
+		return value
+	}
+
+	return (value + divisor - 1) / divisor
 }
