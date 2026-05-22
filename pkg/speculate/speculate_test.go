@@ -272,9 +272,39 @@ func TestValidateVerdict_FailsWhenGateMissing(t *testing.T) {
 	}
 
 	err := ValidateVerdict(verdict, []string{"tests", "scope"})
-	if err == nil || !strings.Contains(err.Error(), `missing gate check "scope"`) {
+	if err == nil || !strings.Contains(err.Error(), `missing gate checks: "scope"`) {
 		t.Fatalf("ValidateVerdict() error = %v, want missing gate error", err)
 	}
+}
+
+func TestValidateVerdict_NamesEveryMissingGate(t *testing.T) {
+	t.Parallel()
+
+	verdict := Verdict{
+		Winner:     "executor",
+		Reason:     "most complete plan",
+		GateChecks: []GateCheck{{Name: "tests", Passed: true}},
+	}
+
+	err := ValidateVerdict(verdict, []string{"tests", "scope", "lint"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `missing gate checks: "scope", "lint"`)
+}
+
+func TestValidateVerdict_NamesMissingGatesEvenWhenPresentGateFails(t *testing.T) {
+	t.Parallel()
+
+	verdict := Verdict{
+		Winner: "executor",
+		Reason: "most complete plan",
+		GateChecks: []GateCheck{
+			{Name: "tests", Passed: false},
+		},
+	}
+
+	err := ValidateVerdict(verdict, []string{"tests", "scope", "lint"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `missing gate checks: "scope", "lint"`)
 }
 
 func roundNumbers(rounds []Round) []int {
@@ -517,7 +547,7 @@ func TestRun_ValidatesAggregatorVerdictGates(t *testing.T) {
 			}, nil
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), `missing gate check "scope"`) {
+	if err == nil || !strings.Contains(err.Error(), `missing gate checks: "scope"`) {
 		t.Fatalf("Run() error = %v, want missing gate error", err)
 	}
 
@@ -625,6 +655,113 @@ func TestRunWithLLM_FullPipeline(t *testing.T) {
 	assert.Equal(t, 5, calls)
 }
 
+func TestRunWithLLM_FailsClosedOnInvalidJudgeGates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		judgeOutput string
+		wantErr     string
+	}{
+		{
+			name: "omitted gates",
+			judgeOutput: "WINNER: planner\n" +
+				"REASON: no structured gate output",
+			wantErr: `missing gate checks: "tests pass", "lint pass"`,
+		},
+		{
+			name:        "unstructured omitted gates",
+			judgeOutput: "I think the planner proposal is best overall.",
+			wantErr:     `missing gate checks: "tests pass", "lint pass"`,
+		},
+		{
+			name: "missing one gate",
+			judgeOutput: "WINNER: planner\n" +
+				"REASON: only one gate emitted\n" +
+				"GATE tests pass: PASS covered",
+			wantErr: `missing gate checks: "lint pass"`,
+		},
+		{
+			name: "malformed gate status",
+			judgeOutput: "WINNER: planner\n" +
+				"REASON: malformed gate evidence\n" +
+				"GATE tests pass: PASSING maybe\n" +
+				"GATE lint pass: PASS clean",
+			wantErr: `gate check "tests pass" failed: malformed gate status`,
+		},
+		{
+			name: "malformed gate syntax",
+			judgeOutput: "WINNER: planner\n" +
+				"REASON: malformed gate syntax\n" +
+				"GATE tests pass PASS no colon\n" +
+				"GATE lint pass: PASS clean",
+			wantErr: `malformed gate check: expected "<name>: PASS|FAIL <notes>"`,
+		},
+		{
+			name: "duplicate gate",
+			judgeOutput: "WINNER: planner\n" +
+				"REASON: duplicate evidence\n" +
+				"GATE tests pass: PASS first\n" +
+				"GATE tests pass: PASS second\n" +
+				"GATE lint pass: PASS clean",
+			wantErr: `duplicate gate check "tests pass"`,
+		},
+		{
+			name: "unknown gate",
+			judgeOutput: "WINNER: planner\n" +
+				"REASON: unknown gate evidence\n" +
+				"GATE tests pass: PASS covered\n" +
+				"GATE lint pass: PASS clean\n" +
+				"GATE deploy pass: PASS shipped",
+			wantErr: `unknown gate check "deploy pass"`,
+		},
+		{
+			name: "explicit failure",
+			judgeOutput: "WINNER: planner\n" +
+				"REASON: tests are red\n" +
+				"GATE tests pass: FAIL unit tests failing\n" +
+				"GATE lint pass: PASS clean",
+			wantErr: `gate check "tests pass" failed: unit tests failing`,
+		},
+		{
+			name: "fully passing verdict",
+			judgeOutput: "WINNER: planner\n" +
+				"REASON: all gates explicit\n" +
+				"GATE tests pass: PASS covered\n" +
+				"GATE lint pass: PASS clean",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			plan, err := NewPlan([]string{"planner"}, []string{"tests pass", "lint pass"})
+			require.NoError(t, err)
+
+			completer := &mockCompleter{
+				responses: map[string]string{
+					"planner": "proposal",
+					"judge":   tt.judgeOutput,
+				},
+			}
+
+			result, err := RunWithLLM(t.Context(), plan, completer, "ship safely")
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				assert.Equal(t, "planner", result.Winner)
+				assert.Len(t, result.Session.Verdict.GateChecks, 2)
+
+				return
+			}
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.NotEmpty(t, result.Session.Verdict.Winner)
+		})
+	}
+}
+
 func TestRunWithLLM_NilCompleter(t *testing.T) {
 	t.Parallel()
 
@@ -670,7 +807,49 @@ func TestParseVerdictFromLLM_FallbackWhenUnstructured(t *testing.T) {
 
 	assert.Equal(t, "unknown", verdict.Winner)
 	assert.Equal(t, content, verdict.Reason)
-	// Gates should be inferred as passing.
-	require.Len(t, verdict.GateChecks, 1)
-	assert.True(t, verdict.GateChecks[0].Passed)
+	assert.Empty(t, verdict.GateChecks)
+}
+
+func TestParseVerdictFromLLM_PreservesOnlyExplicitGates(t *testing.T) {
+	t.Parallel()
+
+	verdict := parseVerdictFromLLM(strings.Join([]string{
+		"WINNER: architect",
+		"REASON: best coverage",
+		"GATE tests pass: PASS all green",
+	}, "\n"), []string{"tests pass", "lint pass"}, []string{"architect", "reviewer"})
+
+	assert.Equal(t, []GateCheck{
+		{Name: "tests pass", Passed: true, Notes: "all green"},
+	}, verdict.GateChecks)
+}
+
+func TestParseGateCheckLine_MalformedStatusFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	for _, line := range []string{
+		"tests pass: PASSING all green",
+		"tests pass: OK all green",
+		"tests pass:",
+	} {
+		t.Run(line, func(t *testing.T) {
+			t.Parallel()
+
+			check := parseGateCheckLine(line)
+			assert.Equal(t, "tests pass", check.Name)
+			assert.False(t, check.Passed)
+			assert.Contains(t, check.Notes, "malformed gate status")
+		})
+	}
+}
+
+func TestParseGateCheckLine_MalformedSyntaxFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	check := parseGateCheckLine("tests pass PASS all green")
+
+	assert.Empty(t, check.Name)
+	assert.False(t, check.Passed)
+	assert.Contains(t, check.Notes, `expected "<name>: PASS|FAIL <notes>"`)
+	assert.Contains(t, check.Notes, "tests pass PASS all green")
 }

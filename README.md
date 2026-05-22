@@ -431,6 +431,12 @@ atteler agents async-plan \
   --async-task 'plan|planner|draft plan' \
   --async-task 'code|coder|implement feature|plan'
 atteler agents spawn 'planner|draft the migration plan' --spawn-dry-run
+atteler agents speculate-run \
+  --speculate-agent planner \
+  --speculate-agent verifier \
+  --speculate-gate "tests pass" \
+  --speculate-gate "lint pass" \
+  --speculate-prompt "pick the safest migration plan"
 atteler agents skill-suggest plan --skill-step code --skill-step test \
   --skill-step plan --skill-step code --skill-step test
 atteler agents skill-suggest "open GH-15|tool=github|prompt=Fix GH-15" \
@@ -462,6 +468,11 @@ atteler worktrees run "Add unit tests for the auth package"
 atteler worktrees list
 atteler worktrees merge 20260430-120000-deadbeef
 ```
+
+Speculative `speculate-run` verdicts fail closed: the judge must emit exactly
+one explicit `GATE <name>: PASS|FAIL <notes>` line for every required
+`--speculate-gate`. Missing, malformed, duplicate, unknown, or failed gate
+lines make the command fail; model silence is never accepted as success.
 
 Session Markdown and JSON exports default to the redacted shareable profile:
 known credential patterns and local absolute paths are scrubbed, untrusted

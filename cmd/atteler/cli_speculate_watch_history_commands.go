@@ -102,7 +102,8 @@ func runSpeculateExecution(ctx context.Context, state appState, input speculateR
 	if err != nil {
 		// Print partial results even on error.
 		if len(result.Session.Proposals) > 0 {
-			fmt.Println(formatSpeculateResult(result))
+			fmt.Print(formatSpeculateResult(result))
+			fmt.Println("error: " + err.Error())
 		}
 
 		return fmt.Errorf("speculate-run: %w", err)
@@ -116,8 +117,18 @@ func runSpeculateExecution(ctx context.Context, state appState, input speculateR
 func formatSpeculateResult(result speculate.Result) string {
 	var b strings.Builder
 
-	b.WriteString("winner: " + result.Winner + "\n")
-	b.WriteString("reason: " + result.Reason + "\n")
+	winner := strings.TrimSpace(result.Winner)
+	if winner == "" {
+		winner = strings.TrimSpace(result.Session.Verdict.Winner)
+	}
+
+	reason := strings.TrimSpace(result.Reason)
+	if reason == "" {
+		reason = strings.TrimSpace(result.Session.Verdict.Reason)
+	}
+
+	b.WriteString("winner: " + winner + "\n")
+	b.WriteString("reason: " + reason + "\n")
 
 	if len(result.Session.Proposals) > 0 {
 		b.WriteString("proposals:\n")
