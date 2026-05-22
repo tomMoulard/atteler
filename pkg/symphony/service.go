@@ -42,10 +42,7 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 	defer func(parent context.Context) {
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
-		defer cancel()
-
-		if shutdownErr := debugServer.Shutdown(shutdownCtx); shutdownErr != nil {
+		if shutdownErr := debugServer.stop(parent, 5*time.Second); shutdownErr != nil {
 			logger.Warn("symphony debug server shutdown failed", "error", shutdownErr)
 		}
 	}(ctx)

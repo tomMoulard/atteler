@@ -166,7 +166,7 @@ func (s *scanState) scanFile(filePath string, entry fs.DirEntry) error {
 		s.findings = append(s.findings, newFinding(
 			relativePath,
 			KindConventionDrift,
-			"uses context.Background()/context.TODO() outside allowed entrypoints/tests",
+			"uses context.Background()/context.TODO()/context.WithoutCancel() outside allowed entrypoints/tests",
 			SeverityMaintenance,
 		))
 	}
@@ -478,7 +478,7 @@ func usesHiddenRootContext(file *ast.File) bool {
 }
 
 func isHiddenRootContextName(name string) bool {
-	return name == "Background" || name == "TODO"
+	return name == "Background" || name == "TODO" || name == "WithoutCancel"
 }
 
 func contextImportNames(file *ast.File) (map[string]bool, bool) {

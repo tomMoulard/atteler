@@ -1,8 +1,10 @@
-//nolint:cyclop,errcheck,errchkjson,gocognit,gofumpt,gosec,intrange,noctx,perfsprint,wrapcheck,wsl_v5 // Legacy slash-command dispatcher predates strict lint cleanup.
+//nolint:cyclop,errcheck,errchkjson,gocognit,gofumpt,gosec,intrange,perfsprint,wrapcheck,wsl_v5 // Legacy slash-command dispatcher predates strict lint cleanup.
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -348,16 +350,24 @@ func (m model) copyCommand(args []string, code bool) (model, tea.Cmd, bool) {
 	} else if len(args) > 0 && args[0] == "session" {
 		text = plainTranscript(m.history)
 	}
-	if err := copyToClipboard(text); err != nil {
+	if err := copyToClipboard(m.ctx, text); err != nil {
 		return m, tea.Println(errStyle.Render("copy: " + err.Error())), true
 	}
 	return m, tea.Println(dimStyle.Render("copied")), true
 }
-func copyToClipboard(text string) error {
+func copyToClipboard(ctx context.Context, text string) error {
+	if ctx == nil {
+		return errors.New("context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("context already done: %w", err)
+	}
+
 	cmds := [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}}
 	for _, c := range cmds {
 		if _, err := exec.LookPath(c[0]); err == nil {
-			cmd := exec.Command(c[0], c[1:]...)
+			cmd := exec.CommandContext(ctx, c[0], c[1:]...)
 			cmd.Stdin = strings.NewReader(text)
 			return cmd.Run()
 		}

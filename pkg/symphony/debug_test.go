@@ -54,10 +54,7 @@ func TestDebugServerStatusAndEvents(t *testing.T) {
 	require.NoError(t, err)
 
 	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
-		defer shutdownCancel()
-
-		require.NoError(t, server.Shutdown(shutdownCtx))
+		require.NoError(t, server.Close())
 	}()
 
 	statusResp, err := http.Get("http://" + server.Address() + "/debug/status") //nolint:noctx // Test client is bounded by server shutdown.

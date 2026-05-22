@@ -41,13 +41,13 @@ type Result struct {
 // intentionally caller-provided: this package is for explicit local CLI actions,
 // not for executing model-suggested commands without user intent.
 func RunBash(ctx context.Context, opts Options) (Result, error) {
+	if err := requireContext(ctx); err != nil {
+		return Result{}, err
+	}
+
 	command := strings.TrimSpace(opts.Command)
 	if command == "" {
 		return Result{}, errors.New("shell: command is required")
-	}
-
-	if ctx == nil {
-		return Result{}, errors.New("shell: context is required")
 	}
 
 	timeout := opts.Timeout
@@ -208,13 +208,13 @@ func mergeEnv(extra map[string]string) []string {
 // Unlike RunBash, output is not captured -- it goes straight to the terminal.
 // The returned Result only contains timing metadata.
 func RunInteractive(ctx context.Context, opts Options) (Result, error) {
+	if err := requireContext(ctx); err != nil {
+		return Result{}, err
+	}
+
 	command := strings.TrimSpace(opts.Command)
 	if command == "" {
 		return Result{}, errors.New("shell: command is required")
-	}
-
-	if ctx == nil {
-		return Result{}, errors.New("shell: context is required")
 	}
 
 	bin, args, err := bashInvocation(command)
@@ -251,4 +251,16 @@ func RunInteractive(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	return result, nil
+}
+
+func requireContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("shell: context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("shell: context already done: %w", err)
+	}
+
+	return nil
 }

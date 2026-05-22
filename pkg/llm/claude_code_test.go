@@ -217,6 +217,75 @@ func TestClaudeCodeProvider_RefreshFailureSurfaced(t *testing.T) {
 	assert.Contains(t, err.Error(), "refresh after 401")
 }
 
+func TestClaudeCodeProvider_RefreshHonorsCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	requestStarted := make(chan struct{})
+	release := make(chan struct{})
+
+	refreshSrv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+
+		select {
+		case <-r.Context().Done():
+			return
+		case <-release:
+			return
+		}
+	}))
+	defer refreshSrv.Close()
+	defer close(release)
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, err := w.Write([]byte(`{"error":{"type":"authentication_error"}}`))
+		assert.NoError(t, err)
+	}))
+	defer apiSrv.Close()
+
+	credPath := writeClaudeCodeCredentialsFile(t, "access-1", "refresh-1", futureExpiry())
+
+	auth, err := loadClaudeCodeAuthFromFile(credPath)
+	require.NoError(t, err)
+
+	auth.refreshURL = refreshSrv.URL
+	auth.httpClient = refreshSrv.Client()
+
+	p := &ClaudeCodeProvider{
+		client:  apiSrv.Client(),
+		auth:    auth,
+		baseURL: apiSrv.URL,
+		models:  []string{"claude-opus-4-7"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		_, completeErr := p.Complete(ctx, CompleteParams{
+			Model:    "claude-opus-4-7",
+			Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		})
+		errCh <- completeErr
+	}()
+
+	<-requestStarted
+	cancel()
+
+	err = <-errCh
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, "access-1", auth.snapshot())
+
+	persisted, err := os.ReadFile(credPath)
+	require.NoError(t, err)
+
+	block, err := parseClaudeCodeCredentialsRaw(persisted)
+	require.NoError(t, err)
+	assert.Equal(t, "access-1", block.AccessToken)
+	assert.Equal(t, "refresh-1", block.RefreshToken)
+}
+
 func TestParseClaudeCodeCredentialsRaw_AcceptsExpired(t *testing.T) {
 	t.Parallel()
 

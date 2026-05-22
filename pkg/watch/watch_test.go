@@ -150,6 +150,14 @@ func runLater() {
 	_ = context.TODO()
 }
 `)
+	writeFile(t, root, "pkg/service/without_cancel.go", `package service
+
+import "context"
+
+func bypassCaller(ctx context.Context) context.Context {
+	return context.WithoutCancel(ctx)
+}
+`)
 	writeFile(t, root, "pkg/service/factory.go", `package service
 
 import "context"
@@ -187,6 +195,7 @@ func main() {
 	keys := findingKeys(findings)
 	assert.Contains(t, keys, "pkg/service/service.go|convention_drift|maintenance")
 	assert.Contains(t, keys, "pkg/service/todo.go|convention_drift|maintenance")
+	assert.Contains(t, keys, "pkg/service/without_cancel.go|convention_drift|maintenance")
 	assert.Contains(t, keys, "pkg/service/factory.go|convention_drift|maintenance")
 	assert.Contains(t, keys, "cmd/tool/main.go|convention_drift|maintenance")
 	assert.NotContains(t, keys, "pkg/service/service_test.go|convention_drift|maintenance")
@@ -223,6 +232,14 @@ func run() {
 	_ = ctxpkg.Background()
 }
 `)
+	writeFile(t, root, "pkg/service/alias_without_cancel.go", `package service
+
+import ctxpkg "context"
+
+func run(ctx context.Context) context.Context {
+	return ctxpkg.WithoutCancel(ctx)
+}
+`)
 	writeFile(t, root, "pkg/service/dot.go", `package service
 
 import . "context"
@@ -237,6 +254,7 @@ func other() {
 
 	keys := findingKeys(findings)
 	assert.Contains(t, keys, "pkg/service/alias.go|convention_drift|maintenance")
+	assert.Contains(t, keys, "pkg/service/alias_without_cancel.go|convention_drift|maintenance")
 	assert.Contains(t, keys, "pkg/service/dot.go|convention_drift|maintenance")
 }
 

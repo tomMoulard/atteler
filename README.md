@@ -455,7 +455,7 @@ Migrate SDK-style callers as follows:
 
 `cmd/atteler` and `cmd/symphony` create process-root contexts at startup and
 pass them down; package code should propagate those contexts instead of calling
-`context.Background()` or `context.TODO()`.
+`context.Background()`, `context.TODO()`, or `context.WithoutCancel()`.
 
 ## Evidence-backed feature map
 
