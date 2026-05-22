@@ -200,6 +200,7 @@ func AgentLoop(
 		if !resp.WantsToolUse() {
 			resp.InputTokens = state.usage.InputTokens
 			resp.CachedInputTokens = state.usage.CachedInputTokens
+			resp.CacheWriteInputTokens = state.usage.CacheWriteTokens
 			resp.OutputTokens = state.usage.OutputTokens
 
 			cond := AgentLoopStopCondition{
@@ -508,6 +509,7 @@ func (s *agentLoopState) recordModelResponse(
 			ToolCalls:         append([]ToolCall(nil), resp.ToolCalls...),
 			InputTokens:       resp.InputTokens,
 			CachedInputTokens: resp.CachedInputTokens,
+			CacheWriteTokens:  resp.CacheWriteInputTokens,
 			OutputTokens:      resp.OutputTokens,
 		},
 		Usage: s.usage,

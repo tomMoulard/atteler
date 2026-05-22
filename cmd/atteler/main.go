@@ -14,6 +14,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
@@ -104,13 +105,15 @@ var terminalTitleSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "�
 
 // llmResponseMsg is sent when the LLM call completes.
 type llmResponseMsg struct {
-	err         error
-	completedAt time.Time
-	content     string
-	model       string
-	eventLines  []string
-	toolLog     []string // tool call summaries (command + truncated output)
-	tokenUsage  tokenUsage
+	err           error
+	completedAt   time.Time
+	content       string
+	provider      string
+	model         string
+	eventLines    []string
+	routeDecision *modelroute.Decision
+	toolLog       []string // tool call summaries (command + truncated output)
+	tokenUsage    tokenUsage
 }
 
 // shellResultMsg is sent when a `!command` finishes executing.
@@ -161,10 +164,11 @@ type loopCheckpointMsg struct {
 }
 
 type tokenUsage struct {
-	InputTokens       int `json:"input_tokens"`
-	CachedInputTokens int `json:"cached_input_tokens"`
-	OutputTokens      int `json:"output_tokens"`
-	Responses         int `json:"responses"`
+	InputTokens           int `json:"input_tokens"`
+	CachedInputTokens     int `json:"cached_input_tokens"`
+	CacheWriteInputTokens int `json:"cache_write_input_tokens"`
+	OutputTokens          int `json:"output_tokens"`
+	Responses             int `json:"responses"`
 }
 
 func (u *tokenUsage) addResponse(resp *llm.Response) {
@@ -174,6 +178,7 @@ func (u *tokenUsage) addResponse(resp *llm.Response) {
 
 	u.InputTokens += resp.InputTokens
 	u.CachedInputTokens += resp.CachedInputTokens
+	u.CacheWriteInputTokens += resp.CacheWriteInputTokens
 	u.OutputTokens += resp.OutputTokens
 	u.Responses++
 }
@@ -181,6 +186,7 @@ func (u *tokenUsage) addResponse(resp *llm.Response) {
 func (u *tokenUsage) add(next tokenUsage) {
 	u.InputTokens += next.InputTokens
 	u.CachedInputTokens += next.CachedInputTokens
+	u.CacheWriteInputTokens += next.CacheWriteInputTokens
 	u.OutputTokens += next.OutputTokens
 	u.Responses += next.Responses
 }
@@ -193,6 +199,7 @@ type llmRequest struct {
 	agentLoopBudget             llm.AgentLoopBudget
 	agentLoopCheckpointInterval int
 	maxInputTokens              int
+	routeDecision               *modelroute.Decision
 	model                       string
 	agentLoopCheckpointPath     string
 	referenceContext            string

@@ -8,8 +8,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/modelroute"
 )
 
 const (
@@ -86,13 +88,17 @@ type CompleteParams struct {
 
 // Response is the provider-normalised result of a completion.
 type Response struct {
-	Content           string
-	Model             string // Model that actually answered.
-	StopReason        StopReason
-	ToolCalls         []ToolCall
-	InputTokens       int
-	CachedInputTokens int
-	OutputTokens      int
+	Content               string
+	Provider              string // Provider that produced the response.
+	Model                 string // Model that actually answered.
+	StopReason            StopReason
+	ToolCalls             []ToolCall
+	Latency               time.Duration
+	FirstTokenLatency     time.Duration
+	InputTokens           int
+	CachedInputTokens     int
+	CacheWriteInputTokens int
+	OutputTokens          int
 }
 
 // WantsToolUse returns true if the model stopped because it wants to call tools.
@@ -130,21 +136,29 @@ type Provider interface {
 // ---------------------------------------------------------------------------
 
 // Registry holds the set of available providers and resolves model -> provider.
+//
+//nolint:govet // Field order keeps registry state grouped by purpose.
 type Registry struct {
-	providers    map[string]Provider
-	models       map[string]Provider
-	fallback     string
-	defaultModel string
-	mu           sync.RWMutex
-	retry        retryConfig
+	providers          map[string]Provider
+	models             map[string]Provider
+	providerModels     map[string]map[string]bool
+	providerModelsLive map[string]bool
+	fallback           string
+	defaultModel       string
+	routeTelemetry     *modelroute.Telemetry
+	mu                 sync.RWMutex
+	retry              retryConfig
 }
 
 // NewRegistry creates an empty registry with default retry settings.
 func NewRegistry() *Registry {
 	return &Registry{
-		providers: make(map[string]Provider),
-		models:    make(map[string]Provider),
-		retry:     defaultRetryConfig(),
+		providers:          make(map[string]Provider),
+		models:             make(map[string]Provider),
+		providerModels:     make(map[string]map[string]bool),
+		providerModelsLive: make(map[string]bool),
+		retry:              defaultRetryConfig(),
+		routeTelemetry:     modelroute.NewTelemetry(),
 	}
 }
 
@@ -157,6 +171,23 @@ func (r *Registry) SetRetry(cfg retryConfig) {
 	r.retry = cfg
 }
 
+// RouteTelemetry returns the registry-owned route telemetry store.
+func (r *Registry) RouteTelemetry() *modelroute.Telemetry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.routeTelemetry
+}
+
+// SetRouteTelemetry replaces the registry-owned route telemetry store. Passing
+// nil disables telemetry recording.
+func (r *Registry) SetRouteTelemetry(telemetry *modelroute.Telemetry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.routeTelemetry = telemetry
+}
+
 // Register adds a provider and indexes all of its models.
 func (r *Registry) Register(p Provider) {
 	r.mu.Lock()
@@ -164,6 +195,7 @@ func (r *Registry) Register(p Provider) {
 
 	providerName := p.Name()
 	r.providers[providerName] = p
+	r.providerModelsLive[providerName] = false
 	r.indexProviderModelsLocked(providerName, p.Models())
 
 	// First registered provider becomes the default.
@@ -194,12 +226,11 @@ func (r *Registry) SetDefaultModel(model string) error {
 	defer r.mu.Unlock()
 
 	if providerName, providerModel, ok := splitProviderModel(model); ok {
-		p, ok := r.providers[providerName]
-		if !ok {
+		if _, ok := r.providers[providerName]; !ok {
 			return fmt.Errorf("llm: unknown provider %q", providerName)
 		}
 
-		r.models[providerModel] = p
+		r.indexProviderModelLocked(providerName, providerModel)
 		r.fallback = providerName
 		r.defaultModel = providerModel
 
@@ -228,12 +259,11 @@ func (r *Registry) SetDefaultProviderModel(providerName, model string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	p, ok := r.providers[providerName]
-	if !ok {
+	if _, ok := r.providers[providerName]; !ok {
 		return fmt.Errorf("llm: unknown provider %q", providerName)
 	}
 
-	r.models[model] = p
+	r.indexProviderModelLocked(providerName, model)
 	r.fallback = providerName
 	r.defaultModel = model
 
@@ -261,14 +291,39 @@ func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Respon
 
 	emitToolExecute(ctx, p, params.Model)
 
-	return completeWithRetry(ctx, retryCfg, func(ctx context.Context) (*Response, error) {
-		resp, err := p.Complete(ctx, params)
-		if err != nil {
-			return nil, fmt.Errorf("llm: %s: %w", p.Name(), err)
+	startedAt := time.Now()
+
+	resp, err := completeWithRetry(ctx, retryCfg, func(ctx context.Context) (*Response, error) {
+		providerResp, completeErr := p.Complete(ctx, params)
+		if completeErr != nil {
+			wrappedErr := fmt.Errorf("llm: %s: %w", p.Name(), completeErr)
+			r.recordRouteFailure(p.Name(), params.Model, wrappedErr)
+
+			return nil, wrappedErr
 		}
 
-		return resp, nil
+		return providerResp, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	latency := time.Since(startedAt)
+	if resp.Latency <= 0 {
+		resp.Latency = latency
+	}
+
+	if resp.Provider == "" {
+		resp.Provider = p.Name()
+	}
+
+	if resp.Model == "" {
+		resp.Model = params.Model
+	}
+
+	r.recordRouteObservation(p.Name(), params.Model, resp, resp.Latency)
+
+	return resp, nil
 }
 
 // CompleteWithFallback tries params.Model followed by fallbackModels until one
@@ -349,6 +404,107 @@ func emitToolExecute(ctx context.Context, provider Provider, model string) {
 			"tool":     "llm.complete",
 		},
 	})
+}
+
+func (r *Registry) recordRouteFailure(providerName, requestedModel string, err error) {
+	if err == nil {
+		return
+	}
+
+	r.mu.RLock()
+	telemetry := r.routeTelemetry
+	r.mu.RUnlock()
+
+	if telemetry == nil {
+		return
+	}
+
+	candidate, _ := routeObservationCandidate(providerName, requestedModel)
+	retryAfter, retryable := isRetryable(err)
+
+	telemetry.RecordFailure(candidate, modelroute.Failure{
+		RetryAfter:  retryAfter,
+		Error:       err.Error(),
+		Retryable:   retryable,
+		RateLimited: isRateLimitError(err),
+	}, time.Now().UTC())
+}
+
+func (r *Registry) recordRouteObservation(providerName, requestedModel string, resp *Response, latency time.Duration) {
+	if resp == nil {
+		return
+	}
+
+	r.mu.RLock()
+	telemetry := r.routeTelemetry
+	r.mu.RUnlock()
+
+	if telemetry == nil {
+		return
+	}
+
+	model := strings.TrimSpace(resp.Model)
+	if model == "" {
+		model = requestedModel
+	}
+
+	candidate := routeObservationCandidateForResponse(providerName, requestedModel, model)
+
+	recordRouteObservationForTelemetry(telemetry, candidate, resp, latency)
+}
+
+func recordRouteObservationForTelemetry(telemetry *modelroute.Telemetry, candidate modelroute.Candidate, resp *Response, latency time.Duration) {
+	telemetry.Record(candidate, modelroute.ActualUsage{
+		Latency:           latency,
+		TTFT:              resp.FirstTokenLatency,
+		InputTokens:       resp.InputTokens,
+		CachedInputTokens: resp.CachedInputTokens,
+		CacheWriteTokens:  resp.CacheWriteInputTokens,
+		OutputTokens:      resp.OutputTokens,
+	}, time.Now().UTC())
+}
+
+func routeObservationCandidateForResponse(providerName, requestedModel, responseModel string) modelroute.Candidate {
+	candidate, catalogBacked := routeObservationCandidate(providerName, responseModel)
+	if !catalogBacked && responseModel != requestedModel {
+		if requestedCandidate, ok := catalogRouteObservationCandidate(providerName, requestedModel); ok {
+			return requestedCandidate
+		}
+	}
+
+	return candidate
+}
+
+func routeObservationCandidate(providerName, model string) (modelroute.Candidate, bool) {
+	if candidate, ok := catalogRouteObservationCandidate(providerName, model); ok {
+		return candidate, true
+	}
+
+	if qualifiedProvider, providerModel, ok := splitProviderModel(model); ok {
+		providerName = qualifiedProvider
+		model = providerModel
+	}
+
+	return modelroute.Candidate{Provider: providerName, Name: model}, false
+}
+
+func catalogRouteObservationCandidate(providerName, model string) (modelroute.Candidate, bool) {
+	if qualifiedProvider, providerModel, ok := splitProviderModel(model); ok {
+		providerName = qualifiedProvider
+		model = providerModel
+	}
+
+	catalog := modelroute.BuiltinCatalog()
+	metadata, ok := catalog.Lookup(providerName, model)
+
+	if ok {
+		candidate := metadata.Candidate(0)
+		candidate.MetadataVersion = catalog.Version
+
+		return candidate, true
+	}
+
+	return modelroute.Candidate{}, false
 }
 
 func (r *Registry) resolveExplicitModelLocked(params CompleteParams) (Provider, CompleteParams, error) {
@@ -475,6 +631,81 @@ func (r *Registry) ProviderForModel(model string) (string, bool) {
 	return p.Name(), true
 }
 
+// ProviderHasModel reports whether providerName has model in the registry's
+// static or fetched model index. It does not make network requests.
+func (r *Registry) ProviderHasModel(providerName, model string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	providerName = strings.TrimSpace(providerName)
+	model = strings.TrimSpace(model)
+
+	if providerName == "" || model == "" {
+		return false
+	}
+
+	models := r.providerModels[providerName]
+
+	return models != nil && models[model]
+}
+
+// IndexedProviderModels returns a copy of the registry's provider-specific
+// static/fetched model index. It does not make network requests.
+func (r *Registry) IndexedProviderModels() map[string][]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make(map[string][]string, len(r.providerModels))
+	for providerName, indexed := range r.providerModels {
+		models := make([]string, 0, len(indexed))
+		for model := range indexed {
+			models = append(models, model)
+		}
+
+		sort.Strings(models)
+		out[providerName] = models
+	}
+
+	return out
+}
+
+// ProviderModelsVerified reports whether the provider-specific model index
+// came from a successful, provider-authoritative FetchModels call instead of
+// only the static fallback list. A verified index can be used as evidence that
+// absent models are currently unavailable for that provider/account.
+func (r *Registry) ProviderModelsVerified(providerName string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.providerModelsLive[strings.TrimSpace(providerName)]
+}
+
+// CanResolveModel reports whether the registry can route model to a provider
+// without making a network request. It accepts provider-qualified model IDs,
+// indexed provider model names, and known provider model prefixes.
+func (r *Registry) CanResolveModel(model string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if providerName, _, ok := splitProviderModel(model); ok {
+		if _, ok := r.providers[providerName]; ok {
+			return providerName, true
+		}
+
+		return "", false
+	}
+
+	if p, ok := r.models[model]; ok {
+		return p.Name(), true
+	}
+
+	if p, ok := r.providerForModelPrefixLocked(model); ok {
+		return p.Name(), true
+	}
+
+	return "", false
+}
+
 // ListProviders returns the names of all registered providers.
 func (r *Registry) ListProviders() []string {
 	r.mu.RLock()
@@ -505,24 +736,104 @@ func (r *Registry) ProviderModels(ctx context.Context, providerName string) ([]s
 
 	models, err := p.FetchModels(ctx)
 	if err == nil && len(models) > 0 {
-		r.mu.Lock()
-		r.indexProviderModelsLocked(providerName, models)
-		r.mu.Unlock()
+		r.storeFetchedProviderModels(providerName, models, providerModelsVerified(p))
 
 		return models, nil
 	}
+
+	r.markProviderModelsUnverified(providerName, p.Models())
 
 	return p.Models(), nil
 }
 
 func (r *Registry) indexProviderModelsLocked(providerName string, models []string) {
-	p := r.providers[providerName]
-
 	for _, m := range models {
-		if m != "" {
-			r.models[m] = p
+		r.indexProviderModelLocked(providerName, m)
+	}
+}
+
+func (r *Registry) storeFetchedProviderModels(providerName string, models []string, verified bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.storeFetchedProviderModelsLocked(providerName, models, verified)
+}
+
+func (r *Registry) storeFetchedProviderModelsLocked(providerName string, models []string, verified bool) {
+	if verified {
+		r.replaceProviderModelsLocked(providerName, models)
+
+		return
+	}
+
+	r.indexProviderModelsLocked(providerName, models)
+	r.providerModelsLive[providerName] = false
+}
+
+func (r *Registry) replaceProviderModelsLocked(providerName string, models []string) {
+	for model := range r.providerModels[providerName] {
+		r.removeProviderModelLocked(providerName, model)
+	}
+
+	delete(r.providerModels, providerName)
+	r.indexProviderModelsLocked(providerName, models)
+	r.providerModelsLive[providerName] = true
+}
+
+func (r *Registry) markProviderModelsUnverified(providerName string, fallbackModels []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.indexProviderModelsLocked(providerName, fallbackModels)
+	r.markProviderModelsUnverifiedLocked(providerName)
+}
+
+func (r *Registry) markProviderModelsUnverifiedLocked(providerName string) {
+	if _, ok := r.providers[providerName]; ok {
+		r.providerModelsLive[providerName] = false
+	}
+}
+
+func (r *Registry) removeProviderModelLocked(providerName, model string) {
+	current, ok := r.models[model]
+	if !ok || current.Name() != providerName {
+		return
+	}
+
+	delete(r.models, model)
+
+	for otherProvider, indexedModels := range r.providerModels {
+		if otherProvider == providerName || !indexedModels[model] {
+			continue
+		}
+
+		if replacement, ok := r.providers[otherProvider]; ok {
+			r.models[model] = replacement
+
+			return
 		}
 	}
+}
+
+func (r *Registry) indexProviderModelLocked(providerName, model string) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+
+	r.models[model] = r.providers[providerName]
+
+	if r.providerModels == nil {
+		r.providerModels = make(map[string]map[string]bool)
+	}
+
+	indexed := r.providerModels[providerName]
+	if indexed == nil {
+		indexed = make(map[string]bool)
+		r.providerModels[providerName] = indexed
+	}
+
+	indexed[model] = true
 }
 
 // ProviderHealth describes the outcome of a single provider health check.
@@ -566,6 +877,8 @@ func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
 			ph.Error = ctxErr
 			ph.Models = p.Models()
 			ph.Warnings = appendProviderWarnings(ph.Warnings, p)
+
+			r.markProviderModelsUnverified(name, ph.Models)
 			results = append(results, ph)
 
 			continue
@@ -578,6 +891,8 @@ func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
 			}
 
 			ph.Warnings = appendProviderWarnings(ph.Warnings, p)
+
+			r.markProviderModelsUnverified(name, ph.Models)
 			results = append(results, ph)
 
 			continue
@@ -588,12 +903,18 @@ func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
 		if err := p.HealthCheck(ctx); err != nil {
 			ph.Error = err
 			ph.Models = p.Models()
+
+			r.markProviderModelsUnverified(name, ph.Models)
 		} else {
 			ph.Healthy = true
 
 			models, fetchErr := p.FetchModels(ctx)
 			if fetchErr != nil || len(models) == 0 {
 				models = p.Models()
+
+				r.markProviderModelsUnverified(name, models)
+			} else {
+				r.storeFetchedProviderModels(name, models, providerModelsVerified(p))
 			}
 
 			ph.Models = models
@@ -614,6 +935,18 @@ func appendProviderWarnings(current []string, p Provider) []string {
 	return append(current, warningProvider.ProviderWarnings()...)
 }
 
+type providerModelVerifier interface {
+	ProviderModelsVerified() bool
+}
+
+func providerModelsVerified(provider Provider) bool {
+	if verifier, ok := provider.(providerModelVerifier); ok {
+		return verifier.ProviderModelsVerified()
+	}
+
+	return true
+}
+
 // ContextWindow returns the context window size (in tokens) for a model,
 // resolving the provider via the same logic as Complete. Returns 0 when the
 // model or provider is unknown.
@@ -621,17 +954,39 @@ func (r *Registry) ContextWindow(model string) int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	// Strip provider prefix if present (e.g. "openai/gpt-4.1" -> "gpt-4.1").
+	if providerName, providerModel, ok := splitProviderModel(model); ok {
+		p, ok := r.providers[providerName]
+		if !ok {
+			return 0
+		}
+
+		if limit := catalogContextWindow(providerName, providerModel); limit > 0 {
+			return limit
+		}
+
+		return p.ModelContextWindow(providerModel)
+	}
+
 	p := r.providerForModelLocked(model)
 	if p == nil {
 		return 0
 	}
 
-	// Strip provider prefix if present (e.g. "openai/gpt-4.1" -> "gpt-4.1").
-	if _, providerModel, ok := splitProviderModel(model); ok {
-		return p.ModelContextWindow(providerModel)
+	if limit := catalogContextWindow(p.Name(), model); limit > 0 {
+		return limit
 	}
 
 	return p.ModelContextWindow(model)
+}
+
+func catalogContextWindow(providerName, model string) int {
+	metadata, ok := modelroute.BuiltinCatalog().Lookup(providerName, model)
+	if !ok {
+		return 0
+	}
+
+	return metadata.ContextWindow
 }
 
 func (r *Registry) providerForModelLocked(model string) Provider {

@@ -26,6 +26,14 @@ func TestRegistry_GetAndList(t *testing.T) {
 			FallbackModels: []string{"gpt-4.1-mini"},
 			Capabilities:   []string{"review", "security"},
 			Triggers:       []string{"review this"},
+			RoutingPolicy: config.RoutingPolicyConfig{
+				PreferredProviders:   []string{"Anthropic"},
+				BannedProviders:      []string{"ollama"},
+				BannedModels:         []string{"openai/gpt-expensive"},
+				RequiredCapabilities: []string{"Tools"},
+				MaxBudget:            0.25,
+				RequireFreshMetadata: true,
+			},
 		},
 		"writer": {Model: "claude-sonnet-4-20250514"},
 		"internal": {
@@ -63,6 +71,13 @@ func TestRegistry_GetAndList(t *testing.T) {
 	if !reflect.DeepEqual(agent.ModelChain(), []string{"gpt-4.1", "gpt-4.1-mini"}) {
 		assert.Failf(t, "assertion failed", "model chain = %v", agent.ModelChain())
 	}
+
+	assert.Equal(t, []string{"anthropic"}, agent.RoutingPolicy.PreferredProviders)
+	assert.Equal(t, []string{"ollama"}, agent.RoutingPolicy.BannedProviders)
+	assert.Equal(t, []string{"openai/gpt-expensive"}, agent.RoutingPolicy.BannedModels)
+	assert.Equal(t, []string{"tools"}, agent.RoutingPolicy.RequiredCapabilities)
+	assert.InDelta(t, 0.25, agent.RoutingPolicy.MaxBudget, 0.000000001)
+	assert.True(t, agent.RoutingPolicy.RequireFreshMetadata)
 }
 
 func TestRegistry_MatchPrompt(t *testing.T) {

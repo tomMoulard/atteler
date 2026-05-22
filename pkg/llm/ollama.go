@@ -366,7 +366,11 @@ func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama: HTTP %d: %s", resp.StatusCode, respBody)
+		return nil, retryableHTTPStatusError(
+			fmt.Errorf("ollama: HTTP %d: %s", resp.StatusCode, respBody),
+			resp.StatusCode,
+			resp.Header.Get("Retry-After"),
+		)
 	}
 
 	var or ollamaChatResponse
@@ -689,6 +693,10 @@ func ollamaCompletionStopReason(reason string) StopReason {
 
 // ModelContextWindow returns known default context windows for common Ollama models.
 func (o *OllamaProvider) ModelContextWindow(model string) int {
+	if limit := catalogContextWindow(providerOllama, model); limit > 0 {
+		return limit
+	}
+
 	model = strings.ToLower(strings.TrimSpace(model))
 
 	model, _, _ = strings.Cut(model, ":")

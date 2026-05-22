@@ -46,6 +46,8 @@ type ProviderConfig struct {
 }
 
 // AgentConfig configures a named agent persona.
+//
+//nolint:govet // Field order follows config-file grouping.
 type AgentConfig struct {
 	Temperature *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
 	TopP        *float64 `json:"top_p,omitempty" yaml:"top_p,omitempty"`
@@ -53,21 +55,32 @@ type AgentConfig struct {
 
 	ToolPermissions map[string]bool `json:"tools,omitempty" yaml:"tools,omitempty"`
 
-	Model            string             `json:"model,omitempty" yaml:"model,omitempty"`
-	Mode             string             `json:"mode,omitempty" yaml:"mode,omitempty"`
-	ReasoningLevel   string             `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
-	Description      string             `json:"description,omitempty" yaml:"description,omitempty"`
-	Personality      string             `json:"personality,omitempty" yaml:"personality,omitempty"`
-	SystemPrompt     string             `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
-	FallbackModels   []string           `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
-	Capabilities     []string           `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
-	Triggers         []string           `json:"triggers,omitempty" yaml:"triggers,omitempty"`
-	References       []string           `json:"references,omitempty" yaml:"references,omitempty"`
-	FeedbackGuidance []FeedbackGuidance `json:"feedback_guidance,omitempty" yaml:"feedback_guidance,omitempty"`
-	MaxTokens        int                `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
-	Hidden           bool               `json:"hidden,omitempty" yaml:"hidden,omitempty"`
+	RoutingPolicy    RoutingPolicyConfig `json:"routing_policy,omitzero" yaml:"routing_policy,omitempty"`
+	Model            string              `json:"model,omitempty" yaml:"model,omitempty"`
+	Mode             string              `json:"mode,omitempty" yaml:"mode,omitempty"`
+	ReasoningLevel   string              `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
+	Description      string              `json:"description,omitempty" yaml:"description,omitempty"`
+	Personality      string              `json:"personality,omitempty" yaml:"personality,omitempty"`
+	SystemPrompt     string              `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
+	FallbackModels   []string            `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
+	Capabilities     []string            `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+	Triggers         []string            `json:"triggers,omitempty" yaml:"triggers,omitempty"`
+	References       []string            `json:"references,omitempty" yaml:"references,omitempty"`
+	FeedbackGuidance []FeedbackGuidance  `json:"feedback_guidance,omitempty" yaml:"feedback_guidance,omitempty"`
+	MaxTokens        int                 `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+	Hidden           bool                `json:"hidden,omitempty" yaml:"hidden,omitempty"`
 
 	hiddenSet bool
+}
+
+// RoutingPolicyConfig configures per-agent model routing preferences.
+type RoutingPolicyConfig struct {
+	PreferredProviders   []string `json:"preferred_providers,omitempty" yaml:"preferred_providers,omitempty"`
+	BannedProviders      []string `json:"banned_providers,omitempty" yaml:"banned_providers,omitempty"`
+	BannedModels         []string `json:"banned_models,omitempty" yaml:"banned_models,omitempty"`
+	RequiredCapabilities []string `json:"required_capabilities,omitempty" yaml:"required_capabilities,omitempty"`
+	MaxBudget            float64  `json:"max_budget,omitempty" yaml:"max_budget,omitempty"`
+	RequireFreshMetadata bool     `json:"require_fresh_metadata,omitempty" yaml:"require_fresh_metadata,omitempty"`
 }
 
 // FeedbackGuidance stores an auditable feedback-derived prompt instruction.
@@ -206,23 +219,24 @@ type fileProviderConfig struct {
 }
 
 type fileAgentConfig struct {
-	Personality      *string            `json:"personality" yaml:"personality"`
-	TopP             *float64           `json:"top_p" yaml:"top_p"`
-	Seed             *int               `json:"seed" yaml:"seed"`
-	Model            *string            `json:"model" yaml:"model"`
-	Mode             *string            `json:"mode" yaml:"mode"`
-	ReasoningLevel   *string            `json:"reasoning_level" yaml:"reasoning_level"`
-	Description      *string            `json:"description" yaml:"description"`
-	Temperature      *float64           `json:"temperature" yaml:"temperature"`
-	SystemPrompt     *string            `json:"system_prompt" yaml:"system_prompt"`
-	ToolPermissions  map[string]bool    `json:"tools" yaml:"tools"`
-	MaxTokens        *int               `json:"max_tokens" yaml:"max_tokens"`
-	Hidden           *bool              `json:"hidden" yaml:"hidden"`
-	FallbackModels   []string           `json:"fallback_models" yaml:"fallback_models"`
-	Capabilities     []string           `json:"capabilities" yaml:"capabilities"`
-	Triggers         []string           `json:"triggers" yaml:"triggers"`
-	References       []string           `json:"references" yaml:"references"`
-	FeedbackGuidance []FeedbackGuidance `json:"feedback_guidance" yaml:"feedback_guidance"`
+	Personality      *string              `json:"personality" yaml:"personality"`
+	TopP             *float64             `json:"top_p" yaml:"top_p"`
+	Seed             *int                 `json:"seed" yaml:"seed"`
+	RoutingPolicy    *RoutingPolicyConfig `json:"routing_policy" yaml:"routing_policy"`
+	Model            *string              `json:"model" yaml:"model"`
+	Mode             *string              `json:"mode" yaml:"mode"`
+	ReasoningLevel   *string              `json:"reasoning_level" yaml:"reasoning_level"`
+	Description      *string              `json:"description" yaml:"description"`
+	Temperature      *float64             `json:"temperature" yaml:"temperature"`
+	SystemPrompt     *string              `json:"system_prompt" yaml:"system_prompt"`
+	ToolPermissions  map[string]bool      `json:"tools" yaml:"tools"`
+	MaxTokens        *int                 `json:"max_tokens" yaml:"max_tokens"`
+	Hidden           *bool                `json:"hidden" yaml:"hidden"`
+	FallbackModels   []string             `json:"fallback_models" yaml:"fallback_models"`
+	Capabilities     []string             `json:"capabilities" yaml:"capabilities"`
+	Triggers         []string             `json:"triggers" yaml:"triggers"`
+	References       []string             `json:"references" yaml:"references"`
+	FeedbackGuidance []FeedbackGuidance   `json:"feedback_guidance" yaml:"feedback_guidance"`
 }
 
 //nolint:govet // field order follows config-file grouping.
@@ -558,6 +572,11 @@ func mergeFileAgent(current *AgentConfig, agent fileAgentConfig, rec *originReco
 		current.ToolPermissions = make(map[string]bool, len(agent.ToolPermissions))
 		maps.Copy(current.ToolPermissions, agent.ToolPermissions)
 		rec.replace(agentFieldPath(name, "tools"), source, current.ToolPermissions, "replaces the entire tool permissions map")
+	}
+
+	if agent.RoutingPolicy != nil {
+		current.RoutingPolicy = cloneRoutingPolicy(*agent.RoutingPolicy)
+		rec.replace(agentFieldPath(name, "routing_policy"), source, current.RoutingPolicy, "replaces the entire routing policy")
 	}
 
 	if agent.SystemPrompt != nil {
@@ -922,6 +941,11 @@ func mergeConfigAgent(current *AgentConfig, agent AgentConfig, rec *originRecord
 		rec.replace(agentFieldPath(name, "tools"), source, current.ToolPermissions, "replaces the entire tool permissions map")
 	}
 
+	if routingPolicyConfigured(agent.RoutingPolicy) {
+		current.RoutingPolicy = cloneRoutingPolicy(agent.RoutingPolicy)
+		rec.replace(agentFieldPath(name, "routing_policy"), source, current.RoutingPolicy, "replaces the entire routing policy")
+	}
+
 	if agent.SystemPrompt != "" {
 		current.SystemPrompt = agent.SystemPrompt
 		rec.set(agentFieldPath(name, "system_prompt"), source, agent.SystemPrompt)
@@ -1279,6 +1303,12 @@ func mergeConfigAgentFromOrigins(current *AgentConfig, agent AgentConfig, dstOri
 		appendOriginChain(dstOrigins, agentFieldPath(name, "tools"), srcOrigins, true)
 	}
 
+	if routingPolicyConfigured(agent.RoutingPolicy) {
+		current.RoutingPolicy = cloneRoutingPolicy(agent.RoutingPolicy)
+
+		appendOriginChain(dstOrigins, agentFieldPath(name, "routing_policy"), srcOrigins, true)
+	}
+
 	if agent.SystemPrompt != "" {
 		current.SystemPrompt = agent.SystemPrompt
 
@@ -1587,6 +1617,26 @@ func cloneFeedbackGuidance(records []FeedbackGuidance) []FeedbackGuidance {
 	}
 
 	return out
+}
+
+func cloneRoutingPolicy(policy RoutingPolicyConfig) RoutingPolicyConfig {
+	return RoutingPolicyConfig{
+		PreferredProviders:   append([]string(nil), policy.PreferredProviders...),
+		BannedProviders:      append([]string(nil), policy.BannedProviders...),
+		BannedModels:         append([]string(nil), policy.BannedModels...),
+		RequiredCapabilities: append([]string(nil), policy.RequiredCapabilities...),
+		MaxBudget:            policy.MaxBudget,
+		RequireFreshMetadata: policy.RequireFreshMetadata,
+	}
+}
+
+func routingPolicyConfigured(policy RoutingPolicyConfig) bool {
+	return len(policy.PreferredProviders) > 0 ||
+		len(policy.BannedProviders) > 0 ||
+		len(policy.BannedModels) > 0 ||
+		len(policy.RequiredCapabilities) > 0 ||
+		policy.MaxBudget > 0 ||
+		policy.RequireFreshMetadata
 }
 
 func cloneMap(in map[string]string) map[string]string {

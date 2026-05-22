@@ -54,11 +54,13 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 		usage.addResponse(resp)
 
 		return llmResponseMsg{
-			completedAt: time.Now(),
-			content:     resp.Content,
-			model:       resp.Model,
-			eventLines:  eventLines.Lines(),
-			tokenUsage:  usage,
+			completedAt:   time.Now(),
+			content:       resp.Content,
+			provider:      resp.Provider,
+			model:         resp.Model,
+			eventLines:    eventLines.Lines(),
+			routeDecision: routeDecisionWithResponse(request.routeDecision, resp, routeTelemetryFromRegistry(reg)),
+			tokenUsage:    usage,
 		}
 	}
 }
@@ -207,12 +209,14 @@ func callLLMWithTools(
 	usage.addResponse(resp)
 
 	return llmResponseMsg{
-		completedAt: time.Now(),
-		content:     resp.Content,
-		model:       resp.Model,
-		eventLines:  eventLines.Lines(),
-		toolLog:     toolLog,
-		tokenUsage:  usage,
+		completedAt:   time.Now(),
+		content:       resp.Content,
+		provider:      resp.Provider,
+		model:         resp.Model,
+		eventLines:    eventLines.Lines(),
+		routeDecision: routeDecisionWithResponse(request.routeDecision, resp, routeTelemetryFromRegistry(reg)),
+		toolLog:       toolLog,
+		tokenUsage:    usage,
 	}
 }
 
@@ -295,6 +299,7 @@ func requestMessagesForBudget(
 	messages []llm.Message,
 	activeAgent agentSelection,
 	generation generationSettings,
+	referenceContext string,
 ) []llm.Message {
 	params := llm.CompleteParams{
 		Model:    modelName,
@@ -303,6 +308,8 @@ func requestMessagesForBudget(
 	if activeAgent.ok {
 		params = activeAgent.agent.CompleteParams(modelName, messages)
 	}
+
+	prependReferenceContext(&params, referenceContext)
 
 	applyGenerationParams(&params, generation)
 

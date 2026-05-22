@@ -37,6 +37,7 @@ type AgentLoopUsage struct {
 	ToolCalls           int           `json:"tool_calls"`
 	InputTokens         int           `json:"input_tokens"`
 	CachedInputTokens   int           `json:"cached_input_tokens"`
+	CacheWriteTokens    int           `json:"cache_write_tokens,omitempty"`
 	OutputTokens        int           `json:"output_tokens"`
 	TotalTokens         int           `json:"total_tokens"`
 }
@@ -113,6 +114,7 @@ func (u *AgentLoopUsage) addResponse(resp *Response, costEstimator AgentLoopCost
 	u.ModelCalls++
 	u.InputTokens += resp.InputTokens
 	u.CachedInputTokens += resp.CachedInputTokens
+	u.CacheWriteTokens += resp.CacheWriteInputTokens
 	u.OutputTokens += resp.OutputTokens
 	u.TotalTokens = u.InputTokens + u.OutputTokens
 

@@ -17,6 +17,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
@@ -58,8 +59,10 @@ type runOncePrepared struct {
 	generation      generationSettings
 	requestMessages []llm.Message
 	refs            []contextref.Reference
+	routeDecision   *modelroute.Decision
 	fallbackModels  []string
 	prompt          string
+	referenceCtx    string
 	requestModel    string
 }
 
@@ -82,11 +85,15 @@ type responseRecordRequest struct {
 }
 
 type responseRecordPayload struct {
-	Content           string `json:"content"`
-	Model             string `json:"model,omitempty"`
-	InputTokens       int    `json:"input_tokens,omitempty"`
-	CachedInputTokens int    `json:"cached_input_tokens,omitempty"`
-	OutputTokens      int    `json:"output_tokens,omitempty"`
+	Content               string `json:"content"`
+	Provider              string `json:"provider,omitempty"`
+	Model                 string `json:"model,omitempty"`
+	LatencyMS             int    `json:"latency_ms,omitempty"`
+	FirstTokenLatencyMS   int    `json:"first_token_latency_ms,omitempty"`
+	InputTokens           int    `json:"input_tokens,omitempty"`
+	CachedInputTokens     int    `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens int    `json:"cache_write_input_tokens,omitempty"`
+	OutputTokens          int    `json:"output_tokens,omitempty"`
 }
 
 func saveRecordedResponse(path string, params llm.CompleteParams, fallbackModels []string, resp *llm.Response) error {
@@ -107,11 +114,15 @@ func saveRecordedResponse(path string, params llm.CompleteParams, fallbackModels
 			ReasoningLevel: params.ReasoningLevel,
 		},
 		Response: responseRecordPayload{
-			Content:           resp.Content,
-			Model:             resp.Model,
-			InputTokens:       resp.InputTokens,
-			CachedInputTokens: resp.CachedInputTokens,
-			OutputTokens:      resp.OutputTokens,
+			Content:               resp.Content,
+			Provider:              resp.Provider,
+			Model:                 resp.Model,
+			LatencyMS:             responseRecordDurationMS(resp.Latency),
+			FirstTokenLatencyMS:   responseRecordDurationMS(resp.FirstTokenLatency),
+			InputTokens:           resp.InputTokens,
+			CachedInputTokens:     resp.CachedInputTokens,
+			CacheWriteInputTokens: resp.CacheWriteInputTokens,
+			OutputTokens:          resp.OutputTokens,
 		},
 	}
 
@@ -148,12 +159,32 @@ func loadRecordedResponse(path string) (*llm.Response, error) {
 	}
 
 	return &llm.Response{
-		Content:           record.Response.Content,
-		Model:             record.Response.Model,
-		InputTokens:       record.Response.InputTokens,
-		CachedInputTokens: record.Response.CachedInputTokens,
-		OutputTokens:      record.Response.OutputTokens,
+		Content:               record.Response.Content,
+		Provider:              record.Response.Provider,
+		Model:                 record.Response.Model,
+		Latency:               responseRecordDuration(record.Response.LatencyMS),
+		FirstTokenLatency:     responseRecordDuration(record.Response.FirstTokenLatencyMS),
+		InputTokens:           record.Response.InputTokens,
+		CachedInputTokens:     record.Response.CachedInputTokens,
+		CacheWriteInputTokens: record.Response.CacheWriteInputTokens,
+		OutputTokens:          record.Response.OutputTokens,
 	}, nil
+}
+
+func responseRecordDurationMS(duration time.Duration) int {
+	if duration <= 0 {
+		return 0
+	}
+
+	return int(duration / time.Millisecond)
+}
+
+func responseRecordDuration(ms int) time.Duration {
+	if ms <= 0 {
+		return 0
+	}
+
+	return time.Duration(ms) * time.Millisecond
 }
 
 func runOnce(
@@ -223,8 +254,11 @@ func runOnceWithOptions(
 	}
 
 	prepared, err := prepareRunOnceRequest(
+		ctx,
+		reg,
 		agents,
 		contextOptions,
+		referenceContext,
 		selectedModel,
 		selectedAgent,
 		fallbackModels,
@@ -235,6 +269,15 @@ func runOnceWithOptions(
 	)
 	if err != nil {
 		recordHeadlessPreflightFailure(store, executionOptions, sessionState, prompt, selectedModel, selectedAgent, err)
+		emitRouteDecisionWarning(
+			ctx,
+			hooks,
+			sessionState.ID,
+			store.Path(sessionState.ID),
+			prepared.activeAgent.name,
+			"",
+			prepared.routeDecision,
+		)
 
 		return err
 	}
@@ -279,8 +322,7 @@ func runOnceWithOptions(
 		params = prepared.activeAgent.agent.CompleteParams(prepared.requestModel, params.Messages)
 	}
 
-	refCtx := buildReferenceContext(ctx, referenceContext, prepared.activeAgent, contextOptions)
-	prependReferenceContext(&params, refCtx)
+	prependReferenceContext(&params, prepared.referenceCtx)
 
 	applyGenerationParams(&params, prepared.generation)
 
@@ -357,6 +399,8 @@ func runOnceWithOptions(
 		outputFormat,
 		executionOptions,
 		headlessRun,
+		prepared.routeDecision,
+		routeTelemetryFromRegistry(reg),
 	)
 }
 
@@ -371,6 +415,8 @@ func finishRunOnceSuccess(
 	outputFormat string,
 	executionOptions runOnceExecutionOptions,
 	headlessRun *session.HeadlessRun,
+	routeDecision *modelroute.Decision,
+	routeTelemetry *modelroute.Telemetry,
 ) error {
 	if err := ensureHeadlessRunCanRecordResponse(store, headlessRun); err != nil {
 		return err
@@ -380,6 +426,16 @@ func finishRunOnceSuccess(
 		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, err.Error())
 		return err
 	}
+
+	emitRouteDecisionWarning(
+		ctx,
+		hooks,
+		sessionState.ID,
+		store.Path(sessionState.ID),
+		agentName,
+		routeResponseModelID(resp.Provider, resp.Model),
+		routeDecisionWithResponse(routeDecision, resp, routeTelemetry),
+	)
 
 	var usage tokenUsage
 	usage.addResponse(resp)
@@ -421,8 +477,11 @@ func applyRunOnceSessionDefaults(sessionState *session.Session, prepared runOnce
 }
 
 func prepareRunOnceRequest(
+	ctx context.Context,
+	reg *llm.Registry,
 	agents *agent.Registry,
 	contextOptions contextref.Options,
+	referenceContext string,
 	selectedModel string,
 	selectedAgent string,
 	fallbackModels []string,
@@ -441,15 +500,32 @@ func prepareRunOnceRequest(
 		return runOncePrepared{}, err
 	}
 
-	requestModel, fallbackModels := requestModelAndFallbacks(selectedModel, modelLocked, fallbackModels, activeAgent)
+	generation := generationForRequest(generationDefaults, generationOverrides, activeAgent)
+	requestReferenceContext := buildReferenceContext(ctx, referenceContext, activeAgent, contextOptions)
+	budgetMessages := requestMessagesForBudget(selectedModel, requestMessages, activeAgent, generation, requestReferenceContext)
+
+	requestModel, fallbackModels, routeDecision, err := requestModelAndFallbacks(
+		selectedModel,
+		modelLocked,
+		fallbackModels,
+		activeAgent,
+		routeProfileForMessages(budgetMessages, generation),
+		routeTelemetryFromRegistry(reg),
+		routeAvailabilityFromRegistryWithRefresh(ctx, reg, effectiveRouteCandidateChain(selectedModel, fallbackModels, activeAgent, modelLocked)),
+	)
+	if err != nil {
+		return runOncePrepared{activeAgent: activeAgent, routeDecision: routeDecision}, err
+	}
 
 	return runOncePrepared{
 		activeAgent:     activeAgent,
-		generation:      generationForRequest(generationDefaults, generationOverrides, activeAgent),
+		generation:      generation,
 		requestMessages: requestMessages,
 		refs:            refs,
+		routeDecision:   routeDecision,
 		fallbackModels:  fallbackModels,
 		prompt:          userPrompt,
+		referenceCtx:    requestReferenceContext,
 		requestModel:    requestModel,
 	}, nil
 }
@@ -495,6 +571,8 @@ func saveRunOnceUserMessage(
 			},
 		})
 	}
+
+	emitRouteDecisionWarning(ctx, hooks, sessionState.ID, store.Path(sessionState.ID), prepared.activeAgent.name, sessionState.DefaultModel, prepared.routeDecision)
 
 	emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.UserMessage,

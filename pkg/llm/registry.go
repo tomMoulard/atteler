@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/modelroute"
 )
 
 type providerFactory func() (Provider, error)
@@ -86,14 +88,47 @@ func KnownProviders() []ProviderInfo {
 		&OpenAIProvider{},
 		&OllamaProvider{},
 	}
+	catalogModels := catalogModelsByProvider()
 
 	out := make([]ProviderInfo, 0, len(providers))
 	for _, provider := range providers {
 		out = append(out, ProviderInfo{
 			Capabilities: ProviderCapabilitiesFor(provider),
 			Name:         provider.Name(),
-			Models:       append([]string(nil), provider.Models()...),
+			Models:       mergeModelLists(provider.Models(), catalogModels[provider.Name()]),
 		})
+	}
+
+	return out
+}
+
+func catalogModelsByProvider() map[string][]string {
+	catalog := modelroute.BuiltinCatalog()
+	models := make(map[string][]string, len(catalog.Models))
+
+	for i := range catalog.Models {
+		metadata := catalog.Models[i]
+		models[metadata.Provider] = append(models[metadata.Provider], metadata.Name)
+	}
+
+	return models
+}
+
+func mergeModelLists(lists ...[]string) []string {
+	var out []string
+
+	seen := make(map[string]bool)
+
+	for _, list := range lists {
+		for _, model := range list {
+			model = strings.TrimSpace(model)
+			if model == "" || seen[model] {
+				continue
+			}
+
+			seen[model] = true
+			out = append(out, model)
+		}
 	}
 
 	return out

@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/modelroute"
 )
 
 func TestCompleteWithRetry_SucceedsFirstAttempt(t *testing.T) {
@@ -128,11 +130,35 @@ func TestParseRetryAfter(t *testing.T) {
 	assert.Equal(t, time.Duration(0), parseRetryAfter("-1"))
 }
 
+func TestRetryableHTTPStatusError_ParsesRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	err := retryableHTTPStatusError(errors.New("openai: HTTP 429: rate limited"), 429, "2")
+
+	retryAfter, retryable := isRetryable(err)
+	assert.True(t, retryable)
+	assert.Equal(t, 2*time.Second, retryAfter)
+	assert.Equal(t, "openai: HTTP 429: rate limited", err.Error())
+}
+
+func TestRetryableHTTPStatusError_IgnoresNonTransientStatus(t *testing.T) {
+	t.Parallel()
+
+	err := retryableHTTPStatusError(errors.New("openai: HTTP 400: bad request"), 400, "2")
+
+	retryAfter, retryable := isRetryable(err)
+	assert.False(t, retryable)
+	assert.Zero(t, retryAfter)
+	assert.Equal(t, "openai: HTTP 400: bad request", err.Error())
+}
+
 func TestRegistry_CompleteRetriesTransientError(t *testing.T) {
 	t.Parallel()
 
 	attempts := 0
 	r := NewRegistry()
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
 	r.SetRetry(retryConfig{MaxAttempts: 2, InitialBackoff: 1 * time.Millisecond})
 	r.Register(&retryFakeProvider{
 		fakeProvider: fakeProvider{
@@ -141,7 +167,7 @@ func TestRegistry_CompleteRetriesTransientError(t *testing.T) {
 			resp:   &Response{Content: "ok"},
 		},
 		failCount: 1,
-		failErr:   errors.New("HTTP 503: unavailable"),
+		failErr:   retryableHTTPStatusError(errors.New("HTTP 429: rate limited"), 429, "1"),
 		attempts:  &attempts,
 	})
 
@@ -149,6 +175,14 @@ func TestRegistry_CompleteRetriesTransientError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ok", resp.Content)
 	assert.Equal(t, 2, attempts)
+
+	obs, ok := telemetry.Snapshot("transient/m-1")
+	require.True(t, ok)
+	assert.Equal(t, 1, obs.Count)
+	assert.Equal(t, 1, obs.FailureCount)
+	assert.Equal(t, 1, obs.RateLimitCount)
+	assert.Empty(t, obs.LastError)
+	assert.False(t, obs.LastFailureRateLimited)
 }
 
 type retryFakeProvider struct {

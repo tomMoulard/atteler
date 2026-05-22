@@ -89,6 +89,7 @@ type AgentLoopModelResponseSummary struct {
 	ContentBytes      int        `json:"content_bytes"`
 	InputTokens       int        `json:"input_tokens"`
 	CachedInputTokens int        `json:"cached_input_tokens"`
+	CacheWriteTokens  int        `json:"cache_write_tokens,omitempty"`
 	OutputTokens      int        `json:"output_tokens"`
 }
 

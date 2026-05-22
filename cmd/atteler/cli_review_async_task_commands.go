@@ -214,17 +214,24 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 		activeAgent = agentSelection{name: reviewer, agent: configuredAgent, ok: true}
 	}
 
-	requestModel, fallbackModels := requestModelAndFallbacks(
-		rc.selectedModel,
-		rc.modelLocked,
-		rc.fallbackModels,
-		activeAgent,
-	)
 	generation := generationForRequest(rc.generationBase, rc.generationOver, activeAgent)
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: systemPrompt},
 		{Role: llm.RoleUser, Content: userPrompt},
+	}
+
+	requestModel, fallbackModels, _, err := requestModelAndFallbacks(
+		rc.selectedModel,
+		rc.modelLocked,
+		rc.fallbackModels,
+		activeAgent,
+		routeProfileForMessages(requestMessagesForBudget(rc.selectedModel, messages, activeAgent, generation, ""), generation),
+		routeTelemetryFromRegistry(rc.registry),
+		routeAvailabilityFromRegistryWithRefresh(ctx, rc.registry, effectiveRouteCandidateChain(rc.selectedModel, rc.fallbackModels, activeAgent, rc.modelLocked)),
+	)
+	if err != nil {
+		return "", err
 	}
 
 	params := llm.CompleteParams{

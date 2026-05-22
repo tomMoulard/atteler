@@ -225,6 +225,48 @@ func TestOpenAIProvider_NameAndModels(t *testing.T) {
 	if len(p.Models()) == 0 {
 		assert.Fail(t, "Models() returned empty")
 	}
+
+	assert.Contains(t, p.Models(), "gpt-5.5")
+}
+
+func TestRegistry_ProviderModelsLiveFetchReplacesOpenAICatalogFallback(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		assert.Equal(t, "/v1/models", r.URL.Path)
+
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(openaiModelsResponse{
+			Data: []struct {
+				ID string `json:"id"`
+			}{
+				{ID: "gpt-live-only"},
+			},
+		}))
+	}))
+	defer srv.Close()
+
+	registry := NewRegistry()
+	registry.Register(&OpenAIProvider{
+		apiKey:  "sk-test",
+		baseURL: srv.URL,
+		client:  srv.Client(),
+	})
+
+	assert.True(t, registry.ProviderHasModel(providerOpenAI, "gpt-5.5"))
+	assert.False(t, registry.ProviderModelsVerified(providerOpenAI))
+
+	models, err := registry.ProviderModels(context.Background(), providerOpenAI)
+	require.NoError(t, err)
+
+	assert.Equal(t, "Bearer sk-test", gotAuth)
+	assert.Equal(t, []string{"gpt-live-only"}, models)
+	assert.True(t, registry.ProviderHasModel(providerOpenAI, "gpt-live-only"))
+	assert.False(t, registry.ProviderHasModel(providerOpenAI, "gpt-5.5"))
+	assert.True(t, registry.ProviderModelsVerified(providerOpenAI))
 }
 
 func TestOpenAIProvider_ConfigBaseURL(t *testing.T) {

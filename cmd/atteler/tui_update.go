@@ -615,10 +615,29 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 	msgs := make([]llm.Message, len(requestMessages))
 	copy(msgs, requestMessages)
 
-	requestModel, fallbackModels := requestModelAndFallbacks(m.selectedModel, m.modelLocked, m.fallbackModels, activeAgent)
-
 	generation := generationForRequest(m.generationDefaults, m.generationOverrides, activeAgent)
-	if err := validateRequestBudget(m.registry, requestModel, requestMessagesForBudget(requestModel, msgs, activeAgent, generation), m.maxInputTokens); err != nil {
+	referenceContext := buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions)
+	budgetMessages := requestMessagesForBudget(m.selectedModel, msgs, activeAgent, generation, referenceContext)
+
+	requestModel, fallbackModels, routeDecision, err := requestModelAndFallbacks(
+		m.selectedModel,
+		m.modelLocked,
+		m.fallbackModels,
+		activeAgent,
+		routeProfileForMessages(budgetMessages, generation),
+		routeTelemetryFromRegistry(m.registry),
+		routeAvailabilityFromRegistryWithRefresh(m.ctx, m.registry, effectiveRouteCandidateChain(m.selectedModel, m.fallbackModels, activeAgent, m.modelLocked)),
+	)
+	if err != nil {
+		cmds := []tea.Cmd{tea.Println(errStyle.Render("Error: " + err.Error()))}
+		if event, ok := routeDecisionEvent(m.sessionState.ID, m.sessionPath, activeAgent.name, "", routeDecision); ok {
+			cmds = append(cmds, emitHook(m.ctx, m.hookRunner, event))
+		}
+
+		return m, tea.Batch(cmds...)
+	}
+
+	if err := validateRequestBudget(m.registry, requestModel, budgetMessages, m.maxInputTokens); err != nil {
 		return m, tea.Println(errStyle.Render("Error: " + err.Error()))
 	}
 
@@ -633,7 +652,9 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
 
 	m.sessionState.DefaultAgent = activeAgent.name
-	if m.selectedModel != "" {
+	if requestModel != "" {
+		m.sessionState.DefaultModel = requestModel
+	} else if m.selectedModel != "" {
 		m.sessionState.DefaultModel = m.selectedModel
 	}
 
@@ -641,7 +662,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 
 	confirmCh := make(chan agentLoopConfirmRequest, 1)
 	responseCh := make(chan bool, 1)
-	referenceContext := appendReferenceContext(
+	referenceContext = appendReferenceContext(
 		buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions),
 		generatedSkillReferenceContext(input, m.skillLearningStoreDir, m.skillLearningSkillDir, m.skillLearningEnabled),
 	)
@@ -666,6 +687,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		agentLoopBudget:             m.agentLoopBudget,
 		agentLoopCheckpointInterval: m.agentLoopCheckpointInterval,
 		maxInputTokens:              m.maxInputTokens,
+		routeDecision:               routeDecision,
 		refs:                        refs,
 		useTools:                    m.executionMode != "plan",
 		confirmRequestCh:            confirmCh,
@@ -689,6 +711,10 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 
 	if activeAgent.ok {
 		cmds = append(cmds, emitAgentExecute(m.ctx, m.hookRunner, m.sessionState.ID, m.sessionPath, activeAgent.name, requestModel))
+	}
+
+	if event, ok := routeDecisionEvent(m.sessionState.ID, m.sessionPath, activeAgent.name, requestModel, routeDecision); ok {
+		cmds = append(cmds, emitHook(m.ctx, m.hookRunner, event))
 	}
 
 	cmds = append(

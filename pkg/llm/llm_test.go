@@ -6,9 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/modelroute"
 )
 
 const (
@@ -21,6 +24,7 @@ const (
 type fakeProvider struct {
 	err            error
 	healthCheckErr error
+	fetchModelsErr error
 	resp           *Response
 	name           string
 	models         []string
@@ -33,6 +37,10 @@ func (f *fakeProvider) Name() string { return f.name }
 func (f *fakeProvider) Models() []string { return f.models }
 
 func (f *fakeProvider) FetchModels(_ context.Context) ([]string, error) {
+	if f.fetchModelsErr != nil {
+		return nil, f.fetchModelsErr
+	}
+
 	if f.fetchedModels != nil {
 		return f.fetchedModels, nil
 	}
@@ -58,9 +66,24 @@ func (f *fakeProvider) Complete(_ context.Context, p CompleteParams) (*Response,
 	}
 
 	r := *f.resp
-	r.Model = p.Model
+	if r.Model == "" {
+		r.Model = p.Model
+	}
 
 	return &r, nil
+}
+
+type modelOmittingProvider struct {
+	fakeProvider
+}
+
+func (f *modelOmittingProvider) Complete(ctx context.Context, p CompleteParams) (*Response, error) {
+	resp, err := f.fakeProvider.Complete(ctx, p)
+	if resp != nil {
+		resp.Model = ""
+	}
+
+	return resp, err
 }
 
 func TestRegistry_RegisterAndListModels(t *testing.T) {
@@ -102,6 +125,31 @@ func TestKnownProviders(t *testing.T) {
 	if providers[0].Name == "" || len(providers[0].Models) == 0 {
 		require.Failf(t, "unexpected failure", "first provider missing data: %+v", providers[0])
 	}
+}
+
+func TestKnownProvidersIncludesBuiltinCatalogModels(t *testing.T) {
+	t.Parallel()
+
+	providers := KnownProviders()
+
+	byName := make(map[string][]string, len(providers))
+	for _, provider := range providers {
+		byName[provider.Name] = provider.Models
+	}
+
+	assert.Contains(t, byName[providerOpenAI], "gpt-5.5")
+	assert.Contains(t, byName[providerAnthropic], "claude-opus-4-7")
+	assert.Contains(t, byName[providerCodex], "gpt-5.3-codex")
+}
+
+func TestRegistry_RegisterIndexesBuiltinCatalogProviderModels(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&OpenAIProvider{})
+
+	assert.True(t, r.ProviderHasModel(providerOpenAI, "gpt-5.5"))
+	assert.False(t, r.ProviderModelsVerified(providerOpenAI))
 }
 
 func TestRegistry_RequiresActiveContextForBlockingMethods(t *testing.T) {
@@ -187,6 +235,40 @@ func TestRegistry_CompleteRoutesProviderQualifiedModel(t *testing.T) {
 	if resp.Model != "shared" {
 		assert.Failf(t, "assertion failed", "model = %q, want shared", resp.Model)
 	}
+}
+
+func TestRegistry_CompleteAnnotatesResponseProvider(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   alphaProvider,
+		models: []string{"a-1"},
+		resp:   &Response{Content: "from-alpha"},
+	})
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: alphaProvider + "/a-1"})
+	require.NoError(t, err)
+
+	assert.Equal(t, alphaProvider, resp.Provider)
+	assert.Equal(t, "a-1", resp.Model)
+}
+
+func TestRegistry_CompleteAnnotatesMissingResponseModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&modelOmittingProvider{fakeProvider: fakeProvider{
+		name:   alphaProvider,
+		models: []string{"a-1"},
+		resp:   &Response{Content: "from-alpha"},
+	}})
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: alphaProvider + "/a-1"})
+	require.NoError(t, err)
+
+	assert.Equal(t, alphaProvider, resp.Provider)
+	assert.Equal(t, "a-1", resp.Model)
 }
 
 func TestRegistry_CompleteInfersProviderForLiveOnlyClaudeModel(t *testing.T) {
@@ -280,6 +362,219 @@ func TestRegistry_CompleteWithFallback(t *testing.T) {
 	if resp.Model != betaModel {
 		assert.Failf(t, "assertion failed", "model = %q, want %s", resp.Model, betaModel)
 	}
+}
+
+func TestRegistry_CompleteWithFallbackRecordsRateLimitTelemetry(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+	r.Register(&fakeProvider{
+		err:    retryableHTTPStatusError(errors.New("openai: HTTP 429: rate limited"), 429, "2"),
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{},
+	})
+	r.Register(&fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "ok"},
+	})
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-mini",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, err)
+	assert.Equal(t, "claude-sonnet-4-20250514", resp.Model)
+
+	openAIObs, ok := telemetry.Snapshot("openai/gpt-4.1-mini")
+	require.True(t, ok)
+	assert.Equal(t, 1, openAIObs.FailureCount)
+	assert.Equal(t, 1, openAIObs.RateLimitCount)
+	assert.True(t, openAIObs.LastFailureRetryable)
+	assert.True(t, openAIObs.LastFailureRateLimited)
+	assert.Equal(t, 2000, openAIObs.LastRetryAfterMS)
+	assert.Contains(t, openAIObs.LastError, "HTTP 429")
+
+	anthropicObs, ok := telemetry.Snapshot("anthropic/claude-sonnet-4-20250514")
+	require.True(t, ok)
+	assert.Equal(t, 1, anthropicObs.Count)
+}
+
+func TestRegistry_CompleteRecordsRouteTelemetry(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp: &Response{
+			Content:               "ok",
+			FirstTokenLatency:     12 * time.Millisecond,
+			InputTokens:           1000,
+			CachedInputTokens:     200,
+			CacheWriteInputTokens: 100,
+			OutputTokens:          50,
+		},
+	})
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: "gpt-4.1-mini"})
+	require.NoError(t, err)
+	assert.Positive(t, resp.Latency)
+
+	obs, ok := telemetry.Snapshot("openai/gpt-4.1-mini")
+	require.True(t, ok)
+	assert.Equal(t, 1, obs.Count)
+	assert.Equal(t, 1000, obs.InputTokens)
+	assert.Equal(t, 200, obs.CachedInputTokens)
+	assert.Equal(t, 100, obs.CacheWriteTokens)
+	assert.Equal(t, 50, obs.OutputTokens)
+	assert.Positive(t, obs.LastLatencyMS)
+	assert.Equal(t, 12, obs.AvgTTFTMS)
+	assert.InDelta(t, 0.00042, obs.LastCost, 0.000000001)
+}
+
+func TestRegistry_CompleteRecordsTelemetryForProviderReportedAlias(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp: &Response{
+			Model:        "gpt-4.1-mini-2025-04-14",
+			InputTokens:  1000,
+			OutputTokens: 50,
+		},
+	})
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: "gpt-4.1-mini"})
+	require.NoError(t, err)
+
+	_, aliasObserved := telemetry.Snapshot("openai/gpt-4.1-mini-2025-04-14")
+	assert.False(t, aliasObserved)
+
+	obs, ok := telemetry.Snapshot("openai/gpt-4.1-mini")
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-4.1-mini", obs.ModelID)
+	assert.InDelta(t, 0.00048, obs.LastCost, 0.000000001)
+}
+
+func TestRegistry_CompleteRecordsTelemetryAgainstRequestedCatalogModelWhenProviderRevisionDrifts(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp: &Response{
+			Model:        "gpt-4.1-mini-2026-05-22",
+			InputTokens:  1000,
+			OutputTokens: 50,
+		},
+	})
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: "gpt-4.1-mini"})
+	require.NoError(t, err)
+
+	_, driftObserved := telemetry.Snapshot("openai/gpt-4.1-mini-2026-05-22")
+	assert.False(t, driftObserved)
+
+	obs, ok := telemetry.Snapshot("openai/gpt-4.1-mini")
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-4.1-mini", obs.ModelID)
+	assert.InDelta(t, 0.00048, obs.LastCost, 0.000000001)
+}
+
+func TestRegistry_ContextWindowUsesBuiltinCatalogMetadata(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.5"},
+		resp:   &Response{},
+	})
+
+	assert.Equal(t, 1_050_000, r.ContextWindow("openai/gpt-5.5"))
+	assert.Equal(t, 1_050_000, r.ContextWindow("gpt-5.5"))
+	assert.Equal(t, 0, NewRegistry().ContextWindow("openai/gpt-5.5"))
+}
+
+func TestProviders_ModelContextWindowUsesBuiltinCatalogMetadata(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 1_050_000, (&OpenAIProvider{}).ModelContextWindow("gpt-5.5"))
+	assert.Equal(t, 1_000_000, (&AnthropicProvider{}).ModelContextWindow("claude-opus-4-7"))
+	assert.Equal(t, 1_000_000, (&ClaudeCodeProvider{}).ModelContextWindow("claude-sonnet-4-6"))
+	assert.Equal(t, 1_050_000, (&CodexProvider{}).ModelContextWindow("gpt-5.5"))
+	assert.Equal(t, 128_000, (&OllamaProvider{}).ModelContextWindow("llama3.2"))
+}
+
+func TestRegistry_CanResolveModelUsesProviderQualificationIndexAndPrefixes(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{},
+	})
+
+	provider, ok := r.CanResolveModel("openai/gpt-future")
+	require.True(t, ok)
+	assert.Equal(t, providerOpenAI, provider)
+
+	provider, ok = r.CanResolveModel("gpt-4.1-mini")
+	require.True(t, ok)
+	assert.Equal(t, providerOpenAI, provider)
+
+	provider, ok = r.CanResolveModel("gpt-future")
+	require.True(t, ok)
+	assert.Equal(t, providerOpenAI, provider)
+
+	_, ok = r.CanResolveModel("anthropic/claude-sonnet-4-20250514")
+	assert.False(t, ok)
+}
+
+func TestRegistry_ProviderHasModelUsesProviderSpecificIndex(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"shared", "gpt-4.1-mini"},
+		resp:   &Response{},
+	})
+	r.Register(&fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{},
+	})
+
+	require.NoError(t, r.SetDefaultModel(providerOpenAI+"/gpt-live"))
+	require.NoError(t, r.SetDefaultProviderModel(providerAnthropic, "claude-live"))
+
+	assert.True(t, r.ProviderHasModel(providerOpenAI, "shared"))
+	assert.False(t, r.ProviderHasModel(providerAnthropic, "shared"))
+	assert.True(t, r.ProviderHasModel(providerOpenAI, "gpt-live"))
+	assert.True(t, r.ProviderHasModel(providerAnthropic, "claude-live"))
+	assert.False(t, r.ProviderHasModel(providerOpenAI, ""))
+
+	indexed := r.IndexedProviderModels()
+	assert.Contains(t, indexed[providerOpenAI], "shared")
+	assert.Contains(t, indexed[providerOpenAI], "gpt-live")
+	assert.Contains(t, indexed[providerAnthropic], "claude-live")
+	assert.NotContains(t, indexed[providerAnthropic], "shared")
 }
 
 func TestRegistry_CompleteWithFallbackAllFail(t *testing.T) {
@@ -516,6 +811,10 @@ func TestRegistry_ProviderModelsIndexesFetchedModels(t *testing.T) {
 		require.Failf(t, "unexpected failure", "models = %v, want [live-model]", models)
 	}
 
+	assert.True(t, r.ProviderHasModel(alphaProvider, "live-model"))
+	assert.False(t, r.ProviderHasModel(alphaProvider, "static-model"))
+	assert.True(t, r.ProviderModelsVerified(alphaProvider))
+
 	resp, err := r.Complete(context.Background(), CompleteParams{Model: "live-model"})
 	if err != nil {
 		require.NoError(t, err)
@@ -524,6 +823,67 @@ func TestRegistry_ProviderModelsIndexesFetchedModels(t *testing.T) {
 	if resp.Model != "live-model" {
 		assert.Failf(t, "assertion failed", "expected live model routing, got %q", resp.Model)
 	}
+
+	_, err = r.Complete(context.Background(), CompleteParams{Model: "static-model"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "unknown model")
+}
+
+func TestRegistry_ProviderModelsFetchFailureMarksVerifiedIndexUnverified(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:          alphaProvider,
+		models:        []string{"static-model"},
+		fetchedModels: []string{"live-model"},
+		resp:          &Response{Content: "ok"},
+	}
+	r := NewRegistry()
+	r.Register(provider)
+
+	_, err := r.ProviderModels(context.Background(), alphaProvider)
+
+	require.NoError(t, err)
+	assert.True(t, r.ProviderModelsVerified(alphaProvider))
+
+	provider.fetchModelsErr = errors.New("models endpoint unavailable")
+	models, err := r.ProviderModels(context.Background(), alphaProvider)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"static-model"}, models)
+	assert.False(t, r.ProviderModelsVerified(alphaProvider))
+	assert.True(t, r.ProviderHasModel(alphaProvider, "live-model"))
+	assert.True(t, r.ProviderHasModel(alphaProvider, "static-model"))
+}
+
+func TestRegistry_CheckHealthFailureKeepsFallbackModelsIndexed(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:          alphaProvider,
+		models:        []string{"static-model"},
+		fetchedModels: []string{"live-model"},
+		resp:          &Response{},
+	}
+	r := NewRegistry()
+	r.Register(provider)
+
+	results := r.CheckHealth(context.Background())
+
+	require.Len(t, results, 1)
+	assert.True(t, results[0].Healthy)
+	assert.True(t, r.ProviderModelsVerified(alphaProvider))
+	assert.True(t, r.ProviderHasModel(alphaProvider, "live-model"))
+	assert.False(t, r.ProviderHasModel(alphaProvider, "static-model"))
+
+	provider.healthCheckErr = errors.New("connection refused")
+	results = r.CheckHealth(context.Background())
+
+	require.Len(t, results, 1)
+	assert.False(t, results[0].Healthy)
+	assert.False(t, r.ProviderModelsVerified(alphaProvider))
+	assert.True(t, r.ProviderHasModel(alphaProvider, "live-model"))
+	assert.True(t, r.ProviderHasModel(alphaProvider, "static-model"))
 }
 
 func TestRegistry_CheckHealth(t *testing.T) {
@@ -599,6 +959,50 @@ func TestRegistry_CheckHealthUseFetchedModels(t *testing.T) {
 	if len(results[0].Models) != 2 || results[0].Models[0] != "live-1" {
 		assert.Failf(t, "assertion failed", "models = %v, want [live-1 live-2]", results[0].Models)
 	}
+
+	assert.True(t, r.ProviderHasModel(alphaProvider, "live-1"))
+	assert.False(t, r.ProviderHasModel(alphaProvider, "static"))
+	assert.True(t, r.ProviderModelsVerified(alphaProvider))
+}
+
+func TestRegistry_StaticCatalogFetchDoesNotVerifyProviderAvailability(t *testing.T) {
+	t.Parallel()
+
+	for _, provider := range []Provider{
+		&CodexProvider{models: []string{"gpt-5.5"}},
+		&ClaudeCodeProvider{models: []string{"claude-sonnet-4-6"}},
+	} {
+		t.Run(provider.Name(), func(t *testing.T) {
+			t.Parallel()
+
+			r := NewRegistry()
+			r.Register(provider)
+
+			models, err := r.ProviderModels(context.Background(), provider.Name())
+
+			require.NoError(t, err)
+			require.NotEmpty(t, models)
+			assert.False(t, r.ProviderModelsVerified(provider.Name()))
+		})
+	}
+}
+
+func TestRegistry_StaticCatalogFetchPreservesConfiguredProviderModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&CodexProvider{models: []string{"gpt-5.5"}})
+
+	require.NoError(t, r.SetDefaultProviderModel(providerCodex, "custom-live"))
+
+	_, err := r.ProviderModels(context.Background(), providerCodex)
+
+	require.NoError(t, err)
+	assert.False(t, r.ProviderModelsVerified(providerCodex))
+	assert.True(t, r.ProviderHasModel(providerCodex, "custom-live"))
+	providerName, ok := r.ProviderForModel("custom-live")
+	assert.True(t, ok)
+	assert.Equal(t, providerCodex, providerName)
 }
 
 func TestRegistry_CheckHealthUsesAdapterDiagnostics(t *testing.T) {

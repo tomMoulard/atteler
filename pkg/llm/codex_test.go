@@ -72,6 +72,7 @@ func TestCodexProvider_Complete(t *testing.T) {
 	assert.Equal(t, 12, resp.InputTokens)
 	assert.Equal(t, 4, resp.CachedInputTokens)
 	assert.Equal(t, 3, resp.OutputTokens)
+	assert.Positive(t, resp.FirstTokenLatency)
 
 	// Request shape: system → instructions, user → input.
 	assert.Equal(t, "/responses", gotPath)
@@ -383,6 +384,22 @@ func TestCodexStreamSSE_CancelUnblocksBackpressuredTerminalError(t *testing.T) {
 	case <-time.After(time.Second):
 		require.Fail(t, "stream goroutine stayed blocked on terminal error after cancellation")
 	}
+}
+
+func TestParseCodexSSERecordsFirstTokenLatency(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC)
+	resp, err := parseCodexSSEWithClock(
+		context.Background(),
+		strings.NewReader(codexSSEText(t, codexFakeSuccess("hello", "gpt-5.4", 1, 0, 1))),
+		startedAt,
+		func() time.Time { return startedAt.Add(42 * time.Millisecond) },
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-5.4", resp.Model)
+	assert.Equal(t, 42*time.Millisecond, resp.FirstTokenLatency)
 }
 
 func TestCodexProvider_RefreshOn401(t *testing.T) {
@@ -1151,6 +1168,23 @@ func waitForBufferedChunks(t *testing.T, ch <-chan Chunk, want int) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func codexSSEText(t *testing.T, events []map[string]any) string {
+	t.Helper()
+
+	var b strings.Builder
+
+	for _, ev := range events {
+		payload, err := json.Marshal(ev)
+		require.NoError(t, err)
+
+		b.WriteString("data: ")
+		b.Write(payload)
+		b.WriteString("\n\n")
+	}
+
+	return b.String()
 }
 
 func asString(v any) string {

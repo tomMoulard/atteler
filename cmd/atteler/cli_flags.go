@@ -198,6 +198,7 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.Var(&opts.routeCandidates, "route-candidate", "model route candidate spec: provider/model,key=value... (repeatable or comma-separated)")
 	fs.Var(&opts.routeInputTokens, "route-input-tokens", "estimated input tokens for model routing")
 	fs.Var(&opts.routeOutputTokens, "route-output-tokens", "estimated output tokens for model routing")
+	fs.Var(&opts.routeCacheWriteTokens, "route-cache-write-tokens", "estimated prompt-cache write tokens for model routing")
 	fs.Var(&opts.routeBudget, "route-budget", "maximum estimated request cost for model routing")
 	fs.Var(&opts.routeCacheReuse, "route-cache-reuse", "prompt-cache reuse estimate for model routing (0..1)")
 	fs.BoolVar(&opts.routeInteractive, "route-interactive", false, "rank model route candidates for low TTFT")

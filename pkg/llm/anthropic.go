@@ -68,11 +68,13 @@ func (a *AnthropicProvider) Name() string { return providerAnthropic }
 
 // Models returns the static list of supported models (fallback).
 func (a *AnthropicProvider) Models() []string {
-	return []string{
+	static := []string{
 		"claude-sonnet-4-20250514",
 		"claude-haiku-4-20250414",
 		"claude-opus-4-20250514",
 	}
+
+	return mergeModelLists(static, catalogModelsByProvider()[providerAnthropic])
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +247,11 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic: HTTP %d: %s", resp.StatusCode, respBody)
+		return nil, retryableHTTPStatusError(
+			fmt.Errorf("anthropic: HTTP %d: %s", resp.StatusCode, respBody),
+			resp.StatusCode,
+			resp.Header.Get("Retry-After"),
+		)
 	}
 
 	var ar anthropicResponse
@@ -262,11 +268,12 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 
 func parseAnthropicResponse(ar anthropicResponse) *Response {
 	result := &Response{
-		Model:             ar.Model,
-		StopReason:        anthropicStopReason(ar.StopReason),
-		InputTokens:       ar.Usage.InputTokens + ar.Usage.CacheCreationInputTokens + ar.Usage.CacheReadInputTokens,
-		CachedInputTokens: ar.Usage.CacheReadInputTokens,
-		OutputTokens:      ar.Usage.OutputTokens,
+		Model:                 ar.Model,
+		StopReason:            anthropicStopReason(ar.StopReason),
+		InputTokens:           ar.Usage.InputTokens + ar.Usage.CacheCreationInputTokens + ar.Usage.CacheReadInputTokens,
+		CachedInputTokens:     ar.Usage.CacheReadInputTokens,
+		CacheWriteInputTokens: ar.Usage.CacheCreationInputTokens,
+		OutputTokens:          ar.Usage.OutputTokens,
 	}
 
 	var textParts strings.Builder
@@ -422,6 +429,10 @@ func (a *AnthropicProvider) setAuthHeaders(httpReq *http.Request) {
 
 // ModelContextWindow returns the context window size for an Anthropic model.
 func (a *AnthropicProvider) ModelContextWindow(model string) int {
+	if limit := catalogContextWindow(providerAnthropic, model); limit > 0 {
+		return limit
+	}
+
 	return anthropicContextWindow(model)
 }
 

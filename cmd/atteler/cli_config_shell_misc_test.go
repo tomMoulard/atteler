@@ -159,6 +159,13 @@ func TestFormatTokenUsageSummary(t *testing.T) {
 	if got != want {
 		require.Failf(t, "unexpected token usage summary", "got %q, want %q", got, want)
 	}
+
+	got = formatTokenUsageSummary(tokenUsage{InputTokens: 1500, CachedInputTokens: 500, CacheWriteInputTokens: 250, OutputTokens: 42, Responses: 2})
+
+	want = "tokens:\tin=1.5k\tcached=500\tout=42\tcache_write=250\tresponses=2"
+	if got != want {
+		require.Failf(t, "unexpected token usage summary", "got %q, want %q", got, want)
+	}
 }
 
 func TestFormatTokenCount(t *testing.T) {

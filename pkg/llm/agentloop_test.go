@@ -639,6 +639,38 @@ func TestAgentLoop_TokenBudgetStopIsCheckpointed(t *testing.T) {
 	assert.Equal(t, AgentLoopStopTokenBudget, ledger.Steps[1].StopCondition.Kind)
 }
 
+func TestAgentLoop_AggregatesCacheWriteUsage(t *testing.T) {
+	t.Parallel()
+
+	ledger := &AgentLoopLedger{}
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{
+				Content:               "cached answer",
+				Model:                 "test-model",
+				StopReason:            StopEndTurn,
+				InputTokens:           10,
+				CachedInputTokens:     3,
+				CacheWriteInputTokens: 2,
+				OutputTokens:          5,
+			},
+		},
+	})
+
+	resp, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, nil, AgentLoopConfig{CheckpointSink: ledger})
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, resp.CacheWriteInputTokens)
+	require.Len(t, ledger.Steps, 2)
+	assert.Equal(t, 2, ledger.Steps[0].Usage.CacheWriteTokens)
+	require.NotNil(t, ledger.Steps[0].ModelResponse)
+	assert.Equal(t, 2, ledger.Steps[0].ModelResponse.CacheWriteTokens)
+}
+
 func TestAgentLoop_DefaultTotalTokenBudgetIsUnlimited(t *testing.T) {
 	t.Parallel()
 

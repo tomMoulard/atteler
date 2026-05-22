@@ -351,6 +351,7 @@ type cliOptions struct {
 	mergeArtifactMaxBytes              positiveIntFlag
 	routeInputTokens                   positiveIntFlag
 	routeOutputTokens                  positiveIntFlag
+	routeCacheWriteTokens              positiveIntFlag
 	gitHistoryLimit                    positiveIntFlag
 	pluginTimeout                      positiveIntFlag
 	bashTimeout                        positiveIntFlag

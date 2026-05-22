@@ -38,6 +38,17 @@ type retryableError struct {
 func (r *retryableError) Error() string { return r.wrapped.Error() }
 func (r *retryableError) Unwrap() error { return r.wrapped }
 
+func retryableHTTPStatusError(err error, statusCode int, retryAfter string) error {
+	if err == nil || !isRetryableStatus(statusCode) {
+		return err
+	}
+
+	return &retryableError{
+		wrapped:    err,
+		retryAfter: parseRetryAfter(retryAfter),
+	}
+}
+
 // isRetryableStatus returns true for HTTP status codes that indicate transient
 // errors worth retrying: 429 (rate limit), 500, 502, 503, 504.
 func isRetryableStatus(code int) bool {
@@ -78,6 +89,18 @@ func isRetryable(err error) (time.Duration, bool) {
 	}
 
 	return 0, false
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+
+	return strings.Contains(msg, "http 429") ||
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "too many requests")
 }
 
 // completeWithRetry calls fn up to cfg.MaxAttempts additional times on

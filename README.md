@@ -187,6 +187,11 @@ agents:
     capabilities: ["review", "security"]
     model: gpt-4.1-mini
     fallback_models: ["gpt-4.1-nano"]
+    routing_policy:
+      preferred_providers: ["openai"]
+      banned_providers: ["ollama"]
+      required_capabilities: ["tools"]
+      max_budget: 0.25
     reasoning_level: high
     triggers: ["review this", "code review"]
     system_prompt: >
@@ -195,6 +200,25 @@ agents:
     temperature: 0
     max_tokens: 1200
 ```
+
+Agent `routing_policy` entries are evaluated against the built-in versioned
+model catalog plus runtime provider evidence. The router considers context
+windows, output limits, input/output/cache prices, required capabilities,
+provider bans/preferences, budget caps, live provider/model availability when
+known, observed latency/TTFT, rate-limit telemetry, and actual token usage from
+previous calls. When routing evidence is used, Atteler emits a `route_decision`
+hook artifact with every candidate considered, constraints applied, rejection
+reasons, estimated cost, fallback order, provider-model verification state, and
+post-response actual cost/usage when available. Runtime calls refresh provider
+model lists within a short bounded window before applying availability
+constraints, and event metadata repeats profile estimates, availability counts,
+constraints, observed latency/TTFT, and actual usage/cost deltas for quick log
+inspection without parsing the full JSON artifact.
+Manual `providers route-interactive` and `providers route-batch` previews use
+the same catalog-backed estimates; `--route-input-tokens`,
+`--route-output-tokens`, `--route-cache-reuse`, and
+`--route-cache-write-tokens` let operators model prompt-cache read/write costs
+before a live call.
 
 Credentials come from environment variables, supported local harness config, or
 provider-specific command-line tools. OpenAI Platform calls require
@@ -558,14 +582,8 @@ atteler agents speculate-run \
   --speculate-gate "tests pass" \
   --speculate-gate "lint pass" \
   --speculate-prompt "pick the safest migration plan"
-atteler agents skill-suggest plan --skill-step code --skill-step test \
-  --skill-step plan --skill-step code --skill-step test
 atteler agents skill-suggest "open GH-15|tool=github|prompt=Fix GH-15" \
   --skill-step "edit pkg/skill|tool=file-edit|input=pkg/skill" \
-  --skill-step "run go test ./pkg/skill|tool=shell|verify=go test ./pkg/skill" \
-  --skill-step "open GH-16|tool=github|prompt=Fix GH-16" \
-  --skill-step "edit pkg/skill|tool=file-edit|input=pkg/skill" \
-  --skill-step "run go test ./pkg/skill|tool=shell|verify=go test ./pkg/skill" \
   --skill-save-dir .atteler/skills --skill-review-only
 atteler agents skill-learning-list
 atteler agents skill-learning-show k8s-investigation
@@ -744,6 +762,7 @@ linked from the row.
 | CLI command routing, grouped help, and compatibility flags | [`cmd/atteler/cli_args.go`](cmd/atteler/cli_args.go), [`cmd/atteler/cli_help_domains.go`](cmd/atteler/cli_help_domains.go), [`cmd/atteler/cli_args_test.go`](cmd/atteler/cli_args_test.go), [`cmd/atteler/cli_help_test.go`](cmd/atteler/cli_help_test.go) |
 | Error-aware streaming completion contract with bounded-buffer guidance | [`pkg/llm/stream.go`](pkg/llm/stream.go), [`pkg/llm/stream_test.go`](pkg/llm/stream_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
 | OpenAI, Anthropic, Codex CLI, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go), [`pkg/llm/capabilities.go`](pkg/llm/capabilities.go), [`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go) |
+| Evidence-backed model routing with catalog metadata, per-agent policy, route-decision artifacts, and usage telemetry | [`pkg/modelroute/catalog.go`](pkg/modelroute/catalog.go), [`pkg/modelroute/decision.go`](pkg/modelroute/decision.go), [`pkg/modelroute/telemetry.go`](pkg/modelroute/telemetry.go), [`pkg/modelroute/modelroute_test.go`](pkg/modelroute/modelroute_test.go), [`pkg/llm/llm.go`](pkg/llm/llm.go), [`cmd/atteler/route_decision_event.go`](cmd/atteler/route_decision_event.go), [`cmd/atteler/agent_resolution_test.go`](cmd/atteler/agent_resolution_test.go) |
 | Configuration loading, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
 | Sessions, transcript search/export, evaluations, failures, artifacts, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |
 | Bounded and policy-gated context references for local files, directories, globs, and remote URLs | [`pkg/contextref/references.go`](pkg/contextref/references.go), [`pkg/contextref/references_test.go`](pkg/contextref/references_test.go), [`pkg/contextref/contextref.go`](pkg/contextref/contextref.go), [`pkg/contextref/contextref_test.go`](pkg/contextref/contextref_test.go) |
