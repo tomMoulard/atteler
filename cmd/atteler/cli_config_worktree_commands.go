@@ -79,6 +79,50 @@ func formatAgentDescription(activeAgent agent.Agent) (string, error) {
 func doctor(ctx context.Context, state appState) error {
 	fmt.Println("Atteler doctor")
 
+	providers := state.registry.ListProviders()
+	sort.Strings(providers)
+
+	printDoctorOverview(state, providers)
+
+	// Health check every registered provider and list their models.
+	fmt.Println()
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	results := providerHealthResults(ctx, state, providers)
+	healthy := 0
+
+	for _, r := range results {
+		if r.Healthy {
+			fmt.Printf("  [ok] %s%s\n", r.Name, doctorAdapterSuffix(r.Contract))
+
+			healthy++
+		} else {
+			fmt.Printf("  [FAIL] %s%s: %v\n", r.Name, doctorAdapterSuffix(r.Contract), r.Error)
+		}
+
+		printDoctorAdapterDetails(r)
+
+		metadataProvider := doctorMetadataProvider(state, r.Name)
+
+		for _, m := range r.Models {
+			fmt.Printf("         - %s%s\n", m, doctorModelMetadataSuffix(metadataProvider, m))
+		}
+	}
+
+	if healthy == 0 {
+		if len(results) == 0 {
+			return errors.New("doctor: no providers registered; set provider credentials or config")
+		}
+
+		return errors.New("doctor: all providers failed their health check")
+	}
+
+	return nil
+}
+
+func printDoctorOverview(state appState, providers []string) {
 	if len(state.loadedConfigPaths) == 0 {
 		fmt.Println("config: no config files loaded")
 	} else {
@@ -86,9 +130,6 @@ func doctor(ctx context.Context, state appState) error {
 	}
 
 	fmt.Println("sessions: " + state.sessionStore.Dir() + " (" + pathStatus(state.sessionStore.Dir()) + ")")
-
-	providers := state.registry.ListProviders()
-	sort.Strings(providers)
 
 	if len(providers) == 0 {
 		fmt.Println("providers: none registered")
@@ -106,39 +147,136 @@ func doctor(ctx context.Context, state appState) error {
 	if state.worktreeInfo != nil {
 		fmt.Println("worktree: " + worktree.Status(state.worktreeInfo))
 	}
+}
 
-	if len(providers) == 0 {
-		return errors.New("doctor: no providers registered; set provider credentials or config")
-	}
-
-	// Health check every registered provider and list their models.
-	fmt.Println()
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
+func providerHealthResults(ctx context.Context, state appState, registeredProviders []string) []llm.ProviderHealth {
 	results := state.registry.CheckHealth(ctx)
-	healthy := 0
+	diagnosticConfig := privateAdapterDiagnosticConfig(state, registeredProviders)
+	results = append(results, llm.PrivateAdapterDiagnostics(ctx, diagnosticConfig)...)
 
-	for _, r := range results {
-		if r.Healthy {
-			fmt.Printf("  [ok] %s\n", r.Name)
+	sort.SliceStable(results, func(i, j int) bool {
+		return results[i].Name < results[j].Name
+	})
 
-			healthy++
-		} else {
-			fmt.Printf("  [FAIL] %s: %v\n", r.Name, r.Error)
-		}
+	return results
+}
 
-		for _, m := range r.Models {
-			fmt.Printf("         - %s\n", m)
+func privateAdapterDiagnosticConfig(state appState, registeredProviders []string) llm.AutoRegisterConfig {
+	diagnosticConfig := llmConfig(state.config, state.selectedModel)
+	if diagnosticConfig.Providers == nil {
+		diagnosticConfig.Providers = make(map[string]llm.ProviderConfig)
+	}
+
+	for _, providerName := range registeredProviders {
+		providerConfig := diagnosticConfig.Providers[providerName]
+		providerConfig.Disabled = true
+		diagnosticConfig.Providers[providerName] = providerConfig
+	}
+
+	return diagnosticConfig
+}
+
+func doctorAdapterSuffix(contract *llm.AdapterContract) string {
+	if contract == nil || contract.AdapterVersion == "" {
+		return ""
+	}
+
+	return " adapter=" + contract.AdapterVersion
+}
+
+func doctorMetadataProvider(state appState, providerName string) llm.ModelMetadataProvider {
+	if provider, found := state.registry.Provider(providerName); found {
+		if typedProvider, hasMetadata := provider.(llm.ModelMetadataProvider); hasMetadata {
+			return typedProvider
 		}
 	}
 
-	if healthy == 0 {
-		return errors.New("doctor: all providers failed their health check")
+	switch providerName {
+	case "codex":
+		return &llm.CodexProvider{}
+	case "claude-code":
+		return &llm.ClaudeCodeProvider{}
+	default:
+		return nil
+	}
+}
+
+func printDoctorAdapterDetails(result llm.ProviderHealth) {
+	if result.Contract != nil {
+		fmt.Printf("         adapter_contract: %s\n", doctorAdapterContractStatus(result))
+		fmt.Printf("         contract: source=%s; source_cli_version=%s; protocol=%s; reviewed=%s; review_after=%s\n",
+			result.Contract.SourceCLI,
+			result.Contract.SourceCLIVersion,
+			result.Contract.Protocol,
+			result.Contract.ReviewedAt,
+			result.Contract.ReviewAfter,
+		)
+		fmt.Printf("         credentials: %s\n", result.Contract.Credential)
+
+		if len(result.Contract.KillSwitches) > 0 {
+			fmt.Printf("         kill_switches: %s\n", strings.Join(result.Contract.KillSwitches, ", "))
+		}
 	}
 
-	return nil
+	for _, check := range result.Checks {
+		fmt.Printf("         [%s] %s: %s\n", check.Status, check.Name, check.Detail)
+	}
+
+	for _, warning := range result.Warnings {
+		fmt.Printf("         warning: %s\n", warning)
+	}
+}
+
+func doctorAdapterContractStatus(result llm.ProviderHealth) string {
+	if result.Healthy && result.Error == nil {
+		return "passed"
+	}
+
+	if result.Error == nil {
+		return "failed"
+	}
+
+	return "failed: " + result.Error.Error()
+}
+
+func doctorModelMetadataSuffix(provider llm.ModelMetadataProvider, model string) string {
+	if provider == nil {
+		return ""
+	}
+
+	metadata, ok := provider.ModelMetadata(model)
+	if !ok {
+		return ""
+	}
+
+	parts := make([]string, 0, 3)
+	if metadata.ContextWindow > 0 {
+		parts = append(parts, fmt.Sprintf("context=%d", metadata.ContextWindow))
+	} else {
+		parts = append(parts, "context=unknown")
+	}
+
+	if metadata.Provenance != "" {
+		parts = append(parts, "provenance="+metadata.Provenance)
+	}
+
+	if metadata.ReviewedAt != "" {
+		parts = append(parts, "reviewed="+metadata.ReviewedAt)
+	}
+
+	if metadata.ReviewAfter != "" {
+		parts = append(parts, "review_after="+metadata.ReviewAfter)
+	}
+
+	if metadata.Notes != "" {
+		parts = append(parts, "notes="+metadata.Notes)
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return " (" + strings.Join(parts, "; ") + ")"
 }
 
 //nolint:unparam // error return kept for consistency with other command handlers.
@@ -211,9 +349,10 @@ func llmConfig(cfg appconfig.Config, selectedModel string) llm.AutoRegisterConfi
 	providers := make(map[string]llm.ProviderConfig, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
 		providers[name] = llm.ProviderConfig{
-			Disabled:       provider.Disabled,
-			BaseURL:        provider.BaseURL,
-			TimeoutSeconds: provider.TimeoutSeconds,
+			Disabled:              provider.Disabled,
+			DisablePrivateAdapter: provider.DisablePrivateAdapter,
+			BaseURL:               provider.BaseURL,
+			TimeoutSeconds:        provider.TimeoutSeconds,
 		}
 	}
 

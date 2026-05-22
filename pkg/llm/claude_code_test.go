@@ -20,6 +20,7 @@ func TestClaudeCodeProvider_Complete(t *testing.T) {
 
 	var (
 		gotReq     anthropicRequest
+		gotBody    []byte
 		gotHeaders http.Header
 		gotPath    string
 	)
@@ -33,7 +34,9 @@ func TestClaudeCodeProvider_Complete(t *testing.T) {
 			return
 		}
 
-		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
+		gotBody = body
+
+		if !assert.NoError(t, json.Unmarshal(gotBody, &gotReq)) {
 			return
 		}
 
@@ -77,6 +80,14 @@ func TestClaudeCodeProvider_Complete(t *testing.T) {
 	assert.Equal(t, 3, resp.OutputTokens)
 
 	assert.Equal(t, "/v1/messages", gotPath)
+	assert.JSONEq(t, `{
+		"model": "claude-opus-4-7",
+		"system": "be brief",
+		"messages": [
+			{"role": "user", "content": "say ok"}
+		],
+		"max_tokens": 4096
+	}`, string(gotBody))
 	assert.Equal(t, "be brief", gotReq.System)
 	require.Len(t, gotReq.Messages, 1)
 	assert.Equal(t, "user", gotReq.Messages[0].Role)
@@ -84,6 +95,7 @@ func TestClaudeCodeProvider_Complete(t *testing.T) {
 	assert.Equal(t, "claude-opus-4-7", gotReq.Model)
 
 	assert.Equal(t, "Bearer access-1", gotHeaders.Get("Authorization"))
+	assert.Equal(t, "application/json", gotHeaders.Get("Content-Type"))
 	assert.Equal(t, defaultAnthropicVersion, gotHeaders.Get("anthropic-version"))
 	assert.Equal(t, anthropicOAuthBetas, gotHeaders.Get("anthropic-beta"))
 }
@@ -286,6 +298,41 @@ func TestClaudeCodeProvider_RefreshHonorsCanceledContext(t *testing.T) {
 	assert.Equal(t, "refresh-1", block.RefreshToken)
 }
 
+func TestClaudeCodeProvider_MissingRefreshTokenFailsLoudlyOn401(t *testing.T) {
+	t.Parallel()
+
+	var apiCalls atomic.Int32
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, err := w.Write([]byte(`{"error":{"type":"authentication_error"}}`))
+		assert.NoError(t, err)
+	}))
+	defer apiSrv.Close()
+
+	credPath := writeClaudeCodeCredentialsFile(t, "access-1", "", futureExpiry())
+
+	auth, err := loadClaudeCodeAuthFromFile(credPath)
+	require.NoError(t, err)
+
+	p := &ClaudeCodeProvider{
+		client:  apiSrv.Client(),
+		auth:    auth,
+		baseURL: apiSrv.URL,
+		models:  []string{"claude-opus-4-7"},
+	}
+
+	_, err = p.Complete(context.Background(), CompleteParams{
+		Model:    "claude-opus-4-7",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refresh after 401")
+	assert.Contains(t, err.Error(), "no refresh_token")
+	assert.EqualValues(t, 1, apiCalls.Load())
+}
+
 func TestParseClaudeCodeCredentialsRaw_AcceptsExpired(t *testing.T) {
 	t.Parallel()
 
@@ -384,6 +431,112 @@ func TestLoadClaudeCodeAuth_FilePath(t *testing.T) {
 
 	assert.Equal(t, "a", auth.snapshot())
 	assert.Equal(t, path, auth.persist.location())
+}
+
+func TestClaudeCodeProvider_ModelMetadataAndContextFallback(t *testing.T) {
+	t.Parallel()
+
+	p := &ClaudeCodeProvider{models: []string{"claude-opus-4-7", "opus"}}
+
+	metadata, ok := p.ModelMetadata("claude-opus-4-7")
+	require.True(t, ok)
+	assert.Equal(t, 200_000, metadata.ContextWindow)
+	assert.NotEmpty(t, metadata.Provenance)
+	assert.NotEmpty(t, metadata.ReviewedAt)
+	assert.NotEmpty(t, metadata.ReviewAfter)
+
+	alias, ok := p.ModelMetadata("opus")
+	require.True(t, ok)
+	assert.Equal(t, 200_000, alias.ContextWindow)
+	assert.Contains(t, alias.Provenance, "alias")
+
+	assert.Zero(t, p.ModelContextWindow("claude-unknown-private"))
+}
+
+func TestClaudeCodeProvider_StaticModelCatalogConformance(t *testing.T) {
+	t.Parallel()
+
+	p := &ClaudeCodeProvider{models: []string{"claude-opus-4-7", "opus"}}
+
+	models, err := p.FetchModels(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"claude-opus-4-7", "opus"}, models)
+
+	catalog := p.ModelCatalog()
+	require.Len(t, catalog, 2)
+	assert.Equal(t, "claude-opus-4-7", catalog[0].ID)
+	assert.Equal(t, 200_000, catalog[0].ContextWindow)
+	assert.Contains(t, catalog[0].Provenance, "static Claude Code adapter catalog")
+	assert.Equal(t, claudeCodeAdapterReviewAfter, catalog[0].ReviewAfter)
+
+	assert.Equal(t, "opus", catalog[1].ID)
+	assert.Equal(t, 200_000, catalog[1].ContextWindow)
+	assert.Contains(t, catalog[1].Provenance, "static Claude Code CLI alias")
+	assert.Equal(t, claudeCodeAdapterReviewAfter, catalog[1].ReviewAfter)
+}
+
+func TestClaudeCodeProvider_AdapterDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	p := &ClaudeCodeProvider{
+		auth:   newTestClaudeCodeAuth(t, "access-1", "refresh-1", futureExpiry()),
+		models: []string{"claude-opus-4-7"},
+	}
+
+	diagnostics := p.AdapterDiagnostics()
+	assert.True(t, diagnostics.Healthy())
+	assert.Equal(t, claudeCodeAdapterVersion, diagnostics.Contract.AdapterVersion)
+	assert.NotEmpty(t, diagnostics.Contract.SourceCLIVersion)
+	assert.Contains(t, diagnostics.Contract.KillSwitches, "providers.claude-code.disable_private_adapter")
+	assert.Contains(t, diagnostics.Contract.KillSwitches, "ATTELER_DISABLE_CLAUDE_CODE_ADAPTER")
+	assert.Equal(t, claudeCodeAdapterReviewAfter, diagnostics.Contract.ReviewAfter)
+
+	checks := readinessChecksByName(diagnostics.Checks)
+	assert.Equal(t, ReadinessOK, checks["local_credentials"].Status)
+	assert.Equal(t, ReadinessOK, checks["token_refresh"].Status)
+	assert.Equal(t, ReadinessSkipped, checks["network_reachability"].Status)
+	assert.Equal(t, ReadinessWarning, checks["model_availability"].Status)
+	assert.Contains(t, diagnostics.Warnings[0], "beta")
+}
+
+func TestClaudeCodeProvider_AdapterDiagnosticsSeparatesAccessAndRefreshReadiness(t *testing.T) {
+	t.Parallel()
+
+	p := &ClaudeCodeProvider{
+		auth:   newTestClaudeCodeAuth(t, "access-without-refresh", "", futureExpiry()),
+		models: []string{"claude-opus-4-7"},
+	}
+
+	diagnostics := p.AdapterDiagnostics()
+	assert.False(t, diagnostics.Healthy())
+
+	checks := readinessChecksByName(diagnostics.Checks)
+	assert.Equal(t, ReadinessOK, checks["local_credentials"].Status)
+	assert.Equal(t, ReadinessFailed, checks["token_refresh"].Status)
+
+	err := diagnostics.Error()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token_refresh")
+}
+
+func TestNewClaudeCodeProviderWithConfig_HonorsPrivateAdapterKillSwitchBeforeCredentials(t *testing.T) {
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "missing-home"))
+
+	_, err := NewClaudeCodeProviderWithConfigContext(
+		context.Background(),
+		ProviderConfig{DisablePrivateAdapter: true},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "private adapter disabled")
+}
+
+func TestNewClaudeCodeProviderWithConfig_HonorsPrivateAdapterEnvKillSwitchBeforeCredentials(t *testing.T) {
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "missing-home"))
+	t.Setenv("ATTELER_DISABLE_CLAUDE_CODE_ADAPTER", "1")
+
+	_, err := NewClaudeCodeProviderWithConfigContext(context.Background(), ProviderConfig{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "private adapter disabled")
 }
 
 // ---------------------------------------------------------------------------

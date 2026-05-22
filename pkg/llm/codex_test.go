@@ -23,18 +23,23 @@ func TestCodexProvider_Complete(t *testing.T) {
 
 	var (
 		gotReq     codexResponsesRequest
+		gotBody    []byte
 		gotHeaders http.Header
+		gotPath    string
 	)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotHeaders = r.Header.Clone()
+		gotPath = r.URL.Path
 
 		body, err := io.ReadAll(r.Body)
 		if !assert.NoError(t, err) {
 			return
 		}
 
-		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
+		gotBody = body
+
+		if !assert.NoError(t, json.Unmarshal(gotBody, &gotReq)) {
 			return
 		}
 
@@ -69,6 +74,23 @@ func TestCodexProvider_Complete(t *testing.T) {
 	assert.Equal(t, 3, resp.OutputTokens)
 
 	// Request shape: system → instructions, user → input.
+	assert.Equal(t, "/responses", gotPath)
+	assert.JSONEq(t, `{
+		"model": "gpt-5.5",
+		"instructions": "be brief",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "say ok"}
+				]
+			}
+		],
+		"stream": true,
+		"store": false,
+		"reasoning": {"effort": "high"}
+	}`, string(gotBody))
 	assert.Equal(t, "be brief", gotReq.Instructions)
 	require.Len(t, gotReq.Input, 1)
 	assert.Equal(t, "message", gotReq.Input[0].Type)
@@ -85,6 +107,9 @@ func TestCodexProvider_Complete(t *testing.T) {
 	// Auth headers carry the chatgpt access token + account id.
 	assert.Equal(t, "Bearer access-1", gotHeaders.Get("Authorization"))
 	assert.Equal(t, "acct-42", gotHeaders.Get("ChatGPT-Account-ID"))
+	assert.Equal(t, "text/event-stream", gotHeaders.Get("Accept"))
+	assert.Equal(t, "responses=experimental", gotHeaders.Get("OpenAI-Beta"))
+	assert.Equal(t, codexOriginatorHeader, gotHeaders.Get("originator"))
 }
 
 func TestCodexProvider_CompleteStream_Success(t *testing.T) {
@@ -547,6 +572,36 @@ func TestCodexProvider_RefreshHonorsCanceledContext(t *testing.T) {
 	assert.Equal(t, "acct-42", diskAuth.Tokens.AccountID)
 }
 
+func TestCodexProvider_MissingRefreshTokenFailsLoudlyOn401(t *testing.T) {
+	t.Parallel()
+
+	var apiCalls atomic.Int32
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, err := w.Write([]byte(`{"error":"invalid_token"}`))
+		assert.NoError(t, err)
+	}))
+	defer apiSrv.Close()
+
+	authPath := writeCodexAuthFile(t, "access-1", "", "acct-42")
+
+	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	require.NoError(t, err)
+
+	p := &CodexProvider{client: apiSrv.Client(), auth: auth, baseURL: apiSrv.URL, models: []string{"gpt-5.5"}}
+
+	_, err = p.Complete(context.Background(), CompleteParams{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refresh after 401")
+	assert.Contains(t, err.Error(), "no refresh_token")
+	assert.EqualValues(t, 1, apiCalls.Load())
+}
+
 func TestLoadCodexChatGPTAuth(t *testing.T) {
 	t.Parallel()
 
@@ -560,6 +615,20 @@ func TestLoadCodexChatGPTAuth(t *testing.T) {
 	assert.Equal(t, "acct-42", accountID)
 }
 
+func TestLoadCodexChatGPTAuth_AllowsMissingRefreshForDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	authPath := writeCodexAuthFile(t, "access-1", "", "acct-42")
+
+	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	require.NoError(t, err)
+
+	access, accountID := auth.snapshot()
+	assert.Equal(t, "access-1", access)
+	assert.Equal(t, "acct-42", accountID)
+	assert.False(t, auth.hasRefreshToken())
+}
+
 func TestLoadCodexChatGPTAuth_RejectsAPIKeyMode(t *testing.T) {
 	t.Parallel()
 
@@ -570,6 +639,16 @@ func TestLoadCodexChatGPTAuth_RejectsAPIKeyMode(t *testing.T) {
 	_, err := loadCodexChatGPTAuthContext(context.Background(), dir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auth_mode")
+}
+
+func TestLoadCodexChatGPTAuth_RejectsMissingAccessToken(t *testing.T) {
+	t.Parallel()
+
+	authPath := writeCodexAuthFile(t, "", "refresh-1", "acct-42")
+
+	_, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing access_token")
 }
 
 func TestPersistRefreshedCodexAuth_AtomicAndPreservesUnknown(t *testing.T) {
@@ -651,6 +730,111 @@ model = "gpt-test-codex"
 	if len(models) == 0 || models[0] != "gpt-test-codex" {
 		require.Failf(t, "unexpected failure", "codexModels = %v, want configured model first", models)
 	}
+}
+
+func TestCodexProvider_ModelMetadataAndContextFallback(t *testing.T) {
+	t.Parallel()
+
+	p := &CodexProvider{models: []string{"custom-codex-model", "gpt-5.5"}}
+
+	metadata, ok := p.ModelMetadata("gpt-5.5")
+	require.True(t, ok)
+	assert.Equal(t, 400_000, metadata.ContextWindow)
+	assert.NotEmpty(t, metadata.Provenance)
+	assert.NotEmpty(t, metadata.ReviewedAt)
+	assert.NotEmpty(t, metadata.ReviewAfter)
+
+	metadata, ok = p.ModelMetadata("custom-codex-model")
+	require.True(t, ok)
+	assert.Zero(t, metadata.ContextWindow)
+	assert.NotEmpty(t, metadata.ReviewedAt)
+	assert.Contains(t, metadata.Notes, "rather than guessing")
+
+	assert.Zero(t, p.ModelContextWindow("gpt-unknown-private"))
+}
+
+func TestCodexProvider_StaticModelCatalogConformance(t *testing.T) {
+	t.Parallel()
+
+	p := &CodexProvider{models: []string{"custom-codex-model", "gpt-5.5"}}
+
+	models, err := p.FetchModels(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"custom-codex-model", "gpt-5.5"}, models)
+
+	catalog := p.ModelCatalog()
+	require.Len(t, catalog, 2)
+	assert.Equal(t, "custom-codex-model", catalog[0].ID)
+	assert.Zero(t, catalog[0].ContextWindow)
+	assert.Contains(t, catalog[0].Provenance, "user Codex config.toml model override")
+	assert.Equal(t, codexAdapterReviewAfter, catalog[0].ReviewAfter)
+
+	assert.Equal(t, "gpt-5.5", catalog[1].ID)
+	assert.Equal(t, 400_000, catalog[1].ContextWindow)
+	assert.Contains(t, catalog[1].Provenance, "static Codex adapter catalog")
+	assert.Equal(t, codexAdapterReviewAfter, catalog[1].ReviewAfter)
+}
+
+func TestCodexProvider_AdapterDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	p := &CodexProvider{
+		auth:   newTestCodexAuth(t, "access-1", "refresh-1", "acct-42"),
+		models: []string{"gpt-5.5"},
+	}
+
+	diagnostics := p.AdapterDiagnostics()
+	assert.True(t, diagnostics.Healthy())
+	assert.Equal(t, codexAdapterVersion, diagnostics.Contract.AdapterVersion)
+	assert.NotEmpty(t, diagnostics.Contract.SourceCLIVersion)
+	assert.Contains(t, diagnostics.Contract.KillSwitches, "providers.codex.disable_private_adapter")
+	assert.Contains(t, diagnostics.Contract.KillSwitches, "ATTELER_DISABLE_CODEX_ADAPTER")
+	assert.Equal(t, codexAdapterReviewAfter, diagnostics.Contract.ReviewAfter)
+
+	checks := readinessChecksByName(diagnostics.Checks)
+	assert.Equal(t, ReadinessOK, checks["local_credentials"].Status)
+	assert.Equal(t, ReadinessOK, checks["token_refresh"].Status)
+	assert.Equal(t, ReadinessSkipped, checks["network_reachability"].Status)
+	assert.Equal(t, ReadinessWarning, checks["model_availability"].Status)
+	assert.Contains(t, diagnostics.Warnings[0], "static")
+}
+
+func TestCodexProvider_AdapterDiagnosticsSeparatesAccessAndRefreshReadiness(t *testing.T) {
+	t.Parallel()
+
+	p := &CodexProvider{
+		auth:   newTestCodexAuth(t, "access-without-refresh", "", ""),
+		models: []string{"gpt-5.5"},
+	}
+
+	diagnostics := p.AdapterDiagnostics()
+	assert.False(t, diagnostics.Healthy())
+
+	checks := readinessChecksByName(diagnostics.Checks)
+	assert.Equal(t, ReadinessOK, checks["local_credentials"].Status)
+	assert.Equal(t, ReadinessFailed, checks["token_refresh"].Status)
+	assert.Equal(t, ReadinessWarning, checks["account_scope"].Status)
+
+	err := diagnostics.Error()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token_refresh")
+}
+
+func TestNewCodexProviderWithConfig_HonorsPrivateAdapterKillSwitchBeforeCredentials(t *testing.T) {
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "missing-codex-home"))
+
+	_, err := NewCodexProviderWithConfigContext(context.Background(), ProviderConfig{DisablePrivateAdapter: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "private adapter disabled")
+}
+
+func TestNewCodexProviderWithConfig_HonorsPrivateAdapterEnvKillSwitchBeforeCredentials(t *testing.T) {
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "missing-codex-home"))
+	t.Setenv("ATTELER_DISABLE_CODEX_ADAPTER", "1")
+
+	_, err := NewCodexProviderWithConfigContext(context.Background(), ProviderConfig{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "private adapter disabled")
 }
 
 func TestCodexBuildInput_SkipsSystemAndPicksContentType(t *testing.T) {
@@ -802,6 +986,16 @@ func TestCodexProvider_Complete_WithToolUse(t *testing.T) {
 	assert.Equal(t, "ls -la", resp.ToolCalls[0].Input["command"])
 }
 
+func TestParseCodexSSE_FailedEventIsConformanceFailure(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseCodexSSE(context.Background(), strings.NewReader(`data: {"type":"response.failed","error":{"message":"wire changed"}}
+
+`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "response.failed")
+}
+
 func TestCodexExtractFunctionCall(t *testing.T) {
 	t.Parallel()
 
@@ -835,10 +1029,23 @@ func TestCodexExtractFunctionCall_NonFunctionCallType(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func newTestCodexAuth(t *testing.T) *codexChatGPTAuth {
+func newTestCodexAuth(t *testing.T, values ...string) *codexChatGPTAuth {
 	t.Helper()
 
-	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
+	access, refresh, accountID := "access-1", "refresh-1", "acct-42"
+	if len(values) > 0 {
+		access = values[0]
+	}
+
+	if len(values) > 1 {
+		refresh = values[1]
+	}
+
+	if len(values) > 2 {
+		accountID = values[2]
+	}
+
+	authPath := writeCodexAuthFile(t, access, refresh, accountID)
 
 	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
 	require.NoError(t, err)

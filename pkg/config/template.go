@@ -25,10 +25,23 @@ providers:
     # base_url: https://api.openai.com
   anthropic:
     # base_url: https://api.anthropic.com
+    # Set disable_private_adapter: true to keep direct Anthropic API keys while
+    # blocking Anthropic fallback to Claude Code/Forge borrowed credentials.
+    # disable_private_adapter: true
   ollama:
     # base_url: http://127.0.0.1:11434
     # Atteler auto-starts "ollama serve" for selected local Ollama runs unless
     # ATTELER_OLLAMA_AUTO_START=false is set.
+  codex:
+    # Private/borrowed-credential adapter for Codex CLI ChatGPT login.
+    # Set disable_private_adapter: true (or ATTELER_DISABLE_CODEX_ADAPTER=1)
+    # to keep normal OpenAI provider support while disabling this adapter.
+    # disable_private_adapter: true
+  claude-code:
+    # Private/borrowed-credential adapter for Claude Code OAuth login.
+    # Set disable_private_adapter: true (or ATTELER_DISABLE_CLAUDE_CODE_ADAPTER=1)
+    # to keep normal Anthropic provider support while disabling this adapter.
+    # disable_private_adapter: true
 
 agents:
   reviewer:

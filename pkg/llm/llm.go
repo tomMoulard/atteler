@@ -527,14 +527,19 @@ func (r *Registry) indexProviderModelsLocked(providerName string, models []strin
 
 // ProviderHealth describes the outcome of a single provider health check.
 type ProviderHealth struct {
-	Error   error
-	Name    string
-	Models  []string
-	Healthy bool
+	Contract *AdapterContract
+	Error    error
+	Name     string
+	Models   []string
+	Checks   []ReadinessCheck
+	Warnings []string
+	Healthy  bool
 }
 
-// CheckHealth pings every registered provider and fetches its models. It
-// returns one ProviderHealth entry per provider, sorted by name.
+// CheckHealth returns one ProviderHealth entry per provider, sorted by name.
+// Providers with structured diagnostics report their adapter contract and
+// readiness dimensions; other providers are pinged via HealthCheck and then
+// queried for models.
 func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
 	ctxErr := requireCredentialContext(ctx)
 
@@ -560,7 +565,27 @@ func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
 		if ctxErr != nil {
 			ph.Error = ctxErr
 			ph.Models = p.Models()
-		} else if err := p.HealthCheck(ctx); err != nil {
+			ph.Warnings = appendProviderWarnings(ph.Warnings, p)
+			results = append(results, ph)
+
+			continue
+		}
+
+		if diagnosticProvider, ok := p.(DiagnosticsProvider); ok {
+			ph = providerHealthFromDiagnostics(name, diagnosticProvider.AdapterDiagnostics())
+			if len(ph.Models) == 0 {
+				ph.Models = p.Models()
+			}
+
+			ph.Warnings = appendProviderWarnings(ph.Warnings, p)
+			results = append(results, ph)
+
+			continue
+		}
+
+		ph.Warnings = appendProviderWarnings(ph.Warnings, p)
+
+		if err := p.HealthCheck(ctx); err != nil {
 			ph.Error = err
 			ph.Models = p.Models()
 		} else {
@@ -578,6 +603,15 @@ func (r *Registry) CheckHealth(ctx context.Context) []ProviderHealth {
 	}
 
 	return results
+}
+
+func appendProviderWarnings(current []string, p Provider) []string {
+	warningProvider, ok := p.(WarningProvider)
+	if !ok {
+		return current
+	}
+
+	return append(current, warningProvider.ProviderWarnings()...)
 }
 
 // ContextWindow returns the context window size (in tokens) for a model,

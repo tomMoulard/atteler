@@ -167,6 +167,16 @@ providers:
   anthropic:
     disabled: false
     base_url: https://api.anthropic.com
+    # Optional: keep direct Anthropic API keys but block Claude/Forge borrowed credentials.
+    # disable_private_adapter: true
+  codex:
+    # Private adapter that borrows Codex CLI ChatGPT-login credentials.
+    # Disable it without disabling the normal OpenAI provider.
+    # disable_private_adapter: true
+  claude-code:
+    # Private adapter that borrows Claude Code OAuth credentials.
+    # Disable it without disabling the normal Anthropic provider.
+    # disable_private_adapter: true
   ollama:
     base_url: http://127.0.0.1:11434
 
@@ -191,6 +201,24 @@ provider-specific command-line tools. OpenAI Platform calls require
 `OPENAI_API_KEY`; direct Anthropic calls require Anthropic credentials. The
 `codex`, `claude-code`, and `ollama` providers use their local CLIs or daemons
 when available.
+
+### Private provider adapter contracts
+
+The `codex` and `claude-code` providers are explicit private compatibility
+adapters for borrowed CLI credential stores. `atteler --doctor` (or
+`atteler config doctor`) reports their adapter contract, credential/refresh
+readiness, non-network-verified model catalog status, and static context-window
+provenance. Disable these adapters
+with `providers.codex.disable_private_adapter: true`,
+`providers.claude-code.disable_private_adapter: true`,
+`ATTELER_DISABLE_CODEX_ADAPTER=1`, `ATTELER_DISABLE_CLAUDE_CODE_ADAPTER=1`, or
+`ATTELER_DISABLE_PRIVATE_ADAPTERS=1`; this does not disable the normal
+`openai` or API-key `anthropic` providers. Use
+`providers.anthropic.disable_private_adapter: true`,
+`ATTELER_DISABLE_CLAUDE_CODE_ADAPTER=1`, or
+`ATTELER_DISABLE_BORROWED_CREDENTIAL_ADAPTERS=1` to keep direct Anthropic
+credentials enabled while blocking Anthropic fallback to borrowed Claude
+Code/Forge credential stores.
 
 ### Provider protocol contracts
 

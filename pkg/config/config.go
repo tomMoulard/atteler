@@ -40,9 +40,10 @@ type Config struct {
 
 // ProviderConfig configures an individual LLM provider.
 type ProviderConfig struct {
-	BaseURL        string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	Disabled       bool   `json:"disabled,omitempty" yaml:"disabled,omitempty"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	BaseURL               string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	Disabled              bool   `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+	DisablePrivateAdapter bool   `json:"disable_private_adapter,omitempty" yaml:"disable_private_adapter,omitempty"`
+	TimeoutSeconds        int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
 }
 
 // AgentConfig configures a named agent persona.
@@ -187,9 +188,10 @@ type fileConfig struct {
 }
 
 type fileProviderConfig struct {
-	Disabled       *bool   `json:"disabled" yaml:"disabled"`
-	BaseURL        *string `json:"base_url" yaml:"base_url"`
-	TimeoutSeconds *int    `json:"timeout_seconds" yaml:"timeout_seconds"`
+	Disabled              *bool   `json:"disabled" yaml:"disabled"`
+	DisablePrivateAdapter *bool   `json:"disable_private_adapter" yaml:"disable_private_adapter"`
+	BaseURL               *string `json:"base_url" yaml:"base_url"`
+	TimeoutSeconds        *int    `json:"timeout_seconds" yaml:"timeout_seconds"`
 }
 
 type fileAgentConfig struct {
@@ -485,6 +487,11 @@ func mergeProviders(dst *Config, providers map[string]fileProviderConfig, rec *o
 		if provider.BaseURL != nil {
 			current.BaseURL = *provider.BaseURL
 			rec.set(providerFieldPath(name, "base_url"), source, *provider.BaseURL)
+		}
+
+		if provider.DisablePrivateAdapter != nil {
+			current.DisablePrivateAdapter = *provider.DisablePrivateAdapter
+			rec.set(providerFieldPath(name, "disable_private_adapter"), source, *provider.DisablePrivateAdapter)
 		}
 
 		if provider.TimeoutSeconds != nil {
@@ -813,6 +820,9 @@ func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec 
 		current.Disabled = provider.Disabled
 		rec.set(providerFieldPath(name, "disabled"), source, provider.Disabled)
 
+		current.DisablePrivateAdapter = provider.DisablePrivateAdapter
+		rec.set(providerFieldPath(name, "disable_private_adapter"), source, provider.DisablePrivateAdapter)
+
 		if provider.TimeoutSeconds > 0 {
 			current.TimeoutSeconds = provider.TimeoutSeconds
 			rec.set(providerFieldPath(name, "timeout_seconds"), source, provider.TimeoutSeconds)
@@ -1127,6 +1137,10 @@ func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderC
 		current.Disabled = provider.Disabled
 
 		appendOriginChain(dstOrigins, providerFieldPath(name, "disabled"), srcOrigins, false)
+
+		current.DisablePrivateAdapter = provider.DisablePrivateAdapter
+
+		appendOriginChain(dstOrigins, providerFieldPath(name, "disable_private_adapter"), srcOrigins, false)
 
 		if provider.TimeoutSeconds > 0 {
 			current.TimeoutSeconds = provider.TimeoutSeconds

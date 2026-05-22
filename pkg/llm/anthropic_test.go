@@ -162,6 +162,18 @@ func TestAnthropicProvider_BearerAuth(t *testing.T) {
 	}
 }
 
+func TestAnthropicProvider_ProviderWarningsForBearerBetaRouting(t *testing.T) {
+	t.Parallel()
+
+	assert.Empty(t, (&AnthropicProvider{bearer: false}).ProviderWarnings())
+
+	warnings := (&AnthropicProvider{bearer: true}).ProviderWarnings()
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "beta routing headers")
+	assert.Contains(t, warnings[0], "disable_private_adapter")
+	assert.Contains(t, warnings[0], "ATTELER_DISABLE_CLAUDE_CODE_ADAPTER")
+}
+
 func TestAnthropicProvider_HTTPError(t *testing.T) {
 	t.Parallel()
 

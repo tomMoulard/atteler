@@ -12,6 +12,17 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 )
 
+const (
+	claudeCodeAdapterVersion    = "claude-code-oauth-messages-v1"
+	claudeCodeAdapterSource     = "Claude Code OAuth credential store claudeAiOauth; source credentials are owned by the claude CLI"
+	claudeCodeAdapterCLIVersion = "Claude Code claudeAiOauth schema, OAuth refresh route, and beta header set as reviewed on 2026-05-22; " +
+		"no public upstream semver contract"
+	claudeCodeAdapterProtocol = "Anthropic Messages POST /v1/messages with Claude Code OAuth bearer auth and beta routing headers: " +
+		anthropicOAuthBetas
+	claudeCodeAdapterReviewedAt  = "2026-05-22"
+	claudeCodeAdapterReviewAfter = "2026-08-22"
+)
+
 // ClaudeCodeProvider calls the Anthropic Messages API directly using the
 // OAuth access token Claude Code stored at login. It auto-refreshes the
 // access token on 401 and persists refreshed tokens back to whichever store
@@ -35,8 +46,18 @@ func NewClaudeCodeProvider() (*ClaudeCodeProvider, error) {
 // NewClaudeCodeProviderContext creates a provider using ctx for credential
 // discovery (keychain probe / file reads).
 func NewClaudeCodeProviderContext(ctx context.Context) (*ClaudeCodeProvider, error) {
+	return NewClaudeCodeProviderWithConfigContext(ctx, ProviderConfig{})
+}
+
+// NewClaudeCodeProviderWithConfigContext creates a provider using ctx for
+// credential discovery and applies provider-specific configuration.
+func NewClaudeCodeProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) (*ClaudeCodeProvider, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, err
+	}
+
+	if privateAdapterDisabled(providerClaudeCode, cfg) {
+		return nil, errors.New("claude code private adapter disabled")
 	}
 
 	auth, err := loadClaudeCodeAuth(ctx)
@@ -45,9 +66,9 @@ func NewClaudeCodeProviderContext(ctx context.Context) (*ClaudeCodeProvider, err
 	}
 
 	return &ClaudeCodeProvider{
-		client:  providerHTTPClient(ProviderConfig{}),
+		client:  providerHTTPClient(cfg),
 		auth:    auth,
-		baseURL: configuredBaseURL("ANTHROPIC_BASE_URL", "", defaultAnthropicBase),
+		baseURL: configuredBaseURL("ANTHROPIC_BASE_URL", cfg.BaseURL, defaultAnthropicBase),
 		models:  defaultClaudeCodeModels(),
 	}, nil
 }
@@ -75,6 +96,44 @@ func (c *ClaudeCodeProvider) FetchModels(ctx context.Context) ([]string, error) 
 	return c.Models(), nil
 }
 
+// AdapterDiagnostics reports the private Claude Code adapter contract and readiness.
+func (c *ClaudeCodeProvider) AdapterDiagnostics() AdapterDiagnostics {
+	access := ""
+	if c.auth != nil {
+		access = c.auth.snapshot()
+	}
+
+	return AdapterDiagnostics{
+		Contract: claudeCodeAdapterContract(),
+		Checks: []ReadinessCheck{
+			{
+				Name:   "local_credentials",
+				Status: readinessStatus(access != ""),
+				Detail: readinessDetail(access != "", "Claude Code OAuth access token loaded", "missing Claude Code OAuth access token; run `claude` to log in"),
+			},
+			{
+				Name:   "token_refresh",
+				Status: readinessStatus(c.auth != nil && c.auth.hasRefreshToken()),
+				Detail: readinessDetail(c.auth != nil && c.auth.hasRefreshToken(), "refresh_token available for one retry after HTTP 401", "missing refresh_token; adapter cannot recover from expired access tokens"),
+			},
+			{
+				Name:   "network_reachability",
+				Status: ReadinessSkipped,
+				Detail: "not probed during doctor; OAuth-mode Messages access is verified only by a completion request",
+			},
+			{
+				Name:   "model_availability",
+				Status: ReadinessWarning,
+				Detail: "static catalog only; OAuth model listing is not treated as a stable public contract",
+			},
+		},
+		Warnings: []string{
+			"uses borrowed Claude Code OAuth credentials, beta Anthropic routing headers, and a static non-network-verified model catalog",
+		},
+		Models: c.Models(),
+	}
+}
+
 // HealthCheck verifies that we have an OAuth access token loaded. It does not
 // hit the network — provider-level credential validity is asserted lazily on
 // the next Complete call (with auto-refresh on 401).
@@ -100,7 +159,38 @@ func (c *ClaudeCodeProvider) HealthCheck(ctx context.Context) error {
 
 // ModelContextWindow returns the context window size for a Claude Code model.
 func (c *ClaudeCodeProvider) ModelContextWindow(model string) int {
-	return anthropicContextWindow(model)
+	metadata, ok := c.ModelMetadata(model)
+	if !ok {
+		return 0
+	}
+
+	return metadata.ContextWindow
+}
+
+// ModelCatalog returns static Claude Code model metadata with provenance.
+func (c *ClaudeCodeProvider) ModelCatalog() []ModelMetadata {
+	out := make([]ModelMetadata, 0, len(c.Models()))
+	for _, model := range c.Models() {
+		metadata, ok := c.ModelMetadata(model)
+		if !ok {
+			continue
+		}
+
+		out = append(out, metadata)
+	}
+
+	return out
+}
+
+// ModelMetadata returns provenance for a Claude Code static model entry.
+func (c *ClaudeCodeProvider) ModelMetadata(model string) (ModelMetadata, bool) {
+	for _, entry := range claudeCodeModelCatalog() {
+		if entry.ID == model {
+			return entry, true
+		}
+	}
+
+	return ModelMetadata{}, false
 }
 
 // Complete performs a chat completion against the Anthropic Messages API,
@@ -225,18 +315,61 @@ func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, acce
 }
 
 func defaultClaudeCodeModels() []string {
-	return []string{
-		"claude-opus-4-7",
-		"claude-opus-4-6",
-		"claude-opus-4-5-20251101",
-		"claude-opus-4-1-20250805",
-		"claude-opus-4-20250514",
-		"claude-sonnet-4-6",
-		"claude-sonnet-4-5-20250929",
-		"claude-sonnet-4-20250514",
-		"claude-haiku-4-5-20251001",
-		"opus",
-		"sonnet",
-		"haiku",
+	return modelIDsFromMetadata(claudeCodeModelCatalog())
+}
+
+func claudeCodeModelCatalog() []ModelMetadata {
+	return cloneModelMetadata([]ModelMetadata{
+		claudeCodeCatalogEntry("claude-opus-4-7"),
+		claudeCodeCatalogEntry("claude-opus-4-6"),
+		claudeCodeCatalogEntry("claude-opus-4-5-20251101"),
+		claudeCodeCatalogEntry("claude-opus-4-1-20250805"),
+		claudeCodeCatalogEntry("claude-opus-4-20250514"),
+		claudeCodeCatalogEntry("claude-sonnet-4-6"),
+		claudeCodeCatalogEntry("claude-sonnet-4-5-20250929"),
+		claudeCodeCatalogEntry("claude-sonnet-4-20250514"),
+		claudeCodeCatalogEntry("claude-haiku-4-5-20251001"),
+		claudeCodeAliasCatalogEntry("opus"),
+		claudeCodeAliasCatalogEntry("sonnet"),
+		claudeCodeAliasCatalogEntry("haiku"),
+	})
+}
+
+func claudeCodeCatalogEntry(id string) ModelMetadata {
+	return ModelMetadata{
+		ID:            id,
+		ContextWindow: 200_000,
+		Provenance:    "static Claude Code adapter catalog reviewed against the local provider contract; not network verified",
+		ReviewedAt:    claudeCodeAdapterReviewedAt,
+		ReviewAfter:   claudeCodeAdapterReviewAfter,
+		Notes:         "OAuth and beta routing behavior belongs to Claude Code compatibility, not the public Anthropic API-key contract",
+	}
+}
+
+func claudeCodeAliasCatalogEntry(id string) ModelMetadata {
+	entry := claudeCodeCatalogEntry(id)
+	entry.Provenance = "static Claude Code CLI alias reviewed against the local provider contract; not network verified"
+	entry.Notes = "alias resolution is owned by Claude Code compatibility; Atteler records the assumed 200k context window instead of deriving it live"
+
+	return entry
+}
+
+//nolint:gosec // Documents credential source paths and JSON field names, not secret values.
+func claudeCodeAdapterContract() AdapterContract {
+	return AdapterContract{
+		Provider:         providerClaudeCode,
+		AdapterVersion:   claudeCodeAdapterVersion,
+		SourceCLI:        claudeCodeAdapterSource,
+		SourceCLIVersion: claudeCodeAdapterCLIVersion,
+		Protocol:         claudeCodeAdapterProtocol,
+		Credential:       "macOS Keychain Claude Code-credentials or ~/.claude/.credentials.json claudeAiOauth",
+		KillSwitches: []string{
+			"providers.claude-code.disable_private_adapter",
+			"ATTELER_DISABLE_CLAUDE_CODE_ADAPTER",
+			"ATTELER_DISABLE_PRIVATE_ADAPTERS",
+			"ATTELER_DISABLE_BORROWED_CREDENTIAL_ADAPTERS",
+		},
+		ReviewedAt:  claudeCodeAdapterReviewedAt,
+		ReviewAfter: claudeCodeAdapterReviewAfter,
 	}
 }

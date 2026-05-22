@@ -3,6 +3,8 @@ package llm
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,6 +25,7 @@ type fakeProvider struct {
 	name           string
 	models         []string
 	fetchedModels  []string
+	warnings       []string
 }
 
 func (f *fakeProvider) Name() string { return f.name }
@@ -39,6 +42,10 @@ func (f *fakeProvider) FetchModels(_ context.Context) ([]string, error) {
 
 func (f *fakeProvider) HealthCheck(_ context.Context) error {
 	return f.healthCheckErr
+}
+
+func (f *fakeProvider) ProviderWarnings() []string {
+	return append([]string(nil), f.warnings...)
 }
 
 func (f *fakeProvider) ModelContextWindow(string) int {
@@ -524,9 +531,10 @@ func TestRegistry_CheckHealth(t *testing.T) {
 
 	r := NewRegistry()
 	r.Register(&fakeProvider{
-		name:   alphaProvider,
-		models: []string{"a-1", "a-2"},
-		resp:   &Response{},
+		name:     alphaProvider,
+		models:   []string{"a-1", "a-2"},
+		resp:     &Response{},
+		warnings: []string{"uses advisory path"},
 	})
 	r.Register(&fakeProvider{
 		name:           "beta",
@@ -552,6 +560,8 @@ func TestRegistry_CheckHealth(t *testing.T) {
 	if len(results[0].Models) != 2 {
 		assert.Failf(t, "assertion failed", "alpha models = %d, want 2", len(results[0].Models))
 	}
+
+	assert.Equal(t, []string{"uses advisory path"}, results[0].Warnings)
 
 	if results[1].Name != "beta" {
 		assert.Failf(t, "assertion failed", "second result name = %q, want beta", results[1].Name)
@@ -589,4 +599,179 @@ func TestRegistry_CheckHealthUseFetchedModels(t *testing.T) {
 	if len(results[0].Models) != 2 || results[0].Models[0] != "live-1" {
 		assert.Failf(t, "assertion failed", "models = %v, want [live-1 live-2]", results[0].Models)
 	}
+}
+
+func TestRegistry_CheckHealthUsesAdapterDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	auth := &codexChatGPTAuth{
+		accessToken:  "access",
+		refreshToken: "refresh",
+		accountID:    "acct",
+	}
+	r := NewRegistry()
+	r.Register(&CodexProvider{
+		auth:   auth,
+		models: []string{"gpt-5.5"},
+	})
+
+	results := r.CheckHealth(context.Background())
+	require.Len(t, results, 1)
+
+	assert.True(t, results[0].Healthy)
+	require.NotNil(t, results[0].Contract)
+	assert.Equal(t, codexAdapterVersion, results[0].Contract.AdapterVersion)
+	assert.NotEmpty(t, results[0].Checks)
+	assert.Contains(t, results[0].Warnings[0], "private")
+}
+
+func TestPrivateAdapterDiagnosticsReportsMissingCredentialContracts(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "codex"))
+	t.Setenv("HOME", tempDir)
+	t.Setenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN", "1")
+
+	results := PrivateAdapterDiagnostics(context.Background(), AutoRegisterConfig{})
+	require.Len(t, results, 2)
+
+	byName := providerHealthByName(results)
+	for _, providerName := range []string{providerClaudeCode, providerCodex} {
+		result := byName[providerName]
+		assert.False(t, result.Healthy)
+		require.NotNil(t, result.Contract)
+		assert.NotEmpty(t, result.Contract.AdapterVersion)
+
+		checks := readinessChecksByName(result.Checks)
+		assert.Equal(t, ReadinessFailed, checks["local_credentials"].Status)
+		assert.Equal(t, ReadinessSkipped, checks["token_refresh"].Status)
+		assert.Equal(t, ReadinessSkipped, checks["network_reachability"].Status)
+		assert.Equal(t, ReadinessWarning, checks["model_availability"].Status)
+	}
+}
+
+func TestPrivateAdapterDiagnosticsReportsCodexConfiguredModelWithoutCredentials(t *testing.T) {
+	tempDir := t.TempDir()
+	codexDir := filepath.Join(tempDir, "codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(`model = "gpt-test-codex"`), 0o600))
+
+	t.Setenv("CODEX_HOME", codexDir)
+	t.Setenv("HOME", tempDir)
+	t.Setenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN", "1")
+	t.Setenv("ATTELER_DISABLE_CLAUDE_CODE_ADAPTER", "1")
+
+	results := PrivateAdapterDiagnostics(context.Background(), AutoRegisterConfig{})
+	require.Len(t, results, 1)
+	assert.Equal(t, providerCodex, results[0].Name)
+	require.NotEmpty(t, results[0].Models)
+	assert.Equal(t, "gpt-test-codex", results[0].Models[0])
+
+	metadata, ok := (&CodexProvider{}).ModelMetadata("gpt-test-codex")
+	require.True(t, ok)
+	assert.Zero(t, metadata.ContextWindow)
+	assert.Contains(t, metadata.Provenance, "config.toml")
+}
+
+func TestPrivateAdapterDiagnosticsSkipsDisabledAdapters(t *testing.T) {
+	t.Setenv("ATTELER_DISABLE_PRIVATE_ADAPTERS", "1")
+
+	results := PrivateAdapterDiagnostics(context.Background(), AutoRegisterConfig{})
+
+	assert.Empty(t, results)
+}
+
+func TestPrivateAdapterDiagnosticsHonorsProviderKillSwitch(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "codex"))
+	t.Setenv("HOME", tempDir)
+	t.Setenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN", "1")
+	t.Setenv("ATTELER_DISABLE_CODEX_ADAPTER", "1")
+
+	results := PrivateAdapterDiagnostics(context.Background(), AutoRegisterConfig{})
+	require.Len(t, results, 1)
+
+	assert.Equal(t, providerClaudeCode, results[0].Name)
+}
+
+func TestAutoRegisterWithConfigContext_DisablesPrivateAdaptersOnly(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-test")
+	t.Setenv("ATTELER_DISABLE_PRIVATE_ADAPTERS", "1")
+
+	r := AutoRegisterWithConfigContext(context.Background(), AutoRegisterConfig{
+		Providers: map[string]ProviderConfig{
+			providerOllama: {Disabled: true},
+		},
+	})
+
+	_, ok := r.Provider(providerOpenAI)
+	assert.True(t, ok, "normal OpenAI provider should remain available")
+
+	_, ok = r.Provider(providerAnthropic)
+	assert.True(t, ok, "normal Anthropic provider should remain available")
+
+	_, ok = r.Provider(providerCodex)
+	assert.False(t, ok, "Codex private adapter should be kill-switched")
+
+	_, ok = r.Provider(providerClaudeCode)
+	assert.False(t, ok, "Claude Code private adapter should be kill-switched")
+}
+
+func TestAutoRegisterWithConfigContext_DisablesPrivateAdapterByProviderConfig(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	t.Setenv("CODEX_HOME", filepath.Dir(writeCodexAuthFile(t, "access", "refresh", "acct")))
+
+	r := AutoRegisterWithConfigContext(context.Background(), AutoRegisterConfig{
+		Providers: map[string]ProviderConfig{
+			providerAnthropic:  {Disabled: true},
+			providerClaudeCode: {Disabled: true},
+			providerOllama:     {Disabled: true},
+			providerCodex:      {DisablePrivateAdapter: true},
+		},
+	})
+
+	_, ok := r.Provider(providerOpenAI)
+	assert.True(t, ok, "normal OpenAI provider should remain available")
+
+	_, ok = r.Provider(providerCodex)
+	assert.False(t, ok, "Codex private adapter should honor disable_private_adapter config")
+}
+
+func TestAutoRegisterWithConfigContext_DisablesAnthropicBorrowedCredentialsOnly(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+	t.Setenv("FORGE_CONFIG", "")
+	t.Setenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN", "1")
+
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+
+	claudeDir := filepath.Join(tempDir, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o750))
+
+	body := `{"claudeAiOauth":{"accessToken":"borrowed-access","refreshToken":"refresh","expiresAt":9999999999999}}`
+	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, ".credentials.json"), []byte(body), 0o600))
+
+	r := AutoRegisterWithConfigContext(context.Background(), AutoRegisterConfig{
+		Providers: map[string]ProviderConfig{
+			providerAnthropic:  {DisablePrivateAdapter: true},
+			providerClaudeCode: {Disabled: true},
+			providerCodex:      {Disabled: true},
+			providerOllama:     {Disabled: true},
+			providerOpenAI:     {Disabled: true},
+		},
+	})
+
+	_, ok := r.Provider(providerAnthropic)
+	assert.False(t, ok, "normal Anthropic provider should not borrow Claude Code credentials when disabled")
+}
+
+func providerHealthByName(results []ProviderHealth) map[string]ProviderHealth {
+	out := make(map[string]ProviderHealth, len(results))
+	for _, result := range results {
+		out[result.Name] = result
+	}
+
+	return out
 }

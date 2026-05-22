@@ -24,6 +24,8 @@ providers:
   openai:
     disabled: true
     base_url: https://openai.global
+  codex:
+    disable_private_adapter: true
 `)
 	local := writeConfig(t, dir, "local.yml", `
 default_model: gpt-local
@@ -100,6 +102,8 @@ plugins:
 	if anthropic.BaseURL != "https://anthropic.global" {
 		assert.Failf(t, "assertion failed", "anthropic base_url = %q", anthropic.BaseURL)
 	}
+
+	assert.True(t, cfg.Providers["codex"].DisablePrivateAdapter)
 
 	reviewer := cfg.Agents["reviewer"]
 	if reviewer.SystemPrompt != "review code" {

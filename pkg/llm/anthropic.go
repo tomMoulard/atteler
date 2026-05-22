@@ -47,10 +47,10 @@ func NewAnthropicProviderWithConfig(_ ProviderConfig) (*AnthropicProvider, error
 }
 
 // NewAnthropicProviderWithConfigContext creates a provider using
-// ResolveAnthropicKeyContext and optional config values. ANTHROPIC_BASE_URL
-// overrides cfg.BaseURL.
+// ResolveAnthropicKeyWithConfigContext and optional config values.
+// ANTHROPIC_BASE_URL overrides cfg.BaseURL.
 func NewAnthropicProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) (*AnthropicProvider, error) {
-	key, bearer, err := ResolveAnthropicKeyContext(ctx)
+	key, bearer, err := ResolveAnthropicKeyWithConfigContext(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +125,21 @@ func (a *AnthropicProvider) FetchModels(ctx context.Context) ([]string, error) {
 	}
 
 	return out, nil
+}
+
+// ProviderWarnings reports when the Anthropic provider is using bearer-token
+// routing that requires Anthropic beta headers. This can happen with explicit
+// bearer tokens or borrowed Claude Code/Forge credentials.
+func (a *AnthropicProvider) ProviderWarnings() []string {
+	if !a.bearer {
+		return nil
+	}
+
+	return []string{
+		"uses Anthropic bearer-token auth with beta routing headers; set providers.anthropic.disable_private_adapter, " +
+			"ATTELER_DISABLE_CLAUDE_CODE_ADAPTER=1, or ATTELER_DISABLE_BORROWED_CREDENTIAL_ADAPTERS=1 " +
+			"to prevent borrowed Claude Code/Forge fallback",
+	}
 }
 
 // HealthCheck verifies that the Anthropic API is reachable and the credentials
