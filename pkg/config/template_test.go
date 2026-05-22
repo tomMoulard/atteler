@@ -29,6 +29,9 @@ func TestTemplateYAML(t *testing.T) {
 		"plugins:",
 		"policy:",
 		"trusted_install_sources:",
+		"vector:",
+		"vectorizer: lexical",
+		"fallback_policy: fail",
 	} {
 		if !strings.Contains(template, want) {
 			require.Failf(t, "unexpected failure", "TemplateYAML missing %q in:\n%s", want, template)

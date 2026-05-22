@@ -73,6 +73,16 @@ skill_learning:
   max_observations: 42
   max_steps: 4
   min_occurrences: 3
+vector:
+  vectorizer: embedding
+  provider: ollama
+  model: nomic-embed-text
+  base_url: http://127.0.0.1:11434
+  timeout_seconds: 12
+  fallback_policy: lexical
+  index_path: ./.atteler/test-vector-index.json
+  chunk_max_runes: 900
+  chunk_overlap_runes: 90
 `)
 
 	cfg, loaded, err := LoadFiles([]string{global, filepath.Join(dir, "missing.json"), local})
@@ -219,6 +229,15 @@ skill_learning:
 	assert.Equal(t, 42, cfg.SkillLearning.MaxObservations)
 	assert.Equal(t, 4, cfg.SkillLearning.MaxSteps)
 	assert.Equal(t, 3, cfg.SkillLearning.MinOccurrences)
+	assert.Equal(t, "embedding", cfg.Vector.Vectorizer)
+	assert.Equal(t, "ollama", cfg.Vector.Provider)
+	assert.Equal(t, "nomic-embed-text", cfg.Vector.Model)
+	assert.Equal(t, "http://127.0.0.1:11434", cfg.Vector.BaseURL)
+	assert.Equal(t, 12, cfg.Vector.TimeoutSeconds)
+	assert.Equal(t, "lexical", cfg.Vector.FallbackPolicy)
+	assert.Equal(t, "./.atteler/test-vector-index.json", cfg.Vector.IndexPath)
+	assert.Equal(t, 900, cfg.Vector.ChunkMaxRunes)
+	assert.Equal(t, 90, cfg.Vector.ChunkOverlapRunes)
 }
 
 func TestLoadFiles_JSONCompatibility(t *testing.T) {

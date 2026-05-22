@@ -326,6 +326,12 @@ type cliOptions struct {
 	reviewPaths                        stringListFlag
 	reviewGates                        stringListFlag
 	vectorSearch                       string
+	vectorizer                         string
+	vectorProvider                     string
+	vectorModel                        string
+	vectorBaseURL                      string
+	vectorFallbackPolicy               string
+	vectorStorePath                    string
 	mergeArtifactsPath                 string
 	mergeArtifactsFormat               string
 	recordArtifact                     string
@@ -372,6 +378,9 @@ type cliOptions struct {
 	retrievalLimit                     positiveIntFlag
 	vectorLimit                        positiveIntFlag
 	codeLimit                          positiveIntFlag
+	vectorTimeout                      positiveIntFlag
+	vectorChunkMaxRunes                positiveIntFlag
+	vectorChunkOverlapRunes            positiveIntFlag
 	mergeArtifactMaxBytes              positiveIntFlag
 	routeInputTokens                   positiveIntFlag
 	routeOutputTokens                  positiveIntFlag
@@ -500,6 +509,7 @@ type appState struct {
 	agentLoopBudget             llm.AgentLoopBudget
 	agentLoopCheckpointInterval int
 	hookConfig                  map[string][]appconfig.HookConfig
+	vectorConfig                appconfig.VectorConfig
 	agentRegistry               *agent.Registry
 	hookRunner                  *events.Runner
 	eventObservers              []events.Observer

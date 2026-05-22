@@ -1179,9 +1179,17 @@ func TextVectorizerSpec(dimensions int) VectorizerSpec {
 	}
 }
 
-// Vectorizer abstracts context-free text-to-vector conversion. Network-backed
-// implementations may implement this interface only to return ErrContextRequired;
-// production callers should use VectorizerContext for embeddings.
+// Metadata describes the lexical fallback vectorizer for persisted indexes
+// and CLI output.
+func (v TextVectorizer) Metadata() VectorizerMetadata {
+	return NewLexicalMetadata(v.Dimensions)
+}
+
+// Vectorizer abstracts text-to-vector conversion so callers can swap between
+// the zero-dependency TextVectorizer and a model-backed EmbeddingVectorizer.
+//
+// Model-backed implementations should expose VectorizerContext and may reject
+// Vectorize calls that would otherwise need a hidden root context.
 type Vectorizer interface {
 	Vectorize(text string) (Vector, error)
 }
@@ -1193,23 +1201,35 @@ type VectorizerContext interface {
 	VectorizeContext(ctx context.Context, text string) (Vector, error)
 }
 
-// EmbeddingVectorizer calls an external embedding API (e.g. Ollama or OpenAI)
-// to produce dense vectors from text. It is the recommended vectorizer when
-// search quality matters and a model endpoint is available.
+// EmbeddingVectorizer calls an Ollama-compatible embedding API to produce
+// dense vectors from text. It is the recommended vectorizer when search
+// quality matters and a model endpoint is available.
 type EmbeddingVectorizer struct {
-	client  *http.Client
-	baseURL string
-	model   string
+	client   *http.Client
+	baseURL  string
+	model    string
+	provider string
 }
 
 const (
-	defaultEmbeddingBaseURL = "http://127.0.0.1:11434"
-	defaultEmbeddingModel   = "nomic-embed-text"
-	embeddingTimeout        = 30 * time.Second
+	defaultEmbeddingProvider = "ollama"
+	defaultEmbeddingBaseURL  = "http://127.0.0.1:11434"
+	defaultEmbeddingModel    = "nomic-embed-text"
+	embeddingTimeout         = 30 * time.Second
 )
 
 // EmbeddingOption configures an EmbeddingVectorizer.
 type EmbeddingOption func(*EmbeddingVectorizer)
+
+// WithEmbeddingProvider labels the embedding backend in persisted metadata.
+// The implementation currently uses an Ollama-compatible /api/embed endpoint.
+func WithEmbeddingProvider(provider string) EmbeddingOption {
+	return func(v *EmbeddingVectorizer) {
+		if p := strings.TrimSpace(provider); p != "" {
+			v.provider = p
+		}
+	}
+}
 
 // WithEmbeddingBaseURL sets the API endpoint. Default is the local Ollama URL.
 func WithEmbeddingBaseURL(baseURL string) EmbeddingOption {
@@ -1238,14 +1258,34 @@ func WithEmbeddingHTTPClient(client *http.Client) EmbeddingOption {
 	}
 }
 
+// WithEmbeddingTimeout sets the request timeout on the vectorizer's HTTP
+// client. It preserves other client fields when a custom client is already set.
+func WithEmbeddingTimeout(timeout time.Duration) EmbeddingOption {
+	return func(v *EmbeddingVectorizer) {
+		if timeout <= 0 {
+			return
+		}
+
+		if v.client == nil {
+			v.client = &http.Client{Timeout: timeout}
+			return
+		}
+
+		client := *v.client
+		client.Timeout = timeout
+		v.client = &client
+	}
+}
+
 // NewEmbeddingVectorizer returns a vectorizer that calls an Ollama-compatible
 // /api/embed endpoint. The zero-value options use the local Ollama default URL
 // and "nomic-embed-text" as the model.
 func NewEmbeddingVectorizer(opts ...EmbeddingOption) *EmbeddingVectorizer {
 	v := &EmbeddingVectorizer{
-		baseURL: defaultEmbeddingBaseURL,
-		model:   defaultEmbeddingModel,
-		client:  &http.Client{Timeout: embeddingTimeout},
+		baseURL:  defaultEmbeddingBaseURL,
+		model:    defaultEmbeddingModel,
+		provider: defaultEmbeddingProvider,
+		client:   &http.Client{Timeout: embeddingTimeout},
 	}
 
 	for _, opt := range opts {
@@ -1255,8 +1295,47 @@ func NewEmbeddingVectorizer(opts ...EmbeddingOption) *EmbeddingVectorizer {
 	return v
 }
 
-// Vectorize refuses network embedding without caller-provided cancellation.
-// Use VectorizeContext for embedding requests.
+// Metadata describes the embedding vectorizer for persisted indexes and CLI
+// output. Pass zero dimensions when the model's vector size is not known yet.
+func (v *EmbeddingVectorizer) Metadata(dimensions int) VectorizerMetadata {
+	if v == nil {
+		return NewEmbeddingMetadata("", "", "", dimensions)
+	}
+
+	return NewEmbeddingMetadata(v.provider, v.model, v.baseURL, dimensions)
+}
+
+// Provider returns the metadata provider label for this vectorizer.
+func (v *EmbeddingVectorizer) Provider() string {
+	if v == nil {
+		return ""
+	}
+
+	return v.provider
+}
+
+// Model returns the embedding model name.
+func (v *EmbeddingVectorizer) Model() string {
+	if v == nil {
+		return ""
+	}
+
+	return v.model
+}
+
+// BaseURL returns the embedding API base URL.
+func (v *EmbeddingVectorizer) BaseURL() string {
+	if v == nil {
+		return ""
+	}
+
+	return v.baseURL
+}
+
+// Vectorize is kept for source compatibility only.
+//
+// Deprecated: use VectorizeContext so embedding HTTP requests inherit caller
+// cancellation and deadlines.
 func (v *EmbeddingVectorizer) Vectorize(text string) (Vector, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, ErrEmptyText
@@ -1982,4 +2061,12 @@ var (
 	ErrProvenanceMissing = errors.New("vector provenance metadata is required")
 	// ErrVectorMismatch is returned when a deterministic text-hash vector no longer matches its text.
 	ErrVectorMismatch = errors.New("vector does not match source text")
+	// ErrNoSources is returned when building an index without source files.
+	ErrNoSources = errors.New("vector index requires at least one source")
+	// ErrMetadataMismatch is returned when a persisted index was built with a
+	// different vectorizer or model than the current search request.
+	ErrMetadataMismatch = errors.New("vector index metadata mismatch")
+	// ErrSourceStale is returned when a persisted index source digest no longer
+	// matches the current file content.
+	ErrSourceStale = errors.New("vector index source is stale")
 )

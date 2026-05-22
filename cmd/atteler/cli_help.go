@@ -353,7 +353,8 @@ func lookupFlagDomain(name string) (string, bool) {
 		strings.HasPrefix(name, "skill-") || strings.HasPrefix(name, "feedback-") ||
 		name == bashCommandName || name == "bash-dir" || name == "bash-timeout-seconds":
 		return "agents", true
-	case strings.HasPrefix(name, "memory-") || strings.HasPrefix(name, "agent-memory-") ||
+	case name == "vectorizer" ||
+		strings.HasPrefix(name, "memory-") || strings.HasPrefix(name, "agent-memory-") ||
 		strings.HasPrefix(name, "retrieval-") ||
 		strings.HasPrefix(name, "vector-") || strings.HasPrefix(name, "git-history-") ||
 		strings.HasPrefix(name, "context-pack-"):

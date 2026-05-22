@@ -73,7 +73,7 @@ from the same descriptors that route the commands.
 | `config` | `atteler config paths`, `atteler config validate`, `atteler config migrate`, `atteler config report` |
 | `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models`, `atteler providers ollama-status`, `atteler providers ollama-stop` |
 | `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
-| `memory` / `rag` | `atteler memory search "OAuth retry storm" --memory-scope repo`, `atteler memory rebuild --memory-store .atteler/memory.json --memory-scope repo`, `atteler memory purge session:<session-id> --memory-store .atteler/memory.json`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"` |
+| `memory` / `rag` | `atteler memory search "OAuth retry storm" --memory-scope repo`, `atteler memory retrieve "OAuth retry storm"`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"`, `atteler memory vector-index docs/research.md` |
 | `code-intel` | `atteler code-intel summary`, `atteler code-intel summary --json`, `atteler code-intel symbol NewRegistry`, `atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/` |
 | `review` | `atteler review scan`, `atteler review plan`, `atteler review run` |
 | `watch` | `atteler watch scan`, `atteler watch json`, `atteler watch loop` |
@@ -697,9 +697,10 @@ atteler watch loop
 # Use atteler help watch for baseline, suppression, gate, and issue-upsert flags.
 
 atteler memory search "OAuth retry storm"
-atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain
+atteler memory retrieve "OAuth retry storm"
 atteler memory git-history "memory regression"
-atteler memory vector-search "redirect risks" --vector-index docs/research.md
+atteler memory vector-search "redirect risks" --vector-index docs/research.md --vectorizer lexical
+atteler memory vector-search "redirect risks" --vector-index docs/research.md --vectorizer embedding --vector-provider ollama --vector-model nomic-embed-text
 
 atteler code-intel summary
 atteler code-intel summary --json
@@ -763,6 +764,13 @@ from persisted JSON. Set the memory TTL options when indexing intentionally
 short-lived content. Saved-session transcript messages and worktree paths are
 excluded from local memory by default; opt in to those metadata/session-message
 options only when needed.
+
+Vector search is explicit about retrieval quality: `--vectorizer lexical` uses
+the deterministic hashed token-frequency fallback, while `--vectorizer
+embedding` uses an Ollama-compatible embedding endpoint. The lexical fallback
+is not semantic retrieval. Search output prints the vectorizer/model that
+produced the ranking and reuses `.atteler` indexes only while source digests,
+vectorizer metadata, dimensions, and chunk settings still match.
 
 Code-intelligence commands accept `--json` (or `--output json`) to emit the
 stable `atteler.code_intel.v1` schema; text output is rendered from the same

@@ -109,6 +109,17 @@ func starterTemplateConfig() Config {
 			MaxSteps:        6,
 			MinOccurrences:  2,
 		},
+		Vector: VectorConfig{
+			Vectorizer:        "lexical",
+			IndexPath:         "./.atteler/vector-index.json",
+			Provider:          "ollama",
+			Model:             "nomic-embed-text",
+			BaseURL:           "http://127.0.0.1:11434",
+			TimeoutSeconds:    30,
+			FallbackPolicy:    "fail",
+			ChunkMaxRunes:     1200,
+			ChunkOverlapRunes: 120,
+		},
 	}
 }
 

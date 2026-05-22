@@ -43,6 +43,7 @@ type Config struct {
 	Context         ContextConfig             `json:"context" yaml:"context"`
 	Plugins         PluginConfig              `json:"plugins" yaml:"plugins"`
 	SkillLearning   SkillLearningConfig       `json:"skill_learning" yaml:"skill_learning"`
+	Vector          VectorConfig              `json:"vector" yaml:"vector"`
 }
 
 // ProviderConfig configures an individual LLM provider.
@@ -206,6 +207,19 @@ type SkillLearningConfig struct {
 	MinOccurrences  int    `json:"min_occurrences,omitempty" yaml:"min_occurrences,omitempty"`
 }
 
+// VectorConfig configures local vector retrieval and persisted indexes.
+type VectorConfig struct {
+	Vectorizer        string `json:"vectorizer,omitempty" yaml:"vectorizer,omitempty"`
+	Provider          string `json:"provider,omitempty" yaml:"provider,omitempty"`
+	Model             string `json:"model,omitempty" yaml:"model,omitempty"`
+	BaseURL           string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	FallbackPolicy    string `json:"fallback_policy,omitempty" yaml:"fallback_policy,omitempty"`
+	IndexPath         string `json:"index_path,omitempty" yaml:"index_path,omitempty"`
+	TimeoutSeconds    int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	ChunkMaxRunes     int    `json:"chunk_max_runes,omitempty" yaml:"chunk_max_runes,omitempty"`
+	ChunkOverlapRunes int    `json:"chunk_overlap_runes,omitempty" yaml:"chunk_overlap_runes,omitempty"`
+}
+
 //nolint:govet // fieldalignment: field order follows config-file grouping; deprecated aliases stay last.
 type fileConfig struct {
 	Version         *int                          `json:"version" yaml:"version"`
@@ -214,6 +228,7 @@ type fileConfig struct {
 	Context         fileContextConfig             `json:"context" yaml:"context"`
 	Plugins         filePluginConfig              `json:"plugins" yaml:"plugins"`
 	SkillLearning   fileSkillLearningConfig       `json:"skill_learning" yaml:"skill_learning"`
+	Vector          fileVectorConfig              `json:"vector" yaml:"vector"`
 	DefaultProvider *string                       `json:"default_provider" yaml:"default_provider"`
 	DefaultModel    *string                       `json:"default_model" yaml:"default_model"`
 	Providers       map[string]fileProviderConfig `json:"providers" yaml:"providers"`
@@ -308,6 +323,18 @@ type fileSkillLearningConfig struct {
 	MaxObservations *int    `json:"max_observations" yaml:"max_observations"`
 	MaxSteps        *int    `json:"max_steps" yaml:"max_steps"`
 	MinOccurrences  *int    `json:"min_occurrences" yaml:"min_occurrences"`
+}
+
+type fileVectorConfig struct {
+	Vectorizer        *string `json:"vectorizer" yaml:"vectorizer"`
+	Provider          *string `json:"provider" yaml:"provider"`
+	Model             *string `json:"model" yaml:"model"`
+	BaseURL           *string `json:"base_url" yaml:"base_url"`
+	FallbackPolicy    *string `json:"fallback_policy" yaml:"fallback_policy"`
+	IndexPath         *string `json:"index_path" yaml:"index_path"`
+	TimeoutSeconds    *int    `json:"timeout_seconds" yaml:"timeout_seconds"`
+	ChunkMaxRunes     *int    `json:"chunk_max_runes" yaml:"chunk_max_runes"`
+	ChunkOverlapRunes *int    `json:"chunk_overlap_runes" yaml:"chunk_overlap_runes"`
 }
 
 // Load reads the default configuration files and returns the merged result plus
@@ -597,6 +624,7 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 	mergeContext(dst, src.Context, rec, source)
 	mergePlugins(dst, src.Plugins, rec, source)
 	mergeSkillLearning(dst, src.SkillLearning, rec, source)
+	mergeVector(dst, src.Vector, rec, source)
 }
 
 func mergeProviders(dst *Config, providers map[string]fileProviderConfig, rec *originRecorder, source originSource) {
@@ -968,6 +996,66 @@ func mergeSkillLearning(dst *Config, skillLearning fileSkillLearningConfig, rec 
 	}
 }
 
+func mergeVector(dst *Config, vector fileVectorConfig, rec *originRecorder, source originSource) {
+	if vector.Vectorizer != nil {
+		value := strings.TrimSpace(*vector.Vectorizer)
+		dst.Vector.Vectorizer = value
+		rec.set("vector.vectorizer", source, value)
+	}
+
+	if vector.Provider != nil {
+		value := strings.TrimSpace(*vector.Provider)
+		dst.Vector.Provider = value
+		rec.set("vector.provider", source, value)
+	}
+
+	if vector.Model != nil {
+		value := strings.TrimSpace(*vector.Model)
+		dst.Vector.Model = value
+		rec.set("vector.model", source, value)
+	}
+
+	if vector.BaseURL != nil {
+		value := strings.TrimSpace(*vector.BaseURL)
+		dst.Vector.BaseURL = value
+		rec.set("vector.base_url", source, value)
+	}
+
+	if vector.FallbackPolicy != nil {
+		value := strings.TrimSpace(*vector.FallbackPolicy)
+		dst.Vector.FallbackPolicy = value
+		rec.set("vector.fallback_policy", source, value)
+	}
+
+	if vector.IndexPath != nil {
+		value := strings.TrimSpace(*vector.IndexPath)
+		dst.Vector.IndexPath = value
+		rec.set("vector.index_path", source, value)
+	}
+
+	if vector.TimeoutSeconds != nil {
+		value := *vector.TimeoutSeconds
+		dst.Vector.TimeoutSeconds = value
+		rec.set("vector.timeout_seconds", source, value)
+	}
+
+	if vector.ChunkMaxRunes != nil {
+		value := *vector.ChunkMaxRunes
+		dst.Vector.ChunkMaxRunes = value
+		rec.set("vector.chunk_max_runes", source, value)
+	}
+
+	if vector.ChunkOverlapRunes != nil {
+		value := *vector.ChunkOverlapRunes
+		dst.Vector.ChunkOverlapRunes = value
+		rec.set("vector.chunk_overlap_runes", source, value)
+	}
+}
+
+func mergeConfig(dst *Config, src Config) {
+	mergeConfigFromSource(dst, src, nil, originSource{})
+}
+
 func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source originSource) {
 	if src.Version > 0 {
 		dst.Version = src.Version
@@ -997,6 +1085,7 @@ func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source 
 	mergeConfigContext(dst, src.Context, rec, source)
 	mergeConfigPlugins(dst, src.Plugins, rec, source)
 	mergeConfigSkillLearning(dst, src.SkillLearning, rec, source)
+	mergeConfigVector(dst, src.Vector, rec, source)
 }
 
 func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec *originRecorder, source originSource) {
@@ -1385,6 +1474,7 @@ func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins Orig
 	mergeConfigContextFromOrigins(dst, src.Context, dstOrigins, srcOrigins)
 	mergeConfigPluginsFromOrigins(dst, src.Plugins, dstOrigins, srcOrigins)
 	mergeConfigSkillLearningFromOrigins(dst, src.SkillLearning, dstOrigins, srcOrigins)
+	mergeConfigVectorFromOrigins(dst, src.Vector, dstOrigins, srcOrigins)
 }
 
 func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderConfig, dstOrigins, srcOrigins OriginMap) {
@@ -1828,6 +1918,106 @@ func mergeConfigSkillLearningFromOrigins(dst *Config, skillLearning SkillLearnin
 		dst.SkillLearning.MinOccurrences = skillLearning.MinOccurrences
 
 		appendOriginChain(dstOrigins, "skill_learning.min_occurrences", srcOrigins, false)
+	}
+}
+
+func mergeConfigVectorFromOrigins(dst *Config, vector VectorConfig, dstOrigins, srcOrigins OriginMap) {
+	if vector.Vectorizer != "" {
+		dst.Vector.Vectorizer = strings.TrimSpace(vector.Vectorizer)
+		appendOriginChain(dstOrigins, "vector.vectorizer", srcOrigins, false)
+	}
+
+	if vector.Provider != "" {
+		dst.Vector.Provider = strings.TrimSpace(vector.Provider)
+		appendOriginChain(dstOrigins, "vector.provider", srcOrigins, false)
+	}
+
+	if vector.Model != "" {
+		dst.Vector.Model = strings.TrimSpace(vector.Model)
+		appendOriginChain(dstOrigins, "vector.model", srcOrigins, false)
+	}
+
+	if vector.BaseURL != "" {
+		dst.Vector.BaseURL = strings.TrimSpace(vector.BaseURL)
+		appendOriginChain(dstOrigins, "vector.base_url", srcOrigins, false)
+	}
+
+	if vector.FallbackPolicy != "" {
+		dst.Vector.FallbackPolicy = strings.TrimSpace(vector.FallbackPolicy)
+		appendOriginChain(dstOrigins, "vector.fallback_policy", srcOrigins, false)
+	}
+
+	if vector.IndexPath != "" {
+		dst.Vector.IndexPath = strings.TrimSpace(vector.IndexPath)
+		appendOriginChain(dstOrigins, "vector.index_path", srcOrigins, false)
+	}
+
+	if vector.TimeoutSeconds > 0 {
+		dst.Vector.TimeoutSeconds = vector.TimeoutSeconds
+		appendOriginChain(dstOrigins, "vector.timeout_seconds", srcOrigins, false)
+	}
+
+	if vector.ChunkMaxRunes > 0 {
+		dst.Vector.ChunkMaxRunes = vector.ChunkMaxRunes
+		appendOriginChain(dstOrigins, "vector.chunk_max_runes", srcOrigins, false)
+	}
+
+	if vector.ChunkOverlapRunes > 0 {
+		dst.Vector.ChunkOverlapRunes = vector.ChunkOverlapRunes
+		appendOriginChain(dstOrigins, "vector.chunk_overlap_runes", srcOrigins, false)
+	}
+}
+
+func mergeConfigVector(dst *Config, vector VectorConfig, rec *originRecorder, source originSource) {
+	if vector.Vectorizer != "" {
+		value := strings.TrimSpace(vector.Vectorizer)
+		dst.Vector.Vectorizer = value
+		rec.set("vector.vectorizer", source, value)
+	}
+
+	if vector.Provider != "" {
+		value := strings.TrimSpace(vector.Provider)
+		dst.Vector.Provider = value
+		rec.set("vector.provider", source, value)
+	}
+
+	if vector.Model != "" {
+		value := strings.TrimSpace(vector.Model)
+		dst.Vector.Model = value
+		rec.set("vector.model", source, value)
+	}
+
+	if vector.BaseURL != "" {
+		value := strings.TrimSpace(vector.BaseURL)
+		dst.Vector.BaseURL = value
+		rec.set("vector.base_url", source, value)
+	}
+
+	if vector.FallbackPolicy != "" {
+		value := strings.TrimSpace(vector.FallbackPolicy)
+		dst.Vector.FallbackPolicy = value
+		rec.set("vector.fallback_policy", source, value)
+	}
+
+	if vector.IndexPath != "" {
+		value := strings.TrimSpace(vector.IndexPath)
+		dst.Vector.IndexPath = value
+		rec.set("vector.index_path", source, value)
+	}
+
+	if vector.TimeoutSeconds > 0 {
+		dst.Vector.TimeoutSeconds = vector.TimeoutSeconds
+		rec.set("vector.timeout_seconds", source, vector.TimeoutSeconds)
+	}
+
+	if vector.ChunkMaxRunes > 0 {
+		dst.Vector.ChunkMaxRunes = vector.ChunkMaxRunes
+		rec.set("vector.chunk_max_runes", source, vector.ChunkMaxRunes)
+	}
+
+	if vector.ChunkOverlapRunes > 0 {
+		dst.Vector.ChunkOverlapRunes = vector.ChunkOverlapRunes
+		rec.set("vector.chunk_overlap_runes", source, vector.ChunkOverlapRunes)
 	}
 }
 

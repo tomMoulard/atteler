@@ -373,59 +373,6 @@ func writeContextPackBudgetFailure(b *strings.Builder, stats contextpack.Stats) 
 	}
 }
 
-func runVectorSearch(input vectorSearchCommandInput) error {
-	if strings.TrimSpace(input.Query) == "" {
-		return errors.New("vector search: --vector-search is required")
-	}
-
-	if len(input.IndexFiles) == 0 {
-		return errors.New("vector search: at least one --vector-index file is required")
-	}
-
-	limit := input.Limit
-	if limit == 0 {
-		limit = 5
-	}
-
-	vectorizer, err := vector.NewTextVectorizer(0)
-	if err != nil {
-		return fmt.Errorf("vector search: create vectorizer: %w", err)
-	}
-
-	store, err := vector.NewStoreWithVectorizer(vectorizer.Spec())
-	if err != nil {
-		return fmt.Errorf("vector search: create store: %w", err)
-	}
-
-	for _, path := range input.IndexFiles {
-		addErr := addVectorFile(store, vectorizer, path)
-		if addErr != nil {
-			return addErr
-		}
-	}
-
-	queryVector, err := vectorizer.Vectorize(privacy.RedactText(input.Query))
-	if err != nil {
-		return fmt.Errorf("vector search: vectorize query: %w", err)
-	}
-
-	results, err := store.SearchWithVectorizer(queryVector, vectorizer.Spec(), limit)
-	if err != nil {
-		return fmt.Errorf("vector search failed: %w", err)
-	}
-
-	if len(results) == 0 {
-		fmt.Println("No vector results found.")
-		return nil
-	}
-
-	for i := range results {
-		fmt.Println(formatVectorResult(results[i]))
-	}
-
-	return nil
-}
-
 func addVectorFile(store *vector.Store, vectorizer *vector.TextVectorizer, path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -469,18 +416,6 @@ func addVectorFile(store *vector.Store, vectorizer *vector.TextVectorizer, path 
 	}
 
 	return nil
-}
-
-func formatVectorResult(result vector.Result) string {
-	parts := []string{
-		result.Document.ID,
-		fmt.Sprintf("score=%.4f", result.Score),
-	}
-	if path := result.Document.Metadata["path"]; path != "" {
-		parts = append(parts, "path="+path)
-	}
-
-	return strings.Join(parts, "\t")
 }
 
 func runAgentMemoryCommand(root, selectedAgent string, input agentMemoryCommandInput) error {

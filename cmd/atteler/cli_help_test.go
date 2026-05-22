@@ -121,6 +121,10 @@ func TestImplicitFlagDefaults_UseSharedPackageDefaults(t *testing.T) {
 
 	assert.Equal(t, wantLargeFileBytes, implicitFlagDefaults["watch-large-file-bytes"])
 	assert.Equal(t, wantLargeFileBytes, implicitFlagDefaults["merge-artifact-max-bytes"])
+	assert.Equal(t, vectorDefaultBaseURL, implicitFlagDefaults["vector-base-url"])
+	assert.Equal(t, vectorDefaultModel, implicitFlagDefaults["vector-model"])
+	assert.Equal(t, vectorDefaultProvider, implicitFlagDefaults["vector-provider"])
+	assert.Equal(t, vectorDefaultTimeoutSeconds, implicitFlagDefaults["vector-timeout-seconds"])
 }
 
 func TestPrintCLIHelp_UnknownDomainGuidesToOverview(t *testing.T) {

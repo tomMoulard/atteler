@@ -483,6 +483,8 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 			diagnostics = append(diagnostics, inspectPlugins(path, value)...)
 		case "skill_learning":
 			diagnostics = append(diagnostics, inspectNamedFields(path, "skill_learning", value, knownSkillLearningFields(), nil)...)
+		case "vector":
+			diagnostics = append(diagnostics, inspectNamedFields(path, "vector", value, knownVectorFields(), nil)...)
 		case "default_provider", fieldDefaultModel, "fallback_models":
 			return
 		default:
@@ -783,6 +785,20 @@ func knownSkillLearningFields() map[string]bool {
 		"max_observations": true,
 		"max_steps":        true,
 		"min_occurrences":  true,
+	}
+}
+
+func knownVectorFields() map[string]bool {
+	return map[string]bool{
+		"vectorizer":          true,
+		"provider":            true,
+		"model":               true,
+		"base_url":            true,
+		"fallback_policy":     true,
+		"index_path":          true,
+		"timeout_seconds":     true,
+		"chunk_max_runes":     true,
+		"chunk_overlap_runes": true,
 	}
 }
 
