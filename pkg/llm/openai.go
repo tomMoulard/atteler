@@ -208,39 +208,9 @@ func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*
 }
 
 func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*Response, error) {
-	msgs := buildOpenAIMessages(params.Messages)
-
-	req := openaiRequest{
-		Model:    params.Model,
-		Messages: msgs,
-		Stop:     params.Stop,
-	}
-	if params.MaxTokens > 0 {
-		req.MaxTokens = params.MaxTokens
-	}
-
-	if params.Temperature != nil {
-		req.Temperature = params.Temperature
-	}
-
-	if params.TopP != nil {
-		req.TopP = params.TopP
-	}
-
-	if params.Seed != nil {
-		req.Seed = params.Seed
-	}
-
-	if effort := openAIReasoningEffort(params.ReasoningLevel); effort != "" {
-		req.ReasoningEffort = effort
-	}
-
-	// Add tool definitions.
-	for _, tool := range params.Tools {
-		req.Tools = append(req.Tools, openaiTool{
-			Type:     "function",
-			Function: openaiToolFunction(tool),
-		})
+	req, err := buildOpenAIRequest(params)
+	if err != nil {
+		return nil, err
 	}
 
 	body, err := json.Marshal(req)
@@ -280,6 +250,50 @@ func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*
 		return nil, fmt.Errorf("openai: %s: %s", or.Error.Type, or.Error.Message)
 	}
 
+	return parseOpenAIResponse(or), nil
+}
+
+func buildOpenAIRequest(params CompleteParams) (openaiRequest, error) {
+	if err := validateCompleteParamsSupported(providerOpenAI, params); err != nil {
+		return openaiRequest{}, err
+	}
+
+	req := openaiRequest{
+		Model:    params.Model,
+		Messages: buildOpenAIMessages(params.Messages),
+		Stop:     params.Stop,
+	}
+	if params.MaxTokens > 0 {
+		req.MaxTokens = params.MaxTokens
+	}
+
+	if params.Temperature != nil {
+		req.Temperature = params.Temperature
+	}
+
+	if params.TopP != nil {
+		req.TopP = params.TopP
+	}
+
+	if params.Seed != nil {
+		req.Seed = params.Seed
+	}
+
+	if effort := openAIReasoningEffort(params.ReasoningLevel); effort != "" {
+		req.ReasoningEffort = effort
+	}
+
+	for _, tool := range params.Tools {
+		req.Tools = append(req.Tools, openaiTool{
+			Type:     "function",
+			Function: openaiToolFunction(tool),
+		})
+	}
+
+	return req, nil
+}
+
+func parseOpenAIResponse(or openaiResponse) *Response {
 	result := &Response{
 		Model:             or.Model,
 		InputTokens:       or.Usage.PromptTokens,
@@ -294,7 +308,7 @@ func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*
 		result.ToolCalls = parseOpenAIToolCalls(choice.Message.ToolCalls)
 	}
 
-	return result, nil
+	return result
 }
 
 func buildOpenAIMessages(messages []Message) []openaiMessage {

@@ -28,8 +28,9 @@ func providerHTTPClient(cfg ProviderConfig) *http.Client {
 
 // ProviderInfo describes a built-in provider without requiring credentials.
 type ProviderInfo struct {
-	Name   string
-	Models []string
+	Capabilities ProviderCapabilities
+	Name         string
+	Models       []string
 }
 
 // AutoRegisterConfig configures provider auto-registration and fallback
@@ -87,8 +88,9 @@ func KnownProviders() []ProviderInfo {
 	out := make([]ProviderInfo, 0, len(providers))
 	for _, provider := range providers {
 		out = append(out, ProviderInfo{
-			Name:   provider.Name(),
-			Models: append([]string(nil), provider.Models()...),
+			Capabilities: ProviderCapabilitiesFor(provider),
+			Name:         provider.Name(),
+			Models:       append([]string(nil), provider.Models()...),
 		})
 	}
 

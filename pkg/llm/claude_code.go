@@ -122,7 +122,7 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 
 	params.Model = model
 
-	req, err := buildAnthropicRequest(params)
+	req, err := buildAnthropicRequestForProvider(providerClaudeCode, params)
 	if err != nil {
 		return nil, err
 	}
