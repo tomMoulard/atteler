@@ -39,7 +39,7 @@ func promptCompletionContext(ctx context.Context, state appState, input string, 
 
 	if includeRepo {
 		completionContext.Issues = append(completionContext.Issues, promptGitIssueCandidates(ctx, state.cwd)...)
-		completionContext.ProjectSymbols = promptProjectSymbolCandidates(state.cwd, input)
+		completionContext.ProjectSymbols = promptProjectSymbolCandidates(ctx, state.cwd, input)
 		completionContext.RecentFiles = append(completionContext.RecentFiles, promptGitRecentFileCandidates(ctx, state.cwd)...)
 	}
 
@@ -99,13 +99,13 @@ func promptSlashCommandCandidates() []promptcomplete.Candidate {
 	return out
 }
 
-func promptProjectSymbolCandidates(root, input string) []promptcomplete.Candidate {
+func promptProjectSymbolCandidates(ctx context.Context, root, input string) []promptcomplete.Candidate {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return nil
 	}
 
-	index, err := codeintel.IndexDir(root)
+	index, err := codeintel.IndexDirContext(ctx, root)
 	if err != nil {
 		return nil
 	}

@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Existing tests and query builders use compact assertion/evidence blocks.
 package codeintel
 
 import (
@@ -8,6 +9,10 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/codegraph"
 )
 
 func TestIndexFiles_SummarizesPackagesImportsAndSymbols(t *testing.T) {
@@ -190,4 +195,428 @@ func Alpha() {}
 	if !reflect.DeepEqual(names, sorted) {
 		t.Fatalf("Symbols order = %#v, want sorted by name", names)
 	}
+}
+
+func TestIndexDir_LoadsSemanticDefinitionsReferencesImportsAndImpact(t *testing.T) {
+	t.Parallel()
+	opts := packageLoaderOptions(t)
+
+	dir := writeSemanticModule(t)
+	apiFile := filepath.Join(dir, "api.go")
+
+	idx, err := NewIndexer().IndexDirWithOptions(dir, opts)
+	require.NoError(t, err)
+
+	definitions := idx.FindDefinitions("NewRunner")
+	require.Len(t, definitions, 1)
+	definition := definitions[0]
+	require.Equal(t, "func", definition.Kind)
+	require.Equal(t, "example.com/sem", definition.PackagePath)
+	require.Equal(t, apiFile, definition.File)
+	require.True(t, definition.Exported)
+	require.Equal(t, "types:def", definition.Provenance.Source)
+	require.NotZero(t, definition.Range.StartLine)
+	require.NotEmpty(t, definition.Build.String())
+	require.Len(t, idx.FindDefinitions("sem.NewRunner"), 1)
+	require.Len(t, idx.FindDefinitions("example.com/sem.NewRunner"), 1)
+	require.NotEmpty(t, idx.FindReferences("example.com/sem.NewRunner"))
+
+	references := idx.FindReferences("NewRunner")
+	require.NotEmpty(t, references)
+	require.Equal(t, "types:use", references[0].Provenance.Source)
+	require.Equal(t, definition.ID, references[0].ToDeclarationID)
+	require.NotZero(t, references[0].Range.StartColumn)
+
+	methodDefinitions := idx.FindDefinitions("Runner.Run")
+	require.Len(t, methodDefinitions, 1)
+	require.Equal(t, "method", methodDefinitions[0].Kind)
+	require.Equal(t, "Runner", methodDefinitions[0].Receiver)
+	require.True(t, methodDefinitions[0].Exported)
+	require.Len(t, idx.FindDefinitions("sem.Runner.Run"), 1)
+	require.Len(t, idx.FindDefinitions("example.com/sem.Runner.Run"), 1)
+	require.NotEmpty(t, idx.FindReferences("Runner.Run"))
+
+	unexportedReceiverMethods := idx.FindDefinitions("hidden.Visible")
+	require.Len(t, unexportedReceiverMethods, 1)
+	require.False(t, unexportedReceiverMethods[0].Exported)
+	require.Empty(t, idx.AnalyzeImpact(ImpactQuery{SymbolName: "hidden.Visible"}).PublicAPIDeclarations)
+
+	genericReceiverMethods := idx.FindDefinitions("Box.Get")
+	require.Len(t, genericReceiverMethods, 1)
+	require.Equal(t, "Box", genericReceiverMethods[0].Receiver)
+	require.True(t, genericReceiverMethods[0].Exported)
+	require.NotEmpty(t, idx.FindReferences("Box.Get"))
+
+	publicAPI := idx.PublicAPI("example.com/sem")
+	require.Contains(t, declarationNames(publicAPI), "NewRunner")
+	require.Contains(t, declarationQualifiedNames(publicAPI), "Runner.Run")
+	require.Contains(t, declarationQualifiedNames(publicAPI), "Box.Get")
+	require.NotContains(t, declarationQualifiedNames(publicAPI), "hidden.Visible")
+	require.NotEmpty(t, exportRelationships(idx.Graph.Relationships()))
+	require.Contains(t, nodeKinds(idx.Graph.Nodes()), "api_boundary")
+	require.Contains(t, nodeKinds(idx.Graph.Nodes()), "external_declaration")
+	require.Contains(t, relationshipKinds(idx.Graph.Relationships()), "has_api_boundary")
+
+	imports := idx.FindImports("context")
+	require.Len(t, imports, 1)
+	require.Equal(t, apiFile, imports[0].File)
+	require.Equal(t, "parser:import", imports[0].Provenance.Source)
+	require.NotZero(t, imports[0].Range.StartLine)
+
+	require.NotEmpty(t, idx.CallEdges)
+	require.Contains(t, callTargets(idx.CallEdges), definition.ID)
+	callers := idx.FindCallers("NewRunner")
+	require.NotEmpty(t, callers)
+	require.Equal(t, "types:call", callers[0].Provenance.Source)
+	require.Contains(t, callTargets(idx.FindCallees("Use")), definition.ID)
+	require.NotEmpty(t, idx.FindCallers("Runner.Run"))
+	require.Contains(t, callTargets(idx.FindCallees("Use")), genericReceiverMethods[0].ID)
+	require.NotEmpty(t, idx.FindCallers("Box.Get"))
+	useDefinitions := idx.FindDefinitions("Use")
+	require.Len(t, useDefinitions, 1)
+	testUseReferences := referencesWhere(idx.FindReferences("Use"), func(reference Reference) bool {
+		return strings.HasSuffix(reference.File, "api_test.go")
+	})
+	require.NotEmpty(t, testUseReferences)
+	require.Equal(t, useDefinitions[0].ID, testUseReferences[0].ToDeclarationID)
+	require.Contains(t, callTargets(idx.FindCallees("TestUse")), useDefinitions[0].ID)
+
+	impact := idx.AnalyzeImpact(ImpactQuery{File: "api.go", ImportPath: "context", SymbolName: "NewRunner"})
+	require.Len(t, impact.DirectImports, 1)
+	require.Len(t, impact.ReverseImports, 1)
+	require.NotEmpty(t, impact.References)
+	require.NotEmpty(t, impact.Callers)
+	require.Len(t, impact.PublicAPIDeclarations, 1)
+	require.NotEmpty(t, impact.Evidence)
+
+	externalImpact := idx.AnalyzeImpact(ImpactQuery{SymbolName: "new"})
+	require.NotEmpty(t, externalImpact.References)
+	require.True(t, uncertaintyContains(externalImpact.Uncertainty, "medium confidence"), "uncertainty=%#v", externalImpact.Uncertainty)
+
+	fileNode := fileNodeID(apiFile)
+	neighbors := idx.Graph.NeighborsWithEvidence(fileNode)
+	require.NotEmpty(t, neighbors)
+	var sawImportEvidence bool
+	for _, neighbor := range neighbors {
+		for _, evidence := range neighbor.Evidence {
+			if evidence.Kind == "imports" && len(evidence.Provenance) > 0 && evidence.Provenance[0].Source == "parser:import" {
+				sawImportEvidence = true
+			}
+		}
+	}
+	require.True(t, sawImportEvidence, "expected import graph evidence for %s", apiFile)
+	require.Contains(t, relationshipKinds(idx.Graph.Relationships()), "resolves_to")
+	require.Contains(t, relationshipKinds(idx.Graph.Relationships()), "imports_package")
+}
+
+func TestIndexDir_HandlesGeneratedTestsBuildTagsAndVendorIntentionally(t *testing.T) {
+	t.Parallel()
+	opts := packageLoaderOptions(t)
+
+	dir := writeSemanticModule(t)
+	idx, err := NewIndexer().IndexDirWithOptions(dir, opts)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, sourceFilesWhere(idx.FileDetails, func(file SourceFile) bool { return file.Test && strings.HasSuffix(file.Path, "api_test.go") }))
+	require.NotEmpty(t, sourceFilesWhere(idx.FileDetails, func(file SourceFile) bool { return file.Generated && strings.HasSuffix(file.Path, "generated.go") }))
+	require.Empty(t, sourceFilesWhere(idx.FileDetails, func(file SourceFile) bool { return strings.HasSuffix(file.Path, "tagged.go") }))
+	require.Empty(t, idx.FindDefinitions("VendorIgnored"))
+
+	idxr := NewIndexer()
+	withoutGeneratedOpts := opts
+	withoutGeneratedOpts.ExcludeGenerated = true
+	withoutGenerated, err := idxr.IndexDirWithOptions(dir, withoutGeneratedOpts)
+	require.NoError(t, err)
+	require.Empty(t, withoutGenerated.FindDefinitions("Generated"))
+
+	withoutTestsOpts := opts
+	withoutTestsOpts.ExcludeTests = true
+	withoutTests, err := idxr.IndexDirWithOptions(dir, withoutTestsOpts)
+	require.NoError(t, err)
+	require.Empty(t, withoutTests.FindDefinitions("TestUse"))
+
+	withTagOpts := opts
+	withTagOpts.Tags = []string{"integration"}
+	withTag, err := idxr.IndexDirWithOptions(dir, withTagOpts)
+	require.NoError(t, err)
+	require.Len(t, withTag.FindDefinitions("Tagged"), 1)
+	taggedFiles := sourceFilesWhere(withTag.FileDetails, func(file SourceFile) bool { return strings.HasSuffix(file.Path, "tagged.go") })
+	require.Len(t, taggedFiles, 1)
+	require.Equal(t, []string{"integration"}, taggedFiles[0].Build.Tags)
+	require.Equal(t, []string{"integration"}, taggedFiles[0].BuildTags)
+}
+
+func TestIndexDir_UsesAncestorModuleForSubdirectory(t *testing.T) {
+	t.Parallel()
+	opts := packageLoaderOptions(t)
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/root\n\ngo 1.26.2\n"), 0o600))
+	writeGoFile(t, dir, "root.go", `package root
+
+func Root() {}
+`)
+	subFile := writeGoFile(t, dir, "sub/sub.go", `package sub
+
+func Sub() {}
+`)
+
+	idx, err := NewIndexer().IndexDirWithOptions(filepath.Join(dir, "sub"), opts)
+	require.NoError(t, err)
+	require.Len(t, idx.Files, 1)
+	require.Equal(t, subFile, idx.Files[0].Path)
+
+	definitions := idx.FindDefinitions("Sub")
+	require.Len(t, definitions, 1)
+	require.Equal(t, "example.com/root/sub", definitions[0].PackagePath)
+	require.Empty(t, idx.FindDefinitions("Root"))
+}
+
+func TestIndexDir_ReturnsPartialIndexWithTypeDiagnostics(t *testing.T) {
+	t.Parallel()
+	opts := packageLoaderOptions(t)
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/broken\n\ngo 1.26.2\n"), 0o600))
+	writeGoFile(t, dir, "broken.go", `package broken
+
+func Broken() {
+	Missing()
+}
+`)
+
+	idx, err := NewIndexer().IndexDirWithOptions(dir, opts)
+	require.NoError(t, err)
+	require.Len(t, idx.FindDefinitions("Broken"), 1)
+	require.NotEmpty(t, idx.Diagnostics)
+	require.True(t, diagnosticsContain(idx.Diagnostics, "Missing"), "diagnostics=%#v", idx.Diagnostics)
+}
+
+func TestIndexer_ReusesUnchangedFingerprintCache(t *testing.T) {
+	t.Parallel()
+	opts := packageLoaderOptions(t)
+
+	dir := writeSemanticModule(t)
+	idxr := NewIndexer()
+
+	first, err := idxr.IndexDirWithOptions(dir, opts)
+	require.NoError(t, err)
+	require.False(t, first.Stats.CacheHit)
+	require.Positive(t, first.Stats.FilesScanned)
+	require.Zero(t, first.Stats.FilesReused)
+	require.Equal(t, first.Stats.FilesScanned, first.Stats.FilesChanged)
+
+	second, err := idxr.IndexDirWithOptions(dir, opts)
+	require.NoError(t, err)
+	require.True(t, second.Stats.CacheHit)
+	require.Equal(t, first.Stats.FilesScanned, second.Stats.FilesScanned)
+	require.Equal(t, first.Stats.FilesScanned, second.Stats.FilesReused)
+	require.Zero(t, second.Stats.FilesChanged)
+
+	writeGoFile(t, dir, "extra.go", `package sem
+
+func Extra() {}
+`)
+	third, err := idxr.IndexDirWithOptions(dir, opts)
+	require.NoError(t, err)
+	require.False(t, third.Stats.CacheHit)
+	require.Equal(t, first.Stats.FilesScanned, third.Stats.FilesReused)
+	require.Equal(t, 1, third.Stats.FilesChanged)
+	require.Len(t, third.FindDefinitions("Extra"), 1)
+}
+
+func TestIndexer_CachedIndexesAreIndependent(t *testing.T) {
+	t.Parallel()
+	opts := packageLoaderOptions(t)
+
+	dir := writeSemanticModule(t)
+	idxr := NewIndexer()
+
+	first, err := idxr.IndexDirWithOptions(dir, opts)
+	require.NoError(t, err)
+	require.NotEmpty(t, first.Files)
+	require.NotNil(t, first.Graph)
+
+	first.Files[0].Imports[0] = "mutated"
+	first.Packages[0].Files[0] = "mutated.go"
+	first.FileDetails[0].Build.Tags = []string{"mutated"}
+	first.Graph.AddNode(codegraph.Node{ID: "mutated", Kind: "test"})
+
+	second, err := idxr.IndexDirWithOptions(dir, opts)
+	require.NoError(t, err)
+	require.True(t, second.Stats.CacheHit)
+	require.NotEqual(t, "mutated", second.Files[0].Imports[0])
+	require.NotEqual(t, "mutated.go", second.Packages[0].Files[0])
+	require.NotEqual(t, []string{"mutated"}, second.FileDetails[0].Build.Tags)
+	require.False(t, second.Graph.Graph().HasNode("mutated"))
+}
+
+func writeSemanticModule(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/sem\n\ngo 1.26.2\n"), 0o600))
+	writeGoFile(t, dir, "api.go", `package sem
+
+import "context"
+
+type Runner struct{}
+type Box[T any] struct{ Value T }
+type hidden struct{}
+
+func NewRunner() Runner {
+	return Runner{}
+}
+
+func (Runner) Run(ctx context.Context) error {
+	return nil
+}
+
+func (hidden) Visible() {}
+func (Box[T]) Get() T { return *new(T) }
+
+func Use(ctx context.Context) {
+	_ = NewRunner()
+	_ = NewRunner().Run(ctx)
+	box := Box[int]{Value: 1}
+	_ = box.Get()
+}
+`)
+	writeGoFile(t, dir, "api_test.go", `package sem
+
+import "testing"
+
+func TestUse(t *testing.T) {
+	Use(nil)
+}
+`)
+	writeGoFile(t, dir, "tagged.go", `//go:build integration
+
+package sem
+
+func Tagged() {}
+`)
+	writeGoFile(t, dir, "generated.go", `// Code generated by test. DO NOT EDIT.
+
+package sem
+
+func Generated() {}
+`)
+	writeGoFile(t, dir, "vendor/ignored.go", `package ignored
+
+func VendorIgnored() {}
+`)
+
+	return dir
+}
+
+func packageLoaderOptions(t *testing.T) IndexOptions {
+	t.Helper()
+
+	return IndexOptions{Env: []string{
+		"GOCACHE=" + filepath.Join(t.TempDir(), "gocache"),
+		"GOWORK=off",
+	}}
+}
+
+func declarationNames(declarations []Declaration) []string {
+	out := make([]string, 0, len(declarations))
+	for i := range declarations {
+		out = append(out, declarations[i].Name)
+	}
+
+	return out
+}
+
+func declarationQualifiedNames(declarations []Declaration) []string {
+	out := make([]string, 0, len(declarations))
+	for i := range declarations {
+		name := declarations[i].Name
+		if declarations[i].Receiver != "" {
+			name = declarations[i].Receiver + "." + name
+		}
+		out = append(out, name)
+	}
+
+	return out
+}
+
+func exportRelationships(edges []codegraph.Relationship) []codegraph.Relationship {
+	var out []codegraph.Relationship
+	for i := range edges {
+		if edges[i].Kind == "exports" {
+			out = append(out, edges[i])
+		}
+	}
+
+	return out
+}
+
+func diagnosticsContain(diagnostics []Diagnostic, text string) bool {
+	for i := range diagnostics {
+		if strings.Contains(diagnostics[i].Message, text) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func relationshipKinds(edges []codegraph.Relationship) []string {
+	out := make([]string, 0, len(edges))
+	for i := range edges {
+		out = append(out, edges[i].Kind)
+	}
+
+	return out
+}
+
+func nodeKinds(nodes []codegraph.Node) []string {
+	out := make([]string, 0, len(nodes))
+	for i := range nodes {
+		out = append(out, nodes[i].Kind)
+	}
+
+	return out
+}
+
+func callTargets(edges []CallEdge) []string {
+	out := make([]string, 0, len(edges))
+	for i := range edges {
+		out = append(out, edges[i].CalleeID)
+	}
+
+	return out
+}
+
+func sourceFilesWhere(files []SourceFile, keep func(SourceFile) bool) []SourceFile {
+	var out []SourceFile
+	for i := range files {
+		if keep(files[i]) {
+			out = append(out, files[i])
+		}
+	}
+
+	return out
+}
+
+func referencesWhere(references []Reference, keep func(Reference) bool) []Reference {
+	var out []Reference
+	for i := range references {
+		if keep(references[i]) {
+			out = append(out, references[i])
+		}
+	}
+
+	return out
+}
+
+func uncertaintyContains(uncertainty []string, text string) bool {
+	for i := range uncertainty {
+		if strings.Contains(uncertainty[i], text) {
+			return true
+		}
+	}
+
+	return false
 }
