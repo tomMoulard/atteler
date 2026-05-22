@@ -106,6 +106,10 @@ func (c *LinearClient) fetchIssues(ctx context.Context, states []string, query s
 }
 
 func (c *LinearClient) graphql(ctx context.Context, query string, variables map[string]any, out any) error {
+	if err := requireTrackerContext(ctx); err != nil {
+		return err
+	}
+
 	body, err := json.Marshal(map[string]any{
 		"query":     query,
 		"variables": variables,
@@ -439,6 +443,10 @@ func (c *GitHubClient) delete(ctx context.Context, path string, out any) error {
 }
 
 func (c *GitHubClient) do(ctx context.Context, method, path string, in any, out any) error {
+	if err := requireTrackerContext(ctx); err != nil {
+		return err
+	}
+
 	endpoint := strings.TrimRight(c.cfg.Endpoint, "/") + path
 	var body io.Reader
 	if in != nil {
@@ -486,6 +494,18 @@ func (c *GitHubClient) do(ctx context.Context, method, path string, in any, out 
 
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("github_unknown_payload: %w", err)
+	}
+
+	return nil
+}
+
+func requireTrackerContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("tracker: context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("tracker: context already done: %w", err)
 	}
 
 	return nil

@@ -55,13 +55,9 @@ func RunEntrypointWithOptions(
 	entrypointName string,
 	options RunOptions,
 ) (RunResult, error) {
-	if options.Timeout <= 0 {
-		return RunResult{}, errors.New("plugin: entrypoint timeout must be positive")
-	}
-
-	entrypointName = strings.TrimSpace(entrypointName)
-	if entrypointName == "" {
-		return RunResult{}, errors.New("plugin: empty entrypoint name")
+	entrypointName, validationErr := validateRunEntrypointRequest(ctx, entrypointName, options)
+	if validationErr != nil {
+		return RunResult{}, validationErr
 	}
 
 	if err := manifest.Validate(root); err != nil {
@@ -136,6 +132,35 @@ func RunEntrypointWithOptions(
 	}
 
 	return result, nil
+}
+
+func validateRunEntrypointRequest(ctx context.Context, entrypointName string, options RunOptions) (string, error) {
+	if err := requireRunContext(ctx); err != nil {
+		return "", err
+	}
+
+	if options.Timeout <= 0 {
+		return "", errors.New("plugin: entrypoint timeout must be positive")
+	}
+
+	entrypointName = strings.TrimSpace(entrypointName)
+	if entrypointName == "" {
+		return "", errors.New("plugin: empty entrypoint name")
+	}
+
+	return entrypointName, nil
+}
+
+func requireRunContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("plugin: context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("plugin: context already done: %w", err)
+	}
+
+	return nil
 }
 
 func validateRunArgs(entrypointName string, schema []ArgumentSpec, args []string) ([]string, error) {

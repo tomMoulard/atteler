@@ -153,6 +153,32 @@ printf executed > executed
 	require.NoFileExists(t, marker)
 }
 
+func TestRunEntrypoint_RequiresActiveContext(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	marker := filepath.Join(root, "executed")
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf executed > executed
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	policy := AcceptManifestPolicy(manifest)
+
+	_, err := RunEntrypointWithOptions(nil, root, manifest, "run", RunOptions{Timeout: 5 * time.Second, Policy: &policy}) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "context is required")
+	require.NoFileExists(t, marker)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = RunEntrypointWithOptions(ctx, root, manifest, "run", RunOptions{Timeout: 5 * time.Second, Policy: &policy})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NoFileExists(t, marker)
+}
+
 func TestRunEntrypoint_RejectsEntrypointOutsideDeclaredFilesystemRead(t *testing.T) {
 	t.Parallel()
 

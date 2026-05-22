@@ -69,6 +69,21 @@ func TestLoadReferences_NilSlice(t *testing.T) {
 	assert.Nil(t, refs)
 }
 
+func TestLoadReferences_RequiresActiveContext(t *testing.T) {
+	t.Parallel()
+
+	_, err := LoadReferences(nil, []string{"doc.md"}, Options{Root: t.TempDir()}) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "context is required")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err = LoadReferencesWithReport(ctx, []string{"doc.md"}, Options{Root: t.TempDir()})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestLoadReferences_RespectsAggregateByteBudget(t *testing.T) {
 	t.Parallel()
 
