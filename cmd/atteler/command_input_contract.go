@@ -21,11 +21,10 @@ type asyncPlanCommandInput struct {
 type asyncRunCommandInput struct {
 	SpawnBinary    string
 	TaskSpecs      []string
-	TimeoutSeconds int
 	Execution      childExecutionCommandInput
+	TimeoutSeconds int
 }
 
-//nolint:govet // field order follows CLI flag grouping instead of byte packing.
 type childExecutionCommandInput struct {
 	LedgerPath          string
 	MaxConcurrency      int
