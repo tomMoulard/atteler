@@ -507,6 +507,32 @@ func TestTranslateCLIArgsWithFlagSet_PreservesParseableFlagOrder(t *testing.T) {
 		assert.Equal(t, "test/model", *model)
 	})
 
+	t.Run("recover headless command maps to compatibility flag", func(t *testing.T) {
+		t.Parallel()
+
+		opts, fs := newCLIOptionsAndFlagSetForTest(t)
+		got := translateCLIArgsWithFlagSet([]string{"session", "recover-headless"}, fs)
+		require.NoError(t, got.Err)
+		require.False(t, got.Help)
+		require.NoError(t, fs.Parse(got.Args))
+
+		assert.True(t, opts.recoverHeadless)
+	})
+
+	t.Run("headless private log flag parses with one-shot command", func(t *testing.T) {
+		t.Parallel()
+
+		opts, fs := newCLIOptionsAndFlagSetForTest(t)
+		got := translateCLIArgsWithFlagSet([]string{"chat", "once", "explain", "--headless", "--headless-private-log"}, fs)
+		require.NoError(t, got.Err)
+		require.False(t, got.Help)
+		require.NoError(t, fs.Parse(got.Args))
+
+		assert.True(t, opts.headless)
+		assert.True(t, opts.headlessPrivateLog)
+		assert.Equal(t, "explain", opts.oncePrompt)
+	})
+
 	t.Run("opaque shell command keeps dash-prefixed command args", func(t *testing.T) {
 		t.Parallel()
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,6 +174,128 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 	require.NoError(t, streamHeadlessLog(context.Background(), store, headlessID))
 }
 
+func TestRunOnceWithOptions_HeadlessPrivateLogKeepsPrompt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
+		nil,
+		&llm.Response{Content: "recorded answer", Model: "gpt-test"},
+	))
+
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	headlessID := "test-headless-private"
+	secretPrompt := "deploy with api_key=sk-" + strings.Repeat("p", 20)
+
+	err := runOnceWithOptions(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		nil,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat:       outputFormatText,
+			HeadlessID:         headlessID,
+			Response:           responseRecordOptions{ReplayPath: replayPath},
+			Headless:           true,
+			HeadlessPrivateLog: true,
+		},
+		true,
+		secretPrompt,
+	)
+	require.NoError(t, err)
+
+	run, err := store.LoadHeadlessRun(headlessID)
+	require.NoError(t, err)
+	assert.True(t, run.PrivateLogs)
+	assert.Equal(t, secretPrompt, run.Prompt)
+}
+
+func TestRunOnceWithOptions_HeadlessRedactsPromptByDefault(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
+		nil,
+		&llm.Response{Content: "recorded answer", Model: "gpt-test"},
+	))
+
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	headlessID := "test-headless-redacted"
+	secretPrompt := "deploy with api_key=sk-" + strings.Repeat("q", 20)
+
+	err := runOnceWithOptions(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		nil,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat: outputFormatText,
+			HeadlessID:   headlessID,
+			Response:     responseRecordOptions{ReplayPath: replayPath},
+			Headless:     true,
+		},
+		true,
+		secretPrompt,
+	)
+	require.NoError(t, err)
+
+	run, err := store.LoadHeadlessRun(headlessID)
+	require.NoError(t, err)
+	assert.False(t, run.PrivateLogs)
+	assert.NotContains(t, run.Prompt, "sk-"+strings.Repeat("q", 20))
+	assert.Contains(t, run.Prompt, "[REDACTED]")
+}
+
+func TestFinishHeadlessRunRecordsCancellationReason(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	run := session.HeadlessRun{
+		ID:     "test-headless-canceled",
+		Status: session.HeadlessStatusRunning,
+	}
+	require.NoError(t, store.SaveHeadlessRun(run))
+
+	loaded, err := store.LoadHeadlessRun(run.ID)
+	require.NoError(t, err)
+
+	finishHeadlessRun(store, &loaded, session.HeadlessStatusFailed, context.Canceled.Error())
+
+	canceled, err := store.LoadHeadlessRun(run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, session.HeadlessStatusFailed, canceled.Status)
+	assert.Equal(t, context.Canceled.Error(), canceled.Error)
+	assert.Equal(t, context.Canceled.Error(), canceled.CancellationReason)
+	require.NotNil(t, canceled.ExitCode)
+	assert.Equal(t, 1, *canceled.ExitCode)
+}
+
 func TestFormatHeadlessRun(t *testing.T) {
 	t.Parallel()
 
@@ -198,4 +321,10 @@ func TestFormatHeadlessRun(t *testing.T) {
 	} {
 		assert.Contains(t, got, want)
 	}
+
+	run.Status = session.HeadlessStatusStale
+	run.StaleReason = "process pid 123 is not running"
+	stale := formatHeadlessRun(run)
+	assert.Contains(t, stale, "status=stale")
+	assert.Contains(t, stale, "recover=atteler session recover-headless")
 }
