@@ -131,7 +131,7 @@ func providerlessFileCommands() []command {
 			name: "memory-command",
 			tier: tierProviderless,
 			match: func(o cliOptions) bool {
-				return o.memorySearch != "" || len(o.memoryIndexFiles) > 0
+				return o.retrievalSearch == "" && (o.memorySearch != "" || len(o.memoryIndexFiles) > 0)
 			},
 			runProviderless: func(_ context.Context, o cliOptions, s *session.Store) error {
 				return runMemoryCommand(s, memoryCommandInputFromOptions(o))
@@ -141,7 +141,7 @@ func providerlessFileCommands() []command {
 			name: "vector-search",
 			tier: tierProviderless,
 			match: func(o cliOptions) bool {
-				return o.vectorSearch != "" || len(o.vectorIndexFiles) > 0
+				return o.retrievalSearch == "" && (o.vectorSearch != "" || len(o.vectorIndexFiles) > 0)
 			},
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
 				return runVectorSearch(vectorSearchCommandInputFromOptions(o))

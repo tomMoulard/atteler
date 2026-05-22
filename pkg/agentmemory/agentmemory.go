@@ -3,6 +3,7 @@
 package agentmemory
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,8 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
+	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/vector"
 )
 
@@ -30,10 +33,17 @@ type Result struct {
 	Score    float64  `json:"score"`
 }
 
+// Searcher adapts one agent namespace to the shared retrieval contract.
+type Searcher struct {
+	Store *Store
+	Agent string
+}
+
 // Store keeps vector memories partitioned by agent name.
 type Store struct {
 	Agents     map[string][]Document `json:"agents"`
-	Dimensions int                   `json:"dimensions"`
+	indexes    map[string]*vector.Store
+	Dimensions int `json:"dimensions"`
 }
 
 // NewStore returns an empty per-agent memory store. A zero dimension value uses
@@ -47,6 +57,7 @@ func NewStore(dimensions int) (*Store, error) {
 	return &Store{
 		Agents:     make(map[string][]Document),
 		Dimensions: vectorizer.Dimensions,
+		indexes:    make(map[string]*vector.Store),
 	}, nil
 }
 
@@ -70,7 +81,19 @@ func (s *Store) AddFile(agent, path string) error {
 
 	clean := filepath.Clean(path)
 
-	return s.Add(agent, Document{ID: clean, Path: clean, Text: string(data)})
+	metadata := map[string]string{
+		"path": clean,
+	}
+	if info, statErr := os.Stat(path); statErr == nil && !info.ModTime().IsZero() {
+		metadata[retrieval.MetadataSourceUpdatedAt] = info.ModTime().UTC().Format(time.RFC3339Nano)
+	}
+
+	return s.Add(agent, Document{
+		ID:       clean,
+		Path:     clean,
+		Text:     string(data),
+		Metadata: metadata,
+	})
 }
 
 // Add vectorizes and stores doc for agent. Existing documents for the same
@@ -94,6 +117,8 @@ func (s *Store) Add(agent string, doc Document) error {
 		doc.Metadata = nil
 	}
 
+	doc, _ = s.prepareDocument(agent, doc)
+
 	vec, err := s.vectorize(doc.Text)
 	if err != nil {
 		return err
@@ -112,13 +137,13 @@ func (s *Store) Add(agent string, doc Document) error {
 			docs[i] = doc
 			s.Agents[agent] = docs
 
-			return nil
+			return s.indexDocument(agent, doc)
 		}
 	}
 
 	s.Agents[agent] = append(docs, doc)
 
-	return nil
+	return s.indexDocument(agent, doc)
 }
 
 // Search vectorizes query and returns results from only agent's documents. A
@@ -143,20 +168,9 @@ func (s *Store) Search(agent, query string, limit int) ([]Result, error) {
 		return nil, nil
 	}
 
-	store, err := vector.NewStore(s.Dimensions)
+	store, err := s.indexForAgent(agent)
 	if err != nil {
-		return nil, fmt.Errorf("agent memory: create vector store: %w", err)
-	}
-
-	for _, doc := range docs {
-		if addErr := store.Add(vector.Document{
-			ID:       doc.ID,
-			Text:     doc.Text,
-			Metadata: doc.Metadata,
-			Vector:   doc.Vector,
-		}); addErr != nil {
-			return nil, fmt.Errorf("index agent memory document %q: %w", doc.ID, addErr)
-		}
+		return nil, err
 	}
 
 	vectorResults, err := store.Search(queryVector, limit)
@@ -173,6 +187,67 @@ func (s *Store) Search(agent, query string, limit int) ([]Result, error) {
 	}
 
 	return results, nil
+}
+
+// SearchRetrieval returns agent memory hits using the shared retrieval
+// contract.
+func (s *Store) SearchRetrieval(ctx context.Context, agent string, query retrieval.Query) ([]retrieval.Result, error) {
+	searcher := Searcher{Store: s, Agent: agent}
+
+	return searcher.SearchRetrieval(ctx, query)
+}
+
+// SearchRetrieval implements retrieval.Searcher for one agent namespace.
+func (s Searcher) SearchRetrieval(ctx context.Context, query retrieval.Query) ([]retrieval.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("agent memory retrieval: %w", err)
+	}
+
+	if s.Store == nil {
+		return nil, nil
+	}
+
+	results, err := s.Store.Search(s.Agent, query.Text, query.Limit)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]retrieval.Result, 0, len(results))
+	for _, result := range results {
+		out = append(out, agentRetrievalResult(s.Agent, result, query))
+	}
+
+	return out, nil
+}
+
+// Delete removes one document from an agent namespace.
+func (s *Store) Delete(agent, id string) bool {
+	agent = strings.TrimSpace(agent)
+
+	id = strings.TrimSpace(id)
+	if agent == "" || id == "" {
+		return false
+	}
+
+	docs := s.Agents[agent]
+	for i, doc := range docs {
+		if doc.ID != id {
+			continue
+		}
+
+		s.Agents[agent] = append(docs[:i], docs[i+1:]...)
+		if len(s.Agents[agent]) == 0 {
+			delete(s.Agents, agent)
+		}
+
+		if s.indexes != nil && s.indexes[agent] != nil {
+			s.indexes[agent].Delete(id)
+		}
+
+		return true
+	}
+
+	return false
 }
 
 // Save writes the store as pretty-printed JSON.
@@ -226,6 +301,89 @@ func (s *Store) Documents(agent string) []Document {
 	return out
 }
 
+func (s *Store) prepareDocument(agent string, doc Document) (Document, bool) {
+	source := retrieval.Source{Type: retrieval.SourceAgentMemory, Name: agent, URI: firstNonEmpty(doc.Path, doc.Metadata["path"])}
+	originalText := doc.Text
+	policyContext := retrieval.PolicyContext{
+		Source:     source,
+		Metadata:   doc.Metadata,
+		DocumentID: doc.ID,
+		Path:       firstNonEmpty(doc.Path, doc.Metadata["path"]),
+	}
+	text, textSafety := retrieval.Sanitize(doc.Text, policyContext)
+	metadata, metadataSafety := retrieval.SanitizeMetadata(doc.Metadata, policyContext)
+	safety := retrieval.MergeSafety(textSafety, metadataSafety)
+
+	doc.Text = text
+	doc.Metadata = metadata
+
+	if !retrieval.IsDefaultSafety(safety) {
+		doc.Metadata = retrieval.MergeSafetyMetadata(doc.Metadata, safety)
+	}
+
+	return doc, originalText != doc.Text
+}
+
+func (s *Store) indexForAgent(agent string) (*vector.Store, error) {
+	if s.indexes == nil {
+		s.indexes = make(map[string]*vector.Store)
+	}
+
+	if store := s.indexes[agent]; store != nil {
+		return store, nil
+	}
+
+	if err := s.rebuildAgentIndex(agent); err != nil {
+		return nil, err
+	}
+
+	return s.indexes[agent], nil
+}
+
+func (s *Store) indexDocument(agent string, doc Document) error {
+	store, err := s.indexForAgent(agent)
+	if err != nil {
+		return err
+	}
+
+	if err := store.Add(vector.Document{
+		ID:       doc.ID,
+		Text:     doc.Text,
+		Metadata: doc.Metadata,
+		Vector:   doc.Vector,
+	}); err != nil {
+		return fmt.Errorf("index agent memory document %q: %w", doc.ID, err)
+	}
+
+	return nil
+}
+
+func (s *Store) rebuildAgentIndex(agent string) error {
+	if s.indexes == nil {
+		s.indexes = make(map[string]*vector.Store)
+	}
+
+	store, err := vector.NewStore(s.Dimensions)
+	if err != nil {
+		return fmt.Errorf("agent memory: create vector store: %w", err)
+	}
+
+	for _, doc := range s.Agents[agent] {
+		if addErr := store.Add(vector.Document{
+			ID:       doc.ID,
+			Text:     doc.Text,
+			Metadata: doc.Metadata,
+			Vector:   doc.Vector,
+		}); addErr != nil {
+			return fmt.Errorf("index agent memory document %q: %w", doc.ID, addErr)
+		}
+	}
+
+	s.indexes[agent] = store
+
+	return nil
+}
+
 func (s *Store) vectorize(text string) (vector.Vector, error) {
 	if s.Dimensions <= 0 {
 		vectorizer, err := vector.NewTextVectorizer(0)
@@ -267,6 +425,8 @@ func (s *Store) validateLoaded() error {
 		s.Agents = make(map[string][]Document)
 	}
 
+	s.indexes = make(map[string]*vector.Store, len(s.Agents))
+
 	for agent, docs := range s.Agents {
 		normalizedDocs, err := s.validateLoadedAgent(agent, docs)
 		if err != nil {
@@ -274,6 +434,9 @@ func (s *Store) validateLoaded() error {
 		}
 
 		s.Agents[agent] = normalizedDocs
+		if err := s.rebuildAgentIndex(agent); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -286,24 +449,10 @@ func (s *Store) validateLoadedAgent(agent string, docs []Document) ([]Document, 
 
 	seen := make(map[string]struct{}, len(docs))
 
-	store, err := vector.NewStore(s.Dimensions)
-	if err != nil {
-		return nil, fmt.Errorf("agent memory: validate vector store: %w", err)
-	}
-
 	for i, doc := range docs {
-		normalized, normalizeErr := s.normalizeLoadedDocument(doc, seen)
+		normalized, normalizeErr := s.normalizeLoadedDocument(agent, doc, seen)
 		if normalizeErr != nil {
 			return nil, normalizeErr
-		}
-
-		if addErr := store.Add(vector.Document{
-			ID:       normalized.ID,
-			Text:     normalized.Text,
-			Metadata: normalized.Metadata,
-			Vector:   normalized.Vector,
-		}); addErr != nil {
-			return nil, fmt.Errorf("agent memory: validate document %q: %w", normalized.ID, addErr)
 		}
 
 		docs[i] = normalized
@@ -312,7 +461,7 @@ func (s *Store) validateLoadedAgent(agent string, docs []Document) ([]Document, 
 	return docs, nil
 }
 
-func (s *Store) normalizeLoadedDocument(doc Document, seen map[string]struct{}) (Document, error) {
+func (s *Store) normalizeLoadedDocument(agent string, doc Document, seen map[string]struct{}) (Document, error) {
 	doc.ID = strings.TrimSpace(doc.ID)
 	if doc.ID == "" {
 		return Document{}, ErrMissingID
@@ -327,7 +476,11 @@ func (s *Store) normalizeLoadedDocument(doc Document, seen map[string]struct{}) 
 		return Document{}, ErrInvalidUTF8
 	}
 
-	if len(doc.Vector) == 0 {
+	var redacted bool
+
+	doc, redacted = s.prepareDocument(agent, doc)
+
+	if len(doc.Vector) == 0 || redacted {
 		vec, err := s.vectorize(doc.Text)
 		if err != nil {
 			return Document{}, err
@@ -357,6 +510,51 @@ func documentFromVector(doc vector.Document, originals []Document) Document {
 	}
 }
 
+func agentRetrievalResult(agent string, result Result, query retrieval.Query) retrieval.Result {
+	doc := result.Document
+	source := retrieval.Source{Type: retrieval.SourceAgentMemory, Name: agent, URI: firstNonEmpty(doc.Path, doc.Metadata["path"])}
+	metadata := cloneMetadata(doc.Metadata)
+	policyContext := retrieval.PolicyContext{
+		Source:     source,
+		Metadata:   metadata,
+		DocumentID: doc.ID,
+		Path:       firstNonEmpty(doc.Path, metadata["path"]),
+	}
+	text, textSafety := retrieval.Sanitize(doc.Text, policyContext)
+	metadata, metadataSafety := retrieval.SanitizeMetadata(metadata, policyContext)
+	safety := retrieval.MergeSafety(retrieval.SafetyFromMetadata(metadata), textSafety)
+	safety = retrieval.MergeSafety(safety, metadataSafety)
+
+	if !retrieval.IsDefaultSafety(safety) {
+		metadata = retrieval.MergeSafetyMetadata(metadata, safety)
+	}
+
+	chunk := retrieval.BestChunkForTerms(doc.ID, text, strings.Fields(strings.ToLower(query.Text)), retrieval.ChunkOptions{})
+
+	scorer := retrieval.Scorer{
+		Name: "agent-memory-hashed-vector-cosine",
+		Raw:  result.Score,
+		Details: map[string]float64{
+			"cosine_similarity": result.Score,
+		},
+	}
+	if query.Explain {
+		scorer.Explanation = []string{"ranked within one agent namespace by cosine similarity over persisted document vectors"}
+	}
+
+	return retrieval.NormalizeResult(retrieval.Result{
+		Source:     source,
+		DocumentID: doc.ID,
+		Chunk:      chunk.Chunk,
+		Score:      retrieval.ClampScore(result.Score),
+		Scorer:     scorer,
+		Snippet:    retrieval.Snippet(chunk.Text, 160),
+		Metadata:   metadata,
+		Freshness:  retrieval.FreshnessFromMetadata(metadata),
+		Safety:     safety,
+	})
+}
+
 func cloneDocument(doc Document) Document {
 	doc.Vector = cloneVector(doc.Vector)
 	doc.Metadata = cloneMetadata(doc.Metadata)
@@ -380,6 +578,16 @@ func cloneMetadata(metadata map[string]string) map[string]string {
 	maps.Copy(out, metadata)
 
 	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+
+	return ""
 }
 
 var (

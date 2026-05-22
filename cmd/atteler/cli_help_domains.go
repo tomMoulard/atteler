@@ -164,6 +164,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Aliases: []string{"memory", "rag", "mem"},
 		Commands: []cliCommandAlias{
 			{Name: "search", Args: "<query>", Summary: "search local memory", Legacy: []string{"--memory-search"}, JoinArgs: true},
+			{Name: "retrieve", Args: "<query>", Summary: "search selected/filtered sources under the unified retrieval contract", Legacy: []string{"--retrieval-search"}, JoinArgs: true},
 			{Name: "index", Args: "<file>", Summary: "add a file to the local memory store", Legacy: []string{"--memory-index"}},
 			{Name: "agent-search", Args: "<query>", Summary: "search one agent's vector memory", Legacy: []string{"--agent-memory-search"}, JoinArgs: true},
 			{Name: "agent-index", Args: "<file>", Summary: "add a file to one agent's vector memory", Legacy: []string{"--agent-memory-index"}},
@@ -174,6 +175,7 @@ var cliHelpDomains = []cliHelpDomain{
 		},
 		Examples: []string{
 			`atteler memory search "OAuth retry storm"`,
+			`atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain`,
 			`atteler memory git-history "memory regression"`,
 			`atteler memory vector-search "redirect risks"`,
 		},
@@ -318,6 +320,7 @@ var implicitFlagDefaults = map[string]string{
 	"plan-max-agents":          "unlimited",
 	"plugin-timeout-seconds":   "30",
 	"prompt-complete-limit":    "5",
+	"retrieval-limit":          "5",
 	"skill-max-steps":          "6",
 	"skill-min-occurrences":    "2",
 	"spawn-timeout-seconds":    "none",

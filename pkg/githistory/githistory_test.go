@@ -1,10 +1,17 @@
 package githistory
 
 import (
+	"context"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 const sampleLog = "bbb\x1fBob\x1fbob@example.com\x1f2026-04-02T12:00:00Z\x1fFix memory search regression\x1e\npkg/memory/memory.go\nREADME.md\n" +
@@ -131,4 +138,53 @@ func commitHashes(results []Result) []string {
 	}
 
 	return hashes
+}
+
+func TestIndex_SearchRetrievalUsesSharedContract(t *testing.T) {
+	t.Parallel()
+
+	commits, err := ParseLog(sampleLog)
+	require.NoError(t, err)
+
+	results, err := NewIndex(commits).SearchRetrieval(context.Background(), retrieval.Query{Text: "memory regression", Limit: 1, Explain: true})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	result := results[0]
+	assert.Equal(t, retrieval.SourceGitHistory, result.Source.Type)
+	assert.Equal(t, "bbb", result.DocumentID)
+	assert.NotEmpty(t, result.Chunk.ID)
+	assert.NotEmpty(t, result.Metadata[retrieval.MetadataStableID])
+	assert.NotEmpty(t, result.Metadata[retrieval.MetadataContentHash])
+	assert.Equal(t, "git-history-weighted-lexical", result.Scorer.Name)
+	assert.NotEmpty(t, result.Scorer.Explanation)
+}
+
+func TestIndex_SearchRetrievalRedactsSensitiveCommitText(t *testing.T) {
+	t.Parallel()
+
+	commit := Commit{
+		Hash:    "secret",
+		Date:    time.Date(2026, 4, 3, 0, 0, 0, 0, time.UTC),
+		Subject: "Rotate OAuth api_key=super-secret-token",
+	}
+
+	results, err := NewIndex([]Commit{commit}).SearchRetrieval(context.Background(), retrieval.Query{
+		Text:          "oauth",
+		Limit:         1,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	assert.False(t, results[0].Safety.InjectAllowed)
+	assert.True(t, results[0].Safety.Redacted)
+	assert.NotContains(t, results[0].Snippet, "super-secret-token")
+	assert.Contains(t, results[0].Snippet, "[REDACTED]")
+	assert.NotContains(t, results[0].Metadata["subject"], "super-secret-token")
+	assert.Contains(t, results[0].Metadata["subject"], "[REDACTED]")
+
+	data, err := json.Marshal(results[0])
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "super-secret-token")
 }

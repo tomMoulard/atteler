@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 const defaultVectorizerDimensions = 128
@@ -36,6 +38,15 @@ type Document struct {
 type Result struct {
 	Document Document
 	Score    float64
+}
+
+// Searcher adapts a Store plus text vectorizer to the shared retrieval
+// contract.
+type Searcher struct {
+	Store      *Store
+	Vectorizer Vectorizer
+	Source     retrieval.Source
+	ScorerName string
 }
 
 // Store is an in-memory vector document store. All exported methods are safe
@@ -114,6 +125,67 @@ func (s *Store) Search(query Vector, limit int) ([]Result, error) {
 	}
 
 	return results, nil
+}
+
+// Delete removes a document by ID and reports whether anything was removed.
+func (s *Store) Delete(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, doc := range s.Documents {
+		if doc.ID != id {
+			continue
+		}
+
+		s.Documents = append(s.Documents[:i], s.Documents[i+1:]...)
+
+		return true
+	}
+
+	return false
+}
+
+// SearchRetrieval vectorizes query text and returns results using the shared
+// retrieval contract.
+func (s Searcher) SearchRetrieval(ctx context.Context, query retrieval.Query) ([]retrieval.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("vector retrieval: %w", err)
+	}
+
+	if s.Store == nil {
+		return nil, nil
+	}
+
+	if s.Vectorizer == nil {
+		vectorizer, err := NewTextVectorizer(s.Store.Dimensions)
+		if err != nil {
+			return nil, fmt.Errorf("vector retrieval: create vectorizer: %w", err)
+		}
+
+		s.Vectorizer = vectorizer
+	}
+
+	queryVector, err := vectorizeContext(ctx, s.Vectorizer, query.Text)
+	if err != nil {
+		return nil, fmt.Errorf("vector retrieval: vectorize query: %w", err)
+	}
+
+	results, err := s.Store.Search(queryVector, query.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("vector retrieval: search store: %w", err)
+	}
+
+	out := make([]retrieval.Result, 0, len(results))
+	for _, result := range results {
+		out = append(out, s.retrievalResult(result, query))
+	}
+
+	return out, nil
 }
 
 // searchLocked performs the read-locked portion of Search, cloning results
@@ -420,6 +492,100 @@ func cloneDocument(doc Document) Document {
 	doc.Metadata = cloneMetadata(doc.Metadata)
 
 	return doc
+}
+
+func (s Searcher) retrievalResult(result Result, query retrieval.Query) retrieval.Result {
+	doc := result.Document
+
+	source := s.Source
+	if source.Type == "" {
+		source = retrieval.Source{Type: retrieval.SourceVector}
+	}
+
+	if source.Name == "" {
+		source.Name = doc.Metadata["path"]
+	}
+
+	if source.URI == "" {
+		source.URI = doc.Metadata["path"]
+	}
+
+	metadata := cloneMetadata(doc.Metadata)
+	policyContext := retrieval.PolicyContext{
+		Source:     source,
+		Metadata:   metadata,
+		DocumentID: doc.ID,
+		Path:       doc.Metadata["path"],
+	}
+	text, sanitizedSafety := retrieval.Sanitize(doc.Text, policyContext)
+	metadata, metadataSafety := retrieval.SanitizeMetadata(metadata, policyContext)
+	safety := retrieval.MergeSafety(retrieval.SafetyFromMetadata(metadata), sanitizedSafety)
+	safety = retrieval.MergeSafety(safety, metadataSafety)
+
+	if !retrieval.IsDefaultSafety(safety) {
+		metadata = retrieval.MergeSafetyMetadata(metadata, safety)
+	}
+
+	chunk := retrieval.BestChunkForTerms(doc.ID, text, tokenize(query.Text), retrieval.ChunkOptions{})
+
+	scorerName := s.ScorerName
+	if scorerName == "" {
+		scorerName = scorerNameForVectorizer(s.Vectorizer)
+	}
+
+	scorer := retrieval.Scorer{
+		Name: scorerName,
+		Raw:  result.Score,
+		Details: map[string]float64{
+			"cosine_similarity": result.Score,
+		},
+	}
+	if query.Explain {
+		scorer.Explanation = []string{"ranked by cosine similarity between query vector and document vector"}
+	}
+
+	return retrieval.NormalizeResult(retrieval.Result{
+		Source:     source,
+		DocumentID: doc.ID,
+		Chunk:      chunk.Chunk,
+		Score:      retrieval.ClampScore(result.Score),
+		Scorer:     scorer,
+		Snippet:    retrieval.Snippet(chunk.Text, 160),
+		Metadata:   metadata,
+		Freshness:  retrieval.FreshnessFromMetadata(metadata),
+		Safety:     safety,
+	})
+}
+
+func vectorizeContext(ctx context.Context, vectorizer Vectorizer, text string) (Vector, error) {
+	if contextVectorizer, ok := vectorizer.(VectorizerContext); ok {
+		vec, err := contextVectorizer.VectorizeContext(ctx, text)
+		if err != nil {
+			return nil, fmt.Errorf("vectorize with context: %w", err)
+		}
+
+		return vec, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("vectorize context: %w", err)
+	}
+
+	vec, err := vectorizer.Vectorize(text)
+	if err != nil {
+		return nil, fmt.Errorf("vectorize text: %w", err)
+	}
+
+	return vec, nil
+}
+
+func scorerNameForVectorizer(vectorizer Vectorizer) string {
+	switch vectorizer.(type) {
+	case *TextVectorizer, TextVectorizer:
+		return "hashed-vector-cosine"
+	default:
+		return "embedding-cosine"
+	}
 }
 
 func cloneVector(vec Vector) Vector {

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 func TestStore_SearchMessagesAndMetadata(t *testing.T) {
@@ -58,6 +60,11 @@ func TestStore_SearchMessagesAndMetadata(t *testing.T) {
 	if len(results[0].Snippets) == 0 || !strings.Contains(results[0].Snippets[0].Text, authQuery) {
 		require.Failf(t, "unexpected failure", "snippet = %+v, want auth excerpt", results[0].Snippets)
 	}
+
+	assert.Equal(t, "message", results[0].Snippets[0].Kind)
+	assert.Equal(t, 0, results[0].Snippets[0].Index)
+	assert.Equal(t, retrieval.RangeUnitRuneOffset, results[0].Snippets[0].Range.Unit)
+	assert.Greater(t, results[0].Snippets[0].Range.End, results[0].Snippets[0].Range.Start)
 
 	results, err = store.Search("gpt-write")
 	if err != nil {
@@ -110,6 +117,8 @@ func TestStore_SearchNegativeKnowledge(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Len(t, results[0].Snippets, 1)
 	assert.Equal(t, llm.Role("negative_knowledge"), results[0].Snippets[0].Role)
+	assert.Equal(t, "negative_knowledge", results[0].Snippets[0].Kind)
+	assert.Equal(t, 0, results[0].Snippets[0].Index)
 	assert.Contains(t, results[0].Snippets[0].Text, "Failed attempt: Patch token refresh timer")
 	assert.Contains(t, results[0].Snippets[0].Text, "Reason: Created retry storms")
 
@@ -133,11 +142,88 @@ func TestStore_SearchEvaluationsAndArtifacts(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Len(t, results[0].Snippets, 1)
 	assert.Equal(t, llm.Role("evaluation"), results[0].Snippets[0].Role)
+	assert.Equal(t, "evaluation", results[0].Snippets[0].Kind)
+	assert.Equal(t, 0, results[0].Snippets[0].Index)
 	assert.Contains(t, results[0].Snippets[0].Text, "Caught OAuth bug")
 
 	results, err = store.Search("findings")
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, llm.Role("artifact"), results[0].Snippets[0].Role)
+	assert.Equal(t, "artifact", results[0].Snippets[0].Kind)
+	assert.Equal(t, 0, results[0].Snippets[0].Index)
 	assert.Contains(t, results[0].Snippets[0].Text, "OAuth findings")
+}
+
+func TestStore_SearchRetrievalMarksSessionsPrivateAndCitable(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	session := New("gpt-review", []llm.Message{{Role: llm.RoleUser, Content: "OAuth callback api_key=super-secret-token"}})
+	session.Title = "Auth repair"
+	require.NoError(t, store.Save(session))
+
+	results, err := store.SearchRetrieval(context.Background(), retrieval.Query{Text: "OAuth callback", Limit: 1, IncludeUnsafe: true, Explain: true})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, retrieval.SourceSession, results[0].Source.Type)
+	assert.Equal(t, "session/"+session.ID, results[0].DocumentID)
+	assert.NotEmpty(t, results[0].Chunk.ID)
+	assert.Equal(t, "message", results[0].Metadata["kind"])
+	assert.Equal(t, "0", results[0].Metadata["index"])
+	assert.Equal(t, string(llm.RoleUser), results[0].Metadata["role"])
+	assert.Equal(t, retrieval.RangeUnitRuneOffset, results[0].Chunk.Range.Unit)
+	assert.Greater(t, results[0].Chunk.Range.End, results[0].Chunk.Range.Start)
+	assert.NotEmpty(t, results[0].Metadata[retrieval.MetadataStableID])
+	assert.NotEmpty(t, results[0].Metadata[retrieval.MetadataContentHash])
+	assert.True(t, results[0].Safety.Private)
+	assert.True(t, results[0].Safety.Redacted)
+	assert.False(t, results[0].Safety.InjectAllowed)
+	assert.NotContains(t, results[0].Snippet, "super-secret-token")
+	assert.NotEmpty(t, results[0].Scorer.Explanation)
+}
+
+func TestStore_SearchRetrievalRequiresUnsafeOptInForSessionSnippets(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	saved := New("gpt-private", []llm.Message{{Role: llm.RoleUser, Content: "OAuth callback retry notes"}})
+	require.NoError(t, store.Save(saved))
+
+	results, err := store.SearchRetrieval(context.Background(), retrieval.Query{Text: "OAuth callback", Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.True(t, results[0].Safety.Private)
+	assert.False(t, results[0].Safety.InjectAllowed)
+	assert.Contains(t, results[0].Safety.Reasons, "private session transcript")
+
+	filtered, err := retrieval.Search(context.Background(), retrieval.Query{Text: "OAuth callback", Limit: 1}, store)
+	require.NoError(t, err)
+	assert.Empty(t, filtered)
+
+	included, err := retrieval.Search(context.Background(), retrieval.Query{Text: "OAuth callback", Limit: 1, IncludeUnsafe: true}, store)
+	require.NoError(t, err)
+	require.Len(t, included, 1)
+	assert.Equal(t, "session/"+saved.ID, included[0].DocumentID)
+}
+
+func TestStore_SearchRetrievalRedactsSensitiveSessionMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	saved := New("gpt-metadata", nil)
+	saved.Title = "OAuth api_key=metadata-secret-token"
+	require.NoError(t, store.Save(saved))
+
+	results, err := store.SearchRetrieval(context.Background(), retrieval.Query{
+		Text:          "OAuth",
+		Limit:         1,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.True(t, results[0].Safety.Redacted)
+	assert.Equal(t, "metadata", results[0].Metadata["kind"])
+	assert.NotContains(t, results[0].Metadata["session_title"], "metadata-secret-token")
+	assert.Contains(t, results[0].Metadata["session_title"], "[REDACTED]")
 }

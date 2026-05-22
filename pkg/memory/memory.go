@@ -3,15 +3,20 @@
 package memory
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 const defaultSnippetRunes = 160
@@ -73,7 +78,16 @@ func (s *Store) AddFile(path string) error {
 
 	clean := filepath.Clean(path)
 
-	return s.Add(Document{ID: clean, Path: clean, Text: string(data)})
+	metadata := map[string]string{
+		"source_type": string(retrieval.SourceFile),
+		"path":        clean,
+	}
+
+	if info, statErr := os.Stat(path); statErr == nil && !info.ModTime().IsZero() {
+		metadata[retrieval.MetadataSourceUpdatedAt] = info.ModTime().UTC().Format(time.RFC3339Nano)
+	}
+
+	return s.Add(Document{ID: clean, Path: clean, Text: string(data), Metadata: metadata})
 }
 
 // AddFiles reads and indexes each path in order.
@@ -104,6 +118,7 @@ func (s *Store) Add(doc Document) error {
 		return ErrMissingID
 	}
 
+	doc = prepareDocument(doc)
 	if doc.Metadata != nil && len(doc.Metadata) == 0 {
 		doc.Metadata = nil
 	}
@@ -181,6 +196,81 @@ func (s *Store) Search(query string, limit int) ([]Result, error) {
 	return results, nil
 }
 
+// SearchRetrieval returns lexical memory hits using the shared retrieval
+// contract. It preserves Search's ranking while adding source, chunk/range,
+// freshness, safety, and scorer explanation metadata.
+func (s *Store) SearchRetrieval(ctx context.Context, query retrieval.Query) ([]retrieval.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("memory retrieval: %w", err)
+	}
+
+	results, err := s.Search(query.Text, query.Limit)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]retrieval.Result, 0, len(results))
+	for _, result := range results {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("memory retrieval: %w", err)
+		}
+
+		out = append(out, retrievalResult(result, query))
+	}
+
+	return out, nil
+}
+
+// Delete removes a document by ID and reports whether anything was removed.
+func (s *Store) Delete(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+
+	for i, doc := range s.Documents {
+		if doc.ID != id {
+			continue
+		}
+
+		s.Documents = append(s.Documents[:i], s.Documents[i+1:]...)
+
+		return true
+	}
+
+	return false
+}
+
+// SyncFiles incrementally indexes exactly paths and deletes file-backed memory
+// documents that are no longer present in paths.
+func (s *Store) SyncFiles(paths ...string) error {
+	keep := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		clean := filepath.Clean(path)
+		keep[clean] = struct{}{}
+
+		if err := s.AddFile(path); err != nil {
+			return err
+		}
+	}
+
+	filtered := s.Documents[:0]
+	for _, doc := range s.Documents {
+		if doc.Metadata["source_type"] != string(retrieval.SourceFile) {
+			filtered = append(filtered, doc)
+			continue
+		}
+
+		if _, ok := keep[doc.ID]; ok {
+			filtered = append(filtered, doc)
+		}
+	}
+
+	s.Documents = filtered
+
+	return nil
+}
+
 // Save writes the store as pretty-printed JSON.
 func (s *Store) Save(path string) error {
 	data, err := json.MarshalIndent(s, "", "  ")
@@ -213,7 +303,147 @@ func Load(path string) (*Store, error) {
 		return nil, fmt.Errorf("decode memory store %q: %w", path, err)
 	}
 
+	for i := range store.Documents {
+		store.Documents[i] = prepareDocument(store.Documents[i])
+	}
+
 	return &store, nil
+}
+
+func prepareDocument(doc Document) Document {
+	source := documentSource(doc)
+	policyContext := retrieval.PolicyContext{
+		Source:     source,
+		Metadata:   doc.Metadata,
+		DocumentID: doc.ID,
+		Path:       firstNonEmpty(doc.Path, doc.Metadata["path"]),
+	}
+	text, textSafety := retrieval.Sanitize(doc.Text, policyContext)
+	metadata, metadataSafety := retrieval.SanitizeMetadata(doc.Metadata, policyContext)
+	safety := retrieval.MergeSafety(textSafety, metadataSafety)
+
+	doc.Text = text
+	doc.Metadata = metadata
+
+	if doc.Metadata == nil {
+		doc.Metadata = make(map[string]string)
+	}
+
+	if _, ok := doc.Metadata[retrieval.MetadataStableID]; !ok {
+		doc.Metadata[retrieval.MetadataStableID] = retrieval.StableDocumentID(source, doc.ID)
+	}
+
+	doc.Metadata[retrieval.MetadataContentHash] = retrieval.TextHash(doc.Text)
+	if !retrieval.IsDefaultSafety(safety) {
+		doc.Metadata = retrieval.MergeSafetyMetadata(doc.Metadata, safety)
+	}
+
+	return doc
+}
+
+func retrievalResult(result Result, query retrieval.Query) retrieval.Result {
+	doc := result.Document
+	metadata := cloneMetadata(doc.Metadata)
+	source := documentSource(doc)
+	policyContext := retrieval.PolicyContext{
+		Source:     source,
+		Metadata:   metadata,
+		DocumentID: doc.ID,
+		Path:       firstNonEmpty(doc.Path, metadata["path"]),
+	}
+	text, textSafety := retrieval.Sanitize(doc.Text, policyContext)
+	metadata, metadataSafety := retrieval.SanitizeMetadata(metadata, policyContext)
+	safety := retrieval.MergeSafety(retrieval.SafetyFromMetadata(metadata), textSafety)
+	safety = retrieval.MergeSafety(safety, metadataSafety)
+	sanitized := text != doc.Text
+	doc.Text = text
+	doc.Metadata = metadata
+
+	if !retrieval.IsDefaultSafety(safety) {
+		doc.Metadata = retrieval.MergeSafetyMetadata(doc.Metadata, safety)
+	}
+
+	chunk := retrieval.BestChunkForTerms(doc.ID, doc.Text, result.Matches, retrieval.ChunkOptions{})
+
+	snippet := result.Snippet
+	if snippet == "" || sanitized {
+		snippet = retrieval.Snippet(chunk.Text, defaultSnippetRunes)
+	}
+
+	scorer := retrieval.Scorer{
+		Name: "lexical-token-overlap",
+		Raw:  result.Score,
+		Details: map[string]float64{
+			"matches":     float64(len(result.Matches)),
+			"query_terms": float64(len(uniqueTokens(query.Text))),
+		},
+	}
+	if query.Explain {
+		scorer.Explanation = []string{
+			"ranked by query-token coverage plus in-document match density",
+			"matched terms: " + strings.Join(result.Matches, ", "),
+		}
+	}
+
+	return retrieval.NormalizeResult(retrieval.Result{
+		Source:     source,
+		DocumentID: doc.ID,
+		Chunk:      chunk.Chunk,
+		Score:      retrieval.NormalizeRawScore(result.Score),
+		Scorer:     scorer,
+		Snippet:    snippet,
+		Metadata:   cloneMetadata(doc.Metadata),
+		Freshness:  retrieval.FreshnessFromMetadata(doc.Metadata),
+		Safety:     retrieval.SafetyFromMetadata(doc.Metadata),
+	})
+}
+
+func documentSource(doc Document) retrieval.Source {
+	sourceType := retrieval.SourceMemory
+	switch retrieval.SourceType(strings.TrimSpace(doc.Metadata["source_type"])) {
+	case retrieval.SourceSession:
+		sourceType = retrieval.SourceSession
+	case retrieval.SourceFile:
+		sourceType = retrieval.SourceFile
+	case retrieval.SourceMemory:
+		sourceType = retrieval.SourceMemory
+	}
+
+	source := retrieval.Source{Type: sourceType}
+	switch sourceType {
+	case retrieval.SourceSession:
+		source.Name = doc.Metadata["session_id"]
+		source.URI = doc.Path
+	case retrieval.SourceFile:
+		source.Name = doc.Path
+		source.URI = doc.Path
+	default:
+		source.Name = doc.Metadata["kind"]
+		source.URI = doc.Path
+	}
+
+	return source
+}
+
+func cloneMetadata(metadata map[string]string) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(metadata))
+	maps.Copy(out, metadata)
+
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+
+	return ""
 }
 
 var (

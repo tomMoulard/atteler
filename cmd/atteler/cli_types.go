@@ -273,6 +273,7 @@ type cliOptions struct {
 	agentMemoryStorePath               string
 	memorySearch                       string
 	memoryStorePath                    string
+	retrievalSearch                    string
 	mcpManifestPath                    string
 	mcpCapability                      string
 	mcpServerName                      string
@@ -305,6 +306,8 @@ type cliOptions struct {
 	sessionTags                        stringListFlag
 	agentMemoryIndexFiles              stringListFlag
 	planAgentNames                     stringListFlag
+	retrievalFilters                   stringListFlag
+	retrievalSources                   stringListFlag
 	suggestSkillSteps                  stringListFlag
 	routeCandidates                    rawStringListFlag
 	lspArgs                            rawStringListFlag
@@ -319,6 +322,7 @@ type cliOptions struct {
 	planMaxAgents                      positiveIntFlag
 	memoryLimit                        positiveIntFlag
 	agentMemoryLimit                   positiveIntFlag
+	retrievalLimit                     positiveIntFlag
 	vectorLimit                        positiveIntFlag
 	mergeArtifactMaxBytes              positiveIntFlag
 	routeInputTokens                   positiveIntFlag
@@ -398,6 +402,8 @@ type cliOptions struct {
 	printConfigTemplate                bool
 	doctor                             bool
 	doctorOffline                      bool
+	retrievalExplain                   bool
+	retrievalIncludeUnsafe             bool
 	helpRequested                      bool
 	readStdin                          bool
 	promptLocalOnly                    bool

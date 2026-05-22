@@ -276,7 +276,7 @@ func statefulRetrievalCommands() []command {
 			name: "agent-memory",
 			tier: tierStateful,
 			match: func(o cliOptions) bool {
-				return o.agentMemorySearch != "" || len(o.agentMemoryIndexFiles) > 0
+				return o.retrievalSearch == "" && (o.agentMemorySearch != "" || len(o.agentMemoryIndexFiles) > 0)
 			},
 			runStateful: func(_ context.Context, o cliOptions, s appState) error {
 				return runAgentMemoryCommand(s.cwd, s.selectedAgent, agentMemoryCommandInputFromOptions(o))
