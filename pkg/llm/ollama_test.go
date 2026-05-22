@@ -547,8 +547,8 @@ func ollamaStreamString(t *testing.T, events ...ollamaChatResponse) string {
 
 	var b strings.Builder
 
-	for _, event := range events {
-		payload, err := json.Marshal(event)
+	for i := range events {
+		payload, err := json.Marshal(events[i])
 		require.NoError(t, err)
 
 		b.Write(payload)
