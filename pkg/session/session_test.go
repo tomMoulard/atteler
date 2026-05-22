@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -268,8 +269,10 @@ func TestSession_RecordEvaluationAndArtifact(t *testing.T) {
 
 	require.Len(t, session.Artifacts, 1)
 	assert.Equal(t, "plan.md", session.Artifacts[0].Path)
+	assert.Equal(t, "plan.md", session.Artifacts[0].LogicalPath)
 	assert.Equal(t, "research", session.Artifacts[0].Kind)
 	assert.Equal(t, "reviewer", session.Artifacts[0].SourceAgent)
+	assert.Equal(t, session.ID, session.Artifacts[0].SourceSessionID)
 	assert.False(t, session.Artifacts[0].CreatedAt.IsZero())
 }
 
@@ -353,6 +356,68 @@ func TestSession_RecordEvaluationDetailsRejectsInvalidCalibration(t *testing.T) 
 	assert.Empty(t, session.Evaluations)
 }
 
+func TestSession_AddArtifactPreservesProvenance(t *testing.T) {
+	t.Parallel()
+
+	session := New("gpt-4.1", []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
+	artifact := Artifact{
+		Path:           " ./reports/../report.md ",
+		LogicalPath:    " decisions/auth.md ",
+		Kind:           " report ",
+		Summary:        " done ",
+		SourceAgent:    " reviewer ",
+		SourceCommand:  " record-artifact ",
+		SourceTool:     " atteler ",
+		SourceCommit:   " abc123 ",
+		WorktreePath:   " /repo ",
+		WorktreeBranch: " feature ",
+		WorktreeBase:   " main ",
+		SHA256:         " ABCDEF ",
+		SizeBytes:      42,
+		ReviewStatus:   " approved ",
+	}
+
+	require.True(t, session.AddArtifact(artifact))
+
+	require.Len(t, session.Artifacts, 1)
+	got := session.Artifacts[0]
+	assert.Equal(t, "report.md", got.Path)
+	assert.Equal(t, "decisions/auth.md", got.LogicalPath)
+	assert.Equal(t, "report", got.Kind)
+	assert.Equal(t, "done", got.Summary)
+	assert.Equal(t, "reviewer", got.SourceAgent)
+	assert.Equal(t, session.ID, got.SourceSessionID)
+	assert.Equal(t, 1, got.SourceTurn)
+	assert.Equal(t, "record-artifact", got.SourceCommand)
+	assert.Equal(t, "atteler", got.SourceTool)
+	assert.Equal(t, "abc123", got.SourceCommit)
+	assert.Equal(t, "/repo", got.WorktreePath)
+	assert.Equal(t, "feature", got.WorktreeBranch)
+	assert.Equal(t, "main", got.WorktreeBase)
+	assert.Equal(t, "abcdef", got.SHA256)
+	assert.Equal(t, int64(42), got.SizeBytes)
+	assert.Equal(t, "approved", got.ReviewStatus)
+	assert.False(t, got.CreatedAt.IsZero())
+}
+
+func TestSession_MarkArtifactsConsumedPreservesFirstConsumption(t *testing.T) {
+	t.Parallel()
+
+	session := New("gpt-4.1", nil)
+	require.True(t, session.RecordArtifact("./plans/../plan.md", "research", "useful", "reviewer"))
+	require.True(t, session.RecordArtifact("notes.md", "research", "notes", "reviewer"))
+
+	consumedAt := mustParseSessionTestTime(t, "2026-05-01T10:00:00Z")
+	assert.Equal(t, 1, session.MarkArtifactsConsumed([]string{"plan.md"}, consumedAt))
+	require.NotNil(t, session.Artifacts[0].ConsumedAt)
+	assert.Equal(t, consumedAt, *session.Artifacts[0].ConsumedAt)
+	assert.Nil(t, session.Artifacts[1].ConsumedAt)
+
+	later := consumedAt.Add(time.Hour)
+	assert.Equal(t, 0, session.MarkArtifactsConsumed([]string{"./plan.md"}, later))
+	assert.Equal(t, consumedAt, *session.Artifacts[0].ConsumedAt)
+}
+
 func TestStore_LoadExistingJSONWithoutNegativeKnowledge(t *testing.T) {
 	t.Parallel()
 
@@ -379,4 +444,13 @@ func TestDefaultDir_EnvOverride(t *testing.T) {
 	if got := DefaultDir(); got != "/tmp/custom-atteler-sessions" {
 		assert.Failf(t, "assertion failed", "DefaultDir = %q", got)
 	}
+}
+
+func mustParseSessionTestTime(t *testing.T, value string) time.Time {
+	t.Helper()
+
+	parsed, err := time.Parse(time.RFC3339, value)
+	require.NoError(t, err)
+
+	return parsed
 }

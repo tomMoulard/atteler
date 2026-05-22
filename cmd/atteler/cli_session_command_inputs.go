@@ -51,6 +51,8 @@ type sessionWriteCommandInput struct {
 	EvaluationConfidence      float64
 	RecordArtifact            string
 	ArtifactKind              string
+	ArtifactLogicalPath       string
+	ArtifactReviewStatus      string
 	ArtifactSummary           string
 	FeedbackApplyConfig       string
 	FeedbackHistoryPath       string
@@ -81,6 +83,8 @@ func sessionWriteCommandInputFromOptions(opts cliOptions) sessionWriteCommandInp
 		EvaluationConfidence:      opts.evaluationConfidence.value,
 		RecordArtifact:            opts.recordArtifact,
 		ArtifactKind:              opts.artifactKind,
+		ArtifactLogicalPath:       opts.artifactLogicalPath,
+		ArtifactReviewStatus:      opts.artifactReviewStatus,
 		ArtifactSummary:           opts.artifactSummary,
 		FeedbackApplyConfig:       opts.feedbackApplyConfig,
 		FeedbackHistoryPath:       opts.feedbackHistoryPath,

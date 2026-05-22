@@ -320,8 +320,11 @@ type cliOptions struct {
 	reviewGates                        stringListFlag
 	vectorSearch                       string
 	mergeArtifactsPath                 string
+	mergeArtifactsFormat               string
 	recordArtifact                     string
 	artifactKind                       string
+	artifactLogicalPath                string
+	artifactReviewStatus               string
 	artifactSummary                    string
 	recordResponsePath                 string
 	replayResponsePath                 string

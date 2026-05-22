@@ -342,7 +342,8 @@ func evaluationSnippets(entries []AgentEvaluation, query, normalizedQuery string
 func artifactSnippets(entries []Artifact, query, normalizedQuery string) []SearchSnippet {
 	snippets := make([]SearchSnippet, 0, maxSnippetsPerSession)
 
-	for i, entry := range entries {
+	for i := range entries {
+		entry := &entries[i]
 		if !matchesArtifact(entry, normalizedQuery) {
 			continue
 		}
@@ -497,21 +498,50 @@ func appendEvaluationSearchMetadata(parts []string, entry *AgentEvaluation) []st
 	return parts
 }
 
-func matchesArtifact(entry Artifact, normalizedQuery string) bool {
+func matchesArtifact(entry *Artifact, normalizedQuery string) bool {
 	return strings.Contains(strings.ToLower(entry.Path), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.LogicalPath), normalizedQuery) ||
 		strings.Contains(strings.ToLower(entry.Kind), normalizedQuery) ||
 		strings.Contains(strings.ToLower(entry.Summary), normalizedQuery) ||
-		strings.Contains(strings.ToLower(entry.SourceAgent), normalizedQuery)
+		strings.Contains(strings.ToLower(entry.SourceAgent), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.SourceSessionID), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.SourceCommand), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.SourceTool), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.SourceCommit), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.WorktreePath), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.WorktreeBranch), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.WorktreeBase), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.SHA256), normalizedQuery) ||
+		strings.Contains(strings.ToLower(entry.ReviewStatus), normalizedQuery)
 }
 
-func artifactSearchText(entry Artifact) string {
+func artifactSearchText(entry *Artifact) string {
 	parts := []string{"Artifact: " + entry.Path, "Kind: " + entry.Kind}
-	if entry.Summary != "" {
-		parts = append(parts, "Summary: "+entry.Summary)
+	if entry.LogicalPath != "" && entry.LogicalPath != entry.Path {
+		parts = append(parts, "Logical Path: "+entry.LogicalPath)
 	}
 
-	if entry.SourceAgent != "" {
-		parts = append(parts, "Source Agent: "+entry.SourceAgent)
+	artifactTextFields := []struct {
+		label string
+		value string
+	}{
+		{label: "Summary", value: entry.Summary},
+		{label: "Source Agent", value: entry.SourceAgent},
+		{label: "Source Session", value: entry.SourceSessionID},
+		{label: "Source Command", value: entry.SourceCommand},
+		{label: "Source Tool", value: entry.SourceTool},
+		{label: "Source Commit", value: entry.SourceCommit},
+		{label: "Worktree", value: entry.WorktreePath},
+		{label: "Worktree Branch", value: entry.WorktreeBranch},
+		{label: "Worktree Base", value: entry.WorktreeBase},
+		{label: "SHA256", value: entry.SHA256},
+		{label: "Review Status", value: entry.ReviewStatus},
+	}
+
+	for _, field := range artifactTextFields {
+		if field.value != "" {
+			parts = append(parts, field.label+": "+field.value)
+		}
 	}
 
 	return strings.Join(parts, " | ")

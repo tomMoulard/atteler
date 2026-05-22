@@ -354,7 +354,7 @@ func lookupFlagDomain(name string) (string, bool) {
 		strings.HasPrefix(name, "vector-") || strings.HasPrefix(name, "git-history-") ||
 		strings.HasPrefix(name, "context-pack-"):
 		return "memory/rag", true
-	case name == "json" || strings.HasPrefix(name, "code-") || strings.HasPrefix(name, "lsp-"):
+	case name == commandOutputJSON || strings.HasPrefix(name, "code-") || strings.HasPrefix(name, "lsp-"):
 		return codeIntelDomainName, true
 	case strings.HasPrefix(name, "review-"):
 		return "review", true

@@ -194,7 +194,9 @@ func (s *Store) addSessionEvaluations(saved session.Session) error {
 }
 
 func (s *Store) addSessionArtifacts(saved session.Session) error {
-	for i, entry := range saved.Artifacts {
+	for i := range saved.Artifacts {
+		entry := &saved.Artifacts[i]
+
 		text := artifactText(entry)
 		if text == "" {
 			continue
@@ -369,7 +371,7 @@ func evaluationText(entry *session.AgentEvaluation) string {
 	return strings.Join(parts, "\n")
 }
 
-func artifactText(entry session.Artifact) string {
+func artifactText(entry *session.Artifact) string {
 	var parts []string
 	appendPart(&parts, "Artifact", entry.Path)
 	appendPart(&parts, "Kind", entry.Kind)

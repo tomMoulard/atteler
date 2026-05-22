@@ -73,7 +73,7 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "failures", Summary: "list negative-knowledge records for --session", Legacy: []string{"--list-failures"}},
 			{Name: "record-failure", Args: "<approach>", Summary: "record negative knowledge on --session", Legacy: []string{"--record-failure"}, JoinArgs: true},
 			{Name: "record-artifact", Args: "<path>", Summary: "record a useful artifact path on --session", Legacy: []string{"--record-artifact"}},
-			{Name: "merge-artifacts", Args: "<path>", Summary: "merge selected-session text artifacts into Markdown", Legacy: []string{"--merge-artifacts"}},
+			{Name: "merge-artifacts", Args: "<path>", Summary: "merge selected-session artifacts into a provenance bundle", Legacy: []string{"--merge-artifacts"}},
 			{Name: "headless", Summary: "list active headless runs", Legacy: []string{"--list-headless"}},
 			{Name: "status-headless", Args: "<id>", Summary: "show one headless run status", Legacy: []string{"--status-headless"}},
 			{Name: "cancel-headless", Args: "<id>", Summary: "cancel one live headless run", Legacy: []string{"--cancel-headless"}},

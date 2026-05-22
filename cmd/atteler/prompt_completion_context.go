@@ -275,7 +275,9 @@ func promptSessionFileCandidates(sessionState session.Session) []promptcomplete.
 	}
 
 	out := make([]promptcomplete.Candidate, 0, len(sessionState.Artifacts))
-	for _, artifact := range sessionState.Artifacts {
+	for i := range sessionState.Artifacts {
+		artifact := &sessionState.Artifacts[i]
+
 		path := strings.TrimSpace(artifact.Path)
 		if path == "" {
 			continue
@@ -293,7 +295,7 @@ func promptSessionFileCandidates(sessionState session.Session) []promptcomplete.
 	return out
 }
 
-func artifactDescription(artifact session.Artifact) string {
+func artifactDescription(artifact *session.Artifact) string {
 	parts := []string{"session artifact"}
 	if artifact.Kind != "" {
 		parts = append(parts, "kind="+artifact.Kind)
@@ -347,7 +349,8 @@ func promptIssueCandidatesFromSession(sessionState session.Session) []promptcomp
 		texts = append(texts, message.Content)
 	}
 
-	for _, artifact := range sessionState.Artifacts {
+	for i := range sessionState.Artifacts {
+		artifact := &sessionState.Artifacts[i]
 		texts = append(texts, artifact.Path, artifact.Kind, artifact.Summary)
 	}
 

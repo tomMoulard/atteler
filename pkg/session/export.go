@@ -137,11 +137,25 @@ type ExportAgentEvaluation struct {
 
 // ExportArtifact is a redaction-aware exported artifact record.
 type ExportArtifact struct {
-	CreatedAt   time.Time `json:"created_at,omitzero"`
-	Path        string    `json:"path"`
-	Kind        string    `json:"kind,omitempty"`
-	Summary     string    `json:"summary,omitempty"`
-	SourceAgent string    `json:"source_agent,omitempty"`
+	CreatedAt       time.Time  `json:"created_at,omitzero"`
+	ConsumedAt      *time.Time `json:"consumed_at,omitempty"`
+	Path            string     `json:"path"`
+	LogicalPath     string     `json:"logical_path,omitempty"`
+	Kind            string     `json:"kind,omitempty"`
+	Summary         string     `json:"summary,omitempty"`
+	SourceAgent     string     `json:"source_agent,omitempty"`
+	SourceSessionID string     `json:"source_session_id,omitempty"`
+	SourceCommand   string     `json:"source_command,omitempty"`
+	SourceTool      string     `json:"source_tool,omitempty"`
+	SourceCommit    string     `json:"source_commit,omitempty"`
+	WorktreePath    string     `json:"worktree_path,omitempty"`
+	WorktreeBranch  string     `json:"worktree_branch,omitempty"`
+	WorktreeBase    string     `json:"worktree_base,omitempty"`
+	SHA256          string     `json:"sha256,omitempty"`
+	ReviewStatus    string     `json:"review_status,omitempty"`
+	SizeBytes       int64      `json:"size_bytes,omitempty"`
+	SourceTurn      int        `json:"source_turn,omitempty"`
+	WorktreeDirty   bool       `json:"worktree_dirty,omitempty"`
 }
 
 type normalizedExportOptions struct {
@@ -420,18 +434,41 @@ func (builder *exportBuilder) exportArtifacts(entries []Artifact) []ExportArtifa
 	}
 
 	exported := make([]ExportArtifact, 0, len(entries))
-	for index, entry := range entries {
+	for index := range entries {
+		entry := &entries[index]
+
 		if entry.Path == "" && entry.Kind == "" {
 			continue
 		}
 
+		var consumedAt *time.Time
+
+		if entry.ConsumedAt != nil && !entry.ConsumedAt.IsZero() {
+			copied := entry.ConsumedAt.UTC()
+			consumedAt = &copied
+		}
+
 		prefix := fmt.Sprintf("artifacts[%d]", index+1)
 		exported = append(exported, ExportArtifact{
-			CreatedAt:   entry.CreatedAt,
-			Path:        builder.sanitize(prefix+".path", entry.Path),
-			Kind:        builder.sanitize(prefix+".kind", entry.Kind),
-			Summary:     builder.sanitize(prefix+".summary", entry.Summary),
-			SourceAgent: builder.sanitize(prefix+".source_agent", entry.SourceAgent),
+			CreatedAt:       entry.CreatedAt,
+			ConsumedAt:      consumedAt,
+			Path:            builder.sanitize(prefix+".path", entry.Path),
+			LogicalPath:     builder.sanitize(prefix+".logical_path", entry.LogicalPath),
+			Kind:            builder.sanitize(prefix+".kind", entry.Kind),
+			Summary:         builder.sanitize(prefix+".summary", entry.Summary),
+			SourceAgent:     builder.sanitize(prefix+".source_agent", entry.SourceAgent),
+			SourceSessionID: builder.sanitize(prefix+".source_session_id", entry.SourceSessionID),
+			SourceCommand:   builder.sanitize(prefix+".source_command", entry.SourceCommand),
+			SourceTool:      builder.sanitize(prefix+".source_tool", entry.SourceTool),
+			SourceCommit:    builder.sanitize(prefix+".source_commit", entry.SourceCommit),
+			WorktreePath:    builder.sanitize(prefix+".worktree_path", entry.WorktreePath),
+			WorktreeBranch:  builder.sanitize(prefix+".worktree_branch", entry.WorktreeBranch),
+			WorktreeBase:    builder.sanitize(prefix+".worktree_base", entry.WorktreeBase),
+			SHA256:          builder.sanitize(prefix+".sha256", entry.SHA256),
+			ReviewStatus:    builder.sanitize(prefix+".review_status", entry.ReviewStatus),
+			SizeBytes:       entry.SizeBytes,
+			SourceTurn:      entry.SourceTurn,
+			WorktreeDirty:   entry.WorktreeDirty,
 		})
 	}
 
@@ -744,28 +781,66 @@ func writeArtifacts(b *strings.Builder, entries []ExportArtifact) {
 
 	b.WriteString("\n## Artifacts\n\n")
 
-	for _, entry := range entries {
+	for i := range entries {
+		entry := &entries[i]
 		if entry.Path == "" && entry.Kind == "" {
 			continue
 		}
 
 		fmt.Fprintf(b, "- **Path:** %s\n", markdownInline(entry.Path))
+		writeArtifactBasicMetadata(b, entry)
+		writeArtifactSourceMetadata(b, entry)
+		writeArtifactWorktreeMetadata(b, entry)
 
-		if entry.Kind != "" {
-			fmt.Fprintf(b, "  - **Kind:** %s\n", markdownInline(entry.Kind))
+		if entry.ReviewStatus != "" {
+			fmt.Fprintf(b, "  - **Review Status:** %s\n", markdownInline(entry.ReviewStatus))
 		}
 
-		if entry.Summary != "" {
-			fmt.Fprintf(b, "  - **Summary:** %s\n", markdownInline(entry.Summary))
-		}
-
-		if entry.SourceAgent != "" {
-			fmt.Fprintf(b, "  - **Source Agent:** %s\n", markdownInline(entry.SourceAgent))
+		if entry.ConsumedAt != nil && !entry.ConsumedAt.IsZero() {
+			fmt.Fprintf(b, "  - **Consumed:** %s\n", entry.ConsumedAt.UTC().Format(time.RFC3339))
 		}
 
 		if !entry.CreatedAt.IsZero() {
 			fmt.Fprintf(b, "  - **Created:** %s\n", entry.CreatedAt.UTC().Format(time.RFC3339))
 		}
+	}
+}
+
+func writeArtifactBasicMetadata(b *strings.Builder, entry *ExportArtifact) {
+	writeIndentedMetadataString(b, "Kind", entry.Kind)
+	writeIndentedMetadataString(b, "Summary", entry.Summary)
+
+	if entry.LogicalPath != "" && entry.LogicalPath != entry.Path {
+		writeIndentedMetadataString(b, "Logical Path", entry.LogicalPath)
+	}
+
+	writeIndentedMetadataString(b, "SHA-256", entry.SHA256)
+
+	if entry.SizeBytes != 0 {
+		fmt.Fprintf(b, "  - **Size:** %d bytes\n", entry.SizeBytes)
+	}
+}
+
+func writeArtifactSourceMetadata(b *strings.Builder, entry *ExportArtifact) {
+	writeIndentedMetadataString(b, "Source Agent", entry.SourceAgent)
+	writeIndentedMetadataString(b, "Source Session", entry.SourceSessionID)
+
+	if entry.SourceTurn != 0 {
+		fmt.Fprintf(b, "  - **Source Turn:** %d\n", entry.SourceTurn)
+	}
+
+	writeIndentedMetadataString(b, "Source Command", entry.SourceCommand)
+	writeIndentedMetadataString(b, "Source Tool", entry.SourceTool)
+	writeIndentedMetadataString(b, "Source Commit", entry.SourceCommit)
+}
+
+func writeArtifactWorktreeMetadata(b *strings.Builder, entry *ExportArtifact) {
+	writeIndentedMetadataString(b, "Worktree", entry.WorktreePath)
+	writeIndentedMetadataString(b, "Worktree Branch", entry.WorktreeBranch)
+	writeIndentedMetadataString(b, "Worktree Base", entry.WorktreeBase)
+
+	if entry.WorktreeDirty {
+		fmt.Fprintln(b, "  - **Worktree Dirty:** true")
 	}
 }
 

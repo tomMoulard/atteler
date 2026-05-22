@@ -953,11 +953,16 @@ func TestFormatArtifact(t *testing.T) {
 	t.Parallel()
 
 	artifact := session.Artifact{
-		Path:        "docs/research.md",
-		Kind:        "research",
-		Summary:     "useful plan",
-		SourceAgent: "reviewer",
-		CreatedAt:   time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC),
+		Path:            "docs/research.md",
+		LogicalPath:     "docs/decision.md",
+		Kind:            "research",
+		Summary:         "useful plan",
+		SourceAgent:     "reviewer",
+		SourceSessionID: "session-1",
+		SHA256:          "abc123",
+		ReviewStatus:    "approved",
+		CreatedAt:       time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC),
+		SizeBytes:       42,
 	}
 
 	got := formatArtifact(artifact)
@@ -966,6 +971,11 @@ func TestFormatArtifact(t *testing.T) {
 		"kind=research",
 		"created_at=2026-05-01T12:30:00Z",
 		"agent=reviewer",
+		"logical_path=docs/decision.md",
+		"session=session-1",
+		"sha256=abc123",
+		"size=42",
+		"review=approved",
 		"summary=useful plan",
 	} {
 		if !strings.Contains(got, want) {
@@ -1028,7 +1038,11 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 	assert.Equal(t, int64(2500), loaded.Evaluations[1].DurationMillis)
 	assert.InEpsilon(t, 0.9, loaded.Evaluations[1].Confidence, 0.0001)
 
-	err = recordArtifact(store, loaded, "docs/research.md", "research", "useful", "reviewer")
+	cwd := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, "docs"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "docs", "research.md"), []byte("research notes"), 0o600))
+
+	err = recordArtifact(t.Context(), store, loaded, cwd, "docs/research.md", "research", "docs/research.md", "approved", "useful", "reviewer")
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -1041,6 +1055,12 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 	require.Len(t, loaded.Artifacts, 1)
 	assert.Equal(t, "docs/research.md", loaded.Artifacts[0].Path)
 	assert.Equal(t, "reviewer", loaded.Artifacts[0].SourceAgent)
+	assert.Equal(t, int64(len("research notes")), loaded.Artifacts[0].SizeBytes)
+	assert.NotEmpty(t, loaded.Artifacts[0].SHA256)
+	assert.Equal(t, loaded.ID, loaded.Artifacts[0].SourceSessionID)
+	assert.Equal(t, "record-artifact", loaded.Artifacts[0].SourceCommand)
+	assert.Equal(t, "atteler", loaded.Artifacts[0].SourceTool)
+	assert.Equal(t, "approved", loaded.Artifacts[0].ReviewStatus)
 }
 
 func TestFormatSessionReuseCommand(t *testing.T) {
