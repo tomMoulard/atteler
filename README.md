@@ -419,11 +419,23 @@ atteler session record-failure "retry token refresh timer" \
   --failure-commit abc123
 atteler session merge-artifacts .atteler/merged-artifacts.md \
   --session 20260430-120000-deadbeef
+atteler session export 20260430-120000-deadbeef \
+  --export-format markdown        # redacted shareable default
+atteler session export 20260430-120000-deadbeef \
+  --export-format private-markdown # explicit full-fidelity/private export
+atteler session export 20260430-120000-deadbeef \
+  --export-format issue           # compact issue/PR-ready summary
 
 atteler worktrees run "Add unit tests for the auth package"
 atteler worktrees list
 atteler worktrees merge 20260430-120000-deadbeef
 ```
+
+Session Markdown and JSON exports default to the redacted shareable profile:
+known credential patterns and local absolute paths are scrubbed, untrusted
+Markdown content is fenced or escaped, and each export includes a provenance
+manifest. Use `private-markdown` or `private-json` only when recipients are
+allowed to see the full raw session.
 
 Skill synthesis looks for repeated multi-step workflows and, when saved, writes
 a reviewable skill directory (`<slug>/SKILL.md` plus `evals/triggers.yaml`)

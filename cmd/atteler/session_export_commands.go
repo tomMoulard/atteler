@@ -1,9 +1,7 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -136,17 +134,35 @@ func yamlMessages(messages []llm.Message) []yamlMessage {
 
 func exportSession(sessionState session.Session, format string) error {
 	switch strings.ToLower(strings.TrimSpace(format)) {
-	case "", "markdown", "md":
+	case "", "markdown", "md", "shareable", "redacted", "redacted-markdown":
 		fmt.Print(session.Markdown(sessionState))
-	case "json":
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-
-		if err := encoder.Encode(sessionState); err != nil {
+	case "json", "machine-json", "shareable-json", "redacted-json":
+		data, err := session.JSON(sessionState)
+		if err != nil {
 			return fmt.Errorf("encode session json: %w", err)
 		}
+
+		fmt.Print(string(data))
+	case "private", "private-markdown", "private-full", "raw", "raw-markdown", "full":
+		fmt.Print(session.PrivateMarkdown(sessionState))
+	case "private-json", "raw-json", "full-json":
+		data, err := session.JSONWithOptions(sessionState, session.ExportOptions{Profile: session.ExportProfilePrivate})
+		if err != nil {
+			return fmt.Errorf("encode private session json: %w", err)
+		}
+
+		fmt.Print(string(data))
+	case "issue", "pr", "summary", "issue-markdown", "pr-markdown", "summary-markdown":
+		fmt.Print(session.IssueMarkdown(sessionState))
+	case "issue-json", "pr-json", "summary-json":
+		data, err := session.JSONWithOptions(sessionState, session.ExportOptions{Profile: session.ExportProfileIssue})
+		if err != nil {
+			return fmt.Errorf("encode issue session json: %w", err)
+		}
+
+		fmt.Print(string(data))
 	default:
-		return fmt.Errorf("unsupported export format %q (supported: markdown, json)", format)
+		return fmt.Errorf("unsupported export format %q (supported: markdown, json, private-markdown, private-json, issue, issue-json)", format)
 	}
 
 	return nil
