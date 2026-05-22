@@ -77,7 +77,7 @@ from that dispatch contract with `atteler config commands-docs`.
 | `watch` | `atteler watch scan`, `atteler watch json`, `atteler watch loop` |
 | `plugins` | `atteler plugins list`, `atteler plugins run reviewer/check`, `atteler plugins manifest .atteler/mcp.yaml` |
 | `worktrees` | `atteler worktrees run "Add unit tests for auth"`, `atteler worktrees list`, `atteler worktrees merge 20260430-120000-deadbeef` |
-| `eval` | `atteler eval output .atteler/fixtures/readme-summary.txt --eval-expected "package overview"`, `atteler eval record reviewer`, `atteler eval replay-response .atteler/fixtures/once.json "Summarize @README.md"` |
+| `eval` | `atteler eval output .atteler/fixtures/readme-summary.txt --eval-expected "package overview"`, `atteler eval run .atteler/evals/readme.eval.yaml --eval-json`, `atteler eval fixtures .atteler/evals --eval-report .atteler/eval-report.json`, `atteler eval record reviewer`, `atteler eval replay-response .atteler/fixtures/once.json "Summarize @README.md"` |
 <!-- atteler:cli-domains:end -->
 
 Common options such as `--model`, `--agent`, `--output`, generation settings,
@@ -289,10 +289,37 @@ atteler chat once "Summarize @README.md" --replay-response .atteler/fixtures/rea
 atteler eval output .atteler/fixtures/readme-summary.txt \
   --eval-expected "package overview" \
   --eval-mode contains
+atteler eval run .atteler/evals/readme.eval.yaml \
+  --eval-json \
+  --eval-report .atteler/eval-report.json
 ```
 
 Replay writes normal session messages while avoiding provider availability and
-sampling noise in tests.
+sampling noise in tests. Structured eval files can combine contains,
+not-contains, regex, JSON/YAML path, inline or file-backed schema, numeric,
+artifact-existence, and exit-code assertions. Reports are JSON with
+per-assertion status, evidence, severity, remediation hints, and redacted
+snippets for CI consumption. Golden updates require both `--eval-update-golden` and
+`--eval-approve-golden-update` so fixture refreshes remain reviewable.
+
+```yaml
+version: 1
+metadata:
+  target_command: atteler chat once "Summarize @README.md"
+  model: openai/gpt-5.4
+  agent: reviewer
+  input_fixture: prompts/readme-summary.txt
+  owner: qa
+actual: ../fixtures/readme-summary.txt
+assertions:
+  - id: mentions-package-overview
+    type: contains
+    value: package overview
+  - id: no-secret-dump
+    type: not_contains
+    value: api_key=
+    remediation: Remove secret-looking debug output from the response.
+```
 
 ### Plugins and local run policy
 

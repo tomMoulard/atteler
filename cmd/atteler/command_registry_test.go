@@ -769,6 +769,24 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			wantTier: tierProviderless,
 		},
 		{
+			name:     "eval run routes providerless eval",
+			args:     []string{"eval", "run", "suite.eval.yaml"},
+			wantName: "eval-output",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "eval fixtures routes providerless eval",
+			args:     []string{"eval", "fixtures", ".atteler/evals"},
+			wantName: "eval-output",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "eval json without target routes to providerless eval validation",
+			args:     []string{"--eval-json"},
+			wantName: "eval-output",
+			wantTier: tierProviderless,
+		},
+		{
 			name:     "session show routes stateful session reader",
 			args:     []string{"session", "show", "demo"},
 			wantName: "session-read",

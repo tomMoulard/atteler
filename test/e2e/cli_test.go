@@ -309,6 +309,31 @@ printf 'plugin-check\n'
 	result = runOK(t, runSpec{dir: workDir}, "eval", "output", actualPath, "--eval-expected", "deterministic")
 	assertContains(t, result.stdout, "PASS\tmode=contains")
 
+	evalSuitePath := filepath.Join(workDir, "actual.eval.yaml")
+	evalReportPath := filepath.Join(workDir, "eval-report.json")
+
+	writeFile(t, evalSuitePath, `version: 1
+metadata:
+  target_command: atteler e2e
+  owner: e2e
+actual: actual.txt
+assertions:
+  - id: contains-deterministic
+    type: contains
+    value: deterministic
+  - id: forbidden-secret
+    type: not_contains
+    value: api_key=
+`)
+	result = runOK(t, runSpec{dir: workDir}, "eval", "run", evalSuitePath, "--eval-json", "--eval-report", evalReportPath)
+	assertContains(t, result.stdout, `"passed": true`)
+	assertContains(t, result.stdout, `"id": "contains-deterministic"`)
+	assertContains(t, result.stdout, `"owner": "e2e"`)
+
+	reportData, err := os.ReadFile(evalReportPath)
+	require.NoError(t, err)
+	assertContains(t, string(reportData), `"passed": true`)
+
 	result = runOK(t, runSpec{dir: workDir}, "eval", "replay-response", replayPath, "summarize", "fixture")
 	assertContains(t, result.stdout, "fixture replayed")
 

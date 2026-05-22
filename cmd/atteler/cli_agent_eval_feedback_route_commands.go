@@ -84,6 +84,233 @@ func evalOutput(actualPath, expectedText, expectedPath string, mode atteval.Matc
 	return errors.New("eval output failed")
 }
 
+func evalCommandRequested(opts cliOptions) bool {
+	return opts.evalOutputPath != "" ||
+		opts.evalAssertionsPath != "" ||
+		opts.evalFixtureDir != "" ||
+		opts.evalExpected != "" ||
+		opts.evalExpectedPath != "" ||
+		opts.evalJSON ||
+		opts.evalReportPath != "" ||
+		opts.evalUpdateGolden ||
+		opts.evalApproveGoldenUpdate ||
+		opts.evalExitCode.set
+}
+
+func evalOutputCommand(opts cliOptions) error {
+	if structuredEvalRequested(opts) || opts.evalJSON || opts.evalReportPath != "" {
+		report, err := evalReportForCommand(opts)
+		if err != nil {
+			return err
+		}
+
+		if err := emitEvalReport(report, opts); err != nil {
+			return err
+		}
+
+		if !report.Passed {
+			return errors.New("eval output failed")
+		}
+
+		return nil
+	}
+
+	return evalOutput(opts.evalOutputPath, opts.evalExpected, opts.evalExpectedPath, atteval.MatchMode(opts.evalMode))
+}
+
+func structuredEvalRequested(opts cliOptions) bool {
+	return opts.evalAssertionsPath != "" ||
+		opts.evalFixtureDir != "" ||
+		opts.evalUpdateGolden ||
+		opts.evalApproveGoldenUpdate
+}
+
+func evalReportForCommand(opts cliOptions) (atteval.Report, error) {
+	if opts.evalAssertionsPath != "" && opts.evalFixtureDir != "" {
+		return atteval.Report{}, errors.New("eval output: pass either --eval-assertions or --eval-fixture-dir, not both")
+	}
+
+	if opts.evalOutputPath == "" && opts.evalAssertionsPath == "" && opts.evalFixtureDir == "" {
+		return atteval.Report{}, errors.New("eval output: pass --eval-output, --eval-assertions, or --eval-fixture-dir")
+	}
+
+	runOptions := evalRunOptions(opts)
+	switch {
+	case opts.evalFixtureDir != "":
+		report, err := atteval.RunFixtureDir(opts.evalFixtureDir, runOptions)
+		if err != nil {
+			return atteval.Report{}, fmt.Errorf("run eval fixture dir: %w", err)
+		}
+
+		return report, nil
+	case opts.evalAssertionsPath != "":
+		report, err := atteval.RunSuiteFile(opts.evalAssertionsPath, runOptions)
+		if err != nil {
+			return atteval.Report{}, fmt.Errorf("run eval assertions: %w", err)
+		}
+
+		return report, nil
+	case opts.evalUpdateGolden || opts.evalApproveGoldenUpdate:
+		return atteval.Report{}, errors.New("eval output: golden update flags require --eval-assertions or --eval-fixture-dir")
+	default:
+		return simpleEvalReport(opts)
+	}
+}
+
+func evalRunOptions(opts cliOptions) atteval.RunOptions {
+	runOptions := atteval.RunOptions{
+		ActualPath:          opts.evalOutputPath,
+		UpdateGolden:        opts.evalUpdateGolden,
+		ApproveGoldenUpdate: opts.evalApproveGoldenUpdate,
+	}
+	if opts.evalExitCode.set {
+		runOptions.ExitCode = &opts.evalExitCode.value
+	}
+
+	return runOptions
+}
+
+func simpleEvalReport(opts cliOptions) (atteval.Report, error) {
+	actual, err := os.ReadFile(opts.evalOutputPath)
+	if err != nil {
+		return atteval.Report{}, fmt.Errorf("eval output: read actual %s: %w", opts.evalOutputPath, err)
+	}
+
+	expected, err := expectedEvalText(opts.evalExpected, opts.evalExpectedPath)
+	if err != nil {
+		return atteval.Report{}, err
+	}
+
+	result := atteval.Check(string(actual), expected, atteval.MatchMode(opts.evalMode))
+	status := "pass"
+	evidence := "output matched"
+
+	if !result.Passed {
+		status = "fail"
+		evidence = result.Summary
+	}
+
+	assertion := atteval.AssertionResult{
+		ID:              "output",
+		Type:            atteval.AssertionType(result.Mode),
+		Severity:        atteval.SeverityError,
+		Status:          status,
+		Passed:          result.Passed,
+		Evidence:        atteval.Redact(evidence),
+		ExpectedSnippet: evalReportSnippet(expected),
+		ActualSnippet:   evalReportSnippet(string(actual)),
+		Error:           atteval.Redact(result.Diff),
+	}
+	if result.Passed {
+		assertion.ExpectedSnippet = ""
+		assertion.ActualSnippet = ""
+	}
+
+	summary := atteval.ReportSummary{Total: 1}
+	if result.Passed {
+		summary.Passed = 1
+	} else {
+		summary.Failed = 1
+	}
+
+	return atteval.Report{
+		Version:   1,
+		Passed:    result.Passed,
+		RunAt:     time.Now().UTC().Format(time.RFC3339),
+		Summary:   summary,
+		Results:   []atteval.AssertionResult{assertion},
+		ActualRef: opts.evalOutputPath,
+	}, nil
+}
+
+func emitEvalReport(report atteval.Report, opts cliOptions) error {
+	data, err := report.JSON()
+	if err != nil {
+		return fmt.Errorf("eval output: encode report: %w", err)
+	}
+
+	if opts.evalReportPath != "" {
+		if err := writeEvalReport(opts.evalReportPath, data); err != nil {
+			return err
+		}
+	}
+
+	if opts.evalJSON {
+		fmt.Println(string(data))
+		return nil
+	}
+
+	printEvalReportText(report, opts.evalReportPath)
+
+	return nil
+}
+
+func writeEvalReport(path string, data []byte) error {
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return fmt.Errorf("eval output: create report directory: %w", err)
+		}
+	}
+
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("eval output: write report %s: %w", path, err)
+	}
+
+	return nil
+}
+
+//nolint:gocognit,wsl_v5 // Text output keeps assertion details grouped for readable CLI failures.
+func printEvalReportText(report atteval.Report, reportPath string) {
+	status := "PASS"
+	if !report.Passed {
+		status = "FAIL"
+	}
+
+	fmt.Printf("%s\ttotal=%d\tpassed=%d\tfailed=%d\n", status, report.Summary.Total, report.Summary.Passed, report.Summary.Failed)
+	for i := range report.Results {
+		result := &report.Results[i]
+		fmt.Printf("%s\tid=%s\ttype=%s\tseverity=%s", strings.ToUpper(result.Status), result.ID, result.Type, result.Severity)
+		if result.Suite != "" {
+			fmt.Printf("\tsuite=%s", result.Suite)
+		}
+		if result.Evidence != "" {
+			fmt.Printf("\tevidence=%s", result.Evidence)
+		}
+		fmt.Println()
+
+		if !result.Passed {
+			if result.Error != "" {
+				fmt.Printf("  error: %s\n", result.Error)
+			}
+			if result.ExpectedSnippet != "" {
+				fmt.Printf("  expected: %q\n", result.ExpectedSnippet)
+			}
+			if result.ActualSnippet != "" {
+				fmt.Printf("  actual: %q\n", result.ActualSnippet)
+			}
+			if result.Remediation != "" {
+				fmt.Printf("  remediation: %s\n", result.Remediation)
+			}
+		}
+	}
+	if reportPath != "" {
+		fmt.Printf("report=%s\n", reportPath)
+	}
+}
+
+func evalReportSnippet(value string) string {
+	const limit = 160
+
+	value = strings.Join(strings.Fields(atteval.Redact(value)), " ")
+	runes := []rune(value)
+
+	if len(runes) <= limit {
+		return value
+	}
+
+	return string(runes[:limit-1]) + "…"
+}
+
 func expectedEvalText(expectedText, expectedPath string) (string, error) {
 	switch {
 	case expectedText != "" && expectedPath != "":

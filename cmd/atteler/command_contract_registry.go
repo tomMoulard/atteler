@@ -196,12 +196,12 @@ func commandContractsByName() map[string]commandContract {
 			withExamples("atteler config doctor"),
 		),
 		"eval-output": commandContractFor(
-			"compare actual output against expected text or file",
-			[]string{"--eval-output", "--eval-expected", "--eval-expected-file", "--eval-mode"},
-			[]string{commandEffectFilesystemRead, commandEffectUserOutput},
-			[]string{commandOutputText},
+			"compare actual output against expected text/file or structured assertions",
+			[]string{"--eval-output", "--eval-assertions", "--eval-fixture-dir", "--eval-expected", "--eval-expected-file", "--eval-mode", "--eval-exit-code", "--eval-json", "--eval-report", "--eval-update-golden", "--eval-approve-golden-update"},
+			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectUserOutput},
+			[]string{commandOutputText, commandOutputJSON, commandOutputFilesystem},
 			withInputType("evalOutputCommandInput"),
-			withExamples(`atteler eval output actual.txt --eval-expected "ok"`),
+			withExamples(`atteler eval output actual.txt --eval-expected "ok"`, `atteler eval run output.eval.yaml --eval-json`),
 		),
 		"feedback-proposals": commandContractFor(
 			"derive agent improvement proposals from the selected session",

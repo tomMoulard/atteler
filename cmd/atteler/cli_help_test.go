@@ -1015,6 +1015,7 @@ func newCLIOptionsAndFlagSetForTest(t *testing.T) (*cliOptions, *flag.FlagSet) {
 	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
 	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
 	opts.seed = nonNegativeIntFlag{name: "seed"}
+	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
 	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
 	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
 

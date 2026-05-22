@@ -240,6 +240,9 @@ type cliOptions struct {
 	evaluationReference                string
 	planAgentsPrompt                   string
 	evalOutputPath                     string
+	evalAssertionsPath                 string
+	evalFixtureDir                     string
+	evalReportPath                     string
 	evalExpected                       string
 	evalExpectedPath                   string
 	evalMode                           string
@@ -332,6 +335,7 @@ type cliOptions struct {
 	skillMaxSteps                      positiveIntFlag
 	skillMinOccurrences                positiveIntFlag
 	evaluationScore                    nonNegativeIntFlag
+	evalExitCode                       nonNegativeIntFlag
 	seed                               nonNegativeIntFlag
 	reasoningLevel                     string
 	temperature                        floatFlag
@@ -374,6 +378,9 @@ type cliOptions struct {
 	stateDiagnostics                   bool
 	commandSurfaceJSON                 bool
 	commandSurfaceDocs                 bool
+	evalJSON                           bool
+	evalUpdateGolden                   bool
+	evalApproveGoldenUpdate            bool
 	listPlugins                        bool
 	listHookEvents                     bool
 	listHookEventsJSON                 bool

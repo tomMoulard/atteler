@@ -284,6 +284,8 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "worktrees merge base mismatch override", args: []string{"worktrees", "merge", "session-123", "--merge-worktree-allow-base-mismatch"}, want: []string{"--merge-worktree", "session-123", "--merge-worktree-allow-base-mismatch"}},
 		{name: "worktrees run prompt", args: []string{"worktrees", "run", "add", "tests"}, want: []string{"--worktree", "add tests"}},
 		{name: "eval", args: []string{"eval", "output", "actual.txt"}, want: []string{"--eval-output", "actual.txt"}},
+		{name: "eval run", args: []string{"eval", "run", "suite.eval.yaml"}, want: []string{"--eval-assertions", "suite.eval.yaml"}},
+		{name: "eval fixtures", args: []string{"eval", "fixtures", ".atteler/evals"}, want: []string{"--eval-fixture-dir", ".atteler/evals"}},
 		{name: "eval list", args: []string{"eval", "list"}, want: []string{"--list-evaluations"}},
 		{name: "eval record response with prompt", args: []string{"eval", "record-response", "fixture.json", "summarize", "readme"}, want: []string{"--record-response", "fixture.json", "--once", "summarize readme"}},
 		{name: "eval replay response with prompt and flags", args: []string{"eval", "replay-response", "fixture.json", "summarize", "readme", "--output", "json"}, want: []string{"--replay-response", "fixture.json", "--once", "summarize readme", "--output", "json"}},
