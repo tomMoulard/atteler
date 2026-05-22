@@ -1,12 +1,16 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,8 +18,11 @@ import (
 	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/speculate"
+	"github.com/tommoulard/atteler/pkg/symphony"
 	"github.com/tommoulard/atteler/pkg/watch"
 )
+
+const defaultGitHubAPIEndpoint = "https://api.github.com"
 
 func runSpeculatePlan(input speculatePlanCommandInput) error {
 	gates := input.Gates
@@ -259,48 +266,161 @@ func formatSpeculatePromptCacheEstimate(estimate speculate.PromptCacheReuseEstim
 	return b.String()
 }
 
-func runWatchScan(root string, largeFileBytes int, jsonOutput bool) error {
-	findings, err := watch.ScanWithOptions(root, watch.Options{LargeFileBytes: int64(largeFileBytes)})
+type watchCLIOptions struct {
+	BaselinePath     string
+	BaselineRef      string
+	RulesPath        string
+	SuppressionsPath string
+	GateMinSeverity  string
+	IssueMinSeverity string
+	IssueRepository  string
+	GitHubEndpoint   string
+	GitHubToken      string
+	IssueLabels      []string
+	LargeFileBytes   int
+	JSONOutput       bool
+	GateEnabled      bool
+	IssueUpsert      bool
+}
+
+type watchScanOutput struct {
+	Comparison *watch.Comparison         `json:"comparison,omitempty"`
+	Gate       *watch.GateResult         `json:"gate,omitempty"`
+	Baseline   *watchBaselineInfo        `json:"baseline,omitempty"`
+	Issues     []watch.IssueUpsertResult `json:"issues,omitempty"`
+	Findings   []watch.Finding           `json:"findings"`
+}
+
+type watchBaselineInfo struct {
+	Source   string `json:"source"`
+	Path     string `json:"path,omitempty"`
+	Ref      string `json:"ref,omitempty"`
+	Commit   string `json:"commit,omitempty"`
+	Findings int    `json:"findings"`
+}
+
+func watchCLIOptionsFrom(options cliOptions) watchCLIOptions {
+	return watchCLIOptions{
+		BaselinePath:     options.watchBaselinePath,
+		BaselineRef:      options.watchBaselineRef,
+		RulesPath:        options.watchRulesPath,
+		SuppressionsPath: options.watchSuppressionsPath,
+		GateMinSeverity:  options.watchGateMinSeverity,
+		IssueMinSeverity: options.watchIssueMinSeverity,
+		IssueRepository:  options.watchIssueRepository,
+		GitHubEndpoint:   options.watchGitHubEndpoint,
+		GitHubToken:      options.watchGitHubToken,
+		IssueLabels:      []string(options.watchIssueLabels),
+		LargeFileBytes:   options.watchLargeFileBytes.value,
+		JSONOutput:       options.watchJSON,
+		GateEnabled:      options.watchGate,
+		IssueUpsert:      options.watchIssueUpsert,
+	}
+}
+
+func runWatchScan(ctx context.Context, root string, options watchCLIOptions) error {
+	return runWatchScanWithIssueTracker(ctx, root, options, nil)
+}
+
+func runWatchScanWithIssueTracker(ctx context.Context, root string, options watchCLIOptions, issueTracker watch.IssueTracker) error {
+	scanOptions, baseline, baselineInfo, gateOptions, err := watchQualityInputs(ctx, root, options)
+	if err != nil {
+		return err
+	}
+
+	findings, err := watch.ScanWithOptions(root, scanOptions)
 	if err != nil {
 		return fmt.Errorf("watch scan: %w", err)
 	}
 
-	if jsonOutput {
+	output := buildWatchScanOutput(findings, baseline, baselineInfo, gateOptions)
+	if err := upsertWatchScanIssues(ctx, options, issueTracker, &output); err != nil {
+		return err
+	}
+
+	if options.JSONOutput {
 		if findings == nil {
 			findings = []watch.Finding{}
 		}
 
-		if err := json.NewEncoder(os.Stdout).Encode(struct {
-			Findings []watch.Finding `json:"findings"`
-		}{Findings: findings}); err != nil {
+		output.Findings = findings
+		if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {
 			return fmt.Errorf("watch scan: encode JSON: %w", err)
 		}
 
-		return nil
+		return watchGateError(output.Gate)
 	}
 
+	printWatchScanOutput(output)
+
+	return watchGateError(output.Gate)
+}
+
+func printWatchScanOutput(output watchScanOutput) {
+	if output.Comparison != nil {
+		fmt.Println(formatWatchComparison(*output.Comparison))
+	}
+
+	if output.Baseline != nil {
+		fmt.Println(formatWatchBaseline(*output.Baseline))
+	}
+
+	if output.Gate != nil {
+		fmt.Println(formatWatchGate(*output.Gate))
+	}
+
+	printWatchIssueUpserts(output.Issues)
+
+	if output.Comparison != nil && printWatchComparisonFindings(*output.Comparison) {
+		return
+	}
+
+	findings := output.Findings
 	if len(findings) == 0 {
 		fmt.Println("No watch findings found.")
-		return nil
+		return
 	}
 
 	for i := range findings {
 		fmt.Println(formatWatchFinding(findings[i]))
 	}
-
-	return nil
 }
 
-func runWatchLoop(ctx context.Context, root string, largeFileBytes, intervalSeconds, maxIterations int) error {
+func runWatchLoop(ctx context.Context, root string, options watchCLIOptions, intervalSeconds, maxIterations int) error {
+	scanOptions, baseline, baselineInfo, gateOptions, err := watchQualityInputs(ctx, root, options)
+	if err != nil {
+		return err
+	}
+
+	issueTracker, issueOptions, err := watchIssueInputs(options, nil)
+	if err != nil {
+		return err
+	}
+
 	interval := time.Duration(intervalSeconds) * time.Second
 
 	results, err := watch.Run(ctx, root, watch.RunOptions{
-		ScanOptions:   watch.Options{LargeFileBytes: int64(largeFileBytes)},
-		Interval:      interval,
-		MaxIterations: maxIterations,
+		ScanOptions:       scanOptions,
+		Baseline:          baseline,
+		Gate:              gateOptions,
+		IssueTracker:      issueTracker,
+		IssueOptions:      issueOptions,
+		StopOnGateFailure: gateOptions.Enabled,
+		Interval:          interval,
+		MaxIterations:     maxIterations,
 	})
+
+	if baselineInfo != nil {
+		fmt.Println(formatWatchBaseline(*baselineInfo))
+	}
+
 	for i := range results {
 		fmt.Println(formatWatchIteration(results[i]))
+		printWatchIssueUpserts(results[i].Issues)
+
+		if results[i].Comparison != nil && printWatchComparisonFindings(*results[i].Comparison) {
+			continue
+		}
 
 		if len(results[i].Findings) == 0 {
 			fmt.Println("No watch findings found.")
@@ -319,6 +439,448 @@ func runWatchLoop(ctx context.Context, root string, largeFileBytes, intervalSeco
 	return nil
 }
 
+func watchQualityInputs(ctx context.Context, root string, options watchCLIOptions) (watch.Options, *watch.Baseline, *watchBaselineInfo, watch.GateOptions, error) {
+	scanOptions := watch.Options{LargeFileBytes: int64(options.LargeFileBytes)}
+
+	if options.RulesPath != "" {
+		config, err := readWatchRulesConfig(options.RulesPath)
+		if err != nil {
+			return watch.Options{}, nil, nil, watch.GateOptions{}, err
+		}
+
+		scanOptions.Rules = config.Rules
+		scanOptions.IgnorePaths = append(scanOptions.IgnorePaths, config.IgnorePaths...)
+	}
+
+	if options.SuppressionsPath != "" {
+		suppressions, err := readWatchSuppressions(options.SuppressionsPath)
+		if err != nil {
+			return watch.Options{}, nil, nil, watch.GateOptions{}, err
+		}
+
+		scanOptions.Suppressions = suppressions
+	}
+
+	var (
+		baseline     *watch.Baseline
+		baselineInfo *watchBaselineInfo
+	)
+
+	if options.BaselinePath != "" && options.BaselineRef != "" {
+		return watch.Options{}, nil, nil, watch.GateOptions{}, errors.New("watch baseline: use only one of --watch-baseline or --watch-baseline-ref")
+	}
+
+	if options.BaselinePath != "" {
+		loaded, err := readWatchBaseline(options.BaselinePath)
+		if err != nil {
+			return watch.Options{}, nil, nil, watch.GateOptions{}, err
+		}
+
+		baseline = &loaded
+		baselineInfo = &watchBaselineInfo{
+			Source:   "file",
+			Path:     options.BaselinePath,
+			Findings: len(loaded.Findings),
+		}
+	}
+
+	if options.BaselineRef != "" {
+		loaded, commit, err := readWatchBaselineRef(ctx, root, scanOptions, options.BaselineRef)
+		if err != nil {
+			return watch.Options{}, nil, nil, watch.GateOptions{}, err
+		}
+
+		baseline = &loaded
+		baselineInfo = &watchBaselineInfo{
+			Source:   "git_merge_base",
+			Ref:      options.BaselineRef,
+			Commit:   commit,
+			Findings: len(loaded.Findings),
+		}
+	}
+
+	gateOptions := watch.GateOptions{
+		Enabled:     options.GateEnabled || options.GateMinSeverity != "",
+		MinSeverity: strings.TrimSpace(options.GateMinSeverity),
+	}
+	if gateOptions.MinSeverity != "" && !validWatchGateSeverity(gateOptions.MinSeverity) {
+		return watch.Options{}, nil, nil, watch.GateOptions{}, fmt.Errorf("watch gate min severity must be one of high, warning, maintenance, info: %q", gateOptions.MinSeverity)
+	}
+
+	return scanOptions, baseline, baselineInfo, gateOptions, nil
+}
+
+func upsertWatchScanIssues(ctx context.Context, options watchCLIOptions, tracker watch.IssueTracker, output *watchScanOutput) error {
+	tracker, issueOptions, err := watchIssueInputs(options, tracker)
+	if err != nil {
+		return err
+	}
+
+	if tracker == nil {
+		return nil
+	}
+
+	if output.Comparison == nil {
+		comparison := watch.CompareFindings(nil, output.Findings)
+		output.Comparison = &comparison
+	}
+
+	issues, err := watch.UpsertIssues(ctx, tracker, *output.Comparison, issueOptions)
+	output.Issues = append([]watch.IssueUpsertResult(nil), issues...)
+
+	if err != nil {
+		return fmt.Errorf("watch issue upsert: %w", err)
+	}
+
+	return nil
+}
+
+func watchIssueInputs(options watchCLIOptions, tracker watch.IssueTracker) (watch.IssueTracker, watch.IssueOptions, error) {
+	issueOptions, err := watchIssueOptions(options)
+	if err != nil {
+		return nil, watch.IssueOptions{}, err
+	}
+
+	if !options.IssueUpsert {
+		return nil, issueOptions, nil
+	}
+
+	if tracker != nil {
+		return tracker, issueOptions, nil
+	}
+
+	config, err := watchGitHubTrackerConfig(options)
+	if err != nil {
+		return nil, watch.IssueOptions{}, err
+	}
+
+	return symphony.NewGitHubClient(config), issueOptions, nil
+}
+
+func watchIssueOptions(options watchCLIOptions) (watch.IssueOptions, error) {
+	minSeverity := strings.TrimSpace(options.IssueMinSeverity)
+	if minSeverity != "" && !validWatchGateSeverity(minSeverity) {
+		return watch.IssueOptions{}, fmt.Errorf("watch issue min severity must be one of high, warning, maintenance, info: %q", minSeverity)
+	}
+
+	labels := append([]string(nil), options.IssueLabels...)
+	if len(labels) == 0 {
+		labels = []string{"quality", "watch"}
+	}
+
+	return watch.IssueOptions{
+		MinSeverity: minSeverity,
+		Labels:      labels,
+	}, nil
+}
+
+func watchGitHubTrackerConfig(options watchCLIOptions) (symphony.TrackerConfig, error) {
+	owner, repo := splitGitHubRepository(options.IssueRepository)
+	if owner == "" || repo == "" {
+		return symphony.TrackerConfig{}, errors.New("watch issue upsert requires --watch-github-repository owner/repo")
+	}
+
+	token := firstNonEmpty(strings.TrimSpace(options.GitHubToken), os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN"))
+	if token == "" {
+		return symphony.TrackerConfig{}, errors.New("watch issue upsert requires --watch-github-token, GITHUB_TOKEN, or GH_TOKEN")
+	}
+
+	endpoint := strings.TrimSpace(options.GitHubEndpoint)
+	if endpoint == "" {
+		endpoint = defaultGitHubAPIEndpoint
+	}
+
+	return symphony.TrackerConfig{
+		Endpoint: endpoint,
+		APIKey:   token,
+		Owner:    owner,
+		Repo:     repo,
+	}, nil
+}
+
+func splitGitHubRepository(repository string) (owner, repo string) {
+	parts := strings.Split(strings.TrimSpace(repository), "/")
+	if len(parts) != 2 {
+		return "", ""
+	}
+
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+}
+
+func validWatchGateSeverity(severity string) bool {
+	switch severity {
+	case watch.SeverityHigh, watch.SeverityWarning, watch.SeverityMaintenance, watch.SeverityInfo:
+		return true
+	default:
+		return false
+	}
+}
+
+func readWatchBaseline(path string) (watch.Baseline, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return watch.Baseline{}, fmt.Errorf("watch baseline: read %s: %w", path, err)
+	}
+
+	var baseline watch.Baseline
+	if err := decodeWatchJSON(data, &baseline, &baseline.Findings); err != nil {
+		return watch.Baseline{}, fmt.Errorf("watch baseline: decode %s: %w", path, err)
+	}
+
+	return baseline, nil
+}
+
+func readWatchBaselineRef(ctx context.Context, root string, scanOptions watch.Options, ref string) (watch.Baseline, string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return watch.Baseline{}, "", errors.New("watch baseline ref is required")
+	}
+
+	mergeBase, err := gitMergeBase(ctx, root, ref)
+	if err != nil {
+		return watch.Baseline{}, "", err
+	}
+
+	tmp, err := os.MkdirTemp("", "atteler-watch-baseline-*")
+	if err != nil {
+		return watch.Baseline{}, "", fmt.Errorf("watch baseline ref: create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	if archiveErr := gitArchiveToDir(ctx, root, mergeBase, tmp); archiveErr != nil {
+		return watch.Baseline{}, "", archiveErr
+	}
+
+	findings, err := watch.ScanWithOptions(tmp, scanOptions)
+	if err != nil {
+		return watch.Baseline{}, "", fmt.Errorf("watch baseline ref %s: scan merge-base %s: %w", ref, mergeBase, err)
+	}
+
+	return watch.Baseline{Findings: findings}, mergeBase, nil
+}
+
+func gitMergeBase(ctx context.Context, root, ref string) (string, error) {
+	output, err := runGitOutput(ctx, root, "merge-base", "HEAD", ref)
+	if err != nil {
+		return "", fmt.Errorf("watch baseline ref %s: find merge-base: %w", ref, err)
+	}
+
+	mergeBase := strings.TrimSpace(string(output))
+	if mergeBase == "" {
+		return "", fmt.Errorf("watch baseline ref %s: empty merge-base", ref)
+	}
+
+	return mergeBase, nil
+}
+
+func gitArchiveToDir(ctx context.Context, root, ref, dir string) error {
+	data, err := runGitOutput(ctx, root, "archive", "--format=tar", ref)
+	if err != nil {
+		return fmt.Errorf("watch baseline ref %s: archive: %w", ref, err)
+	}
+
+	reader := tar.NewReader(bytes.NewReader(data))
+	for {
+		header, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			return nil
+		}
+
+		if nextErr != nil {
+			return fmt.Errorf("watch baseline ref %s: read archive: %w", ref, nextErr)
+		}
+
+		if err := extractTarEntry(reader, header, dir); err != nil {
+			return fmt.Errorf("watch baseline ref %s: extract %s: %w", ref, header.Name, err)
+		}
+	}
+}
+
+func extractTarEntry(reader io.Reader, header *tar.Header, dir string) error {
+	target, err := safeArchivePath(dir, header.Name)
+	if err != nil {
+		return err
+	}
+
+	switch header.Typeflag {
+	case tar.TypeDir:
+		if err := os.MkdirAll(target, 0o750); err != nil {
+			return fmt.Errorf("create archive directory: %w", err)
+		}
+
+		return nil
+	case tar.TypeReg:
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+			return fmt.Errorf("create archive parent directory: %w", err)
+		}
+
+		file, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, header.FileInfo().Mode().Perm())
+		if err != nil {
+			return fmt.Errorf("create archive file: %w", err)
+		}
+		defer file.Close()
+
+		_, err = io.Copy(file, reader)
+		if err != nil {
+			return fmt.Errorf("copy archive file: %w", err)
+		}
+
+		return nil
+	default:
+		return nil
+	}
+}
+
+func safeArchivePath(dir, name string) (string, error) {
+	cleanName := filepath.Clean(name)
+	if filepath.IsAbs(cleanName) || cleanName == ".." || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("unsafe archive path %q", name)
+	}
+
+	target := filepath.Join(dir, cleanName)
+
+	relative, err := filepath.Rel(dir, target)
+	if err != nil {
+		return "", fmt.Errorf("check archive path: %w", err)
+	}
+
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("archive path escapes destination: %q", name)
+	}
+
+	return target, nil
+}
+
+func runGitOutput(ctx context.Context, root string, args ...string) ([]byte, error) {
+	fullArgs := append([]string{"-C", root}, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+
+	return output, nil
+}
+
+type watchRulesConfig struct {
+	Rules       []watch.RuleConfig `json:"rules"`
+	IgnorePaths []string           `json:"ignore_paths"`
+}
+
+func readWatchRules(path string) ([]watch.RuleConfig, error) {
+	config, err := readWatchRulesConfig(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return config.Rules, nil
+}
+
+func readWatchRulesConfig(path string) (watchRulesConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return watchRulesConfig{}, fmt.Errorf("watch rules: read %s: %w", path, err)
+	}
+
+	var payload watchRulesConfig
+	if err := decodeWatchJSON(data, &payload, &payload.Rules); err != nil {
+		return watchRulesConfig{}, fmt.Errorf("watch rules: decode %s: %w", path, err)
+	}
+
+	payload.IgnorePaths = trimNonEmptyStringSlice(payload.IgnorePaths)
+
+	return payload, nil
+}
+
+func readWatchSuppressions(path string) ([]watch.Suppression, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("watch suppressions: read %s: %w", path, err)
+	}
+
+	var payload struct {
+		Suppressions []watch.Suppression `json:"suppressions"`
+	}
+	if err := decodeWatchJSON(data, &payload, &payload.Suppressions); err != nil {
+		return nil, fmt.Errorf("watch suppressions: decode %s: %w", path, err)
+	}
+
+	return payload.Suppressions, nil
+}
+
+func decodeWatchJSON(data []byte, object, array any) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		if err := json.Unmarshal(trimmed, array); err != nil {
+			return fmt.Errorf("decode array payload: %w", err)
+		}
+
+		return nil
+	}
+
+	if err := json.Unmarshal(trimmed, object); err != nil {
+		return fmt.Errorf("decode object payload: %w", err)
+	}
+
+	return nil
+}
+
+func trimNonEmptyStringSlice(values []string) []string {
+	trimmed := make([]string, 0, len(values))
+	for i := range values {
+		value := strings.TrimSpace(values[i])
+		if value != "" {
+			trimmed = append(trimmed, value)
+		}
+	}
+
+	return trimmed
+}
+
+func buildWatchScanOutput(findings []watch.Finding, baseline *watch.Baseline, baselineInfo *watchBaselineInfo, gateOptions watch.GateOptions) watchScanOutput {
+	output := watchScanOutput{
+		Baseline: cloneWatchBaselineInfo(baselineInfo),
+		Findings: append([]watch.Finding(nil), findings...),
+	}
+	if baseline == nil && !gateOptions.Enabled {
+		return output
+	}
+
+	var baselineFindings []watch.Finding
+	if baseline != nil {
+		baselineFindings = baseline.Findings
+	}
+
+	comparison := watch.CompareFindings(baselineFindings, findings)
+	output.Comparison = &comparison
+
+	if gateOptions.Enabled {
+		gate := watch.EvaluateGate(comparison, gateOptions)
+		output.Gate = &gate
+	}
+
+	return output
+}
+
+func cloneWatchBaselineInfo(info *watchBaselineInfo) *watchBaselineInfo {
+	if info == nil {
+		return nil
+	}
+
+	clone := *info
+
+	return &clone
+}
+
+func watchGateError(gate *watch.GateResult) error {
+	if gate == nil || gate.Passed {
+		return nil
+	}
+
+	return fmt.Errorf("watch gate %q failed: %s", gate.Name, gate.Reason)
+}
+
 func formatWatchIteration(result watch.IterationResult) string {
 	parts := []string{
 		"iteration=" + strconv.Itoa(result.Iteration),
@@ -332,7 +894,139 @@ func formatWatchIteration(result watch.IterationResult) string {
 		parts = append(parts, "duration="+result.Duration.String())
 	}
 
+	if result.Comparison != nil {
+		parts = append(parts,
+			"new="+strconv.Itoa(result.Comparison.Metrics.New),
+			"fixed="+strconv.Itoa(result.Comparison.Metrics.Fixed),
+			"unchanged="+strconv.Itoa(result.Comparison.Metrics.Unchanged),
+			"suppressed="+strconv.Itoa(result.Comparison.Metrics.Suppressed),
+			"unstable="+strconv.Itoa(result.Comparison.Metrics.Unstable),
+		)
+	}
+
+	if result.Gate != nil {
+		parts = append(parts,
+			"gate="+result.Gate.Name,
+			"gate_passed="+strconv.FormatBool(result.Gate.Passed),
+		)
+	}
+
+	if len(result.Issues) > 0 {
+		parts = append(parts, "issues="+strconv.Itoa(len(result.Issues)))
+	}
+
 	return strings.Join(parts, "\t")
+}
+
+func formatWatchComparison(comparison watch.Comparison) string {
+	return strings.Join([]string{
+		"watch_comparison",
+		"new=" + strconv.Itoa(comparison.Metrics.New),
+		"fixed=" + strconv.Itoa(comparison.Metrics.Fixed),
+		"unchanged=" + strconv.Itoa(comparison.Metrics.Unchanged),
+		"suppressed=" + strconv.Itoa(comparison.Metrics.Suppressed),
+		"unstable=" + strconv.Itoa(comparison.Metrics.Unstable),
+	}, "\t")
+}
+
+func formatWatchBaseline(info watchBaselineInfo) string {
+	parts := []string{
+		"watch_baseline",
+		"source=" + info.Source,
+		"findings=" + strconv.Itoa(info.Findings),
+	}
+	if info.Path != "" {
+		parts = append(parts, "path="+info.Path)
+	}
+
+	if info.Ref != "" {
+		parts = append(parts, "ref="+info.Ref)
+	}
+
+	if info.Commit != "" {
+		parts = append(parts, "commit="+info.Commit)
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func formatWatchGate(gate watch.GateResult) string {
+	parts := []string{
+		"watch_gate",
+		"name=" + gate.Name,
+		"passed=" + strconv.FormatBool(gate.Passed),
+	}
+	if gate.Reason != "" {
+		parts = append(parts, "reason="+gate.Reason)
+	}
+
+	if len(gate.BlockingFindings) > 0 {
+		parts = append(parts, "blocking_findings="+strconv.Itoa(len(gate.BlockingFindings)))
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func printWatchIssueUpserts(results []watch.IssueUpsertResult) {
+	for i := range results {
+		fmt.Println(formatWatchIssueUpsert(results[i]))
+	}
+}
+
+func formatWatchIssueUpsert(result watch.IssueUpsertResult) string {
+	parts := []string{
+		"watch_issue",
+		"action=" + result.Action,
+	}
+	if result.Issue.Number > 0 {
+		parts = append(parts, "number="+strconv.Itoa(result.Issue.Number))
+	}
+
+	if result.Issue.URL != "" {
+		parts = append(parts, "url="+result.Issue.URL)
+	}
+
+	if result.Issue.Fingerprint != "" {
+		parts = append(parts, "fingerprint="+result.Issue.Fingerprint)
+	}
+
+	if result.Finding.ID != "" {
+		parts = append(parts, "finding_id="+result.Finding.ID)
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func printWatchComparisonFindings(comparison watch.Comparison) bool {
+	printed := false
+
+	for _, group := range []struct {
+		status   string
+		findings []watch.Finding
+	}{
+		{status: "new", findings: comparison.NewFindings},
+		{status: "fixed", findings: comparison.FixedFindings},
+		{status: "unchanged", findings: comparison.UnchangedFindings},
+		{status: "suppressed", findings: comparison.SuppressedFindings},
+		{status: "unstable", findings: comparison.UnstableFindings},
+	} {
+		for i := range group.findings {
+			fmt.Println(formatWatchFindingWithStatus(group.status, group.findings[i]))
+
+			printed = true
+		}
+	}
+
+	return printed
+}
+
+func formatWatchFindingWithStatus(status string, finding watch.Finding) string {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return formatWatchFinding(finding)
+	}
+
+	return "status=" + status + "\t" + formatWatchFinding(finding)
 }
 
 func formatWatchFinding(finding watch.Finding) string {
@@ -341,6 +1035,14 @@ func formatWatchFinding(finding watch.Finding) string {
 		"kind=" + finding.Kind,
 		"severity=" + finding.Severity,
 	}
+	if finding.ID != "" {
+		parts = append(parts, "id="+finding.ID)
+	}
+
+	if finding.Fingerprint != "" {
+		parts = append(parts, "fingerprint="+finding.Fingerprint)
+	}
+
 	if finding.Message != "" {
 		parts = append(parts, "message="+finding.Message)
 	}
@@ -349,8 +1051,24 @@ func formatWatchFinding(finding watch.Finding) string {
 		parts = append(parts, "rule_id="+finding.RuleID)
 	}
 
+	if finding.RuleDescription != "" {
+		parts = append(parts, "rule_description="+finding.RuleDescription)
+	}
+
 	if finding.Help != "" {
 		parts = append(parts, "help="+finding.Help)
+	}
+
+	if finding.Owner != "" {
+		parts = append(parts, "owner="+finding.Owner)
+	}
+
+	if finding.Suppressed {
+		parts = append(parts, "suppressed=true")
+	}
+
+	if finding.SuppressionReason != "" {
+		parts = append(parts, "suppression_reason="+finding.SuppressionReason)
 	}
 
 	return strings.Join(parts, "\t")

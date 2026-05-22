@@ -98,6 +98,208 @@ func TestRun_ReturnsPartialResultsWhenScanFails(t *testing.T) {
 	assert.Equal(t, "bad.go", results[0].Findings[0].Path)
 }
 
+func TestRun_AttachesBaselineComparisonAndGate(t *testing.T) {
+	t.Parallel()
+
+	existing := testFinding("pkg/existing.go", KindConventionDrift, SeverityHigh)
+	newFinding := testFinding("pkg/new.go", KindConventionDrift, SeverityHigh)
+
+	results, err := Run(context.Background(), t.TempDir(), RunOptions{
+		MaxIterations: 1,
+		Baseline:      &Baseline{Findings: []Finding{existing}},
+		Gate:          GateOptions{Enabled: true},
+		Scan: func(context.Context, string, Options) ([]Finding, error) {
+			return []Finding{existing, newFinding}, nil
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	require.NotNil(t, results[0].Comparison)
+	assert.Equal(t, TrendMetrics{New: 1, Fixed: 0, Unchanged: 1, Suppressed: 0, Unstable: 0}, results[0].Comparison.Metrics)
+	require.NotNil(t, results[0].Gate)
+	assert.False(t, results[0].Gate.Passed)
+	assert.Equal(t, []string{"pkg/new.go"}, findingPaths(results[0].Gate.BlockingFindings))
+}
+
+func TestRun_StopsOnGateFailureWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	newFinding := testFinding("pkg/new.go", KindConventionDrift, SeverityHigh)
+
+	results, err := Run(context.Background(), t.TempDir(), RunOptions{
+		MaxIterations:     3,
+		Gate:              GateOptions{Enabled: true},
+		StopOnGateFailure: true,
+		Scan: func(context.Context, string, Options) ([]Finding, error) {
+			return []Finding{newFinding}, nil
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "watch gate")
+	require.Len(t, results, 1)
+	require.NotNil(t, results[0].Gate)
+	assert.False(t, results[0].Gate.Passed)
+}
+
+func TestRun_UpsertsIssueBeforeStoppingOnGateFailure(t *testing.T) {
+	t.Parallel()
+
+	tracker := newFakeIssueTracker()
+	newFinding := testFinding("pkg/new.go", KindConventionDrift, SeverityHigh)
+
+	results, err := Run(context.Background(), t.TempDir(), RunOptions{
+		MaxIterations:     3,
+		Gate:              GateOptions{Enabled: true},
+		IssueTracker:      tracker,
+		StopOnGateFailure: true,
+		Scan: func(context.Context, string, Options) ([]Finding, error) {
+			return []Finding{newFinding}, nil
+		},
+	})
+	require.Error(t, err)
+	require.Len(t, results, 1)
+
+	require.NotNil(t, results[0].Gate)
+	assert.False(t, results[0].Gate.Passed)
+	require.Len(t, results[0].Issues, 1)
+	assert.Equal(t, IssueActionCreated, results[0].Issues[0].Action)
+	assert.Equal(t, newFinding.Fingerprint, results[0].Issues[0].Finding.Fingerprint)
+	assert.Equal(t, 1, tracker.createCalls)
+	assert.Equal(t, 0, tracker.updateCalls)
+}
+
+func TestRun_UpsertsIssuesForNewActionableFindings(t *testing.T) {
+	t.Parallel()
+
+	tracker := newFakeIssueTracker()
+	existing := testFinding("pkg/existing.go", KindConventionDrift, SeverityHigh)
+	newFinding := testFinding("pkg/new.go", KindConventionDrift, SeverityHigh)
+
+	results, err := Run(context.Background(), t.TempDir(), RunOptions{
+		MaxIterations: 2,
+		Baseline:      &Baseline{Findings: []Finding{existing}},
+		IssueTracker:  tracker,
+		IssueOptions: IssueOptions{
+			Labels: []string{"quality", "watch"},
+		},
+		Scan: func(context.Context, string, Options) ([]Finding, error) {
+			return []Finding{existing, newFinding}, nil
+		},
+		Wait: func(context.Context, time.Duration) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+
+	require.Len(t, results[0].Issues, 1)
+	assert.Equal(t, IssueActionCreated, results[0].Issues[0].Action)
+	assert.Equal(t, newFinding.Fingerprint, results[0].Issues[0].Finding.Fingerprint)
+	assert.Equal(t, []string{"quality", "watch"}, tracker.drafts[newFinding.Fingerprint].Labels)
+
+	require.Len(t, results[1].Issues, 1)
+	assert.Equal(t, IssueActionUpdated, results[1].Issues[0].Action)
+	assert.Equal(t, 1, tracker.createCalls)
+	assert.Equal(t, 1, tracker.updateCalls)
+}
+
+func TestRun_TracksUnstableFindingsAcrossIterations(t *testing.T) {
+	t.Parallel()
+
+	flaky := testFinding("pkg/flaky.go", KindConventionDrift, SeverityHigh)
+	scans := [][]Finding{
+		{flaky},
+		nil,
+		{flaky},
+	}
+	scanCalls := 0
+
+	results, err := Run(context.Background(), t.TempDir(), RunOptions{
+		MaxIterations: 3,
+		Baseline:      &Baseline{},
+		Scan: func(context.Context, string, Options) ([]Finding, error) {
+			defer func() { scanCalls++ }()
+			return scans[scanCalls], nil
+		},
+		Wait: func(context.Context, time.Duration) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+
+	assert.Equal(t, 0, results[0].Comparison.Metrics.Unstable)
+	assert.Equal(t, 0, results[1].Comparison.Metrics.Unstable)
+	assert.Empty(t, results[1].Comparison.UnstableFindings)
+	assert.Equal(t, 1, results[2].Comparison.Metrics.Unstable)
+	assert.Equal(t, []string{"pkg/flaky.go"}, findingPaths(results[2].Comparison.UnstableFindings))
+}
+
+func TestRun_KeepsBaselineFixesOutOfUnstableTrend(t *testing.T) {
+	t.Parallel()
+
+	existing := testFinding("pkg/existing.go", KindConventionDrift, SeverityHigh)
+	scans := [][]Finding{
+		{existing},
+		nil,
+	}
+	scanCalls := 0
+
+	results, err := Run(context.Background(), t.TempDir(), RunOptions{
+		MaxIterations: 2,
+		Baseline:      &Baseline{Findings: []Finding{existing}},
+		Scan: func(context.Context, string, Options) ([]Finding, error) {
+			defer func() { scanCalls++ }()
+			return scans[scanCalls], nil
+		},
+		Wait: func(context.Context, time.Duration) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+
+	assert.Equal(t, TrendMetrics{New: 0, Fixed: 0, Unchanged: 1, Suppressed: 0, Unstable: 0}, results[0].Comparison.Metrics)
+	assert.Equal(t, TrendMetrics{New: 0, Fixed: 1, Unchanged: 0, Suppressed: 0, Unstable: 0}, results[1].Comparison.Metrics)
+	assert.Equal(t, []string{"pkg/existing.go"}, findingPaths(results[1].Comparison.FixedFindings))
+	assert.Empty(t, results[1].Comparison.UnstableFindings)
+}
+
+func TestRun_ReevaluatesGateAfterUnstableTrendTracking(t *testing.T) {
+	t.Parallel()
+
+	flaky := testFinding("pkg/flaky.go", KindConventionDrift, SeverityHigh)
+	scans := [][]Finding{
+		{flaky},
+		nil,
+		{flaky},
+	}
+	scanCalls := 0
+
+	results, err := Run(context.Background(), t.TempDir(), RunOptions{
+		MaxIterations: 3,
+		Gate:          GateOptions{Enabled: true},
+		Scan: func(context.Context, string, Options) ([]Finding, error) {
+			defer func() { scanCalls++ }()
+			return scans[scanCalls], nil
+		},
+		Wait: func(context.Context, time.Duration) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+
+	require.NotNil(t, results[0].Gate)
+	assert.False(t, results[0].Gate.Passed)
+	require.NotNil(t, results[2].Comparison)
+	assert.Equal(t, TrendMetrics{New: 0, Fixed: 0, Unchanged: 0, Suppressed: 0, Unstable: 1}, results[2].Comparison.Metrics)
+	require.NotNil(t, results[2].Gate)
+	assert.True(t, results[2].Gate.Passed)
+	assert.Empty(t, results[2].Gate.BlockingFindings)
+}
+
 func TestRun_ValidatesOptions(t *testing.T) {
 	t.Parallel()
 

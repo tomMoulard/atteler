@@ -509,12 +509,12 @@ atteler review scan
 atteler review plan \
   --review-agent quality-reviewer \
   --review-agent test-engineer \
-  --review-path pkg/llm/auth.go \
-  --review-gate "tests pass"
+  --review-path pkg/llm/auth.go
 
 atteler watch scan
 atteler watch json
-atteler watch loop --watch-interval-seconds 60 --watch-max-iterations 3
+atteler watch loop
+# Use atteler help watch for baseline, suppression, gate, and issue-upsert flags.
 
 atteler memory search "OAuth retry storm"
 atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain
@@ -525,6 +525,32 @@ atteler code-intel summary
 atteler code-intel symbol NewRegistry
 atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/
 ```
+
+Watch baselines accept either the JSON emitted by `atteler watch json`, a
+`{"findings":[...]}` payload, or a baseline-ref option to scan the git
+merge-base between `HEAD` and that ref as the branch-point baseline.
+Suppression files accept either
+`[{"id":"watch.rule:fingerprint","reason":"..."}]`,
+`[{"fingerprint":"...","reason":"..."}]`, hand-authored
+`[{"rule_id":"watch.stale_todo","path":"docs/todo.md","reason":"..."}]`,
+or `{"suppressions":[...]}`. Rule config files accept either
+`[{"rule_id":"watch.large_file","severity":"high"}]` or
+`{"ignore_paths":["generated/"],"rules":[...]}`; rule entries can also
+override `help`, assign an `owner`, or set
+`disabled: true`. Watch-loop comparisons print each finding with a `status` of
+`new`, `fixed`, `unchanged`, `suppressed`, or `unstable`; findings that
+reappear after disappearing during a run are marked unstable so flaky scan
+behavior is visible instead of being treated as ordinary debt. When a baseline
+is active, text output emits `watch_baseline` lines and JSON output includes a
+`baseline` object identifying the baseline file or git merge-base commit used
+for the comparison.
+Issue upserts are fingerprint-deduplicated and only target new, unsuppressed
+findings that meet the configured severity threshold, so repeat scans update the
+same tracker issue instead of opening duplicates for acknowledged debt. Enable
+GitHub issue creation/update with the watch issue-upsert and repository options;
+the token comes from the watch token option, `GITHUB_TOKEN`, or `GH_TOKEN`, and
+labels default to `quality,watch`. `atteler review scan` can also emit the
+watch gate as a structured review gate check.
 
 `atteler memory retrieve` prints the shared retrieval contract fields agents
 should cite before injecting context: `source`, `document`, `stable_id`,
@@ -544,6 +570,7 @@ from persisted JSON. Use `--memory-ttl-seconds` or
 Saved-session transcript messages and worktree paths are
 excluded from local memory by default; opt in only when needed with
 `--memory-include-session-messages` or `--memory-include-worktree-metadata`.
+
 ### Agents, plugins, artifacts, and worktrees
 
 ```sh
@@ -753,7 +780,7 @@ linked from the row.
 | Speculative and review-agent planning/execution primitives | [`pkg/speculate/speculate.go`](pkg/speculate/speculate.go), [`pkg/speculate/speculate_test.go`](pkg/speculate/speculate_test.go), [`pkg/review/review.go`](pkg/review/review.go), [`pkg/review/review_test.go`](pkg/review/review_test.go), [`pkg/review/llm.go`](pkg/review/llm.go), [`pkg/review/llm_test.go`](pkg/review/llm_test.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
 | Memory/RAG, unified retrieval contract, per-agent memory, local vector search, git-history search, Go code intelligence, import graphs, and optional LSP lookups | [`pkg/retrieval/types.go`](pkg/retrieval/types.go), [`pkg/retrieval/search.go`](pkg/retrieval/search.go), [`pkg/retrieval/retrieval_test.go`](pkg/retrieval/retrieval_test.go), [`pkg/memory/memory.go`](pkg/memory/memory.go), [`pkg/memory/memory_test.go`](pkg/memory/memory_test.go), [`pkg/agentmemory/agentmemory.go`](pkg/agentmemory/agentmemory.go), [`pkg/agentmemory/agentmemory_test.go`](pkg/agentmemory/agentmemory_test.go), [`pkg/vector/vector.go`](pkg/vector/vector.go), [`pkg/vector/vector_test.go`](pkg/vector/vector_test.go), [`pkg/githistory/githistory.go`](pkg/githistory/githistory.go), [`pkg/githistory/githistory_test.go`](pkg/githistory/githistory_test.go), [`pkg/codeintel/codeintel.go`](pkg/codeintel/codeintel.go), [`pkg/codeintel/codeintel_test.go`](pkg/codeintel/codeintel_test.go), [`pkg/codegraph/codegraph.go`](pkg/codegraph/codegraph.go), [`pkg/codegraph/codegraph_test.go`](pkg/codegraph/codegraph_test.go), [`pkg/lsp/client.go`](pkg/lsp/client.go), [`pkg/lsp/client_test.go`](pkg/lsp/client_test.go) |
 | Plugin manifests, safe local entrypoint execution, MCP manifest validation, and stdio JSON-RPC calls | [`pkg/plugin/manifest.go`](pkg/plugin/manifest.go), [`pkg/plugin/manifest_test.go`](pkg/plugin/manifest_test.go), [`pkg/plugin/run.go`](pkg/plugin/run.go), [`pkg/plugin/run_test.go`](pkg/plugin/run_test.go), [`pkg/mcp/manifest.go`](pkg/mcp/manifest.go), [`pkg/mcp/manifest_test.go`](pkg/mcp/manifest_test.go), [`pkg/mcp/client.go`](pkg/mcp/client.go), [`pkg/mcp/client_test.go`](pkg/mcp/client_test.go), [`cmd/atteler/cli_plugin_commands.go`](cmd/atteler/cli_plugin_commands.go), [`cmd/atteler/cli_mcp_commands.go`](cmd/atteler/cli_mcp_commands.go) |
-| Background repository scanning and review-scan formatting | [`pkg/watch/watch.go`](pkg/watch/watch.go), [`pkg/watch/watch_test.go`](pkg/watch/watch_test.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
+| Background repository scanning, baseline/gate comparisons, suppressions, issue upserts, and review-scan formatting | [`pkg/watch/watch.go`](pkg/watch/watch.go), [`pkg/watch/baseline.go`](pkg/watch/baseline.go), [`pkg/watch/issues.go`](pkg/watch/issues.go), [`pkg/watch/watch_test.go`](pkg/watch/watch_test.go), [`pkg/symphony/tracker.go`](pkg/symphony/tracker.go), [`cmd/atteler/cli_speculate_watch_history_commands.go`](cmd/atteler/cli_speculate_watch_history_commands.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
 | Event hook metadata and local hook execution | [`pkg/events/events.go`](pkg/events/events.go), [`pkg/events/events_test.go`](pkg/events/events_test.go), [`pkg/events/logger.go`](pkg/events/logger.go), [`pkg/events/discoverability_test.go`](pkg/events/discoverability_test.go) |
 | Automatic worktree isolation | [`pkg/worktree/worktree.go`](pkg/worktree/worktree.go), [`pkg/worktree/worktree_test.go`](pkg/worktree/worktree_test.go), [`cmd/atteler/cli_worktree_commands.go`](cmd/atteler/cli_worktree_commands.go) |
 | Symphony issue scheduler | [`cmd/symphony/main.go`](cmd/symphony/main.go), [`pkg/symphony/workflow.go`](pkg/symphony/workflow.go), [`pkg/symphony/workflow_test.go`](pkg/symphony/workflow_test.go), [`pkg/symphony/orchestrator.go`](pkg/symphony/orchestrator.go), [`pkg/symphony/orchestrator_test.go`](pkg/symphony/orchestrator_test.go), [`docs/symphony.md`](docs/symphony.md), [`WORKFLOW.md`](WORKFLOW.md) |

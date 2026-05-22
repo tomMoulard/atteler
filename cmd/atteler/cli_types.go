@@ -325,7 +325,17 @@ type cliOptions struct {
 	artifactSummary                    string
 	recordResponsePath                 string
 	replayResponsePath                 string
+	watchBaselinePath                  string
+	watchBaselineRef                   string
+	watchRulesPath                     string
+	watchSuppressionsPath              string
+	watchGateMinSeverity               string
+	watchIssueMinSeverity              string
+	watchIssueRepository               string
+	watchGitHubEndpoint                string
+	watchGitHubToken                   string
 	sessionTags                        stringListFlag
+	watchIssueLabels                   stringListFlag
 	agentMemoryIndexFiles              stringListFlag
 	planAgentNames                     stringListFlag
 	retrievalFilters                   stringListFlag
@@ -421,6 +431,8 @@ type cliOptions struct {
 	watchScan                          bool
 	watchJSON                          bool
 	watchLoop                          bool
+	watchGate                          bool
+	watchIssueUpsert                   bool
 	reviewScan                         bool
 	lspSymbols                         bool
 	asyncPlan                          bool
