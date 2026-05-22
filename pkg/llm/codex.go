@@ -172,11 +172,42 @@ func (c *CodexProvider) Complete(ctx context.Context, params CompleteParams) (*R
 		return nil, err
 	}
 
-	model := params.Model
+	model, body, err := c.buildResponsesBody(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.doResponsesRequest(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+
+	resp.Model = firstNonEmptyString(resp.Model, model)
+
+	return resp, nil
+}
+
+// CompleteStream runs a streaming OpenAI Responses API request against the
+// chatgpt codex backend, refreshing the access token once on a setup-time 401.
+func (c *CodexProvider) CompleteStream(ctx context.Context, params CompleteParams) (<-chan Chunk, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	model, body, err := c.buildResponsesBody(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.doResponsesStream(ctx, body, model)
+}
+
+func (c *CodexProvider) buildResponsesBody(ctx context.Context, params CompleteParams) (model string, body []byte, err error) {
+	model = params.Model
 	if model == "" {
 		models := c.Models()
 		if len(models) == 0 {
-			return nil, errors.New("codex model not configured")
+			return "", nil, errors.New("codex model not configured")
 		}
 
 		model = models[0]
@@ -194,9 +225,9 @@ func (c *CodexProvider) Complete(ctx context.Context, params CompleteParams) (*R
 		req.Reasoning = &codexRequestReasoning{Effort: effort}
 	}
 
-	body, err := json.Marshal(req)
+	body, err = json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("codex marshal: %w", err)
+		return "", nil, fmt.Errorf("codex marshal: %w", err)
 	}
 
 	emitActivity(ctx, events.Event{
@@ -208,14 +239,7 @@ func (c *CodexProvider) Complete(ctx context.Context, params CompleteParams) (*R
 		},
 	})
 
-	resp, err := c.doResponsesRequest(ctx, body)
-	if err != nil {
-		return nil, err
-	}
-
-	resp.Model = firstNonEmptyString(resp.Model, model)
-
-	return resp, nil
+	return model, body, nil
 }
 
 func (c *CodexProvider) doResponsesRequest(ctx context.Context, body []byte) (*Response, error) {
@@ -245,6 +269,33 @@ func (c *CodexProvider) doResponsesRequest(ctx context.Context, body []byte) (*R
 	return resp, nil
 }
 
+func (c *CodexProvider) doResponsesStream(ctx context.Context, body []byte, model string) (<-chan Chunk, error) {
+	access, accountID := c.auth.snapshot()
+
+	bodyStream, err := c.sendResponsesStream(ctx, body, access, accountID)
+	if err == nil {
+		return streamCodexResponseBody(ctx, bodyStream, model), nil
+	}
+
+	var unauthorized *codexUnauthorizedError
+	if !errors.As(err, &unauthorized) {
+		return nil, err
+	}
+
+	if refreshErr := c.auth.refresh(ctx, access); refreshErr != nil {
+		return nil, fmt.Errorf("codex refresh after 401: %w", refreshErr)
+	}
+
+	access, accountID = c.auth.snapshot()
+
+	bodyStream, err = c.sendResponsesStream(ctx, body, access, accountID)
+	if err != nil {
+		return nil, err
+	}
+
+	return streamCodexResponseBody(ctx, bodyStream, model), nil
+}
+
 type codexUnauthorizedError struct {
 	body string
 }
@@ -254,6 +305,16 @@ func (e *codexUnauthorizedError) Error() string {
 }
 
 func (c *CodexProvider) sendResponses(ctx context.Context, body []byte, access, accountID string) (*Response, error) {
+	bodyStream, err := c.sendResponsesStream(ctx, body, access, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer bodyStream.Close()
+
+	return parseCodexSSE(ctx, bodyStream)
+}
+
+func (c *CodexProvider) sendResponsesStream(ctx context.Context, body []byte, access, accountID string) (io.ReadCloser, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/responses", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("codex new request: %w", err)
@@ -274,19 +335,24 @@ func (c *CodexProvider) sendResponses(ctx context.Context, body []byte, access, 
 	if err != nil {
 		return nil, fmt.Errorf("codex request: %w", err)
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
+		defer resp.Body.Close()
+
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes)) //nolint:errcheck // best-effort body capture for the error message
+
 		return nil, &codexUnauthorizedError{body: string(raw)}
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes)) //nolint:errcheck // best-effort body capture for the error message
+
 		return nil, fmt.Errorf("codex HTTP %d: %s", resp.StatusCode, raw)
 	}
 
-	return parseCodexSSE(resp.Body)
+	return resp.Body, nil
 }
 
 // codexStreamState accumulates partial state from an SSE response stream.
@@ -298,16 +364,26 @@ type codexStreamState struct {
 	finished  bool
 }
 
+type codexStreamAction struct {
+	chunk    Chunk
+	emit     bool
+	terminal bool
+}
+
 // parseCodexSSE consumes an OpenAI Responses-API SSE stream and returns the
-// final assistant message and usage. It prefers the explicit message item
-// when available, falling back to accumulated text deltas otherwise.
-func parseCodexSSE(r io.Reader) (*Response, error) {
+// final assistant message and usage. It prefers the explicit message item when
+// available, falling back to accumulated text deltas otherwise.
+func parseCodexSSE(ctx context.Context, r io.Reader) (*Response, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	state := &codexStreamState{}
 
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("codex stream canceled: %w", err)
+		}
+
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
 			continue
@@ -318,29 +394,144 @@ func parseCodexSSE(r io.Reader) (*Response, error) {
 			continue
 		}
 
-		if err := state.handleEventPayload(payload); err != nil {
+		if _, err := state.handleEventPayload(payload); err != nil {
 			return nil, err
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("codex stream canceled: %w", ctxErr)
+		}
+
 		return nil, fmt.Errorf("codex stream read: %w", err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("codex stream canceled: %w", err)
 	}
 
 	return state.finalize()
 }
 
-func (s *codexStreamState) handleEventPayload(payload string) error {
+func streamCodexResponseBody(ctx context.Context, body io.ReadCloser, model string) <-chan Chunk {
+	ch := make(chan Chunk, DefaultStreamBuffer)
+
+	go func() {
+		defer close(ch)
+		defer body.Close()
+
+		streamCodexSSE(ctx, body, ch, model)
+	}()
+
+	return ch
+}
+
+func streamCodexSSE(ctx context.Context, r io.Reader, ch chan<- Chunk, model string) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	state := &codexStreamState{out: Response{Model: model}}
+
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			sendCodexTerminalError(ctx, ch, fmt.Errorf("codex stream canceled: %w", err))
+
+			return
+		}
+
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+
+		action, err := state.handleEventPayload(payload)
+		if err != nil {
+			sendCodexTerminalError(ctx, ch, err)
+
+			return
+		}
+
+		if action.emit && !sendCodexChunk(ctx, ch, action.chunk) {
+			return
+		}
+
+		if action.terminal {
+			return
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			sendCodexTerminalError(ctx, ch, fmt.Errorf("codex stream canceled: %w", ctxErr))
+
+			return
+		}
+
+		sendCodexTerminalError(ctx, ch, fmt.Errorf("codex stream read: %w", err))
+
+		return
+	}
+
+	if err := ctx.Err(); err != nil {
+		sendCodexTerminalError(ctx, ch, fmt.Errorf("codex stream canceled: %w", err))
+
+		return
+	}
+
+	if !state.finished {
+		sendCodexTerminalError(ctx, ch, fmt.Errorf("codex stream incomplete: %w", ErrStreamIncomplete))
+	}
+}
+
+func sendCodexChunk(ctx context.Context, ch chan<- Chunk, chunk Chunk) bool {
+	select {
+	case ch <- chunk:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func sendCodexTerminalError(ctx context.Context, ch chan<- Chunk, err error) {
+	if err == nil {
+		return
+	}
+
+	chunk := Chunk{Err: err}
+
+	select {
+	case ch <- chunk:
+		return
+	default:
+	}
+
+	select {
+	case ch <- chunk:
+	case <-ctx.Done():
+	}
+}
+
+func (s *codexStreamState) handleEventPayload(payload string) (codexStreamAction, error) {
 	var event codexStreamEvent
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
 		// Tolerate malformed events; some backends interleave keep-alive
 		// pings or partial frames with JSON data lines.
-		return nil //nolint:nilerr // intentional: skip unparseable lines
+		return codexStreamAction{}, nil //nolint:nilerr // intentional: skip unparseable lines
 	}
 
 	switch event.Type {
 	case "response.output_text.delta":
 		s.deltaBuf.WriteString(event.Delta)
+
+		if event.Delta != "" {
+			return codexStreamAction{chunk: Chunk{Content: event.Delta}, emit: true}, nil
+		}
 	case "response.output_item.done":
 		if tc, ok := codexExtractFunctionCall(event.Item); ok {
 			s.toolCalls = append(s.toolCalls, tc)
@@ -350,11 +541,18 @@ func (s *codexStreamState) handleEventPayload(payload string) error {
 	case "response.completed":
 		s.finished = true
 		s.applyCompleted(event.Response)
-	case "response.failed", "error":
-		return fmt.Errorf("codex stream error: %s", payload)
+
+		chunk, err := s.completedChunk()
+		if err != nil {
+			return codexStreamAction{}, err
+		}
+
+		return codexStreamAction{chunk: chunk, emit: true, terminal: true}, nil
+	case "response.failed", "response.incomplete", "error":
+		return codexStreamAction{}, fmt.Errorf("codex stream error: %s", payload)
 	}
 
-	return nil
+	return codexStreamAction{}, nil
 }
 
 func (s *codexStreamState) applyCompleted(resp *codexEventPayload) {
@@ -383,6 +581,10 @@ func (s *codexStreamState) finalize() (*Response, error) {
 		s.out.Content = s.deltaBuf.String()
 	}
 
+	if !s.finished {
+		return nil, fmt.Errorf("codex stream incomplete: %w", ErrStreamIncomplete)
+	}
+
 	// If the model returned tool calls, set them on the response and mark
 	// the stop reason so the AgentLoop knows to execute them.
 	if len(s.toolCalls) > 0 {
@@ -392,15 +594,49 @@ func (s *codexStreamState) finalize() (*Response, error) {
 		return &s.out, nil
 	}
 
-	if s.out.Content == "" && !s.finished {
-		return nil, errors.New("codex stream ended before response.completed")
-	}
-
 	if s.out.Content == "" {
 		return nil, errors.New("codex stream completed with empty assistant message")
 	}
 
+	s.out.StopReason = StopEndTurn
+
 	return &s.out, nil
+}
+
+func (s *codexStreamState) completedChunk() (Chunk, error) {
+	streamedContent := s.deltaBuf.String()
+	completeContent := streamedContent
+	chunkContent := ""
+
+	if completeContent == "" {
+		completeContent = s.finalText
+		chunkContent = s.finalText
+	}
+
+	chunk := Chunk{
+		Content:           chunkContent,
+		Model:             s.out.Model,
+		Done:              true,
+		InputTokens:       s.out.InputTokens,
+		CachedInputTokens: s.out.CachedInputTokens,
+		OutputTokens:      s.out.OutputTokens,
+	}
+
+	if len(s.toolCalls) > 0 {
+		chunk.StopReason = StopToolUse
+
+		chunk.ToolCalls = append([]ToolCall(nil), s.toolCalls...)
+
+		return chunk, nil
+	}
+
+	if completeContent == "" {
+		return Chunk{}, errors.New("codex stream completed with empty assistant message")
+	}
+
+	chunk.StopReason = StopEndTurn
+
+	return chunk, nil
 }
 
 type codexStreamEvent struct {

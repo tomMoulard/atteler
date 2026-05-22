@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -323,6 +324,7 @@ type ollamaChatResponse struct {
 	Message         ollamaMessage `json:"message"`
 	PromptEvalCount int           `json:"prompt_eval_count"`
 	EvalCount       int           `json:"eval_count"`
+	Done            bool          `json:"done"`
 }
 
 // Complete performs a non-streaming chat completion using Ollama's /api/chat endpoint.
@@ -335,46 +337,13 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 }
 
 func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*Response, error) {
-	if params.Model == "" {
-		return nil, errors.New("ollama: model is required")
-	}
-
 	if o.client == nil {
 		o.client = providerHTTPClient(ProviderConfig{})
 	}
 
-	msgs := buildOllamaMessages(params.Messages)
-
-	req := ollamaChatRequest{
-		Model:    params.Model,
-		Messages: msgs,
-		Stream:   false,
-		Options: ollamaOptions{
-			Temperature: params.Temperature,
-			TopP:        params.TopP,
-			Seed:        params.Seed,
-			Stop:        params.Stop,
-		},
-	}
-	if params.MaxTokens > 0 {
-		req.Options.NumPredict = params.MaxTokens
-	}
-
-	if think, ok := ollamaThink(params.ReasoningLevel); ok {
-		req.Think = think
-	}
-
-	// Add tool definitions.
-	for _, tool := range params.Tools {
-		req.Tools = append(req.Tools, ollamaTool{
-			Type:     "function",
-			Function: ollamaToolFunction(tool),
-		})
-	}
-
-	body, err := json.Marshal(req)
+	body, err := buildOllamaChatRequestBody(params, false)
 	if err != nil {
-		return nil, fmt.Errorf("ollama: marshal: %w", err)
+		return nil, err
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/chat", bytes.NewReader(body))
@@ -416,6 +385,7 @@ func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*
 	result := &Response{
 		Content:      or.Message.Content,
 		Model:        model,
+		StopReason:   StopEndTurn,
 		InputTokens:  or.PromptEvalCount,
 		OutputTokens: or.EvalCount,
 	}
@@ -427,6 +397,207 @@ func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*
 	}
 
 	return result, nil
+}
+
+// CompleteStream performs a streaming chat completion using Ollama's /api/chat
+// endpoint. Setup failures are returned directly; once a channel is returned,
+// provider/read/cancellation failures are delivered as terminal error chunks.
+func (o *OllamaProvider) CompleteStream(ctx context.Context, params CompleteParams) (<-chan Chunk, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	if o.client == nil {
+		o.client = providerHTTPClient(ProviderConfig{})
+	}
+
+	body, err := buildOllamaChatRequestBody(params, true)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("ollama: new request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := o.client.Do(httpReq) //nolint:bodyclose // Successful streaming responses are closed by the goroutine below.
+	if err != nil {
+		return nil, fmt.Errorf("ollama: request: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("ollama: read error body: %w", readErr)
+		}
+
+		return nil, fmt.Errorf("ollama: HTTP %d: %s", resp.StatusCode, respBody)
+	}
+
+	ch := make(chan Chunk, DefaultStreamBuffer)
+
+	go func() {
+		defer close(ch)
+		defer resp.Body.Close()
+
+		streamOllamaChatResponse(ctx, resp.Body, ch, params.Model)
+	}()
+
+	return ch, nil
+}
+
+func buildOllamaChatRequestBody(params CompleteParams, stream bool) ([]byte, error) {
+	if params.Model == "" {
+		return nil, errors.New("ollama: model is required")
+	}
+
+	req := ollamaChatRequest{
+		Model:    params.Model,
+		Messages: buildOllamaMessages(params.Messages),
+		Stream:   stream,
+		Options: ollamaOptions{
+			Temperature: params.Temperature,
+			TopP:        params.TopP,
+			Seed:        params.Seed,
+			Stop:        params.Stop,
+		},
+	}
+	if params.MaxTokens > 0 {
+		req.Options.NumPredict = params.MaxTokens
+	}
+
+	if think, ok := ollamaThink(params.ReasoningLevel); ok {
+		req.Think = think
+	}
+
+	// Add tool definitions.
+	for _, tool := range params.Tools {
+		req.Tools = append(req.Tools, ollamaTool{
+			Type:     "function",
+			Function: ollamaToolFunction(tool),
+		})
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("ollama: marshal: %w", err)
+	}
+
+	return body, nil
+}
+
+func streamOllamaChatResponse(ctx context.Context, r io.Reader, ch chan<- Chunk, fallbackModel string) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			sendOllamaTerminalError(ctx, ch, fmt.Errorf("ollama: stream canceled: %w", err))
+
+			return
+		}
+
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		var resp ollamaChatResponse
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			sendOllamaTerminalError(ctx, ch, fmt.Errorf("ollama: stream unmarshal: %w", err))
+
+			return
+		}
+
+		if resp.Error != "" {
+			sendOllamaTerminalError(ctx, ch, fmt.Errorf("ollama: %s", resp.Error))
+
+			return
+		}
+
+		model := firstNonEmptyString(resp.Model, fallbackModel)
+
+		if resp.Message.Content != "" && !sendOllamaChunk(ctx, ch, Chunk{Content: resp.Message.Content, Model: model}) {
+			return
+		}
+
+		if resp.Done {
+			sendOllamaChunk(ctx, ch, ollamaFinalChunk(resp, model))
+
+			return
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			sendOllamaTerminalError(ctx, ch, fmt.Errorf("ollama: stream canceled: %w", ctxErr))
+
+			return
+		}
+
+		sendOllamaTerminalError(ctx, ch, fmt.Errorf("ollama: stream read: %w", err))
+
+		return
+	}
+
+	if err := ctx.Err(); err != nil {
+		sendOllamaTerminalError(ctx, ch, fmt.Errorf("ollama: stream canceled: %w", err))
+
+		return
+	}
+
+	sendOllamaTerminalError(ctx, ch, fmt.Errorf("ollama: stream incomplete: %w", ErrStreamIncomplete))
+}
+
+func ollamaFinalChunk(resp ollamaChatResponse, model string) Chunk {
+	toolCalls := parseOllamaToolCalls(resp.Message.ToolCalls)
+
+	stopReason := StopEndTurn
+	if len(toolCalls) > 0 {
+		stopReason = StopToolUse
+	}
+
+	return Chunk{
+		Model:        model,
+		Done:         true,
+		StopReason:   stopReason,
+		ToolCalls:    toolCalls,
+		InputTokens:  resp.PromptEvalCount,
+		OutputTokens: resp.EvalCount,
+	}
+}
+
+func sendOllamaChunk(ctx context.Context, ch chan<- Chunk, chunk Chunk) bool {
+	select {
+	case ch <- chunk:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func sendOllamaTerminalError(ctx context.Context, ch chan<- Chunk, err error) {
+	if err == nil {
+		return
+	}
+
+	chunk := Chunk{Err: err}
+
+	select {
+	case ch <- chunk:
+		return
+	default:
+	}
+
+	select {
+	case ch <- chunk:
+	case <-ctx.Done():
+	}
 }
 
 func buildOllamaMessages(messages []Message) []ollamaMessage {

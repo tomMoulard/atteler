@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,8 +88,181 @@ func TestOllamaProvider_Complete(t *testing.T) {
 
 	assert.Equal(t, "hello from ollama", resp.Content)
 	assert.Equal(t, "llama3.2", resp.Model)
+	assert.Equal(t, StopEndTurn, resp.StopReason)
 	assert.Equal(t, 7, resp.InputTokens)
 	assert.Equal(t, 4, resp.OutputTokens)
+}
+
+func TestOllamaProvider_CompleteStream_Success(t *testing.T) {
+	t.Parallel()
+
+	var gotReq ollamaChatRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		writeOllamaStream(t, w,
+			ollamaChatResponse{Model: gotReq.Model, Message: ollamaMessage{Content: "hello "}},
+			ollamaChatResponse{Model: gotReq.Model, Message: ollamaMessage{Content: "stream"}},
+			ollamaChatResponse{
+				Model:           gotReq.Model,
+				PromptEvalCount: 7,
+				EvalCount:       2,
+				Done:            true,
+			},
+		)
+	}))
+	defer srv.Close()
+
+	p := &OllamaProvider{baseURL: srv.URL, client: srv.Client()}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "llama3.2",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+	assert.True(t, gotReq.Stream)
+	assert.Equal(t, "hello stream", resp.Content)
+	assert.Equal(t, "llama3.2", resp.Model)
+	assert.Equal(t, StopEndTurn, resp.StopReason)
+	assert.Equal(t, 7, resp.InputTokens)
+	assert.Equal(t, 2, resp.OutputTokens)
+}
+
+func TestOllamaProvider_CompleteStream_ToolUseStopReason(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		writeOllamaStream(t, w,
+			ollamaChatResponse{
+				Model: "llama3.2",
+				Message: ollamaMessage{
+					ToolCalls: []ollamaToolCall{{
+						Function: ollamaToolCallFunction{
+							Name:      "bash",
+							Arguments: map[string]any{"command": "pwd"},
+						},
+					}},
+				},
+				PromptEvalCount: 4,
+				EvalCount:       1,
+				Done:            true,
+			},
+		)
+	}))
+	defer srv.Close()
+
+	p := &OllamaProvider{baseURL: srv.URL, client: srv.Client()}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "llama3.2",
+		Messages: []Message{{Role: RoleUser, Content: "run pwd"}},
+		Tools:    DefaultTools(),
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+	assert.Equal(t, "llama3.2", resp.Model)
+	assert.Equal(t, StopToolUse, resp.StopReason)
+	require.Len(t, resp.ToolCalls, 1)
+	assert.Equal(t, "bash", resp.ToolCalls[0].Name)
+	assert.Equal(t, "pwd", resp.ToolCalls[0].Input["command"])
+	assert.Equal(t, 4, resp.InputTokens)
+	assert.Equal(t, 1, resp.OutputTokens)
+}
+
+func TestOllamaProvider_CompleteStream_MidStreamErrorReturnsPartial(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		writeOllamaStream(t, w,
+			ollamaChatResponse{Model: "llama3.2", Message: ollamaMessage{Content: "partial "}},
+			ollamaChatResponse{Error: "provider failed"},
+		)
+	}))
+	defer srv.Close()
+
+	p := &OllamaProvider{baseURL: srv.URL, client: srv.Client()}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "llama3.2",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "provider failed")
+	assert.Equal(t, "partial ", resp.Content)
+}
+
+func TestOllamaProvider_CompleteStream_MissingFinalChunkIsIncomplete(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		writeOllamaStream(t, w,
+			ollamaChatResponse{Model: "llama3.2", Message: ollamaMessage{Content: "partial"}},
+		)
+	}))
+	defer srv.Close()
+
+	p := &OllamaProvider{baseURL: srv.URL, client: srv.Client()}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "llama3.2",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrStreamIncomplete)
+	assert.Equal(t, "partial", resp.Content)
+}
+
+func TestOllamaStream_CancelUnblocksBackpressuredTerminalError(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := make(chan Chunk, DefaultStreamBuffer)
+	done := make(chan struct{})
+	payload := ollamaStreamString(t,
+		ollamaChatResponse{Model: "llama3.2", Message: ollamaMessage{Content: "one"}},
+		ollamaChatResponse{Model: "llama3.2", Message: ollamaMessage{Content: "two"}},
+		ollamaChatResponse{Error: "provider failed"},
+	)
+
+	go func() {
+		defer close(done)
+
+		streamOllamaChatResponse(ctx, strings.NewReader(payload), ch, "llama3.2")
+	}()
+
+	waitForBufferedChunks(t, ch, DefaultStreamBuffer)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		require.Fail(t, "ollama stream goroutine stayed blocked on terminal error after cancellation")
+	}
 }
 
 func TestOllamaProvider_FetchModels(t *testing.T) {
@@ -353,6 +527,35 @@ func TestKnownProvidersIncludesOllama(t *testing.T) {
 	}
 
 	require.Fail(t, "KnownProviders missing ollama")
+}
+
+func writeOllamaStream(t *testing.T, w http.ResponseWriter, events ...ollamaChatResponse) {
+	t.Helper()
+
+	payload := ollamaStreamString(t, events...)
+
+	_, err := w.Write([]byte(payload))
+	require.NoError(t, err)
+
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func ollamaStreamString(t *testing.T, events ...ollamaChatResponse) string {
+	t.Helper()
+
+	var b strings.Builder
+
+	for _, event := range events {
+		payload, err := json.Marshal(event)
+		require.NoError(t, err)
+
+		b.Write(payload)
+		b.WriteByte('\n')
+	}
+
+	return b.String()
 }
 
 func withOllamaServeStarter(t *testing.T, starter ollamaServeStarter) {

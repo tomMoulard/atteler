@@ -50,6 +50,16 @@ func TestProviders_RequireActiveContextForBlockingMethods(t *testing.T) {
 			require.Error(t, err)
 			require.ErrorIs(t, err, context.Canceled)
 
+			if streamProvider, ok := provider.(StreamProvider); ok {
+				_, err = streamProvider.CompleteStream(nil, params) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+				require.Error(t, err)
+				require.ErrorIs(t, err, ErrContextRequired)
+
+				_, err = streamProvider.CompleteStream(ctx, params)
+				require.Error(t, err)
+				require.ErrorIs(t, err, context.Canceled)
+			}
+
 			_, err = provider.FetchModels(nil) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
 			require.Error(t, err)
 			require.ErrorIs(t, err, ErrContextRequired)
