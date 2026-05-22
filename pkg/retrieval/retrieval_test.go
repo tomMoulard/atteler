@@ -307,6 +307,24 @@ func TestNormalizeResult_BackfillsStableMetadataAndClampsScore(t *testing.T) {
 	assert.Equal(t, result.Metadata[retrieval.MetadataContentHash], result.Chunk.ContentHash)
 }
 
+func TestNormalizeResultDoesNotMutateInputMetadata(t *testing.T) {
+	t.Parallel()
+
+	metadata := map[string]string{"kind": "note"}
+	result := retrieval.NormalizeResult(retrieval.Result{
+		Source:     retrieval.Source{Type: retrieval.SourceMemory, Name: "notes"},
+		DocumentID: "doc-1",
+		Metadata:   metadata,
+		Snippet:    "OAuth callback notes",
+	})
+
+	assert.Equal(t, retrieval.StableDocumentID(retrieval.Source{Type: retrieval.SourceMemory, Name: "notes"}, "doc-1"), result.Metadata[retrieval.MetadataStableID])
+	assert.Equal(t, retrieval.TextHash("OAuth callback notes"), result.Metadata[retrieval.MetadataContentHash])
+	assert.Equal(t, map[string]string{"kind": "note"}, metadata)
+	assert.NotContains(t, metadata, retrieval.MetadataStableID)
+	assert.NotContains(t, metadata, retrieval.MetadataContentHash)
+}
+
 func TestSearch_TreatsMissingSafetyAsDefaultInjectable(t *testing.T) {
 	t.Parallel()
 

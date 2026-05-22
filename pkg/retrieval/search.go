@@ -89,6 +89,8 @@ func appendSelectedResults(out, results []Result, selected map[SourceType]struct
 func NormalizeResult(result Result) Result {
 	if result.Metadata == nil {
 		result.Metadata = make(map[string]string)
+	} else {
+		result.Metadata = maps.Clone(result.Metadata)
 	}
 
 	if IsZeroSafety(result.Safety) {

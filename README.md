@@ -424,6 +424,11 @@ atteler code-intel symbol NewRegistry
 atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/
 ```
 
+`atteler memory retrieve` prints the shared retrieval contract fields agents
+should cite before injecting context: `source`, `document`, `stable_id`,
+`chunk`, `range`, `scorer`, `inject_allowed`, freshness flags, and an optional
+`why` ranking explanation.
+
 ### Agents, plugins, artifacts, and worktrees
 
 ```sh

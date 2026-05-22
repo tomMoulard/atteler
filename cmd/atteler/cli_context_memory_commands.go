@@ -766,12 +766,19 @@ func buildAgentMemoryRetrievalSearcher(root, selectedAgent string, input retriev
 }
 
 func formatRetrievalResult(result retrieval.Result, explain bool) string {
+	result = retrieval.NormalizeResult(result)
+
 	parts := []string{
 		"source=" + string(result.Source.Type),
 		"document=" + result.DocumentID,
 		fmt.Sprintf("score=%.4f", result.Score),
 		"scorer=" + result.Scorer.Name,
 	}
+
+	if stableID := result.Metadata[retrieval.MetadataStableID]; stableID != "" {
+		parts = append(parts, "stable_id="+stableID)
+	}
+
 	parts = appendRetrievalSourceParts(parts, result.Source)
 
 	if result.Chunk.ID != "" {

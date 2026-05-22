@@ -323,9 +323,12 @@ func TestRetrievalSearchersAgentMemoryDefaultsToSelectedAgent(t *testing.T) {
 func TestFormatRetrievalResultIncludesSafetyAndExplanation(t *testing.T) {
 	t.Parallel()
 
+	source := retrieval.Source{Type: retrieval.SourceSession, Name: "session-1", URI: "/tmp/session-1.json"}
+	documentID := "session/session-1/message/0"
+
 	got := formatRetrievalResult(retrieval.Result{
-		Source:     retrieval.Source{Type: retrieval.SourceSession, Name: "session-1", URI: "/tmp/session-1.json"},
-		DocumentID: "session/session-1/message/0",
+		Source:     source,
+		DocumentID: documentID,
 		Chunk: retrieval.Chunk{
 			ID:    "chunk-1",
 			Range: retrieval.Range{Unit: retrieval.RangeUnitRuneOffset, Start: 4, End: 42},
@@ -358,6 +361,7 @@ func TestFormatRetrievalResultIncludesSafetyAndExplanation(t *testing.T) {
 		"document=session/session-1/message/0",
 		"score=0.7500",
 		"scorer=lexical-token-overlap",
+		"stable_id=" + retrieval.StableDocumentID(source, documentID),
 		"chunk=chunk-1",
 		"range=rune_offset:4-42",
 		"inject_allowed=false",
@@ -374,4 +378,22 @@ func TestFormatRetrievalResultIncludesSafetyAndExplanation(t *testing.T) {
 	} {
 		assert.Contains(t, got, want)
 	}
+}
+
+func TestFormatRetrievalResultDoesNotMutateMetadata(t *testing.T) {
+	t.Parallel()
+
+	metadata := map[string]string{"kind": "note"}
+	got := formatRetrievalResult(retrieval.Result{
+		Source:     retrieval.Source{Type: retrieval.SourceMemory, Name: "notes"},
+		DocumentID: "doc-1",
+		Score:      0.5,
+		Scorer:     retrieval.Scorer{Name: "lexical-token-overlap"},
+		Metadata:   metadata,
+		Safety:     retrieval.Safety{InjectAllowed: true},
+	}, false)
+
+	assert.Contains(t, got, "stable_id="+retrieval.StableDocumentID(retrieval.Source{Type: retrieval.SourceMemory, Name: "notes"}, "doc-1"))
+	assert.Equal(t, map[string]string{"kind": "note"}, metadata)
+	assert.NotContains(t, metadata, retrieval.MetadataStableID)
 }
