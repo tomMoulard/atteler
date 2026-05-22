@@ -74,6 +74,15 @@ func agentLoopBudgetFromConfig(cfg appconfig.Config) (llm.AgentLoopBudget, error
 		budget.MaxModelCalls = maxModelCalls
 	}
 
+	if cfg.AgentLoop.MaxToolCalls != nil {
+		maxToolCalls := *cfg.AgentLoop.MaxToolCalls
+		if maxToolCalls < 0 {
+			return budget, errors.New("agent_loop.max_tool_calls must be >= 0")
+		}
+
+		budget.MaxToolCalls = maxToolCalls
+	}
+
 	wallTime, err := agentLoopMaxWallTimeFromConfig(cfg)
 	if err != nil {
 		return budget, err

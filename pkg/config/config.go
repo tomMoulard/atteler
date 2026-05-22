@@ -131,6 +131,10 @@ type AgentLoopConfig struct {
 	// or nil disables the cap (the loop runs until the model returns a final
 	// response or another budget trips). Defaults to nil (unlimited).
 	MaxModelCalls *int `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
+	// MaxToolCalls caps the number of tool executions per agent loop. Zero or
+	// nil disables the cap (the loop runs without a tool-call ceiling).
+	// Defaults to nil (unlimited).
+	MaxToolCalls *int `json:"max_tool_calls,omitempty" yaml:"max_tool_calls,omitempty"`
 	// MaxWallTime caps the wall-clock duration of an agent loop, parsed via
 	// time.ParseDuration (e.g. "30m", "1h30m"). An empty string, "0", or nil
 	// disables the cap (the loop runs without a wall-clock ceiling).
@@ -240,6 +244,7 @@ type fileAgentLoopConfig struct {
 	MaxTotalTokens     *int    `json:"max_total_tokens" yaml:"max_total_tokens"`
 	MaxIterations      *int    `json:"max_iterations" yaml:"max_iterations"`
 	MaxModelCalls      *int    `json:"max_model_calls" yaml:"max_model_calls"`
+	MaxToolCalls       *int    `json:"max_tool_calls" yaml:"max_tool_calls"`
 	MaxWallTime        *string `json:"max_wall_time" yaml:"max_wall_time"`
 	CheckpointInterval *int    `json:"checkpoint_interval" yaml:"checkpoint_interval"`
 }
@@ -727,6 +732,12 @@ func mergeAgentLoop(dst *Config, agentLoop fileAgentLoopConfig, rec *originRecor
 		rec.set("agent_loop.max_model_calls", source, value)
 	}
 
+	if agentLoop.MaxToolCalls != nil {
+		value := *agentLoop.MaxToolCalls
+		dst.AgentLoop.MaxToolCalls = &value
+		rec.set("agent_loop.max_tool_calls", source, value)
+	}
+
 	if agentLoop.MaxWallTime != nil {
 		value := *agentLoop.MaxWallTime
 		dst.AgentLoop.MaxWallTime = &value
@@ -1038,6 +1049,12 @@ func mergeConfigAgentLoop(dst *Config, agentLoop AgentLoopConfig, rec *originRec
 		value := *agentLoop.MaxModelCalls
 		dst.AgentLoop.MaxModelCalls = &value
 		rec.set("agent_loop.max_model_calls", source, value)
+	}
+
+	if agentLoop.MaxToolCalls != nil {
+		value := *agentLoop.MaxToolCalls
+		dst.AgentLoop.MaxToolCalls = &value
+		rec.set("agent_loop.max_tool_calls", source, value)
 	}
 
 	if agentLoop.MaxWallTime != nil {
@@ -1356,6 +1373,13 @@ func mergeConfigAgentLoopFromOrigins(dst *Config, agentLoop AgentLoopConfig, dst
 		dst.AgentLoop.MaxModelCalls = &value
 
 		appendOriginChain(dstOrigins, "agent_loop.max_model_calls", srcOrigins, false)
+	}
+
+	if agentLoop.MaxToolCalls != nil {
+		value := *agentLoop.MaxToolCalls
+		dst.AgentLoop.MaxToolCalls = &value
+
+		appendOriginChain(dstOrigins, "agent_loop.max_tool_calls", srcOrigins, false)
 	}
 
 	if agentLoop.MaxWallTime != nil {

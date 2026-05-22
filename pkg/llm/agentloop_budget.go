@@ -7,15 +7,14 @@ import (
 )
 
 const (
-	defaultMaxToolCalls        = 50
 	defaultMaxHistoryToolBytes = 16 << 10 // 16 KiB per tool result in prompt history.
 )
 
-// AgentLoopBudget is the hard-stop envelope for an agentic tool loop.
-// MaxToolCalls falls back to a conservative default when zero. MaxWallTime,
-// MaxIterations, MaxModelCalls, MaxOutputBytes, MaxCostMicros, and
-// MaxTotalTokens are disabled when zero — callers that want a hard ceiling on
-// those must set them explicitly.
+// AgentLoopBudget is the hard-stop envelope for an agentic tool loop. All
+// ceilings (MaxToolCalls, MaxWallTime, MaxIterations, MaxModelCalls,
+// MaxOutputBytes, MaxCostMicros, MaxTotalTokens, MaxInputTokens,
+// MaxOutputTokens) are disabled when zero — callers that want a hard ceiling
+// must set them explicitly.
 type AgentLoopBudget struct {
 	MaxWallTime     time.Duration `json:"max_wall_time"`
 	MaxOutputBytes  int64         `json:"max_output_bytes"`
@@ -99,8 +98,8 @@ func normalizeAgentLoopBudget(b AgentLoopBudget, legacyMaxIterations int) AgentL
 		b.MaxWallTime = 0
 	}
 
-	if b.MaxToolCalls <= 0 {
-		b.MaxToolCalls = defaultMaxToolCalls
+	if b.MaxToolCalls < 0 {
+		b.MaxToolCalls = 0
 	}
 
 	return b

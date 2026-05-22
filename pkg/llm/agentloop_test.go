@@ -903,7 +903,7 @@ func TestAgentLoop_PolicyDenialStopsBeforeExecution(t *testing.T) {
 	assert.Equal(t, ToolPolicyDeny, toolStep.Policy.Verdict)
 	assert.Equal(t, "test.deny_rm", toolStep.Policy.MatchedRule)
 	require.NotNil(t, toolStep.ToolBudget)
-	assert.Equal(t, defaultMaxToolCalls, toolStep.ToolBudget.Budget.MaxToolCalls)
+	assert.Equal(t, 0, toolStep.ToolBudget.Budget.MaxToolCalls)
 	require.NotNil(t, ledger.Steps[2].StopCondition)
 	assert.Equal(t, AgentLoopStopPolicyDenied, ledger.Steps[2].StopCondition.Kind)
 }
