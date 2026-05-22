@@ -20,12 +20,21 @@ import (
 )
 
 func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
+	pool := lsp.NewServerPool(lsp.PoolOptions{CommandPolicy: authorizeLSPCommand})
+
+	defer func() {
+		if shutdownErr := pool.Shutdown(ctx); shutdownErr != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "lsp shutdown: %v\n", shutdownErr)
+		}
+	}()
+
 	lspOptions := lsp.Options{
 		Command:    strings.TrimSpace(input.Command),
 		Args:       append([]string(nil), input.Args...),
 		FilePath:   strings.TrimSpace(input.FilePath),
 		RootPath:   strings.TrimSpace(input.RootPath),
 		LanguageID: strings.TrimSpace(input.LanguageID),
+		Pool:       pool,
 	}
 
 	var (
@@ -45,6 +54,27 @@ func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
 	fmt.Print(formatLSPSymbols(symbols))
 
 	return nil
+}
+
+func authorizeLSPCommand(ctx context.Context, spec lsp.CommandSpec) error {
+	command := strings.Join(append([]string{spec.Command}, spec.Args...), " ")
+	decision := llm.BashToolPolicy(ctx, llm.ToolCall{
+		Name:  "bash",
+		Input: map[string]any{"command": command},
+	}, llm.AgentLoopBudgetSnapshot{})
+
+	switch decision.Verdict {
+	case llm.ToolPolicyAllow:
+		return nil
+	case llm.ToolPolicyRequireConfirm:
+		return fmt.Errorf("lsp command requires confirmation by local process policy (%s): %s", decision.MatchedRule, decision.Reason)
+	case llm.ToolPolicyDeny:
+		return fmt.Errorf("lsp command denied by local process policy (%s): %s", decision.MatchedRule, decision.Reason)
+	case llm.ToolPolicyDryRun:
+		return fmt.Errorf("lsp command blocked by local process policy dry-run decision (%s): %s", decision.MatchedRule, decision.Reason)
+	default:
+		return fmt.Errorf("lsp command blocked by unknown local process policy verdict %q (%s): %s", decision.Verdict, decision.MatchedRule, decision.Reason)
+	}
 }
 
 func formatLSPSymbols(symbols []lsp.Symbol) string {
