@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Existing tests and query builders use compact assertion/evidence blocks.
 package codegraph
 
 import (
@@ -200,5 +201,113 @@ func assertCycles(t *testing.T, got, want [][]NodeID) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("cycles = %#v, want %#v", got, want)
+	}
+}
+
+func TestEvidenceGraph_ReturnsTypedEvidenceAndUncertainty(t *testing.T) {
+	t.Parallel()
+
+	graph := NewEvidence()
+	graph.AddNode(Node{ID: "file:a.go", Kind: "file", Name: "a.go"})
+	graph.AddNode(Node{ID: "import:fmt", Kind: "import", Name: "fmt"})
+	graph.AddRelationship(Relationship{
+		From: "file:a.go",
+		To:   "import:fmt",
+		Kind: "imports",
+		Provenance: []Provenance{{
+			Source:       "parser:import",
+			File:         "a.go",
+			StartLine:    3,
+			StartColumn:  8,
+			EndLine:      3,
+			EndColumn:    13,
+			BuildContext: "goos=darwin goarch=arm64",
+			Confidence:   "high",
+		}},
+	})
+	graph.AddRelationship(Relationship{From: "file:a.go", To: "missing", Kind: "declares"})
+
+	results := graph.NeighborsWithEvidence("file:a.go")
+	if len(results) != 2 {
+		t.Fatalf("NeighborsWithEvidence() len = %d, want 2", len(results))
+	}
+
+	if results[0].Node.ID != "import:fmt" || results[0].Node.Kind != "import" {
+		t.Fatalf("first neighbor = %#v, want typed import node", results[0].Node)
+	}
+	if len(results[0].Evidence) != 1 || results[0].Evidence[0].Kind != "imports" {
+		t.Fatalf("first evidence = %#v, want imports relationship", results[0].Evidence)
+	}
+	if len(results[0].Uncertainty) != 0 {
+		t.Fatalf("first uncertainty = %#v, want none", results[0].Uncertainty)
+	}
+
+	if results[1].Node.ID != "missing" || len(results[1].Uncertainty) == 0 {
+		t.Fatalf("missing neighbor result = %#v, want uncertainty", results[1])
+	}
+
+	reverse := graph.ReverseDependenciesWithEvidence("import:fmt")
+	if len(reverse) != 1 || reverse[0].Node.ID != "file:a.go" || reverse[0].Evidence[0].Kind != "imports" {
+		t.Fatalf("ReverseDependenciesWithEvidence() = %#v, want file import evidence", reverse)
+	}
+}
+
+func TestEvidenceGraph_CloneIsIndependent(t *testing.T) {
+	t.Parallel()
+
+	graph := NewEvidence()
+	graph.AddNode(Node{ID: "a", Kind: "file"})
+	graph.AddNode(Node{ID: "b", Kind: "import"})
+	graph.AddRelationship(Relationship{From: "a", To: "b", Kind: "imports", Provenance: []Provenance{{Source: "parser"}}})
+
+	clone := graph.Clone()
+	clone.AddNode(Node{ID: "c", Kind: "file"})
+	clone.AddRelationship(Relationship{From: "c", To: "b", Kind: "imports"})
+
+	if graph.Graph().HasNode("c") {
+		t.Fatal("original graph unexpectedly has cloned node c")
+	}
+	if len(graph.ReverseDependenciesWithEvidence("b")) != 1 {
+		t.Fatalf("original reverse deps changed after clone mutation: %#v", graph.ReverseDependenciesWithEvidence("b"))
+	}
+}
+
+func TestEvidenceGraph_TransitiveQueriesReturnEvidence(t *testing.T) {
+	t.Parallel()
+
+	const (
+		apiNode     NodeID = "api"
+		serviceNode NodeID = "service"
+		storageNode NodeID = "storage"
+		callKind           = "calls"
+	)
+
+	graph := NewEvidence()
+	graph.AddNode(Node{ID: apiNode, Kind: "declaration"})
+	graph.AddNode(Node{ID: serviceNode, Kind: "declaration"})
+	graph.AddNode(Node{ID: storageNode, Kind: "declaration"})
+	graph.AddRelationship(Relationship{From: apiNode, To: serviceNode, Kind: callKind, Provenance: []Provenance{{Source: "types:call", File: "api.go", StartLine: 10, Confidence: "high"}}})
+	graph.AddRelationship(Relationship{From: serviceNode, To: storageNode, Kind: callKind, Provenance: []Provenance{{Source: "types:call", File: "service.go", StartLine: 20, Confidence: "high"}}})
+
+	reachable := graph.ReachableFromWithEvidence(apiNode)
+	if len(reachable) != 2 {
+		t.Fatalf("ReachableFromWithEvidence() len = %d, want 2: %#v", len(reachable), reachable)
+	}
+	if reachable[0].Node.ID != serviceNode || reachable[0].Evidence[0].From != apiNode || reachable[0].Evidence[0].Kind != callKind {
+		t.Fatalf("first reachable = %#v, want service call evidence", reachable[0])
+	}
+	if reachable[1].Node.ID != storageNode || reachable[1].Evidence[0].From != serviceNode || reachable[1].Evidence[0].Kind != callKind {
+		t.Fatalf("second reachable = %#v, want storage call evidence", reachable[1])
+	}
+
+	impact := graph.ImpactSetWithEvidence(storageNode)
+	if len(impact) != 2 {
+		t.Fatalf("ImpactSetWithEvidence() len = %d, want 2: %#v", len(impact), impact)
+	}
+	if impact[0].Node.ID != apiNode || impact[0].Evidence[0].From != apiNode || impact[0].Evidence[0].To != serviceNode {
+		t.Fatalf("first impact = %#v, want api->service evidence", impact[0])
+	}
+	if impact[1].Node.ID != serviceNode || impact[1].Evidence[0].From != serviceNode || impact[1].Evidence[0].To != storageNode {
+		t.Fatalf("second impact = %#v, want service->storage evidence", impact[1])
 	}
 }
