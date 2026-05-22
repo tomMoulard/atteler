@@ -83,7 +83,7 @@ func TestRunVectorSearchPersistsLexicalIndexAndReportsVectorizer(t *testing.T) {
 func TestRunVectorSearchPersistsEmbeddingIndexAndReportsModel(t *testing.T) {
 	dir := t.TempDir()
 	note := filepath.Join(dir, "embedding.md")
-	require.NoError(t, os.WriteFile(note, []byte("semantic retrieval ranking"), 0o600))
+	require.NoError(t, os.WriteFile(note, []byte("embedding retrieval ranking"), 0o600))
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/embed", r.URL.Path)
@@ -100,7 +100,7 @@ func TestRunVectorSearchPersistsEmbeddingIndexAndReportsModel(t *testing.T) {
 		assert.Equal(t, "cmd-embed", req.Model)
 
 		embedding := []float64{0, 1}
-		if strings.Contains(req.Input, "semantic") {
+		if strings.Contains(req.Input, "embedding") {
 			embedding = []float64{1, 0}
 		}
 
@@ -113,7 +113,7 @@ func TestRunVectorSearchPersistsEmbeddingIndexAndReportsModel(t *testing.T) {
 
 	indexPath := filepath.Join(dir, "embedding-index.json")
 	opts := cliOptions{
-		vectorSearch:     "semantic retrieval",
+		vectorSearch:     "embedding retrieval",
 		vectorIndexFiles: stringListFlag{note},
 		vectorStorePath:  indexPath,
 		vectorizer:       vector.VectorizerKindEmbedding,
@@ -367,13 +367,13 @@ func TestFormatVectorSearchHeaderReportsEmbeddingMetadata(t *testing.T) {
 		Dimensions: 2,
 		Documents: []vector.Document{{
 			ID:     "docs/retrieval.md#chunk=0000",
-			Text:   "semantic retrieval metadata",
+			Text:   "embedding retrieval metadata",
 			Vector: vector.Vector{1, 0},
 		}},
 		Sources: []vector.SourceMetadata{{
 			Path:   "docs/retrieval.md",
-			Digest: vector.DigestText("semantic retrieval metadata"),
-			Bytes:  len("semantic retrieval metadata"),
+			Digest: vector.DigestText("embedding retrieval metadata"),
+			Bytes:  len("embedding retrieval metadata"),
 		}},
 	}, ".atteler/vector-index.json", false)
 

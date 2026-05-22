@@ -1,4 +1,4 @@
-// Package agentmemory provides dependency-free per-agent vector memory with
+// Package agentmemory provides dependency-free per-agent lexical memory with
 // JSON persistence.
 package agentmemory
 
@@ -24,7 +24,7 @@ const (
 	StoreSchemaVersion = 1
 )
 
-// Document is a vectorized text item stored for one agent.
+// Document is a lexically vectorized text item stored for one agent.
 type Document struct {
 	Metadata   map[string]string     `json:"metadata,omitempty"`
 	Provenance map[string]string     `json:"provenance,omitempty"`
@@ -39,7 +39,7 @@ type Document struct {
 	Vector     vector.Vector         `json:"vector"`
 }
 
-// Result is a vector-ranked agent memory search result.
+// Result is a lexical vector-ranked agent memory search result.
 type Result struct {
 	Document Document `json:"document"`
 	Score    float64  `json:"score"`
@@ -51,7 +51,7 @@ type Searcher struct {
 	Agent string
 }
 
-// Store keeps vector memories partitioned by agent name.
+// Store keeps lexically vectorized memories partitioned by agent name.
 //
 //nolint:govet // Layout prioritizes JSON/API readability over pointer-byte packing.
 type Store struct {
@@ -102,7 +102,7 @@ func WithProvenance(provenance map[string]string) AddOption {
 }
 
 // NewStore returns an empty per-agent memory store. A zero dimension value uses
-// pkg/vector's default text vectorizer dimensions.
+// pkg/vector's default hashed lexical vectorizer dimensions.
 func NewStore(dimensions int) (*Store, error) {
 	vectorizer, err := vector.NewTextVectorizer(dimensions)
 	if err != nil {

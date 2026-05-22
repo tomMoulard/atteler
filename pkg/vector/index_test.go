@@ -186,7 +186,7 @@ func TestRetrievalEval_RankingRegression(t *testing.T) {
 	t.Parallel()
 
 	docs := []Source{
-		{Path: "docs/rag.md", Text: "RAG retrieval chunks source files, stores model metadata, and invalidates stale source digests."},
+		{Path: "docs/retrieval.md", Text: "Local retrieval chunks source files, stores model metadata, and invalidates stale source digests."},
 		{Path: "docs/shell.md", Text: "Shell commands execute with timeout handling and process output capture."},
 		{Path: "docs/oauth.md", Text: "OAuth callbacks validate state before retrying token exchange failures."},
 	}
@@ -199,8 +199,8 @@ func TestRetrievalEval_RankingRegression(t *testing.T) {
 		{
 			name:   "stale vector index invalidation",
 			query:  "How does retrieval invalidate stale indexed files?",
-			vector: "docs/rag.md#chunk=0000",
-			memory: "docs/rag.md",
+			vector: "docs/retrieval.md#chunk=0000",
+			memory: "docs/retrieval.md",
 		},
 		{
 			name:   "shell timeout output capture",

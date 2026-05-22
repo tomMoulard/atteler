@@ -1052,10 +1052,6 @@ func mergeVector(dst *Config, vector fileVectorConfig, rec *originRecorder, sour
 	}
 }
 
-func mergeConfig(dst *Config, src Config) {
-	mergeConfigFromSource(dst, src, nil, originSource{})
-}
-
 func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source originSource) {
 	if src.Version > 0 {
 		dst.Version = src.Version
@@ -1924,46 +1920,55 @@ func mergeConfigSkillLearningFromOrigins(dst *Config, skillLearning SkillLearnin
 func mergeConfigVectorFromOrigins(dst *Config, vector VectorConfig, dstOrigins, srcOrigins OriginMap) {
 	if vector.Vectorizer != "" {
 		dst.Vector.Vectorizer = strings.TrimSpace(vector.Vectorizer)
+
 		appendOriginChain(dstOrigins, "vector.vectorizer", srcOrigins, false)
 	}
 
 	if vector.Provider != "" {
 		dst.Vector.Provider = strings.TrimSpace(vector.Provider)
+
 		appendOriginChain(dstOrigins, "vector.provider", srcOrigins, false)
 	}
 
 	if vector.Model != "" {
 		dst.Vector.Model = strings.TrimSpace(vector.Model)
+
 		appendOriginChain(dstOrigins, "vector.model", srcOrigins, false)
 	}
 
 	if vector.BaseURL != "" {
 		dst.Vector.BaseURL = strings.TrimSpace(vector.BaseURL)
+
 		appendOriginChain(dstOrigins, "vector.base_url", srcOrigins, false)
 	}
 
 	if vector.FallbackPolicy != "" {
 		dst.Vector.FallbackPolicy = strings.TrimSpace(vector.FallbackPolicy)
+
 		appendOriginChain(dstOrigins, "vector.fallback_policy", srcOrigins, false)
 	}
 
 	if vector.IndexPath != "" {
 		dst.Vector.IndexPath = strings.TrimSpace(vector.IndexPath)
+
 		appendOriginChain(dstOrigins, "vector.index_path", srcOrigins, false)
 	}
 
 	if vector.TimeoutSeconds > 0 {
 		dst.Vector.TimeoutSeconds = vector.TimeoutSeconds
+
 		appendOriginChain(dstOrigins, "vector.timeout_seconds", srcOrigins, false)
 	}
 
 	if vector.ChunkMaxRunes > 0 {
 		dst.Vector.ChunkMaxRunes = vector.ChunkMaxRunes
+
 		appendOriginChain(dstOrigins, "vector.chunk_max_runes", srcOrigins, false)
 	}
 
 	if vector.ChunkOverlapRunes > 0 {
 		dst.Vector.ChunkOverlapRunes = vector.ChunkOverlapRunes
+
 		appendOriginChain(dstOrigins, "vector.chunk_overlap_runes", srcOrigins, false)
 	}
 }

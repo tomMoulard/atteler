@@ -39,6 +39,7 @@ type cliHelpDomain struct {
 	Title           string
 	Summary         string
 	Aliases         []string
+	HiddenAliases   []string
 	Commands        []cliCommandAlias
 	RoutingCommands []cliCommandAlias
 	Examples        []string
@@ -179,10 +180,13 @@ var cliHelpDomains = []cliHelpDomain{
 		},
 	},
 	{
-		Name:    "memory/rag",
-		Title:   "Memory & RAG",
-		Summary: "Search saved sessions, UTF-8 file memory stores, agent vector memory, local vector indexes, and git history.",
-		Aliases: []string{"memory", "rag", "mem"},
+		Name:    "memory/retrieval",
+		Title:   "Memory & Retrieval",
+		Summary: "Search saved sessions, UTF-8 file memory stores, agent lexical memory, local lexical/embedding indexes, and git history.",
+		Aliases: []string{"memory", "retrieval", "mem"},
+		// Keep old RAG-shaped routes working without advertising lexical
+		// fallback search as RAG in help output.
+		HiddenAliases: []string{"rag", "memory/rag"},
 		Commands: []cliCommandAlias{
 			{Name: "search", Args: "<query>", Summary: "search scoped local memory and report the searched corpus", Legacy: []string{"--memory-search"}, JoinArgs: true},
 			{Name: "retrieve", Args: "<query>", Summary: "search selected/filtered sources under the unified retrieval contract", Legacy: []string{"--retrieval-search"}, JoinArgs: true},
@@ -190,18 +194,18 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "purge", Args: "<selector>", Summary: "purge memory docs by session:<id>, tag:<tag>, repo:<path>, or all", Legacy: []string{"--memory-purge"}, JoinArgs: true},
 			{Name: "rebuild", Summary: "rebuild the JSON memory store from the selected corpus", Legacy: []string{"--memory-rebuild"}},
 			{Name: "list-corpus", Summary: "print memory corpus metadata", Legacy: []string{"--memory-list-corpus"}},
-			{Name: "agent-search", Args: "<query>", Summary: "search one agent's vector memory", Legacy: []string{"--agent-memory-search"}, JoinArgs: true},
-			{Name: "agent-index", Args: "<file>", Summary: "add a file to one agent's vector memory", Legacy: []string{"--agent-memory-index"}},
-			{Name: "agent-delete", Args: "<id>", Summary: "delete one document from one agent's vector memory", Legacy: []string{"--agent-memory-delete"}},
-			{Name: "agent-compact", Summary: "remove expired documents from per-agent vector memory", Legacy: []string{"--agent-memory-compact"}},
-			{Name: "agent-migrate", Summary: "explicitly migrate and re-embed per-agent vector memory", Legacy: []string{"--agent-memory-migrate"}},
+			{Name: "agent-search", Args: "<query>", Summary: "search one agent's lexical memory", Legacy: []string{"--agent-memory-search"}, JoinArgs: true},
+			{Name: "agent-index", Args: "<file>", Summary: "add a file to one agent's lexical memory", Legacy: []string{"--agent-memory-index"}},
+			{Name: "agent-delete", Args: "<id>", Summary: "delete one document from one agent's lexical memory", Legacy: []string{"--agent-memory-delete"}},
+			{Name: "agent-compact", Summary: "remove expired documents from per-agent lexical memory", Legacy: []string{"--agent-memory-compact"}},
+			{Name: "agent-migrate", Summary: "explicitly migrate and re-vectorize per-agent lexical memory", Legacy: []string{"--agent-memory-migrate"}},
 			{Name: "vector-search", Args: "<query>", Summary: "search a persisted lexical-fallback or embedding vector index", Legacy: []string{"--vector-search"}, JoinArgs: true},
 			{Name: "vector-index", Args: "<file>", Summary: "chunk and add a file to the persisted vector index", Legacy: []string{"--vector-index"}},
 			{Name: "git-history", Args: "<query>", Summary: "search local git history subjects/files/authors", Legacy: []string{"--git-history-search"}, JoinArgs: true},
 			{Name: "context-pack", Args: "<path>", Summary: "compact a role-prefixed transcript file", Legacy: []string{"--context-pack-file"}},
 		},
 		Examples: []string{
-			`atteler memory search "OAuth retry storm" --memory-scope repo`,
+			`atteler memory search "OAuth retry storm"`,
 			`atteler memory retrieve "OAuth retry storm"`,
 			`atteler memory git-history "memory regression"`,
 			`atteler memory vector-search "redirect risks"`,

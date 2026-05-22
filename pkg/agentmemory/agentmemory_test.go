@@ -69,7 +69,7 @@ func TestStore_AddFileRequiresUTF8AndUsesPath(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "memory.txt")
-	require.NoError(t, os.WriteFile(path, []byte("vector memory from file"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte("lexical memory from file"), 0o600))
 
 	store, err := NewStore(16)
 	require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestStore_AddFileRequiresUTF8AndUsesPath(t *testing.T) {
 	require.Len(t, docs, 1)
 	assert.Equal(t, filepath.Clean(path), docs[0].ID)
 	assert.Equal(t, filepath.Clean(path), docs[0].Path)
-	assert.Equal(t, "vector memory from file", docs[0].Text)
+	assert.Equal(t, "lexical memory from file", docs[0].Text)
 	assert.Equal(t, "file", docs[0].Provenance["source_type"])
 	assert.Equal(t, filepath.Clean(path), docs[0].Provenance["path"])
 
@@ -122,7 +122,7 @@ func TestStore_SaveLoadJSONRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.Add("alice", Document{
 		ID:       "design",
-		Text:     "Keep the vector memory package simple and persistent.",
+		Text:     "Keep the lexical memory package simple and persistent.",
 		Metadata: map[string]string{"kind": "note"},
 	}))
 	require.NoError(t, store.AddText("bob", "unrelated", "Bob owns a separate memory namespace."))

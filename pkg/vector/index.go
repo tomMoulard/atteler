@@ -421,7 +421,8 @@ func (idx *Index) Validate() error {
 	}
 
 	seen := make(map[string]struct{}, len(idx.Documents))
-	for _, doc := range idx.Documents {
+	for i := range idx.Documents {
+		doc := &idx.Documents[i]
 		if strings.TrimSpace(doc.ID) == "" {
 			return ErrMissingID
 		}
@@ -505,9 +506,9 @@ func (idx *Index) Store() (*Store, error) {
 		return nil, err
 	}
 
-	for _, doc := range idx.Documents {
-		if err := store.Add(doc); err != nil {
-			return nil, fmt.Errorf("load vector document %q: %w", doc.ID, err)
+	for i := range idx.Documents {
+		if err := store.Add(idx.Documents[i]); err != nil {
+			return nil, fmt.Errorf("load vector document %q: %w", idx.Documents[i].ID, err)
 		}
 	}
 

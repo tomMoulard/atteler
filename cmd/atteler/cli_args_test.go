@@ -439,7 +439,9 @@ func TestTranslateCLIArgs_CanonicalDomainsAndAliasesRoute(t *testing.T) {
 		want []string
 	}{
 		{name: "canonical slash chat session", args: []string{"chat/session", "once", "hello"}, want: []string{"--once", "hello"}},
-		{name: "canonical slash memory rag", args: []string{"memory/rag", "search", "token", "refresh"}, want: []string{"--memory-search", "token refresh"}},
+		{name: "canonical slash memory retrieval", args: []string{"memory/retrieval", "search", "token", "refresh"}, want: []string{"--memory-search", "token refresh"}},
+		{name: "legacy memory rag alias", args: []string{"rag", "search", "token", "refresh"}, want: []string{"--memory-search", "token refresh"}},
+		{name: "legacy slash memory rag", args: []string{"memory/rag", "search", "token", "refresh"}, want: []string{"--memory-search", "token refresh"}},
 		{name: "config alias", args: []string{"cfg", "validate"}, want: []string{"--validate-config"}},
 		{name: "plugin domain alias", args: []string{"plugin", "describe", "runner"}, want: []string{"--describe-plugin", "runner"}},
 		{name: "plugin mcp manifest command alias", args: []string{"plugins", "manifest", "mcp.yaml"}, want: []string{"--mcp-manifest", "mcp.yaml"}},
@@ -491,6 +493,8 @@ func TestTranslateCLIArgs_AllDomainAliasesRouteDocumentedCommands(t *testing.T) 
 
 	for _, domain := range cliHelpDomains {
 		domainTokens := append([]string{domain.Name}, domain.Aliases...)
+		domainTokens = append(domainTokens, domain.HiddenAliases...)
+
 		for _, domainToken := range domainTokens {
 			t.Run(domain.Name+"/"+domainToken, func(t *testing.T) {
 				t.Parallel()
@@ -1008,7 +1012,10 @@ func TestTranslateCLIArgs_HelpPreservesAllDomainAliases(t *testing.T) {
 	t.Parallel()
 
 	for _, domain := range cliHelpDomains {
-		for _, token := range append([]string{domain.Name}, domain.Aliases...) {
+		tokens := append([]string{domain.Name}, domain.Aliases...)
+		tokens = append(tokens, domain.HiddenAliases...)
+
+		for _, token := range tokens {
 			t.Run(domain.Name+"/"+token, func(t *testing.T) {
 				t.Parallel()
 

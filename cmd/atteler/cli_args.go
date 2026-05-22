@@ -649,14 +649,20 @@ func lookupHelpDomain(name string) (cliHelpDomain, bool) {
 	name = normalizeHelpName(name)
 
 	for i := range cliHelpDomains {
-		domain := cliHelpDomains[i]
+		domain := &cliHelpDomains[i]
 		if normalizeHelpName(domain.Name) == name {
-			return domain, true
+			return *domain, true
 		}
 
 		for _, alias := range domain.Aliases {
 			if normalizeHelpName(alias) == name {
-				return domain, true
+				return *domain, true
+			}
+		}
+
+		for _, alias := range domain.HiddenAliases {
+			if normalizeHelpName(alias) == name {
+				return *domain, true
 			}
 		}
 	}

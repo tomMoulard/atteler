@@ -35,7 +35,7 @@ func TestPrintTopLevelHelp_ShrinksFlagCatalogToDomains(t *testing.T) {
 		"config",
 		"providers",
 		"agents",
-		"memory/rag",
+		"memory/retrieval",
 		"code-intel",
 		"review",
 		"watch",
@@ -203,8 +203,14 @@ func TestPrintCLIHelp_AllDomainAliasesRenderFocusedHelp(t *testing.T) {
 				require.NoError(t, err)
 
 				out := buf.String()
+
+				usageAlias := alias
+				if strings.Contains(alias, "/") {
+					usageAlias = usageNameForDomain(domain)
+				}
+
 				assert.Contains(t, out, domain.Title)
-				assert.Contains(t, out, "Usage: atteler "+alias+" <command> [args]")
+				assert.Contains(t, out, "Usage: atteler "+usageAlias+" <command> [args]")
 				assert.Contains(t, out, "Examples:")
 				assert.Contains(t, out, "Aliases:")
 				assert.NotContains(t, out, "Compatibility flag catalog:")
@@ -374,7 +380,7 @@ func TestCLIHelpDomains_MatchAcceptanceDomains(t *testing.T) {
 		"config",
 		"providers",
 		"agents",
-		"memory/rag",
+		"memory/retrieval",
 		"code-intel",
 		"review",
 		"watch",
@@ -745,8 +751,14 @@ func TestPrintCLIHelp_DomainAliasesRenderSameFocusedHelp(t *testing.T) {
 				require.NoError(t, err)
 
 				out := buf.String()
+
+				usageAlias := alias
+				if strings.Contains(alias, "/") {
+					usageAlias = usageNameForDomain(domain)
+				}
+
 				assert.Contains(t, out, domain.Title)
-				assert.Contains(t, out, "Usage: atteler "+alias+" <command> [args]")
+				assert.Contains(t, out, "Usage: atteler "+usageAlias+" <command> [args]")
 				assert.Contains(t, out, "Examples:")
 			})
 		}
@@ -758,7 +770,7 @@ func TestPrintCLIHelp_RequestedAliasDrivesUsage(t *testing.T) {
 
 	tests := map[string]string{
 		"session":  "Usage: atteler session <command> [args]",
-		"rag":      "Usage: atteler rag <command> [args]",
+		"rag":      "Usage: atteler memory <command> [args]",
 		"cfg":      "Usage: atteler cfg <command> [args]",
 		"provider": "Usage: atteler provider <command> [args]",
 	}
@@ -777,12 +789,28 @@ func TestPrintCLIHelp_RequestedAliasDrivesUsage(t *testing.T) {
 	}
 }
 
+func TestPrintCLIHelp_HidesLegacyRAGAliases(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+
+	err := printCLIHelp(&buf, flag.NewFlagSet("test", flag.ContinueOnError), "rag")
+	require.NoError(t, err)
+
+	out := buf.String()
+	assert.Contains(t, out, "Usage: atteler memory <command> [args]")
+	assert.Contains(t, out, "Aliases: memory, retrieval, mem")
+	assert.NotContains(t, out, "memory/rag")
+	assert.NotContains(t, out, "Aliases: memory, retrieval, rag")
+}
+
 func TestPrintCLIHelp_SlashDomainsPreferHumanAliasInUsage(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"chat/session": "Usage: atteler chat <command> [args]",
-		"memory/rag":   "Usage: atteler memory <command> [args]",
+		"chat/session":     "Usage: atteler chat <command> [args]",
+		"memory/retrieval": "Usage: atteler memory <command> [args]",
+		"memory/rag":       "Usage: atteler memory <command> [args]",
 	}
 
 	for domainName, want := range tests {
@@ -818,9 +846,12 @@ func TestFlagDomain_CoversAcceptanceDomains(t *testing.T) {
 		commandOllamaStatus:                  "providers",
 		"plan-agents":                        "agents",
 		"prompt-local-only":                  "agents",
-		"memory-search":                      "memory/rag",
-		"memory-redact":                      "memory/rag",
-		"memory-retention-days":              "memory/rag",
+		"memory-search":                      "memory/retrieval",
+		"memory-redact":                      "memory/retrieval",
+		"memory-retention-days":              "memory/retrieval",
+		"memory-ttl-seconds":                 "memory/retrieval",
+		"memory-include-session-messages":    "memory/retrieval",
+		"memory-include-worktree-metadata":   "memory/retrieval",
 		"code-symbol-prefix":                 "code-intel",
 		"code-limit":                         "code-intel",
 		"code-offset":                        "code-intel",
@@ -832,7 +863,7 @@ func TestFlagDomain_CoversAcceptanceDomains(t *testing.T) {
 		"record-evaluation":                  "eval",
 		"route-cache-reuse":                  "providers",
 		"route-cache-write-tokens":           "providers",
-		"agent-memory-index":                 "memory/rag",
+		"agent-memory-index":                 "memory/retrieval",
 		"lsp-workspace-symbols":              "code-intel",
 		"merge-worktree":                     "worktrees",
 		"plugin-timeout-seconds":             "plugins",
@@ -842,10 +873,10 @@ func TestFlagDomain_CoversAcceptanceDomains(t *testing.T) {
 		"watch-max-iterations":               "watch",
 		"code-file-import-prefix":            "code-intel",
 		"agent-performance-summary":          "agents",
-		"agent-memory-delete":                "memory/rag",
-		"agent-memory-compact":               "memory/rag",
-		"agent-memory-migrate":               "memory/rag",
-		"agent-memory-ttl-seconds":           "memory/rag",
+		"agent-memory-delete":                "memory/retrieval",
+		"agent-memory-compact":               "memory/retrieval",
+		"agent-memory-migrate":               "memory/retrieval",
+		"agent-memory-ttl-seconds":           "memory/retrieval",
 	}
 
 	for flagName, want := range tests {
