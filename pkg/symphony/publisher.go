@@ -372,7 +372,10 @@ func (p *githubPublisher) updatePullRequestBranch(ctx context.Context, dir, bran
 	}
 
 	if _, rebaseErr := p.git(ctx, dir, nil, "rebase", baseRemote); rebaseErr != nil {
-		if _, abortErr := p.git(context.WithoutCancel(ctx), dir, nil, "rebase", "--abort"); abortErr != nil {
+		// Best-effort cleanup: when rebase exits with a merge conflict ctx is
+		// still alive and the abort succeeds. If ctx was already canceled the
+		// abort will fail too, but the workspace is being torn down anyway.
+		if _, abortErr := p.git(ctx, dir, nil, "rebase", "--abort"); abortErr != nil {
 			return "", fmt.Errorf("publish: rebase %s onto %s failed and abort failed: %w; abort: %w", branch, baseRemote, rebaseErr, abortErr)
 		}
 		return "", fmt.Errorf("publish: rebase %s onto %s: %w", branch, baseRemote, rebaseErr)
