@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -779,6 +780,300 @@ func TestRunShellCommand_StartsTaskTimer(t *testing.T) {
 	assert.Equal(t, 1, next.runningTaskID)
 }
 
+func TestPromptTextareaBindsShiftEnterForNewline(t *testing.T) {
+	t.Parallel()
+
+	ta := newPromptTextarea()
+
+	assert.Equal(t, []string{keyShiftEnter, keyAltEnter}, ta.KeyMap.InsertNewline.Keys())
+	assert.Contains(t, ta.KeyMap.InsertNewline.Help().Key, "shift/alt+enter")
+	assert.Contains(t, promptInputHelp, "Shift/Alt+Enter newline")
+	assert.Contains(t, ta.Placeholder, "Shift/Alt+Enter newline")
+	assert.Contains(t, ta.Placeholder, "Enter to send")
+}
+
+func TestEnableTerminalShiftEnterReportingUsesKeyboardEnhancementStack(t *testing.T) {
+	t.Parallel()
+
+	var out strings.Builder
+
+	restore := enableTerminalShiftEnterReporting(&out)
+	assert.Equal(t, "\x1b[>1u", out.String())
+
+	restore()
+	assert.Equal(t, "\x1b[>1u\x1b[<1u", out.String())
+}
+
+func TestUpdate_ShiftEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea: newPromptTextarea(),
+		waiting:  true,
+	}
+	m.textarea.SetValue("first line")
+	m.textarea.CursorEnd()
+
+	nextModel, _ := m.Update(fakeUnknownCSI("13;2u"))
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	assert.True(t, next.waiting)
+	assert.Empty(t, next.queuedPrompts)
+	assert.Equal(t, "first line\n", next.textarea.Value())
+}
+
+func TestUpdate_ShiftEnterSplitsInputAtCursor(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea: newPromptTextarea(),
+		waiting:  true,
+	}
+	m.textarea.SetValue("firstsecond")
+	m.textarea.SetCursor(len("first"))
+
+	nextModel, _ := m.Update(fakeUnknownCSI("13;2u"))
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	assert.True(t, next.waiting)
+	assert.Empty(t, next.queuedPrompts)
+	assert.Equal(t, "first\nsecond", next.textarea.Value())
+}
+
+func TestUpdate_TerminalReportedAltEnterInsertsNewline(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea: newPromptTextarea(),
+		waiting:  true,
+	}
+	m.textarea.SetValue("first line")
+	m.textarea.CursorEnd()
+
+	nextModel, _ := m.Update(fakeUnknownCSI("13;3u"))
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	assert.True(t, next.waiting)
+	assert.Empty(t, next.queuedPrompts)
+	assert.Equal(t, "first line\n", next.textarea.Value())
+}
+
+func TestUpdate_NativeAltEnterInsertsNewline(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea: newPromptTextarea(),
+		waiting:  true,
+	}
+	m.textarea.SetValue("first line")
+	m.textarea.CursorEnd()
+
+	nextModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	assert.True(t, next.waiting)
+	assert.Empty(t, next.queuedPrompts)
+	assert.Equal(t, "first line\n", next.textarea.Value())
+}
+
+func TestUpdate_EnterStillSubmitsInput(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea:            newPromptTextarea(),
+		waiting:             true,
+		promptHistoryCursor: -1,
+	}
+	m.textarea.SetValue("first line")
+
+	nextModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, cmd)
+	assert.True(t, next.waiting)
+	assert.Empty(t, next.textarea.Value())
+	assert.Equal(t, []string{"first line"}, next.queuedPrompts)
+}
+
+func TestUpdate_TerminalReportedEnterStillSubmitsInput(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea:            newPromptTextarea(),
+		waiting:             true,
+		promptHistoryCursor: -1,
+	}
+	m.textarea.SetValue("first line")
+
+	nextModel, cmd := m.Update(fakeUnknownCSI("13;1u"))
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, cmd)
+	assert.True(t, next.waiting)
+	assert.Empty(t, next.textarea.Value())
+	assert.Equal(t, []string{"first line"}, next.queuedPrompts)
+}
+
+func TestUpdate_TerminalReportedCtrlOStillOpensModelPicker(t *testing.T) {
+	t.Parallel()
+
+	nextModel, _ := (model{
+		ctx:      context.Background(),
+		registry: llm.NewRegistry(),
+	}).Update(fakeUnknownCSI("111;5u"))
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	assert.True(t, next.pickerOpen)
+}
+
+func TestUpdate_MultilineInputCanBeSubmitted(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		textarea:            newPromptTextarea(),
+		waiting:             true,
+		promptHistoryCursor: -1,
+	}
+	m.textarea.SetValue("first line")
+	m.textarea.CursorEnd()
+
+	nextModel, _ := m.Update(fakeUnknownCSI("13;2u"))
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+
+	nextModel, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("second line")})
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+
+	nextModel, cmd := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, cmd)
+	assert.Empty(t, next.textarea.Value())
+	assert.Equal(t, []string{"first line\nsecond line"}, next.queuedPrompts)
+	assert.Equal(t, []string{"first line\nsecond line"}, next.promptHistory)
+}
+
+func TestIsShiftEnterKeyName(t *testing.T) {
+	t.Parallel()
+
+	for _, keyName := range []string{
+		keyShiftEnter,
+		fakeUnknownCSI("13;2u").String(),
+		fakeUnknownCSI("13;2:1u").String(),
+		fakeUnknownCSI("13;2:2u").String(),
+		fakeUnknownCSI("13;66u").String(),
+		fakeUnknownCSI("13;130u").String(),
+		fakeUnknownCSI("13;2~").String(),
+		fakeUnknownCSI("27;2;13~").String(),
+		fakeUnknownCSI("27;130;13~").String(),
+		"\x1b[13;2u",
+	} {
+		assert.True(t, isShiftEnterKeyName(keyName), "keyName %q", keyName)
+	}
+
+	for _, keyName := range []string{
+		keyEnter,
+		keyAltEnter,
+		fakeUnknownCSI("13;1u").String(),
+		fakeUnknownCSI("13;2:3u").String(),
+		fakeUnknownCSI("13;2:1:1u").String(),
+		fakeUnknownCSI("13;2;99u").String(),
+		fakeUnknownCSI("13;258u").String(),
+		fakeUnknownCSI("13;5u").String(),
+		fakeUnknownCSI("13;6u").String(),
+		fakeUnknownCSI("27;5;13~").String(),
+		"?CSI[wat]?",
+	} {
+		assert.False(t, isShiftEnterKeyName(keyName), "keyName %q", keyName)
+	}
+}
+
+func TestIsAltEnterKeyName(t *testing.T) {
+	t.Parallel()
+
+	for _, keyName := range []string{
+		keyAltEnter,
+		fakeUnknownCSI("13;3u").String(),
+		fakeUnknownCSI("13;3:1u").String(),
+		fakeUnknownCSI("13;3:2u").String(),
+		fakeUnknownCSI("13;67u").String(),
+		fakeUnknownCSI("13;131u").String(),
+		fakeUnknownCSI("13;3~").String(),
+		fakeUnknownCSI("27;3;13~").String(),
+		fakeUnknownCSI("27;131;13~").String(),
+		"\x1b[13;3u",
+	} {
+		assert.True(t, isAltEnterKeyName(keyName), "keyName %q", keyName)
+	}
+
+	for _, keyName := range []string{
+		keyEnter,
+		keyShiftEnter,
+		fakeUnknownCSI("13;1u").String(),
+		fakeUnknownCSI("13;3:3u").String(),
+		fakeUnknownCSI("13;3:1:1u").String(),
+		fakeUnknownCSI("13;3;99u").String(),
+		fakeUnknownCSI("13;259u").String(),
+		fakeUnknownCSI("13;5u").String(),
+		fakeUnknownCSI("13;6u").String(),
+		fakeUnknownCSI("27;5;13~").String(),
+		"?CSI[wat]?",
+	} {
+		assert.False(t, isAltEnterKeyName(keyName), "keyName %q", keyName)
+	}
+}
+
+func TestTerminalControlKeyMsg(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		msg  tea.Msg
+		want string
+	}{
+		{name: "enter without modifier field", msg: fakeUnknownCSI("13u"), want: keyEnter},
+		{name: "enter with explicit no modifier", msg: fakeUnknownCSI("13;1u"), want: keyEnter},
+		{name: "enter with empty modifier field", msg: fakeUnknownCSI("13;u"), want: keyEnter},
+		{name: "escape", msg: fakeUnknownCSI("27u"), want: keyEsc},
+		{name: "tab", msg: fakeUnknownCSI("9u"), want: "tab"},
+		{name: "shift tab", msg: fakeUnknownCSI("9;2u"), want: "shift+tab"},
+		{name: "backspace", msg: fakeUnknownCSI("127u"), want: "backspace"},
+		{name: "ctrl c", msg: fakeUnknownCSI("99;5u"), want: keyCtrlC},
+		{name: "ctrl d", msg: fakeUnknownCSI("100;5u"), want: "ctrl+d"},
+		{name: "ctrl o", msg: fakeUnknownCSI("111;5u"), want: "ctrl+o"},
+		{name: "ctrl r", msg: fakeUnknownCSI("114;5u"), want: "ctrl+r"},
+		{name: "ctrl z", msg: fakeUnknownCSI("122;5u"), want: "ctrl+z"},
+		{name: "ctrl uppercase o", msg: fakeUnknownCSI("79;5u"), want: "ctrl+o"},
+		{name: "ctrl o with caps lock", msg: fakeUnknownCSI("111;69u"), want: "ctrl+o"},
+		{name: "ctrl o with num lock", msg: fakeUnknownCSI("111;133u"), want: "ctrl+o"},
+		{name: "enter with caps lock", msg: fakeUnknownCSI("13;65u"), want: keyEnter},
+		{name: "enter with num lock", msg: fakeUnknownCSI("13;129u"), want: keyEnter},
+		{name: "raw enter", msg: stringerMsg("\x1b[13u"), want: keyEnter},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := terminalControlKeyMsg(tt.msg)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, got.String())
+		})
+	}
+
+	for _, msg := range []tea.Msg{
+		tea.KeyMsg{Type: tea.KeyEnter},
+		fakeUnknownCSI("13;2u"),
+		fakeUnknownCSI("13;1:3u"),
+		fakeUnknownCSI("13;258u"),
+		fakeUnknownCSI("97;2;65u"),
+		fakeUnknownCSI("111;6u"),
+		fakeUnknownCSI("13;1;99u"),
+	} {
+		got, ok := terminalControlKeyMsg(msg)
+		assert.False(t, ok, "msg %q produced %q", msg, got.String())
+	}
+}
+
 func TestRunningTaskUpdatesTerminalTitle(t *testing.T) {
 	t.Parallel()
 
@@ -971,6 +1266,18 @@ func toStringMsg(msg tea.Msg) string {
 	return fmt.Sprint(msg)
 }
 
+type fakeUnknownCSI string
+
+func (f fakeUnknownCSI) String() string {
+	return fmt.Sprintf("?CSI%+v?", []byte(string(f)))
+}
+
+type stringerMsg string
+
+func (s stringerMsg) String() string {
+	return string(s)
+}
+
 func TestRevampPromptAndUndo(t *testing.T) {
 	t.Parallel()
 
@@ -1086,4 +1393,66 @@ type panicWriter struct{}
 
 func (panicWriter) Write([]byte) (int, error) {
 	panic("hook logger should not be used before the TUI program starts")
+}
+
+//nolint:paralleltest // Captures process stdout while runInteractive uses fmt.Println.
+func TestRunInteractiveHeaderShowsInputNewlineHelp(t *testing.T) {
+	originalRunInteractiveProgram := runInteractiveProgram
+	runInteractiveProgram = func(m model) (tea.Model, error) {
+		return m, nil
+	}
+
+	t.Cleanup(func() {
+		runInteractiveProgram = originalRunInteractiveProgram
+	})
+
+	store := session.NewStore(t.TempDir())
+	state := appState{
+		registry:       llm.NewRegistry(),
+		agentRegistry:  agent.NewRegistry(nil),
+		hookRunner:     events.NewRunner(nil),
+		sessionStore:   store,
+		sessionState:   session.New("gpt-test", nil),
+		contextOptions: contextref.Options{Root: t.TempDir()},
+		selectedModel:  "gpt-test",
+		cwd:            t.TempDir(),
+	}
+
+	output := captureStdout(t, func() {
+		require.NoError(t, runInteractive(context.Background(), state))
+	})
+
+	assert.Equal(t, 1, strings.Count(output, "\x1b[>1u"))
+	assert.Equal(t, 1, strings.Count(output, "\x1b[<1u"))
+
+	plain := stripANSI(output)
+	assert.Contains(t, plain, "Ctrl+D to quit")
+	assert.Contains(t, plain, "Enter to send")
+	assert.Contains(t, plain, "Shift/Alt+Enter newline")
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	originalStdout := os.Stdout
+	readFile, writeFile, err := os.Pipe()
+	require.NoError(t, err)
+
+	os.Stdout = writeFile
+
+	t.Cleanup(func() {
+		os.Stdout = originalStdout
+	})
+
+	fn()
+
+	require.NoError(t, writeFile.Close())
+
+	output, err := io.ReadAll(readFile)
+	require.NoError(t, err)
+	require.NoError(t, readFile.Close())
+
+	os.Stdout = originalStdout
+
+	return string(output)
 }

@@ -21,6 +21,7 @@ func (m model) Init() tea.Cmd {
 
 // Update handles incoming messages.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	msg = normalizeTerminalControlKeyMsg(msg)
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -74,6 +75,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m.updateTextarea(msg)
+}
+
+func normalizeTerminalControlKeyMsg(msg tea.Msg) tea.Msg {
+	if keyMsg, ok := terminalControlKeyMsg(msg); ok {
+		return keyMsg
+	}
+
+	return msg
 }
 
 func (m model) updateIdleSuggestionMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -283,6 +292,14 @@ func relistenForCheckpoint(requestCh <-chan agentLoopConfirmRequest, responseCh 
 
 func (m model) updateTextarea(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
+	if stringer, ok := msg.(fmt.Stringer); ok &&
+		m.checkpointResponseCh == nil &&
+		!m.pickerOpen &&
+		!m.scopePickerOpen &&
+		isTerminalInputNewlineMsg(stringer) {
+		return m.insertInputNewline()
+	}
 
 	if !m.pickerOpen && !m.scopePickerOpen {
 		var taCmd tea.Cmd

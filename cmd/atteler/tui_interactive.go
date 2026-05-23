@@ -13,7 +13,19 @@ import (
 )
 
 func runInteractive(ctx context.Context, state appState) error {
-	fmt.Println(promptStyle.Render("atteler") + dimStyle.Render("  Ctrl+D to quit, Ctrl+O to pick model"))
+	restoreShiftEnterReporting := enableTerminalShiftEnterReporting(os.Stdout)
+
+	restoreTerminalKeyboard := func() {
+		if restoreShiftEnterReporting == nil {
+			return
+		}
+
+		restoreShiftEnterReporting()
+		restoreShiftEnterReporting = nil
+	}
+	defer restoreTerminalKeyboard()
+
+	fmt.Println(promptStyle.Render("atteler") + dimStyle.Render("  Ctrl+D to quit, "+promptInputHelp))
 
 	if len(state.loadedConfigPaths) > 0 {
 		fmt.Println(dimStyle.Render("  Config: " + strings.Join(state.loadedConfigPaths, ", ")))
@@ -86,6 +98,8 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.promptLocalOnly,
 		state.worktreeInfo,
 	))
+
+	restoreTerminalKeyboard()
 
 	// Once the program exits, restore the stderr logger so SessionEnd / Error
 	// events are visible after the TUI has released the screen.
