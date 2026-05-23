@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,6 +77,29 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	}
 }
 
+func TestSaveRecordedResponse_IncludesModelMode(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "response.json")
+	require.NoError(t, saveRecordedResponse(
+		path,
+		llm.CompleteParams{
+			Model:     "gpt-5.4",
+			ModelMode: llm.ModelModeFast,
+			Messages:  []llm.Message{{Role: llm.RoleUser, Content: "hello"}},
+		},
+		nil,
+		&llm.Response{Content: "answer", Model: "gpt-5.4"},
+	))
+
+	var record responseRecordFile
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &record))
+	assert.Equal(t, llm.ModelModeFast, record.Request.ModelMode)
+}
+
 func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	t.Parallel()
 
@@ -85,6 +109,7 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 		AgentLoopCheckpointPath: "/tmp/session.agentloop.jsonl",
 		HeadlessID:              "headless-id",
 		Model:                   "gpt-test",
+		ModelMode:               llm.ModelModeFast,
 		Content:                 "answer",
 		TokenUsage:              tokenUsage{InputTokens: 1, CachedInputTokens: 2, OutputTokens: 3, Responses: 1},
 	}
@@ -101,6 +126,7 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	assert.Equal(t, result.SessionID, decoded.SessionID)
 	assert.Equal(t, result.HeadlessID, decoded.HeadlessID)
 	assert.Equal(t, result.AgentLoopCheckpointPath, decoded.AgentLoopCheckpointPath)
+	assert.Equal(t, result.ModelMode, decoded.ModelMode)
 	assert.Equal(t, result.TokenUsage.OutputTokens, decoded.TokenUsage.OutputTokens)
 	assert.Empty(t, stderr.String())
 
@@ -141,7 +167,7 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 		"gpt-test",
 		"",
 		nil,
-		generationSettings{},
+		generationSettings{ModelMode: llm.ModelModeFast},
 		generationSettings{},
 		0,
 		runOnceExecutionOptions{
@@ -159,6 +185,7 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, session.HeadlessStatusCompleted, run.Status)
 	assert.Equal(t, "gpt-test", run.Model)
+	assert.Equal(t, llm.ModelModeFast, run.ModelMode)
 	assert.NotNil(t, run.CompletedAt)
 
 	log, err := store.ReadHeadlessLog(headlessID)

@@ -20,6 +20,7 @@ type Agent struct {
 	ToolPermissions map[string]bool
 	Name            string
 	Model           string
+	ModelMode       string
 	Mode            string
 	Description     string
 	Personality     string
@@ -54,6 +55,7 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 		registry.agents[name] = Agent{
 			Name:            name,
 			Model:           cfg.Model,
+			ModelMode:       strings.TrimSpace(cfg.ModelMode),
 			Mode:            strings.TrimSpace(cfg.Mode),
 			ToolPermissions: cloneToolPermissions(cfg.ToolPermissions),
 			Description:     strings.TrimSpace(cfg.Description),
@@ -211,6 +213,7 @@ func (a Agent) CompleteParams(model string, messages []llm.Message) llm.Complete
 
 	params := llm.CompleteParams{
 		Model:          model,
+		ModelMode:      a.ModelMode,
 		Messages:       requestMessages,
 		MaxTokens:      a.MaxTokens,
 		Temperature:    a.Temperature,

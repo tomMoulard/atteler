@@ -156,6 +156,7 @@ type generationSettings struct {
 	Temperature    *float64
 	TopP           *float64
 	Seed           *int
+	ModelMode      string
 	ReasoningLevel string
 	MaxTokens      int
 }
@@ -342,6 +343,7 @@ type cliOptions struct {
 	evalExitCode                       nonNegativeIntFlag
 	seed                               nonNegativeIntFlag
 	reasoningLevel                     string
+	modelMode                          string
 	temperature                        floatFlag
 	routeBudget                        floatFlag
 	routeCacheReuse                    floatFlag

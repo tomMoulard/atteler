@@ -39,6 +39,7 @@ type ProviderCapabilities struct {
 	CompleteParams                map[string]CompleteParamSupport `json:"complete_params"`
 	SupportsSeed                  bool                            `json:"supports_seed"`
 	SupportsTools                 bool                            `json:"supports_tools"`
+	SupportsModelMode             bool                            `json:"supports_model_mode"`
 	SupportsReasoning             bool                            `json:"supports_reasoning"`
 	SupportsCacheAccounting       bool                            `json:"supports_cache_accounting"`
 	SupportsStreaming             bool                            `json:"supports_streaming"`
@@ -104,6 +105,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 	providerOpenAI: {
 		SupportsSeed:                  true,
 		SupportsTools:                 true,
+		SupportsModelMode:             true,
 		SupportsReasoning:             true,
 		SupportsCacheAccounting:       true,
 		SupportsStreaming:             false,
@@ -113,6 +115,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 			"TopP":           supported("maps to chat.completions top_p"),
 			"Seed":           supported("maps to chat.completions seed"),
 			"Model":          supported("maps to model"),
+			"ModelMode":      supported("maps fast mode to service_tier=priority"),
 			"ReasoningLevel": supported("maps to reasoning_effort"),
 			"Messages":       lossy("maps to chat.completions messages; ToolResult.IsError is not represented"),
 			"Stop":           supported("maps to stop"),
@@ -123,6 +126,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 	providerAnthropic: {
 		SupportsSeed:                  false,
 		SupportsTools:                 true,
+		SupportsModelMode:             false,
 		SupportsReasoning:             true,
 		SupportsCacheAccounting:       true,
 		SupportsStreaming:             false,
@@ -132,6 +136,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 			"TopP":           supported("maps to messages top_p"),
 			"Seed":           unsupported("Anthropic Messages has no seed parameter"),
 			"Model":          supported("maps to model"),
+			"ModelMode":      unsupported("Anthropic Messages has no OpenAI model mode/service tier equivalent"),
 			"ReasoningLevel": lossy("maps Atteler levels to Anthropic thinking token budgets"),
 			"Messages":       lossy("system messages are lifted to system; tool results become user content blocks"),
 			"Stop":           supported("maps to stop_sequences"),
@@ -142,6 +147,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 	providerClaudeCode: {
 		SupportsSeed:                  false,
 		SupportsTools:                 true,
+		SupportsModelMode:             false,
 		SupportsReasoning:             true,
 		SupportsCacheAccounting:       true,
 		SupportsStreaming:             false,
@@ -151,6 +157,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 			"TopP":           supported("maps to Anthropic Messages top_p"),
 			"Seed":           unsupported("Claude Code OAuth path uses Anthropic Messages, which has no seed parameter"),
 			"Model":          supported("maps to model"),
+			"ModelMode":      unsupported("Claude Code OAuth path has no OpenAI model mode/service tier equivalent"),
 			"ReasoningLevel": lossy("maps Atteler levels to Anthropic thinking token budgets"),
 			"Messages":       lossy("system messages are lifted to system; tool results become user content blocks"),
 			"Stop":           supported("maps to stop_sequences"),
@@ -161,6 +168,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 	providerCodex: {
 		SupportsSeed:                  false,
 		SupportsTools:                 true,
+		SupportsModelMode:             true,
 		SupportsReasoning:             true,
 		SupportsCacheAccounting:       true,
 		SupportsStreaming:             true,
@@ -170,6 +178,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 			"TopP":           unsupported("Codex ChatGPT responses endpoint does not expose top_p in this adapter"),
 			"Seed":           unsupported("Codex ChatGPT responses endpoint does not expose seed in this adapter"),
 			"Model":          supported("maps to model"),
+			"ModelMode":      supported("maps fast mode to Responses service_tier=priority"),
 			"ReasoningLevel": supported("maps to responses reasoning.effort"),
 			"Messages":       lossy("system messages become instructions; tool calls/results become Responses input items; ToolResult.IsError is not represented"),
 			"Stop":           unsupported("Codex ChatGPT responses endpoint does not expose stop sequences in this adapter"),
@@ -180,6 +189,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 	providerOllama: {
 		SupportsSeed:                  true,
 		SupportsTools:                 true,
+		SupportsModelMode:             false,
 		SupportsReasoning:             true,
 		SupportsCacheAccounting:       false,
 		SupportsStreaming:             true,
@@ -189,6 +199,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 			"TopP":           supported("maps to options.top_p"),
 			"Seed":           supported("maps to options.seed"),
 			"Model":          supported("maps to model"),
+			"ModelMode":      unsupported("Ollama has no OpenAI model mode/service tier equivalent"),
 			"ReasoningLevel": lossy("maps Atteler levels to Ollama think false/low/medium/high"),
 			"Messages":       lossy("tool-call IDs, tool-result IDs, and ToolResult.IsError are not represented in Ollama chat messages"),
 			"Stop":           supported("maps to options.stop"),
@@ -236,6 +247,10 @@ func validateCompleteParamsSupported(providerName string, params CompleteParams)
 		return fmt.Errorf("%s: CompleteParams.MaxTokens must be non-negative, got %d", providerName, params.MaxTokens)
 	}
 
+	if err := validateModelMode(params.ModelMode); err != nil {
+		return fmt.Errorf("%s: CompleteParams.ModelMode: %w", providerName, err)
+	}
+
 	if err := validateCompleteParamsWireSafe(providerName, params); err != nil {
 		return err
 	}
@@ -248,6 +263,7 @@ func validateCompleteParamsSupported(providerName string, params CompleteParams)
 		{name: "TopP", set: params.TopP != nil},
 		{name: "Seed", set: params.Seed != nil},
 		{name: "Model", set: strings.TrimSpace(params.Model) != ""},
+		{name: "ModelMode", set: normalizeModelMode(params.ModelMode) != ""},
 		{name: "ReasoningLevel", set: strings.TrimSpace(params.ReasoningLevel) != ""},
 		{name: "Messages", set: len(params.Messages) > 0},
 		{name: "Stop", set: len(params.Stop) > 0},

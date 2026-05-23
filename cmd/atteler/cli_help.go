@@ -323,7 +323,7 @@ func lookupFlagDomain(name string) (string, bool) {
 		return "config", true
 	case name == "model" || name == "list-models" || name == "list-known-models" ||
 		name == "list-providers" || name == "temperature" || name == "top-p" ||
-		name == "max-tokens" || name == "seed" || name == "reasoning-level" ||
+		name == "max-tokens" || name == "seed" || name == "reasoning-level" || name == "model-mode" ||
 		name == "max-input-tokens" || strings.HasPrefix(name, "route-"):
 		return "providers", true
 	case name == "agent" || name == "list-agents" || name == "describe-agent" ||

@@ -6,6 +6,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/agent"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -64,20 +65,37 @@ func resolveAgent(agents *agent.Registry, selectedAgent, input string) (agentSel
 
 func generationOverridesFromState(opts cliOptions, selection selectionState, persistedState appconfig.State, cwd string) generationSettings {
 	generation := generationFromOptions(opts)
-	if generation.ReasoningLevel != "" {
-		return generation
+
+	if generation.ReasoningLevel == "" {
+		if level := strings.TrimSpace(selection.sessionState.DefaultReasoningLevel); level != "" {
+			generation.ReasoningLevel = level
+		} else if level := strings.TrimSpace(persistedState.ReasoningLevelForFolder(cwd)); level != "" {
+			generation.ReasoningLevel = level
+		}
 	}
 
-	if level := strings.TrimSpace(selection.sessionState.DefaultReasoningLevel); level != "" {
-		generation.ReasoningLevel = level
-		return generation
-	}
-
-	if level := strings.TrimSpace(persistedState.ReasoningLevelForFolder(cwd)); level != "" {
-		generation.ReasoningLevel = level
+	if generation.ModelMode == "" {
+		generation.ModelMode = modelModeOverrideFromState(selection, persistedState, cwd)
 	}
 
 	return generation
+}
+
+func modelModeOverrideFromState(selection selectionState, persistedState appconfig.State, cwd string) string {
+	if mode := strings.TrimSpace(selection.sessionState.DefaultModelMode); mode != "" {
+		return mode
+	}
+
+	resolution := persistedState.ResolveModelModePreference(cwd)
+	if mode := strings.TrimSpace(resolution.Value); mode != "" {
+		return mode
+	}
+
+	if resolution.Source != "" {
+		return llm.ModelModeDefault
+	}
+
+	return ""
 }
 
 type selectionState struct {

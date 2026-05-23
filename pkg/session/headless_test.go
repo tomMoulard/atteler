@@ -26,6 +26,7 @@ func TestStore_SaveLoadListHeadlessRuns(t *testing.T) {
 		SessionPath: store.Path("session-one"),
 		Prompt:      "first prompt",
 		Model:       "gpt-5.5",
+		ModelMode:   "fast",
 		Agent:       "executor",
 		Status:      HeadlessStatusRunning,
 	}
@@ -53,6 +54,7 @@ func TestStore_SaveLoadListHeadlessRuns(t *testing.T) {
 	assert.Equal(t, first.SessionPath, loaded.SessionPath)
 	assert.Equal(t, first.Prompt, loaded.Prompt)
 	assert.Equal(t, first.Model, loaded.Model)
+	assert.Equal(t, first.ModelMode, loaded.ModelMode)
 	assert.Equal(t, first.Agent, loaded.Agent)
 	assert.Equal(t, HeadlessStatusRunning, loaded.Status)
 	assert.Equal(t, filepath.Join(store.Dir(), "headless", first.ID+".log"), loaded.LogPath)

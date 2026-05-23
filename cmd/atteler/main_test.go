@@ -239,6 +239,7 @@ func TestGenerationForRequest_Precedence(t *testing.T) {
 		agent: agent.Agent{
 			Temperature:    &agentTemp,
 			Seed:           &agentSeed,
+			ModelMode:      llm.ModelModeFast,
 			ReasoningLevel: "high",
 			MaxTokens:      100,
 		},
@@ -266,6 +267,10 @@ func TestGenerationForRequest_Precedence(t *testing.T) {
 		require.Failf(t, "unexpected failure", "reasoning level = %q, want agent override", generation.ReasoningLevel)
 	}
 
+	if generation.ModelMode != llm.ModelModeFast {
+		require.Failf(t, "unexpected failure", "model mode = %q, want agent override", generation.ModelMode)
+	}
+
 	if generation.MaxTokens != 100 {
 		require.Failf(t, "unexpected failure", "max tokens = %d, want agent override", generation.MaxTokens)
 	}
@@ -285,6 +290,42 @@ func TestGenerationForRequest_CLIReasoningLevelOverridesAgent(t *testing.T) {
 	}
 }
 
+func TestGenerationForRequest_CLIModelModeOverridesAgent(t *testing.T) {
+	t.Parallel()
+
+	generation := generationForRequest(
+		generationSettings{ModelMode: llm.ModelModeDefault},
+		generationSettings{ModelMode: llm.ModelModeFast},
+		agentSelection{ok: true, agent: agent.Agent{ModelMode: llm.ModelModeDefault}},
+	)
+
+	if generation.ModelMode != llm.ModelModeFast {
+		require.Failf(t, "unexpected failure", "model mode = %q, want CLI override", generation.ModelMode)
+	}
+}
+
+func TestGenerationOverridesFromState_ModelModeDefaultSentinelOverridesConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	persisted := config.State{DefaultModelMode: llm.ModelModeFast}
+	persisted.SetModelMode(config.ModelScopeFolder, dir, llm.ModelModeDefault)
+
+	overrides := generationOverridesFromState(cliOptions{}, selectionState{}, persisted, dir)
+	if overrides.ModelMode != llm.ModelModeDefault {
+		require.Failf(t, "unexpected failure", "state model mode override = %q, want default", overrides.ModelMode)
+	}
+
+	generation := generationForRequest(
+		generationSettings{ModelMode: llm.ModelModeFast},
+		overrides,
+		agentSelection{},
+	)
+	if generation.ModelMode != llm.ModelModeDefault {
+		require.Failf(t, "unexpected failure", "model mode = %q, want explicit default override", generation.ModelMode)
+	}
+}
+
 func TestApplyGenerationParams_AllowsExplicitZeroTemperature(t *testing.T) {
 	t.Parallel()
 
@@ -292,7 +333,7 @@ func TestApplyGenerationParams_AllowsExplicitZeroTemperature(t *testing.T) {
 	seed := 0
 	params := llm.CompleteParams{}
 
-	applyGenerationParams(&params, generationSettings{Temperature: &temperature, Seed: &seed, ReasoningLevel: "low"})
+	applyGenerationParams(&params, generationSettings{Temperature: &temperature, Seed: &seed, ModelMode: llm.ModelModeFast, ReasoningLevel: "low"})
 
 	if params.Temperature == nil || *params.Temperature != 0 {
 		require.Failf(t, "unexpected failure", "temperature = %v, want explicit zero", params.Temperature)
@@ -300,6 +341,10 @@ func TestApplyGenerationParams_AllowsExplicitZeroTemperature(t *testing.T) {
 
 	if params.Seed == nil || *params.Seed != 0 {
 		require.Failf(t, "unexpected failure", "seed = %v, want explicit zero", params.Seed)
+	}
+
+	if params.ModelMode != llm.ModelModeFast {
+		require.Failf(t, "unexpected failure", "model mode = %q, want fast", params.ModelMode)
 	}
 }
 

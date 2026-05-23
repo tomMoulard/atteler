@@ -66,6 +66,9 @@ func (o *OpenAIProvider) Name() string { return providerOpenAI }
 // Models returns the static list of supported models (fallback).
 func (o *OpenAIProvider) Models() []string {
 	return []string{
+		modelOpenAIGPT54,
+		modelOpenAIGPT54Mini,
+		modelOpenAIGPT54Nano,
 		"gpt-4.1",
 		"gpt-4.1-mini",
 		"gpt-4.1-nano",
@@ -140,6 +143,7 @@ type openaiRequest struct {
 	TopP            *float64        `json:"top_p,omitempty"`
 	Seed            *int            `json:"seed,omitempty"`
 	Model           string          `json:"model"`
+	ServiceTier     string          `json:"service_tier,omitempty"`
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 	Messages        []openaiMessage `json:"messages"`
 	Stop            []string        `json:"stop,omitempty"`
@@ -283,6 +287,10 @@ func buildOpenAIRequest(params CompleteParams) (openaiRequest, error) {
 		req.ReasoningEffort = effort
 	}
 
+	if tier := openAIServiceTierForModelMode(params.ModelMode); tier != "" {
+		req.ServiceTier = tier
+	}
+
 	for _, tool := range params.Tools {
 		req.Tools = append(req.Tools, openaiTool{
 			Type:     "function",
@@ -405,6 +413,10 @@ func (o *OpenAIProvider) ModelContextWindow(model string) int {
 //nolint:cyclop // Flat model lookup table is clearer as a switch.
 func openaiContextWindow(model string) int {
 	switch model {
+	case modelOpenAIGPT54:
+		return 1_050_000
+	case modelOpenAIGPT54Mini, modelOpenAIGPT54Nano:
+		return 400_000
 	case "gpt-4.1":
 		return 1_047_576
 	case "gpt-4.1-mini":
@@ -428,6 +440,14 @@ func openaiContextWindow(model string) int {
 	case "gpt-4":
 		return 8_192
 	default:
+		if strings.HasPrefix(model, modelOpenAIGPT54Mini) || strings.HasPrefix(model, modelOpenAIGPT54Nano) {
+			return 400_000
+		}
+
+		if strings.HasPrefix(model, modelOpenAIGPT54) {
+			return 1_050_000
+		}
+
 		if strings.HasPrefix(model, "gpt-4.1") {
 			return 1_047_576
 		}

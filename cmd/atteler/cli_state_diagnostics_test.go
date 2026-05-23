@@ -15,7 +15,10 @@ import (
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
-const testReasoningLow = "low"
+const (
+	testReasoningLow        = "low"
+	testDiagnosticsModeFast = "fast"
+)
 
 func TestPrintStateDiagnostics_PrintsPathRevisionAndResolvedSources(t *testing.T) {
 	dir := t.TempDir()
@@ -65,9 +68,10 @@ func TestPrintStateDiagnostics_PrintsPathRevisionAndResolvedSources(t *testing.T
 func TestStateDiagnostics_PreferenceSources(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	state := appconfig.State{DefaultModel: "global-model", DefaultReasoningLevel: "medium"}
+	state := appconfig.State{DefaultModel: "global-model", DefaultReasoningLevel: "medium", DefaultModelMode: testDiagnosticsModeFast}
 	state.SetModel(appconfig.ModelScopeFolder, dir, "folder-model")
 	state.SetReasoningLevel(appconfig.ModelScopeFolder, dir, "high")
+	state.SetModelMode(appconfig.ModelScopeFolder, dir, testDiagnosticsModeFast)
 
 	cfg := appconfig.Config{DefaultModel: "config-model"}
 	cfg.Generation.ReasoningLevel = testReasoningLow
@@ -82,6 +86,11 @@ func TestStateDiagnostics_PreferenceSources(t *testing.T) {
 	assert.Equal(t, "high", reasoning.Selected)
 	assert.Equal(t, "state.folder", reasoning.Source)
 	assert.Equal(t, "folder", reasoning.Scope)
+
+	mode := modelModePreferenceReport(cliOptions{}, app, state, dir, stateSessionPreferences{})
+	assert.Equal(t, testDiagnosticsModeFast, mode.Selected)
+	assert.Equal(t, "state.folder", mode.Source)
+	assert.Equal(t, "folder", mode.Scope)
 }
 
 func TestStateDiagnostics_ReasoningDefaultSentinelNamesPersistedSource(t *testing.T) {
@@ -100,15 +109,31 @@ func TestStateDiagnostics_ReasoningDefaultSentinelNamesPersistedSource(t *testin
 	assert.Equal(t, "folder", reasoning.Scope)
 }
 
+func TestStateDiagnostics_ModelModeDefaultSentinelNamesPersistedSource(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	state := appconfig.State{DefaultModelMode: testDiagnosticsModeFast}
+	state.SetModelMode(appconfig.ModelScopeFolder, dir, "default")
+
+	cfg := appconfig.Config{}
+	cfg.Generation.ModelMode = testDiagnosticsModeFast
+	app := stateDiagnosticsTestApp(cfg)
+
+	mode := modelModePreferenceReport(cliOptions{}, app, state, dir, stateSessionPreferences{})
+	assert.Equal(t, stateDiagnosticsModelModeDefault, mode.Selected)
+	assert.Equal(t, "state.folder", mode.Source)
+	assert.Equal(t, "folder", mode.Scope)
+}
+
 func TestStateDiagnostics_FlagsOverridePersistedSources(t *testing.T) {
 	t.Parallel()
 
-	state := appconfig.State{DefaultModel: "global-model", DefaultReasoningLevel: "medium"}
+	state := appconfig.State{DefaultModel: "global-model", DefaultReasoningLevel: "medium", DefaultModelMode: "default"}
 
 	cfg := appconfig.Config{DefaultModel: "config-model"}
 	cfg.Generation.ReasoningLevel = testReasoningLow
 	app := stateDiagnosticsTestApp(cfg)
-	opts := cliOptions{model: "flag-model", reasoningLevel: "xhigh"}
+	opts := cliOptions{model: "flag-model", reasoningLevel: "xhigh", modelMode: testDiagnosticsModeFast}
 
 	model := modelPreferenceReport(opts, app, state, t.TempDir(), stateSessionPreferences{})
 	assert.Equal(t, "flag-model", model.Selected)
@@ -119,6 +144,11 @@ func TestStateDiagnostics_FlagsOverridePersistedSources(t *testing.T) {
 	assert.Equal(t, "xhigh", reasoning.Selected)
 	assert.Equal(t, "flag.--reasoning-level", reasoning.Source)
 	assert.Equal(t, "flag", reasoning.Scope)
+
+	mode := modelModePreferenceReport(opts, app, state, t.TempDir(), stateSessionPreferences{})
+	assert.Equal(t, testDiagnosticsModeFast, mode.Selected)
+	assert.Equal(t, "flag.--model-mode", mode.Source)
+	assert.Equal(t, "flag", mode.Scope)
 }
 
 func TestStateDiagnostics_AgentSources(t *testing.T) {
@@ -129,6 +159,7 @@ func TestStateDiagnostics_AgentSources(t *testing.T) {
 		Agents: map[string]appconfig.AgentConfig{
 			"reviewer": {
 				Model:          "agent-model",
+				ModelMode:      testDiagnosticsModeFast,
 				ReasoningLevel: "high",
 			},
 		},
@@ -146,6 +177,11 @@ func TestStateDiagnostics_AgentSources(t *testing.T) {
 	assert.Equal(t, "high", reasoning.Selected)
 	assert.Equal(t, "agent.reviewer.reasoning_level", reasoning.Source)
 	assert.Equal(t, "agent", reasoning.Scope)
+
+	mode := modelModePreferenceReport(opts, app, appconfig.State{}, t.TempDir(), stateSessionPreferences{})
+	assert.Equal(t, testDiagnosticsModeFast, mode.Selected)
+	assert.Equal(t, "agent.reviewer.model_mode", mode.Source)
+	assert.Equal(t, "agent", mode.Scope)
 }
 
 func TestStateDiagnostics_SessionSources(t *testing.T) {
@@ -156,6 +192,7 @@ func TestStateDiagnostics_SessionSources(t *testing.T) {
 		Agents: map[string]appconfig.AgentConfig{
 			"reviewer": {
 				Model:          "agent-model",
+				ModelMode:      testDiagnosticsModeFast,
 				ReasoningLevel: "high",
 			},
 		},
@@ -165,6 +202,7 @@ func TestStateDiagnostics_SessionSources(t *testing.T) {
 	sessionPrefs := stateSessionPreferences{
 		ID:            "demo",
 		DefaultModel:  "session-model",
+		DefaultMode:   "default",
 		DefaultReason: "medium",
 	}
 
@@ -177,6 +215,11 @@ func TestStateDiagnostics_SessionSources(t *testing.T) {
 	assert.Equal(t, "medium", reasoning.Selected)
 	assert.Equal(t, "session.default_reasoning_level", reasoning.Source)
 	assert.Equal(t, "session", reasoning.Scope)
+
+	mode := modelModePreferenceReport(cliOptions{}, app, appconfig.State{}, t.TempDir(), sessionPrefs)
+	assert.Equal(t, "default", mode.Selected)
+	assert.Equal(t, "session.default_model_mode", mode.Source)
+	assert.Equal(t, "session", mode.Scope)
 }
 
 func TestStateDiagnostics_LoadsSessionPreferences(t *testing.T) {
@@ -184,6 +227,7 @@ func TestStateDiagnostics_LoadsSessionPreferences(t *testing.T) {
 
 	store := session.NewStore(t.TempDir())
 	saved := session.New("session-model", nil)
+	saved.DefaultModelMode = testDiagnosticsModeFast
 	saved.DefaultReasoningLevel = "medium"
 	saved.DefaultAgent = "reviewer"
 	require.NoError(t, store.Save(saved))
@@ -192,6 +236,7 @@ func TestStateDiagnostics_LoadsSessionPreferences(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, saved.ID, got.ID)
 	assert.Equal(t, "session-model", got.DefaultModel)
+	assert.Equal(t, testDiagnosticsModeFast, got.DefaultMode)
 	assert.Equal(t, "medium", got.DefaultReason)
 	assert.Equal(t, "reviewer", got.DefaultAgent)
 }
@@ -204,6 +249,7 @@ func TestStateDiagnostics_SessionAgentSources(t *testing.T) {
 		Agents: map[string]appconfig.AgentConfig{
 			"reviewer": {
 				Model:          "agent-model",
+				ModelMode:      testDiagnosticsModeFast,
 				ReasoningLevel: "high",
 			},
 		},
@@ -224,6 +270,11 @@ func TestStateDiagnostics_SessionAgentSources(t *testing.T) {
 	assert.Equal(t, "high", reasoning.Selected)
 	assert.Equal(t, "agent.reviewer.reasoning_level", reasoning.Source)
 	assert.Equal(t, "agent", reasoning.Scope)
+
+	mode := modelModePreferenceReport(cliOptions{}, app, appconfig.State{}, t.TempDir(), sessionPrefs)
+	assert.Equal(t, testDiagnosticsModeFast, mode.Selected)
+	assert.Equal(t, "agent.reviewer.model_mode", mode.Source)
+	assert.Equal(t, "agent", mode.Scope)
 }
 
 func TestStateDiagnostics_AgentModelOverridesSessionModel(t *testing.T) {
@@ -255,6 +306,7 @@ func TestStateDiagnostics_FallsBackToConfigSources(t *testing.T) {
 
 	cfg := appconfig.Config{DefaultModel: "config-model"}
 	cfg.Generation.ReasoningLevel = testReasoningLow
+	cfg.Generation.ModelMode = testDiagnosticsModeFast
 	app := stateDiagnosticsTestApp(cfg)
 
 	model := modelPreferenceReport(cliOptions{}, app, appconfig.State{}, t.TempDir(), stateSessionPreferences{})
@@ -266,6 +318,11 @@ func TestStateDiagnostics_FallsBackToConfigSources(t *testing.T) {
 	assert.Equal(t, testReasoningLow, reasoning.Selected)
 	assert.Equal(t, "config.generation.reasoning_level", reasoning.Source)
 	assert.Equal(t, "config", reasoning.Scope)
+
+	mode := modelModePreferenceReport(cliOptions{}, app, appconfig.State{}, t.TempDir(), stateSessionPreferences{})
+	assert.Equal(t, testDiagnosticsModeFast, mode.Selected)
+	assert.Equal(t, "config.generation.model_mode", mode.Source)
+	assert.Equal(t, "config", mode.Scope)
 }
 
 func stateDiagnosticsTestApp(cfg appconfig.Config) appState {

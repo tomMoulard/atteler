@@ -10,12 +10,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testStateModelModeFast = "fast"
+
 func TestStateStore_SaveLoadYAML(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "state.yaml")
 	store := NewStateStore(path)
 
-	state := State{DefaultModel: "codex/gpt-5.5", DefaultReasoningLevel: "high"}
+	state := State{DefaultModel: "codex/gpt-5.5", DefaultReasoningLevel: "high", DefaultModelMode: testStateModelModeFast}
 	state.SetModel(ModelScopeFolder, t.TempDir(), "claude-code/claude-opus-4-6")
 
 	if err := store.Save(state); err != nil {
@@ -49,14 +51,19 @@ func TestStateStore_SaveLoadYAML(t *testing.T) {
 	if loaded.DefaultReasoningLevel != "high" {
 		require.Failf(t, "unexpected failure", "DefaultReasoningLevel = %q", loaded.DefaultReasoningLevel)
 	}
+
+	if loaded.DefaultModelMode != testStateModelModeFast {
+		require.Failf(t, "unexpected failure", "DefaultModelMode = %q", loaded.DefaultModelMode)
+	}
 }
 
 func TestState_ModelForFolderPrefersFolder(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	state := State{DefaultModel: "codex/gpt-5.5", DefaultReasoningLevel: "medium"}
+	state := State{DefaultModel: "codex/gpt-5.5", DefaultReasoningLevel: "medium", DefaultModelMode: testStateModelModeFast}
 	state.SetModel(ModelScopeFolder, dir, "claude-code/claude-opus-4-6")
 	state.SetReasoningLevel(ModelScopeFolder, dir, "xhigh")
+	state.SetModelMode(ModelScopeFolder, dir, testStateModelModeFast)
 
 	if got := state.ModelForFolder(dir); got != "claude-code/claude-opus-4-6" {
 		require.Failf(t, "unexpected failure", "folder model = %q", got)
@@ -66,12 +73,20 @@ func TestState_ModelForFolderPrefersFolder(t *testing.T) {
 		require.Failf(t, "unexpected failure", "folder reasoning = %q", got)
 	}
 
+	if got := state.ModelModeForFolder(dir); got != testStateModelModeFast {
+		require.Failf(t, "unexpected failure", "folder model mode = %q", got)
+	}
+
 	if got := state.ModelForFolder(t.TempDir()); got != "codex/gpt-5.5" {
 		require.Failf(t, "unexpected failure", "global fallback model = %q", got)
 	}
 
 	if got := state.ReasoningLevelForFolder(t.TempDir()); got != "medium" {
 		require.Failf(t, "unexpected failure", "global fallback reasoning = %q", got)
+	}
+
+	if got := state.ModelModeForFolder(t.TempDir()); got != testStateModelModeFast {
+		require.Failf(t, "unexpected failure", "global fallback model mode = %q", got)
 	}
 }
 
@@ -83,6 +98,17 @@ func TestState_FolderReasoningDefaultOverridesGlobal(t *testing.T) {
 
 	if got := state.ReasoningLevelForFolder(dir); got != "" {
 		require.Failf(t, "unexpected failure", "folder default reasoning = %q", got)
+	}
+}
+
+func TestState_FolderModelModeDefaultOverridesGlobal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	state := State{DefaultModelMode: testStateModelModeFast}
+	state.SetModelMode(ModelScopeFolder, dir, "default")
+
+	if got := state.ModelModeForFolder(dir); got != "" {
+		require.Failf(t, "unexpected failure", "folder default model mode = %q", got)
 	}
 }
 

@@ -105,6 +105,7 @@ func TestAgent_CompleteParams(t *testing.T) {
 	agent := Agent{
 		Name:           reviewerAgentName,
 		Model:          "gpt-4.1",
+		ModelMode:      "fast",
 		SystemPrompt:   "Review code.",
 		Temperature:    &temp,
 		TopP:           &topP,
@@ -137,6 +138,10 @@ func TestAgent_CompleteParams(t *testing.T) {
 
 	if params.ReasoningLevel != "high" {
 		assert.Failf(t, "assertion failed", "ReasoningLevel = %q", params.ReasoningLevel)
+	}
+
+	if params.ModelMode != "fast" {
+		assert.Failf(t, "assertion failed", "ModelMode = %q", params.ModelMode)
 	}
 
 	if params.MaxTokens != 100 {

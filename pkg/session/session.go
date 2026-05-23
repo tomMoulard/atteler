@@ -30,6 +30,7 @@ type Session struct {
 	ID                    string              `json:"id"`
 	Title                 string              `json:"title,omitempty"`
 	DefaultModel          string              `json:"default_model,omitempty"`
+	DefaultModelMode      string              `json:"default_model_mode,omitempty"`
 	DefaultReasoningLevel string              `json:"default_reasoning_level,omitempty"`
 	DefaultAgent          string              `json:"default_agent,omitempty"`
 	WorktreePath          string              `json:"worktree_path,omitempty"`

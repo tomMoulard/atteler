@@ -282,6 +282,7 @@ type stateDiagnosticsCommandInput struct {
 	SessionRef     string
 	AgentName      string
 	Model          string
+	ModelMode      string
 	ReasoningLevel string
 }
 
@@ -728,6 +729,7 @@ func stateDiagnosticsCommandInputFromOptions(opts cliOptions) stateDiagnosticsCo
 		SessionRef:     opts.sessionRef,
 		AgentName:      opts.agentName,
 		Model:          opts.model,
+		ModelMode:      opts.modelMode,
 		ReasoningLevel: opts.reasoningLevel,
 	}
 }

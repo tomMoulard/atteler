@@ -78,6 +78,7 @@ type ExportSessionMetadata struct {
 	ID                     string    `json:"id"`
 	Title                  string    `json:"title,omitempty"`
 	DefaultModel           string    `json:"default_model,omitempty"`
+	DefaultModelMode       string    `json:"default_model_mode,omitempty"`
 	DefaultReasoningLevel  string    `json:"default_reasoning_level,omitempty"`
 	DefaultAgent           string    `json:"default_agent,omitempty"`
 	WorktreePath           string    `json:"worktree_path,omitempty"`
@@ -245,6 +246,7 @@ func BuildMachineReadableExport(session Session, options ExportOptions) MachineR
 			UpdatedAt:              session.UpdatedAt,
 			DefaultAgent:           builder.sanitize("session.default_agent", session.DefaultAgent),
 			DefaultModel:           builder.sanitize("session.default_model", session.DefaultModel),
+			DefaultModelMode:       builder.sanitize("session.default_model_mode", session.DefaultModelMode),
 			DefaultReasoningLevel:  builder.sanitize("session.default_reasoning_level", session.DefaultReasoningLevel),
 			WorktreePath:           builder.sanitize("session.worktree_path", session.WorktreePath),
 			WorktreeBranch:         builder.sanitize("session.worktree_branch", session.WorktreeBranch),
@@ -574,6 +576,7 @@ func renderMarkdown(export MachineReadableExport) string {
 	writeMetadata(&b, "Updated", export.Session.UpdatedAt)
 	writeMetadataString(&b, "Agent", export.Session.DefaultAgent)
 	writeMetadataString(&b, "Model", export.Session.DefaultModel)
+	writeMetadataString(&b, "Mode", export.Session.DefaultModelMode)
 	writeMetadataString(&b, "Effort", export.Session.DefaultReasoningLevel)
 	writeMetadataString(&b, "Worktree", export.Session.WorktreePath)
 	writeMetadataString(&b, "Branch", export.Session.WorktreeBranch)

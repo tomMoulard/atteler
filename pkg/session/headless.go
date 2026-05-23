@@ -100,6 +100,7 @@ type HeadlessRun struct {
 	ArtifactDir        string         `json:"artifact_dir,omitempty"`
 	Prompt             string         `json:"prompt"`
 	Model              string         `json:"model"`
+	ModelMode          string         `json:"model_mode,omitempty"`
 	Agent              string         `json:"agent"`
 	Owner              string         `json:"owner,omitempty"`
 	Hostname           string         `json:"hostname,omitempty"`

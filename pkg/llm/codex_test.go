@@ -39,7 +39,7 @@ func TestCodexProvider_Complete(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		writeCodexSSE(t, w, codexFakeSuccess("hello back", "gpt-5.5", 12, 4, 3))
+		writeCodexSSE(t, w, codexFakeSuccess("hello back", modelOpenAIGPT54, 12, 4, 3))
 	}))
 	defer srv.Close()
 
@@ -48,11 +48,12 @@ func TestCodexProvider_Complete(t *testing.T) {
 		client:  srv.Client(),
 		auth:    auth,
 		baseURL: srv.URL,
-		models:  []string{"gpt-5.5"},
+		models:  []string{modelOpenAIGPT54},
 	}
 
 	resp, err := p.Complete(context.Background(), CompleteParams{
-		Model:          "gpt-5.5",
+		Model:          modelOpenAIGPT54,
+		ModelMode:      ModelModeFast,
 		ReasoningLevel: "high",
 		Messages: []Message{
 			{Role: RoleSystem, Content: "be brief"},
@@ -62,7 +63,7 @@ func TestCodexProvider_Complete(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "hello back", resp.Content)
-	assert.Equal(t, "gpt-5.5", resp.Model)
+	assert.Equal(t, modelOpenAIGPT54, resp.Model)
 	assert.Equal(t, StopEndTurn, resp.StopReason)
 	assert.Equal(t, 12, resp.InputTokens)
 	assert.Equal(t, 4, resp.CachedInputTokens)
@@ -81,6 +82,8 @@ func TestCodexProvider_Complete(t *testing.T) {
 	if assert.NotNil(t, gotReq.Reasoning) {
 		assert.Equal(t, "high", gotReq.Reasoning.Effort)
 	}
+
+	assert.Equal(t, modelModePriority, gotReq.ServiceTier)
 
 	// Auth headers carry the chatgpt access token + account id.
 	assert.Equal(t, "Bearer access-1", gotHeaders.Get("Authorization"))

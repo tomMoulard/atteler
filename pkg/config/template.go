@@ -12,6 +12,7 @@ generation:
   temperature: 0
   top_p: 1
   seed: 1
+  # model_mode: fast # OpenAI GPT-5.4 fast mode (service_tier=priority)
   reasoning_level: medium
   max_tokens: 2048
 
@@ -40,6 +41,7 @@ agents:
     fallback_models:
       - gpt-4.1-mini
     seed: 1
+    # model_mode: fast
     reasoning_level: high
     temperature: 0
     max_tokens: 2048

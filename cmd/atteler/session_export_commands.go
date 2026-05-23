@@ -20,6 +20,7 @@ type sessionDetails struct {
 	Title             string                      `yaml:"title,omitempty"`
 	DefaultAgent      string                      `yaml:"default_agent,omitempty"`
 	DefaultModel      string                      `yaml:"default_model,omitempty"`
+	DefaultModelMode  string                      `yaml:"default_model_mode,omitempty"`
 	DefaultReasoning  string                      `yaml:"default_reasoning_level,omitempty"`
 	WorktreePath      string                      `yaml:"worktree_path,omitempty"`
 	WorktreeBranch    string                      `yaml:"worktree_branch,omitempty"`
@@ -69,6 +70,10 @@ func formatSessionDetailsSummary(sessionState session.Session, path string) stri
 		parts = append(parts, "model="+sessionState.DefaultModel)
 	}
 
+	if sessionState.DefaultModelMode != "" {
+		parts = append(parts, "mode="+sessionState.DefaultModelMode)
+	}
+
 	if sessionState.DefaultReasoningLevel != "" {
 		parts = append(parts, "effort="+sessionState.DefaultReasoningLevel)
 	}
@@ -100,6 +105,7 @@ func formatSessionDetails(sessionState session.Session, path string) (string, er
 		UpdatedAt:        sessionState.UpdatedAt,
 		DefaultAgent:     sessionState.DefaultAgent,
 		DefaultModel:     sessionState.DefaultModel,
+		DefaultModelMode: sessionState.DefaultModelMode,
 		DefaultReasoning: sessionState.DefaultReasoningLevel,
 		WorktreePath:     sessionState.WorktreePath,
 		WorktreeBranch:   sessionState.WorktreeBranch,

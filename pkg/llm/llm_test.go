@@ -1,12 +1,15 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/events"
 )
 
 const (
@@ -82,6 +85,59 @@ func TestRegistry_RegisterAndListModels(t *testing.T) {
 			assert.Failf(t, "assertion failed", "unexpected model %q", m)
 		}
 	}
+}
+
+func TestRegistry_CompleteLogsOpenAIModelModeMetadata(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{modelOpenAIGPT54},
+		resp:   &Response{Content: "ok"},
+	})
+
+	var log bytes.Buffer
+
+	ctx := events.WithEmitter(context.Background(), events.NewRunnerWithLogger(nil, &log), events.Event{})
+	_, err := r.Complete(ctx, CompleteParams{
+		Model:          modelOpenAIGPT54,
+		ModelMode:      ModelModeFast,
+		ReasoningLevel: "xhigh",
+	})
+	require.NoError(t, err)
+
+	line := log.String()
+	assert.Contains(t, line, "event:tool_execute")
+	assert.Contains(t, line, "provider=openai")
+	assert.Contains(t, line, "model_mode=fast")
+	assert.Contains(t, line, "reasoning_level=xhigh")
+	assert.Contains(t, line, "service_tier=priority")
+}
+
+func TestRegistry_CompleteDoesNotLogServiceTierForCustomModelMode(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   alphaProvider,
+		models: []string{betaModel},
+		resp:   &Response{Content: "ok"},
+	})
+
+	var log bytes.Buffer
+
+	ctx := events.WithEmitter(context.Background(), events.NewRunnerWithLogger(nil, &log), events.Event{})
+	_, err := r.Complete(ctx, CompleteParams{
+		Model:     betaModel,
+		ModelMode: ModelModeFast,
+	})
+	require.NoError(t, err)
+
+	line := log.String()
+	assert.Contains(t, line, "provider="+alphaProvider)
+	assert.Contains(t, line, "model_mode=fast")
+	assert.NotContains(t, line, "service_tier")
 }
 
 func TestKnownProviders(t *testing.T) {

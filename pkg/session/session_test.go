@@ -15,6 +15,7 @@ func TestStore_SaveLoadByID(t *testing.T) {
 	t.Parallel()
 	store := NewStore(t.TempDir())
 	session := New("gpt-4.1", nil)
+	session.DefaultModelMode = "fast"
 	session.DefaultReasoningLevel = "high"
 	session.Append(llm.RoleUser, "hello")
 	session.Append(llm.RoleAssistant, "hi")
@@ -38,6 +39,10 @@ func TestStore_SaveLoadByID(t *testing.T) {
 
 	if loaded.DefaultReasoningLevel != "high" {
 		assert.Failf(t, "assertion failed", "DefaultReasoningLevel = %q", loaded.DefaultReasoningLevel)
+	}
+
+	if loaded.DefaultModelMode != "fast" {
+		assert.Failf(t, "assertion failed", "DefaultModelMode = %q", loaded.DefaultModelMode)
 	}
 
 	if len(loaded.Messages) != 2 {

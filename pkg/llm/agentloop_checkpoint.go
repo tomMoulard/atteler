@@ -72,6 +72,8 @@ type AgentLoopStopCondition struct {
 // whole transcript into every checkpoint.
 type AgentLoopModelRequestSummary struct {
 	Model          string   `json:"model"`
+	ModelMode      string   `json:"model_mode,omitempty"`
+	ReasoningLevel string   `json:"reasoning_level,omitempty"`
 	FallbackModels []string `json:"fallback_models,omitempty"`
 	ToolNames      []string `json:"tool_names,omitempty"`
 	MessageCount   int      `json:"message_count"`

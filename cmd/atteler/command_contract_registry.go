@@ -472,7 +472,7 @@ func commandContractsByName() map[string]commandContract {
 		),
 		"state-diagnostics": commandContractFor(
 			"print persisted interactive state diagnostics",
-			[]string{"--state-diagnostics", "--session", "--agent", "--model", "--reasoning-level"},
+			[]string{"--state-diagnostics", "--session", "--agent", "--model", "--model-mode", "--reasoning-level"},
 			[]string{commandEffectConfigRead, commandEffectStateRead, commandEffectUserOutput},
 			[]string{commandOutputYAML},
 			withInputType("stateDiagnosticsCommandInput"),

@@ -84,11 +84,11 @@ Common options such as `--model`, `--agent`, `--output`, generation settings,
 provider routing settings, and compatibility flags can still be combined with
 domain commands before or after the focused subcommand, for example
 `atteler session --session <id> messages` or
-`atteler chat once "Summarize" --model openai/gpt-5.4`. Prefer the grouped form
-for humans and the legacy flags for existing automation until scripts are
-migrated. No legacy flag is deprecated in this release; future deprecations
-should add an explicit warning before removing or changing an existing
-script-facing flag.
+`atteler chat once "Summarize" --model openai/gpt-5.4 --model-mode fast`.
+Prefer the grouped form for humans and the legacy flags for existing automation
+until scripts are migrated. No legacy flag is deprecated in this release; future
+deprecations should add an explicit warning before removing or changing an
+existing script-facing flag.
 
 ## Configuration
 
@@ -142,6 +142,8 @@ generation:
   temperature: 0
   top_p: 1
   seed: 1
+  # For OpenAI GPT-5.4, "fast" maps to service_tier=priority.
+  # model_mode: fast
   reasoning_level: medium
   max_tokens: 2048
 
@@ -177,6 +179,7 @@ agents:
     capabilities: ["review", "security"]
     model: gpt-4.1-mini
     fallback_models: ["gpt-4.1-nano"]
+    # model_mode: fast
     reasoning_level: high
     triggers: ["review this", "code review"]
     system_prompt: >
@@ -196,17 +199,19 @@ when available.
 
 Provider adapters intentionally expose `llm.ProviderCapabilities` metadata via
 `llm.ProviderCapabilitiesFor` and `llm.KnownProviders` so callers can check
-whether a provider supports seed, tools, reasoning, cached-token accounting,
-streaming, and network model discovery before setting provider-specific knobs.
-The same metadata documents lossy and unsupported `CompleteParams` fields:
+whether a provider supports seed, tools, model mode, reasoning, cached-token
+accounting, streaming, and network model discovery before setting
+provider-specific knobs. OpenAI and Codex support `model_mode: fast` by sending
+`service_tier=priority`; other providers reject model mode overrides. The same
+metadata documents lossy and unsupported `CompleteParams` fields:
 
 | Provider | Intentionally lossy mappings | Unsupported or unavailable fields |
 | --- | --- | --- |
 | OpenAI | `ToolResult.IsError` is not represented by Chat Completions tool messages. | None currently documented. |
-| Anthropic | Reasoning levels become thinking token budgets; system messages are lifted to `system`; tool results become user-role content blocks. | `Seed` |
-| Claude Code | Same request/response mapping as Anthropic over the Claude Code OAuth path. | `Seed` |
+| Anthropic | Reasoning levels become thinking token budgets; system messages are lifted to `system`; tool results become user-role content blocks. | `Seed`, `ModelMode` |
+| Claude Code | Same request/response mapping as Anthropic over the Claude Code OAuth path. | `Seed`, `ModelMode` |
 | Codex | System messages become Responses `instructions`; chat/tool history becomes Responses input items; `ToolResult.IsError` is not represented. | `Temperature`, `TopP`, `Seed`, `Stop`, `MaxTokens` |
-| Ollama | Reasoning levels become Ollama `think` values; tool-call IDs, tool-result IDs, and `ToolResult.IsError` are not represented in Ollama chat messages. | Cached-token accounting is not reported by Ollama responses. |
+| Ollama | Reasoning levels become Ollama `think` values; tool-call IDs, tool-result IDs, and `ToolResult.IsError` are not represented in Ollama chat messages. | `ModelMode`; cached-token accounting is not reported by Ollama responses. |
 
 Unsupported non-zero knobs, non-finite sampling values, and
 non-JSON-serializable tool schemas or tool-call inputs are rejected instead of

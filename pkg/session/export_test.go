@@ -26,11 +26,12 @@ func TestMarkdown_RendersTranscript(t *testing.T) {
 	t.Parallel()
 
 	session := Session{
-		ID:           "abc",
-		CreatedAt:    time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC),
-		UpdatedAt:    time.Date(2026, 4, 30, 10, 5, 0, 0, time.UTC),
-		DefaultAgent: "reviewer",
-		DefaultModel: "gpt-test",
+		ID:               "abc",
+		CreatedAt:        time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC),
+		UpdatedAt:        time.Date(2026, 4, 30, 10, 5, 0, 0, time.UTC),
+		DefaultAgent:     "reviewer",
+		DefaultModel:     "gpt-test",
+		DefaultModelMode: "fast",
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Content: "hello"},
 			{Role: llm.RoleAssistant, Content: "hi"},
@@ -44,6 +45,7 @@ func TestMarkdown_RendersTranscript(t *testing.T) {
 		"- **Updated:** 2026-04-30T10:05:00Z",
 		"- **Agent:** reviewer",
 		"- **Model:** gpt-test",
+		"- **Mode:** fast",
 		"## Export Manifest",
 		"- **Redaction profile:** redacted-shareable",
 		"### User\n\n```text\nhello\n```",

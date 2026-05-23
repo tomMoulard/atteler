@@ -113,9 +113,9 @@ func (c *CodexProvider) HealthCheck(ctx context.Context) error {
 // ModelContextWindow returns the context window size for a Codex model.
 func (c *CodexProvider) ModelContextWindow(model string) int {
 	switch model {
-	case "gpt-5.5", "gpt-5.4":
+	case "gpt-5.5", modelOpenAIGPT54:
 		return 400_000
-	case "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark":
+	case modelOpenAIGPT54Mini, "gpt-5.3-codex", "gpt-5.3-codex-spark":
 		return 200_000
 	default:
 		if strings.HasPrefix(model, "gpt-") {
@@ -132,6 +132,7 @@ type codexResponsesRequest struct {
 	Reasoning    *codexRequestReasoning `json:"reasoning,omitempty"`
 	Tools        []codexTool            `json:"tools,omitempty"`
 	Model        string                 `json:"model"`
+	ServiceTier  string                 `json:"service_tier,omitempty"`
 	Instructions string                 `json:"instructions,omitempty"`
 	Input        []codexInputItem       `json:"input"`
 	Stream       bool                   `json:"stream"`
@@ -256,6 +257,10 @@ func buildCodexResponsesRequest(params CompleteParams) (codexResponsesRequest, e
 
 	if effort := openAIReasoningEffort(params.ReasoningLevel); effort != "" {
 		req.Reasoning = &codexRequestReasoning{Effort: effort}
+	}
+
+	if tier := openAIServiceTierForModelMode(params.ModelMode); tier != "" {
+		req.ServiceTier = tier
 	}
 
 	return req, nil
@@ -897,8 +902,8 @@ func codexModels() []string {
 func defaultCodexModels() []string {
 	return []string{
 		"gpt-5.5",
-		"gpt-5.4",
-		"gpt-5.4-mini",
+		modelOpenAIGPT54,
+		modelOpenAIGPT54Mini,
 		"gpt-5.3-codex",
 		"gpt-5.3-codex-spark",
 	}

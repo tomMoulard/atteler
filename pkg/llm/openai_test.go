@@ -67,7 +67,8 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 	seed := 123
 
 	resp, err := p.Complete(context.Background(), CompleteParams{
-		Model:          "gpt-4.1",
+		Model:          modelOpenAIGPT54,
+		ModelMode:      ModelModeFast,
 		MaxTokens:      200,
 		Temperature:    &temperature,
 		Seed:           &seed,
@@ -113,6 +114,10 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 
 	if gotReq.ReasoningEffort != "high" {
 		assert.Failf(t, "assertion failed", "reasoning_effort = %q, want high", gotReq.ReasoningEffort)
+	}
+
+	if gotReq.ServiceTier != modelModePriority {
+		assert.Failf(t, "assertion failed", "service_tier = %q, want priority", gotReq.ServiceTier)
 	}
 
 	// Verify auth header.
@@ -212,6 +217,33 @@ func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {
 	if gotReq.ReasoningEffort != "" {
 		assert.Failf(t, "assertion failed", "reasoning_effort = %q, want omitted", gotReq.ReasoningEffort)
 	}
+
+	if gotReq.ServiceTier != "" {
+		assert.Failf(t, "assertion failed", "service_tier = %q, want omitted", gotReq.ServiceTier)
+	}
+}
+
+func TestOpenAIProvider_CompleteRejectsUnsupportedModelMode(t *testing.T) {
+	t.Parallel()
+
+	p := &OpenAIProvider{apiKey: "k", baseURL: "http://127.0.0.1", client: http.DefaultClient}
+	_, err := p.Complete(context.Background(), CompleteParams{
+		Model:     modelOpenAIGPT54,
+		ModelMode: "turbo",
+		Messages:  []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unsupported model_mode "turbo"`)
+}
+
+func TestOpenAIProvider_ModelContextWindowIncludesGPT54(t *testing.T) {
+	t.Parallel()
+
+	provider := &OpenAIProvider{}
+	assert.Equal(t, 1_050_000, provider.ModelContextWindow(modelOpenAIGPT54))
+	assert.Equal(t, 1_050_000, provider.ModelContextWindow(modelOpenAIGPT54+"-2026-03-05"))
+	assert.Equal(t, 400_000, provider.ModelContextWindow(modelOpenAIGPT54Mini))
+	assert.Equal(t, 400_000, provider.ModelContextWindow(modelOpenAIGPT54Nano+"-2026-03-17"))
 }
 
 func TestOpenAIProvider_NameAndModels(t *testing.T) {

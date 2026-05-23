@@ -42,6 +42,7 @@ type runOnceResult struct {
 	HeadlessID              string     `json:"headless_id,omitempty"`
 	Agent                   string     `json:"agent,omitempty"`
 	Model                   string     `json:"model,omitempty"`
+	ModelMode               string     `json:"model_mode,omitempty"`
 	Content                 string     `json:"content"`
 	TokenUsage              tokenUsage `json:"token_usage"`
 }
@@ -69,6 +70,7 @@ type responseRecordRequest struct {
 	TopP           *float64      `json:"top_p,omitempty"`
 	Seed           *int          `json:"seed,omitempty"`
 	Model          string        `json:"model,omitempty"`
+	ModelMode      string        `json:"model_mode,omitempty"`
 	FallbackModels []string      `json:"fallback_models,omitempty"`
 	Messages       []llm.Message `json:"messages"`
 	MaxTokens      int           `json:"max_tokens,omitempty"`
@@ -92,6 +94,7 @@ func saveRecordedResponse(path string, params llm.CompleteParams, fallbackModels
 		RecordedAt: time.Now().UTC(),
 		Request: responseRecordRequest{
 			Model:          params.Model,
+			ModelMode:      params.ModelMode,
 			Messages:       append([]llm.Message(nil), params.Messages...),
 			FallbackModels: append([]string(nil), fallbackModels...),
 			MaxTokens:      params.MaxTokens,
@@ -275,7 +278,15 @@ func runOnceWithOptions(
 		Model:       prepared.requestModel,
 	})
 
-	headlessRun, err := startHeadlessRun(store, executionOptions, sessionState, prepared.prompt, prepared.requestModel, prepared.activeAgent.name)
+	headlessRun, err := startHeadlessRun(
+		store,
+		executionOptions,
+		sessionState,
+		prepared.prompt,
+		prepared.requestModel,
+		prepared.generation.ModelMode,
+		prepared.activeAgent.name,
+	)
 	if err != nil {
 		return err
 	}
@@ -296,6 +307,8 @@ func runOnceWithOptions(
 	slog.Debug("one-shot LLM request",
 		"agent", prepared.activeAgent.name,
 		"model", params.Model,
+		"model_mode", params.ModelMode,
+		"reasoning_level", params.ReasoningLevel,
 		"tools", len(params.Tools),
 		"messages", len(params.Messages),
 	)
@@ -343,6 +356,7 @@ func runOnceWithOptions(
 		AgentLoopCheckpointPath: checkpointPath,
 		Agent:                   prepared.activeAgent.name,
 		Model:                   resp.Model,
+		ModelMode:               prepared.generation.ModelMode,
 		Content:                 resp.Content,
 		TokenUsage:              usage,
 	}
@@ -369,6 +383,10 @@ func applyRunOnceSessionDefaults(sessionState *session.Session, prepared runOnce
 
 	if level := strings.TrimSpace(generationOverrides.ReasoningLevel); level != "" {
 		sessionState.DefaultReasoningLevel = level
+	}
+
+	if mode := strings.TrimSpace(generationOverrides.ModelMode); mode != "" {
+		sessionState.DefaultModelMode = mode
 	}
 }
 
@@ -513,6 +531,7 @@ func startHeadlessRun(
 	sessionState session.Session,
 	prompt string,
 	modelName string,
+	modelMode string,
 	agentName string,
 ) (*session.HeadlessRun, error) {
 	if !options.Headless {
@@ -534,6 +553,7 @@ func startHeadlessRun(
 		SessionPath:    store.Path(sessionState.ID),
 		Prompt:         strings.TrimSpace(prompt),
 		Model:          modelName,
+		ModelMode:      strings.TrimSpace(modelMode),
 		Agent:          agentName,
 		StartedCommand: strings.Join(os.Args, " "),
 		Status:         session.HeadlessStatusRunning,

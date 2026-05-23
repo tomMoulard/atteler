@@ -102,6 +102,7 @@ func TestFormatAgentDescription(t *testing.T) {
 		Triggers:       []string{"review this"},
 		Temperature:    &temperature,
 		Seed:           &seed,
+		ModelMode:      llm.ModelModeFast,
 		ReasoningLevel: "high",
 		MaxTokens:      100,
 	})
@@ -119,6 +120,7 @@ func TestFormatAgentDescription(t *testing.T) {
 		"triggers:",
 		"temperature: 0.1",
 		"seed: 99",
+		"model_mode: fast",
 		"reasoning_level: high",
 		"max_tokens: 100",
 	} {

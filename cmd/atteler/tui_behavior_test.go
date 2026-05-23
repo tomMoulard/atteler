@@ -35,9 +35,9 @@ func TestFZFInputAndSelection(t *testing.T) {
 
 	input := fzfInput(items)
 	for _, want := range []string{
-		"claude-code/claude-opus-4-6\tclaude-code\tclaude-opus-4-6\t\n",
-		"codex/gpt-5.5\tcodex\tgpt-5.5\t\n",
-		"codex/gpt-5.5:xhigh\tcodex\tgpt-5.5\txhigh\n",
+		"claude-code/claude-opus-4-6\tclaude-code\tclaude-opus-4-6\t\t\n",
+		"codex/gpt-5.5\tcodex\tgpt-5.5\t\t\n",
+		"codex/gpt-5.5:xhigh\tcodex\tgpt-5.5\txhigh\t\n",
 	} {
 		if !strings.Contains(input, want) {
 			require.Failf(t, "unexpected failure", "fzf input missing %q in:\n%s", want, input)
@@ -52,6 +52,15 @@ func TestFZFInputAndSelection(t *testing.T) {
 	if item.provider != "codex" || item.model != "gpt-5.5" || item.reasoning != testReasoningXHigh {
 		require.Failf(t, "unexpected failure", "selection = %+v, want codex/gpt-5.5:xhigh", item)
 	}
+
+	fastItems := []pickerItem{
+		{provider: "codex", model: "gpt-5.4", modelMode: llm.ModelModeDefault, reasoning: llm.ReasoningLevelDefault},
+		{provider: "codex", model: "gpt-5.4", modelMode: llm.ModelModeFast, reasoning: testReasoningXHigh},
+	}
+	item, ok = parseFZFSelection("codex/gpt-5.4:mode=fast:effort=xhigh\tcodex\tgpt-5.4\txhigh\tfast\n", fastItems)
+	require.True(t, ok)
+	assert.Equal(t, llm.ModelModeFast, item.modelMode)
+	assert.Equal(t, testReasoningXHigh, item.reasoning)
 
 	item, ok = parseFZFSelection("codex/gpt-5.5\tcodex\tgpt-5.5\n", []pickerItem{
 		{provider: "codex", model: "gpt-5.5", reasoning: llm.ReasoningLevelDefault},
@@ -308,8 +317,10 @@ func expandReasoningItems(bases []pickerItem) []pickerItem {
 
 	out := make([]pickerItem, 0, len(bases)*len(levels))
 	for _, base := range bases {
-		for _, level := range levels {
-			out = append(out, pickerItem{provider: base.provider, model: base.model, reasoning: level})
+		for _, mode := range llm.ModelModePickerModes(base.provider, base.model) {
+			for _, level := range levels {
+				out = append(out, pickerItem{provider: base.provider, model: base.model, modelMode: mode, reasoning: level})
+			}
 		}
 	}
 
@@ -835,12 +846,13 @@ func TestStatusLineShowsReasoningEffortOverride(t *testing.T) {
 	m := model{
 		selectedModel:       testCodexModel,
 		executionMode:       "execute",
-		generationOverrides: generationSettings{ReasoningLevel: testReasoningXHigh},
+		generationOverrides: generationSettings{ReasoningLevel: testReasoningXHigh, ModelMode: llm.ModelModeFast},
 	}
 
 	plain := stripANSI(m.statusLine())
 	assert.Contains(t, plain, "model:"+testCodexModel)
 	assert.Contains(t, plain, "effort:"+testReasoningXHigh)
+	assert.Contains(t, plain, "model_mode:"+llm.ModelModeFast)
 }
 
 func TestStatusLineShowsAgentReasoningEffort(t *testing.T) {
