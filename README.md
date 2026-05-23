@@ -73,7 +73,7 @@ from the same descriptors that route the commands.
 | `config` | `atteler config paths`, `atteler config validate`, `atteler config explain default_model`, `atteler config doctor-offline` |
 | `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models`, `atteler providers ollama-status`, `atteler providers ollama-stop` |
 | `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
-| `memory` / `rag` | `atteler memory search "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"` |
+| `memory` / `rag` | `atteler memory search "OAuth retry storm" --memory-scope repo`, `atteler memory rebuild --memory-store .atteler/memory.json --memory-scope repo`, `atteler memory purge session:<session-id> --memory-store .atteler/memory.json`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"` |
 | `code-intel` | `atteler code-intel summary`, `atteler code-intel summary --json`, `atteler code-intel symbol NewRegistry`, `atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/` |
 | `review` | `atteler review scan`, `atteler review plan`, `atteler review run` |
 | `watch` | `atteler watch scan`, `atteler watch json`, `atteler watch loop` |

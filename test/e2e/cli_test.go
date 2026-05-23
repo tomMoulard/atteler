@@ -283,8 +283,36 @@ printf 'plugin-check\n'
 	assertContains(t, result.stdout, "preview=hello auth")
 
 	result = runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "memory", "search", "hello", "auth")
-	assertContains(t, result.stdout, "session/demo/metadata")
-	assertNotContains(t, result.stdout, "session/demo/message/0")
+	assertContains(t, result.stdout, "Searched corpus:")
+	assertContains(t, result.stdout, "scope=repo")
+	assertContains(t, result.stdout, "session/demo/message/0")
+
+	rebuiltMemoryStore := filepath.Join(workDir, "rebuilt-memory.json")
+	result = runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "memory", "rebuild", "--memory-store", rebuiltMemoryStore, "--memory-scope", "repo")
+	assertContains(t, result.stdout, "Rebuilt memory store")
+
+	memoryJSON, err := os.ReadFile(rebuiltMemoryStore)
+	require.NoError(t, err)
+	assertContains(t, string(memoryJSON), `"schema_version": 1`)
+	assertContains(t, string(memoryJSON), `"corpus":`)
+	assertContains(t, string(memoryJSON), `"created_at":`)
+	assertContains(t, string(memoryJSON), `"updated_at":`)
+
+	result = runOK(t, runSpec{dir: workDir}, "memory", "search", "hello", "auth", "--memory-store", rebuiltMemoryStore)
+	assertContains(t, result.stdout, "Searched corpus:")
+	assertContains(t, result.stdout, "store="+filepath.Clean(rebuiltMemoryStore))
+	assertContains(t, result.stdout, "session/demo/message/0")
+
+	result = runOK(t, runSpec{dir: workDir}, "memory", "list-corpus", "--memory-store", rebuiltMemoryStore)
+	assertContains(t, result.stdout, "Memory corpus:")
+	assertContains(t, result.stdout, "sessions=demo")
+
+	result = runOK(t, runSpec{dir: workDir}, "memory", "purge", "session:demo", "--memory-store", rebuiltMemoryStore)
+	assertContains(t, result.stdout, "Purged")
+
+	result = runOK(t, runSpec{dir: workDir}, "memory", "search", "hello", "auth", "--memory-store", rebuiltMemoryStore, "--memory-scope", "store")
+	assertContains(t, result.stdout, "Searched corpus:")
+	assertContains(t, result.stdout, "No memory results found.")
 
 	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "agents", "list")
 	assertContains(t, result.stdout, "reviewer")
@@ -526,8 +554,8 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 	}
 
 	result = runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "--memory-search", "hello auth")
-	assertContains(t, result.stdout, "session/demo/metadata")
-	assertNotContains(t, result.stdout, "session/demo/message/0")
+	assertContains(t, result.stdout, "Searched corpus:")
+	assertContains(t, result.stdout, "session/demo/message/0")
 
 	notesPath := filepath.Join(workDir, "notes.txt")
 	memoryStore := filepath.Join(workDir, "memory.json")
@@ -535,8 +563,17 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 	writeFile(t, notesPath, "OAuth callback notes\n")
 	result = runOK(t, runSpec{dir: workDir}, "--memory-store", memoryStore, "--memory-index", notesPath)
 	assertContains(t, result.stdout, "Indexed")
+	result = runOK(t, runSpec{dir: workDir}, "memory", "list-corpus", "--memory-store", memoryStore)
+	assertContains(t, result.stdout, "Memory corpus:")
+	assertContains(t, result.stdout, "schema=1")
 	result = runOK(t, runSpec{dir: workDir}, "--memory-store", memoryStore, "--memory-search", "callback")
+	assertContains(t, result.stdout, "Searched corpus:")
+	assertContains(t, result.stdout, "store="+filepath.Clean(memoryStore))
 	assertContains(t, result.stdout, notesPath)
+	result = runOK(t, runSpec{dir: workDir}, "memory", "purge", "repo:"+workDir, "--memory-store", memoryStore)
+	assertContains(t, result.stdout, "Purged 1 memory document")
+	result = runOK(t, runSpec{dir: workDir}, "--memory-store", memoryStore, "--memory-search", "callback")
+	assertContains(t, result.stdout, "No memory results found.")
 
 	result = runOK(t, runSpec{dir: workDir}, "--skill-step", "plan", "--skill-step", "code", "--skill-step", "test", "--skill-step", "plan", "--skill-step", "code", "--skill-step", "test")
 	assertContains(t, result.stdout, "slug: plan-code-test")
@@ -1396,19 +1433,20 @@ func repoRoot() (string, error) {
 
 func writeSession(t *testing.T, dir string) {
 	t.Helper()
-	writeFile(t, filepath.Join(dir, "demo.json"), `{
+	writeFile(t, filepath.Join(dir, "demo.json"), fmt.Sprintf(`{
   "created_at": "2026-04-30T10:00:00Z",
   "updated_at": "2026-04-30T10:05:00Z",
   "id": "demo",
   "title": "Auth review",
   "default_model": "gpt-test",
   "default_agent": "removed-agent",
+  "worktree_path": %q,
   "tags": ["auth", "review"],
   "messages": [
     {"role": "user", "content": "hello auth"},
     {"role": "assistant", "content": "hi there"}
   ]
-}`)
+}`, filepath.Dir(dir)))
 }
 
 func writeFile(t *testing.T, path, content string) {

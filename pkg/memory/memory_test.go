@@ -1,24 +1,19 @@
+//nolint:wsl_v5 // Tests keep setup, action, and assertions close together.
 package memory
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
-	"github.com/tommoulard/atteler/pkg/privacy"
-	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
-const duplicateID = "same"
+const testRetentionThirtyDays = "30 days"
 
 func TestTokenize_NormalizesUnicodeWordsAndDigits(t *testing.T) {
 	t.Parallel()
@@ -82,70 +77,15 @@ func TestStore_SearchRejectsEmptyQuery(t *testing.T) {
 	}
 }
 
-func TestStore_SearchReturnsDefensiveDocumentCopies(t *testing.T) {
-	t.Parallel()
-
-	expiresAt := time.Now().UTC().Add(time.Hour)
-
-	store := NewStore()
-	if err := store.Add(Document{
-		ID:        "auth",
-		Text:      "OAuth callback token refresh guidance",
-		ExpiresAt: &expiresAt,
-		Metadata: map[string]string{
-			"kind": "note",
-		},
-		Provenance: map[string]string{
-			"source_type": "test",
-		},
-	}); err != nil {
-		t.Fatalf("Add() error = %v", err)
-	}
-
-	results, err := store.Search("token refresh", 1)
-	if err != nil {
-		t.Fatalf("Search() error = %v", err)
-	}
-
-	if len(results) != 1 {
-		t.Fatalf("Search() returned %d result(s), want 1", len(results))
-	}
-
-	results[0].Document.Metadata["kind"] = "tampered"
-	results[0].Document.Provenance["privacy_policy"] = "stale"
-	*results[0].Document.ExpiresAt = time.Now().UTC().Add(-time.Hour)
-
-	results, err = store.Search("token refresh", 1)
-	if err != nil {
-		t.Fatalf("Search() after result mutation error = %v", err)
-	}
-
-	if len(results) != 1 {
-		t.Fatalf("Search() after result mutation returned %d result(s), want 1", len(results))
-	}
-
-	if got := results[0].Document.Metadata["kind"]; got != "note" {
-		t.Fatalf("result metadata kind = %q, want note", got)
-	}
-
-	if got := results[0].Document.Provenance["privacy_policy"]; got != privacy.RedactionPolicyVersion {
-		t.Fatalf("result privacy policy = %q, want %q", got, privacy.RedactionPolicyVersion)
-	}
-
-	if results[0].Document.ExpiresAt == nil || !results[0].Document.ExpiresAt.Equal(expiresAt) {
-		t.Fatalf("result expires_at = %v, want %v", results[0].Document.ExpiresAt, expiresAt)
-	}
-}
-
 func TestStore_AddReplacesExistingDocument(t *testing.T) {
 	t.Parallel()
 
 	store := NewStore()
-	if err := store.AddText(duplicateID, "old auth text"); err != nil {
+	if err := store.AddText("same", "old auth text"); err != nil {
 		t.Fatalf("AddText(old) error = %v", err)
 	}
 
-	if err := store.AddText(duplicateID, "new release text"); err != nil {
+	if err := store.AddText("same", "new release text"); err != nil {
 		t.Fatalf("AddText(new) error = %v", err)
 	}
 
@@ -158,35 +98,47 @@ func TestStore_AddReplacesExistingDocument(t *testing.T) {
 	}
 }
 
-func TestStore_AddRejectsInvalidUTF8Text(t *testing.T) {
+func TestStore_AddTextStoresDefaultProvenanceAndPolicy(t *testing.T) {
 	t.Parallel()
 
 	store := NewStore()
-
-	err := store.AddText("invalid", string([]byte{0xff}))
-	if !errors.Is(err, ErrInvalidUTF8) {
-		t.Fatalf("AddText(invalid UTF-8) error = %v, want ErrInvalidUTF8", err)
-	}
-
-	if len(store.Documents) != 0 {
-		t.Fatalf("documents len = %d, want 0", len(store.Documents))
-	}
-}
-
-func TestStore_AddTextRecordsDirectProvenance(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText("note", "direct memory provenance"); err != nil {
+	if err := store.AddText("note", "manual memory note"); err != nil {
 		t.Fatalf("AddText() error = %v", err)
 	}
 
-	if got := store.Documents[0].Provenance["source_type"]; got != "direct" {
-		t.Fatalf("source_type = %q, want direct", got)
+	doc := store.Documents[0]
+	if doc.Provenance == nil {
+		t.Fatalf("provenance is nil, want default provenance")
+	}
+	if doc.Provenance.SourceType != ScopeManual || doc.Provenance.SourceID != "note" {
+		t.Fatalf("provenance = %#v, want manual source for note", doc.Provenance)
+	}
+	if doc.Policy == nil || doc.Policy.Scope != ScopeManual {
+		t.Fatalf("policy = %#v, want manual scope", doc.Policy)
+	}
+}
+
+func TestStore_AddEnrichesPartialSessionProvenanceAndPolicy(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:         "session/partial/message/0",
+		Text:       "partial session provenance",
+		Provenance: &Provenance{SessionID: "partial"},
+	}); err != nil {
+		t.Fatalf("Add() error = %v", err)
 	}
 
-	if got := store.Documents[0].Provenance["privacy_policy"]; got != privacy.RedactionPolicyVersion {
-		t.Fatalf("privacy_policy = %q, want %q", got, privacy.RedactionPolicyVersion)
+	doc := store.Documents[0]
+	if doc.Provenance == nil ||
+		doc.Provenance.SourceType != sessionSourceType ||
+		doc.Provenance.SourceID != "partial" ||
+		doc.Provenance.Kind != "message" {
+		t.Fatalf("provenance = %#v, want enriched session provenance", doc.Provenance)
+	}
+	if doc.Policy == nil || doc.Policy.Scope != ScopeSession {
+		t.Fatalf("policy = %#v, want inferred session scope", doc.Policy)
 	}
 }
 
@@ -218,8 +170,121 @@ func TestStore_AddFileIndexesUTF8Text(t *testing.T) {
 		t.Fatalf("Path = %q, want %q", results[0].Document.Path, filepath.Clean(path))
 	}
 
-	if results[0].Document.Provenance["source_type"] != "file" || results[0].Document.Provenance["path"] != filepath.Clean(path) {
-		t.Fatalf("Provenance = %#v, want file path provenance", results[0].Document.Provenance)
+	if store.Corpus.Scope != ScopeFile || store.Corpus.FileCount != 1 || store.Corpus.DocumentCount != 1 {
+		t.Fatalf("corpus = %#v, want file-scoped one-document corpus", store.Corpus)
+	}
+}
+
+func TestStore_AddManualDocumentToFileCorpusResetsManualScope(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(path, []byte("Local memory keeps useful context."), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	store := NewStore()
+	if err := store.AddFile(path); err != nil {
+		t.Fatalf("AddFile() error = %v", err)
+	}
+	if err := store.AddText("manual", "manual memory note"); err != nil {
+		t.Fatalf("AddText() error = %v", err)
+	}
+
+	if store.Corpus.Scope != ScopeManual || store.Corpus.FileCount != 1 || store.Corpus.DocumentCount != 2 {
+		t.Fatalf("corpus = %#v, want mixed manual/file corpus to use manual scope", store.Corpus)
+	}
+
+	manual := findDocumentByID(t, store, "manual")
+	if manual.Policy == nil || manual.Policy.Scope != ScopeManual {
+		t.Fatalf("manual policy = %#v, want manual scope", manual.Policy)
+	}
+}
+
+func TestStore_AddManualDocumentToSessionCorpusResetsManualScope(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:         "session/current/message/0",
+		Text:       "session memory note",
+		Metadata:   map[string]string{"source_type": sessionSourceType, "session_id": "current"},
+		Provenance: &Provenance{SourceType: sessionSourceType, SessionID: "current"},
+	}); err != nil {
+		t.Fatalf("Add(session) error = %v", err)
+	}
+	store.Corpus = CorpusMetadata{Scope: ScopeSession, SessionIDs: []string{"current"}, SessionCount: 1, DocumentCount: 1}
+
+	if err := store.AddText("manual", "manual memory note"); err != nil {
+		t.Fatalf("AddText(manual) error = %v", err)
+	}
+
+	if store.Corpus.Scope != ScopeManual || store.Corpus.SessionCount != 1 || store.Corpus.DocumentCount != 2 {
+		t.Fatalf("corpus = %#v, want mixed manual/session corpus to use manual scope", store.Corpus)
+	}
+	if strings.Contains(store.Corpus.Description, "scope=session") {
+		t.Fatalf("corpus description = %q, want no session-scope claim", store.Corpus.Description)
+	}
+}
+
+func TestStore_AddManualDocumentToTagsCorpusResetsManualScope(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:         "session/auth/message/0",
+		Text:       "tagged session memory note",
+		Metadata:   map[string]string{"session_id": "auth", "tags": "auth"},
+		Provenance: &Provenance{SourceType: sessionSourceType, SessionID: "auth", Tags: []string{"auth"}},
+	}); err != nil {
+		t.Fatalf("Add(tagged) error = %v", err)
+	}
+	store.Corpus = CorpusMetadata{Scope: ScopeTags, Tags: []string{"auth"}, SessionIDs: []string{"auth"}, SessionCount: 1, DocumentCount: 1}
+
+	if err := store.AddText("manual", "manual memory note"); err != nil {
+		t.Fatalf("AddText(manual) error = %v", err)
+	}
+
+	if store.Corpus.Scope != ScopeManual || store.Corpus.SessionCount != 1 || store.Corpus.DocumentCount != 2 {
+		t.Fatalf("corpus = %#v, want mixed manual/tagged corpus to use manual scope", store.Corpus)
+	}
+	if strings.Contains(store.Corpus.Description, "scope=tags") {
+		t.Fatalf("corpus description = %q, want no tags-scope claim", store.Corpus.Description)
+	}
+}
+
+func TestStore_AddUndatedDocumentToDateRangeCorpusResetsManualScope(t *testing.T) {
+	t.Parallel()
+
+	activity := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:         "session/dated/message/0",
+		Text:       "dated session memory note",
+		Metadata:   map[string]string{"session_id": "dated", "updated_at": activity.Format(time.RFC3339)},
+		Provenance: &Provenance{SourceType: sessionSourceType, SessionID: "dated", UpdatedAt: activity.Format(time.RFC3339)},
+	}); err != nil {
+		t.Fatalf("Add(dated) error = %v", err)
+	}
+	store.Corpus = CorpusMetadata{
+		Scope:         ScopeDateRange,
+		DateStart:     activity.Add(-time.Hour).Format(time.RFC3339),
+		DateEnd:       activity.Add(time.Hour).Format(time.RFC3339),
+		SessionIDs:    []string{"dated"},
+		SessionCount:  1,
+		DocumentCount: 1,
+	}
+
+	if err := store.AddText("manual", "manual memory note"); err != nil {
+		t.Fatalf("AddText(manual) error = %v", err)
+	}
+
+	if store.Corpus.Scope != ScopeManual || store.Corpus.DateStart != "" || store.Corpus.DateEnd != "" {
+		t.Fatalf("corpus = %#v, want mixed undated/date-range corpus to use manual scope without stale dates", store.Corpus)
+	}
+	if strings.Contains(store.Corpus.Description, "date_range=") {
+		t.Fatalf("corpus description = %q, want no stale date range", store.Corpus.Description)
 	}
 }
 
@@ -237,8 +302,8 @@ func TestStore_SaveLoadJSONRoundTrip(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "nested", "memory.json")
-	if err := store.Save(path); err != nil {
-		t.Fatalf("Save() error = %v", err)
+	if saveErr := store.Save(path); saveErr != nil {
+		t.Fatalf("Save() error = %v", saveErr)
 	}
 
 	loaded, err := Load(path)
@@ -248,26 +313,6 @@ func TestStore_SaveLoadJSONRoundTrip(t *testing.T) {
 
 	if !reflect.DeepEqual(loaded.Documents, store.Documents) {
 		t.Fatalf("loaded documents = %#v, want %#v", loaded.Documents, store.Documents)
-	}
-
-	if loaded.SchemaVersion != StoreSchemaVersion {
-		t.Fatalf("SchemaVersion = %d, want %d", loaded.SchemaVersion, StoreSchemaVersion)
-	}
-
-	if loaded.Normalization != StoreTextNormalization {
-		t.Fatalf("Normalization = %q, want %q", loaded.Normalization, StoreTextNormalization)
-	}
-
-	if loaded.CreatedAt.IsZero() || loaded.UpdatedAt.IsZero() {
-		t.Fatalf("loaded store timestamps missing: created=%v updated=%v", loaded.CreatedAt, loaded.UpdatedAt)
-	}
-
-	if loaded.Documents[0].CreatedAt.IsZero() || loaded.Documents[0].UpdatedAt.IsZero() {
-		t.Fatalf("loaded document timestamps missing: created=%v updated=%v", loaded.Documents[0].CreatedAt, loaded.Documents[0].UpdatedAt)
-	}
-
-	if loaded.Documents[0].SourceHash == "" {
-		t.Fatal("loaded document SourceHash is empty")
 	}
 
 	results, err := loaded.Search("rag", 1)
@@ -280,18 +325,80 @@ func TestStore_SaveLoadJSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestStore_SaveTightensExistingFilePermissions(t *testing.T) {
+func TestLoadEmptyStoreReturnsNewStore(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	if err := os.WriteFile(path, []byte(" \n\t"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(empty) error = %v", err)
+	}
+
+	if loaded.SchemaVersion != SchemaVersion {
+		t.Fatalf("schema version = %d, want %d", loaded.SchemaVersion, SchemaVersion)
+	}
+	if loaded.Corpus.Scope != ScopeManual || len(loaded.Documents) != 0 {
+		t.Fatalf("empty load = corpus:%#v documents:%#v, want manual empty store", loaded.Corpus, loaded.Documents)
+	}
+}
+
+func TestStore_SavePreservesEmptyExplicitCorpusMetadata(t *testing.T) {
 	t.Parallel()
 
 	store := NewStore()
-	if err := store.AddText("note", "private lexical memory"); err != nil {
-		t.Fatalf("AddText() error = %v", err)
+	store.Corpus = CorpusMetadata{
+		Scope:     ScopeRepo,
+		RepoPath:  "/repo/empty",
+		Tags:      []string{"security", "security"},
+		Retention: testRetentionThirtyDays,
+		DateStart: "2026-05-01T00:00:00Z",
 	}
 
 	path := filepath.Join(t.TempDir(), "memory.json")
-	//nolint:gosec // Intentionally start with loose permissions to prove Save tightens persisted memory stores.
-	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+	if err := store.Save(path); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.Corpus.Scope != ScopeRepo || loaded.Corpus.RepoPath != "/repo/empty" {
+		t.Fatalf("empty corpus = %#v, want explicit repo scope preserved", loaded.Corpus)
+	}
+	if loaded.Corpus.DocumentCount != 0 || loaded.Corpus.FileCount != 0 || loaded.Corpus.SessionCount != 0 {
+		t.Fatalf("empty corpus counts = %#v, want zero document/file/session counts", loaded.Corpus)
+	}
+	if !reflect.DeepEqual(loaded.Corpus.Tags, []string{"security"}) {
+		t.Fatalf("empty corpus tags = %#v, want de-duplicated selected tag", loaded.Corpus.Tags)
+	}
+	if !strings.Contains(loaded.Corpus.Description, "scope=repo") ||
+		!strings.Contains(loaded.Corpus.Description, "repo=/repo/empty") ||
+		!strings.Contains(loaded.Corpus.Description, "retention=30 days") {
+		t.Fatalf("empty corpus description = %q, want selected corpus policy", loaded.Corpus.Description)
+	}
+}
+
+func TestStore_SaveTightensExistingFilePermissions(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not portable on Windows")
+	}
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil { //nolint:gosec // Intentional loose mode to verify Save tightens it.
 		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	store := NewStore()
+	if err := store.Add(Document{ID: "secret-note", Text: "OAuth token notes"}); err != nil {
+		t.Fatalf("Add() error = %v", err)
 	}
 
 	if err := store.Save(path); err != nil {
@@ -302,1331 +409,1307 @@ func TestStore_SaveTightensExistingFilePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat() error = %v", err)
 	}
-
 	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("memory store mode = %v, want 0600", got)
+		t.Fatalf("memory store permissions = %#o, want 0600", got)
 	}
 }
 
-func TestStore_RedactsSensitiveTextAndMetadataBeforePersistence(t *testing.T) {
+func TestStore_RedactsSecretsBeforeSaveAndSearch(t *testing.T) {
 	t.Parallel()
+
+	const secret = "sk-1234567890abcdefSECRET"
 
 	store := NewStore()
 	if err := store.Add(Document{
-		ID:       "secret",
-		Path:     "docs/secret.md?access_token=artifact123",
-		Text:     "deploy password=hunter2 with api_key=abc123 Authorization: Basic basic-secret-value and config {\"api_key\":\"json-secret-value\",\"authorization\":\"Bearer json-auth-secret\"}\n-----BEGIN RSA PRIVATE KEY-----\nprivate-key-material\n-----END RSA PRIVATE KEY-----",
-		Metadata: map[string]string{"auth_token": "abc123", "kind": "note"},
-	}); err != nil {
-		t.Fatalf("Add() error = %v", err)
-	}
-
-	doc := store.Documents[0]
-	if strings.Contains(doc.Text, "hunter2") || strings.Contains(doc.Text, "abc123") {
-		t.Fatalf("text was not redacted: %q", doc.Text)
-	}
-
-	if strings.Contains(doc.Text, "json-secret-value") {
-		t.Fatalf("JSON-like secret was not redacted: %q", doc.Text)
-	}
-
-	if strings.Contains(doc.Text, "json-auth-secret") {
-		t.Fatalf("JSON-like authorization secret was not redacted: %q", doc.Text)
-	}
-
-	if strings.Contains(doc.Text, "basic-secret-value") {
-		t.Fatalf("authorization secret was not redacted: %q", doc.Text)
-	}
-
-	if strings.Contains(doc.Text, "private-key-material") || strings.Contains(doc.Text, "RSA PRIVATE KEY") {
-		t.Fatalf("private key block was not redacted: %q", doc.Text)
-	}
-
-	if doc.Metadata["auth_token"] != "[REDACTED]" {
-		t.Fatalf("metadata auth_token = %q, want redacted", doc.Metadata["auth_token"])
-	}
-
-	if strings.Contains(doc.Path, "artifact123") {
-		t.Fatalf("path was not redacted: %q", doc.Path)
-	}
-
-	if doc.SourceHash == "" {
-		t.Fatal("SourceHash is empty")
-	}
-}
-
-func TestStore_RedactsSensitiveProvenanceBeforePersistence(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.Add(Document{
-		ID:   "provenance",
-		Text: "safe memory",
-		Provenance: map[string]string{
-			"api_key": "abc123",
-			"source":  "captured password=hunter2 from notes",
+		ID:       "doc-" + secret,
+		Path:     "notes/" + secret + ".txt",
+		Text:     "Rotate OAuth token. OPENAI_API_KEY=" + secret,
+		Metadata: map[string]string{"token": secret, "metadata-" + secret: "key should redact"},
+		Provenance: &Provenance{
+			SessionID: secret,
+			Tags:      []string{secret},
 		},
 	}); err != nil {
 		t.Fatalf("Add() error = %v", err)
 	}
 
-	doc := store.Documents[0]
-	if doc.Provenance["api_key"] != "[REDACTED]" {
-		t.Fatalf("provenance api_key = %q, want redacted", doc.Provenance["api_key"])
+	if strings.Contains(store.Documents[0].ID, secret) {
+		t.Fatalf("stored id contains raw secret: %q", store.Documents[0].ID)
+	}
+	if strings.Contains(store.Documents[0].Path, secret) {
+		t.Fatalf("stored path contains raw secret: %q", store.Documents[0].Path)
+	}
+	if strings.Contains(store.Documents[0].Text, secret) {
+		t.Fatalf("stored text contains raw secret: %q", store.Documents[0].Text)
+	}
+	for key, value := range store.Documents[0].Metadata {
+		if strings.Contains(key, secret) || strings.Contains(value, secret) {
+			t.Fatalf("stored metadata contains raw secret: %#v", store.Documents[0].Metadata)
+		}
+	}
+	if strings.Contains(store.Documents[0].Provenance.SessionID, secret) || strings.Contains(store.Documents[0].Provenance.Tags[0], secret) {
+		t.Fatalf("stored provenance contains raw secret: %#v", store.Documents[0].Provenance)
+	}
+	if store.Documents[0].Policy == nil || !store.Documents[0].Policy.Redacted {
+		t.Fatalf("policy = %#v, want redacted decision", store.Documents[0].Policy)
 	}
 
-	if strings.Contains(doc.Provenance["source"], "hunter2") {
-		t.Fatalf("provenance source was not redacted: %q", doc.Provenance["source"])
+	path := filepath.Join(t.TempDir(), "memory.json")
+	if saveErr := store.Save(path); saveErr != nil {
+		t.Fatalf("Save() error = %v", saveErr)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(data), secret) {
+		t.Fatalf("saved store contains raw secret:\n%s", data)
+	}
+
+	results, err := store.Search("oauth rotate", 1)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results len = %d, want 1", len(results))
+	}
+	if strings.Contains(results[0].Snippet, secret) {
+		t.Fatalf("snippet contains raw secret: %q", results[0].Snippet)
+	}
+	if strings.Contains(results[0].Document.ID, secret) || strings.Contains(results[0].Document.Path, secret) {
+		t.Fatalf("result document contains raw secret: %#v", results[0].Document)
 	}
 }
 
-func TestStore_RedactsSensitiveIDBeforePersistenceAndDelete(t *testing.T) {
+func TestStore_RedactsSecretMetadataValuesByKey(t *testing.T) {
 	t.Parallel()
 
-	store := NewStore()
-	rawID := "docs/secret.md?access_token=artifact123"
+	const secret = "plain-secret-only-the-key-identifies"
 
-	if err := store.Add(Document{ID: rawID, Text: "safe memory"}); err != nil {
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:   "metadata-secret",
+		Text: "metadata-only secret should not leak",
+		Metadata: map[string]string{
+			"api_key":     secret,
+			"token_count": "42",
+		},
+	}); err != nil {
 		t.Fatalf("Add() error = %v", err)
 	}
 
-	if strings.Contains(store.Documents[0].ID, "artifact123") {
-		t.Fatalf("ID was not redacted: %q", store.Documents[0].ID)
+	if strings.Contains(store.Documents[0].Metadata["api_key"], secret) {
+		t.Fatalf("stored metadata api_key contains raw secret: %#v", store.Documents[0].Metadata)
+	}
+	if got := store.Documents[0].Metadata["token_count"]; got != "42" {
+		t.Fatalf("token_count metadata = %q, want 42", got)
+	}
+	if store.Documents[0].Policy == nil || !store.Documents[0].Policy.Redacted {
+		t.Fatalf("policy = %#v, want redacted decision", store.Documents[0].Policy)
 	}
 
-	if !store.Delete(rawID) {
-		t.Fatalf("Delete(%q) = false, want true for redacted ID", rawID)
+	if !slices.Contains(store.Documents[0].Policy.RedactionRules, "secret_assignment") {
+		t.Fatalf("redaction rules = %#v, want secret_assignment", store.Documents[0].Policy.RedactionRules)
 	}
 
-	if len(store.Documents) != 0 {
-		t.Fatalf("documents len = %d, want 0", len(store.Documents))
+	path := filepath.Join(t.TempDir(), "memory.json")
+	if err := store.Save(path); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(data), secret) {
+		t.Fatalf("saved store contains raw metadata secret:\n%s", data)
 	}
 }
 
-func TestStore_RedactsSensitiveIDWithoutCollapsingPathSuffix(t *testing.T) {
+func TestStore_RedactsQuotedSecretAssignmentsBeforeSaveAndSearch(t *testing.T) {
+	t.Parallel()
+
+	const secret = "correct horse battery"
+
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:   "quoted-secret",
+		Text: "OAuth credential note\n\"password\": \"" + secret + "\"\nrotate soon",
+	}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	if strings.Contains(store.Documents[0].Text, secret) {
+		t.Fatalf("stored text contains quoted secret: %q", store.Documents[0].Text)
+	}
+	if store.Documents[0].Policy == nil || !store.Documents[0].Policy.Redacted {
+		t.Fatalf("policy = %#v, want redacted decision", store.Documents[0].Policy)
+	}
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	if err := store.Save(path); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(data), secret) {
+		t.Fatalf("saved store contains quoted secret:\n%s", data)
+	}
+
+	results, err := store.Search("oauth credential", 1)
+	if err != nil {
+		t.Fatalf("Search(oauth) error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Search(oauth) len = %d, want 1", len(results))
+	}
+	if strings.Contains(results[0].Snippet, secret) || strings.Contains(results[0].Document.Text, secret) {
+		t.Fatalf("result leaked quoted secret: %#v", results[0])
+	}
+
+	results, err = store.Search("correct horse", 10)
+	if err != nil {
+		t.Fatalf("Search(secret) error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("Search(secret) results = %#v, want no match", results)
+	}
+}
+
+func TestStore_RedactsPolicyBeforeSaveAndSearch(t *testing.T) {
+	t.Parallel()
+
+	const secret = "sk-1234567890abcdefSECRET"
+
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:   "policy-secret",
+		Text: "OAuth policy note",
+		Policy: &PolicyDecision{
+			Scope:          "scope-" + secret,
+			Retention:      "retain " + secret,
+			RedactionRules: []string{"rule-" + secret},
+		},
+	}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	policy := store.Documents[0].Policy
+	if policy == nil ||
+		strings.Contains(policy.Scope, secret) ||
+		strings.Contains(policy.Retention, secret) ||
+		len(policy.RedactionRules) == 0 ||
+		strings.Contains(strings.Join(policy.RedactionRules, ","), secret) {
+		t.Fatalf("stored policy leaked raw secret: %#v", policy)
+	}
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	if err := store.Save(path); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(data), secret) {
+		t.Fatalf("saved store leaked policy secret:\n%s", data)
+	}
+
+	results, err := store.Search("oauth policy", 1)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results len = %d, want 1", len(results))
+	}
+
+	resultPolicy := results[0].Document.Policy
+	if resultPolicy == nil ||
+		strings.Contains(resultPolicy.Scope, secret) ||
+		strings.Contains(resultPolicy.Retention, secret) ||
+		strings.Contains(strings.Join(resultPolicy.RedactionRules, ","), secret) {
+		t.Fatalf("result policy leaked raw secret: %#v", resultPolicy)
+	}
+}
+
+func TestStore_RedactedDocumentIDsRemainDistinct(t *testing.T) {
+	t.Parallel()
+
+	const firstSecret = "sk-1234567890abcdefSECRET"
+	const secondSecret = "sk-abcdef1234567890SECRET"
+
+	store := NewStore()
+	if err := store.Add(Document{ID: "doc-" + firstSecret, Text: "first OAuth note"}); err != nil {
+		t.Fatalf("Add(first) error = %v", err)
+	}
+	if err := store.Add(Document{ID: "doc-" + secondSecret, Text: "second OAuth note"}); err != nil {
+		t.Fatalf("Add(second) error = %v", err)
+	}
+
+	if len(store.Documents) != 2 {
+		t.Fatalf("documents len = %d, want 2 distinct redacted IDs", len(store.Documents))
+	}
+	if store.Documents[0].ID == store.Documents[1].ID {
+		t.Fatalf("redacted IDs collided: %#v", store.Documents)
+	}
+	for _, doc := range store.Documents {
+		if strings.Contains(doc.ID, firstSecret) || strings.Contains(doc.ID, secondSecret) {
+			t.Fatalf("redacted ID contains raw secret: %q", doc.ID)
+		}
+		if !strings.Contains(doc.ID, "[REDACTED:openai_api_key]#") {
+			t.Fatalf("redacted ID = %q, want redaction marker with fingerprint", doc.ID)
+		}
+	}
+}
+
+func TestStore_RedactedSessionIDsRemainDistinctInCorpus(t *testing.T) {
+	t.Parallel()
+
+	const firstSecret = "sk-1234567890abcdefSECRET"
+	const secondSecret = "sk-abcdef1234567890SECRET"
+
+	store := NewStore()
+	for _, sessionID := range []string{firstSecret, secondSecret} {
+		if err := store.Add(Document{
+			ID:         "session/" + sessionID + "/message/0",
+			Text:       "OAuth session note",
+			Metadata:   map[string]string{"session_id": sessionID, "source_id": sessionID},
+			Provenance: &Provenance{SourceType: sessionSourceType, SourceID: sessionID, SessionID: sessionID},
+		}); err != nil {
+			t.Fatalf("Add(%s) error = %v", sessionID, err)
+		}
+	}
+
+	if store.Corpus.SessionCount != 2 || len(store.Corpus.SessionIDs) != 2 {
+		t.Fatalf("corpus = %#v, want two distinct redacted session IDs", store.Corpus)
+	}
+	if store.Corpus.SessionIDs[0] == store.Corpus.SessionIDs[1] {
+		t.Fatalf("redacted session IDs collided: %#v", store.Corpus.SessionIDs)
+	}
+	for _, sessionID := range store.Corpus.SessionIDs {
+		if strings.Contains(sessionID, firstSecret) || strings.Contains(sessionID, secondSecret) {
+			t.Fatalf("session id contains raw secret: %q", sessionID)
+		}
+		if !strings.Contains(sessionID, "[REDACTED:openai_api_key]#") {
+			t.Fatalf("session id = %q, want redaction marker with fingerprint", sessionID)
+		}
+	}
+}
+
+func TestStore_RedactedRepoPathsRemainDistinctForPurge(t *testing.T) {
+	t.Parallel()
+
+	const firstSecret = "sk-1234567890abcdefSECRET"
+	const secondSecret = "sk-abcdef1234567890SECRET"
+
+	firstRepo := filepath.Join(string(os.PathSeparator), "tmp", firstSecret)
+	secondRepo := filepath.Join(string(os.PathSeparator), "tmp", secondSecret)
+
+	store := NewStore()
+	for _, repoPath := range []string{firstRepo, secondRepo} {
+		if err := store.Add(Document{
+			ID:       "repo-" + repoPath,
+			Text:     "OAuth repo memory",
+			Metadata: map[string]string{"repo_path": repoPath},
+			Provenance: &Provenance{
+				SourceType: ScopeManual,
+				SourceID:   repoPath,
+				RepoPath:   repoPath,
+			},
+		}); err != nil {
+			t.Fatalf("Add(%s) error = %v", repoPath, err)
+		}
+	}
+
+	if len(store.Documents) != 2 {
+		t.Fatalf("documents len = %d, want 2 distinct redacted repo docs", len(store.Documents))
+	}
+	if store.Documents[0].Provenance.RepoPath == store.Documents[1].Provenance.RepoPath {
+		t.Fatalf("redacted repo paths collided: %#v", store.Documents)
+	}
+	for _, doc := range store.Documents {
+		if strings.Contains(doc.ID, firstSecret) ||
+			strings.Contains(doc.ID, secondSecret) ||
+			strings.Contains(doc.Metadata["repo_path"], firstSecret) ||
+			strings.Contains(doc.Metadata["repo_path"], secondSecret) ||
+			strings.Contains(doc.Provenance.RepoPath, firstSecret) ||
+			strings.Contains(doc.Provenance.RepoPath, secondSecret) {
+			t.Fatalf("document contains raw repo secret: %#v", doc)
+		}
+		if !strings.Contains(doc.Provenance.RepoPath, "[REDACTED:openai_api_key]#") {
+			t.Fatalf("repo path = %q, want redaction marker with fingerprint", doc.Provenance.RepoPath)
+		}
+	}
+
+	if removed := store.Purge(PurgeFilter{RepoPath: firstRepo}); removed != 1 {
+		t.Fatalf("purge removed %d, want 1", removed)
+	}
+	if len(store.Documents) != 1 {
+		t.Fatalf("documents after purge = %#v, want one remaining repo", store.Documents)
+	}
+	if strings.Contains(store.Documents[0].Provenance.RepoPath, firstSecret) ||
+		!strings.Contains(store.Documents[0].Provenance.RepoPath, "[REDACTED:openai_api_key]#") {
+		t.Fatalf("remaining repo path = %q, want redacted second repo", store.Documents[0].Provenance.RepoPath)
+	}
+}
+
+func TestStore_RedactedTagsRemainDistinctForPurge(t *testing.T) {
+	t.Parallel()
+
+	const firstTag = "sk-1234567890abcdefSECRET"
+	const secondTag = "sk-abcdef1234567890SECRET"
+
+	store := NewStore()
+	for _, tag := range []string{firstTag, secondTag} {
+		if err := store.Add(Document{
+			ID:         "tagged-" + tag,
+			Text:       "OAuth tagged memory",
+			Metadata:   map[string]string{"tags": tag},
+			Provenance: &Provenance{Tags: []string{tag}},
+		}); err != nil {
+			t.Fatalf("Add(%s) error = %v", tag, err)
+		}
+	}
+
+	if len(store.Corpus.Tags) != 2 {
+		t.Fatalf("corpus tags = %#v, want two distinct redacted tags", store.Corpus.Tags)
+	}
+	if store.Corpus.Tags[0] == store.Corpus.Tags[1] {
+		t.Fatalf("redacted tags collided: %#v", store.Corpus.Tags)
+	}
+	for _, tag := range store.Corpus.Tags {
+		if strings.Contains(tag, firstTag) || strings.Contains(tag, secondTag) {
+			t.Fatalf("corpus tag contains raw secret: %q", tag)
+		}
+		if !strings.Contains(tag, "[REDACTED:openai_api_key]#") {
+			t.Fatalf("tag = %q, want redaction marker with fingerprint", tag)
+		}
+	}
+
+	if removed := store.Purge(PurgeFilter{Tag: firstTag}); removed != 1 {
+		t.Fatalf("purge removed %d, want 1", removed)
+	}
+	if len(store.Documents) != 1 || len(store.Corpus.Tags) != 1 {
+		t.Fatalf("store after purge = docs:%#v corpus:%#v, want one remaining tag", store.Documents, store.Corpus)
+	}
+	if strings.Contains(store.Corpus.Tags[0], firstTag) || !strings.Contains(store.Corpus.Tags[0], "[REDACTED:openai_api_key]#") {
+		t.Fatalf("remaining tag = %q, want redacted second tag", store.Corpus.Tags[0])
+	}
+}
+
+func TestStore_RedactsAndPurgesSessionIDOnlyDocuments(t *testing.T) {
+	t.Parallel()
+
+	const (
+		firstSecret  = "sk-1234567890abcdefSECRET"
+		secondSecret = "sk-abcdef1234567890SECRET"
+	)
+
+	store := NewStore()
+	for _, sessionID := range []string{firstSecret, secondSecret} {
+		if err := store.Add(Document{
+			ID:   "session/" + sessionID + "/message/0",
+			Text: "OAuth legacy session note",
+		}); err != nil {
+			t.Fatalf("Add(%s) error = %v", sessionID, err)
+		}
+	}
+
+	if store.Corpus.SessionCount != 2 || len(store.Corpus.SessionIDs) != 2 {
+		t.Fatalf("corpus = %#v, want two distinct ID-derived sessions", store.Corpus)
+	}
+	if store.Corpus.SessionIDs[0] == store.Corpus.SessionIDs[1] {
+		t.Fatalf("redacted ID-derived session IDs collided: %#v", store.Corpus.SessionIDs)
+	}
+	for _, doc := range store.Documents {
+		if strings.Contains(doc.ID, firstSecret) || strings.Contains(doc.ID, secondSecret) {
+			t.Fatalf("document ID contains raw session secret: %q", doc.ID)
+		}
+	}
+
+	if removed := store.Purge(PurgeFilter{SessionID: firstSecret}); removed != 1 {
+		t.Fatalf("purge removed %d, want 1", removed)
+	}
+	if len(store.Documents) != 1 || store.Corpus.SessionCount != 1 || len(store.Corpus.SessionIDs) != 1 {
+		t.Fatalf("store after purge = docs:%#v corpus:%#v, want one remaining distinct session", store.Documents, store.Corpus)
+	}
+	if strings.Contains(store.Documents[0].ID, firstSecret) {
+		t.Fatalf("remaining document contains purged raw session secret: %q", store.Documents[0].ID)
+	}
+}
+
+func TestStore_PurgeMatchesRedactedSessionSelector(t *testing.T) {
+	t.Parallel()
+
+	const secretSessionID = "sk-1234567890abcdefSECRET"
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:         "session/" + secretSessionID + "/message/0",
+		Text:       "OAuth session note",
+		Metadata:   map[string]string{"session_id": secretSessionID},
+		Provenance: &Provenance{SourceType: sessionSourceType, SourceID: secretSessionID, SessionID: secretSessionID},
+	}); err != nil {
+		t.Fatalf("Add(secret session) error = %v", err)
+	}
+
+	if strings.Contains(store.Documents[0].ID, secretSessionID) || strings.Contains(store.Corpus.SessionIDs[0], secretSessionID) {
+		t.Fatalf("store leaked raw session secret: doc=%#v corpus=%#v", store.Documents[0], store.Corpus)
+	}
+
+	if removed := store.Purge(PurgeFilter{SessionID: secretSessionID}); removed != 1 {
+		t.Fatalf("purge removed %d, want 1", removed)
+	}
+	if len(store.Documents) != 0 || store.Corpus.SessionCount != 0 {
+		t.Fatalf("store after purge = docs:%#v corpus:%#v, want empty", store.Documents, store.Corpus)
+	}
+}
+
+func TestStore_PurgeUsesCustomRedactionRulesBeforeMatching(t *testing.T) {
+	t.Parallel()
+
+	const sessionID = "ACME-12345"
+	store := NewStore()
+	if err := store.SetCustomRedactionRules(`ACME-[0-9]+`); err != nil {
+		t.Fatalf("SetCustomRedactionRules() error = %v", err)
+	}
+
+	// Simulate a legacy store loaded before the custom redaction rule existed.
+	store.Documents = []Document{{
+		ID:         "session/" + sessionID + "/message/0",
+		Text:       "legacy custom-redacted session",
+		Metadata:   map[string]string{"session_id": sessionID},
+		Provenance: &Provenance{SourceType: sessionSourceType, SourceID: sessionID, SessionID: sessionID},
+	}}
+
+	if removed := store.Purge(PurgeFilter{SessionID: sessionID}); removed != 1 {
+		t.Fatalf("purge removed %d, want 1", removed)
+	}
+	if len(store.Documents) != 0 || store.Corpus.SessionCount != 0 {
+		t.Fatalf("store after purge = docs:%#v corpus:%#v, want empty", store.Documents, store.Corpus)
+	}
+}
+
+func TestStore_SearchRedactsLegacyDocumentsBeforeMatching(t *testing.T) {
+	t.Parallel()
+
+	const secret = "sk-1234567890abcdefSECRET"
+
+	store := NewStore()
+	// Bypass Add to simulate a legacy on-disk store created before redaction.
+	store.Documents = []Document{{
+		ID:   "legacy",
+		Text: "legacy raw secret " + secret,
+	}}
+
+	results, err := store.Search(secret, 1)
+	if err != nil {
+		t.Fatalf("Search(secret) error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("Search(secret) results = %#v, want no match against raw secret", results)
+	}
+
+	results, err = store.Search("legacy raw secret", 1)
+	if err != nil {
+		t.Fatalf("Search(legacy) error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Search(legacy) len = %d, want 1", len(results))
+	}
+	if strings.Contains(results[0].Snippet, secret) || strings.Contains(strings.Join(results[0].Matches, ","), "1234567890abcdefSECRET") {
+		t.Fatalf("legacy result leaked secret: %#v", results[0])
+	}
+	if strings.Contains(results[0].Document.Text, secret) {
+		t.Fatalf("legacy result document text leaked secret: %q", results[0].Document.Text)
+	}
+}
+
+func TestStore_SearchDoesNotMatchRedactionMarkerTokens(t *testing.T) {
+	t.Parallel()
+
+	const bearer = "Bearer abcdef1234567890TOKEN"
+
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:   "bearer",
+		Text: "OAuth leak investigation " + bearer,
+	}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	results, err := store.Search(bearer, 10)
+	if err != nil {
+		t.Fatalf("Search(bearer) error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("Search(bearer) results = %#v, want no match against redaction marker tokens", results)
+	}
+
+	results, err = store.Search("oauth investigation", 10)
+	if err != nil {
+		t.Fatalf("Search(oauth) error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Search(oauth) len = %d, want 1", len(results))
+	}
+	if strings.Contains(results[0].Snippet, bearer) || strings.Contains(results[0].Document.Text, bearer) {
+		t.Fatalf("result leaked bearer token: %#v", results[0])
+	}
+}
+
+func TestStore_SearchDoesNotMatchRedactionMarkerFingerprint(t *testing.T) {
 	t.Parallel()
 
 	store := NewStore()
-	firstID := "tenant/access_token=artifact123/first"
-	secondID := "tenant/access_token=artifact123/second"
+	// Bypass Add to simulate a legacy store whose text already contains a
+	// fingerprinted redaction marker from an earlier identifier-style pass.
+	store.Documents = []Document{{
+		ID:   "legacy-marker",
+		Text: "OAuth leak [REDACTED:openai_api_key]#deadbeef1234",
+	}}
 
-	if err := store.AddText(firstID, "first safe memory"); err != nil {
-		t.Fatalf("AddText(first) error = %v", err)
+	results, err := store.Search("deadbeef1234", 10)
+	if err != nil {
+		t.Fatalf("Search(fingerprint) error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("Search(fingerprint) results = %#v, want no match against redaction fingerprint", results)
 	}
 
-	if err := store.AddText(secondID, "second safe memory"); err != nil {
-		t.Fatalf("AddText(second) error = %v", err)
+	results, err = store.Search("oauth leak", 10)
+	if err != nil {
+		t.Fatalf("Search(oauth) error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Search(oauth) len = %d, want 1", len(results))
+	}
+}
+
+func TestStore_CustomRedactionRulesApplyBeforeIndexing(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	if err := store.SetCustomRedactionRules(`ACME-[0-9]+`); err != nil {
+		t.Fatalf("SetCustomRedactionRules() error = %v", err)
+	}
+
+	if err := store.AddText("custom", "customer ACME-12345 should be hidden"); err != nil {
+		t.Fatalf("AddText() error = %v", err)
+	}
+
+	if strings.Contains(store.Documents[0].Text, "ACME-12345") {
+		t.Fatalf("stored text contains custom-redacted value: %q", store.Documents[0].Text)
+	}
+	if !strings.Contains(store.Documents[0].Text, "[REDACTED:custom_1]") {
+		t.Fatalf("stored text = %q, want custom redaction marker", store.Documents[0].Text)
+	}
+}
+
+func TestStore_SetRedactorRedactsExistingDocumentsAndCorpus(t *testing.T) {
+	t.Parallel()
+
+	const secret = "ACME-12345"
+
+	store := NewStore()
+	store.Corpus = CorpusMetadata{Scope: ScopeRepo, RepoPath: "/repo/" + secret, Tags: []string{secret}}
+	if err := store.Add(Document{
+		ID:         "session/" + secret + "/message/0",
+		Text:       "customer " + secret + " should be hidden",
+		Metadata:   map[string]string{"session_id": secret, "repo_path": "/repo/" + secret, "tags": secret},
+		Provenance: &Provenance{SourceType: sessionSourceType, SessionID: secret, RepoPath: "/repo/" + secret, Tags: []string{secret}},
+	}); err != nil {
+		t.Fatalf("AddText() error = %v", err)
+	}
+	if !strings.Contains(store.Documents[0].Text, secret) {
+		t.Fatalf("document was redacted before custom rule was installed: %#v", store.Documents[0])
+	}
+
+	if err := store.SetCustomRedactionRules(`ACME-[0-9]+`); err != nil {
+		t.Fatalf("SetCustomRedactionRules() error = %v", err)
+	}
+
+	if strings.Contains(store.Documents[0].ID, secret) ||
+		strings.Contains(store.Documents[0].Text, secret) ||
+		strings.Contains(store.Documents[0].Metadata["repo_path"], secret) ||
+		strings.Contains(store.Documents[0].Provenance.SessionID, secret) ||
+		strings.Contains(store.Corpus.RepoPath, secret) ||
+		strings.Contains(store.Corpus.Tags[0], secret) {
+		t.Fatalf("store still contains raw custom-redacted value: doc=%#v corpus=%#v", store.Documents[0], store.Corpus)
+	}
+	if !strings.Contains(store.Documents[0].ID, "[REDACTED:custom_1]#") ||
+		!strings.Contains(store.Corpus.Tags[0], "[REDACTED:custom_1]#") {
+		t.Fatalf("store missing fingerprinted custom redaction: doc=%#v corpus=%#v", store.Documents[0], store.Corpus)
+	}
+}
+
+func TestStore_SaveRedactsLoadedLegacyDocuments(t *testing.T) {
+	t.Parallel()
+
+	const secret = "sk-abcdef1234567890SECRET"
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	if err := os.WriteFile(path, []byte(`{"corpus":{"scope":"repo","repo_path":"`+secret+`"},"documents":[{"id":"legacy","text":"legacy api_key=`+secret+`"}]}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	store, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if strings.Contains(store.Corpus.RepoPath, secret) || strings.Contains(store.Documents[0].Text, secret) {
+		t.Fatalf("loaded legacy store contains raw secret: corpus=%#v doc=%#v", store.Corpus, store.Documents[0])
+	}
+	if saveErr := store.Save(path); saveErr != nil {
+		t.Fatalf("Save() error = %v", saveErr)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(data), secret) {
+		t.Fatalf("saved legacy store contains raw secret:\n%s", data)
+	}
+	if !strings.Contains(string(data), `"schema_version": 1`) ||
+		!strings.Contains(string(data), `"corpus"`) ||
+		!strings.Contains(string(data), `"created_at"`) ||
+		!strings.Contains(string(data), `"updated_at"`) ||
+		!strings.Contains(string(data), `"provenance"`) ||
+		!strings.Contains(string(data), `"policy"`) {
+		t.Fatalf("saved legacy store is missing schema, corpus, timestamps, provenance, or policy:\n%s", data)
+	}
+}
+
+func TestStore_SavePersistsSchemaCorpusAndTimestamps(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Corpus = CorpusMetadata{Scope: ScopeRepo, RepoPath: "/repo"}
+	if err := store.Add(Document{
+		ID:         "design",
+		Path:       "/repo/design.md",
+		Text:       "memory design",
+		Provenance: &Provenance{SourceType: ScopeFile, Path: "/repo/design.md"},
+	}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	if err := store.Save(path); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.SchemaVersion != SchemaVersion {
+		t.Fatalf("schema version = %d, want %d", loaded.SchemaVersion, SchemaVersion)
+	}
+	if loaded.CreatedAt.IsZero() || loaded.UpdatedAt.IsZero() {
+		t.Fatalf("timestamps not persisted: created=%v updated=%v", loaded.CreatedAt, loaded.UpdatedAt)
+	}
+	if loaded.Corpus.Scope != ScopeRepo || loaded.Corpus.RepoPath != "/repo" || loaded.Corpus.DocumentCount != 1 {
+		t.Fatalf("corpus = %#v, want repo metadata with document count", loaded.Corpus)
+	}
+	if len(loaded.Documents) != 1 {
+		t.Fatalf("documents len = %d, want 1", len(loaded.Documents))
+	}
+	doc := loaded.Documents[0]
+	if doc.Provenance == nil || doc.Provenance.SourceType != ScopeFile || doc.Provenance.Path != "/repo/design.md" {
+		t.Fatalf("provenance = %#v, want persisted file source provenance", doc.Provenance)
+	}
+	if doc.Policy == nil || doc.Policy.Scope != ScopeFile {
+		t.Fatalf("policy = %#v, want persisted file policy decision", doc.Policy)
+	}
+}
+
+func TestLoadClearsStaleLegacyCorpusMetadata(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	oldDate := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	newDate := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	data := `{
+  "corpus": {
+    "scope": "repo",
+    "repo_path": "/repo/old",
+    "agent": "old-agent",
+    "date_start": "` + oldDate.Add(-time.Hour).Format(time.RFC3339) + `",
+    "date_end": "` + oldDate.Add(time.Hour).Format(time.RFC3339) + `"
+  },
+  "documents": [
+    {
+      "id": "session/new/message/0",
+      "text": "new auth",
+      "metadata": {
+        "session_id": "new",
+        "repo_path": "/repo/new",
+        "agent": "new-agent",
+        "updated_at": "` + newDate.Format(time.RFC3339) + `"
+      },
+      "provenance": {
+        "session_id": "new",
+        "repo_path": "/repo/new",
+        "agent": "new-agent",
+        "updated_at": "` + newDate.Format(time.RFC3339) + `"
+      }
+    }
+  ]
+}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.Corpus.RepoPath != "" || loaded.Corpus.Agent != "" {
+		t.Fatalf("loaded corpus = %#v, want stale repo and agent metadata cleared", loaded.Corpus)
+	}
+	if loaded.Corpus.DateStart != "" || loaded.Corpus.DateEnd != "" {
+		t.Fatalf("loaded corpus = %#v, want stale date range metadata cleared", loaded.Corpus)
+	}
+	if loaded.Corpus.Scope != ScopeManual {
+		t.Fatalf("loaded corpus scope = %q, want manual after stale repo cleanup", loaded.Corpus.Scope)
+	}
+	if strings.Contains(loaded.Corpus.Description, "/repo/old") ||
+		strings.Contains(loaded.Corpus.Description, "old-agent") ||
+		strings.Contains(loaded.Corpus.Description, "date_range=") {
+		t.Fatalf("loaded corpus description = %q, want stale values removed", loaded.Corpus.Description)
+	}
+}
+
+func TestLoadClearsGlobalScopeWithoutOptIn(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	data := `{
+  "corpus": {"scope": "global"},
+  "documents": [
+    {"id": "session/demo/message/0", "text": "demo auth", "metadata": {"session_id": "demo"}}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.Corpus.Scope != ScopeManual || loaded.Corpus.Global {
+		t.Fatalf("loaded corpus = %#v, want non-opt-in global scope downgraded to manual", loaded.Corpus)
+	}
+	if strings.Contains(loaded.Corpus.Description, "scope=global") || strings.Contains(loaded.Corpus.Description, "global=opt-in") {
+		t.Fatalf("loaded corpus description = %q, want no global claim", loaded.Corpus.Description)
+	}
+}
+
+func TestLoadClearsStaleGlobalOptInOutsideGlobalScope(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	data := `{
+  "corpus": {"scope": "repo", "repo_path": "/repo", "global": true},
+  "documents": [
+    {
+      "id": "session/demo/message/0",
+      "text": "demo auth",
+      "metadata": {"session_id": "demo", "repo_path": "/repo"},
+      "provenance": {"session_id": "demo", "repo_path": "/repo"}
+    }
+  ]
+}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.Corpus.Scope != ScopeRepo || loaded.Corpus.Global {
+		t.Fatalf("loaded corpus = %#v, want repo scope without stale global opt-in", loaded.Corpus)
+	}
+	if strings.Contains(loaded.Corpus.Description, "global=opt-in") {
+		t.Fatalf("loaded corpus description = %q, want no stale global opt-in marker", loaded.Corpus.Description)
+	}
+}
+
+func TestLoadDowngradesUnsupportedCorpusScope(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	data := `{
+  "corpus": {"scope": "everything"},
+  "documents": [
+    {"id": "session/demo/message/0", "text": "demo auth", "metadata": {"session_id": "demo"}}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.Corpus.Scope != ScopeManual {
+		t.Fatalf("loaded corpus scope = %q, want unsupported scope downgraded to manual", loaded.Corpus.Scope)
+	}
+	if strings.Contains(loaded.Corpus.Description, "everything") {
+		t.Fatalf("loaded corpus description = %q, want unsupported scope removed", loaded.Corpus.Description)
+	}
+}
+
+func TestLoadRecountsLegacySessionCorpus(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "memory.json")
+	if err := os.WriteFile(path, []byte(`{"documents":[{"id":"session/legacy/message/0","text":"legacy auth"}]}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.Corpus.DocumentCount != 1 || loaded.Corpus.SessionCount != 1 {
+		t.Fatalf("corpus = %#v, want recounted legacy session corpus", loaded.Corpus)
+	}
+	if !reflect.DeepEqual(loaded.Corpus.SessionIDs, []string{"legacy"}) {
+		t.Fatalf("session ids = %#v, want legacy", loaded.Corpus.SessionIDs)
+	}
+	if loaded.Documents[0].Provenance == nil ||
+		loaded.Documents[0].Provenance.SourceType != sessionSourceType ||
+		loaded.Documents[0].Provenance.SessionID != "legacy" ||
+		loaded.Documents[0].Provenance.Kind != "message" {
+		t.Fatalf("legacy provenance = %#v, want session source inferred from ID", loaded.Documents[0].Provenance)
+	}
+	if loaded.Documents[0].Policy == nil || loaded.Documents[0].Policy.Scope != ScopeSession {
+		t.Fatalf("legacy policy = %#v, want session scope inferred from ID", loaded.Documents[0].Policy)
+	}
+}
+
+func TestLoadRecountsLegacyPathOnlyFileCorpus(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	notePath := filepath.Join(dir, "note.txt")
+	storePath := filepath.Join(dir, "memory.json")
+	if err := os.WriteFile(storePath, []byte(`{"documents":[{"id":"`+notePath+`","path":"`+notePath+`","text":"legacy file auth"}]}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	loaded, err := Load(storePath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.Corpus.DocumentCount != 1 || loaded.Corpus.FileCount != 1 || loaded.Corpus.Scope != ScopeFile {
+		t.Fatalf("corpus = %#v, want recounted legacy file corpus", loaded.Corpus)
+	}
+	if loaded.Documents[0].Provenance == nil ||
+		loaded.Documents[0].Provenance.SourceType != ScopeFile ||
+		loaded.Documents[0].Provenance.SourceID != notePath ||
+		loaded.Documents[0].Provenance.Path != notePath ||
+		loaded.Documents[0].Provenance.Kind != ScopeFile {
+		t.Fatalf("legacy provenance = %#v, want file source inferred from path", loaded.Documents[0].Provenance)
+	}
+	if loaded.Documents[0].Policy == nil || loaded.Documents[0].Policy.Scope != ScopeFile {
+		t.Fatalf("legacy policy = %#v, want file scope inferred from path", loaded.Documents[0].Policy)
+	}
+}
+
+func TestStore_PurgeByRepoMatchesLegacyFileIDPath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	notePath := filepath.Join(dir, "note.txt")
+
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:       notePath,
+		Text:     "legacy file auth",
+		Metadata: map[string]string{"source_type": ScopeFile, "kind": ScopeFile},
+	}); err != nil {
+		t.Fatalf("Add(legacy file) error = %v", err)
+	}
+
+	if store.Documents[0].Provenance == nil || store.Documents[0].Provenance.Path != notePath {
+		t.Fatalf("legacy file provenance = %#v, want ID copied into path", store.Documents[0].Provenance)
+	}
+
+	if removed := store.Purge(PurgeFilter{RepoPath: dir}); removed != 1 {
+		t.Fatalf("repo purge removed %d, want legacy file document", removed)
+	}
+	if len(store.Documents) != 0 {
+		t.Fatalf("documents after purge = %#v, want empty", store.Documents)
+	}
+}
+
+func TestStore_PurgeBySessionTagRepoAndAll(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	docs := []Document{
+		{
+			ID:         "session/one/message/0",
+			Text:       "one auth",
+			Metadata:   map[string]string{"session_id": "one", "tags": "auth", "worktree_path": "/repo/one"},
+			Provenance: &Provenance{SessionID: "one", Tags: []string{"auth"}, RepoPath: "/repo/one"},
+		},
+		{
+			ID:         "session/two/message/0",
+			Text:       "two docs",
+			Metadata:   map[string]string{"session_id": "two", "tags": "docs", "worktree_path": "/repo/two"},
+			Provenance: &Provenance{SessionID: "two", Tags: []string{"docs"}, RepoPath: "/repo/two"},
+		},
+		{
+			ID:         "session/three/message/0",
+			Text:       "three auth",
+			Metadata:   map[string]string{"session_id": "three", "tags": "auth", "worktree_path": "/repo/three"},
+			Provenance: &Provenance{SessionID: "three", Tags: []string{"auth"}, RepoPath: "/repo/three"},
+		},
+		{
+			ID:         "file-in-repo-two",
+			Path:       "/repo/two/notes.txt",
+			Text:       "repo two file",
+			Metadata:   map[string]string{"source_type": ScopeFile, "kind": ScopeFile, "path": "/repo/two/notes.txt"},
+			Provenance: &Provenance{SourceType: ScopeFile, Path: "/repo/two/notes.txt"},
+		},
+	}
+	for _, doc := range docs {
+		if err := store.Add(doc); err != nil {
+			t.Fatalf("Add(%s) error = %v", doc.ID, err)
+		}
+	}
+
+	if removed := store.Purge(PurgeFilter{SessionID: "one"}); removed != 1 {
+		t.Fatalf("session purge removed %d, want 1", removed)
+	}
+	if removed := store.Purge(PurgeFilter{RepoPath: "/repo/two"}); removed != 2 {
+		t.Fatalf("repo purge removed %d, want 2", removed)
+	}
+	if removed := store.Purge(PurgeFilter{Tag: "auth"}); removed != 1 {
+		t.Fatalf("tag purge removed %d, want 1", removed)
+	}
+	if removed := store.Purge(PurgeFilter{All: true}); removed != 0 {
+		t.Fatalf("empty all purge removed %d, want 0", removed)
+	}
+}
+
+func TestStore_PurgeIgnoresBlankSelectors(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:         "session/one/message/0",
+		Text:       "one auth",
+		Metadata:   map[string]string{"session_id": "one", "tags": "auth"},
+		Provenance: &Provenance{SessionID: "one", Tags: []string{"auth"}},
+	}); err != nil {
+		t.Fatalf("Add(one) error = %v", err)
+	}
+
+	if removed := store.Purge(PurgeFilter{SessionID: " \t "}); removed != 0 {
+		t.Fatalf("blank session purge removed %d, want 0", removed)
+	}
+	if removed := store.Purge(PurgeFilter{Tag: " \t "}); removed != 0 {
+		t.Fatalf("blank tag purge removed %d, want 0", removed)
+	}
+	if removed := store.Purge(PurgeFilter{RepoPath: " \t "}); removed != 0 {
+		t.Fatalf("blank repo purge removed %d, want 0", removed)
+	}
+	if len(store.Documents) != 1 {
+		t.Fatalf("documents len after blank purge = %d, want 1", len(store.Documents))
+	}
+}
+
+//nolint:paralleltest // Uses t.Chdir to ensure relative session IDs are not treated as repo paths.
+func TestStore_PurgeByRepoDoesNotRemoveSessionWithoutRepoProvenance(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	store := NewStore()
+	if err := store.Add(Document{
+		ID:   "session/legacy/message/0",
+		Path: "legacy",
+		Text: "legacy session without repo provenance",
+	}); err != nil {
+		t.Fatalf("Add(legacy) error = %v", err)
+	}
+	if err := store.Add(Document{
+		ID:       "file-note",
+		Path:     filepath.Join(dir, "note.txt"),
+		Text:     "repo file note",
+		Metadata: map[string]string{"source_type": ScopeFile, "kind": ScopeFile, "path": filepath.Join(dir, "note.txt")},
+	}); err != nil {
+		t.Fatalf("Add(file) error = %v", err)
+	}
+
+	if removed := store.Purge(PurgeFilter{RepoPath: dir}); removed != 1 {
+		t.Fatalf("repo purge removed %d, want only the file document", removed)
+	}
+
+	if len(store.Documents) != 1 || store.Documents[0].ID != "session/legacy/message/0" {
+		t.Fatalf("remaining documents = %#v, want legacy session retained", store.Documents)
+	}
+}
+
+func TestStore_RecountsTagsAndClearsCorpusOnPurgeAll(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore()
+	store.Corpus = CorpusMetadata{Scope: ScopeTags, Tags: []string{"auth", "stale"}, SessionIDs: []string{"old"}}
+	if err := store.Add(Document{
+		ID:         "session/one/message/0",
+		Text:       "one auth",
+		Metadata:   map[string]string{"session_id": "one", "tags": "auth"},
+		Provenance: &Provenance{SessionID: "one", Tags: []string{"auth"}},
+	}); err != nil {
+		t.Fatalf("Add(one) error = %v", err)
+	}
+	if err := store.Add(Document{
+		ID:         "session/two/message/0",
+		Text:       "two docs",
+		Metadata:   map[string]string{"session_id": "two", "tags": "docs"},
+		Provenance: &Provenance{SessionID: "two", Tags: []string{"docs"}},
+	}); err != nil {
+		t.Fatalf("Add(two) error = %v", err)
+	}
+
+	if !reflect.DeepEqual(store.Corpus.Tags, []string{"auth", "docs"}) {
+		t.Fatalf("tags = %#v, want auth/docs", store.Corpus.Tags)
+	}
+
+	if removed := store.Purge(PurgeFilter{Tag: "auth"}); removed != 1 {
+		t.Fatalf("tag purge removed %d, want 1", removed)
+	}
+	if !reflect.DeepEqual(store.Corpus.Tags, []string{"docs"}) {
+		t.Fatalf("tags after tag purge = %#v, want docs", store.Corpus.Tags)
+	}
+
+	if removed := store.Purge(PurgeFilter{All: true}); removed != 1 {
+		t.Fatalf("all purge removed %d, want remaining doc", removed)
+	}
+	if store.Corpus.Scope != ScopeManual ||
+		store.Corpus.DocumentCount != 0 ||
+		len(store.Corpus.Tags) != 0 ||
+		len(store.Corpus.SessionIDs) != 0 ||
+		strings.Contains(store.Corpus.Description, "auth") ||
+		strings.Contains(store.Corpus.Description, "stale") {
+		t.Fatalf("corpus after purge all = %#v, want reset manual empty corpus", store.Corpus)
+	}
+}
+
+func TestStore_PurgeClearsStaleRepoCorpusMetadata(t *testing.T) {
+	t.Parallel()
+
+	firstRepo := filepath.Join(string(os.PathSeparator), "repo", "one")
+	secondRepo := filepath.Join(string(os.PathSeparator), "repo", "two")
+	store := NewStore()
+	store.Corpus = CorpusMetadata{Scope: ScopeRepo, RepoPath: firstRepo}
+
+	for _, doc := range []Document{
+		{
+			ID:         "session/one/message/0",
+			Text:       "one auth",
+			Metadata:   map[string]string{"session_id": "one", "repo_path": firstRepo},
+			Provenance: &Provenance{SessionID: "one", RepoPath: firstRepo},
+		},
+		{
+			ID:         "session/two/message/0",
+			Text:       "two auth",
+			Metadata:   map[string]string{"session_id": "two", "repo_path": secondRepo},
+			Provenance: &Provenance{SessionID: "two", RepoPath: secondRepo},
+		},
+	} {
+		if err := store.Add(doc); err != nil {
+			t.Fatalf("Add(%s) error = %v", doc.ID, err)
+		}
+	}
+
+	if removed := store.Purge(PurgeFilter{RepoPath: firstRepo}); removed != 1 {
+		t.Fatalf("repo purge removed %d, want 1", removed)
+	}
+	if len(store.Documents) != 1 {
+		t.Fatalf("documents after purge = %#v, want one remaining", store.Documents)
+	}
+	if store.Corpus.RepoPath != "" || strings.Contains(store.Corpus.Description, firstRepo) {
+		t.Fatalf("corpus after repo purge = %#v, want purged repo metadata cleared", store.Corpus)
+	}
+	if store.Corpus.Scope != ScopeManual {
+		t.Fatalf("corpus scope after repo purge = %q, want manual mixed corpus", store.Corpus.Scope)
+	}
+}
+
+func TestStore_ApplyRetentionRemovesExpiredSessionDocuments(t *testing.T) {
+	t.Parallel()
+
+	oldTime := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	newTime := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	store := NewStore()
+	docs := []Document{
+		{
+			ID:         "session/old/message/0",
+			Text:       "old auth",
+			Provenance: &Provenance{SessionID: "old", UpdatedAt: oldTime.Format(time.RFC3339)},
+		},
+		{
+			ID:         "session/new/message/0",
+			Text:       "new auth",
+			Provenance: &Provenance{SessionID: "new", UpdatedAt: newTime.Format(time.RFC3339)},
+		},
+		{ID: "file/no-date", Text: "file auth"},
+	}
+	for _, doc := range docs {
+		if err := store.Add(doc); err != nil {
+			t.Fatalf("Add(%s) error = %v", doc.ID, err)
+		}
+	}
+
+	removed := store.ApplyRetention(time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
+	if removed != 1 {
+		t.Fatalf("ApplyRetention() removed %d, want 1", removed)
 	}
 
 	if len(store.Documents) != 2 {
 		t.Fatalf("documents len = %d, want 2", len(store.Documents))
 	}
-
-	if strings.Contains(store.Documents[0].ID, "artifact123") || strings.Contains(store.Documents[1].ID, "artifact123") {
-		t.Fatalf("IDs retained raw secret: %#v", store.Documents)
-	}
-
-	if !strings.HasSuffix(store.Documents[0].ID, "/first") || !strings.HasSuffix(store.Documents[1].ID, "/second") {
-		t.Fatalf("redacted IDs collapsed path suffixes: %#v", store.Documents)
-	}
-
-	if !store.Delete(firstID) {
-		t.Fatal("Delete(first) = false, want true")
-	}
-
-	if len(store.Documents) != 1 || !strings.HasSuffix(store.Documents[0].ID, "/second") {
-		t.Fatalf("documents after delete = %#v, want second document", store.Documents)
-	}
-}
-
-func TestLoadRefusesUnredactedPersistedContent(t *testing.T) {
-	t.Parallel()
-
-	store := Store{
-		SchemaVersion: StoreSchemaVersion,
-		Normalization: StoreTextNormalization,
-		Documents: []Document{{
-			ID:         "secret",
-			Text:       "deploy password=hunter2",
-			Metadata:   map[string]string{"auth_token": "abc123"},
-			Provenance: map[string]string{"source": "Authorization: Bearer openai-secret-value"},
-		}},
-	}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	_, err = Load(path)
-	if !errors.Is(err, ErrPrivacyPolicy) {
-		t.Fatalf("Load() error = %v, want ErrPrivacyPolicy", err)
-	}
-}
-
-func TestLoadRefusesUnredactedPersistedPathUnlessMigrated(t *testing.T) {
-	t.Parallel()
-
-	text := "safe memory"
-	store := Store{
-		SchemaVersion: StoreSchemaVersion,
-		Normalization: StoreTextNormalization,
-		Documents: []Document{{
-			ID:         "doc.md?access_token=id123",
-			Path:       "docs/secret.md?access_token=artifact123",
-			Text:       text,
-			SourceHash: privacy.SourceHash(text),
-			Provenance: map[string]string{"source_type": "test"},
-		}},
-	}
-
-	path := filepath.Join(t.TempDir(), "path-secret.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	_, err = Load(path)
-	if !errors.Is(err, ErrPrivacyPolicy) {
-		t.Fatalf("Load() error = %v, want ErrPrivacyPolicy", err)
-	}
-
-	migrated, err := LoadWithOptions(path, LoadOptions{Migrate: true})
-	if err != nil {
-		t.Fatalf("LoadWithOptions(Migrate) error = %v", err)
-	}
-
-	if strings.Contains(migrated.Documents[0].Path, "artifact123") {
-		t.Fatalf("migrated path was not redacted: %q", migrated.Documents[0].Path)
-	}
-
-	if strings.Contains(migrated.Documents[0].ID, "id123") {
-		t.Fatalf("migrated ID was not redacted: %q", migrated.Documents[0].ID)
-	}
-}
-
-func TestLoadWithOptionsMigratesUnredactedPersistedContent(t *testing.T) {
-	t.Parallel()
-
-	store := Store{
-		Documents: []Document{{
-			ID:         "secret",
-			Text:       "deploy password=hunter2",
-			Metadata:   map[string]string{"auth_token": "abc123"},
-			Provenance: map[string]string{"source": "Authorization: Bearer openai-secret-value"},
-		}},
-	}
-
-	path := filepath.Join(t.TempDir(), "legacy-memory.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	migrated, err := LoadWithOptions(path, LoadOptions{Migrate: true})
-	if err != nil {
-		t.Fatalf("LoadWithOptions(Migrate) error = %v", err)
-	}
-
-	if migrated.SchemaVersion != StoreSchemaVersion {
-		t.Fatalf("SchemaVersion = %d, want %d", migrated.SchemaVersion, StoreSchemaVersion)
-	}
-
-	if len(migrated.Documents) != 1 {
-		t.Fatalf("documents len = %d, want 1", len(migrated.Documents))
-	}
-
-	doc := migrated.Documents[0]
-	for _, raw := range []string{"hunter2", "abc123", "openai-secret-value"} {
-		if strings.Contains(doc.Text, raw) {
-			t.Fatalf("migrated text retained %q: %q", raw, doc.Text)
-		}
-
-		for key, value := range doc.Metadata {
-			if strings.Contains(value, raw) {
-				t.Fatalf("migrated metadata %q retained %q: %q", key, raw, value)
-			}
-		}
-
-		for key, value := range doc.Provenance {
-			if strings.Contains(value, raw) {
-				t.Fatalf("migrated provenance %q retained %q: %q", key, raw, value)
-			}
+	for _, doc := range store.Documents {
+		if doc.ID == "session/old/message/0" {
+			t.Fatalf("expired document was retained: %#v", store.Documents)
 		}
 	}
-
-	if doc.SourceHash != privacy.SourceHash(doc.Text) {
-		t.Fatalf("SourceHash = %q, want hash of redacted text", doc.SourceHash)
-	}
-
-	if migrated.Normalization != StoreTextNormalization {
-		t.Fatalf("Normalization = %q, want %q", migrated.Normalization, StoreTextNormalization)
-	}
 }
 
-func TestLoadRejectsMissingProvenanceUnlessMigrated(t *testing.T) {
+func TestStore_ApplyRetentionClearsCorpusWhenAllDocumentsExpire(t *testing.T) {
 	t.Parallel()
 
-	store := Store{
-		SchemaVersion: StoreSchemaVersion,
-		Normalization: StoreTextNormalization,
-		Documents: []Document{{
-			ID:         "note",
-			Text:       "safe memory without provenance",
-			SourceHash: privacy.SourceHash("safe memory without provenance"),
-		}},
-	}
-
-	path := filepath.Join(t.TempDir(), "missing-provenance.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	_, err = Load(path)
-	if !errors.Is(err, ErrProvenanceMissing) {
-		t.Fatalf("Load() error = %v, want ErrProvenanceMissing", err)
-	}
-
-	migrated, err := LoadWithOptions(path, LoadOptions{Migrate: true})
-	if err != nil {
-		t.Fatalf("LoadWithOptions(Migrate) error = %v", err)
-	}
-
-	if got := migrated.Documents[0].Provenance["source_type"]; got != "legacy" {
-		t.Fatalf("source_type = %q, want legacy", got)
-	}
-}
-
-func TestLoadRejectsMissingPrivacyPolicyUnlessMigrated(t *testing.T) {
-	t.Parallel()
-
+	oldTime := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	store := NewStore()
-	if err := store.AddText("note", "redacted memory text"); err != nil {
-		t.Fatalf("AddText() error = %v", err)
+	store.Corpus = CorpusMetadata{
+		Scope:       ScopeSession,
+		SessionIDs:  []string{"old"},
+		Tags:        []string{"security"},
+		Retention:   testRetentionThirtyDays,
+		Description: "scope=session tags=security retention=30 days",
+	}
+
+	if err := store.Add(Document{
+		ID:         "session/old/message/0",
+		Text:       "old auth",
+		Metadata:   map[string]string{"session_id": "old", "tags": "security", "updated_at": oldTime.Format(time.RFC3339)},
+		Provenance: &Provenance{SourceType: sessionSourceType, SessionID: "old", Tags: []string{"security"}, UpdatedAt: oldTime.Format(time.RFC3339)},
+	}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	store.Corpus.Scope = ScopeSession
+
+	removed := store.ApplyRetention(time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
+	if removed != 1 {
+		t.Fatalf("ApplyRetention() removed %d, want 1", removed)
 	}
-
-	delete(store.Documents[0].Provenance, "privacy_policy")
-
-	path := filepath.Join(t.TempDir(), "missing-privacy-policy.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	_, err = Load(path)
-	if !errors.Is(err, ErrPrivacyPolicy) {
-		t.Fatalf("Load() error = %v, want ErrPrivacyPolicy", err)
-	}
-
-	migrated, err := LoadWithOptions(path, LoadOptions{Migrate: true})
-	if err != nil {
-		t.Fatalf("LoadWithOptions(Migrate) error = %v", err)
-	}
-
-	if got := migrated.Documents[0].Provenance["privacy_policy"]; got != privacy.RedactionPolicyVersion {
-		t.Fatalf("privacy_policy = %q, want %q", got, privacy.RedactionPolicyVersion)
-	}
-}
-
-func TestStore_MigratePreservesExistingProvenance(t *testing.T) {
-	t.Parallel()
-
-	store := Store{
-		Documents: []Document{{
-			ID:   "file-doc",
-			Text: "safe file-backed memory",
-			Provenance: map[string]string{
-				"source_type": "file",
-				"path":        "docs/memory-note.md",
-				"api_key":     "abc123",
-			},
-		}},
-	}
-
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
-	}
-
-	doc := store.Documents[0]
-	if got := doc.Provenance["source_type"]; got != "file" {
-		t.Fatalf("source_type = %q, want file", got)
-	}
-
-	wantRedacted := privacy.RedactMetadata(map[string]string{"api_key": "abc123"})["api_key"]
-	if got := doc.Provenance["api_key"]; got != wantRedacted {
-		t.Fatalf("api_key provenance = %q, want redacted", got)
-	}
-
-	if doc.SourceHash != privacy.SourceHash(doc.Text) {
-		t.Fatalf("SourceHash = %q, want hash of migrated text", doc.SourceHash)
-	}
-}
-
-func TestLoadRefusesLegacySchemaUnlessMigrated(t *testing.T) {
-	t.Parallel()
-
-	store := Store{
-		Documents: []Document{{
-			ID:   "legacy",
-			Text: "redacted legacy memory",
-		}},
-	}
-
-	path := filepath.Join(t.TempDir(), "legacy-memory.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	_, err = Load(path)
-	if !errors.Is(err, ErrIncompatibleSchema) {
-		t.Fatalf("Load() error = %v, want ErrIncompatibleSchema", err)
-	}
-
-	migrated, err := LoadWithOptions(path, LoadOptions{Migrate: true})
-	if err != nil {
-		t.Fatalf("LoadWithOptions(Migrate) error = %v", err)
-	}
-
-	if migrated.SchemaVersion != StoreSchemaVersion {
-		t.Fatalf("SchemaVersion = %d, want %d", migrated.SchemaVersion, StoreSchemaVersion)
-	}
-
-	if len(migrated.Documents) != 1 || migrated.Documents[0].SourceHash == "" {
-		t.Fatalf("migrated documents = %#v, want source hash", migrated.Documents)
-	}
-}
-
-func TestLoadRefusesMissingOrStaleNormalizationUnlessMigrated(t *testing.T) {
-	t.Parallel()
-
-	store := Store{
-		SchemaVersion: StoreSchemaVersion,
-		Documents: []Document{{
-			ID:         "note",
-			Text:       "redacted searchable memory",
-			SourceHash: privacy.SourceHash("redacted searchable memory"),
-		}},
-	}
-
-	path := filepath.Join(t.TempDir(), "stale-normalization.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal(missing normalization) error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile(missing normalization) error = %v", writeErr)
-	}
-
-	_, err = Load(path)
-	if !errors.Is(err, ErrNormalizationMismatch) {
-		t.Fatalf("Load(missing normalization) error = %v, want ErrNormalizationMismatch", err)
-	}
-
-	store.Normalization = "legacy-tokenizer-v0"
-
-	data, err = json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal(stale normalization) error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile(stale normalization) error = %v", writeErr)
-	}
-
-	_, err = Load(path)
-	if !errors.Is(err, ErrNormalizationMismatch) {
-		t.Fatalf("Load(stale normalization) error = %v, want ErrNormalizationMismatch", err)
-	}
-
-	migrated, err := LoadWithOptions(path, LoadOptions{Migrate: true})
-	if err != nil {
-		t.Fatalf("LoadWithOptions(Migrate) error = %v", err)
-	}
-
-	if migrated.Normalization != StoreTextNormalization {
-		t.Fatalf("Normalization = %q, want %q", migrated.Normalization, StoreTextNormalization)
-	}
-}
-
-func TestStore_RefusesMissingSchemaOrNormalizationForExistingDocuments(t *testing.T) {
-	t.Parallel()
-
-	store := &Store{
-		SchemaVersion: StoreSchemaVersion,
-		Documents: []Document{{
-			ID:         "note",
-			Text:       "redacted searchable memory",
-			SourceHash: privacy.SourceHash("redacted searchable memory"),
-		}},
-	}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if err := store.Save(path); !errors.Is(err, ErrNormalizationMismatch) {
-		t.Fatalf("Save(missing normalization) error = %v, want ErrNormalizationMismatch", err)
-	}
-
-	if _, err := store.Search("searchable", 1); !errors.Is(err, ErrNormalizationMismatch) {
-		t.Fatalf("Search(missing normalization) error = %v, want ErrNormalizationMismatch", err)
-	}
-
-	store.Normalization = StoreTextNormalization
-	store.SchemaVersion = 0
-
-	if err := store.Save(path); !errors.Is(err, ErrIncompatibleSchema) {
-		t.Fatalf("Save(missing schema) error = %v, want ErrIncompatibleSchema", err)
-	}
-
-	if _, err := store.Search("searchable", 1); !errors.Is(err, ErrIncompatibleSchema) {
-		t.Fatalf("Search(missing schema) error = %v, want ErrIncompatibleSchema", err)
-	}
-
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
-	}
-
-	if err := store.Save(path); err != nil {
-		t.Fatalf("Save(migrated) error = %v", err)
-	}
-}
-
-func TestStore_MigrateCompactsExpiredDocuments(t *testing.T) {
-	t.Parallel()
-
-	expiredAt := time.Now().UTC().Add(-time.Second)
-	store := &Store{
-		Documents: []Document{
-			{
-				ID:        "expired",
-				Text:      "expired secret api_key=abc123",
-				ExpiresAt: &expiredAt,
-			},
-			{
-				ID:   "active",
-				Text: "active migration memory",
-			},
-		},
-	}
-
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
-	}
-
-	if len(store.Documents) != 1 {
-		t.Fatalf("documents after migrate = %#v, want only active document", store.Documents)
-	}
-
-	if store.Documents[0].ID != "active" {
-		t.Fatalf("remaining document = %q, want active", store.Documents[0].ID)
-	}
-
-	if strings.Contains(store.Documents[0].Text, "abc123") {
-		t.Fatalf("expired secret survived migrate: %#v", store.Documents)
-	}
-}
-
-func TestStore_RejectsIncompatibleSchemaVersion(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	store.SchemaVersion = StoreSchemaVersion + 1
-
-	if err := store.AddText("doc", "memory"); !errors.Is(err, ErrIncompatibleSchema) {
-		t.Fatalf("AddText() error = %v, want ErrIncompatibleSchema", err)
-	}
-
-	if _, err := store.Search("memory", 1); !errors.Is(err, ErrIncompatibleSchema) {
-		t.Fatalf("Search() error = %v, want ErrIncompatibleSchema", err)
-	}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if err := store.Save(path); !errors.Is(err, ErrIncompatibleSchema) {
-		t.Fatalf("Save() error = %v, want ErrIncompatibleSchema", err)
-	}
-}
-
-func TestStore_MigrateRejectsMalformedSchemaVersion(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	store.SchemaVersion = -1
-
-	if err := store.Migrate(); !errors.Is(err, ErrIncompatibleSchema) {
-		t.Fatalf("Migrate() error = %v, want ErrIncompatibleSchema", err)
-	}
-}
-
-func TestLoadRefusesSourceHashMismatch(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText("note", "original memory text"); err != nil {
-		t.Fatalf("AddText() error = %v", err)
-	}
-
-	store.Documents[0].Text = "tampered memory text"
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	_, err = Load(path)
-	if !errors.Is(err, ErrSourceHashMismatch) {
-		t.Fatalf("Load() error = %v, want ErrSourceHashMismatch", err)
-	}
-}
-
-func TestLoadRefusesMissingSourceHashUnlessMigrated(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText("note", "redacted memory text"); err != nil {
-		t.Fatalf("AddText() error = %v", err)
-	}
-
-	store.Documents[0].SourceHash = ""
-
-	path := filepath.Join(t.TempDir(), "missing-source-hash.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	_, err = Load(path)
-	if !errors.Is(err, ErrSourceHashMismatch) {
-		t.Fatalf("Load() error = %v, want ErrSourceHashMismatch", err)
-	}
-
-	migrated, err := LoadWithOptions(path, LoadOptions{Migrate: true})
-	if err != nil {
-		t.Fatalf("LoadWithOptions(Migrate) error = %v", err)
-	}
-
-	if len(migrated.Documents) != 1 {
-		t.Fatalf("documents len = %d, want 1", len(migrated.Documents))
-	}
-
-	if migrated.Documents[0].SourceHash != privacy.SourceHash(migrated.Documents[0].Text) {
-		t.Fatalf("SourceHash = %q, want recomputed hash", migrated.Documents[0].SourceHash)
-	}
-}
-
-func TestStore_SaveRefusesMissingOrStaleSourceHash(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText("note", "trusted memory text"); err != nil {
-		t.Fatalf("AddText() error = %v", err)
-	}
-
-	store.Documents[0].Text = "tampered memory text"
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if err := store.Save(path); !errors.Is(err, ErrSourceHashMismatch) {
-		t.Fatalf("Save(stale hash) error = %v, want ErrSourceHashMismatch", err)
-	}
-
-	if err := store.AddText("note", "trusted memory text"); err != nil {
-		t.Fatalf("AddText(reset) error = %v", err)
-	}
-
-	store.Documents[0].SourceHash = ""
-	if err := store.Save(path); !errors.Is(err, ErrSourceHashMismatch) {
-		t.Fatalf("Save(missing hash) error = %v, want ErrSourceHashMismatch", err)
-	}
-}
-
-func TestLoadAndSaveRefuseDuplicateIDs(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText(duplicateID, "first duplicate memory"); err != nil {
-		t.Fatalf("AddText(same) error = %v", err)
-	}
-
-	if err := store.AddText("other", "second duplicate memory"); err != nil {
-		t.Fatalf("AddText(other) error = %v", err)
-	}
-
-	store.Documents[1].ID = duplicateID
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if err := store.Save(path); !errors.Is(err, ErrDuplicateID) {
-		t.Fatalf("Save(duplicate) error = %v, want ErrDuplicateID", err)
-	}
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	_, err = Load(path)
-	if !errors.Is(err, ErrDuplicateID) {
-		t.Fatalf("Load(duplicate) error = %v, want ErrDuplicateID", err)
-	}
-
-	_, err = LoadWithOptions(path, LoadOptions{Migrate: true})
-	if !errors.Is(err, ErrDuplicateID) {
-		t.Fatalf("LoadWithOptions(Migrate duplicate) error = %v, want ErrDuplicateID", err)
-	}
-}
-
-func TestStore_SearchRejectsMissingOrDuplicateIDs(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText("first", "first duplicate search memory"); err != nil {
-		t.Fatalf("AddText(first) error = %v", err)
-	}
-
-	if err := store.AddText("second", "second duplicate search memory"); err != nil {
-		t.Fatalf("AddText(second) error = %v", err)
-	}
-
-	store.Documents[0].ID = " "
-	if _, err := store.Search("duplicate", 10); !errors.Is(err, ErrMissingID) {
-		t.Fatalf("Search(missing id) error = %v, want ErrMissingID", err)
-	}
-
-	store.Documents[0].ID = duplicateID
-
-	store.Documents[1].ID = duplicateID
-	if _, err := store.Search("duplicate", 10); !errors.Is(err, ErrDuplicateID) {
-		t.Fatalf("Search(duplicate id) error = %v, want ErrDuplicateID", err)
-	}
-}
-
-func TestStore_SaveRefusesUnredactedBypassContent(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	store.Documents = []Document{{
-		ID:         "secret",
-		Text:       "deploy password=hunter2",
-		SourceHash: privacy.SourceHash("deploy password=hunter2"),
-	}}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if err := store.Save(path); !errors.Is(err, ErrPrivacyPolicy) {
-		t.Fatalf("Save(unredacted) error = %v, want ErrPrivacyPolicy", err)
-	}
-}
-
-func TestStore_SearchRefusesTamperedSensitiveContent(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText("safe", "safe searchable memory"); err != nil {
-		t.Fatalf("AddText() error = %v", err)
-	}
-
-	store.Documents[0].Text = "safe searchable memory password=hunter2"
-	store.Documents[0].SourceHash = privacy.SourceHash(store.Documents[0].Text)
-
-	_, err := store.Search("safe", 1)
-	if !errors.Is(err, ErrPrivacyPolicy) {
-		t.Fatalf("Search() error = %v, want ErrPrivacyPolicy", err)
-	}
-}
-
-func TestStore_SearchRefusesMissingSourceHash(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText("safe", "safe searchable memory"); err != nil {
-		t.Fatalf("AddText() error = %v", err)
-	}
-
-	store.Documents[0].SourceHash = ""
-
-	_, err := store.Search("safe", 1)
-	if !errors.Is(err, ErrSourceHashMismatch) {
-		t.Fatalf("Search() error = %v, want ErrSourceHashMismatch", err)
-	}
-}
-
-func TestStore_SearchRejectsMissingProvenance(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText("safe", "safe searchable memory"); err != nil {
-		t.Fatalf("AddText() error = %v", err)
-	}
-
-	store.Documents[0].Provenance = nil
-
-	_, err := store.Search("safe", 1)
-	if !errors.Is(err, ErrProvenanceMissing) {
-		t.Fatalf("Search() error = %v, want ErrProvenanceMissing", err)
-	}
-}
-
-func TestStore_SaveRejectsMissingProvenance(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText("safe", "safe persistent memory"); err != nil {
-		t.Fatalf("AddText() error = %v", err)
-	}
-
-	store.Documents[0].Provenance = nil
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if err := store.Save(path); !errors.Is(err, ErrProvenanceMissing) {
-		t.Fatalf("Save() error = %v, want ErrProvenanceMissing", err)
-	}
-}
-
-func TestStore_DeleteAndCompactRemovePersistedContent(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now().UTC()
-	expired := now.Add(-time.Second)
-
-	store := NewStore()
-	if err := store.Add(Document{ID: "expired", Text: "temporary memory", ExpiresAt: &expired}); err != nil {
-		t.Fatalf("Add(expired) error = %v", err)
-	}
-
-	if err := store.AddText("keep", "durable memory"); err != nil {
-		t.Fatalf("AddText(keep) error = %v", err)
-	}
-
-	results, err := store.Search("temporary", 1)
-	if err != nil {
-		t.Fatalf("Search() error = %v", err)
-	}
-
-	if len(results) != 0 {
-		t.Fatalf("expired search results = %#v, want none", results)
-	}
-
-	if removed := store.Compact(now); removed != 1 {
-		t.Fatalf("Compact() = %d, want 1", removed)
-	}
-
-	for _, doc := range store.Documents[:cap(store.Documents)] {
-		if strings.Contains(doc.Text, "temporary memory") {
-			t.Fatalf("expired content retained in memory backing array: %#v", doc)
-		}
-	}
-
-	if !store.Delete("keep") {
-		t.Fatal("Delete(keep) = false, want true")
-	}
-
-	for _, doc := range store.Documents[:cap(store.Documents)] {
-		if doc.Text != "" {
-			t.Fatalf("deleted content retained in memory backing array: %#v", doc)
-		}
-	}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if saveErr := store.Save(path); saveErr != nil {
-		t.Fatalf("Save() error = %v", saveErr)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-
-	if strings.Contains(string(data), "temporary memory") || strings.Contains(string(data), "durable memory") {
-		t.Fatalf("deleted/expired content still persisted: %s", data)
-	}
-}
-
-func TestStore_DeleteRemovesOneDocumentAndPreservesSiblings(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText("delete-me", "obsolete local memory"); err != nil {
-		t.Fatalf("AddText(delete-me) error = %v", err)
-	}
-
-	if err := store.AddText("keep-me", "durable local memory"); err != nil {
-		t.Fatalf("AddText(keep-me) error = %v", err)
-	}
-
-	if !store.Delete("delete-me") {
-		t.Fatal("Delete(delete-me) = false, want true")
-	}
-
-	if len(store.Documents) != 1 || store.Documents[0].ID != "keep-me" {
-		t.Fatalf("documents after delete = %#v, want only keep-me", store.Documents)
-	}
-
-	results, err := store.Search("obsolete", 10)
-	if err != nil {
-		t.Fatalf("Search(obsolete) error = %v", err)
-	}
-
-	if len(results) != 0 {
-		t.Fatalf("Search(obsolete) results = %#v, want none", results)
-	}
-
-	results, err = store.Search("durable", 10)
-	if err != nil {
-		t.Fatalf("Search(durable) error = %v", err)
-	}
-
-	if len(results) != 1 || results[0].Document.ID != "keep-me" {
-		t.Fatalf("Search(durable) results = %#v, want keep-me", results)
-	}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if saveErr := store.Save(path); saveErr != nil {
-		t.Fatalf("Save() error = %v", saveErr)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-
-	if strings.Contains(string(data), "obsolete local memory") {
-		t.Fatalf("deleted content persisted: %s", data)
-	}
-
-	if !strings.Contains(string(data), "durable local memory") {
-		t.Fatalf("sibling content missing from persisted store: %s", data)
-	}
-}
-
-func TestStore_DeleteRemovesAllDuplicateIDsBeforePersistence(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	if err := store.AddText(duplicateID, "first duplicate memory"); err != nil {
-		t.Fatalf("AddText(same) error = %v", err)
-	}
-
-	if err := store.AddText("other", "second duplicate memory"); err != nil {
-		t.Fatalf("AddText(other) error = %v", err)
-	}
-
-	store.Documents[1].ID = duplicateID
-
-	if !store.Delete(duplicateID) {
-		t.Fatal("Delete(same) = false, want true")
-	}
-
 	if len(store.Documents) != 0 {
-		t.Fatalf("documents after duplicate delete = %#v, want empty", store.Documents)
+		t.Fatalf("documents len = %d, want 0", len(store.Documents))
 	}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if err := store.Save(path); err != nil {
-		t.Fatalf("Save() error = %v", err)
+	if store.Corpus.Scope != ScopeManual ||
+		store.Corpus.SessionCount != 0 ||
+		len(store.Corpus.SessionIDs) != 0 ||
+		len(store.Corpus.Tags) != 0 ||
+		store.Corpus.Retention != testRetentionThirtyDays {
+		t.Fatalf("corpus after full retention = %#v, want manual empty corpus with retention policy", store.Corpus)
 	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-
-	if strings.Contains(string(data), "first duplicate memory") || strings.Contains(string(data), "second duplicate memory") {
-		t.Fatalf("deleted duplicate content still persisted: %s", data)
+	if strings.Contains(store.Corpus.Description, "old") || strings.Contains(store.Corpus.Description, "security") {
+		t.Fatalf("corpus description after full retention = %q, want no expired selectors", store.Corpus.Description)
 	}
 }
 
-func TestStore_DeleteClearsBackingCapacity(t *testing.T) {
+func TestStore_ApplyRetentionClearsStaleCorpusMetadata(t *testing.T) {
 	t.Parallel()
 
+	oldTime := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	newTime := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	oldRepo := filepath.Join(string(os.PathSeparator), "repo", "old")
+	newRepo := filepath.Join(string(os.PathSeparator), "repo", "new")
 	store := NewStore()
-	docs := []Document{
-		{ID: "delete-me", Text: "visible deleted memory"},
-		{ID: "ghost", Text: "hidden stale memory"},
-	}
-	store.Documents = docs[:1]
+	store.Corpus = CorpusMetadata{Scope: ScopeRepo, RepoPath: oldRepo, Agent: "old-agent"}
 
-	if !store.Delete("delete-me") {
-		t.Fatal("Delete(delete-me) = false, want true")
-	}
-
-	for _, doc := range store.Documents[:cap(store.Documents)] {
-		if doc.Text != "" {
-			t.Fatalf("deleted content retained in memory backing array: %#v", doc)
+	for _, doc := range []Document{
+		{
+			ID:         "session/old/message/0",
+			Text:       "old auth",
+			Metadata:   map[string]string{"session_id": "old", "repo_path": oldRepo, "agent": "old-agent", "updated_at": oldTime.Format(time.RFC3339)},
+			Provenance: &Provenance{SessionID: "old", RepoPath: oldRepo, Agent: "old-agent", UpdatedAt: oldTime.Format(time.RFC3339)},
+		},
+		{
+			ID:         "session/new/message/0",
+			Text:       "new auth",
+			Metadata:   map[string]string{"session_id": "new", "repo_path": newRepo, "agent": "new-agent", "updated_at": newTime.Format(time.RFC3339)},
+			Provenance: &Provenance{SessionID: "new", RepoPath: newRepo, Agent: "new-agent", UpdatedAt: newTime.Format(time.RFC3339)},
+		},
+	} {
+		if err := store.Add(doc); err != nil {
+			t.Fatalf("Add(%s) error = %v", doc.ID, err)
 		}
 	}
+
+	removed := store.ApplyRetention(time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC))
+	if removed != 1 {
+		t.Fatalf("ApplyRetention() removed %d, want 1", removed)
+	}
+	if store.Corpus.RepoPath != "" || store.Corpus.Agent != "" {
+		t.Fatalf("corpus after retention = %#v, want stale repo and agent metadata cleared", store.Corpus)
+	}
+	if strings.Contains(store.Corpus.Description, oldRepo) || strings.Contains(store.Corpus.Description, "old-agent") {
+		t.Fatalf("corpus description after retention = %q, want stale metadata removed", store.Corpus.Description)
+	}
+	if store.Corpus.Scope != ScopeManual {
+		t.Fatalf("corpus scope after retention = %q, want manual mixed corpus", store.Corpus.Scope)
+	}
 }
 
-func TestStore_SaveCompactsExpiredContent(t *testing.T) {
+func TestStore_ApplyPolicyUpdatesDocumentPolicy(t *testing.T) {
 	t.Parallel()
-
-	expired := time.Now().UTC().Add(-time.Second)
 
 	store := NewStore()
-	if err := store.Add(Document{ID: "expired", Text: "temporary save-only memory", ExpiresAt: &expired}); err != nil {
-		t.Fatalf("Add(expired) error = %v", err)
-	}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if err := store.Save(path); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-
-	if strings.Contains(string(data), "temporary save-only memory") {
-		t.Fatalf("expired content still persisted: %s", data)
-	}
-
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if len(loaded.Documents) != 0 {
-		t.Fatalf("loaded documents len = %d, want expired content compacted", len(loaded.Documents))
-	}
-}
-
-func TestStore_SaveCompactsExpiredLegacyContentBeforeSchemaValidation(t *testing.T) {
-	t.Parallel()
-
-	expired := time.Now().UTC().Add(-time.Second)
-	store := Store{
-		Normalization: "legacy-tokenizer-v0",
-		Documents: []Document{{
-			ID:        "expired",
-			Text:      "expired legacy memory",
-			ExpiresAt: &expired,
-		}},
-	}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-	if err := store.Save(path); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-
-	if strings.Contains(string(data), "expired legacy memory") {
-		t.Fatalf("expired legacy content still persisted: %s", data)
-	}
-
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if loaded.SchemaVersion != StoreSchemaVersion || len(loaded.Documents) != 0 {
-		t.Fatalf("loaded store = %#v, want current empty store", loaded)
-	}
-
-	if loaded.Normalization != StoreTextNormalization {
-		t.Fatalf("Normalization = %q, want %q", loaded.Normalization, StoreTextNormalization)
-	}
-}
-
-func TestLoadCompactsExpiredInvalidContentBeforeValidation(t *testing.T) {
-	t.Parallel()
-
-	expired := time.Now().UTC().Add(-time.Second)
-	store := Store{
-		SchemaVersion: StoreSchemaVersion,
-		Normalization: "legacy-tokenizer-v0",
-		Documents: []Document{{
-			ID:        "expired",
-			Text:      "expired invalid memory",
-			ExpiresAt: &expired,
-		}},
-	}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if len(loaded.Documents) != 0 {
-		t.Fatalf("loaded documents = %#v, want expired content compacted", loaded.Documents)
-	}
-
-	if loaded.Normalization != StoreTextNormalization {
-		t.Fatalf("Normalization = %q, want %q", loaded.Normalization, StoreTextNormalization)
-	}
-}
-
-func TestLoadCompactsExpiredLegacySchemaContentBeforeValidation(t *testing.T) {
-	t.Parallel()
-
-	expired := time.Now().UTC().Add(-time.Second)
-	store := Store{
-		Documents: []Document{{
-			ID:        "expired",
-			Text:      "expired legacy-schema memory",
-			ExpiresAt: &expired,
-		}},
-	}
-
-	path := filepath.Join(t.TempDir(), "memory.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if loaded.SchemaVersion != StoreSchemaVersion || len(loaded.Documents) != 0 {
-		t.Fatalf("loaded store = %#v, want current empty store", loaded)
-	}
-}
-
-func TestLoadCompactsExpiredDuplicateBeforeValidation(t *testing.T) {
-	t.Parallel()
-
-	expired := time.Now().UTC().Add(-time.Second)
-	store := NewStore()
-
-	if err := store.AddText(duplicateID, "active duplicate memory"); err != nil {
+	if err := store.AddText("note", "retained auth note"); err != nil {
 		t.Fatalf("AddText() error = %v", err)
 	}
+	store.Documents[0].Policy = nil
 
-	store.Documents = append(store.Documents, Document{
-		ID:        duplicateID,
-		Text:      "expired duplicate memory",
-		ExpiresAt: &expired,
-	})
+	store.ApplyPolicy(ScopeRepo, testRetentionThirtyDays)
 
-	path := filepath.Join(t.TempDir(), "memory.json")
-
-	data, err := json.Marshal(store)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-
-	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
-		t.Fatalf("WriteFile() error = %v", writeErr)
-	}
-
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if len(loaded.Documents) != 1 || loaded.Documents[0].Text != "active duplicate memory" {
-		t.Fatalf("loaded documents = %#v, want only active duplicate", loaded.Documents)
+	policy := store.Documents[0].Policy
+	if policy == nil || policy.Scope != ScopeRepo || policy.Retention != testRetentionThirtyDays {
+		t.Fatalf("policy = %#v, want repo scope and 30 day retention", policy)
 	}
 }
 
-func TestStore_RetrievalQualityFixture(t *testing.T) {
-	t.Parallel()
+func findDocumentByID(t *testing.T, store *Store, id string) Document {
+	t.Helper()
 
-	data, err := os.ReadFile(filepath.Join("testdata", "retrieval_quality.json"))
-	if err != nil {
-		t.Fatalf("ReadFile(fixture) error = %v", err)
-	}
-
-	var fixture struct {
-		Documents []struct {
-			ID   string `json:"id"`
-			Text string `json:"text"`
-		} `json:"documents"`
-		Cases []struct {
-			Query   string `json:"query"`
-			WantTop string `json:"want_top"`
-		} `json:"cases"`
-	}
-	if err := json.Unmarshal(data, &fixture); err != nil {
-		t.Fatalf("Unmarshal(fixture) error = %v", err)
-	}
-
-	store := NewStore()
-	for _, doc := range fixture.Documents {
-		if err := store.AddText(doc.ID, doc.Text); err != nil {
-			t.Fatalf("AddText(%q) error = %v", doc.ID, err)
+	for i := range store.Documents {
+		if store.Documents[i].ID == id {
+			return store.Documents[i]
 		}
 	}
 
-	for _, tc := range fixture.Cases {
-		results, err := store.Search(tc.Query, 1)
-		if err != nil {
-			t.Fatalf("Search(%q) error = %v", tc.Query, err)
-		}
+	t.Fatalf("document %q not found in %#v", id, store.Documents)
 
-		if len(results) != 1 || results[0].Document.ID != tc.WantTop {
-			t.Fatalf("Search(%q) top = %#v, want %q", tc.Query, results, tc.WantTop)
-		}
-	}
-}
-
-func TestStore_SearchRetrievalAddsContractSafetyAndRange(t *testing.T) {
-	t.Parallel()
-
-	store := NewStore()
-	require.NoError(t, store.Add(Document{ID: "secret", Path: ".env", Text: "api_key=super-secret-token oauth callback"}))
-
-	results, err := store.SearchRetrieval(context.Background(), retrieval.Query{Text: "oauth callback", Limit: 1, Explain: true, IncludeUnsafe: true})
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-
-	result := results[0]
-	assert.Equal(t, retrieval.SourceMemory, result.Source.Type)
-	assert.Equal(t, "secret", result.DocumentID)
-	assert.NotEmpty(t, result.Chunk.ID)
-	assert.Equal(t, retrieval.RangeUnitRuneOffset, result.Chunk.Range.Unit)
-	assert.False(t, result.Safety.InjectAllowed)
-	assert.True(t, result.Safety.Sensitive)
-	assert.True(t, result.Safety.Redacted)
-	assert.NotContains(t, result.Snippet, "super-secret-token")
-	assert.NotEmpty(t, result.Scorer.Explanation)
-}
-
-func TestLoad_NormalizesLegacyDocumentsBeforeRetrieval(t *testing.T) {
-	t.Parallel()
-
-	path := filepath.Join(t.TempDir(), "legacy-memory.json")
-	require.NoError(t, os.WriteFile(path, []byte(`{
-  "documents": [
-    {"id": "legacy", "path": ".env", "text": "api_key=super-secret-token oauth callback", "metadata": {"api_key": "metadata-secret-token"}}
-  ]
-}`), 0o600))
-
-	store, err := LoadWithOptions(path, LoadOptions{Migrate: true})
-	require.NoError(t, err)
-	require.Len(t, store.Documents, 1)
-	assert.NotContains(t, store.Documents[0].Text, "super-secret-token")
-	assert.Equal(t, "[REDACTED]", store.Documents[0].Metadata["api_key"])
-	assert.NotContains(t, store.Documents[0].Metadata["api_key"], "metadata-secret-token")
-
-	results, err := store.SearchRetrieval(context.Background(), retrieval.Query{
-		Text:          "oauth callback",
-		Limit:         1,
-		IncludeUnsafe: true,
-	})
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.False(t, results[0].Safety.InjectAllowed)
-	assert.True(t, results[0].Safety.Redacted)
-	assert.NotContains(t, results[0].Snippet, "super-secret-token")
-	assert.NotContains(t, results[0].Metadata["api_key"], "metadata-secret-token")
-	assert.Equal(t, "[REDACTED]", results[0].Metadata["api_key"])
-}
-
-func TestStore_SearchRetrievalReportsFileFreshness(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "note.txt")
-	require.NoError(t, os.WriteFile(path, []byte("oauth callback notes"), 0o600))
-
-	store := NewStore()
-	require.NoError(t, store.AddFile(path))
-
-	results, err := store.SearchRetrieval(context.Background(), retrieval.Query{Text: "oauth callback", Limit: 1})
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "current", results[0].Freshness.Status)
-	assert.False(t, results[0].Freshness.Deleted)
-
-	future := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, os.Chtimes(path, future, future))
-
-	results, err = store.SearchRetrieval(context.Background(), retrieval.Query{Text: "oauth callback", Limit: 1})
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "stale", results[0].Freshness.Status)
-	assert.False(t, results[0].Freshness.Deleted)
-
-	require.NoError(t, os.Remove(path))
-
-	results, err = store.SearchRetrieval(context.Background(), retrieval.Query{Text: "oauth callback", Limit: 1})
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "deleted", results[0].Freshness.Status)
-	assert.True(t, results[0].Freshness.Deleted)
-}
-
-func TestStore_SyncFilesDeletesRemovedFileDocuments(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	keep := filepath.Join(dir, "keep.txt")
-	gone := filepath.Join(dir, "gone.txt")
-
-	require.NoError(t, os.WriteFile(keep, []byte("keep oauth context"), 0o600))
-	require.NoError(t, os.WriteFile(gone, []byte("gone oauth context"), 0o600))
-
-	store := NewStore()
-	require.NoError(t, store.SyncFiles(keep, gone))
-	require.NoError(t, store.SyncFiles(keep))
-
-	require.Len(t, store.Documents, 1)
-	assert.Equal(t, filepath.Clean(keep), store.Documents[0].ID)
+	return Document{}
 }

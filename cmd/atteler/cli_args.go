@@ -313,7 +313,7 @@ func helpDomainForSelector(name string, fs *flag.FlagSet) (string, bool) {
 	}
 
 	switch normalizeHelpName(name) {
-	case "legacy", "flags", "all", "domains", "overview":
+	case "legacy", "flags", helpSelectorAll, "domains", "overview":
 		return normalizeHelpName(name), true
 	}
 

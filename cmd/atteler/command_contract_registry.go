@@ -350,7 +350,7 @@ func commandContractsByName() map[string]commandContract {
 		),
 		"memory-command": commandContractFor(
 			"search or update the local UTF-8 file memory store",
-			[]string{"--memory-search", "--memory-index", "--memory-delete", "--memory-compact", "--memory-migrate", "--memory-store", "--memory-limit", "--memory-ttl-seconds", "--memory-include-session-messages", "--memory-include-worktree-metadata"},
+			[]string{"--memory-search", "--memory-index", "--memory-delete", "--memory-compact", "--memory-migrate", "--memory-store", "--memory-limit", "--memory-ttl-seconds", "--memory-include-session-messages", "--memory-include-worktree-metadata", "--memory-scope", "--memory-session", "--memory-repo", "--memory-tag", "--memory-since", "--memory-until", "--memory-agent", "--memory-global", "--memory-purge", "--memory-rebuild", "--memory-list-corpus", "--memory-redact", "--memory-retention-days"},
 			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectSessionRead, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("memoryCommandInput"),

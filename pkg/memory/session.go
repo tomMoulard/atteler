@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Session provenance helpers keep optional metadata mapping compact.
 package memory
 
 import (
@@ -7,8 +8,6 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/llm"
-	"github.com/tommoulard/atteler/pkg/privacy"
-	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -16,41 +15,17 @@ const sessionSourceType = "session"
 
 var errMissingSessionID = errors.New("memory session id is required")
 
-// SessionIndexPolicy controls which session fields are copied into searchable
-// memory. Raw transcript messages are excluded by default because they can
-// contain secrets or unrelated private content; callers must opt in explicitly.
-type SessionIndexPolicy struct {
-	IncludeMessages          bool
-	IncludeNegativeKnowledge bool
-	IncludeEvaluations       bool
-	IncludeArtifacts         bool
-	IncludeWorktreeMetadata  bool
-}
-
-// DefaultSessionIndexPolicy returns the privacy-preserving default session
-// memory policy.
-func DefaultSessionIndexPolicy() SessionIndexPolicy {
-	return SessionIndexPolicy{
-		IncludeNegativeKnowledge: true,
-		IncludeEvaluations:       true,
-		IncludeArtifacts:         true,
-	}
+// SessionIndexOptions controls privacy scope metadata for session-derived memory.
+type SessionIndexOptions struct {
+	Scope     string
+	Agent     string
+	Retention string
 }
 
 // FromSessions builds a searchable memory store from saved sessions.
 func FromSessions(sessions ...session.Session) (*Store, error) {
 	store := NewStore()
 	if err := store.AddSessions(sessions...); err != nil {
-		return nil, err
-	}
-
-	return store, nil
-}
-
-// FromSessionsWithPolicy builds a searchable memory store using policy.
-func FromSessionsWithPolicy(policy SessionIndexPolicy, sessions ...session.Session) (*Store, error) {
-	store := NewStore()
-	if err := store.AddSessionsWithPolicy(policy, sessions...); err != nil {
 		return nil, err
 	}
 
@@ -68,70 +43,64 @@ func (s *Store) AddSessions(sessions ...session.Session) error {
 	return nil
 }
 
-// AddSessionsWithPolicy indexes each saved session according to policy.
-func (s *Store) AddSessionsWithPolicy(policy SessionIndexPolicy, sessions ...session.Session) error {
-	for i := range sessions {
-		if err := s.AddSessionWithPolicy(sessions[i], policy); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// AddSession indexes privacy-safe metadata, negative knowledge, agent
-// evaluations, and artifacts for a saved session. Raw transcript messages and
-// worktree metadata require AddSessionWithPolicy opt-in.
+// AddSession indexes searchable metadata, transcript messages, negative
+// knowledge, agent evaluations, and artifacts for a saved session.
 func (s *Store) AddSession(saved session.Session) error {
-	return s.AddSessionWithPolicy(saved, DefaultSessionIndexPolicy())
+	return s.AddSessionWithOptions(saved, SessionIndexOptions{Scope: ScopeSession})
 }
 
-// AddSessionWithPolicy indexes a saved session according to policy.
-func (s *Store) AddSessionWithPolicy(saved session.Session, policy SessionIndexPolicy) error {
+// AddSessionWithOptions indexes searchable session data with explicit scope policy metadata.
+func (s *Store) AddSessionWithOptions(saved session.Session, opts SessionIndexOptions) error {
 	sessionID := strings.TrimSpace(saved.ID)
 	if sessionID == "" {
 		return errMissingSessionID
 	}
 
-	if text := sessionMetadataText(saved, policy); text != "" {
-		if err := s.Add(sessionDocument(saved, "metadata", -1, text, nil)); err != nil {
-			return err
+	opts.Scope = normalizeSessionScope(opts.Scope)
+
+	if text := sessionMetadataText(saved); text != "" {
+		if shouldIndexSessionDocument(saved, opts, saved.DefaultAgent) {
+			if err := s.Add(sessionDocument(saved, "metadata", -1, text, nil, opts)); err != nil {
+				return err
+			}
 		}
 	}
 
-	if policy.IncludeMessages {
-		if err := s.addSessionMessages(saved); err != nil {
-			return err
-		}
+	if err := s.addSessionMessages(saved, opts); err != nil {
+		return err
 	}
 
-	if policy.IncludeNegativeKnowledge {
-		if err := s.addSessionNegativeKnowledge(saved); err != nil {
-			return err
-		}
+	if err := s.addSessionNegativeKnowledge(saved, opts); err != nil {
+		return err
 	}
 
-	if policy.IncludeEvaluations {
-		if err := s.addSessionEvaluations(saved); err != nil {
-			return err
-		}
+	if err := s.addSessionEvaluations(saved, opts); err != nil {
+		return err
 	}
 
-	if policy.IncludeArtifacts {
-		return s.addSessionArtifacts(saved)
+	if err := s.addSessionArtifacts(saved, opts); err != nil {
+		return err
 	}
+
+	s.updateSessionCorpus(saved, opts)
 
 	return nil
 }
 
-func (s *Store) addSessionMessages(saved session.Session) error {
+func (s *Store) addSessionMessages(saved session.Session, opts SessionIndexOptions) error {
+	if !shouldIndexSessionDocument(saved, opts, saved.DefaultAgent) {
+		return nil
+	}
+
 	for i, message := range saved.Messages {
 		text := messageText(message)
 		if text == "" {
 			continue
 		}
 
-		if err := s.Add(sessionDocument(saved, "message", i, text, sessionMessageMetadata(message, text))); err != nil {
+		if err := s.Add(sessionDocument(saved, "message", i, text, map[string]string{
+			"role": strings.TrimSpace(string(message.Role)),
+		}, opts)); err != nil {
 			return err
 		}
 	}
@@ -139,23 +108,12 @@ func (s *Store) addSessionMessages(saved session.Session) error {
 	return nil
 }
 
-func sessionMessageMetadata(message llm.Message, text string) map[string]string {
-	metadata := map[string]string{
-		"role":                                strings.TrimSpace(string(message.Role)),
-		retrieval.MetadataSafetyInjectAllowed: "false",
-		retrieval.MetadataSafetyPrivate:       "true",
-	}
-
-	if privacy.RedactText(text) != text {
-		metadata[retrieval.MetadataSafetySensitive] = "true"
-		metadata[retrieval.MetadataSafetyRedacted] = "true"
-	}
-
-	return metadata
-}
-
-func (s *Store) addSessionNegativeKnowledge(saved session.Session) error {
+func (s *Store) addSessionNegativeKnowledge(saved session.Session, opts SessionIndexOptions) error {
 	for i, entry := range saved.NegativeKnowledge {
+		if !shouldIndexSessionDocument(saved, opts, entry.Agent) {
+			continue
+		}
+
 		text := negativeKnowledgeText(entry)
 		if text == "" {
 			continue
@@ -164,7 +122,7 @@ func (s *Store) addSessionNegativeKnowledge(saved session.Session) error {
 		if err := s.Add(sessionDocument(saved, "negative_knowledge", i, text, map[string]string{
 			"agent":  strings.TrimSpace(entry.Agent),
 			"commit": strings.TrimSpace(entry.Commit),
-		})); err != nil {
+		}, opts)); err != nil {
 			return err
 		}
 	}
@@ -172,11 +130,14 @@ func (s *Store) addSessionNegativeKnowledge(saved session.Session) error {
 	return nil
 }
 
-func (s *Store) addSessionEvaluations(saved session.Session) error {
+func (s *Store) addSessionEvaluations(saved session.Session, opts SessionIndexOptions) error {
 	for i := range saved.Evaluations {
 		entry := &saved.Evaluations[i]
+		if !shouldIndexSessionDocument(saved, opts, entry.Agent) {
+			continue
+		}
 
-		text := evaluationText(entry)
+		text := evaluationText(*entry)
 		if text == "" {
 			continue
 		}
@@ -185,7 +146,7 @@ func (s *Store) addSessionEvaluations(saved session.Session) error {
 			"agent":     strings.TrimSpace(entry.Agent),
 			"outcome":   strings.TrimSpace(entry.Outcome),
 			"reference": strings.TrimSpace(entry.Reference),
-		})); err != nil {
+		}, opts)); err != nil {
 			return err
 		}
 	}
@@ -193,11 +154,14 @@ func (s *Store) addSessionEvaluations(saved session.Session) error {
 	return nil
 }
 
-func (s *Store) addSessionArtifacts(saved session.Session) error {
+func (s *Store) addSessionArtifacts(saved session.Session, opts SessionIndexOptions) error {
 	for i := range saved.Artifacts {
 		entry := &saved.Artifacts[i]
+		if !shouldIndexSessionDocument(saved, opts, entry.SourceAgent) {
+			continue
+		}
 
-		text := artifactText(entry)
+		text := artifactText(*entry)
 		if text == "" {
 			continue
 		}
@@ -206,7 +170,7 @@ func (s *Store) addSessionArtifacts(saved session.Session) error {
 			"artifact_path": strings.TrimSpace(entry.Path),
 			"artifact_kind": strings.TrimSpace(entry.Kind),
 			"source_agent":  strings.TrimSpace(entry.SourceAgent),
-		})); err != nil {
+		}, opts)); err != nil {
 			return err
 		}
 	}
@@ -214,7 +178,8 @@ func (s *Store) addSessionArtifacts(saved session.Session) error {
 	return nil
 }
 
-func sessionDocument(saved session.Session, kind string, index int, text string, extra map[string]string) Document {
+//nolint:cyclop // Session provenance intentionally maps several optional session fields.
+func sessionDocument(saved session.Session, kind string, index int, text string, extra map[string]string, opts SessionIndexOptions) Document {
 	metadata := map[string]string{
 		"source_type": sessionSourceType,
 		"session_id":  saved.ID,
@@ -244,26 +209,61 @@ func sessionDocument(saved session.Session, kind string, index int, text string,
 		metadata["updated_at"] = saved.UpdatedAt.UTC().Format(time.RFC3339)
 	}
 
+	if saved.WorktreePath != "" {
+		metadata["worktree_path"] = saved.WorktreePath
+		metadata["repo_path"] = saved.WorktreePath
+	}
+
+	if saved.WorktreeBranch != "" {
+		metadata["worktree_branch"] = saved.WorktreeBranch
+	}
+
+	if saved.WorktreeBase != "" {
+		metadata["worktree_base"] = saved.WorktreeBase
+	}
+
+	if len(saved.Tags) > 0 {
+		metadata["tags"] = strings.Join(saved.Tags, ", ")
+	}
+
 	for key, value := range extra {
 		if value = strings.TrimSpace(value); value != "" {
 			metadata[key] = value
 		}
 	}
 
+	agent := documentAgent(saved, extra)
+	path := firstNonEmpty(extra["artifact_path"], saved.ID)
+	provenance := &Provenance{
+		SourceType: sessionSourceType,
+		SourceID:   saved.ID,
+		SessionID:  saved.ID,
+		Kind:       kind,
+		Agent:      agent,
+		RepoPath:   saved.WorktreePath,
+		Path:       path,
+		Tags:       append([]string(nil), saved.Tags...),
+	}
+	if role := strings.TrimSpace(extra["role"]); role != "" {
+		provenance.Role = role
+	}
+	if !saved.CreatedAt.IsZero() {
+		provenance.CreatedAt = saved.CreatedAt.UTC().Format(time.RFC3339)
+	}
+	if !saved.UpdatedAt.IsZero() {
+		provenance.UpdatedAt = saved.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+
 	return Document{
 		ID:         sessionDocumentID(saved.ID, kind, index),
-		Path:       saved.ID,
+		Path:       path,
 		Text:       text,
 		Metadata:   metadata,
-		Provenance: sessionProvenance(saved.ID, kind),
-	}
-}
-
-func sessionProvenance(sessionID, kind string) map[string]string {
-	return map[string]string{
-		"source_type": sessionSourceType,
-		"session_id":  sessionID,
-		"kind":        kind,
+		Provenance: provenance,
+		Policy: &PolicyDecision{
+			Scope:     opts.Scope,
+			Retention: strings.TrimSpace(opts.Retention),
+		},
 	}
 }
 
@@ -275,18 +275,76 @@ func sessionDocumentID(sessionID, kind string, index int) string {
 	return "session/" + sessionID + "/" + kind + "/" + strconv.Itoa(index)
 }
 
-func sessionMetadataText(saved session.Session, policy SessionIndexPolicy) string {
+func normalizeSessionScope(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" || !knownCorpusScope(scope) {
+		return ScopeSession
+	}
+
+	return scope
+}
+
+func shouldIndexSessionDocument(saved session.Session, opts SessionIndexOptions, documentAgent string) bool {
+	wantAgent := strings.ToLower(strings.TrimSpace(opts.Agent))
+	if wantAgent == "" {
+		return true
+	}
+
+	documentAgent = strings.ToLower(strings.TrimSpace(documentAgent))
+	if documentAgent != "" {
+		return documentAgent == wantAgent
+	}
+
+	return strings.ToLower(strings.TrimSpace(saved.DefaultAgent)) == wantAgent
+}
+
+func (s *Store) updateSessionCorpus(saved session.Session, opts SessionIndexOptions) {
+	s.Corpus.Scope = opts.Scope
+	if opts.Scope == ScopeGlobal {
+		s.Corpus.Global = true
+	}
+	if strings.TrimSpace(saved.WorktreePath) != "" {
+		s.Corpus.RepoPath = saved.WorktreePath
+	}
+	if strings.TrimSpace(opts.Agent) != "" {
+		s.Corpus.Agent = strings.TrimSpace(opts.Agent)
+	}
+	if strings.TrimSpace(opts.Retention) != "" {
+		s.Corpus.Retention = strings.TrimSpace(opts.Retention)
+	}
+	s.recountCorpus()
+	s.normalizeCorpusMetadata()
+}
+
+func documentAgent(saved session.Session, extra map[string]string) string {
+	for _, key := range []string{"agent", "source_agent"} {
+		if value := strings.TrimSpace(extra[key]); value != "" {
+			return value
+		}
+	}
+
+	return strings.TrimSpace(saved.DefaultAgent)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func sessionMetadataText(saved session.Session) string {
 	var parts []string
 	appendPart(&parts, "Session", saved.ID)
 	appendPart(&parts, "Title", saved.Title)
 	appendPart(&parts, "Default agent", saved.DefaultAgent)
 	appendPart(&parts, "Default model", saved.DefaultModel)
-
-	if policy.IncludeWorktreeMetadata {
-		appendPart(&parts, "Worktree path", saved.WorktreePath)
-		appendPart(&parts, "Worktree branch", saved.WorktreeBranch)
-		appendPart(&parts, "Worktree base", saved.WorktreeBase)
-	}
+	appendPart(&parts, "Worktree path", saved.WorktreePath)
+	appendPart(&parts, "Worktree branch", saved.WorktreeBranch)
+	appendPart(&parts, "Worktree base", saved.WorktreeBase)
 
 	if len(saved.Tags) > 0 {
 		appendPart(&parts, "Tags", strings.Join(saved.Tags, ", "))
@@ -317,8 +375,6 @@ func negativeKnowledgeText(entry session.NegativeKnowledge) string {
 	appendPart(&parts, "Reason", entry.Reason)
 	appendPart(&parts, "Commit", entry.Commit)
 	appendPart(&parts, "Agent", entry.Agent)
-	appendPart(&parts, "Task type", entry.TaskType)
-	appendPart(&parts, "Severity", entry.Severity)
 
 	if !entry.CreatedAt.IsZero() {
 		appendPart(&parts, "Created", entry.CreatedAt.UTC().Format(time.RFC3339))
@@ -327,38 +383,13 @@ func negativeKnowledgeText(entry session.NegativeKnowledge) string {
 	return strings.Join(parts, "\n")
 }
 
-func evaluationText(entry *session.AgentEvaluation) string {
+func evaluationText(entry session.AgentEvaluation) string {
 	var parts []string
 	appendPart(&parts, "Evaluation", entry.Agent)
 	appendPart(&parts, "Outcome", entry.Outcome)
 
 	if entry.Score != 0 {
 		appendPart(&parts, "Score", strconv.Itoa(entry.Score))
-	}
-
-	appendPart(&parts, "Source", entry.Source)
-	appendPart(&parts, "Evaluator", entry.Evaluator)
-	appendPart(&parts, "Rubric version", entry.RubricVersion)
-	appendPart(&parts, "Task type", entry.TaskType)
-	appendPart(&parts, "Difficulty", entry.Difficulty)
-	appendPart(&parts, "Expected outcome", entry.ExpectedOutcome)
-	appendPart(&parts, "Model", entry.Model)
-	appendPart(&parts, "Agent version", entry.AgentVersion)
-
-	if entry.SchemaVersion != 0 {
-		appendPart(&parts, "Schema version", strconv.Itoa(entry.SchemaVersion))
-	}
-
-	if entry.DurationMillis != 0 {
-		appendPart(&parts, "Duration millis", strconv.FormatInt(entry.DurationMillis, 10))
-	}
-
-	if entry.Cost != 0 {
-		appendPart(&parts, "Cost", strconv.FormatFloat(entry.Cost, 'f', 6, 64))
-	}
-
-	if entry.Confidence != 0 {
-		appendPart(&parts, "Confidence", strconv.FormatFloat(entry.Confidence, 'f', 2, 64))
 	}
 
 	appendPart(&parts, "Reference", entry.Reference)
@@ -371,7 +402,7 @@ func evaluationText(entry *session.AgentEvaluation) string {
 	return strings.Join(parts, "\n")
 }
 
-func artifactText(entry *session.Artifact) string {
+func artifactText(entry session.Artifact) string {
 	var parts []string
 	appendPart(&parts, "Artifact", entry.Path)
 	appendPart(&parts, "Kind", entry.Kind)

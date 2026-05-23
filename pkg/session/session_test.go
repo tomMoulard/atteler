@@ -93,6 +93,7 @@ func TestStore_List(t *testing.T) {
 	first := New("gpt-4.1", []llm.Message{{Role: llm.RoleUser, Content: "one"}})
 	first.DefaultAgent = defaultAgent
 	first.Title = "Review auth flow"
+	first.WorktreePath = "/repo/auth"
 
 	first.Tags = []string{"auth", "review"}
 	if err := store.Save(first); err != nil {
@@ -125,9 +126,55 @@ func TestStore_List(t *testing.T) {
 		require.Failf(t, "unexpected failure", "title not found in summaries: %+v", summaries)
 	}
 
+	if summaries[1].WorktreePath != first.WorktreePath && summaries[0].WorktreePath != first.WorktreePath {
+		require.Failf(t, "unexpected failure", "worktree path not found in summaries: %+v", summaries)
+	}
+
 	if len(summaries[1].Tags) == 0 && len(summaries[0].Tags) == 0 {
 		require.Failf(t, "unexpected failure", "tags not found in summaries: %+v", summaries)
 	}
+}
+
+func TestStore_ListDoesNotDecodeMessageContent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.json")
+	data := `{
+  "id": "legacy",
+  "title": "Legacy transcript",
+  "default_agent": "reviewer",
+  "worktree_path": "/repo/auth",
+  "negative_knowledge": [123, {"agent": 123, "approach": 123}, {"agent": "critic", "approach": 123}],
+  "evaluations": [{"agent": ["bad"], "notes": 123}, {"agent": "reviewer", "notes": 123}],
+  "artifacts": [{"source_agent": false, "summary": 123}, {"source_agent": "writer", "summary": 123}],
+  "messages": [123, {"role": "user", "content": 123}]
+}`
+	require.NoError(t, os.WriteFile(path, []byte(data), 0o600))
+
+	summaries, err := NewStore(dir).List()
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	assert.Equal(t, "legacy", summaries[0].ID)
+	assert.Equal(t, "/repo/auth", summaries[0].WorktreePath)
+	assert.ElementsMatch(t, []string{"critic", "reviewer", "writer"}, summaries[0].AgentNames)
+	assert.Equal(t, 2, summaries[0].Messages)
+
+	_, err = NewStore(dir).Load("legacy")
+	require.Error(t, err)
+}
+
+func TestStore_ListRejectsTrailingSessionJSON(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trailing.json")
+	data := `{"id":"trailing","messages":[]}{"id":"extra"}`
+	require.NoError(t, os.WriteFile(path, []byte(data), 0o600))
+
+	_, err := NewStore(dir).List()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "trailing data")
 }
 
 func TestStore_Tags(t *testing.T) {

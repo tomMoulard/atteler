@@ -113,17 +113,11 @@ func providerlessFileCommands() []command {
 			},
 		},
 		{
-			name: "memory-command",
-			tier: tierProviderless,
-			match: func(o cliOptions) bool {
-				return o.retrievalSearch == "" && (o.memorySearch != "" ||
-					len(o.memoryIndexFiles) > 0 ||
-					o.memoryDelete != "" ||
-					o.memoryCompact ||
-					o.memoryMigrate)
-			},
+			name:  "memory-command",
+			tier:  tierProviderless,
+			match: memoryCommandRequested,
 			runProviderless: func(_ context.Context, o cliOptions, s *session.Store) error {
-				return runMemoryCommand(s, memoryCommandInputFromOptions(o))
+				return runMemoryCommand(s, o)
 			},
 		},
 		{

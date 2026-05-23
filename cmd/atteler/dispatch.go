@@ -50,6 +50,8 @@ func parseOptions() cliOptions {
 	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}
 	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
 	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
+	opts.memoryLimit = positiveIntFlag{name: "memory-limit"}
+	opts.memoryRetentionDays = positiveIntFlag{name: "memory-retention-days"}
 	registerCLIFlags(&opts)
 
 	flag.Usage = groupedUsage

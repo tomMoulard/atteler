@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -125,6 +126,7 @@ type Store struct {
 type Summary struct {
 	UpdatedAt      time.Time `json:"updated_at,omitzero"`
 	CreatedAt      time.Time `json:"created_at,omitzero"`
+	AgentNames     []string  `json:"agent_names,omitempty"`
 	Path           string    `json:"path"`
 	ID             string    `json:"id"`
 	Title          string    `json:"title,omitempty"`
@@ -135,6 +137,26 @@ type Summary struct {
 	WorktreeBase   string    `json:"worktree_base,omitempty"`
 	Tags           []string  `json:"tags,omitempty"`
 	Messages       int       `json:"messages"`
+}
+
+// sessionSummaryFile mirrors lightweight session JSON fields used for listing.
+// It intentionally does not decode message content so summary scans do not
+// materialize historical transcripts.
+//
+//nolint:govet // JSON/API field readability is preferred over pointer packing.
+type sessionSummaryFile struct {
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	AgentNames     []string
+	Tags           []string
+	ID             string
+	Title          string
+	DefaultModel   string
+	DefaultAgent   string
+	WorktreePath   string
+	WorktreeBranch string
+	WorktreeBase   string
+	Messages       int
 }
 
 // TagSummary counts how many saved sessions use a tag.
@@ -285,12 +307,12 @@ func (s *Store) List() ([]Summary, error) {
 
 		path := filepath.Join(s.dir, entry.Name())
 
-		session, err := s.Load(path)
+		summary, err := readSummary(path)
 		if err != nil {
 			return nil, err
 		}
 
-		summaries = append(summaries, summarize(path, session))
+		summaries = append(summaries, summary)
 	}
 
 	sort.Slice(summaries, func(i, j int) bool {
@@ -685,6 +707,382 @@ func newID(now time.Time) string {
 func idFromPath(path string) string {
 	base := filepath.Base(path)
 	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+func readSummary(path string) (Summary, error) {
+	reader, err := os.Open(path)
+	if err != nil {
+		return Summary{}, fmt.Errorf("session: read %s: %w", path, err)
+	}
+	defer reader.Close()
+
+	decoder := json.NewDecoder(reader)
+
+	file, err := readSummaryFile(decoder)
+	if err != nil {
+		return Summary{}, fmt.Errorf("session: parse %s: %w", path, err)
+	}
+
+	if file.ID == "" {
+		file.ID = idFromPath(path)
+	}
+
+	return summarizeFile(path, file), nil
+}
+
+func summarizeFile(path string, file sessionSummaryFile) Summary {
+	return Summary{
+		ID:           file.ID,
+		Title:        file.Title,
+		Path:         path,
+		CreatedAt:    file.CreatedAt,
+		UpdatedAt:    file.UpdatedAt,
+		AgentNames:   appendSummaryAgentNames([]string{file.DefaultAgent}, file.AgentNames...),
+		DefaultModel: file.DefaultModel,
+		DefaultAgent: file.DefaultAgent,
+		WorktreePath: file.WorktreePath,
+		Tags:         append([]string(nil), file.Tags...),
+		Messages:     file.Messages,
+	}
+}
+
+func readSummaryFile(decoder *json.Decoder) (sessionSummaryFile, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return sessionSummaryFile{}, fmt.Errorf("read summary object: %w", err)
+	}
+
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return sessionSummaryFile{}, errors.New("read summary object: expected object")
+	}
+
+	var file sessionSummaryFile
+
+	for decoder.More() {
+		key, keyErr := readSummaryObjectKey(decoder)
+		if keyErr != nil {
+			return sessionSummaryFile{}, keyErr
+		}
+
+		if valueErr := readSummaryObjectValue(decoder, key, &file); valueErr != nil {
+			return sessionSummaryFile{}, valueErr
+		}
+	}
+
+	if err := expectSummaryJSONDelim(decoder, '}'); err != nil {
+		return sessionSummaryFile{}, err
+	}
+
+	if err := expectSummaryJSONEOF(decoder); err != nil {
+		return sessionSummaryFile{}, err
+	}
+
+	return file, nil
+}
+
+func readSummaryObjectKey(decoder *json.Decoder) (string, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return "", fmt.Errorf("read summary key: %w", err)
+	}
+
+	key, ok := token.(string)
+	if !ok {
+		return "", errors.New("read summary key: expected string")
+	}
+
+	return key, nil
+}
+
+func readSummaryObjectValue(decoder *json.Decoder, key string, file *sessionSummaryFile) error {
+	if agentField, ok := summaryAgentField(key); ok {
+		return readSummaryObjectAgents(decoder, file, agentField)
+	}
+
+	switch key {
+	case "id":
+		return decodeSummaryJSONValue(decoder, key, &file.ID)
+	case "title":
+		return decodeSummaryJSONValue(decoder, key, &file.Title)
+	case "default_model":
+		return decodeSummaryJSONValue(decoder, key, &file.DefaultModel)
+	case "default_agent":
+		return decodeSummaryJSONValue(decoder, key, &file.DefaultAgent)
+	case "worktree_path":
+		return decodeSummaryJSONValue(decoder, key, &file.WorktreePath)
+	case "created_at":
+		return decodeSummaryJSONValue(decoder, key, &file.CreatedAt)
+	case "updated_at":
+		return decodeSummaryJSONValue(decoder, key, &file.UpdatedAt)
+	case "tags":
+		return decodeSummaryJSONValue(decoder, key, &file.Tags)
+	case "messages":
+		count, err := countSummaryMessages(decoder)
+		if err != nil {
+			return err
+		}
+
+		file.Messages = count
+
+		return nil
+	default:
+		return skipSummaryJSONValue(decoder)
+	}
+}
+
+func summaryAgentField(key string) (string, bool) {
+	switch key {
+	case "negative_knowledge", "evaluations":
+		return "agent", true
+	case "artifacts":
+		return "source_agent", true
+	default:
+		return "", false
+	}
+}
+
+func readSummaryObjectAgents(decoder *json.Decoder, file *sessionSummaryFile, agentField string) error {
+	agents, err := readSummaryAgentArray(decoder, agentField)
+	if err != nil {
+		return err
+	}
+
+	file.AgentNames = appendSummaryAgentNames(file.AgentNames, agents...)
+
+	return nil
+}
+
+func summaryAgentNames(values ...string) []string {
+	seen := make(map[string]string, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+
+		seen[key] = value
+	}
+
+	out := make([]string, 0, len(seen))
+	for _, value := range seen {
+		out = append(out, value)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i]) < strings.ToLower(out[j])
+	})
+
+	return out
+}
+
+func appendSummaryAgentNames(existing []string, values ...string) []string {
+	merged := make([]string, 0, len(existing)+len(values))
+	merged = append(merged, existing...)
+	merged = append(merged, values...)
+
+	return summaryAgentNames(merged...)
+}
+
+func readSummaryAgentArray(decoder *json.Decoder, agentField string) ([]string, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("read summary agents: %w", err)
+	}
+
+	if token == nil {
+		return nil, nil
+	}
+
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '[' {
+		if err := skipSummaryJSONValueAfterToken(decoder, token); err != nil {
+			return nil, err
+		}
+
+		return nil, nil
+	}
+
+	var agents []string
+
+	for decoder.More() {
+		values, err := readSummaryAgentObject(decoder, agentField)
+		if err != nil {
+			return nil, err
+		}
+
+		agents = appendSummaryAgentNames(agents, values...)
+	}
+
+	if err := expectSummaryJSONDelim(decoder, ']'); err != nil {
+		return nil, err
+	}
+
+	return agents, nil
+}
+
+func readSummaryAgentObject(decoder *json.Decoder, agentField string) ([]string, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("read summary agent object: %w", err)
+	}
+
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return nil, skipSummaryJSONValueAfterToken(decoder, token)
+	}
+
+	var agents []string
+
+	for decoder.More() {
+		key, err := readSummaryObjectKey(decoder)
+		if err != nil {
+			return nil, err
+		}
+
+		if key != agentField {
+			if skipErr := skipSummaryJSONValue(decoder); skipErr != nil {
+				return nil, skipErr
+			}
+
+			continue
+		}
+
+		token, tokenErr := decoder.Token()
+		if tokenErr != nil {
+			return nil, fmt.Errorf("read summary agent %s: %w", agentField, tokenErr)
+		}
+
+		agent, ok := token.(string)
+		if !ok {
+			if skipErr := skipSummaryJSONValueAfterToken(decoder, token); skipErr != nil {
+				return nil, skipErr
+			}
+
+			continue
+		}
+
+		agents = appendSummaryAgentNames(agents, agent)
+	}
+
+	if err := expectSummaryJSONDelim(decoder, '}'); err != nil {
+		return nil, err
+	}
+
+	return agents, nil
+}
+
+func decodeSummaryJSONValue(decoder *json.Decoder, key string, target any) error {
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("read summary %s: %w", key, err)
+	}
+
+	return nil
+}
+
+func countSummaryMessages(decoder *json.Decoder) (int, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return 0, fmt.Errorf("read messages: %w", err)
+	}
+
+	if token == nil {
+		return 0, nil
+	}
+
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '[' {
+		return 0, errors.New("read messages: expected array")
+	}
+
+	count := 0
+
+	for decoder.More() {
+		if err := skipSummaryJSONValue(decoder); err != nil {
+			return 0, err
+		}
+
+		count++
+	}
+
+	if err := expectSummaryJSONDelim(decoder, ']'); err != nil {
+		return 0, err
+	}
+
+	return count, nil
+}
+
+func skipSummaryJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("skip message value: %w", err)
+	}
+
+	return skipSummaryJSONValueAfterToken(decoder, token)
+}
+
+//nolint:wsl_v5 // Recursive token skipping is intentionally compact.
+func skipSummaryJSONValueAfterToken(decoder *json.Decoder, token json.Token) error {
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+
+	switch delim {
+	case '{':
+		for decoder.More() {
+			if _, err := decoder.Token(); err != nil {
+				return fmt.Errorf("skip message key: %w", err)
+			}
+			if err := skipSummaryJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+
+		return expectSummaryJSONDelim(decoder, '}')
+	case '[':
+		for decoder.More() {
+			if err := skipSummaryJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+
+		return expectSummaryJSONDelim(decoder, ']')
+	default:
+		return fmt.Errorf("skip message value: unexpected delimiter %q", delim)
+	}
+}
+
+func expectSummaryJSONDelim(decoder *json.Decoder, want json.Delim) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("skip message delimiter: %w", err)
+	}
+
+	got, ok := token.(json.Delim)
+	if !ok || got != want {
+		return fmt.Errorf("skip message delimiter: expected %q", want)
+	}
+
+	return nil
+}
+
+func expectSummaryJSONEOF(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("read summary trailing data: %w", err)
+	}
+
+	return fmt.Errorf("read summary trailing data: unexpected token %v", token)
 }
 
 func summarize(path string, session Session) Summary {

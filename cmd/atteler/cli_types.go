@@ -286,9 +286,16 @@ type cliOptions struct {
 	agentMemorySearch                  string
 	agentMemoryStorePath               string
 	memoryDelete                       string
+	memoryAgent                        string
+	memoryRepoPath                     string
+	memoryScope                        string
 	memorySearch                       string
+	memorySessionRef                   string
+	memorySince                        string
 	memoryStorePath                    string
+	memoryPurgeSpec                    string
 	retrievalSearch                    string
+	memoryUntil                        string
 	mcpManifestPath                    string
 	mcpCapability                      string
 	mcpServerName                      string
@@ -340,6 +347,8 @@ type cliOptions struct {
 	sessionTags                        stringListFlag
 	watchIssueLabels                   stringListFlag
 	agentMemoryIndexFiles              stringListFlag
+	memoryRedactRules                  rawStringListFlag
+	memoryTags                         stringListFlag
 	planAgentNames                     stringListFlag
 	retrievalFilters                   stringListFlag
 	retrievalSources                   stringListFlag
@@ -357,6 +366,7 @@ type cliOptions struct {
 	planMaxAgents                      positiveIntFlag
 	memoryLimit                        positiveIntFlag
 	memoryTTL                          positiveIntFlag
+	memoryRetentionDays                positiveIntFlag
 	agentMemoryLimit                   positiveIntFlag
 	agentMemoryTTL                     positiveIntFlag
 	retrievalLimit                     positiveIntFlag
@@ -469,6 +479,9 @@ type cliOptions struct {
 	showVersion                        bool
 	useWorktree                        bool
 	mergeWorktreeAllowBaseMismatch     bool
+	memoryGlobal                       bool
+	memoryListCorpus                   bool
+	memoryRebuild                      bool
 	pluginDryRun                       bool
 	listWorktrees                      bool
 	noAutoMerge                        bool

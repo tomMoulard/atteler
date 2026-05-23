@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Memory CLI scope/policy helpers use compact guard clauses for readability.
 package main
 
 import (
@@ -6,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -677,6 +680,17 @@ func loadMissingAgentMemoryStore(path string, migrate bool, statErr error) (*age
 	return store, nil
 }
 
+func memoryDisplayValue(value string) string {
+	redactor, err := memory.NewRedactor()
+	if err != nil {
+		return privacy.RedactIdentifier(strings.TrimSpace(value))
+	}
+
+	redacted, _ := redactor.RedactIdentifier(strings.TrimSpace(value))
+
+	return redacted
+}
+
 func formatAgentMemoryResult(result agentmemory.Result) string {
 	parts := []string{
 		result.Document.ID,
@@ -691,6 +705,33 @@ func formatAgentMemoryResult(result agentmemory.Result) string {
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+const (
+	memoryPurgeAll   = helpSelectorAll
+	memoryAgentKey   = "agent"
+	memoryScopeStore = memory.ScopeStore
+)
+
+//nolint:govet // Field order follows the scope-resolution flow more than pointer packing.
+type memoryCorpusPlan struct {
+	since         time.Time
+	until         time.Time
+	tags          []string
+	scope         string
+	sessionRef    string
+	repoPath      string
+	agent         string
+	retentionText string
+	retentionDays int
+	global        bool
+	hasSince      bool
+	hasUntil      bool
+}
+
+type memorySessionCandidate struct {
+	path  string
+	saved session.Session
 }
 
 func runRetrievalCommand(ctx context.Context, state appState, input retrievalCommandInput) error {
@@ -811,7 +852,7 @@ func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {
 		return retrieval.SourceGitHistory, false, nil
 	case "vector", "vectors":
 		return retrieval.SourceVector, false, nil
-	case "agent", "agent_memory", "agentmemory":
+	case memoryAgentKey, "agent_memory", "agentmemory":
 		return retrieval.SourceAgentMemory, false, nil
 	default:
 		return "", false, fmt.Errorf("retrieval: unknown source %q", raw)
@@ -907,7 +948,7 @@ func retrievalSearcher(ctx context.Context, state appState, input retrievalComma
 }
 
 func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput, includeSessions bool) (*memory.Store, error) {
-	mem, err := loadMemoryStore(input.MemoryStorePath, false)
+	mem, err := loadMemoryStore(input.MemoryStorePath)
 	if err != nil {
 		return nil, err
 	}
@@ -919,7 +960,7 @@ func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput
 	}
 
 	if includeSessions && strings.TrimSpace(input.MemoryStorePath) == "" && len(input.MemoryIndexFiles) == 0 {
-		if err := addSessionMemory(mem, store, memory.DefaultSessionIndexPolicy()); err != nil {
+		if err := addRetrievalSessionMemory(mem, store); err != nil {
 			return nil, err
 		}
 	}
@@ -1062,74 +1103,171 @@ func appendRetrievalSourceParts(parts []string, source retrieval.Source) []strin
 	return parts
 }
 
-func runMemoryCommand(store *session.Store, input memoryCommandInput) error {
-	if err := validateMemoryCommandInput(input); err != nil {
-		return err
-	}
-
-	mem, err := loadMemoryStore(input.StorePath, input.Migrate)
-	if err != nil {
-		return err
-	}
-
-	storeChanged, messages, err := mutateMemoryStore(mem, input)
-	if err != nil {
-		return err
-	}
-
-	if store != nil && shouldAddSessionMemory(mem, input) {
-		beforeDocuments := len(mem.Documents)
-		if sessionErr := addSessionMemory(mem, store, sessionIndexPolicy(input)); sessionErr != nil {
-			return sessionErr
-		}
-
-		storeChanged = storeChanged || len(mem.Documents) != beforeDocuments
-	}
-
-	if err := saveMemoryStoreIfChanged(mem, input.StorePath, storeChanged); err != nil {
-		return err
-	}
-
-	for _, message := range messages {
-		fmt.Println(message)
-	}
-
-	return finishMemoryCommand(mem, input)
-}
-
-func saveMemoryStoreIfChanged(mem *memory.Store, storePath string, storeChanged bool) error {
-	if storePath == "" || !storeChanged {
+func addRetrievalSessionMemory(mem *memory.Store, store *session.Store) error {
+	if store == nil {
 		return nil
 	}
 
-	if err := mem.Save(storePath); err != nil {
-		return fmt.Errorf("memory: save store: %w", err)
+	summaries, err := store.List()
+	if err != nil {
+		return fmt.Errorf("retrieval: list sessions: %w", err)
+	}
+
+	for i := range summaries {
+		summary := &summaries[i]
+		saved, err := store.Load(summary.Path)
+		if err != nil {
+			return fmt.Errorf("retrieval: load session %s: %w", summary.ID, err)
+		}
+		if err := mem.AddSession(saved); err != nil {
+			return fmt.Errorf("retrieval: index session %s: %w", saved.ID, err)
+		}
 	}
 
 	return nil
 }
 
-func finishMemoryCommand(mem *memory.Store, input memoryCommandInput) error {
-	if input.Search == "" {
-		if input.StorePath != "" && memoryCommandMutatesStore(input) {
-			return nil
+//nolint:cyclop,gocognit,nestif // Coordinates purge, rebuild, list, index, retention, and search modes in CLI precedence order.
+func runMemoryCommand(store *session.Store, opts cliOptions) (err error) {
+	redactor, err := memory.NewRedactor(opts.memoryRedactRules...)
+	if err != nil {
+		fallbackRedactor, fallbackErr := memory.NewRedactor()
+		if fallbackErr != nil {
+			return fmt.Errorf("memory: configure redaction: %w", err)
 		}
 
-		return errors.New("memory: --memory-search is required unless indexing into --memory-store")
+		return redactMemoryCommandError(fallbackRedactor, fmt.Errorf("memory: configure redaction: %w", err))
+	}
+	defer func() {
+		err = redactMemoryCommandError(redactor, err)
+	}()
+
+	if memoryRetentionRequestedOnly(opts) && strings.TrimSpace(opts.memoryStorePath) == "" {
+		return errors.New("memory: --memory-store is required for retention-only")
+	}
+	if memoryIndexRequiresStore(opts) {
+		return errors.New("memory: --memory-store is required for memory indexing without --memory-search")
+	}
+	if strings.TrimSpace(opts.memoryPurgeSpec) != "" && opts.memoryRebuild {
+		return errors.New("memory: --memory-purge cannot be combined with --memory-rebuild")
 	}
 
-	return searchMemoryStore(mem, input.Search, input.Limit)
-}
+	if strings.TrimSpace(opts.memoryPurgeSpec) != "" {
+		if strings.TrimSpace(opts.memoryStorePath) == "" {
+			return errors.New("memory: --memory-store is required for --memory-purge")
+		}
 
-func searchMemoryStore(mem *memory.Store, query string, limit int) error {
+		mem, purgeErr := loadMemoryStore(opts.memoryStorePath)
+		if purgeErr != nil {
+			return purgeErr
+		}
+		mem.SetRedactor(redactor)
+
+		filter, parseErr := parseMemoryPurgeSpec(opts.memoryPurgeSpec)
+		if parseErr != nil {
+			return parseErr
+		}
+
+		removed := mem.Purge(filter)
+		if saveErr := mem.Save(opts.memoryStorePath); saveErr != nil {
+			return fmt.Errorf("memory: save store: %w", saveErr)
+		}
+
+		fmt.Printf("Purged %d memory document(s) from %s\n", removed, redactMemoryDisplay(redactor, opts.memoryStorePath))
+		if memoryPurgeOnly(opts) {
+			return nil
+		}
+	}
+
+	var mem *memory.Store
+	if opts.memoryRebuild {
+		if strings.TrimSpace(opts.memoryStorePath) == "" {
+			return errors.New("memory: --memory-store is required for --memory-rebuild")
+		}
+
+		mem, err = buildMemoryStoreWithRedactor(store, opts, redactor, true)
+		if err != nil {
+			return err
+		}
+
+		if saveErr := mem.Save(opts.memoryStorePath); saveErr != nil {
+			return fmt.Errorf("memory: save store: %w", saveErr)
+		}
+
+		fmt.Printf("Rebuilt memory store at %s\n", redactMemoryDisplay(redactor, opts.memoryStorePath))
+		fmt.Print(formatMemoryCorpusWithRedactor(mem, redactor))
+		if strings.TrimSpace(opts.memorySearch) == "" {
+			return nil
+		}
+	}
+
+	if mem == nil {
+		mem, err = buildMemoryStoreWithRedactor(store, opts, redactor, false)
+		if err != nil {
+			return err
+		}
+	}
+
+	var maintenanceMem *memory.Store
+	if opts.memoryStorePath != "" && opts.memoryRetentionDays.value > 0 && !opts.memoryRebuild {
+		maintenanceMem, err = buildMemoryMaintenanceStore(opts, redactor)
+		if err != nil {
+			return err
+		}
+		if saveErr := maintenanceMem.Save(opts.memoryStorePath); saveErr != nil {
+			return fmt.Errorf("memory: save store: %w", saveErr)
+		}
+
+		if shouldReturnAfterMemoryRetention(opts) {
+			fmt.Printf("Applied %s memory retention to %s\n", memoryRetentionStatusText(maintenanceMem, opts), redactMemoryDisplay(redactor, opts.memoryStorePath))
+			return nil
+		}
+	}
+
+	if opts.memoryStorePath != "" && len(opts.memoryIndexFiles) > 0 && !opts.memoryRebuild {
+		if maintenanceMem == nil {
+			maintenanceMem, err = buildMemoryMaintenanceStore(opts, redactor)
+			if err != nil {
+				return err
+			}
+		}
+		if saveErr := maintenanceMem.Save(opts.memoryStorePath); saveErr != nil {
+			return fmt.Errorf("memory: save store: %w", saveErr)
+		}
+
+		if opts.memorySearch == "" && !opts.memoryListCorpus {
+			fmt.Printf("Indexed %d document(s) into %s\n", len(opts.memoryIndexFiles), redactMemoryDisplay(redactor, opts.memoryStorePath))
+			return nil
+		}
+	}
+
+	if opts.memoryListCorpus {
+		fmt.Print(formatMemoryCorpusWithRedactor(mem, redactor))
+		if strings.TrimSpace(opts.memorySearch) == "" {
+			return nil
+		}
+	}
+
+	if strings.TrimSpace(opts.memorySearch) == "" {
+		return errors.New("memory: --memory-search is required unless indexing, purging, rebuilding, retaining, or listing corpus")
+	}
+
+	searchMem, err := memorySearchStore(mem, opts, redactor)
+	if err != nil {
+		return err
+	}
+
+	limit := opts.memoryLimit.value
 	if limit == 0 {
 		limit = 5
 	}
 
-	results, err := mem.Search(query, limit)
+	results, err := searchMem.Search(opts.memorySearch, limit)
 	if err != nil {
 		return fmt.Errorf("memory: search: %w", err)
 	}
+
+	fmt.Print(formatMemoryCorpusStatement(searchMem, redactor, opts.memoryStorePath))
 
 	if len(results) == 0 {
 		fmt.Println("No memory results found.")
@@ -1137,189 +1275,354 @@ func searchMemoryStore(mem *memory.Store, query string, limit int) error {
 	}
 
 	for i := range results {
-		fmt.Println(formatMemoryResult(results[i]))
+		fmt.Println(formatMemoryResultWithRedactor(results[i], redactor))
 	}
 
 	return nil
 }
 
-func buildMemoryStore(store *session.Store, input memoryCommandInput) (*memory.Store, error) {
-	mem, err := loadMemoryStore(input.StorePath, input.Migrate)
+func buildMemoryMaintenanceStore(opts cliOptions, redactor *memory.Redactor) (*memory.Store, error) {
+	mem, err := loadMemoryStore(opts.memoryStorePath)
+	if err != nil {
+		return nil, err
+	}
+	mem.SetRedactor(redactor)
+
+	plan, err := memoryPlan(opts)
 	if err != nil {
 		return nil, err
 	}
 
-	if _, _, err := mutateMemoryStore(mem, input); err != nil {
+	applyMemoryRetentionPolicy(mem, plan)
+	if err := addMemoryIndexFiles(mem, opts.memoryIndexFiles); err != nil {
 		return nil, err
 	}
-
-	if store != nil && shouldAddSessionMemory(mem, input) {
-		if sessionErr := addSessionMemory(mem, store, sessionIndexPolicy(input)); sessionErr != nil {
-			return nil, sessionErr
-		}
+	applyMemoryRetentionPolicy(mem, plan)
+	if explicitMemoryScopeRequested(opts) {
+		updateMemoryCorpus(mem, plan, memoryStoreSessionIDs(mem))
 	}
 
 	return mem, nil
 }
 
-func validateMemoryCommandInput(input memoryCommandInput) error {
-	if input.StorePath == "" && (strings.TrimSpace(input.DeleteID) != "" || input.Compact || input.Migrate) {
-		return errors.New("memory: --memory-store is required for --memory-delete, --memory-compact, or --memory-migrate")
-	}
-
-	return nil
-}
-
-func mutateMemoryStore(mem *memory.Store, input memoryCommandInput) (storeChanged bool, messages []string, err error) {
-	messages = make([]string, 0, len(input.IndexFiles)+2)
-
-	if input.Migrate {
-		storeChanged = true
-
-		messages = append(messages, "Migrated memory store "+memoryDisplayValue(input.StorePath))
-	}
-
-	deleted, message := deleteMemoryDocument(mem, input.StorePath, input.DeleteID)
-	storeChanged = storeChanged || deleted
-	messages = appendMemoryMessage(messages, message)
-
-	compacted, message := compactMemoryDocuments(mem, input.StorePath, input.Compact)
-	storeChanged = storeChanged || compacted
-	messages = appendMemoryMessage(messages, message)
-
-	indexedMessage, err := indexMemoryFiles(mem, input.StorePath, input.IndexFiles, input.TTLSeconds)
+func memorySearchStore(mem *memory.Store, opts cliOptions, redactor *memory.Redactor) (*memory.Store, error) {
+	plan, err := memoryPlan(opts)
 	if err != nil {
-		return false, nil, err
+		return nil, err
+	}
+	if !implicitStoreBackedSearchShouldUseRepoScope(opts, plan) {
+		return mem, nil
 	}
 
-	storeChanged = storeChanged || indexedMessage != ""
-	messages = appendMemoryMessage(messages, indexedMessage)
+	searchMem := cloneMemoryStore(mem)
+	constrainMemoryStore(searchMem, plan, nil, redactor)
+	if err := addExplicitMemoryIndexDocuments(searchMem, mem, opts.memoryIndexFiles, redactor); err != nil {
+		return nil, err
+	}
 
-	return storeChanged, messages, nil
+	return searchMem, nil
 }
 
-func appendMemoryMessage(messages []string, message string) []string {
-	if message == "" {
-		return messages
-	}
-
-	return append(messages, message)
-}
-
-func deleteMemoryDocument(mem *memory.Store, storePath, id string) (changed bool, message string) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return false, ""
-	}
-
-	if mem.Delete(id) {
-		return true, "Deleted memory " + memoryDisplayValue(id) + " from " + memoryDisplayValue(storePath)
-	}
-
-	return false, "No memory " + memoryDisplayValue(id) + " found in " + memoryDisplayValue(storePath)
-}
-
-func compactMemoryDocuments(mem *memory.Store, storePath string, enabled bool) (changed bool, message string) {
-	if !enabled {
-		return false, ""
-	}
-
-	removed := mem.Compact(time.Now().UTC())
-	message = fmt.Sprintf("Compacted %d expired memory document(s) from %s", removed, memoryDisplayValue(storePath))
-
-	return true, message
-}
-
-func indexMemoryFiles(mem *memory.Store, storePath string, paths []string, ttlSeconds int) (string, error) {
-	expiresAt := memoryExpiresAt(ttlSeconds)
-	for _, path := range paths {
-		if err := addMemoryFileWithExpiry(mem, path, expiresAt); err != nil {
-			return "", fmt.Errorf("memory: index %s: %w", path, err)
-		}
-	}
-
-	if len(paths) == 0 || storePath == "" {
-		return "", nil
-	}
-
-	return fmt.Sprintf("Indexed %d document(s) into %s", len(paths), memoryDisplayValue(storePath)), nil
-}
-
-func memoryDisplayValue(value string) string {
-	return privacy.RedactIdentifier(strings.TrimSpace(value))
-}
-
-func addMemoryFileWithExpiry(mem *memory.Store, path string, expiresAt *time.Time) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read memory file %q: %w", path, err)
-	}
-
-	if !utf8.Valid(data) {
-		return fmt.Errorf("read memory file %q: %w", path, memory.ErrInvalidUTF8)
-	}
-
-	clean := filepath.Clean(path)
-
-	if err := mem.Add(memory.Document{
-		ID:        clean,
-		Path:      clean,
-		Text:      string(data),
-		ExpiresAt: expiresAt,
-		Provenance: map[string]string{
-			"source_type": "file",
-			"path":        clean,
-		},
-	}); err != nil {
-		return fmt.Errorf("add memory document %q: %w", clean, err)
-	}
-
-	return nil
-}
-
-func memoryExpiresAt(ttlSeconds int) *time.Time {
-	if ttlSeconds <= 0 {
+func addExplicitMemoryIndexDocuments(dst, src *memory.Store, paths []string, redactor *memory.Redactor) error {
+	if dst == nil || src == nil || len(paths) == 0 {
 		return nil
 	}
 
-	expiresAt := time.Now().UTC().Add(time.Duration(ttlSeconds) * time.Second)
-
-	return &expiresAt
-}
-
-func shouldAddSessionMemory(mem *memory.Store, input memoryCommandInput) bool {
-	if input.DeleteID != "" || input.Compact || input.Migrate {
-		return false
+	indexed := memoryIndexPathSet(paths, redactor)
+	if len(indexed) == 0 {
+		return nil
 	}
 
-	return input.StorePath == "" || len(mem.Documents) == 0
+	for i := range src.Documents {
+		doc := &src.Documents[i]
+		if !memoryDocumentMatchesIndexedPath(*doc, indexed) {
+			continue
+		}
+
+		if err := dst.Add(cloneMemoryDocument(*doc)); err != nil {
+			return fmt.Errorf("memory: include indexed file %s: %w", doc.ID, err)
+		}
+	}
+
+	return nil
 }
 
-func memoryCommandMutatesStore(input memoryCommandInput) bool {
-	return strings.TrimSpace(input.DeleteID) != "" ||
-		input.Compact ||
-		input.Migrate ||
-		len(input.IndexFiles) > 0
+func memoryIndexPathSet(paths []string, redactor *memory.Redactor) map[string]struct{} {
+	indexed := make(map[string]struct{}, len(paths)*2)
+	for _, path := range paths {
+		path = filepath.Clean(strings.TrimSpace(path))
+		if path == "." || path == "" {
+			continue
+		}
+
+		indexed[path] = struct{}{}
+		if redactor != nil {
+			redacted, _ := redactor.RedactIdentifier(path)
+			if strings.TrimSpace(redacted) != "" {
+				indexed[redacted] = struct{}{}
+			}
+		}
+	}
+
+	return indexed
 }
 
-func loadMemoryStore(path string, migrate bool) (*memory.Store, error) {
+func memoryDocumentMatchesIndexedPath(doc memory.Document, indexed map[string]struct{}) bool {
+	for _, candidate := range []string{
+		doc.ID,
+		doc.Path,
+		doc.Metadata["path"],
+	} {
+		if _, ok := indexed[filepath.Clean(strings.TrimSpace(candidate))]; ok {
+			return true
+		}
+	}
+	if doc.Provenance != nil {
+		if _, ok := indexed[filepath.Clean(strings.TrimSpace(doc.Provenance.Path))]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func cloneMemoryStore(mem *memory.Store) *memory.Store {
+	if mem == nil {
+		return memory.NewStore()
+	}
+
+	copied := *mem
+	copied.Corpus = cloneMemoryCorpus(mem.Corpus)
+	copied.Documents = make([]memory.Document, len(mem.Documents))
+	for i := range mem.Documents {
+		copied.Documents[i] = cloneMemoryDocument(mem.Documents[i])
+	}
+
+	return &copied
+}
+
+func cloneMemoryCorpus(corpus memory.CorpusMetadata) memory.CorpusMetadata {
+	copied := corpus
+	copied.CreatedFrom = append([]string(nil), corpus.CreatedFrom...)
+	copied.SessionIDs = append([]string(nil), corpus.SessionIDs...)
+	copied.Tags = append([]string(nil), corpus.Tags...)
+
+	return copied
+}
+
+func cloneMemoryDocument(doc memory.Document) memory.Document {
+	copied := doc
+	if doc.Metadata != nil {
+		copied.Metadata = maps.Clone(doc.Metadata)
+	}
+	if doc.Provenance != nil {
+		provenance := *doc.Provenance
+		provenance.Tags = append([]string(nil), doc.Provenance.Tags...)
+		copied.Provenance = &provenance
+	}
+	if doc.Policy != nil {
+		policy := *doc.Policy
+		policy.RedactionRules = append([]string(nil), doc.Policy.RedactionRules...)
+		copied.Policy = &policy
+	}
+
+	return copied
+}
+
+func redactMemoryDisplay(redactor *memory.Redactor, value string) string {
+	if redactor == nil || strings.TrimSpace(value) == "" {
+		return value
+	}
+
+	redacted, _ := redactor.Redact(value)
+
+	return redacted
+}
+
+func redactMemoryCommandError(redactor *memory.Redactor, err error) error {
+	if redactor == nil || err == nil {
+		return err
+	}
+
+	redacted, decision := redactor.Redact(err.Error())
+	if !decision.Redacted {
+		return err
+	}
+
+	return redactedMemoryCommandError{cause: err, message: redacted}
+}
+
+type redactedMemoryCommandError struct {
+	cause   error
+	message string
+}
+
+func (e redactedMemoryCommandError) Error() string {
+	return e.message
+}
+
+func (e redactedMemoryCommandError) Unwrap() error {
+	return e.cause
+}
+
+func buildMemoryStore(store *session.Store, opts cliOptions) (*memory.Store, error) {
+	redactor, err := memory.NewRedactor(opts.memoryRedactRules...)
+	if err != nil {
+		return nil, fmt.Errorf("memory: configure redaction: %w", err)
+	}
+
+	return buildMemoryStoreWithRedactor(store, opts, redactor, false)
+}
+
+func buildMemoryStoreWithRedactor(store *session.Store, opts cliOptions, redactor *memory.Redactor, rebuild bool) (*memory.Store, error) {
+	var mem *memory.Store
+	if rebuild {
+		mem = memory.NewStore()
+	} else {
+		var err error
+		mem, err = loadMemoryStore(opts.memoryStorePath)
+		if err != nil {
+			return nil, err
+		}
+	}
+	mem.SetRedactor(redactor)
+
+	plan, err := memoryPlan(opts)
+	if err != nil {
+		return nil, err
+	}
+	if buildErr := validateMemoryBuildRequest(opts, plan, rebuild); buildErr != nil {
+		return nil, buildErr
+	}
+	applyMemoryRetentionPolicy(mem, plan)
+
+	if addErr := addMemoryIndexFiles(mem, opts.memoryIndexFiles); addErr != nil {
+		return nil, addErr
+	}
+	var indexedFileSource *memory.Store
+	if len(opts.memoryIndexFiles) > 0 {
+		indexedFileSource = cloneMemoryStore(mem)
+	}
+
+	sessionIDs, err := indexMemorySessionsForPlan(mem, store, opts, plan, rebuild)
+	if err != nil {
+		return nil, err
+	}
+	sessionIDs = selectedMemorySessionIDs(plan, sessionIDs)
+
+	applyMemoryRetentionPolicy(mem, plan)
+
+	if shouldConstrainMemoryCorpus(opts, plan) && !purgeLeftEmptyMemoryStore(opts, mem) {
+		constrainMemoryStore(mem, plan, sessionIDs, redactor)
+		if addErr := addExplicitMemoryIndexDocuments(mem, indexedFileSource, opts.memoryIndexFiles, redactor); addErr != nil {
+			return nil, addErr
+		}
+	} else if shouldApplyStoreScopePolicy(opts, plan) {
+		updateMemoryCorpus(mem, plan, memoryStoreSessionIDs(mem))
+	}
+
+	return mem, nil
+}
+
+func purgeLeftEmptyMemoryStore(opts cliOptions, mem *memory.Store) bool {
+	return strings.TrimSpace(opts.memoryPurgeSpec) != "" && mem != nil && len(mem.Documents) == 0
+}
+
+func validateMemoryBuildRequest(opts cliOptions, plan memoryCorpusPlan, rebuild bool) error {
+	if plan.scope == memoryScopeStore && strings.TrimSpace(opts.memoryStorePath) == "" {
+		return errors.New("memory: --memory-store is required for --memory-scope store")
+	}
+	if rebuild && plan.scope == memoryScopeStore {
+		return errors.New("memory: --memory-scope store cannot be used with --memory-rebuild")
+	}
+
+	return nil
+}
+
+func addMemoryIndexFiles(mem *memory.Store, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	if err := mem.AddFiles(paths...); err != nil {
+		return fmt.Errorf("memory: index files: %w", err)
+	}
+	mem.Corpus.FileCount = memoryFileDocumentCount(mem)
+
+	return nil
+}
+
+func indexMemorySessionsForPlan(mem *memory.Store, store *session.Store, opts cliOptions, plan memoryCorpusPlan, rebuild bool) ([]string, error) {
+	if !shouldIndexSessionMemory(opts, rebuild) {
+		return nil, nil
+	}
+
+	sessionIDs, err := addSessionMemory(mem, store, plan)
+	if err == nil {
+		return sessionIDs, nil
+	}
+	if canUseStoredSessionOnly(opts, plan, err) {
+		return []string{memorySessionIDFromRef(plan.sessionRef)}, nil
+	}
+
+	return nil, err
+}
+
+func selectedMemorySessionIDs(plan memoryCorpusPlan, sessionIDs []string) []string {
+	if len(sessionIDs) == 0 && plan.scope == memory.ScopeSession && strings.TrimSpace(plan.sessionRef) != "" {
+		return []string{memorySessionIDFromRef(plan.sessionRef)}
+	}
+
+	return sessionIDs
+}
+
+func applyMemoryRetentionPolicy(mem *memory.Store, plan memoryCorpusPlan) {
+	if plan.retentionDays <= 0 {
+		return
+	}
+
+	mem.ApplyRetention(plan.since)
+	mem.ApplyPolicy("", plan.retentionText)
+	mem.Corpus.Retention = plan.retentionText
+	mem.Corpus.DateStart = plan.since.UTC().Format(time.RFC3339)
+	mem.Corpus.DateEnd = ""
+	mem.Corpus.Description = memoryCorpusDescription(mem.Corpus)
+}
+
+func canUseStoredSessionOnly(opts cliOptions, plan memoryCorpusPlan, err error) bool {
+	return strings.TrimSpace(opts.memoryStorePath) != "" &&
+		plan.scope == memory.ScopeSession &&
+		errors.Is(err, os.ErrNotExist)
+}
+
+func memorySessionIDFromRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+
+	base := filepath.Base(ref)
+	if ext := filepath.Ext(base); ext != "" {
+		base = strings.TrimSuffix(base, ext)
+	}
+
+	return strings.TrimSpace(base)
+}
+
+func loadMemoryStore(path string) (*memory.Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return memory.NewStore(), nil
 	}
 
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			if migrate {
-				return nil, fmt.Errorf("memory: migrate store %s: %w", path, err)
-			}
-
 			return memory.NewStore(), nil
 		}
 
 		return nil, fmt.Errorf("memory: stat store %s: %w", path, err)
 	}
 
-	store, err := memory.LoadWithOptions(path, memory.LoadOptions{Migrate: migrate})
+	store, err := memory.Load(path)
 	if err != nil {
 		return nil, fmt.Errorf("memory: load store: %w", err)
 	}
@@ -1327,37 +1630,1333 @@ func loadMemoryStore(path string, migrate bool) (*memory.Store, error) {
 	return store, nil
 }
 
-func sessionIndexPolicy(input memoryCommandInput) memory.SessionIndexPolicy {
-	policy := memory.DefaultSessionIndexPolicy()
-	policy.IncludeMessages = input.IncludeSessionMessages
-	policy.IncludeWorktreeMetadata = input.IncludeWorktreeMetadata
-
-	return policy
-}
-
-func addSessionMemory(mem *memory.Store, store *session.Store, policy memory.SessionIndexPolicy) error {
-	summaries, err := store.List()
-	if err != nil {
-		return fmt.Errorf("memory: list sessions: %w", err)
+func addSessionMemory(mem *memory.Store, store *session.Store, plan memoryCorpusPlan) ([]string, error) {
+	if store == nil {
+		return nil, errors.New("memory: session store is required for session-backed memory scopes")
 	}
 
+	sessions, err := memorySessionCandidatesForPlan(store, plan)
+	if err != nil {
+		return nil, err
+	}
+
+	sessionIDs := make([]string, 0, len(sessions))
+	for i := range sessions {
+		saved := sessions[i].saved
+		if strings.TrimSpace(saved.WorktreePath) == "" && strings.TrimSpace(plan.repoPath) != "" &&
+			memorySessionRepoMatches(saved, sessions[i].path, plan) {
+			saved.WorktreePath = plan.repoPath
+		}
+		sessionIDs = append(sessionIDs, saved.ID)
+
+		if err := mem.AddSessionWithOptions(saved, memory.SessionIndexOptions{
+			Scope:     plan.scope,
+			Agent:     plan.agent,
+			Retention: plan.retentionText,
+		}); err != nil {
+			return nil, fmt.Errorf("memory: index session %s: %w", saved.ID, err)
+		}
+	}
+
+	updateMemoryCorpus(mem, plan, memoryStoreSessionIDs(mem))
+
+	return sessionIDs, nil
+}
+
+func memorySessionCandidatesForPlan(store *session.Store, plan memoryCorpusPlan) ([]memorySessionCandidate, error) {
+	if plan.scope != memory.ScopeSession {
+		return loadMemorySessions(store, plan)
+	}
+
+	ref := strings.TrimSpace(plan.sessionRef)
+	if ref == "" {
+		return nil, errors.New("memory: --memory-session or --session is required for session memory scope")
+	}
+
+	saved, err := store.Load(ref)
+	if err != nil {
+		return nil, fmt.Errorf("memory: load session %s: %w", ref, err)
+	}
+
+	sessionPath := store.Path(ref)
+	if !memorySessionMatchesPlan(saved, sessionPath, plan) {
+		return nil, nil
+	}
+
+	return []memorySessionCandidate{{path: sessionPath, saved: saved}}, nil
+}
+
+func loadMemorySessions(store *session.Store, plan memoryCorpusPlan) ([]memorySessionCandidate, error) {
+	summaries, err := store.List()
+	if err != nil {
+		return nil, fmt.Errorf("memory: list sessions: %w", err)
+	}
+
+	sessions := make([]memorySessionCandidate, 0, len(summaries))
 	for i := range summaries {
 		summary := &summaries[i]
+		if !memorySummaryMatchesPlan(*summary, plan) {
+			continue
+		}
 
 		saved, err := store.Load(summary.Path)
 		if err != nil {
-			return fmt.Errorf("memory: load session %s: %w", summary.ID, err)
+			return nil, fmt.Errorf("memory: load session %s: %w", summary.ID, err)
 		}
 
-		if err := mem.AddSessionWithPolicy(saved, policy); err != nil {
-			return fmt.Errorf("memory: index session %s: %w", summary.ID, err)
+		if !memorySessionMatchesPlan(saved, summary.Path, plan) {
+			continue
 		}
+
+		sessions = append(sessions, memorySessionCandidate{saved: saved, path: summary.Path})
+	}
+
+	return sessions, nil
+}
+
+func memorySummaryMatchesPlan(summary session.Summary, plan memoryCorpusPlan) bool {
+	if strings.TrimSpace(plan.sessionRef) != "" && !memorySummarySessionMatches(summary, plan.sessionRef) {
+		return false
+	}
+
+	if !memorySummaryRepoMatches(summary, plan) {
+		return false
+	}
+
+	if len(plan.tags) > 0 && !summaryHasAnyMemoryTag(summary, plan.tags) {
+		return false
+	}
+
+	if plan.agent != "" && !summaryHasMemoryAgent(summary, plan.agent) {
+		return false
+	}
+
+	return memorySummaryDateMatches(summary, plan)
+}
+
+func memorySummarySessionMatches(summary session.Summary, sessionRef string) bool {
+	return memorySessionRefMatches(summary.ID, summary.Path, sessionRef)
+}
+
+func memorySummaryRepoMatches(summary session.Summary, plan memoryCorpusPlan) bool {
+	if strings.TrimSpace(plan.repoPath) == "" {
+		return true
+	}
+
+	if strings.TrimSpace(summary.WorktreePath) != "" {
+		return sameMemoryPath(summary.WorktreePath, plan.repoPath)
+	}
+
+	return memoryPathWithin(summary.Path, plan.repoPath)
+}
+
+func summaryHasAnyMemoryTag(summary session.Summary, tags []string) bool {
+	want := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag != "" {
+			want[tag] = struct{}{}
+		}
+	}
+
+	if len(want) == 0 {
+		return true
+	}
+
+	for _, tag := range summary.Tags {
+		if _, ok := want[strings.ToLower(strings.TrimSpace(tag))]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func summaryHasMemoryAgent(summary session.Summary, agent string) bool {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	if agent == "" {
+		return true
+	}
+
+	if strings.ToLower(strings.TrimSpace(summary.DefaultAgent)) == agent {
+		return true
+	}
+
+	for _, candidate := range summary.AgentNames {
+		if strings.ToLower(strings.TrimSpace(candidate)) == agent {
+			return true
+		}
+	}
+
+	return false
+}
+
+func memorySummaryDateMatches(summary session.Summary, plan memoryCorpusPlan) bool {
+	activity := summary.UpdatedAt
+	if activity.IsZero() {
+		activity = summary.CreatedAt
+	}
+	if plan.hasSince && (activity.IsZero() || activity.Before(plan.since)) {
+		return false
+	}
+	if plan.hasUntil && (activity.IsZero() || activity.After(plan.until)) {
+		return false
+	}
+
+	return true
+}
+
+func memoryCommandRequested(opts cliOptions) bool {
+	return opts.memorySearch != "" ||
+		len(opts.memoryIndexFiles) > 0 ||
+		opts.memoryPurgeSpec != "" ||
+		opts.memoryRebuild ||
+		opts.memoryListCorpus ||
+		opts.memoryRetentionDays.value > 0
+}
+
+func memoryPurgeOnly(opts cliOptions) bool {
+	return strings.TrimSpace(opts.memoryPurgeSpec) != "" &&
+		strings.TrimSpace(opts.memorySearch) == "" &&
+		len(opts.memoryIndexFiles) == 0 &&
+		!opts.memoryRebuild &&
+		!opts.memoryListCorpus &&
+		opts.memoryRetentionDays.value == 0
+}
+
+func shouldReturnAfterMemoryRetention(opts cliOptions) bool {
+	return strings.TrimSpace(opts.memorySearch) == "" &&
+		len(opts.memoryIndexFiles) == 0 &&
+		!opts.memoryRebuild &&
+		!opts.memoryListCorpus
+}
+
+func memoryRetentionStatusText(mem *memory.Store, opts cliOptions) string {
+	if mem != nil && strings.TrimSpace(mem.Corpus.Retention) != "" {
+		return mem.Corpus.Retention
+	}
+	if opts.memoryRetentionDays.value > 0 {
+		return fmt.Sprintf("%d days", opts.memoryRetentionDays.value)
+	}
+
+	return "configured"
+}
+
+func memoryRetentionRequestedOnly(opts cliOptions) bool {
+	return opts.memoryRetentionDays.value > 0 &&
+		strings.TrimSpace(opts.memorySearch) == "" &&
+		len(opts.memoryIndexFiles) == 0 &&
+		strings.TrimSpace(opts.memoryPurgeSpec) == "" &&
+		!opts.memoryRebuild &&
+		!opts.memoryListCorpus
+}
+
+func memoryIndexRequiresStore(opts cliOptions) bool {
+	return len(opts.memoryIndexFiles) > 0 &&
+		strings.TrimSpace(opts.memoryStorePath) == "" &&
+		strings.TrimSpace(opts.memorySearch) == ""
+}
+
+func shouldIndexSessionMemory(opts cliOptions, rebuild bool) bool {
+	if len(opts.memoryIndexFiles) > 0 && strings.TrimSpace(opts.memorySearch) == "" && !rebuild {
+		return false
+	}
+
+	if memoryRetentionRequestedOnly(opts) {
+		return false
+	}
+
+	if memoryStoreMaintenanceOnly(opts) {
+		return false
+	}
+
+	if strings.TrimSpace(opts.memoryPurgeSpec) != "" && !rebuild {
+		return false
+	}
+
+	if memoryIndexMaintenanceOnly(opts) {
+		return false
+	}
+
+	if normalizeMemoryScope(opts.memoryScope) == memoryScopeStore {
+		return false
+	}
+
+	if rebuild {
+		return true
+	}
+
+	if strings.TrimSpace(opts.memoryStorePath) == "" {
+		return true
+	}
+
+	return explicitMemoryScopeRequested(opts)
+}
+
+func memoryStoreMaintenanceOnly(opts cliOptions) bool {
+	return strings.TrimSpace(opts.memoryStorePath) != "" &&
+		strings.TrimSpace(opts.memorySearch) == "" &&
+		!opts.memoryRebuild &&
+		(opts.memoryListCorpus ||
+			opts.memoryRetentionDays.value > 0 ||
+			len(opts.memoryIndexFiles) > 0 ||
+			strings.TrimSpace(opts.memoryPurgeSpec) != "")
+}
+
+func memoryIndexMaintenanceOnly(opts cliOptions) bool {
+	return strings.TrimSpace(opts.memoryStorePath) != "" &&
+		len(opts.memoryIndexFiles) > 0 &&
+		strings.TrimSpace(opts.memorySearch) == "" &&
+		strings.TrimSpace(opts.memoryPurgeSpec) == "" &&
+		!opts.memoryRebuild
+}
+
+func explicitMemoryScopeRequested(opts cliOptions) bool {
+	return strings.TrimSpace(opts.memoryScope) != "" ||
+		strings.TrimSpace(opts.memorySessionRef) != "" ||
+		strings.TrimSpace(opts.sessionRef) != "" ||
+		strings.TrimSpace(opts.memoryRepoPath) != "" ||
+		len(opts.memoryTags) > 0 ||
+		strings.TrimSpace(opts.memorySince) != "" ||
+		strings.TrimSpace(opts.memoryUntil) != "" ||
+		strings.TrimSpace(opts.memoryAgent) != "" ||
+		opts.memoryGlobal
+}
+
+func shouldConstrainMemoryCorpus(opts cliOptions, plan memoryCorpusPlan) bool {
+	if memoryRetentionRequestedOnly(opts) {
+		return false
+	}
+
+	if implicitStoreBackedSearchUsesRepoScope(opts, plan) {
+		return true
+	}
+
+	if !explicitMemoryScopeRequested(opts) {
+		return false
+	}
+
+	switch plan.scope {
+	case memory.ScopeGlobal, memoryScopeStore:
+		return memoryPlanHasSecondaryFilters(plan)
+	default:
+		return true
+	}
+}
+
+func shouldApplyStoreScopePolicy(opts cliOptions, plan memoryCorpusPlan) bool {
+	return normalizeMemoryScope(opts.memoryScope) == memoryScopeStore &&
+		plan.scope == memoryScopeStore
+}
+
+func implicitStoreBackedSearchUsesRepoScope(opts cliOptions, plan memoryCorpusPlan) bool {
+	return implicitStoreBackedSearchShouldUseRepoScope(opts, plan) &&
+		len(opts.memoryIndexFiles) == 0 &&
+		opts.memoryRetentionDays.value == 0
+}
+
+func implicitStoreBackedSearchShouldUseRepoScope(opts cliOptions, plan memoryCorpusPlan) bool {
+	return strings.TrimSpace(opts.memoryStorePath) != "" &&
+		strings.TrimSpace(opts.memorySearch) != "" &&
+		strings.TrimSpace(opts.memoryScope) == "" &&
+		!opts.memoryGlobal &&
+		plan.scope == memory.ScopeRepo &&
+		strings.TrimSpace(plan.repoPath) != ""
+}
+
+func memoryPlanHasSecondaryFilters(plan memoryCorpusPlan) bool {
+	return strings.TrimSpace(plan.repoPath) != "" ||
+		strings.TrimSpace(plan.sessionRef) != "" ||
+		len(plan.tags) > 0 ||
+		strings.TrimSpace(plan.agent) != "" ||
+		plan.hasSince ||
+		plan.hasUntil
+}
+
+func memoryPlan(opts cliOptions) (memoryCorpusPlan, error) {
+	scope := normalizeMemoryScope(opts.memoryScope)
+	plan := memoryCorpusPlan{
+		scope:         scope,
+		sessionRef:    firstNonEmptyString(opts.memorySessionRef, opts.sessionRef),
+		repoPath:      strings.TrimSpace(opts.memoryRepoPath),
+		tags:          append([]string(nil), opts.memoryTags...),
+		agent:         memoryPlanAgent(opts, scope),
+		retentionDays: opts.memoryRetentionDays.value,
+	}
+
+	if opts.memoryGlobal {
+		plan.scope = memory.ScopeGlobal
+		plan.global = true
+	}
+
+	if plan.scope == "" {
+		plan.scope = inferredMemoryScope(opts, plan)
+	}
+
+	if plan.scope == memory.ScopeGlobal {
+		plan.global = true
+	}
+
+	if plan.repoPath != "" {
+		plan.repoPath = normalizeExplicitMemoryRepoPath(plan.repoPath)
+	} else if plan.scope == memory.ScopeRepo {
+		repoPath, err := defaultMemoryRepoPath()
+		if err != nil {
+			return memoryCorpusPlan{}, fmt.Errorf("memory: resolve cwd for repo scope: %w", err)
+		}
+		plan.repoPath = repoPath
+	}
+
+	var err error
+	if strings.TrimSpace(opts.memorySince) != "" {
+		plan.since, err = parseMemoryTime(opts.memorySince, false)
+		if err != nil {
+			return memoryCorpusPlan{}, err
+		}
+		plan.hasSince = true
+	}
+	if strings.TrimSpace(opts.memoryUntil) != "" {
+		plan.until, err = parseMemoryTime(opts.memoryUntil, true)
+		if err != nil {
+			return memoryCorpusPlan{}, err
+		}
+		plan.hasUntil = true
+	}
+	if plan.retentionDays > 0 {
+		plan.retentionText = fmt.Sprintf("%d days", plan.retentionDays)
+		cutoff := time.Now().UTC().AddDate(0, 0, -plan.retentionDays)
+		if !plan.hasSince || cutoff.After(plan.since) {
+			plan.since = cutoff
+			plan.hasSince = true
+		}
+	}
+
+	if err := validateMemoryPlan(plan); err != nil {
+		return memoryCorpusPlan{}, err
+	}
+
+	return plan, nil
+}
+
+func memoryPlanAgent(opts cliOptions, scope string) string {
+	if agent := strings.TrimSpace(opts.memoryAgent); agent != "" {
+		return agent
+	}
+	if scope == memory.ScopeAgent {
+		return strings.TrimSpace(opts.agentName)
+	}
+
+	return ""
+}
+
+func validateMemoryPlan(plan memoryCorpusPlan) error {
+	if plan.hasSince && plan.hasUntil && plan.since.After(plan.until) {
+		return fmt.Errorf("memory: --memory-since %s is after --memory-until %s", plan.since.Format(time.RFC3339), plan.until.Format(time.RFC3339))
+	}
+
+	switch plan.scope {
+	case memory.ScopeSession:
+		if strings.TrimSpace(plan.sessionRef) == "" {
+			return errors.New("memory: --memory-session or --session is required for session memory scope")
+		}
+	case memory.ScopeRepo, memory.ScopeGlobal, memoryScopeStore:
+		return nil
+	case memory.ScopeTags:
+		if len(plan.tags) == 0 {
+			return errors.New("memory: at least one --memory-tag is required for tags memory scope")
+		}
+	case memory.ScopeDateRange:
+		if !plan.hasSince && !plan.hasUntil {
+			return errors.New("memory: --memory-since, --memory-until, or --memory-retention-days is required for date-range memory scope")
+		}
+	case memory.ScopeAgent:
+		if strings.TrimSpace(plan.agent) == "" {
+			return errors.New("memory: --memory-agent or --agent is required for agent memory scope")
+		}
+	default:
+		return fmt.Errorf("memory: unsupported --memory-scope %q", plan.scope)
 	}
 
 	return nil
 }
 
+func normalizeMemoryScope(scope string) string {
+	switch strings.ToLower(strings.ReplaceAll(strings.TrimSpace(scope), "-", "_")) {
+	case "":
+		return ""
+	case memoryScopeStore:
+		return memoryScopeStore
+	case "current_session", "current_session_only", helpSelectorSession:
+		return memory.ScopeSession
+	case "current_repo", "current_repo_only", "repo", "repository":
+		return memory.ScopeRepo
+	case "tag", "tags", "tagged", "tagged_session", "tagged_sessions":
+		return memory.ScopeTags
+	case "date", "date_range", "date_ranges", "daterange":
+		return memory.ScopeDateRange
+	case memoryAgentKey, "agent_memory", "agent_specific", "agent_specific_memory":
+		return memory.ScopeAgent
+	case "global", "global_memory", "opt_in_global", memoryPurgeAll:
+		return memory.ScopeGlobal
+	default:
+		return strings.TrimSpace(scope)
+	}
+}
+
+func inferredMemoryScope(opts cliOptions, plan memoryCorpusPlan) string {
+	switch {
+	case strings.TrimSpace(plan.sessionRef) != "":
+		return memory.ScopeSession
+	case strings.TrimSpace(plan.agent) != "":
+		return memory.ScopeAgent
+	case len(plan.tags) > 0:
+		return memory.ScopeTags
+	case plan.hasSince || plan.hasUntil || strings.TrimSpace(opts.memorySince) != "" || strings.TrimSpace(opts.memoryUntil) != "":
+		return memory.ScopeDateRange
+	default:
+		return memory.ScopeRepo
+	}
+}
+
+func defaultMemoryRepoPath() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get cwd: %w", err)
+	}
+
+	return findMemoryRepoRoot(cwd), nil
+}
+
+func normalizeExplicitMemoryRepoPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+
+	if _, err := os.Stat(path); err == nil {
+		return findMemoryRepoRoot(path)
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		if _, statErr := os.Stat(abs); statErr == nil {
+			return findMemoryRepoRoot(abs)
+		}
+	}
+
+	return path
+}
+
+func findMemoryRepoRoot(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	path = filepath.Clean(path)
+
+	for dir := path; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return path
+		}
+	}
+}
+
+func parseMemoryTime(raw string, endOfDay bool) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		return parsed.UTC(), nil
+	}
+
+	parsed, err := time.Parse("2006-01-02", raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("memory: parse date %q as YYYY-MM-DD or RFC3339: %w", raw, err)
+	}
+	if endOfDay {
+		parsed = parsed.Add(24*time.Hour - time.Nanosecond)
+	}
+
+	return parsed.UTC(), nil
+}
+
+func memorySessionMatchesPlan(saved session.Session, sessionPath string, plan memoryCorpusPlan) bool {
+	if strings.TrimSpace(plan.sessionRef) != "" && !memorySessionRefMatches(saved.ID, sessionPath, plan.sessionRef) {
+		return false
+	}
+
+	if !memorySessionRepoMatches(saved, sessionPath, plan) {
+		return false
+	}
+
+	if len(plan.tags) > 0 && !sessionHasAnyMemoryTag(saved, plan.tags) {
+		return false
+	}
+
+	if plan.agent != "" && !sessionHasMemoryAgent(saved, plan.agent) {
+		return false
+	}
+
+	return memorySessionDateMatches(saved, plan)
+}
+
+func memorySessionRepoMatches(saved session.Session, sessionPath string, plan memoryCorpusPlan) bool {
+	if strings.TrimSpace(plan.repoPath) == "" {
+		return true
+	}
+
+	if strings.TrimSpace(saved.WorktreePath) != "" {
+		return sameMemoryPath(saved.WorktreePath, plan.repoPath)
+	}
+
+	return memoryPathWithin(sessionPath, plan.repoPath)
+}
+
+func memorySessionRefMatches(sessionID, sessionPath, sessionRef string) bool {
+	sessionRef = strings.TrimSpace(sessionRef)
+	if sessionRef == "" {
+		return true
+	}
+
+	if strings.TrimSpace(sessionID) == sessionRef {
+		return true
+	}
+	if refID := memorySessionIDFromRef(sessionRef); refID != "" && strings.TrimSpace(sessionID) == refID {
+		return true
+	}
+	if strings.TrimSpace(sessionPath) != "" && sameMemoryPath(sessionPath, sessionRef) {
+		return true
+	}
+
+	return false
+}
+
+func memorySessionDateMatches(saved session.Session, plan memoryCorpusPlan) bool {
+	activity := saved.UpdatedAt
+	if activity.IsZero() {
+		activity = saved.CreatedAt
+	}
+	if plan.hasSince && (activity.IsZero() || activity.Before(plan.since)) {
+		return false
+	}
+	if plan.hasUntil && (activity.IsZero() || activity.After(plan.until)) {
+		return false
+	}
+
+	return true
+}
+
+func sameMemoryPath(left, right string) bool {
+	left = cleanMemoryPath(left)
+	right = cleanMemoryPath(right)
+
+	return left != "" && right != "" && left == right
+}
+
+func cleanMemoryPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+
+	return evalMemoryPathSymlinks(path)
+}
+
+func evalMemoryPathSymlinks(path string) string {
+	path = filepath.Clean(path)
+	if evaluated, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(evaluated)
+	}
+
+	parent := path
+	var suffix []string
+	for {
+		next := filepath.Dir(parent)
+		if next == parent {
+			return path
+		}
+
+		suffix = append(suffix, filepath.Base(parent))
+		parent = next
+		if evaluated, err := filepath.EvalSymlinks(parent); err == nil {
+			out := filepath.Clean(evaluated)
+			for i := len(suffix) - 1; i >= 0; i-- {
+				out = filepath.Join(out, suffix[i])
+			}
+
+			return filepath.Clean(out)
+		}
+	}
+}
+
+func memoryPathWithin(path, root string) bool {
+	path = cleanMemoryPath(path)
+	root = cleanMemoryPath(root)
+	if path == "" || root == "" {
+		return false
+	}
+
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+func sessionHasAnyMemoryTag(saved session.Session, tags []string) bool {
+	want := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag != "" {
+			want[tag] = struct{}{}
+		}
+	}
+
+	if len(want) == 0 {
+		return true
+	}
+
+	for _, tag := range saved.Tags {
+		if _, ok := want[strings.ToLower(strings.TrimSpace(tag))]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func sessionHasMemoryAgent(saved session.Session, agent string) bool {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	if agent == "" {
+		return true
+	}
+
+	if strings.ToLower(strings.TrimSpace(saved.DefaultAgent)) == agent {
+		return true
+	}
+
+	for _, entry := range saved.NegativeKnowledge {
+		if strings.ToLower(strings.TrimSpace(entry.Agent)) == agent {
+			return true
+		}
+	}
+	for i := range saved.Evaluations {
+		entry := &saved.Evaluations[i]
+		if strings.ToLower(strings.TrimSpace(entry.Agent)) == agent {
+			return true
+		}
+	}
+	for i := range saved.Artifacts {
+		entry := &saved.Artifacts[i]
+		if strings.ToLower(strings.TrimSpace(entry.SourceAgent)) == agent {
+			return true
+		}
+	}
+
+	return false
+}
+
+func memoryFileDocumentCount(mem *memory.Store) int {
+	count := 0
+	for i := range mem.Documents {
+		doc := &mem.Documents[i]
+		if doc.Provenance != nil && doc.Provenance.SourceType == memory.ScopeFile {
+			count++
+			continue
+		}
+		if doc.Metadata["source_type"] == memory.ScopeFile || doc.Metadata["kind"] == memory.ScopeFile {
+			count++
+		}
+	}
+
+	return count
+}
+
+func constrainMemoryStore(mem *memory.Store, plan memoryCorpusPlan, selectedSessionIDs []string, redactor *memory.Redactor) {
+	matchPlan := redactedMemoryMatchPlan(plan, redactor)
+	selectedSessionIDs = selectedMemorySessionIDs(plan, selectedSessionIDs)
+	selected := memoryStringSet(selectedSessionIDs)
+	for _, sessionID := range redactedMemorySessionIDs(selectedSessionIDs, redactor) {
+		if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+			selected[sessionID] = struct{}{}
+		}
+	}
+
+	kept := mem.Documents[:0]
+	for i := range mem.Documents {
+		doc := mem.Documents[i]
+		if memoryDocumentMatchesPlan(doc, plan, selected) || memoryDocumentMatchesPlan(doc, matchPlan, selected) {
+			kept = append(kept, doc)
+		}
+	}
+
+	mem.Documents = kept
+	sessionIDs := memoryStoreSessionIDs(mem)
+	if plan.scope == memory.ScopeSession && len(sessionIDs) == 0 {
+		sessionIDs = selectedMemorySessionIDs(plan, selectedSessionIDs)
+	}
+	updateMemoryCorpus(mem, plan, sessionIDs)
+}
+
+func redactedMemoryMatchPlan(plan memoryCorpusPlan, redactor *memory.Redactor) memoryCorpusPlan {
+	if redactor == nil {
+		return plan
+	}
+
+	plan.tags = append([]string(nil), plan.tags...)
+	plan.repoPath, _ = redactor.RedactIdentifier(plan.repoPath)
+	plan.sessionRef, _ = redactor.RedactIdentifier(plan.sessionRef)
+	plan.agent, _ = redactor.RedactIdentifier(plan.agent)
+	for i := range plan.tags {
+		plan.tags[i], _ = redactor.RedactIdentifier(plan.tags[i])
+	}
+
+	return plan
+}
+
+func redactedMemorySessionIDs(sessionIDs []string, redactor *memory.Redactor) []string {
+	if redactor == nil || len(sessionIDs) == 0 {
+		return sessionIDs
+	}
+
+	redacted := make([]string, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		value, _ := redactor.RedactIdentifier(sessionID)
+		redacted = append(redacted, value)
+	}
+
+	return redacted
+}
+
+func memoryDocumentMatchesPlan(doc memory.Document, plan memoryCorpusPlan, selectedSessionIDs map[string]struct{}) bool {
+	if !memoryDocumentMatchesSecondaryFilters(doc, plan) {
+		return false
+	}
+
+	switch plan.scope {
+	case memory.ScopeSession:
+		_, ok := selectedSessionIDs[memoryDocumentSessionID(doc)]
+
+		return ok
+	case memory.ScopeRepo:
+		return memoryDocumentRepoMatches(doc, plan.repoPath)
+	case memory.ScopeTags:
+		return memoryDocumentHasAnyTag(doc, plan.tags)
+	case memory.ScopeDateRange:
+		return memoryDocumentInDateRange(doc, plan)
+	case memory.ScopeAgent:
+		return strings.EqualFold(memoryDocumentAgent(doc), plan.agent)
+	default:
+		return true
+	}
+}
+
+func memoryDocumentMatchesSecondaryFilters(doc memory.Document, plan memoryCorpusPlan) bool {
+	return memoryDocumentMatchesSecondarySessionFilter(doc, plan) &&
+		memoryDocumentMatchesSecondaryRepoFilter(doc, plan) &&
+		memoryDocumentMatchesSecondaryTagFilter(doc, plan) &&
+		memoryDocumentMatchesSecondaryDateFilter(doc, plan) &&
+		memoryDocumentMatchesSecondaryAgentFilter(doc, plan)
+}
+
+func memoryDocumentMatchesSecondarySessionFilter(doc memory.Document, plan memoryCorpusPlan) bool {
+	if plan.scope == memory.ScopeSession || strings.TrimSpace(plan.sessionRef) == "" {
+		return true
+	}
+
+	return memoryDocumentSessionRefMatches(doc, plan.sessionRef)
+}
+
+func memoryDocumentMatchesSecondaryRepoFilter(doc memory.Document, plan memoryCorpusPlan) bool {
+	if plan.scope == memory.ScopeRepo || strings.TrimSpace(plan.repoPath) == "" {
+		return true
+	}
+
+	return memoryDocumentRepoMatches(doc, plan.repoPath)
+}
+
+func memoryDocumentMatchesSecondaryTagFilter(doc memory.Document, plan memoryCorpusPlan) bool {
+	if plan.scope == memory.ScopeTags || len(plan.tags) == 0 {
+		return true
+	}
+
+	return memoryDocumentHasAnyTag(doc, plan.tags)
+}
+
+func memoryDocumentMatchesSecondaryDateFilter(doc memory.Document, plan memoryCorpusPlan) bool {
+	if plan.scope == memory.ScopeDateRange || (!plan.hasSince && !plan.hasUntil) {
+		return true
+	}
+
+	return memoryDocumentInDateRange(doc, plan)
+}
+
+func memoryDocumentMatchesSecondaryAgentFilter(doc memory.Document, plan memoryCorpusPlan) bool {
+	if plan.scope == memory.ScopeAgent || strings.TrimSpace(plan.agent) == "" {
+		return true
+	}
+
+	return strings.EqualFold(memoryDocumentAgent(doc), plan.agent)
+}
+
+func memoryDocumentSessionRefMatches(doc memory.Document, sessionRef string) bool {
+	sessionRef = strings.TrimSpace(sessionRef)
+	if sessionRef == "" {
+		return true
+	}
+
+	sessionID := memoryDocumentSessionID(doc)
+	return sessionID != "" && memorySessionRefMatches(sessionID, "", sessionRef)
+}
+
+func memoryStringSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			set[value] = struct{}{}
+		}
+	}
+
+	return set
+}
+
+func memoryStoreSessionIDs(mem *memory.Store) []string {
+	seen := make(map[string]struct{})
+	for i := range mem.Documents {
+		if sessionID := memoryDocumentSessionID(mem.Documents[i]); sessionID != "" {
+			seen[sessionID] = struct{}{}
+		}
+	}
+
+	sessionIDs := make([]string, 0, len(seen))
+	for sessionID := range seen {
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	sort.Strings(sessionIDs)
+
+	return sessionIDs
+}
+
+func memoryDocumentSessionID(doc memory.Document) string {
+	if doc.Provenance != nil && strings.TrimSpace(doc.Provenance.SessionID) != "" {
+		return strings.TrimSpace(doc.Provenance.SessionID)
+	}
+	if sessionID := strings.TrimSpace(doc.Metadata["session_id"]); sessionID != "" {
+		return sessionID
+	}
+	if strings.HasPrefix(doc.ID, "session/") {
+		parts := strings.Split(doc.ID, "/")
+		if len(parts) >= 2 {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+
+	return ""
+}
+
+func memoryDocumentRepoMatches(doc memory.Document, repoPath string) bool {
+	candidates := []string{
+		doc.Metadata["repo_path"],
+		doc.Metadata["worktree_path"],
+	}
+	if doc.Provenance != nil {
+		candidates = append(candidates, doc.Provenance.RepoPath)
+	}
+	for _, candidate := range candidates {
+		if sameMemoryPath(candidate, repoPath) {
+			return true
+		}
+	}
+
+	for _, candidate := range memoryDocumentRepoPathCandidates(doc) {
+		if memoryPathWithin(candidate, repoPath) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func memoryDocumentRepoPathCandidates(doc memory.Document) []string {
+	if memoryDocumentIsSession(doc) {
+		return nil
+	}
+
+	candidates := []string{doc.Metadata["path"], doc.Path}
+	candidates = appendMemoryDocumentProvenanceFilePaths(candidates, doc)
+	if memoryDocumentIsFile(doc) {
+		candidates = append(candidates, doc.ID, doc.Metadata["source_id"])
+	}
+
+	return candidates
+}
+
+func appendMemoryDocumentProvenanceFilePaths(candidates []string, doc memory.Document) []string {
+	if doc.Provenance == nil {
+		return candidates
+	}
+
+	candidates = append(candidates, doc.Provenance.Path)
+	if doc.Provenance.SourceType == memory.ScopeFile {
+		candidates = append(candidates, doc.Provenance.SourceID)
+	}
+
+	return candidates
+}
+
+func memoryDocumentIsSession(doc memory.Document) bool {
+	if doc.Provenance != nil {
+		switch doc.Provenance.SourceType {
+		case memory.ScopeFile:
+			return false
+		case "session":
+			return true
+		}
+	}
+	switch doc.Metadata["source_type"] {
+	case memory.ScopeFile:
+		return false
+	case "session":
+		return true
+	}
+
+	return memoryDocumentSessionID(doc) != ""
+}
+
+func memoryDocumentIsFile(doc memory.Document) bool {
+	if doc.Provenance != nil && doc.Provenance.SourceType == memory.ScopeFile {
+		return true
+	}
+
+	return doc.Metadata["source_type"] == memory.ScopeFile || doc.Metadata["kind"] == memory.ScopeFile
+}
+
+func memoryDocumentHasAnyTag(doc memory.Document, tags []string) bool {
+	want := stringSetFold(tags)
+	if len(want) == 0 {
+		return true
+	}
+
+	for _, tag := range memoryDocumentTags(doc) {
+		if _, ok := want[strings.ToLower(strings.TrimSpace(tag))]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func stringSetFold(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" {
+			set[value] = struct{}{}
+		}
+	}
+
+	return set
+}
+
+func memoryDocumentTags(doc memory.Document) []string {
+	var tags []string
+	if doc.Provenance != nil {
+		tags = append(tags, doc.Provenance.Tags...)
+	}
+	for tag := range strings.SplitSeq(doc.Metadata["tags"], ",") {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+
+	return tags
+}
+
+func memoryDocumentInDateRange(doc memory.Document, plan memoryCorpusPlan) bool {
+	activity, ok := memoryDocumentActivity(doc)
+	if !ok {
+		return false
+	}
+	if plan.hasSince && activity.Before(plan.since) {
+		return false
+	}
+	if plan.hasUntil && activity.After(plan.until) {
+		return false
+	}
+
+	return true
+}
+
+func memoryDocumentActivity(doc memory.Document) (time.Time, bool) {
+	candidates := make([]string, 0, 4)
+	if doc.Provenance != nil {
+		candidates = append(candidates, doc.Provenance.UpdatedAt, doc.Provenance.CreatedAt)
+	}
+
+	candidates = append(candidates, doc.Metadata["updated_at"], doc.Metadata["created_at"])
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+
+		parsed, err := time.Parse(time.RFC3339, candidate)
+		if err == nil {
+			return parsed.UTC(), true
+		}
+	}
+
+	return time.Time{}, false
+}
+
+func memoryDocumentAgent(doc memory.Document) string {
+	if doc.Provenance != nil && strings.TrimSpace(doc.Provenance.Agent) != "" {
+		return strings.TrimSpace(doc.Provenance.Agent)
+	}
+
+	for _, key := range []string{memoryAgentKey, "source_agent", "default_agent"} {
+		if value := strings.TrimSpace(doc.Metadata[key]); value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func updateMemoryCorpus(mem *memory.Store, plan memoryCorpusPlan, sessionIDs []string) {
+	mem.Corpus.Scope = plan.scope
+	mem.Corpus.RepoPath = memoryCorpusRepoPath(plan.repoPath)
+	mem.Corpus.Tags = append([]string(nil), plan.tags...)
+	mem.Corpus.Agent = plan.agent
+	mem.Corpus.SessionIDs = append([]string(nil), sessionIDs...)
+	mem.Corpus.SessionCount = len(sessionIDs)
+	mem.Corpus.FileCount = memoryFileDocumentCount(mem)
+	mem.Corpus.DocumentCount = len(mem.Documents)
+	mem.Corpus.Global = plan.global
+	mem.Corpus.Retention = plan.retentionText
+	mem.Corpus.DateStart = ""
+	mem.Corpus.DateEnd = ""
+	if plan.hasSince {
+		mem.Corpus.DateStart = plan.since.UTC().Format(time.RFC3339)
+	}
+	if plan.hasUntil {
+		mem.Corpus.DateEnd = plan.until.UTC().Format(time.RFC3339)
+	}
+
+	var sources []string
+	if len(sessionIDs) > 0 {
+		sources = append(sources, "sessions")
+	}
+	if mem.Corpus.FileCount > 0 {
+		sources = append(sources, "files")
+	}
+	mem.Corpus.CreatedFrom = sources
+	mem.Corpus.Description = memoryCorpusDescription(mem.Corpus)
+}
+
+func memoryCorpusRepoPath(repoPath string) string {
+	repoPath = strings.TrimSpace(repoPath)
+	if repoPath == "" {
+		return ""
+	}
+	if _, err := os.Stat(repoPath); err == nil {
+		return cleanMemoryPath(repoPath)
+	}
+
+	return repoPath
+}
+
+func memoryCorpusDescription(corpus memory.CorpusMetadata) string {
+	parts := []string{"scope=" + fallbackMemoryValue(corpus.Scope, "manual")}
+	if corpus.Global {
+		parts = append(parts, "global=opt-in")
+	}
+	if corpus.RepoPath != "" {
+		parts = append(parts, "repo="+corpus.RepoPath)
+	}
+	if corpus.Agent != "" {
+		parts = append(parts, "agent="+corpus.Agent)
+	}
+	if len(corpus.Tags) > 0 {
+		parts = append(parts, "tags="+strings.Join(corpus.Tags, ","))
+	}
+	if len(corpus.SessionIDs) > 0 {
+		parts = append(parts, "session_ids="+strings.Join(corpus.SessionIDs, ","))
+	}
+	if corpus.DateStart != "" || corpus.DateEnd != "" {
+		parts = append(parts, "date_range="+fallbackMemoryValue(corpus.DateStart, "*")+".."+fallbackMemoryValue(corpus.DateEnd, "*"))
+	}
+	if corpus.Retention != "" {
+		parts = append(parts, "retention="+corpus.Retention)
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func parseMemoryPurgeSpec(raw string) (memory.PurgeFilter, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return memory.PurgeFilter{}, errors.New("memory: --memory-purge requires all, session:<id>, tag:<tag>, or repo:<path>")
+	}
+	if strings.EqualFold(raw, memoryPurgeAll) {
+		return memory.PurgeFilter{All: true}, nil
+	}
+
+	key, value, ok := strings.Cut(raw, ":")
+	if !ok {
+		key, value, ok = strings.Cut(raw, "=")
+	}
+	if !ok || strings.TrimSpace(value) == "" {
+		return memory.PurgeFilter{}, fmt.Errorf("memory: invalid purge selector %q; use all, session:<id>, tag:<tag>, or repo:<path>", raw)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case helpSelectorSession:
+		return memory.PurgeFilter{SessionID: strings.TrimSpace(value)}, nil
+	case "tag":
+		return memory.PurgeFilter{Tag: strings.TrimSpace(value)}, nil
+	case "repo", "repository", "worktree":
+		return memory.PurgeFilter{RepoPath: normalizeExplicitMemoryRepoPath(value)}, nil
+	default:
+		return memory.PurgeFilter{}, fmt.Errorf("memory: unsupported purge selector %q; use all, session:<id>, tag:<tag>, or repo:<path>", key)
+	}
+}
+
+func formatMemoryCorpusStatement(mem *memory.Store, redactor *memory.Redactor, storePath string) string {
+	corpus := mem.Corpus
+	parts := []string{
+		"Searched corpus:",
+		"scope=" + fallbackMemoryValue(corpus.Scope, "manual"),
+		fmt.Sprintf("documents=%d", len(mem.Documents)),
+		fmt.Sprintf("sessions=%d", corpus.SessionCount),
+		fmt.Sprintf("files=%d", corpus.FileCount),
+	}
+	if strings.TrimSpace(storePath) != "" {
+		parts = append(parts, "store="+filepath.Clean(storePath))
+	}
+	if corpus.Global {
+		parts = append(parts, "global=opt-in")
+	}
+	if corpus.RepoPath != "" {
+		parts = append(parts, "repo="+corpus.RepoPath)
+	}
+	if corpus.Agent != "" {
+		parts = append(parts, "agent="+corpus.Agent)
+	}
+	if len(corpus.Tags) > 0 {
+		parts = append(parts, "tags="+strings.Join(corpus.Tags, ","))
+	}
+	if len(corpus.SessionIDs) > 0 {
+		parts = append(parts, "session_ids="+strings.Join(corpus.SessionIDs, ","))
+	}
+	if corpus.DateStart != "" || corpus.DateEnd != "" {
+		parts = append(parts, "date_range="+fallbackMemoryValue(corpus.DateStart, "*")+".."+fallbackMemoryValue(corpus.DateEnd, "*"))
+	}
+	if corpus.Retention != "" {
+		parts = append(parts, "retention="+corpus.Retention)
+	}
+
+	out := strings.Join(parts, "\t") + "\n"
+	if redactor != nil {
+		out, _ = redactor.Redact(out)
+	}
+
+	return out
+}
+
+func formatMemoryCorpusWithRedactor(mem *memory.Store, redactor *memory.Redactor) string {
+	corpus := mem.Corpus
+	var b strings.Builder
+	fmt.Fprintf(&b, "Memory corpus:\tschema=%d\tscope=%s\tdocuments=%d\tsessions=%d\tfiles=%d\n",
+		mem.SchemaVersion,
+		fallbackMemoryValue(corpus.Scope, "manual"),
+		len(mem.Documents),
+		corpus.SessionCount,
+		corpus.FileCount,
+	)
+	if !mem.CreatedAt.IsZero() {
+		fmt.Fprintf(&b, "  created_at=%s\n", mem.CreatedAt.UTC().Format(time.RFC3339))
+	}
+	if !mem.UpdatedAt.IsZero() {
+		fmt.Fprintf(&b, "  updated_at=%s\n", mem.UpdatedAt.UTC().Format(time.RFC3339))
+	}
+	if corpus.Description != "" {
+		fmt.Fprintf(&b, "  policy=%s\n", corpus.Description)
+	}
+	if len(corpus.CreatedFrom) > 0 {
+		fmt.Fprintf(&b, "  created_from=%s\n", strings.Join(corpus.CreatedFrom, ", "))
+	}
+	if corpus.RepoPath != "" {
+		fmt.Fprintf(&b, "  repo=%s\n", corpus.RepoPath)
+	}
+	if corpus.Agent != "" {
+		fmt.Fprintf(&b, "  agent=%s\n", corpus.Agent)
+	}
+	if len(corpus.Tags) > 0 {
+		fmt.Fprintf(&b, "  tags=%s\n", strings.Join(corpus.Tags, ", "))
+	}
+	if len(corpus.SessionIDs) > 0 {
+		fmt.Fprintf(&b, "  sessions=%s\n", strings.Join(corpus.SessionIDs, ", "))
+	}
+	if corpus.DateStart != "" || corpus.DateEnd != "" {
+		fmt.Fprintf(&b, "  date_range=%s..%s\n", fallbackMemoryValue(corpus.DateStart, "*"), fallbackMemoryValue(corpus.DateEnd, "*"))
+	}
+	if corpus.Retention != "" {
+		fmt.Fprintf(&b, "  retention=%s\n", corpus.Retention)
+	}
+	if corpus.Global {
+		b.WriteString("  global=opt-in\n")
+	}
+
+	out := b.String()
+	if redactor != nil {
+		out, _ = redactor.Redact(out)
+	}
+
+	return out
+}
+
+func fallbackMemoryValue(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+
+	return value
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
 func formatMemoryResult(result memory.Result) string {
+	redactor, err := memory.NewRedactor()
+	if err != nil {
+		return formatMemoryResultWithRedactor(result, nil)
+	}
+
+	return formatMemoryResultWithRedactor(result, redactor)
+}
+
+func formatMemoryResultWithRedactor(result memory.Result, redactor *memory.Redactor) string {
 	parts := []string{
 		result.Document.ID,
 		fmt.Sprintf("score=%.4f", result.Score),
@@ -1376,8 +2975,18 @@ func formatMemoryResult(result memory.Result) string {
 
 	line := strings.Join(parts, "\t")
 	if result.Snippet == "" {
+		if redactor != nil {
+			line, _ = redactor.Redact(line)
+		}
+
 		return line
 	}
 
-	return line + "\n  " + result.Snippet
+	snippet := result.Snippet
+	if redactor != nil {
+		line, _ = redactor.Redact(line)
+		snippet, _ = redactor.Redact(snippet)
+	}
+
+	return line + "\n  " + snippet
 }
