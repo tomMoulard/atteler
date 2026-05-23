@@ -3,6 +3,8 @@
 package skill
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -16,8 +18,11 @@ const (
 	defaultMinSteps       = 2
 	defaultMaxSteps       = 6
 	defaultMinOccurrences = 2
+	maxSlugLength         = 96
+	slugHashLength        = 12
 
 	parameterID     = "id"
+	parameterEmail  = "email"
 	parameterIssue  = "issue"
 	parameterNumber = "number"
 	parameterPath   = "path"
@@ -32,10 +37,13 @@ const (
 )
 
 var (
-	separators   = regexp.MustCompile(`[^a-z0-9]+`)
-	issueRef     = regexp.MustCompile(`^(?:#\d+|gh-\d+|[a-z][a-z0-9]*-\d+)$`)
-	numberValue  = regexp.MustCompile(`^\d+$`)
-	hexLikeValue = regexp.MustCompile(`^[0-9a-f]{7,}$`)
+	separators     = regexp.MustCompile(`[^a-z0-9]+`)
+	issueRef       = regexp.MustCompile(`^(?:#\d+|gh-\d+|[a-z][a-z0-9]*-\d+)$`)
+	numberValue    = regexp.MustCompile(`^\d+$`)
+	hexLikeValue   = regexp.MustCompile(`^[0-9a-f]{7,}$`)
+	uuidLikeValue  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	emailLikeValue = regexp.MustCompile(`^[a-z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
+	urlLikeValue   = regexp.MustCompile(`^[a-z][a-z0-9+.-]*://`)
 )
 
 // Options controls how repeated action sequences are detected.
@@ -462,10 +470,38 @@ func slugForSteps(steps []string) string {
 		}
 	}
 
-	return strings.Join(parts, "-")
+	return compactSlug(strings.Join(parts, "-"))
+}
+
+func compactSlug(slug string) string {
+	if len(slug) <= maxSlugLength {
+		return slug
+	}
+
+	sum := sha256.Sum256([]byte(slug))
+	suffix := "-" + hex.EncodeToString(sum[:])[:slugHashLength]
+	prefixLimit := maxSlugLength - len(suffix)
+	prefix := strings.Trim(slug[:prefixLimit], "-")
+
+	if cut := strings.LastIndex(prefix, "-"); cut >= prefixLimit/2 {
+		prefix = strings.Trim(prefix[:cut], "-")
+	}
+
+	if prefix == "" {
+		prefix = strings.Trim(slug[:prefixLimit], "-")
+	}
+
+	return prefix + suffix
 }
 
 func nameFromSlug(slug string) string {
+	if lastDash := strings.LastIndex(slug, "-"); lastDash > 0 {
+		suffix := slug[lastDash+1:]
+		if len(suffix) == slugHashLength && hexLikeValue.MatchString(suffix) {
+			slug = slug[:lastDash]
+		}
+	}
+
 	words := strings.Split(slug, "-")
 	for i, word := range words {
 		if word == "" {
@@ -537,15 +573,17 @@ func parameterName(token string) string {
 	}
 
 	switch {
-	case strings.HasPrefix(token, "http://") || strings.HasPrefix(token, "https://"):
+	case urlLikeValue.MatchString(token):
 		return parameterURL
+	case emailLikeValue.MatchString(token):
+		return parameterEmail
 	case issueRef.MatchString(token):
 		return parameterIssue
 	case strings.Contains(token, "/") || strings.Contains(token, `\`) || isKnownPath(token):
 		return parameterPath
 	case numberValue.MatchString(token):
 		return parameterNumber
-	case hexLikeValue.MatchString(token):
+	case hexLikeValue.MatchString(token), uuidLikeValue.MatchString(token):
 		return parameterID
 	default:
 		return ""
@@ -603,6 +641,8 @@ func parameterDescription(name string) string {
 	switch name {
 	case parameterIssue:
 		return "Issue, ticket, pull request, or task reference supplied by the user."
+	case parameterEmail:
+		return "Email address supplied by the user."
 	case parameterPath:
 		return "Repository, file, directory, or package path supplied by the user."
 	case parameterURL:

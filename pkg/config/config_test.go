@@ -64,6 +64,13 @@ agent_loop:
 plugins:
   paths:
     - ./plugin-a
+skill_learning:
+  enabled: false
+  store_dir: ./.atteler/learn
+  skill_dir: ./.atteler/skills/generated
+  max_observations: 42
+  max_steps: 4
+  min_occurrences: 3
 `)
 
 	cfg, loaded, err := LoadFiles([]string{global, filepath.Join(dir, "missing.json"), local})
@@ -198,6 +205,16 @@ plugins:
 	if !reflect.DeepEqual(cfg.Plugins.Paths, []string{"./plugin-a"}) {
 		assert.Failf(t, "assertion failed", "plugin paths = %v", cfg.Plugins.Paths)
 	}
+
+	if cfg.SkillLearning.Enabled == nil || *cfg.SkillLearning.Enabled {
+		assert.Failf(t, "assertion failed", "skill_learning.enabled = %v, want false", cfg.SkillLearning.Enabled)
+	}
+
+	assert.Equal(t, "./.atteler/learn", cfg.SkillLearning.StoreDir)
+	assert.Equal(t, "./.atteler/skills/generated", cfg.SkillLearning.SkillDir)
+	assert.Equal(t, 42, cfg.SkillLearning.MaxObservations)
+	assert.Equal(t, 4, cfg.SkillLearning.MaxSteps)
+	assert.Equal(t, 3, cfg.SkillLearning.MinOccurrences)
 }
 
 func TestLoadFiles_JSONCompatibility(t *testing.T) {

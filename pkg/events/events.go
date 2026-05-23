@@ -97,10 +97,17 @@ type Hook struct {
 	Timeout time.Duration
 }
 
+// Observer receives lifecycle events for best-effort local background work.
+// Observer failures must not interrupt the user-facing command or hook flow.
+type Observer interface {
+	ObserveEvent(context.Context, Event) error
+}
+
 // Runner emits events to configured hooks.
 type Runner struct {
-	logger *Logger
-	hooks  map[string][]Hook
+	logger    *Logger
+	hooks     map[string][]Hook
+	observers []Observer
 }
 
 // NewRunner creates a hook runner from config.
@@ -110,6 +117,12 @@ func NewRunner(configured map[string][]config.HookConfig) *Runner {
 
 // NewRunnerWithLogger creates a hook runner and optional built-in event logger.
 func NewRunnerWithLogger(configured map[string][]config.HookConfig, logWriter io.Writer) *Runner {
+	return NewRunnerWithLoggerAndObservers(configured, logWriter)
+}
+
+// NewRunnerWithLoggerAndObservers creates a hook runner, optional event logger,
+// and best-effort local observers.
+func NewRunnerWithLoggerAndObservers(configured map[string][]config.HookConfig, logWriter io.Writer, observers ...Observer) *Runner {
 	hooks := make(map[string][]Hook, len(configured))
 	for eventType, configs := range configured {
 		for _, cfg := range configs {
@@ -130,7 +143,11 @@ func NewRunnerWithLogger(configured map[string][]config.HookConfig, logWriter io
 		}
 	}
 
-	return &Runner{hooks: hooks, logger: NewLogger(logWriter)}
+	return &Runner{
+		hooks:     hooks,
+		logger:    NewLogger(logWriter),
+		observers: compactObservers(observers),
+	}
 }
 
 // WithLogger returns a runner with the same hooks and a new optional logger.
@@ -150,7 +167,7 @@ func (r *Runner) WithLogger(logWriter io.Writer) *Runner {
 		}
 	}
 
-	return &Runner{hooks: hooks, logger: NewLogger(logWriter)}
+	return &Runner{hooks: hooks, logger: NewLogger(logWriter), observers: append([]Observer(nil), r.observers...)}
 }
 
 // Emit sends event to every hook registered for event.Type.
@@ -174,6 +191,8 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 	if r.logger != nil {
 		r.logger.Log(event)
 	}
+
+	r.notifyObservers(ctx, event)
 
 	if len(r.hooks) == 0 {
 		return nil
@@ -200,6 +219,53 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 	}
 
 	return errors.Join(failures...)
+}
+
+func (r *Runner) notifyObservers(ctx context.Context, event Event) {
+	if r == nil || len(r.observers) == 0 {
+		return
+	}
+
+	for _, observer := range r.observers {
+		if observer == nil {
+			continue
+		}
+
+		if err := notifyObserver(ctx, observer, event.cloneForObserver()); err != nil {
+			continue
+		}
+	}
+}
+
+func notifyObserver(ctx context.Context, observer Observer, event Event) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("events: observer panic: %v", recovered)
+		}
+	}()
+
+	if err := observer.ObserveEvent(ctx, event); err != nil {
+		return fmt.Errorf("events: observer: %w", err)
+	}
+
+	return nil
+}
+
+func (e Event) cloneForObserver() Event {
+	e.Metadata = maps.Clone(e.Metadata)
+
+	return e
+}
+
+func compactObservers(observers []Observer) []Observer {
+	out := make([]Observer, 0, len(observers))
+	for _, observer := range observers {
+		if observer != nil {
+			out = append(out, observer)
+		}
+	}
+
+	return out
 }
 
 func runHook(ctx context.Context, hook Hook, event Event, payload []byte) error {

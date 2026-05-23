@@ -735,6 +735,54 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 	assertContains(t, string(historyData), "status: pending")
 }
 
+func TestAutomaticSkillLearningCommands(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	learningDir := filepath.Join(workDir, "learning")
+	generatedSkillDir := filepath.Join(workDir, "generated-skills")
+	spec := runSpec{
+		dir: workDir,
+		env: []string{
+			"ATTELER_SKILL_LEARNING=true",
+			"ATTELER_SKILL_LEARNING_DIR=" + learningDir,
+			"ATTELER_SKILL_LEARNING_SKILL_DIR=" + generatedSkillDir,
+		},
+	}
+
+	for range 2 {
+		runOK(t, spec, "--bash", "echo plan")
+		runOK(t, spec, "--bash", "echo code")
+	}
+
+	result := runOK(t, spec, "agents", "skill-learning-list")
+	assertContains(t, result.stdout, "enabled: true")
+	assertContains(t, result.stdout, "skills: 1")
+
+	entries, err := os.ReadDir(generatedSkillDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	slug := entries[0].Name()
+	skillPath := filepath.Join(generatedSkillDir, slug, "SKILL.md")
+	skillData, err := os.ReadFile(skillPath)
+	require.NoError(t, err)
+	assertContains(t, string(skillData), "run echo plan")
+	assertContains(t, string(skillData), "run echo code")
+
+	result = runOK(t, spec, "agents", "skill-learning-show", slug)
+	assertContains(t, result.stdout, "run echo plan")
+
+	runOK(t, spec, "agents", "skill-learning-disable", slug)
+	result = runOK(t, spec, "agents", "skill-learning-list")
+	assertContains(t, result.stdout, slug+"\tdisabled")
+
+	runOK(t, spec, "agents", "skill-learning-delete", slug)
+	result = runOK(t, spec, "agents", "skill-learning-list")
+	assertContains(t, result.stdout, "skills: 0")
+	require.NoDirExists(t, filepath.Join(generatedSkillDir, slug))
+}
+
 func TestSpeculateRunFailsClosedWhenJudgeGatesInvalid(t *testing.T) {
 	t.Parallel()
 
@@ -1220,20 +1268,23 @@ func testEnv(t *testing.T, spec runSpec) []string {
 	t.Helper()
 
 	skip := map[string]bool{
-		"ANTHROPIC_API_KEY":   true,
-		"ANTHROPIC_BASE_URL":  true,
-		"ATTELER_CONFIG":      true,
-		"ATTELER_SESSION_DIR": true,
-		"CODEX_HOME":          true,
-		"FORGE_CONFIG":        true,
-		"HOME":                true,
-		"OPENAI_API_KEY":      true,
-		"OPENAI_BASE_URL":     true,
-		"OLLAMA_BASE_URL":     true,
-		"XDG_CONFIG_HOME":     true,
+		"ANTHROPIC_API_KEY":                true,
+		"ANTHROPIC_BASE_URL":               true,
+		"ATTELER_CONFIG":                   true,
+		"ATTELER_SKILL_LEARNING":           true,
+		"ATTELER_SKILL_LEARNING_DIR":       true,
+		"ATTELER_SKILL_LEARNING_SKILL_DIR": true,
+		"ATTELER_SESSION_DIR":              true,
+		"CODEX_HOME":                       true,
+		"FORGE_CONFIG":                     true,
+		"HOME":                             true,
+		"OPENAI_API_KEY":                   true,
+		"OPENAI_BASE_URL":                  true,
+		"OLLAMA_BASE_URL":                  true,
+		"XDG_CONFIG_HOME":                  true,
 	}
 
-	env := make([]string, 0, len(os.Environ())+8+len(spec.env))
+	env := make([]string, 0, len(os.Environ())+12+len(spec.env))
 	for _, item := range os.Environ() {
 		key, _, _ := strings.Cut(item, "=")
 		if !skip[key] {
@@ -1252,6 +1303,7 @@ func testEnv(t *testing.T, spec runSpec) []string {
 		"ANTHROPIC_API_KEY=",
 		"ANTHROPIC_BASE_URL=",
 		"ATTELER_CONFIG=",
+		"ATTELER_SKILL_LEARNING=false",
 		"ATTELER_SESSION_DIR="+sessionDir,
 		"CODEX_HOME=",
 		"FORGE_CONFIG=",

@@ -52,7 +52,7 @@ func runInteractive(ctx context.Context, state appState) error {
 	// bleed onto bubbletea's alt-screen rendering. Replace the stderr-logger
 	// runner that loadAppState set up with a logger-less one. Utility commands
 	// and one-shot mode keep the stderr logger.
-	state.hookRunner = events.NewRunner(state.hookConfig)
+	state.hookRunner = events.NewRunnerWithLoggerAndObservers(state.hookConfig, nil, state.eventObservers...)
 
 	emitHookWarning(ctx, state.hookRunner, events.Event{
 		Type:        events.SessionStart,
@@ -72,6 +72,9 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.sessionState,
 		state.contextOptions,
 		state.referenceContext,
+		state.skillLearningStoreDir,
+		state.skillLearningSkillDir,
+		state.skillLearningEnabled,
 		state.sessionStore.Path(state.sessionState.ID),
 		state.cwd,
 		state.selectedModel,
@@ -89,7 +92,7 @@ func runInteractive(ctx context.Context, state appState) error {
 
 	// Once the program exits, restore the stderr logger so SessionEnd / Error
 	// events are visible after the TUI has released the screen.
-	state.hookRunner = events.NewRunnerWithLogger(state.hookConfig, os.Stderr)
+	state.hookRunner = events.NewRunnerWithLoggerAndObservers(state.hookConfig, os.Stderr, state.eventObservers...)
 
 	if err != nil {
 		emitHookWarning(ctx, state.hookRunner, events.Event{

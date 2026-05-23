@@ -188,6 +188,14 @@ func pathWithin(root, path string) bool {
 	root = filepath.Clean(root)
 	path = filepath.Clean(path)
 
+	if absRoot, err := filepath.Abs(root); err == nil {
+		root = filepath.Clean(absRoot)
+	}
+
+	if absPath, err := filepath.Abs(path); err == nil {
+		path = filepath.Clean(absPath)
+	}
+
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
 		return false

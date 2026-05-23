@@ -23,8 +23,6 @@ import (
 const EnvPath = "ATTELER_CONFIG"
 
 // Config is the merged application configuration.
-//
-//nolint:govet // fieldalignment: field order follows config-file grouping.
 type Config struct {
 	Providers       map[string]ProviderConfig `json:"providers,omitempty" yaml:"providers,omitempty"`
 	Agents          map[string]AgentConfig    `json:"agents,omitempty" yaml:"agents,omitempty"`
@@ -36,6 +34,7 @@ type Config struct {
 	FallbackModels  []string                  `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
 	Context         ContextConfig             `json:"context" yaml:"context"`
 	Plugins         PluginConfig              `json:"plugins" yaml:"plugins"`
+	SkillLearning   SkillLearningConfig       `json:"skill_learning" yaml:"skill_learning"`
 }
 
 // ProviderConfig configures an individual LLM provider.
@@ -173,11 +172,23 @@ type PluginConfig struct {
 	Paths  []string              `json:"paths,omitempty" yaml:"paths,omitempty"`
 }
 
+// SkillLearningConfig configures automatic recurring-workflow skill learning.
+// A nil Enabled value means the default behavior should be used.
+type SkillLearningConfig struct {
+	Enabled         *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	StoreDir        string `json:"store_dir,omitempty" yaml:"store_dir,omitempty"`
+	SkillDir        string `json:"skill_dir,omitempty" yaml:"skill_dir,omitempty"`
+	MaxObservations int    `json:"max_observations,omitempty" yaml:"max_observations,omitempty"`
+	MaxSteps        int    `json:"max_steps,omitempty" yaml:"max_steps,omitempty"`
+	MinOccurrences  int    `json:"min_occurrences,omitempty" yaml:"min_occurrences,omitempty"`
+}
+
 type fileConfig struct {
 	Generation      fileGenerationConfig          `json:"generation" yaml:"generation"`
 	AgentLoop       fileAgentLoopConfig           `json:"agent_loop" yaml:"agent_loop"`
 	Context         fileContextConfig             `json:"context" yaml:"context"`
 	Plugins         filePluginConfig              `json:"plugins" yaml:"plugins"`
+	SkillLearning   fileSkillLearningConfig       `json:"skill_learning" yaml:"skill_learning"`
 	DefaultProvider *string                       `json:"default_provider" yaml:"default_provider"`
 	DefaultModel    *string                       `json:"default_model" yaml:"default_model"`
 	Providers       map[string]fileProviderConfig `json:"providers" yaml:"providers"`
@@ -252,6 +263,15 @@ type fileAgentLoopConfig struct {
 type filePluginConfig struct {
 	Policy *attelerplugin.Policy `json:"policy" yaml:"policy"`
 	Paths  []string              `json:"paths" yaml:"paths"`
+}
+
+type fileSkillLearningConfig struct {
+	Enabled         *bool   `json:"enabled" yaml:"enabled"`
+	StoreDir        *string `json:"store_dir" yaml:"store_dir"`
+	SkillDir        *string `json:"skill_dir" yaml:"skill_dir"`
+	MaxObservations *int    `json:"max_observations" yaml:"max_observations"`
+	MaxSteps        *int    `json:"max_steps" yaml:"max_steps"`
+	MinOccurrences  *int    `json:"min_occurrences" yaml:"min_occurrences"`
 }
 
 // Load reads the default configuration files and returns the merged result plus
@@ -461,6 +481,7 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 	mergeAgentLoop(dst, src.AgentLoop, rec, source)
 	mergeContext(dst, src.Context, rec, source)
 	mergePlugins(dst, src.Plugins, rec, source)
+	mergeSkillLearning(dst, src.SkillLearning, rec, source)
 }
 
 func mergeProviders(dst *Config, providers map[string]fileProviderConfig, rec *originRecorder, source originSource) {
@@ -763,6 +784,39 @@ func mergePlugins(dst *Config, plugins filePluginConfig, rec *originRecorder, so
 	}
 }
 
+func mergeSkillLearning(dst *Config, skillLearning fileSkillLearningConfig, rec *originRecorder, source originSource) {
+	if skillLearning.Enabled != nil {
+		value := *skillLearning.Enabled
+		dst.SkillLearning.Enabled = &value
+		rec.set("skill_learning.enabled", source, value)
+	}
+
+	if skillLearning.StoreDir != nil {
+		dst.SkillLearning.StoreDir = strings.TrimSpace(*skillLearning.StoreDir)
+		rec.set("skill_learning.store_dir", source, dst.SkillLearning.StoreDir)
+	}
+
+	if skillLearning.SkillDir != nil {
+		dst.SkillLearning.SkillDir = strings.TrimSpace(*skillLearning.SkillDir)
+		rec.set("skill_learning.skill_dir", source, dst.SkillLearning.SkillDir)
+	}
+
+	if skillLearning.MaxObservations != nil {
+		dst.SkillLearning.MaxObservations = *skillLearning.MaxObservations
+		rec.set("skill_learning.max_observations", source, dst.SkillLearning.MaxObservations)
+	}
+
+	if skillLearning.MaxSteps != nil {
+		dst.SkillLearning.MaxSteps = *skillLearning.MaxSteps
+		rec.set("skill_learning.max_steps", source, dst.SkillLearning.MaxSteps)
+	}
+
+	if skillLearning.MinOccurrences != nil {
+		dst.SkillLearning.MinOccurrences = *skillLearning.MinOccurrences
+		rec.set("skill_learning.min_occurrences", source, dst.SkillLearning.MinOccurrences)
+	}
+}
+
 func mergeConfig(dst *Config, src Config) {
 	mergeConfigFromSource(dst, src, nil, originSource{})
 }
@@ -790,6 +844,7 @@ func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source 
 	mergeConfigAgentLoop(dst, src.AgentLoop, rec, source)
 	mergeConfigContext(dst, src.Context, rec, source)
 	mergeConfigPlugins(dst, src.Plugins, rec, source)
+	mergeConfigSkillLearning(dst, src.SkillLearning, rec, source)
 }
 
 func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec *originRecorder, source originSource) {
@@ -1077,6 +1132,39 @@ func mergeConfigPlugins(dst *Config, plugins PluginConfig, rec *originRecorder, 
 	}
 }
 
+func mergeConfigSkillLearning(dst *Config, skillLearning SkillLearningConfig, rec *originRecorder, source originSource) {
+	if skillLearning.Enabled != nil {
+		value := *skillLearning.Enabled
+		dst.SkillLearning.Enabled = &value
+		rec.set("skill_learning.enabled", source, value)
+	}
+
+	if skillLearning.StoreDir != "" {
+		dst.SkillLearning.StoreDir = skillLearning.StoreDir
+		rec.set("skill_learning.store_dir", source, skillLearning.StoreDir)
+	}
+
+	if skillLearning.SkillDir != "" {
+		dst.SkillLearning.SkillDir = skillLearning.SkillDir
+		rec.set("skill_learning.skill_dir", source, skillLearning.SkillDir)
+	}
+
+	if skillLearning.MaxObservations > 0 {
+		dst.SkillLearning.MaxObservations = skillLearning.MaxObservations
+		rec.set("skill_learning.max_observations", source, skillLearning.MaxObservations)
+	}
+
+	if skillLearning.MaxSteps > 0 {
+		dst.SkillLearning.MaxSteps = skillLearning.MaxSteps
+		rec.set("skill_learning.max_steps", source, skillLearning.MaxSteps)
+	}
+
+	if skillLearning.MinOccurrences > 0 {
+		dst.SkillLearning.MinOccurrences = skillLearning.MinOccurrences
+		rec.set("skill_learning.min_occurrences", source, skillLearning.MinOccurrences)
+	}
+}
+
 func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins OriginMap) {
 	if src.DefaultProvider != "" {
 		dst.DefaultProvider = src.DefaultProvider
@@ -1103,6 +1191,7 @@ func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins Orig
 	mergeConfigAgentLoopFromOrigins(dst, src.AgentLoop, dstOrigins, srcOrigins)
 	mergeConfigContextFromOrigins(dst, src.Context, dstOrigins, srcOrigins)
 	mergeConfigPluginsFromOrigins(dst, src.Plugins, dstOrigins, srcOrigins)
+	mergeConfigSkillLearningFromOrigins(dst, src.SkillLearning, dstOrigins, srcOrigins)
 }
 
 func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderConfig, dstOrigins, srcOrigins OriginMap) {
@@ -1407,6 +1496,45 @@ func mergeConfigPluginsFromOrigins(dst *Config, plugins PluginConfig, dstOrigins
 	if plugins.Policy != nil {
 		policy := attelerplugin.ClonePolicy(*plugins.Policy)
 		dst.Plugins.Policy = &policy
+	}
+}
+
+func mergeConfigSkillLearningFromOrigins(dst *Config, skillLearning SkillLearningConfig, dstOrigins, srcOrigins OriginMap) {
+	if skillLearning.Enabled != nil {
+		value := *skillLearning.Enabled
+		dst.SkillLearning.Enabled = &value
+
+		appendOriginChain(dstOrigins, "skill_learning.enabled", srcOrigins, false)
+	}
+
+	if skillLearning.StoreDir != "" {
+		dst.SkillLearning.StoreDir = skillLearning.StoreDir
+
+		appendOriginChain(dstOrigins, "skill_learning.store_dir", srcOrigins, false)
+	}
+
+	if skillLearning.SkillDir != "" {
+		dst.SkillLearning.SkillDir = skillLearning.SkillDir
+
+		appendOriginChain(dstOrigins, "skill_learning.skill_dir", srcOrigins, false)
+	}
+
+	if skillLearning.MaxObservations > 0 {
+		dst.SkillLearning.MaxObservations = skillLearning.MaxObservations
+
+		appendOriginChain(dstOrigins, "skill_learning.max_observations", srcOrigins, false)
+	}
+
+	if skillLearning.MaxSteps > 0 {
+		dst.SkillLearning.MaxSteps = skillLearning.MaxSteps
+
+		appendOriginChain(dstOrigins, "skill_learning.max_steps", srcOrigins, false)
+	}
+
+	if skillLearning.MinOccurrences > 0 {
+		dst.SkillLearning.MinOccurrences = skillLearning.MinOccurrences
+
+		appendOriginChain(dstOrigins, "skill_learning.min_occurrences", srcOrigins, false)
 	}
 }
 

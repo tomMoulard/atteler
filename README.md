@@ -475,6 +475,14 @@ atteler agents skill-suggest "open GH-15|tool=github|prompt=Fix GH-15" \
   --skill-step "edit pkg/skill|tool=file-edit|input=pkg/skill" \
   --skill-step "run go test ./pkg/skill|tool=shell|verify=go test ./pkg/skill" \
   --skill-save-dir .atteler/skills --skill-review-only
+atteler agents skill-learning-list
+atteler agents skill-learning-show k8s-investigation
+atteler agents skill-learning-edit k8s-investigation
+atteler agents skill-learning-disable k8s-investigation
+atteler agents skill-learning-enable k8s-investigation
+atteler agents skill-learning-delete k8s-investigation
+atteler agents skill-learning-disable-all
+atteler agents skill-learning-enable-all
 
 atteler plugins list
 atteler plugins describe reviewer
@@ -521,6 +529,40 @@ diff before persisting the accepted skill. For richer provenance, each
 `|output=...`, `|verify=...`, and `|stop=...` metadata after the action label.
 Use `--skill-review-only` to inspect the generated diff without writing files;
 rerun without that flag after approving the skill.
+
+Automatic skill learning runs behind the normal lifecycle event stream and
+quietly records redacted, reusable workflow observations in
+`.atteler/skill-learning/state.json`. When a multi-step workflow recurs often
+enough, Atteler writes or improves a generated skill under
+`.atteler/skills/generated/<slug>/` without prompting while the user is working.
+Both default directories are local git-ignored paths to avoid accidentally
+committing learned workflow state.
+Active generated skills are silently added to future request context only when
+their trigger shape matches the current prompt.
+The learner intentionally persists summarized command/action shapes rather than
+raw command output, and Kubernetes-style contexts, namespaces, pods, containers,
+cloud cluster/project/profile names, Helm releases, tokens, and secret resource
+names are parameterized before storage. Non-internal tool invocations are
+recorded by tool name only, without raw tool arguments or output. Generated
+Kubernetes skills that include
+mutating or sensitive secret/token steps are not broadly auto-injected for
+generic incident prompts; request those skills by name when they are truly
+intended. Use
+`atteler agents skill-learning-list` to inspect generated skills and the
+effective enabled/disabled status after config, environment, and local state,
+`skill-learning-show <slug>` to review a `SKILL.md`,
+`skill-learning-edit <slug>` to open it with `$VISUAL` or `$EDITOR`, or edit the
+printed skill path directly to customize it. Manual edits are not overwritten by
+later background updates; run `skill-learning-enable <slug>` after review to
+accept the edited file as the new auto-update baseline.
+Use `skill-learning-disable <slug>` to stop updating one generated skill,
+`skill-learning-delete <slug>` to remove one and forget the observations that
+produced it, and `skill-learning-disable-all` to opt out locally. Use
+`skill-learning-enable-all` to opt back in. Config can also set
+`skill_learning.enabled: false`; `ATTELER_SKILL_LEARNING=false` disables it for
+a process. `ATTELER_SKILL_LEARNING_DIR` and
+`ATTELER_SKILL_LEARNING_SKILL_DIR` can point state and generated skills at
+temporary or profile-specific directories.
 
 `atteler worktrees run` creates an isolated git worktree for a session with an
 ownership manifest under `.git/atteler/worktrees/`. Merge-back now runs as a
@@ -615,6 +657,7 @@ linked from the row.
 | Bounded and policy-gated context references for local files, directories, globs, and remote URLs | [`pkg/contextref/references.go`](pkg/contextref/references.go), [`pkg/contextref/references_test.go`](pkg/contextref/references_test.go), [`pkg/contextref/contextref.go`](pkg/contextref/contextref.go), [`pkg/contextref/contextref_test.go`](pkg/contextref/contextref_test.go) |
 | Agent metadata, matching, orchestration planning, async waves, and sub-agent fan-out | [`pkg/agent/agent.go`](pkg/agent/agent.go), [`pkg/agent/orchestration.go`](pkg/agent/orchestration.go), [`pkg/agent/orchestration_test.go`](pkg/agent/orchestration_test.go), [`pkg/async/plan.go`](pkg/async/plan.go), [`pkg/async/plan_test.go`](pkg/async/plan_test.go), [`pkg/subagent/subagent.go`](pkg/subagent/subagent.go), [`pkg/subagent/subagent_test.go`](pkg/subagent/subagent_test.go), [`cmd/atteler/cli_async_commands.go`](cmd/atteler/cli_async_commands.go) |
 | Skill synthesis into reviewable `SKILL.md` directories with trigger eval fixtures | [`pkg/skill/suggestion.go`](pkg/skill/suggestion.go), [`pkg/skill/persist.go`](pkg/skill/persist.go), [`pkg/skill/trigger.go`](pkg/skill/trigger.go), [`pkg/skill/suggestion_test.go`](pkg/skill/suggestion_test.go), [`test/e2e/cli_test.go`](test/e2e/cli_test.go) |
+| Automatic recurring-workflow skill learning with redacted observations, generated-skill revisions, relevant future context injection, and management/opt-out controls | [`pkg/skill/learning.go`](pkg/skill/learning.go), [`pkg/skill/learning_test.go`](pkg/skill/learning_test.go), [`pkg/events/events.go`](pkg/events/events.go), [`cmd/atteler/skill_learning_setup.go`](cmd/atteler/skill_learning_setup.go), [`cmd/atteler/cli_skill_learning_commands.go`](cmd/atteler/cli_skill_learning_commands.go), [`cmd/atteler/cli_skill_learning_commands_test.go`](cmd/atteler/cli_skill_learning_commands_test.go) |
 | Speculative and review-agent planning/execution primitives | [`pkg/speculate/speculate.go`](pkg/speculate/speculate.go), [`pkg/speculate/speculate_test.go`](pkg/speculate/speculate_test.go), [`pkg/review/review.go`](pkg/review/review.go), [`pkg/review/review_test.go`](pkg/review/review_test.go), [`pkg/review/llm.go`](pkg/review/llm.go), [`pkg/review/llm_test.go`](pkg/review/llm_test.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
 | Memory/RAG, unified retrieval contract, local vector search, git-history search, Go code intelligence, import graphs, and optional LSP lookups | [`pkg/retrieval/types.go`](pkg/retrieval/types.go), [`pkg/retrieval/search.go`](pkg/retrieval/search.go), [`pkg/retrieval/retrieval_test.go`](pkg/retrieval/retrieval_test.go), [`pkg/memory/memory.go`](pkg/memory/memory.go), [`pkg/memory/memory_test.go`](pkg/memory/memory_test.go), [`pkg/vector/vector.go`](pkg/vector/vector.go), [`pkg/vector/vector_test.go`](pkg/vector/vector_test.go), [`pkg/githistory/githistory.go`](pkg/githistory/githistory.go), [`pkg/githistory/githistory_test.go`](pkg/githistory/githistory_test.go), [`pkg/codeintel/codeintel.go`](pkg/codeintel/codeintel.go), [`pkg/codeintel/codeintel_test.go`](pkg/codeintel/codeintel_test.go), [`pkg/codegraph/codegraph.go`](pkg/codegraph/codegraph.go), [`pkg/codegraph/codegraph_test.go`](pkg/codegraph/codegraph_test.go), [`pkg/lsp/client.go`](pkg/lsp/client.go), [`pkg/lsp/client_test.go`](pkg/lsp/client_test.go) |
 | Plugin manifests, safe local entrypoint execution, MCP manifest validation, and stdio JSON-RPC calls | [`pkg/plugin/manifest.go`](pkg/plugin/manifest.go), [`pkg/plugin/manifest_test.go`](pkg/plugin/manifest_test.go), [`pkg/plugin/run.go`](pkg/plugin/run.go), [`pkg/plugin/run_test.go`](pkg/plugin/run_test.go), [`pkg/mcp/manifest.go`](pkg/mcp/manifest.go), [`pkg/mcp/manifest_test.go`](pkg/mcp/manifest_test.go), [`pkg/mcp/client.go`](pkg/mcp/client.go), [`pkg/mcp/client_test.go`](pkg/mcp/client_test.go), [`cmd/atteler/cli_plugin_commands.go`](cmd/atteler/cli_plugin_commands.go), [`cmd/atteler/cli_mcp_commands.go`](cmd/atteler/cli_mcp_commands.go) |

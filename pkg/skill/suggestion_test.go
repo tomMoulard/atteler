@@ -98,6 +98,29 @@ func TestSuggest_IgnoresEmptyActionsAndNormalizesWhitespace(t *testing.T) {
 	}
 }
 
+func TestSuggest_CompactsLongSlugForGeneratedSkillPaths(t *testing.T) {
+	t.Parallel()
+
+	got, ok := SuggestWithOptions([]string{
+		"Run diagnostic command with unusually verbose stable labels for namespace deployment pod container events and logs",
+		"Summarize likely root causes with unusually verbose stable labels for namespace deployment pod container events and logs",
+		"Run diagnostic command with unusually verbose stable labels for namespace deployment pod container events and logs",
+		"Summarize likely root causes with unusually verbose stable labels for namespace deployment pod container events and logs",
+	}, Options{})
+	require.True(t, ok)
+
+	require.LessOrEqual(t, len(got.Slug), maxSlugLength)
+	require.Regexp(t, validSlug, got.Slug)
+	require.Contains(t, got.Slug, "run-diagnostic-command")
+	hashSuffix := strings.TrimPrefix(got.Slug[strings.LastIndex(got.Slug, "-"):], "-")
+	require.Len(t, hashSuffix, slugHashLength)
+	require.NotContains(t, strings.ToLower(got.Name), hashSuffix)
+	require.True(t, PromptTriggers(got, "Use the "+strings.TrimSuffix(got.Name, " Skill")+" skill."))
+	require.True(t, PromptTriggers(got, "Run the "+got.Slug+" workflow."))
+	require.False(t, PromptTriggers(got, "Run diagnostic command workflow."))
+	require.False(t, PromptTriggers(got, "Only "+humanStep(got.Steps[0])+"."))
+}
+
 func TestParseObservationSpec_CapturesInlineProvenance(t *testing.T) {
 	t.Parallel()
 

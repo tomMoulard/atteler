@@ -15,6 +15,31 @@ import (
 	"github.com/tommoulard/atteler/pkg/config"
 )
 
+type recordingObserver struct {
+	err    error
+	events []Event
+}
+
+func (o *recordingObserver) ObserveEvent(_ context.Context, event Event) error {
+	o.events = append(o.events, event)
+
+	return o.err
+}
+
+type mutatingObserver struct{}
+
+func (mutatingObserver) ObserveEvent(_ context.Context, event Event) error {
+	event.Metadata["command"] = "mutated"
+
+	return nil
+}
+
+type panickingObserver struct{}
+
+func (panickingObserver) ObserveEvent(context.Context, Event) error {
+	panic("observer failed")
+}
+
 func TestRunner_EmitRunsHookWithPayloadAndEnv(t *testing.T) {
 	t.Parallel()
 
@@ -76,6 +101,43 @@ func TestRunner_EmitNoHooksIsNoop(t *testing.T) {
 	if err := NewRunner(nil).Emit(context.Background(), Event{Type: UserMessage}); err != nil {
 		require.NoError(t, err)
 	}
+}
+
+func TestRunner_EmitNotifiesObserversWithoutInterrupting(t *testing.T) {
+	t.Parallel()
+
+	observer := &recordingObserver{err: assert.AnError}
+	err := NewRunnerWithLoggerAndObservers(nil, nil, observer).Emit(context.Background(), Event{
+		Type:    CommandExecute,
+		Content: "go test ./pkg/events",
+	})
+	require.NoError(t, err)
+	require.Len(t, observer.events, 1)
+	require.Equal(t, CommandExecute, observer.events[0].Type)
+}
+
+func TestRunner_ObserversCannotMutateCallerEvent(t *testing.T) {
+	t.Parallel()
+
+	metadata := map[string]string{"command": "go test ./pkg/events"}
+	err := NewRunnerWithLoggerAndObservers(nil, nil, mutatingObserver{}).Emit(context.Background(), Event{
+		Type:     CommandExecute,
+		Metadata: metadata,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "go test ./pkg/events", metadata["command"])
+}
+
+func TestRunner_ObserverPanicDoesNotInterrupt(t *testing.T) {
+	t.Parallel()
+
+	observer := &recordingObserver{}
+	err := NewRunnerWithLoggerAndObservers(nil, nil, panickingObserver{}, observer).Emit(context.Background(), Event{
+		Type:    CommandExecute,
+		Content: "go test ./pkg/events",
+	})
+	require.NoError(t, err)
+	require.Len(t, observer.events, 1)
 }
 
 func TestRunner_EmitRequiresContext(t *testing.T) {
