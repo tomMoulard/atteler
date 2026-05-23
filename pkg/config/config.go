@@ -293,7 +293,7 @@ type fileSkillLearningConfig struct {
 // Load reads the default configuration files and returns the merged result plus
 // the paths that were successfully loaded. Missing files are ignored.
 func Load() (Config, []string, error) {
-	cfg, loaded, _, err := LoadWithOrigins()
+	cfg, loaded, _, _, err := LoadWithDiagnostics()
 
 	return cfg, loaded, err
 }
@@ -302,7 +302,16 @@ func Load() (Config, []string, error) {
 // config, successfully loaded paths, and per-field origin chains. Missing files
 // are ignored.
 func LoadWithOrigins() (Config, []string, OriginMap, error) {
-	cfg, loaded, origins := LoadHarnessDefaultsWithOrigins()
+	cfg, loaded, origins, _, err := LoadWithDiagnostics()
+
+	return cfg, loaded, origins, err
+}
+
+// LoadWithDiagnostics reads the default configuration stack and returns the
+// merged config, successfully loaded paths, per-field origin chains, and
+// non-fatal diagnostics from best-effort harness importers.
+func LoadWithDiagnostics() (Config, []string, OriginMap, []Diagnostic, error) {
+	cfg, loaded, origins, diagnostics := LoadHarnessDefaultsWithDiagnostics()
 
 	fileCfg, fileLoaded, fileOrigins, err := LoadPathSources(DefaultPathSources())
 	mergeConfigFromOrigins(&cfg, fileCfg, origins, fileOrigins)
@@ -311,7 +320,7 @@ func LoadWithOrigins() (Config, []string, OriginMap, error) {
 
 	normalizeEmptyMaps(&cfg)
 
-	return cfg, loaded, origins, err
+	return cfg, loaded, origins, diagnostics, err
 }
 
 // DefaultPaths returns the configuration files in merge order. Later files
@@ -897,8 +906,10 @@ func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec 
 			rec.set(providerFieldPath(name, "base_url"), source, provider.BaseURL)
 		}
 
-		current.Disabled = provider.Disabled
-		rec.set(providerFieldPath(name, "disabled"), source, provider.Disabled)
+		if provider.Disabled {
+			current.Disabled = true
+			rec.set(providerFieldPath(name, "disabled"), source, provider.Disabled)
+		}
 
 		current.DisablePrivateAdapter = provider.DisablePrivateAdapter
 		rec.set(providerFieldPath(name, "disable_private_adapter"), source, provider.DisablePrivateAdapter)
@@ -1260,9 +1271,12 @@ func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderC
 			appendOriginChain(dstOrigins, providerFieldPath(name, "base_url"), srcOrigins, false)
 		}
 
-		current.Disabled = provider.Disabled
+		disabledPath := providerFieldPath(name, "disabled")
+		if originPathExists(srcOrigins, disabledPath) {
+			current.Disabled = provider.Disabled
 
-		appendOriginChain(dstOrigins, providerFieldPath(name, "disabled"), srcOrigins, false)
+			appendOriginChain(dstOrigins, disabledPath, srcOrigins, false)
+		}
 
 		current.DisablePrivateAdapter = provider.DisablePrivateAdapter
 
@@ -1276,6 +1290,12 @@ func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderC
 
 		dst.Providers[name] = current
 	}
+}
+
+func originPathExists(origins OriginMap, path string) bool {
+	_, ok := origins[path]
+
+	return ok
 }
 
 func mergeConfigAgentsFromOrigins(dst *Config, agents map[string]AgentConfig, dstOrigins, srcOrigins OriginMap) {

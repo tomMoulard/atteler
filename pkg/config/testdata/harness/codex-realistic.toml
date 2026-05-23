@@ -1,0 +1,17 @@
+# Current Codex config shape with comments, arrays, and nested providers.
+model = "gpt-5.5"
+model_provider = "openai"
+trusted_project_roots = ["/repo/one", "/repo/two"]
+profile = "work"
+
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://openai.example/v1"
+wire_api = "responses"
+
+[model_providers.anthropic]
+base_url = "https://anthropic.example"
+
+[profiles.work]
+model = "gpt-5.4"
+model_provider = "anthropic"

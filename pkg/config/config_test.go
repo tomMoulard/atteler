@@ -555,6 +555,46 @@ func TestLoadWithOrigins_DefaultStackClassifiesEnvAndOverridesProject(t *testing
 	assert.Equal(t, envPath, chain[2].Source)
 }
 
+func TestLoadWithDiagnostics_ReturnsHarnessWarningsWhenConfigFileFails(t *testing.T) {
+	tempDir := t.TempDir()
+	configHome := filepath.Join(tempDir, "xdg-config")
+	projectDir := filepath.Join(tempDir, "project")
+	codexHome := filepath.Join(tempDir, "codex-home")
+	require.NoError(t, os.MkdirAll(codexHome, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, ".atteler"), 0o700))
+
+	codexConfig := filepath.Join(codexHome, "config.toml")
+	require.NoError(t, os.WriteFile(codexConfig, []byte(`
+model = "gpt-5.5"
+trusted_project_roots = ["/repo"]
+`), 0o600))
+
+	projectConfig := filepath.Join(projectDir, ".atteler", "config.yaml")
+	require.NoError(t, os.WriteFile(projectConfig, []byte(`default_model: [`), 0o600))
+
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv(EnvPath, "")
+	t.Chdir(projectDir)
+
+	cfg, loaded, origins, diagnostics, err := LoadWithDiagnostics()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), projectConfig)
+	assert.Equal(t, "gpt-5.5", cfg.DefaultModel)
+	assert.Contains(t, loaded, codexConfig)
+	assertDiagnosticContains(t, diagnostics, "trusted_project_roots: ignored unsupported field")
+
+	origin, ok := origins.Final("default_model")
+	require.True(t, ok)
+	assert.Equal(t, OriginHarnessImport, origin.Kind)
+	assert.Equal(t, codexConfig, origin.Source)
+}
+
 func TestLoadFiles_InvalidYAMLIncludesPath(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

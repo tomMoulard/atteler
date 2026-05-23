@@ -11,8 +11,10 @@ import (
 )
 
 func explainConfig(opts cliOptions) error {
-	cfg, loaded, origins, err := appconfig.LoadWithOrigins()
+	cfg, loaded, origins, diagnostics, err := appconfig.LoadWithDiagnostics()
 	if err != nil {
+		printDiagnostics(os.Stdout, diagnostics)
+
 		return fmt.Errorf("explain config: %w", err)
 	}
 
@@ -29,12 +31,22 @@ func explainConfig(opts cliOptions) error {
 	}
 
 	addRuntimeConfigOrigins(origins, cfg, opts, persistedState, cwd, stateStore.Path())
-	writeConfigExplanation(os.Stdout, loaded, origins, opts.explainConfigPath)
+	writeConfigExplanationWithDiagnostics(os.Stdout, loaded, origins, diagnostics, opts.explainConfigPath)
 
 	return nil
 }
 
 func writeConfigExplanation(w io.Writer, loaded []string, origins appconfig.OriginMap, fieldFilter string) {
+	writeConfigExplanationWithDiagnostics(w, loaded, origins, nil, fieldFilter)
+}
+
+func writeConfigExplanationWithDiagnostics(
+	w io.Writer,
+	loaded []string,
+	origins appconfig.OriginMap,
+	diagnostics []appconfig.Diagnostic,
+	fieldFilter string,
+) {
 	fieldFilter = strings.TrimSpace(fieldFilter)
 
 	fmt.Fprintln(w, "Config explanation")
@@ -63,6 +75,11 @@ func writeConfigExplanation(w io.Writer, loaded []string, origins appconfig.Orig
 	}
 
 	fmt.Fprintln(w)
+	printDiagnostics(w, diagnostics)
+
+	if len(diagnostics) > 0 {
+		fmt.Fprintln(w)
+	}
 
 	heading := "Field origins:"
 	if fieldFilter != "" {
@@ -108,6 +125,23 @@ func writeConfigExplanation(w io.Writer, loaded []string, origins appconfig.Orig
 
 	if !matched {
 		fmt.Fprintln(w, "  (no fields matched)")
+	}
+}
+
+func printDiagnostics(w io.Writer, diagnostics []appconfig.Diagnostic) {
+	if len(diagnostics) == 0 {
+		return
+	}
+
+	fmt.Fprintln(w, "Config importer warnings:")
+
+	for _, diagnostic := range diagnostics {
+		severity := diagnostic.Severity
+		if severity == "" {
+			severity = appconfig.DiagnosticWarning
+		}
+
+		fmt.Fprintf(w, "  - [%s] %s\n", severity, diagnostic.String())
 	}
 }
 

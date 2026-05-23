@@ -1,0 +1,8 @@
+model = ["claude-opus-4-6"]
+provider_id = 123
+unknown_forge_knob = true
+
+[session]
+model_id = ["claude-opus-4-6"]
+provider_id = "claude_code"
+extra_session_knob = "ignored"

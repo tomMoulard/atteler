@@ -1,0 +1,5 @@
+model = ["gpt-5.5"]
+model_provider = "openai"
+[model_providers.openai]
+base_url = ["https://openai.example"]
+unknown_provider_knob = true
