@@ -519,6 +519,10 @@ func buildVectorFixture(tb testing.TB, docs []fixtureDocument, vectorizer vector
 	tb.Helper()
 
 	store, err := vector.NewStore(0)
+	if specer, ok := vectorizer.(interface{ Spec() vector.VectorizerSpec }); ok {
+		store, err = vector.NewStoreWithVectorizer(specer.Spec())
+	}
+
 	require.NoError(tb, err)
 
 	for _, doc := range docs {

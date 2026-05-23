@@ -451,7 +451,20 @@ atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/
 should cite before injecting context: `source`, `document`, `stable_id`,
 `chunk`, `range`, `scorer`, `inject_allowed`, freshness flags, and an optional
 `why` ranking explanation.
-
+Memory and vector stores persist schema, source-hash, provenance, redaction
+policy version, timestamps, TTL, and embedding/vectorizer metadata where
+vectors are stored, so stale embeddings or stale privacy policy provenance fail
+closed until explicitly migrated. Use
+`atteler memory migrate --memory-store <path>` or
+`atteler memory agent-migrate --agent-memory-store <path>` after changing a
+store schema, redaction policy, or vectorizer. Use `atteler memory delete`,
+`atteler memory agent-delete`, `atteler memory compact`, and
+`atteler memory agent-compact` to prove deleted or expired content is removed
+from persisted JSON. Use `--memory-ttl-seconds` or
+`--agent-memory-ttl-seconds` when indexing intentionally short-lived content.
+Saved-session transcript messages and worktree paths are
+excluded from local memory by default; opt in only when needed with
+`--memory-include-session-messages` or `--memory-include-worktree-metadata`.
 ### Agents, plugins, artifacts, and worktrees
 
 ```sh
@@ -616,7 +629,7 @@ linked from the row.
 | Agent metadata, matching, orchestration planning, async waves, and sub-agent fan-out | [`pkg/agent/agent.go`](pkg/agent/agent.go), [`pkg/agent/orchestration.go`](pkg/agent/orchestration.go), [`pkg/agent/orchestration_test.go`](pkg/agent/orchestration_test.go), [`pkg/async/plan.go`](pkg/async/plan.go), [`pkg/async/plan_test.go`](pkg/async/plan_test.go), [`pkg/subagent/subagent.go`](pkg/subagent/subagent.go), [`pkg/subagent/subagent_test.go`](pkg/subagent/subagent_test.go), [`cmd/atteler/cli_async_commands.go`](cmd/atteler/cli_async_commands.go) |
 | Skill synthesis into reviewable `SKILL.md` directories with trigger eval fixtures | [`pkg/skill/suggestion.go`](pkg/skill/suggestion.go), [`pkg/skill/persist.go`](pkg/skill/persist.go), [`pkg/skill/trigger.go`](pkg/skill/trigger.go), [`pkg/skill/suggestion_test.go`](pkg/skill/suggestion_test.go), [`test/e2e/cli_test.go`](test/e2e/cli_test.go) |
 | Speculative and review-agent planning/execution primitives | [`pkg/speculate/speculate.go`](pkg/speculate/speculate.go), [`pkg/speculate/speculate_test.go`](pkg/speculate/speculate_test.go), [`pkg/review/review.go`](pkg/review/review.go), [`pkg/review/review_test.go`](pkg/review/review_test.go), [`pkg/review/llm.go`](pkg/review/llm.go), [`pkg/review/llm_test.go`](pkg/review/llm_test.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
-| Memory/RAG, unified retrieval contract, local vector search, git-history search, Go code intelligence, import graphs, and optional LSP lookups | [`pkg/retrieval/types.go`](pkg/retrieval/types.go), [`pkg/retrieval/search.go`](pkg/retrieval/search.go), [`pkg/retrieval/retrieval_test.go`](pkg/retrieval/retrieval_test.go), [`pkg/memory/memory.go`](pkg/memory/memory.go), [`pkg/memory/memory_test.go`](pkg/memory/memory_test.go), [`pkg/vector/vector.go`](pkg/vector/vector.go), [`pkg/vector/vector_test.go`](pkg/vector/vector_test.go), [`pkg/githistory/githistory.go`](pkg/githistory/githistory.go), [`pkg/githistory/githistory_test.go`](pkg/githistory/githistory_test.go), [`pkg/codeintel/codeintel.go`](pkg/codeintel/codeintel.go), [`pkg/codeintel/codeintel_test.go`](pkg/codeintel/codeintel_test.go), [`pkg/codegraph/codegraph.go`](pkg/codegraph/codegraph.go), [`pkg/codegraph/codegraph_test.go`](pkg/codegraph/codegraph_test.go), [`pkg/lsp/client.go`](pkg/lsp/client.go), [`pkg/lsp/client_test.go`](pkg/lsp/client_test.go) |
+| Memory/RAG, unified retrieval contract, per-agent memory, local vector search, git-history search, Go code intelligence, import graphs, and optional LSP lookups | [`pkg/retrieval/types.go`](pkg/retrieval/types.go), [`pkg/retrieval/search.go`](pkg/retrieval/search.go), [`pkg/retrieval/retrieval_test.go`](pkg/retrieval/retrieval_test.go), [`pkg/memory/memory.go`](pkg/memory/memory.go), [`pkg/memory/memory_test.go`](pkg/memory/memory_test.go), [`pkg/agentmemory/agentmemory.go`](pkg/agentmemory/agentmemory.go), [`pkg/agentmemory/agentmemory_test.go`](pkg/agentmemory/agentmemory_test.go), [`pkg/vector/vector.go`](pkg/vector/vector.go), [`pkg/vector/vector_test.go`](pkg/vector/vector_test.go), [`pkg/githistory/githistory.go`](pkg/githistory/githistory.go), [`pkg/githistory/githistory_test.go`](pkg/githistory/githistory_test.go), [`pkg/codeintel/codeintel.go`](pkg/codeintel/codeintel.go), [`pkg/codeintel/codeintel_test.go`](pkg/codeintel/codeintel_test.go), [`pkg/codegraph/codegraph.go`](pkg/codegraph/codegraph.go), [`pkg/codegraph/codegraph_test.go`](pkg/codegraph/codegraph_test.go), [`pkg/lsp/client.go`](pkg/lsp/client.go), [`pkg/lsp/client_test.go`](pkg/lsp/client_test.go) |
 | Plugin manifests, safe local entrypoint execution, MCP manifest validation, and stdio JSON-RPC calls | [`pkg/plugin/manifest.go`](pkg/plugin/manifest.go), [`pkg/plugin/manifest_test.go`](pkg/plugin/manifest_test.go), [`pkg/plugin/run.go`](pkg/plugin/run.go), [`pkg/plugin/run_test.go`](pkg/plugin/run_test.go), [`pkg/mcp/manifest.go`](pkg/mcp/manifest.go), [`pkg/mcp/manifest_test.go`](pkg/mcp/manifest_test.go), [`pkg/mcp/client.go`](pkg/mcp/client.go), [`pkg/mcp/client_test.go`](pkg/mcp/client_test.go), [`cmd/atteler/cli_plugin_commands.go`](cmd/atteler/cli_plugin_commands.go), [`cmd/atteler/cli_mcp_commands.go`](cmd/atteler/cli_mcp_commands.go) |
 | Background repository scanning and review-scan formatting | [`pkg/watch/watch.go`](pkg/watch/watch.go), [`pkg/watch/watch_test.go`](pkg/watch/watch_test.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
 | Event hook metadata and local hook execution | [`pkg/events/events.go`](pkg/events/events.go), [`pkg/events/events_test.go`](pkg/events/events_test.go), [`pkg/events/logger.go`](pkg/events/logger.go), [`pkg/events/discoverability_test.go`](pkg/events/discoverability_test.go) |

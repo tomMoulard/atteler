@@ -1,0 +1,30 @@
+{
+  "documents": [
+    {
+      "id": "auth",
+      "text": "OAuth token rotation handles refresh credentials and callback retries."
+    },
+    {
+      "id": "docs",
+      "text": "Release notes describe documentation screenshots and changelog edits."
+    },
+    {
+      "id": "rust",
+      "text": "Rust ownership notes mention lifetimes and borrowing."
+    }
+  ],
+  "cases": [
+    {
+      "query": "refresh token retry",
+      "want_top": "auth"
+    },
+    {
+      "query": "documentation changelog screenshots",
+      "want_top": "docs"
+    },
+    {
+      "query": "lifetimes borrowing ownership",
+      "want_top": "rust"
+    }
+  ]
+}

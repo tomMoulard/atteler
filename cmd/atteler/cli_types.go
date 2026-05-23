@@ -269,8 +269,10 @@ type cliOptions struct {
 	feedbackRollbackReason             string
 	feedbackHistoryPath                string
 	agentMemoryAgent                   string
+	agentMemoryDelete                  string
 	agentMemorySearch                  string
 	agentMemoryStorePath               string
+	memoryDelete                       string
 	memorySearch                       string
 	memoryStorePath                    string
 	retrievalSearch                    string
@@ -321,7 +323,9 @@ type cliOptions struct {
 	contextPackTokens                  positiveIntFlag
 	planMaxAgents                      positiveIntFlag
 	memoryLimit                        positiveIntFlag
+	memoryTTL                          positiveIntFlag
 	agentMemoryLimit                   positiveIntFlag
+	agentMemoryTTL                     positiveIntFlag
 	retrievalLimit                     positiveIntFlag
 	vectorLimit                        positiveIntFlag
 	mergeArtifactMaxBytes              positiveIntFlag
@@ -399,6 +403,12 @@ type cliOptions struct {
 	feedbackProposals                  bool
 	validateConfig                     bool
 	explainConfig                      bool
+	memoryCompact                      bool
+	memoryIncludeSessionMessages       bool
+	memoryIncludeWorktreeMetadata      bool
+	memoryMigrate                      bool
+	agentMemoryCompact                 bool
+	agentMemoryMigrate                 bool
 	printConfigTemplate                bool
 	doctor                             bool
 	doctorOffline                      bool

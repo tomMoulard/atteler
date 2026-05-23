@@ -787,6 +787,12 @@ func TestFlagDomain_CoversAcceptanceDomains(t *testing.T) {
 		"plan-agents":                        "agents",
 		"prompt-local-only":                  "agents",
 		"memory-search":                      "memory/rag",
+		"memory-delete":                      "memory/rag",
+		"memory-compact":                     "memory/rag",
+		"memory-migrate":                     "memory/rag",
+		"memory-ttl-seconds":                 "memory/rag",
+		"memory-include-session-messages":    "memory/rag",
+		"memory-include-worktree-metadata":   "memory/rag",
 		"code-symbol-prefix":                 "code-intel",
 		"review-plan":                        "review",
 		"watch-scan":                         "watch",
@@ -803,6 +809,10 @@ func TestFlagDomain_CoversAcceptanceDomains(t *testing.T) {
 		"watch-max-iterations":               "watch",
 		"code-file-import-prefix":            "code-intel",
 		"agent-performance-summary":          "agents",
+		"agent-memory-delete":                "memory/rag",
+		"agent-memory-compact":               "memory/rag",
+		"agent-memory-migrate":               "memory/rag",
+		"agent-memory-ttl-seconds":           "memory/rag",
 	}
 
 	for flagName, want := range tests {

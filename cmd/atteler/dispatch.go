@@ -35,6 +35,8 @@ func parseOptions() cliOptions {
 	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
 	opts.seed = nonNegativeIntFlag{name: "seed"}
 	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
+	opts.memoryTTL = positiveIntFlag{name: "memory-ttl-seconds"}
+	opts.agentMemoryTTL = positiveIntFlag{name: "agent-memory-ttl-seconds"}
 	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
 	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
 	registerCLIFlags(&opts)

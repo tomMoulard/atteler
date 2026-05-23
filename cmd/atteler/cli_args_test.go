@@ -276,6 +276,11 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "agents feedback rollback", args: []string{"agents", "--feedback-rollback-agent", "reviewer", "--feedback-rollback-id", "fg-1", "feedback-rollback", "agents.yaml"}, want: []string{"--feedback-rollback-agent", "reviewer", "--feedback-rollback-id", "fg-1", "--feedback-rollback-config", "agents.yaml"}},
 		{name: "agents bash", args: []string{"agents", "bash", "go", "test", "./cmd/atteler"}, want: []string{"--bash", "go test ./cmd/atteler"}},
 		{name: "memory rag", args: []string{"memory", "search", "OAuth", "retry"}, want: []string{"--memory-search", "OAuth retry"}},
+		{name: "memory delete", args: []string{"memory", "delete", "old-doc", "--memory-store", "store.json"}, want: []string{"--memory-delete", "old-doc", "--memory-store", "store.json"}},
+		{name: "memory compact", args: []string{"memory", "compact", "--memory-store", "store.json"}, want: []string{"--memory-compact", "--memory-store", "store.json"}},
+		{name: "memory migrate", args: []string{"memory", "migrate", "--memory-store", "store.json"}, want: []string{"--memory-migrate", "--memory-store", "store.json"}},
+		{name: "memory index ttl", args: []string{"memory", "index", "note.txt", "--memory-ttl-seconds", "60"}, want: []string{"--memory-index", "note.txt", "--memory-ttl-seconds", "60"}},
+		{name: "memory search raw transcript opt-in", args: []string{"memory", "search", "OAuth", "--memory-include-session-messages"}, want: []string{"--memory-search", "OAuth", "--memory-include-session-messages"}},
 		{name: "code intel", args: []string{"code-intel", "summary"}, want: []string{"--code-summary"}},
 		{name: "review", args: []string{"review", "scan"}, want: []string{"--review-scan"}},
 		{name: "watch", args: []string{"watch", "json"}, want: []string{"--watch-scan", "--watch-json"}},
@@ -290,6 +295,10 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "eval record response with prompt", args: []string{"eval", "record-response", "fixture.json", "summarize", "readme"}, want: []string{"--record-response", "fixture.json", "--once", "summarize readme"}},
 		{name: "eval replay response with prompt and flags", args: []string{"eval", "replay-response", "fixture.json", "summarize", "readme", "--output", "json"}, want: []string{"--replay-response", "fixture.json", "--once", "summarize readme", "--output", "json"}},
 		{name: "eval replay response with stdin", args: []string{"eval", "replay-response", "fixture.json", "--stdin"}, want: []string{"--replay-response", "fixture.json", "--stdin"}},
+		{name: "agent memory delete", args: []string{"memory", "agent-delete", "delete-me", "--agent-memory-agent", "reviewer"}, want: []string{"--agent-memory-delete", "delete-me", "--agent-memory-agent", "reviewer"}},
+		{name: "agent memory compact", args: []string{"memory", "agent-compact", "--agent-memory-store", "store.json"}, want: []string{"--agent-memory-compact", "--agent-memory-store", "store.json"}},
+		{name: "agent memory migrate", args: []string{"memory", "agent-migrate", "--agent-memory-store", "store.json"}, want: []string{"--agent-memory-migrate", "--agent-memory-store", "store.json"}},
+		{name: "agent memory index ttl", args: []string{"memory", "agent-index", "note.txt", "--agent-memory-ttl-seconds", "60"}, want: []string{"--agent-memory-index", "note.txt", "--agent-memory-ttl-seconds", "60"}},
 	}
 
 	for _, tt := range tests {

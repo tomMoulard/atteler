@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/privacy"
+	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -14,10 +16,41 @@ const sessionSourceType = "session"
 
 var errMissingSessionID = errors.New("memory session id is required")
 
+// SessionIndexPolicy controls which session fields are copied into searchable
+// memory. Raw transcript messages are excluded by default because they can
+// contain secrets or unrelated private content; callers must opt in explicitly.
+type SessionIndexPolicy struct {
+	IncludeMessages          bool
+	IncludeNegativeKnowledge bool
+	IncludeEvaluations       bool
+	IncludeArtifacts         bool
+	IncludeWorktreeMetadata  bool
+}
+
+// DefaultSessionIndexPolicy returns the privacy-preserving default session
+// memory policy.
+func DefaultSessionIndexPolicy() SessionIndexPolicy {
+	return SessionIndexPolicy{
+		IncludeNegativeKnowledge: true,
+		IncludeEvaluations:       true,
+		IncludeArtifacts:         true,
+	}
+}
+
 // FromSessions builds a searchable memory store from saved sessions.
 func FromSessions(sessions ...session.Session) (*Store, error) {
 	store := NewStore()
 	if err := store.AddSessions(sessions...); err != nil {
+		return nil, err
+	}
+
+	return store, nil
+}
+
+// FromSessionsWithPolicy builds a searchable memory store using policy.
+func FromSessionsWithPolicy(policy SessionIndexPolicy, sessions ...session.Session) (*Store, error) {
+	store := NewStore()
+	if err := store.AddSessionsWithPolicy(policy, sessions...); err != nil {
 		return nil, err
 	}
 
@@ -35,33 +68,60 @@ func (s *Store) AddSessions(sessions ...session.Session) error {
 	return nil
 }
 
-// AddSession indexes searchable metadata, transcript messages, negative
-// knowledge, agent evaluations, and artifacts for a saved session.
+// AddSessionsWithPolicy indexes each saved session according to policy.
+func (s *Store) AddSessionsWithPolicy(policy SessionIndexPolicy, sessions ...session.Session) error {
+	for i := range sessions {
+		if err := s.AddSessionWithPolicy(sessions[i], policy); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// AddSession indexes privacy-safe metadata, negative knowledge, agent
+// evaluations, and artifacts for a saved session. Raw transcript messages and
+// worktree metadata require AddSessionWithPolicy opt-in.
 func (s *Store) AddSession(saved session.Session) error {
+	return s.AddSessionWithPolicy(saved, DefaultSessionIndexPolicy())
+}
+
+// AddSessionWithPolicy indexes a saved session according to policy.
+func (s *Store) AddSessionWithPolicy(saved session.Session, policy SessionIndexPolicy) error {
 	sessionID := strings.TrimSpace(saved.ID)
 	if sessionID == "" {
 		return errMissingSessionID
 	}
 
-	if text := sessionMetadataText(saved); text != "" {
+	if text := sessionMetadataText(saved, policy); text != "" {
 		if err := s.Add(sessionDocument(saved, "metadata", -1, text, nil)); err != nil {
 			return err
 		}
 	}
 
-	if err := s.addSessionMessages(saved); err != nil {
-		return err
+	if policy.IncludeMessages {
+		if err := s.addSessionMessages(saved); err != nil {
+			return err
+		}
 	}
 
-	if err := s.addSessionNegativeKnowledge(saved); err != nil {
-		return err
+	if policy.IncludeNegativeKnowledge {
+		if err := s.addSessionNegativeKnowledge(saved); err != nil {
+			return err
+		}
 	}
 
-	if err := s.addSessionEvaluations(saved); err != nil {
-		return err
+	if policy.IncludeEvaluations {
+		if err := s.addSessionEvaluations(saved); err != nil {
+			return err
+		}
 	}
 
-	return s.addSessionArtifacts(saved)
+	if policy.IncludeArtifacts {
+		return s.addSessionArtifacts(saved)
+	}
+
+	return nil
 }
 
 func (s *Store) addSessionMessages(saved session.Session) error {
@@ -71,14 +131,27 @@ func (s *Store) addSessionMessages(saved session.Session) error {
 			continue
 		}
 
-		if err := s.Add(sessionDocument(saved, "message", i, text, map[string]string{
-			"role": strings.TrimSpace(string(message.Role)),
-		})); err != nil {
+		if err := s.Add(sessionDocument(saved, "message", i, text, sessionMessageMetadata(message, text))); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func sessionMessageMetadata(message llm.Message, text string) map[string]string {
+	metadata := map[string]string{
+		"role":                                strings.TrimSpace(string(message.Role)),
+		retrieval.MetadataSafetyInjectAllowed: "false",
+		retrieval.MetadataSafetyPrivate:       "true",
+	}
+
+	if privacy.RedactText(text) != text {
+		metadata[retrieval.MetadataSafetySensitive] = "true"
+		metadata[retrieval.MetadataSafetyRedacted] = "true"
+	}
+
+	return metadata
 }
 
 func (s *Store) addSessionNegativeKnowledge(saved session.Session) error {
@@ -174,10 +247,19 @@ func sessionDocument(saved session.Session, kind string, index int, text string,
 	}
 
 	return Document{
-		ID:       sessionDocumentID(saved.ID, kind, index),
-		Path:     saved.ID,
-		Text:     text,
-		Metadata: metadata,
+		ID:         sessionDocumentID(saved.ID, kind, index),
+		Path:       saved.ID,
+		Text:       text,
+		Metadata:   metadata,
+		Provenance: sessionProvenance(saved.ID, kind),
+	}
+}
+
+func sessionProvenance(sessionID, kind string) map[string]string {
+	return map[string]string{
+		"source_type": sessionSourceType,
+		"session_id":  sessionID,
+		"kind":        kind,
 	}
 }
 
@@ -189,15 +271,18 @@ func sessionDocumentID(sessionID, kind string, index int) string {
 	return "session/" + sessionID + "/" + kind + "/" + strconv.Itoa(index)
 }
 
-func sessionMetadataText(saved session.Session) string {
+func sessionMetadataText(saved session.Session, policy SessionIndexPolicy) string {
 	var parts []string
 	appendPart(&parts, "Session", saved.ID)
 	appendPart(&parts, "Title", saved.Title)
 	appendPart(&parts, "Default agent", saved.DefaultAgent)
 	appendPart(&parts, "Default model", saved.DefaultModel)
-	appendPart(&parts, "Worktree path", saved.WorktreePath)
-	appendPart(&parts, "Worktree branch", saved.WorktreeBranch)
-	appendPart(&parts, "Worktree base", saved.WorktreeBase)
+
+	if policy.IncludeWorktreeMetadata {
+		appendPart(&parts, "Worktree path", saved.WorktreePath)
+		appendPart(&parts, "Worktree branch", saved.WorktreeBranch)
+		appendPart(&parts, "Worktree base", saved.WorktreeBase)
+	}
 
 	if len(saved.Tags) > 0 {
 		appendPart(&parts, "Tags", strings.Join(saved.Tags, ", "))

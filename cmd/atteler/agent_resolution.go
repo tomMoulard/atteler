@@ -218,6 +218,9 @@ func sessionLocalUtilityRequested(opts cliOptions) bool {
 	return opts.mergeArtifactsPath != "" ||
 		opts.feedbackProposals ||
 		opts.agentMemorySearch != "" ||
+		opts.agentMemoryDelete != "" ||
+		opts.agentMemoryCompact ||
+		opts.agentMemoryMigrate ||
 		len(opts.agentMemoryIndexFiles) > 0
 }
 

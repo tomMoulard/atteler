@@ -113,7 +113,7 @@ func commandContractsByName() map[string]commandContract {
 	return map[string]commandContract{
 		"agent-memory": commandContractFor(
 			"search or update one agent's vector memory",
-			[]string{"--agent-memory-search", "--agent-memory-index", "--agent-memory-store", "--agent-memory-agent", "--agent-memory-limit"},
+			[]string{"--agent-memory-search", "--agent-memory-index", "--agent-memory-delete", "--agent-memory-compact", "--agent-memory-migrate", "--agent-memory-store", "--agent-memory-agent", "--agent-memory-limit", "--agent-memory-ttl-seconds"},
 			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectSessionRead, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("agentMemoryCommandInput"),
@@ -334,7 +334,7 @@ func commandContractsByName() map[string]commandContract {
 		),
 		"memory-command": commandContractFor(
 			"search or update the local UTF-8 file memory store",
-			[]string{"--memory-search", "--memory-index", "--memory-store", "--memory-limit"},
+			[]string{"--memory-search", "--memory-index", "--memory-delete", "--memory-compact", "--memory-migrate", "--memory-store", "--memory-limit", "--memory-ttl-seconds", "--memory-include-session-messages", "--memory-include-worktree-metadata"},
 			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectSessionRead, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("memoryCommandInput"),

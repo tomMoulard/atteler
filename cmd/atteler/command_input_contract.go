@@ -6,8 +6,12 @@ type agentMemoryCommandInput struct {
 	Search     string
 	Agent      string
 	StorePath  string
+	DeleteID   string
 	IndexFiles []string
 	Limit      int
+	TTLSeconds int
+	Migrate    bool
+	Compact    bool
 }
 
 type asyncPlanCommandInput struct {
@@ -186,10 +190,16 @@ type lspSymbolsCommandInput struct {
 }
 
 type memoryCommandInput struct {
-	Search     string
-	StorePath  string
-	IndexFiles []string
-	Limit      int
+	Search                  string
+	StorePath               string
+	DeleteID                string
+	IndexFiles              []string
+	Limit                   int
+	TTLSeconds              int
+	IncludeSessionMessages  bool
+	IncludeWorktreeMetadata bool
+	Migrate                 bool
+	Compact                 bool
 }
 
 type retrievalCommandInput struct {
@@ -390,8 +400,12 @@ func agentMemoryCommandInputFromOptions(opts cliOptions) agentMemoryCommandInput
 		Search:     opts.agentMemorySearch,
 		Agent:      opts.agentMemoryAgent,
 		StorePath:  opts.agentMemoryStorePath,
+		DeleteID:   opts.agentMemoryDelete,
 		IndexFiles: append([]string(nil), opts.agentMemoryIndexFiles...),
 		Limit:      opts.agentMemoryLimit.value,
+		TTLSeconds: opts.agentMemoryTTL.value,
+		Migrate:    opts.agentMemoryMigrate,
+		Compact:    opts.agentMemoryCompact,
 	}
 }
 
@@ -609,10 +623,16 @@ func lspSymbolsCommandInputFromOptions(opts cliOptions) lspSymbolsCommandInput {
 
 func memoryCommandInputFromOptions(opts cliOptions) memoryCommandInput {
 	return memoryCommandInput{
-		Search:     opts.memorySearch,
-		StorePath:  opts.memoryStorePath,
-		IndexFiles: append([]string(nil), opts.memoryIndexFiles...),
-		Limit:      opts.memoryLimit.value,
+		Search:                  opts.memorySearch,
+		StorePath:               opts.memoryStorePath,
+		DeleteID:                opts.memoryDelete,
+		IndexFiles:              append([]string(nil), opts.memoryIndexFiles...),
+		Limit:                   opts.memoryLimit.value,
+		TTLSeconds:              opts.memoryTTL.value,
+		IncludeSessionMessages:  opts.memoryIncludeSessionMessages,
+		IncludeWorktreeMetadata: opts.memoryIncludeWorktreeMetadata,
+		Migrate:                 opts.memoryMigrate,
+		Compact:                 opts.memoryCompact,
 	}
 }
 

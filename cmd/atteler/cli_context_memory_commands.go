@@ -17,6 +17,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/lsp"
 	"github.com/tommoulard/atteler/pkg/memory"
+	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/vector"
@@ -324,7 +325,7 @@ func runVectorSearch(input vectorSearchCommandInput) error {
 		return fmt.Errorf("vector search: create vectorizer: %w", err)
 	}
 
-	store, err := vector.NewStore(vectorizer.Dimensions)
+	store, err := vector.NewStoreWithVectorizer(vectorizer.Spec())
 	if err != nil {
 		return fmt.Errorf("vector search: create store: %w", err)
 	}
@@ -336,12 +337,12 @@ func runVectorSearch(input vectorSearchCommandInput) error {
 		}
 	}
 
-	queryVector, err := vectorizer.Vectorize(input.Query)
+	queryVector, err := vectorizer.Vectorize(privacy.RedactText(input.Query))
 	if err != nil {
 		return fmt.Errorf("vector search: vectorize query: %w", err)
 	}
 
-	results, err := store.Search(queryVector, limit)
+	results, err := store.SearchWithVectorizer(queryVector, vectorizer.Spec(), limit)
 	if err != nil {
 		return fmt.Errorf("vector search failed: %w", err)
 	}
@@ -369,7 +370,7 @@ func addVectorFile(store *vector.Store, vectorizer *vector.TextVectorizer, path 
 	}
 
 	clean := filepath.Clean(path)
-	text, safety := retrieval.Sanitize(string(data), retrieval.PolicyContext{
+	text, safety := retrieval.Sanitize(privacy.RedactText(string(data)), retrieval.PolicyContext{
 		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: clean, URI: clean},
 		DocumentID: clean,
 		Path:       clean,
@@ -389,7 +390,14 @@ func addVectorFile(store *vector.Store, vectorizer *vector.TextVectorizer, path 
 		metadata = retrieval.MergeSafetyMetadata(metadata, safety)
 	}
 
-	if err := store.Add(vector.Document{ID: clean, Text: text, Vector: vec, Metadata: metadata}); err != nil {
+	if err := store.Add(vector.Document{
+		ID:         clean,
+		Text:       text,
+		Vector:     vec,
+		Vectorizer: vectorizer.Spec(),
+		Metadata:   metadata,
+		Provenance: map[string]string{"source_type": "file", "path": clean},
+	}); err != nil {
 		return fmt.Errorf("vector search: index %s: %w", path, err)
 	}
 
@@ -414,7 +422,7 @@ func runAgentMemoryCommand(root, selectedAgent string, input agentMemoryCommandI
 		agentName = strings.TrimSpace(selectedAgent)
 	}
 
-	if agentName == "" {
+	if agentName == "" && agentMemoryCommandNeedsAgent(input) {
 		return errors.New("agent memory: --agent-memory-agent or --agent is required")
 	}
 
@@ -423,23 +431,24 @@ func runAgentMemoryCommand(root, selectedAgent string, input agentMemoryCommandI
 		storePath = filepath.Join(root, ".atteler", "agent-memory.json")
 	}
 
-	store, err := loadAgentMemoryStore(storePath)
+	store, err := loadAgentMemoryStore(storePath, input.Migrate)
 	if err != nil {
 		return err
 	}
 
-	for _, path := range input.IndexFiles {
-		if addErr := store.AddFile(agentName, path); addErr != nil {
-			return fmt.Errorf("agent memory: index %s: %w", path, addErr)
-		}
+	storeChanged, messages, err := mutateAgentMemoryStore(store, agentName, storePath, input)
+	if err != nil {
+		return err
 	}
 
-	if len(input.IndexFiles) > 0 {
+	if storeChanged {
 		if saveErr := store.Save(storePath); saveErr != nil {
 			return fmt.Errorf("agent memory: save store: %w", saveErr)
 		}
+	}
 
-		fmt.Printf("Indexed %d file(s) for agent %s in %s\n", len(input.IndexFiles), agentName, storePath)
+	for _, message := range messages {
+		fmt.Println(message)
 	}
 
 	if strings.TrimSpace(input.Search) == "" {
@@ -468,23 +477,137 @@ func runAgentMemoryCommand(root, selectedAgent string, input agentMemoryCommandI
 	return nil
 }
 
-func loadAgentMemoryStore(path string) (*agentmemory.Store, error) {
-	if _, err := os.Stat(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			store, newErr := agentmemory.NewStore(0)
-			if newErr != nil {
-				return nil, fmt.Errorf("agent memory: create store: %w", newErr)
-			}
+func agentMemoryCommandNeedsAgent(input agentMemoryCommandInput) bool {
+	return strings.TrimSpace(input.Search) != "" ||
+		strings.TrimSpace(input.DeleteID) != "" ||
+		len(input.IndexFiles) > 0
+}
 
-			return store, nil
-		}
+func mutateAgentMemoryStore(
+	store *agentmemory.Store,
+	agentName string,
+	storePath string,
+	input agentMemoryCommandInput,
+) (storeChanged bool, messages []string, err error) {
+	messages = make([]string, 0, len(input.IndexFiles)+3)
 
-		return nil, fmt.Errorf("agent memory: stat store %s: %w", path, err)
+	if input.Migrate {
+		storeChanged = true
+
+		messages = append(messages, "Migrated agent memory store "+memoryDisplayValue(storePath))
 	}
 
-	store, err := agentmemory.Load(path)
+	deleted, message := deleteAgentMemoryDocument(store, agentName, storePath, input.DeleteID)
+	storeChanged = storeChanged || deleted
+	messages = appendAgentMemoryMessage(messages, message)
+
+	compacted, message := compactAgentMemoryDocuments(store, storePath, input.Compact)
+	storeChanged = storeChanged || compacted
+	messages = appendAgentMemoryMessage(messages, message)
+
+	indexedMessage, err := indexAgentMemoryFiles(store, agentName, storePath, input.IndexFiles, input.TTLSeconds)
+	if err != nil {
+		return false, nil, err
+	}
+
+	storeChanged = storeChanged || indexedMessage != ""
+	messages = appendAgentMemoryMessage(messages, indexedMessage)
+
+	return storeChanged, messages, nil
+}
+
+func appendAgentMemoryMessage(messages []string, message string) []string {
+	if message == "" {
+		return messages
+	}
+
+	return append(messages, message)
+}
+
+func deleteAgentMemoryDocument(store *agentmemory.Store, agentName, storePath, id string) (changed bool, message string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, ""
+	}
+
+	if store.Delete(agentName, id) {
+		return true, fmt.Sprintf(
+			"Deleted agent memory %s for agent %s from %s",
+			memoryDisplayValue(id),
+			memoryDisplayValue(agentName),
+			memoryDisplayValue(storePath),
+		)
+	}
+
+	return false, fmt.Sprintf(
+		"No agent memory %s found for agent %s in %s",
+		memoryDisplayValue(id),
+		memoryDisplayValue(agentName),
+		memoryDisplayValue(storePath),
+	)
+}
+
+func compactAgentMemoryDocuments(store *agentmemory.Store, storePath string, enabled bool) (changed bool, message string) {
+	if !enabled {
+		return false, ""
+	}
+
+	removed := store.Compact(time.Now().UTC())
+	message = fmt.Sprintf("Compacted %d expired agent memory document(s) from %s", removed, memoryDisplayValue(storePath))
+
+	return true, message
+}
+
+func indexAgentMemoryFiles(store *agentmemory.Store, agentName, storePath string, paths []string, ttlSeconds int) (string, error) {
+	opts := agentMemoryIndexOptions(ttlSeconds)
+	for _, path := range paths {
+		if addErr := store.AddFileWithOptions(agentName, path, opts...); addErr != nil {
+			return "", fmt.Errorf("agent memory: index %s: %w", path, addErr)
+		}
+	}
+
+	if len(paths) == 0 {
+		return "", nil
+	}
+
+	return fmt.Sprintf("Indexed %d file(s) for agent %s in %s", len(paths), memoryDisplayValue(agentName), memoryDisplayValue(storePath)), nil
+}
+
+func agentMemoryIndexOptions(ttlSeconds int) []agentmemory.AddOption {
+	if ttlSeconds <= 0 {
+		return nil
+	}
+
+	return []agentmemory.AddOption{agentmemory.WithTTL(time.Duration(ttlSeconds) * time.Second)}
+}
+
+func loadAgentMemoryStore(path string, migrate bool) (*agentmemory.Store, error) {
+	if _, err := os.Stat(path); err != nil {
+		return loadMissingAgentMemoryStore(path, migrate, err)
+	}
+
+	loadOptions := agentmemory.LoadOptions{Migrate: migrate}
+
+	store, err := agentmemory.LoadWithOptions(path, loadOptions)
 	if err != nil {
 		return nil, fmt.Errorf("agent memory: load store: %w", err)
+	}
+
+	return store, nil
+}
+
+func loadMissingAgentMemoryStore(path string, migrate bool, statErr error) (*agentmemory.Store, error) {
+	if !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("agent memory: stat store %s: %w", path, statErr)
+	}
+
+	if migrate {
+		return nil, fmt.Errorf("agent memory: migrate store %s: %w", path, statErr)
+	}
+
+	store, err := agentmemory.NewStore(0)
+	if err != nil {
+		return nil, fmt.Errorf("agent memory: create store: %w", err)
 	}
 
 	return store, nil
@@ -720,7 +843,7 @@ func retrievalSearcher(ctx context.Context, state appState, input retrievalComma
 }
 
 func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput, includeSessions bool) (*memory.Store, error) {
-	mem, err := loadMemoryStore(input.MemoryStorePath)
+	mem, err := loadMemoryStore(input.MemoryStorePath, false)
 	if err != nil {
 		return nil, err
 	}
@@ -732,7 +855,7 @@ func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput
 	}
 
 	if includeSessions && strings.TrimSpace(input.MemoryStorePath) == "" && len(input.MemoryIndexFiles) == 0 {
-		if err := addSessionMemory(mem, store); err != nil {
+		if err := addSessionMemory(mem, store, memory.DefaultSessionIndexPolicy()); err != nil {
 			return nil, err
 		}
 	}
@@ -750,7 +873,7 @@ func buildVectorRetrievalSearcher(paths []string) (retrieval.Searcher, error) {
 		return nil, fmt.Errorf("retrieval: create vectorizer: %w", err)
 	}
 
-	store, err := vector.NewStore(vectorizer.Dimensions)
+	store, err := vector.NewStoreWithVectorizer(vectorizer.Spec())
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: create vector store: %w", err)
 	}
@@ -787,7 +910,7 @@ func buildAgentMemoryRetrievalSearcher(root, selectedAgent string, input retriev
 		storePath = filepath.Join(root, ".atteler", "agent-memory.json")
 	}
 
-	store, err := loadAgentMemoryStore(storePath)
+	store, err := loadAgentMemoryStore(storePath, false)
 	if err != nil {
 		return nil, err
 	}
@@ -876,32 +999,70 @@ func appendRetrievalSourceParts(parts []string, source retrieval.Source) []strin
 }
 
 func runMemoryCommand(store *session.Store, input memoryCommandInput) error {
-	mem, err := buildMemoryStore(store, input)
+	if err := validateMemoryCommandInput(input); err != nil {
+		return err
+	}
+
+	mem, err := loadMemoryStore(input.StorePath, input.Migrate)
 	if err != nil {
 		return err
 	}
 
-	if input.StorePath != "" && len(input.IndexFiles) > 0 {
-		if saveErr := mem.Save(input.StorePath); saveErr != nil {
-			return fmt.Errorf("memory: save store: %w", saveErr)
-		}
-
-		if input.Search == "" {
-			fmt.Printf("Indexed %d document(s) into %s\n", len(mem.Documents), input.StorePath)
-			return nil
-		}
+	storeChanged, messages, err := mutateMemoryStore(mem, input)
+	if err != nil {
+		return err
 	}
 
+	if store != nil && shouldAddSessionMemory(mem, input) {
+		beforeDocuments := len(mem.Documents)
+		if sessionErr := addSessionMemory(mem, store, sessionIndexPolicy(input)); sessionErr != nil {
+			return sessionErr
+		}
+
+		storeChanged = storeChanged || len(mem.Documents) != beforeDocuments
+	}
+
+	if err := saveMemoryStoreIfChanged(mem, input.StorePath, storeChanged); err != nil {
+		return err
+	}
+
+	for _, message := range messages {
+		fmt.Println(message)
+	}
+
+	return finishMemoryCommand(mem, input)
+}
+
+func saveMemoryStoreIfChanged(mem *memory.Store, storePath string, storeChanged bool) error {
+	if storePath == "" || !storeChanged {
+		return nil
+	}
+
+	if err := mem.Save(storePath); err != nil {
+		return fmt.Errorf("memory: save store: %w", err)
+	}
+
+	return nil
+}
+
+func finishMemoryCommand(mem *memory.Store, input memoryCommandInput) error {
 	if input.Search == "" {
+		if input.StorePath != "" && memoryCommandMutatesStore(input) {
+			return nil
+		}
+
 		return errors.New("memory: --memory-search is required unless indexing into --memory-store")
 	}
 
-	limit := input.Limit
+	return searchMemoryStore(mem, input.Search, input.Limit)
+}
+
+func searchMemoryStore(mem *memory.Store, query string, limit int) error {
 	if limit == 0 {
 		limit = 5
 	}
 
-	results, err := mem.Search(input.Search, limit)
+	results, err := mem.Search(query, limit)
 	if err != nil {
 		return fmt.Errorf("memory: search: %w", err)
 	}
@@ -919,40 +1080,182 @@ func runMemoryCommand(store *session.Store, input memoryCommandInput) error {
 }
 
 func buildMemoryStore(store *session.Store, input memoryCommandInput) (*memory.Store, error) {
-	mem, err := loadMemoryStore(input.StorePath)
+	mem, err := loadMemoryStore(input.StorePath, input.Migrate)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(input.IndexFiles) > 0 {
-		if err := mem.AddFiles(input.IndexFiles...); err != nil {
-			return nil, fmt.Errorf("memory: index files: %w", err)
-		}
+	if _, _, err := mutateMemoryStore(mem, input); err != nil {
+		return nil, err
 	}
 
-	if input.StorePath == "" || len(mem.Documents) == 0 {
-		if err := addSessionMemory(mem, store); err != nil {
-			return nil, err
+	if store != nil && shouldAddSessionMemory(mem, input) {
+		if sessionErr := addSessionMemory(mem, store, sessionIndexPolicy(input)); sessionErr != nil {
+			return nil, sessionErr
 		}
 	}
 
 	return mem, nil
 }
 
-func loadMemoryStore(path string) (*memory.Store, error) {
+func validateMemoryCommandInput(input memoryCommandInput) error {
+	if input.StorePath == "" && (strings.TrimSpace(input.DeleteID) != "" || input.Compact || input.Migrate) {
+		return errors.New("memory: --memory-store is required for --memory-delete, --memory-compact, or --memory-migrate")
+	}
+
+	return nil
+}
+
+func mutateMemoryStore(mem *memory.Store, input memoryCommandInput) (storeChanged bool, messages []string, err error) {
+	messages = make([]string, 0, len(input.IndexFiles)+2)
+
+	if input.Migrate {
+		storeChanged = true
+
+		messages = append(messages, "Migrated memory store "+memoryDisplayValue(input.StorePath))
+	}
+
+	deleted, message := deleteMemoryDocument(mem, input.StorePath, input.DeleteID)
+	storeChanged = storeChanged || deleted
+	messages = appendMemoryMessage(messages, message)
+
+	compacted, message := compactMemoryDocuments(mem, input.StorePath, input.Compact)
+	storeChanged = storeChanged || compacted
+	messages = appendMemoryMessage(messages, message)
+
+	indexedMessage, err := indexMemoryFiles(mem, input.StorePath, input.IndexFiles, input.TTLSeconds)
+	if err != nil {
+		return false, nil, err
+	}
+
+	storeChanged = storeChanged || indexedMessage != ""
+	messages = appendMemoryMessage(messages, indexedMessage)
+
+	return storeChanged, messages, nil
+}
+
+func appendMemoryMessage(messages []string, message string) []string {
+	if message == "" {
+		return messages
+	}
+
+	return append(messages, message)
+}
+
+func deleteMemoryDocument(mem *memory.Store, storePath, id string) (changed bool, message string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, ""
+	}
+
+	if mem.Delete(id) {
+		return true, "Deleted memory " + memoryDisplayValue(id) + " from " + memoryDisplayValue(storePath)
+	}
+
+	return false, "No memory " + memoryDisplayValue(id) + " found in " + memoryDisplayValue(storePath)
+}
+
+func compactMemoryDocuments(mem *memory.Store, storePath string, enabled bool) (changed bool, message string) {
+	if !enabled {
+		return false, ""
+	}
+
+	removed := mem.Compact(time.Now().UTC())
+	message = fmt.Sprintf("Compacted %d expired memory document(s) from %s", removed, memoryDisplayValue(storePath))
+
+	return true, message
+}
+
+func indexMemoryFiles(mem *memory.Store, storePath string, paths []string, ttlSeconds int) (string, error) {
+	expiresAt := memoryExpiresAt(ttlSeconds)
+	for _, path := range paths {
+		if err := addMemoryFileWithExpiry(mem, path, expiresAt); err != nil {
+			return "", fmt.Errorf("memory: index %s: %w", path, err)
+		}
+	}
+
+	if len(paths) == 0 || storePath == "" {
+		return "", nil
+	}
+
+	return fmt.Sprintf("Indexed %d document(s) into %s", len(paths), memoryDisplayValue(storePath)), nil
+}
+
+func memoryDisplayValue(value string) string {
+	return privacy.RedactIdentifier(strings.TrimSpace(value))
+}
+
+func addMemoryFileWithExpiry(mem *memory.Store, path string, expiresAt *time.Time) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read memory file %q: %w", path, err)
+	}
+
+	if !utf8.Valid(data) {
+		return fmt.Errorf("read memory file %q: %w", path, memory.ErrInvalidUTF8)
+	}
+
+	clean := filepath.Clean(path)
+
+	if err := mem.Add(memory.Document{
+		ID:        clean,
+		Path:      clean,
+		Text:      string(data),
+		ExpiresAt: expiresAt,
+		Provenance: map[string]string{
+			"source_type": "file",
+			"path":        clean,
+		},
+	}); err != nil {
+		return fmt.Errorf("add memory document %q: %w", clean, err)
+	}
+
+	return nil
+}
+
+func memoryExpiresAt(ttlSeconds int) *time.Time {
+	if ttlSeconds <= 0 {
+		return nil
+	}
+
+	expiresAt := time.Now().UTC().Add(time.Duration(ttlSeconds) * time.Second)
+
+	return &expiresAt
+}
+
+func shouldAddSessionMemory(mem *memory.Store, input memoryCommandInput) bool {
+	if input.DeleteID != "" || input.Compact || input.Migrate {
+		return false
+	}
+
+	return input.StorePath == "" || len(mem.Documents) == 0
+}
+
+func memoryCommandMutatesStore(input memoryCommandInput) bool {
+	return strings.TrimSpace(input.DeleteID) != "" ||
+		input.Compact ||
+		input.Migrate ||
+		len(input.IndexFiles) > 0
+}
+
+func loadMemoryStore(path string, migrate bool) (*memory.Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return memory.NewStore(), nil
 	}
 
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if migrate {
+				return nil, fmt.Errorf("memory: migrate store %s: %w", path, err)
+			}
+
 			return memory.NewStore(), nil
 		}
 
 		return nil, fmt.Errorf("memory: stat store %s: %w", path, err)
 	}
 
-	store, err := memory.Load(path)
+	store, err := memory.LoadWithOptions(path, memory.LoadOptions{Migrate: migrate})
 	if err != nil {
 		return nil, fmt.Errorf("memory: load store: %w", err)
 	}
@@ -960,7 +1263,15 @@ func loadMemoryStore(path string) (*memory.Store, error) {
 	return store, nil
 }
 
-func addSessionMemory(mem *memory.Store, store *session.Store) error {
+func sessionIndexPolicy(input memoryCommandInput) memory.SessionIndexPolicy {
+	policy := memory.DefaultSessionIndexPolicy()
+	policy.IncludeMessages = input.IncludeSessionMessages
+	policy.IncludeWorktreeMetadata = input.IncludeWorktreeMetadata
+
+	return policy
+}
+
+func addSessionMemory(mem *memory.Store, store *session.Store, policy memory.SessionIndexPolicy) error {
 	summaries, err := store.List()
 	if err != nil {
 		return fmt.Errorf("memory: list sessions: %w", err)
@@ -974,7 +1285,7 @@ func addSessionMemory(mem *memory.Store, store *session.Store) error {
 			return fmt.Errorf("memory: load session %s: %w", summary.ID, err)
 		}
 
-		if err := mem.AddSession(saved); err != nil {
+		if err := mem.AddSessionWithPolicy(saved, policy); err != nil {
 			return fmt.Errorf("memory: index session %s: %w", summary.ID, err)
 		}
 	}
