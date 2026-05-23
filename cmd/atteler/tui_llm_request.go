@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +19,11 @@ import (
 
 func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd {
 	return func() tea.Msg {
-		eventLines := newEventLineBuffer()
+		if request.liveCh != nil {
+			defer close(request.liveCh)
+		}
+
+		eventLines := newEventLineBuffer(request.liveCh)
 		ctx = events.WithEmitter(
 			ctx,
 			request.hookRunner.WithLogger(eventLines),
@@ -39,24 +44,32 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 
 		// When tools are enabled, run the agentic loop.
 		if request.useTools {
-			return callLLMWithTools(ctx, reg, params, request, eventLines)
+			return finishLLMResponse(request.liveCh, callLLMWithTools(ctx, reg, params, request, eventLines))
 		}
 
 		emitRequestContextManifest(ctx, reg, params.Model, params.Messages, request)
 
 		if err := validateRequestBudgetWithFallbacks(reg, params.Model, request.fallbackModels, params.Messages, request.maxInputTokens); err != nil {
-			return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines()}
+			return finishLLMResponse(request.liveCh, llmResponseMsg{
+				err:         err,
+				completedAt: time.Now(),
+				eventLines:  eventLines.Lines(),
+			})
 		}
 
 		resp, err := reg.CompleteWithFallback(ctx, params, request.fallbackModels)
 		if err != nil {
-			return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines()}
+			return finishLLMResponse(request.liveCh, llmResponseMsg{
+				err:         err,
+				completedAt: time.Now(),
+				eventLines:  eventLines.Lines(),
+			})
 		}
 
 		var usage tokenUsage
 		usage.addResponse(resp)
 
-		return llmResponseMsg{
+		return finishLLMResponse(request.liveCh, llmResponseMsg{
 			completedAt:   time.Now(),
 			content:       resp.Content,
 			provider:      resp.Provider,
@@ -64,6 +77,39 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 			eventLines:    eventLines.Lines(),
 			routeDecision: routeDecisionWithResponse(request.routeDecision, resp, routeTelemetryFromRegistry(reg)),
 			tokenUsage:    usage,
+		})
+	}
+}
+
+func finishLLMResponse(liveCh chan<- tea.Msg, msg llmResponseMsg) tea.Msg {
+	if liveCh == nil {
+		return msg
+	}
+
+	msg.liveEvents = true
+	liveCh <- msg
+
+	return nil
+}
+
+func listenForLLMLiveMessage(liveCh <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-liveCh
+		if !ok {
+			return nil
+		}
+
+		switch typed := msg.(type) {
+		case llmEventLineMsg:
+			typed.liveCh = liveCh
+
+			return typed
+		case llmToolOutputMsg:
+			typed.liveCh = liveCh
+
+			return typed
+		default:
+			return msg
 		}
 	}
 }
@@ -151,6 +197,22 @@ func callLLMWithTools(
 				SessionID:   request.eventBase.SessionID,
 				SessionPath: request.eventBase.SessionPath,
 			},
+			OutputCallback: func(chunk attshell.OutputChunk) {
+				sendLiveLLMToolOutput(request.liveCh, command, chunk)
+				emitFromContextWarning(ctx, events.Event{
+					Type:    events.CommandOutput,
+					Content: string(chunk.Data),
+					Metadata: map[string]string{
+						"command":      command,
+						"cwd":          request.workingDir,
+						"partial":      "true",
+						"sequence":     strconv.FormatInt(chunk.Sequence, 10),
+						"source":       "llm_tool",
+						"stream":       string(chunk.Stream),
+						"tool_call_id": call.ID,
+					},
+				})
+			},
 		})
 
 		output := formatShellContext(shellResultMsg{
@@ -217,6 +279,7 @@ func callLLMWithTools(
 			completedAt: time.Now(),
 			eventLines:  eventLines.Lines(),
 			toolLog:     toolLog,
+			liveEvents:  request.liveCh != nil,
 		}
 	}
 
@@ -232,6 +295,20 @@ func callLLMWithTools(
 		routeDecision: routeDecisionWithResponse(request.routeDecision, resp, routeTelemetryFromRegistry(reg)),
 		toolLog:       toolLog,
 		tokenUsage:    usage,
+		liveEvents:    request.liveCh != nil,
+	}
+}
+
+func sendLiveLLMToolOutput(liveCh chan<- tea.Msg, command string, chunk attshell.OutputChunk) {
+	if liveCh == nil {
+		return
+	}
+
+	liveCh <- llmToolOutputMsg{
+		command:  command,
+		stream:   string(chunk.Stream),
+		data:     string(chunk.Data),
+		sequence: chunk.Sequence,
 	}
 }
 

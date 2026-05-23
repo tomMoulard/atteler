@@ -21,6 +21,10 @@ type Logger struct {
 	w io.Writer
 }
 
+type flushWriter interface {
+	Flush() error
+}
+
 // NewLogger creates a logger. A nil writer disables logging.
 func NewLogger(w io.Writer) *Logger {
 	if w == nil {
@@ -64,6 +68,10 @@ func (l *Logger) Log(event Event) {
 	slog.Debug("lifecycle event", attrs...)
 
 	fmt.Fprintln(l.w, FormatLine(event))
+
+	if flusher, ok := l.w.(flushWriter); ok {
+		_ = flusher.Flush()
+	}
 }
 
 // FormatLine formats an event as one human-readable line.

@@ -38,7 +38,7 @@ const (
 	ContextManifest = "context_manifest"
 	// CommandExecute is emitted when Atteler starts a local command.
 	CommandExecute = "command_execute"
-	// CommandOutput is emitted when a local command finishes and output is available.
+	// CommandOutput is emitted when local command output is available.
 	CommandOutput = "command_output"
 	// ToolExecute is emitted when Atteler invokes a provider/tool.
 	ToolExecute = "tool_execute"
@@ -60,7 +60,7 @@ var supportedEventTypes = []SupportedEventType{
 	{Type: AgentExecute, Description: "Emitted when a configured agent is selected for work."},
 	{Type: AssistantMessage, Description: "Emitted after an assistant response is appended."},
 	{Type: CommandExecute, Description: "Emitted when Atteler starts a local command."},
-	{Type: CommandOutput, Description: "Emitted when a local command finishes and captured output is available."},
+	{Type: CommandOutput, Description: "Emitted when local command output is available."},
 	{Type: ContextAdd, Description: "Emitted when a local reference is added to LLM context."},
 	{Type: ContextManifest, Description: "Emitted before an LLM request with context audit metadata."},
 	{Type: Error, Description: "Emitted when an LLM request or session operation fails."},

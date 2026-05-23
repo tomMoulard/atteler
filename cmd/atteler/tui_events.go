@@ -18,12 +18,18 @@ import (
 )
 
 type eventLineBuffer struct {
-	lines []string
-	mu    sync.Mutex
+	liveCh chan<- tea.Msg
+	lines  []string
+	mu     sync.Mutex
 }
 
-func newEventLineBuffer() *eventLineBuffer {
-	return &eventLineBuffer{}
+func newEventLineBuffer(liveCh ...chan<- tea.Msg) *eventLineBuffer {
+	var ch chan<- tea.Msg
+	if len(liveCh) > 0 {
+		ch = liveCh[0]
+	}
+
+	return &eventLineBuffer{liveCh: ch}
 }
 
 func (b *eventLineBuffer) Write(p []byte) (int, error) {
@@ -46,6 +52,9 @@ func (b *eventLineBuffer) Write(p []byte) (int, error) {
 		}
 
 		b.lines = append(b.lines, line)
+		if b.liveCh != nil {
+			b.liveCh <- llmEventLineMsg{line: line}
+		}
 	}
 
 	return len(p), nil
@@ -259,6 +268,16 @@ func emitHook(ctx context.Context, runner *events.Runner, event events.Event) te
 		line := events.FormatLine(event)
 
 		return hookMsg{err: runner.Emit(ctx, event), line: line}
+	}
+}
+
+func emitHookQuiet(ctx context.Context, runner *events.Runner, event events.Event) tea.Cmd {
+	return func() tea.Msg {
+		if runner == nil {
+			return hookMsg{}
+		}
+
+		return hookMsg{err: runner.Emit(ctx, event)}
 	}
 }
 

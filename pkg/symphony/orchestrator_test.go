@@ -3,7 +3,9 @@ package symphony
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,6 +114,57 @@ func TestHandleWorkerExit_PublishedPRSchedulesMonitorAndReleasesClaim(t *testing
 	assert.False(t, monitor.NextCheckAt.IsZero())
 	require.NotNil(t, monitor.Timer)
 	monitor.Timer.Stop()
+}
+
+func TestHandleCodexUpdateRecordsCommandOutputMetadata(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Stream output", State: "OPEN"}
+	longOutput := strings.Repeat("x", 1200)
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: Config{}},
+			loaded:  true,
+		},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state: runtimeState{
+			Running: map[string]*runningEntry{
+				issue.ID: {
+					Issue:     issue,
+					StartedAt: time.Now().Add(-time.Second),
+					State:     issue.State,
+				},
+			},
+		},
+	}
+
+	orchestrator.handleCodexUpdate(codexUpdateEvent{
+		issueID: issue.ID,
+		event: CodexEvent{
+			Event:        codexEventExecCommandOutputDelta,
+			ThreadID:     "thread-1",
+			TurnID:       "turn-1",
+			SessionID:    "thread-1-turn-1",
+			CommandID:    "cmd-1",
+			ProcessID:    "proc-1",
+			Command:      "make test",
+			OutputStream: "stdout",
+			OutputChunk:  longOutput,
+		},
+	})
+
+	require.Len(t, orchestrator.state.RecentEvents, 1)
+	event := orchestrator.state.RecentEvents[0]
+	assert.Equal(t, "codex_event", event.Kind)
+	assert.Equal(t, issue.Identifier, event.Issue)
+	assert.Equal(t, codexEventExecCommandOutputDelta, event.Fields["event"])
+	assert.Equal(t, "cmd-1", event.Fields["command_id"])
+	assert.Equal(t, "proc-1", event.Fields["process_id"])
+	assert.Equal(t, "make test", event.Fields["command"])
+	assert.Equal(t, "stdout", event.Fields["stream"])
+	assert.Equal(t, commandOutputPreview(longOutput), event.Fields["output"])
+	assert.Equal(t, len(longOutput), event.Fields["output_bytes"])
+	assert.Equal(t, true, event.Fields["output_truncated"])
 }
 
 func TestHandlePullRequestCheckDue_DispatchesReworkForFailedChecks(t *testing.T) {

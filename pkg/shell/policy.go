@@ -319,7 +319,7 @@ func commandCWD(dir string) (string, error) {
 
 // RunCommand runs a command with captured stdout/stderr through the policy gate.
 func RunCommand(ctx context.Context, opts CommandOptions) (Result, error) {
-	stdout, stderr, outputLimit := commandOutputWriters(0)
+	stdout, stderr, outputLimit := commandOutputWriters(0, nil)
 	opts.Stdout = stdout
 	opts.Stderr = stderr
 

@@ -14,6 +14,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/promptcomplete"
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
 // Init returns the initial command.
@@ -57,11 +58,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m.updateChat(msg)
 
-	case llmResponseMsg:
-		return m.updateLLMResponse(msg)
+	case llmResponseMsg, llmEventLineMsg, llmToolOutputMsg:
+		return m.updateLLMMessage(msg)
 
-	case shellResultMsg:
-		return m.updateShellResult(msg)
+	case shellResultMsg, shellOutputMsg:
+		return m.updateShellMessage(msg)
 
 	case idleSuggestionRequestMsg, idleSuggestionMsg:
 		return m.updateIdleSuggestionMessage(msg)
@@ -85,6 +86,53 @@ func normalizeTerminalControlKeyMsg(msg tea.Msg) tea.Msg {
 	}
 
 	return msg
+}
+
+func (m model) updateLLMMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case llmResponseMsg:
+		return m.updateLLMResponse(msg)
+	case llmEventLineMsg, llmToolOutputMsg:
+		return m.updateLLMLiveMessage(msg)
+	default:
+		return m, nil
+	}
+}
+
+func (m model) updateLLMLiveMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case llmEventLineMsg:
+		return m, tea.Sequence(
+			tea.Println(dimStyle.Render(msg.line)),
+			listenForLLMLiveMessage(msg.liveCh),
+		)
+	case llmToolOutputMsg:
+		return m, tea.Sequence(
+			tea.Printf("%s", formatLLMToolOutputChunk(msg)),
+			listenForLLMLiveMessage(msg.liveCh),
+		)
+	default:
+		return m, nil
+	}
+}
+
+func formatLLMToolOutputChunk(msg llmToolOutputMsg) string {
+	if msg.stream == string(attshell.OutputStreamStderr) {
+		return errStyle.Render(msg.data)
+	}
+
+	return msg.data
+}
+
+func (m model) updateShellMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case shellResultMsg:
+		return m.updateShellResult(msg)
+	case shellOutputMsg:
+		return m.updateShellOutput(msg)
+	default:
+		return m, nil
+	}
 }
 
 func (m model) updateIdleSuggestionMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -733,6 +781,8 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 
 	confirmCh := make(chan agentLoopConfirmRequest, 1)
 	responseCh := make(chan bool, 1)
+	liveCh := make(chan tea.Msg, 64)
+
 	request := llmRequest{
 		eventBase: events.Event{
 			SessionID:   m.sessionState.ID,
@@ -760,6 +810,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		useTools:                    m.executionMode != executionModePlan,
 		confirmRequestCh:            confirmCh,
 		confirmResponseCh:           responseCh,
+		liveCh:                      liveCh,
 	}
 
 	return m, m.submitPromptRequestCommand(
@@ -773,6 +824,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		tickCmd,
 		confirmCh,
 		responseCh,
+		liveCh,
 	)
 }
 
@@ -787,6 +839,7 @@ func (m model) submitPromptRequestCommand(
 	tickCmd tea.Cmd,
 	confirmCh chan agentLoopConfirmRequest,
 	responseCh chan bool,
+	liveCh <-chan tea.Msg,
 ) tea.Cmd {
 	cmds := []tea.Cmd{
 		tea.Println(line),
@@ -827,7 +880,7 @@ func (m model) submitPromptRequestCommand(
 		llmCmd,
 	)
 
-	return tea.Batch(tea.Sequence(cmds...), tickCmd, listenForCheckpoint(confirmCh, responseCh))
+	return tea.Batch(tea.Sequence(cmds...), tickCmd, listenForCheckpoint(confirmCh, responseCh), listenForLLMLiveMessage(liveCh))
 }
 
 func (m model) inlineReferenceErrorCommand(

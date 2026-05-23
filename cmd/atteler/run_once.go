@@ -1530,12 +1530,35 @@ func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) ll
 			},
 		})
 
+		if logw != nil {
+			fmt.Fprintln(logw, dimStyle.Render("  $ "+command))
+		}
+
 		result, shellErr := attshell.RunBash(ctx, attshell.Options{
 			Command:        command,
 			Dir:            cwd,
 			Timeout:        5 * time.Minute,
 			MaxOutputBytes: agentLoopToolOutputLimit(ctx),
 			Audit:          audit,
+			OutputCallback: func(chunk attshell.OutputChunk) {
+				if logw != nil {
+					fmt.Fprint(logw, dimStyle.Render(string(chunk.Data)))
+				}
+
+				emitFromContextWarning(ctx, events.Event{
+					Type:    events.CommandOutput,
+					Content: string(chunk.Data),
+					Metadata: map[string]string{
+						"command":      command,
+						"cwd":          cwd,
+						"partial":      "true",
+						"sequence":     strconv.FormatInt(chunk.Sequence, 10),
+						"source":       "llm_tool",
+						"stream":       string(chunk.Stream),
+						"tool_call_id": call.ID,
+					},
+				})
+			},
 		})
 
 		output := formatShellContext(shellResultMsg{
@@ -1544,7 +1567,10 @@ func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) ll
 			stderr:  result.Stderr,
 			err:     shellErr,
 		})
-		fmt.Fprintln(logw, dimStyle.Render("  "+output))
+		if shellErr != nil && logw != nil {
+			fmt.Fprintln(logw, dimStyle.Render("[error] "+shellErr.Error()))
+		}
+
 		emitFromContextWarning(ctx, commandOutputEvent(
 			"", "", "", "", cwd, command, output, shellErr,
 			map[string]string{

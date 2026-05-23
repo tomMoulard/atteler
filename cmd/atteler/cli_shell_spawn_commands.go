@@ -86,14 +86,32 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 			SessionID:   state.sessionState.ID,
 			SessionPath: state.sessionStore.Path(state.sessionState.ID),
 		},
-	})
-	if result.Stdout != "" {
-		fmt.Print(result.Stdout)
-	}
+		OutputCallback: func(chunk attshell.OutputChunk) {
+			switch chunk.Stream {
+			case attshell.OutputStreamStderr:
+				_, _ = os.Stderr.Write(chunk.Data)
+			default:
+				_, _ = os.Stdout.Write(chunk.Data)
+			}
 
-	if result.Stderr != "" {
-		fmt.Fprint(os.Stderr, result.Stderr)
-	}
+			emitHookWarning(ctx, state.hookRunner, events.Event{
+				Type:        events.CommandOutput,
+				SessionID:   state.sessionState.ID,
+				SessionPath: state.sessionStore.Path(state.sessionState.ID),
+				Agent:       state.selectedAgent,
+				Model:       state.selectedModel,
+				Content:     string(chunk.Data),
+				Metadata: map[string]string{
+					"command":  input.Command,
+					"cwd":      dir,
+					"partial":  "true",
+					"sequence": strconv.FormatInt(chunk.Sequence, 10),
+					"source":   "cli",
+					"stream":   string(chunk.Stream),
+				},
+			})
+		},
+	})
 
 	output := formatShellContext(shellResultMsg{
 		command: input.Command,
