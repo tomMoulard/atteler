@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,6 +21,36 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			name: "code intel command",
 			args: []string{"code-intel", "summary"},
 			want: []string{"--code-summary"},
+		},
+		{
+			name: "code intel command keeps json flag",
+			args: []string{"code-intel", "summary", "--json"},
+			want: []string{"--code-summary", "--json"},
+		},
+		{
+			name: "code intel command keeps domain scoped json flag",
+			args: []string{"code-intel", "--json", "summary"},
+			want: []string{"--json", "--code-summary"},
+		},
+		{
+			name: "code intel command keeps leading json flag",
+			args: []string{"--json", "code-intel", "summary"},
+			want: []string{"--json", "--code-summary"},
+		},
+		{
+			name: "code intel command keeps output format flag",
+			args: []string{"code-intel", "summary", "--output", "json"},
+			want: []string{"--code-summary", "--output", "json"},
+		},
+		{
+			name: "code intel lsp workspace keeps json flag",
+			args: []string{"code-intel", "lsp-workspace", "Handler", "--json"},
+			want: []string{"--lsp-workspace-symbols", "Handler", "--json"},
+		},
+		{
+			name: "code intel routes descriptor generated command",
+			args: []string{"code-intel", "package-import-path", "main:context"},
+			want: []string{"--code-package-import-path", "main:context"},
 		},
 		{
 			name: "review command keeps follow-on flags",
@@ -88,6 +119,57 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			assert.Equal(t, tt.want, got.Args)
 		})
 	}
+}
+
+func TestTranslateCLIArgs_CodeIntelDescriptorCommandsRouteToLegacyFlags(t *testing.T) {
+	t.Parallel()
+
+	fs := newRegisteredFlagSetForTest(t)
+
+	for _, descriptor := range codeIntelCommandDescriptors() {
+		t.Run(descriptor.DomainCommand, func(t *testing.T) {
+			t.Parallel()
+
+			args := []string{"code-intel", descriptor.DomainCommand}
+			want := []string{descriptor.LegacyFlag}
+
+			if strings.Contains(descriptor.Args, "<") {
+				args = append(args, "fixture")
+				want = append(want, "fixture")
+			}
+
+			got := translateCLIArgsWithFlagSet(args, fs)
+			require.NoError(t, got.Err)
+			assert.False(t, got.Help)
+			assert.Equal(t, want, got.Args)
+
+			jsonArgs := append(append([]string(nil), args...), "--json")
+			jsonWant := append(append([]string(nil), want...), "--json")
+			jsonGot := translateCLIArgsWithFlagSet(jsonArgs, fs)
+			require.NoError(t, jsonGot.Err)
+			assert.False(t, jsonGot.Help)
+			assert.Equal(t, jsonWant, jsonGot.Args)
+
+			outputJSONArgs := append(append([]string(nil), args...), "--output", "json")
+			outputJSONWant := append(append([]string(nil), want...), "--output", "json")
+			outputJSONGot := translateCLIArgsWithFlagSet(outputJSONArgs, fs)
+			require.NoError(t, outputJSONGot.Err)
+			assert.False(t, outputJSONGot.Help)
+			assert.Equal(t, outputJSONWant, outputJSONGot.Args)
+		})
+	}
+}
+
+func TestTranslateCLIArgs_CodeIntelPaginationFlagsStayWithGroupedCommand(t *testing.T) {
+	t.Parallel()
+
+	got := translateCLIArgsWithFlagSet(
+		[]string{"code-intel", "symbol", "main", "--code-limit", "1", "--code-offset", "2"},
+		newRegisteredFlagSetForTest(t),
+	)
+	require.NoError(t, got.Err)
+	assert.False(t, got.Help)
+	assert.Equal(t, []string{"--code-symbol", "main", "--code-limit", "1", "--code-offset", "2"}, got.Args)
 }
 
 func TestTranslateCLIArgs_DomainWordsCanStartPositionalPrompts(t *testing.T) {
@@ -763,10 +845,130 @@ func TestTranslateCLIArgs_DomainHelpAndUnknownCommand(t *testing.T) {
 	assert.True(t, trailingFlagHelp.Help)
 	assert.Empty(t, trailingFlagHelp.HelpDomain)
 
-	unknown := translateCLIArgs([]string{"code-intel", "wat"})
-	require.NoError(t, unknown.Err)
-	assert.False(t, unknown.Help)
-	assert.Equal(t, []string{"code-intel", "wat"}, unknown.Args)
+	for _, test := range []struct {
+		name string
+		want string
+	}{
+		{name: "code-intel", want: "unknown code-intel command \"wat\"; run `atteler help code-intel`"},
+		{name: "codeintel", want: "unknown codeintel command \"wat\"; run `atteler help codeintel`"},
+		{name: "code-intelligence", want: "unknown code-intelligence command \"wat\"; run `atteler help code-intelligence`"},
+	} {
+		t.Run("unknown code-intel command/"+test.name, func(t *testing.T) {
+			t.Parallel()
+
+			unknownCodeIntel := translateCLIArgs([]string{test.name, "wat"})
+			require.EqualError(t, unknownCodeIntel.Err, test.want)
+			assert.False(t, unknownCodeIntel.Help)
+			assert.Empty(t, unknownCodeIntel.Args)
+		})
+	}
+
+	unknownCodePrompt := translateCLIArgs([]string{"code", "wat"})
+	require.NoError(t, unknownCodePrompt.Err)
+	assert.False(t, unknownCodePrompt.Help)
+	assert.Equal(t, []string{"code", "wat"}, unknownCodePrompt.Args)
+
+	registeredFlags := newRegisteredFlagSetForTest(t)
+
+	unknownCodeIntelWithFlag := translateCLIArgsWithFlagSet([]string{"code-intel", "--json", "wat"}, registeredFlags)
+	require.EqualError(t, unknownCodeIntelWithFlag.Err, "unknown code-intel command \"wat\"; run `atteler help code-intel`")
+	assert.False(t, unknownCodeIntelWithFlag.Help)
+	assert.Empty(t, unknownCodeIntelWithFlag.Args)
+
+	unknownCodePromptWithFlag := translateCLIArgsWithFlagSet([]string{"code", "--json", "wat"}, registeredFlags)
+	require.NoError(t, unknownCodePromptWithFlag.Err)
+	assert.False(t, unknownCodePromptWithFlag.Help)
+	assert.Equal(t, []string{"code", "--json", "wat"}, unknownCodePromptWithFlag.Args)
+
+	unknownCodeIntelFlag := translateCLIArgsWithFlagSet([]string{"code-intel", "--wat", "summary"}, registeredFlags)
+	require.EqualError(t, unknownCodeIntelFlag.Err, "unknown code-intel flag \"--wat\"; run `atteler help code-intel`")
+	assert.False(t, unknownCodeIntelFlag.Help)
+	assert.Empty(t, unknownCodeIntelFlag.Args)
+
+	unknownCodeIntelFlagAfterOutputFlag := translateCLIArgsWithFlagSet([]string{"code-intel", "--json", "--wat", "summary"}, registeredFlags)
+	require.EqualError(t, unknownCodeIntelFlagAfterOutputFlag.Err, "unknown code-intel flag \"--wat\"; run `atteler help code-intel`")
+	assert.False(t, unknownCodeIntelFlagAfterOutputFlag.Help)
+	assert.Empty(t, unknownCodeIntelFlagAfterOutputFlag.Args)
+
+	unknownCodeIntelCommandTailFlag := translateCLIArgsWithFlagSet([]string{"code-intel", "summary", "--wat"}, registeredFlags)
+	require.EqualError(t, unknownCodeIntelCommandTailFlag.Err, "unknown code-intel flag \"--wat\"; run `atteler help code-intel`")
+	assert.False(t, unknownCodeIntelCommandTailFlag.Help)
+	assert.Empty(t, unknownCodeIntelCommandTailFlag.Args)
+
+	unknownCodeIntelCommandTailFlagBeforeRequiredArg := translateCLIArgsWithFlagSet([]string{"code-intel", "symbol", "--wat"}, registeredFlags)
+	require.EqualError(t, unknownCodeIntelCommandTailFlagBeforeRequiredArg.Err, "unknown code-intel flag \"--wat\"; run `atteler help code-intel`")
+	assert.False(t, unknownCodeIntelCommandTailFlagBeforeRequiredArg.Help)
+	assert.Empty(t, unknownCodeIntelCommandTailFlagBeforeRequiredArg.Args)
+
+	unknownCodeIntelCommandTailFlagAfterRequiredArg := translateCLIArgsWithFlagSet([]string{"code-intel", "symbol", "Run", "--wat"}, registeredFlags)
+	require.EqualError(t, unknownCodeIntelCommandTailFlagAfterRequiredArg.Err, "unknown code-intel flag \"--wat\"; run `atteler help code-intel`")
+	assert.False(t, unknownCodeIntelCommandTailFlagAfterRequiredArg.Help)
+	assert.Empty(t, unknownCodeIntelCommandTailFlagAfterRequiredArg.Args)
+
+	unknownCodeIntelCommandTailFlagAfterScopedPrefix := translateCLIArgsWithFlagSet([]string{"code-intel", "--json", "summary", "--wat"}, registeredFlags)
+	require.EqualError(t, unknownCodeIntelCommandTailFlagAfterScopedPrefix.Err, "unknown code-intel flag \"--wat\"; run `atteler help code-intel`")
+	assert.False(t, unknownCodeIntelCommandTailFlagAfterScopedPrefix.Help)
+	assert.Empty(t, unknownCodeIntelCommandTailFlagAfterScopedPrefix.Args)
+
+	delimitedCodeIntelDashValue := translateCLIArgsWithFlagSet([]string{"code-intel", "symbol", "--", "--generated-name"}, registeredFlags)
+	require.NoError(t, delimitedCodeIntelDashValue.Err)
+	assert.False(t, delimitedCodeIntelDashValue.Help)
+	assert.Equal(t, []string{"--code-symbol", "--generated-name"}, delimitedCodeIntelDashValue.Args)
+
+	unknownCodePromptFlag := translateCLIArgsWithFlagSet([]string{"code", "--wat", "summary"}, registeredFlags)
+	require.NoError(t, unknownCodePromptFlag.Err)
+	assert.False(t, unknownCodePromptFlag.Help)
+	assert.Equal(t, []string{"code", "--wat", "summary"}, unknownCodePromptFlag.Args)
+
+	missingCodeIntelCommandWithFlag := translateCLIArgsWithFlagSet([]string{"code-intel", "--json"}, registeredFlags)
+	require.EqualError(t, missingCodeIntelCommandWithFlag.Err, "code-intel requires a command; run `atteler help code-intel`")
+	assert.False(t, missingCodeIntelCommandWithFlag.Help)
+	assert.Empty(t, missingCodeIntelCommandWithFlag.Args)
+
+	missingCodeIntelCommandWithOutputFlag := translateCLIArgsWithFlagSet([]string{"code-intel", "--output", "json"}, registeredFlags)
+	require.EqualError(t, missingCodeIntelCommandWithOutputFlag.Err, "code-intel requires a command; run `atteler help code-intel`")
+	assert.False(t, missingCodeIntelCommandWithOutputFlag.Help)
+	assert.Empty(t, missingCodeIntelCommandWithOutputFlag.Args)
+
+	missingCodeIntelCommandWithDisabledSelector := translateCLIArgsWithFlagSet([]string{"code-intel", "--code-summary=false"}, registeredFlags)
+	require.EqualError(t, missingCodeIntelCommandWithDisabledSelector.Err, "code-intel requires a command; run `atteler help code-intel`")
+	assert.False(t, missingCodeIntelCommandWithDisabledSelector.Help)
+	assert.Empty(t, missingCodeIntelCommandWithDisabledSelector.Args)
+
+	missingCodeIntelCommandWithEmptySelector := translateCLIArgsWithFlagSet([]string{"code-intel", "--code-symbol="}, registeredFlags)
+	require.EqualError(t, missingCodeIntelCommandWithEmptySelector.Err, "code-intel requires a command; run `atteler help code-intel`")
+	assert.False(t, missingCodeIntelCommandWithEmptySelector.Help)
+	assert.Empty(t, missingCodeIntelCommandWithEmptySelector.Args)
+
+	missingCodeIntelCommandWithEmptySeparateSelector := translateCLIArgsWithFlagSet([]string{"code-intel", "--code-symbol", ""}, registeredFlags)
+	require.EqualError(t, missingCodeIntelCommandWithEmptySeparateSelector.Err, "code-intel requires a command; run `atteler help code-intel`")
+	assert.False(t, missingCodeIntelCommandWithEmptySeparateSelector.Help)
+	assert.Empty(t, missingCodeIntelCommandWithEmptySeparateSelector.Args)
+
+	missingCodeIntelCommandWithEmptyLSPSelector := translateCLIArgsWithFlagSet([]string{"code-intel", "--lsp-workspace-symbols", ""}, registeredFlags)
+	require.EqualError(t, missingCodeIntelCommandWithEmptyLSPSelector.Err, "code-intel requires a command; run `atteler help code-intel`")
+	assert.False(t, missingCodeIntelCommandWithEmptyLSPSelector.Help)
+	assert.Empty(t, missingCodeIntelCommandWithEmptyLSPSelector.Args)
+
+	scopedCodeIntelLegacyFlag := translateCLIArgsWithFlagSet([]string{"code-intel", "--json", "--code-summary"}, registeredFlags)
+	require.NoError(t, scopedCodeIntelLegacyFlag.Err)
+	assert.False(t, scopedCodeIntelLegacyFlag.Help)
+	assert.Equal(t, []string{"--json", "--code-summary"}, scopedCodeIntelLegacyFlag.Args)
+
+	scopedCodeIntelLegacyOutputFlag := translateCLIArgsWithFlagSet([]string{"code-intel", "--output", "json", "--code-summary"}, registeredFlags)
+	require.NoError(t, scopedCodeIntelLegacyOutputFlag.Err)
+	assert.False(t, scopedCodeIntelLegacyOutputFlag.Help)
+	assert.Equal(t, []string{"--output", "json", "--code-summary"}, scopedCodeIntelLegacyOutputFlag.Args)
+
+	scopedCodeIntelLSPLegacyFlag := translateCLIArgsWithFlagSet([]string{"code-intel", "--json", "--lsp-symbols", "--lsp-file", "main.go"}, registeredFlags)
+	require.NoError(t, scopedCodeIntelLSPLegacyFlag.Err)
+	assert.False(t, scopedCodeIntelLSPLegacyFlag.Help)
+	assert.Equal(t, []string{"--json", "--lsp-symbols", "--lsp-file", "main.go"}, scopedCodeIntelLSPLegacyFlag.Args)
+
+	scopedCodeIntelLSPWorkspaceLegacyFlag := translateCLIArgsWithFlagSet([]string{"code-intel", "--output", "json", "--lsp-workspace-symbols", "Handler"}, registeredFlags)
+	require.NoError(t, scopedCodeIntelLSPWorkspaceLegacyFlag.Err)
+	assert.False(t, scopedCodeIntelLSPWorkspaceLegacyFlag.Help)
+	assert.Equal(t, []string{"--output", "json", "--lsp-workspace-symbols", "Handler"}, scopedCodeIntelLSPWorkspaceLegacyFlag.Args)
 
 	unknownAlias := translateCLIArgs([]string{"session", "wat"})
 	require.NoError(t, unknownAlias.Err)
@@ -869,6 +1071,11 @@ func TestTranslateCLIArgs_RequiredCommandArgsDoNotConsumeTrailingFlags(t *testin
 			want: "session export requires <id-or-path>",
 		},
 		{
+			name: "code-intel command with only output flag",
+			args: []string{"code-intel", "symbol", "--json"},
+			want: "code-intel symbol requires <name>",
+		},
+		{
 			name: "opaque shell command with no command",
 			args: []string{"agents", "bash"},
 			want: "agents bash requires <command>",
@@ -904,6 +1111,8 @@ func TestTranslateCLIArgs_RequiredCommandArgsDoNotConsumeTrailingFlags(t *testin
 			fs.String("run-plugin", "", "")
 			fs.String("export-session", "", "")
 			fs.String("export-format", "markdown", "")
+			fs.String("code-symbol", "", "")
+			fs.Bool("json", false, "")
 			fs.String("bash", "", "")
 			fs.String("eval-output", "", "")
 

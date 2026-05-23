@@ -31,7 +31,7 @@ func TestSummarizeCodeFiles(t *testing.T) {
 	}
 }
 
-func TestFindAndFormatCodeFile(t *testing.T) {
+func TestFindCodeFile(t *testing.T) {
 	t.Parallel()
 
 	root := filepath.Join("tmp", "repo")
@@ -46,18 +46,6 @@ func TestFindAndFormatCodeFile(t *testing.T) {
 	found, ok := findCodeFile(root, idx, "pkg/llm/client.go")
 	if !ok || found.Path != file.Path {
 		require.Failf(t, "expected to find code file", "found=%#v ok=%v", found, ok)
-	}
-
-	got := formatCodeFile(root, file)
-
-	want := "path=pkg/llm/client.go	package=llm	imports=2	symbols=1"
-	if got != want {
-		require.Failf(t, "unexpected code file format", "got %q, want %q", got, want)
-	}
-
-	symbol := formatCodeFileSymbol(file.Symbols[0])
-	if symbol != "Client	kind=type	line=12" {
-		require.Failf(t, "unexpected code file symbol format", "got %q", symbol)
 	}
 }
 
@@ -80,7 +68,7 @@ func TestSummarizeAndFormatCodePackageFiles(t *testing.T) {
 		require.Failf(t, "unexpected package files", "got %#v, want %#v", files, wantFiles)
 	}
 
-	got := formatCodePackageFile(files[0])
+	got := formatCodeIntelFile(codeIntelFilesFromPackageFiles(files)[0])
 
 	want := "path=pkg/llm/a.go	package=llm	symbols=1	imports=2"
 	if got != want {
@@ -106,7 +94,7 @@ func TestSummarizeAndFormatCodePackages(t *testing.T) {
 		require.Failf(t, "unexpected package summaries", "got %#v, want %#v", packages, wantPackages)
 	}
 
-	got := formatCodePackageSummary(packages[1])
+	got := formatCodeIntelPackage(codeIntelPackagesFromSummaries(packages)[1])
 
 	want := "package=main	files=2	symbols=3"
 	if got != want {
@@ -117,7 +105,7 @@ func TestSummarizeAndFormatCodePackages(t *testing.T) {
 func TestFormatCodeSummary(t *testing.T) {
 	t.Parallel()
 
-	got := formatCodeSummary(codeSummary{
+	got := formatCodeIntelSummary(codeIntelSummary{
 		Files:    3,
 		Packages: 2,
 		Symbols:  7,
@@ -146,7 +134,7 @@ func TestCountPackages(t *testing.T) {
 func TestFormatCodeCycle(t *testing.T) {
 	t.Parallel()
 
-	got := formatCodeCycle(1, []codegraph.NodeID{"pkg/a", "pkg/b", "pkg/a"})
+	got := formatCodeIntelCycle(codeIntelCyclesFromGraph([][]codegraph.NodeID{{"pkg/a", "pkg/b", "pkg/a"}})[0])
 
 	want := "cycle=1	nodes=pkg/a -> pkg/b -> pkg/a"
 	if got != want {
@@ -157,7 +145,7 @@ func TestFormatCodeCycle(t *testing.T) {
 func TestFormatCodeLayer(t *testing.T) {
 	t.Parallel()
 
-	got := formatCodeLayer(2, []codegraph.NodeID{"pkg/a", "pkg/b"})
+	got := formatCodeIntelLayer(codeIntelLayer{Index: 2, Nodes: []string{"pkg/a", "pkg/b"}})
 
 	want := "layer=2	nodes=pkg/a,pkg/b"
 	if got != want {
@@ -211,10 +199,10 @@ func TestImportGraphReachableAndNormalizeTarget(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	graph, err := importGraph(root)
-	if err != nil {
-		require.NoError(t, err)
-	}
+	idx, err := codeintel.IndexDir(root)
+	require.NoError(t, err)
+
+	graph := importGraphFromIndex(root, idx)
 
 	if got := normalizeCodeGraphTarget(root, file); got != "pkg/runner.go" {
 		require.Failf(t, "unexpected normalized absolute target", "got %q", got)

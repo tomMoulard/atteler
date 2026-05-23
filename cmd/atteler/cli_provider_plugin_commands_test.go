@@ -101,10 +101,10 @@ func TestMCPCommandInputsFromOptions(t *testing.T) {
 	}, mcpInvokeCommandInputFromOptions(opts))
 }
 
-func TestFormatLSPSymbols(t *testing.T) {
+func TestCodeIntelLSPTextRendersFromSchemaResponse(t *testing.T) {
 	t.Parallel()
 
-	got := formatLSPSymbols([]lsp.Symbol{{
+	response := buildLSPCodeIntelResponse(lspSymbolsCommandInput{DocumentSymbols: true}, []lsp.Symbol{{
 		Name:           "Handle",
 		Kind:           12,
 		Detail:         "func()",
@@ -119,8 +119,24 @@ func TestFormatLSPSymbols(t *testing.T) {
 		}},
 	}})
 
+	var out strings.Builder
+	require.NoError(t, writeCodeIntelResponse(&out, response, outputFormatText))
+
+	got := out.String()
 	assert.Contains(t, got, "Handle\tkind=12\trange=2:1-4:2\tdetail=func()\tcontainer=server\turi=file:///repo/main.go")
 	assert.Contains(t, got, "  child\tkind=13\trange=3:1-3:5")
+}
+
+func TestRunLSPSymbolsRejectsInvalidOutputBeforeStartingLSP(t *testing.T) {
+	t.Parallel()
+
+	err := runLSPSymbols(t.Context(), lspSymbolsCommandInput{
+		DocumentSymbols: true,
+		JSON:            true,
+		OutputFormat:    "xml",
+	})
+
+	require.EqualError(t, err, `unsupported output format "xml" (supported: text, json)`)
 }
 
 func TestFormatHookEventType(t *testing.T) {

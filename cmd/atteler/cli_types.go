@@ -358,6 +358,7 @@ type cliOptions struct {
 	agentMemoryTTL                     positiveIntFlag
 	retrievalLimit                     positiveIntFlag
 	vectorLimit                        positiveIntFlag
+	codeLimit                          positiveIntFlag
 	mergeArtifactMaxBytes              positiveIntFlag
 	routeInputTokens                   positiveIntFlag
 	routeOutputTokens                  positiveIntFlag
@@ -376,6 +377,7 @@ type cliOptions struct {
 	evaluationScore                    nonNegativeIntFlag
 	evalExitCode                       nonNegativeIntFlag
 	evaluationDurationMillis           nonNegativeIntFlag
+	codeOffset                         nonNegativeIntFlag
 	seed                               nonNegativeIntFlag
 	reasoningLevel                     string
 	temperature                        floatFlag
@@ -410,6 +412,7 @@ type cliOptions struct {
 	listCodeSymbolFileSummary          bool
 	listCodePackageImportSummary       bool
 	listCodePackages                   bool
+	jsonOutput                         bool
 	listSessions                       bool
 	listHeadless                       bool
 	recoverHeadless                    bool

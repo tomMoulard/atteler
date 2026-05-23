@@ -47,15 +47,16 @@ const (
 )
 
 type commandContract struct {
-	Summary       string                `json:"summary"`
-	InputType     string                `json:"input_type"`
-	InputFlags    []string              `json:"input_flags"`
-	ConflictRules []commandConflictRule `json:"conflict_rules"`
-	Examples      []string              `json:"examples"`
-	SideEffects   []string              `json:"side_effects"`
-	OutputModes   []string              `json:"output_modes"`
-	Fixtures      []commandFixture      `json:"fixtures"`
-	Overrides     []string              `json:"overrides,omitempty"`
+	Summary          string                `json:"summary"`
+	InputType        string                `json:"input_type"`
+	InputFlags       []string              `json:"input_flags"`
+	ConflictRules    []commandConflictRule `json:"conflict_rules"`
+	Examples         []string              `json:"examples"`
+	SideEffects      []string              `json:"side_effects"`
+	OutputModes      []string              `json:"output_modes"`
+	Fixtures         []commandFixture      `json:"fixtures"`
+	Overrides        []string              `json:"overrides,omitempty"`
+	CodeIntelQueries []codeIntelQueryDoc   `json:"code_intel_queries,omitempty"`
 }
 
 //nolint:govet // JSON readability matters more than pointer-byte packing.
@@ -80,23 +81,28 @@ type commandSurface struct {
 }
 
 type commandSurfaceDomain struct {
-	Name     string                        `json:"name"`
-	Title    string                        `json:"title"`
-	Summary  string                        `json:"summary"`
-	Aliases  []string                      `json:"aliases,omitempty"`
-	Commands []commandSurfaceDomainCommand `json:"commands"`
-	Examples []string                      `json:"examples,omitempty"`
+	Name            string                        `json:"name"`
+	Title           string                        `json:"title"`
+	Summary         string                        `json:"summary"`
+	Aliases         []string                      `json:"aliases,omitempty"`
+	Commands        []commandSurfaceDomainCommand `json:"commands"`
+	RoutingCommands []commandSurfaceDomainCommand `json:"routing_commands,omitempty"`
+	Examples        []string                      `json:"examples,omitempty"`
 }
 
 type commandSurfaceDomainCommand struct {
 	Name             string   `json:"name"`
 	Summary          string   `json:"summary"`
 	Args             string   `json:"args,omitempty"`
+	TextOutput       string   `json:"text_output,omitempty"`
+	JSONSchema       string   `json:"json_schema,omitempty"`
 	Aliases          []string `json:"aliases,omitempty"`
+	Examples         []string `json:"examples,omitempty"`
 	LegacyFlags      []string `json:"legacy_flags,omitempty"`
 	DispatchCommands []string `json:"dispatch_commands,omitempty"`
 	SideEffects      []string `json:"side_effects,omitempty"`
 	OutputModes      []string `json:"output_modes,omitempty"`
+	JSONFields       []string `json:"json_fields,omitempty"`
 	JoinArgs         bool     `json:"join_args,omitempty"`
 	PromptAfterValue bool     `json:"prompt_after_value,omitempty"`
 	PromptFromStdin  bool     `json:"prompt_from_stdin,omitempty"`
@@ -104,18 +110,19 @@ type commandSurfaceDomainCommand struct {
 }
 
 type commandSurfaceCommand struct {
-	Name          string                `json:"name"`
-	Tier          string                `json:"tier"`
-	Summary       string                `json:"summary"`
-	InputType     string                `json:"input_type"`
-	InputFields   []string              `json:"input_fields,omitempty"`
-	InputFlags    []string              `json:"input_flags"`
-	ConflictRules []commandConflictRule `json:"conflict_rules"`
-	Examples      []string              `json:"examples"`
-	SideEffects   []string              `json:"side_effects"`
-	OutputModes   []string              `json:"output_modes"`
-	Fixtures      []commandFixture      `json:"fixtures"`
-	Overrides     []string              `json:"overrides,omitempty"`
+	Name             string                `json:"name"`
+	Tier             string                `json:"tier"`
+	Summary          string                `json:"summary"`
+	InputType        string                `json:"input_type"`
+	InputFields      []string              `json:"input_fields,omitempty"`
+	InputFlags       []string              `json:"input_flags"`
+	ConflictRules    []commandConflictRule `json:"conflict_rules"`
+	Examples         []string              `json:"examples"`
+	SideEffects      []string              `json:"side_effects"`
+	OutputModes      []string              `json:"output_modes"`
+	Fixtures         []commandFixture      `json:"fixtures"`
+	Overrides        []string              `json:"overrides,omitempty"`
+	CodeIntelQueries []codeIntelQueryDoc   `json:"code_intel_queries,omitempty"`
 }
 
 type commandSurfaceSlashCommand struct {
@@ -193,6 +200,12 @@ func withOverrides(names ...string) func(*commandContract) {
 func withExamples(examples ...string) func(*commandContract) {
 	return func(contract *commandContract) {
 		contract.Examples = normalizeContractList(examples)
+	}
+}
+
+func withCodeIntelQueries(queries []codeIntelQueryDoc) func(*commandContract) {
+	return func(contract *commandContract) {
+		contract.CodeIntelQueries = append([]codeIntelQueryDoc(nil), queries...)
 	}
 }
 
@@ -485,6 +498,8 @@ func buildCommandSurface(registry []command) commandSurface {
 			OutputModes:   append([]string(nil), cmd.contract.OutputModes...),
 			Fixtures:      append([]commandFixture(nil), cmd.contract.Fixtures...),
 			Overrides:     append([]string(nil), cmd.contract.Overrides...),
+			CodeIntelQueries: append([]codeIntelQueryDoc(nil),
+				cmd.contract.CodeIntelQueries...),
 		})
 	}
 
@@ -503,6 +518,8 @@ func buildCommandSurface(registry []command) commandSurface {
 			OutputModes:   append([]string(nil), cmd.contract.OutputModes...),
 			Fixtures:      append([]commandFixture(nil), cmd.contract.Fixtures...),
 			Overrides:     append([]string(nil), cmd.contract.Overrides...),
+			CodeIntelQueries: append([]codeIntelQueryDoc(nil),
+				cmd.contract.CodeIntelQueries...),
 		})
 	}
 
@@ -577,33 +594,63 @@ func commandInputFieldNames(inputType string) []string {
 
 func commandSurfaceDomains(commands []commandSurfaceCommand) []commandSurfaceDomain {
 	domains := make([]commandSurfaceDomain, 0, len(cliHelpDomains))
-	for _, domain := range cliHelpDomains {
+	for i := range cliHelpDomains {
+		domain := &cliHelpDomains[i]
 		domains = append(domains, commandSurfaceDomain{
-			Name:     domain.Name,
-			Title:    domain.Title,
-			Summary:  domain.Summary,
-			Aliases:  append([]string(nil), domain.Aliases...),
-			Commands: commandSurfaceDomainCommands(domain.Commands, commands),
-			Examples: append([]string(nil), domain.Examples...),
+			Name:            domain.Name,
+			Title:           domain.Title,
+			Summary:         domain.Summary,
+			Aliases:         append([]string(nil), domain.Aliases...),
+			Commands:        commandSurfaceDomainCommands(domain.Commands, commands),
+			RoutingCommands: commandSurfaceDomainCommands(domainRoutingOnlyCommands(domain), commands),
+			Examples:        append([]string(nil), domain.Examples...),
 		})
 	}
 
 	return domains
 }
 
+func domainRoutingOnlyCommands(domain *cliHelpDomain) []cliCommandAlias {
+	if len(domain.RoutingCommands) == 0 {
+		return nil
+	}
+
+	visible := make(map[string]struct{}, len(domain.Commands))
+	for i := range domain.Commands {
+		visible[normalizeHelpName(domain.Commands[i].Name)] = struct{}{}
+	}
+
+	routingOnly := make([]cliCommandAlias, 0, len(domain.RoutingCommands))
+	for i := range domain.RoutingCommands {
+		command := domain.RoutingCommands[i]
+		if _, ok := visible[normalizeHelpName(command.Name)]; ok {
+			continue
+		}
+
+		routingOnly = append(routingOnly, command)
+	}
+
+	return routingOnly
+}
+
 func commandSurfaceDomainCommands(commands []cliCommandAlias, dispatchCommands []commandSurfaceCommand) []commandSurfaceDomainCommand {
 	out := make([]commandSurfaceDomainCommand, 0, len(commands))
-	for _, command := range commands {
+	for i := range commands {
+		command := &commands[i]
 		matches := domainCommandDispatchMatches(command.Legacy, dispatchCommands)
 		out = append(out, commandSurfaceDomainCommand{
 			Name:             command.Name,
 			Summary:          command.Summary,
 			Args:             command.Args,
+			TextOutput:       command.TextOutput,
+			JSONSchema:       command.JSONSchema,
 			Aliases:          append([]string(nil), command.Aliases...),
+			Examples:         append([]string(nil), command.Examples...),
 			LegacyFlags:      append([]string(nil), command.Legacy...),
 			DispatchCommands: domainCommandDispatchNames(matches),
 			SideEffects:      domainCommandSideEffects(matches),
 			OutputModes:      domainCommandOutputModes(matches),
+			JSONFields:       append([]string(nil), command.JSONFields...),
 			JoinArgs:         command.JoinArgs,
 			PromptAfterValue: command.PromptAfterValue,
 			PromptFromStdin:  command.PromptFromStdin,
@@ -765,34 +812,8 @@ func renderCommandSurfaceMarkdown(surface commandSurface) string {
 		out.WriteString(domain.Summary)
 		out.WriteString("\n\n")
 
-		if len(domain.Commands) > 0 {
-			out.WriteString("Commands:\n")
-
-			for commandIndex := range domain.Commands {
-				command := &domain.Commands[commandIndex]
-
-				out.WriteString("- `")
-				out.WriteString(command.Name)
-
-				if command.Args != "" {
-					out.WriteString(" ")
-					out.WriteString(command.Args)
-				}
-
-				out.WriteString("`: ")
-				out.WriteString(command.Summary)
-
-				if len(command.DispatchCommands) > 0 {
-					out.WriteString(" (dispatch: ")
-					writeMarkdownInlineCodeList(&out, command.DispatchCommands)
-					out.WriteString(")")
-				}
-
-				out.WriteString("\n")
-			}
-
-			out.WriteString("\n")
-		}
+		writeMarkdownDomainCommands(&out, "Commands", domain.Commands)
+		writeMarkdownDomainCommands(&out, "Routing-only commands", domain.RoutingCommands)
 
 		if len(domain.Examples) > 0 {
 			out.WriteString("Examples:\n")
@@ -829,6 +850,7 @@ func renderCommandSurfaceMarkdown(surface commandSurface) string {
 		writeMarkdownListDetail(&out, "Overrides", command.Overrides)
 		writeMarkdownListDetail(&out, "Side effects", command.SideEffects)
 		writeMarkdownListDetail(&out, "Outputs", command.OutputModes)
+		writeMarkdownCodeIntelQueryDetails(&out, command.CodeIntelQueries)
 		writeMarkdownFixtureDetails(&out, command.Fixtures)
 	}
 
@@ -977,17 +999,96 @@ func writeSlashVariantDetails(out *strings.Builder, variants []slashCommandVaria
 		out.WriteString("`: ")
 		out.WriteString(variant.Summary)
 		out.WriteString("\n")
-		writeMarkdownIndentedListDetail(out, "Side effects", variant.SideEffects, "      ")
-		writeMarkdownIndentedListDetail(out, "Outputs", variant.OutputModes, "      ")
-		writeMarkdownIndentedListDetail(out, "Policy", variant.PolicyRequirements, "      ")
+		writeMarkdownIndentedListDetail(out, "      ", "Side effects", variant.SideEffects)
+		writeMarkdownIndentedListDetail(out, "      ", "Outputs", variant.OutputModes)
+		writeMarkdownIndentedListDetail(out, "      ", "Policy", variant.PolicyRequirements)
+	}
+}
+
+func writeMarkdownDomainCommands(out *strings.Builder, title string, commands []commandSurfaceDomainCommand) {
+	if len(commands) == 0 {
+		return
+	}
+
+	out.WriteString(title)
+	out.WriteString(":\n")
+
+	for commandIndex := range commands {
+		command := &commands[commandIndex]
+
+		out.WriteString("- `")
+		out.WriteString(command.Name)
+
+		if command.Args != "" {
+			out.WriteString(" ")
+			out.WriteString(command.Args)
+		}
+
+		out.WriteString("`: ")
+		out.WriteString(command.Summary)
+
+		if len(command.DispatchCommands) > 0 {
+			out.WriteString(" (dispatch: ")
+			writeMarkdownInlineCodeList(out, command.DispatchCommands)
+			out.WriteString(")")
+		}
+
+		out.WriteString("\n")
+
+		writeDomainCommandOutputDocs(out, command)
+	}
+
+	out.WriteString("\n")
+}
+
+func writeDomainCommandOutputDocs(out *strings.Builder, command *commandSurfaceDomainCommand) {
+	if command.TextOutput != "" {
+		writeMarkdownListDetail(out, "Text output", []string{command.TextOutput})
+	}
+
+	if command.JSONSchema != "" {
+		writeMarkdownListDetail(out, "JSON schema", []string{command.JSONSchema})
+	}
+
+	writeMarkdownListDetail(out, "JSON fields", command.JSONFields)
+	writeMarkdownListDetail(out, "Examples", command.Examples)
+}
+
+func writeMarkdownCodeIntelQueryDetails(out *strings.Builder, queries []codeIntelQueryDoc) {
+	if len(queries) == 0 {
+		return
+	}
+
+	out.WriteString("  - Code-intel queries:\n")
+
+	for i := range queries {
+		query := &queries[i]
+
+		out.WriteString("    - `")
+		out.WriteString(query.DomainCommand)
+
+		if query.Args != "" {
+			out.WriteString(" ")
+			out.WriteString(query.Args)
+		}
+
+		out.WriteString("` / `")
+		out.WriteString(query.LegacyFlag)
+		out.WriteString("`: ")
+		out.WriteString(query.Summary)
+		out.WriteString("\n")
+		writeMarkdownIndentedListDetail(out, "      ", "Text output", []string{query.TextOutput})
+		writeMarkdownIndentedListDetail(out, "      ", "JSON schema", []string{query.JSONSchema})
+		writeMarkdownIndentedListDetail(out, "      ", "JSON fields", query.JSONFields)
+		writeMarkdownIndentedListDetail(out, "      ", "Examples", query.Examples)
 	}
 }
 
 func writeMarkdownListDetail(out *strings.Builder, label string, values []string) {
-	writeMarkdownIndentedListDetail(out, label, values, "  ")
+	writeMarkdownIndentedListDetail(out, "  ", label, values)
 }
 
-func writeMarkdownIndentedListDetail(out *strings.Builder, label string, values []string, indent string) {
+func writeMarkdownIndentedListDetail(out *strings.Builder, indent, label string, values []string) {
 	if len(values) == 0 {
 		return
 	}
@@ -1078,7 +1179,9 @@ func renderReadmeDomainTable(domains []cliHelpDomain) string {
 	table.WriteString("| Domain | Examples |\n")
 	table.WriteString("|--------|----------|\n")
 
-	for _, domain := range domains {
+	for i := range domains {
+		domain := &domains[i]
+
 		table.WriteString("| ")
 		table.WriteString(readmeDomainLabel(domain))
 		table.WriteString(" | ")
@@ -1091,7 +1194,7 @@ func renderReadmeDomainTable(domains []cliHelpDomain) string {
 	return table.String()
 }
 
-func readmeDomainLabel(domain cliHelpDomain) string {
+func readmeDomainLabel(domain *cliHelpDomain) string {
 	parts := strings.Split(domain.Name, "/")
 	if len(parts) > 1 {
 		labels := make([]string, 0, len(parts))
@@ -1181,7 +1284,7 @@ func flagRequiresFixtureValue(flag string) bool {
 		"list-session-tags",
 		"list-sessions",
 		"list-worktrees",
-		"lsp-symbols",
+		codeIntelLSPSymbolsName,
 		"print-config-template",
 		"recover-headless",
 		"review-plan",

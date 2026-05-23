@@ -73,6 +73,9 @@ type codeIntelCommandInput struct {
 	FileSymbolPrefix               string
 	FileImportPrefix               string
 	FileImportPath                 string
+	OutputFormat                   string
+	Limit                          int
+	Offset                         int
 	ListImports                    bool
 	ListImportSummary              bool
 	ListImportFileSummary          bool
@@ -84,6 +87,7 @@ type codeIntelCommandInput struct {
 	ListSymbolFileSummary          bool
 	ListPackageImportSummary       bool
 	ListPackages                   bool
+	JSON                           bool
 }
 
 type contextPackCommandInput struct {
@@ -189,8 +193,10 @@ type lspSymbolsCommandInput struct {
 	RootPath         string
 	LanguageID       string
 	WorkspaceSymbols string
+	OutputFormat     string
 	Args             []string
 	DocumentSymbols  bool
+	JSON             bool
 }
 
 type memoryCommandInput struct {
@@ -496,6 +502,9 @@ func codeIntelCommandInputFromOptions(opts cliOptions) codeIntelCommandInput {
 		FileSymbolPrefix:               opts.codeFileSymbolPrefix,
 		FileImportPrefix:               opts.codeFileImportPrefix,
 		FileImportPath:                 opts.codeFileImportPath,
+		OutputFormat:                   opts.outputFormat,
+		Limit:                          opts.codeLimit.value,
+		Offset:                         opts.codeOffset.value,
 		ListImports:                    opts.listCodeImports,
 		ListImportSummary:              opts.listCodeImportSummary,
 		ListImportFileSummary:          opts.listCodeImportFileSummary,
@@ -507,6 +516,7 @@ func codeIntelCommandInputFromOptions(opts cliOptions) codeIntelCommandInput {
 		ListSymbolFileSummary:          opts.listCodeSymbolFileSummary,
 		ListPackageImportSummary:       opts.listCodePackageImportSummary,
 		ListPackages:                   opts.listCodePackages,
+		JSON:                           opts.jsonOutput,
 	}
 }
 
@@ -643,8 +653,10 @@ func lspSymbolsCommandInputFromOptions(opts cliOptions) lspSymbolsCommandInput {
 		RootPath:         opts.lspRootPath,
 		LanguageID:       opts.lspLanguageID,
 		WorkspaceSymbols: opts.lspWorkspaceSymbols,
+		OutputFormat:     opts.outputFormat,
 		Args:             append([]string(nil), opts.lspArgs...),
 		DocumentSymbols:  opts.lspSymbols,
+		JSON:             opts.jsonOutput,
 	}
 }
 

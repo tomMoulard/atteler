@@ -1,0 +1,2 @@
+Handle	kind=12	range=2:1-4:2	detail=func()	container=server	uri=file:///repo/main.go
+  Inner	kind=5	range=3:2-3:8

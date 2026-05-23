@@ -1,0 +1,13 @@
+{
+  "schema": "atteler.code_intel.v1",
+  "command": "code-deps-target",
+  "query": {
+    "target": "runner.go"
+  },
+  "empty": false,
+  "nodes": [
+    {
+      "path": "context"
+    }
+  ]
+}

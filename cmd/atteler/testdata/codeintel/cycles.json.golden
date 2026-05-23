@@ -1,0 +1,15 @@
+{
+  "schema": "atteler.code_intel.v1",
+  "command": "list-code-cycles",
+  "empty": false,
+  "cycles": [
+    {
+      "index": 1,
+      "nodes": [
+        "a.go",
+        "b.go",
+        "a.go"
+      ]
+    }
+  ]
+}

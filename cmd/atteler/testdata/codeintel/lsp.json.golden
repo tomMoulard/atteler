@@ -1,0 +1,63 @@
+{
+  "schema": "atteler.code_intel.v1",
+  "command": "lsp-symbols",
+  "query": {
+    "file": "main.go"
+  },
+  "empty": false,
+  "lsp_symbols": [
+    {
+      "name": "Handle",
+      "kind": 12,
+      "detail": "func()",
+      "container": "server",
+      "uri": "file:///repo/main.go",
+      "range": {
+        "start": {
+          "line": 2,
+          "character": 1
+        },
+        "end": {
+          "line": 4,
+          "character": 2
+        }
+      },
+      "selection_range": {
+        "start": {
+          "line": 2,
+          "character": 6
+        },
+        "end": {
+          "line": 2,
+          "character": 12
+        }
+      },
+      "children": [
+        {
+          "name": "Inner",
+          "kind": 5,
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 2
+            },
+            "end": {
+              "line": 3,
+              "character": 8
+            }
+          },
+          "selection_range": {
+            "start": {
+              "line": 3,
+              "character": 2
+            },
+            "end": {
+              "line": 3,
+              "character": 7
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

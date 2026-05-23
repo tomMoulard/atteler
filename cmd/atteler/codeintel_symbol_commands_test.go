@@ -3,7 +3,6 @@ package main
 import (
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -32,7 +31,7 @@ func TestSummarizeAndFormatCodeSymbolFiles(t *testing.T) {
 		require.Failf(t, "unexpected symbol file summaries", "got %#v, want %#v", summaries, want)
 	}
 
-	got := formatCodeSymbolFileSummary(summaries[0])
+	got := formatCodeIntelSymbolFileSummary(codeIntelFilesFromSymbolFileSummaries(summaries)[0])
 	if got != "path=cmd/a.go	package=main	symbols=2" {
 		require.Failf(t, "unexpected symbol file summary format", "got %q", got)
 	}
@@ -55,7 +54,7 @@ func TestSummarizeAndFormatCodeSymbols(t *testing.T) {
 		require.Failf(t, "unexpected symbol summaries", "got %#v, want %#v", summaries, want)
 	}
 
-	got := formatCodeSymbolSummary(summaries[0])
+	got := formatCodeIntelSymbolSummary(codeIntelSymbolsFromSummaries(summaries)[0])
 	if got != "kind=func	symbols=2" {
 		require.Failf(t, "unexpected symbol summary format", "got %q", got)
 	}
@@ -282,14 +281,14 @@ func TestFormatCodeSymbol(t *testing.T) {
 	t.Parallel()
 
 	root := filepath.Join("tmp", "repo")
-	got := formatCodeSymbol(root, codeintel.Symbol{
+	got := formatCodeIntelSymbol(codeIntelSymbolsFromSymbols(root, []codeintel.Symbol{{
 		Name: "Run",
 		Kind: "method",
 		File: filepath.Join(root, "pkg", "runner.go"),
 		Line: 42,
-	})
+	}})[0], true)
 
-	want := strings.Join([]string{"Run", "kind=method", "path=pkg/runner.go", "line=42"}, "\t")
+	want := "Run\tkind=method\tpath=pkg/runner.go\tline=42"
 	if got != want {
 		require.Failf(t, "unexpected code symbol format", "got %q, want %q", got, want)
 	}

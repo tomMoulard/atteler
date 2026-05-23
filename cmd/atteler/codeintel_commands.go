@@ -1,8 +1,7 @@
 package main
 
-// Code-intel command handlers are split by concern across:
-// codeintel_symbol_commands.go, codeintel_import_file_commands.go,
-// codeintel_file_commands.go, codeintel_file_import_commands.go,
-// codeintel_file_symbol_commands.go, codeintel_package_symbol_commands.go,
-// codeintel_package_import_commands.go, codeintel_package_commands.go, and
-// codeintel_summary_graph_commands.go.
+// Code-intel command handlers are split by concern:
+// codeintel_command_descriptors.go owns selector/help metadata;
+// codeintel_schema.go, codeintel_response_builders.go, and
+// codeintel_response_render.go own the typed output contract; and the
+// codeintel_*_commands.go files own query/filter helpers by domain.

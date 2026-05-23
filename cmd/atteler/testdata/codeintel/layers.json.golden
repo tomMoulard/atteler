@@ -1,0 +1,19 @@
+{
+  "schema": "atteler.code_intel.v1",
+  "command": "list-code-layers",
+  "empty": false,
+  "layers": [
+    {
+      "index": 1,
+      "nodes": [
+        "runner.go"
+      ]
+    },
+    {
+      "index": 2,
+      "nodes": [
+        "context"
+      ]
+    }
+  ]
+}

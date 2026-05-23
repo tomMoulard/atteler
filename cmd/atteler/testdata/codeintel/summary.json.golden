@@ -1,0 +1,15 @@
+{
+  "schema": "atteler.code_intel.v1",
+  "command": "code-summary",
+  "empty": false,
+  "summary": {
+    "files": 1,
+    "packages": 1,
+    "symbols": 1,
+    "imports": 0,
+    "nodes": 1,
+    "edges": 0,
+    "cycles": 0,
+    "layers": 1
+  }
+}

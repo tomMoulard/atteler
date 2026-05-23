@@ -41,6 +41,8 @@ func parseOptions() cliOptions {
 	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
 	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
 	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
+	opts.codeLimit = positiveIntFlag{name: "code-limit"}
+	opts.codeOffset = nonNegativeIntFlag{name: "code-offset"}
 	opts.seed = nonNegativeIntFlag{name: "seed"}
 	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
 	opts.memoryTTL = positiveIntFlag{name: "memory-ttl-seconds"}
