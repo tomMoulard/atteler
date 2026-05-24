@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -177,6 +178,14 @@ func selectRegistryCommand(registry []command, tier commandTier, opts cliOptions
 }
 
 func validateCLICommandSelection(opts cliOptions) error {
+	if opts.headlessID != "" && !opts.headless {
+		return errors.New("--headless-id requires --headless")
+	}
+
+	if opts.headlessPrivateLog && !opts.headless {
+		return errors.New("--headless-private-log requires --headless")
+	}
+
 	matches := matchingRegistryCommands(commandRegistry, tierAny, opts)
 	inlineCommands := buildInlineCommandRegistry()
 

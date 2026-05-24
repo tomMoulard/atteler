@@ -375,6 +375,11 @@ func TestCommandSurface_RepresentativeSideEffectsAndOutputsAreStable(t *testing.
 			outputModes: []string{commandOutputText},
 		},
 		{
+			name:        "headless-command",
+			sideEffects: []string{commandEffectSessionRead, commandEffectSessionWrite, commandEffectUserOutput, commandEffectProcessExecute},
+			outputModes: []string{commandOutputText},
+		},
+		{
 			name:        "bash-command",
 			sideEffects: []string{commandEffectProcessExecute, commandEffectSessionWrite, commandEffectUserOutput},
 			outputModes: []string{commandOutputProcess, commandOutputText},
@@ -445,6 +450,26 @@ func TestCommandRegistry_InlineRegistryAmbiguityFailsHelpfulError(t *testing.T) 
 	assert.Contains(t, err.Error(), "--version")
 	assert.Contains(t, err.Error(), "list-sessions")
 	assert.Contains(t, err.Error(), "--list-sessions")
+}
+
+func TestCommandRegistry_HeadlessIDRequiresHeadlessMode(t *testing.T) {
+	t.Parallel()
+
+	err := validateCLICommandSelection(cliOptions{headlessID: "run-known"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--headless-id requires --headless")
+
+	err = validateCLICommandSelection(cliOptions{headlessID: " "})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--headless-id requires --headless")
+}
+
+func TestCommandRegistry_HeadlessPrivateLogRequiresHeadlessMode(t *testing.T) {
+	t.Parallel()
+
+	err := validateCLICommandSelection(cliOptions{headlessPrivateLog: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--headless-private-log requires --headless")
 }
 
 func TestCommandRegistry_InlineAmbiguityFailsHelpfulError(t *testing.T) {
@@ -627,19 +652,25 @@ func TestCommandSurface_JSONDumpIncludesDispatchContract(t *testing.T) {
 	assert.Contains(t, commandSurfaceDomainCommandNames(domains["config"].Commands), "commands-docs")
 	assert.Contains(t, commands, "command-surface-json")
 	assert.Contains(t, commands, "list-sessions")
+	assert.Contains(t, commands, "headless-command")
 	assert.Contains(t, commands, "mcp-invoke")
 	assert.Equal(t, "providerless", commands["list-sessions"].Tier)
 	assert.Equal(t, "listSessionsCommandInput", commands["list-sessions"].InputType)
+	assert.Equal(t, "headlessCommandInput", commands["headless-command"].InputType)
 	assert.Equal(t, "routeModelsCommandInput", commands["route-models-providerless"].InputType)
 	assert.Equal(t, "bashCommandInput", commands["bash-command"].InputType)
 	assert.Equal(t, "spawnAgentsCommandInput", commands["spawn-agents"].InputType)
 	assert.Contains(t, commands["list-sessions"].InputFields, "Tag")
+	assert.Contains(t, commands["headless-command"].InputFields, "CancelID")
+	assert.Contains(t, commands["headless-command"].InputFields, "Recover")
 	assert.Contains(t, commands["route-models-providerless"].InputFields, "Candidates")
 	assert.Contains(t, commands["bash-command"].InputFields, "Command")
 	assert.Contains(t, commands["spawn-agents"].InputFields, "Specs")
 	assert.Contains(t, commands["mcp-invoke"].Overrides, "mcp-manifest")
 	assert.Contains(t, commands["mcp-invoke"].OutputModes, commandOutputJSON)
 	assert.Contains(t, commands["list-sessions"].SideEffects, commandEffectSessionRead)
+	assert.Contains(t, commands["headless-command"].SideEffects, commandEffectProcessExecute)
+	assert.Contains(t, commands["headless-command"].SideEffects, commandEffectSessionWrite)
 
 	require.Contains(t, slashCommands, "apply-patch")
 	assert.Equal(t, "/apply-patch", slashCommands["apply-patch"].Usage)
@@ -663,6 +694,15 @@ func TestCommandSurface_DomainCommandsLinkToDispatchContract(t *testing.T) {
 	assert.Equal(t, []string{"list-sessions"}, sessionList.DispatchCommands)
 	assert.Contains(t, sessionList.SideEffects, commandEffectSessionRead)
 	assert.Contains(t, sessionList.OutputModes, commandOutputText)
+
+	headlessStatus := requireDomainCommand(t, surface, "chat/session", "status-headless")
+	assert.Equal(t, []string{"headless-command"}, headlessStatus.DispatchCommands)
+	assert.Contains(t, headlessStatus.SideEffects, commandEffectSessionRead)
+
+	headlessCancel := requireDomainCommand(t, surface, "chat/session", "cancel-headless")
+	assert.Equal(t, []string{"headless-command"}, headlessCancel.DispatchCommands)
+	assert.Contains(t, headlessCancel.SideEffects, commandEffectProcessExecute)
+	assert.Contains(t, headlessCancel.SideEffects, commandEffectSessionWrite)
 
 	mcpManifest := requireDomainCommand(t, surface, "plugins", "mcp-manifest")
 	assert.Equal(t, []string{"mcp-manifest"}, mcpManifest.DispatchCommands)
@@ -726,6 +766,13 @@ func TestCommandSurface_MarkdownDocsRenderFromSurface(t *testing.T) {
 	assert.Contains(t, docs, "`exclusive-command` with `*`")
 	assert.Contains(t, docs, "- Side effects: `session-store-read`, `stdout`")
 	assert.Contains(t, docs, "- Outputs: `text`")
+	assert.Contains(t, docs, "`headless`: list active headless runs (dispatch: `headless-command`)")
+	assert.Contains(t, docs, "`cancel-headless <id>`: cancel one live headless run (dispatch: `headless-command`)")
+	assert.Contains(t, docs, "`headless-command` (providerless)")
+	assert.Contains(t, docs, "- Input: `headlessCommandInput`")
+	assert.Contains(t, docs, "- Input fields: `StatusID`, `CancelID`, `StreamID`, `Recover`, `List`")
+	assert.Contains(t, docs, "- Flags: `--list-headless`, `--recover-headless`, `--status-headless`, `--cancel-headless`, `--stream-headless`")
+	assert.Contains(t, docs, "- Side effects: `session-store-read`, `session-store-write`, `stdout`, `process-execute`")
 	assert.Contains(t, docs, "- Fixtures:")
 	assert.Contains(t, docs, "`legacy-flag`: `atteler --list-sessions` -> `list-sessions`")
 	assert.Contains(t, docs, "`command-surface-json` (inline)")
@@ -808,6 +855,66 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			name:     "session list routes providerless",
 			args:     []string{"session", testCommandList},
 			wantName: "list-sessions",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "session headless routes providerless lifecycle command",
+			args:     []string{"session", "headless"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "session status-headless routes providerless lifecycle command",
+			args:     []string{"session", "status-headless", "run-123"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "session cancel-headless routes providerless lifecycle command",
+			args:     []string{"session", "cancel-headless", "run-123"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "session recover-headless routes providerless lifecycle command",
+			args:     []string{"session", "recover-headless"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "session stream-headless routes providerless lifecycle command",
+			args:     []string{"session", "stream-headless", "run-123"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "legacy list-headless flag routes providerless lifecycle command",
+			args:     []string{"--list-headless"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "legacy status-headless flag routes providerless lifecycle command",
+			args:     []string{"--status-headless", "run-123"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "legacy cancel-headless flag routes providerless lifecycle command",
+			args:     []string{"--cancel-headless", "run-123"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "legacy recover-headless flag routes providerless lifecycle command",
+			args:     []string{"--recover-headless"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "legacy stream-headless flag routes providerless lifecycle command",
+			args:     []string{"--stream-headless", "run-123"},
+			wantName: "headless-command",
 			wantTier: tierProviderless,
 		},
 		{

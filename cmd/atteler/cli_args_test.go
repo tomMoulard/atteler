@@ -509,11 +509,19 @@ func TestTranslateCLIArgsWithFlagSet_PreservesParseableFlagOrder(t *testing.T) {
 		assert.Equal(t, "test/model", *model)
 	})
 
-	t.Run("recover headless command maps to compatibility flag", func(t *testing.T) {
+	t.Run("headless list and recover commands map to compatibility flags", func(t *testing.T) {
 		t.Parallel()
 
 		opts, fs := newCLIOptionsAndFlagSetForTest(t)
-		got := translateCLIArgsWithFlagSet([]string{"session", "recover-headless"}, fs)
+		got := translateCLIArgsWithFlagSet([]string{"session", "headless"}, fs)
+		require.NoError(t, got.Err)
+		require.False(t, got.Help)
+		require.NoError(t, fs.Parse(got.Args))
+
+		assert.True(t, opts.listHeadless)
+
+		opts, fs = newCLIOptionsAndFlagSetForTest(t)
+		got = translateCLIArgsWithFlagSet([]string{"session", "recover-headless"}, fs)
 		require.NoError(t, got.Err)
 		require.False(t, got.Help)
 		require.NoError(t, fs.Parse(got.Args))
@@ -521,16 +529,68 @@ func TestTranslateCLIArgsWithFlagSet_PreservesParseableFlagOrder(t *testing.T) {
 		assert.True(t, opts.recoverHeadless)
 	})
 
-	t.Run("headless private log flag parses with one-shot command", func(t *testing.T) {
+	t.Run("headless ID commands map IDs to compatibility flags", func(t *testing.T) {
 		t.Parallel()
 
 		opts, fs := newCLIOptionsAndFlagSetForTest(t)
-		got := translateCLIArgsWithFlagSet([]string{"chat", "once", "explain", "--headless", "--headless-private-log"}, fs)
+		got := translateCLIArgsWithFlagSet([]string{"session", "status-headless", "run-123"}, fs)
+		require.NoError(t, got.Err)
+		require.False(t, got.Help)
+		require.NoError(t, fs.Parse(got.Args))
+		assert.Equal(t, "run-123", opts.statusHeadlessID)
+
+		opts, fs = newCLIOptionsAndFlagSetForTest(t)
+		got = translateCLIArgsWithFlagSet([]string{"session", "cancel-headless", "run-456"}, fs)
+		require.NoError(t, got.Err)
+		require.False(t, got.Help)
+		require.NoError(t, fs.Parse(got.Args))
+		assert.Equal(t, "run-456", opts.cancelHeadlessID)
+
+		opts, fs = newCLIOptionsAndFlagSetForTest(t)
+		got = translateCLIArgsWithFlagSet([]string{"session", "stream-headless", "run-789"}, fs)
+		require.NoError(t, got.Err)
+		require.False(t, got.Help)
+		require.NoError(t, fs.Parse(got.Args))
+		assert.Equal(t, "run-789", opts.streamHeadlessID)
+	})
+
+	t.Run("headless ID commands reject missing IDs", func(t *testing.T) {
+		t.Parallel()
+
+		tests := []struct {
+			name string
+			args []string
+		}{
+			{name: "status", args: []string{"session", "status-headless"}},
+			{name: "cancel", args: []string{"session", "cancel-headless"}},
+			{name: "stream", args: []string{"session", "stream-headless"}},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				_, fs := newCLIOptionsAndFlagSetForTest(t)
+				got := translateCLIArgsWithFlagSet(tt.args, fs)
+
+				require.Error(t, got.Err)
+				assert.Contains(t, got.Err.Error(), tt.args[1]+" requires <id>")
+				assert.Contains(t, got.Err.Error(), "atteler help session")
+			})
+		}
+	})
+
+	t.Run("headless lifecycle flags parse with one-shot command", func(t *testing.T) {
+		t.Parallel()
+
+		opts, fs := newCLIOptionsAndFlagSetForTest(t)
+		got := translateCLIArgsWithFlagSet([]string{"chat", "once", "explain", "--headless", "--headless-id", "run-known", "--headless-private-log"}, fs)
 		require.NoError(t, got.Err)
 		require.False(t, got.Help)
 		require.NoError(t, fs.Parse(got.Args))
 
 		assert.True(t, opts.headless)
+		assert.Equal(t, "run-known", opts.headlessID)
 		assert.True(t, opts.headlessPrivateLog)
 		assert.Equal(t, "explain", opts.oncePrompt)
 	})

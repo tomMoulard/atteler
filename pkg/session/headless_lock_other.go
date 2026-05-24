@@ -15,3 +15,19 @@ func unlockHeadlessFile(_ *os.File) error {
 func headlessProcessAlive(_ int) bool {
 	return false
 }
+
+func headlessProcessGroupID(_ int) int {
+	return 0
+}
+
+func headlessProcessGroupAlive(_ int) bool {
+	return false
+}
+
+func signalHeadlessProcess(_ int) error {
+	return nil
+}
+
+func signalHeadlessProcessGroup(pid int, _ int) error {
+	return signalHeadlessProcess(pid)
+}

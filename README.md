@@ -223,15 +223,43 @@ wire transport internally.
 atteler
 atteler chat once "Explain this repository in one paragraph"
 git diff | atteler chat once "Review this diff" --stdin
-atteler chat once "Summarize @README.md" --headless --output json
+atteler chat once "Summarize @README.md" --headless --headless-id docs-summary --output json
 atteler session headless
+atteler session status-headless <headless-id>
+atteler session cancel-headless <headless-id>
 atteler session recover-headless
 atteler session stream-headless <headless-id>
 ```
 
-Headless metadata and logs are redacted by default; reserve
+Headless metadata, event summaries, and logs are redacted by default; reserve
 `--headless-private-log` for local private runs that intentionally keep raw
-prompts, errors, and provider output.
+prompts, errors, event summaries, and log text.
+Each headless run records PID, process group, command arguments, cwd, host,
+start time, last heartbeat, optional parent/child run IDs, terminal reason, and
+a separate `<id>.events.jsonl` lifecycle summary with `started`,
+`user_message`, `assistant_message`, and terminal events. Lifecycle statuses
+distinguish `running`, `completed`, `failed`, `canceled`, `timed_out`,
+`stale`, `orphaned`, `superseded`, and `corrupt` metadata. Running one-shot
+headless runs refresh their heartbeat every 15 seconds; records with no
+heartbeat for 30 minutes are reconciled as `stale` or `orphaned`, while missing
+or dead local PIDs reconcile immediately.
+Atteler reconciles stale running records at startup and when listing or checking
+status, so crashed local PIDs do not stay `running` forever.
+`atteler session cancel-headless <id>` records a durable `canceled` status
+before signaling the recorded local PID or process group; on Unix-like hosts it
+escalates to a kill signal if the process ignores cancellation briefly.
+Use `--headless-id <id>` when launching a one-shot headless run if another
+process needs a stable handle for `status-headless`, `cancel-headless`, or
+`stream-headless`; explicit IDs must be portable file names (no leading or
+trailing whitespace, path separators, control characters, or `<>:"|?*`), must
+be unique, and reuse is rejected while metadata, logs, events, or artifacts for
+that ID exist.
+Launch nested headless work with `ATTELER_HEADLESS_PARENT_ID=<id>` to record
+parent/child run relationships in both metadata and structured events.
+Raw log text is retained in rotated chunks capped at 1 MiB each and 8 chunks per
+run by default; older chunks are removed after the retained size is exceeded.
+The printed `log=` path is the logical base, and retained chunks use
+`<headless-id>.log.000001`, `<headless-id>.log.000002`, and so on.
 
 In the interactive TUI, `Ctrl+O` opens the model picker, `Tab` accepts visible
 local prompt completions (agents, slash commands, session context, and safe

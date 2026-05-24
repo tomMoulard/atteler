@@ -303,7 +303,8 @@ func lookupFlagDomain(name string) (string, bool) {
 
 	switch {
 	case name == "once" || name == "stdin" || name == "output" || name == "headless" ||
-		name == "headless-private-log" || name == "list-headless" || name == "recover-headless" || name == "stream-headless" ||
+		name == "headless-id" || name == "headless-private-log" || name == "list-headless" || name == "recover-headless" ||
+		name == "status-headless" || name == "cancel-headless" || name == "stream-headless" ||
 		name == sessionCommandName || name == "session-id" || name == "session-dir" ||
 		name == "session-title" || name == "session-tag" ||
 		strings.HasPrefix(name, "list-session") || strings.HasPrefix(name, "show-session") ||

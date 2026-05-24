@@ -1183,6 +1183,7 @@ func flagRequiresFixtureValue(flag string) bool {
 		"list-worktrees",
 		"lsp-symbols",
 		"print-config-template",
+		"recover-headless",
 		"review-plan",
 		"review-run",
 		"review-scan",
