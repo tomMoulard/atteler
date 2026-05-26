@@ -235,6 +235,128 @@ func TestMarkdown_DefaultShareableRedactsSecretsAndAbsolutePaths(t *testing.T) {
 	assert.Contains(t, got, "[REDACTED_PATH]")
 }
 
+func TestBuildMachineReadableExport_ExcludedFieldsOmitByPolicy(t *testing.T) {
+	t.Parallel()
+
+	session := Session{
+		ID:           "abc",
+		Title:        "Private title",
+		CreatedAt:    time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC),
+		UpdatedAt:    time.Date(2026, 4, 30, 11, 0, 0, 0, time.UTC),
+		DefaultAgent: "reviewer",
+		DefaultModel: "gpt-secret",
+		WorktreePath: "/private/repo",
+		Tags:         []string{"private-tag"},
+		Messages:     []llm.Message{{Role: llm.RoleUser, Content: "private transcript"}},
+		NegativeKnowledge: []NegativeKnowledge{{
+			Approach:  "private failed approach",
+			Reason:    "private failure reason",
+			Agent:     "reviewer",
+			CreatedAt: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC),
+		}},
+		Evaluations: []AgentEvaluation{{
+			Agent:     "reviewer",
+			Outcome:   "private evaluation",
+			CreatedAt: time.Date(2026, 4, 30, 13, 0, 0, 0, time.UTC),
+		}},
+		Artifacts: []Artifact{{
+			Path:      "/private/artifact.md",
+			Kind:      "private artifact",
+			Summary:   "private artifact summary",
+			CreatedAt: time.Date(2026, 4, 30, 14, 0, 0, 0, time.UTC),
+		}},
+	}
+
+	export := BuildMachineReadableExport(session, ExportOptions{
+		Profile:    ExportProfilePrivate,
+		ExportedAt: fixedExportedAt,
+		ExcludedFields: []SearchField{
+			SearchFieldTranscript,
+			SearchFieldFailures,
+			SearchFieldEvaluations,
+			SearchFieldArtifacts,
+			SearchFieldTags,
+			SearchFieldRepo,
+			SearchFieldAgent,
+			SearchFieldModel,
+			SearchFieldDate,
+			SearchFieldSession,
+			SearchFieldTitle,
+		},
+	})
+
+	assert.Empty(t, export.Messages)
+	assert.Empty(t, export.NegativeKnowledge)
+	assert.Empty(t, export.Evaluations)
+	assert.Empty(t, export.Artifacts)
+	assert.Empty(t, export.Session.Tags)
+	assert.Empty(t, export.Session.WorktreePath)
+	assert.Empty(t, export.Session.DefaultAgent)
+	assert.Empty(t, export.Session.DefaultModel)
+	assert.Empty(t, export.Session.ID)
+	assert.Empty(t, export.Session.Title)
+	assert.Empty(t, export.Manifest.SessionID)
+	assert.True(t, export.Manifest.ExportedAt.IsZero())
+	assert.True(t, export.Session.CreatedAt.IsZero())
+	assert.True(t, export.Session.UpdatedAt.IsZero())
+	assert.Equal(t, 1, export.Session.MessageCount)
+	assert.Equal(t, 1, export.Session.NegativeKnowledgeCount)
+	assert.Equal(t, 1, export.Session.EvaluationCount)
+	assert.Equal(t, 1, export.Session.ArtifactCount)
+	assert.Contains(t, export.Manifest.OmittedSections, "transcript omitted by export field policy")
+	assert.Contains(t, export.Manifest.OmittedSections, "negative knowledge omitted by export field policy")
+	assert.Contains(t, export.Manifest.OmittedSections, "evaluations omitted by export field policy")
+	assert.Contains(t, export.Manifest.OmittedSections, "artifacts omitted by export field policy")
+	assert.Contains(t, export.Manifest.OmittedSections, "session.tags omitted by export field policy")
+	assert.Contains(t, export.Manifest.OmittedSections, "session.worktree_path omitted by export field policy")
+	assert.Contains(t, export.Manifest.OmittedSections, "manifest.exported_at omitted by export field policy")
+}
+
+func TestBuildMachineReadableExport_MetadataPolicyDoesNotLeakNestedFields(t *testing.T) {
+	t.Parallel()
+
+	session := Session{
+		ID: "abc",
+		NegativeKnowledge: []NegativeKnowledge{{
+			Approach:  "cache patch",
+			Reason:    "broke auth",
+			Agent:     "reviewer",
+			CreatedAt: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC),
+		}},
+		Evaluations: []AgentEvaluation{{
+			Agent:     "reviewer",
+			Outcome:   "pass",
+			Notes:     "retained notes",
+			CreatedAt: time.Date(2026, 4, 30, 13, 0, 0, 0, time.UTC),
+		}},
+		Artifacts: []Artifact{{
+			Path:        "docs/research.md",
+			Kind:        "research",
+			SourceAgent: "reviewer",
+			CreatedAt:   time.Date(2026, 4, 30, 14, 0, 0, 0, time.UTC),
+		}},
+	}
+
+	export := BuildMachineReadableExport(session, ExportOptions{
+		Profile:        ExportProfilePrivate,
+		ExportedAt:     fixedExportedAt,
+		ExcludedFields: []SearchField{SearchFieldAgent, SearchFieldDate},
+	})
+
+	require.Len(t, export.NegativeKnowledge, 1)
+	require.Len(t, export.Evaluations, 1)
+	require.Len(t, export.Artifacts, 1)
+	assert.Equal(t, "cache patch", export.NegativeKnowledge[0].Approach)
+	assert.Equal(t, "retained notes", export.Evaluations[0].Notes)
+	assert.Equal(t, "docs/research.md", export.Artifacts[0].Path)
+	assert.Empty(t, export.NegativeKnowledge[0].Agent)
+	assert.Empty(t, export.Evaluations[0].Agent)
+	assert.Empty(t, export.Artifacts[0].SourceAgent)
+	assert.True(t, export.NegativeKnowledge[0].CreatedAt.IsZero())
+	assert.True(t, export.Evaluations[0].CreatedAt.IsZero())
+	assert.True(t, export.Artifacts[0].CreatedAt.IsZero())
+}
+
 func TestMarkdown_DefaultUsesShareableProfile(t *testing.T) {
 	t.Parallel()
 
@@ -274,6 +396,89 @@ func TestMarkdown_PrivateProfileIsExplicitAndFullFidelity(t *testing.T) {
 	assert.Contains(t, got, "- **Privacy notice:** Private full-fidelity export")
 	assert.Contains(t, got, openAIKey)
 	assert.Contains(t, got, "/Users/tom/work/private-repo/.env")
+}
+
+func TestMarkdown_PrivateProfileHonorsSensitiveFieldPolicy(t *testing.T) {
+	t.Parallel()
+
+	const (
+		secret     = "ultra-private-value"
+		toolSecret = "tool-private-value"
+	)
+
+	session := Session{
+		ID:           "abc",
+		WorktreePath: "/Users/tom/work/private-repo",
+		Messages: []llm.Message{{
+			Role:    llm.RoleUser,
+			Content: "tenant_secret=" + secret + " path=/Users/tom/work/private-repo/.env",
+			ToolCalls: []llm.ToolCall{{
+				ID:    "call-1",
+				Name:  "read_file",
+				Input: map[string]any{"tenant_secret": toolSecret},
+			}},
+			ToolResult: &llm.ToolResult{ToolCallID: "call-1", Content: "tenant_secret=" + toolSecret},
+		}},
+	}
+
+	got := MarkdownWithOptions(session, ExportOptions{
+		Profile:         ExportProfilePrivate,
+		ExportedAt:      fixedExportedAt,
+		SensitiveFields: []string{"tenant_secret"},
+	})
+	export := BuildMachineReadableExport(session, ExportOptions{
+		Profile:         ExportProfilePrivate,
+		ExportedAt:      fixedExportedAt,
+		SensitiveFields: []string{"tenant_secret"},
+	})
+
+	assert.Contains(t, got, "Private export with sensitive-field redaction")
+	assert.Contains(t, got, "[REDACTED]")
+	assert.Contains(t, got, "redacted private export")
+	assert.NotContains(t, got, secret)
+	assert.NotContains(t, got, toolSecret)
+	assert.NotContains(t, got, "/Users/tom")
+	require.Len(t, export.Messages, 1)
+	assert.Empty(t, export.Messages[0].ToolCalls)
+	assert.Nil(t, export.Messages[0].ToolResult)
+	assert.Equal(t, 1, export.Messages[0].ToolCallCount)
+	assert.True(t, export.Messages[0].ToolResultOmitted)
+	assert.NotContains(t, export.Messages[0].Content, secret)
+	assert.Contains(t, export.Manifest.PrivacyNotice, "sensitive-field redaction")
+}
+
+func TestBuildMachineReadableExport_SensitiveFieldNamesRedactWholeValues(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rawModel   = "raw-model-field-secret"
+		rawTag     = "raw-tag-field-secret"
+		rawContent = "raw-content-field-secret"
+	)
+
+	session := Session{
+		ID:           "abc",
+		DefaultModel: rawModel,
+		Tags:         []string{rawTag},
+		Messages:     []llm.Message{{Role: llm.RoleUser, Content: rawContent}},
+	}
+
+	export := BuildMachineReadableExport(session, ExportOptions{
+		Profile:         ExportProfilePrivate,
+		ExportedAt:      fixedExportedAt,
+		SensitiveFields: []string{"default_model", "tags", "content"},
+	})
+	data, err := json.Marshal(export)
+	require.NoError(t, err)
+
+	assert.Equal(t, "[REDACTED]", export.Session.DefaultModel)
+	assert.Equal(t, []string{"[REDACTED]"}, export.Session.Tags)
+	require.Len(t, export.Messages, 1)
+	assert.Equal(t, "[REDACTED]", export.Messages[0].Content)
+	assert.NotContains(t, string(data), rawModel)
+	assert.NotContains(t, string(data), rawTag)
+	assert.NotContains(t, string(data), rawContent)
+	assert.Contains(t, export.Manifest.PrivacyNotice, "sensitive-field redaction")
 }
 
 func TestMarkdown_FencesTranscriptAndEscapesInlineInjection(t *testing.T) {

@@ -542,8 +542,8 @@ func searchSessions(store *session.Store, query string) error {
 		result := &results[i]
 		fmt.Println(formatSessionSummary(result.Summary))
 
-		for _, snippet := range result.Snippets {
-			fmt.Println(formatSearchSnippet(snippet))
+		for snippetIndex := range result.Snippets {
+			fmt.Println(formatSearchSnippet(result.Snippets[snippetIndex]))
 		}
 	}
 

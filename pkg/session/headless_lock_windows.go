@@ -11,6 +11,14 @@ import (
 )
 
 func lockHeadlessFile(file *os.File) error {
+	return lockSessionFile(file, "headless lock")
+}
+
+func unlockHeadlessFile(file *os.File) error {
+	return unlockSessionFile(file, "headless lock")
+}
+
+func lockSessionFile(file *os.File, label string) error {
 	var overlapped windows.Overlapped
 	if err := windows.LockFileEx(
 		windows.Handle(file.Fd()),
@@ -20,13 +28,13 @@ func lockHeadlessFile(file *os.File) error {
 		0,
 		&overlapped,
 	); err != nil {
-		return fmt.Errorf("session: lock headless lock %s: %w", file.Name(), err)
+		return fmt.Errorf("session: lock %s %s: %w", label, file.Name(), err)
 	}
 
 	return nil
 }
 
-func unlockHeadlessFile(file *os.File) error {
+func unlockSessionFile(file *os.File, label string) error {
 	var overlapped windows.Overlapped
 	if err := windows.UnlockFileEx(
 		windows.Handle(file.Fd()),
@@ -35,7 +43,7 @@ func unlockHeadlessFile(file *os.File) error {
 		0,
 		&overlapped,
 	); err != nil {
-		return fmt.Errorf("session: unlock headless lock %s: %w", file.Name(), err)
+		return fmt.Errorf("session: unlock %s %s: %w", label, file.Name(), err)
 	}
 
 	return nil
