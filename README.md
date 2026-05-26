@@ -70,7 +70,7 @@ from the same descriptors that route the commands.
 | Domain | Examples |
 |--------|----------|
 | `chat` / `session` | `atteler chat once "Explain this repository in one paragraph"`, `atteler session list`, `atteler session search "auth retry"` |
-| `config` | `atteler config paths`, `atteler config validate`, `atteler config explain default_model`, `atteler config migrate`, `atteler config report`, `atteler config doctor-offline` |
+| `config` | `atteler config paths`, `atteler config validate`, `atteler config migrate`, `atteler config report` |
 | `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models`, `atteler providers ollama-status`, `atteler providers ollama-stop` |
 | `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
 | `memory` / `rag` | `atteler memory search "OAuth retry storm" --memory-scope repo`, `atteler memory rebuild --memory-store .atteler/memory.json --memory-scope repo`, `atteler memory purge session:<session-id> --memory-store .atteler/memory.json`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"` |

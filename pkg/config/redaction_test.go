@@ -25,6 +25,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 			"reviewer": {
 				Seed:             &seed,
 				SystemPrompt:     "private prompt",
+				RoutingPolicy:    RoutingPolicyConfig{PreferredProviders: []string{"openai"}},
 				FallbackModels:   []string{"fallback-a"},
 				ToolPermissions:  map[string]bool{"read": true},
 				FeedbackGuidance: []FeedbackGuidance{{ID: "private-feedback"}},
@@ -43,6 +44,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	*redacted.Generation.Temperature = 0.9
 	*redacted.AgentLoop.MaxIterations = 99
 	*redacted.Agents["reviewer"].Seed = 42
+	redacted.Agents["reviewer"].RoutingPolicy.PreferredProviders[0] = "anthropic"
 	redacted.Agents["reviewer"].FallbackModels[0] = "fallback-b"
 	redacted.Agents["reviewer"].ToolPermissions["read"] = false
 	redacted.Hooks["session_end"][0].Command[0] = "printf"
@@ -52,6 +54,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.InDelta(t, 0.2, *cfg.Generation.Temperature, 0)
 	assert.Equal(t, 3, *cfg.AgentLoop.MaxIterations)
 	assert.Equal(t, 7, *cfg.Agents["reviewer"].Seed)
+	assert.Equal(t, []string{"openai"}, cfg.Agents["reviewer"].RoutingPolicy.PreferredProviders)
 	assert.Equal(t, []string{"fallback-a"}, cfg.Agents["reviewer"].FallbackModels)
 	assert.True(t, cfg.Agents["reviewer"].ToolPermissions["read"])
 	assert.Equal(t, []string{"echo", "done"}, cfg.Hooks["session_end"][0].Command)

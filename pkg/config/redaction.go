@@ -37,6 +37,7 @@ func RedactedConfig(cfg Config) Config {
 		agent.Temperature = clonePtr(agent.Temperature)
 		agent.TopP = clonePtr(agent.TopP)
 		agent.Seed = clonePtr(agent.Seed)
+		agent.RoutingPolicy = cloneRoutingPolicy(agent.RoutingPolicy)
 		agent.FallbackModels = append([]string(nil), agent.FallbackModels...)
 		agent.Capabilities = append([]string(nil), agent.Capabilities...)
 		agent.Triggers = append([]string(nil), agent.Triggers...)

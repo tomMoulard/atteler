@@ -66,9 +66,11 @@ func writeConfigExplanationWithDiagnostics(
 
 	writeConfigExplanationLoadedSources(w, loaded, origins)
 	printDiagnostics(w, diagnostics)
+
 	if len(diagnostics) > 0 {
 		fmt.Fprintln(w)
 	}
+
 	writeConfigExplanationDefaults(w, fieldFilter)
 
 	heading := "Field origins:"

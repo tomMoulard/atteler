@@ -28,6 +28,9 @@ agent_loop:
 agents:
   reviewer:
     prompt: review safely
+    routing_policy:
+      preferred_providers: [openai]
+      surprise: true
 providers:
   openai:
     disable_private_adapter: true
@@ -52,7 +55,10 @@ skill_learning:
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "generation.reasoning", "generation.reasoning_level")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "agents.reviewer.prompt", "agents.reviewer.system_prompt")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "generation.surprise", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "agents.reviewer.routing_policy.surprise", "")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "providers.openai.token", "")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agents.reviewer.routing_policy")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agents.reviewer.routing_policy.preferred_providers")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_tool_calls")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_wall_time")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.checkpoint_interval")

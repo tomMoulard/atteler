@@ -473,7 +473,7 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 		case "providers":
 			diagnostics = append(diagnostics, inspectMapEntries(path, "providers", value, knownProviderFields(), nil)...)
 		case "agents":
-			diagnostics = append(diagnostics, inspectMapEntries(path, "agents", value, knownAgentFields(), deprecatedAgentFields())...)
+			diagnostics = append(diagnostics, inspectAgents(path, value)...)
 		case "hooks":
 			diagnostics = append(diagnostics, inspectHooks(path, value)...)
 		case "plugins":
@@ -589,6 +589,24 @@ func inspectHooks(path string, value *yaml.Node) []Diagnostic {
 		for i, hook := range hooks.Content {
 			field := fmt.Sprintf("hooks.%s[%d]", event, i)
 			diagnostics = append(diagnostics, inspectNamedFields(path, field, hook, knownHookFields(), nil)...)
+		}
+	})
+
+	return diagnostics
+}
+
+func inspectAgents(path string, value *yaml.Node) []Diagnostic {
+	var diagnostics []Diagnostic
+
+	forEachMappingField(value, func(name string, entry *yaml.Node) {
+		prefix := "agents." + name
+
+		diagnostics = append(diagnostics, inspectNamedFields(path, prefix, entry, knownAgentFields(), deprecatedAgentFields())...)
+		if routingPolicy := mappingValue(entry, "routing_policy"); routingPolicy != nil {
+			diagnostics = append(
+				diagnostics,
+				inspectNamedFields(path, prefix+".routing_policy", routingPolicy, knownRoutingPolicyFields(), nil)...,
+			)
 		}
 	})
 
@@ -771,6 +789,7 @@ func knownAgentFields() map[string]bool {
 		"top_p":             true,
 		"seed":              true,
 		"tools":             true,
+		"routing_policy":    true,
 		"model":             true,
 		"mode":              true,
 		"reasoning_level":   true,
@@ -784,6 +803,17 @@ func knownAgentFields() map[string]bool {
 		"feedback_guidance": true,
 		"max_tokens":        true,
 		"hidden":            true,
+	}
+}
+
+func knownRoutingPolicyFields() map[string]bool {
+	return map[string]bool{
+		"preferred_providers":    true,
+		"banned_providers":       true,
+		"banned_models":          true,
+		"required_capabilities":  true,
+		"max_budget":             true,
+		"require_fresh_metadata": true,
 	}
 }
 
