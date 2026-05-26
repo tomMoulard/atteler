@@ -188,6 +188,38 @@ hooks:
 	assert.NotContains(t, string(out), "agent-secret")
 }
 
+func TestNewDefaultDiagnosticsReport_IncludesHarnessDiagnostics(t *testing.T) {
+	tempDir := t.TempDir()
+	codexHome := filepath.Join(tempDir, "codex")
+	require.NoError(t, os.MkdirAll(codexHome, 0o700))
+
+	codexConfig := filepath.Join(codexHome, "config.toml")
+	require.NoError(t, os.WriteFile(codexConfig, []byte(`
+model = "gpt-5.5"
+trusted_project_roots = ["/private/repo"]
+`), 0o600))
+
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv(EnvPath, "")
+	t.Setenv(EnvStatePath, filepath.Join(tempDir, "state.yaml"))
+	t.Chdir(tempDir)
+
+	report := NewDefaultDiagnosticsReport()
+
+	assert.Empty(t, report.LoadError)
+	assert.Contains(t, report.LoadedSources, codexConfig)
+	assertDiagnosticContains(t, report.Diagnostics, "trusted_project_roots: ignored unsupported field")
+
+	out, err := yaml.Marshal(report)
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "/private/repo")
+}
+
 func TestInspectStatePath_ReportsStateMetadataWithoutPreferences(t *testing.T) {
 	t.Parallel()
 

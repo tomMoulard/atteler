@@ -25,6 +25,7 @@ type AppServerClient struct {
 	emit         func(CodexEvent)
 	lines        chan appServerMessage
 	done         chan error
+	waitDone     chan struct{}
 	stderr       <-chan string
 	commandLinks map[string]commandLink
 	mu           sync.Mutex
@@ -131,6 +132,7 @@ func startAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 		emit:         emit,
 		lines:        make(chan appServerMessage, 64),
 		done:         make(chan error, 1),
+		waitDone:     make(chan struct{}),
 		stderr:       readString(stderr),
 		commandLinks: make(map[string]commandLink),
 		nextID:       1,
@@ -146,6 +148,7 @@ func startAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 			err = finishErr
 		}
 		client.done <- err
+		close(client.waitDone)
 	}()
 
 	if err := client.initialize(ctx, cfg); err != nil {
@@ -189,6 +192,14 @@ func (c *AppServerClient) Close() error {
 	_ = c.stdin.Close()
 	if c.cmd != nil && c.cmd.Process != nil {
 		_ = c.cmd.Process.Kill()
+	}
+
+	if c.waitDone != nil {
+		select {
+		case <-c.waitDone:
+		case <-time.After(defaultCodexReadTimeout):
+			return errors.New("codex app-server: close timeout")
+		}
 	}
 
 	return nil

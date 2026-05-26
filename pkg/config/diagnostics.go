@@ -141,6 +141,7 @@ type DiagnosticsReport struct {
 	Sources             []SourceDiagnostic  `json:"sources" yaml:"sources"`
 	LoadedSources       []string            `json:"loaded_sources,omitempty" yaml:"loaded_sources,omitempty"`
 	LoadError           string              `json:"load_error,omitempty" yaml:"load_error,omitempty"`
+	Diagnostics         []Diagnostic        `json:"diagnostics,omitempty" yaml:"diagnostics,omitempty"`
 	State               *StateDiagnostic    `json:"state,omitempty" yaml:"state,omitempty"`
 	Defaults            []DefaultDiagnostic `json:"defaults,omitempty" yaml:"defaults,omitempty"`
 	Config              Config              `json:"config" yaml:"config"`
@@ -230,15 +231,15 @@ func InspectPathSources(sources []PathSource) []SourceDiagnostic {
 // still reporting permissive schema diagnostics for every candidate source.
 func NewDiagnosticsReport(sources []PathSource) DiagnosticsReport {
 	cfg, loaded, origins, err := LoadPathSources(sources)
-	return newDiagnosticsReport(sources, cfg, loaded, origins, err)
+	return newDiagnosticsReport(sources, cfg, loaded, origins, nil, err)
 }
 
 // NewDefaultDiagnosticsReport returns a redacted diagnostics report for
 // the same default stack used by LoadWithOrigins, including harness imports and
 // ATTELER_CONFIG overrides.
 func NewDefaultDiagnosticsReport() DiagnosticsReport {
-	cfg, loaded, origins, err := LoadWithOrigins()
-	report := newDiagnosticsReport(DefaultPathSources(), cfg, loaded, origins, err)
+	cfg, loaded, origins, diagnostics, err := LoadWithDiagnostics()
+	report := newDiagnosticsReport(DefaultPathSources(), cfg, loaded, origins, diagnostics, err)
 	state := InspectStatePath(DefaultStatePath())
 	report.State = &state
 
@@ -430,6 +431,7 @@ func newDiagnosticsReport(
 	cfg Config,
 	loaded []string,
 	origins OriginMap,
+	diagnostics []Diagnostic,
 	err error,
 ) DiagnosticsReport {
 	report := DiagnosticsReport{
@@ -437,6 +439,7 @@ func newDiagnosticsReport(
 		StateSchemaVersion:  StateSchemaVersion,
 		Sources:             InspectPathSources(sources),
 		LoadedSources:       append([]string(nil), loaded...),
+		Diagnostics:         append([]Diagnostic(nil), diagnostics...),
 		Defaults:            DefaultDiagnostics(),
 		Config:              RedactedConfig(cfg),
 		Origins:             RedactedOriginMap(origins),
