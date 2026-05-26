@@ -28,9 +28,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install GoReleaser
-        run: go install github.com/goreleaser/goreleaser/v2@latest
-
       - name: Tidy
         run: go mod tidy
 
