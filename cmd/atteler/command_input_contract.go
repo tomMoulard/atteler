@@ -286,10 +286,37 @@ type stateDiagnosticsCommandInput struct {
 }
 
 type suggestSkillCommandInput struct {
-	SaveDir        string
-	Steps          []string
-	MaxSteps       int
-	MinOccurrences int
+	SaveDir            string
+	LearningDir        string
+	LearningSkillDir   string
+	LearningShow       string
+	LearningEdit       string
+	LearningEnable     string
+	LearningDisable    string
+	LearningDelete     string
+	Steps              []string
+	MaxSteps           int
+	MinOccurrences     int
+	ReviewOnly         bool
+	LearningList       bool
+	LearningEnableAll  bool
+	LearningDisableAll bool
+}
+
+type skillLearningCommandInput struct {
+	EffectiveEnabled *bool
+	Dir              string
+	SkillDir         string
+	Show             string
+	Edit             string
+	Editor           string
+	Enable           string
+	Disable          string
+	Delete           string
+	SuggestSteps     []string
+	List             bool
+	EnableAll        bool
+	DisableAll       bool
 }
 
 type vectorSearchCommandInput struct {
@@ -730,10 +757,37 @@ func stateDiagnosticsCommandInputFromOptions(opts cliOptions) stateDiagnosticsCo
 
 func suggestSkillCommandInputFromOptions(opts cliOptions) suggestSkillCommandInput {
 	return suggestSkillCommandInput{
-		SaveDir:        opts.skillSaveDir,
-		Steps:          append([]string(nil), opts.suggestSkillSteps...),
-		MaxSteps:       opts.skillMaxSteps.value,
-		MinOccurrences: opts.skillMinOccurrences.value,
+		SaveDir:            opts.skillSaveDir,
+		LearningDir:        opts.skillLearningDir,
+		LearningSkillDir:   opts.skillLearningSkillDir,
+		LearningShow:       opts.skillLearningShow,
+		LearningEdit:       opts.skillLearningEdit,
+		LearningEnable:     opts.skillLearningEnable,
+		LearningDisable:    opts.skillLearningDisable,
+		LearningDelete:     opts.skillLearningDelete,
+		Steps:              append([]string(nil), opts.suggestSkillSteps...),
+		MaxSteps:           opts.skillMaxSteps.value,
+		MinOccurrences:     opts.skillMinOccurrences.value,
+		ReviewOnly:         opts.skillReviewOnly,
+		LearningList:       opts.skillLearningList,
+		LearningEnableAll:  opts.skillLearningEnableAll,
+		LearningDisableAll: opts.skillLearningDisableAll,
+	}
+}
+
+func skillLearningCommandInputFromOptions(opts cliOptions) skillLearningCommandInput {
+	return skillLearningCommandInput{
+		Dir:          opts.skillLearningDir,
+		SkillDir:     opts.skillLearningSkillDir,
+		Show:         opts.skillLearningShow,
+		Edit:         opts.skillLearningEdit,
+		Enable:       opts.skillLearningEnable,
+		Disable:      opts.skillLearningDisable,
+		Delete:       opts.skillLearningDelete,
+		SuggestSteps: append([]string(nil), opts.suggestSkillSteps...),
+		List:         opts.skillLearningList,
+		EnableAll:    opts.skillLearningEnableAll,
+		DisableAll:   opts.skillLearningDisableAll,
 	}
 }
 

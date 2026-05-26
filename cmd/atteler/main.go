@@ -246,42 +246,45 @@ type model struct {
 	agentLoopBudget             llm.AgentLoopBudget
 	agentLoopCheckpointInterval int
 
-	sessionState         session.Session
-	history              []llm.Message
-	promptHistory        []string
-	queuedPrompts        []string
-	promptHistoryDraft   string
-	pickerItems          []pickerItem
-	contextOptions       contextref.Options
-	referenceContext     string
-	worktreeInfo         *worktree.Info
-	tokenUsage           tokenUsage
-	runningTaskStarted   time.Time
-	idleSuggestionInput  string
-	idleSuggestionText   string
-	idleSuggestionStatus string
-	pickerCursor         int
-	idleSuggestionID     int
-	terminalTitleFrame   int
-	modelFetchID         int
-	modelFetchesPending  int
-	completionCursor     int
-	promptHistoryCursor  int
-	runningTaskID        int
-	maxInputTokens       int
-	width                int
-	quitting             bool
-	waiting              bool
-	pickerOpen           bool
-	pickerLoading        bool
-	scopePickerOpen      bool
-	completionOpen       bool
-	modelLocked          bool
-	promptLocalOnly      bool
-	revampUndoActive     bool
-	completionItems      []completionCandidate
-	runningTaskLabel     string
-	revampUndo           string
+	sessionState          session.Session
+	history               []llm.Message
+	promptHistory         []string
+	queuedPrompts         []string
+	promptHistoryDraft    string
+	pickerItems           []pickerItem
+	contextOptions        contextref.Options
+	referenceContext      string
+	skillLearningStoreDir string
+	skillLearningSkillDir string
+	worktreeInfo          *worktree.Info
+	tokenUsage            tokenUsage
+	runningTaskStarted    time.Time
+	idleSuggestionInput   string
+	idleSuggestionText    string
+	idleSuggestionStatus  string
+	pickerCursor          int
+	idleSuggestionID      int
+	terminalTitleFrame    int
+	modelFetchID          int
+	modelFetchesPending   int
+	completionCursor      int
+	promptHistoryCursor   int
+	runningTaskID         int
+	maxInputTokens        int
+	width                 int
+	quitting              bool
+	waiting               bool
+	pickerOpen            bool
+	pickerLoading         bool
+	scopePickerOpen       bool
+	completionOpen        bool
+	modelLocked           bool
+	promptLocalOnly       bool
+	skillLearningEnabled  bool
+	revampUndoActive      bool
+	completionItems       []completionCandidate
+	runningTaskLabel      string
+	revampUndo            string
 
 	// checkpointResponseCh is non-nil when the TUI is waiting for the user to
 	// confirm whether to continue the agent loop or execute a require-confirm
@@ -303,6 +306,9 @@ func initialModel(
 	sessionState session.Session,
 	contextOptions contextref.Options,
 	referenceContext string,
+	skillLearningStoreDir string,
+	skillLearningSkillDir string,
+	skillLearningEnabled bool,
 	sessionPath string,
 	cwd string,
 	selectedModel string,
@@ -340,6 +346,9 @@ func initialModel(
 		sessionState:                sessionState,
 		contextOptions:              contextOptions,
 		referenceContext:            referenceContext,
+		skillLearningStoreDir:       skillLearningStoreDir,
+		skillLearningSkillDir:       skillLearningSkillDir,
+		skillLearningEnabled:        skillLearningEnabled,
 		sessionPath:                 sessionPath,
 		cwd:                         cwd,
 		selectedModel:               selectedModel,

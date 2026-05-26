@@ -123,12 +123,12 @@ func PromptTriggers(suggestion Suggestion, prompt string) bool {
 	}
 
 	promptTokens := tokenSet(prompt)
-	if containsAllTokens(promptTokens, slugTokens(suggestion.Slug)) {
+	if generatedSkillPhraseMatches(prompt, promptTokens, strings.ReplaceAll(suggestion.Slug, "-", " ")) {
 		return true
 	}
 
 	name := normalizeStep(strings.TrimSuffix(suggestion.Name, " Skill"))
-	if name != "" && containsAllTokens(promptTokens, strings.Fields(name)) {
+	if generatedSkillPhraseMatches(prompt, promptTokens, name) {
 		return true
 	}
 
@@ -146,6 +146,33 @@ func PromptTriggers(suggestion Suggestion, prompt string) bool {
 	return true
 }
 
+func generatedSkillPhraseMatches(prompt string, tokens map[string]struct{}, phrase string) bool {
+	phrase = normalizeStep(phrase)
+
+	return phrase != "" && promptHasGeneratedSkillCue(tokens) && promptContainsNormalizedPhrase(prompt, phrase)
+}
+
+func promptContainsNormalizedPhrase(prompt, phrase string) bool {
+	prompt = " " + normalizeTriggerPhrase(prompt) + " "
+	phrase = " " + normalizeTriggerPhrase(phrase) + " "
+
+	return strings.Contains(prompt, phrase)
+}
+
+func normalizeTriggerPhrase(value string) string {
+	return strings.Join(strings.Fields(separators.ReplaceAllString(strings.ToLower(strings.TrimSpace(value)), " ")), " ")
+}
+
+func promptHasGeneratedSkillCue(tokens map[string]struct{}) bool {
+	for _, token := range []string{"skill", "workflow"} {
+		if _, ok := tokens[token]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
 func humanWorkflow(steps []string) string {
 	parts := make([]string, 0, len(steps))
 	for _, step := range steps {
@@ -160,10 +187,6 @@ func humanStep(step string) string {
 	step = strings.ReplaceAll(step, "}}", ">")
 
 	return step
-}
-
-func slugTokens(slug string) []string {
-	return strings.Fields(strings.ReplaceAll(slug, "-", " "))
 }
 
 func tokenSet(text string) map[string]struct{} {
@@ -212,7 +235,7 @@ func stepAnchorTokens(step string) []string {
 
 func isPlaceholderName(field string) bool {
 	switch field {
-	case parameterIssue, parameterPath, parameterURL, parameterNumber, parameterID:
+	case parameterEmail, parameterID, parameterIssue, parameterNumber, parameterPath, parameterURL:
 		return true
 	default:
 		return false

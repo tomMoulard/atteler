@@ -96,6 +96,15 @@ plugins:
   #     stderr_max_bytes: 65536
   #   trusted_install_sources: ["local"]
 
+skill_learning:
+  # Set enabled: false to opt out of automatic recurring-workflow skill learning.
+  enabled: true
+  store_dir: ./.atteler/skill-learning
+  skill_dir: ./.atteler/skills/generated
+  min_occurrences: 2
+  max_steps: 6
+  max_observations: 300
+
 #vim: setf=conf
 `
 

@@ -295,6 +295,13 @@ type cliOptions struct {
 	speculatePrompt                    string
 	reviewPrompt                       string
 	skillSaveDir                       string
+	skillLearningDir                   string
+	skillLearningSkillDir              string
+	skillLearningShow                  string
+	skillLearningEdit                  string
+	skillLearningEnable                string
+	skillLearningDisable               string
+	skillLearningDelete                string
 	asyncTaskSpecs                     stringListFlag
 	reviewAgents                       stringListFlag
 	reviewPaths                        stringListFlag
@@ -356,6 +363,9 @@ type cliOptions struct {
 	speculatePlan                      bool
 	speculateRun                       bool
 	skillReviewOnly                    bool
+	skillLearningList                  bool
+	skillLearningEnableAll             bool
+	skillLearningDisableAll            bool
 	reviewPlan                         bool
 	reviewRun                          bool
 	routeInteractive                   bool
@@ -433,6 +443,7 @@ type appState struct {
 	hookConfig                  map[string][]appconfig.HookConfig
 	agentRegistry               *agent.Registry
 	hookRunner                  *events.Runner
+	eventObservers              []events.Observer
 	sessionStore                *session.Store
 	stateStore                  *appconfig.StateStore
 	registry                    *llm.Registry
@@ -443,6 +454,8 @@ type appState struct {
 	providers                   []string
 	loadedConfigPaths           []string
 	referenceContext            string
+	skillLearningStoreDir       string
+	skillLearningSkillDir       string
 	selectedModel               string
 	selectedAgent               string
 	cwd                         string
@@ -450,4 +463,5 @@ type appState struct {
 	modelLocked                 bool
 	autoMergeWorktree           bool
 	promptLocalOnly             bool
+	skillLearningEnabled        bool
 }

@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
 
+	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -195,8 +198,23 @@ func providerlessPlanningCommands() []command {
 		{
 			name:  "suggest-skill",
 			tier:  tierProviderless,
-			match: func(o cliOptions) bool { return len(o.suggestSkillSteps) > 0 },
-			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
+			match: func(o cliOptions) bool { return len(o.suggestSkillSteps) > 0 || skillLearningCommandRequested(o) },
+			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
+				if skillLearningCommandRequested(o) {
+					cfg, _, cfgErr := appconfig.Load()
+					if cfgErr != nil {
+						fmt.Fprintln(os.Stderr, "warning: "+cfgErr.Error())
+					}
+
+					input := skillLearningCommandInputFromOptions(o)
+					learningOpts, _ := skillLearningOptionsFromLoadedConfig(cfg, o)
+					input.Dir = learningOpts.StoreDir
+					input.SkillDir = learningOpts.SkillDir
+					input.EffectiveEnabled = learningOpts.Enabled
+
+					return runSkillLearningCommand(ctx, input)
+				}
+
 				return suggestSkill(o.suggestSkillSteps, o.skillMaxSteps.value, o.skillMinOccurrences.value, o.skillSaveDir, o.skillReviewOnly)
 			},
 		},

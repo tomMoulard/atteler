@@ -624,6 +624,10 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 
 	confirmCh := make(chan agentLoopConfirmRequest, 1)
 	responseCh := make(chan bool, 1)
+	referenceContext := appendReferenceContext(
+		buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions),
+		generatedSkillReferenceContext(input, m.skillLearningStoreDir, m.skillLearningSkillDir, m.skillLearningEnabled),
+	)
 
 	request := llmRequest{
 		eventBase: events.Event{
@@ -637,7 +641,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		hasAgent:                    activeAgent.ok,
 		model:                       requestModel,
 		agentLoopCheckpointPath:     agentLoopCheckpointPath(m.sessionPath),
-		referenceContext:            buildReferenceContext(m.ctx, m.referenceContext, activeAgent, m.contextOptions),
+		referenceContext:            referenceContext,
 		workingDir:                  m.cwd,
 		messages:                    msgs,
 		fallbackModels:              fallbackModels,

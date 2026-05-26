@@ -22,7 +22,11 @@ import (
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
 
-const affirmativeYes = "yes"
+const (
+	affirmativeTrue = "true"
+	affirmativeYes  = "yes"
+	negativeFalse   = "false"
+)
 
 func parseOptions() cliOptions {
 	var opts cliOptions
@@ -153,7 +157,7 @@ func applyDebugBool(getenv func(string) string, name string, target *bool) {
 	}
 
 	switch strings.ToLower(strings.TrimSpace(getenv(name))) {
-	case "1", "true", affirmativeYes, "on":
+	case "1", affirmativeTrue, affirmativeYes, "on":
 		*target = true
 	}
 }
@@ -530,6 +534,8 @@ func providerlessState(store *session.Store) (appState, error) {
 }
 
 func runWithState(ctx context.Context, opts cliOptions, state appState) error {
+	defer flushEventObservers(ctx, state.eventObservers)
+
 	if handled, err := dispatchStateful(ctx, opts, state); handled {
 		return err
 	}
@@ -576,6 +582,16 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		return err
 	}
 
+	referenceContext := appendReferenceContext(
+		state.referenceContext,
+		generatedSkillReferenceContext(
+			prompt,
+			state.skillLearningStoreDir,
+			state.skillLearningSkillDir,
+			state.skillLearningEnabled,
+		),
+	)
+
 	runErr := runOnceWithOptions(
 		ctx,
 		state.registry,
@@ -584,7 +600,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		state.sessionStore,
 		state.sessionState,
 		state.contextOptions,
-		state.referenceContext,
+		referenceContext,
 		state.selectedModel,
 		state.selectedAgent,
 		state.fallbackModels,
@@ -648,7 +664,10 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		hookLogWriter = os.Stderr
 	}
 
-	hookRunner := events.NewRunnerWithLogger(cfg.Hooks, hookLogWriter)
+	skillLearningOpts, configuredSkillLearningEnabled := skillLearningOptionsFromConfig(cfg, opts, os.Getenv)
+	skillLearningEnabled := skillLearningEffectiveEnabled(skillLearningOpts, configuredSkillLearningEnabled)
+	eventObservers := skillLearningObserversFromOptions(ctx, skillLearningOpts, skillLearningEnabled)
+	hookRunner := events.NewRunnerWithLoggerAndObservers(cfg.Hooks, hookLogWriter, eventObservers...)
 	store := session.NewStore(opts.sessionDir)
 	stateStore := appconfig.NewStateStore("")
 
@@ -724,10 +743,13 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		registry:                    reg,
 		agentRegistry:               agentRegistry,
 		hookRunner:                  hookRunner,
+		eventObservers:              eventObservers,
 		sessionStore:                store,
 		stateStore:                  stateStore,
 		contextOptions:              contextOptions,
 		referenceContext:            referenceContext,
+		skillLearningStoreDir:       skillLearningOpts.StoreDir,
+		skillLearningSkillDir:       skillLearningOpts.SkillDir,
 		sessionState:                selection.sessionState,
 		worktreeInfo:                wtInfo,
 		cwd:                         cwd,
@@ -747,6 +769,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		modelLocked:                 selection.modelLocked,
 		autoMergeWorktree:           opts.useWorktree && !opts.noAutoMerge,
 		promptLocalOnly:             opts.promptLocalOnly,
+		skillLearningEnabled:        skillLearningEnabled,
 	}, nil
 }
 
