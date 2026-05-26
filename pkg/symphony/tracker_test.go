@@ -128,6 +128,8 @@ func TestGitHubClient_FetchOpenPullRequestsByHeadPrefixInfersIssue(t *testing.T)
 			writeTestResponse(t, w, `[{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"}},{"number":32,"html_url":"https://github.com/owner/repo/pull/32","state":"open","head":{"ref":"other/GH-3","sha":"def456"}}]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/2":
 			writeTestResponse(t, w, `{"node_id":"node-2","number":2,"title":"Fix CI","state":"open","html_url":"https://github.com/owner/repo/issues/2","labels":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/2/comments":
+			writeTestResponse(t, w, `[]`)
 		default:
 			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
 			http.NotFound(w, r)
@@ -150,6 +152,45 @@ func TestGitHubClient_FetchOpenPullRequestsByHeadPrefixInfersIssue(t *testing.T)
 	assert.Equal(t, "symphony/GH-2", pullRequests[0].Branch)
 	assert.Equal(t, "GH-2", pullRequests[0].Issue.Identifier)
 	assert.Equal(t, "Fix CI", pullRequests[0].Issue.Title)
+}
+
+func TestGitHubClient_FetchCandidateIssuesIncludesDiscussionComments(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubIssuesPath:
+			assert.Equal(t, "open", r.URL.Query().Get("state"))
+			writeTestResponse(t, w, `[{"node_id":"node-32","number":32,"title":"Persist admission records","state":"open","html_url":"https://github.com/owner/repo/issues/32","body":"Add child run artifacts.","labels":[{"name":"symphony"}]}]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/32/comments":
+			writeTestResponse(t, w, `[{"html_url":"https://github.com/owner/repo/issues/32#issuecomment-1","user":{"login":"maintainer"},"author_association":"OWNER","created_at":"2026-05-26T08:52:52Z","updated_at":"2026-05-26T08:52:52Z","body":"Add a fixture where a child is denied before spawn."},{"html_url":"https://github.com/owner/repo/issues/32#issuecomment-2","user":{"login":"reviewer"},"author_association":"NONE","created_at":"2026-05-26T09:00:00Z","updated_at":"2026-05-26T09:00:00Z","body":"Also cover admitted then halted."}]`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint:     server.URL,
+		APIKey:       "token",
+		Owner:        "owner",
+		Repo:         "repo",
+		ActiveStates: []string{"OPEN"},
+		Labels:       []string{"symphony"},
+	})
+
+	issues, err := client.FetchCandidateIssues(t.Context())
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	require.Len(t, issues[0].Comments, 2)
+
+	assert.Equal(t, "maintainer", issues[0].Comments[0].Author)
+	assert.Equal(t, "OWNER", issues[0].Comments[0].AuthorAssociation)
+	assert.Contains(t, issues[0].Comments[0].Body, "denied before spawn")
+	assert.Contains(t, issues[0].Comments[1].Body, "admitted then halted")
 }
 
 func TestGitHubClient_UpsertsWatchIssuesByFingerprint(t *testing.T) {

@@ -158,6 +158,10 @@ func turnPrompt(def WorkflowDefinition, issue Issue, attempt *int, runContext *R
 			return "", err
 		}
 
+		if commentsPrompt := issueCommentsPrompt(def.PromptTemplate, issue); commentsPrompt != "" {
+			prompt += "\n\n---\n\n" + commentsPrompt
+		}
+
 		contextPrompt := runContextPrompt(runContext)
 		if contextPrompt == "" {
 			return prompt, nil
@@ -173,6 +177,29 @@ func turnPrompt(def WorkflowDefinition, issue Issue, attempt *int, runContext *R
 		turnNumber,
 		maxTurns,
 	), nil
+}
+
+func issueCommentsPrompt(template string, issue Issue) string {
+	if len(issue.Comments) == 0 || strings.Contains(template, "issue.comments") {
+		return ""
+	}
+
+	var builder strings.Builder
+	fmt.Fprintln(&builder, "Issue discussion comments:")
+	fmt.Fprintln(&builder, "Treat these comments as part of the issue context. Reconcile newer maintainer comments with the original description before implementing.")
+	for i, comment := range issue.Comments {
+		author := firstNonEmpty(comment.Author, "unknown")
+		fmt.Fprintf(&builder, "\nComment %d by %s", i+1, author)
+		if comment.CreatedAt != nil {
+			fmt.Fprintf(&builder, " at %s", comment.CreatedAt.UTC().Format(time.RFC3339))
+		}
+		if comment.URL != nil && strings.TrimSpace(*comment.URL) != "" {
+			fmt.Fprintf(&builder, "\nURL: %s", strings.TrimSpace(*comment.URL))
+		}
+		fmt.Fprintf(&builder, "\n%s\n", strings.TrimSpace(comment.Body))
+	}
+
+	return strings.TrimSpace(builder.String())
 }
 
 func runContextPrompt(runContext *RunContext) string {

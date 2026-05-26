@@ -52,9 +52,26 @@ func issueTemplateMap(issue Issue) map[string]any {
 		"url":         pointerValue(issue.URL),
 		"labels":      issue.Labels,
 		"blocked_by":  blockerTemplateMaps(issue.BlockedBy),
+		"comments":    issueCommentTemplateMaps(issue.Comments),
 		"created_at":  timePointerValue(issue.CreatedAt),
 		"updated_at":  timePointerValue(issue.UpdatedAt),
 	}
+}
+
+func issueCommentTemplateMaps(comments []IssueComment) []map[string]any {
+	out := make([]map[string]any, 0, len(comments))
+	for _, comment := range comments {
+		out = append(out, map[string]any{
+			"author":             comment.Author,
+			"author_association": comment.AuthorAssociation,
+			"body":               comment.Body,
+			"url":                pointerValue(comment.URL),
+			"created_at":         timePointerValue(comment.CreatedAt),
+			"updated_at":         timePointerValue(comment.UpdatedAt),
+		})
+	}
+
+	return out
 }
 
 func blockerTemplateMaps(blockers []BlockerRef) []map[string]any {

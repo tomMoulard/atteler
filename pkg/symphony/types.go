@@ -45,18 +45,29 @@ const (
 
 // Issue is the normalized tracker issue model used by Symphony.
 type Issue struct {
-	CreatedAt   *time.Time   `json:"created_at,omitempty"`
-	UpdatedAt   *time.Time   `json:"updated_at,omitempty"`
-	Description *string      `json:"description,omitempty"`
-	Priority    *int         `json:"priority,omitempty"`
-	BranchName  *string      `json:"branch_name,omitempty"`
-	URL         *string      `json:"url,omitempty"`
-	ID          string       `json:"id"`
-	Identifier  string       `json:"identifier"`
-	Title       string       `json:"title"`
-	State       string       `json:"state"`
-	Labels      []string     `json:"labels"`
-	BlockedBy   []BlockerRef `json:"blocked_by"`
+	CreatedAt   *time.Time     `json:"created_at,omitempty"`
+	UpdatedAt   *time.Time     `json:"updated_at,omitempty"`
+	Description *string        `json:"description,omitempty"`
+	Priority    *int           `json:"priority,omitempty"`
+	BranchName  *string        `json:"branch_name,omitempty"`
+	URL         *string        `json:"url,omitempty"`
+	ID          string         `json:"id"`
+	Identifier  string         `json:"identifier"`
+	Title       string         `json:"title"`
+	State       string         `json:"state"`
+	Labels      []string       `json:"labels"`
+	BlockedBy   []BlockerRef   `json:"blocked_by"`
+	Comments    []IssueComment `json:"comments,omitempty"`
+}
+
+// IssueComment is a normalized tracker discussion comment.
+type IssueComment struct {
+	CreatedAt         *time.Time `json:"created_at,omitempty"`
+	UpdatedAt         *time.Time `json:"updated_at,omitempty"`
+	URL               *string    `json:"url,omitempty"`
+	Author            string     `json:"author,omitempty"`
+	AuthorAssociation string     `json:"author_association,omitempty"`
+	Body              string     `json:"body,omitempty"`
 }
 
 // BlockerRef identifies an issue that blocks a candidate issue.

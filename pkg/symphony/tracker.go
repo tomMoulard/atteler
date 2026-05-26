@@ -414,7 +414,12 @@ func (c *GitHubClient) fetchList(ctx context.Context, state string) ([]Issue, er
 				continue
 			}
 
-			all = append(all, normalizeGitHubIssue(issue))
+			normalized, err := c.normalizeGitHubIssueWithComments(ctx, issue)
+			if err != nil {
+				return nil, err
+			}
+
+			all = append(all, normalized)
 		}
 
 		if len(payload) < 100 {
@@ -431,7 +436,53 @@ func (c *GitHubClient) fetchOne(ctx context.Context, number int) (Issue, error) 
 		return Issue{}, err
 	}
 
-	return normalizeGitHubIssue(payload), nil
+	return c.normalizeGitHubIssueWithComments(ctx, payload)
+}
+
+func (c *GitHubClient) normalizeGitHubIssueWithComments(ctx context.Context, payload githubIssue) (Issue, error) {
+	issue := normalizeGitHubIssue(payload)
+	if payload.Number <= 0 {
+		return issue, nil
+	}
+
+	comments, err := c.fetchIssueComments(ctx, payload.Number)
+	if err != nil {
+		return Issue{}, err
+	}
+	issue.Comments = comments
+
+	return issue, nil
+}
+
+func (c *GitHubClient) fetchIssueComments(ctx context.Context, number int) ([]IssueComment, error) {
+	var comments []IssueComment
+	for page := 1; ; page++ {
+		values := url.Values{}
+		values.Set("per_page", "100")
+		values.Set("page", strconv.Itoa(page))
+
+		var payload []githubIssueComment
+		path := fmt.Sprintf(
+			"/repos/%s/%s/issues/%d/comments?%s",
+			url.PathEscape(c.cfg.Owner),
+			url.PathEscape(c.cfg.Repo),
+			number,
+			values.Encode(),
+		)
+		if err := c.get(ctx, path, &payload); err != nil {
+			return nil, err
+		}
+
+		for _, comment := range payload {
+			comments = append(comments, normalizeGitHubIssueComment(comment))
+		}
+
+		if len(payload) < 100 {
+			break
+		}
+	}
+
+	return comments, nil
 }
 
 func (c *GitHubClient) get(ctx context.Context, path string, out any) error {
@@ -922,6 +973,19 @@ type githubIssue struct {
 	Labels      []githubLabel `json:"labels"`
 }
 
+type githubIssueComment struct {
+	Body              *string     `json:"body"`
+	HTMLURL           *string     `json:"html_url"`
+	User              *githubUser `json:"user"`
+	AuthorAssociation string      `json:"author_association"`
+	CreatedAt         string      `json:"created_at"`
+	UpdatedAt         string      `json:"updated_at"`
+}
+
+type githubUser struct {
+	Login string `json:"login"`
+}
+
 type githubLabel struct {
 	Name string `json:"name"`
 }
@@ -998,6 +1062,26 @@ func normalizeGitHubIssue(issue githubIssue) Issue {
 	sort.Strings(out.Labels)
 
 	return out
+}
+
+func normalizeGitHubIssueComment(comment githubIssueComment) IssueComment {
+	var author string
+	if comment.User != nil {
+		author = comment.User.Login
+	}
+	var body string
+	if comment.Body != nil {
+		body = *comment.Body
+	}
+
+	return IssueComment{
+		Author:            author,
+		AuthorAssociation: comment.AuthorAssociation,
+		Body:              strings.TrimSpace(body),
+		URL:               comment.HTMLURL,
+		CreatedAt:         parseTimePointer(comment.CreatedAt),
+		UpdatedAt:         parseTimePointer(comment.UpdatedAt),
+	}
 }
 
 func watchIssueRef(issue githubIssue, fingerprint string) watch.IssueRef {

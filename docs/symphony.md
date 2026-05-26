@@ -67,7 +67,10 @@ Labels:{% for label in issue.labels %} {{ label }}{% endfor %}
 The prompt renderer is strict: unknown variables and unknown filters fail the
 affected run attempt. It supports `{{ issue.title }}`, `{{ attempt }}`,
 `{% if attempt %}...{% else %}...{% endif %}`, and
-`{% for label in issue.labels %}...{% endfor %}`.
+`{% for label in issue.labels %}...{% endfor %}`. GitHub issue comments are
+available as `issue.comments`; when a workflow template does not reference
+`issue.comments`, Symphony appends the issue discussion automatically to the
+first worker prompt so maintainer comments are not silently dropped.
 
 ## Trackers
 
