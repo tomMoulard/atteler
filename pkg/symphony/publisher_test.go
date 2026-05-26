@@ -60,7 +60,6 @@ func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			assert.Contains(t, body["body"], "https://github.com/owner/repo/pull/7")
 			w.WriteHeader(http.StatusCreated)
 			writeTestResponse(t, w, `{}`)
 		default:

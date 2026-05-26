@@ -553,7 +553,7 @@ func (p *githubPublisher) finalizeIssue(ctx context.Context, issueNumber int, is
 		}
 	}
 
-	comment := publishIssueComment(issue, pr, removed)
+	comment := publishIssueComment(pr, removed)
 	if commentErr := p.client.AddIssueComment(ctx, issueNumber, comment); commentErr != nil {
 		p.logger.Warn(
 			"symphony issue comment failed after publish",
@@ -673,14 +673,11 @@ func publishPRBody(issue Issue) string {
 	return body.String()
 }
 
-func publishIssueComment(issue Issue, pr GitHubPullRequest, removedLabels []string) string {
+func publishIssueComment(pr GitHubPullRequest, removedLabels []string) string {
 	var body bytes.Buffer
-	fmt.Fprintf(&body, "Symphony opened pull request #%d: %s\n\n", pr.Number, pr.HTMLURL)
+	fmt.Fprintf(&body, "Symphony opened pull request #%d\n\n", pr.Number)
 	if len(removedLabels) > 0 {
 		fmt.Fprintf(&body, "Removed dispatch label(s) `%s` so this issue stops redispatching while the PR is open.\n", strings.Join(removedLabels, "`, `"))
-	}
-	if issue.URL != nil && strings.TrimSpace(*issue.URL) != "" {
-		fmt.Fprintf(&body, "\nIssue: %s\n", strings.TrimSpace(*issue.URL))
 	}
 	return body.String()
 }

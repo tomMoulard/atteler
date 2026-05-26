@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1429,30 +1428,4 @@ func TestRunInteractiveHeaderShowsInputNewlineHelp(t *testing.T) {
 	assert.Contains(t, plain, "Ctrl+D to quit")
 	assert.Contains(t, plain, "Enter to send")
 	assert.Contains(t, plain, "Shift/Alt+Enter newline")
-}
-
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-
-	originalStdout := os.Stdout
-	readFile, writeFile, err := os.Pipe()
-	require.NoError(t, err)
-
-	os.Stdout = writeFile
-
-	t.Cleanup(func() {
-		os.Stdout = originalStdout
-	})
-
-	fn()
-
-	require.NoError(t, writeFile.Close())
-
-	output, err := io.ReadAll(readFile)
-	require.NoError(t, err)
-	require.NoError(t, readFile.Close())
-
-	os.Stdout = originalStdout
-
-	return string(output)
 }

@@ -764,7 +764,9 @@ func captureStdout(t *testing.T, fn func()) string {
 	oldStdout := os.Stdout
 	reader, writer, err := os.Pipe()
 	require.NoError(t, err)
+
 	os.Stdout = writer
+
 	t.Cleanup(func() {
 		os.Stdout = oldStdout
 	})
