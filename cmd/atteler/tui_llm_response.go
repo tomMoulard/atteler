@@ -93,6 +93,9 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 			Content:     msg.content,
 		}),
 	)
+	if event, ok := routeDecisionEvent(m.sessionState.ID, m.sessionPath, m.sessionState.DefaultAgent, routeResponseModelID(msg.provider, msg.model), msg.routeDecision); ok {
+		cmds = append(cmds, emitHook(m.ctx, m.hookRunner, event))
+	}
 
 	return m.continueWithQueuedPrompt(tea.Sequence(cmds...))
 }

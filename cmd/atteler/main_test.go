@@ -327,7 +327,17 @@ func TestRecordedResponseRoundTrip(t *testing.T) {
 		Seed:        &seed,
 		Messages:    []llm.Message{{Role: llm.RoleUser, Content: "hello"}},
 	}
-	resp := &llm.Response{Content: "hi back", Model: "gpt-test", InputTokens: 2, CachedInputTokens: 1, OutputTokens: 3}
+	resp := &llm.Response{
+		Content:               "hi back",
+		Provider:              "openai",
+		Model:                 "gpt-test",
+		Latency:               42 * time.Millisecond,
+		FirstTokenLatency:     7 * time.Millisecond,
+		InputTokens:           2,
+		CachedInputTokens:     1,
+		CacheWriteInputTokens: 4,
+		OutputTokens:          3,
+	}
 
 	if err := saveRecordedResponse(path, params, []string{"backup"}, resp); err != nil {
 		require.NoError(t, err)
@@ -338,7 +348,15 @@ func TestRecordedResponseRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	if got.Content != "hi back" || got.Model != "gpt-test" || got.InputTokens != 2 || got.CachedInputTokens != 1 || got.OutputTokens != 3 {
+	if got.Content != "hi back" ||
+		got.Provider != "openai" ||
+		got.Model != "gpt-test" ||
+		got.Latency != 42*time.Millisecond ||
+		got.FirstTokenLatency != 7*time.Millisecond ||
+		got.InputTokens != 2 ||
+		got.CachedInputTokens != 1 ||
+		got.CacheWriteInputTokens != 4 ||
+		got.OutputTokens != 3 {
 		require.Failf(t, "unexpected replay response", "got = %+v", got)
 	}
 }

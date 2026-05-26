@@ -65,12 +65,14 @@ func (o *OpenAIProvider) Name() string { return providerOpenAI }
 
 // Models returns the static list of supported models (fallback).
 func (o *OpenAIProvider) Models() []string {
-	return []string{
+	static := []string{
 		"gpt-4.1",
 		"gpt-4.1-mini",
 		"gpt-4.1-nano",
 		"o4-mini",
 	}
+
+	return mergeModelLists(static, catalogModelsByProvider()[providerOpenAI])
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +240,11 @@ func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openai: HTTP %d: %s", resp.StatusCode, respBody)
+		return nil, retryableHTTPStatusError(
+			fmt.Errorf("openai: HTTP %d: %s", resp.StatusCode, respBody),
+			resp.StatusCode,
+			resp.Header.Get("Retry-After"),
+		)
 	}
 
 	var or openaiResponse
@@ -399,6 +405,10 @@ func configuredBaseURL(envKey, configured, fallback string) string {
 
 // ModelContextWindow returns the context window size for an OpenAI model.
 func (o *OpenAIProvider) ModelContextWindow(model string) int {
+	if limit := catalogContextWindow(providerOpenAI, model); limit > 0 {
+		return limit
+	}
+
 	return openaiContextWindow(model)
 }
 

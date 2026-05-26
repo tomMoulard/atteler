@@ -52,6 +52,20 @@ agents:
     model: gpt-4.1
     fallback_models:
       - gpt-4.1-mini
+    routing_policy:
+      # Prefer providers before cost/latency tie-breakers.
+      preferred_providers:
+        - openai
+      # Reject every model from listed providers.
+      # banned_providers:
+      #   - ollama
+      # Reject provider-qualified IDs or provider-local model names.
+      # banned_models:
+      #   - openai/gpt-expensive
+      # required_capabilities:
+      #   - tools
+      # max_budget: 0.25
+      # require_fresh_metadata: true
     seed: 1
     reasoning_level: high
     temperature: 0

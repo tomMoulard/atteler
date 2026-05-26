@@ -10,14 +10,18 @@ import (
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/feedback"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/modelroute"
 )
 
 // Agent is a named LLM persona with optional model and generation knobs.
+//
+//nolint:govet // Field order follows persona/config grouping.
 type Agent struct {
 	Temperature     *float64
 	TopP            *float64
 	Seed            *int
 	ToolPermissions map[string]bool
+	RoutingPolicy   modelroute.Policy
 	Name            string
 	Model           string
 	Mode            string
@@ -56,6 +60,7 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 			Model:           cfg.Model,
 			Mode:            strings.TrimSpace(cfg.Mode),
 			ToolPermissions: cloneToolPermissions(cfg.ToolPermissions),
+			RoutingPolicy:   routingPolicyFromConfig(cfg.RoutingPolicy),
 			Description:     strings.TrimSpace(cfg.Description),
 			Personality:     strings.TrimSpace(cfg.Personality),
 			SystemPrompt:    feedback.RenderSystemPrompt(cfg.SystemPrompt, cfg.FeedbackGuidance, now),
@@ -84,6 +89,17 @@ func cloneToolPermissions(in map[string]bool) map[string]bool {
 	maps.Copy(out, in)
 
 	return out
+}
+
+func routingPolicyFromConfig(cfg config.RoutingPolicyConfig) modelroute.Policy {
+	return modelroute.Policy{
+		PreferredProviders:   normalizePhrases(cfg.PreferredProviders),
+		BannedProviders:      normalizePhrases(cfg.BannedProviders),
+		BannedModels:         normalizeModels(cfg.BannedModels),
+		RequiredCapabilities: normalizePhrases(cfg.RequiredCapabilities),
+		MaxBudget:            cfg.MaxBudget,
+		RequireFreshMetadata: cfg.RequireFreshMetadata,
+	}
 }
 
 // ModelChain returns the ordered model preference chain for this agent.

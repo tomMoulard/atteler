@@ -658,6 +658,7 @@ func TestCommandSurface_JSONDumpIncludesDispatchContract(t *testing.T) {
 	assert.Equal(t, "listSessionsCommandInput", commands["list-sessions"].InputType)
 	assert.Equal(t, "headlessCommandInput", commands["headless-command"].InputType)
 	assert.Equal(t, "routeModelsCommandInput", commands["route-models-providerless"].InputType)
+	assert.Contains(t, commands["route-models-providerless"].InputFlags, "--route-cache-write-tokens")
 	assert.Equal(t, "bashCommandInput", commands["bash-command"].InputType)
 	assert.Equal(t, "spawnAgentsCommandInput", commands["spawn-agents"].InputType)
 	assert.Contains(t, commands["list-sessions"].InputFields, "Tag")

@@ -15,8 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
+	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -76,6 +79,124 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	if len(loaded.Messages) != 2 || loaded.Messages[1].Content != "recorded answer" {
 		require.Failf(t, "unexpected replayed session", "messages = %+v", loaded.Messages)
 	}
+}
+
+func TestPrepareRunOnceRequestReturnsRouteDecisionOnRoutingError(t *testing.T) {
+	t.Parallel()
+
+	agents := agent.NewRegistry(map[string]config.AgentConfig{
+		"reviewer": {
+			Model:          "openai/gpt-4.1-mini",
+			FallbackModels: []string{"openai/gpt-4.1-nano"},
+			RoutingPolicy: config.RoutingPolicyConfig{
+				BannedProviders: []string{"openai"},
+			},
+		},
+	})
+
+	prepared, err := prepareRunOnceRequest(
+		context.Background(),
+		llm.NewRegistry(),
+		agents,
+		contextref.Options{Root: t.TempDir()},
+		"",
+		"",
+		"reviewer",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		false,
+		"review this",
+	)
+
+	require.Error(t, err)
+	require.NotNil(t, prepared.routeDecision)
+	assert.Empty(t, prepared.routeDecision.Selected)
+	assert.Equal(t, "reviewer", prepared.activeAgent.name)
+	assertRejectionContainsCommand(t, *prepared.routeDecision, "openai/gpt-4.1-mini", modelroute.ReasonProviderBanned)
+	assertRejectionContainsCommand(t, *prepared.routeDecision, "openai/gpt-4.1-nano", modelroute.ReasonProviderBanned)
+}
+
+func TestRunOnceWithOptions_EmitsEstimatedAndActualRouteDecisionEvents(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "review this"}}},
+		nil,
+		&llm.Response{
+			Content:           "recorded answer",
+			Provider:          "openai",
+			Model:             "gpt-4.1-nano",
+			Latency:           42 * time.Millisecond,
+			FirstTokenLatency: 7 * time.Millisecond,
+			InputTokens:       100,
+			CachedInputTokens: 20,
+			OutputTokens:      10,
+		},
+	))
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1-mini", "gpt-4.1-nano"}})
+	_, err := registry.ProviderModels(context.Background(), "openai")
+	require.NoError(t, err)
+
+	agents := agent.NewRegistry(map[string]config.AgentConfig{
+		"reviewer": {
+			Model:          "openai/gpt-4.1-mini",
+			FallbackModels: []string{"openai/gpt-4.1-nano"},
+			RoutingPolicy: config.RoutingPolicyConfig{
+				PreferredProviders: []string{"openai"},
+			},
+		},
+	})
+
+	var eventLog bytes.Buffer
+
+	hooks := events.NewRunnerWithLogger(nil, &eventLog)
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+
+	err = runOnceWithOptions(
+		context.Background(),
+		registry,
+		agents,
+		hooks,
+		store,
+		session.New("", nil),
+		contextref.Options{Root: dir},
+		"",
+		"",
+		"reviewer",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat: outputFormatText,
+			HeadlessID:   "route-decision-events",
+			Headless:     true,
+			Response:     responseRecordOptions{ReplayPath: replayPath},
+		},
+		false,
+		"review this",
+	)
+	require.NoError(t, err)
+
+	log := eventLog.String()
+	assert.Contains(t, log, "event:route_decision")
+	assert.Contains(t, log, "agent=reviewer")
+	assert.Contains(t, log, "phase=estimated")
+	assert.Contains(t, log, "phase=actual")
+	assert.Contains(t, log, "actual_cost=")
+	assert.Contains(t, log, "actual_latency_ms=42")
+	assert.Contains(t, log, "actual_ttft_ms=7")
+	assert.Contains(t, log, "actual_input_tokens=100")
+	assert.Contains(t, log, "actual_output_tokens=10")
+	assert.Contains(t, log, "actual_selected=openai/gpt-4.1-nano")
+	assert.Contains(t, log, "fallback_order=openai/gpt-4.1-nano,openai/gpt-4.1-mini")
+	assert.Contains(t, log, "verified_provider_model_count=1")
 }
 
 func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
@@ -170,41 +291,41 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 	assert.Contains(t, log, "assistant_message")
 	assert.Contains(t, log, "completed")
 
-	events, err := store.ReadHeadlessEvents(headlessID)
+	headlessEvents, err := store.ReadHeadlessEvents(headlessID)
 	require.NoError(t, err)
-	require.Len(t, events, 4)
-	assert.Equal(t, session.HeadlessEventStarted, events[0].Type)
-	assert.Equal(t, session.HeadlessEventUserMessage, events[1].Type)
-	assert.Equal(t, session.HeadlessEventAssistantMessage, events[2].Type)
-	assert.Equal(t, session.HeadlessEventCompleted, events[3].Type)
-	assert.Equal(t, session.HeadlessStatusRunning, events[0].Status)
-	assert.Equal(t, session.HeadlessStatusRunning, events[1].Status)
-	assert.Equal(t, session.HeadlessStatusRunning, events[2].Status)
-	assert.Equal(t, session.HeadlessStatusCompleted, events[3].Status)
-	assert.Equal(t, run.SessionID, events[0].SessionID)
-	assert.Equal(t, run.SessionID, events[1].SessionID)
-	assert.Equal(t, run.SessionID, events[2].SessionID)
-	assert.Equal(t, run.SessionID, events[3].SessionID)
-	assert.Equal(t, run.SessionPath, events[0].SessionPath)
-	assert.Equal(t, run.SessionPath, events[1].SessionPath)
-	assert.Equal(t, run.SessionPath, events[2].SessionPath)
-	assert.Equal(t, run.SessionPath, events[3].SessionPath)
-	assert.Equal(t, "gpt-test", events[0].Model)
-	assert.Equal(t, "gpt-test", events[1].Model)
-	assert.Equal(t, "gpt-test", events[2].Model)
-	assert.Equal(t, "gpt-test", events[3].Model)
-	assert.Equal(t, "headless", events[0].StartMethod)
-	assert.NotEmpty(t, events[0].StartedCommand)
-	assert.NotEmpty(t, events[0].CommandArgs)
-	assert.Equal(t, string(llm.RoleUser), events[1].Role)
-	assert.Equal(t, "hello", events[1].Message)
-	assert.Equal(t, "5", events[1].Metadata["bytes"])
-	assert.Equal(t, string(llm.RoleAssistant), events[2].Role)
-	assert.Equal(t, "15", events[2].Metadata["bytes"])
-	assert.Equal(t, "headless", events[3].StartMethod)
-	assert.NotEmpty(t, events[3].StartedCommand)
-	assert.NotEmpty(t, events[3].CommandArgs)
-	assert.Equal(t, "completed", events[3].TerminalReason)
+	require.Len(t, headlessEvents, 4)
+	assert.Equal(t, session.HeadlessEventStarted, headlessEvents[0].Type)
+	assert.Equal(t, session.HeadlessEventUserMessage, headlessEvents[1].Type)
+	assert.Equal(t, session.HeadlessEventAssistantMessage, headlessEvents[2].Type)
+	assert.Equal(t, session.HeadlessEventCompleted, headlessEvents[3].Type)
+	assert.Equal(t, session.HeadlessStatusRunning, headlessEvents[0].Status)
+	assert.Equal(t, session.HeadlessStatusRunning, headlessEvents[1].Status)
+	assert.Equal(t, session.HeadlessStatusRunning, headlessEvents[2].Status)
+	assert.Equal(t, session.HeadlessStatusCompleted, headlessEvents[3].Status)
+	assert.Equal(t, run.SessionID, headlessEvents[0].SessionID)
+	assert.Equal(t, run.SessionID, headlessEvents[1].SessionID)
+	assert.Equal(t, run.SessionID, headlessEvents[2].SessionID)
+	assert.Equal(t, run.SessionID, headlessEvents[3].SessionID)
+	assert.Equal(t, run.SessionPath, headlessEvents[0].SessionPath)
+	assert.Equal(t, run.SessionPath, headlessEvents[1].SessionPath)
+	assert.Equal(t, run.SessionPath, headlessEvents[2].SessionPath)
+	assert.Equal(t, run.SessionPath, headlessEvents[3].SessionPath)
+	assert.Equal(t, "gpt-test", headlessEvents[0].Model)
+	assert.Equal(t, "gpt-test", headlessEvents[1].Model)
+	assert.Equal(t, "gpt-test", headlessEvents[2].Model)
+	assert.Equal(t, "gpt-test", headlessEvents[3].Model)
+	assert.Equal(t, "headless", headlessEvents[0].StartMethod)
+	assert.NotEmpty(t, headlessEvents[0].StartedCommand)
+	assert.NotEmpty(t, headlessEvents[0].CommandArgs)
+	assert.Equal(t, string(llm.RoleUser), headlessEvents[1].Role)
+	assert.Equal(t, "hello", headlessEvents[1].Message)
+	assert.Equal(t, "5", headlessEvents[1].Metadata["bytes"])
+	assert.Equal(t, string(llm.RoleAssistant), headlessEvents[2].Role)
+	assert.Equal(t, "15", headlessEvents[2].Metadata["bytes"])
+	assert.Equal(t, "headless", headlessEvents[3].StartMethod)
+	assert.NotEmpty(t, headlessEvents[3].StartedCommand)
+	assert.NotEmpty(t, headlessEvents[3].CommandArgs)
+	assert.Equal(t, "completed", headlessEvents[3].TerminalReason)
 
 	runs, err := store.ListHeadlessRuns()
 	require.NoError(t, err)
@@ -278,12 +399,12 @@ func TestStartHeadlessRunRecordsParentRunRelationship(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, parent.ChildRunIDs, "child-headless")
 
-	events, err := store.ReadHeadlessEvents("child-headless")
+	headlessEvents, err := store.ReadHeadlessEvents("child-headless")
 	require.NoError(t, err)
-	require.Len(t, events, 2)
-	assert.Equal(t, "parent-headless", events[0].ParentRunID)
-	assert.Equal(t, session.HeadlessEventUserMessage, events[1].Type)
-	assert.Equal(t, "parent-headless", events[1].ParentRunID)
+	require.Len(t, headlessEvents, 2)
+	assert.Equal(t, "parent-headless", headlessEvents[0].ParentRunID)
+	assert.Equal(t, session.HeadlessEventUserMessage, headlessEvents[1].Type)
+	assert.Equal(t, "parent-headless", headlessEvents[1].ParentRunID)
 }
 
 func TestStartHeadlessRunRejectsExistingExplicitID(t *testing.T) {
@@ -370,12 +491,12 @@ func TestFailStartedHeadlessRunRecordsFailedStatus(t *testing.T) {
 	assert.Contains(t, log, "failed")
 	assert.Contains(t, log, "write headless start log")
 
-	events, err := store.ReadHeadlessEvents(run.ID)
+	headlessEvents, err := store.ReadHeadlessEvents(run.ID)
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, session.HeadlessEventFailed, events[0].Type)
-	assert.Contains(t, events[0].Error, "write headless start log")
-	assert.Equal(t, events[0].Error, events[0].TerminalReason)
+	require.Len(t, headlessEvents, 1)
+	assert.Equal(t, session.HeadlessEventFailed, headlessEvents[0].Type)
+	assert.Contains(t, headlessEvents[0].Error, "write headless start log")
+	assert.Equal(t, headlessEvents[0].Error, headlessEvents[0].TerminalReason)
 }
 
 func TestRunOnceWithOptions_HeadlessPrivateLogKeepsPrompt(t *testing.T) {
@@ -426,12 +547,12 @@ func TestRunOnceWithOptions_HeadlessPrivateLogKeepsPrompt(t *testing.T) {
 	assert.True(t, run.PrivateLogs)
 	assert.Equal(t, secretPrompt, run.Prompt)
 
-	events, err := store.ReadHeadlessEvents(headlessID)
+	headlessEvents, err := store.ReadHeadlessEvents(headlessID)
 	require.NoError(t, err)
-	require.Len(t, events, 4)
-	assert.Equal(t, session.HeadlessEventUserMessage, events[1].Type)
-	assert.Equal(t, string(llm.RoleUser), events[1].Role)
-	assert.Equal(t, secretPrompt, events[1].Message)
+	require.Len(t, headlessEvents, 4)
+	assert.Equal(t, session.HeadlessEventUserMessage, headlessEvents[1].Type)
+	assert.Equal(t, string(llm.RoleUser), headlessEvents[1].Role)
+	assert.Equal(t, secretPrompt, headlessEvents[1].Message)
 }
 
 func TestRunOnceWithOptions_HeadlessRedactsPromptByDefault(t *testing.T) {
@@ -482,13 +603,13 @@ func TestRunOnceWithOptions_HeadlessRedactsPromptByDefault(t *testing.T) {
 	assert.NotContains(t, run.Prompt, "sk-"+strings.Repeat("q", 20))
 	assert.Contains(t, run.Prompt, "[REDACTED]")
 
-	events, err := store.ReadHeadlessEvents(headlessID)
+	headlessEvents, err := store.ReadHeadlessEvents(headlessID)
 	require.NoError(t, err)
-	require.Len(t, events, 4)
-	assert.Equal(t, session.HeadlessEventUserMessage, events[1].Type)
-	assert.Equal(t, string(llm.RoleUser), events[1].Role)
-	assert.NotContains(t, events[1].Message, "sk-"+strings.Repeat("q", 20))
-	assert.Contains(t, events[1].Message, "[REDACTED]")
+	require.Len(t, headlessEvents, 4)
+	assert.Equal(t, session.HeadlessEventUserMessage, headlessEvents[1].Type)
+	assert.Equal(t, string(llm.RoleUser), headlessEvents[1].Role)
+	assert.NotContains(t, headlessEvents[1].Message, "sk-"+strings.Repeat("q", 20))
+	assert.Contains(t, headlessEvents[1].Message, "[REDACTED]")
 }
 
 func TestRunOnceWithOptions_HeadlessRecordsOutputFormatFailure(t *testing.T) {
@@ -531,12 +652,12 @@ func TestRunOnceWithOptions_HeadlessRecordsOutputFormatFailure(t *testing.T) {
 	require.NotNil(t, run.ExitCode)
 	assert.Equal(t, 1, *run.ExitCode)
 
-	events, err := store.ReadHeadlessEvents(headlessID)
+	headlessEvents, err := store.ReadHeadlessEvents(headlessID)
 	require.NoError(t, err)
-	require.Len(t, events, 3)
-	assert.Equal(t, session.HeadlessEventStarted, events[0].Type)
-	assert.Equal(t, session.HeadlessEventUserMessage, events[1].Type)
-	assert.Equal(t, session.HeadlessEventFailed, events[2].Type)
+	require.Len(t, headlessEvents, 3)
+	assert.Equal(t, session.HeadlessEventStarted, headlessEvents[0].Type)
+	assert.Equal(t, session.HeadlessEventUserMessage, headlessEvents[1].Type)
+	assert.Equal(t, session.HeadlessEventFailed, headlessEvents[2].Type)
 }
 
 func TestRunWithState_HeadlessRecordsOutputFormatFailure(t *testing.T) {
@@ -599,11 +720,11 @@ func TestRunWithState_HeadlessRecordsMissingPromptFailure(t *testing.T) {
 	require.NotNil(t, loaded.ExitCode)
 	assert.Equal(t, 1, *loaded.ExitCode)
 
-	events, eventsErr := store.ReadHeadlessEvents(headlessID)
+	headlessEvents, eventsErr := store.ReadHeadlessEvents(headlessID)
 	require.NoError(t, eventsErr)
-	require.Len(t, events, 2)
-	assert.Equal(t, session.HeadlessEventStarted, events[0].Type)
-	assert.Equal(t, session.HeadlessEventFailed, events[1].Type)
+	require.Len(t, headlessEvents, 2)
+	assert.Equal(t, session.HeadlessEventStarted, headlessEvents[0].Type)
+	assert.Equal(t, session.HeadlessEventFailed, headlessEvents[1].Type)
 }
 
 func TestRunOnceWithOptions_HeadlessRecordsReferenceExpansionFailure(t *testing.T) {
@@ -646,12 +767,12 @@ func TestRunOnceWithOptions_HeadlessRecordsReferenceExpansionFailure(t *testing.
 	require.NotNil(t, run.ExitCode)
 	assert.Equal(t, 1, *run.ExitCode)
 
-	events, err := store.ReadHeadlessEvents(headlessID)
+	headlessEvents, err := store.ReadHeadlessEvents(headlessID)
 	require.NoError(t, err)
-	require.Len(t, events, 3)
-	assert.Equal(t, session.HeadlessEventStarted, events[0].Type)
-	assert.Equal(t, session.HeadlessEventUserMessage, events[1].Type)
-	assert.Equal(t, session.HeadlessEventFailed, events[2].Type)
+	require.Len(t, headlessEvents, 3)
+	assert.Equal(t, session.HeadlessEventStarted, headlessEvents[0].Type)
+	assert.Equal(t, session.HeadlessEventUserMessage, headlessEvents[1].Type)
+	assert.Equal(t, session.HeadlessEventFailed, headlessEvents[2].Type)
 }
 
 func TestRunOnceWithOptions_HeadlessRecordsBudgetFailure(t *testing.T) {
@@ -694,12 +815,12 @@ func TestRunOnceWithOptions_HeadlessRecordsBudgetFailure(t *testing.T) {
 	require.NotNil(t, run.ExitCode)
 	assert.Equal(t, 1, *run.ExitCode)
 
-	events, err := store.ReadHeadlessEvents(headlessID)
+	headlessEvents, err := store.ReadHeadlessEvents(headlessID)
 	require.NoError(t, err)
-	require.Len(t, events, 3)
-	assert.Equal(t, session.HeadlessEventStarted, events[0].Type)
-	assert.Equal(t, session.HeadlessEventUserMessage, events[1].Type)
-	assert.Equal(t, session.HeadlessEventFailed, events[2].Type)
+	require.Len(t, headlessEvents, 3)
+	assert.Equal(t, session.HeadlessEventStarted, headlessEvents[0].Type)
+	assert.Equal(t, session.HeadlessEventUserMessage, headlessEvents[1].Type)
+	assert.Equal(t, session.HeadlessEventFailed, headlessEvents[2].Type)
 }
 
 func TestFinishHeadlessRunRecordsCancellationReason(t *testing.T) {
@@ -725,12 +846,12 @@ func TestFinishHeadlessRunRecordsCancellationReason(t *testing.T) {
 	require.NotNil(t, canceled.ExitCode)
 	assert.Equal(t, 130, *canceled.ExitCode)
 
-	events, err := store.ReadHeadlessEvents(run.ID)
+	headlessEvents, err := store.ReadHeadlessEvents(run.ID)
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, session.HeadlessEventCanceled, events[0].Type)
-	assert.Equal(t, context.Canceled.Error(), events[0].CancelReason)
-	assert.Equal(t, context.Canceled.Error(), events[0].TerminalReason)
+	require.Len(t, headlessEvents, 1)
+	assert.Equal(t, session.HeadlessEventCanceled, headlessEvents[0].Type)
+	assert.Equal(t, context.Canceled.Error(), headlessEvents[0].CancelReason)
+	assert.Equal(t, context.Canceled.Error(), headlessEvents[0].TerminalReason)
 }
 
 func TestFinishHeadlessStatusClassifiesCancelledMessages(t *testing.T) {
@@ -764,10 +885,10 @@ func TestFinishHeadlessRunRecordsFailedStatus(t *testing.T) {
 	require.NotNil(t, failed.ExitCode)
 	assert.Equal(t, 1, *failed.ExitCode)
 
-	events, err := store.ReadHeadlessEvents(run.ID)
+	headlessEvents, err := store.ReadHeadlessEvents(run.ID)
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, session.HeadlessEventFailed, events[0].Type)
+	require.Len(t, headlessEvents, 1)
+	assert.Equal(t, session.HeadlessEventFailed, headlessEvents[0].Type)
 }
 
 func TestFinishHeadlessRunRecordsTimedOutStatus(t *testing.T) {
@@ -793,11 +914,11 @@ func TestFinishHeadlessRunRecordsTimedOutStatus(t *testing.T) {
 	require.NotNil(t, timedOut.ExitCode)
 	assert.Equal(t, 124, *timedOut.ExitCode)
 
-	events, err := store.ReadHeadlessEvents(run.ID)
+	headlessEvents, err := store.ReadHeadlessEvents(run.ID)
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, session.HeadlessEventTimedOut, events[0].Type)
-	assert.Equal(t, context.DeadlineExceeded.Error(), events[0].TerminalReason)
+	require.Len(t, headlessEvents, 1)
+	assert.Equal(t, session.HeadlessEventTimedOut, headlessEvents[0].Type)
+	assert.Equal(t, context.DeadlineExceeded.Error(), headlessEvents[0].TerminalReason)
 }
 
 func TestFinishHeadlessRunPreservesDurableCanceledStatus(t *testing.T) {
@@ -828,10 +949,10 @@ func TestFinishHeadlessRunPreservesDurableCanceledStatus(t *testing.T) {
 	require.NotNil(t, current.ExitCode)
 	assert.Equal(t, 130, *current.ExitCode)
 
-	events, err := store.ReadHeadlessEvents(run.ID)
+	headlessEvents, err := store.ReadHeadlessEvents(run.ID)
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, session.HeadlessEventCanceled, events[0].Type)
+	require.Len(t, headlessEvents, 1)
+	assert.Equal(t, session.HeadlessEventCanceled, headlessEvents[0].Type)
 }
 
 func TestHeadlessCompletionErrorReportsPreservedTerminalStatus(t *testing.T) {
@@ -912,10 +1033,10 @@ func TestRecordHeadlessAssistantMessageSkipsDurableTerminalStatus(t *testing.T) 
 	require.NoError(t, err)
 	assert.NotContains(t, log, "assistant_message")
 
-	events, err := store.ReadHeadlessEvents(run.ID)
+	headlessEvents, err := store.ReadHeadlessEvents(run.ID)
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, session.HeadlessEventCanceled, events[0].Type)
+	require.Len(t, headlessEvents, 1)
+	assert.Equal(t, session.HeadlessEventCanceled, headlessEvents[0].Type)
 }
 
 func TestRecordHeadlessAssistantMessageSkipsCorruptMetadata(t *testing.T) {
@@ -934,9 +1055,9 @@ func TestRecordHeadlessAssistantMessageSkipsCorruptMetadata(t *testing.T) {
 	_, err := store.ReadHeadlessLog(run.ID)
 	require.ErrorIs(t, err, os.ErrNotExist)
 
-	events, err := store.ReadHeadlessEvents(run.ID)
+	headlessEvents, err := store.ReadHeadlessEvents(run.ID)
 	require.NoError(t, err)
-	assert.Empty(t, events)
+	assert.Empty(t, headlessEvents)
 }
 
 func TestRecordHeadlessAssistantMessageRevivesOrphanedRun(t *testing.T) {
@@ -967,13 +1088,13 @@ func TestRecordHeadlessAssistantMessageRevivesOrphanedRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, log, "assistant_message")
 
-	events, err := store.ReadHeadlessEvents(run.ID)
+	headlessEvents, err := store.ReadHeadlessEvents(run.ID)
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, session.HeadlessEventAssistantMessage, events[0].Type)
-	assert.Equal(t, session.HeadlessStatusRunning, events[0].Status)
-	assert.Equal(t, "gpt-newer-response", events[0].Model)
-	assert.Empty(t, events[0].OrphanedReason)
+	require.Len(t, headlessEvents, 1)
+	assert.Equal(t, session.HeadlessEventAssistantMessage, headlessEvents[0].Type)
+	assert.Equal(t, session.HeadlessStatusRunning, headlessEvents[0].Status)
+	assert.Equal(t, "gpt-newer-response", headlessEvents[0].Model)
+	assert.Empty(t, headlessEvents[0].OrphanedReason)
 }
 
 func TestFormatHeadlessRun(t *testing.T) {

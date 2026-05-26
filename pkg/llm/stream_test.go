@@ -17,12 +17,14 @@ func TestStreamFromComplete_SingleChunk(t *testing.T) {
 		name:   "test",
 		models: []string{"m-1"},
 		resp: &Response{
-			Content:      "hello",
-			Model:        "m-1",
-			StopReason:   StopEndTurn,
-			ToolCalls:    []ToolCall{{ID: "tool-1", Name: "bash", Input: map[string]any{"command": "pwd"}}},
-			InputTokens:  10,
-			OutputTokens: 5,
+			Content:               "hello",
+			Model:                 "m-1",
+			StopReason:            StopEndTurn,
+			ToolCalls:             []ToolCall{{ID: "tool-1", Name: "bash", Input: map[string]any{"command": "pwd"}}},
+			FirstTokenLatency:     15 * time.Millisecond,
+			InputTokens:           10,
+			CacheWriteInputTokens: 2,
+			OutputTokens:          5,
 		},
 	}
 
@@ -37,7 +39,9 @@ func TestStreamFromComplete_SingleChunk(t *testing.T) {
 	assert.Equal(t, StopEndTurn, chunks[0].StopReason)
 	require.Len(t, chunks[0].ToolCalls, 1)
 	assert.Equal(t, "tool-1", chunks[0].ToolCalls[0].ID)
+	assert.Equal(t, 15*time.Millisecond, chunks[0].FirstTokenLatency)
 	assert.Equal(t, 10, chunks[0].InputTokens)
+	assert.Equal(t, 2, chunks[0].CacheWriteInputTokens)
 	assert.Equal(t, 5, chunks[0].OutputTokens)
 }
 
@@ -115,7 +119,17 @@ func TestCollectStream_AssemblesResponse(t *testing.T) {
 
 	ch <- Chunk{Content: "world", Model: "m-1"}
 
-	ch <- Chunk{Content: "!", Done: true, StopReason: StopEndTurn, InputTokens: 10, OutputTokens: 3, Model: "m-1"}
+	ch <- Chunk{
+		Content:               "!",
+		Done:                  true,
+		StopReason:            StopEndTurn,
+		FirstTokenLatency:     25 * time.Millisecond,
+		InputTokens:           10,
+		CachedInputTokens:     2,
+		CacheWriteInputTokens: 1,
+		OutputTokens:          3,
+		Model:                 "m-1",
+	}
 
 	close(ch)
 
@@ -124,8 +138,32 @@ func TestCollectStream_AssemblesResponse(t *testing.T) {
 	assert.Equal(t, "Hello world!", resp.Content)
 	assert.Equal(t, "m-1", resp.Model)
 	assert.Equal(t, StopEndTurn, resp.StopReason)
+	assert.Equal(t, 25*time.Millisecond, resp.FirstTokenLatency)
 	assert.Equal(t, 10, resp.InputTokens)
+	assert.Equal(t, 2, resp.CachedInputTokens)
+	assert.Equal(t, 1, resp.CacheWriteInputTokens)
 	assert.Equal(t, 3, resp.OutputTokens)
+}
+
+func TestCollectStream_KeepsFirstTokenLatencyFromInitialToken(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan Chunk, 3)
+	ch <- Chunk{Content: "first", FirstTokenLatency: 12 * time.Millisecond}
+
+	ch <- Chunk{Content: " second"}
+
+	ch <- Chunk{Done: true, InputTokens: 4, OutputTokens: 2}
+
+	close(ch)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+
+	assert.Equal(t, "first second", resp.Content)
+	assert.Equal(t, 12*time.Millisecond, resp.FirstTokenLatency)
+	assert.Equal(t, 4, resp.InputTokens)
+	assert.Equal(t, 2, resp.OutputTokens)
 }
 
 func TestCollectStream_EmptyChannel(t *testing.T) {
@@ -254,9 +292,9 @@ func (f *fakeStreamProvider) CompleteStream(ctx context.Context, _ CompleteParam
 	go func() {
 		defer close(ch)
 
-		for _, chunk := range f.chunks {
+		for i := range f.chunks {
 			select {
-			case ch <- chunk:
+			case ch <- f.chunks[i]:
 			case <-ctx.Done():
 				return
 			}

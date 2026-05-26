@@ -674,6 +674,10 @@ func formatTokenUsageSummary(usage tokenUsage) string {
 		"cached=" + formatTokenCount(usage.CachedInputTokens),
 		"out=" + formatTokenCount(usage.OutputTokens),
 	}
+	if usage.CacheWriteInputTokens > 0 {
+		parts = append(parts, "cache_write="+formatTokenCount(usage.CacheWriteInputTokens))
+	}
+
 	if usage.Responses > 0 {
 		parts = append(parts, "responses="+strconv.Itoa(usage.Responses))
 	}
@@ -682,7 +686,7 @@ func formatTokenUsageSummary(usage tokenUsage) string {
 }
 
 func printTokenUsageSummary(w io.Writer, usage tokenUsage) {
-	if usage.InputTokens == 0 && usage.CachedInputTokens == 0 && usage.OutputTokens == 0 {
+	if usage.InputTokens == 0 && usage.CachedInputTokens == 0 && usage.CacheWriteInputTokens == 0 && usage.OutputTokens == 0 {
 		return
 	}
 

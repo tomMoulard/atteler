@@ -76,8 +76,8 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 		assert.Failf(t, "assertion failed", "content = %q, want %q", resp.Content, "hello back")
 	}
 
-	if resp.InputTokens != 20 || resp.CachedInputTokens != 6 || resp.OutputTokens != 5 {
-		assert.Failf(t, "assertion failed", "tokens = %d/%d/%d, want 20/6/5", resp.InputTokens, resp.CachedInputTokens, resp.OutputTokens)
+	if resp.InputTokens != 20 || resp.CachedInputTokens != 6 || resp.CacheWriteInputTokens != 4 || resp.OutputTokens != 5 {
+		assert.Failf(t, "assertion failed", "tokens = %d/%d/%d/%d, want 20/6/4/5", resp.InputTokens, resp.CachedInputTokens, resp.CacheWriteInputTokens, resp.OutputTokens)
 	}
 
 	// Verify request shape.
@@ -278,6 +278,49 @@ func TestAnthropicProvider_NameAndModels(t *testing.T) {
 	if len(p.Models()) == 0 {
 		assert.Fail(t, "Models() returned empty")
 	}
+
+	assert.Contains(t, p.Models(), "claude-opus-4-7")
+}
+
+func TestRegistry_ProviderModelsLiveFetchReplacesAnthropicCatalogFallback(t *testing.T) {
+	t.Parallel()
+
+	var gotHeaders http.Header
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		assert.Equal(t, "/v1/models", r.URL.Path)
+
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(anthropicModelsResponse{
+			Data: []struct {
+				ID string `json:"id"`
+			}{
+				{ID: "claude-live-only"},
+			},
+		}))
+	}))
+	defer srv.Close()
+
+	registry := NewRegistry()
+	registry.Register(&AnthropicProvider{
+		apiKey:  "test-api-key",
+		baseURL: srv.URL,
+		client:  srv.Client(),
+	})
+
+	assert.True(t, registry.ProviderHasModel(providerAnthropic, "claude-opus-4-7"))
+	assert.False(t, registry.ProviderModelsVerified(providerAnthropic))
+
+	models, err := registry.ProviderModels(context.Background(), providerAnthropic)
+	require.NoError(t, err)
+
+	assert.Equal(t, "test-api-key", gotHeaders.Get("X-Api-Key"))
+	assert.Equal(t, defaultAnthropicVersion, gotHeaders.Get("anthropic-version"))
+	assert.Equal(t, []string{"claude-live-only"}, models)
+	assert.True(t, registry.ProviderHasModel(providerAnthropic, "claude-live-only"))
+	assert.False(t, registry.ProviderHasModel(providerAnthropic, "claude-opus-4-7"))
+	assert.True(t, registry.ProviderModelsVerified(providerAnthropic))
 }
 
 func TestAnthropicProvider_ConfigBaseURL(t *testing.T) {

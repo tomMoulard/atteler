@@ -22,6 +22,7 @@ func TestSupportedEventTypes_ReturnsStableSortedEvents(t *testing.T) {
 		Error,
 		FileRead,
 		FileWrite,
+		RouteDecision,
 		SessionEnd,
 		SessionStart,
 		ToolExecute,

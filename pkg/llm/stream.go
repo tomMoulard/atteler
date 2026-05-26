@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 const (
@@ -49,14 +50,17 @@ type Chunk struct {
 	// tool-use requests.
 	ToolCalls []ToolCall
 
-	// Usage is populated on the final chunk when the provider reports token
-	// counts.
-	InputTokens       int
-	CachedInputTokens int
-	OutputTokens      int
+	// FirstTokenLatency may be populated as soon as the first content token is
+	// observed. Usage is populated on the final chunk when the provider reports
+	// token counts.
+	FirstTokenLatency     time.Duration
+	InputTokens           int
+	CachedInputTokens     int
+	CacheWriteInputTokens int
+	OutputTokens          int
 
 	// Done signals a final successful chunk. When Done is true, StopReason,
-	// ToolCalls, and usage fields may be populated.
+	// ToolCalls, latency, and usage fields may be populated.
 	Done bool
 }
 
@@ -94,14 +98,16 @@ func StreamFromComplete(ctx context.Context, p Provider, params CompleteParams) 
 
 	ch := make(chan Chunk, DefaultStreamBuffer)
 	ch <- Chunk{
-		Content:           resp.Content,
-		Model:             resp.Model,
-		Done:              true,
-		StopReason:        resp.StopReason,
-		ToolCalls:         append([]ToolCall(nil), resp.ToolCalls...),
-		InputTokens:       resp.InputTokens,
-		CachedInputTokens: resp.CachedInputTokens,
-		OutputTokens:      resp.OutputTokens,
+		Content:               resp.Content,
+		Model:                 resp.Model,
+		Done:                  true,
+		StopReason:            resp.StopReason,
+		ToolCalls:             append([]ToolCall(nil), resp.ToolCalls...),
+		FirstTokenLatency:     resp.FirstTokenLatency,
+		InputTokens:           resp.InputTokens,
+		CachedInputTokens:     resp.CachedInputTokens,
+		CacheWriteInputTokens: resp.CacheWriteInputTokens,
+		OutputTokens:          resp.OutputTokens,
 	}
 
 	close(ch)
@@ -158,11 +164,16 @@ func CollectStream(ch <-chan Chunk) (*Response, error) {
 			return resp, c.Err
 		}
 
+		if resp.FirstTokenLatency <= 0 && c.FirstTokenLatency > 0 {
+			resp.FirstTokenLatency = c.FirstTokenLatency
+		}
+
 		if c.Done {
 			resp.StopReason = c.StopReason
 			resp.ToolCalls = append([]ToolCall(nil), c.ToolCalls...)
 			resp.InputTokens = c.InputTokens
 			resp.CachedInputTokens = c.CachedInputTokens
+			resp.CacheWriteInputTokens = c.CacheWriteInputTokens
 			resp.OutputTokens = c.OutputTokens
 
 			resp.Content = b.String()

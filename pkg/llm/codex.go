@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/tommoulard/atteler/pkg/events"
 )
@@ -165,6 +166,13 @@ func (c *CodexProvider) AdapterDiagnostics() AdapterDiagnostics {
 	}
 }
 
+// ProviderModelsVerified reports whether FetchModels is an authoritative live
+// provider availability check. Codex currently exposes only a local/static model
+// catalog for this auth mode, so absence from the list should remain unverified.
+func (c *CodexProvider) ProviderModelsVerified() bool {
+	return false
+}
+
 // HealthCheck verifies that auth.json parses and contains a chatgpt-mode token.
 // It does not contact the network.
 func (c *CodexProvider) HealthCheck(ctx context.Context) error {
@@ -194,6 +202,10 @@ func (c *CodexProvider) HealthCheck(ctx context.Context) error {
 
 // ModelContextWindow returns the context window size for a Codex model.
 func (c *CodexProvider) ModelContextWindow(model string) int {
+	if limit := catalogContextWindow(providerCodex, model); limit > 0 {
+		return limit
+	}
+
 	metadata, ok := c.ModelMetadata(model)
 	if !ok {
 		return 0
@@ -403,9 +415,11 @@ func (c *CodexProvider) doResponsesRequest(ctx context.Context, body []byte) (*R
 func (c *CodexProvider) doResponsesStream(ctx context.Context, body []byte, model string) (<-chan Chunk, error) {
 	access, accountID := c.auth.snapshot()
 
+	startedAt := time.Now()
+
 	bodyStream, err := c.sendResponsesStream(ctx, body, access, accountID)
 	if err == nil {
-		return streamCodexResponseBody(ctx, bodyStream, model), nil
+		return streamCodexResponseBody(ctx, bodyStream, model, startedAt, time.Now), nil
 	}
 
 	var unauthorized *codexUnauthorizedError
@@ -419,12 +433,14 @@ func (c *CodexProvider) doResponsesStream(ctx context.Context, body []byte, mode
 
 	access, accountID = c.auth.snapshot()
 
+	startedAt = time.Now()
+
 	bodyStream, err = c.sendResponsesStream(ctx, body, access, accountID)
 	if err != nil {
 		return nil, err
 	}
 
-	return streamCodexResponseBody(ctx, bodyStream, model), nil
+	return streamCodexResponseBody(ctx, bodyStream, model, startedAt, time.Now), nil
 }
 
 type codexUnauthorizedError struct {
@@ -436,13 +452,15 @@ func (e *codexUnauthorizedError) Error() string {
 }
 
 func (c *CodexProvider) sendResponses(ctx context.Context, body []byte, access, accountID string) (*Response, error) {
+	startedAt := time.Now()
+
 	bodyStream, err := c.sendResponsesStream(ctx, body, access, accountID)
 	if err != nil {
 		return nil, err
 	}
 	defer bodyStream.Close()
 
-	return parseCodexSSE(ctx, bodyStream)
+	return parseCodexSSEWithClock(ctx, bodyStream, startedAt, time.Now)
 }
 
 func (c *CodexProvider) sendResponsesStream(ctx context.Context, body []byte, access, accountID string) (io.ReadCloser, error) {
@@ -480,7 +498,11 @@ func (c *CodexProvider) sendResponsesStream(ctx context.Context, body []byte, ac
 
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes)) //nolint:errcheck // best-effort body capture for the error message
 
-		return nil, fmt.Errorf("codex HTTP %d: %s", resp.StatusCode, raw)
+		return nil, retryableHTTPStatusError(
+			fmt.Errorf("codex HTTP %d: %s", resp.StatusCode, raw),
+			resp.StatusCode,
+			resp.Header.Get("Retry-After"),
+		)
 	}
 
 	return resp.Body, nil
@@ -488,11 +510,14 @@ func (c *CodexProvider) sendResponsesStream(ctx context.Context, body []byte, ac
 
 // codexStreamState accumulates partial state from an SSE response stream.
 type codexStreamState struct {
-	toolCalls []ToolCall
-	finalText string
-	deltaBuf  strings.Builder
-	out       Response
-	finished  bool
+	now                func() time.Time
+	startedAt          time.Time
+	toolCalls          []ToolCall
+	finalText          string
+	deltaBuf           strings.Builder
+	out                Response
+	finished           bool
+	firstTokenRecorded bool
 }
 
 type codexStreamAction struct {
@@ -505,10 +530,17 @@ type codexStreamAction struct {
 // final assistant message and usage. It prefers the explicit message item when
 // available, falling back to accumulated text deltas otherwise.
 func parseCodexSSE(ctx context.Context, r io.Reader) (*Response, error) {
+	return parseCodexSSEWithClock(ctx, r, time.Time{}, nil)
+}
+
+func parseCodexSSEWithClock(ctx context.Context, r io.Reader, startedAt time.Time, now func() time.Time) (*Response, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
-	state := &codexStreamState{}
+	state := &codexStreamState{
+		startedAt: startedAt,
+		now:       now,
+	}
 
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
@@ -545,24 +577,32 @@ func parseCodexSSE(ctx context.Context, r io.Reader) (*Response, error) {
 	return state.finalize()
 }
 
-func streamCodexResponseBody(ctx context.Context, body io.ReadCloser, model string) <-chan Chunk {
+func streamCodexResponseBody(ctx context.Context, body io.ReadCloser, model string, startedAt time.Time, now func() time.Time) <-chan Chunk {
 	ch := make(chan Chunk, DefaultStreamBuffer)
 
 	go func() {
 		defer close(ch)
 		defer body.Close()
 
-		streamCodexSSE(ctx, body, ch, model)
+		streamCodexSSEWithClock(ctx, body, ch, model, startedAt, now)
 	}()
 
 	return ch
 }
 
 func streamCodexSSE(ctx context.Context, r io.Reader, ch chan<- Chunk, model string) {
+	streamCodexSSEWithClock(ctx, r, ch, model, time.Time{}, nil)
+}
+
+func streamCodexSSEWithClock(ctx context.Context, r io.Reader, ch chan<- Chunk, model string, startedAt time.Time, now func() time.Time) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
-	state := &codexStreamState{out: Response{Model: model}}
+	state := &codexStreamState{
+		startedAt: startedAt,
+		now:       now,
+		out:       Response{Model: model},
+	}
 
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
@@ -658,15 +698,26 @@ func (s *codexStreamState) handleEventPayload(payload string) (codexStreamAction
 
 	switch event.Type {
 	case "response.output_text.delta":
+		if event.Delta != "" {
+			s.recordFirstToken()
+		}
+
 		s.deltaBuf.WriteString(event.Delta)
 
 		if event.Delta != "" {
-			return codexStreamAction{chunk: Chunk{Content: event.Delta}, emit: true}, nil
+			return codexStreamAction{
+				chunk: Chunk{
+					Content:           event.Delta,
+					FirstTokenLatency: s.out.FirstTokenLatency,
+				},
+				emit: true,
+			}, nil
 		}
 	case "response.output_item.done":
 		if tc, ok := codexExtractFunctionCall(event.Item); ok {
 			s.toolCalls = append(s.toolCalls, tc)
 		} else if text := codexExtractMessageText(event.Item); text != "" {
+			s.recordFirstToken()
 			s.finalText = text
 		}
 	case "response.completed":
@@ -684,6 +735,18 @@ func (s *codexStreamState) handleEventPayload(payload string) (codexStreamAction
 	}
 
 	return codexStreamAction{}, nil
+}
+
+func (s *codexStreamState) recordFirstToken() {
+	if s.firstTokenRecorded || s.startedAt.IsZero() || s.now == nil {
+		return
+	}
+
+	s.firstTokenRecorded = true
+
+	if d := s.now().Sub(s.startedAt); d > 0 {
+		s.out.FirstTokenLatency = d
+	}
 }
 
 func (s *codexStreamState) applyCompleted(resp *codexEventPayload) {
@@ -751,12 +814,14 @@ func (s *codexStreamState) completedChunk() (Chunk, error) {
 	}
 
 	chunk := Chunk{
-		Content:           chunkContent,
-		Model:             s.out.Model,
-		Done:              true,
-		InputTokens:       s.out.InputTokens,
-		CachedInputTokens: s.out.CachedInputTokens,
-		OutputTokens:      s.out.OutputTokens,
+		Content:               chunkContent,
+		Model:                 s.out.Model,
+		Done:                  true,
+		FirstTokenLatency:     s.out.FirstTokenLatency,
+		InputTokens:           s.out.InputTokens,
+		CachedInputTokens:     s.out.CachedInputTokens,
+		CacheWriteInputTokens: s.out.CacheWriteInputTokens,
+		OutputTokens:          s.out.OutputTokens,
 	}
 
 	if len(s.toolCalls) > 0 {

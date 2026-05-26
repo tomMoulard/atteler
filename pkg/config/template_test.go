@@ -19,6 +19,7 @@ func TestTemplateYAML(t *testing.T) {
 		"max_total_tokens:",
 		"providers:",
 		"agents:",
+		"routing_policy:",
 		"hooks:",
 		"context:",
 		"plugins:",

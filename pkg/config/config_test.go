@@ -349,6 +349,38 @@ agent_loop:
 	assert.Equal(t, "0", totalTokensOrigin[1].Value)
 }
 
+func TestLoadFiles_MergesAgentRoutingPolicy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "routing.yaml", `
+agents:
+  reviewer:
+    routing_policy:
+      preferred_providers: [anthropic]
+      banned_providers: [ollama]
+      banned_models: [openai/gpt-expensive]
+      required_capabilities: [tools]
+      max_budget: 0.25
+      require_fresh_metadata: true
+`)
+
+	cfg, _, origins, err := LoadFilesWithOrigins([]string{path})
+	require.NoError(t, err)
+
+	policy := cfg.Agents["reviewer"].RoutingPolicy
+	assert.Equal(t, []string{"anthropic"}, policy.PreferredProviders)
+	assert.Equal(t, []string{"ollama"}, policy.BannedProviders)
+	assert.Equal(t, []string{"openai/gpt-expensive"}, policy.BannedModels)
+	assert.Equal(t, []string{"tools"}, policy.RequiredCapabilities)
+	assert.InDelta(t, 0.25, policy.MaxBudget, 0.000000001)
+	assert.True(t, policy.RequireFreshMetadata)
+
+	origin := origins["agents.reviewer.routing_policy"].Chain
+	require.Len(t, origin, 1)
+	assert.Equal(t, OriginSet, origin[0].Operation)
+}
+
 func TestLoadFilesWithOrigins_TracksMapMergeProviderAgentAndPluginReplacement(t *testing.T) {
 	t.Parallel()
 

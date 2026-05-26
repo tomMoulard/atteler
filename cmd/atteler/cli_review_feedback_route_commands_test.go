@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -139,7 +140,7 @@ func TestFormatReviewRunResult(t *testing.T) {
 func TestParseAndFormatRouteCandidate(t *testing.T) {
 	t.Parallel()
 
-	candidate, err := parseRouteCandidate("openai/gpt-mini,input=0.001,output=0.002,priority=2,max=1000,latency=500,ttft=100")
+	candidate, err := parseRouteCandidate("openai/gpt-mini,input=0.001,output=0.002,priority=2,max=1000,max_output=200,latency=500,ttft=100")
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -157,6 +158,7 @@ func TestParseAndFormatRouteCandidate(t *testing.T) {
 		"cost=0.200000",
 		"priority=2",
 		"max_input=1000",
+		"max_output=200",
 		"latency_ms=500",
 		"ttft_ms=100",
 	} {
@@ -164,6 +166,195 @@ func TestParseAndFormatRouteCandidate(t *testing.T) {
 			require.Failf(t, "formatted route candidate missing content", "missing %q in %q", want, got)
 		}
 	}
+}
+
+func TestParseRouteCandidateUsesBuiltinMetadata(t *testing.T) {
+	t.Parallel()
+
+	candidate, err := parseRouteCandidate("openai/gpt-4.1-mini")
+	require.NoError(t, err)
+
+	assert.Equal(t, "openai", candidate.Provider)
+	assert.Equal(t, "gpt-4.1-mini", candidate.Name)
+	assert.Equal(t, modelroute.BuiltinCatalogVersion, candidate.MetadataVersion)
+	assert.Positive(t, candidate.MaxInputTokens)
+	assert.Positive(t, candidate.MaxOutputTokens)
+	assert.Positive(t, candidate.InputTokenCost)
+	assert.Positive(t, candidate.CachedInputTokenCost)
+	assert.Positive(t, candidate.OutputTokenCost)
+	assert.NotEmpty(t, candidate.MetadataSourceURL)
+}
+
+func TestParseRouteCandidateKeepsDeprecationMetadata(t *testing.T) {
+	t.Parallel()
+
+	candidate, err := parseRouteCandidate("anthropic/claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	assert.True(t, candidate.Deprecated)
+
+	got := formatRouteCandidate(candidate, modelroute.RequestProfile{EstimatedInputTokens: 1})
+	assert.Contains(t, got, "deprecated=true")
+}
+
+func TestDecideRouteCandidatesAnnotatesCatalogMetadata(t *testing.T) {
+	t.Parallel()
+
+	candidate, err := parseRouteCandidate("openai/gpt-4.1-mini")
+	require.NoError(t, err)
+
+	decision := decideRouteCandidatesAt(
+		[]modelroute.Candidate{candidate},
+		modelroute.RequestProfile{EstimatedInputTokens: 10},
+		time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC),
+	)
+
+	assert.Equal(t, modelroute.BuiltinCatalogVersion, decision.CatalogVersion)
+	assert.Contains(t, decision.Constraints, modelroute.ConstraintCatalogMetadata)
+	assert.Contains(t, decision.Constraints, modelroute.ConstraintMetadataFreshness)
+
+	got := formatRouteDecision(decision)
+	assert.Contains(t, got, "catalog_version="+modelroute.BuiltinCatalogVersion)
+	assert.Contains(t, got, "constraints=context_window,estimated_cost,catalog_metadata,metadata_freshness")
+}
+
+func TestParseRouteCandidateRejectsUnknownMetadataWithoutExplicitFields(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseRouteCandidate("openai/not-real")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown or ambiguous model metadata")
+	assert.Contains(t, err.Error(), "explicit key=value metadata")
+}
+
+func TestParseRouteCandidateRejectsAmbiguousBuiltinMetadataWithoutProvider(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseRouteCandidate("gpt-5.5")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown or ambiguous model metadata")
+}
+
+func TestParseRouteCandidateAllowsExplicitManualMetadata(t *testing.T) {
+	t.Parallel()
+
+	candidate, err := parseRouteCandidate("openai/not-real,input=0.001,output=0.002,max=1000")
+
+	require.NoError(t, err)
+	assert.Equal(t, "openai/not-real", candidate.ID())
+	assert.InDelta(t, 0.001, candidate.InputTokenCost, 0.000000001)
+	assert.InDelta(t, 0.002, candidate.OutputTokenCost, 0.000000001)
+	assert.Equal(t, 1000, candidate.MaxInputTokens)
+}
+
+func TestFormatRouteDecisionIncludesRejectedCandidates(t *testing.T) {
+	t.Parallel()
+
+	candidates := []modelroute.Candidate{
+		{Name: "small", Provider: "openai", MaxInputTokens: 10, InputTokenCost: 0.001},
+		{Name: "ok", Provider: "openai", MaxInputTokens: 1000, InputTokenCost: 0.001},
+	}
+	decision := modelroute.Decide(candidates, modelroute.RequestProfile{EstimatedInputTokens: 100}, modelroute.Policy{}, nil)
+
+	got := formatRouteDecision(decision)
+
+	assert.Contains(t, got, "route_decision\tselected=openai/ok")
+	assert.Contains(t, got, "constraints=context_window,estimated_cost")
+	assert.Contains(t, got, "candidate\topenai/small\tstatus=rejected")
+	assert.Contains(t, got, "rejected=context overflow")
+	assert.Contains(t, got, "candidate\topenai/ok\tstatus=selected")
+	assert.Contains(t, got, "fallback_order=openai/ok")
+}
+
+func TestFormatRouteDecisionIncludesMetadataAndTelemetryEvidence(t *testing.T) {
+	t.Parallel()
+
+	catalog := modelroute.BuiltinCatalog()
+	candidate, ok := catalog.Candidate("anthropic/claude-sonnet-4-20250514")
+	require.True(t, ok)
+
+	telemetry := modelroute.NewTelemetry()
+	observedAt := time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC)
+	telemetry.RecordFailure(candidate, modelroute.Failure{
+		RetryAfter:  time.Second,
+		Error:       "openai: HTTP 429: rate limited",
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+
+	decision := modelroute.DecideAt(
+		[]modelroute.Candidate{candidate},
+		modelroute.RequestProfile{EstimatedInputTokens: 100},
+		modelroute.Policy{},
+		telemetry,
+		observedAt,
+	)
+
+	got := formatRouteDecision(decision)
+
+	assert.Contains(t, got, "metadata_version="+modelroute.BuiltinCatalogVersion)
+	assert.Contains(t, got, "metadata_source=https://")
+	assert.Contains(t, got, "deprecated=true")
+	assert.Contains(t, got, "failure_count=1")
+	assert.Contains(t, got, "rate_limit_count=1")
+	assert.Contains(t, got, "rate_limit_until=")
+	assert.Contains(t, got, modelroute.ReasonRateLimited)
+}
+
+func TestFormatRouteDecisionIncludesLatencyEvidence(t *testing.T) {
+	t.Parallel()
+
+	candidate := modelroute.Candidate{
+		Name:              "fast",
+		Provider:          "openai",
+		InputTokenCost:    0.000001,
+		ExpectedLatencyMS: 80,
+		ExpectedTTFTMS:    30,
+	}
+	telemetry := modelroute.NewTelemetry()
+	telemetry.Record(candidate, modelroute.ActualUsage{
+		Latency:     40 * time.Millisecond,
+		TTFT:        10 * time.Millisecond,
+		InputTokens: 100,
+	}, time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC))
+
+	decision := modelroute.Decide(
+		[]modelroute.Candidate{candidate},
+		modelroute.RequestProfile{EstimatedInputTokens: 100, Interactive: true},
+		modelroute.Policy{},
+		telemetry,
+	)
+
+	got := formatRouteDecision(decision)
+
+	assert.Contains(t, got, "expected_latency_ms=80")
+	assert.Contains(t, got, "expected_ttft_ms=30")
+	assert.Contains(t, got, "observed_latency_ms=40")
+	assert.Contains(t, got, "observed_ttft_ms=10")
+}
+
+func TestFormatRouteDecisionIncludesActualCostDelta(t *testing.T) {
+	t.Parallel()
+
+	decision := modelroute.Decide(
+		[]modelroute.Candidate{{Name: "gpt-test", Provider: "openai", InputTokenCost: 0.000001, OutputTokenCost: 0.000004}},
+		modelroute.RequestProfile{EstimatedInputTokens: 100},
+		modelroute.Policy{},
+		nil,
+	)
+	decision = modelroute.DecisionWithActualUsage(decision, "", modelroute.ActualUsage{
+		InputTokens:  100,
+		OutputTokens: 10,
+	})
+
+	got := formatRouteDecision(decision)
+
+	assert.Contains(t, got, "actual_cost=0.000140")
+	assert.Contains(t, got, "actual_cost_delta=0.000040")
+	assert.Contains(t, got, "actual_input_tokens=100")
+	assert.Contains(t, got, "actual_output_tokens=10")
 }
 
 func TestApplyRouteSelectionChoosesBudgetedFallbackChain(t *testing.T) {
@@ -221,22 +412,52 @@ func TestRouteModelsCommandInputFromOptions(t *testing.T) {
 	t.Parallel()
 
 	got := routeModelsCommandInputFromOptions(cliOptions{
-		routeCandidates:   rawStringListFlag{"openai/fast,input=0.001,output=0.002,max=1000"},
-		routeInputTokens:  positiveIntFlag{value: 100, set: true},
-		routeOutputTokens: positiveIntFlag{value: 50, set: true},
-		routeBudget:       floatFlag{value: 0.25, set: true},
-		routeCacheReuse:   floatFlag{value: 0.75, set: true},
-		routeInteractive:  true,
+		routeCandidates:       rawStringListFlag{"openai/fast,input=0.001,output=0.002,max=1000"},
+		routeInputTokens:      positiveIntFlag{value: 100, set: true},
+		routeOutputTokens:     positiveIntFlag{value: 50, set: true},
+		routeCacheWriteTokens: positiveIntFlag{value: 20, set: true},
+		routeBudget:           floatFlag{value: 0.25, set: true},
+		routeCacheReuse:       floatFlag{value: 0.75, set: true},
+		routeInteractive:      true,
 	})
 
 	assert.Equal(t, []string{"openai/fast,input=0.001,output=0.002,max=1000"}, got.Candidates)
 	assert.Equal(t, modelroute.RequestProfile{
-		EstimatedInputTokens:     100,
-		EstimatedOutputTokens:    50,
-		Budget:                   0.25,
-		Interactive:              true,
-		PromptCacheReuseEstimate: 0.75,
+		EstimatedInputTokens:      100,
+		EstimatedOutputTokens:     50,
+		EstimatedCacheWriteTokens: 20,
+		Budget:                    0.25,
+		Interactive:               true,
+		PromptCacheReuseEstimate:  0.75,
 	}, got.Profile)
+}
+
+func TestRouteModelsCacheWriteTokensAffectEstimatedCost(t *testing.T) {
+	t.Parallel()
+
+	input := routeModelsCommandInputFromOptions(cliOptions{
+		routeCandidates: rawStringListFlag{
+			"openai/cache-aware,input=0.001,cached=0.0001,cache_write=0.003,output=0.002,max=1000",
+		},
+		routeInputTokens:      positiveIntFlag{value: 100, set: true},
+		routeOutputTokens:     positiveIntFlag{value: 10, set: true},
+		routeCacheWriteTokens: positiveIntFlag{value: 20, set: true},
+		routeCacheReuse:       floatFlag{value: 0.5, set: true},
+	})
+
+	candidates, profile, err := routeCandidatesAndProfile(input)
+	require.NoError(t, err)
+
+	decision := decideRouteCandidates(candidates, profile)
+	require.Len(t, decision.Candidates, 1)
+	assert.InDelta(t, 0.115, decision.Candidates[0].EstimatedCost, 0.000000001)
+
+	got := formatRouteDecision(decision)
+	assert.Contains(t, got, "estimated_input_tokens=100")
+	assert.Contains(t, got, "estimated_output_tokens=10")
+	assert.Contains(t, got, "estimated_cache_write_tokens=20")
+	assert.Contains(t, got, "prompt_cache_reuse_estimate=0.5")
+	assert.Contains(t, got, "estimated_cost=0.115000")
 }
 
 func TestParseAndFormatContextPack(t *testing.T) {

@@ -134,6 +134,13 @@ func (c *ClaudeCodeProvider) AdapterDiagnostics() AdapterDiagnostics {
 	}
 }
 
+// ProviderModelsVerified reports whether FetchModels is an authoritative live
+// provider availability check. Claude Code currently exposes a local/static
+// model catalog here, so absence from the list should remain unverified.
+func (c *ClaudeCodeProvider) ProviderModelsVerified() bool {
+	return false
+}
+
 // HealthCheck verifies that we have an OAuth access token loaded. It does not
 // hit the network — provider-level credential validity is asserted lazily on
 // the next Complete call (with auto-refresh on 401).
@@ -159,6 +166,10 @@ func (c *ClaudeCodeProvider) HealthCheck(ctx context.Context) error {
 
 // ModelContextWindow returns the context window size for a Claude Code model.
 func (c *ClaudeCodeProvider) ModelContextWindow(model string) int {
+	if limit := catalogContextWindow(providerClaudeCode, model); limit > 0 {
+		return limit
+	}
+
 	metadata, ok := c.ModelMetadata(model)
 	if !ok {
 		return 0
@@ -299,7 +310,11 @@ func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, acce
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("claude code: HTTP %d: %s", resp.StatusCode, respBody)
+		return nil, retryableHTTPStatusError(
+			fmt.Errorf("claude code: HTTP %d: %s", resp.StatusCode, respBody),
+			resp.StatusCode,
+			resp.Header.Get("Retry-After"),
+		)
 	}
 
 	var ar anthropicResponse

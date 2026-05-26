@@ -43,6 +43,8 @@ const (
 	ToolExecute = "tool_execute"
 	// AgentExecute is emitted when a configured agent is selected for work.
 	AgentExecute = "agent_execute"
+	// RouteDecision is emitted when model routing selects or rejects candidates.
+	RouteDecision = "route_decision"
 
 	defaultTimeout = 10 * time.Second
 )
@@ -62,6 +64,7 @@ var supportedEventTypes = []SupportedEventType{
 	{Type: Error, Description: "Emitted when an LLM request or session operation fails."},
 	{Type: FileRead, Description: "Emitted when Atteler reads a user or project file."},
 	{Type: FileWrite, Description: "Emitted when Atteler writes a local file."},
+	{Type: RouteDecision, Description: "Emitted when model routing selects or rejects candidates."},
 	{Type: SessionEnd, Description: "Emitted when an interactive or one-shot session ends."},
 	{Type: SessionStart, Description: "Emitted when an interactive or one-shot session starts."},
 	{Type: ToolExecute, Description: "Emitted when Atteler invokes a provider or tool."},

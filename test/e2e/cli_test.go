@@ -585,7 +585,8 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 		"--route-budget", "0.2",
 	)
 	assertContains(t, result.stdout, "openai/gpt-budget")
-	assertNotContains(t, result.stdout, "openai/too-expensive")
+	assertContains(t, result.stdout, "openai/too-expensive\tstatus=rejected")
+	assertContains(t, result.stdout, "over budget")
 
 	result = runOK(t, runSpec{dir: workDir},
 		"--async-plan",

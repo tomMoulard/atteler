@@ -388,7 +388,7 @@ func commandContractsByName() map[string]commandContract {
 		),
 		"route-models-providerless": commandContractFor(
 			"rank model route candidates",
-			[]string{"--route-interactive", "--route-batch", "--route-candidate", "--route-input-tokens", "--route-output-tokens", "--route-budget", "--route-cache-reuse"},
+			[]string{"--route-interactive", "--route-batch", "--route-candidate", "--route-input-tokens", "--route-output-tokens", "--route-cache-write-tokens", "--route-budget", "--route-cache-reuse"},
 			[]string{commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("routeModelsCommandInput"),

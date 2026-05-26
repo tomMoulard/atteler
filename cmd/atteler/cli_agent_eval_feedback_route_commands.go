@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -920,10 +921,11 @@ func routeModelsCommandInputFromOptions(opts cliOptions) routeModelsCommandInput
 	input := routeModelsCommandInput{
 		Candidates: append([]string(nil), opts.routeCandidates...),
 		Profile: modelroute.RequestProfile{
-			EstimatedInputTokens:  opts.routeInputTokens.value,
-			EstimatedOutputTokens: opts.routeOutputTokens.value,
-			Interactive:           opts.routeInteractive,
-			Batch:                 opts.routeBatch,
+			EstimatedInputTokens:      opts.routeInputTokens.value,
+			EstimatedOutputTokens:     opts.routeOutputTokens.value,
+			EstimatedCacheWriteTokens: opts.routeCacheWriteTokens.value,
+			Interactive:               opts.routeInteractive,
+			Batch:                     opts.routeBatch,
 		},
 	}
 	if opts.routeBudget.set {
@@ -947,15 +949,18 @@ func runRouteModels(input routeModelsCommandInput) error {
 		return err
 	}
 
-	chain := modelroute.FallbackChain(candidates, profile)
-	if len(chain) == 0 {
+	decision := decideRouteCandidates(candidates, profile)
+	if decision.Selected == "" {
 		fmt.Println("No model route candidates fit.")
+
+		if rendered := formatRouteDecision(decision); rendered != "" {
+			fmt.Print(rendered)
+		}
+
 		return nil
 	}
 
-	for i := range chain {
-		fmt.Println(formatRouteCandidate(chain[i], profile))
-	}
+	fmt.Print(formatRouteDecision(decision))
 
 	return nil
 }
@@ -984,30 +989,72 @@ func applyRouteSelection(input routeModelsCommandInput, state *selectionState) e
 		return err
 	}
 
-	chain := modelroute.FallbackChain(candidates, profile)
-	if len(chain) == 0 {
+	decision := decideRouteCandidates(candidates, profile)
+	if len(decision.FallbackOrder) == 0 {
 		return errors.New("model route: no candidates fit request budget/context")
 	}
 
-	state.selectedModel = chain[0].ID()
-	state.fallbackModels = routeFallbackIDs(chain[1:])
+	state.selectedModel = decision.FallbackOrder[0]
+	state.fallbackModels = append([]string(nil), decision.FallbackOrder[1:]...)
 	state.modelLocked = true
 	state.sessionState.DefaultModel = state.selectedModel
 
 	return nil
 }
 
-func routeFallbackIDs(candidates []modelroute.Candidate) []string {
-	if len(candidates) == 0 {
-		return nil
+func decideRouteCandidates(candidates []modelroute.Candidate, profile modelroute.RequestProfile) modelroute.Decision {
+	return decideRouteCandidatesAt(candidates, profile, time.Now().UTC())
+}
+
+func decideRouteCandidatesAt(candidates []modelroute.Candidate, profile modelroute.RequestProfile, now time.Time) modelroute.Decision {
+	decision := modelroute.Decide(candidates, profile, modelroute.Policy{}, nil)
+
+	version, ok := routeCandidateCatalogVersion(candidates)
+	if !ok {
+		return decision
 	}
 
-	out := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
-		out = append(out, candidate.ID())
+	decision.CatalogVersion = version
+	decision.Constraints = appendRouteConstraint(decision.Constraints, modelroute.ConstraintCatalogMetadata)
+	decision.Constraints = appendRouteConstraint(decision.Constraints, modelroute.ConstraintMetadataFreshness)
+
+	catalog := modelroute.BuiltinCatalog()
+	if catalog.IsStale(now) {
+		decision.CatalogStale = true
+		decision.Warnings = append(decision.Warnings, fmt.Sprintf("%s: catalog %s stale after %s", modelroute.ReasonMetadataStale, catalog.Version, catalog.StaleAfter.Format(time.RFC3339)))
 	}
 
-	return out
+	return decision
+}
+
+func routeCandidateCatalogVersion(candidates []modelroute.Candidate) (string, bool) {
+	version := ""
+
+	for i := range candidates {
+		candidateVersion := strings.TrimSpace(candidates[i].MetadataVersion)
+		if candidateVersion == "" {
+			continue
+		}
+
+		if version == "" {
+			version = candidateVersion
+			continue
+		}
+
+		if version != candidateVersion {
+			return "mixed", true
+		}
+	}
+
+	return version, version != ""
+}
+
+func appendRouteConstraint(constraints []string, constraint string) []string {
+	if slices.Contains(constraints, constraint) {
+		return constraints
+	}
+
+	return append(constraints, constraint)
 }
 
 func parseRouteCandidate(raw string) (modelroute.Candidate, error) {
@@ -1030,6 +1077,12 @@ func parseRouteCandidate(raw string) (modelroute.Candidate, error) {
 		return modelroute.Candidate{}, errors.New("route candidate: model id is required")
 	}
 
+	if catalogCandidate, ok := modelroute.BuiltinCatalog().Candidate(candidate.ID()); ok {
+		candidate = catalogCandidate
+	} else if len(parts) == 1 {
+		return modelroute.Candidate{}, fmt.Errorf("route candidate %q: unknown or ambiguous model metadata; use provider/model or supply explicit key=value metadata", id)
+	}
+
 	for _, part := range parts[1:] {
 		field, value, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok {
@@ -1044,6 +1097,7 @@ func parseRouteCandidate(raw string) (modelroute.Candidate, error) {
 	return candidate, nil
 }
 
+//nolint:cyclop // Flat CLI field parsing keeps each accepted spelling close to its validation.
 func applyRouteCandidateField(candidate *modelroute.Candidate, field, value string) error {
 	switch field {
 	case "input", "input_cost":
@@ -1060,6 +1114,20 @@ func applyRouteCandidateField(candidate *modelroute.Candidate, field, value stri
 		}
 
 		candidate.OutputTokenCost = parsed
+	case "cached", "cached_input", "cached_input_cost":
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return fmt.Errorf("route candidate cached input cost: %w", err)
+		}
+
+		candidate.CachedInputTokenCost = parsed
+	case "cache_write", "cache_write_cost":
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return fmt.Errorf("route candidate cache write cost: %w", err)
+		}
+
+		candidate.CacheWriteTokenCost = parsed
 	case "priority":
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
@@ -1074,6 +1142,13 @@ func applyRouteCandidateField(candidate *modelroute.Candidate, field, value stri
 		}
 
 		candidate.MaxInputTokens = parsed
+	case "max_output", "output_max":
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("route candidate max output: %w", err)
+		}
+
+		candidate.MaxOutputTokens = parsed
 	case "latency":
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
@@ -1100,12 +1175,28 @@ func formatRouteCandidate(candidate modelroute.Candidate, profile modelroute.Req
 		candidate.ID(),
 		fmt.Sprintf("cost=%.6f", modelroute.EstimateCost(candidate, profile)),
 	}
+	if candidate.MetadataVersion != "" {
+		parts = append(parts, "metadata_version="+candidate.MetadataVersion)
+	}
+
+	if candidate.MetadataSourceURL != "" {
+		parts = append(parts, "metadata_source="+candidate.MetadataSourceURL)
+	}
+
+	if candidate.Deprecated {
+		parts = append(parts, "deprecated=true")
+	}
+
 	if candidate.Priority != 0 {
 		parts = append(parts, "priority="+strconv.Itoa(candidate.Priority))
 	}
 
 	if candidate.MaxInputTokens > 0 {
 		parts = append(parts, "max_input="+strconv.Itoa(candidate.MaxInputTokens))
+	}
+
+	if candidate.MaxOutputTokens > 0 {
+		parts = append(parts, "max_output="+strconv.Itoa(candidate.MaxOutputTokens))
 	}
 
 	if candidate.ExpectedLatencyMS > 0 {
@@ -1117,4 +1208,186 @@ func formatRouteCandidate(candidate modelroute.Candidate, profile modelroute.Req
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func formatRouteDecision(decision modelroute.Decision) string {
+	if len(decision.Candidates) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+
+	b.WriteString(strings.Join(formatRouteDecisionHeader(decision), "\t"))
+	b.WriteByte('\n')
+
+	for i := range decision.Candidates {
+		b.WriteString(strings.Join(formatCandidateDecision(decision.Candidates[i]), "\t"))
+		b.WriteByte('\n')
+	}
+
+	return b.String()
+}
+
+func formatRouteDecisionHeader(decision modelroute.Decision) []string {
+	header := []string{
+		"route_decision",
+		"selected=" + emptyRouteValue(decision.Selected),
+		"fallback_order=" + strings.Join(decision.FallbackOrder, ","),
+	}
+	if decision.CatalogVersion != "" {
+		header = append(header, "catalog_version="+decision.CatalogVersion)
+	}
+
+	if decision.CatalogStale {
+		header = append(header, "catalog_stale=true")
+	}
+
+	header = appendRouteProfileEvidence(header, decision.Profile)
+
+	if len(decision.Constraints) > 0 {
+		header = append(header, "constraints="+strings.Join(decision.Constraints, ","))
+	}
+
+	return header
+}
+
+func appendRouteProfileEvidence(parts []string, profile modelroute.RequestProfile) []string {
+	if profile.EstimatedInputTokens > 0 {
+		parts = append(parts, "estimated_input_tokens="+strconv.Itoa(profile.EstimatedInputTokens))
+	}
+
+	if profile.EstimatedOutputTokens > 0 {
+		parts = append(parts, "estimated_output_tokens="+strconv.Itoa(profile.EstimatedOutputTokens))
+	}
+
+	if profile.EstimatedCacheWriteTokens > 0 {
+		parts = append(parts, "estimated_cache_write_tokens="+strconv.Itoa(profile.EstimatedCacheWriteTokens))
+	}
+
+	if profile.PromptCacheReuseEstimate > 0 {
+		parts = append(parts, "prompt_cache_reuse_estimate="+strconv.FormatFloat(profile.PromptCacheReuseEstimate, 'f', -1, 64))
+	}
+
+	if profile.Budget > 0 {
+		parts = append(parts, fmt.Sprintf("budget=%.6f", profile.Budget))
+	}
+
+	return parts
+}
+
+func formatCandidateDecision(candidate modelroute.CandidateDecision) []string {
+	parts := []string{
+		"candidate",
+		candidate.ID,
+		"status=" + candidate.Status,
+		fmt.Sprintf("estimated_cost=%.6f", candidate.EstimatedCost),
+	}
+
+	parts = appendCostAndRank(parts, candidate)
+	parts = appendCandidateEvidence(parts, candidate)
+
+	if len(candidate.Rejected) > 0 {
+		parts = append(parts, "rejected="+strings.Join(candidate.Rejected, ";"))
+	}
+
+	return parts
+}
+
+func appendCostAndRank(parts []string, candidate modelroute.CandidateDecision) []string {
+	if candidate.ActualUsageRecorded {
+		parts = append(
+			parts,
+			fmt.Sprintf("actual_cost=%.6f", candidate.ActualCost),
+			fmt.Sprintf("actual_cost_delta=%.6f", candidate.ActualCostDelta),
+		)
+		parts = appendActualUsage(parts, candidate)
+	}
+
+	if candidate.Rank > 0 {
+		parts = append(parts, "rank="+strconv.Itoa(candidate.Rank))
+	}
+
+	if candidate.Candidate.MaxInputTokens > 0 {
+		parts = append(parts, "max_input="+strconv.Itoa(candidate.Candidate.MaxInputTokens))
+	}
+
+	if candidate.Candidate.MaxOutputTokens > 0 {
+		parts = append(parts, "max_output="+strconv.Itoa(candidate.Candidate.MaxOutputTokens))
+	}
+
+	return parts
+}
+
+func appendActualUsage(parts []string, candidate modelroute.CandidateDecision) []string {
+	parts = append(parts, "actual_input_tokens="+strconv.Itoa(candidate.ActualInputTokens))
+
+	if candidate.ActualCachedTokens > 0 {
+		parts = append(parts, "actual_cached_input_tokens="+strconv.Itoa(candidate.ActualCachedTokens))
+	}
+
+	if candidate.ActualCacheWrites > 0 {
+		parts = append(parts, "actual_cache_write_tokens="+strconv.Itoa(candidate.ActualCacheWrites))
+	}
+
+	if candidate.ActualOutputTokens > 0 {
+		parts = append(parts, "actual_output_tokens="+strconv.Itoa(candidate.ActualOutputTokens))
+	}
+
+	return parts
+}
+
+func appendCandidateEvidence(parts []string, candidate modelroute.CandidateDecision) []string {
+	if candidate.Candidate.MetadataVersion != "" {
+		parts = append(parts, "metadata_version="+candidate.Candidate.MetadataVersion)
+	}
+
+	if candidate.Candidate.MetadataSourceURL != "" {
+		parts = append(parts, "metadata_source="+candidate.Candidate.MetadataSourceURL)
+	}
+
+	if candidate.Candidate.Deprecated {
+		parts = append(parts, "deprecated=true")
+	}
+
+	if candidate.ExpectedLatencyMS > 0 {
+		parts = append(parts, "expected_latency_ms="+strconv.Itoa(candidate.ExpectedLatencyMS))
+	}
+
+	if candidate.ExpectedTTFTMS > 0 {
+		parts = append(parts, "expected_ttft_ms="+strconv.Itoa(candidate.ExpectedTTFTMS))
+	}
+
+	if candidate.ObservedLatencyMS > 0 {
+		parts = append(parts, "observed_latency_ms="+strconv.Itoa(candidate.ObservedLatencyMS))
+	}
+
+	if candidate.ObservedTTFTMS > 0 {
+		parts = append(parts, "observed_ttft_ms="+strconv.Itoa(candidate.ObservedTTFTMS))
+	}
+
+	if candidate.TelemetryCount > 0 || candidate.FailureCount > 0 {
+		parts = append(parts, "telemetry_count="+strconv.Itoa(candidate.TelemetryCount))
+	}
+
+	if candidate.FailureCount > 0 {
+		parts = append(parts, "failure_count="+strconv.Itoa(candidate.FailureCount))
+	}
+
+	if candidate.RateLimitCount > 0 {
+		parts = append(parts, "rate_limit_count="+strconv.Itoa(candidate.RateLimitCount))
+	}
+
+	if candidate.RateLimitUntil != "" {
+		parts = append(parts, "rate_limit_until="+candidate.RateLimitUntil)
+	}
+
+	return parts
+}
+
+func emptyRouteValue(value string) string {
+	if value == "" {
+		return "-"
+	}
+
+	return value
 }
