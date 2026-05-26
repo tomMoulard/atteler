@@ -215,13 +215,12 @@ func formatReviewReport(report review.Report) string {
 	findings := report.SortedFindings()
 	if len(findings) == 0 {
 		b.WriteString("findings: none\n")
-		return b.String()
-	}
+	} else {
+		b.WriteString("findings:\n")
 
-	b.WriteString("findings:\n")
-
-	for i := range findings {
-		fmt.Fprintf(&b, "  - %s\n", formatReviewFinding(findings[i]))
+		for i := range findings {
+			fmt.Fprintf(&b, "  - %s\n", formatReviewFinding(findings[i]))
+		}
 	}
 
 	return b.String()
@@ -232,8 +231,21 @@ func formatReviewGateCheck(check review.GateCheck) string {
 		"name=" + check.Name,
 		"passed=" + strconv.FormatBool(check.Passed),
 	}
+
 	if check.Notes != "" {
 		parts = append(parts, "notes="+check.Notes)
+	}
+
+	if check.Proof != "" {
+		parts = append(parts, "proof="+check.Proof)
+	}
+
+	if check.NotRunReason != "" {
+		parts = append(parts, "not_run_reason="+check.NotRunReason)
+	}
+
+	if len(check.Provenance) > 0 {
+		parts = append(parts, "provenance="+formatReviewEvidenceSources(check.Provenance))
 	}
 
 	return strings.Join(parts, "\t")
@@ -246,18 +258,56 @@ func formatReviewFinding(finding review.Finding) string {
 		"path=" + finding.Path,
 	}
 	if finding.Line > 0 {
-		parts = append(parts, "line="+strconv.Itoa(finding.Line))
+		line := strconv.Itoa(finding.Line)
+		if finding.EndLine > finding.Line {
+			line += "-" + strconv.Itoa(finding.EndLine)
+		}
+
+		parts = append(parts, "line="+line)
 	}
 
 	if finding.Message != "" {
 		parts = append(parts, "message="+finding.Message)
 	}
 
+	if finding.Evidence != "" {
+		parts = append(parts, "evidence="+finding.Evidence)
+	}
+
+	if finding.SeverityRationale != "" {
+		parts = append(parts, "severity_rationale="+finding.SeverityRationale)
+	}
+
 	if finding.Suggestion != "" {
 		parts = append(parts, "suggestion="+finding.Suggestion)
 	}
 
+	if finding.SuggestedVerification != "" {
+		parts = append(parts, "suggested_verification="+finding.SuggestedVerification)
+	}
+
+	if finding.Confidence != "" {
+		parts = append(parts, "confidence="+finding.Confidence)
+	}
+
+	if len(finding.Provenance) > 0 {
+		parts = append(parts, "provenance="+formatReviewEvidenceSources(finding.Provenance))
+	}
+
+	if len(finding.Dissent) > 0 {
+		parts = append(parts, "dissent="+formatReviewEvidenceSources(finding.Dissent))
+	}
+
 	return strings.Join(parts, "\t")
+}
+
+func formatReviewEvidenceSources(sources []review.EvidenceSource) string {
+	parts := make([]string, 0, len(sources))
+	for _, source := range sources {
+		parts = append(parts, string(source.Type)+":"+source.Source+":"+source.Summary)
+	}
+
+	return strings.Join(parts, ";")
 }
 
 type reviewCompleter struct {
@@ -498,6 +548,24 @@ func formatReviewRunResult(result review.Result) string {
 				note.ReviewedReviewer,
 				truncatePreview(note.Notes, 160),
 			)
+		}
+	}
+
+	if len(result.Session.Errors) > 0 {
+		b.WriteString("errors:\n")
+
+		for _, runError := range result.Session.Errors {
+			parts := []string{"stage=" + runError.Stage}
+			if runError.Reviewer != "" {
+				parts = append(parts, "reviewer="+runError.Reviewer)
+			}
+
+			if runError.ReviewedReviewer != "" {
+				parts = append(parts, "reviewed_reviewer="+runError.ReviewedReviewer)
+			}
+
+			parts = append(parts, "message="+runError.Message)
+			fmt.Fprintf(&b, "  - %s\n", strings.Join(parts, "\t"))
 		}
 	}
 

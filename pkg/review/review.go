@@ -42,6 +42,20 @@ const (
 	CategoryStyle Category = "style"
 )
 
+// EvidenceType identifies whether a claim is backed by model judgment,
+// reviewed source context, or hard command output.
+type EvidenceType string
+
+const (
+	// EvidenceModelJudgment marks claims inferred by a review model.
+	EvidenceModelJudgment EvidenceType = "model-judgment"
+	// EvidenceReviewContext marks claims backed by the reviewed code snapshot.
+	EvidenceReviewContext EvidenceType = "review-context"
+	// EvidenceCommandOutput marks claims backed by test, lint, typecheck, or
+	// other command output.
+	EvidenceCommandOutput EvidenceType = "command-output"
+)
+
 // DefaultRequiredGates names the baseline gates expected for a code-review verdict.
 var DefaultRequiredGates = []string{
 	"tests pass",
@@ -55,12 +69,26 @@ var DefaultRequiredGates = []string{
 //
 //nolint:govet // Public field order follows review readability.
 type Finding struct {
-	Severity   Severity
-	Category   Category
-	Path       string
-	Line       int
-	Message    string
-	Suggestion string
+	Severity              Severity
+	Category              Category
+	Path                  string
+	Line                  int
+	EndLine               int
+	Message               string
+	Evidence              string
+	SeverityRationale     string
+	Suggestion            string
+	SuggestedVerification string
+	Provenance            []EvidenceSource
+	Dissent               []EvidenceSource
+	Confidence            string
+}
+
+// EvidenceSource records who or what supports or disputes a review claim.
+type EvidenceSource struct {
+	Type    EvidenceType
+	Source  string
+	Summary string
 }
 
 // Reviewer describes a review participant and the categories they cover.
@@ -85,9 +113,12 @@ type Request struct {
 //
 //nolint:govet // Public field order follows semantic readability.
 type GateCheck struct {
-	Name   string
-	Passed bool
-	Notes  string
+	Name         string
+	Passed       bool
+	Notes        string
+	Proof        string
+	NotRunReason string
+	Provenance   []EvidenceSource
 }
 
 // Report is the structured output of a code review.
@@ -174,6 +205,14 @@ func ValidateFinding(finding Finding) error {
 		return fmt.Errorf("finding line must be non-negative, got %d", finding.Line)
 	}
 
+	if finding.EndLine < 0 {
+		return fmt.Errorf("finding end line must be non-negative, got %d", finding.EndLine)
+	}
+
+	if finding.Line > 0 && finding.EndLine > 0 && finding.EndLine < finding.Line {
+		return fmt.Errorf("finding end line %d is before line %d", finding.EndLine, finding.Line)
+	}
+
 	if strings.TrimSpace(finding.Message) == "" {
 		return errors.New("finding message is required")
 	}
@@ -187,7 +226,8 @@ func ValidateReport(report Report, requiredGates []string) error {
 		return errors.New("report reviewer is required")
 	}
 
-	for i, finding := range report.Findings {
+	for i := range report.Findings {
+		finding := report.Findings[i]
 		if err := ValidateFinding(finding); err != nil {
 			return fmt.Errorf("finding %d: %w", i, err)
 		}
@@ -263,7 +303,9 @@ func GroupFindingsBySeverity(findings []Finding) []FindingGroup {
 
 	for _, severity := range []Severity{SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityInfo} {
 		group := FindingGroup{Key: string(severity)}
-		for _, finding := range sorted {
+
+		for i := range sorted {
+			finding := sorted[i]
 			if finding.Severity == severity {
 				group.Findings = append(group.Findings, finding)
 			}
@@ -283,7 +325,9 @@ func GroupFindingsByCategory(findings []Finding) []FindingGroup {
 	byCategory := make(map[string][]Finding)
 	keys := make([]string, 0)
 
-	for _, finding := range sorted {
+	for i := range sorted {
+		finding := sorted[i]
+
 		key := string(finding.Category)
 		if _, ok := byCategory[key]; !ok {
 			keys = append(keys, key)
@@ -306,7 +350,8 @@ func GroupFindingsByCategory(findings []Finding) []FindingGroup {
 func Summary(findings []Finding) SeveritySummary {
 	var summary SeveritySummary
 
-	for _, finding := range findings {
+	for i := range findings {
+		finding := findings[i]
 		switch finding.Severity {
 		case SeverityCritical:
 			summary.Critical++
@@ -350,6 +395,10 @@ func lessFinding(left, right Finding) bool {
 		return left.Line < right.Line
 	}
 
+	if left.EndLine != right.EndLine {
+		return left.EndLine < right.EndLine
+	}
+
 	if left.Category != right.Category {
 		return left.Category < right.Category
 	}
@@ -364,6 +413,15 @@ func lessFinding(left, right Finding) bool {
 func validSeverity(severity Severity) bool {
 	_, ok := severityRank[severity]
 	return ok
+}
+
+func validCategory(category Category) bool {
+	switch category {
+	case CategoryCorrectness, CategorySecurity, CategoryTests, CategoryPerformance, CategoryMaintainability, CategoryStyle:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeCategories(categories []Category) ([]Category, error) {
