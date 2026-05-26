@@ -691,9 +691,10 @@ func TestBuildMemoryStore_IndexesSessionsAndFiles(t *testing.T) {
 	store := session.NewStore(filepath.Join(dir, "sessions"))
 	sessionState := session.New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "OAuth session notes"}})
 	sessionState.ID = "demo"
+	sessionState.WorktreePath = dir
 	require.NoError(t, store.Save(sessionState))
 
-	mem, err := buildMemoryStore(store, memoryCommandInput{IndexFiles: []string{filePath}})
+	mem, err := buildMemoryStore(store, cliOptions{memoryIndexFiles: stringListFlag{filePath}, memoryRepoPath: dir})
 	require.NoError(t, err)
 	results, err := mem.Search("oauth", 10)
 	require.NoError(t, err)

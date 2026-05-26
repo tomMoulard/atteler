@@ -458,7 +458,7 @@ func promptAgentCandidates(registry *agent.Registry) []promptcomplete.Candidate 
 
 func promptToolCandidates() []promptcomplete.Candidate {
 	return []promptcomplete.Candidate{
-		{Text: "memory-search", Kind: "tool", Description: "search local memory and saved sessions"},
+		{Text: "memory-search", Kind: "tool", Description: "search privacy-scoped local memory with corpus reporting"},
 		{Text: "plan-agents", Kind: "tool", Description: "preview agent orchestration"},
 		{Text: "review", Kind: "tool", Description: "run a structured code review"},
 		{Text: "test", Kind: "tool", Description: "run verification tests"},

@@ -73,6 +73,11 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			want: []string{"--once", "explain this repo", "--model", "openai/gpt-5.4"},
 		},
 		{
+			name: "memory search keeps trailing privacy flags parseable",
+			args: []string{"memory", "search", "OAuth", "retry", "--memory-scope", "repo", "--memory-tag", "security"},
+			want: []string{"--memory-search", "OAuth retry", "--memory-scope", "repo", "--memory-tag", "security"},
+		},
+		{
 			name: "positional run command keeps trailing flags parseable",
 			args: []string{"chat", "run", "explain", "this", "repo", "--model", "openai/gpt-5.4"},
 			want: []string{"--model", "openai/gpt-5.4", "explain this repo"},
@@ -367,11 +372,14 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "agents skill learning opt in", args: []string{"agents", "skill-learning-enable-all"}, want: []string{"--skill-learning-enable-all"}},
 		{name: "agents bash", args: []string{"agents", "bash", "go", "test", "./cmd/atteler"}, want: []string{"--bash", "go test ./cmd/atteler"}},
 		{name: "memory rag", args: []string{"memory", "search", "OAuth", "retry"}, want: []string{"--memory-search", "OAuth retry"}},
-		{name: "memory delete", args: []string{"memory", "delete", "old-doc", "--memory-store", "store.json"}, want: []string{"--memory-delete", "old-doc", "--memory-store", "store.json"}},
-		{name: "memory compact", args: []string{"memory", "compact", "--memory-store", "store.json"}, want: []string{"--memory-compact", "--memory-store", "store.json"}},
-		{name: "memory migrate", args: []string{"memory", "migrate", "--memory-store", "store.json"}, want: []string{"--memory-migrate", "--memory-store", "store.json"}},
-		{name: "memory index ttl", args: []string{"memory", "index", "note.txt", "--memory-ttl-seconds", "60"}, want: []string{"--memory-index", "note.txt", "--memory-ttl-seconds", "60"}},
-		{name: "memory search raw transcript opt-in", args: []string{"memory", "search", "OAuth", "--memory-include-session-messages"}, want: []string{"--memory-search", "OAuth", "--memory-include-session-messages"}},
+		{name: "memory purge", args: []string{"memory", "purge", "tag:auth"}, want: []string{"--memory-purge", "tag:auth"}},
+		{name: "memory rebuild", args: []string{"memory", "rebuild"}, want: []string{"--memory-rebuild"}},
+		{name: "memory list corpus", args: []string{"memory", "list-corpus"}, want: []string{"--memory-list-corpus"}},
+		{name: "memory list corpus with scoped store", args: []string{"memory", "--memory-store", ".atteler/memory.json", "list-corpus"}, want: []string{"--memory-store", ".atteler/memory.json", "--memory-list-corpus"}},
+		{name: "memory list corpus keeps trailing store flag", args: []string{"memory", "list-corpus", "--memory-store", ".atteler/memory.json"}, want: []string{"--memory-list-corpus", "--memory-store", ".atteler/memory.json"}},
+		{name: "memory rebuild keeps privacy flags", args: []string{"memory", "rebuild", "--memory-store", ".atteler/memory.json", "--memory-scope", "repo"}, want: []string{"--memory-rebuild", "--memory-store", ".atteler/memory.json", "--memory-scope", "repo"}},
+		{name: "memory purge keeps domain flags", args: []string{"memory", "--memory-store", ".atteler/memory.json", "purge", "session:abc"}, want: []string{"--memory-store", ".atteler/memory.json", "--memory-purge", "session:abc"}},
+		{name: "memory purge keeps trailing store flag", args: []string{"memory", "purge", "session:abc", "--memory-store", ".atteler/memory.json"}, want: []string{"--memory-purge", "session:abc", "--memory-store", ".atteler/memory.json"}},
 		{name: "code intel", args: []string{"code-intel", "summary"}, want: []string{"--code-summary"}},
 		{name: "review", args: []string{"review", "scan"}, want: []string{"--review-scan"}},
 		{name: "watch", args: []string{"watch", "json"}, want: []string{"--watch-scan", "--watch-json"}},
@@ -402,6 +410,18 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 			assert.Equal(t, tt.want, got.Args)
 		})
 	}
+}
+
+func TestRegisterCLIFlags_MemoryRedactKeepsRegexCommas(t *testing.T) {
+	t.Parallel()
+
+	opts, fs := newCLIOptionsAndFlagSetForTest(t)
+
+	require.NoError(t, fs.Parse([]string{
+		"--memory-redact", `ACME-[0-9]{2,4}`,
+		"--memory-redact", `token=(foo,bar)`,
+	}))
+	assert.Equal(t, rawStringListFlag{`ACME-[0-9]{2,4}`, `token=(foo,bar)`}, opts.memoryRedactRules)
 }
 
 func TestTranslateCLIArgs_CanonicalDomainsAndAliasesRoute(t *testing.T) {

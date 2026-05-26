@@ -815,12 +815,8 @@ func TestFlagDomain_CoversAcceptanceDomains(t *testing.T) {
 		"plan-agents":                        "agents",
 		"prompt-local-only":                  "agents",
 		"memory-search":                      "memory/rag",
-		"memory-delete":                      "memory/rag",
-		"memory-compact":                     "memory/rag",
-		"memory-migrate":                     "memory/rag",
-		"memory-ttl-seconds":                 "memory/rag",
-		"memory-include-session-messages":    "memory/rag",
-		"memory-include-worktree-metadata":   "memory/rag",
+		"memory-redact":                      "memory/rag",
+		"memory-retention-days":              "memory/rag",
 		"code-symbol-prefix":                 "code-intel",
 		"code-limit":                         "code-intel",
 		"code-offset":                        "code-intel",
@@ -1069,6 +1065,8 @@ func newCLIOptionsAndFlagSetForTest(t *testing.T) (*cliOptions, *flag.FlagSet) {
 	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}
 	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
 	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
+	opts.memoryLimit = positiveIntFlag{name: "memory-limit"}
+	opts.memoryRetentionDays = positiveIntFlag{name: "memory-retention-days"}
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

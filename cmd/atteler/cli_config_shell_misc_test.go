@@ -467,6 +467,7 @@ func TestDefaultValueForFlag_IncludesZeroAndImplicitDefaults(t *testing.T) {
 		{name: "false bool", flag: &flag.Flag{Name: "doctor", DefValue: "false"}, want: "false"},
 		{name: "zero numeric", flag: &flag.Flag{Name: "evaluation-score", DefValue: "0"}, want: "0"},
 		{name: "implicit runtime default", flag: &flag.Flag{Name: "memory-limit", DefValue: ""}, want: "5"},
+		{name: "implicit disabled default", flag: &flag.Flag{Name: "memory-retention-days", DefValue: ""}, want: "disabled"},
 	}
 
 	for _, tt := range tests {

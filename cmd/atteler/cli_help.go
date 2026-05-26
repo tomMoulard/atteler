@@ -12,8 +12,10 @@ import (
 )
 
 const (
-	noLegacyDeprecationNotice = "No legacy flag is deprecated in this release."
+	helpSelectorAll           = "all"
+	helpSelectorSession       = "session"
 	outputFlagName            = "output"
+	noLegacyDeprecationNotice = "No legacy flag is deprecated in this release."
 )
 
 func groupedUsage() {
@@ -28,7 +30,7 @@ func printCLIHelp(w io.Writer, fs *flag.FlagSet, domainName string) error {
 	case "", "domains", "overview":
 		printTopLevelHelp(w)
 		return nil
-	case "legacy", "flags", "all":
+	case "legacy", "flags", helpSelectorAll:
 		printLegacyFlagHelp(w, fs)
 		return nil
 	default:
@@ -315,10 +317,11 @@ func lookupFlagDomain(name string) (string, bool) {
 	name = normalizeHelpName(name)
 
 	switch {
-	case name == "once" || name == "stdin" || name == outputFlagName || name == "headless" ||
-		name == "headless-id" || name == "headless-private-log" || name == "list-headless" || name == "recover-headless" ||
-		name == "status-headless" || name == "cancel-headless" || name == "stream-headless" ||
-		name == sessionCommandName || name == "session-id" || name == "session-dir" ||
+	case name == "once" || name == "stdin" || name == "output" || name == "headless" ||
+		name == "list-headless" || name == "stream-headless" ||
+		name == "status-headless" || name == "cancel-headless" || name == "recover-headless" ||
+		name == "headless-id" || name == "headless-private-log" ||
+		name == helpSelectorSession || name == "session-id" || name == "session-dir" ||
 		name == "session-title" || name == "session-tag" ||
 		strings.HasPrefix(name, "list-session") || strings.HasPrefix(name, "show-session") ||
 		strings.HasPrefix(name, "session-summary") || name == "replay" ||
