@@ -31,7 +31,7 @@ func TestSummarizeAndFormatCodeImportFiles(t *testing.T) {
 		require.Failf(t, "unexpected import file summaries", "got %#v, want %#v", summaries, want)
 	}
 
-	got := formatCodeImportFileSummary(summaries[0])
+	got := formatCodeIntelImportFileSummary(codeIntelFilesFromImportFileSummaries(summaries)[0])
 	if got != "path=cmd/a.go	package=main	imports=2" {
 		require.Failf(t, "unexpected import file summary format", "got %q", got)
 	}
@@ -54,7 +54,7 @@ func TestSummarizeAndFormatCodeImports(t *testing.T) {
 		require.Failf(t, "unexpected import summaries", "got %#v, want %#v", summaries, want)
 	}
 
-	got := formatCodeImportSummary(summaries[1])
+	got := formatCodeIntelImportSummary(codeIntelImportsFromSummaries(summaries)[1])
 	if got != "import=fmt	files=2" {
 		require.Failf(t, "unexpected import summary format", "got %q", got)
 	}
@@ -155,7 +155,7 @@ func TestSummarizeCodeImportPrefixPackages(t *testing.T) {
 		require.Failf(t, "unexpected import prefix package summaries", "got %#v, want %#v", summaries, want)
 	}
 
-	if got := formatCodePackageImportMatchSummary(summaries[0]); got != "package=main\tfiles=1\timports=2" {
+	if got := formatCodeIntelPackageImportMatchSummary(codeIntelPackagesFromImportMatches(summaries)[0]); got != "package=main\tfiles=1\timports=2" {
 		require.Failf(t, "unexpected import package summary format", "got %q", got)
 	}
 
@@ -300,7 +300,7 @@ func TestSummarizeAndFormatCodeImportPathPackages(t *testing.T) {
 		require.Failf(t, "unexpected import path package summaries", "got %#v, want %#v", summaries, want)
 	}
 
-	if got := formatCodePackageImportMatchSummary(summaries[0]); got != "package=main\tfiles=1" {
+	if got := formatCodeIntelPackageImportMatchSummary(codeIntelPackagesFromImportMatches(summaries)[0]); got != "package=main\tfiles=1" {
 		require.Failf(t, "unexpected import package summary format", "got %q", got)
 	}
 
@@ -317,10 +317,10 @@ func TestFormatCodeImportEdge(t *testing.T) {
 	t.Parallel()
 
 	root := filepath.Join("tmp", "repo")
-	got := formatCodeImportEdge(root, codeintel.ImportEdge{
+	got := formatCodeIntelEdge(codeIntelEdgesFromImportEdges(root, []codeintel.ImportEdge{{
 		From:   filepath.Join(root, "pkg", "runner.go"),
 		Import: "context",
-	})
+	}})[0])
 
 	want := "path=pkg/runner.go\timport=context"
 	if got != want {

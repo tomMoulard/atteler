@@ -1,0 +1,16 @@
+{
+  "schema": "atteler.code_intel.v1",
+  "command": "code-symbol-name",
+  "query": {
+    "symbol": "Run"
+  },
+  "empty": false,
+  "symbols": [
+    {
+      "name": "Run",
+      "kind": "func",
+      "path": "runner.go",
+      "line": 3
+    }
+  ]
+}

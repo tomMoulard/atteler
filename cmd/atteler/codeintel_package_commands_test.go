@@ -272,7 +272,7 @@ func TestSummarizeAndFormatCodePackageImportCounts(t *testing.T) {
 		require.Failf(t, "unexpected package import summaries", "got %#v, want %#v", summaries, want)
 	}
 
-	got := formatCodePackageImportSummary(summaries[0])
+	got := formatCodeIntelPackageImportSummary(codeIntelPackagesFromImportSummaries(summaries)[0])
 	if got != "package=pkg	files=3	imports=3	unique_imports=2" {
 		require.Failf(t, "unexpected package import summary format", "got %q", got)
 	}

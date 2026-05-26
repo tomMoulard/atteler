@@ -103,7 +103,7 @@ func providerlessFileCommands() []command {
 			},
 		},
 		{
-			name: "lsp-symbols",
+			name: codeIntelLSPSymbolsName,
 			tier: tierProviderless,
 			match: func(o cliOptions) bool {
 				return o.lspSymbols || o.lspWorkspaceSymbols != ""

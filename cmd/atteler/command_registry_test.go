@@ -287,10 +287,10 @@ func TestCommandRegistry_PrefixedCommandContractsCoverRegisteredFlags(t *testing
 	commands := commandSurfaceCommandsByName(buildCommandSurface(buildCommandRegistry()).Commands)
 
 	require.Contains(t, commands, "code-intel")
-	assert.ElementsMatch(t, registeredFlagsWithPrefix(fs, "code-"), commands["code-intel"].InputFlags)
+	assert.ElementsMatch(t, append(registeredFlagsWithPrefix(fs, "code-"), "--json", "--output"), commands["code-intel"].InputFlags)
 
 	require.Contains(t, commands, "lsp-symbols")
-	assert.ElementsMatch(t, registeredFlagsWithPrefix(fs, "lsp-"), commands["lsp-symbols"].InputFlags)
+	assert.ElementsMatch(t, append(registeredFlagsWithPrefix(fs, "lsp-"), "--json", "--output"), commands["lsp-symbols"].InputFlags)
 }
 
 func TestCommandRegistry_InlineContractsAreWellFormed(t *testing.T) {
@@ -650,6 +650,7 @@ func TestCommandSurface_JSONDumpIncludesDispatchContract(t *testing.T) {
 	require.Contains(t, domains, "config")
 	assert.Contains(t, commandSurfaceDomainCommandNames(domains["config"].Commands), "commands-json")
 	assert.Contains(t, commandSurfaceDomainCommandNames(domains["config"].Commands), "commands-docs")
+	assert.Contains(t, commandSurfaceDomainCommandNames(domains["code-intel"].RoutingCommands), "symbol-name-file-summary")
 	assert.Contains(t, commands, "command-surface-json")
 	assert.Contains(t, commands, "list-sessions")
 	assert.Contains(t, commands, "headless-command")
@@ -714,6 +715,10 @@ func TestCommandSurface_DomainCommandsLinkToDispatchContract(t *testing.T) {
 	lspWorkspace := requireDomainCommand(t, surface, "code-intel", "lsp-workspace")
 	assert.Equal(t, []string{"lsp-symbols"}, lspWorkspace.DispatchCommands)
 
+	symbolNameFileSummary := requireDomainRoutingCommand(t, surface, "code-intel", "symbol-name-file-summary")
+	assert.Equal(t, []string{"code-intel"}, symbolNameFileSummary.DispatchCommands)
+	assert.Contains(t, symbolNameFileSummary.OutputModes, commandOutputJSON)
+
 	oneShotPrompt := requireDomainCommand(t, surface, "chat/session", "once")
 	assert.Empty(t, oneShotPrompt.DispatchCommands, "one-shot prompt execution is intentionally outside the command registry")
 }
@@ -742,6 +747,18 @@ func TestCommandSurface_DocumentedRegistryCommandsDeclareDispatchLinks(t *testin
 				assert.NotEmpty(t, got.SideEffects, "%s %s should inherit dispatch side effects", domain.Name, documentedCommand.Name)
 				assert.NotEmpty(t, got.OutputModes, "%s %s should inherit dispatch output modes", domain.Name, documentedCommand.Name)
 			}
+
+			for commandIndex := range domain.RoutingCommands {
+				routingCommand := domain.RoutingCommands[commandIndex]
+				if documentedDomainCommandForTest(domain, routingCommand.Name) {
+					continue
+				}
+
+				got := requireDomainRoutingCommand(t, surface, domain.Name, routingCommand.Name)
+				assert.NotEmpty(t, got.DispatchCommands, "%s %s should link routing-only command descriptors", domain.Name, routingCommand.Name)
+				assert.NotEmpty(t, got.SideEffects, "%s %s should inherit routing-only side effects", domain.Name, routingCommand.Name)
+				assert.NotEmpty(t, got.OutputModes, "%s %s should inherit routing-only output modes", domain.Name, routingCommand.Name)
+			}
 		})
 	}
 }
@@ -755,6 +772,8 @@ func TestCommandSurface_MarkdownDocsRenderFromSurface(t *testing.T) {
 	assert.Contains(t, docs, "Schema: `"+commandSurfaceSchema+"`")
 	assert.Contains(t, docs, "## Chat & sessions")
 	assert.Contains(t, docs, "Commands:")
+	assert.Contains(t, docs, "Routing-only commands:")
+	assert.Contains(t, docs, "`symbol-name-file-summary <name>`: list files with symbol counts for one exact name")
 	assert.Contains(t, docs, "`commands-json`: dump the inspectable CLI command surface as JSON")
 	assert.Contains(t, docs, "`list`: list saved sessions (dispatch: `list-sessions`)")
 	assert.Contains(t, docs, `atteler session list`)
@@ -795,6 +814,10 @@ func TestCommandSurface_MarkdownDocsRenderFromSurface(t *testing.T) {
 	assert.Contains(t, docs, "- `/eval add`: add the current session to local evaluation cases")
 	assert.Contains(t, docs, "Policy: `mutates-filesystem`")
 	assert.Contains(t, docs, "- Policy: `runs-local-process`, `mutates-worktree`")
+	assert.Contains(t, docs, "`code-intel` (providerless-config)")
+	assert.Contains(t, docs, "- Input fields: `SymbolName`, `SymbolFileSummary`")
+	assert.Contains(t, docs, "`--code-limit`")
+	assert.Contains(t, docs, "`--code-offset`")
 }
 
 func TestCommandSurface_MarkdownSlashHelpRendersFromSurface(t *testing.T) {
@@ -1099,6 +1122,36 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			assert.Equal(t, tt.wantTier, got.tier)
 		})
 	}
+}
+
+func TestCommandRegistry_CodeIntelGroupedStructuredFlagsReachSchemaInput(t *testing.T) {
+	t.Parallel()
+
+	opts := parseGroupedOptionsForRouteTest(t, []string{
+		"code-intel",
+		"symbol",
+		"Run",
+		"--json",
+		"--code-limit",
+		"1",
+		"--code-offset",
+		"2",
+	})
+
+	got, ok := firstMatchingCommand(opts)
+	require.True(t, ok)
+	assert.Equal(t, codeIntelDomainName, got.name)
+	assert.Equal(t, tierProviderlessConfig, got.tier)
+
+	input := codeIntelCommandInputFromOptions(opts)
+	selected, err := selectCodeIntelCommand(input)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, "code-symbol-name", selected.name)
+	assert.Equal(t, "Run", input.SymbolName)
+	assert.True(t, input.JSON)
+	assert.Equal(t, 1, input.Limit)
+	assert.Equal(t, 2, input.Offset)
 }
 
 func TestCommandRegistry_StatefulSessionDispatcherPreservesAliases(t *testing.T) {
@@ -1406,6 +1459,18 @@ func TestCommandRegistry_GroupedCommandsWithSupplementalFlagsReachExpectedHandle
 			wantTier: tierProviderless,
 		},
 		{
+			name:     "code-intel lsp-symbols routes to lsp providerless handler",
+			args:     []string{"code-intel", "lsp-symbols", "--lsp-command", "gopls", "--lsp-file", "main.go"},
+			wantName: codeIntelLSPSymbolsName,
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "code-intel lsp-workspace routes to lsp providerless handler",
+			args:     []string{"code-intel", "lsp-workspace", "Handler", "--lsp-command", "gopls"},
+			wantName: codeIntelLSPSymbolsName,
+			wantTier: tierProviderless,
+		},
+		{
 			name:     "review run routes stateful when executed",
 			args:     []string{"review", "run"},
 			wantName: "review-run",
@@ -1654,6 +1719,47 @@ func requireDomainCommand(
 	require.Failf(t, "missing domain", "domain %q not found", domainName)
 
 	return commandSurfaceDomainCommand{}
+}
+
+func requireDomainRoutingCommand(
+	t *testing.T,
+	surface commandSurface,
+	domainName string,
+	commandName string,
+) commandSurfaceDomainCommand {
+	t.Helper()
+
+	for i := range surface.Domains {
+		if surface.Domains[i].Name != domainName {
+			continue
+		}
+
+		for j := range surface.Domains[i].RoutingCommands {
+			if surface.Domains[i].RoutingCommands[j].Name == commandName {
+				return surface.Domains[i].RoutingCommands[j]
+			}
+		}
+
+		require.Failf(t, "missing domain routing command", "domain %q routing command %q not found", domainName, commandName)
+
+		return commandSurfaceDomainCommand{}
+	}
+
+	require.Failf(t, "missing domain", "domain %q not found", domainName)
+
+	return commandSurfaceDomainCommand{}
+}
+
+func documentedDomainCommandForTest(domain cliHelpDomain, name string) bool {
+	name = normalizeHelpName(name)
+
+	for i := range domain.Commands {
+		if normalizeHelpName(domain.Commands[i].Name) == name {
+			return true
+		}
+	}
+
+	return false
 }
 
 func commandSurfaceDomainCommandNames(commands []commandSurfaceDomainCommand) []string {

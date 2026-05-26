@@ -31,6 +31,11 @@ const (
 )
 
 func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
+	format, err := structuredCommandOutputFormat(input.JSON, input.OutputFormat)
+	if err != nil {
+		return err
+	}
+
 	pool := lsp.NewServerPool(lsp.PoolOptions{CommandPolicy: authorizeLSPCommand})
 
 	defer func() {
@@ -48,10 +53,8 @@ func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
 		Pool:       pool,
 	}
 
-	var (
-		symbols []lsp.Symbol
-		err     error
-	)
+	var symbols []lsp.Symbol
+
 	if strings.TrimSpace(input.WorkspaceSymbols) != "" {
 		symbols, err = lsp.WorkspaceSymbols(ctx, lspOptions, input.WorkspaceSymbols)
 	} else {
@@ -62,9 +65,9 @@ func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
 		return fmt.Errorf("lsp symbols: %w", err)
 	}
 
-	fmt.Print(formatLSPSymbols(symbols))
+	response := buildLSPCodeIntelResponse(input, symbols)
 
-	return nil
+	return writeCodeIntelResponse(os.Stdout, response, format)
 }
 
 func authorizeLSPCommand(ctx context.Context, spec lsp.CommandSpec) error {
@@ -86,50 +89,6 @@ func authorizeLSPCommand(ctx context.Context, spec lsp.CommandSpec) error {
 	default:
 		return fmt.Errorf("lsp command blocked by unknown local process policy verdict %q (%s): %s", decision.Verdict, decision.MatchedRule, decision.Reason)
 	}
-}
-
-func formatLSPSymbols(symbols []lsp.Symbol) string {
-	if len(symbols) == 0 {
-		return "No LSP symbols found.\n"
-	}
-
-	var b strings.Builder
-	writeLSPSymbols(&b, symbols, 0)
-
-	return b.String()
-}
-
-func writeLSPSymbols(b *strings.Builder, symbols []lsp.Symbol, depth int) {
-	indent := strings.Repeat("  ", depth)
-
-	for i := range symbols {
-		symbol := symbols[i]
-
-		parts := []string{
-			indent + symbol.Name,
-			"kind=" + strconv.Itoa(symbol.Kind),
-			"range=" + formatLSPRange(symbol.Range),
-		}
-		if symbol.Detail != "" {
-			parts = append(parts, "detail="+symbol.Detail)
-		}
-
-		if symbol.ContainerName != "" {
-			parts = append(parts, "container="+symbol.ContainerName)
-		}
-
-		if symbol.URI != "" {
-			parts = append(parts, "uri="+symbol.URI)
-		}
-
-		b.WriteString(strings.Join(parts, "\t"))
-		b.WriteString("\n")
-		writeLSPSymbols(b, symbol.Children, depth+1)
-	}
-}
-
-func formatLSPRange(r lsp.Range) string {
-	return fmt.Sprintf("%d:%d-%d:%d", r.Start.Line, r.Start.Character, r.End.Line, r.End.Character)
 }
 
 func runContextPack(path string, maxTokens int, model string) error {
@@ -844,7 +803,7 @@ func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {
 		return "", true, nil
 	case "memory", "mem":
 		return retrieval.SourceMemory, false, nil
-	case "file", "files":
+	case "file", string(codeIntelTextFiles):
 		return retrieval.SourceFile, false, nil
 	case retrievalSourceSession, "sessions":
 		return retrieval.SourceSession, false, nil

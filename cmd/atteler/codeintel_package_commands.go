@@ -1,32 +1,10 @@
 package main
 
 import (
-	"fmt"
-	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/codeintel"
 )
-
-func listCodeFiles(root string) error {
-	idx, err := codeintel.IndexDir(root)
-	if err != nil {
-		return fmt.Errorf("code files: index %s: %w", root, err)
-	}
-
-	files := summarizeCodeFiles(root, idx)
-	if len(files) == 0 {
-		fmt.Println("No Go files found.")
-		return nil
-	}
-
-	for i := range files {
-		fmt.Println(formatCodePackageFile(files[i]))
-	}
-
-	return nil
-}
 
 func summarizeCodeFiles(root string, idx codeintel.Index) []codePackageFile {
 	files := make([]codePackageFile, 0, len(idx.Files))
@@ -40,28 +18,9 @@ func summarizeCodeFiles(root string, idx codeintel.Index) []codePackageFile {
 		})
 	}
 
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	sortCodePackageFiles(files)
 
 	return files
-}
-
-func listCodePackageFiles(root, name string) error {
-	idx, err := codeintel.IndexDir(root)
-	if err != nil {
-		return fmt.Errorf("code package: index %s: %w", root, err)
-	}
-
-	files := summarizeCodePackageFiles(root, idx, name)
-	if len(files) == 0 {
-		fmt.Println("No Go package files found.")
-		return nil
-	}
-
-	for i := range files {
-		fmt.Println(formatCodePackageFile(files[i]))
-	}
-
-	return nil
 }
 
 type codePackageFile struct {
@@ -71,16 +30,46 @@ type codePackageFile struct {
 	Imports int
 }
 
-func summarizeCodePackageFiles(root string, idx codeintel.Index, name string) []codePackageFile {
-	name = strings.TrimSpace(name)
-	files := make([]codePackageFile, 0)
+func sortCodePackageFiles(files []codePackageFile) {
+	sortCodeIntelByNameAsc(files, func(file codePackageFile) string { return file.Path })
+}
+
+func codeFilePackagesByPath(idx codeintel.Index) map[string]string {
+	packagesByFile := make(map[string]string, len(idx.Files))
+	for i := range idx.Files {
+		packagesByFile[idx.Files[i].Path] = idx.Files[i].Package
+	}
+
+	return packagesByFile
+}
+
+func codePackageFileSet(idx codeintel.Index, packageName string) map[string]struct{} {
+	packageName = strings.TrimSpace(packageName)
+	if packageName == "" {
+		return nil
+	}
+
+	files := make(map[string]struct{})
 
 	for i := range idx.Files {
-		file := idx.Files[i]
-		if file.Package != name {
-			continue
+		if idx.Files[i].Package == packageName {
+			files[idx.Files[i].Path] = struct{}{}
 		}
+	}
 
+	if len(files) == 0 {
+		return nil
+	}
+
+	return files
+}
+
+func summarizeCodePackageFiles(root string, idx codeintel.Index, name string) []codePackageFile {
+	matches := codePackageFiles(idx, name)
+	files := make([]codePackageFile, 0, len(matches))
+
+	for i := range matches {
+		file := matches[i]
 		files = append(files, codePackageFile{
 			Path:    relativeCodePath(root, file.Path),
 			Package: file.Package,
@@ -89,38 +78,15 @@ func summarizeCodePackageFiles(root string, idx codeintel.Index, name string) []
 		})
 	}
 
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	sortCodePackageFiles(files)
 
 	return files
-}
-
-func formatCodePackageFile(file codePackageFile) string {
-	return "path=" + file.Path + "	package=" + file.Package + "	symbols=" + strconv.Itoa(file.Symbols) + "	imports=" + strconv.Itoa(file.Imports)
 }
 
 type codePackageSummary struct {
 	Name    string
 	Files   int
 	Symbols int
-}
-
-func listCodePackages(root string) error {
-	idx, err := codeintel.IndexDir(root)
-	if err != nil {
-		return fmt.Errorf("code packages: index %s: %w", root, err)
-	}
-
-	packages := summarizeCodePackages(idx)
-	if len(packages) == 0 {
-		fmt.Println("No Go packages found.")
-		return nil
-	}
-
-	for i := range packages {
-		fmt.Println(formatCodePackageSummary(packages[i]))
-	}
-
-	return nil
 }
 
 func summarizeCodePackages(idx codeintel.Index) []codePackageSummary {
@@ -147,17 +113,10 @@ func summarizeCodePackages(idx codeintel.Index) []codePackageSummary {
 		packages = append(packages, *summary)
 	}
 
-	sort.Slice(packages, func(i, j int) bool {
-		if packages[i].Name != packages[j].Name {
-			return packages[i].Name < packages[j].Name
-		}
-
-		return packages[i].Files < packages[j].Files
-	})
+	sortCodeIntelByNameAscCountAsc(packages,
+		func(summary codePackageSummary) string { return summary.Name },
+		func(summary codePackageSummary) int { return summary.Files },
+	)
 
 	return packages
-}
-
-func formatCodePackageSummary(summary codePackageSummary) string {
-	return "package=" + summary.Name + "	files=" + strconv.Itoa(summary.Files) + "	symbols=" + strconv.Itoa(summary.Symbols)
 }

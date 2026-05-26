@@ -1,0 +1,3 @@
+path=runner.go	package=main	imports=0	symbols=1
+symbols:
+  - Run	kind=func	line=3

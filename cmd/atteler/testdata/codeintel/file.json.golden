@@ -1,0 +1,24 @@
+{
+  "schema": "atteler.code_intel.v1",
+  "command": "code-file-path",
+  "query": {
+    "path": "runner.go"
+  },
+  "empty": false,
+  "files": [
+    {
+      "path": "runner.go",
+      "package": "main",
+      "import_count": 0,
+      "symbol_count": 1,
+      "symbols": [
+        {
+          "name": "Run",
+          "kind": "func",
+          "path": "runner.go",
+          "line": 3
+        }
+      ]
+    }
+  ]
+}

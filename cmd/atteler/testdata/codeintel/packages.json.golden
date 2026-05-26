@@ -1,0 +1,12 @@
+{
+  "schema": "atteler.code_intel.v1",
+  "command": "list-code-packages",
+  "empty": false,
+  "packages": [
+    {
+      "name": "main",
+      "files": 1,
+      "symbols": 3
+    }
+  ]
+}

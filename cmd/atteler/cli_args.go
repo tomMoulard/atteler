@@ -91,11 +91,23 @@ func translateDomainCommandArgs(prefix []string, domain cliHelpDomain, rest []st
 		// also natural prompt starters.  Only claim grouped routing when the
 		// command token is known; otherwise keep the legacy positional prompt
 		// path intact.
+		if strictUnknownDomainCommand(domain, rest[0]) {
+			return cliArgPlan{
+				Err: unknownDomainCommandError(domain, rest[0], rest[1]),
+			}
+		}
+
 		return cliArgPlan{Args: appendCLIArgs(prefix, rest...)}
 	}
 
 	if commandTailRequestsHelp(command, rest[2:]) {
 		return cliArgPlan{Help: true, HelpDomain: rest[0]}
+	}
+
+	if strictUnknownDomainCommand(domain, rest[0]) {
+		if unknownFlag, ok := firstUnknownFlagArg(rest[2:], fs, false); ok {
+			return cliArgPlan{Err: unknownDomainFlagError(domain, rest[0], unknownFlag)}
+		}
 	}
 
 	if commandMissingRequiredArgs(command, prefix, rest[2:], fs) {
@@ -107,9 +119,45 @@ func translateDomainCommandArgs(prefix []string, domain cliHelpDomain, rest []st
 	return cliArgPlan{Args: appendCLIArgs(prefix, commandArgsWithFlagSet(command, prefix, rest[2:], fs)...)}
 }
 
+func strictUnknownDomainCommand(domain cliHelpDomain, selector string) bool {
+	if domain.Name != codeIntelDomainName {
+		return false
+	}
+
+	selector = normalizeHelpName(selector)
+	switch selector {
+	case codeIntelDomainName, "codeintel", "code-intelligence":
+		return true
+	default:
+		return false
+	}
+}
+
+func unknownDomainCommandError(domain cliHelpDomain, selector, command string) error {
+	usageName := usageNameForDomainSelector(domain, selector)
+
+	return fmt.Errorf("unknown %s command %q; run `atteler help %s`", usageName, command, usageName)
+}
+
+func unknownDomainFlagError(domain cliHelpDomain, selector, flagArg string) error {
+	usageName := usageNameForDomainSelector(domain, selector)
+
+	return fmt.Errorf("unknown %s flag %q; run `atteler help %s`", usageName, flagArg, usageName)
+}
+
 func translateDomainFlagPrefixArgs(prefix []string, domain cliHelpDomain, rest []string, fs *flag.FlagSet) cliArgPlan {
 	if !knownFlagArg(rest[1], fs) {
+		if strictUnknownDomainCommand(domain, rest[0]) {
+			return cliArgPlan{Err: unknownDomainFlagError(domain, rest[0], rest[1])}
+		}
+
 		return cliArgPlan{Args: appendCLIArgs(prefix, rest...)}
+	}
+
+	if strictUnknownDomainCommand(domain, rest[0]) {
+		if unknownFlag, ok := firstUnknownFlagArg(rest[1:], fs, true); ok {
+			return cliArgPlan{Err: unknownDomainFlagError(domain, rest[0], unknownFlag)}
+		}
 	}
 
 	if tailRequestsHelpFlag(rest[1:]) {
@@ -118,14 +166,123 @@ func translateDomainFlagPrefixArgs(prefix []string, domain cliHelpDomain, rest [
 
 	scopedPrefix, commandRest := splitLeadingFlagArgs(rest[1:], fs)
 	if len(commandRest) == 0 {
+		if strictUnknownDomainCommand(domain, rest[0]) && !codeIntelFlagPrefixSelectsCommand(scopedPrefix, fs) {
+			return cliArgPlan{Err: missingDomainCommandError(domain, rest[0])}
+		}
+
 		return cliArgPlan{Args: appendCLIArgs(prefix, rest[1:]...)}
 	}
 
 	if _, ok := lookupDomainCommand(domain, commandRest[0]); !ok {
+		if strictUnknownDomainCommand(domain, rest[0]) {
+			return cliArgPlan{Err: unknownDomainCommandError(domain, rest[0], commandRest[0])}
+		}
+
 		return cliArgPlan{Args: appendCLIArgs(prefix, rest...)}
 	}
 
 	return translateDomainCommandArgs(appendCLIArgs(prefix, scopedPrefix...), domain, append([]string{rest[0]}, commandRest...), fs)
+}
+
+func missingDomainCommandError(domain cliHelpDomain, selector string) error {
+	usageName := usageNameForDomainSelector(domain, selector)
+
+	return fmt.Errorf("%s requires a command; run `atteler help %s`", usageName, usageName)
+}
+
+func firstUnknownFlagArg(args []string, fs *flag.FlagSet, stopAtPositional bool) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || isHelpFlag(arg) {
+			return "", false
+		}
+
+		if !isFlagArg(arg) {
+			if stopAtPositional {
+				return "", false
+			}
+
+			continue
+		}
+
+		if !knownFlagArg(arg, fs) {
+			return arg, true
+		}
+
+		if flagConsumesSeparateValue(arg, fs) && i+1 < len(args) {
+			i++
+		}
+	}
+
+	return "", false
+}
+
+func codeIntelFlagPrefixSelectsCommand(args []string, fs *flag.FlagSet) bool {
+	selectors := codeIntelSelectorFlagSet()
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		name := flagName(arg)
+
+		if !selectors["--"+name] {
+			i = skipFlagValueIndex(args, i, fs)
+
+			continue
+		}
+
+		selected, nextIndex := codeIntelSelectorArgSelectsCommand(args, i, fs)
+		if selected {
+			return true
+		}
+
+		i = nextIndex
+	}
+
+	return false
+}
+
+func skipFlagValueIndex(args []string, index int, fs *flag.FlagSet) int {
+	if flagConsumesSeparateValue(args[index], fs) && index+1 < len(args) {
+		return index + 1
+	}
+
+	return index
+}
+
+func codeIntelSelectorArgSelectsCommand(args []string, index int, fs *flag.FlagSet) (selected bool, nextIndex int) {
+	arg := args[index]
+	name := flagName(arg)
+
+	consumesValue := flagConsumesSeparateValue(arg, fs)
+	if !consumesValue {
+		return flagArgsEnableBool([]string{arg}, name), index
+	}
+
+	if _, value, hasValue := strings.Cut(arg, "="); hasValue {
+		return strings.TrimSpace(value) != "", index
+	}
+
+	if index+1 >= len(args) {
+		return true, index
+	}
+
+	if strings.TrimSpace(args[index+1]) == "" {
+		return false, index + 1
+	}
+
+	return true, index
+}
+
+func codeIntelSelectorFlagSet() map[string]bool {
+	selectors := make(map[string]bool, len(codeIntelCommandDescriptors())+2)
+	for _, descriptor := range codeIntelCommandDescriptors() {
+		selectors[descriptor.LegacyFlag] = true
+	}
+
+	selectors["--lsp-symbols"] = true
+	selectors["--lsp-workspace-symbols"] = true
+
+	return selectors
 }
 
 func commandTailRequestsHelp(command cliCommandAlias, tail []string) bool {
@@ -464,14 +621,23 @@ func appendCLIArgs(prefix []string, args ...string) []string {
 func lookupDomainCommand(domain cliHelpDomain, name string) (cliCommandAlias, bool) {
 	name = normalizeHelpName(name)
 
-	for _, command := range domain.Commands {
+	if command, ok := lookupDomainCommandAlias(domain.Commands, name); ok {
+		return command, true
+	}
+
+	return lookupDomainCommandAlias(domain.RoutingCommands, name)
+}
+
+func lookupDomainCommandAlias(commands []cliCommandAlias, name string) (cliCommandAlias, bool) {
+	for i := range commands {
+		command := &commands[i]
 		if normalizeHelpName(command.Name) == name {
-			return command, true
+			return *command, true
 		}
 
 		for _, alias := range command.Aliases {
 			if normalizeHelpName(alias) == name {
-				return command, true
+				return *command, true
 			}
 		}
 	}
@@ -482,7 +648,8 @@ func lookupDomainCommand(domain cliHelpDomain, name string) (cliCommandAlias, bo
 func lookupHelpDomain(name string) (cliHelpDomain, bool) {
 	name = normalizeHelpName(name)
 
-	for _, domain := range cliHelpDomains {
+	for i := range cliHelpDomains {
+		domain := cliHelpDomains[i]
 		if normalizeHelpName(domain.Name) == name {
 			return domain, true
 		}

@@ -1,0 +1,13 @@
+{
+  "schema": "atteler.code_intel.v1",
+  "command": "code-impact-target",
+  "query": {
+    "target": "context"
+  },
+  "empty": false,
+  "impact_set": [
+    {
+      "path": "runner.go"
+    }
+  ]
+}

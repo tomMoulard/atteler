@@ -222,6 +222,16 @@ func TestREADME_CLIDocumentationDefersToGeneratedHelp(t *testing.T) {
 	assert.Contains(t, readme, "atteler help --code-summary")
 	assert.Contains(t, readme, "Domain help is rendered from structured command metadata")
 	assert.Contains(t, readme, "covered by routing tests")
+	assert.Contains(t, readme, "atteler config commands-json")
+	assert.Contains(t, readme, "atteler config commands-docs")
+	assert.Contains(t, readme, "Code-intel")
+	assert.Contains(t, readme, "generated text formats, JSON fields")
+	assert.Contains(t, readme, "concrete examples")
+	assert.Contains(t, readme, "Code-intelligence commands accept `--json`")
+	assert.Contains(t, readme, "stable `"+codeIntelSchemaVersion+"` schema")
+	assert.Contains(t, readme, "typed response contract")
+	assert.Contains(t, readme, "`--code-limit` and `--code-offset`")
+	assert.Contains(t, readme, "pagination metadata")
 	assert.Contains(t, readme, "No legacy flag is deprecated")
 
 	for _, domain := range []string{
@@ -596,7 +606,8 @@ func TestLegacyHelpIncludesEveryRegisteredFlag(t *testing.T) {
 func acceptedHelpDomainNames() map[string]bool {
 	names := make(map[string]bool, len(cliHelpDomains))
 
-	for _, domain := range cliHelpDomains {
+	for i := range cliHelpDomains {
+		domain := &cliHelpDomains[i]
 		names[domain.Name] = true
 	}
 
@@ -622,6 +633,10 @@ func TestPrintCLIHelp_DomainIncludesCommandsExamplesAndGeneratedFlags(t *testing
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.Bool("code-summary", false, "print compact Go code index and import graph counts and exit")
 	fs.String("code-symbol", "", "find Go symbols by exact name in the current repository and exit")
+	fs.Int("code-limit", 0, "maximum code-intel rows to emit for list-style results")
+	fs.Int("code-offset", 0, "number of code-intel rows to skip before emitting list-style results")
+	fs.Bool("json", false, "emit JSON for commands with structured output, such as code-intel")
+	fs.String("output", "text", "one-shot output format: text or json")
 	fs.Bool("review-scan", false, "scan the current repository and print a structured review report and exit")
 
 	var buf bytes.Buffer
@@ -631,10 +646,15 @@ func TestPrintCLIHelp_DomainIncludesCommandsExamplesAndGeneratedFlags(t *testing
 
 	out := buf.String()
 	assert.Contains(t, out, "Code intelligence")
+	assert.Contains(t, out, "--json or --output json")
 	assert.Contains(t, out, "summary")
 	assert.Contains(t, out, "atteler code-intel summary")
 	assert.Contains(t, out, "--code-summary")
 	assert.Contains(t, out, "--code-symbol")
+	assert.Contains(t, out, "--code-limit")
+	assert.Contains(t, out, "--code-offset")
+	assert.Contains(t, out, "--json")
+	assert.Contains(t, out, "--output")
 	assert.NotContains(t, out, "--review-scan")
 }
 
@@ -801,6 +821,8 @@ func TestFlagDomain_CoversAcceptanceDomains(t *testing.T) {
 		"memory-include-session-messages":    "memory/rag",
 		"memory-include-worktree-metadata":   "memory/rag",
 		"code-symbol-prefix":                 "code-intel",
+		"code-limit":                         "code-intel",
+		"code-offset":                        "code-intel",
 		"review-plan":                        "review",
 		"watch-scan":                         "watch",
 		"run-plugin":                         "plugins",
@@ -983,7 +1005,8 @@ func assertCommandLegacyPrefix(t *testing.T, command cliCommandAlias, args []str
 }
 
 func firstLegacyAlias(domain cliHelpDomain) string {
-	for _, command := range domain.Commands {
+	for i := range domain.Commands {
+		command := &domain.Commands[i]
 		if len(command.Legacy) > 0 {
 			return command.Legacy[0]
 		}
@@ -1038,6 +1061,8 @@ func newCLIOptionsAndFlagSetForTest(t *testing.T) (*cliOptions, *flag.FlagSet) {
 	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
 	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
 	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
+	opts.codeLimit = positiveIntFlag{name: "code-limit"}
+	opts.codeOffset = nonNegativeIntFlag{name: "code-offset"}
 	opts.seed = nonNegativeIntFlag{name: "seed"}
 	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
 	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}

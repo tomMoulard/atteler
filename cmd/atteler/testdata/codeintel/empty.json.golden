@@ -1,0 +1,9 @@
+{
+  "schema": "atteler.code_intel.v1",
+  "command": "code-symbol-name",
+  "query": {
+    "symbol": "Missing"
+  },
+  "empty": true,
+  "message": "No code-intel results found."
+}

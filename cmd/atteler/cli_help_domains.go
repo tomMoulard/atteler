@@ -19,8 +19,12 @@ type cliCommandAlias struct {
 	Name             string
 	Summary          string
 	Args             string
+	TextOutput       string
+	JSONSchema       string
 	Legacy           []string
 	Aliases          []string
+	Examples         []string
+	JSONFields       []string
 	JoinArgs         bool
 	PromptAfterValue bool
 	PromptFromStdin  bool
@@ -31,12 +35,13 @@ type cliCommandAlias struct {
 }
 
 type cliHelpDomain struct {
-	Name     string
-	Title    string
-	Summary  string
-	Aliases  []string
-	Commands []cliCommandAlias
-	Examples []string
+	Name            string
+	Title           string
+	Summary         string
+	Aliases         []string
+	Commands        []cliCommandAlias
+	RoutingCommands []cliCommandAlias
+	Examples        []string
 }
 
 //nolint:govet // field order keeps the result fields grouped for readability.
@@ -197,41 +202,16 @@ var cliHelpDomains = []cliHelpDomain{
 		},
 	},
 	{
-		Name:    "code-intel",
-		Title:   "Code intelligence",
-		Summary: "Run Go code index, import graph, package/file/symbol, impact, and optional LSP queries without an LLM call.",
-		Aliases: []string{"code", "codeintel", "code-intelligence"},
-		Commands: []cliCommandAlias{
-			{Name: "summary", Summary: "print compact Go code index counts", Legacy: []string{"--code-summary"}},
-			{Name: "files", Summary: "list Go files with package/import/symbol counts", Legacy: []string{"--code-files"}},
-			{Name: "packages", Summary: "list Go packages with file/symbol counts", Legacy: []string{"--code-packages"}},
-			{Name: "package", Args: "<package>", Summary: "list files and symbol counts for one package", Legacy: []string{"--code-package"}},
-			{Name: "package-imports", Args: "<package>", Summary: "list import usage counts for one package", Legacy: []string{"--code-package-imports"}},
-			{Name: "package-symbols", Args: "<package>", Summary: "list symbol kind counts for one package", Legacy: []string{"--code-package-symbols"}},
-			{Name: "file", Args: "<path>", Summary: "print package, symbols, and imports for one file", Legacy: []string{"--code-file"}},
-			{Name: "file-imports", Args: "<path>", Summary: "list imports for one Go file", Legacy: []string{"--code-file-imports"}},
-			{Name: "file-symbols", Args: "<path>", Summary: "list symbols for one Go file", Legacy: []string{"--code-file-symbols"}},
-			{Name: "symbol", Args: "<name>", Summary: "find Go symbols by exact name", Legacy: []string{"--code-symbol"}},
-			{Name: "symbol-prefix", Args: "<prefix>", Summary: "find Go symbols by prefix", Legacy: []string{"--code-symbol-prefix"}},
-			{Name: "symbol-kind", Args: "<kind>", Summary: "list Go symbols by kind", Legacy: []string{"--code-symbol-kind"}},
-			{Name: "imports", Summary: "list Go import edges", Legacy: []string{"--code-imports"}},
-			{Name: "import-summary", Summary: "list import paths with usage counts", Legacy: []string{"--code-import-summary"}},
-			{Name: "import-path", Args: "<path>", Summary: "list files importing one exact path", Legacy: []string{"--code-import-path"}},
-			{Name: "import-prefix", Args: "<prefix>", Summary: "list files importing paths with one prefix", Legacy: []string{"--code-import-prefix"}},
-			{Name: "layers", Summary: "list topological Go import graph layers", Legacy: []string{"--code-layers"}},
-			{Name: "cycles", Summary: "list Go import graph cycles", Legacy: []string{"--code-cycles"}},
-			{Name: "impact", Args: "<path>", Summary: "list files impacted by an import path", Legacy: []string{"--code-impact"}},
-			{Name: "reachable", Args: "<path>", Summary: "list reachable import graph nodes", Legacy: []string{"--code-reachable"}},
-			{Name: "deps", Args: "<path>", Summary: "list direct import graph dependencies", Legacy: []string{"--code-deps"}},
-			{Name: "rdeps", Args: "<path>", Summary: "list direct reverse dependencies", Legacy: []string{"--code-rdeps"}},
-			{Name: "lsp-symbols", Summary: "request document symbols from an external LSP", Legacy: []string{"--lsp-symbols"}},
-			{Name: "lsp-workspace", Args: "<query>", Summary: "request workspace symbols from an external LSP", Legacy: []string{"--lsp-workspace-symbols"}},
-		},
-		Examples: []string{
-			`atteler code-intel summary`,
-			`atteler code-intel symbol NewRegistry`,
-			`atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/`,
-		},
+		Name:     codeIntelDomainName,
+		Title:    "Code intelligence",
+		Summary:  "Run Go code index, import graph, package/file/symbol, impact, and optional LSP queries without an LLM call; add --json or --output json for the stable schema.",
+		Aliases:  []string{"code", "codeintel", "code-intelligence"},
+		Commands: focusedCodeIntelDomainCommandAliases(),
+		// Keep human help focused while accepting every descriptor-generated
+		// query as a grouped command. The full generated contract is exposed
+		// through `atteler config commands-docs`.
+		RoutingCommands: codeIntelDomainCommandAliases(),
+		Examples:        codeIntelDomainExamples(),
 	},
 	{
 		Name:    "review",

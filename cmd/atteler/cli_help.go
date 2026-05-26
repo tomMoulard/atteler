@@ -11,7 +11,10 @@ import (
 	"strings"
 )
 
-const noLegacyDeprecationNotice = "No legacy flag is deprecated in this release."
+const (
+	noLegacyDeprecationNotice = "No legacy flag is deprecated in this release."
+	outputFlagName            = "output"
+)
 
 func groupedUsage() {
 	printTopLevelHelp(os.Stderr)
@@ -53,7 +56,8 @@ func printTopLevelHelp(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Domains:")
 
-	for _, domain := range cliHelpDomains {
+	for i := range cliHelpDomains {
+		domain := &cliHelpDomains[i]
 		fmt.Fprintf(w, "  %-14s %s\n", domain.Name, domain.Summary)
 	}
 
@@ -82,14 +86,15 @@ func printDomainHelp(w io.Writer, fs *flag.FlagSet, domain cliHelpDomain, reques
 	}
 
 	fmt.Fprintln(w, "\nCommands:")
-	for _, command := range domain.Commands {
+	for i := range domain.Commands {
+		command := &domain.Commands[i]
 		name := command.Name
 		if command.Args != "" {
 			name += " " + command.Args
 		}
 
 		summary := command.Summary
-		if aliases := commandAliasSummary(command); aliases != "" {
+		if aliases := commandAliasSummary(*command); aliases != "" {
 			summary += " (" + aliases + ")"
 		}
 
@@ -250,13 +255,21 @@ func flagNamesForDomain(fs *flag.FlagSet, domainName string) []string {
 
 	var names []string
 	fs.VisitAll(func(f *flag.Flag) {
-		if flagDomain(f.Name) == domainName {
+		if flagBelongsToDomain(f.Name, domainName) {
 			names = append(names, "--"+f.Name)
 		}
 	})
 	sort.Strings(names)
 
 	return names
+}
+
+func flagBelongsToDomain(flagName, domainName string) bool {
+	if flagDomain(flagName) == domainName {
+		return true
+	}
+
+	return domainName == codeIntelDomainName && flagName == outputFlagName
 }
 
 func printWrappedList(w io.Writer, values []string, indent string, width int) {
@@ -302,7 +315,7 @@ func lookupFlagDomain(name string) (string, bool) {
 	name = normalizeHelpName(name)
 
 	switch {
-	case name == "once" || name == "stdin" || name == "output" || name == "headless" ||
+	case name == "once" || name == "stdin" || name == outputFlagName || name == "headless" ||
 		name == "headless-id" || name == "headless-private-log" || name == "list-headless" || name == "recover-headless" ||
 		name == "status-headless" || name == "cancel-headless" || name == "stream-headless" ||
 		name == sessionCommandName || name == "session-id" || name == "session-dir" ||
@@ -341,8 +354,8 @@ func lookupFlagDomain(name string) (string, bool) {
 		strings.HasPrefix(name, "vector-") || strings.HasPrefix(name, "git-history-") ||
 		strings.HasPrefix(name, "context-pack-"):
 		return "memory/rag", true
-	case strings.HasPrefix(name, "code-") || strings.HasPrefix(name, "lsp-"):
-		return "code-intel", true
+	case name == "json" || strings.HasPrefix(name, "code-") || strings.HasPrefix(name, "lsp-"):
+		return codeIntelDomainName, true
 	case strings.HasPrefix(name, "review-"):
 		return "review", true
 	case strings.HasPrefix(name, "watch-"):
