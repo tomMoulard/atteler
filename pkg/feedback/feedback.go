@@ -584,7 +584,8 @@ func attachFixtureProofs(proposals []Proposal, artifacts []session.Artifact, lat
 		return
 	}
 
-	for _, artifact := range artifacts {
+	for i := range artifacts {
+		artifact := &artifacts[i]
 		if !isPassingFixture(artifact) {
 			continue
 		}
@@ -618,11 +619,11 @@ func attachFixtureProofs(proposals []Proposal, artifacts []session.Artifact, lat
 	}
 }
 
-func artifactIsAfterSignal(artifact session.Artifact, latestSignal time.Time) bool {
+func artifactIsAfterSignal(artifact *session.Artifact, latestSignal time.Time) bool {
 	return latestSignal.IsZero() || artifact.CreatedAt.IsZero() || !artifact.CreatedAt.Before(latestSignal)
 }
 
-func isPassingFixture(artifact session.Artifact) bool {
+func isPassingFixture(artifact *session.Artifact) bool {
 	kind := strings.ToLower(strings.TrimSpace(artifact.Kind))
 	if kind == "" {
 		return false
@@ -651,7 +652,7 @@ func positiveProofText(value string) bool {
 	return false
 }
 
-func fixtureVerificationRecord(artifact session.Artifact) VerificationRecord {
+func fixtureVerificationRecord(artifact *session.Artifact) VerificationRecord {
 	return VerificationRecord{
 		Kind:      VerificationKindFixture,
 		Phase:     VerificationPhaseAfter,

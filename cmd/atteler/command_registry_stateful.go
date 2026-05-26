@@ -225,8 +225,8 @@ func statefulSessionWriteCommandSet() []statefulSessionCommand[sessionWriteComma
 				return recordEvaluationDetails(s.sessionStore, s.sessionState, evaluation)
 			}),
 		statefulSessionCmd("record-artifact", func(input sessionWriteCommandInput) bool { return input.RecordArtifact != "" },
-			func(_ context.Context, input sessionWriteCommandInput, s appState) error {
-				return recordArtifact(s.sessionStore, s.sessionState, input.RecordArtifact, input.ArtifactKind, input.ArtifactSummary, s.selectedAgent)
+			func(ctx context.Context, input sessionWriteCommandInput, s appState) error {
+				return recordArtifact(ctx, s.sessionStore, s.sessionState, s.cwd, input.RecordArtifact, input.ArtifactKind, input.ArtifactLogicalPath, input.ArtifactReviewStatus, input.ArtifactSummary, s.selectedAgent)
 			}),
 		statefulSessionCmd("feedback-apply", func(input sessionWriteCommandInput) bool { return input.FeedbackApplyConfig != "" },
 			func(_ context.Context, input sessionWriteCommandInput, s appState) error {
@@ -319,7 +319,7 @@ func statefulRetrievalCommands() []command {
 			tier:  tierStateful,
 			match: func(o cliOptions) bool { return o.mergeArtifactsPath != "" },
 			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
-				return mergeArtifacts(ctx, s, o.mergeArtifactsPath, o.mergeArtifactMaxBytes.value)
+				return mergeArtifacts(ctx, s, o.mergeArtifactsPath, o.mergeArtifactsFormat, o.mergeArtifactMaxBytes.value)
 			},
 		},
 	}

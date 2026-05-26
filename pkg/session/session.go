@@ -91,12 +91,28 @@ type AgentEvaluation struct {
 }
 
 // Artifact records a useful file or research artifact produced during a session.
+//
+//nolint:govet // Field order keeps artifact identity and provenance grouped in serialized sessions.
 type Artifact struct {
-	CreatedAt   time.Time `json:"created_at" yaml:"created_at"`
-	Path        string    `json:"path" yaml:"path"`
-	Kind        string    `json:"kind" yaml:"kind"`
-	Summary     string    `json:"summary,omitempty" yaml:"summary,omitempty"`
-	SourceAgent string    `json:"source_agent,omitempty" yaml:"source_agent,omitempty"`
+	Path            string     `json:"path" yaml:"path"`
+	LogicalPath     string     `json:"logical_path,omitempty" yaml:"logical_path,omitempty"`
+	Kind            string     `json:"kind" yaml:"kind"`
+	Summary         string     `json:"summary,omitempty" yaml:"summary,omitempty"`
+	SourceAgent     string     `json:"source_agent,omitempty" yaml:"source_agent,omitempty"`
+	SourceSessionID string     `json:"source_session_id,omitempty" yaml:"source_session_id,omitempty"`
+	SourceCommand   string     `json:"source_command,omitempty" yaml:"source_command,omitempty"`
+	SourceTool      string     `json:"source_tool,omitempty" yaml:"source_tool,omitempty"`
+	SourceCommit    string     `json:"source_commit,omitempty" yaml:"source_commit,omitempty"`
+	WorktreePath    string     `json:"worktree_path,omitempty" yaml:"worktree_path,omitempty"`
+	WorktreeBranch  string     `json:"worktree_branch,omitempty" yaml:"worktree_branch,omitempty"`
+	WorktreeBase    string     `json:"worktree_base,omitempty" yaml:"worktree_base,omitempty"`
+	SHA256          string     `json:"sha256,omitempty" yaml:"sha256,omitempty"`
+	ReviewStatus    string     `json:"review_status,omitempty" yaml:"review_status,omitempty"`
+	CreatedAt       time.Time  `json:"created_at" yaml:"created_at"`
+	ConsumedAt      *time.Time `json:"consumed_at,omitempty" yaml:"consumed_at,omitempty"`
+	SizeBytes       int64      `json:"size_bytes,omitempty" yaml:"size_bytes,omitempty"`
+	SourceTurn      int        `json:"source_turn,omitempty" yaml:"source_turn,omitempty"`
+	WorktreeDirty   bool       `json:"worktree_dirty,omitempty" yaml:"worktree_dirty,omitempty"`
 }
 
 // Store reads and writes sessions under a directory.
@@ -519,24 +535,112 @@ func normalizeEvaluationSourceName(source string) string {
 	}
 }
 
-// RecordArtifact appends a session artifact when the path and kind are valid.
-func (s *Session) RecordArtifact(path, kind, summary, sourceAgent string) bool {
-	path = strings.TrimSpace(path)
+// AddArtifact appends a populated session artifact when the path and kind are valid.
+func (s *Session) AddArtifact(artifact Artifact) bool {
+	path := strings.TrimSpace(artifact.Path)
 
-	kind = strings.TrimSpace(kind)
+	kind := strings.TrimSpace(artifact.Kind)
 	if path == "" || kind == "" {
 		return false
 	}
 
-	s.Artifacts = append(s.Artifacts, Artifact{
-		Path:        filepath.Clean(path),
-		Kind:        kind,
-		Summary:     strings.TrimSpace(summary),
-		SourceAgent: strings.TrimSpace(sourceAgent),
-		CreatedAt:   time.Now().UTC(),
-	})
+	artifact.Path = filepath.Clean(path)
+	artifact.Kind = kind
+	artifact.Summary = strings.TrimSpace(artifact.Summary)
+	artifact.SourceAgent = strings.TrimSpace(artifact.SourceAgent)
+	artifact.SourceSessionID = strings.TrimSpace(artifact.SourceSessionID)
+	artifact.SourceCommand = strings.TrimSpace(artifact.SourceCommand)
+	artifact.SourceTool = strings.TrimSpace(artifact.SourceTool)
+	artifact.SourceCommit = strings.TrimSpace(artifact.SourceCommit)
+	artifact.WorktreePath = strings.TrimSpace(artifact.WorktreePath)
+	artifact.WorktreeBranch = strings.TrimSpace(artifact.WorktreeBranch)
+	artifact.WorktreeBase = strings.TrimSpace(artifact.WorktreeBase)
+	artifact.SHA256 = strings.ToLower(strings.TrimSpace(artifact.SHA256))
+	artifact.ReviewStatus = strings.TrimSpace(artifact.ReviewStatus)
+
+	if logicalPath := strings.TrimSpace(artifact.LogicalPath); logicalPath != "" {
+		artifact.LogicalPath = filepath.Clean(logicalPath)
+	} else {
+		artifact.LogicalPath = artifact.Path
+	}
+
+	if artifact.SourceSessionID == "" {
+		artifact.SourceSessionID = strings.TrimSpace(s.ID)
+	}
+
+	if artifact.SourceTurn == 0 && len(s.Messages) > 0 {
+		artifact.SourceTurn = len(s.Messages)
+	}
+
+	if artifact.CreatedAt.IsZero() {
+		artifact.CreatedAt = time.Now().UTC()
+	}
+
+	s.Artifacts = append(s.Artifacts, artifact)
 
 	return true
+}
+
+// MarkArtifactsConsumed records when artifacts were consumed by a downstream merge/export.
+func (s *Session) MarkArtifactsConsumed(paths []string, consumedAt time.Time) int {
+	if len(paths) == 0 {
+		return 0
+	}
+
+	if consumedAt.IsZero() {
+		consumedAt = time.Now().UTC()
+	} else {
+		consumedAt = consumedAt.UTC()
+	}
+
+	wanted := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		if normalized := normalizeArtifactPath(path); normalized != "" {
+			wanted[normalized] = struct{}{}
+		}
+	}
+
+	if len(wanted) == 0 {
+		return 0
+	}
+
+	marked := 0
+
+	for i := range s.Artifacts {
+		artifact := &s.Artifacts[i]
+		if _, ok := wanted[normalizeArtifactPath(artifact.Path)]; !ok {
+			continue
+		}
+
+		if artifact.ConsumedAt != nil && !artifact.ConsumedAt.IsZero() {
+			continue
+		}
+
+		copied := consumedAt
+		artifact.ConsumedAt = &copied
+		marked++
+	}
+
+	return marked
+}
+
+// RecordArtifact appends a session artifact when the path and kind are valid.
+func (s *Session) RecordArtifact(path, kind, summary, sourceAgent string) bool {
+	return s.AddArtifact(Artifact{
+		Path:        path,
+		Kind:        kind,
+		Summary:     summary,
+		SourceAgent: sourceAgent,
+	})
+}
+
+func normalizeArtifactPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+
+	return filepath.ToSlash(filepath.Clean(path))
 }
 
 func (s *Store) path(ref string) string {

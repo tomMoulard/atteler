@@ -229,6 +229,7 @@ type retrievalCommandInput struct {
 
 type mergeArtifactsCommandInput struct {
 	OutputPath string
+	Format     string
 	MaxBytes   int
 }
 
@@ -693,7 +694,11 @@ func retrievalCommandInputFromOptions(opts cliOptions) retrievalCommandInput {
 }
 
 func mergeArtifactsCommandInputFromOptions(opts cliOptions) mergeArtifactsCommandInput {
-	return mergeArtifactsCommandInput{OutputPath: opts.mergeArtifactsPath, MaxBytes: opts.mergeArtifactMaxBytes.value}
+	return mergeArtifactsCommandInput{
+		OutputPath: opts.mergeArtifactsPath,
+		Format:     opts.mergeArtifactsFormat,
+		MaxBytes:   opts.mergeArtifactMaxBytes.value,
+	}
 }
 
 func mergeWorktreeCommandInputFromOptions(opts cliOptions) mergeWorktreeCommandInput {

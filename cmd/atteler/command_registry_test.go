@@ -1232,6 +1232,8 @@ func TestCommandRegistry_SessionCommandInputsCopyOnlySessionFields(t *testing.T)
 		evaluationReference:   "run-1",
 		recordArtifact:        "artifact.md",
 		artifactKind:          "report",
+		artifactLogicalPath:   "docs/decision.md",
+		artifactReviewStatus:  "approved",
 		artifactSummary:       "summary",
 		feedbackApplyConfig:   "agents.yaml",
 		feedbackHistoryPath:   "history.json",
@@ -1265,6 +1267,8 @@ func TestCommandRegistry_SessionCommandInputsCopyOnlySessionFields(t *testing.T)
 	assert.Equal(t, 3, writeInput.EvaluationScore)
 	assert.Equal(t, "artifact.md", writeInput.RecordArtifact)
 	assert.Equal(t, "report", writeInput.ArtifactKind)
+	assert.Equal(t, "docs/decision.md", writeInput.ArtifactLogicalPath)
+	assert.Equal(t, "approved", writeInput.ArtifactReviewStatus)
 	assert.Equal(t, "summary", writeInput.ArtifactSummary)
 	assert.Equal(t, "agents.yaml", writeInput.FeedbackApplyConfig)
 	assert.Equal(t, "history.json", writeInput.FeedbackHistoryPath)

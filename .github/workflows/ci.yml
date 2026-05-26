@@ -18,28 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        shell: bash
-        run: |
-          set -euo pipefail
-          git init .
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --prune --no-recurse-submodules origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
-          git checkout --force "${GITHUB_SHA}"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
-        shell: bash
-        run: |
-          set -euo pipefail
-          go_version="$(awk '/^go / { print $2; exit }' go.mod)"
-          curl -fsSL "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" -o "${RUNNER_TEMP}/go.tgz"
-          sudo rm -rf /usr/local/go
-          sudo tar -C /usr/local -xzf "${RUNNER_TEMP}/go.tgz"
-          echo "/usr/local/go/bin" >> "${GITHUB_PATH}"
-          echo "$(/usr/local/go/bin/go env GOPATH)/bin" >> "${GITHUB_PATH}"
-          /usr/local/go/bin/go version
-
-      - name: Install GoReleaser
-        run: go install github.com/goreleaser/goreleaser/v2@latest
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
       - name: Tidy
         run: go mod tidy
@@ -63,7 +50,15 @@ jobs:
         run: make build
 
       - name: Check GoReleaser config
-        run: goreleaser check
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: check
 
       - name: Build GoReleaser snapshot
-        run: goreleaser release --snapshot --clean --skip=publish
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish

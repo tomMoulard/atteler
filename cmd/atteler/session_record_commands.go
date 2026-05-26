@@ -299,6 +299,38 @@ func formatArtifact(artifact session.Artifact) string {
 		parts = append(parts, "agent="+artifact.SourceAgent)
 	}
 
+	if artifact.LogicalPath != "" && artifact.LogicalPath != artifact.Path {
+		parts = append(parts, "logical_path="+artifact.LogicalPath)
+	}
+
+	if artifact.SourceSessionID != "" {
+		parts = append(parts, "session="+artifact.SourceSessionID)
+	}
+
+	if artifact.SourceTurn != 0 {
+		parts = append(parts, "turn="+strconv.Itoa(artifact.SourceTurn))
+	}
+
+	if artifact.SourceCommand != "" {
+		parts = append(parts, "command="+artifact.SourceCommand)
+	}
+
+	if artifact.SourceCommit != "" {
+		parts = append(parts, "commit="+artifact.SourceCommit)
+	}
+
+	if artifact.SHA256 != "" {
+		parts = append(parts, "sha256="+artifact.SHA256)
+	}
+
+	if artifact.SizeBytes != 0 {
+		parts = append(parts, "size="+strconv.FormatInt(artifact.SizeBytes, 10))
+	}
+
+	if artifact.ReviewStatus != "" {
+		parts = append(parts, "review="+artifact.ReviewStatus)
+	}
+
 	if artifact.Summary != "" {
 		parts = append(parts, "summary="+artifact.Summary)
 	}
@@ -306,7 +338,7 @@ func formatArtifact(artifact session.Artifact) string {
 	return strings.Join(parts, "	")
 }
 
-func mergeArtifacts(ctx context.Context, state appState, outputPath string, maxBytes int) error {
+func mergeArtifacts(ctx context.Context, state appState, outputPath, outputFormat string, maxBytes int) error {
 	if maxBytes == 0 {
 		maxBytes = int(watch.DefaultLargeFileBytes)
 	}
@@ -316,12 +348,26 @@ func mergeArtifacts(ctx context.Context, state appState, outputPath string, maxB
 		return fmt.Errorf("merge artifacts: %w", err)
 	}
 
-	for _, warning := range result.Warnings {
-		fmt.Fprintf(os.Stderr, "warning: artifact %s skipped: %s\n", warning.Path, warning.Reason)
+	consumedAt := time.Now().UTC()
+	result.MarkConsumedAt(consumedAt)
+
+	for i := range result.Warnings {
+		warning := &result.Warnings[i]
+		fmt.Fprintf(os.Stderr, "warning: artifact %s %s: %s\n", warning.Path, warning.Code, warning.Reason)
+	}
+
+	data, err := renderMergedArtifactOutput(result, outputFormat)
+	if err != nil {
+		return err
 	}
 
 	if strings.TrimSpace(outputPath) == "-" {
-		fmt.Print(result.Markdown)
+		if err := persistMergedArtifactConsumption(state.sessionStore, &state.sessionState, result.Entries, consumedAt); err != nil {
+			return err
+		}
+
+		fmt.Print(string(data))
+
 		return nil
 	}
 
@@ -329,25 +375,83 @@ func mergeArtifacts(ctx context.Context, state appState, outputPath string, maxB
 		return fmt.Errorf("merge artifacts: create output dir: %w", err)
 	}
 
-	if err := os.WriteFile(outputPath, []byte(result.Markdown), 0o600); err != nil {
+	if err := os.WriteFile(outputPath, data, 0o600); err != nil {
 		return fmt.Errorf("merge artifacts: write %s: %w", outputPath, err)
 	}
 
 	emitFileWriteWarning(ctx, state.hookRunner, state.sessionState, outputPath, state.selectedAgent, "merged-artifacts")
+
+	if err := persistMergedArtifactConsumption(state.sessionStore, &state.sessionState, result.Entries, consumedAt); err != nil {
+		return err
+	}
+
 	fmt.Println("Merged artifacts into " + outputPath)
 
 	return nil
 }
 
+func persistMergedArtifactConsumption(store *session.Store, sessionState *session.Session, entries []artifactmerge.Entry, consumedAt time.Time) error {
+	if store == nil || sessionState == nil || len(entries) == 0 {
+		return nil
+	}
+
+	paths := make([]string, 0, len(entries))
+	for i := range entries {
+		paths = append(paths, entries[i].Path)
+	}
+
+	if sessionState.MarkArtifactsConsumed(paths, consumedAt) == 0 {
+		return nil
+	}
+
+	if err := store.Save(*sessionState); err != nil {
+		return fmt.Errorf("merge artifacts: save consumed artifacts: %w", err)
+	}
+
+	return nil
+}
+
+func renderMergedArtifactOutput(result artifactmerge.Result, outputFormat string) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(outputFormat)) {
+	case "", "markdown", "md":
+		return []byte(result.Markdown), nil
+	case "json":
+		data, err := result.JSON()
+		if err != nil {
+			return nil, fmt.Errorf("merge artifacts: render json: %w", err)
+		}
+
+		return data, nil
+	default:
+		return nil, fmt.Errorf("merge artifacts: unsupported format %q", outputFormat)
+	}
+}
+
 func recordArtifact(
+	ctx context.Context,
 	store *session.Store,
 	sessionState session.Session,
+	cwd string,
 	path string,
 	kind string,
+	logicalPath string,
+	reviewStatus string,
 	summary string,
 	sourceAgent string,
 ) error {
-	if !sessionState.RecordArtifact(path, kind, summary, sourceAgent) {
+	artifact, err := artifactmerge.CaptureArtifact(ctx, cwd, sessionState, path, kind, summary, sourceAgent, artifactmerge.CaptureOptions{
+		MaxBytes:      watch.DefaultLargeFileBytes,
+		LogicalPath:   logicalPath,
+		SourceCommand: "record-artifact",
+		SourceTool:    "atteler",
+	})
+	if err != nil {
+		return fmt.Errorf("record artifact: %w", err)
+	}
+
+	artifact.ReviewStatus = strings.TrimSpace(reviewStatus)
+
+	if !sessionState.AddArtifact(artifact) {
 		return errors.New("record artifact: path and kind are required")
 	}
 

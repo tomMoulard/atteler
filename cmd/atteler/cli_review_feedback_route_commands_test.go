@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,7 @@ func TestMergeArtifactsWritesMarkdown(t *testing.T) {
 	}
 	assert.True(t, state.sessionState.RecordArtifact("research.md", "research", "notes", "reviewer"))
 
-	err := mergeArtifacts(t.Context(), state, outputPath, 1024)
+	err := mergeArtifacts(t.Context(), state, outputPath, "markdown", 1024)
 
 	require.NoError(t, err)
 	data, err := os.ReadFile(outputPath)
@@ -52,6 +53,68 @@ func TestMergeArtifactsWritesMarkdown(t *testing.T) {
 	assert.Contains(t, out, "# Merged Artifacts")
 	assert.Contains(t, out, "## research.md")
 	assert.Contains(t, out, "research notes")
+}
+
+func TestMergeArtifactsWritesJSONBundle(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "research.md")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("research notes"), 0o600))
+
+	outputPath := filepath.Join(dir, "merged.json")
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	sessionState := session.New("gpt-test", nil)
+	assert.True(t, sessionState.RecordArtifact("research.md", "research", "notes", "reviewer"))
+	require.NoError(t, store.Save(sessionState))
+
+	state := appState{
+		cwd:           dir,
+		sessionStore:  store,
+		sessionState:  sessionState,
+		selectedAgent: "reviewer",
+	}
+
+	err := mergeArtifacts(t.Context(), state, outputPath, "json", 1024)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+
+	var out struct {
+		Entries []struct {
+			Path       string `json:"path"`
+			SHA256     string `json:"sha256"`
+			Content    string `json:"content"`
+			ConsumedAt string `json:"consumed_at"`
+		} `json:"entries"`
+		SchemaVersion int `json:"schema_version"`
+		Summary       struct {
+			InputCount    int `json:"input_count"`
+			IncludedCount int `json:"included_count"`
+			SkippedCount  int `json:"skipped_count"`
+			WarningCount  int `json:"warning_count"`
+		} `json:"summary"`
+	}
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.Equal(t, 1, out.SchemaVersion)
+	assert.Equal(t, 1, out.Summary.InputCount)
+	assert.Equal(t, 1, out.Summary.IncludedCount)
+	assert.Zero(t, out.Summary.SkippedCount)
+	assert.Equal(t, 1, out.Summary.WarningCount)
+	require.Len(t, out.Entries, 1)
+	assert.Equal(t, "research.md", out.Entries[0].Path)
+	assert.NotEmpty(t, out.Entries[0].SHA256)
+	assert.Equal(t, "research notes", out.Entries[0].Content)
+	assert.NotEmpty(t, out.Entries[0].ConsumedAt)
+
+	loaded, err := store.Load(sessionState.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.Artifacts, 1)
+	require.NotNil(t, loaded.Artifacts[0].ConsumedAt)
+	jsonConsumedAt, err := time.Parse(time.RFC3339Nano, out.Entries[0].ConsumedAt)
+	require.NoError(t, err)
+	assert.True(t, loaded.Artifacts[0].ConsumedAt.Equal(jsonConsumedAt))
 }
 
 func TestFormatReviewReport(t *testing.T) {
