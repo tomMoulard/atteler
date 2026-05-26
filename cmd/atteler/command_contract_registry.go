@@ -99,7 +99,7 @@ func inlineCommandContractsByName() map[string]commandContract {
 			withExamples("atteler config version"),
 		),
 		"validate-config": commandContractFor(
-			"validate merged YAML/JSON config",
+			"validate merged YAML/JSON config and importer warnings",
 			[]string{"--validate-config"},
 			[]string{commandEffectConfigRead, commandEffectUserOutput},
 			[]string{commandOutputText},

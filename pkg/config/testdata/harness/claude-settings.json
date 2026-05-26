@@ -1,0 +1,8 @@
+{
+  "model": "claude-sonnet-4-20250514",
+  "apiBase": "https://anthropic.example",
+  "permissions": {
+    "allow": ["Bash(go test ./...)"]
+  },
+  "unknownClaudeKnob": true
+}

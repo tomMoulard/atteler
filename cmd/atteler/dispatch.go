@@ -330,7 +330,9 @@ func listConfigPaths() {
 }
 
 func validateConfig() error {
-	cfg, loaded, err := appconfig.Load()
+	cfg, loaded, _, diagnostics, err := appconfig.LoadWithDiagnostics()
+	printDiagnostics(os.Stdout, diagnostics)
+
 	if err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}

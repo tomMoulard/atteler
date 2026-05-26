@@ -137,6 +137,11 @@ the selected request model/provider after state, flags, and agent selection.
 missing-credential, health-check, live-model, and static-fallback status so a
 broken backend is visible before a completion request fails.
 
+Harness importer warnings, including unsupported fields, malformed best-effort
+input, and ignored fallback-only sections, are printed by `atteler config
+validate` and `atteler config explain`; `explain` also shows the source path and
+`harness-import` precedence for every imported value.
+
 Minimal example:
 
 ```yaml

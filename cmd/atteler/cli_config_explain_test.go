@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -136,4 +138,124 @@ func TestWriteConfigExplanation_FiltersFieldPrefixes(t *testing.T) {
 	assert.Contains(t, got, "providers.openai.base_url: https://openai.project")
 	assert.NotContains(t, got, "providers.anthropic.base_url:")
 	assert.NotContains(t, got, "default_model:")
+}
+
+func TestWriteConfigExplanationWithDiagnostics_PrintsImporterWarnings(t *testing.T) {
+	t.Parallel()
+
+	diagnostics := []appconfig.Diagnostic{{
+		Severity: appconfig.DiagnosticWarning,
+		Importer: "opencode",
+		Source:   "opencode.jsonc",
+		Path:     "agent.bad.hidden",
+		Message:  "ignored value: expected boolean, got string",
+	}}
+
+	var out strings.Builder
+	writeConfigExplanationWithDiagnostics(&out, nil, appconfig.OriginMap{}, diagnostics, "")
+	got := out.String()
+
+	assert.Contains(t, got, "Config importer warnings:")
+	assert.Contains(t, got, "[warning] opencode: opencode.jsonc agent.bad.hidden: ignored value")
+}
+
+func TestWriteConfigExplanationWithDiagnostics_PrintsHarnessImportOrigins(t *testing.T) {
+	t.Parallel()
+
+	const source = "/home/test/.codex/config.toml"
+
+	origins := appconfig.OriginMap{
+		"default_model": {
+			Chain: []appconfig.OriginEvent{{
+				Kind:      appconfig.OriginHarnessImport,
+				Operation: appconfig.OriginSet,
+				Source:    source,
+				Value:     "gpt-5.5",
+			}},
+		},
+	}
+
+	var out strings.Builder
+	writeConfigExplanationWithDiagnostics(&out, []string{source}, origins, nil, "")
+	got := out.String()
+
+	assert.Contains(t, got, "1. [harness-import] "+source)
+	assert.Contains(t, got, "default_model: gpt-5.5")
+	assert.Contains(t, got, "set by "+source+" [harness-import] => gpt-5.5")
+}
+
+func TestExplainConfig_PrintsHarnessImporterWarningsAndOrigins(t *testing.T) {
+	tempDir := t.TempDir()
+	codexHome := filepath.Join(tempDir, "codex")
+	require.NoError(t, os.MkdirAll(codexHome, 0o700))
+	codexConfig := filepath.Join(codexHome, "config.toml")
+	require.NoError(t, os.WriteFile(codexConfig, []byte(`
+model = "gpt-5.5"
+model_provider = "openai"
+trusted_project_roots = ["/repo"]
+
+[model_providers.openai]
+base_url = "https://openai.example"
+wire_api = "responses"
+`), 0o600))
+
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	var err error
+
+	out := captureStdoutForStateDiagnostics(t, func() {
+		err = explainConfig(cliOptions{})
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, out, "Config importer warnings:")
+	assert.Contains(t, out, "codex: "+codexConfig+" trusted_project_roots: ignored unsupported field")
+	assert.Contains(t, out, "codex: "+codexConfig+" model_providers.openai.wire_api: ignored unsupported field")
+	assert.Contains(t, out, "1. [harness-import] "+codexConfig)
+	assert.Contains(t, out, "default_model: gpt-5.5")
+	assert.Contains(t, out, "set by "+codexConfig+" [harness-import] => gpt-5.5")
+	assert.Contains(t, out, "providers.openai.base_url: https://openai.example")
+	assert.Contains(t, out, "runtime.selected_model: gpt-5.5")
+}
+
+func TestExplainConfig_PrintsHarnessImporterWarningsBeforeConfigError(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	claudeDir := filepath.Join(tempDir, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{
+		"model": "claude-sonnet-4-20250514",
+		"unsupported": true
+	}`), 0o600))
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`default_model: [`), 0o600))
+
+	var err error
+
+	out := captureStdoutForStateDiagnostics(t, func() {
+		err = explainConfig(cliOptions{})
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "explain config:")
+	assert.Contains(t, out, "Config importer warnings:")
+	assert.Contains(t, out, "claude: "+filepath.Join(claudeDir, "settings.json")+" unsupported: ignored unsupported field")
+	assert.NotContains(t, out, "Config explanation")
 }

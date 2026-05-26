@@ -1,0 +1,39 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // JSONC comments and trailing commas are supported by OpenCode.
+  "model": "openai/gpt-5.4",
+  "permission": {
+    "edit": "deny",
+  },
+  "agent": {
+    "reviewer": {
+      "description": "Reviews code",
+      "model": "anthropic/claude-sonnet-4-20250514",
+      "prompt": "Review carefully.",
+      "hidden": false,
+      "tools": {
+        "read": true,
+        "write": false,
+      },
+      "permission": {
+        "edit": "deny",
+      },
+    },
+    "hidden-helper": {
+      "prompt": "Internal helper",
+      "hidden": true,
+    },
+  },
+  "provider": {
+    "openai": {
+      "baseURL": "https://openai.example/v1",
+      "models": ["gpt-5.4", "gpt-5.4-mini"],
+    },
+    "anthropic": {
+      "base_url": "https://anthropic.example",
+    },
+  },
+  "categories": {
+    "deep": { "model": "openai/gpt-5.4" },
+  },
+}

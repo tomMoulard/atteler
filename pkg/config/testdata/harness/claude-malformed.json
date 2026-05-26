@@ -1,0 +1,11 @@
+{
+  "model": ["claude-sonnet-4-20250514"],
+  "apiBase": ["https://anthropic.example"],
+  "unsupportedTop": true,
+  "llm": {
+    "model": { "name": "claude-opus" },
+    "provider": 123,
+    "base_url": ["https://anthropic.example"],
+    "unsupportedLLMKnob": true
+  }
+}

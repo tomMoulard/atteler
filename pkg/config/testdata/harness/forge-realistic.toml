@@ -1,0 +1,6 @@
+"$schema" = "https://forgecode.dev/schema.json"
+
+[session]
+provider_id = "claude_code"
+model_id = "claude-opus-4-6"
+base_url = "https://claude-code.example"

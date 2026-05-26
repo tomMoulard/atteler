@@ -95,7 +95,7 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "paths", Summary: "list config files in load order", Legacy: []string{"--list-config-paths"}},
 			{Name: "template", Summary: "print a starter YAML config", Legacy: []string{"--print-config-template"}},
 			{Name: "init", Args: "<path>", Summary: "write a starter YAML config without overwriting", Legacy: []string{"--init-config"}},
-			{Name: "validate", Summary: "validate merged YAML/JSON config", Legacy: []string{"--validate-config"}},
+			{Name: "validate", Summary: "validate merged YAML/JSON config and importer warnings", Legacy: []string{"--validate-config"}},
 			{Name: "explain", Args: "[field-prefix]", Summary: "print merged config values with per-field provenance", Legacy: []string{"--explain-config"}},
 			{Name: "doctor", Summary: "run provider-aware readiness diagnostics", Legacy: []string{"--doctor"}},
 			{Name: "doctor-offline", Summary: "run offline readiness diagnostics", Legacy: []string{"--doctor-offline"}},

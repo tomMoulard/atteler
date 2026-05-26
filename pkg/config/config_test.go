@@ -494,6 +494,95 @@ func TestOriginChain_MergesMapOriginsAcrossOriginMaps(t *testing.T) {
 	assert.Equal(t, OriginReplace, dst["plugins.paths"].Chain[1].Operation)
 }
 
+func TestMergeConfigFromOrigins_PreservesProviderBoolWhenSourceOmitsIt(t *testing.T) {
+	t.Parallel()
+
+	dst := Config{
+		Providers: map[string]ProviderConfig{
+			"codex": {DisablePrivateAdapter: true},
+		},
+	}
+	dstOrigins := OriginMap{
+		"providers.codex.disable_private_adapter": {
+			Chain: []OriginEvent{{
+				Kind:      OriginHarnessImport,
+				Operation: OriginSet,
+				Source:    "harness",
+				Value:     "true",
+			}},
+		},
+	}
+	src := Config{
+		Providers: map[string]ProviderConfig{
+			"codex": {BaseURL: "https://codex.example"},
+		},
+	}
+	srcOrigins := OriginMap{
+		"providers.codex.base_url": {
+			Chain: []OriginEvent{{
+				Kind:      OriginProjectFile,
+				Operation: OriginSet,
+				Source:    "project.yaml",
+				Value:     "https://codex.example",
+			}},
+		},
+	}
+
+	mergeConfigFromOrigins(&dst, src, dstOrigins, srcOrigins)
+
+	assert.True(t, dst.Providers["codex"].DisablePrivateAdapter)
+	require.Len(t, dstOrigins["providers.codex.disable_private_adapter"].Chain, 1)
+
+	baseURLOrigin, ok := dstOrigins.Final("providers.codex.base_url")
+	require.True(t, ok)
+	assert.Equal(t, "project.yaml", baseURLOrigin.Source)
+}
+
+func TestMergeConfigFromOrigins_AllowsExplicitProviderBoolFalse(t *testing.T) {
+	t.Parallel()
+
+	dst := Config{
+		Providers: map[string]ProviderConfig{
+			"codex": {DisablePrivateAdapter: true},
+		},
+	}
+	dstOrigins := OriginMap{
+		"providers.codex.disable_private_adapter": {
+			Chain: []OriginEvent{{
+				Kind:      OriginHarnessImport,
+				Operation: OriginSet,
+				Source:    "harness",
+				Value:     "true",
+			}},
+		},
+	}
+	src := Config{
+		Providers: map[string]ProviderConfig{
+			"codex": {DisablePrivateAdapter: false},
+		},
+	}
+	srcOrigins := OriginMap{
+		"providers.codex.disable_private_adapter": {
+			Chain: []OriginEvent{{
+				Kind:      OriginProjectFile,
+				Operation: OriginSet,
+				Source:    "project.yaml",
+				Value:     "false",
+			}},
+		},
+	}
+
+	mergeConfigFromOrigins(&dst, src, dstOrigins, srcOrigins)
+
+	assert.False(t, dst.Providers["codex"].DisablePrivateAdapter)
+
+	chain := dstOrigins["providers.codex.disable_private_adapter"].Chain
+	require.Len(t, chain, 2)
+	assert.Equal(t, OriginOverride, chain[1].Operation)
+	assert.Equal(t, "project.yaml", chain[1].Source)
+	assert.Equal(t, "false", chain[1].Value)
+}
+
 func TestLoadPathSources_EnvPathPrecedence(t *testing.T) {
 	t.Parallel()
 
@@ -553,6 +642,46 @@ func TestLoadWithOrigins_DefaultStackClassifiesEnvAndOverridesProject(t *testing
 	assert.Equal(t, OriginProjectFile, chain[1].Kind)
 	assert.Equal(t, OriginEnvFile, chain[2].Kind)
 	assert.Equal(t, envPath, chain[2].Source)
+}
+
+func TestLoadWithDiagnostics_ReturnsHarnessWarningsWhenConfigFileFails(t *testing.T) {
+	tempDir := t.TempDir()
+	configHome := filepath.Join(tempDir, "xdg-config")
+	projectDir := filepath.Join(tempDir, "project")
+	codexHome := filepath.Join(tempDir, "codex-home")
+	require.NoError(t, os.MkdirAll(codexHome, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, ".atteler"), 0o700))
+
+	codexConfig := filepath.Join(codexHome, "config.toml")
+	require.NoError(t, os.WriteFile(codexConfig, []byte(`
+model = "gpt-5.5"
+trusted_project_roots = ["/repo"]
+`), 0o600))
+
+	projectConfig := filepath.Join(projectDir, ".atteler", "config.yaml")
+	require.NoError(t, os.WriteFile(projectConfig, []byte(`default_model: [`), 0o600))
+
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv(EnvPath, "")
+	t.Chdir(projectDir)
+
+	cfg, loaded, origins, diagnostics, err := LoadWithDiagnostics()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), projectConfig)
+	assert.Equal(t, "gpt-5.5", cfg.DefaultModel)
+	assert.Contains(t, loaded, codexConfig)
+	assertDiagnosticContains(t, diagnostics, "trusted_project_roots: ignored unsupported field")
+
+	origin, ok := origins.Final("default_model")
+	require.True(t, ok)
+	assert.Equal(t, OriginHarnessImport, origin.Kind)
+	assert.Equal(t, codexConfig, origin.Source)
 }
 
 func TestLoadFiles_InvalidYAMLIncludesPath(t *testing.T) {
