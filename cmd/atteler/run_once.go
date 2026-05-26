@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,11 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
+)
+
+const (
+	headlessHeartbeatInterval = 15 * time.Second
+	headlessParentRunIDEnv    = "ATTELER_HEADLESS_PARENT_ID"
 )
 
 type responseRecordOptions struct {
@@ -211,6 +217,8 @@ func runOnceWithOptions(
 ) error {
 	outputFormat, err := normalizeOutputFormat(executionOptions.OutputFormat)
 	if err != nil {
+		recordHeadlessPreflightFailure(store, executionOptions, sessionState, prompt, selectedModel, selectedAgent, err)
+
 		return err
 	}
 
@@ -226,6 +234,8 @@ func runOnceWithOptions(
 		prompt,
 	)
 	if err != nil {
+		recordHeadlessPreflightFailure(store, executionOptions, sessionState, prompt, selectedModel, selectedAgent, err)
+
 		return err
 	}
 
@@ -247,7 +257,17 @@ func runOnceWithOptions(
 		Model:       sessionState.DefaultModel,
 	})
 
+	headlessRun, err := startHeadlessRun(store, executionOptions, sessionState, prepared.prompt, prepared.requestModel, prepared.activeAgent.name)
+	if err != nil {
+		return err
+	}
+
+	stopHeadlessHeartbeat := startHeadlessHeartbeat(ctx, store, headlessRun)
+	defer stopHeadlessHeartbeat()
+
 	if userSaveErr := saveRunOnceUserMessage(ctx, hooks, store, &sessionState, prepared); userSaveErr != nil {
+		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, userSaveErr.Error())
+
 		return userSaveErr
 	}
 
@@ -264,10 +284,6 @@ func runOnceWithOptions(
 
 	applyGenerationParams(&params, prepared.generation)
 
-	if budgetErr := validateRequestBudget(reg, params.Model, params.Messages, maxInputTokens); budgetErr != nil {
-		return budgetErr
-	}
-
 	ctx = events.WithEmitter(ctx, hooks, events.Event{
 		SessionID:   sessionState.ID,
 		SessionPath: store.Path(sessionState.ID),
@@ -275,9 +291,10 @@ func runOnceWithOptions(
 		Model:       prepared.requestModel,
 	})
 
-	headlessRun, err := startHeadlessRun(store, executionOptions, sessionState, prepared.prompt, prepared.requestModel, prepared.activeAgent.name)
-	if err != nil {
-		return err
+	if budgetErr := validateRequestBudget(reg, params.Model, params.Messages, maxInputTokens); budgetErr != nil {
+		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, budgetErr.Error())
+
+		return budgetErr
 	}
 
 	// Enable tool use for one-shot calls: the LLM can invoke bash commands.
@@ -329,7 +346,37 @@ func runOnceWithOptions(
 		return fmt.Errorf("one-shot complete: %w", err)
 	}
 
-	if err := saveRunOnceAssistantResponse(ctx, hooks, store, &sessionState, prepared.activeAgent.name, resp); err != nil {
+	return finishRunOnceSuccess(
+		ctx,
+		hooks,
+		store,
+		&sessionState,
+		prepared.activeAgent.name,
+		resp,
+		checkpointPath,
+		outputFormat,
+		executionOptions,
+		headlessRun,
+	)
+}
+
+func finishRunOnceSuccess(
+	ctx context.Context,
+	hooks *events.Runner,
+	store *session.Store,
+	sessionState *session.Session,
+	agentName string,
+	resp *llm.Response,
+	checkpointPath string,
+	outputFormat string,
+	executionOptions runOnceExecutionOptions,
+	headlessRun *session.HeadlessRun,
+) error {
+	if err := ensureHeadlessRunCanRecordResponse(store, headlessRun); err != nil {
+		return err
+	}
+
+	if err := saveRunOnceAssistantResponse(ctx, hooks, store, sessionState, agentName, resp); err != nil {
 		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, err.Error())
 		return err
 	}
@@ -341,7 +388,7 @@ func runOnceWithOptions(
 		SessionID:               sessionState.ID,
 		SessionPath:             store.Path(sessionState.ID),
 		AgentLoopCheckpointPath: checkpointPath,
-		Agent:                   prepared.activeAgent.name,
+		Agent:                   agentName,
 		Model:                   resp.Model,
 		Content:                 resp.Content,
 		TokenUsage:              usage,
@@ -352,11 +399,12 @@ func runOnceWithOptions(
 			headlessRun.Model = resp.Model
 		}
 
-		if err := store.AppendHeadlessLog(headlessRun.ID, fmt.Sprintf("assistant_message\t%s\tbytes=%d\n", time.Now().UTC().Format(time.RFC3339), len(resp.Content))); err != nil {
-			fmt.Fprintln(os.Stderr, "warning: "+err.Error())
-		}
-
+		recordHeadlessAssistantMessage(store, headlessRun, len(resp.Content))
 		finishHeadlessRun(store, headlessRun, session.HeadlessStatusCompleted, "")
+
+		if err := headlessCompletionError(headlessRun); err != nil {
+			return err
+		}
 	}
 
 	return writeRunOnceResult(os.Stdout, os.Stderr, result, outputFormat, executionOptions.Headless)
@@ -507,6 +555,162 @@ func saveRunOnceAssistantResponse(
 	return nil
 }
 
+func recordHeadlessPreflightFailure(
+	store *session.Store,
+	options runOnceExecutionOptions,
+	sessionState session.Session,
+	prompt string,
+	modelName string,
+	agentName string,
+	failure error,
+) {
+	if failure == nil || !options.Headless {
+		return
+	}
+
+	run, err := startHeadlessRun(store, options, sessionState, prompt, modelName, agentName)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+
+		return
+	}
+
+	finishHeadlessRun(store, run, session.HeadlessStatusFailed, failure.Error())
+}
+
+func recordHeadlessAssistantMessage(store *session.Store, run *session.HeadlessRun, contentBytes int) {
+	if store == nil || run == nil {
+		return
+	}
+
+	current, err := store.LoadHeadlessRun(run.ID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: load headless run before assistant message: "+err.Error())
+
+		return
+	}
+
+	if headlessRunRecordingIsTerminal(current.Status) {
+		*run = current
+
+		return
+	}
+
+	if current.Status == session.HeadlessStatusRunning || current.Status == session.HeadlessStatusOrphaned {
+		if heartbeatErr := store.HeartbeatHeadlessRun(run.ID); heartbeatErr != nil {
+			fmt.Fprintln(os.Stderr, "warning: heartbeat headless run before assistant message: "+heartbeatErr.Error())
+
+			return
+		}
+
+		current, err = store.LoadHeadlessRun(run.ID)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "warning: reload headless run before assistant message: "+err.Error())
+
+			return
+		}
+
+		if headlessRunRecordingIsTerminal(current.Status) {
+			*run = current
+
+			return
+		}
+	}
+
+	mergeHeadlessRunForAssistantRecording(run, current)
+
+	if err := store.AppendHeadlessLog(run.ID, fmt.Sprintf("assistant_message\t%s\tbytes=%d\n", time.Now().UTC().Format(time.RFC3339), contentBytes)); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+	}
+
+	event := session.HeadlessEvent{
+		Type:           session.HeadlessEventAssistantMessage,
+		Status:         session.HeadlessStatusRunning,
+		Role:           string(llm.RoleAssistant),
+		ParentRunID:    run.ParentRunID,
+		SessionID:      run.SessionID,
+		SessionPath:    run.SessionPath,
+		Agent:          run.Agent,
+		Model:          run.Model,
+		CWD:            run.CWD,
+		Hostname:       run.Hostname,
+		StartedCommand: run.StartedCommand,
+		StartMethod:    run.StartMethod,
+		TerminalReason: run.TerminalReason,
+		CancelReason:   run.CancellationReason,
+		StaleReason:    run.StaleReason,
+		OrphanedReason: run.OrphanedReason,
+		CommandArgs:    append([]string(nil), run.CommandArgs...),
+		ChildRunIDs:    append([]string(nil), run.ChildRunIDs...),
+		PID:            run.PID,
+		ParentPID:      run.ParentPID,
+		ProcessGroupID: run.ProcessGroupID,
+		Metadata: map[string]string{
+			"bytes": strconv.Itoa(contentBytes),
+		},
+	}
+	if err := store.AppendHeadlessEvent(run.ID, event); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+	}
+}
+
+func mergeHeadlessRunForAssistantRecording(run *session.HeadlessRun, current session.HeadlessRun) {
+	responseModel := run.Model
+	*run = current
+
+	if strings.TrimSpace(responseModel) != "" {
+		run.Model = responseModel
+	}
+}
+
+func headlessRunRecordingIsTerminal(status session.HeadlessStatus) bool {
+	switch status {
+	case session.HeadlessStatusCompleted,
+		session.HeadlessStatusFailed,
+		session.HeadlessStatusCanceled,
+		session.HeadlessStatusTimedOut,
+		session.HeadlessStatusStale,
+		session.HeadlessStatusSuperseded,
+		session.HeadlessStatusCorrupt:
+		return true
+	default:
+		return false
+	}
+}
+
+func startHeadlessHeartbeat(ctx context.Context, store *session.Store, run *session.HeadlessRun) func() {
+	if store == nil || run == nil {
+		return func() {}
+	}
+
+	id := run.ID
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		ticker := time.NewTicker(headlessHeartbeatInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				if err := store.HeartbeatHeadlessRun(id); err != nil {
+					slog.Debug("headless heartbeat failed", "id", id, "error", err)
+				}
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 func startHeadlessRun(
 	store *session.Store,
 	options runOnceExecutionOptions,
@@ -523,36 +727,134 @@ func startHeadlessRun(
 		return nil, errors.New("headless mode requires a session store")
 	}
 
-	id := strings.TrimSpace(options.HeadlessID)
+	id := options.HeadlessID
 	if id == "" {
 		id = session.New("", nil).ID
 	}
 
 	run := session.HeadlessRun{
 		ID:             id,
+		ParentRunID:    os.Getenv(headlessParentRunIDEnv),
 		SessionID:      sessionState.ID,
 		SessionPath:    store.Path(sessionState.ID),
 		Prompt:         strings.TrimSpace(prompt),
 		Model:          modelName,
 		Agent:          agentName,
 		StartedCommand: strings.Join(os.Args, " "),
+		StartMethod:    "headless",
 		Status:         session.HeadlessStatusRunning,
 		PrivateLogs:    options.HeadlessPrivateLog,
 	}
-	if err := store.SaveHeadlessRun(run); err != nil {
+
+	if err := saveStartedHeadlessRun(store, run); err != nil {
 		return nil, fmt.Errorf("start headless run: %w", err)
 	}
 
 	saved, err := store.LoadHeadlessRun(id)
 	if err != nil {
-		return nil, fmt.Errorf("load started headless run: %w", err)
+		loadErr := fmt.Errorf("load started headless run: %w", err)
+		failStartedHeadlessRun(store, &run, loadErr)
+
+		return nil, loadErr
 	}
 
 	if err := store.AppendHeadlessLog(id, "started\t"+time.Now().UTC().Format(time.RFC3339)+"\tsession="+sessionState.ID+"\n"); err != nil {
-		return nil, fmt.Errorf("write headless start log: %w", err)
+		logErr := fmt.Errorf("write headless start log: %w", err)
+		failStartedHeadlessRun(store, &saved, logErr)
+
+		return nil, logErr
+	}
+
+	if err := store.AppendHeadlessEvent(id, session.HeadlessEvent{
+		Type:           session.HeadlessEventStarted,
+		Status:         saved.Status,
+		ParentRunID:    saved.ParentRunID,
+		SessionID:      saved.SessionID,
+		SessionPath:    saved.SessionPath,
+		Agent:          saved.Agent,
+		Model:          saved.Model,
+		CWD:            saved.CWD,
+		Hostname:       saved.Hostname,
+		StartedCommand: saved.StartedCommand,
+		StartMethod:    saved.StartMethod,
+		TerminalReason: saved.TerminalReason,
+		CancelReason:   saved.CancellationReason,
+		StaleReason:    saved.StaleReason,
+		OrphanedReason: saved.OrphanedReason,
+		CommandArgs:    append([]string(nil), saved.CommandArgs...),
+		PID:            saved.PID,
+		ParentPID:      saved.ParentPID,
+		ProcessGroupID: saved.ProcessGroupID,
+	}); err != nil {
+		eventErr := fmt.Errorf("write headless start event: %w", err)
+		failStartedHeadlessRun(store, &saved, eventErr)
+
+		return nil, eventErr
+	}
+
+	if err := appendHeadlessUserMessageEvent(store, id, saved); err != nil {
+		eventErr := fmt.Errorf("write headless user message event: %w", err)
+		failStartedHeadlessRun(store, &saved, eventErr)
+
+		return nil, eventErr
+	}
+
+	if saved.ParentRunID != "" {
+		if err := store.LinkHeadlessChildRun(saved.ParentRunID, saved.ID); err != nil {
+			fmt.Fprintln(os.Stderr, "warning: link headless child run: "+err.Error())
+		}
 	}
 
 	return &saved, nil
+}
+
+func appendHeadlessUserMessageEvent(store *session.Store, id string, run session.HeadlessRun) error {
+	if strings.TrimSpace(run.Prompt) == "" {
+		return nil
+	}
+
+	if err := store.AppendHeadlessEvent(id, session.HeadlessEvent{
+		Type:           session.HeadlessEventUserMessage,
+		Status:         run.Status,
+		Role:           string(llm.RoleUser),
+		Message:        run.Prompt,
+		ParentRunID:    run.ParentRunID,
+		SessionID:      run.SessionID,
+		SessionPath:    run.SessionPath,
+		Agent:          run.Agent,
+		Model:          run.Model,
+		CWD:            run.CWD,
+		Hostname:       run.Hostname,
+		StartedCommand: run.StartedCommand,
+		StartMethod:    run.StartMethod,
+		CommandArgs:    append([]string(nil), run.CommandArgs...),
+		PID:            run.PID,
+		ParentPID:      run.ParentPID,
+		ProcessGroupID: run.ProcessGroupID,
+		Metadata: map[string]string{
+			"bytes": strconv.Itoa(len(run.Prompt)),
+		},
+	}); err != nil {
+		return fmt.Errorf("append headless user message event: %w", err)
+	}
+
+	return nil
+}
+
+func failStartedHeadlessRun(store *session.Store, run *session.HeadlessRun, err error) {
+	if err == nil {
+		return
+	}
+
+	finishHeadlessRun(store, run, session.HeadlessStatusFailed, err.Error())
+}
+
+func saveStartedHeadlessRun(store *session.Store, run session.HeadlessRun) error {
+	if err := store.SaveNewHeadlessRun(run); err != nil {
+		return fmt.Errorf("save new headless run: %w", err)
+	}
+
+	return nil
 }
 
 func finishHeadlessRun(store *session.Store, run *session.HeadlessRun, status session.HeadlessStatus, message string) {
@@ -561,24 +863,89 @@ func finishHeadlessRun(store *session.Store, run *session.HeadlessRun, status se
 	}
 
 	now := time.Now().UTC()
+	message = strings.TrimSpace(message)
+
+	status = finishHeadlessStatus(status, message)
+	applyFinishedHeadlessRun(run, status, message, now)
+
+	saved, wrote, err := store.SaveFinishedHeadlessRun(*run)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+		return
+	}
+
+	*run = saved
+
+	if !wrote {
+		return
+	}
+
+	appendFinishedHeadlessLog(store, run, status, now)
+	appendFinishedHeadlessEvent(store, run, status)
+}
+
+func finishHeadlessStatus(status session.HeadlessStatus, message string) session.HeadlessStatus {
+	if status != session.HeadlessStatusFailed {
+		return status
+	}
+
+	if isTimeoutMessage(message) {
+		return session.HeadlessStatusTimedOut
+	}
+
+	if isCancellationMessage(message) {
+		return session.HeadlessStatusCanceled
+	}
+
+	return status
+}
+
+func applyFinishedHeadlessRun(run *session.HeadlessRun, status session.HeadlessStatus, message string, now time.Time) {
 	run.Status = status
 	run.CompletedAt = &now
+	run.Error = message
 
-	run.Error = strings.TrimSpace(message)
 	if run.CancellationReason == "" && isCancellationMessage(run.Error) {
 		run.CancellationReason = run.Error
 	}
 
-	exitCode := 0
-	if status != session.HeadlessStatusCompleted {
-		exitCode = 1
+	if run.TerminalReason == "" {
+		run.TerminalReason = run.Error
+		if run.TerminalReason == "" {
+			run.TerminalReason = string(status)
+		}
 	}
 
+	exitCode := headlessExitCode(status)
 	run.ExitCode = &exitCode
-	if err := store.SaveHeadlessRun(*run); err != nil {
-		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
-	}
 
+	if status == session.HeadlessStatusCanceled {
+		run.CanceledAt = &now
+
+		if run.CancellationReason == "" {
+			run.CancellationReason = "canceled"
+		}
+
+		if run.TerminalReason == "" {
+			run.TerminalReason = run.CancellationReason
+		}
+	}
+}
+
+func headlessExitCode(status session.HeadlessStatus) int {
+	switch status {
+	case session.HeadlessStatusCompleted:
+		return 0
+	case session.HeadlessStatusCanceled:
+		return 130
+	case session.HeadlessStatusTimedOut:
+		return 124
+	default:
+		return 1
+	}
+}
+
+func appendFinishedHeadlessLog(store *session.Store, run *session.HeadlessRun, status session.HeadlessStatus, now time.Time) {
 	logLine := string(status) + "\t" + now.Format(time.RFC3339)
 	if run.Error != "" {
 		logLine += "\terror=" + run.Error
@@ -589,15 +956,96 @@ func finishHeadlessRun(store *session.Store, run *session.HeadlessRun, status se
 	}
 }
 
+func appendFinishedHeadlessEvent(store *session.Store, run *session.HeadlessRun, status session.HeadlessStatus) {
+	eventType := session.HeadlessEventType(status)
+	if status == session.HeadlessStatusCompleted {
+		eventType = session.HeadlessEventCompleted
+	}
+
+	if err := store.AppendHeadlessEvent(run.ID, session.HeadlessEvent{
+		Type:           eventType,
+		Status:         run.Status,
+		ParentRunID:    run.ParentRunID,
+		SessionID:      run.SessionID,
+		SessionPath:    run.SessionPath,
+		Message:        run.TerminalReason,
+		Error:          run.Error,
+		Agent:          run.Agent,
+		Model:          run.Model,
+		CWD:            run.CWD,
+		Hostname:       run.Hostname,
+		StartedCommand: run.StartedCommand,
+		StartMethod:    run.StartMethod,
+		TerminalReason: run.TerminalReason,
+		CancelReason:   run.CancellationReason,
+		StaleReason:    run.StaleReason,
+		OrphanedReason: run.OrphanedReason,
+		CommandArgs:    append([]string(nil), run.CommandArgs...),
+		ChildRunIDs:    append([]string(nil), run.ChildRunIDs...),
+		ExitCode:       run.ExitCode,
+		PID:            run.PID,
+		ParentPID:      run.ParentPID,
+		ProcessGroupID: run.ProcessGroupID,
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+	}
+}
+
+func ensureHeadlessRunCanRecordResponse(store *session.Store, run *session.HeadlessRun) error {
+	if store == nil || run == nil {
+		return nil
+	}
+
+	current, err := store.HeadlessRunStatus(run.ID)
+	if err != nil {
+		return fmt.Errorf("check headless run status: %w", err)
+	}
+
+	*run = current
+
+	return headlessCompletionError(run)
+}
+
+func headlessCompletionError(run *session.HeadlessRun) error {
+	if run == nil || run.Status == "" || run.Status == session.HeadlessStatusCompleted {
+		return nil
+	}
+
+	if !headlessRunRecordingIsTerminal(run.Status) {
+		return nil
+	}
+
+	reason := strings.TrimSpace(run.TerminalReason)
+	if reason == "" {
+		reason = strings.TrimSpace(run.Error)
+	}
+
+	if reason == "" {
+		reason = string(run.Status)
+	}
+
+	return fmt.Errorf("headless run %s ended with status %s: %s", run.ID, run.Status, reason)
+}
+
 func isCancellationMessage(message string) bool {
 	message = strings.ToLower(strings.TrimSpace(message))
 	if message == "" {
 		return false
 	}
 
-	return strings.Contains(message, "context canceled") ||
-		strings.Contains(message, "context deadline exceeded") ||
-		strings.Contains(message, "canceled")
+	return strings.Contains(message, "cancel")
+}
+
+func isTimeoutMessage(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+
+	return strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "deadline exceeded") ||
+		strings.Contains(message, "timed out") ||
+		strings.Contains(message, "timeout")
 }
 
 func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFormat string, headless bool) error {

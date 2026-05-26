@@ -3,6 +3,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -45,7 +46,7 @@ func headlessProcessAlive(pid int) bool {
 
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
-		return false
+		return errors.Is(err, windows.ERROR_ACCESS_DENIED)
 	}
 	defer func() {
 		_ = windows.CloseHandle(handle)
@@ -57,4 +58,29 @@ func headlessProcessAlive(pid int) bool {
 	}
 
 	return code == stillActive
+}
+
+func headlessProcessGroupID(_ int) int {
+	return 0
+}
+
+func headlessProcessGroupAlive(_ int) bool {
+	return false
+}
+
+func signalHeadlessProcess(pid int) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find process %d: %w", pid, err)
+	}
+
+	if err := process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("kill process %d: %w", pid, err)
+	}
+
+	return nil
+}
+
+func signalHeadlessProcessGroup(pid int, _ int) error {
+	return signalHeadlessProcess(pid)
 }

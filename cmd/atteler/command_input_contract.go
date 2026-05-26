@@ -147,13 +147,17 @@ type initRTKPluginCommandInput struct {
 	Dir string
 }
 
+type headlessCommandInput struct {
+	StatusID string
+	CancelID string
+	StreamID string
+	Recover  bool
+	List     bool
+}
+
 type listAgentsCommandInput struct{}
 
 type listConfigPathsCommandInput struct{}
-
-type listHeadlessCommandInput struct{}
-
-type recoverHeadlessCommandInput struct{}
 
 type listHookEventsCommandInput struct {
 	JSON bool
@@ -274,10 +278,6 @@ type speculateRunCommandInput struct {
 	Gates  []string
 }
 
-type streamHeadlessCommandInput struct {
-	ID string
-}
-
 type stateDiagnosticsCommandInput struct {
 	SessionRef     string
 	AgentName      string
@@ -334,12 +334,11 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"feedbackProposalsCommandInput":       func(opts cliOptions) any { return feedbackProposalsCommandInputFromOptions(opts) },
 		"feedbackRollbackCommandInput":        func(opts cliOptions) any { return feedbackRollbackCommandInputFromOptions(opts) },
 		"gitHistorySearchCommandInput":        func(opts cliOptions) any { return gitHistorySearchCommandInputFromOptions(opts) },
+		"headlessCommandInput":                func(opts cliOptions) any { return headlessCommandInputFromOptions(opts) },
 		"initConfigCommandInput":              func(opts cliOptions) any { return initConfigCommandInputFromOptions(opts) },
 		"initRTKPluginCommandInput":           func(opts cliOptions) any { return initRTKPluginCommandInputFromOptions(opts) },
 		"listAgentsCommandInput":              func(opts cliOptions) any { return listAgentsCommandInputFromOptions(opts) },
 		"listConfigPathsCommandInput":         func(opts cliOptions) any { return listConfigPathsCommandInputFromOptions(opts) },
-		"listHeadlessCommandInput":            func(opts cliOptions) any { return listHeadlessCommandInputFromOptions(opts) },
-		"recoverHeadlessCommandInput":         func(opts cliOptions) any { return recoverHeadlessCommandInputFromOptions(opts) },
 		"listHookEventsCommandInput":          func(opts cliOptions) any { return listHookEventsCommandInputFromOptions(opts) },
 		"listKnownModelsCommandInput":         func(opts cliOptions) any { return listKnownModelsCommandInputFromOptions(opts) },
 		"listModelsCommandInput":              func(opts cliOptions) any { return listModelsCommandInputFromOptions(opts) },
@@ -371,7 +370,6 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"speculatePlanCommandInput":           func(opts cliOptions) any { return speculatePlanCommandInputFromOptions(opts) },
 		"speculateRunCommandInput":            func(opts cliOptions) any { return speculateRunCommandInputFromOptions(opts) },
 		"stateDiagnosticsCommandInput":        func(opts cliOptions) any { return stateDiagnosticsCommandInputFromOptions(opts) },
-		"streamHeadlessCommandInput":          func(opts cliOptions) any { return streamHeadlessCommandInputFromOptions(opts) },
 		"suggestSkillCommandInput":            func(opts cliOptions) any { return suggestSkillCommandInputFromOptions(opts) },
 		"taskCommandInput":                    func(opts cliOptions) any { return taskCommandInputFromOptions(opts) },
 		"validateConfigCommandInput":          func(opts cliOptions) any { return validateConfigCommandInputFromOptions(opts) },
@@ -539,6 +537,16 @@ func gitHistorySearchCommandInputFromOptions(opts cliOptions) gitHistorySearchCo
 	return gitHistorySearchCommandInput{Query: opts.gitHistorySearch, Limit: opts.gitHistoryLimit.value}
 }
 
+func headlessCommandInputFromOptions(opts cliOptions) headlessCommandInput {
+	return headlessCommandInput{
+		StatusID: opts.statusHeadlessID,
+		CancelID: opts.cancelHeadlessID,
+		StreamID: opts.streamHeadlessID,
+		Recover:  opts.recoverHeadless,
+		List:     opts.listHeadless,
+	}
+}
+
 func initConfigCommandInputFromOptions(opts cliOptions) initConfigCommandInput {
 	return initConfigCommandInput{Path: opts.initConfigPath}
 }
@@ -553,14 +561,6 @@ func listAgentsCommandInputFromOptions(_ cliOptions) listAgentsCommandInput {
 
 func listConfigPathsCommandInputFromOptions(_ cliOptions) listConfigPathsCommandInput {
 	return listConfigPathsCommandInput{}
-}
-
-func listHeadlessCommandInputFromOptions(_ cliOptions) listHeadlessCommandInput {
-	return listHeadlessCommandInput{}
-}
-
-func recoverHeadlessCommandInputFromOptions(_ cliOptions) recoverHeadlessCommandInput {
-	return recoverHeadlessCommandInput{}
 }
 
 func listHookEventsCommandInputFromOptions(opts cliOptions) listHookEventsCommandInput {
@@ -717,10 +717,6 @@ func speculateRunCommandInputFromOptions(opts cliOptions) speculateRunCommandInp
 		Agents: append([]string(nil), opts.speculateAgents...),
 		Gates:  append([]string(nil), opts.speculateGates...),
 	}
-}
-
-func streamHeadlessCommandInputFromOptions(opts cliOptions) streamHeadlessCommandInput {
-	return streamHeadlessCommandInput{ID: opts.streamHeadlessID}
 }
 
 func stateDiagnosticsCommandInputFromOptions(opts cliOptions) stateDiagnosticsCommandInput {

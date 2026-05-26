@@ -782,6 +782,13 @@ func TestFlagDomain_CoversAcceptanceDomains(t *testing.T) {
 
 	tests := map[string]string{
 		"once":                               "chat/session",
+		"headless-id":                        "chat/session",
+		"headless-private-log":               "chat/session",
+		"list-headless":                      "chat/session",
+		"recover-headless":                   "chat/session",
+		"status-headless":                    "chat/session",
+		"cancel-headless":                    "chat/session",
+		"stream-headless":                    "chat/session",
 		"validate-config":                    "config",
 		"list-providers":                     "providers",
 		"plan-agents":                        "agents",

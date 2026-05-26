@@ -404,6 +404,9 @@ func run(ctx context.Context) error {
 
 	// Phase 1: providerless commands (no LLM registry needed).
 	store := session.NewStore(opts.sessionDir)
+	if !opts.recoverHeadless {
+		reconcileHeadlessRunsAtStartup(store)
+	}
 
 	if handled, err := dispatchProviderless(ctx, opts, store); handled {
 		return err
@@ -424,10 +427,22 @@ func run(ctx context.Context) error {
 	// Phase 3: full state (LLM providers, hooks, sessions).
 	state, err := loadAppState(ctx, opts)
 	if err != nil {
+		recordHeadlessLoadStateFailure(store, opts, err)
+
 		return err
 	}
 
 	return runWithState(ctx, opts, state)
+}
+
+func reconcileHeadlessRunsAtStartup(store *session.Store) {
+	if store == nil {
+		return
+	}
+
+	if _, err := store.RecoverStaleHeadlessRuns(0); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: reconcile headless runs: "+err.Error())
+	}
 }
 
 func runParseControlCommand(opts cliOptions) (bool, error) {
@@ -519,21 +534,45 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		return err
 	}
 
-	outputFormat, err := normalizeOutputFormat(opts.outputFormat)
-	if err != nil {
+	executionOptions := runOnceExecutionOptionsFromOptions(opts)
+	executionOptions.AgentLoopBudget = state.agentLoopBudget
+	executionOptions.AgentLoopCheckpointInterval = state.agentLoopCheckpointInterval
+
+	if opts.headless && opts.oncePrompt == "" && !opts.readStdin {
+		err := errors.New("headless mode requires --once, positional prompt text, or --stdin")
+		recordHeadlessPreflightFailure(
+			state.sessionStore,
+			executionOptions,
+			state.sessionState,
+			opts.oncePrompt,
+			state.selectedModel,
+			state.selectedAgent,
+			err,
+		)
+
 		return err
 	}
 
-	if opts.headless && opts.oncePrompt == "" && !opts.readStdin {
-		return errors.New("headless mode requires --once, positional prompt text, or --stdin")
-	}
-
 	if opts.oncePrompt == "" && !opts.readStdin {
+		if _, err := normalizeOutputFormat(opts.outputFormat); err != nil {
+			return err
+		}
+
 		return runInteractive(ctx, state)
 	}
 
 	prompt, err := oneShotPrompt(opts.oncePrompt, opts.readStdin)
 	if err != nil {
+		recordHeadlessPreflightFailure(
+			state.sessionStore,
+			executionOptions,
+			state.sessionState,
+			opts.oncePrompt,
+			state.selectedModel,
+			state.selectedAgent,
+			err,
+		)
+
 		return err
 	}
 
@@ -552,23 +591,45 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		state.generationDefaults,
 		state.generationOverrides,
 		state.maxInputTokens,
-		runOnceExecutionOptions{
-			AgentLoopBudget:             state.agentLoopBudget,
-			AgentLoopCheckpointInterval: state.agentLoopCheckpointInterval,
-			Response: responseRecordOptions{
-				RecordPath: opts.recordResponsePath,
-				ReplayPath: opts.replayResponsePath,
-			},
-			OutputFormat:       outputFormat,
-			Headless:           opts.headless,
-			HeadlessPrivateLog: opts.headlessPrivateLog,
-		},
+		executionOptions,
 		state.modelLocked,
 		prompt,
 	)
 	finalizeWorktree(ctx, &state)
 
 	return runErr
+}
+
+func runOnceExecutionOptionsFromOptions(opts cliOptions) runOnceExecutionOptions {
+	return runOnceExecutionOptions{
+		Response: responseRecordOptions{
+			RecordPath: opts.recordResponsePath,
+			ReplayPath: opts.replayResponsePath,
+		},
+		OutputFormat:       opts.outputFormat,
+		Headless:           opts.headless,
+		HeadlessID:         opts.headlessID,
+		HeadlessPrivateLog: opts.headlessPrivateLog,
+	}
+}
+
+func recordHeadlessLoadStateFailure(store *session.Store, opts cliOptions, failure error) {
+	if failure == nil || !opts.headless {
+		return
+	}
+
+	sessionState := session.New(opts.model, nil)
+	sessionState.DefaultAgent = opts.agentName
+
+	recordHeadlessPreflightFailure(
+		store,
+		runOnceExecutionOptionsFromOptions(opts),
+		sessionState,
+		opts.oncePrompt,
+		opts.model,
+		opts.agentName,
+		failure,
+	)
 }
 
 func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {

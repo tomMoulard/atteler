@@ -173,7 +173,10 @@ type cliOptions struct {
 	exportFormat                       string
 	outputFormat                       string
 	listSessionsTag                    string
+	headlessID                         string
 	streamHeadlessID                   string
+	statusHeadlessID                   string
+	cancelHeadlessID                   string
 	searchQuery                        string
 	initConfigPath                     string
 	explainConfigPath                  string

@@ -14,6 +14,11 @@ import (
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
+const (
+	headlessStreamPollInterval    = time.Second
+	headlessTerminalDrainInterval = 100 * time.Millisecond
+)
+
 func listSessions(store *session.Store, tag string) error {
 	summaries, err := listSessionSummaries(store, tag)
 	if err != nil {
@@ -32,22 +37,79 @@ func listSessions(store *session.Store, tag string) error {
 	return nil
 }
 
+func headlessCommandRequested(opts cliOptions) bool {
+	return opts.listHeadless ||
+		opts.recoverHeadless ||
+		opts.statusHeadlessID != "" ||
+		opts.cancelHeadlessID != "" ||
+		opts.streamHeadlessID != ""
+}
+
+func runHeadlessCommand(ctx context.Context, opts cliOptions, store *session.Store) error {
+	if headlessCommandCount(opts) > 1 {
+		return errors.New("headless command: choose only one of list, recover, status, cancel, or stream")
+	}
+
+	switch {
+	case opts.statusHeadlessID != "":
+		return statusHeadlessRun(store, opts.statusHeadlessID)
+	case opts.cancelHeadlessID != "":
+		return cancelHeadlessRun(store, opts.cancelHeadlessID)
+	case opts.streamHeadlessID != "":
+		return streamHeadlessLog(ctx, store, opts.streamHeadlessID)
+	case opts.recoverHeadless:
+		return recoverHeadlessRuns(store)
+	case opts.listHeadless:
+		return listHeadlessRuns(store)
+	default:
+		return nil
+	}
+}
+
+func headlessCommandCount(opts cliOptions) int {
+	count := 0
+	if opts.listHeadless {
+		count++
+	}
+
+	if opts.recoverHeadless {
+		count++
+	}
+
+	if opts.statusHeadlessID != "" {
+		count++
+	}
+
+	if opts.cancelHeadlessID != "" {
+		count++
+	}
+
+	if opts.streamHeadlessID != "" {
+		count++
+	}
+
+	return count
+}
+
 func listHeadlessRuns(store *session.Store) error {
 	runs, err := store.ListHeadlessRuns()
 	if err != nil {
-		return fmt.Errorf("list headless sessions: %w", err)
+		return fmt.Errorf("list headless runs: %w", err)
 	}
 
 	active := make([]session.HeadlessRun, 0, len(runs))
 	for i := range runs {
 		run := &runs[i]
-		if run.Status == session.HeadlessStatusRunning || run.Status == session.HeadlessStatusStale {
+		if run.Status == session.HeadlessStatusRunning ||
+			run.Status == session.HeadlessStatusStale ||
+			run.Status == session.HeadlessStatusOrphaned ||
+			run.Status == session.HeadlessStatusCorrupt {
 			active = append(active, *run)
 		}
 	}
 
 	if len(active) == 0 {
-		fmt.Println("No active headless sessions found.")
+		fmt.Println("No active headless runs found.")
 		return nil
 	}
 
@@ -61,11 +123,11 @@ func listHeadlessRuns(store *session.Store) error {
 func recoverHeadlessRuns(store *session.Store) error {
 	recovered, err := store.RecoverStaleHeadlessRuns(0)
 	if err != nil {
-		return fmt.Errorf("recover headless sessions: %w", err)
+		return fmt.Errorf("recover headless runs: %w", err)
 	}
 
 	if len(recovered) == 0 {
-		fmt.Println("No recoverable stale headless sessions found.")
+		fmt.Println("No recoverable stale/orphaned headless runs found.")
 		return nil
 	}
 
@@ -76,8 +138,37 @@ func recoverHeadlessRuns(store *session.Store) error {
 	return nil
 }
 
+func statusHeadlessRun(store *session.Store, id string) error {
+	if id == "" {
+		return errors.New("status headless: id is required")
+	}
+
+	run, err := store.HeadlessRunStatus(id)
+	if err != nil {
+		return fmt.Errorf("status headless: %w", err)
+	}
+
+	fmt.Println(formatHeadlessRun(run))
+
+	return nil
+}
+
+func cancelHeadlessRun(store *session.Store, id string) error {
+	if id == "" {
+		return errors.New("cancel headless: id is required")
+	}
+
+	run, err := store.CancelHeadlessRun(id, "canceled by atteler session cancel-headless")
+	if err != nil {
+		return fmt.Errorf("cancel headless: %w", err)
+	}
+
+	fmt.Println(formatHeadlessRun(run))
+
+	return nil
+}
+
 func streamHeadlessLog(ctx context.Context, store *session.Store, id string) error {
-	id = strings.TrimSpace(id)
 	if id == "" {
 		return errors.New("stream headless: id is required")
 	}
@@ -96,16 +187,16 @@ func streamHeadlessLog(ctx context.Context, store *session.Store, id string) err
 
 		offset = tail.NextOffset
 
-		run, err := store.LoadHeadlessRun(id)
+		run, err := store.HeadlessRunStatus(id)
 		if err != nil {
 			return fmt.Errorf("stream headless: %w", err)
 		}
 
-		if run.Status != session.HeadlessStatusRunning {
-			return nil
+		if headlessRunRecordingIsTerminal(run.Status) {
+			return drainTerminalHeadlessLogTail(ctx, store, id, offset)
 		}
 
-		timer := time.NewTimer(time.Second)
+		timer := time.NewTimer(headlessStreamPollInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -113,6 +204,57 @@ func streamHeadlessLog(ctx context.Context, store *session.Store, id string) err
 		case <-timer.C:
 		}
 	}
+}
+
+func drainTerminalHeadlessLogTail(ctx context.Context, store *session.Store, id string, offset session.HeadlessLogOffset) error {
+	nextOffset := offset
+
+	for {
+		drainedOffset, wrote, err := drainHeadlessLogTail(store, id, nextOffset)
+		if err != nil {
+			return err
+		}
+
+		nextOffset = drainedOffset
+
+		if !wrote {
+			break
+		}
+	}
+
+	timer := time.NewTimer(headlessTerminalDrainInterval)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return fmt.Errorf("stream headless: %w", ctx.Err())
+	case <-timer.C:
+	}
+
+	for {
+		drainedOffset, wrote, err := drainHeadlessLogTail(store, id, nextOffset)
+		if err != nil {
+			return err
+		}
+
+		nextOffset = drainedOffset
+
+		if !wrote {
+			return nil
+		}
+	}
+}
+
+func drainHeadlessLogTail(store *session.Store, id string, offset session.HeadlessLogOffset) (session.HeadlessLogOffset, bool, error) {
+	tail, err := store.TailHeadlessLog(id, session.HeadlessLogTailOptions{Offset: offset})
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return offset, false, fmt.Errorf("stream headless: %w", err)
+	}
+
+	if tail.Text != "" {
+		fmt.Print(tail.Text)
+	}
+
+	return tail.NextOffset, tail.Text != "", nil
 }
 
 func listSessionSummaries(store *session.Store, tag string) ([]session.Summary, error) {
@@ -302,44 +444,144 @@ func formatHeadlessRun(run session.HeadlessRun) string {
 		updated = run.UpdatedAt.UTC().Format(time.RFC3339)
 	}
 
+	heartbeat := "-"
+	if !run.LastHeartbeatAt.IsZero() {
+		heartbeat = run.LastHeartbeatAt.UTC().Format(time.RFC3339)
+	}
+
 	agentName := fallbackDash(run.Agent)
 	modelName := fallbackDash(run.Model)
 
 	parts := []string{
-		run.ID,
+		formatHeadlessFieldValue(run.ID),
 		"status=" + string(run.Status),
 		"session=" + fallbackDash(run.SessionID),
 		"agent=" + agentName,
 		"model=" + modelName,
 		"started=" + started,
 		"updated=" + updated,
+		"heartbeat=" + heartbeat,
 		"log=" + fallbackDash(run.LogPath),
 	}
+
+	parts = appendHeadlessRunTimeDetails(parts, run)
+	parts = appendHeadlessRunProcessDetails(parts, run)
+	parts = appendHeadlessRunStorageDetails(parts, run)
+	parts = appendHeadlessRunTerminalDetails(parts, run)
+
+	return strings.Join(parts, "\t")
+}
+
+func appendHeadlessRunTimeDetails(parts []string, run session.HeadlessRun) []string {
+	if run.EventsPath != "" {
+		parts = append(parts, "events="+formatHeadlessFieldValue(run.EventsPath))
+	}
+
+	if run.CompletedAt != nil {
+		parts = append(parts, "completed="+run.CompletedAt.UTC().Format(time.RFC3339))
+	}
+
+	if run.CanceledAt != nil {
+		parts = append(parts, "canceled="+run.CanceledAt.UTC().Format(time.RFC3339))
+	}
+
+	return parts
+}
+
+func appendHeadlessRunProcessDetails(parts []string, run session.HeadlessRun) []string {
 	if run.PID != 0 {
 		parts = append(parts, "pid="+strconv.Itoa(run.PID))
+	}
+
+	if run.ParentPID != 0 {
+		parts = append(parts, "ppid="+strconv.Itoa(run.ParentPID))
+	}
+
+	if run.ProcessGroupID != 0 {
+		parts = append(parts, "pgid="+strconv.Itoa(run.ProcessGroupID))
+	}
+
+	if run.ParentRunID != "" {
+		parts = append(parts, "parent_run="+formatHeadlessFieldValue(run.ParentRunID))
+	}
+
+	if len(run.ChildRunIDs) > 0 {
+		parts = append(parts, "child_runs="+formatHeadlessArgs(run.ChildRunIDs))
+	}
+
+	if run.StartMethod != "" {
+		parts = append(parts, "start_method="+formatHeadlessFieldValue(run.StartMethod))
+	}
+
+	if run.StartedCommand != "" {
+		parts = append(parts, "command="+formatHeadlessFieldValue(run.StartedCommand))
+	}
+
+	if len(run.CommandArgs) > 0 {
+		parts = append(parts, "command_args="+formatHeadlessArgs(run.CommandArgs))
+	}
+
+	if run.Hostname != "" {
+		parts = append(parts, "host="+formatHeadlessFieldValue(run.Hostname))
+	}
+
+	if run.CWD != "" {
+		parts = append(parts, "cwd="+formatHeadlessFieldValue(run.CWD))
 	}
 
 	if run.ExitCode != nil {
 		parts = append(parts, "exit_code="+strconv.Itoa(*run.ExitCode))
 	}
 
+	return parts
+}
+
+func appendHeadlessRunStorageDetails(parts []string, run session.HeadlessRun) []string {
+	if run.LogPath != "" {
+		parts = append(parts, "log_chunk_pattern="+formatHeadlessFieldValue(run.LogPath)+".NNNNNN")
+	}
+
 	if run.ArtifactDir != "" {
-		parts = append(parts, "artifacts="+run.ArtifactDir)
+		parts = append(parts, "artifacts="+formatHeadlessFieldValue(run.ArtifactDir))
 	}
 
+	if run.LogMaxChunkBytes != 0 {
+		parts = append(parts, "log_max_chunk_bytes="+strconv.FormatInt(run.LogMaxChunkBytes, 10))
+	}
+
+	if run.LogMaxChunks != 0 {
+		parts = append(parts, "log_max_chunks="+strconv.Itoa(run.LogMaxChunks))
+	}
+
+	return parts
+}
+
+func appendHeadlessRunTerminalDetails(parts []string, run session.HeadlessRun) []string {
 	if run.StaleReason != "" {
-		parts = append(parts, "stale_reason="+run.StaleReason)
+		parts = append(parts, "stale_reason="+formatHeadlessFieldValue(run.StaleReason))
 	}
 
-	if run.Status == session.HeadlessStatusStale {
+	if run.OrphanedReason != "" {
+		parts = append(parts, "orphaned_reason="+formatHeadlessFieldValue(run.OrphanedReason))
+	}
+
+	if run.CancellationReason != "" {
+		parts = append(parts, "cancellation_reason="+formatHeadlessFieldValue(run.CancellationReason))
+	}
+
+	if run.TerminalReason != "" {
+		parts = append(parts, "terminal_reason="+formatHeadlessFieldValue(run.TerminalReason))
+	}
+
+	if run.Status == session.HeadlessStatusStale || run.Status == session.HeadlessStatusOrphaned {
 		parts = append(parts, "recover=atteler session recover-headless")
 	}
 
 	if run.Error != "" {
-		parts = append(parts, "error="+run.Error)
+		parts = append(parts, "error="+formatHeadlessFieldValue(run.Error))
 	}
 
-	return strings.Join(parts, "\t")
+	return parts
 }
 
 func fallbackDash(value string) string {
@@ -347,7 +589,24 @@ func fallbackDash(value string) string {
 		return "-"
 	}
 
-	return value
+	return formatHeadlessFieldValue(value)
+}
+
+func formatHeadlessFieldValue(value string) string {
+	return strings.NewReplacer(
+		"\t", " ",
+		"\r", "\\r",
+		"\n", "\\n",
+	).Replace(value)
+}
+
+func formatHeadlessArgs(args []string) string {
+	data, err := json.Marshal(args)
+	if err != nil {
+		return formatHeadlessFieldValue(strings.Join(args, " "))
+	}
+
+	return formatHeadlessFieldValue(string(data))
 }
 
 func formatSearchSnippet(snippet session.SearchSnippet) string {

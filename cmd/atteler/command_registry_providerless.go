@@ -22,28 +22,10 @@ func providerlessSessionCommands() []command {
 			},
 		},
 		{
-			name:  "list-headless",
-			tier:  tierProviderless,
-			match: func(o cliOptions) bool { return o.listHeadless },
-			runProviderless: func(_ context.Context, _ cliOptions, s *session.Store) error {
-				return listHeadlessRuns(s)
-			},
-		},
-		{
-			name:  "recover-headless",
-			tier:  tierProviderless,
-			match: func(o cliOptions) bool { return o.recoverHeadless },
-			runProviderless: func(_ context.Context, _ cliOptions, s *session.Store) error {
-				return recoverHeadlessRuns(s)
-			},
-		},
-		{
-			name:  "stream-headless",
-			tier:  tierProviderless,
-			match: func(o cliOptions) bool { return o.streamHeadlessID != "" },
-			runProviderless: func(ctx context.Context, o cliOptions, s *session.Store) error {
-				return streamHeadlessLog(ctx, s, o.streamHeadlessID)
-			},
+			name:            "headless-command",
+			tier:            tierProviderless,
+			match:           headlessCommandRequested,
+			runProviderless: runHeadlessCommand,
 		},
 		{
 			name:  "list-sessions",

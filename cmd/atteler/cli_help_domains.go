@@ -70,7 +70,9 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "record-artifact", Args: "<path>", Summary: "record a useful artifact path on --session", Legacy: []string{"--record-artifact"}},
 			{Name: "merge-artifacts", Args: "<path>", Summary: "merge selected-session text artifacts into Markdown", Legacy: []string{"--merge-artifacts"}},
 			{Name: "headless", Summary: "list active headless runs", Legacy: []string{"--list-headless"}},
-			{Name: "recover-headless", Summary: "mark stale/crashed headless runs recovered", Legacy: []string{"--recover-headless"}},
+			{Name: "status-headless", Args: "<id>", Summary: "show one headless run status", Legacy: []string{"--status-headless"}},
+			{Name: "cancel-headless", Args: "<id>", Summary: "cancel one live headless run", Legacy: []string{"--cancel-headless"}},
+			{Name: "recover-headless", Summary: "reconcile stale/orphaned headless runs", Legacy: []string{"--recover-headless"}},
 			{Name: "stream-headless", Args: "<id>", Summary: "stream one headless run log", Legacy: []string{"--stream-headless"}},
 		},
 		Examples: []string{

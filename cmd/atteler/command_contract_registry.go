@@ -251,21 +251,19 @@ func commandContractsByName() map[string]commandContract {
 			withInputType("listAgentsCommandInput"),
 			withExamples("atteler agents list"),
 		),
-		"list-headless": commandContractFor(
-			"list active headless sessions",
-			[]string{"--list-headless"},
-			[]string{commandEffectSessionRead, commandEffectUserOutput},
+		"headless-command": commandContractFor(
+			"inspect, reconcile, stream, or cancel headless runs",
+			[]string{"--list-headless", "--recover-headless", "--status-headless", "--cancel-headless", "--stream-headless"},
+			[]string{commandEffectSessionRead, commandEffectSessionWrite, commandEffectUserOutput, commandEffectProcessExecute},
 			[]string{commandOutputText},
-			withInputType("listHeadlessCommandInput"),
-			withExamples("atteler session headless"),
-		),
-		"recover-headless": commandContractFor(
-			"mark stale/crashed headless sessions recovered",
-			[]string{"--recover-headless"},
-			[]string{commandEffectSessionRead, commandEffectSessionWrite, commandEffectUserOutput},
-			[]string{commandOutputText},
-			withInputType("recoverHeadlessCommandInput"),
-			withExamples("atteler session recover-headless"),
+			withInputType("headlessCommandInput"),
+			withExamples(
+				"atteler session headless",
+				"atteler session status-headless run-123",
+				"atteler session cancel-headless run-123",
+				"atteler session recover-headless",
+				"atteler session stream-headless run-123",
+			),
 		),
 		"list-hook-events": commandContractFor(
 			"list supported lifecycle hook event types",
@@ -477,14 +475,6 @@ func commandContractsByName() map[string]commandContract {
 			[]string{commandOutputYAML},
 			withInputType("stateDiagnosticsCommandInput"),
 			withExamples("atteler config state"),
-		),
-		"stream-headless": commandContractFor(
-			"stream one headless session log",
-			[]string{"--stream-headless"},
-			[]string{commandEffectSessionRead, commandEffectUserOutput},
-			[]string{commandOutputText},
-			withInputType("streamHeadlessCommandInput"),
-			withExamples("atteler session stream-headless run-123"),
 		),
 		"suggest-skill": commandContractFor(
 			"suggest reusable skills from repeated observed actions",
