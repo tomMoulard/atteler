@@ -35,11 +35,14 @@ type responseRecordOptions struct {
 type runOnceExecutionOptions struct {
 	OutputFormat                string
 	HeadlessID                  string
+	SkillLearningStoreDir       string
+	SkillLearningSkillDir       string
 	Response                    responseRecordOptions
 	AgentLoopBudget             llm.AgentLoopBudget
 	AgentLoopCheckpointInterval int
 	Headless                    bool
 	HeadlessPrivateLog          bool
+	SkillLearningEnabled        bool
 }
 
 type runOnceResult struct {
@@ -324,6 +327,20 @@ func runOnceWithOptions(
 	requestContextOptions := contextOptionsForRequestModels(contextOptions, reg, prepared.requestModel, prepared.fallbackModels)
 	globalRefCtx := configuredReferenceContextForRunOnce(ctx, configuredReferences, referenceContext, referenceManifest, referenceContextEstimator, requestContextOptions)
 	refCtx := buildReferenceContextWithManifest(ctx, globalRefCtx, prepared.activeAgent, requestContextOptions)
+	generatedSkillRefCtx := generatedSkillReferenceContextWithManifest(
+		prepared.prompt,
+		executionOptions.SkillLearningStoreDir,
+		executionOptions.SkillLearningSkillDir,
+		executionOptions.SkillLearningEnabled,
+		requestContextOptions,
+	)
+	refCtx.Content = appendReferenceContext(refCtx.Content, generatedSkillRefCtx.Content)
+
+	refCtx.Manifest = mergeReferenceManifests(refCtx.Manifest, generatedSkillRefCtx.Manifest)
+	if refCtx.Estimator == "" {
+		refCtx.Estimator = generatedSkillRefCtx.Estimator
+	}
+
 	prependReferenceContext(&params, refCtx.Content)
 
 	applyGenerationParams(&params, prepared.generation)

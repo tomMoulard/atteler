@@ -480,8 +480,153 @@ func TestGeneratedSkillReferenceContextFormatsMatchingSkill(t *testing.T) {
 	require.Contains(t, got, "generated-skill:k8s-investigation")
 	require.Contains(t, got, "K8s Investigation")
 
+	refCtx := generatedSkillReferenceContextWithManifest(
+		"Investigate this Kubernetes incident.",
+		storeDir,
+		filepath.Join(root, "skills"),
+		true,
+		contextOptionsForProviderModel(contextref.Options{}, "anthropic", "claude-test"),
+	)
+	require.NotEmpty(t, refCtx.Content)
+	assert.Contains(t, refCtx.Estimator, "anthropic-calibrated")
+	assert.Equal(t, 1, refCtx.Manifest.IncludedCount)
+	assert.Equal(t, 0, refCtx.Manifest.RejectedCount)
+	assert.Contains(t, refCtx.Manifest.TokenEstimator, "anthropic-calibrated")
+	require.Len(t, refCtx.Manifest.Entries, 1)
+	assert.Equal(t, "generated-skill:k8s-investigation", refCtx.Manifest.Entries[0].Scope)
+	assert.Equal(t, contextref.ReferenceDecisionLoaded, refCtx.Manifest.Entries[0].PolicyDecision)
+	assert.Equal(t, "loaded.generated_skill", refCtx.Manifest.Entries[0].PolicyReasonCode)
+	assert.Contains(t, refCtx.Manifest.Entries[0].TokenEstimator, "model=claude-test")
+	assert.Positive(t, refCtx.Manifest.Entries[0].TokenEstimate.UpperBoundTokens)
+
 	require.Empty(t, generatedSkillReferenceContext("Investigate this Kubernetes incident.", storeDir, filepath.Join(root, "skills"), false))
 	require.Empty(t, generatedSkillReferenceContext("Summarize the README.", storeDir, filepath.Join(root, "skills"), true))
+}
+
+func TestGeneratedSkillReferenceContextAuditsTruncationReason(t *testing.T) {
+	t.Parallel()
+
+	refCtx := formatGeneratedSkillReferencesWithManifest(
+		[]attskill.GeneratedSkillReference{{
+			Slug:      "k8s-investigation",
+			Name:      "K8s Investigation",
+			Path:      filepath.Join(t.TempDir(), "skills", "k8s-investigation", "SKILL.md"),
+			Content:   strings.Repeat("use kubectl safely\n", 4),
+			Truncated: true,
+		}},
+		contextOptionsForProviderModel(contextref.Options{}, "anthropic", "claude-test"),
+	)
+
+	require.Len(t, refCtx.Manifest.Entries, 1)
+	entry := refCtx.Manifest.Entries[0]
+	assert.Equal(t, contextref.ReferenceDecisionTruncated, entry.PolicyDecision)
+	assert.Equal(t, "truncated.byte_limit", entry.PolicyReasonCode)
+	assert.Contains(t, entry.PolicyReason, "generated skill")
+	assert.Contains(t, entry.PolicyReason, "byte limit")
+	assert.True(t, entry.Truncated)
+	assert.Equal(t, 1, refCtx.Manifest.TruncatedCount)
+	assert.Equal(t, 1, refCtx.Manifest.IncludedCount)
+}
+
+func TestRunWithState_HeadlessGeneratedSkillAppearsInContextManifest(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	storeDir := filepath.Join(root, "learning")
+	skillDir := filepath.Join(root, "skills")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "style.md"), []byte("Prefer concise reports.\n"), 0o600))
+
+	skillPath := filepath.Join(skillDir, "k8s-investigation", "SKILL.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(skillPath), 0o750))
+	require.NoError(t, os.WriteFile(skillPath, []byte("# K8s Investigation\nUse kubectl safely.\n"), 0o600))
+
+	store := attskill.NewLearningStore(storeDir)
+	now := time.Now().UTC()
+	require.NoError(t, store.Save(attskill.LearningState{Skills: []attskill.GeneratedSkill{{
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Name:        "K8s Investigation Skill",
+		Slug:        "k8s-investigation",
+		Status:      attskill.LearningSkillStatusActive,
+		SkillPath:   skillPath,
+		Steps:       []string{"run kubectl get pods"},
+		Occurrences: 3,
+	}}}))
+
+	replayPath := filepath.Join(root, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "claude-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "Investigate this Kubernetes incident."}}},
+		nil,
+		&llm.Response{Content: "recorded answer", Model: "claude-test"},
+	))
+
+	sessionStore := session.NewStore(filepath.Join(root, "sessions"))
+	headlessID := "generated-skill-manifest"
+	contextOptions := contextOptionsForProviderModel(contextref.Options{Root: root}, "anthropic", "claude-test")
+	err := runWithState(t.Context(), cliOptions{
+		oncePrompt:         "Investigate this Kubernetes incident.",
+		headless:           true,
+		headlessID:         headlessID,
+		outputFormat:       outputFormatText,
+		replayResponsePath: replayPath,
+	}, appState{
+		registry:                  llm.NewRegistry(),
+		agentRegistry:             agent.NewRegistry(nil),
+		sessionStore:              sessionStore,
+		sessionState:              session.New("claude-test", nil),
+		contextOptions:            contextOptions,
+		configuredReferences:      []string{"style.md"},
+		selectedModel:             "claude-test",
+		skillLearningStoreDir:     storeDir,
+		skillLearningSkillDir:     skillDir,
+		skillLearningEnabled:      true,
+		referenceContextEstimator: "stale-estimator-forces-configured-reference-reload",
+	})
+	require.NoError(t, err)
+
+	log, err := sessionStore.ReadHeadlessLog(headlessID)
+	require.NoError(t, err)
+
+	manifest := decodeHeadlessContextManifest(t, log)
+	require.Len(t, manifest.ConfiguredReferences.Entries, 2)
+	assert.Equal(t, 2, manifest.IncludedReferenceCount)
+	assertManifestContainsGeneratedSkillReference(t, manifest, "k8s-investigation")
+	assertManifestContainsSource(t, manifest, "style.md")
+	assert.Positive(t, manifest.ReferenceEstimatedUpperBound)
+}
+
+func assertManifestContainsGeneratedSkillReference(t *testing.T, manifest requestContextManifest, slug string) {
+	t.Helper()
+
+	for i := range manifest.ConfiguredReferences.Entries {
+		entry := &manifest.ConfiguredReferences.Entries[i]
+		if entry.Scope != "generated-skill:"+slug {
+			continue
+		}
+
+		assert.Equal(t, contextref.ReferenceDecisionLoaded, entry.PolicyDecision)
+		assert.Equal(t, "loaded.generated_skill", entry.PolicyReasonCode)
+		assert.Contains(t, entry.TokenEstimator, "model=claude-test")
+		assert.Positive(t, entry.TokenEstimate.UpperBoundTokens)
+
+		return
+	}
+
+	require.FailNow(t, "generated skill reference missing from manifest", "slug=%s manifest=%+v", slug, manifest.ConfiguredReferences.Entries)
+}
+
+func assertManifestContainsSource(t *testing.T, manifest requestContextManifest, source string) {
+	t.Helper()
+
+	for i := range manifest.ConfiguredReferences.Entries {
+		entry := &manifest.ConfiguredReferences.Entries[i]
+		if entry.Source == source {
+			return
+		}
+	}
+
+	require.FailNow(t, "source missing from manifest", "source=%s manifest=%+v", source, manifest.ConfiguredReferences.Entries)
 }
 
 func TestBackgroundObserverDoesNotBlockEventEmissionAndFlushes(t *testing.T) {

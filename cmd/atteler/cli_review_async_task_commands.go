@@ -338,8 +338,8 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 	setExplicitContextManifestEventModel(&manifestEvent, params.Model)
 	emitHookWarning(ctx, rc.hookRunner, manifestEvent)
 
-	if err := validateRequestBudgetWithFallbacks(rc.registry, params.Model, fallbackModels, params.Messages, rc.maxInputTokens); err != nil {
-		return "", fmt.Errorf("review LLM budget: %w", err)
+	if budgetErr := validateRequestBudgetWithFallbacks(rc.registry, params.Model, fallbackModels, params.Messages, rc.maxInputTokens); budgetErr != nil {
+		return "", fmt.Errorf("review LLM budget: %w", budgetErr)
 	}
 
 	resp, err := rc.registry.CompleteWithFallback(ctx, params, fallbackModels)

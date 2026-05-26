@@ -550,6 +550,9 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 	executionOptions := runOnceExecutionOptionsFromOptions(opts)
 	executionOptions.AgentLoopBudget = state.agentLoopBudget
 	executionOptions.AgentLoopCheckpointInterval = state.agentLoopCheckpointInterval
+	executionOptions.SkillLearningStoreDir = state.skillLearningStoreDir
+	executionOptions.SkillLearningSkillDir = state.skillLearningSkillDir
+	executionOptions.SkillLearningEnabled = state.skillLearningEnabled
 
 	if opts.headless && opts.oncePrompt == "" && !opts.readStdin {
 		err := errors.New("headless mode requires --once, positional prompt text, or --stdin")
@@ -589,16 +592,6 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		return err
 	}
 
-	referenceContext := appendReferenceContext(
-		state.referenceContext,
-		generatedSkillReferenceContext(
-			prompt,
-			state.skillLearningStoreDir,
-			state.skillLearningSkillDir,
-			state.skillLearningEnabled,
-		),
-	)
-
 	runErr := runOnceWithOptions(
 		ctx,
 		state.registry,
@@ -607,7 +600,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		state.sessionStore,
 		state.sessionState,
 		state.contextOptions,
-		referenceContext,
+		state.referenceContext,
 		state.referenceManifest,
 		state.referenceContextEstimator,
 		state.configuredReferences,

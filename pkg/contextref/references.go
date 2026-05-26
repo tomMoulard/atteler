@@ -1801,6 +1801,7 @@ func referenceReasonCodeMatchers() []reasonCodeMatcher {
 		{code: "http_status", needles: []string{"http "}},
 		{code: "request_aborted", needles: []string{"aborted"}},
 		{code: "omitted", needles: []string{"omitted"}},
+		{code: "generated_skill", needles: []string{"generated skill"}},
 		{code: "glob_no_match", needles: []string{"glob matched no files"}},
 		{code: "io_error", needles: []string{"stat"}},
 		{code: "io_error", needles: []string{"read"}},
