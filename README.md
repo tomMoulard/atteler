@@ -141,7 +141,7 @@ broken backend is visible before a completion request fails.
 Use `atteler config report` for a redacted YAML diagnostics bundle suitable for
 issue reports; it includes schema versions, candidate source status, migrations,
 implicit defaults, unknown/deprecated field findings, and redacted merged
-origins.
+origins, plus harness importer warnings.
 Use `atteler config migrate` to rewrite existing Atteler config files and the
 persisted state file to the current schema; missing files are skipped.
 Read-only inspection can also be triggered through debug aliases such as
@@ -151,8 +151,8 @@ Read-only inspection can also be triggered through debug aliases such as
 
 Harness importer warnings, including unsupported fields, malformed best-effort
 input, and ignored fallback-only sections, are printed by `atteler config
-validate` and `atteler config explain`; `explain` also shows the source path and
-`harness-import` precedence for every imported value.
+validate`, `atteler config explain`, and `atteler config report`; `explain` also
+shows the source path and `harness-import` precedence for every imported value.
 
 Minimal example:
 
