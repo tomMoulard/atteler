@@ -503,7 +503,7 @@ func (m model) acceptCompletion() (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 
-	return m, nil, false
+	return m.forceIdleSuggestion()
 }
 
 func (m model) revampPrompt() (tea.Model, tea.Cmd) {
