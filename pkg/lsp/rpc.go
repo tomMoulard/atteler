@@ -15,12 +15,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 //nolint:govet // Field order groups process, write lock, pending requests, and lifecycle.
 type rpcClient struct {
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
+	cmd        *exec.Cmd
+	invocation *shell.Invocation
+	stdin      io.WriteCloser
 
 	writeMu sync.Mutex
 
@@ -84,45 +87,71 @@ func startClient(
 	default:
 	}
 
-	cmd := exec.CommandContext(startCtx, command, args...)
+	secrets := secretValuesFromEnv(env)
+	stderr := newDiagnosticBuffer(maxDiagnosticBytes, secrets)
+	stdout := newDiagnosticBuffer(maxDiagnosticBytes, secrets)
+
+	cmd, invocation, err := shell.CommandContext(startCtx, shell.CommandOptions{
+		Program:      command,
+		Args:         args,
+		EnvList:      env,
+		Stderr:       stderr,
+		Mode:         shell.ModeStreaming,
+		Audit:        shell.AuditContext{Caller: "atteler.lsp"},
+		SecretValues: secrets,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("authorize language server %q: %w", command, err)
+	}
 	// A managed language server should outlive a single request context. Keep
 	// CommandContext's pre-start cancellation check for startup timeouts while
 	// leaving shutdown/force-close as the only process termination paths after
 	// the server has started.
 	cmd.Cancel = nil
-	cmd.Env = append(os.Environ(), env...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("open language server stdin: %w", err)
+		return nil, fmt.Errorf("open language server stdin: %w", finishLanguageServerSetupError(invocation, err))
 	}
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("open language server stdout: %w", err)
+		return nil, fmt.Errorf("open language server stdout: %w", finishLanguageServerSetupError(invocation, err))
 	}
 
-	secrets := secretValuesFromEnv(env)
-	stderr := newDiagnosticBuffer(maxDiagnosticBytes, secrets)
-	stdout := newDiagnosticBuffer(maxDiagnosticBytes, secrets)
-	cmd.Stderr = stderr
-
 	if err := cmd.Start(); err != nil {
+		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "language server failed before JSON-RPC streaming"}); finishErr != nil {
+			return nil, fmt.Errorf("start language server %q: %w", command, errors.Join(err, finishErr))
+		}
+
 		return nil, fmt.Errorf("start language server %q: %w", command, err)
 	}
 
 	client := &rpcClient{
-		cmd:      cmd,
-		stdin:    stdin,
-		pending:  make(map[int]chan rpcResponse),
-		done:     make(chan struct{}),
-		waitDone: make(chan struct{}),
-		stderr:   stderr,
-		stdout:   stdout,
+		cmd:        cmd,
+		invocation: invocation,
+		stdin:      stdin,
+		pending:    make(map[int]chan rpcResponse),
+		done:       make(chan struct{}),
+		waitDone:   make(chan struct{}),
+		stderr:     stderr,
+		stdout:     stdout,
 	}
 	go client.readLoop(stdoutPipe)
 
 	return client, nil
+}
+
+func finishLanguageServerSetupError(invocation *shell.Invocation, err error) error {
+	if finishErr := invocation.Finish(shell.FinishOptions{
+		Error:         err,
+		OutputCapture: shell.OutputNotCaptured,
+		OutputNote:    "language server failed before JSON-RPC streaming",
+	}); finishErr != nil {
+		return errors.Join(err, finishErr)
+	}
+
+	return err
 }
 
 func (c *rpcClient) setNotificationHandler(handler func(string, json.RawMessage)) {
@@ -394,7 +423,16 @@ func (c *rpcClient) wait(ctx context.Context) error {
 func (c *rpcClient) waitDoneAfterStart() <-chan struct{} {
 	c.waitOnce.Do(func() {
 		go func() {
-			c.waitErr = c.cmd.Wait()
+			waitErr := c.cmd.Wait()
+			if finishErr := c.invocation.Finish(shell.FinishOptions{Error: waitErr, OutputCapture: shell.OutputNotCaptured, OutputNote: "language server JSON-RPC stream was not captured"}); finishErr != nil {
+				if waitErr != nil {
+					waitErr = errors.Join(waitErr, finishErr)
+				} else {
+					waitErr = finishErr
+				}
+			}
+
+			c.waitErr = waitErr
 			close(c.waitDone)
 		}()
 	})

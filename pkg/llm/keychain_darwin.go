@@ -7,8 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 // keychainService is the macOS Keychain "service" attribute under which the
@@ -36,11 +37,7 @@ func readClaudeCodeKeychain(ctx context.Context) (string, error) {
 // readClaudeCodeKeychainPassword runs `security find-generic-password -w` and
 // returns the raw password blob (the JSON the claude CLI stored).
 func readClaudeCodeKeychainPassword(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx,
-		"security", "find-generic-password",
-		"-s", keychainService,
-		"-w",
-	).Output()
+	out, err := runSecurityCommand(ctx, []string{"find-generic-password", "-s", keychainService, "-w"}, nil, shell.OutputSensitive)
 	if err != nil {
 		return "", fmt.Errorf("keychain lookup failed: %w", err)
 	}
@@ -57,10 +54,7 @@ func readClaudeCodeKeychainPassword(ctx context.Context) (string, error) {
 // returns the account name ("acct") so callers can update the entry under the
 // same account on write.
 func readClaudeCodeKeychainAccount(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx,
-		"security", "find-generic-password",
-		"-s", keychainService,
-	).Output()
+	out, err := runSecurityCommand(ctx, []string{"find-generic-password", "-s", keychainService}, nil, shell.OutputSensitive)
 	if err != nil {
 		return "", fmt.Errorf("keychain metadata lookup failed: %w", err)
 	}
@@ -142,11 +136,43 @@ func (p *claudeCodeKeychainPersister) persist(ctx context.Context, accessToken, 
 		args = append(args, "-a", p.account)
 	}
 
-	cmd := exec.CommandContext(ctx, "security", args...)
-
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := runSecurityCommand(ctx, args, []string{string(updated)}, shell.OutputSensitive); err != nil {
 		return fmt.Errorf("keychain update failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
 	return nil
+}
+
+func runSecurityCommand(ctx context.Context, args, secretArgs []string, capture shell.OutputCapture) ([]byte, error) {
+	var stdout, stderr bytes.Buffer
+
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+		Program:      "security",
+		Args:         args,
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+		Mode:         shell.ModeCaptured,
+		SecretValues: secretArgs,
+		Audit:        shell.AuditContext{Caller: "atteler.keychain.security"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("authorize security command: %w", err)
+	}
+
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{
+		Stdout:        stdout.String(),
+		Stderr:        stderr.String(),
+		Error:         runErr,
+		OutputCapture: capture,
+		OutputNote:    "macOS keychain output may contain credentials",
+	}); finishErr != nil && runErr == nil {
+		return nil, fmt.Errorf("audit security command: %w", finishErr)
+	}
+
+	if runErr != nil {
+		return append(stdout.Bytes(), stderr.Bytes()...), runErr
+	}
+
+	return stdout.Bytes(), nil
 }

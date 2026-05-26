@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 // AppServerClient speaks Codex app-server JSONL over stdio.
@@ -53,6 +55,20 @@ func (e *appServerError) Error() string {
 
 // StartAppServer launches the configured Codex app-server command.
 func StartAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, emit func(CodexEvent)) (*AppServerClient, error) {
+	return startAppServer(ctx, cfg, workspacePath, shell.AuditContext{Caller: "symphony.codex_app_server"}, emit)
+}
+
+// StartAppServerForIssue launches the configured Codex app-server command and
+// ties its audit records to the issue currently being worked.
+func StartAppServerForIssue(ctx context.Context, cfg CodexConfig, issue Issue, workspacePath string, emit func(CodexEvent)) (*AppServerClient, error) {
+	return startAppServer(ctx, cfg, workspacePath, shell.AuditContext{
+		Caller:          "symphony.codex_app_server",
+		IssueID:         issue.ID,
+		IssueIdentifier: issue.Identifier,
+	}, emit)
+}
+
+func startAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, audit shell.AuditContext, emit func(CodexEvent)) (*AppServerClient, error) {
 	if err := requireAppServerContext(ctx); err != nil {
 		return nil, err
 	}
@@ -62,25 +78,42 @@ func StartAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 		command = defaultCodexCommand
 	}
 
-	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
-	cmd.Dir = workspacePath
+	if strings.TrimSpace(audit.Caller) == "" {
+		audit.Caller = "symphony.codex_app_server"
+	}
+
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+		Program: "bash",
+		Args:    []string{"--noprofile", "--norc", "-lc", command},
+		Command: command,
+		Dir:     workspacePath,
+		Mode:    shell.ModeStreaming,
+		Audit:   audit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("codex_not_found: authorize %q: %w", command, err)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("codex_not_found: open stdin: %w", err)
+		return nil, fmt.Errorf("codex_not_found: open stdin: %w", finishAppServerSetupError(invocation, err))
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("codex_not_found: open stdout: %w", err)
+		return nil, fmt.Errorf("codex_not_found: open stdout: %w", finishAppServerSetupError(invocation, err))
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("codex_not_found: open stderr: %w", err)
+		return nil, fmt.Errorf("codex_not_found: open stderr: %w", finishAppServerSetupError(invocation, err))
 	}
 
 	if err := cmd.Start(); err != nil {
+		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "process failed before stdio protocol output capture"}); finishErr != nil {
+			return nil, fmt.Errorf("codex_not_found: start %q: %w", command, errors.Join(err, finishErr))
+		}
+
 		return nil, fmt.Errorf("codex_not_found: start %q: %w", command, err)
 	}
 
@@ -99,7 +132,11 @@ func StartAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 
 	go client.readLoop(stdout)
 	go func() {
-		client.done <- cmd.Wait()
+		err := cmd.Wait()
+		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "stdio protocol streamed to Symphony app-server client"}); finishErr != nil && err == nil {
+			err = finishErr
+		}
+		client.done <- err
 	}()
 
 	if err := client.initialize(ctx, cfg); err != nil {
@@ -120,6 +157,18 @@ func requireAppServerContext(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func finishAppServerSetupError(invocation *shell.Invocation, err error) error {
+	if finishErr := invocation.Finish(shell.FinishOptions{
+		Error:         err,
+		OutputCapture: shell.OutputNotCaptured,
+		OutputNote:    "process failed before stdio protocol output capture",
+	}); finishErr != nil {
+		return errors.Join(err, finishErr)
+	}
+
+	return err
 }
 
 // Close stops the app-server subprocess.

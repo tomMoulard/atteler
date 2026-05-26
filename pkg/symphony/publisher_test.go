@@ -13,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 const (
@@ -71,9 +73,11 @@ func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
 
 	var commands []string
 	var pushEnv []string
-	runner := func(_ context.Context, _ string, env []string, args ...string) ([]byte, error) {
+	var audits []shell.AuditContext
+	runner := func(_ context.Context, _ string, env []string, audit shell.AuditContext, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
 		commands = append(commands, joined)
+		audits = append(audits, audit)
 		switch {
 		case joined == "checkout -B symphony/GH-12":
 			return nil, nil
@@ -148,6 +152,12 @@ func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
 	assert.Contains(t, commands, "push -u origin symphony/GH-12")
 	assert.Contains(t, pushEnv, "GIT_TERMINAL_PROMPT=0")
 	assert.Contains(t, pushEnv, "GITHUB_TOKEN=token")
+	require.NotEmpty(t, audits)
+	for _, audit := range audits {
+		assert.Equal(t, "symphony.git", audit.Caller)
+		assert.Equal(t, "node", audit.IssueID)
+		assert.Equal(t, "GH-12", audit.IssueIdentifier)
+	}
 	requestMu.Lock()
 	defer requestMu.Unlock()
 	assert.Contains(t, requests, "DELETE /repos/owner/repo/issues/12/labels/symphony?")
@@ -159,7 +169,7 @@ func TestGitHubPublisher_RebasesAndForcePushesPullRequestBranch(t *testing.T) {
 	var commands []string
 	var fetchEnv []string
 	var pushEnv []string
-	runner := func(_ context.Context, _ string, env []string, args ...string) ([]byte, error) {
+	runner := func(_ context.Context, _ string, env []string, _ shell.AuditContext, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
 		commands = append(commands, joined)
 		switch joined {
@@ -223,7 +233,7 @@ func TestGitHubPublisher_PreparesReworkWorkspaceAndLeavesRebaseConflict(t *testi
 	t.Parallel()
 
 	var commands []string
-	runner := func(_ context.Context, _ string, _ []string, args ...string) ([]byte, error) {
+	runner := func(_ context.Context, _ string, _ []string, _ shell.AuditContext, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
 		commands = append(commands, joined)
 		switch joined {
@@ -291,7 +301,7 @@ func TestGitHubPublisher_SkipsCleanWorkspaceWithoutPullRequest(t *testing.T) {
 	defer server.Close()
 
 	var commands []string
-	runner := func(_ context.Context, _ string, _ []string, args ...string) ([]byte, error) {
+	runner := func(_ context.Context, _ string, _ []string, _ shell.AuditContext, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
 		commands = append(commands, joined)
 		switch joined {

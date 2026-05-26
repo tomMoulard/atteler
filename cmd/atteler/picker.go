@@ -13,6 +13,7 @@ import (
 
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 // modelsLoadedMsg is sent when one provider's model discovery completes.
@@ -431,19 +432,30 @@ func runFZFModelPicker(ctx context.Context, fzfPath string, items []pickerItem) 
 	var stdout bytes.Buffer
 
 	input := fzfInput(items)
-	cmd := exec.CommandContext(
-		ctx,
-		fzfPath,
-		"--prompt", "atteler model> ",
-		"--height", "80%",
-		"--border",
-		"--delimiter", "\t",
-		"--with-nth", "1",
-	)
-	cmd.Stdin = strings.NewReader(input)
-	cmd.Stdout = &stdout
+
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+		Program: fzfPath,
+		Args: []string{
+			"--prompt", "atteler model> ",
+			"--height", "80%",
+			"--border",
+			"--delimiter", "\t",
+			"--with-nth", "1",
+		},
+		Stdin:  strings.NewReader(input),
+		Stdout: &stdout,
+		Mode:   shell.ModeInteractive,
+		Audit:  shell.AuditContext{Caller: "atteler.fzf_model_picker"},
+	})
+	if err != nil {
+		return func() tea.Msg { return fzfModelSelectedMsg{err: err} }
+	}
 
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Error: err, OutputCapture: shell.OutputCaptured}); finishErr != nil && err == nil {
+			err = finishErr
+		}
+
 		if item, ok := parseFZFSelection(stdout.String(), items); ok {
 			return fzfModelSelectedMsg{item: item, selected: true}
 		}

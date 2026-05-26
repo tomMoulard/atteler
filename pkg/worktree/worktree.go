@@ -18,6 +18,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 // EnvDir overrides the parent directory for worktree directories.
@@ -1615,24 +1617,27 @@ func gitMergeBase(ctx context.Context, dir, left, right string) (string, error) 
 }
 
 func gitIsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
-	if err := requireCommandContext(ctx); err != nil {
-		return false, err
-	}
-
-	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", ancestor, descendant)
-	cmd.Dir = dir
+	args := []string{"merge-base", "--is-ancestor", ancestor, descendant}
 
 	var stderr bytes.Buffer
 
-	cmd.Stderr = &stderr
+	cmd, invocation, err := gitCommand(ctx, dir, &stderr, nil, args...)
+	if err != nil {
+		return false, err
+	}
 
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{Stderr: stderr.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+		return false, fmt.Errorf("git merge-base --is-ancestor audit: %w", finishErr)
+	}
+
+	if runErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 {
 			return false, nil
 		}
 
-		return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %s: %w", ancestor, descendant, strings.TrimSpace(stderr.String()), err)
+		return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %s: %w", ancestor, descendant, strings.TrimSpace(stderr.String()), runErr)
 	}
 
 	return true, nil
@@ -1793,58 +1798,92 @@ func printable(value string) string {
 
 // gitRun executes a git command in dir and returns any error.
 func gitRun(ctx context.Context, dir string, args ...string) error {
-	if err := requireCommandContext(ctx); err != nil {
+	var stderr bytes.Buffer
+
+	cmd, invocation, err := gitCommand(ctx, dir, &stderr, nil, args...)
+	if err != nil {
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{Stderr: stderr.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+		return fmt.Errorf("git %s audit: %w", strings.Join(args, " "), finishErr)
+	}
 
-	var stderr bytes.Buffer
-
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), err)
+	if runErr != nil {
+		return fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), runErr)
 	}
 
 	return nil
 }
 
 func gitCombinedOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	if err := requireCommandContext(ctx); err != nil {
+	var out bytes.Buffer
+
+	cmd, invocation, err := gitCommand(ctx, dir, &out, &out, args...)
+	if err != nil {
 		return "", err
 	}
 
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{Stdout: out.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+		return out.String(), fmt.Errorf("git %s audit: %w", strings.Join(args, " "), finishErr)
 	}
 
-	return string(out), nil
+	if runErr != nil {
+		return out.String(), fmt.Errorf("git %s: %w", strings.Join(args, " "), runErr)
+	}
+
+	return out.String(), nil
 }
 
 // gitOutput executes a git command in dir and returns its stdout.
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	if err := requireCommandContext(ctx); err != nil {
+	var stdout, stderr bytes.Buffer
+
+	cmd, invocation, err := gitCommand(ctx, dir, &stderr, &stdout, args...)
+	if err != nil {
 		return "", err
 	}
 
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Stderr: stderr.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+		return "", fmt.Errorf("git %s audit: %w", strings.Join(args, " "), finishErr)
+	}
 
-	var stdout, stderr bytes.Buffer
-
-	cmd.Stdout = &stdout
-
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), err)
+	if runErr != nil {
+		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), runErr)
 	}
 
 	return stdout.String(), nil
+}
+
+func gitCommand(ctx context.Context, dir string, stderr, stdout *bytes.Buffer, args ...string) (*exec.Cmd, *shell.Invocation, error) {
+	opts := shell.CommandOptions{
+		Program: "git",
+		Args:    args,
+		Dir:     dir,
+		Mode:    shell.ModeCaptured,
+		Audit:   shell.AuditContext{Caller: "atteler.worktree.git"},
+	}
+	if stderr != nil {
+		opts.Stderr = stderr
+	}
+
+	if stdout != nil {
+		opts.Stdout = stdout
+	}
+
+	if err := requireCommandContext(ctx); err != nil {
+		return nil, nil, err
+	}
+
+	cmd, invocation, err := shell.CommandContext(ctx, opts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("git %s authorize: %w", strings.Join(args, " "), err)
+	}
+
+	return cmd, invocation, nil
 }
 
 // parseWorktreeList parses the porcelain output of `git worktree list`

@@ -146,6 +146,11 @@ func callLLMWithTools(
 			Dir:            request.workingDir,
 			Timeout:        5 * time.Minute, // Generous timeout for tool calls.
 			MaxOutputBytes: agentLoopToolOutputLimit(ctx),
+			Audit: attshell.AuditContext{
+				Caller:      "atteler.tui.llm_tool",
+				SessionID:   request.eventBase.SessionID,
+				SessionPath: request.eventBase.SessionPath,
+			},
 		})
 
 		output := formatShellContext(shellResultMsg{

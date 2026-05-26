@@ -7,13 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 // WorkflowSnapshot is a last-known-good workflow definition and effective
@@ -957,12 +958,32 @@ func runGitHubCLI(ctx context.Context, args ...string) string {
 	cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	output, err := exec.CommandContext(cmdCtx, "gh", args...).CombinedOutput()
+	var output bytes.Buffer
+	cmd, invocation, err := shell.CommandContext(cmdCtx, shell.CommandOptions{
+		Program: "gh",
+		Args:    args,
+		Stdout:  &output,
+		Stderr:  &output,
+		Mode:    shell.ModeCaptured,
+		Audit:   shell.AuditContext{Caller: "symphony.gh_token"},
+	})
 	if err != nil {
 		return ""
 	}
 
-	return strings.TrimSpace(string(output))
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{
+		Error:         runErr,
+		OutputCapture: shell.OutputSensitive,
+		OutputNote:    "GitHub CLI token output is intentionally not captured",
+	}); finishErr != nil && runErr == nil {
+		return ""
+	}
+	if runErr != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(output.String())
 }
 
 func parseGitHubAuthStatusToken(output string) string {

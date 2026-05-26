@@ -76,7 +76,7 @@ func (r *DefaultAgentRunner) Run(ctx context.Context, req RunRequest, emit func(
 		}
 	}
 
-	client, err := StartAppServer(ctx, req.Config.Codex, workspace.Path, emit)
+	client, err := StartAppServerForIssue(ctx, req.Config.Codex, req.Issue, workspace.Path, emit)
 	if err != nil {
 		result.CompletedAt = time.Now().UTC()
 		result.Error = err.Error()

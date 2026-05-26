@@ -6,11 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 // Request describes one child agent invocation.
@@ -111,25 +111,48 @@ func AttelerCommandWithOptions(opts CommandOptions) Runner {
 		args := append([]string(nil), opts.Args...)
 		args = append(args, "--agent", request.Agent, "--once", request.Prompt)
 
-		cmd := exec.CommandContext(ctx, binary, args...)
-		if strings.TrimSpace(opts.Dir) != "" {
-			cmd.Dir = opts.Dir
-		}
-
-		cmd.Env = mergeEnv(opts.Env)
-
 		var stdout, stderr bytes.Buffer
 
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
+		cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+			Program: binary,
+			Args:    args,
+			Dir:     opts.Dir,
+			Env:     opts.Env,
+			Mode:    shell.ModeCaptured,
+			Stdout:  &stdout,
+			Stderr:  &stderr,
+			Audit: shell.AuditContext{
+				Caller: "atteler.subagent",
+			},
+		})
+		if err != nil {
+			return "", fmt.Errorf("subagent: authorize atteler command: %w", err)
+		}
 
 		if err := cmd.Run(); err != nil {
+			if finishErr := invocation.Finish(shell.FinishOptions{
+				Stdout:        stdout.String(),
+				Stderr:        stderr.String(),
+				Error:         err,
+				OutputCapture: shell.OutputCaptured,
+			}); finishErr != nil {
+				return stdout.String(), fmt.Errorf("subagent: audit atteler command: %w", finishErr)
+			}
+
 			message := strings.TrimSpace(stderr.String())
 			if message == "" {
 				message = err.Error()
 			}
 
 			return stdout.String(), fmt.Errorf("subagent: atteler command failed: %s: %w", message, err)
+		}
+
+		if err := invocation.Finish(shell.FinishOptions{
+			Stdout:        stdout.String(),
+			Stderr:        stderr.String(),
+			OutputCapture: shell.OutputCaptured,
+		}); err != nil {
+			return stdout.String(), err
 		}
 
 		return stdout.String(), nil
@@ -172,23 +195,4 @@ func validateRequests(requests []Request) error {
 	}
 
 	return nil
-}
-
-func mergeEnv(extra map[string]string) []string {
-	if len(extra) == 0 {
-		return nil
-	}
-
-	env := os.Environ()
-
-	for key, value := range extra {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-
-		env = append(env, key+"="+value)
-	}
-
-	return env
 }

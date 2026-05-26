@@ -432,6 +432,11 @@ func runOnceWithOptions(
 		executionOptions.Response,
 		checkpointPath,
 		agentLoopPreflight,
+		attshell.AuditContext{
+			Caller:      "atteler.once.llm_tool",
+			SessionID:   sessionState.ID,
+			SessionPath: store.Path(sessionState.ID),
+		},
 	)
 	if err != nil {
 		emitHookWarning(ctx, hooks, events.Event{
@@ -1408,6 +1413,7 @@ func runOnceComplete(
 	responseOptions responseRecordOptions,
 	checkpointPath string,
 	beforeModelCall func(iteration int, params llm.CompleteParams) error,
+	audit attshell.AuditContext,
 ) (*llm.Response, error) {
 	if responseOptions.ReplayPath != "" {
 		resp, err := loadRecordedResponse(responseOptions.ReplayPath)
@@ -1427,7 +1433,7 @@ func runOnceComplete(
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
-	executor := newBashExecutor(cwd, os.Stderr)
+	executor := newBashExecutor(cwd, os.Stderr, audit)
 
 	resp, _, err := llm.AgentLoop(ctx, reg, params, fallbackModels, executor, llm.AgentLoopConfig{
 		ConfirmContinue:    confirmContinueStdin,
@@ -1493,7 +1499,7 @@ func confirmToolCallStdin(_ context.Context, call llm.ToolCall, decision llm.Too
 
 // newBashExecutor creates a ToolExecutor that runs bash commands in the given
 // working directory, logging output to the provided writer.
-func newBashExecutor(cwd string, logw io.Writer) llm.ToolExecutor {
+func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) llm.ToolExecutor {
 	return func(ctx context.Context, call llm.ToolCall) llm.ToolResult {
 		if call.Name != "bash" {
 			return llm.ToolResult{
@@ -1529,6 +1535,7 @@ func newBashExecutor(cwd string, logw io.Writer) llm.ToolExecutor {
 			Dir:            cwd,
 			Timeout:        5 * time.Minute,
 			MaxOutputBytes: agentLoopToolOutputLimit(ctx),
+			Audit:          audit,
 		})
 
 		output := formatShellContext(shellResultMsg{

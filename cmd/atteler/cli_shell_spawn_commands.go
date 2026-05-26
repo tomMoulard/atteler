@@ -81,6 +81,11 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 		Command: input.Command,
 		Dir:     dir,
 		Timeout: timeout,
+		Audit: attshell.AuditContext{
+			Caller:      "atteler.cli.bash",
+			SessionID:   state.sessionState.ID,
+			SessionPath: state.sessionStore.Path(state.sessionState.ID),
+		},
 	})
 	if result.Stdout != "" {
 		fmt.Print(result.Stdout)
