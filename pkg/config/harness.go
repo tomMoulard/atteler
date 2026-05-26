@@ -188,10 +188,10 @@ func LoadHarnessDefaultsWithDiagnostics() (cfg Config, loaded []string, origins 
 }
 
 type harnessImportResult struct {
-	Config      Config
 	Loaded      []string
 	Origins     OriginMap
 	Diagnostics []Diagnostic
+	Config      Config
 }
 
 func newHarnessImportResult() harnessImportResult {

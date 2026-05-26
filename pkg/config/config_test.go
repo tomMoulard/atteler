@@ -494,6 +494,95 @@ func TestOriginChain_MergesMapOriginsAcrossOriginMaps(t *testing.T) {
 	assert.Equal(t, OriginReplace, dst["plugins.paths"].Chain[1].Operation)
 }
 
+func TestMergeConfigFromOrigins_PreservesProviderBoolWhenSourceOmitsIt(t *testing.T) {
+	t.Parallel()
+
+	dst := Config{
+		Providers: map[string]ProviderConfig{
+			"codex": {DisablePrivateAdapter: true},
+		},
+	}
+	dstOrigins := OriginMap{
+		"providers.codex.disable_private_adapter": {
+			Chain: []OriginEvent{{
+				Kind:      OriginHarnessImport,
+				Operation: OriginSet,
+				Source:    "harness",
+				Value:     "true",
+			}},
+		},
+	}
+	src := Config{
+		Providers: map[string]ProviderConfig{
+			"codex": {BaseURL: "https://codex.example"},
+		},
+	}
+	srcOrigins := OriginMap{
+		"providers.codex.base_url": {
+			Chain: []OriginEvent{{
+				Kind:      OriginProjectFile,
+				Operation: OriginSet,
+				Source:    "project.yaml",
+				Value:     "https://codex.example",
+			}},
+		},
+	}
+
+	mergeConfigFromOrigins(&dst, src, dstOrigins, srcOrigins)
+
+	assert.True(t, dst.Providers["codex"].DisablePrivateAdapter)
+	require.Len(t, dstOrigins["providers.codex.disable_private_adapter"].Chain, 1)
+
+	baseURLOrigin, ok := dstOrigins.Final("providers.codex.base_url")
+	require.True(t, ok)
+	assert.Equal(t, "project.yaml", baseURLOrigin.Source)
+}
+
+func TestMergeConfigFromOrigins_AllowsExplicitProviderBoolFalse(t *testing.T) {
+	t.Parallel()
+
+	dst := Config{
+		Providers: map[string]ProviderConfig{
+			"codex": {DisablePrivateAdapter: true},
+		},
+	}
+	dstOrigins := OriginMap{
+		"providers.codex.disable_private_adapter": {
+			Chain: []OriginEvent{{
+				Kind:      OriginHarnessImport,
+				Operation: OriginSet,
+				Source:    "harness",
+				Value:     "true",
+			}},
+		},
+	}
+	src := Config{
+		Providers: map[string]ProviderConfig{
+			"codex": {DisablePrivateAdapter: false},
+		},
+	}
+	srcOrigins := OriginMap{
+		"providers.codex.disable_private_adapter": {
+			Chain: []OriginEvent{{
+				Kind:      OriginProjectFile,
+				Operation: OriginSet,
+				Source:    "project.yaml",
+				Value:     "false",
+			}},
+		},
+	}
+
+	mergeConfigFromOrigins(&dst, src, dstOrigins, srcOrigins)
+
+	assert.False(t, dst.Providers["codex"].DisablePrivateAdapter)
+
+	chain := dstOrigins["providers.codex.disable_private_adapter"].Chain
+	require.Len(t, chain, 2)
+	assert.Equal(t, OriginOverride, chain[1].Operation)
+	assert.Equal(t, "project.yaml", chain[1].Source)
+	assert.Equal(t, "false", chain[1].Value)
+}
+
 func TestLoadPathSources_EnvPathPrecedence(t *testing.T) {
 	t.Parallel()
 

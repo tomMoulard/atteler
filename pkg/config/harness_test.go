@@ -764,6 +764,9 @@ Review carefully.
 	_, ok = origins.Final("providers.openai.disabled")
 	assert.False(t, ok, "omitted provider disabled flag should not be reported as an imported value")
 
+	_, ok = origins.Final("providers.openai.disable_private_adapter")
+	assert.False(t, ok, "omitted private-adapter flag should not be reported as an imported value")
+
 	agentOrigin, ok := origins.Final("agents.reviewer.model")
 	require.True(t, ok)
 	assert.Equal(t, OriginHarnessImport, agentOrigin.Kind)

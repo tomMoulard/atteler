@@ -858,10 +858,6 @@ func mergeSkillLearning(dst *Config, skillLearning fileSkillLearningConfig, rec 
 	}
 }
 
-func mergeConfig(dst *Config, src Config) {
-	mergeConfigFromSource(dst, src, nil, originSource{})
-}
-
 func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source originSource) {
 	if src.DefaultProvider != "" {
 		dst.DefaultProvider = src.DefaultProvider
@@ -911,8 +907,10 @@ func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec 
 			rec.set(providerFieldPath(name, "disabled"), source, provider.Disabled)
 		}
 
-		current.DisablePrivateAdapter = provider.DisablePrivateAdapter
-		rec.set(providerFieldPath(name, "disable_private_adapter"), source, provider.DisablePrivateAdapter)
+		if provider.DisablePrivateAdapter {
+			current.DisablePrivateAdapter = true
+			rec.set(providerFieldPath(name, "disable_private_adapter"), source, provider.DisablePrivateAdapter)
+		}
 
 		if provider.TimeoutSeconds > 0 {
 			current.TimeoutSeconds = provider.TimeoutSeconds
@@ -1278,9 +1276,12 @@ func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderC
 			appendOriginChain(dstOrigins, disabledPath, srcOrigins, false)
 		}
 
-		current.DisablePrivateAdapter = provider.DisablePrivateAdapter
+		disablePrivateAdapterPath := providerFieldPath(name, "disable_private_adapter")
+		if originPathExists(srcOrigins, disablePrivateAdapterPath) {
+			current.DisablePrivateAdapter = provider.DisablePrivateAdapter
 
-		appendOriginChain(dstOrigins, providerFieldPath(name, "disable_private_adapter"), srcOrigins, false)
+			appendOriginChain(dstOrigins, disablePrivateAdapterPath, srcOrigins, false)
+		}
 
 		if provider.TimeoutSeconds > 0 {
 			current.TimeoutSeconds = provider.TimeoutSeconds
