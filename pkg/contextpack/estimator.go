@@ -12,6 +12,7 @@ const (
 	defaultMessageOverheadTokens = 6
 	defaultCharsPerToken         = 3
 	defaultErrorBoundPercent     = 25
+	providerMessageCalibration   = "provider-message-overhead-v1"
 	providerAnthropicName        = "anthropic"
 	providerClaudeCodeName       = "claude-code"
 	providerCodexName            = "codex"
@@ -36,6 +37,7 @@ type EstimatorProfile struct {
 	Name                  string
 	Provider              string
 	Model                 string
+	Calibration           string
 	CharsPerToken         int
 	MessageOverheadTokens int
 	ErrorBoundPercent     int
@@ -63,6 +65,7 @@ func NewEstimator(provider, model string) Estimator {
 		Name:                  "generic-conservative",
 		Provider:              provider,
 		Model:                 model,
+		Calibration:           "conservative-rune-count-v1",
 		CharsPerToken:         defaultCharsPerToken,
 		MessageOverheadTokens: defaultMessageOverheadTokens,
 		ErrorBoundPercent:     defaultErrorBoundPercent,
@@ -71,18 +74,22 @@ func NewEstimator(provider, model string) Estimator {
 	switch provider {
 	case providerOpenAIName:
 		profile.Name = "openai-calibrated"
+		profile.Calibration = providerMessageCalibration
 		profile.MessageOverheadTokens = 4
 		profile.ErrorBoundPercent = 12
 	case providerCodexName:
 		profile.Name = "codex-calibrated"
+		profile.Calibration = providerMessageCalibration
 		profile.MessageOverheadTokens = 5
 		profile.ErrorBoundPercent = 12
 	case providerAnthropicName, providerClaudeCodeName:
 		profile.Name = "anthropic-calibrated"
+		profile.Calibration = providerMessageCalibration
 		profile.MessageOverheadTokens = 7
 		profile.ErrorBoundPercent = 18
 	case providerOllamaName:
 		profile.Name = "ollama-calibrated"
+		profile.Calibration = providerMessageCalibration
 		profile.MessageOverheadTokens = 8
 		profile.ErrorBoundPercent = 20
 	}

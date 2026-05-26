@@ -11,8 +11,10 @@ import (
 	"time"
 
 	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/llm"
 	attskill "github.com/tommoulard/atteler/pkg/skill"
 )
 
@@ -338,24 +340,30 @@ func flushEventObservers(ctx context.Context, observers []events.Observer) {
 }
 
 func generatedSkillReferenceContext(prompt, storeDir, skillDir string, enabled bool) string {
+	return generatedSkillReferenceContextWithManifest(prompt, storeDir, skillDir, enabled, contextref.Options{}).Content
+}
+
+func generatedSkillReferenceContextWithManifest(prompt, storeDir, skillDir string, enabled bool, opts contextref.Options) configuredReferenceContext {
 	if !enabled {
-		return ""
+		return configuredReferenceContext{}
 	}
 
 	refs, err := attskill.MatchingGeneratedSkills(prompt, attskill.ReferenceOptions{StoreDir: storeDir, SkillDir: skillDir})
 	if err != nil || len(refs) == 0 {
-		return ""
+		return configuredReferenceContext{}
 	}
 
-	return formatGeneratedSkillReferences(refs)
+	return formatGeneratedSkillReferencesWithManifest(refs, opts)
 }
 
-func formatGeneratedSkillReferences(refs []attskill.GeneratedSkillReference) string {
+func formatGeneratedSkillReferencesWithManifest(refs []attskill.GeneratedSkillReference, opts contextref.Options) configuredReferenceContext {
 	if len(refs) == 0 {
-		return ""
+		return configuredReferenceContext{}
 	}
 
 	loaded := make([]contextref.LoadedReference, 0, len(refs))
+	referenceEvents := make([]contextref.ReferenceEvent, 0, len(refs))
+
 	for i := range refs {
 		ref := refs[i]
 		contentBytes := []byte(ref.Content)
@@ -365,6 +373,31 @@ func formatGeneratedSkillReferences(refs []attskill.GeneratedSkillReference) str
 			policyDecision = contextref.ReferenceDecisionTruncated
 		}
 
+		tokenEstimate, tokenEstimator := estimateGeneratedSkillReferenceContent(opts, contentBytes)
+
+		policyReason := "active generated skill matched current prompt"
+		if ref.Truncated {
+			policyReason = "generated skill byte limit reached"
+		}
+
+		policyReasonCode := contextref.ReferenceReasonCode(policyDecision, policyReason)
+
+		event := contextref.ReferenceEvent{
+			Source:           ref.Path,
+			Kind:             "file",
+			Scope:            "generated-skill:" + ref.Slug,
+			Location:         "local",
+			TokenEstimator:   tokenEstimator,
+			Bytes:            len(contentBytes),
+			Truncated:        ref.Truncated,
+			DigestSHA256:     digestString(contentBytes),
+			FetchedAt:        time.Now().UTC(),
+			PolicyDecision:   policyDecision,
+			PolicyReason:     policyReason,
+			PolicyReasonCode: policyReasonCode,
+			TokenEstimate:    tokenEstimate,
+		}
+		referenceEvents = append(referenceEvents, event)
 		loaded = append(loaded, contextref.LoadedReference{
 			Source:    ref.Path,
 			Kind:      "file",
@@ -372,28 +405,50 @@ func formatGeneratedSkillReferences(refs []attskill.GeneratedSkillReference) str
 			Bytes:     len(contentBytes),
 			Truncated: ref.Truncated,
 			Provenance: contextref.ReferenceProvenance{
-				Scope:          "generated-skill:" + ref.Slug,
-				Location:       "local",
-				Size:           len(contentBytes),
-				Truncated:      ref.Truncated,
-				DigestSHA256:   digestString(contentBytes),
-				PolicyDecision: policyDecision,
-				PolicyReason:   "active generated skill matched current prompt",
+				Scope:            "generated-skill:" + ref.Slug,
+				Location:         "local",
+				Size:             len(contentBytes),
+				TokenEstimator:   tokenEstimator,
+				Truncated:        ref.Truncated,
+				DigestSHA256:     digestString(contentBytes),
+				FetchedAt:        event.FetchedAt,
+				PolicyDecision:   policyDecision,
+				PolicyReason:     policyReason,
+				PolicyReasonCode: policyReasonCode,
+				TokenEstimate:    tokenEstimate,
 			},
 		})
 	}
 
 	formatted := contextref.FormatReferences(loaded)
 	if formatted == "" {
-		return ""
+		return configuredReferenceContext{}
 	}
 
-	return strings.Join([]string{
-		"Generated skills matched this request in the background.",
-		"Use them only when they fit the user's current workflow; do not mention this background selection unless asked.",
-		"",
-		formatted,
-	}, "\n")
+	return configuredReferenceContext{
+		Content: strings.Join([]string{
+			"Generated skills matched this request in the background.",
+			"Use them only when they fit the user's current workflow; do not mention this background selection unless asked.",
+			"",
+			formatted,
+		}, "\n"),
+		Manifest:  withReferenceManifestEstimator(contextref.BuildReferenceManifest(referenceEvents), estimatorSummaryForContextOptions(opts)),
+		Estimator: estimatorSummaryForContextOptions(opts),
+	}
+}
+
+func estimateGeneratedSkillReferenceContent(opts contextref.Options, content []byte) (estimate contextpack.TokenEstimate, estimatorSummary string) {
+	estimator := opts.TokenEstimator
+	if estimator == nil {
+		estimator = contextpack.DefaultEstimator()
+	}
+
+	estimate = estimator.EstimateMessage(llm.Message{
+		Role:    llm.RoleSystem,
+		Content: string(content),
+	})
+
+	return estimate, contextEstimatorSummary(estimator.Profile())
 }
 
 func appendReferenceContext(base, extra string) string {

@@ -19,6 +19,7 @@ func TestSupportedEventTypes_ReturnsStableSortedEvents(t *testing.T) {
 		CommandExecute,
 		CommandOutput,
 		ContextAdd,
+		ContextManifest,
 		Error,
 		FileRead,
 		FileWrite,

@@ -59,6 +59,8 @@ func TestCompact_TrimsOlderMessagesWithEvidenceManifest(t *testing.T) {
 
 	marker := requireManifestMarker(t, result.Messages)
 	assert.Contains(t, marker.Content, "evidence manifest")
+	assert.Contains(t, marker.Content, `"schema_version":1`)
+	assert.Equal(t, 1, result.Manifest.SchemaVersion)
 	assert.Equal(t, result.Stats.OmittedCount, result.Manifest.OmittedCount)
 	assert.NotEmpty(t, result.Manifest.Ranges)
 	assert.NotEmpty(t, result.Manifest.Items)
@@ -66,6 +68,7 @@ func TestCompact_TrimsOlderMessagesWithEvidenceManifest(t *testing.T) {
 	assert.Contains(t, result.Manifest.Items[0].Hash, "sha256:")
 	assert.NotEmpty(t, result.Manifest.Items[0].Summary)
 	assert.NotEmpty(t, result.Manifest.Items[0].WhyDropped)
+	assert.Equal(t, "lower_score", result.Manifest.Items[0].ReasonCode)
 }
 
 func TestCompact_PreservesOldCriticalInstructionsUnderTightBudget(t *testing.T) {
@@ -109,6 +112,7 @@ func TestCompact_SystemMessageOverflowIsHardBudgetFailure(t *testing.T) {
 	assert.False(t, result.Stats.FitsBudget)
 	assert.False(t, result.Stats.Compressed)
 	assert.Contains(t, result.Stats.BudgetFailureReason, "system messages")
+	assert.Equal(t, "required_system_overflow", result.Stats.BudgetFailureReasonCode)
 	assert.Equal(t, messages, result.Messages)
 }
 
@@ -133,6 +137,25 @@ func TestCompact_ProviderVarianceUsesUpperBoundBeforeClaimingFit(t *testing.T) {
 	assert.False(t, !anthropicResult.Stats.Compressed && !anthropicResult.Stats.HardBudgetFailure && anthropicResult.Stats.FitsBudget, "anthropic budget check claimed the unmodified context fit: %+v", anthropicResult.Stats)
 }
 
+func TestEstimatorProfileRecordsCalibrationAndErrorBound(t *testing.T) {
+	t.Parallel()
+
+	messages := []llm.Message{{Role: llm.RoleUser, Content: strings.Repeat("calibrated estimate ", 4)}}
+	estimator := NewEstimator("openai", "gpt-4.1")
+	profile := estimator.Profile()
+	estimate := estimator.EstimateMessages(messages)
+
+	assert.Equal(t, "openai-calibrated", profile.Name)
+	assert.Equal(t, "provider-message-overhead-v1", profile.Calibration)
+	assert.Equal(t, 12, profile.ErrorBoundPercent)
+	assert.Positive(t, estimate.ErrorBoundTokens)
+	assert.Equal(t, estimate.Tokens+estimate.ErrorBoundTokens, estimate.UpperBoundTokens)
+
+	result := CompactWithOptions(messages, Options{Provider: "openai", Model: "gpt-4.1", MaxTokens: estimate.UpperBoundTokens})
+	assert.Contains(t, result.Stats.Estimator, "err=12%")
+	assert.Contains(t, result.Stats.Estimator, "calibration=provider-message-overhead-v1")
+}
+
 func TestCompact_HardFailsWhenPinnedEvidenceAndManifestCannotFit(t *testing.T) {
 	t.Parallel()
 
@@ -149,6 +172,7 @@ func TestCompact_HardFailsWhenPinnedEvidenceAndManifestCannotFit(t *testing.T) {
 	assert.True(t, result.Stats.HardBudgetFailure)
 	assert.False(t, result.Stats.FitsBudget)
 	assert.Contains(t, result.Stats.BudgetFailureReason, "pinned evidence")
+	assert.Equal(t, "required_pinned_overflow", result.Stats.BudgetFailureReasonCode)
 	assert.Equal(t, messages, result.Messages)
 }
 
@@ -167,6 +191,14 @@ func TestCompact_ModelContextWindowCapsUnsetBudget(t *testing.T) {
 	assert.Equal(t, 8192, result.Stats.MaxEstimatedTokens)
 	assert.LessOrEqual(t, result.Stats.OutputEstimatedUpperBound, 8192)
 	assert.Contains(t, result.Stats.Estimator, "openai-calibrated")
+}
+
+func TestModelContextWindowNormalizesProviderQualifiedModel(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 8192, ModelContextWindow("", "openai/gpt-4"))
+	assert.Equal(t, 200_000, ModelContextWindow("", "claude-sonnet-4-20250514"))
+	assert.Equal(t, 0, ModelContextWindow("", "unknown-model"))
 }
 
 func TestCompact_ManifestUsesMessageMetadataTimestamps(t *testing.T) {
@@ -262,6 +294,143 @@ func TestCompact_PolicyRolePriorityCanBeatRecency(t *testing.T) {
 	assertExactMessageContentAbsent(t, result.Messages, "newer assistant detail")
 	assertExactMessageContentAbsent(t, result.Messages, "newer tool detail")
 	assert.Contains(t, result.Manifest.Policy, "role=user:100")
+}
+
+func TestCompact_MetadataPinnedMessageIsRequiredContext(t *testing.T) {
+	t.Parallel()
+
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: "policy"},
+		{Role: llm.RoleUser, Content: "old pinned user note"},
+		{Role: llm.RoleAssistant, Content: "newer assistant detail"},
+		{Role: llm.RoleUser, Content: "newest user detail"},
+	}
+	metadata := []MessageMetadata{
+		{},
+		{Pinned: true},
+		{},
+		{},
+	}
+
+	result := CompactWithOptions(messages, Options{
+		Estimator: fixedTokenEstimator{},
+		Metadata:  metadata,
+		MaxTokens: 3,
+		Policy: Policy{
+			RecencyWeight:        1,
+			ImportanceWeight:     1,
+			ManifestMaxItems:     1,
+			ManifestMaxRanges:    1,
+			ManifestSummaryRunes: 16,
+			RolePriority: map[llm.Role]int{
+				llm.RoleUser:      0,
+				llm.RoleAssistant: 0,
+			},
+		},
+	})
+
+	require.True(t, result.Stats.Compressed, "expected compression: %+v", result.Stats)
+	assert.True(t, result.Stats.FitsBudget)
+	assertMessageContentPresent(t, result.Messages, "old pinned user note")
+	assertExactMessageContentAbsent(t, result.Messages, "newest user detail")
+	assert.Contains(t, result.Manifest.Policy, "preserve_pinned=true")
+}
+
+func TestCompact_MetadataPriorityCanBeatRecency(t *testing.T) {
+	t.Parallel()
+
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: "policy"},
+		{Role: llm.RoleUser, Content: "old high priority user note"},
+		{Role: llm.RoleAssistant, Content: "newer assistant detail"},
+		{Role: llm.RoleTool, Content: "newest tool detail"},
+	}
+	metadata := []MessageMetadata{
+		{},
+		{Priority: 50},
+		{},
+		{},
+	}
+
+	result := CompactWithOptions(messages, Options{
+		Estimator: fixedTokenEstimator{},
+		Metadata:  metadata,
+		MaxTokens: 3,
+		Policy: Policy{
+			RecencyWeight:        1,
+			ImportanceWeight:     1,
+			ManifestMaxItems:     1,
+			ManifestMaxRanges:    1,
+			ManifestSummaryRunes: 16,
+			RolePriority: map[llm.Role]int{
+				llm.RoleUser:      0,
+				llm.RoleAssistant: 0,
+				llm.RoleTool:      0,
+			},
+		},
+	})
+
+	require.True(t, result.Stats.Compressed, "expected compression: %+v", result.Stats)
+	assert.True(t, result.Stats.FitsBudget)
+	assertMessageContentPresent(t, result.Messages, "old high priority user note")
+	assertExactMessageContentAbsent(t, result.Messages, "newest tool detail")
+}
+
+func TestCompact_MetadataPriorityIsRequiredContext(t *testing.T) {
+	t.Parallel()
+
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: "policy"},
+		{Role: llm.RoleUser, Content: "old high priority user note"},
+		{Role: llm.RoleAssistant, Content: "newer assistant detail"},
+	}
+	metadata := []MessageMetadata{
+		{},
+		{Priority: 50},
+		{},
+	}
+
+	result := CompactWithOptions(messages, Options{
+		Estimator: fixedTokenEstimator{},
+		Metadata:  metadata,
+		MaxTokens: 1,
+	})
+
+	assert.True(t, result.Stats.HardBudgetFailure)
+	assert.False(t, result.Stats.FitsBudget)
+	assert.Contains(t, result.Stats.BudgetFailureReason, "pinned evidence")
+	assert.Equal(t, "required_pinned_overflow", result.Stats.BudgetFailureReasonCode)
+	assert.Equal(t, messages, result.Messages)
+}
+
+func TestCompact_SemanticSignalsAreAuditedWithoutBecomingRequired(t *testing.T) {
+	t.Parallel()
+
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: "policy"},
+		{Role: llm.RoleUser, Content: "failed stack trace from old run"},
+		{Role: llm.RoleUser, Content: "newer low-signal note"},
+	}
+
+	result := CompactWithOptions(messages, Options{
+		Estimator: fixedTokenEstimator{},
+		MaxTokens: 2,
+		Policy: Policy{
+			ManifestMaxItems:     2,
+			ManifestMaxRanges:    1,
+			ManifestSummaryRunes: 32,
+			RolePriority: map[llm.Role]int{
+				llm.RoleUser: 0,
+			},
+		},
+	})
+
+	require.True(t, result.Stats.Compressed, "expected compression: %+v", result.Stats)
+	assert.False(t, result.Stats.HardBudgetFailure)
+	assert.True(t, result.Stats.FitsBudget)
+	require.NotEmpty(t, result.Manifest.Items)
+	assert.Contains(t, result.Manifest.Items[0].Signals, "failure")
+	assert.Equal(t, "semantic_signal_lower_score", result.Manifest.Items[0].ReasonCode)
 }
 
 type fixedTokenEstimator struct{}

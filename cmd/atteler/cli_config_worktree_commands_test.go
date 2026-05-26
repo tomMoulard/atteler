@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,11 +44,39 @@ func TestContextOptionsFromConfig_MapsReferencePolicy(t *testing.T) {
 	assert.True(t, opts.ReferencePolicy.AllowPrivateNetworks)
 }
 
+func TestContextOptionsForProviderModelUsesProviderCalibration(t *testing.T) {
+	t.Parallel()
+
+	opts := contextOptionsForProviderModel(contextref.Options{}, "anthropic", "custom-model")
+	require.NotNil(t, opts.TokenEstimator)
+
+	profile := opts.TokenEstimator.Profile()
+	assert.Equal(t, "anthropic", profile.Provider)
+	assert.Equal(t, "custom-model", profile.Model)
+	assert.Contains(t, profile.Name, "anthropic")
+	assert.Positive(t, profile.ErrorBoundPercent)
+}
+
+func TestContextOptionsForRequestModelsUsesFirstFallbackWhenPrimaryEmpty(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(contextManifestBudgetProvider{name: "fallback", models: []string{"tiny"}, window: 10_000})
+
+	opts := contextOptionsForRequestModels(contextref.Options{}, registry, "", []string{"fallback/tiny"})
+	require.NotNil(t, opts.TokenEstimator)
+
+	profile := opts.TokenEstimator.Profile()
+	assert.Equal(t, "fallback", profile.Provider)
+	assert.Equal(t, "tiny", profile.Model)
+}
+
 func TestFormatReferenceEventIncludesPolicyReasonAndProvenance(t *testing.T) {
 	t.Parallel()
 
 	event := contextref.ReferenceEvent{
 		Source:         "https://docs.example.com/style.md",
+		ResolvedSource: "https://cdn.docs.example.com/style.md",
 		Kind:           "url",
 		Scope:          "agent:reviewer",
 		Location:       "remote",
@@ -65,11 +94,79 @@ func TestFormatReferenceEventIncludesPolicyReasonAndProvenance(t *testing.T) {
 	assert.Contains(t, got, "kind=url")
 	assert.Contains(t, got, "location=remote")
 	assert.Contains(t, got, `source="https://docs.example.com/style.md"`)
+	assert.Contains(t, got, `resolved_source="https://cdn.docs.example.com/style.md"`)
 	assert.Contains(t, got, "bytes=42")
 	assert.Contains(t, got, "truncated=true")
 	assert.Contains(t, got, "sha256="+strings.Repeat("a", 64))
 	assert.Contains(t, got, "fetched_at=2026-05-21T12:00:00Z")
 	assert.Contains(t, got, `reason="byte limit reached"`)
+}
+
+func TestFormatReferenceEventRedactsCredentialBearingURLFields(t *testing.T) {
+	t.Parallel()
+
+	parsed := url.URL{
+		Scheme: "https",
+		Host:   "docs.example.com",
+		Path:   "/style.md",
+	}
+	parsed.User = url.UserPassword("token-user", "password-secret")
+	query := parsed.Query()
+	query.Set("access_token", "query-secret")
+	query.Set("topic", "context")
+	parsed.RawQuery = query.Encode()
+
+	got := formatReferenceEvent(contextref.ReferenceEvent{
+		Source:         parsed.String(),
+		ResolvedSource: parsed.String(),
+		Kind:           "url",
+		PolicyDecision: contextref.ReferenceDecisionRejected,
+		PolicyReason:   "fetch failed for " + parsed.String(),
+	})
+
+	assert.NotContains(t, got, "token-user")
+	assert.NotContains(t, got, "password-secret")
+	assert.NotContains(t, got, "query-secret")
+	assert.Contains(t, got, "REDACTED@docs.example.com")
+	assert.Contains(t, got, "access_token=REDACTED")
+	assert.Contains(t, got, `source="https://REDACTED@docs.example.com/style.md?access_token=REDACTED&topic=context"`)
+	assert.Contains(t, got, `resolved_source="https://REDACTED@docs.example.com/style.md?access_token=REDACTED&topic=context"`)
+}
+
+func TestFormatReferenceManifestRedactsCredentialBearingURLFields(t *testing.T) {
+	t.Parallel()
+
+	parsed := url.URL{
+		Scheme: "https",
+		Host:   "docs.example.com",
+		Path:   "/style.md",
+	}
+	parsed.User = url.UserPassword("token-user", "password-secret")
+	query := parsed.Query()
+	query.Set("access_token", "query-secret")
+	query.Set("topic", "context")
+	parsed.RawQuery = query.Encode()
+
+	got := formatReferenceManifest(contextref.ReferenceManifest{
+		TokenEstimator: "test-estimator",
+		Entries: []contextref.ReferenceEvent{
+			{
+				Source:         parsed.String(),
+				ResolvedSource: parsed.String(),
+				Kind:           "url",
+				PolicyDecision: contextref.ReferenceDecisionRejected,
+				PolicyReason:   "fetch failed for " + parsed.String(),
+			},
+		},
+	})
+
+	assert.NotContains(t, got, "token-user")
+	assert.NotContains(t, got, "password-secret")
+	assert.NotContains(t, got, "query-secret")
+	assert.Contains(t, got, `"schema_version":1`)
+	assert.Contains(t, got, "REDACTED@docs.example.com")
+	assert.Contains(t, got, "access_token=REDACTED")
+	assert.Contains(t, got, "test-estimator")
 }
 
 func TestFormatReferenceEventDecisionLabels(t *testing.T) {
@@ -111,9 +208,15 @@ func TestLoadConfiguredReferencesFailsClosedAndReportsEveryDecision(t *testing.T
 
 	assert.Contains(t, stderr, "reference loaded")
 	assert.Contains(t, stderr, `source="good.md"`)
+	assert.Contains(t, stderr, "reference omitted")
+	assert.Contains(t, stderr, "configured reference block omitted because loading failed")
 	assert.Contains(t, stderr, "reference rejected")
 	assert.Contains(t, stderr, `source="../secret.md"`)
 	assert.Contains(t, stderr, "outside allowed local roots")
+	assert.Contains(t, stderr, "reference manifest")
+	assert.Contains(t, stderr, `"included_count":0`)
+	assert.Contains(t, stderr, `"omitted_count":1`)
+	assert.Contains(t, stderr, `"rejected_count":1`)
 	assert.Contains(t, stderr, "omitting configured reference context")
 }
 
@@ -134,8 +237,11 @@ func TestLoadConfiguredReferencesReportsTruncatedAndSkipped(t *testing.T) { //no
 	assert.Contains(t, stderr, "reference truncated")
 	assert.Contains(t, stderr, `source="big.md"`)
 	assert.Contains(t, stderr, "bytes=3")
+	assert.Contains(t, stderr, "tokens=")
+	assert.Contains(t, stderr, "token_upper=")
 	assert.Contains(t, stderr, "truncated=true")
 	assert.Contains(t, stderr, "reference skipped")
+	assert.Contains(t, stderr, "reference manifest")
 	assert.Contains(t, stderr, `reason="empty reference"`)
 }
 
@@ -313,6 +419,122 @@ func (p doctorHealthyProvider) Complete(context.Context, llm.CompleteParams) (*l
 }
 
 func (p doctorHealthyProvider) ModelContextWindow(string) int { return 12345 }
+
+func TestLoadConfiguredReferenceContextRecordsEstimatorForRejectedOnlyManifest(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
+	dir := t.TempDir()
+	opts := contextOptionsForProviderModel(contextref.Options{Root: dir}, "anthropic", "claude-test")
+
+	var refCtx configuredReferenceContext
+
+	stderr := captureStderr(t, func() {
+		refCtx = loadConfiguredReferenceContext(t.Context(), []string{"../secret.md"}, opts)
+	})
+
+	assert.Empty(t, refCtx.Content)
+	assert.Contains(t, refCtx.Estimator, "anthropic-calibrated")
+	assert.Contains(t, refCtx.Manifest.TokenEstimator, "anthropic-calibrated")
+	assert.Equal(t, 1, refCtx.Manifest.RejectedCount)
+	assert.Contains(t, stderr, `"token_estimator":"anthropic-calibrated`)
+}
+
+func TestBuildReferenceContextWithManifestUsesRequestEstimatorForAgentReferences(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "rubric.md"), []byte("review carefully"), 0o600))
+
+	opts := contextOptionsForProviderModel(contextref.Options{Root: dir}, "anthropic", "claude-test")
+	activeAgent := agentSelection{
+		name: "reviewer",
+		ok:   true,
+		agent: agent.Agent{
+			Name:       "reviewer",
+			References: []string{"rubric.md"},
+		},
+	}
+
+	var refCtx configuredReferenceContext
+
+	captureStderr(t, func() {
+		refCtx = buildReferenceContextWithManifest(t.Context(), configuredReferenceContext{}, activeAgent, opts)
+	})
+
+	require.NotEmpty(t, refCtx.Content)
+	require.Len(t, refCtx.Manifest.Entries, 1)
+	assert.Contains(t, refCtx.Content, "anthropic-calibrated")
+	assert.Contains(t, refCtx.Manifest.Entries[0].TokenEstimator, "anthropic-calibrated")
+}
+
+func TestBuildReferenceContextWithManifestRetainsGlobalAuditWhenOnlyAgentHasContent(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "rubric.md"), []byte("review carefully"), 0o600))
+
+	opts := contextOptionsForProviderModel(contextref.Options{Root: dir}, "openai", "gpt-test")
+	globalManifest := contextref.BuildReferenceManifest([]contextref.ReferenceEvent{
+		{
+			Source:         "../secret.md",
+			Kind:           "file",
+			Scope:          contextref.ReferenceScopeGlobal,
+			Location:       "local",
+			PolicyDecision: contextref.ReferenceDecisionRejected,
+			PolicyReason:   "outside allowed local roots",
+			TokenEstimator: "openai-calibrated",
+		},
+	})
+	globalRefCtx := configuredReferenceContext{Manifest: globalManifest, Estimator: "openai-calibrated"}
+	activeAgent := agentSelection{
+		name: "reviewer",
+		ok:   true,
+		agent: agent.Agent{
+			Name:       "reviewer",
+			References: []string{"rubric.md"},
+		},
+	}
+
+	var refCtx configuredReferenceContext
+
+	captureStderr(t, func() {
+		refCtx = buildReferenceContextWithManifest(t.Context(), globalRefCtx, activeAgent, opts)
+	})
+
+	require.NotEmpty(t, refCtx.Content)
+	assert.Contains(t, refCtx.Content, `source="rubric.md"`)
+	assert.Equal(t, 1, refCtx.Manifest.RejectedCount)
+	assert.Equal(t, 1, refCtx.Manifest.IncludedCount)
+	require.Len(t, refCtx.Manifest.Entries, 2)
+	assert.Equal(t, "../secret.md", refCtx.Manifest.Entries[0].Source)
+	assert.Equal(t, "rubric.md", refCtx.Manifest.Entries[1].Source)
+}
+
+func TestConfiguredReferenceContextForRequestReloadsWhenEstimatorChanges(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "style.md"), []byte("provider aware"), 0o600))
+
+	refs := []string{"style.md"}
+	openAIOpts := contextOptionsForProviderModel(contextref.Options{Root: dir}, "openai", "gpt-test")
+	anthropicOpts := contextOptionsForProviderModel(contextref.Options{Root: dir}, "anthropic", "claude-test")
+
+	var current configuredReferenceContext
+
+	captureStderr(t, func() {
+		current = loadConfiguredReferenceContext(t.Context(), refs, openAIOpts)
+	})
+
+	require.Contains(t, current.Estimator, "openai-calibrated")
+	require.Contains(t, current.Manifest.Entries[0].TokenEstimator, "openai-calibrated")
+
+	var reloaded configuredReferenceContext
+
+	captureStderr(t, func() {
+		reloaded = configuredReferenceContextForRequest(t.Context(), refs, current, anthropicOpts)
+	})
+
+	require.Contains(t, reloaded.Estimator, "anthropic-calibrated")
+	require.Contains(t, reloaded.Content, "anthropic-calibrated")
+	require.Contains(t, reloaded.Manifest.Entries[0].TokenEstimator, "anthropic-calibrated")
+
+	same := configuredReferenceContextForRequest(t.Context(), refs, reloaded, anthropicOpts)
+	assert.Equal(t, reloaded.Estimator, same.Estimator)
+	assert.Equal(t, reloaded.Content, same.Content)
+}
 
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()

@@ -15,6 +15,7 @@ import (
 // Stats describes the result of a context compaction pass.
 type Stats struct {
 	BudgetFailureReason         string
+	BudgetFailureReasonCode     string
 	Estimator                   string
 	Provider                    string
 	Model                       string
@@ -45,6 +46,8 @@ type Result struct {
 // MessageMetadata carries optional audit metadata for a message.
 type MessageMetadata struct {
 	Timestamp string
+	Pinned    bool
+	Priority  int
 }
 
 // Options configures a compaction pass.
@@ -72,8 +75,9 @@ type Policy struct {
 }
 
 type messageAnalysis struct {
-	Signals []string
-	Pinned  bool
+	Signals  []string
+	Pinned   bool
+	Priority int
 }
 
 type scoredMessage struct {
@@ -123,7 +127,7 @@ func CompactWithOptions(messages []llm.Message, opts Options) Result {
 		return Result{Messages: out, Stats: stats}
 	}
 
-	analyses := analyzeMessages(messages)
+	analyses := analyzeMessages(messages, metadata)
 
 	selected, failureReason, ok := selectRequiredMessages(messages, analyses, estimator, policy, maxTokens)
 	if !ok {
@@ -270,6 +274,16 @@ func modelContextWindow(profile EstimatorProfile) int {
 	}
 }
 
+// ModelContextWindow returns the known context window for a provider/model pair,
+// or 0 when the provider or model is unknown. It uses the same provider/model
+// normalization as NewEstimator so model strings like "openai/gpt-4" work even
+// when the caller does not have a registered provider instance.
+func ModelContextWindow(provider, model string) int {
+	provider, model = normalizeEstimatorTarget(provider, model)
+
+	return modelContextWindow(EstimatorProfile{Provider: provider, Model: model})
+}
+
 func newStats(messages []llm.Message, original TokenEstimate, maxTokens int, profile EstimatorProfile, policy Policy) Stats {
 	return Stats{
 		OriginalCount:               len(messages),
@@ -303,8 +317,26 @@ func hardBudgetResult(messages []llm.Message, base Stats, estimate TokenEstimate
 	stats.HardBudgetFailure = true
 	stats.FitsBudget = false
 	stats.BudgetFailureReason = reason
+	stats.BudgetFailureReasonCode = budgetFailureReasonCode(reason)
 
 	return Result{Messages: out, Stats: stats}
+}
+
+func budgetFailureReasonCode(reason string) string {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+
+	switch {
+	case strings.Contains(reason, "system messages"):
+		return "required_system_overflow"
+	case strings.Contains(reason, "pinned evidence"):
+		return "required_pinned_overflow"
+	case strings.Contains(reason, "preserved evidence"):
+		return "preserved_evidence_overflow"
+	case strings.Contains(reason, "omission manifest"):
+		return "omission_manifest_overflow"
+	default:
+		return "required_context_overflow"
+	}
 }
 
 func buildOutputCandidate(
@@ -423,29 +455,40 @@ func messageScore(index int, msg llm.Message, analysis messageAnalysis, policy P
 		importance += 100
 	}
 
-	return recency*policy.RecencyWeight + importance*policy.ImportanceWeight + policy.rolePriority(msg.Role)
+	return recency*policy.RecencyWeight +
+		(importance+analysis.Priority)*policy.ImportanceWeight +
+		policy.rolePriority(msg.Role)
 }
 
-func analyzeMessages(messages []llm.Message) []messageAnalysis {
+func analyzeMessages(messages []llm.Message, metadata []MessageMetadata) []messageAnalysis {
 	analyses := make([]messageAnalysis, len(messages))
 	for i, msg := range messages {
-		analyses[i] = analyzeMessage(msg)
+		var meta MessageMetadata
+		if i < len(metadata) {
+			meta = metadata[i]
+		}
+
+		analyses[i] = analyzeMessage(msg, meta)
 	}
 
 	return analyses
 }
 
-func analyzeMessage(msg llm.Message) messageAnalysis {
+func analyzeMessage(msg llm.Message, meta MessageMetadata) messageAnalysis {
 	var signals []string
+
+	required := false
 
 	lower := strings.ToLower(msg.Content)
 
 	if msg.Role == llm.RoleSystem {
 		signals = append(signals, "system-instruction")
+		required = true
 	}
 
 	if containsAny(lower, "must", "never", "do not", "don't", "required", "requirement", "constraint", "acceptance criteria", "instruction", "policy") {
 		signals = append(signals, "constraint-or-instruction")
+		required = true
 	}
 
 	if containsAny(lower, "decision:", "decided", "we chose", "rejected:", "directive:") {
@@ -464,7 +507,17 @@ func analyzeMessage(msg llm.Message) messageAnalysis {
 		signals = append(signals, "file-citation")
 	}
 
-	return messageAnalysis{Pinned: len(signals) > 0, Signals: signals}
+	if meta.Pinned {
+		signals = append(signals, "metadata-pinned")
+		required = true
+	}
+
+	if meta.Priority > 0 {
+		signals = append(signals, fmt.Sprintf("metadata-priority:%d", meta.Priority))
+		required = true
+	}
+
+	return messageAnalysis{Pinned: required, Priority: meta.Priority, Signals: signals}
 }
 
 func containsAny(text string, needles ...string) bool {

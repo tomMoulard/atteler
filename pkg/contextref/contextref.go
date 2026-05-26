@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/tommoulard/atteler/pkg/contextpack"
 )
 
 const (
@@ -33,6 +35,10 @@ type Options struct {
 	Root          string
 	MaxFileBytes  int
 	MaxTotalBytes int
+	// TokenEstimator records provider/model-calibrated token estimates for
+	// reference manifests. If nil, a conservative provider-agnostic estimator is
+	// used.
+	TokenEstimator contextpack.Estimator
 	// ReferencePolicy constrains configured reference ingestion. It is used by
 	// LoadReferences; inline @path expansion remains rooted under Root.
 	ReferencePolicy ReferencePolicy
@@ -43,37 +49,53 @@ type Options struct {
 
 // Reference describes one expanded local file or directory tree.
 type Reference struct {
-	Path      string
-	Kind      string
-	Bytes     int
-	Truncated bool
+	Path           string
+	Kind           string
+	TokenEstimator string
+	DigestSHA256   string
+	Bytes          int
+	Truncated      bool
+	TokenEstimate  contextpack.TokenEstimate
 }
 
 // Result is the expanded prompt and reference metadata.
 type Result struct {
 	Prompt     string
 	References []Reference
+	Events     []ReferenceEvent
 }
 
 // Expand appends referenced local file contents or directory trees to prompt.
 // References are written as @path tokens and must resolve under Options.Root.
 func Expand(prompt string, opts Options) (Result, error) {
+	result, _, err := ExpandWithReport(prompt, opts)
+	return result, err
+}
+
+// ExpandWithReport is Expand plus per-inline-reference audit events. It
+// returns the events collected before an error so callers can still emit a
+// manifest for rejected @path attempts that abort request assembly.
+func ExpandWithReport(prompt string, opts Options) (Result, []ReferenceEvent, error) {
 	opts = normalizeOptions(opts)
 
 	candidates := parseCandidates(prompt)
 	if len(candidates) == 0 {
-		return Result{Prompt: prompt}, nil
+		return Result{Prompt: prompt}, nil, nil
 	}
 
 	seen := make(map[string]bool, len(candidates))
 
-	var refs []expandedReference
+	var (
+		refs   []expandedReference
+		events []ReferenceEvent
+	)
 
 	total := 0
 	for _, candidate := range candidates {
 		ref, nextTotal, ok, err := expandCandidate(candidate, opts, total, seen)
 		if err != nil {
-			return Result{}, err
+			events = append(events, rejectedInlineReferenceEvent(candidate, opts, err))
+			return Result{}, events, err
 		}
 
 		if !ok {
@@ -83,32 +105,42 @@ func Expand(prompt string, opts Options) (Result, error) {
 		total = nextTotal
 
 		refs = append(refs, ref)
+		events = append(events, inlineReferenceEvent(ref.Reference()))
 	}
 
 	if len(refs) == 0 {
-		return Result{Prompt: prompt}, nil
+		return Result{Prompt: prompt, Events: events}, events, nil
 	}
 
-	return Result{
+	result := Result{
 		Prompt:     appendReferences(prompt, refs),
 		References: references(refs),
-	}, nil
+		Events:     events,
+	}
+
+	return result, events, nil
 }
 
 type expandedReference struct {
-	content   string
-	Path      string
-	Kind      string
-	Bytes     int
-	Truncated bool
+	content        string
+	Path           string
+	Kind           string
+	TokenEstimator string
+	DigestSHA256   string
+	Bytes          int
+	Truncated      bool
+	TokenEstimate  contextpack.TokenEstimate
 }
 
 func (r expandedReference) Reference() Reference {
 	return Reference{
-		Path:      r.Path,
-		Kind:      r.Kind,
-		Bytes:     r.Bytes,
-		Truncated: r.Truncated,
+		Path:           r.Path,
+		Kind:           r.Kind,
+		TokenEstimator: r.TokenEstimator,
+		DigestSHA256:   r.DigestSHA256,
+		Bytes:          r.Bytes,
+		Truncated:      r.Truncated,
+		TokenEstimate:  r.TokenEstimate,
 	}
 }
 
@@ -125,6 +157,10 @@ func normalizeOptions(opts Options) Options {
 
 	if opts.MaxTotalBytes <= 0 {
 		opts.MaxTotalBytes = DefaultMaxTotalBytes
+	}
+
+	if opts.TokenEstimator == nil {
+		opts.TokenEstimator = contextpack.DefaultEstimator()
 	}
 
 	return opts
@@ -151,7 +187,7 @@ func parseCandidates(prompt string) []string {
 			continue
 		}
 
-		candidate := strings.Trim(prompt[i+1:j], ".,;:!?)]}")
+		candidate := strings.TrimRight(prompt[i+1:j], ".,;:!?)]}")
 		if candidate != "" {
 			out = append(out, candidate)
 		}
@@ -191,18 +227,23 @@ func expandCandidate(
 		return expandedReference{}, total, false, err
 	}
 
-	info, err := os.Stat(resolved)
+	_, err = os.Lstat(resolved)
 	if err != nil {
 		if !pathLike(candidate) && errors.Is(err, os.ErrNotExist) {
 			return expandedReference{}, total, false, nil
 		}
 
-		return expandedReference{}, total, false, fmt.Errorf("context: stat @%s: %w", candidate, err)
+		return expandedReference{}, total, false, fmt.Errorf("context: stat @%s: %s", candidate, safePathErrorMessage(err))
 	}
 
 	resolved, err = resolveSymlinksInsideRoot(opts.Root, resolved, candidate)
 	if err != nil {
 		return expandedReference{}, total, false, err
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return expandedReference{}, total, false, fmt.Errorf("context: stat @%s: %s", candidate, safePathErrorMessage(err))
 	}
 
 	if seen[resolved] {
@@ -221,15 +262,20 @@ func expandCandidate(
 
 		content, truncated, treeErr := directoryTree(resolved, limit)
 		if treeErr != nil {
-			return expandedReference{}, total, false, fmt.Errorf("context: list @%s: %w", candidate, treeErr)
+			return expandedReference{}, total, false, fmt.Errorf("context: list @%s: %s", candidate, safePathErrorMessage(treeErr))
 		}
 
+		tokenEstimate, tokenEstimator := estimateReferenceContent(opts, content)
+
 		return expandedReference{
-			Path:      displayPath,
-			Kind:      "directory",
-			Bytes:     len(content),
-			Truncated: truncated,
-			content:   string(content),
+			Path:           displayPath,
+			Kind:           "directory",
+			TokenEstimator: tokenEstimator,
+			DigestSHA256:   digestHex(content),
+			Bytes:          len(content),
+			Truncated:      truncated,
+			TokenEstimate:  tokenEstimate,
+			content:        string(content),
 		}, total + len(content), true, nil
 	}
 
@@ -246,15 +292,24 @@ func expandCandidate(
 
 	content, truncated, err := readLimited(resolved, limit)
 	if err != nil {
-		return expandedReference{}, total, false, fmt.Errorf("context: read @%s: %w", candidate, err)
+		return expandedReference{}, total, false, fmt.Errorf("context: read @%s: %s", candidate, safePathErrorMessage(err))
 	}
 
+	if isBinary(content) {
+		return expandedReference{}, total, false, fmt.Errorf("context: @%s is a binary file", candidate)
+	}
+
+	tokenEstimate, tokenEstimator := estimateReferenceContent(opts, content)
+
 	return expandedReference{
-		Path:      displayPath,
-		Kind:      kindFile,
-		Bytes:     len(content),
-		Truncated: truncated,
-		content:   string(content),
+		Path:           displayPath,
+		Kind:           kindFile,
+		TokenEstimator: tokenEstimator,
+		DigestSHA256:   digestHex(content),
+		Bytes:          len(content),
+		Truncated:      truncated,
+		TokenEstimate:  tokenEstimate,
+		content:        string(content),
 	}, total + len(content), true, nil
 }
 
@@ -280,7 +335,7 @@ func resolve(root, candidate string) (resolved, displayPath string, err error) {
 	}
 
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", "", fmt.Errorf("context: @%s escapes root %s", candidate, root)
+		return "", "", fmt.Errorf("context: @%s escapes root", candidate)
 	}
 
 	return path, filepath.ToSlash(rel), nil
@@ -294,12 +349,12 @@ func resolveSymlinksInsideRoot(root, path, candidate string) (string, error) {
 
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return "", fmt.Errorf("context: resolve root symlinks: %w", err)
+		return "", fmt.Errorf("context: resolve root symlinks: %s", safePathErrorMessage(err))
 	}
 
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", fmt.Errorf("context: resolve @%s symlinks: %w", candidate, err)
+		return "", fmt.Errorf("context: resolve @%s symlinks: %s", candidate, safePathErrorMessage(err))
 	}
 
 	rel, err := filepath.Rel(root, resolved)
@@ -308,7 +363,7 @@ func resolveSymlinksInsideRoot(root, path, candidate string) (string, error) {
 	}
 
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("context: @%s escapes root %s", candidate, root)
+		return "", fmt.Errorf("context: @%s escapes root", candidate)
 	}
 
 	return resolved, nil
@@ -393,6 +448,24 @@ func readLimited(path string, limit int) (data []byte, truncated bool, err error
 	return data, false, nil
 }
 
+func safePathErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Op + ": " + pathErr.Err.Error()
+	}
+
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		return linkErr.Op + ": " + linkErr.Err.Error()
+	}
+
+	return err.Error()
+}
+
 func appendReferences(prompt string, refs []expandedReference) string {
 	var b strings.Builder
 	b.WriteString(prompt)
@@ -410,6 +483,28 @@ func appendReferences(prompt string, refs []expandedReference) string {
 		b.WriteString(escapeAttr(ref.Path))
 		b.WriteString(`" truncated="`)
 		b.WriteString(strconv.FormatBool(ref.Truncated))
+		b.WriteString(`" bytes="`)
+		b.WriteString(strconv.Itoa(ref.Bytes))
+
+		if ref.TokenEstimate.Tokens > 0 || ref.TokenEstimate.UpperBoundTokens > 0 {
+			b.WriteString(`" estimated_tokens="`)
+			b.WriteString(strconv.Itoa(ref.TokenEstimate.Tokens))
+			b.WriteString(`" estimated_token_error_bound="`)
+			b.WriteString(strconv.Itoa(ref.TokenEstimate.ErrorBoundTokens))
+			b.WriteString(`" estimated_token_upper_bound="`)
+			b.WriteString(strconv.Itoa(ref.TokenEstimate.UpperBoundTokens))
+		}
+
+		if ref.TokenEstimator != "" {
+			b.WriteString(`" token_estimator="`)
+			b.WriteString(escapeAttr(ref.TokenEstimator))
+		}
+
+		if ref.DigestSHA256 != "" {
+			b.WriteString(`" digest_sha256="`)
+			b.WriteString(escapeAttr(ref.DigestSHA256))
+		}
+
 		b.WriteString("\">\n")
 		b.WriteString(escapeText(ref.content))
 
@@ -431,6 +526,10 @@ func escapeAttr(value string) string {
 	value = strings.ReplaceAll(value, "&", "&amp;")
 	value = strings.ReplaceAll(value, `"`, "&quot;")
 	value = strings.ReplaceAll(value, "<", "&lt;")
+	value = strings.ReplaceAll(value, ">", "&gt;")
+	value = strings.ReplaceAll(value, "\r", "&#13;")
+	value = strings.ReplaceAll(value, "\n", "&#10;")
+	value = strings.ReplaceAll(value, "\t", "&#9;")
 
 	return value
 }
@@ -442,4 +541,35 @@ func references(refs []expandedReference) []Reference {
 	}
 
 	return out
+}
+
+func inlineReferenceEvent(ref Reference) ReferenceEvent {
+	decision := ReferenceDecisionLoaded
+	reason := "inline reference resolved inside root"
+
+	if ref.Truncated {
+		decision = ReferenceDecisionTruncated
+		reason = "byte limit reached"
+	}
+
+	return ReferenceEvent{
+		Source:           ref.Path,
+		Kind:             ref.Kind,
+		Scope:            ReferenceScopeInline,
+		Location:         referenceLocationLocal,
+		TokenEstimator:   ref.TokenEstimator,
+		DigestSHA256:     ref.DigestSHA256,
+		Bytes:            ref.Bytes,
+		Truncated:        ref.Truncated,
+		PolicyDecision:   decision,
+		PolicyReason:     reason,
+		PolicyReasonCode: ReferenceReasonCode(decision, reason),
+		TokenEstimate:    ref.TokenEstimate,
+	}
+}
+
+func rejectedInlineReferenceEvent(candidate string, opts Options, err error) ReferenceEvent {
+	opts.ReferenceScope = ReferenceScopeInline
+
+	return newReferenceEvent(candidate, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error())
 }

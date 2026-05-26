@@ -11,10 +11,16 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
-const unknownTimestamp = "unknown"
+const (
+	manifestSchemaVersion = 1
+	unknownTimestamp      = "unknown"
+)
 
 // Manifest captures audit metadata for content omitted during compaction.
+//
+//nolint:govet // Field order keeps schema and descriptive fields before counts in JSON.
 type Manifest struct {
+	SchemaVersion   int            `json:"schema_version"`
 	Estimator       string         `json:"estimator"`
 	Policy          string         `json:"policy"`
 	Budget          string         `json:"budget"`
@@ -41,6 +47,7 @@ type OmittedItem struct {
 	Hash        string        `json:"hash"`
 	Summary     string        `json:"summary"`
 	WhyDropped  string        `json:"why_dropped"`
+	ReasonCode  string        `json:"reason_code"`
 	Signals     []string      `json:"signals,omitempty"`
 	TokenBudget TokenEstimate `json:"token_budget"`
 	Index       int           `json:"index"`
@@ -126,6 +133,7 @@ func newManifestMarker(
 			Hash:        messageHash(messages[index]),
 			Summary:     summarizeContent(messages[index].Content, build.summaryRunes),
 			WhyDropped:  droppedReason(analysis, policy),
+			ReasonCode:  droppedReasonCode(analysis),
 			Signals:     append([]string(nil), analysis.Signals...),
 			TokenBudget: estimator.EstimateMessage(messages[index]),
 		})
@@ -134,14 +142,15 @@ func newManifestMarker(
 	truncated := len(items) < len(omitted) || len(ranges) < rangeCount || build.summaryRunes < policy.ManifestSummaryRunes
 
 	manifest := Manifest{
-		Estimator:    estimatorProfileSummary(profile),
-		Policy:       policy.summary(),
-		Budget:       fmt.Sprintf("max=%d;upper_bound", maxTokens),
-		OmittedCount: len(omitted),
-		RangeCount:   rangeCount,
-		Ranges:       ranges,
-		Items:        items,
-		Truncated:    truncated,
+		SchemaVersion: manifestSchemaVersion,
+		Estimator:     estimatorProfileSummary(profile),
+		Policy:        policy.summary(),
+		Budget:        fmt.Sprintf("max=%d;upper_bound", maxTokens),
+		OmittedCount:  len(omitted),
+		RangeCount:    rangeCount,
+		Ranges:        ranges,
+		Items:         items,
+		Truncated:     truncated,
 	}
 	if truncated {
 		manifest.TruncatedReason = "fit-budget"
@@ -256,10 +265,30 @@ func summarizeContent(content string, maxRunes int) string {
 
 func droppedReason(analysis messageAnalysis, policy Policy) string {
 	if len(analysis.Signals) == 0 {
+		if analysis.Priority > 0 {
+			return fmt.Sprintf("metadata priority %d scored below retained messages under %s", analysis.Priority, policy.summary())
+		}
+
 		return "lower score than retained messages under " + policy.summary()
 	}
 
 	return "lower score after preserving stronger evidence; signals=" + strings.Join(analysis.Signals, ",")
+}
+
+func droppedReasonCode(analysis messageAnalysis) string {
+	if analysis.Pinned {
+		return "required_context_dropped"
+	}
+
+	if analysis.Priority > 0 {
+		return "metadata_priority_lower_score"
+	}
+
+	if len(analysis.Signals) > 0 {
+		return "semantic_signal_lower_score"
+	}
+
+	return "lower_score"
 }
 
 func estimatorProfileSummary(profile EstimatorProfile) string {
@@ -270,6 +299,10 @@ func estimatorProfileSummary(profile EstimatorProfile) string {
 		fmt.Sprintf("overhead=%d", profile.MessageOverheadTokens),
 		fmt.Sprintf("err=%d%%", profile.ErrorBoundPercent),
 	}
+	if strings.TrimSpace(profile.Calibration) != "" {
+		parts = append(parts, "calibration="+strings.TrimSpace(profile.Calibration))
+	}
+
 	if profile.Model != "" {
 		parts = append(parts, "model="+profile.Model)
 	}

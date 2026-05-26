@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -36,13 +37,15 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 
 		applyGenerationParams(&params, request.generation)
 
-		if err := validateRequestBudget(reg, params.Model, params.Messages, request.maxInputTokens); err != nil {
-			return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines()}
-		}
-
 		// When tools are enabled, run the agentic loop.
 		if request.useTools {
 			return callLLMWithTools(ctx, reg, params, request, eventLines)
+		}
+
+		emitRequestContextManifest(ctx, reg, params.Model, params.Messages, request)
+
+		if err := validateRequestBudgetWithFallbacks(reg, params.Model, request.fallbackModels, params.Messages, request.maxInputTokens); err != nil {
+			return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines()}
 		}
 
 		resp, err := reg.CompleteWithFallback(ctx, params, request.fallbackModels)
@@ -85,6 +88,12 @@ func callLLMWithTools(
 	// mentions other tools that are not wired up in this environment.
 	if len(tools) > 0 {
 		prependToolReminder(&params, tools)
+	}
+
+	emitRequestContextManifest(ctx, reg, params.Model, params.Messages, request)
+
+	if err := validateRequestBudgetWithFallbacks(reg, params.Model, request.fallbackModels, params.Messages, request.maxInputTokens); err != nil {
+		return llmResponseMsg{err: err, completedAt: time.Now(), eventLines: eventLines.Lines()}
 	}
 
 	toolNames := make([]string, 0, len(tools))
@@ -185,6 +194,7 @@ func callLLMWithTools(
 	resp, _, err := llm.AgentLoop(ctx, reg, params, request.fallbackModels, executor, llm.AgentLoopConfig{
 		ConfirmContinue:    confirmContinueFn,
 		ConfirmToolCall:    confirmToolFn,
+		BeforeModelCall:    agentLoopManifestPreflight(ctx, reg, request),
 		Budget:             request.agentLoopBudget,
 		CheckpointInterval: request.agentLoopCheckpointInterval,
 		Policy:             llm.BashToolPolicy,
@@ -300,6 +310,7 @@ func requestMessagesForBudget(
 	activeAgent agentSelection,
 	generation generationSettings,
 	referenceContext string,
+	useTools bool,
 ) []llm.Message {
 	params := llm.CompleteParams{
 		Model:    modelName,
@@ -310,32 +321,253 @@ func requestMessagesForBudget(
 	}
 
 	prependReferenceContext(&params, referenceContext)
-
 	applyGenerationParams(&params, generation)
+
+	if useTools {
+		tools := llm.DefaultTools()
+		if activeAgent.ok {
+			tools = activeAgent.agent.FilterTools(tools)
+		}
+
+		if len(tools) > 0 {
+			prependToolReminder(&params, tools)
+		}
+	}
 
 	return params.Messages
 }
 
+func emitRequestContextManifest(ctx context.Context, reg *llm.Registry, modelName string, messages []llm.Message, request llmRequest) {
+	emitFromContextWarning(ctx, requestContextManifestEvent(newRequestContextManifestForModelsWithInlineEvents(
+		reg,
+		modelName,
+		request.fallbackModels,
+		messages,
+		request.maxInputTokens,
+		request.inlineReferenceEvents,
+		request.referenceManifest,
+	)))
+}
+
+func agentLoopManifestPreflight(ctx context.Context, reg *llm.Registry, request llmRequest) func(iteration int, params llm.CompleteParams) error {
+	return func(iteration int, params llm.CompleteParams) error {
+		if iteration > 0 {
+			emitRequestContextManifest(ctx, reg, params.Model, params.Messages, request)
+		}
+
+		return validateRequestBudgetWithFallbacks(reg, params.Model, request.fallbackModels, params.Messages, request.maxInputTokens)
+	}
+}
+
+func newRequestContextManifestForModels(
+	reg *llm.Registry,
+	modelName string,
+	fallbackModels []string,
+	messages []llm.Message,
+	maxInputTokens int,
+	configuredManifest contextref.ReferenceManifest,
+) requestContextManifest {
+	return newRequestContextManifestForModelsWithInlineEvents(
+		reg,
+		modelName,
+		fallbackModels,
+		messages,
+		maxInputTokens,
+		nil,
+		configuredManifest,
+	)
+}
+
+func newRequestContextManifestForModelsWithInlineEvents(
+	reg *llm.Registry,
+	modelName string,
+	fallbackModels []string,
+	messages []llm.Message,
+	maxInputTokens int,
+	inlineEvents []contextref.ReferenceEvent,
+	configuredManifest contextref.ReferenceManifest,
+) requestContextManifest {
+	primaryProvider, primaryModel := requestManifestModelIdentity(reg, modelName, fallbackModels)
+	manifest := newRequestContextManifestWithInlineEvents(
+		primaryProvider,
+		primaryModel,
+		messages,
+		maxInputTokens,
+		contextWindowForModel(reg, primaryModel),
+		inlineEvents,
+		configuredManifest,
+	)
+
+	seen := map[string]bool{strings.TrimSpace(primaryModel): true}
+	for _, fallbackModel := range fallbackModels {
+		fallbackModel = strings.TrimSpace(fallbackModel)
+		if fallbackModel == "" || seen[fallbackModel] {
+			continue
+		}
+
+		seen[fallbackModel] = true
+		manifest.FallbackModelEstimates = append(manifest.FallbackModelEstimates, requestModelEstimate(
+			providerNameForModel(reg, fallbackModel),
+			fallbackModel,
+			messages,
+			maxInputTokens,
+			contextWindowForModel(reg, fallbackModel),
+		))
+	}
+
+	return manifest
+}
+
+func requestManifestModelIdentity(reg *llm.Registry, modelName string, fallbackModels []string) (providerName, manifestModel string) {
+	providerName = providerNameForModel(reg, modelName)
+
+	manifestModel = modelName
+
+	if strings.TrimSpace(modelName) != "" {
+		return providerName, manifestModel
+	}
+
+	for _, fallbackModel := range fallbackModels {
+		fallbackModel = strings.TrimSpace(fallbackModel)
+		if fallbackModel != "" {
+			return providerNameForModel(reg, fallbackModel), fallbackModel
+		}
+	}
+
+	resolvedProvider, resolvedModel, ok := resolveRegistryModel(reg, "")
+	if !ok {
+		return providerName, manifestModel
+	}
+
+	return resolvedProvider, resolvedModel
+}
+
 func validateRequestBudget(reg *llm.Registry, modelName string, messages []llm.Message, maxInputTokens int) error {
-	used := llm.EstimateTokens(messages)
+	estimate, estimatorSummary := estimateMessagesForModel(reg, modelName, messages)
+	used := estimate.UpperBoundTokens
+
 	if maxInputTokens > 0 && used > maxInputTokens {
-		return fmt.Errorf("estimated input tokens %s exceed configured max_input_tokens %s", formatTokenCount(used), formatTokenCount(maxInputTokens))
+		return fmt.Errorf("estimated input tokens upper bound %s (point=%s error_bound=%s estimator=%s) exceeds configured max_input_tokens %s", formatTokenCount(used), formatTokenCount(estimate.Tokens), formatTokenCount(estimate.ErrorBoundTokens), estimatorSummary, formatTokenCount(maxInputTokens))
 	}
 
-	if reg == nil || modelName == "" {
-		return nil
-	}
+	if limit := contextWindowForModel(reg, modelName); limit > 0 && used > limit {
+		displayModel := modelName
+		if strings.TrimSpace(displayModel) == "" {
+			_, resolvedModel, ok := resolveRegistryModel(reg, "")
+			if ok {
+				displayModel = resolvedModel
+			}
+		}
 
-	if limit := reg.ContextWindow(modelName); limit > 0 && used > limit {
-		return fmt.Errorf("estimated input tokens %s exceed %s context window %s", formatTokenCount(used), modelName, formatTokenCount(limit))
+		return fmt.Errorf("estimated input tokens upper bound %s (point=%s error_bound=%s estimator=%s) exceeds %s context window %s", formatTokenCount(used), formatTokenCount(estimate.Tokens), formatTokenCount(estimate.ErrorBoundTokens), estimatorSummary, displayModel, formatTokenCount(limit))
 	}
 
 	return nil
 }
 
-func expandReferences(messages []llm.Message, opts contextref.Options) ([]llm.Message, []contextref.Reference, error) {
+func validateRequestBudgetWithFallbacks(reg *llm.Registry, modelName string, fallbackModels []string, messages []llm.Message, maxInputTokens int) error {
+	models := requestBudgetModels(modelName, fallbackModels)
+	if len(models) == 0 {
+		return validateRequestBudget(reg, "", messages, maxInputTokens)
+	}
+
+	for _, model := range models {
+		if err := validateRequestBudget(reg, model, messages, maxInputTokens); err != nil {
+			return fmt.Errorf("model %s budget: %w", model, err)
+		}
+	}
+
+	return nil
+}
+
+func requestBudgetModels(modelName string, fallbackModels []string) []string {
+	seen := make(map[string]bool, len(fallbackModels)+1)
+	models := make([]string, 0, len(fallbackModels)+1)
+
+	for _, model := range append([]string{modelName}, fallbackModels...) {
+		model = strings.TrimSpace(model)
+		if model == "" || seen[model] {
+			continue
+		}
+
+		seen[model] = true
+		models = append(models, model)
+	}
+
+	return models
+}
+
+func estimateMessagesForModel(reg *llm.Registry, modelName string, messages []llm.Message) (estimate contextpack.TokenEstimate, estimatorSummary string) {
+	providerName := providerNameForModel(reg, modelName)
+
+	estimatorModel := modelName
+
+	if strings.TrimSpace(modelName) == "" {
+		resolvedProvider, resolvedModel, ok := resolveRegistryModel(reg, "")
+		if ok {
+			providerName = resolvedProvider
+			estimatorModel = resolvedModel
+		}
+	}
+
+	estimator := contextpack.NewEstimator(providerName, estimatorModel)
+
+	return estimator.EstimateMessages(messages), contextEstimatorSummary(estimator.Profile())
+}
+
+func providerNameForModel(reg *llm.Registry, modelName string) string {
+	if reg == nil {
+		return ""
+	}
+
+	resolvedProvider, ok := reg.ProviderForModel(modelName)
+	if !ok {
+		return ""
+	}
+
+	return resolvedProvider
+}
+
+func resolveRegistryModel(reg *llm.Registry, modelName string) (providerName, providerModel string, ok bool) {
+	if reg == nil {
+		return "", "", false
+	}
+
+	return reg.ResolveModel(modelName)
+}
+
+func contextWindowForModel(reg *llm.Registry, modelName string) int {
+	if reg != nil {
+		if limit := reg.ContextWindow(modelName); limit > 0 {
+			return limit
+		}
+	}
+
+	return contextpack.ModelContextWindow(providerNameForModel(reg, modelName), modelName)
+}
+
+func contextEstimatorSummary(profile contextpack.EstimatorProfile) string {
+	parts := []string{
+		profile.Name,
+		"provider=" + profile.Provider,
+		fmt.Sprintf("cpt=%d", profile.CharsPerToken),
+		fmt.Sprintf("overhead=%d", profile.MessageOverheadTokens),
+		fmt.Sprintf("err=%d%%", profile.ErrorBoundPercent),
+	}
+	if strings.TrimSpace(profile.Calibration) != "" {
+		parts = append(parts, "calibration="+strings.TrimSpace(profile.Calibration))
+	}
+
+	if strings.TrimSpace(profile.Model) != "" {
+		parts = append(parts, "model="+strings.TrimSpace(profile.Model))
+	}
+
+	return strings.Join(parts, ";")
+}
+
+func expandReferences(messages []llm.Message, opts contextref.Options) ([]llm.Message, []contextref.Reference, []contextref.ReferenceEvent, error) {
 	if len(messages) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	out := append([]llm.Message(nil), messages...)
@@ -344,17 +576,18 @@ func expandReferences(messages []llm.Message, opts contextref.Options) ([]llm.Me
 			continue
 		}
 
-		result, err := contextref.Expand(out[i].Content, opts)
+		result, inlineEvents, err := contextref.ExpandWithReport(out[i].Content, opts)
 		if err != nil {
-			return nil, nil, fmt.Errorf("expand context references: %w", err)
+			inlineEvents = omitLoadedConfiguredReferenceEvents(inlineEvents, "inline reference block omitted because expansion failed")
+			return nil, nil, inlineEvents, fmt.Errorf("expand context references: %w", err)
 		}
 
 		out[i].Content = result.Prompt
 
-		return out, result.References, nil
+		return out, result.References, inlineEvents, nil
 	}
 
-	return out, nil, nil
+	return out, nil, nil, nil
 }
 
 func referenceSummary(refs []contextref.Reference) string {

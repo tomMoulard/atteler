@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -627,6 +628,54 @@ func TestParseContextPackTimestampWithoutSpaceKeepsContent(t *testing.T) {
 	assert.Equal(t, llm.RoleUser, messages[0].Role)
 	assert.Equal(t, "continue without losing first byte", messages[0].Content)
 	assert.Equal(t, "2026-05-22T10:00:00Z", metadata[0].Timestamp)
+}
+
+func TestParseContextPackMessageMetadataPinnedAndPriority(t *testing.T) {
+	t.Parallel()
+
+	messages, metadata := parseContextPackMessagesWithMetadata("user[timestamp=2026-05-22T10:00:00Z,pinned,priority=42]: retain this\nassistant[pin=false,priority=7]: lower priority\n")
+
+	require.Len(t, messages, 2)
+	require.Len(t, metadata, 2)
+	assert.Equal(t, "retain this", messages[0].Content)
+	assert.Equal(t, "2026-05-22T10:00:00Z", metadata[0].Timestamp)
+	assert.True(t, metadata[0].Pinned)
+	assert.Equal(t, 42, metadata[0].Priority)
+	assert.False(t, metadata[1].Pinned)
+	assert.Equal(t, 7, metadata[1].Priority)
+}
+
+func TestParseContextPackZeroValueMetadataStillParsesRole(t *testing.T) {
+	t.Parallel()
+
+	messages, metadata := parseContextPackMessagesWithMetadata("user[pin=false,priority=0]: zero value metadata\n")
+
+	require.Len(t, messages, 1)
+	require.Len(t, metadata, 1)
+	assert.Equal(t, llm.RoleUser, messages[0].Role)
+	assert.Equal(t, "zero value metadata", messages[0].Content)
+	assert.False(t, metadata[0].Pinned)
+	assert.Zero(t, metadata[0].Priority)
+}
+
+func TestRunContextPackFailsWhenRequiredContextCannotFit(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "messages.txt")
+	require.NoError(t, os.WriteFile(path, []byte("system: "+strings.Repeat("required ", 100)), 0o600))
+
+	var stdout bytes.Buffer
+
+	var stderr bytes.Buffer
+
+	err := runContextPackWithWriters(&stdout, &stderr, path, 1, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "required context does not fit")
+	assert.Contains(t, err.Error(), "system messages")
+	assert.Empty(t, stdout.String(), "failed context pack must not write over-budget context to stdout")
+	assert.Contains(t, stderr.String(), "budget_failure:")
+	assert.Contains(t, stderr.String(), "budget_failure_code: required_system_overflow")
+	assert.NotContains(t, stderr.String(), "output:")
 }
 
 func TestAddVectorFileRecordsRetrievalFreshness(t *testing.T) {

@@ -314,6 +314,30 @@ func TestValidateRequestBudget_MaxInputTokens(t *testing.T) {
 	if got := err.Error(); !strings.Contains(got, "max_input_tokens") {
 		require.Failf(t, "unexpected error", "error = %q", got)
 	}
+
+	if got := err.Error(); !strings.Contains(got, "upper bound") || !strings.Contains(got, "generic-conservative") {
+		require.Failf(t, "unexpected budget detail", "error = %q", got)
+	}
+}
+
+func TestRequestMessagesForBudgetIncludesFinalReferenceAndToolContext(t *testing.T) {
+	t.Parallel()
+
+	messages := []llm.Message{{Role: llm.RoleUser, Content: "inspect repo"}}
+	got := requestMessagesForBudget(
+		"gpt-test",
+		messages,
+		agentSelection{},
+		generationSettings{},
+		"<configured_references>\nreference\n</configured_references>",
+		true,
+	)
+
+	require.Len(t, got, 3)
+	assert.Contains(t, got[0].Content, "You have the following tools available")
+	assert.Contains(t, got[1].Content, "<configured_references>")
+	assert.Equal(t, llm.RoleUser, got[2].Role)
+	assert.Equal(t, "inspect repo", got[2].Content)
 }
 
 func TestRecordedResponseRoundTrip(t *testing.T) {

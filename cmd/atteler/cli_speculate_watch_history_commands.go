@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/contextref"
+	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/speculate"
@@ -53,8 +55,10 @@ func runSpeculatePlan(input speculatePlanCommandInput) error {
 // interface so the speculative execution pipeline can make real LLM calls.
 type registryCompleter struct {
 	registry       *llm.Registry
+	hookRunner     *events.Runner
 	fallbackModels []string
 	generation     generationSettings
+	maxInputTokens int
 }
 
 func (rc *registryCompleter) Complete(ctx context.Context, model, systemPrompt, userPrompt string) (string, error) {
@@ -67,6 +71,22 @@ func (rc *registryCompleter) Complete(ctx context.Context, model, systemPrompt, 
 	}
 
 	applyGenerationParams(&params, rc.generation)
+
+	manifestEvent := requestContextManifestEvent(newRequestContextManifestForModels(
+		rc.registry,
+		params.Model,
+		rc.fallbackModels,
+		params.Messages,
+		rc.maxInputTokens,
+		contextref.ReferenceManifest{},
+	))
+	manifestEvent.Agent = model
+	setExplicitContextManifestEventModel(&manifestEvent, params.Model)
+	emitHookWarning(ctx, rc.hookRunner, manifestEvent)
+
+	if err := validateRequestBudgetWithFallbacks(rc.registry, params.Model, rc.fallbackModels, params.Messages, rc.maxInputTokens); err != nil {
+		return "", fmt.Errorf("speculate LLM budget: %w", err)
+	}
 
 	resp, err := rc.registry.CompleteWithFallback(ctx, params, rc.fallbackModels)
 	if err != nil {
@@ -99,8 +119,10 @@ func runSpeculateExecution(ctx context.Context, state appState, input speculateR
 
 	completer := &registryCompleter{
 		registry:       state.registry,
+		hookRunner:     state.hookRunner,
 		fallbackModels: state.fallbackModels,
 		generation:     mergeGenerationSettings(state.generationDefaults, state.generationOverrides),
+		maxInputTokens: state.maxInputTokens,
 	}
 
 	fmt.Fprintln(os.Stderr, "speculate: running three-round pipeline with "+strings.Join(agents, ", ")+"...")

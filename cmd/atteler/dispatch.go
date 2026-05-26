@@ -550,6 +550,9 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 	executionOptions := runOnceExecutionOptionsFromOptions(opts)
 	executionOptions.AgentLoopBudget = state.agentLoopBudget
 	executionOptions.AgentLoopCheckpointInterval = state.agentLoopCheckpointInterval
+	executionOptions.SkillLearningStoreDir = state.skillLearningStoreDir
+	executionOptions.SkillLearningSkillDir = state.skillLearningSkillDir
+	executionOptions.SkillLearningEnabled = state.skillLearningEnabled
 
 	if opts.headless && opts.oncePrompt == "" && !opts.readStdin {
 		err := errors.New("headless mode requires --once, positional prompt text, or --stdin")
@@ -589,16 +592,6 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		return err
 	}
 
-	referenceContext := appendReferenceContext(
-		state.referenceContext,
-		generatedSkillReferenceContext(
-			prompt,
-			state.skillLearningStoreDir,
-			state.skillLearningSkillDir,
-			state.skillLearningEnabled,
-		),
-	)
-
 	runErr := runOnceWithOptions(
 		ctx,
 		state.registry,
@@ -607,7 +600,10 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		state.sessionStore,
 		state.sessionState,
 		state.contextOptions,
-		referenceContext,
+		state.referenceContext,
+		state.referenceManifest,
+		state.referenceContextEstimator,
+		state.configuredReferences,
 		state.selectedModel,
 		state.selectedAgent,
 		state.fallbackModels,
@@ -695,7 +691,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	reg := autoRegisterForOptions(ctx, opts, cfg, selection.selectedModel)
 	contextOptions := contextOptionsFromConfig(cfg)
-	referenceContext := loadConfiguredReferences(ctx, cfg.Context.References, contextOptions)
+	contextOptions = contextOptionsForRequestModels(contextOptions, reg, selection.selectedModel, selection.fallbackModels)
 	generationDefaults := generationFromConfig(cfg)
 	generationOverrides := generationOverridesFromState(opts, selection, persistedState, cwd)
 
@@ -725,6 +721,8 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		contextOptions.Root = wtInfo.Path
 	}
 
+	referenceContext := loadConfiguredReferenceContext(ctx, cfg.Context.References, contextOptions)
+
 	return appState{
 		config:                      cfg,
 		registry:                    reg,
@@ -734,7 +732,10 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		sessionStore:                store,
 		stateStore:                  stateStore,
 		contextOptions:              contextOptions,
-		referenceContext:            referenceContext,
+		configuredReferences:        append([]string(nil), cfg.Context.References...),
+		referenceContext:            referenceContext.Content,
+		referenceManifest:           referenceContext.Manifest,
+		referenceContextEstimator:   referenceContext.Estimator,
 		skillLearningStoreDir:       skillLearningOpts.StoreDir,
 		skillLearningSkillDir:       skillLearningOpts.SkillDir,
 		sessionState:                selection.sessionState,

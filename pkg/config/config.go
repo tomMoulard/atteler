@@ -698,32 +698,38 @@ func mergeContext(dst *Config, contextConfig fileContextConfig, rec *originRecor
 		rec.replace("context.references", source, dst.Context.References, "replaces the entire configured reference list")
 	}
 
-	mergeReferencePolicy(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy)
+	mergeReferencePolicy(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy, rec, source)
 }
 
-func mergeReferencePolicy(dst *ReferencePolicyConfig, policy fileReferencePolicyConfig) {
+func mergeReferencePolicy(dst *ReferencePolicyConfig, policy fileReferencePolicyConfig, rec *originRecorder, source originSource) {
 	if policy.AllowedSchemes != nil {
 		dst.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
+		rec.replace("context.reference_policy.allowed_schemes", source, dst.AllowedSchemes, "replaces the allowed configured-reference URL schemes")
 	}
 
 	if policy.AllowedHosts != nil {
 		dst.AllowedHosts = append([]string(nil), policy.AllowedHosts...)
+		rec.replace("context.reference_policy.allowed_hosts", source, dst.AllowedHosts, "replaces the allowed configured-reference URL hosts")
 	}
 
 	if policy.LocalRoots != nil {
 		dst.LocalRoots = append([]string(nil), policy.LocalRoots...)
+		rec.replace("context.reference_policy.local_roots", source, dst.LocalRoots, "replaces explicit local roots for configured references")
 	}
 
 	if policy.MaxRedirects != nil {
 		dst.MaxRedirects = *policy.MaxRedirects
+		rec.set("context.reference_policy.max_redirects", source, *policy.MaxRedirects)
 	}
 
 	if policy.ContentTypes != nil {
 		dst.ContentTypes = append([]string(nil), policy.ContentTypes...)
+		rec.replace("context.reference_policy.content_types", source, dst.ContentTypes, "replaces allowed configured-reference response content types")
 	}
 
 	if policy.AllowPrivateNetworks != nil {
 		dst.AllowPrivateNetworks = *policy.AllowPrivateNetworks
+		rec.set("context.reference_policy.allow_private_networks", source, *policy.AllowPrivateNetworks)
 	}
 }
 
@@ -1059,32 +1065,39 @@ func mergeConfigContext(dst *Config, contextConfig ContextConfig, rec *originRec
 		rec.replace("context.references", source, dst.Context.References, "replaces the entire configured reference list")
 	}
 
-	mergeConfigReferencePolicy(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy)
+	mergeConfigReferencePolicy(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy, rec, source)
 }
 
-func mergeConfigReferencePolicy(dst *ReferencePolicyConfig, policy ReferencePolicyConfig) {
+func mergeConfigReferencePolicy(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, rec *originRecorder, source originSource) {
 	if policy.AllowedSchemes != nil {
 		dst.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
+		rec.replace("context.reference_policy.allowed_schemes", source, dst.AllowedSchemes, "replaces the allowed configured-reference URL schemes")
 	}
 
 	if policy.AllowedHosts != nil {
 		dst.AllowedHosts = append([]string(nil), policy.AllowedHosts...)
+		rec.replace("context.reference_policy.allowed_hosts", source, dst.AllowedHosts, "replaces the allowed configured-reference URL hosts")
 	}
 
 	if policy.LocalRoots != nil {
 		dst.LocalRoots = append([]string(nil), policy.LocalRoots...)
+		rec.replace("context.reference_policy.local_roots", source, dst.LocalRoots, "replaces explicit local roots for configured references")
 	}
 
 	if policy.MaxRedirects > 0 {
 		dst.MaxRedirects = policy.MaxRedirects
+		rec.set("context.reference_policy.max_redirects", source, policy.MaxRedirects)
 	}
 
 	if policy.ContentTypes != nil {
 		dst.ContentTypes = append([]string(nil), policy.ContentTypes...)
+		rec.replace("context.reference_policy.content_types", source, dst.ContentTypes, "replaces allowed configured-reference response content types")
 	}
 
 	if policy.AllowPrivateNetworks {
 		dst.AllowPrivateNetworks = true
+
+		rec.set("context.reference_policy.allow_private_networks", source, true)
 	}
 }
 
@@ -1445,6 +1458,47 @@ func mergeConfigContextFromOrigins(dst *Config, contextConfig ContextConfig, dst
 
 		appendOriginChain(dstOrigins, "context.references", srcOrigins, true)
 	}
+
+	mergeConfigReferencePolicyFromOrigins(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy, dstOrigins, srcOrigins)
+}
+
+func mergeConfigReferencePolicyFromOrigins(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, dstOrigins, srcOrigins OriginMap) {
+	mergeStringSliceFromOrigins(&dst.AllowedSchemes, policy.AllowedSchemes, "context.reference_policy.allowed_schemes", dstOrigins, srcOrigins)
+	mergeStringSliceFromOrigins(&dst.AllowedHosts, policy.AllowedHosts, "context.reference_policy.allowed_hosts", dstOrigins, srcOrigins)
+	mergeStringSliceFromOrigins(&dst.LocalRoots, policy.LocalRoots, "context.reference_policy.local_roots", dstOrigins, srcOrigins)
+	mergeStringSliceFromOrigins(&dst.ContentTypes, policy.ContentTypes, "context.reference_policy.content_types", dstOrigins, srcOrigins)
+
+	if originPathSet(srcOrigins, "context.reference_policy.max_redirects") || policy.MaxRedirects > 0 {
+		dst.MaxRedirects = policy.MaxRedirects
+
+		appendOriginChain(dstOrigins, "context.reference_policy.max_redirects", srcOrigins, false)
+	}
+
+	if originPathSet(srcOrigins, "context.reference_policy.allow_private_networks") || policy.AllowPrivateNetworks {
+		dst.AllowPrivateNetworks = policy.AllowPrivateNetworks
+
+		appendOriginChain(dstOrigins, "context.reference_policy.allow_private_networks", srcOrigins, false)
+	}
+}
+
+func mergeStringSliceFromOrigins(dst *[]string, src []string, path string, dstOrigins, srcOrigins OriginMap) {
+	if !originPathSet(srcOrigins, path) && src == nil {
+		return
+	}
+
+	*dst = append([]string(nil), src...)
+
+	appendOriginChain(dstOrigins, path, srcOrigins, true)
+}
+
+func originPathSet(origins OriginMap, path string) bool {
+	if len(origins) == 0 {
+		return false
+	}
+
+	origin, ok := origins[path]
+
+	return ok && len(origin.Chain) > 0
 }
 
 func mergeConfigGenerationFromOrigins(dst *Config, generation GenerationConfig, dstOrigins, srcOrigins OriginMap) {

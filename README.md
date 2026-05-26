@@ -370,14 +370,27 @@ prepended to model requests. Treat them as untrusted ingestion inputs: a local
 file can contain prompt-injection text, and a remote URL can become an SSRF
 target if it is not constrained. Atteler escapes reference content before
 placing it in `<configured_references>`, records provenance (scope, local vs
-remote, size, truncation, digest, fetch time, and policy decision), and prints a
-stderr line for every loaded, truncated, skipped, or rejected configured
-reference. If any configured reference is rejected, that configured-reference
-block is omitted instead of silently sending partial context.
+remote, size, provider-calibrated token point estimate/error bound/upper bound,
+truncation, digest, fetch time, redirect target when applicable, policy
+decision, and machine-readable reason code), and prints both per-reference audit
+lines and a JSON reference manifest
+for every loaded, truncated, skipped, omitted, or rejected configured reference.
+If any configured reference is rejected, that configured-reference block is
+omitted instead of silently sending partial context.
+
+Before each model request, Atteler also emits a `context_manifest` hook/event
+with the final message count, provider-calibrated input-token upper bound,
+the estimator profile/calibration ID and error-bound margin used for that upper
+bound, configured and model-window budget fit (including fallback-model
+estimates), inline `@path` references with content digests, configured
+reference decisions, truncation status, omissions, and skipped/rejected reason
+codes.
+Rejected inline `@path` attempts emit the same manifest shape before aborting
+request assembly, so blocked root escapes and symlink escapes remain auditable.
 
 By default, configured local references must stay under the current working
-directory. Add explicit `local_roots` for audited outside-root reads. Remote
-references support only HTTP(S) URLs and are denied unless
+directory and should be written as relative paths. Add explicit `local_roots`
+for audited absolute or outside-root reads. Remote references support only HTTP(S) URLs and are denied unless
 `reference_policy.allowed_hosts` allows the host; private, loopback, link-local,
 and multicast targets remain blocked unless `allow_private_networks: true` is
 set deliberately. Host wildcards such as
@@ -406,6 +419,22 @@ agents:
     references:
       - ./docs/reviewer-rubric.md
 ```
+
+### Context compression audit metadata
+
+`atteler memory context-pack <transcript.txt>` uses the same calibrated token
+estimator and omission manifest logic as model requests. Transcript lines can
+pin required context or raise its retention priority with bracket metadata:
+`user[timestamp=2026-05-22T10:00:00Z,pinned,priority=42]: keep this`. Pinned
+messages, positive-priority messages, and system messages are treated as
+required context; if they cannot fit inside `--context-pack-tokens` (or the
+selected model window), the command fails instead of silently dropping them.
+Hard failures include a stable `budget_failure_code` alongside the human
+message.
+Omitted messages are represented by a compact evidence manifest containing
+hashes, timestamps, summaries, token estimates, drop reasons, and stable reason
+codes. The omission manifest is schema-versioned so downstream audit tooling can
+detect future format changes.
 
 ### Deterministic response fixtures and eval checks
 
@@ -609,6 +638,7 @@ atteler agents speculate-run \
   --speculate-gate "tests pass" \
   --speculate-gate "lint pass" \
   --speculate-prompt "pick the safest migration plan"
+atteler agents skill-suggest plan --skill-step code --skill-step test
 atteler agents skill-suggest "open GH-15|tool=github|prompt=Fix GH-15" \
   --skill-step "edit pkg/skill|tool=file-edit|input=pkg/skill" \
   --skill-save-dir .atteler/skills --skill-review-only

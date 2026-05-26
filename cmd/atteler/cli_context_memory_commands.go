@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -131,18 +133,33 @@ func formatLSPRange(r lsp.Range) string {
 }
 
 func runContextPack(path string, maxTokens int, model string) error {
+	return runContextPackWithWriters(os.Stdout, os.Stderr, path, maxTokens, model)
+}
+
+func runContextPackWithWriters(stdout, stderr io.Writer, path string, maxTokens int, model string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("context pack: read %s: %w", path, err)
 	}
 
 	messages, metadata := parseContextPackMessagesWithMetadata(string(data))
+
 	result := contextpack.CompactWithOptions(messages, contextpack.Options{
 		Model:     model,
 		Metadata:  metadata,
 		MaxTokens: maxTokens,
 	})
-	fmt.Print(formatContextPackResult(result))
+	if result.Stats.HardBudgetFailure {
+		if stderr != nil {
+			fmt.Fprint(stderr, formatContextPackAudit(result))
+		}
+
+		return fmt.Errorf("context pack: required context does not fit token budget: %s", result.Stats.BudgetFailureReason)
+	}
+
+	if stdout != nil {
+		fmt.Fprint(stdout, formatContextPackResult(result))
+	}
 
 	return nil
 }
@@ -192,8 +209,7 @@ func parseRoleLineWithMetadata(line string) (llm.Role, string, contextpack.Messa
 		return "", "", contextpack.MessageMetadata{}, false
 	}
 
-	roleName, timestamp := parseRoleNameAndTimestamp(roleText)
-	metadata := contextpack.MessageMetadata{Timestamp: timestamp}
+	roleName, metadata := parseRoleNameAndMetadata(roleText)
 
 	switch strings.ToLower(roleName) {
 	case string(llm.RoleSystem), "developer":
@@ -241,28 +257,99 @@ func splitContextPackRoleLine(line string) (roleText, content string, ok bool) {
 	return "", "", false
 }
 
-func parseRoleNameAndTimestamp(roleText string) (roleName, timestamp string) {
+func parseRoleNameAndMetadata(roleText string) (roleName string, metadata contextpack.MessageMetadata) {
 	roleText = strings.TrimSpace(roleText)
 	if !strings.HasSuffix(roleText, "]") {
-		return roleText, ""
+		return roleText, contextpack.MessageMetadata{}
 	}
 
 	start := strings.LastIndex(roleText, "[")
 	if start <= 0 {
-		return roleText, ""
+		return roleText, contextpack.MessageMetadata{}
 	}
 
 	roleName = strings.TrimSpace(roleText[:start])
 
-	timestamp = strings.TrimSpace(roleText[start+1 : len(roleText)-1])
-	if roleName == "" || timestamp == "" {
-		return roleText, ""
+	metadata, metadataOK := parseContextPackMetadata(strings.TrimSpace(roleText[start+1 : len(roleText)-1]))
+	if roleName == "" || !metadataOK {
+		return roleText, contextpack.MessageMetadata{}
 	}
 
-	return roleName, timestamp
+	return roleName, metadata
+}
+
+func parseContextPackMetadata(raw string) (contextpack.MessageMetadata, bool) {
+	var metadata contextpack.MessageMetadata
+
+	var ok bool
+
+	for part := range strings.SplitSeq(raw, ",") {
+		if parseContextPackMetadataPart(&metadata, part) {
+			ok = true
+		}
+	}
+
+	return metadata, ok
+}
+
+func parseContextPackMetadataPart(metadata *contextpack.MessageMetadata, part string) bool {
+	key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+	key = strings.ToLower(strings.TrimSpace(key))
+	value = strings.TrimSpace(value)
+
+	if isPinMetadataKey(key) {
+		metadata.Pinned = !ok || parseMetadataBool(value)
+		return true
+	}
+
+	if ok && key == "priority" {
+		if priority, err := strconv.Atoi(value); err == nil {
+			metadata.Priority = priority
+			return true
+		}
+
+		return false
+	}
+
+	if ok && isTimestampMetadataKey(key) {
+		metadata.Timestamp = value
+		return true
+	}
+
+	if !ok && metadata.Timestamp == "" && strings.TrimSpace(part) != "" {
+		metadata.Timestamp = strings.TrimSpace(part)
+		return true
+	}
+
+	return false
+}
+
+func isPinMetadataKey(key string) bool {
+	return key == "pin" || key == "pinned"
+}
+
+func isTimestampMetadataKey(key string) bool {
+	return key == "timestamp" || key == "time" || key == "ts"
+}
+
+func parseMetadataBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func formatContextPackResult(result contextpack.Result) string {
+	return formatContextPackResultWithOutput(result, true)
+}
+
+func formatContextPackAudit(result contextpack.Result) string {
+	return formatContextPackResultWithOutput(result, false)
+}
+
+func formatContextPackResultWithOutput(result contextpack.Result, includeOutput bool) string {
 	var b strings.Builder
 
 	stats := result.Stats
@@ -294,7 +381,17 @@ func formatContextPackResult(result contextpack.Result) string {
 	}
 
 	if stats.HardBudgetFailure {
-		fmt.Fprintf(&b, "budget_failure: %s\n", stats.BudgetFailureReason)
+		writeContextPackBudgetFailure(&b, stats)
+	}
+
+	if result.Manifest.OmittedCount > 0 || len(result.Manifest.Ranges) > 0 || len(result.Manifest.Items) > 0 {
+		if data, err := json.Marshal(result.Manifest); err == nil {
+			fmt.Fprintf(&b, "manifest: %s\n", data)
+		}
+	}
+
+	if !includeOutput {
+		return b.String()
 	}
 
 	b.WriteString("output:\n")
@@ -304,6 +401,14 @@ func formatContextPackResult(result contextpack.Result) string {
 	}
 
 	return b.String()
+}
+
+func writeContextPackBudgetFailure(b *strings.Builder, stats contextpack.Stats) {
+	fmt.Fprintf(b, "budget_failure: %s\n", stats.BudgetFailureReason)
+
+	if stats.BudgetFailureReasonCode != "" {
+		fmt.Fprintf(b, "budget_failure_code: %s\n", stats.BudgetFailureReasonCode)
+	}
 }
 
 func runVectorSearch(input vectorSearchCommandInput) error {

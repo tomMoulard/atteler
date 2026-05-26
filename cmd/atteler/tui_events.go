@@ -154,18 +154,15 @@ func fileReadEvent(
 	sessionID, sessionPath, agentName, modelName string,
 	ref contextref.Reference,
 ) events.Event {
+	metadata := referenceEventMetadata(ref)
+
 	return events.Event{
 		Type:        events.FileRead,
 		SessionID:   sessionID,
 		SessionPath: sessionPath,
 		Agent:       agentName,
 		Model:       modelName,
-		Metadata: map[string]string{
-			"path":      ref.Path,
-			"kind":      ref.Kind,
-			"bytes":     strconv.Itoa(ref.Bytes),
-			"truncated": strconv.FormatBool(ref.Truncated),
-		},
+		Metadata:    metadata,
 	}
 }
 
@@ -182,19 +179,41 @@ func contextAddEvent(
 	sessionID, sessionPath, agentName, modelName string,
 	ref contextref.Reference,
 ) events.Event {
+	metadata := referenceEventMetadata(ref)
+
 	return events.Event{
 		Type:        events.ContextAdd,
 		SessionID:   sessionID,
 		SessionPath: sessionPath,
 		Agent:       agentName,
 		Model:       modelName,
-		Metadata: map[string]string{
-			"path":      ref.Path,
-			"kind":      ref.Kind,
-			"bytes":     strconv.Itoa(ref.Bytes),
-			"truncated": strconv.FormatBool(ref.Truncated),
-		},
+		Metadata:    metadata,
 	}
+}
+
+func referenceEventMetadata(ref contextref.Reference) map[string]string {
+	metadata := map[string]string{
+		"path":      ref.Path,
+		"kind":      ref.Kind,
+		"bytes":     strconv.Itoa(ref.Bytes),
+		"truncated": strconv.FormatBool(ref.Truncated),
+	}
+
+	if ref.TokenEstimate.Tokens > 0 || ref.TokenEstimate.UpperBoundTokens > 0 {
+		metadata["estimated_tokens"] = strconv.Itoa(ref.TokenEstimate.Tokens)
+		metadata["estimated_token_error_bound"] = strconv.Itoa(ref.TokenEstimate.ErrorBoundTokens)
+		metadata["estimated_token_upper_bound"] = strconv.Itoa(ref.TokenEstimate.UpperBoundTokens)
+	}
+
+	if ref.TokenEstimator != "" {
+		metadata["token_estimator"] = ref.TokenEstimator
+	}
+
+	if ref.DigestSHA256 != "" {
+		metadata["digest_sha256"] = ref.DigestSHA256
+	}
+
+	return metadata
 }
 
 func emitFileWriteWarning(

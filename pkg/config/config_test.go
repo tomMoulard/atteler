@@ -669,6 +669,62 @@ context:
 	assert.False(t, cfg.Context.ReferencePolicy.AllowPrivateNetworks)
 }
 
+func TestLoadWithOrigins_PreservesContextReferencePolicy(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	cwd := filepath.Join(dir, "cwd")
+
+	require.NoError(t, os.MkdirAll(home, 0o700))
+	require.NoError(t, os.MkdirAll(cwd, 0o700))
+
+	first := writeConfig(t, dir, "first.yaml", `
+context:
+  reference_policy:
+    allowed_hosts: [old.example.com]
+    max_redirects: 5
+    allow_private_networks: true
+`)
+	second := writeConfig(t, dir, "second.yaml", `
+context:
+  reference_policy:
+    allowed_schemes: [https]
+    allowed_hosts: [docs.example.com]
+    local_roots: [../shared]
+    max_redirects: 0
+    content_types: [text/*]
+    allow_private_networks: false
+`)
+
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv(EnvPath, first+string(os.PathListSeparator)+second)
+	t.Chdir(cwd)
+
+	cfg, loaded, origins, err := LoadWithOrigins()
+	require.NoError(t, err)
+	assert.Contains(t, loaded, first)
+	assert.Contains(t, loaded, second)
+	assert.Equal(t, []string{"https"}, cfg.Context.ReferencePolicy.AllowedSchemes)
+	assert.Equal(t, []string{"docs.example.com"}, cfg.Context.ReferencePolicy.AllowedHosts)
+	assert.Equal(t, []string{"../shared"}, cfg.Context.ReferencePolicy.LocalRoots)
+	assert.Equal(t, 0, cfg.Context.ReferencePolicy.MaxRedirects)
+	assert.Equal(t, []string{"text/*"}, cfg.Context.ReferencePolicy.ContentTypes)
+	assert.False(t, cfg.Context.ReferencePolicy.AllowPrivateNetworks)
+
+	maxRedirectsOrigin, ok := origins.Final("context.reference_policy.max_redirects")
+	require.True(t, ok)
+	assert.Equal(t, OriginEnvFile, maxRedirectsOrigin.Kind)
+	assert.Equal(t, second, maxRedirectsOrigin.Source)
+	assert.Equal(t, "0", maxRedirectsOrigin.Value)
+
+	privateNetworkOrigin, ok := origins.Final("context.reference_policy.allow_private_networks")
+	require.True(t, ok)
+	assert.Equal(t, OriginEnvFile, privateNetworkOrigin.Kind)
+	assert.Equal(t, second, privateNetworkOrigin.Source)
+	assert.Equal(t, "false", privateNetworkOrigin.Value)
+}
+
 func TestLoadFiles_AgentReferences(t *testing.T) {
 	t.Parallel()
 

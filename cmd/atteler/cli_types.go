@@ -489,7 +489,10 @@ type appState struct {
 	pluginPaths                 []string
 	providers                   []string
 	loadedConfigPaths           []string
+	configuredReferences        []string
+	referenceManifest           contextref.ReferenceManifest
 	referenceContext            string
+	referenceContextEstimator   string
 	skillLearningStoreDir       string
 	skillLearningSkillDir       string
 	selectedModel               string
