@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/events"
@@ -25,6 +26,17 @@ const codexChatGPTAPIBase = "https://chatgpt.com/backend-api/codex"
 // own originator value; impersonation here is at the user's invitation, since
 // they want their codex login to authorize atteler.
 const codexOriginatorHeader = "codex_cli_rs"
+
+const (
+	codexAdapterVersion    = "codex-chatgpt-responses-v1"
+	codexAdapterSource     = "Codex CLI auth.json auth_mode=chatgpt; source credentials are owned by the codex CLI"
+	codexAdapterCLIVersion = "Codex CLI ChatGPT auth schema and originator header as reviewed on 2026-05-22; " +
+		"no public upstream semver contract"
+	codexAdapterProtocol = "ChatGPT Codex backend POST /backend-api/codex/responses with Responses-style SSE, " +
+		"originator=codex_cli_rs, OpenAI-Beta=responses=experimental"
+	codexAdapterReviewedAt  = "2026-05-22"
+	codexAdapterReviewAfter = "2026-08-22"
+)
 
 // CodexProvider calls the OpenAI Responses API directly using credentials
 // stored by the codex CLI in ~/.codex/auth.json (auth_mode=chatgpt). It
@@ -48,8 +60,26 @@ func NewCodexProvider() (*CodexProvider, error) {
 // NewCodexProviderContext creates a provider backed by ~/.codex/auth.json.
 // It returns an error when no chatgpt-mode credentials are present.
 func NewCodexProviderContext(ctx context.Context) (*CodexProvider, error) {
+	return NewCodexProviderWithConfigContext(ctx, ProviderConfig{})
+}
+
+// NewCodexProviderWithConfig is kept for source compatibility only.
+//
+// Deprecated: use NewCodexProviderWithConfigContext so auth-file reads inherit
+// caller cancellation checks.
+func NewCodexProviderWithConfig(_ ProviderConfig) (*CodexProvider, error) {
+	return nil, ErrContextRequired
+}
+
+// NewCodexProviderWithConfigContext creates a provider backed by
+// ~/.codex/auth.json and applies provider-specific configuration.
+func NewCodexProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) (*CodexProvider, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, err
+	}
+
+	if privateAdapterDisabled(providerCodex, cfg) {
+		return nil, errors.New("codex private adapter disabled")
 	}
 
 	auth, err := loadCodexChatGPTAuthContext(ctx, codexConfigDir())
@@ -58,9 +88,9 @@ func NewCodexProviderContext(ctx context.Context) (*CodexProvider, error) {
 	}
 
 	return &CodexProvider{
-		client:  providerHTTPClient(ProviderConfig{}),
+		client:  providerHTTPClient(cfg),
 		auth:    auth,
-		baseURL: configuredBaseURL("CODEX_BASE_URL", "", codexChatGPTAPIBase),
+		baseURL: configuredBaseURL("CODEX_BASE_URL", cfg.BaseURL, codexChatGPTAPIBase),
 		models:  codexModels(),
 	}, nil
 }
@@ -87,6 +117,54 @@ func (c *CodexProvider) FetchModels(ctx context.Context) ([]string, error) {
 	return c.Models(), nil
 }
 
+// AdapterDiagnostics reports the private Codex adapter contract and readiness.
+func (c *CodexProvider) AdapterDiagnostics() AdapterDiagnostics {
+	access, accountID := "", ""
+	if c.auth != nil {
+		access, accountID = c.auth.snapshot()
+	}
+
+	checks := []ReadinessCheck{
+		{
+			Name:   "local_credentials",
+			Status: readinessStatus(access != ""),
+			Detail: readinessDetail(access != "", "chatgpt access_token loaded from Codex auth.json", "missing chatgpt access_token; run `codex login`"),
+		},
+		{
+			Name:   "token_refresh",
+			Status: readinessStatus(c.auth != nil && c.auth.hasRefreshToken()),
+			Detail: readinessDetail(c.auth != nil && c.auth.hasRefreshToken(), "refresh_token available for one retry after HTTP 401", "missing refresh_token; adapter cannot recover from expired access tokens"),
+		},
+		{
+			Name:   "network_reachability",
+			Status: ReadinessSkipped,
+			Detail: "not probed during doctor; private ChatGPT Codex backend is verified only by a completion request",
+		},
+		{
+			Name:   "model_availability",
+			Status: ReadinessWarning,
+			Detail: "static catalog only; this auth mode has no supported /models endpoint",
+		},
+	}
+
+	if accountID == "" {
+		checks = append(checks, ReadinessCheck{
+			Name:   "account_scope",
+			Status: ReadinessWarning,
+			Detail: "auth.json has no ChatGPT account id; backend may choose the default account",
+		})
+	}
+
+	return AdapterDiagnostics{
+		Contract: codexAdapterContract(),
+		Checks:   checks,
+		Warnings: []string{
+			"uses a private ChatGPT/Codex backend, borrowed Codex CLI credentials, and a static non-network-verified model catalog",
+		},
+		Models: c.Models(),
+	}
+}
+
 // HealthCheck verifies that auth.json parses and contains a chatgpt-mode token.
 // It does not contact the network.
 func (c *CodexProvider) HealthCheck(ctx context.Context) error {
@@ -102,6 +180,10 @@ func (c *CodexProvider) HealthCheck(ctx context.Context) error {
 		},
 	})
 
+	if c.auth == nil {
+		return errors.New("no Codex chatgpt access_token in auth.json: run `codex login`")
+	}
+
 	access, _ := c.auth.snapshot()
 	if access == "" {
 		return errors.New("no Codex chatgpt access_token in auth.json: run `codex login`")
@@ -112,18 +194,48 @@ func (c *CodexProvider) HealthCheck(ctx context.Context) error {
 
 // ModelContextWindow returns the context window size for a Codex model.
 func (c *CodexProvider) ModelContextWindow(model string) int {
-	switch model {
-	case "gpt-5.5", "gpt-5.4":
-		return 400_000
-	case "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark":
-		return 200_000
-	default:
-		if strings.HasPrefix(model, "gpt-") {
-			return 200_000
-		}
-
+	metadata, ok := c.ModelMetadata(model)
+	if !ok {
 		return 0
 	}
+
+	return metadata.ContextWindow
+}
+
+// ModelCatalog returns static Codex model metadata with provenance.
+func (c *CodexProvider) ModelCatalog() []ModelMetadata {
+	out := make([]ModelMetadata, 0, len(c.Models()))
+	for _, model := range c.Models() {
+		metadata, ok := c.ModelMetadata(model)
+		if !ok {
+			continue
+		}
+
+		out = append(out, metadata)
+	}
+
+	return out
+}
+
+// ModelMetadata returns provenance for a Codex static model entry.
+func (c *CodexProvider) ModelMetadata(model string) (ModelMetadata, bool) {
+	for _, entry := range codexDefaultModelCatalog() {
+		if entry.ID == model {
+			return entry, true
+		}
+	}
+
+	if slices.Contains(c.Models(), model) || model == codexConfiguredModel() {
+		return ModelMetadata{
+			ID:          model,
+			Provenance:  "user Codex config.toml model override; no Codex backend model-metadata endpoint exists for this auth mode",
+			ReviewedAt:  codexAdapterReviewedAt,
+			ReviewAfter: codexAdapterReviewAfter,
+			Notes:       "context window unknown; Atteler intentionally returns 0 rather than guessing for configured Codex models",
+		}, true
+	}
+
+	return ModelMetadata{}, false
 }
 
 // codexResponsesRequest mirrors the subset of the OpenAI Responses API that
@@ -895,12 +1007,71 @@ func codexModels() []string {
 }
 
 func defaultCodexModels() []string {
-	return []string{
-		"gpt-5.5",
-		"gpt-5.4",
-		"gpt-5.4-mini",
-		"gpt-5.3-codex",
-		"gpt-5.3-codex-spark",
+	return modelIDsFromMetadata(codexDefaultModelCatalog())
+}
+
+func codexDefaultModelCatalog() []ModelMetadata {
+	return cloneModelMetadata([]ModelMetadata{
+		{
+			ID:            "gpt-5.5",
+			ContextWindow: 400_000,
+			Provenance:    "static Codex adapter catalog reviewed against the local provider contract; not network verified",
+			ReviewedAt:    codexAdapterReviewedAt,
+			ReviewAfter:   codexAdapterReviewAfter,
+			Notes:         "private Codex backend has no supported /models endpoint for ChatGPT auth",
+		},
+		{
+			ID:            "gpt-5.4",
+			ContextWindow: 400_000,
+			Provenance:    "static Codex adapter catalog reviewed against the local provider contract; not network verified",
+			ReviewedAt:    codexAdapterReviewedAt,
+			ReviewAfter:   codexAdapterReviewAfter,
+			Notes:         "private Codex backend has no supported /models endpoint for ChatGPT auth",
+		},
+		{
+			ID:            "gpt-5.4-mini",
+			ContextWindow: 200_000,
+			Provenance:    "static Codex adapter catalog reviewed against the local provider contract; not network verified",
+			ReviewedAt:    codexAdapterReviewedAt,
+			ReviewAfter:   codexAdapterReviewAfter,
+			Notes:         "private Codex backend has no supported /models endpoint for ChatGPT auth",
+		},
+		{
+			ID:            "gpt-5.3-codex",
+			ContextWindow: 200_000,
+			Provenance:    "static Codex adapter catalog reviewed against the local provider contract; not network verified",
+			ReviewedAt:    codexAdapterReviewedAt,
+			ReviewAfter:   codexAdapterReviewAfter,
+			Notes:         "private Codex backend has no supported /models endpoint for ChatGPT auth",
+		},
+		{
+			ID:            "gpt-5.3-codex-spark",
+			ContextWindow: 200_000,
+			Provenance:    "static Codex adapter catalog reviewed against the local provider contract; not network verified",
+			ReviewedAt:    codexAdapterReviewedAt,
+			ReviewAfter:   codexAdapterReviewAfter,
+			Notes:         "private Codex backend has no supported /models endpoint for ChatGPT auth",
+		},
+	})
+}
+
+//nolint:gosec // Documents credential source paths and JSON field names, not secret values.
+func codexAdapterContract() AdapterContract {
+	return AdapterContract{
+		Provider:         providerCodex,
+		AdapterVersion:   codexAdapterVersion,
+		SourceCLI:        codexAdapterSource,
+		SourceCLIVersion: codexAdapterCLIVersion,
+		Protocol:         codexAdapterProtocol,
+		Credential:       "CODEX_HOME/auth.json or ~/.codex/auth.json tokens.access_token/refresh_token/account_id",
+		KillSwitches: []string{
+			"providers.codex.disable_private_adapter",
+			"ATTELER_DISABLE_CODEX_ADAPTER",
+			"ATTELER_DISABLE_PRIVATE_ADAPTERS",
+			"ATTELER_DISABLE_BORROWED_CREDENTIAL_ADAPTERS",
+		},
+		ReviewedAt:  codexAdapterReviewedAt,
+		ReviewAfter: codexAdapterReviewAfter,
 	}
 }
 

@@ -53,9 +53,25 @@ func ResolveAnthropicKey() (key string, bearer bool, err error) {
 //  5. macOS Keychain "Claude Code-credentials" (reuse Claude Code's OAuth session)
 //  6. ~/.claude/.credentials.json              (Linux/Windows fallback)
 //
+// Borrowed credential sources in steps 3-6 are skipped when the global
+// private/borrowed adapter kill switches are set.
+//
 // The second return value indicates whether the credential is a bearer token
 // (true) or a plain API key (false).
 func ResolveAnthropicKeyContext(ctx context.Context) (key string, bearer bool, err error) {
+	return resolveAnthropicKeyContext(ctx, !borrowedAnthropicCredentialsDisabled(ProviderConfig{}))
+}
+
+// ResolveAnthropicKeyWithConfigContext resolves Anthropic credentials while
+// honoring provider kill switches for borrowed Claude Code/Forge credential
+// stores. API keys and explicit ANTHROPIC_AUTH_TOKEN bearer tokens remain
+// available so disabling private adapters does not disable the normal Anthropic
+// provider.
+func ResolveAnthropicKeyWithConfigContext(ctx context.Context, cfg ProviderConfig) (key string, bearer bool, err error) {
+	return resolveAnthropicKeyContext(ctx, !borrowedAnthropicCredentialsDisabled(cfg))
+}
+
+func resolveAnthropicKeyContext(ctx context.Context, allowBorrowedCredentials bool) (key string, bearer bool, err error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return "", false, err
 	}
@@ -66,6 +82,12 @@ func ResolveAnthropicKeyContext(ctx context.Context) (key string, bearer bool, e
 
 	if v := os.Getenv("ANTHROPIC_AUTH_TOKEN"); v != "" {
 		return v, true, nil
+	}
+
+	if !allowBorrowedCredentials {
+		return "", false, errors.New(
+			"no Anthropic API credentials found: borrowed Claude Code/Forge credential stores are disabled; set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN",
+		)
 	}
 
 	if v := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); v != "" {
@@ -95,6 +117,13 @@ func ResolveAnthropicKeyContext(ctx context.Context) (key string, bearer bool, e
 
 func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func borrowedAnthropicCredentialsDisabled(cfg ProviderConfig) bool {
+	return cfg.DisablePrivateAdapter ||
+		envBool("ATTELER_DISABLE_PRIVATE_ADAPTERS") ||
+		envBool("ATTELER_DISABLE_BORROWED_CREDENTIAL_ADAPTERS") ||
+		envBool("ATTELER_DISABLE_CLAUDE_CODE_ADAPTER")
 }
 
 // claudeCodeCredentials is the JSON stored in the Keychain / credentials file.
@@ -791,8 +820,8 @@ func loadCodexChatGPTAuthContext(ctx context.Context, codexHome string) (*codexC
 		return nil, fmt.Errorf("codex auth_mode is %q, want chatgpt", auth.AuthMode)
 	}
 
-	if auth.Tokens.AccessToken == "" || auth.Tokens.RefreshToken == "" {
-		return nil, fmt.Errorf("codex %s missing tokens", authPath)
+	if auth.Tokens.AccessToken == "" {
+		return nil, fmt.Errorf("codex %s missing access_token", authPath)
 	}
 
 	return &codexChatGPTAuth{
@@ -814,6 +843,13 @@ func (a *codexChatGPTAuth) snapshot() (access, account string) {
 	return a.accessToken, a.accountID
 }
 
+func (a *codexChatGPTAuth) hasRefreshToken() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.refreshToken != ""
+}
+
 // refresh exchanges the stored refresh_token for fresh tokens and writes the
 // new state back to auth.json. The caller may pass a previously observed
 // access token to skip the refresh if another goroutine has already refreshed.
@@ -828,6 +864,10 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 	if observedAccess != "" && observedAccess != a.accessToken {
 		// Another caller refreshed concurrently; the stored token is already new.
 		return nil
+	}
+
+	if a.refreshToken == "" {
+		return errors.New("codex chatgpt refresh: no refresh_token available")
 	}
 
 	body, err := json.Marshal(map[string]string{
@@ -1154,6 +1194,13 @@ func (a *claudeCodeAuth) snapshot() string {
 	defer a.mu.Unlock()
 
 	return a.accessToken
+}
+
+func (a *claudeCodeAuth) hasRefreshToken() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.refreshToken != ""
 }
 
 // refresh exchanges the stored refresh_token for fresh tokens and writes the

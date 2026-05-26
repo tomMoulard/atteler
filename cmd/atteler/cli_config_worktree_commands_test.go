@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,8 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/agent"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
+	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/session"
 )
 
 func TestContextOptionsFromConfig_MapsReferencePolicy(t *testing.T) {
@@ -134,6 +138,181 @@ func TestLoadConfiguredReferencesReportsTruncatedAndSkipped(t *testing.T) { //no
 	assert.Contains(t, stderr, "reference skipped")
 	assert.Contains(t, stderr, `reason="empty reference"`)
 }
+
+func TestDoctorPrintsPrivateAdapterContractAndModelProvenance(t *testing.T) { //nolint:paralleltest // captures process-global stdout.
+	registry := llm.NewRegistry()
+	registry.Register(doctorDiagnosticsProvider{})
+
+	state := appState{
+		config: appconfig.Config{
+			Providers: map[string]appconfig.ProviderConfig{
+				"claude-code": {Disabled: true},
+			},
+		},
+		registry:      registry,
+		agentRegistry: agent.NewRegistry(nil),
+		sessionStore:  session.NewStore(t.TempDir()),
+	}
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		require.NoError(t, doctor(t.Context(), state))
+	})
+
+	assert.Contains(t, stdout, "[ok] codex adapter=codex-test-contract-v1")
+	assert.Contains(t, stdout, "adapter_contract: passed")
+	assert.Contains(t, stdout, "contract: source=Codex CLI auth.json")
+	assert.Contains(t, stdout, "source_cli_version=codex cli test fixture")
+	assert.Contains(t, stdout, "kill_switches: providers.codex.disable_private_adapter")
+	assert.Contains(t, stdout, "[ok] local_credentials")
+	assert.Contains(t, stdout, "[warn] model_availability")
+	assert.Contains(t, stdout, "warning: private adapter")
+	assert.Contains(t, stdout, "- gpt-test (context=12345; provenance=static fixture; reviewed=2029-01-01; review_after=2030-01-01; notes=test note)")
+}
+
+func TestDoctorReportsUnregisteredPrivateAdapterCredentialFailures(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "codex"))
+	t.Setenv("HOME", tempDir)
+	t.Setenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN", "1")
+
+	state := appState{
+		registry:      llm.NewRegistry(),
+		agentRegistry: agent.NewRegistry(nil),
+		sessionStore:  session.NewStore(t.TempDir()),
+	}
+
+	var doctorErr error
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		doctorErr = doctor(t.Context(), state)
+	})
+
+	require.Error(t, doctorErr)
+	assert.Contains(t, doctorErr.Error(), "all providers failed")
+	assert.Contains(t, stdout, "[FAIL] claude-code adapter=claude-code-oauth-messages-v1")
+	assert.Contains(t, stdout, "[FAIL] codex adapter=codex-chatgpt-responses-v1")
+	assert.Contains(t, stdout, "adapter_contract: failed: local_credentials")
+	assert.Contains(t, stdout, "[fail] local_credentials")
+	assert.Contains(t, stdout, "[skip] token_refresh")
+	assert.Contains(t, stdout, "[skip] network_reachability")
+	assert.Contains(t, stdout, "- gpt-5.5 (context=400000; provenance=static Codex adapter catalog")
+	assert.Contains(t, stdout, "reviewed=2026-05-22; review_after=2026-08-22; notes=private Codex backend")
+}
+
+func TestDoctorHonorsPrivateAdapterKillSwitchesWithoutFailingNormalProvider(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "codex"))
+	t.Setenv("HOME", tempDir)
+	t.Setenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN", "1")
+
+	registry := llm.NewRegistry()
+	registry.Register(doctorHealthyProvider{name: "openai", models: []string{"gpt-test"}})
+
+	state := appState{
+		config: appconfig.Config{
+			Providers: map[string]appconfig.ProviderConfig{
+				"codex":       {DisablePrivateAdapter: true},
+				"claude-code": {DisablePrivateAdapter: true},
+			},
+		},
+		registry:      registry,
+		agentRegistry: agent.NewRegistry(nil),
+		sessionStore:  session.NewStore(t.TempDir()),
+	}
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		require.NoError(t, doctor(t.Context(), state))
+	})
+
+	assert.Contains(t, stdout, "[ok] openai")
+	assert.NotContains(t, stdout, "[FAIL] codex")
+	assert.NotContains(t, stdout, "[FAIL] claude-code")
+}
+
+type doctorDiagnosticsProvider struct{}
+
+const doctorDiagnosticsProviderName = "codex"
+
+func (doctorDiagnosticsProvider) Name() string { return doctorDiagnosticsProviderName }
+
+func (doctorDiagnosticsProvider) Models() []string { return []string{"gpt-test"} }
+
+func (doctorDiagnosticsProvider) FetchModels(context.Context) ([]string, error) {
+	return []string{"gpt-test"}, nil
+}
+
+func (doctorDiagnosticsProvider) HealthCheck(context.Context) error { return nil }
+
+func (doctorDiagnosticsProvider) Complete(context.Context, llm.CompleteParams) (*llm.Response, error) {
+	return &llm.Response{Content: "ok", Model: "gpt-test"}, nil
+}
+
+func (doctorDiagnosticsProvider) ModelContextWindow(string) int { return 12345 }
+
+func (doctorDiagnosticsProvider) AdapterDiagnostics() llm.AdapterDiagnostics {
+	return llm.AdapterDiagnostics{
+		Contract: llm.AdapterContract{
+			Provider:         doctorDiagnosticsProviderName,
+			AdapterVersion:   "codex-test-contract-v1",
+			SourceCLI:        "Codex CLI auth.json",
+			SourceCLIVersion: "codex cli test fixture",
+			Protocol:         "test protocol",
+			KillSwitches:     []string{"providers.codex.disable_private_adapter"},
+			ReviewedAt:       "2029-01-01",
+			ReviewAfter:      "2030-01-01",
+		},
+		Checks: []llm.ReadinessCheck{
+			{Name: "local_credentials", Status: llm.ReadinessOK, Detail: "loaded"},
+			{Name: "model_availability", Status: llm.ReadinessWarning, Detail: "static"},
+		},
+		Warnings: []string{"private adapter"},
+		Models:   []string{"gpt-test"},
+	}
+}
+
+func (doctorDiagnosticsProvider) ModelCatalog() []llm.ModelMetadata {
+	return []llm.ModelMetadata{doctorModelMetadata()}
+}
+
+func (doctorDiagnosticsProvider) ModelMetadata(model string) (llm.ModelMetadata, bool) {
+	if model != "gpt-test" {
+		return llm.ModelMetadata{}, false
+	}
+
+	return doctorModelMetadata(), true
+}
+
+func doctorModelMetadata() llm.ModelMetadata {
+	return llm.ModelMetadata{
+		ID:            "gpt-test",
+		ContextWindow: 12345,
+		Provenance:    "static fixture",
+		ReviewedAt:    "2029-01-01",
+		ReviewAfter:   "2030-01-01",
+		Notes:         "test note",
+	}
+}
+
+type doctorHealthyProvider struct {
+	name   string
+	models []string
+}
+
+func (p doctorHealthyProvider) Name() string { return p.name }
+
+func (p doctorHealthyProvider) Models() []string { return append([]string(nil), p.models...) }
+
+func (p doctorHealthyProvider) FetchModels(context.Context) ([]string, error) {
+	return append([]string(nil), p.models...), nil
+}
+
+func (p doctorHealthyProvider) HealthCheck(context.Context) error { return nil }
+
+func (p doctorHealthyProvider) Complete(context.Context, llm.CompleteParams) (*llm.Response, error) {
+	return &llm.Response{Content: "ok", Model: p.models[0]}, nil
+}
+
+func (p doctorHealthyProvider) ModelContextWindow(string) int { return 12345 }
 
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()

@@ -707,36 +707,16 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	}
 
 	providers := reg.ListProviders()
-	if len(providers) == 0 && !opts.headless {
+	if len(providers) == 0 && !opts.headless && !opts.doctor {
 		fmt.Fprintln(os.Stderr, "warning: no LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY")
 	}
 
-	// Set up git worktree isolation when requested.
-	var wtInfo *worktree.Info
+	wtInfo, err := setupWorktreeIfRequested(ctx, opts, cwd, &selection)
+	if err != nil {
+		return appState{}, err
+	}
 
-	if opts.useWorktree && cwd != "" {
-		// If continuing a session that already has a worktree, re-use it.
-		if selection.sessionState.WorktreePath != "" {
-			wtInfo = &worktree.Info{
-				Path:       selection.sessionState.WorktreePath,
-				Branch:     selection.sessionState.WorktreeBranch,
-				BaseBranch: selection.sessionState.WorktreeBase,
-				SessionID:  selection.sessionState.ID,
-			}
-			fmt.Fprintln(os.Stderr, "worktree: reusing "+wtInfo.Path)
-		} else {
-			wtInfo, err = worktree.CreateContext(ctx, cwd, selection.sessionState.ID)
-			if err != nil {
-				return appState{}, fmt.Errorf("worktree setup: %w", err)
-			}
-
-			selection.sessionState.WorktreePath = wtInfo.Path
-			selection.sessionState.WorktreeBranch = wtInfo.Branch
-			selection.sessionState.WorktreeBase = wtInfo.BaseBranch
-			fmt.Fprintln(os.Stderr, "worktree: created "+wtInfo.Path+" (branch "+wtInfo.Branch+")")
-		}
-
-		// Update context references to point at the worktree.
+	if wtInfo != nil {
 		contextOptions.Root = wtInfo.Path
 	}
 
@@ -773,6 +753,42 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		promptLocalOnly:             opts.promptLocalOnly,
 		skillLearningEnabled:        skillLearningEnabled,
 	}, nil
+}
+
+func setupWorktreeIfRequested(
+	ctx context.Context,
+	opts cliOptions,
+	cwd string,
+	selection *selectionState,
+) (*worktree.Info, error) {
+	if !opts.useWorktree || cwd == "" {
+		return nil, nil
+	}
+
+	// If continuing a session that already has a worktree, re-use it.
+	if selection.sessionState.WorktreePath != "" {
+		wtInfo := &worktree.Info{
+			Path:       selection.sessionState.WorktreePath,
+			Branch:     selection.sessionState.WorktreeBranch,
+			BaseBranch: selection.sessionState.WorktreeBase,
+			SessionID:  selection.sessionState.ID,
+		}
+		fmt.Fprintln(os.Stderr, "worktree: reusing "+wtInfo.Path)
+
+		return wtInfo, nil
+	}
+
+	wtInfo, err := worktree.CreateContext(ctx, cwd, selection.sessionState.ID)
+	if err != nil {
+		return nil, fmt.Errorf("worktree setup: %w", err)
+	}
+
+	selection.sessionState.WorktreePath = wtInfo.Path
+	selection.sessionState.WorktreeBranch = wtInfo.Branch
+	selection.sessionState.WorktreeBase = wtInfo.BaseBranch
+	fmt.Fprintln(os.Stderr, "worktree: created "+wtInfo.Path+" (branch "+wtInfo.Branch+")")
+
+	return wtInfo, nil
 }
 
 func autoRegisterForOptions(ctx context.Context, opts cliOptions, cfg appconfig.Config, selectedModel string) *llm.Registry {

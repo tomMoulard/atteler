@@ -202,6 +202,108 @@ func TestResolveAnthropicKeyContext_RefreshHonorsCanceledContext(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
+func TestResolveAnthropicKeyWithConfig_APIKeyWorksWhenBorrowedCredentialsDisabled(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "api-key")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
+	t.Setenv("FORGE_CONFIG", "")
+	t.Setenv("ATTELER_DISABLE_PRIVATE_ADAPTERS", "1")
+
+	key, bearer, err := ResolveAnthropicKeyWithConfigContext(context.Background(), ProviderConfig{})
+	require.NoError(t, err)
+
+	assert.Equal(t, "api-key", key)
+	assert.False(t, bearer)
+}
+
+func TestResolveAnthropicKeyWithConfig_AuthTokenWorksWhenBorrowedCredentialsDisabled(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "auth-token")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
+	t.Setenv("FORGE_CONFIG", "")
+
+	key, bearer, err := ResolveAnthropicKeyWithConfigContext(
+		context.Background(),
+		ProviderConfig{DisablePrivateAdapter: true},
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, "auth-token", key)
+	assert.True(t, bearer)
+}
+
+func TestResolveAnthropicKeyWithConfig_SkipsClaudeCodeOAuthWhenBorrowedCredentialsDisabled(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
+	t.Setenv("FORGE_CONFIG", "")
+
+	_, _, err := ResolveAnthropicKeyWithConfigContext(
+		context.Background(),
+		ProviderConfig{DisablePrivateAdapter: true},
+	)
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "borrowed Claude Code/Forge credential stores are disabled")
+}
+
+func TestResolveAnthropicKey_GlobalKillSwitchSkipsClaudeCodeOAuth(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
+	t.Setenv("FORGE_CONFIG", "")
+	t.Setenv("ATTELER_DISABLE_PRIVATE_ADAPTERS", "1")
+
+	_, _, err := ResolveAnthropicKeyContext(context.Background())
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "borrowed Claude Code/Forge credential stores are disabled")
+}
+
+func TestResolveAnthropicKey_ClaudeCodeKillSwitchSkipsBorrowedOAuth(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token")
+	t.Setenv("FORGE_CONFIG", "")
+	t.Setenv("ATTELER_DISABLE_CLAUDE_CODE_ADAPTER", "1")
+
+	_, _, err := ResolveAnthropicKeyContext(context.Background())
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "borrowed Claude Code/Forge credential stores are disabled")
+}
+
+func TestResolveAnthropicKeyWithConfig_SkipsCredentialFilesWhenBorrowedCredentialsDisabled(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+	t.Setenv("FORGE_CONFIG", "")
+	t.Setenv("ATTELER_DISABLE_BORROWED_CREDENTIAL_ADAPTERS", "1")
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	claudeDir := filepath.Join(dir, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o750))
+
+	claudeData := `{"claudeAiOauth":{"accessToken":"sk-from-file","refreshToken":"rt","expiresAt":9999999999999}}`
+	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, ".credentials.json"), []byte(claudeData), 0o600))
+
+	forgeDir := filepath.Join(dir, "forge")
+	require.NoError(t, os.MkdirAll(forgeDir, 0o750))
+
+	forgeData := `[{"id":"anthropic","auth_details":{"api_key":"forge-service-key"}}]`
+	require.NoError(t, os.WriteFile(filepath.Join(forgeDir, ".credentials.json"), []byte(forgeData), 0o600))
+
+	_, _, err := ResolveAnthropicKeyWithConfigContext(
+		context.Background(),
+		ProviderConfig{},
+	)
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "borrowed Claude Code/Forge credential stores are disabled")
+}
+
 func TestParseClaudeCodeCredentials(t *testing.T) {
 	t.Parallel()
 

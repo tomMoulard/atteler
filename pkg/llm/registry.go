@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -55,10 +56,11 @@ func (c AutoRegisterConfig) logger() *slog.Logger {
 
 // ProviderConfig configures one LLM provider.
 type ProviderConfig struct {
-	BaseURL        string
-	Disabled       bool
-	AutoStart      bool
-	TimeoutSeconds int
+	BaseURL               string
+	Disabled              bool
+	AutoStart             bool
+	DisablePrivateAdapter bool
+	TimeoutSeconds        int
 }
 
 // AutoRegister is kept for source compatibility only and does not perform
@@ -133,10 +135,10 @@ func AutoRegisterWithConfigContext(ctx context.Context, cfg AutoRegisterConfig) 
 		return NewOllamaProviderWithConfigContext(ctx, ollamaConfig)
 	})
 	registerConfiguredProvider(r, cfg, providerClaudeCode, func() (Provider, error) {
-		return NewClaudeCodeProviderContext(ctx)
+		return NewClaudeCodeProviderWithConfigContext(ctx, providerConfig(cfg, providerClaudeCode))
 	})
 	registerConfiguredProvider(r, cfg, providerCodex, func() (Provider, error) {
-		return NewCodexProviderContext(ctx)
+		return NewCodexProviderWithConfigContext(ctx, providerConfig(cfg, providerCodex))
 	})
 
 	applyDefaultSelection(r, cfg)
@@ -144,9 +146,129 @@ func AutoRegisterWithConfigContext(ctx context.Context, cfg AutoRegisterConfig) 
 	return r
 }
 
+// PrivateAdapterDiagnostics reports readiness for private/borrowed-credential
+// adapters without requiring them to be registered. Disabled private adapters
+// are omitted so global/provider kill switches do not produce noisy failures.
+func PrivateAdapterDiagnostics(ctx context.Context, cfg AutoRegisterConfig) []ProviderHealth {
+	ctxErr := requireCredentialContext(ctx)
+
+	names := []string{providerClaudeCode, providerCodex}
+	results := make([]ProviderHealth, 0, len(names))
+
+	for _, providerName := range names {
+		providerCfg := providerConfig(cfg, providerName)
+		if providerCfg.Disabled || privateAdapterDisabled(providerName, providerCfg) {
+			continue
+		}
+
+		if ctxErr != nil {
+			results = append(results, privateAdapterCredentialFailure(
+				providerName,
+				privateAdapterContract(providerName),
+				privateAdapterModels(providerName),
+				ctxErr,
+			))
+
+			continue
+		}
+
+		results = append(results, privateAdapterHealth(ctx, providerName, providerCfg))
+	}
+
+	return results
+}
+
+func privateAdapterHealth(ctx context.Context, providerName string, cfg ProviderConfig) ProviderHealth {
+	switch providerName {
+	case providerCodex:
+		provider, err := NewCodexProviderWithConfigContext(ctx, cfg)
+		if err != nil {
+			return privateAdapterCredentialFailure(providerCodex, codexAdapterContract(), codexModels(), err)
+		}
+
+		return providerHealthFromDiagnostics(providerCodex, provider.AdapterDiagnostics())
+	case providerClaudeCode:
+		provider, err := NewClaudeCodeProviderWithConfigContext(ctx, cfg)
+		if err != nil {
+			return privateAdapterCredentialFailure(providerClaudeCode, claudeCodeAdapterContract(), defaultClaudeCodeModels(), err)
+		}
+
+		return providerHealthFromDiagnostics(providerClaudeCode, provider.AdapterDiagnostics())
+	default:
+		return ProviderHealth{Name: providerName}
+	}
+}
+
+func privateAdapterContract(providerName string) AdapterContract {
+	switch providerName {
+	case providerCodex:
+		return codexAdapterContract()
+	case providerClaudeCode:
+		return claudeCodeAdapterContract()
+	default:
+		return AdapterContract{Provider: providerName}
+	}
+}
+
+func privateAdapterModels(providerName string) []string {
+	switch providerName {
+	case providerCodex:
+		return codexModels()
+	case providerClaudeCode:
+		return defaultClaudeCodeModels()
+	default:
+		return nil
+	}
+}
+
+func privateAdapterCredentialFailure(
+	providerName string,
+	contract AdapterContract,
+	models []string,
+	err error,
+) ProviderHealth {
+	diagnostics := AdapterDiagnostics{
+		Contract: contract,
+		Checks: []ReadinessCheck{
+			{Name: "local_credentials", Status: ReadinessFailed, Detail: err.Error()},
+			{Name: "token_refresh", Status: ReadinessSkipped, Detail: "not checked because local credentials did not load"},
+			{Name: "network_reachability", Status: ReadinessSkipped, Detail: "not probed during doctor; adapter did not pass local credential checks"},
+			{Name: "model_availability", Status: ReadinessWarning, Detail: "static catalog only; model availability is not network verified"},
+		},
+		Warnings: []string{"private adapter is unavailable before any request because its borrowed credential contract failed"},
+		Models:   append([]string(nil), models...),
+	}
+
+	return providerHealthFromDiagnostics(providerName, diagnostics)
+}
+
+func providerHealthFromDiagnostics(providerName string, diagnostics AdapterDiagnostics) ProviderHealth {
+	health := ProviderHealth{
+		Name:     providerName,
+		Checks:   append([]ReadinessCheck(nil), diagnostics.Checks...),
+		Warnings: append([]string(nil), diagnostics.Warnings...),
+		Models:   append([]string(nil), diagnostics.Models...),
+		Healthy:  diagnostics.Healthy(),
+		Error:    diagnostics.Error(),
+	}
+
+	if diagnostics.Contract.AdapterVersion != "" {
+		contract := diagnostics.Contract
+		health.Contract = &contract
+	}
+
+	return health
+}
+
 func registerConfiguredProvider(r *Registry, cfg AutoRegisterConfig, providerName string, factory providerFactory) {
-	if providerConfig(cfg, providerName).Disabled {
+	providerCfg := providerConfig(cfg, providerName)
+	if providerCfg.Disabled {
 		cfg.logger().Debug("llm provider skipped: disabled by config", "provider", providerName)
+		return
+	}
+
+	if privateAdapterDisabled(providerName, providerCfg) {
+		cfg.logger().Debug("llm provider skipped: private adapter disabled", "provider", providerName)
 		return
 	}
 
@@ -205,6 +327,50 @@ func providerConfig(cfg AutoRegisterConfig, name string) ProviderConfig {
 	}
 
 	return cfg.Providers[name]
+}
+
+func privateAdapterDisabled(providerName string, cfg ProviderConfig) bool {
+	if !isPrivateAdapterProvider(providerName) {
+		return false
+	}
+
+	return cfg.DisablePrivateAdapter ||
+		envBool("ATTELER_DISABLE_PRIVATE_ADAPTERS") ||
+		envBool("ATTELER_DISABLE_BORROWED_CREDENTIAL_ADAPTERS") ||
+		envBool(privateAdapterProviderKillSwitch(providerName))
+}
+
+func isPrivateAdapterProvider(providerName string) bool {
+	return providerName == providerCodex || providerName == providerClaudeCode
+}
+
+func privateAdapterProviderKillSwitch(providerName string) string {
+	switch providerName {
+	case providerCodex:
+		return "ATTELER_DISABLE_CODEX_ADAPTER"
+	case providerClaudeCode:
+		return "ATTELER_DISABLE_CLAUDE_CODE_ADAPTER"
+	default:
+		return ""
+	}
+}
+
+func envBool(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func shouldAutoStartOllama(cfg AutoRegisterConfig) bool {
