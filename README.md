@@ -250,19 +250,21 @@ Provider adapters intentionally expose `llm.ProviderCapabilities` metadata via
 `llm.ProviderCapabilitiesFor` and `llm.KnownProviders` so callers can check
 whether a provider supports seed, tools, reasoning, cached-token accounting,
 streaming, and network model discovery before setting provider-specific knobs.
-The same metadata documents lossy and unsupported `CompleteParams` fields:
+The same metadata documents lossy mappings, provider-adjusted request options,
+and unsupported `CompleteParams` fields:
 
-| Provider | Intentionally lossy mappings | Unsupported or unavailable fields |
+| Provider | Intentionally lossy or adjusted mappings | Unsupported or unavailable fields |
 | --- | --- | --- |
 | OpenAI | `ToolResult.IsError` is not represented by Chat Completions tool messages. | None currently documented. |
-| Anthropic | Reasoning levels become thinking token budgets; system messages are lifted to `system`; tool results become user-role content blocks. | `Seed` |
-| Claude Code | Same request/response mapping as Anthropic over the Claude Code OAuth path. | `Seed` |
-| Codex | System messages become Responses `instructions`; chat/tool history becomes Responses input items; `ToolResult.IsError` is not represented. | `Temperature`, `TopP`, `Seed`, `Stop`, `MaxTokens` |
+| Anthropic | Reasoning levels become thinking token budgets; when thinking is enabled, `Temperature` is coerced to `1`; system messages are lifted to `system`; tool results become user-role content blocks. | `Seed` |
+| Claude Code | Same request/response mapping as Anthropic over the Claude Code OAuth path; when thinking is enabled, `Temperature` is coerced to `1`. | `Seed` |
+| Codex | `Temperature` is omitted because the ChatGPT Responses adapter does not expose it; system messages become Responses `instructions`; chat/tool history becomes Responses input items; `ToolResult.IsError` is not represented. | `TopP`, `Seed`, `Stop`, `MaxTokens` |
 | Ollama | Reasoning levels become Ollama `think` values; tool-call IDs, tool-result IDs, and `ToolResult.IsError` are not represented in Ollama chat messages. | Cached-token accounting is not reported by Ollama responses. |
 
-Unsupported non-zero knobs, non-finite sampling values, and
-non-JSON-serializable tool schemas or tool-call inputs are rejected instead of
-silently dropped.
+Unsupported non-zero knobs, non-finite sampling values, and non-JSON-serializable
+tool schemas or tool-call inputs are rejected instead of silently dropped.
+Unavailable knobs or provider-constrained values with explicit adapter handling
+are normalized before dispatch and reported in activity metadata.
 `SupportsStreaming` in the capability metadata means caller-facing
 `llm.StreamProvider` support, not whether an adapter happens to use a streaming
 wire transport internally.

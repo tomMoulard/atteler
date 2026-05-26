@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	llmevents "github.com/tommoulard/atteler/pkg/events"
 )
 
 func TestClaudeCodeProvider_Complete(t *testing.T) {
@@ -98,6 +101,79 @@ func TestClaudeCodeProvider_Complete(t *testing.T) {
 	assert.Equal(t, "application/json", gotHeaders.Get("Content-Type"))
 	assert.Equal(t, defaultAnthropicVersion, gotHeaders.Get("anthropic-version"))
 	assert.Equal(t, anthropicOAuthBetas, gotHeaders.Get("anthropic-beta"))
+}
+
+func TestClaudeCodeProvider_CompleteCoercesThinkingTemperature(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotReq  anthropicRequest
+		gotBody []byte
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		gotBody = body
+
+		if !assert.NoError(t, json.Unmarshal(gotBody, &gotReq)) {
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"model": "claude-opus-4-7",
+			"content": []map[string]any{
+				{"type": "text", "text": "ok"},
+			},
+			"usage": map[string]any{
+				"input_tokens":  1,
+				"output_tokens": 1,
+			},
+		}))
+	}))
+	defer srv.Close()
+
+	auth := newTestClaudeCodeAuth(t, "access-1", "refresh-1", futureExpiry())
+	p := &ClaudeCodeProvider{
+		client:  srv.Client(),
+		auth:    auth,
+		baseURL: srv.URL,
+		models:  []string{"claude-opus-4-7"},
+	}
+
+	var log bytes.Buffer
+
+	ctx := llmevents.WithEmitter(context.Background(), llmevents.NewRunnerWithLogger(nil, &log), llmevents.Event{})
+
+	temperature := 0.2
+	resp, err := p.Complete(ctx, CompleteParams{
+		Model:          "claude-opus-4-7",
+		ReasoningLevel: "high",
+		Temperature:    &temperature,
+		Messages:       []Message{{Role: RoleUser, Content: "think"}},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "ok", resp.Content)
+	require.NotNil(t, gotReq.Temperature)
+	assert.InEpsilon(t, 1.0, *gotReq.Temperature, 0.0001)
+	require.NotNil(t, gotReq.Thinking)
+	assert.Equal(t, "enabled", gotReq.Thinking.Type)
+	assert.Contains(t, log.String(), "option_adjustments")
+	assert.Contains(t, log.String(), "Temperature coerced")
+	assert.JSONEq(t, `{
+		"temperature": 1,
+		"model": "claude-opus-4-7",
+		"thinking": {"type": "enabled", "budget_tokens": 2048},
+		"messages": [
+			{"role": "user", "content": "think"}
+		],
+		"max_tokens": 4096
+	}`, string(gotBody))
 }
 
 func TestClaudeCodeProvider_RefreshOn401(t *testing.T) {

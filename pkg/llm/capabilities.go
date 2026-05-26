@@ -21,6 +21,11 @@ const (
 	// must reject a non-zero value instead of silently dropping it.
 	CompleteParamUnsupported CompleteParamSupportStatus = "unsupported"
 
+	// CompleteParamOmitted means the provider cannot honor the parameter but the
+	// adapter intentionally omits it from the wire request to keep shared
+	// generation options portable across fallback providers.
+	CompleteParamOmitted CompleteParamSupportStatus = "omitted"
+
 	// CompleteParamLossy means the provider has an intentional approximation
 	// documented in the support note.
 	CompleteParamLossy CompleteParamSupportStatus = "lossy"
@@ -128,7 +133,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 		SupportsStreaming:             false,
 		SupportsNetworkModelDiscovery: true,
 		CompleteParams: map[string]CompleteParamSupport{
-			"Temperature":    supported("maps to messages temperature"),
+			"Temperature":    supported("maps to messages temperature; coerced to 1 when thinking is enabled"),
 			"TopP":           supported("maps to messages top_p"),
 			"Seed":           unsupported("Anthropic Messages has no seed parameter"),
 			"Model":          supported("maps to model"),
@@ -147,7 +152,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 		SupportsStreaming:             false,
 		SupportsNetworkModelDiscovery: false,
 		CompleteParams: map[string]CompleteParamSupport{
-			"Temperature":    supported("maps to Anthropic Messages temperature"),
+			"Temperature":    supported("maps to Anthropic Messages temperature; coerced to 1 when thinking is enabled"),
 			"TopP":           supported("maps to Anthropic Messages top_p"),
 			"Seed":           unsupported("Claude Code OAuth path uses Anthropic Messages, which has no seed parameter"),
 			"Model":          supported("maps to model"),
@@ -166,7 +171,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 		SupportsStreaming:             true,
 		SupportsNetworkModelDiscovery: false,
 		CompleteParams: map[string]CompleteParamSupport{
-			"Temperature":    unsupported("Codex ChatGPT responses endpoint does not expose temperature in this adapter"),
+			"Temperature":    omitted("Codex ChatGPT responses endpoint does not expose temperature in this adapter"),
 			"TopP":           unsupported("Codex ChatGPT responses endpoint does not expose top_p in this adapter"),
 			"Seed":           unsupported("Codex ChatGPT responses endpoint does not expose seed in this adapter"),
 			"Model":          supported("maps to model"),
@@ -204,6 +209,10 @@ func supported(note string) CompleteParamSupport {
 
 func unsupported(note string) CompleteParamSupport {
 	return CompleteParamSupport{Status: CompleteParamUnsupported, Note: note}
+}
+
+func omitted(note string) CompleteParamSupport {
+	return CompleteParamSupport{Status: CompleteParamOmitted, Note: note}
 }
 
 func lossy(note string) CompleteParamSupport {
@@ -318,4 +327,67 @@ func validateCompleteParamsWireSafe(providerName string, params CompleteParams) 
 
 func isFiniteFloat(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+type completeParamAdjustment struct {
+	Name   string
+	Action string
+	Reason string
+}
+
+func prepareCompleteParamsForProvider(
+	providerName string,
+	params CompleteParams,
+) (CompleteParams, []completeParamAdjustment, error) {
+	if err := validateCompleteParamsWireSafe(providerName, params); err != nil {
+		return params, nil, err
+	}
+
+	params, adjustments := normalizeCompleteParamsForProvider(providerName, params)
+
+	return params, adjustments, nil
+}
+
+func normalizeCompleteParamsForProvider(
+	providerName string,
+	params CompleteParams,
+) (CompleteParams, []completeParamAdjustment) {
+	var adjustments []completeParamAdjustment
+
+	if params.Temperature == nil {
+		return params, adjustments
+	}
+
+	switch providerName {
+	case providerCodex:
+		params.Temperature = nil
+
+		adjustments = append(adjustments, completeParamAdjustment{
+			Name:   "Temperature",
+			Action: "omitted",
+			Reason: "Codex ChatGPT responses endpoint does not expose temperature in this adapter",
+		})
+	case providerAnthropic, providerClaudeCode:
+		if anthropicThinkingRequested(params.ReasoningLevel) && *params.Temperature != 1 {
+			one := 1.0
+			params.Temperature = &one
+
+			adjustments = append(adjustments, completeParamAdjustment{
+				Name:   "Temperature",
+				Action: "coerced",
+				Reason: "Anthropic extended thinking only accepts temperature=1",
+			})
+		}
+	}
+
+	return params, adjustments
+}
+
+func anthropicThinkingRequested(level string) bool {
+	switch normalizeReasoningLevel(level) {
+	case "", reasoningLevelNone, reasoningLevelMinimal:
+		return false
+	default:
+		return true
+	}
 }
