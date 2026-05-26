@@ -124,6 +124,38 @@ func TestStateStore_LoadMigratesLegacyState(t *testing.T) {
 	assert.Contains(t, string(data), "revision: 1")
 }
 
+func TestStateStore_MigratePersistsLegacyState(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "state.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("default_model: legacy-model\n"), 0o600))
+
+	store := NewStateStore(path)
+	changed, migrated, err := store.Migrate()
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, StateSchemaVersion, migrated.Version)
+	assert.Equal(t, int64(1), migrated.Revision)
+	assert.Equal(t, "legacy-model", migrated.DefaultModel)
+
+	changed, current, err := store.Migrate()
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, int64(1), current.Revision)
+}
+
+func TestStateStore_MigrateMissingDoesNotCreateStateFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "state.yaml")
+
+	changed, state, err := NewStateStore(path).Migrate()
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, State{}, state)
+
+	_, statErr := os.Stat(path)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
 func TestStateStore_LoadRejectsFutureVersion(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "state.yaml")

@@ -29,6 +29,16 @@ func buildInlineCommandRegistry() []command {
 			match: func(o cliOptions) bool { return o.validateConfig },
 		},
 		{
+			name:  "config-migrate",
+			tier:  tierInline,
+			match: func(o cliOptions) bool { return o.configMigrate },
+		},
+		{
+			name:  "config-report",
+			tier:  tierInline,
+			match: func(o cliOptions) bool { return o.configReport },
+		},
+		{
 			name:  "explain-config",
 			tier:  tierInline,
 			match: func(o cliOptions) bool { return o.explainConfig },

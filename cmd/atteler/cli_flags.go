@@ -317,6 +317,8 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.StringVar(&opts.feedbackRollbackReason, "feedback-rollback-reason", "", "optional rollback reason for --feedback-rollback-config")
 	fs.StringVar(&opts.feedbackHistoryPath, "feedback-history", "", "append feedback apply/rollback decisions to this history log")
 	fs.Var(&opts.watchLargeFileBytes, "watch-large-file-bytes", "large-file byte threshold for --watch-scan")
+	fs.BoolVar(&opts.configMigrate, "config-migrate", false, "migrate existing Atteler config/state files to the current schema and exit")
+	fs.BoolVar(&opts.configReport, "config-report", false, "print redacted config diagnostics for issue reports and exit")
 	fs.BoolVar(&opts.validateConfig, "validate-config", false, "validate merged YAML/JSON config and importer warnings, then exit")
 	fs.BoolVar(&opts.explainConfig, "explain-config", false, "print merged config values with per-field provenance and exit")
 	fs.StringVar(&opts.explainConfigPath, "explain-config-field", "", "limit --explain-config output to this field path prefix")

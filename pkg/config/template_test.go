@@ -1,9 +1,12 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -13,6 +16,7 @@ func TestTemplateYAML(t *testing.T) {
 	template := TemplateYAML()
 	for _, want := range []string{
 		"default_provider:",
+		"version:",
 		"generation:",
 		"agent_loop:",
 		"max_output_bytes:",
@@ -34,4 +38,12 @@ func TestTemplateYAML(t *testing.T) {
 	if strings.Contains(template, "api.openai.com/v1") {
 		require.Failf(t, "unexpected failure", "TemplateYAML should use OpenAI host root, got:\n%s", template)
 	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(template), 0o600))
+
+	cfg, _, err := LoadFiles([]string{path})
+	require.NoError(t, err)
+	assert.Equal(t, ConfigSchemaVersion, cfg.Version)
+	assert.Equal(t, starterTemplateConfig(), cfg)
 }

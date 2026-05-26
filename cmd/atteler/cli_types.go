@@ -458,6 +458,8 @@ type cliOptions struct {
 	asyncRun                           bool
 	spawnDryRun                        bool
 	feedbackProposals                  bool
+	configMigrate                      bool
+	configReport                       bool
 	validateConfig                     bool
 	explainConfig                      bool
 	memoryCompact                      bool

@@ -138,6 +138,68 @@ func (s *StateStore) Load() (State, error) {
 	return s.load()
 }
 
+// Migrate persists a legacy state file using the current state schema. Missing
+// state files are not created by migration.
+func (s *StateStore) Migrate() (changed bool, migrated State, err error) {
+	if _, statErr := os.Stat(s.path); statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			return false, State{}, nil
+		}
+
+		return false, State{}, fmt.Errorf("state: stat %s: %w", s.path, statErr)
+	}
+
+	err = s.withLock(func() error {
+		data, readErr := os.ReadFile(s.path)
+		if readErr != nil {
+			if errors.Is(readErr, os.ErrNotExist) {
+				return nil
+			}
+
+			return fmt.Errorf("state: read %s: %w", s.path, readErr)
+		}
+
+		if len(bytes.TrimSpace(data)) == 0 {
+			return fmt.Errorf("state: parse %s: empty file; move this file aside to let Atteler recreate it", s.path)
+		}
+
+		var raw struct {
+			Version int `yaml:"version"`
+		}
+
+		unmarshalErr := yaml.Unmarshal(data, &raw)
+		if unmarshalErr != nil {
+			return fmt.Errorf("state: parse %s: %w; fix the YAML or move this file aside to let Atteler recreate it", s.path, unmarshalErr)
+		}
+
+		state, loadErr := s.load()
+		if loadErr != nil {
+			return loadErr
+		}
+
+		if raw.Version == StateSchemaVersion && state.Version == StateSchemaVersion {
+			migrated = state
+
+			return nil
+		}
+
+		nextRevision := state.Revision + 1
+		if saveErr := s.saveLocked(state, nextRevision); saveErr != nil {
+			return saveErr
+		}
+
+		changed = true
+		migrated = normalizeStateForSave(state, nextRevision)
+
+		return nil
+	})
+	if err != nil {
+		return false, State{}, err
+	}
+
+	return changed, migrated, nil
+}
+
 func (s *StateStore) load() (State, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -330,7 +392,7 @@ func writeStateFileAtomic(path string, data []byte, mode os.FileMode) error {
 
 	cleanup = false
 
-	if err := syncStateDir(dir); err != nil {
+	if err := syncDir(dir); err != nil {
 		return err
 	}
 

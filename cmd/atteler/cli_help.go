@@ -332,7 +332,7 @@ func lookupFlagDomain(name string) (string, bool) {
 		strings.HasPrefix(name, "merge-artifacts") || name == "merge-artifact-max-bytes":
 		return "chat/session", true
 	case name == "config" || name == "print-config-template" || name == "init-config" ||
-		name == "list-config-paths" || name == "validate-config" ||
+		name == "list-config-paths" || name == "validate-config" || name == "config-migrate" || name == "config-report" ||
 		name == "explain-config" || name == "explain-config-field" ||
 		name == "doctor" || name == "doctor-offline" || name == "version" ||
 		name == "state-diagnostics" || strings.HasPrefix(name, "command-surface-") ||

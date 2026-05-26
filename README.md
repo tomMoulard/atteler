@@ -70,7 +70,7 @@ from the same descriptors that route the commands.
 | Domain | Examples |
 |--------|----------|
 | `chat` / `session` | `atteler chat once "Explain this repository in one paragraph"`, `atteler session list`, `atteler session search "auth retry"` |
-| `config` | `atteler config paths`, `atteler config validate`, `atteler config explain default_model`, `atteler config doctor-offline` |
+| `config` | `atteler config paths`, `atteler config validate`, `atteler config explain default_model`, `atteler config migrate`, `atteler config report`, `atteler config doctor-offline` |
 | `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models`, `atteler providers ollama-status`, `atteler providers ollama-stop` |
 | `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
 | `memory` / `rag` | `atteler memory search "OAuth retry storm" --memory-scope repo`, `atteler memory rebuild --memory-store .atteler/memory.json --memory-scope repo`, `atteler memory purge session:<session-id> --memory-store .atteler/memory.json`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"` |
@@ -125,6 +125,8 @@ atteler config init ~/.config/atteler/config.yaml
 atteler config paths
 atteler config validate
 atteler config explain default_model
+atteler config migrate
+atteler config report
 atteler config doctor
 ```
 
@@ -136,6 +138,16 @@ the selected request model/provider after state, flags, and agent selection.
 `atteler config doctor` prints provider readiness with registered, disabled,
 missing-credential, health-check, live-model, and static-fallback status so a
 broken backend is visible before a completion request fails.
+Use `atteler config report` for a redacted YAML diagnostics bundle suitable for
+issue reports; it includes schema versions, candidate source status, migrations,
+implicit defaults, unknown/deprecated field findings, and redacted merged
+origins.
+Use `atteler config migrate` to rewrite existing Atteler config files and the
+persisted state file to the current schema; missing files are skipped.
+Read-only inspection can also be triggered through debug aliases such as
+`DEBUG_ATTELER_CONFIG_REPORT=1`, `DEBUG_ATTELER_EXPLAIN_CONFIG=1`,
+`DEBUG_ATTELER_EXPLAIN_CONFIG_FIELD=providers.openai`, and
+`DEBUG_ATTELER_STATE_DIAGNOSTICS=1`.
 
 Harness importer warnings, including unsupported fields, malformed best-effort
 input, and ignored fallback-only sections, are printed by `atteler config
@@ -145,6 +157,8 @@ validate` and `atteler config explain`; `explain` also shows the source path and
 Minimal example:
 
 ```yaml
+version: 1
+
 default_provider: openai
 default_model: gpt-4.1-mini
 fallback_models: ["gpt-4.1", "gpt-4.1-nano"]
@@ -955,7 +969,7 @@ linked from the row.
 | Error-aware streaming completion contract with bounded-buffer guidance | [`pkg/llm/stream.go`](pkg/llm/stream.go), [`pkg/llm/stream_test.go`](pkg/llm/stream_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
 | OpenAI, Anthropic, Codex, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go), [`pkg/llm/capabilities.go`](pkg/llm/capabilities.go), [`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go), [`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go), [`pkg/llm/provider_runtime_test.go`](pkg/llm/provider_runtime_test.go) |
 | Evidence-backed model routing with catalog metadata, per-agent policy, route-decision artifacts, and usage telemetry | [`pkg/modelroute/catalog.go`](pkg/modelroute/catalog.go), [`pkg/modelroute/decision.go`](pkg/modelroute/decision.go), [`pkg/modelroute/telemetry.go`](pkg/modelroute/telemetry.go), [`pkg/modelroute/modelroute_test.go`](pkg/modelroute/modelroute_test.go), [`pkg/llm/llm.go`](pkg/llm/llm.go), [`cmd/atteler/route_decision_event.go`](cmd/atteler/route_decision_event.go), [`cmd/atteler/agent_resolution_test.go`](cmd/atteler/agent_resolution_test.go) |
-| Configuration loading, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
+| Configuration loading, migration, redacted diagnostics, atomic state, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/migrate.go`](pkg/config/migrate.go), [`pkg/config/migrate_test.go`](pkg/config/migrate_test.go), [`pkg/config/diagnostics.go`](pkg/config/diagnostics.go), [`pkg/config/diagnostics_test.go`](pkg/config/diagnostics_test.go), [`pkg/config/redaction.go`](pkg/config/redaction.go), [`pkg/config/state.go`](pkg/config/state.go), [`pkg/config/state_test.go`](pkg/config/state_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
 | Sessions, transcript search/export, evaluations, failures, provenance-rich artifacts, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/artifactmerge/artifactmerge.go`](pkg/artifactmerge/artifactmerge.go), [`pkg/artifactmerge/artifactmerge_test.go`](pkg/artifactmerge/artifactmerge_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |
 | Bounded and policy-gated context references for local files, directories, globs, and remote URLs | [`pkg/contextref/references.go`](pkg/contextref/references.go), [`pkg/contextref/references_test.go`](pkg/contextref/references_test.go), [`pkg/contextref/contextref.go`](pkg/contextref/contextref.go), [`pkg/contextref/contextref_test.go`](pkg/contextref/contextref_test.go) |
 | Agent metadata, matching, orchestration planning, async waves, and sub-agent fan-out | [`pkg/agent/agent.go`](pkg/agent/agent.go), [`pkg/agent/orchestration.go`](pkg/agent/orchestration.go), [`pkg/agent/orchestration_test.go`](pkg/agent/orchestration_test.go), [`pkg/async/plan.go`](pkg/async/plan.go), [`pkg/async/plan_test.go`](pkg/async/plan_test.go), [`pkg/subagent/subagent.go`](pkg/subagent/subagent.go), [`pkg/subagent/subagent_test.go`](pkg/subagent/subagent_test.go), [`cmd/atteler/cli_async_commands.go`](cmd/atteler/cli_async_commands.go) |

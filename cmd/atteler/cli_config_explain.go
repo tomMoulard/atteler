@@ -51,6 +51,10 @@ func writeConfigExplanationWithDiagnostics(
 
 	fmt.Fprintln(w, "Config explanation")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Schema versions:")
+	fmt.Fprintf(w, "  config: %d\n", appconfig.ConfigSchemaVersion)
+	fmt.Fprintf(w, "  state: %d\n", appconfig.StateSchemaVersion)
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Precedence (lowest to highest):")
 	fmt.Fprintln(w, "  harness-import < global-file < project-file < env-file < state-override < cli-flag < runtime-selection")
 	fmt.Fprintln(w)
@@ -59,27 +63,13 @@ func writeConfigExplanationWithDiagnostics(
 	fmt.Fprintln(w, "  - Provider and agent maps merge by name; fields inside the same name override independently.")
 	fmt.Fprintln(w, "  - Lists and per-agent tool maps replace the earlier value in full when set later.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Loaded sources:")
 
-	if len(loaded) == 0 {
-		fmt.Fprintln(w, "  (none)")
-	} else {
-		for i, path := range loaded {
-			kind := originKindForSource(origins, path)
-			if kind == "" {
-				kind = "loaded"
-			}
-
-			fmt.Fprintf(w, "  %d. [%s] %s\n", i+1, kind, path)
-		}
-	}
-
-	fmt.Fprintln(w)
+	writeConfigExplanationLoadedSources(w, loaded, origins)
 	printDiagnostics(w, diagnostics)
-
 	if len(diagnostics) > 0 {
 		fmt.Fprintln(w)
 	}
+	writeConfigExplanationDefaults(w, fieldFilter)
 
 	heading := "Field origins:"
 	if fieldFilter != "" {
@@ -103,7 +93,7 @@ func writeConfigExplanationWithDiagnostics(
 			continue
 		}
 
-		fmt.Fprintf(w, "%s: %s\n", path, truncateConfigExplainValue(final.Value))
+		fmt.Fprintf(w, "%s: %s\n", path, truncateConfigExplainValue(appconfig.RedactOriginValue(path, final.Value)))
 
 		for _, event := range origin.Chain {
 			note := ""
@@ -117,7 +107,7 @@ func writeConfigExplanationWithDiagnostics(
 				event.Operation,
 				event.Source,
 				event.Kind,
-				truncateConfigExplainValue(event.Value),
+				truncateConfigExplainValue(appconfig.RedactOriginValue(path, event.Value)),
 				note,
 			)
 		}
@@ -143,6 +133,56 @@ func printDiagnostics(w io.Writer, diagnostics []appconfig.Diagnostic) {
 
 		fmt.Fprintf(w, "  - [%s] %s\n", severity, diagnostic.String())
 	}
+}
+
+func writeConfigExplanationLoadedSources(w io.Writer, loaded []string, origins appconfig.OriginMap) {
+	fmt.Fprintln(w, "Loaded sources:")
+
+	if len(loaded) == 0 {
+		fmt.Fprintln(w, "  (none)")
+		fmt.Fprintln(w)
+
+		return
+	}
+
+	for i, path := range loaded {
+		kind := originKindForSource(origins, path)
+		if kind == "" {
+			kind = "loaded"
+		}
+
+		fmt.Fprintf(w, "  %d. [%s] %s\n", i+1, kind, path)
+	}
+
+	fmt.Fprintln(w)
+}
+
+func writeConfigExplanationDefaults(w io.Writer, fieldFilter string) {
+	heading := "Implicit defaults (used when no higher-precedence source sets the field):"
+	if fieldFilter != "" {
+		heading = fmt.Sprintf("Implicit defaults matching %q:", fieldFilter)
+	}
+
+	fmt.Fprintln(w, heading)
+
+	matched := false
+
+	for _, defaultInfo := range appconfig.DefaultDiagnostics() {
+		if !configExplainPathMatches(defaultInfo.Field, fieldFilter) {
+			continue
+		}
+
+		matched = true
+
+		fmt.Fprintf(w, "%s: %s\n", defaultInfo.Field, defaultInfo.Value)
+		fmt.Fprintf(w, "  - %s\n", defaultInfo.Message)
+	}
+
+	if !matched {
+		fmt.Fprintln(w, "  (no defaults matched)")
+	}
+
+	fmt.Fprintln(w)
 }
 
 func addRuntimeConfigOrigins(

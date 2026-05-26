@@ -22,8 +22,14 @@ import (
 // with the platform path-list separator.
 const EnvPath = "ATTELER_CONFIG"
 
+// ConfigSchemaVersion is the current on-disk schema version for Atteler config
+// files. Missing or zero versions are treated as legacy v0 and migrated in
+// memory before merging.
+const ConfigSchemaVersion = 1
+
 // Config is the merged application configuration.
 type Config struct {
+	Version         int                       `json:"version,omitempty" yaml:"version,omitempty"`
 	Providers       map[string]ProviderConfig `json:"providers,omitempty" yaml:"providers,omitempty"`
 	Agents          map[string]AgentConfig    `json:"agents,omitempty" yaml:"agents,omitempty"`
 	Hooks           map[string][]HookConfig   `json:"hooks,omitempty" yaml:"hooks,omitempty"`
@@ -198,7 +204,9 @@ type SkillLearningConfig struct {
 	MinOccurrences  int    `json:"min_occurrences,omitempty" yaml:"min_occurrences,omitempty"`
 }
 
+//nolint:govet // fieldalignment: field order follows config-file grouping; deprecated aliases stay last.
 type fileConfig struct {
+	Version         *int                          `json:"version" yaml:"version"`
 	Generation      fileGenerationConfig          `json:"generation" yaml:"generation"`
 	AgentLoop       fileAgentLoopConfig           `json:"agent_loop" yaml:"agent_loop"`
 	Context         fileContextConfig             `json:"context" yaml:"context"`
@@ -210,6 +218,9 @@ type fileConfig struct {
 	Agents          map[string]fileAgentConfig    `json:"agents" yaml:"agents"`
 	Hooks           map[string][]HookConfig       `json:"hooks" yaml:"hooks"`
 	FallbackModels  []string                      `json:"fallback_models" yaml:"fallback_models"`
+
+	DeprecatedProvider *string `json:"provider" yaml:"provider"`
+	DeprecatedModel    *string `json:"model" yaml:"model"`
 }
 
 type fileProviderConfig struct {
@@ -220,6 +231,7 @@ type fileProviderConfig struct {
 	TimeoutSeconds        *int    `json:"timeout_seconds" yaml:"timeout_seconds"`
 }
 
+//nolint:govet // fieldalignment: field order follows config-file grouping; deprecated aliases stay last.
 type fileAgentConfig struct {
 	Personality      *string              `json:"personality" yaml:"personality"`
 	TopP             *float64             `json:"top_p" yaml:"top_p"`
@@ -239,6 +251,8 @@ type fileAgentConfig struct {
 	Triggers         []string             `json:"triggers" yaml:"triggers"`
 	References       []string             `json:"references" yaml:"references"`
 	FeedbackGuidance []FeedbackGuidance   `json:"feedback_guidance" yaml:"feedback_guidance"`
+
+	DeprecatedPrompt *string `json:"prompt" yaml:"prompt"`
 }
 
 //nolint:govet // field order follows config-file grouping.
@@ -266,6 +280,8 @@ type fileGenerationConfig struct {
 	Seed           *int     `json:"seed" yaml:"seed"`
 	ReasoningLevel *string  `json:"reasoning_level" yaml:"reasoning_level"`
 	MaxTokens      *int     `json:"max_tokens" yaml:"max_tokens"`
+
+	DeprecatedReasoning *string `json:"reasoning" yaml:"reasoning"`
 }
 
 type fileAgentLoopConfig struct {
@@ -421,14 +437,20 @@ func LoadPathSources(sources []PathSource) (Config, []string, OriginMap, error) 
 		dec := yaml.NewDecoder(bytes.NewReader(data))
 		dec.KnownFields(true)
 
-		if err := dec.Decode(&next); err != nil {
+		decodeErr := dec.Decode(&next)
+		if decodeErr != nil {
 			// An empty or whitespace-only file produces io.EOF; treat it
 			// as a no-op rather than a parse error.
-			if errors.Is(err, io.EOF) {
+			if errors.Is(decodeErr, io.EOF) {
 				continue
 			}
 
-			return cfg, loaded, origins, fmt.Errorf("config: parse %s: %w", path, err)
+			return cfg, loaded, origins, fmt.Errorf("config: parse %s: %w", path, decodeErr)
+		}
+
+		next, err = migrateFileConfig(next, path)
+		if err != nil {
+			return cfg, loaded, origins, err
 		}
 
 		if source.Kind == "" {
@@ -445,7 +467,66 @@ func LoadPathSources(sources []PathSource) (Config, []string, OriginMap, error) 
 
 	normalizeEmptyMaps(&cfg)
 
+	if len(loaded) > 0 && cfg.Version == 0 {
+		cfg.Version = ConfigSchemaVersion
+	}
+
 	return cfg, loaded, origins, nil
+}
+
+func migrateFileConfig(cfg fileConfig, path string) (fileConfig, error) {
+	version, err := migrateLoadedConfigVersion(cfg.Version, path)
+	if err != nil {
+		return fileConfig{}, err
+	}
+
+	if version != nil {
+		cfg.Version = version
+	}
+
+	if cfg.DefaultProvider == nil && cfg.DeprecatedProvider != nil {
+		cfg.DefaultProvider = cfg.DeprecatedProvider
+	}
+
+	if cfg.DefaultModel == nil && cfg.DeprecatedModel != nil {
+		cfg.DefaultModel = cfg.DeprecatedModel
+	}
+
+	if cfg.Generation.ReasoningLevel == nil && cfg.Generation.DeprecatedReasoning != nil {
+		cfg.Generation.ReasoningLevel = cfg.Generation.DeprecatedReasoning
+	}
+
+	for name := range cfg.Agents {
+		agent := cfg.Agents[name]
+		if agent.SystemPrompt == nil && agent.DeprecatedPrompt != nil {
+			agent.SystemPrompt = agent.DeprecatedPrompt
+			cfg.Agents[name] = agent
+		}
+	}
+
+	return cfg, nil
+}
+
+func migrateLoadedConfigVersion(version *int, path string) (*int, error) {
+	if version == nil {
+		return nil, nil
+	}
+
+	if *version < 0 || *version > ConfigSchemaVersion {
+		return nil, fmt.Errorf(
+			"config: unsupported version %d in %s; upgrade Atteler or remove this file after backing it up",
+			*version,
+			path,
+		)
+	}
+
+	if *version == ConfigSchemaVersion {
+		return version, nil
+	}
+
+	current := ConfigSchemaVersion
+
+	return &current, nil
 }
 
 func globalPaths() []string {
@@ -486,6 +567,11 @@ func normalizeEmptyMaps(cfg *Config) {
 }
 
 func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder, source originSource) {
+	if src.Version != nil {
+		dst.Version = *src.Version
+		rec.set("version", source, *src.Version)
+	}
+
 	if src.DefaultProvider != nil {
 		dst.DefaultProvider = *src.DefaultProvider
 		rec.set("default_provider", source, *src.DefaultProvider)
@@ -718,6 +804,10 @@ func mergeContext(dst *Config, contextConfig fileContextConfig, rec *originRecor
 }
 
 func mergeReferencePolicy(dst *ReferencePolicyConfig, policy fileReferencePolicyConfig, rec *originRecorder, source originSource) {
+	if fileReferencePolicySet(policy) {
+		rec.merge("context.reference_policy", source, "reference_policy", "merges reference policy fields")
+	}
+
 	if policy.AllowedSchemes != nil {
 		dst.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
 		rec.replace("context.reference_policy.allowed_schemes", source, dst.AllowedSchemes, "replaces the allowed configured-reference URL schemes")
@@ -747,6 +837,15 @@ func mergeReferencePolicy(dst *ReferencePolicyConfig, policy fileReferencePolicy
 		dst.AllowPrivateNetworks = *policy.AllowPrivateNetworks
 		rec.set("context.reference_policy.allow_private_networks", source, *policy.AllowPrivateNetworks)
 	}
+}
+
+func fileReferencePolicySet(policy fileReferencePolicyConfig) bool {
+	return policy.AllowedSchemes != nil ||
+		policy.AllowedHosts != nil ||
+		policy.LocalRoots != nil ||
+		policy.MaxRedirects != nil ||
+		policy.ContentTypes != nil ||
+		policy.AllowPrivateNetworks != nil
 }
 
 func mergeGeneration(dst *Config, generation fileGenerationConfig, rec *originRecorder, source originSource) {
@@ -829,6 +928,8 @@ func mergePlugins(dst *Config, plugins filePluginConfig, rec *originRecorder, so
 	if plugins.Policy != nil {
 		policy := attelerplugin.ClonePolicy(*plugins.Policy)
 		dst.Plugins.Policy = &policy
+
+		rec.replace("plugins.policy", source, "configured", "replaces the plugin execution policy")
 	}
 }
 
@@ -866,6 +967,11 @@ func mergeSkillLearning(dst *Config, skillLearning fileSkillLearningConfig, rec 
 }
 
 func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source originSource) {
+	if src.Version > 0 {
+		dst.Version = src.Version
+		rec.set("version", source, src.Version)
+	}
+
 	if src.DefaultProvider != "" {
 		dst.DefaultProvider = src.DefaultProvider
 		rec.set("default_provider", source, src.DefaultProvider)
@@ -1088,6 +1194,10 @@ func mergeConfigContext(dst *Config, contextConfig ContextConfig, rec *originRec
 }
 
 func mergeConfigReferencePolicy(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, rec *originRecorder, source originSource) {
+	if referencePolicySet(policy) {
+		rec.merge("context.reference_policy", source, "reference_policy", "merges reference policy fields")
+	}
+
 	if policy.AllowedSchemes != nil {
 		dst.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
 		rec.replace("context.reference_policy.allowed_schemes", source, dst.AllowedSchemes, "replaces the allowed configured-reference URL schemes")
@@ -1118,6 +1228,15 @@ func mergeConfigReferencePolicy(dst *ReferencePolicyConfig, policy ReferencePoli
 
 		rec.set("context.reference_policy.allow_private_networks", source, true)
 	}
+}
+
+func referencePolicySet(policy ReferencePolicyConfig) bool {
+	return policy.AllowedSchemes != nil ||
+		policy.AllowedHosts != nil ||
+		policy.LocalRoots != nil ||
+		policy.MaxRedirects > 0 ||
+		policy.ContentTypes != nil ||
+		policy.AllowPrivateNetworks
 }
 
 func mergeConfigGeneration(dst *Config, generation GenerationConfig, rec *originRecorder, source originSource) {
@@ -1232,6 +1351,12 @@ func mergeConfigSkillLearning(dst *Config, skillLearning SkillLearningConfig, re
 }
 
 func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins OriginMap) {
+	if src.Version > 0 {
+		dst.Version = src.Version
+
+		appendOriginChain(dstOrigins, "version", srcOrigins, false)
+	}
+
 	if src.DefaultProvider != "" {
 		dst.DefaultProvider = src.DefaultProvider
 
@@ -1497,43 +1622,74 @@ func mergeConfigContextFromOrigins(dst *Config, contextConfig ContextConfig, dst
 	mergeConfigReferencePolicyFromOrigins(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy, dstOrigins, srcOrigins)
 }
 
-func mergeConfigReferencePolicyFromOrigins(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, dstOrigins, srcOrigins OriginMap) {
-	mergeStringSliceFromOrigins(&dst.AllowedSchemes, policy.AllowedSchemes, "context.reference_policy.allowed_schemes", dstOrigins, srcOrigins)
-	mergeStringSliceFromOrigins(&dst.AllowedHosts, policy.AllowedHosts, "context.reference_policy.allowed_hosts", dstOrigins, srcOrigins)
-	mergeStringSliceFromOrigins(&dst.LocalRoots, policy.LocalRoots, "context.reference_policy.local_roots", dstOrigins, srcOrigins)
-	mergeStringSliceFromOrigins(&dst.ContentTypes, policy.ContentTypes, "context.reference_policy.content_types", dstOrigins, srcOrigins)
+func mergeConfigReferencePolicyFromOrigins(
+	dst *ReferencePolicyConfig,
+	policy ReferencePolicyConfig,
+	dstOrigins OriginMap,
+	srcOrigins OriginMap,
+) {
+	if referencePolicySet(policy) || originMapHasAny(srcOrigins,
+		"context.reference_policy.allowed_schemes",
+		"context.reference_policy.allowed_hosts",
+		"context.reference_policy.local_roots",
+		"context.reference_policy.max_redirects",
+		"context.reference_policy.content_types",
+		"context.reference_policy.allow_private_networks",
+	) {
+		appendOriginChain(dstOrigins, "context.reference_policy", srcOrigins, false)
+	}
 
-	if originPathSet(srcOrigins, "context.reference_policy.max_redirects") || policy.MaxRedirects > 0 {
+	if policy.AllowedSchemes != nil || originMapHas(srcOrigins, "context.reference_policy.allowed_schemes") {
+		dst.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
+
+		appendOriginChain(dstOrigins, "context.reference_policy.allowed_schemes", srcOrigins, true)
+	}
+
+	if policy.AllowedHosts != nil || originMapHas(srcOrigins, "context.reference_policy.allowed_hosts") {
+		dst.AllowedHosts = append([]string(nil), policy.AllowedHosts...)
+
+		appendOriginChain(dstOrigins, "context.reference_policy.allowed_hosts", srcOrigins, true)
+	}
+
+	if policy.LocalRoots != nil || originMapHas(srcOrigins, "context.reference_policy.local_roots") {
+		dst.LocalRoots = append([]string(nil), policy.LocalRoots...)
+
+		appendOriginChain(dstOrigins, "context.reference_policy.local_roots", srcOrigins, true)
+	}
+
+	if policy.MaxRedirects > 0 || originMapHas(srcOrigins, "context.reference_policy.max_redirects") {
 		dst.MaxRedirects = policy.MaxRedirects
 
 		appendOriginChain(dstOrigins, "context.reference_policy.max_redirects", srcOrigins, false)
 	}
 
-	if originPathSet(srcOrigins, "context.reference_policy.allow_private_networks") || policy.AllowPrivateNetworks {
+	if policy.ContentTypes != nil || originMapHas(srcOrigins, "context.reference_policy.content_types") {
+		dst.ContentTypes = append([]string(nil), policy.ContentTypes...)
+
+		appendOriginChain(dstOrigins, "context.reference_policy.content_types", srcOrigins, true)
+	}
+
+	if policy.AllowPrivateNetworks || originMapHas(srcOrigins, "context.reference_policy.allow_private_networks") {
 		dst.AllowPrivateNetworks = policy.AllowPrivateNetworks
 
 		appendOriginChain(dstOrigins, "context.reference_policy.allow_private_networks", srcOrigins, false)
 	}
 }
 
-func mergeStringSliceFromOrigins(dst *[]string, src []string, path string, dstOrigins, srcOrigins OriginMap) {
-	if !originPathSet(srcOrigins, path) && src == nil {
-		return
-	}
-
-	*dst = append([]string(nil), src...)
-
-	appendOriginChain(dstOrigins, path, srcOrigins, true)
-}
-
-func originPathSet(origins OriginMap, path string) bool {
-	if len(origins) == 0 {
-		return false
-	}
-
+func originMapHas(origins OriginMap, path string) bool {
 	origin, ok := origins[path]
 
 	return ok && len(origin.Chain) > 0
+}
+
+func originMapHasAny(origins OriginMap, paths ...string) bool {
+	for _, path := range paths {
+		if originMapHas(origins, path) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func mergeConfigGenerationFromOrigins(dst *Config, generation GenerationConfig, dstOrigins, srcOrigins OriginMap) {
@@ -1629,6 +1785,8 @@ func mergeConfigPluginsFromOrigins(dst *Config, plugins PluginConfig, dstOrigins
 	if plugins.Policy != nil {
 		policy := attelerplugin.ClonePolicy(*plugins.Policy)
 		dst.Plugins.Policy = &policy
+
+		appendOriginChain(dstOrigins, "plugins.policy", srcOrigins, true)
 	}
 }
 

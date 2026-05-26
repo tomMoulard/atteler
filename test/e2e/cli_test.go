@@ -106,6 +106,9 @@ func TestOfflineProviderCommands(t *testing.T) {
 
 	result = runOK(t, runSpec{dir: workDir}, "--doctor-offline")
 	assertContains(t, result.stdout, "Atteler offline doctor")
+	assertContains(t, result.stdout, "schema: config=")
+	assertContains(t, result.stdout, "config_diagnostics:")
+	assertContains(t, result.stdout, "state_diagnostics:")
 	assertContains(t, result.stdout, "known_providers:")
 	assertContains(t, result.stdout, "ollama")
 	assertContains(t, result.stdout, "hook_events:")

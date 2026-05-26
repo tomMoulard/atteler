@@ -208,6 +208,10 @@ func TestApplyDebugEnvOptions(t *testing.T) {
 	values := map[string]string{
 		"DEBUG_ATTELER_DOCTOR":                    "true",
 		"DEBUG_ATTELER_DOCTOR_OFFLINE":            "true",
+		"DEBUG_ATTELER_CONFIG_REPORT":             "true",
+		"DEBUG_ATTELER_EXPLAIN_CONFIG":            "true",
+		"DEBUG_ATTELER_EXPLAIN_CONFIG_FIELD":      "providers.openai",
+		"DEBUG_ATTELER_STATE_DIAGNOSTICS":         "true",
 		"DEBUG_ATTELER_LIST_HOOK_EVENTS":          "true",
 		"DEBUG_ATTELER_LIST_HOOK_EVENTS_JSON":     "true",
 		"DEBUG_ATTELER_OLLAMA_STATUS":             "true",
@@ -235,6 +239,10 @@ func TestApplyDebugEnvOptions(t *testing.T) {
 
 	assert.True(t, opts.doctor)
 	assert.True(t, opts.doctorOffline)
+	assert.True(t, opts.configReport)
+	assert.True(t, opts.explainConfig)
+	assert.Equal(t, "providers.openai", opts.explainConfigPath)
+	assert.True(t, opts.stateDiagnostics)
 	assert.True(t, opts.listHookEvents)
 	assert.True(t, opts.listHookEventsJSON)
 	assert.True(t, opts.ollamaStatus)
@@ -283,6 +291,23 @@ func TestApplyDebugEnvOptionsDoesNotOverrideExplicitOptions(t *testing.T) {
 
 	assert.Equal(t, "explicit.yaml", opts.mcpManifestPath)
 	assert.Equal(t, 2, opts.watchMaxIterations.value)
+}
+
+func TestApplyDebugEnvOptionsExplainConfigFieldActivatesExplain(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{}
+
+	applyDebugEnvOptions(&opts, func(name string) string {
+		if name == "DEBUG_ATTELER_EXPLAIN_CONFIG_FIELD" {
+			return "providers.openai"
+		}
+
+		return ""
+	})
+
+	assert.True(t, opts.explainConfig)
+	assert.Equal(t, "providers.openai", opts.explainConfigPath)
 }
 
 func TestFormatShellContext(t *testing.T) {

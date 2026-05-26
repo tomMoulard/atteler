@@ -114,6 +114,10 @@ type doctorOfflineCommandInput struct {
 	SessionDir string
 }
 
+type configMigrateCommandInput struct{}
+
+type configReportCommandInput struct{}
+
 type evalOutputCommandInput struct {
 	ActualPath   string
 	ExpectedText string
@@ -125,14 +129,14 @@ type explainConfigCommandInput struct {
 	FieldPath string
 }
 
-type feedbackProposalsCommandInput struct{}
-
 type feedbackApproveCommandInput struct {
 	ConfigPath  string
 	HistoryPath string
 	Agent       string
 	ID          string
 }
+
+type feedbackProposalsCommandInput struct{}
 
 type feedbackRollbackCommandInput struct {
 	ConfigPath  string
@@ -371,6 +375,8 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"codeIntelCommandInput":               func(opts cliOptions) any { return codeIntelCommandInputFromOptions(opts) },
 		"commandSurfaceDocsCommandInput":      func(opts cliOptions) any { return commandSurfaceDocsCommandInputFromOptions(opts) },
 		"commandSurfaceJSONCommandInput":      func(opts cliOptions) any { return commandSurfaceJSONCommandInputFromOptions(opts) },
+		"configMigrateCommandInput":           func(opts cliOptions) any { return configMigrateCommandInputFromOptions(opts) },
+		"configReportCommandInput":            func(opts cliOptions) any { return configReportCommandInputFromOptions(opts) },
 		"contextPackCommandInput":             func(opts cliOptions) any { return contextPackCommandInputFromOptions(opts) },
 		"describeAgentCommandInput":           func(opts cliOptions) any { return describeAgentCommandInputFromOptions(opts) },
 		"describePluginCommandInput":          func(opts cliOptions) any { return describePluginCommandInputFromOptions(opts) },
@@ -555,6 +561,14 @@ func doctorOfflineCommandInputFromOptions(opts cliOptions) doctorOfflineCommandI
 	return doctorOfflineCommandInput{SessionDir: opts.sessionDir}
 }
 
+func configMigrateCommandInputFromOptions(_ cliOptions) configMigrateCommandInput {
+	return configMigrateCommandInput{}
+}
+
+func configReportCommandInputFromOptions(_ cliOptions) configReportCommandInput {
+	return configReportCommandInput{}
+}
+
 func evalOutputCommandInputFromOptions(opts cliOptions) evalOutputCommandInput {
 	return evalOutputCommandInput{
 		ActualPath:   opts.evalOutputPath,
@@ -568,10 +582,6 @@ func explainConfigCommandInputFromOptions(opts cliOptions) explainConfigCommandI
 	return explainConfigCommandInput{FieldPath: opts.explainConfigPath}
 }
 
-func feedbackProposalsCommandInputFromOptions(_ cliOptions) feedbackProposalsCommandInput {
-	return feedbackProposalsCommandInput{}
-}
-
 func feedbackApproveCommandInputFromOptions(opts cliOptions) feedbackApproveCommandInput {
 	return feedbackApproveCommandInput{
 		ConfigPath:  opts.feedbackApproveConfig,
@@ -579,6 +589,10 @@ func feedbackApproveCommandInputFromOptions(opts cliOptions) feedbackApproveComm
 		Agent:       opts.feedbackApproveAgent,
 		ID:          opts.feedbackApproveID,
 	}
+}
+
+func feedbackProposalsCommandInputFromOptions(_ cliOptions) feedbackProposalsCommandInput {
+	return feedbackProposalsCommandInput{}
 }
 
 func feedbackRollbackCommandInputFromOptions(opts cliOptions) feedbackRollbackCommandInput {

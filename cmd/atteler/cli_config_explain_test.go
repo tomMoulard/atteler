@@ -71,6 +71,8 @@ func TestWriteConfigExplanation_IncludesProviderModelAndRuntimeProvenance(t *tes
 	got := out.String()
 
 	assert.Contains(t, got, "Precedence (lowest to highest):")
+	assert.Contains(t, got, "Implicit defaults")
+	assert.Contains(t, got, "agent_loop.max_iterations: unset/0")
 	assert.Contains(t, got, "providers.openai.base_url: https://openai.project")
 	assert.Contains(t, got, "runtime.selected_model: cli-model")
 	assert.Contains(t, got, "--model [cli-flag]")
