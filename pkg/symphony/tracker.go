@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/watch"
 )
 
 // NewTrackerClient builds the tracker adapter selected by config.
@@ -294,6 +296,8 @@ type GitHubClient struct {
 	cfg        TrackerConfig
 }
 
+var _ watch.IssueTracker = (*GitHubClient)(nil)
+
 // NewGitHubClient creates a GitHub Issues client.
 func NewGitHubClient(cfg TrackerConfig) *GitHubClient {
 	return &GitHubClient{
@@ -436,6 +440,10 @@ func (c *GitHubClient) get(ctx context.Context, path string, out any) error {
 
 func (c *GitHubClient) post(ctx context.Context, path string, in any, out any) error {
 	return c.do(ctx, http.MethodPost, path, in, out)
+}
+
+func (c *GitHubClient) patch(ctx context.Context, path string, in any, out any) error {
+	return c.do(ctx, http.MethodPatch, path, in, out)
 }
 
 func (c *GitHubClient) delete(ctx context.Context, path string, out any) error {
@@ -649,6 +657,72 @@ func (c *GitHubClient) AddIssueComment(ctx context.Context, issueNumber int, bod
 		url.PathEscape(c.cfg.Repo),
 		issueNumber,
 	), map[string]string{"body": body}, nil)
+}
+
+// FindIssueByFingerprint locates an existing Atteler watch issue by the hidden
+// fingerprint marker embedded in the issue body.
+func (c *GitHubClient) FindIssueByFingerprint(ctx context.Context, fingerprint string) (*watch.IssueRef, error) {
+	fingerprint = strings.TrimSpace(fingerprint)
+	if fingerprint == "" {
+		return nil, errors.New("watch issue fingerprint is required")
+	}
+
+	marker := watch.IssueFingerprintMarker(fingerprint)
+	for page := 1; ; page++ {
+		values := url.Values{}
+		values.Set("state", "all")
+		values.Set("per_page", "100")
+		values.Set("page", strconv.Itoa(page))
+
+		var payload []githubIssue
+		if err := c.get(ctx, "/repos/"+url.PathEscape(c.cfg.Owner)+"/"+url.PathEscape(c.cfg.Repo)+"/issues?"+values.Encode(), &payload); err != nil {
+			return nil, err
+		}
+
+		for _, issue := range payload {
+			if issue.PullRequest != nil || issue.Body == nil || !strings.Contains(*issue.Body, marker) {
+				continue
+			}
+
+			ref := watchIssueRef(issue, fingerprint)
+			return &ref, nil
+		}
+
+		if len(payload) < 100 {
+			return nil, nil
+		}
+	}
+}
+
+// CreateIssue opens a GitHub issue for an actionable Atteler watch finding.
+func (c *GitHubClient) CreateIssue(ctx context.Context, draft watch.IssueDraft) (watch.IssueRef, error) {
+	var payload githubIssue
+	err := c.post(ctx, c.repositoryPath("issues"), watchIssueMutationPayload(draft), &payload)
+	if err != nil {
+		return watch.IssueRef{}, err
+	}
+
+	return watchIssueRef(payload, draft.Fingerprint), nil
+}
+
+// UpdateIssue refreshes an existing GitHub issue for an Atteler watch finding.
+func (c *GitHubClient) UpdateIssue(ctx context.Context, ref watch.IssueRef, draft watch.IssueDraft) (watch.IssueRef, error) {
+	if ref.Number <= 0 {
+		return watch.IssueRef{}, errors.New("watch issue number is required")
+	}
+
+	var payload githubIssue
+	mutation := watchIssueMutationPayload(draft)
+	if strings.EqualFold(ref.State, "closed") {
+		mutation["state"] = "open"
+	}
+
+	err := c.patch(ctx, c.repositoryPath(fmt.Sprintf("issues/%d", ref.Number)), mutation, &payload)
+	if err != nil {
+		return watch.IssueRef{}, err
+	}
+
+	return watchIssueRef(payload, draft.Fingerprint), nil
 }
 
 // FetchPullRequest returns the current GitHub PR payload needed by Symphony.
@@ -924,6 +998,40 @@ func normalizeGitHubIssue(issue githubIssue) Issue {
 	sort.Strings(out.Labels)
 
 	return out
+}
+
+func watchIssueRef(issue githubIssue, fingerprint string) watch.IssueRef {
+	return watch.IssueRef{
+		ID:          firstNonEmpty(issue.NodeID, fmt.Sprintf("GH-%d", issue.Number)),
+		URL:         stringValue(issue.HTMLURL),
+		Fingerprint: fingerprint,
+		State:       issue.State,
+		Number:      issue.Number,
+	}
+}
+
+func watchIssueMutationPayload(draft watch.IssueDraft) map[string]any {
+	payload := map[string]any{
+		"title": draft.Title,
+		"body":  draft.Body,
+	}
+	if len(draft.Labels) > 0 {
+		payload["labels"] = draft.Labels
+	}
+
+	return payload
+}
+
+func (c *GitHubClient) repositoryPath(path string) string {
+	return "/repos/" + url.PathEscape(c.cfg.Owner) + "/" + url.PathEscape(c.cfg.Repo) + "/" + strings.TrimPrefix(path, "/")
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+
+	return *value
 }
 
 func githubRESTStates(states []string) []string {

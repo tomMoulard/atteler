@@ -489,6 +489,37 @@ func TestTranslateCLIArgsWithFlagSet_PreservesParseableFlagOrder(t *testing.T) {
 		assert.Equal(t, "test/model", *model)
 	})
 
+	t.Run("watch quality flags remain parseable after grouped command", func(t *testing.T) {
+		t.Parallel()
+
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		watchScan := fs.Bool("watch-scan", false, "")
+		watchBaseline := fs.String("watch-baseline", "", "")
+		watchGate := fs.Bool("watch-gate", false, "")
+		watchGateMinSeverity := fs.String("watch-gate-min-severity", "", "")
+		watchUpsertIssues := fs.Bool("watch-upsert-issues", false, "")
+		watchRepository := fs.String("watch-github-repository", "", "")
+
+		got := translateCLIArgsWithFlagSet([]string{
+			"watch", "scan",
+			"--watch-baseline", ".atteler/watch-baseline.json",
+			"--watch-gate",
+			"--watch-gate-min-severity", "warning",
+			"--watch-upsert-issues",
+			"--watch-github-repository", "owner/repo",
+		}, fs)
+		require.NoError(t, got.Err)
+		require.False(t, got.Help)
+		require.NoError(t, fs.Parse(got.Args))
+
+		assert.True(t, *watchScan)
+		assert.Equal(t, ".atteler/watch-baseline.json", *watchBaseline)
+		assert.True(t, *watchGate)
+		assert.Equal(t, "warning", *watchGateMinSeverity)
+		assert.True(t, *watchUpsertIssues)
+		assert.Equal(t, "owner/repo", *watchRepository)
+	})
+
 	t.Run("joined prompt command keeps trailing flags parseable", func(t *testing.T) {
 		t.Parallel()
 

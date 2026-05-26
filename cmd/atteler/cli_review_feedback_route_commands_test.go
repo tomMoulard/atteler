@@ -17,6 +17,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/review"
 	"github.com/tommoulard/atteler/pkg/session"
+	"github.com/tommoulard/atteler/pkg/watch"
 )
 
 func TestMergeArtifactsWritesMarkdown(t *testing.T) {
@@ -82,6 +83,41 @@ func TestFormatReviewReport(t *testing.T) {
 			require.Failf(t, "formatted review report missing content", "missing %q in:\n%s", want, got)
 		}
 	}
+}
+
+func TestFormatReviewReportIncludesGateChecks(t *testing.T) {
+	t.Parallel()
+
+	report := review.Report{
+		Reviewer: "watch-scan",
+		GateChecks: []review.GateCheck{{
+			Name:   "watch-quality-gate",
+			Passed: false,
+			Notes:  "new findings meet or exceed high severity (blocking_findings=1)",
+		}},
+	}
+
+	got := formatReviewReport(report)
+
+	assert.Contains(t, got, "gate_checks:\n")
+	assert.Contains(t, got, "name=watch-quality-gate\tpassed=false\tnotes=new findings meet or exceed high severity (blocking_findings=1)")
+	assert.Contains(t, got, "findings: none\n")
+}
+
+func TestWatchGateChecksToReview(t *testing.T) {
+	t.Parallel()
+
+	checks := watchGateChecksToReview(&watch.GateResult{
+		Name:             "watch-quality-gate",
+		Reason:           "new findings meet or exceed high severity",
+		BlockingFindings: []watch.Finding{{Path: "pkg/new.go"}},
+		Passed:           false,
+	})
+
+	require.Len(t, checks, 1)
+	assert.Equal(t, "watch-quality-gate", checks[0].Name)
+	assert.False(t, checks[0].Passed)
+	assert.Equal(t, "new findings meet or exceed high severity (blocking_findings=1)", checks[0].Notes)
 }
 
 func TestBuildReviewContext_LoadsPathsAndInstructions(t *testing.T) {

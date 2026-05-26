@@ -151,23 +151,23 @@ func providerlessConfigLocalAnalysisCommands() []command {
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.watchLoop },
 			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
-				return runWatchLoop(ctx, s.cwd, o.watchLargeFileBytes.value, o.watchIntervalSeconds.value, o.watchMaxIterations.value)
+				return runWatchLoop(ctx, s.cwd, watchCLIOptionsFrom(o), o.watchIntervalSeconds.value, o.watchMaxIterations.value)
 			},
 		},
 		{
 			name:  "watch-scan-providerless",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.watchScan },
-			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
-				return runWatchScan(s.cwd, o.watchLargeFileBytes.value, o.watchJSON)
+			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
+				return runWatchScan(ctx, s.cwd, watchCLIOptionsFrom(o))
 			},
 		},
 		{
 			name:  "review-scan-providerless",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.reviewScan },
-			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
-				return runReviewScan(s.cwd, o.watchLargeFileBytes.value)
+			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
+				return runReviewScan(ctx, s.cwd, watchCLIOptionsFrom(o))
 			},
 		},
 	}

@@ -103,19 +103,41 @@ func formatReviewPlanReviewer(reviewer review.Reviewer) string {
 	return strings.Join(parts, "\t")
 }
 
-func runReviewScan(root string, largeFileBytes int) error {
-	findings, err := watch.ScanWithOptions(root, watch.Options{LargeFileBytes: int64(largeFileBytes)})
+func runReviewScan(ctx context.Context, root string, options watchCLIOptions) error {
+	scanOptions, baseline, baselineInfo, gateOptions, err := watchQualityInputs(ctx, root, options)
+	if err != nil {
+		return err
+	}
+
+	findings, err := watch.ScanWithOptions(root, scanOptions)
 	if err != nil {
 		return fmt.Errorf("review scan: %w", err)
 	}
 
+	output := buildWatchScanOutput(findings, baseline, baselineInfo, gateOptions)
 	report := review.Report{
-		Reviewer: "watch-scan",
-		Findings: watchFindingsToReview(findings),
+		Reviewer:   "watch-scan",
+		Findings:   actionableWatchFindingsToReview(output),
+		GateChecks: watchGateChecksToReview(output.Gate),
 	}
 	fmt.Print(formatReviewReport(report))
 
-	return nil
+	return watchGateError(output.Gate)
+}
+
+func actionableWatchFindingsToReview(output watchScanOutput) []review.Finding {
+	if output.Comparison != nil {
+		return watchFindingsToReview(output.Comparison.NewFindings)
+	}
+
+	findings := make([]watch.Finding, 0, len(output.Findings))
+	for i := range output.Findings {
+		if !output.Findings[i].Suppressed {
+			findings = append(findings, output.Findings[i])
+		}
+	}
+
+	return watchFindingsToReview(findings)
 }
 
 func watchFindingsToReview(findings []watch.Finding) []review.Finding {
@@ -134,8 +156,27 @@ func watchFindingsToReview(findings []watch.Finding) []review.Finding {
 	return review.SortedFindings(out)
 }
 
+func watchGateChecksToReview(gate *watch.GateResult) []review.GateCheck {
+	if gate == nil {
+		return nil
+	}
+
+	notes := gate.Reason
+	if len(gate.BlockingFindings) > 0 {
+		notes += fmt.Sprintf(" (blocking_findings=%d)", len(gate.BlockingFindings))
+	}
+
+	return []review.GateCheck{{
+		Name:   gate.Name,
+		Passed: gate.Passed,
+		Notes:  strings.TrimSpace(notes),
+	}}
+}
+
 func reviewSeverity(severity string) review.Severity {
 	switch severity {
+	case watch.SeverityHigh:
+		return review.SeverityHigh
 	case watch.SeverityWarning:
 		return review.SeverityMedium
 	case watch.SeverityMaintenance:
@@ -162,6 +203,14 @@ func formatReviewReport(report review.Report) string {
 	summary := report.SeveritySummary()
 	fmt.Fprintf(&b, "summary: critical=%d high=%d medium=%d low=%d info=%d total=%d\n", summary.Critical, summary.High, summary.Medium, summary.Low, summary.Info, summary.Total())
 
+	if len(report.GateChecks) > 0 {
+		b.WriteString("gate_checks:\n")
+
+		for i := range report.GateChecks {
+			fmt.Fprintf(&b, "  - %s\n", formatReviewGateCheck(report.GateChecks[i]))
+		}
+	}
+
 	findings := report.SortedFindings()
 	if len(findings) == 0 {
 		b.WriteString("findings: none\n")
@@ -175,6 +224,18 @@ func formatReviewReport(report review.Report) string {
 	}
 
 	return b.String()
+}
+
+func formatReviewGateCheck(check review.GateCheck) string {
+	parts := []string{
+		"name=" + check.Name,
+		"passed=" + strconv.FormatBool(check.Passed),
+	}
+	if check.Notes != "" {
+		parts = append(parts, "notes="+check.Notes)
+	}
+
+	return strings.Join(parts, "\t")
 }
 
 func formatReviewFinding(finding review.Finding) string {

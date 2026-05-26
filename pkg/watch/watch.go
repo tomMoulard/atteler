@@ -3,6 +3,7 @@
 package watch
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -29,6 +30,8 @@ const (
 	// KindConventionDrift identifies code that violates repository conventions.
 	KindConventionDrift = "convention_drift"
 
+	// SeverityHigh marks findings that are strong enough to fail quality gates.
+	SeverityHigh = "high"
 	// SeverityInfo marks informational findings.
 	SeverityInfo = "info"
 	// SeverityWarning marks findings likely to need attention.
@@ -39,19 +42,64 @@ const (
 
 // Finding describes a repository scan result.
 type Finding struct {
-	Path     string `json:"path"`
-	Kind     string `json:"kind"`
-	Message  string `json:"message"`
-	Severity string `json:"severity"`
-	RuleID   string `json:"rule_id,omitempty"`
-	Help     string `json:"help,omitempty"`
+	Path              string `json:"path"`
+	Kind              string `json:"kind"`
+	Message           string `json:"message"`
+	Severity          string `json:"severity"`
+	ID                string `json:"id,omitempty"`
+	Fingerprint       string `json:"fingerprint,omitempty"`
+	RuleID            string `json:"rule_id,omitempty"`
+	RuleDescription   string `json:"rule_description,omitempty"`
+	Help              string `json:"help,omitempty"`
+	Owner             string `json:"owner,omitempty"`
+	SuppressionReason string `json:"suppression_reason,omitempty"`
+	Suppressed        bool   `json:"suppressed,omitempty"`
 }
 
 // Options configures repository scans.
 type Options struct {
+	// IgnorePaths are additional .gitignore-style patterns applied on top of
+	// the repository root .gitignore and built-in runtime/generated folders.
+	IgnorePaths []string
+	// Rules overrides the built-in scan rule policy by rule ID.
+	Rules []RuleConfig
+	// Suppressions acknowledges matching findings. Suppressed findings are still
+	// returned for trend metrics, but quality gates and issue upserts ignore them.
+	Suppressions []Suppression
 	// LargeFileBytes is the byte threshold for large-file findings.
 	// Values less than or equal to zero use DefaultLargeFileBytes.
 	LargeFileBytes int64
+}
+
+// Rule describes one explainable watch scan rule.
+type Rule struct {
+	ID              string `json:"id"`
+	Kind            string `json:"kind"`
+	Description     string `json:"description"`
+	DefaultSeverity string `json:"default_severity"`
+	Help            string `json:"help"`
+	Owner           string `json:"owner,omitempty"`
+	Enabled         bool   `json:"enabled"`
+}
+
+// RuleConfig customizes one built-in rule by ID.
+type RuleConfig struct {
+	RuleID   string `json:"rule_id"`
+	Severity string `json:"severity,omitempty"`
+	Help     string `json:"help,omitempty"`
+	Owner    string `json:"owner,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+// Suppression acknowledges a stable finding with an auditable reason.
+// ID or Fingerprint is preferred; RuleID+Path is accepted for hand-authored
+// suppressions before the caller has captured a concrete scan output.
+type Suppression struct {
+	ID          string `json:"id,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	RuleID      string `json:"rule_id,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Reason      string `json:"reason"`
 }
 
 // Scan scans root using default options.
@@ -68,10 +116,22 @@ func ScanWithOptions(root string, options Options) ([]Finding, error) {
 		largeFileBytes = DefaultLargeFileBytes
 	}
 
+	rules, err := newRulePolicy(options.Rules)
+	if err != nil {
+		return nil, err
+	}
+
+	suppressions, err := newSuppressionMatcher(options.Suppressions)
+	if err != nil {
+		return nil, err
+	}
+
 	state := scanState{
 		root:           root,
 		largeFileBytes: largeFileBytes,
-		ignore:         loadGitIgnore(root),
+		ignore:         loadIgnore(root, options.IgnorePaths),
+		rules:          rules,
+		suppressions:   suppressions,
 		goFiles:        make(map[string]bool),
 		testFiles:      make(map[string]bool),
 	}
@@ -90,6 +150,8 @@ type scanState struct {
 	root           string
 	largeFileBytes int64
 	ignore         ignoreMatcher
+	rules          rulePolicy
+	suppressions   suppressionMatcher
 	findings       []Finding
 	goFiles        map[string]bool
 	testFiles      map[string]bool
@@ -121,6 +183,10 @@ func (s *scanState) visit(filePath string, entry fs.DirEntry, err error) error {
 }
 
 func (s *scanState) scanFile(filePath string, entry fs.DirEntry) error {
+	if entry.Type()&fs.ModeSymlink != 0 {
+		return nil
+	}
+
 	relativePath, err := relative(s.root, filePath)
 	if err != nil {
 		return err
@@ -136,52 +202,101 @@ func (s *scanState) scanFile(filePath string, entry fs.DirEntry) error {
 	}
 
 	if info.Size() > s.largeFileBytes {
-		s.findings = append(s.findings, newFinding(
+		s.addFinding(
 			relativePath,
 			KindLargeFile,
 			fmt.Sprintf("file is %d bytes, above %d byte threshold", info.Size(), s.largeFileBytes),
-			SeverityWarning,
-		))
+		)
 	}
 
 	recordGoFile(relativePath, s.goFiles, s.testFiles)
 
-	if shouldScanStaleMarkers(relativePath) {
+	if s.rules.enabled(KindStaleTODO) && shouldScanStaleMarkers(relativePath) {
 		ok, err := hasStaleTODOMarker(filePath)
 		if err != nil {
 			return err
 		}
 
 		if ok {
-			s.findings = append(s.findings, newFinding(
+			s.addFinding(
 				relativePath,
 				KindStaleTODO,
 				"contains stale TODO/FIXME marker",
-				SeverityMaintenance,
-			))
+			)
 		}
 	}
 
-	if hasContextBackgroundDrift(filePath, relativePath) {
-		s.findings = append(s.findings, newFinding(
+	if s.rules.enabled(KindConventionDrift) && hasContextBackgroundDrift(filePath, relativePath) {
+		s.addFinding(
 			relativePath,
 			KindConventionDrift,
 			"uses context.Background()/context.TODO()/context.WithoutCancel() outside allowed entrypoints/tests",
-			SeverityMaintenance,
-		))
+		)
 	}
 
 	return nil
 }
 
-func newFinding(path, kind, message, severity string) Finding {
-	return Finding{
-		Path:     path,
-		Kind:     kind,
-		Message:  message,
-		Severity: severity,
-		RuleID:   "watch." + kind,
-		Help:     findingHelp(kind),
+func (s *scanState) addFinding(path, kind, message string) {
+	if !s.rules.enabled(kind) {
+		return
+	}
+
+	finding := newFinding(path, kind, message, s.rules.rule(kind))
+	finding = s.suppressions.apply(finding)
+	s.findings = append(s.findings, finding)
+}
+
+func newFinding(path, kind, message string, rule Rule) Finding {
+	finding := Finding{
+		Path:            path,
+		Kind:            kind,
+		Message:         message,
+		Severity:        rule.DefaultSeverity,
+		RuleID:          rule.ID,
+		RuleDescription: rule.Description,
+		Help:            rule.Help,
+		Owner:           rule.Owner,
+	}
+
+	return completeFindingIdentity(finding)
+}
+
+// DefaultRules returns the built-in watch rules and their default policy.
+func DefaultRules() []Rule {
+	return []Rule{
+		{
+			ID:              "watch." + KindLargeFile,
+			Kind:            KindLargeFile,
+			Description:     "Flags files above the configured byte threshold.",
+			DefaultSeverity: SeverityWarning,
+			Help:            findingHelp(KindLargeFile),
+			Enabled:         true,
+		},
+		{
+			ID:              "watch." + KindMissingTest,
+			Kind:            KindMissingTest,
+			Description:     "Flags production Go files without same-directory _test.go companions.",
+			DefaultSeverity: SeverityInfo,
+			Help:            findingHelp(KindMissingTest),
+			Enabled:         true,
+		},
+		{
+			ID:              "watch." + KindStaleTODO,
+			Kind:            KindStaleTODO,
+			Description:     "Flags TODO/FIXME markers that should become tracked work or be removed.",
+			DefaultSeverity: SeverityMaintenance,
+			Help:            findingHelp(KindStaleTODO),
+			Enabled:         true,
+		},
+		{
+			ID:              "watch." + KindConventionDrift,
+			Kind:            KindConventionDrift,
+			Description:     "Flags context.Background(), context.TODO(), or context.WithoutCancel() usage outside process entrypoints and tests.",
+			DefaultSeverity: SeverityMaintenance,
+			Help:            findingHelp(KindConventionDrift),
+			Enabled:         true,
+		},
 	}
 }
 
@@ -200,8 +315,91 @@ func findingHelp(kind string) string {
 	}
 }
 
+type rulePolicy struct {
+	byKind map[string]Rule
+	byID   map[string]Rule
+}
+
+func newRulePolicy(configs []RuleConfig) (rulePolicy, error) {
+	policy := rulePolicy{
+		byKind: make(map[string]Rule),
+		byID:   make(map[string]Rule),
+	}
+
+	for _, rule := range DefaultRules() {
+		policy.byKind[rule.Kind] = rule
+		policy.byID[rule.ID] = rule
+	}
+
+	for _, config := range configs {
+		ruleID := strings.TrimSpace(config.RuleID)
+		if ruleID == "" {
+			return rulePolicy{}, errors.New("watch rule config: rule_id is required")
+		}
+
+		rule, ok := policy.byID[ruleID]
+		if !ok {
+			return rulePolicy{}, fmt.Errorf("watch rule config: unknown rule_id %q", ruleID)
+		}
+
+		rule.Enabled = !config.Disabled
+		if strings.TrimSpace(config.Severity) != "" {
+			if !validSeverity(config.Severity) {
+				return rulePolicy{}, fmt.Errorf("watch rule config %s: invalid severity %q", ruleID, config.Severity)
+			}
+
+			rule.DefaultSeverity = strings.TrimSpace(config.Severity)
+		}
+
+		if strings.TrimSpace(config.Help) != "" {
+			rule.Help = strings.TrimSpace(config.Help)
+		}
+
+		if strings.TrimSpace(config.Owner) != "" {
+			rule.Owner = strings.TrimSpace(config.Owner)
+		}
+
+		policy.byKind[rule.Kind] = rule
+		policy.byID[rule.ID] = rule
+	}
+
+	return policy, nil
+}
+
+func (p rulePolicy) enabled(kind string) bool {
+	rule, ok := p.byKind[kind]
+	return ok && rule.Enabled
+}
+
+func (p rulePolicy) rule(kind string) Rule {
+	if rule, ok := p.byKind[kind]; ok {
+		return rule
+	}
+
+	return Rule{
+		ID:              "watch." + kind,
+		Kind:            kind,
+		DefaultSeverity: SeverityInfo,
+		Enabled:         true,
+	}
+}
+
+func validSeverity(severity string) bool {
+	switch strings.TrimSpace(severity) {
+	case SeverityHigh, SeverityWarning, SeverityMaintenance, SeverityInfo:
+		return true
+	default:
+		return false
+	}
+}
+
 func shouldScanStaleMarkers(path string) bool {
 	return !strings.HasSuffix(path, "_test.go")
+}
+
+func loadIgnore(root string, extraPatterns []string) ignoreMatcher {
+	matcher := loadGitIgnore(root)
+	return matcher.with(extraPatterns)
 }
 
 func loadGitIgnore(root string) ignoreMatcher {
@@ -224,6 +422,17 @@ func loadGitIgnore(root string) ignoreMatcher {
 
 type ignoreMatcher struct {
 	rules []ignoreRule
+}
+
+func (m ignoreMatcher) with(patterns []string) ignoreMatcher {
+	for _, pattern := range patterns {
+		rule, ok := parseIgnoreRule(pattern)
+		if ok {
+			m.rules = append(m.rules, rule)
+		}
+	}
+
+	return m
 }
 
 func (m ignoreMatcher) ignored(relativePath string, isDir bool) bool {
@@ -324,19 +533,18 @@ func hasPathPrefix(relativePath, prefix string) bool {
 func (s *scanState) addMissingTests() {
 	for path := range s.goFiles {
 		if !s.testFiles[testPath(path)] {
-			s.findings = append(s.findings, newFinding(
+			s.addFinding(
 				path,
 				KindMissingTest,
 				"missing _test.go companion",
-				SeverityInfo,
-			))
+			)
 		}
 	}
 }
 
 func shouldSkipDir(name string) bool {
 	switch name {
-	case ".atteler", ".cache", ".codex", ".git", ".idea", ".omx", ".vscode", "build", "dist", "node_modules", "vendor":
+	case ".atteler", ".cache", ".codex", ".generated", ".git", ".idea", ".omx", ".vscode", "build", "dist", "generated", "node_modules", "vendor":
 		return true
 	default:
 		return false
@@ -541,6 +749,18 @@ func sortFindings(findings []Finding) {
 			return findings[i].Message < findings[j].Message
 		}
 
-		return findings[i].Severity < findings[j].Severity
+		if findings[i].Severity != findings[j].Severity {
+			return findings[i].Severity < findings[j].Severity
+		}
+
+		if findings[i].RuleID != findings[j].RuleID {
+			return findings[i].RuleID < findings[j].RuleID
+		}
+
+		if findings[i].Fingerprint != findings[j].Fingerprint {
+			return findings[i].Fingerprint < findings[j].Fingerprint
+		}
+
+		return findings[i].ID < findings[j].ID
 	})
 }

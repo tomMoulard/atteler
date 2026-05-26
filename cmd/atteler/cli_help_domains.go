@@ -344,6 +344,8 @@ var implicitFlagDefaults = map[string]string{
 	"spawn-timeout-seconds":    "none",
 	"vector-limit":             "5",
 	"watch-interval-seconds":   "60",
+	"watch-gate-min-severity":  "high",
+	"watch-issue-min-severity": "high",
 	"watch-large-file-bytes":   strconv.FormatInt(watch.DefaultLargeFileBytes, 10),
 	"watch-max-iterations":     "unlimited",
 }
