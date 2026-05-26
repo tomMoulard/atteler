@@ -71,6 +71,8 @@ func TestWriteConfigExplanation_IncludesProviderModelAndRuntimeProvenance(t *tes
 	got := out.String()
 
 	assert.Contains(t, got, "Precedence (lowest to highest):")
+	assert.Contains(t, got, "Implicit defaults")
+	assert.Contains(t, got, "agent_loop.max_iterations: unset/0")
 	assert.Contains(t, got, "providers.openai.base_url: https://openai.project")
 	assert.Contains(t, got, "runtime.selected_model: cli-model")
 	assert.Contains(t, got, "--model [cli-flag]")
@@ -258,4 +260,12 @@ func TestExplainConfig_PrintsHarnessImporterWarningsBeforeConfigError(t *testing
 	assert.Contains(t, out, "Config importer warnings:")
 	assert.Contains(t, out, "claude: "+filepath.Join(claudeDir, "settings.json")+" unsupported: ignored unsupported field")
 	assert.NotContains(t, out, "Config explanation")
+}
+
+func TestConfigExplainPathMatches_WildcardDefaultsMatchConcreteFieldFilters(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, configExplainPathMatches("providers.*.disable_private_adapter", "providers.openai.disable_private_adapter"))
+	assert.True(t, configExplainPathMatches("providers.*.disable_private_adapter", "providers.openai"))
+	assert.False(t, configExplainPathMatches("providers.*.disable_private_adapter", "providers.openai.base_url"))
 }

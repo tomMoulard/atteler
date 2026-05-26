@@ -40,6 +40,6 @@ func unlockStateFile(file *os.File) error {
 	return nil
 }
 
-func syncStateDir(_ string) error {
+func syncDir(_ string) error {
 	return nil
 }

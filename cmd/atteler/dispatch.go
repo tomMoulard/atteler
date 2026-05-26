@@ -23,9 +23,11 @@ import (
 )
 
 const (
-	affirmativeTrue = "true"
-	affirmativeYes  = "yes"
-	negativeFalse   = "false"
+	affirmativeTrue          = "true"
+	affirmativeYes           = "yes"
+	negativeFalse            = "false"
+	configPathStatusMissing  = "missing"
+	configPathStatusUpToDate = "up-to-date"
 )
 
 func parseOptions() cliOptions {
@@ -117,6 +119,9 @@ func applyDebugEnvOptions(opts *cliOptions, getenv func(string) string) {
 	applyDebugBool(getenv, "DEBUG_ATTELER_DOCTOR", &opts.doctor)
 	applyDebugBool(getenv, "DEBUG_ATTELER_DOCTOR_OFFLINE", &opts.doctorOffline)
 	applyDebugBool(getenv, "DEBUG_ATTELER_VALIDATE_CONFIG", &opts.validateConfig)
+	applyDebugBool(getenv, "DEBUG_ATTELER_CONFIG_REPORT", &opts.configReport)
+	applyDebugBool(getenv, "DEBUG_ATTELER_EXPLAIN_CONFIG", &opts.explainConfig)
+	applyDebugBool(getenv, "DEBUG_ATTELER_STATE_DIAGNOSTICS", &opts.stateDiagnostics)
 	applyDebugBool(getenv, "DEBUG_ATTELER_LIST_CONFIG_PATHS", &opts.listConfigPaths)
 	applyDebugBool(getenv, "DEBUG_ATTELER_LIST_PROVIDERS", &opts.listProviders)
 	applyDebugBool(getenv, "DEBUG_ATTELER_LIST_KNOWN_MODELS", &opts.listKnownModels)
@@ -155,12 +160,17 @@ func applyDebugEnvOptions(opts *cliOptions, getenv func(string) string) {
 	applyDebugString(getenv, "DEBUG_ATTELER_LSP_ROOT", &opts.lspRootPath)
 	applyDebugString(getenv, "DEBUG_ATTELER_LSP_LANGUAGE", &opts.lspLanguageID)
 	applyDebugString(getenv, "DEBUG_ATTELER_LSP_WORKSPACE_SYMBOLS", &opts.lspWorkspaceSymbols)
+	applyDebugString(getenv, "DEBUG_ATTELER_EXPLAIN_CONFIG_FIELD", &opts.explainConfigPath)
 	applyDebugString(getenv, "DEBUG_ATTELER_GIT_HISTORY_SEARCH", &opts.gitHistorySearch)
 	applyDebugPositiveInt(getenv, "DEBUG_ATTELER_GIT_HISTORY_LIMIT", &opts.gitHistoryLimit)
 	applyDebugPositiveInt(getenv, "DEBUG_ATTELER_MCP_TIMEOUT_SECONDS", &opts.mcpTimeout)
 	applyDebugPositiveInt(getenv, "DEBUG_ATTELER_WATCH_LARGE_FILE_BYTES", &opts.watchLargeFileBytes)
 	applyDebugPositiveInt(getenv, "DEBUG_ATTELER_WATCH_INTERVAL_SECONDS", &opts.watchIntervalSeconds)
 	applyDebugPositiveInt(getenv, "DEBUG_ATTELER_WATCH_MAX_ITERATIONS", &opts.watchMaxIterations)
+
+	if opts.explainConfigPath != "" {
+		opts.explainConfig = true
+	}
 }
 
 func applyDebugBool(getenv func(string) string, name string, target *bool) {
@@ -362,7 +372,7 @@ func configPathStatus(path string) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "missing"
+			return configPathStatusMissing
 		}
 
 		return "error: " + err.Error()
@@ -516,6 +526,10 @@ func runInlineConfigCommand(opts cliOptions) (bool, error) {
 		return true, nil
 	case opts.validateConfig:
 		return true, validateConfig()
+	case opts.configMigrate:
+		return true, migrateConfigAndState()
+	case opts.configReport:
+		return true, printConfigReport()
 	case opts.explainConfig:
 		return true, explainConfig(opts)
 	case opts.commandSurfaceJSON:

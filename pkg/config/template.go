@@ -1,143 +1,137 @@
 package config
 
-const templateYAML = `# Atteler configuration
-# Save as ~/.config/atteler/config.yaml, ./.atteler/config.yaml, or ./.atteler.yaml.
+import (
+	"fmt"
+	"strings"
 
-default_provider: openai
-default_model: gpt-4.1
-fallback_models:
-  - gpt-4.1-mini
+	"gopkg.in/yaml.v3"
 
-generation:
-  temperature: 0
-  top_p: 1
-  seed: 1
-  reasoning_level: medium
-  max_tokens: 2048
+	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
+)
 
-agent_loop:
-  # Set 0 for no ceiling.
-  max_output_bytes: 0
-  max_total_tokens: 0
+const (
+	templateDefaultProvider = "openai"
+	templateDefaultModel    = "gpt-4.1"
+	templateFallbackModel   = "gpt-4.1-mini"
+)
 
-providers:
-  openai:
-    # base_url: https://api.openai.com
-  anthropic:
-    # base_url: https://api.anthropic.com
-    # Set disable_private_adapter: true to keep direct Anthropic API keys while
-    # blocking Anthropic fallback to Claude Code/Forge borrowed credentials.
-    # disable_private_adapter: true
-  ollama:
-    # base_url: http://127.0.0.1:11434
-    # Auto-start is opt-in because it launches a local long-lived daemon.
-    # Set auto_start: true (or ATTELER_OLLAMA_AUTO_START=true) to let Atteler
-    # start "ollama serve" for selected local Ollama runs.
-    auto_start: false
-  codex:
-    # Private/borrowed-credential adapter for Codex CLI ChatGPT login.
-    # Set disable_private_adapter: true (or ATTELER_DISABLE_CODEX_ADAPTER=1)
-    # to keep normal OpenAI provider support while disabling this adapter.
-    # disable_private_adapter: true
-  claude-code:
-    # Private/borrowed-credential adapter for Claude Code OAuth login.
-    # Set disable_private_adapter: true (or ATTELER_DISABLE_CLAUDE_CODE_ADAPTER=1)
-    # to keep normal Anthropic provider support while disabling this adapter.
-    # disable_private_adapter: true
+// starterTemplateConfig returns the example config that backs TemplateYAML.
+// Keeping the starter as a Config value makes the emitted YAML follow the same
+// schema tags that the loader accepts, so new fields are less likely to drift
+// from the on-disk shape.
+func starterTemplateConfig() Config {
+	temperature := 0.0
+	topP := 1.0
+	seed := 1
+	agentLoopMaxOutput := int64(0)
+	agentLoopMaxTotalTokens := 0
+	skillLearningEnabled := true
 
-agents:
-  reviewer:
-    description: Code review specialist
-    capabilities:
-      - review
-      - security
-    model: gpt-4.1
-    fallback_models:
-      - gpt-4.1-mini
-    routing_policy:
-      # Prefer providers before cost/latency tie-breakers.
-      preferred_providers:
-        - openai
-      # Reject every model from listed providers.
-      # banned_providers:
-      #   - ollama
-      # Reject provider-qualified IDs or provider-local model names.
-      # banned_models:
-      #   - openai/gpt-expensive
-      # required_capabilities:
-      #   - tools
-      # max_budget: 0.25
-      # require_fresh_metadata: true
-    seed: 1
-    reasoning_level: high
-    temperature: 0
-    max_tokens: 2048
-    triggers:
-      - "review this"
-      - "code review"
-    system_prompt: |
-      You are a concise code reviewer. Focus on correctness, tests,
-      security, and maintainability.
+	return Config{
+		Version:         ConfigSchemaVersion,
+		DefaultProvider: templateDefaultProvider,
+		DefaultModel:    templateDefaultModel,
+		FallbackModels:  []string{templateFallbackModel},
+		Generation: GenerationConfig{
+			Temperature:    &temperature,
+			TopP:           &topP,
+			Seed:           &seed,
+			ReasoningLevel: "medium",
+			MaxTokens:      2048,
+		},
+		AgentLoop: AgentLoopConfig{
+			MaxOutputBytes: &agentLoopMaxOutput,
+			MaxTotalTokens: &agentLoopMaxTotalTokens,
+		},
+		Providers: map[string]ProviderConfig{
+			"claude-code":           {},
+			"codex":                 {},
+			"anthropic":             {},
+			templateDefaultProvider: {},
+			"ollama":                {BaseURL: "http://127.0.0.1:11434"},
+		},
+		Agents: map[string]AgentConfig{
+			"reviewer": {
+				Description:    "Code review specialist",
+				Capabilities:   []string{"review", "security"},
+				Model:          templateDefaultModel,
+				FallbackModels: []string{templateFallbackModel},
+				RoutingPolicy: RoutingPolicyConfig{
+					PreferredProviders: []string{templateDefaultProvider},
+				},
+				Seed:           &seed,
+				ReasoningLevel: "high",
+				Temperature:    &temperature,
+				MaxTokens:      2048,
+				Triggers:       []string{"review this", "code review"},
+				SystemPrompt: "You are a concise code reviewer. Focus on correctness, " +
+					"tests, security, and maintainability.",
+			},
+		},
+		Hooks: map[string][]HookConfig{
+			"session_end": {{
+				Command:        []string{"echo", "atteler session ended"},
+				TimeoutSeconds: 5,
+			}},
+		},
+		Context: ContextConfig{
+			MaxFileBytes:   32768,
+			MaxTotalBytes:  131072,
+			MaxInputTokens: 120000,
+			ReferencePolicy: ReferencePolicyConfig{
+				AllowedSchemes: []string{"https"},
+				AllowedHosts:   []string{"docs.example.com"},
+				LocalRoots:     []string{"../shared-style-guides"},
+				ContentTypes:   []string{"text/*", "application/json"},
+			},
+		},
+		Plugins: PluginConfig{
+			Policy: &attelerplugin.Policy{
+				Permissions: attelerplugin.PermissionSet{
+					Filesystem: attelerplugin.FilesystemPermissions{
+						Read: []string{"."},
+					},
+					Network: attelerplugin.NetworkPermissions{Allow: false},
+					Shell:   attelerplugin.ShellPermissions{Allow: false},
+				},
+				Output: attelerplugin.OutputLimits{
+					StdoutMaxBytes: 65536,
+					StderrMaxBytes: 65536,
+				},
+				TrustedInstallSources: []string{"local"},
+			},
+		},
+		SkillLearning: SkillLearningConfig{
+			Enabled:         &skillLearningEnabled,
+			StoreDir:        "./.atteler/skill-learning",
+			SkillDir:        "./.atteler/skills/generated",
+			MaxObservations: 300,
+			MaxSteps:        6,
+			MinOccurrences:  2,
+		},
+	}
+}
 
-hooks:
-  session_end:
-    - command: ["echo", "atteler session ended"]
-      timeout_seconds: 5
+func templateYAML() string {
+	data, err := yaml.Marshal(starterTemplateConfig())
+	if err != nil {
+		panic(fmt.Sprintf("marshal starter config template: %v", err))
+	}
 
-context:
-  max_file_bytes: 32768
-  max_total_bytes: 131072
-  max_input_tokens: 120000
-  # Configured references cross a trust boundary before every model request.
-  # Local paths are limited to the working directory plus explicit local_roots.
-  # Remote URLs are rejected unless both scheme and host are allowed.
-  # references:
-  #   - ./docs/style-guide.md
-  #   - https://docs.example.com/llm-style.md
-  reference_policy:
-    # allowed_schemes: [https]
-    # allowed_hosts:
-    #   - docs.example.com
-    # local_roots:
-    #   - ../shared-style-guides
-    # max_redirects: 0
-    # content_types: [text/*, application/json]
-    # allow_private_networks: false
+	var out strings.Builder
+	out.WriteString("# Atteler configuration\n")
+	out.WriteString("# Save as ~/.config/atteler/config.yaml, ./.atteler/config.yaml, or ./.atteler.yaml.\n")
+	out.WriteString("# Generated from the current config schema and starter defaults.\n")
+	out.WriteString("# Use `atteler config explain` to inspect implicit defaults and merge provenance.\n")
+	out.WriteString("# Configured references cross a trust boundary before every model request.\n")
+	out.WriteString("# Remote URLs are rejected unless both scheme and host are allowed below.\n\n")
+	out.Write(data)
+	out.WriteString("\n#vim: setf=conf\n")
 
-plugins:
-  # paths:
-  #   - ./.atteler/plugins/reviewer
-  # policy:
-  #   permissions:
-  #     filesystem:
-  #       read: ["."]
-  #       write: []
-  #     network:
-  #       allow: false
-  #       hosts: []
-  #     shell:
-  #       allow: false
-  #     env: []
-  #     secrets: []
-  #     tools: []
-  #   output:
-  #     stdout_max_bytes: 65536
-  #     stderr_max_bytes: 65536
-  #   trusted_install_sources: ["local"]
-
-skill_learning:
-  # Set enabled: false to opt out of automatic recurring-workflow skill learning.
-  enabled: true
-  store_dir: ./.atteler/skill-learning
-  skill_dir: ./.atteler/skills/generated
-  min_occurrences: 2
-  max_steps: 6
-  max_observations: 300
-
-#vim: setf=conf
-`
+	return out.String()
+}
 
 // TemplateYAML returns a starter YAML configuration without secrets.
 func TemplateYAML() string {
-	return templateYAML
+	return templateYAML()
 }

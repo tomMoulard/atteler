@@ -1,0 +1,327 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+)
+
+func TestInspectPathSources_ReportsUnknownDeprecatedAndVersionDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+provider: openai
+model: gpt-legacy
+generation:
+  reasoning: high
+  surprise: true
+agent_loop:
+  max_tool_calls: 10
+  max_wall_time: 30m
+  checkpoint_interval: 2
+agents:
+  reviewer:
+    prompt: review safely
+    routing_policy:
+      preferred_providers: [openai]
+      surprise: true
+providers:
+  openai:
+    disable_private_adapter: true
+    token: should-not-be-here
+skill_learning:
+  enabled: true
+  store_dir: ./.atteler/skill-learning
+  skill_dir: ./.atteler/skills/generated
+  min_occurrences: 2
+  max_steps: 6
+  max_observations: 300
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+	assert.Equal(t, ConfigSchemaVersion, reports[0].Version)
+
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticInfo, "version", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "provider", "default_provider")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "model", "default_model")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "generation.reasoning", "generation.reasoning_level")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "agents.reviewer.prompt", "agents.reviewer.system_prompt")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "generation.surprise", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "agents.reviewer.routing_policy.surprise", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "providers.openai.token", "")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agents.reviewer.routing_policy")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agents.reviewer.routing_policy.preferred_providers")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_tool_calls")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_wall_time")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.checkpoint_interval")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "providers.openai.disable_private_adapter")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "skill_learning")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "skill_learning.enabled")
+}
+
+func TestInspectPathSources_ReportsNonMappingConfig(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("- not-a-map\n"), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "error", reports[0].Status)
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "expected top-level mapping")
+}
+
+func TestInspectPathSources_AcceptsGeneratedTemplate(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(TemplateYAML()), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+	assert.Empty(t, reports[0].Diagnostics)
+}
+
+func TestInspectPathSources_ReportsNegativeVersion(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("version: -1\n"), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+	assert.Equal(t, -1, reports[0].Version)
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "version", "")
+}
+
+func TestNewDiagnosticsReport_RedactsSecrets(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+providers:
+  openai:
+    base_url: https://user:secret@example.com/v1?x-api-key=sk-secret
+agents:
+  reviewer:
+    description: internal reviewer description secret
+    personality: internal reviewer personality secret
+    system_prompt: proprietary instructions
+    references:
+      - https://example.com/agent?api_key=agent-secret
+context:
+  references:
+    - https://example.com/doc?token=ref-secret
+hooks:
+  session_end:
+    - command: ["curl", "--token", "hook-secret", "-H", "Authorization: Bearer header-secret", "https://example.com/hook?token=url-secret"]
+      env:
+        API_TOKEN: hook-secret
+`), 0o600))
+
+	report := NewDiagnosticsReport([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Empty(t, report.LoadError)
+	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_iterations")
+	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_tool_calls")
+	assertDefaultDiagnostic(t, report.Defaults, "providers.*.disable_private_adapter")
+	assertDefaultDiagnostic(t, report.Defaults, "skill_learning.enabled")
+
+	assert.NotContains(t, report.Config.Providers["openai"].BaseURL, "secret")
+	assert.Equal(t, RedactedValue, report.Config.Agents["reviewer"].Description)
+	assert.Equal(t, RedactedValue, report.Config.Agents["reviewer"].Personality)
+	assert.Equal(t, RedactedValue, report.Config.Agents["reviewer"].SystemPrompt)
+	require.Len(t, report.Config.Hooks["session_end"], 1)
+	assert.Equal(t, RedactedValue, report.Config.Hooks["session_end"][0].Env["API_TOKEN"])
+	assert.Equal(t, RedactedValue, report.Config.Hooks["session_end"][0].Command[2])
+	assert.NotContains(t, report.Config.Hooks["session_end"][0].Command[4], "header-secret")
+	assert.NotContains(t, report.Config.Hooks["session_end"][0].Command[5], "url-secret")
+	assert.NotContains(t, report.Config.Context.References[0], "ref-secret")
+	assert.NotContains(t, report.Config.Agents["reviewer"].References[0], "agent-secret")
+
+	final, ok := report.Origins.Final("providers.openai.base_url")
+	require.True(t, ok)
+	assert.NotContains(t, final.Value, "sk-secret")
+	assert.NotContains(t, final.Value, "user:secret")
+
+	hookOrigin, ok := report.Origins.Final("hooks.session_end")
+	require.True(t, ok)
+	assert.NotContains(t, hookOrigin.Value, "hook-secret")
+	assert.NotContains(t, hookOrigin.Value, "header-secret")
+	assert.NotContains(t, hookOrigin.Value, "url-secret")
+
+	contextRefsOrigin, ok := report.Origins.Final("context.references")
+	require.True(t, ok)
+	assert.NotContains(t, contextRefsOrigin.Value, "ref-secret")
+
+	descriptionOrigin, ok := report.Origins.Final("agents.reviewer.description")
+	require.True(t, ok)
+	assert.Equal(t, RedactedValue, descriptionOrigin.Value)
+
+	personalityOrigin, ok := report.Origins.Final("agents.reviewer.personality")
+	require.True(t, ok)
+	assert.Equal(t, RedactedValue, personalityOrigin.Value)
+
+	systemPromptOrigin, ok := report.Origins.Final("agents.reviewer.system_prompt")
+	require.True(t, ok)
+	assert.Equal(t, RedactedValue, systemPromptOrigin.Value)
+
+	out, err := yaml.Marshal(report)
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "internal reviewer")
+	assert.NotContains(t, string(out), "proprietary instructions")
+	assert.NotContains(t, string(out), "secret")
+	assert.NotContains(t, string(out), "header-secret")
+	assert.NotContains(t, string(out), "url-secret")
+	assert.NotContains(t, string(out), "ref-secret")
+	assert.NotContains(t, string(out), "agent-secret")
+}
+
+func TestInspectStatePath_ReportsStateMetadataWithoutPreferences(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("version: 1\nrevision: 7\ndefault_model: secret-model\n"), 0o600))
+
+	report := InspectStatePath(path)
+	assert.Equal(t, path, report.Path)
+	assert.Equal(t, "present", report.Status)
+	assert.Equal(t, StateSchemaVersion, report.Version)
+	assert.Equal(t, int64(7), report.Revision)
+	assert.Empty(t, report.Error)
+	assert.Empty(t, report.Diagnostics)
+}
+
+func TestInspectStatePath_ReportsLegacyStateVersion(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("default_model: private-model\n"), 0o600))
+
+	report := InspectStatePath(path)
+	assert.Equal(t, "present", report.Status)
+	assert.Equal(t, StateSchemaVersion, report.Version)
+	assert.Empty(t, report.Error)
+	assertDiagnostic(t, report.Diagnostics, DiagnosticInfo, "version", "")
+}
+
+func TestInspectStatePath_ReportsCorruptedStateWithRecoveryHint(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("version: [broken\n"), 0o600))
+
+	report := InspectStatePath(path)
+	assert.Equal(t, path, report.Path)
+	assert.Equal(t, "error", report.Status)
+	assert.Contains(t, report.Error, path)
+	assert.Contains(t, report.Error, "fix the YAML")
+	assert.Contains(t, report.Error, "move this file aside")
+}
+
+func TestInspectStatePath_ReportsUnknownStateFieldsWithoutValues(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`version: 1
+revision: 7
+future_metadata:
+  token: private-state-value
+folders:
+  /private/project:
+    default_model: folder-model
+    future_folder_metadata: private-folder-value
+`), 0o600))
+
+	report := InspectStatePath(path)
+	assert.Equal(t, "present", report.Status)
+	assert.Empty(t, report.Error)
+	assertDiagnosticMessage(t, report.Diagnostics, DiagnosticInfo, "unknown state field is preserved across writes")
+	assertDiagnostic(t, report.Diagnostics, DiagnosticInfo, "future_metadata", "")
+	assertDiagnostic(t, report.Diagnostics, DiagnosticInfo, "folders.*.future_folder_metadata", "")
+
+	out, err := yaml.Marshal(report)
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "private-state-value")
+	assert.NotContains(t, string(out), "private-folder-value")
+	assert.NotContains(t, string(out), "/private/project")
+}
+
+func TestDefaultDiagnostics_ReturnsCopy(t *testing.T) {
+	t.Parallel()
+
+	defaults := DefaultDiagnostics()
+	require.NotEmpty(t, defaults)
+
+	defaults[0].Value = "mutated"
+
+	assert.NotEqual(t, "mutated", DefaultDiagnostics()[0].Value)
+}
+
+func assertDiagnostic(
+	t *testing.T,
+	diagnostics []Diagnostic,
+	severity DiagnosticSeverity,
+	field string,
+	replacement string,
+) {
+	t.Helper()
+
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Severity == severity && diagnostic.Field == field && diagnostic.Replacement == replacement {
+			return
+		}
+	}
+
+	require.Failf(t, "missing diagnostic", "severity=%s field=%s replacement=%s diagnostics=%v", severity, field, replacement, diagnostics)
+}
+
+func assertDiagnosticMessage(
+	t *testing.T,
+	diagnostics []Diagnostic,
+	severity DiagnosticSeverity,
+	message string,
+) {
+	t.Helper()
+
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Severity == severity && diagnostic.Message == message {
+			return
+		}
+	}
+
+	require.Failf(t, "missing diagnostic", "severity=%s message=%s diagnostics=%v", severity, message, diagnostics)
+}
+
+func assertNoDiagnostic(t *testing.T, diagnostics []Diagnostic, field string) {
+	t.Helper()
+
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Field == field {
+			require.Failf(t, "unexpected diagnostic", "field=%s diagnostic=%v diagnostics=%v", field, diagnostic, diagnostics)
+		}
+	}
+}
+
+func assertDefaultDiagnostic(t *testing.T, defaults []DefaultDiagnostic, field string) {
+	t.Helper()
+
+	for _, defaultInfo := range defaults {
+		if defaultInfo.Field == field {
+			return
+		}
+	}
+
+	require.Failf(t, "missing default diagnostic", "field=%s defaults=%v", field, defaults)
+}

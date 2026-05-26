@@ -32,6 +32,7 @@ const (
 	commandEffectSessionRead     = "session-store-read"
 	commandEffectSessionWrite    = "session-store-write"
 	commandEffectStateRead       = "state-store-read"
+	commandEffectStateWrite      = "state-store-write"
 	commandEffectTaskWrite       = "task-store-write"
 	commandEffectUserOutput      = "stdout"
 	commandEffectWorktreeWrite   = "worktree-write"
@@ -456,6 +457,7 @@ func isKnownCommandSideEffect(value string) bool {
 		commandEffectSessionRead,
 		commandEffectSessionWrite,
 		commandEffectStateRead,
+		commandEffectStateWrite,
 		commandEffectTaskWrite,
 		commandEffectUserOutput,
 		commandEffectWorktreeWrite:

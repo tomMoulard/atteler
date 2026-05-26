@@ -240,6 +240,56 @@ func TestLoadFiles_JSONCompatibility(t *testing.T) {
 	}
 }
 
+func TestLoadFiles_ConfigVersionAndDeprecatedFieldMigration(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "legacy.yaml", `
+version: 0
+provider: openai
+model: gpt-legacy
+generation:
+  reasoning: high
+agents:
+  reviewer:
+    prompt: review safely
+`)
+
+	cfg, loaded, origins, err := LoadFilesWithOrigins([]string{path})
+	require.NoError(t, err)
+	require.Equal(t, []string{path}, loaded)
+	assert.Equal(t, ConfigSchemaVersion, cfg.Version)
+	assert.Equal(t, "openai", cfg.DefaultProvider)
+	assert.Equal(t, "gpt-legacy", cfg.DefaultModel)
+	assert.Equal(t, "high", cfg.Generation.ReasoningLevel)
+	assert.Equal(t, "review safely", cfg.Agents["reviewer"].SystemPrompt)
+
+	final, ok := origins.Final("version")
+	require.True(t, ok)
+	assert.Equal(t, "1", final.Value)
+}
+
+func TestLoadFiles_RejectsFutureConfigVersion(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "future.yaml", `version: 99`)
+
+	_, _, err := LoadFiles([]string{path})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported version 99")
+	assert.Contains(t, err.Error(), path)
+}
+
+func TestLoadFiles_RejectsNegativeConfigVersion(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "negative.yaml", `version: -1`)
+
+	_, _, err := LoadFiles([]string{path})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported version -1")
+	assert.Contains(t, err.Error(), path)
+}
+
 func TestLoadFiles_PluginPolicy(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -795,7 +845,7 @@ context:
     allow_private_networks: false
 `)
 
-	cfg, _, err := LoadFiles([]string{path})
+	cfg, _, origins, err := LoadFilesWithOrigins([]string{path})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"https"}, cfg.Context.ReferencePolicy.AllowedSchemes)
 	assert.Equal(t, []string{"docs.example.com", "*.trusted.example"}, cfg.Context.ReferencePolicy.AllowedHosts)
@@ -803,6 +853,15 @@ context:
 	assert.Equal(t, 2, cfg.Context.ReferencePolicy.MaxRedirects)
 	assert.Equal(t, []string{"text/*", "application/json"}, cfg.Context.ReferencePolicy.ContentTypes)
 	assert.False(t, cfg.Context.ReferencePolicy.AllowPrivateNetworks)
+
+	allowedHostsOrigin, ok := origins.Final("context.reference_policy.allowed_hosts")
+	require.True(t, ok)
+	assert.Equal(t, OriginExplicitFile, allowedHostsOrigin.Kind)
+	assert.Equal(t, `["docs.example.com","*.trusted.example"]`, allowedHostsOrigin.Value)
+
+	privateNetworksOrigin, ok := origins.Final("context.reference_policy.allow_private_networks")
+	require.True(t, ok)
+	assert.Equal(t, "false", privateNetworksOrigin.Value)
 }
 
 func TestLoadWithOrigins_PreservesContextReferencePolicy(t *testing.T) {

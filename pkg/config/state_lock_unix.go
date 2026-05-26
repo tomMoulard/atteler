@@ -26,15 +26,15 @@ func unlockStateFile(file *os.File) error {
 	return nil
 }
 
-func syncStateDir(dir string) error {
+func syncDir(dir string) error {
 	file, err := os.Open(dir)
 	if err != nil {
-		return fmt.Errorf("state: open dir %s: %w", dir, err)
+		return fmt.Errorf("open dir %s: %w", dir, err)
 	}
 	defer file.Close()
 
 	if err := file.Sync(); err != nil {
-		return fmt.Errorf("state: sync dir %s: %w", dir, err)
+		return fmt.Errorf("sync dir %s: %w", dir, err)
 	}
 
 	return nil

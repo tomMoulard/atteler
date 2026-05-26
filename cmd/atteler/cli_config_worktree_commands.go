@@ -140,6 +140,7 @@ func printDoctorOverview(state appState, providers []string) {
 		fmt.Println("config: " + strings.Join(state.loadedConfigPaths, ", "))
 	}
 
+	printConfigStateDoctorSummary()
 	fmt.Println("sessions: " + state.sessionStore.Dir() + " (" + pathStatus(state.sessionStore.Dir()) + ")")
 
 	if len(providers) == 0 {
@@ -453,6 +454,8 @@ func doctorOffline(opts cliOptions) error {
 		fmt.Println("config: " + strings.Join(loadedConfigPaths, ", "))
 	}
 
+	printConfigStateDoctorSummary()
+
 	store := session.NewStore(opts.sessionDir)
 	fmt.Println("sessions: " + store.Dir() + " (" + pathStatus(store.Dir()) + ")")
 
@@ -485,6 +488,81 @@ func doctorOffline(opts cliOptions) error {
 	}
 
 	return nil
+}
+
+type configDoctorDiagnosticSummary struct {
+	errors   int
+	warnings int
+	info     int
+}
+
+func printConfigStateDoctorSummary() {
+	fmt.Printf(
+		"schema: config=%d state=%d\n",
+		appconfig.ConfigSchemaVersion,
+		appconfig.StateSchemaVersion,
+	)
+
+	configSummary := summarizeSourceDiagnostics(appconfig.InspectPathSources(appconfig.DefaultPathSources()))
+	fmt.Printf(
+		"config_diagnostics: errors=%d warnings=%d info=%d\n",
+		configSummary.errors,
+		configSummary.warnings,
+		configSummary.info,
+	)
+
+	stateReport := appconfig.InspectStatePath(appconfig.DefaultStatePath())
+
+	stateStatus := stateReport.Status
+	if stateReport.Version > 0 {
+		stateStatus += fmt.Sprintf(", version=%d", stateReport.Version)
+	}
+
+	if stateReport.Revision > 0 {
+		stateStatus += fmt.Sprintf(", revision=%d", stateReport.Revision)
+	}
+
+	stateSummary := summarizeDiagnostics(stateReport.Diagnostics)
+	fmt.Printf("state: %s (%s)\n", stateReport.Path, stateStatus)
+	fmt.Printf(
+		"state_diagnostics: errors=%d warnings=%d info=%d\n",
+		stateSummary.errors,
+		stateSummary.warnings,
+		stateSummary.info,
+	)
+}
+
+func summarizeSourceDiagnostics(sources []appconfig.SourceDiagnostic) configDoctorDiagnosticSummary {
+	var summary configDoctorDiagnosticSummary
+	for _, source := range sources {
+		summary.add(source.Diagnostics)
+	}
+
+	return summary
+}
+
+func summarizeDiagnostics(diagnostics []appconfig.Diagnostic) configDoctorDiagnosticSummary {
+	var summary configDoctorDiagnosticSummary
+	summary.add(diagnostics)
+
+	return summary
+}
+
+func (s *configDoctorDiagnosticSummary) add(diagnostics []appconfig.Diagnostic) {
+	if s == nil {
+		return
+	}
+
+	for _, diagnostic := range diagnostics {
+		switch diagnostic.Severity {
+		case appconfig.DiagnosticError:
+			s.errors++
+		case appconfig.DiagnosticWarning:
+			s.warnings++
+		case appconfig.DiagnosticInfo:
+			s.info++
+		}
+	}
 }
 
 func pathStatus(path string) string {

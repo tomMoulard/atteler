@@ -404,6 +404,54 @@ func TestCommandSurface_RepresentativeSideEffectsAndOutputsAreStable(t *testing.
 			sideEffects: []string{commandEffectFilesystemRead, commandEffectUserOutput},
 			outputModes: []string{commandOutputText, commandOutputJSON},
 		},
+		{
+			name: "doctor-offline",
+			sideEffects: []string{
+				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectStateRead,
+				commandEffectUserOutput,
+			},
+			outputModes: []string{commandOutputText},
+		},
+		{
+			name: "doctor",
+			sideEffects: []string{
+				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectLLMProviderRead,
+				commandEffectStateRead,
+				commandEffectUserOutput,
+			},
+			outputModes: []string{commandOutputText},
+		},
+		{
+			name:        "explain-config",
+			sideEffects: []string{commandEffectConfigRead, commandEffectStateRead, commandEffectUserOutput},
+			outputModes: []string{commandOutputText},
+		},
+		{
+			name: "config-migrate",
+			sideEffects: []string{
+				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectFilesystemWrite,
+				commandEffectStateRead,
+				commandEffectStateWrite,
+				commandEffectUserOutput,
+			},
+			outputModes: []string{commandOutputText},
+		},
+		{
+			name: "config-report",
+			sideEffects: []string{
+				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectStateRead,
+				commandEffectUserOutput,
+			},
+			outputModes: []string{commandOutputYAML},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1299,6 +1347,14 @@ func TestCommandRegistry_GroupedInlineCommandsBypassRegistry(t *testing.T) {
 		t.Helper()
 		assert.True(t, opts.validateConfig)
 	})
+	assertInlineGroupedRoute(t, []string{"config", "migrate"}, func(t *testing.T, opts cliOptions) {
+		t.Helper()
+		assert.True(t, opts.configMigrate)
+	})
+	assertInlineGroupedRoute(t, []string{"config", "report"}, func(t *testing.T, opts cliOptions) {
+		t.Helper()
+		assert.True(t, opts.configReport)
+	})
 	assertInlineGroupedRoute(t, []string{"config", "explain", "default_model"}, func(t *testing.T, opts cliOptions) {
 		t.Helper()
 		assert.True(t, opts.explainConfig)
@@ -1693,6 +1749,7 @@ func knownSideEffectsForTest() map[string]bool {
 		commandEffectSessionRead:     true,
 		commandEffectSessionWrite:    true,
 		commandEffectStateRead:       true,
+		commandEffectStateWrite:      true,
 		commandEffectTaskWrite:       true,
 		commandEffectUserOutput:      true,
 		commandEffectWorktreeWrite:   true,
@@ -1939,7 +1996,7 @@ func isDocumentedInlineCommandForTest(domain cliHelpDomain, command cliCommandAl
 	switch domain.Name {
 	case testDomainConfig:
 		switch command.Name {
-		case "paths", testCommandTemplate, "init", "validate", "explain", "commands-json", "commands-docs", testCommandDoctorOffline, testCommandVersion:
+		case "paths", testCommandTemplate, "init", "validate", "migrate", "report", "explain", "commands-json", "commands-docs", testCommandDoctorOffline, testCommandVersion:
 			return true
 		}
 	case testDomainProviders:
@@ -1988,6 +2045,10 @@ func assertInlineOptionSetForTest(t *testing.T, domain cliHelpDomain, command cl
 		assert.NotEmpty(t, opts.initConfigPath)
 	case domain.Name == testDomainConfig && command.Name == "validate":
 		assert.True(t, opts.validateConfig)
+	case domain.Name == testDomainConfig && command.Name == "migrate":
+		assert.True(t, opts.configMigrate)
+	case domain.Name == testDomainConfig && command.Name == "report":
+		assert.True(t, opts.configReport)
 	case domain.Name == testDomainConfig && command.Name == "explain":
 		assert.True(t, opts.explainConfig)
 	case domain.Name == testDomainConfig && command.Name == "commands-json":
