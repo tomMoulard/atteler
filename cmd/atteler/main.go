@@ -5,7 +5,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -81,9 +80,11 @@ var (
 // Key binding constants.
 const (
 	keyCtrlC         = "ctrl+c"
+	keyAltEnter      = "alt+enter"
 	keyDown          = "down"
 	keyEnter         = "enter"
 	keyEsc           = "esc"
+	keyShiftEnter    = "shift+enter"
 	keyUp            = "up"
 	outputFormatJSON = "json"
 	outputFormatText = "text"
@@ -323,17 +324,7 @@ func initialModel(
 	promptLocalOnly bool,
 	wtInfo *worktree.Info,
 ) model {
-	ta := textarea.New()
-	ta.Placeholder = "Send a message (Alt+Enter to send, Ctrl+O to pick model)"
-	ta.Focus()
-	ta.CharLimit = 0 // unlimited
-	ta.ShowLineNumbers = false
-	ta.SetHeight(3)
-
-	// Remap newline insertion to Alt+Enter so plain Enter submits.
-	// Bubbletea v1 cannot distinguish Shift+Enter from Enter (terminals emit
-	// the same \r byte for both), so Alt+Enter is the only reliable modifier.
-	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"))
+	ta := newPromptTextarea()
 	selectedProvider, _ := reg.ProviderForModel(selectedModel)
 
 	return model{
