@@ -79,6 +79,19 @@ func TestPromptCompletionContext_ExcludesHiddenAgents(t *testing.T) {
 	assert.NotContains(t, candidateTexts(completionContext.Agents), "internal")
 }
 
+//nolint:paralleltest // Uses t.Chdir to verify the default task-list path has no repo side effects.
+func TestPromptCompletionContext_MissingTaskListDoesNotCreateDefaultTaskDir(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	completionContext := promptCompletionContext(context.Background(), appState{}, "ask", false)
+
+	assert.Empty(t, completionContext.Tasks)
+
+	_, err := os.Stat(filepath.Join(tempDir, ".atteler"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestPromptSlashCommandCandidates_DeriveFromDescriptors(t *testing.T) {
 	t.Parallel()
 

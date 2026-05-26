@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -313,7 +314,12 @@ func promptTaskCandidates(ctx context.Context, store *session.Store, root string
 		return nil
 	}
 
-	taskStore := tasklist.NewStore(taskListPath(store, ""))
+	taskList := taskListPath(store, "")
+	if _, err := os.Stat(taskList); err != nil {
+		return nil
+	}
+
+	taskStore := tasklist.NewStore(taskList)
 
 	tasks, err := taskStore.List(ctx)
 	if err != nil {
