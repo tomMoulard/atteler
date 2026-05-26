@@ -17,6 +17,9 @@ const RedactedValue = "<redacted>"
 // by placeholders so the result can be attached to issue reports.
 func RedactedConfig(cfg Config) Config {
 	out := cfg
+	out.Generation = redactedGenerationConfig(cfg.Generation)
+	out.AgentLoop = redactedAgentLoopConfig(cfg.AgentLoop)
+	out.SkillLearning.Enabled = clonePtr(cfg.SkillLearning.Enabled)
 
 	out.Providers = make(map[string]ProviderConfig, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
@@ -31,12 +34,23 @@ func RedactedConfig(cfg Config) Config {
 	out.Agents = make(map[string]AgentConfig, len(cfg.Agents))
 	for name := range cfg.Agents {
 		agent := cfg.Agents[name]
+		agent.Temperature = clonePtr(agent.Temperature)
+		agent.TopP = clonePtr(agent.TopP)
+		agent.Seed = clonePtr(agent.Seed)
 		agent.FallbackModels = append([]string(nil), agent.FallbackModels...)
 		agent.Capabilities = append([]string(nil), agent.Capabilities...)
 		agent.Triggers = append([]string(nil), agent.Triggers...)
 		agent.References = redactStringSlice("references", agent.References)
 		agent.ToolPermissions = cloneBoolMap(agent.ToolPermissions)
 		agent.FeedbackGuidance = nil
+
+		if strings.TrimSpace(agent.Description) != "" {
+			agent.Description = RedactedValue
+		}
+
+		if strings.TrimSpace(agent.Personality) != "" {
+			agent.Personality = RedactedValue
+		}
 
 		if strings.TrimSpace(agent.SystemPrompt) != "" {
 			agent.SystemPrompt = RedactedValue
@@ -74,6 +88,36 @@ func RedactedConfig(cfg Config) Config {
 	return out
 }
 
+func redactedGenerationConfig(cfg GenerationConfig) GenerationConfig {
+	cfg.Temperature = clonePtr(cfg.Temperature)
+	cfg.TopP = clonePtr(cfg.TopP)
+	cfg.Seed = clonePtr(cfg.Seed)
+
+	return cfg
+}
+
+func redactedAgentLoopConfig(cfg AgentLoopConfig) AgentLoopConfig {
+	cfg.MaxOutputBytes = clonePtr(cfg.MaxOutputBytes)
+	cfg.MaxTotalTokens = clonePtr(cfg.MaxTotalTokens)
+	cfg.MaxIterations = clonePtr(cfg.MaxIterations)
+	cfg.MaxModelCalls = clonePtr(cfg.MaxModelCalls)
+	cfg.MaxToolCalls = clonePtr(cfg.MaxToolCalls)
+	cfg.MaxWallTime = clonePtr(cfg.MaxWallTime)
+	cfg.CheckpointInterval = clonePtr(cfg.CheckpointInterval)
+
+	return cfg
+}
+
+func clonePtr[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+
+	cloned := *value
+
+	return &cloned
+}
+
 // RedactedOriginMap returns a deep copy of origins with origin values redacted
 // using the same path-aware rules as RedactedConfig.
 func RedactedOriginMap(origins OriginMap) OriginMap {
@@ -103,6 +147,7 @@ func RedactOriginValue(path, value string) string {
 	case strings.HasSuffix(path, ".base_url"):
 		return redactURL(value)
 	case strings.Contains(path, ".env"), strings.Contains(path, ".command"),
+		strings.HasSuffix(path, ".description"), strings.HasSuffix(path, ".personality"),
 		strings.HasSuffix(path, ".system_prompt"), strings.Contains(path, ".feedback_guidance"):
 		if strings.TrimSpace(value) == "" {
 			return value

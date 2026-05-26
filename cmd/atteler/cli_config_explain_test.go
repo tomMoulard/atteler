@@ -261,3 +261,11 @@ func TestExplainConfig_PrintsHarnessImporterWarningsBeforeConfigError(t *testing
 	assert.Contains(t, out, "claude: "+filepath.Join(claudeDir, "settings.json")+" unsupported: ignored unsupported field")
 	assert.NotContains(t, out, "Config explanation")
 }
+
+func TestConfigExplainPathMatches_WildcardDefaultsMatchConcreteFieldFilters(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, configExplainPathMatches("providers.*.disable_private_adapter", "providers.openai.disable_private_adapter"))
+	assert.True(t, configExplainPathMatches("providers.*.disable_private_adapter", "providers.openai"))
+	assert.False(t, configExplainPathMatches("providers.*.disable_private_adapter", "providers.openai.base_url"))
+}

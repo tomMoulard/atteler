@@ -448,6 +448,7 @@ func newDiagnosticsReport(
 	return report
 }
 
+//nolint:cyclop // top-level schema dispatch is kept together so diagnostics mirror file shape.
 func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 	if root == nil {
 		return nil
@@ -477,6 +478,8 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 			diagnostics = append(diagnostics, inspectHooks(path, value)...)
 		case "plugins":
 			diagnostics = append(diagnostics, inspectPlugins(path, value)...)
+		case "skill_learning":
+			diagnostics = append(diagnostics, inspectNamedFields(path, "skill_learning", value, knownSkillLearningFields(), nil)...)
 		case "default_provider", fieldDefaultModel, "fallback_models":
 			return
 		default:
@@ -711,10 +714,13 @@ func deprecatedGenerationFields() map[string]string {
 
 func knownAgentLoopFields() map[string]bool {
 	return map[string]bool{
-		"max_output_bytes": true,
-		"max_total_tokens": true,
-		"max_iterations":   true,
-		"max_model_calls":  true,
+		"max_output_bytes":    true,
+		"max_total_tokens":    true,
+		"max_iterations":      true,
+		"max_model_calls":     true,
+		"max_tool_calls":      true,
+		"max_wall_time":       true,
+		"checkpoint_interval": true,
 	}
 }
 
@@ -741,9 +747,21 @@ func knownReferencePolicyFields() map[string]bool {
 
 func knownProviderFields() map[string]bool {
 	return map[string]bool{
-		"base_url":        true,
-		"disabled":        true,
-		"timeout_seconds": true,
+		"base_url":                true,
+		"disabled":                true,
+		"disable_private_adapter": true,
+		"timeout_seconds":         true,
+	}
+}
+
+func knownSkillLearningFields() map[string]bool {
+	return map[string]bool{
+		"enabled":          true,
+		"store_dir":        true,
+		"skill_dir":        true,
+		"max_observations": true,
+		"max_steps":        true,
+		"min_occurrences":  true,
 	}
 }
 

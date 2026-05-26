@@ -356,6 +356,8 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "chat session record artifact provenance", args: []string{"session", "record-artifact", "artifact.md", "--artifact-logical-path", "docs/decision.md", "--artifact-review-status", "approved"}, want: []string{"--record-artifact", "artifact.md", "--artifact-logical-path", "docs/decision.md", "--artifact-review-status", "approved"}},
 		{name: "chat session merge artifacts json", args: []string{"session", "merge-artifacts", "merged.json", "--merge-artifacts-format", "json"}, want: []string{"--merge-artifacts", "merged.json", "--merge-artifacts-format", "json"}},
 		{name: "config", args: []string{"config", "validate"}, want: []string{"--validate-config"}},
+		{name: "config migrate", args: []string{"config", "migrate"}, want: []string{"--config-migrate"}},
+		{name: "config report", args: []string{"config", "report"}, want: []string{"--config-report"}},
 		{name: "config explain", args: []string{"config", "explain", "default_model"}, want: []string{"--explain-config", "default_model"}},
 		{name: "providers", args: []string{"providers", "list"}, want: []string{"--list-providers"}},
 		{name: "agents", args: []string{"agents", "plan", "review", "auth"}, want: []string{"--plan-agents", "review auth"}},

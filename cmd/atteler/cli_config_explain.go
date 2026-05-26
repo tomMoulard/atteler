@@ -467,5 +467,27 @@ func configExplainPathMatches(path, fieldFilter string) bool {
 		return true
 	}
 
-	return path == fieldFilter || strings.HasPrefix(path, fieldFilter+".")
+	return path == fieldFilter || strings.HasPrefix(path, fieldFilter+".") ||
+		configExplainWildcardPathMatches(path, fieldFilter)
+}
+
+func configExplainWildcardPathMatches(pattern, fieldFilter string) bool {
+	if !strings.Contains(pattern, "*") {
+		return false
+	}
+
+	patternParts := strings.Split(pattern, ".")
+	filterParts := strings.Split(fieldFilter, ".")
+
+	if len(patternParts) < len(filterParts) {
+		return false
+	}
+
+	for i, filterPart := range filterParts {
+		if patternParts[i] != "*" && patternParts[i] != filterPart {
+			return false
+		}
+	}
+
+	return true
 }

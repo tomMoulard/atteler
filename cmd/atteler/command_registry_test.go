@@ -430,6 +430,28 @@ func TestCommandSurface_RepresentativeSideEffectsAndOutputsAreStable(t *testing.
 			sideEffects: []string{commandEffectConfigRead, commandEffectStateRead, commandEffectUserOutput},
 			outputModes: []string{commandOutputText},
 		},
+		{
+			name: "config-migrate",
+			sideEffects: []string{
+				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectFilesystemWrite,
+				commandEffectStateRead,
+				commandEffectStateWrite,
+				commandEffectUserOutput,
+			},
+			outputModes: []string{commandOutputText},
+		},
+		{
+			name: "config-report",
+			sideEffects: []string{
+				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectStateRead,
+				commandEffectUserOutput,
+			},
+			outputModes: []string{commandOutputYAML},
+		},
 	}
 
 	for _, tt := range tests {

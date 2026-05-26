@@ -21,12 +21,24 @@ model: gpt-legacy
 generation:
   reasoning: high
   surprise: true
+agent_loop:
+  max_tool_calls: 10
+  max_wall_time: 30m
+  checkpoint_interval: 2
 agents:
   reviewer:
     prompt: review safely
 providers:
   openai:
+    disable_private_adapter: true
     token: should-not-be-here
+skill_learning:
+  enabled: true
+  store_dir: ./.atteler/skill-learning
+  skill_dir: ./.atteler/skills/generated
+  min_occurrences: 2
+  max_steps: 6
+  max_observations: 300
 `), 0o600))
 
 	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
@@ -41,6 +53,12 @@ providers:
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "agents.reviewer.prompt", "agents.reviewer.system_prompt")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "generation.surprise", "")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "providers.openai.token", "")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_tool_calls")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_wall_time")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.checkpoint_interval")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "providers.openai.disable_private_adapter")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "skill_learning")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "skill_learning.enabled")
 }
 
 func TestInspectPathSources_ReportsNonMappingConfig(t *testing.T) {
@@ -53,6 +71,18 @@ func TestInspectPathSources_ReportsNonMappingConfig(t *testing.T) {
 	require.Len(t, reports, 1)
 	assert.Equal(t, "error", reports[0].Status)
 	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "expected top-level mapping")
+}
+
+func TestInspectPathSources_AcceptsGeneratedTemplate(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(TemplateYAML()), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+	assert.Empty(t, reports[0].Diagnostics)
 }
 
 func TestInspectPathSources_ReportsNegativeVersion(t *testing.T) {
@@ -80,6 +110,8 @@ providers:
     base_url: https://user:secret@example.com/v1?x-api-key=sk-secret
 agents:
   reviewer:
+    description: internal reviewer description secret
+    personality: internal reviewer personality secret
     system_prompt: proprietary instructions
     references:
       - https://example.com/agent?api_key=agent-secret
@@ -96,8 +128,13 @@ hooks:
 	report := NewDiagnosticsReport([]PathSource{{Path: path, Kind: OriginExplicitFile}})
 	require.Empty(t, report.LoadError)
 	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_iterations")
+	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_tool_calls")
+	assertDefaultDiagnostic(t, report.Defaults, "providers.*.disable_private_adapter")
+	assertDefaultDiagnostic(t, report.Defaults, "skill_learning.enabled")
 
 	assert.NotContains(t, report.Config.Providers["openai"].BaseURL, "secret")
+	assert.Equal(t, RedactedValue, report.Config.Agents["reviewer"].Description)
+	assert.Equal(t, RedactedValue, report.Config.Agents["reviewer"].Personality)
 	assert.Equal(t, RedactedValue, report.Config.Agents["reviewer"].SystemPrompt)
 	require.Len(t, report.Config.Hooks["session_end"], 1)
 	assert.Equal(t, RedactedValue, report.Config.Hooks["session_end"][0].Env["API_TOKEN"])
@@ -122,8 +159,22 @@ hooks:
 	require.True(t, ok)
 	assert.NotContains(t, contextRefsOrigin.Value, "ref-secret")
 
+	descriptionOrigin, ok := report.Origins.Final("agents.reviewer.description")
+	require.True(t, ok)
+	assert.Equal(t, RedactedValue, descriptionOrigin.Value)
+
+	personalityOrigin, ok := report.Origins.Final("agents.reviewer.personality")
+	require.True(t, ok)
+	assert.Equal(t, RedactedValue, personalityOrigin.Value)
+
+	systemPromptOrigin, ok := report.Origins.Final("agents.reviewer.system_prompt")
+	require.True(t, ok)
+	assert.Equal(t, RedactedValue, systemPromptOrigin.Value)
+
 	out, err := yaml.Marshal(report)
 	require.NoError(t, err)
+	assert.NotContains(t, string(out), "internal reviewer")
+	assert.NotContains(t, string(out), "proprietary instructions")
 	assert.NotContains(t, string(out), "secret")
 	assert.NotContains(t, string(out), "header-secret")
 	assert.NotContains(t, string(out), "url-secret")
@@ -245,6 +296,16 @@ func assertDiagnosticMessage(
 	}
 
 	require.Failf(t, "missing diagnostic", "severity=%s message=%s diagnostics=%v", severity, message, diagnostics)
+}
+
+func assertNoDiagnostic(t *testing.T, diagnostics []Diagnostic, field string) {
+	t.Helper()
+
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Field == field {
+			require.Failf(t, "unexpected diagnostic", "field=%s diagnostic=%v diagnostics=%v", field, diagnostic, diagnostics)
+		}
+	}
 }
 
 func assertDefaultDiagnostic(t *testing.T, defaults []DefaultDiagnostic, field string) {

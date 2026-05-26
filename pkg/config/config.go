@@ -28,6 +28,8 @@ const EnvPath = "ATTELER_CONFIG"
 const ConfigSchemaVersion = 1
 
 // Config is the merged application configuration.
+//
+//nolint:govet // fieldalignment: field order follows config-file grouping.
 type Config struct {
 	Version         int                       `json:"version,omitempty" yaml:"version,omitempty"`
 	Providers       map[string]ProviderConfig `json:"providers,omitempty" yaml:"providers,omitempty"`

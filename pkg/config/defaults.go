@@ -80,6 +80,21 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Message: "agent-loop model calls are unlimited unless this field is set to a positive call limit",
 		},
 		{
+			Field:   "agent_loop.max_tool_calls",
+			Value:   "unset/0",
+			Message: "agent-loop tool executions are unlimited unless this field is set to a positive call limit",
+		},
+		{
+			Field:   "agent_loop.max_wall_time",
+			Value:   "unset/0",
+			Message: "agent-loop wall-clock runtime is unlimited unless this field is set to a positive duration",
+		},
+		{
+			Field:   "agent_loop.checkpoint_interval",
+			Value:   "unset/0",
+			Message: "interactive continuation checkpoints are disabled unless this field is set to a positive iteration interval",
+		},
+		{
 			Field:   "context.references",
 			Value:   "[]",
 			Message: "no configured references are loaded unless this list is set",
@@ -133,6 +148,41 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Field:   "plugins.paths",
 			Value:   "[]",
 			Message: "no local plugin manifests are loaded unless this list is set",
+		},
+		{
+			Field:   "providers.*.disable_private_adapter",
+			Value:   "false",
+			Message: "private provider adapters remain eligible unless a provider config or environment kill switch disables them",
+		},
+		{
+			Field:   "skill_learning.enabled",
+			Value:   "unset",
+			Message: "automatic recurring-workflow skill learning uses its built-in default unless config or environment overrides it",
+		},
+		{
+			Field:   "skill_learning.store_dir",
+			Value:   "unset",
+			Message: "skill-learning observations use the runtime default store directory unless config or environment overrides it",
+		},
+		{
+			Field:   "skill_learning.skill_dir",
+			Value:   "unset",
+			Message: "generated skills use the runtime default skill directory unless config or environment overrides it",
+		},
+		{
+			Field:   "skill_learning.min_occurrences",
+			Value:   "0",
+			Message: "the skill-learning runtime uses its built-in minimum occurrence threshold unless config sets this field",
+		},
+		{
+			Field:   "skill_learning.max_steps",
+			Value:   "0",
+			Message: "the skill-learning runtime uses its built-in maximum step threshold unless config sets this field",
+		},
+		{
+			Field:   "skill_learning.max_observations",
+			Value:   "0",
+			Message: "the skill-learning runtime uses its built-in observation retention limit unless config sets this field",
 		},
 	}
 
