@@ -33,6 +33,7 @@ func TestProviderCapabilities_CoverCompleteParams(t *testing.T) {
 				assert.Contains(t, []CompleteParamSupportStatus{
 					CompleteParamSupported,
 					CompleteParamUnsupported,
+					CompleteParamOmitted,
 					CompleteParamLossy,
 				}, support.Status, field)
 
@@ -771,22 +772,36 @@ func providerProtocolRequestFixtures() []protocolRequestFixture {
 			unsupported: map[string]string{providerAnthropic: "Seed", providerClaudeCode: "Seed", providerCodex: "Seed"},
 		},
 		{
-			name: "sampling",
+			name: "temperature",
 			params: withContractParams(baseContractParams([]Message{{Role: RoleUser, Content: "Sample."}}), func(params *CompleteParams) {
 				params.Temperature = &temperature
-				params.TopP = &topP
 			}),
 			covers: []string{
 				"Temperature",
+			},
+			want: map[string]string{
+				providerOpenAI:     `{"temperature":0.4,"model":"contract-model","messages":[{"role":"user","content":"Sample."}]}`,
+				providerAnthropic:  `{"temperature":0.4,"model":"contract-model","messages":[{"role":"user","content":"Sample."}],"max_tokens":4096}`,
+				providerClaudeCode: `{"temperature":0.4,"model":"contract-model","messages":[{"role":"user","content":"Sample."}],"max_tokens":4096}`,
+				providerCodex:      `{"model":"contract-model","instructions":"You are a helpful assistant.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Sample."}]}],"stream":true,"store":false}`,
+				providerOllama:     `{"model":"contract-model","messages":[{"role":"user","content":"Sample."}],"options":{"temperature":0.4},"stream":false}`,
+			},
+		},
+		{
+			name: "top p",
+			params: withContractParams(baseContractParams([]Message{{Role: RoleUser, Content: "Sample."}}), func(params *CompleteParams) {
+				params.TopP = &topP
+			}),
+			covers: []string{
 				"TopP",
 			},
 			want: map[string]string{
-				providerOpenAI:     `{"temperature":0.4,"top_p":0.8,"model":"contract-model","messages":[{"role":"user","content":"Sample."}]}`,
-				providerAnthropic:  `{"temperature":0.4,"top_p":0.8,"model":"contract-model","messages":[{"role":"user","content":"Sample."}],"max_tokens":4096}`,
-				providerClaudeCode: `{"temperature":0.4,"top_p":0.8,"model":"contract-model","messages":[{"role":"user","content":"Sample."}],"max_tokens":4096}`,
-				providerOllama:     `{"model":"contract-model","messages":[{"role":"user","content":"Sample."}],"options":{"temperature":0.4,"top_p":0.8},"stream":false}`,
+				providerOpenAI:     `{"top_p":0.8,"model":"contract-model","messages":[{"role":"user","content":"Sample."}]}`,
+				providerAnthropic:  `{"top_p":0.8,"model":"contract-model","messages":[{"role":"user","content":"Sample."}],"max_tokens":4096}`,
+				providerClaudeCode: `{"top_p":0.8,"model":"contract-model","messages":[{"role":"user","content":"Sample."}],"max_tokens":4096}`,
+				providerOllama:     `{"model":"contract-model","messages":[{"role":"user","content":"Sample."}],"options":{"top_p":0.8},"stream":false}`,
 			},
-			unsupported: map[string]string{providerCodex: "Temperature"},
+			unsupported: map[string]string{providerCodex: "TopP"},
 		},
 	}
 }

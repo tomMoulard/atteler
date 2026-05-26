@@ -223,6 +223,11 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 
 	params.Model = model
 
+	params, adjustments, err := prepareCompleteParamsForProvider(providerClaudeCode, params)
+	if err != nil {
+		return nil, err
+	}
+
 	req, err := buildAnthropicRequestForProvider(providerClaudeCode, params)
 	if err != nil {
 		return nil, err
@@ -234,12 +239,9 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 	}
 
 	emitActivity(ctx, events.Event{
-		Type:  events.CommandExecute,
-		Model: model,
-		Metadata: map[string]string{
-			"command":  "claude_code.messages",
-			"provider": providerClaudeCode,
-		},
+		Type:     events.CommandExecute,
+		Model:    model,
+		Metadata: claudeCodeCommandMetadata(adjustments),
 	})
 
 	resp, err := c.doMessagesRequest(ctx, body)
@@ -250,6 +252,18 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 	resp.Model = firstNonEmptyString(resp.Model, model)
 
 	return resp, nil
+}
+
+func claudeCodeCommandMetadata(adjustments []completeParamAdjustment) map[string]string {
+	metadata := map[string]string{
+		"command":  "claude_code.messages",
+		"provider": providerClaudeCode,
+	}
+	if len(adjustments) > 0 {
+		metadata["option_adjustments"] = formatCompleteParamAdjustments(adjustments)
+	}
+
+	return metadata
 }
 
 func (c *ClaudeCodeProvider) doMessagesRequest(ctx context.Context, body []byte) (*Response, error) {

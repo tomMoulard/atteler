@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/modelroute"
 )
 
@@ -31,6 +33,7 @@ type fakeProvider struct {
 	models         []string
 	fetchedModels  []string
 	warnings       []string
+	calls          []CompleteParams
 }
 
 func (f *fakeProvider) Name() string { return f.name }
@@ -62,11 +65,17 @@ func (f *fakeProvider) ModelContextWindow(string) int {
 }
 
 func (f *fakeProvider) Complete(_ context.Context, p CompleteParams) (*Response, error) {
+	f.calls = append(f.calls, p)
+
 	if f.err != nil {
 		return nil, f.err
 	}
 
-	r := *f.resp
+	var r Response
+	if f.resp != nil {
+		r = *f.resp
+	}
+
 	if r.Model == "" {
 		r.Model = p.Model
 	}
@@ -373,6 +382,51 @@ func TestRegistry_CompleteWithFallback(t *testing.T) {
 	if resp.Model != betaModel {
 		assert.Failf(t, "assertion failed", "model = %q, want %s", resp.Model, betaModel)
 	}
+}
+
+func TestRegistry_CompleteWithFallbackNormalizesTemperaturePerProvider(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	codexProvider := &fakeProvider{
+		err:    errors.New("codex offline"),
+		name:   providerCodex,
+		models: []string{"gpt-5.5"},
+		resp:   &Response{},
+	}
+	claudeCodeProvider := &fakeProvider{
+		name:   providerClaudeCode,
+		models: []string{"claude-opus-4-7"},
+		resp:   &Response{Content: "ok"},
+	}
+
+	r.Register(codexProvider)
+	r.Register(claudeCodeProvider)
+
+	var log bytes.Buffer
+
+	ctx := events.WithEmitter(context.Background(), events.NewRunnerWithLogger(nil, &log), events.Event{})
+
+	temperature := 0.2
+	resp, err := r.CompleteWithFallback(ctx, CompleteParams{
+		Model:          "codex/gpt-5.5",
+		ReasoningLevel: "high",
+		Temperature:    &temperature,
+		Messages:       []Message{{Role: RoleUser, Content: "hi"}},
+	}, []string{"claude-code/claude-opus-4-7"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "ok", resp.Content)
+	require.Len(t, codexProvider.calls, 1)
+	assert.Nil(t, codexProvider.calls[0].Temperature)
+	require.Len(t, claudeCodeProvider.calls, 1)
+	require.NotNil(t, claudeCodeProvider.calls[0].Temperature)
+	assert.InEpsilon(t, 1.0, *claudeCodeProvider.calls[0].Temperature, 0.0001)
+
+	logOutput := log.String()
+	assert.Contains(t, logOutput, "option_adjustments")
+	assert.Contains(t, logOutput, "Temperature omitted")
+	assert.Contains(t, logOutput, "Temperature coerced")
 }
 
 func TestRegistry_CompleteWithFallbackRecordsRateLimitTelemetry(t *testing.T) {

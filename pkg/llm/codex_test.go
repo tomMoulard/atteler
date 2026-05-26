@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	llmevents "github.com/tommoulard/atteler/pkg/events"
 )
 
 func TestCodexProvider_Complete(t *testing.T) {
@@ -113,10 +116,78 @@ func TestCodexProvider_Complete(t *testing.T) {
 	assert.Equal(t, codexOriginatorHeader, gotHeaders.Get("originator"))
 }
 
+func TestCodexProvider_CompleteOmitsUnsupportedTemperature(t *testing.T) {
+	t.Parallel()
+
+	var gotBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		gotBody = body
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeCodexSSE(t, w, codexFakeSuccess("ok", "gpt-5.5", 1, 0, 1))
+	}))
+	defer srv.Close()
+
+	auth := newTestCodexAuth(t)
+	p := &CodexProvider{
+		client:  srv.Client(),
+		auth:    auth,
+		baseURL: srv.URL,
+		models:  []string{"gpt-5.5"},
+	}
+
+	var log bytes.Buffer
+
+	ctx := llmevents.WithEmitter(context.Background(), llmevents.NewRunnerWithLogger(nil, &log), llmevents.Event{})
+
+	temperature := 0.2
+	resp, err := p.Complete(ctx, CompleteParams{
+		Model:       "gpt-5.5",
+		Temperature: &temperature,
+		Messages:    []Message{{Role: RoleUser, Content: "say ok"}},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "ok", resp.Content)
+	assert.NotContains(t, string(gotBody), "temperature")
+	assert.Contains(t, log.String(), "option_adjustments")
+	assert.Contains(t, log.String(), "Temperature omitted")
+	assert.JSONEq(t, `{
+		"model": "gpt-5.5",
+		"instructions": "You are a helpful assistant.",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "say ok"}
+				]
+			}
+		],
+		"stream": true,
+		"store": false
+	}`, string(gotBody))
+}
+
 func TestCodexProvider_CompleteStream_Success(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var gotBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		gotBody = body
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		writeCodexSSE(t, w, codexFakeSuccess("hello stream", "gpt-5.5", 8, 2, 4))
 	}))
@@ -129,9 +200,11 @@ func TestCodexProvider_CompleteStream_Success(t *testing.T) {
 		models:  []string{"gpt-5.5"},
 	}
 
+	temperature := 0.2
 	ch, err := p.CompleteStream(context.Background(), CompleteParams{
-		Model:    "gpt-5.5",
-		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		Model:       "gpt-5.5",
+		Temperature: &temperature,
+		Messages:    []Message{{Role: RoleUser, Content: "hi"}},
 	})
 	require.NoError(t, err)
 
@@ -143,6 +216,7 @@ func TestCodexProvider_CompleteStream_Success(t *testing.T) {
 	assert.Equal(t, 8, resp.InputTokens)
 	assert.Equal(t, 2, resp.CachedInputTokens)
 	assert.Equal(t, 4, resp.OutputTokens)
+	assert.NotContains(t, string(gotBody), "temperature")
 }
 
 func TestCodexProvider_CompleteStream_ToolUseStopReason(t *testing.T) {

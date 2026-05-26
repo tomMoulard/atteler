@@ -339,6 +339,13 @@ func (c *CodexProvider) buildResponsesBody(ctx context.Context, params CompleteP
 
 	params.Model = model
 
+	preparedParams, adjustments, err := prepareCompleteParamsForProvider(providerCodex, params)
+	if err != nil {
+		return "", nil, err
+	}
+
+	params = preparedParams
+
 	req, err := buildCodexResponsesRequest(params)
 	if err != nil {
 		return "", nil, err
@@ -349,21 +356,33 @@ func (c *CodexProvider) buildResponsesBody(ctx context.Context, params CompleteP
 		return "", nil, fmt.Errorf("codex marshal: %w", err)
 	}
 
+	metadata := map[string]string{
+		"command":  "codex.responses",
+		"provider": providerCodex,
+	}
+	if len(adjustments) > 0 {
+		metadata["option_adjustments"] = formatCompleteParamAdjustments(adjustments)
+	}
+
 	emitActivity(ctx, events.Event{
-		Type:  events.CommandExecute,
-		Model: model,
-		Metadata: map[string]string{
-			"command":  "codex.responses",
-			"provider": providerCodex,
-		},
+		Type:     events.CommandExecute,
+		Model:    model,
+		Metadata: metadata,
 	})
 
 	return model, body, nil
 }
 
 func buildCodexResponsesRequest(params CompleteParams) (codexResponsesRequest, error) {
-	if err := validateCompleteParamsSupported(providerCodex, params); err != nil {
+	preparedParams, _, err := prepareCompleteParamsForProvider(providerCodex, params)
+	if err != nil {
 		return codexResponsesRequest{}, err
+	}
+
+	params = preparedParams
+
+	if validateErr := validateCompleteParamsSupported(providerCodex, params); validateErr != nil {
+		return codexResponsesRequest{}, validateErr
 	}
 
 	if params.Model == "" {

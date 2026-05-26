@@ -285,12 +285,17 @@ func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Respon
 		return nil, err
 	}
 
+	params, adjustments, err := prepareCompleteParamsForProvider(p.Name(), params)
+	if err != nil {
+		return nil, err
+	}
+
 	// Snapshot retry config under the lock so concurrent SetRetry calls are safe.
 	r.mu.RLock()
 	retryCfg := r.retry
 	r.mu.RUnlock()
 
-	emitToolExecute(ctx, p, params.Model)
+	emitToolExecute(ctx, p, params.Model, adjustments)
 
 	startedAt := time.Now()
 
@@ -396,15 +401,34 @@ func (r *Registry) resolve(params CompleteParams) (Provider, CompleteParams, err
 	return p, params, nil
 }
 
-func emitToolExecute(ctx context.Context, provider Provider, model string) {
+func emitToolExecute(ctx context.Context, provider Provider, model string, adjustments []completeParamAdjustment) {
+	metadata := map[string]string{
+		"provider": provider.Name(),
+		"tool":     "llm.complete",
+	}
+	if len(adjustments) > 0 {
+		metadata["option_adjustments"] = formatCompleteParamAdjustments(adjustments)
+	}
+
 	emitActivity(ctx, events.Event{
-		Type:  events.ToolExecute,
-		Model: model,
-		Metadata: map[string]string{
-			"provider": provider.Name(),
-			"tool":     "llm.complete",
-		},
+		Type:     events.ToolExecute,
+		Model:    model,
+		Metadata: metadata,
 	})
+}
+
+func formatCompleteParamAdjustments(adjustments []completeParamAdjustment) string {
+	parts := make([]string, 0, len(adjustments))
+	for _, adjustment := range adjustments {
+		part := adjustment.Name + " " + adjustment.Action
+		if adjustment.Reason != "" {
+			part += ": " + adjustment.Reason
+		}
+
+		parts = append(parts, part)
+	}
+
+	return strings.Join(parts, "; ")
 }
 
 func (r *Registry) recordRouteFailure(providerName, requestedModel string, err error) {

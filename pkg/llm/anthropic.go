@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/tommoulard/atteler/pkg/events"
 )
 
 const (
@@ -216,6 +218,11 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 		return nil, err
 	}
 
+	params, adjustments, err := prepareCompleteParamsForProvider(providerAnthropic, params)
+	if err != nil {
+		return nil, err
+	}
+
 	req, err := buildAnthropicRequestForProvider(providerAnthropic, params)
 	if err != nil {
 		return nil, err
@@ -234,6 +241,14 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("anthropic-version", defaultAnthropicVersion)
 	a.setAuthHeaders(httpReq)
+
+	if len(adjustments) > 0 {
+		emitActivity(ctx, events.Event{
+			Type:     events.CommandExecute,
+			Model:    params.Model,
+			Metadata: anthropicCommandMetadata(adjustments),
+		})
+	}
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -264,6 +279,18 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 	}
 
 	return parseAnthropicResponse(ar), nil
+}
+
+func anthropicCommandMetadata(adjustments []completeParamAdjustment) map[string]string {
+	metadata := map[string]string{
+		"command":  "anthropic.messages",
+		"provider": providerAnthropic,
+	}
+	if len(adjustments) > 0 {
+		metadata["option_adjustments"] = formatCompleteParamAdjustments(adjustments)
+	}
+
+	return metadata
 }
 
 func parseAnthropicResponse(ar anthropicResponse) *Response {
@@ -310,8 +337,15 @@ func anthropicStopReason(reason string) StopReason {
 }
 
 func buildAnthropicRequestForProvider(providerName string, params CompleteParams) (anthropicRequest, error) {
-	if err := validateCompleteParamsSupported(providerName, params); err != nil {
+	preparedParams, _, err := prepareCompleteParamsForProvider(providerName, params)
+	if err != nil {
 		return anthropicRequest{}, err
+	}
+
+	params = preparedParams
+
+	if validateErr := validateCompleteParamsSupported(providerName, params); validateErr != nil {
+		return anthropicRequest{}, validateErr
 	}
 
 	var system string

@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	llmevents "github.com/tommoulard/atteler/pkg/events"
 )
 
 func TestAnthropicProvider_Complete(t *testing.T) {
@@ -57,7 +60,11 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 	}
 	temperature := 0.5
 
-	resp, err := p.Complete(context.Background(), CompleteParams{
+	var log bytes.Buffer
+
+	ctx := llmevents.WithEmitter(context.Background(), llmevents.NewRunnerWithLogger(nil, &log), llmevents.Event{})
+
+	resp, err := p.Complete(ctx, CompleteParams{
 		Model:          "claude-sonnet-4-20250514",
 		MaxTokens:      4096,
 		Temperature:    &temperature,
@@ -101,9 +108,12 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 		assert.Failf(t, "assertion failed", "thinking = %+v, want enabled/2048", gotReq.Thinking)
 	}
 
-	if gotReq.Temperature == nil || *gotReq.Temperature != 0.5 {
+	if gotReq.Temperature == nil || *gotReq.Temperature != 1 {
 		assert.Failf(t, "assertion failed", "temperature = %v", gotReq.Temperature)
 	}
+
+	assert.Contains(t, log.String(), "option_adjustments")
+	assert.Contains(t, log.String(), "Temperature coerced")
 
 	// Verify headers.
 	if gotHeaders.Get("X-Api-Key") != "test-key" {
