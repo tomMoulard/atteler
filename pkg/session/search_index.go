@@ -892,7 +892,9 @@ func addEvaluationFields(document *indexedSession, session Session, policy norma
 		return
 	}
 
-	for index, entry := range session.Evaluations {
+	for index := range session.Evaluations {
+		entry := &session.Evaluations[index]
+
 		label := fmt.Sprintf("evaluations[%d]", index+1)
 		if !policy.excludes(SearchFieldAgent) {
 			document.Agents = appendNormalizedUniqueIndexed(document.Agents, label+".agent", entry.Agent, policy)
@@ -913,7 +915,9 @@ func addArtifactFields(document *indexedSession, session Session, policy normali
 		return
 	}
 
-	for index, entry := range session.Artifacts {
+	for index := range session.Artifacts {
+		entry := &session.Artifacts[index]
+
 		label := fmt.Sprintf("artifacts[%d]", index+1)
 		if !policy.excludes(SearchFieldAgent) {
 			document.Agents = appendNormalizedUniqueIndexed(document.Agents, label+".source_agent", entry.SourceAgent, policy)
@@ -1161,7 +1165,7 @@ func indexedNegativeKnowledgeSearchText(label string, entry NegativeKnowledge, p
 	return strings.Join(parts, " | ")
 }
 
-func indexedEvaluationSearchText(label string, entry AgentEvaluation, policy normalizedSearchIndexPolicy) string {
+func indexedEvaluationSearchText(label string, entry *AgentEvaluation, policy normalizedSearchIndexPolicy) string {
 	parts := []string{"Evaluation"}
 	if entry.Agent != "" && !policy.excludes(SearchFieldAgent) {
 		parts[0] = "Evaluation: " + sanitizeIndexFieldString(label+".agent", entry.Agent, policy)
@@ -1223,7 +1227,7 @@ func indexedEvaluationSearchText(label string, entry AgentEvaluation, policy nor
 	return strings.Join(parts, " | ")
 }
 
-func indexedArtifactSearchText(label string, entry Artifact, policy normalizedSearchIndexPolicy) string {
+func indexedArtifactSearchText(label string, entry *Artifact, policy normalizedSearchIndexPolicy) string {
 	parts := []string{
 		"Artifact: " + indexArtifactPathValue(label+".path", entry.Path, policy),
 		"Kind: " + sanitizeIndexFieldString(label+".kind", entry.Kind, policy),

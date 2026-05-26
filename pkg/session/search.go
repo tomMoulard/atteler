@@ -212,6 +212,7 @@ func (s *Store) SearchRetrieval(ctx context.Context, query retrieval.Query) ([]r
 func sessionRetrievalResults(result SearchResult, query retrieval.Query) []retrieval.Result {
 	documentID := "session/" + result.Summary.ID
 	rawScore := result.Score
+
 	if rawScore <= 0 {
 		rawScore = 1 + float64(len(result.Snippets))
 	}
@@ -254,15 +255,18 @@ func sessionRetrievalResults(result SearchResult, query retrieval.Query) []retri
 	}
 
 	out := make([]retrieval.Result, 0, len(result.Snippets))
-	for i, snippet := range result.Snippets {
+	for i := range result.Snippets {
+		snippet := &result.Snippets[i]
 		metadata := cloneStringMap(baseMetadata)
 
 		metadata["role"] = string(snippet.Role)
 		metadata["field"] = string(snippet.Field)
 		metadata["label"] = snippet.Label
+
 		if snippet.Kind != "" {
 			metadata["kind"] = snippet.Kind
 		}
+
 		if snippet.Index >= 0 {
 			metadata["index"] = strconv.Itoa(snippet.Index)
 		}
@@ -666,7 +670,7 @@ func snippetsFromMatches(matches []SearchMatch) []SearchSnippet {
 
 	for i := range limit {
 		match := matches[i]
-		kind, index := snippetKindIndex(match.Label, match.Field)
+		kind, index := snippetKindIndex(match.Label)
 		snippets = append(snippets, SearchSnippet{
 			Range:  retrieval.Range{Unit: retrieval.RangeUnitRuneOffset, Start: match.Offset, End: match.End},
 			Role:   match.Role,
@@ -683,7 +687,7 @@ func snippetsFromMatches(matches []SearchMatch) []SearchSnippet {
 	return snippets
 }
 
-func snippetKindIndex(label string, field SearchField) (string, int) {
+func snippetKindIndex(label string) (kind string, index int) {
 	for _, candidate := range []struct {
 		prefix string
 		kind   string
