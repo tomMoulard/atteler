@@ -80,9 +80,9 @@ from that dispatch contract with `atteler config commands-docs`.
 | `eval` | `atteler eval output .atteler/fixtures/readme-summary.txt --eval-expected "package overview"`, `atteler eval run .atteler/evals/readme.eval.yaml --eval-json`, `atteler eval fixtures .atteler/evals --eval-report .atteler/eval-report.json`, `atteler eval record reviewer`, `atteler eval replay-response .atteler/fixtures/once.json "Summarize @README.md"` |
 <!-- atteler:cli-domains:end -->
 
-Common options such as `--model`, `--agent`, `--output`, generation settings,
-provider routing settings, and compatibility flags can still be combined with
-domain commands before or after the focused subcommand, for example
+Common options for model, agent, output, generation settings, provider routing
+settings, and compatibility flags can still be combined with domain commands
+before or after the focused subcommand, for example
 `atteler session --session <id> messages` or
 `atteler chat once "Summarize" --model openai/gpt-5.4`. Prefer the grouped form
 for humans and the legacy flags for existing automation until scripts are

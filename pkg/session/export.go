@@ -382,7 +382,8 @@ func (builder *exportBuilder) exportEvaluations(entries []AgentEvaluation) []Exp
 	}
 
 	exported := make([]ExportAgentEvaluation, 0, len(entries))
-	for index, entry := range entries {
+	for index := range entries {
+		entry := &entries[index]
 		if entry.Agent == "" && entry.Outcome == "" {
 			continue
 		}
