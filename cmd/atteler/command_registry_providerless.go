@@ -122,12 +122,12 @@ func providerlessFileCommands() []command {
 		},
 		{
 			name: "vector-search",
-			tier: tierProviderless,
+			tier: tierProviderlessConfig,
 			match: func(o cliOptions) bool {
 				return o.retrievalSearch == "" && (o.vectorSearch != "" || len(o.vectorIndexFiles) > 0)
 			},
-			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return runVectorSearch(vectorSearchCommandInputFromOptions(o))
+			runProviderlessConfig: func(ctx context.Context, o cliOptions, state appState) error {
+				return runVectorSearch(ctx, state.cwd, state.vectorConfig, o)
 			},
 		},
 	}

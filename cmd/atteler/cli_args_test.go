@@ -374,6 +374,8 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "agents skill learning opt in", args: []string{"agents", "skill-learning-enable-all"}, want: []string{"--skill-learning-enable-all"}},
 		{name: "agents bash", args: []string{"agents", "bash", "go", "test", "./cmd/atteler"}, want: []string{"--bash", "go test ./cmd/atteler"}},
 		{name: "memory rag", args: []string{"memory", "search", "OAuth", "retry"}, want: []string{"--memory-search", "OAuth retry"}},
+		{name: "memory index ttl", args: []string{"memory", "index", "note.txt", "--memory-ttl-seconds", "60"}, want: []string{"--memory-index", "note.txt", "--memory-ttl-seconds", "60"}},
+		{name: "memory search raw transcript opt-in", args: []string{"memory", "search", "OAuth", "--memory-include-session-messages"}, want: []string{"--memory-search", "OAuth", "--memory-include-session-messages"}},
 		{name: "memory purge", args: []string{"memory", "purge", "tag:auth"}, want: []string{"--memory-purge", "tag:auth"}},
 		{name: "memory rebuild", args: []string{"memory", "rebuild"}, want: []string{"--memory-rebuild"}},
 		{name: "memory list corpus", args: []string{"memory", "list-corpus"}, want: []string{"--memory-list-corpus"}},
@@ -382,6 +384,8 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "memory rebuild keeps privacy flags", args: []string{"memory", "rebuild", "--memory-store", ".atteler/memory.json", "--memory-scope", "repo"}, want: []string{"--memory-rebuild", "--memory-store", ".atteler/memory.json", "--memory-scope", "repo"}},
 		{name: "memory purge keeps domain flags", args: []string{"memory", "--memory-store", ".atteler/memory.json", "purge", "session:abc"}, want: []string{"--memory-store", ".atteler/memory.json", "--memory-purge", "session:abc"}},
 		{name: "memory purge keeps trailing store flag", args: []string{"memory", "purge", "session:abc", "--memory-store", ".atteler/memory.json"}, want: []string{"--memory-purge", "session:abc", "--memory-store", ".atteler/memory.json"}},
+		{name: "memory vector lexical", args: []string{"memory", "vector-search", "redirect", "risks", "--vectorizer", "lexical"}, want: []string{"--vector-search", "redirect risks", "--vectorizer", "lexical"}},
+		{name: "memory vector embedding index", args: []string{"memory", "vector-index", "docs/research.md", "--vectorizer", "embedding", "--vector-model", "nomic-embed-text"}, want: []string{"--vector-index", "docs/research.md", "--vectorizer", "embedding", "--vector-model", "nomic-embed-text"}},
 		{name: "code intel", args: []string{"code-intel", "summary"}, want: []string{"--code-summary"}},
 		{name: "review", args: []string{"review", "scan"}, want: []string{"--review-scan"}},
 		{name: "watch", args: []string{"watch", "json"}, want: []string{"--watch-scan", "--watch-json"}},
@@ -435,7 +439,9 @@ func TestTranslateCLIArgs_CanonicalDomainsAndAliasesRoute(t *testing.T) {
 		want []string
 	}{
 		{name: "canonical slash chat session", args: []string{"chat/session", "once", "hello"}, want: []string{"--once", "hello"}},
-		{name: "canonical slash memory rag", args: []string{"memory/rag", "search", "token", "refresh"}, want: []string{"--memory-search", "token refresh"}},
+		{name: "canonical slash memory retrieval", args: []string{"memory/retrieval", "search", "token", "refresh"}, want: []string{"--memory-search", "token refresh"}},
+		{name: "legacy memory rag alias", args: []string{"rag", "search", "token", "refresh"}, want: []string{"--memory-search", "token refresh"}},
+		{name: "legacy slash memory rag", args: []string{"memory/rag", "search", "token", "refresh"}, want: []string{"--memory-search", "token refresh"}},
 		{name: "config alias", args: []string{"cfg", "validate"}, want: []string{"--validate-config"}},
 		{name: "plugin domain alias", args: []string{"plugin", "describe", "runner"}, want: []string{"--describe-plugin", "runner"}},
 		{name: "plugin mcp manifest command alias", args: []string{"plugins", "manifest", "mcp.yaml"}, want: []string{"--mcp-manifest", "mcp.yaml"}},
@@ -487,6 +493,8 @@ func TestTranslateCLIArgs_AllDomainAliasesRouteDocumentedCommands(t *testing.T) 
 
 	for _, domain := range cliHelpDomains {
 		domainTokens := append([]string{domain.Name}, domain.Aliases...)
+		domainTokens = append(domainTokens, domain.HiddenAliases...)
+
 		for _, domainToken := range domainTokens {
 			t.Run(domain.Name+"/"+domainToken, func(t *testing.T) {
 				t.Parallel()
@@ -1004,7 +1012,10 @@ func TestTranslateCLIArgs_HelpPreservesAllDomainAliases(t *testing.T) {
 	t.Parallel()
 
 	for _, domain := range cliHelpDomains {
-		for _, token := range append([]string{domain.Name}, domain.Aliases...) {
+		tokens := append([]string{domain.Name}, domain.Aliases...)
+		tokens = append(tokens, domain.HiddenAliases...)
+
+		for _, token := range tokens {
 			t.Run(domain.Name+"/"+token, func(t *testing.T) {
 				t.Parallel()
 

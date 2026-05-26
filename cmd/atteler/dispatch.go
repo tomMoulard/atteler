@@ -54,6 +54,10 @@ func parseOptions() cliOptions {
 	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
 	opts.memoryLimit = positiveIntFlag{name: "memory-limit"}
 	opts.memoryRetentionDays = positiveIntFlag{name: "memory-retention-days"}
+	opts.vectorLimit = positiveIntFlag{name: "vector-limit"}
+	opts.vectorTimeout = positiveIntFlag{name: "vector-timeout-seconds"}
+	opts.vectorChunkMaxRunes = positiveIntFlag{name: "vector-chunk-max-runes"}
+	opts.vectorChunkOverlapRunes = positiveIntFlag{name: "vector-chunk-overlap-runes"}
 	registerCLIFlags(&opts)
 
 	flag.Usage = groupedUsage
@@ -562,6 +566,7 @@ func providerlessState(store *session.Store) (appState, error) {
 		loadedConfigPaths: loadedConfigPaths,
 		pluginPaths:       append([]string(nil), cfg.Plugins.Paths...),
 		pluginPolicy:      clonePluginPolicy(cfg.Plugins.Policy),
+		vectorConfig:      cfg.Vector,
 	}, nil
 }
 
@@ -787,6 +792,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		agentLoopCheckpointInterval: agentLoopCheckpointInterval,
 		maxInputTokens:              maxInputTokens,
 		hookConfig:                  cfg.Hooks,
+		vectorConfig:                cfg.Vector,
 		modelLocked:                 selection.modelLocked,
 		autoMergeWorktree:           opts.useWorktree && !opts.noAutoMerge,
 		promptLocalOnly:             opts.promptLocalOnly,

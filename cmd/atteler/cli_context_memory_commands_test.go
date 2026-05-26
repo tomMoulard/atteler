@@ -19,30 +19,12 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/memory"
 	"github.com/tommoulard/atteler/pkg/session"
-	"github.com/tommoulard/atteler/pkg/vector"
 )
 
 const (
 	localMemorySessionID = "local"
 	otherMemoryName      = "other"
 )
-
-func TestFormatVectorResult(t *testing.T) {
-	t.Parallel()
-
-	got := formatVectorResult(vector.Result{
-		Document: vector.Document{
-			ID:       "docs/research.md",
-			Metadata: map[string]string{"path": "docs/research.md"},
-		},
-		Score: 0.75,
-	})
-
-	want := "docs/research.md\tscore=0.7500\tpath=docs/research.md"
-	if got != want {
-		require.Failf(t, "unexpected vector result format", "got %q, want %q", got, want)
-	}
-}
 
 func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {
 	t.Parallel()

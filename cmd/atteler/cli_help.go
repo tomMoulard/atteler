@@ -60,7 +60,8 @@ func printTopLevelHelp(w io.Writer) {
 
 	for i := range cliHelpDomains {
 		domain := &cliHelpDomains[i]
-		fmt.Fprintf(w, "  %-14s %s\n", domain.Name, domain.Summary)
+
+		fmt.Fprintf(w, "  %-18s %s\n", domain.Name, domain.Summary)
 	}
 
 	fmt.Fprintln(w)
@@ -142,7 +143,17 @@ func usageNameForDomainSelector(domain cliHelpDomain, selector string) string {
 
 	for _, alias := range domain.Aliases {
 		if selector == normalizeHelpName(alias) {
+			if strings.Contains(alias, "/") {
+				return usageNameForDomain(domain)
+			}
+
 			return alias
+		}
+	}
+
+	for _, alias := range domain.HiddenAliases {
+		if selector == normalizeHelpName(alias) {
+			return usageNameForDomain(domain)
 		}
 	}
 
@@ -353,11 +364,12 @@ func lookupFlagDomain(name string) (string, bool) {
 		strings.HasPrefix(name, "skill-") || strings.HasPrefix(name, "feedback-") ||
 		name == bashCommandName || name == "bash-dir" || name == "bash-timeout-seconds":
 		return "agents", true
-	case strings.HasPrefix(name, "memory-") || strings.HasPrefix(name, "agent-memory-") ||
+	case name == "vectorizer" ||
+		strings.HasPrefix(name, "memory-") || strings.HasPrefix(name, "agent-memory-") ||
 		strings.HasPrefix(name, "retrieval-") ||
 		strings.HasPrefix(name, "vector-") || strings.HasPrefix(name, "git-history-") ||
 		strings.HasPrefix(name, "context-pack-"):
-		return "memory/rag", true
+		return "memory/retrieval", true
 	case name == commandOutputJSON || strings.HasPrefix(name, "code-") || strings.HasPrefix(name, "lsp-"):
 		return codeIntelDomainName, true
 	case strings.HasPrefix(name, "review-"):

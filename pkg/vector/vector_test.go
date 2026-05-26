@@ -2714,7 +2714,9 @@ func TestNewEmbeddingVectorizer_Defaults(t *testing.T) {
 	v := NewEmbeddingVectorizer()
 	assert.Equal(t, defaultEmbeddingBaseURL, v.baseURL)
 	assert.Equal(t, defaultEmbeddingModel, v.model)
+	assert.Equal(t, defaultEmbeddingProvider, v.provider)
 	assert.NotNil(t, v.client)
+	assert.Equal(t, embeddingTimeout, v.client.Timeout)
 }
 
 func TestEmbeddingVectorizer_VectorizeRequiresContext(t *testing.T) {
@@ -2843,4 +2845,16 @@ func TestSearcher_SearchRetrievalRedactsPreFlaggedRawText(t *testing.T) {
 	assert.Equal(t, "[REDACTED]", results[0].Metadata["api_key"])
 	assert.NotContains(t, results[0].Metadata["api_key"], "metadata-secret-token")
 	assert.NotContains(t, results[0].Metadata[retrieval.MetadataSafetyReasons], ";;")
+}
+
+func TestEmbeddingVectorizer_WithTimeoutOverridesClientTimeout(t *testing.T) {
+	t.Parallel()
+
+	v := NewEmbeddingVectorizer(
+		WithEmbeddingHTTPClient(&http.Client{}),
+		WithEmbeddingTimeout(2*time.Second),
+	)
+
+	require.NotNil(t, v.client)
+	assert.Equal(t, 2*time.Second, v.client.Timeout)
 }

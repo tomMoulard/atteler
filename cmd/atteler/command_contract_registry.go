@@ -144,7 +144,7 @@ func inlineCommandContractsByName() map[string]commandContract {
 func commandContractsByName() map[string]commandContract {
 	return map[string]commandContract{
 		"agent-memory": commandContractFor(
-			"search or update one agent's vector memory",
+			"search or update one agent's lexical memory",
 			[]string{"--agent-memory-search", "--agent-memory-index", "--agent-memory-delete", "--agent-memory-compact", "--agent-memory-migrate", "--agent-memory-store", "--agent-memory-agent", "--agent-memory-limit", "--agent-memory-ttl-seconds"},
 			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectSessionRead, commandEffectUserOutput},
 			[]string{commandOutputText},
