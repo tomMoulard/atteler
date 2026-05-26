@@ -179,6 +179,10 @@ type listPluginsCommandInput struct{}
 
 type listProvidersCommandInput struct{}
 
+type ollamaStatusCommandInput struct{}
+
+type ollamaStopCommandInput struct{}
+
 type listSessionsCommandInput struct {
 	Tag string
 }
@@ -388,6 +392,8 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"listModelsCommandInput":              func(opts cliOptions) any { return listModelsCommandInputFromOptions(opts) },
 		"listPluginsCommandInput":             func(opts cliOptions) any { return listPluginsCommandInputFromOptions(opts) },
 		"listProvidersCommandInput":           func(opts cliOptions) any { return listProvidersCommandInputFromOptions(opts) },
+		"ollamaStatusCommandInput":            func(opts cliOptions) any { return ollamaStatusCommandInputFromOptions(opts) },
+		"ollamaStopCommandInput":              func(opts cliOptions) any { return ollamaStopCommandInputFromOptions(opts) },
 		"listSessionsCommandInput":            func(opts cliOptions) any { return listSessionsCommandInputFromOptions(opts) },
 		"listSessionTagsCommandInput":         func(opts cliOptions) any { return listSessionTagsCommandInputFromOptions(opts) },
 		"listWorktreesCommandInput":           func(opts cliOptions) any { return listWorktreesCommandInputFromOptions(opts) },
@@ -633,6 +639,14 @@ func listPluginsCommandInputFromOptions(_ cliOptions) listPluginsCommandInput {
 
 func listProvidersCommandInputFromOptions(_ cliOptions) listProvidersCommandInput {
 	return listProvidersCommandInput{}
+}
+
+func ollamaStatusCommandInputFromOptions(_ cliOptions) ollamaStatusCommandInput {
+	return ollamaStatusCommandInput{}
+}
+
+func ollamaStopCommandInputFromOptions(_ cliOptions) ollamaStopCommandInput {
+	return ollamaStopCommandInput{}
 }
 
 func listSessionsCommandInputFromOptions(opts cliOptions) listSessionsCommandInput {

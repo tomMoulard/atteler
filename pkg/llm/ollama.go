@@ -13,11 +13,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 const (
@@ -29,11 +28,17 @@ const (
 )
 
 // OllamaProvider calls a local or configured Ollama server.
+//
+//nolint:govet // Field order groups provider lifecycle state for readability.
 type OllamaProvider struct {
-	client         *http.Client
-	baseURL        string
-	autoStart      bool
-	startAttempted bool
+	client          *http.Client
+	baseURL         string
+	sessionID       string
+	ownershipPath   string
+	commandLine     []string
+	autoStartSource string
+	autoStart       bool
+	startAttempted  bool
 }
 
 // NewOllamaProvider creates a provider using OLLAMA_BASE_URL or the local
@@ -51,10 +56,20 @@ func NewOllamaProviderWithConfigContext(ctx context.Context, cfg ProviderConfig)
 	}
 
 	baseURL := strings.TrimRight(configuredBaseURL("OLLAMA_BASE_URL", cfg.BaseURL, defaultOllamaBase), "/")
+
+	autoStartPolicy := ollamaAutoStartPolicy(cfg.AutoStart)
+	if cfg.autoStartBlocked {
+		autoStartPolicy.Enabled = false
+	}
+
 	p := &OllamaProvider{
-		baseURL:   baseURL,
-		client:    providerHTTPClient(cfg),
-		autoStart: cfg.AutoStart && ollamaAutoStartEnabled() && isLocalOllamaBaseURL(baseURL),
+		baseURL:         baseURL,
+		client:          providerHTTPClient(cfg),
+		sessionID:       cfg.SessionID,
+		ownershipPath:   cfg.OwnershipPath,
+		commandLine:     append([]string(nil), cfg.CommandLine...),
+		autoStartSource: autoStartPolicy.Source,
+		autoStart:       autoStartPolicy.Enabled && isLocalOllamaBaseURL(baseURL),
 	}
 
 	if ollamaExplicitlyConfigured(cfg) && !p.autoStart {
@@ -86,7 +101,31 @@ func ollamaExplicitlyConfigured(cfg ProviderConfig) bool {
 	return os.Getenv("OLLAMA_BASE_URL") != "" || cfg.BaseURL != ""
 }
 
-type ollamaServeStarter func(ctx context.Context, baseURL string) error
+//nolint:govet // Field order mirrors the ownership metadata recorded at start.
+type ollamaStartRequest struct {
+	BaseURL       string
+	SessionID     string
+	OwnershipPath string
+	CommandLine   []string
+	PolicySource  string
+}
+
+//nolint:govet // Field order keeps ownership metadata before transient log buffer.
+type ollamaDaemonStart struct {
+	ownership     OllamaDaemonOwnership
+	logs          *boundedLogBuffer
+	ownershipPath string
+}
+
+func (s *ollamaDaemonStart) startupLogs() string {
+	if s == nil || s.logs == nil {
+		return ""
+	}
+
+	return s.logs.String()
+}
+
+type ollamaServeStarter func(ctx context.Context, req ollamaStartRequest) (*ollamaDaemonStart, error)
 
 var (
 	ollamaServeStarterMu sync.Mutex
@@ -100,60 +139,172 @@ func (o *OllamaProvider) startDaemonAndWait(ctx context.Context) error {
 
 	o.startAttempted = true
 
-	if err := callOllamaServeStarter(ctx, o.baseURL); err != nil {
+	start, err := callOllamaServeStarter(ctx, ollamaStartRequest{
+		BaseURL:       o.baseURL,
+		SessionID:     o.sessionID,
+		OwnershipPath: o.ownershipPath,
+		CommandLine:   o.commandLine,
+		PolicySource:  o.autoStartSource,
+	})
+	if err != nil {
 		return err
 	}
 
-	return o.waitForDaemon(ctx)
+	if err := o.waitForDaemon(ctx); err != nil {
+		return ollamaStartupError(err, start)
+	}
+
+	return nil
 }
 
-func callOllamaServeStarter(ctx context.Context, baseURL string) error {
+func callOllamaServeStarter(ctx context.Context, req ollamaStartRequest) (*ollamaDaemonStart, error) {
 	ollamaServeStarterMu.Lock()
 	starter := startOllamaServe
 	ollamaServeStarterMu.Unlock()
 
-	return starter(ctx, baseURL)
+	return starter(ctx, req)
 }
 
-func startOllamaServeProcess(ctx context.Context, baseURL string) error {
-	env := map[string]string(nil)
-	if host := ollamaHostForBaseURL(baseURL); host != "" {
-		env = map[string]string{"OLLAMA_HOST": host}
+func startOllamaServeProcess(ctx context.Context, req ollamaStartRequest) (*ollamaDaemonStart, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, fmt.Errorf("ollama: start daemon: %w", err)
 	}
 
-	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
-		Program: ollamaServeCommand,
-		Args:    []string{"serve"},
-		Env:     env,
-		Stdout:  io.Discard,
-		Stderr:  io.Discard,
-		Mode:    shell.ModeStreaming,
-		Audit:   shell.AuditContext{Caller: "atteler.ollama.serve"},
-	})
+	stateDir := ollamaStateDir(req.OwnershipPath)
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		return nil, fmt.Errorf("ollama: prepare daemon state dir: %w", err)
+	}
+
+	logFile, err := os.CreateTemp(stateDir, "ollama-startup-*.log")
 	if err != nil {
-		return fmt.Errorf("ollama: authorize daemon: %w", err)
+		return nil, fmt.Errorf("ollama: create startup log: %w", err)
+	}
+
+	logPath := logFile.Name()
+	logs := newBoundedLogBuffer(ollamaStartupLogBytes)
+	logWriter := &lockedWriter{writer: io.MultiWriter(newCappedLogFileWriter(logFile, ollamaStartupLogBytes), logs)}
+
+	cmd := exec.Command(ollamaServeCommand, "serve") //nolint:noctx // Ollama is intentionally started as a reversible long-lived daemon after the caller context is checked.
+	cmd.Stdout = logWriter
+	cmd.Stderr = logWriter
+
+	if err := ctx.Err(); err != nil {
+		_ = logFile.Close()
+		_ = os.Remove(logPath)
+
+		return nil, fmt.Errorf("ollama: start daemon: %w", err)
+	}
+
+	environment := map[string]string{}
+	if host := ollamaHostForBaseURL(req.BaseURL); host != "" {
+		environment["OLLAMA_HOST"] = host
+		cmd.Env = append(os.Environ(), "OLLAMA_HOST="+host)
 	}
 
 	if err := cmd.Start(); err != nil {
-		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "ollama daemon failed before output capture"}); finishErr != nil {
-			return fmt.Errorf("ollama: start daemon: %w", errors.Join(err, finishErr))
-		}
+		_ = logFile.Close()
+		_ = os.Remove(logPath)
 
-		return fmt.Errorf("ollama: start daemon: %w", err)
+		return nil, fmt.Errorf("ollama: start daemon: %w", err)
 	}
 
-	go func() {
-		err := cmd.Wait()
-		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "ollama daemon output discarded"}); finishErr != nil {
-			slog.Warn("ollama daemon audit failed", "error", finishErr)
+	ownership := OllamaDaemonOwnership{
+		Owner:           "atteler",
+		PID:             cmd.Process.Pid,
+		AttelerPID:      os.Getpid(),
+		ParentPID:       os.Getppid(),
+		Command:         []string{ollamaServeCommand, "serve"},
+		Environment:     environment,
+		StartedAt:       time.Now().UTC(),
+		BaseURL:         req.BaseURL,
+		SessionID:       req.SessionID,
+		AttelerCommand:  ollamaCommandLine(req.CommandLine),
+		AutoStartSource: req.PolicySource,
+		LogPath:         logPath,
+	}
+
+	ownershipPath := ollamaOwnershipPath(req.OwnershipPath)
+	if err := recordOllamaOwnership(ownershipPath, ownership); err != nil {
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			slog.Warn("ollama daemon cleanup after ownership failure failed", "pid", cmd.Process.Pid, "error", killErr)
 		}
 
-		if err != nil {
-			slog.Warn("ollama daemon exited", "error", err)
+		// Reap the child after the forced cleanup so a failed ownership write
+		// does not leave a short-lived zombie process behind.
+		if waitErr := cmd.Wait(); waitErr != nil {
+			slog.Debug("ollama daemon cleanup wait completed", "pid", cmd.Process.Pid, "error", waitErr)
+		}
+
+		_ = logFile.Close()
+
+		return nil, fmt.Errorf("ollama: record daemon ownership: %w", err)
+	}
+
+	slog.Info("ollama daemon started by atteler",
+		"pid", cmd.Process.Pid,
+		"base_url", req.BaseURL,
+		"auto_start_source", req.PolicySource,
+		"ownership_path", ownershipPath,
+		"log_path", logPath,
+		"stop_command", "atteler --ollama-stop",
+	)
+
+	go func() {
+		defer func() {
+			if err := logFile.Close(); err != nil {
+				slog.Warn("ollama startup log close failed", "path", logPath, "error", err)
+			}
+		}()
+
+		if err := cmd.Wait(); err != nil {
+			slog.Warn("ollama daemon exited", "pid", cmd.Process.Pid, "log_path", logPath, "error", err)
 		}
 	}()
 
-	return nil
+	return &ollamaDaemonStart{ownership: ownership, ownershipPath: ownershipPath, logs: logs}, nil
+}
+
+func ollamaCommandLine(commandLine []string) []string {
+	if len(commandLine) > 0 {
+		return append([]string(nil), commandLine...)
+	}
+
+	return append([]string(nil), os.Args...)
+}
+
+func ollamaStartupError(err error, start *ollamaDaemonStart) error {
+	if start == nil {
+		return err
+	}
+
+	err = fmt.Errorf("%w; %s", err, start.stopHint())
+
+	logs := strings.TrimSpace(start.startupLogs())
+	if logs == "" {
+		if start.ownership.LogPath != "" {
+			return fmt.Errorf("%w; startup log: %s", err, start.ownership.LogPath)
+		}
+
+		return err
+	}
+
+	if start.ownership.LogPath != "" {
+		return fmt.Errorf("%w; startup log %s: %s", err, start.ownership.LogPath, logs)
+	}
+
+	return fmt.Errorf("%w; startup log: %s", err, logs)
+}
+
+func (s *ollamaDaemonStart) stopHint() string {
+	if s == nil || s.ownership.PID <= 0 {
+		return "check `atteler --ollama-status` for daemon status"
+	}
+
+	if s.ownershipPath != "" {
+		return fmt.Sprintf("Atteler started Ollama PID %d; ownership record: %s; stop with `atteler --ollama-stop`", s.ownership.PID, s.ownershipPath)
+	}
+
+	return fmt.Sprintf("Atteler started Ollama PID %d; stop with `atteler --ollama-stop`", s.ownership.PID)
 }
 
 func (o *OllamaProvider) waitForDaemon(ctx context.Context) error {
@@ -181,24 +332,13 @@ func (o *OllamaProvider) waitForDaemon(ctx context.Context) error {
 	}
 }
 
-func ollamaAutoStartEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(envOllamaAutoStart))) {
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return true
-	}
-}
-
 func isLocalOllamaBaseURL(baseURL string) bool {
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
 		return false
 	}
 
-	host := strings.ToLower(parsed.Hostname())
-
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	return isLocalOllamaHost(parsed.Hostname())
 }
 
 func ollamaHostForBaseURL(baseURL string) string {

@@ -85,6 +85,7 @@ func doctor(ctx context.Context, state appState) error {
 	sort.Strings(providers)
 
 	printDoctorOverview(state, providers)
+	fmt.Println(formatOllamaDoctorLine(ctx, state.config))
 
 	// Health check every registered provider and list their models.
 	fmt.Println()
@@ -172,7 +173,7 @@ func providerHealthResults(ctx context.Context, state appState, registeredProvid
 }
 
 func privateAdapterDiagnosticConfig(state appState, registeredProviders []string) llm.AutoRegisterConfig {
-	diagnosticConfig := llmConfig(state.config, state.selectedModel, state.fallbackModels)
+	diagnosticConfig := llmConfig(state.config, state.selectedModel, state.fallbackModels, state.sessionState.ID, os.Args)
 	if diagnosticConfig.Providers == nil {
 		diagnosticConfig.Providers = make(map[string]llm.ProviderConfig)
 	}
@@ -503,11 +504,18 @@ func pathStatus(path string) string {
 	return "ok"
 }
 
-func llmConfig(cfg appconfig.Config, selectedModel string, fallbackModels []string) llm.AutoRegisterConfig {
+func llmConfig(
+	cfg appconfig.Config,
+	selectedModel string,
+	fallbackModels []string,
+	sessionID string,
+	commandLine []string,
+) llm.AutoRegisterConfig {
 	providers := make(map[string]llm.ProviderConfig, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
 		providers[name] = llm.ProviderConfig{
 			Disabled:              provider.Disabled,
+			AutoStart:             provider.AutoStart,
 			DisablePrivateAdapter: provider.DisablePrivateAdapter,
 			BaseURL:               provider.BaseURL,
 			TimeoutSeconds:        provider.TimeoutSeconds,
@@ -523,6 +531,8 @@ func llmConfig(cfg appconfig.Config, selectedModel string, fallbackModels []stri
 		DefaultModel:    cfg.DefaultModel,
 		SelectedModel:   selectedModel,
 		FallbackModels:  append([]string(nil), fallbackModels...),
+		SessionID:       sessionID,
+		CommandLine:     append([]string(nil), commandLine...),
 		Providers:       providers,
 	}
 }

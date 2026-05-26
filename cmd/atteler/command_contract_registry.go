@@ -66,6 +66,22 @@ func inlineCommandContractsByName() map[string]commandContract {
 			withInputType("listProvidersCommandInput"),
 			withExamples("atteler providers list"),
 		),
+		commandOllamaStatus: commandContractFor(
+			"print Ollama daemon lifecycle status without starting it",
+			[]string{"--ollama-status"},
+			[]string{commandEffectConfigRead, commandEffectFilesystemRead, commandEffectLLMProviderRead, commandEffectUserOutput},
+			[]string{commandOutputText},
+			withInputType("ollamaStatusCommandInput"),
+			withExamples("atteler providers ollama-status"),
+		),
+		commandOllamaStop: commandContractFor(
+			"stop and clean up an Atteler-owned Ollama daemon",
+			[]string{"--ollama-stop"},
+			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectUserOutput},
+			[]string{commandOutputText},
+			withInputType("ollamaStopCommandInput"),
+			withExamples("atteler providers ollama-stop"),
+		),
 		"list-worktrees": commandContractFor(
 			"list active atteler worktrees",
 			[]string{"--list-worktrees"},

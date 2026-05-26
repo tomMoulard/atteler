@@ -404,6 +404,7 @@ providers:
   openai:
     base_url: https://openai.second
     disabled: false
+    auto_start: true
 agents:
   reviewer:
     model: gpt-review-second
@@ -417,6 +418,7 @@ plugins:
 	require.NoError(t, err)
 	assert.Equal(t, "https://anthropic.first", cfg.Providers["anthropic"].BaseURL)
 	assert.Equal(t, "https://openai.second", cfg.Providers["openai"].BaseURL)
+	assert.True(t, cfg.Providers["openai"].AutoStart)
 	assert.Equal(t, "gpt-review-second", cfg.Agents["reviewer"].Model)
 	assert.Equal(t, map[string]bool{"shell": false}, cfg.Agents["reviewer"].ToolPermissions)
 	assert.Equal(t, []string{"./plugin-b"}, cfg.Plugins.Paths)
@@ -430,6 +432,11 @@ plugins:
 	require.Len(t, providerFieldOrigin, 2)
 	assert.Equal(t, OriginOverride, providerFieldOrigin[1].Operation)
 	assert.Equal(t, second, providerFieldOrigin[1].Source)
+
+	autoStartOrigin := origins["providers.openai.auto_start"].Chain
+	require.Len(t, autoStartOrigin, 1)
+	assert.Equal(t, OriginSet, autoStartOrigin[0].Operation)
+	assert.Equal(t, second, autoStartOrigin[0].Source)
 
 	agentOrigin := origins["agents.reviewer.model"].Chain
 	require.Len(t, agentOrigin, 2)

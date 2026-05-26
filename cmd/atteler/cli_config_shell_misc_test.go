@@ -203,6 +203,7 @@ func TestApplyDebugEnvOptions(t *testing.T) {
 		"DEBUG_ATTELER_DOCTOR_OFFLINE":            "true",
 		"DEBUG_ATTELER_LIST_HOOK_EVENTS":          "true",
 		"DEBUG_ATTELER_LIST_HOOK_EVENTS_JSON":     "true",
+		"DEBUG_ATTELER_OLLAMA_STATUS":             "true",
 		"DEBUG_ATTELER_WATCH_SCAN":                "1",
 		"DEBUG_ATTELER_WATCH_JSON":                "1",
 		"DEBUG_ATTELER_REVIEW_PLAN":               "true",
@@ -229,6 +230,7 @@ func TestApplyDebugEnvOptions(t *testing.T) {
 	assert.True(t, opts.doctorOffline)
 	assert.True(t, opts.listHookEvents)
 	assert.True(t, opts.listHookEventsJSON)
+	assert.True(t, opts.ollamaStatus)
 	assert.True(t, opts.watchScan)
 	assert.True(t, opts.watchJSON)
 	assert.True(t, opts.reviewPlan)
