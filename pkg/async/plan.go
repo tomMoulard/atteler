@@ -40,6 +40,8 @@ type TaskResult struct {
 	Error          string        `json:"error,omitempty"`
 	Status         string        `json:"status,omitempty"`
 	LedgerPath     string        `json:"ledger_path,omitempty"`
+	AdmissionID    string        `json:"admission_id,omitempty"`
+	StopID         string        `json:"stop_id,omitempty"`
 	TranscriptPath string        `json:"transcript_path,omitempty"`
 	Artifacts      []string      `json:"artifacts,omitempty"`
 	ExitStatus     int           `json:"exit_status,omitempty"`

@@ -749,6 +749,7 @@ func TestValidateAndFormatAsyncRun(t *testing.T) {
 		Output:         "done\n",
 		Status:         attasync.StatusSucceeded,
 		LedgerPath:     "/tmp/async-ledger.json",
+		AdmissionID:    "admission-plan",
 		TranscriptPath: "/tmp/transcripts/plan.txt",
 		Artifacts:      []string{"/tmp/artifacts/plan.patch"},
 		Duration:       1500 * time.Millisecond,
@@ -759,15 +760,36 @@ func TestValidateAndFormatAsyncRun(t *testing.T) {
 		Error:    "boom",
 		Status:   attasync.StatusFailed,
 		Duration: time.Millisecond,
+	}, {
+		Wave:        1,
+		Order:       1,
+		Task:        attasync.Task{ID: "deny", Agent: "executor"},
+		Error:       "scope denied",
+		Status:      attasync.StatusDenied,
+		LedgerPath:  "/tmp/async-ledger.json",
+		AdmissionID: "admission-deny",
+	}, {
+		Wave:        1,
+		Order:       2,
+		Task:        attasync.Task{ID: "timeout", Agent: "executor"},
+		Error:       "context deadline exceeded",
+		Status:      attasync.StatusTimedOut,
+		AdmissionID: "admission-timeout",
+		StopID:      "stop-timeout",
 	}})
 
 	assert.Contains(t, got, "wave=1\torder=1\tid=plan\tagent=planner\tstatus=ok\tduration=1.5s")
 	assert.Contains(t, got, "ledger=/tmp/async-ledger.json")
+	assert.Contains(t, got, "admission_id=admission-plan")
 	assert.Contains(t, got, "transcript=/tmp/transcripts/plan.txt")
 	assert.Contains(t, got, "artifact=/tmp/artifacts/plan.patch")
 	assert.Contains(t, got, "output=done")
 	assert.Contains(t, got, "wave=2\torder=1\tid=code\tagent=coder\tstatus=error\tduration=1ms")
 	assert.Contains(t, got, "error=boom")
+	assert.Contains(t, got, "wave=2\torder=2\tid=deny\tagent=executor\tstatus=denied")
+	assert.Contains(t, got, "admission_id=admission-deny")
+	assert.Contains(t, got, "wave=2\torder=3\tid=timeout\tagent=executor\tstatus=timed_out")
+	assert.Contains(t, got, "stop_id=stop-timeout")
 }
 
 func TestChildExecutionOptionsFromCLIFlags(t *testing.T) {

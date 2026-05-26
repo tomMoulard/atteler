@@ -289,6 +289,14 @@ func formatAsyncRunResults(results []attasync.TaskResult) string {
 			fmt.Fprintf(&b, "ledger=%s\n", result.LedgerPath)
 		}
 
+		if strings.TrimSpace(result.AdmissionID) != "" {
+			fmt.Fprintf(&b, "admission_id=%s\n", result.AdmissionID)
+		}
+
+		if strings.TrimSpace(result.StopID) != "" {
+			fmt.Fprintf(&b, "stop_id=%s\n", result.StopID)
+		}
+
 		if strings.TrimSpace(result.TranscriptPath) != "" {
 			fmt.Fprintf(&b, "transcript=%s\n", result.TranscriptPath)
 		}

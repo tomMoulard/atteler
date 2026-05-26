@@ -20,6 +20,8 @@ const (
 	StatusSucceeded = "succeeded"
 	// StatusFailed means a task returned an error.
 	StatusFailed = "failed"
+	// StatusDenied means a task was denied before execution by admission policy.
+	StatusDenied = "denied"
 	// StatusCanceled means a task was canceled before completion.
 	StatusCanceled = "canceled"
 	// StatusTimedOut means a task exceeded its per-task timeout.
@@ -103,28 +105,73 @@ type TaskAttempt struct {
 	Stderr         string        `json:"stderr,omitempty"`
 	Error          string        `json:"error,omitempty"`
 	Status         string        `json:"status"`
+	AdmissionID    string        `json:"admission_id,omitempty"`
+	StopID         string        `json:"stop_id,omitempty"`
 	TranscriptPath string        `json:"transcript_path,omitempty"`
 	Artifacts      []string      `json:"artifacts,omitempty"`
 	ExitStatus     int           `json:"exit_status,omitempty"`
 	Usage          Usage         `json:"usage,omitempty"`
 }
 
+// Admission captures the durable decision boundary before an async child task
+// is allowed to run or denied by resource/cancellation policy.
+//
+//nolint:govet // Field order keeps identity and policy before the decision.
+type Admission struct {
+	RecordedAt        time.Time     `json:"recorded_at"`
+	AdmissionID       string        `json:"admission_id"`
+	ChildID           string        `json:"child_id"`
+	ParentRunID       string        `json:"parent_run_id"`
+	Wave              int           `json:"wave"`
+	Order             int           `json:"order"`
+	WorkspaceID       string        `json:"workspace_id,omitempty"`
+	AllowedWriteScope string        `json:"allowed_write_scope,omitempty"`
+	Model             string        `json:"model,omitempty"`
+	Provider          string        `json:"provider,omitempty"`
+	Timeout           time.Duration `json:"timeout,omitempty"`
+	Budget            Budget        `json:"budget,omitempty"`
+	RetryPolicy       RetryPolicy   `json:"retry_policy,omitempty"`
+	Attempt           int           `json:"attempt,omitempty"`
+	Admitted          bool          `json:"admitted"`
+	DenyReason        string        `json:"deny_reason,omitempty"`
+}
+
+// StopReceipt captures the durable halt boundary for an admitted async task.
+//
+//nolint:govet // Field order keeps identity before terminal reason metadata.
+type StopReceipt struct {
+	RecordedAt  time.Time `json:"recorded_at"`
+	StopID      string    `json:"stop_id"`
+	AdmissionID string    `json:"admission_id"`
+	ChildID     string    `json:"child_id"`
+	ParentRunID string    `json:"parent_run_id"`
+	Wave        int       `json:"wave"`
+	Order       int       `json:"order"`
+	Attempt     int       `json:"attempt"`
+	Status      string    `json:"status"`
+	Reason      string    `json:"reason,omitempty"`
+}
+
 // Ledger is an auditable JSON document for a dependency-aware async run.
 //
 //nolint:govet // Field order keeps lifecycle metadata before detailed records.
 type Ledger struct {
-	StartedAt time.Time     `json:"started_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
-	RunID     string        `json:"run_id"`
-	Options   RunOptions    `json:"options"`
-	Tasks     []Task        `json:"tasks"`
-	Attempts  []TaskAttempt `json:"attempts,omitempty"`
-	Results   []TaskResult  `json:"results,omitempty"`
+	StartedAt    time.Time     `json:"started_at"`
+	UpdatedAt    time.Time     `json:"updated_at"`
+	RunID        string        `json:"run_id"`
+	Options      RunOptions    `json:"options"`
+	Tasks        []Task        `json:"tasks"`
+	Admissions   []Admission   `json:"admissions,omitempty"`
+	StopReceipts []StopReceipt `json:"stop_receipts,omitempty"`
+	Attempts     []TaskAttempt `json:"attempts,omitempty"`
+	Results      []TaskResult  `json:"results,omitempty"`
 }
 
 // RunWithOptions executes ready batches in order under explicit budgets,
 // retries, cancellation behavior, and an optional durable ledger. It returns
-// results in wave/order order. If a task fails, downstream waves are skipped.
+// results in wave/order order. If a task fails, downstream waves are skipped;
+// ledger-backed runs also persist those never-started tasks as denied
+// admissions/results so resume has a durable boundary.
 func (p *Plan) RunWithOptions(ctx context.Context, run TaskRunner, opts RunOptions) ([]TaskResult, error) {
 	if run == nil {
 		return nil, errors.New("task runner is nil")
@@ -139,6 +186,9 @@ func (p *Plan) RunWithOptions(ctx context.Context, run TaskRunner, opts RunOptio
 
 // RunDetailedWithOptions executes ready batches with a runner that returns
 // stdout/stderr, exit status, artifacts, and usage metadata for the ledger.
+// It uses the same downstream-denial persistence semantics as RunWithOptions.
+//
+//nolint:gocognit // Wave orchestration keeps resume, cancellation, failure, and ledger ordering visible.
 func (p *Plan) RunDetailedWithOptions(ctx context.Context, run DetailedTaskRunner, opts RunOptions) ([]TaskResult, error) {
 	if run == nil {
 		return nil, errors.New("task runner is nil")
@@ -166,6 +216,10 @@ func (p *Plan) RunDetailedWithOptions(ctx context.Context, run DetailedTaskRunne
 
 	for wave, batch := range batches {
 		if err := ctx.Err(); err != nil {
+			if ledger != nil {
+				results = append(results, recordRemainingWavesCanceledBeforeStart(wave, batches, opts, ledger, err)...)
+			}
+
 			return results, errors.Join(fmt.Errorf("context canceled before wave %d: %w", wave, err), ledger.ledgerError())
 		}
 
@@ -178,12 +232,90 @@ func (p *Plan) RunDetailedWithOptions(ctx context.Context, run DetailedTaskRunne
 			}
 		}
 
+		if err := ctx.Err(); err != nil {
+			if ledger != nil {
+				results = append(results, recordRemainingWavesCanceledBeforeStart(wave+1, batches, opts, ledger, err)...)
+			}
+
+			return results, errors.Join(fmt.Errorf("context canceled after wave %d: %w", wave, err), ledger.ledgerError())
+		}
+
 		if result, ok := firstFailedResult(waveResults); ok {
-			return results, errors.Join(fmt.Errorf("task %q failed: %s", result.Task.ID, result.Error), ledger.ledgerError())
+			if ledger != nil {
+				results = append(results, recordRemainingWavesDeniedAfterFailure(wave+1, batches, opts, ledger, result)...)
+			}
+
+			return results, errors.Join(taskRunError(result), ledger.ledgerError())
 		}
 	}
 
 	return results, ledger.ledgerError()
+}
+
+func recordRemainingWavesCanceledBeforeStart(
+	startWave int,
+	batches [][]Task,
+	opts RunOptions,
+	ledger *runLedgerStore,
+	err error,
+) []TaskResult {
+	results := make([]TaskResult, 0)
+	for wave := startWave; wave < len(batches); wave++ {
+		batch := applyTaskDefaults(batches[wave], opts)
+		waveResults := make([]TaskResult, len(batch))
+		for i := range batch {
+			recordTaskCanceledBeforeStart(wave, i, batch[i], waveResults, ledger, opts, err)
+		}
+
+		results = append(results, waveResults...)
+	}
+
+	return results
+}
+
+func recordRemainingWavesDeniedAfterFailure(
+	startWave int,
+	batches [][]Task,
+	opts RunOptions,
+	ledger *runLedgerStore,
+	failed TaskResult,
+) []TaskResult {
+	if startWave >= len(batches) {
+		return nil
+	}
+
+	err := fmt.Errorf("upstream wave halted after task %q %s: %s", failed.Task.ID, taskRunErrorStatus(failed.Status), failed.Error)
+	results := make([]TaskResult, 0)
+	for wave := startWave; wave < len(batches); wave++ {
+		batch := applyTaskDefaults(batches[wave], opts)
+		waveResults := make([]TaskResult, len(batch))
+		for i := range batch {
+			recordTaskDeniedBeforeStart(wave, i, batch[i], waveResults, ledger, opts, err)
+		}
+
+		results = append(results, waveResults...)
+	}
+
+	return results
+}
+
+func taskRunError(result TaskResult) error {
+	return fmt.Errorf("task %q %s: %s", result.Task.ID, taskRunErrorStatus(result.Status), result.Error)
+}
+
+func taskRunErrorStatus(status string) string {
+	switch status {
+	case StatusBudgetExhausted:
+		return "budget exhausted"
+	case StatusCanceled:
+		return "canceled"
+	case StatusDenied:
+		return "denied"
+	case StatusTimedOut:
+		return "timed out"
+	default:
+		return "failed"
+	}
 }
 
 func runBatchWithOptions(
@@ -217,14 +349,14 @@ func runBatchWithOptions(
 
 				result := runTaskWithRetries(ctx, wave, index, batch[index], run, opts, budget, ledger)
 				results[index] = result
-				if result.Error != "" && (opts.CancelOnFailure || result.Status == StatusBudgetExhausted) {
+				if result.Error != "" && (opts.CancelOnFailure || result.Status == StatusBudgetExhausted || result.Status == StatusDenied) {
 					cancel()
 				}
 			}
 		}()
 	}
 
-	submitTaskJobs(ctx, wave, batch, skipped, jobs, results, ledger)
+	submitTaskJobs(ctx, wave, batch, skipped, jobs, results, ledger, opts)
 
 	close(jobs)
 	wg.Wait()
@@ -240,6 +372,7 @@ func submitTaskJobs(
 	jobs chan<- int,
 	results []TaskResult,
 	ledger *runLedgerStore,
+	opts RunOptions,
 ) {
 	for i := range batch {
 		if skipped[i] {
@@ -247,13 +380,13 @@ func submitTaskJobs(
 		}
 
 		if err := ctx.Err(); err != nil {
-			recordTaskCanceledBeforeStart(wave, i, batch[i], results, ledger, err)
+			recordTaskCanceledBeforeStart(wave, i, batch[i], results, ledger, opts, err)
 			continue
 		}
 
 		select {
 		case <-ctx.Done():
-			recordTaskCanceledBeforeStart(wave, i, batch[i], results, ledger, ctx.Err())
+			recordTaskCanceledBeforeStart(wave, i, batch[i], results, ledger, opts, ctx.Err())
 		case jobs <- i:
 		}
 	}
@@ -265,9 +398,29 @@ func recordTaskCanceledBeforeStart(
 	task Task,
 	results []TaskResult,
 	ledger *runLedgerStore,
+	opts RunOptions,
 	err error,
 ) {
+	admission := admissionForTask(wave, order, task, 0, false, err, ledger, opts)
+	ignoreRunLedgerError(ledger.recordAdmission(admission))
 	results[order] = taskResultFromError(wave, order, task, ledger, StatusCanceled, 0, err)
+	results[order].AdmissionID = admission.AdmissionID
+	ignoreRunLedgerError(ledger.recordResult(results[order]))
+}
+
+func recordTaskDeniedBeforeStart(
+	wave int,
+	order int,
+	task Task,
+	results []TaskResult,
+	ledger *runLedgerStore,
+	opts RunOptions,
+	err error,
+) {
+	admission := admissionForTask(wave, order, task, 0, false, err, ledger, opts)
+	ignoreRunLedgerError(ledger.recordAdmission(admission))
+	results[order] = taskResultFromError(wave, order, task, ledger, StatusDenied, 0, err)
+	results[order].AdmissionID = admission.AdmissionID
 	ignoreRunLedgerError(ledger.recordResult(results[order]))
 }
 
@@ -286,6 +439,7 @@ func nextTaskIndex(ctx context.Context, jobs <-chan int) (int, bool) {
 	}
 }
 
+//nolint:gocognit // Retry, admission, budget, timeout, and ledger ordering must stay explicit.
 func runTaskWithRetries(
 	ctx context.Context,
 	wave int,
@@ -301,7 +455,20 @@ func runTaskWithRetries(
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
+			admission := admissionForTask(wave, order, task, attempt, false, err, ledger, opts)
+			ignoreRunLedgerError(ledger.recordAdmission(admission))
 			last = taskResultFromError(wave, order, task, ledger, StatusCanceled, attempt-1, err)
+			last.AdmissionID = admission.AdmissionID
+			ignoreRunLedgerError(ledger.recordResult(last))
+
+			return last
+		}
+
+		if err := validateRunAllowedWriteScope(task.AllowedWriteScope, opts.AllowedWriteScope); err != nil {
+			admission := admissionForTask(wave, order, task, attempt, false, err, ledger, opts)
+			ignoreRunLedgerError(ledger.recordAdmission(admission))
+			last = taskResultFromError(wave, order, task, ledger, StatusDenied, attempt-1, err)
+			last.AdmissionID = admission.AdmissionID
 			ignoreRunLedgerError(ledger.recordResult(last))
 
 			return last
@@ -309,18 +476,22 @@ func runTaskWithRetries(
 
 		usage, err := budget.reserve(task)
 		if err != nil {
+			admission := admissionForTask(wave, order, task, attempt, false, err, ledger, opts)
+			ignoreRunLedgerError(ledger.recordAdmission(admission))
 			last = taskResultFromError(wave, order, task, ledger, StatusBudgetExhausted, attempt-1, err)
+			last.AdmissionID = admission.AdmissionID
 			ignoreRunLedgerError(ledger.recordResult(last))
-			ignoreRunLedgerError(ledger.appendAttempt(TaskAttempt{
-				StartedAt:  last.StartedAt,
-				FinishedAt: last.FinishedAt,
-				Wave:       wave,
-				Order:      order,
-				Attempt:    attempt,
-				Task:       task,
-				Error:      err.Error(),
-				Status:     StatusBudgetExhausted,
-			}))
+
+			return last
+		}
+
+		admission := admissionForTask(wave, order, task, attempt, true, nil, ledger, opts)
+		admitErr := ledger.recordAdmission(admission)
+		if admitErr != nil {
+			admissionErr := fmt.Errorf("async: task %q admission failed: %w", task.ID, admitErr)
+			last = taskResultFromError(wave, order, task, ledger, StatusFailed, attempt-1, admissionErr)
+			last.AdmissionID = admission.AdmissionID
+			ignoreRunLedgerError(ledger.recordResult(last))
 
 			return last
 		}
@@ -335,13 +506,14 @@ func runTaskWithRetries(
 		startedClock := time.Now()
 		started := startedClock.UTC()
 		attemptIndex := ledger.startAttempt(TaskAttempt{
-			StartedAt: started,
-			Wave:      wave,
-			Order:     order,
-			Attempt:   attempt,
-			Task:      task,
-			Status:    StatusRunning,
-			Usage:     usage,
+			StartedAt:   started,
+			Wave:        wave,
+			Order:       order,
+			Attempt:     attempt,
+			Task:        task,
+			Status:      StatusRunning,
+			Usage:       usage,
+			AdmissionID: admission.AdmissionID,
 		})
 
 		out, err := run(attemptCtx, task)
@@ -362,6 +534,12 @@ func runTaskWithRetries(
 			err = errors.Join(err, budgetErr)
 		}
 		status, err = taskStatusAfterRunnerBudgetExhaustion(status, err, out)
+		stopID := ""
+		if taskStatusNeedsStopReceipt(status) {
+			receipt := stopReceiptForTask(wave, order, task, attempt, admission.AdmissionID, status, err, ledger)
+			stopID = receipt.StopID
+			ignoreRunLedgerError(ledger.recordStopReceipt(receipt))
+		}
 		transcriptPath := ledger.writeTranscript(task.ID, attempt, out, err)
 		attemptRecord := TaskAttempt{
 			StartedAt:      started,
@@ -374,6 +552,8 @@ func runTaskWithRetries(
 			Output:         out.Stdout,
 			Stderr:         out.Stderr,
 			Status:         status,
+			AdmissionID:    admission.AdmissionID,
+			StopID:         stopID,
 			TranscriptPath: transcriptPath,
 			Artifacts:      append([]string(nil), out.Artifacts...),
 			ExitStatus:     out.ExitStatus,
@@ -396,6 +576,8 @@ func runTaskWithRetries(
 			Stderr:         out.Stderr,
 			Status:         status,
 			LedgerPath:     ledger.path(),
+			AdmissionID:    admission.AdmissionID,
+			StopID:         stopID,
 			TranscriptPath: transcriptPath,
 			Artifacts:      append([]string(nil), out.Artifacts...),
 			ExitStatus:     out.ExitStatus,
@@ -414,8 +596,10 @@ func runTaskWithRetries(
 		}
 
 		if err := waitTaskRetryBackoff(ctx, opts.RetryPolicy.Backoff); err != nil {
-			last.Status = StatusCanceled
-			last.Error = err.Error()
+			admission := admissionForTask(wave, order, task, attempt+1, false, err, ledger, opts)
+			ignoreRunLedgerError(ledger.recordAdmission(admission))
+			last = taskResultFromError(wave, order, task, ledger, StatusCanceled, attempt, err)
+			last.AdmissionID = admission.AdmissionID
 			break
 		}
 	}
@@ -503,6 +687,74 @@ func taskResultFromError(wave, order int, task Task, ledger *runLedgerStore, sta
 		Status:     status,
 		LedgerPath: ledger.path(),
 	}
+}
+
+func admissionForTask(
+	wave int,
+	order int,
+	task Task,
+	attempt int,
+	admitted bool,
+	denyErr error,
+	ledger *runLedgerStore,
+	opts RunOptions,
+) Admission {
+	now := time.Now().UTC()
+	admission := Admission{
+		RecordedAt:        now,
+		AdmissionID:       "admission-" + newRunID(now),
+		ChildID:           task.ID,
+		ParentRunID:       ledger.runID(),
+		Wave:              wave,
+		Order:             order,
+		WorkspaceID:       task.WorkspaceID,
+		AllowedWriteScope: task.AllowedWriteScope,
+		Model:             task.Model,
+		Provider:          task.Provider,
+		Timeout:           opts.Timeout,
+		Budget:            opts.Budget,
+		RetryPolicy:       opts.RetryPolicy,
+		Attempt:           attempt,
+		Admitted:          admitted,
+	}
+	if denyErr != nil {
+		admission.DenyReason = denyErr.Error()
+	}
+
+	return admission
+}
+
+func taskStatusNeedsStopReceipt(status string) bool {
+	return status == StatusCanceled || status == StatusTimedOut || status == StatusBudgetExhausted
+}
+
+func stopReceiptForTask(
+	wave int,
+	order int,
+	task Task,
+	attempt int,
+	admissionID string,
+	status string,
+	err error,
+	ledger *runLedgerStore,
+) StopReceipt {
+	now := time.Now().UTC()
+	receipt := StopReceipt{
+		RecordedAt:  now,
+		StopID:      "stop-" + newRunID(now),
+		AdmissionID: admissionID,
+		ChildID:     task.ID,
+		ParentRunID: ledger.runID(),
+		Wave:        wave,
+		Order:       order,
+		Attempt:     attempt,
+		Status:      status,
+	}
+	if err != nil {
+		receipt.Reason = err.Error()
+	}
+
+	return receipt
 }
 
 func seedResumedTaskResults(
@@ -627,6 +879,37 @@ func taskWorkspaceID(parentWorkspaceID, taskID string) string {
 	return parentWorkspaceID + "/" + taskID
 }
 
+func validateRunAllowedWriteScope(childScope, parentScope string) error {
+	childScope = strings.TrimSpace(childScope)
+	parentScope = strings.TrimSpace(parentScope)
+	if childScope == "" || parentScope == "" {
+		return nil
+	}
+
+	parentAbs, err := filepath.Abs(parentScope)
+	if err != nil {
+		return fmt.Errorf("resolve parent allowed write scope %q: %w", parentScope, err)
+	}
+
+	childAbs, err := filepath.Abs(childScope)
+	if err != nil {
+		return fmt.Errorf("resolve child allowed write scope %q: %w", childScope, err)
+	}
+
+	parentAbs = filepath.Clean(parentAbs)
+	childAbs = filepath.Clean(childAbs)
+	rel, err := filepath.Rel(parentAbs, childAbs)
+	if err != nil {
+		return fmt.Errorf("compare child allowed write scope %q to parent scope %q: %w", childScope, parentScope, err)
+	}
+
+	if rel == "." || (!filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		return nil
+	}
+
+	return fmt.Errorf("allowed write scope %q escapes parent scope %q", childScope, parentScope)
+}
+
 func estimateRunPromptTokens(prompt string) int {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -727,16 +1010,21 @@ func (b *runBudgetTracker) reserve(task Task) (Usage, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	var errs []error
 	if b.maxOutputBytes > 0 && b.usedOutputBytes >= b.maxOutputBytes {
-		return usage, fmt.Errorf("output byte budget exhausted: used %d of %d", b.usedOutputBytes, b.maxOutputBytes)
+		errs = append(errs, fmt.Errorf("output byte budget exhausted: used %d of %d", b.usedOutputBytes, b.maxOutputBytes))
 	}
 
 	if b.maxPromptTokens > 0 && b.usedPromptTokens+usage.PromptTokens > b.maxPromptTokens {
-		return usage, fmt.Errorf("prompt token budget exceeded: requested %d, used %d of %d", usage.PromptTokens, b.usedPromptTokens, b.maxPromptTokens)
+		errs = append(errs, fmt.Errorf("prompt token budget exceeded: requested %d, used %d of %d", usage.PromptTokens, b.usedPromptTokens, b.maxPromptTokens))
 	}
 
 	if b.maxCostMicros > 0 && b.usedCostMicros+usage.EstimatedCostMicros > b.maxCostMicros {
-		return usage, fmt.Errorf("cost budget exceeded: requested %d micros, used %d of %d", usage.EstimatedCostMicros, b.usedCostMicros, b.maxCostMicros)
+		errs = append(errs, fmt.Errorf("cost budget exceeded: requested %d micros, used %d of %d", usage.EstimatedCostMicros, b.usedCostMicros, b.maxCostMicros))
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return usage, err
 	}
 
 	b.usedPromptTokens += usage.PromptTokens
@@ -883,6 +1171,27 @@ func recoverRunningTaskAttempts(ledger *Ledger, now time.Time) {
 		if ledger.Attempts[i].Error == "" {
 			ledger.Attempts[i].Error = "async: recovered running attempt during resume"
 		}
+
+		if ledger.Attempts[i].AdmissionID != "" {
+			receipt := recoveredTaskStopReceipt(ledger, ledger.Attempts[i], now)
+			ledger.Attempts[i].StopID = receipt.StopID
+			ledger.StopReceipts = append(ledger.StopReceipts, receipt)
+		}
+	}
+}
+
+func recoveredTaskStopReceipt(ledger *Ledger, attempt TaskAttempt, now time.Time) StopReceipt {
+	return StopReceipt{
+		RecordedAt:  now,
+		StopID:      "stop-" + newRunID(now),
+		AdmissionID: attempt.AdmissionID,
+		ChildID:     attempt.Task.ID,
+		ParentRunID: ledger.RunID,
+		Wave:        attempt.Wave,
+		Order:       attempt.Order,
+		Attempt:     attempt.Attempt,
+		Status:      StatusCanceled,
+		Reason:      attempt.Error,
 	}
 }
 
@@ -894,6 +1203,17 @@ func (s *runLedgerStore) path() string {
 	return s.pathTo
 }
 
+func (s *runLedgerStore) runID() string {
+	if s == nil {
+		return ""
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.ledger.RunID
+}
+
 func (s *runLedgerStore) completedAttempts() []TaskAttempt {
 	if s == nil {
 		return nil
@@ -903,7 +1223,7 @@ func (s *runLedgerStore) completedAttempts() []TaskAttempt {
 	for i := range s.ledger.Attempts {
 		attempt := s.ledger.Attempts[i]
 		if attempt.Status == StatusSucceeded || attempt.Status == StatusFailed || attempt.Status == StatusTimedOut ||
-			attempt.Status == StatusCanceled || attempt.Status == StatusBudgetExhausted {
+			attempt.Status == StatusCanceled || attempt.Status == StatusBudgetExhausted || attempt.Status == StatusDenied {
 			attempts = append(attempts, attempt)
 		}
 	}
@@ -960,6 +1280,8 @@ func taskResultFromAttempt(attempt TaskAttempt) TaskResult {
 		Stderr:         attempt.Stderr,
 		Error:          attempt.Error,
 		Status:         attempt.Status,
+		AdmissionID:    attempt.AdmissionID,
+		StopID:         attempt.StopID,
 		TranscriptPath: attempt.TranscriptPath,
 		Artifacts:      append([]string(nil), attempt.Artifacts...),
 		ExitStatus:     attempt.ExitStatus,
@@ -979,13 +1301,37 @@ func sameTaskForResume(previous, current Task) bool {
 	return previous.ID == current.ID &&
 		previous.Agent == current.Agent &&
 		previous.Prompt == current.Prompt &&
-		previous.WorkspaceID == current.WorkspaceID &&
+		sameWorkspaceForResume(previous.WorkspaceID, current.WorkspaceID, current.ID) &&
 		previous.AllowedWriteScope == current.AllowedWriteScope &&
 		previous.Model == current.Model &&
 		previous.Provider == current.Provider &&
 		previous.EstimatedPromptTokens == current.EstimatedPromptTokens &&
 		previous.EstimatedCostMicros == current.EstimatedCostMicros &&
 		sameStringSet(previous.DependsOn, current.DependsOn)
+}
+
+func sameWorkspaceForResume(previous, current, childID string) bool {
+	previous = strings.TrimSpace(previous)
+	current = strings.TrimSpace(current)
+	childID = strings.TrimSpace(childID)
+	if previous == current {
+		return true
+	}
+
+	// CLI utility runs create a fresh parent session ID for each invocation, but
+	// the child boundary is still stable when both workspace IDs are derived by
+	// appending the same task ID. Treat those derived child workspaces as
+	// equivalent so --spawn-resume can skip already-completed children without
+	// requiring operators to pin the transient parent session.
+	return derivedChildWorkspaceID(previous, childID) && derivedChildWorkspaceID(current, childID)
+}
+
+func derivedChildWorkspaceID(workspaceID, childID string) bool {
+	if workspaceID == "" || childID == "" {
+		return false
+	}
+
+	return workspaceID == childID || strings.HasSuffix(workspaceID, "/"+childID)
 }
 
 func sameStringSet(left, right []string) bool {
@@ -1027,7 +1373,7 @@ func (s *runLedgerStore) startAttempt(attempt TaskAttempt) int {
 	return index
 }
 
-func (s *runLedgerStore) appendAttempt(attempt TaskAttempt) error {
+func (s *runLedgerStore) recordAdmission(admission Admission) error {
 	if s == nil {
 		return nil
 	}
@@ -1035,7 +1381,20 @@ func (s *runLedgerStore) appendAttempt(attempt TaskAttempt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.ledger.Attempts = append(s.ledger.Attempts, attempt)
+	s.ledger.Admissions = append(s.ledger.Admissions, admission)
+
+	return s.saveLocked()
+}
+
+func (s *runLedgerStore) recordStopReceipt(receipt StopReceipt) error {
+	if s == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ledger.StopReceipts = append(s.ledger.StopReceipts, receipt)
 
 	return s.saveLocked()
 }

@@ -313,9 +313,9 @@ func childStatusForDisplay(status, errText string) string {
 	}
 
 	switch status {
-	case "succeeded":
+	case subagent.StatusSucceeded:
 		return "ok"
-	case "failed":
+	case subagent.StatusFailed:
 		return statusError
 	default:
 		return status
@@ -420,6 +420,14 @@ func formatSpawnResults(results []subagent.Result) string {
 
 		if strings.TrimSpace(result.LedgerPath) != "" {
 			fmt.Fprintf(&b, "ledger=%s\n", result.LedgerPath)
+		}
+
+		if strings.TrimSpace(result.AdmissionID) != "" {
+			fmt.Fprintf(&b, "admission_id=%s\n", result.AdmissionID)
+		}
+
+		if strings.TrimSpace(result.StopID) != "" {
+			fmt.Fprintf(&b, "stop_id=%s\n", result.StopID)
 		}
 
 		if strings.TrimSpace(result.TranscriptPath) != "" {

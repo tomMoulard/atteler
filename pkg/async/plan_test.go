@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,10 +20,12 @@ import (
 )
 
 const (
-	partialOutput   = "partial"
-	failingID       = "fail"
-	recoveredOutput = "recovered"
-	slowID          = "slow"
+	doneOutput         = "done"
+	partialOutput      = "partial"
+	failingID          = "fail"
+	recoveredOutput    = "recovered"
+	shouldNotRunOutput = "should not run"
+	slowID             = "slow"
 )
 
 func TestPlan_ReadyBatches(t *testing.T) {
@@ -172,6 +175,40 @@ func TestPlan_RunExecutesSameWaveConcurrently(t *testing.T) {
 	}
 }
 
+func TestPlan_RunUsesDefaultBoundedConcurrency(t *testing.T) {
+	t.Parallel()
+
+	tasks := make([]Task, defaultMaxConcurrency*3)
+	for i := range tasks {
+		id := fmt.Sprintf("task-%02d", i)
+		tasks[i] = Task{ID: id, Agent: "executor", Prompt: id}
+	}
+
+	plan, err := NewPlan(tasks)
+	require.NoError(t, err)
+
+	var current atomic.Int32
+	var maxSeen atomic.Int32
+	results, err := plan.Run(t.Context(), func(context.Context, Task) (string, error) {
+		active := current.Add(1)
+		for {
+			seen := maxSeen.Load()
+			if active <= seen || maxSeen.CompareAndSwap(seen, active) {
+				break
+			}
+		}
+
+		time.Sleep(10 * time.Millisecond)
+		current.Add(-1)
+
+		return doneOutput, nil
+	})
+
+	require.NoError(t, err)
+	require.Len(t, results, len(tasks))
+	assert.LessOrEqual(t, maxSeen.Load(), int32(defaultMaxConcurrency))
+}
+
 func TestPlan_RunPreservesWaveOrderDespiteCompletionOrder(t *testing.T) {
 	t.Parallel()
 
@@ -222,6 +259,54 @@ func TestPlan_RunSkipsDownstreamWavesAfterFailure(t *testing.T) {
 	assert.Equal(t, "boom", results[0].Error)
 	assert.Equal(t, partialOutput, results[0].Output)
 	assert.Empty(t, results[1].Error)
+}
+
+func TestPlan_RunWithOptions_PersistsDownstreamAdmissionDenialsAfterFailure(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]Task{
+		{ID: failingID, Agent: "executor", Prompt: failingID},
+		{ID: "peer", Agent: "executor", Prompt: "peer"},
+		{ID: "downstream", Agent: "reviewer", Prompt: "downstream", DependsOn: []string{"peer"}},
+	})
+	require.NoError(t, err)
+
+	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+	results, err := plan.RunWithOptions(t.Context(), func(_ context.Context, task Task) (string, error) {
+		if task.ID == failingID {
+			return partialOutput, errors.New("boom")
+		}
+
+		return task.ID + "-output", nil
+	}, RunOptions{LedgerPath: ledgerPath})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `task "fail" failed: boom`)
+	require.Len(t, results, 3)
+	assert.Equal(t, []string{failingID, "peer", "downstream"}, resultIDs(results))
+	assert.Equal(t, StatusFailed, results[0].Status)
+	assert.Equal(t, StatusSucceeded, results[1].Status)
+	assert.Equal(t, StatusDenied, results[2].Status)
+	assert.Contains(t, results[2].Error, `upstream wave halted after task "fail" failed`)
+	assert.NotEmpty(t, results[2].AdmissionID)
+
+	var ledger Ledger
+	data, readErr := os.ReadFile(ledgerPath)
+	require.NoError(t, readErr)
+	require.NoError(t, json.Unmarshal(data, &ledger))
+	require.Len(t, ledger.Admissions, 3)
+	require.Len(t, ledger.Attempts, 2)
+	require.Len(t, ledger.Results, 3)
+
+	admissions := map[string]Admission{}
+	for _, admission := range ledger.Admissions {
+		admissions[admission.ChildID] = admission
+	}
+	require.Contains(t, admissions, "downstream")
+	assert.False(t, admissions["downstream"].Admitted)
+	assert.Contains(t, admissions["downstream"].DenyReason, `upstream wave halted after task "fail" failed`)
+	assert.Equal(t, admissions["downstream"].AdmissionID, results[2].AdmissionID)
+	assert.Equal(t, admissions["downstream"].AdmissionID, ledger.Results[2].AdmissionID)
 }
 
 func TestPlan_RunRejectsNilRunner(t *testing.T) {
@@ -344,6 +429,52 @@ func TestPlan_RunWithOptions_CancelOnFailureMarksSiblingCanceledWhenRunnerIgnore
 	assert.Contains(t, results[1].Error, context.Canceled.Error())
 }
 
+func TestPlan_RunWithOptions_ParentCancellationMarksDownstreamCanceled(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]Task{
+		{ID: "running", Agent: "executor", Prompt: "running"},
+		{ID: "after", Agent: "reviewer", Prompt: "after", DependsOn: []string{"running"}},
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+	results, err := plan.RunWithOptions(ctx, func(ctx context.Context, task Task) (string, error) {
+		if task.ID == "running" {
+			cancel()
+			<-ctx.Done()
+
+			return "", ctx.Err()
+		}
+
+		return shouldNotRunOutput, nil
+	}, RunOptions{LedgerPath: ledgerPath})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context canceled after wave 0")
+	require.Len(t, results, 2)
+	assert.Equal(t, StatusCanceled, results[0].Status)
+	assert.Equal(t, StatusCanceled, results[1].Status)
+	assert.NotEmpty(t, results[1].AdmissionID)
+
+	var ledger Ledger
+	data, readErr := os.ReadFile(ledgerPath)
+	require.NoError(t, readErr)
+	require.NoError(t, json.Unmarshal(data, &ledger))
+	require.Len(t, ledger.Admissions, 2)
+	require.Len(t, ledger.Attempts, 1)
+	require.Len(t, ledger.Results, 2)
+	assert.True(t, ledger.Admissions[0].Admitted)
+	assert.False(t, ledger.Admissions[1].Admitted)
+	assert.Equal(t, "after", ledger.Admissions[1].ChildID)
+	assert.Contains(t, ledger.Admissions[1].DenyReason, context.Canceled.Error())
+	assert.Equal(t, StatusCanceled, ledger.Results[1].Status)
+	assert.Equal(t, ledger.Admissions[1].AdmissionID, ledger.Results[1].AdmissionID)
+}
+
 func TestPlan_RunWithOptions_RetriesPersistsAndResumes(t *testing.T) {
 	t.Parallel()
 
@@ -374,6 +505,7 @@ func TestPlan_RunWithOptions_RetriesPersistsAndResumes(t *testing.T) {
 		LedgerPath:  ledgerPath,
 		RetryPolicy: RetryPolicy{MaxAttempts: 2},
 		Model:       "codex/gpt-test",
+		WorkspaceID: "parent-run-a",
 	})
 	require.NoError(t, err)
 	require.Len(t, results, 3)
@@ -394,11 +526,17 @@ func TestPlan_RunWithOptions_RetriesPersistsAndResumes(t *testing.T) {
 	calls = map[string]int{}
 	mu.Unlock()
 
-	resumed, err := plan.RunWithOptions(t.Context(), runner, RunOptions{LedgerPath: ledgerPath, Resume: true, Model: "codex/gpt-test"})
+	resumed, err := plan.RunWithOptions(t.Context(), runner, RunOptions{
+		LedgerPath:  ledgerPath,
+		Resume:      true,
+		Model:       "codex/gpt-test",
+		WorkspaceID: "parent-run-b",
+	})
 	require.NoError(t, err)
 	require.Len(t, resumed, 3)
 	assert.Equal(t, []string{StatusSkipped, StatusSkipped, StatusSkipped}, []string{resumed[0].Status, resumed[1].Status, resumed[2].Status})
 	assert.True(t, resumed[0].Resumed)
+	assert.Equal(t, "parent-run-b/ok", resumed[0].Task.WorkspaceID)
 	assert.Equal(t, "after-done", resumed[2].Output)
 
 	mu.Lock()
@@ -413,7 +551,12 @@ func TestPlan_RunWithOptions_RetriesPersistsAndResumes(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	changed, err := changedPlan.RunWithOptions(t.Context(), runner, RunOptions{LedgerPath: ledgerPath, Resume: true, Model: "codex/gpt-test"})
+	changed, err := changedPlan.RunWithOptions(t.Context(), runner, RunOptions{
+		LedgerPath:  ledgerPath,
+		Resume:      true,
+		Model:       "codex/gpt-test",
+		WorkspaceID: "parent-run-b",
+	})
 	require.NoError(t, err)
 	require.Len(t, changed, 3)
 	assert.Equal(t, StatusSucceeded, changed[0].Status)
@@ -459,9 +602,11 @@ func TestPlan_RunWithOptions_ResumesAfterFailedWave(t *testing.T) {
 
 	results, err := plan.RunWithOptions(t.Context(), runner, RunOptions{LedgerPath: ledgerPath})
 	require.Error(t, err)
-	require.Len(t, results, 2)
+	require.Len(t, results, 3)
 	assert.Equal(t, StatusSucceeded, results[0].Status)
 	assert.Equal(t, StatusFailed, results[1].Status)
+	assert.Equal(t, StatusDenied, results[2].Status)
+	assert.Contains(t, results[2].Error, `upstream wave halted after task "fail" failed`)
 
 	failing.Store(false)
 	mu.Lock()
@@ -483,6 +628,86 @@ func TestPlan_RunWithOptions_ResumesAfterFailedWave(t *testing.T) {
 	assert.Zero(t, calls["ok"])
 	assert.Equal(t, 1, calls[failingID])
 	assert.Equal(t, 1, calls["after"])
+}
+
+func TestPlan_RunWithOptions_RecordsAdmissionDenialWhenRetryBackoffCanceled(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]Task{{ID: "flaky", Agent: "executor", Prompt: "flaky"}})
+	require.NoError(t, err)
+
+	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	go cancelAfterFailedAttempt(ctx, cancel, ledgerPath)
+
+	var calls atomic.Int32
+	results, err := plan.RunWithOptions(ctx, func(context.Context, Task) (string, error) {
+		if calls.Add(1) == 1 {
+			return partialOutput, errors.New("try again")
+		}
+
+		return shouldNotRunOutput, nil
+	}, RunOptions{
+		LedgerPath: ledgerPath,
+		RetryPolicy: RetryPolicy{
+			MaxAttempts: 2,
+			Backoff:     time.Hour,
+		},
+	})
+
+	require.Error(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, StatusCanceled, results[0].Status)
+	assert.Equal(t, 1, results[0].Attempts)
+	assert.Equal(t, int32(1), calls.Load())
+
+	var ledger Ledger
+	data, readErr := os.ReadFile(ledgerPath)
+	require.NoError(t, readErr)
+	require.NoError(t, json.Unmarshal(data, &ledger))
+	require.Len(t, ledger.Admissions, 2)
+	assert.True(t, ledger.Admissions[0].Admitted)
+	assert.Equal(t, 1, ledger.Admissions[0].Attempt)
+	assert.False(t, ledger.Admissions[1].Admitted)
+	assert.Equal(t, 2, ledger.Admissions[1].Attempt)
+	assert.Contains(t, ledger.Admissions[1].DenyReason, "retry backoff canceled")
+	assert.Equal(t, ledger.Admissions[1].AdmissionID, results[0].AdmissionID)
+	require.Len(t, ledger.Attempts, 1)
+	assert.Equal(t, StatusFailed, ledger.Attempts[0].Status)
+	assert.Equal(t, ledger.Admissions[0].AdmissionID, ledger.Attempts[0].AdmissionID)
+	require.Len(t, ledger.Results, 1)
+	assert.Equal(t, StatusCanceled, ledger.Results[0].Status)
+	assert.Equal(t, ledger.Admissions[1].AdmissionID, ledger.Results[0].AdmissionID)
+}
+
+func cancelAfterFailedAttempt(ctx context.Context, cancel context.CancelFunc, ledgerPath string) {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			data, err := os.ReadFile(ledgerPath)
+			if err != nil {
+				continue
+			}
+
+			var ledger Ledger
+			if err := json.Unmarshal(data, &ledger); err != nil {
+				continue
+			}
+
+			for i := range ledger.Attempts {
+				if ledger.Attempts[i].Status == StatusFailed {
+					cancel()
+					return
+				}
+			}
+		}
+	}
 }
 
 func TestPlan_RunWithOptions_ResumeRerunsAfterLatestMatchingFailure(t *testing.T) {
@@ -673,7 +898,7 @@ func TestPlan_RunWithOptions_ResumeIgnoresDependencyOrder(t *testing.T) {
 	require.NoError(t, err)
 
 	results, err := initial.RunWithOptions(t.Context(), func(context.Context, Task) (string, error) {
-		return "done", nil
+		return doneOutput, nil
 	}, RunOptions{LedgerPath: ledgerPath})
 	require.NoError(t, err)
 	require.Len(t, results, 3)
@@ -706,7 +931,7 @@ func TestPlan_RunWithOptions_ResumeRequiresExistingLedger(t *testing.T) {
 	var calls atomic.Int32
 	runner := func(context.Context, Task) (string, error) {
 		calls.Add(1)
-		return "should not run", nil
+		return shouldNotRunOutput, nil
 	}
 
 	results, err := plan.RunWithOptions(t.Context(), runner, RunOptions{Resume: true})
@@ -730,20 +955,30 @@ func TestPlan_RunWithOptions_ResumeRecoversRunningAttempt(t *testing.T) {
 	require.NoError(t, err)
 
 	started := time.Now().UTC().Add(-time.Minute)
+	admissionID := "admission-before-crash"
 	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
 	data, err := json.MarshalIndent(Ledger{
 		StartedAt: started,
 		UpdatedAt: started,
 		RunID:     "run-before-crash",
 		Tasks:     []Task{task},
+		Admissions: []Admission{{
+			RecordedAt:  started,
+			AdmissionID: admissionID,
+			ChildID:     task.ID,
+			ParentRunID: "run-before-crash",
+			Admitted:    true,
+			Attempt:     1,
+		}},
 		Attempts: []TaskAttempt{{
-			StartedAt: started,
-			Wave:      0,
-			Order:     0,
-			Attempt:   1,
-			Task:      task,
-			Status:    StatusRunning,
-			Usage:     Usage{PromptTokens: 1},
+			StartedAt:   started,
+			Wave:        0,
+			Order:       0,
+			Attempt:     1,
+			Task:        task,
+			Status:      StatusRunning,
+			AdmissionID: admissionID,
+			Usage:       Usage{PromptTokens: 1},
 		}},
 	}, "", "  ")
 	require.NoError(t, err)
@@ -770,6 +1005,12 @@ func TestPlan_RunWithOptions_ResumeRecoversRunningAttempt(t *testing.T) {
 	assert.Equal(t, StatusCanceled, ledger.Attempts[0].Status)
 	assert.Contains(t, ledger.Attempts[0].Error, "recovered running attempt")
 	assert.False(t, ledger.Attempts[0].FinishedAt.IsZero())
+	require.Len(t, ledger.StopReceipts, 1)
+	assert.Equal(t, ledger.Attempts[0].StopID, ledger.StopReceipts[0].StopID)
+	assert.Equal(t, admissionID, ledger.StopReceipts[0].AdmissionID)
+	assert.Equal(t, task.ID, ledger.StopReceipts[0].ChildID)
+	assert.Equal(t, StatusCanceled, ledger.StopReceipts[0].Status)
+	assert.Contains(t, ledger.StopReceipts[0].Reason, "recovered running attempt")
 	assert.Equal(t, StatusSucceeded, ledger.Attempts[1].Status)
 }
 
@@ -782,14 +1023,30 @@ func TestPlan_RunWithOptions_TimeoutAndBudgetExhaustion(t *testing.T) {
 		plan, err := NewPlan([]Task{{ID: slowID, Agent: "executor", Prompt: slowID}})
 		require.NoError(t, err)
 
+		ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
 		results, err := plan.RunWithOptions(t.Context(), func(ctx context.Context, _ Task) (string, error) {
 			<-ctx.Done()
 			return "", ctx.Err()
-		}, RunOptions{Timeout: 10 * time.Millisecond})
+		}, RunOptions{LedgerPath: ledgerPath, Timeout: 10 * time.Millisecond})
 
 		require.Error(t, err)
 		require.Len(t, results, 1)
+		assert.Contains(t, err.Error(), `task "slow" timed out`)
 		assert.Equal(t, StatusTimedOut, results[0].Status)
+		assert.NotEmpty(t, results[0].AdmissionID)
+		assert.NotEmpty(t, results[0].StopID)
+
+		var ledger Ledger
+		data, readErr := os.ReadFile(ledgerPath)
+		require.NoError(t, readErr)
+		require.NoError(t, json.Unmarshal(data, &ledger))
+		require.Len(t, ledger.StopReceipts, 1)
+		assert.Equal(t, results[0].AdmissionID, ledger.StopReceipts[0].AdmissionID)
+		assert.Equal(t, results[0].StopID, ledger.StopReceipts[0].StopID)
+		assert.Equal(t, slowID, ledger.StopReceipts[0].ChildID)
+		assert.Equal(t, StatusTimedOut, ledger.StopReceipts[0].Status)
+		assert.Equal(t, 0, ledger.StopReceipts[0].Wave)
+		assert.Equal(t, 0, ledger.StopReceipts[0].Order)
 	})
 
 	t.Run("timeout even when runner returns success after deadline", func(t *testing.T) {
@@ -927,12 +1184,13 @@ func TestPlan_RunWithOptions_TimeoutAndBudgetExhaustion(t *testing.T) {
 		})
 		require.NoError(t, err)
 
+		ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
 		var calls atomic.Int32
 		results, err := plan.RunDetailedWithOptions(t.Context(), func(context.Context, Task) (TaskRunOutput, error) {
 			calls.Add(1)
 
 			return TaskRunOutput{Stdout: "abcd", BudgetExhausted: true}, nil
-		}, RunOptions{MaxConcurrency: 1})
+		}, RunOptions{LedgerPath: ledgerPath, MaxConcurrency: 1})
 
 		require.Error(t, err)
 		require.Len(t, results, 2)
@@ -941,6 +1199,28 @@ func TestPlan_RunWithOptions_TimeoutAndBudgetExhaustion(t *testing.T) {
 		assert.Equal(t, "abcd", results[0].Output)
 		assert.Contains(t, results[0].Error, "budget exhausted by runner")
 		assert.Equal(t, int32(1), calls.Load())
+
+		var ledger Ledger
+		data, readErr := os.ReadFile(ledgerPath)
+		require.NoError(t, readErr)
+		require.NoError(t, json.Unmarshal(data, &ledger))
+		require.Len(t, ledger.Admissions, 2)
+		admissions := map[string]Admission{}
+		for _, admission := range ledger.Admissions {
+			admissions[admission.ChildID] = admission
+		}
+		assert.True(t, admissions["chatty"].Admitted)
+		assert.False(t, admissions["queued"].Admitted)
+		assert.Contains(t, admissions["queued"].DenyReason, context.Canceled.Error())
+		assert.Equal(t, admissions["queued"].AdmissionID, results[1].AdmissionID)
+		require.Len(t, ledger.StopReceipts, 1)
+		assert.Equal(t, results[0].AdmissionID, ledger.StopReceipts[0].AdmissionID)
+		assert.Equal(t, results[0].StopID, ledger.StopReceipts[0].StopID)
+		assert.Equal(t, "chatty", ledger.StopReceipts[0].ChildID)
+		assert.Equal(t, StatusBudgetExhausted, ledger.StopReceipts[0].Status)
+		assert.Contains(t, ledger.StopReceipts[0].Reason, "budget exhausted by runner")
+		require.Len(t, ledger.Attempts, 1)
+		assert.Equal(t, "chatty", ledger.Attempts[0].Task.ID)
 	})
 
 	t.Run("resume keeps exhausted output budget closed", func(t *testing.T) {
@@ -964,13 +1244,47 @@ func TestPlan_RunWithOptions_TimeoutAndBudgetExhaustion(t *testing.T) {
 		calls.Store(0)
 		resumed, err := plan.RunWithOptions(t.Context(), func(context.Context, Task) (string, error) {
 			calls.Add(1)
-			return "should not run", nil
+			return shouldNotRunOutput, nil
 		}, RunOptions{LedgerPath: ledgerPath, Resume: true, Budget: Budget{MaxOutputBytes: 4}})
 
 		require.Error(t, err)
 		require.Len(t, resumed, 1)
 		assert.Equal(t, StatusBudgetExhausted, resumed[0].Status)
 		assert.Contains(t, resumed[0].Error, "output byte budget exhausted")
+		assert.Equal(t, int32(0), calls.Load())
+	})
+
+	t.Run("resume keeps exhausted token and cost budget closed", func(t *testing.T) {
+		t.Parallel()
+
+		plan, err := NewPlan([]Task{{ID: "actual", Agent: "executor", Prompt: "actual", EstimatedPromptTokens: 1, EstimatedCostMicros: 1}})
+		require.NoError(t, err)
+
+		ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+		var calls atomic.Int32
+		results, err := plan.RunDetailedWithOptions(t.Context(), func(context.Context, Task) (TaskRunOutput, error) {
+			calls.Add(1)
+
+			return TaskRunOutput{Stdout: "ok", PromptTokens: 10, EstimatedCostMicros: 10}, nil
+		}, RunOptions{LedgerPath: ledgerPath, Budget: Budget{MaxPromptTokens: 5, MaxCostMicros: 5}})
+
+		require.Error(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, StatusBudgetExhausted, results[0].Status)
+		assert.Equal(t, int32(1), calls.Load())
+
+		calls.Store(0)
+		resumed, err := plan.RunDetailedWithOptions(t.Context(), func(context.Context, Task) (TaskRunOutput, error) {
+			calls.Add(1)
+
+			return TaskRunOutput{Stdout: shouldNotRunOutput}, nil
+		}, RunOptions{LedgerPath: ledgerPath, Resume: true, Budget: Budget{MaxPromptTokens: 5, MaxCostMicros: 5}})
+
+		require.Error(t, err)
+		require.Len(t, resumed, 1)
+		assert.Equal(t, StatusBudgetExhausted, resumed[0].Status)
+		assert.Contains(t, resumed[0].Error, "prompt token budget exceeded")
+		assert.Contains(t, resumed[0].Error, "cost budget exceeded")
 		assert.Equal(t, int32(0), calls.Load())
 	})
 
@@ -992,6 +1306,279 @@ func TestPlan_RunWithOptions_TimeoutAndBudgetExhaustion(t *testing.T) {
 		assert.Equal(t, 10, results[0].Usage.PromptTokens)
 		assert.Equal(t, int64(10), results[0].Usage.EstimatedCostMicros)
 	})
+}
+
+func TestPlan_RunWithOptions_PersistsAdmissionDenialBeforeSpawn(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]Task{{ID: "expensive", Agent: "executor", Prompt: "expensive", EstimatedPromptTokens: 10}})
+	require.NoError(t, err)
+
+	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+	var called atomic.Bool
+	results, err := plan.RunWithOptions(t.Context(), func(context.Context, Task) (string, error) {
+		called.Store(true)
+
+		return shouldNotRunOutput, nil
+	}, RunOptions{
+		LedgerPath:        ledgerPath,
+		WorkspaceID:       "parent-session",
+		AllowedWriteScope: t.TempDir(),
+		Model:             "codex/gpt-test",
+		Provider:          "codex",
+		Timeout:           time.Second,
+		RetryPolicy:       RetryPolicy{MaxAttempts: 3},
+		Budget:            Budget{MaxPromptTokens: 5},
+	})
+
+	require.Error(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, StatusBudgetExhausted, results[0].Status)
+	assert.Contains(t, err.Error(), `task "expensive" budget exhausted`)
+	assert.False(t, called.Load())
+
+	var ledger Ledger
+	data, readErr := os.ReadFile(ledgerPath)
+	require.NoError(t, readErr)
+	require.NoError(t, json.Unmarshal(data, &ledger))
+	require.Len(t, ledger.Admissions, 1)
+	admission := ledger.Admissions[0]
+	assert.NotEmpty(t, admission.AdmissionID)
+	assert.Equal(t, "expensive", admission.ChildID)
+	assert.Equal(t, ledger.RunID, admission.ParentRunID)
+	assert.Equal(t, "parent-session/expensive", admission.WorkspaceID)
+	assert.Equal(t, "codex/gpt-test", admission.Model)
+	assert.Equal(t, "codex", admission.Provider)
+	assert.Equal(t, time.Second, admission.Timeout)
+	assert.Equal(t, Budget{MaxPromptTokens: 5}, admission.Budget)
+	assert.Equal(t, RetryPolicy{MaxAttempts: 3}, admission.RetryPolicy)
+	assert.False(t, admission.Admitted)
+	assert.Contains(t, admission.DenyReason, "prompt token budget exceeded")
+	assert.Equal(t, admission.AdmissionID, results[0].AdmissionID)
+	require.Len(t, ledger.Results, 1)
+	assert.Equal(t, admission.AdmissionID, ledger.Results[0].AdmissionID)
+	assert.Empty(t, ledger.Attempts)
+}
+
+func TestPlan_RunWithOptions_PersistsAdmissionBeforeRunner(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]Task{{ID: "preflight", Agent: "executor", Prompt: "preflight"}})
+	require.NoError(t, err)
+
+	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+	results, err := plan.RunWithOptions(t.Context(), func(context.Context, Task) (string, error) {
+		data, readErr := os.ReadFile(ledgerPath)
+		if readErr != nil {
+			return "", fmt.Errorf("read ledger before runner body: %w", readErr)
+		}
+
+		var ledger Ledger
+		if unmarshalErr := json.Unmarshal(data, &ledger); unmarshalErr != nil {
+			return "", fmt.Errorf("unmarshal ledger before runner body: %w", unmarshalErr)
+		}
+
+		if len(ledger.Admissions) != 1 {
+			return "", fmt.Errorf("expected one admission before runner body, got %d", len(ledger.Admissions))
+		}
+
+		admission := ledger.Admissions[0]
+		if !admission.Admitted || admission.AdmissionID == "" || admission.ChildID != "preflight" || admission.ParentRunID == "" {
+			return "", fmt.Errorf("unexpected admission before runner body: %+v", admission)
+		}
+
+		if len(ledger.Attempts) != 1 {
+			return "", fmt.Errorf("expected one running attempt before runner body, got %d", len(ledger.Attempts))
+		}
+
+		attempt := ledger.Attempts[0]
+		if attempt.Status != StatusRunning || attempt.AdmissionID != admission.AdmissionID {
+			return "", fmt.Errorf("unexpected attempt before runner body: %+v", attempt)
+		}
+
+		return doneOutput, nil
+	}, RunOptions{
+		LedgerPath:        ledgerPath,
+		WorkspaceID:       "parent-run",
+		AllowedWriteScope: t.TempDir(),
+		Timeout:           time.Second,
+		Budget:            Budget{MaxPromptTokens: 10},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, StatusSucceeded, results[0].Status)
+	assert.NotEmpty(t, results[0].AdmissionID)
+}
+
+func TestPlan_RunWithOptions_DeniesScopeViolationBeforeSpawn(t *testing.T) {
+	t.Parallel()
+
+	parentScope := t.TempDir()
+	childScope := filepath.Join(parentScope, "..", "outside-scope")
+	plan, err := NewPlan([]Task{{
+		ID:                "escape",
+		Agent:             "executor",
+		Prompt:            "escape",
+		AllowedWriteScope: childScope,
+	}})
+	require.NoError(t, err)
+
+	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+	var called atomic.Bool
+	results, err := plan.RunWithOptions(t.Context(), func(context.Context, Task) (string, error) {
+		called.Store(true)
+
+		return shouldNotRunOutput, nil
+	}, RunOptions{LedgerPath: ledgerPath, AllowedWriteScope: parentScope})
+
+	require.Error(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, StatusDenied, results[0].Status)
+	assert.Contains(t, err.Error(), `task "escape" denied`)
+	assert.False(t, called.Load())
+
+	var ledger Ledger
+	data, readErr := os.ReadFile(ledgerPath)
+	require.NoError(t, readErr)
+	require.NoError(t, json.Unmarshal(data, &ledger))
+	require.Len(t, ledger.Admissions, 1)
+	admission := ledger.Admissions[0]
+	assert.False(t, admission.Admitted)
+	assert.Equal(t, childScope, admission.AllowedWriteScope)
+	assert.Contains(t, admission.DenyReason, "escapes parent scope")
+	assert.Equal(t, admission.AdmissionID, results[0].AdmissionID)
+	require.Len(t, ledger.Results, 1)
+	assert.Equal(t, StatusDenied, ledger.Results[0].Status)
+	assert.Equal(t, admission.AdmissionID, ledger.Results[0].AdmissionID)
+	assert.Empty(t, ledger.Attempts)
+}
+
+func TestPlan_RunWithOptions_PersistsAdmissionForHaltedSibling(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]Task{
+		{ID: failingID, Agent: "executor", Prompt: failingID},
+		{ID: slowID, Agent: "executor", Prompt: slowID},
+	})
+	require.NoError(t, err)
+
+	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+	slowStarted := make(chan struct{})
+	releaseFailure := make(chan struct{})
+
+	results, err := plan.RunWithOptions(t.Context(), func(ctx context.Context, task Task) (string, error) {
+		switch task.ID {
+		case failingID:
+			<-slowStarted
+			close(releaseFailure)
+
+			return partialOutput, errors.New("boom")
+		case slowID:
+			close(slowStarted)
+			<-releaseFailure
+			<-ctx.Done()
+
+			return "", ctx.Err()
+		default:
+			return "", nil
+		}
+	}, RunOptions{LedgerPath: ledgerPath, MaxConcurrency: 2, CancelOnFailure: true})
+
+	require.Error(t, err)
+	require.Len(t, results, 2)
+	assert.Equal(t, StatusFailed, results[0].Status)
+	assert.Equal(t, StatusCanceled, results[1].Status)
+
+	var ledger Ledger
+	data, readErr := os.ReadFile(ledgerPath)
+	require.NoError(t, readErr)
+	require.NoError(t, json.Unmarshal(data, &ledger))
+	require.Len(t, ledger.Admissions, 2)
+	admissions := map[string]Admission{}
+	for _, admission := range ledger.Admissions {
+		admissions[admission.ChildID] = admission
+	}
+	require.Contains(t, admissions, failingID)
+	require.Contains(t, admissions, slowID)
+	assert.NotEmpty(t, admissions[failingID].AdmissionID)
+	assert.NotEmpty(t, admissions[slowID].AdmissionID)
+	assert.NotEqual(t, admissions[failingID].AdmissionID, admissions[slowID].AdmissionID)
+	assert.True(t, admissions[failingID].Admitted)
+	assert.True(t, admissions[slowID].Admitted)
+	assert.Empty(t, admissions[slowID].DenyReason)
+	assert.Equal(t, ledger.RunID, admissions[slowID].ParentRunID)
+	resultStatuses := map[string]string{}
+	resultAdmissions := map[string]string{}
+	resultStops := map[string]string{}
+	for _, result := range ledger.Results {
+		resultStatuses[result.Task.ID] = result.Status
+		resultAdmissions[result.Task.ID] = result.AdmissionID
+		resultStops[result.Task.ID] = result.StopID
+	}
+	attemptStatuses := map[string]string{}
+	attemptAdmissions := map[string]string{}
+	attemptStops := map[string]string{}
+	for _, attempt := range ledger.Attempts {
+		attemptStatuses[attempt.Task.ID] = attempt.Status
+		attemptAdmissions[attempt.Task.ID] = attempt.AdmissionID
+		attemptStops[attempt.Task.ID] = attempt.StopID
+	}
+	require.Len(t, ledger.StopReceipts, 1)
+	stopReceipt := ledger.StopReceipts[0]
+	assert.NotEmpty(t, stopReceipt.StopID)
+	assert.Equal(t, slowID, stopReceipt.ChildID)
+	assert.Equal(t, StatusCanceled, stopReceipt.Status)
+	assert.Equal(t, admissions[slowID].AdmissionID, stopReceipt.AdmissionID)
+	assert.Equal(t, StatusCanceled, resultStatuses[slowID])
+	assert.Equal(t, StatusCanceled, attemptStatuses[slowID])
+	assert.Equal(t, admissions[slowID].AdmissionID, resultAdmissions[slowID])
+	assert.Equal(t, admissions[slowID].AdmissionID, attemptAdmissions[slowID])
+	assert.Equal(t, stopReceipt.StopID, resultStops[slowID])
+	assert.Equal(t, stopReceipt.StopID, attemptStops[slowID])
+}
+
+func TestPlan_RunWithOptions_PreCanceledContextPersistsAdmissionDenials(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]Task{
+		{ID: "plan", Agent: "planner", Prompt: "plan"},
+		{ID: "build", Agent: "executor", Prompt: "build", DependsOn: []string{"plan"}},
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+	var ran atomic.Bool
+	results, err := plan.RunWithOptions(ctx, func(context.Context, Task) (string, error) {
+		ran.Store(true)
+
+		return shouldNotRunOutput, nil
+	}, RunOptions{LedgerPath: ledgerPath})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context canceled before wave 0")
+	assert.False(t, ran.Load())
+	require.Len(t, results, 2)
+	assert.Equal(t, StatusCanceled, results[0].Status)
+	assert.Equal(t, StatusCanceled, results[1].Status)
+	assert.NotEmpty(t, results[0].AdmissionID)
+	assert.NotEmpty(t, results[1].AdmissionID)
+
+	var ledger Ledger
+	data, readErr := os.ReadFile(ledgerPath)
+	require.NoError(t, readErr)
+	require.NoError(t, json.Unmarshal(data, &ledger))
+	require.Len(t, ledger.Admissions, 2)
+	require.Len(t, ledger.Results, 2)
+	assert.Empty(t, ledger.Attempts)
+	for _, admission := range ledger.Admissions {
+		assert.False(t, admission.Admitted)
+		assert.Contains(t, admission.DenyReason, context.Canceled.Error())
+		assert.Equal(t, ledger.RunID, admission.ParentRunID)
+	}
 }
 
 func TestPlan_RunDetailedWithOptions_PersistsTranscriptAndExitStatus(t *testing.T) {

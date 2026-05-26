@@ -28,6 +28,8 @@ const (
 	StatusSucceeded = "succeeded"
 	// StatusFailed means a child request returned an error.
 	StatusFailed = "failed"
+	// StatusDenied means a child request was denied before spawn by admission policy.
+	StatusDenied = "denied"
 	// StatusCanceled means a child request was canceled before completion.
 	StatusCanceled = "canceled"
 	// StatusTimedOut means a child request exceeded its per-child timeout.
@@ -125,6 +127,8 @@ type Result struct {
 	Error          string        `json:"error,omitempty"`
 	Status         string        `json:"status"`
 	LedgerPath     string        `json:"ledger_path,omitempty"`
+	AdmissionID    string        `json:"admission_id,omitempty"`
+	StopID         string        `json:"stop_id,omitempty"`
 	TranscriptPath string        `json:"transcript_path,omitempty"`
 	Artifacts      []string      `json:"artifacts,omitempty"`
 	Usage          Usage         `json:"usage,omitempty"`
@@ -147,22 +151,61 @@ type Attempt struct {
 	Stderr         string        `json:"stderr,omitempty"`
 	Error          string        `json:"error,omitempty"`
 	ExitStatus     int           `json:"exit_status,omitempty"`
+	AdmissionID    string        `json:"admission_id,omitempty"`
+	StopID         string        `json:"stop_id,omitempty"`
 	TranscriptPath string        `json:"transcript_path,omitempty"`
 	Artifacts      []string      `json:"artifacts,omitempty"`
 	Usage          Usage         `json:"usage,omitempty"`
+}
+
+// Admission captures the durable decision boundary before a child request is
+// allowed to spawn or denied by resource/cancellation policy.
+//
+//nolint:govet // Field order keeps identity and policy before the decision.
+type Admission struct {
+	RecordedAt        time.Time     `json:"recorded_at"`
+	AdmissionID       string        `json:"admission_id"`
+	ChildID           string        `json:"child_id"`
+	ParentRunID       string        `json:"parent_run_id"`
+	WorkspaceID       string        `json:"workspace_id,omitempty"`
+	AllowedWriteScope string        `json:"allowed_write_scope,omitempty"`
+	Model             string        `json:"model,omitempty"`
+	Provider          string        `json:"provider,omitempty"`
+	Timeout           time.Duration `json:"timeout,omitempty"`
+	Budget            Budget        `json:"budget,omitempty"`
+	RetryPolicy       RetryPolicy   `json:"retry_policy,omitempty"`
+	Attempt           int           `json:"attempt,omitempty"`
+	Admitted          bool          `json:"admitted"`
+	DenyReason        string        `json:"deny_reason,omitempty"`
+}
+
+// StopReceipt captures the durable halt boundary for an admitted child.
+//
+//nolint:govet // Field order keeps identity before terminal reason metadata.
+type StopReceipt struct {
+	RecordedAt  time.Time `json:"recorded_at"`
+	StopID      string    `json:"stop_id"`
+	AdmissionID string    `json:"admission_id"`
+	ChildID     string    `json:"child_id"`
+	ParentRunID string    `json:"parent_run_id"`
+	Attempt     int       `json:"attempt"`
+	Status      string    `json:"status"`
+	Reason      string    `json:"reason,omitempty"`
 }
 
 // Ledger is an auditable JSON document for a spawn run.
 //
 //nolint:govet // Field order keeps lifecycle metadata before detailed records.
 type Ledger struct {
-	StartedAt time.Time `json:"started_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	RunID     string    `json:"run_id"`
-	Options   Options   `json:"options"`
-	Requests  []Request `json:"requests"`
-	Attempts  []Attempt `json:"attempts,omitempty"`
-	Results   []Result  `json:"results,omitempty"`
+	StartedAt    time.Time     `json:"started_at"`
+	UpdatedAt    time.Time     `json:"updated_at"`
+	RunID        string        `json:"run_id"`
+	Options      Options       `json:"options"`
+	Requests     []Request     `json:"requests"`
+	Admissions   []Admission   `json:"admissions,omitempty"`
+	StopReceipts []StopReceipt `json:"stop_receipts,omitempty"`
+	Attempts     []Attempt     `json:"attempts,omitempty"`
+	Results      []Result      `json:"results,omitempty"`
 }
 
 // CommandOptions controls AttelerCommand invocations.
@@ -213,16 +256,15 @@ func SpawnAllDetailed(ctx context.Context, requests []Request, run DetailedRunne
 		return nil, err
 	}
 
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("subagent: context canceled before spawning: %w", err)
-	}
-
 	opts = normalizeOptions(opts, len(requests))
 	requests = applyRequestDefaults(requests, opts)
 
 	ledger, err := openLedger(opts, requests)
 	if err != nil {
 		return nil, err
+	}
+	if err := ctx.Err(); err != nil && ledger == nil {
+		return nil, fmt.Errorf("subagent: context canceled before spawning: %w", err)
 	}
 
 	results := make([]Result, len(requests))
@@ -250,7 +292,7 @@ func SpawnAllDetailed(ctx context.Context, requests []Request, run DetailedRunne
 				results[index] = result
 				if err != nil {
 					errs[index] = err
-					if opts.CancelOnFailure || result.Status == StatusBudgetExhausted {
+					if opts.CancelOnFailure || result.Status == StatusBudgetExhausted || result.Status == StatusDenied {
 						cancel()
 					}
 				}
@@ -258,7 +300,7 @@ func SpawnAllDetailed(ctx context.Context, requests []Request, run DetailedRunne
 		}()
 	}
 
-	submitRequestJobs(ctx, requests, skipped, jobs, results, errs, ledger)
+	submitRequestJobs(ctx, requests, skipped, jobs, results, errs, ledger, opts)
 
 	close(jobs)
 	wg.Wait()
@@ -274,6 +316,7 @@ func submitRequestJobs(
 	results []Result,
 	errs []error,
 	ledger *ledgerStore,
+	opts Options,
 ) {
 	for i := range requests {
 		if skipped[i] {
@@ -281,13 +324,13 @@ func submitRequestJobs(
 		}
 
 		if err := ctx.Err(); err != nil {
-			recordRequestCanceledBeforeStart(i, requests[i], results, errs, ledger, err)
+			recordRequestCanceledBeforeStart(i, requests[i], results, errs, ledger, opts, err)
 			continue
 		}
 
 		select {
 		case <-ctx.Done():
-			recordRequestCanceledBeforeStart(i, requests[i], results, errs, ledger, ctx.Err())
+			recordRequestCanceledBeforeStart(i, requests[i], results, errs, ledger, opts, ctx.Err())
 		case jobs <- i:
 		}
 	}
@@ -299,9 +342,12 @@ func recordRequestCanceledBeforeStart(
 	results []Result,
 	errs []error,
 	ledger *ledgerStore,
+	opts Options,
 	err error,
 ) {
-	results[index] = canceledBeforeStartResult(request, ledger)
+	admission := admissionForRequest(request, 0, false, err, ledger, opts)
+	ignoreLedgerError(ledger.recordAdmission(admission))
+	results[index] = canceledBeforeStartResult(request, ledger, admission.AdmissionID, err)
 	errs[index] = fmt.Errorf("subagent: request %q canceled before start: %w", request.ID, err)
 }
 
@@ -340,6 +386,8 @@ func AttelerCommandWithOptions(opts CommandOptions) Runner {
 
 // AttelerCommandDetailedWithOptions returns a DetailedRunner that invokes an
 // atteler binary once per request with --agent and --once arguments.
+//
+//nolint:gocognit // Keep authorization, output-limit, audit, and failure handling linear and explicit.
 func AttelerCommandDetailedWithOptions(opts CommandOptions) DetailedRunner {
 	return func(ctx context.Context, request Request) (RunOutput, error) {
 		if ctx == nil {
@@ -506,12 +554,25 @@ func WithOutputByteLimit(ctx context.Context, maxBytes int64) context.Context {
 	return context.WithValue(ctx, outputByteLimitContextKey{}, maxBytes)
 }
 
-func commandOutputByteLimit(ctx context.Context, configured int64) int64 {
-	value := ctx.Value(outputByteLimitContextKey{})
-	remaining, ok := value.(int64)
-	if !ok {
-		remaining = 0
+// OutputByteLimit returns the remaining aggregate output-byte budget for the
+// current child invocation, when one is configured. DetailedRunner
+// implementations that can enforce output caps during execution should honor
+// this value.
+func OutputByteLimit(ctx context.Context) int64 {
+	if ctx == nil {
+		return 0
 	}
+
+	remaining, ok := ctx.Value(outputByteLimitContextKey{}).(int64)
+	if !ok || remaining <= 0 {
+		return 0
+	}
+
+	return remaining
+}
+
+func commandOutputByteLimit(ctx context.Context, configured int64) int64 {
+	remaining := OutputByteLimit(ctx)
 
 	switch {
 	case remaining <= 0:
@@ -545,6 +606,7 @@ func (l *commandOutputLimiter) exceededLimit() bool {
 	return l.exceeded
 }
 
+//nolint:gocognit // Retry, admission, budget, timeout, and ledger ordering must stay explicit.
 func runRequest(
 	ctx context.Context,
 	request Request,
@@ -559,26 +621,45 @@ func runRequest(
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
+			admission := admissionForRequest(request, attempt, false, err, ledger, opts)
+			ignoreLedgerError(ledger.recordAdmission(admission))
 			last = resultFromError(request, ledger, StatusCanceled, attempt-1, err)
+			last.AdmissionID = admission.AdmissionID
 			ignoreLedgerError(ledger.recordResult(last))
 
 			return last, fmt.Errorf("subagent: request %q canceled: %w", request.ID, err)
 		}
 
+		if err := validateAllowedWriteScope(request.AllowedWriteScope, opts.AllowedWriteScope); err != nil {
+			admission := admissionForRequest(request, attempt, false, err, ledger, opts)
+			ignoreLedgerError(ledger.recordAdmission(admission))
+			last = resultFromError(request, ledger, StatusDenied, attempt-1, err)
+			last.AdmissionID = admission.AdmissionID
+			ignoreLedgerError(ledger.recordResult(last))
+
+			return last, fmt.Errorf("subagent: request %q denied: %w", request.ID, err)
+		}
+
 		usage, err := budget.reserve(request)
 		if err != nil {
+			admission := admissionForRequest(request, attempt, false, err, ledger, opts)
+			ignoreLedgerError(ledger.recordAdmission(admission))
 			last = resultFromError(request, ledger, StatusBudgetExhausted, attempt-1, err)
+			last.AdmissionID = admission.AdmissionID
 			ignoreLedgerError(ledger.recordResult(last))
-			ignoreLedgerError(ledger.appendAttempt(Attempt{
-				StartedAt:  last.StartedAt,
-				FinishedAt: last.FinishedAt,
-				Request:    request,
-				Attempt:    attempt,
-				Status:     StatusBudgetExhausted,
-				Error:      err.Error(),
-			}))
 
 			return last, fmt.Errorf("subagent: request %q budget exhausted: %w", request.ID, err)
+		}
+
+		admission := admissionForRequest(request, attempt, true, nil, ledger, opts)
+		admitErr := ledger.recordAdmission(admission)
+		if admitErr != nil {
+			admissionErr := fmt.Errorf("subagent: request %q admission failed: %w", request.ID, admitErr)
+			last = resultFromError(request, ledger, StatusFailed, attempt-1, admissionErr)
+			last.AdmissionID = admission.AdmissionID
+			ignoreLedgerError(ledger.recordResult(last))
+
+			return last, admissionErr
 		}
 
 		attemptCtx := ctx
@@ -591,11 +672,12 @@ func runRequest(
 		startedClock := time.Now()
 		started := startedClock.UTC()
 		attemptIndex := ledger.startAttempt(Attempt{
-			StartedAt: started,
-			Request:   request,
-			Attempt:   attempt,
-			Status:    StatusRunning,
-			Usage:     usage,
+			StartedAt:   started,
+			Request:     request,
+			Attempt:     attempt,
+			Status:      StatusRunning,
+			Usage:       usage,
+			AdmissionID: admission.AdmissionID,
 		})
 
 		out, err := run(attemptCtx, request)
@@ -616,6 +698,12 @@ func runRequest(
 			err = errors.Join(err, budgetErr)
 		}
 		status, err = statusAfterRunnerBudgetExhaustion(status, err, out)
+		stopID := ""
+		if statusNeedsStopReceipt(status) {
+			receipt := stopReceiptForRequest(request, attempt, admission.AdmissionID, status, err, ledger)
+			stopID = receipt.StopID
+			ignoreLedgerError(ledger.recordStopReceipt(receipt))
+		}
 		transcriptPath := ledger.writeTranscript(request.ID, attempt, out, err)
 		ledgerAttempt := Attempt{
 			StartedAt:      started,
@@ -627,6 +715,8 @@ func runRequest(
 			Stdout:         out.Stdout,
 			Stderr:         out.Stderr,
 			ExitStatus:     out.ExitStatus,
+			AdmissionID:    admission.AdmissionID,
+			StopID:         stopID,
 			TranscriptPath: transcriptPath,
 			Artifacts:      append([]string(nil), out.Artifacts...),
 			Usage:          usage,
@@ -645,6 +735,8 @@ func runRequest(
 			Stderr:         out.Stderr,
 			Status:         status,
 			LedgerPath:     ledger.path(),
+			AdmissionID:    admission.AdmissionID,
+			StopID:         stopID,
 			TranscriptPath: transcriptPath,
 			Artifacts:      append([]string(nil), out.Artifacts...),
 			Usage:          usage,
@@ -665,8 +757,10 @@ func runRequest(
 		}
 
 		if err := sleepBeforeRetry(ctx, opts.RetryPolicy.Backoff); err != nil {
-			last.Status = StatusCanceled
-			last.Error = err.Error()
+			admission := admissionForRequest(request, attempt+1, false, err, ledger, opts)
+			ignoreLedgerError(ledger.recordAdmission(admission))
+			last = resultFromError(request, ledger, StatusCanceled, attempt, err)
+			last.AdmissionID = admission.AdmissionID
 			lastErr = err
 			break
 		}
@@ -675,10 +769,25 @@ func runRequest(
 	ignoreLedgerError(ledger.recordResult(last))
 
 	if last.Attempts <= 1 {
-		return last, fmt.Errorf("subagent: request %q %s: %w", request.ID, last.Status, lastErr)
+		return last, fmt.Errorf("subagent: request %q %s: %w", request.ID, requestRunErrorStatus(last.Status), lastErr)
 	}
 
-	return last, fmt.Errorf("subagent: request %q %s after %d attempt(s): %w", request.ID, last.Status, last.Attempts, lastErr)
+	return last, fmt.Errorf("subagent: request %q %s after %d attempt(s): %w", request.ID, requestRunErrorStatus(last.Status), last.Attempts, lastErr)
+}
+
+func requestRunErrorStatus(status string) string {
+	switch status {
+	case StatusBudgetExhausted:
+		return "budget exhausted"
+	case StatusCanceled:
+		return "canceled"
+	case StatusDenied:
+		return "denied"
+	case StatusTimedOut:
+		return "timed out"
+	default:
+		return "failed"
+	}
 }
 
 func statusAfterRunnerBudgetExhaustion(status string, err error, out RunOutput) (string, error) {
@@ -759,11 +868,72 @@ func resultFromError(request Request, ledger *ledgerStore, status string, attemp
 	}
 }
 
-func canceledBeforeStartResult(request Request, ledger *ledgerStore) Result {
-	result := resultFromError(request, ledger, StatusCanceled, 0, context.Canceled)
+func canceledBeforeStartResult(request Request, ledger *ledgerStore, admissionID string, err error) Result {
+	result := resultFromError(request, ledger, StatusCanceled, 0, err)
+	result.AdmissionID = admissionID
 	ignoreLedgerError(ledger.recordResult(result))
 
 	return result
+}
+
+func admissionForRequest(
+	request Request,
+	attempt int,
+	admitted bool,
+	denyErr error,
+	ledger *ledgerStore,
+	opts Options,
+) Admission {
+	now := time.Now().UTC()
+	admission := Admission{
+		RecordedAt:        now,
+		AdmissionID:       "admission-" + newRunID(now),
+		ChildID:           request.ID,
+		ParentRunID:       ledger.runID(),
+		WorkspaceID:       request.WorkspaceID,
+		AllowedWriteScope: request.AllowedWriteScope,
+		Model:             request.Model,
+		Provider:          request.Provider,
+		Timeout:           opts.Timeout,
+		Budget:            opts.Budget,
+		RetryPolicy:       opts.RetryPolicy,
+		Attempt:           attempt,
+		Admitted:          admitted,
+	}
+	if denyErr != nil {
+		admission.DenyReason = denyErr.Error()
+	}
+
+	return admission
+}
+
+func statusNeedsStopReceipt(status string) bool {
+	return status == StatusCanceled || status == StatusTimedOut || status == StatusBudgetExhausted
+}
+
+func stopReceiptForRequest(
+	request Request,
+	attempt int,
+	admissionID string,
+	status string,
+	err error,
+	ledger *ledgerStore,
+) StopReceipt {
+	now := time.Now().UTC()
+	receipt := StopReceipt{
+		RecordedAt:  now,
+		StopID:      "stop-" + newRunID(now),
+		AdmissionID: admissionID,
+		ChildID:     request.ID,
+		ParentRunID: ledger.runID(),
+		Attempt:     attempt,
+		Status:      status,
+	}
+	if err != nil {
+		receipt.Reason = err.Error()
+	}
+
+	return receipt
 }
 
 func validateRequests(requests []Request) error {
@@ -890,6 +1060,37 @@ func requestWorkspaceID(parentWorkspaceID, requestID string) string {
 	}
 
 	return parentWorkspaceID + "/" + requestID
+}
+
+func validateAllowedWriteScope(childScope, parentScope string) error {
+	childScope = strings.TrimSpace(childScope)
+	parentScope = strings.TrimSpace(parentScope)
+	if childScope == "" || parentScope == "" {
+		return nil
+	}
+
+	parentAbs, err := filepath.Abs(parentScope)
+	if err != nil {
+		return fmt.Errorf("resolve parent allowed write scope %q: %w", parentScope, err)
+	}
+
+	childAbs, err := filepath.Abs(childScope)
+	if err != nil {
+		return fmt.Errorf("resolve child allowed write scope %q: %w", childScope, err)
+	}
+
+	parentAbs = filepath.Clean(parentAbs)
+	childAbs = filepath.Clean(childAbs)
+	rel, err := filepath.Rel(parentAbs, childAbs)
+	if err != nil {
+		return fmt.Errorf("compare child allowed write scope %q to parent scope %q: %w", childScope, parentScope, err)
+	}
+
+	if rel == "." || (!filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		return nil
+	}
+
+	return fmt.Errorf("allowed write scope %q escapes parent scope %q", childScope, parentScope)
 }
 
 func estimatePromptTokens(prompt string) int {
@@ -1039,16 +1240,21 @@ func (b *budgetTracker) reserve(request Request) (Usage, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	var errs []error
 	if b.maxOutputBytes > 0 && b.usedOutputBytes >= b.maxOutputBytes {
-		return usage, fmt.Errorf("output byte budget exhausted: used %d of %d", b.usedOutputBytes, b.maxOutputBytes)
+		errs = append(errs, fmt.Errorf("output byte budget exhausted: used %d of %d", b.usedOutputBytes, b.maxOutputBytes))
 	}
 
 	if b.maxPromptTokens > 0 && b.usedPromptTokens+usage.PromptTokens > b.maxPromptTokens {
-		return usage, fmt.Errorf("prompt token budget exceeded: requested %d, used %d of %d", usage.PromptTokens, b.usedPromptTokens, b.maxPromptTokens)
+		errs = append(errs, fmt.Errorf("prompt token budget exceeded: requested %d, used %d of %d", usage.PromptTokens, b.usedPromptTokens, b.maxPromptTokens))
 	}
 
 	if b.maxCostMicros > 0 && b.usedCostMicros+usage.EstimatedCostMicros > b.maxCostMicros {
-		return usage, fmt.Errorf("cost budget exceeded: requested %d micros, used %d of %d", usage.EstimatedCostMicros, b.usedCostMicros, b.maxCostMicros)
+		errs = append(errs, fmt.Errorf("cost budget exceeded: requested %d micros, used %d of %d", usage.EstimatedCostMicros, b.usedCostMicros, b.maxCostMicros))
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return usage, err
 	}
 
 	b.usedPromptTokens += usage.PromptTokens
@@ -1195,6 +1401,25 @@ func recoverRunningAttempts(ledger *Ledger, now time.Time) {
 		if ledger.Attempts[i].Error == "" {
 			ledger.Attempts[i].Error = "subagent: recovered running attempt during resume"
 		}
+
+		if ledger.Attempts[i].AdmissionID != "" {
+			receipt := recoveredStopReceipt(ledger, ledger.Attempts[i], now)
+			ledger.Attempts[i].StopID = receipt.StopID
+			ledger.StopReceipts = append(ledger.StopReceipts, receipt)
+		}
+	}
+}
+
+func recoveredStopReceipt(ledger *Ledger, attempt Attempt, now time.Time) StopReceipt {
+	return StopReceipt{
+		RecordedAt:  now,
+		StopID:      "stop-" + newRunID(now),
+		AdmissionID: attempt.AdmissionID,
+		ChildID:     attempt.Request.ID,
+		ParentRunID: ledger.RunID,
+		Attempt:     attempt.Attempt,
+		Status:      StatusCanceled,
+		Reason:      attempt.Error,
 	}
 }
 
@@ -1206,6 +1431,17 @@ func (s *ledgerStore) path() string {
 	return s.pathTo
 }
 
+func (s *ledgerStore) runID() string {
+	if s == nil {
+		return ""
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.ledger.RunID
+}
+
 func (s *ledgerStore) completedAttempts() []Attempt {
 	if s == nil {
 		return nil
@@ -1215,7 +1451,7 @@ func (s *ledgerStore) completedAttempts() []Attempt {
 	for i := range s.ledger.Attempts {
 		attempt := s.ledger.Attempts[i]
 		if attempt.Status == StatusSucceeded || attempt.Status == StatusFailed || attempt.Status == StatusTimedOut ||
-			attempt.Status == StatusCanceled || attempt.Status == StatusBudgetExhausted {
+			attempt.Status == StatusCanceled || attempt.Status == StatusBudgetExhausted || attempt.Status == StatusDenied {
 			attempts = append(attempts, attempt)
 		}
 	}
@@ -1269,6 +1505,8 @@ func resultFromAttempt(attempt Attempt) Result {
 		Stderr:         attempt.Stderr,
 		Error:          attempt.Error,
 		Status:         attempt.Status,
+		AdmissionID:    attempt.AdmissionID,
+		StopID:         attempt.StopID,
 		TranscriptPath: attempt.TranscriptPath,
 		Artifacts:      append([]string(nil), attempt.Artifacts...),
 		Usage:          attempt.Usage,
@@ -1289,12 +1527,36 @@ func sameRequestForResume(previous, current Request) bool {
 	return previous.ID == current.ID &&
 		previous.Agent == current.Agent &&
 		previous.Prompt == current.Prompt &&
-		previous.WorkspaceID == current.WorkspaceID &&
+		sameWorkspaceForResume(previous.WorkspaceID, current.WorkspaceID, current.ID) &&
 		previous.AllowedWriteScope == current.AllowedWriteScope &&
 		previous.Model == current.Model &&
 		previous.Provider == current.Provider &&
 		previous.EstimatedPromptTokens == current.EstimatedPromptTokens &&
 		previous.EstimatedCostMicros == current.EstimatedCostMicros
+}
+
+func sameWorkspaceForResume(previous, current, childID string) bool {
+	previous = strings.TrimSpace(previous)
+	current = strings.TrimSpace(current)
+	childID = strings.TrimSpace(childID)
+	if previous == current {
+		return true
+	}
+
+	// CLI utility runs create a fresh parent session ID for each invocation, but
+	// the child boundary is still stable when both workspace IDs are derived by
+	// appending the same request ID. Treat those derived child workspaces as
+	// equivalent so --spawn-resume can skip already-completed children without
+	// requiring operators to pin the transient parent session.
+	return derivedChildWorkspaceID(previous, childID) && derivedChildWorkspaceID(current, childID)
+}
+
+func derivedChildWorkspaceID(workspaceID, childID string) bool {
+	if workspaceID == "" || childID == "" {
+		return false
+	}
+
+	return workspaceID == childID || strings.HasSuffix(workspaceID, "/"+childID)
 }
 
 func (s *ledgerStore) startAttempt(attempt Attempt) int {
@@ -1312,7 +1574,7 @@ func (s *ledgerStore) startAttempt(attempt Attempt) int {
 	return index
 }
 
-func (s *ledgerStore) appendAttempt(attempt Attempt) error {
+func (s *ledgerStore) recordAdmission(admission Admission) error {
 	if s == nil {
 		return nil
 	}
@@ -1320,7 +1582,20 @@ func (s *ledgerStore) appendAttempt(attempt Attempt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.ledger.Attempts = append(s.ledger.Attempts, attempt)
+	s.ledger.Admissions = append(s.ledger.Admissions, admission)
+
+	return s.saveLocked()
+}
+
+func (s *ledgerStore) recordStopReceipt(receipt StopReceipt) error {
+	if s == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ledger.StopReceipts = append(s.ledger.StopReceipts, receipt)
 
 	return s.saveLocked()
 }

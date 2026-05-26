@@ -833,9 +833,18 @@ lines make the command fail; model silence is never accepted as success.
 Async task and sub-agent execution now writes JSON ledgers under
 `.atteler/runs/.../ledger.json` by default, with per-child transcript paths for
 sub-agent command output and artifact paths printed in CLI summaries when
-available. The generated agents help lists the ledger, resume, concurrency,
-timeout, retry, cancellation, token/cost, and output-byte controls for safe
-retry and backpressure tuning. Child processes
+available. Ledgers include pre-run admission records with `admission_id`,
+`admitted`, and `deny_reason` fields before attempts, so denied children and
+halted siblings are auditable without inferring launch decisions from stderr.
+Attempts, results, and CLI summaries carry the same `admission_id` so each
+transcript can be traced back to its launch decision.
+The generated agents help lists the ledger, resume, concurrency, timeout,
+retry, cancellation, token/cost, and output-byte controls for safe retry and
+backpressure tuning; child scopes that escape the parent allowed write scope are
+denied before spawn and recorded as admission denials without synthetic
+execution attempts. Async tasks in downstream waves after a halted wave are also
+persisted as denied admissions without attempts, so resume has a durable
+boundary for work that never became runnable. Child processes
 receive `ATTELER_CHILD_*` identity and
 `ATTELER_ALLOWED_WRITE_SCOPE` environment metadata so their workspace and write
 scope are explicit in both runtime and ledger records. Budget exhaustion stops
@@ -845,7 +854,7 @@ cannot collectively overshoot before the next budget check. The Atteler child
 command capture path enforces the configured or remaining aggregate output byte
 cap during execution instead of buffering unbounded stdout/stderr. On resume,
 stale `running` attempts from an interrupted process are recovered as `canceled`
-before retry decisions are made.
+with stop receipts before retry decisions are made.
 
 Session Markdown and JSON exports default to the redacted shareable profile:
 known credential patterns and local absolute paths are scrubbed, untrusted
@@ -996,7 +1005,7 @@ linked from the row.
 | Configuration loading, migration, redacted diagnostics, atomic state, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/migrate.go`](pkg/config/migrate.go), [`pkg/config/migrate_test.go`](pkg/config/migrate_test.go), [`pkg/config/diagnostics.go`](pkg/config/diagnostics.go), [`pkg/config/diagnostics_test.go`](pkg/config/diagnostics_test.go), [`pkg/config/redaction.go`](pkg/config/redaction.go), [`pkg/config/state.go`](pkg/config/state.go), [`pkg/config/state_test.go`](pkg/config/state_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
 | Sessions, transcript search/export, evaluations, failures, provenance-rich artifacts, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/artifactmerge/artifactmerge.go`](pkg/artifactmerge/artifactmerge.go), [`pkg/artifactmerge/artifactmerge_test.go`](pkg/artifactmerge/artifactmerge_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |
 | Bounded and policy-gated context references for local files, directories, globs, and remote URLs | [`pkg/contextref/references.go`](pkg/contextref/references.go), [`pkg/contextref/references_test.go`](pkg/contextref/references_test.go), [`pkg/contextref/contextref.go`](pkg/contextref/contextref.go), [`pkg/contextref/contextref_test.go`](pkg/contextref/contextref_test.go) |
-| Agent metadata, matching, orchestration planning, bounded async waves, and auditable sub-agent fan-out | [`pkg/agent/agent.go`](pkg/agent/agent.go), [`pkg/agent/orchestration.go`](pkg/agent/orchestration.go), [`pkg/agent/orchestration_test.go`](pkg/agent/orchestration_test.go), [`pkg/async/plan.go`](pkg/async/plan.go), [`pkg/async/run_options.go`](pkg/async/run_options.go), [`pkg/async/plan_test.go`](pkg/async/plan_test.go), [`pkg/subagent/subagent.go`](pkg/subagent/subagent.go), [`pkg/subagent/subagent_test.go`](pkg/subagent/subagent_test.go), [`cmd/atteler/cli_async_commands.go`](cmd/atteler/cli_async_commands.go) |
+| Agent metadata, matching, orchestration planning, bounded async waves, and auditable sub-agent fan-out | [`pkg/agent/agent.go`](pkg/agent/agent.go), [`pkg/agent/orchestration.go`](pkg/agent/orchestration.go), [`pkg/agent/orchestration_test.go`](pkg/agent/orchestration_test.go), [`pkg/async/plan.go`](pkg/async/plan.go), [`pkg/async/run_options.go`](pkg/async/run_options.go), [`pkg/async/plan_test.go`](pkg/async/plan_test.go), [`pkg/subagent/subagent.go`](pkg/subagent/subagent.go), [`pkg/subagent/subagent_test.go`](pkg/subagent/subagent_test.go), [`cmd/atteler/cli_async_commands.go`](cmd/atteler/cli_async_commands.go), [`cmd/atteler/cli_shell_spawn_commands.go`](cmd/atteler/cli_shell_spawn_commands.go), [`test/e2e/cli_test.go`](test/e2e/cli_test.go) |
 | Skill synthesis into reviewable `SKILL.md` directories with trigger eval fixtures | [`pkg/skill/suggestion.go`](pkg/skill/suggestion.go), [`pkg/skill/persist.go`](pkg/skill/persist.go), [`pkg/skill/trigger.go`](pkg/skill/trigger.go), [`pkg/skill/suggestion_test.go`](pkg/skill/suggestion_test.go), [`test/e2e/cli_test.go`](test/e2e/cli_test.go) |
 | Automatic recurring-workflow skill learning with redacted observations, generated-skill revisions, relevant future context injection, and management/opt-out controls | [`pkg/skill/learning.go`](pkg/skill/learning.go), [`pkg/skill/learning_test.go`](pkg/skill/learning_test.go), [`pkg/events/events.go`](pkg/events/events.go), [`cmd/atteler/skill_learning_setup.go`](cmd/atteler/skill_learning_setup.go), [`cmd/atteler/cli_skill_learning_commands.go`](cmd/atteler/cli_skill_learning_commands.go), [`cmd/atteler/cli_skill_learning_commands_test.go`](cmd/atteler/cli_skill_learning_commands_test.go) |
 | Speculative and review-agent planning/execution primitives | [`pkg/speculate/speculate.go`](pkg/speculate/speculate.go), [`pkg/speculate/speculate_test.go`](pkg/speculate/speculate_test.go), [`pkg/review/review.go`](pkg/review/review.go), [`pkg/review/review_test.go`](pkg/review/review_test.go), [`pkg/review/llm.go`](pkg/review/llm.go), [`pkg/review/llm_test.go`](pkg/review/llm_test.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
