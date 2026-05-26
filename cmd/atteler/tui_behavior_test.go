@@ -22,6 +22,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/tasklist"
 )
 
@@ -114,6 +115,45 @@ func (p activityLoggingProvider) Complete(ctx context.Context, params llm.Comple
 }
 
 func (p activityLoggingProvider) ModelContextWindow(string) int { return 0 }
+
+type toolCallingProvider struct {
+	command string
+	calls   int
+}
+
+func (p *toolCallingProvider) Name() string { return "tool" }
+
+func (p *toolCallingProvider) Models() []string { return []string{"tool-model"} }
+
+func (p *toolCallingProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p *toolCallingProvider) HealthCheck(context.Context) error { return nil }
+
+func (p *toolCallingProvider) Complete(_ context.Context, params llm.CompleteParams) (*llm.Response, error) {
+	p.calls++
+	if p.calls == 1 {
+		command := p.command
+		if command == "" {
+			command = `printf 'live\n'; sleep 0.4; printf 'done\n'`
+		}
+
+		return &llm.Response{
+			Model:      params.Model,
+			StopReason: llm.StopToolUse,
+			ToolCalls: []llm.ToolCall{{
+				ID:    "call-1",
+				Name:  "bash",
+				Input: map[string]any{"command": command},
+			}},
+		}, nil
+	}
+
+	return &llm.Response{Content: "finished", Model: params.Model, StopReason: llm.StopEndTurn}, nil
+}
+
+func (p *toolCallingProvider) ModelContextWindow(string) int { return 0 }
 
 type idleSuggestionProvider struct {
 	response string
@@ -221,6 +261,159 @@ func TestCallLLMBuffersProviderActivityEvents(t *testing.T) {
 	assert.Contains(t, lines, "event:command_execute")
 	assert.Contains(t, lines, "command=fake-provider-command")
 	assert.Contains(t, lines, "session=session-1")
+}
+
+func TestCallLLMWithToolsStreamsCommandOutputBeforeCompletion(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(&toolCallingProvider{})
+
+	liveCh := make(chan tea.Msg, 16)
+	done := make(chan tea.Msg, 1)
+
+	go func() {
+		done <- callLLM(context.Background(), registry, llmRequest{
+			eventBase: events.Event{
+				SessionID: "session-1",
+				Model:     "tool-model",
+			},
+			hookRunner: events.NewRunner(nil),
+			model:      "tool-model",
+			messages: []llm.Message{{
+				Role:    llm.RoleUser,
+				Content: "run tool",
+			}},
+			useTools:   true,
+			workingDir: t.TempDir(),
+			liveCh:     liveCh,
+		})()
+	}()
+
+	output := requireLiveToolOutputBefore(t, liveCh, liveOutputTimeout)
+	assert.Equal(t, "live\n", output.data)
+	assert.Equal(t, string(attshell.OutputStreamStdout), output.stream)
+
+	select {
+	case msg := <-done:
+		require.Failf(t, "LLM completed before delayed tool output", "msg=%+v", msg)
+	default:
+	}
+
+	msg := requireLiveLLMResponseBefore(t, liveCh, time.Second)
+	require.NoError(t, msg.err)
+	assert.Equal(t, "finished", msg.content)
+	assert.True(t, msg.liveEvents)
+
+	select {
+	case raw := <-done:
+		assert.Nil(t, raw)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for callLLM command return")
+	}
+}
+
+func TestCallLLMWithToolsStreamsCommandStderrBeforeCompletion(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(&toolCallingProvider{command: `printf 'warn\n' >&2; sleep 0.4; printf 'done\n' >&2`})
+
+	liveCh := make(chan tea.Msg, 16)
+	done := make(chan tea.Msg, 1)
+
+	go func() {
+		done <- callLLM(context.Background(), registry, llmRequest{
+			eventBase: events.Event{
+				SessionID: "session-1",
+				Model:     "tool-model",
+			},
+			hookRunner: events.NewRunner(nil),
+			model:      "tool-model",
+			messages: []llm.Message{{
+				Role:    llm.RoleUser,
+				Content: "run tool",
+			}},
+			useTools:   true,
+			workingDir: t.TempDir(),
+			liveCh:     liveCh,
+		})()
+	}()
+
+	output := requireLiveToolOutputBefore(t, liveCh, liveOutputTimeout)
+	assert.Equal(t, "warn\n", output.data)
+	assert.Equal(t, string(attshell.OutputStreamStderr), output.stream)
+
+	select {
+	case msg := <-done:
+		require.Failf(t, "LLM completed before delayed tool stderr", "msg=%+v", msg)
+	default:
+	}
+
+	msg := requireLiveLLMResponseBefore(t, liveCh, time.Second)
+	require.NoError(t, msg.err)
+	assert.Equal(t, "finished", msg.content)
+
+	select {
+	case raw := <-done:
+		assert.Nil(t, raw)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for callLLM command return")
+	}
+}
+
+func TestFinishLLMResponseDeliversFinalMessage(t *testing.T) {
+	t.Parallel()
+
+	liveCh := make(chan tea.Msg, 1)
+	raw := finishLLMResponse(liveCh, llmResponseMsg{err: context.Canceled})
+	assert.Nil(t, raw)
+
+	select {
+	case raw := <-liveCh:
+		msg, ok := raw.(llmResponseMsg)
+		require.True(t, ok)
+		require.ErrorIs(t, msg.err, context.Canceled)
+		assert.True(t, msg.liveEvents)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for final LLM response")
+	}
+}
+
+func requireLiveToolOutputBefore(t *testing.T, liveCh <-chan tea.Msg, timeout time.Duration) llmToolOutputMsg {
+	t.Helper()
+
+	deadline := time.After(timeout)
+
+	for {
+		select {
+		case raw := <-liveCh:
+			if output, ok := raw.(llmToolOutputMsg); ok {
+				return output
+			}
+		case <-deadline:
+			require.FailNow(t, "timed out waiting for live tool output")
+		}
+	}
+}
+
+func requireLiveLLMResponseBefore(t *testing.T, liveCh <-chan tea.Msg, timeout time.Duration) llmResponseMsg {
+	t.Helper()
+
+	deadline := time.After(timeout)
+
+	for {
+		select {
+		case raw, ok := <-liveCh:
+			require.True(t, ok, "live LLM channel closed before final response")
+
+			if msg, ok := raw.(llmResponseMsg); ok {
+				return msg
+			}
+		case <-deadline:
+			require.FailNow(t, "timed out waiting for live LLM response")
+		}
+	}
 }
 
 func TestOpenModelPickerFetchesProviderModelsInBackground(t *testing.T) {
@@ -1329,6 +1522,16 @@ func TestUpdateLLMResponse_ClearsCompletedTaskTimer(t *testing.T) {
 	assert.False(t, next.waiting)
 	assert.Empty(t, next.runningTaskLabel)
 	assert.True(t, next.runningTaskStarted.IsZero())
+}
+
+func TestLLMToolLogCommands_SkipsBufferedLogsAfterLiveStreaming(t *testing.T) {
+	t.Parallel()
+
+	assert.Empty(t, llmToolLogCommands([]string{"$ command\nlive output"}, true))
+
+	cmds := llmToolLogCommands([]string{"$ command\nbuffered output"}, false)
+	require.Len(t, cmds, 1)
+	assert.Contains(t, stripANSI(toStringMsg(cmds[0]())), "buffered output")
 }
 
 func stripANSI(value string) string {

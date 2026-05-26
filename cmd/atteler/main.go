@@ -121,6 +121,20 @@ type llmResponseMsg struct {
 	routeDecision *modelroute.Decision
 	toolLog       []string // tool call summaries (command + truncated output)
 	tokenUsage    tokenUsage
+	liveEvents    bool
+}
+
+type llmEventLineMsg struct {
+	liveCh <-chan tea.Msg
+	line   string
+}
+
+type llmToolOutputMsg struct {
+	liveCh   <-chan tea.Msg
+	command  string
+	stream   string
+	data     string
+	sequence int64
 }
 
 // shellResultMsg is sent when a `!command` finishes executing.
@@ -130,6 +144,16 @@ type shellResultMsg struct {
 	command     string
 	stdout      string
 	stderr      string
+	streamed    bool
+}
+
+// shellOutputMsg is sent while a `!command` is still running.
+type shellOutputMsg struct {
+	outputCh <-chan tea.Msg
+	command  string
+	stream   string
+	data     string
+	sequence int64
 }
 
 type idleSuggestionRequestMsg struct {
@@ -226,6 +250,7 @@ type llmRequest struct {
 	// boolean on confirmResponseCh.
 	confirmRequestCh  chan agentLoopConfirmRequest
 	confirmResponseCh chan bool
+	liveCh            chan tea.Msg
 }
 
 type completionCandidate struct {

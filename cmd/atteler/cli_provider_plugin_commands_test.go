@@ -171,6 +171,7 @@ func TestCommandOutputEventCarriesRenderedOutput(t *testing.T) {
 	assert.Equal(t, assert.AnError.Error(), event.Error)
 	assert.Equal(t, "go test ./...", event.Metadata["command"])
 	assert.Equal(t, "/repo", event.Metadata["cwd"])
+	assert.Equal(t, "false", event.Metadata["partial"])
 	assert.Equal(t, "user", event.Metadata["source"])
 }
 

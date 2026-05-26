@@ -1,25 +1,32 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
-const testUnifiedDiffPatch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
+const (
+	testUnifiedDiffPatch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
+	liveOutputTimeout    = time.Second
+)
 
 func TestMergeTags_DeduplicatesCaseInsensitive(t *testing.T) {
 	t.Parallel()
@@ -336,6 +343,348 @@ func TestUpdateShellResult_ClearsCompletedTaskTimer(t *testing.T) {
 	assert.False(t, next.waiting)
 	assert.Empty(t, next.runningTaskLabel)
 	assert.True(t, next.runningTaskStarted.IsZero())
+}
+
+func TestRunShellCommandCmd_StreamsOutputBeforeCompletion(t *testing.T) {
+	t.Parallel()
+
+	outputCh := make(chan tea.Msg, 2)
+	done := make(chan any, 1)
+
+	go func() {
+		done <- runShellCommandCmd(context.Background(), `printf first; sleep 0.4; printf second`, "", outputCh, attshell.AuditContext{})()
+	}()
+
+	chunk := requireShellOutputBefore(t, outputCh, liveOutputTimeout)
+	assert.Equal(t, "first", chunk.data)
+	assert.Equal(t, string(attshell.OutputStreamStdout), chunk.stream)
+	assert.Equal(t, int64(1), chunk.sequence)
+
+	select {
+	case msg := <-done:
+		require.Failf(t, "command completed before delayed output", "msg=%+v", msg)
+	default:
+	}
+
+	select {
+	case msg := <-nextShellResult(t, outputCh):
+		require.NoError(t, msg.err)
+		assert.True(t, msg.streamed)
+		assert.Equal(t, "firstsecond", msg.stdout)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for command completion")
+	}
+
+	select {
+	case raw := <-done:
+		assert.Nil(t, raw)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for command goroutine")
+	}
+}
+
+func TestRunShellCommandCmd_StreamsStderrBeforeCompletion(t *testing.T) {
+	t.Parallel()
+
+	outputCh := make(chan tea.Msg, 2)
+	done := make(chan any, 1)
+
+	go func() {
+		done <- runShellCommandCmd(context.Background(), `printf warn >&2; sleep 0.4; printf done >&2`, "", outputCh, attshell.AuditContext{})()
+	}()
+
+	chunk := requireShellOutputBefore(t, outputCh, liveOutputTimeout)
+	assert.Equal(t, "warn", chunk.data)
+	assert.Equal(t, string(attshell.OutputStreamStderr), chunk.stream)
+
+	select {
+	case msg := <-done:
+		require.Failf(t, "command completed before delayed stderr", "msg=%+v", msg)
+	default:
+	}
+
+	select {
+	case msg := <-nextShellResult(t, outputCh):
+		require.NoError(t, msg.err)
+		assert.True(t, msg.streamed)
+		assert.Equal(t, "warndone", msg.stderr)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for command completion")
+	}
+}
+
+//nolint:paralleltest // Temporarily redirects process stdout.
+func TestRunBashCommand_StreamsStdoutBeforeCompletion(t *testing.T) {
+	store := session.NewStore(t.TempDir())
+	stdout := captureProcessOutput(t, &os.Stdout)
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- runBashCommand(context.Background(), appState{
+			cwd:          t.TempDir(),
+			sessionStore: store,
+			sessionState: session.New("gpt-test", nil),
+		}, bashCommandInput{
+			Command:        `printf 'live\n'; sleep 0.4; printf 'done\n'`,
+			TimeoutSeconds: 2,
+		})
+	}()
+
+	assert.Equal(t, "live\n", requireLineBefore(t, stdout.lines, liveOutputTimeout))
+
+	select {
+	case err := <-done:
+		require.Failf(t, "command completed before delayed stdout", "err=%v", err)
+	default:
+	}
+
+	require.NoError(t, <-done)
+}
+
+//nolint:paralleltest // Temporarily redirects process stderr.
+func TestRunBashCommand_StreamsStderrBeforeCompletion(t *testing.T) {
+	store := session.NewStore(t.TempDir())
+	stderr := captureProcessOutput(t, &os.Stderr)
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- runBashCommand(context.Background(), appState{
+			cwd:          t.TempDir(),
+			sessionStore: store,
+			sessionState: session.New("gpt-test", nil),
+		}, bashCommandInput{
+			Command:        `printf 'warn\n' >&2; sleep 0.4; printf 'done\n' >&2`,
+			TimeoutSeconds: 2,
+		})
+	}()
+
+	assert.Equal(t, "warn\n", requireLineBefore(t, stderr.lines, liveOutputTimeout))
+
+	select {
+	case err := <-done:
+		require.Failf(t, "command completed before delayed stderr", "err=%v", err)
+	default:
+	}
+
+	require.NoError(t, <-done)
+}
+
+//nolint:paralleltest // Temporarily redirects process stdout.
+func TestRunBashCommand_EmitsCommandEventTimeline(t *testing.T) {
+	store := session.NewStore(t.TempDir())
+	recorder := newEventLogRecorder()
+	stdout := captureProcessOutput(t, &os.Stdout)
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- runBashCommand(context.Background(), appState{
+			cwd:          t.TempDir(),
+			hookRunner:   events.NewRunnerWithLogger(nil, recorder),
+			sessionStore: store,
+			sessionState: session.New("gpt-test", nil),
+		}, bashCommandInput{
+			Command:        `printf 'live\n'; sleep 0.4; printf 'done\n'`,
+			TimeoutSeconds: 2,
+		})
+	}()
+
+	assert.Equal(t, "live\n", requireLineBefore(t, stdout.lines, liveOutputTimeout))
+	partial := recorder.requireLineContainingBefore(t, "partial=true", liveOutputTimeout)
+	assert.Contains(t, partial, "event:command_output")
+	assert.Contains(t, partial, "source=cli")
+	assert.Contains(t, partial, "stream=stdout")
+
+	select {
+	case err := <-done:
+		require.Failf(t, "command completed before partial output event was observed", "err=%v", err)
+	default:
+	}
+
+	require.NoError(t, <-done)
+
+	lines := recorder.Lines()
+	assertLineOrder(t, lines, "event:command_execute", "partial=true", "partial=false")
+}
+
+type eventLogRecorder struct {
+	lineCh chan string
+	lines  []string
+	mu     sync.Mutex
+}
+
+func newEventLogRecorder() *eventLogRecorder {
+	return &eventLogRecorder{lineCh: make(chan string, 32)}
+}
+
+func (r *eventLogRecorder) Write(p []byte) (int, error) {
+	if r == nil {
+		return len(p), nil
+	}
+
+	text := strings.TrimRight(string(p), "\n")
+	for line := range strings.SplitSeq(text, "\n") {
+		if line == "" {
+			continue
+		}
+
+		r.mu.Lock()
+		r.lines = append(r.lines, line)
+		r.mu.Unlock()
+
+		select {
+		case r.lineCh <- line:
+		default:
+		}
+	}
+
+	return len(p), nil
+}
+
+func (r *eventLogRecorder) Lines() []string {
+	if r == nil {
+		return nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]string(nil), r.lines...)
+}
+
+func (r *eventLogRecorder) requireLineContainingBefore(t *testing.T, needle string, timeout time.Duration) string {
+	t.Helper()
+
+	deadline := time.After(timeout)
+
+	for {
+		select {
+		case line := <-r.lineCh:
+			if strings.Contains(line, needle) {
+				return line
+			}
+		case <-deadline:
+			require.FailNowf(t, "timed out waiting for event log line", "needle=%q lines=%v", needle, r.Lines())
+		}
+	}
+}
+
+func assertLineOrder(t *testing.T, lines []string, needles ...string) {
+	t.Helper()
+
+	next := 0
+	for _, line := range lines {
+		if next < len(needles) && strings.Contains(line, needles[next]) {
+			next++
+		}
+	}
+
+	require.Equalf(t, len(needles), next, "event log lines out of order: %v", lines)
+}
+
+type capturedProcessOutput struct {
+	lines <-chan string
+}
+
+func captureProcessOutput(t *testing.T, target **os.File) capturedProcessOutput {
+	t.Helper()
+
+	original := *target
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+
+	*target = writer
+
+	t.Cleanup(func() {
+		*target = original
+		_ = writer.Close()
+		_ = reader.Close()
+	})
+
+	lines := make(chan string, 1)
+
+	go func() {
+		line, err := bufio.NewReader(reader).ReadString('\n')
+		if err != nil && line == "" {
+			lines <- ""
+
+			return
+		}
+
+		lines <- line
+	}()
+
+	return capturedProcessOutput{lines: lines}
+}
+
+func requireLineBefore(t *testing.T, lines <-chan string, timeout time.Duration) string {
+	t.Helper()
+
+	select {
+	case line := <-lines:
+		return line
+	case <-time.After(timeout):
+		require.FailNow(t, "timed out waiting for streamed output")
+	}
+
+	return ""
+}
+
+func TestRunShellCommandCmd_DeliversFinalResultWhenContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	outputCh := make(chan tea.Msg, 1)
+	raw := runShellCommandCmd(ctx, `printf never`, "", outputCh, attshell.AuditContext{})()
+	assert.Nil(t, raw)
+
+	select {
+	case raw := <-outputCh:
+		msg, ok := raw.(shellResultMsg)
+		require.True(t, ok)
+		require.Error(t, msg.err)
+		assert.True(t, msg.streamed)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for canceled command result")
+	}
+}
+
+func requireShellOutputBefore(t *testing.T, outputCh <-chan tea.Msg, timeout time.Duration) shellOutputMsg {
+	t.Helper()
+
+	select {
+	case raw := <-outputCh:
+		chunk, ok := raw.(shellOutputMsg)
+		require.True(t, ok)
+
+		return chunk
+	case <-time.After(timeout):
+		require.FailNow(t, "timed out waiting for streamed shell output")
+	}
+
+	return shellOutputMsg{}
+}
+
+func nextShellResult(t *testing.T, outputCh <-chan tea.Msg) <-chan shellResultMsg {
+	t.Helper()
+
+	resultCh := make(chan shellResultMsg, 1)
+
+	go func() {
+		for raw := range outputCh {
+			if msg, ok := raw.(shellResultMsg); ok {
+				resultCh <- msg
+
+				return
+			}
+		}
+	}()
+
+	return resultCh
 }
 
 func TestPruneToPinned_ReindexesPinnedMessages(t *testing.T) {

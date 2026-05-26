@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/session"
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
 func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
@@ -449,6 +451,121 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 
 	require.NoError(t, writeRunOnceResult(&stdout, &stderr, result, "text", false))
 	assert.Contains(t, stderr.String(), "agent loop checkpoint: /tmp/session.agentloop.jsonl")
+}
+
+func TestBashExecutorStreamsOutputBeforeCompletion(t *testing.T) {
+	t.Parallel()
+
+	logw := newNotifyBuffer()
+	done := make(chan llm.ToolResult, 1)
+
+	go func() {
+		done <- newBashExecutor(t.TempDir(), logw, attshell.AuditContext{})(context.Background(), llm.ToolCall{
+			ID:    "call-1",
+			Name:  "bash",
+			Input: map[string]any{"command": `printf '\154ive\n'; sleep 0.4; printf '\144one\n'`},
+		})
+	}()
+
+	requireLogWriteContainsBefore(t, logw.writes, "live\n", liveOutputTimeout)
+
+	select {
+	case result := <-done:
+		require.Failf(t, "tool completed before delayed output", "result=%+v", result)
+	default:
+	}
+
+	select {
+	case result := <-done:
+		require.False(t, result.IsError)
+
+		plainLog := stripANSI(logw.String())
+		assert.Contains(t, plainLog, "live\n")
+		assert.Contains(t, plainLog, "done\n")
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for tool completion")
+	}
+}
+
+func TestBashExecutorStreamsStderrBeforeCompletion(t *testing.T) {
+	t.Parallel()
+
+	logw := newNotifyBuffer()
+	done := make(chan llm.ToolResult, 1)
+
+	go func() {
+		done <- newBashExecutor(t.TempDir(), logw, attshell.AuditContext{})(context.Background(), llm.ToolCall{
+			ID:    "call-1",
+			Name:  "bash",
+			Input: map[string]any{"command": `printf '\167arn\n' >&2; sleep 0.4; printf '\144one\n' >&2`},
+		})
+	}()
+
+	requireLogWriteContainsBefore(t, logw.writes, "warn\n", liveOutputTimeout)
+
+	select {
+	case result := <-done:
+		require.Failf(t, "tool completed before delayed stderr", "result=%+v", result)
+	default:
+	}
+
+	select {
+	case result := <-done:
+		require.False(t, result.IsError)
+
+		plainLog := stripANSI(logw.String())
+		assert.Contains(t, plainLog, "warn\n")
+		assert.Contains(t, plainLog, "done\n")
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for tool completion")
+	}
+}
+
+type notifyBuffer struct {
+	writes chan string
+	buffer bytes.Buffer
+	mu     sync.Mutex
+}
+
+func newNotifyBuffer() *notifyBuffer {
+	return &notifyBuffer{writes: make(chan string, 16)}
+}
+
+func (b *notifyBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	n, err := b.buffer.Write(p)
+	select {
+	case b.writes <- string(p):
+	default:
+	}
+
+	return n, err
+}
+
+func (b *notifyBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buffer.String()
+}
+
+func requireLogWriteContainsBefore(t *testing.T, writes <-chan string, want string, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.After(timeout)
+
+	for {
+		select {
+		case text := <-writes:
+			if strings.Contains(stripANSI(text), want) {
+				return
+			}
+		case <-deadline:
+			require.FailNowf(t, "timed out waiting for streamed log output", "want=%q", want)
+		}
+	}
 }
 
 func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {

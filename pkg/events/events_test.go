@@ -194,6 +194,28 @@ func TestLogger_LogsAnyEvent(t *testing.T) {
 	}
 }
 
+func TestLogger_FlushesBufferedWriter(t *testing.T) {
+	t.Parallel()
+
+	var out flushBuffer
+
+	NewLogger(&out).Log(Event{Type: CommandOutput})
+
+	assert.Equal(t, 1, out.flushes)
+	assert.Contains(t, out.String(), "event:command_output")
+}
+
+type flushBuffer struct {
+	bytes.Buffer
+	flushes int
+}
+
+func (b *flushBuffer) Flush() error {
+	b.flushes++
+
+	return nil
+}
+
 func helperHook(t *testing.T) {
 	t.Helper()
 

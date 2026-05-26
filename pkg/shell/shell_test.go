@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,10 +80,15 @@ func TestRunBash_RequiresActiveContext(t *testing.T) {
 func TestRunBash_LimitsCapturedOutputBytes(t *testing.T) {
 	t.Parallel()
 
+	var chunks []OutputChunk
+
 	result, err := RunBash(context.Background(), Options{
 		Command:        `printf abcdef`,
 		MaxOutputBytes: 3,
 		Audit:          testAuditContext(t),
+		OutputCallback: func(chunk OutputChunk) {
+			chunks = append(chunks, chunk)
+		},
 	})
 
 	require.Error(t, err)
@@ -90,6 +96,138 @@ func TestRunBash_LimitsCapturedOutputBytes(t *testing.T) {
 	require.Equal(t, "abc", result.Stdout)
 	require.Empty(t, result.Stderr)
 	require.True(t, result.OutputTruncated)
+	require.Len(t, chunks, 1)
+	require.Equal(t, OutputStreamStdout, chunks[0].Stream)
+	require.Equal(t, "abc", string(chunks[0].Data))
+}
+
+func TestRunBash_StreamsStdoutBeforeCommandCompletes(t *testing.T) {
+	t.Parallel()
+
+	chunks := make(chan OutputChunk, 2)
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := RunBash(context.Background(), Options{
+			Command: `printf first; sleep 0.4; printf second`,
+			OutputCallback: func(chunk OutputChunk) {
+				chunks <- chunk
+			},
+		})
+		done <- err
+	}()
+
+	var chunk OutputChunk
+	select {
+	case chunk = <-chunks:
+	case <-time.After(300 * time.Millisecond):
+		require.FailNow(t, "timed out waiting for streamed stdout")
+	}
+
+	require.Equal(t, OutputStreamStdout, chunk.Stream)
+	require.Equal(t, "first", string(chunk.Data))
+	require.Equal(t, int64(1), chunk.Sequence)
+	require.False(t, chunk.Timestamp.IsZero())
+
+	select {
+	case err := <-done:
+		require.Failf(t, "command completed before delayed output", "err=%v", err)
+	default:
+	}
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for command completion")
+	}
+}
+
+func TestRunBash_StreamsStderrBeforeCommandCompletes(t *testing.T) {
+	t.Parallel()
+
+	chunks := make(chan OutputChunk, 2)
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := RunBash(context.Background(), Options{
+			Command: `printf warn >&2; sleep 0.4; printf done >&2`,
+			OutputCallback: func(chunk OutputChunk) {
+				chunks <- chunk
+			},
+		})
+		done <- err
+	}()
+
+	var chunk OutputChunk
+	select {
+	case chunk = <-chunks:
+	case <-time.After(300 * time.Millisecond):
+		require.FailNow(t, "timed out waiting for streamed stderr")
+	}
+
+	require.Equal(t, OutputStreamStderr, chunk.Stream)
+	require.Equal(t, "warn", string(chunk.Data))
+
+	select {
+	case err := <-done:
+		require.Failf(t, "command completed before delayed output", "err=%v", err)
+	default:
+	}
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for command completion")
+	}
+}
+
+func TestOutputCallback_DeliveryFollowsObservedSequence(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+
+	var got []int64
+
+	firstStarted := make(chan struct{})
+
+	stdout, stderr, _ := commandOutputWriters(0, func(chunk OutputChunk) {
+		if chunk.Sequence == 1 {
+			close(firstStarted)
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		got = append(got, chunk.Sequence)
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+
+		_, _ = stdout.Write([]byte("stdout"))
+	}()
+
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for first callback")
+	}
+
+	go func() {
+		defer wg.Done()
+
+		_, _ = stderr.Write([]byte("stderr"))
+	}()
+
+	wg.Wait()
+
+	require.Equal(t, []int64{1, 2}, got)
 }
 
 func TestRunInteractive_RejectsBlankCommand(t *testing.T) {

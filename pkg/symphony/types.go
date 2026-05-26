@@ -338,9 +338,16 @@ type CodexEvent struct {
 	SessionID    string
 	AppServerPID string
 	Message      string
+	CommandID    string
+	ProcessID    string
+	Command      string
+	OutputStream string
+	OutputChunk  string
 	InputTokens  int64
 	OutputTokens int64
 	TotalTokens  int64
+	ExitCode     int
+	ExitCodeSet  bool
 }
 
 // TokenUsage captures the app-server token usage shape that Symphony tracks.

@@ -17,6 +17,8 @@ import (
 const defaultTimeout = 30 * time.Second
 
 // Options controls one explicit shell command invocation.
+//
+//nolint:govet // Public field order groups command controls before callbacks.
 type Options struct {
 	Policy         *Policy
 	Env            map[string]string
@@ -25,6 +27,7 @@ type Options struct {
 	Dir            string
 	Timeout        time.Duration
 	MaxOutputBytes int64
+	OutputCallback OutputCallback
 }
 
 // Result captures stdout, stderr, and timing for a command run.
@@ -38,6 +41,33 @@ type Result struct {
 	ExitError       string
 	OutputTruncated bool
 }
+
+// OutputStream identifies which process stream produced an output chunk.
+type OutputStream string
+
+const (
+	// OutputStreamStdout identifies bytes produced on stdout.
+	OutputStreamStdout OutputStream = "stdout"
+	// OutputStreamStderr identifies bytes produced on stderr.
+	OutputStreamStderr OutputStream = "stderr"
+)
+
+// OutputChunk is delivered synchronously as a command writes stdout/stderr.
+//
+// Data is a callback-owned copy. Sequence is monotonic for one command run and
+// reflects the order in which Atteler observed writes across both streams.
+type OutputChunk struct {
+	Timestamp time.Time
+	Stream    OutputStream
+	Data      []byte
+	Sequence  int64
+}
+
+// OutputCallback observes command output as soon as Atteler receives it.
+//
+// When MaxOutputBytes is set, callbacks receive only bytes accepted by that
+// limit, matching the captured Result output.
+type OutputCallback func(OutputChunk)
 
 // RunBash runs Command through bash -lc with a timeout. The command string is
 // intentionally caller-provided: this package is for explicit local CLI actions,
@@ -67,7 +97,7 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 
 	started := time.Now().UTC()
 
-	stdout, stderr, outputLimit := commandOutputWriters(opts.MaxOutputBytes)
+	stdout, stderr, outputLimit := commandOutputWriters(opts.MaxOutputBytes, opts.OutputCallback)
 
 	cmd, invocation, err := CommandContext(runCtx, CommandOptions{
 		Program: bin,
@@ -126,19 +156,23 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 type commandOutputLimiter struct {
 	mu        sync.Mutex
 	remaining int64
+	sequence  int64
 	limited   bool
 	truncated bool
 }
 
 type limitedOutputBuffer struct {
 	limiter *commandOutputLimiter
+	stream  OutputStream
+	onChunk OutputCallback
 	buffer  bytes.Buffer
 }
 
-func commandOutputWriters(maxBytes int64) (stdout, stderr *limitedOutputBuffer, limiter *commandOutputLimiter) {
+func commandOutputWriters(maxBytes int64, onChunk OutputCallback) (stdout, stderr *limitedOutputBuffer, limiter *commandOutputLimiter) {
 	limiter = &commandOutputLimiter{remaining: maxBytes, limited: maxBytes > 0}
 
-	return &limitedOutputBuffer{limiter: limiter}, &limitedOutputBuffer{limiter: limiter}, limiter
+	return &limitedOutputBuffer{limiter: limiter, stream: OutputStreamStdout, onChunk: onChunk},
+		&limitedOutputBuffer{limiter: limiter, stream: OutputStreamStderr, onChunk: onChunk}, limiter
 }
 
 func (w *limitedOutputBuffer) Write(p []byte) (int, error) {
@@ -146,29 +180,40 @@ func (w *limitedOutputBuffer) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 
+	var chunkData []byte
+
 	w.limiter.mu.Lock()
 	defer w.limiter.mu.Unlock()
 
-	if !w.limiter.limited {
+	switch {
+	case !w.limiter.limited:
 		_, _ = w.buffer.Write(p)
-
-		return len(p), nil
-	}
-
-	if w.limiter.remaining <= 0 {
+		chunkData = p
+	case w.limiter.remaining <= 0:
 		w.limiter.truncated = true
+	default:
+		writeBytes := min(int64(len(p)), w.limiter.remaining)
+		if writeBytes > 0 {
+			_, _ = w.buffer.Write(p[:writeBytes])
+			w.limiter.remaining -= writeBytes
+			chunkData = p[:writeBytes]
+		}
 
-		return len(p), nil
+		if writeBytes < int64(len(p)) {
+			w.limiter.truncated = true
+		}
 	}
 
-	writeBytes := min(int64(len(p)), w.limiter.remaining)
-	if writeBytes > 0 {
-		_, _ = w.buffer.Write(p[:writeBytes])
-		w.limiter.remaining -= writeBytes
-	}
+	if w.onChunk != nil && len(chunkData) > 0 {
+		w.limiter.sequence++
+		chunk := OutputChunk{
+			Timestamp: time.Now().UTC(),
+			Stream:    w.stream,
+			Data:      append([]byte(nil), chunkData...),
+			Sequence:  w.limiter.sequence,
+		}
 
-	if writeBytes < int64(len(p)) {
-		w.limiter.truncated = true
+		w.onChunk(chunk)
 	}
 
 	return len(p), nil

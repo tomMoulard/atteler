@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,15 +20,22 @@ import (
 
 // AppServerClient speaks Codex app-server JSONL over stdio.
 type AppServerClient struct {
-	stdin  io.WriteCloser
-	cmd    *exec.Cmd
-	emit   func(CodexEvent)
-	lines  chan appServerMessage
-	done   chan error
-	stderr <-chan string
-	mu     sync.Mutex
-	nextID int64
-	pid    string
+	stdin        io.WriteCloser
+	cmd          *exec.Cmd
+	emit         func(CodexEvent)
+	lines        chan appServerMessage
+	done         chan error
+	stderr       <-chan string
+	commandLinks map[string]commandLink
+	mu           sync.Mutex
+	commandMu    sync.Mutex
+	nextID       int64
+	pid          string
+}
+
+type commandLink struct {
+	commandID string
+	command   string
 }
 
 type appServerMessage struct {
@@ -118,13 +126,14 @@ func startAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 	}
 
 	client := &AppServerClient{
-		stdin:  stdin,
-		cmd:    cmd,
-		emit:   emit,
-		lines:  make(chan appServerMessage, 64),
-		done:   make(chan error, 1),
-		stderr: readString(stderr),
-		nextID: 1,
+		stdin:        stdin,
+		cmd:          cmd,
+		emit:         emit,
+		lines:        make(chan appServerMessage, 64),
+		done:         make(chan error, 1),
+		stderr:       readString(stderr),
+		commandLinks: make(map[string]commandLink),
+		nextID:       1,
 	}
 	if cmd.Process != nil {
 		client.pid = fmt.Sprint(cmd.Process.Pid)
@@ -514,6 +523,18 @@ func (c *AppServerClient) emitNotification(msg appServerMessage, fallbackThreadI
 		event.Message = summarizeRaw(msg.Params)
 	}
 
+	if commandEvent := c.enrichCommandNotification(parseCommandNotification(msg.Method, msg.Params)); commandEvent.ok {
+		event.Event = commandEvent.event
+		event.Message = commandEvent.message
+		event.CommandID = commandEvent.commandID
+		event.ProcessID = commandEvent.processID
+		event.Command = commandEvent.command
+		event.OutputStream = commandEvent.stream
+		event.OutputChunk = commandEvent.chunk
+		event.ExitCode = commandEvent.exitCode
+		event.ExitCodeSet = commandEvent.exitCodeSet
+	}
+
 	if ids := parseThreadTurnIDs(msg.Params); ids.threadID != "" || ids.turnID != "" {
 		event.ThreadID = firstNonEmpty(ids.threadID, event.ThreadID)
 		event.TurnID = firstNonEmpty(ids.turnID, event.TurnID)
@@ -524,6 +545,72 @@ func (c *AppServerClient) emitNotification(msg appServerMessage, fallbackThreadI
 	}
 
 	c.emitEvent(event)
+}
+
+func (c *AppServerClient) enrichCommandNotification(notification commandNotification) commandNotification {
+	if c == nil || !notification.ok || (notification.processID == "" && notification.commandID == "") {
+		return notification
+	}
+
+	c.commandMu.Lock()
+	defer c.commandMu.Unlock()
+
+	c.rememberCommandLinkLocked(notification)
+
+	if notification.processID != "" {
+		notification = applyCommandLink(notification, c.commandLinks[notification.processID])
+	}
+	if notification.commandID != "" {
+		notification = applyCommandLink(notification, c.commandLinks[notification.commandID])
+	}
+
+	return notification
+}
+
+func (c *AppServerClient) rememberCommandLinkLocked(notification commandNotification) {
+	link := commandLink{}
+	if notification.commandID != "" && notification.commandID != notification.processID {
+		link.commandID = notification.commandID
+	}
+	if notification.command != "" {
+		link.command = notification.command
+	}
+	if link.commandID == "" && link.command == "" {
+		return
+	}
+
+	if c.commandLinks == nil {
+		c.commandLinks = make(map[string]commandLink)
+	}
+
+	if notification.processID != "" {
+		c.commandLinks[notification.processID] = mergeCommandLink(c.commandLinks[notification.processID], link)
+	}
+	if notification.commandID != "" {
+		c.commandLinks[notification.commandID] = mergeCommandLink(c.commandLinks[notification.commandID], link)
+	}
+}
+
+func mergeCommandLink(previous, next commandLink) commandLink {
+	if next.commandID != "" {
+		previous.commandID = next.commandID
+	}
+	if next.command != "" {
+		previous.command = next.command
+	}
+
+	return previous
+}
+
+func applyCommandLink(notification commandNotification, link commandLink) commandNotification {
+	if link.commandID != "" && (notification.commandID == "" || notification.commandID == notification.processID) {
+		notification.commandID = link.commandID
+	}
+	if link.command != "" && notification.command == "" {
+		notification.command = link.command
+	}
+
+	return notification
 }
 
 func (c *AppServerClient) emitEvent(event CodexEvent) {
@@ -750,6 +837,359 @@ func parseThreadTurnIDs(raw json.RawMessage) threadTurnIDs {
 	_ = json.Unmarshal(raw, &payload)
 
 	return threadTurnIDs{threadID: payload.ThreadID, turnID: payload.TurnID}
+}
+
+type commandNotification struct {
+	event       string
+	message     string
+	commandID   string
+	processID   string
+	command     string
+	stream      string
+	chunk       string
+	exitCode    int
+	exitCodeSet bool
+	ok          bool
+}
+
+const (
+	codexEventExecCommandBegin       = "exec_command_begin"
+	codexEventExecCommandOutputDelta = "exec_command_output_delta"
+	codexEventExecCommandEnd         = "exec_command_end"
+	codexEventTerminalInteraction    = "terminal_interaction"
+	codexEventExecCommand            = "exec_command_event"
+	commandOutputStreamStdout        = "stdout"
+	commandOutputStreamStderr        = "stderr"
+)
+
+func parseCommandNotification(method string, raw json.RawMessage) commandNotification {
+	fields := rawObject(raw)
+	eventName := commandEventName(method, fields)
+	if eventName == "" {
+		return commandNotification{}
+	}
+
+	itemFields := mapField(fields, "item")
+	fieldSets := []map[string]any{fields, itemFields}
+	processID := firstStringFromFields(fieldSets, "processId", "process_id", "processHandle", "process_handle")
+	commandID := firstStringFromFields(fieldSets, "itemId", "item_id", "commandId", "command_id", "callId", "call_id", "id")
+	if commandID == "" {
+		commandID = processID
+	}
+
+	notification := commandNotification{
+		ok:        true,
+		event:     eventName,
+		commandID: commandID,
+		processID: processID,
+		command:   commandString(fieldSets...),
+		stream:    firstStreamFromFields(fieldSets),
+	}
+	notification.exitCode, notification.exitCodeSet = intFromFields(fieldSets, "exitCode", "exit_code")
+
+	if stream, chunk := commandOutputChunk(fieldSets...); chunk != "" {
+		notification.chunk = chunk
+		notification.stream = firstNonEmpty(notification.stream, stream)
+	}
+	if notification.event == codexEventExecCommandOutputDelta && notification.chunk != "" && notification.stream == "" {
+		notification.stream = commandOutputStreamStdout
+	}
+
+	switch notification.event {
+	case codexEventExecCommandOutputDelta:
+		notification.message = notification.chunk
+	case codexEventExecCommandEnd:
+		notification.message = notification.command
+		if notification.message == "" && notification.exitCodeSet {
+			notification.message = fmt.Sprintf("exit_code=%d", notification.exitCode)
+		}
+	case codexEventTerminalInteraction:
+		notification.message = firstStringFromFields(fieldSets, "stdin")
+		if notification.message == "" {
+			notification.message = notification.chunk
+		}
+	default:
+		notification.message = firstNonEmpty(notification.command, notification.commandID)
+	}
+
+	if notification.message == "" {
+		notification.message = method
+	}
+
+	return notification
+}
+
+func commandEventName(method string, fields map[string]any) string {
+	normalized := strings.ToLower(strings.TrimSpace(method))
+	if normalized == "" {
+		return ""
+	}
+
+	if eventName := commandItemLifecycleEventName(normalized, fields); eventName != "" {
+		return eventName
+	}
+
+	if commandOutputEventMethod(normalized) {
+		return codexEventExecCommandOutputDelta
+	}
+
+	if strings.Contains(normalized, "terminalinteraction") || strings.Contains(normalized, "terminal_interaction") {
+		return codexEventTerminalInteraction
+	}
+
+	if normalized == "process/exited" {
+		return codexEventExecCommandEnd
+	}
+
+	if !isCommandMethod(normalized) {
+		return ""
+	}
+
+	return genericCommandEventName(normalized)
+}
+
+func commandItemLifecycleEventName(normalized string, fields map[string]any) string {
+	if normalized != "item/started" && normalized != "item/completed" {
+		return ""
+	}
+
+	if !isCommandItemType(eventStringValue(mapField(fields, "item")["type"])) {
+		return ""
+	}
+
+	if strings.HasSuffix(normalized, "started") {
+		return codexEventExecCommandBegin
+	}
+
+	return codexEventExecCommandEnd
+}
+
+func commandOutputEventMethod(normalized string) bool {
+	if !strings.Contains(normalized, "outputdelta") && !strings.Contains(normalized, "output_delta") {
+		return false
+	}
+
+	return isCommandMethod(normalized) || strings.Contains(normalized, "process/")
+}
+
+func genericCommandEventName(normalized string) string {
+	switch {
+	case strings.Contains(normalized, "begin"), strings.Contains(normalized, "start"):
+		return codexEventExecCommandBegin
+	case strings.Contains(normalized, "end"), strings.Contains(normalized, "complete"), strings.Contains(normalized, "finish"):
+		return codexEventExecCommandEnd
+	default:
+		return codexEventExecCommand
+	}
+}
+
+func isCommandMethod(normalized string) bool {
+	return strings.Contains(normalized, "commandexecution") ||
+		strings.Contains(normalized, "command_execution") ||
+		strings.Contains(normalized, "command/exec") ||
+		strings.Contains(normalized, "execcommand") ||
+		strings.Contains(normalized, "exec_command")
+}
+
+func isCommandItemType(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, "_", "")
+	normalized = strings.ReplaceAll(normalized, "-", "")
+
+	return normalized == "commandexecution" || normalized == "execcommand"
+}
+
+func rawObject(raw json.RawMessage) map[string]any {
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil
+	}
+
+	return fields
+}
+
+func mapField(fields map[string]any, key string) map[string]any {
+	value, _ := fields[key].(map[string]any)
+
+	return value
+}
+
+func firstStringField(fields map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := eventStringValue(fields[key]); value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func firstStringFromFields(fieldSets []map[string]any, keys ...string) string {
+	for _, fields := range fieldSets {
+		if value := firstStringField(fields, keys...); value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func firstStreamFromFields(fieldSets []map[string]any) string {
+	for _, fields := range fieldSets {
+		if value := streamFromFields(fields); value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func streamFromFields(fields map[string]any) string {
+	for _, key := range []string{"stream", "outputStream", "output_stream", "fd"} {
+		if value := outputStreamValue(fields[key]); value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func outputStreamValue(value any) string {
+	if value := normalizeOutputStream(eventStringValue(value)); value != "" {
+		return value
+	}
+
+	switch typed := value.(type) {
+	case float64:
+		return normalizeOutputStream(fmt.Sprintf("%.0f", typed))
+	case int:
+		return normalizeOutputStream(strconvFormatInt(int64(typed)))
+	case int64:
+		return normalizeOutputStream(strconvFormatInt(typed))
+	default:
+		return ""
+	}
+}
+
+func normalizeOutputStream(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case commandOutputStreamStdout, "out", "1":
+		return commandOutputStreamStdout
+	case commandOutputStreamStderr, "err", "2":
+		return commandOutputStreamStderr
+	default:
+		return strings.TrimSpace(value)
+	}
+}
+
+func commandString(fieldSets ...map[string]any) string {
+	for _, fields := range fieldSets {
+		if value := firstStringField(fields, "command", "cmd", "parsedCmd", "parsed_cmd"); value != "" {
+			return value
+		}
+
+		for _, key := range []string{"command", "cmd", "parsedCmd", "parsed_cmd"} {
+			if values, ok := fields[key].([]any); ok && len(values) > 0 {
+				parts := make([]string, 0, len(values))
+				for _, value := range values {
+					if part := eventStringValue(value); part != "" {
+						parts = append(parts, part)
+					}
+				}
+
+				if len(parts) > 0 {
+					return strings.Join(parts, " ")
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+func commandOutputChunk(fieldSets ...map[string]any) (stream string, chunk string) {
+	for _, fields := range fieldSets {
+		stream, chunk = commandOutputChunkFromFields(fields)
+		if chunk != "" {
+			return stream, chunk
+		}
+	}
+
+	return "", ""
+}
+
+func commandOutputChunkFromFields(fields map[string]any) (stream string, chunk string) {
+	if value, ok := fields["chunk"].(map[string]any); ok {
+		return streamFromFields(value),
+			firstStringField(value, "text", "delta", "data", "output", "chunk")
+	}
+
+	if value := firstStringField(fields, "deltaBase64", "delta_base64"); value != "" {
+		decoded, err := base64.StdEncoding.DecodeString(value)
+		if err == nil {
+			return "", string(decoded)
+		}
+
+		return "", value
+	}
+
+	if value := firstStringField(fields, "chunk", "delta", "text", "data", "output"); value != "" {
+		return "", value
+	}
+
+	if value := eventStringValue(fields[commandOutputStreamStdout]); value != "" {
+		return normalizeOutputStream(commandOutputStreamStdout), value
+	}
+
+	if value := eventStringValue(fields[commandOutputStreamStderr]); value != "" {
+		return normalizeOutputStream(commandOutputStreamStderr), value
+	}
+
+	return "", ""
+}
+
+func eventStringValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case json.Number:
+		return typed.String()
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return ""
+	}
+}
+
+func intField(fields map[string]any, keys ...string) (int, bool) {
+	for _, key := range keys {
+		switch value := fields[key].(type) {
+		case float64:
+			return int(value), true
+		case int:
+			return value, true
+		case int64:
+			return int(value), true
+		case json.Number:
+			parsed, err := value.Int64()
+			if err == nil {
+				return int(parsed), true
+			}
+		}
+	}
+
+	return 0, false
+}
+
+func intFromFields(fieldSets []map[string]any, keys ...string) (int, bool) {
+	for _, fields := range fieldSets {
+		value, ok := intField(fields, keys...)
+		if ok {
+			return value, true
+		}
+	}
+
+	return 0, false
 }
 
 func summarizeRaw(raw json.RawMessage) string {

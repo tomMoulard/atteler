@@ -27,7 +27,11 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 	m.cancel = nil
 	elapsed := m.finishRunningTask(msg.completedAt)
 
-	cmds := append(eventLineCommands(msg.eventLines), tea.SetWindowTitle(terminalIdleTitle()))
+	cmds := []tea.Cmd{tea.SetWindowTitle(terminalIdleTitle())}
+	if !msg.liveEvents {
+		cmds = append(eventLineCommands(msg.eventLines), cmds...)
+	}
+
 	if msg.err != nil {
 		errorLine := "Error: " + msg.err.Error()
 		if elapsed > 0 {
@@ -74,10 +78,7 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 		header += dimStyle.Render(fmt.Sprintf(" [%d tool calls]", len(msg.toolLog)))
 	}
 
-	// Print tool call logs before the final response.
-	for _, entry := range msg.toolLog {
-		cmds = append(cmds, tea.Println(dimStyle.Render("  "+entry)))
-	}
+	cmds = append(cmds, llmToolLogCommands(msg.toolLog, msg.liveEvents)...)
 
 	cmds = append(
 		cmds,
@@ -98,6 +99,19 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m.continueWithQueuedPrompt(tea.Sequence(cmds...))
+}
+
+func llmToolLogCommands(toolLog []string, liveEvents bool) []tea.Cmd {
+	if liveEvents {
+		return nil
+	}
+
+	cmds := make([]tea.Cmd, 0, len(toolLog))
+	for _, entry := range toolLog {
+		cmds = append(cmds, tea.Println(dimStyle.Render("  "+entry)))
+	}
+
+	return cmds
 }
 
 func (m model) continueWithQueuedPrompt(current tea.Cmd) (tea.Model, tea.Cmd) {

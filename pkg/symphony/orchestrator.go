@@ -593,17 +593,64 @@ func (o *Orchestrator) handleCodexUpdate(event codexUpdateEvent) {
 	}
 
 	o.logCodexUpdate(entry, update)
-	o.recordIssueEvent(
-		"codex_event", entry.Issue, "codex event received",
+
+	fields := []any{
 		"event", update.Event,
 		"message", update.Message,
 		"session_id", entry.SessionID,
 		"thread_id", entry.ThreadID,
 		"turn_id", entry.TurnID,
-	)
+	}
+	if update.CommandID != "" {
+		fields = append(fields, "command_id", update.CommandID)
+	}
+	if update.ProcessID != "" {
+		fields = append(fields, "process_id", update.ProcessID)
+	}
+	if update.Command != "" {
+		fields = append(fields, "command", update.Command)
+	}
+	if update.OutputStream != "" {
+		fields = append(fields, "stream", update.OutputStream)
+	}
+	if update.OutputChunk != "" {
+		outputPreview := commandOutputPreview(update.OutputChunk)
+		fields = append(fields, "output", outputPreview, "output_bytes", len(update.OutputChunk))
+		if outputPreview != update.OutputChunk {
+			fields = append(fields, "output_truncated", true)
+		}
+	}
+	if update.ExitCodeSet {
+		fields = append(fields, "exit_code", update.ExitCode)
+	}
+
+	o.recordIssueEvent("codex_event", entry.Issue, "codex event received", fields...)
 }
 
 func (o *Orchestrator) logCodexUpdate(entry *runningEntry, update CodexEvent) {
+	attrs := codexUpdateLogAttrs(entry, update)
+
+	switch update.Event {
+	case "session_started":
+		o.logger.Info("symphony codex session started", attrs...)
+	case "turn_started":
+		o.logger.Info("symphony codex turn started", attrs...)
+	case "turn_completed":
+		o.logger.Info("symphony codex turn completed", attrs...)
+	case codexEventExecCommandBegin:
+		o.logger.Info("symphony codex command started", attrs...)
+	case codexEventExecCommandOutputDelta:
+		o.logger.Info("symphony codex command output", attrs...)
+	case codexEventExecCommandEnd:
+		o.logger.Info("symphony codex command completed", attrs...)
+	case "turn_failed", "turn_input_required", "unsupported_tool_call":
+		o.logger.Warn("symphony codex turn needs attention", attrs...)
+	default:
+		o.logger.Debug("symphony codex event", attrs...)
+	}
+}
+
+func codexUpdateLogAttrs(entry *runningEntry, update CodexEvent) []any {
 	attrs := []any{
 		"issue_id", entry.Issue.ID,
 		"issue_identifier", entry.Issue.Identifier,
@@ -616,6 +663,30 @@ func (o *Orchestrator) logCodexUpdate(entry *runningEntry, update CodexEvent) {
 		attrs = append(attrs, "message", update.Message)
 	}
 
+	if update.CommandID != "" {
+		attrs = append(attrs, "command_id", update.CommandID)
+	}
+
+	if update.ProcessID != "" {
+		attrs = append(attrs, "process_id", update.ProcessID)
+	}
+
+	if update.Command != "" {
+		attrs = append(attrs, "command", update.Command)
+	}
+
+	if update.OutputStream != "" {
+		attrs = append(attrs, "stream", update.OutputStream)
+	}
+
+	if update.OutputChunk != "" {
+		attrs = append(attrs, "output", commandOutputPreview(update.OutputChunk))
+	}
+
+	if update.ExitCodeSet {
+		attrs = append(attrs, "exit_code", update.ExitCode)
+	}
+
 	if update.TotalTokens > 0 {
 		attrs = append(
 			attrs,
@@ -625,18 +696,15 @@ func (o *Orchestrator) logCodexUpdate(entry *runningEntry, update CodexEvent) {
 		)
 	}
 
-	switch update.Event {
-	case "session_started":
-		o.logger.Info("symphony codex session started", attrs...)
-	case "turn_started":
-		o.logger.Info("symphony codex turn started", attrs...)
-	case "turn_completed":
-		o.logger.Info("symphony codex turn completed", attrs...)
-	case "turn_failed", "turn_input_required", "unsupported_tool_call":
-		o.logger.Warn("symphony codex turn needs attention", attrs...)
-	default:
-		o.logger.Debug("symphony codex event", attrs...)
+	return attrs
+}
+
+func commandOutputPreview(value string) string {
+	if len(value) <= 1000 {
+		return value
 	}
+
+	return value[:1000] + "..."
 }
 
 func (o *Orchestrator) handleWorkerExit(event workerExitEvent) {

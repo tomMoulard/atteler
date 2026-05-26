@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 	ctx, cancel := context.WithCancel(m.ctx) //nolint:gosec // see comment above
 	m.cancel = cancel
 	tickCmd := m.startRunningTask("command")
+	outputCh := make(chan tea.Msg, 32)
 
 	return m, tea.Batch(tea.Sequence(
 		tea.Println(line),
@@ -48,8 +50,12 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 				"source":  "user",
 			},
 		}),
-		runShellCommandCmd(ctx, command, m.cwd, m.sessionState.ID, m.sessionPath),
-	), tickCmd)
+		runShellCommandCmd(ctx, command, m.cwd, outputCh, attshell.AuditContext{
+			Caller:      "atteler.tui.shell",
+			SessionID:   m.sessionState.ID,
+			SessionPath: m.sessionPath,
+		}),
+	), tickCmd, listenForShellOutput(outputCh))
 }
 
 // runInteractiveShellCommand hands the terminal to a child process via
@@ -202,26 +208,98 @@ func exitErrorSuffix(exitError string) string {
 	return ": " + exitError
 }
 
-func runShellCommandCmd(ctx context.Context, command, dir, sessionID, sessionPath string) tea.Cmd {
+func listenForShellOutput(outputCh <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
+		msg, ok := <-outputCh
+		if !ok {
+			return nil
+		}
+
+		if outputMsg, ok := msg.(shellOutputMsg); ok {
+			outputMsg.outputCh = outputCh
+
+			return outputMsg
+		}
+
+		return msg
+	}
+}
+
+func runShellCommandCmd(ctx context.Context, command, dir string, outputCh chan<- tea.Msg, audit attshell.AuditContext) tea.Cmd {
+	return func() tea.Msg {
+		if outputCh != nil {
+			defer close(outputCh)
+		}
+
 		result, err := attshell.RunBash(ctx, attshell.Options{
 			Command: command,
 			Dir:     dir,
-			Audit: attshell.AuditContext{
-				Caller:      "atteler.tui.shell",
-				SessionID:   sessionID,
-				SessionPath: sessionPath,
+			Audit:   audit,
+			OutputCallback: func(chunk attshell.OutputChunk) {
+				if outputCh == nil {
+					return
+				}
+
+				outputCh <- shellOutputMsg{
+					command:  command,
+					stream:   string(chunk.Stream),
+					data:     string(chunk.Data),
+					sequence: chunk.Sequence,
+				}
 			},
 		})
 
-		return shellResultMsg{
+		msg := shellResultMsg{
 			err:         err,
 			completedAt: time.Now(),
 			command:     command,
 			stdout:      result.Stdout,
 			stderr:      result.Stderr,
+			streamed:    outputCh != nil,
 		}
+		if outputCh != nil {
+			outputCh <- msg
+
+			return nil
+		}
+
+		return msg
 	}
+}
+
+func (m model) updateShellOutput(msg shellOutputMsg) (tea.Model, tea.Cmd) {
+	metadata := map[string]string{
+		"command":  msg.command,
+		"cwd":      m.cwd,
+		"partial":  "true",
+		"sequence": strconv.FormatInt(msg.sequence, 10),
+		"source":   "user",
+		"stream":   msg.stream,
+	}
+
+	cmds := []tea.Cmd{
+		tea.Printf("%s", formatShellOutputChunk(msg)),
+		emitHookQuiet(m.ctx, m.hookRunner, events.Event{
+			Type:        events.CommandOutput,
+			SessionID:   m.sessionState.ID,
+			SessionPath: m.sessionPath,
+			Agent:       m.selectedAgent,
+			Model:       m.sessionState.DefaultModel,
+			Content:     msg.data,
+			Metadata:    metadata,
+		}),
+		listenForShellOutput(msg.outputCh),
+	}
+
+	return m, tea.Sequence(cmds...)
+}
+
+func formatShellOutputChunk(msg shellOutputMsg) string {
+	if msg.stream == string(attshell.OutputStreamStderr) {
+		return errStyle.Render(msg.data)
+	}
+
+	return msg.data
 }
 
 // updateShellResult appends the executed command and its output to the chat
@@ -250,11 +328,11 @@ func (m model) updateShellResult(msg shellResultMsg) (tea.Model, tea.Cmd) {
 	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
 
 	cmds := []tea.Cmd{tea.SetWindowTitle(terminalIdleTitle()), emitHook(m.ctx, m.hookRunner, outputEvent)}
-	if msg.stdout != "" {
+	if !msg.streamed && msg.stdout != "" {
 		cmds = append(cmds, tea.Println(strings.TrimRight(msg.stdout, "\n")))
 	}
 
-	if msg.stderr != "" {
+	if !msg.streamed && msg.stderr != "" {
 		cmds = append(cmds, tea.Println(errStyle.Render(strings.TrimRight(msg.stderr, "\n"))))
 	}
 
@@ -310,6 +388,7 @@ func commandOutputEvent(
 	metadata := map[string]string{
 		"command": command,
 		"cwd":     cwd,
+		"partial": "false",
 	}
 	maps.Copy(metadata, extra)
 
