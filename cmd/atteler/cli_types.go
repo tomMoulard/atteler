@@ -237,10 +237,20 @@ type cliOptions struct {
 	recordFailure                      string
 	failureReason                      string
 	failureCommit                      string
+	failureTaskType                    string
+	failureSeverity                    string
 	recordEvaluation                   string
 	evaluationOutcome                  string
 	evaluationNotes                    string
 	evaluationReference                string
+	evaluationSource                   string
+	evaluationEvaluator                string
+	evaluationRubricVersion            string
+	evaluationTaskType                 string
+	evaluationDifficulty               string
+	evaluationExpectedOutcome          string
+	evaluationModel                    string
+	evaluationAgentVersion             string
 	planAgentsPrompt                   string
 	evalOutputPath                     string
 	evalAssertionsPath                 string
@@ -354,9 +364,12 @@ type cliOptions struct {
 	skillMinOccurrences                positiveIntFlag
 	evaluationScore                    nonNegativeIntFlag
 	evalExitCode                       nonNegativeIntFlag
+	evaluationDurationMillis           nonNegativeIntFlag
 	seed                               nonNegativeIntFlag
 	reasoningLevel                     string
 	temperature                        floatFlag
+	evaluationCost                     floatFlag
+	evaluationConfidence               floatFlag
 	routeBudget                        floatFlag
 	routeCacheReuse                    floatFlag
 	topP                               floatFlag

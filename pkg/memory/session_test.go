@@ -188,13 +188,17 @@ func TestStore_AddSession_IndexesKnowledgeEvaluationsAndArtifacts(t *testing.T) 
 			Reason:   "Created retry storms",
 			Commit:   "abc123",
 			Agent:    "reviewer",
+			TaskType: "migration",
+			Severity: "critical",
 		}},
 		Evaluations: []session.AgentEvaluation{{
-			Agent:     "verifier",
-			Outcome:   "pass",
-			Notes:     "Caught OAuth regression",
-			Reference: "eval.md",
-			Score:     90,
+			Agent:         "verifier",
+			Outcome:       "pass",
+			Notes:         "Caught OAuth regression",
+			Reference:     "eval.md",
+			RubricVersion: "review rubric v2",
+			TaskType:      "auth review",
+			Score:         90,
 		}},
 		Artifacts: []session.Artifact{{
 			Path:        "docs/oauth.md",
@@ -219,7 +223,9 @@ func TestStore_AddSession_IndexesKnowledgeEvaluationsAndArtifacts(t *testing.T) 
 		wantKind string
 	}{
 		{name: "negative knowledge", query: "retry storms", wantID: "session/session-2/negative_knowledge/0", wantKind: "negative_knowledge"},
+		{name: "negative knowledge metadata", query: "critical migration", wantID: "session/session-2/negative_knowledge/0", wantKind: "negative_knowledge"},
 		{name: "evaluation", query: "caught regression", wantID: "session/session-2/evaluation/0", wantKind: "evaluation"},
+		{name: "evaluation metadata", query: "rubric auth", wantID: "session/session-2/evaluation/0", wantKind: "evaluation"},
 		{name: "artifact", query: "redirect risks", wantID: "session/session-2/artifact/0", wantKind: "artifact"},
 	}
 

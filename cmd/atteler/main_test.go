@@ -746,8 +746,55 @@ func TestFormatAgentPerformanceSummary(t *testing.T) {
 		AverageScore:             7.5,
 		MinScore:                 6,
 		MaxScore:                 9,
-		Outcomes:                 []session.OutcomeCount{{Outcome: "pass", Count: 1}, {Outcome: "fail", Count: 1}},
-		LatestActivity:           time.Date(2026, 5, 2, 10, 30, 0, 0, time.UTC),
+		RecentWindowDays:         30,
+		EvaluationProvenance:     []session.ProvenanceCount{{Source: "human", Count: 2}},
+		RubricVersions:           []session.RubricVersionCount{{RubricVersion: "review/v1", Count: 2}},
+		Evaluators:               []session.EvaluatorCount{{Evaluator: "alice", Count: 2}},
+		ScoreBuckets: []session.ScoreBucketSummary{{
+			Source:                 "human",
+			RubricVersion:          "review/v1",
+			TaskType:               "code-review",
+			Difficulty:             "medium",
+			Model:                  "gpt-test",
+			AgentVersion:           "reviewer@1",
+			RoutingEligible:        false,
+			ValidityReasons:        []string{"sample size 2 is below required 10", "recent sample size 1 is below required 3"},
+			SampleSize:             2,
+			AverageScore:           7.5,
+			ConfidenceIntervalLow:  4.56,
+			ConfidenceIntervalHigh: 10.44,
+			StandardError:          1.5,
+			Uncertainty:            "low_sample",
+			RecentSampleSize:       1,
+			RecentAverageScore:     9,
+			PreviousSampleSize:     1,
+			PreviousAverageScore:   6,
+			RegressionDelta:        3,
+			RegressionStatus:       "insufficient_history",
+			LatestScoreAt:          time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC),
+			RecentWindowStart:      time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC),
+			ConfidenceSampleCount:  2,
+			AverageConfidence:      0.8,
+			DurationSampleCount:    1,
+			AverageDurationMillis:  1234,
+			CostSampleCount:        1,
+			TotalCost:              0.012345,
+			AverageCost:            0.012345,
+		}},
+		Outcomes: []session.OutcomeCount{{Outcome: "pass", Count: 1}, {Outcome: "fail", Count: 1}},
+		NegativeKnowledgeBreakdown: []session.NegativeKnowledgeCategoryCount{
+			{TaskType: "code-review", Severity: "medium", Count: 1},
+		},
+		Validity: session.PerformanceValidity{
+			RoutingEligible:       false,
+			Checks:                []string{"routing requires a versioned rubric"},
+			Reasons:               []string{"no compatible scored bucket has at least 10 samples"},
+			MinimumSampleSize:     10,
+			MinimumRecentSamples:  3,
+			MaximumStandardError:  5,
+			MinimumMeanConfidence: 0.7,
+		},
+		LatestActivity: time.Date(2026, 5, 2, 10, 30, 0, 0, time.UTC),
 	}
 
 	got := formatAgentPerformanceSummary(summary)
@@ -757,11 +804,25 @@ func TestFormatAgentPerformanceSummary(t *testing.T) {
 		"failures=1",
 		"negative_knowledge=1",
 		"default_agent_sessions=1",
+		"routing_eligible=false",
+		"recency_window_days=30",
+		"provenance=human:2",
+		"rubrics=review/v1:2",
+		"evaluators=alice:2",
+		"score_buckets=source=human/rubric=review/v1/task=code-review/difficulty=medium/model=gpt-test/agent_version=reviewer@1/routing_eligible=false/sample=2/avg=7.50/ci95=4.56..10.44/stderr=1.50/uncertainty=low_sample/recent_sample=1/recent_avg=9.00/previous_sample=1/previous_avg=6.00/regression=insufficient_history/regression_delta=3.00/latest_score=2026-05-02T10:00:00Z/recent_since=2026-04-02T10:00:00Z/confidence_sample=2/avg_confidence=0.80/duration_sample=1/avg_duration_ms=1234.00/cost_sample=1/total_cost=0.012345/avg_cost=0.012345/validity_reasons=sample size 2 is below required 10|recent sample size 1 is below required 3",
 		"scored=2",
 		"avg_score=7.50",
 		"min_score=6",
 		"max_score=9",
 		"outcomes=pass:1,fail:1",
+		"negative_knowledge_breakdown=code-review/medium:1",
+		"validity_eligible_buckets=0",
+		"validity_min_sample_size=10",
+		"validity_min_recent_samples=3",
+		"validity_max_stderr=5.00",
+		"validity_min_confidence=0.70",
+		"validity_checks=routing requires a versioned rubric",
+		"validity_reasons=no compatible scored bucket has at least 10 samples",
 		"latest=2026-05-02T10:30:00Z",
 	} {
 		if !strings.Contains(got, want) {
@@ -799,12 +860,24 @@ func TestFormatEvaluation(t *testing.T) {
 	t.Parallel()
 
 	evaluation := session.AgentEvaluation{
-		Agent:     "reviewer",
-		Outcome:   "pass",
-		Notes:     "caught regression",
-		Reference: "eval.md",
-		Score:     9,
-		CreatedAt: time.Date(2026, 5, 1, 12, 45, 0, 0, time.UTC),
+		Agent:           "reviewer",
+		Outcome:         "pass",
+		Notes:           "caught regression",
+		Reference:       "eval.md",
+		Source:          session.EvaluationSourceHarness,
+		Evaluator:       "ci-eval",
+		RubricVersion:   "review/v2",
+		TaskType:        "code-review",
+		Difficulty:      "medium",
+		ExpectedOutcome: "catch regression",
+		Model:           "gpt-test",
+		AgentVersion:    "reviewer@abc123",
+		SchemaVersion:   session.AgentEvaluationSchemaVersion,
+		Score:           9,
+		DurationMillis:  1234,
+		Cost:            0.012345,
+		Confidence:      0.85,
+		CreatedAt:       time.Date(2026, 5, 1, 12, 45, 0, 0, time.UTC),
 	}
 
 	got := formatEvaluation(evaluation)
@@ -813,6 +886,18 @@ func TestFormatEvaluation(t *testing.T) {
 		"outcome=pass",
 		"created_at=2026-05-01T12:45:00Z",
 		"score=9",
+		"source=harness",
+		"evaluator=ci-eval",
+		"rubric_version=review/v2",
+		"task_type=code-review",
+		"difficulty=medium",
+		"expected_outcome=catch regression",
+		"model=gpt-test",
+		"agent_version=reviewer@abc123",
+		"schema_version=1",
+		"duration_millis=1234",
+		"cost=0.012345",
+		"confidence=0.85",
 		"reference=eval.md",
 		"notes=caught regression",
 	} {
@@ -869,6 +954,37 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 	require.Len(t, loaded.Evaluations, 1)
 	assert.Equal(t, "reviewer", loaded.Evaluations[0].Agent)
 	assert.Equal(t, 9, loaded.Evaluations[0].Score)
+
+	err = recordEvaluationDetails(store, loaded, session.AgentEvaluation{
+		Agent:          "planner",
+		Outcome:        "pass",
+		Source:         session.EvaluationSourceCI,
+		Evaluator:      "ci-eval",
+		RubricVersion:  "planning/v3",
+		TaskType:       "planning",
+		Difficulty:     "hard",
+		Model:          "gpt-plan",
+		AgentVersion:   "planner@2",
+		Score:          88,
+		Confidence:     0.9,
+		DurationMillis: 2500,
+		Cost:           0.02,
+	})
+	if err != nil {
+		require.NoError(t, err)
+	}
+
+	loaded, err = store.Load(sessionState.ID)
+	if err != nil {
+		require.NoError(t, err)
+	}
+
+	require.Len(t, loaded.Evaluations, 2)
+	assert.Equal(t, session.EvaluationSourceCI, loaded.Evaluations[1].Source)
+	assert.Equal(t, "planning/v3", loaded.Evaluations[1].RubricVersion)
+	assert.Equal(t, "planning", loaded.Evaluations[1].TaskType)
+	assert.Equal(t, int64(2500), loaded.Evaluations[1].DurationMillis)
+	assert.InEpsilon(t, 0.9, loaded.Evaluations[1].Confidence, 0.0001)
 
 	err = recordArtifact(store, loaded, "docs/research.md", "research", "useful", "reviewer")
 	if err != nil {

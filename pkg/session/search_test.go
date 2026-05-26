@@ -109,7 +109,14 @@ func TestStore_SearchNegativeKnowledge(t *testing.T) {
 	store := NewStore(t.TempDir())
 	session := New("gpt-review", []llm.Message{{Role: llm.RoleUser, Content: "Try something safe"}})
 	session.Title = "Auth repair"
-	require.True(t, session.RecordNegativeKnowledge("Patch token refresh timer", "Created retry storms", "abc123", "reviewer"))
+	require.True(t, session.RecordNegativeKnowledgeDetails(NegativeKnowledge{
+		Approach: "Patch token refresh timer",
+		Reason:   "Created retry storms",
+		Commit:   "abc123",
+		Agent:    "reviewer",
+		TaskType: "migration",
+		Severity: "critical",
+	}))
 	require.NoError(t, store.Save(session))
 
 	results, err := store.Search("retry storms")
@@ -126,6 +133,11 @@ func TestStore_SearchNegativeKnowledge(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Contains(t, results[0].Snippets[0].Text, "Commit: abc123")
+
+	results, err = store.Search("critical")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Contains(t, results[0].Snippets[0].Text, "Severity: critical")
 }
 
 func TestStore_SearchEvaluationsAndArtifacts(t *testing.T) {
@@ -133,7 +145,19 @@ func TestStore_SearchEvaluationsAndArtifacts(t *testing.T) {
 
 	store := NewStore(t.TempDir())
 	session := New("gpt-review", nil)
-	require.True(t, session.RecordEvaluation("reviewer", "pass", "Caught OAuth bug", "eval.md", 90))
+	require.True(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:          "reviewer",
+		Outcome:        "pass",
+		Notes:          "Caught OAuth bug",
+		Reference:      "eval.md",
+		Source:         EvaluationSourceHarness,
+		RubricVersion:  "review/v2",
+		TaskType:       "auth",
+		Model:          "gpt-review",
+		DurationMillis: 1200,
+		Confidence:     0.91,
+		Score:          90,
+	}))
 	require.True(t, session.RecordArtifact("docs/oauth.md", "research", "OAuth findings", "researcher"))
 	require.NoError(t, store.Save(session))
 
@@ -145,6 +169,18 @@ func TestStore_SearchEvaluationsAndArtifacts(t *testing.T) {
 	assert.Equal(t, "evaluation", results[0].Snippets[0].Kind)
 	assert.Equal(t, 0, results[0].Snippets[0].Index)
 	assert.Contains(t, results[0].Snippets[0].Text, "Caught OAuth bug")
+
+	results, err = store.Search("review/v2")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, llm.Role("evaluation"), results[0].Snippets[0].Role)
+	assert.Contains(t, results[0].Snippets[0].Text, "Rubric Version: review/v2")
+
+	results, err = store.Search("0.91")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, llm.Role("evaluation"), results[0].Snippets[0].Role)
+	assert.Contains(t, results[0].Snippets[0].Text, "Confidence: 0.91")
 
 	results, err = store.Search("findings")
 	require.NoError(t, err)

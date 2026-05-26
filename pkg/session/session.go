@@ -21,6 +21,21 @@ const (
 	EnvDir = "ATTELER_SESSION_DIR"
 
 	sessionFileExt = ".json"
+
+	// AgentEvaluationSchemaVersion is the current persisted evaluation metadata schema.
+	AgentEvaluationSchemaVersion = 1
+
+	// EvaluationSourceHuman marks an evaluation entered by a person.
+	EvaluationSourceHuman = "human"
+	// EvaluationSourceHarness marks an evaluation emitted by a repeatable eval harness.
+	EvaluationSourceHarness = "harness"
+	// EvaluationSourceCI marks an evaluation emitted by continuous integration.
+	EvaluationSourceCI = "ci"
+	// EvaluationSourceLegacy marks records that predate provenance metadata.
+	EvaluationSourceLegacy = "legacy"
+
+	// RubricVersionLegacy is used when older records have scores but no rubric.
+	RubricVersionLegacy = "legacy-unversioned"
 )
 
 // Session is a durable chat transcript.
@@ -49,16 +64,30 @@ type NegativeKnowledge struct {
 	Reason    string    `json:"reason" yaml:"reason"`
 	Commit    string    `json:"commit,omitempty" yaml:"commit,omitempty"`
 	Agent     string    `json:"agent,omitempty" yaml:"agent,omitempty"`
+	TaskType  string    `json:"task_type,omitempty" yaml:"task_type,omitempty"`
+	Severity  string    `json:"severity,omitempty" yaml:"severity,omitempty"`
 }
 
-// AgentEvaluation records a human or harness assessment for an agent output.
+// AgentEvaluation records a human, harness, or CI assessment for an agent output.
 type AgentEvaluation struct {
-	CreatedAt time.Time `json:"created_at" yaml:"created_at"`
-	Agent     string    `json:"agent" yaml:"agent"`
-	Outcome   string    `json:"outcome" yaml:"outcome"`
-	Notes     string    `json:"notes,omitempty" yaml:"notes,omitempty"`
-	Reference string    `json:"reference,omitempty" yaml:"reference,omitempty"`
-	Score     int       `json:"score,omitempty" yaml:"score,omitempty"`
+	CreatedAt       time.Time `json:"created_at" yaml:"created_at"`
+	Agent           string    `json:"agent" yaml:"agent"`
+	Outcome         string    `json:"outcome" yaml:"outcome"`
+	Notes           string    `json:"notes,omitempty" yaml:"notes,omitempty"`
+	Reference       string    `json:"reference,omitempty" yaml:"reference,omitempty"`
+	Source          string    `json:"source,omitempty" yaml:"source,omitempty"`
+	Evaluator       string    `json:"evaluator,omitempty" yaml:"evaluator,omitempty"`
+	RubricVersion   string    `json:"rubric_version,omitempty" yaml:"rubric_version,omitempty"`
+	TaskType        string    `json:"task_type,omitempty" yaml:"task_type,omitempty"`
+	Difficulty      string    `json:"difficulty,omitempty" yaml:"difficulty,omitempty"`
+	ExpectedOutcome string    `json:"expected_outcome,omitempty" yaml:"expected_outcome,omitempty"`
+	Model           string    `json:"model,omitempty" yaml:"model,omitempty"`
+	AgentVersion    string    `json:"agent_version,omitempty" yaml:"agent_version,omitempty"`
+	SchemaVersion   int       `json:"schema_version,omitempty" yaml:"schema_version,omitempty"`
+	Score           int       `json:"score,omitempty" yaml:"score,omitempty"`
+	DurationMillis  int64     `json:"duration_millis,omitempty" yaml:"duration_millis,omitempty"`
+	Cost            float64   `json:"cost,omitempty" yaml:"cost,omitempty"`
+	Confidence      float64   `json:"confidence,omitempty" yaml:"confidence,omitempty"`
 }
 
 // Artifact records a useful file or research artifact produced during a session.
@@ -334,30 +363,43 @@ func (s *Session) Append(role llm.Role, content string) {
 
 // RecordNegativeKnowledge records a failed approach unless the same approach and reason already exist.
 func (s *Session) RecordNegativeKnowledge(approach, reason, commit, agent string) bool {
-	approach = strings.TrimSpace(approach)
+	return s.RecordNegativeKnowledgeDetails(NegativeKnowledge{
+		Approach: approach,
+		Reason:   reason,
+		Commit:   commit,
+		Agent:    agent,
+	})
+}
 
-	reason = strings.TrimSpace(reason)
-	if approach == "" || reason == "" {
+// RecordNegativeKnowledgeDetails records categorized negative knowledge unless it is a duplicate.
+func (s *Session) RecordNegativeKnowledgeDetails(entry NegativeKnowledge) bool {
+	entry.Approach = strings.TrimSpace(entry.Approach)
+
+	entry.Reason = strings.TrimSpace(entry.Reason)
+	if entry.Approach == "" || entry.Reason == "" {
 		return false
 	}
 
-	approachKey := normalizeNegativeKnowledgeKey(approach)
+	approachKey := normalizeNegativeKnowledgeKey(entry.Approach)
 
-	reasonKey := normalizeNegativeKnowledgeKey(reason)
-	for _, entry := range s.NegativeKnowledge {
-		if normalizeNegativeKnowledgeKey(entry.Approach) == approachKey &&
-			normalizeNegativeKnowledgeKey(entry.Reason) == reasonKey {
+	reasonKey := normalizeNegativeKnowledgeKey(entry.Reason)
+	for _, existing := range s.NegativeKnowledge {
+		if normalizeNegativeKnowledgeKey(existing.Approach) == approachKey &&
+			normalizeNegativeKnowledgeKey(existing.Reason) == reasonKey {
 			return false
 		}
 	}
 
-	s.NegativeKnowledge = append(s.NegativeKnowledge, NegativeKnowledge{
-		Approach:  approach,
-		Reason:    reason,
-		Commit:    strings.TrimSpace(commit),
-		Agent:     strings.TrimSpace(agent),
-		CreatedAt: time.Now().UTC(),
-	})
+	entry.Commit = strings.TrimSpace(entry.Commit)
+	entry.Agent = strings.TrimSpace(entry.Agent)
+	entry.TaskType = strings.TrimSpace(entry.TaskType)
+
+	entry.Severity = strings.TrimSpace(entry.Severity)
+	if entry.CreatedAt.IsZero() {
+		entry.CreatedAt = time.Now().UTC()
+	}
+
+	s.NegativeKnowledge = append(s.NegativeKnowledge, entry)
 
 	return true
 }
@@ -368,23 +410,113 @@ func normalizeNegativeKnowledgeKey(value string) string {
 
 // RecordEvaluation appends an agent evaluation when required fields are valid.
 func (s *Session) RecordEvaluation(agentName, outcome, notes, reference string, score int) bool {
-	agentName = strings.TrimSpace(agentName)
+	return s.RecordEvaluationDetails(AgentEvaluation{
+		Agent:         agentName,
+		Outcome:       outcome,
+		Notes:         notes,
+		Reference:     reference,
+		Score:         score,
+		Source:        EvaluationSourceHuman,
+		RubricVersion: RubricVersionLegacy,
+		SchemaVersion: AgentEvaluationSchemaVersion,
+	})
+}
 
-	outcome = strings.TrimSpace(outcome)
-	if agentName == "" || outcome == "" {
+// RecordEvaluationDetails appends a versioned agent evaluation when required fields are valid.
+func (s *Session) RecordEvaluationDetails(evaluation AgentEvaluation) bool {
+	evaluation, ok := normalizeEvaluationDetails(evaluation)
+	if !ok {
 		return false
 	}
 
-	s.Evaluations = append(s.Evaluations, AgentEvaluation{
-		Agent:     agentName,
-		Outcome:   outcome,
-		Notes:     strings.TrimSpace(notes),
-		Reference: strings.TrimSpace(reference),
-		Score:     score,
-		CreatedAt: time.Now().UTC(),
-	})
+	s.Evaluations = append(s.Evaluations, evaluation)
 
 	return true
+}
+
+func normalizeEvaluationDetails(evaluation AgentEvaluation) (AgentEvaluation, bool) {
+	evaluation.Agent = strings.TrimSpace(evaluation.Agent)
+
+	evaluation.Outcome = strings.TrimSpace(evaluation.Outcome)
+	if evaluation.Agent == "" || evaluation.Outcome == "" {
+		return AgentEvaluation{}, false
+	}
+
+	if invalidEvaluationCalibration(evaluation) {
+		return AgentEvaluation{}, false
+	}
+
+	evaluation.Notes = strings.TrimSpace(evaluation.Notes)
+	evaluation.Reference = strings.TrimSpace(evaluation.Reference)
+
+	source, ok := normalizeEvaluationSourceForRecord(evaluation.Source)
+	if !ok {
+		return AgentEvaluation{}, false
+	}
+
+	evaluation.Source = source
+	evaluation.Evaluator = strings.TrimSpace(evaluation.Evaluator)
+	evaluation.RubricVersion = strings.TrimSpace(evaluation.RubricVersion)
+	evaluation.TaskType = strings.TrimSpace(evaluation.TaskType)
+	evaluation.Difficulty = strings.TrimSpace(evaluation.Difficulty)
+	evaluation.ExpectedOutcome = strings.TrimSpace(evaluation.ExpectedOutcome)
+	evaluation.Model = strings.TrimSpace(evaluation.Model)
+
+	evaluation.AgentVersion = strings.TrimSpace(evaluation.AgentVersion)
+	evaluation.SchemaVersion = normalizeEvaluationSchemaVersion(evaluation.SchemaVersion)
+
+	if evaluation.RubricVersion == "" {
+		evaluation.RubricVersion = RubricVersionLegacy
+	}
+
+	if evaluation.CreatedAt.IsZero() {
+		evaluation.CreatedAt = time.Now().UTC()
+	}
+
+	return evaluation, true
+}
+
+func invalidEvaluationCalibration(evaluation AgentEvaluation) bool {
+	return evaluation.Confidence < 0 || evaluation.Confidence > 1 ||
+		evaluation.DurationMillis < 0 || evaluation.Cost < 0 ||
+		evaluation.Score < 0 || evaluation.SchemaVersion < 0 ||
+		evaluation.SchemaVersion > AgentEvaluationSchemaVersion
+}
+
+func normalizeEvaluationSourceForRecord(source string) (string, bool) {
+	sourceProvided := strings.TrimSpace(source) != ""
+	source = normalizeEvaluationSourceName(source)
+
+	if sourceProvided && source == "" {
+		return "", false
+	}
+
+	if source == "" {
+		source = EvaluationSourceHuman
+	}
+
+	return source, true
+}
+
+func normalizeEvaluationSchemaVersion(version int) int {
+	if version == 0 {
+		return AgentEvaluationSchemaVersion
+	}
+
+	return version
+}
+
+func knownEvaluationSource(source string) bool {
+	return normalizeEvaluationSourceName(source) != ""
+}
+
+func normalizeEvaluationSourceName(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case EvaluationSourceHuman, EvaluationSourceHarness, EvaluationSourceCI:
+		return strings.ToLower(strings.TrimSpace(source))
+	default:
+		return ""
+	}
 }
 
 // RecordArtifact appends a session artifact when the path and kind are valid.

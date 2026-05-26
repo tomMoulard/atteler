@@ -80,9 +80,9 @@ from that dispatch contract with `atteler config commands-docs`.
 | `eval` | `atteler eval output .atteler/fixtures/readme-summary.txt --eval-expected "package overview"`, `atteler eval run .atteler/evals/readme.eval.yaml --eval-json`, `atteler eval fixtures .atteler/evals --eval-report .atteler/eval-report.json`, `atteler eval record reviewer`, `atteler eval replay-response .atteler/fixtures/once.json "Summarize @README.md"` |
 <!-- atteler:cli-domains:end -->
 
-Common options such as `--model`, `--agent`, `--output`, generation settings,
-provider routing settings, and compatibility flags can still be combined with
-domain commands before or after the focused subcommand, for example
+Common options for model, agent, output, generation settings, provider routing
+settings, and compatibility flags can still be combined with domain commands
+before or after the focused subcommand, for example
 `atteler session --session <id> messages` or
 `atteler chat once "Summarize" --model openai/gpt-5.4`. Prefer the grouped form
 for humans and the legacy flags for existing automation until scripts are
@@ -302,6 +302,27 @@ deterministic no-network completion path even when providers are configured.
 For non-interactive checks, `atteler agents prompt-complete "ask @rev"` previews
 the same local completion engine with source attribution, replacement ranges,
 rank signals, and a short explanation of what accepting the completion inserts.
+
+### Session evaluations and performance summaries
+
+Saved sessions can record agent evaluations, negative-knowledge incidents, and
+artifacts for later review. Evaluation records include versioned metadata for
+provenance (`human`, `harness`, or `ci`), evaluator identity, rubric version,
+task type, difficulty, expected outcome, model, agent version, duration, cost,
+and evaluator confidence. Negative knowledge is tracked separately by task type
+and severity instead of being flattened into a score.
+
+`atteler agents performance` is a diagnostic summary, not an automatic routing
+signal. Scores are grouped into compatible source, rubric, task, difficulty,
+model, and agent-version buckets before any average is shown; incompatible
+rubrics are not averaged together. Each bucket reports sample size,
+small-sample-adjusted confidence interval, standard error, runtime/cost
+coverage, recency-window bounds and counts, latest score timestamp, and
+regression status plus bucket-level routing eligibility and validity reasons.
+The summary also prints explicit routing validity checks and remains
+`routing_eligible=false` until a compatible bucket has enough total and recent
+samples, known provenance, a versioned rubric, task class, difficulty, model,
+agent version, confidence coverage, and bounded uncertainty.
 
 ### Local file and directory context
 

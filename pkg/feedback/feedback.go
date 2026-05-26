@@ -127,7 +127,8 @@ func Proposals(evaluations []session.AgentEvaluation, negativeKnowledge []sessio
 		group.negative = append(group.negative, entry)
 	}
 
-	for _, entry := range evaluations {
+	for i := range evaluations {
+		entry := evaluations[i]
 		if !isImprovementSignal(entry) {
 			if isPassingEvaluation(entry) {
 				key := agentKey(entry.Agent)
@@ -208,7 +209,8 @@ func (group *proposalGroup) latestSignalTime() time.Time {
 		latest = maxTime(latest, entry.CreatedAt)
 	}
 
-	for _, entry := range group.failedEvaluations {
+	for i := range group.failedEvaluations {
+		entry := group.failedEvaluations[i]
 		latest = maxTime(latest, entry.CreatedAt)
 	}
 
@@ -241,7 +243,8 @@ func latestSignalTimes(
 		latest[key] = maxTime(latest[key], entry.CreatedAt)
 	}
 
-	for _, entry := range evaluations {
+	for i := range evaluations {
+		entry := evaluations[i]
 		if !isImprovementSignal(entry) {
 			continue
 		}
@@ -259,7 +262,8 @@ func afterPassingEvaluations(evaluations []session.AgentEvaluation, latestSignal
 	}
 
 	filtered := make([]session.AgentEvaluation, 0, len(evaluations))
-	for _, evaluation := range evaluations {
+	for i := range evaluations {
+		evaluation := evaluations[i]
 		if evaluation.CreatedAt.IsZero() || !evaluation.CreatedAt.Before(latestSignal) {
 			filtered = append(filtered, evaluation)
 		}
@@ -361,7 +365,8 @@ func proposalEvidence(group *proposalGroup) []string {
 		evidence = append(evidence, negativeKnowledgeEvidence(entry))
 	}
 
-	for _, entry := range group.failedEvaluations {
+	for i := range group.failedEvaluations {
+		entry := group.failedEvaluations[i]
 		evidence = append(evidence, evaluationEvidence(entry))
 	}
 
@@ -389,7 +394,8 @@ func proposalEvidenceLinks(group *proposalGroup) []EvidenceLink {
 		})
 	}
 
-	for _, entry := range group.failedEvaluations {
+	for i := range group.failedEvaluations {
+		entry := group.failedEvaluations[i]
 		description := evaluationEvidence(entry)
 
 		reference := strings.TrimSpace(entry.Reference)
@@ -404,7 +410,8 @@ func proposalEvidenceLinks(group *proposalGroup) []EvidenceLink {
 		})
 	}
 
-	for _, entry := range group.passingEvaluations {
+	for i := range group.passingEvaluations {
+		entry := group.passingEvaluations[i]
 		description := evaluationEvidence(entry)
 
 		reference := strings.TrimSpace(entry.Reference)
@@ -424,11 +431,13 @@ func proposalEvidenceLinks(group *proposalGroup) []EvidenceLink {
 
 func proposalVerification(group *proposalGroup) []VerificationRecord {
 	records := make([]VerificationRecord, 0, len(group.failedEvaluations)+len(group.passingEvaluations))
-	for _, entry := range group.failedEvaluations {
+	for i := range group.failedEvaluations {
+		entry := group.failedEvaluations[i]
 		records = append(records, evaluationVerificationRecord(entry, VerificationPhaseBefore, false))
 	}
 
-	for _, entry := range group.passingEvaluations {
+	for i := range group.passingEvaluations {
+		entry := group.passingEvaluations[i]
 		records = append(records, evaluationVerificationRecord(entry, VerificationPhaseAfter, true))
 	}
 
