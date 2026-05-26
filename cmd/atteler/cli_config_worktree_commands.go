@@ -92,31 +92,37 @@ func doctor(ctx context.Context, state appState) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	report := state.registry.CheckReadiness(ctx, 0)
+	readinessHealthy := printProviderReadinessReport(report)
+
+	fmt.Println()
+
 	results := providerHealthResults(ctx, state, providers)
-	healthy := 0
+	adapterHealthy := 0
 
-	for _, r := range results {
-		if r.Healthy {
-			fmt.Printf("  [ok] %s%s\n", r.Name, doctorAdapterSuffix(r.Contract))
+	for i := range results {
+		result := &results[i]
+		if result.Healthy {
+			fmt.Printf("  [ok] %s%s\n", result.Name, doctorAdapterSuffix(result.Contract))
 
-			healthy++
+			adapterHealthy++
 		} else {
-			fmt.Printf("  [FAIL] %s%s: %v\n", r.Name, doctorAdapterSuffix(r.Contract), r.Error)
+			fmt.Printf("  [FAIL] %s%s: %v\n", result.Name, doctorAdapterSuffix(result.Contract), result.Error)
 		}
 
-		printDoctorAdapterDetails(r)
+		printDoctorAdapterDetails(result)
 
-		metadataProvider := doctorMetadataProvider(state, r.Name)
+		metadataProvider := doctorMetadataProvider(state, result.Name)
 
-		for _, m := range r.Models {
+		for _, m := range result.Models {
 			fmt.Printf("         - %s%s\n", m, doctorModelMetadataSuffix(metadataProvider, m))
 		}
 
-		printDoctorRuntimeDetails(r.Name)
+		printDoctorRuntimeDetails(result.Name)
 	}
 
-	if healthy == 0 {
-		if len(results) == 0 {
+	if readinessHealthy == 0 && adapterHealthy == 0 {
+		if len(report.Providers) == 0 && len(results) == 0 {
 			return errors.New("doctor: no providers registered; set provider credentials or config")
 		}
 
@@ -154,7 +160,7 @@ func printDoctorOverview(state appState, providers []string) {
 }
 
 func providerHealthResults(ctx context.Context, state appState, registeredProviders []string) []llm.ProviderHealth {
-	results := state.registry.CheckHealth(ctx)
+	results := state.registry.CheckHealthWithTTL(ctx, llm.DefaultReadinessCacheTTL)
 	diagnosticConfig := privateAdapterDiagnosticConfig(state, registeredProviders)
 	results = append(results, llm.PrivateAdapterDiagnostics(ctx, diagnosticConfig)...)
 
@@ -166,7 +172,7 @@ func providerHealthResults(ctx context.Context, state appState, registeredProvid
 }
 
 func privateAdapterDiagnosticConfig(state appState, registeredProviders []string) llm.AutoRegisterConfig {
-	diagnosticConfig := llmConfig(state.config, state.selectedModel)
+	diagnosticConfig := llmConfig(state.config, state.selectedModel, state.fallbackModels)
 	if diagnosticConfig.Providers == nil {
 		diagnosticConfig.Providers = make(map[string]llm.ProviderConfig)
 	}
@@ -212,7 +218,11 @@ func doctorMetadataProvider(state appState, providerName string) llm.ModelMetada
 	}
 }
 
-func printDoctorAdapterDetails(result llm.ProviderHealth) {
+func printDoctorAdapterDetails(result *llm.ProviderHealth) {
+	if result == nil {
+		return
+	}
+
 	if result.Contract != nil {
 		fmt.Printf("         adapter_contract: %s\n", doctorAdapterContractStatus(result))
 		fmt.Printf("         contract: source=%s; source_cli_version=%s; protocol=%s; reviewed=%s; review_after=%s\n",
@@ -238,7 +248,11 @@ func printDoctorAdapterDetails(result llm.ProviderHealth) {
 	}
 }
 
-func doctorAdapterContractStatus(result llm.ProviderHealth) string {
+func doctorAdapterContractStatus(result *llm.ProviderHealth) string {
+	if result == nil {
+		return "failed"
+	}
+
 	if result.Healthy && result.Error == nil {
 		return "passed"
 	}
@@ -288,6 +302,139 @@ func doctorModelMetadataSuffix(provider llm.ModelMetadataProvider, model string)
 	}
 
 	return " (" + strings.Join(parts, "; ") + ")"
+}
+
+func printProviderReadinessReport(report llm.ProviderReadinessReport) int {
+	if report.Default.Provider != "" || report.Default.Model != "" {
+		fmt.Println("default_selection:")
+
+		if report.Default.Provider != "" {
+			printDefaultSelectionLine("provider", report.Default.Provider, report.Default.ProviderError)
+		}
+
+		if report.Default.Model != "" {
+			printDefaultSelectionLine("model", report.Default.Model, report.Default.ModelError)
+		}
+
+		fmt.Println()
+	}
+
+	if len(report.Providers) == 0 {
+		fmt.Println("providers: none")
+
+		return 0
+	}
+
+	fmt.Println("provider_readiness:")
+
+	healthy := 0
+
+	for i := range report.Providers {
+		provider := &report.Providers[i]
+		label := providerReadinessLabel(provider)
+		fmt.Printf("  [%s] %s", label, provider.Name)
+
+		if provider.Configured {
+			fmt.Print(" configured")
+		}
+
+		if provider.Requested {
+			fmt.Print(" requested")
+		}
+
+		if provider.HealthCached {
+			fmt.Print(" cached")
+		}
+
+		fmt.Println()
+
+		if provider.Healthy {
+			healthy++
+		}
+
+		printProviderReadinessReason(provider)
+		printProviderReadinessModels(provider)
+	}
+
+	return healthy
+}
+
+func printDefaultSelectionLine(kind, value string, err error) {
+	if err != nil {
+		fmt.Printf("  [%s] %s: %s (%v)\n", statusWarn, kind, value, err)
+
+		return
+	}
+
+	fmt.Printf("  [ok] %s: %s\n", kind, value)
+}
+
+func providerReadinessLabel(provider *llm.ProviderReadiness) string {
+	switch provider.Status {
+	case llm.ProviderStatusRegistered:
+		if provider.HealthChecked && !provider.Healthy {
+			return statusFail
+		}
+
+		if provider.ModelFetchError != nil {
+			return statusWarn
+		}
+
+		return "ok"
+	case llm.ProviderStatusDisabled:
+		return "skip"
+	case llm.ProviderStatusMissingCredential:
+		return "auth"
+	default:
+		return statusFail
+	}
+}
+
+func printProviderReadinessReason(provider *llm.ProviderReadiness) {
+	if provider.Status != "" {
+		fmt.Printf("         status: %s\n", provider.Status)
+	}
+
+	if provider.Error != nil {
+		fmt.Printf("         reason: %v\n", provider.Error)
+	}
+
+	if provider.HealthError != nil && errorString(provider.HealthError) != errorString(provider.Error) {
+		fmt.Printf("         health: %v\n", provider.HealthError)
+	}
+
+	if provider.ModelFetchError != nil && errorString(provider.ModelFetchError) != errorString(provider.Error) {
+		fmt.Printf("         model_fetch: %v\n", provider.ModelFetchError)
+	}
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	return err.Error()
+}
+
+func printProviderReadinessModels(provider *llm.ProviderReadiness) {
+	models := append([]string(nil), provider.Models...)
+	sort.Strings(models)
+
+	source := provider.ModelCatalogSource
+	if source == "" {
+		source = llm.ModelCatalogSourceStatic
+	}
+
+	switch source {
+	case llm.ModelCatalogSourceLive:
+		fmt.Println("         models: live")
+	default:
+		fmt.Println("         models: static fallback")
+	}
+
+	for _, model := range models {
+		fmt.Printf("         - %s\n", model)
+	}
 }
 
 //nolint:unparam // error return kept for consistency with other command handlers.
@@ -356,7 +503,7 @@ func pathStatus(path string) string {
 	return "ok"
 }
 
-func llmConfig(cfg appconfig.Config, selectedModel string) llm.AutoRegisterConfig {
+func llmConfig(cfg appconfig.Config, selectedModel string, fallbackModels []string) llm.AutoRegisterConfig {
 	providers := make(map[string]llm.ProviderConfig, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
 		providers[name] = llm.ProviderConfig{
@@ -375,6 +522,7 @@ func llmConfig(cfg appconfig.Config, selectedModel string) llm.AutoRegisterConfi
 		DefaultProvider: cfg.DefaultProvider,
 		DefaultModel:    cfg.DefaultModel,
 		SelectedModel:   selectedModel,
+		FallbackModels:  append([]string(nil), fallbackModels...),
 		Providers:       providers,
 	}
 }

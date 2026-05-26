@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -24,12 +26,32 @@ type stateDiagnosticsReport struct {
 	Revision       int64                 `yaml:"revision"`
 	Model          statePreferenceReport `yaml:"model"`
 	ReasoningLevel statePreferenceReport `yaml:"reasoning_level"`
+	Providers      []stateProviderReport `yaml:"providers,omitempty"`
 }
 
 type statePreferenceReport struct {
 	Selected string `yaml:"selected,omitempty"`
 	Source   string `yaml:"source"`
 	Scope    string `yaml:"scope"`
+}
+
+type stateProviderReport struct {
+	Error              string   `yaml:"error,omitempty"`
+	HealthError        string   `yaml:"health_error,omitempty"`
+	ModelFetchError    string   `yaml:"model_fetch_error,omitempty"`
+	CheckedAt          string   `yaml:"checked_at,omitempty"`
+	Name               string   `yaml:"name"`
+	Status             string   `yaml:"status"`
+	ModelCatalogSource string   `yaml:"model_catalog_source,omitempty"`
+	Models             []string `yaml:"models,omitempty"`
+	StaticModels       []string `yaml:"static_models,omitempty"`
+	LiveModels         []string `yaml:"live_models,omitempty"`
+	Registered         bool     `yaml:"registered"`
+	Configured         bool     `yaml:"configured,omitempty"`
+	Requested          bool     `yaml:"requested,omitempty"`
+	HealthChecked      bool     `yaml:"health_checked,omitempty"`
+	HealthCached       bool     `yaml:"health_cached,omitempty"`
+	Healthy            bool     `yaml:"healthy,omitempty"`
 }
 
 func printStateDiagnostics(opts cliOptions, state appState) error {
@@ -62,6 +84,7 @@ func printStateDiagnostics(opts cliOptions, state appState) error {
 			state.cwd,
 			sessionPrefs,
 		),
+		Providers: providerReports(state.providerReadiness),
 	}
 
 	out, err := yaml.Marshal(report)
@@ -72,6 +95,41 @@ func printStateDiagnostics(opts cliOptions, state appState) error {
 	fmt.Print(string(out))
 
 	return nil
+}
+
+func providerReports(report llm.ProviderReadinessReport) []stateProviderReport {
+	out := make([]stateProviderReport, 0, len(report.Providers))
+	for i := range report.Providers {
+		provider := &report.Providers[i]
+		out = append(out, stateProviderReport{
+			Name:               provider.Name,
+			Status:             string(provider.Status),
+			Registered:         provider.Registered,
+			Configured:         provider.Configured,
+			Requested:          provider.Requested,
+			HealthChecked:      provider.HealthChecked,
+			HealthCached:       provider.HealthCached,
+			Healthy:            provider.Healthy,
+			CheckedAt:          formatProviderCheckedAt(provider.CheckedAt),
+			ModelCatalogSource: string(provider.ModelCatalogSource),
+			Models:             append([]string(nil), provider.Models...),
+			StaticModels:       append([]string(nil), provider.StaticModels...),
+			LiveModels:         append([]string(nil), provider.LiveModels...),
+			Error:              errorString(provider.Error),
+			HealthError:        errorString(provider.HealthError),
+			ModelFetchError:    errorString(provider.ModelFetchError),
+		})
+	}
+
+	return out
+}
+
+func formatProviderCheckedAt(checkedAt time.Time) string {
+	if checkedAt.IsZero() {
+		return ""
+	}
+
+	return checkedAt.UTC().Format(time.RFC3339)
 }
 
 func stateDiagnosticVersion(state appconfig.State) int {

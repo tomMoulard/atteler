@@ -180,7 +180,7 @@ func formatSpeculateResult(result speculate.Result) string {
 		b.WriteString("gates:\n")
 
 		for _, gc := range result.Session.Verdict.GateChecks {
-			status := "FAIL"
+			status := statusFail
 			if gc.Passed {
 				status = "PASS"
 			}

@@ -282,8 +282,8 @@ func TestCollectStream_ContextCancellationReturnsPartialAndError(t *testing.T) {
 }
 
 type fakeStreamProvider struct {
-	fakeProvider
 	chunks []Chunk
+	fakeProvider
 }
 
 func (f *fakeStreamProvider) CompleteStream(ctx context.Context, _ CompleteParams) (<-chan Chunk, error) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/url"
 	"os"
@@ -554,6 +555,54 @@ func TestConfiguredReferenceContextForRequestReloadsWhenEstimatorChanges(t *test
 	same := configuredReferenceContextForRequest(t.Context(), refs, reloaded, anthropicOpts)
 	assert.Equal(t, reloaded.Estimator, same.Estimator)
 	assert.Equal(t, reloaded.Content, same.Content)
+}
+
+func TestLLMConfigUsesResolvedFallbackModels(t *testing.T) {
+	t.Parallel()
+
+	cfg := appconfig.Config{
+		FallbackModels: []string{"config-fallback"},
+	}
+
+	got := llmConfig(cfg, "selected-model", []string{"agent-fallback"})
+
+	assert.Equal(t, "selected-model", got.SelectedModel)
+	assert.Equal(t, []string{"agent-fallback"}, got.FallbackModels)
+}
+
+func TestDoctorForcesFreshProviderReadiness(t *testing.T) { //nolint:paralleltest // Captures process stdout.
+	provider := &providerCommandTestProvider{
+		healthErr: errors.New("cached failure"),
+		name:      "alpha",
+		models:    []string{"alpha-static"},
+	}
+
+	reg := llm.NewRegistry()
+	reg.Register(provider)
+
+	cached := reg.CheckHealthWithTTL(context.Background(), time.Hour)
+	require.Len(t, cached, 1)
+	require.False(t, cached[0].Healthy)
+	require.Equal(t, 1, provider.healthCalls)
+
+	provider.healthErr = nil
+
+	app := appState{
+		agentRegistry: agent.NewRegistry(nil),
+		registry:      reg,
+		sessionStore:  session.NewStore(t.TempDir()),
+	}
+
+	var err error
+
+	out := captureStdoutForStateDiagnostics(t, func() {
+		err = doctor(context.Background(), app)
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, out, "[ok] alpha")
+	assert.NotContains(t, out, "cached")
+	assert.Equal(t, 2, provider.healthCalls)
 }
 
 func captureStderr(t *testing.T, fn func()) string {

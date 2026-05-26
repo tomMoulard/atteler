@@ -486,6 +486,7 @@ type appState struct {
 	sessionStore                *session.Store
 	stateStore                  *appconfig.StateStore
 	registry                    *llm.Registry
+	providerReadiness           llm.ProviderReadinessReport
 	worktreeInfo                *worktree.Info
 	pluginPolicy                *attelerplugin.Policy
 	fallbackModels              []string

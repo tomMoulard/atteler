@@ -125,6 +125,7 @@ atteler config init ~/.config/atteler/config.yaml
 atteler config paths
 atteler config validate
 atteler config explain default_model
+atteler config doctor
 ```
 
 Use `atteler config explain` without a field prefix to print every tracked
@@ -132,6 +133,9 @@ field, or pass a prefix such as `default_model`, `providers.openai`, or
 `agents.reviewer` to focus on one model, provider, or agent. Runtime diagnostic
 paths such as `runtime.selected_model` and `runtime.selected_provider` explain
 the selected request model/provider after state, flags, and agent selection.
+`atteler config doctor` prints provider readiness with registered, disabled,
+missing-credential, health-check, live-model, and static-fallback status so a
+broken backend is visible before a completion request fails.
 
 Minimal example:
 

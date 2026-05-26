@@ -691,7 +691,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		return appState{}, err
 	}
 
-	reg := autoRegisterForOptions(ctx, opts, cfg, selection.selectedModel)
+	reg, providerReadiness := autoRegisterForOptions(ctx, opts, cfg, selection.selectedModel, selection.fallbackModels)
 	contextOptions := contextOptionsFromConfig(cfg)
 	contextOptions = contextOptionsForRequestModels(contextOptions, reg, selection.selectedModel, selection.fallbackModels)
 	generationDefaults := generationFromConfig(cfg)
@@ -728,6 +728,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	return appState{
 		config:                      cfg,
 		registry:                    reg,
+		providerReadiness:           providerReadiness,
 		agentRegistry:               agentRegistry,
 		hookRunner:                  hookRunner,
 		eventObservers:              eventObservers,
@@ -799,12 +800,18 @@ func setupWorktreeIfRequested(
 	return wtInfo, nil
 }
 
-func autoRegisterForOptions(ctx context.Context, opts cliOptions, cfg appconfig.Config, selectedModel string) *llm.Registry {
-	regCfg := llmConfig(cfg, selectedModel)
+func autoRegisterForOptions(
+	ctx context.Context,
+	opts cliOptions,
+	cfg appconfig.Config,
+	selectedModel string,
+	fallbackModels []string,
+) (*llm.Registry, llm.ProviderReadinessReport) {
+	regCfg := llmConfig(cfg, selectedModel, fallbackModels)
 
 	if opts.headless {
 		regCfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
-	return llm.AutoRegisterWithConfigContext(ctx, regCfg)
+	return llm.AutoRegisterWithConfigContextReport(ctx, regCfg)
 }

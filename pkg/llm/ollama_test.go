@@ -496,7 +496,7 @@ func TestAutoRegisterWithConfigContext_StartsLocalOllamaForDefaultProvider(t *te
 func TestShouldAutoStartOllama(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	tests := []struct { //nolint:govet // Test table field order favors readability.
 		cfg  AutoRegisterConfig
 		name string
 		want bool

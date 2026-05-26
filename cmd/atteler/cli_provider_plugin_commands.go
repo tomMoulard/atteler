@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 
 	"github.com/tommoulard/atteler/pkg/agent"
@@ -19,11 +20,16 @@ func listModels(ctx context.Context, reg *llm.Registry) error {
 	}
 
 	for _, provider := range providers {
-		models, err := reg.ProviderModels(ctx, provider)
+		catalog, err := reg.ProviderModelCatalog(ctx, provider)
 		if err != nil {
 			return fmt.Errorf("list %s models: %w", provider, err)
 		}
 
+		if catalog.Error != nil && catalog.Source == llm.ModelCatalogSourceStatic {
+			fmt.Fprintf(os.Stderr, "warning: %s live model fetch failed; using static fallback: %v\n", provider, catalog.Error)
+		}
+
+		models := append([]string(nil), catalog.Models...)
 		sort.Strings(models)
 
 		for _, model := range models {
