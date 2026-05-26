@@ -196,8 +196,9 @@ func AutoRegisterWithConfig(cfg AutoRegisterConfig) *Registry {
 // Deprecated: use AutoRegisterWithConfigContextReport.
 func AutoRegisterWithConfigReport(cfg AutoRegisterConfig) (*Registry, ProviderReadinessReport) {
 	r := AutoRegisterWithConfig(cfg)
+	report := r.ReadinessReport()
 
-	return r, r.ReadinessReport()
+	return r, report
 }
 
 // AutoRegisterWithConfigContext is AutoRegisterWithConfig with caller-provided
@@ -220,12 +221,15 @@ func AutoRegisterWithConfigContextReport(ctx context.Context, cfg AutoRegisterCo
 		r.readiness.Default = defaultReport
 		r.mu.Unlock()
 
-		return r, r.ReadinessReport()
+		report := r.ReadinessReport()
+
+		return r, report
 	}
 
 	r = autoRegisterWithFactoriesContext(ctx, cfg, builtinProviderRegistrations(ctx, cfg))
+	report := r.ReadinessReport()
 
-	return r, r.ReadinessReport()
+	return r, report
 }
 
 func builtinProviderRegistrations(ctx context.Context, cfg AutoRegisterConfig) []providerRegistration {
@@ -478,27 +482,6 @@ func providerHealthFromDiagnostics(providerName string, diagnostics AdapterDiagn
 	}
 
 	return health
-}
-
-func registerConfiguredProvider(r *Registry, cfg AutoRegisterConfig, providerName string, factory providerFactory) {
-	providerCfg := providerConfig(cfg, providerName)
-	if providerCfg.Disabled {
-		cfg.logger().Debug("llm provider skipped: disabled by config", "provider", providerName)
-		return
-	}
-
-	if privateAdapterDisabled(providerName, providerCfg) {
-		cfg.logger().Debug("llm provider skipped: private adapter disabled", "provider", providerName)
-		return
-	}
-
-	p, err := factory()
-	if err != nil {
-		logProviderSkip(cfg.logger(), providerName, err, false)
-		return
-	}
-
-	r.Register(p)
 }
 
 func applyDefaultSelection(r *Registry, cfg AutoRegisterConfig) DefaultSelectionReport {

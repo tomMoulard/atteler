@@ -448,59 +448,115 @@ func (r *Registry) checkProviderHealth(ctx context.Context, providerName string,
 		}
 	}
 
-	health := ProviderHealth{
+	health := providerHealthFresh(ctx, providerName, p, now, ttl, ctxErr)
+
+	r.mu.Lock()
+	r.cacheProviderHealthLocked(providerName, health, now)
+	r.applyHealthToReadinessLocked(providerName, health)
+	r.mu.Unlock()
+
+	return cloneProviderHealth(health)
+}
+
+func providerHealthFresh(
+	ctx context.Context,
+	providerName string,
+	p Provider,
+	now time.Time,
+	ttl time.Duration,
+	ctxErr error,
+) ProviderHealth {
+	if ctxErr != nil {
+		health := providerHealthBase(providerName, p, now, ttl)
+		health.Error = ctxErr
+		health.Models = cleanModelList(p.Models())
+		health.ModelSource = ModelCatalogSourceStatic
+
+		return health
+	}
+
+	if diagnosticProvider, ok := p.(DiagnosticsProvider); ok {
+		return providerDiagnosticHealth(providerName, p, diagnosticProvider, now, ttl)
+	}
+
+	if providerFetchModelsChecksHealth(providerName) {
+		return providerCatalogHealth(ctx, providerName, p, now, ttl)
+	}
+
+	return providerExplicitHealthCheck(ctx, providerName, p, now, ttl)
+}
+
+func providerHealthBase(providerName string, p Provider, now time.Time, ttl time.Duration) ProviderHealth {
+	return ProviderHealth{
 		Name:         providerName,
 		CheckedAt:    now,
 		CacheTTL:     ttl,
 		StaticModels: cleanModelList(p.Models()),
 		Warnings:     appendProviderWarnings(nil, p),
 	}
+}
 
-	if ctxErr != nil {
-		health.Error = ctxErr
-		health.Models = cleanModelList(p.Models())
-		health.ModelSource = ModelCatalogSourceStatic
-	} else if diagnosticProvider, ok := p.(DiagnosticsProvider); ok {
-		health = providerHealthFromDiagnostics(providerName, diagnosticProvider.AdapterDiagnostics())
-		health.CheckedAt = now
-		health.CacheTTL = ttl
-		health.StaticModels = cleanModelList(p.Models())
-		health.ModelSource = ModelCatalogSourceStatic
-		health.Warnings = appendProviderWarnings(health.Warnings, p)
+func providerDiagnosticHealth(
+	providerName string,
+	p Provider,
+	diagnosticProvider DiagnosticsProvider,
+	now time.Time,
+	ttl time.Duration,
+) ProviderHealth {
+	health := providerHealthFromDiagnostics(providerName, diagnosticProvider.AdapterDiagnostics())
+	health.CheckedAt = now
+	health.CacheTTL = ttl
+	health.StaticModels = cleanModelList(p.Models())
+	health.ModelSource = ModelCatalogSourceStatic
+	health.Warnings = appendProviderWarnings(health.Warnings, p)
 
-		if len(health.Models) == 0 {
-			health.Models = cleanModelList(p.Models())
-		}
-	} else if providerFetchModelsChecksHealth(providerName) {
-		catalog := fetchProviderModelCatalog(ctx, p)
-		health.Models = append([]string(nil), catalog.Models...)
-		health.StaticModels = append([]string(nil), catalog.StaticModels...)
-		health.LiveModels = append([]string(nil), catalog.LiveModels...)
-		health.ModelSource = catalog.Source
+	return providerHealthWithDefaults(health, p)
+}
 
-		health.ModelFetchError = catalog.Error
-		health.Error = catalog.Error
-		health.Healthy = catalog.Error == nil
-	} else if err := p.HealthCheck(ctx); err != nil {
+func providerCatalogHealth(ctx context.Context, providerName string, p Provider, now time.Time, ttl time.Duration) ProviderHealth {
+	health := providerHealthBase(providerName, p, now, ttl)
+	catalog := fetchProviderModelCatalog(ctx, p)
+
+	health.Models = append([]string(nil), catalog.Models...)
+	health.StaticModels = append([]string(nil), catalog.StaticModels...)
+	health.LiveModels = append([]string(nil), catalog.LiveModels...)
+	health.ModelSource = catalog.Source
+	health.ModelFetchError = catalog.Error
+	health.Error = catalog.Error
+	health.Healthy = catalog.Error == nil
+
+	return providerHealthWithDefaults(health, p)
+}
+
+func providerExplicitHealthCheck(ctx context.Context, providerName string, p Provider, now time.Time, ttl time.Duration) ProviderHealth {
+	health := providerHealthBase(providerName, p, now, ttl)
+
+	if err := p.HealthCheck(ctx); err != nil {
 		health.Error = err
 		health.Models = cleanModelList(p.Models())
 		health.ModelSource = ModelCatalogSourceStatic
-	} else {
-		catalog := fetchProviderModelCatalog(ctx, p)
-		health.Healthy = true
 
-		health.Models = append([]string(nil), catalog.Models...)
-		health.StaticModels = append([]string(nil), catalog.StaticModels...)
-		health.LiveModels = append([]string(nil), catalog.LiveModels...)
-		health.ModelSource = catalog.Source
-		health.ModelFetchError = catalog.Error
-
-		if catalog.Error != nil {
-			health.Models = cleanModelList(p.Models())
-			health.ModelSource = ModelCatalogSourceStatic
-		}
+		return providerHealthWithDefaults(health, p)
 	}
 
+	catalog := fetchProviderModelCatalog(ctx, p)
+	health.Healthy = true
+
+	health.Models = append([]string(nil), catalog.Models...)
+	health.StaticModels = append([]string(nil), catalog.StaticModels...)
+	health.LiveModels = append([]string(nil), catalog.LiveModels...)
+	health.ModelSource = catalog.Source
+	health.ModelFetchError = catalog.Error
+
+	if catalog.Error != nil {
+		health.Models = cleanModelList(p.Models())
+		health.ModelSource = ModelCatalogSourceStatic
+	}
+
+	return providerHealthWithDefaults(health, p)
+}
+
+func providerHealthWithDefaults(health ProviderHealth, p Provider) ProviderHealth {
 	if len(health.Models) == 0 {
 		health.Models = cleanModelList(p.Models())
 	}
@@ -509,12 +565,7 @@ func (r *Registry) checkProviderHealth(ctx context.Context, providerName string,
 		health.ModelSource = ModelCatalogSourceStatic
 	}
 
-	r.mu.Lock()
-	r.cacheProviderHealthLocked(providerName, health, now)
-	r.applyHealthToReadinessLocked(providerName, health)
-	r.mu.Unlock()
-
-	return cloneProviderHealth(health)
+	return health
 }
 
 func (r *Registry) cachedProviderHealthLocked(providerName string, ttl time.Duration, now time.Time) (ProviderHealth, bool) {
@@ -610,6 +661,7 @@ func cloneProviderHealth(health ProviderHealth) ProviderHealth {
 	health.LiveModels = append([]string(nil), health.LiveModels...)
 	health.Checks = append([]ReadinessCheck(nil), health.Checks...)
 	health.Warnings = append([]string(nil), health.Warnings...)
+
 	if health.Contract != nil {
 		contract := *health.Contract
 		health.Contract = &contract

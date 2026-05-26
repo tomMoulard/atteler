@@ -100,20 +100,21 @@ func doctor(ctx context.Context, state appState) error {
 	results := providerHealthResults(ctx, state, providers)
 	adapterHealthy := 0
 
-	for _, r := range results {
-		if r.Healthy {
-			fmt.Printf("  [ok] %s%s\n", r.Name, doctorAdapterSuffix(r.Contract))
+	for i := range results {
+		result := &results[i]
+		if result.Healthy {
+			fmt.Printf("  [ok] %s%s\n", result.Name, doctorAdapterSuffix(result.Contract))
 
 			adapterHealthy++
 		} else {
-			fmt.Printf("  [FAIL] %s%s: %v\n", r.Name, doctorAdapterSuffix(r.Contract), r.Error)
+			fmt.Printf("  [FAIL] %s%s: %v\n", result.Name, doctorAdapterSuffix(result.Contract), result.Error)
 		}
 
-		printDoctorAdapterDetails(r)
+		printDoctorAdapterDetails(result)
 
-		metadataProvider := doctorMetadataProvider(state, r.Name)
+		metadataProvider := doctorMetadataProvider(state, result.Name)
 
-		for _, m := range r.Models {
+		for _, m := range result.Models {
 			fmt.Printf("         - %s%s\n", m, doctorModelMetadataSuffix(metadataProvider, m))
 		}
 
@@ -217,7 +218,11 @@ func doctorMetadataProvider(state appState, providerName string) llm.ModelMetada
 	}
 }
 
-func printDoctorAdapterDetails(result llm.ProviderHealth) {
+func printDoctorAdapterDetails(result *llm.ProviderHealth) {
+	if result == nil {
+		return
+	}
+
 	if result.Contract != nil {
 		fmt.Printf("         adapter_contract: %s\n", doctorAdapterContractStatus(result))
 		fmt.Printf("         contract: source=%s; source_cli_version=%s; protocol=%s; reviewed=%s; review_after=%s\n",
@@ -243,7 +248,11 @@ func printDoctorAdapterDetails(result llm.ProviderHealth) {
 	}
 }
 
-func doctorAdapterContractStatus(result llm.ProviderHealth) string {
+func doctorAdapterContractStatus(result *llm.ProviderHealth) string {
+	if result == nil {
+		return "failed"
+	}
+
 	if result.Healthy && result.Error == nil {
 		return "passed"
 	}

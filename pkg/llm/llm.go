@@ -782,24 +782,6 @@ func (r *Registry) indexProviderModelsLocked(providerName string, models []strin
 	}
 }
 
-func (r *Registry) storeFetchedProviderModels(providerName string, models []string, verified bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.storeFetchedProviderModelsLocked(providerName, models, verified)
-}
-
-func (r *Registry) storeFetchedProviderModelsLocked(providerName string, models []string, verified bool) {
-	if verified {
-		r.replaceProviderModelsLocked(providerName, models)
-
-		return
-	}
-
-	r.indexProviderModelsLocked(providerName, models)
-	r.providerModelsLive[providerName] = false
-}
-
 func (r *Registry) replaceProviderModelsLocked(providerName string, models []string) {
 	for model := range r.providerModels[providerName] {
 		r.removeProviderModelLocked(providerName, model)
@@ -808,14 +790,6 @@ func (r *Registry) replaceProviderModelsLocked(providerName string, models []str
 	delete(r.providerModels, providerName)
 	r.indexProviderModelsLocked(providerName, models)
 	r.providerModelsLive[providerName] = true
-}
-
-func (r *Registry) markProviderModelsUnverified(providerName string, fallbackModels []string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.indexProviderModelsLocked(providerName, fallbackModels)
-	r.markProviderModelsUnverifiedLocked(providerName)
 }
 
 func (r *Registry) markProviderModelsUnverifiedLocked(providerName string) {

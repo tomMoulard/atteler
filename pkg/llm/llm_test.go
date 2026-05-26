@@ -1670,7 +1670,8 @@ func TestAutoRegisterWithConfigContext_DisablesAnthropicBorrowedCredentialsOnly(
 
 func providerHealthByName(results []ProviderHealth) map[string]ProviderHealth {
 	out := make(map[string]ProviderHealth, len(results))
-	for _, result := range results {
+	for i := range results {
+		result := results[i]
 		out[result.Name] = result
 	}
 
