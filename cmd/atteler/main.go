@@ -102,6 +102,13 @@ const (
 	taskTickInterval        = time.Second
 	idleSuggestionDelay     = time.Second
 	idleSuggestionTimeout   = 8 * time.Second
+
+	idleSuggestionStatusPending       = "pending"
+	idleSuggestionStatusPendingForced = "pending:forced"
+	idleSuggestionStatusReadyModel    = "ready:model"
+	idleSuggestionStatusRejectedStale = "rejected:stale"
+	idleSuggestionStatusRejectedError = "rejected:error"
+	idleSuggestionStatusRejectedEmpty = "rejected:empty"
 )
 
 var terminalTitleSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -166,6 +173,7 @@ type idleSuggestionMsg struct {
 	input      string
 	suggestion string
 	id         int
+	force      bool
 }
 
 type taskTickMsg struct {

@@ -357,7 +357,7 @@ func (m *model) scheduleIdleSuggestion() tea.Cmd {
 	m.idleSuggestionID++
 	m.idleSuggestionInput = value
 	m.idleSuggestionText = ""
-	m.idleSuggestionStatus = "pending"
+	m.idleSuggestionStatus = idleSuggestionStatusPending
 	id := m.idleSuggestionID
 
 	return tea.Tick(idleSuggestionDelay, func(time.Time) tea.Msg {
@@ -365,17 +365,63 @@ func (m *model) scheduleIdleSuggestion() tea.Cmd {
 	})
 }
 
+func (m model) forceIdleSuggestion() (tea.Model, tea.Cmd, bool) {
+	value := m.textarea.Value()
+	if m.idleSuggestionStatus == idleSuggestionStatusPendingForced &&
+		m.idleSuggestionInput == value &&
+		textareaCursorOffset(m.textarea) == len(value) {
+		return m, nil, true
+	}
+
+	if textareaCursorOffset(m.textarea) != len(value) {
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedStale
+
+		return m, nil, true
+	}
+
+	if m.waiting {
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedError
+
+		return m, tea.Println(errStyle.Render("Suggestion unavailable while a task is running.")), true
+	}
+
+	if m.promptLocalOnly {
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedError
+
+		return m, tea.Println(errStyle.Render("Suggestion unavailable: model-backed suggestions are disabled by --prompt-local-only.")), true
+	}
+
+	if m.registry == nil {
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedError
+
+		return m, tea.Println(errStyle.Render("Suggestion unavailable: no model registry is configured.")), true
+	}
+
+	m.idleSuggestionID++
+
+	next, cmd := m.startIdleSuggestionRequest(m.idleSuggestionID, value, true)
+
+	return next, cmd, true
+}
+
 func (m model) updateIdleSuggestionRequest(msg idleSuggestionRequestMsg) (tea.Model, tea.Cmd) {
 	if msg.id != m.idleSuggestionID ||
-		msg.input != m.idleSuggestionInput ||
-		msg.input != m.textarea.Value() ||
-		textareaCursorOffset(m.textarea) != len(m.textarea.Value()) ||
-		m.waiting ||
-		m.registry == nil {
-		m.idleSuggestionStatus = "rejected:stale"
+		msg.input != m.idleSuggestionInput {
 		return m, nil
 	}
 
+	if msg.input != m.textarea.Value() ||
+		textareaCursorOffset(m.textarea) != len(m.textarea.Value()) ||
+		m.waiting ||
+		m.registry == nil {
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedStale
+		return m, nil
+	}
+
+	return m.startIdleSuggestionRequest(msg.id, msg.input, false)
+}
+
+func (m model) startIdleSuggestionRequest(id int, input string, force bool) (tea.Model, tea.Cmd) {
 	requestCtx := m.ctx
 	if requestCtx != nil {
 		var cancel context.CancelFunc
@@ -384,6 +430,16 @@ func (m model) updateIdleSuggestionRequest(msg idleSuggestionRequestMsg) (tea.Mo
 
 		m.cancelIdleSuggestionRequest()
 		m.idleSuggestionCancel = cancel
+	}
+
+	m.idleSuggestionID = id
+	m.idleSuggestionInput = input
+	m.idleSuggestionText = ""
+
+	if force {
+		m.idleSuggestionStatus = idleSuggestionStatusPendingForced
+	} else {
+		m.idleSuggestionStatus = idleSuggestionStatusPending
 	}
 
 	return m, requestIdleSuggestion(
@@ -395,18 +451,22 @@ func (m model) updateIdleSuggestionRequest(msg idleSuggestionRequestMsg) (tea.Mo
 		m.generationOverrides,
 		m.hookRunner,
 		m.maxInputTokens,
-		msg.id,
-		msg.input,
+		id,
+		input,
 		m.idleSuggestionContext(),
+		force,
 	)
 }
 
 func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) {
 	if msg.id != m.idleSuggestionID ||
-		msg.input != m.idleSuggestionInput ||
-		msg.input != m.textarea.Value() ||
+		msg.input != m.idleSuggestionInput {
+		return m, nil
+	}
+
+	if msg.input != m.textarea.Value() ||
 		textareaCursorOffset(m.textarea) != len(m.textarea.Value()) {
-		m.idleSuggestionStatus = "rejected:stale"
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedStale
 		return m, nil
 	}
 
@@ -417,7 +477,11 @@ func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) 
 		// provider/network failures.
 		slog.Debug("idle prompt suggestion failed", "error", msg.err)
 
-		m.idleSuggestionStatus = "rejected:error"
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedError
+
+		if msg.force {
+			return m, tea.Println(errStyle.Render("Suggestion failed: " + msg.err.Error()))
+		}
 
 		return m, nil
 	}
@@ -426,14 +490,32 @@ func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) 
 		m.idleSuggestionText = ""
 		m.idleSuggestionStatus = "rejected:" + reason
 
+		if msg.force {
+			return m, tea.Println(errStyle.Render("Suggestion rejected: " + reason))
+		}
+
 		return m, nil
 	}
 
-	m.idleSuggestionText = normalizeIdleSuggestion(msg.input, msg.suggestion)
-	if m.idleSuggestionText == "" {
-		m.idleSuggestionStatus = "rejected:empty"
+	suggestion := normalizeIdleSuggestion(msg.input, msg.suggestion)
+	if suggestion == "" {
+		m.idleSuggestionText = ""
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedEmpty
+
+		if msg.force {
+			return m, tea.Println(errStyle.Render("Suggestion failed: empty response."))
+		}
 	} else {
-		m.idleSuggestionStatus = "ready:model"
+		if msg.force {
+			m.textarea.SetValue(msg.input + suggestion)
+			m.textarea.CursorEnd()
+			m.clearIdleSuggestion()
+
+			return m, nil
+		}
+
+		m.idleSuggestionText = suggestion
+		m.idleSuggestionStatus = idleSuggestionStatusReadyModel
 	}
 
 	return m, nil
@@ -442,6 +524,7 @@ func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) 
 func (m model) visibleIdleSuggestion() (string, bool) {
 	value := m.textarea.Value()
 	if strings.TrimSpace(value) == "" ||
+		m.idleSuggestionStatus != idleSuggestionStatusReadyModel ||
 		m.idleSuggestionInput != value ||
 		m.idleSuggestionText == "" ||
 		textareaCursorOffset(m.textarea) != len(value) {
@@ -463,10 +546,11 @@ func requestIdleSuggestion(
 	id int,
 	input string,
 	contextSummary string,
+	force bool,
 ) tea.Cmd {
 	return func() tea.Msg {
 		if ctx == nil {
-			return idleSuggestionMsg{id: id, input: input, err: errors.New("idle suggestion: context is required")}
+			return idleSuggestionMsg{id: id, input: input, err: errors.New("idle suggestion: context is required"), force: force}
 		}
 
 		reqCtx, cancel := context.WithTimeout(ctx, idleSuggestionTimeout)
@@ -505,15 +589,15 @@ func requestIdleSuggestion(
 		emitHookWarning(reqCtx, hookRunner, manifestEvent)
 
 		if err := validateRequestBudgetWithFallbacks(reg, params.Model, fallbackModels, params.Messages, maxInputTokens); err != nil {
-			return idleSuggestionMsg{id: id, input: input, err: err}
+			return idleSuggestionMsg{id: id, input: input, err: err, force: force}
 		}
 
 		resp, err := reg.CompleteWithFallback(reqCtx, params, fallbackModels)
 		if err != nil {
-			return idleSuggestionMsg{id: id, input: input, err: err}
+			return idleSuggestionMsg{id: id, input: input, err: err, force: force}
 		}
 
-		return idleSuggestionMsg{id: id, input: input, suggestion: resp.Content}
+		return idleSuggestionMsg{id: id, input: input, suggestion: resp.Content, force: force}
 	}
 }
 

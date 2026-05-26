@@ -420,11 +420,10 @@ The printed `log=` path is the logical base, and retained chunks use
 
 In the interactive TUI, `Enter` sends the prompt, `Shift+Enter` inserts a
 newline for multi-line drafts (`Alt+Enter` remains available as a terminal
-fallback), `Ctrl+O` opens the model picker, `Tab` accepts visible local prompt
-completions (agents, slash commands, session context, and safe model-backed
-suffixes when configured), `Ctrl+R` rewrites under-specified prompts without
-adding boilerplate to already-structured drafts, and `Ctrl+Z` undoes the latest
-rewrite.
+fallback), `Ctrl+O` opens the model picker, `Tab` accepts visible prompt
+completions or requests a fresh model-backed suffix when none is valid,
+`Ctrl+R` rewrites under-specified prompts without adding boilerplate to
+already-structured drafts, and `Ctrl+Z` undoes the latest rewrite.
 Use `--prompt-local-only` to keep interactive prompt assistance on the
 deterministic no-network completion path even when providers are configured.
 

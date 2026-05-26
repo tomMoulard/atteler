@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -175,6 +176,38 @@ func (p idleSuggestionProvider) Complete(context.Context, llm.CompleteParams) (*
 }
 
 func (p idleSuggestionProvider) ModelContextWindow(string) int { return 0 }
+
+func newIdleSuggestionTestModel(response string) model {
+	registry := llm.NewRegistry()
+	registry.Register(idleSuggestionProvider{model: "model", response: response})
+
+	return model{
+		ctx:           context.Background(),
+		registry:      registry,
+		selectedModel: "suggest/model",
+		textarea:      textarea.New(),
+	}
+}
+
+type failingIdleSuggestionProvider struct {
+	model string
+}
+
+func (p failingIdleSuggestionProvider) Name() string { return "suggest" }
+
+func (p failingIdleSuggestionProvider) Models() []string { return []string{p.model} }
+
+func (p failingIdleSuggestionProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p failingIdleSuggestionProvider) HealthCheck(context.Context) error { return nil }
+
+func (p failingIdleSuggestionProvider) Complete(context.Context, llm.CompleteParams) (*llm.Response, error) {
+	return nil, errors.New("provider unavailable")
+}
+
+func (p failingIdleSuggestionProvider) ModelContextWindow(string) int { return 0 }
 
 type capturingIdleSuggestionProvider struct {
 	params   *llm.CompleteParams
@@ -678,11 +711,276 @@ func TestPromptSuggestionUsesTaskIDsWithoutModel(t *testing.T) {
 	assert.Equal(t, "task GH-27", applyPromptSuggestion(m.textarea.Value(), suggestion))
 }
 
-func TestIdleSuggestionRequestUsesProviderAndAcceptsSuffix(t *testing.T) {
+func TestAcceptCompletionAcceptsValidPromptSuggestion(t *testing.T) {
+	t.Parallel()
+
+	m := model{textarea: textarea.New()}
+	m.textarea.SetValue("summ")
+	m.textarea.CursorEnd()
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.Nil(t, cmd)
+	assert.Equal(t, "summarize this session with changed files and verification evidence", next.textarea.Value())
+}
+
+func TestAcceptCompletionForcesSuggestionWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	m := newIdleSuggestionTestModel("draft prompt with tests")
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, "draft prompt", next.textarea.Value())
+	assert.Equal(t, idleSuggestionStatusPendingForced, next.idleSuggestionStatus)
+	assert.Equal(t, "draft prompt", next.idleSuggestionInput)
+
+	msg, ok := cmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.True(t, msg.force)
+	require.NoError(t, msg.err)
+
+	nextModel, cmd = next.updateIdleSuggestion(msg)
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.Nil(t, cmd)
+	assert.Equal(t, "draft prompt with tests", next.textarea.Value())
+	assert.Empty(t, next.idleSuggestionStatus)
+	assert.Empty(t, next.idleSuggestionText)
+}
+
+func TestAcceptCompletionForcesSuggestionWhenInputEmpty(t *testing.T) {
+	t.Parallel()
+
+	m := newIdleSuggestionTestModel("draft prompt")
+	m.textarea.CursorEnd()
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, idleSuggestionStatusPendingForced, next.idleSuggestionStatus)
+	assert.Empty(t, next.idleSuggestionInput)
+
+	msg, ok := cmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.True(t, msg.force)
+	require.NoError(t, msg.err)
+
+	nextModel, _ = next.updateIdleSuggestion(msg)
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	assert.Equal(t, "draft prompt", next.textarea.Value())
+}
+
+func TestAcceptCompletionShowsForcedSuggestionStatus(t *testing.T) {
+	t.Parallel()
+
+	m := newIdleSuggestionTestModel("draft prompt with tests")
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+
+	assert.Contains(t, stripANSI(next.statusLine()), "suggestion:"+idleSuggestionStatusPendingForced)
+}
+
+func TestAcceptCompletionRetriesRejectedSuggestionStates(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []string{idleSuggestionStatusRejectedStale, idleSuggestionStatusRejectedError} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+
+			m := newIdleSuggestionTestModel("draft prompt with tests")
+			m.idleSuggestionID = 7
+			m.idleSuggestionInput = "draft prompt"
+			m.idleSuggestionText = " stale"
+			m.idleSuggestionStatus = status
+			m.textarea.SetValue("draft prompt")
+			m.textarea.CursorEnd()
+
+			nextModel, cmd, handled := m.acceptCompletion()
+			next, ok := nextModel.(model)
+			require.True(t, ok)
+			require.True(t, handled)
+			require.NotNil(t, cmd)
+			assert.Equal(t, idleSuggestionStatusPendingForced, next.idleSuggestionStatus)
+			assert.Equal(t, 8, next.idleSuggestionID)
+
+			msg, ok := cmd().(idleSuggestionMsg)
+			require.True(t, ok)
+			require.True(t, msg.force)
+			require.NoError(t, msg.err)
+
+			nextModel, _ = next.updateIdleSuggestion(msg)
+			next, ok = nextModel.(model)
+			require.True(t, ok)
+			assert.Equal(t, "draft prompt with tests", next.textarea.Value())
+		})
+	}
+}
+
+func TestAcceptCompletionDebouncesForcedSuggestion(t *testing.T) {
+	t.Parallel()
+
+	m := newIdleSuggestionTestModel("draft prompt with tests")
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	nextModel, firstCmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, firstCmd)
+
+	nextModel, secondCmd, handled := next.acceptCompletion()
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.Nil(t, secondCmd)
+	assert.Equal(t, idleSuggestionStatusPendingForced, next.idleSuggestionStatus)
+	assert.Equal(t, "draft prompt", next.textarea.Value())
+}
+
+func TestAcceptCompletionSupersedesScheduledIdleSuggestion(t *testing.T) {
+	t.Parallel()
+
+	m := newIdleSuggestionTestModel("draft prompt with tests")
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	oldID := m.idleSuggestionID
+
+	nextModel, forceCmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, forceCmd)
+	assert.Equal(t, oldID+1, next.idleSuggestionID)
+	assert.Equal(t, idleSuggestionStatusPendingForced, next.idleSuggestionStatus)
+
+	nextModel, oldRequestCmd := next.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    oldID,
+		input: "draft prompt",
+	})
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.Nil(t, oldRequestCmd)
+	assert.Equal(t, idleSuggestionStatusPendingForced, next.idleSuggestionStatus)
+}
+
+func TestAcceptCompletionReportsUnavailableForcedSuggestion(t *testing.T) {
 	t.Parallel()
 
 	registry := llm.NewRegistry()
 	registry.Register(idleSuggestionProvider{model: "model", response: "draft prompt with tests"})
+
+	for _, tc := range []struct {
+		name  string
+		model model
+	}{
+		{name: "no registry", model: model{}},
+		{name: "local only", model: model{registry: registry, selectedModel: "suggest/model", promptLocalOnly: true}},
+		{name: "waiting", model: model{registry: registry, selectedModel: "suggest/model", waiting: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			m := tc.model
+			m.textarea = textarea.New()
+			m.textarea.SetValue("draft prompt")
+			m.textarea.CursorEnd()
+
+			nextModel, cmd, handled := m.acceptCompletion()
+			next, ok := nextModel.(model)
+			require.True(t, ok)
+			require.True(t, handled)
+			require.NotNil(t, cmd)
+			assert.Equal(t, "draft prompt", next.textarea.Value())
+			assert.Equal(t, idleSuggestionStatusRejectedError, next.idleSuggestionStatus)
+		})
+	}
+}
+
+func TestAcceptCompletionDoesNotForceSuggestionWhenCursorIsMidline(t *testing.T) {
+	t.Parallel()
+
+	m := newIdleSuggestionTestModel("draft prompt with tests")
+	m.textarea.SetValue("draft prompt")
+	m.textarea.SetCursor(len("draft"))
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.Nil(t, cmd)
+	assert.Equal(t, "draft prompt", next.textarea.Value())
+	assert.Equal(t, idleSuggestionStatusRejectedStale, next.idleSuggestionStatus)
+}
+
+func TestAcceptCompletionCancelsInFlightIdleSuggestionBeforeForcing(t *testing.T) {
+	t.Parallel()
+
+	provider := &cancelAwareIdleSuggestionProvider{model: "model"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:           context.Background(),
+		registry:      registry,
+		selectedModel: "cancel/model",
+		textarea:      textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	nextModel, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, requestCmd)
+	require.NotNil(t, next.idleSuggestionCancel)
+	idleID := next.idleSuggestionID
+
+	nextModel, forceCmd, handled := next.acceptCompletion()
+	forced, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, forceCmd)
+	assert.Equal(t, idleID+1, forced.idleSuggestionID)
+	assert.Equal(t, idleSuggestionStatusPendingForced, forced.idleSuggestionStatus)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.Error(t, msg.err)
+	assert.Contains(t, msg.err.Error(), "canceled")
+	assert.False(t, provider.called)
+}
+
+func TestAcceptCompletionReportsForcedSuggestionErrors(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(failingIdleSuggestionProvider{model: "model"})
 
 	m := model{
 		ctx:           context.Background(),
@@ -690,6 +988,70 @@ func TestIdleSuggestionRequestUsesProviderAndAcceptsSuffix(t *testing.T) {
 		selectedModel: "suggest/model",
 		textarea:      textarea.New(),
 	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+
+	msg, ok := cmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.True(t, msg.force)
+	require.Error(t, msg.err)
+
+	nextModel, printCmd := next.updateIdleSuggestion(msg)
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, printCmd)
+	assert.Equal(t, "draft prompt", next.textarea.Value())
+	assert.Equal(t, idleSuggestionStatusRejectedError, next.idleSuggestionStatus)
+}
+
+func TestAcceptCompletionRejectsInvalidForcedSuggestions(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		response   string
+		wantStatus string
+	}{
+		{name: "empty", response: "", wantStatus: idleSuggestionStatusRejectedEmpty},
+		{name: "unsafe", response: "with tests\nrm -rf /", wantStatus: "rejected:unsafe-multiline"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			m := newIdleSuggestionTestModel(tc.response)
+			m.textarea.SetValue("draft prompt")
+			m.textarea.CursorEnd()
+
+			nextModel, cmd, handled := m.acceptCompletion()
+			next, ok := nextModel.(model)
+			require.True(t, ok)
+			require.True(t, handled)
+			require.NotNil(t, cmd)
+
+			msg, ok := cmd().(idleSuggestionMsg)
+			require.True(t, ok)
+			require.True(t, msg.force)
+
+			nextModel, printCmd := next.updateIdleSuggestion(msg)
+			next, ok = nextModel.(model)
+			require.True(t, ok)
+			require.NotNil(t, printCmd)
+			assert.Equal(t, "draft prompt", next.textarea.Value())
+			assert.Equal(t, tc.wantStatus, next.idleSuggestionStatus)
+		})
+	}
+}
+
+func TestIdleSuggestionRequestUsesProviderAndAcceptsSuffix(t *testing.T) {
+	t.Parallel()
+
+	m := newIdleSuggestionTestModel("draft prompt with tests")
 	m.textarea.SetValue("draft prompt")
 	m.textarea.CursorEnd()
 	cmd := m.scheduleIdleSuggestion()
@@ -849,15 +1211,7 @@ func TestPromptLocalOnlySkipsIdleModelSuggestion(t *testing.T) {
 func TestIdleSuggestionRequestRejectsCursorMoved(t *testing.T) {
 	t.Parallel()
 
-	registry := llm.NewRegistry()
-	registry.Register(idleSuggestionProvider{model: "model", response: "draft prompt with tests"})
-
-	m := model{
-		ctx:           context.Background(),
-		registry:      registry,
-		selectedModel: "suggest/model",
-		textarea:      textarea.New(),
-	}
+	m := newIdleSuggestionTestModel("draft prompt with tests")
 	m.textarea.SetValue("draft prompt")
 	m.textarea.CursorEnd()
 	cmd := m.scheduleIdleSuggestion()
@@ -873,7 +1227,7 @@ func TestIdleSuggestionRequestRejectsCursorMoved(t *testing.T) {
 	next, ok := nextModel.(model)
 	require.True(t, ok)
 	assert.Nil(t, requestCmd)
-	assert.Equal(t, "rejected:stale", next.idleSuggestionStatus)
+	assert.Equal(t, idleSuggestionStatusRejectedStale, next.idleSuggestionStatus)
 }
 
 func TestClearIdleSuggestionCancelsInFlightRequest(t *testing.T) {
@@ -920,6 +1274,28 @@ func TestIdleSuggestionIgnoresStaleResponses(t *testing.T) {
 	m.textarea.SetValue("new input")
 	m.idleSuggestionID = 2
 	m.idleSuggestionInput = "new input"
+	m.idleSuggestionStatus = idleSuggestionStatusReadyModel
+	m.idleSuggestionText = " suffix"
+
+	nextModel, _ := m.updateIdleSuggestion(idleSuggestionMsg{
+		id:         1,
+		input:      "old input",
+		suggestion: " old suffix",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	assert.Equal(t, " suffix", next.idleSuggestionText)
+	assert.Equal(t, idleSuggestionStatusReadyModel, next.idleSuggestionStatus)
+}
+
+func TestIdleSuggestionRejectsCurrentResponseWhenInputChanged(t *testing.T) {
+	t.Parallel()
+
+	m := model{textarea: textarea.New()}
+	m.textarea.SetValue("new input")
+	m.textarea.CursorEnd()
+	m.idleSuggestionID = 1
+	m.idleSuggestionInput = "old input"
 
 	nextModel, _ := m.updateIdleSuggestion(idleSuggestionMsg{
 		id:         1,
@@ -929,7 +1305,7 @@ func TestIdleSuggestionIgnoresStaleResponses(t *testing.T) {
 	next, ok := nextModel.(model)
 	require.True(t, ok)
 	assert.Empty(t, next.idleSuggestionText)
-	assert.Equal(t, "rejected:stale", next.idleSuggestionStatus)
+	assert.Equal(t, idleSuggestionStatusRejectedStale, next.idleSuggestionStatus)
 }
 
 func TestIdleSuggestionRejectsUnsafeResponses(t *testing.T) {
