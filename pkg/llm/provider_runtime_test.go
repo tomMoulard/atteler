@@ -119,7 +119,7 @@ func TestProviderRuntimeInfo_DocumentsActualAdapterBoundaries(t *testing.T) {
 
 	claudeCode, ok := ProviderRuntime(providerClaudeCode)
 	require.True(t, ok)
-	assert.Contains(t, claudeCode.ExecutionPath, "does not run `claude --print`")
+	assert.Contains(t, claudeCode.ExecutionPath, "does not run the Claude Code CLI")
 	assert.Contains(t, claudeCode.SandboxAndTools, "No Claude Code subprocess")
 	assert.Contains(t, claudeCode.HealthCheck, "no network call")
 

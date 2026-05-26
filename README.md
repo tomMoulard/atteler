@@ -232,7 +232,7 @@ directly from atteler.
 
 `atteler --list-providers` and `atteler --list-known-models` read the built-in
 provider inventory from `llm.KnownProviders()` without credentials or network
-calls. `atteler --doctor` registers the configured providers and then runs the
+calls. The doctor command registers the configured providers and then runs the
 provider-specific health check described below, so some health checks hit the
 network while Codex and Claude Code only validate loaded local credentials.
 
@@ -250,17 +250,17 @@ boundary, health check, or model inventory changes. Refresh the block with
 - Token refresh: ForgeCode OAuth credentials may refresh during credential resolution; the Anthropic adapter itself does not refresh on 401.
 - Network endpoint: `ANTHROPIC_BASE_URL` or provider config, default `https://api.anthropic.com`; `POST /v1/messages` for completions and `GET /v1/models` for model/health checks.
 - Sandbox and tools: No subprocess or workspace sandbox. Atteler sends tool definitions in the Messages request; any tool execution happens in Atteler's agent loop.
-- Model inventory: `--list-known-models` prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.
+- Model inventory: Known-model listing prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.
 - Health check: Network check: calls `GET /v1/models` through `FetchModels`.
 
 #### `claude-code`
 
-- Execution path: Direct HTTPS calls from atteler to the Anthropic Messages API using Claude Code OAuth; it does not run `claude --print`.
+- Execution path: Direct HTTPS calls from atteler to the Anthropic Messages API using Claude Code OAuth; it does not run the Claude Code CLI in print mode.
 - Credential source: Claude Code OAuth from macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json`.
 - Token refresh: On 401, exchanges the stored refresh token at `https://platform.claude.com/v1/oauth/token` and persists refreshed tokens back to the same Claude Code credential store.
 - Network endpoint: `ANTHROPIC_BASE_URL`, default `https://api.anthropic.com`; `POST /v1/messages` for completions. Model listing is static for this provider.
 - Sandbox and tools: No Claude Code subprocess, file/search/edit tool sandbox, or workspace sandbox. Atteler only forwards configured request tools.
-- Model inventory: `--list-known-models` and `FetchModels` both return the static Claude Code model/alias catalog; no model-list network call is made.
+- Model inventory: Known-model listing and `FetchModels` both return the static Claude Code model/alias catalog; no model-list network call is made.
 - Health check: Local credential check only: verifies an OAuth access token is loaded; no network call.
 
 #### `codex`
@@ -270,7 +270,7 @@ boundary, health check, or model inventory changes. Refresh the block with
 - Token refresh: On 401, exchanges the stored refresh token at `https://auth.openai.com/oauth/token` and atomically updates `auth.json`.
 - Network endpoint: `CODEX_BASE_URL`, default `https://chatgpt.com/backend-api/codex`; `POST /responses` for completions. Model listing is static plus any model from Codex config.
 - Sandbox and tools: No Codex subprocess, file/search/edit tool sandbox, or workspace sandbox. Atteler sends Responses API function-tool definitions only.
-- Model inventory: `--list-known-models` prints the static Codex catalog; registered providers prepend any model configured in Codex config and `FetchModels` stays local.
+- Model inventory: Known-model listing prints the static Codex catalog; registered providers prepend any model configured in Codex config and `FetchModels` stays local.
 - Health check: Local credential check only: verifies parsed ChatGPT-mode auth has an access token; no network call.
 
 #### `ollama`
@@ -280,7 +280,7 @@ boundary, health check, or model inventory changes. Refresh the block with
 - Token refresh: None.
 - Network endpoint: `OLLAMA_BASE_URL` or provider config, default `http://127.0.0.1:11434`; `POST /api/chat` for completions and `GET /api/tags` for model/health checks.
 - Sandbox and tools: No workspace sandbox. Local model execution and any model tool behavior are governed by the Ollama daemon; Atteler serializes configured tool definitions.
-- Model inventory: `--list-known-models` prints useful static defaults without contacting Ollama; registered providers call `GET /api/tags` for live local model names.
+- Model inventory: Known-model listing prints useful static defaults without contacting Ollama; registered providers call `GET /api/tags` for live local model names.
 - Health check: Network/local daemon check: calls `GET /api/tags` and may first auto-start `ollama serve` during provider creation.
 
 #### `openai`
@@ -290,7 +290,7 @@ boundary, health check, or model inventory changes. Refresh the block with
 - Token refresh: None; the API key is sent as a bearer token and is not refreshed.
 - Network endpoint: `OPENAI_BASE_URL` or provider config, default `https://api.openai.com`; `POST /v1/chat/completions` for completions and `GET /v1/models` for model/health checks.
 - Sandbox and tools: No subprocess or workspace sandbox. Atteler sends function-tool definitions in the chat request; any tool execution happens in Atteler's agent loop.
-- Model inventory: `--list-known-models` prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.
+- Model inventory: Known-model listing prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.
 - Health check: Network check: calls `GET /v1/models` through `FetchModels`.
 <!-- END GENERATED PROVIDER RUNTIME DOCS -->
 

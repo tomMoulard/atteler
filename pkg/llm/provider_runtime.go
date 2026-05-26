@@ -33,16 +33,16 @@ func providerRuntimeCatalog() map[string]ProviderRuntimeInfo {
 			TokenRefresh:     "ForgeCode OAuth credentials may refresh during credential resolution; the Anthropic adapter itself does not refresh on 401.",
 			NetworkEndpoint:  fmt.Sprintf("`ANTHROPIC_BASE_URL` or provider config, default `%s`; `POST /v1/messages` for completions and `GET /v1/models` for model/health checks.", defaultAnthropicBase),
 			SandboxAndTools:  "No subprocess or workspace sandbox. Atteler sends tool definitions in the Messages request; any tool execution happens in Atteler's agent loop.",
-			ModelInventory:   "`--list-known-models` prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.",
+			ModelInventory:   "Known-model listing prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.",
 			HealthCheck:      "Network check: calls `GET /v1/models` through `FetchModels`.",
 		},
 		providerClaudeCode: { // #nosec G101 -- documentation names credential sources, not secret values.
-			ExecutionPath:    "Direct HTTPS calls from atteler to the Anthropic Messages API using Claude Code OAuth; it does not run `claude --print`.",
+			ExecutionPath:    "Direct HTTPS calls from atteler to the Anthropic Messages API using Claude Code OAuth; it does not run the Claude Code CLI in print mode.",
 			CredentialSource: "Claude Code OAuth from macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json`.",
 			TokenRefresh:     fmt.Sprintf("On 401, exchanges the stored refresh token at `%s` and persists refreshed tokens back to the same Claude Code credential store.", claudeCodeRefreshURL),
 			NetworkEndpoint:  fmt.Sprintf("`ANTHROPIC_BASE_URL`, default `%s`; `POST /v1/messages` for completions. Model listing is static for this provider.", defaultAnthropicBase),
 			SandboxAndTools:  "No Claude Code subprocess, file/search/edit tool sandbox, or workspace sandbox. Atteler only forwards configured request tools.",
-			ModelInventory:   "`--list-known-models` and `FetchModels` both return the static Claude Code model/alias catalog; no model-list network call is made.",
+			ModelInventory:   "Known-model listing and `FetchModels` both return the static Claude Code model/alias catalog; no model-list network call is made.",
 			HealthCheck:      "Local credential check only: verifies an OAuth access token is loaded; no network call.",
 		},
 		providerCodex: { // #nosec G101 -- documentation names credential sources, not secret values.
@@ -51,7 +51,7 @@ func providerRuntimeCatalog() map[string]ProviderRuntimeInfo {
 			TokenRefresh:     fmt.Sprintf("On 401, exchanges the stored refresh token at `%s` and atomically updates `auth.json`.", codexChatGPTRefreshURL),
 			NetworkEndpoint:  fmt.Sprintf("`CODEX_BASE_URL`, default `%s`; `POST /responses` for completions. Model listing is static plus any model from Codex config.", codexChatGPTAPIBase),
 			SandboxAndTools:  "No Codex subprocess, file/search/edit tool sandbox, or workspace sandbox. Atteler sends Responses API function-tool definitions only.",
-			ModelInventory:   "`--list-known-models` prints the static Codex catalog; registered providers prepend any model configured in Codex config and `FetchModels` stays local.",
+			ModelInventory:   "Known-model listing prints the static Codex catalog; registered providers prepend any model configured in Codex config and `FetchModels` stays local.",
 			HealthCheck:      "Local credential check only: verifies parsed ChatGPT-mode auth has an access token; no network call.",
 		},
 		providerOllama: { // #nosec G101 -- documentation names credential sources, not secret values.
@@ -60,7 +60,7 @@ func providerRuntimeCatalog() map[string]ProviderRuntimeInfo {
 			TokenRefresh:     "None.",
 			NetworkEndpoint:  fmt.Sprintf("`OLLAMA_BASE_URL` or provider config, default `%s`; `POST /api/chat` for completions and `GET /api/tags` for model/health checks.", defaultOllamaBase),
 			SandboxAndTools:  "No workspace sandbox. Local model execution and any model tool behavior are governed by the Ollama daemon; Atteler serializes configured tool definitions.",
-			ModelInventory:   "`--list-known-models` prints useful static defaults without contacting Ollama; registered providers call `GET /api/tags` for live local model names.",
+			ModelInventory:   "Known-model listing prints useful static defaults without contacting Ollama; registered providers call `GET /api/tags` for live local model names.",
 			HealthCheck:      "Network/local daemon check: calls `GET /api/tags` and may first auto-start `ollama serve` during provider creation.",
 		},
 		providerOpenAI: { // #nosec G101 -- documentation names credential sources, not secret values.
@@ -69,7 +69,7 @@ func providerRuntimeCatalog() map[string]ProviderRuntimeInfo {
 			TokenRefresh:     "None; the API key is sent as a bearer token and is not refreshed.",
 			NetworkEndpoint:  fmt.Sprintf("`OPENAI_BASE_URL` or provider config, default `%s`; `POST /v1/chat/completions` for completions and `GET /v1/models` for model/health checks.", defaultOpenAIBase),
 			SandboxAndTools:  "No subprocess or workspace sandbox. Atteler sends function-tool definitions in the chat request; any tool execution happens in Atteler's agent loop.",
-			ModelInventory:   "`--list-known-models` prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.",
+			ModelInventory:   "Known-model listing prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.",
 			HealthCheck:      "Network check: calls `GET /v1/models` through `FetchModels`.",
 		},
 	}
