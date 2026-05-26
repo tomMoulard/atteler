@@ -14,17 +14,29 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/vector"
 )
 
+const (
+	// StoreSchemaVersion is the current JSON persistence schema for agent memory.
+	StoreSchemaVersion = 1
+)
+
 // Document is a vectorized text item stored for one agent.
 type Document struct {
-	Metadata map[string]string `json:"metadata,omitempty"`
-	ID       string            `json:"id"`
-	Path     string            `json:"path,omitempty"`
-	Text     string            `json:"text"`
-	Vector   vector.Vector     `json:"vector"`
+	Metadata   map[string]string     `json:"metadata,omitempty"`
+	Provenance map[string]string     `json:"provenance,omitempty"`
+	ExpiresAt  *time.Time            `json:"expires_at,omitempty"`
+	CreatedAt  time.Time             `json:"created_at,omitzero"`
+	UpdatedAt  time.Time             `json:"updated_at,omitzero"`
+	Vectorizer vector.VectorizerSpec `json:"vectorizer"`
+	ID         string                `json:"id"`
+	Path       string                `json:"path,omitempty"`
+	Text       string                `json:"text"`
+	SourceHash string                `json:"source_hash"`
+	Vector     vector.Vector         `json:"vector"`
 }
 
 // Result is a vector-ranked agent memory search result.
@@ -40,10 +52,53 @@ type Searcher struct {
 }
 
 // Store keeps vector memories partitioned by agent name.
+//
+//nolint:govet // Layout prioritizes JSON/API readability over pointer-byte packing.
 type Store struct {
-	Agents     map[string][]Document `json:"agents"`
-	indexes    map[string]*vector.Store
-	Dimensions int `json:"dimensions"`
+	Agents        map[string][]Document `json:"agents"`
+	Vectorizer    vector.VectorizerSpec `json:"vectorizer"`
+	CreatedAt     time.Time             `json:"created_at,omitzero"`
+	UpdatedAt     time.Time             `json:"updated_at,omitzero"`
+	SchemaVersion int                   `json:"schema_version"`
+	Dimensions    int                   `json:"dimensions"`
+}
+
+// LoadOptions controls persisted store loading.
+type LoadOptions struct {
+	// Migrate re-embeds legacy or stale documents from their redacted text instead
+	// of trusting persisted vectors with missing/incompatible metadata.
+	Migrate bool
+}
+
+type addOptions struct {
+	provenance map[string]string
+	expiresAt  *time.Time
+	ttl        time.Duration
+}
+
+// AddOption configures AddWithOptions and AddTextWithOptions.
+type AddOption func(*addOptions)
+
+// WithTTL expires the memory after ttl. Non-positive TTLs are ignored.
+func WithTTL(ttl time.Duration) AddOption {
+	return func(opts *addOptions) {
+		opts.ttl = ttl
+	}
+}
+
+// WithExpiresAt expires the memory at t.
+func WithExpiresAt(t time.Time) AddOption {
+	return func(opts *addOptions) {
+		t = t.UTC()
+		opts.expiresAt = &t
+	}
+}
+
+// WithProvenance records non-sensitive source metadata for the memory.
+func WithProvenance(provenance map[string]string) AddOption {
+	return func(opts *addOptions) {
+		opts.provenance = cleanMetadata(provenance)
+	}
 }
 
 // NewStore returns an empty per-agent memory store. A zero dimension value uses
@@ -54,10 +109,15 @@ func NewStore(dimensions int) (*Store, error) {
 		return nil, fmt.Errorf("agent memory: create vectorizer: %w", err)
 	}
 
+	now := time.Now().UTC()
+
 	return &Store{
-		Agents:     make(map[string][]Document),
-		Dimensions: vectorizer.Dimensions,
-		indexes:    make(map[string]*vector.Store),
+		Agents:        make(map[string][]Document),
+		Vectorizer:    vectorizer.Spec(),
+		SchemaVersion: StoreSchemaVersion,
+		Dimensions:    vectorizer.Dimensions,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}, nil
 }
 
@@ -67,9 +127,19 @@ func (s *Store) AddText(agent, id, text string) error {
 	return s.Add(agent, Document{ID: id, Text: text})
 }
 
+// AddTextWithOptions is AddText with TTL/provenance support.
+func (s *Store) AddTextWithOptions(agent, id, text string, opts ...AddOption) error {
+	return s.AddWithOptions(agent, Document{ID: id, Text: text}, opts...)
+}
+
 // AddFile reads and stores a UTF-8 text file for agent. The cleaned filepath is
 // used as the document ID and Path.
 func (s *Store) AddFile(agent, path string) error {
+	return s.AddFileWithOptions(agent, path)
+}
+
+// AddFileWithOptions is AddFile with TTL/provenance support.
+func (s *Store) AddFileWithOptions(agent, path string, opts ...AddOption) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read agent memory file %q: %w", path, err)
@@ -81,43 +151,67 @@ func (s *Store) AddFile(agent, path string) error {
 
 	clean := filepath.Clean(path)
 
-	metadata := map[string]string{
-		"path": clean,
-	}
+	metadata := map[string]string{"path": clean}
 	if info, statErr := os.Stat(path); statErr == nil && !info.ModTime().IsZero() {
 		metadata[retrieval.MetadataSourceUpdatedAt] = info.ModTime().UTC().Format(time.RFC3339Nano)
 	}
 
-	return s.Add(agent, Document{
-		ID:       clean,
-		Path:     clean,
-		Text:     string(data),
-		Metadata: metadata,
-	})
+	return s.AddWithOptions(agent, Document{
+		ID:         clean,
+		Path:       clean,
+		Text:       string(data),
+		Metadata:   metadata,
+		Provenance: fileProvenance(clean),
+	}, opts...)
 }
 
 // Add vectorizes and stores doc for agent. Existing documents for the same
 // agent and document ID are replaced.
 func (s *Store) Add(agent string, doc Document) error {
-	agent = strings.TrimSpace(agent)
-	if agent == "" {
-		return ErrMissingAgent
+	return s.AddWithOptions(agent, doc)
+}
+
+// AddWithOptions vectorizes and stores doc with TTL/provenance support.
+func (s *Store) AddWithOptions(agent string, doc Document, opts ...AddOption) error {
+	agent, agentErr := redactAgentName(agent)
+	if agentErr != nil {
+		return agentErr
 	}
 
-	doc.ID = strings.TrimSpace(doc.ID)
-	if doc.ID == "" {
-		return ErrMissingID
+	id, idErr := redactDocumentID(doc.ID)
+	if idErr != nil {
+		return idErr
 	}
+
+	doc.ID = id
 
 	if !utf8.ValidString(doc.Text) {
 		return ErrInvalidUTF8
 	}
 
-	if doc.Metadata != nil && len(doc.Metadata) == 0 {
-		doc.Metadata = nil
+	if err := s.ensureVectorizer(); err != nil {
+		return err
 	}
 
-	doc, _ = s.prepareDocument(agent, doc)
+	applied := applyAddOptions(opts...)
+	if applied.ttl > 0 {
+		expiresAt := time.Now().UTC().Add(applied.ttl)
+		applied.expiresAt = &expiresAt
+	}
+
+	if applied.expiresAt != nil {
+		doc.ExpiresAt = cloneTimePtr(applied.expiresAt)
+	}
+
+	if len(applied.provenance) > 0 {
+		doc.Provenance = mergeMetadata(doc.Provenance, applied.provenance)
+	}
+
+	doc.Text = privacy.RedactText(doc.Text)
+	doc.Path = privacy.RedactIdentifier(strings.TrimSpace(doc.Path))
+	doc.Metadata = privacy.RedactMetadata(doc.Metadata)
+	doc.Provenance = ensureProvenance(cleanMetadata(doc.Provenance), "direct")
+	doc.SourceHash = privacy.SourceHash(doc.Text)
 
 	vec, err := s.vectorize(doc.Text)
 	if err != nil {
@@ -125,40 +219,63 @@ func (s *Store) Add(agent string, doc Document) error {
 	}
 
 	doc.Vector = cloneVector(vec)
-	doc.Metadata = cloneMetadata(doc.Metadata)
+	doc.Vectorizer = s.Vectorizer
+
+	now := time.Now().UTC()
+
+	hasCreatedAt := !doc.CreatedAt.IsZero()
+	if doc.CreatedAt.IsZero() {
+		doc.CreatedAt = now
+	}
+
+	doc.UpdatedAt = now
 
 	if s.Agents == nil {
 		s.Agents = make(map[string][]Document)
 	}
 
+	if s.CreatedAt.IsZero() {
+		s.CreatedAt = now
+	}
+
+	s.UpdatedAt = now
+
 	docs := s.Agents[agent]
-	for i, existing := range docs {
-		if existing.ID == doc.ID {
-			docs[i] = doc
+	for i := range docs {
+		if docs[i].ID == doc.ID {
+			if !hasCreatedAt {
+				doc.CreatedAt = docs[i].CreatedAt
+			}
+
+			docs[i] = cloneDocument(doc)
 			s.Agents[agent] = docs
 
-			return s.indexDocument(agent, doc)
+			return nil
 		}
 	}
 
-	s.Agents[agent] = append(docs, doc)
+	s.Agents[agent] = append(docs, cloneDocument(doc))
 
-	return s.indexDocument(agent, doc)
+	return nil
 }
 
 // Search vectorizes query and returns results from only agent's documents. A
 // limit less than one returns every non-zero match.
 func (s *Store) Search(agent, query string, limit int) ([]Result, error) {
-	agent = strings.TrimSpace(agent)
-	if agent == "" {
-		return nil, ErrMissingAgent
+	agent, agentErr := redactAgentName(agent)
+	if agentErr != nil {
+		return nil, agentErr
 	}
 
 	if !utf8.ValidString(query) {
 		return nil, ErrInvalidUTF8
 	}
 
-	queryVector, err := s.vectorize(query)
+	if err := s.ensureVectorizer(); err != nil {
+		return nil, err
+	}
+
+	queryVector, err := s.vectorize(privacy.RedactText(query))
 	if err != nil {
 		return nil, err
 	}
@@ -168,20 +285,64 @@ func (s *Store) Search(agent, query string, limit int) ([]Result, error) {
 		return nil, nil
 	}
 
-	store, err := s.indexForAgent(agent)
+	store, err := vector.NewStoreWithVectorizer(s.Vectorizer)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("agent memory: create vector store: %w", err)
 	}
 
-	vectorResults, err := store.Search(queryVector, limit)
+	now := time.Now().UTC()
+	seen := make(map[string]struct{}, len(docs))
+	indexedDocs := make([]Document, 0, len(docs))
+
+	for i := range docs {
+		doc := docs[i]
+		if isExpired(doc, now) {
+			continue
+		}
+
+		doc.ID = strings.TrimSpace(doc.ID)
+		if doc.ID == "" {
+			return nil, ErrMissingID
+		}
+
+		if _, ok := seen[doc.ID]; ok {
+			return nil, fmt.Errorf("%w: %s", ErrDuplicateID, doc.ID)
+		}
+
+		seen[doc.ID] = struct{}{}
+
+		if validateErr := s.validateSearchDocument(doc); validateErr != nil {
+			return nil, fmt.Errorf("agent memory: validate search document %q: %w", doc.ID, validateErr)
+		}
+
+		indexedDocs = append(indexedDocs, cloneDocument(doc))
+
+		if addErr := store.Add(vector.Document{
+			ID:         doc.ID,
+			Text:       doc.Text,
+			Metadata:   doc.Metadata,
+			Provenance: doc.Provenance,
+			Vector:     doc.Vector,
+			Vectorizer: doc.Vectorizer,
+			SourceHash: doc.SourceHash,
+			CreatedAt:  doc.CreatedAt,
+			UpdatedAt:  doc.UpdatedAt,
+			ExpiresAt:  doc.ExpiresAt,
+		}); addErr != nil {
+			return nil, fmt.Errorf("index agent memory document %q: %w", doc.ID, addErr)
+		}
+	}
+
+	vectorResults, err := store.SearchWithVectorizer(queryVector, s.Vectorizer, limit)
 	if err != nil {
 		return nil, fmt.Errorf("agent memory: search vector store: %w", err)
 	}
 
 	results := make([]Result, 0, len(vectorResults))
-	for _, result := range vectorResults {
+	for i := range vectorResults {
+		result := vectorResults[i]
 		results = append(results, Result{
-			Document: documentFromVector(result.Document, docs),
+			Document: documentFromVector(result.Document, indexedDocs),
 			Score:    result.Score,
 		})
 	}
@@ -213,36 +374,48 @@ func (s Searcher) SearchRetrieval(ctx context.Context, query retrieval.Query) ([
 	}
 
 	out := make([]retrieval.Result, 0, len(results))
-	for _, result := range results {
-		out = append(out, agentRetrievalResult(s.Agent, result, query))
+	for i := range results {
+		out = append(out, agentRetrievalResult(s.Agent, results[i], query))
 	}
 
 	return out, nil
 }
 
-// Delete removes one document from an agent namespace.
+// Delete removes memories for agent and reports whether anything was removed.
 func (s *Store) Delete(agent, id string) bool {
-	agent = strings.TrimSpace(agent)
+	redactedAgent, agentErr := redactAgentName(agent)
 
-	id = strings.TrimSpace(id)
-	if agent == "" || id == "" {
+	redactedID, idErr := redactDocumentID(id)
+	if agentErr != nil || idErr != nil {
 		return false
 	}
 
+	agent = redactedAgent
+	id = redactedID
+
 	docs := s.Agents[agent]
-	for i, doc := range docs {
-		if doc.ID != id {
+	kept := docs[:0]
+	removed := false
+
+	for i := range docs {
+		if docs[i].ID == id {
+			removed = true
 			continue
 		}
 
-		s.Agents[agent] = append(docs[:i], docs[i+1:]...)
-		if len(s.Agents[agent]) == 0 {
+		kept = append(kept, docs[i])
+	}
+
+	if removed {
+		clear(docs[len(kept):cap(docs)])
+
+		if len(kept) == 0 {
 			delete(s.Agents, agent)
+		} else {
+			s.Agents[agent] = kept
 		}
 
-		if s.indexes != nil && s.indexes[agent] != nil {
-			s.indexes[agent].Delete(id)
-		}
+		s.UpdatedAt = time.Now().UTC()
 
 		return true
 	}
@@ -250,8 +423,52 @@ func (s *Store) Delete(agent, id string) bool {
 	return false
 }
 
+// Compact removes expired memories and returns the number of purged entries.
+func (s *Store) Compact(now time.Time) int {
+	now = now.UTC()
+
+	removed := 0
+
+	for agent, docs := range s.Agents {
+		kept := docs[:0]
+		for i := range docs {
+			if isExpired(docs[i], now) {
+				removed++
+				continue
+			}
+
+			kept = append(kept, docs[i])
+		}
+
+		clear(docs[len(kept):cap(docs)])
+
+		if len(kept) == 0 {
+			delete(s.Agents, agent)
+			continue
+		}
+
+		s.Agents[agent] = kept
+	}
+
+	if removed > 0 {
+		s.UpdatedAt = time.Now().UTC()
+	}
+
+	return removed
+}
+
 // Save writes the store as pretty-printed JSON.
 func (s *Store) Save(path string) error {
+	s.Compact(time.Now().UTC())
+
+	if err := s.ensureVectorizer(); err != nil {
+		return err
+	}
+
+	if err := s.validateLoaded(); err != nil {
+		return err
+	}
+
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal agent memory store: %w", err)
@@ -267,11 +484,21 @@ func (s *Store) Save(path string) error {
 		return fmt.Errorf("write agent memory store %q: %w", path, err)
 	}
 
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod agent memory store %q: %w", path, err)
+	}
+
 	return nil
 }
 
 // Load reads a JSON store saved by Save.
 func Load(path string) (*Store, error) {
+	return LoadWithOptions(path, LoadOptions{})
+}
+
+// LoadWithOptions reads a JSON store and optionally migrates stale vector data
+// by rebuilding vectors from redacted persisted text.
+func LoadWithOptions(path string, opts LoadOptions) (*Store, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read agent memory store %q: %w", path, err)
@@ -282,6 +509,16 @@ func Load(path string) (*Store, error) {
 		return nil, fmt.Errorf("decode agent memory store %q: %w", path, err)
 	}
 
+	if opts.Migrate {
+		if err := store.Migrate(); err != nil {
+			return nil, fmt.Errorf("migrate agent memory store %q: %w", path, err)
+		}
+
+		return &store, nil
+	}
+
+	store.Compact(time.Now().UTC())
+
 	if err := store.validateLoaded(); err != nil {
 		return nil, fmt.Errorf("validate agent memory store %q: %w", path, err)
 	}
@@ -289,109 +526,172 @@ func Load(path string) (*Store, error) {
 	return &store, nil
 }
 
+// Migrate updates a loaded legacy/stale store to the current schema by
+// redacting text/metadata and rebuilding every vector with the current local
+// text-hash vectorizer.
+func (s *Store) Migrate() error {
+	if s.SchemaVersion < 0 || s.SchemaVersion > StoreSchemaVersion {
+		return ErrIncompatibleSchema
+	}
+
+	now := time.Now().UTC()
+	s.Compact(now)
+
+	if s.Dimensions < 0 && !s.hasDocuments() {
+		s.Dimensions = 0
+	} else if s.Dimensions < 0 {
+		return vector.ErrInvalidDimensions
+	}
+
+	if s.Dimensions == 0 {
+		fresh, err := NewStore(0)
+		if err != nil {
+			return err
+		}
+
+		s.Dimensions = fresh.Dimensions
+	}
+
+	s.SchemaVersion = StoreSchemaVersion
+	s.Vectorizer = vector.TextVectorizerSpec(s.Dimensions)
+
+	if s.CreatedAt.IsZero() {
+		s.CreatedAt = now
+	}
+
+	s.UpdatedAt = now
+
+	if s.Agents == nil {
+		s.Agents = make(map[string][]Document)
+	}
+
+	normalizedAgents := make(map[string][]Document, len(s.Agents))
+	for agent, docs := range s.Agents {
+		normalizedAgent, err := normalizeLoadedAgentName(agent, true)
+		if err != nil {
+			return err
+		}
+
+		normalizedDocs, err := s.migrateAgent(normalizedAgent, docs)
+		if err != nil {
+			return err
+		}
+
+		normalizedAgents[normalizedAgent] = append(normalizedAgents[normalizedAgent], normalizedDocs...)
+	}
+
+	s.Agents = normalizedAgents
+
+	return s.validateLoaded()
+}
+
+// ReembedAll rebuilds every vector with the store's current vectorizer.
+func (s *Store) ReembedAll() error {
+	s.Compact(time.Now().UTC())
+
+	if err := s.ensureVectorizer(); err != nil {
+		return err
+	}
+
+	normalizedAgents := make(map[string][]Document, len(s.Agents))
+	for agent, docs := range s.Agents {
+		normalizedAgent, err := normalizeLoadedAgentName(agent, true)
+		if err != nil {
+			return err
+		}
+
+		for i := range docs {
+			updated, err := s.reembedDocument(docs[i])
+			if err != nil {
+				return fmt.Errorf("agent memory: re-embed %s/%s: %w", agent, docs[i].ID, err)
+			}
+
+			docs[i] = updated
+		}
+
+		normalizedAgents[normalizedAgent] = append(normalizedAgents[normalizedAgent], docs...)
+	}
+
+	s.Agents = normalizedAgents
+	s.UpdatedAt = time.Now().UTC()
+
+	return s.validateLoaded()
+}
+
+// Reembed rebuilds one agent document vector with the store's current vectorizer.
+func (s *Store) Reembed(agent, id string) error {
+	agent, agentErr := redactAgentName(agent)
+	if agentErr != nil {
+		return agentErr
+	}
+
+	redactedID, idErr := redactDocumentID(id)
+	if idErr != nil {
+		return idErr
+	}
+
+	id = redactedID
+
+	if err := s.ensureVectorizer(); err != nil {
+		return err
+	}
+
+	docs := s.Agents[agent]
+	for i := range docs {
+		if docs[i].ID != id {
+			continue
+		}
+
+		updated, err := s.reembedDocument(docs[i])
+		if err != nil {
+			return err
+		}
+
+		docs[i] = updated
+		s.Agents[agent] = docs
+		s.UpdatedAt = time.Now().UTC()
+
+		return nil
+	}
+
+	return fmt.Errorf("%w: %s", ErrMissingID, id)
+}
+
+// MigrateTextDimensions rebuilds the store using the built-in text hash
+// vectorizer at dimensions.
+func (s *Store) MigrateTextDimensions(dimensions int) error {
+	vectorizer, err := vector.NewTextVectorizer(dimensions)
+	if err != nil {
+		return fmt.Errorf("agent memory: create vectorizer: %w", err)
+	}
+
+	s.Dimensions = vectorizer.Dimensions
+	s.Vectorizer = vectorizer.Spec()
+	s.SchemaVersion = StoreSchemaVersion
+
+	return s.ReembedAll()
+}
+
 // Documents returns a defensive copy of agent's documents.
 func (s *Store) Documents(agent string) []Document {
-	docs := s.Agents[strings.TrimSpace(agent)]
+	agent, err := redactAgentName(agent)
+	if err != nil {
+		return nil
+	}
+
+	docs := s.Agents[agent]
 
 	out := make([]Document, 0, len(docs))
-	for _, doc := range docs {
-		out = append(out, cloneDocument(doc))
+	for i := range docs {
+		out = append(out, cloneDocument(docs[i]))
 	}
 
 	return out
 }
 
-func (s *Store) prepareDocument(agent string, doc Document) (Document, bool) {
-	source := retrieval.Source{Type: retrieval.SourceAgentMemory, Name: agent, URI: firstNonEmpty(doc.Path, doc.Metadata["path"])}
-	originalText := doc.Text
-	policyContext := retrieval.PolicyContext{
-		Source:     source,
-		Metadata:   doc.Metadata,
-		DocumentID: doc.ID,
-		Path:       firstNonEmpty(doc.Path, doc.Metadata["path"]),
-	}
-	text, textSafety := retrieval.Sanitize(doc.Text, policyContext)
-	metadata, metadataSafety := retrieval.SanitizeMetadata(doc.Metadata, policyContext)
-	safety := retrieval.MergeSafety(textSafety, metadataSafety)
-
-	doc.Text = text
-	doc.Metadata = metadata
-
-	if !retrieval.IsDefaultSafety(safety) {
-		doc.Metadata = retrieval.MergeSafetyMetadata(doc.Metadata, safety)
-	}
-
-	return doc, originalText != doc.Text
-}
-
-func (s *Store) indexForAgent(agent string) (*vector.Store, error) {
-	if s.indexes == nil {
-		s.indexes = make(map[string]*vector.Store)
-	}
-
-	if store := s.indexes[agent]; store != nil {
-		return store, nil
-	}
-
-	if err := s.rebuildAgentIndex(agent); err != nil {
-		return nil, err
-	}
-
-	return s.indexes[agent], nil
-}
-
-func (s *Store) indexDocument(agent string, doc Document) error {
-	store, err := s.indexForAgent(agent)
-	if err != nil {
-		return err
-	}
-
-	if err := store.Add(vector.Document{
-		ID:       doc.ID,
-		Text:     doc.Text,
-		Metadata: doc.Metadata,
-		Vector:   doc.Vector,
-	}); err != nil {
-		return fmt.Errorf("index agent memory document %q: %w", doc.ID, err)
-	}
-
-	return nil
-}
-
-func (s *Store) rebuildAgentIndex(agent string) error {
-	if s.indexes == nil {
-		s.indexes = make(map[string]*vector.Store)
-	}
-
-	store, err := vector.NewStore(s.Dimensions)
-	if err != nil {
-		return fmt.Errorf("agent memory: create vector store: %w", err)
-	}
-
-	for _, doc := range s.Agents[agent] {
-		if addErr := store.Add(vector.Document{
-			ID:       doc.ID,
-			Text:     doc.Text,
-			Metadata: doc.Metadata,
-			Vector:   doc.Vector,
-		}); addErr != nil {
-			return fmt.Errorf("index agent memory document %q: %w", doc.ID, addErr)
-		}
-	}
-
-	s.indexes[agent] = store
-
-	return nil
-}
-
 func (s *Store) vectorize(text string) (vector.Vector, error) {
-	if s.Dimensions <= 0 {
-		vectorizer, err := vector.NewTextVectorizer(0)
-		if err != nil {
-			return nil, fmt.Errorf("agent memory: create default vectorizer: %w", err)
-		}
-
-		s.Dimensions = vectorizer.Dimensions
+	if err := s.ensureVectorizer(); err != nil {
+		return nil, err
 	}
 
 	vectorizer, err := vector.NewTextVectorizer(s.Dimensions)
@@ -407,25 +707,121 @@ func (s *Store) vectorize(text string) (vector.Vector, error) {
 	return vec, nil
 }
 
-func (s *Store) validateLoaded() error {
-	if s.Dimensions < 0 {
+func (s *Store) ensureVectorizer() error {
+	if s.SchemaVersion == 0 {
+		if s.hasDocuments() {
+			return ErrIncompatibleSchema
+		}
+
+		s.SchemaVersion = StoreSchemaVersion
+	}
+
+	if s.SchemaVersion != StoreSchemaVersion {
+		return ErrIncompatibleSchema
+	}
+
+	hasDocuments := s.hasDocuments()
+	if err := s.ensureVectorizerDimensions(hasDocuments); err != nil {
+		return err
+	}
+
+	wanted := vector.TextVectorizerSpec(s.Dimensions)
+
+	return s.ensureVectorizerSpec(wanted, hasDocuments)
+}
+
+func (s *Store) ensureVectorizerDimensions(hasDocuments bool) error {
+	if s.Dimensions < 0 && hasDocuments {
 		return vector.ErrInvalidDimensions
 	}
 
-	if s.Dimensions == 0 {
-		fresh, err := NewStore(0)
-		if err != nil {
-			return err
+	if s.Dimensions < 0 {
+		s.Dimensions = 0
+	}
+
+	if s.Dimensions != 0 {
+		return nil
+	}
+
+	vectorizer, err := vector.NewTextVectorizer(0)
+	if err != nil {
+		return fmt.Errorf("agent memory: create default vectorizer: %w", err)
+	}
+
+	s.Dimensions = vectorizer.Dimensions
+
+	return nil
+}
+
+func (s *Store) ensureVectorizerSpec(wanted vector.VectorizerSpec, hasDocuments bool) error {
+	if privacyErr := validatePersistedVectorizerSpecPrivacy(s.Vectorizer); privacyErr != nil {
+		return privacyErr
+	}
+
+	s.Vectorizer = cleanVectorizerSpec(s.Vectorizer)
+
+	if s.Vectorizer.IsZero() {
+		if hasDocuments {
+			return vector.ErrVectorizerMismatch
 		}
 
-		s.Dimensions = fresh.Dimensions
+		s.Vectorizer = wanted
+	}
+
+	if !s.Vectorizer.CompatibleWith(wanted) {
+		if hasDocuments {
+			return fmt.Errorf("%w: store uses %s/%s, want %s/%s",
+				vector.ErrVectorizerMismatch, s.Vectorizer.ID, s.Vectorizer.Model, wanted.ID, wanted.Model)
+		}
+
+		s.Vectorizer = wanted
+	}
+
+	if s.Vectorizer.Dimensions == 0 {
+		if hasDocuments {
+			return fmt.Errorf("%w: store vectorizer dimensions got 0, want %d", vector.ErrDimensionMismatch, s.Dimensions)
+		}
+
+		s.Vectorizer.Dimensions = s.Dimensions
+	}
+
+	if s.Vectorizer.Dimensions != s.Dimensions {
+		return fmt.Errorf("%w: store vectorizer dimensions got %d, want %d",
+			vector.ErrDimensionMismatch, s.Vectorizer.Dimensions, s.Dimensions)
+	}
+
+	return nil
+}
+
+func (s *Store) validateLoaded() error {
+	if s.SchemaVersion == 0 {
+		if s.hasDocuments() {
+			return ErrIncompatibleSchema
+		}
+
+		s.SchemaVersion = StoreSchemaVersion
+	}
+
+	if s.SchemaVersion != StoreSchemaVersion {
+		return ErrIncompatibleSchema
+	}
+
+	if err := s.ensureLoadedVectorizer(); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	if s.CreatedAt.IsZero() {
+		s.CreatedAt = now
+	}
+
+	if s.UpdatedAt.IsZero() {
+		s.UpdatedAt = s.CreatedAt
 	}
 
 	if s.Agents == nil {
 		s.Agents = make(map[string][]Document)
 	}
-
-	s.indexes = make(map[string]*vector.Store, len(s.Agents))
 
 	for agent, docs := range s.Agents {
 		normalizedDocs, err := s.validateLoadedAgent(agent, docs)
@@ -434,25 +830,160 @@ func (s *Store) validateLoaded() error {
 		}
 
 		s.Agents[agent] = normalizedDocs
-		if err := s.rebuildAgentIndex(agent); err != nil {
-			return err
-		}
 	}
 
 	return nil
 }
 
-func (s *Store) validateLoadedAgent(agent string, docs []Document) ([]Document, error) {
+func (s *Store) ensureLoadedVectorizer() error {
+	hasDocuments := s.hasDocuments()
+	if s.Dimensions <= 0 {
+		if hasDocuments {
+			return vector.ErrInvalidDimensions
+		}
+
+		vectorizer, err := vector.NewTextVectorizer(0)
+		if err != nil {
+			return fmt.Errorf("agent memory: create default vectorizer: %w", err)
+		}
+
+		s.Dimensions = vectorizer.Dimensions
+	}
+
+	if s.Dimensions <= 0 {
+		return vector.ErrInvalidDimensions
+	}
+
+	wanted := vector.TextVectorizerSpec(s.Dimensions)
+	if privacyErr := validatePersistedVectorizerSpecPrivacy(s.Vectorizer); privacyErr != nil {
+		return privacyErr
+	}
+
+	s.Vectorizer = cleanVectorizerSpec(s.Vectorizer)
+
+	if s.Vectorizer.IsZero() || !s.Vectorizer.CompatibleWith(wanted) {
+		if hasDocuments {
+			return vector.ErrVectorizerMismatch
+		}
+
+		s.Vectorizer = wanted
+	}
+
+	if s.Vectorizer.Dimensions != s.Dimensions {
+		if hasDocuments {
+			return fmt.Errorf("%w: store vectorizer dimensions got %d, want %d",
+				vector.ErrDimensionMismatch, s.Vectorizer.Dimensions, s.Dimensions)
+		}
+
+		s.Vectorizer = wanted
+	}
+
+	return nil
+}
+
+func (s *Store) validateSearchDocument(doc Document) error {
+	if _, err := normalizeLoadedDocumentID(doc.ID, false); err != nil {
+		return err
+	}
+
+	if !utf8.ValidString(doc.Text) {
+		return ErrInvalidUTF8
+	}
+
+	redactedText := privacy.RedactText(doc.Text)
+	if redactedText != doc.Text {
+		return ErrPrivacyPolicy
+	}
+
+	if path := strings.TrimSpace(doc.Path); privacy.RedactIdentifier(path) != path {
+		return ErrPrivacyPolicy
+	}
+
+	if err := validateVectorizableText(redactedText); err != nil {
+		return err
+	}
+
+	if !maps.Equal(doc.Metadata, privacy.RedactMetadata(doc.Metadata)) {
+		return ErrPrivacyPolicy
+	}
+
+	if !maps.Equal(doc.Provenance, cleanMetadata(doc.Provenance)) {
+		return ErrPrivacyPolicy
+	}
+
+	if err := validateProvenance(doc.Provenance); err != nil {
+		return err
+	}
+
+	if doc.SourceHash != privacy.SourceHash(redactedText) {
+		return ErrSourceHashMismatch
+	}
+
+	if _, err := s.validateDocumentVectorizer(doc); err != nil {
+		return err
+	}
+
+	if err := s.validateDocumentVector(doc); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Store) migrateAgent(agent string, docs []Document) ([]Document, error) {
 	if strings.TrimSpace(agent) == "" {
 		return nil, ErrMissingAgent
 	}
 
 	seen := make(map[string]struct{}, len(docs))
+	for i := range docs {
+		normalized, err := s.normalizeLoadedDocument(docs[i], seen, true)
+		if err != nil {
+			return nil, err
+		}
 
-	for i, doc := range docs {
-		normalized, normalizeErr := s.normalizeLoadedDocument(agent, doc, seen)
+		updated, err := s.reembedDocument(normalized)
+		if err != nil {
+			return nil, err
+		}
+
+		docs[i] = updated
+	}
+
+	return docs, nil
+}
+
+func (s *Store) validateLoadedAgent(agent string, docs []Document) ([]Document, error) {
+	if _, err := normalizeLoadedAgentName(agent, false); err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{}, len(docs))
+
+	store, err := vector.NewStoreWithVectorizer(s.Vectorizer)
+	if err != nil {
+		return nil, fmt.Errorf("agent memory: validate vector store: %w", err)
+	}
+
+	for i := range docs {
+		normalized, normalizeErr := s.normalizeLoadedDocument(docs[i], seen, false)
 		if normalizeErr != nil {
 			return nil, normalizeErr
+		}
+
+		if addErr := store.Add(vector.Document{
+			ID:         normalized.ID,
+			Text:       normalized.Text,
+			Metadata:   normalized.Metadata,
+			Provenance: normalized.Provenance,
+			Vector:     normalized.Vector,
+			Vectorizer: normalized.Vectorizer,
+			SourceHash: normalized.SourceHash,
+			CreatedAt:  normalized.CreatedAt,
+			UpdatedAt:  normalized.UpdatedAt,
+			ExpiresAt:  normalized.ExpiresAt,
+		}); addErr != nil {
+			return nil, fmt.Errorf("agent memory: validate document %q: %w", normalized.ID, addErr)
 		}
 
 		docs[i] = normalized
@@ -461,11 +992,13 @@ func (s *Store) validateLoadedAgent(agent string, docs []Document) ([]Document, 
 	return docs, nil
 }
 
-func (s *Store) normalizeLoadedDocument(agent string, doc Document, seen map[string]struct{}) (Document, error) {
-	doc.ID = strings.TrimSpace(doc.ID)
-	if doc.ID == "" {
-		return Document{}, ErrMissingID
+func (s *Store) normalizeLoadedDocument(doc Document, seen map[string]struct{}, migrating bool) (Document, error) {
+	id, err := normalizeLoadedDocumentID(doc.ID, migrating)
+	if err != nil {
+		return Document{}, err
 	}
+
+	doc.ID = id
 
 	if _, ok := seen[doc.ID]; ok {
 		return Document{}, fmt.Errorf("%w: %s", ErrDuplicateID, doc.ID)
@@ -476,37 +1009,169 @@ func (s *Store) normalizeLoadedDocument(agent string, doc Document, seen map[str
 		return Document{}, ErrInvalidUTF8
 	}
 
-	var redacted bool
+	normalized, err := normalizeLoadedPrivacy(doc, migrating)
+	if err != nil {
+		return Document{}, err
+	}
 
-	doc, redacted = s.prepareDocument(agent, doc)
+	doc = normalized
+	if validateErr := validateVectorizableText(doc.Text); validateErr != nil {
+		return Document{}, validateErr
+	}
 
-	if len(doc.Vector) == 0 || redacted {
-		vec, err := s.vectorize(doc.Text)
-		if err != nil {
-			return Document{}, err
-		}
+	if doc.CreatedAt.IsZero() {
+		doc.CreatedAt = s.CreatedAt
+	}
 
-		doc.Vector = vec
+	if doc.UpdatedAt.IsZero() {
+		doc.UpdatedAt = doc.CreatedAt
+	}
+
+	if migrating {
+		doc.SourceHash = privacy.SourceHash(doc.Text)
+		doc.Vectorizer = s.Vectorizer
+
+		return doc, nil
+	}
+
+	if doc.SourceHash != privacy.SourceHash(doc.Text) {
+		return Document{}, fmt.Errorf("%w: %s", ErrSourceHashMismatch, doc.ID)
+	}
+
+	if provenanceErr := validateProvenance(doc.Provenance); provenanceErr != nil {
+		return Document{}, fmt.Errorf("%w: %s", provenanceErr, doc.ID)
+	}
+
+	docVectorizer, err := s.validateDocumentVectorizer(doc)
+	if err != nil {
+		return Document{}, err
+	}
+
+	doc.Vectorizer = docVectorizer
+
+	if err := s.validateDocumentVector(doc); err != nil {
+		return Document{}, err
 	}
 
 	doc.Vector = cloneVector(doc.Vector)
-	doc.Metadata = cloneMetadata(doc.Metadata)
+
+	return doc, nil
+}
+
+func (s *Store) validateDocumentVectorizer(doc Document) (vector.VectorizerSpec, error) {
+	if privacyErr := validatePersistedVectorizerSpecPrivacy(doc.Vectorizer); privacyErr != nil {
+		return vector.VectorizerSpec{}, fmt.Errorf("%w: %s", privacyErr, doc.ID)
+	}
+
+	docVectorizer := cleanVectorizerSpec(doc.Vectorizer)
+	if docVectorizer.IsZero() || !docVectorizer.CompatibleWith(s.Vectorizer) {
+		return vector.VectorizerSpec{}, fmt.Errorf("%w: %s", vector.ErrVectorizerMismatch, doc.ID)
+	}
+
+	if docVectorizer.Dimensions != s.Dimensions {
+		return vector.VectorizerSpec{}, fmt.Errorf("%w: document %q vectorizer dimensions got %d, want %d",
+			vector.ErrDimensionMismatch, doc.ID, docVectorizer.Dimensions, s.Dimensions)
+	}
+
+	return docVectorizer, nil
+}
+
+func normalizeLoadedPrivacy(doc Document, migrating bool) (Document, error) {
+	redactedText := privacy.RedactText(doc.Text)
+	if !migrating && redactedText != doc.Text {
+		return Document{}, fmt.Errorf("%w: %s", ErrPrivacyPolicy, doc.ID)
+	}
+
+	doc.Text = redactedText
+	path := strings.TrimSpace(doc.Path)
+
+	redactedPath := privacy.RedactIdentifier(path)
+	if !migrating && redactedPath != path {
+		return Document{}, fmt.Errorf("%w: %s", ErrPrivacyPolicy, doc.ID)
+	}
+
+	doc.Path = redactedPath
+
+	redactedMetadata := privacy.RedactMetadata(doc.Metadata)
+	if !migrating && !maps.Equal(doc.Metadata, redactedMetadata) {
+		return Document{}, fmt.Errorf("%w: %s", ErrPrivacyPolicy, doc.ID)
+	}
+
+	doc.Metadata = redactedMetadata
+
+	redactedProvenance := cleanMetadata(doc.Provenance)
+	if !migrating && !maps.Equal(doc.Provenance, redactedProvenance) {
+		return Document{}, fmt.Errorf("%w: %s", ErrPrivacyPolicy, doc.ID)
+	}
+
+	if migrating {
+		redactedProvenance = ensureProvenance(redactedProvenance, "legacy")
+	}
+
+	doc.Provenance = redactedProvenance
+	doc.ExpiresAt = cloneTimePtr(doc.ExpiresAt)
+
+	return doc, nil
+}
+
+func (s *Store) reembedDocument(doc Document) (Document, error) {
+	id, idErr := redactDocumentID(doc.ID)
+	if idErr != nil {
+		return Document{}, idErr
+	}
+
+	doc.ID = id
+
+	if !utf8.ValidString(doc.Text) {
+		return Document{}, ErrInvalidUTF8
+	}
+
+	doc.Text = privacy.RedactText(doc.Text)
+
+	doc.Path = privacy.RedactIdentifier(strings.TrimSpace(doc.Path))
+	if err := validateVectorizableText(doc.Text); err != nil {
+		return Document{}, err
+	}
+
+	doc.Metadata = privacy.RedactMetadata(doc.Metadata)
+	doc.Provenance = ensureProvenance(cleanMetadata(doc.Provenance), "reembed")
+	doc.SourceHash = privacy.SourceHash(doc.Text)
+
+	vec, err := s.vectorize(doc.Text)
+	if err != nil {
+		return Document{}, err
+	}
+
+	doc.Vector = cloneVector(vec)
+	doc.Vectorizer = s.Vectorizer
+
+	if doc.CreatedAt.IsZero() {
+		doc.CreatedAt = time.Now().UTC()
+	}
+
+	doc.UpdatedAt = time.Now().UTC()
 
 	return doc, nil
 }
 
 func documentFromVector(doc vector.Document, originals []Document) Document {
-	for _, original := range originals {
-		if original.ID == doc.ID {
-			return cloneDocument(original)
+	for i := range originals {
+		if originals[i].ID == doc.ID {
+			return cloneDocument(originals[i])
 		}
 	}
 
 	return Document{
-		ID:       doc.ID,
-		Text:     doc.Text,
-		Metadata: cloneMetadata(doc.Metadata),
-		Vector:   cloneVector(doc.Vector),
+		ID:         doc.ID,
+		Text:       doc.Text,
+		Metadata:   cloneMetadata(doc.Metadata),
+		Provenance: cloneMetadata(doc.Provenance),
+		Vector:     cloneVector(doc.Vector),
+		Vectorizer: doc.Vectorizer,
+		SourceHash: doc.SourceHash,
+		CreatedAt:  doc.CreatedAt,
+		UpdatedAt:  doc.UpdatedAt,
+		ExpiresAt:  cloneTimePtr(doc.ExpiresAt),
 	}
 }
 
@@ -555,9 +1220,212 @@ func agentRetrievalResult(agent string, result Result, query retrieval.Query) re
 	})
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func applyAddOptions(opts ...AddOption) addOptions {
+	var out addOptions
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&out)
+		}
+	}
+
+	return out
+}
+
+func (s *Store) hasDocuments() bool {
+	for _, docs := range s.Agents {
+		if len(docs) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+func mergeMetadata(left, right map[string]string) map[string]string {
+	out := cleanMetadata(left)
+
+	right = cleanMetadata(right)
+	if len(right) == 0 {
+		return out
+	}
+
+	if out == nil {
+		out = make(map[string]string, len(right))
+	}
+
+	for key, value := range right {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+
+		if key == "" || value == "" {
+			continue
+		}
+
+		out[key] = value
+	}
+
+	return out
+}
+
+func cleanMetadata(metadata map[string]string) map[string]string {
+	return privacy.RedactMetadata(metadata)
+}
+
+func cleanVectorizerSpec(spec vector.VectorizerSpec) vector.VectorizerSpec {
+	spec.ID = privacy.RedactIdentifier(strings.TrimSpace(spec.ID))
+	spec.Model = privacy.RedactIdentifier(strings.TrimSpace(spec.Model))
+	spec.Normalization = privacy.RedactIdentifier(strings.TrimSpace(spec.Normalization))
+	spec.Version = privacy.RedactIdentifier(strings.TrimSpace(spec.Version))
+
+	return spec
+}
+
+func validatePersistedVectorizerSpecPrivacy(spec vector.VectorizerSpec) error {
+	if spec.IsZero() {
+		return nil
+	}
+
+	if privacy.RedactIdentifier(strings.TrimSpace(spec.ID)) != strings.TrimSpace(spec.ID) ||
+		privacy.RedactIdentifier(strings.TrimSpace(spec.Model)) != strings.TrimSpace(spec.Model) ||
+		privacy.RedactIdentifier(strings.TrimSpace(spec.Normalization)) != strings.TrimSpace(spec.Normalization) ||
+		privacy.RedactIdentifier(strings.TrimSpace(spec.Version)) != strings.TrimSpace(spec.Version) {
+		return ErrPrivacyPolicy
+	}
+
+	return nil
+}
+
+func redactAgentName(agent string) (string, error) {
+	return normalizeLoadedAgentName(agent, true)
+}
+
+func normalizeLoadedAgentName(agent string, migrating bool) (string, error) {
+	trimmed := strings.TrimSpace(agent)
+	if trimmed == "" {
+		return "", ErrMissingAgent
+	}
+
+	redacted := privacy.RedactIdentifier(trimmed)
+	if !migrating && (redacted != trimmed || trimmed != agent) {
+		return "", fmt.Errorf("%w: %s", ErrPrivacyPolicy, agent)
+	}
+
+	return redacted, nil
+}
+
+func redactDocumentID(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", ErrMissingID
+	}
+
+	return privacy.RedactIdentifier(id), nil
+}
+
+func normalizeLoadedDocumentID(id string, migrating bool) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", ErrMissingID
+	}
+
+	redacted := privacy.RedactIdentifier(id)
+	if !migrating && redacted != id {
+		return "", fmt.Errorf("%w: %s", ErrPrivacyPolicy, id)
+	}
+
+	return redacted, nil
+}
+
+func ensureProvenance(provenance map[string]string, sourceType string) map[string]string {
+	if provenance == nil {
+		provenance = make(map[string]string, 2)
+	}
+
+	if strings.TrimSpace(provenance["source_type"]) == "" {
+		provenance["source_type"] = sourceType
+	}
+
+	provenance["privacy_policy"] = privacy.RedactionPolicyVersion
+
+	return provenance
+}
+
+func validateProvenance(provenance map[string]string) error {
+	if strings.TrimSpace(provenance["source_type"]) == "" {
+		return ErrProvenanceMissing
+	}
+
+	if strings.TrimSpace(provenance["privacy_policy"]) != privacy.RedactionPolicyVersion {
+		return ErrPrivacyPolicy
+	}
+
+	return nil
+}
+
+func (s *Store) validateDocumentVector(doc Document) error {
+	if len(doc.Vector) != s.Dimensions {
+		return fmt.Errorf("%w: document %q vector dimensions got %d, want %d",
+			vector.ErrDimensionMismatch, doc.ID, len(doc.Vector), s.Dimensions)
+	}
+
+	vectorizer, err := vector.NewTextVectorizer(s.Dimensions)
+	if err != nil {
+		return fmt.Errorf("agent memory: create validation vectorizer: %w", err)
+	}
+
+	expected, err := vectorizer.Vectorize(doc.Text)
+	if err != nil {
+		return fmt.Errorf("agent memory: validate vector for %q: %w", doc.ID, err)
+	}
+
+	if !vectorsEqual(doc.Vector, expected) {
+		return fmt.Errorf("%w: %s", ErrVectorMismatch, doc.ID)
+	}
+
+	return nil
+}
+
+func validateVectorizableText(text string) error {
+	if !utf8.ValidString(text) {
+		return ErrInvalidUTF8
+	}
+
+	vectorizer, err := vector.NewTextVectorizer(1)
+	if err != nil {
+		return fmt.Errorf("agent memory: create validation vectorizer: %w", err)
+	}
+
+	_, err = vectorizer.Vectorize(text)
+	if err != nil {
+		return fmt.Errorf("agent memory: validate vectorizable text: %w", err)
+	}
+
+	return nil
+}
+
+func fileProvenance(path string) map[string]string {
+	return map[string]string{
+		"source_type": "file",
+		"path":        path,
+	}
+}
+
 func cloneDocument(doc Document) Document {
 	doc.Vector = cloneVector(doc.Vector)
 	doc.Metadata = cloneMetadata(doc.Metadata)
+	doc.Provenance = cloneMetadata(doc.Provenance)
+	doc.ExpiresAt = cloneTimePtr(doc.ExpiresAt)
 
 	return doc
 }
@@ -567,6 +1435,20 @@ func cloneVector(vec vector.Vector) vector.Vector {
 	copy(out, vec)
 
 	return out
+}
+
+func vectorsEqual(left, right vector.Vector) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 func cloneMetadata(metadata map[string]string) map[string]string {
@@ -580,14 +1462,18 @@ func cloneMetadata(metadata map[string]string) map[string]string {
 	return out
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
+func cloneTimePtr(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
 	}
 
-	return ""
+	copied := value.UTC()
+
+	return &copied
+}
+
+func isExpired(doc Document, now time.Time) bool {
+	return doc.ExpiresAt != nil && !doc.ExpiresAt.IsZero() && !doc.ExpiresAt.After(now)
 }
 
 var (
@@ -599,4 +1485,14 @@ var (
 	ErrInvalidUTF8 = errors.New("agent memory text is not valid UTF-8")
 	// ErrDuplicateID is returned when persisted JSON has duplicate IDs for one agent.
 	ErrDuplicateID = errors.New("agent memory duplicate document id")
+	// ErrIncompatibleSchema is returned when persisted JSON is not on the current schema.
+	ErrIncompatibleSchema = errors.New("agent memory store schema version is incompatible")
+	// ErrSourceHashMismatch is returned when persisted text and source hash disagree.
+	ErrSourceHashMismatch = errors.New("agent memory source hash mismatch")
+	// ErrPrivacyPolicy is returned when persisted JSON still contains text that must be redacted.
+	ErrPrivacyPolicy = errors.New("agent memory violates privacy policy")
+	// ErrProvenanceMissing is returned when persisted agent memory lacks source provenance metadata.
+	ErrProvenanceMissing = errors.New("agent memory provenance metadata is required")
+	// ErrVectorMismatch is returned when a persisted hashed vector no longer matches its text.
+	ErrVectorMismatch = errors.New("agent memory vector mismatch")
 )

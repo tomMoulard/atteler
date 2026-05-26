@@ -948,6 +948,24 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			wantTier: tierProviderless,
 		},
 		{
+			name:     "memory delete routes providerless",
+			args:     []string{"memory", "delete", "old-doc", "--memory-store", "store.json"},
+			wantName: "memory-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "memory migrate routes providerless",
+			args:     []string{"memory", "migrate", "--memory-store", "store.json"},
+			wantName: "memory-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "agent memory migrate routes stateful",
+			args:     []string{"memory", "agent-migrate", "--agent-memory-store", "store.json"},
+			wantName: "agent-memory",
+			wantTier: tierStateful,
+		},
+		{
 			name:     "code-intel summary routes providerless config",
 			args:     []string{"code-intel", "summary"},
 			wantName: "code-intel",

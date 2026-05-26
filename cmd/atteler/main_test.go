@@ -655,7 +655,8 @@ func TestBuildMemoryStore_IndexesSessionsAndFiles(t *testing.T) {
 	require.NoError(t, err)
 	results, err := mem.Search("oauth", 10)
 	require.NoError(t, err)
-	require.Len(t, results, 2)
+	require.Len(t, results, 1)
+	assert.Equal(t, filepath.Clean(filePath), results[0].Document.ID)
 }
 
 func TestFormatMessageSummary(t *testing.T) {

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/agentmemory"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/memory"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/vector"
@@ -31,6 +34,558 @@ func TestFormatVectorResult(t *testing.T) {
 	want := "docs/research.md\tscore=0.7500\tpath=docs/research.md"
 	if got != want {
 		require.Failf(t, "unexpected vector result format", "got %q, want %q", got, want)
+	}
+}
+
+func TestAddVectorFileRecordsProvenance(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vector-note.txt")
+	require.NoError(t, os.WriteFile(path, []byte("vector provenance memory"), 0o600))
+
+	vectorizer, err := vector.NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	store, err := vector.NewStoreWithVectorizer(vectorizer.Spec())
+	require.NoError(t, err)
+	require.NoError(t, addVectorFile(store, vectorizer, path))
+
+	require.Len(t, store.Documents, 1)
+	assert.Equal(t, "file", store.Documents[0].Provenance["source_type"])
+	assert.Equal(t, filepath.Clean(path), store.Documents[0].Provenance["path"])
+}
+
+func TestRunMemoryCommandIndexesWithTTL(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	note := filepath.Join(dir, "ttl-memory.txt")
+	require.NoError(t, os.WriteFile(note, []byte("short lived lexical memory"), 0o600))
+
+	storePath := filepath.Join(dir, "memory.json")
+	start := time.Now().UTC()
+
+	err := runMemoryCommand(nil, memoryCommandInput{
+		StorePath:  storePath,
+		IndexFiles: []string{note},
+		TTLSeconds: 60,
+	})
+	require.NoError(t, err)
+
+	loaded, err := memory.Load(storePath)
+	require.NoError(t, err)
+	require.Len(t, loaded.Documents, 1)
+	require.NotNil(t, loaded.Documents[0].ExpiresAt)
+	assert.True(t, loaded.Documents[0].ExpiresAt.After(start))
+	assert.Equal(t, "file", loaded.Documents[0].Provenance["source_type"])
+	assert.Equal(t, filepath.Clean(note), loaded.Documents[0].Provenance["path"])
+
+	assert.Equal(t, 1, loaded.Compact(loaded.Documents[0].ExpiresAt.Add(time.Nanosecond)))
+	require.NoError(t, loaded.Save(storePath))
+
+	persisted, err := os.ReadFile(storePath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(persisted), "short lived lexical memory")
+}
+
+func TestRunMemoryCommandDeletesAndCompactsPersistedStore(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "memory.json")
+	expired := time.Now().UTC().Add(-time.Hour)
+
+	store := memory.NewStore()
+	require.NoError(t, store.AddText("delete-me", "obsolete lexical memory api_key=api-key-test-value"))
+	require.NoError(t, store.Add(memory.Document{ID: "expired-me", Text: "expired lexical memory", ExpiresAt: &expired}))
+	require.NoError(t, store.AddText("keep-me", "durable lexical memory"))
+
+	data, err := json.MarshalIndent(store, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(storePath, append(data, '\n'), 0o600))
+
+	err = runMemoryCommand(nil, memoryCommandInput{
+		StorePath: storePath,
+		DeleteID:  "delete-me",
+	})
+	require.NoError(t, err)
+
+	loaded, err := memory.Load(storePath)
+	require.NoError(t, err)
+
+	results, err := loaded.Search("obsolete", 10)
+	require.NoError(t, err)
+	assert.Empty(t, results)
+
+	err = runMemoryCommand(nil, memoryCommandInput{
+		StorePath: storePath,
+		Compact:   true,
+	})
+	require.NoError(t, err)
+
+	persisted, err := os.ReadFile(storePath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(persisted), "delete-me")
+	assert.NotContains(t, string(persisted), "obsolete lexical")
+	assert.NotContains(t, string(persisted), "api-key-test-value")
+	assert.NotContains(t, string(persisted), "expired-me")
+	assert.NotContains(t, string(persisted), "expired lexical")
+	assert.Contains(t, string(persisted), "keep-me")
+}
+
+func TestMemoryLifecycleMessagesRedactSensitiveIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	rawID := "docs/access_token=doc123/note.md"
+	rawStorePath := filepath.Join(t.TempDir(), "tenant", "access_token=store123", "memory.json")
+
+	store := memory.NewStore()
+	require.NoError(t, store.AddText(rawID, "sensitive lifecycle message memory"))
+
+	changed, messages, err := mutateMemoryStore(store, memoryCommandInput{
+		StorePath: rawStorePath,
+		DeleteID:  rawID,
+		Compact:   true,
+		Migrate:   true,
+	})
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	got := strings.Join(messages, "\n")
+	assert.NotContains(t, got, "doc123")
+	assert.NotContains(t, got, "store123")
+	assert.Contains(t, got, "[REDACTED]")
+}
+
+func TestRunMemoryCommandMigratesLegacyPersistedStore(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "legacy-memory.json")
+
+	store := memory.Store{
+		Documents: []memory.Document{{
+			ID:         "legacy-secret",
+			Text:       "deploy password=hunter2 with api_key=abc123",
+			Metadata:   map[string]string{"auth_token": "tok123"},
+			Provenance: map[string]string{"source": "Authorization: Bearer openai-secret-value"},
+		}},
+	}
+
+	data, err := json.MarshalIndent(store, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(storePath, append(data, '\n'), 0o600))
+
+	err = runMemoryCommand(nil, memoryCommandInput{
+		StorePath: storePath,
+		Migrate:   true,
+	})
+	require.NoError(t, err)
+
+	loaded, err := memory.Load(storePath)
+	require.NoError(t, err)
+	require.Len(t, loaded.Documents, 1)
+	assert.Equal(t, memory.StoreSchemaVersion, loaded.SchemaVersion)
+	assert.NotEmpty(t, loaded.Documents[0].SourceHash)
+
+	persisted, err := os.ReadFile(storePath)
+	require.NoError(t, err)
+
+	for _, raw := range []string{"hunter2", "abc123", "tok123", "openai-secret-value"} {
+		assert.NotContains(t, string(persisted), raw)
+	}
+}
+
+func TestRunMemoryCommandMigrateRequiresExistingStore(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	missingStore := filepath.Join(dir, "missing-memory.json")
+
+	err := runMemoryCommand(nil, memoryCommandInput{
+		StorePath: missingStore,
+		Migrate:   true,
+	})
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	_, statErr := os.Stat(missingStore)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestMemoryCommandInputFromOptionsMapsPrivacyOptIns(t *testing.T) {
+	t.Parallel()
+
+	got := memoryCommandInputFromOptions(cliOptions{
+		memorySearch:                  "callback retry",
+		memoryMigrate:                 true,
+		memoryIncludeSessionMessages:  true,
+		memoryIncludeWorktreeMetadata: true,
+	})
+
+	assert.Equal(t, "callback retry", got.Search)
+	assert.True(t, got.Migrate)
+	assert.True(t, got.IncludeSessionMessages)
+	assert.True(t, got.IncludeWorktreeMetadata)
+}
+
+func TestBuildMemoryStoreRequiresOptInForSessionMessagesAndWorktreeMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	saved := session.New("gpt-test", []llm.Message{{
+		Role:    llm.RoleUser,
+		Content: "Please remember the callback retry transcript detail.",
+	}})
+	saved.ID = "session-memory-opt-in"
+	saved.Title = "Metadata only"
+	saved.WorktreePath = "/tmp/customer-alpha-worktree"
+	saved.WorktreeBranch = "feature/customer-alpha"
+	require.NoError(t, store.Save(saved))
+
+	defaultMemory, err := buildMemoryStore(store, memoryCommandInput{})
+	require.NoError(t, err)
+
+	messageResults, err := defaultMemory.Search("callback retry transcript", 1)
+	require.NoError(t, err)
+	assert.Empty(t, messageResults)
+
+	worktreeResults, err := defaultMemory.Search("customer alpha worktree", 1)
+	require.NoError(t, err)
+	assert.Empty(t, worktreeResults)
+
+	optInMemory, err := buildMemoryStore(store, memoryCommandInput{
+		IncludeSessionMessages:  true,
+		IncludeWorktreeMetadata: true,
+	})
+	require.NoError(t, err)
+
+	messageResults, err = optInMemory.Search("callback retry transcript", 1)
+	require.NoError(t, err)
+
+	if assert.Len(t, messageResults, 1) {
+		assert.Equal(t, "session/session-memory-opt-in/message/0", messageResults[0].Document.ID)
+	}
+
+	worktreeResults, err = optInMemory.Search("customer alpha worktree", 1)
+	require.NoError(t, err)
+
+	if assert.Len(t, worktreeResults, 1) {
+		assert.Equal(t, "session/session-memory-opt-in/metadata", worktreeResults[0].Document.ID)
+	}
+}
+
+func TestRunMemoryCommandPersistsDefaultSessionIndexIntoEmptyStore(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sessionStore := session.NewStore(filepath.Join(dir, "sessions"))
+	saved := session.New("gpt-test", nil)
+	saved.ID = "persistent-session-memory"
+	saved.Title = "Persistent searchable session title"
+	require.NoError(t, sessionStore.Save(saved))
+
+	storePath := filepath.Join(dir, "memory.json")
+	err := runMemoryCommand(sessionStore, memoryCommandInput{
+		StorePath: storePath,
+		Search:    "persistent searchable title",
+	})
+	require.NoError(t, err)
+
+	loaded, err := memory.Load(storePath)
+	require.NoError(t, err)
+
+	results, err := loaded.Search("persistent searchable title", 1)
+	require.NoError(t, err)
+
+	if assert.Len(t, results, 1) {
+		assert.Equal(t, "session/persistent-session-memory/metadata", results[0].Document.ID)
+	}
+}
+
+func TestRunMemoryCommandRedactsSessionSecretsBeforePersistence(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sessionStore := session.NewStore(filepath.Join(dir, "sessions"))
+
+	saved := session.New("tenant/embed?api_key=model123/v1", []llm.Message{{
+		Role:    llm.RoleUser,
+		Content: "transcript-only api_key=message123",
+	}})
+	saved.ID = "cli-secret-session"
+	saved.Title = "CLI secret persistence"
+	saved.DefaultAgent = "reviewer/access_token=agent123/team"
+	saved.Artifacts = []session.Artifact{{
+		Path:        "docs/secret.md?access_token=artifact123",
+		Kind:        "note",
+		Summary:     "artifact summary password=summary123",
+		SourceAgent: "researcher/access_token=source123/team",
+	}}
+	require.NoError(t, sessionStore.Save(saved))
+
+	storePath := filepath.Join(dir, "memory.json")
+	err := runMemoryCommand(sessionStore, memoryCommandInput{
+		StorePath: storePath,
+		Search:    "cli secret persistence",
+	})
+	require.NoError(t, err)
+
+	persisted, err := os.ReadFile(storePath)
+	require.NoError(t, err)
+
+	persistedText := string(persisted)
+	assert.Contains(t, persistedText, "[REDACTED]")
+
+	for _, raw := range []string{"model123", "agent123", "artifact123", "summary123", "source123", "message123"} {
+		assert.NotContains(t, persistedText, raw)
+	}
+
+	assert.NotContains(t, persistedText, "transcript-only")
+
+	loaded, err := memory.Load(storePath)
+	require.NoError(t, err)
+
+	for _, doc := range loaded.Documents {
+		assert.NotEqual(t, "message", doc.Metadata["kind"])
+	}
+}
+
+func TestRunMemoryCommandSearchesWithoutSessionStore(t *testing.T) {
+	t.Parallel()
+
+	err := runMemoryCommand(nil, memoryCommandInput{Search: "anything"})
+	require.NoError(t, err)
+}
+
+func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	note := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(note, []byte("OAuth callback retry memory"), 0o600); err != nil {
+		require.NoError(t, err)
+	}
+
+	storePath := filepath.Join(dir, "agent-memory.json")
+
+	err := runAgentMemoryCommand(dir, "reviewer", agentMemoryCommandInput{
+		StorePath:  storePath,
+		Search:     "callback retry",
+		IndexFiles: []string{note},
+		Limit:      1,
+	})
+
+	require.NoError(t, err)
+	loaded, err := agentmemory.Load(storePath)
+	require.NoError(t, err)
+	results, err := loaded.Search("reviewer", "callback", 1)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, filepath.Clean(note), results[0].Document.ID)
+}
+
+func TestRunAgentMemoryCommandIndexesWithTTL(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	note := filepath.Join(dir, "ttl-note.txt")
+	require.NoError(t, os.WriteFile(note, []byte("short lived callback memory"), 0o600))
+
+	storePath := filepath.Join(dir, "agent-memory.json")
+	start := time.Now().UTC()
+
+	err := runAgentMemoryCommand(dir, "reviewer", agentMemoryCommandInput{
+		StorePath:  storePath,
+		IndexFiles: []string{note},
+		TTLSeconds: 60,
+	})
+	require.NoError(t, err)
+
+	loaded, err := agentmemory.Load(storePath)
+	require.NoError(t, err)
+
+	docs := loaded.Documents("reviewer")
+	require.Len(t, docs, 1)
+	require.NotNil(t, docs[0].ExpiresAt)
+	assert.True(t, docs[0].ExpiresAt.After(start))
+
+	assert.Equal(t, 1, loaded.Compact(docs[0].ExpiresAt.Add(time.Nanosecond)))
+	require.NoError(t, loaded.Save(storePath))
+
+	persisted, err := os.ReadFile(storePath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(persisted), "short lived callback memory")
+}
+
+func TestRunAgentMemoryCommandDeletesAndPersists(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "agent-memory.json")
+
+	store, err := agentmemory.NewStore(0)
+	require.NoError(t, err)
+	require.NoError(t, store.AddText("reviewer", "delete-me", "obsolete callback memory api_key=api-key-test-value"))
+	require.NoError(t, store.AddText("reviewer", "keep-me", "kept callback retry memory"))
+	require.NoError(t, store.Save(storePath))
+
+	err = runAgentMemoryCommand(dir, "reviewer", agentMemoryCommandInput{
+		StorePath: storePath,
+		DeleteID:  "delete-me",
+	})
+	require.NoError(t, err)
+
+	loaded, err := agentmemory.Load(storePath)
+	require.NoError(t, err)
+
+	docs := loaded.Documents("reviewer")
+	require.Len(t, docs, 1)
+	assert.Equal(t, "keep-me", docs[0].ID)
+
+	results, err := loaded.Search("reviewer", "obsolete", 10)
+	require.NoError(t, err)
+	assert.Empty(t, results)
+
+	persisted, err := os.ReadFile(storePath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(persisted), "delete-me")
+	assert.NotContains(t, string(persisted), "obsolete callback")
+	assert.NotContains(t, string(persisted), "api-key-test-value")
+	assert.Contains(t, string(persisted), "keep-me")
+}
+
+func TestAgentMemoryLifecycleMessagesRedactSensitiveIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	rawAgent := "reviewer/access_token=agent123/team"
+	rawID := "notes/access_token=doc123/memory.md"
+	rawStorePath := filepath.Join(t.TempDir(), "tenant", "access_token=store123", "agent-memory.json")
+
+	store, err := agentmemory.NewStore(16)
+	require.NoError(t, err)
+	require.NoError(t, store.AddText(rawAgent, rawID, "sensitive agent lifecycle message memory"))
+
+	changed, messages, err := mutateAgentMemoryStore(store, rawAgent, rawStorePath, agentMemoryCommandInput{
+		DeleteID: rawID,
+		Compact:  true,
+		Migrate:  true,
+	})
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	got := strings.Join(messages, "\n")
+	assert.NotContains(t, got, "agent123")
+	assert.NotContains(t, got, "doc123")
+	assert.NotContains(t, got, "store123")
+	assert.Contains(t, got, "[REDACTED]")
+}
+
+func TestRunAgentMemoryCommandCompactsExpiredPersistedDocuments(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "agent-memory.json")
+
+	store, err := agentmemory.NewStore(0)
+	require.NoError(t, err)
+	require.NoError(t, store.AddTextWithOptions("reviewer", "expired-me", "expired callback memory", agentmemory.WithExpiresAt(time.Now().Add(-time.Hour))))
+	require.NoError(t, store.AddTextWithOptions("reviewer", "fresh-me", "fresh callback memory", agentmemory.WithExpiresAt(time.Now().Add(time.Hour))))
+
+	data, err := json.MarshalIndent(store, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(storePath, append(data, '\n'), 0o600))
+
+	err = runAgentMemoryCommand(dir, "reviewer", agentMemoryCommandInput{
+		StorePath: storePath,
+		Compact:   true,
+	})
+	require.NoError(t, err)
+
+	loaded, err := agentmemory.Load(storePath)
+	require.NoError(t, err)
+
+	docs := loaded.Documents("reviewer")
+	require.Len(t, docs, 1)
+	assert.Equal(t, "fresh-me", docs[0].ID)
+
+	persisted, err := os.ReadFile(storePath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(persisted), "expired-me")
+	assert.NotContains(t, string(persisted), "expired callback")
+	assert.Contains(t, string(persisted), "fresh-me")
+}
+
+func TestRunAgentMemoryCommandMigratesStalePersistedStore(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "agent-memory.json")
+
+	store, err := agentmemory.NewStore(16)
+	require.NoError(t, err)
+	require.NoError(t, store.AddText("reviewer", "stale-me", "OAuth token refresh retries"))
+	store.Agents["reviewer"][0].Vectorizer.Model = "stale-hash-model"
+
+	data, err := json.MarshalIndent(store, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(storePath, append(data, '\n'), 0o600))
+
+	err = runAgentMemoryCommand(dir, "", agentMemoryCommandInput{
+		StorePath: storePath,
+		Migrate:   true,
+	})
+	require.NoError(t, err)
+
+	loaded, err := agentmemory.Load(storePath)
+	require.NoError(t, err)
+
+	docs := loaded.Documents("reviewer")
+	require.Len(t, docs, 1)
+	assert.NotEqual(t, "stale-hash-model", docs[0].Vectorizer.Model)
+	assert.True(t, docs[0].Vectorizer.CompatibleWith(loaded.Vectorizer))
+
+	results, err := loaded.Search("reviewer", "token refresh", 1)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "stale-me", results[0].Document.ID)
+}
+
+func TestRunAgentMemoryCommandMigrateRequiresExistingStore(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	missingStore := filepath.Join(dir, "missing-agent-memory.json")
+
+	err := runAgentMemoryCommand(dir, "", agentMemoryCommandInput{
+		StorePath: missingStore,
+		Migrate:   true,
+	})
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	_, statErr := os.Stat(missingStore)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestFormatAgentMemoryResult(t *testing.T) {
+	t.Parallel()
+
+	got := formatAgentMemoryResult(agentmemory.Result{
+		Document: agentmemory.Document{
+			ID:       "docs/memory.md",
+			Path:     "docs/memory.md",
+			Metadata: map[string]string{"kind": "note"},
+		},
+		Score: 0.5,
+	})
+
+	want := "docs/memory.md\tscore=0.5000\tpath=docs/memory.md\tkind=note"
+	if got != want {
+		require.Failf(t, "unexpected agent memory result format", "got %q, want %q", got, want)
 	}
 }
 
@@ -115,52 +670,6 @@ func TestAddVectorFileRecordsRetrievalFreshness(t *testing.T) {
 	require.Len(t, results, 1)
 	assert.Equal(t, "deleted", results[0].Freshness.Status)
 	assert.True(t, results[0].Freshness.Deleted)
-}
-
-func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	note := filepath.Join(dir, "note.txt")
-	if err := os.WriteFile(note, []byte("OAuth callback retry memory"), 0o600); err != nil {
-		require.NoError(t, err)
-	}
-
-	storePath := filepath.Join(dir, "agent-memory.json")
-
-	err := runAgentMemoryCommand(dir, "reviewer", agentMemoryCommandInput{
-		StorePath:  storePath,
-		Search:     "callback retry",
-		IndexFiles: []string{note},
-		Limit:      1,
-	})
-
-	require.NoError(t, err)
-	loaded, err := agentmemory.Load(storePath)
-	require.NoError(t, err)
-	results, err := loaded.Search("reviewer", "callback", 1)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, filepath.Clean(note), results[0].Document.ID)
-}
-
-func TestFormatAgentMemoryResult(t *testing.T) {
-	t.Parallel()
-
-	got := formatAgentMemoryResult(agentmemory.Result{
-		Document: agentmemory.Document{
-			ID:       "docs/memory.md",
-			Path:     "docs/memory.md",
-			Metadata: map[string]string{"kind": "note"},
-		},
-		Score: 0.5,
-	})
-
-	want := "docs/memory.md\tscore=0.5000\tpath=docs/memory.md\tkind=note"
-	if got != want {
-		require.Failf(t, "unexpected agent memory result format", "got %q, want %q", got, want)
-	}
 }
 
 func TestSelectedRetrievalSources(t *testing.T) {

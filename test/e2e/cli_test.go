@@ -283,7 +283,8 @@ printf 'plugin-check\n'
 	assertContains(t, result.stdout, "preview=hello auth")
 
 	result = runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "memory", "search", "hello", "auth")
-	assertContains(t, result.stdout, "session/demo/message/0")
+	assertContains(t, result.stdout, "session/demo/metadata")
+	assertNotContains(t, result.stdout, "session/demo/message/0")
 
 	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "agents", "list")
 	assertContains(t, result.stdout, "reviewer")
@@ -525,7 +526,8 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 	}
 
 	result = runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "--memory-search", "hello auth")
-	assertContains(t, result.stdout, "session/demo/message/0")
+	assertContains(t, result.stdout, "session/demo/metadata")
+	assertNotContains(t, result.stdout, "session/demo/message/0")
 
 	notesPath := filepath.Join(workDir, "notes.txt")
 	memoryStore := filepath.Join(workDir, "memory.json")

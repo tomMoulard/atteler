@@ -1,0 +1,26 @@
+{
+  "documents": [
+    {
+      "id": "auth",
+      "text": "OAuth token rotation handles refresh credentials and callback retry failures."
+    },
+    {
+      "id": "docs",
+      "text": "Release notes describe screenshots, copy edits, and documentation updates."
+    },
+    {
+      "id": "queue",
+      "text": "Background queue drains jobs and records batch throughput metrics."
+    }
+  ],
+  "cases": [
+    {
+      "query": "refresh token retry",
+      "want_top": "auth"
+    },
+    {
+      "query": "batch throughput jobs",
+      "want_top": "queue"
+    }
+  ]
+}

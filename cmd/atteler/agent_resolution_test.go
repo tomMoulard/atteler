@@ -117,8 +117,17 @@ func TestResolveSelection_SessionUtilitiesSkipUnknownSavedAgent(t *testing.T) {
 		"feedback proposals": func(id string) cliOptions { return cliOptions{sessionRef: id, feedbackProposals: true} },
 		"merge artifacts":    func(id string) cliOptions { return cliOptions{sessionRef: id, mergeArtifactsPath: "-"} },
 		"agent memory":       func(id string) cliOptions { return cliOptions{sessionRef: id, agentMemorySearch: "auth"} },
-		"bash":               func(id string) cliOptions { return cliOptions{sessionRef: id, bashCommand: "echo ok"} },
-		"async run":          func(id string) cliOptions { return cliOptions{sessionRef: id, asyncRun: true} },
+		"agent memory delete": func(id string) cliOptions {
+			return cliOptions{sessionRef: id, agentMemoryDelete: "memory-id"}
+		},
+		"agent memory compact": func(id string) cliOptions {
+			return cliOptions{sessionRef: id, agentMemoryCompact: true}
+		},
+		"agent memory migrate": func(id string) cliOptions {
+			return cliOptions{sessionRef: id, agentMemoryMigrate: true}
+		},
+		"bash":      func(id string) cliOptions { return cliOptions{sessionRef: id, bashCommand: "echo ok"} },
+		"async run": func(id string) cliOptions { return cliOptions{sessionRef: id, asyncRun: true} },
 		"spawn agents": func(id string) cliOptions {
 			return cliOptions{sessionRef: id, spawnAgentSpecs: []string{"reviewer|check"}}
 		},
