@@ -552,11 +552,6 @@ atteler agents async-plan \
   --async-task 'plan|planner|draft plan' \
   --async-task 'code|coder|implement feature|plan'
 atteler agents spawn 'planner|draft the migration plan' --spawn-dry-run
-atteler agents spawn 'reviewer|check the diff' \
-  --spawn-max-concurrency 2 \
-  --spawn-task-timeout-seconds 120 \
-  --spawn-retries 1 \
-  --spawn-retry-backoff-seconds 5
 atteler agents speculate-run \
   --speculate-agent planner \
   --speculate-agent verifier \
@@ -611,11 +606,9 @@ lines make the command fail; model silence is never accepted as success.
 Async task and sub-agent execution now writes JSON ledgers under
 `.atteler/runs/.../ledger.json` by default, with per-child transcript paths for
 sub-agent command output and artifact paths printed in CLI summaries when
-available. Use `--spawn-ledger <path> --spawn-resume` to retry a failed run
-without rerunning matching successful children, and tune backpressure with
-`--spawn-max-concurrency`, `--spawn-task-timeout-seconds`, `--spawn-retries`,
-`--spawn-retry-backoff-seconds`, `--spawn-cancel-on-failure`, `--spawn-token-budget`,
-`--spawn-cost-budget-micros`, and `--spawn-output-budget-bytes`. Child processes
+available. The generated agents help lists the ledger, resume, concurrency,
+timeout, retry, cancellation, token/cost, and output-byte controls for safe
+retry and backpressure tuning. Child processes
 receive `ATTELER_CHILD_*` identity and
 `ATTELER_ALLOWED_WRITE_SCOPE` environment metadata so their workspace and write
 scope are explicit in both runtime and ledger records. Budget exhaustion stops
