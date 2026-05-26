@@ -118,7 +118,7 @@ func doctor(ctx context.Context, state appState) error {
 			fmt.Printf("         - %s%s\n", m, doctorModelMetadataSuffix(metadataProvider, m))
 		}
 
-		printDoctorRuntimeDetails(r.Name)
+		printDoctorRuntimeDetails(result.Name)
 	}
 
 	if readinessHealthy == 0 && adapterHealthy == 0 {
