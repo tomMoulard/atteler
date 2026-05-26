@@ -111,11 +111,16 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 	}
 
 	if err := cmd.Start(); err != nil {
-		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "MCP server failed before JSON-RPC streaming"}); finishErr != nil {
-			return nil, fmt.Errorf("start mcp server %q: %w", strings.TrimSpace(server.Name), errors.Join(err, finishErr))
+		startErr := fmt.Errorf("start mcp server %q: %w", strings.TrimSpace(server.Name), err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			startErr = fmt.Errorf("mcp server %q timed out or was canceled: %w", strings.TrimSpace(server.Name), errors.Join(ctxErr, err))
 		}
 
-		return nil, fmt.Errorf("start mcp server %q: %w", strings.TrimSpace(server.Name), err)
+		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "MCP server failed before JSON-RPC streaming"}); finishErr != nil {
+			return nil, errors.Join(startErr, finishErr)
+		}
+
+		return nil, startErr
 	}
 
 	stderrCh := readAll(stderr)
