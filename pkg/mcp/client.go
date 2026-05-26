@@ -111,11 +111,7 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 	}
 
 	if err := cmd.Start(); err != nil {
-		if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "MCP server failed before JSON-RPC streaming"}); finishErr != nil {
-			return nil, fmt.Errorf("start mcp server %q: %w", strings.TrimSpace(server.Name), errors.Join(err, finishErr))
-		}
-
-		return nil, fmt.Errorf("start mcp server %q: %w", strings.TrimSpace(server.Name), err)
+		return nil, finishMCPStartError(ctx, invocation, strings.TrimSpace(server.Name), err)
 	}
 
 	stderrCh := readAll(stderr)
@@ -182,6 +178,19 @@ func finishMCPSetupError(invocation *shell.Invocation, err error) error {
 	}
 
 	return err
+}
+
+func finishMCPStartError(ctx context.Context, invocation *shell.Invocation, serverName string, err error) error {
+	startErr := fmt.Errorf("start mcp server %q: %w", serverName, err)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		startErr = fmt.Errorf("mcp server %q timed out or was canceled: %w", serverName, errors.Join(ctxErr, err))
+	}
+
+	if finishErr := invocation.Finish(shell.FinishOptions{Error: err, OutputCapture: shell.OutputNotCaptured, OutputNote: "MCP server failed before JSON-RPC streaming"}); finishErr != nil {
+		return errors.Join(startErr, finishErr)
+	}
+
+	return startErr
 }
 
 // CallTool invokes the MCP tools/call method for toolName.

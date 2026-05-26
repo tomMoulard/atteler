@@ -111,6 +111,8 @@ func doctor(ctx context.Context, state appState) error {
 		for _, m := range r.Models {
 			fmt.Printf("         - %s%s\n", m, doctorModelMetadataSuffix(metadataProvider, m))
 		}
+
+		printDoctorRuntimeDetails(r.Name)
 	}
 
 	if healthy == 0 {
@@ -184,6 +186,13 @@ func doctorAdapterSuffix(contract *llm.AdapterContract) string {
 	}
 
 	return " adapter=" + contract.AdapterVersion
+}
+
+func printDoctorRuntimeDetails(providerName string) {
+	if runtime, ok := llm.ProviderRuntime(providerName); ok {
+		fmt.Printf("         runtime: %s\n", runtime.ExecutionPath)
+		fmt.Printf("         health: %s\n", runtime.HealthCheck)
+	}
 }
 
 func doctorMetadataProvider(state appState, providerName string) llm.ModelMetadataProvider {
