@@ -649,12 +649,16 @@ func waitTaskRetryBackoff(ctx context.Context, backoff time.Duration) error {
 }
 
 func taskStatusForAttempt(attemptErr, parentErr, err error, timeoutExceeded bool) string {
-	if errors.Is(attemptErr, context.DeadlineExceeded) || timeoutExceeded {
+	if errors.Is(attemptErr, context.DeadlineExceeded) {
 		return StatusTimedOut
 	}
 
 	if errors.Is(parentErr, context.Canceled) || errors.Is(attemptErr, context.Canceled) {
 		return StatusCanceled
+	}
+
+	if timeoutExceeded {
+		return StatusTimedOut
 	}
 
 	if err == nil {

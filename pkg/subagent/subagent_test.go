@@ -20,6 +20,7 @@ import (
 
 const (
 	doneOutput         = "done"
+	lateSuccessOutput  = "late success"
 	partialOutput      = "partial"
 	failingID          = "fail"
 	recoveredOutput    = "recovered"
@@ -1034,7 +1035,7 @@ func TestSpawnAllWithOptions_CancelOnFailureMarksSiblingCanceledWhenRunnerIgnore
 			close(slowStarted)
 			<-releaseFailure
 			<-ctx.Done()
-			return "late success", nil
+			return lateSuccessOutput, nil
 		default:
 			return "", nil
 		}
@@ -1046,6 +1047,40 @@ func TestSpawnAllWithOptions_CancelOnFailureMarksSiblingCanceledWhenRunnerIgnore
 	assert.Equal(t, StatusCanceled, results[1].Status)
 	assert.Contains(t, results[1].Error, context.Canceled.Error())
 	assert.Contains(t, results[1].Error, `sibling cancellation after request "fail" failed`)
+}
+
+func TestSpawnAllWithOptions_CancelOnFailureBeatsTimeoutWhenSiblingIgnoresContext(t *testing.T) {
+	t.Parallel()
+
+	requests := []Request{
+		{ID: failingID, Agent: "executor", Prompt: failingID},
+		{ID: slowID, Agent: "executor", Prompt: slowID},
+	}
+	slowStarted := make(chan struct{})
+	releaseFailure := make(chan struct{})
+
+	results, err := SpawnAllWithOptions(t.Context(), requests, func(_ context.Context, request Request) (string, error) {
+		switch request.ID {
+		case failingID:
+			<-slowStarted
+			close(releaseFailure)
+			return partialOutput, errors.New("boom")
+		case slowID:
+			close(slowStarted)
+			<-releaseFailure
+			time.Sleep(20 * time.Millisecond)
+			return lateSuccessOutput, nil
+		default:
+			return "", nil
+		}
+	}, Options{MaxConcurrency: 2, CancelOnFailure: true, Timeout: 5 * time.Millisecond})
+
+	require.Error(t, err)
+	require.Len(t, results, 2)
+	assert.Equal(t, StatusFailed, results[0].Status)
+	assert.Equal(t, StatusCanceled, results[1].Status)
+	assert.Contains(t, results[1].Error, `sibling cancellation after request "fail" failed`)
+	assert.NotContains(t, results[1].Error, context.DeadlineExceeded.Error())
 }
 
 func TestCanceledBeforeStartResult_PreservesCancelCause(t *testing.T) {
@@ -1098,7 +1133,7 @@ func TestSpawnAllWithOptions_TimeoutAndBudgetExhaustion(t *testing.T) {
 
 		results, err := SpawnAllWithOptions(t.Context(), []Request{{ID: slowID, Agent: "executor", Prompt: slowID}}, func(context.Context, Request) (string, error) {
 			time.Sleep(20 * time.Millisecond)
-			return "late success", nil
+			return lateSuccessOutput, nil
 		}, Options{Timeout: 5 * time.Millisecond})
 
 		require.Error(t, err)

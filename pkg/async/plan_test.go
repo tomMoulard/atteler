@@ -21,6 +21,7 @@ import (
 
 const (
 	doneOutput         = "done"
+	lateSuccessOutput  = "late success"
 	partialOutput      = "partial"
 	failingID          = "fail"
 	recoveredOutput    = "recovered"
@@ -417,7 +418,7 @@ func TestPlan_RunWithOptions_CancelOnFailureMarksSiblingCanceledWhenRunnerIgnore
 			close(slowStarted)
 			<-releaseFailure
 			<-ctx.Done()
-			return "late success", nil
+			return lateSuccessOutput, nil
 		default:
 			return "", nil
 		}
@@ -429,6 +430,42 @@ func TestPlan_RunWithOptions_CancelOnFailureMarksSiblingCanceledWhenRunnerIgnore
 	assert.Equal(t, StatusCanceled, results[1].Status)
 	assert.Contains(t, results[1].Error, context.Canceled.Error())
 	assert.Contains(t, results[1].Error, `sibling cancellation after task "fail" failed`)
+}
+
+func TestPlan_RunWithOptions_CancelOnFailureBeatsTimeoutWhenSiblingIgnoresContext(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]Task{
+		{ID: failingID, Agent: "executor", Prompt: failingID},
+		{ID: slowID, Agent: "executor", Prompt: slowID},
+	})
+	require.NoError(t, err)
+
+	slowStarted := make(chan struct{})
+	releaseFailure := make(chan struct{})
+
+	results, err := plan.RunWithOptions(t.Context(), func(_ context.Context, task Task) (string, error) {
+		switch task.ID {
+		case failingID:
+			<-slowStarted
+			close(releaseFailure)
+			return partialOutput, errors.New("boom")
+		case slowID:
+			close(slowStarted)
+			<-releaseFailure
+			time.Sleep(20 * time.Millisecond)
+			return lateSuccessOutput, nil
+		default:
+			return "", nil
+		}
+	}, RunOptions{MaxConcurrency: 2, CancelOnFailure: true, Timeout: 5 * time.Millisecond})
+
+	require.Error(t, err)
+	require.Len(t, results, 2)
+	assert.Equal(t, StatusFailed, results[0].Status)
+	assert.Equal(t, StatusCanceled, results[1].Status)
+	assert.Contains(t, results[1].Error, `sibling cancellation after task "fail" failed`)
+	assert.NotContains(t, results[1].Error, context.DeadlineExceeded.Error())
 }
 
 func TestPlan_RunWithOptions_ParentCancellationMarksDownstreamCanceled(t *testing.T) {
@@ -1109,7 +1146,7 @@ func TestPlan_RunWithOptions_TimeoutAndBudgetExhaustion(t *testing.T) {
 
 		results, err := plan.RunWithOptions(t.Context(), func(context.Context, Task) (string, error) {
 			time.Sleep(20 * time.Millisecond)
-			return "late success", nil
+			return lateSuccessOutput, nil
 		}, RunOptions{Timeout: 5 * time.Millisecond})
 
 		require.Error(t, err)
