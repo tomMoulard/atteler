@@ -21,7 +21,22 @@ type asyncPlanCommandInput struct {
 type asyncRunCommandInput struct {
 	SpawnBinary    string
 	TaskSpecs      []string
+	Execution      childExecutionCommandInput
 	TimeoutSeconds int
+}
+
+type childExecutionCommandInput struct {
+	LedgerPath          string
+	MaxConcurrency      int
+	TaskTimeoutSeconds  int
+	Retries             int
+	RetryBackoffSeconds int
+	TokenBudget         int
+	CostBudgetMicros    int
+	OutputBudgetBytes   int
+	RetriesSet          bool
+	CancelOnFailure     bool
+	Resume              bool
 }
 
 type codeIntelCommandInput struct {
@@ -462,6 +477,23 @@ func asyncRunCommandInputFromOptions(opts cliOptions) asyncRunCommandInput {
 		SpawnBinary:    opts.spawnBinary,
 		TaskSpecs:      append([]string(nil), opts.asyncTaskSpecs...),
 		TimeoutSeconds: opts.spawnTimeout.value,
+		Execution:      childExecutionCommandInputFromOptions(opts),
+	}
+}
+
+func childExecutionCommandInputFromOptions(opts cliOptions) childExecutionCommandInput {
+	return childExecutionCommandInput{
+		LedgerPath:          opts.spawnLedgerPath,
+		MaxConcurrency:      opts.spawnMaxConcurrency.value,
+		TaskTimeoutSeconds:  opts.spawnTaskTimeout.value,
+		Retries:             opts.spawnRetries.value,
+		RetryBackoffSeconds: opts.spawnRetryBackoff.value,
+		TokenBudget:         opts.spawnTokenBudget.value,
+		CostBudgetMicros:    opts.spawnCostBudgetMicros.value,
+		OutputBudgetBytes:   opts.spawnOutputBudgetBytes.value,
+		RetriesSet:          opts.spawnRetries.set,
+		CancelOnFailure:     opts.spawnCancelOnFailure,
+		Resume:              opts.spawnResume,
 	}
 }
 

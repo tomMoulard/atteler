@@ -230,19 +230,45 @@ func TestFormatSpawnResults(t *testing.T) {
 	t.Parallel()
 
 	got := formatSpawnResults([]subagent.Result{{
-		Request:  subagent.Request{ID: "child-1", Agent: "reviewer"},
-		Output:   "done\n",
-		Duration: 1500 * time.Millisecond,
+		Request:        subagent.Request{ID: "child-1", Agent: "reviewer"},
+		Output:         "done\n",
+		Status:         subagent.StatusSucceeded,
+		LedgerPath:     "/tmp/spawn-ledger.json",
+		AdmissionID:    "admission-child-1",
+		TranscriptPath: "/tmp/transcripts/child-1.txt",
+		Artifacts:      []string{"/tmp/artifacts/child-1.patch"},
+		Duration:       1500 * time.Millisecond,
 	}, {
 		Request:  subagent.Request{ID: "child-2", Agent: "critic"},
 		Error:    "boom",
+		Status:   subagent.StatusFailed,
 		Duration: time.Millisecond,
+	}, {
+		Request:     subagent.Request{ID: "child-3", Agent: "executor"},
+		Error:       "scope denied",
+		Status:      subagent.StatusDenied,
+		LedgerPath:  "/tmp/spawn-ledger.json",
+		AdmissionID: "admission-child-3",
+	}, {
+		Request:     subagent.Request{ID: "child-4", Agent: "executor"},
+		Error:       "context deadline exceeded",
+		Status:      subagent.StatusTimedOut,
+		AdmissionID: "admission-child-4",
+		StopID:      "stop-child-4",
 	}})
 
 	assert.Contains(t, got, "id=child-1\tagent=reviewer\tstatus=ok\tduration=1.5s")
+	assert.Contains(t, got, "ledger=/tmp/spawn-ledger.json")
+	assert.Contains(t, got, "admission_id=admission-child-1")
+	assert.Contains(t, got, "transcript=/tmp/transcripts/child-1.txt")
+	assert.Contains(t, got, "artifact=/tmp/artifacts/child-1.patch")
 	assert.Contains(t, got, "output=done")
 	assert.Contains(t, got, "id=child-2\tagent=critic\tstatus=error\tduration=1ms")
 	assert.Contains(t, got, "error=boom")
+	assert.Contains(t, got, "id=child-3\tagent=executor\tstatus=denied")
+	assert.Contains(t, got, "admission_id=admission-child-3")
+	assert.Contains(t, got, "id=child-4\tagent=executor\tstatus=timed_out")
+	assert.Contains(t, got, "stop_id=stop-child-4")
 }
 
 func TestSelectModelStoresProviderQualifiedModel(t *testing.T) {

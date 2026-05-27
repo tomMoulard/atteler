@@ -681,6 +681,198 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
 	assertContains(t, result.stdout, "agent=reviewer")
 	assertContains(t, result.stdout, "prompt=dry run this child prompt")
 
+	if runtime.GOOS != windowsGOOS {
+		fakeAtteler := filepath.Join(workDir, "fake-atteler")
+		childRunLog := filepath.Join(workDir, "child-runs.log")
+
+		writeExecutable(t, fakeAtteler, `#!/bin/sh
+if [ -n "$RUN_LOG" ]; then
+  printf '%s\n' "$ATTELER_CHILD_ID" >> "$RUN_LOG"
+fi
+printf 'child:%s agent:%s scope:%s\n' "$ATTELER_CHILD_ID" "$ATTELER_CHILD_AGENT" "$ATTELER_ALLOWED_WRITE_SCOPE"
+printf 'workspace:%s\n' "$ATTELER_CHILD_WORKSPACE_ID" >&2
+`)
+
+		spawnLedger := filepath.Join(workDir, "spawn-ledger.json")
+		childRunSpec := runSpec{dir: workDir, env: []string{"RUN_LOG=" + childRunLog}}
+		result = runOK(t, childRunSpec,
+			"--spawn-agent", "child|reviewer|real child prompt",
+			"--spawn-binary", fakeAtteler,
+			"--spawn-ledger", spawnLedger,
+		)
+		assertContains(t, result.stdout, "id=child\tagent=reviewer\tstatus=ok")
+		assertContains(t, result.stdout, "ledger="+spawnLedger)
+		assertContains(t, result.stdout, "admission_id=")
+		assertContains(t, result.stdout, "transcript=")
+		assertContains(t, result.stdout, "output=child:child agent:reviewer scope:")
+
+		spawnLedgerData, readErr := os.ReadFile(spawnLedger)
+		require.NoError(t, readErr)
+		assertContains(t, string(spawnLedgerData), `"admissions"`)
+		assertContains(t, string(spawnLedgerData), `"admitted": true`)
+		assertContains(t, string(spawnLedgerData), `"child_id": "child"`)
+		assertContains(t, string(spawnLedgerData), `"attempts"`)
+
+		transcriptPath := valueFromOutputLine(result.stdout, "transcript=")
+		require.NotEmpty(t, transcriptPath)
+		transcriptData, readErr := os.ReadFile(transcriptPath)
+		require.NoError(t, readErr)
+		assertContains(t, string(transcriptData), "# stdout")
+		assertContains(t, string(transcriptData), "child:child agent:reviewer")
+		assertContains(t, string(transcriptData), "# stderr")
+		assertContains(t, string(transcriptData), "workspace:")
+
+		childRunLogData, readErr := os.ReadFile(childRunLog)
+		require.NoError(t, readErr)
+		require.Equal(t, "child\n", string(childRunLogData))
+
+		result = runOK(t, childRunSpec,
+			"--spawn-agent", "child|reviewer|real child prompt",
+			"--spawn-binary", fakeAtteler,
+			"--spawn-ledger", spawnLedger,
+			"--spawn-resume",
+		)
+		assertContains(t, result.stdout, "id=child\tagent=reviewer\tstatus=skipped")
+		assertContains(t, result.stdout, "ledger="+spawnLedger)
+		assertContains(t, result.stdout, "admission_id=")
+
+		childRunLogData, readErr = os.ReadFile(childRunLog)
+		require.NoError(t, readErr)
+		require.Equal(t, "child\n", string(childRunLogData))
+
+		denyLedger := filepath.Join(workDir, "spawn-denied-ledger.json")
+		denyRunLog := filepath.Join(workDir, "deny-runs.log")
+		deniedResult, deniedErr := runAtteler(t, runSpec{dir: workDir, env: []string{"RUN_LOG=" + denyRunLog}},
+			"--spawn-agent", "blocked|reviewer|this prompt should exceed a one token budget",
+			"--spawn-binary", fakeAtteler,
+			"--spawn-ledger", denyLedger,
+			"--spawn-token-budget", "1",
+		)
+		require.Error(t, deniedErr)
+		assertContains(t, deniedResult.stdout, "id=blocked\tagent=reviewer\tstatus=budget_exhausted")
+		assertContains(t, deniedResult.stdout, "ledger="+denyLedger)
+		assertContains(t, deniedResult.stdout, "admission_id=")
+		assertNotContains(t, deniedResult.stdout, "transcript=")
+
+		denyLedgerData, readErr := os.ReadFile(denyLedger)
+		require.NoError(t, readErr)
+		assertContains(t, string(denyLedgerData), `"admissions"`)
+		assertContains(t, string(denyLedgerData), `"admitted": false`)
+		assertContains(t, string(denyLedgerData), `"deny_reason": "prompt token budget exceeded`)
+		assertContains(t, string(denyLedgerData), `"child_id": "blocked"`)
+		assertNotContains(t, string(denyLedgerData), `"attempts"`)
+
+		_, readErr = os.ReadFile(denyRunLog)
+		require.ErrorIs(t, readErr, os.ErrNotExist)
+
+		haltFakeAtteler := filepath.Join(workDir, "halt-fake-atteler")
+		haltRunLog := filepath.Join(workDir, "halt-runs.log")
+
+		writeExecutable(t, haltFakeAtteler, `#!/bin/sh
+if [ -n "$RUN_LOG" ]; then
+  printf '%s\n' "$ATTELER_CHILD_ID" >> "$RUN_LOG"
+fi
+printf 'child:%s agent:%s\n' "$ATTELER_CHILD_ID" "$ATTELER_CHILD_AGENT"
+if [ "$ATTELER_CHILD_ID" = "fail" ]; then
+  waited=0
+  while [ ! -f "$ATTELER_ALLOWED_WRITE_SCOPE/slow-started" ] && [ "$waited" -lt 100 ]; do
+    waited=$((waited + 1))
+    sleep 0.05
+  done
+  printf 'failing child\n' >&2
+  exit 7
+fi
+if [ "$ATTELER_CHILD_ID" = "slow" ]; then
+  touch "$ATTELER_ALLOWED_WRITE_SCOPE/slow-started"
+  sleep 5
+  printf 'slow child completed\n'
+fi
+`)
+
+		haltLedger := filepath.Join(workDir, "spawn-halted-ledger.json")
+		haltedResult, haltedErr := runAtteler(t, runSpec{dir: workDir, env: []string{"RUN_LOG=" + haltRunLog}, timeout: 15 * time.Second},
+			"--spawn-agent", "fail|reviewer|fail after sibling is admitted",
+			"--spawn-agent", "slow|reviewer|wait for cancellation",
+			"--spawn-binary", haltFakeAtteler,
+			"--spawn-ledger", haltLedger,
+			"--spawn-max-concurrency", "2",
+			"--spawn-cancel-on-failure",
+		)
+		require.Error(t, haltedErr)
+		assertContains(t, haltedResult.stdout, "id=fail\tagent=reviewer\tstatus=error")
+		assertContains(t, haltedResult.stdout, "id=slow\tagent=reviewer\tstatus=canceled")
+		assertContains(t, haltedResult.stdout, "ledger="+haltLedger)
+		assertContains(t, haltedResult.stdout, "admission_id=")
+		assertContains(t, haltedResult.stdout, "stop_id=")
+		assertContains(t, haltedResult.stdout, "transcript=")
+
+		haltLedgerData, readErr := os.ReadFile(haltLedger)
+		require.NoError(t, readErr)
+		assertContains(t, string(haltLedgerData), `"admissions"`)
+		assertContains(t, string(haltLedgerData), `"admitted": true`)
+		assertContains(t, string(haltLedgerData), `"child_id": "fail"`)
+		assertContains(t, string(haltLedgerData), `"child_id": "slow"`)
+		assertContains(t, string(haltLedgerData), `"stop_receipts"`)
+		assertContains(t, string(haltLedgerData), `"status": "canceled"`)
+
+		haltRunLogData, readErr := os.ReadFile(haltRunLog)
+		require.NoError(t, readErr)
+		assertContains(t, string(haltRunLogData), "fail\n")
+		assertContains(t, string(haltRunLogData), "slow\n")
+
+		asyncLedger := filepath.Join(workDir, "async-ledger.json")
+		result = runOK(t, childRunSpec,
+			"--async-run",
+			"--async-task", "plan|planner|draft plan",
+			"--async-task", "code|coder|implement|plan",
+			"--spawn-binary", fakeAtteler,
+			"--spawn-ledger", asyncLedger,
+		)
+		assertContains(t, result.stdout, "wave=1\torder=1\tid=plan\tagent=planner\tstatus=ok")
+		assertContains(t, result.stdout, "wave=2\torder=1\tid=code\tagent=coder\tstatus=ok")
+		assertContains(t, result.stdout, "ledger="+asyncLedger)
+		assertContains(t, result.stdout, "admission_id=")
+		assertContains(t, result.stdout, "transcript=")
+		assertContains(t, result.stdout, "output=child:plan agent:planner scope:")
+
+		asyncLedgerData, readErr := os.ReadFile(asyncLedger)
+		require.NoError(t, readErr)
+		assertContains(t, string(asyncLedgerData), `"admissions"`)
+		assertContains(t, string(asyncLedgerData), `"child_id": "plan"`)
+		assertContains(t, string(asyncLedgerData), `"child_id": "code"`)
+		assertContains(t, string(asyncLedgerData), `"attempts"`)
+
+		asyncTranscriptPath := valueFromOutputLine(result.stdout, "transcript=")
+		require.NotEmpty(t, asyncTranscriptPath)
+		asyncTranscriptData, readErr := os.ReadFile(asyncTranscriptPath)
+		require.NoError(t, readErr)
+		assertContains(t, string(asyncTranscriptData), "# stdout")
+		assertContains(t, string(asyncTranscriptData), "child:plan agent:planner")
+		assertContains(t, string(asyncTranscriptData), "# stderr")
+		assertContains(t, string(asyncTranscriptData), "workspace:")
+
+		childRunLogData, readErr = os.ReadFile(childRunLog)
+		require.NoError(t, readErr)
+		require.Equal(t, "child\nplan\ncode\n", string(childRunLogData))
+
+		result = runOK(t, childRunSpec,
+			"--async-run",
+			"--async-task", "plan|planner|draft plan",
+			"--async-task", "code|coder|implement|plan",
+			"--spawn-binary", fakeAtteler,
+			"--spawn-ledger", asyncLedger,
+			"--spawn-resume",
+		)
+		assertContains(t, result.stdout, "wave=1\torder=1\tid=plan\tagent=planner\tstatus=skipped")
+		assertContains(t, result.stdout, "wave=2\torder=1\tid=code\tagent=coder\tstatus=skipped")
+		assertContains(t, result.stdout, "ledger="+asyncLedger)
+		assertContains(t, result.stdout, "admission_id=")
+
+		childRunLogData, readErr = os.ReadFile(childRunLog)
+		require.NoError(t, readErr)
+		require.Equal(t, "child\nplan\ncode\n", string(childRunLogData))
+	}
+
 	taskFile := filepath.Join(workDir, "tasks.json")
 	result = runOK(t, runSpec{dir: workDir}, "--task-file", taskFile, "--task-add", "draft the task list CLI", "--task-id", "todo-1", "--task-agent", "planner")
 	assertContains(t, result.stdout, "id=todo-1")
@@ -1470,6 +1662,16 @@ func assertContains(t *testing.T, haystack, needle string) {
 	if !strings.Contains(haystack, needle) {
 		require.Failf(t, "unexpected failure", "missing %q in:\n%s", needle, haystack)
 	}
+}
+
+func valueFromOutputLine(output, prefix string) string {
+	for line := range strings.SplitSeq(output, "\n") {
+		if value, ok := strings.CutPrefix(line, prefix); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+
+	return ""
 }
 
 func assertNotContains(t *testing.T, haystack, needle string) {

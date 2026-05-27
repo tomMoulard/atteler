@@ -310,6 +310,7 @@ type cliOptions struct {
 	lspWorkspaceSymbols                string
 	helpDomain                         string
 	spawnBinary                        string
+	spawnLedgerPath                    string
 	promptCompleteInput                string
 	speculatePrompt                    string
 	reviewPrompt                       string
@@ -390,6 +391,12 @@ type cliOptions struct {
 	bashTimeout                        positiveIntFlag
 	mcpTimeout                         positiveIntFlag
 	spawnTimeout                       positiveIntFlag
+	spawnTaskTimeout                   positiveIntFlag
+	spawnMaxConcurrency                positiveIntFlag
+	spawnTokenBudget                   positiveIntFlag
+	spawnCostBudgetMicros              positiveIntFlag
+	spawnOutputBudgetBytes             positiveIntFlag
+	spawnRetryBackoff                  positiveIntFlag
 	promptCompleteLimit                positiveIntFlag
 	watchLargeFileBytes                positiveIntFlag
 	watchIntervalSeconds               positiveIntFlag
@@ -400,6 +407,7 @@ type cliOptions struct {
 	evalExitCode                       nonNegativeIntFlag
 	evaluationDurationMillis           nonNegativeIntFlag
 	codeOffset                         nonNegativeIntFlag
+	spawnRetries                       nonNegativeIntFlag
 	seed                               nonNegativeIntFlag
 	reasoningLevel                     string
 	temperature                        floatFlag
@@ -466,6 +474,8 @@ type cliOptions struct {
 	asyncPlan                          bool
 	asyncRun                           bool
 	spawnDryRun                        bool
+	spawnResume                        bool
+	spawnCancelOnFailure               bool
 	feedbackProposals                  bool
 	configMigrate                      bool
 	configReport                       bool

@@ -4,5 +4,6 @@
 /.atteler/sessions/
 /.atteler/skill-learning/
 /.atteler/skills/generated/
+/.atteler/runs/
 /.symphony/workspaces/
 cmd/atteler/.atteler/

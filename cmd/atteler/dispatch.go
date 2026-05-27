@@ -32,32 +32,7 @@ const (
 
 func parseOptions() cliOptions {
 	var opts cliOptions
-
-	opts.temperature = floatFlag{name: "temperature", min: 0}
-	opts.topP = floatFlag{name: "top-p", min: 0, max: 1, hasMax: true}
-	opts.routeBudget = floatFlag{name: "route-budget", min: 0}
-	opts.routeCacheReuse = floatFlag{name: "route-cache-reuse", min: 0, max: 1, hasMax: true}
-	opts.routeCacheWriteTokens = positiveIntFlag{name: "route-cache-write-tokens"}
-	opts.evaluationCost = floatFlag{name: "evaluation-cost", min: 0}
-	opts.evaluationConfidence = floatFlag{name: "evaluation-confidence", min: 0, max: 1, hasMax: true}
-	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
-	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
-	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
-	opts.codeLimit = positiveIntFlag{name: "code-limit"}
-	opts.codeOffset = nonNegativeIntFlag{name: "code-offset"}
-	opts.seed = nonNegativeIntFlag{name: "seed"}
-	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
-	opts.memoryTTL = positiveIntFlag{name: "memory-ttl-seconds"}
-	opts.agentMemoryTTL = positiveIntFlag{name: "agent-memory-ttl-seconds"}
-	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}
-	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
-	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
-	opts.memoryLimit = positiveIntFlag{name: "memory-limit"}
-	opts.memoryRetentionDays = positiveIntFlag{name: "memory-retention-days"}
-	opts.vectorLimit = positiveIntFlag{name: "vector-limit"}
-	opts.vectorTimeout = positiveIntFlag{name: "vector-timeout-seconds"}
-	opts.vectorChunkMaxRunes = positiveIntFlag{name: "vector-chunk-max-runes"}
-	opts.vectorChunkOverlapRunes = positiveIntFlag{name: "vector-chunk-overlap-runes"}
+	initCLIFlagValues(&opts)
 	registerCLIFlags(&opts)
 
 	flag.Usage = groupedUsage
@@ -85,6 +60,58 @@ func parseOptions() cliOptions {
 	applyDebugEnvOptions(&opts, os.Getenv)
 
 	return opts
+}
+
+func initCLIFlagValues(opts *cliOptions) {
+	opts.temperature = floatFlag{name: "temperature", min: 0}
+	opts.topP = floatFlag{name: "top-p", min: 0, max: 1, hasMax: true}
+	opts.routeBudget = floatFlag{name: "route-budget", min: 0}
+	opts.routeCacheReuse = floatFlag{name: "route-cache-reuse", min: 0, max: 1, hasMax: true}
+	opts.routeCacheWriteTokens = positiveIntFlag{name: "route-cache-write-tokens"}
+	opts.evaluationCost = floatFlag{name: "evaluation-cost", min: 0}
+	opts.evaluationConfidence = floatFlag{name: "evaluation-confidence", min: 0, max: 1, hasMax: true}
+	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
+	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
+	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
+	opts.contextPackTokens = positiveIntFlag{name: "context-pack-tokens"}
+	opts.planMaxAgents = positiveIntFlag{name: "plan-max-agents"}
+	opts.memoryLimit = positiveIntFlag{name: "memory-limit"}
+	opts.memoryTTL = positiveIntFlag{name: "memory-ttl-seconds"}
+	opts.memoryRetentionDays = positiveIntFlag{name: "memory-retention-days"}
+	opts.agentMemoryLimit = positiveIntFlag{name: "agent-memory-limit"}
+	opts.agentMemoryTTL = positiveIntFlag{name: "agent-memory-ttl-seconds"}
+	opts.retrievalLimit = positiveIntFlag{name: "retrieval-limit"}
+	opts.vectorLimit = positiveIntFlag{name: "vector-limit"}
+	opts.codeLimit = positiveIntFlag{name: "code-limit"}
+	opts.vectorTimeout = positiveIntFlag{name: "vector-timeout-seconds"}
+	opts.vectorChunkMaxRunes = positiveIntFlag{name: "vector-chunk-max-runes"}
+	opts.vectorChunkOverlapRunes = positiveIntFlag{name: "vector-chunk-overlap-runes"}
+	opts.mergeArtifactMaxBytes = positiveIntFlag{name: "merge-artifact-max-bytes"}
+	opts.routeInputTokens = positiveIntFlag{name: "route-input-tokens"}
+	opts.routeOutputTokens = positiveIntFlag{name: "route-output-tokens"}
+	opts.routeCacheWriteTokens = positiveIntFlag{name: "route-cache-write-tokens"}
+	opts.gitHistoryLimit = positiveIntFlag{name: "git-history-limit"}
+	opts.pluginTimeout = positiveIntFlag{name: "plugin-timeout-seconds"}
+	opts.bashTimeout = positiveIntFlag{name: "bash-timeout-seconds"}
+	opts.mcpTimeout = positiveIntFlag{name: "mcp-timeout-seconds"}
+	opts.spawnTimeout = positiveIntFlag{name: "spawn-timeout-seconds"}
+	opts.spawnTaskTimeout = positiveIntFlag{name: "spawn-task-timeout-seconds"}
+	opts.spawnMaxConcurrency = positiveIntFlag{name: "spawn-max-concurrency"}
+	opts.spawnTokenBudget = positiveIntFlag{name: "spawn-token-budget"}
+	opts.spawnCostBudgetMicros = positiveIntFlag{name: "spawn-cost-budget-micros"}
+	opts.spawnOutputBudgetBytes = positiveIntFlag{name: "spawn-output-budget-bytes"}
+	opts.spawnRetryBackoff = positiveIntFlag{name: "spawn-retry-backoff-seconds"}
+	opts.promptCompleteLimit = positiveIntFlag{name: "prompt-complete-limit"}
+	opts.watchLargeFileBytes = positiveIntFlag{name: "watch-large-file-bytes"}
+	opts.watchIntervalSeconds = positiveIntFlag{name: "watch-interval-seconds"}
+	opts.watchMaxIterations = positiveIntFlag{name: "watch-max-iterations"}
+	opts.skillMaxSteps = positiveIntFlag{name: "skill-max-steps"}
+	opts.skillMinOccurrences = positiveIntFlag{name: "skill-min-occurrences"}
+	opts.codeOffset = nonNegativeIntFlag{name: "code-offset"}
+	opts.spawnRetries = nonNegativeIntFlag{name: "spawn-retries"}
+	opts.seed = nonNegativeIntFlag{name: "seed"}
+	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
+	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}
 }
 
 func applyPositionalOptions(opts *cliOptions, args []string) {
