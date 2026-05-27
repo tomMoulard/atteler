@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
 )
@@ -34,7 +35,7 @@ func TestSlashHelp_Golden(t *testing.T) {
 	t.Parallel()
 
 	want := `/help /model [name] /profile [name] /save /export [path] /clear /retry /edit /fork [n]
-/tokens /cost /search <query> /pin <n> /unpin <n> /context [prune] /mode [plan|execute]
+/tokens /cost /search <query> /pin <n> /unpin <n> /context [prune] /mode [plan|execute] /suggestions [status|local|session|folder|global]
 /template [name] /codeblocks /save-code <n> <path> /copy [last|session] /copy-code [n] /apply-patch /eval add|run`
 
 	assert.Equal(t, want, slashHelp())
@@ -182,6 +183,23 @@ func TestSlashCommandValidation_UsesDescriptorSchemas(t *testing.T) {
 			name:    "mode validates enum",
 			input:   "/mode inspect",
 			wantErr: "mode must be plan or execute",
+		},
+		{
+			name:      "suggestions parses folder opt-in",
+			input:     "/suggestions folder",
+			wantName:  "suggestions",
+			wantInput: slashSuggestionsInput{Mode: string(promptSuggestionConsentFolder)},
+		},
+		{
+			name:      "suggestions parses no-network as local-only",
+			input:     "/suggestions no-network",
+			wantName:  "suggestions",
+			wantInput: slashSuggestionsInput{Mode: string(promptSuggestionConsentLocalOnly)},
+		},
+		{
+			name:    "suggestions validates enum",
+			input:   "/suggestions always",
+			wantErr: "usage: /suggestions [status|local|session|folder|global]",
 		},
 		{
 			name:    "save-code requires block and path",
@@ -668,6 +686,11 @@ func TestSlashCommandSideEffects_AreStableForMutatingCommands(t *testing.T) {
 			policies: []string{slashPolicyMutatesConversation, slashPolicyMutatesSessionStore},
 		},
 		{
+			name:     "suggestions",
+			effects:  []string{commandEffectLLMProviderRead, commandEffectSessionWrite, commandEffectStateWrite, commandEffectUserOutput},
+			policies: []string{slashPolicyMutatesSessionStore, slashPolicyCallsLLM},
+		},
+		{
 			name:     "save-code",
 			effects:  []string{commandEffectFilesystemWrite, commandEffectUserOutput},
 			policies: []string{slashPolicyMutatesFilesystem},
@@ -775,6 +798,260 @@ func TestForkSlashCommandPreservesAgentLoopBudget(t *testing.T) {
 	require.NotNil(t, cmd)
 	assert.Len(t, next.history, 1)
 	assert.Equal(t, budget, next.sessionState.AgentLoopBudget)
+}
+
+func TestSuggestionsSlashCommandSessionOptInUpdatesSession(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
+
+	m := model{
+		ctx:           context.Background(),
+		sessionStore:  store,
+		sessionState:  session.Session{ID: "session-id"},
+		selectedModel: "suggest/model",
+	}
+
+	next, cmd, handled := runSuggestionsSlashCommand(m, slashSuggestionsInput{Mode: string(promptSuggestionConsentSession)})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, promptSuggestionConsentSession, next.promptSuggestionConsent)
+	assert.Equal(t, string(appconfig.PromptSuggestionPreferenceModelBacked), next.sessionState.PromptSuggestions)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 2)
+
+	msg, ok := batch[0]().(sessionSavedMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+
+	loaded, err := store.Load("session-id")
+	require.NoError(t, err)
+	assert.Equal(t, string(appconfig.PromptSuggestionPreferenceModelBacked), loaded.PromptSuggestions)
+}
+
+func TestSuggestionsSlashCommandStatusShowsPrivacyAndBudget(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		selectedModel:           "suggest/model",
+		promptSuggestionConsent: promptSuggestionConsentGlobal,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		idleSuggestionRequests:  3,
+		idleSuggestionUsage:     tokenUsage{InputTokens: 40, OutputTokens: 10, Responses: 2},
+		idleSuggestionCostUSD:   0.0012,
+		sessionState: session.Session{
+			BackgroundSuggestions: &session.BackgroundSuggestionUsage{ProviderCalls: 2},
+		},
+	}
+
+	next, cmd, handled := runSuggestionsSlashCommand(m, slashSuggestionsInput{Show: true})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, m.promptSuggestionConsent, next.promptSuggestionConsent)
+
+	output := stripANSI(toStringMsg(cmd()))
+	assert.Contains(t, output, "suggestions: mode=global")
+	assert.Contains(t, output, "model=suggest/model")
+	assert.Contains(t, output, "budget=requests≤20 rate≤6/min")
+	assert.Contains(t, output, "usage=requests=3/20 rate=0/6_per_min provider_calls=2 responses=2 session_tokens=50/12000 cost=$0.001200/$0.05")
+	assert.Contains(t, output, "privacy=file/task/issue context omitted")
+}
+
+func TestSuggestionsSlashCommandFolderOptInPersistsState(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := appconfig.NewStateStore(filepath.Join(dir, "state.yaml"))
+	cwd := filepath.Join(dir, "repo")
+	require.NoError(t, os.MkdirAll(cwd, 0o750))
+
+	m := model{
+		ctx:          context.Background(),
+		cwd:          cwd,
+		stateStore:   store,
+		sessionState: session.Session{ID: "session-id"},
+	}
+
+	next, cmd, handled := runSuggestionsSlashCommand(m, slashSuggestionsInput{Mode: string(promptSuggestionConsentFolder)})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, promptSuggestionConsentFolder, next.promptSuggestionConsent)
+	assert.Empty(t, next.sessionState.PromptSuggestions)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 3)
+
+	msg, ok := batch[1]().(promptSuggestionPreferenceSavedMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, appconfig.PromptSuggestionPreferenceModelBacked, loaded.PromptSuggestionsForFolder(cwd))
+}
+
+func TestSuggestionsSlashCommandGlobalOptInPersistsState(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := appconfig.NewStateStore(filepath.Join(dir, "state.yaml"))
+	cwd := filepath.Join(dir, "repo")
+	require.NoError(t, os.MkdirAll(cwd, 0o750))
+
+	m := model{
+		ctx:          context.Background(),
+		cwd:          cwd,
+		stateStore:   store,
+		sessionState: session.Session{ID: "session-id", PromptSuggestions: string(appconfig.PromptSuggestionPreferenceLocalOnly)},
+	}
+
+	next, cmd, handled := runSuggestionsSlashCommand(m, slashSuggestionsInput{Mode: string(promptSuggestionConsentGlobal)})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, promptSuggestionConsentGlobal, next.promptSuggestionConsent)
+	assert.Empty(t, next.sessionState.PromptSuggestions)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 3)
+
+	msg, ok := batch[1]().(promptSuggestionPreferenceSavedMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, appconfig.PromptSuggestionPreferenceModelBacked, loaded.PromptSuggestionsForFolder(filepath.Join(dir, "other-repo")))
+}
+
+func TestSuggestionsSlashCommandLocalPersistsStateAndClearsSuggestion(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := appconfig.NewStateStore(filepath.Join(dir, "state.yaml"))
+	cwd := filepath.Join(dir, "repo")
+	require.NoError(t, os.MkdirAll(cwd, 0o750))
+
+	m := model{
+		ctx:                     context.Background(),
+		cwd:                     cwd,
+		stateStore:              store,
+		sessionState:            session.Session{ID: "session-id", PromptSuggestions: string(appconfig.PromptSuggestionPreferenceModelBacked)},
+		promptSuggestionConsent: promptSuggestionConsentFolder,
+		idleSuggestionInput:     "draft",
+		idleSuggestionText:      " suffix",
+		idleSuggestionStatus:    idleSuggestionStatusReadyModel,
+	}
+
+	next, cmd, handled := runSuggestionsSlashCommand(m, slashSuggestionsInput{Mode: string(promptSuggestionConsentLocalOnly)})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, promptSuggestionConsentLocalOnly, next.promptSuggestionConsent)
+	assert.Equal(t, string(appconfig.PromptSuggestionPreferenceLocalOnly), next.sessionState.PromptSuggestions)
+	assert.Empty(t, next.idleSuggestionInput)
+	assert.Empty(t, next.idleSuggestionText)
+	assert.Empty(t, next.idleSuggestionStatus)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 3)
+
+	msg, ok := batch[1]().(promptSuggestionPreferenceSavedMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, appconfig.PromptSuggestionPreferenceLocalOnly, loaded.PromptSuggestionsForFolder(cwd))
+}
+
+func TestSuggestionsSlashCommandLocalDisablesGlobalOptInGlobally(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := appconfig.NewStateStore(filepath.Join(dir, "state.yaml"))
+	cwd := filepath.Join(dir, "repo")
+	require.NoError(t, os.MkdirAll(cwd, 0o750))
+
+	require.NoError(t, store.Save(appconfig.State{
+		DefaultPromptSuggestions: string(appconfig.PromptSuggestionPreferenceModelBacked),
+	}))
+
+	m := model{
+		ctx:                     context.Background(),
+		cwd:                     cwd,
+		stateStore:              store,
+		sessionState:            session.Session{ID: "session-id"},
+		promptSuggestionConsent: promptSuggestionConsentGlobal,
+	}
+
+	next, cmd, handled := runSuggestionsSlashCommand(m, slashSuggestionsInput{Mode: string(promptSuggestionConsentLocalOnly)})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, promptSuggestionConsentLocalOnly, next.promptSuggestionConsent)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 3)
+
+	msg, ok := batch[1]().(promptSuggestionPreferenceSavedMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+	assert.Equal(t, appconfig.ModelScopeGlobal, msg.scope)
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, appconfig.PromptSuggestionPreferenceLocalOnly, loaded.PromptSuggestionsForFolder(filepath.Join(dir, "other-repo")))
+}
+
+func TestSuggestionsSlashCommandNoNetworkAliasDisablesModelBackedSuggestions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := appconfig.NewStateStore(filepath.Join(dir, "state.yaml"))
+	cwd := filepath.Join(dir, "repo")
+	require.NoError(t, os.MkdirAll(cwd, 0o750))
+
+	m := model{
+		ctx:                     context.Background(),
+		cwd:                     cwd,
+		stateStore:              store,
+		sessionState:            session.Session{ID: "session-id", PromptSuggestions: string(appconfig.PromptSuggestionPreferenceModelBacked)},
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionInput:     "draft",
+		idleSuggestionText:      " suffix",
+		idleSuggestionStatus:    idleSuggestionStatusReadyModel,
+	}
+
+	next, cmd, handled := m.handleSlashCommand("/suggestions no-network")
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, promptSuggestionConsentLocalOnly, next.promptSuggestionConsent)
+	assert.Equal(t, string(appconfig.PromptSuggestionPreferenceLocalOnly), next.sessionState.PromptSuggestions)
+	assert.Empty(t, next.idleSuggestionInput)
+	assert.Empty(t, next.idleSuggestionText)
+	assert.Empty(t, next.idleSuggestionStatus)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 3)
+
+	msg, ok := batch[1]().(promptSuggestionPreferenceSavedMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, appconfig.PromptSuggestionPreferenceLocalOnly, loaded.PromptSuggestionsForFolder(cwd))
 }
 
 func TestSaveCodeSlashCommand_WritesSelectedCodeBlock(t *testing.T) {
@@ -892,6 +1169,17 @@ func TestCommandSurface_IncludesSlashCommandDescriptors(t *testing.T) {
 	assert.Equal(t, []slashCommandArgument{
 		{Name: "mode", Type: slashArgumentTypeEnum, Values: []string{"plan", "execute"}},
 	}, commands["mode"].Arguments)
+
+	require.Contains(t, commands, "suggestions")
+	assert.Equal(t, []string{"Mode", "Show"}, commands["suggestions"].InputFields)
+	assert.Equal(t, "/suggestions [status|local|session|folder|global]", commands["suggestions"].Usage)
+	assert.Contains(t, commands["suggestions"].PolicyRequirements, slashPolicyMutatesSessionStore)
+	assert.Contains(t, commands["suggestions"].PolicyRequirements, slashPolicyCallsLLM)
+	assert.Contains(t, commands["suggestions"].SideEffects, commandEffectLLMProviderRead)
+	assert.Contains(t, commands["suggestions"].SideEffects, commandEffectStateWrite)
+	assert.Equal(t, []slashCommandArgument{
+		{Name: "mode", Type: slashArgumentTypeEnum, Values: []string{"status", "local", string(promptSuggestionConsentSession), string(promptSuggestionConsentFolder), string(promptSuggestionConsentGlobal)}},
+	}, commands["suggestions"].Arguments)
 
 	require.Contains(t, commands, "export")
 	assert.Contains(t, commands["export"].SharedCLICommands, "session-read")

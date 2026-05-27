@@ -36,6 +36,11 @@ type modelPreferenceSavedMsg struct {
 	scope appconfig.ModelScope
 }
 
+type promptSuggestionPreferenceSavedMsg struct {
+	err   error
+	scope appconfig.ModelScope
+}
+
 // sessionSavedMsg is sent when a session save attempt completes.
 type sessionSavedMsg struct {
 	err error

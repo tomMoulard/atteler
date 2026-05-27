@@ -542,6 +542,8 @@ type appState struct {
 	skillLearningSkillDir       string
 	selectedModel               string
 	selectedAgent               string
+	promptSuggestionConsent     promptSuggestionConsent
+	idleSuggestionBudget        idleSuggestionBudget
 	cwd                         string
 	maxInputTokens              int
 	modelLocked                 bool

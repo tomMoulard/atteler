@@ -833,6 +833,11 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	referenceContext := loadConfiguredReferenceContext(ctx, cfg.Context.References, contextOptions)
 	selection.sessionState.AgentLoopBudget = agentLoopBudget
+	suggestionConsent := promptSuggestionConsentFromPreferences(
+		opts.promptLocalOnly,
+		selection.sessionState.PromptSuggestions,
+		persistedState.ResolvePromptSuggestionPreference(cwd),
+	)
 
 	return appState{
 		config:                      cfg,
@@ -857,6 +862,8 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		providers:                   providers,
 		selectedModel:               selection.selectedModel,
 		selectedAgent:               selection.selectedAgent,
+		promptSuggestionConsent:     suggestionConsent,
+		idleSuggestionBudget:        defaultIdleSuggestionBudget(),
 		fallbackModels:              selection.fallbackModels,
 		pluginPaths:                 append([]string(nil), cfg.Plugins.Paths...),
 		pluginPolicy:                clonePluginPolicy(cfg.Plugins.Policy),

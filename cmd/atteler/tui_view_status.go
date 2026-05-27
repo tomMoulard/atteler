@@ -18,7 +18,9 @@ import (
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/promptcomplete"
+	"github.com/tommoulard/atteler/pkg/session"
 )
 
 func (m *model) startRunningTask(label string) tea.Cmd {
@@ -144,8 +146,8 @@ func (m model) statusLine() string {
 		parts = append(parts, ctx)
 	}
 
-	if m.idleSuggestionStatus != "" {
-		parts = append(parts, "suggestion:"+m.idleSuggestionStatus)
+	if suggestionLabel := m.idleSuggestionStatusLabel(); suggestionLabel != "" {
+		parts = append(parts, "suggestion:"+suggestionLabel)
 	}
 
 	if len(parts) == 0 {
@@ -153,6 +155,44 @@ func (m model) statusLine() string {
 	}
 
 	return dimStyle.Render("  [") + pickerSelectedStyle.Render(strings.Join(parts, " ")) + dimStyle.Render("]")
+}
+
+func (m model) idleSuggestionStatusLabel() string {
+	status := strings.TrimSpace(m.idleSuggestionStatus)
+	if status == "" {
+		return ""
+	}
+
+	switch status {
+	case idleSuggestionStatusSending, idleSuggestionStatusPendingForced:
+		label := status
+		if modelID := m.idleSuggestionModelStatusLabel(); modelID != "" {
+			label += ":" + modelID
+		}
+
+		if contextSummary := strings.TrimSpace(m.idleSuggestionContext); contextSummary != "" {
+			label += ":ctx=" + contextSummary
+		}
+
+		return label
+	default:
+		return status
+	}
+}
+
+func (m model) idleSuggestionModelStatusLabel() string {
+	modelID := strings.TrimSpace(m.idleSuggestionModel)
+
+	provider := strings.TrimSpace(m.idleSuggestionProvider)
+	if modelID == "" {
+		modelID = m.modelStatusLabel()
+	}
+
+	if provider != "" && modelID != "" && !strings.Contains(modelID, "/") {
+		modelID = provider + "/" + modelID
+	}
+
+	return strings.ReplaceAll(modelID, " ", "_")
 }
 
 func (m model) modelStatusLabel() string {
@@ -337,6 +377,9 @@ func (m *model) clearIdleSuggestion() {
 	m.idleSuggestionInput = ""
 	m.idleSuggestionText = ""
 	m.idleSuggestionStatus = ""
+	m.idleSuggestionProvider = ""
+	m.idleSuggestionModel = ""
+	m.idleSuggestionContext = ""
 }
 
 func (m *model) cancelIdleSuggestionRequest() {
@@ -352,9 +395,13 @@ func (m *model) scheduleIdleSuggestion() tea.Cmd {
 	value := m.textarea.Value()
 	if m.waiting ||
 		m.registry == nil ||
-		m.promptLocalOnly ||
+		!m.modelBackedIdleSuggestionsEnabled() ||
 		strings.TrimSpace(value) == "" ||
 		textareaCursorOffset(m.textarea) != len(value) {
+		return nil
+	}
+
+	if m.idleSuggestionBudgetBeforeRequestError() != nil {
 		return nil
 	}
 
@@ -377,6 +424,12 @@ func (m model) forceIdleSuggestion() (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 
+	if strings.TrimSpace(value) == "" {
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedEmpty
+
+		return m, tea.Println(errStyle.Render("Suggestion unavailable: prompt is empty.")), true
+	}
+
 	if textareaCursorOffset(m.textarea) != len(value) {
 		m.idleSuggestionStatus = idleSuggestionStatusRejectedStale
 
@@ -395,10 +448,22 @@ func (m model) forceIdleSuggestion() (tea.Model, tea.Cmd, bool) {
 		return m, tea.Println(errStyle.Render("Suggestion unavailable: model-backed suggestions are disabled by --prompt-local-only.")), true
 	}
 
+	if !m.promptSuggestionConsent.allowsModelBacked() {
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedError
+
+		return m, tea.Println(errStyle.Render("Suggestion unavailable: model-backed suggestions are local-only by default. Use /suggestions session, /suggestions folder, or /suggestions global to opt in.")), true
+	}
+
 	if m.registry == nil {
 		m.idleSuggestionStatus = idleSuggestionStatusRejectedError
 
 		return m, tea.Println(errStyle.Render("Suggestion unavailable: no model registry is configured.")), true
+	}
+
+	if err := m.idleSuggestionBudgetBeforeRequestError(); err != nil {
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedBudget
+
+		return m, tea.Println(errStyle.Render("Suggestion unavailable: " + err.Error())), true
 	}
 
 	m.idleSuggestionID++
@@ -417,8 +482,14 @@ func (m model) updateIdleSuggestionRequest(msg idleSuggestionRequestMsg) (tea.Mo
 	if msg.input != m.textarea.Value() ||
 		textareaCursorOffset(m.textarea) != len(m.textarea.Value()) ||
 		m.waiting ||
-		m.registry == nil {
+		m.registry == nil ||
+		!m.modelBackedIdleSuggestionsEnabled() {
 		m.idleSuggestionStatus = idleSuggestionStatusRejectedStale
+		return m, nil
+	}
+
+	if err := m.idleSuggestionBudgetBeforeRequestError(); err != nil {
+		m.idleSuggestionStatus = idleSuggestionStatusRejectedBudget
 		return m, nil
 	}
 
@@ -426,6 +497,19 @@ func (m model) updateIdleSuggestionRequest(msg idleSuggestionRequestMsg) (tea.Mo
 }
 
 func (m model) startIdleSuggestionRequest(id int, input string, force bool) (tea.Model, tea.Cmd) {
+	contextPayload := m.idleSuggestionContextPayload()
+	provider, modelName, _ := resolveRegistryModel(m.registry, m.selectedModel)
+
+	displayModel := m.selectedModel
+	if displayModel == "" {
+		displayModel = modelName
+	}
+
+	budget := normalizeIdleSuggestionBudget(m.idleSuggestionBudget)
+	currentUsage := m.idleSuggestionUsage
+	currentEstimatedTokens := m.idleSuggestionTokens
+	currentCostUSD := m.idleSuggestionCostUSD
+
 	requestCtx := m.ctx
 	if requestCtx != nil {
 		var cancel context.CancelFunc
@@ -439,11 +523,16 @@ func (m model) startIdleSuggestionRequest(id int, input string, force bool) (tea
 	m.idleSuggestionID = id
 	m.idleSuggestionInput = input
 	m.idleSuggestionText = ""
+	m.idleSuggestionProvider = provider
+	m.idleSuggestionModel = displayModel
+	m.idleSuggestionContext = contextPayload.Summary
+	m.idleSuggestionRequests++
+	m.idleSuggestionTimes = appendIdleSuggestionRequestTime(m.idleSuggestionTimes, time.Now())
 
 	if force {
 		m.idleSuggestionStatus = idleSuggestionStatusPendingForced
 	} else {
-		m.idleSuggestionStatus = idleSuggestionStatusPending
+		m.idleSuggestionStatus = idleSuggestionStatusSending
 	}
 
 	return m, requestIdleSuggestion(
@@ -455,23 +544,21 @@ func (m model) startIdleSuggestionRequest(id int, input string, force bool) (tea
 		m.generationOverrides,
 		m.hookRunner,
 		m.maxInputTokens,
+		budget,
+		currentUsage,
+		currentEstimatedTokens,
+		currentCostUSD,
 		id,
 		input,
-		m.idleSuggestionContext(),
+		contextPayload.Content,
+		contextPayload.Summary,
 		force,
 	)
 }
 
 func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) {
-	if msg.id != m.idleSuggestionID ||
-		msg.input != m.idleSuggestionInput {
-		return m, nil
-	}
-
-	if msg.input != m.textarea.Value() ||
-		textareaCursorOffset(m.textarea) != len(m.textarea.Value()) {
-		m.idleSuggestionStatus = idleSuggestionStatusRejectedStale
-		return m, nil
+	if next, cmd, stale := m.updateStaleIdleSuggestion(msg); stale {
+		return next, cmd
 	}
 
 	m.cancelIdleSuggestionRequest()
@@ -482,47 +569,162 @@ func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) 
 		slog.Debug("idle prompt suggestion failed", "error", msg.err)
 
 		m.idleSuggestionStatus = idleSuggestionStatusRejectedError
-
-		if msg.force {
-			return m, tea.Println(errStyle.Render("Suggestion failed: " + msg.err.Error()))
+		if errors.Is(msg.err, errIdleSuggestionBudget) {
+			m.idleSuggestionStatus = idleSuggestionStatusRejectedBudget
 		}
 
-		return m, nil
+		m.recordIdleSuggestionResult(msg, true, false)
+
+		if msg.force {
+			return m, tea.Batch(
+				saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner),
+				tea.Println(errStyle.Render("Suggestion failed: "+msg.err.Error())),
+			)
+		}
+
+		return m, saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner)
 	}
 
 	if reason := unsafeIdleSuggestionReason(msg.suggestion); reason != "" {
 		m.idleSuggestionText = ""
 		m.idleSuggestionStatus = "rejected:" + reason
+		m.recordIdleSuggestionResult(msg, false, true)
 
 		if msg.force {
-			return m, tea.Println(errStyle.Render("Suggestion rejected: " + reason))
+			return m, tea.Batch(
+				saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner),
+				tea.Println(errStyle.Render("Suggestion rejected: "+reason)),
+			)
 		}
 
-		return m, nil
+		return m, saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner)
 	}
 
 	suggestion := normalizeIdleSuggestion(msg.input, msg.suggestion)
 	if suggestion == "" {
 		m.idleSuggestionText = ""
 		m.idleSuggestionStatus = idleSuggestionStatusRejectedEmpty
+		m.recordIdleSuggestionResult(msg, false, true)
 
 		if msg.force {
-			return m, tea.Println(errStyle.Render("Suggestion failed: empty response."))
+			return m, tea.Batch(
+				saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner),
+				tea.Println(errStyle.Render("Suggestion failed: empty response.")),
+			)
 		}
 	} else {
 		if msg.force {
 			m.textarea.SetValue(msg.input + suggestion)
 			m.textarea.CursorEnd()
+			m.idleSuggestionStatus = idleSuggestionStatusReadyModel
+			m.recordIdleSuggestionResult(msg, false, false)
 			m.clearIdleSuggestion()
 
-			return m, nil
+			return m, saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner)
 		}
 
 		m.idleSuggestionText = suggestion
 		m.idleSuggestionStatus = idleSuggestionStatusReadyModel
+		m.recordIdleSuggestionResult(msg, false, false)
 	}
 
-	return m, nil
+	return m, saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner)
+}
+
+func (m model) updateStaleIdleSuggestion(msg idleSuggestionMsg) (model, tea.Cmd, bool) {
+	if msg.id != m.idleSuggestionID || msg.input != m.idleSuggestionInput {
+		if msg.id == m.idleSuggestionID {
+			m.cancelIdleSuggestionRequest()
+		}
+
+		if m.recordStaleIdleSuggestionResult(msg) {
+			return m, saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner), true
+		}
+
+		return m, nil, true
+	}
+
+	if msg.input == m.textarea.Value() &&
+		textareaCursorOffset(m.textarea) == len(m.textarea.Value()) {
+		return m, nil, false
+	}
+
+	m.cancelIdleSuggestionRequest()
+
+	m.idleSuggestionStatus = idleSuggestionStatusRejectedStale
+	if m.recordStaleIdleSuggestionResult(msg) {
+		return m, saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner), true
+	}
+
+	return m, nil, true
+}
+
+func (m *model) recordIdleSuggestionResult(msg idleSuggestionMsg, failed, rejected bool) {
+	m.recordIdleSuggestionResultWithStatus(msg, m.idleSuggestionStatus, failed, rejected)
+}
+
+func (m *model) recordStaleIdleSuggestionResult(msg idleSuggestionMsg) bool {
+	if !msg.providerCall &&
+		msg.usage == (tokenUsage{}) &&
+		msg.estimatedInputTokens == 0 &&
+		msg.estimatedOutputTokens == 0 &&
+		msg.estimatedCostUSD == 0 &&
+		msg.err == nil {
+		return false
+	}
+
+	m.recordIdleSuggestionResultWithStatus(msg, idleSuggestionStatusRejectedStale, msg.err != nil, true)
+
+	return true
+}
+
+func (m *model) recordIdleSuggestionResultWithStatus(msg idleSuggestionMsg, status string, failed, rejected bool) {
+	m.idleSuggestionUsage.add(msg.usage)
+
+	if msg.providerCall && (msg.estimatedInputTokens > 0 || msg.estimatedOutputTokens > 0) {
+		m.idleSuggestionTokens += msg.estimatedInputTokens + msg.estimatedOutputTokens
+	}
+
+	if msg.providerCall {
+		m.idleSuggestionCostUSD += msg.estimatedCostUSD
+	}
+
+	provider := strings.TrimSpace(msg.provider)
+
+	modelName := strings.TrimSpace(msg.model)
+	if modelName == "" {
+		modelName = strings.TrimSpace(m.idleSuggestionModel)
+	}
+
+	if provider == "" {
+		provider = strings.TrimSpace(m.idleSuggestionProvider)
+	}
+
+	if provider == "" && modelName != "" {
+		provider = providerNameForModel(m.registry, modelName)
+	}
+
+	record := session.BackgroundSuggestionRecord{
+		Provider:              provider,
+		Model:                 modelName,
+		Status:                status,
+		ContextSummary:        msg.contextSummary,
+		ProviderCall:          msg.providerCall,
+		Response:              msg.providerCall && msg.err == nil,
+		Error:                 failed,
+		Rejected:              rejected || strings.HasPrefix(status, "rejected:"),
+		InputTokens:           msg.usage.InputTokens,
+		CachedInputTokens:     msg.usage.CachedInputTokens,
+		CacheWriteInputTokens: msg.usage.CacheWriteInputTokens,
+		OutputTokens:          msg.usage.OutputTokens,
+	}
+	if msg.providerCall {
+		record.EstimatedCostUSD = msg.estimatedCostUSD
+		record.EstimatedInputTokens = msg.estimatedInputTokens
+		record.EstimatedOutputTokens = msg.estimatedOutputTokens
+	}
+
+	m.sessionState.RecordBackgroundSuggestionUsage(record)
 }
 
 func (m model) visibleIdleSuggestion() (string, bool) {
@@ -547,21 +749,28 @@ func requestIdleSuggestion(
 	overrides generationSettings,
 	hookRunner *events.Runner,
 	maxInputTokens int,
+	idleBudget idleSuggestionBudget,
+	currentUsage tokenUsage,
+	currentEstimatedTokens int,
+	currentCostUSD float64,
 	id int,
 	input string,
 	contextSummary string,
+	contextStatusSummary string,
 	force bool,
 ) tea.Cmd {
 	return func() tea.Msg {
 		if ctx == nil {
-			return idleSuggestionMsg{id: id, input: input, err: errors.New("idle suggestion: context is required"), force: force}
+			return idleSuggestionMsg{id: id, input: input, err: errors.New("idle suggestion: context is required"), contextSummary: contextStatusSummary, force: force}
 		}
 
 		reqCtx, cancel := context.WithTimeout(ctx, idleSuggestionTimeout)
 		defer cancel()
 
 		generation := mergeGenerationSettings(defaults, overrides)
-		generation.MaxTokens = 32
+		idleBudget = normalizeIdleSuggestionBudget(idleBudget)
+		effectiveMaxInputTokens := effectiveIdleSuggestionMaxInputTokens(maxInputTokens, idleBudget)
+		generation.MaxTokens = idleBudget.MaxOutputTokens
 
 		params := llm.CompleteParams{
 			Model: modelName,
@@ -586,26 +795,107 @@ func requestIdleSuggestion(
 			params.Model,
 			fallbackModels,
 			params.Messages,
-			maxInputTokens,
+			effectiveMaxInputTokens,
 			contextref.ReferenceManifest{},
 		))
 		setExplicitContextManifestEventModel(&manifestEvent, params.Model)
+		manifestEvent.Metadata["request_kind"] = "background_suggestion"
+		manifestEvent.Metadata["background_suggestion"] = "true"
+		manifestEvent.Metadata["context_summary"] = contextStatusSummary
 		emitHookWarning(reqCtx, hookRunner, manifestEvent)
 
-		if err := validateRequestBudgetWithFallbacks(reg, params.Model, fallbackModels, params.Messages, maxInputTokens); err != nil {
-			return idleSuggestionMsg{id: id, input: input, err: err, force: force}
+		estimatedInputTokens, estimatedCostUSD, budgetErr := validateIdleSuggestionRequestBudget(
+			reg,
+			params.Model,
+			fallbackModels,
+			params.Messages,
+			maxInputTokens,
+			idleBudget,
+			currentUsage,
+			currentEstimatedTokens,
+			currentCostUSD,
+		)
+		if budgetErr != nil {
+			return idleSuggestionMsg{
+				id:                    id,
+				input:                 input,
+				err:                   budgetErr,
+				contextSummary:        contextStatusSummary,
+				estimatedInputTokens:  estimatedInputTokens,
+				estimatedOutputTokens: idleBudget.MaxOutputTokens,
+				estimatedCostUSD:      estimatedCostUSD,
+				force:                 force,
+			}
+		}
+
+		if err := reqCtx.Err(); err != nil {
+			return idleSuggestionMsg{
+				id:                    id,
+				input:                 input,
+				err:                   err,
+				provider:              providerNameForModel(reg, params.Model),
+				model:                 params.Model,
+				contextSummary:        contextStatusSummary,
+				estimatedInputTokens:  estimatedInputTokens,
+				estimatedOutputTokens: idleBudget.MaxOutputTokens,
+				estimatedCostUSD:      estimatedCostUSD,
+				force:                 force,
+			}
 		}
 
 		resp, err := reg.CompleteWithFallback(reqCtx, params, fallbackModels)
 		if err != nil {
-			return idleSuggestionMsg{id: id, input: input, err: err, force: force}
+			return idleSuggestionMsg{
+				id:                    id,
+				input:                 input,
+				err:                   err,
+				provider:              providerNameForModel(reg, params.Model),
+				model:                 params.Model,
+				contextSummary:        contextStatusSummary,
+				estimatedInputTokens:  estimatedInputTokens,
+				estimatedOutputTokens: idleBudget.MaxOutputTokens,
+				estimatedCostUSD:      estimatedCostUSD,
+				force:                 force,
+				providerCall:          true,
+			}
 		}
 
-		return idleSuggestionMsg{id: id, input: input, suggestion: resp.Content, force: force}
+		usage := tokenUsage{}
+		usage.addResponse(resp)
+
+		provider := strings.TrimSpace(resp.Provider)
+		if provider == "" {
+			provider = providerNameForModel(reg, params.Model)
+		}
+
+		responseModel := strings.TrimSpace(resp.Model)
+		if responseModel == "" {
+			responseModel = params.Model
+		}
+
+		return idleSuggestionMsg{
+			id:                    id,
+			input:                 input,
+			suggestion:            resp.Content,
+			provider:              provider,
+			model:                 responseModel,
+			contextSummary:        contextStatusSummary,
+			usage:                 usage,
+			estimatedInputTokens:  estimatedInputTokens,
+			estimatedOutputTokens: idleBudget.MaxOutputTokens,
+			estimatedCostUSD:      estimatedCostUSD,
+			force:                 force,
+			providerCall:          true,
+		}
 	}
 }
 
-func (m model) idleSuggestionContext() string {
+type idleSuggestionContextPayload struct {
+	Content string
+	Summary string
+}
+
+func (m model) idleSuggestionContextPayload() idleSuggestionContextPayload {
 	completionContext := promptCompletionContext(m.ctx, appState{
 		agentRegistry: m.agentRegistry,
 		sessionStore:  m.sessionStore,
@@ -616,29 +906,55 @@ func (m model) idleSuggestionContext() string {
 
 	var lines []string
 
+	counts := make(map[string]int)
+
 	appendCandidates := func(label string, candidates []promptcomplete.Candidate, limit int) {
 		for i, candidate := range candidates {
 			if i >= limit {
 				break
 			}
 
-			lines = append(lines, label+": "+candidate.Text+" — "+candidate.Description)
+			lines = append(lines, idleSuggestionContextLine(label, candidate))
+			counts[label]++
 		}
 	}
 
 	appendCandidates("agent", completionContext.Agents, 4)
 	appendCandidates("tool", completionContext.Tools, 4)
 	appendCandidates("slash", completionContext.SlashCommands, 6)
-	appendCandidates("file", completionContext.RecentFiles, 4)
-	appendCandidates("task", completionContext.Tasks, 4)
-	appendCandidates("issue", completionContext.Issues, 4)
 	appendCandidates("permission", completionContext.Permissions, 4)
 
+	// Files, tasks, and issue references often contain private repository or
+	// incident context. Keep model-backed idle suggestions on a minimal
+	// provider-visible context unless a future explicit policy permits those
+	// categories. Local deterministic completions still use the full context.
+	privateSummary := "file/task/issue=omitted-private"
+
 	if len(lines) == 0 {
-		return "local-only deterministic context available; no live context candidates matched."
+		return idleSuggestionContextPayload{
+			Content: "minimal deterministic context available; private file/task/issue context omitted.",
+			Summary: privateSummary,
+		}
 	}
 
-	return strings.Join(lines, "\n")
+	summary := []string{
+		"agent=" + strconv.Itoa(counts["agent"]),
+		"tool=" + strconv.Itoa(counts["tool"]),
+		"slash=" + strconv.Itoa(counts["slash"]),
+		"permission=" + strconv.Itoa(counts["permission"]),
+		privateSummary,
+	}
+
+	return idleSuggestionContextPayload{
+		Content: strings.Join(lines, "\n") + "\nprivacy: private file/task/issue context omitted; candidate descriptions omitted from background suggestions.",
+		Summary: strings.Join(summary, ","),
+	}
+}
+
+func idleSuggestionContextLine(label string, candidate promptcomplete.Candidate) string {
+	text := privacy.RedactIdentifier(candidate.Text)
+
+	return label + ": " + text
 }
 
 func unsafeIdleSuggestionReason(suggestion string) string {

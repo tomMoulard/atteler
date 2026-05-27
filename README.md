@@ -510,11 +510,26 @@ The printed `log=` path is the logical base, and retained chunks use
 In the interactive TUI, `Enter` sends the prompt, `Shift+Enter` inserts a
 newline for multi-line drafts (`Alt+Enter` remains available as a terminal
 fallback), `Ctrl+O` opens the model picker, `Tab` accepts visible prompt
-completions or requests a fresh model-backed suffix when none is valid,
+completions or, only after opt-in, requests a fresh model-backed suffix when none is valid,
 `Ctrl+R` rewrites under-specified prompts without adding boilerplate to
 already-structured drafts, and `Ctrl+Z` undoes the latest rewrite.
-Use `--prompt-local-only` to keep interactive prompt assistance on the
-deterministic no-network completion path even when providers are configured.
+Interactive prompt assistance defaults to the deterministic no-network
+completion path even when providers are configured. Use `/suggestions session`,
+`/suggestions folder`, or `/suggestions global` to opt in to model-backed idle
+suffix suggestions; `/suggestions local` returns to local-only, and
+`/suggestions status` shows the active mode, current usage, budgets, and privacy
+scope. Session opt-ins are saved as `prompt_suggestions`; folder/global defaults
+are saved as `default_prompt_suggestions` in Atteler state. Background
+suggestions show the provider/model and a compact context summary while a draft
+is being sent. Private file, task, and issue context is omitted from those
+background calls, local candidate descriptions are omitted, usage is recorded
+under `background_suggestions` in session metadata, and the default background
+budget is 20 requests per session, 6 requests per minute, 1,024 estimated input
+tokens per request, 32 output tokens per request, 12,000 session tokens, and
+$0.05 estimated cost. Provider models without maintained pricing metadata use a
+conservative catalog-high estimate; local Ollama models are treated as
+zero-cost. `--prompt-local-only` still forces the local-only path for the
+process.
 
 For non-interactive checks, `atteler agents prompt-complete "ask @rev"` previews
 the same local completion engine with source attribution, replacement ranges,

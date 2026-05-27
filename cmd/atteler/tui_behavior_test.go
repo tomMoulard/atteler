@@ -158,8 +158,10 @@ func (p *toolCallingProvider) Complete(_ context.Context, params llm.CompletePar
 func (p *toolCallingProvider) ModelContextWindow(string) int { return 0 }
 
 type idleSuggestionProvider struct {
-	response string
-	model    string
+	response     string
+	model        string
+	inputTokens  int
+	outputTokens int
 }
 
 func (p idleSuggestionProvider) Name() string { return "suggest" }
@@ -173,7 +175,12 @@ func (p idleSuggestionProvider) FetchModels(context.Context) ([]string, error) {
 func (p idleSuggestionProvider) HealthCheck(context.Context) error { return nil }
 
 func (p idleSuggestionProvider) Complete(context.Context, llm.CompleteParams) (*llm.Response, error) {
-	return &llm.Response{Content: p.response, Model: p.model}, nil
+	return &llm.Response{
+		Content:      p.response,
+		Model:        p.model,
+		InputTokens:  p.inputTokens,
+		OutputTokens: p.outputTokens,
+	}, nil
 }
 
 func (p idleSuggestionProvider) ModelContextWindow(string) int { return 0 }
@@ -183,10 +190,12 @@ func newIdleSuggestionTestModel(response string) model {
 	registry.Register(idleSuggestionProvider{model: "model", response: response})
 
 	return model{
-		ctx:           context.Background(),
-		registry:      registry,
-		selectedModel: "suggest/model",
-		textarea:      textarea.New(),
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "suggest/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		textarea:                textarea.New(),
 	}
 }
 
@@ -211,12 +220,19 @@ func (p failingIdleSuggestionProvider) Complete(context.Context, llm.CompletePar
 func (p failingIdleSuggestionProvider) ModelContextWindow(string) int { return 0 }
 
 type capturingIdleSuggestionProvider struct {
-	params   *llm.CompleteParams
-	response string
-	model    string
+	params       *llm.CompleteParams
+	response     string
+	model        string
+	providerName string
 }
 
-func (p *capturingIdleSuggestionProvider) Name() string { return "capture" }
+func (p *capturingIdleSuggestionProvider) Name() string {
+	if p.providerName != "" {
+		return p.providerName
+	}
+
+	return "capture"
+}
 
 func (p *capturingIdleSuggestionProvider) Models() []string { return []string{p.model} }
 
@@ -836,16 +852,27 @@ func TestAcceptCompletionForcesSuggestionWhenMissing(t *testing.T) {
 	nextModel, cmd = next.updateIdleSuggestion(msg)
 	next, ok = nextModel.(model)
 	require.True(t, ok)
-	require.Nil(t, cmd)
+	require.NotNil(t, cmd)
 	assert.Equal(t, "draft prompt with tests", next.textarea.Value())
 	assert.Empty(t, next.idleSuggestionStatus)
 	assert.Empty(t, next.idleSuggestionText)
 }
 
-func TestAcceptCompletionForcesSuggestionWhenInputEmpty(t *testing.T) {
+func TestAcceptCompletionSkipsForcedSuggestionWhenInputEmpty(t *testing.T) {
 	t.Parallel()
 
-	m := newIdleSuggestionTestModel("draft prompt")
+	provider := &capturingIdleSuggestionProvider{model: "model", response: "draft prompt"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "capture/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		textarea:                textarea.New(),
+	}
 	m.textarea.CursorEnd()
 
 	nextModel, cmd, handled := m.acceptCompletion()
@@ -853,18 +880,13 @@ func TestAcceptCompletionForcesSuggestionWhenInputEmpty(t *testing.T) {
 	require.True(t, ok)
 	require.True(t, handled)
 	require.NotNil(t, cmd)
-	assert.Equal(t, idleSuggestionStatusPendingForced, next.idleSuggestionStatus)
+	assert.Equal(t, idleSuggestionStatusRejectedEmpty, next.idleSuggestionStatus)
 	assert.Empty(t, next.idleSuggestionInput)
 
 	msg, ok := cmd().(idleSuggestionMsg)
-	require.True(t, ok)
-	require.True(t, msg.force)
-	require.NoError(t, msg.err)
-
-	nextModel, _ = next.updateIdleSuggestion(msg)
-	next, ok = nextModel.(model)
-	require.True(t, ok)
-	assert.Equal(t, "draft prompt", next.textarea.Value())
+	assert.False(t, ok, "empty prompts must not send provider-backed idle suggestions")
+	assert.Equal(t, idleSuggestionMsg{}, msg)
+	assert.Nil(t, provider.params)
 }
 
 func TestAcceptCompletionShowsForcedSuggestionStatus(t *testing.T) {
@@ -880,7 +902,10 @@ func TestAcceptCompletionShowsForcedSuggestionStatus(t *testing.T) {
 	require.True(t, handled)
 	require.NotNil(t, cmd)
 
-	assert.Contains(t, stripANSI(next.statusLine()), "suggestion:"+idleSuggestionStatusPendingForced)
+	status := stripANSI(next.statusLine())
+	assert.Contains(t, status, "suggestion:"+idleSuggestionStatusPendingForced+":suggest/model")
+	assert.Contains(t, status, "ctx=agent=")
+	assert.Contains(t, status, "file/task/issue=omitted-private")
 }
 
 func TestAcceptCompletionRetriesRejectedSuggestionStates(t *testing.T) {
@@ -982,7 +1007,7 @@ func TestAcceptCompletionReportsUnavailableForcedSuggestion(t *testing.T) {
 	}{
 		{name: "no registry", model: model{}},
 		{name: "local only", model: model{registry: registry, selectedModel: "suggest/model", promptLocalOnly: true}},
-		{name: "waiting", model: model{registry: registry, selectedModel: "suggest/model", waiting: true}},
+		{name: "waiting", model: model{registry: registry, selectedModel: "suggest/model", promptSuggestionConsent: promptSuggestionConsentSession, waiting: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1027,10 +1052,12 @@ func TestAcceptCompletionCancelsInFlightIdleSuggestionBeforeForcing(t *testing.T
 	registry.Register(provider)
 
 	m := model{
-		ctx:           context.Background(),
-		registry:      registry,
-		selectedModel: "cancel/model",
-		textarea:      textarea.New(),
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "cancel/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		textarea:                textarea.New(),
 	}
 	m.textarea.SetValue("draft prompt")
 	m.textarea.CursorEnd()
@@ -1069,10 +1096,12 @@ func TestAcceptCompletionReportsForcedSuggestionErrors(t *testing.T) {
 	registry.Register(failingIdleSuggestionProvider{model: "model"})
 
 	m := model{
-		ctx:           context.Background(),
-		registry:      registry,
-		selectedModel: "suggest/model",
-		textarea:      textarea.New(),
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "suggest/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		textarea:                textarea.New(),
 	}
 	m.textarea.SetValue("draft prompt")
 	m.textarea.CursorEnd()
@@ -1179,12 +1208,14 @@ func TestIdleSuggestionRequestEmitsContextManifestBeforeBudgetFailure(t *testing
 	var eventLog bytes.Buffer
 
 	m := model{
-		ctx:            context.Background(),
-		registry:       registry,
-		hookRunner:     events.NewRunnerWithLogger(nil, &eventLog),
-		selectedModel:  "suggest/model",
-		maxInputTokens: 1,
-		textarea:       textarea.New(),
+		ctx:                     context.Background(),
+		registry:                registry,
+		hookRunner:              events.NewRunnerWithLogger(nil, &eventLog),
+		selectedModel:           "suggest/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		maxInputTokens:          1,
+		textarea:                textarea.New(),
 	}
 	m.textarea.SetValue("draft prompt")
 	m.textarea.CursorEnd()
@@ -1205,11 +1236,53 @@ func TestIdleSuggestionRequestEmitsContextManifestBeforeBudgetFailure(t *testing
 	log := eventLog.String()
 	assert.Contains(t, log, "context_manifest")
 	assert.Contains(t, log, "model=suggest/model")
+	assert.Contains(t, log, "request_kind=background_suggestion")
+	assert.Contains(t, log, "background_suggestion=true")
+	assert.Contains(t, log, "context_summary=")
+	assert.Contains(t, log, "file/task/issue=omitted-private")
 	assert.Contains(t, log, "fits_configured_token_budget=false")
 	assert.Contains(t, log, "max_input_tokens=1")
 }
 
-func TestIdleSuggestionRequestIncludesLocalContext(t *testing.T) {
+func TestIdleSuggestionContextManifestUsesBackgroundInputBudget(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(idleSuggestionProvider{model: "model", response: "draft prompt with tests"})
+
+	var eventLog bytes.Buffer
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		hookRunner:              events.NewRunnerWithLogger(nil, &eventLog),
+		selectedModel:           "suggest/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		textarea:                textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	_, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+
+	log := eventLog.String()
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, "max_input_tokens=1024")
+	assert.Contains(t, log, "fits_configured_token_budget=true")
+}
+
+func TestIdleSuggestionRequestUsesPrivacyScopedLocalContext(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1230,16 +1303,18 @@ func TestIdleSuggestionRequestIncludesLocalContext(t *testing.T) {
 		registry: registry,
 		agentRegistry: agent.NewRegistry(map[string]config.AgentConfig{
 			"planner": {
-				Description:     "plans implementation work",
+				Description:     "plans implementation work with api_key=sk-testsecretvalue",
 				ToolPermissions: map[string]bool{"bash": true},
 			},
 		}),
-		sessionStore:  store,
-		sessionState:  session.Session{Title: "Follow up on #15", Artifacts: []session.Artifact{{Path: "docs/notes.md", Kind: "notes"}}},
-		selectedAgent: "planner",
-		selectedModel: "capture/model",
-		cwd:           dir,
-		textarea:      textarea.New(),
+		sessionStore:            store,
+		sessionState:            session.Session{Title: "Follow up on #15", Artifacts: []session.Artifact{{Path: "docs/notes.md", Kind: "notes"}}},
+		selectedAgent:           "planner",
+		selectedModel:           "capture/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		cwd:                     dir,
+		textarea:                textarea.New(),
 	}
 	m.textarea.SetValue("draft prompt")
 	m.textarea.CursorEnd()
@@ -1263,14 +1338,60 @@ func TestIdleSuggestionRequestIncludesLocalContext(t *testing.T) {
 		"Local context:",
 		"agent: planner",
 		"slash: /help",
+		"permission: bash",
+		"privacy: private file/task/issue context omitted",
+	} {
+		assert.Contains(t, localContext, want)
+	}
+
+	for _, private := range []string{
+		"sk-testsecretvalue",
+		"plans implementation work",
 		"file: docs/notes.md",
 		"task: GH-27",
 		"issue: #15",
 		"issue: GH-27",
-		"permission: bash",
 	} {
-		assert.Contains(t, localContext, want)
+		assert.NotContains(t, localContext, private)
 	}
+
+	assert.Contains(t, msg.contextSummary, "file/task/issue=omitted-private")
+}
+
+func TestIdleSuggestionRequestAppliesOutputTokenBudget(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{model: "model", response: "draft prompt with tests"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "capture/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget: idleSuggestionBudget{
+			MaxOutputTokens: 7,
+		},
+		textarea: textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	_, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+	require.NotNil(t, provider.params)
+	assert.Equal(t, 7, provider.params.MaxTokens)
+	assert.Equal(t, 7, msg.estimatedOutputTokens)
 }
 
 func TestPromptLocalOnlySkipsIdleModelSuggestion(t *testing.T) {
@@ -1280,11 +1401,12 @@ func TestPromptLocalOnlySkipsIdleModelSuggestion(t *testing.T) {
 	registry.Register(idleSuggestionProvider{model: "model", response: "draft prompt with tests"})
 
 	m := model{
-		ctx:             context.Background(),
-		registry:        registry,
-		selectedModel:   "suggest/model",
-		promptLocalOnly: true,
-		textarea:        textarea.New(),
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "suggest/model",
+		promptLocalOnly:         true,
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		textarea:                textarea.New(),
 	}
 	m.textarea.SetValue("draft prompt")
 	m.textarea.CursorEnd()
@@ -1292,6 +1414,673 @@ func TestPromptLocalOnlySkipsIdleModelSuggestion(t *testing.T) {
 	assert.Nil(t, m.scheduleIdleSuggestion())
 	assert.Empty(t, m.idleSuggestionInput)
 	assert.Empty(t, m.idleSuggestionStatus)
+}
+
+func TestPromptLocalOnlySkipsForcedIdleModelSuggestion(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{model: "model", response: "draft prompt with tests"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "capture/model",
+		promptLocalOnly:         true,
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		textarea:                textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, idleSuggestionStatusRejectedError, next.idleSuggestionStatus)
+
+	_, isProviderRequest := cmd().(idleSuggestionMsg)
+	assert.False(t, isProviderRequest)
+	assert.Nil(t, provider.params)
+}
+
+func TestEmptyPromptSkipsForcedIdleModelSuggestion(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{model: "model", response: "draft prompt with tests"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "capture/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		textarea:                textarea.New(),
+	}
+	m.textarea.SetValue("  ")
+	m.textarea.CursorEnd()
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, idleSuggestionStatusRejectedEmpty, next.idleSuggestionStatus)
+
+	_, isProviderRequest := cmd().(idleSuggestionMsg)
+	assert.False(t, isProviderRequest)
+	assert.Nil(t, provider.params)
+}
+
+func TestPromptSuggestionConsentFromPreferences(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		statePreference   config.PreferenceResolution
+		name              string
+		sessionPreference string
+		want              promptSuggestionConsent
+		promptLocalOnly   bool
+	}{
+		{
+			name: "fresh install defaults local only",
+			want: promptSuggestionConsentLocalOnly,
+		},
+		{
+			name:              "prompt local only overrides model backed session",
+			promptLocalOnly:   true,
+			sessionPreference: string(config.PromptSuggestionPreferenceModelBacked),
+			want:              promptSuggestionConsentLocalOnly,
+		},
+		{
+			name:              "session opt in wins over persisted local only",
+			sessionPreference: string(config.PromptSuggestionPreferenceModelBacked),
+			statePreference: config.PreferenceResolution{
+				Value: string(config.PromptSuggestionPreferenceLocalOnly),
+				Scope: config.ModelScopeFolder,
+			},
+			want: promptSuggestionConsentSession,
+		},
+		{
+			name:              "session local only wins over persisted model backed",
+			sessionPreference: string(config.PromptSuggestionPreferenceLocalOnly),
+			statePreference: config.PreferenceResolution{
+				Value: string(config.PromptSuggestionPreferenceModelBacked),
+				Scope: config.ModelScopeGlobal,
+			},
+			want: promptSuggestionConsentLocalOnly,
+		},
+		{
+			name:              "session no-network alias is local only",
+			sessionPreference: "no-network",
+			statePreference: config.PreferenceResolution{
+				Value: string(config.PromptSuggestionPreferenceModelBacked),
+				Scope: config.ModelScopeGlobal,
+			},
+			want: promptSuggestionConsentLocalOnly,
+		},
+		{
+			name: "folder model backed",
+			statePreference: config.PreferenceResolution{
+				Value: string(config.PromptSuggestionPreferenceModelBacked),
+				Scope: config.ModelScopeFolder,
+			},
+			want: promptSuggestionConsentFolder,
+		},
+		{
+			name: "state alias model backed",
+			statePreference: config.PreferenceResolution{
+				Value: "provider",
+				Scope: config.ModelScopeFolder,
+			},
+			want: promptSuggestionConsentFolder,
+		},
+		{
+			name: "global model backed",
+			statePreference: config.PreferenceResolution{
+				Value: string(config.PromptSuggestionPreferenceModelBacked),
+				Scope: config.ModelScopeGlobal,
+			},
+			want: promptSuggestionConsentGlobal,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(
+				t,
+				tc.want,
+				promptSuggestionConsentFromPreferences(tc.promptLocalOnly, tc.sessionPreference, tc.statePreference),
+			)
+		})
+	}
+}
+
+func TestIdleSuggestionDefaultRequiresModelBackedOptIn(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{model: "model", response: "draft prompt with tests"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:           context.Background(),
+		registry:      registry,
+		selectedModel: "capture/model",
+		textarea:      textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	assert.Nil(t, m.scheduleIdleSuggestion())
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, idleSuggestionStatusRejectedError, next.idleSuggestionStatus)
+
+	_, isProviderRequest := cmd().(idleSuggestionMsg)
+	assert.False(t, isProviderRequest)
+	assert.Nil(t, provider.params)
+}
+
+func TestIdleSuggestionStatusShowsProviderModelAndContextSummary(t *testing.T) {
+	t.Parallel()
+
+	m := newIdleSuggestionTestModel("draft prompt with tests")
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	nextModel, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, requestCmd)
+
+	status := stripANSI(next.statusLine())
+	assert.Contains(t, status, "suggestion:"+idleSuggestionStatusSending+":suggest/model")
+	assert.Contains(t, status, "ctx=agent=")
+	assert.Contains(t, status, "file/task/issue=omitted-private")
+}
+
+func TestIdleSuggestionRecordsBackgroundUsageMetadata(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(idleSuggestionProvider{
+		model:    "model",
+		response: "draft prompt with tests",
+	})
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		sessionState:            session.Session{ID: "session-id"},
+		selectedModel:           "suggest/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		textarea:                textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	_, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID + 1,
+		input: "draft prompt",
+	})
+	assert.Nil(t, requestCmd, "unscheduled request should stay stale")
+
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	nextModel, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+
+	nextModel, _ = next.updateIdleSuggestion(msg)
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+
+	require.NotNil(t, next.sessionState.BackgroundSuggestions)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.Requests)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.ProviderCalls)
+	assert.Equal(t, idleSuggestionStatusReadyModel, next.sessionState.BackgroundSuggestions.LastStatus)
+	assert.Contains(t, next.sessionState.BackgroundSuggestions.LastContextSummary, "omitted-private")
+}
+
+func TestIdleSuggestionUsageStaysSeparateFromChatUsage(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(idleSuggestionProvider{
+		model:        "model",
+		response:     "draft prompt with tests",
+		inputTokens:  11,
+		outputTokens: 3,
+	})
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		sessionState:            session.Session{ID: "session-id"},
+		selectedModel:           "suggest/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		tokenUsage:              tokenUsage{InputTokens: 100, OutputTokens: 20, Responses: 1},
+		textarea:                textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	nextModel, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+
+	nextModel, saveCmd := next.updateIdleSuggestion(msg)
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, saveCmd)
+
+	assert.Equal(t, tokenUsage{InputTokens: 100, OutputTokens: 20, Responses: 1}, next.tokenUsage)
+	assert.Equal(t, 11, next.idleSuggestionUsage.InputTokens)
+	assert.Equal(t, 3, next.idleSuggestionUsage.OutputTokens)
+	assert.Equal(t, 1, next.idleSuggestionUsage.Responses)
+	require.NotNil(t, next.sessionState.BackgroundSuggestions)
+	assert.Equal(t, 11, next.sessionState.BackgroundSuggestions.InputTokens)
+	assert.Equal(t, 3, next.sessionState.BackgroundSuggestions.OutputTokens)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.Responses)
+}
+
+func TestIdleSuggestionRecordsProviderErrorsAsBackgroundUsage(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(failingIdleSuggestionProvider{model: "model"})
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		sessionState:            session.Session{ID: "session-id"},
+		selectedModel:           "suggest/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		textarea:                textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	nextModel, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.Error(t, msg.err)
+	assert.True(t, msg.providerCall)
+
+	nextModel, saveCmd := next.updateIdleSuggestion(msg)
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, saveCmd)
+
+	require.NotNil(t, next.sessionState.BackgroundSuggestions)
+	assert.Equal(t, idleSuggestionStatusRejectedError, next.idleSuggestionStatus)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.Requests)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.ProviderCalls)
+	assert.Equal(t, 0, next.sessionState.BackgroundSuggestions.Responses)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.Errors)
+	assert.Equal(t, idleSuggestionStatusRejectedError, next.sessionState.BackgroundSuggestions.LastStatus)
+	assert.Contains(t, next.sessionState.BackgroundSuggestions.LastContextSummary, "omitted-private")
+	assert.Positive(t, next.sessionState.BackgroundSuggestions.EstimatedInputTokens)
+	assert.Positive(t, next.sessionState.BackgroundSuggestions.EstimatedCostUSD)
+}
+
+func TestIdleSuggestionBudgetExhaustionSkipsProvider(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{model: "model", response: "draft prompt with tests"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "capture/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget: idleSuggestionBudget{
+			MaxRequestsPerSession: 1,
+			MaxInputTokens:        idleSuggestionMaxInputTokens,
+			MaxOutputTokens:       idleSuggestionMaxOutputTokens,
+			MaxSessionTokens:      idleSuggestionMaxSessionTokens,
+			MaxEstimatedCostUSD:   idleSuggestionMaxEstimatedCostUSD,
+		},
+		idleSuggestionRequests: 1,
+		textarea:               textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	cmd := m.scheduleIdleSuggestion()
+	assert.Nil(t, cmd)
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, idleSuggestionStatusRejectedBudget, next.idleSuggestionStatus)
+	assert.Nil(t, provider.params)
+}
+
+func TestIdleSuggestionRateBudgetExhaustionSkipsProvider(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{model: "model", response: "draft prompt with tests"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "capture/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget: idleSuggestionBudget{
+			MaxRequestsPerSession: idleSuggestionMaxRequestsPerSession,
+			MaxRequestsPerMinute:  1,
+			MaxInputTokens:        idleSuggestionMaxInputTokens,
+			MaxOutputTokens:       idleSuggestionMaxOutputTokens,
+			MaxSessionTokens:      idleSuggestionMaxSessionTokens,
+			MaxEstimatedCostUSD:   idleSuggestionMaxEstimatedCostUSD,
+		},
+		idleSuggestionTimes: []time.Time{time.Now()},
+		textarea:            textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	assert.Nil(t, m.scheduleIdleSuggestion())
+
+	nextModel, cmd, handled := m.acceptCompletion()
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, idleSuggestionStatusRejectedBudget, next.idleSuggestionStatus)
+	assert.Nil(t, provider.params)
+}
+
+func TestIdleSuggestionRateBudgetIgnoresExpiredRequestTimes(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	recent := now.Add(-30 * time.Second)
+	expired := now.Add(-2 * time.Minute)
+
+	assert.Equal(t, 1, idleSuggestionRecentRequestCount([]time.Time{expired, recent}, now))
+
+	requestTimes := []time.Time{expired, recent}
+
+	pruned := appendIdleSuggestionRequestTime(requestTimes, now)
+	require.Len(t, pruned, 2)
+	assert.Equal(t, recent, pruned[0])
+	assert.Equal(t, now, pruned[1])
+	assert.Equal(t, []time.Time{expired, recent}, requestTimes)
+}
+
+func TestInitialModelHonorsPersistedIdleSuggestionBudgetUsage(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(idleSuggestionProvider{model: "model", response: "draft prompt with tests"})
+
+	sessionState := session.Session{
+		BackgroundSuggestions: &session.BackgroundSuggestionUsage{
+			Requests:              idleSuggestionMaxRequestsPerSession,
+			InputTokens:           12,
+			OutputTokens:          4,
+			EstimatedInputTokens:  500,
+			EstimatedOutputTokens: 32,
+			EstimatedCostUSD:      0.01,
+		},
+	}
+
+	m := initialModel(
+		context.Background(),
+		registry,
+		agent.NewRegistry(nil),
+		nil,
+		nil,
+		nil,
+		sessionState,
+		contextref.Options{},
+		nil,
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		"",
+		"",
+		false,
+		"",
+		t.TempDir(),
+		"suggest/model",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		llm.AgentLoopBudget{},
+		0,
+		0,
+		false,
+		false,
+		promptSuggestionConsentSession,
+		defaultIdleSuggestionBudget(),
+		nil,
+	)
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+
+	assert.Equal(t, idleSuggestionMaxRequestsPerSession, m.idleSuggestionRequests)
+	assert.Equal(t, 532, m.idleSuggestionTokens)
+	assert.InDelta(t, 0.01, m.idleSuggestionCostUSD, 0.0000001)
+	assert.Nil(t, m.scheduleIdleSuggestion())
+}
+
+func TestIdleSuggestionCostBudgetUsesFallbackEstimate(t *testing.T) {
+	t.Parallel()
+
+	primaryCost := estimateIdleSuggestionCost(nil, "openai/gpt-5.4-nano", 1000, idleSuggestionMaxOutputTokens)
+	fallbackCost := estimateIdleSuggestionCost(nil, "openai/gpt-5.5", 1000, idleSuggestionMaxOutputTokens)
+	estimatedCost := estimateIdleSuggestionCostWithFallbacks(
+		nil,
+		"openai/gpt-5.4-nano",
+		[]string{"openai/gpt-5.5"},
+		1000,
+		idleSuggestionMaxOutputTokens,
+	)
+
+	require.Positive(t, primaryCost)
+	require.Positive(t, fallbackCost)
+	assert.Greater(t, fallbackCost, primaryCost)
+	assert.InDelta(t, fallbackCost, estimatedCost, 0.0000001)
+}
+
+func TestIdleSuggestionBudgetUsesConservativeFallbackInputEstimate(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(&capturingIdleSuggestionProvider{providerName: "openai", model: "gpt-5.4-nano"})
+	registry.Register(&capturingIdleSuggestionProvider{providerName: "anthropic", model: "claude-haiku-4-5-20251001"})
+
+	messages := []llm.Message{{Role: llm.RoleUser, Content: "draft prompt"}}
+	primaryEstimate, _ := estimateMessagesForModel(registry, "openai/gpt-5.4-nano", messages)
+	fallbackEstimate, _ := estimateMessagesForModel(registry, "anthropic/claude-haiku-4-5-20251001", messages)
+	require.Greater(t, fallbackEstimate.UpperBoundTokens, primaryEstimate.UpperBoundTokens)
+
+	estimatedInputTokens, _, err := validateIdleSuggestionRequestBudget(
+		registry,
+		"openai/gpt-5.4-nano",
+		[]string{"anthropic/claude-haiku-4-5-20251001"},
+		messages,
+		idleSuggestionMaxInputTokens,
+		idleSuggestionBudget{
+			MaxRequestsPerSession: idleSuggestionMaxRequestsPerSession,
+			MaxInputTokens:        idleSuggestionMaxInputTokens,
+			MaxOutputTokens:       idleSuggestionMaxOutputTokens,
+			MaxSessionTokens:      idleSuggestionMaxSessionTokens,
+			MaxEstimatedCostUSD:   1,
+		},
+		tokenUsage{},
+		0,
+		0,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, fallbackEstimate.UpperBoundTokens, estimatedInputTokens)
+}
+
+func TestIdleSuggestionCostBudgetUsesConservativeEstimateForUnknownProviderModel(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{
+		providerName: "custom",
+		model:        "unknown",
+		response:     "draft prompt with tests",
+	}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	estimatedCost := estimateIdleSuggestionCost(registry, "custom/unknown", 1000, idleSuggestionMaxOutputTokens)
+	require.Positive(t, estimatedCost)
+
+	_, _, err := validateIdleSuggestionRequestBudget(
+		registry,
+		"custom/unknown",
+		nil,
+		[]llm.Message{{Role: llm.RoleUser, Content: "draft prompt"}},
+		idleSuggestionMaxInputTokens,
+		idleSuggestionBudget{
+			MaxRequestsPerSession: idleSuggestionMaxRequestsPerSession,
+			MaxInputTokens:        idleSuggestionMaxInputTokens,
+			MaxOutputTokens:       idleSuggestionMaxOutputTokens,
+			MaxSessionTokens:      idleSuggestionMaxSessionTokens,
+			MaxEstimatedCostUSD:   0.000000000001,
+		},
+		tokenUsage{},
+		0,
+		0,
+	)
+	require.ErrorIs(t, err, errIdleSuggestionBudget)
+	assert.Contains(t, err.Error(), "estimated cost")
+}
+
+func TestIdleSuggestionCostBudgetTreatsOllamaModelsAsZeroCost(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{
+		providerName: "ollama",
+		model:        "llama3.2",
+		response:     "draft prompt with tests",
+	}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	assert.Zero(t, estimateIdleSuggestionCost(nil, "ollama/llama3.2", 1000, idleSuggestionMaxOutputTokens))
+	assert.Zero(t, estimateIdleSuggestionCost(registry, "llama3.2", 1000, idleSuggestionMaxOutputTokens))
+}
+
+func TestIdleSuggestionEstimatedCostBudgetExhaustionSkipsProvider(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{
+		providerName: "openai",
+		model:        "gpt-5.5",
+		response:     "draft prompt with tests",
+	}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "openai/gpt-5.5",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget: idleSuggestionBudget{
+			MaxRequestsPerSession: idleSuggestionMaxRequestsPerSession,
+			MaxInputTokens:        idleSuggestionMaxInputTokens,
+			MaxOutputTokens:       idleSuggestionMaxOutputTokens,
+			MaxSessionTokens:      idleSuggestionMaxSessionTokens,
+			MaxEstimatedCostUSD:   0.000000000001,
+		},
+		textarea: textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	nextModel, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.Error(t, msg.err)
+	require.ErrorIs(t, msg.err, errIdleSuggestionBudget)
+	assert.Contains(t, msg.err.Error(), "estimated cost")
+	assert.False(t, msg.providerCall)
+	assert.Nil(t, provider.params)
+
+	nextModel, saveCmd := next.updateIdleSuggestion(msg)
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, saveCmd)
+	assert.Equal(t, idleSuggestionStatusRejectedBudget, next.idleSuggestionStatus)
+	require.NotNil(t, next.sessionState.BackgroundSuggestions)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.Requests)
+	assert.Equal(t, 0, next.sessionState.BackgroundSuggestions.ProviderCalls)
+	assert.Equal(t, 0, next.sessionState.BackgroundSuggestions.Responses)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.Errors)
+	assert.InDelta(t, 0, next.sessionState.BackgroundSuggestions.EstimatedCostUSD, 0.0000001)
+	assert.Equal(t, 0, next.sessionState.BackgroundSuggestions.EstimatedInputTokens)
+	assert.InDelta(t, 0, next.idleSuggestionCostUSD, 0.0000001)
+	assert.Equal(t, 0, next.idleSuggestionTokens)
 }
 
 func TestIdleSuggestionRequestRejectsCursorMoved(t *testing.T) {
@@ -1324,10 +2113,12 @@ func TestClearIdleSuggestionCancelsInFlightRequest(t *testing.T) {
 	registry.Register(provider)
 
 	m := model{
-		ctx:           context.Background(),
-		registry:      registry,
-		selectedModel: "cancel/model",
-		textarea:      textarea.New(),
+		ctx:                     context.Background(),
+		registry:                registry,
+		selectedModel:           "cancel/model",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		textarea:                textarea.New(),
 	}
 	m.textarea.SetValue("draft prompt")
 	m.textarea.CursorEnd()
@@ -1350,6 +2141,7 @@ func TestClearIdleSuggestionCancelsInFlightRequest(t *testing.T) {
 	require.Error(t, msg.err)
 	assert.Contains(t, msg.err.Error(), "canceled")
 	assert.False(t, provider.called)
+	assert.False(t, msg.providerCall)
 	assert.Nil(t, next.idleSuggestionCancel)
 }
 
@@ -1392,6 +2184,49 @@ func TestIdleSuggestionRejectsCurrentResponseWhenInputChanged(t *testing.T) {
 	require.True(t, ok)
 	assert.Empty(t, next.idleSuggestionText)
 	assert.Equal(t, idleSuggestionStatusRejectedStale, next.idleSuggestionStatus)
+}
+
+func TestIdleSuggestionRecordsStaleProviderResponsesAsBackgroundUsage(t *testing.T) {
+	t.Parallel()
+
+	m := newIdleSuggestionTestModel("draft prompt with tests")
+	m.sessionState = session.Session{ID: "session-id"}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	nextModel, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	next, ok := nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+	require.True(t, msg.providerCall)
+
+	next.textarea.SetValue("changed prompt")
+	next.textarea.CursorEnd()
+
+	nextModel, saveCmd := next.updateIdleSuggestion(msg)
+	next, ok = nextModel.(model)
+	require.True(t, ok)
+	require.NotNil(t, saveCmd)
+
+	assert.Equal(t, "changed prompt", next.textarea.Value())
+	assert.Empty(t, next.idleSuggestionText)
+	assert.Equal(t, idleSuggestionStatusRejectedStale, next.idleSuggestionStatus)
+	assert.Nil(t, next.idleSuggestionCancel)
+	require.NotNil(t, next.sessionState.BackgroundSuggestions)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.Requests)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.ProviderCalls)
+	assert.Equal(t, 1, next.sessionState.BackgroundSuggestions.Rejected)
+	assert.Equal(t, idleSuggestionStatusRejectedStale, next.sessionState.BackgroundSuggestions.LastStatus)
+	assert.Contains(t, next.sessionState.BackgroundSuggestions.LastContextSummary, "omitted-private")
 }
 
 func TestIdleSuggestionRejectsUnsafeResponses(t *testing.T) {
@@ -2230,4 +3065,42 @@ func TestRunInteractiveHeaderShowsInputNewlineHelp(t *testing.T) {
 	assert.Contains(t, plain, "Ctrl+D to quit")
 	assert.Contains(t, plain, "Enter to send")
 	assert.Contains(t, plain, "Shift/Alt+Enter newline")
+}
+
+//nolint:paralleltest // Captures process stdout while startup status uses fmt.Println.
+func TestStartupPromptSuggestionStatusShowsPromptLocalOnlyOverride(t *testing.T) {
+	output := captureStdout(t, func() {
+		printStartupPromptSuggestionStatus(appState{
+			promptLocalOnly:         true,
+			promptSuggestionConsent: promptSuggestionConsentGlobal,
+		})
+	})
+
+	plain := stripANSI(output)
+	assert.Contains(t, plain, "Prompt suggestions: local-only")
+	assert.Contains(t, plain, "--prompt-local-only overrides saved opt-ins")
+}
+
+//nolint:paralleltest // Captures process stdout while startup status uses fmt.Println.
+func TestStartupPromptSuggestionStatusShowsOptInHintByDefault(t *testing.T) {
+	output := captureStdout(t, func() {
+		printStartupPromptSuggestionStatus(appState{})
+	})
+
+	plain := stripANSI(output)
+	assert.Contains(t, plain, "Prompt suggestions: local-only")
+	assert.Contains(t, plain, "/suggestions session|folder|global to opt in")
+}
+
+//nolint:paralleltest // Captures process stdout while startup status uses fmt.Println.
+func TestStartupPromptSuggestionStatusShowsModelBackedPrivacyScope(t *testing.T) {
+	output := captureStdout(t, func() {
+		printStartupPromptSuggestionStatus(appState{
+			promptSuggestionConsent: promptSuggestionConsentFolder,
+		})
+	})
+
+	plain := stripANSI(output)
+	assert.Contains(t, plain, "Prompt suggestions: model-backed folder scope")
+	assert.Contains(t, plain, "private file/task/issue context omitted")
 }

@@ -15,6 +15,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
@@ -215,6 +216,165 @@ func runModeSlashCommand(m model, input slashModeInput) (model, tea.Cmd, bool) {
 	m.executionMode = input.Mode
 
 	return m, tea.Println(dimStyle.Render("mode set to " + input.Mode)), true
+}
+
+func runSuggestionsSlashCommand(m model, input slashSuggestionsInput) (model, tea.Cmd, bool) {
+	if input.Show {
+		return m, tea.Println(m.promptSuggestionsSummary()), true
+	}
+
+	switch input.Mode {
+	case string(promptSuggestionConsentLocalOnly), "local":
+		scope := m.promptSuggestionLocalOnlyScope()
+		m.promptSuggestionConsent = promptSuggestionConsentLocalOnly
+		m.sessionState.PromptSuggestions = string(appconfig.PromptSuggestionPreferenceLocalOnly)
+		m.clearIdleSuggestion()
+
+		// Persist before printing confirmation so a user can quit immediately
+		// after seeing the opt-in/out result without racing Bubble Tea commands.
+		sessionSaveMsg := saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner)()
+		preferenceSaveMsg := savePromptSuggestionPreference(
+			m.ctx,
+			m.stateStore,
+			m.cwd,
+			appconfig.PromptSuggestionPreferenceLocalOnly,
+			scope,
+			m.hookRunner,
+		)()
+
+		return m, tea.Batch(
+			func() tea.Msg { return sessionSaveMsg },
+			func() tea.Msg { return preferenceSaveMsg },
+			tea.Println(dimStyle.Render("model-backed idle suggestions disabled (local-only).")),
+		), true
+	case string(promptSuggestionConsentSession):
+		m.promptSuggestionConsent = promptSuggestionConsentSession
+		m.sessionState.PromptSuggestions = string(appconfig.PromptSuggestionPreferenceModelBacked)
+
+		// Persist before printing confirmation so the session opt-in is durable.
+		sessionSaveMsg := saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner)()
+
+		return m, tea.Batch(
+			func() tea.Msg { return sessionSaveMsg },
+			tea.Println(warnStyle.Render(m.promptSuggestionOptInWarning("for this session"))),
+		), true
+	case string(promptSuggestionConsentFolder):
+		m.promptSuggestionConsent = promptSuggestionConsentFolder
+		m.sessionState.PromptSuggestions = ""
+
+		// Persist before printing confirmation so the folder opt-in is durable.
+		sessionSaveMsg := saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner)()
+		preferenceSaveMsg := savePromptSuggestionPreference(
+			m.ctx,
+			m.stateStore,
+			m.cwd,
+			appconfig.PromptSuggestionPreferenceModelBacked,
+			appconfig.ModelScopeFolder,
+			m.hookRunner,
+		)()
+
+		return m, tea.Batch(
+			func() tea.Msg { return sessionSaveMsg },
+			func() tea.Msg { return preferenceSaveMsg },
+			tea.Println(warnStyle.Render(m.promptSuggestionOptInWarning("for this folder"))),
+		), true
+	case string(promptSuggestionConsentGlobal):
+		m.promptSuggestionConsent = promptSuggestionConsentGlobal
+		m.sessionState.PromptSuggestions = ""
+
+		// Persist before printing confirmation so the global opt-in is durable.
+		sessionSaveMsg := saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner)()
+		preferenceSaveMsg := savePromptSuggestionPreference(
+			m.ctx,
+			m.stateStore,
+			m.cwd,
+			appconfig.PromptSuggestionPreferenceModelBacked,
+			appconfig.ModelScopeGlobal,
+			m.hookRunner,
+		)()
+
+		return m, tea.Batch(
+			func() tea.Msg { return sessionSaveMsg },
+			func() tea.Msg { return preferenceSaveMsg },
+			tea.Println(warnStyle.Render(m.promptSuggestionOptInWarning("globally"))),
+		), true
+	default:
+		return m, tea.Println(errStyle.Render("suggestions: unknown mode")), true
+	}
+}
+
+func (m model) promptSuggestionLocalOnlyScope() appconfig.ModelScope {
+	switch m.promptSuggestionConsent {
+	case promptSuggestionConsentGlobal:
+		return appconfig.ModelScopeGlobal
+	case promptSuggestionConsentFolder:
+		return appconfig.ModelScopeFolder
+	default:
+		if appconfig.FolderKey(m.cwd) == "" {
+			return appconfig.ModelScopeGlobal
+		}
+
+		return appconfig.ModelScopeFolder
+	}
+}
+
+func (m model) promptSuggestionOptInWarning(scope string) string {
+	if m.promptLocalOnly {
+		return "model-backed idle suggestions saved " + scope + "; current process remains local-only because --prompt-local-only is set."
+	}
+
+	destination := m.modelStatusLabel()
+	if destination == "" {
+		destination = "the active provider"
+	}
+
+	return "model-backed idle suggestions enabled " + scope + "; drafts may be sent to " + destination + " with private file/task/issue context omitted."
+}
+
+func (m model) promptSuggestionsSummary() string {
+	budget := normalizeIdleSuggestionBudget(m.idleSuggestionBudget)
+	usedTokens := max(m.idleSuggestionUsage.InputTokens+m.idleSuggestionUsage.OutputTokens, m.idleSuggestionTokens)
+	recentRequests := idleSuggestionRecentRequestCount(m.idleSuggestionTimes, time.Now())
+
+	providerCalls := 0
+	if m.sessionState.BackgroundSuggestions != nil {
+		providerCalls = m.sessionState.BackgroundSuggestions.ProviderCalls
+	}
+
+	mode := string(m.promptSuggestionConsent)
+	if m.promptLocalOnly {
+		mode = string(promptSuggestionConsentLocalOnly) + " (--prompt-local-only)"
+	}
+
+	if mode == "" {
+		mode = string(promptSuggestionConsentLocalOnly)
+	}
+
+	return strings.Join([]string{
+		"suggestions: mode=" + mode,
+		"model=" + m.modelStatusLabel(),
+		fmt.Sprintf("budget=requests≤%d rate≤%d/min input≤%d output≤%d session_tokens≤%d cost≤$%.2f",
+			budget.MaxRequestsPerSession,
+			budget.MaxRequestsPerMinute,
+			budget.MaxInputTokens,
+			budget.MaxOutputTokens,
+			budget.MaxSessionTokens,
+			budget.MaxEstimatedCostUSD,
+		),
+		fmt.Sprintf("usage=requests=%d/%d rate=%d/%d_per_min provider_calls=%d responses=%d session_tokens=%d/%d cost=$%.6f/$%.2f",
+			m.idleSuggestionRequests,
+			budget.MaxRequestsPerSession,
+			recentRequests,
+			budget.MaxRequestsPerMinute,
+			providerCalls,
+			m.idleSuggestionUsage.Responses,
+			usedTokens,
+			budget.MaxSessionTokens,
+			m.idleSuggestionCostUSD,
+			budget.MaxEstimatedCostUSD,
+		),
+		"privacy=file/task/issue context omitted from provider-backed suggestions",
+	}, "\n")
 }
 
 func runCodeblocksSlashCommand(m model, _ slashNoArgsInput) (model, tea.Cmd, bool) {

@@ -665,8 +665,8 @@ type memoryCorpusPlan struct {
 }
 
 type memorySessionCandidate struct {
-	path  string
 	saved session.Session
+	path  string
 }
 
 func runRetrievalCommand(ctx context.Context, state appState, input retrievalCommandInput) error {

@@ -103,12 +103,21 @@ const (
 	idleSuggestionDelay     = time.Second
 	idleSuggestionTimeout   = 8 * time.Second
 
-	idleSuggestionStatusPending       = "pending"
-	idleSuggestionStatusPendingForced = "pending:forced"
-	idleSuggestionStatusReadyModel    = "ready:model"
-	idleSuggestionStatusRejectedStale = "rejected:stale"
-	idleSuggestionStatusRejectedError = "rejected:error"
-	idleSuggestionStatusRejectedEmpty = "rejected:empty"
+	idleSuggestionStatusPending        = "pending"
+	idleSuggestionStatusPendingForced  = "pending:forced"
+	idleSuggestionStatusSending        = "sending"
+	idleSuggestionStatusReadyModel     = "ready:model"
+	idleSuggestionStatusRejectedStale  = "rejected:stale"
+	idleSuggestionStatusRejectedError  = "rejected:error"
+	idleSuggestionStatusRejectedEmpty  = "rejected:empty"
+	idleSuggestionStatusRejectedBudget = "rejected:budget"
+
+	idleSuggestionMaxRequestsPerSession = 20
+	idleSuggestionMaxRequestsPerMinute  = 6
+	idleSuggestionMaxInputTokens        = 1024
+	idleSuggestionMaxOutputTokens       = 32
+	idleSuggestionMaxSessionTokens      = 12_000
+	idleSuggestionMaxEstimatedCostUSD   = 0.05
 )
 
 var terminalTitleSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -169,11 +178,37 @@ type idleSuggestionRequestMsg struct {
 }
 
 type idleSuggestionMsg struct {
-	err        error
-	input      string
-	suggestion string
-	id         int
-	force      bool
+	err                   error
+	input                 string
+	suggestion            string
+	provider              string
+	model                 string
+	contextSummary        string
+	usage                 tokenUsage
+	estimatedInputTokens  int
+	estimatedOutputTokens int
+	estimatedCostUSD      float64
+	id                    int
+	force                 bool
+	providerCall          bool
+}
+
+type promptSuggestionConsent string
+
+const (
+	promptSuggestionConsentLocalOnly promptSuggestionConsent = promptSuggestionConsent(appconfig.PromptSuggestionPreferenceLocalOnly)
+	promptSuggestionConsentSession   promptSuggestionConsent = promptSuggestionConsent(appconfig.ModelScopeSession)
+	promptSuggestionConsentFolder    promptSuggestionConsent = promptSuggestionConsent(appconfig.ModelScopeFolder)
+	promptSuggestionConsentGlobal    promptSuggestionConsent = promptSuggestionConsent(appconfig.ModelScopeGlobal)
+)
+
+type idleSuggestionBudget struct {
+	MaxRequestsPerSession int
+	MaxRequestsPerMinute  int
+	MaxInputTokens        int
+	MaxOutputTokens       int
+	MaxSessionTokens      int
+	MaxEstimatedCostUSD   float64
 }
 
 type taskTickMsg struct {
@@ -316,7 +351,16 @@ type model struct {
 	idleSuggestionInput       string
 	idleSuggestionText        string
 	idleSuggestionStatus      string
+	idleSuggestionProvider    string
+	idleSuggestionModel       string
+	idleSuggestionContext     string
+	idleSuggestionUsage       tokenUsage
+	idleSuggestionBudget      idleSuggestionBudget
+	idleSuggestionTimes       []time.Time
+	idleSuggestionCostUSD     float64
 	pickerCursor              int
+	idleSuggestionRequests    int
+	idleSuggestionTokens      int
 	idleSuggestionID          int
 	terminalTitleFrame        int
 	modelFetchID              int
@@ -334,6 +378,7 @@ type model struct {
 	completionOpen            bool
 	modelLocked               bool
 	promptLocalOnly           bool
+	promptSuggestionConsent   promptSuggestionConsent
 	skillLearningEnabled      bool
 	revampUndoActive          bool
 	completionItems           []completionCandidate
@@ -379,11 +424,14 @@ func initialModel(
 	maxInputTokens int,
 	modelLocked bool,
 	promptLocalOnly bool,
+	promptSuggestionConsent promptSuggestionConsent,
+	idleSuggestionBudget idleSuggestionBudget,
 	wtInfo *worktree.Info,
 ) model {
 	ta := newPromptTextarea()
 	selectedProvider, _ := reg.ProviderForModel(selectedModel)
 	sessionState.AgentLoopBudget = agentLoopBudget
+	idleSuggestionUsage, idleSuggestionRequests, idleSuggestionTokens, idleSuggestionCostUSD := idleSuggestionBudgetStateFromSession(sessionState)
 
 	return model{
 		ctx:                         ctx,
@@ -419,6 +467,12 @@ func initialModel(
 		textarea:                    ta,
 		modelLocked:                 modelLocked,
 		promptLocalOnly:             promptLocalOnly,
+		promptSuggestionConsent:     promptSuggestionConsent,
+		idleSuggestionUsage:         idleSuggestionUsage,
+		idleSuggestionBudget:        normalizeIdleSuggestionBudget(idleSuggestionBudget),
+		idleSuggestionCostUSD:       idleSuggestionCostUSD,
+		idleSuggestionRequests:      idleSuggestionRequests,
+		idleSuggestionTokens:        idleSuggestionTokens,
 		worktreeInfo:                wtInfo,
 		pinnedMessages:              make(map[int]bool),
 		executionMode:               executionModeExecute,

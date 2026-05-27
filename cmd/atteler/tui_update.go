@@ -38,8 +38,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fzfModelSelectedMsg:
 		return m.updateFZFModelSelected(msg)
 
-	case modelPreferenceSavedMsg:
-		return m.updateModelPreferenceSaved(msg)
+	case modelPreferenceSavedMsg, promptSuggestionPreferenceSavedMsg:
+		return m.updatePreferenceSaved(msg)
 
 	case tea.KeyMsg:
 		// When waiting for user confirmation from the agent loop, intercept Y/N
@@ -224,6 +224,25 @@ func (m model) updateModelPreferenceSaved(msg modelPreferenceSavedMsg) (tea.Mode
 	}
 
 	return m, nil
+}
+
+func (m model) updatePromptSuggestionPreferenceSaved(msg promptSuggestionPreferenceSavedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		return m, tea.Println(errStyle.Render("Warning: " + msg.err.Error()))
+	}
+
+	return m, nil
+}
+
+func (m model) updatePreferenceSaved(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case modelPreferenceSavedMsg:
+		return m.updateModelPreferenceSaved(msg)
+	case promptSuggestionPreferenceSavedMsg:
+		return m.updatePromptSuggestionPreferenceSaved(msg)
+	default:
+		return m, nil
+	}
 }
 
 func (m model) updateSessionSaved(msg sessionSavedMsg) (tea.Model, tea.Cmd) {

@@ -41,7 +41,7 @@ const (
 
 // Session is a durable chat transcript.
 //
-//nolint:govet // Persisted JSON order favors stable human-readable session metadata over pointer packing.
+//nolint:govet // Field order keeps the on-disk JSON/YAML schema stable and readable.
 type Session struct {
 	CreatedAt             time.Time           `json:"created_at"`
 	UpdatedAt             time.Time           `json:"updated_at"`
@@ -51,14 +51,62 @@ type Session struct {
 	DefaultReasoningLevel string              `json:"default_reasoning_level,omitempty"`
 	DefaultAgent          string              `json:"default_agent,omitempty"`
 	AgentLoopBudget       llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
-	WorktreePath          string              `json:"worktree_path,omitempty"`
-	WorktreeBranch        string              `json:"worktree_branch,omitempty"`
-	WorktreeBase          string              `json:"worktree_base,omitempty"`
-	Tags                  []string            `json:"tags,omitempty"`
-	Messages              []llm.Message       `json:"messages"`
-	NegativeKnowledge     []NegativeKnowledge `json:"negative_knowledge,omitempty" yaml:"negative_knowledge,omitempty"`
-	Evaluations           []AgentEvaluation   `json:"evaluations,omitempty" yaml:"evaluations,omitempty"`
-	Artifacts             []Artifact          `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
+	// PromptSuggestions stores the session-scoped background prompt suggestion
+	// preference. Empty means no session override; callers should fall back to
+	// folder/global state or the safe local-only default.
+	PromptSuggestions     string                     `json:"prompt_suggestions,omitempty" yaml:"prompt_suggestions,omitempty"`
+	WorktreePath          string                     `json:"worktree_path,omitempty"`
+	WorktreeBranch        string                     `json:"worktree_branch,omitempty"`
+	WorktreeBase          string                     `json:"worktree_base,omitempty"`
+	Tags                  []string                   `json:"tags,omitempty"`
+	Messages              []llm.Message              `json:"messages"`
+	NegativeKnowledge     []NegativeKnowledge        `json:"negative_knowledge,omitempty" yaml:"negative_knowledge,omitempty"`
+	Evaluations           []AgentEvaluation          `json:"evaluations,omitempty" yaml:"evaluations,omitempty"`
+	Artifacts             []Artifact                 `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
+	BackgroundSuggestions *BackgroundSuggestionUsage `json:"background_suggestions,omitempty" yaml:"background_suggestions,omitempty"`
+}
+
+// BackgroundSuggestionUsage stores usage for background prompt suggestion calls
+// separately from user-submitted chat completions.
+type BackgroundSuggestionUsage struct {
+	UpdatedAt             time.Time `json:"updated_at,omitzero" yaml:"updated_at,omitempty"`
+	LastProvider          string    `json:"last_provider,omitempty" yaml:"last_provider,omitempty"`
+	LastModel             string    `json:"last_model,omitempty" yaml:"last_model,omitempty"`
+	LastStatus            string    `json:"last_status,omitempty" yaml:"last_status,omitempty"`
+	LastContextSummary    string    `json:"last_context_summary,omitempty" yaml:"last_context_summary,omitempty"`
+	EstimatedCostUSD      float64   `json:"estimated_cost_usd,omitempty" yaml:"estimated_cost_usd,omitempty"`
+	Requests              int       `json:"requests,omitempty" yaml:"requests,omitempty"`
+	ProviderCalls         int       `json:"provider_calls,omitempty" yaml:"provider_calls,omitempty"`
+	Responses             int       `json:"responses,omitempty" yaml:"responses,omitempty"`
+	Errors                int       `json:"errors,omitempty" yaml:"errors,omitempty"`
+	Rejected              int       `json:"rejected,omitempty" yaml:"rejected,omitempty"`
+	InputTokens           int       `json:"input_tokens,omitempty" yaml:"input_tokens,omitempty"`
+	CachedInputTokens     int       `json:"cached_input_tokens,omitempty" yaml:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens int       `json:"cache_write_input_tokens,omitempty" yaml:"cache_write_input_tokens,omitempty"`
+	OutputTokens          int       `json:"output_tokens,omitempty" yaml:"output_tokens,omitempty"`
+	EstimatedInputTokens  int       `json:"estimated_input_tokens,omitempty" yaml:"estimated_input_tokens,omitempty"`
+	EstimatedOutputTokens int       `json:"estimated_output_tokens,omitempty" yaml:"estimated_output_tokens,omitempty"`
+}
+
+// BackgroundSuggestionRecord describes one background prompt suggestion
+// lifecycle event to fold into BackgroundSuggestionUsage.
+type BackgroundSuggestionRecord struct {
+	UpdatedAt             time.Time
+	Provider              string
+	Model                 string
+	Status                string
+	ContextSummary        string
+	EstimatedCostUSD      float64
+	ProviderCall          bool
+	Response              bool
+	Error                 bool
+	Rejected              bool
+	InputTokens           int
+	CachedInputTokens     int
+	CacheWriteInputTokens int
+	OutputTokens          int
+	EstimatedInputTokens  int
+	EstimatedOutputTokens int
 }
 
 // NegativeKnowledge records a failed approach so future agents can avoid repeating it.
@@ -418,6 +466,55 @@ func (s *Store) Path(ref string) string {
 // Append adds a message to the session.
 func (s *Session) Append(role llm.Role, content string) {
 	s.Messages = append(s.Messages, llm.Message{Role: role, Content: content})
+}
+
+// RecordBackgroundSuggestionUsage records one background suggestion attempt
+// without mixing it into chat token totals.
+func (s *Session) RecordBackgroundSuggestionUsage(record BackgroundSuggestionRecord) {
+	if s == nil {
+		return
+	}
+
+	if s.BackgroundSuggestions == nil {
+		s.BackgroundSuggestions = &BackgroundSuggestionUsage{}
+	}
+
+	usage := s.BackgroundSuggestions
+
+	if record.UpdatedAt.IsZero() {
+		record.UpdatedAt = time.Now().UTC()
+	}
+
+	usage.UpdatedAt = record.UpdatedAt
+	usage.LastProvider = strings.TrimSpace(record.Provider)
+	usage.LastModel = strings.TrimSpace(record.Model)
+	usage.LastStatus = strings.TrimSpace(record.Status)
+	usage.LastContextSummary = strings.TrimSpace(record.ContextSummary)
+	usage.EstimatedCostUSD += record.EstimatedCostUSD
+	usage.Requests++
+
+	if record.ProviderCall {
+		usage.ProviderCalls++
+	}
+
+	if record.Response {
+		usage.Responses++
+	}
+
+	if record.Error {
+		usage.Errors++
+	}
+
+	if record.Rejected {
+		usage.Rejected++
+	}
+
+	usage.InputTokens += max(record.InputTokens, 0)
+	usage.CachedInputTokens += max(record.CachedInputTokens, 0)
+	usage.CacheWriteInputTokens += max(record.CacheWriteInputTokens, 0)
+	usage.OutputTokens += max(record.OutputTokens, 0)
+	usage.EstimatedInputTokens += max(record.EstimatedInputTokens, 0)
+	usage.EstimatedOutputTokens += max(record.EstimatedOutputTokens, 0)
 }
 
 // RecordNegativeKnowledge records a failed approach unless the same approach and reason already exist.
