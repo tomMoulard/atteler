@@ -392,6 +392,7 @@ func TestPlan_RunWithOptions_CancelOnFailureCancelsSibling(t *testing.T) {
 	require.Len(t, results, 2)
 	assert.Equal(t, StatusFailed, results[0].Status)
 	assert.Equal(t, StatusCanceled, results[1].Status)
+	assert.Contains(t, results[1].Error, `sibling cancellation after task "fail" failed`)
 }
 
 func TestPlan_RunWithOptions_CancelOnFailureMarksSiblingCanceledWhenRunnerIgnoresContext(t *testing.T) {
@@ -427,6 +428,7 @@ func TestPlan_RunWithOptions_CancelOnFailureMarksSiblingCanceledWhenRunnerIgnore
 	assert.Equal(t, StatusFailed, results[0].Status)
 	assert.Equal(t, StatusCanceled, results[1].Status)
 	assert.Contains(t, results[1].Error, context.Canceled.Error())
+	assert.Contains(t, results[1].Error, `sibling cancellation after task "fail" failed`)
 }
 
 func TestPlan_RunWithOptions_ParentCancellationMarksDownstreamCanceled(t *testing.T) {
@@ -1553,27 +1555,34 @@ func TestPlan_RunWithOptions_PersistsAdmissionForHaltedSibling(t *testing.T) {
 	resultStatuses := map[string]string{}
 	resultAdmissions := map[string]string{}
 	resultStops := map[string]string{}
+	resultErrors := map[string]string{}
 	for _, result := range ledger.Results {
 		resultStatuses[result.Task.ID] = result.Status
 		resultAdmissions[result.Task.ID] = result.AdmissionID
 		resultStops[result.Task.ID] = result.StopID
+		resultErrors[result.Task.ID] = result.Error
 	}
 	attemptStatuses := map[string]string{}
 	attemptAdmissions := map[string]string{}
 	attemptStops := map[string]string{}
+	attemptErrors := map[string]string{}
 	for _, attempt := range ledger.Attempts {
 		attemptStatuses[attempt.Task.ID] = attempt.Status
 		attemptAdmissions[attempt.Task.ID] = attempt.AdmissionID
 		attemptStops[attempt.Task.ID] = attempt.StopID
+		attemptErrors[attempt.Task.ID] = attempt.Error
 	}
 	require.Len(t, ledger.StopReceipts, 1)
 	stopReceipt := ledger.StopReceipts[0]
 	assert.NotEmpty(t, stopReceipt.StopID)
 	assert.Equal(t, slowID, stopReceipt.ChildID)
 	assert.Equal(t, StatusCanceled, stopReceipt.Status)
+	assert.Contains(t, stopReceipt.Reason, `sibling cancellation after task "fail" failed`)
 	assert.Equal(t, admissions[slowID].AdmissionID, stopReceipt.AdmissionID)
 	assert.Equal(t, StatusCanceled, resultStatuses[slowID])
 	assert.Equal(t, StatusCanceled, attemptStatuses[slowID])
+	assert.Contains(t, resultErrors[slowID], `sibling cancellation after task "fail" failed`)
+	assert.Contains(t, attemptErrors[slowID], `sibling cancellation after task "fail" failed`)
 	assert.Equal(t, admissions[slowID].AdmissionID, resultAdmissions[slowID])
 	assert.Equal(t, admissions[slowID].AdmissionID, attemptAdmissions[slowID])
 	assert.Equal(t, stopReceipt.StopID, resultStops[slowID])

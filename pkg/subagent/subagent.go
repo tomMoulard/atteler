@@ -270,8 +270,8 @@ func SpawnAllDetailed(ctx context.Context, requests []Request, run DetailedRunne
 	results := make([]Result, len(requests))
 	skipped := seedResumedResults(results, requests, ledger, opts)
 	budget := newBudgetTracker(opts.Budget, ledger)
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 
 	errs := make([]error, len(requests))
 	jobs := make(chan int)
@@ -293,7 +293,7 @@ func SpawnAllDetailed(ctx context.Context, requests []Request, run DetailedRunne
 				if err != nil {
 					errs[index] = err
 					if opts.CancelOnFailure || result.Status == StatusBudgetExhausted || result.Status == StatusDenied {
-						cancel()
+						cancel(requestSiblingCancelCause(result))
 					}
 				}
 			}
@@ -324,13 +324,13 @@ func submitRequestJobs(
 		}
 
 		if err := ctx.Err(); err != nil {
-			recordRequestCanceledBeforeStart(i, requests[i], results, errs, ledger, opts, err)
+			recordRequestCanceledBeforeStart(i, requests[i], results, errs, ledger, opts, contextCauseOrErr(ctx, err))
 			continue
 		}
 
 		select {
 		case <-ctx.Done():
-			recordRequestCanceledBeforeStart(i, requests[i], results, errs, ledger, opts, ctx.Err())
+			recordRequestCanceledBeforeStart(i, requests[i], results, errs, ledger, opts, contextCauseOrErr(ctx, ctx.Err()))
 		case jobs <- i:
 		}
 	}
@@ -621,13 +621,14 @@ func runRequest(
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			admission := admissionForRequest(request, attempt, false, err, ledger, opts)
+			cause := contextCauseOrErr(ctx, err)
+			admission := admissionForRequest(request, attempt, false, cause, ledger, opts)
 			ignoreLedgerError(ledger.recordAdmission(admission))
-			last = resultFromError(request, ledger, StatusCanceled, attempt-1, err)
+			last = resultFromError(request, ledger, StatusCanceled, attempt-1, cause)
 			last.AdmissionID = admission.AdmissionID
 			ignoreLedgerError(ledger.recordResult(last))
 
-			return last, fmt.Errorf("subagent: request %q canceled: %w", request.ID, err)
+			return last, fmt.Errorf("subagent: request %q canceled: %w", request.ID, cause)
 		}
 
 		if err := validateAllowedWriteScope(request.AllowedWriteScope, opts.AllowedWriteScope); err != nil {
@@ -690,7 +691,7 @@ func runRequest(
 		cancel()
 
 		status := statusForAttempt(attemptErr, parentErr, err, timeoutExceeded)
-		err = errorForStatus(status, err)
+		err = errorForStatus(attemptCtx, ctx, status, err)
 		reserved := usage
 		usage = mergeUsage(usage, out)
 		if budgetErr := budget.recordActual(reserved, usage); budgetErr != nil {
@@ -842,16 +843,51 @@ func statusForAttempt(attemptErr, parentErr, err error, timeoutExceeded bool) st
 	return StatusFailed
 }
 
-func errorForStatus(status string, err error) error {
+func errorForStatus(attemptCtx, parentCtx context.Context, status string, err error) error {
 	if status == StatusTimedOut && err == nil {
 		return context.DeadlineExceeded
 	}
 
-	if status == StatusCanceled && err == nil {
-		return context.Canceled
+	if status == StatusCanceled {
+		cause := contextCauseOrErr(attemptCtx, context.Canceled)
+		if errors.Is(cause, context.Canceled) && parentCtx != nil {
+			cause = contextCauseOrErr(parentCtx, context.Canceled)
+		}
+
+		if err == nil || errors.Is(err, context.Canceled) {
+			return cause
+		}
+
+		return errors.Join(err, cause)
 	}
 
 	return err
+}
+
+func contextCauseOrErr(ctx context.Context, fallback error) error {
+	if ctx == nil {
+		return fallback
+	}
+
+	cause := context.Cause(ctx)
+	if cause != nil {
+		return fmt.Errorf("%w", cause)
+	}
+
+	return fallback
+}
+
+func requestSiblingCancelCause(result Result) error {
+	status := requestRunErrorStatus(result.Status)
+	if strings.TrimSpace(status) == "" {
+		status = "failed"
+	}
+
+	if detail := strings.TrimSpace(result.Error); detail != "" {
+		return fmt.Errorf("subagent: sibling cancellation after request %q %s: %s: %w", result.Request.ID, status, detail, context.Canceled)
+	}
+
+	return fmt.Errorf("subagent: sibling cancellation after request %q %s: %w", result.Request.ID, status, context.Canceled)
 }
 
 func resultFromError(request Request, ledger *ledgerStore, status string, attempts int, err error) Result {

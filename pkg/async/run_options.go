@@ -330,8 +330,8 @@ func runBatchWithOptions(
 ) []TaskResult {
 	results := make([]TaskResult, len(batch))
 	skipped := seedResumedTaskResults(results, wave, batch, ledger, opts, stableResumed)
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 
 	jobs := make(chan int)
 	var wg sync.WaitGroup
@@ -350,7 +350,7 @@ func runBatchWithOptions(
 				result := runTaskWithRetries(ctx, wave, index, batch[index], run, opts, budget, ledger)
 				results[index] = result
 				if result.Error != "" && (opts.CancelOnFailure || result.Status == StatusBudgetExhausted || result.Status == StatusDenied) {
-					cancel()
+					cancel(taskSiblingCancelCause(result))
 				}
 			}
 		}()
@@ -380,13 +380,13 @@ func submitTaskJobs(
 		}
 
 		if err := ctx.Err(); err != nil {
-			recordTaskCanceledBeforeStart(wave, i, batch[i], results, ledger, opts, err)
+			recordTaskCanceledBeforeStart(wave, i, batch[i], results, ledger, opts, runContextCauseOrErr(ctx, err))
 			continue
 		}
 
 		select {
 		case <-ctx.Done():
-			recordTaskCanceledBeforeStart(wave, i, batch[i], results, ledger, opts, ctx.Err())
+			recordTaskCanceledBeforeStart(wave, i, batch[i], results, ledger, opts, runContextCauseOrErr(ctx, ctx.Err()))
 		case jobs <- i:
 		}
 	}
@@ -455,9 +455,10 @@ func runTaskWithRetries(
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			admission := admissionForTask(wave, order, task, attempt, false, err, ledger, opts)
+			cause := runContextCauseOrErr(ctx, err)
+			admission := admissionForTask(wave, order, task, attempt, false, cause, ledger, opts)
 			ignoreRunLedgerError(ledger.recordAdmission(admission))
-			last = taskResultFromError(wave, order, task, ledger, StatusCanceled, attempt-1, err)
+			last = taskResultFromError(wave, order, task, ledger, StatusCanceled, attempt-1, cause)
 			last.AdmissionID = admission.AdmissionID
 			ignoreRunLedgerError(ledger.recordResult(last))
 
@@ -526,7 +527,7 @@ func runTaskWithRetries(
 		cancel()
 
 		status := taskStatusForAttempt(attemptErr, parentErr, err, timeoutExceeded)
-		err = taskErrorForStatus(status, err)
+		err = taskErrorForStatus(attemptCtx, ctx, status, err)
 		reserved := usage
 		usage = mergeTaskUsage(usage, out)
 		if budgetErr := budget.recordActual(reserved, usage); budgetErr != nil {
@@ -661,16 +662,51 @@ func taskStatusForAttempt(attemptErr, parentErr, err error, timeoutExceeded bool
 	return StatusFailed
 }
 
-func taskErrorForStatus(status string, err error) error {
+func taskErrorForStatus(attemptCtx, parentCtx context.Context, status string, err error) error {
 	if status == StatusTimedOut && err == nil {
 		return context.DeadlineExceeded
 	}
 
-	if status == StatusCanceled && err == nil {
-		return context.Canceled
+	if status == StatusCanceled {
+		cause := runContextCauseOrErr(attemptCtx, context.Canceled)
+		if errors.Is(cause, context.Canceled) && parentCtx != nil {
+			cause = runContextCauseOrErr(parentCtx, context.Canceled)
+		}
+
+		if err == nil || errors.Is(err, context.Canceled) {
+			return cause
+		}
+
+		return errors.Join(err, cause)
 	}
 
 	return err
+}
+
+func runContextCauseOrErr(ctx context.Context, fallback error) error {
+	if ctx == nil {
+		return fallback
+	}
+
+	cause := context.Cause(ctx)
+	if cause != nil {
+		return fmt.Errorf("%w", cause)
+	}
+
+	return fallback
+}
+
+func taskSiblingCancelCause(result TaskResult) error {
+	status := taskRunErrorStatus(result.Status)
+	if strings.TrimSpace(status) == "" {
+		status = "failed"
+	}
+
+	if detail := strings.TrimSpace(result.Error); detail != "" {
+		return fmt.Errorf("async: sibling cancellation after task %q %s: %s: %w", result.Task.ID, status, detail, context.Canceled)
+	}
+
+	return fmt.Errorf("async: sibling cancellation after task %q %s: %w", result.Task.ID, status, context.Canceled)
 }
 
 func taskResultFromError(wave, order int, task Task, ledger *runLedgerStore, status string, attempts int, err error) TaskResult {
