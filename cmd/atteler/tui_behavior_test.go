@@ -293,7 +293,8 @@ func TestCallLLMBuffersProviderActivityEvents(t *testing.T) {
 	assert.Contains(t, lines, "provider=activity")
 	assert.Contains(t, lines, "tool=llm.complete")
 	assert.Contains(t, lines, "event:command_execute")
-	assert.Contains(t, lines, "command=fake-provider-command")
+	assert.NotContains(t, lines, "command=fake-provider-command")
+	assert.Contains(t, lines, "redacted=true")
 	assert.Contains(t, lines, "session=session-1")
 }
 

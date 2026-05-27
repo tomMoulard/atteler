@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 type contextKey struct{}
@@ -40,6 +41,8 @@ func (l *Logger) Log(event Event) {
 		return
 	}
 
+	event = sanitizeEventForLog(event)
+
 	// Also emit to slog for structured logging consumers.
 	attrs := []any{
 		slog.String("event_type", event.Type),
@@ -57,8 +60,16 @@ func (l *Logger) Log(event Event) {
 		attrs = append(attrs, slog.String("session_id", event.SessionID))
 	}
 
-	if event.Error != "" {
-		attrs = append(attrs, slog.String("error", event.Error))
+	if event.ErrorSummary != "" {
+		attrs = append(attrs, slog.String("error_summary", event.ErrorSummary))
+	}
+
+	if event.Redacted {
+		attrs = append(attrs, slog.Bool("redacted", true))
+	}
+
+	if event.Truncated {
+		attrs = append(attrs, slog.Bool("truncated", true))
 	}
 
 	for _, key := range sortedMetadataKeys(event.Metadata) {
@@ -67,7 +78,7 @@ func (l *Logger) Log(event Event) {
 
 	slog.Debug("lifecycle event", attrs...)
 
-	fmt.Fprintln(l.w, FormatLine(event))
+	fmt.Fprintln(l.w, formatLine(event))
 
 	if flusher, ok := l.w.(flushWriter); ok {
 		_ = flusher.Flush()
@@ -76,25 +87,37 @@ func (l *Logger) Log(event Event) {
 
 // FormatLine formats an event as one human-readable line.
 func FormatLine(event Event) string {
+	return formatLine(sanitizeEventForLog(event))
+}
+
+func formatLine(event Event) string {
 	parts := []string{"event:" + event.Type}
 	if event.Agent != "" {
-		parts = append(parts, "agent="+event.Agent)
+		parts = append(parts, "agent="+quoteValue(event.Agent))
 	}
 
 	if event.Model != "" {
-		parts = append(parts, "model="+event.Model)
+		parts = append(parts, "model="+quoteValue(event.Model))
 	}
 
 	if event.SessionID != "" {
-		parts = append(parts, "session="+event.SessionID)
+		parts = append(parts, "session="+quoteValue(event.SessionID))
 	}
 
 	for _, key := range sortedMetadataKeys(event.Metadata) {
 		parts = append(parts, key+"="+quoteValue(event.Metadata[key]))
 	}
 
-	if event.Error != "" {
-		parts = append(parts, "error="+quoteValue(event.Error))
+	if event.ErrorSummary != "" {
+		parts = append(parts, "error="+quoteValue(event.ErrorSummary))
+	}
+
+	if event.Redacted {
+		parts = append(parts, "redacted=true")
+	}
+
+	if event.Truncated {
+		parts = append(parts, "truncated=true")
 	}
 
 	return strings.Join(parts, " ")
@@ -157,9 +180,19 @@ func quoteValue(value string) string {
 		return `""`
 	}
 
-	if strings.ContainsAny(value, " \t\n\r") {
+	if strings.ContainsAny(value, " \t\n\r") || containsControlRune(value) {
 		return fmt.Sprintf("%q", value)
 	}
 
 	return value
+}
+
+func containsControlRune(value string) bool {
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+
+	return false
 }

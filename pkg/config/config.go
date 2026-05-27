@@ -123,10 +123,14 @@ type FeedbackGuidanceAuditEvent struct {
 }
 
 // HookConfig configures a local command to receive atteler lifecycle events.
+//
+//nolint:govet // fieldalignment: field order follows config-file grouping.
 type HookConfig struct {
 	Env            map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 	Command        []string          `json:"command,omitempty" yaml:"command,omitempty"`
+	Payload        string            `json:"payload,omitempty" yaml:"payload,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	InheritEnv     bool              `json:"inherit_env,omitempty" yaml:"inherit_env,omitempty"`
 }
 
 // GenerationConfig configures default generation parameters for all requests.
@@ -904,8 +908,10 @@ func mergeHooks(dst *Config, hooks map[string][]HookConfig, rec *originRecorder,
 		merged := make([]HookConfig, 0, len(eventHooks))
 		for _, hook := range eventHooks {
 			next := HookConfig{
-				Command: append([]string(nil), hook.Command...),
-				Env:     cloneMap(hook.Env),
+				Command:    append([]string(nil), hook.Command...),
+				Env:        cloneMap(hook.Env),
+				Payload:    hook.Payload,
+				InheritEnv: hook.InheritEnv,
 			}
 			next.TimeoutSeconds = hook.TimeoutSeconds
 			merged = append(merged, next)
@@ -2308,7 +2314,9 @@ func cloneHooks(hooks []HookConfig) []HookConfig {
 		out = append(out, HookConfig{
 			Command:        append([]string(nil), hook.Command...),
 			Env:            cloneMap(hook.Env),
+			Payload:        hook.Payload,
 			TimeoutSeconds: hook.TimeoutSeconds,
+			InheritEnv:     hook.InheritEnv,
 		})
 	}
 

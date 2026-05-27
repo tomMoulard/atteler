@@ -178,3 +178,18 @@ func yamlFieldsForType[T any]() map[string]bool {
 
 	return fields
 }
+
+func TestTemplateYAMLDocumentsHookPrivacyDefaults(t *testing.T) {
+	t.Parallel()
+
+	template := TemplateYAML()
+	for _, want := range []string{
+		"payload defaults to metadata",
+		"payload: metadata",
+		"inherit_env: false",
+		"Explicit env values are passed verbatim",
+		"ATTELER_* variables are reserved",
+	} {
+		require.Contains(t, template, want)
+	}
+}
