@@ -196,6 +196,77 @@ func TestRequestContextManifestSanitizesConfiguredReferenceManifest(t *testing.T
 	assert.Contains(t, manifestJSON, "test-estimator")
 }
 
+func TestRequestContextManifestSanitizesInlineReferenceEvents(t *testing.T) {
+	t.Parallel()
+
+	manifest := newRequestContextManifestWithInlineEvents(
+		"",
+		"gpt-test",
+		[]llm.Message{{Role: llm.RoleUser, Content: "hello"}},
+		0,
+		0,
+		[]contextref.ReferenceEvent{
+			{
+				Source:           "docs/api_key=inline-secret.md",
+				Kind:             "file",
+				Scope:            contextref.ReferenceScopeInline,
+				Location:         "local",
+				TokenEstimator:   "secret=inline-estimator-secret",
+				DigestSHA256:     "sha\nsecret=inline-digest-secret",
+				PolicyDecision:   contextref.ReferenceDecisionLoaded,
+				PolicyReason:     "inline token=inline-reason-secret",
+				PolicyReasonCode: "loaded.token=inline-code-secret",
+			},
+		},
+		contextref.ReferenceManifest{},
+	)
+
+	require.Len(t, manifest.InlineReferences, 1)
+	inlineRef := manifest.InlineReferences[0]
+	assert.NotContains(t, inlineRef.Source, "inline-secret")
+	assert.NotContains(t, inlineRef.TokenEstimator, "inline-estimator-secret")
+	assert.NotContains(t, inlineRef.DigestSHA256, "inline-digest-secret")
+	assert.NotContains(t, inlineRef.PolicyReason, "inline-reason-secret")
+	assert.NotContains(t, inlineRef.PolicyReasonCode, "inline-code-secret")
+	assert.NotContains(t, inlineRef.DigestSHA256, "\n")
+	assert.Contains(t, inlineRef.Source, "api_key=[REDACTED]")
+
+	event := requestContextManifestEvent(manifest)
+	manifestJSON := event.Metadata["context_manifest"]
+	assert.NotContains(t, manifestJSON, "inline-secret")
+	assert.NotContains(t, manifestJSON, "inline-estimator-secret")
+	assert.NotContains(t, manifestJSON, "inline-digest-secret")
+	assert.NotContains(t, manifestJSON, "inline-reason-secret")
+	assert.NotContains(t, manifestJSON, "inline-code-secret")
+}
+
+func TestRequestContextManifestSanitizesManifestLevelTokenEstimator(t *testing.T) {
+	t.Parallel()
+
+	manifest := newRequestContextManifest(
+		"",
+		"gpt-test",
+		[]llm.Message{{Role: llm.RoleUser, Content: "hello"}},
+		0,
+		0,
+		nil,
+		contextref.ReferenceManifest{
+			TokenEstimator: "provider=openai\nsecret=estimator-secret",
+		},
+	)
+
+	require.Empty(t, manifest.ConfiguredReferences.Entries)
+	assert.NotContains(t, manifest.ConfiguredReferences.TokenEstimator, "estimator-secret")
+	assert.NotContains(t, manifest.ConfiguredReferences.TokenEstimator, "\n")
+	assert.Contains(t, manifest.ConfiguredReferences.TokenEstimator, "secret=[REDACTED]")
+
+	event := requestContextManifestEvent(manifest)
+	manifestJSON := event.Metadata["context_manifest"]
+	assert.NotContains(t, manifestJSON, "estimator-secret")
+	assert.NotContains(t, manifestJSON, `\nsecret=estimator-secret`)
+	assert.Contains(t, manifestJSON, "secret=[REDACTED]")
+}
+
 func TestRequestContextManifestCountsOmittedReferencesOutsideIncludedBytes(t *testing.T) {
 	t.Parallel()
 

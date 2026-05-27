@@ -8,6 +8,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
+	atteval "github.com/tommoulard/atteler/pkg/eval"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 )
@@ -92,6 +93,7 @@ func newRequestContextManifestWithInlineEvents(
 	inlineEvents []contextref.ReferenceEvent,
 	configuredManifest contextref.ReferenceManifest,
 ) requestContextManifest {
+	inlineEvents = sanitizeReferenceEventsForAudit(inlineEvents)
 	configuredManifest = sanitizeReferenceManifestForAudit(configuredManifest)
 
 	estimator := contextpack.NewEstimator(providerName, model)
@@ -261,9 +263,10 @@ func mergeReferenceManifests(manifests ...contextref.ReferenceManifest) contextr
 
 	tokenEstimator := ""
 
-	for _, manifest := range manifests {
+	for i := range manifests {
+		manifest := &manifests[i]
 		if tokenEstimator == "" {
-			tokenEstimator = manifest.TokenEstimator
+			tokenEstimator = sanitizeContextManifestText(manifest.TokenEstimator)
 		}
 
 		referenceEvents = append(referenceEvents, manifest.Entries...)
@@ -280,8 +283,25 @@ func mergeReferenceManifests(manifests ...contextref.ReferenceManifest) contextr
 func sanitizeReferenceManifestForAudit(manifest contextref.ReferenceManifest) contextref.ReferenceManifest {
 	sanitized := contextref.BuildReferenceManifest(manifest.Entries)
 	if sanitized.TokenEstimator == "" {
-		sanitized.TokenEstimator = manifest.TokenEstimator
+		sanitized.TokenEstimator = sanitizeContextManifestText(manifest.TokenEstimator)
 	}
 
 	return sanitized
+}
+
+func sanitizeReferenceEventsForAudit(referenceEvents []contextref.ReferenceEvent) []contextref.ReferenceEvent {
+	return contextref.BuildReferenceManifest(referenceEvents).Entries
+}
+
+func sanitizeContextManifestText(value string) string {
+	value = strings.ToValidUTF8(value, "�")
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return '�'
+		}
+
+		return r
+	}, value)
+
+	return atteval.Redact(value)
 }

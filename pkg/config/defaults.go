@@ -131,8 +131,8 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 		},
 		{
 			Field:   "context.reference_policy.allowed_schemes",
-			Value:   "[]",
-			Message: "configured remote references are rejected unless a config source allowlists their URL scheme",
+			Value:   "[https]",
+			Message: "configured remote references are HTTPS-only unless a config source narrows or expands the allowed URL schemes",
 		},
 		{
 			Field:   "context.reference_policy.allowed_hosts",
@@ -145,13 +145,23 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Message: "configured local references are limited to the working directory unless extra local roots are set",
 		},
 		{
+			Field:   "context.reference_policy.allow_absolute_paths",
+			Value:   "false",
+			Message: "configured absolute local references are rejected unless explicitly allowed",
+		},
+		{
 			Field:   "context.reference_policy.max_redirects",
 			Value:   "0",
 			Message: "configured remote references do not follow redirects unless this is positive",
 		},
 		{
+			Field:   "context.reference_policy.max_files",
+			Value:   "200",
+			Message: "configured reference loading stops after the built-in file count limit unless config sets max_files",
+		},
+		{
 			Field:   "context.reference_policy.content_types",
-			Value:   "[]",
+			Value:   "[text/*, application/json, application/xml, application/x-yaml, application/yaml, application/toml]",
 			Message: "configured remote references accept the loader's built-in safe content types unless this list narrows them",
 		},
 		{

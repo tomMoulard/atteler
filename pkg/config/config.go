@@ -198,11 +198,69 @@ type ContextConfig struct {
 // ReferencePolicyConfig controls which configured references may be ingested.
 type ReferencePolicyConfig struct {
 	AllowedSchemes       []string `json:"allowed_schemes,omitempty" yaml:"allowed_schemes,omitempty"`
+	DeniedSchemes        []string `json:"denied_schemes,omitempty" yaml:"denied_schemes,omitempty"`
 	AllowedHosts         []string `json:"allowed_hosts,omitempty" yaml:"allowed_hosts,omitempty"`
+	DeniedHosts          []string `json:"denied_hosts,omitempty" yaml:"denied_hosts,omitempty"`
+	AllowedPorts         []int    `json:"allowed_ports,omitempty" yaml:"allowed_ports,omitempty"`
+	DeniedPorts          []int    `json:"denied_ports,omitempty" yaml:"denied_ports,omitempty"`
 	LocalRoots           []string `json:"local_roots,omitempty" yaml:"local_roots,omitempty"`
+	DeniedLocalRoots     []string `json:"denied_local_roots,omitempty" yaml:"denied_local_roots,omitempty"`
+	AllowedGlobs         []string `json:"allowed_globs,omitempty" yaml:"allowed_globs,omitempty"`
+	DeniedGlobs          []string `json:"denied_globs,omitempty" yaml:"denied_globs,omitempty"`
 	ContentTypes         []string `json:"content_types,omitempty" yaml:"content_types,omitempty"`
 	MaxRedirects         int      `json:"max_redirects,omitempty" yaml:"max_redirects,omitempty"`
+	MaxFiles             int      `json:"max_files,omitempty" yaml:"max_files,omitempty"`
+	AllowAbsolutePaths   bool     `json:"allow_absolute_paths,omitempty" yaml:"allow_absolute_paths,omitempty"`
 	AllowPrivateNetworks bool     `json:"allow_private_networks,omitempty" yaml:"allow_private_networks,omitempty"`
+}
+
+// MarshalYAML preserves explicitly empty list fields. For reference policy,
+// nil means "unset; use loader defaults" while [] can be an intentional deny-all
+// policy for fields such as allowed_schemes and content_types.
+func (p ReferencePolicyConfig) MarshalYAML() (any, error) {
+	out := make(map[string]any, 16)
+
+	marshalStringListYAML(out, "allowed_schemes", p.AllowedSchemes)
+	marshalStringListYAML(out, "denied_schemes", p.DeniedSchemes)
+	marshalStringListYAML(out, "allowed_hosts", p.AllowedHosts)
+	marshalStringListYAML(out, "denied_hosts", p.DeniedHosts)
+	marshalIntListYAML(out, "allowed_ports", p.AllowedPorts)
+	marshalIntListYAML(out, "denied_ports", p.DeniedPorts)
+	marshalStringListYAML(out, "local_roots", p.LocalRoots)
+	marshalStringListYAML(out, "denied_local_roots", p.DeniedLocalRoots)
+	marshalStringListYAML(out, "allowed_globs", p.AllowedGlobs)
+	marshalStringListYAML(out, "denied_globs", p.DeniedGlobs)
+	marshalStringListYAML(out, "content_types", p.ContentTypes)
+
+	if p.MaxRedirects != 0 {
+		out["max_redirects"] = p.MaxRedirects
+	}
+
+	if p.MaxFiles != 0 {
+		out["max_files"] = p.MaxFiles
+	}
+
+	if p.AllowAbsolutePaths {
+		out["allow_absolute_paths"] = p.AllowAbsolutePaths
+	}
+
+	if p.AllowPrivateNetworks {
+		out["allow_private_networks"] = p.AllowPrivateNetworks
+	}
+
+	return out, nil
+}
+
+func marshalStringListYAML(out map[string]any, field string, values []string) {
+	if values != nil {
+		out[field] = values
+	}
+}
+
+func marshalIntListYAML(out map[string]any, field string, values []int) {
+	if values != nil {
+		out[field] = values
+	}
 }
 
 // PluginConfig configures local plugin manifest discovery.
@@ -300,10 +358,19 @@ type fileContextConfig struct {
 //nolint:govet // field order follows config-file grouping.
 type fileReferencePolicyConfig struct {
 	AllowedSchemes       []string `json:"allowed_schemes" yaml:"allowed_schemes"`
+	DeniedSchemes        []string `json:"denied_schemes" yaml:"denied_schemes"`
 	AllowedHosts         []string `json:"allowed_hosts" yaml:"allowed_hosts"`
+	DeniedHosts          []string `json:"denied_hosts" yaml:"denied_hosts"`
+	AllowedPorts         []int    `json:"allowed_ports" yaml:"allowed_ports"`
+	DeniedPorts          []int    `json:"denied_ports" yaml:"denied_ports"`
 	LocalRoots           []string `json:"local_roots" yaml:"local_roots"`
+	DeniedLocalRoots     []string `json:"denied_local_roots" yaml:"denied_local_roots"`
+	AllowedGlobs         []string `json:"allowed_globs" yaml:"allowed_globs"`
+	DeniedGlobs          []string `json:"denied_globs" yaml:"denied_globs"`
 	ContentTypes         []string `json:"content_types" yaml:"content_types"`
 	MaxRedirects         *int     `json:"max_redirects" yaml:"max_redirects"`
+	MaxFiles             *int     `json:"max_files" yaml:"max_files"`
+	AllowAbsolutePaths   *bool    `json:"allow_absolute_paths" yaml:"allow_absolute_paths"`
 	AllowPrivateNetworks *bool    `json:"allow_private_networks" yaml:"allow_private_networks"`
 }
 
@@ -874,48 +941,91 @@ func mergeContext(dst *Config, contextConfig fileContextConfig, rec *originRecor
 }
 
 func mergeReferencePolicy(dst *ReferencePolicyConfig, policy fileReferencePolicyConfig, rec *originRecorder, source originSource) {
-	if fileReferencePolicySet(policy) {
-		rec.merge("context.reference_policy", source, "reference_policy", "merges reference policy fields")
+	mergeReferencePolicyLists(dst, policy, rec, source)
+	mergeReferencePolicyLimits(dst, policy, rec, source)
+}
+
+func mergeReferencePolicyLists(dst *ReferencePolicyConfig, policy fileReferencePolicyConfig, rec *originRecorder, source originSource) {
+	if policy.AllowedSchemes != nil {
+		dst.AllowedSchemes = cloneSlicePreserveEmpty(policy.AllowedSchemes)
+		rec.replace(referencePolicyFieldPath("allowed_schemes"), source, policy.AllowedSchemes, "replaces the entire allowed scheme list")
 	}
 
-	if policy.AllowedSchemes != nil {
-		dst.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
-		rec.replace("context.reference_policy.allowed_schemes", source, dst.AllowedSchemes, "replaces the allowed configured-reference URL schemes")
+	if policy.DeniedSchemes != nil {
+		dst.DeniedSchemes = cloneSlicePreserveEmpty(policy.DeniedSchemes)
+		rec.replace(referencePolicyFieldPath("denied_schemes"), source, policy.DeniedSchemes, "replaces the entire denied scheme list")
 	}
 
 	if policy.AllowedHosts != nil {
-		dst.AllowedHosts = append([]string(nil), policy.AllowedHosts...)
-		rec.replace("context.reference_policy.allowed_hosts", source, dst.AllowedHosts, "replaces the allowed configured-reference URL hosts")
+		dst.AllowedHosts = cloneSlicePreserveEmpty(policy.AllowedHosts)
+		rec.replace(referencePolicyFieldPath("allowed_hosts"), source, policy.AllowedHosts, "replaces the entire allowed host list")
+	}
+
+	if policy.DeniedHosts != nil {
+		dst.DeniedHosts = cloneSlicePreserveEmpty(policy.DeniedHosts)
+		rec.replace(referencePolicyFieldPath("denied_hosts"), source, policy.DeniedHosts, "replaces the entire denied host list")
+	}
+
+	if policy.AllowedPorts != nil {
+		dst.AllowedPorts = cloneSlicePreserveEmpty(policy.AllowedPorts)
+		rec.replace(referencePolicyFieldPath("allowed_ports"), source, policy.AllowedPorts, "replaces the entire allowed port list")
+	}
+
+	if policy.DeniedPorts != nil {
+		dst.DeniedPorts = cloneSlicePreserveEmpty(policy.DeniedPorts)
+		rec.replace(referencePolicyFieldPath("denied_ports"), source, policy.DeniedPorts, "replaces the entire denied port list")
 	}
 
 	if policy.LocalRoots != nil {
-		dst.LocalRoots = append([]string(nil), policy.LocalRoots...)
-		rec.replace("context.reference_policy.local_roots", source, dst.LocalRoots, "replaces explicit local roots for configured references")
+		dst.LocalRoots = cloneSlicePreserveEmpty(policy.LocalRoots)
+		rec.replace(referencePolicyFieldPath("local_roots"), source, policy.LocalRoots, "replaces the entire local root list")
 	}
 
-	if policy.MaxRedirects != nil {
-		dst.MaxRedirects = *policy.MaxRedirects
-		rec.set("context.reference_policy.max_redirects", source, *policy.MaxRedirects)
+	if policy.DeniedLocalRoots != nil {
+		dst.DeniedLocalRoots = cloneSlicePreserveEmpty(policy.DeniedLocalRoots)
+		rec.replace(referencePolicyFieldPath("denied_local_roots"), source, policy.DeniedLocalRoots, "replaces the entire denied local root list")
+	}
+
+	if policy.AllowedGlobs != nil {
+		dst.AllowedGlobs = cloneSlicePreserveEmpty(policy.AllowedGlobs)
+		rec.replace(referencePolicyFieldPath("allowed_globs"), source, policy.AllowedGlobs, "replaces the entire allowed glob list")
+	}
+
+	if policy.DeniedGlobs != nil {
+		dst.DeniedGlobs = cloneSlicePreserveEmpty(policy.DeniedGlobs)
+		rec.replace(referencePolicyFieldPath("denied_globs"), source, policy.DeniedGlobs, "replaces the entire denied glob list")
 	}
 
 	if policy.ContentTypes != nil {
-		dst.ContentTypes = append([]string(nil), policy.ContentTypes...)
-		rec.replace("context.reference_policy.content_types", source, dst.ContentTypes, "replaces allowed configured-reference response content types")
+		dst.ContentTypes = cloneSlicePreserveEmpty(policy.ContentTypes)
+		rec.replace(referencePolicyFieldPath("content_types"), source, policy.ContentTypes, "replaces the entire allowed content-type list")
+	}
+}
+
+func mergeReferencePolicyLimits(dst *ReferencePolicyConfig, policy fileReferencePolicyConfig, rec *originRecorder, source originSource) {
+	if policy.MaxRedirects != nil {
+		dst.MaxRedirects = *policy.MaxRedirects
+		rec.set(referencePolicyFieldPath("max_redirects"), source, *policy.MaxRedirects)
+	}
+
+	if policy.MaxFiles != nil {
+		dst.MaxFiles = *policy.MaxFiles
+		rec.set(referencePolicyFieldPath("max_files"), source, *policy.MaxFiles)
+	}
+
+	if policy.AllowAbsolutePaths != nil {
+		dst.AllowAbsolutePaths = *policy.AllowAbsolutePaths
+		rec.set(referencePolicyFieldPath("allow_absolute_paths"), source, *policy.AllowAbsolutePaths)
 	}
 
 	if policy.AllowPrivateNetworks != nil {
 		dst.AllowPrivateNetworks = *policy.AllowPrivateNetworks
-		rec.set("context.reference_policy.allow_private_networks", source, *policy.AllowPrivateNetworks)
+		rec.set(referencePolicyFieldPath("allow_private_networks"), source, *policy.AllowPrivateNetworks)
 	}
 }
 
-func fileReferencePolicySet(policy fileReferencePolicyConfig) bool {
-	return policy.AllowedSchemes != nil ||
-		policy.AllowedHosts != nil ||
-		policy.LocalRoots != nil ||
-		policy.MaxRedirects != nil ||
-		policy.ContentTypes != nil ||
-		policy.AllowPrivateNetworks != nil
+func referencePolicyFieldPath(field string) string {
+	return "context.reference_policy." + field
 }
 
 func mergeGeneration(dst *Config, generation fileGenerationConfig, rec *originRecorder, source originSource) {
@@ -1356,49 +1466,89 @@ func mergeConfigContext(dst *Config, contextConfig ContextConfig, rec *originRec
 }
 
 func mergeConfigReferencePolicy(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, rec *originRecorder, source originSource) {
-	if referencePolicySet(policy) {
-		rec.merge("context.reference_policy", source, "reference_policy", "merges reference policy fields")
+	mergeConfigReferencePolicyLists(dst, policy, rec, source)
+	mergeConfigReferencePolicyLimits(dst, policy, rec, source)
+}
+
+func mergeConfigReferencePolicyLists(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, rec *originRecorder, source originSource) {
+	if policy.AllowedSchemes != nil {
+		dst.AllowedSchemes = cloneSlicePreserveEmpty(policy.AllowedSchemes)
+		rec.replace(referencePolicyFieldPath("allowed_schemes"), source, policy.AllowedSchemes, "replaces the entire allowed scheme list")
 	}
 
-	if policy.AllowedSchemes != nil {
-		dst.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
-		rec.replace("context.reference_policy.allowed_schemes", source, dst.AllowedSchemes, "replaces the allowed configured-reference URL schemes")
+	if policy.DeniedSchemes != nil {
+		dst.DeniedSchemes = cloneSlicePreserveEmpty(policy.DeniedSchemes)
+		rec.replace(referencePolicyFieldPath("denied_schemes"), source, policy.DeniedSchemes, "replaces the entire denied scheme list")
 	}
 
 	if policy.AllowedHosts != nil {
-		dst.AllowedHosts = append([]string(nil), policy.AllowedHosts...)
-		rec.replace("context.reference_policy.allowed_hosts", source, dst.AllowedHosts, "replaces the allowed configured-reference URL hosts")
+		dst.AllowedHosts = cloneSlicePreserveEmpty(policy.AllowedHosts)
+		rec.replace(referencePolicyFieldPath("allowed_hosts"), source, policy.AllowedHosts, "replaces the entire allowed host list")
+	}
+
+	if policy.DeniedHosts != nil {
+		dst.DeniedHosts = cloneSlicePreserveEmpty(policy.DeniedHosts)
+		rec.replace(referencePolicyFieldPath("denied_hosts"), source, policy.DeniedHosts, "replaces the entire denied host list")
+	}
+
+	if policy.AllowedPorts != nil {
+		dst.AllowedPorts = cloneSlicePreserveEmpty(policy.AllowedPorts)
+		rec.replace(referencePolicyFieldPath("allowed_ports"), source, policy.AllowedPorts, "replaces the entire allowed port list")
+	}
+
+	if policy.DeniedPorts != nil {
+		dst.DeniedPorts = cloneSlicePreserveEmpty(policy.DeniedPorts)
+		rec.replace(referencePolicyFieldPath("denied_ports"), source, policy.DeniedPorts, "replaces the entire denied port list")
 	}
 
 	if policy.LocalRoots != nil {
-		dst.LocalRoots = append([]string(nil), policy.LocalRoots...)
-		rec.replace("context.reference_policy.local_roots", source, dst.LocalRoots, "replaces explicit local roots for configured references")
+		dst.LocalRoots = cloneSlicePreserveEmpty(policy.LocalRoots)
+		rec.replace(referencePolicyFieldPath("local_roots"), source, policy.LocalRoots, "replaces the entire local root list")
 	}
 
-	if policy.MaxRedirects > 0 {
-		dst.MaxRedirects = policy.MaxRedirects
-		rec.set("context.reference_policy.max_redirects", source, policy.MaxRedirects)
+	if policy.DeniedLocalRoots != nil {
+		dst.DeniedLocalRoots = cloneSlicePreserveEmpty(policy.DeniedLocalRoots)
+		rec.replace(referencePolicyFieldPath("denied_local_roots"), source, policy.DeniedLocalRoots, "replaces the entire denied local root list")
+	}
+
+	if policy.AllowedGlobs != nil {
+		dst.AllowedGlobs = cloneSlicePreserveEmpty(policy.AllowedGlobs)
+		rec.replace(referencePolicyFieldPath("allowed_globs"), source, policy.AllowedGlobs, "replaces the entire allowed glob list")
+	}
+
+	if policy.DeniedGlobs != nil {
+		dst.DeniedGlobs = cloneSlicePreserveEmpty(policy.DeniedGlobs)
+		rec.replace(referencePolicyFieldPath("denied_globs"), source, policy.DeniedGlobs, "replaces the entire denied glob list")
 	}
 
 	if policy.ContentTypes != nil {
-		dst.ContentTypes = append([]string(nil), policy.ContentTypes...)
-		rec.replace("context.reference_policy.content_types", source, dst.ContentTypes, "replaces allowed configured-reference response content types")
+		dst.ContentTypes = cloneSlicePreserveEmpty(policy.ContentTypes)
+		rec.replace(referencePolicyFieldPath("content_types"), source, policy.ContentTypes, "replaces the entire allowed content-type list")
+	}
+}
+
+func mergeConfigReferencePolicyLimits(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, rec *originRecorder, source originSource) {
+	if policy.MaxRedirects > 0 {
+		dst.MaxRedirects = policy.MaxRedirects
+		rec.set(referencePolicyFieldPath("max_redirects"), source, policy.MaxRedirects)
+	}
+
+	if policy.MaxFiles > 0 {
+		dst.MaxFiles = policy.MaxFiles
+		rec.set(referencePolicyFieldPath("max_files"), source, policy.MaxFiles)
+	}
+
+	if policy.AllowAbsolutePaths {
+		dst.AllowAbsolutePaths = true
+
+		rec.set(referencePolicyFieldPath("allow_absolute_paths"), source, policy.AllowAbsolutePaths)
 	}
 
 	if policy.AllowPrivateNetworks {
 		dst.AllowPrivateNetworks = true
 
-		rec.set("context.reference_policy.allow_private_networks", source, true)
+		rec.set(referencePolicyFieldPath("allow_private_networks"), source, policy.AllowPrivateNetworks)
 	}
-}
-
-func referencePolicySet(policy ReferencePolicyConfig) bool {
-	return policy.AllowedSchemes != nil ||
-		policy.AllowedHosts != nil ||
-		policy.LocalRoots != nil ||
-		policy.MaxRedirects > 0 ||
-		policy.ContentTypes != nil ||
-		policy.AllowPrivateNetworks
 }
 
 func mergeConfigGeneration(dst *Config, generation GenerationConfig, rec *originRecorder, source originSource) {
@@ -1819,74 +1969,70 @@ func mergeConfigContextFromOrigins(dst *Config, contextConfig ContextConfig, dst
 	mergeConfigReferencePolicyFromOrigins(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy, dstOrigins, srcOrigins)
 }
 
-func mergeConfigReferencePolicyFromOrigins(
-	dst *ReferencePolicyConfig,
-	policy ReferencePolicyConfig,
-	dstOrigins OriginMap,
-	srcOrigins OriginMap,
-) {
-	if referencePolicySet(policy) || originMapHasAny(srcOrigins,
-		"context.reference_policy.allowed_schemes",
-		"context.reference_policy.allowed_hosts",
-		"context.reference_policy.local_roots",
-		"context.reference_policy.max_redirects",
-		"context.reference_policy.content_types",
-		"context.reference_policy.allow_private_networks",
-	) {
-		appendOriginChain(dstOrigins, "context.reference_policy", srcOrigins, false)
+func mergeConfigReferencePolicyFromOrigins(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, dstOrigins, srcOrigins OriginMap) {
+	mergeConfigReferencePolicyListsFromOrigins(dst, policy, dstOrigins, srcOrigins)
+	mergeConfigReferencePolicyLimitsFromOrigins(dst, policy, dstOrigins, srcOrigins)
+}
+
+func mergeConfigReferencePolicyListsFromOrigins(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, dstOrigins, srcOrigins OriginMap) {
+	mergePolicyListFromOrigins(&dst.AllowedSchemes, policy.AllowedSchemes, "allowed_schemes", dstOrigins, srcOrigins)
+	mergePolicyListFromOrigins(&dst.DeniedSchemes, policy.DeniedSchemes, "denied_schemes", dstOrigins, srcOrigins)
+	mergePolicyListFromOrigins(&dst.AllowedHosts, policy.AllowedHosts, "allowed_hosts", dstOrigins, srcOrigins)
+	mergePolicyListFromOrigins(&dst.DeniedHosts, policy.DeniedHosts, "denied_hosts", dstOrigins, srcOrigins)
+	mergePolicyListFromOrigins(&dst.AllowedPorts, policy.AllowedPorts, "allowed_ports", dstOrigins, srcOrigins)
+	mergePolicyListFromOrigins(&dst.DeniedPorts, policy.DeniedPorts, "denied_ports", dstOrigins, srcOrigins)
+	mergePolicyListFromOrigins(&dst.LocalRoots, policy.LocalRoots, "local_roots", dstOrigins, srcOrigins)
+	mergePolicyListFromOrigins(&dst.DeniedLocalRoots, policy.DeniedLocalRoots, "denied_local_roots", dstOrigins, srcOrigins)
+	mergePolicyListFromOrigins(&dst.AllowedGlobs, policy.AllowedGlobs, "allowed_globs", dstOrigins, srcOrigins)
+	mergePolicyListFromOrigins(&dst.DeniedGlobs, policy.DeniedGlobs, "denied_globs", dstOrigins, srcOrigins)
+	mergePolicyListFromOrigins(&dst.ContentTypes, policy.ContentTypes, "content_types", dstOrigins, srcOrigins)
+}
+
+func mergePolicyListFromOrigins[T any](dst *[]T, policy []T, field string, dstOrigins, srcOrigins OriginMap) {
+	path := referencePolicyFieldPath(field)
+	if policy == nil && !originPresent(srcOrigins, path) {
+		return
 	}
 
-	if policy.AllowedSchemes != nil || originMapHas(srcOrigins, "context.reference_policy.allowed_schemes") {
-		dst.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
+	*dst = cloneSlicePreserveEmpty(policy)
 
-		appendOriginChain(dstOrigins, "context.reference_policy.allowed_schemes", srcOrigins, true)
-	}
+	appendOriginChain(dstOrigins, path, srcOrigins, true)
+}
 
-	if policy.AllowedHosts != nil || originMapHas(srcOrigins, "context.reference_policy.allowed_hosts") {
-		dst.AllowedHosts = append([]string(nil), policy.AllowedHosts...)
-
-		appendOriginChain(dstOrigins, "context.reference_policy.allowed_hosts", srcOrigins, true)
-	}
-
-	if policy.LocalRoots != nil || originMapHas(srcOrigins, "context.reference_policy.local_roots") {
-		dst.LocalRoots = append([]string(nil), policy.LocalRoots...)
-
-		appendOriginChain(dstOrigins, "context.reference_policy.local_roots", srcOrigins, true)
-	}
-
-	if policy.MaxRedirects > 0 || originMapHas(srcOrigins, "context.reference_policy.max_redirects") {
+func mergeConfigReferencePolicyLimitsFromOrigins(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, dstOrigins, srcOrigins OriginMap) {
+	if policy.MaxRedirects > 0 || originPresent(srcOrigins, referencePolicyFieldPath("max_redirects")) {
 		dst.MaxRedirects = policy.MaxRedirects
 
-		appendOriginChain(dstOrigins, "context.reference_policy.max_redirects", srcOrigins, false)
+		appendOriginChain(dstOrigins, referencePolicyFieldPath("max_redirects"), srcOrigins, false)
 	}
 
-	if policy.ContentTypes != nil || originMapHas(srcOrigins, "context.reference_policy.content_types") {
-		dst.ContentTypes = append([]string(nil), policy.ContentTypes...)
+	if policy.MaxFiles > 0 || originPresent(srcOrigins, referencePolicyFieldPath("max_files")) {
+		dst.MaxFiles = policy.MaxFiles
 
-		appendOriginChain(dstOrigins, "context.reference_policy.content_types", srcOrigins, true)
+		appendOriginChain(dstOrigins, referencePolicyFieldPath("max_files"), srcOrigins, false)
 	}
 
-	if policy.AllowPrivateNetworks || originMapHas(srcOrigins, "context.reference_policy.allow_private_networks") {
+	if policy.AllowAbsolutePaths || originPresent(srcOrigins, referencePolicyFieldPath("allow_absolute_paths")) {
+		dst.AllowAbsolutePaths = policy.AllowAbsolutePaths
+
+		appendOriginChain(dstOrigins, referencePolicyFieldPath("allow_absolute_paths"), srcOrigins, false)
+	}
+
+	if policy.AllowPrivateNetworks || originPresent(srcOrigins, referencePolicyFieldPath("allow_private_networks")) {
 		dst.AllowPrivateNetworks = policy.AllowPrivateNetworks
 
-		appendOriginChain(dstOrigins, "context.reference_policy.allow_private_networks", srcOrigins, false)
+		appendOriginChain(dstOrigins, referencePolicyFieldPath("allow_private_networks"), srcOrigins, false)
 	}
 }
 
-func originMapHas(origins OriginMap, path string) bool {
+func originPresent(origins OriginMap, path string) bool {
+	if origins == nil {
+		return false
+	}
+
 	origin, ok := origins[path]
 
 	return ok && len(origin.Chain) > 0
-}
-
-func originMapHasAny(origins OriginMap, paths ...string) bool {
-	for _, path := range paths {
-		if originMapHas(origins, path) {
-			return true
-		}
-	}
-
-	return false
 }
 
 func mergeConfigGenerationFromOrigins(dst *Config, generation GenerationConfig, dstOrigins, srcOrigins OriginMap) {
@@ -2165,6 +2311,17 @@ func cloneHooks(hooks []HookConfig) []HookConfig {
 			TimeoutSeconds: hook.TimeoutSeconds,
 		})
 	}
+
+	return out
+}
+
+func cloneSlicePreserveEmpty[T any](in []T) []T {
+	if in == nil {
+		return nil
+	}
+
+	out := make([]T, len(in))
+	copy(out, in)
 
 	return out
 }

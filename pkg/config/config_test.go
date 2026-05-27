@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadFiles_MergesInOrder(t *testing.T) {
@@ -576,6 +577,115 @@ agents:
 	assert.Equal(t, OriginSet, origin[0].Operation)
 }
 
+func TestLoadFilesWithOrigins_TracksReferencePolicyOverrides(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	first := writeConfig(t, dir, "first.yaml", `
+context:
+  reference_policy:
+    allowed_hosts: [docs.example.com]
+    max_redirects: 3
+    max_files: 5
+    allow_absolute_paths: true
+    allow_private_networks: true
+`)
+	second := writeConfig(t, dir, "second.yaml", `
+context:
+  reference_policy:
+    allowed_hosts: []
+    max_redirects: 0
+    max_files: 0
+    allow_absolute_paths: false
+    allow_private_networks: false
+`)
+
+	cfg, loaded, origins, err := LoadFilesWithOrigins([]string{first, second})
+	require.NoError(t, err)
+	require.Equal(t, []string{first, second}, loaded)
+	assert.Empty(t, cfg.Context.ReferencePolicy.AllowedHosts)
+	assert.Equal(t, 0, cfg.Context.ReferencePolicy.MaxRedirects)
+	assert.Equal(t, 0, cfg.Context.ReferencePolicy.MaxFiles)
+	assert.False(t, cfg.Context.ReferencePolicy.AllowAbsolutePaths)
+	assert.False(t, cfg.Context.ReferencePolicy.AllowPrivateNetworks)
+
+	hostsOrigin := origins["context.reference_policy.allowed_hosts"].Chain
+	require.Len(t, hostsOrigin, 2)
+	assert.Equal(t, OriginSet, hostsOrigin[0].Operation)
+	assert.Equal(t, OriginReplace, hostsOrigin[1].Operation)
+	assert.Equal(t, second, hostsOrigin[1].Source)
+	assert.Equal(t, "[]", hostsOrigin[1].Value)
+
+	maxFilesOrigin := origins["context.reference_policy.max_files"].Chain
+	require.Len(t, maxFilesOrigin, 2)
+	assert.Equal(t, OriginOverride, maxFilesOrigin[1].Operation)
+	assert.Equal(t, second, maxFilesOrigin[1].Source)
+	assert.Equal(t, "0", maxFilesOrigin[1].Value)
+
+	redirectOrigin := origins["context.reference_policy.max_redirects"].Chain
+	require.Len(t, redirectOrigin, 2)
+	assert.Equal(t, OriginOverride, redirectOrigin[1].Operation)
+	assert.Equal(t, second, redirectOrigin[1].Source)
+	assert.Equal(t, "0", redirectOrigin[1].Value)
+
+	absoluteOrigin := origins["context.reference_policy.allow_absolute_paths"].Chain
+	require.Len(t, absoluteOrigin, 2)
+	assert.Equal(t, OriginOverride, absoluteOrigin[1].Operation)
+	assert.Equal(t, second, absoluteOrigin[1].Source)
+	assert.Equal(t, "false", absoluteOrigin[1].Value)
+
+	privateNetworksOrigin := origins["context.reference_policy.allow_private_networks"].Chain
+	require.Len(t, privateNetworksOrigin, 2)
+	assert.Equal(t, OriginOverride, privateNetworksOrigin[1].Operation)
+	assert.Equal(t, second, privateNetworksOrigin[1].Source)
+	assert.Equal(t, "false", privateNetworksOrigin[1].Value)
+}
+
+func TestLoadFiles_ContextReferencePolicyPreservesExplicitEmptyDefaultLists(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "empty-reference-policy-lists.yaml", `
+context:
+  reference_policy:
+    allowed_schemes: []
+    content_types: []
+`)
+
+	cfg, _, origins, err := LoadFilesWithOrigins([]string{path})
+	require.NoError(t, err)
+
+	assert.NotNil(t, cfg.Context.ReferencePolicy.AllowedSchemes)
+	assert.Empty(t, cfg.Context.ReferencePolicy.AllowedSchemes)
+	assert.NotNil(t, cfg.Context.ReferencePolicy.ContentTypes)
+	assert.Empty(t, cfg.Context.ReferencePolicy.ContentTypes)
+
+	schemesOrigin := origins["context.reference_policy.allowed_schemes"].Chain
+	require.Len(t, schemesOrigin, 1)
+	assert.Equal(t, "[]", schemesOrigin[0].Value)
+
+	contentTypesOrigin := origins["context.reference_policy.content_types"].Chain
+	require.Len(t, contentTypesOrigin, 1)
+	assert.Equal(t, "[]", contentTypesOrigin[0].Value)
+}
+
+func TestReferencePolicyConfigMarshalYAML_PreservesExplicitEmptyLists(t *testing.T) {
+	t.Parallel()
+
+	out, err := yaml.Marshal(ReferencePolicyConfig{
+		AllowedSchemes: []string{},
+		DeniedHosts:    []string{},
+		ContentTypes:   []string{},
+	})
+	require.NoError(t, err)
+
+	text := string(out)
+	assert.Contains(t, text, "allowed_schemes: []")
+	assert.Contains(t, text, "denied_hosts: []")
+	assert.Contains(t, text, "content_types: []")
+	assert.NotContains(t, text, "allowed_hosts:")
+}
+
 func TestLoadFilesWithOrigins_TracksMapMergeProviderAgentAndPluginReplacement(t *testing.T) {
 	t.Parallel()
 
@@ -820,7 +930,15 @@ func TestLoadWithOrigins_DefaultStackClassifiesEnvAndOverridesProject(t *testing
 
 	global := writeConfig(t, filepath.Join(configHome, "atteler"), "config.yaml", `default_model: gpt-global`)
 	project := writeConfig(t, filepath.Join(projectDir, ".atteler"), "config.yaml", `default_model: gpt-project`)
-	envPath := writeConfig(t, tempDir, "env.yaml", `default_model: gpt-env`)
+	envPath := writeConfig(t, tempDir, "env.yaml", `
+default_model: gpt-env
+context:
+  reference_policy:
+    allowed_schemes: [http]
+    allowed_hosts: [docs.example.com]
+    max_files: 9
+    allow_absolute_paths: true
+`)
 
 	t.Setenv("HOME", tempDir)
 	t.Setenv("XDG_CONFIG_HOME", configHome)
@@ -844,6 +962,17 @@ func TestLoadWithOrigins_DefaultStackClassifiesEnvAndOverridesProject(t *testing
 	assert.Equal(t, OriginProjectFile, chain[1].Kind)
 	assert.Equal(t, OriginEnvFile, chain[2].Kind)
 	assert.Equal(t, envPath, chain[2].Source)
+
+	assert.Equal(t, []string{"http"}, cfg.Context.ReferencePolicy.AllowedSchemes)
+	assert.Equal(t, []string{"docs.example.com"}, cfg.Context.ReferencePolicy.AllowedHosts)
+	assert.Equal(t, 9, cfg.Context.ReferencePolicy.MaxFiles)
+	assert.True(t, cfg.Context.ReferencePolicy.AllowAbsolutePaths)
+
+	policyOrigin := origins["context.reference_policy.max_files"].Chain
+	require.Len(t, policyOrigin, 1)
+	assert.Equal(t, OriginEnvFile, policyOrigin[0].Kind)
+	assert.Equal(t, envPath, policyOrigin[0].Source)
+	assert.Equal(t, "9", policyOrigin[0].Value)
 }
 
 func TestLoadWithDiagnostics_ReturnsHarnessWarningsWhenConfigFileFails(t *testing.T) {
@@ -978,25 +1107,47 @@ func TestLoadFiles_ContextReferencePolicy(t *testing.T) {
 context:
   reference_policy:
     allowed_schemes: [https]
+    denied_schemes: [http]
     allowed_hosts:
       - docs.example.com
       - "*.trusted.example"
+    denied_hosts:
+      - blocked.example.com
+    allowed_ports: [443, 8443]
+    denied_ports: [81]
     local_roots:
       - ../shared-style
+    denied_local_roots:
+      - ../shared-style/secrets
+    allowed_globs:
+      - docs/**/*.md
+    denied_globs:
+      - "**/*.pem"
     max_redirects: 2
+    max_files: 7
     content_types:
       - text/*
       - application/json
+    allow_absolute_paths: true
     allow_private_networks: false
 `)
 
 	cfg, _, origins, err := LoadFilesWithOrigins([]string{path})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"https"}, cfg.Context.ReferencePolicy.AllowedSchemes)
+	assert.Equal(t, []string{"http"}, cfg.Context.ReferencePolicy.DeniedSchemes)
 	assert.Equal(t, []string{"docs.example.com", "*.trusted.example"}, cfg.Context.ReferencePolicy.AllowedHosts)
+	assert.Equal(t, []string{"blocked.example.com"}, cfg.Context.ReferencePolicy.DeniedHosts)
+	assert.Equal(t, []int{443, 8443}, cfg.Context.ReferencePolicy.AllowedPorts)
+	assert.Equal(t, []int{81}, cfg.Context.ReferencePolicy.DeniedPorts)
 	assert.Equal(t, []string{"../shared-style"}, cfg.Context.ReferencePolicy.LocalRoots)
+	assert.Equal(t, []string{"../shared-style/secrets"}, cfg.Context.ReferencePolicy.DeniedLocalRoots)
+	assert.Equal(t, []string{"docs/**/*.md"}, cfg.Context.ReferencePolicy.AllowedGlobs)
+	assert.Equal(t, []string{"**/*.pem"}, cfg.Context.ReferencePolicy.DeniedGlobs)
 	assert.Equal(t, 2, cfg.Context.ReferencePolicy.MaxRedirects)
+	assert.Equal(t, 7, cfg.Context.ReferencePolicy.MaxFiles)
 	assert.Equal(t, []string{"text/*", "application/json"}, cfg.Context.ReferencePolicy.ContentTypes)
+	assert.True(t, cfg.Context.ReferencePolicy.AllowAbsolutePaths)
 	assert.False(t, cfg.Context.ReferencePolicy.AllowPrivateNetworks)
 
 	allowedHostsOrigin, ok := origins.Final("context.reference_policy.allowed_hosts")

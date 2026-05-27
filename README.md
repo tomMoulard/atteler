@@ -507,10 +507,12 @@ placing it in `<configured_references>`, records provenance (scope, local vs
 remote, size, provider-calibrated token point estimate/error bound/upper bound,
 truncation, digest, fetch time, redirect target when applicable, policy
 decision, and machine-readable reason code), and prints both per-reference audit
-lines and a JSON reference manifest
-for every loaded, truncated, skipped, omitted, or rejected configured reference.
-If any configured reference is rejected, that configured-reference block is
-omitted instead of silently sending partial context.
+lines and a JSON reference manifest for every loaded, truncated, skipped,
+omitted, or rejected configured reference. If any configured reference is
+rejected, that configured-reference block is omitted instead of silently sending
+partial context. Reference text, sources, and diagnostics are sanitized for
+control characters and common secret-looking values before they are printed or
+sent to a model.
 
 Before each model request, Atteler also emits a `context_manifest` hook/event
 with the final message count, provider-calibrated input-token upper bound,
@@ -518,16 +520,23 @@ the estimator profile/calibration ID and error-bound margin used for that upper
 bound, configured and model-window budget fit (including fallback-model
 estimates), inline `@path` references with content digests, configured
 reference decisions, truncation status, omissions, and skipped/rejected reason
-codes.
-Rejected inline `@path` attempts emit the same manifest shape before aborting
-request assembly, so blocked root escapes and symlink escapes remain auditable.
+codes. Rejected inline `@path` attempts emit the same manifest shape before
+aborting request assembly, so blocked root escapes and symlink escapes remain
+auditable.
 
 By default, configured local references must stay under the current working
-directory and should be written as relative paths. Add explicit `local_roots`
-for audited absolute or outside-root reads. Remote references support only HTTP(S) URLs and are denied unless
-`reference_policy.allowed_hosts` allows the host; private, loopback, link-local,
-and multicast targets remain blocked unless `allow_private_networks: true` is
-set deliberately. Host wildcards such as
+directory. Absolute paths require `allow_absolute_paths: true`; paths outside
+the working directory also require an explicit `local_roots` entry and are
+audited in the reference provenance. Local glob policy is evaluated against the
+path shown relative to the allowed root that contains the file, so entries under
+extra `local_roots` should use patterns relative to those roots. Remote
+references support only HTTP(S) URLs, default to HTTPS-only, and are denied
+unless `reference_policy.allowed_hosts` allows the host and the port policy
+allows the effective port. Leave `allowed_schemes` or `content_types` unset to
+use the safe defaults; set either list to `[]` only when you intentionally want
+to deny all remote schemes or response MIME types. Private, loopback,
+link-local, and multicast targets remain blocked unless
+`allow_private_networks: true` is set deliberately. Host wildcards such as
 `*.docs.example.com` match subdomains only; list `docs.example.com` separately
 if the apex host should also be trusted.
 
@@ -540,12 +549,25 @@ context:
     allowed_schemes: [https]
     allowed_hosts:
       - docs.example.com
+    denied_hosts: []
+    allowed_ports: [443]
+    denied_ports: []
     local_roots:
       - ../shared-style-guides
+    denied_local_roots: []
+    allowed_globs:
+      # Matched relative to the allowed root containing each file.
+      - docs/**/*.md
+      - "**/*.md"
+    denied_globs:
+      - "**/*.pem"
+      - "**/.env"
     max_redirects: 0
+    max_files: 200
     content_types:
       - text/*
       - application/json
+    allow_absolute_paths: false
     allow_private_networks: false
 
 agents:

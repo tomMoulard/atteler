@@ -832,11 +832,15 @@ func shouldRetry(status string, attempt, maxAttempts int) bool {
 }
 
 func statusForAttempt(attemptErr, parentErr, err error, timeoutExceeded bool) string {
+	if errors.Is(parentErr, context.Canceled) {
+		return StatusCanceled
+	}
+
 	if errors.Is(attemptErr, context.DeadlineExceeded) {
 		return StatusTimedOut
 	}
 
-	if errors.Is(parentErr, context.Canceled) || errors.Is(attemptErr, context.Canceled) {
+	if errors.Is(attemptErr, context.Canceled) {
 		return StatusCanceled
 	}
 
@@ -867,7 +871,9 @@ func errorForStatus(attemptCtx, parentCtx context.Context, status string, err er
 
 	if status == StatusCanceled {
 		cause := contextCauseOrErr(attemptCtx, context.Canceled)
-		if errors.Is(cause, context.Canceled) && parentCtx != nil {
+		if parentCtx != nil && errors.Is(parentCtx.Err(), context.Canceled) {
+			cause = contextCauseOrErr(parentCtx, context.Canceled)
+		} else if errors.Is(cause, context.Canceled) && parentCtx != nil {
 			cause = contextCauseOrErr(parentCtx, context.Canceled)
 		}
 

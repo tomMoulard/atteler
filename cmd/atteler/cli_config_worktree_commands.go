@@ -768,13 +768,33 @@ func contextOptionsForRequestModels(opts contextref.Options, reg *llm.Registry, 
 
 func referencePolicyFromConfig(policy appconfig.ReferencePolicyConfig) contextref.ReferencePolicy {
 	return contextref.ReferencePolicy{
-		AllowedSchemes:       append([]string(nil), policy.AllowedSchemes...),
-		AllowedHosts:         append([]string(nil), policy.AllowedHosts...),
-		LocalRoots:           append([]string(nil), policy.LocalRoots...),
+		AllowedSchemes:       cloneSlicePreserveEmpty(policy.AllowedSchemes),
+		DeniedSchemes:        cloneSlicePreserveEmpty(policy.DeniedSchemes),
+		AllowedHosts:         cloneSlicePreserveEmpty(policy.AllowedHosts),
+		DeniedHosts:          cloneSlicePreserveEmpty(policy.DeniedHosts),
+		AllowedPorts:         cloneSlicePreserveEmpty(policy.AllowedPorts),
+		DeniedPorts:          cloneSlicePreserveEmpty(policy.DeniedPorts),
+		LocalRoots:           cloneSlicePreserveEmpty(policy.LocalRoots),
+		DeniedLocalRoots:     cloneSlicePreserveEmpty(policy.DeniedLocalRoots),
+		AllowedGlobs:         cloneSlicePreserveEmpty(policy.AllowedGlobs),
+		DeniedGlobs:          cloneSlicePreserveEmpty(policy.DeniedGlobs),
 		MaxRedirects:         policy.MaxRedirects,
-		ContentTypes:         append([]string(nil), policy.ContentTypes...),
+		MaxFiles:             policy.MaxFiles,
+		ContentTypes:         cloneSlicePreserveEmpty(policy.ContentTypes),
+		AllowAbsolutePaths:   policy.AllowAbsolutePaths,
 		AllowPrivateNetworks: policy.AllowPrivateNetworks,
 	}
+}
+
+func cloneSlicePreserveEmpty[T any](in []T) []T {
+	if in == nil {
+		return nil
+	}
+
+	out := make([]T, len(in))
+	copy(out, in)
+
+	return out
 }
 
 // loadConfiguredReferences resolves the configured reference paths/URLs at
@@ -804,7 +824,10 @@ func loadConfiguredReferenceContext(ctx context.Context, refs []string, opts con
 func loadConfiguredReferenceContextForScope(ctx context.Context, refs []string, opts contextref.Options) configuredReferenceContext {
 	estimatorSummary := estimatorSummaryForContextOptions(opts)
 	if len(refs) == 0 {
-		return configuredReferenceContext{Estimator: estimatorSummary}
+		return configuredReferenceContext{
+			Manifest:  withReferenceManifestEstimator(contextref.BuildReferenceManifest(nil), estimatorSummary),
+			Estimator: estimatorSummary,
+		}
 	}
 
 	loaded, referenceEvents, err := contextref.LoadReferencesWithReport(ctx, refs, opts)
@@ -827,6 +850,10 @@ func loadConfiguredReferenceContextForScope(ctx context.Context, refs []string, 
 			fmt.Fprintln(os.Stderr, formatReferenceManifest(manifest))
 		}
 
+		if manifest.RejectedCount > 0 {
+			fmt.Fprintf(os.Stderr, "warning: loading configured references rejected %d reference(s); omitting configured reference context\n", manifest.RejectedCount)
+		}
+
 		fmt.Fprintf(os.Stderr, "warning: loading configured references failed; omitting configured reference context: %v\n", err)
 
 		return configuredReferenceContext{Manifest: manifest, Estimator: estimatorSummary}
@@ -845,7 +872,7 @@ func loadConfiguredReferenceContextForScope(ctx context.Context, refs []string, 
 
 func withReferenceManifestEstimator(manifest contextref.ReferenceManifest, estimatorSummary string) contextref.ReferenceManifest {
 	if manifest.TokenEstimator == "" {
-		manifest.TokenEstimator = estimatorSummary
+		manifest.TokenEstimator = sanitizeContextManifestText(estimatorSummary)
 	}
 
 	return manifest
