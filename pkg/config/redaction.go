@@ -76,10 +76,7 @@ func RedactedConfig(cfg Config) Config {
 	out.FallbackModels = append([]string(nil), cfg.FallbackModels...)
 	out.ModelAliases = maps.Clone(cfg.ModelAliases)
 	out.Context.References = redactStringSlice("references", cfg.Context.References)
-	out.Context.ReferencePolicy.AllowedSchemes = append([]string(nil), cfg.Context.ReferencePolicy.AllowedSchemes...)
-	out.Context.ReferencePolicy.AllowedHosts = append([]string(nil), cfg.Context.ReferencePolicy.AllowedHosts...)
-	out.Context.ReferencePolicy.LocalRoots = append([]string(nil), cfg.Context.ReferencePolicy.LocalRoots...)
-	out.Context.ReferencePolicy.ContentTypes = append([]string(nil), cfg.Context.ReferencePolicy.ContentTypes...)
+	out.Context.ReferencePolicy = redactedReferencePolicyConfig(cfg.Context.ReferencePolicy)
 
 	out.Plugins.Paths = append([]string(nil), cfg.Plugins.Paths...)
 	if cfg.Plugins.Policy != nil {
@@ -111,6 +108,22 @@ func redactedAgentLoopConfig(cfg AgentLoopConfig) AgentLoopConfig {
 	cfg.CheckpointInterval = clonePtr(cfg.CheckpointInterval)
 
 	return cfg
+}
+
+func redactedReferencePolicyConfig(policy ReferencePolicyConfig) ReferencePolicyConfig {
+	policy.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
+	policy.DeniedSchemes = append([]string(nil), policy.DeniedSchemes...)
+	policy.AllowedHosts = append([]string(nil), policy.AllowedHosts...)
+	policy.DeniedHosts = append([]string(nil), policy.DeniedHosts...)
+	policy.AllowedPorts = append([]int(nil), policy.AllowedPorts...)
+	policy.DeniedPorts = append([]int(nil), policy.DeniedPorts...)
+	policy.LocalRoots = append([]string(nil), policy.LocalRoots...)
+	policy.DeniedLocalRoots = append([]string(nil), policy.DeniedLocalRoots...)
+	policy.AllowedGlobs = append([]string(nil), policy.AllowedGlobs...)
+	policy.DeniedGlobs = append([]string(nil), policy.DeniedGlobs...)
+	policy.ContentTypes = append([]string(nil), policy.ContentTypes...)
+
+	return policy
 }
 
 func clonePtr[T any](value *T) *T {

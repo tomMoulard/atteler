@@ -501,6 +501,21 @@ func (p doctorHealthyProvider) Complete(context.Context, llm.CompleteParams) (*l
 
 func (p doctorHealthyProvider) ModelContextWindow(string) int { return 12345 }
 
+func TestLoadConfiguredReferenceContextRecordsEstimatorForEmptyReferences(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	opts := contextOptionsForProviderModel(contextref.Options{Root: dir}, "anthropic", "claude-test")
+
+	refCtx := loadConfiguredReferenceContext(t.Context(), nil, opts)
+
+	assert.Empty(t, refCtx.Content)
+	assert.Empty(t, refCtx.Manifest.Entries)
+	assert.Equal(t, 1, refCtx.Manifest.SchemaVersion)
+	assert.Contains(t, refCtx.Estimator, "anthropic-calibrated")
+	assert.Contains(t, refCtx.Manifest.TokenEstimator, "anthropic-calibrated")
+}
+
 func TestLoadConfiguredReferenceContextRecordsEstimatorForRejectedOnlyManifest(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
 	dir := t.TempDir()
 	opts := contextOptionsForProviderModel(contextref.Options{Root: dir}, "anthropic", "claude-test")

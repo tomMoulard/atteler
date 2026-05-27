@@ -1,6 +1,9 @@
 package eval
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 var (
 	quotedSecretAssignmentPattern = regexp.MustCompile(`(?i)(["'][A-Za-z0-9_.-]*(api[_-]?key|access[_-]?key|access[_-]?token|auth[_-]?token|authorization|token|secret|password|passwd|private[_-]?key|credential|signature|jwt|cookie|session)[A-Za-z0-9_.-]*["'])(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,"'&}\]]+)`)
@@ -26,5 +29,7 @@ func Redact(s string) string {
 	redacted = authorizationPattern.ReplaceAllString(redacted, "$1$2$3[REDACTED]")
 	redacted = quotedSecretAssignmentPattern.ReplaceAllString(redacted, "$1$3[REDACTED]")
 
-	return secretAssignmentPattern.ReplaceAllString(redacted, "$1$3[REDACTED]")
+	redacted = secretAssignmentPattern.ReplaceAllString(redacted, "$1$3[REDACTED]")
+
+	return strings.ReplaceAll(redacted, "[REDACTED]]", "[REDACTED]")
 }

@@ -283,11 +283,11 @@ func LoadReferencesWithReport(ctx context.Context, refs []string, opts Options) 
 // records every included, skipped, truncated, and rejected reference decision.
 func LoadReferencesWithManifest(ctx context.Context, refs []string, opts Options) ([]LoadedReference, ReferenceManifest, error) {
 	if err := requireReferenceContext(ctx); err != nil {
-		return nil, ReferenceManifest{}, err
+		return nil, abortedReferenceManifest(refs, opts, err), err
 	}
 
 	if len(refs) == 0 {
-		return nil, ReferenceManifest{}, nil
+		return nil, BuildReferenceManifest(nil), nil
 	}
 
 	opts = normalizeOptions(opts)
@@ -311,8 +311,9 @@ func LoadReferencesWithManifest(ctx context.Context, refs []string, opts Options
 		entryCount int
 	)
 
-	for _, raw := range refs {
+	for i, raw := range refs {
 		if err := requireReferenceContext(ctx); err != nil {
+			manifest.Append(abortedReferenceEvents(refs[i:], opts, err)...)
 			return out, BuildReferenceManifest(manifest.Entries), errors.Join(append(errs, err)...)
 		}
 
@@ -371,6 +372,28 @@ func rejectedPolicyManifest(refs []string, opts Options, policyErr error) Refere
 	}
 
 	return BuildReferenceManifest(manifest.Entries)
+}
+
+func abortedReferenceManifest(refs []string, opts Options, contextErr error) ReferenceManifest {
+	return BuildReferenceManifest(abortedReferenceEvents(refs, opts, contextErr))
+}
+
+func abortedReferenceEvents(refs []string, opts Options, contextErr error) []ReferenceEvent {
+	reason := "request aborted: " + contextErr.Error()
+	events := make([]ReferenceEvent, 0, len(refs))
+
+	for _, raw := range refs {
+		ref := strings.TrimSpace(raw)
+		if ref == "" {
+			events = append(events, newReferenceEvent(raw, "", "", opts, ReferenceDecisionSkipped, "empty reference"))
+			continue
+		}
+
+		kind, location := referenceKindLocation(ref)
+		events = append(events, newReferenceEvent(ref, kind, location, opts, ReferenceDecisionRejected, reason))
+	}
+
+	return events
 }
 
 func referenceKindLocation(ref string) (kind, location string) {
@@ -605,28 +628,6 @@ func singletonLoaded(loaded LoadedReference, event ReferenceEvent, err error) ([
 	return []LoadedReference{loaded}, []ReferenceEvent{event}, nil
 }
 
-func referenceErrorSource(ref string, events []ReferenceEvent) string {
-	for i := range events {
-		if strings.TrimSpace(events[i].Source) != "" {
-			return events[i].Source
-		}
-	}
-
-	if isURL(ref) {
-		return referenceURLSource(ref)
-	}
-
-	return ref
-}
-
-func skippedReferenceEvent(ref string, opts Options, reason string) ReferenceEvent {
-	if isURL(ref) {
-		return newReferenceEvent(referenceURLSource(ref), kindURL, referenceLocationRemote, opts, ReferenceDecisionSkipped, reason)
-	}
-
-	return newReferenceEvent(ref, kindFile, referenceLocationLocal, opts, ReferenceDecisionSkipped, reason)
-}
-
 // FormatReferences renders loaded references as an XML-ish block suitable for
 // prepending to a system prompt or appending to a user message. Reference text
 // is XML-escaped so content cannot close tags or forge sibling prompt sections.
@@ -708,14 +709,6 @@ func FormatReferences(refs []LoadedReference) string {
 	b.WriteString("</configured_references>")
 
 	return b.String()
-}
-
-func displayReferenceSource(ref LoadedReference) string {
-	if ref.Kind == kindURL || isURL(ref.Source) {
-		return referenceURLSource(ref.Source)
-	}
-
-	return ref.Source
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,6 +1067,8 @@ func isGlob(ref string) bool {
 
 // loadGlob expands a glob pattern and loads every matching text file. The
 // pattern may contain ** to match zero or more directory levels.
+//
+//nolint:gocognit,cyclop // Keeps ordered policy, budget, and symlink manifest decisions in one loop.
 func loadGlob(pattern string, opts Options, policy normalizedReferencePolicy, total, entryCount int) ([]LoadedReference, []ReferenceEvent, error) {
 	if err := validateReferenceGlob(pattern); err != nil {
 		event := newReferenceEvent(pattern, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error())
@@ -1127,6 +1122,20 @@ func loadGlob(pattern string, opts Options, policy normalizedReferencePolicy, to
 			continue
 		}
 
+		loadPath, symlinkEvent, ok := globLoadPath(path, source, opts, policy)
+		if symlinkEvent.PolicyDecision != "" {
+			events = append(events, symlinkEvent)
+		}
+
+		if !ok {
+			continue
+		}
+
+		if err := validateSymlinkTargetGlobPolicy(path, loadPath, source, opts, policy); err != nil {
+			events = append(events, newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error()))
+			continue
+		}
+
 		if policy.maxFiles > 0 && entryCount >= policy.maxFiles {
 			events = append(events, newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionSkipped, "max_files reached"))
 			break
@@ -1139,20 +1148,6 @@ func loadGlob(pattern string, opts Options, policy normalizedReferencePolicy, to
 		}
 
 		limit := min(opts.MaxFileBytes, remaining)
-		loadPath := path
-		if isSymlink(path) {
-			var skipEvent ReferenceEvent
-			var ok bool
-
-			loadPath, skipEvent, ok = symlinkTargetLoadPath(path, source, opts, policy)
-			if skipEvent.PolicyDecision != "" {
-				events = append(events, skipEvent)
-			}
-
-			if !ok {
-				continue
-			}
-		}
 
 		loaded, event, loadErr := loadSingleFile(loadPath, source, limit, opts)
 		if loadErr != nil {
@@ -1245,6 +1240,27 @@ func globSkipEvents(skipped []globSkip, rawBase, absBase string, opts Options, p
 	}
 
 	return events
+}
+
+func globLoadPath(path, source string, opts Options, policy normalizedReferencePolicy) (string, ReferenceEvent, bool) {
+	if !isSymlink(path) {
+		return path, ReferenceEvent{}, true
+	}
+
+	return symlinkTargetLoadPath(path, source, opts, policy)
+}
+
+func validateSymlinkTargetGlobPolicy(path, loadPath, source string, opts Options, policy normalizedReferencePolicy) error {
+	if path == loadPath {
+		return nil
+	}
+
+	targetSource := localGlobPolicySource(loadPath, opts, policy)
+	if targetSource == source {
+		return nil
+	}
+
+	return validateLocalGlobPolicySources(policy, targetSource)
 }
 
 func resolveGlobBaseAndPattern(pattern string, opts Options) (rawBase, base, absPattern string, err error) {
@@ -1408,9 +1424,9 @@ func expandGlob(base, absPattern string, deniedRoots []string) ([]string, []glob
 
 func (g *globExpansion) walk(path string, entry fs.DirEntry, walkErr error) error {
 	if walkErr != nil {
-		g.skipped = append(g.skipped, globSkip{Source: path, Reason: walkErr.Error()})
+		g.skipped = append(g.skipped, globSkip{Source: path, Reason: safePathErrorMessage(walkErr)})
 
-		return nil //nolint:nilerr // manifest records inaccessible entries as skipped
+		return nil // manifest records inaccessible entries as skipped
 	}
 
 	if g.skipDeniedRoot(path) {
@@ -1426,7 +1442,7 @@ func (g *globExpansion) walk(path string, entry fs.DirEntry, walkErr error) erro
 	}
 
 	if entry.Type()&os.ModeSymlink != 0 {
-		g.matches = append(g.matches, path)
+		g.collectSymlink(path)
 		return nil
 	}
 
@@ -1466,6 +1482,17 @@ func (g *globExpansion) skipNonRegular(entry fs.DirEntry, path string) {
 	if shouldReportGlobNonRegularSkip(entry, path, g.absPattern) {
 		g.skipped = append(g.skipped, globSkip{Source: path, Reason: nonRegularEntryReason(entry)})
 	}
+}
+
+func (g *globExpansion) collectSymlink(path string) {
+	if matchGlob(g.absPattern, filepath.ToSlash(path)) || symlinkTargetMayNeedManifest(path) {
+		g.matches = append(g.matches, path)
+	}
+}
+
+func symlinkTargetMayNeedManifest(path string) bool {
+	info, err := os.Stat(path)
+	return err != nil || info.IsDir()
 }
 
 func (g *globExpansion) collectMatch(path string) error {
@@ -1549,7 +1576,7 @@ func loadDirectory(dir, ref string, opts Options, policy normalizedReferencePoli
 	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			source := directoryEventSource(path, dir, ref, opts, policy)
-			events = append(events, newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionSkipped, walkErr.Error()))
+			events = append(events, newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionSkipped, safePathErrorMessage(walkErr)))
 
 			return nil // skip inaccessible entries in directory walk
 		}
@@ -1639,6 +1666,16 @@ func loadDirectoryFile(
 		return LoadedReference{}, event, false, false
 	}
 
+	loadPath, symlinkEvent, ok := directoryLoadPath(path, source, opts, policy)
+	if !ok {
+		return LoadedReference{}, symlinkEvent, false, false
+	}
+
+	if err := validateSymlinkTargetGlobPolicy(path, loadPath, source, opts, policy); err != nil {
+		event := newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error())
+		return LoadedReference{}, event, false, false
+	}
+
 	if policy.maxFiles > 0 && entryCount >= policy.maxFiles {
 		event := newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionSkipped, "max_files reached")
 		return LoadedReference{}, event, false, true
@@ -1651,20 +1688,10 @@ func loadDirectoryFile(
 	}
 
 	limit := min(opts.MaxFileBytes, remaining)
-	loadPath := path
-	var event ReferenceEvent
-	if isSymlink(path) {
-		var ok bool
-
-		loadPath, event, ok = symlinkTargetLoadPath(path, source, opts, policy)
-		if !ok {
-			return LoadedReference{}, event, false, false
-		}
-	}
 
 	loaded, event, loadErr := loadSingleFile(loadPath, source, limit, opts)
 	if loadErr != nil {
-		event.PolicyDecision = ReferenceDecisionSkipped
+		event = withReferenceDecision(event, ReferenceDecisionSkipped, event.PolicyReason)
 		return LoadedReference{}, event, false, false
 	}
 
@@ -1725,6 +1752,14 @@ func nonRegularEntryReason(entry fs.DirEntry) string {
 	}
 
 	return "non-regular entry skipped by reference policy"
+}
+
+func directoryLoadPath(path, source string, opts Options, policy normalizedReferencePolicy) (string, ReferenceEvent, bool) {
+	if !isSymlink(path) {
+		return path, ReferenceEvent{}, true
+	}
+
+	return symlinkTargetLoadPath(path, source, opts, policy)
 }
 
 func isSymlink(path string) bool {
@@ -1800,7 +1835,7 @@ func annotateOutOfRootLocalReference(loaded *LoadedReference, event *ReferenceEv
 		event.PolicyReason = appendPolicyReason(event.PolicyReason, "outside root allowed by reference policy local_roots")
 	}
 
-	loaded.Provenance.PolicyReason = event.PolicyReason
+	syncReferencePolicyReason(loaded, event)
 }
 
 func referenceOutsidePolicyRoot(policy normalizedReferencePolicy, paths ...string) bool {
@@ -1819,7 +1854,17 @@ func referenceOutsidePolicyRoot(policy normalizedReferencePolicy, paths ...strin
 
 func annotateAbsoluteLocalReference(loaded *LoadedReference, event *ReferenceEvent) {
 	event.PolicyReason = appendPolicyReason(event.PolicyReason, "absolute path allowed by reference policy")
+	syncReferencePolicyReason(loaded, event)
+}
+
+func syncReferencePolicyReason(loaded *LoadedReference, event *ReferenceEvent) {
+	if loaded == nil || event == nil {
+		return
+	}
+
+	event.PolicyReasonCode = ReferenceReasonCode(event.PolicyDecision, event.PolicyReason)
 	loaded.Provenance.PolicyReason = event.PolicyReason
+	loaded.Provenance.PolicyReasonCode = event.PolicyReasonCode
 }
 
 // ---------------------------------------------------------------------------
@@ -1935,7 +1980,7 @@ func isURL(ref string) bool {
 func referenceURLSource(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return redactMalformedURLSource(rawURL)
+		return sanitizeMalformedReferenceSource(rawURL)
 	}
 
 	return referenceURLSourceFromParsed(parsed)
@@ -1951,98 +1996,39 @@ func referenceURLSourceFromParsed(parsed *url.URL) string {
 		safe.User = url.User("REDACTED")
 	}
 
-	query := safe.Query()
-	for key, values := range query {
-		if !sensitiveURLQueryKey(key) {
-			continue
-		}
-
-		for i := range values {
-			values[i] = "REDACTED"
-		}
-
-		query[key] = values
-	}
-
-	safe.RawQuery = query.Encode()
+	safe.Host = sanitizeReferenceDiagnosticPlain(safe.Host)
+	safe.Path = sanitizeReferenceDiagnosticPlain(safe.Path)
+	safe.RawPath = ""
+	safe.Fragment = sanitizeReferenceDiagnosticPlain(safe.Fragment)
+	safe.RawQuery = sanitizeReferenceURLDisplayQuery(safe.Query()).Encode()
 
 	return safe.String()
 }
 
+func sanitizeReferenceURLDisplayQuery(query url.Values) url.Values {
+	sanitized := make(url.Values, len(query))
+	for key, values := range query {
+		sensitive := sensitiveURLQueryKey(key)
+		safeKey := sanitizeReferenceQueryKey(key, key, sensitive)
+		safeValues := make([]string, len(values))
+
+		for i := range values {
+			if sensitive {
+				safeValues[i] = "REDACTED"
+				continue
+			}
+
+			safeValues[i] = sanitizeReferenceDiagnosticPlain(values[i])
+		}
+
+		sanitized[safeKey] = append(sanitized[safeKey], safeValues...)
+	}
+
+	return sanitized
+}
+
 func sensitiveURLQueryKey(key string) bool {
-	key = strings.ToLower(strings.TrimSpace(key))
-	key = strings.NewReplacer("-", "_", ".", "_").Replace(key)
-
-	switch key {
-	case "api_key", "apikey", "access_key", "auth", "authorization", "key", "password", "passwd", "pwd", "secret":
-		return true
-	}
-
-	return strings.Contains(key, "token") ||
-		strings.Contains(key, "secret") ||
-		strings.Contains(key, "credential") ||
-		strings.Contains(key, "password") ||
-		strings.Contains(key, "private_key")
-}
-
-func redactMalformedURLSource(rawURL string) string {
-	safe := redactURLUserInfoFallback(rawURL)
-
-	queryStart := strings.Index(safe, "?")
-	if queryStart < 0 {
-		return safe
-	}
-
-	queryEnd := len(safe)
-	if fragmentStart := strings.Index(safe[queryStart+1:], "#"); fragmentStart >= 0 {
-		queryEnd = queryStart + 1 + fragmentStart
-	}
-
-	query := safe[queryStart+1 : queryEnd]
-	if query == "" {
-		return safe
-	}
-
-	parts := strings.Split(query, "&")
-	for i, part := range parts {
-		key, _, _ := strings.Cut(part, "=")
-
-		decodedKey, err := url.QueryUnescape(key)
-		if err != nil {
-			decodedKey = key
-		}
-
-		if sensitiveURLQueryKey(decodedKey) {
-			parts[i] = key + "=REDACTED"
-		}
-	}
-
-	return safe[:queryStart+1] + strings.Join(parts, "&") + safe[queryEnd:]
-}
-
-func redactURLUserInfoFallback(rawURL string) string {
-	schemeIdx := strings.Index(rawURL, "://")
-	if schemeIdx < 0 {
-		return rawURL
-	}
-
-	authorityStart := schemeIdx + len("://")
-	authorityEnd := len(rawURL)
-
-	for _, sep := range []string{"/", "?", "#"} {
-		if idx := strings.Index(rawURL[authorityStart:], sep); idx >= 0 && authorityStart+idx < authorityEnd {
-			authorityEnd = authorityStart + idx
-		}
-	}
-
-	authority := rawURL[authorityStart:authorityEnd]
-
-	at := strings.LastIndex(authority, "@")
-	if at < 0 {
-		return rawURL
-	}
-
-	return rawURL[:authorityStart] + "REDACTED" + authority[at:] + rawURL[authorityEnd:]
+	return sensitiveQueryKey(key)
 }
 
 func redactURLsInText(text string) string {
@@ -2999,6 +2985,29 @@ func sanitizeReferenceDiagnostic(value string) string {
 	return b.String()
 }
 
+func sanitizeReferenceReason(value string) string {
+	matches := referenceURLInTextPattern.FindAllStringIndex(value, -1)
+	if len(matches) == 0 {
+		return sanitizeReferenceDiagnosticPlain(value)
+	}
+
+	var (
+		b    strings.Builder
+		last int
+	)
+
+	for _, match := range matches {
+		b.WriteString(sanitizeReferenceDiagnosticPlain(value[last:match[0]]))
+		b.WriteString(referenceURLSource(value[match[0]:match[1]]))
+
+		last = match[1]
+	}
+
+	b.WriteString(sanitizeReferenceDiagnosticPlain(value[last:]))
+
+	return b.String()
+}
+
 func sanitizeReferenceSource(source string) string {
 	parsed, err := url.Parse(source)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -3221,13 +3230,25 @@ func provenanceForFormat(ref LoadedReference, formattedContent string) Reference
 func sanitizeReferenceEvent(event ReferenceEvent) ReferenceEvent {
 	if event.Kind == kindURL || isURL(event.Source) {
 		event.Source = referenceURLSource(event.Source)
+	} else {
+		event.Source = sanitizeReferenceDiagnostic(event.Source)
 	}
 
 	if event.ResolvedSource != "" && (event.Kind == kindURL || isURL(event.ResolvedSource)) {
 		event.ResolvedSource = referenceURLSource(event.ResolvedSource)
+	} else {
+		event.ResolvedSource = sanitizeReferenceDiagnostic(event.ResolvedSource)
 	}
 
-	event.PolicyReason = redactURLsInText(event.PolicyReason)
+	event.Kind = sanitizeReferenceDiagnostic(event.Kind)
+	event.Scope = sanitizeReferenceDiagnostic(event.Scope)
+	event.Location = sanitizeReferenceDiagnostic(event.Location)
+	event.TokenEstimator = sanitizeReferenceDiagnostic(event.TokenEstimator)
+	event.DigestSHA256 = sanitizeReferenceDiagnostic(event.DigestSHA256)
+	event.PolicyDecision = sanitizeReferenceDiagnostic(event.PolicyDecision)
+	event.PolicyReason = sanitizeReferenceReason(event.PolicyReason)
+	event.PolicyReasonCode = sanitizeReferenceDiagnostic(event.PolicyReasonCode)
+
 	if event.PolicyReasonCode == "" {
 		event.PolicyReasonCode = ReferenceReasonCode(event.PolicyDecision, event.PolicyReason)
 	}
@@ -3292,9 +3313,12 @@ func withDefaultReferencePolicyDecision(prov ReferenceProvenance, truncated bool
 
 	prov.Scope = sanitizeReferenceDiagnostic(prov.Scope)
 	prov.Location = sanitizeReferenceDiagnostic(prov.Location)
+	prov.ResolvedSource = sanitizeReferenceDiagnostic(prov.ResolvedSource)
+	prov.TokenEstimator = sanitizeReferenceDiagnostic(prov.TokenEstimator)
 	prov.DigestSHA256 = sanitizeReferenceDiagnostic(prov.DigestSHA256)
 	prov.PolicyDecision = sanitizeReferenceDiagnostic(prov.PolicyDecision)
-	prov.PolicyReason = sanitizeReferenceDiagnostic(prov.PolicyReason)
+	prov.PolicyReason = sanitizeReferenceReason(prov.PolicyReason)
+	prov.PolicyReasonCode = sanitizeReferenceDiagnostic(prov.PolicyReasonCode)
 
 	return prov
 }
@@ -3325,22 +3349,39 @@ type reasonCodeMatcher struct {
 
 func referenceReasonCodeMatchers() []reasonCodeMatcher {
 	return []reasonCodeMatcher{
+		{code: "outside_root_allowed", needles: []string{"outside root allowed"}},
+		{code: "absolute_path_allowed", needles: []string{"absolute path allowed"}},
 		{code: "allowed", needles: []string{"allowed by policy"}},
 		{code: "allowed", needles: []string{"resolved inside root"}},
 		{code: "byte_limit", needles: []string{"byte limit"}},
 		{code: "empty_reference", needles: []string{"empty reference"}},
 		{code: "max_total_bytes", needles: []string{"max_total_bytes"}},
+		{code: "max_files", needles: []string{"max_files"}},
 		{code: "outside_allowed_roots", needles: []string{"outside allowed local roots"}},
+		{code: "denied_local_roots", needles: []string{"denied local roots"}},
+		{code: "absolute_requires_allow_absolute_paths", needles: []string{"allow_absolute_paths"}},
 		{code: "absolute_requires_local_roots", needles: []string{"requires an explicit local_roots"}},
 		{code: "root_escape", needles: []string{"escapes root"}},
+		{code: "denied_globs", needles: []string{"denied_globs"}},
+		{code: "allowed_globs", needles: []string{"allowed_globs"}},
 		{code: "binary", needles: []string{"binary"}},
 		{code: "content_type", needles: []string{"content-type"}},
+		{code: "userinfo", needles: []string{"userinfo"}},
 		{code: "scheme", needles: []string{"scheme"}},
-		{code: "host", needles: []string{"host"}},
+		{code: "port", needles: []string{"url port"}},
+		{code: "port", needles: []string{"port "}},
+		{code: "port", needles: []string{"allowed_ports"}},
+		{code: "port", needles: []string{"denied_ports"}},
+		{code: "host", needles: []string{"allowed_hosts"}},
+		{code: "host", needles: []string{"denied_hosts"}},
+		{code: "host", needles: []string{"url host"}},
+		{code: "host", needles: []string{"host \""}},
 		{code: "private_network", needles: []string{"private network"}},
 		{code: "redirect", needles: []string{"redirect"}},
 		{code: "http_status", needles: []string{"http "}},
 		{code: "request_aborted", needles: []string{"aborted"}},
+		{code: "request_aborted", needles: []string{"context canceled"}},
+		{code: "request_aborted", needles: []string{"deadline exceeded"}},
 		{code: "omitted", needles: []string{"omitted"}},
 		{code: "generated_skill", needles: []string{"generated skill"}},
 		{code: "glob_no_match", needles: []string{"glob matched no files"}},

@@ -824,7 +824,10 @@ func loadConfiguredReferenceContext(ctx context.Context, refs []string, opts con
 func loadConfiguredReferenceContextForScope(ctx context.Context, refs []string, opts contextref.Options) configuredReferenceContext {
 	estimatorSummary := estimatorSummaryForContextOptions(opts)
 	if len(refs) == 0 {
-		return configuredReferenceContext{Estimator: estimatorSummary}
+		return configuredReferenceContext{
+			Manifest:  withReferenceManifestEstimator(contextref.BuildReferenceManifest(nil), estimatorSummary),
+			Estimator: estimatorSummary,
+		}
 	}
 
 	loaded, referenceEvents, err := contextref.LoadReferencesWithReport(ctx, refs, opts)
@@ -869,7 +872,7 @@ func loadConfiguredReferenceContextForScope(ctx context.Context, refs []string, 
 
 func withReferenceManifestEstimator(manifest contextref.ReferenceManifest, estimatorSummary string) contextref.ReferenceManifest {
 	if manifest.TokenEstimator == "" {
-		manifest.TokenEstimator = estimatorSummary
+		manifest.TokenEstimator = sanitizeContextManifestText(estimatorSummary)
 	}
 
 	return manifest

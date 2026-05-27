@@ -3,6 +3,7 @@ package contextref
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -101,6 +102,16 @@ func TestLoadReferences_NilSlice(t *testing.T) {
 	assert.Nil(t, refs)
 }
 
+func TestLoadReferencesWithManifest_EmptyReferencesReturnsSchema(t *testing.T) {
+	t.Parallel()
+
+	refs, manifest, err := LoadReferencesWithManifest(context.Background(), nil, Options{Root: t.TempDir()})
+	require.NoError(t, err)
+	assert.Nil(t, refs)
+	assert.Equal(t, referenceManifestSchemaVersion, manifest.SchemaVersion)
+	assert.Empty(t, manifest.Entries)
+}
+
 func TestLoadReferences_RequiresActiveContext(t *testing.T) {
 	t.Parallel()
 
@@ -114,6 +125,26 @@ func TestLoadReferences_RequiresActiveContext(t *testing.T) {
 	_, _, err = LoadReferencesWithReport(ctx, []string{"doc.md"}, Options{Root: t.TempDir()})
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestLoadReferencesWithManifest_RecordsContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	refs, manifest, err := LoadReferencesWithManifest(ctx, []string{"doc.md", "https://example.com/ref.txt"}, Options{Root: t.TempDir()})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, refs)
+	assert.Equal(t, referenceManifestSchemaVersion, manifest.SchemaVersion)
+	require.Len(t, manifest.Rejected, 2)
+	assert.Equal(t, "doc.md", manifest.Rejected[0].Source)
+	assert.Equal(t, kindFile, manifest.Rejected[0].Kind)
+	assert.Equal(t, kindURL, manifest.Rejected[1].Kind)
+	assert.Equal(t, referenceLocationRemote, manifest.Rejected[1].Location)
+	assert.Contains(t, manifest.Rejected[0].PolicyReason, "request aborted")
+	assert.Equal(t, "rejected.request_aborted", manifest.Rejected[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_RespectsAggregateByteBudget(t *testing.T) {
@@ -317,6 +348,38 @@ func TestBuildReferenceManifestRedactsCredentialBearingURLFields(t *testing.T) {
 	assert.Contains(t, manifest.Entries[0].PolicyReason, "topic=context")
 }
 
+func TestBuildReferenceManifestRedactsLocalProvenanceFields(t *testing.T) {
+	t.Parallel()
+
+	manifest := BuildReferenceManifest([]ReferenceEvent{
+		{
+			Source:           "docs/api_key=source-secret.md",
+			ResolvedSource:   "resolved/token=resolved-secret.md",
+			Kind:             kindFile,
+			Scope:            "agent:token=scope-secret",
+			Location:         "local",
+			TokenEstimator:   "secret=estimator-secret",
+			DigestSHA256:     "sha-secret",
+			PolicyDecision:   ReferenceDecisionRejected,
+			PolicyReason:     "read failed: api_key=reason-secret",
+			PolicyReasonCode: "rejected.custom",
+		},
+	})
+	require.Len(t, manifest.Entries, 1)
+
+	entryJSON, err := json.Marshal(manifest.Entries[0])
+	require.NoError(t, err)
+
+	got := string(entryJSON)
+
+	assert.NotContains(t, got, "source-secret")
+	assert.NotContains(t, got, "resolved-secret")
+	assert.NotContains(t, got, "scope-secret")
+	assert.NotContains(t, got, "estimator-secret")
+	assert.NotContains(t, got, "reason-secret")
+	assert.Contains(t, got, "[REDACTED]")
+}
+
 func TestLoadReferencesWithManifest_GroupsEveryDecision(t *testing.T) {
 	t.Parallel()
 
@@ -446,17 +509,23 @@ func TestLoadReferences_SkipsBinaryFiles(t *testing.T) {
 	assert.Equal(t, "hello world", refs[0].Content)
 
 	// Binary file as direct reference returns an error.
-	_, err = LoadReferences(context.Background(), []string{"image.png"}, Options{Root: dir})
+	_, events, err := LoadReferencesWithReport(context.Background(), []string{"image.png"}, Options{Root: dir})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "binary file")
+	require.Len(t, events, 1)
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Equal(t, "rejected.binary", events[0].PolicyReasonCode)
 
 	writeBinaryFile(t, dir, "truncated.bin", []byte{'A', 0x00, 'B'})
-	_, err = LoadReferences(context.Background(), []string{"truncated.bin"}, Options{
+	_, events, err = LoadReferencesWithReport(context.Background(), []string{"truncated.bin"}, Options{
 		Root:         dir,
 		MaxFileBytes: 1,
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "binary file")
+	require.Len(t, events, 1)
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Equal(t, "rejected.binary", events[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_SanitizesInvalidUTF8(t *testing.T) {
@@ -513,6 +582,7 @@ func TestLoadReferences_AllowsPathOutsideRootWithLocalRoot(t *testing.T) {
 	assert.Contains(t, refs[0].Content, "# Style Guide")
 	assert.Equal(t, referenceLocationLocal, refs[0].Provenance.Location)
 	assert.Contains(t, refs[0].Provenance.PolicyReason, "outside root allowed")
+	assert.Equal(t, "loaded.outside_root_allowed", refs[0].Provenance.PolicyReasonCode)
 }
 
 func TestLoadReferences_LocalRootGlobsUseLocalRootRelativePaths(t *testing.T) {
@@ -657,6 +727,7 @@ func TestLoadReferences_RejectsPathInsideDeniedLocalRoot(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
 	assert.Contains(t, events[0].PolicyReason, "denied local roots")
+	assert.Equal(t, "rejected.denied_local_roots", events[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_RejectsAbsolutePathInsideRootWithoutLocalRoot(t *testing.T) {
@@ -672,6 +743,7 @@ func TestLoadReferences_RejectsAbsolutePathInsideRootWithoutLocalRoot(t *testing
 	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
 	assert.Contains(t, events[0].PolicyReason, "absolute path")
 	assert.Contains(t, events[0].PolicyReason, "allow_absolute_paths")
+	assert.Equal(t, "rejected.absolute_requires_allow_absolute_paths", events[0].PolicyReasonCode)
 }
 
 func TestLoadReferencesWithReport_DoesNotLeakRootInMissingPathReason(t *testing.T) {
@@ -704,6 +776,23 @@ func TestSafePathErrorMessageRedactsPathErrorPaths(t *testing.T) {
 	assert.NotContains(t, linkMessage, secretPath)
 }
 
+func TestGlobExpansionWalkRedactsInaccessibleEntryReason(t *testing.T) {
+	t.Parallel()
+
+	secretPath := filepath.Join(t.TempDir(), "api_key=path-secret.go")
+
+	var expansion globExpansion
+
+	err := expansion.walk(secretPath, nil, &os.PathError{Op: "open", Path: secretPath, Err: os.ErrPermission})
+	require.NoError(t, err)
+	require.Len(t, expansion.skipped, 1)
+
+	assert.Equal(t, secretPath, expansion.skipped[0].Source)
+	assert.Equal(t, "open: permission denied", expansion.skipped[0].Reason)
+	assert.NotContains(t, expansion.skipped[0].Reason, secretPath)
+	assert.NotContains(t, expansion.skipped[0].Reason, "path-secret")
+}
+
 func TestLoadReferences_AllowsAbsolutePathWithLocalRoot(t *testing.T) {
 	t.Parallel()
 
@@ -725,6 +814,7 @@ func TestLoadReferences_AllowsAbsolutePathWithLocalRoot(t *testing.T) {
 	assert.Equal(t, "reference content", refs[0].Content)
 	assert.Contains(t, refs[0].Provenance.PolicyReason, "absolute path allowed")
 	assert.Contains(t, refs[0].Provenance.PolicyReason, "outside root allowed")
+	assert.Equal(t, "loaded.outside_root_allowed", refs[0].Provenance.PolicyReasonCode)
 }
 
 func TestLoadReferences_AbsolutePathInsideRootUsesRelativeGlobPolicy(t *testing.T) {
@@ -747,6 +837,7 @@ func TestLoadReferences_AbsolutePathInsideRootUsesRelativeGlobPolicy(t *testing.
 	assert.Equal(t, absPath, refs[0].Source)
 	assert.Contains(t, refs[0].Content, "# Read me")
 	assert.Contains(t, refs[0].Provenance.PolicyReason, "absolute path allowed")
+	assert.Equal(t, "loaded.absolute_path_allowed", refs[0].Provenance.PolicyReasonCode)
 }
 
 func TestLoadReferences_AbsoluteDirectoryInsideRootUsesRelativeGlobPolicy(t *testing.T) {
@@ -1066,6 +1157,34 @@ func TestLoadReferences_DirectoryLoadsSymlinkInsideLocalRoots(t *testing.T) {
 	assert.Equal(t, "shared", refs[0].Content)
 }
 
+func TestLoadReferences_DirectoryRejectsSymlinkWhenTargetMatchesDeniedGlob(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "secrets/key.txt", "secret\n")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "public"), 0o750))
+
+	linkPath := filepath.Join(root, "public", "guide.md")
+	if err := os.Symlink(filepath.Join(root, "secrets", "key.txt"), linkPath); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	refs, events, err := LoadReferencesWithReport(context.Background(), []string{"public"}, Options{
+		Root: root,
+		ReferencePolicy: ReferencePolicy{
+			DeniedGlobs: []string{"secrets/**"},
+		},
+	})
+	require.Error(t, err)
+	assert.Empty(t, refs)
+	require.Len(t, events, 1)
+
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Equal(t, "public/guide.md", events[0].Source)
+	assert.Contains(t, events[0].PolicyReason, "denied_globs")
+	assert.Contains(t, events[0].PolicyReason, "secrets/key.txt")
+}
+
 // ---------------------------------------------------------------------------
 // Directory loading (reads file contents)
 // ---------------------------------------------------------------------------
@@ -1123,6 +1242,7 @@ func TestLoadReferences_DirectorySkipsBinaryFiles(t *testing.T) {
 	require.Len(t, manifest.Skipped, 1)
 	assert.Equal(t, "src/icon.png", manifest.Skipped[0].Source)
 	assert.Contains(t, manifest.Skipped[0].PolicyReason, "binary file")
+	assert.Equal(t, "skipped.binary", manifest.Skipped[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_DirectorySkipsGitDir(t *testing.T) {
@@ -1212,6 +1332,7 @@ func TestLoadReferences_DirectoryRespectsMaxFilesPolicy(t *testing.T) {
 	require.Len(t, refs, 2)
 	require.Len(t, manifest.Skipped, 1)
 	assert.Equal(t, "max_files reached", manifest.Skipped[0].PolicyReason)
+	assert.Equal(t, "skipped.max_files", manifest.Skipped[0].PolicyReasonCode)
 	assert.Equal(t, "src/c.go", manifest.Skipped[0].Source)
 }
 
@@ -1230,6 +1351,7 @@ func TestLoadReferences_DirectoryDefaultMaxFilesManifestsOverLimit(t *testing.T)
 
 	assert.Equal(t, "src/200.txt", manifest.Skipped[0].Source)
 	assert.Equal(t, "max_files reached", manifest.Skipped[0].PolicyReason)
+	assert.Equal(t, "skipped.max_files", manifest.Skipped[0].PolicyReasonCode)
 }
 
 func TestLoadReferencesWithReport_DirectoryReportsNoLoadableFiles(t *testing.T) {
@@ -1378,6 +1500,7 @@ func TestLoadReferences_GlobRespectsMaxFilesPolicy(t *testing.T) {
 	assert.Equal(t, []string{"src/a.go", "src/b.go"}, collectSources(refs))
 	assert.Equal(t, "src/c.go", manifest.Skipped[0].Source)
 	assert.Equal(t, "max_files reached", manifest.Skipped[0].PolicyReason)
+	assert.Equal(t, "skipped.max_files", manifest.Skipped[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_GlobMaxFilesCountsIncludedFilesAfterRejections(t *testing.T) {
@@ -1424,6 +1547,7 @@ func TestLoadReferences_RejectsDirectFileOutsideAllowedGlobs(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
 	assert.Contains(t, events[0].PolicyReason, "allowed_globs")
+	assert.Equal(t, "rejected.allowed_globs", events[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_RejectsInvalidGlobPolicy(t *testing.T) {
@@ -1497,6 +1621,7 @@ func TestLoadReferences_DirectoryAppliesAllowedAndDeniedGlobs(t *testing.T) {
 	require.Len(t, manifest.Rejected, 1)
 	assert.Equal(t, "docs/cert.pem", manifest.Rejected[0].Source)
 	assert.Contains(t, manifest.Rejected[0].PolicyReason, "denied_globs")
+	assert.Equal(t, "rejected.denied_globs", manifest.Rejected[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_DirectoryRejectsFilesUnderDeniedGlobParent(t *testing.T) {
@@ -1739,6 +1864,26 @@ func TestLoadReferences_GlobReportsSymlinkDirectorySkipped(t *testing.T) {
 	assert.Contains(t, manifest.Skipped[0].PolicyReason, "outside allowed local roots")
 }
 
+func TestLoadReferences_GlobDoesNotLoadSymlinkFileOutsidePattern(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "target/secret.go", "package secret\n")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "src"), 0o750))
+
+	linkPath := filepath.Join(root, "src", "secret.txt")
+	if err := os.Symlink(filepath.Join(root, "target", "secret.go"), linkPath); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	refs, events, err := LoadReferencesWithReport(context.Background(), []string{"src/*.go"}, Options{Root: root})
+	require.NoError(t, err)
+	assert.Empty(t, refs)
+	require.Len(t, events, 1)
+	assert.Equal(t, ReferenceDecisionSkipped, events[0].PolicyDecision)
+	assert.Equal(t, "glob matched no files", events[0].PolicyReason)
+}
+
 func TestLoadReferences_GlobUnderSymlinkedRootUsesRelativeGlobPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -1903,6 +2048,34 @@ func TestLoadReferences_GlobLoadsSymlinkInsideLocalRoots(t *testing.T) {
 
 	assert.Equal(t, "src/shared.go", refs[0].Source)
 	assert.Equal(t, "package shared\n", refs[0].Content)
+}
+
+func TestLoadReferences_GlobRejectsSymlinkWhenTargetMatchesDeniedGlob(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "secrets/key.go", "package secret\n")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "src"), 0o750))
+
+	linkPath := filepath.Join(root, "src", "guide.go")
+	if err := os.Symlink(filepath.Join(root, "secrets", "key.go"), linkPath); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	refs, events, err := LoadReferencesWithReport(context.Background(), []string{"src/*.go"}, Options{
+		Root: root,
+		ReferencePolicy: ReferencePolicy{
+			DeniedGlobs: []string{"secrets/**"},
+		},
+	})
+	require.Error(t, err)
+	assert.Empty(t, refs)
+	require.Len(t, events, 1)
+
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Equal(t, "src/guide.go", events[0].Source)
+	assert.Contains(t, events[0].PolicyReason, "denied_globs")
+	assert.Contains(t, events[0].PolicyReason, "secrets/key.go")
 }
 
 func TestLoadReferences_GlobLoadsSymlinkedBaseInsideLocalRoots(t *testing.T) {
@@ -2120,6 +2293,24 @@ func TestLoadReferencesWithReport_GlobSkippedBinaryReasonCodeMatchesDecision(t *
 	assert.Equal(t, "skipped.binary", binaryEvent.PolicyReasonCode)
 }
 
+func TestReferenceReasonCodeClassifiesContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "rejected.request_aborted", ReferenceReasonCode(ReferenceDecisionRejected, "fetch: context canceled"))
+	assert.Equal(t, "rejected.request_aborted", ReferenceReasonCode(ReferenceDecisionRejected, "read body: context deadline exceeded"))
+}
+
+func TestReferenceReasonCodeDoesNotTreatLocalhostAsHostPolicy(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(
+		t,
+		"rejected.private_network",
+		ReferenceReasonCode(ReferenceDecisionRejected, `fetch: Get "http://localhost:9/doc.txt": private network address 127.0.0.1 blocked`),
+	)
+	assert.Equal(t, "rejected.host", ReferenceReasonCode(ReferenceDecisionRejected, `host "example.com" is not in allowed_hosts`))
+}
+
 // ---------------------------------------------------------------------------
 // URL loading
 // ---------------------------------------------------------------------------
@@ -2180,6 +2371,7 @@ func TestLoadReferences_URLRecordsAllowedRedirectTarget(t *testing.T) {
 	policy := testURLPolicy(t, srv)
 	targetParsed, err := url.Parse(target.URL)
 	require.NoError(t, err)
+
 	policy.AllowedHosts = append(policy.AllowedHosts, targetParsed.Host)
 	policy.MaxRedirects = 1
 
@@ -2218,7 +2410,10 @@ func TestLoadReferences_URLRedactsCredentialBearingSource(t *testing.T) {
 
 	parsed.Path = "/doc.txt"
 	query := parsed.Query()
+	query.Set("AWSAccessKeyId", "aws-key-id-secret")
+	query.Set("X-Amz-Signature", "signature-secret")
 	query.Set("access_token", "query-secret")
+	query.Set("sig", "sig-secret")
 	query.Set("topic", "context")
 	parsed.RawQuery = query.Encode()
 
@@ -2233,13 +2428,60 @@ func TestLoadReferences_URLRedactsCredentialBearingSource(t *testing.T) {
 	require.Len(t, events, 1)
 
 	for _, got := range []string{refs[0].Source, refs[0].Provenance.PolicyReason, events[0].Source, FormatReferences(refs)} {
+		assert.NotContains(t, got, "aws-key-id-secret")
 		assert.NotContains(t, got, "query-secret")
+		assert.NotContains(t, got, "signature-secret")
+		assert.NotContains(t, got, "sig-secret")
 	}
 
 	assert.Contains(t, refs[0].Source, "REDACTED")
+	assert.Contains(t, refs[0].Source, "AWSAccessKeyId=REDACTED")
+	assert.Contains(t, refs[0].Source, "X-Amz-Signature=REDACTED")
 	assert.Contains(t, refs[0].Source, "access_token=REDACTED")
+	assert.Contains(t, refs[0].Source, "sig=REDACTED")
 	assert.Contains(t, refs[0].Source, "topic=context")
 	assert.Equal(t, refs[0].Source, events[0].Source)
+}
+
+func TestLoadReferences_URLRedactsPathFragmentAndQueryValueSecrets(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := w.Write([]byte("remote content")); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer srv.Close()
+
+	parsed, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	parsed.Path = "/docs/api_key=path-secret/file.txt"
+	query := parsed.Query()
+	query.Set("topic", "api_key=query-value-secret")
+	query.Set("token=query-key-secret", "query-key-value-secret")
+	parsed.RawQuery = query.Encode()
+	parsed.Fragment = "token=fragment-secret"
+
+	refs, events, err := LoadReferencesWithReport(context.Background(), []string{parsed.String()}, Options{
+		Root:            t.TempDir(),
+		ReferencePolicy: testURLPolicy(t, srv),
+	})
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	require.Len(t, events, 1)
+
+	manifest := BuildReferenceManifest(events)
+	rendered := FormatReferences(refs)
+
+	for _, got := range []string{refs[0].Source, events[0].Source, manifest.Entries[0].Source, rendered} {
+		assert.NotContains(t, got, "path-secret")
+		assert.NotContains(t, got, "query-value-secret")
+		assert.NotContains(t, got, "query-key-secret")
+		assert.NotContains(t, got, "query-key-value-secret")
+		assert.NotContains(t, got, "fragment-secret")
+		assert.Contains(t, got, "REDACTED")
+	}
 }
 
 func TestLoadReferences_URLRedactsCredentialBearingErrorSource(t *testing.T) {
@@ -2480,7 +2722,7 @@ func TestLoadReferences_URLRejectsNonDefaultPortUnlessExplicitlyAllowed(t *testi
 	parsed, err := url.Parse(srv.URL)
 	require.NoError(t, err)
 
-	_, err = LoadReferences(context.Background(), []string{srv.URL + "/doc.txt"}, Options{
+	_, events, err := LoadReferencesWithReport(context.Background(), []string{srv.URL + "/doc.txt"}, Options{
 		Root: t.TempDir(),
 		ReferencePolicy: ReferencePolicy{
 			AllowedSchemes:       []string{parsed.Scheme},
@@ -2489,8 +2731,10 @@ func TestLoadReferences_URLRejectsNonDefaultPortUnlessExplicitlyAllowed(t *testi
 		},
 	})
 	require.Error(t, err)
+	require.Len(t, events, 1)
 	assert.Contains(t, err.Error(), "port")
 	assert.Contains(t, err.Error(), "not allowed")
+	assert.Equal(t, "rejected.port", events[0].PolicyReasonCode)
 	assert.Zero(t, hits.Load(), "disallowed ports should be rejected before making a request")
 }
 
@@ -2511,12 +2755,14 @@ func TestLoadReferences_URLRejectsDeniedPort(t *testing.T) {
 	policy := testURLPolicy(t, srv)
 	policy.DeniedPorts = []int{testURLPort(t, srv)}
 
-	_, err := LoadReferences(context.Background(), []string{srv.URL + "/doc.txt"}, Options{
+	_, events, err := LoadReferencesWithReport(context.Background(), []string{srv.URL + "/doc.txt"}, Options{
 		Root:            t.TempDir(),
 		ReferencePolicy: policy,
 	})
 	require.Error(t, err)
+	require.Len(t, events, 1)
 	assert.Contains(t, err.Error(), "denied")
+	assert.Equal(t, "rejected.port", events[0].PolicyReasonCode)
 	assert.Zero(t, hits.Load(), "denied ports should be rejected before making a request")
 }
 
@@ -2536,6 +2782,7 @@ func TestLoadReferences_URLRejectsInvalidPortPolicy(t *testing.T) {
 	assert.Equal(t, kindURL, manifest.Rejected[0].Kind)
 	assert.Equal(t, referenceLocationRemote, manifest.Rejected[0].Location)
 	assert.Contains(t, manifest.Rejected[0].PolicyReason, "invalid port 70000")
+	assert.Equal(t, "rejected.port", manifest.Rejected[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_URLRejectsMalformedExplicitPort(t *testing.T) {
@@ -2563,6 +2810,7 @@ func TestLoadReferences_URLRejectsMalformedExplicitPort(t *testing.T) {
 			assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
 			assert.Contains(t, events[0].PolicyReason, "invalid")
 			assert.Contains(t, events[0].PolicyReason, "port")
+			assert.Equal(t, "rejected.port", events[0].PolicyReasonCode)
 		})
 	}
 }
@@ -2642,7 +2890,7 @@ func TestLoadReferences_URLRedactsMalformedURLCredentialsAndQuery(t *testing.T) 
 	t.Parallel()
 
 	encodedAccessKey := "%41%4b%49%41%49%4f%53%46%4f%44%4e%4e%37%45%58%41%4d%50%4c%45"
-	rawURL := "https://user:" + "source-password" + "@example.com/%zz?sig=" + "sig-secret" + "&section=intro&marker=" + encodedAccessKey
+	rawURL := "https://user:" + "source-password" + "@example.com/%zz/api_key=path-secret?sig=" + "sig-secret" + "&token%3Dencoded-source-secret&section=intro&marker=" + encodedAccessKey
 
 	_, events, err := LoadReferencesWithReport(context.Background(), []string{rawURL}, Options{Root: t.TempDir()})
 	require.Error(t, err)
@@ -2652,13 +2900,19 @@ func TestLoadReferences_URLRedactsMalformedURLCredentialsAndQuery(t *testing.T) 
 	assert.Equal(t, referenceLocationRemote, events[0].Location)
 	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
 	assert.NotContains(t, err.Error(), "source-password")
+	assert.NotContains(t, err.Error(), "path-secret")
 	assert.NotContains(t, err.Error(), "sig-secret")
+	assert.NotContains(t, err.Error(), "encoded-source-secret")
 	assert.NotContains(t, err.Error(), encodedAccessKey)
 	assert.NotContains(t, events[0].Source, "source-password")
+	assert.NotContains(t, events[0].Source, "path-secret")
 	assert.NotContains(t, events[0].Source, "sig-secret")
+	assert.NotContains(t, events[0].Source, "encoded-source-secret")
 	assert.NotContains(t, events[0].Source, encodedAccessKey)
-	assert.Contains(t, events[0].Source, "REDACTED@example.com")
+	assert.Contains(t, events[0].Source, "[REDACTED]@example.com")
+	assert.Contains(t, events[0].Source, "api_key=[REDACTED]")
 	assert.Contains(t, events[0].Source, "sig=[REDACTED]")
+	assert.Contains(t, events[0].Source, "token=[REDACTED]")
 	assert.Contains(t, events[0].Source, "section=intro")
 	assert.Contains(t, events[0].Source, "marker=[REDACTED]")
 }
@@ -2736,6 +2990,7 @@ func TestLoadReferences_URLRejectsDeniedHost(t *testing.T) {
 
 			assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
 			assert.Contains(t, events[0].PolicyReason, `denied_hosts`)
+			assert.Equal(t, "rejected.host", events[0].PolicyReasonCode)
 		})
 	}
 }
@@ -2768,6 +3023,7 @@ func TestLoadReferences_URLRejectsUserInfo(t *testing.T) {
 
 	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
 	assert.Contains(t, events[0].PolicyReason, "userinfo")
+	assert.Equal(t, "rejected.userinfo", events[0].PolicyReasonCode)
 	assert.NotContains(t, events[0].Source, "source-secret")
 	assert.NotContains(t, err.Error(), "source-secret")
 	assert.Zero(t, hits.Load(), "URLs with userinfo should be rejected before making a request")
@@ -2818,6 +3074,7 @@ func TestLoadReferences_URLRejectsPrivateDNSResolutionBeforeDial(t *testing.T) {
 
 	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
 	assert.Contains(t, events[0].PolicyReason, "private network address")
+	assert.Equal(t, "rejected.private_network", events[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_URLRejectsPrivateIPLiteralBeforeDial(t *testing.T) {
@@ -2847,6 +3104,7 @@ func TestLoadReferences_URLRejectsPrivateIPLiteralBeforeDial(t *testing.T) {
 
 			assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
 			assert.Contains(t, events[0].PolicyReason, "private network address")
+			assert.Equal(t, "rejected.private_network", events[0].PolicyReasonCode)
 		})
 	}
 }
@@ -3055,12 +3313,15 @@ func TestLoadReferences_URLRejectsRedirectWhenLimitExceeded(t *testing.T) {
 	policy := testURLPolicy(t, srv)
 	policy.MaxRedirects = 0
 
-	_, err := LoadReferences(context.Background(), []string{srv.URL + "/doc.txt"}, Options{
+	_, events, err := LoadReferencesWithReport(context.Background(), []string{srv.URL + "/doc.txt"}, Options{
 		Root:            t.TempDir(),
 		ReferencePolicy: policy,
 	})
 	require.Error(t, err)
+	require.Len(t, events, 1)
 	assert.Contains(t, err.Error(), "max_redirects=0")
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Equal(t, "rejected.redirect", events[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_URLRejectsRedirectToDisallowedHost(t *testing.T) {
@@ -3151,12 +3412,15 @@ func TestLoadReferences_URLRejectsMissingContentType(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := LoadReferences(context.Background(), []string{srv.URL + "/doc.txt"}, Options{
+	_, events, err := LoadReferencesWithReport(context.Background(), []string{srv.URL + "/doc.txt"}, Options{
 		Root:            t.TempDir(),
 		ReferencePolicy: testURLPolicy(t, srv),
 	})
 	require.Error(t, err)
+	require.Len(t, events, 1)
 	assert.Contains(t, err.Error(), "missing Content-Type")
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Equal(t, "rejected.content_type", events[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_URLRejectsContentTypeWhenAllowedContentTypesExplicitlyEmpty(t *testing.T) {
@@ -3183,6 +3447,7 @@ func TestLoadReferences_URLRejectsContentTypeWhenAllowedContentTypesExplicitlyEm
 
 	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
 	assert.Contains(t, events[0].PolicyReason, `Content-Type "text/plain" is not allowed`)
+	assert.Equal(t, "rejected.content_type", events[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_URLRejectsBinaryResponseBody(t *testing.T) {
@@ -3197,13 +3462,16 @@ func TestLoadReferences_URLRejectsBinaryResponseBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := LoadReferences(context.Background(), []string{srv.URL + "/doc.txt"}, Options{
+	_, events, err := LoadReferencesWithReport(context.Background(), []string{srv.URL + "/doc.txt"}, Options{
 		MaxFileBytes:    1,
 		Root:            t.TempDir(),
 		ReferencePolicy: testURLPolicy(t, srv),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "binary response body")
+	require.Len(t, events, 1)
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Equal(t, "rejected.binary", events[0].PolicyReasonCode)
 }
 
 func TestLoadReferences_URLHTTPError(t *testing.T) {
@@ -3407,6 +3675,23 @@ func TestFormatReferences_RedactsCredentialBearingURLSourceAttributes(t *testing
 	assert.Contains(t, got, `topic=context`)
 }
 
+func TestFormatReferences_RedactsCredentialBearingLocalSourceAttributes(t *testing.T) {
+	t.Parallel()
+
+	got := FormatReferences([]LoadedReference{
+		{
+			Source:  "docs/api_key=source-secret.md",
+			Kind:    kindFile,
+			Content: "safe\n",
+			Bytes:   5,
+		},
+	})
+
+	assert.NotContains(t, got, "source-secret")
+	assert.Contains(t, got, `source="docs/api_key=[REDACTED]"`)
+	assert.Contains(t, got, "safe")
+}
+
 func TestFormatReferences_RedactsSecretsAndSourceCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -3462,6 +3747,37 @@ func TestFormatReferences_SanitizesControlCharactersInProvenance(t *testing.T) {
 	assert.Contains(t, got, "agent:bad�name")
 	assert.Contains(t, got, "sha�secret=[REDACTED]")
 	assert.Contains(t, got, "allowed�by policy�")
+}
+
+func TestFormatReferences_RedactsLocalResolvedSourceProvenance(t *testing.T) {
+	t.Parallel()
+
+	refs := []LoadedReference{
+		{
+			Source:  "docs/source.md",
+			Kind:    kindFile,
+			Content: "ok\n",
+			Bytes:   3,
+			Provenance: ReferenceProvenance{
+				ResolvedSource:   "resolved/api_key=resolved-secret.md",
+				TokenEstimator:   "secret=estimator-secret",
+				TokenEstimate:    contextpack.TokenEstimate{Tokens: 1},
+				PolicyDecision:   ReferenceDecisionLoaded,
+				PolicyReason:     "allowed token=reason-secret",
+				PolicyReasonCode: "loaded.token=code-secret",
+			},
+		},
+	}
+
+	got := FormatReferences(refs)
+	assert.NotContains(t, got, "resolved-secret")
+	assert.NotContains(t, got, "estimator-secret")
+	assert.NotContains(t, got, "reason-secret")
+	assert.NotContains(t, got, "code-secret")
+	assert.Contains(t, got, "resolved_source=\"resolved/api_key=[REDACTED]")
+	assert.Contains(t, got, "token_estimator=\"secret=[REDACTED]\"")
+	assert.Contains(t, got, "policy_reason=\"allowed token=[REDACTED]\"")
+	assert.Contains(t, got, "policy_reason_code=\"loaded.token=[REDACTED]\"")
 }
 
 func TestFormatReferences_EscapesProvenanceAttributes(t *testing.T) {

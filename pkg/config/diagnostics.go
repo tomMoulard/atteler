@@ -824,10 +824,19 @@ func knownContextFields() map[string]bool {
 func knownReferencePolicyFields() map[string]bool {
 	return map[string]bool{
 		"allowed_schemes":        true,
+		"denied_schemes":         true,
 		"allowed_hosts":          true,
+		"denied_hosts":           true,
+		"allowed_ports":          true,
+		"denied_ports":           true,
 		"local_roots":            true,
+		"denied_local_roots":     true,
+		"allowed_globs":          true,
+		"denied_globs":           true,
 		"content_types":          true,
 		"max_redirects":          true,
+		"max_files":              true,
+		"allow_absolute_paths":   true,
 		"allow_private_networks": true,
 	}
 }

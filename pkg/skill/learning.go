@@ -2251,8 +2251,11 @@ func sanitizeGenericAssignmentField(field string) (string, bool) {
 	if strings.Contains(value+suffix, "{{") && strings.Contains(value+suffix, "}}") {
 		return "", false
 	}
-
 	if genericSensitiveFlag(name) {
+		if strings.Contains(value+suffix, redactedPlaceholder) {
+			return prefix + name + "=" + redactedPlaceholder, true
+		}
+
 		return prefix + name + "=" + redactedPlaceholder + suffix, true
 	}
 

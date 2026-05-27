@@ -123,6 +123,50 @@ model_aliases:
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "model_aliases.nested", "")
 }
 
+func TestInspectPathSources_AcceptsReferencePolicyFields(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+context:
+  reference_policy:
+    allowed_schemes: [https]
+    denied_schemes: [http]
+    allowed_hosts: [docs.example.com]
+    denied_hosts: [blocked.example.com]
+    allowed_ports: [443]
+    denied_ports: [81]
+    local_roots: [../shared]
+    denied_local_roots: [../shared/secrets]
+    allowed_globs: ["docs/**/*.md"]
+    denied_globs: ["**/*.pem"]
+    content_types: [text/*]
+    max_redirects: 1
+    max_files: 20
+    allow_absolute_paths: true
+    allow_private_networks: false
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.allowed_schemes")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.denied_schemes")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.allowed_hosts")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.denied_hosts")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.allowed_ports")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.denied_ports")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.local_roots")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.denied_local_roots")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.allowed_globs")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.denied_globs")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.content_types")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.max_redirects")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.max_files")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.allow_absolute_paths")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.allow_private_networks")
+}
+
 func TestInspectPathSources_ReportsNegativeVersion(t *testing.T) {
 	t.Parallel()
 
@@ -170,6 +214,7 @@ hooks:
 	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_cost_micros")
 	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_input_tokens")
 	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_output_tokens")
+	assertDefaultDiagnostic(t, report.Defaults, "context.reference_policy.allow_absolute_paths")
 	assertDefaultDiagnostic(t, report.Defaults, "providers.*.disable_private_adapter")
 	assertDefaultDiagnostic(t, report.Defaults, "skill_learning.enabled")
 
@@ -336,6 +381,22 @@ func TestDefaultDiagnostics_ReturnsCopy(t *testing.T) {
 	assert.NotEqual(t, "mutated", DefaultDiagnostics()[0].Value)
 }
 
+func TestDefaultDiagnostics_ReferencePolicySafetyDefaults(t *testing.T) {
+	t.Parallel()
+
+	defaults := DefaultDiagnostics()
+
+	assertDefaultDiagnosticValue(t, defaults, "context.reference_policy.allowed_schemes", "[https]")
+	assertDefaultDiagnosticValue(t, defaults, "context.reference_policy.allow_absolute_paths", "false")
+	assertDefaultDiagnosticValue(t, defaults, "context.reference_policy.max_redirects", "0")
+	assertDefaultDiagnosticValue(t, defaults, "context.reference_policy.max_files", "200")
+
+	contentTypes := defaultDiagnosticValue(t, defaults, "context.reference_policy.content_types")
+	assert.Contains(t, contentTypes, "text/*")
+	assert.Contains(t, contentTypes, "application/json")
+	assert.Contains(t, contentTypes, "application/toml")
+}
+
 func assertDiagnostic(
 	t *testing.T,
 	diagnostics []Diagnostic,
@@ -384,11 +445,25 @@ func assertNoDiagnostic(t *testing.T, diagnostics []Diagnostic, field string) {
 func assertDefaultDiagnostic(t *testing.T, defaults []DefaultDiagnostic, field string) {
 	t.Helper()
 
+	_ = defaultDiagnosticValue(t, defaults, field)
+}
+
+func assertDefaultDiagnosticValue(t *testing.T, defaults []DefaultDiagnostic, field, value string) {
+	t.Helper()
+
+	assert.Equal(t, value, defaultDiagnosticValue(t, defaults, field))
+}
+
+func defaultDiagnosticValue(t *testing.T, defaults []DefaultDiagnostic, field string) string {
+	t.Helper()
+
 	for _, defaultInfo := range defaults {
 		if defaultInfo.Field == field {
-			return
+			return defaultInfo.Value
 		}
 	}
 
 	require.Failf(t, "missing default diagnostic", "field=%s defaults=%v", field, defaults)
+
+	return ""
 }

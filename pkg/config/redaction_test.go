@@ -56,6 +56,21 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 				Env:     map[string]string{"SAFE": "value"},
 			}},
 		},
+		Context: ContextConfig{
+			ReferencePolicy: ReferencePolicyConfig{
+				AllowedSchemes:   []string{"https"},
+				DeniedSchemes:    []string{"http"},
+				AllowedHosts:     []string{"docs.example.com"},
+				DeniedHosts:      []string{"blocked.example.com"},
+				AllowedPorts:     []int{443},
+				DeniedPorts:      []int{81},
+				LocalRoots:       []string{"../shared"},
+				DeniedLocalRoots: []string{"../shared/secrets"},
+				AllowedGlobs:     []string{"docs/**/*.md"},
+				DeniedGlobs:      []string{"**/*.pem"},
+				ContentTypes:     []string{"text/*"},
+			},
+		},
 		SkillLearning: SkillLearningConfig{Enabled: &enabled},
 	}
 
@@ -78,6 +93,17 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	redacted.Agents["reviewer"].ToolPermissions["read"] = false
 	redacted.Hooks["session_end"][0].Command[0] = "printf"
 	redacted.Hooks["session_end"][0].Env["SAFE"] = "changed"
+	redacted.Context.ReferencePolicy.AllowedSchemes[0] = "http"
+	redacted.Context.ReferencePolicy.DeniedSchemes[0] = "ftp"
+	redacted.Context.ReferencePolicy.AllowedHosts[0] = "changed.example.com"
+	redacted.Context.ReferencePolicy.DeniedHosts[0] = "changed-block.example.com"
+	redacted.Context.ReferencePolicy.AllowedPorts[0] = 8443
+	redacted.Context.ReferencePolicy.DeniedPorts[0] = 82
+	redacted.Context.ReferencePolicy.LocalRoots[0] = "../changed"
+	redacted.Context.ReferencePolicy.DeniedLocalRoots[0] = "../changed/secrets"
+	redacted.Context.ReferencePolicy.AllowedGlobs[0] = "changed/**/*.md"
+	redacted.Context.ReferencePolicy.DeniedGlobs[0] = "**/*.key"
+	redacted.Context.ReferencePolicy.ContentTypes[0] = "application/json"
 	*redacted.SkillLearning.Enabled = false
 
 	assert.InDelta(t, 0.2, *cfg.Generation.Temperature, 0)
@@ -98,6 +124,17 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.True(t, cfg.Agents["reviewer"].ToolPermissions["read"])
 	assert.Equal(t, []string{"echo", "done"}, cfg.Hooks["session_end"][0].Command)
 	assert.Equal(t, "value", cfg.Hooks["session_end"][0].Env["SAFE"])
+	assert.Equal(t, []string{"https"}, cfg.Context.ReferencePolicy.AllowedSchemes)
+	assert.Equal(t, []string{"http"}, cfg.Context.ReferencePolicy.DeniedSchemes)
+	assert.Equal(t, []string{"docs.example.com"}, cfg.Context.ReferencePolicy.AllowedHosts)
+	assert.Equal(t, []string{"blocked.example.com"}, cfg.Context.ReferencePolicy.DeniedHosts)
+	assert.Equal(t, []int{443}, cfg.Context.ReferencePolicy.AllowedPorts)
+	assert.Equal(t, []int{81}, cfg.Context.ReferencePolicy.DeniedPorts)
+	assert.Equal(t, []string{"../shared"}, cfg.Context.ReferencePolicy.LocalRoots)
+	assert.Equal(t, []string{"../shared/secrets"}, cfg.Context.ReferencePolicy.DeniedLocalRoots)
+	assert.Equal(t, []string{"docs/**/*.md"}, cfg.Context.ReferencePolicy.AllowedGlobs)
+	assert.Equal(t, []string{"**/*.pem"}, cfg.Context.ReferencePolicy.DeniedGlobs)
+	assert.Equal(t, []string{"text/*"}, cfg.Context.ReferencePolicy.ContentTypes)
 	assert.True(t, *cfg.SkillLearning.Enabled)
 	assert.Equal(t, RedactedValue, redacted.Agents["reviewer"].SystemPrompt)
 	assert.Empty(t, redacted.Agents["reviewer"].FeedbackGuidance)

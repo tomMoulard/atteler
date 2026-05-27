@@ -1551,15 +1551,6 @@ func mergeConfigReferencePolicyLimits(dst *ReferencePolicyConfig, policy Referen
 	}
 }
 
-func referencePolicySet(policy ReferencePolicyConfig) bool {
-	return policy.AllowedSchemes != nil ||
-		policy.AllowedHosts != nil ||
-		policy.LocalRoots != nil ||
-		policy.MaxRedirects > 0 ||
-		policy.ContentTypes != nil ||
-		policy.AllowPrivateNetworks
-}
-
 func mergeConfigGeneration(dst *Config, generation GenerationConfig, rec *originRecorder, source originSource) {
 	if generation.Temperature != nil {
 		dst.Generation.Temperature = generation.Temperature
