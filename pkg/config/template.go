@@ -155,6 +155,8 @@ func templateYAML() string {
 	out.WriteString("# Use `atteler config explain` to inspect implicit defaults and merge provenance.\n")
 	out.WriteString("# Configured references cross a trust boundary before every model request.\n")
 	out.WriteString("# Remote URLs are rejected unless both scheme and host are allowed below.\n\n")
+	out.WriteString("# Local paths are limited to the working directory plus explicit local_roots; absolute paths require allow_absolute_paths.\n")
+	out.WriteString("# Private-network URL targets remain blocked unless allow_private_networks is set deliberately.\n")
 	out.Write(data)
 	out.WriteString("\n#vim: setf=conf\n")
 

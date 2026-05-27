@@ -28,20 +28,38 @@ func TestContextOptionsFromConfig_MapsReferencePolicy(t *testing.T) {
 		Context: appconfig.ContextConfig{
 			ReferencePolicy: appconfig.ReferencePolicyConfig{
 				AllowedSchemes:       []string{"https"},
+				DeniedSchemes:        []string{"http"},
 				AllowedHosts:         []string{"docs.example.com"},
+				DeniedHosts:          []string{"bad.example.com"},
+				AllowedPorts:         []int{443},
+				DeniedPorts:          []int{81},
 				LocalRoots:           []string{"../shared"},
+				DeniedLocalRoots:     []string{"../shared/secrets"},
+				AllowedGlobs:         []string{"docs/**/*.md"},
+				DeniedGlobs:          []string{"**/*.pem"},
 				MaxRedirects:         2,
+				MaxFiles:             17,
 				ContentTypes:         []string{"text/*"},
+				AllowAbsolutePaths:   true,
 				AllowPrivateNetworks: true,
 			},
 		},
 	})
 
 	assert.Equal(t, []string{"https"}, opts.ReferencePolicy.AllowedSchemes)
+	assert.Equal(t, []string{"http"}, opts.ReferencePolicy.DeniedSchemes)
 	assert.Equal(t, []string{"docs.example.com"}, opts.ReferencePolicy.AllowedHosts)
+	assert.Equal(t, []string{"bad.example.com"}, opts.ReferencePolicy.DeniedHosts)
+	assert.Equal(t, []int{443}, opts.ReferencePolicy.AllowedPorts)
+	assert.Equal(t, []int{81}, opts.ReferencePolicy.DeniedPorts)
 	assert.Equal(t, []string{"../shared"}, opts.ReferencePolicy.LocalRoots)
+	assert.Equal(t, []string{"../shared/secrets"}, opts.ReferencePolicy.DeniedLocalRoots)
+	assert.Equal(t, []string{"docs/**/*.md"}, opts.ReferencePolicy.AllowedGlobs)
+	assert.Equal(t, []string{"**/*.pem"}, opts.ReferencePolicy.DeniedGlobs)
 	assert.Equal(t, 2, opts.ReferencePolicy.MaxRedirects)
+	assert.Equal(t, 17, opts.ReferencePolicy.MaxFiles)
 	assert.Equal(t, []string{"text/*"}, opts.ReferencePolicy.ContentTypes)
+	assert.True(t, opts.ReferencePolicy.AllowAbsolutePaths)
 	assert.True(t, opts.ReferencePolicy.AllowPrivateNetworks)
 }
 
@@ -72,6 +90,24 @@ func TestContextOptionsForRequestModelsUsesFirstFallbackWhenPrimaryEmpty(t *test
 	assert.Equal(t, "tiny", profile.Model)
 }
 
+func TestContextOptionsFromConfig_PreservesExplicitEmptyDefaultLists(t *testing.T) {
+	t.Parallel()
+
+	opts := contextOptionsFromConfig(appconfig.Config{
+		Context: appconfig.ContextConfig{
+			ReferencePolicy: appconfig.ReferencePolicyConfig{
+				AllowedSchemes: []string{},
+				ContentTypes:   []string{},
+			},
+		},
+	})
+
+	assert.NotNil(t, opts.ReferencePolicy.AllowedSchemes)
+	assert.Empty(t, opts.ReferencePolicy.AllowedSchemes)
+	assert.NotNil(t, opts.ReferencePolicy.ContentTypes)
+	assert.Empty(t, opts.ReferencePolicy.ContentTypes)
+}
+
 func TestFormatReferenceEventIncludesPolicyReasonAndProvenance(t *testing.T) {
 	t.Parallel()
 
@@ -97,6 +133,7 @@ func TestFormatReferenceEventIncludesPolicyReasonAndProvenance(t *testing.T) {
 	assert.Contains(t, got, `source="https://docs.example.com/style.md"`)
 	assert.Contains(t, got, `resolved_source="https://cdn.docs.example.com/style.md"`)
 	assert.Contains(t, got, "bytes=42")
+	assert.Equal(t, 1, strings.Count(got, "bytes=42"))
 	assert.Contains(t, got, "truncated=true")
 	assert.Contains(t, got, "sha256="+strings.Repeat("a", 64))
 	assert.Contains(t, got, "fetched_at=2026-05-21T12:00:00Z")
@@ -219,6 +256,29 @@ func TestLoadConfiguredReferencesFailsClosedAndReportsEveryDecision(t *testing.T
 	assert.Contains(t, stderr, `"omitted_count":1`)
 	assert.Contains(t, stderr, `"rejected_count":1`)
 	assert.Contains(t, stderr, "omitting configured reference context")
+}
+
+func TestLoadConfiguredReferencesFailsClosedWhenManifestHasRejectedEntries(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "good.md"), []byte("trusted docs\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "secret.pem"), []byte("private key\n"), 0o600))
+
+	stderr := captureStderr(t, func() {
+		got := loadConfiguredReferences(t.Context(), []string{"."}, contextref.Options{
+			Root: root,
+			ReferencePolicy: contextref.ReferencePolicy{
+				DeniedGlobs: []string{"**/*.pem"},
+			},
+		})
+		assert.Empty(t, got, "manifest-level rejections should omit the whole configured-reference block")
+	})
+
+	assert.Contains(t, stderr, "reference loaded")
+	assert.Contains(t, stderr, `source="good.md"`)
+	assert.Contains(t, stderr, "reference rejected")
+	assert.Contains(t, stderr, `source="secret.pem"`)
+	assert.Contains(t, stderr, "matches denied_globs")
+	assert.Contains(t, stderr, "rejected 1 reference(s); omitting configured reference context")
 }
 
 func TestLoadConfiguredReferencesReportsTruncatedAndSkipped(t *testing.T) { //nolint:paralleltest // captures process-global stderr.
