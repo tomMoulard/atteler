@@ -394,6 +394,10 @@ func AttelerCommandDetailedWithOptions(opts CommandOptions) DetailedRunner {
 			return RunOutput{}, errors.New("subagent: context is required")
 		}
 
+		if err := ctx.Err(); err != nil {
+			return RunOutput{}, fmt.Errorf("subagent: context canceled before atteler command: %w", err)
+		}
+
 		binary := strings.TrimSpace(opts.Binary)
 		if binary == "" {
 			return RunOutput{}, errors.New("subagent: atteler binary is required")
