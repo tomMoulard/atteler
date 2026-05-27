@@ -144,6 +144,10 @@ type explainConfigCommandInput struct {
 	FieldPath string
 }
 
+type explainModelResolutionCommandInput struct {
+	Model string
+}
+
 type feedbackApproveCommandInput struct {
 	ConfigPath  string
 	HistoryPath string
@@ -399,6 +403,7 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"doctorOfflineCommandInput":           func(opts cliOptions) any { return doctorOfflineCommandInputFromOptions(opts) },
 		"evalOutputCommandInput":              func(opts cliOptions) any { return evalOutputCommandInputFromOptions(opts) },
 		"explainConfigCommandInput":           func(opts cliOptions) any { return explainConfigCommandInputFromOptions(opts) },
+		"explainModelResolutionCommandInput":  func(opts cliOptions) any { return explainModelResolutionCommandInputFromOptions(opts) },
 		"feedbackApproveCommandInput":         func(opts cliOptions) any { return feedbackApproveCommandInputFromOptions(opts) },
 		"feedbackProposalsCommandInput":       func(opts cliOptions) any { return feedbackProposalsCommandInputFromOptions(opts) },
 		"feedbackRollbackCommandInput":        func(opts cliOptions) any { return feedbackRollbackCommandInputFromOptions(opts) },
@@ -677,6 +682,10 @@ func listKnownModelsCommandInputFromOptions(_ cliOptions) listKnownModelsCommand
 
 func listModelsCommandInputFromOptions(_ cliOptions) listModelsCommandInput {
 	return listModelsCommandInput{}
+}
+
+func explainModelResolutionCommandInputFromOptions(opts cliOptions) explainModelResolutionCommandInput {
+	return explainModelResolutionCommandInput{Model: opts.explainModelResolution}
 }
 
 func listPluginsCommandInputFromOptions(_ cliOptions) listPluginsCommandInput {

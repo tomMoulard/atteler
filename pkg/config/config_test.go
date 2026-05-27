@@ -18,6 +18,9 @@ func TestLoadFiles_MergesInOrder(t *testing.T) {
 default_provider: anthropic
 default_model: claude-default
 fallback_models: [claude-fallback]
+model_aliases:
+  fast: openai/gpt-global
+  safe: anthropic/claude-global
 providers:
   anthropic:
     base_url: https://anthropic.global
@@ -30,6 +33,9 @@ providers:
 	local := writeConfig(t, dir, "local.yml", `
 default_model: gpt-local
 fallback_models: [gpt-backup]
+model_aliases:
+  fast: openai/gpt-local
+  review: codex/gpt-5.5
 providers:
   openai:
     disabled: false
@@ -113,6 +119,12 @@ vector:
 	if !reflect.DeepEqual(cfg.FallbackModels, []string{"gpt-backup"}) {
 		assert.Failf(t, "assertion failed", "FallbackModels = %v", cfg.FallbackModels)
 	}
+
+	assert.Equal(t, map[string]string{
+		"fast":   "openai/gpt-local",
+		"review": "codex/gpt-5.5",
+		"safe":   "anthropic/claude-global",
+	}, cfg.ModelAliases)
 
 	openai := cfg.Providers["openai"]
 	if openai.Disabled {

@@ -97,6 +97,32 @@ func TestInspectPathSources_AcceptsGeneratedTemplate(t *testing.T) {
 	assert.Empty(t, reports[0].Diagnostics)
 }
 
+func TestInspectPathSources_ReportsInvalidModelAliases(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+model_aliases:
+  fast: openai/gpt-4.1-mini
+  openai/fast: openai/gpt-4.1-mini
+  openai/: openai/gpt-4.1-mini
+  missing_provider: gpt-4.1-mini
+  nested:
+    provider: openai
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+
+	assertNoDiagnostic(t, reports[0].Diagnostics, "model_aliases.fast")
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "model alias must be a bare model name")
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "model alias target must be provider/model")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "model_aliases.openai/fast", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "model_aliases.openai/", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "model_aliases.missing_provider", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "model_aliases.nested", "")
+}
+
 func TestInspectPathSources_ReportsNegativeVersion(t *testing.T) {
 	t.Parallel()
 

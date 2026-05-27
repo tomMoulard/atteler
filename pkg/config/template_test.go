@@ -18,6 +18,7 @@ func TestTemplateYAML(t *testing.T) {
 	template := TemplateYAML()
 	for _, want := range []string{
 		"default_provider:",
+		"model_aliases:",
 		"version:",
 		"generation:",
 		"agent_loop:",

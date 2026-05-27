@@ -562,14 +562,27 @@ func TestLLMConfigUsesResolvedFallbackModels(t *testing.T) {
 
 	cfg := appconfig.Config{
 		FallbackModels: []string{"config-fallback"},
+		ModelAliases:   map[string]string{"fast": "openai/gpt-4.1-mini"},
 	}
 
 	got := llmConfig(cfg, "selected-model", []string{"agent-fallback"}, "session-123", []string{"atteler", "--model", "selected-model"})
 
 	assert.Equal(t, "selected-model", got.SelectedModel)
+	assert.Equal(t, map[string]string{"fast": "openai/gpt-4.1-mini"}, got.ModelAliases)
 	assert.Equal(t, []string{"agent-fallback"}, got.FallbackModels)
 	assert.Equal(t, "session-123", got.SessionID)
 	assert.Equal(t, []string{"atteler", "--model", "selected-model"}, got.CommandLine)
+}
+
+func TestProviderRegistrationSelectedModelUsesExplainTarget(t *testing.T) {
+	t.Parallel()
+
+	got := providerRegistrationSelectedModel(
+		cliOptions{explainModelResolution: "gpt-live-only"},
+		"persisted-model",
+	)
+
+	assert.Equal(t, "gpt-live-only", got)
 }
 
 func TestDoctorForcesFreshProviderReadiness(t *testing.T) { //nolint:paralleltest // Captures process stdout.

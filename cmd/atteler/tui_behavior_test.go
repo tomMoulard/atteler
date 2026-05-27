@@ -596,6 +596,22 @@ func TestOpenModelPickerFetchesProviderModelsInBackground(t *testing.T) {
 	)
 }
 
+func TestPickerItemsForProviderCatalogUsesBareConfiguredAlias(t *testing.T) {
+	t.Parallel()
+
+	items := pickerItemsForProviderCatalog("openai", llm.ProviderModelCatalog{
+		Models: []string{"gpt-4.1-mini", "fast"},
+		ModelProvenance: map[string]llm.ModelProvenance{
+			"fast":         llm.ModelProvenanceConfiguredAlias,
+			"gpt-4.1-mini": llm.ModelProvenanceStatic,
+		},
+	})
+
+	assert.Contains(t, items, pickerItem{provider: "", model: "fast", reasoning: llm.ReasoningLevelDefault})
+	assert.Contains(t, items, pickerItem{provider: "openai", model: "gpt-4.1-mini", reasoning: llm.ReasoningLevelDefault})
+	assert.NotContains(t, items, pickerItem{provider: "openai", model: "fast", reasoning: llm.ReasoningLevelDefault})
+}
+
 // expandReasoningItems expands each base picker item into one entry per picker
 // reasoning level (default + each canonical level), matching the shape
 // produced by pickerItemsForProvider.

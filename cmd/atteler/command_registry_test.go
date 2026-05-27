@@ -1014,6 +1014,12 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			wantTier: tierStateful,
 		},
 		{
+			name:     "providers resolve routes stateful resolution diagnostics",
+			args:     []string{"providers", "resolve", "gpt-test"},
+			wantName: "explain-model-resolution",
+			wantTier: tierStateful,
+		},
+		{
 			name:     "memory search routes providerless",
 			args:     []string{"memory", "search", "hello", "auth"},
 			wantName: "memory-command",
@@ -1397,6 +1403,17 @@ func TestCommandRegistry_GroupedInlineCommandsBypassRegistry(t *testing.T) {
 		t.Helper()
 		assert.Equal(t, "session-123", opts.mergeWorktreeRef)
 	})
+}
+
+func TestCommandRegistry_GroupedProviderResolveParsesModel(t *testing.T) {
+	t.Parallel()
+
+	opts := parseGroupedOptionsForRouteTest(t, []string{"providers", "resolve", "gpt-test"})
+	got, ok := firstMatchingCommand(opts)
+	require.True(t, ok)
+	assert.Equal(t, "explain-model-resolution", got.name)
+	assert.Equal(t, tierStateful, got.tier)
+	assert.Equal(t, "gpt-test", opts.explainModelResolution)
 }
 
 func TestApplyPositionalOptions_ConfigExplainOwnsPositionalFilter(t *testing.T) {

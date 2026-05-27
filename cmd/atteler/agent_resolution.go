@@ -275,7 +275,7 @@ func refreshRouteProviderModels(ctx context.Context, registry *llm.Registry, can
 			return
 		}
 
-		if _, err := registry.ProviderModels(refreshCtx, providerName); err != nil {
+		if _, err := registry.ProviderModelCatalog(refreshCtx, providerName); err != nil {
 			continue
 		}
 	}
@@ -380,11 +380,12 @@ func providerModelsVerifiedByProvider(registry *llm.Registry, providers []string
 }
 
 type routeAvailabilityCandidateEvidence struct {
-	decisionID string
-	provider   string
-	model      string
-	aliases    []string
-	resolvable bool
+	decisionID        string
+	provider          string
+	model             string
+	aliases           []string
+	resolvable        bool
+	providerQualified bool
 }
 
 func routeAvailabilityCandidate(registry *llm.Registry, id string) routeAvailabilityCandidateEvidence {
@@ -402,6 +403,7 @@ func routeAvailabilityCandidate(registry *llm.Registry, id string) routeAvailabi
 	}
 
 	if provider, model, ok := strings.Cut(id, "/"); ok {
+		candidate.providerQualified = true
 		if candidate.provider == "" {
 			candidate.provider = strings.TrimSpace(provider)
 		}
@@ -413,25 +415,44 @@ func routeAvailabilityCandidate(registry *llm.Registry, id string) routeAvailabi
 		candidate.model = id
 	}
 
-	resolvedProvider, ok := registry.CanResolveModel(id)
+	resolvedProvider, resolvedModel, ok := registry.ResolveModel(id)
 	if ok {
 		candidate.resolvable = true
-		if candidate.provider == "" {
+		if !candidate.providerQualified && id != resolvedModel {
+			candidate.aliases = append(candidate.aliases, id)
+		}
+
+		if candidate.provider == "" || (candidate.providerQualified && !routeAvailabilityProviderRegistered(registry, candidate.provider)) {
 			candidate.provider = resolvedProvider
+			candidate.model = resolvedModel
+			candidate.providerQualified = false
+		} else if candidate.model == "" {
+			candidate.model = resolvedModel
 		}
 	}
 
 	return candidate
 }
 
+func routeAvailabilityProviderRegistered(registry *llm.Registry, providerName string) bool {
+	if registry == nil {
+		return false
+	}
+
+	_, ok := registry.Provider(strings.TrimSpace(providerName))
+
+	return ok
+}
+
 func routeAvailabilityModelIndexed(registry *llm.Registry, candidate routeAvailabilityCandidateEvidence, models []string) bool {
 	if candidate.provider != "" {
-		if registry.ProviderHasModel(candidate.provider, candidate.model) {
+		allowConfiguredAliases := !candidate.providerQualified
+		if routeAvailabilityProviderHasModel(registry, candidate.provider, candidate.model, allowConfiguredAliases) {
 			return true
 		}
 
 		for _, alias := range candidate.aliases {
-			if routeAvailabilityProviderHasModel(registry, candidate.provider, alias) {
+			if routeAvailabilityProviderHasModel(registry, candidate.provider, alias, allowConfiguredAliases) {
 				return true
 			}
 		}
@@ -452,7 +473,29 @@ func routeAvailabilityModelIndexed(registry *llm.Registry, candidate routeAvaila
 	return false
 }
 
-func routeAvailabilityProviderHasModel(registry *llm.Registry, providerName, model string) bool {
+func routeAvailabilityProviderHasModel(
+	registry *llm.Registry,
+	providerName string,
+	model string,
+	allowConfiguredAliases bool,
+) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+
+	if provenance, ok := registry.ProviderModelProvenance(providerName, model); ok {
+		if allowConfiguredAliases || provenance != llm.ModelProvenanceConfiguredAlias {
+			return true
+		}
+
+		if _, ok := registry.ProviderModelCatalogProvenance(providerName, model); ok {
+			return true
+		}
+
+		return registry.ProviderModelUserOverride(providerName, model)
+	}
+
 	if qualifiedProvider, providerModel, ok := strings.Cut(strings.TrimSpace(model), "/"); ok {
 		if !strings.EqualFold(strings.TrimSpace(qualifiedProvider), strings.TrimSpace(providerName)) {
 			return false
@@ -461,7 +504,20 @@ func routeAvailabilityProviderHasModel(registry *llm.Registry, providerName, mod
 		model = providerModel
 	}
 
-	return registry.ProviderHasModel(providerName, model)
+	provenance, ok := registry.ProviderModelProvenance(providerName, model)
+	if !ok {
+		return false
+	}
+
+	if allowConfiguredAliases || provenance != llm.ModelProvenanceConfiguredAlias {
+		return true
+	}
+
+	if _, ok := registry.ProviderModelCatalogProvenance(providerName, model); ok {
+		return true
+	}
+
+	return registry.ProviderModelUserOverride(providerName, model)
 }
 
 func addUnavailableRoute(unavailable map[string]string, id, reason string) map[string]string {
@@ -715,5 +771,6 @@ func workflowExecutionUtilityRequested(opts cliOptions) bool {
 
 func providerInspectionUtilityRequested(opts cliOptions) bool {
 	return opts.listModels ||
+		opts.explainModelResolution != "" ||
 		opts.doctor
 }

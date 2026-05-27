@@ -872,7 +872,13 @@ func autoRegisterForOptions(
 	fallbackModels []string,
 	sessionID string,
 ) (*llm.Registry, llm.ProviderReadinessReport) {
-	regCfg := llmConfig(cfg, selectedModel, fallbackModels, sessionID, os.Args)
+	regCfg := llmConfig(
+		cfg,
+		providerRegistrationSelectedModel(opts, selectedModel),
+		fallbackModels,
+		sessionID,
+		os.Args,
+	)
 
 	if providerInspectionUtilityRequested(opts) {
 		regCfg.DisableAutoStart = true
@@ -883,4 +889,12 @@ func autoRegisterForOptions(
 	}
 
 	return llm.AutoRegisterWithConfigContextReport(ctx, regCfg)
+}
+
+func providerRegistrationSelectedModel(opts cliOptions, selectedModel string) string {
+	if strings.TrimSpace(opts.explainModelResolution) != "" {
+		return opts.explainModelResolution
+	}
+
+	return selectedModel
 }

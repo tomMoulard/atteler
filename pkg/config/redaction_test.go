@@ -49,6 +49,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 				FeedbackGuidance: []FeedbackGuidance{{ID: "private-feedback"}},
 			},
 		},
+		ModelAliases: map[string]string{"fast": "openai/gpt-4.1-mini"},
 		Hooks: map[string][]HookConfig{
 			"session_end": {{
 				Command: []string{"echo", "done"},
@@ -73,6 +74,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	*redacted.Agents["reviewer"].Seed = 42
 	redacted.Agents["reviewer"].RoutingPolicy.PreferredProviders[0] = "anthropic"
 	redacted.Agents["reviewer"].FallbackModels[0] = "fallback-b"
+	redacted.ModelAliases["fast"] = "openai/changed"
 	redacted.Agents["reviewer"].ToolPermissions["read"] = false
 	redacted.Hooks["session_end"][0].Command[0] = "printf"
 	redacted.Hooks["session_end"][0].Env["SAFE"] = "changed"
@@ -92,6 +94,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.Equal(t, 7, *cfg.Agents["reviewer"].Seed)
 	assert.Equal(t, []string{"openai"}, cfg.Agents["reviewer"].RoutingPolicy.PreferredProviders)
 	assert.Equal(t, []string{"fallback-a"}, cfg.Agents["reviewer"].FallbackModels)
+	assert.Equal(t, "openai/gpt-4.1-mini", cfg.ModelAliases["fast"])
 	assert.True(t, cfg.Agents["reviewer"].ToolPermissions["read"])
 	assert.Equal(t, []string{"echo", "done"}, cfg.Hooks["session_end"][0].Command)
 	assert.Equal(t, "value", cfg.Hooks["session_end"][0].Env["SAFE"])

@@ -354,6 +354,7 @@ func TestAutoRegisterWithConfigContextReport_ReportsLiveModelFetchFailure(t *tes
 	assert.Equal(t, ProviderStatusFailedHealthCheck, entry.Status)
 	assert.Equal(t, ModelCatalogSourceStatic, entry.ModelCatalogSource)
 	assert.Equal(t, []string{"gpt-static"}, entry.Models)
+	assert.True(t, entry.ModelsStale)
 	assert.Equal(t, "models unavailable", entry.ModelFetchError.Error())
 	assert.Equal(t, 1, provider.fetchCalls)
 }
@@ -382,6 +383,110 @@ func TestAutoRegisterWithConfigContextReport_ReportsDefaultModelProviderMismatch
 	resp, err := r.Complete(context.Background(), CompleteParams{})
 	require.NoError(t, err)
 	assert.Equal(t, "a-1", resp.Model)
+}
+
+func TestAutoRegisterWithConfigContextReport_ReportsDefaultProviderBareModelMismatch(t *testing.T) {
+	t.Parallel()
+
+	openAIProvider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-static"},
+		resp:   &Response{Content: "from-openai"},
+	}
+	anthropicProvider := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-static"},
+		resp:   &Response{Content: "from-anthropic"},
+	}
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultProvider:        providerAnthropic,
+		DefaultModel:           "gpt-static",
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: openAIProvider.models,
+			factory: func() (Provider, error) {
+				return openAIProvider, nil
+			},
+		},
+		{
+			name:         providerAnthropic,
+			staticModels: anthropicProvider.models,
+			factory: func() (Provider, error) {
+				return anthropicProvider, nil
+			},
+		},
+	})
+
+	report := r.ReadinessReport()
+	require.Error(t, report.Default.ModelError)
+	assert.Contains(t, report.Default.ModelError.Error(), "not default provider")
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "from-anthropic", resp.Content)
+	assert.Equal(t, "claude-static", resp.Model)
+}
+
+func TestAutoRegisterWithConfigContextReport_ReportsDefaultProviderAmbiguousBareModelMismatch(t *testing.T) {
+	t.Parallel()
+
+	openAIProvider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"shared"},
+		resp:   &Response{Content: "from-openai"},
+	}
+	anthropicProvider := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"shared"},
+		resp:   &Response{Content: "from-anthropic"},
+	}
+	codexProvider := &fakeProvider{
+		name:   providerCodex,
+		models: []string{"codex-static"},
+		resp:   &Response{Content: "from-codex"},
+	}
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultProvider:        providerCodex,
+		DefaultModel:           "shared",
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: openAIProvider.models,
+			factory: func() (Provider, error) {
+				return openAIProvider, nil
+			},
+		},
+		{
+			name:         providerAnthropic,
+			staticModels: anthropicProvider.models,
+			factory: func() (Provider, error) {
+				return anthropicProvider, nil
+			},
+		},
+		{
+			name:         providerCodex,
+			staticModels: codexProvider.models,
+			factory: func() (Provider, error) {
+				return codexProvider, nil
+			},
+		},
+	})
+
+	report := r.ReadinessReport()
+	require.Error(t, report.Default.ModelError)
+	assert.Contains(t, report.Default.ModelError.Error(), "not default provider")
+	assert.Contains(t, report.Default.ModelError.Error(), providerAnthropic)
+	assert.Contains(t, report.Default.ModelError.Error(), providerOpenAI)
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "from-codex", resp.Content)
+	assert.Equal(t, "codex-static", resp.Model)
 }
 
 func TestAutoRegisterWithConfigContextReport_QualifiedModelRequestsOnlyNamedProvider(t *testing.T) {
@@ -415,6 +520,316 @@ func TestAutoRegisterWithConfigContextReport_QualifiedModelRequestsOnlyNamedProv
 	assert.True(t, codex.Requested)
 }
 
+func TestAutoRegisterWithConfigContextReport_AppliesConfiguredModelAlias(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "ok"},
+	}
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultModel:           "fast",
+		ModelAliases:           map[string]string{"fast": providerOpenAI + "/gpt-4.1-mini"},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: provider.models,
+			factory: func() (Provider, error) {
+				return provider, nil
+			},
+		},
+	})
+
+	entry := requireReadinessProvider(t, r.ReadinessReport(), providerOpenAI)
+	assert.True(t, entry.Requested)
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4.1-mini", resp.Model)
+
+	diagnostic := r.ExplainModelResolution("fast")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, "gpt-4.1-mini", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, diagnostic.Provenance)
+}
+
+func TestAutoRegisterWithConfigContextReport_DefaultExactSlashModelUsesCatalogClaim(t *testing.T) {
+	t.Parallel()
+
+	const model = "namespace/model"
+
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{model},
+		resp:   &Response{Content: "ok"},
+	}
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultProvider:        providerOpenAI,
+		DefaultModel:           model,
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: provider.models,
+			factory: func() (Provider, error) {
+				return provider, nil
+			},
+		},
+	})
+
+	report := r.ReadinessReport()
+	require.NoError(t, report.Default.ModelError)
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, model, resp.Model)
+
+	diagnostic := r.ExplainModelResolution("")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, model, diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceStatic, diagnostic.Provenance)
+}
+
+func TestAutoRegisterWithConfigContextReport_SelectedConfiguredModelAliasRequestsProvider(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "ok"},
+	}
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		SelectedModel:          "fast",
+		ModelAliases:           map[string]string{"fast": providerOpenAI + "/gpt-4.1-mini"},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: provider.models,
+			factory: func() (Provider, error) {
+				return provider, nil
+			},
+		},
+	})
+
+	entry := requireReadinessProvider(t, r.ReadinessReport(), providerOpenAI)
+	assert.True(t, entry.Requested)
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: "fast"})
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4.1-mini", resp.Model)
+}
+
+func TestAutoRegisterWithConfigContextReport_FallbackConfiguredModelAliasRequestsProvider(t *testing.T) {
+	t.Parallel()
+
+	primaryProvider := &fakeProvider{
+		err:    errors.New("primary unavailable"),
+		name:   alphaProvider,
+		models: []string{"a-1"},
+		resp:   &Response{Content: "primary"},
+	}
+	fallbackProvider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "fallback"},
+	}
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		FallbackModels:         []string{" fast "},
+		ModelAliases:           map[string]string{"fast": providerOpenAI + "/gpt-4.1-mini"},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         alphaProvider,
+			staticModels: primaryProvider.models,
+			factory: func() (Provider, error) {
+				return primaryProvider, nil
+			},
+		},
+		{
+			name:         providerOpenAI,
+			staticModels: fallbackProvider.models,
+			factory: func() (Provider, error) {
+				return fallbackProvider, nil
+			},
+		},
+	})
+
+	entry := requireReadinessProvider(t, r.ReadinessReport(), providerOpenAI)
+	assert.True(t, entry.Requested)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "a-1"}, []string{"fast"})
+	require.NoError(t, err)
+	assert.Equal(t, "fallback", resp.Content)
+	assert.Equal(t, "gpt-4.1-mini", resp.Model)
+	require.Len(t, fallbackProvider.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", fallbackProvider.calls[0].Model)
+}
+
+func TestAutoRegisterWithConfigContextReport_SelectedBareModelUsesLiveCatalog(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:          providerOpenAI,
+		models:        []string{"gpt-static"},
+		fetchedModels: []string{"gpt-live-only"},
+		resp:          &Response{Content: "ok"},
+	}
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		SelectedModel:          "gpt-live-only",
+		ReadinessCheckTimeout:  time.Second,
+		ReadinessCacheTTL:      time.Minute,
+		DisableReadinessChecks: false,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: provider.models,
+			factory: func() (Provider, error) {
+				return provider, nil
+			},
+		},
+	})
+
+	entry := requireReadinessProvider(t, r.ReadinessReport(), providerOpenAI)
+	assert.True(t, entry.Requested)
+	assert.Equal(t, ModelCatalogSourceLive, entry.ModelCatalogSource)
+	assert.Equal(t, []string{"gpt-live-only"}, entry.Models)
+
+	diagnostic := r.ExplainModelResolution("gpt-live-only")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, "gpt-live-only", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceFetchedLive, diagnostic.Provenance)
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: "gpt-live-only"})
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-live-only", resp.Model)
+}
+
+func TestAutoRegisterWithConfigContextReport_ReportsDefaultModelAliasProviderMismatch(t *testing.T) {
+	t.Parallel()
+
+	openAIProvider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-static"},
+		resp:   &Response{Content: "from-openai"},
+	}
+	anthropicProvider := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-static"},
+		resp:   &Response{Content: "from-anthropic"},
+	}
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultProvider:        providerOpenAI,
+		DefaultModel:           "fast",
+		ModelAliases:           map[string]string{"fast": providerAnthropic + "/claude-static"},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: openAIProvider.models,
+			factory: func() (Provider, error) {
+				return openAIProvider, nil
+			},
+		},
+		{
+			name:         providerAnthropic,
+			staticModels: anthropicProvider.models,
+			factory: func() (Provider, error) {
+				return anthropicProvider, nil
+			},
+		},
+	})
+
+	report := r.ReadinessReport()
+	require.Error(t, report.Default.ModelError)
+	assert.Contains(t, report.Default.ModelError.Error(), "not default provider")
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "from-openai", resp.Content)
+	assert.Equal(t, "gpt-static", resp.Model)
+}
+
+func TestAutoRegisterWithConfigContextReport_AppliesSelectedProviderModelOverride(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-static"},
+		resp:   &Response{Content: "ok"},
+	}
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		SelectedModel:          providerOpenAI + "/private-deployment",
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: provider.models,
+			factory: func() (Provider, error) {
+				return provider, nil
+			},
+		},
+	})
+
+	assert.True(t, r.ProviderHasModel(providerOpenAI, "private-deployment"))
+
+	diagnostic := r.ExplainModelResolution("private-deployment")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, "private-deployment", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceUserOverride, diagnostic.Provenance)
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), providerOpenAI)
+	require.NoError(t, err)
+	assert.Contains(t, catalog.Models, "private-deployment")
+	assert.Equal(t, ModelProvenanceUserOverride, catalog.ModelProvenance["private-deployment"])
+}
+
+func TestAutoRegisterWithConfigContextReport_AppliesDefaultProviderPrivateModelOverride(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-static"},
+		resp:   &Response{Content: "ok"},
+	}
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultProvider:        providerOpenAI,
+		DefaultModel:           "private-deployment",
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: provider.models,
+			factory: func() (Provider, error) {
+				return provider, nil
+			},
+		},
+	})
+
+	report := r.ReadinessReport()
+	require.NoError(t, report.Default.ModelError)
+	assert.True(t, r.ProviderHasModel(providerOpenAI, "private-deployment"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "private-deployment", resp.Model)
+
+	diagnostic := r.ExplainModelResolution("")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, "private-deployment", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceUserOverride, diagnostic.Provenance)
+	assert.True(t, diagnostic.DefaultProviderConfigured)
+}
+
 func TestRegistry_CompleteRoutesToCorrectProvider(t *testing.T) {
 	t.Parallel()
 
@@ -437,6 +852,56 @@ func TestRegistry_CompleteRoutesToCorrectProvider(t *testing.T) {
 
 	if resp.Model != betaModel {
 		assert.Failf(t, "assertion failed", "expected model %s, got %q", betaModel, resp.Model)
+	}
+}
+
+func TestRegistry_CompleteDoesNotGuessProviderFromLegacyPrefix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		model     string
+		providers []*fakeProvider
+	}{
+		{
+			name:  "openai",
+			model: "gpt-future",
+			providers: []*fakeProvider{
+				{name: providerOpenAI, models: []string{"gpt-known"}, resp: &Response{Content: "from-openai"}},
+			},
+		},
+		{
+			name:  "claude code preference",
+			model: "claude-future",
+			providers: []*fakeProvider{
+				{name: providerAnthropic, models: []string{"claude-known"}, resp: &Response{Content: "from-anthropic"}},
+				{name: providerClaudeCode, models: []string{"claude-code-known"}, resp: &Response{Content: "from-claude-code"}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := NewRegistry()
+			for _, provider := range tt.providers {
+				r.Register(provider)
+			}
+
+			_, err := r.Complete(context.Background(), CompleteParams{Model: tt.model})
+			require.Error(t, err)
+			require.ErrorContains(t, err, "unknown model")
+
+			for _, provider := range tt.providers {
+				assert.Empty(t, provider.calls)
+			}
+
+			diagnostic := r.ExplainModelResolution(tt.model)
+			require.Error(t, diagnostic.Error)
+			assert.Equal(t, "no registered provider catalog, live fetch, configured alias, or user override claims this bare model", diagnostic.Reason)
+			assert.Empty(t, diagnostic.Candidates)
+		})
 	}
 }
 
@@ -467,6 +932,97 @@ func TestRegistry_CompleteRoutesProviderQualifiedModel(t *testing.T) {
 	if resp.Model != "shared" {
 		assert.Failf(t, "assertion failed", "model = %q, want shared", resp.Model)
 	}
+}
+
+func TestRegistry_CompleteRoutesExactCatalogModelContainingSlash(t *testing.T) {
+	t.Parallel()
+
+	const model = "namespace/model"
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   alphaProvider,
+		models: []string{model},
+		resp:   &Response{Content: "from-alpha"},
+	})
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: model})
+	require.NoError(t, err)
+	assert.Equal(t, "from-alpha", resp.Content)
+	assert.Equal(t, model, resp.Model)
+
+	diagnostic := r.ExplainModelResolution(model)
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, alphaProvider, diagnostic.ProviderName)
+	assert.Equal(t, model, diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceStatic, diagnostic.Provenance)
+}
+
+func TestRegistry_ProviderQualifiedSyntaxWinsOverExactSlashModelClaim(t *testing.T) {
+	t.Parallel()
+
+	const model = "openai/private"
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"openai-static"},
+		resp:   &Response{Content: "from-openai"},
+	})
+	r.Register(&fakeProvider{
+		name:   "beta",
+		models: []string{model},
+		resp:   &Response{Content: "from-beta"},
+	})
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: model})
+	require.NoError(t, err)
+	assert.Equal(t, "from-openai", resp.Content)
+	assert.Equal(t, "private", resp.Model)
+
+	diagnostic := r.ExplainModelResolution(model)
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, "private", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceUserOverride, diagnostic.Provenance)
+	assert.Equal(t, "provider-qualified model selected provider directly", diagnostic.Reason)
+
+	resp, err = r.Complete(context.Background(), CompleteParams{Model: "beta/" + model})
+	require.NoError(t, err)
+	assert.Equal(t, "from-beta", resp.Content)
+	assert.Equal(t, model, resp.Model)
+}
+
+func TestRegistry_ExactSlashModelCollisionRequiresDefaultProvider(t *testing.T) {
+	t.Parallel()
+
+	const model = "namespace/model"
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{name: alphaProvider, models: []string{model}, resp: &Response{Content: "from-alpha"}})
+	r.Register(&fakeProvider{name: "beta", models: []string{model}, resp: &Response{Content: "from-beta"}})
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: model})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous model")
+
+	diagnostic := r.ExplainModelResolution(model)
+	require.Error(t, diagnostic.Error)
+	assert.Contains(t, diagnostic.Reason, "model ID is ambiguous")
+	require.Len(t, diagnostic.Candidates, 2)
+	assert.Equal(t, model, diagnostic.Candidates[0].Model)
+	assert.Equal(t, model, diagnostic.Candidates[1].Model)
+
+	require.NoError(t, r.SetDefault("beta"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: model})
+	require.NoError(t, err)
+	assert.Equal(t, "from-beta", resp.Content)
+
+	diagnostic = r.ExplainModelResolution(model)
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, "beta", diagnostic.ProviderName)
+	assert.Contains(t, diagnostic.Reason, "model ID is claimed by multiple providers")
 }
 
 func TestRegistry_CompleteAnnotatesResponseProvider(t *testing.T) {
@@ -503,7 +1059,7 @@ func TestRegistry_CompleteAnnotatesMissingResponseModel(t *testing.T) {
 	assert.Equal(t, "a-1", resp.Model)
 }
 
-func TestRegistry_CompleteInfersProviderForLiveOnlyClaudeModel(t *testing.T) {
+func TestRegistry_CompleteProviderQualifiedLiveOnlyModel(t *testing.T) {
 	t.Parallel()
 
 	const liveModel = "claude-opus-4-6"
@@ -515,10 +1071,8 @@ func TestRegistry_CompleteInfersProviderForLiveOnlyClaudeModel(t *testing.T) {
 		resp:   &Response{Content: "from-anthropic"},
 	})
 
-	resp, err := r.Complete(context.Background(), CompleteParams{Model: liveModel})
-	if err != nil {
-		require.NoError(t, err)
-	}
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: providerAnthropic + "/" + liveModel})
+	require.NoError(t, err)
 
 	if resp.Model != liveModel {
 		assert.Failf(t, "assertion failed", "model = %q, want %s", resp.Model, liveModel)
@@ -529,31 +1083,52 @@ func TestRegistry_CompleteInfersProviderForLiveOnlyClaudeModel(t *testing.T) {
 	}
 }
 
-func TestRegistry_CompleteInfersClaudeCodeBeforeAnthropic(t *testing.T) {
+func TestRegistry_CompleteDoesNotGuessProviderFromClaudePrefix(t *testing.T) {
 	t.Parallel()
 
 	const liveModel = "claude-future"
 
 	r := NewRegistry()
-	r.Register(&fakeProvider{
+	anthropic := &fakeProvider{
 		name:   providerAnthropic,
 		models: []string{"claude-sonnet-4-20250514"},
 		resp:   &Response{Content: "from-anthropic"},
-	})
-	r.Register(&fakeProvider{
+	}
+	claudeCode := &fakeProvider{
 		name:   providerClaudeCode,
 		models: []string{"claude-opus-4-6"},
 		resp:   &Response{Content: "from-claude-code"},
-	})
-
-	resp, err := r.Complete(context.Background(), CompleteParams{Model: liveModel})
-	if err != nil {
-		require.NoError(t, err)
 	}
 
-	if resp.Content != "from-claude-code" {
-		assert.Failf(t, "assertion failed", "content = %q, want from-claude-code", resp.Content)
+	r.Register(anthropic)
+	r.Register(claudeCode)
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: liveModel})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown model")
+	assert.Empty(t, anthropic.calls)
+	assert.Empty(t, claudeCode.calls)
+}
+
+func TestRegistry_CompleteDoesNotGuessProviderFromOpenAIPrefixes(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1"},
+		resp:   &Response{Content: "from-openai"},
 	}
+
+	r := NewRegistry()
+	r.Register(provider)
+
+	for _, model := range []string{"gpt-future", "o1-future", "o3-future", "o4-future"} {
+		_, err := r.Complete(context.Background(), CompleteParams{Model: model})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown model")
+	}
+
+	assert.Empty(t, provider.calls)
 }
 
 func TestRegistry_CompleteUnknownModel(t *testing.T) {
@@ -797,7 +1372,7 @@ func TestProviders_ModelContextWindowUsesBuiltinCatalogMetadata(t *testing.T) {
 	assert.Equal(t, 128_000, (&OllamaProvider{}).ModelContextWindow("llama3.2"))
 }
 
-func TestRegistry_CanResolveModelUsesProviderQualificationIndexAndPrefixes(t *testing.T) {
+func TestRegistry_CanResolveModelUsesProviderQualificationIndexAndAliases(t *testing.T) {
 	t.Parallel()
 
 	r := NewRegistry()
@@ -806,6 +1381,7 @@ func TestRegistry_CanResolveModelUsesProviderQualificationIndexAndPrefixes(t *te
 		models: []string{"gpt-4.1-mini"},
 		resp:   &Response{},
 	})
+	require.NoError(t, r.SetModelAlias("fast", providerOpenAI, "gpt-4.1-mini"))
 
 	provider, ok := r.CanResolveModel("openai/gpt-future")
 	require.True(t, ok)
@@ -815,12 +1391,526 @@ func TestRegistry_CanResolveModelUsesProviderQualificationIndexAndPrefixes(t *te
 	require.True(t, ok)
 	assert.Equal(t, providerOpenAI, provider)
 
-	provider, ok = r.CanResolveModel("gpt-future")
+	provider, ok = r.CanResolveModel("fast")
 	require.True(t, ok)
 	assert.Equal(t, providerOpenAI, provider)
 
+	_, ok = r.CanResolveModel("gpt-future")
+	assert.False(t, ok)
+
 	_, ok = r.CanResolveModel("anthropic/claude-sonnet-4-20250514")
 	assert.False(t, ok)
+}
+
+func TestRegistry_CompleteRejectsAmbiguousBareModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{name: alphaProvider, models: []string{"shared"}, resp: &Response{Content: "alpha"}})
+	r.Register(&fakeProvider{name: "beta", models: []string{"shared"}, resp: &Response{Content: "beta"}})
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: "shared"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous model")
+	assert.Contains(t, err.Error(), alphaProvider)
+	assert.Contains(t, err.Error(), "beta")
+
+	diagnostic := r.ExplainModelResolution("shared")
+	require.Error(t, diagnostic.Error)
+	assert.Equal(t, "bare model is ambiguous; use provider/model or configure a default provider", diagnostic.Reason)
+	require.Len(t, diagnostic.Candidates, 2)
+}
+
+func TestRegistry_CompleteRejectsAmbiguousLiveCatalogModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:          alphaProvider,
+		models:        []string{"alpha-static"},
+		fetchedModels: []string{"shared-live"},
+		resp:          &Response{Content: "alpha"},
+	})
+	r.Register(&fakeProvider{
+		name:          "beta",
+		models:        []string{"beta-static"},
+		fetchedModels: []string{"shared-live"},
+		resp:          &Response{Content: "beta"},
+	})
+
+	_, err := r.ProviderModelCatalog(context.Background(), alphaProvider)
+	require.NoError(t, err)
+	_, err = r.ProviderModelCatalog(context.Background(), "beta")
+	require.NoError(t, err)
+
+	_, err = r.Complete(context.Background(), CompleteParams{Model: "shared-live"})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "ambiguous model")
+
+	diagnostic := r.ExplainModelResolution("shared-live")
+	require.Error(t, diagnostic.Error)
+	require.Len(t, diagnostic.Candidates, 2)
+	assert.Equal(t, ModelProvenanceFetchedLive, diagnostic.Candidates[0].Provenance)
+	assert.Equal(t, ModelProvenanceFetchedLive, diagnostic.Candidates[1].Provenance)
+}
+
+func TestRegistry_CompleteUsesConfiguredDefaultProviderForAmbiguousBareModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{name: alphaProvider, models: []string{"shared"}, resp: &Response{Content: "alpha"}})
+	r.Register(&fakeProvider{name: "beta", models: []string{"shared"}, resp: &Response{Content: "beta"}})
+	require.NoError(t, r.SetDefault("beta"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: "shared"})
+	require.NoError(t, err)
+	assert.Equal(t, "beta", resp.Content)
+
+	diagnostic := r.ExplainModelResolution("shared")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, "beta", diagnostic.ProviderName)
+	assert.Contains(t, diagnostic.Reason, "configured default provider")
+}
+
+func TestRegistry_CompleteUsesConfiguredDefaultModelProviderForAmbiguousBareModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{name: alphaProvider, models: []string{"a-1", "shared"}, resp: &Response{Content: "alpha"}})
+	r.Register(&fakeProvider{name: "beta", models: []string{"b-1", "shared"}, resp: &Response{Content: "beta"}})
+	require.NoError(t, r.SetDefaultModel("a-1"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: "shared"})
+	require.NoError(t, err)
+	assert.Equal(t, "alpha", resp.Content)
+
+	diagnostic := r.ExplainModelResolution("shared")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, alphaProvider, diagnostic.ProviderName)
+	assert.True(t, diagnostic.DefaultProviderConfigured)
+}
+
+func TestRegistry_ConfiguredAliasResolvesToProviderModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "ok"},
+	}
+	r.Register(provider)
+	require.NoError(t, r.SetModelAlias("fast", providerOpenAI, "gpt-4.1-mini"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: "fast"})
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4.1-mini", resp.Model)
+	require.Len(t, provider.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", provider.calls[0].Model)
+
+	diagnostic := r.ExplainModelResolution("fast")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, "gpt-4.1-mini", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, diagnostic.Provenance)
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), providerOpenAI)
+	require.NoError(t, err)
+	assert.Contains(t, catalog.Models, "fast")
+	assert.Equal(t, ModelProvenanceConfiguredAlias, catalog.ModelProvenance["fast"])
+}
+
+func TestRegistry_ConfiguredAliasTargetMarksStaleStaticFallback(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:     alphaProvider,
+		models:   []string{"static-model"},
+		fetchErr: errors.New("models unavailable"),
+		resp:     &Response{Content: "ok"},
+	})
+	require.NoError(t, r.SetModelAlias("fast", alphaProvider, "static-model"))
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), alphaProvider)
+	require.NoError(t, err)
+	require.Error(t, catalog.Error)
+	require.True(t, catalog.Stale)
+
+	diagnostic := r.ExplainModelResolution("fast")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, diagnostic.Provenance)
+	assert.True(t, diagnostic.Stale)
+	require.Len(t, diagnostic.Candidates, 1)
+	assert.True(t, diagnostic.Candidates[0].Stale)
+}
+
+func TestRegistry_ConfiguredAliasTargetNotInStaticFallbackIsNotStale(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:     alphaProvider,
+		models:   []string{"static-model"},
+		fetchErr: errors.New("models unavailable"),
+		resp:     &Response{Content: "ok"},
+	})
+	require.NoError(t, r.SetModelAlias("private-model", alphaProvider, "private-model"))
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), alphaProvider)
+	require.NoError(t, err)
+	require.Error(t, catalog.Error)
+	require.True(t, catalog.Stale)
+	assert.Contains(t, catalog.Models, "private-model")
+	assert.Equal(t, ModelProvenanceConfiguredAlias, catalog.ModelProvenance["private-model"])
+
+	diagnostic := r.ExplainModelResolution("private-model")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, diagnostic.Provenance)
+	assert.False(t, diagnostic.Stale)
+	require.Len(t, diagnostic.Candidates, 1)
+	assert.False(t, diagnostic.Candidates[0].Stale)
+}
+
+func TestRegistry_SetModelAliasRejectsProviderQualifiedAlias(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{},
+	})
+
+	err := r.SetModelAlias(providerOpenAI+"/fast", providerOpenAI, "gpt-4.1-mini")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a bare model name")
+
+	err = r.SetModelAlias(providerOpenAI+"/", providerOpenAI, "gpt-4.1-mini")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a bare model name")
+}
+
+func TestRegistry_ProviderQualifiedModelIgnoresConfiguredAlias(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "ok"},
+	}
+	r.Register(provider)
+	require.NoError(t, r.SetModelAlias("fast", providerOpenAI, "gpt-4.1-mini"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: providerOpenAI + "/fast"})
+	require.NoError(t, err)
+	assert.Equal(t, "fast", resp.Model)
+	require.Len(t, provider.calls, 1)
+	assert.Equal(t, "fast", provider.calls[0].Model)
+
+	diagnostic := r.ExplainModelResolution(providerOpenAI + "/fast")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, "fast", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceUserOverride, diagnostic.Provenance)
+}
+
+func TestRegistry_ProviderQualifiedModelDoesNotUseSameNameConfiguredAliasProvenance(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"fast"},
+		resp:   &Response{Content: "ok"},
+	}
+	r.Register(provider)
+	require.NoError(t, r.SetModelAlias("fast", providerOpenAI, "fast"))
+
+	bareDiagnostic := r.ExplainModelResolution("fast")
+	require.NoError(t, bareDiagnostic.Error)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, bareDiagnostic.Provenance)
+
+	qualifiedDiagnostic := r.ExplainModelResolution(providerOpenAI + "/fast")
+	require.NoError(t, qualifiedDiagnostic.Error)
+	assert.Equal(t, providerOpenAI, qualifiedDiagnostic.ProviderName)
+	assert.Equal(t, "fast", qualifiedDiagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceStatic, qualifiedDiagnostic.Provenance)
+	assert.Equal(t, "provider-qualified model selected provider directly", qualifiedDiagnostic.Reason)
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: providerOpenAI + "/fast"})
+	require.NoError(t, err)
+	assert.Equal(t, "fast", resp.Model)
+}
+
+func TestRegistry_ProviderQualifiedOverrideDoesNotStealBareConfiguredAlias(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "ok"},
+	}
+	r.Register(provider)
+	require.NoError(t, r.SetModelAlias("fast", providerOpenAI, "gpt-4.1-mini"))
+	require.NoError(t, r.SetProviderModelOverride(providerOpenAI, "fast"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: "fast"})
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4.1-mini", resp.Model)
+
+	resp, err = r.Complete(context.Background(), CompleteParams{Model: providerOpenAI + "/fast"})
+	require.NoError(t, err)
+	assert.Equal(t, "fast", resp.Model)
+
+	diagnostic := r.ExplainModelResolution("fast")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, "gpt-4.1-mini", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, diagnostic.Provenance)
+	assert.True(t, r.ProviderModelUserOverride(providerOpenAI, "fast"))
+}
+
+func TestRegistry_ConfiguredAliasSurvivesCatalogRefreshNameCollision(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	provider := &fakeProvider{
+		name:          providerOpenAI,
+		models:        []string{"fast"},
+		fetchedModels: []string{"fast", "gpt-4.1-mini"},
+		resp:          &Response{Content: "ok"},
+	}
+	r.Register(provider)
+	require.NoError(t, r.SetModelAlias("fast", providerOpenAI, "gpt-4.1-mini"))
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), providerOpenAI)
+	require.NoError(t, err)
+	require.NoError(t, catalog.Error)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, catalog.ModelProvenance["fast"])
+
+	provenance, ok := r.ProviderModelCatalogProvenance(providerOpenAI, "fast")
+	require.True(t, ok)
+	assert.Equal(t, ModelProvenanceFetchedLive, provenance)
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: "fast"})
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4.1-mini", resp.Model)
+
+	diagnostic := r.ExplainModelResolution("fast")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, "gpt-4.1-mini", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, diagnostic.Provenance)
+
+	qualifiedDiagnostic := r.ExplainModelResolution(providerOpenAI + "/fast")
+	require.NoError(t, qualifiedDiagnostic.Error)
+	assert.Equal(t, providerOpenAI, qualifiedDiagnostic.ProviderName)
+	assert.Equal(t, "fast", qualifiedDiagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceFetchedLive, qualifiedDiagnostic.Provenance)
+}
+
+func TestRegistry_CatalogProvenanceClearsWhenLiveCatalogDropsAliasName(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	provider := &fakeProvider{
+		name:          providerOpenAI,
+		models:        []string{"fast"},
+		fetchedModels: []string{"gpt-4.1-mini"},
+		resp:          &Response{Content: "ok"},
+	}
+	r.Register(provider)
+	require.NoError(t, r.SetModelAlias("fast", providerOpenAI, "gpt-4.1-mini"))
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), providerOpenAI)
+	require.NoError(t, err)
+	require.NoError(t, catalog.Error)
+	assert.Contains(t, catalog.Models, "fast")
+	assert.Equal(t, ModelProvenanceConfiguredAlias, catalog.ModelProvenance["fast"])
+
+	_, ok := r.ProviderModelCatalogProvenance(providerOpenAI, "fast")
+	assert.False(t, ok)
+
+	bareDiagnostic := r.ExplainModelResolution("fast")
+	require.NoError(t, bareDiagnostic.Error)
+	assert.Equal(t, "gpt-4.1-mini", bareDiagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, bareDiagnostic.Provenance)
+
+	qualifiedDiagnostic := r.ExplainModelResolution(providerOpenAI + "/fast")
+	require.NoError(t, qualifiedDiagnostic.Error)
+	assert.Equal(t, "fast", qualifiedDiagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceUserOverride, qualifiedDiagnostic.Provenance)
+}
+
+func TestRegistry_DefaultProviderQualifiedModelIgnoresConfiguredAlias(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "ok"},
+	}
+	r.Register(provider)
+	require.NoError(t, r.SetModelAlias("fast", providerOpenAI, "gpt-4.1-mini"))
+	require.NoError(t, r.SetDefaultModel(providerOpenAI+"/fast"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "fast", resp.Model)
+	require.Len(t, provider.calls, 1)
+	assert.Equal(t, "fast", provider.calls[0].Model)
+
+	diagnostic := r.ExplainModelResolution("")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, "fast", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceUserOverride, diagnostic.Provenance)
+}
+
+func TestRegistry_ConfiguredAliasCollisionIsAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{name: alphaProvider, models: []string{"a-1"}, resp: &Response{Content: "alpha"}})
+	r.Register(&fakeProvider{name: "beta", models: []string{"b-1"}, resp: &Response{Content: "beta"}})
+	require.NoError(t, r.SetModelAlias("fast", alphaProvider, "a-1"))
+	require.NoError(t, r.SetModelAlias("fast", "beta", "b-1"))
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: "fast"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous model")
+
+	diagnostic := r.ExplainModelResolution("fast")
+	require.Error(t, diagnostic.Error)
+	require.Len(t, diagnostic.Candidates, 2)
+	assert.Equal(t, alphaProvider, diagnostic.Candidates[0].ProviderName)
+	assert.Equal(t, "a-1", diagnostic.Candidates[0].Model)
+	assert.Equal(t, "beta", diagnostic.Candidates[1].ProviderName)
+	assert.Equal(t, "b-1", diagnostic.Candidates[1].Model)
+}
+
+func TestRegistry_ConfiguredAliasCollidesWithStaticCatalogClaim(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{name: alphaProvider, models: []string{"fast"}, resp: &Response{Content: "alpha"}})
+	r.Register(&fakeProvider{name: "beta", models: []string{"b-1"}, resp: &Response{Content: "beta"}})
+	require.NoError(t, r.SetModelAlias("fast", "beta", "b-1"))
+
+	_, err := r.Complete(context.Background(), CompleteParams{Model: "fast"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous model")
+
+	diagnostic := r.ExplainModelResolution("fast")
+	require.Error(t, diagnostic.Error)
+	require.Len(t, diagnostic.Candidates, 2)
+	assert.Equal(t, alphaProvider, diagnostic.Candidates[0].ProviderName)
+	assert.Equal(t, "fast", diagnostic.Candidates[0].Model)
+	assert.Equal(t, ModelProvenanceStatic, diagnostic.Candidates[0].Provenance)
+	assert.Equal(t, "beta", diagnostic.Candidates[1].ProviderName)
+	assert.Equal(t, "b-1", diagnostic.Candidates[1].Model)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, diagnostic.Candidates[1].Provenance)
+
+	require.NoError(t, r.SetDefault("beta"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: "fast"})
+	require.NoError(t, err)
+	assert.Equal(t, "beta", resp.Content)
+	assert.Equal(t, "b-1", resp.Model)
+}
+
+func TestRegistry_ConfiguredDefaultProviderDisambiguatesAliasCollision(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{name: alphaProvider, models: []string{"a-1"}, resp: &Response{Content: "alpha"}})
+	r.Register(&fakeProvider{name: "beta", models: []string{"b-1"}, resp: &Response{Content: "beta"}})
+	require.NoError(t, r.SetModelAlias("fast", alphaProvider, "a-1"))
+	require.NoError(t, r.SetModelAlias("fast", "beta", "b-1"))
+	require.NoError(t, r.SetDefault("beta"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{Model: "fast"})
+	require.NoError(t, err)
+	assert.Equal(t, "beta", resp.Content)
+
+	diagnostic := r.ExplainModelResolution("fast")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, "beta", diagnostic.ProviderName)
+	assert.Equal(t, "b-1", diagnostic.ProviderModel)
+	assert.Contains(t, diagnostic.Reason, "configured default provider")
+}
+
+func TestRegistry_DefaultConfiguredAliasUsesProviderModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "ok"},
+	}
+	r.Register(provider)
+	require.NoError(t, r.SetModelAlias("fast", providerOpenAI, "gpt-4.1-mini"))
+	require.NoError(t, r.SetDefaultModel("fast"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4.1-mini", resp.Model)
+	require.Len(t, provider.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", provider.calls[0].Model)
+
+	diagnostic := r.ExplainModelResolution("")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerOpenAI, diagnostic.ProviderName)
+	assert.Equal(t, "gpt-4.1-mini", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceConfiguredAlias, diagnostic.Provenance)
+}
+
+func TestRegistry_UserOverrideModelProvenance(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{name: providerCodex, models: []string{"gpt-5.5"}, resp: &Response{}})
+
+	require.NoError(t, r.SetDefaultProviderModel(providerCodex, "custom-deployment"))
+
+	diagnostic := r.ExplainModelResolution("custom-deployment")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, providerCodex, diagnostic.ProviderName)
+	assert.Equal(t, ModelProvenanceUserOverride, diagnostic.Provenance)
+
+	provenance, ok := r.ProviderModelProvenance(providerCodex, "custom-deployment")
+	require.True(t, ok)
+	assert.Equal(t, ModelProvenanceUserOverride, provenance)
+}
+
+func TestRegistry_ProviderModelCatalogIncludesUserOverrideProvenance(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:          providerOpenAI,
+		models:        []string{"gpt-static"},
+		fetchedModels: []string{"gpt-live"},
+		resp:          &Response{},
+	})
+	require.NoError(t, r.SetProviderModelOverride(providerOpenAI, "private-deployment"))
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), providerOpenAI)
+	require.NoError(t, err)
+	require.NoError(t, catalog.Error)
+	assert.Equal(t, ModelCatalogSourceLive, catalog.Source)
+	assert.Contains(t, catalog.Models, "gpt-live")
+	assert.Contains(t, catalog.Models, "private-deployment")
+	assert.Equal(t, ModelProvenanceFetchedLive, catalog.ModelProvenance["gpt-live"])
+	assert.Equal(t, ModelProvenanceUserOverride, catalog.ModelProvenance["private-deployment"])
+
+	models, err := r.ProviderModels(context.Background(), providerOpenAI)
+	require.NoError(t, err)
+	assert.Contains(t, models, "private-deployment")
 }
 
 func TestRegistry_ProviderHasModelUsesProviderSpecificIndex(t *testing.T) {
@@ -960,6 +2050,29 @@ func TestRegistry_SetDefaultModelProviderQualified(t *testing.T) {
 	}
 }
 
+func TestRegistry_SetDefaultModelExactSlashModelID(t *testing.T) {
+	t.Parallel()
+
+	const model = "namespace/model"
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{name: alphaProvider, models: []string{model}, resp: &Response{Content: "from-alpha"}})
+
+	require.NoError(t, r.SetDefaultModel(model))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "from-alpha", resp.Content)
+	assert.Equal(t, model, resp.Model)
+
+	diagnostic := r.ExplainModelResolution("")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, alphaProvider, diagnostic.ProviderName)
+	assert.Equal(t, model, diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceStatic, diagnostic.Provenance)
+	assert.True(t, diagnostic.DefaultProviderConfigured)
+}
+
 func TestRegistry_SetDefaultProviderModelIndexesConfiguredModel(t *testing.T) {
 	t.Parallel()
 
@@ -1084,6 +2197,34 @@ func TestRegistry_ResolveModelAndContextWindowUseDefaultForEmptyModel(t *testing
 	assert.Equal(t, 128_000, r.ContextWindow(""))
 }
 
+func TestRegistry_EmptyModelUsesFetchedLiveCatalogDefault(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	provider := &fakeProvider{
+		name:          alphaProvider,
+		models:        []string{"static-model"},
+		fetchedModels: []string{"live-model"},
+		resp:          &Response{Content: "ok"},
+	}
+	r.Register(provider)
+
+	_, err := r.ProviderModelCatalog(context.Background(), alphaProvider)
+	require.NoError(t, err)
+
+	resp, err := r.Complete(context.Background(), CompleteParams{})
+	require.NoError(t, err)
+	assert.Equal(t, "live-model", resp.Model)
+	require.Len(t, provider.calls, 1)
+	assert.Equal(t, "live-model", provider.calls[0].Model)
+
+	diagnostic := r.ExplainModelResolution("")
+	require.NoError(t, diagnostic.Error)
+	assert.Equal(t, alphaProvider, diagnostic.ProviderName)
+	assert.Equal(t, "live-model", diagnostic.ProviderModel)
+	assert.Equal(t, ModelProvenanceFetchedLive, diagnostic.Provenance)
+}
+
 func TestRegistry_ProviderModelsIndexesFetchedModels(t *testing.T) {
 	t.Parallel()
 
@@ -1103,6 +2244,10 @@ func TestRegistry_ProviderModelsIndexesFetchedModels(t *testing.T) {
 	if len(models) != 1 || models[0] != "live-model" {
 		require.Failf(t, "unexpected failure", "models = %v, want [live-model]", models)
 	}
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), alphaProvider)
+	require.NoError(t, err)
+	assert.Equal(t, ModelProvenanceFetchedLive, catalog.ModelProvenance["live-model"])
 
 	assert.True(t, r.ProviderHasModel(alphaProvider, "live-model"))
 	assert.False(t, r.ProviderHasModel(alphaProvider, "static-model"))
@@ -1142,14 +2287,16 @@ func TestRegistry_ProviderModelsFetchFailureMarksVerifiedIndexUnverified(t *test
 	provider.fetchModelsErr = errors.New("models endpoint unavailable")
 	models, err := r.ProviderModels(context.Background(), alphaProvider)
 
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "using stale static fallback")
+	require.ErrorContains(t, err, "models endpoint unavailable")
 	assert.Equal(t, []string{"static-model"}, models)
 	assert.False(t, r.ProviderModelsVerified(alphaProvider))
-	assert.True(t, r.ProviderHasModel(alphaProvider, "live-model"))
+	assert.False(t, r.ProviderHasModel(alphaProvider, "live-model"))
 	assert.True(t, r.ProviderHasModel(alphaProvider, "static-model"))
 }
 
-func TestRegistry_CheckHealthFailureKeepsFallbackModelsIndexed(t *testing.T) {
+func TestRegistry_CheckHealthFailureReplacesLiveIndexWithStaticFallback(t *testing.T) {
 	t.Parallel()
 
 	provider := &fakeProvider{
@@ -1175,7 +2322,7 @@ func TestRegistry_CheckHealthFailureKeepsFallbackModelsIndexed(t *testing.T) {
 	require.Len(t, results, 1)
 	assert.False(t, results[0].Healthy)
 	assert.False(t, r.ProviderModelsVerified(alphaProvider))
-	assert.True(t, r.ProviderHasModel(alphaProvider, "live-model"))
+	assert.False(t, r.ProviderHasModel(alphaProvider, "live-model"))
 	assert.True(t, r.ProviderHasModel(alphaProvider, "static-model"))
 }
 
@@ -1195,8 +2342,24 @@ func TestRegistry_ProviderModelCatalogReportsStaticFallbackOnFetchFailure(t *tes
 	assert.Equal(t, ModelCatalogSourceStatic, catalog.Source)
 	assert.Equal(t, []string{"static-model"}, catalog.Models)
 	assert.Equal(t, []string{"static-model"}, catalog.StaticModels)
+	assert.True(t, catalog.Stale)
+	assert.Equal(t, ModelProvenanceStatic, catalog.ModelProvenance["static-model"])
 	require.Error(t, catalog.Error)
 	assert.Contains(t, catalog.Error.Error(), "fetch failed")
+}
+
+func TestProviderReadinessSummaryMarksStaleModelCatalog(t *testing.T) {
+	t.Parallel()
+
+	summary := providerReadinessSummary(&ProviderReadiness{
+		Name:               alphaProvider,
+		Status:             ProviderStatusRegistered,
+		ModelCatalogSource: ModelCatalogSourceStatic,
+		ModelsStale:        true,
+	})
+
+	assert.Contains(t, summary, "models=static")
+	assert.Contains(t, summary, "stale=true")
 }
 
 func TestRegistry_ProviderModelCatalogClearsStaleFetchFailure(t *testing.T) {
@@ -1229,6 +2392,44 @@ func TestRegistry_ProviderModelCatalogClearsStaleFetchFailure(t *testing.T) {
 	require.NoError(t, entry.Error)
 	require.NoError(t, entry.ModelFetchError)
 	assert.Equal(t, ModelCatalogSourceLive, entry.ModelCatalogSource)
+}
+
+func TestRegistry_ProviderModelCatalogFetchFailureReplacesPreviousLiveIndexWithStaleStaticFallback(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:          alphaProvider,
+		models:        []string{"static-model"},
+		fetchedModels: []string{"live-model"},
+		resp:          &Response{Content: "ok"},
+	}
+
+	r := NewRegistry()
+	r.Register(provider)
+
+	catalog, err := r.ProviderModelCatalog(context.Background(), alphaProvider)
+	require.NoError(t, err)
+	require.NoError(t, catalog.Error)
+	assert.Equal(t, []string{"live-model"}, catalog.Models)
+	assert.True(t, r.ProviderHasModel(alphaProvider, "live-model"))
+	assert.False(t, r.ProviderHasModel(alphaProvider, "static-model"))
+	assert.True(t, r.ProviderModelsVerified(alphaProvider))
+
+	provider.fetchedModels = nil
+	provider.fetchErr = errors.New("live catalog unavailable")
+
+	catalog, err = r.ProviderModelCatalog(context.Background(), alphaProvider)
+	require.NoError(t, err)
+	require.Error(t, catalog.Error)
+	assert.True(t, catalog.Stale)
+	assert.Equal(t, []string{"static-model"}, catalog.Models)
+	assert.False(t, r.ProviderHasModel(alphaProvider, "live-model"))
+	assert.True(t, r.ProviderHasModel(alphaProvider, "static-model"))
+	assert.False(t, r.ProviderModelsVerified(alphaProvider))
+
+	_, err = r.Complete(context.Background(), CompleteParams{Model: "live-model"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "unknown model")
 }
 
 func TestRegistry_ProviderModelCatalogDoesNotFetchStaticOnlyProviders(t *testing.T) {
@@ -1353,7 +2554,7 @@ func TestRegistry_ResolutionErrorIncludesDynamicallyRequestedProvider(t *testing
 	assert.Contains(t, err.Error(), "codex=missing_credentials")
 	assert.NotContains(t, err.Error(), "openai=missing_credentials")
 
-	_, err = r.Complete(context.Background(), CompleteParams{Model: "gpt-4.1"})
+	_, err = r.Complete(context.Background(), CompleteParams{Model: "gpt-static"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "openai=missing_credentials")
 	assert.NotContains(t, err.Error(), "codex=missing_credentials")

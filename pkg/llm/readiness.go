@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -48,12 +49,14 @@ const (
 //
 //nolint:govet // Field order keeps provenance and model slices grouped for callers.
 type ProviderModelCatalog struct {
-	Error        error
-	ProviderName string
-	Models       []string
-	StaticModels []string
-	LiveModels   []string
-	Source       ModelCatalogSource
+	Error           error
+	ProviderName    string
+	Models          []string
+	StaticModels    []string
+	LiveModels      []string
+	ModelProvenance map[string]ModelProvenance
+	Source          ModelCatalogSource
+	Stale           bool
 }
 
 // ProviderReadiness is the product-facing provider availability state recorded
@@ -78,6 +81,7 @@ type ProviderReadiness struct {
 	HealthChecked      bool
 	HealthCached       bool
 	Healthy            bool
+	ModelsStale        bool
 }
 
 // DefaultSelectionReport records how configured default provider/model
@@ -107,7 +111,11 @@ type providerHealthCacheEntry struct {
 func cloneProviderModelCatalog(c ProviderModelCatalog) ProviderModelCatalog {
 	c.Models = append([]string(nil), c.Models...)
 	c.StaticModels = append([]string(nil), c.StaticModels...)
+
 	c.LiveModels = append([]string(nil), c.LiveModels...)
+	if c.ModelProvenance != nil {
+		c.ModelProvenance = maps.Clone(c.ModelProvenance)
+	}
 
 	return c
 }
@@ -136,10 +144,11 @@ func (r *Registry) setStaticProviderCatalogLocked(providerName string, models []
 
 	staticModels := cleanModelList(models)
 	r.catalogs[providerName] = ProviderModelCatalog{
-		ProviderName: providerName,
-		Models:       append([]string(nil), staticModels...),
-		StaticModels: append([]string(nil), staticModels...),
-		Source:       ModelCatalogSourceStatic,
+		ProviderName:    providerName,
+		Models:          append([]string(nil), staticModels...),
+		StaticModels:    append([]string(nil), staticModels...),
+		ModelProvenance: modelProvenanceForModels(staticModels, ModelProvenanceStatic),
+		Source:          ModelCatalogSourceStatic,
 	}
 }
 
@@ -151,8 +160,14 @@ func (r *Registry) setProviderCatalogLocked(providerName string, catalog Provide
 	catalog.ProviderName = providerName
 	catalog.Models = cleanModelList(catalog.Models)
 	catalog.StaticModels = cleanModelList(catalog.StaticModels)
+
 	catalog.LiveModels = cleanModelList(catalog.LiveModels)
+	if catalog.ModelProvenance == nil {
+		catalog.ModelProvenance = modelProvenanceForModels(catalog.Models, catalogProvenance(catalog.Source))
+	}
+
 	r.catalogs[providerName] = cloneProviderModelCatalog(catalog)
+	r.addProviderModelOverridesToCatalogLocked(providerName)
 }
 
 func (r *Registry) providerCatalogLocked(providerName string) (ProviderModelCatalog, bool) {
@@ -281,6 +296,24 @@ func cleanModelList(models []string) []string {
 	return out
 }
 
+func modelProvenanceForModels(models []string, provenance ModelProvenance) map[string]ModelProvenance {
+	out := make(map[string]ModelProvenance, len(models))
+	for _, model := range cleanModelList(models) {
+		out[model] = provenance
+	}
+
+	return out
+}
+
+func catalogProvenance(source ModelCatalogSource) ModelProvenance {
+	switch source {
+	case ModelCatalogSourceLive:
+		return ModelProvenanceFetchedLive
+	default:
+		return ModelProvenanceStatic
+	}
+}
+
 // ProviderModelCatalog fetches a provider's live model list when supported and
 // returns explicit provenance for live-vs-static model availability.
 func (r *Registry) ProviderModelCatalog(ctx context.Context, providerName string) (ProviderModelCatalog, error) {
@@ -303,14 +336,18 @@ func (r *Registry) ProviderModelCatalog(ctx context.Context, providerName string
 
 	if len(catalog.LiveModels) > 0 {
 		if providerModelsVerified(p) {
-			r.replaceProviderModelsLocked(providerName, catalog.LiveModels)
+			r.replaceProviderModelsLocked(providerName, catalog.LiveModels, ModelProvenanceFetchedLive, true)
 		} else {
-			r.indexProviderModelsLocked(providerName, catalog.LiveModels)
+			r.indexProviderModelsLocked(providerName, catalog.LiveModels, ModelProvenanceFetchedLive)
 			r.markProviderModelsUnverifiedLocked(providerName)
 		}
 	} else {
-		r.indexProviderModelsLocked(providerName, catalog.StaticModels)
-		r.markProviderModelsUnverifiedLocked(providerName)
+		r.replaceProviderModelsLocked(providerName, catalog.StaticModels, ModelProvenanceStatic, false)
+	}
+
+	storedCatalog, ok := r.providerCatalogLocked(providerName)
+	if ok {
+		catalog = storedCatalog
 	}
 
 	r.updateReadinessCatalogLocked(providerName, catalog)
@@ -322,10 +359,11 @@ func (r *Registry) ProviderModelCatalog(ctx context.Context, providerName string
 func fetchProviderModelCatalog(ctx context.Context, p Provider) ProviderModelCatalog {
 	staticModels := cleanModelList(p.Models())
 	catalog := ProviderModelCatalog{
-		ProviderName: p.Name(),
-		Models:       append([]string(nil), staticModels...),
-		StaticModels: append([]string(nil), staticModels...),
-		Source:       ModelCatalogSourceStatic,
+		ProviderName:    p.Name(),
+		Models:          append([]string(nil), staticModels...),
+		StaticModels:    append([]string(nil), staticModels...),
+		ModelProvenance: modelProvenanceForModels(staticModels, ModelProvenanceStatic),
+		Source:          ModelCatalogSourceStatic,
 	}
 
 	if !providerSupportsLiveModels(p.Name()) {
@@ -335,6 +373,7 @@ func fetchProviderModelCatalog(ctx context.Context, p Provider) ProviderModelCat
 	liveModels, err := p.FetchModels(ctx)
 	if err != nil {
 		catalog.Error = err
+		catalog.Stale = true
 
 		return catalog
 	}
@@ -346,6 +385,7 @@ func fetchProviderModelCatalog(ctx context.Context, p Provider) ProviderModelCat
 
 	catalog.Models = append([]string(nil), liveModels...)
 	catalog.LiveModels = append([]string(nil), liveModels...)
+	catalog.ModelProvenance = modelProvenanceForModels(liveModels, ModelProvenanceFetchedLive)
 	catalog.Source = ModelCatalogSourceLive
 
 	return catalog
@@ -362,6 +402,7 @@ func (r *Registry) updateReadinessCatalogLocked(providerName string, catalog Pro
 	entry.LiveModels = append([]string(nil), catalog.LiveModels...)
 	entry.ModelCatalogSource = catalog.Source
 	entry.ModelFetchError = catalog.Error
+	entry.ModelsStale = catalog.Stale
 
 	if entry.HealthError != nil {
 		entry.Error = entry.HealthError
@@ -524,6 +565,7 @@ func providerCatalogHealth(ctx context.Context, providerName string, p Provider,
 	health.ModelFetchError = catalog.Error
 	health.Error = catalog.Error
 	health.Healthy = catalog.Error == nil
+	health.ModelsStale = catalog.Stale
 
 	return providerHealthWithDefaults(health, p)
 }
@@ -547,10 +589,12 @@ func providerExplicitHealthCheck(ctx context.Context, providerName string, p Pro
 	health.LiveModels = append([]string(nil), catalog.LiveModels...)
 	health.ModelSource = catalog.Source
 	health.ModelFetchError = catalog.Error
+	health.ModelsStale = catalog.Stale
 
 	if catalog.Error != nil {
 		health.Models = cleanModelList(p.Models())
 		health.ModelSource = ModelCatalogSourceStatic
+		health.ModelsStale = true
 	}
 
 	return providerHealthWithDefaults(health, p)
@@ -623,6 +667,7 @@ func (r *Registry) applyHealthToReadinessLocked(providerName string, health Prov
 	entry.StaticModels = append([]string(nil), health.StaticModels...)
 	entry.LiveModels = append([]string(nil), health.LiveModels...)
 	entry.ModelCatalogSource = health.ModelSource
+	entry.ModelsStale = health.ModelsStale
 
 	if health.Healthy && health.ModelFetchError != nil {
 		entry.Error = health.ModelFetchError
@@ -634,24 +679,25 @@ func (r *Registry) applyHealthToReadinessLocked(providerName string, health Prov
 
 	r.upsertReadinessProviderLocked(entry)
 	r.setProviderCatalogLocked(providerName, ProviderModelCatalog{
-		ProviderName: providerName,
-		Models:       health.Models,
-		StaticModels: health.StaticModels,
-		LiveModels:   health.LiveModels,
-		Source:       health.ModelSource,
-		Error:        health.ModelFetchError,
+		ProviderName:    providerName,
+		Models:          health.Models,
+		StaticModels:    health.StaticModels,
+		LiveModels:      health.LiveModels,
+		ModelProvenance: modelProvenanceForModels(health.Models, catalogProvenance(health.ModelSource)),
+		Source:          health.ModelSource,
+		Error:           health.ModelFetchError,
+		Stale:           health.ModelsStale,
 	})
 
 	if len(health.LiveModels) > 0 {
 		if provider, ok := r.providers[providerName]; ok && providerModelsVerified(provider) {
-			r.replaceProviderModelsLocked(providerName, health.LiveModels)
+			r.replaceProviderModelsLocked(providerName, health.LiveModels, ModelProvenanceFetchedLive, true)
 		} else {
-			r.indexProviderModelsLocked(providerName, health.LiveModels)
+			r.indexProviderModelsLocked(providerName, health.LiveModels, ModelProvenanceFetchedLive)
 			r.markProviderModelsUnverifiedLocked(providerName)
 		}
 	} else {
-		r.indexProviderModelsLocked(providerName, health.StaticModels)
-		r.markProviderModelsUnverifiedLocked(providerName)
+		r.replaceProviderModelsLocked(providerName, health.StaticModels, ModelProvenanceStatic, false)
 	}
 }
 
@@ -711,18 +757,35 @@ func (r *Registry) relevantProviderNamesForModelLocked(model string) map[string]
 		return nil
 	}
 
-	var providerName string
 	if explicitProvider, _, ok := splitProviderModel(model); ok {
-		providerName = explicitProvider
-	} else {
-		providerName = r.providerNameForModelPrefixLocked(model)
+		return map[string]bool{explicitProvider: true}
 	}
 
-	if providerName == "" {
+	candidates := r.modelResolutionCandidatesLocked(model)
+
+	providers := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		providers[candidate.ProviderName] = true
+	}
+
+	entries := r.readinessReportLocked().Providers
+	for i := range entries {
+		if providerReadinessMentionsModel(&entries[i], model) {
+			providers[entries[i].Name] = true
+		}
+	}
+
+	if len(providers) == 0 {
 		return nil
 	}
 
-	return map[string]bool{providerName: true}
+	return providers
+}
+
+func providerReadinessMentionsModel(entry *ProviderReadiness, model string) bool {
+	return containsModel(entry.Models, model) ||
+		containsModel(entry.StaticModels, model) ||
+		containsModel(entry.LiveModels, model)
 }
 
 func includeProviderInResolutionContext(entry *ProviderReadiness, relevantProviders map[string]bool) bool {
@@ -742,6 +805,10 @@ func providerReadinessSummary(entry *ProviderReadiness) string {
 	parts := []string{entry.Name + "=" + status}
 	if entry.ModelCatalogSource != "" {
 		parts = append(parts, "models="+string(entry.ModelCatalogSource))
+	}
+
+	if entry.ModelsStale {
+		parts = append(parts, "stale=true")
 	}
 
 	if entry.Error != nil {
@@ -835,46 +902,21 @@ func (r *Registry) modelResolutionLabel(model string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if model == "" {
-		if r.defaultModel != "" {
-			model = r.defaultModel
-		} else if p, ok := r.providers[r.fallback]; ok {
-			models := p.Models()
-			if len(models) > 0 {
-				model = models[0]
-			}
-		}
-	}
-
-	if model == "" {
-		if r.fallback != "" {
-			return "default provider " + r.fallback
+	diagnostic := r.explainModelResolutionLocked(model)
+	if diagnostic.Error != nil {
+		if strings.TrimSpace(model) == "" {
+			return "unresolved"
 		}
 
-		return "unresolved"
+		return strings.TrimSpace(model) + " unresolved"
 	}
 
-	if providerName, providerModel, ok := splitProviderModel(model); ok {
-		if _, ok := r.providers[providerName]; ok {
-			return providerName + "/" + providerModel
-		}
-
-		return model + " via unknown provider"
+	label := diagnostic.ProviderName + "/" + diagnostic.ProviderModel
+	if diagnostic.Provenance != "" {
+		label += " (" + string(diagnostic.Provenance) + ")"
 	}
 
-	if p, ok := r.models[model]; ok {
-		return p.Name() + "/" + model
-	}
-
-	if providerName := r.providerNameForModelPrefixLocked(model); providerName != "" {
-		if _, ok := r.providers[providerName]; ok {
-			return providerName + "/" + model + " (prefix)"
-		}
-
-		return model + " via unavailable " + providerName
-	}
-
-	return model + " unresolved"
+	return label
 }
 
 func joinFallbackFailures(failures []error) error {

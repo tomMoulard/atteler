@@ -40,6 +40,9 @@ func starterTemplateConfig() Config {
 		DefaultProvider: templateDefaultProvider,
 		DefaultModel:    templateDefaultModel,
 		FallbackModels:  []string{templateFallbackModel},
+		ModelAliases: map[string]string{
+			"fast": templateDefaultProvider + "/" + templateFallbackModel,
+		},
 		Generation: GenerationConfig{
 			Temperature:    &temperature,
 			TopP:           &topP,

@@ -49,6 +49,7 @@ type stateProviderReport struct {
 	Registered         bool     `yaml:"registered"`
 	Configured         bool     `yaml:"configured,omitempty"`
 	Requested          bool     `yaml:"requested,omitempty"`
+	ModelsStale        bool     `yaml:"models_stale,omitempty"`
 	HealthChecked      bool     `yaml:"health_checked,omitempty"`
 	HealthCached       bool     `yaml:"health_cached,omitempty"`
 	Healthy            bool     `yaml:"healthy,omitempty"`
@@ -107,6 +108,7 @@ func providerReports(report llm.ProviderReadinessReport) []stateProviderReport {
 			Registered:         provider.Registered,
 			Configured:         provider.Configured,
 			Requested:          provider.Requested,
+			ModelsStale:        provider.ModelsStale,
 			HealthChecked:      provider.HealthChecked,
 			HealthCached:       provider.HealthCached,
 			Healthy:            provider.Healthy,
