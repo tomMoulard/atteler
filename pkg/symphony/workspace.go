@@ -135,6 +135,11 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 		return nil
 	}
 
+	workspace.WorkspaceKey = hookWorkspaceKey(issue, workspace)
+	if workspace.WorkspaceKey == "" {
+		return fmt.Errorf("hook %s workspace key is empty for issue %q", hookName, issue.Identifier)
+	}
+
 	timeout := cfg.Hooks.Timeout
 	if timeout <= 0 {
 		timeout = defaultHookTimeout
@@ -150,6 +155,7 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 		Command: script,
 		Dir:     workspace.Path,
 		EnvList: hookEnv(issue, workspace, hookName),
+		Policy:  symphonyHookPolicy(),
 		Mode:    shell.ModeCaptured,
 		Stdout:  &stdout,
 		Stderr:  &stderr,
@@ -193,11 +199,29 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 	return nil
 }
 
+func symphonyHookPolicy() *shell.Policy {
+	policy := shell.DefaultPolicy()
+	policy.AllowCredentialEnv = append(policy.AllowCredentialEnv, "SYMPHONY_WORKSPACE_KEY")
+
+	return &policy
+}
+
+func hookWorkspaceKey(issue Issue, workspace Workspace) string {
+	key := strings.TrimSpace(workspace.WorkspaceKey)
+	if key != "" {
+		return key
+	}
+
+	return SanitizeWorkspaceKey(issue.Identifier)
+}
+
 func hookEnv(issue Issue, workspace Workspace, hookName string) []string {
+	workspaceKey := hookWorkspaceKey(issue, workspace)
+
 	return []string{
 		"SYMPHONY_HOOK=" + hookName,
 		"SYMPHONY_WORKSPACE_PATH=" + workspace.Path,
-		"SYMPHONY_WORKSPACE_KEY=" + workspace.WorkspaceKey,
+		"SYMPHONY_WORKSPACE_KEY=" + workspaceKey,
 		"SYMPHONY_ISSUE_ID=" + issue.ID,
 		"SYMPHONY_ISSUE_IDENTIFIER=" + issue.Identifier,
 		"SYMPHONY_ISSUE_TITLE=" + issue.Title,

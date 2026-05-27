@@ -58,3 +58,44 @@ func TestRunHookRequiresActiveContext(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestRunHookDerivesMissingWorkspaceKeyFromIssueIdentifier(t *testing.T) {
+	t.Parallel()
+
+	workspacePath := t.TempDir()
+	marker := filepath.Join(workspacePath, "workspace-key.txt")
+	cfg := Config{
+		Hooks: HooksConfig{
+			BeforeRun: "printf '%s' \"$SYMPHONY_WORKSPACE_KEY\" > workspace-key.txt",
+			Timeout:   time.Second,
+		},
+	}
+	issue := Issue{ID: "issue-node", Identifier: "GH-61", Title: "Fix", State: "OPEN"}
+
+	err := RunHook(context.Background(), cfg, issue, Workspace{Path: workspacePath}, "before_run", cfg.Hooks.BeforeRun)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	assert.Equal(t, "GH-61", string(data))
+}
+
+func TestRunHookRejectsEmptyWorkspaceKeyBeforeExecutingScript(t *testing.T) {
+	t.Parallel()
+
+	workspacePath := t.TempDir()
+	cfg := Config{
+		Hooks: HooksConfig{
+			BeforeRun: "touch should-not-exist",
+			Timeout:   time.Second,
+		},
+	}
+	issue := Issue{ID: "issue-node", Title: "Fix", State: "OPEN"}
+
+	err := RunHook(context.Background(), cfg, issue, Workspace{Path: workspacePath}, "before_run", cfg.Hooks.BeforeRun)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "workspace key is empty")
+
+	_, statErr := os.Stat(filepath.Join(workspacePath, "should-not-exist"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
