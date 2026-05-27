@@ -196,7 +196,7 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.StringVar(&opts.lspLanguageID, "lsp-language", "", "language ID for --lsp-symbols; inferred from --lsp-file when omitted")
 	fs.StringVar(&opts.promptCompleteInput, "prompt-complete", "", "suggest local context-aware rest-of-line prompt completions and exit")
 	fs.Var(&opts.promptCompleteLimit, "prompt-complete-limit", "maximum --prompt-complete suggestions")
-	fs.BoolVar(&opts.promptLocalOnly, "prompt-local-only", false, "disable model-backed idle prompt suggestions and use local prompt completions only")
+	fs.BoolVar(&opts.promptLocalOnly, "prompt-local-only", false, "force local prompt completions only; model-backed idle suggestions are opt-in via /suggestions")
 	fs.BoolVar(&opts.asyncPlan, "async-plan", false, "print dependency-aware async task batches and exit")
 	fs.BoolVar(&opts.asyncRun, "async-run", false, "execute dependency-aware async tasks by spawning Atteler sub-agents and exit")
 	fs.Var(&opts.asyncTaskSpecs, "async-task", "task spec for --async-plan/--async-run: id|agent|prompt|dep1+dep2 (repeatable or comma-separated)")

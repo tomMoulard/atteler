@@ -150,6 +150,40 @@ func saveModelPreference(
 	}
 }
 
+func savePromptSuggestionPreference(
+	ctx context.Context,
+	store *appconfig.StateStore,
+	cwd string,
+	preference appconfig.PromptSuggestionPreference,
+	scope appconfig.ModelScope,
+	runner *events.Runner,
+) tea.Cmd {
+	return func() tea.Msg {
+		if store == nil {
+			return promptSuggestionPreferenceSavedMsg{scope: scope}
+		}
+
+		_, err := store.Update(func(state *appconfig.State) error {
+			state.SetPromptSuggestionPreference(scope, cwd, preference)
+
+			return nil
+		})
+		if err != nil {
+			return promptSuggestionPreferenceSavedMsg{err: err, scope: scope}
+		}
+
+		emitHookWarning(ctx, runner, events.Event{
+			Type: events.FileWrite,
+			Metadata: map[string]string{
+				"path": store.Path(),
+				"kind": "state",
+			},
+		})
+
+		return promptSuggestionPreferenceSavedMsg{scope: scope}
+	}
+}
+
 func emitFileRead(
 	ctx context.Context,
 	runner *events.Runner,

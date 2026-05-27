@@ -107,6 +107,75 @@ func TestStore_LoadByPathInfersID(t *testing.T) {
 	}
 }
 
+func TestSession_RecordBackgroundSuggestionUsage(t *testing.T) {
+	t.Parallel()
+
+	var session Session
+	session.RecordBackgroundSuggestionUsage(BackgroundSuggestionRecord{
+		Provider:              "openai",
+		Model:                 "gpt-5.4-mini",
+		Status:                "ready:model",
+		ContextSummary:        "agent=1,file/task/issue=omitted-private",
+		EstimatedCostUSD:      0.0002,
+		ProviderCall:          true,
+		Response:              true,
+		InputTokens:           12,
+		CachedInputTokens:     3,
+		CacheWriteInputTokens: 1,
+		OutputTokens:          4,
+		EstimatedInputTokens:  20,
+		EstimatedOutputTokens: 8,
+	})
+
+	require.NotNil(t, session.BackgroundSuggestions)
+	assert.Equal(t, 1, session.BackgroundSuggestions.Requests)
+	assert.Equal(t, 1, session.BackgroundSuggestions.ProviderCalls)
+	assert.Equal(t, 1, session.BackgroundSuggestions.Responses)
+	assert.Equal(t, "ready:model", session.BackgroundSuggestions.LastStatus)
+	assert.Equal(t, "agent=1,file/task/issue=omitted-private", session.BackgroundSuggestions.LastContextSummary)
+	assert.Equal(t, 12, session.BackgroundSuggestions.InputTokens)
+	assert.Equal(t, 4, session.BackgroundSuggestions.OutputTokens)
+	assert.Equal(t, 20, session.BackgroundSuggestions.EstimatedInputTokens)
+	assert.InDelta(t, 0.0002, session.BackgroundSuggestions.EstimatedCostUSD, 0.0000001)
+}
+
+func TestStore_SaveLoadPromptSuggestionMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	session := New("gpt-test", nil)
+	session.PromptSuggestions = "model-backed"
+	session.RecordBackgroundSuggestionUsage(BackgroundSuggestionRecord{
+		Provider:              "openai",
+		Model:                 "gpt-5.4-mini",
+		Status:                "ready:model",
+		ContextSummary:        "slash=1,file/task/issue=omitted-private",
+		EstimatedCostUSD:      0.0001,
+		ProviderCall:          true,
+		Response:              true,
+		InputTokens:           7,
+		OutputTokens:          2,
+		EstimatedInputTokens:  12,
+		EstimatedOutputTokens: 4,
+	})
+
+	require.NoError(t, store.Save(session))
+
+	loaded, err := store.Load(session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "model-backed", loaded.PromptSuggestions)
+	require.NotNil(t, loaded.BackgroundSuggestions)
+	assert.Equal(t, 1, loaded.BackgroundSuggestions.Requests)
+	assert.Equal(t, 1, loaded.BackgroundSuggestions.ProviderCalls)
+	assert.Equal(t, "ready:model", loaded.BackgroundSuggestions.LastStatus)
+	assert.Equal(t, "slash=1,file/task/issue=omitted-private", loaded.BackgroundSuggestions.LastContextSummary)
+	assert.Equal(t, 7, loaded.BackgroundSuggestions.InputTokens)
+	assert.Equal(t, 2, loaded.BackgroundSuggestions.OutputTokens)
+	assert.Equal(t, 12, loaded.BackgroundSuggestions.EstimatedInputTokens)
+	assert.Equal(t, 4, loaded.BackgroundSuggestions.EstimatedOutputTokens)
+	assert.InDelta(t, 0.0001, loaded.BackgroundSuggestions.EstimatedCostUSD, 0.0000001)
+}
+
 func TestStore_Path(t *testing.T) {
 	t.Parallel()
 

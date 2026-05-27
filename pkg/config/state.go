@@ -31,6 +31,16 @@ const (
 	stateReasoningLevelDefault = "default"
 )
 
+// PromptSuggestionPreference controls whether background model-backed prompt
+// suggestions may send draft text to a provider. The safe default is local-only.
+type PromptSuggestionPreference string
+
+// Supported prompt suggestion preferences.
+const (
+	PromptSuggestionPreferenceLocalOnly   PromptSuggestionPreference = "local-only"
+	PromptSuggestionPreferenceModelBacked PromptSuggestionPreference = "model-backed"
+)
+
 // ErrStateConflict identifies a save that would overwrite a newer state
 // revision on disk.
 var ErrStateConflict = errors.New("state revision conflict")
@@ -47,6 +57,10 @@ type State struct {
 	// selected interactively. It intentionally lives in state rather than
 	// config because it is a user preference, not project policy.
 	DefaultReasoningLevel string `json:"default_reasoning_level,omitempty" yaml:"default_reasoning_level,omitempty"`
+	// DefaultPromptSuggestions stores the global background prompt suggestion
+	// preference. Empty means the safe default: local-only deterministic
+	// suggestions.
+	DefaultPromptSuggestions string `json:"default_prompt_suggestions,omitempty" yaml:"default_prompt_suggestions,omitempty"`
 	// UnknownFields preserves unrecognized YAML keys so newer metadata is not
 	// silently deleted by older Atteler versions.
 	UnknownFields map[string]any `json:"-" yaml:",inline,omitempty"`
@@ -57,8 +71,9 @@ type State struct {
 //
 //nolint:govet // field order keeps the YAML schema stable and readable.
 type FolderState struct {
-	DefaultModel          string `json:"default_model,omitempty" yaml:"default_model,omitempty"`
-	DefaultReasoningLevel string `json:"default_reasoning_level,omitempty" yaml:"default_reasoning_level,omitempty"`
+	DefaultModel             string `json:"default_model,omitempty" yaml:"default_model,omitempty"`
+	DefaultReasoningLevel    string `json:"default_reasoning_level,omitempty" yaml:"default_reasoning_level,omitempty"`
+	DefaultPromptSuggestions string `json:"default_prompt_suggestions,omitempty" yaml:"default_prompt_suggestions,omitempty"`
 	// UnknownFields preserves unrecognized per-folder YAML keys across writes.
 	UnknownFields map[string]any `json:"-" yaml:",inline,omitempty"`
 }
@@ -438,6 +453,18 @@ func (s *State) ReasoningLevelForFolder(cwd string) string {
 	return s.ResolveReasoningPreference(cwd).Value
 }
 
+// PromptSuggestionsForFolder resolves the persisted prompt suggestion
+// preference for cwd, preferring folder state over the global default. Empty
+// means local-only.
+func (s *State) PromptSuggestionsForFolder(cwd string) PromptSuggestionPreference {
+	value := s.ResolvePromptSuggestionPreference(cwd).Value
+	if value == "" {
+		return PromptSuggestionPreferenceLocalOnly
+	}
+
+	return PromptSuggestionPreference(value)
+}
+
 // ResolveModelPreference resolves the persisted model for cwd and reports the
 // state scope that supplied it.
 func (s *State) ResolveModelPreference(cwd string) PreferenceResolution {
@@ -508,6 +535,37 @@ func (s *State) ResolveReasoningPreference(cwd string) PreferenceResolution {
 	return PreferenceResolution{FolderKey: key}
 }
 
+// ResolvePromptSuggestionPreference resolves the persisted background prompt
+// suggestion preference for cwd and reports the state scope that supplied it.
+func (s *State) ResolvePromptSuggestionPreference(cwd string) PreferenceResolution {
+	if s == nil {
+		return PreferenceResolution{}
+	}
+
+	key := FolderKey(cwd)
+	if key != "" && s.Folders != nil {
+		if folder, ok := s.Folders[key]; ok && NormalizePromptSuggestionPreference(folder.DefaultPromptSuggestions) != "" {
+			return PreferenceResolution{
+				Value:     string(NormalizePromptSuggestionPreference(folder.DefaultPromptSuggestions)),
+				Source:    "state.folder",
+				Scope:     ModelScopeFolder,
+				FolderKey: key,
+			}
+		}
+	}
+
+	if preference := NormalizePromptSuggestionPreference(s.DefaultPromptSuggestions); preference != "" {
+		return PreferenceResolution{
+			Value:     string(preference),
+			Source:    "state.global",
+			Scope:     ModelScopeGlobal,
+			FolderKey: key,
+		}
+	}
+
+	return PreferenceResolution{FolderKey: key}
+}
+
 // SetModel stores model at the requested scope. Session scope is intentionally
 // not persisted.
 func (s *State) SetModel(scope ModelScope, cwd, model string) {
@@ -557,6 +615,45 @@ func (s *State) SetReasoningLevel(scope ModelScope, cwd, level string) {
 		folder := s.Folders[key]
 		folder.DefaultReasoningLevel = level
 		s.Folders[key] = folder
+	}
+}
+
+// SetPromptSuggestionPreference stores the model-backed prompt suggestion
+// preference at the requested scope. Session scope is intentionally not stored
+// in global state; session files carry that preference.
+func (s *State) SetPromptSuggestionPreference(scope ModelScope, cwd string, preference PromptSuggestionPreference) {
+	value := string(NormalizePromptSuggestionPreference(string(preference)))
+
+	switch scope {
+	case ModelScopeGlobal:
+		s.DefaultPromptSuggestions = value
+	case ModelScopeFolder:
+		key := FolderKey(cwd)
+		if key == "" {
+			return
+		}
+
+		if s.Folders == nil {
+			s.Folders = make(map[string]FolderState)
+		}
+
+		folder := s.Folders[key]
+		folder.DefaultPromptSuggestions = value
+		s.Folders[key] = folder
+	}
+}
+
+// NormalizePromptSuggestionPreference canonicalizes user-facing aliases for
+// background prompt suggestion preferences. Unknown values return empty so
+// callers can fall back to the safe local-only default.
+func NormalizePromptSuggestionPreference(value string) PromptSuggestionPreference {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case string(PromptSuggestionPreferenceModelBacked), "model", "provider", "remote", "llm":
+		return PromptSuggestionPreferenceModelBacked
+	case string(PromptSuggestionPreferenceLocalOnly), "local", "disable", "no-network", "offline":
+		return PromptSuggestionPreferenceLocalOnly
+	default:
+		return ""
 	}
 }
 

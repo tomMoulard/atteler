@@ -51,6 +51,64 @@ func TestStateStore_SaveLoadYAML(t *testing.T) {
 	}
 }
 
+func TestState_PromptSuggestionsDefaultLocalOnly(t *testing.T) {
+	t.Parallel()
+
+	var state State
+
+	assert.Equal(t, PromptSuggestionPreferenceLocalOnly, state.PromptSuggestionsForFolder(t.TempDir()))
+	assert.Empty(t, state.ResolvePromptSuggestionPreference(t.TempDir()).Source)
+}
+
+func TestState_PromptSuggestionPreferenceAliases(t *testing.T) {
+	t.Parallel()
+
+	state := State{DefaultPromptSuggestions: "offline"}
+	assert.Equal(t, PromptSuggestionPreferenceLocalOnly, state.PromptSuggestionsForFolder(t.TempDir()))
+	assert.Equal(t, PromptSuggestionPreferenceModelBacked, NormalizePromptSuggestionPreference("provider"))
+	assert.Empty(t, NormalizePromptSuggestionPreference("maybe"))
+}
+
+func TestState_PromptSuggestionsForFolderPrefersFolder(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	state := State{DefaultPromptSuggestions: string(PromptSuggestionPreferenceModelBacked)}
+	state.SetPromptSuggestionPreference(ModelScopeFolder, dir, PromptSuggestionPreferenceLocalOnly)
+
+	resolution := state.ResolvePromptSuggestionPreference(dir)
+	assert.Equal(t, string(PromptSuggestionPreferenceLocalOnly), resolution.Value)
+	assert.Equal(t, "state.folder", resolution.Source)
+	assert.Equal(t, ModelScopeFolder, resolution.Scope)
+	assert.Equal(t, PromptSuggestionPreferenceLocalOnly, state.PromptSuggestionsForFolder(dir))
+
+	global := state.ResolvePromptSuggestionPreference(t.TempDir())
+	assert.Equal(t, string(PromptSuggestionPreferenceModelBacked), global.Value)
+	assert.Equal(t, "state.global", global.Source)
+	assert.Equal(t, ModelScopeGlobal, global.Scope)
+}
+
+func TestStateStore_SaveLoadPromptSuggestionPreference(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.yaml")
+	store := NewStateStore(path)
+
+	state := State{DefaultPromptSuggestions: string(PromptSuggestionPreferenceLocalOnly)}
+	state.SetPromptSuggestionPreference(ModelScopeFolder, dir, PromptSuggestionPreferenceModelBacked)
+
+	require.NoError(t, store.Save(state))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "default_prompt_suggestions: local-only")
+	assert.Contains(t, string(data), "default_prompt_suggestions: model-backed")
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, PromptSuggestionPreferenceModelBacked, loaded.PromptSuggestionsForFolder(dir))
+	assert.Equal(t, PromptSuggestionPreferenceLocalOnly, loaded.PromptSuggestionsForFolder(t.TempDir()))
+}
+
 func TestState_ModelForFolderPrefersFolder(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

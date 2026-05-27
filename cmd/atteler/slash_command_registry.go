@@ -102,6 +102,11 @@ type slashModeInput struct {
 	Show bool
 }
 
+type slashSuggestionsInput struct {
+	Mode string
+	Show bool
+}
+
 type slashSaveCodeInput struct {
 	Path  string
 	Block int
@@ -414,6 +419,22 @@ func slashCommandDescriptors() []slashCommandDescriptor {
 			},
 			parseModeInput,
 			runModeSlashCommand,
+		),
+		typedSlashCommand(
+			slashCommandDescriptor{
+				Name:                "suggestions",
+				Usage:               "/suggestions [status|local|session|folder|global]",
+				Summary:             "show or opt in to model-backed idle prompt suggestions",
+				Arguments:           []slashCommandArgument{{Name: "mode", Type: slashArgumentTypeEnum, Values: []string{"status", "local", string(promptSuggestionConsentSession), string(promptSuggestionConsentFolder), string(promptSuggestionConsentGlobal)}}},
+				SideEffects:         []string{commandEffectLLMProviderRead, commandEffectSessionWrite, commandEffectStateWrite, commandEffectUserOutput},
+				OutputModes:         []string{commandOutputText},
+				CompletionTokens:    []string{"prompt", "privacy", "local", "provider"},
+				HelpGroup:           1,
+				MutatesSessionStore: true,
+				CallsLLM:            true,
+			},
+			parseSuggestionsInput,
+			runSuggestionsSlashCommand,
 		),
 		typedSlashCommand(
 			slashCommandDescriptor{
@@ -1300,6 +1321,32 @@ func parseModeInput(args []string, usage string) (slashModeInput, error) {
 	}
 
 	return slashModeInput{Mode: args[0]}, nil
+}
+
+func parseSuggestionsInput(args []string, usage string) (slashSuggestionsInput, error) {
+	if len(args) == 0 {
+		return slashSuggestionsInput{Show: true}, nil
+	}
+
+	if len(args) != 1 {
+		return slashSuggestionsInput{}, slashUsageError(usage)
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(args[0]))
+	switch mode {
+	case "status", "show":
+		return slashSuggestionsInput{Show: true}, nil
+	case "local", string(promptSuggestionConsentLocalOnly), "disable", "no-network", "offline":
+		return slashSuggestionsInput{Mode: string(promptSuggestionConsentLocalOnly)}, nil
+	case string(promptSuggestionConsentSession), "session-only":
+		return slashSuggestionsInput{Mode: string(promptSuggestionConsentSession)}, nil
+	case string(promptSuggestionConsentFolder):
+		return slashSuggestionsInput{Mode: string(promptSuggestionConsentFolder)}, nil
+	case string(promptSuggestionConsentGlobal):
+		return slashSuggestionsInput{Mode: string(promptSuggestionConsentGlobal)}, nil
+	default:
+		return slashSuggestionsInput{}, slashUsageError(usage)
+	}
 }
 
 func parseSaveCodeInput(args []string, usage string) (slashSaveCodeInput, error) {

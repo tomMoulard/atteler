@@ -47,6 +47,8 @@ func runInteractive(ctx context.Context, state appState) error {
 		fmt.Println(dimStyle.Render("  Connected providers: ") + pickerProviderStyle.Render(strings.Join(state.providers, ", ")))
 	}
 
+	printStartupPromptSuggestionStatus(state)
+
 	if summary := startupProviderReadinessSummary(state.providerReadiness); summary != "" {
 		fmt.Println(warnStyle.Render("  Provider readiness: " + summary))
 	}
@@ -109,6 +111,8 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.maxInputTokens,
 		state.modelLocked,
 		state.promptLocalOnly,
+		state.promptSuggestionConsent,
+		state.idleSuggestionBudget,
 		state.worktreeInfo,
 	))
 
@@ -160,6 +164,22 @@ func runInteractive(ctx context.Context, state appState) error {
 	finalizeWorktree(ctx, &state)
 
 	return nil
+}
+
+func printStartupPromptSuggestionStatus(state appState) {
+	if state.promptLocalOnly {
+		fmt.Println(dimStyle.Render("  Prompt suggestions: local-only (--prompt-local-only overrides saved opt-ins)"))
+
+		return
+	}
+
+	if !state.promptSuggestionConsent.allowsModelBacked() {
+		fmt.Println(dimStyle.Render("  Prompt suggestions: local-only (/suggestions session|folder|global to opt in)"))
+
+		return
+	}
+
+	fmt.Println(warnStyle.Render("  Prompt suggestions: model-backed " + string(state.promptSuggestionConsent) + " scope; private file/task/issue context omitted"))
 }
 
 func startupProviderReadinessSummary(report llm.ProviderReadinessReport) string {
