@@ -1135,6 +1135,73 @@ func TestPromptSuggestionDeduplicatesRepoWarmupDuringRender(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // Uses process-wide prompt context source hooks.
+func TestPromptSuggestionSkipsLargeRepoIndexDuringRender(t *testing.T) {
+	dir := t.TempDir()
+
+	for i := range defaultPromptContextMaxIndexFiles + 1 {
+		subdir := filepath.Join(dir, fmt.Sprintf("pkg%02d", i/100))
+		require.NoError(t, os.MkdirAll(subdir, 0o700))
+		require.NoError(
+			t,
+			os.WriteFile(
+				filepath.Join(subdir, fmt.Sprintf("large%04d.go", i)),
+				fmt.Appendf(nil, "package pkg%02d\n\nfunc LargeSymbol%04d() {}\n", i/100, i),
+				0o600,
+			),
+		)
+	}
+
+	var indexCalls atomic.Int32
+
+	t.Cleanup(setPromptCodeIndexDirContextForTest(func(context.Context, string) (codeintel.Index, error) {
+		indexCalls.Add(1)
+
+		return codeintel.Index{}, nil
+	}))
+
+	store := session.NewStore(filepath.Join(dir, ".atteler", "sessions"))
+	cache := newPromptContextCache()
+	m := model{
+		ctx:                context.Background(),
+		sessionStore:       store,
+		cwd:                dir,
+		promptContextCache: cache,
+		textarea:           textarea.New(),
+	}
+	m.textarea.SetValue("Large")
+	m.textarea.CursorEnd()
+
+	start := time.Now()
+	suggestion, ok := m.promptSuggestion()
+	elapsed := time.Since(start)
+
+	assert.False(t, ok)
+	assert.Empty(t, suggestion.Text)
+	assert.Less(t, elapsed, promptContextTestReturnBudget)
+
+	key := promptContextCacheKeyForState(appState{
+		cwd:                dir,
+		sessionStore:       store,
+		promptContextCache: cache,
+	})
+
+	var snapshot promptRepoContextSnapshot
+
+	require.Eventually(t, func() bool {
+		var snapshotOK bool
+
+		snapshot, snapshotOK = cache.freshSnapshot(key, time.Now(), time.Minute)
+
+		return snapshotOK
+	}, promptContextTestBackgroundBudget, 10*time.Millisecond)
+
+	projectSymbols := statusForSource(t, snapshot.Sources, promptContextSourceProjectSymbols)
+	assert.Equal(t, promptContextFreshnessSkipped, projectSymbols.Status)
+	assert.Contains(t, projectSymbols.Detail, "go file count exceeds limit")
+	assert.Equal(t, int32(0), indexCalls.Load(), "large render-time repos should skip indexing before invoking codeintel")
+}
+
 func TestAcceptCompletionAcceptsValidPromptSuggestion(t *testing.T) {
 	t.Parallel()
 
