@@ -92,6 +92,7 @@ func starterTemplateConfig() Config {
 		Hooks: map[string][]HookConfig{
 			"session_end": {{
 				Command:        []string{"echo", "atteler session ended"},
+				Payload:        "metadata",
 				TimeoutSeconds: 5,
 			}},
 		},
@@ -162,6 +163,11 @@ func templateYAML() string {
 	out.WriteString("# Save as ~/.config/atteler/config.yaml, ./.atteler/config.yaml, or ./.atteler.yaml.\n")
 	out.WriteString("# Generated from the current config schema and starter defaults.\n")
 	out.WriteString("# Use `atteler config explain` to inspect implicit defaults and merge provenance.\n")
+	out.WriteString("# Lifecycle hook payload defaults to metadata: no prompt text, command output, file paths, or raw errors.\n")
+	out.WriteString("# Use payload: summary for bounded redacted summaries, or payload: full only for trusted hooks.\n")
+	out.WriteString("# Hooks default to inherit_env: false; set true only when the hook needs PATH, HOME, or credentials.\n")
+	out.WriteString("# Explicit env values are passed verbatim to the hook process; avoid putting credentials there unless needed.\n")
+	out.WriteString("# Event ATTELER_* variables are reserved and generated from sanitized event data.\n")
 	out.WriteString("# Configured references cross a trust boundary before every model request.\n")
 	out.WriteString("# Remote URLs are rejected unless both scheme and host are allowed below.\n\n")
 	out.WriteString("# Local paths are limited to the working directory plus explicit local_roots; absolute paths require allow_absolute_paths.\n")

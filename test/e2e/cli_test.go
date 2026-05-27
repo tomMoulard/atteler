@@ -1326,7 +1326,8 @@ providers:
 	for _, want := range []string{
 		"event:session_start",
 		"event:file_read",
-		"path=README.md",
+		"bytes=18",
+		"truncated=false",
 		"event:context_add",
 		"event:file_write",
 		"kind=session",
@@ -1335,10 +1336,13 @@ providers:
 		"event:tool_execute",
 		"provider=codex",
 		"event:command_execute",
-		`command=codex.responses`,
+		"redacted=true",
 	} {
 		assertContains(t, result.stderr, want)
 	}
+
+	assertNotContains(t, result.stderr, "path=README.md")
+	assertNotContains(t, result.stderr, `command=codex.responses`)
 }
 
 // startFakeCodexResponses spins up an httptest server that mimics the codex
@@ -1454,7 +1458,8 @@ providers:
 	}, "--config", configPath, "--once", "say hi")
 
 	assertContains(t, result.stdout, "claude code reply")
-	assertContains(t, result.stderr, `command=claude_code.messages`)
+	assertContains(t, result.stderr, "event:command_execute")
+	assertNotContains(t, result.stderr, `command=claude_code.messages`)
 	assertContains(t, result.stderr, "provider=claude-code")
 }
 

@@ -381,6 +381,10 @@ func validateConfig() error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
+	if err := validateHookConfig(cfg.Hooks); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
 	if _, err := agentLoopBudgetFromConfig(cfg); err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
@@ -397,6 +401,45 @@ func validateConfig() error {
 	fmt.Println("Config valid: " + strings.Join(loaded, ", "))
 
 	return nil
+}
+
+func validateHookConfig(hooks map[string][]appconfig.HookConfig) error {
+	for eventType, hookList := range hooks {
+		for index, hook := range hookList {
+			payload := strings.ToLower(strings.TrimSpace(hook.Payload))
+			if payload == "" {
+				continue
+			}
+
+			switch events.PayloadMode(payload) {
+			case events.PayloadMetadata, events.PayloadSummary, events.PayloadFull:
+				continue
+			default:
+				return fmt.Errorf(
+					"%s: unknown payload mode (want metadata, summary, or full)",
+					hookConfigPayloadPath(eventType, index),
+				)
+			}
+		}
+	}
+
+	return nil
+}
+
+func hookConfigPayloadPath(eventType string, index int) string {
+	for _, supported := range events.SupportedEventTypes() {
+		if eventType == supported.Type {
+			return fmt.Sprintf("hooks.%s[%d].payload", eventType, index)
+		}
+	}
+
+	return fmt.Sprintf("hooks.event[%d].payload", index)
+}
+
+func warnInvalidHookConfig(hooks map[string][]appconfig.HookConfig) {
+	if err := validateHookConfig(hooks); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: validate config: "+err.Error())
+	}
 }
 
 func configPathStatus(path string) string {
@@ -714,6 +757,8 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
+
+	warnInvalidHookConfig(cfg.Hooks)
 
 	agentRegistry := agent.NewRegistry(cfg.Agents)
 	// Default to a stderr logger so events from utility commands (--bash,

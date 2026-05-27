@@ -7,6 +7,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/events"
 )
 
 func TestValidateConfig_PrintsHarnessImporterWarnings(t *testing.T) {
@@ -221,4 +224,92 @@ func TestValidateConfig_RejectsAgentLoopBudgetFields(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantError)
 		})
 	}
+}
+
+func TestValidateHookConfig_AcceptsKnownPayloadModes(t *testing.T) {
+	t.Parallel()
+
+	hooks := map[string][]appconfig.HookConfig{
+		events.UserMessage: {
+			{Payload: ""},
+			{Payload: "metadata"},
+			{Payload: " summary "},
+			{Payload: "FULL"},
+		},
+	}
+
+	require.NoError(t, validateHookConfig(hooks))
+}
+
+func TestValidateHookConfig_RejectsUnknownPayloadWithoutLeakingHookConfig(t *testing.T) {
+	t.Parallel()
+
+	hooks := map[string][]appconfig.HookConfig{
+		events.UserMessage: {{
+			Command: []string{"/tmp/secret-hook", "--api-key=sk-test-secret"},
+			Env: map[string]string{
+				"API_TOKEN": "secret-env-value",
+			},
+			Payload: "sk-payloadsecret1234567890",
+		}},
+	}
+
+	err := validateHookConfig(hooks)
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "hooks.user_message[0].payload")
+	assert.Contains(t, message, "unknown payload mode")
+	assert.NotContains(t, message, "secret-hook")
+	assert.NotContains(t, message, "--api-key")
+	assert.NotContains(t, message, "API_TOKEN")
+	assert.NotContains(t, message, "secret-env-value")
+	assert.NotContains(t, message, "sk-payloadsecret")
+}
+
+func TestValidateHookConfig_RedactsUnknownEventNameInError(t *testing.T) {
+	t.Parallel()
+
+	hooks := map[string][]appconfig.HookConfig{
+		"sk-eventsecret1234567890": {{
+			Payload: "sk-payloadsecret1234567890",
+		}},
+	}
+
+	err := validateHookConfig(hooks)
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "hooks.event[0].payload")
+	assert.NotContains(t, message, "sk-eventsecret")
+	assert.NotContains(t, message, "sk-payloadsecret")
+}
+
+func TestValidateConfig_RejectsInvalidHookPayload(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+hooks:
+  user_message:
+    - command: ["/tmp/secret-hook", "--token=sk-test-secret"]
+      env:
+        API_TOKEN: secret-env-value
+      payload: sk-payloadsecret1234567890
+`), 0o600))
+
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "xdg"))
+	t.Setenv(appconfig.EnvPath, configPath)
+	t.Chdir(tempDir)
+
+	err := validateConfig()
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "validate config:")
+	assert.Contains(t, message, "hooks.user_message[0].payload")
+	assert.NotContains(t, message, "secret-hook")
+	assert.NotContains(t, message, "--token")
+	assert.NotContains(t, message, "API_TOKEN")
+	assert.NotContains(t, message, "secret-env-value")
+	assert.NotContains(t, message, "sk-payloadsecret")
 }

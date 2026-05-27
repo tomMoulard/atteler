@@ -424,6 +424,43 @@ func TestLoadFiles_RejectsNegativeConfigVersion(t *testing.T) {
 	assert.Contains(t, err.Error(), path)
 }
 
+func TestLoadFiles_HookPrivacyFieldsOverride(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	first := writeConfig(t, dir, "first.yaml", `
+hooks:
+  user_message:
+    - command: [old-hook]
+      payload: full
+      inherit_env: true
+      timeout_seconds: 10
+      env:
+        OLD: "1"
+`)
+	second := writeConfig(t, dir, "second.yaml", `
+hooks:
+  user_message:
+    - command: [new-hook]
+      payload: summary
+      inherit_env: false
+      timeout_seconds: 2
+      env:
+        NEW: "1"
+`)
+
+	cfg, _, err := LoadFiles([]string{first, second})
+	require.NoError(t, err)
+
+	hooks := cfg.Hooks["user_message"]
+	require.Len(t, hooks, 1)
+	assert.Equal(t, []string{"new-hook"}, hooks[0].Command)
+	assert.Equal(t, "summary", hooks[0].Payload)
+	assert.False(t, hooks[0].InheritEnv)
+	assert.Equal(t, 2, hooks[0].TimeoutSeconds)
+	assert.Equal(t, map[string]string{"NEW": "1"}, hooks[0].Env)
+}
+
 func TestLoadFiles_PluginPolicy(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

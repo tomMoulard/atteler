@@ -925,6 +925,8 @@ func knownHookFields() map[string]bool {
 	return map[string]bool{
 		"env":             true,
 		"command":         true,
+		"payload":         true,
 		"timeout_seconds": true,
+		"inherit_env":     true,
 	}
 }

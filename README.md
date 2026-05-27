@@ -402,6 +402,65 @@ are normalized before dispatch and reported in activity metadata.
 `llm.StreamProvider` support, not whether an adapter happens to use a streaming
 wire transport internally.
 
+### Lifecycle hook privacy
+
+Lifecycle hooks are local subprocess integrations, not trusted in-process
+extensions. Hook payloads are schema-filtered per event type, size-bounded, and
+default to least-privilege metadata only:
+
+```yaml
+hooks:
+  assistant_message:
+    - command: ["./scripts/notify-assistant"]
+      payload: metadata      # metadata (default), summary, or full
+      inherit_env: false     # default; set true only for trusted hooks
+      env:
+        NOTIFY_CHANNEL: dev
+```
+
+- `payload: metadata` sends event type, timestamp, session id, agent/model/role
+  where applicable, and allowlisted non-sensitive metadata such as byte counts,
+  operational counts, or provider/tool names. Prompt text, assistant text,
+  command output, raw errors, file/session paths, commands, cwd values, and
+  arbitrary metadata are omitted.
+- `payload: summary` adds bounded redacted summaries for sensitive content/error
+  fields without copying the raw text.
+- `payload: full` is for trusted hooks that truly need content-bearing fields.
+  It still applies known-secret redaction and size limits, but it may expose
+  prompts, command text, paths, and command output after redaction. Redaction is
+  best-effort pattern matching, not a substitute for keeping untrusted hooks on
+  `metadata` or `summary`.
+- Serialized hook payloads are capped at 64 KiB. Within that envelope, content
+  fields are capped at 8 KiB, error fields at 2 KiB, and scalar/metadata values
+  are separately bounded; payloads include `redacted`/`truncated` markers when
+  Atteler omits or shortens data.
+- Hooks do not inherit Atteler's full environment by default. Add explicit
+  `env:` entries, or set `inherit_env: true` only when a trusted hook needs the
+  parent `PATH`, `HOME`, credentials, or other ambient variables. Explicit
+  `env:` values are passed verbatim, so do not place credentials there unless
+  the hook genuinely needs them. Atteler-owned event variables such as
+  `ATTELER_EVENT_TYPE`, `ATTELER_PAYLOAD_MODE`, `ATTELER_SESSION_ID`,
+  `ATTELER_SESSION_PATH`, `ATTELER_AGENT`, `ATTELER_MODEL`, and `ATTELER_ROLE`
+  are reserved and always generated from sanitized event data.
+
+Default metadata schemas are deliberately narrow:
+
+| Event family | Default and opt-in policy |
+| --- | --- |
+| `user_message`, `assistant_message` | Role by default. `payload: summary` adds generated summaries; `payload: full` includes prompt/assistant text after redaction and bounds. |
+| `command_execute`, `command_output` | Safe source/provider/tool-call metadata by default. `payload: summary` adds content/error summaries; `payload: full` also includes commands, cwd, and bounded redacted content/errors. |
+| `file_read`, `file_write`, `context_add` | File kind/byte/truncation metadata only by default. Paths require `payload: full`; file contents are omitted. |
+| `context_manifest`, `route_decision` | Bounded audit metadata by default. Full JSON artifacts require `payload: full` or the existing headless-private logging path. |
+| `tool_execute`, `agent_execute`, sessions, errors | Provider/tool/agent/session identifiers where applicable. Error details require `payload: summary` or `payload: full`; built-in logs summarize rather than copy raw errors. |
+
+Built-in event logging follows the same privacy boundary: it records hook/event
+activity with bounded metadata and redaction markers instead of raw content, raw
+errors, path metadata, or secret-looking values.
+Debug audit logs for hook invocation include the event type, hook command
+basename, payload mode and byte size, timeout, `inherit_env`, and configured
+environment key count; they do not include hook argv values, environment values,
+or the event payload.
+
 ## Common workflows
 
 ### One-shot and interactive chat
@@ -1076,7 +1135,7 @@ linked from the row.
 | Memory/retrieval, unified retrieval contract, per-agent memory, local lexical/embedding vector search, workspace ANN vector context, git-history search, Go code intelligence, import graphs, structured code-intel CLI output, and optional LSP lookups | [`pkg/retrieval/types.go`](pkg/retrieval/types.go), [`pkg/retrieval/search.go`](pkg/retrieval/search.go), [`pkg/retrieval/retrieval_test.go`](pkg/retrieval/retrieval_test.go), [`pkg/memory/memory.go`](pkg/memory/memory.go), [`pkg/memory/memory_test.go`](pkg/memory/memory_test.go), [`pkg/agentmemory/agentmemory.go`](pkg/agentmemory/agentmemory.go), [`pkg/agentmemory/agentmemory_test.go`](pkg/agentmemory/agentmemory_test.go), [`pkg/vector/vector.go`](pkg/vector/vector.go), [`pkg/vector/vector_test.go`](pkg/vector/vector_test.go), [`pkg/vector/index.go`](pkg/vector/index.go), [`pkg/vector/index_test.go`](pkg/vector/index_test.go), [`pkg/vector/ann.go`](pkg/vector/ann.go), [`pkg/vector/ann_test.go`](pkg/vector/ann_test.go), [`pkg/vector/workspace.go`](pkg/vector/workspace.go), [`pkg/vector/workspace_test.go`](pkg/vector/workspace_test.go), [`pkg/vector/index_searcher.go`](pkg/vector/index_searcher.go), [`pkg/vector/index_searcher_test.go`](pkg/vector/index_searcher_test.go), [`cmd/atteler/workspace_vector_context.go`](cmd/atteler/workspace_vector_context.go), [`cmd/atteler/workspace_vector_context_test.go`](cmd/atteler/workspace_vector_context_test.go), [`cmd/atteler/cli_vector_search_commands.go`](cmd/atteler/cli_vector_search_commands.go), [`cmd/atteler/cli_vector_search_commands_test.go`](cmd/atteler/cli_vector_search_commands_test.go), [`pkg/githistory/githistory.go`](pkg/githistory/githistory.go), [`pkg/githistory/githistory_test.go`](pkg/githistory/githistory_test.go), [`pkg/codeintel/codeintel.go`](pkg/codeintel/codeintel.go), [`pkg/codeintel/codeintel_test.go`](pkg/codeintel/codeintel_test.go), [`pkg/codegraph/codegraph.go`](pkg/codegraph/codegraph.go), [`pkg/codegraph/codegraph_test.go`](pkg/codegraph/codegraph_test.go), [`cmd/atteler/codeintel_schema.go`](cmd/atteler/codeintel_schema.go), [`cmd/atteler/codeintel_response_render.go`](cmd/atteler/codeintel_response_render.go), [`cmd/atteler/codeintel_command_descriptors.go`](cmd/atteler/codeintel_command_descriptors.go), [`cmd/atteler/codeintel_schema_test.go`](cmd/atteler/codeintel_schema_test.go), [`pkg/lsp/client.go`](pkg/lsp/client.go), [`pkg/lsp/client_test.go`](pkg/lsp/client_test.go) |
 | Plugin manifests, safe local entrypoint execution, MCP manifest validation, and stdio JSON-RPC calls | [`pkg/plugin/manifest.go`](pkg/plugin/manifest.go), [`pkg/plugin/manifest_test.go`](pkg/plugin/manifest_test.go), [`pkg/plugin/run.go`](pkg/plugin/run.go), [`pkg/plugin/run_test.go`](pkg/plugin/run_test.go), [`pkg/mcp/manifest.go`](pkg/mcp/manifest.go), [`pkg/mcp/manifest_test.go`](pkg/mcp/manifest_test.go), [`pkg/mcp/client.go`](pkg/mcp/client.go), [`pkg/mcp/client_test.go`](pkg/mcp/client_test.go), [`cmd/atteler/cli_plugin_commands.go`](cmd/atteler/cli_plugin_commands.go), [`cmd/atteler/cli_mcp_commands.go`](cmd/atteler/cli_mcp_commands.go) |
 | Background repository scanning, baseline/gate comparisons, suppressions, issue upserts, and review-scan formatting | [`pkg/watch/watch.go`](pkg/watch/watch.go), [`pkg/watch/baseline.go`](pkg/watch/baseline.go), [`pkg/watch/issues.go`](pkg/watch/issues.go), [`pkg/watch/watch_test.go`](pkg/watch/watch_test.go), [`pkg/symphony/tracker.go`](pkg/symphony/tracker.go), [`cmd/atteler/cli_speculate_watch_history_commands.go`](cmd/atteler/cli_speculate_watch_history_commands.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
-| Event hook metadata and local hook execution | [`pkg/events/events.go`](pkg/events/events.go), [`pkg/events/events_test.go`](pkg/events/events_test.go), [`pkg/events/logger.go`](pkg/events/logger.go), [`pkg/events/discoverability_test.go`](pkg/events/discoverability_test.go) |
+| Event hook privacy, metadata, and local hook execution | [`pkg/events/events.go`](pkg/events/events.go), [`pkg/events/events_test.go`](pkg/events/events_test.go), [`pkg/events/privacy.go`](pkg/events/privacy.go), [`pkg/events/privacy_test.go`](pkg/events/privacy_test.go), [`pkg/events/logger.go`](pkg/events/logger.go), [`pkg/events/discoverability_test.go`](pkg/events/discoverability_test.go) |
 | Automatic worktree isolation | [`pkg/worktree/worktree.go`](pkg/worktree/worktree.go), [`pkg/worktree/worktree_test.go`](pkg/worktree/worktree_test.go), [`cmd/atteler/cli_worktree_commands.go`](cmd/atteler/cli_worktree_commands.go) |
 | Symphony issue scheduler | [`cmd/symphony/main.go`](cmd/symphony/main.go), [`pkg/symphony/workflow.go`](pkg/symphony/workflow.go), [`pkg/symphony/workflow_test.go`](pkg/symphony/workflow_test.go), [`pkg/symphony/orchestrator.go`](pkg/symphony/orchestrator.go), [`pkg/symphony/orchestrator_test.go`](pkg/symphony/orchestrator_test.go), [`docs/symphony.md`](docs/symphony.md), [`WORKFLOW.md`](WORKFLOW.md) |
 | Build, CI, and release packaging | [`Makefile`](Makefile), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/release.yml`](.github/workflows/release.yml), [`.goreleaser.yaml`](.goreleaser.yaml) |

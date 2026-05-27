@@ -293,7 +293,7 @@ func emitHookWarning(ctx context.Context, runner *events.Runner, event events.Ev
 
 func emitFromContextWarning(ctx context.Context, event events.Event) {
 	if err := events.EmitFromContext(ctx, event); err != nil {
-		slog.Warn("emit hook from context", "event_type", event.Type, "error", err)
+		slog.Warn("emit hook from context", "event", events.FormatLine(event), "error", err)
 	}
 }
 

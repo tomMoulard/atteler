@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/shell"
@@ -50,6 +53,18 @@ const (
 	defaultTimeout = 10 * time.Second
 )
 
+// PayloadMode controls how much event data is passed to a hook.
+type PayloadMode string
+
+const (
+	// PayloadMetadata sends only non-sensitive event metadata.
+	PayloadMetadata PayloadMode = "metadata"
+	// PayloadSummary adds bounded summaries for sensitive content/error fields.
+	PayloadSummary PayloadMode = "summary"
+	// PayloadFull sends content-bearing fields after secret redaction and size limits.
+	PayloadFull PayloadMode = "full"
+)
+
 // SupportedEventType describes one hook event type supported by this package.
 type SupportedEventType struct {
 	Type        string `json:"type"`
@@ -83,23 +98,32 @@ func SupportedEventTypes() []SupportedEventType {
 
 // Event is the JSON payload sent to hooks on stdin.
 type Event struct {
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	Timestamp   time.Time         `json:"timestamp"`
-	Type        string            `json:"type"`
-	SessionID   string            `json:"session_id,omitempty"`
-	SessionPath string            `json:"session_path,omitempty"`
-	Agent       string            `json:"agent,omitempty"`
-	Model       string            `json:"model,omitempty"`
-	Role        string            `json:"role,omitempty"`
-	Content     string            `json:"content,omitempty"`
-	Error       string            `json:"error,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+	Timestamp      time.Time         `json:"timestamp"`
+	Type           string            `json:"type"`
+	SessionID      string            `json:"session_id,omitempty"`
+	SessionPath    string            `json:"session_path,omitempty"`
+	Agent          string            `json:"agent,omitempty"`
+	Model          string            `json:"model,omitempty"`
+	Role           string            `json:"role,omitempty"`
+	Content        string            `json:"content,omitempty"`
+	ContentSummary string            `json:"content_summary,omitempty"`
+	Error          string            `json:"error,omitempty"`
+	ErrorSummary   string            `json:"error_summary,omitempty"`
+	PayloadMode    string            `json:"payload_mode,omitempty"`
+	Redacted       bool              `json:"redacted,omitempty"`
+	Truncated      bool              `json:"truncated,omitempty"`
 }
 
 // Hook is a local command hook for one event type.
+//
+//nolint:govet // fieldalignment: field order groups command, timeout, and privacy controls.
 type Hook struct {
-	Env     map[string]string
-	Command []string
-	Timeout time.Duration
+	Env         map[string]string
+	Command     []string
+	Timeout     time.Duration
+	PayloadMode PayloadMode
+	InheritEnv  bool
 }
 
 // Observer receives lifecycle events for best-effort local background work.
@@ -141,9 +165,11 @@ func NewRunnerWithLoggerAndObservers(configured map[string][]config.HookConfig, 
 			}
 
 			hooks[eventType] = append(hooks[eventType], Hook{
-				Command: append([]string(nil), cfg.Command...),
-				Env:     cloneMap(cfg.Env),
-				Timeout: timeout,
+				Command:     append([]string(nil), cfg.Command...),
+				Env:         cloneMap(cfg.Env),
+				Timeout:     timeout,
+				PayloadMode: normalizePayloadMode(cfg.Payload),
+				InheritEnv:  cfg.InheritEnv,
 			})
 		}
 	}
@@ -165,9 +191,11 @@ func (r *Runner) WithLogger(logWriter io.Writer) *Runner {
 	for eventType, configured := range r.hooks {
 		for _, hook := range configured {
 			hooks[eventType] = append(hooks[eventType], Hook{
-				Command: append([]string(nil), hook.Command...),
-				Env:     cloneMap(hook.Env),
-				Timeout: hook.Timeout,
+				Command:     append([]string(nil), hook.Command...),
+				Env:         cloneMap(hook.Env),
+				Timeout:     hook.Timeout,
+				PayloadMode: hook.PayloadMode,
+				InheritEnv:  hook.InheritEnv,
 			})
 		}
 	}
@@ -208,17 +236,20 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 		return nil
 	}
 
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("events: marshal %s: %w", event.Type, err)
-	}
-
-	payload = append(payload, '\n')
-
 	var failures []error
 
 	for _, hook := range hooks {
-		if err := runHook(ctx, hook, event, payload); err != nil {
+		hookEvent := sanitizeEventForHook(event, hook.PayloadMode)
+
+		payload, err := json.Marshal(hookEvent)
+		if err != nil {
+			return fmt.Errorf("events: marshal %s: %w", hookEvent.Type, err)
+		}
+
+		payload = append(payload, '\n')
+		logHookInvocation(hookEvent, hook, len(payload))
+
+		if err := runHook(ctx, hook, hookEvent, payload); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -282,7 +313,7 @@ func runHook(ctx context.Context, hook Hook, event Event, payload []byte) error 
 	hookCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var stderr bytes.Buffer
+	var stderr hookStderrCounter
 
 	cmd, invocation, err := shell.CommandContext(hookCtx, shell.CommandOptions{
 		Program: hook.Command[0],
@@ -290,7 +321,9 @@ func runHook(ctx context.Context, hook Hook, event Event, payload []byte) error 
 		Command: strings.Join(hook.Command, " "),
 		Stdin:   bytes.NewReader(payload),
 		Stderr:  &stderr,
-		EnvList: eventEnv(event, hook.Env),
+		EnvList: hookEnvList(hook, event),
+		EnvMode: shell.EnvModeExplicitOnly,
+		Policy:  hookPolicy(hook),
 		Mode:    shell.ModeCaptured,
 		Audit: shell.AuditContext{
 			Caller:      "atteler.event_hook." + event.Type,
@@ -299,47 +332,216 @@ func runHook(ctx context.Context, hook Hook, event Event, payload []byte) error 
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("events: authorize hook %q: %w", strings.Join(hook.Command, " "), err)
+		return fmt.Errorf("events: authorize hook %q: %w", hookAuditCommand(hook.Command), err)
 	}
 
-	if err := cmd.Run(); err != nil {
-		if finishErr := invocation.Finish(shell.FinishOptions{Stderr: stderr.String(), Error: err, OutputCapture: shell.OutputCaptured}); finishErr != nil {
-			return fmt.Errorf("events: audit hook %q: %w", strings.Join(hook.Command, " "), finishErr)
-		}
+	runErr := cmd.Run()
 
-		detail := strings.TrimSpace(stderr.String())
-		if detail != "" {
-			return fmt.Errorf("events: %s hook %q failed: %w: %s", event.Type, strings.Join(hook.Command, " "), err, detail)
-		}
-
-		return fmt.Errorf("events: %s hook %q failed: %w", event.Type, strings.Join(hook.Command, " "), err)
+	finishErr := invocation.Finish(shell.FinishOptions{
+		Error:         runErr,
+		OutputCapture: shell.OutputSensitive,
+		OutputNote:    "hook stdout/stderr omitted by lifecycle privacy policy",
+	})
+	if finishErr != nil {
+		return fmt.Errorf("events: audit hook %q: %w", hookAuditCommand(hook.Command), finishErr)
 	}
 
-	if err := invocation.Finish(shell.FinishOptions{Stderr: stderr.String(), OutputCapture: shell.OutputCaptured}); err != nil {
-		return fmt.Errorf("events: audit hook %q: %w", strings.Join(hook.Command, " "), err)
+	if runErr != nil {
+		if stderr.Bytes() > 0 {
+			return fmt.Errorf(
+				"events: %s hook %q failed: %s (stderr %d bytes omitted)",
+				event.Type,
+				hookAuditCommand(hook.Command),
+				hookErrorSummary(runErr),
+				stderr.Bytes(),
+			)
+		}
+
+		return fmt.Errorf("events: %s hook %q failed: %s", event.Type, hookAuditCommand(hook.Command), hookErrorSummary(runErr))
 	}
 
 	return nil
 }
 
-func eventEnv(event Event, extra map[string]string) []string {
-	env := []string{
-		"ATTELER_EVENT_TYPE=" + event.Type,
-		"ATTELER_SESSION_ID=" + event.SessionID,
-		"ATTELER_SESSION_PATH=" + event.SessionPath,
-		"ATTELER_AGENT=" + event.Agent,
-		"ATTELER_MODEL=" + event.Model,
-		"ATTELER_ROLE=" + event.Role,
+func hookEnvList(hook Hook, event Event) []string {
+	env := eventEnv(event, hook.Env)
+	if hook.InheritEnv {
+		env = append(filterReservedEventEnv(os.Environ()), env...)
 	}
+
+	return env
+}
+
+func hookPolicy(hook Hook) *shell.Policy {
+	policy := shell.DefaultPolicy()
+	policy.AllowCredentialEnv = hookAllowedCredentialEnv(hook)
+
+	return &policy
+}
+
+func hookAllowedCredentialEnv(hook Hook) []string {
+	if hook.InheritEnv {
+		return []string{"*"}
+	}
+
+	if len(hook.Env) == 0 {
+		return nil
+	}
+
+	env := make([]string, 0, len(hook.Env))
+	for key := range hook.Env {
+		if isReservedEventEnvKey(key) {
+			continue
+		}
+
+		env = append(env, key)
+	}
+
+	return env
+}
+
+type hookStderrCounter struct {
+	bytes int
+}
+
+func (w *hookStderrCounter) Write(p []byte) (int, error) {
+	w.bytes += len(p)
+
+	return len(p), nil
+}
+
+func (w *hookStderrCounter) Bytes() int {
+	return w.bytes
+}
+
+func hookErrorSummary(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded.Error()
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled.Error()
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.String()
+	}
+
+	return "command start failed"
+}
+
+func eventEnv(event Event, extra map[string]string) []string {
+	env := make([]string, 0, len(extra)+10)
+	for key, value := range extra {
+		if isReservedEventEnvKey(key) {
+			continue
+		}
+
+		env = append(env, key+"="+value)
+	}
+
+	env = append(env, eventEnvEntry("ATTELER_EVENT_TYPE", event.Type))
+
+	if event.PayloadMode != "" {
+		env = append(env, eventEnvEntry("ATTELER_PAYLOAD_MODE", event.PayloadMode))
+	}
+
+	if event.SessionID != "" {
+		env = append(env, eventEnvEntry("ATTELER_SESSION_ID", event.SessionID))
+	}
+
+	if event.SessionPath != "" {
+		env = append(env, eventEnvEntry("ATTELER_SESSION_PATH", event.SessionPath))
+	}
+
+	if event.Agent != "" {
+		env = append(env, eventEnvEntry("ATTELER_AGENT", event.Agent))
+	}
+
+	if event.Model != "" {
+		env = append(env, eventEnvEntry("ATTELER_MODEL", event.Model))
+	}
+
+	if event.Role != "" {
+		env = append(env, eventEnvEntry("ATTELER_ROLE", event.Role))
+	}
+
+	if event.Redacted {
+		env = append(env, "ATTELER_EVENT_REDACTED=true")
+	}
+
+	if event.Truncated {
+		env = append(env, "ATTELER_EVENT_TRUNCATED=true")
+	}
+
 	if !event.Timestamp.IsZero() {
 		env = append(env, "ATTELER_EVENT_UNIX="+strconv.FormatInt(event.Timestamp.Unix(), 10))
 	}
 
-	for key, value := range extra {
-		env = append(env, key+"="+value)
+	return env
+}
+
+func eventEnvEntry(key, value string) string {
+	return key + "=" + sanitizeEventEnvValue(value)
+}
+
+func sanitizeEventEnvValue(value string) string {
+	value = strings.ToValidUTF8(value, "")
+
+	return strings.Map(func(r rune) rune {
+		if r == 0 {
+			return -1
+		}
+
+		if unicode.IsControl(r) {
+			return '_'
+		}
+
+		return r
+	}, value)
+}
+
+func filterReservedEventEnv(env []string) []string {
+	if len(env) == 0 {
+		return nil
 	}
 
-	return env
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if isReservedEventEnvKey(key) {
+			continue
+		}
+
+		out = append(out, entry)
+	}
+
+	return out
+}
+
+func isReservedEventEnvKey(key string) bool {
+	key, _, _ = strings.Cut(key, "=")
+
+	switch {
+	case strings.EqualFold(key, "ATTELER_EVENT_TYPE"),
+		strings.EqualFold(key, "ATTELER_PAYLOAD_MODE"),
+		strings.EqualFold(key, "ATTELER_SESSION_ID"),
+		strings.EqualFold(key, "ATTELER_SESSION_PATH"),
+		strings.EqualFold(key, "ATTELER_AGENT"),
+		strings.EqualFold(key, "ATTELER_MODEL"),
+		strings.EqualFold(key, "ATTELER_ROLE"),
+		strings.EqualFold(key, "ATTELER_EVENT_REDACTED"),
+		strings.EqualFold(key, "ATTELER_EVENT_TRUNCATED"),
+		strings.EqualFold(key, "ATTELER_EVENT_UNIX"):
+		return true
+	default:
+		return false
+	}
 }
 
 func cloneMap(in map[string]string) map[string]string {
