@@ -405,6 +405,18 @@ func TestCommandSurface_RepresentativeSideEffectsAndOutputsAreStable(t *testing.
 			outputModes: []string{commandOutputText, commandOutputJSON},
 		},
 		{
+			name: "retrieval-search",
+			sideEffects: []string{
+				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectFilesystemWrite,
+				commandEffectGitRead,
+				commandEffectSessionRead,
+				commandEffectUserOutput,
+			},
+			outputModes: []string{commandOutputText},
+		},
+		{
 			name: "doctor-offline",
 			sideEffects: []string{
 				commandEffectConfigRead,

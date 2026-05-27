@@ -184,7 +184,7 @@ var cliHelpDomains = []cliHelpDomain{
 	{
 		Name:    "memory/retrieval",
 		Title:   "Memory & Retrieval",
-		Summary: "Search saved sessions, UTF-8 file memory stores, agent lexical memory, local lexical/embedding indexes, and git history.",
+		Summary: "Search saved sessions, UTF-8 file memory stores, workspace vector indexes, agent lexical memory, local lexical/embedding indexes, and git history.",
 		Aliases: []string{"memory", "retrieval", "mem"},
 		// Keep old RAG-shaped routes working without advertising lexical
 		// fallback search as RAG in help output.
@@ -209,6 +209,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Examples: []string{
 			`atteler memory search "OAuth retry storm"`,
 			`atteler memory retrieve "OAuth retry storm"`,
+			`atteler memory retrieve "OAuth retry storm" --retrieval-source vector`,
 			`atteler memory git-history "memory regression"`,
 			`atteler memory vector-search "redirect risks"`,
 			`atteler memory vector-index docs/research.md`,

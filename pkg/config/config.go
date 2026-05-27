@@ -282,15 +282,23 @@ type SkillLearningConfig struct {
 
 // VectorConfig configures local vector retrieval and persisted indexes.
 type VectorConfig struct {
-	Vectorizer        string `json:"vectorizer,omitempty" yaml:"vectorizer,omitempty"`
-	Provider          string `json:"provider,omitempty" yaml:"provider,omitempty"`
-	Model             string `json:"model,omitempty" yaml:"model,omitempty"`
-	BaseURL           string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	FallbackPolicy    string `json:"fallback_policy,omitempty" yaml:"fallback_policy,omitempty"`
-	IndexPath         string `json:"index_path,omitempty" yaml:"index_path,omitempty"`
-	TimeoutSeconds    int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
-	ChunkMaxRunes     int    `json:"chunk_max_runes,omitempty" yaml:"chunk_max_runes,omitempty"`
-	ChunkOverlapRunes int    `json:"chunk_overlap_runes,omitempty" yaml:"chunk_overlap_runes,omitempty"`
+	WorkspaceEnabled               *bool    `json:"workspace_enabled,omitempty" yaml:"workspace_enabled,omitempty"`
+	WorkspaceAllowRemoteEmbeddings *bool    `json:"workspace_allow_remote_embeddings,omitempty" yaml:"workspace_allow_remote_embeddings,omitempty"`
+	Vectorizer                     string   `json:"vectorizer,omitempty" yaml:"vectorizer,omitempty"`
+	Provider                       string   `json:"provider,omitempty" yaml:"provider,omitempty"`
+	Model                          string   `json:"model,omitempty" yaml:"model,omitempty"`
+	BaseURL                        string   `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	FallbackPolicy                 string   `json:"fallback_policy,omitempty" yaml:"fallback_policy,omitempty"`
+	IndexPath                      string   `json:"index_path,omitempty" yaml:"index_path,omitempty"`
+	WorkspaceIndexPath             string   `json:"workspace_index_path,omitempty" yaml:"workspace_index_path,omitempty"`
+	WorkspaceInclude               []string `json:"workspace_include,omitempty" yaml:"workspace_include,omitempty"`
+	WorkspaceExclude               []string `json:"workspace_exclude,omitempty" yaml:"workspace_exclude,omitempty"`
+	TimeoutSeconds                 int      `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	ChunkMaxRunes                  int      `json:"chunk_max_runes,omitempty" yaml:"chunk_max_runes,omitempty"`
+	ChunkOverlapRunes              int      `json:"chunk_overlap_runes,omitempty" yaml:"chunk_overlap_runes,omitempty"`
+	WorkspaceLimit                 int      `json:"workspace_limit,omitempty" yaml:"workspace_limit,omitempty"`
+	WorkspaceMaxFileBytes          int      `json:"workspace_max_file_bytes,omitempty" yaml:"workspace_max_file_bytes,omitempty"`
+	WorkspaceMaxFiles              int      `json:"workspace_max_files,omitempty" yaml:"workspace_max_files,omitempty"`
 }
 
 //nolint:govet // fieldalignment: field order follows config-file grouping; deprecated aliases stay last.
@@ -411,16 +419,25 @@ type fileSkillLearningConfig struct {
 	MinOccurrences  *int    `json:"min_occurrences" yaml:"min_occurrences"`
 }
 
+//nolint:govet // Field order mirrors the documented vector config schema.
 type fileVectorConfig struct {
-	Vectorizer        *string `json:"vectorizer" yaml:"vectorizer"`
-	Provider          *string `json:"provider" yaml:"provider"`
-	Model             *string `json:"model" yaml:"model"`
-	BaseURL           *string `json:"base_url" yaml:"base_url"`
-	FallbackPolicy    *string `json:"fallback_policy" yaml:"fallback_policy"`
-	IndexPath         *string `json:"index_path" yaml:"index_path"`
-	TimeoutSeconds    *int    `json:"timeout_seconds" yaml:"timeout_seconds"`
-	ChunkMaxRunes     *int    `json:"chunk_max_runes" yaml:"chunk_max_runes"`
-	ChunkOverlapRunes *int    `json:"chunk_overlap_runes" yaml:"chunk_overlap_runes"`
+	WorkspaceEnabled               *bool    `json:"workspace_enabled" yaml:"workspace_enabled"`
+	WorkspaceAllowRemoteEmbeddings *bool    `json:"workspace_allow_remote_embeddings" yaml:"workspace_allow_remote_embeddings"`
+	Vectorizer                     *string  `json:"vectorizer" yaml:"vectorizer"`
+	Provider                       *string  `json:"provider" yaml:"provider"`
+	Model                          *string  `json:"model" yaml:"model"`
+	BaseURL                        *string  `json:"base_url" yaml:"base_url"`
+	FallbackPolicy                 *string  `json:"fallback_policy" yaml:"fallback_policy"`
+	IndexPath                      *string  `json:"index_path" yaml:"index_path"`
+	WorkspaceIndexPath             *string  `json:"workspace_index_path" yaml:"workspace_index_path"`
+	WorkspaceInclude               []string `json:"workspace_include" yaml:"workspace_include"`
+	WorkspaceExclude               []string `json:"workspace_exclude" yaml:"workspace_exclude"`
+	TimeoutSeconds                 *int     `json:"timeout_seconds" yaml:"timeout_seconds"`
+	ChunkMaxRunes                  *int     `json:"chunk_max_runes" yaml:"chunk_max_runes"`
+	ChunkOverlapRunes              *int     `json:"chunk_overlap_runes" yaml:"chunk_overlap_runes"`
+	WorkspaceLimit                 *int     `json:"workspace_limit" yaml:"workspace_limit"`
+	WorkspaceMaxFileBytes          *int     `json:"workspace_max_file_bytes" yaml:"workspace_max_file_bytes"`
+	WorkspaceMaxFiles              *int     `json:"workspace_max_files" yaml:"workspace_max_files"`
 }
 
 // Load reads the default configuration files and returns the merged result plus
@@ -1164,7 +1181,20 @@ func mergeSkillLearning(dst *Config, skillLearning fileSkillLearningConfig, rec 
 	}
 }
 
+//nolint:cyclop // Merge functions intentionally mirror each schema field for origin tracking.
 func mergeVector(dst *Config, vector fileVectorConfig, rec *originRecorder, source originSource) {
+	if vector.WorkspaceEnabled != nil {
+		value := *vector.WorkspaceEnabled
+		dst.Vector.WorkspaceEnabled = &value
+		rec.set("vector.workspace_enabled", source, value)
+	}
+
+	if vector.WorkspaceAllowRemoteEmbeddings != nil {
+		value := *vector.WorkspaceAllowRemoteEmbeddings
+		dst.Vector.WorkspaceAllowRemoteEmbeddings = &value
+		rec.set("vector.workspace_allow_remote_embeddings", source, value)
+	}
+
 	if vector.Vectorizer != nil {
 		value := strings.TrimSpace(*vector.Vectorizer)
 		dst.Vector.Vectorizer = value
@@ -1201,6 +1231,22 @@ func mergeVector(dst *Config, vector fileVectorConfig, rec *originRecorder, sour
 		rec.set("vector.index_path", source, value)
 	}
 
+	if vector.WorkspaceIndexPath != nil {
+		value := strings.TrimSpace(*vector.WorkspaceIndexPath)
+		dst.Vector.WorkspaceIndexPath = value
+		rec.set("vector.workspace_index_path", source, value)
+	}
+
+	if vector.WorkspaceInclude != nil {
+		dst.Vector.WorkspaceInclude = append([]string(nil), vector.WorkspaceInclude...)
+		rec.replace("vector.workspace_include", source, dst.Vector.WorkspaceInclude, "replaces the workspace vector include pattern list")
+	}
+
+	if vector.WorkspaceExclude != nil {
+		dst.Vector.WorkspaceExclude = append([]string(nil), vector.WorkspaceExclude...)
+		rec.replace("vector.workspace_exclude", source, dst.Vector.WorkspaceExclude, "replaces the workspace vector exclude pattern list")
+	}
+
 	if vector.TimeoutSeconds != nil {
 		value := *vector.TimeoutSeconds
 		dst.Vector.TimeoutSeconds = value
@@ -1217,6 +1263,24 @@ func mergeVector(dst *Config, vector fileVectorConfig, rec *originRecorder, sour
 		value := *vector.ChunkOverlapRunes
 		dst.Vector.ChunkOverlapRunes = value
 		rec.set("vector.chunk_overlap_runes", source, value)
+	}
+
+	if vector.WorkspaceLimit != nil {
+		value := *vector.WorkspaceLimit
+		dst.Vector.WorkspaceLimit = value
+		rec.set("vector.workspace_limit", source, value)
+	}
+
+	if vector.WorkspaceMaxFileBytes != nil {
+		value := *vector.WorkspaceMaxFileBytes
+		dst.Vector.WorkspaceMaxFileBytes = value
+		rec.set("vector.workspace_max_file_bytes", source, value)
+	}
+
+	if vector.WorkspaceMaxFiles != nil {
+		value := *vector.WorkspaceMaxFiles
+		dst.Vector.WorkspaceMaxFiles = value
+		rec.set("vector.workspace_max_files", source, value)
 	}
 }
 
@@ -2193,7 +2257,22 @@ func mergeConfigSkillLearningFromOrigins(dst *Config, skillLearning SkillLearnin
 	}
 }
 
+//nolint:cyclop // Merge functions intentionally mirror each schema field for origin tracking.
 func mergeConfigVectorFromOrigins(dst *Config, vector VectorConfig, dstOrigins, srcOrigins OriginMap) {
+	if vector.WorkspaceEnabled != nil {
+		value := *vector.WorkspaceEnabled
+		dst.Vector.WorkspaceEnabled = &value
+
+		appendOriginChain(dstOrigins, "vector.workspace_enabled", srcOrigins, false)
+	}
+
+	if vector.WorkspaceAllowRemoteEmbeddings != nil {
+		value := *vector.WorkspaceAllowRemoteEmbeddings
+		dst.Vector.WorkspaceAllowRemoteEmbeddings = &value
+
+		appendOriginChain(dstOrigins, "vector.workspace_allow_remote_embeddings", srcOrigins, false)
+	}
+
 	if vector.Vectorizer != "" {
 		dst.Vector.Vectorizer = strings.TrimSpace(vector.Vectorizer)
 
@@ -2230,6 +2309,24 @@ func mergeConfigVectorFromOrigins(dst *Config, vector VectorConfig, dstOrigins, 
 		appendOriginChain(dstOrigins, "vector.index_path", srcOrigins, false)
 	}
 
+	if vector.WorkspaceIndexPath != "" {
+		dst.Vector.WorkspaceIndexPath = strings.TrimSpace(vector.WorkspaceIndexPath)
+
+		appendOriginChain(dstOrigins, "vector.workspace_index_path", srcOrigins, false)
+	}
+
+	if vector.WorkspaceInclude != nil {
+		dst.Vector.WorkspaceInclude = append([]string(nil), vector.WorkspaceInclude...)
+
+		appendOriginChain(dstOrigins, "vector.workspace_include", srcOrigins, true)
+	}
+
+	if vector.WorkspaceExclude != nil {
+		dst.Vector.WorkspaceExclude = append([]string(nil), vector.WorkspaceExclude...)
+
+		appendOriginChain(dstOrigins, "vector.workspace_exclude", srcOrigins, true)
+	}
+
 	if vector.TimeoutSeconds > 0 {
 		dst.Vector.TimeoutSeconds = vector.TimeoutSeconds
 
@@ -2247,9 +2344,40 @@ func mergeConfigVectorFromOrigins(dst *Config, vector VectorConfig, dstOrigins, 
 
 		appendOriginChain(dstOrigins, "vector.chunk_overlap_runes", srcOrigins, false)
 	}
+
+	if vector.WorkspaceLimit > 0 {
+		dst.Vector.WorkspaceLimit = vector.WorkspaceLimit
+
+		appendOriginChain(dstOrigins, "vector.workspace_limit", srcOrigins, false)
+	}
+
+	if vector.WorkspaceMaxFileBytes > 0 {
+		dst.Vector.WorkspaceMaxFileBytes = vector.WorkspaceMaxFileBytes
+
+		appendOriginChain(dstOrigins, "vector.workspace_max_file_bytes", srcOrigins, false)
+	}
+
+	if vector.WorkspaceMaxFiles > 0 {
+		dst.Vector.WorkspaceMaxFiles = vector.WorkspaceMaxFiles
+
+		appendOriginChain(dstOrigins, "vector.workspace_max_files", srcOrigins, false)
+	}
 }
 
+//nolint:cyclop // Merge functions intentionally mirror each schema field for origin tracking.
 func mergeConfigVector(dst *Config, vector VectorConfig, rec *originRecorder, source originSource) {
+	if vector.WorkspaceEnabled != nil {
+		value := *vector.WorkspaceEnabled
+		dst.Vector.WorkspaceEnabled = &value
+		rec.set("vector.workspace_enabled", source, value)
+	}
+
+	if vector.WorkspaceAllowRemoteEmbeddings != nil {
+		value := *vector.WorkspaceAllowRemoteEmbeddings
+		dst.Vector.WorkspaceAllowRemoteEmbeddings = &value
+		rec.set("vector.workspace_allow_remote_embeddings", source, value)
+	}
+
 	if vector.Vectorizer != "" {
 		value := strings.TrimSpace(vector.Vectorizer)
 		dst.Vector.Vectorizer = value
@@ -2286,6 +2414,22 @@ func mergeConfigVector(dst *Config, vector VectorConfig, rec *originRecorder, so
 		rec.set("vector.index_path", source, value)
 	}
 
+	if vector.WorkspaceIndexPath != "" {
+		value := strings.TrimSpace(vector.WorkspaceIndexPath)
+		dst.Vector.WorkspaceIndexPath = value
+		rec.set("vector.workspace_index_path", source, value)
+	}
+
+	if vector.WorkspaceInclude != nil {
+		dst.Vector.WorkspaceInclude = append([]string(nil), vector.WorkspaceInclude...)
+		rec.replace("vector.workspace_include", source, dst.Vector.WorkspaceInclude, "replaces the workspace vector include pattern list")
+	}
+
+	if vector.WorkspaceExclude != nil {
+		dst.Vector.WorkspaceExclude = append([]string(nil), vector.WorkspaceExclude...)
+		rec.replace("vector.workspace_exclude", source, dst.Vector.WorkspaceExclude, "replaces the workspace vector exclude pattern list")
+	}
+
 	if vector.TimeoutSeconds > 0 {
 		dst.Vector.TimeoutSeconds = vector.TimeoutSeconds
 		rec.set("vector.timeout_seconds", source, vector.TimeoutSeconds)
@@ -2299,6 +2443,21 @@ func mergeConfigVector(dst *Config, vector VectorConfig, rec *originRecorder, so
 	if vector.ChunkOverlapRunes > 0 {
 		dst.Vector.ChunkOverlapRunes = vector.ChunkOverlapRunes
 		rec.set("vector.chunk_overlap_runes", source, vector.ChunkOverlapRunes)
+	}
+
+	if vector.WorkspaceLimit > 0 {
+		dst.Vector.WorkspaceLimit = vector.WorkspaceLimit
+		rec.set("vector.workspace_limit", source, vector.WorkspaceLimit)
+	}
+
+	if vector.WorkspaceMaxFileBytes > 0 {
+		dst.Vector.WorkspaceMaxFileBytes = vector.WorkspaceMaxFileBytes
+		rec.set("vector.workspace_max_file_bytes", source, vector.WorkspaceMaxFileBytes)
+	}
+
+	if vector.WorkspaceMaxFiles > 0 {
+		dst.Vector.WorkspaceMaxFiles = vector.WorkspaceMaxFiles
+		rec.set("vector.workspace_max_files", source, vector.WorkspaceMaxFiles)
 	}
 }
 

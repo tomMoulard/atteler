@@ -20,6 +20,7 @@ func RedactedConfig(cfg Config) Config {
 	out.Generation = redactedGenerationConfig(cfg.Generation)
 	out.AgentLoop = redactedAgentLoopConfig(cfg.AgentLoop)
 	out.SkillLearning.Enabled = clonePtr(cfg.SkillLearning.Enabled)
+	out.Vector = redactedVectorConfig(cfg.Vector)
 
 	out.Providers = make(map[string]ProviderConfig, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
@@ -126,6 +127,20 @@ func redactedReferencePolicyConfig(policy ReferencePolicyConfig) ReferencePolicy
 	return policy
 }
 
+func redactedVectorConfig(cfg VectorConfig) VectorConfig {
+	cfg.WorkspaceEnabled = clonePtr(cfg.WorkspaceEnabled)
+	cfg.WorkspaceAllowRemoteEmbeddings = clonePtr(cfg.WorkspaceAllowRemoteEmbeddings)
+	cfg.Provider = redactPotentialSecretString(cfg.Provider)
+	cfg.Model = redactPotentialSecretString(cfg.Model)
+	cfg.BaseURL = redactURL(cfg.BaseURL)
+	cfg.IndexPath = redactPotentialSecretString(cfg.IndexPath)
+	cfg.WorkspaceIndexPath = redactPotentialSecretString(cfg.WorkspaceIndexPath)
+	cfg.WorkspaceInclude = redactStringSlice("workspace_include", cfg.WorkspaceInclude)
+	cfg.WorkspaceExclude = redactStringSlice("workspace_exclude", cfg.WorkspaceExclude)
+
+	return cfg
+}
+
 func clonePtr[T any](value *T) *T {
 	if value == nil {
 		return nil
@@ -162,6 +177,8 @@ func RedactOriginValue(path, value string) string {
 		return redactSerializedHooks(value)
 	case path == "context.references" || strings.HasSuffix(path, ".references"):
 		return redactSerializedStringSlice("references", value)
+	case path == "vector.workspace_include" || path == "vector.workspace_exclude":
+		return redactSerializedStringSlice(path, value)
 	case strings.HasSuffix(path, ".base_url"):
 		return redactURL(value)
 	case strings.Contains(path, ".env"), strings.Contains(path, ".command"),

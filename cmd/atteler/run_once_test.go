@@ -24,6 +24,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
+	"github.com/tommoulard/atteler/pkg/vector"
 )
 
 type runOnceCostProvider struct {
@@ -498,6 +499,222 @@ func TestRunOnceWithOptions_EmitsEstimatedAndActualRouteDecisionEvents(t *testin
 	assert.Contains(t, log, "actual_selected=openai/gpt-4.1-nano")
 	assert.Contains(t, log, "fallback_order=openai/gpt-4.1-nano,openai/gpt-4.1-mini")
 	assert.Contains(t, log, "verified_provider_model_count=1")
+}
+
+func TestRunOnceWithOptions_AppendsWorkspaceVectorContext(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docs", "auth.md"), []byte("OAuth callback state validation and token exchange retry notes."), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docs", "shell.md"), []byte("Shell process output capture and timeout notes."), 0o600))
+
+	replayPath := filepath.Join(dir, "response.json")
+	recordPath := filepath.Join(dir, "recorded-request.json")
+
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "Where are OAuth retry notes?"}}},
+		nil,
+		&llm.Response{Content: "recorded answer", Model: "gpt-test"},
+	))
+
+	enabled := true
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+
+	err := runOnceWithOptions(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		nil,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			VectorConfig: config.VectorConfig{
+				WorkspaceEnabled:      &enabled,
+				WorkspaceIndexPath:    filepath.Join(dir, ".atteler", "workspace-index.json"),
+				Vectorizer:            vector.VectorizerKindLexical,
+				WorkspaceLimit:        1,
+				WorkspaceMaxFileBytes: 1024,
+				WorkspaceExclude:      []string{"response.json", "recorded-request.json", "sessions/"},
+			},
+			Response: responseRecordOptions{
+				ReplayPath: replayPath,
+				RecordPath: recordPath,
+			},
+		},
+		true,
+		"Where are OAuth retry notes?",
+	)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(recordPath)
+	require.NoError(t, err)
+
+	var record responseRecordFile
+	require.NoError(t, json.Unmarshal(data, &record))
+
+	var workspaceContext string
+
+	for _, message := range record.Request.Messages {
+		if strings.Contains(message.Content, "<workspace_vector_context") {
+			workspaceContext = message.Content
+
+			break
+		}
+	}
+
+	require.NotEmpty(t, workspaceContext)
+	assert.Contains(t, workspaceContext, `index_path=".atteler/workspace-index.json"`)
+	assert.Contains(t, workspaceContext, `path="docs/auth.md"`)
+	assert.Contains(t, workspaceContext, "OAuth callback")
+	assert.NotContains(t, workspaceContext, dir)
+}
+
+func TestRunOnceWithOptions_DoesNotIndexWorkspaceVectorContextWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docs", "auth.md"), []byte("OAuth callback state validation and token exchange retry notes."), 0o600))
+
+	replayPath := filepath.Join(dir, "response.json")
+	recordPath := filepath.Join(dir, "recorded-request.json")
+
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "Where are OAuth retry notes?"}}},
+		nil,
+		&llm.Response{Content: "recorded answer", Model: "gpt-test"},
+	))
+
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+
+	err := runOnceWithOptions(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		nil,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			Response: responseRecordOptions{
+				ReplayPath: replayPath,
+				RecordPath: recordPath,
+			},
+		},
+		true,
+		"Where are OAuth retry notes?",
+	)
+	require.NoError(t, err)
+
+	assert.NoFileExists(t, filepath.Join(dir, vector.DefaultWorkspaceIndexPath))
+
+	data, err := os.ReadFile(recordPath)
+	require.NoError(t, err)
+
+	var record responseRecordFile
+	require.NoError(t, json.Unmarshal(data, &record))
+
+	for _, message := range record.Request.Messages {
+		assert.NotContains(t, message.Content, "<workspace_vector_context")
+	}
+}
+
+func TestRunOnceWithOptions_HeadlessManifestIncludesWorkspaceVectorContext(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docs", "auth.md"), []byte("OAuth callback state validation and token exchange retry notes."), 0o600))
+
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "Where are OAuth retry notes?"}}},
+		nil,
+		&llm.Response{Content: "recorded answer", Model: "gpt-test"},
+	))
+
+	enabled := true
+	headlessID := "test-headless-workspace-vector-manifest"
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+
+	err := runOnceWithOptions(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		nil,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat: outputFormatText,
+			Headless:     true,
+			HeadlessID:   headlessID,
+			VectorConfig: config.VectorConfig{
+				WorkspaceEnabled:      &enabled,
+				WorkspaceIndexPath:    filepath.Join(dir, ".atteler", "workspace-index.json"),
+				Vectorizer:            vector.VectorizerKindLexical,
+				WorkspaceLimit:        1,
+				WorkspaceMaxFileBytes: 1024,
+				WorkspaceExclude:      []string{"response.json", "sessions/"},
+			},
+			Response: responseRecordOptions{ReplayPath: replayPath},
+		},
+		true,
+		"Where are OAuth retry notes?",
+	)
+	require.NoError(t, err)
+
+	log, err := store.ReadHeadlessLog(headlessID)
+	require.NoError(t, err)
+
+	manifest := decodeHeadlessContextManifest(t, log)
+	require.Len(t, manifest.ConfiguredReferences.Entries, 1)
+
+	entry := manifest.ConfiguredReferences.Entries[0]
+	assert.Equal(t, workspaceVectorReferenceScope, entry.Scope)
+	assert.Equal(t, "workspace-vector", entry.Source)
+	assert.Equal(t, "vector", entry.Kind)
+	assert.Equal(t, ".atteler/workspace-index.json", entry.ResolvedSource)
+	assert.Equal(t, contextref.ReferenceDecisionLoaded, entry.PolicyDecision)
+	assert.NotEmpty(t, entry.DigestSHA256)
+	assert.Positive(t, entry.TokenEstimate.UpperBoundTokens)
+	assert.Equal(t, entry.Bytes, manifest.ReferenceBytes)
+	assert.NotContains(t, entry.ResolvedSource, dir)
 }
 
 func TestRunOnce_EmitsContextManifestBeforeBudgetFailure(t *testing.T) {

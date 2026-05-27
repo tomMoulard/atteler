@@ -89,6 +89,8 @@ skill_learning:
   max_steps: 4
   min_occurrences: 3
 vector:
+  workspace_enabled: true
+  workspace_allow_remote_embeddings: false
   vectorizer: embedding
   provider: ollama
   model: nomic-embed-text
@@ -96,8 +98,14 @@ vector:
   timeout_seconds: 12
   fallback_policy: lexical
   index_path: ./.atteler/test-vector-index.json
+  workspace_index_path: ./.atteler/workspace-vector-index.json
+  workspace_include: ["*.go", "*.md"]
+  workspace_exclude: ["vendor/", "*.gen.go"]
   chunk_max_runes: 900
   chunk_overlap_runes: 90
+  workspace_limit: 3
+  workspace_max_file_bytes: 12345
+  workspace_max_files: 321
 `)
 
 	cfg, loaded, err := LoadFiles([]string{global, filepath.Join(dir, "missing.json"), local})
@@ -282,6 +290,10 @@ vector:
 	assert.Equal(t, 42, cfg.SkillLearning.MaxObservations)
 	assert.Equal(t, 4, cfg.SkillLearning.MaxSteps)
 	assert.Equal(t, 3, cfg.SkillLearning.MinOccurrences)
+	require.NotNil(t, cfg.Vector.WorkspaceEnabled)
+	assert.True(t, *cfg.Vector.WorkspaceEnabled)
+	require.NotNil(t, cfg.Vector.WorkspaceAllowRemoteEmbeddings)
+	assert.False(t, *cfg.Vector.WorkspaceAllowRemoteEmbeddings)
 	assert.Equal(t, "embedding", cfg.Vector.Vectorizer)
 	assert.Equal(t, "ollama", cfg.Vector.Provider)
 	assert.Equal(t, "nomic-embed-text", cfg.Vector.Model)
@@ -289,8 +301,14 @@ vector:
 	assert.Equal(t, 12, cfg.Vector.TimeoutSeconds)
 	assert.Equal(t, "lexical", cfg.Vector.FallbackPolicy)
 	assert.Equal(t, "./.atteler/test-vector-index.json", cfg.Vector.IndexPath)
+	assert.Equal(t, "./.atteler/workspace-vector-index.json", cfg.Vector.WorkspaceIndexPath)
+	assert.Equal(t, []string{"*.go", "*.md"}, cfg.Vector.WorkspaceInclude)
+	assert.Equal(t, []string{"vendor/", "*.gen.go"}, cfg.Vector.WorkspaceExclude)
 	assert.Equal(t, 900, cfg.Vector.ChunkMaxRunes)
 	assert.Equal(t, 90, cfg.Vector.ChunkOverlapRunes)
+	assert.Equal(t, 3, cfg.Vector.WorkspaceLimit)
+	assert.Equal(t, 12345, cfg.Vector.WorkspaceMaxFileBytes)
+	assert.Equal(t, 321, cfg.Vector.WorkspaceMaxFiles)
 }
 
 func TestLoadFiles_ConfiguresAllAgentLoopBudgetFields(t *testing.T) {

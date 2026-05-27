@@ -2847,6 +2847,51 @@ func TestSearcher_SearchRetrievalRedactsPreFlaggedRawText(t *testing.T) {
 	assert.NotContains(t, results[0].Metadata[retrieval.MetadataSafetyReasons], ";;")
 }
 
+func TestSearcher_SearchRetrievalOffsetsWorkspaceChunkRange(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	text := "OAuth callback retry near original file offset."
+	vec, err := vectorizer.Vectorize(text)
+	require.NoError(t, err)
+
+	store, err := NewStoreWithVectorizer(vectorizer.Spec())
+	require.NoError(t, err)
+	require.NoError(t, store.Add(Document{
+		ID:     "docs/auth.md#chunk=0001",
+		Text:   text,
+		Vector: vec,
+		Metadata: map[string]string{
+			"path":             "docs/auth.md",
+			"chunk_start_rune": "120",
+			"chunk_end_rune":   "180",
+		},
+	}))
+
+	results, err := Searcher{
+		Store:      store,
+		Vectorizer: vectorizer,
+		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: "workspace"},
+	}.SearchRetrieval(context.Background(), retrieval.Query{Text: "OAuth retry", IncludeUnsafe: true})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	assert.Equal(t, retrieval.RangeUnitRuneOffset, results[0].Chunk.Range.Unit)
+	assert.Equal(t, 120, results[0].Chunk.Range.Start)
+	assert.Equal(t, 120+len([]rune(text)), results[0].Chunk.Range.End)
+	assert.LessOrEqual(t, results[0].Chunk.Range.End, 180)
+}
+
+func TestSearcher_SearchRetrievalRejectsNilContext(t *testing.T) {
+	t.Parallel()
+
+	_, err := Searcher{}.SearchRetrieval(nil, retrieval.Query{Text: "oauth callback"}) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContextRequired)
+}
+
 func TestEmbeddingVectorizer_WithTimeoutOverridesClientTimeout(t *testing.T) {
 	t.Parallel()
 

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -333,6 +334,10 @@ func (s *Store) SearchWithVectorizer(query Vector, spec VectorizerSpec, limit in
 // SearchRetrieval vectorizes query text and returns results using the shared
 // retrieval contract.
 func (s Searcher) SearchRetrieval(ctx context.Context, query retrieval.Query) ([]retrieval.Result, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("vector retrieval: %w", err)
 	}
@@ -1655,6 +1660,7 @@ func (s Searcher) retrievalResult(result Result, query retrieval.Query) retrieva
 	}
 
 	chunk := retrieval.BestChunkForTerms(doc.ID, text, tokenize(query.Text), retrieval.ChunkOptions{})
+	chunk = applySourceRuneOffset(chunk, metadata)
 
 	scorerName := s.ScorerName
 	if scorerName == "" {
@@ -1683,6 +1689,38 @@ func (s Searcher) retrievalResult(result Result, query retrieval.Query) retrieva
 		Freshness:  retrieval.FreshnessFromMetadata(metadata),
 		Safety:     safety,
 	})
+}
+
+func applySourceRuneOffset(chunk retrieval.ChunkedText, metadata map[string]string) retrieval.ChunkedText {
+	sourceStart, ok := parseNonNegativeMetadataInt(metadata["chunk_start_rune"])
+	if !ok {
+		return chunk
+	}
+
+	sourceEnd, hasSourceEnd := parseNonNegativeMetadataInt(metadata["chunk_end_rune"])
+
+	chunk.Chunk.Range.Unit = retrieval.RangeUnitRuneOffset
+	chunk.Chunk.Range.Start += sourceStart
+	chunk.Chunk.Range.End += sourceStart
+
+	if hasSourceEnd && chunk.Chunk.Range.End > sourceEnd {
+		chunk.Chunk.Range.End = sourceEnd
+	}
+
+	if chunk.Chunk.Range.Start > chunk.Chunk.Range.End {
+		chunk.Chunk.Range.Start = chunk.Chunk.Range.End
+	}
+
+	return chunk
+}
+
+func parseNonNegativeMetadataInt(raw string) (int, bool) {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value < 0 {
+		return 0, false
+	}
+
+	return value, true
 }
 
 func vectorizeContext(ctx context.Context, vectorizer Vectorizer, text string) (Vector, error) {
@@ -1855,7 +1893,12 @@ func checkDocumentTextHashVector(doc Document) error {
 		return nil
 	}
 
-	vectorizer, err := NewTextVectorizer(spec.Dimensions)
+	dimensions := spec.Dimensions
+	if dimensions == 0 {
+		dimensions = len(doc.Vector)
+	}
+
+	vectorizer, err := NewTextVectorizer(dimensions)
 	if err != nil {
 		return fmt.Errorf("validate text-hash vector %q: %w", doc.ID, err)
 	}
@@ -2063,6 +2106,8 @@ var (
 	ErrVectorMismatch = errors.New("vector does not match source text")
 	// ErrNoSources is returned when building an index without source files.
 	ErrNoSources = errors.New("vector index requires at least one source")
+	// ErrIndexCorrupt is returned when a persisted vector index is not valid JSON.
+	ErrIndexCorrupt = errors.New("vector index is corrupt")
 	// ErrMetadataMismatch is returned when a persisted index was built with a
 	// different vectorizer or model than the current search request.
 	ErrMetadataMismatch = errors.New("vector index metadata mismatch")

@@ -610,6 +610,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 	executionOptions.SkillLearningStoreDir = state.skillLearningStoreDir
 	executionOptions.SkillLearningSkillDir = state.skillLearningSkillDir
 	executionOptions.SkillLearningEnabled = state.skillLearningEnabled
+	executionOptions.VectorConfig = state.vectorConfig
 
 	if opts.headless && opts.oncePrompt == "" && !opts.readStdin {
 		err := errors.New("headless mode requires --once, positional prompt text, or --stdin")

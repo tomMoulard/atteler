@@ -34,6 +34,8 @@ func starterTemplateConfig() Config {
 	agentLoopWallTime := "0"
 	agentLoopCheckpointInterval := 0
 	skillLearningEnabled := true
+	workspaceVectorEnabled := false
+	workspaceAllowRemoteEmbeddings := false
 
 	return Config{
 		Version:         ConfigSchemaVersion,
@@ -129,15 +131,22 @@ func starterTemplateConfig() Config {
 			MinOccurrences:  2,
 		},
 		Vector: VectorConfig{
-			Vectorizer:        "lexical",
-			IndexPath:         "./.atteler/vector-index.json",
-			Provider:          "ollama",
-			Model:             "nomic-embed-text",
-			BaseURL:           "http://127.0.0.1:11434",
-			TimeoutSeconds:    30,
-			FallbackPolicy:    "fail",
-			ChunkMaxRunes:     1200,
-			ChunkOverlapRunes: 120,
+			WorkspaceEnabled:               &workspaceVectorEnabled,
+			WorkspaceAllowRemoteEmbeddings: &workspaceAllowRemoteEmbeddings,
+			Vectorizer:                     "lexical",
+			IndexPath:                      "./.atteler/vector-index.json",
+			WorkspaceIndexPath:             "./.atteler/workspace-vector-index.json",
+			Provider:                       "ollama",
+			Model:                          "nomic-embed-text",
+			BaseURL:                        "http://127.0.0.1:11434",
+			TimeoutSeconds:                 30,
+			FallbackPolicy:                 "fail",
+			ChunkMaxRunes:                  1200,
+			ChunkOverlapRunes:              120,
+			WorkspaceLimit:                 4,
+			WorkspaceMaxFileBytes:          262144,
+			WorkspaceMaxFiles:              5000,
+			WorkspaceExclude:               []string{"tmp/", "*.generated.*"},
 		},
 	}
 }
@@ -157,6 +166,12 @@ func templateYAML() string {
 	out.WriteString("# Remote URLs are rejected unless both scheme and host are allowed below.\n\n")
 	out.WriteString("# Local paths are limited to the working directory plus explicit local_roots; absolute paths require allow_absolute_paths.\n")
 	out.WriteString("# Private-network URL targets remain blocked unless allow_private_networks is set deliberately.\n")
+	out.WriteString("\n")
+	out.WriteString("# Workspace vector indexing is disabled by default. If vector.vectorizer is\n")
+	out.WriteString("# changed to embedding, indexed file chunks are sent to vector.base_url;\n")
+	out.WriteString("# non-loopback embedding endpoints also require workspace_allow_remote_embeddings: true.\n\n")
+	out.WriteString("# Set vector.fallback_policy: lexical to stay local with lexical workspace search\n")
+	out.WriteString("# when an embedding endpoint is unavailable or not explicitly consented.\n\n")
 	out.Write(data)
 	out.WriteString("\n#vim: setf=conf\n")
 
