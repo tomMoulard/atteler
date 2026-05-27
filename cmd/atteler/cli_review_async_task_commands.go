@@ -13,6 +13,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/review"
+	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/watch"
 )
 
@@ -223,6 +224,19 @@ func formatReviewReport(report review.Report) string {
 		}
 	}
 
+	if len(report.GateChecks) > 0 {
+		b.WriteString("gates:\n")
+
+		for _, gate := range report.GateChecks {
+			status := gateStatusFail
+			if gate.Passed {
+				status = gateStatusPass
+			}
+
+			fmt.Fprintf(&b, "  - %s: %s %s\n", gate.Name, status, gate.Notes)
+		}
+	}
+
 	return b.String()
 }
 
@@ -313,6 +327,7 @@ func formatReviewEvidenceSources(sources []review.EvidenceSource) string {
 type reviewCompleter struct {
 	registry          *llm.Registry
 	agents            *agent.Registry
+	recorder          *multiAgentRunRecorder
 	hookRunner        *events.Runner
 	selectedModel     string
 	fallbackModels    []string
@@ -392,12 +407,33 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 		return "", fmt.Errorf("review LLM budget: %w", budgetErr)
 	}
 
-	resp, err := rc.registry.CompleteWithFallback(ctx, params, fallbackModels)
+	resp, err := completeMultiAgentRegistryCall(
+		ctx,
+		rc.recorder,
+		rc.registry,
+		reviewCallInfo(reviewer, systemPrompt),
+		params,
+		fallbackModels,
+	)
 	if err != nil {
 		return "", fmt.Errorf("review LLM complete: %w", err)
 	}
 
 	return resp.Content, nil
+}
+
+func reviewCallInfo(reviewer, systemPrompt string) multiAgentCallInfo {
+	info := multiAgentCallInfo{Agent: reviewer, Phase: multiAgentPhaseReviewReport}
+
+	switch {
+	case strings.Contains(systemPrompt, "aggregating a three-round code review"):
+		info.Phase = multiAgentPhaseAggregateVerdict
+	case strings.Contains(systemPrompt, "cross-reviewing"):
+		info.Phase = multiAgentPhaseCrossReview
+		info.TargetAgent = targetAfter(systemPrompt, "cross-reviewing ", "'s")
+	}
+
+	return info
 }
 
 func runReviewExecution(ctx context.Context, state appState, input reviewRunCommandInput) error {
@@ -411,9 +447,28 @@ func runReviewExecution(ctx context.Context, state appState, input reviewRunComm
 		return fmt.Errorf("review-run context: %w", err)
 	}
 
+	sessionState := state.sessionState
+	budget := multiAgentBudgetFromState(state)
+	recorder := newMultiAgentRunRecorder(
+		state.sessionStore,
+		&sessionState,
+		session.MultiAgentRunKindReview,
+		reviewContext.Content,
+		state.selectedModel,
+		state.fallbackModels,
+		budget,
+		state.registry.ContextWindow,
+		nil,
+	)
+
+	if startErr := recorder.start(); startErr != nil {
+		return startErr
+	}
+
 	completer := &reviewCompleter{
 		registry:          state.registry,
 		agents:            state.agentRegistry,
+		recorder:          recorder,
 		hookRunner:        state.hookRunner,
 		contextOptions:    state.contextOptions,
 		selectedModel:     state.selectedModel,
@@ -432,7 +487,20 @@ func runReviewExecution(ctx context.Context, state appState, input reviewRunComm
 
 	fmt.Fprintln(os.Stderr, "review: running three-round pipeline with "+strings.Join(reviewerNames, ", ")+"...")
 
-	result, err := review.RunWithLLM(ctx, plan, completer, reviewContext.Content)
+	runCtx, cancelRun := contextWithMultiAgentRunBudget(ctx, budget)
+	defer cancelRun()
+
+	result, err := review.RunWithLLM(runCtx, plan, completer, reviewContext.Content)
+
+	err = multiAgentRunErrorForBudgetContext(ctx, runCtx, err, budget, recorder.run.StartedAt)
+	if recordErr := recorder.recordReviewSession(result.Session); recordErr != nil {
+		return multiAgentPersistenceError(err, recordErr)
+	}
+
+	if finishErr := recorder.finish(err); finishErr != nil {
+		return multiAgentPersistenceError(err, finishErr)
+	}
+
 	if err != nil {
 		if len(result.Session.Reports) > 0 || result.Session.Verdict.Reviewer != "" {
 			fmt.Print(formatReviewRunResult(result))

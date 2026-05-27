@@ -451,6 +451,9 @@ func ValidateVerdict(verdict Verdict, requiredGateChecks []string) error {
 }
 
 func runProposals(ctx context.Context, agents []string, propose ProposalRunner) ([]Proposal, error) {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	proposals := make([]Proposal, len(agents))
 	errs := make([]error, len(agents))
 
@@ -461,9 +464,12 @@ func runProposals(ctx context.Context, agents []string, propose ProposalRunner) 
 		go func(i int, agent string) {
 			defer wg.Done()
 
-			content, err := propose(ctx, agent)
+			content, err := propose(runCtx, agent)
 			if err != nil {
 				errs[i] = fmt.Errorf("proposal %q: %w", agent, err)
+
+				cancel()
+
 				return
 			}
 
@@ -486,6 +492,9 @@ func runReviews(ctx context.Context, proposals []Proposal, review ReviewRunner) 
 		return nil, err
 	}
 
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	proposalByAgent := make(map[string]Proposal, len(proposals))
 	for _, proposal := range proposals {
 		proposalByAgent[proposal.Agent] = proposal
@@ -503,9 +512,12 @@ func runReviews(ctx context.Context, proposals []Proposal, review ReviewRunner) 
 
 			targetProposal := proposalByAgent[assignment.TargetAgent]
 
-			notes, err := review(ctx, assignment, targetProposal)
+			notes, err := review(runCtx, assignment, targetProposal)
 			if err != nil {
 				errs[i] = fmt.Errorf("review %q -> %q: %w", assignment.Reviewer, assignment.TargetAgent, err)
+
+				cancel()
+
 				return
 			}
 
@@ -548,12 +560,22 @@ func validateRunnablePlan(plan Plan) error {
 
 func firstError(errs []error) error {
 	for _, err := range errs {
+		if err != nil && !isContextCancellation(err) {
+			return err
+		}
+	}
+
+	for _, err := range errs {
 		if err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func isContextCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func normalizeBranchPrompts(branches []BranchPrompt) ([]BranchPrompt, error) {
@@ -648,8 +670,8 @@ type LLMCompleter interface {
 // concurrently, then cross-reviews run concurrently, and finally an aggregator
 // agent produces the verdict.
 //
-// The task parameter is the user's original prompt. The systemPrefix is
-// prepended to every LLM call's system prompt for consistent framing.
+// The task parameter is the user's original prompt and is included in every
+// proposal, cross-review, and aggregate-verdict prompt for replayable context.
 func RunWithLLM(ctx context.Context, plan Plan, completer LLMCompleter, task string) (Result, error) {
 	if completer == nil {
 		return Result{}, errors.New("LLM completer is required")
@@ -739,10 +761,12 @@ func llmAggregator(completer LLMCompleter, plan Plan, task string) func(ctx cont
 // parseVerdictFromLLM extracts a Verdict from free-form LLM output.
 // It looks for WINNER:, REASON:, and GATE lines. Missing gate lines are left
 // absent so validation fails closed instead of inventing safety evidence.
-func parseVerdictFromLLM(content string, requiredGates, agents []string) Verdict {
-	// Required gates are validated after parsing. Keep this parser evidence-only:
-	// never synthesize missing gate checks from this list.
+func parseVerdictFromLLM(content string, requiredGates []string, agents ...[]string) Verdict {
+	// Required gates and participating agents are validated after parsing. Keep
+	// this parser evidence-only: never synthesize missing gate checks or rewrite
+	// an invalid winner from these lists.
 	_ = requiredGates
+	_ = agents
 
 	verdict := Verdict{}
 
@@ -767,10 +791,6 @@ func parseVerdictFromLLM(content string, requiredGates, agents []string) Verdict
 
 	if verdict.Reason == "" && content != "" {
 		verdict.Reason = content
-	}
-
-	if len(agents) > 0 && validateWinnerIsAgent(verdict.Winner, agents) != nil {
-		verdict.Winner = "unknown"
 	}
 
 	return verdict

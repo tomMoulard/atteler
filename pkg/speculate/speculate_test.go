@@ -455,6 +455,120 @@ func TestRun_ReturnsPartialSessionWhenProposalFails(t *testing.T) {
 	}
 }
 
+func TestRun_RejectsVerdictWinnerOutsidePlanAgents(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]string{"planner", "executor"}, []string{"tests"})
+	require.NoError(t, err)
+
+	result, err := Run(t.Context(), plan, Runner{
+		Propose: func(_ context.Context, agent string) (string, error) {
+			return "proposal from " + agent, nil
+		},
+		Review: func(_ context.Context, _ Review, _ Proposal) (string, error) {
+			return "review notes", nil
+		},
+		Aggregate: func(context.Context, Session) (Verdict, error) {
+			return Verdict{
+				Winner: "ghost",
+				Reason: "not a recorded branch",
+				GateChecks: []GateCheck{{
+					Name:   "tests",
+					Passed: true,
+					Notes:  "claimed",
+				}},
+			}, nil
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not one of the participating agents")
+	assert.Empty(t, result.Winner)
+	assert.Equal(t, "ghost", result.Session.Verdict.Winner)
+	assert.Equal(t, "not a recorded branch", result.Session.Verdict.Reason)
+	require.Len(t, result.Session.Verdict.GateChecks, 1)
+	assert.True(t, result.Session.Verdict.GateChecks[0].Passed)
+}
+
+func TestRun_CancelsSiblingProposalOnFailure(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]string{"fastfail", "waiter"}, []string{"tests"})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	waiterStarted := make(chan struct{})
+
+	var siblingCanceled atomic.Bool
+
+	result, err := Run(ctx, plan, Runner{
+		Propose: func(ctx context.Context, agent string) (string, error) {
+			if agent == "waiter" {
+				close(waiterStarted)
+				<-ctx.Done()
+				siblingCanceled.Store(true)
+
+				return "", ctx.Err()
+			}
+
+			<-waiterStarted
+
+			return "", errors.New("boom")
+		},
+		Review: func(context.Context, Review, Proposal) (string, error) {
+			return "", errors.New("review should not run after proposal failure")
+		},
+		Aggregate: func(context.Context, Session) (Verdict, error) {
+			return Verdict{}, errors.New("aggregate should not run after proposal failure")
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `proposal "fastfail": boom`)
+	assert.True(t, siblingCanceled.Load())
+	assert.Empty(t, result.Session.Reviews)
+}
+
+func TestRun_CancelsSiblingReviewOnFailure(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]string{"fastfail", "waiter"}, []string{"tests"})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	waiterStarted := make(chan struct{})
+
+	var siblingCanceled atomic.Bool
+
+	result, err := Run(ctx, plan, Runner{
+		Propose: func(_ context.Context, agent string) (string, error) {
+			return "proposal from " + agent, nil
+		},
+		Review: func(ctx context.Context, assignment Review, _ Proposal) (string, error) {
+			if assignment.Reviewer == "waiter" {
+				close(waiterStarted)
+				<-ctx.Done()
+				siblingCanceled.Store(true)
+
+				return "", ctx.Err()
+			}
+
+			<-waiterStarted
+
+			return "", errors.New("boom")
+		},
+		Aggregate: func(context.Context, Session) (Verdict, error) {
+			return Verdict{}, errors.New("aggregate should not run after review failure")
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `review "fastfail" -> "waiter": boom`)
+	assert.True(t, siblingCanceled.Load())
+	assert.Empty(t, result.Winner)
+}
+
 func TestRun_StopsBeforeStartingWhenContextCanceled(t *testing.T) {
 	t.Parallel()
 
@@ -641,7 +755,7 @@ func TestRunWithLLM_FullPipeline(t *testing.T) {
 	plan, err := NewPlan([]string{"planner", "executor"}, []string{"tests pass", "lint pass"})
 	require.NoError(t, err)
 
-	result, err := RunWithLLM(context.Background(), plan, completer, "refactor auth")
+	result, err := RunWithLLM(t.Context(), plan, completer, "refactor auth")
 	require.NoError(t, err)
 	assert.Equal(t, "planner", result.Winner)
 	assert.Contains(t, result.Reason, "incremental")
@@ -760,6 +874,33 @@ func TestRunWithLLM_FailsClosedOnInvalidJudgeGates(t *testing.T) {
 			assert.NotEmpty(t, result.Session.Verdict.Winner)
 		})
 	}
+
+}
+
+func TestRunWithLLM_ReturnsParsedVerdictWhenWinnerIsInvalid(t *testing.T) {
+	t.Parallel()
+
+	completer := &mockCompleter{
+		responses: map[string]string{
+			"planner":  "plan: refactor the auth module",
+			"executor": "plan: rewrite the auth module",
+			"judge": "WINNER: ghost\n" +
+				"REASON: unsupported candidate\n" +
+				"GATE tests pass: PASS claimed",
+		},
+	}
+
+	plan, err := NewPlan([]string{"planner", "executor"}, []string{"tests pass"})
+	require.NoError(t, err)
+
+	result, err := RunWithLLM(t.Context(), plan, completer, "refactor auth")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not one of the participating agents")
+	assert.Equal(t, "ghost", result.Session.Verdict.Winner)
+	assert.Equal(t, "unsupported candidate", result.Session.Verdict.Reason)
+	require.Len(t, result.Session.Verdict.GateChecks, 1)
+	assert.Equal(t, "tests pass", result.Session.Verdict.GateChecks[0].Name)
+	assert.True(t, result.Session.Verdict.GateChecks[0].Passed)
 }
 
 func TestRunWithLLM_NilCompleter(t *testing.T) {
@@ -768,7 +909,7 @@ func TestRunWithLLM_NilCompleter(t *testing.T) {
 	plan, err := NewPlan([]string{"a"}, nil)
 	require.NoError(t, err)
 
-	_, err = RunWithLLM(context.Background(), plan, nil, "task")
+	_, err = RunWithLLM(t.Context(), plan, nil, "task")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "completer")
 }
@@ -779,7 +920,7 @@ func TestRunWithLLM_EmptyTask(t *testing.T) {
 	plan, err := NewPlan([]string{"a"}, nil)
 	require.NoError(t, err)
 
-	_, err = RunWithLLM(context.Background(), plan, &mockCompleter{}, "  ")
+	_, err = RunWithLLM(t.Context(), plan, &mockCompleter{}, "  ")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "task prompt")
 }
@@ -788,7 +929,7 @@ func TestParseVerdictFromLLM_StructuredOutput(t *testing.T) {
 	t.Parallel()
 
 	content := "WINNER: architect\nREASON: best coverage\nGATE tests: PASS all green\nGATE lint: FAIL missing import"
-	verdict := parseVerdictFromLLM(content, []string{"tests", "lint"}, []string{"architect", "reviewer"})
+	verdict := parseVerdictFromLLM(content, []string{"tests", "lint"})
 
 	assert.Equal(t, "architect", verdict.Winner)
 	assert.Equal(t, "best coverage", verdict.Reason)
@@ -803,7 +944,7 @@ func TestParseVerdictFromLLM_FallbackWhenUnstructured(t *testing.T) {
 	t.Parallel()
 
 	content := "I think the architect proposal is better overall."
-	verdict := parseVerdictFromLLM(content, []string{"tests"}, nil)
+	verdict := parseVerdictFromLLM(content, []string{"tests"})
 
 	assert.Equal(t, "unknown", verdict.Winner)
 	assert.Equal(t, content, verdict.Reason)

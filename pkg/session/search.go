@@ -36,6 +36,8 @@ const (
 	SearchFieldFailures SearchField = "failures"
 	// SearchFieldArtifacts matches recorded artifact metadata.
 	SearchFieldArtifacts SearchField = "artifacts"
+	// SearchFieldMultiAgent matches durable review/speculation run receipts.
+	SearchFieldMultiAgent SearchField = "multi_agent_runs"
 	// SearchFieldAgent matches agent metadata and per-record source agents.
 	SearchFieldAgent SearchField = "agent"
 	// SearchFieldModel matches model metadata.
@@ -637,6 +639,8 @@ func searchFieldWeight(field SearchField) float64 {
 		return 5
 	case SearchFieldEvaluations:
 		return 5
+	case SearchFieldMultiAgent:
+		return 6
 	case SearchFieldArtifacts:
 		return 4
 	case SearchFieldAgent, SearchFieldModel, SearchFieldRepo, SearchFieldSession:
@@ -696,6 +700,7 @@ func snippetKindIndex(label string) (kind string, index int) {
 		{prefix: "negative_knowledge[", kind: "negative_knowledge"},
 		{prefix: "evaluations[", kind: "evaluation"},
 		{prefix: "artifacts[", kind: "artifact"},
+		{prefix: "multi_agent_runs[", kind: "multi_agent_run"},
 	} {
 		if strings.HasPrefix(label, candidate.prefix) {
 			return candidate.kind, parseOneBasedLabelIndex(label, len(candidate.prefix))

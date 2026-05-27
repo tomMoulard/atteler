@@ -6,10 +6,15 @@ type sessionReadCommandInput struct {
 	SummarySessionRef string
 	ExportRef         string
 	ExportFormat      string
+	ShowRunRef        string
+	ExportRunRef      string
+	ReplayRunRef      string
+	ResumeRunRef      string
 	ListArtifacts     bool
 	ListEvaluations   bool
 	ListFailures      bool
 	ListMessages      bool
+	ListRuns          bool
 }
 
 func sessionReadCommandInputFromOptions(opts cliOptions) sessionReadCommandInput {
@@ -19,10 +24,15 @@ func sessionReadCommandInputFromOptions(opts cliOptions) sessionReadCommandInput
 		SummarySessionRef: opts.summarySessionRef,
 		ExportRef:         opts.exportRef,
 		ExportFormat:      opts.exportFormat,
+		ShowRunRef:        opts.showRunRef,
+		ExportRunRef:      opts.exportRunRef,
+		ReplayRunRef:      opts.replayRunRef,
+		ResumeRunRef:      opts.resumeRunRef,
 		ListArtifacts:     opts.listArtifacts,
 		ListEvaluations:   opts.listEvaluations,
 		ListFailures:      opts.listFailures,
 		ListMessages:      opts.listMessages,
+		ListRuns:          opts.listRuns,
 	}
 }
 

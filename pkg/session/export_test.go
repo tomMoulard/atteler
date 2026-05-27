@@ -181,6 +181,312 @@ func TestMarkdown_RendersEvaluationsAndArtifacts(t *testing.T) {
 	}
 }
 
+func TestMarkdownAndJSON_ExportMultiAgentRunArtifacts(t *testing.T) {
+	t.Parallel()
+
+	secret := credentialLike("multirun")
+	session := Session{
+		ID: "abc",
+		MultiAgentRuns: []MultiAgentRun{{
+			ID:        "run-1",
+			ReceiptID: "receipt-1",
+			Kind:      MultiAgentRunKindSpeculation,
+			Status:    MultiAgentRunStatusBudgetExhausted,
+			Prompt:    "review key=" + secret,
+			Model:     "gpt-test",
+			StartedAt: time.Date(2026, 4, 30, 14, 10, 0, 0, time.UTC),
+			Budget: MultiAgentRunBudget{
+				PerCallMaxInputTokens:  1000,
+				PerCallMaxOutputTokens: 500,
+				MaxRunTotalTokens:      2000,
+				MaxRunCostMicros:       900,
+				MaxRunWallTimeMS:       30_000,
+			},
+			Usage: MultiAgentRunUsage{
+				ModelCalls:            1,
+				CompletedCalls:        1,
+				BudgetRejectedCalls:   1,
+				EstimatedInputTokens:  42,
+				EstimatedOutputTokens: 11,
+				EstimatedTotalTokens:  53,
+				EstimatedCostMicros:   700,
+				InputTokens:           42,
+				CachedInputTokens:     4,
+				OutputTokens:          11,
+				TotalTokens:           53,
+				DurationMS:            125,
+			},
+			Branches: []MultiAgentRunBranch{{
+				Name:                 "planner",
+				Role:                 "proposal",
+				Provenance:           "provider-call:call-001",
+				Model:                "gpt-test",
+				PromptHash:           "sha256:abc123",
+				Status:               MultiAgentRunStatusBudgetExhausted,
+				InputTokenEstimate:   42,
+				OutputTokenEstimate:  11,
+				ContextWindow:        4096,
+				MaxOutputTokens:      100,
+				InputTokens:          42,
+				CachedInputTokens:    4,
+				OutputTokens:         11,
+				TotalTokens:          53,
+				EstimatedCostMicros:  700,
+				DurationMS:           100,
+				BudgetRejectionRule:  "budget.max_run_total_tokens",
+				BudgetRejectionUsage: 2100,
+				BudgetRejectionLimit: 2000,
+			}},
+			Reviewers: []MultiAgentRunReviewer{{
+				Name:        "critic",
+				Role:        "cross-review",
+				TargetAgent: "planner",
+				Model:       "gpt-test",
+				PromptHash:  "sha256:def456",
+				CallID:      "call-002",
+			}},
+			Calls: []MultiAgentRunCall{{
+				ID:                   "call-001",
+				Phase:                "proposal",
+				Agent:                "planner",
+				Status:               MultiAgentRunStatusBudgetExhausted,
+				RequestedModel:       "gpt-test",
+				ResponseModel:        "backup-test",
+				FallbackModels:       []string{"backup-test"},
+				PromptHash:           "sha256:abc123",
+				SystemPrompt:         "system prompt",
+				UserPrompt:           "user prompt key=" + secret,
+				Response:             "proposal body",
+				InputTokenEstimate:   42,
+				ContextWindow:        4096,
+				MaxOutputTokens:      100,
+				InputTokens:          42,
+				CachedInputTokens:    4,
+				OutputTokens:         11,
+				TotalTokens:          53,
+				EstimatedCostMicros:  700,
+				DurationMS:           100,
+				BudgetRejectionRule:  "budget.max_run_total_tokens",
+				BudgetRejectionUsage: 2100,
+				BudgetRejectionLimit: 2000,
+			}},
+			Artifacts: []MultiAgentRunArtifact{{
+				Kind:    "proposal",
+				Phase:   "proposal",
+				Agent:   "planner",
+				Content: "proposal body key=" + secret,
+				Index:   1,
+				Metadata: map[string]string{
+					"call_id":               "call-001",
+					"raw_provider_response": "true",
+				},
+			}},
+			Gates: []MultiAgentRunGate{{
+				Name:   "tests pass",
+				Phase:  "aggregate-verdict",
+				Agent:  "planner",
+				Passed: false,
+				Notes:  "tests not run",
+			}},
+			Decisions: []MultiAgentRunDecision{{
+				Kind:      "proposal",
+				Phase:     "proposal",
+				Agent:     "planner",
+				Outcome:   "accepted",
+				Rationale: "best evidence key=" + secret,
+				Index:     1,
+			}},
+			Disagreements: []MultiAgentRunDisagreement{{
+				Phase:       "cross-review",
+				Reviewer:    "critic",
+				TargetAgent: "planner",
+				Subject:     "cross-review",
+				Notes:       "needs tests key=" + secret,
+				Index:       1,
+			}},
+			Summary:            MultiAgentRunSummary{Winner: "planner", Reason: "best evidence"},
+			CancellationReason: "canceled by operator key=" + secret,
+			ResumeReason:       "continue from partial receipt key=" + secret,
+			Error:              "gate failed key=" + secret,
+		}},
+	}
+
+	options := shareableTestOptions()
+	markdown := MarkdownWithOptions(session, options)
+	data, err := JSONWithOptions(session, options)
+	require.NoError(t, err)
+
+	var decoded MachineReadableExport
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Len(t, decoded.MultiAgentRuns, 1)
+	assert.Equal(t, 1, decoded.Session.MultiAgentRunCount)
+	assert.Equal(t, "run-1", decoded.MultiAgentRuns[0].ID)
+	assert.Equal(t, "receipt-1", decoded.MultiAgentRuns[0].ReceiptID)
+	assert.Equal(t, MultiAgentRunStatusBudgetExhausted, decoded.MultiAgentRuns[0].Status)
+	assert.Equal(t, int64(900), decoded.MultiAgentRuns[0].Budget.MaxRunCostMicros)
+	assert.Equal(t, int64(30_000), decoded.MultiAgentRuns[0].Budget.MaxRunWallTimeMS)
+	assert.Equal(t, int64(700), decoded.MultiAgentRuns[0].Usage.EstimatedCostMicros)
+	assert.Equal(t, int64(125), decoded.MultiAgentRuns[0].Usage.DurationMS)
+	assert.Equal(t, 4, decoded.MultiAgentRuns[0].Usage.CachedInputTokens)
+	assert.Equal(t, 1, decoded.MultiAgentRuns[0].Usage.BudgetRejectedCalls)
+	assert.Equal(t, 42, decoded.MultiAgentRuns[0].Branches[0].InputTokenEstimate)
+	assert.Equal(t, 11, decoded.MultiAgentRuns[0].Branches[0].OutputTokenEstimate)
+	assert.Equal(t, 4096, decoded.MultiAgentRuns[0].Branches[0].ContextWindow)
+	assert.Equal(t, 100, decoded.MultiAgentRuns[0].Branches[0].MaxOutputTokens)
+	assert.Equal(t, 4, decoded.MultiAgentRuns[0].Branches[0].CachedInputTokens)
+	assert.Equal(t, "budget.max_run_total_tokens", decoded.MultiAgentRuns[0].Branches[0].BudgetRejectionRule)
+	assert.Equal(t, 2100, decoded.MultiAgentRuns[0].Branches[0].BudgetRejectionUsage)
+	assert.Equal(t, 2000, decoded.MultiAgentRuns[0].Branches[0].BudgetRejectionLimit)
+	require.Len(t, decoded.MultiAgentRuns[0].Reviewers, 1)
+	assert.Equal(t, "critic", decoded.MultiAgentRuns[0].Reviewers[0].Name)
+	assert.Equal(t, "sha256:def456", decoded.MultiAgentRuns[0].Reviewers[0].PromptHash)
+	assert.Equal(t, "sha256:abc123", decoded.MultiAgentRuns[0].Calls[0].PromptHash)
+	assert.Equal(t, 100, decoded.MultiAgentRuns[0].Calls[0].MaxOutputTokens)
+	assert.Equal(t, int64(700), decoded.MultiAgentRuns[0].Calls[0].EstimatedCostMicros)
+	assert.Equal(t, int64(100), decoded.MultiAgentRuns[0].Calls[0].DurationMS)
+	assert.Equal(t, 2100, decoded.MultiAgentRuns[0].Calls[0].BudgetRejectionUsage)
+	assert.Equal(t, 2000, decoded.MultiAgentRuns[0].Calls[0].BudgetRejectionLimit)
+	assert.Equal(t, "proposal", decoded.MultiAgentRuns[0].Artifacts[0].Kind)
+	assert.Equal(t, 1, decoded.MultiAgentRuns[0].Artifacts[0].Index)
+	assert.Equal(t, "tests pass", decoded.MultiAgentRuns[0].Gates[0].Name)
+	require.Len(t, decoded.MultiAgentRuns[0].Disagreements, 1)
+	assert.Equal(t, "critic", decoded.MultiAgentRuns[0].Disagreements[0].Reviewer)
+	assert.Equal(t, 1, decoded.MultiAgentRuns[0].Disagreements[0].Index)
+	assert.Contains(t, decoded.MultiAgentRuns[0].Disagreements[0].Notes, "[REDACTED_API_KEY]")
+	assert.Equal(t, "accepted", decoded.MultiAgentRuns[0].Decisions[0].Outcome)
+	assert.Equal(t, 1, decoded.MultiAgentRuns[0].Decisions[0].Index)
+	assert.Empty(t, decoded.MultiAgentRuns[0].Summary.Winner)
+	assert.Empty(t, decoded.MultiAgentRuns[0].Summary.Reason)
+	assert.Contains(t, decoded.Manifest.ContentHashes, "multi_agent_runs")
+	assert.Contains(t, markdown, "## Multi-agent Runs")
+	assert.Contains(t, markdown, "**speculation:** `run-1`")
+	assert.NotContains(t, markdown, "**Winner:** planner")
+	assert.NotContains(t, markdown, "**Reason:** best evidence")
+	assert.Contains(t, markdown, `**Prompt:** review key=\[REDACTED\_API\_KEY\]`)
+	assert.Contains(t, markdown, "**Budget:** per_call_max_input_tokens=1000")
+	assert.Contains(t, markdown, "per_call_max_output_tokens=500")
+	assert.Contains(t, markdown, "max_run_total_tokens=2000")
+	assert.Contains(t, markdown, "max_run_cost_micros=900")
+	assert.Contains(t, markdown, "max_run_wall_time_ms=30000")
+	assert.Contains(t, markdown, "**Cancellation reason:**")
+	assert.Contains(t, markdown, "**Resume reason:**")
+	assert.Contains(t, markdown, "budget_rejected_calls=1")
+	assert.Contains(t, markdown, "input_estimate=42")
+	assert.Contains(t, markdown, "output_estimate=11")
+	assert.Contains(t, markdown, "context_window=4096")
+	assert.Contains(t, markdown, "max_output_tokens=100")
+	assert.Contains(t, markdown, "cached_input_tokens=4")
+	assert.Contains(t, markdown, "estimated_total_tokens=53")
+	assert.Contains(t, markdown, "estimated_cost_micros=700")
+	assert.Contains(t, markdown, "total_tokens=53")
+	assert.Contains(t, markdown, "provenance=provider-call:call-001")
+	assert.Contains(t, markdown, "prompt_hash=sha256:abc123")
+	assert.Contains(t, markdown, "budget_rejection=budget.max\\_run\\_total\\_tokens used=2100 limit=2000")
+	assert.Contains(t, markdown, "**Reviewers:**")
+	assert.Contains(t, markdown, "critic role=cross-review target=planner model=gpt-test prompt_hash=sha256:def456 call=call-002")
+	assert.Contains(t, markdown, "**Disagreements:**")
+	assert.Contains(t, markdown, "reviewer=critic target=planner subject=cross-review")
+	assert.Contains(t, markdown, "subject=cross-review index=1")
+	assert.Contains(t, markdown, "**Decisions:**")
+	assert.Contains(t, markdown, "proposal accepted phase=proposal agent=planner index=1")
+	assert.Contains(t, markdown, "model=backup-test")
+	assert.Contains(t, markdown, "requested_model=gpt-test")
+	assert.Contains(t, markdown, "response_model=backup-test")
+	assert.Contains(t, markdown, "fallback_models=backup-test")
+	assert.Contains(t, markdown, "max_output_tokens=100")
+	assert.Contains(t, markdown, "context_window=4096")
+	assert.Contains(t, markdown, "input_tokens=42 cached_input_tokens=4 output_tokens=11 total_tokens=53")
+	assert.Contains(t, markdown, "duration_ms=100")
+	assert.Contains(t, markdown, "budget_rejection=budget.max\\_run\\_total\\_tokens used=2100 limit=2000")
+	assert.Contains(t, markdown, "system_prompt=system prompt")
+	assert.Contains(t, markdown, "response=proposal body")
+	assert.Contains(t, markdown, "proposal phase=proposal agent=planner target= index=1")
+	assert.Contains(t, markdown, "metadata.call\\_id=call-001")
+	assert.Contains(t, markdown, "metadata.raw\\_provider\\_response=true")
+	assert.NotContains(t, string(data), secret)
+	assert.NotContains(t, markdown, secret)
+}
+
+func TestMarkdownAndJSON_ExportMultiAgentRunSummaryRequiresAcceptedOutput(t *testing.T) {
+	t.Parallel()
+
+	session := Session{
+		ID: "abc",
+		MultiAgentRuns: []MultiAgentRun{
+			{
+				ID:      "run-running",
+				Kind:    MultiAgentRunKindSpeculation,
+				Status:  MultiAgentRunStatusRunning,
+				Summary: MultiAgentRunSummary{Winner: "stale", Reason: "not terminal"},
+				Artifacts: []MultiAgentRunArtifact{{
+					Kind:    "verdict",
+					Phase:   "aggregate-verdict",
+					Agent:   "judge",
+					Content: "winner: stale",
+					Index:   1,
+				}},
+				Decisions: []MultiAgentRunDecision{{
+					Kind:    "verdict",
+					Phase:   "aggregate-verdict",
+					Agent:   "judge",
+					Outcome: "accepted",
+					Index:   1,
+				}},
+			},
+			{
+				ID:      "run-missing-artifact",
+				Kind:    MultiAgentRunKindReview,
+				Status:  MultiAgentRunStatusCompleted,
+				Summary: MultiAgentRunSummary{VerdictReviewer: "missing-artifact", Findings: 2},
+				Decisions: []MultiAgentRunDecision{{
+					Kind:    "verdict",
+					Outcome: "accepted",
+				}},
+			},
+			{
+				ID:     "run-final",
+				Kind:   MultiAgentRunKindSpeculation,
+				Status: MultiAgentRunStatusCompleted,
+				Summary: MultiAgentRunSummary{
+					Winner: "final",
+					Reason: "accepted aggregate evidence",
+				},
+				Artifacts: []MultiAgentRunArtifact{{
+					Kind:    "verdict",
+					Phase:   "aggregate-verdict",
+					Agent:   "judge",
+					Content: "winner: final\nreason: accepted aggregate evidence",
+					Index:   1,
+				}},
+				Decisions: []MultiAgentRunDecision{{
+					Kind:      "verdict",
+					Phase:     "aggregate-verdict",
+					Agent:     "judge",
+					Outcome:   "accepted",
+					Rationale: "accepted aggregate evidence",
+					Index:     1,
+				}},
+			},
+		},
+	}
+
+	options := shareableTestOptions()
+	export := BuildMachineReadableExport(session, options)
+	require.Len(t, export.MultiAgentRuns, 3)
+	assert.Empty(t, export.MultiAgentRuns[0].Summary.Winner)
+	assert.Empty(t, export.MultiAgentRuns[0].Summary.Reason)
+	assert.Empty(t, export.MultiAgentRuns[1].Summary.VerdictReviewer)
+	assert.Zero(t, export.MultiAgentRuns[1].Summary.Findings)
+	assert.Equal(t, "final", export.MultiAgentRuns[2].Summary.Winner)
+	assert.Equal(t, "accepted aggregate evidence", export.MultiAgentRuns[2].Summary.Reason)
+
+	markdown := MarkdownWithOptions(session, options)
+	assert.NotContains(t, markdown, "**Winner:** stale")
+	assert.NotContains(t, markdown, "**Verdict reviewer:** missing-artifact")
+	assert.Contains(t, markdown, "**Winner:** final")
+	assert.Contains(t, markdown, "**Reason:** accepted aggregate evidence")
+}
+
 func TestMarkdown_DefaultShareableRedactsSecretsAndAbsolutePaths(t *testing.T) {
 	t.Parallel()
 
@@ -623,6 +929,80 @@ func TestIssueMarkdown_OmitsTranscriptBodies(t *testing.T) {
 	assert.Contains(t, got, "- **Messages:** 1 total, 0 exported")
 	assert.NotContains(t, got, "private prompt body")
 	assert.NotContains(t, got, "## Transcript")
+}
+
+func TestIssueExport_OmitsMultiAgentRunBodies(t *testing.T) {
+	t.Parallel()
+
+	session := Session{
+		ID: "abc",
+		MultiAgentRuns: []MultiAgentRun{{
+			ID:     "run-1",
+			Kind:   MultiAgentRunKindSpeculation,
+			Status: MultiAgentRunStatusBudgetExhausted,
+			Prompt: "private run prompt",
+			Calls: []MultiAgentRunCall{{
+				ID:           "call-001",
+				Phase:        "proposal",
+				Agent:        "planner",
+				Status:       MultiAgentRunStatusCompleted,
+				PromptHash:   "sha256:abc",
+				SystemPrompt: "private system prompt",
+				UserPrompt:   "private user prompt",
+				Response:     "private provider response",
+			}},
+			Artifacts: []MultiAgentRunArtifact{{
+				Kind:    "proposal",
+				Phase:   "proposal",
+				Agent:   "planner",
+				Content: "private proposal artifact",
+			}},
+			Disagreements: []MultiAgentRunDisagreement{{
+				Phase:       "cross-review",
+				Reviewer:    "critic",
+				TargetAgent: "planner",
+				Subject:     "cross-review",
+				Notes:       "private disagreement note",
+			}},
+		}},
+	}
+	options := ExportOptions{Profile: ExportProfileIssue, ExportedAt: fixedExportedAt}
+
+	markdown := MarkdownWithOptions(session, options)
+	data, err := JSONWithOptions(session, options)
+	require.NoError(t, err)
+
+	var decoded MachineReadableExport
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Len(t, decoded.MultiAgentRuns, 1)
+	require.Len(t, decoded.MultiAgentRuns[0].Calls, 1)
+	require.Len(t, decoded.MultiAgentRuns[0].Artifacts, 1)
+	require.Len(t, decoded.MultiAgentRuns[0].Disagreements, 1)
+	assert.Empty(t, decoded.MultiAgentRuns[0].Prompt)
+	assert.Empty(t, decoded.MultiAgentRuns[0].Calls[0].SystemPrompt)
+	assert.Empty(t, decoded.MultiAgentRuns[0].Calls[0].UserPrompt)
+	assert.Empty(t, decoded.MultiAgentRuns[0].Calls[0].Response)
+	assert.Empty(t, decoded.MultiAgentRuns[0].Artifacts[0].Content)
+	assert.Empty(t, decoded.MultiAgentRuns[0].Disagreements[0].Notes)
+	assert.Equal(t, "sha256:abc", decoded.MultiAgentRuns[0].Calls[0].PromptHash)
+	assert.Equal(t, "critic", decoded.MultiAgentRuns[0].Disagreements[0].Reviewer)
+
+	for _, privateText := range []string{
+		"private run prompt",
+		"private system prompt",
+		"private user prompt",
+		"private provider response",
+		"private proposal artifact",
+		"private disagreement note",
+	} {
+		assert.NotContains(t, markdown, privateText)
+		assert.NotContains(t, string(data), privateText)
+	}
+
+	assert.Contains(t, markdown, "multi-agent run prompts omitted by issue/PR summary profile")
+	assert.Contains(t, markdown, "multi-agent run provider-call prompts/responses omitted by issue/PR summary profile")
+	assert.Contains(t, markdown, "multi-agent run artifact contents omitted by issue/PR summary profile")
+	assert.Contains(t, markdown, "multi-agent run disagreement notes omitted by issue/PR summary profile")
 }
 
 func TestJSON_MachineReadableExportMatchesMarkdownRedaction(t *testing.T) {

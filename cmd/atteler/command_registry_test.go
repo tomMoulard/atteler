@@ -590,6 +590,22 @@ func TestCommandRegistry_StatefulSessionReadSubcommandAmbiguityFailsHelpfulError
 	assert.Contains(t, err.Error(), "summary-session")
 }
 
+func TestCommandRegistry_StatefulRunReadSubcommandAmbiguityFailsHelpfulError(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{
+		showRunRef:   "latest",
+		exportRunRef: "latest",
+	}
+
+	err := validateCLICommandSelection(opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous CLI command")
+	assert.Contains(t, err.Error(), "session read")
+	assert.Contains(t, err.Error(), "show-run")
+	assert.Contains(t, err.Error(), "export-run")
+}
+
 func TestCommandRegistry_StatefulSessionWriteSubcommandAmbiguityFailsHelpfulError(t *testing.T) {
 	t.Parallel()
 
@@ -1260,6 +1276,36 @@ func TestCommandRegistry_StatefulSessionDispatcherPreservesAliases(t *testing.T)
 			wantName:  "list-evaluations",
 		},
 		{
+			name:      "session runs dispatches to list-runs alias",
+			args:      []string{"session", "runs"},
+			matchRead: true,
+			wantName:  "list-runs",
+		},
+		{
+			name:      "session show-run dispatches to show-run alias",
+			args:      []string{"session", "show-run", "latest"},
+			matchRead: true,
+			wantName:  "show-run",
+		},
+		{
+			name:      "session export-run dispatches to export-run alias",
+			args:      []string{"session", "export-run", "review"},
+			matchRead: true,
+			wantName:  "export-run",
+		},
+		{
+			name:      "session replay-run dispatches to replay-run alias",
+			args:      []string{"session", "replay-run", "speculation"},
+			matchRead: true,
+			wantName:  "replay-run",
+		},
+		{
+			name:      "session resume-run dispatches to resume-run alias",
+			args:      []string{"session", "resume-run", "latest"},
+			matchRead: true,
+			wantName:  "resume-run",
+		},
+		{
 			name:     "session record-failure dispatches to record-failure alias",
 			args:     []string{"session", "record-failure", "bad", "attempt"},
 			wantName: "record-failure",
@@ -1303,10 +1349,15 @@ func TestCommandRegistry_SessionCommandInputsCopyOnlySessionFields(t *testing.T)
 		summarySessionRef:     "summary-id",
 		exportRef:             "export-id",
 		exportFormat:          "json",
+		showRunRef:            "run-show",
+		exportRunRef:          "run-export",
+		replayRunRef:          "run-replay",
+		resumeRunRef:          "run-resume",
 		listArtifacts:         true,
 		listEvaluations:       true,
 		listFailures:          true,
 		listMessages:          true,
+		listRuns:              true,
 		recordFailure:         "bad-approach",
 		failureReason:         "flaky",
 		failureCommit:         "abc123",
@@ -1335,10 +1386,15 @@ func TestCommandRegistry_SessionCommandInputsCopyOnlySessionFields(t *testing.T)
 	assert.Equal(t, "summary-id", readInput.SummarySessionRef)
 	assert.Equal(t, "export-id", readInput.ExportRef)
 	assert.Equal(t, "json", readInput.ExportFormat)
+	assert.Equal(t, "run-show", readInput.ShowRunRef)
+	assert.Equal(t, "run-export", readInput.ExportRunRef)
+	assert.Equal(t, "run-replay", readInput.ReplayRunRef)
+	assert.Equal(t, "run-resume", readInput.ResumeRunRef)
 	assert.True(t, readInput.ListArtifacts)
 	assert.True(t, readInput.ListEvaluations)
 	assert.True(t, readInput.ListFailures)
 	assert.True(t, readInput.ListMessages)
+	assert.True(t, readInput.ListRuns)
 
 	writeInput := sessionWriteCommandInputFromOptions(opts)
 	assert.Equal(t, "bad-approach", writeInput.RecordFailure)

@@ -187,6 +187,9 @@ func RunWithLLM(ctx context.Context, plan Plan, completer LLMCompleter, reviewCo
 }
 
 func runIndependentReports(ctx context.Context, reviewers []Reviewer, review ReportRunner) ([]Report, []RunError, error) {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	reports := make([]Report, len(reviewers))
 	errs := make([]error, len(reviewers))
 	runErrors := make([]RunError, len(reviewers))
@@ -198,7 +201,7 @@ func runIndependentReports(ctx context.Context, reviewers []Reviewer, review Rep
 		go func(i int, reviewer Reviewer) {
 			defer wg.Done()
 
-			report, err := review(ctx, reviewer)
+			report, err := review(runCtx, reviewer)
 			if strings.TrimSpace(report.Reviewer) == "" {
 				report.Reviewer = reviewer.Name
 			}
@@ -213,6 +216,8 @@ func runIndependentReports(ctx context.Context, reviewers []Reviewer, review Rep
 					Reviewer: reviewer.Name,
 					Message:  err.Error(),
 				}
+
+				cancel()
 
 				return
 			}
@@ -234,6 +239,9 @@ func runCrossReviews(
 	reports []Report,
 	crossReview CrossReviewRunner,
 ) ([]CrossReviewNote, []RunError, error) {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	reportByReviewer := make(map[string]Report, len(reports))
 	for _, report := range reports {
 		reportByReviewer[report.Reviewer] = report
@@ -260,10 +268,12 @@ func runCrossReviews(
 					Message:          "missing target report",
 				}
 
+				cancel()
+
 				return
 			}
 
-			content, err := crossReview(ctx, assignment, targetReport)
+			content, err := crossReview(runCtx, assignment, targetReport)
 			if err != nil {
 				errs[i] = fmt.Errorf("review %q -> %q: %w", assignment.Reviewer, assignment.ReviewedReviewer, err)
 				runErrors[i] = RunError{
@@ -272,6 +282,8 @@ func runCrossReviews(
 					ReviewedReviewer: assignment.ReviewedReviewer,
 					Message:          err.Error(),
 				}
+
+				cancel()
 
 				return
 			}
@@ -337,12 +349,22 @@ func validateRunnablePlan(plan Plan) error {
 
 func firstError(errs []error) error {
 	for _, err := range errs {
+		if err != nil && !isContextCancellation(err) {
+			return err
+		}
+	}
+
+	for _, err := range errs {
 		if err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func isContextCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 type llmReviewResponse struct {

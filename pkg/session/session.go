@@ -63,6 +63,7 @@ type Session struct {
 	NegativeKnowledge     []NegativeKnowledge        `json:"negative_knowledge,omitempty" yaml:"negative_knowledge,omitempty"`
 	Evaluations           []AgentEvaluation          `json:"evaluations,omitempty" yaml:"evaluations,omitempty"`
 	Artifacts             []Artifact                 `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
+	MultiAgentRuns        []MultiAgentRun            `json:"multi_agent_runs,omitempty" yaml:"multi_agent_runs,omitempty"`
 	BackgroundSuggestions *BackgroundSuggestionUsage `json:"background_suggestions,omitempty" yaml:"background_suggestions,omitempty"`
 }
 
@@ -165,6 +166,222 @@ type Artifact struct {
 	SizeBytes       int64      `json:"size_bytes,omitempty" yaml:"size_bytes,omitempty"`
 	SourceTurn      int        `json:"source_turn,omitempty" yaml:"source_turn,omitempty"`
 	WorktreeDirty   bool       `json:"worktree_dirty,omitempty" yaml:"worktree_dirty,omitempty"`
+}
+
+// MultiAgentRunStatus is the durable lifecycle state for a review/speculation run.
+type MultiAgentRunStatus string
+
+const (
+	// MultiAgentRunStatusRunning means at least one child call may still be active.
+	MultiAgentRunStatusRunning MultiAgentRunStatus = "running"
+	// MultiAgentRunStatusCompleted means all workflow gates passed.
+	MultiAgentRunStatusCompleted MultiAgentRunStatus = "completed"
+	// MultiAgentRunStatusError means the run ended with a provider, parsing, or validation error.
+	MultiAgentRunStatusError MultiAgentRunStatus = "error"
+	// MultiAgentRunStatusBudgetExhausted means the run stopped because a configured budget was exceeded.
+	MultiAgentRunStatusBudgetExhausted MultiAgentRunStatus = "budget_exhausted"
+	// MultiAgentRunStatusCancelled matches the issue terminal-state spelling.
+	MultiAgentRunStatusCancelled MultiAgentRunStatus = "cancelled" //nolint:misspell // Public receipt schema uses the issue's terminal-state spelling.
+	// MultiAgentRunStatusCanceled is the US-spelling alias.
+	MultiAgentRunStatusCanceled MultiAgentRunStatus = MultiAgentRunStatusCancelled
+	// MultiAgentRunStatusFailed is retained as a compatibility alias for error terminal states.
+	MultiAgentRunStatusFailed MultiAgentRunStatus = MultiAgentRunStatusError
+)
+
+const (
+	// MultiAgentRunKindSpeculation records a speculative execution workflow.
+	MultiAgentRunKindSpeculation = "speculation"
+	// MultiAgentRunKindReview records a review-agent workflow.
+	MultiAgentRunKindReview = "review"
+)
+
+const (
+	multiAgentRunArtifactKindVerdict     = "verdict"
+	multiAgentRunDecisionOutcomeAccepted = "accepted"
+)
+
+// MultiAgentRun captures replayable artifacts for one review/speculation workflow.
+//
+//nolint:govet // Field order follows lifecycle, request, budget, evidence, then result for readable JSON.
+type MultiAgentRun struct {
+	StartedAt          time.Time                   `json:"started_at" yaml:"started_at"`
+	UpdatedAt          time.Time                   `json:"updated_at" yaml:"updated_at"`
+	CompletedAt        *time.Time                  `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
+	ID                 string                      `json:"id" yaml:"id"`
+	ReceiptID          string                      `json:"receipt_id,omitempty" yaml:"receipt_id,omitempty"`
+	Kind               string                      `json:"kind" yaml:"kind"`
+	Status             MultiAgentRunStatus         `json:"status" yaml:"status"`
+	Prompt             string                      `json:"prompt,omitempty" yaml:"prompt,omitempty"`
+	Model              string                      `json:"model,omitempty" yaml:"model,omitempty"`
+	FallbackModels     []string                    `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
+	Budget             MultiAgentRunBudget         `json:"budget,omitzero" yaml:"budget,omitempty"`
+	Usage              MultiAgentRunUsage          `json:"usage,omitzero" yaml:"usage,omitempty"`
+	Calls              []MultiAgentRunCall         `json:"calls,omitempty" yaml:"calls,omitempty"`
+	Branches           []MultiAgentRunBranch       `json:"branches,omitempty" yaml:"branches,omitempty"`
+	Reviewers          []MultiAgentRunReviewer     `json:"reviewers,omitempty" yaml:"reviewers,omitempty"`
+	Artifacts          []MultiAgentRunArtifact     `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
+	Gates              []MultiAgentRunGate         `json:"gates,omitempty" yaml:"gates,omitempty"`
+	Disagreements      []MultiAgentRunDisagreement `json:"disagreements,omitempty" yaml:"disagreements,omitempty"`
+	Decisions          []MultiAgentRunDecision     `json:"decisions,omitempty" yaml:"decisions,omitempty"`
+	Summary            MultiAgentRunSummary        `json:"summary,omitzero" yaml:"summary,omitempty"`
+	CancellationReason string                      `json:"cancellation_reason,omitempty" yaml:"cancellation_reason,omitempty"`
+	ResumeReason       string                      `json:"resume_reason,omitempty" yaml:"resume_reason,omitempty"`
+	Error              string                      `json:"error,omitempty" yaml:"error,omitempty"`
+}
+
+// MultiAgentRunBudget records the limits enforced for one multi-agent run.
+type MultiAgentRunBudget struct {
+	PerCallMaxInputTokens  int   `json:"per_call_max_input_tokens,omitempty" yaml:"per_call_max_input_tokens,omitempty"`
+	PerCallMaxOutputTokens int   `json:"per_call_max_output_tokens,omitempty" yaml:"per_call_max_output_tokens,omitempty"`
+	MaxRunInputTokens      int   `json:"max_run_input_tokens,omitempty" yaml:"max_run_input_tokens,omitempty"`
+	MaxRunOutputTokens     int   `json:"max_run_output_tokens,omitempty" yaml:"max_run_output_tokens,omitempty"`
+	MaxRunTotalTokens      int   `json:"max_run_total_tokens,omitempty" yaml:"max_run_total_tokens,omitempty"`
+	MaxModelCalls          int   `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
+	MaxRunCostMicros       int64 `json:"max_run_cost_micros,omitempty" yaml:"max_run_cost_micros,omitempty"`
+	MaxRunWallTimeMS       int64 `json:"max_run_wall_time_ms,omitempty" yaml:"max_run_wall_time_ms,omitempty"`
+}
+
+// MultiAgentRunUsage records estimated and observed usage for audit and budget replay.
+type MultiAgentRunUsage struct {
+	ModelCalls            int   `json:"model_calls,omitempty" yaml:"model_calls,omitempty"`
+	EstimatedInputTokens  int   `json:"estimated_input_tokens,omitempty" yaml:"estimated_input_tokens,omitempty"`
+	EstimatedOutputTokens int   `json:"estimated_output_tokens,omitempty" yaml:"estimated_output_tokens,omitempty"`
+	EstimatedCostMicros   int64 `json:"estimated_cost_micros,omitempty" yaml:"estimated_cost_micros,omitempty"`
+	InputTokens           int   `json:"input_tokens,omitempty" yaml:"input_tokens,omitempty"`
+	CachedInputTokens     int   `json:"cached_input_tokens,omitempty" yaml:"cached_input_tokens,omitempty"`
+	OutputTokens          int   `json:"output_tokens,omitempty" yaml:"output_tokens,omitempty"`
+	TotalTokens           int   `json:"total_tokens,omitempty" yaml:"total_tokens,omitempty"`
+	EstimatedTotalTokens  int   `json:"estimated_total_tokens,omitempty" yaml:"estimated_total_tokens,omitempty"`
+	DurationMS            int64 `json:"duration_ms,omitempty" yaml:"duration_ms,omitempty"`
+	BudgetRejectedCalls   int   `json:"budget_rejected_calls,omitempty" yaml:"budget_rejected_calls,omitempty"`
+	ProviderFailedCalls   int   `json:"provider_failed_calls,omitempty" yaml:"provider_failed_calls,omitempty"`
+	CanceledCalls         int   `json:"canceled_calls,omitempty" yaml:"canceled_calls,omitempty"`
+	CompletedCalls        int   `json:"completed_calls,omitempty" yaml:"completed_calls,omitempty"`
+}
+
+// MultiAgentRunCall records one provider call or preflight budget rejection.
+//
+//nolint:govet // Prompt and response fields are intentionally grouped for audit readability.
+type MultiAgentRunCall struct {
+	StartedAt            time.Time           `json:"started_at" yaml:"started_at"`
+	CompletedAt          *time.Time          `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
+	ID                   string              `json:"id" yaml:"id"`
+	Phase                string              `json:"phase" yaml:"phase"`
+	Agent                string              `json:"agent,omitempty" yaml:"agent,omitempty"`
+	TargetAgent          string              `json:"target_agent,omitempty" yaml:"target_agent,omitempty"`
+	Status               MultiAgentRunStatus `json:"status" yaml:"status"`
+	RequestedModel       string              `json:"requested_model,omitempty" yaml:"requested_model,omitempty"`
+	ResponseModel        string              `json:"response_model,omitempty" yaml:"response_model,omitempty"`
+	FallbackModels       []string            `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
+	PromptHash           string              `json:"prompt_hash,omitempty" yaml:"prompt_hash,omitempty"`
+	SystemPrompt         string              `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
+	UserPrompt           string              `json:"user_prompt,omitempty" yaml:"user_prompt,omitempty"`
+	Response             string              `json:"response,omitempty" yaml:"response,omitempty"`
+	Error                string              `json:"error,omitempty" yaml:"error,omitempty"`
+	InputTokenEstimate   int                 `json:"input_token_estimate,omitempty" yaml:"input_token_estimate,omitempty"`
+	OutputTokenEstimate  int                 `json:"output_token_estimate,omitempty" yaml:"output_token_estimate,omitempty"`
+	ContextWindow        int                 `json:"context_window,omitempty" yaml:"context_window,omitempty"`
+	MaxOutputTokens      int                 `json:"max_output_tokens,omitempty" yaml:"max_output_tokens,omitempty"`
+	InputTokens          int                 `json:"input_tokens,omitempty" yaml:"input_tokens,omitempty"`
+	CachedInputTokens    int                 `json:"cached_input_tokens,omitempty" yaml:"cached_input_tokens,omitempty"`
+	OutputTokens         int                 `json:"output_tokens,omitempty" yaml:"output_tokens,omitempty"`
+	TotalTokens          int                 `json:"total_tokens,omitempty" yaml:"total_tokens,omitempty"`
+	EstimatedCostMicros  int64               `json:"estimated_cost_micros,omitempty" yaml:"estimated_cost_micros,omitempty"`
+	DurationMS           int64               `json:"duration_ms,omitempty" yaml:"duration_ms,omitempty"`
+	BudgetRejectionRule  string              `json:"budget_rejection_rule,omitempty" yaml:"budget_rejection_rule,omitempty"`
+	BudgetRejectionUsage int                 `json:"budget_rejection_usage,omitempty" yaml:"budget_rejection_usage,omitempty"`
+	BudgetRejectionLimit int                 `json:"budget_rejection_limit,omitempty" yaml:"budget_rejection_limit,omitempty"`
+}
+
+// MultiAgentRunBranch records per-branch provenance and budget usage.
+//
+// Branches are derived from candidate-producing provider calls, such as
+// speculation proposals and independent review reports.
+//
+//nolint:govet // Field order mirrors the persisted audit schema for readable JSON/YAML.
+type MultiAgentRunBranch struct {
+	Name                 string              `json:"name" yaml:"name"`
+	Role                 string              `json:"role,omitempty" yaml:"role,omitempty"`
+	Provenance           string              `json:"provenance,omitempty" yaml:"provenance,omitempty"`
+	Model                string              `json:"model,omitempty" yaml:"model,omitempty"`
+	PromptHash           string              `json:"prompt_hash,omitempty" yaml:"prompt_hash,omitempty"`
+	Error                string              `json:"error,omitempty" yaml:"error,omitempty"`
+	Status               MultiAgentRunStatus `json:"status" yaml:"status"`
+	InputTokenEstimate   int                 `json:"input_token_estimate,omitempty" yaml:"input_token_estimate,omitempty"`
+	OutputTokenEstimate  int                 `json:"output_token_estimate,omitempty" yaml:"output_token_estimate,omitempty"`
+	ContextWindow        int                 `json:"context_window,omitempty" yaml:"context_window,omitempty"`
+	MaxOutputTokens      int                 `json:"max_output_tokens,omitempty" yaml:"max_output_tokens,omitempty"`
+	InputTokens          int                 `json:"input_tokens,omitempty" yaml:"input_tokens,omitempty"`
+	CachedInputTokens    int                 `json:"cached_input_tokens,omitempty" yaml:"cached_input_tokens,omitempty"`
+	OutputTokens         int                 `json:"output_tokens,omitempty" yaml:"output_tokens,omitempty"`
+	TotalTokens          int                 `json:"total_tokens,omitempty" yaml:"total_tokens,omitempty"`
+	EstimatedCostMicros  int64               `json:"estimated_cost_micros,omitempty" yaml:"estimated_cost_micros,omitempty"`
+	DurationMS           int64               `json:"duration_ms,omitempty" yaml:"duration_ms,omitempty"`
+	BudgetRejectionRule  string              `json:"budget_rejection_rule,omitempty" yaml:"budget_rejection_rule,omitempty"`
+	BudgetRejectionUsage int                 `json:"budget_rejection_usage,omitempty" yaml:"budget_rejection_usage,omitempty"`
+	BudgetRejectionLimit int                 `json:"budget_rejection_limit,omitempty" yaml:"budget_rejection_limit,omitempty"`
+}
+
+// MultiAgentRunReviewer records one reviewer role invocation with model and prompt provenance.
+type MultiAgentRunReviewer struct {
+	Name        string `json:"name" yaml:"name"`
+	Role        string `json:"role,omitempty" yaml:"role,omitempty"`
+	TargetAgent string `json:"target_agent,omitempty" yaml:"target_agent,omitempty"`
+	Model       string `json:"model,omitempty" yaml:"model,omitempty"`
+	PromptHash  string `json:"prompt_hash,omitempty" yaml:"prompt_hash,omitempty"`
+	CallID      string `json:"call_id,omitempty" yaml:"call_id,omitempty"`
+}
+
+// MultiAgentRunArtifact stores a replayable workflow artifact.
+//
+//nolint:govet // JSON/YAML field order keeps audit metadata grouped for reviewability.
+type MultiAgentRunArtifact struct {
+	CreatedAt   time.Time         `json:"created_at" yaml:"created_at"`
+	Kind        string            `json:"kind" yaml:"kind"`
+	Phase       string            `json:"phase,omitempty" yaml:"phase,omitempty"`
+	Agent       string            `json:"agent,omitempty" yaml:"agent,omitempty"`
+	TargetAgent string            `json:"target_agent,omitempty" yaml:"target_agent,omitempty"`
+	Content     string            `json:"content,omitempty" yaml:"content,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Index       int               `json:"index,omitempty" yaml:"index,omitempty"`
+}
+
+// MultiAgentRunGate records one gate decision tied to a reviewer, agent, or verdict.
+type MultiAgentRunGate struct {
+	Name   string `json:"name" yaml:"name"`
+	Phase  string `json:"phase,omitempty" yaml:"phase,omitempty"`
+	Agent  string `json:"agent,omitempty" yaml:"agent,omitempty"`
+	Notes  string `json:"notes,omitempty" yaml:"notes,omitempty"`
+	Passed bool   `json:"passed" yaml:"passed"`
+}
+
+// MultiAgentRunDisagreement records cross-review challenges or divergent gate decisions.
+type MultiAgentRunDisagreement struct {
+	Phase       string `json:"phase,omitempty" yaml:"phase,omitempty"`
+	Reviewer    string `json:"reviewer,omitempty" yaml:"reviewer,omitempty"`
+	TargetAgent string `json:"target_agent,omitempty" yaml:"target_agent,omitempty"`
+	Subject     string `json:"subject,omitempty" yaml:"subject,omitempty"`
+	Notes       string `json:"notes,omitempty" yaml:"notes,omitempty"`
+	Index       int    `json:"index,omitempty" yaml:"index,omitempty"`
+}
+
+// MultiAgentRunDecision records accepted/rejected workflow outputs and rationale.
+type MultiAgentRunDecision struct {
+	Kind        string `json:"kind" yaml:"kind"`
+	Phase       string `json:"phase,omitempty" yaml:"phase,omitempty"`
+	Agent       string `json:"agent,omitempty" yaml:"agent,omitempty"`
+	TargetAgent string `json:"target_agent,omitempty" yaml:"target_agent,omitempty"`
+	Outcome     string `json:"outcome" yaml:"outcome"`
+	Rationale   string `json:"rationale,omitempty" yaml:"rationale,omitempty"`
+	Index       int    `json:"index,omitempty" yaml:"index,omitempty"`
+}
+
+// MultiAgentRunSummary captures compact replay metadata for list and replay commands.
+type MultiAgentRunSummary struct {
+	Winner          string `json:"winner,omitempty" yaml:"winner,omitempty"`
+	Reason          string `json:"reason,omitempty" yaml:"reason,omitempty"`
+	VerdictReviewer string `json:"verdict_reviewer,omitempty" yaml:"verdict_reviewer,omitempty"`
+	Findings        int    `json:"findings,omitempty" yaml:"findings,omitempty"`
 }
 
 // Store reads and writes sessions under a directory.
@@ -781,6 +998,192 @@ func normalizeArtifactPath(path string) string {
 	}
 
 	return filepath.ToSlash(filepath.Clean(path))
+}
+
+// NewMultiAgentRun creates a new running multi-agent workflow record.
+func NewMultiAgentRun(kind, prompt, model string, fallbackModels []string, budget MultiAgentRunBudget) MultiAgentRun {
+	now := time.Now().UTC()
+	id := newID(now)
+
+	return MultiAgentRun{
+		ID:             id,
+		ReceiptID:      id,
+		Kind:           strings.TrimSpace(kind),
+		Status:         MultiAgentRunStatusRunning,
+		Prompt:         strings.TrimSpace(prompt),
+		Model:          strings.TrimSpace(model),
+		FallbackModels: append([]string(nil), fallbackModels...),
+		Budget:         budget,
+		StartedAt:      now,
+		UpdatedAt:      now,
+	}
+}
+
+// UpsertMultiAgentRun records or replaces a durable multi-agent run by ID.
+func (s *Session) UpsertMultiAgentRun(run MultiAgentRun) bool {
+	run.ID = strings.TrimSpace(run.ID)
+	if run.ID == "" {
+		return false
+	}
+
+	if strings.TrimSpace(run.ReceiptID) == "" {
+		run.ReceiptID = run.ID
+	}
+
+	if run.StartedAt.IsZero() {
+		run.StartedAt = time.Now().UTC()
+	}
+
+	run.UpdatedAt = time.Now().UTC()
+
+	for i := range s.MultiAgentRuns {
+		if s.MultiAgentRuns[i].ID == run.ID {
+			s.MultiAgentRuns[i] = run
+			return true
+		}
+	}
+
+	s.MultiAgentRuns = append(s.MultiAgentRuns, run)
+
+	return true
+}
+
+// FindMultiAgentRun returns a run by ID, or the newest run when ref is "latest".
+func (s *Session) FindMultiAgentRun(ref string) (MultiAgentRun, bool) {
+	if s == nil {
+		return MultiAgentRun{}, false
+	}
+
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return MultiAgentRun{}, false
+	}
+
+	if strings.EqualFold(ref, "latest") {
+		return latestMultiAgentRun(s.MultiAgentRuns, "")
+	}
+
+	if strings.EqualFold(ref, MultiAgentRunKindReview) || strings.EqualFold(ref, MultiAgentRunKindSpeculation) {
+		return latestMultiAgentRun(s.MultiAgentRuns, ref)
+	}
+
+	for i := range s.MultiAgentRuns {
+		if s.MultiAgentRuns[i].ID == ref || s.MultiAgentRuns[i].ReceiptID == ref {
+			return s.MultiAgentRuns[i], true
+		}
+	}
+
+	return MultiAgentRun{}, false
+}
+
+func latestMultiAgentRun(runs []MultiAgentRun, kind string) (MultiAgentRun, bool) {
+	var latest MultiAgentRun
+
+	found := false
+
+	for i := range runs {
+		run := &runs[i]
+		if kind != "" && !strings.EqualFold(run.Kind, kind) {
+			continue
+		}
+
+		if !found || !multiAgentRunSortTime(*run).Before(multiAgentRunSortTime(latest)) {
+			latest = *run
+			found = true
+		}
+	}
+
+	return latest, found
+}
+
+func multiAgentRunSortTime(run MultiAgentRun) time.Time {
+	switch {
+	case !run.UpdatedAt.IsZero():
+		return run.UpdatedAt
+	case run.CompletedAt != nil && !run.CompletedAt.IsZero():
+		return *run.CompletedAt
+	default:
+		return run.StartedAt
+	}
+}
+
+func multiAgentRunHasAcceptedOutput(run MultiAgentRun) bool {
+	if run.Status != MultiAgentRunStatusCompleted {
+		return false
+	}
+
+	artifact, ok := acceptedMultiAgentRunArtifact(run)
+	if !ok {
+		return false
+	}
+
+	return strings.TrimSpace(artifact.Content) != ""
+}
+
+func acceptedMultiAgentRunArtifact(run MultiAgentRun) (MultiAgentRunArtifact, bool) {
+	accepted, ok := firstAcceptedMultiAgentRunDecision(run.Decisions)
+	if !ok {
+		return MultiAgentRunArtifact{}, false
+	}
+
+	var legacyMatch MultiAgentRunArtifact
+
+	foundLegacyMatch := false
+
+	for i := range run.Artifacts {
+		artifact := run.Artifacts[i]
+		if !multiAgentRunArtifactMatchesDecision(artifact, accepted) {
+			continue
+		}
+
+		if accepted.Index > 0 && artifact.Index == 0 {
+			legacyMatch = artifact
+			foundLegacyMatch = true
+
+			continue
+		}
+
+		if accepted.Index > 0 && artifact.Index != accepted.Index {
+			continue
+		}
+
+		return artifact, true
+	}
+
+	return legacyMatch, foundLegacyMatch
+}
+
+func firstAcceptedMultiAgentRunDecision(decisions []MultiAgentRunDecision) (MultiAgentRunDecision, bool) {
+	for _, decision := range decisions {
+		if decision.Kind == multiAgentRunArtifactKindVerdict && decision.Outcome == multiAgentRunDecisionOutcomeAccepted {
+			return decision, true
+		}
+	}
+
+	return MultiAgentRunDecision{}, false
+}
+
+func multiAgentRunArtifactMatchesDecision(
+	artifact MultiAgentRunArtifact,
+	decision MultiAgentRunDecision,
+) bool {
+	if artifact.Kind != multiAgentRunArtifactKindVerdict {
+		return false
+	}
+
+	if decision.Phase != "" && artifact.Phase != decision.Phase {
+		return false
+	}
+
+	if decision.Agent != "" && artifact.Agent != decision.Agent {
+		return false
+	}
+
+	if decision.TargetAgent != "" && artifact.TargetAgent != decision.TargetAgent {
+		return false
+	}
+
+	return true
 }
 
 func (s *Store) path(ref string) string {

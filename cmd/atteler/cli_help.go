@@ -338,7 +338,9 @@ func lookupFlagDomain(name string) (string, bool) {
 		strings.HasPrefix(name, "session-summary") || name == "replay" ||
 		strings.HasPrefix(name, "export-session") || name == "export-format" ||
 		name == "search-sessions" || name == "list-messages" || name == "list-artifacts" ||
-		name == "list-failures" || name == "record-failure" || name == "failure-reason" ||
+		name == "list-failures" || name == "list-runs" || name == "show-run" ||
+		name == "export-run" || name == "replay-run" || name == "resume-run" ||
+		name == "record-failure" || name == "failure-reason" ||
 		strings.HasPrefix(name, "failure-") || name == "record-artifact" || strings.HasPrefix(name, "artifact-") ||
 		strings.HasPrefix(name, "merge-artifacts") || name == "merge-artifact-max-bytes":
 		return "chat/session", true

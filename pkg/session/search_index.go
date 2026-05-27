@@ -20,7 +20,7 @@ const (
 	searchIndexFileName      = ".session-search-index"
 	searchIndexLockFileName  = ".session-search-index.lock"
 	searchIndexVersion       = 2
-	searchIndexSchemaVersion = 9
+	searchIndexSchemaVersion = 10
 	sessionSchemaVersion     = 1
 
 	defaultTranscriptRetention = 180 * 24 * time.Hour
@@ -779,6 +779,7 @@ func buildIndexedSession(
 	addFailureFields(&document, session, policy)
 	addEvaluationFields(&document, session, policy)
 	addArtifactFields(&document, session, policy)
+	addMultiAgentRunFields(&document, session, policy)
 
 	return document
 }
@@ -929,6 +930,31 @@ func addArtifactFields(document *indexedSession, session Session, policy normali
 
 		addIndexedField(document, policy, SearchFieldAgent, label+".source_agent", llm.Role("artifact"), entry.SourceAgent, entry.CreatedAt)
 		addIndexedField(document, policy, SearchFieldArtifacts, label, llm.Role("artifact"), indexedArtifactSearchText(label, entry, policy), entry.CreatedAt)
+	}
+}
+
+func addMultiAgentRunFields(document *indexedSession, session Session, policy normalizedSearchIndexPolicy) {
+	if policy.excludes(SearchFieldMultiAgent) {
+		return
+	}
+
+	for index := range session.MultiAgentRuns {
+		run := &session.MultiAgentRuns[index]
+		label := fmt.Sprintf("multi_agent_runs[%d]", index+1)
+
+		if !policy.excludes(SearchFieldAgent) {
+			for _, agent := range multiAgentRunAgentValues(run) {
+				document.Agents = appendNormalizedUniqueIndexed(document.Agents, label+".agent", agent, policy)
+			}
+		}
+
+		if !policy.excludes(SearchFieldModel) {
+			for _, model := range multiAgentRunModelValues(run) {
+				document.Models = appendNormalizedUniqueIndexed(document.Models, label+".model", model, policy)
+			}
+		}
+
+		addIndexedField(document, policy, SearchFieldMultiAgent, label, llm.Role("multi_agent_run"), indexedMultiAgentRunSearchText(label, run, policy), run.StartedAt)
 	}
 }
 
@@ -1304,6 +1330,197 @@ func isPrivatePath(value string) bool {
 		strings.HasPrefix(value, `~\`) ||
 		strings.HasPrefix(value, `\\`) ||
 		(len(value) >= 3 && value[1] == ':' && (value[2] == '\\' || value[2] == '/'))
+}
+
+func indexedMultiAgentRunSearchText(label string, run *MultiAgentRun, policy normalizedSearchIndexPolicy) string {
+	summary := MultiAgentRunSummary{}
+	if multiAgentRunHasAcceptedOutput(*run) {
+		summary = run.Summary
+	}
+
+	parts := []string{
+		"Multi-agent run: " + sanitizeIndexFieldString(label+".id", run.ID, policy),
+		"Receipt: " + sanitizeIndexFieldString(label+".receipt_id", run.ReceiptID, policy),
+		"Kind: " + sanitizeIndexFieldString(label+".kind", run.Kind, policy),
+		"Status: " + string(run.Status),
+		"Prompt: " + sanitizeIndexFieldString(label+".prompt", run.Prompt, policy),
+		"Model: " + sanitizeIndexFieldString(label+".model", run.Model, policy),
+		"Fallback models: " + sanitizeIndexFieldString(label+".fallback_models", strings.Join(run.FallbackModels, " "), policy),
+		"Winner: " + sanitizeIndexFieldString(label+".summary.winner", summary.Winner, policy),
+		"Reason: " + sanitizeIndexFieldString(label+".summary.reason", summary.Reason, policy),
+		"Verdict reviewer: " + sanitizeIndexFieldString(label+".summary.verdict_reviewer", summary.VerdictReviewer, policy),
+		"Cancellation: " + sanitizeIndexFieldString(label+".cancellation_reason", run.CancellationReason, policy),
+		"Resume: " + sanitizeIndexFieldString(label+".resume_reason", run.ResumeReason, policy),
+		"Error: " + sanitizeIndexFieldString(label+".error", run.Error, policy),
+	}
+
+	for index := range run.Branches {
+		branch := &run.Branches[index]
+		branchLabel := fmt.Sprintf("%s.branches[%d]", label, index+1)
+		parts = append(parts, "Branch: "+strings.Join(nonEmptyIndexParts([]string{
+			sanitizeIndexFieldString(branchLabel+".name", branch.Name, policy),
+			sanitizeIndexFieldString(branchLabel+".role", branch.Role, policy),
+			sanitizeIndexFieldString(branchLabel+".provenance", branch.Provenance, policy),
+			sanitizeIndexFieldString(branchLabel+".model", branch.Model, policy),
+			sanitizeIndexFieldString(branchLabel+".prompt_hash", branch.PromptHash, policy),
+			string(branch.Status),
+			sanitizeIndexFieldString(branchLabel+".error", branch.Error, policy),
+			sanitizeIndexFieldString(branchLabel+".budget_rejection_rule", branch.BudgetRejectionRule, policy),
+		}), " "))
+	}
+
+	for index := range run.Reviewers {
+		reviewer := &run.Reviewers[index]
+		reviewerLabel := fmt.Sprintf("%s.reviewers[%d]", label, index+1)
+		parts = append(parts, "Reviewer: "+strings.Join(nonEmptyIndexParts([]string{
+			sanitizeIndexFieldString(reviewerLabel+".name", reviewer.Name, policy),
+			sanitizeIndexFieldString(reviewerLabel+".role", reviewer.Role, policy),
+			sanitizeIndexFieldString(reviewerLabel+".target_agent", reviewer.TargetAgent, policy),
+			sanitizeIndexFieldString(reviewerLabel+".model", reviewer.Model, policy),
+			sanitizeIndexFieldString(reviewerLabel+".prompt_hash", reviewer.PromptHash, policy),
+			sanitizeIndexFieldString(reviewerLabel+".call_id", reviewer.CallID, policy),
+		}), " "))
+	}
+
+	for index := range run.Artifacts {
+		artifact := &run.Artifacts[index]
+		artifactLabel := fmt.Sprintf("%s.artifacts[%d]", label, index+1)
+		parts = append(parts, "Artifact: "+strings.Join(nonEmptyIndexParts([]string{
+			sanitizeIndexFieldString(artifactLabel+".kind", artifact.Kind, policy),
+			sanitizeIndexFieldString(artifactLabel+".phase", artifact.Phase, policy),
+			sanitizeIndexFieldString(artifactLabel+".agent", artifact.Agent, policy),
+			sanitizeIndexFieldString(artifactLabel+".target_agent", artifact.TargetAgent, policy),
+			sanitizeIndexFieldString(artifactLabel+".content", artifact.Content, policy),
+			indexStringMapText(artifactLabel+".metadata", artifact.Metadata, policy),
+		}), " "))
+	}
+
+	for index := range run.Gates {
+		gate := &run.Gates[index]
+		gateLabel := fmt.Sprintf("%s.gates[%d]", label, index+1)
+		parts = append(parts, "Gate: "+strings.Join(nonEmptyIndexParts([]string{
+			sanitizeIndexFieldString(gateLabel+".name", gate.Name, policy),
+			sanitizeIndexFieldString(gateLabel+".phase", gate.Phase, policy),
+			sanitizeIndexFieldString(gateLabel+".agent", gate.Agent, policy),
+			sanitizeIndexFieldString(gateLabel+".notes", gate.Notes, policy),
+		}), " "))
+	}
+
+	for index := range run.Decisions {
+		decision := &run.Decisions[index]
+		decisionLabel := fmt.Sprintf("%s.decisions[%d]", label, index+1)
+		parts = append(parts, "Decision: "+strings.Join(nonEmptyIndexParts([]string{
+			sanitizeIndexFieldString(decisionLabel+".kind", decision.Kind, policy),
+			sanitizeIndexFieldString(decisionLabel+".phase", decision.Phase, policy),
+			sanitizeIndexFieldString(decisionLabel+".agent", decision.Agent, policy),
+			sanitizeIndexFieldString(decisionLabel+".target_agent", decision.TargetAgent, policy),
+			sanitizeIndexFieldString(decisionLabel+".outcome", decision.Outcome, policy),
+			sanitizeIndexFieldString(decisionLabel+".rationale", decision.Rationale, policy),
+		}), " "))
+	}
+
+	for index := range run.Disagreements {
+		disagreement := &run.Disagreements[index]
+		disagreementLabel := fmt.Sprintf("%s.disagreements[%d]", label, index+1)
+		parts = append(parts, "Disagreement: "+strings.Join(nonEmptyIndexParts([]string{
+			sanitizeIndexFieldString(disagreementLabel+".phase", disagreement.Phase, policy),
+			sanitizeIndexFieldString(disagreementLabel+".reviewer", disagreement.Reviewer, policy),
+			sanitizeIndexFieldString(disagreementLabel+".target_agent", disagreement.TargetAgent, policy),
+			sanitizeIndexFieldString(disagreementLabel+".subject", disagreement.Subject, policy),
+			sanitizeIndexFieldString(disagreementLabel+".notes", disagreement.Notes, policy),
+		}), " "))
+	}
+
+	for index := range run.Calls {
+		call := &run.Calls[index]
+		callLabel := fmt.Sprintf("%s.calls[%d]", label, index+1)
+		parts = append(parts, "Call: "+strings.Join(nonEmptyIndexParts([]string{
+			sanitizeIndexFieldString(callLabel+".id", call.ID, policy),
+			sanitizeIndexFieldString(callLabel+".phase", call.Phase, policy),
+			sanitizeIndexFieldString(callLabel+".agent", call.Agent, policy),
+			sanitizeIndexFieldString(callLabel+".target_agent", call.TargetAgent, policy),
+			string(call.Status),
+			sanitizeIndexFieldString(callLabel+".requested_model", call.RequestedModel, policy),
+			sanitizeIndexFieldString(callLabel+".response_model", call.ResponseModel, policy),
+			sanitizeIndexFieldString(callLabel+".fallback_models", strings.Join(call.FallbackModels, " "), policy),
+			sanitizeIndexFieldString(callLabel+".prompt_hash", call.PromptHash, policy),
+			sanitizeIndexFieldString(callLabel+".system_prompt", call.SystemPrompt, policy),
+			sanitizeIndexFieldString(callLabel+".user_prompt", call.UserPrompt, policy),
+			sanitizeIndexFieldString(callLabel+".response", call.Response, policy),
+			sanitizeIndexFieldString(callLabel+".error", call.Error, policy),
+			sanitizeIndexFieldString(callLabel+".budget_rejection_rule", call.BudgetRejectionRule, policy),
+		}), " "))
+	}
+
+	return strings.Join(nonEmptyIndexParts(parts), " | ")
+}
+
+func multiAgentRunAgentValues(run *MultiAgentRun) []string {
+	values := make([]string, 0, len(run.Branches)+len(run.Reviewers)+len(run.Artifacts)+len(run.Calls)*2)
+	for i := range run.Branches {
+		values = append(values, run.Branches[i].Role)
+	}
+	for i := range run.Reviewers {
+		values = append(values, run.Reviewers[i].Name, run.Reviewers[i].Role, run.Reviewers[i].TargetAgent)
+	}
+	for i := range run.Artifacts {
+		values = append(values, run.Artifacts[i].Agent, run.Artifacts[i].TargetAgent)
+	}
+	for i := range run.Calls {
+		values = append(values, run.Calls[i].Agent, run.Calls[i].TargetAgent)
+	}
+
+	return values
+}
+
+func multiAgentRunModelValues(run *MultiAgentRun) []string {
+	values := make([]string, 0, 1+len(run.FallbackModels)+len(run.Branches)+len(run.Reviewers)+len(run.Calls)*3)
+	values = append(values, run.Model)
+	values = append(values, run.FallbackModels...)
+	for i := range run.Branches {
+		values = append(values, run.Branches[i].Model)
+	}
+	for i := range run.Reviewers {
+		values = append(values, run.Reviewers[i].Model)
+	}
+	for i := range run.Calls {
+		values = append(values, run.Calls[i].RequestedModel, run.Calls[i].ResponseModel)
+		values = append(values, run.Calls[i].FallbackModels...)
+	}
+
+	return values
+}
+
+func indexStringMapText(label string, values map[string]string, policy normalizedSearchIndexPolicy) string {
+	if len(values) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+
+		parts = append(parts, sanitizeIndexFieldString(label+"."+key, key+"="+strings.TrimSpace(value), policy))
+	}
+
+	sort.Strings(parts)
+
+	return strings.Join(nonEmptyIndexParts(parts), " ")
+}
+
+func nonEmptyIndexParts(parts []string) []string {
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+
+	return out
 }
 
 func normalizeStringList(values []string) []string {

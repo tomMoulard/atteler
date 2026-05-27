@@ -3,11 +3,13 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -433,6 +435,104 @@ func TestRun_StopsBeforeCrossReviewsWhenContextCanceledAfterReports(t *testing.T
 	require.Len(t, result.Session.Reports, 2)
 	assert.False(t, crossReviewCalled.Load())
 	assert.False(t, aggregateCalled.Load())
+}
+
+func TestRun_CancelsSiblingIndependentReviewOnFailure(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan(
+		[]Reviewer{{Name: "fastfail"}, {Name: "waiter"}},
+		[]string{"pkg/auth.go"},
+		[]string{"tests pass"},
+	)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	waiterStarted := make(chan struct{})
+
+	var siblingCanceled atomic.Bool
+
+	result, err := Run(ctx, plan, Runner{
+		Review: func(ctx context.Context, reviewer Reviewer) (Report, error) {
+			if reviewer.Name == "waiter" {
+				close(waiterStarted)
+				<-ctx.Done()
+				siblingCanceled.Store(true)
+
+				return Report{}, ctx.Err()
+			}
+
+			<-waiterStarted
+
+			return Report{}, errors.New("boom")
+		},
+		CrossReview: func(context.Context, CrossReview, Report) (string, error) {
+			return "", errors.New("cross-review should not run after review failure")
+		},
+		Aggregate: func(context.Context, Session) (Report, error) {
+			return Report{}, errors.New("aggregate should not run after review failure")
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `review "fastfail": boom`)
+	assert.True(t, siblingCanceled.Load())
+	assert.Empty(t, result.Session.CrossReviews)
+	require.Len(t, result.Session.Errors, 2)
+	assert.Equal(t, "fastfail", result.Session.Errors[0].Reviewer)
+}
+
+func TestRun_CancelsSiblingCrossReviewOnFailure(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan(
+		[]Reviewer{{Name: "fastfail"}, {Name: "waiter"}},
+		[]string{"pkg/auth.go"},
+		[]string{"tests pass"},
+	)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	waiterStarted := make(chan struct{})
+
+	var siblingCanceled atomic.Bool
+
+	result, err := Run(ctx, plan, Runner{
+		Review: func(_ context.Context, reviewer Reviewer) (Report, error) {
+			return Report{
+				Reviewer: reviewer.Name,
+				GateChecks: []GateCheck{{
+					Name:   "tests pass",
+					Passed: true,
+					Notes:  "covered",
+				}},
+			}, nil
+		},
+		CrossReview: func(ctx context.Context, assignment CrossReview, _ Report) (string, error) {
+			if assignment.Reviewer == "waiter" {
+				close(waiterStarted)
+				<-ctx.Done()
+				siblingCanceled.Store(true)
+
+				return "", ctx.Err()
+			}
+
+			<-waiterStarted
+
+			return "", errors.New("boom")
+		},
+		Aggregate: func(context.Context, Session) (Report, error) {
+			return Report{}, errors.New("aggregate should not run after cross-review failure")
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `review "fastfail" -> "waiter": boom`)
+	assert.True(t, siblingCanceled.Load())
+	assert.Empty(t, result.Report.Reviewer)
+	require.Len(t, result.Session.Errors, 2)
 }
 
 func TestParseReportFromLLM_RequiresEvidenceBackedJSON(t *testing.T) {

@@ -38,48 +38,22 @@ func agentLoopCheckpointSink(path string) llm.AgentLoopCheckpointSink {
 }
 
 func agentLoopBudgetFromConfig(cfg appconfig.Config) (llm.AgentLoopBudget, error) {
-	var (
-		budget llm.AgentLoopBudget
-		err    error
-	)
+	var budget llm.AgentLoopBudget
 
-	budget.MaxOutputBytes, err = nonNegativeAgentLoopInt64("agent_loop.max_output_bytes", cfg.AgentLoop.MaxOutputBytes)
-	if err != nil {
+	if cfg.AgentLoop.MaxOutputBytes != nil {
+		maxOutputBytes, err := nonNegativeAgentLoopInt64Budget("agent_loop.max_output_bytes", *cfg.AgentLoop.MaxOutputBytes)
+		if err != nil {
+			return budget, err
+		}
+
+		budget.MaxOutputBytes = maxOutputBytes
+	}
+
+	if err := applyAgentLoopTokenBudgets(&budget, cfg.AgentLoop); err != nil {
 		return budget, err
 	}
 
-	budget.MaxCostMicros, err = nonNegativeAgentLoopInt64("agent_loop.max_cost_micros", cfg.AgentLoop.MaxCostMicros)
-	if err != nil {
-		return budget, err
-	}
-
-	budget.MaxInputTokens, err = nonNegativeAgentLoopInt("agent_loop.max_input_tokens", cfg.AgentLoop.MaxInputTokens)
-	if err != nil {
-		return budget, err
-	}
-
-	budget.MaxOutputTokens, err = nonNegativeAgentLoopInt("agent_loop.max_output_tokens", cfg.AgentLoop.MaxOutputTokens)
-	if err != nil {
-		return budget, err
-	}
-
-	budget.MaxTotalTokens, err = nonNegativeAgentLoopInt("agent_loop.max_total_tokens", cfg.AgentLoop.MaxTotalTokens)
-	if err != nil {
-		return budget, err
-	}
-
-	budget.MaxIterations, err = nonNegativeAgentLoopInt("agent_loop.max_iterations", cfg.AgentLoop.MaxIterations)
-	if err != nil {
-		return budget, err
-	}
-
-	budget.MaxModelCalls, err = nonNegativeAgentLoopInt("agent_loop.max_model_calls", cfg.AgentLoop.MaxModelCalls)
-	if err != nil {
-		return budget, err
-	}
-
-	budget.MaxToolCalls, err = nonNegativeAgentLoopInt("agent_loop.max_tool_calls", cfg.AgentLoop.MaxToolCalls)
-	if err != nil {
+	if err := applyAgentLoopCountBudgets(&budget, cfg.AgentLoop); err != nil {
 		return budget, err
 	}
 
@@ -93,28 +67,91 @@ func agentLoopBudgetFromConfig(cfg appconfig.Config) (llm.AgentLoopBudget, error
 	return budget, nil
 }
 
-func nonNegativeAgentLoopInt(name string, value *int) (int, error) {
-	if value == nil {
-		return 0, nil
+func applyAgentLoopTokenBudgets(budget *llm.AgentLoopBudget, cfg appconfig.AgentLoopConfig) error {
+	if cfg.MaxCostMicros != nil {
+		maxCostMicros, err := nonNegativeAgentLoopInt64Budget("agent_loop.max_cost_micros", *cfg.MaxCostMicros)
+		if err != nil {
+			return err
+		}
+
+		budget.MaxCostMicros = maxCostMicros
 	}
 
-	if *value < 0 {
-		return 0, fmt.Errorf("%s must be >= 0", name)
+	if cfg.MaxInputTokens != nil {
+		maxInputTokens, err := nonNegativeAgentLoopIntBudget("agent_loop.max_input_tokens", *cfg.MaxInputTokens)
+		if err != nil {
+			return err
+		}
+
+		budget.MaxInputTokens = maxInputTokens
 	}
 
-	return *value, nil
+	if cfg.MaxOutputTokens != nil {
+		maxOutputTokens, err := nonNegativeAgentLoopIntBudget("agent_loop.max_output_tokens", *cfg.MaxOutputTokens)
+		if err != nil {
+			return err
+		}
+
+		budget.MaxOutputTokens = maxOutputTokens
+	}
+
+	if cfg.MaxTotalTokens != nil {
+		maxTotalTokens, err := nonNegativeAgentLoopIntBudget("agent_loop.max_total_tokens", *cfg.MaxTotalTokens)
+		if err != nil {
+			return err
+		}
+
+		budget.MaxTotalTokens = maxTotalTokens
+	}
+
+	return nil
 }
 
-func nonNegativeAgentLoopInt64(name string, value *int64) (int64, error) {
-	if value == nil {
-		return 0, nil
+func applyAgentLoopCountBudgets(budget *llm.AgentLoopBudget, cfg appconfig.AgentLoopConfig) error {
+	if cfg.MaxIterations != nil {
+		maxIterations, err := nonNegativeAgentLoopIntBudget("agent_loop.max_iterations", *cfg.MaxIterations)
+		if err != nil {
+			return err
+		}
+
+		budget.MaxIterations = maxIterations
 	}
 
-	if *value < 0 {
+	if cfg.MaxModelCalls != nil {
+		maxModelCalls, err := nonNegativeAgentLoopIntBudget("agent_loop.max_model_calls", *cfg.MaxModelCalls)
+		if err != nil {
+			return err
+		}
+
+		budget.MaxModelCalls = maxModelCalls
+	}
+
+	if cfg.MaxToolCalls != nil {
+		maxToolCalls, err := nonNegativeAgentLoopIntBudget("agent_loop.max_tool_calls", *cfg.MaxToolCalls)
+		if err != nil {
+			return err
+		}
+
+		budget.MaxToolCalls = maxToolCalls
+	}
+
+	return nil
+}
+
+func nonNegativeAgentLoopIntBudget(name string, value int) (int, error) {
+	if value < 0 {
 		return 0, fmt.Errorf("%s must be >= 0", name)
 	}
 
-	return *value, nil
+	return value, nil
+}
+
+func nonNegativeAgentLoopInt64Budget(name string, value int64) (int64, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("%s must be >= 0", name)
+	}
+
+	return value, nil
 }
 
 // agentLoopMaxWallTimeFromConfig parses the configured wall-time ceiling.

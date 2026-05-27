@@ -71,6 +71,7 @@ type MachineReadableExport struct {
 	NegativeKnowledge []ExportNegativeKnowledge `json:"negative_knowledge,omitempty"`
 	Evaluations       []ExportAgentEvaluation   `json:"evaluations,omitempty"`
 	Artifacts         []ExportArtifact          `json:"artifacts,omitempty"`
+	MultiAgentRuns    []ExportMultiAgentRun     `json:"multi_agent_runs,omitempty"`
 	Messages          []ExportMessage           `json:"messages,omitempty"`
 }
 
@@ -95,6 +96,7 @@ type ExportSessionMetadata struct {
 	NegativeKnowledgeCount int                 `json:"negative_knowledge_count"`
 	EvaluationCount        int                 `json:"evaluation_count"`
 	ArtifactCount          int                 `json:"artifact_count"`
+	MultiAgentRunCount     int                 `json:"multi_agent_run_count"`
 }
 
 // ExportMessage is a redaction-aware exported transcript message.
@@ -162,6 +164,155 @@ type ExportArtifact struct {
 	SizeBytes       int64      `json:"size_bytes,omitempty"`
 	SourceTurn      int        `json:"source_turn,omitempty"`
 	WorktreeDirty   bool       `json:"worktree_dirty,omitempty"`
+}
+
+// ExportMultiAgentRun is a redaction-aware exported review/speculation run.
+//
+//nolint:govet // JSON field order mirrors session.MultiAgentRun for audit readability.
+type ExportMultiAgentRun struct {
+	StartedAt          time.Time                         `json:"started_at,omitzero"`
+	UpdatedAt          time.Time                         `json:"updated_at,omitzero"`
+	CompletedAt        *time.Time                        `json:"completed_at,omitempty"`
+	ID                 string                            `json:"id"`
+	ReceiptID          string                            `json:"receipt_id,omitempty"`
+	Kind               string                            `json:"kind"`
+	Status             MultiAgentRunStatus               `json:"status"`
+	Prompt             string                            `json:"prompt,omitempty"`
+	Model              string                            `json:"model,omitempty"`
+	FallbackModels     []string                          `json:"fallback_models,omitempty"`
+	Budget             MultiAgentRunBudget               `json:"budget,omitzero"`
+	Usage              MultiAgentRunUsage                `json:"usage,omitzero"`
+	Calls              []ExportMultiAgentRunCall         `json:"calls,omitempty"`
+	Branches           []ExportMultiAgentRunBranch       `json:"branches,omitempty"`
+	Reviewers          []ExportMultiAgentRunReviewer     `json:"reviewers,omitempty"`
+	Artifacts          []ExportMultiAgentRunArtifact     `json:"artifacts,omitempty"`
+	Gates              []ExportMultiAgentRunGate         `json:"gates,omitempty"`
+	Disagreements      []ExportMultiAgentRunDisagreement `json:"disagreements,omitempty"`
+	Decisions          []ExportMultiAgentRunDecision     `json:"decisions,omitempty"`
+	Summary            ExportMultiAgentRunSummary        `json:"summary,omitzero"`
+	CancellationReason string                            `json:"cancellation_reason,omitempty"`
+	ResumeReason       string                            `json:"resume_reason,omitempty"`
+	Error              string                            `json:"error,omitempty"`
+}
+
+// ExportMultiAgentRunCall is a sanitized provider-call audit record.
+//
+//nolint:govet // JSON field order mirrors the durable call audit schema.
+type ExportMultiAgentRunCall struct {
+	StartedAt            time.Time           `json:"started_at,omitzero"`
+	CompletedAt          *time.Time          `json:"completed_at,omitempty"`
+	ID                   string              `json:"id"`
+	Phase                string              `json:"phase"`
+	Agent                string              `json:"agent,omitempty"`
+	TargetAgent          string              `json:"target_agent,omitempty"`
+	Status               MultiAgentRunStatus `json:"status"`
+	RequestedModel       string              `json:"requested_model,omitempty"`
+	ResponseModel        string              `json:"response_model,omitempty"`
+	FallbackModels       []string            `json:"fallback_models,omitempty"`
+	PromptHash           string              `json:"prompt_hash,omitempty"`
+	SystemPrompt         string              `json:"system_prompt,omitempty"`
+	UserPrompt           string              `json:"user_prompt,omitempty"`
+	Response             string              `json:"response,omitempty"`
+	Error                string              `json:"error,omitempty"`
+	InputTokenEstimate   int                 `json:"input_token_estimate,omitempty"`
+	OutputTokenEstimate  int                 `json:"output_token_estimate,omitempty"`
+	ContextWindow        int                 `json:"context_window,omitempty"`
+	MaxOutputTokens      int                 `json:"max_output_tokens,omitempty"`
+	InputTokens          int                 `json:"input_tokens,omitempty"`
+	CachedInputTokens    int                 `json:"cached_input_tokens,omitempty"`
+	OutputTokens         int                 `json:"output_tokens,omitempty"`
+	TotalTokens          int                 `json:"total_tokens,omitempty"`
+	EstimatedCostMicros  int64               `json:"estimated_cost_micros,omitempty"`
+	DurationMS           int64               `json:"duration_ms,omitempty"`
+	BudgetRejectionRule  string              `json:"budget_rejection_rule,omitempty"`
+	BudgetRejectionUsage int                 `json:"budget_rejection_usage,omitempty"`
+	BudgetRejectionLimit int                 `json:"budget_rejection_limit,omitempty"`
+}
+
+// ExportMultiAgentRunBranch is a sanitized per-branch provenance and budget record.
+//
+//nolint:govet // JSON field order mirrors the durable branch audit schema.
+type ExportMultiAgentRunBranch struct {
+	Name                 string              `json:"name"`
+	Role                 string              `json:"role,omitempty"`
+	Provenance           string              `json:"provenance,omitempty"`
+	Model                string              `json:"model,omitempty"`
+	PromptHash           string              `json:"prompt_hash,omitempty"`
+	Error                string              `json:"error,omitempty"`
+	Status               MultiAgentRunStatus `json:"status"`
+	InputTokenEstimate   int                 `json:"input_token_estimate,omitempty"`
+	OutputTokenEstimate  int                 `json:"output_token_estimate,omitempty"`
+	ContextWindow        int                 `json:"context_window,omitempty"`
+	MaxOutputTokens      int                 `json:"max_output_tokens,omitempty"`
+	InputTokens          int                 `json:"input_tokens,omitempty"`
+	CachedInputTokens    int                 `json:"cached_input_tokens,omitempty"`
+	OutputTokens         int                 `json:"output_tokens,omitempty"`
+	TotalTokens          int                 `json:"total_tokens,omitempty"`
+	EstimatedCostMicros  int64               `json:"estimated_cost_micros,omitempty"`
+	DurationMS           int64               `json:"duration_ms,omitempty"`
+	BudgetRejectionRule  string              `json:"budget_rejection_rule,omitempty"`
+	BudgetRejectionUsage int                 `json:"budget_rejection_usage,omitempty"`
+	BudgetRejectionLimit int                 `json:"budget_rejection_limit,omitempty"`
+}
+
+// ExportMultiAgentRunReviewer is a sanitized reviewer role invocation record.
+type ExportMultiAgentRunReviewer struct {
+	Name        string `json:"name"`
+	Role        string `json:"role,omitempty"`
+	TargetAgent string `json:"target_agent,omitempty"`
+	Model       string `json:"model,omitempty"`
+	PromptHash  string `json:"prompt_hash,omitempty"`
+	CallID      string `json:"call_id,omitempty"`
+}
+
+// ExportMultiAgentRunArtifact is a sanitized workflow artifact.
+type ExportMultiAgentRunArtifact struct {
+	CreatedAt   time.Time         `json:"created_at,omitzero"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	Kind        string            `json:"kind"`
+	Phase       string            `json:"phase,omitempty"`
+	Agent       string            `json:"agent,omitempty"`
+	TargetAgent string            `json:"target_agent,omitempty"`
+	Content     string            `json:"content,omitempty"`
+	Index       int               `json:"index,omitempty"`
+}
+
+// ExportMultiAgentRunGate is a sanitized gate result.
+type ExportMultiAgentRunGate struct {
+	Name   string `json:"name"`
+	Phase  string `json:"phase,omitempty"`
+	Agent  string `json:"agent,omitempty"`
+	Notes  string `json:"notes,omitempty"`
+	Passed bool   `json:"passed"`
+}
+
+// ExportMultiAgentRunDisagreement is a sanitized cross-review or divergent-gate record.
+type ExportMultiAgentRunDisagreement struct {
+	Phase       string `json:"phase,omitempty"`
+	Reviewer    string `json:"reviewer,omitempty"`
+	TargetAgent string `json:"target_agent,omitempty"`
+	Subject     string `json:"subject,omitempty"`
+	Notes       string `json:"notes,omitempty"`
+	Index       int    `json:"index,omitempty"`
+}
+
+// ExportMultiAgentRunDecision is a sanitized accepted/rejected output decision.
+type ExportMultiAgentRunDecision struct {
+	Kind        string `json:"kind"`
+	Phase       string `json:"phase,omitempty"`
+	Agent       string `json:"agent,omitempty"`
+	TargetAgent string `json:"target_agent,omitempty"`
+	Outcome     string `json:"outcome"`
+	Rationale   string `json:"rationale,omitempty"`
+	Index       int    `json:"index,omitempty"`
+}
+
+// ExportMultiAgentRunSummary is a sanitized compact run result.
+type ExportMultiAgentRunSummary struct {
+	Winner          string `json:"winner,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	VerdictReviewer string `json:"verdict_reviewer,omitempty"`
+	Findings        int    `json:"findings,omitempty"`
 }
 
 type normalizedExportOptions struct {
@@ -290,12 +441,14 @@ func BuildMachineReadableExport(session Session, options ExportOptions) MachineR
 			NegativeKnowledgeCount: len(session.NegativeKnowledge),
 			EvaluationCount:        len(session.Evaluations),
 			ArtifactCount:          len(session.Artifacts),
+			MultiAgentRunCount:     len(session.MultiAgentRuns),
 		},
 	}
 
 	export.NegativeKnowledge = builder.exportNegativeKnowledge(session.NegativeKnowledge)
 	export.Evaluations = builder.exportEvaluations(session.Evaluations)
 	export.Artifacts = builder.exportArtifacts(session.Artifacts)
+	export.MultiAgentRuns = builder.exportMultiAgentRuns(session.MultiAgentRuns)
 	export.Messages = builder.exportMessages(session.Messages)
 	export.Session.ExportedMessageCount = len(export.Messages)
 
@@ -528,6 +681,277 @@ func (builder *exportBuilder) exportArtifacts(entries []Artifact) []ExportArtifa
 	return exported
 }
 
+func (builder *exportBuilder) exportMultiAgentRuns(entries []MultiAgentRun) []ExportMultiAgentRun {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	exported := make([]ExportMultiAgentRun, 0, len(entries))
+	for index := range entries {
+		entry := entries[index]
+		if entry.ID == "" && entry.Kind == "" {
+			continue
+		}
+
+		prefix := fmt.Sprintf("multi_agent_runs[%d]", index+1)
+		summary := builder.exportMultiAgentRunSummary(prefix, entry)
+		exported = append(exported, ExportMultiAgentRun{
+			StartedAt:   entry.StartedAt,
+			UpdatedAt:   entry.UpdatedAt,
+			CompletedAt: entry.CompletedAt,
+			ID:          builder.sanitize(prefix+".id", entry.ID),
+			ReceiptID:   builder.sanitize(prefix+".receipt_id", entry.ReceiptID),
+			Kind:        builder.sanitize(prefix+".kind", entry.Kind),
+			Status:      entry.Status,
+			Prompt: builder.sanitizeIssueOmittable(
+				prefix+".prompt",
+				entry.Prompt,
+				"multi-agent run prompts omitted by issue/PR summary profile",
+			),
+			Model:              builder.sanitize(prefix+".model", entry.Model),
+			FallbackModels:     builder.sanitizeSlice(prefix+".fallback_models", entry.FallbackModels),
+			Budget:             entry.Budget,
+			Usage:              entry.Usage,
+			Calls:              builder.exportMultiAgentRunCalls(prefix, entry.Calls),
+			Branches:           builder.exportMultiAgentRunBranches(prefix, entry.Branches),
+			Reviewers:          builder.exportMultiAgentRunReviewers(prefix, entry.Reviewers),
+			Artifacts:          builder.exportMultiAgentRunArtifacts(prefix, entry.Artifacts),
+			Gates:              builder.exportMultiAgentRunGates(prefix, entry.Gates),
+			Disagreements:      builder.exportMultiAgentRunDisagreements(prefix, entry.Disagreements),
+			Decisions:          builder.exportMultiAgentRunDecisions(prefix, entry.Decisions),
+			Summary:            summary,
+			CancellationReason: builder.sanitize(prefix+".cancellation_reason", entry.CancellationReason),
+			ResumeReason:       builder.sanitize(prefix+".resume_reason", entry.ResumeReason),
+			Error:              builder.sanitize(prefix+".error", entry.Error),
+		})
+	}
+
+	return exported
+}
+
+func (builder *exportBuilder) exportMultiAgentRunSummary(
+	prefix string,
+	entry MultiAgentRun,
+) ExportMultiAgentRunSummary {
+	if !multiAgentRunHasAcceptedOutput(entry) {
+		return ExportMultiAgentRunSummary{}
+	}
+
+	return ExportMultiAgentRunSummary{
+		Winner:          builder.sanitize(prefix+".summary.winner", entry.Summary.Winner),
+		Reason:          builder.sanitize(prefix+".summary.reason", entry.Summary.Reason),
+		VerdictReviewer: builder.sanitize(prefix+".summary.verdict_reviewer", entry.Summary.VerdictReviewer),
+		Findings:        entry.Summary.Findings,
+	}
+}
+
+func (builder *exportBuilder) exportMultiAgentRunCalls(prefix string, calls []MultiAgentRunCall) []ExportMultiAgentRunCall {
+	if len(calls) == 0 {
+		return nil
+	}
+
+	exported := make([]ExportMultiAgentRunCall, 0, len(calls))
+	for index := range calls {
+		call := calls[index]
+		callPrefix := fmt.Sprintf("%s.calls[%d]", prefix, index+1)
+		exported = append(exported, ExportMultiAgentRunCall{
+			StartedAt:      call.StartedAt,
+			CompletedAt:    call.CompletedAt,
+			ID:             builder.sanitize(callPrefix+".id", call.ID),
+			Phase:          builder.sanitize(callPrefix+".phase", call.Phase),
+			Agent:          builder.sanitize(callPrefix+".agent", call.Agent),
+			TargetAgent:    builder.sanitize(callPrefix+".target_agent", call.TargetAgent),
+			Status:         call.Status,
+			RequestedModel: builder.sanitize(callPrefix+".requested_model", call.RequestedModel),
+			ResponseModel:  builder.sanitize(callPrefix+".response_model", call.ResponseModel),
+			FallbackModels: builder.sanitizeSlice(callPrefix+".fallback_models", call.FallbackModels),
+			PromptHash:     builder.sanitize(callPrefix+".prompt_hash", call.PromptHash),
+			SystemPrompt: builder.sanitizeIssueOmittable(
+				callPrefix+".system_prompt",
+				call.SystemPrompt,
+				"multi-agent run provider-call prompts/responses omitted by issue/PR summary profile",
+			),
+			UserPrompt: builder.sanitizeIssueOmittable(
+				callPrefix+".user_prompt",
+				call.UserPrompt,
+				"multi-agent run provider-call prompts/responses omitted by issue/PR summary profile",
+			),
+			Response: builder.sanitizeIssueOmittable(
+				callPrefix+".response",
+				call.Response,
+				"multi-agent run provider-call prompts/responses omitted by issue/PR summary profile",
+			),
+			Error:                builder.sanitize(callPrefix+".error", call.Error),
+			InputTokenEstimate:   call.InputTokenEstimate,
+			OutputTokenEstimate:  call.OutputTokenEstimate,
+			ContextWindow:        call.ContextWindow,
+			MaxOutputTokens:      call.MaxOutputTokens,
+			InputTokens:          call.InputTokens,
+			CachedInputTokens:    call.CachedInputTokens,
+			OutputTokens:         call.OutputTokens,
+			TotalTokens:          call.TotalTokens,
+			EstimatedCostMicros:  call.EstimatedCostMicros,
+			DurationMS:           call.DurationMS,
+			BudgetRejectionRule:  builder.sanitize(callPrefix+".budget_rejection_rule", call.BudgetRejectionRule),
+			BudgetRejectionUsage: call.BudgetRejectionUsage,
+			BudgetRejectionLimit: call.BudgetRejectionLimit,
+		})
+	}
+
+	return exported
+}
+
+func (builder *exportBuilder) exportMultiAgentRunBranches(prefix string, branches []MultiAgentRunBranch) []ExportMultiAgentRunBranch {
+	if len(branches) == 0 {
+		return nil
+	}
+
+	exported := make([]ExportMultiAgentRunBranch, 0, len(branches))
+	for index := range branches {
+		branch := &branches[index]
+		branchPrefix := fmt.Sprintf("%s.branches[%d]", prefix, index+1)
+		exported = append(exported, ExportMultiAgentRunBranch{
+			Name:                 builder.sanitize(branchPrefix+".name", branch.Name),
+			Role:                 builder.sanitize(branchPrefix+".role", branch.Role),
+			Provenance:           builder.sanitize(branchPrefix+".provenance", branch.Provenance),
+			Model:                builder.sanitize(branchPrefix+".model", branch.Model),
+			PromptHash:           builder.sanitize(branchPrefix+".prompt_hash", branch.PromptHash),
+			Error:                builder.sanitize(branchPrefix+".error", branch.Error),
+			Status:               branch.Status,
+			InputTokenEstimate:   branch.InputTokenEstimate,
+			OutputTokenEstimate:  branch.OutputTokenEstimate,
+			ContextWindow:        branch.ContextWindow,
+			MaxOutputTokens:      branch.MaxOutputTokens,
+			InputTokens:          branch.InputTokens,
+			CachedInputTokens:    branch.CachedInputTokens,
+			OutputTokens:         branch.OutputTokens,
+			TotalTokens:          branch.TotalTokens,
+			EstimatedCostMicros:  branch.EstimatedCostMicros,
+			DurationMS:           branch.DurationMS,
+			BudgetRejectionRule:  builder.sanitize(branchPrefix+".budget_rejection_rule", branch.BudgetRejectionRule),
+			BudgetRejectionUsage: branch.BudgetRejectionUsage,
+			BudgetRejectionLimit: branch.BudgetRejectionLimit,
+		})
+	}
+
+	return exported
+}
+
+func (builder *exportBuilder) exportMultiAgentRunReviewers(prefix string, reviewers []MultiAgentRunReviewer) []ExportMultiAgentRunReviewer {
+	if len(reviewers) == 0 {
+		return nil
+	}
+
+	exported := make([]ExportMultiAgentRunReviewer, 0, len(reviewers))
+	for index, reviewer := range reviewers {
+		reviewerPrefix := fmt.Sprintf("%s.reviewers[%d]", prefix, index+1)
+		exported = append(exported, ExportMultiAgentRunReviewer{
+			Name:        builder.sanitize(reviewerPrefix+".name", reviewer.Name),
+			Role:        builder.sanitize(reviewerPrefix+".role", reviewer.Role),
+			TargetAgent: builder.sanitize(reviewerPrefix+".target_agent", reviewer.TargetAgent),
+			Model:       builder.sanitize(reviewerPrefix+".model", reviewer.Model),
+			PromptHash:  builder.sanitize(reviewerPrefix+".prompt_hash", reviewer.PromptHash),
+			CallID:      builder.sanitize(reviewerPrefix+".call_id", reviewer.CallID),
+		})
+	}
+
+	return exported
+}
+
+func (builder *exportBuilder) exportMultiAgentRunArtifacts(prefix string, artifacts []MultiAgentRunArtifact) []ExportMultiAgentRunArtifact {
+	if len(artifacts) == 0 {
+		return nil
+	}
+
+	exported := make([]ExportMultiAgentRunArtifact, 0, len(artifacts))
+	for index, artifact := range artifacts {
+		artifactPrefix := fmt.Sprintf("%s.artifacts[%d]", prefix, index+1)
+		exported = append(exported, ExportMultiAgentRunArtifact{
+			CreatedAt:   artifact.CreatedAt,
+			Kind:        builder.sanitize(artifactPrefix+".kind", artifact.Kind),
+			Phase:       builder.sanitize(artifactPrefix+".phase", artifact.Phase),
+			Agent:       builder.sanitize(artifactPrefix+".agent", artifact.Agent),
+			TargetAgent: builder.sanitize(artifactPrefix+".target_agent", artifact.TargetAgent),
+			Content: builder.sanitizeIssueOmittable(
+				artifactPrefix+".content",
+				artifact.Content,
+				"multi-agent run artifact contents omitted by issue/PR summary profile",
+			),
+			Metadata: builder.sanitizeMap(artifactPrefix+".metadata", artifact.Metadata),
+			Index:    artifact.Index,
+		})
+	}
+
+	return exported
+}
+
+func (builder *exportBuilder) exportMultiAgentRunGates(prefix string, gates []MultiAgentRunGate) []ExportMultiAgentRunGate {
+	if len(gates) == 0 {
+		return nil
+	}
+
+	exported := make([]ExportMultiAgentRunGate, 0, len(gates))
+	for index, gate := range gates {
+		gatePrefix := fmt.Sprintf("%s.gates[%d]", prefix, index+1)
+		exported = append(exported, ExportMultiAgentRunGate{
+			Name:   builder.sanitize(gatePrefix+".name", gate.Name),
+			Phase:  builder.sanitize(gatePrefix+".phase", gate.Phase),
+			Agent:  builder.sanitize(gatePrefix+".agent", gate.Agent),
+			Notes:  builder.sanitize(gatePrefix+".notes", gate.Notes),
+			Passed: gate.Passed,
+		})
+	}
+
+	return exported
+}
+
+func (builder *exportBuilder) exportMultiAgentRunDisagreements(prefix string, disagreements []MultiAgentRunDisagreement) []ExportMultiAgentRunDisagreement {
+	if len(disagreements) == 0 {
+		return nil
+	}
+
+	exported := make([]ExportMultiAgentRunDisagreement, 0, len(disagreements))
+	for index, disagreement := range disagreements {
+		disagreementPrefix := fmt.Sprintf("%s.disagreements[%d]", prefix, index+1)
+		exported = append(exported, ExportMultiAgentRunDisagreement{
+			Phase:       builder.sanitize(disagreementPrefix+".phase", disagreement.Phase),
+			Reviewer:    builder.sanitize(disagreementPrefix+".reviewer", disagreement.Reviewer),
+			TargetAgent: builder.sanitize(disagreementPrefix+".target_agent", disagreement.TargetAgent),
+			Subject:     builder.sanitize(disagreementPrefix+".subject", disagreement.Subject),
+			Notes: builder.sanitizeIssueOmittable(
+				disagreementPrefix+".notes",
+				disagreement.Notes,
+				"multi-agent run disagreement notes omitted by issue/PR summary profile",
+			),
+			Index: disagreement.Index,
+		})
+	}
+
+	return exported
+}
+
+func (builder *exportBuilder) exportMultiAgentRunDecisions(prefix string, decisions []MultiAgentRunDecision) []ExportMultiAgentRunDecision {
+	if len(decisions) == 0 {
+		return nil
+	}
+
+	exported := make([]ExportMultiAgentRunDecision, 0, len(decisions))
+	for index, decision := range decisions {
+		decisionPrefix := fmt.Sprintf("%s.decisions[%d]", prefix, index+1)
+		exported = append(exported, ExportMultiAgentRunDecision{
+			Kind:        builder.sanitize(decisionPrefix+".kind", decision.Kind),
+			Phase:       builder.sanitize(decisionPrefix+".phase", decision.Phase),
+			Agent:       builder.sanitize(decisionPrefix+".agent", decision.Agent),
+			TargetAgent: builder.sanitize(decisionPrefix+".target_agent", decision.TargetAgent),
+			Outcome:     builder.sanitize(decisionPrefix+".outcome", decision.Outcome),
+			Rationale:   builder.sanitize(decisionPrefix+".rationale", decision.Rationale),
+			Index:       decision.Index,
+		})
+	}
+
+	return exported
+}
+
 func (builder *exportBuilder) exportMessages(messages []llm.Message) []ExportMessage {
 	if len(messages) == 0 {
 		return nil
@@ -615,6 +1039,47 @@ func (builder *exportBuilder) exportSlice(field string, searchField SearchField,
 	}
 
 	return out
+}
+
+func (builder *exportBuilder) sanitizeSlice(field string, values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(values))
+	for index, value := range values {
+		out = append(out, builder.sanitize(fmt.Sprintf("%s[%d]", field, index+1), value))
+	}
+
+	return out
+}
+
+func (builder *exportBuilder) sanitizeMap(field string, values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		safeKey := builder.sanitize(field+".key", key)
+		out[safeKey] = builder.sanitize(field+"."+key, value)
+	}
+
+	return out
+}
+
+func (builder *exportBuilder) sanitizeIssueOmittable(field, value, reason string) string {
+	if value == "" {
+		return ""
+	}
+
+	if builder.options.profile == ExportProfileIssue {
+		builder.omit(reason)
+
+		return ""
+	}
+
+	return builder.sanitize(field, value)
 }
 
 func (builder *exportBuilder) exportString(field string, searchField SearchField, value string) string {
@@ -792,6 +1257,7 @@ func renderMarkdown(export MachineReadableExport) string {
 	writeNegativeKnowledge(&b, export.NegativeKnowledge)
 	writeEvaluations(&b, export.Evaluations)
 	writeArtifacts(&b, export.Artifacts)
+	writeMultiAgentRuns(&b, export.MultiAgentRuns)
 	writeTranscript(&b, export)
 
 	return b.String()
@@ -838,10 +1304,12 @@ func writeIssueSummary(b *strings.Builder, export MachineReadableExport) {
 	fmt.Fprintf(b, "- **Negative knowledge records:** %d\n", export.Session.NegativeKnowledgeCount)
 	fmt.Fprintf(b, "- **Evaluations:** %d\n", export.Session.EvaluationCount)
 	fmt.Fprintf(b, "- **Artifacts:** %d\n", export.Session.ArtifactCount)
+	fmt.Fprintf(b, "- **Multi-agent runs:** %d\n", export.Session.MultiAgentRunCount)
 
 	writeNegativeKnowledge(b, export.NegativeKnowledge)
 	writeEvaluations(b, export.Evaluations)
 	writeArtifacts(b, export.Artifacts)
+	writeMultiAgentRuns(b, export.MultiAgentRuns)
 }
 
 func writeEvaluations(b *strings.Builder, entries []ExportAgentEvaluation) {
@@ -978,6 +1446,426 @@ func writeArtifactWorktreeMetadata(b *strings.Builder, entry *ExportArtifact) {
 	if entry.WorktreeDirty {
 		fmt.Fprintln(b, "  - **Worktree Dirty:** true")
 	}
+}
+
+func writeMultiAgentRuns(b *strings.Builder, entries []ExportMultiAgentRun) {
+	if len(entries) == 0 {
+		return
+	}
+
+	b.WriteString("\n## Multi-agent Runs\n\n")
+
+	for i := range entries {
+		entry := entries[i]
+		fmt.Fprintf(
+			b,
+			"- **%s:** `%s` (%s)\n",
+			markdownInline(fallback(entry.Kind, "run")),
+			markdownInline(entry.ID),
+			markdownInline(string(entry.Status)),
+		)
+
+		if entry.ReceiptID != "" && entry.ReceiptID != entry.ID {
+			fmt.Fprintf(b, "  - **Receipt:** %s\n", markdownInline(entry.ReceiptID))
+		}
+
+		writeRunTimeMetadata(b, entry)
+
+		if entry.Prompt != "" {
+			fmt.Fprintf(b, "  - **Prompt:** %s\n", markdownInline(truncateForMarkdownLine(entry.Prompt, 240)))
+		}
+
+		writeRunSummary(b, entry.Summary)
+		writeRunBudget(b, entry.Budget)
+		writeRunUsage(b, entry.Usage)
+
+		if entry.CancellationReason != "" {
+			fmt.Fprintf(b, "  - **Cancellation reason:** %s\n", markdownInline(entry.CancellationReason))
+		}
+
+		if entry.ResumeReason != "" {
+			fmt.Fprintf(b, "  - **Resume reason:** %s\n", markdownInline(entry.ResumeReason))
+		}
+
+		if entry.Error != "" {
+			fmt.Fprintf(b, "  - **Error:** %s\n", markdownInline(entry.Error))
+		}
+
+		if len(entry.Branches) > 0 {
+			b.WriteString("  - **Branches:**\n")
+
+			for i := range entry.Branches {
+				branch := &entry.Branches[i]
+				fmt.Fprintf(
+					b,
+					"    - %s role=%s status=%s model=%s prompt_hash=%s input_estimate=%d output_estimate=%d context_window=%d max_output_tokens=%d input_tokens=%d cached_input_tokens=%d output_tokens=%d total_tokens=%d estimated_cost_micros=%d duration_ms=%d",
+					markdownInline(branch.Name),
+					markdownInline(branch.Role),
+					markdownInline(string(branch.Status)),
+					markdownInline(branch.Model),
+					markdownInline(branch.PromptHash),
+					branch.InputTokenEstimate,
+					branch.OutputTokenEstimate,
+					branch.ContextWindow,
+					branch.MaxOutputTokens,
+					branch.InputTokens,
+					branch.CachedInputTokens,
+					branch.OutputTokens,
+					branch.TotalTokens,
+					branch.EstimatedCostMicros,
+					branch.DurationMS,
+				)
+
+				if branch.Provenance != "" {
+					fmt.Fprintf(b, " provenance=%s", markdownInline(branch.Provenance))
+				}
+
+				if branch.Error != "" {
+					fmt.Fprintf(b, " error=%s", markdownInline(branch.Error))
+				}
+
+				if branch.BudgetRejectionRule != "" {
+					fmt.Fprintf(
+						b,
+						" budget_rejection=%s used=%d limit=%d",
+						markdownInline(branch.BudgetRejectionRule),
+						branch.BudgetRejectionUsage,
+						branch.BudgetRejectionLimit,
+					)
+				}
+
+				b.WriteByte('\n')
+			}
+		}
+
+		if len(entry.Reviewers) > 0 {
+			b.WriteString("  - **Reviewers:**\n")
+
+			for _, reviewer := range entry.Reviewers {
+				fmt.Fprintf(
+					b,
+					"    - %s role=%s target=%s model=%s prompt_hash=%s call=%s\n",
+					markdownInline(reviewer.Name),
+					markdownInline(reviewer.Role),
+					markdownInline(reviewer.TargetAgent),
+					markdownInline(reviewer.Model),
+					markdownInline(reviewer.PromptHash),
+					markdownInline(reviewer.CallID),
+				)
+			}
+		}
+
+		if len(entry.Gates) > 0 {
+			b.WriteString("  - **Gates:**\n")
+
+			for _, gate := range entry.Gates {
+				status := "FAIL"
+				if gate.Passed {
+					status = "PASS"
+				}
+
+				fmt.Fprintf(b, "    - %s: %s", markdownInline(gate.Name), status)
+
+				if gate.Phase != "" || gate.Agent != "" {
+					fmt.Fprintf(b, " (%s %s)", markdownInline(gate.Phase), markdownInline(gate.Agent))
+				}
+
+				if gate.Notes != "" {
+					fmt.Fprintf(b, " — %s", markdownInline(gate.Notes))
+				}
+
+				b.WriteByte('\n')
+			}
+		}
+
+		if len(entry.Disagreements) > 0 {
+			b.WriteString("  - **Disagreements:**\n")
+
+			for _, disagreement := range entry.Disagreements {
+				fmt.Fprintf(
+					b,
+					"    - %s reviewer=%s target=%s subject=%s",
+					markdownInline(disagreement.Phase),
+					markdownInline(disagreement.Reviewer),
+					markdownInline(disagreement.TargetAgent),
+					markdownInline(disagreement.Subject),
+				)
+
+				if disagreement.Index > 0 {
+					fmt.Fprintf(b, " index=%d", disagreement.Index)
+				}
+
+				if disagreement.Notes != "" {
+					fmt.Fprintf(b, " — %s", markdownInline(disagreement.Notes))
+				}
+
+				b.WriteByte('\n')
+			}
+		}
+
+		if len(entry.Decisions) > 0 {
+			b.WriteString("  - **Decisions:**\n")
+
+			for _, decision := range entry.Decisions {
+				fmt.Fprintf(
+					b,
+					"    - %s %s phase=%s agent=%s",
+					markdownInline(decision.Kind),
+					markdownInline(decision.Outcome),
+					markdownInline(decision.Phase),
+					markdownInline(decision.Agent),
+				)
+
+				if decision.TargetAgent != "" {
+					fmt.Fprintf(b, " target=%s", markdownInline(decision.TargetAgent))
+				}
+
+				if decision.Index > 0 {
+					fmt.Fprintf(b, " index=%d", decision.Index)
+				}
+
+				if decision.Rationale != "" {
+					fmt.Fprintf(b, " — %s", markdownInline(decision.Rationale))
+				}
+
+				b.WriteByte('\n')
+			}
+		}
+
+		if len(entry.Artifacts) > 0 {
+			b.WriteString("  - **Artifacts:**\n")
+
+			for _, artifact := range entry.Artifacts {
+				fmt.Fprintf(
+					b,
+					"    - %s phase=%s agent=%s target=%s",
+					markdownInline(artifact.Kind),
+					markdownInline(artifact.Phase),
+					markdownInline(artifact.Agent),
+					markdownInline(artifact.TargetAgent),
+				)
+
+				if artifact.Index > 0 {
+					fmt.Fprintf(b, " index=%d", artifact.Index)
+				}
+
+				if artifact.Content != "" {
+					fmt.Fprintf(b, " content=%s", markdownInline(truncateForMarkdownLine(artifact.Content, 240)))
+				}
+
+				writeRunArtifactMetadata(b, artifact.Metadata)
+
+				b.WriteByte('\n')
+			}
+		}
+
+		writeRunCalls(b, entry.Calls)
+	}
+}
+
+func writeRunArtifactMetadata(b *strings.Builder, metadata map[string]string) {
+	if len(metadata) == 0 {
+		return
+	}
+
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		fmt.Fprintf(b, " metadata.%s=%s", markdownInline(key), markdownInline(metadata[key]))
+	}
+}
+
+func writeRunCalls(b *strings.Builder, calls []ExportMultiAgentRunCall) {
+	if len(calls) == 0 {
+		return
+	}
+
+	b.WriteString("  - **Calls:**\n")
+
+	for i := range calls {
+		writeRunCall(b, &calls[i])
+	}
+}
+
+func writeRunCall(b *strings.Builder, call *ExportMultiAgentRunCall) {
+	fmt.Fprintf(
+		b,
+		"    - %s agent=%s target=%s status=%s model=%s input_estimate=%d output_estimate=%d",
+		markdownInline(call.Phase),
+		markdownInline(call.Agent),
+		markdownInline(call.TargetAgent),
+		markdownInline(string(call.Status)),
+		markdownInline(fallback(call.ResponseModel, call.RequestedModel)),
+		call.InputTokenEstimate,
+		call.OutputTokenEstimate,
+	)
+
+	if call.PromptHash != "" {
+		fmt.Fprintf(b, " prompt_hash=%s", markdownInline(call.PromptHash))
+	}
+
+	if call.RequestedModel != "" {
+		fmt.Fprintf(b, " requested_model=%s", markdownInline(call.RequestedModel))
+	}
+
+	if call.ResponseModel != "" {
+		fmt.Fprintf(b, " response_model=%s", markdownInline(call.ResponseModel))
+	}
+
+	if len(call.FallbackModels) > 0 {
+		fmt.Fprintf(b, " fallback_models=%s", markdownInline(strings.Join(call.FallbackModels, ",")))
+	}
+
+	if call.MaxOutputTokens > 0 {
+		fmt.Fprintf(b, " max_output_tokens=%d", call.MaxOutputTokens)
+	}
+
+	if call.ContextWindow > 0 {
+		fmt.Fprintf(b, " context_window=%d", call.ContextWindow)
+	}
+
+	if call.InputTokens > 0 || call.CachedInputTokens > 0 || call.OutputTokens > 0 || call.TotalTokens > 0 {
+		fmt.Fprintf(
+			b,
+			" input_tokens=%d cached_input_tokens=%d output_tokens=%d total_tokens=%d",
+			call.InputTokens,
+			call.CachedInputTokens,
+			call.OutputTokens,
+			call.TotalTokens,
+		)
+	}
+
+	if call.DurationMS > 0 {
+		fmt.Fprintf(b, " duration_ms=%d", call.DurationMS)
+	}
+
+	if call.EstimatedCostMicros > 0 {
+		fmt.Fprintf(b, " estimated_cost_micros=%d", call.EstimatedCostMicros)
+	}
+
+	if call.BudgetRejectionRule != "" {
+		fmt.Fprintf(
+			b,
+			" budget_rejection=%s used=%d limit=%d",
+			markdownInline(call.BudgetRejectionRule),
+			call.BudgetRejectionUsage,
+			call.BudgetRejectionLimit,
+		)
+	}
+
+	if call.Error != "" {
+		fmt.Fprintf(b, " error=%s", markdownInline(call.Error))
+	}
+
+	writeRunCallTextField(b, "system_prompt", call.SystemPrompt)
+	writeRunCallTextField(b, "user_prompt", call.UserPrompt)
+	writeRunCallTextField(b, "response", call.Response)
+
+	b.WriteByte('\n')
+}
+
+func writeRunCallTextField(b *strings.Builder, name, value string) {
+	if value == "" {
+		return
+	}
+
+	fmt.Fprintf(b, " %s=%s", name, markdownInline(truncateForMarkdownLine(value, 160)))
+}
+
+func writeRunTimeMetadata(b *strings.Builder, entry ExportMultiAgentRun) {
+	if !entry.StartedAt.IsZero() {
+		fmt.Fprintf(b, "  - **Started:** %s\n", entry.StartedAt.UTC().Format(time.RFC3339))
+	}
+
+	if entry.CompletedAt != nil && !entry.CompletedAt.IsZero() {
+		fmt.Fprintf(b, "  - **Completed:** %s\n", entry.CompletedAt.UTC().Format(time.RFC3339))
+	}
+
+	if entry.Model != "" {
+		fmt.Fprintf(b, "  - **Model:** %s\n", markdownInline(entry.Model))
+	}
+}
+
+func writeRunSummary(b *strings.Builder, summary ExportMultiAgentRunSummary) {
+	if summary.Winner != "" {
+		fmt.Fprintf(b, "  - **Winner:** %s\n", markdownInline(summary.Winner))
+	}
+
+	if summary.Reason != "" {
+		fmt.Fprintf(b, "  - **Reason:** %s\n", markdownInline(summary.Reason))
+	}
+
+	if summary.VerdictReviewer != "" {
+		fmt.Fprintf(b, "  - **Verdict reviewer:** %s\n", markdownInline(summary.VerdictReviewer))
+	}
+
+	if summary.Findings > 0 {
+		fmt.Fprintf(b, "  - **Findings:** %d\n", summary.Findings)
+	}
+}
+
+func writeRunBudget(b *strings.Builder, budget MultiAgentRunBudget) {
+	if budget.PerCallMaxInputTokens == 0 &&
+		budget.PerCallMaxOutputTokens == 0 &&
+		budget.MaxRunInputTokens == 0 &&
+		budget.MaxRunOutputTokens == 0 &&
+		budget.MaxRunTotalTokens == 0 &&
+		budget.MaxModelCalls == 0 &&
+		budget.MaxRunCostMicros == 0 &&
+		budget.MaxRunWallTimeMS == 0 {
+		return
+	}
+
+	fmt.Fprintf(
+		b,
+		"  - **Budget:** per_call_max_input_tokens=%d per_call_max_output_tokens=%d max_run_input_tokens=%d max_run_output_tokens=%d max_run_total_tokens=%d max_model_calls=%d max_run_cost_micros=%d max_run_wall_time_ms=%d\n",
+		budget.PerCallMaxInputTokens,
+		budget.PerCallMaxOutputTokens,
+		budget.MaxRunInputTokens,
+		budget.MaxRunOutputTokens,
+		budget.MaxRunTotalTokens,
+		budget.MaxModelCalls,
+		budget.MaxRunCostMicros,
+		budget.MaxRunWallTimeMS,
+	)
+}
+
+func writeRunUsage(b *strings.Builder, usage MultiAgentRunUsage) {
+	if usage.ModelCalls == 0 && usage.EstimatedInputTokens == 0 && usage.EstimatedOutputTokens == 0 &&
+		usage.EstimatedTotalTokens == 0 && usage.InputTokens == 0 && usage.CachedInputTokens == 0 &&
+		usage.OutputTokens == 0 && usage.TotalTokens == 0 && usage.EstimatedCostMicros == 0 &&
+		usage.CompletedCalls == 0 && usage.CanceledCalls == 0 && usage.ProviderFailedCalls == 0 &&
+		usage.BudgetRejectedCalls == 0 &&
+		usage.DurationMS == 0 {
+		return
+	}
+
+	fmt.Fprintf(
+		b,
+		"  - **Usage:** model_calls=%d completed_calls=%d canceled_calls=%d provider_failed_calls=%d budget_rejected_calls=%d estimated_input_tokens=%d estimated_output_tokens=%d estimated_total_tokens=%d estimated_cost_micros=%d input_tokens=%d cached_input_tokens=%d output_tokens=%d total_tokens=%d duration_ms=%d\n",
+		usage.ModelCalls,
+		usage.CompletedCalls,
+		usage.CanceledCalls,
+		usage.ProviderFailedCalls,
+		usage.BudgetRejectedCalls,
+		usage.EstimatedInputTokens,
+		usage.EstimatedOutputTokens,
+		usage.EstimatedTotalTokens,
+		usage.EstimatedCostMicros,
+		usage.InputTokens,
+		usage.CachedInputTokens,
+		usage.OutputTokens,
+		usage.TotalTokens,
+		usage.DurationMS,
+	)
 }
 
 func writeNegativeKnowledge(b *strings.Builder, entries []ExportNegativeKnowledge) {
@@ -1194,6 +2082,20 @@ func markdownInline(value string) string {
 	return replacer.Replace(value)
 }
 
+func truncateForMarkdownLine(value string, maxRunes int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if maxRunes <= 0 {
+		return value
+	}
+
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+
+	return string(runes[:maxRunes]) + "..."
+}
+
 func exportContentHashes(export MachineReadableExport) map[string]string {
 	hashes := map[string]string{
 		"session": hashJSON(export.Session),
@@ -1213,6 +2115,10 @@ func exportContentHashes(export MachineReadableExport) map[string]string {
 
 	if len(export.Artifacts) > 0 {
 		hashes["artifacts"] = hashJSON(export.Artifacts)
+	}
+
+	if len(export.MultiAgentRuns) > 0 {
+		hashes["multi_agent_runs"] = hashJSON(export.MultiAgentRuns)
 	}
 
 	return hashes

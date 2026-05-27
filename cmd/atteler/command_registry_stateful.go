@@ -133,6 +133,22 @@ func statefulSessionReadCommandSet() []statefulSessionCommand[sessionReadCommand
 			func(_ context.Context, input sessionReadCommandInput, s appState) error {
 				return exportSession(s.sessionState, input.ExportFormat)
 			}),
+		statefulSessionCmd("show-run", func(input sessionReadCommandInput) bool { return input.ShowRunRef != "" },
+			func(_ context.Context, input sessionReadCommandInput, s appState) error {
+				return showMultiAgentRun(s.sessionState, input.ShowRunRef)
+			}),
+		statefulSessionCmd("export-run", func(input sessionReadCommandInput) bool { return input.ExportRunRef != "" },
+			func(_ context.Context, input sessionReadCommandInput, s appState) error {
+				return exportMultiAgentRun(s.sessionState, input.ExportRunRef, input.ExportFormat)
+			}),
+		statefulSessionCmd("replay-run", func(input sessionReadCommandInput) bool { return input.ReplayRunRef != "" },
+			func(_ context.Context, input sessionReadCommandInput, s appState) error {
+				return replayMultiAgentRun(s.sessionState, input.ReplayRunRef)
+			}),
+		statefulSessionCmd("resume-run", func(input sessionReadCommandInput) bool { return input.ResumeRunRef != "" },
+			func(_ context.Context, input sessionReadCommandInput, s appState) error {
+				return resumeMultiAgentRun(s.sessionState, input.ResumeRunRef)
+			}),
 		statefulSessionCmd("list-artifacts", func(input sessionReadCommandInput) bool { return input.ListArtifacts },
 			func(_ context.Context, _ sessionReadCommandInput, s appState) error {
 				listArtifacts(s.sessionState)
@@ -151,6 +167,11 @@ func statefulSessionReadCommandSet() []statefulSessionCommand[sessionReadCommand
 		statefulSessionCmd("list-messages", func(input sessionReadCommandInput) bool { return input.ListMessages },
 			func(_ context.Context, _ sessionReadCommandInput, s appState) error {
 				listMessages(s.sessionState)
+				return nil
+			}),
+		statefulSessionCmd("list-runs", func(input sessionReadCommandInput) bool { return input.ListRuns },
+			func(_ context.Context, _ sessionReadCommandInput, s appState) error {
+				listMultiAgentRuns(s.sessionState)
 				return nil
 			}),
 	}
