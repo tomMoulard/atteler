@@ -649,11 +649,15 @@ func waitTaskRetryBackoff(ctx context.Context, backoff time.Duration) error {
 }
 
 func taskStatusForAttempt(attemptErr, parentErr, err error, timeoutExceeded bool) string {
+	if errors.Is(parentErr, context.Canceled) {
+		return StatusCanceled
+	}
+
 	if errors.Is(attemptErr, context.DeadlineExceeded) {
 		return StatusTimedOut
 	}
 
-	if errors.Is(parentErr, context.Canceled) || errors.Is(attemptErr, context.Canceled) {
+	if errors.Is(attemptErr, context.Canceled) {
 		return StatusCanceled
 	}
 
@@ -684,7 +688,9 @@ func taskErrorForStatus(attemptCtx, parentCtx context.Context, status string, er
 
 	if status == StatusCanceled {
 		cause := runContextCauseOrErr(attemptCtx, context.Canceled)
-		if errors.Is(cause, context.Canceled) && parentCtx != nil {
+		if parentCtx != nil && errors.Is(parentCtx.Err(), context.Canceled) {
+			cause = runContextCauseOrErr(parentCtx, context.Canceled)
+		} else if errors.Is(cause, context.Canceled) && parentCtx != nil {
 			cause = runContextCauseOrErr(parentCtx, context.Canceled)
 		}
 
