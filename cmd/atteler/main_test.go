@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,9 +62,10 @@ func TestFormatSessionSummary(t *testing.T) {
 
 	summary.Title = "Auth review"
 	summary.Tags = []string{"auth", "review"}
+	summary.AgentLoopBudget = llm.AgentLoopBudget{MaxInputTokens: 100, MaxOutputTokens: 50, MaxCostMicros: 25_000}
 	got = formatSessionSummary(summary)
 
-	want = "abc\t2026-04-30T12:00:00Z\t3 messages\tagent=reviewer\tmodel=gpt-test\ttitle=Auth review\ttags=auth,review\t/tmp/abc.json"
+	want = "abc\t2026-04-30T12:00:00Z\t3 messages\tagent=reviewer\tmodel=gpt-test\tbudget=in=100,out=50,costµ=25000\ttitle=Auth review\ttags=auth,review\t/tmp/abc.json"
 	if got != want {
 		require.Failf(t, "unexpected failure", "titled summary = %q, want %q", got, want)
 	}
@@ -122,6 +124,17 @@ func TestFormatSessionDetails(t *testing.T) {
 	sessionState := session.New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
 	sessionState.Title = "Demo"
 	sessionState.Tags = []string{"demo"}
+	sessionState.AgentLoopBudget = llm.AgentLoopBudget{
+		MaxWallTime:     time.Minute,
+		MaxOutputBytes:  4096,
+		MaxCostMicros:   25_000,
+		MaxIterations:   3,
+		MaxModelCalls:   4,
+		MaxToolCalls:    5,
+		MaxInputTokens:  100,
+		MaxOutputTokens: 50,
+		MaxTotalTokens:  150,
+	}
 	sessionState.RecordNegativeKnowledge("try cache bust", "broke auth", "abc123", "reviewer")
 	sessionState.RecordEvaluation("reviewer", "pass", "caught auth regression", "eval.md", 5)
 	sessionState.RecordArtifact("docs/research.md", "research", "auth notes", "reviewer")
@@ -136,6 +149,16 @@ func TestFormatSessionDetails(t *testing.T) {
 		"path: /tmp/session.json",
 		"title: Demo",
 		"- demo",
+		"agent_loop_budget:",
+		"max_output_bytes: 4096",
+		"max_cost_micros: 25000",
+		"max_input_tokens: 100",
+		"max_output_tokens: 50",
+		"max_total_tokens: 150",
+		"max_iterations: 3",
+		"max_model_calls: 4",
+		"max_tool_calls: 5",
+		"max_wall_time: 1m0s",
 		"role: user",
 		"content: hello",
 		"negative_knowledge:",
@@ -149,6 +172,12 @@ func TestFormatSessionDetails(t *testing.T) {
 			require.Failf(t, "unexpected failure", "session details missing %q in:\n%s", want, out)
 		}
 	}
+}
+
+func TestSessionAgentLoopBudgetDetailsExposeEveryBudgetField(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, tagFieldsForType[llm.AgentLoopBudget]("json"), tagFieldsForType[agentLoopBudgetDetails]("yaml"))
 }
 
 func TestInitConfigWritesTemplateWithoutOverwrite(t *testing.T) {
@@ -171,6 +200,30 @@ func TestInitConfigWritesTemplateWithoutOverwrite(t *testing.T) {
 	if err := initConfig(path); err == nil {
 		require.FailNow(t, "expected existing config error")
 	}
+}
+
+//nolint:paralleltest // Temporarily redirects process stdout.
+func TestRunInlineConfigCommandTemplateMatchesConfigTemplate(t *testing.T) {
+	originalStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+
+	os.Stdout = writer
+
+	defer func() {
+		os.Stdout = originalStdout
+		_ = reader.Close()
+		_ = writer.Close()
+	}()
+
+	handled, runErr := runInlineConfigCommand(cliOptions{printConfigTemplate: true})
+	require.NoError(t, runErr)
+	assert.True(t, handled)
+	require.NoError(t, writer.Close())
+
+	data, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Equal(t, config.TemplateYAML(), string(data))
 }
 
 func TestAppendStdinContext(t *testing.T) {
@@ -746,8 +799,13 @@ func TestFormatSessionDetailsSummary(t *testing.T) {
 		DefaultModel: "gpt-test",
 		CreatedAt:    time.Date(2026, 5, 1, 13, 15, 0, 0, time.UTC),
 		UpdatedAt:    time.Date(2026, 5, 1, 13, 30, 0, 0, time.UTC),
-		Tags:         []string{"auth", "regression"},
-		Messages:     []llm.Message{{Role: llm.RoleUser, Content: "hello"}},
+		AgentLoopBudget: llm.AgentLoopBudget{
+			MaxCostMicros:   25_000,
+			MaxInputTokens:  100,
+			MaxOutputTokens: 50,
+		},
+		Tags:     []string{"auth", "regression"},
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}},
 		NegativeKnowledge: []session.NegativeKnowledge{
 			{Approach: "timer", Reason: "storm"},
 		},
@@ -768,6 +826,7 @@ func TestFormatSessionDetailsSummary(t *testing.T) {
 		"title=Auth refresh",
 		"agent=reviewer",
 		"model=gpt-test",
+		"budget=in=100,out=50,costµ=25000",
 		"tags=auth,regression",
 	} {
 		if !strings.Contains(got, want) {

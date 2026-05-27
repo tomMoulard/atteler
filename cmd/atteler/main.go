@@ -381,6 +381,7 @@ func initialModel(
 ) model {
 	ta := newPromptTextarea()
 	selectedProvider, _ := reg.ProviderForModel(selectedModel)
+	sessionState.AgentLoopBudget = agentLoopBudget
 
 	return model{
 		ctx:                         ctx,

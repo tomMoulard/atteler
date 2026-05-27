@@ -11,7 +11,16 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 
 	temperature := 0.2
 	seed := 7
+	maxOutputBytes := int64(4096)
+	maxCostMicros := int64(25_000)
+	maxInputTokens := 100
+	maxOutputTokens := 50
+	maxTotalTokens := 150
 	maxIterations := 3
+	maxModelCalls := 4
+	maxToolCalls := 5
+	maxWallTime := "1m"
+	checkpointInterval := 2
 	enabled := true
 
 	cfg := Config{
@@ -19,7 +28,16 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 			Temperature: &temperature,
 		},
 		AgentLoop: AgentLoopConfig{
-			MaxIterations: &maxIterations,
+			MaxOutputBytes:     &maxOutputBytes,
+			MaxCostMicros:      &maxCostMicros,
+			MaxInputTokens:     &maxInputTokens,
+			MaxOutputTokens:    &maxOutputTokens,
+			MaxTotalTokens:     &maxTotalTokens,
+			MaxIterations:      &maxIterations,
+			MaxModelCalls:      &maxModelCalls,
+			MaxToolCalls:       &maxToolCalls,
+			MaxWallTime:        &maxWallTime,
+			CheckpointInterval: &checkpointInterval,
 		},
 		Agents: map[string]AgentConfig{
 			"reviewer": {
@@ -42,7 +60,16 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 
 	redacted := RedactedConfig(cfg)
 	*redacted.Generation.Temperature = 0.9
+	*redacted.AgentLoop.MaxOutputBytes = 8192
+	*redacted.AgentLoop.MaxCostMicros = 50_000
+	*redacted.AgentLoop.MaxInputTokens = 999
+	*redacted.AgentLoop.MaxOutputTokens = 888
+	*redacted.AgentLoop.MaxTotalTokens = 777
 	*redacted.AgentLoop.MaxIterations = 99
+	*redacted.AgentLoop.MaxModelCalls = 66
+	*redacted.AgentLoop.MaxToolCalls = 55
+	*redacted.AgentLoop.MaxWallTime = "2m"
+	*redacted.AgentLoop.CheckpointInterval = 44
 	*redacted.Agents["reviewer"].Seed = 42
 	redacted.Agents["reviewer"].RoutingPolicy.PreferredProviders[0] = "anthropic"
 	redacted.Agents["reviewer"].FallbackModels[0] = "fallback-b"
@@ -52,7 +79,16 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	*redacted.SkillLearning.Enabled = false
 
 	assert.InDelta(t, 0.2, *cfg.Generation.Temperature, 0)
+	assert.EqualValues(t, 4096, *cfg.AgentLoop.MaxOutputBytes)
+	assert.EqualValues(t, 25_000, *cfg.AgentLoop.MaxCostMicros)
+	assert.Equal(t, 100, *cfg.AgentLoop.MaxInputTokens)
+	assert.Equal(t, 50, *cfg.AgentLoop.MaxOutputTokens)
+	assert.Equal(t, 150, *cfg.AgentLoop.MaxTotalTokens)
 	assert.Equal(t, 3, *cfg.AgentLoop.MaxIterations)
+	assert.Equal(t, 4, *cfg.AgentLoop.MaxModelCalls)
+	assert.Equal(t, 5, *cfg.AgentLoop.MaxToolCalls)
+	assert.Equal(t, "1m", *cfg.AgentLoop.MaxWallTime)
+	assert.Equal(t, 2, *cfg.AgentLoop.CheckpointInterval)
 	assert.Equal(t, 7, *cfg.Agents["reviewer"].Seed)
 	assert.Equal(t, []string{"openai"}, cfg.Agents["reviewer"].RoutingPolicy.PreferredProviders)
 	assert.Equal(t, []string{"fallback-a"}, cfg.Agents["reviewer"].FallbackModels)

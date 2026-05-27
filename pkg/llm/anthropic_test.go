@@ -83,6 +83,8 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 		assert.Failf(t, "assertion failed", "content = %q, want %q", resp.Content, "hello back")
 	}
 
+	assert.Equal(t, providerAnthropic, resp.Provider)
+
 	if resp.InputTokens != 20 || resp.CachedInputTokens != 6 || resp.CacheWriteInputTokens != 4 || resp.OutputTokens != 5 {
 		assert.Failf(t, "assertion failed", "tokens = %d/%d/%d/%d, want 20/6/4/5", resp.InputTokens, resp.CachedInputTokens, resp.CacheWriteInputTokens, resp.OutputTokens)
 	}

@@ -573,6 +573,10 @@ func formatSessionSummary(summary session.Summary) string {
 		"agent=" + agentName,
 		"model=" + modelName,
 	}
+	if budget := formatAgentLoopBudgetCompact(summary.AgentLoopBudget); budget != "" {
+		parts = append(parts, "budget="+budget)
+	}
+
 	if summary.Title != "" {
 		parts = append(parts, "title="+summary.Title)
 	}

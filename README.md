@@ -171,20 +171,37 @@ generation:
   max_tokens: 2048
 
 agent_loop:
-  # 0 means no ceiling.
+  # 0 means no ceiling. These ceilings are cumulative for one agent loop.
   max_output_bytes: 0
+  # max_cost_micros caps estimated provider spend in micro-units of currency
+  # (for example, 1000000 = 1.0). When set, Atteler requires provider/model
+  # pricing and usage metadata, and fails closed for unpriced or unmetered
+  # models.
+  max_cost_micros: 0
+  # max_input_tokens and max_output_tokens use provider-reported actual usage
+  # accumulated across the whole loop. They are distinct from
+  # context.max_input_tokens, which preflights each individual request before
+  # it is sent; the stricter gate wins in practice based on which one trips.
+  # When token ceilings are set, Atteler fails closed for unmetered or
+  # partially metered responses.
+  max_input_tokens: 0
+  max_output_tokens: 0
   max_total_tokens: 0
   # max_iterations caps the number of tool-use turns per agent loop. Omit (or
   # set to 0) to run unlimited turns until the model returns a final response
   # or another budget — model calls, tool calls, wall time — trips.
   max_iterations: 0
+  # max_model_calls and max_tool_calls cap cumulative model completions and
+  # executed tool calls.
+  max_model_calls: 0
+  max_tool_calls: 0
   # max_wall_time caps the wall-clock duration of an agent loop. Parsed via
   # Go's time.ParseDuration (e.g. "30m", "1h30m"). Omit, leave empty, or set
   # to "0" for no wall-clock cap (the default).
-  # max_wall_time: 30m
+  max_wall_time: "0"
   # checkpoint_interval prompts the user to confirm continuation every N
   # tool-use iterations. Omit (or set to 0) to never prompt — the default.
-  # checkpoint_interval: 40
+  checkpoint_interval: 0
 
 providers:
   openai:

@@ -22,6 +22,9 @@ generation:
   reasoning: high
   surprise: true
 agent_loop:
+  max_cost_micros: 100000
+  max_input_tokens: 1000
+  max_output_tokens: 2000
   max_tool_calls: 10
   max_wall_time: 30m
   checkpoint_interval: 2
@@ -62,6 +65,9 @@ skill_learning:
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_tool_calls")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_wall_time")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.checkpoint_interval")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_cost_micros")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_input_tokens")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_output_tokens")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "providers.openai.disable_private_adapter")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "skill_learning")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "skill_learning.enabled")
@@ -135,6 +141,9 @@ hooks:
 	require.Empty(t, report.LoadError)
 	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_iterations")
 	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_tool_calls")
+	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_cost_micros")
+	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_input_tokens")
+	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_output_tokens")
 	assertDefaultDiagnostic(t, report.Defaults, "providers.*.disable_private_adapter")
 	assertDefaultDiagnostic(t, report.Defaults, "skill_learning.enabled")
 

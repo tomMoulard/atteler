@@ -65,6 +65,21 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Message: "agent-loop tool output is unlimited unless this field is set to a positive byte limit",
 		},
 		{
+			Field:   "agent_loop.max_cost_micros",
+			Value:   "unset/0",
+			Message: "agent-loop estimated provider cost is unlimited unless this field is set to a positive micro-unit limit; priced model metadata is required when enabled",
+		},
+		{
+			Field:   "agent_loop.max_input_tokens",
+			Value:   "unset/0",
+			Message: "agent-loop cumulative provider-reported input tokens are unlimited unless this field is set to a positive token limit; context.max_input_tokens remains a separate per-request preflight cap",
+		},
+		{
+			Field:   "agent_loop.max_output_tokens",
+			Value:   "unset/0",
+			Message: "agent-loop cumulative provider-reported output tokens are unlimited unless this field is set to a positive token limit",
+		},
+		{
 			Field:   "agent_loop.max_total_tokens",
 			Value:   "unset/0",
 			Message: "agent-loop cumulative tokens are unlimited unless this field is set to a positive token limit",

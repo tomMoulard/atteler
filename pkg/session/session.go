@@ -40,6 +40,8 @@ const (
 )
 
 // Session is a durable chat transcript.
+//
+//nolint:govet // Persisted JSON order favors stable human-readable session metadata over pointer packing.
 type Session struct {
 	CreatedAt             time.Time           `json:"created_at"`
 	UpdatedAt             time.Time           `json:"updated_at"`
@@ -48,6 +50,7 @@ type Session struct {
 	DefaultModel          string              `json:"default_model,omitempty"`
 	DefaultReasoningLevel string              `json:"default_reasoning_level,omitempty"`
 	DefaultAgent          string              `json:"default_agent,omitempty"`
+	AgentLoopBudget       llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
 	WorktreePath          string              `json:"worktree_path,omitempty"`
 	WorktreeBranch        string              `json:"worktree_branch,omitempty"`
 	WorktreeBase          string              `json:"worktree_base,omitempty"`
@@ -123,20 +126,23 @@ type Store struct {
 }
 
 // Summary is lightweight session metadata for listing.
+//
+//nolint:govet // JSON/API field readability is preferred over pointer packing.
 type Summary struct {
-	UpdatedAt      time.Time `json:"updated_at,omitzero"`
-	CreatedAt      time.Time `json:"created_at,omitzero"`
-	AgentNames     []string  `json:"agent_names,omitempty"`
-	Path           string    `json:"path"`
-	ID             string    `json:"id"`
-	Title          string    `json:"title,omitempty"`
-	DefaultModel   string    `json:"default_model,omitempty"`
-	DefaultAgent   string    `json:"default_agent,omitempty"`
-	WorktreePath   string    `json:"worktree_path,omitempty"`
-	WorktreeBranch string    `json:"worktree_branch,omitempty"`
-	WorktreeBase   string    `json:"worktree_base,omitempty"`
-	Tags           []string  `json:"tags,omitempty"`
-	Messages       int       `json:"messages"`
+	UpdatedAt       time.Time           `json:"updated_at,omitzero"`
+	CreatedAt       time.Time           `json:"created_at,omitzero"`
+	AgentNames      []string            `json:"agent_names,omitempty"`
+	Path            string              `json:"path"`
+	ID              string              `json:"id"`
+	Title           string              `json:"title,omitempty"`
+	DefaultModel    string              `json:"default_model,omitempty"`
+	DefaultAgent    string              `json:"default_agent,omitempty"`
+	AgentLoopBudget llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
+	WorktreePath    string              `json:"worktree_path,omitempty"`
+	WorktreeBranch  string              `json:"worktree_branch,omitempty"`
+	WorktreeBase    string              `json:"worktree_base,omitempty"`
+	Tags            []string            `json:"tags,omitempty"`
+	Messages        int                 `json:"messages"`
 }
 
 // sessionSummaryFile mirrors lightweight session JSON fields used for listing.
@@ -145,18 +151,19 @@ type Summary struct {
 //
 //nolint:govet // JSON/API field readability is preferred over pointer packing.
 type sessionSummaryFile struct {
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	AgentNames     []string
-	Tags           []string
-	ID             string
-	Title          string
-	DefaultModel   string
-	DefaultAgent   string
-	WorktreePath   string
-	WorktreeBranch string
-	WorktreeBase   string
-	Messages       int
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	AgentNames      []string
+	Tags            []string
+	ID              string
+	Title           string
+	DefaultModel    string
+	DefaultAgent    string
+	AgentLoopBudget llm.AgentLoopBudget
+	WorktreePath    string
+	WorktreeBranch  string
+	WorktreeBase    string
+	Messages        int
 }
 
 // TagSummary counts how many saved sessions use a tag.
@@ -732,17 +739,18 @@ func readSummary(path string) (Summary, error) {
 
 func summarizeFile(path string, file sessionSummaryFile) Summary {
 	return Summary{
-		ID:           file.ID,
-		Title:        file.Title,
-		Path:         path,
-		CreatedAt:    file.CreatedAt,
-		UpdatedAt:    file.UpdatedAt,
-		AgentNames:   appendSummaryAgentNames([]string{file.DefaultAgent}, file.AgentNames...),
-		DefaultModel: file.DefaultModel,
-		DefaultAgent: file.DefaultAgent,
-		WorktreePath: file.WorktreePath,
-		Tags:         append([]string(nil), file.Tags...),
-		Messages:     file.Messages,
+		ID:              file.ID,
+		Title:           file.Title,
+		Path:            path,
+		CreatedAt:       file.CreatedAt,
+		UpdatedAt:       file.UpdatedAt,
+		AgentNames:      appendSummaryAgentNames([]string{file.DefaultAgent}, file.AgentNames...),
+		DefaultModel:    file.DefaultModel,
+		DefaultAgent:    file.DefaultAgent,
+		AgentLoopBudget: file.AgentLoopBudget,
+		WorktreePath:    file.WorktreePath,
+		Tags:            append([]string(nil), file.Tags...),
+		Messages:        file.Messages,
 	}
 }
 
@@ -809,6 +817,8 @@ func readSummaryObjectValue(decoder *json.Decoder, key string, file *sessionSumm
 		return decodeSummaryJSONValue(decoder, key, &file.DefaultModel)
 	case "default_agent":
 		return decodeSummaryJSONValue(decoder, key, &file.DefaultAgent)
+	case "agent_loop_budget":
+		return decodeSummaryJSONValue(decoder, key, &file.AgentLoopBudget)
 	case "worktree_path":
 		return decodeSummaryJSONValue(decoder, key, &file.WorktreePath)
 	case "created_at":

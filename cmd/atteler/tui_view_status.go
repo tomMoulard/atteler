@@ -136,6 +136,10 @@ func (m model) statusLine() string {
 		parts = append(parts, "effort:"+reasoningLabel)
 	}
 
+	if budget := formatAgentLoopBudgetCompact(m.agentLoopBudget); budget != "" {
+		parts = append(parts, "budget:"+budget)
+	}
+
 	if ctx := m.contextUsage(); ctx != "" {
 		parts = append(parts, ctx)
 	}

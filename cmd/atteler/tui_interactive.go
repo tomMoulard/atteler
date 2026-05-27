@@ -77,6 +77,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		SessionPath: state.sessionStore.Path(state.sessionState.ID),
 		Agent:       state.selectedAgent,
 		Model:       state.selectedModel,
+		Metadata:    agentLoopBudgetEventMetadata(state.agentLoopBudget),
 	})
 
 	finalModel, err := runInteractiveProgram(initialModel(
@@ -152,6 +153,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		SessionPath: state.sessionStore.Path(finalSession.ID),
 		Agent:       finalSession.DefaultAgent,
 		Model:       finalSession.DefaultModel,
+		Metadata:    agentLoopBudgetEventMetadata(finalSession.AgentLoopBudget),
 	})
 
 	finalizeWorktree(ctx, &state)

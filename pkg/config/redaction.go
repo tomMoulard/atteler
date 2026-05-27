@@ -99,6 +99,9 @@ func redactedGenerationConfig(cfg GenerationConfig) GenerationConfig {
 
 func redactedAgentLoopConfig(cfg AgentLoopConfig) AgentLoopConfig {
 	cfg.MaxOutputBytes = clonePtr(cfg.MaxOutputBytes)
+	cfg.MaxCostMicros = clonePtr(cfg.MaxCostMicros)
+	cfg.MaxInputTokens = clonePtr(cfg.MaxInputTokens)
+	cfg.MaxOutputTokens = clonePtr(cfg.MaxOutputTokens)
 	cfg.MaxTotalTokens = clonePtr(cfg.MaxTotalTokens)
 	cfg.MaxIterations = clonePtr(cfg.MaxIterations)
 	cfg.MaxModelCalls = clonePtr(cfg.MaxModelCalls)

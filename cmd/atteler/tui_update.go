@@ -769,6 +769,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 
 	m.history = nextHistory
 	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
+	m.sessionState.AgentLoopBudget = m.agentLoopBudget
 
 	m.sessionState.DefaultAgent = activeAgent.name
 	if requestModel != "" {

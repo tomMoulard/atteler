@@ -102,6 +102,7 @@ type AgentLoopStep struct {
 	Iteration     int                            `json:"iteration"`
 	At            time.Time                      `json:"at"`
 	Kind          AgentLoopStepKind              `json:"kind"`
+	Budget        AgentLoopBudget                `json:"budget,omitzero"`
 	ModelRequest  *AgentLoopModelRequestSummary  `json:"model_request,omitempty"`
 	ModelResponse *AgentLoopModelResponseSummary `json:"model_response,omitempty"`
 	ToolCall      *ToolCall                      `json:"tool_call,omitempty"`
@@ -128,8 +129,11 @@ func (f AgentLoopCheckpointFunc) SaveAgentLoopStep(ctx context.Context, step Age
 
 // AgentLoopLedger is an in-memory checkpoint sink useful for tests and callers
 // that want structured inspection without parsing chat transcripts.
+//
+//nolint:govet // JSON summary keeps the effective budget before detailed steps.
 type AgentLoopLedger struct {
-	Steps []AgentLoopStep `json:"steps"`
+	Budget AgentLoopBudget `json:"budget,omitzero"`
+	Steps  []AgentLoopStep `json:"steps"`
 }
 
 // SaveAgentLoopStep implements AgentLoopCheckpointSink.
@@ -142,9 +146,18 @@ func (l *AgentLoopLedger) SaveAgentLoopStep(ctx context.Context, step AgentLoopS
 		return nil
 	}
 
+	l.captureBudget(step.Budget)
 	l.Steps = append(l.Steps, step)
 
 	return nil
+}
+
+func (l *AgentLoopLedger) captureBudget(budget AgentLoopBudget) {
+	if l == nil || !l.Budget.IsZero() || budget.IsZero() {
+		return
+	}
+
+	l.Budget = budget
 }
 
 // AgentLoopJSONLCheckpoint appends checkpoint records to a JSON Lines file.
@@ -220,6 +233,7 @@ func LoadAgentLoopLedger(path string) (*AgentLoopLedger, error) {
 					return nil, fmt.Errorf("llm: parse checkpoint %s line %d: %w", path, lineNo, decodeErr)
 				}
 
+				ledger.captureBudget(step.Budget)
 				ledger.Steps = append(ledger.Steps, step)
 			}
 		}

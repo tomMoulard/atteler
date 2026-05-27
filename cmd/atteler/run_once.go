@@ -25,6 +25,10 @@ import (
 const (
 	headlessHeartbeatInterval = 15 * time.Second
 	headlessParentRunIDEnv    = "ATTELER_HEADLESS_PARENT_ID"
+
+	agentLoopConfigFieldMaxInputTokens  = "agent_loop.max_input_tokens"  // #nosec G101 -- config field path, not a credential.
+	agentLoopConfigFieldMaxOutputTokens = "agent_loop.max_output_tokens" // #nosec G101 -- config field path, not a credential.
+	agentLoopConfigFieldMaxTotalTokens  = "agent_loop.max_total_tokens"  // #nosec G101 -- config field path, not a credential.
 )
 
 type responseRecordOptions struct {
@@ -45,15 +49,17 @@ type runOnceExecutionOptions struct {
 	SkillLearningEnabled        bool
 }
 
+//nolint:govet // JSON output order favors user-facing readability over pointer packing.
 type runOnceResult struct {
-	SessionID               string     `json:"session_id"`
-	SessionPath             string     `json:"session_path"`
-	AgentLoopCheckpointPath string     `json:"agent_loop_checkpoint_path,omitempty"`
-	HeadlessID              string     `json:"headless_id,omitempty"`
-	Agent                   string     `json:"agent,omitempty"`
-	Model                   string     `json:"model,omitempty"`
-	Content                 string     `json:"content"`
-	TokenUsage              tokenUsage `json:"token_usage"`
+	SessionID               string              `json:"session_id"`
+	SessionPath             string              `json:"session_path"`
+	AgentLoopCheckpointPath string              `json:"agent_loop_checkpoint_path,omitempty"`
+	AgentLoopBudget         llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
+	HeadlessID              string              `json:"headless_id,omitempty"`
+	Agent                   string              `json:"agent,omitempty"`
+	Model                   string              `json:"model,omitempty"`
+	Content                 string              `json:"content"`
+	TokenUsage              tokenUsage          `json:"token_usage"`
 }
 
 //nolint:govet // Field order follows request-preparation flow; padding is irrelevant here.
@@ -300,6 +306,7 @@ func runOnceWithOptions(
 
 	applyRunOnceSessionDefaults(&sessionState, prepared, generationOverrides)
 	sessionState.DefaultAgent = prepared.activeAgent.name
+	sessionState.AgentLoopBudget = executionOptions.AgentLoopBudget
 
 	emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.SessionStart,
@@ -307,6 +314,7 @@ func runOnceWithOptions(
 		SessionPath: store.Path(sessionState.ID),
 		Agent:       prepared.activeAgent.name,
 		Model:       sessionState.DefaultModel,
+		Metadata:    agentLoopBudgetEventMetadata(executionOptions.AgentLoopBudget),
 	})
 	defer emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.SessionEnd,
@@ -314,6 +322,7 @@ func runOnceWithOptions(
 		SessionPath: store.Path(sessionState.ID),
 		Agent:       prepared.activeAgent.name,
 		Model:       sessionState.DefaultModel,
+		Metadata:    agentLoopBudgetEventMetadata(executionOptions.AgentLoopBudget),
 	})
 
 	params := llm.CompleteParams{
@@ -508,6 +517,7 @@ func finishRunOnceSuccess(
 		SessionID:               sessionState.ID,
 		SessionPath:             store.Path(sessionState.ID),
 		AgentLoopCheckpointPath: checkpointPath,
+		AgentLoopBudget:         executionOptions.AgentLoopBudget,
 		Agent:                   agentName,
 		Model:                   resp.Model,
 		Content:                 resp.Content,
@@ -887,27 +897,28 @@ func recordHeadlessAssistantMessage(store *session.Store, run *session.HeadlessR
 	}
 
 	event := session.HeadlessEvent{
-		Type:           session.HeadlessEventAssistantMessage,
-		Status:         session.HeadlessStatusRunning,
-		Role:           string(llm.RoleAssistant),
-		ParentRunID:    run.ParentRunID,
-		SessionID:      run.SessionID,
-		SessionPath:    run.SessionPath,
-		Agent:          run.Agent,
-		Model:          run.Model,
-		CWD:            run.CWD,
-		Hostname:       run.Hostname,
-		StartedCommand: run.StartedCommand,
-		StartMethod:    run.StartMethod,
-		TerminalReason: run.TerminalReason,
-		CancelReason:   run.CancellationReason,
-		StaleReason:    run.StaleReason,
-		OrphanedReason: run.OrphanedReason,
-		CommandArgs:    append([]string(nil), run.CommandArgs...),
-		ChildRunIDs:    append([]string(nil), run.ChildRunIDs...),
-		PID:            run.PID,
-		ParentPID:      run.ParentPID,
-		ProcessGroupID: run.ProcessGroupID,
+		Type:            session.HeadlessEventAssistantMessage,
+		Status:          session.HeadlessStatusRunning,
+		Role:            string(llm.RoleAssistant),
+		ParentRunID:     run.ParentRunID,
+		SessionID:       run.SessionID,
+		SessionPath:     run.SessionPath,
+		Agent:           run.Agent,
+		Model:           run.Model,
+		AgentLoopBudget: run.AgentLoopBudget,
+		CWD:             run.CWD,
+		Hostname:        run.Hostname,
+		StartedCommand:  run.StartedCommand,
+		StartMethod:     run.StartMethod,
+		TerminalReason:  run.TerminalReason,
+		CancelReason:    run.CancellationReason,
+		StaleReason:     run.StaleReason,
+		OrphanedReason:  run.OrphanedReason,
+		CommandArgs:     append([]string(nil), run.CommandArgs...),
+		ChildRunIDs:     append([]string(nil), run.ChildRunIDs...),
+		PID:             run.PID,
+		ParentPID:       run.ParentPID,
+		ProcessGroupID:  run.ProcessGroupID,
 		Metadata: map[string]string{
 			"bytes": strconv.Itoa(contentBytes),
 		},
@@ -997,17 +1008,18 @@ func startHeadlessRun(
 	}
 
 	run := session.HeadlessRun{
-		ID:             id,
-		ParentRunID:    os.Getenv(headlessParentRunIDEnv),
-		SessionID:      sessionState.ID,
-		SessionPath:    store.Path(sessionState.ID),
-		Prompt:         strings.TrimSpace(prompt),
-		Model:          modelName,
-		Agent:          agentName,
-		StartedCommand: strings.Join(os.Args, " "),
-		StartMethod:    "headless",
-		Status:         session.HeadlessStatusRunning,
-		PrivateLogs:    options.HeadlessPrivateLog,
+		ID:              id,
+		ParentRunID:     os.Getenv(headlessParentRunIDEnv),
+		SessionID:       sessionState.ID,
+		SessionPath:     store.Path(sessionState.ID),
+		Prompt:          strings.TrimSpace(prompt),
+		Model:           modelName,
+		AgentLoopBudget: options.AgentLoopBudget,
+		Agent:           agentName,
+		StartedCommand:  strings.Join(os.Args, " "),
+		StartMethod:     "headless",
+		Status:          session.HeadlessStatusRunning,
+		PrivateLogs:     options.HeadlessPrivateLog,
 	}
 
 	if err := saveStartedHeadlessRun(store, run); err != nil {
@@ -1030,25 +1042,26 @@ func startHeadlessRun(
 	}
 
 	if err := store.AppendHeadlessEvent(id, session.HeadlessEvent{
-		Type:           session.HeadlessEventStarted,
-		Status:         saved.Status,
-		ParentRunID:    saved.ParentRunID,
-		SessionID:      saved.SessionID,
-		SessionPath:    saved.SessionPath,
-		Agent:          saved.Agent,
-		Model:          saved.Model,
-		CWD:            saved.CWD,
-		Hostname:       saved.Hostname,
-		StartedCommand: saved.StartedCommand,
-		StartMethod:    saved.StartMethod,
-		TerminalReason: saved.TerminalReason,
-		CancelReason:   saved.CancellationReason,
-		StaleReason:    saved.StaleReason,
-		OrphanedReason: saved.OrphanedReason,
-		CommandArgs:    append([]string(nil), saved.CommandArgs...),
-		PID:            saved.PID,
-		ParentPID:      saved.ParentPID,
-		ProcessGroupID: saved.ProcessGroupID,
+		Type:            session.HeadlessEventStarted,
+		Status:          saved.Status,
+		ParentRunID:     saved.ParentRunID,
+		SessionID:       saved.SessionID,
+		SessionPath:     saved.SessionPath,
+		Agent:           saved.Agent,
+		Model:           saved.Model,
+		AgentLoopBudget: saved.AgentLoopBudget,
+		CWD:             saved.CWD,
+		Hostname:        saved.Hostname,
+		StartedCommand:  saved.StartedCommand,
+		StartMethod:     saved.StartMethod,
+		TerminalReason:  saved.TerminalReason,
+		CancelReason:    saved.CancellationReason,
+		StaleReason:     saved.StaleReason,
+		OrphanedReason:  saved.OrphanedReason,
+		CommandArgs:     append([]string(nil), saved.CommandArgs...),
+		PID:             saved.PID,
+		ParentPID:       saved.ParentPID,
+		ProcessGroupID:  saved.ProcessGroupID,
 	}); err != nil {
 		eventErr := fmt.Errorf("write headless start event: %w", err)
 		failStartedHeadlessRun(store, &saved, eventErr)
@@ -1087,23 +1100,24 @@ func appendHeadlessUserMessageEvent(store *session.Store, id string, run session
 	}
 
 	if err := store.AppendHeadlessEvent(id, session.HeadlessEvent{
-		Type:           session.HeadlessEventUserMessage,
-		Status:         run.Status,
-		Role:           string(llm.RoleUser),
-		Message:        run.Prompt,
-		ParentRunID:    run.ParentRunID,
-		SessionID:      run.SessionID,
-		SessionPath:    run.SessionPath,
-		Agent:          run.Agent,
-		Model:          run.Model,
-		CWD:            run.CWD,
-		Hostname:       run.Hostname,
-		StartedCommand: run.StartedCommand,
-		StartMethod:    run.StartMethod,
-		CommandArgs:    append([]string(nil), run.CommandArgs...),
-		PID:            run.PID,
-		ParentPID:      run.ParentPID,
-		ProcessGroupID: run.ProcessGroupID,
+		Type:            session.HeadlessEventUserMessage,
+		Status:          run.Status,
+		Role:            string(llm.RoleUser),
+		Message:         run.Prompt,
+		ParentRunID:     run.ParentRunID,
+		SessionID:       run.SessionID,
+		SessionPath:     run.SessionPath,
+		Agent:           run.Agent,
+		Model:           run.Model,
+		AgentLoopBudget: run.AgentLoopBudget,
+		CWD:             run.CWD,
+		Hostname:        run.Hostname,
+		StartedCommand:  run.StartedCommand,
+		StartMethod:     run.StartMethod,
+		CommandArgs:     append([]string(nil), run.CommandArgs...),
+		PID:             run.PID,
+		ParentPID:       run.ParentPID,
+		ProcessGroupID:  run.ProcessGroupID,
 		Metadata: map[string]string{
 			"bytes": strconv.Itoa(len(run.Prompt)),
 		},
@@ -1249,29 +1263,30 @@ func appendFinishedHeadlessEvent(store *session.Store, run *session.HeadlessRun,
 	}
 
 	if err := store.AppendHeadlessEvent(run.ID, session.HeadlessEvent{
-		Type:           eventType,
-		Status:         run.Status,
-		ParentRunID:    run.ParentRunID,
-		SessionID:      run.SessionID,
-		SessionPath:    run.SessionPath,
-		Message:        run.TerminalReason,
-		Error:          run.Error,
-		Agent:          run.Agent,
-		Model:          run.Model,
-		CWD:            run.CWD,
-		Hostname:       run.Hostname,
-		StartedCommand: run.StartedCommand,
-		StartMethod:    run.StartMethod,
-		TerminalReason: run.TerminalReason,
-		CancelReason:   run.CancellationReason,
-		StaleReason:    run.StaleReason,
-		OrphanedReason: run.OrphanedReason,
-		CommandArgs:    append([]string(nil), run.CommandArgs...),
-		ChildRunIDs:    append([]string(nil), run.ChildRunIDs...),
-		ExitCode:       run.ExitCode,
-		PID:            run.PID,
-		ParentPID:      run.ParentPID,
-		ProcessGroupID: run.ProcessGroupID,
+		Type:            eventType,
+		Status:          run.Status,
+		ParentRunID:     run.ParentRunID,
+		SessionID:       run.SessionID,
+		SessionPath:     run.SessionPath,
+		Message:         run.TerminalReason,
+		Error:           run.Error,
+		Agent:           run.Agent,
+		Model:           run.Model,
+		AgentLoopBudget: run.AgentLoopBudget,
+		CWD:             run.CWD,
+		Hostname:        run.Hostname,
+		StartedCommand:  run.StartedCommand,
+		StartMethod:     run.StartMethod,
+		TerminalReason:  run.TerminalReason,
+		CancelReason:    run.CancellationReason,
+		StaleReason:     run.StaleReason,
+		OrphanedReason:  run.OrphanedReason,
+		CommandArgs:     append([]string(nil), run.CommandArgs...),
+		ChildRunIDs:     append([]string(nil), run.ChildRunIDs...),
+		ExitCode:        run.ExitCode,
+		PID:             run.PID,
+		ParentPID:       run.ParentPID,
+		ProcessGroupID:  run.ProcessGroupID,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
@@ -1354,15 +1369,19 @@ func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFo
 			if result.AgentLoopCheckpointPath != "" {
 				fmt.Fprintln(stderr, "agent loop checkpoint: "+result.AgentLoopCheckpointPath)
 			}
+
+			if budget := formatAgentLoopBudgetCompact(result.AgentLoopBudget); budget != "" {
+				fmt.Fprintln(stderr, "agent loop budget: "+budget)
+			}
 		}
 
 		return nil
 	}
 }
 
-// runOnceComplete handles replay or live agent-loop completion for one-shot
-// mode. If a replay path is set, it loads the recorded response; otherwise it
-// runs the agentic loop with tool execution support.
+// runOnceAgentLoopManifestPreflight emits follow-up context manifests before
+// model calls after the first agent-loop turn, then validates the request
+// against the configured per-request input budget.
 func runOnceAgentLoopManifestPreflight(
 	ctx context.Context,
 	hooks *events.Runner,
@@ -1403,6 +1422,9 @@ func runOnceAgentLoopManifestPreflight(
 	}
 }
 
+// runOnceComplete handles replay or live agent-loop completion for one-shot
+// mode. If a replay path is set, it loads the recorded response; otherwise it
+// runs the agentic loop with tool execution support.
 func runOnceComplete(
 	ctx context.Context,
 	reg *llm.Registry,
@@ -1421,6 +1443,10 @@ func runOnceComplete(
 			return nil, err
 		}
 
+		if err := enforceReplayAgentLoopBudget(reg, params.Model, fallbackModels, agentLoopBudget, resp); err != nil {
+			return nil, err
+		}
+
 		if err := saveRecordedResponse(responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
 			return nil, err
 		}
@@ -1435,11 +1461,17 @@ func runOnceComplete(
 
 	executor := newBashExecutor(cwd, os.Stderr, audit)
 
+	costEstimator, err := agentLoopCostEstimatorForBudget(reg, params.Model, fallbackModels, agentLoopBudget)
+	if err != nil {
+		return nil, err
+	}
+
 	resp, _, err := llm.AgentLoop(ctx, reg, params, fallbackModels, executor, llm.AgentLoopConfig{
 		ConfirmContinue:    confirmContinueStdin,
 		ConfirmToolCall:    confirmToolCallStdin,
 		BeforeModelCall:    beforeModelCall,
 		Budget:             agentLoopBudget,
+		EstimateCostMicros: costEstimator,
 		CheckpointInterval: agentLoopCheckpointInterval,
 		Policy:             llm.BashToolPolicy,
 		CheckpointSink:     agentLoopCheckpointSink(checkpointPath),
@@ -1453,6 +1485,197 @@ func runOnceComplete(
 	}
 
 	return resp, nil
+}
+
+func enforceReplayAgentLoopBudget(
+	reg *llm.Registry,
+	model string,
+	fallbackModels []string,
+	budget llm.AgentLoopBudget,
+	resp *llm.Response,
+) error {
+	if budget.IsZero() {
+		return nil
+	}
+
+	usage, err := replayAgentLoopUsage(resp, budget)
+	if err != nil {
+		return err
+	}
+
+	costMicros, err := replayAgentLoopCostMicros(reg, model, fallbackModels, budget, resp)
+	if err != nil {
+		return err
+	}
+
+	usage.EstimatedCostMicros = costMicros
+
+	return enforceReplayAgentLoopUsageBudget(budget, usage)
+}
+
+func replayAgentLoopCostMicros(
+	reg *llm.Registry,
+	model string,
+	fallbackModels []string,
+	budget llm.AgentLoopBudget,
+	resp *llm.Response,
+) (int64, error) {
+	if budget.MaxCostMicros <= 0 {
+		return 0, nil
+	}
+
+	estimator, err := agentLoopCostEstimatorForBudget(reg, model, fallbackModels, budget)
+	if err != nil {
+		return 0, err
+	}
+
+	costMicros, err := estimator(resp)
+	if err != nil {
+		return 0, fmt.Errorf("agent_loop.max_cost_micros: %w", err)
+	}
+
+	if costMicros < 0 {
+		return 0, fmt.Errorf("agent_loop.max_cost_micros: negative cost estimate: %d micros", costMicros)
+	}
+
+	return costMicros, nil
+}
+
+func enforceReplayAgentLoopUsageBudget(budget llm.AgentLoopBudget, usage llm.AgentLoopUsage) error {
+	if budget.MaxModelCalls > 0 && usage.ModelCalls > budget.MaxModelCalls {
+		return fmt.Errorf("agent_loop.max_model_calls: model call budget exhausted: used %d of %d", usage.ModelCalls, budget.MaxModelCalls)
+	}
+
+	if budget.MaxInputTokens > 0 && usage.InputTokens > budget.MaxInputTokens {
+		return fmt.Errorf("agent_loop.max_input_tokens: input token budget exceeded: used %d of %d", usage.InputTokens, budget.MaxInputTokens)
+	}
+
+	if budget.MaxOutputTokens > 0 && usage.OutputTokens > budget.MaxOutputTokens {
+		return fmt.Errorf("agent_loop.max_output_tokens: output token budget exceeded: used %d of %d", usage.OutputTokens, budget.MaxOutputTokens)
+	}
+
+	if budget.MaxTotalTokens > 0 && usage.TotalTokens > budget.MaxTotalTokens {
+		return fmt.Errorf("agent_loop.max_total_tokens: total token budget exceeded: used %d of %d", usage.TotalTokens, budget.MaxTotalTokens)
+	}
+
+	if budget.MaxCostMicros > 0 && usage.EstimatedCostMicros > budget.MaxCostMicros {
+		return fmt.Errorf("agent_loop.max_cost_micros: cost budget exceeded: used %d micros of %d", usage.EstimatedCostMicros, budget.MaxCostMicros)
+	}
+
+	return nil
+}
+
+func replayAgentLoopUsage(resp *llm.Response, budget llm.AgentLoopBudget) (llm.AgentLoopUsage, error) {
+	if resp == nil {
+		return llm.AgentLoopUsage{}, nil
+	}
+
+	usage := llm.AgentLoopUsage{ModelCalls: 1}
+	if err := replayAgentLoopTokenUsageError(resp, budget); err != nil {
+		return usage, err
+	}
+
+	usage.InputTokens = resp.InputTokens
+	usage.CachedInputTokens = resp.CachedInputTokens
+	usage.CacheWriteTokens = resp.CacheWriteInputTokens
+	usage.OutputTokens = resp.OutputTokens
+	usage.TotalTokens = resp.InputTokens + resp.OutputTokens
+
+	return usage, nil
+}
+
+func replayAgentLoopTokenUsageError(resp *llm.Response, budget llm.AgentLoopBudget) error {
+	if budget.MaxInputTokens <= 0 && budget.MaxOutputTokens <= 0 && budget.MaxTotalTokens <= 0 {
+		return nil
+	}
+
+	if err := replayAgentLoopInvalidTokenUsageError(resp, budget); err != nil {
+		return err
+	}
+
+	return replayAgentLoopMissingTokenUsageError(resp, budget)
+}
+
+func replayAgentLoopInvalidTokenUsageError(resp *llm.Response, budget llm.AgentLoopBudget) error {
+	if resp.InputTokens < 0 ||
+		resp.CachedInputTokens < 0 ||
+		resp.CacheWriteInputTokens < 0 ||
+		resp.OutputTokens < 0 {
+		return fmt.Errorf("%s: token budget could not be enforced: %w: negative token usage",
+			replayAgentLoopTokenBudgetField(budget),
+			llm.ErrAgentLoopTokenUsageUnavailable,
+		)
+	}
+
+	return nil
+}
+
+func replayAgentLoopMissingTokenUsageError(resp *llm.Response, budget llm.AgentLoopBudget) error {
+	requireInput := budget.MaxInputTokens > 0 || budget.MaxTotalTokens > 0
+	requireOutput := (budget.MaxOutputTokens > 0 || budget.MaxTotalTokens > 0) && replayAgentLoopResponseHasVisibleOutput(resp)
+
+	switch {
+	case requireInput && resp.InputTokens <= 0:
+		return replayAgentLoopTokenUsageUnavailableError(
+			replayAgentLoopInputUsageBudgetField(budget),
+			"input token usage unavailable",
+		)
+	case requireOutput && resp.OutputTokens <= 0:
+		return replayAgentLoopTokenUsageUnavailableError(
+			replayAgentLoopOutputUsageBudgetField(budget),
+			"output token usage unavailable",
+		)
+	}
+
+	if resp.CachedInputTokens+resp.CacheWriteInputTokens > resp.InputTokens {
+		return replayAgentLoopTokenUsageUnavailableError(
+			replayAgentLoopInputUsageBudgetField(budget),
+			"cache token usage exceeds input tokens",
+		)
+	}
+
+	return nil
+}
+
+func replayAgentLoopTokenUsageUnavailableError(field, detail string) error {
+	return fmt.Errorf("%s: token budget could not be enforced: %w: %s",
+		field,
+		llm.ErrAgentLoopTokenUsageUnavailable,
+		detail,
+	)
+}
+
+func replayAgentLoopResponseHasVisibleOutput(resp *llm.Response) bool {
+	return resp != nil && (resp.Content != "" || len(resp.ToolCalls) > 0)
+}
+
+func replayAgentLoopTokenBudgetField(budget llm.AgentLoopBudget) string {
+	switch {
+	case budget.MaxInputTokens > 0:
+		return agentLoopConfigFieldMaxInputTokens
+	case budget.MaxOutputTokens > 0:
+		return agentLoopConfigFieldMaxOutputTokens
+	case budget.MaxTotalTokens > 0:
+		return agentLoopConfigFieldMaxTotalTokens
+	default:
+		return agentLoopConfigFieldMaxTotalTokens
+	}
+}
+
+func replayAgentLoopInputUsageBudgetField(budget llm.AgentLoopBudget) string {
+	if budget.MaxInputTokens > 0 {
+		return agentLoopConfigFieldMaxInputTokens
+	}
+
+	return agentLoopConfigFieldMaxTotalTokens
+}
+
+func replayAgentLoopOutputUsageBudgetField(budget llm.AgentLoopBudget) string {
+	if budget.MaxOutputTokens > 0 {
+		return agentLoopConfigFieldMaxOutputTokens
+	}
+
+	return agentLoopConfigFieldMaxTotalTokens
 }
 
 // confirmContinueStdin prompts the user on stdin/stderr when the agent loop

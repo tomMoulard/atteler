@@ -62,7 +62,15 @@ generation:
   max_tokens: 900
 agent_loop:
   max_output_bytes: 0
+  max_cost_micros: 0
+  max_input_tokens: 0
+  max_output_tokens: 0
   max_total_tokens: 0
+  max_iterations: 0
+  max_model_calls: 0
+  max_tool_calls: 0
+  max_wall_time: "0"
+  checkpoint_interval: 0
 plugins:
   paths:
     - ./plugin-a
@@ -212,8 +220,40 @@ vector:
 		assert.Failf(t, "assertion failed", "agent_loop.max_output_bytes = %v, want 0", cfg.AgentLoop.MaxOutputBytes)
 	}
 
+	if cfg.AgentLoop.MaxCostMicros == nil || *cfg.AgentLoop.MaxCostMicros != 0 {
+		assert.Failf(t, "assertion failed", "agent_loop.max_cost_micros = %v, want 0", cfg.AgentLoop.MaxCostMicros)
+	}
+
+	if cfg.AgentLoop.MaxInputTokens == nil || *cfg.AgentLoop.MaxInputTokens != 0 {
+		assert.Failf(t, "assertion failed", "agent_loop.max_input_tokens = %v, want 0", cfg.AgentLoop.MaxInputTokens)
+	}
+
+	if cfg.AgentLoop.MaxOutputTokens == nil || *cfg.AgentLoop.MaxOutputTokens != 0 {
+		assert.Failf(t, "assertion failed", "agent_loop.max_output_tokens = %v, want 0", cfg.AgentLoop.MaxOutputTokens)
+	}
+
 	if cfg.AgentLoop.MaxTotalTokens == nil || *cfg.AgentLoop.MaxTotalTokens != 0 {
 		assert.Failf(t, "assertion failed", "agent_loop.max_total_tokens = %v, want 0", cfg.AgentLoop.MaxTotalTokens)
+	}
+
+	if cfg.AgentLoop.MaxIterations == nil || *cfg.AgentLoop.MaxIterations != 0 {
+		assert.Failf(t, "assertion failed", "agent_loop.max_iterations = %v, want 0", cfg.AgentLoop.MaxIterations)
+	}
+
+	if cfg.AgentLoop.MaxModelCalls == nil || *cfg.AgentLoop.MaxModelCalls != 0 {
+		assert.Failf(t, "assertion failed", "agent_loop.max_model_calls = %v, want 0", cfg.AgentLoop.MaxModelCalls)
+	}
+
+	if cfg.AgentLoop.MaxToolCalls == nil || *cfg.AgentLoop.MaxToolCalls != 0 {
+		assert.Failf(t, "assertion failed", "agent_loop.max_tool_calls = %v, want 0", cfg.AgentLoop.MaxToolCalls)
+	}
+
+	if cfg.AgentLoop.MaxWallTime == nil || *cfg.AgentLoop.MaxWallTime != "0" {
+		assert.Failf(t, "assertion failed", "agent_loop.max_wall_time = %v, want 0", cfg.AgentLoop.MaxWallTime)
+	}
+
+	if cfg.AgentLoop.CheckpointInterval == nil || *cfg.AgentLoop.CheckpointInterval != 0 {
+		assert.Failf(t, "assertion failed", "agent_loop.checkpoint_interval = %v, want 0", cfg.AgentLoop.CheckpointInterval)
 	}
 
 	if !reflect.DeepEqual(cfg.Plugins.Paths, []string{"./plugin-a"}) {
@@ -238,6 +278,50 @@ vector:
 	assert.Equal(t, "./.atteler/test-vector-index.json", cfg.Vector.IndexPath)
 	assert.Equal(t, 900, cfg.Vector.ChunkMaxRunes)
 	assert.Equal(t, 90, cfg.Vector.ChunkOverlapRunes)
+}
+
+func TestLoadFiles_ConfiguresAllAgentLoopBudgetFields(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "config.yaml", `
+agent_loop:
+  max_output_bytes: 4096
+  max_cost_micros: 250000
+  max_input_tokens: 1000
+  max_output_tokens: 2000
+  max_total_tokens: 3000
+  max_iterations: 4
+  max_model_calls: 5
+  max_tool_calls: 6
+  max_wall_time: 30m
+  checkpoint_interval: 7
+`)
+
+	cfg, loaded, err := LoadFiles([]string{path})
+	require.NoError(t, err)
+	require.Equal(t, []string{path}, loaded)
+
+	require.NotNil(t, cfg.AgentLoop.MaxOutputBytes)
+	assert.EqualValues(t, 4096, *cfg.AgentLoop.MaxOutputBytes)
+	require.NotNil(t, cfg.AgentLoop.MaxCostMicros)
+	assert.EqualValues(t, 250000, *cfg.AgentLoop.MaxCostMicros)
+	require.NotNil(t, cfg.AgentLoop.MaxInputTokens)
+	assert.Equal(t, 1000, *cfg.AgentLoop.MaxInputTokens)
+	require.NotNil(t, cfg.AgentLoop.MaxOutputTokens)
+	assert.Equal(t, 2000, *cfg.AgentLoop.MaxOutputTokens)
+	require.NotNil(t, cfg.AgentLoop.MaxTotalTokens)
+	assert.Equal(t, 3000, *cfg.AgentLoop.MaxTotalTokens)
+	require.NotNil(t, cfg.AgentLoop.MaxIterations)
+	assert.Equal(t, 4, *cfg.AgentLoop.MaxIterations)
+	require.NotNil(t, cfg.AgentLoop.MaxModelCalls)
+	assert.Equal(t, 5, *cfg.AgentLoop.MaxModelCalls)
+	require.NotNil(t, cfg.AgentLoop.MaxToolCalls)
+	assert.Equal(t, 6, *cfg.AgentLoop.MaxToolCalls)
+	require.NotNil(t, cfg.AgentLoop.MaxWallTime)
+	assert.Equal(t, "30m", *cfg.AgentLoop.MaxWallTime)
+	require.NotNil(t, cfg.AgentLoop.CheckpointInterval)
+	assert.Equal(t, 7, *cfg.AgentLoop.CheckpointInterval)
 }
 
 func TestLoadFiles_JSONCompatibility(t *testing.T) {
@@ -371,6 +455,9 @@ default_model: gpt-first
 fallback_models: [gpt-first-fallback]
 agent_loop:
   max_output_bytes: 1048576
+  max_cost_micros: 250000
+  max_input_tokens: 1000
+  max_output_tokens: 2000
   max_total_tokens: 200000
 `)
 	second := writeConfig(t, dir, "second.yaml", `
@@ -378,6 +465,9 @@ default_model: gpt-second
 fallback_models: [gpt-second-fallback]
 agent_loop:
   max_output_bytes: 0
+  max_cost_micros: 0
+  max_input_tokens: 0
+  max_output_tokens: 0
   max_total_tokens: 0
 `)
 
@@ -388,6 +478,12 @@ agent_loop:
 	assert.Equal(t, []string{"gpt-second-fallback"}, cfg.FallbackModels)
 	require.NotNil(t, cfg.AgentLoop.MaxOutputBytes)
 	assert.EqualValues(t, 0, *cfg.AgentLoop.MaxOutputBytes)
+	require.NotNil(t, cfg.AgentLoop.MaxCostMicros)
+	assert.EqualValues(t, 0, *cfg.AgentLoop.MaxCostMicros)
+	require.NotNil(t, cfg.AgentLoop.MaxInputTokens)
+	assert.Equal(t, 0, *cfg.AgentLoop.MaxInputTokens)
+	require.NotNil(t, cfg.AgentLoop.MaxOutputTokens)
+	assert.Equal(t, 0, *cfg.AgentLoop.MaxOutputTokens)
 	require.NotNil(t, cfg.AgentLoop.MaxTotalTokens)
 	assert.Equal(t, 0, *cfg.AgentLoop.MaxTotalTokens)
 
@@ -416,6 +512,24 @@ agent_loop:
 	assert.Equal(t, OriginOverride, totalTokensOrigin[1].Operation)
 	assert.Equal(t, second, totalTokensOrigin[1].Source)
 	assert.Equal(t, "0", totalTokensOrigin[1].Value)
+
+	costOrigin := origins["agent_loop.max_cost_micros"].Chain
+	require.Len(t, costOrigin, 2)
+	assert.Equal(t, OriginOverride, costOrigin[1].Operation)
+	assert.Equal(t, second, costOrigin[1].Source)
+	assert.Equal(t, "0", costOrigin[1].Value)
+
+	inputTokensOrigin := origins["agent_loop.max_input_tokens"].Chain
+	require.Len(t, inputTokensOrigin, 2)
+	assert.Equal(t, OriginOverride, inputTokensOrigin[1].Operation)
+	assert.Equal(t, second, inputTokensOrigin[1].Source)
+	assert.Equal(t, "0", inputTokensOrigin[1].Value)
+
+	outputTokensOrigin := origins["agent_loop.max_output_tokens"].Chain
+	require.Len(t, outputTokensOrigin, 2)
+	assert.Equal(t, OriginOverride, outputTokensOrigin[1].Operation)
+	assert.Equal(t, second, outputTokensOrigin[1].Source)
+	assert.Equal(t, "0", outputTokensOrigin[1].Value)
 }
 
 func TestLoadFiles_MergesAgentRoutingPolicy(t *testing.T) {

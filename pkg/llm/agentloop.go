@@ -144,7 +144,7 @@ func AgentLoop(
 			return nil, state.messages, stopConditionError(*cond)
 		}
 
-		if cond := budgetExceededStop(state.budget, state.usage); cond != nil {
+		if cond := budgetExhaustedStop(state.budget, state.usage); cond != nil {
 			if err := state.recordStop(ctx, cfg.CheckpointSink, *cond); err != nil {
 				return nil, state.messages, err
 			}
@@ -199,11 +199,20 @@ func AgentLoop(
 			return nil, state.messages, fmt.Errorf("llm: agent loop iteration %d: %w", state.usage.Iterations, err)
 		}
 
-		state.usage.addResponse(resp, cfg.EstimateCostMicros)
+		usageErr := state.usage.addResponse(resp, state.budget, cfg.EstimateCostMicros)
 		state.refreshElapsed()
 
 		if err := state.recordModelResponse(ctx, cfg.CheckpointSink, requestSummary, resp); err != nil {
 			return nil, state.messages, err
+		}
+
+		if usageErr != nil {
+			cond := usageErrorStopCondition(usageErr, state.budget)
+			if err := state.recordStop(ctx, cfg.CheckpointSink, cond); err != nil {
+				return nil, state.messages, err
+			}
+
+			return nil, state.messages, stopConditionError(cond)
 		}
 
 		if resp.Content != "" && cfg.OnContent != nil {
@@ -281,6 +290,53 @@ func AgentLoop(
 		}
 
 		state.usage.Iterations++
+	}
+}
+
+func usageErrorStopCondition(err error, budget AgentLoopBudget) AgentLoopStopCondition {
+	if errors.Is(err, ErrAgentLoopTokenUsageUnavailable) {
+		matchedRule := agentLoopTokenBudgetMatchedRule(budget)
+
+		var usageErr agentLoopTokenUsageError
+		if errors.As(err, &usageErr) {
+			matchedRule = agentLoopTokenUsageMatchedRule(usageErr.field, budget)
+		}
+
+		return AgentLoopStopCondition{
+			Kind:        AgentLoopStopTokenBudget,
+			Reason:      fmt.Sprintf("token budget could not be enforced: %v", err),
+			MatchedRule: matchedRule,
+		}
+	}
+
+	return AgentLoopStopCondition{
+		Kind:        AgentLoopStopCostBudget,
+		Reason:      fmt.Sprintf("cost budget could not be enforced: %v", err),
+		MatchedRule: "budget.max_cost_micros",
+	}
+}
+
+func agentLoopTokenBudgetMatchedRule(budget AgentLoopBudget) string {
+	switch {
+	case budget.MaxInputTokens > 0:
+		return agentLoopBudgetRuleMaxInputTokens
+	case budget.MaxOutputTokens > 0:
+		return agentLoopBudgetRuleMaxOutputTokens
+	case budget.MaxTotalTokens > 0:
+		return agentLoopBudgetRuleMaxTotalTokens
+	default:
+		return agentLoopBudgetRuleMaxTotalTokens
+	}
+}
+
+func agentLoopTokenUsageMatchedRule(field agentLoopTokenUsageField, budget AgentLoopBudget) string {
+	switch field {
+	case agentLoopTokenUsageFieldInput:
+		return agentLoopInputUsageMatchedRule(budget)
+	case agentLoopTokenUsageFieldOutput:
+		return agentLoopOutputUsageMatchedRule(budget)
+	default:
+		return agentLoopTokenBudgetMatchedRule(budget)
 	}
 }
 
@@ -442,7 +498,7 @@ func (s *agentLoopState) preToolStopCondition() *AgentLoopStopCondition {
 		}
 	}
 
-	return budgetExceededStop(s.budget, s.usage)
+	return budgetExhaustedStop(s.budget, s.usage)
 }
 
 func (s *agentLoopState) appendPromptToolResult(result ToolResult, historyToolLimit int) {
@@ -521,6 +577,7 @@ func (s *agentLoopState) recordModelResponse(
 	step := AgentLoopStep{
 		Kind:         AgentLoopStepModelResponse,
 		Iteration:    s.usage.Iterations,
+		Budget:       s.budget,
 		ModelRequest: &request,
 		ModelResponse: &AgentLoopModelResponseSummary{
 			Model:             resp.Model,
@@ -561,6 +618,7 @@ func (s *agentLoopState) recordToolCall(
 	step := AgentLoopStep{
 		Kind:          AgentLoopStepToolCall,
 		Iteration:     s.usage.Iterations,
+		Budget:        s.budget,
 		ToolCallIndex: callIndex,
 		ToolCall:      &callCopy,
 		Policy:        &decisionCopy,
@@ -582,6 +640,7 @@ func (s *agentLoopState) recordStop(ctx context.Context, sink AgentLoopCheckpoin
 	step := AgentLoopStep{
 		Kind:          AgentLoopStepStop,
 		Iteration:     s.usage.Iterations,
+		Budget:        s.budget,
 		Usage:         s.usage,
 		StopCondition: &condCopy,
 	}

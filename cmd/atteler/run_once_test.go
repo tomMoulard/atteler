@@ -26,6 +26,35 @@ import (
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
+type runOnceCostProvider struct {
+	response *llm.Response
+	name     string
+	models   []string
+	calls    int
+}
+
+func (p *runOnceCostProvider) Name() string { return p.name }
+
+func (p *runOnceCostProvider) Models() []string { return append([]string(nil), p.models...) }
+
+func (p *runOnceCostProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p *runOnceCostProvider) HealthCheck(context.Context) error { return nil }
+
+func (p *runOnceCostProvider) ModelContextWindow(string) int { return 128_000 }
+
+func (p *runOnceCostProvider) Complete(_ context.Context, _ llm.CompleteParams) (*llm.Response, error) {
+	if p.response == nil {
+		return nil, errors.New("missing response")
+	}
+
+	p.calls++
+
+	return p.response, nil
+}
+
 func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -85,6 +114,269 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	if len(loaded.Messages) != 2 || loaded.Messages[1].Content != "recorded answer" {
 		require.Failf(t, "unexpected replayed session", "messages = %+v", loaded.Messages)
 	}
+}
+
+func TestRunOnceComplete_CostBudgetFailsClosedWithoutPricing(t *testing.T) {
+	t.Parallel()
+
+	provider := &runOnceCostProvider{
+		name:   "ollama",
+		models: []string{"llama3.2"},
+		response: &llm.Response{
+			Content:    "unpriced answer",
+			Provider:   "ollama",
+			Model:      "llama3.2",
+			StopReason: llm.StopEndTurn,
+		},
+	}
+	reg := llm.NewRegistry()
+	reg.Register(provider)
+
+	_, err := runOnceComplete(
+		context.Background(),
+		reg,
+		llm.CompleteParams{Model: "ollama/llama3.2"},
+		nil,
+		llm.AgentLoopBudget{MaxCostMicros: 1},
+		0,
+		responseRecordOptions{},
+		"",
+		nil,
+		attshell.AuditContext{},
+	)
+	require.ErrorIs(t, err, llm.ErrAgentLoopCostPricingUnavailable)
+	assert.Contains(t, err.Error(), "agent_loop.max_cost_micros")
+	assert.Zero(t, provider.calls, "unpriced cost budgets should fail before model usage")
+}
+
+func TestRunOnceComplete_CostBudgetPassesWithCatalogPricing(t *testing.T) {
+	t.Parallel()
+
+	provider := &runOnceCostProvider{
+		name:   "openai",
+		models: []string{"gpt-4.1-mini"},
+		response: &llm.Response{
+			Content:      "priced answer",
+			Provider:     "openai",
+			Model:        "gpt-4.1-mini",
+			StopReason:   llm.StopEndTurn,
+			InputTokens:  1,
+			OutputTokens: 1,
+		},
+	}
+	reg := llm.NewRegistry()
+	reg.Register(provider)
+
+	resp, err := runOnceComplete(
+		context.Background(),
+		reg,
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini"},
+		nil,
+		llm.AgentLoopBudget{MaxCostMicros: 10},
+		0,
+		responseRecordOptions{},
+		"",
+		nil,
+		attshell.AuditContext{},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "priced answer", resp.Content)
+	assert.Equal(t, 1, provider.calls)
+}
+
+func TestRunOnceComplete_ReplayCostBudgetFailsClosedWithoutPricing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
+		nil,
+		&llm.Response{
+			Content:      "recorded answer",
+			Provider:     "test",
+			Model:        "gpt-test",
+			InputTokens:  1,
+			OutputTokens: 1,
+		},
+	))
+
+	_, err := runOnceComplete(
+		context.Background(),
+		llm.NewRegistry(),
+		llm.CompleteParams{Model: "test/gpt-test"},
+		nil,
+		llm.AgentLoopBudget{MaxCostMicros: 10},
+		0,
+		responseRecordOptions{ReplayPath: replayPath},
+		"",
+		nil,
+		attshell.AuditContext{},
+	)
+	require.ErrorIs(t, err, llm.ErrAgentLoopCostPricingUnavailable)
+	assert.Contains(t, err.Error(), "agent_loop.max_cost_micros")
+}
+
+func TestRunOnceComplete_ReplayCostBudgetPassesWithCatalogPricing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
+		nil,
+		&llm.Response{
+			Content:      "recorded answer",
+			Provider:     "openai",
+			Model:        "gpt-4.1-mini",
+			InputTokens:  1,
+			OutputTokens: 1,
+		},
+	))
+
+	resp, err := runOnceComplete(
+		context.Background(),
+		llm.NewRegistry(),
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini"},
+		nil,
+		llm.AgentLoopBudget{MaxCostMicros: 10},
+		0,
+		responseRecordOptions{ReplayPath: replayPath},
+		"",
+		nil,
+		attshell.AuditContext{},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "recorded answer", resp.Content)
+}
+
+func TestRunOnceComplete_ReplayTokenBudgetsAreEnforced(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
+		nil,
+		&llm.Response{
+			Content:      "recorded answer",
+			Provider:     "openai",
+			Model:        "gpt-4.1-mini",
+			InputTokens:  7,
+			OutputTokens: 3,
+		},
+	))
+
+	_, err := runOnceComplete(
+		context.Background(),
+		llm.NewRegistry(),
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini"},
+		nil,
+		llm.AgentLoopBudget{MaxInputTokens: 6},
+		0,
+		responseRecordOptions{ReplayPath: replayPath},
+		"",
+		nil,
+		attshell.AuditContext{},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent_loop.max_input_tokens")
+	assert.Contains(t, err.Error(), "input token budget exceeded")
+}
+
+func TestRunOnceComplete_ReplayTokenBudgetFailsClosedWithoutUsageMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
+		nil,
+		&llm.Response{
+			Content:  "recorded answer",
+			Provider: "openai",
+			Model:    "gpt-4.1-mini",
+		},
+	))
+
+	_, err := runOnceComplete(
+		context.Background(),
+		llm.NewRegistry(),
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini"},
+		nil,
+		llm.AgentLoopBudget{MaxOutputTokens: 100},
+		0,
+		responseRecordOptions{ReplayPath: replayPath},
+		"",
+		nil,
+		attshell.AuditContext{},
+	)
+	require.ErrorIs(t, err, llm.ErrAgentLoopTokenUsageUnavailable)
+	assert.Contains(t, err.Error(), "agent_loop.max_output_tokens")
+	assert.Contains(t, err.Error(), "token budget could not be enforced")
+
+	partialReplayPath := filepath.Join(dir, "partial-response.json")
+	require.NoError(t, saveRecordedResponse(
+		partialReplayPath,
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
+		nil,
+		&llm.Response{
+			Content:      "recorded answer",
+			Provider:     "openai",
+			Model:        "gpt-4.1-mini",
+			OutputTokens: 3,
+		},
+	))
+
+	_, err = runOnceComplete(
+		context.Background(),
+		llm.NewRegistry(),
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini"},
+		nil,
+		llm.AgentLoopBudget{MaxInputTokens: 100},
+		0,
+		responseRecordOptions{ReplayPath: partialReplayPath},
+		"",
+		nil,
+		attshell.AuditContext{},
+	)
+	require.ErrorIs(t, err, llm.ErrAgentLoopTokenUsageUnavailable)
+	assert.Contains(t, err.Error(), "agent_loop.max_input_tokens")
+	assert.Contains(t, err.Error(), "input token usage unavailable")
+
+	combinedReplayPath := filepath.Join(dir, "combined-response.json")
+	require.NoError(t, saveRecordedResponse(
+		combinedReplayPath,
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
+		nil,
+		&llm.Response{
+			Content:     "recorded answer",
+			Provider:    "openai",
+			Model:       "gpt-4.1-mini",
+			InputTokens: 5,
+		},
+	))
+
+	_, err = runOnceComplete(
+		context.Background(),
+		llm.NewRegistry(),
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini"},
+		nil,
+		llm.AgentLoopBudget{MaxInputTokens: 100, MaxOutputTokens: 100},
+		0,
+		responseRecordOptions{ReplayPath: combinedReplayPath},
+		"",
+		nil,
+		attshell.AuditContext{},
+	)
+	require.ErrorIs(t, err, llm.ErrAgentLoopTokenUsageUnavailable)
+	assert.Contains(t, err.Error(), "agent_loop.max_output_tokens")
+	assert.Contains(t, err.Error(), "output token usage unavailable")
+	assert.NotContains(t, err.Error(), "agent_loop.max_input_tokens")
 }
 
 func TestPrepareRunOnceRequestReturnsRouteDecisionOnRoutingError(t *testing.T) {
@@ -248,6 +540,56 @@ func TestRunOnce_EmitsContextManifestBeforeBudgetFailure(t *testing.T) {
 	assert.Contains(t, log, "fits_configured_token_budget=false")
 	assert.Contains(t, log, "estimated_token_upper_bound")
 	assert.Contains(t, log, "max_input_tokens=1")
+}
+
+func TestRunOnce_ContextInputBudgetPreemptsAgentLoopInputBudget(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	provider := &runOnceCostProvider{
+		name:   "openai",
+		models: []string{"gpt-4.1-mini"},
+	}
+	reg := llm.NewRegistry()
+	reg.Register(provider)
+
+	var eventLog bytes.Buffer
+
+	err := runOnceWithOptions(
+		context.Background(),
+		reg,
+		agent.NewRegistry(nil),
+		events.NewRunnerWithLogger(nil, &eventLog),
+		store,
+		session.New("openai/gpt-4.1-mini", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"openai/gpt-4.1-mini",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		1,
+		runOnceExecutionOptions{
+			OutputFormat:    outputFormatText,
+			AgentLoopBudget: llm.AgentLoopBudget{MaxInputTokens: 1_000},
+		},
+		true,
+		strings.Repeat("x", 200),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_input_tokens")
+	assert.NotContains(t, err.Error(), "agent_loop.max_input_tokens")
+	assert.Zero(t, provider.calls, "per-request context.max_input_tokens should reject before the agent loop calls the model")
+
+	log := eventLog.String()
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, "agent_loop_budget=")
+	assert.Contains(t, log, `"max_input_tokens":1000`)
 }
 
 func TestRunOnce_EmitsContextManifestForRejectedInlineReference(t *testing.T) {
@@ -422,6 +764,7 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 		SessionID:               "session-id",
 		SessionPath:             "/tmp/session.json",
 		AgentLoopCheckpointPath: "/tmp/session.agentloop.jsonl",
+		AgentLoopBudget:         llm.AgentLoopBudget{MaxInputTokens: 100, MaxOutputTokens: 50},
 		HeadlessID:              "headless-id",
 		Model:                   "gpt-test",
 		Content:                 "answer",
@@ -440,6 +783,7 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	assert.Equal(t, result.SessionID, decoded.SessionID)
 	assert.Equal(t, result.HeadlessID, decoded.HeadlessID)
 	assert.Equal(t, result.AgentLoopCheckpointPath, decoded.AgentLoopCheckpointPath)
+	assert.Equal(t, result.AgentLoopBudget, decoded.AgentLoopBudget)
 	assert.Equal(t, result.TokenUsage.OutputTokens, decoded.TokenUsage.OutputTokens)
 	assert.Empty(t, stderr.String())
 
@@ -451,6 +795,9 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 
 	require.NoError(t, writeRunOnceResult(&stdout, &stderr, result, "text", false))
 	assert.Contains(t, stderr.String(), "agent loop checkpoint: /tmp/session.agentloop.jsonl")
+	assert.Contains(t, stderr.String(), "agent loop budget:")
+	assert.Contains(t, stderr.String(), "in=100")
+	assert.Contains(t, stderr.String(), "out=50")
 }
 
 func TestBashExecutorStreamsOutputBeforeCompletion(t *testing.T) {
@@ -575,37 +922,52 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 	replayPath := filepath.Join(dir, "response.json")
 	require.NoError(t, saveRecordedResponse(
 		replayPath,
-		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
-		&llm.Response{Content: "recorded answer", Model: "gpt-test", InputTokens: 2, CachedInputTokens: 1, OutputTokens: 3},
+		&llm.Response{Content: "recorded answer", Provider: "openai", Model: "gpt-4.1-mini", InputTokens: 2, CachedInputTokens: 1, OutputTokens: 3},
 	))
 
 	store := session.NewStore(filepath.Join(dir, "sessions"))
 	headlessID := "test-headless"
 
+	var eventLog bytes.Buffer
+
+	agentLoopBudget := llm.AgentLoopBudget{
+		MaxWallTime:     time.Minute,
+		MaxOutputBytes:  4096,
+		MaxCostMicros:   25_000,
+		MaxIterations:   3,
+		MaxModelCalls:   4,
+		MaxToolCalls:    5,
+		MaxInputTokens:  100,
+		MaxOutputTokens: 50,
+		MaxTotalTokens:  150,
+	}
+
 	err := runOnceWithOptions(
 		context.Background(),
 		llm.NewRegistry(),
 		agent.NewRegistry(nil),
-		nil,
+		events.NewRunnerWithLogger(nil, &eventLog),
 		store,
-		session.New("gpt-test", nil),
+		session.New("openai/gpt-4.1-mini", nil),
 		contextref.Options{Root: dir},
 		"",
 		contextref.ReferenceManifest{},
 		"",
 		nil,
-		"gpt-test",
+		"openai/gpt-4.1-mini",
 		"",
 		nil,
 		generationSettings{},
 		generationSettings{},
 		0,
 		runOnceExecutionOptions{
-			OutputFormat: outputFormatText,
-			HeadlessID:   headlessID,
-			Response:     responseRecordOptions{ReplayPath: replayPath},
-			Headless:     true,
+			OutputFormat:    outputFormatText,
+			HeadlessID:      headlessID,
+			Response:        responseRecordOptions{ReplayPath: replayPath},
+			AgentLoopBudget: agentLoopBudget,
+			Headless:        true,
 		},
 		true,
 		"hello",
@@ -614,8 +976,17 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 
 	run, err := store.LoadHeadlessRun(headlessID)
 	require.NoError(t, err)
+
+	hookLog := eventLog.String()
+	assert.Contains(t, hookLog, "event:session_start")
+	assert.Contains(t, hookLog, "event:session_end")
+	assert.Contains(t, hookLog, "agent_loop_budget=")
+	assert.Contains(t, hookLog, `"max_cost_micros":25000`)
+	assert.Contains(t, hookLog, `"max_input_tokens":100`)
+
 	assert.Equal(t, session.HeadlessStatusCompleted, run.Status)
-	assert.Equal(t, "gpt-test", run.Model)
+	assert.Equal(t, "gpt-4.1-mini", run.Model)
+	assert.Equal(t, agentLoopBudget, run.AgentLoopBudget)
 	assert.Equal(t, "headless", run.StartMethod)
 	assert.NotNil(t, run.CompletedAt)
 
@@ -646,10 +1017,14 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 	assert.Equal(t, run.SessionPath, headlessEvents[1].SessionPath)
 	assert.Equal(t, run.SessionPath, headlessEvents[2].SessionPath)
 	assert.Equal(t, run.SessionPath, headlessEvents[3].SessionPath)
-	assert.Equal(t, "gpt-test", headlessEvents[0].Model)
-	assert.Equal(t, "gpt-test", headlessEvents[1].Model)
-	assert.Equal(t, "gpt-test", headlessEvents[2].Model)
-	assert.Equal(t, "gpt-test", headlessEvents[3].Model)
+	assert.Equal(t, "openai/gpt-4.1-mini", headlessEvents[0].Model)
+	assert.Equal(t, agentLoopBudget, headlessEvents[0].AgentLoopBudget)
+	assert.Equal(t, "openai/gpt-4.1-mini", headlessEvents[1].Model)
+	assert.Equal(t, agentLoopBudget, headlessEvents[1].AgentLoopBudget)
+	assert.Equal(t, "gpt-4.1-mini", headlessEvents[2].Model)
+	assert.Equal(t, agentLoopBudget, headlessEvents[2].AgentLoopBudget)
+	assert.Equal(t, "gpt-4.1-mini", headlessEvents[3].Model)
+	assert.Equal(t, agentLoopBudget, headlessEvents[3].AgentLoopBudget)
 	assert.Equal(t, "headless", headlessEvents[0].StartMethod)
 	assert.NotEmpty(t, headlessEvents[0].StartedCommand)
 	assert.NotEmpty(t, headlessEvents[0].CommandArgs)

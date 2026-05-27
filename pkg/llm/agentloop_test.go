@@ -2,8 +2,10 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -255,6 +257,24 @@ func TestAgentLoop_DefaultMaxWallTimeIsUnlimited(t *testing.T) {
 	normalized := normalizeAgentLoopBudget(AgentLoopBudget{}, 0)
 	assert.Zero(t, normalized.MaxWallTime)
 	assert.Nil(t, budgetExceededStop(normalized, AgentLoopUsage{Elapsed: 24 * time.Hour}))
+}
+
+func TestAgentLoop_NormalizesNegativeBudgetCeilings(t *testing.T) {
+	t.Parallel()
+
+	normalized := normalizeAgentLoopBudget(AgentLoopBudget{
+		MaxWallTime:     -time.Second,
+		MaxOutputBytes:  -1,
+		MaxCostMicros:   -1,
+		MaxIterations:   -1,
+		MaxModelCalls:   -1,
+		MaxToolCalls:    -1,
+		MaxInputTokens:  -1,
+		MaxOutputTokens: -1,
+		MaxTotalTokens:  -1,
+	}, 0)
+
+	assert.True(t, normalized.IsZero())
 }
 
 func TestAgentLoop_ZeroCheckpointIntervalNeverPrompts(t *testing.T) {
@@ -689,8 +709,560 @@ func TestAgentLoop_TokenBudgetStopIsCheckpointed(t *testing.T) {
 	require.Len(t, ledger.Steps, 2)
 	assert.Equal(t, AgentLoopStepModelResponse, ledger.Steps[0].Kind)
 	assert.Equal(t, 13, ledger.Steps[0].Usage.TotalTokens)
+	assert.Equal(t, 10, ledger.Steps[0].Budget.MaxTotalTokens)
+	require.NotNil(t, ledger.Steps[1].StopCondition)
+	assert.Equal(t, 10, ledger.Steps[1].Budget.MaxTotalTokens)
+	assert.Equal(t, AgentLoopStopTokenBudget, ledger.Steps[1].StopCondition.Kind)
+}
+
+func TestAgentLoop_CheckpointsRecordEffectiveBudget(t *testing.T) {
+	t.Parallel()
+
+	budget := AgentLoopBudget{
+		MaxWallTime:     time.Minute,
+		MaxOutputBytes:  4096,
+		MaxCostMicros:   1_000_000,
+		MaxIterations:   3,
+		MaxModelCalls:   2,
+		MaxToolCalls:    2,
+		MaxInputTokens:  1_000,
+		MaxOutputTokens: 500,
+		MaxTotalTokens:  1_500,
+	}
+	ledger := &AgentLoopLedger{}
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{
+				Content:      "done",
+				Model:        "test-model",
+				StopReason:   StopEndTurn,
+				InputTokens:  10,
+				OutputTokens: 5,
+			},
+		},
+	})
+
+	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, nil, AgentLoopConfig{
+		Budget: budget,
+		EstimateCostMicros: func(_ *Response) (int64, error) {
+			return 100, nil
+		},
+		CheckpointSink: ledger,
+	})
+	require.NoError(t, err)
+	require.Len(t, ledger.Steps, 2)
+	assert.Equal(t, budget, ledger.Budget)
+	assert.Equal(t, budget, ledger.Steps[0].Budget)
+	assert.Equal(t, budget, ledger.Steps[1].Budget)
+}
+
+func TestAgentLoop_JSONLCheckpointPersistsEffectiveBudget(t *testing.T) {
+	t.Parallel()
+
+	budget := AgentLoopBudget{
+		MaxWallTime:     time.Minute,
+		MaxOutputBytes:  4096,
+		MaxCostMicros:   1_000_000,
+		MaxIterations:   3,
+		MaxModelCalls:   2,
+		MaxToolCalls:    2,
+		MaxInputTokens:  1_000,
+		MaxOutputTokens: 500,
+		MaxTotalTokens:  1_500,
+	}
+	checkpointPath := filepath.Join(t.TempDir(), "agentloop.jsonl")
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{
+				Content:      "done",
+				Model:        "test-model",
+				StopReason:   StopEndTurn,
+				InputTokens:  10,
+				OutputTokens: 5,
+			},
+		},
+	})
+
+	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, nil, AgentLoopConfig{
+		Budget: budget,
+		EstimateCostMicros: func(_ *Response) (int64, error) {
+			return 100, nil
+		},
+		CheckpointSink: NewAgentLoopJSONLCheckpoint(checkpointPath),
+	})
+	require.NoError(t, err)
+
+	loaded, err := LoadAgentLoopLedger(checkpointPath)
+	require.NoError(t, err)
+	require.Len(t, loaded.Steps, 2)
+	assert.Equal(t, budget, loaded.Budget)
+	assert.Equal(t, budget, loaded.Steps[0].Budget)
+	assert.Equal(t, budget, loaded.Steps[1].Budget)
+}
+
+func TestAgentLoopBudgetSnapshotJSONPreservesZeroRemainingConfiguredCeilings(t *testing.T) {
+	t.Parallel()
+
+	snapshot := AgentLoopBudgetSnapshot{
+		Budget: AgentLoopBudget{
+			MaxCostMicros:   10,
+			MaxInputTokens:  5,
+			MaxOutputTokens: 7,
+		},
+		Used: AgentLoopUsage{
+			EstimatedCostMicros: 10,
+			InputTokens:         5,
+			OutputTokens:        7,
+		},
+	}
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(data), `"remaining_cost_micros":0`)
+	assert.Contains(t, string(data), `"remaining_input_tokens":0`)
+	assert.Contains(t, string(data), `"remaining_output_tokens":0`)
+}
+
+func TestAgentLoopBudgetStopConditionsCoverEveryCeiling(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name             string
+		rule             string
+		kind             AgentLoopStopKind
+		budget           AgentLoopBudget
+		used             AgentLoopUsage
+		useModelCallStop bool
+		useToolStop      bool
+	}{
+		{
+			name:   "wall time",
+			budget: AgentLoopBudget{MaxWallTime: time.Second},
+			used:   AgentLoopUsage{Elapsed: time.Second},
+			rule:   "budget.max_wall_time",
+			kind:   AgentLoopStopWallTime,
+		},
+		{
+			name:   "output bytes",
+			budget: AgentLoopBudget{MaxOutputBytes: 10},
+			used:   AgentLoopUsage{OutputBytes: 11},
+			rule:   "budget.max_output_bytes",
+			kind:   AgentLoopStopOutputBytes,
+		},
+		{
+			name:   "cost",
+			budget: AgentLoopBudget{MaxCostMicros: 10},
+			used:   AgentLoopUsage{EstimatedCostMicros: 11},
+			rule:   "budget.max_cost_micros",
+			kind:   AgentLoopStopCostBudget,
+		},
+		{
+			name:   "iterations",
+			budget: AgentLoopBudget{MaxIterations: 2},
+			used:   AgentLoopUsage{Iterations: 2},
+			rule:   "budget.max_iterations",
+			kind:   AgentLoopStopMaxIterations,
+		},
+		{
+			name:             "model calls",
+			budget:           AgentLoopBudget{MaxModelCalls: 2},
+			used:             AgentLoopUsage{ModelCalls: 2},
+			rule:             "budget.max_model_calls",
+			kind:             AgentLoopStopMaxModelCalls,
+			useModelCallStop: true,
+		},
+		{
+			name:        "tool calls",
+			budget:      AgentLoopBudget{MaxToolCalls: 2},
+			used:        AgentLoopUsage{ToolCalls: 2},
+			rule:        "budget.max_tool_calls",
+			kind:        AgentLoopStopMaxToolCalls,
+			useToolStop: true,
+		},
+		{
+			name:   "input tokens",
+			budget: AgentLoopBudget{MaxInputTokens: 10},
+			used:   AgentLoopUsage{InputTokens: 11},
+			rule:   "budget.max_input_tokens",
+			kind:   AgentLoopStopTokenBudget,
+		},
+		{
+			name:   "output tokens",
+			budget: AgentLoopBudget{MaxOutputTokens: 10},
+			used:   AgentLoopUsage{OutputTokens: 11},
+			rule:   "budget.max_output_tokens",
+			kind:   AgentLoopStopTokenBudget,
+		},
+		{
+			name:   "total tokens",
+			budget: AgentLoopBudget{MaxTotalTokens: 10},
+			used:   AgentLoopUsage{TotalTokens: 11},
+			rule:   "budget.max_total_tokens",
+			kind:   AgentLoopStopTokenBudget,
+		},
+	}
+
+	coveredFields := make(map[string]bool, len(cases))
+	for _, tc := range cases {
+		coveredFields[strings.TrimPrefix(tc.rule, "budget.")] = true
+	}
+
+	assert.Equal(t, agentLoopBudgetJSONFieldsForTest(), coveredFields)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cond := budgetExceededStop(tc.budget, tc.used)
+			if tc.useModelCallStop {
+				cond = modelCallBudgetStop(tc.budget, tc.used)
+			}
+
+			if tc.useToolStop {
+				state := newAgentLoopState(nil, AgentLoopConfig{Budget: tc.budget})
+				state.usage = tc.used
+				cond = state.preToolStopCondition()
+			}
+
+			require.NotNil(t, cond)
+			assert.Equal(t, tc.rule, cond.MatchedRule)
+			assert.Equal(t, tc.kind, cond.Kind)
+		})
+	}
+}
+
+func agentLoopBudgetJSONFieldsForTest() map[string]bool {
+	budgetType := reflect.TypeFor[AgentLoopBudget]()
+	fields := make(map[string]bool, budgetType.NumField())
+
+	for field := range budgetType.Fields() {
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+
+		if name == "" || name == "-" {
+			continue
+		}
+
+		fields[name] = true
+	}
+
+	return fields
+}
+
+func TestAgentLoop_InputTokenBudgetIsDistinctFromTotalTokenBudget(t *testing.T) {
+	t.Parallel()
+
+	ledger := &AgentLoopLedger{}
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{
+				Content:      "too much input",
+				Model:        "test-model",
+				StopReason:   StopEndTurn,
+				InputTokens:  7,
+				OutputTokens: 1,
+			},
+		},
+	})
+
+	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, nil, AgentLoopConfig{
+		Budget:         AgentLoopBudget{MaxInputTokens: 6, MaxTotalTokens: 100},
+		CheckpointSink: ledger,
+	})
+	require.ErrorContains(t, err, "input token budget exceeded")
+	require.Len(t, ledger.Steps, 2)
+	require.NotNil(t, ledger.Steps[1].StopCondition)
+	assert.Equal(t, "budget.max_input_tokens", ledger.Steps[1].StopCondition.MatchedRule)
+	assert.Equal(t, AgentLoopStopTokenBudget, ledger.Steps[1].StopCondition.Kind)
+}
+
+func TestAgentLoop_OutputTokenBudgetIsDistinctFromTotalTokenBudget(t *testing.T) {
+	t.Parallel()
+
+	ledger := &AgentLoopLedger{}
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{
+				Content:      "too much output",
+				Model:        "test-model",
+				StopReason:   StopEndTurn,
+				InputTokens:  1,
+				OutputTokens: 7,
+			},
+		},
+	})
+
+	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, nil, AgentLoopConfig{
+		Budget:         AgentLoopBudget{MaxOutputTokens: 6, MaxTotalTokens: 100},
+		CheckpointSink: ledger,
+	})
+	require.ErrorContains(t, err, "output token budget exceeded")
+	require.Len(t, ledger.Steps, 2)
+	require.NotNil(t, ledger.Steps[1].StopCondition)
+	assert.Equal(t, "budget.max_output_tokens", ledger.Steps[1].StopCondition.MatchedRule)
+	assert.Equal(t, AgentLoopStopTokenBudget, ledger.Steps[1].StopCondition.Kind)
+}
+
+func TestAgentLoop_ExactUsageBudgetStopsBeforeFollowUpToolWork(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct { //nolint:govet // Test table order favors readable setup/expectation grouping over field packing.
+		name          string
+		budget        AgentLoopBudget
+		response      *Response
+		costEstimator AgentLoopCostEstimator
+		wantRule      string
+		wantText      string
+		wantKind      AgentLoopStopKind
+	}{
+		{
+			name:   "input tokens",
+			budget: AgentLoopBudget{MaxInputTokens: 10},
+			response: &Response{
+				Model:        "test-model",
+				StopReason:   StopToolUse,
+				ToolCalls:    []ToolCall{{ID: "call-input", Name: "bash"}},
+				InputTokens:  10,
+				OutputTokens: 1,
+			},
+			wantRule: "budget.max_input_tokens",
+			wantText: "input token budget exhausted",
+			wantKind: AgentLoopStopTokenBudget,
+		},
+		{
+			name:   "output tokens",
+			budget: AgentLoopBudget{MaxOutputTokens: 10},
+			response: &Response{
+				Model:        "test-model",
+				StopReason:   StopToolUse,
+				ToolCalls:    []ToolCall{{ID: "call-output", Name: "bash"}},
+				InputTokens:  1,
+				OutputTokens: 10,
+			},
+			wantRule: "budget.max_output_tokens",
+			wantText: "output token budget exhausted",
+			wantKind: AgentLoopStopTokenBudget,
+		},
+		{
+			name:   "total tokens",
+			budget: AgentLoopBudget{MaxTotalTokens: 11},
+			response: &Response{
+				Model:        "test-model",
+				StopReason:   StopToolUse,
+				ToolCalls:    []ToolCall{{ID: "call-total", Name: "bash"}},
+				InputTokens:  10,
+				OutputTokens: 1,
+			},
+			wantRule: "budget.max_total_tokens",
+			wantText: "total token budget exhausted",
+			wantKind: AgentLoopStopTokenBudget,
+		},
+		{
+			name:   "cost",
+			budget: AgentLoopBudget{MaxCostMicros: 10},
+			response: &Response{
+				Model:        "test-model",
+				StopReason:   StopToolUse,
+				ToolCalls:    []ToolCall{{ID: "call-cost", Name: "bash"}},
+				InputTokens:  1,
+				OutputTokens: 1,
+			},
+			costEstimator: func(_ *Response) (int64, error) {
+				return 10, nil
+			},
+			wantRule: "budget.max_cost_micros",
+			wantText: "cost budget exhausted",
+			wantKind: AgentLoopStopCostBudget,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ledger := &AgentLoopLedger{}
+			provider := &agentTestProvider{responses: []*Response{tc.response}}
+			reg := NewRegistry()
+			reg.Register(provider)
+
+			executions := 0
+			executor := func(_ context.Context, call ToolCall) ToolResult {
+				executions++
+
+				return ToolResult{ToolCallID: call.ID, Content: "should not run"}
+			}
+
+			_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+				Model:    "test-model",
+				Messages: []Message{{Role: RoleUser, Content: "hi"}},
+			}, nil, executor, AgentLoopConfig{
+				Budget:             tc.budget,
+				EstimateCostMicros: tc.costEstimator,
+				CheckpointSink:     ledger,
+			})
+			require.ErrorContains(t, err, tc.wantText)
+			assert.Equal(t, 1, provider.calls)
+			assert.Zero(t, executions, "exactly exhausted usage budget should deny follow-up tool work")
+			require.Len(t, ledger.Steps, 3)
+			assert.Equal(t, AgentLoopStepToolCall, ledger.Steps[1].Kind)
+			require.NotNil(t, ledger.Steps[2].StopCondition)
+			assert.Equal(t, tc.wantRule, ledger.Steps[2].StopCondition.MatchedRule)
+			assert.Equal(t, tc.wantKind, ledger.Steps[2].StopCondition.Kind)
+		})
+	}
+}
+
+func TestAgentLoop_ExactOutputByteBudgetStopsBeforeNextModelCall(t *testing.T) {
+	t.Parallel()
+
+	ledger := &AgentLoopLedger{}
+	provider := &agentTestProvider{
+		responses: []*Response{
+			{
+				Model:      "test-model",
+				StopReason: StopToolUse,
+				ToolCalls:  []ToolCall{{ID: "call-output-bytes", Name: "bash"}},
+			},
+			{
+				Content:    "should not be called",
+				Model:      "test-model",
+				StopReason: StopEndTurn,
+			},
+		},
+	}
+	reg := NewRegistry()
+	reg.Register(provider)
+
+	executions := 0
+	executor := func(_ context.Context, call ToolCall) ToolResult {
+		executions++
+
+		return ToolResult{ToolCallID: call.ID, Content: "1234"}
+	}
+
+	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, executor, AgentLoopConfig{
+		Budget:         AgentLoopBudget{MaxOutputBytes: 4},
+		CheckpointSink: ledger,
+	})
+	require.ErrorContains(t, err, "tool output byte budget exhausted")
+	assert.Equal(t, 1, provider.calls, "exact output-byte budget should block the next model call")
+	assert.Equal(t, 1, executions)
+	require.Len(t, ledger.Steps, 3)
+	require.NotNil(t, ledger.Steps[2].StopCondition)
+	assert.Equal(t, "budget.max_output_bytes", ledger.Steps[2].StopCondition.MatchedRule)
+	assert.Equal(t, AgentLoopStopOutputBytes, ledger.Steps[2].StopCondition.Kind)
+}
+
+func TestAgentLoop_TokenBudgetFailsClosedWithoutUsageMetadata(t *testing.T) {
+	t.Parallel()
+
+	ledger := &AgentLoopLedger{}
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{
+				Content:    "unmetered answer",
+				Model:      "test-model",
+				StopReason: StopEndTurn,
+			},
+		},
+	})
+
+	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, nil, AgentLoopConfig{
+		Budget:         AgentLoopBudget{MaxInputTokens: 100},
+		CheckpointSink: ledger,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token budget could not be enforced")
+	assert.Contains(t, err.Error(), ErrAgentLoopTokenUsageUnavailable.Error())
+	require.Len(t, ledger.Steps, 2)
 	require.NotNil(t, ledger.Steps[1].StopCondition)
 	assert.Equal(t, AgentLoopStopTokenBudget, ledger.Steps[1].StopCondition.Kind)
+	assert.Equal(t, "budget.max_input_tokens", ledger.Steps[1].StopCondition.MatchedRule)
+}
+
+func TestAgentLoop_TokenBudgetFailsClosedWithPartialUsageMetadata(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct { //nolint:govet // Test table order favors readable setup/expectation grouping over field packing.
+		response *Response
+		budget   AgentLoopBudget
+		name     string
+		wantRule string
+		wantText string
+	}{
+		{
+			name:     "input ceiling requires input usage",
+			budget:   AgentLoopBudget{MaxInputTokens: 100},
+			response: &Response{Content: "answer", Model: "test-model", StopReason: StopEndTurn, OutputTokens: 5},
+			wantRule: "budget.max_input_tokens",
+			wantText: "input token usage unavailable",
+		},
+		{
+			name:     "output ceiling requires output usage for visible output",
+			budget:   AgentLoopBudget{MaxOutputTokens: 100},
+			response: &Response{Content: "answer", Model: "test-model", StopReason: StopEndTurn, InputTokens: 5},
+			wantRule: "budget.max_output_tokens",
+			wantText: "output token usage unavailable",
+		},
+		{
+			name:     "total ceiling requires output usage for visible output",
+			budget:   AgentLoopBudget{MaxTotalTokens: 100},
+			response: &Response{Content: "answer", Model: "test-model", StopReason: StopEndTurn, InputTokens: 5},
+			wantRule: "budget.max_total_tokens",
+			wantText: "output token usage unavailable",
+		},
+		{
+			name:     "combined input and output ceilings attribute missing output usage",
+			budget:   AgentLoopBudget{MaxInputTokens: 100, MaxOutputTokens: 100},
+			response: &Response{Content: "answer", Model: "test-model", StopReason: StopEndTurn, InputTokens: 5},
+			wantRule: "budget.max_output_tokens",
+			wantText: "output token usage unavailable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ledger := &AgentLoopLedger{}
+			reg := NewRegistry()
+			reg.Register(&agentTestProvider{responses: []*Response{tc.response}})
+
+			_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+				Model:    "test-model",
+				Messages: []Message{{Role: RoleUser, Content: "hi"}},
+			}, nil, nil, AgentLoopConfig{
+				Budget:         tc.budget,
+				CheckpointSink: ledger,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "token budget could not be enforced")
+			assert.Contains(t, err.Error(), tc.wantText)
+			require.Len(t, ledger.Steps, 2)
+			require.NotNil(t, ledger.Steps[1].StopCondition)
+			assert.Equal(t, AgentLoopStopTokenBudget, ledger.Steps[1].StopCondition.Kind)
+			assert.Equal(t, tc.wantRule, ledger.Steps[1].StopCondition.MatchedRule)
+		})
+	}
 }
 
 func TestAgentLoop_AggregatesCacheWriteUsage(t *testing.T) {
@@ -770,8 +1342,8 @@ func TestAgentLoop_CostBudgetRequiresEstimatorAndStops(t *testing.T) {
 
 	_, _, err = AgentLoop(context.Background(), reg, CompleteParams{Model: "test-model"}, nil, nil, AgentLoopConfig{
 		Budget: AgentLoopBudget{MaxCostMicros: 100},
-		EstimateCostMicros: func(_ *Response) int64 {
-			return 150
+		EstimateCostMicros: func(_ *Response) (int64, error) {
+			return 150, nil
 		},
 		CheckpointSink: ledger,
 	})

@@ -23,8 +23,16 @@ func starterTemplateConfig() Config {
 	temperature := 0.0
 	topP := 1.0
 	seed := 1
-	agentLoopMaxOutput := int64(0)
+	agentLoopMaxOutputBytes := int64(0)
+	agentLoopMaxCostMicros := int64(0)
+	agentLoopMaxInputTokens := 0
+	agentLoopMaxOutputTokens := 0
 	agentLoopMaxTotalTokens := 0
+	agentLoopMaxIterations := 0
+	agentLoopMaxModelCalls := 0
+	agentLoopMaxToolCalls := 0
+	agentLoopWallTime := "0"
+	agentLoopCheckpointInterval := 0
 	skillLearningEnabled := true
 
 	return Config{
@@ -40,8 +48,16 @@ func starterTemplateConfig() Config {
 			MaxTokens:      2048,
 		},
 		AgentLoop: AgentLoopConfig{
-			MaxOutputBytes: &agentLoopMaxOutput,
-			MaxTotalTokens: &agentLoopMaxTotalTokens,
+			MaxOutputBytes:     &agentLoopMaxOutputBytes,
+			MaxCostMicros:      &agentLoopMaxCostMicros,
+			MaxInputTokens:     &agentLoopMaxInputTokens,
+			MaxOutputTokens:    &agentLoopMaxOutputTokens,
+			MaxTotalTokens:     &agentLoopMaxTotalTokens,
+			MaxIterations:      &agentLoopMaxIterations,
+			MaxModelCalls:      &agentLoopMaxModelCalls,
+			MaxToolCalls:       &agentLoopMaxToolCalls,
+			MaxWallTime:        &agentLoopWallTime,
+			CheckpointInterval: &agentLoopCheckpointInterval,
 		},
 		Providers: map[string]ProviderConfig{
 			"claude-code":           {},

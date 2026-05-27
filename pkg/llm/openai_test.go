@@ -86,6 +86,8 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 		assert.Failf(t, "assertion failed", "content = %q, want %q", resp.Content, "hello back")
 	}
 
+	assert.Equal(t, providerOpenAI, resp.Provider)
+
 	if resp.InputTokens != 8 || resp.CachedInputTokens != 2 || resp.OutputTokens != 3 {
 		assert.Failf(t, "assertion failed", "tokens = %d/%d/%d, want 8/2/3", resp.InputTokens, resp.CachedInputTokens, resp.OutputTokens)
 	}

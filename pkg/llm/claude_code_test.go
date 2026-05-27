@@ -76,6 +76,7 @@ func TestClaudeCodeProvider_Complete(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "hello back", resp.Content)
+	assert.Equal(t, providerClaudeCode, resp.Provider)
 	assert.Equal(t, "claude-opus-4-7", resp.Model)
 	// 12 input + 4 cache_read = 16 total in our reporting; 4 marked as cached.
 	assert.Equal(t, 16, resp.InputTokens)

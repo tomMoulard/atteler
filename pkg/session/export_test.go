@@ -31,6 +31,17 @@ func TestMarkdown_RendersTranscript(t *testing.T) {
 		UpdatedAt:    time.Date(2026, 4, 30, 10, 5, 0, 0, time.UTC),
 		DefaultAgent: "reviewer",
 		DefaultModel: "gpt-test",
+		AgentLoopBudget: llm.AgentLoopBudget{
+			MaxWallTime:     time.Minute,
+			MaxOutputBytes:  4096,
+			MaxCostMicros:   25_000,
+			MaxIterations:   3,
+			MaxModelCalls:   4,
+			MaxToolCalls:    5,
+			MaxInputTokens:  100,
+			MaxOutputTokens: 50,
+			MaxTotalTokens:  150,
+		},
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Content: "hello"},
 			{Role: llm.RoleAssistant, Content: "hi"},
@@ -44,6 +55,7 @@ func TestMarkdown_RendersTranscript(t *testing.T) {
 		"- **Updated:** 2026-04-30T10:05:00Z",
 		"- **Agent:** reviewer",
 		"- **Model:** gpt-test",
+		"- **Agent loop budget:** iter=3,model=4,tool=5,wall=1m0s,in=100,out=50,total=150,bytes=4096,costµ=25000",
 		"## Export Manifest",
 		"- **Redaction profile:** redacted-shareable",
 		"### User\n\n```text\nhello\n```",
@@ -310,6 +322,37 @@ func TestBuildMachineReadableExport_ExcludedFieldsOmitByPolicy(t *testing.T) {
 	assert.Contains(t, export.Manifest.OmittedSections, "session.tags omitted by export field policy")
 	assert.Contains(t, export.Manifest.OmittedSections, "session.worktree_path omitted by export field policy")
 	assert.Contains(t, export.Manifest.OmittedSections, "manifest.exported_at omitted by export field policy")
+}
+
+func TestBuildMachineReadableExport_IncludesAgentLoopBudget(t *testing.T) {
+	t.Parallel()
+
+	budget := llm.AgentLoopBudget{
+		MaxWallTime:     2 * time.Minute,
+		MaxOutputBytes:  4096,
+		MaxCostMicros:   25_000,
+		MaxIterations:   7,
+		MaxModelCalls:   5,
+		MaxToolCalls:    9,
+		MaxInputTokens:  100,
+		MaxOutputTokens: 50,
+		MaxTotalTokens:  150,
+	}
+	session := Session{
+		ID:              "abc",
+		AgentLoopBudget: budget,
+	}
+
+	export := BuildMachineReadableExport(session, shareableTestOptions())
+	assert.Equal(t, budget, export.Session.AgentLoopBudget)
+
+	data, err := JSONWithOptions(session, shareableTestOptions())
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"agent_loop_budget"`)
+
+	var decoded MachineReadableExport
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, budget, decoded.Session.AgentLoopBudget)
 }
 
 func TestBuildMachineReadableExport_MetadataPolicyDoesNotLeakNestedFields(t *testing.T) {

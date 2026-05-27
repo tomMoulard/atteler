@@ -755,6 +755,28 @@ func TestClearSlashCommand_ClearsConversationState(t *testing.T) {
 	assert.Equal(t, tokenUsage{}, next.tokenUsage)
 }
 
+func TestForkSlashCommandPreservesAgentLoopBudget(t *testing.T) {
+	t.Parallel()
+
+	messages := []llm.Message{
+		{Role: llm.RoleUser, Content: "hello"},
+		{Role: llm.RoleAssistant, Content: "world"},
+	}
+	budget := llm.AgentLoopBudget{MaxInputTokens: 100, MaxOutputTokens: 50, MaxCostMicros: 25_000}
+	m := model{
+		selectedModel:   "gpt-test",
+		history:         append([]llm.Message(nil), messages...),
+		sessionState:    session.New("gpt-test", messages),
+		agentLoopBudget: budget,
+	}
+
+	next, cmd, handled := runForkSlashCommand(m, slashForkInput{Count: 1, HasCount: true})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Len(t, next.history, 1)
+	assert.Equal(t, budget, next.sessionState.AgentLoopBudget)
+}
+
 func TestSaveCodeSlashCommand_WritesSelectedCodeBlock(t *testing.T) {
 	t.Parallel()
 
