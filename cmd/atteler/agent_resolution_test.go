@@ -518,12 +518,115 @@ func TestRouteAvailabilityFromRegistryMarksProviderQualifiedModelUnverified(t *t
 	assert.NotContains(t, availability.Unavailable, "openai/gpt-future")
 	require.Contains(t, availability.Unverified, "openai/gpt-future")
 	assert.Contains(t, availability.Unverified["openai/gpt-future"], modelroute.ReasonModelUnverified)
-	require.Contains(t, availability.Unverified, "gpt-prefix-future")
-	assert.Contains(t, availability.Unverified["gpt-prefix-future"], modelroute.ReasonModelUnverified)
+	require.Contains(t, availability.Unavailable, "gpt-prefix-future")
+	assert.Contains(t, availability.Unavailable["gpt-prefix-future"], modelroute.ReasonModelUnavailable)
 	assert.NotContains(t, availability.Unverified, "openai/gpt-4.1-mini")
 	assert.Equal(t, []string{"gpt-4.1-mini"}, availability.ProviderModels["openai"])
 	assert.False(t, availability.ProviderModelsVerified["openai"])
 	assert.Contains(t, availability.Unavailable["anthropic/claude-sonnet-4-20250514"], modelroute.ReasonProviderUnavailable)
+}
+
+func TestRouteAvailabilityFromRegistryAcceptsExactSlashModelID(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"namespace/model"}})
+
+	availability := routeAvailabilityFromRegistry(registry, []string{"namespace/model"})
+
+	assert.True(t, availability.Checked)
+	assert.NotContains(t, availability.Unavailable, "namespace/model")
+	assert.NotContains(t, availability.Unverified, "namespace/model")
+	assert.Equal(t, []string{"namespace/model"}, availability.ProviderModels["openai"])
+	assert.Contains(t, availability.Models, "namespace/model")
+}
+
+func TestRouteAvailabilityFromRegistryDoesNotTreatConfiguredAliasAsProviderQualifiedModel(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1-mini"}})
+	require.NoError(t, registry.SetModelAlias("fast", "openai", "gpt-4.1-mini"))
+
+	availability := routeAvailabilityFromRegistry(registry, []string{
+		"fast",
+		"openai/fast",
+	})
+
+	assert.NotContains(t, availability.Unverified, "fast")
+	assert.NotContains(t, availability.Unavailable, "fast")
+	require.Contains(t, availability.Unverified, "openai/fast")
+	assert.Contains(t, availability.Unverified["openai/fast"], modelroute.ReasonModelUnverified)
+}
+
+func TestRouteAvailabilityFromRegistryAcceptsConfiguredAliasToPrivateModel(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1-mini"}})
+	require.NoError(t, registry.SetModelAlias("fast", "openai", "private-deployment"))
+
+	availability := routeAvailabilityFromRegistry(registry, []string{"fast"})
+
+	assert.NotContains(t, availability.Unverified, "fast")
+	assert.NotContains(t, availability.Unavailable, "fast")
+	assert.Contains(t, availability.Models, "fast")
+	assert.Contains(t, availability.ProviderModels["openai"], "fast")
+}
+
+func TestRouteAvailabilityFromRegistryAllowsProviderQualifiedCatalogModelBesideAlias(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"fast"}, fetched: []string{"fast"}})
+	require.NoError(t, registry.SetModelAlias("fast", "openai", "fast"))
+	_, err := registry.ProviderModelCatalog(context.Background(), "openai")
+	require.NoError(t, err)
+
+	availability := routeAvailabilityFromRegistry(registry, []string{
+		"fast",
+		"openai/fast",
+	})
+
+	assert.True(t, availability.ProviderModelsVerified["openai"])
+	assert.NotContains(t, availability.Unverified, "fast")
+	assert.NotContains(t, availability.Unavailable, "fast")
+	assert.NotContains(t, availability.Unverified, "openai/fast")
+	assert.NotContains(t, availability.Unavailable, "openai/fast")
+}
+
+func TestRouteAvailabilityFromRegistryAllowsProviderQualifiedOverrideBesideAlias(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1-mini"}})
+	require.NoError(t, registry.SetModelAlias("fast", "openai", "gpt-4.1-mini"))
+	require.NoError(t, registry.SetProviderModelOverride("openai", "fast"))
+
+	availability := routeAvailabilityFromRegistry(registry, []string{
+		"fast",
+		"openai/fast",
+	})
+
+	assert.NotContains(t, availability.Unverified, "fast")
+	assert.NotContains(t, availability.Unavailable, "fast")
+	assert.NotContains(t, availability.Unverified, "openai/fast")
+	assert.NotContains(t, availability.Unavailable, "openai/fast")
+}
+
+func TestRouteAvailabilityFromRegistryAcceptsProviderQualifiedUserOverride(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1-mini"}})
+	require.NoError(t, registry.SetProviderModelOverride("openai", "private-deployment"))
+
+	availability := routeAvailabilityFromRegistry(registry, []string{
+		"openai/private-deployment",
+	})
+
+	assert.NotContains(t, availability.Unverified, "openai/private-deployment")
+	assert.NotContains(t, availability.Unavailable, "openai/private-deployment")
 }
 
 func TestRouteAvailabilityFromRegistryMarksMissingVerifiedModelUnavailable(t *testing.T) {

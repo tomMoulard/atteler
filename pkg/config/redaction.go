@@ -74,6 +74,7 @@ func RedactedConfig(cfg Config) Config {
 	}
 
 	out.FallbackModels = append([]string(nil), cfg.FallbackModels...)
+	out.ModelAliases = maps.Clone(cfg.ModelAliases)
 	out.Context.References = redactStringSlice("references", cfg.Context.References)
 	out.Context.ReferencePolicy.AllowedSchemes = append([]string(nil), cfg.Context.ReferencePolicy.AllowedSchemes...)
 	out.Context.ReferencePolicy.AllowedHosts = append([]string(nil), cfg.Context.ReferencePolicy.AllowedHosts...)

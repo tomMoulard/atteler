@@ -206,9 +206,7 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 
 	cmds := []tea.Cmd{tea.Println(
 		dimStyle.Render("Model set to ") +
-			pickerProviderStyle.Render(item.provider) +
-			dimStyle.Render("/") +
-			pickerSelectedStyle.Render(item.model) +
+			pickerSelectedStyle.Render(pickerSelectionLabel(item)) +
 			suffix +
 			dimStyle.Render(" ("+modelScopeLabel(scope)+")"),
 	)}
@@ -231,6 +229,10 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func pickerSelectionLabel(item pickerItem) string {
+	return item.modelID()
 }
 
 func modelScopeLabel(scope appconfig.ModelScope) string {
@@ -309,12 +311,12 @@ func loadModels(ctx context.Context, reg *llm.Registry, providers []string, fetc
 	cmds := make([]tea.Cmd, 0, len(providers))
 	for _, provider := range providers {
 		cmds = append(cmds, func() tea.Msg {
-			models, err := reg.ProviderModels(ctx, provider)
+			catalog, err := reg.ProviderModelCatalog(ctx, provider)
 			if err != nil {
 				return modelsLoadedMsg{provider: provider, fetchID: fetchID, err: err}
 			}
 
-			items := pickerItemsForProvider(provider, models)
+			items := pickerItemsForProviderCatalog(provider, catalog)
 			if len(items) == 0 {
 				return modelsLoadedMsg{provider: provider, fetchID: fetchID, err: fmt.Errorf("no models available from %s", provider)}
 			}
@@ -334,12 +336,12 @@ func loadModelsForFZF(ctx context.Context, reg *llm.Registry, fetchID int) tea.C
 		var items []pickerItem
 
 		for _, provider := range providers {
-			models, err := reg.ProviderModels(ctx, provider)
+			catalog, err := reg.ProviderModelCatalog(ctx, provider)
 			if err != nil {
 				continue
 			}
 
-			items = append(items, pickerItemsForProvider(provider, models)...)
+			items = append(items, pickerItemsForProviderCatalog(provider, catalog)...)
 		}
 
 		if len(items) == 0 {
@@ -366,6 +368,31 @@ func fallbackModelPickerItems(reg *llm.Registry) []pickerItem {
 	}
 
 	return sortPickerItems(items)
+}
+
+func pickerItemsForProviderCatalog(provider string, catalog llm.ProviderModelCatalog) []pickerItem {
+	models := append([]string(nil), catalog.Models...)
+	sort.Strings(models)
+
+	levels := llm.ReasoningPickerLevels()
+
+	items := make([]pickerItem, 0, len(models)*len(levels))
+	for _, modelName := range models {
+		if modelName == "" {
+			continue
+		}
+
+		itemProvider := provider
+		if catalog.ModelProvenance[modelName] == llm.ModelProvenanceConfiguredAlias {
+			itemProvider = ""
+		}
+
+		for _, level := range levels {
+			items = append(items, pickerItem{provider: itemProvider, model: modelName, reasoning: level})
+		}
+	}
+
+	return items
 }
 
 func pickerItemsForProvider(provider string, models []string) []pickerItem {

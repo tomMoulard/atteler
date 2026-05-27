@@ -2,11 +2,13 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,6 +55,7 @@ type AutoRegisterConfig struct {
 	Logger *slog.Logger
 
 	Providers      map[string]ProviderConfig
+	ModelAliases   map[string]string
 	FallbackModels []string
 	CommandLine    []string
 
@@ -295,6 +298,9 @@ func autoRegisterWithFactoriesContext(ctx context.Context, cfg AutoRegisterConfi
 		registerProviderWithReadiness(ctx, r, cfg, registration)
 	}
 
+	applyModelAliases(r, cfg)
+	applyUserModelOverrides(r, cfg)
+
 	defaultReport := applyDefaultSelection(r, cfg)
 	r.mu.Lock()
 	r.readiness.Default = defaultReport
@@ -511,25 +517,110 @@ func applyDefaultSelection(r *Registry, cfg AutoRegisterConfig) DefaultSelection
 		}
 	}
 
-	if cfg.DefaultModel != "" {
-		mismatchErr := defaultModelMismatch(cfg.DefaultProvider, cfg.DefaultModel)
-
-		err := mismatchErr
-		if err == nil {
-			err = r.SetDefaultModel(cfg.DefaultModel)
-		}
-
-		if err != nil && cfg.DefaultProvider != "" && mismatchErr == nil {
-			err = r.SetDefaultProviderModel(cfg.DefaultProvider, cfg.DefaultModel)
-		}
-
-		if err != nil {
-			report.ModelError = err
-			logger.Warn("llm default model ignored", "model", cfg.DefaultModel, "error", err)
-		}
+	if err := applyDefaultModelSelection(r, cfg); err != nil {
+		report.ModelError = err
+		logger.Warn("llm default model ignored", "model", cfg.DefaultModel, "error", err)
 	}
 
 	return report
+}
+
+func applyDefaultModelSelection(r *Registry, cfg AutoRegisterConfig) error {
+	if cfg.DefaultModel == "" {
+		return nil
+	}
+
+	err := r.SetDefaultModel(cfg.DefaultModel)
+	if err == nil || cfg.DefaultProvider == "" || isDefaultModelProviderMismatch(err) {
+		return err
+	}
+
+	if mismatchErr := defaultModelMismatch(cfg.DefaultProvider, cfg.DefaultModel, cfg.ModelAliases); mismatchErr != nil {
+		return mismatchErr
+	}
+
+	return r.SetDefaultProviderModel(cfg.DefaultProvider, cfg.DefaultModel)
+}
+
+func applyModelAliases(r *Registry, cfg AutoRegisterConfig) {
+	logger := cfg.logger()
+
+	aliases := make([]string, 0, len(cfg.ModelAliases))
+	for alias := range cfg.ModelAliases {
+		aliases = append(aliases, alias)
+	}
+
+	sort.Strings(aliases)
+
+	for _, alias := range aliases {
+		target := strings.TrimSpace(cfg.ModelAliases[alias])
+
+		providerName, providerModel, ok := splitProviderModel(target)
+		if !ok {
+			logger.Warn(
+				"llm model alias ignored",
+				"alias",
+				alias,
+				"target",
+				target,
+				"error",
+				"target must be provider/model",
+			)
+
+			continue
+		}
+
+		if err := r.SetModelAlias(alias, providerName, providerModel); err != nil {
+			logger.Warn("llm model alias ignored", "alias", alias, "target", target, "error", err)
+		}
+	}
+}
+
+func applyUserModelOverrides(r *Registry, cfg AutoRegisterConfig) {
+	logger := cfg.logger()
+
+	for _, model := range providerQualifiedUserModels(cfg) {
+		providerName, providerModel, ok := splitProviderModel(model)
+		if !ok {
+			continue
+		}
+
+		if err := r.SetProviderModelOverride(providerName, providerModel); err != nil {
+			logger.Warn("llm model override ignored", "model", model, "error", err)
+		}
+	}
+}
+
+func providerQualifiedUserModels(cfg AutoRegisterConfig) []string {
+	seen := make(map[string]bool)
+
+	record := func(model string) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return
+		}
+
+		if _, _, ok := splitProviderModel(model); !ok {
+			return
+		}
+
+		seen[model] = true
+	}
+
+	record(cfg.SelectedModel)
+
+	for _, model := range cfg.FallbackModels {
+		record(model)
+	}
+
+	models := make([]string, 0, len(seen))
+	for model := range seen {
+		models = append(models, model)
+	}
+
+	sort.Strings(models)
+
+	return models
 }
 
 func logProviderSkip(logger *slog.Logger, providerName string, err error, visible bool) {
@@ -591,11 +682,20 @@ func providerRequested(cfg AutoRegisterConfig, name string) bool {
 		return true
 	}
 
+	if providerRequestedByModelAlias(cfg, name) {
+		return true
+	}
+
+	// Compatibility-only readiness hint: legacy bare model prefixes can still
+	// make provider diagnostics visible, but Registry resolution no longer uses
+	// these prefixes to route completion requests. Keep this isolated to
+	// auto-registration/readiness discovery; do not call it from model
+	// resolution paths.
 	switch name {
 	case providerOpenAI:
-		return providerRequestedByModelPrefix(cfg, "gpt", "o1", "o3", "o4")
+		return providerRequestedByLegacyModelPrefix(cfg, "gpt", "o1", "o3", "o4")
 	case providerAnthropic, providerClaudeCode:
-		return providerRequestedByModelPrefix(cfg, "claude")
+		return providerRequestedByLegacyModelPrefix(cfg, "claude")
 	case providerOllama:
 		return providerRequestedByKnownOllamaModel(cfg)
 	default:
@@ -612,10 +712,33 @@ func providerExplicitlyRequested(cfg AutoRegisterConfig, name string) bool {
 		})
 }
 
-func providerRequestedByModelPrefix(cfg AutoRegisterConfig, prefixes ...string) bool {
-	return unqualifiedModelHasAnyPrefix(cfg.DefaultModel, prefixes...) ||
-		unqualifiedModelHasAnyPrefix(cfg.SelectedModel, prefixes...) ||
-		anyUnqualifiedModelHasPrefix(cfg.FallbackModels, prefixes...)
+func providerRequestedByModelAlias(cfg AutoRegisterConfig, name string) bool {
+	for alias, target := range cfg.ModelAliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			continue
+		}
+
+		if !modelNamesProvider(target, name) {
+			continue
+		}
+
+		if strings.TrimSpace(cfg.DefaultModel) == alias ||
+			strings.TrimSpace(cfg.SelectedModel) == alias ||
+			slices.ContainsFunc(cfg.FallbackModels, func(model string) bool {
+				return strings.TrimSpace(model) == alias
+			}) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func providerRequestedByLegacyModelPrefix(cfg AutoRegisterConfig, prefixes ...string) bool {
+	return legacyUnqualifiedModelHasAnyPrefix(cfg.DefaultModel, prefixes...) ||
+		legacyUnqualifiedModelHasAnyPrefix(cfg.SelectedModel, prefixes...) ||
+		anyLegacyUnqualifiedModelHasPrefix(cfg.FallbackModels, prefixes...)
 }
 
 func providerRequestedByKnownOllamaModel(cfg AutoRegisterConfig) bool {
@@ -648,7 +771,7 @@ func readinessCheckTimeout(cfg AutoRegisterConfig) time.Duration {
 	return DefaultReadinessCheckTimeout
 }
 
-func defaultModelMismatch(providerName, model string) error {
+func defaultModelMismatch(providerName, model string, aliases map[string]string) error {
 	providerName = strings.ToLower(strings.TrimSpace(providerName))
 	model = strings.TrimSpace(model)
 
@@ -664,27 +787,54 @@ func defaultModelMismatch(providerName, model string) error {
 		return nil
 	}
 
-	switch {
-	case modelHasAnyPrefix(model, "claude"):
-		if providerName != providerAnthropic && providerName != providerClaudeCode {
-			return defaultModelProviderMismatchError(providerName, providerAnthropic, model)
-		}
-	case modelHasAnyPrefix(model, "gpt", "o1", "o3", "o4"):
-		if providerName != providerOpenAI && providerName != providerCodex {
-			return defaultModelProviderMismatchError(providerName, providerOpenAI, model)
-		}
-	case isKnownOllamaModelName(model):
-		if providerName != providerOllama {
-			return defaultModelProviderMismatchError(providerName, providerOllama, model)
+	if target, ok := configuredAliasTarget(aliases, model); ok {
+		modelProvider, _, ok := splitProviderModel(target)
+		if ok && !strings.EqualFold(modelProvider, providerName) {
+			return defaultModelProviderMismatchError(providerName, modelProvider, model)
 		}
 	}
 
 	return nil
 }
 
+func configuredAliasTarget(aliases map[string]string, alias string) (string, bool) {
+	alias = strings.TrimSpace(alias)
+	for configuredAlias, target := range aliases {
+		if strings.TrimSpace(configuredAlias) == alias {
+			return strings.TrimSpace(target), true
+		}
+	}
+
+	return "", false
+}
+
 func defaultModelProviderMismatchError(defaultProvider, modelProvider, model string) error {
-	return fmt.Errorf("llm: default model %q appears to belong to provider %q, not default provider %q",
-		model, modelProvider, defaultProvider)
+	return defaultModelProviderMismatch{
+		defaultProvider: defaultProvider,
+		modelProvider:   modelProvider,
+		model:           model,
+	}
+}
+
+type defaultModelProviderMismatch struct {
+	defaultProvider string
+	modelProvider   string
+	model           string
+}
+
+func (e defaultModelProviderMismatch) Error() string {
+	return fmt.Sprintf(
+		"llm: default model %q appears to belong to provider %q, not default provider %q",
+		e.model,
+		e.modelProvider,
+		e.defaultProvider,
+	)
+}
+
+func isDefaultModelProviderMismatch(err error) bool {
+	var mismatch defaultModelProviderMismatch
+
+	return errors.As(err, &mismatch)
 }
 
 func privateAdapterDisabled(providerName string, cfg ProviderConfig) bool {
@@ -757,7 +907,7 @@ func modelNamesProvider(model, provider string) bool {
 	return ok && strings.EqualFold(prefix, provider)
 }
 
-func modelHasAnyPrefix(model string, prefixes ...string) bool {
+func legacyModelHasAnyPrefix(model string, prefixes ...string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if model == "" {
 		return false
@@ -776,17 +926,17 @@ func modelHasAnyPrefix(model string, prefixes ...string) bool {
 	return false
 }
 
-func unqualifiedModelHasAnyPrefix(model string, prefixes ...string) bool {
+func legacyUnqualifiedModelHasAnyPrefix(model string, prefixes ...string) bool {
 	if _, _, ok := splitProviderModel(model); ok {
 		return false
 	}
 
-	return modelHasAnyPrefix(model, prefixes...)
+	return legacyModelHasAnyPrefix(model, prefixes...)
 }
 
-func anyUnqualifiedModelHasPrefix(models []string, prefixes ...string) bool {
+func anyLegacyUnqualifiedModelHasPrefix(models []string, prefixes ...string) bool {
 	for _, model := range models {
-		if unqualifiedModelHasAnyPrefix(model, prefixes...) {
+		if legacyUnqualifiedModelHasAnyPrefix(model, prefixes...) {
 			return true
 		}
 	}

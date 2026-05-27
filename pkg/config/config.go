@@ -39,6 +39,7 @@ type Config struct {
 	AgentLoop       AgentLoopConfig           `json:"agent_loop" yaml:"agent_loop"`
 	DefaultProvider string                    `json:"default_provider,omitempty" yaml:"default_provider,omitempty"`
 	DefaultModel    string                    `json:"default_model,omitempty" yaml:"default_model,omitempty"`
+	ModelAliases    map[string]string         `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty"`
 	FallbackModels  []string                  `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
 	Context         ContextConfig             `json:"context" yaml:"context"`
 	Plugins         PluginConfig              `json:"plugins" yaml:"plugins"`
@@ -231,6 +232,7 @@ type fileConfig struct {
 	Vector          fileVectorConfig              `json:"vector" yaml:"vector"`
 	DefaultProvider *string                       `json:"default_provider" yaml:"default_provider"`
 	DefaultModel    *string                       `json:"default_model" yaml:"default_model"`
+	ModelAliases    map[string]string             `json:"model_aliases" yaml:"model_aliases"`
 	Providers       map[string]fileProviderConfig `json:"providers" yaml:"providers"`
 	Agents          map[string]fileAgentConfig    `json:"agents" yaml:"agents"`
 	Hooks           map[string][]HookConfig       `json:"hooks" yaml:"hooks"`
@@ -586,6 +588,10 @@ func normalizeEmptyMaps(cfg *Config) {
 		cfg.Providers = nil
 	}
 
+	if len(cfg.ModelAliases) == 0 {
+		cfg.ModelAliases = nil
+	}
+
 	if len(cfg.Agents) == 0 {
 		cfg.Agents = nil
 	}
@@ -616,6 +622,7 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 		rec.replace("fallback_models", source, dst.FallbackModels, "replaces the entire fallback model list")
 	}
 
+	mergeModelAliases(dst, src.ModelAliases, rec, source)
 	mergeProviders(dst, src.Providers, rec, source)
 	mergeAgents(dst, src.Agents, rec, source)
 	mergeHooks(dst, src.Hooks, rec, source)
@@ -625,6 +632,22 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 	mergePlugins(dst, src.Plugins, rec, source)
 	mergeSkillLearning(dst, src.SkillLearning, rec, source)
 	mergeVector(dst, src.Vector, rec, source)
+}
+
+func mergeModelAliases(dst *Config, aliases map[string]string, rec *originRecorder, source originSource) {
+	if aliases != nil {
+		rec.merge("model_aliases", source, sortedMapKeys(aliases), "merges model aliases by alias")
+	}
+
+	for alias, target := range aliases {
+		if dst.ModelAliases == nil {
+			dst.ModelAliases = make(map[string]string)
+		}
+
+		target = strings.TrimSpace(target)
+		dst.ModelAliases[alias] = target
+		rec.set(modelAliasFieldPath(alias), source, target)
+	}
 }
 
 func mergeProviders(dst *Config, providers map[string]fileProviderConfig, rec *originRecorder, source originSource) {
@@ -1073,6 +1096,7 @@ func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source 
 		rec.replace("fallback_models", source, dst.FallbackModels, "replaces the entire fallback model list")
 	}
 
+	mergeConfigModelAliases(dst, src.ModelAliases, rec, source)
 	mergeConfigProviders(dst, src.Providers, rec, source)
 	mergeConfigAgents(dst, src.Agents, rec, source)
 	mergeConfigHooks(dst, src.Hooks, rec, source)
@@ -1082,6 +1106,22 @@ func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source 
 	mergeConfigPlugins(dst, src.Plugins, rec, source)
 	mergeConfigSkillLearning(dst, src.SkillLearning, rec, source)
 	mergeConfigVector(dst, src.Vector, rec, source)
+}
+
+func mergeConfigModelAliases(dst *Config, aliases map[string]string, rec *originRecorder, source originSource) {
+	if aliases != nil {
+		rec.merge("model_aliases", source, sortedMapKeys(aliases), "merges model aliases by alias")
+	}
+
+	for alias, target := range aliases {
+		if dst.ModelAliases == nil {
+			dst.ModelAliases = make(map[string]string)
+		}
+
+		target = strings.TrimSpace(target)
+		dst.ModelAliases[alias] = target
+		rec.set(modelAliasFieldPath(alias), source, target)
+	}
 }
 
 func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec *originRecorder, source originSource) {
@@ -1462,6 +1502,7 @@ func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins Orig
 		appendOriginChain(dstOrigins, "fallback_models", srcOrigins, true)
 	}
 
+	mergeConfigModelAliasesFromOrigins(dst, src.ModelAliases, dstOrigins, srcOrigins)
 	mergeConfigProvidersFromOrigins(dst, src.Providers, dstOrigins, srcOrigins)
 	mergeConfigAgentsFromOrigins(dst, src.Agents, dstOrigins, srcOrigins)
 	mergeConfigHooksFromOrigins(dst, src.Hooks, dstOrigins, srcOrigins)
@@ -1471,6 +1512,21 @@ func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins Orig
 	mergeConfigPluginsFromOrigins(dst, src.Plugins, dstOrigins, srcOrigins)
 	mergeConfigSkillLearningFromOrigins(dst, src.SkillLearning, dstOrigins, srcOrigins)
 	mergeConfigVectorFromOrigins(dst, src.Vector, dstOrigins, srcOrigins)
+}
+
+func mergeConfigModelAliasesFromOrigins(dst *Config, aliases map[string]string, dstOrigins, srcOrigins OriginMap) {
+	if aliases != nil {
+		appendOriginChain(dstOrigins, "model_aliases", srcOrigins, false)
+	}
+
+	for alias, target := range aliases {
+		if dst.ModelAliases == nil {
+			dst.ModelAliases = make(map[string]string)
+		}
+
+		dst.ModelAliases[alias] = strings.TrimSpace(target)
+		appendOriginChain(dstOrigins, modelAliasFieldPath(alias), srcOrigins, false)
+	}
 }
 
 func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderConfig, dstOrigins, srcOrigins OriginMap) {

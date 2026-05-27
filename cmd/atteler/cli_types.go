@@ -183,6 +183,7 @@ type cliOptions struct {
 	configPaths                        string
 	contextPackPath                    string
 	model                              string
+	explainModelResolution             string
 	describeAgentName                  string
 	codeSymbolName                     string
 	codeSymbolFileSummary              string

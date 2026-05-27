@@ -71,7 +71,7 @@ from the same descriptors that route the commands.
 |--------|----------|
 | `chat` / `session` | `atteler chat once "Explain this repository in one paragraph"`, `atteler session list`, `atteler session search "auth retry"` |
 | `config` | `atteler config paths`, `atteler config validate`, `atteler config migrate`, `atteler config report` |
-| `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models`, `atteler providers ollama-status`, `atteler providers ollama-stop` |
+| `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models`, `atteler providers resolve gpt-5.5`, `atteler providers ollama-status`, `atteler providers ollama-stop` |
 | `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
 | `memory` / `retrieval` | `atteler memory search "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm"`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"`, `atteler memory vector-index docs/research.md` |
 | `code-intel` | `atteler code-intel summary`, `atteler code-intel summary --json`, `atteler code-intel symbol NewRegistry`, `atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/` |
@@ -81,6 +81,11 @@ from the same descriptors that route the commands.
 | `worktrees` | `atteler worktrees run "Add unit tests for auth"`, `atteler worktrees list`, `atteler worktrees merge 20260430-120000-deadbeef` |
 | `eval` | `atteler eval output .atteler/fixtures/readme-summary.txt --eval-expected "package overview"`, `atteler eval run .atteler/evals/readme.eval.yaml --eval-json`, `atteler eval fixtures .atteler/evals --eval-report .atteler/eval-report.json`, `atteler eval record reviewer`, `atteler eval replay-response .atteler/fixtures/once.json "Summarize @README.md"` |
 <!-- atteler:cli-domains:end -->
+
+Use `atteler providers resolve <model>` when routing is unclear. It prints the
+selected provider/model when resolution is safe, lists every provider claim
+considered for ambiguous bare names, and includes provenance/stale-catalog
+markers so static fallbacks are not mistaken for fresh live catalogs.
 
 Common options for model, agent, output, generation settings, provider routing
 settings, and compatibility flags can still be combined with domain commands
@@ -162,6 +167,8 @@ version: 1
 default_provider: openai
 default_model: gpt-4.1-mini
 fallback_models: ["gpt-4.1", "gpt-4.1-nano"]
+model_aliases:
+  fast: openai/gpt-4.1-mini
 
 generation:
   temperature: 0
@@ -227,6 +234,12 @@ agents:
     temperature: 0
     max_tokens: 1200
 ```
+
+Bare model names resolve only by exact provider catalog claim or explicit
+`model_aliases` entry. If more than one provider claims the same bare name,
+Atteler reports the collision unless a configured default provider/model makes
+the provider choice deterministic. Legacy `gpt*`/`claude*` prefixes are kept
+only as readiness-discovery hints, not as completion-routing rules.
 
 Agent `routing_policy` entries are evaluated against the built-in versioned
 model catalog plus runtime provider evidence. The router considers context

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -134,6 +135,54 @@ type Provider interface {
 	ModelContextWindow(model string) int
 }
 
+// ModelProvenance records how the registry learned about a model claim.
+type ModelProvenance string
+
+// Model claim provenance values.
+const (
+	ModelProvenanceStatic          ModelProvenance = "static"
+	ModelProvenanceFetchedLive     ModelProvenance = "fetched_live"
+	ModelProvenanceConfiguredAlias ModelProvenance = "configured_alias"
+	ModelProvenanceUserOverride    ModelProvenance = "user_override"
+)
+
+// ModelResolutionCandidate explains one provider claim considered during
+// registry model resolution.
+type ModelResolutionCandidate struct {
+	ProviderName string
+	Model        string
+	Provenance   ModelProvenance
+	Stale        bool
+}
+
+// ModelResolutionDiagnostic explains how a request model resolves, or why it
+// cannot resolve safely.
+//
+//nolint:govet // Field order keeps diagnostic output fields grouped for callers.
+type ModelResolutionDiagnostic struct {
+	Error                     error
+	RequestedModel            string
+	ProviderName              string
+	ProviderModel             string
+	Reason                    string
+	Provenance                ModelProvenance
+	Candidates                []ModelResolutionCandidate
+	DefaultProvider           string
+	DefaultProviderConfigured bool
+	Stale                     bool
+}
+
+// Resolved reports whether the diagnostic selected a concrete provider/model.
+func (d ModelResolutionDiagnostic) Resolved() bool {
+	return d.Error == nil && d.ProviderName != ""
+}
+
+type modelClaim struct {
+	providerName string
+	model        string
+	provenance   ModelProvenance
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
@@ -143,13 +192,19 @@ type Provider interface {
 //nolint:govet // Field order keeps registry state grouped by purpose.
 type Registry struct {
 	providers          map[string]Provider
-	models             map[string]Provider
+	models             map[string]map[string]modelClaim
 	catalogs           map[string]ProviderModelCatalog
 	healthCache        map[string]providerHealthCacheEntry
 	providerModels     map[string]map[string]bool
+	modelProvenance    map[string]map[string]ModelProvenance
+	catalogProvenance  map[string]map[string]ModelProvenance
+	modelOverrides     map[string]map[string]bool
 	providerModelsLive map[string]bool
 	fallback           string
 	defaultModel       string
+	defaultConfigured  bool
+	defaultProviderSet bool
+	defaultQualified   bool
 	readiness          ProviderReadinessReport
 	routeTelemetry     *modelroute.Telemetry
 	mu                 sync.RWMutex
@@ -160,10 +215,13 @@ type Registry struct {
 func NewRegistry() *Registry {
 	return &Registry{
 		providers:          make(map[string]Provider),
-		models:             make(map[string]Provider),
+		models:             make(map[string]map[string]modelClaim),
 		catalogs:           make(map[string]ProviderModelCatalog),
 		healthCache:        make(map[string]providerHealthCacheEntry),
 		providerModels:     make(map[string]map[string]bool),
+		modelProvenance:    make(map[string]map[string]ModelProvenance),
+		catalogProvenance:  make(map[string]map[string]ModelProvenance),
+		modelOverrides:     make(map[string]map[string]bool),
 		providerModelsLive: make(map[string]bool),
 		retry:              defaultRetryConfig(),
 		routeTelemetry:     modelroute.NewTelemetry(),
@@ -204,7 +262,7 @@ func (r *Registry) Register(p Provider) {
 	providerName := p.Name()
 	r.providers[providerName] = p
 	r.providerModelsLive[providerName] = false
-	r.indexProviderModelsLocked(providerName, p.Models())
+	r.indexProviderModelsLocked(providerName, p.Models(), ModelProvenanceStatic)
 	r.setStaticProviderCatalogLocked(providerName, p.Models())
 	r.markProviderRegisteredLocked(providerName, p.Models())
 
@@ -216,6 +274,8 @@ func (r *Registry) Register(p Provider) {
 
 // SetDefault changes the fallback provider used when the model is empty.
 func (r *Registry) SetDefault(name string) error {
+	name = strings.TrimSpace(name)
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -225,35 +285,64 @@ func (r *Registry) SetDefault(name string) error {
 
 	r.fallback = name
 	r.defaultModel = ""
+	r.defaultConfigured = true
+	r.defaultProviderSet = true
+	r.defaultQualified = false
 
 	return nil
 }
 
 // SetDefaultModel changes the fallback model used when CompleteParams.Model is
-// empty. The model must already be indexed by the registry.
+// empty. Bare models must resolve through an exact claim or configured alias;
+// provider-qualified models may introduce a user override for private model IDs.
 func (r *Registry) SetDefaultModel(model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return errors.New("llm: default model cannot be empty")
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if providerName, providerModel, ok := splitProviderModel(model); ok {
-		if _, ok := r.providers[providerName]; !ok {
-			return fmt.Errorf("llm: unknown provider %q", providerName)
+		if _, ok := r.providers[providerName]; ok {
+			if r.defaultProviderSet && !strings.EqualFold(providerName, r.fallback) {
+				return defaultModelProviderMismatchError(r.fallback, providerName, model)
+			}
+
+			r.indexProviderModelLocked(providerName, providerModel, ModelProvenanceUserOverride)
+			r.recordProviderModelOverrideLocked(providerName, providerModel)
+			r.fallback = providerName
+			r.defaultModel = providerModel
+			r.defaultConfigured = true
+			r.defaultProviderSet = true
+			r.defaultQualified = true
+
+			return nil
+		}
+	}
+
+	diagnostic := r.explainModelResolutionLocked(model)
+	if diagnostic.Error != nil {
+		if r.defaultProviderSet && len(diagnostic.Candidates) > 0 {
+			return defaultModelProviderMismatchError(
+				r.fallback,
+				strings.Join(modelResolutionCandidateProviderNames(diagnostic.Candidates), ", "),
+				model,
+			)
 		}
 
-		r.indexProviderModelLocked(providerName, providerModel)
-		r.fallback = providerName
-		r.defaultModel = providerModel
-
-		return nil
+		return diagnostic.Error
 	}
 
-	p, ok := r.models[model]
-	if !ok {
-		return fmt.Errorf("llm: unknown model %q", model)
+	if r.defaultProviderSet && diagnostic.ProviderName != r.fallback {
+		return defaultModelProviderMismatchError(r.fallback, diagnostic.ProviderName, model)
 	}
 
-	r.fallback = p.Name()
+	r.fallback = diagnostic.ProviderName
 	r.defaultModel = model
+	r.defaultConfigured = true
+	r.defaultQualified = false
 
 	return nil
 }
@@ -262,6 +351,9 @@ func (r *Registry) SetDefaultModel(model string) error {
 // used for configured live-only model IDs before ProviderModels has fetched and
 // indexed the provider's live model list.
 func (r *Registry) SetDefaultProviderModel(providerName, model string) error {
+	providerName = strings.TrimSpace(providerName)
+	model = strings.TrimSpace(model)
+
 	if model == "" {
 		return errors.New("llm: default model cannot be empty")
 	}
@@ -273,9 +365,68 @@ func (r *Registry) SetDefaultProviderModel(providerName, model string) error {
 		return fmt.Errorf("llm: unknown provider %q", providerName)
 	}
 
-	r.indexProviderModelLocked(providerName, model)
+	r.indexProviderModelLocked(providerName, model, ModelProvenanceUserOverride)
+	r.recordProviderModelOverrideLocked(providerName, model)
 	r.fallback = providerName
 	r.defaultModel = model
+	r.defaultConfigured = true
+	r.defaultProviderSet = true
+	r.defaultQualified = true
+
+	return nil
+}
+
+// SetModelAlias maps a bare alias to a provider-local model. Aliases are
+// explicit user configuration and take part in collision-safe bare model
+// resolution just like provider catalog entries.
+func (r *Registry) SetModelAlias(alias, providerName, providerModel string) error {
+	alias = strings.TrimSpace(alias)
+	providerName = strings.TrimSpace(providerName)
+	providerModel = strings.TrimSpace(providerModel)
+
+	if alias == "" {
+		return errors.New("llm: model alias cannot be empty")
+	}
+
+	if providerModel == "" {
+		return errors.New("llm: alias target model cannot be empty")
+	}
+
+	if strings.Contains(alias, "/") {
+		return fmt.Errorf("llm: model alias %q must be a bare model name", alias)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.providers[providerName]; !ok {
+		return fmt.Errorf("llm: unknown provider %q", providerName)
+	}
+
+	r.indexModelClaimLocked(providerName, alias, providerModel, ModelProvenanceConfiguredAlias)
+
+	return nil
+}
+
+// SetProviderModelOverride records a provider-local model explicitly selected
+// by user configuration without changing the registry default.
+func (r *Registry) SetProviderModelOverride(providerName, model string) error {
+	providerName = strings.TrimSpace(providerName)
+	model = strings.TrimSpace(model)
+
+	if model == "" {
+		return errors.New("llm: model override cannot be empty")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.providers[providerName]; !ok {
+		return fmt.Errorf("llm: unknown provider %q", providerName)
+	}
+
+	r.indexProviderModelLocked(providerName, model, ModelProvenanceUserOverride)
+	r.recordProviderModelOverrideLocked(providerName, model)
 
 	return nil
 }
@@ -388,15 +539,23 @@ func (r *Registry) resolve(params CompleteParams) (Provider, CompleteParams, err
 	}
 
 	if r.defaultModel != "" {
-		p, ok := r.models[r.defaultModel]
-		if !ok {
+		diagnostic := r.explainDefaultModelLocked()
+		if diagnostic.Error != nil {
 			return nil, params, r.resolutionErrorForModelLocked(
-				fmt.Errorf("llm: unknown default model %q", r.defaultModel),
+				diagnostic.Error,
 				r.defaultModel,
 			)
 		}
 
-		params.Model = r.defaultModel
+		p, ok := r.providers[diagnostic.ProviderName]
+		if !ok {
+			return nil, params, r.resolutionErrorForModelLocked(
+				fmt.Errorf("llm: unknown provider %q", diagnostic.ProviderName),
+				r.defaultModel,
+			)
+		}
+
+		params.Model = diagnostic.ProviderModel
 
 		return p, params, nil
 	}
@@ -406,7 +565,7 @@ func (r *Registry) resolve(params CompleteParams) (Provider, CompleteParams, err
 		return nil, params, r.resolutionErrorLocked(errors.New("llm: no providers registered"))
 	}
 
-	if models := p.Models(); len(models) > 0 {
+	if models := r.defaultProviderModelsLocked(r.fallback, p); len(models) > 0 {
 		params.Model = models[0]
 	}
 
@@ -545,56 +704,321 @@ func catalogRouteObservationCandidate(providerName, model string) (modelroute.Ca
 }
 
 func (r *Registry) resolveExplicitModelLocked(params CompleteParams) (Provider, CompleteParams, error) {
-	if providerName, providerModel, ok := splitProviderModel(params.Model); ok {
-		p, ok := r.providers[providerName]
-		if !ok {
-			return nil, params, r.resolutionErrorForModelLocked(
-				fmt.Errorf("llm: unknown provider %q", providerName),
-				params.Model,
-			)
-		}
-
-		params.Model = providerModel
-
-		return p, params, nil
+	diagnostic := r.explainModelResolutionLocked(params.Model)
+	if diagnostic.Error != nil {
+		return nil, params, r.resolutionErrorForModelLocked(diagnostic.Error, params.Model)
 	}
 
-	if p, ok := r.models[params.Model]; ok {
-		return p, params, nil
+	p, ok := r.providers[diagnostic.ProviderName]
+	if !ok {
+		return nil, params, r.resolutionErrorForModelLocked(
+			fmt.Errorf("llm: unknown provider %q", diagnostic.ProviderName),
+			params.Model,
+		)
 	}
 
-	if p, ok := r.providerForModelPrefixLocked(params.Model); ok {
-		return p, params, nil
-	}
+	params.Model = diagnostic.ProviderModel
 
-	return nil, params, r.resolutionErrorForModelLocked(fmt.Errorf("llm: unknown model %q", params.Model), params.Model)
+	return p, params, nil
 }
 
-func (r *Registry) providerForModelPrefixLocked(model string) (Provider, bool) {
-	providerName := r.providerNameForModelPrefixLocked(model)
-	if providerName == "" {
-		return nil, false
+// ExplainModelResolution returns a diagnostic for the provider/model that the
+// registry would use for model without making a provider call.
+func (r *Registry) ExplainModelResolution(model string) ModelResolutionDiagnostic {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.explainModelResolutionLocked(model)
+}
+
+func (r *Registry) explainModelResolutionLocked(model string) ModelResolutionDiagnostic {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return r.explainDefaultModelLocked()
+	}
+
+	diagnostic := ModelResolutionDiagnostic{
+		RequestedModel:            model,
+		DefaultProvider:           r.fallback,
+		DefaultProviderConfigured: r.defaultConfigured,
+	}
+
+	providerName, providerModel, providerQualified := splitProviderModel(model)
+	if qualifiedDiagnostic, ok := r.explainProviderQualifiedModelLocked(
+		diagnostic,
+		providerName,
+		providerModel,
+		providerQualified,
+	); ok {
+		return qualifiedDiagnostic
+	}
+
+	candidates := r.modelResolutionCandidatesLocked(model)
+	diagnostic.Candidates = candidates
+
+	if len(candidates) == 0 {
+		if providerQualified {
+			diagnostic.Error = fmt.Errorf("llm: unknown provider %q", providerName)
+			diagnostic.Reason = "provider-qualified model names require a registered provider"
+
+			return diagnostic
+		}
+
+		diagnostic.Error = fmt.Errorf("llm: unknown model %q", model)
+		diagnostic.Reason = "no registered provider catalog, live fetch, configured alias, or user override claims this bare model"
+
+		return diagnostic
+	}
+
+	if len(candidates) == 1 {
+		candidate := candidates[0]
+		diagnostic.ProviderName = candidate.ProviderName
+		diagnostic.ProviderModel = candidate.Model
+		diagnostic.Provenance = candidate.Provenance
+		diagnostic.Stale = candidate.Stale
+		diagnostic.Reason = exactModelMatchReason(providerQualified)
+
+		return diagnostic
+	}
+
+	if r.defaultConfigured {
+		for _, candidate := range candidates {
+			if candidate.ProviderName != r.fallback {
+				continue
+			}
+
+			diagnostic.ProviderName = candidate.ProviderName
+			diagnostic.ProviderModel = candidate.Model
+			diagnostic.Provenance = candidate.Provenance
+			diagnostic.Stale = candidate.Stale
+			diagnostic.Reason = fmt.Sprintf(
+				"%s is claimed by multiple providers; configured default provider %q selected a deterministic match",
+				modelResolutionRequestKind(providerQualified),
+				r.fallback,
+			)
+
+			return diagnostic
+		}
+	}
+
+	diagnostic.Error = fmt.Errorf(
+		"llm: ambiguous model %q claimed by providers: %s",
+		model,
+		strings.Join(modelResolutionCandidateProviderNames(candidates), ", "),
+	)
+	diagnostic.Reason = modelResolutionRequestKind(providerQualified) +
+		" is ambiguous; use provider/model or configure a default provider"
+
+	return diagnostic
+}
+
+func (r *Registry) explainProviderQualifiedModelLocked(
+	diagnostic ModelResolutionDiagnostic,
+	providerName string,
+	providerModel string,
+	providerQualified bool,
+) (ModelResolutionDiagnostic, bool) {
+	if !providerQualified {
+		return diagnostic, false
 	}
 
 	p, ok := r.providers[providerName]
+	if !ok {
+		return diagnostic, false
+	}
 
-	return p, ok
+	diagnostic.ProviderName = p.Name()
+	diagnostic.ProviderModel = providerModel
+	diagnostic.Provenance = r.providerQualifiedModelProvenanceLocked(providerName, providerModel)
+	diagnostic.Stale = r.modelClaimStaleLocked(providerName, providerModel, diagnostic.Provenance)
+	diagnostic.Candidates = []ModelResolutionCandidate{{
+		ProviderName: providerName,
+		Model:        diagnostic.ProviderModel,
+		Provenance:   diagnostic.Provenance,
+		Stale:        diagnostic.Stale,
+	}}
+	diagnostic.Reason = "provider-qualified model selected provider directly"
+
+	return diagnostic, true
 }
 
-func (r *Registry) providerNameForModelPrefixLocked(model string) string {
-	model = strings.ToLower(strings.TrimSpace(model))
-	switch {
-	case strings.HasPrefix(model, "claude"):
-		if _, ok := r.providers[providerClaudeCode]; ok {
-			return providerClaudeCode
+func (r *Registry) providerQualifiedModelProvenanceLocked(providerName, providerModel string) ModelProvenance {
+	if claim, ok := r.models[providerModel][providerName]; ok &&
+		claim.model == providerModel &&
+		claim.provenance != ModelProvenanceConfiguredAlias {
+		return claim.provenance
+	}
+
+	if provenance, ok := r.providerModelCatalogProvenanceLocked(providerName, providerModel); ok {
+		return provenance
+	}
+
+	return ModelProvenanceUserOverride
+}
+
+func exactModelMatchReason(providerQualified bool) string {
+	if providerQualified {
+		return "provider prefix was not registered; full model ID matched exactly one registered provider claim"
+	}
+
+	return "bare model matched exactly one registered provider claim"
+}
+
+func modelResolutionRequestKind(providerQualified bool) string {
+	if providerQualified {
+		return "model ID"
+	}
+
+	return "bare model"
+}
+
+func (r *Registry) explainDefaultModelLocked() ModelResolutionDiagnostic {
+	diagnostic := ModelResolutionDiagnostic{
+		DefaultProvider:           r.fallback,
+		DefaultProviderConfigured: r.defaultConfigured,
+	}
+
+	if r.defaultModel != "" {
+		p, ok := r.providers[r.fallback]
+		if !ok {
+			diagnostic.RequestedModel = r.defaultModel
+			diagnostic.Error = fmt.Errorf("llm: unknown default model %q", r.defaultModel)
+			diagnostic.Reason = "configured default model points at an unavailable provider"
+
+			return diagnostic
 		}
 
-		return providerAnthropic
-	case strings.HasPrefix(model, "gpt"), strings.HasPrefix(model, "o1"), strings.HasPrefix(model, "o3"), strings.HasPrefix(model, "o4"):
-		return providerOpenAI
-	default:
-		return ""
+		diagnostic.RequestedModel = r.defaultModel
+		diagnostic.ProviderName = p.Name()
+		diagnostic.ProviderModel = r.defaultModel
+
+		diagnostic.Provenance = r.providerModelProvenanceLocked(p.Name(), r.defaultModel)
+		if r.defaultQualified {
+			diagnostic.Provenance = ModelProvenanceUserOverride
+		} else if claim, ok := r.models[r.defaultModel][p.Name()]; ok {
+			diagnostic.ProviderModel = claim.model
+			diagnostic.Provenance = claim.provenance
+		}
+
+		if diagnostic.Provenance == "" {
+			diagnostic.Provenance = ModelProvenanceUserOverride
+		}
+
+		diagnostic.Stale = r.modelClaimStaleLocked(p.Name(), diagnostic.ProviderModel, diagnostic.Provenance)
+
+		diagnostic.Candidates = []ModelResolutionCandidate{{
+			ProviderName: p.Name(),
+			Model:        diagnostic.ProviderModel,
+			Provenance:   diagnostic.Provenance,
+			Stale:        diagnostic.Stale,
+		}}
+		diagnostic.Reason = "empty request used configured default model"
+
+		return diagnostic
 	}
+
+	p, ok := r.providers[r.fallback]
+	if !ok {
+		diagnostic.Error = errors.New("llm: no providers registered")
+		diagnostic.Reason = "empty request has no registered fallback provider"
+
+		return diagnostic
+	}
+
+	diagnostic.ProviderName = p.Name()
+
+	diagnostic.Reason = "empty request used default provider"
+	if models := r.defaultProviderModelsLocked(p.Name(), p); len(models) > 0 {
+		diagnostic.RequestedModel = models[0]
+		diagnostic.ProviderModel = models[0]
+
+		diagnostic.Provenance = r.providerModelProvenanceLocked(p.Name(), models[0])
+		if diagnostic.Provenance == "" {
+			diagnostic.Provenance = ModelProvenanceStatic
+		}
+
+		diagnostic.Stale = r.modelClaimStaleLocked(p.Name(), models[0], diagnostic.Provenance)
+
+		diagnostic.Candidates = []ModelResolutionCandidate{{
+			ProviderName: p.Name(),
+			Model:        models[0],
+			Provenance:   diagnostic.Provenance,
+			Stale:        diagnostic.Stale,
+		}}
+	}
+
+	return diagnostic
+}
+
+func (r *Registry) defaultProviderModelsLocked(providerName string, p Provider) []string {
+	if catalog, ok := r.catalogs[providerName]; ok {
+		if len(catalog.LiveModels) > 0 {
+			return append([]string(nil), catalog.LiveModels...)
+		}
+
+		if len(catalog.StaticModels) > 0 {
+			return append([]string(nil), catalog.StaticModels...)
+		}
+
+		if len(catalog.Models) > 0 {
+			return append([]string(nil), catalog.Models...)
+		}
+	}
+
+	return p.Models()
+}
+
+func (r *Registry) modelResolutionCandidatesLocked(model string) []ModelResolutionCandidate {
+	claims := r.models[model]
+	if len(claims) == 0 {
+		return nil
+	}
+
+	providers := make([]string, 0, len(claims))
+	for providerName := range claims {
+		providers = append(providers, providerName)
+	}
+
+	sort.Strings(providers)
+
+	candidates := make([]ModelResolutionCandidate, 0, len(providers))
+	for _, providerName := range providers {
+		claim := claims[providerName]
+		candidates = append(candidates, ModelResolutionCandidate{
+			ProviderName: claim.providerName,
+			Model:        claim.model,
+			Provenance:   claim.provenance,
+			Stale:        r.modelClaimStaleLocked(claim.providerName, claim.model, claim.provenance),
+		})
+	}
+
+	return candidates
+}
+
+func (r *Registry) modelClaimStaleLocked(providerName, model string, provenance ModelProvenance) bool {
+	if !isCatalogProvenance(provenance) && provenance != ModelProvenanceConfiguredAlias {
+		return false
+	}
+
+	// Configured aliases are fresh user intent, but an alias target that only
+	// appears in a stale static fallback should still disclose that catalog age.
+	catalog, ok := r.catalogs[providerName]
+	if !ok || !catalog.Stale {
+		return false
+	}
+
+	catalogProvenance, ok := r.providerModelCatalogProvenanceLocked(providerName, model)
+
+	return ok && isCatalogProvenance(catalogProvenance)
+}
+
+func modelResolutionCandidateProviderNames(candidates []ModelResolutionCandidate) []string {
+	names := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		names = append(names, candidate.ProviderName)
+	}
+
+	return names
 }
 
 func splitProviderModel(model string) (providerName, providerModel string, ok bool) {
@@ -650,7 +1074,7 @@ func (r *Registry) Provider(name string) (Provider, bool) {
 	return p, ok
 }
 
-// ProviderForModel returns the provider name currently indexed for a model.
+// ProviderForModel returns the provider name that would handle model.
 func (r *Registry) ProviderForModel(model string) (string, bool) {
 	providerName, _, ok := r.ResolveModel(model)
 
@@ -665,16 +1089,17 @@ func (r *Registry) ResolveModel(model string) (providerName, providerModel strin
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	p, providerModel, ok := r.resolveModelLocked(model)
-	if !ok {
+	diagnostic := r.explainModelResolutionLocked(model)
+	if diagnostic.Error != nil {
 		return "", "", false
 	}
 
-	return p.Name(), providerModel, true
+	return diagnostic.ProviderName, diagnostic.ProviderModel, true
 }
 
 // ProviderHasModel reports whether providerName has model in the registry's
-// static or fetched model index. It does not make network requests.
+// static, fetched, alias, or override model index. It does not make network
+// requests.
 func (r *Registry) ProviderHasModel(providerName, model string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -691,8 +1116,68 @@ func (r *Registry) ProviderHasModel(providerName, model string) bool {
 	return models != nil && models[model]
 }
 
+// ProviderModelProvenance reports how providerName's claim for model was
+// learned. It does not make network requests.
+func (r *Registry) ProviderModelProvenance(providerName, model string) (ModelProvenance, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	providerName = strings.TrimSpace(providerName)
+	model = strings.TrimSpace(model)
+
+	if providerName == "" || model == "" || r.modelProvenance == nil {
+		return "", false
+	}
+
+	provenance, ok := r.modelProvenance[providerName][model]
+
+	return provenance, ok
+}
+
+// ProviderModelCatalogProvenance reports the static/live catalog provenance for
+// providerName/model, even when a configured alias with the same local model
+// name owns bare-model resolution.
+func (r *Registry) ProviderModelCatalogProvenance(providerName, model string) (ModelProvenance, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	providerName = strings.TrimSpace(providerName)
+	model = strings.TrimSpace(model)
+
+	return r.providerModelCatalogProvenanceLocked(providerName, model)
+}
+
+func (r *Registry) providerModelCatalogProvenanceLocked(providerName, model string) (ModelProvenance, bool) {
+	if providerName == "" || model == "" || r.catalogProvenance == nil {
+		return "", false
+	}
+
+	provenance, ok := r.catalogProvenance[providerName][model]
+
+	return provenance, ok
+}
+
+// ProviderModelUserOverride reports whether providerName/model was explicitly
+// configured as a provider-qualified model ID. It is separate from
+// ProviderModelProvenance so a configured alias can keep owning bare-model
+// resolution while provider/model routing remains available for a private
+// deployment with the same local name.
+func (r *Registry) ProviderModelUserOverride(providerName, model string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	providerName = strings.TrimSpace(providerName)
+	model = strings.TrimSpace(model)
+
+	if providerName == "" || model == "" || r.modelOverrides == nil {
+		return false
+	}
+
+	return r.modelOverrides[providerName][model]
+}
+
 // IndexedProviderModels returns a copy of the registry's provider-specific
-// static/fetched model index. It does not make network requests.
+// static/fetched/alias/override model index. It does not make network requests.
 func (r *Registry) IndexedProviderModels() map[string][]string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -724,28 +1209,17 @@ func (r *Registry) ProviderModelsVerified(providerName string) bool {
 
 // CanResolveModel reports whether the registry can route model to a provider
 // without making a network request. It accepts provider-qualified model IDs,
-// indexed provider model names, and known provider model prefixes.
+// unambiguous indexed model names, and configured aliases.
 func (r *Registry) CanResolveModel(model string) (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if providerName, _, ok := splitProviderModel(model); ok {
-		if _, ok := r.providers[providerName]; ok {
-			return providerName, true
-		}
-
+	diagnostic := r.explainModelResolutionLocked(model)
+	if diagnostic.Error != nil {
 		return "", false
 	}
 
-	if p, ok := r.models[model]; ok {
-		return p.Name(), true
-	}
-
-	if p, ok := r.providerForModelPrefixLocked(model); ok {
-		return p.Name(), true
-	}
-
-	return "", false
+	return diagnostic.ProviderName, true
 }
 
 // ListProviders returns the names of all registered providers.
@@ -762,7 +1236,11 @@ func (r *Registry) ListProviders() []string {
 }
 
 // ProviderModels returns the model list for a specific provider, trying the
-// live API first (FetchModels) and falling back to the static list.
+// live API first (FetchModels) and falling back to the static list. When the
+// live fetch fails, it returns the stale static fallback together with an
+// error so callers do not mistake the fallback for fresh provider data. Call
+// ProviderModelCatalog when callers need structured stale-fallback or
+// provenance details.
 func (r *Registry) ProviderModels(ctx context.Context, providerName string) ([]string, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, err
@@ -773,23 +1251,32 @@ func (r *Registry) ProviderModels(ctx context.Context, providerName string) ([]s
 		return nil, err
 	}
 
+	if catalog.Error != nil {
+		return catalog.Models, fmt.Errorf(
+			"llm: %s live model fetch failed; using stale static fallback: %w",
+			providerName,
+			catalog.Error,
+		)
+	}
+
 	return catalog.Models, nil
 }
 
-func (r *Registry) indexProviderModelsLocked(providerName string, models []string) {
+func (r *Registry) indexProviderModelsLocked(providerName string, models []string, provenance ModelProvenance) {
 	for _, m := range models {
-		r.indexProviderModelLocked(providerName, m)
+		r.indexProviderModelLocked(providerName, m, provenance)
 	}
 }
 
-func (r *Registry) replaceProviderModelsLocked(providerName string, models []string) {
-	for model := range r.providerModels[providerName] {
-		r.removeProviderModelLocked(providerName, model)
-	}
-
-	delete(r.providerModels, providerName)
-	r.indexProviderModelsLocked(providerName, models)
-	r.providerModelsLive[providerName] = true
+func (r *Registry) replaceProviderModelsLocked(
+	providerName string,
+	models []string,
+	provenance ModelProvenance,
+	verified bool,
+) {
+	r.removeProviderCatalogModelsLocked(providerName)
+	r.indexProviderModelsLocked(providerName, models, provenance)
+	r.providerModelsLive[providerName] = verified
 }
 
 func (r *Registry) markProviderModelsUnverifiedLocked(providerName string) {
@@ -798,35 +1285,187 @@ func (r *Registry) markProviderModelsUnverifiedLocked(providerName string) {
 	}
 }
 
-func (r *Registry) removeProviderModelLocked(providerName, model string) {
-	current, ok := r.models[model]
-	if !ok || current.Name() != providerName {
-		return
+func (r *Registry) removeProviderCatalogModelsLocked(providerName string) {
+	for model := range r.catalogProvenance[providerName] {
+		r.removeCatalogModelClaimLocked(providerName, model)
+	}
+}
+
+func isCatalogProvenance(provenance ModelProvenance) bool {
+	return provenance == ModelProvenanceStatic || provenance == ModelProvenanceFetchedLive
+}
+
+func (r *Registry) removeModelClaimLocked(providerName, model string) {
+	if byProvider := r.models[model]; byProvider != nil {
+		delete(byProvider, providerName)
+
+		if len(byProvider) == 0 {
+			delete(r.models, model)
+		}
 	}
 
-	delete(r.models, model)
+	if indexed := r.providerModels[providerName]; indexed != nil {
+		delete(indexed, model)
 
-	for otherProvider, indexedModels := range r.providerModels {
-		if otherProvider == providerName || !indexedModels[model] {
-			continue
+		if len(indexed) == 0 {
+			delete(r.providerModels, providerName)
 		}
+	}
 
-		if replacement, ok := r.providers[otherProvider]; ok {
-			r.models[model] = replacement
+	if provenanceByModel := r.modelProvenance[providerName]; provenanceByModel != nil {
+		delete(provenanceByModel, model)
 
-			return
+		if len(provenanceByModel) == 0 {
+			delete(r.modelProvenance, providerName)
+		}
+	}
+
+	if catalogProvenanceByModel := r.catalogProvenance[providerName]; catalogProvenanceByModel != nil {
+		delete(catalogProvenanceByModel, model)
+
+		if len(catalogProvenanceByModel) == 0 {
+			delete(r.catalogProvenance, providerName)
 		}
 	}
 }
 
-func (r *Registry) indexProviderModelLocked(providerName, model string) {
+func (r *Registry) removeCatalogModelClaimLocked(providerName, model string) {
+	if catalogProvenanceByModel := r.catalogProvenance[providerName]; catalogProvenanceByModel != nil {
+		delete(catalogProvenanceByModel, model)
+
+		if len(catalogProvenanceByModel) == 0 {
+			delete(r.catalogProvenance, providerName)
+		}
+	}
+
+	if byProvider := r.models[model]; byProvider != nil {
+		if claim, ok := byProvider[providerName]; ok && isCatalogProvenance(claim.provenance) {
+			r.removeModelClaimLocked(providerName, model)
+
+			return
+		}
+	}
+
+	if provenanceByModel := r.modelProvenance[providerName]; provenanceByModel != nil {
+		if isCatalogProvenance(provenanceByModel[model]) {
+			delete(provenanceByModel, model)
+
+			if len(provenanceByModel) == 0 {
+				delete(r.modelProvenance, providerName)
+			}
+		}
+	}
+
+	if indexed := r.providerModels[providerName]; indexed != nil && !r.providerModelHasIntentionalClaimLocked(providerName, model) {
+		delete(indexed, model)
+
+		if len(indexed) == 0 {
+			delete(r.providerModels, providerName)
+		}
+	}
+}
+
+func (r *Registry) providerModelHasIntentionalClaimLocked(providerName, model string) bool {
+	if byProvider := r.models[model]; byProvider != nil {
+		if claim, ok := byProvider[providerName]; ok && !isCatalogProvenance(claim.provenance) {
+			return true
+		}
+	}
+
+	return r.modelOverrides[providerName][model]
+}
+
+func (r *Registry) indexProviderModelLocked(providerName, model string, provenance ModelProvenance) {
+	r.indexModelClaimLocked(providerName, model, model, provenance)
+}
+
+func (r *Registry) indexModelClaimLocked(providerName, model, providerModel string, provenance ModelProvenance) {
 	model = strings.TrimSpace(model)
-	if model == "" {
+
+	providerModel = strings.TrimSpace(providerModel)
+	if model == "" || providerModel == "" {
 		return
 	}
 
-	r.models[model] = r.providers[providerName]
+	if provenance == "" {
+		provenance = ModelProvenanceStatic
+	}
 
+	if isCatalogProvenance(provenance) {
+		r.recordCatalogModelProvenanceLocked(providerName, model, provenance)
+	}
+
+	if r.models == nil {
+		r.models = make(map[string]map[string]modelClaim)
+	}
+
+	claims := r.models[model]
+	if claims == nil {
+		claims = make(map[string]modelClaim)
+		r.models[model] = claims
+	}
+
+	if existing, ok := claims[providerName]; ok &&
+		!isCatalogProvenance(existing.provenance) &&
+		isCatalogProvenance(provenance) {
+		// User-configured aliases and overrides are intentional routing claims.
+		// A later static/live catalog refresh must not silently replace them
+		// when the provider also exposes a model with the same bare name.
+		r.addModelToProviderCatalogLocked(providerName, model, existing.provenance)
+
+		return
+	}
+
+	if existing, ok := claims[providerName]; ok &&
+		existing.provenance == ModelProvenanceConfiguredAlias &&
+		provenance == ModelProvenanceUserOverride {
+		// A provider-qualified user override such as openai/fast should make
+		// that provider-local model available without stealing bare "fast"
+		// away from an explicit configured alias.
+		r.addModelToProviderCatalogLocked(providerName, model, existing.provenance)
+		r.addProviderModelLocked(providerName, model)
+
+		return
+	}
+
+	claims[providerName] = modelClaim{
+		providerName: providerName,
+		model:        providerModel,
+		provenance:   provenance,
+	}
+
+	r.addProviderModelLocked(providerName, model)
+
+	if r.modelProvenance == nil {
+		r.modelProvenance = make(map[string]map[string]ModelProvenance)
+	}
+
+	provenanceByModel := r.modelProvenance[providerName]
+	if provenanceByModel == nil {
+		provenanceByModel = make(map[string]ModelProvenance)
+		r.modelProvenance[providerName] = provenanceByModel
+	}
+
+	provenanceByModel[model] = provenance
+
+	r.addModelToProviderCatalogLocked(providerName, model, provenance)
+}
+
+func (r *Registry) recordCatalogModelProvenanceLocked(providerName, model string, provenance ModelProvenance) {
+	if r.catalogProvenance == nil {
+		r.catalogProvenance = make(map[string]map[string]ModelProvenance)
+	}
+
+	provenanceByModel := r.catalogProvenance[providerName]
+	if provenanceByModel == nil {
+		provenanceByModel = make(map[string]ModelProvenance)
+		r.catalogProvenance[providerName] = provenanceByModel
+	}
+
+	provenanceByModel[model] = provenance
+}
+
+func (r *Registry) addProviderModelLocked(providerName, model string) {
 	if r.providerModels == nil {
 		r.providerModels = make(map[string]map[string]bool)
 	}
@@ -838,6 +1477,70 @@ func (r *Registry) indexProviderModelLocked(providerName, model string) {
 	}
 
 	indexed[model] = true
+}
+
+func (r *Registry) recordProviderModelOverrideLocked(providerName, model string) {
+	model = strings.TrimSpace(model)
+	if providerName == "" || model == "" {
+		return
+	}
+
+	if r.modelOverrides == nil {
+		r.modelOverrides = make(map[string]map[string]bool)
+	}
+
+	overrides := r.modelOverrides[providerName]
+	if overrides == nil {
+		overrides = make(map[string]bool)
+		r.modelOverrides[providerName] = overrides
+	}
+
+	overrides[model] = true
+}
+
+func (r *Registry) providerModelProvenanceLocked(providerName, model string) ModelProvenance {
+	if r.modelProvenance == nil {
+		return ""
+	}
+
+	return r.modelProvenance[providerName][strings.TrimSpace(model)]
+}
+
+func (r *Registry) addModelToProviderCatalogLocked(providerName, model string, provenance ModelProvenance) {
+	if r.catalogs == nil {
+		return
+	}
+
+	catalog, ok := r.catalogs[providerName]
+	if !ok {
+		return
+	}
+
+	if !containsModel(catalog.Models, model) {
+		catalog.Models = append(catalog.Models, model)
+		sort.Strings(catalog.Models)
+	}
+
+	if catalog.ModelProvenance == nil {
+		catalog.ModelProvenance = make(map[string]ModelProvenance)
+	}
+
+	catalog.ModelProvenance[model] = provenance
+	r.catalogs[providerName] = catalog
+}
+
+func (r *Registry) addProviderModelOverridesToCatalogLocked(providerName string) {
+	for model, provenance := range r.modelProvenance[providerName] {
+		if isCatalogProvenance(provenance) {
+			continue
+		}
+
+		r.addModelToProviderCatalogLocked(providerName, model, provenance)
+	}
+}
+
+func containsModel(models []string, want string) bool {
+	return slices.Contains(models, want)
 }
 
 // ProviderHealth describes the outcome of a single provider health check.
@@ -858,6 +1561,7 @@ type ProviderHealth struct {
 	ModelSource     ModelCatalogSource
 	Healthy         bool
 	Cached          bool
+	ModelsStale     bool
 }
 
 // CheckHealth returns one ProviderHealth entry per provider, sorted by name.
@@ -919,52 +1623,17 @@ func catalogContextWindow(providerName, model string) int {
 }
 
 func (r *Registry) resolveModelLocked(model string) (Provider, string, bool) {
-	model = strings.TrimSpace(model)
-	if model == "" {
-		return r.resolveDefaultModelLocked()
+	diagnostic := r.explainModelResolutionLocked(model)
+	if diagnostic.Error != nil {
+		return nil, "", false
 	}
 
-	if providerName, providerModel, ok := splitProviderModel(model); ok {
-		p, ok := r.providers[providerName]
-		if !ok {
-			return nil, "", false
-		}
-
-		return p, providerModel, true
-	}
-
-	if p, ok := r.models[model]; ok {
-		return p, model, true
-	}
-
-	if p, ok := r.providerForModelPrefixLocked(model); ok {
-		return p, model, true
-	}
-
-	return nil, "", false
-}
-
-func (r *Registry) resolveDefaultModelLocked() (Provider, string, bool) {
-	if r.defaultModel != "" {
-		p, ok := r.models[r.defaultModel]
-		if !ok {
-			return nil, "", false
-		}
-
-		return p, r.defaultModel, true
-	}
-
-	p, ok := r.providers[r.fallback]
+	p, ok := r.providers[diagnostic.ProviderName]
 	if !ok {
 		return nil, "", false
 	}
 
-	models := p.Models()
-	if len(models) == 0 {
-		return p, "", true
-	}
-
-	return p, models[0], true
+	return p, diagnostic.ProviderModel, true
 }
 
 const (

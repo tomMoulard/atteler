@@ -356,6 +356,14 @@ func statefulProviderCommands() []command {
 			},
 		},
 		{
+			name:  "explain-model-resolution",
+			tier:  tierStateful,
+			match: func(o cliOptions) bool { return o.explainModelResolution != "" },
+			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
+				return explainModelResolution(ctx, o.explainModelResolution, s.registry)
+			},
+		},
+		{
 			name:  "doctor",
 			tier:  tierStateful,
 			match: func(o cliOptions) bool { return o.doctor },

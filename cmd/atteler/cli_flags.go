@@ -259,6 +259,7 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.BoolVar(&opts.listModels, "list-models", false, "list available models and exit")
 	fs.BoolVar(&opts.listKnownModels, "list-known-models", false, "list built-in provider/model IDs without API calls and exit")
 	fs.BoolVar(&opts.listProviders, "list-providers", false, "list built-in provider names without API calls and exit")
+	fs.StringVar(&opts.explainModelResolution, "explain-model-resolution", "", "explain how a model ID resolves to a provider and exit")
 	fs.BoolVar(&opts.ollamaStatus, "ollama-status", false, "print Ollama daemon lifecycle status without starting it and exit")
 	fs.BoolVar(&opts.ollamaStop, "ollama-stop", false, "stop and clean up the Atteler-owned Ollama daemon record and exit")
 	fs.BoolVar(&opts.listAgents, "list-agents", false, "list configured agents and exit")

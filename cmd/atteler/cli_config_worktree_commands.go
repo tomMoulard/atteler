@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"sort"
 	"strconv"
@@ -431,7 +432,11 @@ func printProviderReadinessModels(provider *llm.ProviderReadiness) {
 	case llm.ModelCatalogSourceLive:
 		fmt.Println("         models: live")
 	default:
-		fmt.Println("         models: static fallback")
+		if provider.ModelsStale {
+			fmt.Println("         models: static fallback (stale)")
+		} else {
+			fmt.Println("         models: static fallback")
+		}
 	}
 
 	for _, model := range models {
@@ -607,12 +612,24 @@ func llmConfig(
 	return llm.AutoRegisterConfig{
 		DefaultProvider: cfg.DefaultProvider,
 		DefaultModel:    cfg.DefaultModel,
+		ModelAliases:    cloneStringMap(cfg.ModelAliases),
 		SelectedModel:   selectedModel,
 		FallbackModels:  append([]string(nil), fallbackModels...),
 		SessionID:       sessionID,
 		CommandLine:     append([]string(nil), commandLine...),
 		Providers:       providers,
 	}
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(in))
+	maps.Copy(out, in)
+
+	return out
 }
 
 func generationFromConfig(cfg appconfig.Config) generationSettings {

@@ -485,6 +485,8 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 			diagnostics = append(diagnostics, inspectNamedFields(path, "skill_learning", value, knownSkillLearningFields(), nil)...)
 		case "vector":
 			diagnostics = append(diagnostics, inspectNamedFields(path, "vector", value, knownVectorFields(), nil)...)
+		case "model_aliases":
+			diagnostics = append(diagnostics, inspectModelAliases(path, value)...)
 		case "default_provider", fieldDefaultModel, "fallback_models":
 			return
 		default:
@@ -502,6 +504,65 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 	}
 
 	return diagnostics
+}
+
+func inspectModelAliases(path string, value *yaml.Node) []Diagnostic {
+	if value == nil {
+		return nil
+	}
+
+	if value.Kind != yaml.MappingNode {
+		return []Diagnostic{modelAliasDiagnostic(path, "model_aliases", "model_aliases must be a mapping of alias to provider/model")}
+	}
+
+	var diagnostics []Diagnostic
+
+	forEachMappingField(value, func(alias string, target *yaml.Node) {
+		field := modelAliasFieldPath(alias)
+		if strings.TrimSpace(alias) == "" {
+			diagnostics = append(diagnostics, modelAliasDiagnostic(path, field, "model alias cannot be empty"))
+
+			return
+		}
+
+		if strings.Contains(strings.TrimSpace(alias), "/") {
+			diagnostics = append(diagnostics, modelAliasDiagnostic(path, field, "model alias must be a bare model name"))
+		}
+
+		if target == nil || target.Kind != yaml.ScalarNode {
+			diagnostics = append(diagnostics, modelAliasDiagnostic(path, field, "model alias target must be provider/model"))
+
+			return
+		}
+
+		if !validProviderModelAlias(target.Value) {
+			diagnostics = append(diagnostics, modelAliasDiagnostic(path, field, "model alias target must be provider/model"))
+		}
+	})
+
+	return diagnostics
+}
+
+func validProviderModelAlias(model string) bool {
+	providerName, providerModel, ok := strings.Cut(strings.TrimSpace(model), "/")
+	if !ok {
+		return false
+	}
+
+	providerName = strings.TrimSpace(providerName)
+
+	providerModel = strings.TrimSpace(providerModel)
+
+	return providerName != "" && providerModel != ""
+}
+
+func modelAliasDiagnostic(path, field, message string) Diagnostic {
+	return Diagnostic{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    field,
+		Message:  message,
+	}
 }
 
 func inspectConfigVersion(path, field string, value *yaml.Node) []Diagnostic {

@@ -314,6 +314,14 @@ func commandContractsByName() map[string]commandContract {
 			withInputType("listModelsCommandInput"),
 			withExamples("atteler providers models"),
 		),
+		"explain-model-resolution": commandContractFor(
+			"explain how a model ID resolves to a provider",
+			[]string{"--explain-model-resolution"},
+			[]string{commandEffectLLMProviderRead, commandEffectUserOutput},
+			[]string{commandOutputText},
+			withInputType("explainModelResolutionCommandInput"),
+			withExamples("atteler providers resolve gpt-5.5"),
+		),
 		"list-plugins": commandContractFor(
 			"list configured local plugin manifests",
 			[]string{"--list-plugins"},

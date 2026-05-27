@@ -285,6 +285,7 @@ func TestProviderReportsExposeReadinessReasons(t *testing.T) {
 				ModelCatalogSource: llm.ModelCatalogSourceStatic,
 				Models:             []string{"gpt-static"},
 				StaticModels:       []string{"gpt-static"},
+				ModelsStale:        true,
 				Error:              assert.AnError,
 			},
 		},
@@ -295,6 +296,7 @@ func TestProviderReportsExposeReadinessReasons(t *testing.T) {
 	assert.Equal(t, string(llm.ProviderStatusFailedHealthCheck), reports[0].Status)
 	assert.True(t, reports[0].Configured)
 	assert.True(t, reports[0].Requested)
+	assert.True(t, reports[0].ModelsStale)
 	assert.Equal(t, string(llm.ModelCatalogSourceStatic), reports[0].ModelCatalogSource)
 	assert.Equal(t, []string{"gpt-static"}, reports[0].Models)
 	assert.Contains(t, reports[0].Error, "assert")
@@ -339,6 +341,7 @@ func TestPrintProviderReadinessReport_ShowsStatusReasonAndModelSource(t *testing
 				Models:             []string{"custom-static"},
 				StaticModels:       []string{"custom-static"},
 				ModelFetchError:    errors.New("live models timeout"),
+				ModelsStale:        true,
 			},
 		},
 	}
@@ -358,6 +361,7 @@ func TestPrintProviderReadinessReport_ShowsStatusReasonAndModelSource(t *testing
 	assert.Contains(t, out, "models: live")
 	assert.Contains(t, out, "[WARN] custom")
 	assert.Contains(t, out, "model_fetch: live models timeout")
+	assert.Contains(t, out, "models: static fallback (stale)")
 }
 
 func TestStartupProviderReadinessSummary_FiltersUnrequestedProviders(t *testing.T) {
