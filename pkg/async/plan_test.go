@@ -477,6 +477,51 @@ func TestPlan_RunWithOptions_ParentCancellationMarksDownstreamCanceled(t *testin
 	assert.Equal(t, ledger.Admissions[1].AdmissionID, ledger.Results[1].AdmissionID)
 }
 
+func TestPlan_RunWithOptions_ParentCancellationPreservesCauseInDownstreamAdmission(t *testing.T) {
+	t.Parallel()
+
+	plan, err := NewPlan([]Task{
+		{ID: "running", Agent: "executor", Prompt: "running"},
+		{ID: "after", Agent: "reviewer", Prompt: "after", DependsOn: []string{"running"}},
+	})
+	require.NoError(t, err)
+
+	cancelCause := errors.New("operator stopped async run")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+
+	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+	results, err := plan.RunWithOptions(ctx, func(ctx context.Context, task Task) (string, error) {
+		if task.ID == "running" {
+			cancel(cancelCause)
+			<-ctx.Done()
+
+			return "", ctx.Err()
+		}
+
+		return shouldNotRunOutput, nil
+	}, RunOptions{LedgerPath: ledgerPath})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context canceled after wave 0")
+	assert.Contains(t, err.Error(), cancelCause.Error())
+	require.Len(t, results, 2)
+	assert.Equal(t, StatusCanceled, results[0].Status)
+	assert.Contains(t, results[0].Error, cancelCause.Error())
+	assert.Equal(t, StatusCanceled, results[1].Status)
+	assert.Contains(t, results[1].Error, cancelCause.Error())
+
+	var ledger Ledger
+	data, readErr := os.ReadFile(ledgerPath)
+	require.NoError(t, readErr)
+	require.NoError(t, json.Unmarshal(data, &ledger))
+	require.Len(t, ledger.Admissions, 2)
+	assert.True(t, ledger.Admissions[0].Admitted)
+	assert.False(t, ledger.Admissions[1].Admitted)
+	assert.Equal(t, "after", ledger.Admissions[1].ChildID)
+	assert.Contains(t, ledger.Admissions[1].DenyReason, cancelCause.Error())
+}
+
 func TestPlan_RunWithOptions_RetriesPersistsAndResumes(t *testing.T) {
 	t.Parallel()
 
@@ -639,9 +684,12 @@ func TestPlan_RunWithOptions_RecordsAdmissionDenialWhenRetryBackoffCanceled(t *t
 	require.NoError(t, err)
 
 	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	go cancelAfterFailedAttempt(ctx, cancel, ledgerPath)
+	parentCtx, stopTimeout := context.WithTimeout(t.Context(), 2*time.Second)
+	defer stopTimeout()
+	ctx, cancel := context.WithCancelCause(parentCtx)
+	defer cancel(nil)
+	cancelCause := errors.New("operator stopped async retry")
+	go cancelAfterFailedAttempt(ctx, func() { cancel(cancelCause) }, ledgerPath)
 
 	var calls atomic.Int32
 	results, err := plan.RunWithOptions(ctx, func(context.Context, Task) (string, error) {
@@ -662,6 +710,7 @@ func TestPlan_RunWithOptions_RecordsAdmissionDenialWhenRetryBackoffCanceled(t *t
 	require.Len(t, results, 1)
 	assert.Equal(t, StatusCanceled, results[0].Status)
 	assert.Equal(t, 1, results[0].Attempts)
+	assert.Contains(t, results[0].Error, cancelCause.Error())
 	assert.Equal(t, int32(1), calls.Load())
 
 	var ledger Ledger
@@ -674,6 +723,7 @@ func TestPlan_RunWithOptions_RecordsAdmissionDenialWhenRetryBackoffCanceled(t *t
 	assert.False(t, ledger.Admissions[1].Admitted)
 	assert.Equal(t, 2, ledger.Admissions[1].Attempt)
 	assert.Contains(t, ledger.Admissions[1].DenyReason, "retry backoff canceled")
+	assert.Contains(t, ledger.Admissions[1].DenyReason, cancelCause.Error())
 	assert.Equal(t, ledger.Admissions[1].AdmissionID, results[0].AdmissionID)
 	require.Len(t, ledger.Attempts, 1)
 	assert.Equal(t, StatusFailed, ledger.Attempts[0].Status)

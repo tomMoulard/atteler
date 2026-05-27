@@ -652,9 +652,12 @@ func TestSpawnAllWithOptions_RecordsAdmissionDenialWhenRetryBackoffCanceled(t *t
 
 	requests := []Request{{ID: "flaky", Agent: "executor", Prompt: "flaky"}}
 	ledgerPath := filepath.Join(t.TempDir(), "spawn-ledger.json")
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	go cancelAfterFailedAttempt(ctx, cancel, ledgerPath)
+	parentCtx, stopTimeout := context.WithTimeout(t.Context(), 2*time.Second)
+	defer stopTimeout()
+	ctx, cancel := context.WithCancelCause(parentCtx)
+	defer cancel(nil)
+	cancelCause := errors.New("operator stopped spawn retry")
+	go cancelAfterFailedAttempt(ctx, func() { cancel(cancelCause) }, ledgerPath)
 
 	var calls atomic.Int32
 	results, err := SpawnAllWithOptions(ctx, requests, func(context.Context, Request) (string, error) {
@@ -675,6 +678,7 @@ func TestSpawnAllWithOptions_RecordsAdmissionDenialWhenRetryBackoffCanceled(t *t
 	require.Len(t, results, 1)
 	assert.Equal(t, StatusCanceled, results[0].Status)
 	assert.Equal(t, 1, results[0].Attempts)
+	assert.Contains(t, results[0].Error, cancelCause.Error())
 	assert.Equal(t, int32(1), calls.Load())
 
 	var ledger Ledger
@@ -687,6 +691,7 @@ func TestSpawnAllWithOptions_RecordsAdmissionDenialWhenRetryBackoffCanceled(t *t
 	assert.False(t, ledger.Admissions[1].Admitted)
 	assert.Equal(t, 2, ledger.Admissions[1].Attempt)
 	assert.Contains(t, ledger.Admissions[1].DenyReason, "retry backoff canceled")
+	assert.Contains(t, ledger.Admissions[1].DenyReason, cancelCause.Error())
 	assert.Equal(t, ledger.Admissions[1].AdmissionID, results[0].AdmissionID)
 	require.Len(t, ledger.Attempts, 1)
 	assert.Equal(t, StatusFailed, ledger.Attempts[0].Status)

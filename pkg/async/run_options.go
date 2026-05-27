@@ -216,11 +216,12 @@ func (p *Plan) RunDetailedWithOptions(ctx context.Context, run DetailedTaskRunne
 
 	for wave, batch := range batches {
 		if err := ctx.Err(); err != nil {
+			cause := runContextCauseOrErr(ctx, err)
 			if ledger != nil {
-				results = append(results, recordRemainingWavesCanceledBeforeStart(wave, batches, opts, ledger, err)...)
+				results = append(results, recordRemainingWavesCanceledBeforeStart(wave, batches, opts, ledger, cause)...)
 			}
 
-			return results, errors.Join(fmt.Errorf("context canceled before wave %d: %w", wave, err), ledger.ledgerError())
+			return results, errors.Join(fmt.Errorf("context canceled before wave %d: %w", wave, cause), ledger.ledgerError())
 		}
 
 		batch = applyTaskDefaults(batch, opts)
@@ -233,11 +234,12 @@ func (p *Plan) RunDetailedWithOptions(ctx context.Context, run DetailedTaskRunne
 		}
 
 		if err := ctx.Err(); err != nil {
+			cause := runContextCauseOrErr(ctx, err)
 			if ledger != nil {
-				results = append(results, recordRemainingWavesCanceledBeforeStart(wave+1, batches, opts, ledger, err)...)
+				results = append(results, recordRemainingWavesCanceledBeforeStart(wave+1, batches, opts, ledger, cause)...)
 			}
 
-			return results, errors.Join(fmt.Errorf("context canceled after wave %d: %w", wave, err), ledger.ledgerError())
+			return results, errors.Join(fmt.Errorf("context canceled after wave %d: %w", wave, cause), ledger.ledgerError())
 		}
 
 		if result, ok := firstFailedResult(waveResults); ok {
@@ -642,7 +644,7 @@ func waitTaskRetryBackoff(ctx context.Context, backoff time.Duration) error {
 	case <-timer.C:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("retry backoff canceled: %w", ctx.Err())
+		return fmt.Errorf("retry backoff canceled: %w", runContextCauseOrErr(ctx, ctx.Err()))
 	}
 }
 

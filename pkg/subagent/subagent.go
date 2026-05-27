@@ -815,7 +815,7 @@ func sleepBeforeRetry(ctx context.Context, backoff time.Duration) error {
 	case <-timer.C:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("retry backoff canceled: %w", ctx.Err())
+		return fmt.Errorf("retry backoff canceled: %w", contextCauseOrErr(ctx, ctx.Err()))
 	}
 }
 
