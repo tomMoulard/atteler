@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/llm"
 )
 
 const testWindowsGOOS = "windows"
@@ -1572,6 +1574,41 @@ func TestStore_SaveFinishedHeadlessRunPreservesCanceledStatus(t *testing.T) {
 	assert.Equal(t, "operator requested stop", loaded.TerminalReason)
 	require.NotNil(t, loaded.ExitCode)
 	assert.Equal(t, 130, *loaded.ExitCode)
+}
+
+func TestStore_SaveFinishedHeadlessRunPreservesAgentLoopBudget(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	startedAt := time.Now().UTC()
+	budget := llm.AgentLoopBudget{
+		MaxCostMicros:   25_000,
+		MaxInputTokens:  100,
+		MaxOutputTokens: 50,
+	}
+	require.NoError(t, store.SaveHeadlessRun(HeadlessRun{
+		ID:              "run-finish-budget",
+		StartedAt:       startedAt,
+		SessionID:       "session-budget",
+		AgentLoopBudget: budget,
+		Status:          HeadlessStatusRunning,
+	}))
+
+	exitCode := 0
+	saved, wrote, err := store.SaveFinishedHeadlessRun(HeadlessRun{
+		ID:        "run-finish-budget",
+		StartedAt: startedAt,
+		SessionID: "session-budget",
+		ExitCode:  &exitCode,
+		Status:    HeadlessStatusCompleted,
+	})
+	require.NoError(t, err)
+	assert.True(t, wrote)
+	assert.Equal(t, budget, saved.AgentLoopBudget)
+
+	loaded, err := store.LoadHeadlessRun("run-finish-budget")
+	require.NoError(t, err)
+	assert.Equal(t, budget, loaded.AgentLoopBudget)
 }
 
 func TestStore_SaveFinishedHeadlessRunRejectsNonTerminalStatus(t *testing.T) {

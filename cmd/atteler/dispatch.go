@@ -786,6 +786,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	}
 
 	referenceContext := loadConfiguredReferenceContext(ctx, cfg.Context.References, contextOptions)
+	selection.sessionState.AgentLoopBudget = agentLoopBudget
 
 	return appState{
 		config:                      cfg,

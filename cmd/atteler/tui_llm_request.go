@@ -122,6 +122,10 @@ func callLLMWithTools(
 	request llmRequest,
 	eventLines *eventLineBuffer,
 ) llmResponseMsg {
+	if request.confirmRequestCh != nil {
+		defer close(request.confirmRequestCh)
+	}
+
 	tools := llm.DefaultTools()
 	if request.hasAgent {
 		tools = request.agent.FilterTools(tools)
@@ -258,21 +262,27 @@ func callLLMWithTools(
 
 	confirmContinueFn, confirmToolFn := agentLoopConfirmCallbacks(ctx, request)
 
+	costEstimator, err := agentLoopCostEstimatorForBudget(reg, params.Model, request.fallbackModels, request.agentLoopBudget)
+	if err != nil {
+		return llmResponseMsg{
+			err:         err,
+			completedAt: time.Now(),
+			eventLines:  eventLines.Lines(),
+			toolLog:     toolLog,
+			liveEvents:  request.liveCh != nil,
+		}
+	}
+
 	resp, _, err := llm.AgentLoop(ctx, reg, params, request.fallbackModels, executor, llm.AgentLoopConfig{
 		ConfirmContinue:    confirmContinueFn,
 		ConfirmToolCall:    confirmToolFn,
 		BeforeModelCall:    agentLoopManifestPreflight(ctx, reg, request),
 		Budget:             request.agentLoopBudget,
+		EstimateCostMicros: costEstimator,
 		CheckpointInterval: request.agentLoopCheckpointInterval,
 		Policy:             llm.BashToolPolicy,
 		CheckpointSink:     agentLoopCheckpointSink(request.agentLoopCheckpointPath),
 	})
-
-	// Close the request channel so the listenForCheckpoint goroutine exits.
-	if request.confirmRequestCh != nil {
-		close(request.confirmRequestCh)
-	}
-
 	if err != nil {
 		return llmResponseMsg{
 			err:         agentLoopError(err, request.agentLoopCheckpointPath),

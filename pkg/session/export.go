@@ -8,6 +8,7 @@ import (
 	"html"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,23 +75,26 @@ type MachineReadableExport struct {
 }
 
 // ExportSessionMetadata contains safe session-level metadata for exports.
+//
+//nolint:govet // JSON field order keeps stable export metadata; padding is not performance-sensitive.
 type ExportSessionMetadata struct {
-	CreatedAt              time.Time `json:"created_at,omitzero"`
-	UpdatedAt              time.Time `json:"updated_at,omitzero"`
-	ID                     string    `json:"id"`
-	Title                  string    `json:"title,omitempty"`
-	DefaultModel           string    `json:"default_model,omitempty"`
-	DefaultReasoningLevel  string    `json:"default_reasoning_level,omitempty"`
-	DefaultAgent           string    `json:"default_agent,omitempty"`
-	WorktreePath           string    `json:"worktree_path,omitempty"`
-	WorktreeBranch         string    `json:"worktree_branch,omitempty"`
-	WorktreeBase           string    `json:"worktree_base,omitempty"`
-	Tags                   []string  `json:"tags,omitempty"`
-	MessageCount           int       `json:"message_count"`
-	ExportedMessageCount   int       `json:"exported_message_count"`
-	NegativeKnowledgeCount int       `json:"negative_knowledge_count"`
-	EvaluationCount        int       `json:"evaluation_count"`
-	ArtifactCount          int       `json:"artifact_count"`
+	CreatedAt              time.Time           `json:"created_at,omitzero"`
+	UpdatedAt              time.Time           `json:"updated_at,omitzero"`
+	ID                     string              `json:"id"`
+	Title                  string              `json:"title,omitempty"`
+	DefaultModel           string              `json:"default_model,omitempty"`
+	DefaultReasoningLevel  string              `json:"default_reasoning_level,omitempty"`
+	DefaultAgent           string              `json:"default_agent,omitempty"`
+	AgentLoopBudget        llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
+	WorktreePath           string              `json:"worktree_path,omitempty"`
+	WorktreeBranch         string              `json:"worktree_branch,omitempty"`
+	WorktreeBase           string              `json:"worktree_base,omitempty"`
+	Tags                   []string            `json:"tags,omitempty"`
+	MessageCount           int                 `json:"message_count"`
+	ExportedMessageCount   int                 `json:"exported_message_count"`
+	NegativeKnowledgeCount int                 `json:"negative_knowledge_count"`
+	EvaluationCount        int                 `json:"evaluation_count"`
+	ArtifactCount          int                 `json:"artifact_count"`
 }
 
 // ExportMessage is a redaction-aware exported transcript message.
@@ -277,6 +281,7 @@ func BuildMachineReadableExport(session Session, options ExportOptions) MachineR
 			DefaultAgent:           builder.exportString("session.default_agent", SearchFieldAgent, session.DefaultAgent),
 			DefaultModel:           builder.exportString("session.default_model", SearchFieldModel, session.DefaultModel),
 			DefaultReasoningLevel:  builder.exportString("session.default_reasoning_level", SearchFieldModel, session.DefaultReasoningLevel),
+			AgentLoopBudget:        session.AgentLoopBudget,
 			WorktreePath:           builder.exportString("session.worktree_path", SearchFieldRepo, session.WorktreePath),
 			WorktreeBranch:         builder.exportString("session.worktree_branch", SearchFieldRepo, session.WorktreeBranch),
 			WorktreeBase:           builder.exportString("session.worktree_base", SearchFieldRepo, session.WorktreeBase),
@@ -771,6 +776,7 @@ func renderMarkdown(export MachineReadableExport) string {
 	writeMetadataString(&b, "Agent", export.Session.DefaultAgent)
 	writeMetadataString(&b, "Model", export.Session.DefaultModel)
 	writeMetadataString(&b, "Effort", export.Session.DefaultReasoningLevel)
+	writeMetadataString(&b, "Agent loop budget", formatAgentLoopBudgetCompact(export.Session.AgentLoopBudget))
 	writeMetadataString(&b, "Worktree", export.Session.WorktreePath)
 	writeMetadataString(&b, "Branch", export.Session.WorktreeBranch)
 	writeMetadataString(&b, "Base", export.Session.WorktreeBase)
@@ -1055,6 +1061,67 @@ func writeMetadataString(b *strings.Builder, label, value string) {
 	}
 
 	fmt.Fprintf(b, "- **%s:** %s\n", label, markdownInline(value))
+}
+
+func formatAgentLoopBudgetCompact(budget llm.AgentLoopBudget) string {
+	if budget.IsZero() {
+		return ""
+	}
+
+	parts := make([]string, 0, 9)
+	if budget.MaxIterations > 0 {
+		parts = append(parts, "iter="+strconv.Itoa(budget.MaxIterations))
+	}
+
+	if budget.MaxModelCalls > 0 {
+		parts = append(parts, "model="+strconv.Itoa(budget.MaxModelCalls))
+	}
+
+	if budget.MaxToolCalls > 0 {
+		parts = append(parts, "tool="+strconv.Itoa(budget.MaxToolCalls))
+	}
+
+	if budget.MaxWallTime > 0 {
+		parts = append(parts, "wall="+budget.MaxWallTime.String())
+	}
+
+	if budget.MaxInputTokens > 0 {
+		parts = append(parts, "in="+formatTokenCount(budget.MaxInputTokens))
+	}
+
+	if budget.MaxOutputTokens > 0 {
+		parts = append(parts, "out="+formatTokenCount(budget.MaxOutputTokens))
+	}
+
+	if budget.MaxTotalTokens > 0 {
+		parts = append(parts, "total="+formatTokenCount(budget.MaxTotalTokens))
+	}
+
+	if budget.MaxOutputBytes > 0 {
+		parts = append(parts, "bytes="+strconv.FormatInt(budget.MaxOutputBytes, 10))
+	}
+
+	if budget.MaxCostMicros > 0 {
+		parts = append(parts, "costµ="+strconv.FormatInt(budget.MaxCostMicros, 10))
+	}
+
+	return strings.Join(parts, ",")
+}
+
+func formatTokenCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		s := strconv.FormatFloat(float64(n)/1_000_000, 'f', 1, 64)
+
+		return s + "M"
+	case n >= 1_000:
+		s := strconv.FormatFloat(float64(n)/1_000, 'f', 1, 64)
+		s = strings.TrimSuffix(s, ".0")
+
+		return s + "k"
+	default:
+		return strconv.Itoa(n)
+	}
 }
 
 func fencedJSON(value any) string {

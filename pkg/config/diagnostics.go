@@ -738,6 +738,9 @@ func deprecatedGenerationFields() map[string]string {
 func knownAgentLoopFields() map[string]bool {
 	return map[string]bool{
 		"max_output_bytes":    true,
+		"max_cost_micros":     true,
+		"max_input_tokens":    true,
+		"max_output_tokens":   true,
 		"max_total_tokens":    true,
 		"max_iterations":      true,
 		"max_model_calls":     true,

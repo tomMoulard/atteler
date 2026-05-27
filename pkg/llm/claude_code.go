@@ -340,7 +340,10 @@ func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, acce
 		return nil, fmt.Errorf("claude code: %s: %s", ar.Error.Type, ar.Error.Message)
 	}
 
-	return parseAnthropicResponse(ar), nil
+	result := parseAnthropicResponse(ar)
+	result.Provider = providerClaudeCode
+
+	return result, nil
 }
 
 func defaultClaudeCodeModels() []string {

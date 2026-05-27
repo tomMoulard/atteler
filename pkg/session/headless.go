@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/tommoulard/atteler/pkg/llm"
 )
 
 const (
@@ -141,75 +143,77 @@ type HeadlessLogTail struct {
 //
 //nolint:govet // JSON summary fields are grouped by lifecycle and metadata readability.
 type HeadlessEvent struct {
-	At             time.Time         `json:"at"`
-	RunID          string            `json:"run_id"`
-	ParentRunID    string            `json:"parent_run_id,omitempty"`
-	SessionID      string            `json:"session_id,omitempty"`
-	SessionPath    string            `json:"session_path,omitempty"`
-	Type           HeadlessEventType `json:"type"`
-	Status         HeadlessStatus    `json:"status,omitempty"`
-	Role           string            `json:"role,omitempty"`
-	Message        string            `json:"message,omitempty"`
-	Error          string            `json:"error,omitempty"`
-	Agent          string            `json:"agent,omitempty"`
-	Model          string            `json:"model,omitempty"`
-	CWD            string            `json:"cwd,omitempty"`
-	Hostname       string            `json:"hostname,omitempty"`
-	StartedCommand string            `json:"started_command,omitempty"`
-	StartMethod    string            `json:"start_method,omitempty"`
-	TerminalReason string            `json:"terminal_reason,omitempty"`
-	CancelReason   string            `json:"cancellation_reason,omitempty"`
-	StaleReason    string            `json:"stale_reason,omitempty"`
-	OrphanedReason string            `json:"orphaned_reason,omitempty"`
-	ExitCode       *int              `json:"exit_code,omitempty"`
-	CommandArgs    []string          `json:"command_args,omitempty"`
-	ChildRunIDs    []string          `json:"child_run_ids,omitempty"`
-	PID            int               `json:"pid,omitempty"`
-	ParentPID      int               `json:"parent_pid,omitempty"`
-	ProcessGroupID int               `json:"process_group_id,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
+	At              time.Time           `json:"at"`
+	RunID           string              `json:"run_id"`
+	ParentRunID     string              `json:"parent_run_id,omitempty"`
+	SessionID       string              `json:"session_id,omitempty"`
+	SessionPath     string              `json:"session_path,omitempty"`
+	Type            HeadlessEventType   `json:"type"`
+	Status          HeadlessStatus      `json:"status,omitempty"`
+	Role            string              `json:"role,omitempty"`
+	Message         string              `json:"message,omitempty"`
+	Error           string              `json:"error,omitempty"`
+	Agent           string              `json:"agent,omitempty"`
+	Model           string              `json:"model,omitempty"`
+	AgentLoopBudget llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
+	CWD             string              `json:"cwd,omitempty"`
+	Hostname        string              `json:"hostname,omitempty"`
+	StartedCommand  string              `json:"started_command,omitempty"`
+	StartMethod     string              `json:"start_method,omitempty"`
+	TerminalReason  string              `json:"terminal_reason,omitempty"`
+	CancelReason    string              `json:"cancellation_reason,omitempty"`
+	StaleReason     string              `json:"stale_reason,omitempty"`
+	OrphanedReason  string              `json:"orphaned_reason,omitempty"`
+	ExitCode        *int                `json:"exit_code,omitempty"`
+	CommandArgs     []string            `json:"command_args,omitempty"`
+	ChildRunIDs     []string            `json:"child_run_ids,omitempty"`
+	PID             int                 `json:"pid,omitempty"`
+	ParentPID       int                 `json:"parent_pid,omitempty"`
+	ProcessGroupID  int                 `json:"process_group_id,omitempty"`
+	Metadata        map[string]string   `json:"metadata,omitempty"`
 }
 
 // HeadlessRun records metadata for an atteler headless execution.
 //
 //nolint:govet // JSON metadata is grouped by lifecycle and operator-facing fields; padding is irrelevant.
 type HeadlessRun struct {
-	StartedAt          time.Time      `json:"started_at"`
-	UpdatedAt          time.Time      `json:"updated_at"`
-	LastHeartbeatAt    time.Time      `json:"last_heartbeat_at,omitzero"`
-	CompletedAt        *time.Time     `json:"completed_at,omitempty"`
-	CanceledAt         *time.Time     `json:"canceled_at,omitempty"`
-	ExitCode           *int           `json:"exit_code,omitempty"`
-	ID                 string         `json:"id"`
-	ParentRunID        string         `json:"parent_run_id,omitempty"`
-	SessionID          string         `json:"session_id"`
-	SessionPath        string         `json:"session_path"`
-	LogPath            string         `json:"log_path"`
-	EventsPath         string         `json:"events_path,omitempty"`
-	ArtifactDir        string         `json:"artifact_dir,omitempty"`
-	CWD                string         `json:"cwd,omitempty"`
-	Prompt             string         `json:"prompt"`
-	Model              string         `json:"model"`
-	Agent              string         `json:"agent"`
-	Owner              string         `json:"owner,omitempty"`
-	Hostname           string         `json:"hostname,omitempty"`
-	StartedCommand     string         `json:"started_command,omitempty"`
-	StartMethod        string         `json:"start_method,omitempty"`
-	TerminalReason     string         `json:"terminal_reason,omitempty"`
-	CancellationReason string         `json:"cancellation_reason,omitempty"`
-	StaleReason        string         `json:"stale_reason,omitempty"`
-	OrphanedReason     string         `json:"orphaned_reason,omitempty"`
-	Error              string         `json:"error"`
-	CommandArgs        []string       `json:"command_args,omitempty"`
-	ChildRunIDs        []string       `json:"child_run_ids,omitempty"`
-	PID                int            `json:"pid,omitempty"`
-	ParentPID          int            `json:"parent_pid,omitempty"`
-	ProcessGroupID     int            `json:"process_group_id,omitempty"`
-	LogMaxChunkBytes   int64          `json:"log_max_chunk_bytes,omitempty"`
-	LogMaxChunks       int            `json:"log_max_chunks,omitempty"`
-	Status             HeadlessStatus `json:"status"`
-	PrivateLogs        bool           `json:"private_logs,omitempty"`
-	Stale              bool           `json:"stale,omitempty"`
+	StartedAt          time.Time           `json:"started_at"`
+	UpdatedAt          time.Time           `json:"updated_at"`
+	LastHeartbeatAt    time.Time           `json:"last_heartbeat_at,omitzero"`
+	CompletedAt        *time.Time          `json:"completed_at,omitempty"`
+	CanceledAt         *time.Time          `json:"canceled_at,omitempty"`
+	ExitCode           *int                `json:"exit_code,omitempty"`
+	ID                 string              `json:"id"`
+	ParentRunID        string              `json:"parent_run_id,omitempty"`
+	SessionID          string              `json:"session_id"`
+	SessionPath        string              `json:"session_path"`
+	LogPath            string              `json:"log_path"`
+	EventsPath         string              `json:"events_path,omitempty"`
+	ArtifactDir        string              `json:"artifact_dir,omitempty"`
+	CWD                string              `json:"cwd,omitempty"`
+	Prompt             string              `json:"prompt"`
+	Model              string              `json:"model"`
+	AgentLoopBudget    llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
+	Agent              string              `json:"agent"`
+	Owner              string              `json:"owner,omitempty"`
+	Hostname           string              `json:"hostname,omitempty"`
+	StartedCommand     string              `json:"started_command,omitempty"`
+	StartMethod        string              `json:"start_method,omitempty"`
+	TerminalReason     string              `json:"terminal_reason,omitempty"`
+	CancellationReason string              `json:"cancellation_reason,omitempty"`
+	StaleReason        string              `json:"stale_reason,omitempty"`
+	OrphanedReason     string              `json:"orphaned_reason,omitempty"`
+	Error              string              `json:"error"`
+	CommandArgs        []string            `json:"command_args,omitempty"`
+	ChildRunIDs        []string            `json:"child_run_ids,omitempty"`
+	PID                int                 `json:"pid,omitempty"`
+	ParentPID          int                 `json:"parent_pid,omitempty"`
+	ProcessGroupID     int                 `json:"process_group_id,omitempty"`
+	LogMaxChunkBytes   int64               `json:"log_max_chunk_bytes,omitempty"`
+	LogMaxChunks       int                 `json:"log_max_chunks,omitempty"`
+	Status             HeadlessStatus      `json:"status"`
+	PrivateLogs        bool                `json:"private_logs,omitempty"`
+	Stale              bool                `json:"stale,omitempty"`
 }
 
 type headlessLogChunk struct {
@@ -597,6 +601,10 @@ func mergeFinishedHeadlessIdentity(current, run HeadlessRun) HeadlessRun {
 
 	if run.Model == "" {
 		run.Model = current.Model
+	}
+
+	if run.AgentLoopBudget.IsZero() {
+		run.AgentLoopBudget = current.AgentLoopBudget
 	}
 
 	if run.Agent == "" {
@@ -1735,31 +1743,32 @@ func validateHeadlessEventLifecycle(event HeadlessEvent) error {
 
 func headlessEventForRun(run HeadlessRun, eventType HeadlessEventType, message string) HeadlessEvent {
 	return HeadlessEvent{
-		At:             time.Now().UTC(),
-		RunID:          run.ID,
-		ParentRunID:    run.ParentRunID,
-		SessionID:      run.SessionID,
-		SessionPath:    run.SessionPath,
-		Type:           eventType,
-		Status:         run.Status,
-		Message:        message,
-		Error:          run.Error,
-		Agent:          run.Agent,
-		Model:          run.Model,
-		CWD:            run.CWD,
-		Hostname:       run.Hostname,
-		StartedCommand: run.StartedCommand,
-		StartMethod:    run.StartMethod,
-		TerminalReason: run.TerminalReason,
-		CancelReason:   run.CancellationReason,
-		StaleReason:    run.StaleReason,
-		OrphanedReason: run.OrphanedReason,
-		ExitCode:       run.ExitCode,
-		CommandArgs:    append([]string(nil), run.CommandArgs...),
-		ChildRunIDs:    append([]string(nil), run.ChildRunIDs...),
-		PID:            run.PID,
-		ParentPID:      run.ParentPID,
-		ProcessGroupID: run.ProcessGroupID,
+		At:              time.Now().UTC(),
+		RunID:           run.ID,
+		ParentRunID:     run.ParentRunID,
+		SessionID:       run.SessionID,
+		SessionPath:     run.SessionPath,
+		Type:            eventType,
+		Status:          run.Status,
+		Message:         message,
+		Error:           run.Error,
+		Agent:           run.Agent,
+		Model:           run.Model,
+		AgentLoopBudget: run.AgentLoopBudget,
+		CWD:             run.CWD,
+		Hostname:        run.Hostname,
+		StartedCommand:  run.StartedCommand,
+		StartMethod:     run.StartMethod,
+		TerminalReason:  run.TerminalReason,
+		CancelReason:    run.CancellationReason,
+		StaleReason:     run.StaleReason,
+		OrphanedReason:  run.OrphanedReason,
+		ExitCode:        run.ExitCode,
+		CommandArgs:     append([]string(nil), run.CommandArgs...),
+		ChildRunIDs:     append([]string(nil), run.ChildRunIDs...),
+		PID:             run.PID,
+		ParentPID:       run.ParentPID,
+		ProcessGroupID:  run.ProcessGroupID,
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -411,6 +412,74 @@ func TestFinishLLMResponseDeliversFinalMessage(t *testing.T) {
 	case <-time.After(time.Second):
 		require.FailNow(t, "timed out waiting for final LLM response")
 	}
+}
+
+func TestCallLLMWithToolsCostBudgetFailsClosedWithoutPricing(t *testing.T) {
+	t.Parallel()
+
+	provider := &runOnceCostProvider{
+		name:   "ollama",
+		models: []string{"llama3.2"},
+		response: &llm.Response{
+			Content:    "unpriced answer",
+			Provider:   "ollama",
+			Model:      "llama3.2",
+			StopReason: llm.StopEndTurn,
+		},
+	}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	msg := callLLMWithTools(context.Background(), registry, llm.CompleteParams{
+		Model: "ollama/llama3.2",
+		Messages: []llm.Message{{
+			Role:    llm.RoleUser,
+			Content: "use tools",
+		}},
+	}, llmRequest{
+		agentLoopBudget: llm.AgentLoopBudget{MaxCostMicros: 1},
+		workingDir:      t.TempDir(),
+	}, newEventLineBuffer())
+
+	require.ErrorIs(t, msg.err, llm.ErrAgentLoopCostPricingUnavailable)
+	assert.Contains(t, msg.err.Error(), "agent_loop.max_cost_micros")
+	assert.Zero(t, provider.calls, "TUI cost budgets should fail before unpriced model usage")
+}
+
+func TestCallLLMWithToolsCostBudgetPassesWithCatalogPricing(t *testing.T) {
+	t.Parallel()
+
+	provider := &runOnceCostProvider{
+		name:   "openai",
+		models: []string{"gpt-4.1-mini"},
+		response: &llm.Response{
+			Content:      "priced answer",
+			Provider:     "openai",
+			Model:        "gpt-4.1-mini",
+			StopReason:   llm.StopEndTurn,
+			InputTokens:  1,
+			OutputTokens: 1,
+		},
+	}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	msg := callLLMWithTools(context.Background(), registry, llm.CompleteParams{
+		Model: "openai/gpt-4.1-mini",
+		Messages: []llm.Message{{
+			Role:    llm.RoleUser,
+			Content: "use tools",
+		}},
+	}, llmRequest{
+		agentLoopBudget: llm.AgentLoopBudget{MaxCostMicros: 10},
+		workingDir:      t.TempDir(),
+	}, newEventLineBuffer())
+
+	require.NoError(t, msg.err)
+	assert.Equal(t, "priced answer", msg.content)
+	assert.Equal(t, 1, provider.calls)
+	assert.Equal(t, 1, msg.tokenUsage.InputTokens)
+	assert.Equal(t, 1, msg.tokenUsage.OutputTokens)
 }
 
 func requireLiveToolOutputBefore(t *testing.T, liveCh <-chan tea.Msg, timeout time.Duration) llmToolOutputMsg {
@@ -1764,6 +1833,25 @@ func TestStatusLineShowsAgentReasoningEffort(t *testing.T) {
 	assert.Contains(t, plain, "effort:high")
 }
 
+func TestStatusLineShowsAgentLoopBudget(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		selectedModel: "gpt-test",
+		agentLoopBudget: llm.AgentLoopBudget{
+			MaxInputTokens:  100,
+			MaxOutputTokens: 50,
+			MaxCostMicros:   25_000,
+		},
+	}
+
+	plain := stripANSI(m.statusLine())
+	assert.Contains(t, plain, "budget:")
+	assert.Contains(t, plain, "in=100")
+	assert.Contains(t, plain, "out=50")
+	assert.Contains(t, plain, "costµ=25000")
+}
+
 func TestContextUsageUsesProviderAwareUpperBound(t *testing.T) {
 	t.Parallel()
 
@@ -2031,24 +2119,64 @@ func TestRunInteractive_ReplacesHookLoggerBeforeSessionStart(t *testing.T) {
 	})
 
 	store := session.NewStore(t.TempDir())
+	observer := &recordingTUIObserver{}
+	budget := llm.AgentLoopBudget{
+		MaxCostMicros:   25_000,
+		MaxInputTokens:  100,
+		MaxOutputTokens: 50,
+	}
 	state := appState{
-		registry:       llm.NewRegistry(),
-		agentRegistry:  agent.NewRegistry(nil),
-		hookRunner:     events.NewRunnerWithLogger(nil, panicWriter{}),
-		sessionStore:   store,
-		sessionState:   session.New("gpt-test", nil),
-		contextOptions: contextref.Options{Root: t.TempDir()},
-		selectedModel:  "gpt-test",
-		cwd:            t.TempDir(),
+		registry:        llm.NewRegistry(),
+		agentRegistry:   agent.NewRegistry(nil),
+		hookRunner:      events.NewRunnerWithLogger(nil, panicWriter{}),
+		eventObservers:  []events.Observer{observer},
+		sessionStore:    store,
+		sessionState:    session.New("gpt-test", nil),
+		contextOptions:  contextref.Options{Root: t.TempDir()},
+		selectedModel:   "gpt-test",
+		agentLoopBudget: budget,
+		cwd:             t.TempDir(),
 	}
 
 	require.NoError(t, runInteractive(context.Background(), state))
+
+	require.NotEmpty(t, observer.events)
+
+	for _, eventType := range []string{events.SessionStart, events.SessionEnd} {
+		event := observer.eventByType(eventType)
+		require.NotNilf(t, event, "missing %s event", eventType)
+		require.Contains(t, event.Metadata, "agent_loop_budget")
+
+		var decoded llm.AgentLoopBudget
+		require.NoError(t, json.Unmarshal([]byte(event.Metadata["agent_loop_budget"]), &decoded))
+		assert.Equal(t, budget, decoded)
+	}
 }
 
 type panicWriter struct{}
 
 func (panicWriter) Write([]byte) (int, error) {
 	panic("hook logger should not be used before the TUI program starts")
+}
+
+type recordingTUIObserver struct {
+	events []events.Event
+}
+
+func (o *recordingTUIObserver) ObserveEvent(_ context.Context, event events.Event) error {
+	o.events = append(o.events, event)
+
+	return nil
+}
+
+func (o *recordingTUIObserver) eventByType(eventType string) *events.Event {
+	for i := range o.events {
+		if o.events[i].Type == eventType {
+			return &o.events[i]
+		}
+	}
+
+	return nil
 }
 
 //nolint:paralleltest // Captures process stdout while runInteractive uses fmt.Println.

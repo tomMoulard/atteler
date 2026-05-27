@@ -142,8 +142,22 @@ type AgentLoopConfig struct {
 	// MaxOutputBytes caps cumulative raw tool output per agent loop. Zero or nil
 	// disables the cap.
 	MaxOutputBytes *int64 `json:"max_output_bytes,omitempty" yaml:"max_output_bytes,omitempty"`
+	// MaxCostMicros caps cumulative estimated provider cost in micro-units of
+	// currency per agent loop. Zero or nil disables the cap. Runtime callers
+	// fail closed when provider/model pricing metadata is unavailable.
+	MaxCostMicros *int64 `json:"max_cost_micros,omitempty" yaml:"max_cost_micros,omitempty"`
+	// MaxInputTokens caps cumulative model input tokens reported by providers
+	// across an agent loop. It is separate from context.max_input_tokens, which
+	// preflights each request before it is sent. Runtime callers fail closed
+	// when token usage metadata is unavailable or incomplete.
+	MaxInputTokens *int `json:"max_input_tokens,omitempty" yaml:"max_input_tokens,omitempty"`
+	// MaxOutputTokens caps cumulative model output tokens reported by providers
+	// across an agent loop. Zero or nil disables the cap. Runtime callers fail
+	// closed when token usage metadata is unavailable or incomplete.
+	MaxOutputTokens *int `json:"max_output_tokens,omitempty" yaml:"max_output_tokens,omitempty"`
 	// MaxTotalTokens caps cumulative model input plus output tokens per agent
-	// loop. Zero or nil disables the cap.
+	// loop. Zero or nil disables the cap. Runtime callers fail closed when
+	// token usage metadata is unavailable or incomplete.
 	MaxTotalTokens *int `json:"max_total_tokens,omitempty" yaml:"max_total_tokens,omitempty"`
 	// MaxIterations caps the number of tool-use turns per agent loop. Zero or
 	// nil disables the cap (the loop runs until the model returns a final
@@ -303,6 +317,9 @@ type fileGenerationConfig struct {
 
 type fileAgentLoopConfig struct {
 	MaxOutputBytes     *int64  `json:"max_output_bytes" yaml:"max_output_bytes"`
+	MaxCostMicros      *int64  `json:"max_cost_micros" yaml:"max_cost_micros"`
+	MaxInputTokens     *int    `json:"max_input_tokens" yaml:"max_input_tokens"`
+	MaxOutputTokens    *int    `json:"max_output_tokens" yaml:"max_output_tokens"`
 	MaxTotalTokens     *int    `json:"max_total_tokens" yaml:"max_total_tokens"`
 	MaxIterations      *int    `json:"max_iterations" yaml:"max_iterations"`
 	MaxModelCalls      *int    `json:"max_model_calls" yaml:"max_model_calls"`
@@ -912,6 +929,24 @@ func mergeAgentLoop(dst *Config, agentLoop fileAgentLoopConfig, rec *originRecor
 		rec.set("agent_loop.max_output_bytes", source, value)
 	}
 
+	if agentLoop.MaxCostMicros != nil {
+		value := *agentLoop.MaxCostMicros
+		dst.AgentLoop.MaxCostMicros = &value
+		rec.set("agent_loop.max_cost_micros", source, value)
+	}
+
+	if agentLoop.MaxInputTokens != nil {
+		value := *agentLoop.MaxInputTokens
+		dst.AgentLoop.MaxInputTokens = &value
+		rec.set("agent_loop.max_input_tokens", source, value)
+	}
+
+	if agentLoop.MaxOutputTokens != nil {
+		value := *agentLoop.MaxOutputTokens
+		dst.AgentLoop.MaxOutputTokens = &value
+		rec.set("agent_loop.max_output_tokens", source, value)
+	}
+
 	if agentLoop.MaxTotalTokens != nil {
 		value := *agentLoop.MaxTotalTokens
 		dst.AgentLoop.MaxTotalTokens = &value
@@ -1358,6 +1393,24 @@ func mergeConfigAgentLoop(dst *Config, agentLoop AgentLoopConfig, rec *originRec
 		value := *agentLoop.MaxOutputBytes
 		dst.AgentLoop.MaxOutputBytes = &value
 		rec.set("agent_loop.max_output_bytes", source, value)
+	}
+
+	if agentLoop.MaxCostMicros != nil {
+		value := *agentLoop.MaxCostMicros
+		dst.AgentLoop.MaxCostMicros = &value
+		rec.set("agent_loop.max_cost_micros", source, value)
+	}
+
+	if agentLoop.MaxInputTokens != nil {
+		value := *agentLoop.MaxInputTokens
+		dst.AgentLoop.MaxInputTokens = &value
+		rec.set("agent_loop.max_input_tokens", source, value)
+	}
+
+	if agentLoop.MaxOutputTokens != nil {
+		value := *agentLoop.MaxOutputTokens
+		dst.AgentLoop.MaxOutputTokens = &value
+		rec.set("agent_loop.max_output_tokens", source, value)
 	}
 
 	if agentLoop.MaxTotalTokens != nil {
@@ -1818,6 +1871,27 @@ func mergeConfigAgentLoopFromOrigins(dst *Config, agentLoop AgentLoopConfig, dst
 		dst.AgentLoop.MaxOutputBytes = &value
 
 		appendOriginChain(dstOrigins, "agent_loop.max_output_bytes", srcOrigins, false)
+	}
+
+	if agentLoop.MaxCostMicros != nil {
+		value := *agentLoop.MaxCostMicros
+		dst.AgentLoop.MaxCostMicros = &value
+
+		appendOriginChain(dstOrigins, "agent_loop.max_cost_micros", srcOrigins, false)
+	}
+
+	if agentLoop.MaxInputTokens != nil {
+		value := *agentLoop.MaxInputTokens
+		dst.AgentLoop.MaxInputTokens = &value
+
+		appendOriginChain(dstOrigins, "agent_loop.max_input_tokens", srcOrigins, false)
+	}
+
+	if agentLoop.MaxOutputTokens != nil {
+		value := *agentLoop.MaxOutputTokens
+		dst.AgentLoop.MaxOutputTokens = &value
+
+		appendOriginChain(dstOrigins, "agent_loop.max_output_tokens", srcOrigins, false)
 	}
 
 	if agentLoop.MaxTotalTokens != nil {

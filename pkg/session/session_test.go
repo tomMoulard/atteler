@@ -17,6 +17,17 @@ func TestStore_SaveLoadByID(t *testing.T) {
 	store := NewStore(t.TempDir())
 	session := New("gpt-4.1", nil)
 	session.DefaultReasoningLevel = "high"
+	session.AgentLoopBudget = llm.AgentLoopBudget{
+		MaxWallTime:     time.Minute,
+		MaxOutputBytes:  4096,
+		MaxCostMicros:   25_000,
+		MaxIterations:   3,
+		MaxModelCalls:   4,
+		MaxToolCalls:    5,
+		MaxInputTokens:  100,
+		MaxOutputTokens: 50,
+		MaxTotalTokens:  150,
+	}
 	session.Append(llm.RoleUser, "hello")
 	session.Append(llm.RoleAssistant, "hi")
 
@@ -41,6 +52,8 @@ func TestStore_SaveLoadByID(t *testing.T) {
 		assert.Failf(t, "assertion failed", "DefaultReasoningLevel = %q", loaded.DefaultReasoningLevel)
 	}
 
+	assert.Equal(t, session.AgentLoopBudget, loaded.AgentLoopBudget)
+
 	if len(loaded.Messages) != 2 {
 		require.Failf(t, "unexpected failure", "messages len = %d, want 2", len(loaded.Messages))
 	}
@@ -48,6 +61,31 @@ func TestStore_SaveLoadByID(t *testing.T) {
 	if loaded.Messages[0].Role != llm.RoleUser || loaded.Messages[0].Content != "hello" {
 		assert.Failf(t, "assertion failed", "first message = %+v", loaded.Messages[0])
 	}
+}
+
+func TestHeadlessEventForRunIncludesAgentLoopBudget(t *testing.T) {
+	t.Parallel()
+
+	budget := llm.AgentLoopBudget{
+		MaxWallTime:     time.Minute,
+		MaxOutputBytes:  4096,
+		MaxCostMicros:   25_000,
+		MaxIterations:   3,
+		MaxModelCalls:   4,
+		MaxToolCalls:    5,
+		MaxInputTokens:  100,
+		MaxOutputTokens: 50,
+		MaxTotalTokens:  150,
+	}
+
+	event := headlessEventForRun(HeadlessRun{
+		ID:              "run-budget",
+		SessionID:       "session-budget",
+		Status:          HeadlessStatusCanceled,
+		AgentLoopBudget: budget,
+	}, HeadlessEventCanceled, "canceled")
+
+	assert.Equal(t, budget, event.AgentLoopBudget)
 }
 
 func TestStore_LoadByPathInfersID(t *testing.T) {
@@ -94,6 +132,7 @@ func TestStore_List(t *testing.T) {
 	first.DefaultAgent = defaultAgent
 	first.Title = "Review auth flow"
 	first.WorktreePath = "/repo/auth"
+	first.AgentLoopBudget = llm.AgentLoopBudget{MaxInputTokens: 100, MaxOutputTokens: 50, MaxCostMicros: 25_000}
 
 	first.Tags = []string{"auth", "review"}
 	if err := store.Save(first); err != nil {
@@ -128,6 +167,10 @@ func TestStore_List(t *testing.T) {
 
 	if summaries[1].WorktreePath != first.WorktreePath && summaries[0].WorktreePath != first.WorktreePath {
 		require.Failf(t, "unexpected failure", "worktree path not found in summaries: %+v", summaries)
+	}
+
+	if summaries[1].AgentLoopBudget != first.AgentLoopBudget && summaries[0].AgentLoopBudget != first.AgentLoopBudget {
+		require.Failf(t, "unexpected failure", "agent loop budget not found in summaries: %+v", summaries)
 	}
 
 	if len(summaries[1].Tags) == 0 && len(summaries[0].Tags) == 0 {

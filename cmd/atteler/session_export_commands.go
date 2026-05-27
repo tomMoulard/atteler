@@ -21,6 +21,7 @@ type sessionDetails struct {
 	DefaultAgent      string                      `yaml:"default_agent,omitempty"`
 	DefaultModel      string                      `yaml:"default_model,omitempty"`
 	DefaultReasoning  string                      `yaml:"default_reasoning_level,omitempty"`
+	AgentLoopBudget   *agentLoopBudgetDetails     `yaml:"agent_loop_budget,omitempty"`
 	WorktreePath      string                      `yaml:"worktree_path,omitempty"`
 	WorktreeBranch    string                      `yaml:"worktree_branch,omitempty"`
 	WorktreeBase      string                      `yaml:"worktree_base,omitempty"`
@@ -29,6 +30,19 @@ type sessionDetails struct {
 	NegativeKnowledge []session.NegativeKnowledge `yaml:"negative_knowledge,omitempty"`
 	Evaluations       []session.AgentEvaluation   `yaml:"evaluations,omitempty"`
 	Artifacts         []session.Artifact          `yaml:"artifacts,omitempty"`
+}
+
+//nolint:govet // YAML output order mirrors the documented agent_loop config schema.
+type agentLoopBudgetDetails struct {
+	MaxOutputBytes  int64  `yaml:"max_output_bytes"`
+	MaxCostMicros   int64  `yaml:"max_cost_micros"`
+	MaxInputTokens  int    `yaml:"max_input_tokens"`
+	MaxOutputTokens int    `yaml:"max_output_tokens"`
+	MaxTotalTokens  int    `yaml:"max_total_tokens"`
+	MaxIterations   int    `yaml:"max_iterations"`
+	MaxModelCalls   int    `yaml:"max_model_calls"`
+	MaxToolCalls    int    `yaml:"max_tool_calls"`
+	MaxWallTime     string `yaml:"max_wall_time"`
 }
 
 type yamlMessage struct {
@@ -73,6 +87,10 @@ func formatSessionDetailsSummary(sessionState session.Session, path string) stri
 		parts = append(parts, "effort="+sessionState.DefaultReasoningLevel)
 	}
 
+	if budget := formatAgentLoopBudgetCompact(sessionState.AgentLoopBudget); budget != "" {
+		parts = append(parts, "budget="+budget)
+	}
+
 	if len(sessionState.Tags) > 0 {
 		parts = append(parts, "tags="+strings.Join(sessionState.Tags, ","))
 	}
@@ -101,6 +119,7 @@ func formatSessionDetails(sessionState session.Session, path string) (string, er
 		DefaultAgent:     sessionState.DefaultAgent,
 		DefaultModel:     sessionState.DefaultModel,
 		DefaultReasoning: sessionState.DefaultReasoningLevel,
+		AgentLoopBudget:  sessionAgentLoopBudgetDetails(sessionState.AgentLoopBudget),
 		WorktreePath:     sessionState.WorktreePath,
 		WorktreeBranch:   sessionState.WorktreeBranch,
 		WorktreeBase:     sessionState.WorktreeBase,
@@ -118,6 +137,24 @@ func formatSessionDetails(sessionState session.Session, path string) (string, er
 	}
 
 	return string(out), nil
+}
+
+func sessionAgentLoopBudgetDetails(budget llm.AgentLoopBudget) *agentLoopBudgetDetails {
+	if budget.IsZero() {
+		return nil
+	}
+
+	return &agentLoopBudgetDetails{
+		MaxOutputBytes:  budget.MaxOutputBytes,
+		MaxCostMicros:   budget.MaxCostMicros,
+		MaxInputTokens:  budget.MaxInputTokens,
+		MaxOutputTokens: budget.MaxOutputTokens,
+		MaxTotalTokens:  budget.MaxTotalTokens,
+		MaxIterations:   budget.MaxIterations,
+		MaxModelCalls:   budget.MaxModelCalls,
+		MaxToolCalls:    budget.MaxToolCalls,
+		MaxWallTime:     budget.MaxWallTime.String(),
+	}
 }
 
 func yamlMessages(messages []llm.Message) []yamlMessage {

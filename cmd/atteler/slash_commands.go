@@ -269,6 +269,7 @@ func (m model) forkAt(input slashForkInput) (model, tea.Cmd, bool) {
 
 	m.history = append([]llm.Message(nil), m.history[:n]...)
 	m.sessionState = session.New(m.selectedModel, m.history)
+	m.sessionState.AgentLoopBudget = m.agentLoopBudget
 
 	return m, tea.Println(dimStyle.Render("forked session " + m.sessionState.ID)), true
 }

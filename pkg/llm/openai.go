@@ -301,6 +301,7 @@ func buildOpenAIRequest(params CompleteParams) (openaiRequest, error) {
 
 func parseOpenAIResponse(or openaiResponse) *Response {
 	result := &Response{
+		Provider:          providerOpenAI,
 		Model:             or.Model,
 		InputTokens:       or.Usage.PromptTokens,
 		CachedInputTokens: or.Usage.PromptTokensDetails.CachedTokens,

@@ -278,7 +278,10 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 		return nil, fmt.Errorf("anthropic: %s: %s", ar.Error.Type, ar.Error.Message)
 	}
 
-	return parseAnthropicResponse(ar), nil
+	result := parseAnthropicResponse(ar)
+	result.Provider = providerAnthropic
+
+	return result, nil
 }
 
 func anthropicCommandMetadata(adjustments []completeParamAdjustment) map[string]string {
