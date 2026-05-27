@@ -840,9 +840,10 @@ Attempts, results, and CLI summaries carry the same `admission_id` so each
 transcript can be traced back to its launch decision.
 The generated agents help lists the ledger, resume, concurrency, timeout,
 retry, cancellation, token/cost, and output-byte controls for safe retry and
-backpressure tuning; child scopes that escape the parent allowed write scope are
-denied before spawn and recorded as admission denials without synthetic
-execution attempts. Async tasks in downstream waves after a halted wave are also
+backpressure tuning; child scopes that escape the parent allowed write scope,
+including symlink escapes, are denied before spawn and recorded as admission
+denials without synthetic execution attempts. Async tasks in downstream waves
+after a halted wave are also
 persisted as denied admissions without attempts, so resume has a durable
 boundary for work that never became runnable. Child processes
 receive `ATTELER_CHILD_*` identity and

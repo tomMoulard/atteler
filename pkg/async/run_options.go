@@ -886,18 +886,16 @@ func validateRunAllowedWriteScope(childScope, parentScope string) error {
 		return nil
 	}
 
-	parentAbs, err := filepath.Abs(parentScope)
+	parentAbs, err := resolveRunAllowedWriteScopePath(parentScope)
 	if err != nil {
 		return fmt.Errorf("resolve parent allowed write scope %q: %w", parentScope, err)
 	}
 
-	childAbs, err := filepath.Abs(childScope)
+	childAbs, err := resolveRunAllowedWriteScopePath(childScope)
 	if err != nil {
 		return fmt.Errorf("resolve child allowed write scope %q: %w", childScope, err)
 	}
 
-	parentAbs = filepath.Clean(parentAbs)
-	childAbs = filepath.Clean(childAbs)
 	rel, err := filepath.Rel(parentAbs, childAbs)
 	if err != nil {
 		return fmt.Errorf("compare child allowed write scope %q to parent scope %q: %w", childScope, parentScope, err)
@@ -908,6 +906,55 @@ func validateRunAllowedWriteScope(childScope, parentScope string) error {
 	}
 
 	return fmt.Errorf("allowed write scope %q escapes parent scope %q", childScope, parentScope)
+}
+
+func resolveRunAllowedWriteScopePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("absolute scope path: %w", err)
+	}
+
+	clean := filepath.Clean(abs)
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err == nil {
+		return filepath.Clean(resolved), nil
+	}
+
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("evaluate scope symlinks %q: %w", clean, err)
+	}
+
+	return resolveRunAllowedWriteScopeExistingAncestor(clean)
+}
+
+func resolveRunAllowedWriteScopeExistingAncestor(path string) (string, error) {
+	missing := make([]string, 0)
+	current := path
+
+	for {
+		if _, err := os.Lstat(current); err == nil {
+			resolved, evalErr := filepath.EvalSymlinks(current)
+			if evalErr != nil {
+				return "", fmt.Errorf("evaluate scope ancestor symlinks %q: %w", current, evalErr)
+			}
+
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+
+			return filepath.Clean(resolved), nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("stat scope ancestor %q: %w", current, err)
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(path), nil
+		}
+
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func estimateRunPromptTokens(prompt string) int {

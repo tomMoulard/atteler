@@ -1454,6 +1454,48 @@ func TestPlan_RunWithOptions_DeniesScopeViolationBeforeSpawn(t *testing.T) {
 	assert.Empty(t, ledger.Attempts)
 }
 
+func TestPlan_RunWithOptions_DeniesSymlinkScopeEscapeBeforeSpawn(t *testing.T) {
+	t.Parallel()
+
+	parentScope := t.TempDir()
+	outsideScope := t.TempDir()
+	childScope := filepath.Join(parentScope, "linked-outside")
+	requireSymlinkOrSkip(t, outsideScope, childScope)
+	plan, err := NewPlan([]Task{{
+		ID:                "escape",
+		Agent:             "executor",
+		Prompt:            "escape",
+		AllowedWriteScope: childScope,
+	}})
+	require.NoError(t, err)
+
+	ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+	var called atomic.Bool
+	results, err := plan.RunWithOptions(t.Context(), func(context.Context, Task) (string, error) {
+		called.Store(true)
+
+		return shouldNotRunOutput, nil
+	}, RunOptions{LedgerPath: ledgerPath, AllowedWriteScope: parentScope})
+
+	require.Error(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, StatusDenied, results[0].Status)
+	assert.Contains(t, err.Error(), `task "escape" denied`)
+	assert.False(t, called.Load())
+
+	var ledger Ledger
+	data, readErr := os.ReadFile(ledgerPath)
+	require.NoError(t, readErr)
+	require.NoError(t, json.Unmarshal(data, &ledger))
+	require.Len(t, ledger.Admissions, 1)
+	admission := ledger.Admissions[0]
+	assert.False(t, admission.Admitted)
+	assert.Equal(t, childScope, admission.AllowedWriteScope)
+	assert.Contains(t, admission.DenyReason, "escapes parent scope")
+	assert.Equal(t, admission.AdmissionID, results[0].AdmissionID)
+	assert.Empty(t, ledger.Attempts)
+}
+
 func TestPlan_RunWithOptions_PersistsAdmissionForHaltedSibling(t *testing.T) {
 	t.Parallel()
 
@@ -1578,6 +1620,14 @@ func TestPlan_RunWithOptions_PreCanceledContextPersistsAdmissionDenials(t *testi
 		assert.False(t, admission.Admitted)
 		assert.Contains(t, admission.DenyReason, context.Canceled.Error())
 		assert.Equal(t, ledger.RunID, admission.ParentRunID)
+	}
+}
+
+func requireSymlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink not available in this environment: %v", err)
 	}
 }
 
