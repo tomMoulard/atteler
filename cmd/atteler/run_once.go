@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -36,11 +37,13 @@ type responseRecordOptions struct {
 	ReplayPath string
 }
 
+//nolint:govet // Field order follows CLI execution concerns, not memory packing.
 type runOnceExecutionOptions struct {
 	OutputFormat                string
 	HeadlessID                  string
 	SkillLearningStoreDir       string
 	SkillLearningSkillDir       string
+	VectorConfig                appconfig.VectorConfig
 	Response                    responseRecordOptions
 	AgentLoopBudget             llm.AgentLoopBudget
 	AgentLoopCheckpointInterval int
@@ -348,6 +351,21 @@ func runOnceWithOptions(
 	refCtx.Manifest = mergeReferenceManifests(refCtx.Manifest, generatedSkillRefCtx.Manifest)
 	if refCtx.Estimator == "" {
 		refCtx.Estimator = generatedSkillRefCtx.Estimator
+	}
+
+	workspaceRefCtx := workspaceVectorReferenceContextWithWarning(
+		ctx,
+		contextOptions.Root,
+		executionOptions.VectorConfig,
+		prepared.prompt,
+		true,
+		requestContextOptions,
+	)
+	refCtx.Content = appendReferenceContext(refCtx.Content, workspaceRefCtx.Content)
+
+	refCtx.Manifest = mergeReferenceManifests(refCtx.Manifest, workspaceRefCtx.Manifest)
+	if refCtx.Estimator == "" {
+		refCtx.Estimator = workspaceRefCtx.Estimator
 	}
 
 	prependReferenceContext(&params, refCtx.Content)

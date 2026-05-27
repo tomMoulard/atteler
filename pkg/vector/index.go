@@ -7,12 +7,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/tommoulard/atteler/pkg/privacy"
+	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 const (
@@ -35,7 +40,11 @@ const (
 	// DefaultChunkOverlapRunes preserves some local context across chunk
 	// boundaries without producing excessive duplicate chunks.
 	DefaultChunkOverlapRunes = 120
+
+	vectorizerMetadataRedactedValue = "[REDACTED]"
 )
+
+var vectorizerMetadataUserinfoPattern = regexp.MustCompile(`(^|//)([^/?#\s:@]+):([^/?#\s@]+)@`)
 
 // VectorizerMetadata records the vectorizer that produced an index. Persisting
 // it prevents accidental reuse of hashed lexical vectors as model embeddings
@@ -72,9 +81,9 @@ func NewEmbeddingMetadata(provider, model, baseURL string, dimensions int) Vecto
 // kinds.
 func (m VectorizerMetadata) Normalize() VectorizerMetadata {
 	m.Kind = normalizeMetadataToken(m.Kind)
-	m.Provider = normalizeProviderToken(m.Provider)
-	m.Model = strings.TrimSpace(m.Model)
-	m.BaseURL = strings.TrimRight(strings.TrimSpace(m.BaseURL), "/")
+	m.Provider = normalizeProviderToken(privacy.RedactIdentifier(m.Provider))
+	m.Model = privacy.RedactIdentifier(strings.TrimSpace(m.Model))
+	m.BaseURL = redactVectorizerMetadataURL(m.BaseURL)
 
 	if m.Kind == VectorizerKindLexical {
 		m.Provider = ""
@@ -111,6 +120,211 @@ func (m VectorizerMetadata) Label() string {
 
 		return m.Kind
 	}
+}
+
+func redactVectorizerMetadataURL(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return privacy.RedactIdentifier(redactVectorizerMetadataUserinfo(raw))
+	}
+
+	if parsed.User != nil {
+		if _, hasPassword := parsed.User.Password(); hasPassword {
+			parsed.User = url.UserPassword(vectorizerMetadataRedactedValue, vectorizerMetadataRedactedValue)
+		} else {
+			parsed.User = url.User(vectorizerMetadataRedactedValue)
+		}
+	} else if redacted := redactVectorizerMetadataUserinfo(raw); redacted != raw {
+		reparsed, parseErr := url.Parse(redacted)
+		if parseErr != nil {
+			return privacy.RedactIdentifier(redacted)
+		}
+
+		parsed = reparsed
+	}
+
+	if query, redacted := redactVectorizerMetadataQuery(parsed.Query()); redacted {
+		parsed.RawQuery = query
+	}
+
+	return privacy.RedactIdentifier(parsed.String())
+}
+
+func redactVectorizerMetadataUserinfo(raw string) string {
+	return vectorizerMetadataUserinfoPattern.ReplaceAllString(
+		raw,
+		"$1"+vectorizerMetadataRedactedValue+":"+vectorizerMetadataRedactedValue+"@",
+	)
+}
+
+func redactVectorizerMetadataQuery(query url.Values) (string, bool) {
+	redacted := false
+
+	for key := range query {
+		if privacy.IsSensitiveKey(key) {
+			redacted = true
+
+			query.Set(key, vectorizerMetadataRedactedValue)
+		}
+	}
+
+	if !redacted {
+		return "", false
+	}
+
+	return query.Encode(), true
+}
+
+func validateVectorizerMetadataPrivacy(metadata VectorizerMetadata) error {
+	if vectorizerMetadataSecretValue(metadata.Provider) ||
+		vectorizerMetadataSecretValue(metadata.Model) ||
+		vectorizerMetadataURLSecretValue(metadata.BaseURL) {
+		return ErrPrivacyPolicy
+	}
+
+	return nil
+}
+
+func vectorizerMetadataSecretValue(value string) bool {
+	value = strings.TrimSpace(value)
+
+	return value != privacy.RedactIdentifier(value)
+}
+
+func vectorizerMetadataURLSecretValue(raw string) bool {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return false
+	}
+
+	if vectorizerMetadataUserinfoSecretValue(raw) {
+		return true
+	}
+
+	if raw != privacy.RedactIdentifier(raw) {
+		return true
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+
+	if parsed.User != nil {
+		username := parsed.User.Username()
+		if !vectorizerMetadataValueRedacted(username) {
+			return true
+		}
+
+		password, hasPassword := parsed.User.Password()
+		if hasPassword && !vectorizerMetadataValueRedacted(password) {
+			return true
+		}
+	}
+
+	for key, values := range parsed.Query() {
+		if !privacy.IsSensitiveKey(key) {
+			continue
+		}
+
+		for _, value := range values {
+			if !vectorizerMetadataValueRedacted(value) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func vectorizerMetadataUserinfoSecretValue(raw string) bool {
+	for _, match := range vectorizerMetadataUserinfoPattern.FindAllStringSubmatch(raw, -1) {
+		if len(match) < 4 {
+			continue
+		}
+
+		if !vectorizerMetadataValueRedacted(match[2]) || !vectorizerMetadataValueRedacted(match[3]) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func vectorizerMetadataValueRedacted(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || value == vectorizerMetadataRedactedValue {
+		return true
+	}
+
+	unescaped, err := url.QueryUnescape(value)
+	if err != nil {
+		return false
+	}
+
+	return unescaped == vectorizerMetadataRedactedValue
+}
+
+type vectorizerMetadataProvider interface {
+	Metadata() VectorizerMetadata
+}
+
+type vectorizerDimensionMetadataProvider interface {
+	Metadata(int) VectorizerMetadata
+}
+
+func vectorizerMetadata(vectorizer Vectorizer) VectorizerMetadata {
+	if provider, ok := vectorizer.(vectorizerDimensionMetadataProvider); ok {
+		return provider.Metadata(0)
+	}
+
+	if provider, ok := vectorizer.(vectorizerMetadataProvider); ok {
+		return provider.Metadata()
+	}
+
+	return VectorizerMetadata{}
+}
+
+func normalizeVectorizerMetadataForIndex(vectorizer Vectorizer, metadata VectorizerMetadata) VectorizerMetadata {
+	inferred := vectorizerMetadata(vectorizer)
+	if strings.TrimSpace(inferred.Kind) != "" {
+		inferred = inferred.Normalize()
+	}
+
+	if strings.TrimSpace(metadata.Kind) == "" {
+		metadata.Kind = inferred.Kind
+	}
+
+	if strings.TrimSpace(metadata.Kind) == "" {
+		return VectorizerMetadata{}
+	}
+
+	if normalizeMetadataToken(metadata.Kind) != inferred.Kind {
+		return metadata.Normalize()
+	}
+
+	if strings.TrimSpace(metadata.Provider) == "" {
+		metadata.Provider = inferred.Provider
+	}
+
+	if strings.TrimSpace(metadata.Model) == "" {
+		metadata.Model = inferred.Model
+	}
+
+	if strings.TrimSpace(metadata.BaseURL) == "" {
+		metadata.BaseURL = inferred.BaseURL
+	}
+
+	if metadata.Dimensions == 0 {
+		metadata.Dimensions = inferred.Dimensions
+	}
+
+	return metadata.Normalize()
 }
 
 // CompatibleWith reports whether actual persisted metadata may satisfy an
@@ -269,12 +483,12 @@ func SourceFromFile(path string) (Source, error) {
 	return Source{Path: filepath.Clean(path), Text: string(data)}, nil
 }
 
-// SourceMetadataForText returns digest metadata for source text.
+// SourceMetadataForText returns digest metadata for source text. Digests and
+// byte counts are derived from redacted text so persisted indexes do not retain
+// fingerprints of raw credential values.
 func SourceMetadataForText(path, text string) SourceMetadata {
-	path = strings.TrimSpace(path)
-	if path != "" {
-		path = filepath.Clean(path)
-	}
+	path = redactSourcePath(path)
+	text = privacy.RedactText(text)
 
 	return SourceMetadata{
 		Path:   path,
@@ -309,6 +523,10 @@ func BuildIndex(
 	chunkOptions ChunkOptions,
 	createdAt time.Time,
 ) (*Index, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
+
 	if len(sources) == 0 {
 		return nil, ErrNoSources
 	}
@@ -321,15 +539,24 @@ func BuildIndex(
 		createdAt = time.Now().UTC()
 	}
 
+	metadata = normalizeVectorizerMetadataForIndex(vectorizer, metadata)
+	if metadata.Kind == "" {
+		return nil, fmt.Errorf("%w: vectorizer metadata is required", ErrMetadataMismatch)
+	}
+
 	idx := &Index{
 		Version:    IndexVersion,
 		CreatedAt:  createdAt.UTC(),
-		Vectorizer: metadata.Normalize(),
+		Vectorizer: metadata,
 		Chunk:      chunkOptions.Normalize(),
 		Sources:    make([]SourceMetadata, 0, len(sources)),
 	}
 
 	for _, source := range sources {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("build vector index: %w", err)
+		}
+
 		if err := idx.addSource(ctx, source, vectorizer); err != nil {
 			return nil, err
 		}
@@ -350,7 +577,7 @@ func (idx *Index) Save(path string) error {
 		return errors.New("vector index is nil")
 	}
 
-	if err := idx.Validate(); err != nil {
+	if err := idx.validate(indexValidationOptions{RequireDocumentPersistenceSafety: true}); err != nil {
 		return err
 	}
 
@@ -371,11 +598,19 @@ func (idx *Index) Save(path string) error {
 		return fmt.Errorf("write vector index %q: %w", path, err)
 	}
 
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod vector index %q: %w", path, err)
+	}
+
 	return nil
 }
 
 // LoadIndex reads and validates an index saved by Save.
 func LoadIndex(path string) (*Index, error) {
+	return loadIndex(path, indexValidationOptions{})
+}
+
+func loadIndex(path string, validation indexValidationOptions) (*Index, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read vector index %q: %w", path, err)
@@ -383,18 +618,36 @@ func LoadIndex(path string) (*Index, error) {
 
 	var idx Index
 	if err := json.Unmarshal(data, &idx); err != nil {
-		return nil, fmt.Errorf("decode vector index %q: %w", path, err)
+		return nil, fmt.Errorf("%w: decode vector index %q: %w", ErrIndexCorrupt, path, err)
 	}
 
-	if err := idx.Validate(); err != nil {
+	if err := idx.validate(validation); err != nil {
 		return nil, fmt.Errorf("validate vector index %q: %w", path, err)
 	}
 
 	return &idx, nil
 }
 
+func redactSourcePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+
+	return privacy.RedactIdentifier(filepath.Clean(path))
+}
+
 // Validate checks the internal consistency of idx.
 func (idx *Index) Validate() error {
+	return idx.validate(indexValidationOptions{})
+}
+
+type indexValidationOptions struct {
+	AllowStaleTextHashVector         bool
+	RequireDocumentPersistenceSafety bool
+}
+
+func (idx *Index) validate(opts indexValidationOptions) error {
 	if idx == nil {
 		return errors.New("vector index is nil")
 	}
@@ -407,8 +660,172 @@ func (idx *Index) Validate() error {
 		return ErrInvalidDimensions
 	}
 
+	if err := idx.validateVectorizerMetadata(); err != nil {
+		return err
+	}
+
+	seen := make(map[string]struct{}, len(idx.Documents))
+	for i := range idx.Documents {
+		if err := validateIndexDocument(&idx.Documents[i], idx.Vectorizer, idx.Dimensions, opts, seen); err != nil {
+			return err
+		}
+	}
+
+	seenSources := make(map[string]struct{}, len(idx.Sources))
+	for _, source := range idx.Sources {
+		if err := validateIndexSourceMetadata(source, seenSources); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateIndexSourceMetadata(source SourceMetadata, seen map[string]struct{}) error {
+	sourcePath := strings.TrimSpace(source.Path)
+	sourceDigest := strings.TrimSpace(source.Digest)
+
+	if sourcePath == "" || sourceDigest == "" {
+		return fmt.Errorf("%w: source metadata missing path or digest", ErrSourceStale)
+	}
+
+	cleanPath := filepath.Clean(sourcePath)
+	if sourcePath != cleanPath {
+		return fmt.Errorf("%w: source metadata path %q is not clean", ErrSourceStale, cleanPath)
+	}
+
+	redactedSourcePath := redactSourcePath(cleanPath)
+	if cleanPath != redactedSourcePath {
+		return fmt.Errorf("%w: source metadata path %q", ErrPrivacyPolicy, redactedSourcePath)
+	}
+
+	if !validSourceDigest(sourceDigest) || source.Bytes < 0 {
+		return fmt.Errorf("%w: source metadata %q has invalid digest or byte count", ErrSourceStale, cleanPath)
+	}
+
+	if _, ok := seen[cleanPath]; ok {
+		return fmt.Errorf("%w: duplicate source metadata path %q", ErrSourceStale, cleanPath)
+	}
+
+	seen[cleanPath] = struct{}{}
+
+	return nil
+}
+
+func validSourceDigest(digest string) bool {
+	if len(digest) != sha256.Size*2 {
+		return false
+	}
+
+	_, err := hex.DecodeString(digest)
+
+	return err == nil
+}
+
+func validateIndexDocument(
+	doc *Document,
+	metadata VectorizerMetadata,
+	dimensions int,
+	opts indexValidationOptions,
+	seen map[string]struct{},
+) error {
+	if strings.TrimSpace(doc.ID) == "" {
+		return ErrMissingID
+	}
+
+	if _, ok := seen[doc.ID]; ok {
+		return fmt.Errorf("%w: %q", ErrDuplicateID, doc.ID)
+	}
+
+	seen[doc.ID] = struct{}{}
+	if len(doc.Vector) != dimensions {
+		return fmt.Errorf("%w: document %q has %d, want %d", ErrDimensionMismatch, doc.ID, len(doc.Vector), dimensions)
+	}
+
+	if err := validateVector(doc.Vector); err != nil {
+		return fmt.Errorf("validate vector document %q: %w", doc.ID, err)
+	}
+
+	if err := validateIndexDocumentVectorizer(*doc, dimensions, metadata); err != nil {
+		return fmt.Errorf("validate vector document %q vectorizer: %w", doc.ID, err)
+	}
+
+	if opts.RequireDocumentPersistenceSafety {
+		if err := checkDocumentPrivacy(*doc); err != nil {
+			return fmt.Errorf("validate vector document %q privacy: %w", doc.ID, err)
+		}
+
+		if err := checkDocumentSourceHash(*doc); err != nil {
+			return fmt.Errorf("validate vector document %q source hash: %w", doc.ID, err)
+		}
+
+		if err := checkDocumentProvenance(*doc); err != nil {
+			return fmt.Errorf("validate vector document %q provenance: %w", doc.ID, err)
+		}
+	}
+
+	if opts.AllowStaleTextHashVector {
+		return nil
+	}
+
+	if err := checkDocumentTextHashVector(*doc); err != nil {
+		return fmt.Errorf("validate vector document %q vector: %w", doc.ID, err)
+	}
+
+	return nil
+}
+
+func validateIndexDocumentVectorizer(doc Document, dimensions int, metadata VectorizerMetadata) error {
+	if doc.Vectorizer.IsZero() {
+		return nil
+	}
+
+	if err := validatePersistedVectorizerSpecPrivacy(doc.Vectorizer); err != nil {
+		return err
+	}
+
+	spec := normalizeVectorizerSpec(doc.Vectorizer)
+	if err := validateVectorizerIdentity(spec); err != nil {
+		return err
+	}
+
+	if spec.Dimensions != 0 && spec.Dimensions != dimensions {
+		return fmt.Errorf("%w: vectorizer dimensions got %d, want %d", ErrDimensionMismatch, spec.Dimensions, dimensions)
+	}
+
+	if err := validateDocumentVectorizerMatchesIndex(spec, metadata); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateDocumentVectorizerMatchesIndex(spec VectorizerSpec, metadata VectorizerMetadata) error {
+	metadata = metadata.Normalize()
+
+	switch metadata.Kind {
+	case "":
+		return nil
+	case VectorizerKindLexical:
+		if spec.ID != TextHashVectorizerID {
+			return ErrVectorizerMismatch
+		}
+	case VectorizerKindEmbedding:
+		if metadata.Model != "" && spec.Model != "" && spec.Model != metadata.Model {
+			return ErrVectorizerMismatch
+		}
+	}
+
+	return nil
+}
+
+func (idx *Index) validateVectorizerMetadata() error {
 	if idx.Vectorizer.Kind == "" {
 		return fmt.Errorf("%w: missing vectorizer kind", ErrMetadataMismatch)
+	}
+
+	if err := validateVectorizerMetadataPrivacy(idx.Vectorizer); err != nil {
+		return err
 	}
 
 	idx.Vectorizer = idx.Vectorizer.Normalize()
@@ -420,40 +837,22 @@ func (idx *Index) Validate() error {
 		return fmt.Errorf("%w: metadata has %d, index has %d", ErrDimensionMismatch, idx.Vectorizer.Dimensions, idx.Dimensions)
 	}
 
-	seen := make(map[string]struct{}, len(idx.Documents))
-	for i := range idx.Documents {
-		doc := &idx.Documents[i]
-		if strings.TrimSpace(doc.ID) == "" {
-			return ErrMissingID
-		}
-
-		if _, ok := seen[doc.ID]; ok {
-			return fmt.Errorf("duplicate vector document id %q", doc.ID)
-		}
-
-		seen[doc.ID] = struct{}{}
-		if len(doc.Vector) != idx.Dimensions {
-			return fmt.Errorf("%w: document %q has %d, want %d", ErrDimensionMismatch, doc.ID, len(doc.Vector), idx.Dimensions)
-		}
-
-		if err := validateVector(doc.Vector); err != nil {
-			return fmt.Errorf("validate vector document %q: %w", doc.ID, err)
-		}
-	}
-
-	for _, source := range idx.Sources {
-		if strings.TrimSpace(source.Path) == "" || strings.TrimSpace(source.Digest) == "" {
-			return fmt.Errorf("%w: source metadata missing path or digest", ErrSourceStale)
-		}
-	}
-
 	return nil
 }
 
 // ValidateFor checks whether idx can be reused for expected metadata and the
 // currently observed source digests.
 func (idx *Index) ValidateFor(expected VectorizerMetadata, currentSources []SourceMetadata, expectedChunk ...ChunkOptions) error {
-	if err := idx.Validate(); err != nil {
+	return idx.validateFor(expected, currentSources, indexValidationOptions{}, expectedChunk...)
+}
+
+func (idx *Index) validateFor(
+	expected VectorizerMetadata,
+	currentSources []SourceMetadata,
+	validation indexValidationOptions,
+	expectedChunk ...ChunkOptions,
+) error {
+	if err := idx.validate(validation); err != nil {
 		return err
 	}
 
@@ -507,7 +906,14 @@ func (idx *Index) Store() (*Store, error) {
 	}
 
 	for i := range idx.Documents {
-		if err := store.Add(idx.Documents[i]); err != nil {
+		doc := idx.Documents[i]
+		// Index.ValidateFor already enforces index-level vectorizer metadata.
+		// Keep the legacy Store adapter unpinned so callers with a query vector
+		// can continue using Store.Search without also providing vectorizer
+		// identity; ANN search still validates per-document specs directly.
+		doc.Vectorizer = VectorizerSpec{}
+
+		if err := store.Add(doc); err != nil {
 			return nil, fmt.Errorf("load vector document %q: %w", idx.Documents[i].ID, err)
 		}
 	}
@@ -521,23 +927,32 @@ func (idx *Index) addSource(ctx context.Context, source Source, vectorizer Vecto
 		return ErrMissingID
 	}
 
-	source.Path = filepath.Clean(source.Path)
+	rawPath := filepath.Clean(source.Path)
 
 	if !utf8.ValidString(source.Text) {
-		return fmt.Errorf("vector source %s: %w", source.Path, ErrInvalidUTF8)
+		return fmt.Errorf("vector source %s: %w", rawPath, ErrInvalidUTF8)
 	}
 
-	sourceMetadata := SourceMetadataForText(source.Path, source.Text)
+	sourceMetadata := SourceMetadataForText(rawPath, source.Text)
+	documentPath := sourceMetadata.Path
 
-	chunks, err := ChunkText(source.Path, source.Text, idx.Chunk)
+	if documentPath == "" {
+		return ErrMissingID
+	}
+
+	text := privacy.RedactText(source.Text)
+
+	chunks, err := ChunkText(documentPath, text, idx.Chunk)
 	if err != nil {
-		return fmt.Errorf("chunk vector source %s: %w", source.Path, err)
+		return fmt.Errorf("chunk vector source %s: %w", rawPath, err)
 	}
 
 	idx.Sources = append(idx.Sources, sourceMetadata)
 
 	for _, chunk := range chunks {
-		vec, err := vectorizeWithContext(ctx, vectorizer, chunk.Text)
+		text, metadata := chunkDocumentPayload(documentPath, sourceMetadata, chunk)
+
+		vec, err := vectorizeWithContext(ctx, vectorizer, text)
 		if err != nil {
 			return fmt.Errorf("vectorize chunk %s: %w", chunk.ID, err)
 		}
@@ -559,23 +974,88 @@ func (idx *Index) addSource(ctx context.Context, source Source, vectorizer Vecto
 		}
 
 		idx.Documents = append(idx.Documents, Document{
-			ID:     chunk.ID,
-			Text:   chunk.Text,
-			Vector: cloneVector(vec),
-			Metadata: map[string]string{
-				"path":             source.Path,
-				"chunk_index":      strconv.Itoa(chunk.Index),
-				"chunk_start_rune": strconv.Itoa(chunk.StartRune),
-				"chunk_end_rune":   strconv.Itoa(chunk.EndRune),
-				"source_digest":    sourceMetadata.Digest,
-			},
+			ID:         chunk.ID,
+			Text:       text,
+			SourceHash: sourceHash(text),
+			Vector:     cloneVector(vec),
+			Vectorizer: documentVectorizerSpec(vectorizer, len(vec)),
+			Metadata:   metadata,
+			Provenance: ensureProvenance(map[string]string{
+				"source_type": "file",
+				"path":        documentPath,
+			}, "file"),
 		})
 	}
 
 	return nil
 }
 
+func chunkDocumentPayload(documentPath string, sourceMetadata SourceMetadata, chunk Chunk) (text string, metadata map[string]string) {
+	metadata = map[string]string{
+		"path":             documentPath,
+		"chunk_index":      strconv.Itoa(chunk.Index),
+		"chunk_start_rune": strconv.Itoa(chunk.StartRune),
+		"chunk_end_rune":   strconv.Itoa(chunk.EndRune),
+		"source_digest":    sourceMetadata.Digest,
+	}
+	policyContext := retrieval.PolicyContext{
+		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: documentPath, URI: documentPath},
+		Metadata:   metadata,
+		DocumentID: chunk.ID,
+		Path:       documentPath,
+	}
+	text, textSafety := retrieval.Sanitize(chunk.Text, policyContext)
+	metadata, metadataSafety := retrieval.SanitizeMetadata(metadata, policyContext)
+	// Keep the persisted path aligned with SourceMetadata so incremental
+	// refresh can match retained chunks after safety redaction.
+	metadata["path"] = documentPath
+
+	safety := retrieval.MergeSafety(textSafety, metadataSafety)
+	if strings.Contains(text, "[REDACTED]") {
+		safety = retrieval.MergeSafety(safety, retrieval.Safety{
+			InjectAllowed: false,
+			Redacted:      true,
+			Sensitive:     true,
+			Reasons:       []string{"privacy redaction before indexing"},
+		})
+	}
+
+	if !retrieval.IsDefaultSafety(safety) {
+		metadata = retrieval.MergeSafetyMetadata(metadata, safety)
+	}
+
+	return text, metadata
+}
+
+type vectorizerDimensionSpecProvider interface {
+	Spec(int) VectorizerSpec
+}
+
+type vectorizerSpecProvider interface {
+	Spec() VectorizerSpec
+}
+
+func documentVectorizerSpec(vectorizer Vectorizer, dimensions int) VectorizerSpec {
+	if provider, ok := vectorizer.(vectorizerDimensionSpecProvider); ok {
+		return provider.Spec(dimensions)
+	}
+
+	if provider, ok := vectorizer.(vectorizerSpecProvider); ok {
+		return provider.Spec()
+	}
+
+	return VectorizerSpec{}
+}
+
 func vectorizeWithContext(ctx context.Context, vectorizer Vectorizer, text string) (Vector, error) {
+	if ctx == nil {
+		return nil, ErrContextRequired
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("vectorize context: %w", err)
+	}
+
 	if contextual, ok := vectorizer.(VectorizerContext); ok {
 		vec, err := contextual.VectorizeContext(ctx, text)
 		if err != nil {

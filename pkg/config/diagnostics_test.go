@@ -217,6 +217,8 @@ hooks:
 	assertDefaultDiagnostic(t, report.Defaults, "context.reference_policy.allow_absolute_paths")
 	assertDefaultDiagnostic(t, report.Defaults, "providers.*.disable_private_adapter")
 	assertDefaultDiagnostic(t, report.Defaults, "skill_learning.enabled")
+	assertDefaultDiagnostic(t, report.Defaults, "vector.workspace_enabled")
+	assertDefaultDiagnostic(t, report.Defaults, "vector.workspace_allow_remote_embeddings")
 
 	assert.NotContains(t, report.Config.Providers["openai"].BaseURL, "secret")
 	assert.Equal(t, RedactedValue, report.Config.Agents["reviewer"].Description)

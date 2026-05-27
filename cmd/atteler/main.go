@@ -307,6 +307,7 @@ type model struct {
 	referenceContext          string
 	referenceManifest         contextref.ReferenceManifest
 	referenceContextEstimator string
+	vectorConfig              appconfig.VectorConfig
 	skillLearningStoreDir     string
 	skillLearningSkillDir     string
 	worktreeInfo              *worktree.Info
@@ -362,6 +363,7 @@ func initialModel(
 	referenceContext string,
 	referenceManifest contextref.ReferenceManifest,
 	referenceContextEstimator string,
+	vectorConfig appconfig.VectorConfig,
 	skillLearningStoreDir string,
 	skillLearningSkillDir string,
 	skillLearningEnabled bool,
@@ -396,6 +398,7 @@ func initialModel(
 		referenceContext:            referenceContext,
 		referenceManifest:           referenceManifest,
 		referenceContextEstimator:   referenceContextEstimator,
+		vectorConfig:                vectorConfig,
 		skillLearningStoreDir:       skillLearningStoreDir,
 		skillLearningSkillDir:       skillLearningSkillDir,
 		skillLearningEnabled:        skillLearningEnabled,

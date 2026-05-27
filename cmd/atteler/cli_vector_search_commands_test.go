@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/vector"
 )
 
@@ -276,12 +277,17 @@ func TestRunVectorSearchRejectsQueryDimensionMismatchWithRebuildHint(t *testing.
 			vector.SourceMetadataForText(note, noteText),
 		},
 		Documents: []vector.Document{{
-			ID:     filepath.Clean(note) + "#chunk=0000",
-			Text:   noteText,
-			Vector: vector.Vector{1, 0},
+			ID:         filepath.Clean(note) + "#chunk=0000",
+			Text:       noteText,
+			SourceHash: privacy.SourceHash(noteText),
+			Vector:     vector.Vector{1, 0},
 			Metadata: map[string]string{
 				"path":          filepath.Clean(note),
 				"source_digest": vector.DigestText(noteText),
+			},
+			Provenance: map[string]string{
+				"source_type":    "file",
+				"privacy_policy": privacy.RedactionPolicyVersion,
 			},
 		}},
 	}
@@ -326,12 +332,17 @@ func TestRunVectorSearchRebuildsDimensionMismatchWhenSourcesProvided(t *testing.
 			vector.SourceMetadataForText(note, noteText),
 		},
 		Documents: []vector.Document{{
-			ID:     filepath.Clean(note) + "#chunk=0000",
-			Text:   noteText,
-			Vector: vector.Vector{1, 0},
+			ID:         filepath.Clean(note) + "#chunk=0000",
+			Text:       noteText,
+			SourceHash: privacy.SourceHash(noteText),
+			Vector:     vector.Vector{1, 0},
 			Metadata: map[string]string{
 				"path":          filepath.Clean(note),
 				"source_digest": vector.DigestText(noteText),
+			},
+			Provenance: map[string]string{
+				"source_type":    "file",
+				"privacy_policy": privacy.RedactionPolicyVersion,
 			},
 		}},
 	}
@@ -448,6 +459,8 @@ func TestLexicalFallbackIndexPathDoesNotClobberEmbeddingIndex(t *testing.T) {
 
 	assert.Equal(t, ".atteler/vector-index.lexical.json", lexicalFallbackIndexPath(".atteler/vector-index.json"))
 	assert.Equal(t, ".atteler/vector-index.lexical", lexicalFallbackIndexPath(".atteler/vector-index"))
+	assert.Equal(t, ".atteler/vector-index.lexical.json", lexicalFallbackIndexPath(".atteler/vector-index.lexical.json"))
+	assert.Equal(t, ".atteler/vector-index.lexical", lexicalFallbackIndexPath(".atteler/vector-index.lexical"))
 }
 
 //nolint:paralleltest // Captures process stdout to verify user-facing fallback output.
@@ -502,12 +515,17 @@ func TestRunVectorSearchEmbeddingFailureFallsBackUsingReusableIndexSources(t *te
 			vector.SourceMetadataForText(note, noteText),
 		},
 		Documents: []vector.Document{{
-			ID:     filepath.Clean(note) + "#chunk=0000",
-			Text:   noteText,
-			Vector: vector.Vector{1, 0},
+			ID:         filepath.Clean(note) + "#chunk=0000",
+			Text:       noteText,
+			SourceHash: privacy.SourceHash(noteText),
+			Vector:     vector.Vector{1, 0},
 			Metadata: map[string]string{
 				"path":          filepath.Clean(note),
 				"source_digest": vector.DigestText(noteText),
+			},
+			Provenance: map[string]string{
+				"source_type":    "file",
+				"privacy_policy": privacy.RedactionPolicyVersion,
 			},
 		}},
 	}

@@ -470,7 +470,7 @@ func commandContractsByName() map[string]commandContract {
 		"retrieval-search": commandContractFor(
 			"search selected retrieval sources with the shared result contract",
 			[]string{"--retrieval-search", "--retrieval-source", "--retrieval-filter", "--retrieval-limit", "--retrieval-explain", "--retrieval-include-unsafe", "--memory-store", "--memory-index", "--vector-index", "--agent-memory-store", "--agent-memory-agent", "--agent"},
-			[]string{commandEffectConfigRead, commandEffectFilesystemRead, commandEffectGitRead, commandEffectSessionRead, commandEffectUserOutput},
+			[]string{commandEffectConfigRead, commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectGitRead, commandEffectSessionRead, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("retrievalCommandInput"),
 			withExamples(`atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain`),

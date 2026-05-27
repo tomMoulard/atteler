@@ -93,6 +93,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.referenceContext,
 		state.referenceManifest,
 		state.referenceContextEstimator,
+		state.vectorConfig,
 		state.skillLearningStoreDir,
 		state.skillLearningSkillDir,
 		state.skillLearningEnabled,

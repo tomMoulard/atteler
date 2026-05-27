@@ -1,9 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
@@ -22,6 +24,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	maxWallTime := "1m"
 	checkpointInterval := 2
 	enabled := true
+	workspaceEnabled := true
 
 	cfg := Config{
 		Generation: GenerationConfig{
@@ -72,6 +75,13 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 			},
 		},
 		SkillLearning: SkillLearningConfig{Enabled: &enabled},
+		Vector: VectorConfig{
+			WorkspaceEnabled: &workspaceEnabled,
+			Model:            "tenant-embed?api_" + "key=secret-token/v1",
+			BaseURL:          "https://user:" + "pass" + "@example.com/embed",
+			WorkspaceInclude: []string{"*.go", "docs/api_key=secret-token/*.md"},
+			WorkspaceExclude: []string{"vendor/", "tmp/auth_token=secret-token/"},
+		},
 	}
 
 	redacted := RedactedConfig(cfg)
@@ -105,6 +115,9 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	redacted.Context.ReferencePolicy.DeniedGlobs[0] = "**/*.key"
 	redacted.Context.ReferencePolicy.ContentTypes[0] = "application/json"
 	*redacted.SkillLearning.Enabled = false
+	*redacted.Vector.WorkspaceEnabled = false
+	redacted.Vector.WorkspaceInclude[0] = "*.md"
+	redacted.Vector.WorkspaceExclude[0] = "node_modules/"
 
 	assert.InDelta(t, 0.2, *cfg.Generation.Temperature, 0)
 	assert.EqualValues(t, 4096, *cfg.AgentLoop.MaxOutputBytes)
@@ -136,6 +149,52 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.Equal(t, []string{"**/*.pem"}, cfg.Context.ReferencePolicy.DeniedGlobs)
 	assert.Equal(t, []string{"text/*"}, cfg.Context.ReferencePolicy.ContentTypes)
 	assert.True(t, *cfg.SkillLearning.Enabled)
+	assert.True(t, *cfg.Vector.WorkspaceEnabled)
+	assert.Equal(t, []string{"*.go", "docs/api_key=secret-token/*.md"}, cfg.Vector.WorkspaceInclude)
+	assert.Equal(t, []string{"vendor/", "tmp/auth_token=secret-token/"}, cfg.Vector.WorkspaceExclude)
+	assert.NotContains(t, redacted.Vector.BaseURL, "pass")
+	assert.NotContains(t, redacted.Vector.Model, "secret-token")
+	assert.NotContains(t, redacted.Vector.WorkspaceInclude[1], "secret-token")
+	assert.NotContains(t, redacted.Vector.WorkspaceExclude[1], "secret-token")
 	assert.Equal(t, RedactedValue, redacted.Agents["reviewer"].SystemPrompt)
 	assert.Empty(t, redacted.Agents["reviewer"].FeedbackGuidance)
+}
+
+func TestRedactedOriginMap_RedactsWorkspaceVectorPatternLists(t *testing.T) {
+	t.Parallel()
+
+	origins := OriginMap{
+		"vector.workspace_include": {Chain: []OriginEvent{{
+			Kind:      OriginProjectFile,
+			Operation: OriginSet,
+			Source:    "atteler.yaml",
+			Value:     `["*.go","docs/api_key=secret-token/*.md"]`,
+		}}},
+		"vector.workspace_exclude": {Chain: []OriginEvent{{
+			Kind:      OriginProjectFile,
+			Operation: OriginSet,
+			Source:    "atteler.yaml",
+			Value:     `["vendor/","tmp/auth_token=secret-token/"]`,
+		}}},
+	}
+
+	redacted := RedactedOriginMap(origins)
+
+	includeValue := redacted["vector.workspace_include"].Chain[0].Value
+	excludeValue := redacted["vector.workspace_exclude"].Chain[0].Value
+
+	assert.NotContains(t, includeValue, "secret-token")
+	assert.NotContains(t, excludeValue, "secret-token")
+
+	var includePatterns []string
+	require.NoError(t, json.Unmarshal([]byte(includeValue), &includePatterns))
+	require.Len(t, includePatterns, 2)
+	assert.Equal(t, "*.go", includePatterns[0])
+	assert.NotContains(t, includePatterns[1], "secret-token")
+
+	var excludePatterns []string
+	require.NoError(t, json.Unmarshal([]byte(excludeValue), &excludePatterns))
+	require.Len(t, excludePatterns, 2)
+	assert.Equal(t, "vendor/", excludePatterns[0])
+	assert.NotContains(t, excludePatterns[1], "secret-token")
 }

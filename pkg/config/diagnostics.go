@@ -863,15 +863,23 @@ func knownSkillLearningFields() map[string]bool {
 
 func knownVectorFields() map[string]bool {
 	return map[string]bool{
-		"vectorizer":          true,
-		"provider":            true,
-		"model":               true,
-		"base_url":            true,
-		"fallback_policy":     true,
-		"index_path":          true,
-		"timeout_seconds":     true,
-		"chunk_max_runes":     true,
-		"chunk_overlap_runes": true,
+		"workspace_enabled":                 true,
+		"workspace_allow_remote_embeddings": true,
+		"vectorizer":                        true,
+		"provider":                          true,
+		"model":                             true,
+		"base_url":                          true,
+		"fallback_policy":                   true,
+		"index_path":                        true,
+		"workspace_index_path":              true,
+		"workspace_include":                 true,
+		"workspace_exclude":                 true,
+		"timeout_seconds":                   true,
+		"chunk_max_runes":                   true,
+		"chunk_overlap_runes":               true,
+		"workspace_limit":                   true,
+		"workspace_max_file_bytes":          true,
+		"workspace_max_files":               true,
 	}
 }
 

@@ -680,7 +680,7 @@ func runRetrievalCommand(ctx context.Context, state appState, input retrievalCom
 		limit = 5
 	}
 
-	sources, err := selectedRetrievalSources(input)
+	sources, err := selectedRetrievalSources(input, workspaceVectorEnabled(state.vectorConfig))
 	if err != nil {
 		return err
 	}
@@ -744,7 +744,7 @@ func retrievalFilters(rawFilters []string) (map[string]string, error) {
 	return filters, nil
 }
 
-func selectedRetrievalSources(input retrievalCommandInput) ([]retrieval.SourceType, error) {
+func selectedRetrievalSources(input retrievalCommandInput, includeWorkspaceVector bool) ([]retrieval.SourceType, error) {
 	if len(input.Sources) == 0 {
 		return []retrieval.SourceType{retrieval.SourceMemory, retrieval.SourceFile, retrieval.SourceSession}, nil
 	}
@@ -759,7 +759,7 @@ func selectedRetrievalSources(input retrievalCommandInput) ([]retrieval.SourceTy
 		}
 
 		if all {
-			return allRetrievalSources(input), nil
+			return allRetrievalSources(input, includeWorkspaceVector), nil
 		}
 
 		if _, ok := seen[source]; ok {
@@ -794,14 +794,14 @@ func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {
 	}
 }
 
-func allRetrievalSources(input retrievalCommandInput) []retrieval.SourceType {
+func allRetrievalSources(input retrievalCommandInput, includeWorkspaceVector bool) []retrieval.SourceType {
 	sources := []retrieval.SourceType{
 		retrieval.SourceMemory,
 		retrieval.SourceFile,
 		retrieval.SourceSession,
 		retrieval.SourceGitHistory,
 	}
-	if len(input.VectorIndexFiles) > 0 {
+	if len(input.VectorIndexFiles) > 0 || includeWorkspaceVector {
 		sources = append(sources, retrieval.SourceVector)
 	}
 
@@ -837,6 +837,10 @@ func retrievalSearchers(
 
 		searcher, err := retrievalSearcher(ctx, state, input, source)
 		if err != nil {
+			if shouldSkipEmptyWorkspaceVectorSource(input, sources, source, err) {
+				continue
+			}
+
 			return nil, err
 		}
 
@@ -846,6 +850,30 @@ func retrievalSearchers(
 	}
 
 	return searchers, nil
+}
+
+func shouldSkipEmptyWorkspaceVectorSource(
+	input retrievalCommandInput,
+	sources []retrieval.SourceType,
+	source retrieval.SourceType,
+	err error,
+) bool {
+	return source == retrieval.SourceVector &&
+		len(sources) > 1 &&
+		len(input.VectorIndexFiles) == 0 &&
+		retrievalSourceAllRequested(input.Sources) &&
+		errors.Is(err, vector.ErrNoSources)
+}
+
+func retrievalSourceAllRequested(sources []string) bool {
+	for _, raw := range sources {
+		_, all, err := parseRetrievalSource(raw)
+		if err == nil && all {
+			return true
+		}
+	}
+
+	return false
 }
 
 func retrievalSourceSet(sources []retrieval.SourceType) map[retrieval.SourceType]bool {
@@ -874,7 +902,7 @@ func retrievalSearcher(ctx context.Context, state appState, input retrievalComma
 
 		return githistory.NewIndex(commits), nil
 	case retrieval.SourceVector:
-		return buildVectorRetrievalSearcher(input.VectorIndexFiles)
+		return buildVectorRetrievalSearcher(ctx, state, input.VectorIndexFiles)
 	case retrieval.SourceAgentMemory:
 		return buildAgentMemoryRetrievalSearcher(state.cwd, state.selectedAgent, input)
 	default:
@@ -903,9 +931,9 @@ func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput
 	return mem, nil
 }
 
-func buildVectorRetrievalSearcher(paths []string) (retrieval.Searcher, error) {
+func buildVectorRetrievalSearcher(ctx context.Context, state appState, paths []string) (retrieval.Searcher, error) {
 	if len(paths) == 0 {
-		return nil, errors.New("retrieval: --vector-index is required for --retrieval-source vector")
+		return buildWorkspaceVectorRetrievalSearcher(ctx, state)
 	}
 
 	vectorizer, err := vector.NewTextVectorizer(0)
@@ -928,6 +956,71 @@ func buildVectorRetrievalSearcher(paths []string) (retrieval.Searcher, error) {
 		Store:      store,
 		Vectorizer: vectorizer,
 		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: "local-vector-index"},
+	}, nil
+}
+
+func buildWorkspaceVectorRetrievalSearcher(ctx context.Context, state appState) (retrieval.Searcher, error) {
+	if !workspaceVectorEnabled(state.vectorConfig) {
+		return nil, errors.New("retrieval: --vector-index is required for --retrieval-source vector unless vector.workspace_enabled is true")
+	}
+
+	settings, opts, err := workspaceVectorSettings(firstNonEmpty(state.contextOptions.Root, state.cwd), state.vectorConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	if settings.Vectorizer == vector.VectorizerKindEmbedding &&
+		!workspaceRemoteEmbeddingAllowed(settings.BaseURL, state.vectorConfig.WorkspaceAllowRemoteEmbeddings) {
+		if settings.FallbackPolicy == vector.VectorizerKindLexical {
+			return buildWorkspaceVectorRetrievalSearcherWithLexicalFallback(ctx, settings, opts)
+		}
+
+		return nil, fmt.Errorf("retrieval: remote embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings", workspaceDisplayEmbeddingEndpoint(settings.BaseURL))
+	}
+
+	searcher, err := buildWorkspaceVectorRetrievalSearcherOnce(ctx, settings, opts)
+	if err == nil ||
+		settings.Vectorizer != vector.VectorizerKindEmbedding ||
+		settings.FallbackPolicy != vector.VectorizerKindLexical ||
+		!vectorSearchEmbeddingFailure(err) {
+		return searcher, err
+	}
+
+	return buildWorkspaceVectorRetrievalSearcherWithLexicalFallback(ctx, settings, opts)
+}
+
+func buildWorkspaceVectorRetrievalSearcherWithLexicalFallback(
+	ctx context.Context,
+	settings vectorSearchSettings,
+	opts vector.WorkspaceOptions,
+) (retrieval.Searcher, error) {
+	settings, opts, err := workspaceLexicalFallbackSettings(settings, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildWorkspaceVectorRetrievalSearcherOnce(ctx, settings, opts)
+}
+
+func buildWorkspaceVectorRetrievalSearcherOnce(
+	ctx context.Context,
+	settings vectorSearchSettings,
+	opts vector.WorkspaceOptions,
+) (retrieval.Searcher, error) {
+	idx, _, err := refreshWorkspaceVectorIndex(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return vector.IndexSearcher{
+		Index:      idx,
+		Vectorizer: opts.Vectorizer,
+		Source: retrieval.Source{
+			Type: retrieval.SourceVector,
+			Name: "workspace",
+			URI:  workspaceVectorSourceURI(opts),
+		},
+		ScorerName: settings.Vectorizer + "-workspace-ann",
 	}, nil
 }
 

@@ -492,12 +492,21 @@ func lexicalFallbackIndexPath(indexPath string) string {
 		return "vector-index.lexical.json"
 	}
 
+	if strings.HasSuffix(indexPath, ".lexical") {
+		return indexPath
+	}
+
 	extension := filepath.Ext(indexPath)
 	if extension == "" {
 		return indexPath + ".lexical"
 	}
 
-	return strings.TrimSuffix(indexPath, extension) + ".lexical" + extension
+	stem := strings.TrimSuffix(indexPath, extension)
+	if strings.HasSuffix(stem, ".lexical") {
+		return indexPath
+	}
+
+	return stem + ".lexical" + extension
 }
 
 func formatVectorSearchHeader(idx *vector.Index, indexPath string, rebuilt bool) string {

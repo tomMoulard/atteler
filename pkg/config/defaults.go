@@ -209,6 +209,41 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Value:   "0",
 			Message: "the skill-learning runtime uses its built-in observation retention limit unless config sets this field",
 		},
+		{
+			Field:   "vector.workspace_enabled",
+			Value:   "false",
+			Message: "workspace vector indexing is disabled unless explicitly enabled; no workspace files are embedded or indexed by default",
+		},
+		{
+			Field:   "vector.workspace_allow_remote_embeddings",
+			Value:   "false",
+			Message: "non-loopback embedding endpoints are blocked for workspace indexing unless explicitly allowed",
+		},
+		{
+			Field:   "vector.vectorizer",
+			Value:   "lexical",
+			Message: "workspace vector context uses the local lexical hash vectorizer unless config selects model-backed embeddings",
+		},
+		{
+			Field:   "vector.workspace_index_path",
+			Value:   ".atteler/workspace-vector-index.json",
+			Message: "enabled workspace vector indexes are stored under the launched workspace by default",
+		},
+		{
+			Field:   "vector.fallback_policy",
+			Value:   "fail",
+			Message: "embedding failures fail closed unless config explicitly selects lexical fallback",
+		},
+		{
+			Field:   "vector.workspace_max_file_bytes",
+			Value:   "262144",
+			Message: "workspace indexing skips files larger than the built-in per-file safety cap unless config sets a different positive limit",
+		},
+		{
+			Field:   "vector.workspace_max_files",
+			Value:   "5000",
+			Message: "workspace indexing stops after the built-in file-count safety cap unless config sets a different positive limit",
+		},
 	}
 
 	return append([]DefaultDiagnostic(nil), defaults...)

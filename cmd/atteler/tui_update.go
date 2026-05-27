@@ -738,6 +738,21 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		referenceContext.Estimator = generatedSkillRefCtx.Estimator
 	}
 
+	workspaceRefCtx := workspaceVectorReferenceContextWithWarning(
+		m.ctx,
+		firstNonEmpty(m.contextOptions.Root, m.cwd),
+		m.vectorConfig,
+		input,
+		false,
+		contextOptions,
+	)
+	referenceContext.Content = appendReferenceContext(referenceContext.Content, workspaceRefCtx.Content)
+
+	referenceContext.Manifest = mergeReferenceManifests(referenceContext.Manifest, workspaceRefCtx.Manifest)
+	if referenceContext.Estimator == "" {
+		referenceContext.Estimator = workspaceRefCtx.Estimator
+	}
+
 	preflightMessages := requestMessagesForBudget(requestModel, msgs, activeAgent, generation, referenceContext.Content, m.executionMode != executionModePlan)
 	if err := validateRequestBudgetWithFallbacks(m.registry, requestModel, fallbackModels, preflightMessages, m.maxInputTokens); err != nil {
 		manifestEvent := requestContextManifestEvent(newRequestContextManifestForModelsWithInlineEvents(
