@@ -1891,6 +1891,7 @@ func TestInitialModelHonorsPersistedIdleSuggestionBudgetUsage(t *testing.T) {
 		"",
 		contextref.ReferenceManifest{},
 		"",
+		config.VectorConfig{},
 		"",
 		"",
 		false,

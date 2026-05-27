@@ -140,6 +140,28 @@ func TestSanitizeEventForHook_CommandExecuteKeepsSafeMetadataOnly(t *testing.T) 
 	assert.True(t, got.Redacted)
 }
 
+func TestSanitizeEventForHook_ContextManifestKeepsBackgroundSuggestionAuditMetadata(t *testing.T) {
+	t.Parallel()
+
+	got := sanitizeEventForHook(Event{
+		Type: ContextManifest,
+		Metadata: map[string]string{
+			"context_manifest":      `{"schema_version":1}`,
+			"request_kind":          "background_suggestion",
+			"background_suggestion": "true",
+			"context_summary":       "agent=1,file/task/issue=omitted-private",
+			"draft":                 "send api_key=sk-backgroundsecret1234567890",
+		},
+	}, PayloadMetadata)
+
+	assert.Equal(t, `{"schema_version":1}`, got.Metadata["context_manifest"])
+	assert.Equal(t, "background_suggestion", got.Metadata["request_kind"])
+	assert.Equal(t, "true", got.Metadata["background_suggestion"])
+	assert.Equal(t, "agent=1,file/task/issue=omitted-private", got.Metadata["context_summary"])
+	assert.NotContains(t, got.Metadata, "draft")
+	assert.True(t, got.Redacted)
+}
+
 func TestSanitizeEventForHook_RedactsPathLookingSafeMetadataValues(t *testing.T) {
 	t.Parallel()
 
