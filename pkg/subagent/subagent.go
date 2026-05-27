@@ -844,8 +844,17 @@ func statusForAttempt(attemptErr, parentErr, err error, timeoutExceeded bool) st
 }
 
 func errorForStatus(attemptCtx, parentCtx context.Context, status string, err error) error {
-	if status == StatusTimedOut && err == nil {
-		return context.DeadlineExceeded
+	if status == StatusTimedOut {
+		cause := contextCauseOrErr(attemptCtx, context.DeadlineExceeded)
+		if err == nil {
+			return cause
+		}
+
+		if errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+
+		return errors.Join(err, cause)
 	}
 
 	if status == StatusCanceled {

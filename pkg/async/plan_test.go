@@ -1118,6 +1118,36 @@ func TestPlan_RunWithOptions_TimeoutAndBudgetExhaustion(t *testing.T) {
 		assert.Contains(t, results[0].Error, context.DeadlineExceeded.Error())
 	})
 
+	t.Run("timeout records deadline when runner returns custom error after deadline", func(t *testing.T) {
+		t.Parallel()
+
+		plan, err := NewPlan([]Task{{ID: slowID, Agent: "executor", Prompt: slowID}})
+		require.NoError(t, err)
+
+		ledgerPath := filepath.Join(t.TempDir(), "async-ledger.json")
+		results, err := plan.RunWithOptions(t.Context(), func(context.Context, Task) (string, error) {
+			time.Sleep(20 * time.Millisecond)
+			return "", errors.New("late cleanup failed")
+		}, RunOptions{LedgerPath: ledgerPath, Timeout: 5 * time.Millisecond})
+
+		require.Error(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, StatusTimedOut, results[0].Status)
+		assert.Contains(t, results[0].Error, "late cleanup failed")
+		assert.Contains(t, results[0].Error, context.DeadlineExceeded.Error())
+
+		var ledger Ledger
+		data, readErr := os.ReadFile(ledgerPath)
+		require.NoError(t, readErr)
+		require.NoError(t, json.Unmarshal(data, &ledger))
+		require.Len(t, ledger.Attempts, 1)
+		assert.Contains(t, ledger.Attempts[0].Error, "late cleanup failed")
+		assert.Contains(t, ledger.Attempts[0].Error, context.DeadlineExceeded.Error())
+		require.Len(t, ledger.StopReceipts, 1)
+		assert.Contains(t, ledger.StopReceipts[0].Reason, "late cleanup failed")
+		assert.Contains(t, ledger.StopReceipts[0].Reason, context.DeadlineExceeded.Error())
+	})
+
 	t.Run("budget", func(t *testing.T) {
 		t.Parallel()
 
