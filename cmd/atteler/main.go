@@ -346,6 +346,7 @@ type model struct {
 	skillLearningStoreDir     string
 	skillLearningSkillDir     string
 	worktreeInfo              *worktree.Info
+	promptContextCache        *promptContextCache
 	tokenUsage                tokenUsage
 	runningTaskStarted        time.Time
 	idleSuggestionInput       string
@@ -358,6 +359,7 @@ type model struct {
 	idleSuggestionBudget      idleSuggestionBudget
 	idleSuggestionTimes       []time.Time
 	idleSuggestionCostUSD     float64
+	promptContextStatus       string
 	pickerCursor              int
 	idleSuggestionRequests    int
 	idleSuggestionTokens      int
@@ -427,6 +429,7 @@ func initialModel(
 	promptSuggestionConsent promptSuggestionConsent,
 	idleSuggestionBudget idleSuggestionBudget,
 	wtInfo *worktree.Info,
+	promptContextCache *promptContextCache,
 ) model {
 	ta := newPromptTextarea()
 	selectedProvider, _ := reg.ProviderForModel(selectedModel)
@@ -474,6 +477,7 @@ func initialModel(
 		idleSuggestionRequests:      idleSuggestionRequests,
 		idleSuggestionTokens:        idleSuggestionTokens,
 		worktreeInfo:                wtInfo,
+		promptContextCache:          promptContextCache,
 		pinnedMessages:              make(map[int]bool),
 		executionMode:               executionModeExecute,
 	}

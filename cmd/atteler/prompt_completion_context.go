@@ -4,51 +4,26 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/agent"
-	"github.com/tommoulard/atteler/pkg/codeintel"
 	"github.com/tommoulard/atteler/pkg/promptcomplete"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/shell"
-	"github.com/tommoulard/atteler/pkg/tasklist"
 )
 
-const maxPromptContextCandidates = 300
+const (
+	maxPromptContextCandidates = 300
+	maxPromptGitOutputBytes    = 64 * 1024
+)
 
 var issueRefPattern = regexp.MustCompile(`(?i)(?:\bGH-\d+\b|#\d+\b)`)
 
 func promptCompletionContext(ctx context.Context, state appState, input string, includeRepo bool) promptcomplete.Context {
-	completionContext := promptcomplete.Context{
-		Input:         input,
-		Cursor:        len(input),
-		Agents:        promptAgentCandidates(state.agentRegistry),
-		Tools:         promptToolCandidates(),
-		Templates:     promptTemplateCandidates(),
-		SlashCommands: promptSlashCommandCandidates(),
-		RecentFiles:   promptSessionFileCandidates(state.sessionState),
-		Issues:        promptIssueCandidatesFromSession(state.sessionState),
-		Permissions:   promptPermissionCandidates(state.agentRegistry, state.selectedAgent),
-	}
-
-	tasks := promptTaskCandidates(ctx, state.sessionStore, state.cwd)
-	completionContext.Tasks = tasks
-	completionContext.Issues = append(completionContext.Issues, promptIssueCandidatesFromTasks(tasks)...)
-
-	if includeRepo {
-		completionContext.Issues = append(completionContext.Issues, promptGitIssueCandidates(ctx, state.cwd)...)
-		completionContext.ProjectSymbols = promptProjectSymbolCandidates(ctx, state.cwd, input)
-		completionContext.RecentFiles = append(completionContext.RecentFiles, promptGitRecentFileCandidates(ctx, state.cwd)...)
-	}
-
-	completionContext.Issues = dedupePromptCandidates(completionContext.Issues)
-	completionContext.RecentFiles = dedupePromptCandidates(completionContext.RecentFiles)
-
-	return completionContext
+	return promptCompletionContextWithFreshness(ctx, state, input, includeRepo).Context
 }
 
 func dedupePromptCandidates(candidates []promptcomplete.Candidate) []promptcomplete.Candidate {
@@ -101,43 +76,6 @@ func promptSlashCommandCandidates() []promptcomplete.Candidate {
 	return out
 }
 
-func promptProjectSymbolCandidates(ctx context.Context, root, input string) []promptcomplete.Candidate {
-	root = strings.TrimSpace(root)
-	if root == "" {
-		return nil
-	}
-
-	index, err := codeintel.IndexDirContext(ctx, root)
-	if err != nil {
-		return nil
-	}
-
-	prefix := strings.ToLower(promptCompletionPrefix(input))
-	limit := min(len(index.Symbols), maxPromptContextCandidates)
-
-	out := make([]promptcomplete.Candidate, 0, limit)
-	for _, symbol := range index.Symbols {
-		if len(out) >= limit {
-			break
-		}
-
-		if prefix != "" && !symbolNameMatchesPrefix(symbol.Name, prefix) {
-			continue
-		}
-
-		rel := relPath(root, symbol.File)
-		out = append(out, promptcomplete.Candidate{
-			Text:        symbol.Name,
-			Kind:        "project-symbol",
-			Source:      "project symbol index",
-			Description: fmt.Sprintf("%s in %s:%d", symbol.Kind, filepath.ToSlash(rel), symbol.Line),
-			Tokens:      []string{symbol.Kind, rel, filepath.Base(rel)},
-		})
-	}
-
-	return out
-}
-
 func promptCompletionPrefix(input string) string {
 	cursor := len(input)
 	start := cursor
@@ -162,77 +100,49 @@ func symbolNameMatchesPrefix(name, prefix string) bool {
 	return strings.HasPrefix(name, prefix) || (len(prefix) >= 3 && strings.Contains(name, prefix))
 }
 
-func promptGitRecentFileCandidates(ctx context.Context, root string) []promptcomplete.Candidate {
-	root = strings.TrimSpace(root)
-	if root == "" || ctx == nil {
-		return nil
-	}
-
-	output, err := promptGitOutput(ctx, root, "status", "--short")
+func promptProjectSymbolCandidates(ctx context.Context, root, input string) []promptcomplete.Candidate {
+	candidates, err := promptProjectSymbolCandidatesWithError(
+		ctx,
+		root,
+		input,
+		maxPromptContextCandidates,
+		defaultPromptContextMaxIndexFiles,
+	)
 	if err != nil {
 		return nil
 	}
 
-	seen := make(map[string]struct{})
-	files := make([]string, 0)
+	return candidates
+}
 
-	for line := range strings.SplitSeq(output, "\n") {
-		file := parseGitStatusPath(line)
-		if file == "" {
-			continue
-		}
-
-		if _, ok := seen[file]; ok {
-			continue
-		}
-
-		seen[file] = struct{}{}
-		files = append(files, file)
+func promptGitRecentFileCandidates(ctx context.Context, root string) []promptcomplete.Candidate {
+	candidates, err := promptGitRecentFileCandidatesWithError(ctx, root, maxPromptContextCandidates)
+	if err != nil {
+		return nil
 	}
 
-	sort.Strings(files)
-
-	out := make([]promptcomplete.Candidate, 0, min(len(files), maxPromptContextCandidates))
-	for _, file := range files {
-		if len(out) >= maxPromptContextCandidates {
-			break
-		}
-
-		out = append(out, promptcomplete.Candidate{
-			Text:        filepath.ToSlash(file),
-			Kind:        "recent-file",
-			Source:      "git status",
-			Description: "recently touched file",
-			Tokens:      []string{"git", "status", filepath.Base(file)},
-		})
-	}
-
-	return out
+	return candidates
 }
 
 func promptGitIssueCandidates(ctx context.Context, root string) []promptcomplete.Candidate {
-	root = strings.TrimSpace(root)
-	if root == "" || ctx == nil {
-		return nil
-	}
-
-	output, err := promptGitOutput(ctx, root, "branch", "--show-current")
+	candidates, err := promptGitIssueCandidatesWithError(ctx, root, maxPromptContextCandidates)
 	if err != nil {
 		return nil
 	}
 
-	return issueCandidatesFromText("git branch", output)
+	return candidates
 }
 
 func promptGitOutput(ctx context.Context, root string, args ...string) (string, error) {
-	var stdout, stderr bytes.Buffer
+	stdout := newPromptLimitedOutputBuffer(maxPromptGitOutputBytes)
+	stderr := newPromptLimitedOutputBuffer(maxPromptGitOutputBytes)
 
 	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
 		Program: "git",
 		Args:    args,
 		Dir:     root,
-		Stdout:  &stdout,
-		Stderr:  &stderr,
+		Stdout:  stdout,
+		Stderr:  stderr,
 		Mode:    shell.ModeCaptured,
 		Audit:   shell.AuditContext{Caller: "atteler.prompt_completion.git"},
 	})
@@ -241,7 +151,22 @@ func promptGitOutput(ctx context.Context, root string, args ...string) (string, 
 	}
 
 	runErr := cmd.Run()
-	if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Stderr: stderr.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+
+	stdoutText := stdout.String()
+	stderrText := stderr.String()
+	outputNote := ""
+
+	if stdout.Truncated() || stderr.Truncated() {
+		outputNote = fmt.Sprintf("prompt git output limited to %d bytes per stream", maxPromptGitOutputBytes)
+	}
+
+	if finishErr := invocation.Finish(shell.FinishOptions{
+		Stdout:        stdoutText,
+		Stderr:        stderrText,
+		Error:         runErr,
+		OutputCapture: shell.OutputCaptured,
+		OutputNote:    outputNote,
+	}); finishErr != nil {
 		return "", fmt.Errorf("prompt git: audit: %w", finishErr)
 	}
 
@@ -249,7 +174,66 @@ func promptGitOutput(ctx context.Context, root string, args ...string) (string, 
 		return "", fmt.Errorf("prompt git: run: %w", runErr)
 	}
 
-	return stdout.String(), nil
+	if stdout.Truncated() || stderr.Truncated() {
+		return stdoutText, promptContextPartialError{
+			reason:          fmt.Sprintf("git output exceeded %d bytes per stream", maxPromptGitOutputBytes),
+			outputTruncated: stdout.Truncated(),
+		}
+	}
+
+	return stdoutText, nil
+}
+
+type promptLimitedOutputBuffer struct {
+	buffer    bytes.Buffer
+	maxBytes  int
+	truncated bool
+}
+
+func newPromptLimitedOutputBuffer(maxBytes int) *promptLimitedOutputBuffer {
+	return &promptLimitedOutputBuffer{maxBytes: maxBytes}
+}
+
+func (b *promptLimitedOutputBuffer) Write(p []byte) (int, error) {
+	if b == nil {
+		return len(p), nil
+	}
+
+	if b.maxBytes <= 0 {
+		_, _ = b.buffer.Write(p)
+
+		return len(p), nil
+	}
+
+	remaining := b.maxBytes - b.buffer.Len()
+	if remaining <= 0 {
+		b.truncated = true
+
+		return len(p), nil
+	}
+
+	if len(p) > remaining {
+		_, _ = b.buffer.Write(p[:remaining])
+		b.truncated = true
+
+		return len(p), nil
+	}
+
+	_, _ = b.buffer.Write(p)
+
+	return len(p), nil
+}
+
+func (b *promptLimitedOutputBuffer) String() string {
+	if b == nil {
+		return ""
+	}
+
+	return b.buffer.String()
+}
+
+func (b *promptLimitedOutputBuffer) Truncated() bool {
+	return b != nil && b.truncated
 }
 
 func parseGitStatusPath(line string) string {
@@ -270,14 +254,25 @@ func parseGitStatusPath(line string) string {
 	return path
 }
 
-func promptSessionFileCandidates(sessionState session.Session) []promptcomplete.Candidate {
+func promptSessionFileCandidates(sessionState session.Session, limits ...int) []promptcomplete.Candidate {
 	if len(sessionState.Artifacts) == 0 {
 		return nil
 	}
 
-	out := make([]promptcomplete.Candidate, 0, len(sessionState.Artifacts))
-	for i := range sessionState.Artifacts {
-		artifact := &sessionState.Artifacts[i]
+	limit := promptContextCandidateLimit(limits...)
+	if limit <= 0 {
+		limit = maxPromptContextCandidates
+	}
+
+	artifacts := tailPromptSessionArtifacts(sessionState.Artifacts, limit)
+
+	out := make([]promptcomplete.Candidate, 0, min(len(artifacts), limit))
+	for i := range artifacts {
+		if len(out) >= limit {
+			break
+		}
+
+		artifact := &artifacts[i]
 
 		path := strings.TrimSpace(artifact.Path)
 		if path == "" {
@@ -309,58 +304,28 @@ func artifactDescription(artifact *session.Artifact) string {
 	return strings.Join(parts, "; ")
 }
 
-func promptTaskCandidates(ctx context.Context, store *session.Store, root string) []promptcomplete.Candidate {
-	if ctx == nil {
-		return nil
+func promptIssueCandidatesFromSession(sessionState session.Session, limits ...int) []promptcomplete.Candidate {
+	limit := promptContextCandidateLimit(limits...)
+	if limit <= 0 {
+		limit = maxPromptContextCandidates
 	}
 
-	taskList := taskListPath(store, "")
-	if _, err := os.Stat(taskList); err != nil {
-		return nil
+	texts := []string{sessionState.ID, promptContextStringSample(sessionState.Title)}
+	for _, tag := range tailPromptSessionStrings(sessionState.Tags, limit) {
+		texts = append(texts, promptContextStringSample(tag))
 	}
 
-	taskStore := tasklist.NewStore(taskList)
-
-	tasks, err := taskStore.List(ctx)
-	if err != nil {
-		return nil
+	for _, message := range tailPromptSessionMessages(sessionState.Messages, limit) {
+		texts = append(texts, promptContextStringSample(message.Content))
 	}
 
-	out := make([]promptcomplete.Candidate, 0, len(tasks))
-	for i := range tasks {
-		task := &tasks[i]
-
-		description := string(task.Status)
-		if task.Title != "" {
-			description += ": " + task.Title
-		}
-
-		out = append(out, promptcomplete.Candidate{
-			Text:        task.ID,
-			Kind:        "task",
-			Source:      "task list",
-			Description: description,
-			Tokens:      []string{string(task.Status), task.Agent, root},
-		})
+	artifacts := tailPromptSessionArtifacts(sessionState.Artifacts, limit)
+	for i := range artifacts {
+		artifact := &artifacts[i]
+		texts = append(texts, artifact.Path, artifact.Kind, promptContextStringSample(artifact.Summary))
 	}
 
-	return out
-}
-
-func promptIssueCandidatesFromSession(sessionState session.Session) []promptcomplete.Candidate {
-	texts := []string{sessionState.ID, sessionState.Title}
-	texts = append(texts, sessionState.Tags...)
-
-	for _, message := range sessionState.Messages {
-		texts = append(texts, message.Content)
-	}
-
-	for i := range sessionState.Artifacts {
-		artifact := &sessionState.Artifacts[i]
-		texts = append(texts, artifact.Path, artifact.Kind, artifact.Summary)
-	}
-
-	return issueCandidatesFromText("session state", texts...)
+	return issueCandidatesFromTextLimit("session state", limit, texts...)
 }
 
 func promptIssueCandidatesFromTasks(tasks []promptcomplete.Candidate) []promptcomplete.Candidate {
@@ -374,6 +339,14 @@ func promptIssueCandidatesFromTasks(tasks []promptcomplete.Candidate) []promptco
 }
 
 func issueCandidatesFromText(source string, texts ...string) []promptcomplete.Candidate {
+	return issueCandidatesFromTextLimit(source, maxPromptContextCandidates, texts...)
+}
+
+func issueCandidatesFromTextLimit(source string, limit int, texts ...string) []promptcomplete.Candidate {
+	if limit <= 0 {
+		limit = maxPromptContextCandidates
+	}
+
 	seen := make(map[string]struct{})
 	refs := make([]string, 0)
 
@@ -389,7 +362,15 @@ func issueCandidatesFromText(source string, texts ...string) []promptcomplete.Ca
 			}
 
 			seen[ref] = struct{}{}
+
 			refs = append(refs, ref)
+			if len(refs) >= limit {
+				break
+			}
+		}
+
+		if len(refs) >= limit {
+			break
 		}
 	}
 
@@ -437,6 +418,10 @@ func promptPermissionCandidates(registry *agent.Registry, selectedAgent string) 
 
 	activeAgent, ok := registry.Get(selectedAgent)
 	if !ok {
+		return out
+	}
+
+	if activeAgent.Hidden {
 		return out
 	}
 

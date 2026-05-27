@@ -532,8 +532,10 @@ zero-cost. `--prompt-local-only` still forces the local-only path for the
 process.
 
 For non-interactive checks, `atteler agents prompt-complete "ask @rev"` previews
-the same local completion engine with source attribution, replacement ranges,
-rank signals, and a short explanation of what accepting the completion inserts.
+the same local completion engine with per-source context freshness
+(`fresh`, `stale`, `partial`, `skipped`, or `error`), source attribution,
+replacement ranges, rank signals, and a short explanation of what accepting the
+completion inserts.
 
 ### Session evaluations and performance summaries
 

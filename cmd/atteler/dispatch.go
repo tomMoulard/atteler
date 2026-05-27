@@ -629,14 +629,15 @@ func providerlessState(store *session.Store) (appState, error) {
 	}
 
 	return appState{
-		config:            cfg,
-		agentRegistry:     agent.NewRegistry(cfg.Agents),
-		sessionStore:      store,
-		cwd:               cwd,
-		loadedConfigPaths: loadedConfigPaths,
-		pluginPaths:       append([]string(nil), cfg.Plugins.Paths...),
-		pluginPolicy:      clonePluginPolicy(cfg.Plugins.Policy),
-		vectorConfig:      cfg.Vector,
+		config:             cfg,
+		agentRegistry:      agent.NewRegistry(cfg.Agents),
+		sessionStore:       store,
+		cwd:                cwd,
+		loadedConfigPaths:  loadedConfigPaths,
+		pluginPaths:        append([]string(nil), cfg.Plugins.Paths...),
+		pluginPolicy:       clonePluginPolicy(cfg.Plugins.Policy),
+		vectorConfig:       cfg.Vector,
+		promptContextCache: newPromptContextCache(promptContextCachePath(store)),
 	}, nil
 }
 
@@ -867,6 +868,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		fallbackModels:              selection.fallbackModels,
 		pluginPaths:                 append([]string(nil), cfg.Plugins.Paths...),
 		pluginPolicy:                clonePluginPolicy(cfg.Plugins.Policy),
+		promptContextCache:          newPromptContextCache(promptContextCachePath(store)),
 		generationDefaults:          generationDefaults,
 		generationOverrides:         generationOverrides,
 		agentLoopBudget:             agentLoopBudget,

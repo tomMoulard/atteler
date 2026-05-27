@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,10 +21,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/codeintel"
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/promptcomplete"
 	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/tasklist"
@@ -813,6 +817,324 @@ func TestPromptSuggestionUsesTaskIDsWithoutModel(t *testing.T) {
 	assert.Equal(t, "task GH-27", applyPromptSuggestion(m.textarea.Value(), suggestion))
 }
 
+func TestPromptSuggestionUsesRepoBackedPromptCacheWithoutModel(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, ".atteler", "sessions"))
+	cache := newPromptContextCache()
+	state := appState{
+		cwd:                dir,
+		sessionStore:       store,
+		selectedAgent:      "planner",
+		promptContextCache: cache,
+	}
+	key := promptContextCacheKeyForState(state)
+	cache.store(promptRepoContextSnapshot{
+		CapturedAt: time.Now(),
+		Key:        key,
+		ProjectSymbols: []promptcomplete.Candidate{{
+			Text:        "RepoBackedSymbol",
+			Kind:        "project-symbol",
+			Description: "func in pkg/repo.go:12",
+		}},
+		Sources: []promptContextSourceStatus{
+			promptContextSourceReport(promptContextSourceProjectSymbols, promptContextFreshnessFresh, "1 candidate"),
+		},
+	})
+
+	m := model{
+		ctx:                context.Background(),
+		sessionStore:       store,
+		cwd:                dir,
+		selectedAgent:      "planner",
+		promptContextCache: cache,
+		textarea:           textarea.New(),
+	}
+	m.textarea.SetValue("call Repo")
+	m.textarea.CursorEnd()
+
+	suggestion, ok := m.promptSuggestion()
+	require.True(t, ok)
+	assert.Equal(t, "RepoBackedSymbol", suggestion.Text)
+	assert.Equal(t, "call RepoBackedSymbol", applyPromptSuggestion(m.textarea.Value(), suggestion))
+}
+
+func TestPromptSuggestionUsesContextRootForPromptCache(t *testing.T) {
+	t.Parallel()
+
+	outer := t.TempDir()
+	repoRoot := filepath.Join(outer, "worktree")
+	cwd := filepath.Join(outer, "launcher")
+
+	require.NoError(t, os.MkdirAll(repoRoot, 0o700))
+	require.NoError(t, os.MkdirAll(cwd, 0o700))
+
+	store := session.NewStore(filepath.Join(outer, ".atteler", "sessions"))
+	cache := newPromptContextCache()
+	state := appState{
+		cwd:                cwd,
+		contextOptions:     contextref.Options{Root: repoRoot},
+		sessionStore:       store,
+		selectedAgent:      "planner",
+		promptContextCache: cache,
+	}
+	key := promptContextCacheKeyForState(state)
+	cache.store(promptRepoContextSnapshot{
+		CapturedAt: time.Now(),
+		Key:        key,
+		ProjectSymbols: []promptcomplete.Candidate{{
+			Text:        "ContextRootSymbol",
+			Kind:        "project-symbol",
+			Description: "func in worktree/repo.go:12",
+		}},
+		Sources: []promptContextSourceStatus{
+			promptContextSourceReport(promptContextSourceProjectSymbols, promptContextFreshnessFresh, "1 candidate"),
+		},
+	})
+
+	m := model{
+		ctx:                context.Background(),
+		sessionStore:       store,
+		cwd:                cwd,
+		contextOptions:     contextref.Options{Root: repoRoot},
+		selectedAgent:      "planner",
+		promptContextCache: cache,
+		textarea:           textarea.New(),
+	}
+	m.textarea.SetValue("call Context")
+	m.textarea.CursorEnd()
+
+	suggestion, ok := m.promptSuggestion()
+	require.True(t, ok)
+	assert.Equal(t, "ContextRootSymbol", suggestion.Text)
+	assert.Equal(t, "call ContextRootSymbol", applyPromptSuggestion(m.textarea.Value(), suggestion))
+}
+
+//nolint:paralleltest // Uses process-wide prompt context source hooks.
+func TestPromptSuggestionSharesDurablePromptCacheWithPromptComplete(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.go"), []byte("package shared\n\nfunc SharedPromptSymbol() {}\n"), 0o600))
+
+	indexCalls := 0
+	restoreIndex := setPromptCodeIndexDirContextForTest(func(_ context.Context, root string) (codeintel.Index, error) {
+		indexCalls++
+
+		return codeintel.Index{Symbols: []codeintel.Symbol{{
+			Name: "SharedPromptSymbol",
+			Kind: "func",
+			File: filepath.Join(root, "shared.go"),
+			Line: 3,
+		}}}, nil
+	})
+	t.Cleanup(restoreIndex)
+
+	cachePath := filepath.Join(dir, ".atteler", promptContextCacheFileName)
+	cliState := appState{
+		cwd:                dir,
+		selectedAgent:      "planner",
+		promptContextCache: newPromptContextCache(cachePath),
+	}
+	cliResult := promptCompletionContextWithOptions(context.Background(), cliState, "Shared", true, defaultPromptCompletionContextOptions())
+	require.Contains(t, candidateTexts(cliResult.Context.ProjectSymbols), "SharedPromptSymbol")
+	require.FileExists(t, cachePath)
+	require.Equal(t, 1, indexCalls)
+
+	m := model{
+		ctx:                context.Background(),
+		cwd:                dir,
+		selectedAgent:      "planner",
+		promptContextCache: newPromptContextCache(cachePath),
+		textarea:           textarea.New(),
+	}
+	m.textarea.SetValue("Shared")
+	m.textarea.CursorEnd()
+
+	suggestion, ok := m.promptSuggestion()
+	require.True(t, ok)
+	assert.Equal(t, "SharedPromptSymbol", suggestion.Text)
+	assert.Equal(t, 1, indexCalls)
+}
+
+func TestIdleSuggestionContextUsesRepoBackedPromptCache(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, ".atteler", "sessions"))
+	cache := newPromptContextCache()
+	state := appState{
+		cwd:                dir,
+		sessionStore:       store,
+		selectedAgent:      "planner",
+		promptContextCache: cache,
+	}
+	key := promptContextCacheKeyForState(state)
+	cache.store(promptRepoContextSnapshot{
+		CapturedAt: time.Now(),
+		Key:        key,
+		ProjectSymbols: []promptcomplete.Candidate{{
+			Text:        "RepoBackedSymbol",
+			Kind:        "project-symbol",
+			Description: "func in pkg/repo.go:12",
+		}},
+		Sources: []promptContextSourceStatus{
+			promptContextSourceReport(promptContextSourceProjectSymbols, promptContextFreshnessFresh, "1 candidate"),
+		},
+	})
+
+	m := model{
+		ctx:                context.Background(),
+		sessionStore:       store,
+		cwd:                dir,
+		selectedAgent:      "planner",
+		promptContextCache: cache,
+		textarea:           textarea.New(),
+	}
+	m.textarea.SetValue("Repo")
+	m.textarea.CursorEnd()
+
+	summary, status := m.idleSuggestionContextForPrompt()
+
+	assert.Contains(t, summary, "symbol: RepoBackedSymbol")
+	assert.Contains(t, summary, "context project symbols: fresh")
+	assert.Equal(t, "fresh", status)
+}
+
+//nolint:paralleltest // Uses process-wide prompt context source hooks.
+func TestIdleSuggestionContextReusesPromptCacheWithoutReindex(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "repo.go"), []byte("package repo\n\nfunc RepoBackedSymbol() {}\n"), 0o600))
+
+	indexCalls := 0
+	indexed := make(chan struct{}, 1)
+	restoreIndex := setPromptCodeIndexDirContextForTest(func(_ context.Context, root string) (codeintel.Index, error) {
+		indexCalls++
+
+		indexed <- struct{}{}
+
+		return codeintel.Index{Symbols: []codeintel.Symbol{{
+			Name: "RepoBackedSymbol",
+			Kind: "func",
+			File: filepath.Join(root, "repo.go"),
+			Line: 3,
+		}}}, nil
+	})
+	t.Cleanup(restoreIndex)
+
+	cache := newPromptContextCache()
+	m := model{
+		ctx:                context.Background(),
+		sessionStore:       session.NewStore(filepath.Join(dir, ".atteler", "sessions")),
+		cwd:                dir,
+		selectedAgent:      "planner",
+		promptContextCache: cache,
+		textarea:           textarea.New(),
+	}
+	m.textarea.SetValue("Repo")
+	m.textarea.CursorEnd()
+
+	firstSummary, firstStatus := m.idleSuggestionContextForPrompt()
+	assert.NotContains(t, firstSummary, "symbol: RepoBackedSymbol")
+	assert.Contains(t, firstStatus, "skipped")
+
+	select {
+	case <-indexed:
+	case <-time.After(promptContextTestBackgroundBudget):
+		require.Fail(t, "prompt context cache did not warm project symbols")
+	}
+
+	var secondSummary, secondStatus string
+
+	require.Eventually(t, func() bool {
+		secondSummary, secondStatus = m.idleSuggestionContextForPrompt()
+
+		return strings.Contains(secondSummary, "symbol: RepoBackedSymbol")
+	}, promptContextTestBackgroundBudget, 10*time.Millisecond)
+
+	thirdSummary, thirdStatus := m.idleSuggestionContextForPrompt()
+
+	assert.Contains(t, secondSummary, "symbol: RepoBackedSymbol")
+	assert.Contains(t, secondSummary, "context project symbols: fresh")
+	assert.NotContains(t, secondStatus, "project-symbols")
+	assert.Contains(t, thirdSummary, "symbol: RepoBackedSymbol")
+	assert.Contains(t, thirdSummary, "context project symbols: fresh")
+	assert.NotContains(t, thirdStatus, "project-symbols")
+	assert.Equal(t, 1, indexCalls)
+}
+
+//nolint:paralleltest // Uses process-wide prompt context source hooks.
+func TestPromptSuggestionDeduplicatesRepoWarmupDuringRender(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "render.go"), []byte("package render\n\nfunc RenderSymbol() {}\n"), 0o600))
+
+	var (
+		indexCalls  atomic.Int32
+		releaseOnce sync.Once
+	)
+
+	indexStarted := make(chan struct{}, 1)
+	indexDone := make(chan struct{}, 1)
+	releaseIndex := make(chan struct{})
+
+	restoreIndex := setPromptCodeIndexDirContextForTest(func(context.Context, string) (codeintel.Index, error) {
+		indexCalls.Add(1)
+
+		defer func() {
+			indexDone <- struct{}{}
+		}()
+
+		select {
+		case indexStarted <- struct{}{}:
+		default:
+		}
+
+		<-releaseIndex
+
+		return codeintel.Index{}, nil
+	})
+	t.Cleanup(restoreIndex)
+	t.Cleanup(func() {
+		releaseOnce.Do(func() {
+			close(releaseIndex)
+		})
+	})
+
+	m := model{
+		ctx:                context.Background(),
+		sessionStore:       session.NewStore(filepath.Join(dir, ".atteler", "sessions")),
+		cwd:                dir,
+		selectedAgent:      "planner",
+		promptContextCache: newPromptContextCache(),
+		textarea:           textarea.New(),
+	}
+	m.textarea.SetValue("Render")
+	m.textarea.CursorEnd()
+
+	_, firstOK := m.promptSuggestion()
+	_, secondOK := m.promptSuggestion()
+
+	assert.False(t, firstOK)
+	assert.False(t, secondOK)
+
+	select {
+	case <-indexStarted:
+	case <-time.After(promptContextTestBackgroundBudget):
+		require.Fail(t, "render-time prompt suggestion did not start repo warmup")
+	}
+
+	assert.Equal(t, int32(1), indexCalls.Load(), "render-time prompt suggestions should share one in-flight repo warmup")
+
+	releaseOnce.Do(func() {
+		close(releaseIndex)
+	})
+
+	select {
+	case <-indexDone:
+	case <-time.After(promptContextTestBackgroundBudget):
+		require.Fail(t, "render-time prompt context warmup did not stop")
+	}
+}
+
 func TestAcceptCompletionAcceptsValidPromptSuggestion(t *testing.T) {
 	t.Parallel()
 
@@ -1416,6 +1738,45 @@ func TestPromptLocalOnlySkipsIdleModelSuggestion(t *testing.T) {
 	assert.Empty(t, m.idleSuggestionStatus)
 }
 
+func TestPromptLocalOnlyUpdatesPromptContextStatusFromCache(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cache := newPromptContextCache()
+	key := promptContextCacheKeyForState(appState{cwd: dir, promptContextCache: cache})
+	cache.store(promptRepoContextSnapshot{
+		CapturedAt: time.Now(),
+		Key:        key,
+		ProjectSymbols: []promptcomplete.Candidate{{
+			Text: "CachedSymbol",
+			Kind: "project-symbol",
+		}},
+		Sources: []promptContextSourceStatus{
+			promptContextSourceReport(promptContextSourceProjectSymbols, promptContextFreshnessFresh, "1 candidate"),
+		},
+	})
+
+	registry := llm.NewRegistry()
+	registry.Register(idleSuggestionProvider{model: "model", response: "draft prompt with tests"})
+
+	m := model{
+		ctx:                context.Background(),
+		registry:           registry,
+		selectedModel:      "suggest/model",
+		promptLocalOnly:    true,
+		cwd:                dir,
+		promptContextCache: cache,
+		textarea:           textarea.New(),
+	}
+	m.textarea.SetValue("Cached")
+	m.textarea.CursorEnd()
+
+	assert.Nil(t, m.scheduleIdleSuggestion())
+	assert.Empty(t, m.idleSuggestionInput)
+	assert.Empty(t, m.idleSuggestionStatus)
+	assert.Equal(t, string(promptContextFreshnessFresh), m.promptContextStatus)
+}
+
 func TestPromptLocalOnlySkipsForcedIdleModelSuggestion(t *testing.T) {
 	t.Parallel()
 
@@ -1910,6 +2271,7 @@ func TestInitialModelHonorsPersistedIdleSuggestionBudgetUsage(t *testing.T) {
 		promptSuggestionConsentSession,
 		defaultIdleSuggestionBudget(),
 		nil,
+		nil,
 	)
 	m.textarea.SetValue("draft prompt")
 	m.textarea.CursorEnd()
@@ -2144,6 +2506,24 @@ func TestClearIdleSuggestionCancelsInFlightRequest(t *testing.T) {
 	assert.False(t, provider.called)
 	assert.False(t, msg.providerCall)
 	assert.Nil(t, next.idleSuggestionCancel)
+}
+
+func TestClearIdleSuggestionClearsPromptContextStatus(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		idleSuggestionInput:  "draft",
+		idleSuggestionText:   " suffix",
+		idleSuggestionStatus: idleSuggestionStatusReadyModel,
+		promptContextStatus:  "stale:project-symbols",
+	}
+
+	m.clearIdleSuggestion()
+
+	assert.Empty(t, m.idleSuggestionInput)
+	assert.Empty(t, m.idleSuggestionText)
+	assert.Empty(t, m.idleSuggestionStatus)
+	assert.Empty(t, m.promptContextStatus)
 }
 
 func TestIdleSuggestionIgnoresStaleResponses(t *testing.T) {
@@ -2703,6 +3083,15 @@ func TestStatusLineShowsAgentLoopBudget(t *testing.T) {
 	assert.Contains(t, plain, "in=100")
 	assert.Contains(t, plain, "out=50")
 	assert.Contains(t, plain, "costµ=25000")
+}
+
+func TestStatusLineShowsPromptContextFreshness(t *testing.T) {
+	t.Parallel()
+
+	m := model{promptContextStatus: "stale:project-symbols"}
+
+	plain := stripANSI(m.statusLine())
+	assert.Contains(t, plain, "promptctx:stale:project-symbols")
 }
 
 func TestContextUsageUsesProviderAwareUpperBound(t *testing.T) {

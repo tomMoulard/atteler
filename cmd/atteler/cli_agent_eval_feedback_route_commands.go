@@ -426,7 +426,10 @@ func formatSkillTriggerResults(results []attskill.TriggerEvalResult) string {
 }
 
 func promptComplete(ctx context.Context, state appState, input string, limit int) {
-	suggestions := promptcomplete.SuggestAll(promptCompletionContext(ctx, state, input, true), promptcomplete.Options{Limit: limit})
+	contextResult := promptCompletionContextWithFreshness(ctx, state, input, true)
+	fmt.Print(formatPromptContextSources(contextResult.Sources))
+
+	suggestions := promptcomplete.SuggestAll(contextResult.Context, promptcomplete.Options{Limit: limit})
 	if len(suggestions) == 0 {
 		fmt.Println("No prompt completion found.")
 		return

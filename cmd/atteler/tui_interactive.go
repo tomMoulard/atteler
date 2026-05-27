@@ -114,6 +114,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.promptSuggestionConsent,
 		state.idleSuggestionBudget,
 		state.worktreeInfo,
+		state.promptContextCache,
 	))
 
 	restoreTerminalKeyboard()

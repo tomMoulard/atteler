@@ -194,7 +194,7 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.StringVar(&opts.lspFilePath, "lsp-file", "", "source file to inspect with --lsp-symbols")
 	fs.StringVar(&opts.lspRootPath, "lsp-root", "", "workspace root for --lsp-symbols")
 	fs.StringVar(&opts.lspLanguageID, "lsp-language", "", "language ID for --lsp-symbols; inferred from --lsp-file when omitted")
-	fs.StringVar(&opts.promptCompleteInput, "prompt-complete", "", "suggest local context-aware rest-of-line prompt completions and exit")
+	fs.StringVar(&opts.promptCompleteInput, "prompt-complete", "", "suggest local prompt completions with context freshness and exit")
 	fs.Var(&opts.promptCompleteLimit, "prompt-complete-limit", "maximum --prompt-complete suggestions")
 	fs.BoolVar(&opts.promptLocalOnly, "prompt-local-only", false, "force local prompt completions only; model-backed idle suggestions are opt-in via /suggestions")
 	fs.BoolVar(&opts.asyncPlan, "async-plan", false, "print dependency-aware async task batches and exit")
