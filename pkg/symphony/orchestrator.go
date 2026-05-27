@@ -933,9 +933,7 @@ func (o *Orchestrator) handlePullRequestCheckDue(ctx context.Context, number int
 		return
 	}
 
-	checkClient, ok := o.tracker.(interface {
-		FetchPullRequestChecks(context.Context, int) (PullRequestCheckSnapshot, error)
-	})
+	checks, err, ok := o.fetchPullRequestChecks(ctx, number, cfg.Publish)
 	if !ok {
 		monitor.Exhausted = true
 		monitor.LastError = "tracker does not support pull request checks"
@@ -945,8 +943,6 @@ func (o *Orchestrator) handlePullRequestCheckDue(ctx context.Context, number int
 		)
 		return
 	}
-
-	checks, err := checkClient.FetchPullRequestChecks(ctx, number)
 	if err != nil {
 		o.reschedulePullRequestCheck(monitor, cfg.Publish.CheckInterval, err.Error())
 		o.recordIssueEvent(
@@ -970,6 +966,13 @@ func (o *Orchestrator) handlePullRequestCheckDue(ctx context.Context, number int
 		"summary", checks.Summary,
 		"needs_branch_update", checks.NeedsBranchUpdate,
 		"branch_update_reason", checks.BranchUpdateReason,
+		"requirement_source", checks.RequirementSource,
+		"required_failed_checks", checks.RequiredFailedCheckNames,
+		"optional_failed_checks", checks.OptionalFailedCheckNames,
+		"pending_required_checks", checks.PendingRequiredCheckNames,
+		"missing_required_checks", checks.MissingRequiredCheckNames,
+		"branch_protection_error", checks.BranchProtectionError,
+		"ruleset_error", checks.RulesetError,
 	)
 
 	if checks.NeedsBranchUpdate {
@@ -999,6 +1002,49 @@ func (o *Orchestrator) handlePullRequestCheckDue(ctx context.Context, number int
 	default:
 		o.reschedulePullRequestCheck(monitor, cfg.Publish.CheckInterval, "")
 	}
+}
+
+func (o *Orchestrator) fetchPullRequestChecks(ctx context.Context, number int, cfg PublishConfig) (PullRequestCheckSnapshot, error, bool) {
+	if checkClient, ok := o.tracker.(interface {
+		FetchPullRequestChecksWithPolicy(context.Context, int, PullRequestCheckPolicy) (PullRequestCheckSnapshot, error)
+	}); ok {
+		checks, err := checkClient.FetchPullRequestChecksWithPolicy(ctx, number, pullRequestCheckPolicyFromPublishConfig(cfg))
+		if err != nil {
+			return checks, fmt.Errorf("fetch pull request checks with policy: %w", err), true
+		}
+
+		return checks, nil, true
+	}
+
+	checkClient, ok := o.tracker.(interface {
+		FetchPullRequestChecks(context.Context, int) (PullRequestCheckSnapshot, error)
+	})
+	if !ok {
+		return PullRequestCheckSnapshot{}, nil, false
+	}
+
+	checks, err := checkClient.FetchPullRequestChecks(ctx, number)
+	if err != nil {
+		return checks, fmt.Errorf("fetch pull request checks: %w", err), true
+	}
+
+	return checks, nil, true
+}
+
+func pullRequestCheckPolicyFromPublishConfig(cfg PublishConfig) PullRequestCheckPolicy {
+	policy := PullRequestCheckPolicy{
+		NoChecksPolicy:         cfg.NoChecksPolicy,
+		RequiredCheckNames:     append([]string(nil), cfg.RequiredCheckNames...),
+		RequiredCheckPatterns:  append([]string(nil), cfg.RequiredCheckPatterns...),
+		DiscoverRequiredChecks: cfg.DiscoverRequiredChecks,
+		ReworkOptionalChecks:   cfg.ReworkOptionalChecks,
+	}
+
+	if policy.NoChecksPolicy == "" {
+		policy.NoChecksPolicy = defaultNoChecksPolicy
+	}
+
+	return policy
 }
 
 func (o *Orchestrator) handlePullRequestBranchUpdate(ctx context.Context, snapshot WorkflowSnapshot, monitor *pullRequestMonitorEntry, checks PullRequestCheckSnapshot) {
@@ -1114,6 +1160,13 @@ func pullRequestPendingReworkKey(checks PullRequestCheckSnapshot) string {
 func clonePullRequestCheckSnapshot(snapshot PullRequestCheckSnapshot) *PullRequestCheckSnapshot {
 	clone := snapshot
 	clone.FailedCheckNames = append([]string(nil), snapshot.FailedCheckNames...)
+	clone.RequiredCheckNames = append([]string(nil), snapshot.RequiredCheckNames...)
+	clone.RequiredCheckPatterns = append([]string(nil), snapshot.RequiredCheckPatterns...)
+	clone.RequiredFailedCheckNames = append([]string(nil), snapshot.RequiredFailedCheckNames...)
+	clone.OptionalFailedCheckNames = append([]string(nil), snapshot.OptionalFailedCheckNames...)
+	clone.PendingRequiredCheckNames = append([]string(nil), snapshot.PendingRequiredCheckNames...)
+	clone.MissingRequiredCheckNames = append([]string(nil), snapshot.MissingRequiredCheckNames...)
+	clone.PendingOptionalCheckNames = append([]string(nil), snapshot.PendingOptionalCheckNames...)
 	clone.CheckRuns = append([]PullRequestCheckRun(nil), snapshot.CheckRuns...)
 	clone.StatusContexts = append([]PullRequestStatus(nil), snapshot.StatusContexts...)
 	return &clone
@@ -1162,13 +1215,15 @@ func (o *Orchestrator) handleFailedPullRequestChecks(ctx context.Context, snapsh
 	runContext := &RunContext{
 		Kind: RunKindPullRequestRework,
 		PullRequest: &PullRequestReworkContext{
-			URL:           monitor.PullRequestURL,
-			Branch:        monitor.Branch,
-			HeadSHA:       checks.HeadSHA,
-			Summary:       checks.Summary,
-			FailedChecks:  append([]string(nil), checks.FailedCheckNames...),
-			Number:        monitor.Number,
-			ReworkAttempt: attempt,
+			URL:                  monitor.PullRequestURL,
+			Branch:               monitor.Branch,
+			HeadSHA:              checks.HeadSHA,
+			Summary:              checks.Summary,
+			FailedChecks:         append([]string(nil), checks.FailedCheckNames...),
+			RequiredFailedChecks: append([]string(nil), checks.RequiredFailedCheckNames...),
+			OptionalFailedChecks: append([]string(nil), checks.OptionalFailedCheckNames...),
+			Number:               monitor.Number,
+			ReworkAttempt:        attempt,
 		},
 	}
 
@@ -1177,6 +1232,8 @@ func (o *Orchestrator) handleFailedPullRequestChecks(ctx context.Context, snapsh
 		"pull_request_number", monitor.Number,
 		"rework_attempt", attempt,
 		"summary", checks.Summary,
+		"required_failed_checks", checks.RequiredFailedCheckNames,
+		"optional_failed_checks", checks.OptionalFailedCheckNames,
 	)
 	o.logger.Info(
 		"symphony dispatching pull request rework",
@@ -1185,6 +1242,8 @@ func (o *Orchestrator) handleFailedPullRequestChecks(ctx context.Context, snapsh
 		"pull_request_number", monitor.Number,
 		"rework_attempt", attempt,
 		"summary", checks.Summary,
+		"required_failed_checks", checks.RequiredFailedCheckNames,
+		"optional_failed_checks", checks.OptionalFailedCheckNames,
 	)
 
 	o.dispatch(ctx, snapshot, monitor.Issue, &attempt, runContext)

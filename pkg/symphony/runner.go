@@ -219,9 +219,24 @@ func runContextPrompt(runContext *RunContext) string {
 	if pr.Summary != "" {
 		fmt.Fprintf(&builder, "- Check summary: %s\n", pr.Summary)
 	}
-	if len(pr.FailedChecks) > 0 {
+	if len(pr.RequiredFailedChecks) > 0 {
+		fmt.Fprintln(&builder, "- Required failing checks:")
+		for _, check := range pr.RequiredFailedChecks {
+			fmt.Fprintf(&builder, "  - %s\n", check)
+		}
+	} else if len(pr.FailedChecks) > 0 && !sameStringSet(pr.FailedChecks, pr.OptionalFailedChecks) {
 		fmt.Fprintln(&builder, "- Failing checks:")
 		for _, check := range pr.FailedChecks {
+			fmt.Fprintf(&builder, "  - %s\n", check)
+		}
+	}
+	if len(pr.OptionalFailedChecks) > 0 {
+		label := "Optional failing checks (reported for context; only fix them if they are relevant to the blocking failure):"
+		if len(pr.RequiredFailedChecks) == 0 && sameStringSet(pr.FailedChecks, pr.OptionalFailedChecks) {
+			label = "Optional failing checks selected for rework by workflow config:"
+		}
+		fmt.Fprintf(&builder, "- %s\n", label)
+		for _, check := range pr.OptionalFailedChecks {
 			fmt.Fprintf(&builder, "  - %s\n", check)
 		}
 	}

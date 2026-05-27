@@ -81,6 +81,8 @@ func TestResolveConfig_PublishDefaultsRemoveTrackerLabels(t *testing.T) {
 	assert.Equal(t, []string{"symphony"}, cfg.Publish.RemoveLabels)
 	assert.Equal(t, "Atteler Symphony", cfg.Publish.GitUserName)
 	assert.Equal(t, "symphony@users.noreply.github.com", cfg.Publish.GitUserEmail)
+	assert.Equal(t, PullRequestNoChecksPass, cfg.Publish.NoChecksPolicy)
+	assert.True(t, cfg.Publish.DiscoverRequiredChecks)
 }
 
 func TestResolveConfig_PublishCheckMonitorConfig(t *testing.T) {
@@ -99,6 +101,11 @@ func TestResolveConfig_PublishCheckMonitorConfig(t *testing.T) {
 			"monitor_checks":            true,
 			"check_interval_ms":         1234,
 			"max_check_rework_attempts": 5,
+			"required_checks":           []any{"test", "lint"},
+			"required_check_patterns":   []any{"ci/*"},
+			"no_checks_policy":          "pending",
+			"discover_required_checks":  false,
+			"rework_optional_checks":    true,
 		},
 	}, path)
 	require.NoError(t, err)
@@ -106,6 +113,33 @@ func TestResolveConfig_PublishCheckMonitorConfig(t *testing.T) {
 	assert.True(t, cfg.Publish.MonitorChecks)
 	assert.Equal(t, 1234*time.Millisecond, cfg.Publish.CheckInterval)
 	assert.Equal(t, 5, cfg.Publish.MaxCheckReworkAttempts)
+	assert.Equal(t, []string{"test", "lint"}, cfg.Publish.RequiredCheckNames)
+	assert.Equal(t, []string{"ci/*"}, cfg.Publish.RequiredCheckPatterns)
+	assert.Equal(t, PullRequestNoChecksPending, cfg.Publish.NoChecksPolicy)
+	assert.False(t, cfg.Publish.DiscoverRequiredChecks)
+	assert.True(t, cfg.Publish.ReworkOptionalChecks)
+}
+
+func TestResolveConfig_RejectsInvalidPublishNoChecksPolicy(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	_, err := ResolveConfig(t.Context(), map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+			"labels":     []any{"symphony"},
+		},
+		"publish": map[string]any{
+			"enabled":          true,
+			"monitor_checks":   true,
+			"no_checks_policy": "ignore",
+		},
+	}, path)
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "publish.no_checks_policy must be one of pass, pending, fail")
 }
 
 func TestResolveConfig_DebugConfig(t *testing.T) {

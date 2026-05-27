@@ -83,13 +83,15 @@ func TestTurnPrompt_IncludesPullRequestReworkContext(t *testing.T) {
 		&RunContext{
 			Kind: RunKindPullRequestRework,
 			PullRequest: &PullRequestReworkContext{
-				URL:           "https://github.com/owner/repo/pull/31",
-				Branch:        "symphony/GH-2",
-				HeadSHA:       "abc123",
-				Summary:       "failing checks: test",
-				FailedChecks:  []string{"test"},
-				Number:        31,
-				ReworkAttempt: 2,
+				URL:                  "https://github.com/owner/repo/pull/31",
+				Branch:               "symphony/GH-2",
+				HeadSHA:              "abc123",
+				Summary:              "failing required checks: test",
+				FailedChecks:         []string{"test"},
+				RequiredFailedChecks: []string{"test"},
+				OptionalFailedChecks: []string{"optional-lint"},
+				Number:               31,
+				ReworkAttempt:        2,
 			},
 		},
 		1,
@@ -100,9 +102,70 @@ func TestTurnPrompt_IncludesPullRequestReworkContext(t *testing.T) {
 	assert.Contains(t, prompt, "Work on GH-2")
 	assert.Contains(t, prompt, "Symphony PR rework context")
 	assert.Contains(t, prompt, "Pull request: #31 https://github.com/owner/repo/pull/31")
+	assert.Contains(t, prompt, "Required failing checks")
+	assert.Contains(t, prompt, "Optional failing checks")
 	assert.Contains(t, prompt, "test")
+	assert.Contains(t, prompt, "optional-lint")
 	assert.Contains(t, prompt, "same branch")
 	assert.Contains(t, prompt, "git rebase --continue")
+}
+
+func TestTurnPrompt_LabelsOptionalCheckReworkAsOptional(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := turnPrompt(
+		WorkflowDefinition{PromptTemplate: "Work on {{ issue.identifier }}"},
+		Issue{ID: "1", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"},
+		nil,
+		&RunContext{
+			Kind: RunKindPullRequestRework,
+			PullRequest: &PullRequestReworkContext{
+				URL:                  "https://github.com/owner/repo/pull/31",
+				Branch:               "symphony/GH-2",
+				Summary:              "failing optional checks configured for rework: optional-lint",
+				FailedChecks:         []string{"optional-lint"},
+				OptionalFailedChecks: []string{"optional-lint"},
+				Number:               31,
+				ReworkAttempt:        1,
+			},
+		},
+		1,
+		8,
+	)
+	require.NoError(t, err)
+
+	assert.Contains(t, prompt, "Optional failing checks selected for rework by workflow config")
+	assert.NotContains(t, prompt, "Required failing checks")
+}
+
+func TestTurnPrompt_LabelsOptionalFailuresAsContextForNoChecksPolicyFailure(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := turnPrompt(
+		WorkflowDefinition{PromptTemplate: "Work on {{ issue.identifier }}"},
+		Issue{ID: "1", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"},
+		nil,
+		&RunContext{
+			Kind: RunKindPullRequestRework,
+			PullRequest: &PullRequestReworkContext{
+				URL:                  "https://github.com/owner/repo/pull/31",
+				Branch:               "symphony/GH-2",
+				Summary:              "reported checks are optional and no-check policy is fail",
+				FailedChecks:         []string{"no required checks"},
+				OptionalFailedChecks: []string{"optional-lint"},
+				Number:               31,
+				ReworkAttempt:        1,
+			},
+		},
+		1,
+		8,
+	)
+	require.NoError(t, err)
+
+	assert.Contains(t, prompt, "Failing checks")
+	assert.Contains(t, prompt, "no required checks")
+	assert.Contains(t, prompt, "Optional failing checks (reported for context")
+	assert.NotContains(t, prompt, "Optional failing checks selected for rework by workflow config")
 }
 
 func TestTurnPrompt_AppendsIssueCommentsWhenWorkflowOmitsThem(t *testing.T) {

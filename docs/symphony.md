@@ -39,6 +39,11 @@ publish:
   draft: false
   remove_labels: [codex]
   monitor_checks: true
+  required_checks: []          # exact check/status names, optional
+  required_check_patterns: []  # glob patterns where * matches any substring
+  discover_required_checks: true
+  no_checks_policy: pass       # pass, pending, or fail when no required checks exist
+  rework_optional_checks: false
   check_interval_ms: 30000
   max_check_rework_attempts: 3
 debug:
@@ -119,18 +124,36 @@ filter and Symphony will not redispatch it.
 
 With `publish.monitor_checks: true`, published PRs enter a separate check
 monitor lane. Symphony polls GitHub check runs and commit-status contexts for
-the PR head. If GitHub reports that the PR branch is behind the base branch or
-has merge conflicts, Symphony fetches the PR branch and base branch, rebases
-locally, and pushes the updated PR branch with `--force-with-lease`. Rebase
-failures or dirty workspaces dispatch a PR rework worker on the same branch so
-Codex can resolve conflicts. Once an automatic branch update fails for a given
-PR head/base pair, Symphony keeps that failure as pending rework instead of
-retrying the same rebase on every poll. When the worker starts, Symphony
-prepares the workspace on the PR branch and leaves the rebase conflict in place
-when possible, so the worker can resolve files, run `git rebase --continue`,
-and publish the fixed branch. Passing checks complete the monitor. Failing
-checks dispatch the same PR rework lane, then the publish path commits, pushes,
-and reuses the existing PR. This loop is capped by
+the PR head, separates required checks from optional checks, and only dispatches
+PR rework for required failures by default. Required checks come from exact
+`publish.required_checks`, glob-style `publish.required_check_patterns`, and,
+when `publish.discover_required_checks: true`, GitHub branch protection required
+status checks and repository rulesets if the token can read them. Discovery
+lookup failures are kept in the debug snapshot but do not fail polling;
+configure required checks explicitly if token scopes cannot read protection or
+rulesets. Branch-protection and ruleset lookup errors are reported separately
+in the debug snapshot. Repositories without configured or discovered required
+checks follow `publish.no_checks_policy` (`pass`, `pending`, or `fail`).
+Optional failing checks are reported in debug snapshots and rework prompts for
+context, but only trigger rework when
+`publish.rework_optional_checks: true`. Check-run conclusions follow an explicit
+policy: `success`, `neutral`, and `skipped` pass; `failure`, `cancelled`,
+`canceled`, `timed_out`, `action_required`, `startup_failure`, and `stale`
+fail; incomplete runs or completed runs without a conclusion stay pending; any
+unknown conclusion is treated as failed.
+
+If GitHub reports that the PR branch is behind the base branch or has merge
+conflicts, Symphony fetches the PR branch and base branch, rebases locally, and
+pushes the updated PR branch with `--force-with-lease`. Rebase failures or dirty
+workspaces dispatch a PR rework worker on the same branch so Codex can resolve
+conflicts. Once an automatic branch update fails for a given PR head/base pair,
+Symphony keeps that failure as pending rework instead of retrying the same
+rebase on every poll. When the worker starts, Symphony prepares the workspace on
+the PR branch and leaves the rebase conflict in place when possible, so the
+worker can resolve files, run `git rebase --continue`, and publish the fixed
+branch. Passing required checks complete the monitor. Required failing checks
+dispatch the same PR rework lane, then the publish path commits, pushes, and
+reuses the existing PR. This loop is capped by
 `publish.max_check_rework_attempts`; it does not re-add the source issue label
 or put the issue back into the normal dispatch queue.
 
@@ -232,8 +255,9 @@ The orchestrator:
 - schedules one-second continuation retries after clean worker exits unless a
   publish step opened or reused a pull request and finalized the issue
 - monitors published pull requests for failed checks when
-  `publish.monitor_checks` is enabled, and dispatches same-branch rework without
-  putting the source issue back into the issue queue
+  `publish.monitor_checks` is enabled, distinguishes required and optional
+  checks, and dispatches same-branch rework for required failures without putting
+  the source issue back into the issue queue
 - schedules exponential failure retries capped by `agent.max_retry_backoff_ms`
 
 Logs are emitted through `slog` as `key=value` text on stderr. Set

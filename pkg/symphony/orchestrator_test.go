@@ -36,6 +36,22 @@ func (t checkTracker) FetchPullRequestChecks(context.Context, int) (PullRequestC
 	return t.checks, nil
 }
 
+type policyCheckTracker struct {
+	noopTracker
+	checks PullRequestCheckSnapshot
+	policy PullRequestCheckPolicy
+	number int
+	calls  int
+}
+
+func (t *policyCheckTracker) FetchPullRequestChecksWithPolicy(_ context.Context, number int, policy PullRequestCheckPolicy) (PullRequestCheckSnapshot, error) {
+	t.calls++
+	t.number = number
+	t.policy = policy
+
+	return t.checks, nil
+}
+
 type captureRunner struct {
 	requests chan RunRequest
 }
@@ -195,13 +211,15 @@ func TestHandlePullRequestCheckDue_DispatchesReworkForFailedChecks(t *testing.T)
 			loaded:  true,
 		},
 		tracker: checkTracker{checks: PullRequestCheckSnapshot{
-			CheckedAt:        time.Now().UTC(),
-			PullRequestURL:   "https://github.com/owner/repo/pull/31",
-			HeadRef:          "symphony/GH-2",
-			HeadSHA:          "abc123",
-			Summary:          "failing checks: test",
-			FailedCheckNames: []string{"test"},
-			State:            PullRequestChecksFailed,
+			CheckedAt:                time.Now().UTC(),
+			PullRequestURL:           "https://github.com/owner/repo/pull/31",
+			HeadRef:                  "symphony/GH-2",
+			HeadSHA:                  "abc123",
+			Summary:                  "failing required checks: test",
+			FailedCheckNames:         []string{"test"},
+			RequiredFailedCheckNames: []string{"test"},
+			OptionalFailedCheckNames: []string{"optional-lint"},
+			State:                    PullRequestChecksFailed,
 		}},
 		runner: runner,
 		logger: slog.Default(),
@@ -233,12 +251,149 @@ func TestHandlePullRequestCheckDue_DispatchesReworkForFailedChecks(t *testing.T)
 	assert.Equal(t, RunKindPullRequestRework, req.Context.Kind)
 	assert.Equal(t, 31, req.Context.PullRequest.Number)
 	assert.Equal(t, []string{"test"}, req.Context.PullRequest.FailedChecks)
+	assert.Equal(t, []string{"test"}, req.Context.PullRequest.RequiredFailedChecks)
+	assert.Equal(t, []string{"optional-lint"}, req.Context.PullRequest.OptionalFailedChecks)
 	assert.Equal(t, 1, req.Context.PullRequest.ReworkAttempt)
 	assert.Contains(t, orchestrator.state.Running, issue.ID)
 	assert.Contains(t, orchestrator.state.Claimed, issue.ID)
 
 	cancel()
 	orchestrator.wg.Wait()
+}
+
+func TestHandlePullRequestCheckDue_CompletesWhenOnlyOptionalChecksFail(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind: trackerKindGitHub,
+		},
+		Publish: PublishConfig{
+			Enabled:                true,
+			MonitorChecks:          true,
+			CheckInterval:          time.Hour,
+			MaxCheckReworkAttempts: 3,
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 2,
+		},
+	}
+	runner := captureRunner{requests: make(chan RunRequest, 1)}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker: checkTracker{checks: PullRequestCheckSnapshot{
+			CheckedAt:                time.Now().UTC(),
+			PullRequestURL:           "https://github.com/owner/repo/pull/31",
+			HeadRef:                  "symphony/GH-2",
+			HeadSHA:                  "abc123",
+			Summary:                  "required checks passed; optional failing checks: optional-lint",
+			OptionalFailedCheckNames: []string{"optional-lint"},
+			State:                    PullRequestChecksPassed,
+		}},
+		runner: runner,
+		logger: slog.Default(),
+		events: make(chan orchestratorEvent, 4),
+		state: runtimeState{
+			Running:       map[string]*runningEntry{},
+			Claimed:       map[string]struct{}{},
+			RetryAttempts: map[string]*RetryEntry{},
+			PullRequests: map[int]*pullRequestMonitorEntry{
+				31: {
+					Issue:          issue,
+					Branch:         "symphony/GH-2",
+					PullRequestURL: "https://github.com/owner/repo/pull/31",
+					Number:         31,
+				},
+			},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.handlePullRequestCheckDue(t.Context(), 31)
+
+	assert.NotContains(t, orchestrator.state.PullRequests, 31)
+	assert.Contains(t, orchestrator.state.CompletedPullRequests, 31)
+
+	select {
+	case req := <-runner.requests:
+		t.Fatalf("optional failure unexpectedly dispatched rework: %#v", req.Context)
+	default:
+	}
+}
+
+func TestHandlePullRequestCheckDue_PassesPublishCheckPolicyToTracker(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind: trackerKindGitHub,
+		},
+		Publish: PublishConfig{
+			Enabled:                true,
+			MonitorChecks:          true,
+			CheckInterval:          time.Hour,
+			MaxCheckReworkAttempts: 3,
+			NoChecksPolicy:         PullRequestNoChecksFail,
+			RequiredCheckNames:     []string{"test", "build"},
+			RequiredCheckPatterns:  []string{"ci/*"},
+			DiscoverRequiredChecks: true,
+			ReworkOptionalChecks:   true,
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 2,
+		},
+	}
+	tracker := &policyCheckTracker{checks: PullRequestCheckSnapshot{
+		CheckedAt:      time.Now().UTC(),
+		PullRequestURL: "https://github.com/owner/repo/pull/31",
+		HeadRef:        "symphony/GH-2",
+		HeadSHA:        "abc123",
+		Summary:        "required checks passed",
+		State:          PullRequestChecksPassed,
+	}}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker: tracker,
+		logger:  slog.Default(),
+		events:  make(chan orchestratorEvent, 4),
+		state: runtimeState{
+			Running:       map[string]*runningEntry{},
+			Claimed:       map[string]struct{}{},
+			RetryAttempts: map[string]*RetryEntry{},
+			PullRequests: map[int]*pullRequestMonitorEntry{
+				31: {
+					Issue:          issue,
+					Branch:         "symphony/GH-2",
+					PullRequestURL: "https://github.com/owner/repo/pull/31",
+					Number:         31,
+				},
+			},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.handlePullRequestCheckDue(t.Context(), 31)
+
+	assert.Equal(t, 1, tracker.calls)
+	assert.Equal(t, 31, tracker.number)
+	assert.Equal(t, PullRequestNoChecksFail, tracker.policy.NoChecksPolicy)
+	assert.Equal(t, []string{"test", "build"}, tracker.policy.RequiredCheckNames)
+	assert.Equal(t, []string{"ci/*"}, tracker.policy.RequiredCheckPatterns)
+	assert.True(t, tracker.policy.DiscoverRequiredChecks)
+	assert.True(t, tracker.policy.ReworkOptionalChecks)
+	assert.False(t, tracker.policy.TreatAllReportedAsRequired)
 }
 
 func TestHandlePullRequestCheckDue_UpdatesBranchBeforeCompletingChecks(t *testing.T) {
@@ -582,6 +737,71 @@ func TestRecoverPullRequestMonitorTimersRearmsStaleMonitor(t *testing.T) {
 	assert.Contains(t, monitor.LastError, "recovered")
 	require.NotNil(t, monitor.Timer)
 	monitor.Timer.Stop()
+}
+
+func TestDebugSnapshotIncludesPullRequestCheckClassification(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	checks := PullRequestCheckSnapshot{
+		CheckedAt:                 time.Now().UTC(),
+		Summary:                   "failing required checks: test",
+		RequirementSource:         "config",
+		NoChecksPolicy:            string(PullRequestNoChecksPass),
+		BranchProtectionError:     "branch protection required status checks: HTTP 403",
+		RulesetError:              "ruleset required status checks: HTTP 403",
+		RequiredCheckNames:        []string{"test"},
+		RequiredFailedCheckNames:  []string{"test"},
+		OptionalFailedCheckNames:  []string{"optional-lint"},
+		PendingRequiredCheckNames: []string{"build"},
+		State:                     PullRequestChecksFailed,
+	}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: Config{
+				Publish: PublishConfig{
+					NoChecksPolicy:         PullRequestNoChecksPass,
+					RequiredCheckNames:     []string{"test"},
+					RequiredCheckPatterns:  []string{"ci/*"},
+					DiscoverRequiredChecks: true,
+					ReworkOptionalChecks:   false,
+				},
+			}},
+			loaded: true,
+		},
+		state: runtimeState{
+			PullRequests: map[int]*pullRequestMonitorEntry{31: {
+				Issue:        issue,
+				LastSnapshot: checks,
+				Number:       31,
+			}},
+			Claimed:       map[string]struct{}{},
+			Completed:     map[string]struct{}{},
+			RetryAttempts: map[string]*RetryEntry{},
+			Running:       map[string]*runningEntry{},
+			StartedAt:     time.Now(),
+		},
+	}
+
+	snapshot := orchestrator.buildDebugSnapshot(time.Now().UTC())
+
+	assert.Equal(t, []string{"test"}, snapshot.Config.PublishRequiredChecks)
+	assert.Equal(t, []string{"ci/*"}, snapshot.Config.PublishRequiredCheckPatterns)
+	assert.Equal(t, string(PullRequestNoChecksPass), snapshot.Config.PublishNoChecksPolicy)
+	require.Len(t, snapshot.PullRequests, 1)
+	assert.Equal(t, checks.RequiredFailedCheckNames, snapshot.PullRequests[0].LastSnapshot.RequiredFailedCheckNames)
+	assert.Equal(t, checks.OptionalFailedCheckNames, snapshot.PullRequests[0].LastSnapshot.OptionalFailedCheckNames)
+	assert.Equal(t, checks.RequirementSource, snapshot.PullRequests[0].LastSnapshot.RequirementSource)
+	assert.Equal(t, checks.BranchProtectionError, snapshot.PullRequests[0].LastSnapshot.BranchProtectionError)
+	assert.Equal(t, checks.RulesetError, snapshot.PullRequests[0].LastSnapshot.RulesetError)
+	statusSummary := strings.Join(snapshot.Summary.WhatIsGoingOn, "\n")
+	assert.Contains(t, statusSummary, "requirement source: config")
+	assert.Contains(t, statusSummary, "no-check policy: pass")
+	assert.Contains(t, statusSummary, "required failed: test")
+	assert.Contains(t, statusSummary, "required pending: build")
+	assert.Contains(t, statusSummary, "optional failed: optional-lint")
+	assert.Contains(t, statusSummary, "branch protection lookup error")
+	assert.Contains(t, statusSummary, "ruleset lookup error")
 }
 
 func TestHandlePullRequestCheckDue_CompletesClosedPullRequest(t *testing.T) {

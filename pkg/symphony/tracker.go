@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -799,11 +800,19 @@ func (c *GitHubClient) FetchPullRequest(ctx context.Context, number int) (GitHub
 // FetchPullRequestChecks returns a normalized snapshot of the current check
 // runs and legacy commit statuses for a PR head commit.
 func (c *GitHubClient) FetchPullRequestChecks(ctx context.Context, number int) (PullRequestCheckSnapshot, error) {
+	return c.FetchPullRequestChecksWithPolicy(ctx, number, legacyPullRequestCheckPolicy())
+}
+
+// FetchPullRequestChecksWithPolicy returns a normalized snapshot of the current
+// check runs and legacy commit statuses for a PR head commit using the supplied
+// required-check policy.
+func (c *GitHubClient) FetchPullRequestChecksWithPolicy(ctx context.Context, number int, policy PullRequestCheckPolicy) (PullRequestCheckSnapshot, error) {
 	pr, err := c.FetchPullRequest(ctx, number)
 	if err != nil {
 		return PullRequestCheckSnapshot{}, err
 	}
 
+	policy = normalizePullRequestCheckPolicy(policy)
 	snapshot := PullRequestCheckSnapshot{
 		CheckedAt:         time.Now().UTC(),
 		PullRequestNumber: pr.Number,
@@ -814,6 +823,7 @@ func (c *GitHubClient) FetchPullRequestChecks(ctx context.Context, number int) (
 		BaseSHA:           pr.Base.SHA,
 		MergeableState:    pr.MergeableState,
 		PullRequestClosed: strings.EqualFold(pr.State, "closed"),
+		NoChecksPolicy:    string(policy.NoChecksPolicy),
 	}
 	if snapshot.PullRequestClosed {
 		snapshot.State = PullRequestChecksPassed
@@ -866,69 +876,529 @@ func (c *GitHubClient) FetchPullRequestChecks(ctx context.Context, number int) (
 	}
 
 	for _, status := range statuses.Statuses {
-		snapshot.StatusContexts = append(snapshot.StatusContexts, PullRequestStatus(status))
+		snapshot.StatusContexts = append(snapshot.StatusContexts, PullRequestStatus{
+			Context:     status.Context,
+			State:       status.State,
+			Description: status.Description,
+			TargetURL:   status.TargetURL,
+		})
 	}
 
-	classifyPullRequestChecks(&snapshot)
+	if policy.DiscoverRequiredChecks {
+		discovery := c.fetchGitHubRequiredChecks(ctx, pr.Base.Ref)
+		policy.BranchProtectionCheckNames = append(policy.BranchProtectionCheckNames, discovery.branchProtectionChecks...)
+		policy.RulesetCheckNames = append(policy.RulesetCheckNames, discovery.rulesetChecks...)
+		if discovery.branchProtectionErr != nil {
+			snapshot.BranchProtectionError = discovery.branchProtectionErr.Error()
+		}
+		if discovery.rulesetErr != nil {
+			snapshot.RulesetError = discovery.rulesetErr.Error()
+		}
+	}
+
+	classifyPullRequestChecks(&snapshot, policy)
 	return snapshot, nil
 }
 
-func classifyPullRequestChecks(snapshot *PullRequestCheckSnapshot) {
+func classifyPullRequestChecks(snapshot *PullRequestCheckSnapshot, policy PullRequestCheckPolicy) {
 	if snapshot == nil {
 		return
 	}
 
+	resetPullRequestCheckClassification(snapshot)
+	policy = normalizePullRequestCheckPolicy(policy)
+	matcher := newRequiredCheckMatcher(policy)
+	snapshot.RequiredCheckNames = sortedStrings(matcher.exactNames())
+	snapshot.RequiredCheckPatterns = sortedStrings(matcher.patterns())
+	snapshot.RequirementSource = requirementSourceSummary(matcher.sources(), policy.TreatAllReportedAsRequired)
+	snapshot.NoChecksPolicy = string(policy.NoChecksPolicy)
+
 	total := len(snapshot.CheckRuns) + len(snapshot.StatusContexts)
 	if total == 0 {
-		snapshot.State = PullRequestChecksPending
-		snapshot.Summary = "no check runs or status contexts have been reported yet"
+		classifyNoReportedPullRequestChecks(snapshot, matcher)
 		return
 	}
 
-	var pending []string
-	for _, run := range snapshot.CheckRuns {
-		name := firstNonEmpty(run.Name, "unnamed check run")
-		switch {
-		case !strings.EqualFold(run.Status, "completed"):
-			pending = append(pending, name)
-		case isFailingCheckConclusion(run.Conclusion):
-			snapshot.FailedCheckNames = append(snapshot.FailedCheckNames, name)
-		case strings.TrimSpace(run.Conclusion) == "":
-			pending = append(pending, name)
-		}
-	}
-
-	for _, status := range snapshot.StatusContexts {
-		name := firstNonEmpty(status.Context, "unnamed status context")
-		switch normalizeState(status.State) {
-		case "success":
-		case "failure", "error":
-			snapshot.FailedCheckNames = append(snapshot.FailedCheckNames, name)
-		default:
-			pending = append(pending, name)
-		}
-	}
+	evidence := collectPullRequestCheckEvidence(snapshot, matcher)
+	snapshot.MissingRequiredCheckNames = matcher.missingRequired(evidence.observedRequired)
+	snapshot.OptionalFailedCheckNames = sortedStrings(evidence.optionalFailures)
+	snapshot.PendingOptionalCheckNames = sortedStrings(evidence.optionalPending)
+	snapshot.RequiredFailedCheckNames = sortedStrings(snapshot.RequiredFailedCheckNames)
+	snapshot.PendingRequiredCheckNames = sortedStrings(snapshot.PendingRequiredCheckNames)
 
 	switch {
-	case len(snapshot.FailedCheckNames) > 0:
+	case len(snapshot.RequiredFailedCheckNames) > 0:
+		snapshot.FailedCheckNames = append([]string(nil), snapshot.RequiredFailedCheckNames...)
 		snapshot.State = PullRequestChecksFailed
-		snapshot.Summary = "failing checks: " + strings.Join(snapshot.FailedCheckNames, ", ")
-	case len(pending) > 0:
+		snapshot.Summary = "failing required checks: " + strings.Join(snapshot.RequiredFailedCheckNames, ", ")
+	case len(snapshot.PendingRequiredCheckNames) > 0 || len(snapshot.MissingRequiredCheckNames) > 0:
 		snapshot.State = PullRequestChecksPending
-		snapshot.Summary = "pending checks: " + strings.Join(pending, ", ")
+		pending := append([]string(nil), snapshot.PendingRequiredCheckNames...)
+		pending = append(pending, snapshot.MissingRequiredCheckNames...)
+		snapshot.Summary = "pending required checks: " + strings.Join(sortedStrings(pending), ", ")
+	case policy.ReworkOptionalChecks && len(snapshot.OptionalFailedCheckNames) > 0:
+		snapshot.FailedCheckNames = append([]string(nil), snapshot.OptionalFailedCheckNames...)
+		snapshot.State = PullRequestChecksFailed
+		snapshot.Summary = "failing optional checks configured for rework: " + strings.Join(snapshot.OptionalFailedCheckNames, ", ")
+	case !matcher.hasRequiredChecks():
+		classifyNoRequiredPullRequestChecks(snapshot)
+	case len(snapshot.OptionalFailedCheckNames) > 0:
+		snapshot.State = PullRequestChecksPassed
+		snapshot.Summary = "required checks passed; optional failing checks: " + strings.Join(snapshot.OptionalFailedCheckNames, ", ")
+	case len(snapshot.PendingOptionalCheckNames) > 0:
+		snapshot.State = PullRequestChecksPassed
+		snapshot.Summary = "required checks passed; optional checks still pending: " + strings.Join(snapshot.PendingOptionalCheckNames, ", ")
 	default:
 		snapshot.State = PullRequestChecksPassed
-		snapshot.Summary = "all reported checks have passed"
+		snapshot.Summary = "all required checks have passed"
 	}
 }
 
-func isFailingCheckConclusion(conclusion string) bool {
-	switch normalizeState(conclusion) {
-	case "failure", "cancelled", "canceled", "timed_out", "action_required", "startup_failure", "stale":
-		return true
+func resetPullRequestCheckClassification(snapshot *PullRequestCheckSnapshot) {
+	snapshot.RequirementSource = ""
+	snapshot.NoChecksPolicy = ""
+	snapshot.RequiredCheckNames = nil
+	snapshot.RequiredCheckPatterns = nil
+	snapshot.FailedCheckNames = nil
+	snapshot.RequiredFailedCheckNames = nil
+	snapshot.OptionalFailedCheckNames = nil
+	snapshot.PendingRequiredCheckNames = nil
+	snapshot.MissingRequiredCheckNames = nil
+	snapshot.PendingOptionalCheckNames = nil
+}
+
+type pullRequestCheckEvidence struct {
+	observedRequired map[string]struct{}
+	optionalFailures []string
+	optionalPending  []string
+}
+
+func collectPullRequestCheckEvidence(snapshot *PullRequestCheckSnapshot, matcher requiredCheckMatcher) pullRequestCheckEvidence {
+	evidence := pullRequestCheckEvidence{observedRequired: map[string]struct{}{}}
+
+	for i := range snapshot.CheckRuns {
+		evidence.addCheckRun(snapshot, &snapshot.CheckRuns[i], matcher)
+	}
+
+	for i := range snapshot.StatusContexts {
+		evidence.addStatusContext(snapshot, &snapshot.StatusContexts[i], matcher)
+	}
+
+	return evidence
+}
+
+func (e *pullRequestCheckEvidence) addCheckRun(snapshot *PullRequestCheckSnapshot, run *PullRequestCheckRun, matcher requiredCheckMatcher) {
+	name := firstNonEmpty(run.Name, "unnamed check run")
+	required, source := matcher.match(name)
+	run.Required = required
+	run.RequirementSource = source
+	if required {
+		e.observedRequired[name] = struct{}{}
+	}
+
+	state := classifyCheckRunState(*run)
+	switch {
+	case required && state == pullRequestObservedCheckFailed:
+		snapshot.RequiredFailedCheckNames = append(snapshot.RequiredFailedCheckNames, name)
+	case required && state == pullRequestObservedCheckPending:
+		snapshot.PendingRequiredCheckNames = append(snapshot.PendingRequiredCheckNames, name)
+	case state == pullRequestObservedCheckFailed:
+		e.optionalFailures = append(e.optionalFailures, name)
+	case state == pullRequestObservedCheckPending:
+		e.optionalPending = append(e.optionalPending, name)
+	}
+}
+
+func (e *pullRequestCheckEvidence) addStatusContext(snapshot *PullRequestCheckSnapshot, status *PullRequestStatus, matcher requiredCheckMatcher) {
+	name := firstNonEmpty(status.Context, "unnamed status context")
+	required, source := matcher.match(name)
+	status.Required = required
+	status.RequirementSource = source
+	if required {
+		e.observedRequired[name] = struct{}{}
+	}
+
+	switch normalizeState(status.State) {
+	case "success":
+	case "failure", "error":
+		if required {
+			snapshot.RequiredFailedCheckNames = append(snapshot.RequiredFailedCheckNames, name)
+			return
+		}
+
+		e.optionalFailures = append(e.optionalFailures, name)
 	default:
+		if required {
+			snapshot.PendingRequiredCheckNames = append(snapshot.PendingRequiredCheckNames, name)
+			return
+		}
+
+		e.optionalPending = append(e.optionalPending, name)
+	}
+}
+
+func classifyNoReportedPullRequestChecks(snapshot *PullRequestCheckSnapshot, matcher requiredCheckMatcher) {
+	if matcher.hasNamedRequiredChecks() {
+		snapshot.MissingRequiredCheckNames = matcher.missingRequired(nil)
+		snapshot.State = PullRequestChecksPending
+		snapshot.Summary = "pending required checks: " + strings.Join(snapshot.MissingRequiredCheckNames, ", ")
+		return
+	}
+
+	switch PullRequestNoChecksPolicy(snapshot.NoChecksPolicy) {
+	case PullRequestNoChecksFail:
+		snapshot.State = PullRequestChecksFailed
+		snapshot.Summary = "no check runs or status contexts were reported and no-check policy is fail"
+		snapshot.FailedCheckNames = []string{"no reported checks"}
+	case PullRequestNoChecksPending:
+		snapshot.State = PullRequestChecksPending
+		snapshot.Summary = "no check runs or status contexts have been reported yet"
+	default:
+		snapshot.State = PullRequestChecksPassed
+		snapshot.Summary = "no required checks configured or discovered; no-check policy is pass"
+	}
+}
+
+func classifyNoRequiredPullRequestChecks(snapshot *PullRequestCheckSnapshot) {
+	switch PullRequestNoChecksPolicy(snapshot.NoChecksPolicy) {
+	case PullRequestNoChecksFail:
+		snapshot.State = PullRequestChecksFailed
+		snapshot.Summary = "reported checks are optional and no-check policy is fail"
+		snapshot.FailedCheckNames = []string{"no required checks"}
+	case PullRequestNoChecksPending:
+		snapshot.State = PullRequestChecksPending
+		snapshot.Summary = "reported checks are optional and no-check policy is pending"
+	case PullRequestNoChecksPass:
+		snapshot.State = PullRequestChecksPassed
+		switch {
+		case len(snapshot.OptionalFailedCheckNames) > 0:
+			snapshot.Summary = "no required checks configured or discovered; optional failing checks: " + strings.Join(snapshot.OptionalFailedCheckNames, ", ")
+		case len(snapshot.PendingOptionalCheckNames) > 0:
+			snapshot.Summary = "no required checks configured or discovered; optional checks still pending: " + strings.Join(snapshot.PendingOptionalCheckNames, ", ")
+		default:
+			snapshot.Summary = "no required checks configured or discovered; reported checks are optional"
+		}
+	default:
+		snapshot.State = PullRequestChecksPassed
+		snapshot.Summary = "no required checks configured or discovered; reported checks are optional"
+	}
+}
+
+type pullRequestObservedCheckState string
+
+const (
+	pullRequestObservedCheckPassed  pullRequestObservedCheckState = "passed"
+	pullRequestObservedCheckPending pullRequestObservedCheckState = "pending"
+	pullRequestObservedCheckFailed  pullRequestObservedCheckState = "failed"
+)
+
+func classifyCheckRunState(run PullRequestCheckRun) pullRequestObservedCheckState {
+	if !strings.EqualFold(run.Status, "completed") {
+		return pullRequestObservedCheckPending
+	}
+
+	switch normalizeState(run.Conclusion) {
+	case "success", "neutral", "skipped":
+		return pullRequestObservedCheckPassed
+	case "failure", "cancelled", "canceled", "timed_out", "action_required", "startup_failure", "stale":
+		return pullRequestObservedCheckFailed
+	case "":
+		return pullRequestObservedCheckPending
+	default:
+		return pullRequestObservedCheckFailed
+	}
+}
+
+func legacyPullRequestCheckPolicy() PullRequestCheckPolicy {
+	return PullRequestCheckPolicy{
+		NoChecksPolicy:             PullRequestNoChecksPending,
+		TreatAllReportedAsRequired: true,
+	}
+}
+
+func normalizePullRequestCheckPolicy(policy PullRequestCheckPolicy) PullRequestCheckPolicy {
+	policy.RequiredCheckNames = trimNonEmptyStrings(policy.RequiredCheckNames)
+	policy.RequiredCheckPatterns = trimNonEmptyStrings(policy.RequiredCheckPatterns)
+	policy.BranchProtectionCheckNames = trimNonEmptyStrings(policy.BranchProtectionCheckNames)
+	policy.RulesetCheckNames = trimNonEmptyStrings(policy.RulesetCheckNames)
+	if policy.NoChecksPolicy == "" {
+		policy.NoChecksPolicy = defaultNoChecksPolicy
+	}
+	return policy
+}
+
+type requiredCheckMatcher struct {
+	exact                    map[string][]string
+	requiredPatterns         []requiredCheckPattern
+	treatAllReportedRequired bool
+}
+
+type requiredCheckPattern struct {
+	pattern string
+	source  string
+}
+
+func newRequiredCheckMatcher(policy PullRequestCheckPolicy) requiredCheckMatcher {
+	matcher := requiredCheckMatcher{
+		exact:                    map[string][]string{},
+		treatAllReportedRequired: policy.TreatAllReportedAsRequired,
+	}
+
+	for _, name := range trimNonEmptyStrings(policy.RequiredCheckNames) {
+		matcher.addExact(name, "config")
+	}
+
+	for _, name := range trimNonEmptyStrings(policy.BranchProtectionCheckNames) {
+		matcher.addExact(name, "branch_protection")
+	}
+
+	for _, name := range trimNonEmptyStrings(policy.RulesetCheckNames) {
+		matcher.addExact(name, "ruleset")
+	}
+
+	for _, pattern := range trimNonEmptyStrings(policy.RequiredCheckPatterns) {
+		matcher.requiredPatterns = append(matcher.requiredPatterns, requiredCheckPattern{pattern: pattern, source: "config_pattern"})
+	}
+
+	return matcher
+}
+
+func (m requiredCheckMatcher) addExact(name, source string) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	m.exact[name] = append(m.exact[name], source)
+}
+
+func (m requiredCheckMatcher) hasRequiredChecks() bool {
+	return m.treatAllReportedRequired || len(m.exact) > 0 || len(m.requiredPatterns) > 0
+}
+
+func (m requiredCheckMatcher) hasNamedRequiredChecks() bool {
+	return len(m.exact) > 0 || len(m.requiredPatterns) > 0
+}
+
+func (m requiredCheckMatcher) match(name string) (bool, string) {
+	if m.treatAllReportedRequired {
+		return true, "all_reported"
+	}
+
+	var sources []string
+	if exactSources, ok := m.exact[name]; ok {
+		sources = append(sources, exactSources...)
+	}
+
+	for _, pattern := range m.requiredPatterns {
+		if wildcardMatch(pattern.pattern, name) {
+			sources = append(sources, pattern.source)
+		}
+	}
+
+	if len(sources) == 0 {
+		return false, "optional"
+	}
+
+	return true, strings.Join(sortedStrings(sources), ",")
+}
+
+func (m requiredCheckMatcher) missingRequired(observed map[string]struct{}) []string {
+	if m.treatAllReportedRequired {
+		return nil
+	}
+
+	var missing []string
+	for name := range m.exact {
+		if _, ok := observed[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+
+	for _, pattern := range m.requiredPatterns {
+		patternObserved := false
+		for name := range observed {
+			if wildcardMatch(pattern.pattern, name) {
+				patternObserved = true
+				break
+			}
+		}
+		if !patternObserved {
+			missing = append(missing, "pattern:"+pattern.pattern)
+		}
+	}
+
+	return sortedStrings(missing)
+}
+
+func (m requiredCheckMatcher) exactNames() []string {
+	names := make([]string, 0, len(m.exact))
+	for name := range m.exact {
+		names = append(names, name)
+	}
+	return names
+}
+
+func (m requiredCheckMatcher) patterns() []string {
+	patterns := make([]string, 0, len(m.requiredPatterns))
+	for _, pattern := range m.requiredPatterns {
+		patterns = append(patterns, pattern.pattern)
+	}
+	return patterns
+}
+
+func (m requiredCheckMatcher) sources() []string {
+	var sources []string
+	for _, exactSources := range m.exact {
+		sources = append(sources, exactSources...)
+	}
+	for _, pattern := range m.requiredPatterns {
+		sources = append(sources, pattern.source)
+	}
+	return sources
+}
+
+func requirementSourceSummary(sources []string, treatAllReported bool) string {
+	if treatAllReported {
+		return "all_reported"
+	}
+
+	sources = sortedStrings(sources)
+	if len(sources) == 0 {
+		return "none"
+	}
+
+	return strings.Join(sources, ",")
+}
+
+func wildcardMatch(pattern, value string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
 		return false
 	}
+
+	return wildcardMatchRunes([]rune(pattern), []rune(value))
+}
+
+func wildcardMatchRunes(pattern, value []rune) bool {
+	starIndex := -1
+	matchIndex := 0
+	patternIndex := 0
+	valueIndex := 0
+
+	for valueIndex < len(value) {
+		switch {
+		case patternIndex < len(pattern) && (pattern[patternIndex] == '?' || pattern[patternIndex] == value[valueIndex]):
+			patternIndex++
+			valueIndex++
+		case patternIndex < len(pattern) && pattern[patternIndex] == '*':
+			starIndex = patternIndex
+			matchIndex = valueIndex
+			patternIndex++
+		case starIndex != -1:
+			patternIndex = starIndex + 1
+			matchIndex++
+			valueIndex = matchIndex
+		default:
+			return false
+		}
+	}
+
+	for patternIndex < len(pattern) && pattern[patternIndex] == '*' {
+		patternIndex++
+	}
+
+	return patternIndex == len(pattern)
+}
+
+func sortedStrings(values []string) []string {
+	values = trimNonEmptyStrings(values)
+	sort.Strings(values)
+	return slices.Compact(values)
+}
+
+type githubRequiredCheckDiscovery struct {
+	branchProtectionErr    error
+	rulesetErr             error
+	branchProtectionChecks []string
+	rulesetChecks          []string
+}
+
+func (c *GitHubClient) fetchGitHubRequiredChecks(ctx context.Context, branch string) githubRequiredCheckDiscovery {
+	branchProtectionChecks, branchProtectionErr := c.fetchBranchProtectionRequiredChecks(ctx, branch)
+	rulesetChecks, rulesetErr := c.fetchRulesetRequiredChecks(ctx, branch)
+	return githubRequiredCheckDiscovery{
+		branchProtectionErr:    branchProtectionErr,
+		rulesetErr:             rulesetErr,
+		branchProtectionChecks: branchProtectionChecks,
+		rulesetChecks:          rulesetChecks,
+	}
+}
+
+func (c *GitHubClient) fetchBranchProtectionRequiredChecks(ctx context.Context, branch string) ([]string, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return nil, errors.New("branch protection lookup skipped: base branch is not available")
+	}
+
+	var payload githubRequiredStatusChecks
+	if err := c.get(ctx, fmt.Sprintf(
+		"/repos/%s/%s/branches/%s/protection/required_status_checks",
+		url.PathEscape(c.cfg.Owner),
+		url.PathEscape(c.cfg.Repo),
+		url.PathEscape(branch),
+	), &payload); err != nil {
+		var statusErr *githubAPIStatusError
+		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("branch protection required status checks: %w", err)
+	}
+
+	return payload.contexts(), nil
+}
+
+func (c *GitHubClient) fetchRulesetRequiredChecks(ctx context.Context, branch string) ([]string, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return nil, errors.New("ruleset lookup skipped: base branch is not available")
+	}
+
+	var contexts []string
+	for page := 1; ; page++ {
+		values := url.Values{}
+		values.Set("per_page", "100")
+		values.Set("page", strconv.Itoa(page))
+
+		var payload []githubBranchRule
+		if err := c.get(ctx, fmt.Sprintf(
+			"/repos/%s/%s/rules/branches/%s?%s",
+			url.PathEscape(c.cfg.Owner),
+			url.PathEscape(c.cfg.Repo),
+			url.PathEscape(branch),
+			values.Encode(),
+		), &payload); err != nil {
+			var statusErr *githubAPIStatusError
+			if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+				return nil, nil
+			}
+
+			return nil, fmt.Errorf("ruleset required status checks: %w", err)
+		}
+
+		for _, rule := range payload {
+			if rule.Type != "required_status_checks" {
+				continue
+			}
+
+			contexts = append(contexts, rule.Parameters.contexts()...)
+		}
+
+		if len(payload) < 100 {
+			break
+		}
+	}
+
+	return sortedStrings(contexts), nil
 }
 
 func pullRequestBranchUpdateReason(pr GitHubPullRequest) string {
@@ -1034,6 +1504,45 @@ type githubStatusContext struct {
 	State       string `json:"state"`
 	Description string `json:"description"`
 	TargetURL   string `json:"target_url"`
+}
+
+type githubRequiredStatusChecks struct {
+	Contexts []string                    `json:"contexts"`
+	Checks   []githubRequiredStatusCheck `json:"checks"`
+}
+
+type githubRequiredStatusCheck struct {
+	Context string `json:"context"`
+}
+
+func (c githubRequiredStatusChecks) contexts() []string {
+	out := append([]string(nil), c.Contexts...)
+	for _, check := range c.Checks {
+		out = append(out, check.Context)
+	}
+	return sortedStrings(out)
+}
+
+type githubBranchRule struct {
+	Parameters githubBranchRuleParameters `json:"parameters"`
+	Type       string                     `json:"type"`
+}
+
+type githubBranchRuleParameters struct {
+	RequiredStatusChecks []githubRulesetRequiredStatusCheck `json:"required_status_checks"`
+}
+
+type githubRulesetRequiredStatusCheck struct {
+	Context string `json:"context"`
+}
+
+func (p githubBranchRuleParameters) contexts() []string {
+	contexts := make([]string, 0, len(p.RequiredStatusChecks))
+	for _, check := range p.RequiredStatusChecks {
+		contexts = append(contexts, check.Context)
+	}
+
+	return sortedStrings(contexts)
 }
 
 func normalizeGitHubIssue(issue githubIssue) Issue {
