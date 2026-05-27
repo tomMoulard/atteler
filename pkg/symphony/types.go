@@ -34,6 +34,7 @@ const (
 	defaultDebugEventLimit   = 200
 	defaultPRCheckInterval   = 30 * time.Second
 	defaultMaxPRRework       = 3
+	defaultNoChecksPolicy    = PullRequestNoChecksPass
 	linearAPIKeyEnv          = "LINEAR_API_KEY" //nolint:gosec // Environment variable name, not a credential value.
 	githubTokenEnv           = "GITHUB_TOKEN"   //nolint:gosec // Environment variable name, not a credential value.
 	githubCLITokenEnv        = "GH_TOKEN"
@@ -133,12 +134,17 @@ type PublishConfig struct {
 	BranchPrefix           string
 	GitUserName            string
 	GitUserEmail           string
+	NoChecksPolicy         PullRequestNoChecksPolicy
 	RemoveLabels           []string
+	RequiredCheckNames     []string
+	RequiredCheckPatterns  []string
 	CheckInterval          time.Duration
 	MaxCheckReworkAttempts int
 	Enabled                bool
 	Draft                  bool
 	MonitorChecks          bool
+	DiscoverRequiredChecks bool
+	ReworkOptionalChecks   bool
 }
 
 // DebugConfig configures the local HTTP status/debug API.
@@ -240,13 +246,15 @@ const (
 // PullRequestReworkContext tells a worker why it is re-entering a published PR
 // branch and which checks need attention.
 type PullRequestReworkContext struct {
-	URL           string
-	Branch        string
-	HeadSHA       string
-	Summary       string
-	FailedChecks  []string
-	Number        int
-	ReworkAttempt int
+	URL                  string
+	Branch               string
+	HeadSHA              string
+	Summary              string
+	FailedChecks         []string
+	RequiredFailedChecks []string
+	OptionalFailedChecks []string
+	Number               int
+	ReworkAttempt        int
 }
 
 // PullRequestCheckState is Symphony's normalized view of GitHub PR checks.
@@ -255,50 +263,100 @@ type PullRequestCheckState string
 const (
 	// PullRequestChecksPending means at least one required check is not complete.
 	PullRequestChecksPending PullRequestCheckState = "pending"
-	// PullRequestChecksPassed means all observed checks passed.
+	// PullRequestChecksPassed means required checks passed or the configured
+	// no-check policy completed monitoring.
 	PullRequestChecksPassed PullRequestCheckState = "passed"
-	// PullRequestChecksFailed means at least one observed check failed.
+	// PullRequestChecksFailed means at least one required check failed, or
+	// optional/no-check failures are configured to fail monitoring.
 	PullRequestChecksFailed PullRequestCheckState = "failed"
 )
+
+// PullRequestNoChecksPolicy controls what the PR monitor does when no required
+// checks are configured, discovered, or reported for a repository.
+type PullRequestNoChecksPolicy string
+
+const (
+	// PullRequestNoChecksPass completes PR monitoring when no required checks
+	// exist for the head commit.
+	PullRequestNoChecksPass PullRequestNoChecksPolicy = "pass"
+	// PullRequestNoChecksPending preserves the legacy wait-for-CI behavior.
+	PullRequestNoChecksPending PullRequestNoChecksPolicy = "pending"
+	// PullRequestNoChecksFail dispatches rework when a workflow requires checks
+	// to exist but none are configured, discovered, or reported.
+	PullRequestNoChecksFail PullRequestNoChecksPolicy = "fail"
+)
+
+// PullRequestCheckPolicy configures how GitHub check runs and legacy commit
+// status contexts are separated into required and optional evidence.
+//
+// RequiredCheckPatterns use a small glob syntax where '*' matches any
+// substring and '?' matches one rune. The exported policy type lets the
+// orchestrator pass publish-monitor config without making GitHub tracker config
+// responsible for publish behavior.
+type PullRequestCheckPolicy struct {
+	NoChecksPolicy             PullRequestNoChecksPolicy
+	RequiredCheckNames         []string
+	RequiredCheckPatterns      []string
+	BranchProtectionCheckNames []string
+	RulesetCheckNames          []string
+	DiscoverRequiredChecks     bool
+	ReworkOptionalChecks       bool
+	TreatAllReportedAsRequired bool
+}
 
 // PullRequestCheckSnapshot is the GitHub evidence used by the PR remediation
 // lane and debug API.
 //
 //nolint:govet // Field order keeps timestamps and PR identity before check details for JSON/debug readability.
 type PullRequestCheckSnapshot struct {
-	CheckedAt          time.Time             `json:"checked_at"`
-	PullRequestURL     string                `json:"pull_request_url,omitempty"`
-	HeadRef            string                `json:"head_ref,omitempty"`
-	HeadSHA            string                `json:"head_sha,omitempty"`
-	BaseRef            string                `json:"base_ref,omitempty"`
-	BaseSHA            string                `json:"base_sha,omitempty"`
-	MergeableState     string                `json:"mergeable_state,omitempty"`
-	Summary            string                `json:"summary,omitempty"`
-	BranchUpdateReason string                `json:"branch_update_reason,omitempty"`
-	FailedCheckNames   []string              `json:"failed_check_names,omitempty"`
-	CheckRuns          []PullRequestCheckRun `json:"check_runs,omitempty"`
-	StatusContexts     []PullRequestStatus   `json:"status_contexts,omitempty"`
-	PullRequestNumber  int                   `json:"pull_request_number"`
-	State              PullRequestCheckState `json:"state"`
-	PullRequestClosed  bool                  `json:"pull_request_closed"`
-	NeedsBranchUpdate  bool                  `json:"needs_branch_update"`
+	CheckedAt                 time.Time             `json:"checked_at"`
+	PullRequestURL            string                `json:"pull_request_url,omitempty"`
+	HeadRef                   string                `json:"head_ref,omitempty"`
+	HeadSHA                   string                `json:"head_sha,omitempty"`
+	BaseRef                   string                `json:"base_ref,omitempty"`
+	BaseSHA                   string                `json:"base_sha,omitempty"`
+	MergeableState            string                `json:"mergeable_state,omitempty"`
+	Summary                   string                `json:"summary,omitempty"`
+	BranchUpdateReason        string                `json:"branch_update_reason,omitempty"`
+	RequirementSource         string                `json:"requirement_source,omitempty"`
+	NoChecksPolicy            string                `json:"no_checks_policy,omitempty"`
+	BranchProtectionError     string                `json:"branch_protection_error,omitempty"`
+	RulesetError              string                `json:"ruleset_error,omitempty"`
+	RequiredCheckNames        []string              `json:"required_check_names,omitempty"`
+	RequiredCheckPatterns     []string              `json:"required_check_patterns,omitempty"`
+	FailedCheckNames          []string              `json:"failed_check_names,omitempty"`
+	RequiredFailedCheckNames  []string              `json:"required_failed_check_names,omitempty"`
+	OptionalFailedCheckNames  []string              `json:"optional_failed_check_names,omitempty"`
+	PendingRequiredCheckNames []string              `json:"pending_required_check_names,omitempty"`
+	MissingRequiredCheckNames []string              `json:"missing_required_check_names,omitempty"`
+	PendingOptionalCheckNames []string              `json:"pending_optional_check_names,omitempty"`
+	CheckRuns                 []PullRequestCheckRun `json:"check_runs,omitempty"`
+	StatusContexts            []PullRequestStatus   `json:"status_contexts,omitempty"`
+	PullRequestNumber         int                   `json:"pull_request_number"`
+	State                     PullRequestCheckState `json:"state"`
+	PullRequestClosed         bool                  `json:"pull_request_closed"`
+	NeedsBranchUpdate         bool                  `json:"needs_branch_update"`
 }
 
 // PullRequestCheckRun is a single GitHub Checks API run.
 type PullRequestCheckRun struct {
-	Name       string `json:"name"`
-	Status     string `json:"status,omitempty"`
-	Conclusion string `json:"conclusion,omitempty"`
-	DetailsURL string `json:"details_url,omitempty"`
-	HTMLURL    string `json:"html_url,omitempty"`
+	Name              string `json:"name"`
+	Status            string `json:"status,omitempty"`
+	Conclusion        string `json:"conclusion,omitempty"`
+	DetailsURL        string `json:"details_url,omitempty"`
+	HTMLURL           string `json:"html_url,omitempty"`
+	RequirementSource string `json:"requirement_source,omitempty"`
+	Required          bool   `json:"required"`
 }
 
 // PullRequestStatus is a single legacy GitHub commit-status context.
 type PullRequestStatus struct {
-	Context     string `json:"context"`
-	State       string `json:"state,omitempty"`
-	Description string `json:"description,omitempty"`
-	TargetURL   string `json:"target_url,omitempty"`
+	Context           string `json:"context"`
+	State             string `json:"state,omitempty"`
+	Description       string `json:"description,omitempty"`
+	TargetURL         string `json:"target_url,omitempty"`
+	RequirementSource string `json:"requirement_source,omitempty"`
+	Required          bool   `json:"required"`
 }
 
 // MonitoredPullRequest ties an open GitHub PR back to the issue branch

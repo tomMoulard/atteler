@@ -15,6 +15,11 @@ publish:
   draft: false
   remove_labels: [symphony]
   monitor_checks: true
+  required_checks: []
+  required_check_patterns: []
+  discover_required_checks: true
+  no_checks_policy: pass
+  rework_optional_checks: false
   check_interval_ms: 30000
   max_check_rework_attempts: 3
 debug:

@@ -351,6 +351,11 @@ type rawPublishConfig struct {
 	Draft                  *bool    `yaml:"draft"`
 	MonitorChecks          *bool    `yaml:"monitor_checks"`
 	RemoveLabels           []string `yaml:"remove_labels"`
+	RequiredCheckNames     []string `yaml:"required_checks"`
+	RequiredCheckPatterns  []string `yaml:"required_check_patterns"`
+	NoChecksPolicy         *string  `yaml:"no_checks_policy"`
+	DiscoverRequiredChecks *bool    `yaml:"discover_required_checks"`
+	ReworkOptionalChecks   *bool    `yaml:"rework_optional_checks"`
 	GitUserName            *string  `yaml:"git_user_name"`
 	GitUserEmail           *string  `yaml:"git_user_email"`
 	CheckIntervalMS        *int     `yaml:"check_interval_ms"`
@@ -426,11 +431,13 @@ func ResolveConfig(ctx context.Context, config map[string]any, workflowPath stri
 			Root: filepath.Join(os.TempDir(), "symphony_workspaces"),
 		},
 		Publish: PublishConfig{
-			Remote:       "origin",
-			BaseBranch:   "main",
-			BranchPrefix: "symphony",
-			GitUserName:  "Atteler Symphony",
-			GitUserEmail: "symphony@users.noreply.github.com",
+			Remote:                 "origin",
+			BaseBranch:             "main",
+			BranchPrefix:           "symphony",
+			GitUserName:            "Atteler Symphony",
+			GitUserEmail:           "symphony@users.noreply.github.com",
+			NoChecksPolicy:         defaultNoChecksPolicy,
+			DiscoverRequiredChecks: true,
 		},
 		Debug: DebugConfig{
 			Address:    defaultDebugAddress,
@@ -543,6 +550,26 @@ func applyRawConfig(cfg *Config, raw rawConfig) {
 
 	if len(raw.Publish.RemoveLabels) > 0 {
 		cfg.Publish.RemoveLabels = trimNonEmptyStrings(raw.Publish.RemoveLabels)
+	}
+
+	if len(raw.Publish.RequiredCheckNames) > 0 {
+		cfg.Publish.RequiredCheckNames = trimNonEmptyStrings(raw.Publish.RequiredCheckNames)
+	}
+
+	if len(raw.Publish.RequiredCheckPatterns) > 0 {
+		cfg.Publish.RequiredCheckPatterns = trimNonEmptyStrings(raw.Publish.RequiredCheckPatterns)
+	}
+
+	if raw.Publish.NoChecksPolicy != nil {
+		cfg.Publish.NoChecksPolicy = PullRequestNoChecksPolicy(strings.ToLower(strings.TrimSpace(*raw.Publish.NoChecksPolicy)))
+	}
+
+	if raw.Publish.DiscoverRequiredChecks != nil {
+		cfg.Publish.DiscoverRequiredChecks = *raw.Publish.DiscoverRequiredChecks
+	}
+
+	if raw.Publish.ReworkOptionalChecks != nil {
+		cfg.Publish.ReworkOptionalChecks = *raw.Publish.ReworkOptionalChecks
 	}
 
 	if raw.Publish.GitUserName != nil {
@@ -800,6 +827,10 @@ func resolvePublishDefaults(cfg *Config) {
 	cfg.Publish.BranchPrefix = firstNonEmpty(cfg.Publish.BranchPrefix, "symphony")
 	cfg.Publish.GitUserName = firstNonEmpty(cfg.Publish.GitUserName, "Atteler Symphony")
 	cfg.Publish.GitUserEmail = firstNonEmpty(cfg.Publish.GitUserEmail, "symphony@users.noreply.github.com")
+	if cfg.Publish.NoChecksPolicy == "" {
+		cfg.Publish.NoChecksPolicy = defaultNoChecksPolicy
+	}
+
 	if cfg.Publish.CheckInterval <= 0 {
 		cfg.Publish.CheckInterval = defaultPRCheckInterval
 	}
@@ -924,6 +955,12 @@ func (cfg Config) validatePublishConfig() error {
 
 		if cfg.Publish.MaxCheckReworkAttempts <= 0 {
 			return errors.New("publish.max_check_rework_attempts must be > 0 when publish.monitor_checks is true")
+		}
+
+		switch cfg.Publish.NoChecksPolicy {
+		case PullRequestNoChecksPass, PullRequestNoChecksPending, PullRequestNoChecksFail:
+		default:
+			return fmt.Errorf("publish.no_checks_policy must be one of pass, pending, fail when publish.monitor_checks is true: %s", cfg.Publish.NoChecksPolicy)
 		}
 	}
 

@@ -3,6 +3,7 @@ package symphony
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,7 +15,14 @@ import (
 	"github.com/tommoulard/atteler/pkg/watch"
 )
 
-const testGitHubIssuesPath = "/repos/owner/repo/issues"
+const (
+	testGitHubIssuesPath       = "/repos/owner/repo/issues"
+	testGitHubPullRequestPath  = "/repos/owner/repo/pulls/31"
+	testGitHubCheckRunsPath    = "/repos/owner/repo/commits/abc123/check-runs"
+	testGitHubCommitStatusPath = "/repos/owner/repo/commits/abc123/status"
+	testGitHubProtectionPath   = "/repos/owner/repo/branches/main/protection/required_status_checks"
+	testGitHubRulesPath        = "/repos/owner/repo/rules/branches/main"
+)
 
 func TestTrackerClients_RequireActiveContext(t *testing.T) {
 	t.Parallel()
@@ -53,11 +61,11 @@ func TestGitHubClient_FetchPullRequestChecksClassifiesFailure(t *testing.T) {
 		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
 
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/pulls/31":
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
 			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"}}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/commits/abc123/check-runs":
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
 			writeTestResponse(t, w, `{"check_runs":[{"name":"test","status":"completed","conclusion":"failure","details_url":"https://ci.example/test"},{"name":"lint","status":"completed","conclusion":"success"}]}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/commits/abc123/status":
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
 			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
 		default:
 			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
@@ -82,6 +90,770 @@ func TestGitHubClient_FetchPullRequestChecksClassifiesFailure(t *testing.T) {
 	assert.Contains(t, checks.Summary, "test")
 }
 
+func TestGitHubClient_FetchPullRequestChecksPassesNoCheckRepoByPolicy(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy: PullRequestNoChecksPass,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksPassed, checks.State)
+	assert.Equal(t, "none", checks.RequirementSource)
+	assert.Equal(t, string(PullRequestNoChecksPass), checks.NoChecksPolicy)
+	assert.Empty(t, checks.FailedCheckNames)
+	assert.Contains(t, checks.Summary, "no required checks")
+}
+
+func TestClassifyPullRequestChecksHonorsNoChecksPolicies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		policy       PullRequestNoChecksPolicy
+		expected     PullRequestCheckState
+		failedChecks []string
+	}{
+		{
+			policy:   PullRequestNoChecksPass,
+			expected: PullRequestChecksPassed,
+		},
+		{
+			policy:   PullRequestNoChecksPending,
+			expected: PullRequestChecksPending,
+		},
+		{
+			policy:       PullRequestNoChecksFail,
+			expected:     PullRequestChecksFailed,
+			failedChecks: []string{"no reported checks"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(string(test.policy), func(t *testing.T) {
+			t.Parallel()
+
+			checks := PullRequestCheckSnapshot{}
+			classifyPullRequestChecks(&checks, PullRequestCheckPolicy{
+				NoChecksPolicy: test.policy,
+			})
+
+			assert.Equal(t, test.expected, checks.State)
+			assert.Equal(t, string(test.policy), checks.NoChecksPolicy)
+			assert.Equal(t, test.failedChecks, checks.FailedCheckNames)
+		})
+	}
+}
+
+func TestClassifyPullRequestChecksHonorsNoChecksPoliciesWhenOnlyOptionalChecksReported(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		policy       PullRequestNoChecksPolicy
+		expected     PullRequestCheckState
+		failedChecks []string
+	}{
+		{
+			policy:   PullRequestNoChecksPass,
+			expected: PullRequestChecksPassed,
+		},
+		{
+			policy:   PullRequestNoChecksPending,
+			expected: PullRequestChecksPending,
+		},
+		{
+			policy:       PullRequestNoChecksFail,
+			expected:     PullRequestChecksFailed,
+			failedChecks: []string{"no required checks"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(string(test.policy), func(t *testing.T) {
+			t.Parallel()
+
+			checks := PullRequestCheckSnapshot{
+				CheckRuns: []PullRequestCheckRun{{
+					Name:       "optional-lint",
+					Status:     "completed",
+					Conclusion: "failure",
+				}},
+			}
+			classifyPullRequestChecks(&checks, PullRequestCheckPolicy{
+				NoChecksPolicy: test.policy,
+			})
+
+			assert.Equal(t, test.expected, checks.State)
+			assert.Equal(t, string(test.policy), checks.NoChecksPolicy)
+			assert.Equal(t, test.failedChecks, checks.FailedCheckNames)
+			assert.Equal(t, []string{"optional-lint"}, checks.OptionalFailedCheckNames)
+			assert.Equal(t, "none", checks.RequirementSource)
+		})
+	}
+}
+
+func TestClassifyPullRequestChecksTreatAllReportedUsesNoChecksPolicyWhenNoneReported(t *testing.T) {
+	t.Parallel()
+
+	checks := PullRequestCheckSnapshot{}
+	classifyPullRequestChecks(&checks, PullRequestCheckPolicy{
+		NoChecksPolicy:             PullRequestNoChecksPending,
+		TreatAllReportedAsRequired: true,
+	})
+
+	assert.Equal(t, PullRequestChecksPending, checks.State)
+	assert.Empty(t, checks.MissingRequiredCheckNames)
+	assert.Equal(t, "no check runs or status contexts have been reported yet", checks.Summary)
+}
+
+func TestClassifyPullRequestChecksMarksConfiguredRequiredChecksMissingWhenNoneReported(t *testing.T) {
+	t.Parallel()
+
+	checks := PullRequestCheckSnapshot{}
+	classifyPullRequestChecks(&checks, PullRequestCheckPolicy{
+		NoChecksPolicy:     PullRequestNoChecksPass,
+		RequiredCheckNames: []string{"test"},
+	})
+
+	assert.Equal(t, PullRequestChecksPending, checks.State)
+	assert.Equal(t, []string{"test"}, checks.MissingRequiredCheckNames)
+	assert.Contains(t, checks.Summary, "pending required checks")
+}
+
+func TestClassifyPullRequestChecksMarksConfiguredRequiredPatternsMissingWhenNoneReported(t *testing.T) {
+	t.Parallel()
+
+	checks := PullRequestCheckSnapshot{}
+	classifyPullRequestChecks(&checks, PullRequestCheckPolicy{
+		NoChecksPolicy:        PullRequestNoChecksPass,
+		RequiredCheckPatterns: []string{"ci/*"},
+	})
+
+	assert.Equal(t, PullRequestChecksPending, checks.State)
+	assert.Equal(t, []string{"pattern:ci/*"}, checks.MissingRequiredCheckNames)
+	assert.Contains(t, checks.Summary, "pending required checks")
+}
+
+func TestGitHubClient_FetchPullRequestChecksReportsOptionalFailuresWithoutFailing(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[{"name":"optional-lint","status":"completed","conclusion":"failure"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy: PullRequestNoChecksPass,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksPassed, checks.State)
+	assert.Empty(t, checks.FailedCheckNames)
+	assert.Equal(t, []string{"optional-lint"}, checks.OptionalFailedCheckNames)
+	require.Len(t, checks.CheckRuns, 1)
+	assert.False(t, checks.CheckRuns[0].Required)
+	assert.Equal(t, "optional", checks.CheckRuns[0].RequirementSource)
+	assert.Contains(t, checks.Summary, "optional failing checks")
+}
+
+func TestClassifyPullRequestChecksCanReworkOptionalFailuresByPolicy(t *testing.T) {
+	t.Parallel()
+
+	checks := PullRequestCheckSnapshot{
+		CheckRuns: []PullRequestCheckRun{{
+			Name:       "optional-lint",
+			Status:     "completed",
+			Conclusion: "failure",
+		}},
+	}
+
+	classifyPullRequestChecks(&checks, PullRequestCheckPolicy{
+		NoChecksPolicy:       PullRequestNoChecksPass,
+		ReworkOptionalChecks: true,
+	})
+
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, []string{"optional-lint"}, checks.FailedCheckNames)
+	assert.Equal(t, []string{"optional-lint"}, checks.OptionalFailedCheckNames)
+	assert.Empty(t, checks.RequiredFailedCheckNames)
+	assert.Contains(t, checks.Summary, "optional checks configured for rework")
+}
+
+func TestGitHubClient_FetchPullRequestChecksFailsRequiredChecksOnly(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[{"name":"test","status":"completed","conclusion":"failure"},{"name":"optional-lint","status":"completed","conclusion":"failure"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy:     PullRequestNoChecksPass,
+		RequiredCheckNames: []string{"test"},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, []string{"test"}, checks.FailedCheckNames)
+	assert.Equal(t, []string{"test"}, checks.RequiredFailedCheckNames)
+	assert.Equal(t, []string{"optional-lint"}, checks.OptionalFailedCheckNames)
+	require.Len(t, checks.CheckRuns, 2)
+	assert.True(t, checks.CheckRuns[0].Required)
+	assert.Equal(t, "config", checks.CheckRuns[0].RequirementSource)
+	assert.False(t, checks.CheckRuns[1].Required)
+}
+
+func TestClassifyPullRequestChecksClassifiesLegacyStatusContexts(t *testing.T) {
+	t.Parallel()
+
+	checks := PullRequestCheckSnapshot{
+		StatusContexts: []PullRequestStatus{
+			{Context: "status/test", State: "failure"},
+			{Context: "status/optional", State: "failure"},
+		},
+	}
+
+	classifyPullRequestChecks(&checks, PullRequestCheckPolicy{
+		NoChecksPolicy:     PullRequestNoChecksPass,
+		RequiredCheckNames: []string{"status/test"},
+	})
+
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, []string{"status/test"}, checks.FailedCheckNames)
+	assert.Equal(t, []string{"status/test"}, checks.RequiredFailedCheckNames)
+	assert.Equal(t, []string{"status/optional"}, checks.OptionalFailedCheckNames)
+	require.Len(t, checks.StatusContexts, 2)
+	assert.True(t, checks.StatusContexts[0].Required)
+	assert.Equal(t, "config", checks.StatusContexts[0].RequirementSource)
+	assert.False(t, checks.StatusContexts[1].Required)
+	assert.Equal(t, "optional", checks.StatusContexts[1].RequirementSource)
+}
+
+func TestClassifyPullRequestChecksSupportsRequiredCheckPatterns(t *testing.T) {
+	t.Parallel()
+
+	checks := PullRequestCheckSnapshot{
+		CheckRuns: []PullRequestCheckRun{{
+			Name:       "ci/test",
+			Status:     "completed",
+			Conclusion: "failure",
+		}},
+	}
+
+	classifyPullRequestChecks(&checks, PullRequestCheckPolicy{
+		NoChecksPolicy:        PullRequestNoChecksPass,
+		RequiredCheckPatterns: []string{"ci/*"},
+	})
+
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, []string{"ci/test"}, checks.RequiredFailedCheckNames)
+	assert.Equal(t, []string{"ci/*"}, checks.RequiredCheckPatterns)
+	require.Len(t, checks.CheckRuns, 1)
+	assert.True(t, checks.CheckRuns[0].Required)
+	assert.Equal(t, "config_pattern", checks.CheckRuns[0].RequirementSource)
+}
+
+func TestGitHubClient_FetchPullRequestChecksTreatsNeutralAndSkippedAsPassing(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[{"name":"lint","status":"completed","conclusion":"neutral"},{"name":"docs","status":"completed","conclusion":"skipped"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy:     PullRequestNoChecksPass,
+		RequiredCheckNames: []string{"lint", "docs"},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksPassed, checks.State)
+	assert.Empty(t, checks.FailedCheckNames)
+	assert.Empty(t, checks.PendingRequiredCheckNames)
+	assert.Contains(t, checks.Summary, "all required checks")
+}
+
+func TestClassifyPullRequestChecksTreatsUnknownConclusionsAsFailing(t *testing.T) {
+	t.Parallel()
+
+	checks := PullRequestCheckSnapshot{
+		CheckRuns: []PullRequestCheckRun{{
+			Name:       "experimental",
+			Status:     "completed",
+			Conclusion: "unexpected_new_conclusion",
+		}},
+	}
+
+	classifyPullRequestChecks(&checks, PullRequestCheckPolicy{
+		NoChecksPolicy:     PullRequestNoChecksPass,
+		RequiredCheckNames: []string{"experimental"},
+	})
+
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, []string{"experimental"}, checks.RequiredFailedCheckNames)
+	assert.Contains(t, checks.Summary, "failing required checks")
+}
+
+func TestClassifyCheckRunStateAppliesDocumentedConclusionPolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		status     string
+		conclusion string
+		expected   pullRequestObservedCheckState
+	}{
+		{name: "success passes", status: "completed", conclusion: "success", expected: pullRequestObservedCheckPassed},
+		{name: "neutral passes", status: "completed", conclusion: "neutral", expected: pullRequestObservedCheckPassed},
+		{name: "skipped passes", status: "completed", conclusion: "skipped", expected: pullRequestObservedCheckPassed},
+		{name: "failure fails", status: "completed", conclusion: "failure", expected: pullRequestObservedCheckFailed},
+		{
+			name:       "GitHub cancellation conclusion fails",
+			status:     "completed",
+			conclusion: "cancelled", //nolint:misspell // Exact GitHub Checks API token.
+			expected:   pullRequestObservedCheckFailed,
+		},
+		{name: "canceled alias fails", status: "completed", conclusion: "canceled", expected: pullRequestObservedCheckFailed},
+		{name: "timed out fails", status: "completed", conclusion: "timed_out", expected: pullRequestObservedCheckFailed},
+		{name: "action required fails", status: "completed", conclusion: "action_required", expected: pullRequestObservedCheckFailed},
+		{name: "blank completed is pending", status: "completed", expected: pullRequestObservedCheckPending},
+		{name: "in progress is pending", status: "in_progress", expected: pullRequestObservedCheckPending},
+		{name: "unknown fails closed", status: "completed", conclusion: "new_conclusion", expected: pullRequestObservedCheckFailed},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := classifyCheckRunState(PullRequestCheckRun{Status: test.status, Conclusion: test.conclusion})
+
+			assert.Equal(t, test.expected, actual)
+		})
+	}
+}
+
+func TestGitHubClient_FetchPullRequestChecksUsesBranchProtectionRequiredChecks(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[{"name":"test","status":"completed","conclusion":"failure"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubProtectionPath:
+			writeTestResponse(t, w, `{"contexts":["test"],"checks":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubRulesPath:
+			writeTestResponse(t, w, `[]`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy:         PullRequestNoChecksPass,
+		DiscoverRequiredChecks: true,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, "branch_protection", checks.RequirementSource)
+	assert.Equal(t, []string{"test"}, checks.RequiredCheckNames)
+	assert.Equal(t, []string{"test"}, checks.RequiredFailedCheckNames)
+	require.Len(t, checks.CheckRuns, 1)
+	assert.True(t, checks.CheckRuns[0].Required)
+	assert.Equal(t, "branch_protection", checks.CheckRuns[0].RequirementSource)
+}
+
+func TestGitHubRequiredStatusChecksContextsIncludesChecksArray(t *testing.T) {
+	t.Parallel()
+
+	payload := githubRequiredStatusChecks{
+		Contexts: []string{"legacy-status"},
+		Checks: []githubRequiredStatusCheck{{
+			Context: "github-actions",
+		}},
+	}
+
+	assert.Equal(t, []string{"github-actions", "legacy-status"}, payload.contexts())
+}
+
+func TestGitHubClient_FetchPullRequestChecksWaitsForDiscoveredRequiredChecks(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubProtectionPath:
+			writeTestResponse(t, w, `{"contexts":["test"],"checks":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubRulesPath:
+			writeTestResponse(t, w, `[]`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy:         PullRequestNoChecksPass,
+		DiscoverRequiredChecks: true,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksPending, checks.State)
+	assert.Equal(t, "branch_protection", checks.RequirementSource)
+	assert.Equal(t, []string{"test"}, checks.RequiredCheckNames)
+	assert.Equal(t, []string{"test"}, checks.MissingRequiredCheckNames)
+	assert.Empty(t, checks.FailedCheckNames)
+	assert.Contains(t, checks.Summary, "pending required checks")
+}
+
+func TestGitHubClient_FetchPullRequestChecksUsesRulesetRequiredChecks(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[{"name":"test","status":"completed","conclusion":"failure"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubProtectionPath:
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubRulesPath:
+			writeTestResponse(t, w, `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test"}]}}]`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy:         PullRequestNoChecksPass,
+		DiscoverRequiredChecks: true,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, "ruleset", checks.RequirementSource)
+	assert.Equal(t, []string{"test"}, checks.RequiredCheckNames)
+	assert.Equal(t, []string{"test"}, checks.RequiredFailedCheckNames)
+	require.Len(t, checks.CheckRuns, 1)
+	assert.True(t, checks.CheckRuns[0].Required)
+	assert.Equal(t, "ruleset", checks.CheckRuns[0].RequirementSource)
+}
+
+func TestGitHubClient_FetchPullRequestChecksCombinesRequirementSources(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[{"name":"test","status":"completed","conclusion":"failure"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubProtectionPath:
+			writeTestResponse(t, w, `{"contexts":["test"],"checks":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubRulesPath:
+			writeTestResponse(t, w, `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test"}]}}]`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy:         PullRequestNoChecksPass,
+		RequiredCheckNames:     []string{"test"},
+		DiscoverRequiredChecks: true,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, "branch_protection,config,ruleset", checks.RequirementSource)
+	assert.Equal(t, []string{"test"}, checks.RequiredCheckNames)
+	require.Len(t, checks.CheckRuns, 1)
+	assert.True(t, checks.CheckRuns[0].Required)
+	assert.Equal(t, "branch_protection,config,ruleset", checks.CheckRuns[0].RequirementSource)
+}
+
+func TestGitHubClient_FetchPullRequestChecksPaginatesRulesetRequiredChecks(t *testing.T) {
+	t.Parallel()
+
+	rulesRequests := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[{"name":"late-required","status":"completed","conclusion":"failure"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubProtectionPath:
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubRulesPath:
+			rulesRequests++
+
+			assert.Equal(t, "100", r.URL.Query().Get("per_page"))
+
+			switch r.URL.Query().Get("page") {
+			case "1":
+				writeTestResponse(t, w, testGitHubRulesPayload(100, "pull_request", "ignored"))
+			case "2":
+				writeTestResponse(t, w, testGitHubRulesPayload(1, "required_status_checks", "late-required"))
+			default:
+				t.Errorf("unexpected rules page: %s", r.URL.RawQuery)
+				http.NotFound(w, r)
+			}
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy:         PullRequestNoChecksPass,
+		DiscoverRequiredChecks: true,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, rulesRequests)
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, "ruleset", checks.RequirementSource)
+	assert.Equal(t, []string{"late-required"}, checks.RequiredCheckNames)
+	assert.Equal(t, []string{"late-required"}, checks.RequiredFailedCheckNames)
+}
+
+func TestGitHubClient_FetchPullRequestChecksReportsBranchProtectionLookupErrors(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubProtectionPath:
+			http.Error(w, `{"message":"Resource not accessible by integration"}`, http.StatusForbidden)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubRulesPath:
+			writeTestResponse(t, w, `[]`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy:         PullRequestNoChecksPass,
+		DiscoverRequiredChecks: true,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksPassed, checks.State)
+	assert.Equal(t, "none", checks.RequirementSource)
+	assert.Contains(t, checks.BranchProtectionError, "HTTP 403")
+	assert.Contains(t, checks.BranchProtectionError, "Resource not accessible")
+	assert.Empty(t, checks.RulesetError)
+}
+
+func TestGitHubClient_FetchPullRequestChecksReportsRulesetLookupErrors(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"check_runs":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","statuses":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubProtectionPath:
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubRulesPath:
+			http.Error(w, `{"message":"Resource not accessible by integration"}`, http.StatusForbidden)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		NoChecksPolicy:         PullRequestNoChecksPass,
+		DiscoverRequiredChecks: true,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, PullRequestChecksPassed, checks.State)
+	assert.Equal(t, "none", checks.RequirementSource)
+	assert.Empty(t, checks.BranchProtectionError)
+	assert.Contains(t, checks.RulesetError, "HTTP 403")
+	assert.Contains(t, checks.RulesetError, "Resource not accessible")
+}
+
 func TestGitHubClient_FetchPullRequestChecksFlagsBranchUpdate(t *testing.T) {
 	t.Parallel()
 
@@ -89,7 +861,7 @@ func TestGitHubClient_FetchPullRequestChecksFlagsBranchUpdate(t *testing.T) {
 		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
 
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/pulls/31":
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
 			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","mergeable_state":"behind","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
 		default:
 			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
@@ -374,6 +1146,15 @@ func writeGitHubIssue(t *testing.T, w http.ResponseWriter, body string) {
 	t.Helper()
 
 	writeGitHubIssueWithState(t, w, body, "open")
+}
+
+func testGitHubRulesPayload(count int, ruleType, checkContext string) string {
+	rules := make([]string, 0, count)
+	for range count {
+		rules = append(rules, fmt.Sprintf(`{"type":%q,"parameters":{"required_status_checks":[{"context":%q}]}}`, ruleType, checkContext))
+	}
+
+	return `[` + strings.Join(rules, ",") + `]`
 }
 
 func writeGitHubIssueListWithState(t *testing.T, w http.ResponseWriter, body, state string) {

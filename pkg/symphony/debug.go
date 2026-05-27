@@ -71,9 +71,14 @@ type DebugConfigSnapshot struct {
 	PublishBaseBranch             string   `json:"publish_base_branch,omitempty"`
 	PublishBranchPrefix           string   `json:"publish_branch_prefix,omitempty"`
 	PublishRemoveLabels           []string `json:"publish_remove_labels,omitempty"`
+	PublishRequiredChecks         []string `json:"publish_required_checks,omitempty"`
+	PublishRequiredCheckPatterns  []string `json:"publish_required_check_patterns,omitempty"`
+	PublishNoChecksPolicy         string   `json:"publish_no_checks_policy,omitempty"`
 	PublishMonitorChecks          bool     `json:"publish_monitor_checks"`
 	PublishCheckIntervalMS        int64    `json:"publish_check_interval_ms,omitempty"`
 	PublishMaxCheckReworkAttempts int      `json:"publish_max_check_rework_attempts,omitempty"`
+	PublishDiscoverRequiredChecks bool     `json:"publish_discover_required_checks"`
+	PublishReworkOptionalChecks   bool     `json:"publish_rework_optional_checks"`
 	DebugEnabled                  bool     `json:"debug_enabled"`
 	DebugAddress                  string   `json:"debug_address,omitempty"`
 }
@@ -536,9 +541,14 @@ func debugConfigSnapshot(cfg Config) DebugConfigSnapshot {
 		PublishBaseBranch:             cfg.Publish.BaseBranch,
 		PublishBranchPrefix:           cfg.Publish.BranchPrefix,
 		PublishRemoveLabels:           append([]string(nil), cfg.Publish.RemoveLabels...),
+		PublishRequiredChecks:         append([]string(nil), cfg.Publish.RequiredCheckNames...),
+		PublishRequiredCheckPatterns:  append([]string(nil), cfg.Publish.RequiredCheckPatterns...),
+		PublishNoChecksPolicy:         string(cfg.Publish.NoChecksPolicy),
 		PublishMonitorChecks:          cfg.Publish.MonitorChecks,
 		PublishCheckIntervalMS:        cfg.Publish.CheckInterval.Milliseconds(),
 		PublishMaxCheckReworkAttempts: cfg.Publish.MaxCheckReworkAttempts,
+		PublishDiscoverRequiredChecks: cfg.Publish.DiscoverRequiredChecks,
+		PublishReworkOptionalChecks:   cfg.Publish.ReworkOptionalChecks,
 		DebugEnabled:                  cfg.Debug.Enabled,
 		DebugAddress:                  cfg.Debug.Address,
 	}
@@ -601,14 +611,15 @@ func currentActivitySummaries(running []DebugRunningIssue, retries []DebugRetry,
 		if state == "" {
 			state = "unknown"
 		}
+		checkDetails := pullRequestDebugCheckDetails(pr.LastSnapshot)
 
 		switch {
 		case pr.InRework:
-			out = append(out, fmt.Sprintf("PR #%d is being reworked on %s after %d attempt(s).", pr.Number, firstNonEmpty(pr.Branch, "its branch"), pr.ReworkAttempts))
+			out = append(out, fmt.Sprintf("PR #%d is being reworked on %s after %d attempt(s); checks are %s%s.", pr.Number, firstNonEmpty(pr.Branch, "its branch"), pr.ReworkAttempts, state, checkDetails))
 		case pr.Exhausted:
-			out = append(out, fmt.Sprintf("PR #%d checks are %s and rework is exhausted: %s", pr.Number, state, pr.LastError))
+			out = append(out, fmt.Sprintf("PR #%d checks are %s%s and rework is exhausted: %s", pr.Number, state, checkDetails, pr.LastError))
 		default:
-			out = append(out, fmt.Sprintf("PR #%d checks are %s; next check at %s.", pr.Number, state, pr.NextCheckAt.Format(time.RFC3339)))
+			out = append(out, fmt.Sprintf("PR #%d checks are %s%s; next check at %s.", pr.Number, state, checkDetails, pr.NextCheckAt.Format(time.RFC3339)))
 		}
 	}
 
@@ -617,6 +628,42 @@ func currentActivitySummaries(running []DebugRunningIssue, retries []DebugRetry,
 	}
 
 	return out
+}
+
+func pullRequestDebugCheckDetails(snapshot PullRequestCheckSnapshot) string {
+	var parts []string
+	if snapshot.RequirementSource != "" {
+		parts = append(parts, "requirement source: "+snapshot.RequirementSource)
+	}
+	if snapshot.NoChecksPolicy != "" {
+		parts = append(parts, "no-check policy: "+snapshot.NoChecksPolicy)
+	}
+	if len(snapshot.RequiredFailedCheckNames) > 0 {
+		parts = append(parts, "required failed: "+strings.Join(snapshot.RequiredFailedCheckNames, ", "))
+	}
+	if len(snapshot.PendingRequiredCheckNames) > 0 {
+		parts = append(parts, "required pending: "+strings.Join(snapshot.PendingRequiredCheckNames, ", "))
+	}
+	if len(snapshot.MissingRequiredCheckNames) > 0 {
+		parts = append(parts, "required missing: "+strings.Join(snapshot.MissingRequiredCheckNames, ", "))
+	}
+	if len(snapshot.OptionalFailedCheckNames) > 0 {
+		parts = append(parts, "optional failed: "+strings.Join(snapshot.OptionalFailedCheckNames, ", "))
+	}
+	if len(snapshot.PendingOptionalCheckNames) > 0 {
+		parts = append(parts, "optional pending: "+strings.Join(snapshot.PendingOptionalCheckNames, ", "))
+	}
+	if snapshot.BranchProtectionError != "" {
+		parts = append(parts, "branch protection lookup error: "+snapshot.BranchProtectionError)
+	}
+	if snapshot.RulesetError != "" {
+		parts = append(parts, "ruleset lookup error: "+snapshot.RulesetError)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return "; " + strings.Join(parts, "; ")
 }
 
 func nextActionSummaries(now time.Time, running []DebugRunningIssue, retries []DebugRetry, pullRequests []DebugPullRequest, cfg Config, counts DebugCounts) []string {
@@ -647,7 +694,7 @@ func nextActionSummaries(now time.Time, running []DebugRunningIssue, retries []D
 		}
 
 		delay := max(pr.NextCheckAt.Sub(now).Round(time.Second), 0)
-		out = append(out, fmt.Sprintf("Check PR #%d again in %s; if checks fail, dispatch a PR rework worker.", pr.Number, delay))
+		out = append(out, fmt.Sprintf("Check PR #%d again in %s; if required checks fail, dispatch a PR rework worker.", pr.Number, delay))
 	}
 
 	if counts.AvailableSlots > 0 {
@@ -659,7 +706,7 @@ func nextActionSummaries(now time.Time, running []DebugRunningIssue, retries []D
 	}
 
 	if cfg.Publish.MonitorChecks {
-		out = append(out, fmt.Sprintf("Published PRs are monitored every %s and can be reworked up to %d time(s).", cfg.Publish.CheckInterval.Round(time.Second), cfg.Publish.MaxCheckReworkAttempts))
+		out = append(out, fmt.Sprintf("Published PRs are monitored every %s and can be reworked up to %d time(s); no-check policy is %s.", cfg.Publish.CheckInterval.Round(time.Second), cfg.Publish.MaxCheckReworkAttempts, cfg.Publish.NoChecksPolicy))
 	}
 
 	if len(out) == 0 {
