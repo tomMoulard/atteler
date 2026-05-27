@@ -445,6 +445,37 @@ func TestReadForgeCredentialsFile_RefreshHonorsCanceledContext(t *testing.T) {
 	assert.Contains(t, err.Error(), "context canceled")
 }
 
+func TestRefreshForgeOAuthToken_HTTPErrorIsTyped(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "3")
+		w.Header().Set("x-request-id", "req-forge")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, err := w.Write([]byte(`{"error":{"type":"temporarily_unavailable","message":"try later"}}`))
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	_, err := refreshForgeOAuthToken(
+		context.Background(),
+		forgeOAuthConfig{
+			TokenURL: srv.URL,
+			ClientID: "client-123",
+		},
+		"refresh-token",
+	)
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerAnthropic, providerErr.Provider)
+	assert.Equal(t, http.StatusServiceUnavailable, providerErr.StatusCode)
+	assert.Equal(t, "req-forge", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Contains(t, providerErr.Message, "temporarily_unavailable")
+}
+
 func TestReadForgeCredentialsFile_CanceledRefreshDoesNotFallBackToAPIKey(t *testing.T) {
 	t.Parallel()
 
@@ -637,6 +668,37 @@ func TestResolveOpenAIKey_CodexAuthJSON_OAuthTokenIsNotPlatformKey(t *testing.T)
 	}
 }
 
+func TestCodexChatGPTAuthRefresh_HTTPErrorIsTyped(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("x-request-id", "req-codex-refresh")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, err := w.Write([]byte(`{"error":"rate limited"}`))
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	auth := &codexChatGPTAuth{
+		authPath:     filepath.Join(t.TempDir(), "auth.json"),
+		httpClient:   srv.Client(),
+		refreshURL:   srv.URL,
+		accessToken:  "old-access",
+		refreshToken: "refresh-token",
+	}
+
+	err := auth.refresh(context.Background(), "old-access")
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerCodex, providerErr.Provider)
+	assert.Equal(t, http.StatusTooManyRequests, providerErr.StatusCode)
+	assert.Equal(t, "req-codex-refresh", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "rate limited", providerErr.Message)
+}
+
 func TestResolveOpenAIKey_NoCreds(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 
@@ -647,4 +709,34 @@ func TestResolveOpenAIKey_NoCreds(t *testing.T) {
 	if err == nil {
 		require.FailNow(t, "expected error when no credentials available")
 	}
+}
+
+func TestClaudeCodeAuthRefresh_HTTPErrorIsTyped(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("request-id", "req-claude-refresh")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, err := w.Write([]byte(`{"error":{"type":"invalid_grant","message":"expired refresh"}}`))
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	auth := &claudeCodeAuth{
+		httpClient:   srv.Client(),
+		refreshURL:   srv.URL,
+		accessToken:  "old-access",
+		refreshToken: "refresh-token",
+	}
+
+	err := auth.refresh(context.Background(), "old-access")
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerClaudeCode, providerErr.Provider)
+	assert.Equal(t, http.StatusUnauthorized, providerErr.StatusCode)
+	assert.Equal(t, "req-claude-refresh", providerErr.RequestID)
+	assert.Equal(t, RetryabilityNonRetryable, providerErr.Retryability)
+	assert.Contains(t, providerErr.Message, "invalid_grant")
 }

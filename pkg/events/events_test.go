@@ -826,6 +826,34 @@ func TestRunner_EmitMarshalFailureRedactsEventType(t *testing.T) {
 	assert.NotContains(t, got, "sk-marshalerrorsecret")
 }
 
+func TestEmitFromContextBestEffortLogsCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+
+	ctx := WithEmitter(
+		context.Background(),
+		NewRunnerWithLogger(nil, &out),
+		Event{Model: "gpt-test"},
+	)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	err := EmitFromContextBestEffort(ctx, Event{
+		Type: ProviderRetry,
+		Metadata: map[string]string{
+			"outcome": "canceled",
+		},
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+
+	logs := out.String()
+	assert.Contains(t, logs, "event:provider_retry")
+	assert.Contains(t, logs, "model=gpt-test")
+	assert.Contains(t, logs, "outcome=canceled")
+}
+
 func TestLogger_LogsAnyEvent(t *testing.T) {
 	t.Parallel()
 

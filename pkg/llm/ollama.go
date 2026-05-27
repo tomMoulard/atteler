@@ -411,7 +411,7 @@ func (o *OllamaProvider) FetchModels(ctx context.Context) ([]string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama: models HTTP %d: %s", resp.StatusCode, body)
+		return nil, newProviderHTTPError(providerOllama, resp, body)
 	}
 
 	var tr ollamaTagsResponse
@@ -526,11 +526,7 @@ func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, retryableHTTPStatusError(
-			fmt.Errorf("ollama: HTTP %d: %s", resp.StatusCode, respBody),
-			resp.StatusCode,
-			resp.Header.Get("Retry-After"),
-		)
+		return nil, newProviderHTTPError(providerOllama, resp, respBody)
 	}
 
 	var or ollamaChatResponse
@@ -539,7 +535,7 @@ func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*
 	}
 
 	if or.Error != "" {
-		return nil, fmt.Errorf("ollama: %s", or.Error)
+		return nil, newProviderPayloadError(providerOllama, resp.StatusCode, resp.Header, "", or.Error)
 	}
 
 	return parseOllamaChatResponse(or, params.Model), nil
@@ -647,7 +643,7 @@ func (o *OllamaProvider) CompleteStream(ctx context.Context, params CompletePara
 			return nil, fmt.Errorf("ollama: read error body: %w", readErr)
 		}
 
-		return nil, fmt.Errorf("ollama: HTTP %d: %s", resp.StatusCode, respBody)
+		return nil, newProviderHTTPError(providerOllama, resp, respBody)
 	}
 
 	ch := make(chan Chunk, DefaultStreamBuffer)

@@ -115,7 +115,7 @@ func (a *AnthropicProvider) FetchModels(ctx context.Context) ([]string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic: models HTTP %d: %s", resp.StatusCode, body)
+		return nil, newProviderHTTPError(providerAnthropic, resp, body)
 	}
 
 	var mr anthropicModelsResponse
@@ -262,11 +262,7 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, retryableHTTPStatusError(
-			fmt.Errorf("anthropic: HTTP %d: %s", resp.StatusCode, respBody),
-			resp.StatusCode,
-			resp.Header.Get("Retry-After"),
-		)
+		return nil, newProviderHTTPError(providerAnthropic, resp, respBody)
 	}
 
 	var ar anthropicResponse
@@ -275,7 +271,7 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 	}
 
 	if ar.Error != nil {
-		return nil, fmt.Errorf("anthropic: %s: %s", ar.Error.Type, ar.Error.Message)
+		return nil, newProviderPayloadError(providerAnthropic, resp.StatusCode, resp.Header, ar.Error.Type, ar.Error.Message)
 	}
 
 	result := parseAnthropicResponse(ar)

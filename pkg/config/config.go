@@ -49,11 +49,22 @@ type Config struct {
 
 // ProviderConfig configures an individual LLM provider.
 type ProviderConfig struct {
-	BaseURL               string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	Disabled              bool   `json:"disabled,omitempty" yaml:"disabled,omitempty"`
-	AutoStart             bool   `json:"auto_start,omitempty" yaml:"auto_start,omitempty"`
-	DisablePrivateAdapter bool   `json:"disable_private_adapter,omitempty" yaml:"disable_private_adapter,omitempty"`
-	TimeoutSeconds        int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	Retry                 RetryConfig `json:"retry,omitzero" yaml:"retry,omitempty"`
+	BaseURL               string      `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	Disabled              bool        `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+	AutoStart             bool        `json:"auto_start,omitempty" yaml:"auto_start,omitempty"`
+	DisablePrivateAdapter bool        `json:"disable_private_adapter,omitempty" yaml:"disable_private_adapter,omitempty"`
+	TimeoutSeconds        int         `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+}
+
+// RetryConfig configures provider retry behavior. Nil fields inherit the
+// registry defaults; max_attempts is the number of additional retry attempts.
+type RetryConfig struct {
+	MaxAttempts      *int     `json:"max_attempts,omitempty" yaml:"max_attempts,omitempty"`
+	InitialBackoffMS *int     `json:"initial_backoff_ms,omitempty" yaml:"initial_backoff_ms,omitempty"`
+	MaxBackoffMS     *int     `json:"max_backoff_ms,omitempty" yaml:"max_backoff_ms,omitempty"`
+	MaxElapsedMS     *int     `json:"max_elapsed_ms,omitempty" yaml:"max_elapsed_ms,omitempty"`
+	JitterFraction   *float64 `json:"jitter_fraction,omitempty" yaml:"jitter_fraction,omitempty"`
 }
 
 // AgentConfig configures a named agent persona.
@@ -327,11 +338,20 @@ type fileConfig struct {
 }
 
 type fileProviderConfig struct {
-	Disabled              *bool   `json:"disabled" yaml:"disabled"`
-	AutoStart             *bool   `json:"auto_start" yaml:"auto_start"`
-	DisablePrivateAdapter *bool   `json:"disable_private_adapter" yaml:"disable_private_adapter"`
-	BaseURL               *string `json:"base_url" yaml:"base_url"`
-	TimeoutSeconds        *int    `json:"timeout_seconds" yaml:"timeout_seconds"`
+	Disabled              *bool           `json:"disabled" yaml:"disabled"`
+	AutoStart             *bool           `json:"auto_start" yaml:"auto_start"`
+	DisablePrivateAdapter *bool           `json:"disable_private_adapter" yaml:"disable_private_adapter"`
+	BaseURL               *string         `json:"base_url" yaml:"base_url"`
+	Retry                 fileRetryConfig `json:"retry" yaml:"retry"`
+	TimeoutSeconds        *int            `json:"timeout_seconds" yaml:"timeout_seconds"`
+}
+
+type fileRetryConfig struct {
+	MaxAttempts      *int     `json:"max_attempts" yaml:"max_attempts"`
+	InitialBackoffMS *int     `json:"initial_backoff_ms" yaml:"initial_backoff_ms"`
+	MaxBackoffMS     *int     `json:"max_backoff_ms" yaml:"max_backoff_ms"`
+	MaxElapsedMS     *int     `json:"max_elapsed_ms" yaml:"max_elapsed_ms"`
+	JitterFraction   *float64 `json:"jitter_fraction" yaml:"jitter_fraction"`
 }
 
 //nolint:govet // fieldalignment: field order follows config-file grouping; deprecated aliases stay last.
@@ -794,8 +814,51 @@ func mergeProviders(dst *Config, providers map[string]fileProviderConfig, rec *o
 			rec.set(providerFieldPath(name, "timeout_seconds"), source, *provider.TimeoutSeconds)
 		}
 
+		mergeFileRetryConfig(&current.Retry, provider.Retry, rec, source, providerFieldPath(name, "retry"))
+
 		dst.Providers[name] = current
 	}
+}
+
+func mergeFileRetryConfig(dst *RetryConfig, src fileRetryConfig, rec *originRecorder, source originSource, path string) {
+	if !src.hasFields() {
+		return
+	}
+
+	rec.merge(path, source, "retry", "merges provider retry fields")
+
+	if src.MaxAttempts != nil {
+		dst.MaxAttempts = src.MaxAttempts
+		rec.set(dottedPath(path, "max_attempts"), source, *src.MaxAttempts)
+	}
+
+	if src.InitialBackoffMS != nil {
+		dst.InitialBackoffMS = src.InitialBackoffMS
+		rec.set(dottedPath(path, "initial_backoff_ms"), source, *src.InitialBackoffMS)
+	}
+
+	if src.MaxBackoffMS != nil {
+		dst.MaxBackoffMS = src.MaxBackoffMS
+		rec.set(dottedPath(path, "max_backoff_ms"), source, *src.MaxBackoffMS)
+	}
+
+	if src.MaxElapsedMS != nil {
+		dst.MaxElapsedMS = src.MaxElapsedMS
+		rec.set(dottedPath(path, "max_elapsed_ms"), source, *src.MaxElapsedMS)
+	}
+
+	if src.JitterFraction != nil {
+		dst.JitterFraction = src.JitterFraction
+		rec.set(dottedPath(path, "jitter_fraction"), source, *src.JitterFraction)
+	}
+}
+
+func (c fileRetryConfig) hasFields() bool {
+	return c.MaxAttempts != nil ||
+		c.InitialBackoffMS != nil ||
+		c.MaxBackoffMS != nil ||
+		c.MaxElapsedMS != nil ||
+		c.JitterFraction != nil
 }
 
 func mergeAgents(dst *Config, agents map[string]fileAgentConfig, rec *originRecorder, source originSource) {
@@ -1375,8 +1438,51 @@ func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec 
 			rec.set(providerFieldPath(name, "timeout_seconds"), source, provider.TimeoutSeconds)
 		}
 
+		mergeRetryConfig(&current.Retry, provider.Retry, rec, source, providerFieldPath(name, "retry"))
+
 		dst.Providers[name] = current
 	}
+}
+
+func mergeRetryConfig(dst *RetryConfig, src RetryConfig, rec *originRecorder, source originSource, path string) {
+	if !src.hasFields() {
+		return
+	}
+
+	rec.merge(path, source, "retry", "merges provider retry fields")
+
+	if src.MaxAttempts != nil {
+		dst.MaxAttempts = src.MaxAttempts
+		rec.set(dottedPath(path, "max_attempts"), source, *src.MaxAttempts)
+	}
+
+	if src.InitialBackoffMS != nil {
+		dst.InitialBackoffMS = src.InitialBackoffMS
+		rec.set(dottedPath(path, "initial_backoff_ms"), source, *src.InitialBackoffMS)
+	}
+
+	if src.MaxBackoffMS != nil {
+		dst.MaxBackoffMS = src.MaxBackoffMS
+		rec.set(dottedPath(path, "max_backoff_ms"), source, *src.MaxBackoffMS)
+	}
+
+	if src.MaxElapsedMS != nil {
+		dst.MaxElapsedMS = src.MaxElapsedMS
+		rec.set(dottedPath(path, "max_elapsed_ms"), source, *src.MaxElapsedMS)
+	}
+
+	if src.JitterFraction != nil {
+		dst.JitterFraction = src.JitterFraction
+		rec.set(dottedPath(path, "jitter_fraction"), source, *src.JitterFraction)
+	}
+}
+
+func (c RetryConfig) hasFields() bool {
+	return c.MaxAttempts != nil ||
+		c.InitialBackoffMS != nil ||
+		c.MaxBackoffMS != nil ||
+		c.MaxElapsedMS != nil ||
+		c.JitterFraction != nil
 }
 
 func mergeConfigAgents(dst *Config, agents map[string]AgentConfig, rec *originRecorder, source originSource) {
@@ -1845,6 +1951,16 @@ func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderC
 			appendOriginChain(dstOrigins, providerFieldPath(name, "timeout_seconds"), srcOrigins, false)
 		}
 
+		if provider.Retry.hasFields() {
+			current.Retry = mergeRetryConfigFromOrigins(
+				current.Retry,
+				provider.Retry,
+				dstOrigins,
+				srcOrigins,
+				providerFieldPath(name, "retry"),
+			)
+		}
+
 		dst.Providers[name] = current
 	}
 }
@@ -1853,6 +1969,48 @@ func originPathExists(origins OriginMap, path string) bool {
 	_, ok := origins[path]
 
 	return ok
+}
+
+func mergeRetryConfigFromOrigins(
+	current RetryConfig,
+	provider RetryConfig,
+	dstOrigins OriginMap,
+	srcOrigins OriginMap,
+	path string,
+) RetryConfig {
+	appendOriginChain(dstOrigins, path, srcOrigins, false)
+
+	if provider.MaxAttempts != nil {
+		current.MaxAttempts = provider.MaxAttempts
+
+		appendOriginChain(dstOrigins, dottedPath(path, "max_attempts"), srcOrigins, false)
+	}
+
+	if provider.InitialBackoffMS != nil {
+		current.InitialBackoffMS = provider.InitialBackoffMS
+
+		appendOriginChain(dstOrigins, dottedPath(path, "initial_backoff_ms"), srcOrigins, false)
+	}
+
+	if provider.MaxBackoffMS != nil {
+		current.MaxBackoffMS = provider.MaxBackoffMS
+
+		appendOriginChain(dstOrigins, dottedPath(path, "max_backoff_ms"), srcOrigins, false)
+	}
+
+	if provider.MaxElapsedMS != nil {
+		current.MaxElapsedMS = provider.MaxElapsedMS
+
+		appendOriginChain(dstOrigins, dottedPath(path, "max_elapsed_ms"), srcOrigins, false)
+	}
+
+	if provider.JitterFraction != nil {
+		current.JitterFraction = provider.JitterFraction
+
+		appendOriginChain(dstOrigins, dottedPath(path, "jitter_fraction"), srcOrigins, false)
+	}
+
+	return current
 }
 
 func mergeConfigAgentsFromOrigins(dst *Config, agents map[string]AgentConfig, dstOrigins, srcOrigins OriginMap) {

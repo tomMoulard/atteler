@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -142,6 +143,41 @@ func EmitFromContext(ctx context.Context, event Event) error {
 	event = mergeBase(value.base, event)
 
 	return value.emitter.Emit(ctx, event)
+}
+
+// EmitFromContextBestEffort emits an event through the runner stored by
+// WithEmitter. If ctx is already canceled, it still writes to the local event
+// logger, but it does not run configured hooks because hook execution must
+// respect caller cancellation.
+func EmitFromContextBestEffort(ctx context.Context, event Event) error {
+	if ctx == nil {
+		return errors.New("events: context is required")
+	}
+
+	value, ok := ctx.Value(contextKey{}).(contextEmitter)
+	if !ok || value.emitter == nil {
+		return nil
+	}
+
+	event = mergeBase(value.base, event)
+
+	return value.emitter.emitBestEffort(ctx, event)
+}
+
+func (r *Runner) emitBestEffort(ctx context.Context, event Event) error {
+	if r == nil || event.Type == "" {
+		return nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		if r.logger != nil {
+			r.logger.Log(event)
+		}
+
+		return fmt.Errorf("events: context already done: %w", err)
+	}
+
+	return r.Emit(ctx, event)
 }
 
 func mergeBase(base, event Event) Event {

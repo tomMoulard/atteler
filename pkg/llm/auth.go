@@ -495,7 +495,7 @@ func refreshForgeOAuthToken(ctx context.Context, config forgeOAuthConfig, refres
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return forgeOAuthTokens{}, fmt.Errorf("ForgeCode OAuth refresh HTTP %d: %s", resp.StatusCode, body)
+		return forgeOAuthTokens{}, fmt.Errorf("ForgeCode OAuth refresh: %w", newProviderHTTPError(providerAnthropic, resp, body))
 	}
 
 	var refreshed forgeOAuthRefreshResponse
@@ -899,7 +899,7 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("codex chatgpt refresh: HTTP %d: %s", resp.StatusCode, respBody)
+		return fmt.Errorf("codex chatgpt refresh: %w", newProviderHTTPError(providerCodex, resp, respBody))
 	}
 
 	var refreshed struct {
@@ -1280,7 +1280,7 @@ func (a *claudeCodeAuth) exchangeClaudeCodeRefreshToken(ctx context.Context) (cl
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return claudeCodeRefreshResponse{}, fmt.Errorf("claude code refresh: HTTP %d: %s", resp.StatusCode, respBody)
+		return claudeCodeRefreshResponse{}, fmt.Errorf("claude code refresh: %w", newProviderHTTPError(providerClaudeCode, resp, respBody))
 	}
 
 	var refreshed claudeCodeRefreshResponse

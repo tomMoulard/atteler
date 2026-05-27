@@ -289,6 +289,89 @@ func TestOllamaProvider_FetchModels(t *testing.T) {
 	assert.Equal(t, []string{"llama3.2:latest", "qwen2.5:7b"}, models)
 }
 
+func TestOllamaProvider_HTTPErrorIsTyped(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, err := w.Write([]byte(`{"error":"daemon busy"}`))
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	p := &OllamaProvider{baseURL: srv.URL, client: srv.Client()}
+
+	_, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "llama3.2",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerOllama, providerErr.Provider)
+	assert.Equal(t, http.StatusServiceUnavailable, providerErr.StatusCode)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "daemon busy", providerErr.Message)
+}
+
+func TestOllamaProvider_FetchModelsHTTPErrorIsTyped(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("cf-ray", "cf-ollama-models")
+		w.WriteHeader(http.StatusBadGateway)
+		_, err := w.Write([]byte(`{"error":"tag list unavailable"}`))
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	p := &OllamaProvider{baseURL: srv.URL, client: srv.Client()}
+
+	_, err := p.FetchModels(context.Background())
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerOllama, providerErr.Provider)
+	assert.Equal(t, http.StatusBadGateway, providerErr.StatusCode)
+	assert.Equal(t, "cf-ollama-models", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "tag list unavailable", providerErr.Message)
+}
+
+func TestOllamaProvider_ErrorPayloadIsTyped(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "8")
+		w.Header().Set("cf-ray", "cf-ollama-payload")
+		w.Header().Set("Content-Type", "application/json")
+
+		assert.NoError(t, json.NewEncoder(w).Encode(ollamaChatResponse{
+			Error: "service unavailable: daemon overloaded",
+		}))
+	}))
+	defer srv.Close()
+
+	p := &OllamaProvider{baseURL: srv.URL, client: srv.Client()}
+
+	_, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "llama3.2",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerOllama, providerErr.Provider)
+	assert.Equal(t, http.StatusOK, providerErr.StatusCode)
+	assert.Equal(t, 8*time.Second, providerErr.RetryAfter)
+	assert.Equal(t, "cf-ollama-payload", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "service unavailable: daemon overloaded", providerErr.Message)
+}
+
 func TestOllamaProvider_ConfigBaseURL(t *testing.T) {
 	t.Setenv("OLLAMA_BASE_URL", "")
 
@@ -811,6 +894,12 @@ func TestStopOwnedOllamaDaemonRefusesPIDMismatch(t *testing.T) { //nolint:parall
 func TestAutoRegisterWithConfigContext_RegistersConfiguredOllama(t *testing.T) {
 	t.Setenv("OLLAMA_BASE_URL", "")
 
+	maxAttempts := 4
+	initialBackoffMS := 25
+	maxBackoffMS := 250
+	maxElapsedMS := 500
+	jitterFraction := 0.3
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/tags", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
@@ -825,7 +914,16 @@ func TestAutoRegisterWithConfigContext_RegistersConfiguredOllama(t *testing.T) {
 			providerOpenAI:     {Disabled: true},
 			providerClaudeCode: {Disabled: true},
 			providerCodex:      {Disabled: true},
-			providerOllama:     {BaseURL: srv.URL},
+			providerOllama: {
+				BaseURL: srv.URL,
+				Retry: RetryPolicyConfig{
+					MaxAttempts:      &maxAttempts,
+					InitialBackoffMS: &initialBackoffMS,
+					MaxBackoffMS:     &maxBackoffMS,
+					MaxElapsedMS:     &maxElapsedMS,
+					JitterFraction:   &jitterFraction,
+				},
+			},
 		},
 		DefaultProvider: providerOllama,
 		DefaultModel:    "llama3.2",
@@ -838,6 +936,13 @@ func TestAutoRegisterWithConfigContext_RegistersConfiguredOllama(t *testing.T) {
 	providerName, ok := r.ProviderForModel("llama3.2")
 	require.True(t, ok)
 	assert.Equal(t, providerOllama, providerName)
+
+	retry := r.RetryPolicyForProvider(providerOllama)
+	assert.Equal(t, maxAttempts, retry.MaxAttempts)
+	assert.Equal(t, time.Duration(initialBackoffMS)*time.Millisecond, retry.InitialBackoff)
+	assert.Equal(t, time.Duration(maxBackoffMS)*time.Millisecond, retry.MaxBackoff)
+	assert.Equal(t, time.Duration(maxElapsedMS)*time.Millisecond, retry.MaxElapsedTime)
+	assert.InEpsilon(t, jitterFraction, retry.JitterFraction, 0.0001)
 }
 
 func TestAutoRegisterWithConfigContext_StartsLocalOllamaForDefaultProvider(t *testing.T) {

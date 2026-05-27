@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
@@ -113,6 +115,170 @@ func TestPathStatus(t *testing.T) {
 	if got := pathStatus(missing); got != "will be created on first save" {
 		require.Failf(t, "unexpected failure", "pathStatus(missing) = %q", got)
 	}
+}
+
+func TestLLMConfigCarriesProviderRetryPolicy(t *testing.T) {
+	t.Parallel()
+
+	maxAttempts := 3
+	initialBackoffMS := 50
+	maxBackoffMS := 500
+	maxElapsedMS := 5000
+	jitterFraction := 0.4
+
+	got := llmConfig(appconfig.Config{
+		DefaultProvider: "openai",
+		DefaultModel:    "gpt-default",
+		Providers: map[string]appconfig.ProviderConfig{
+			"openai": {
+				BaseURL:        "https://openai.example.test",
+				TimeoutSeconds: 30,
+				Retry: appconfig.RetryConfig{
+					MaxAttempts:      &maxAttempts,
+					InitialBackoffMS: &initialBackoffMS,
+					MaxBackoffMS:     &maxBackoffMS,
+					MaxElapsedMS:     &maxElapsedMS,
+					JitterFraction:   &jitterFraction,
+				},
+			},
+		},
+	}, "gpt-selected", nil, "", nil)
+
+	assert.Equal(t, "openai", got.DefaultProvider)
+	assert.Equal(t, "gpt-default", got.DefaultModel)
+	assert.Equal(t, "gpt-selected", got.SelectedModel)
+
+	provider := got.Providers["openai"]
+	assert.Equal(t, "https://openai.example.test", provider.BaseURL)
+	assert.Equal(t, 30, provider.TimeoutSeconds)
+	require.NotNil(t, provider.Retry.MaxAttempts)
+	assert.Equal(t, maxAttempts, *provider.Retry.MaxAttempts)
+	require.NotNil(t, provider.Retry.InitialBackoffMS)
+	assert.Equal(t, initialBackoffMS, *provider.Retry.InitialBackoffMS)
+	require.NotNil(t, provider.Retry.MaxBackoffMS)
+	assert.Equal(t, maxBackoffMS, *provider.Retry.MaxBackoffMS)
+	require.NotNil(t, provider.Retry.MaxElapsedMS)
+	assert.Equal(t, maxElapsedMS, *provider.Retry.MaxElapsedMS)
+	require.NotNil(t, provider.Retry.JitterFraction)
+	assert.InEpsilon(t, jitterFraction, *provider.Retry.JitterFraction, 0.0001)
+}
+
+func TestRetryPolicyInfoForConfig_AppliesOverridesAndNormalization(t *testing.T) {
+	t.Parallel()
+
+	maxAttempts := 4
+	initialBackoffMS := 25
+	maxBackoffMS := 250
+	maxElapsedMS := 500
+	jitterFraction := 0.3
+
+	info := retryPolicyInfoForConfig("openai", appconfig.ProviderConfig{
+		Retry: appconfig.RetryConfig{
+			MaxAttempts:      &maxAttempts,
+			InitialBackoffMS: &initialBackoffMS,
+			MaxBackoffMS:     &maxBackoffMS,
+			MaxElapsedMS:     &maxElapsedMS,
+			JitterFraction:   &jitterFraction,
+		},
+	})
+
+	assert.Equal(t, maxAttempts, info.MaxAttempts)
+	assert.Equal(t, 25*time.Millisecond, info.InitialBackoff)
+	assert.Equal(t, 250*time.Millisecond, info.MaxBackoff)
+	assert.Equal(t, 500*time.Millisecond, info.MaxElapsedTime)
+	assert.InEpsilon(t, jitterFraction, info.JitterFraction, 0.0001)
+
+	negative := -1
+	tooHigh := 2.0
+	info = retryPolicyInfoForConfig("openai", appconfig.ProviderConfig{
+		Retry: appconfig.RetryConfig{
+			MaxAttempts:    &negative,
+			JitterFraction: &tooHigh,
+		},
+	})
+
+	assert.Equal(t, 0, info.MaxAttempts)
+	assert.InEpsilon(t, 1.0, info.JitterFraction, 0.0001)
+}
+
+func TestDoctorOfflinePrintsProviderRetryPolicies(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+providers:
+  openai:
+    retry:
+      max_attempts: 4
+      initial_backoff_ms: 25
+      max_backoff_ms: 250
+      max_elapsed_ms: 500
+      jitter_fraction: 0.3
+  custom-gateway:
+    retry:
+      max_attempts: 1
+`), 0o600))
+
+	t.Setenv(appconfig.EnvPath, configPath)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+
+	out := captureStdoutForConfigTest(t, func() {
+		require.NoError(t, doctorOffline(cliOptions{sessionDir: filepath.Join(dir, "sessions")}))
+	})
+
+	assert.Contains(t, out, "provider_retries:")
+	assert.Contains(t, out, "openai: max_retries=4 initial=25ms max_backoff=250ms budget=500ms jitter=30%")
+	assert.Contains(t, out, "custom-gateway: max_retries=1 initial=1s max_backoff=10s budget=30s jitter=20%")
+}
+
+func TestDoctorPrintsHealthRetryPolicy(t *testing.T) { //nolint:paralleltest // captures process stdout
+	r := llm.NewRegistry()
+	r.Register(modelPickerProvider{
+		name:   "healthy",
+		models: []string{"healthy-model"},
+	})
+	r.SetProviderRetry("healthy", llm.RetryPolicy{
+		MaxAttempts:    3,
+		InitialBackoff: 20 * time.Millisecond,
+		MaxBackoff:     200 * time.Millisecond,
+		MaxElapsedTime: 2 * time.Second,
+		JitterFraction: 0.25,
+	})
+
+	out := captureStdoutForConfigTest(t, func() {
+		require.NoError(t, doctor(context.Background(), appState{
+			registry:      r,
+			agentRegistry: agent.NewRegistry(nil),
+			sessionStore:  session.NewStore(t.TempDir()),
+		}))
+	})
+
+	assert.Contains(t, out, "[ok] healthy")
+	assert.Contains(t, out, "retry: max_retries=3 initial=20ms max_backoff=200ms budget=2s jitter=25%")
+	assert.Contains(t, out, "- healthy-model")
+}
+
+func captureStdoutForConfigTest(t *testing.T, fn func()) string {
+	t.Helper()
+
+	oldStdout := os.Stdout
+
+	defer func() {
+		os.Stdout = oldStdout
+	}()
+
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+
+	os.Stdout = writer
+
+	fn()
+
+	require.NoError(t, writer.Close())
+
+	out, err := io.ReadAll(reader)
+	require.NoError(t, err)
+
+	return string(out)
 }
 
 func TestFormatAgentDescription(t *testing.T) {

@@ -95,6 +95,7 @@ func (c AutoRegisterConfig) logger() *slog.Logger {
 //
 //nolint:govet // Field order keeps externally useful provider settings grouped.
 type ProviderConfig struct {
+	Retry                 RetryPolicyConfig
 	BaseURL               string
 	OwnershipPath         string
 	SessionID             string
@@ -362,6 +363,7 @@ func registerProviderWithReadiness(
 	}
 
 	r.Register(p)
+	r.applyProviderRetryConfig(providerName, providerCfg.Retry)
 
 	r.mu.Lock()
 	if registered, ok := r.readinessProviderLocked(providerName); ok {

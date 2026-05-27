@@ -463,11 +463,15 @@ func (c *CodexProvider) doResponsesStream(ctx context.Context, body []byte, mode
 }
 
 type codexUnauthorizedError struct {
-	body string
+	err *ProviderError
 }
 
 func (e *codexUnauthorizedError) Error() string {
-	return "codex: HTTP 401: " + e.body
+	return e.err.Error()
+}
+
+func (e *codexUnauthorizedError) Unwrap() error {
+	return e.err
 }
 
 func (c *CodexProvider) sendResponses(ctx context.Context, body []byte, access, accountID string) (*Response, error) {
@@ -509,7 +513,7 @@ func (c *CodexProvider) sendResponsesStream(ctx context.Context, body []byte, ac
 
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes)) //nolint:errcheck // best-effort body capture for the error message
 
-		return nil, &codexUnauthorizedError{body: string(raw)}
+		return nil, &codexUnauthorizedError{err: newProviderHTTPError(providerCodex, resp, raw)}
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -517,11 +521,7 @@ func (c *CodexProvider) sendResponsesStream(ctx context.Context, body []byte, ac
 
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes)) //nolint:errcheck // best-effort body capture for the error message
 
-		return nil, retryableHTTPStatusError(
-			fmt.Errorf("codex HTTP %d: %s", resp.StatusCode, raw),
-			resp.StatusCode,
-			resp.Header.Get("Retry-After"),
-		)
+		return nil, newProviderHTTPError(providerCodex, resp, raw)
 	}
 
 	return resp.Body, nil
@@ -534,6 +534,7 @@ type codexStreamState struct {
 	toolCalls          []ToolCall
 	finalText          string
 	deltaBuf           strings.Builder
+	header             http.Header
 	out                Response
 	finished           bool
 	firstTokenRecorded bool
@@ -549,16 +550,25 @@ type codexStreamAction struct {
 // final assistant message and usage. It prefers the explicit message item when
 // available, falling back to accumulated text deltas otherwise.
 func parseCodexSSE(ctx context.Context, r io.Reader) (*Response, error) {
-	return parseCodexSSEWithClock(ctx, r, time.Time{}, nil)
+	return parseCodexSSEWithHeader(ctx, r, nil)
+}
+
+func parseCodexSSEWithHeader(ctx context.Context, r io.Reader, header http.Header) (*Response, error) {
+	return parseCodexSSEWithClockAndHeader(ctx, r, time.Time{}, nil, header)
 }
 
 func parseCodexSSEWithClock(ctx context.Context, r io.Reader, startedAt time.Time, now func() time.Time) (*Response, error) {
+	return parseCodexSSEWithClockAndHeader(ctx, r, startedAt, now, nil)
+}
+
+func parseCodexSSEWithClockAndHeader(ctx context.Context, r io.Reader, startedAt time.Time, now func() time.Time, header http.Header) (*Response, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	state := &codexStreamState{
 		startedAt: startedAt,
 		now:       now,
+		header:    header,
 	}
 
 	for scanner.Scan() {
@@ -750,7 +760,7 @@ func (s *codexStreamState) handleEventPayload(payload string) (codexStreamAction
 
 		return codexStreamAction{chunk: chunk, emit: true, terminal: true}, nil
 	case "response.failed", "response.incomplete", "error":
-		return codexStreamAction{}, fmt.Errorf("codex stream error: %s", payload)
+		return codexStreamAction{}, event.providerError(s.header)
 	}
 
 	return codexStreamAction{}, nil
@@ -866,8 +876,11 @@ func (s *codexStreamState) completedChunk() (Chunk, error) {
 type codexStreamEvent struct {
 	Item     *codexEventItem    `json:"item,omitempty"`
 	Response *codexEventPayload `json:"response,omitempty"`
+	Error    *codexEventError   `json:"error,omitempty"`
 	Type     string             `json:"type"`
+	Code     string             `json:"code,omitempty"`
 	Delta    string             `json:"delta,omitempty"`
+	Message  string             `json:"message,omitempty"`
 }
 
 type codexEventItem struct {
@@ -887,6 +900,7 @@ type codexEventItemContent struct {
 
 type codexEventPayload struct {
 	IncompleteDetails *codexIncompleteDetails `json:"incomplete_details,omitempty"`
+	Error             *codexEventError        `json:"error,omitempty"`
 	Usage             *codexEventUsage        `json:"usage,omitempty"`
 	Model             string                  `json:"model,omitempty"`
 	Status            string                  `json:"status,omitempty"`
@@ -894,6 +908,77 @@ type codexEventPayload struct {
 
 type codexIncompleteDetails struct {
 	Reason string `json:"reason,omitempty"`
+}
+
+type codexEventError struct {
+	Message string `json:"message,omitempty"`
+	Type    string `json:"type,omitempty"`
+	Code    string `json:"code,omitempty"`
+}
+
+func (e *codexEventError) UnmarshalJSON(data []byte) error {
+	var message string
+	if err := json.Unmarshal(data, &message); err == nil {
+		e.Message = message
+
+		return nil
+	}
+
+	type object codexEventError
+
+	var value object
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+
+	*e = codexEventError(value)
+
+	return nil
+}
+
+func (e codexStreamEvent) providerError(header http.Header) *ProviderError {
+	eventError := e.Error
+	if eventError == nil && e.Response != nil {
+		eventError = e.Response.Error
+	}
+
+	if eventError != nil {
+		errorType := firstNonEmptyString(eventError.Code, eventError.Type, e.Code)
+		if errorType == "" {
+			errorType = "codex stream error"
+		}
+
+		message := firstNonEmptyString(eventError.Message, "codex stream error")
+		if errorType == "codex stream error" && e.Type != "" && message != e.Type {
+			message = e.Type + ": " + message
+		}
+
+		return newProviderPayloadError(
+			providerCodex,
+			http.StatusOK,
+			header,
+			errorType,
+			message,
+		)
+	}
+
+	errorType := firstNonEmptyString(e.Code, e.Type)
+	if errorType == "" {
+		errorType = "codex stream error"
+	}
+
+	message := firstNonEmptyString(e.Message, "codex stream error")
+	if errorType == "codex stream error" && e.Type != "" && message != e.Type {
+		message = e.Type + ": " + message
+	}
+
+	return newProviderPayloadError(
+		providerCodex,
+		http.StatusOK,
+		header,
+		errorType,
+		message,
+	)
 }
 
 type codexEventUsage struct {

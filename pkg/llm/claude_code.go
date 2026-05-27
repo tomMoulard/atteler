@@ -289,11 +289,15 @@ func (c *ClaudeCodeProvider) doMessagesRequest(ctx context.Context, body []byte)
 }
 
 type claudeCodeUnauthorizedError struct {
-	body string
+	err *ProviderError
 }
 
 func (e *claudeCodeUnauthorizedError) Error() string {
-	return "claude code: HTTP 401: " + e.body
+	return e.err.Error()
+}
+
+func (e *claudeCodeUnauthorizedError) Unwrap() error {
+	return e.err
 }
 
 func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, access string) (*Response, error) {
@@ -315,7 +319,7 @@ func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, acce
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes)) //nolint:errcheck // best-effort body capture for the error message
-		return nil, &claudeCodeUnauthorizedError{body: string(raw)}
+		return nil, &claudeCodeUnauthorizedError{err: newProviderHTTPError(providerClaudeCode, resp, raw)}
 	}
 
 	respBody, err := io.ReadAll(resp.Body)
@@ -324,11 +328,7 @@ func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, acce
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, retryableHTTPStatusError(
-			fmt.Errorf("claude code: HTTP %d: %s", resp.StatusCode, respBody),
-			resp.StatusCode,
-			resp.Header.Get("Retry-After"),
-		)
+		return nil, newProviderHTTPError(providerClaudeCode, resp, respBody)
 	}
 
 	var ar anthropicResponse
@@ -337,7 +337,7 @@ func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, acce
 	}
 
 	if ar.Error != nil {
-		return nil, fmt.Errorf("claude code: %s: %s", ar.Error.Type, ar.Error.Message)
+		return nil, newProviderPayloadError(providerClaudeCode, resp.StatusCode, resp.Header, ar.Error.Type, ar.Error.Message)
 	}
 
 	result := parseAnthropicResponse(ar)

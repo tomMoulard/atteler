@@ -75,6 +75,7 @@ type ProviderReadiness struct {
 	Models             []string
 	StaticModels       []string
 	LiveModels         []string
+	RetryPolicy        RetryPolicyInfo
 	Registered         bool
 	Configured         bool
 	Requested          bool
@@ -467,8 +468,10 @@ func (r *Registry) checkProviderHealth(ctx context.Context, providerName string,
 	now := time.Now()
 
 	r.mu.RLock()
+	retryPolicy := r.retryPolicyForProviderLocked(providerName).info()
 
 	if cached, ok := r.cachedProviderHealthLocked(providerName, ttl, now); ok {
+		cached.RetryPolicy = retryPolicy
 		r.mu.RUnlock()
 		r.mu.Lock()
 		r.applyHealthToReadinessLocked(providerName, cached)
@@ -484,12 +487,14 @@ func (r *Registry) checkProviderHealth(ctx context.Context, providerName string,
 
 	if !ok {
 		return ProviderHealth{
-			Name:  providerName,
-			Error: fmt.Errorf("llm: unknown provider %q", providerName),
+			Name:        providerName,
+			RetryPolicy: retryPolicy,
+			Error:       fmt.Errorf("llm: unknown provider %q", providerName),
 		}
 	}
 
 	health := providerHealthFresh(ctx, providerName, p, now, ttl, ctxErr)
+	health.RetryPolicy = retryPolicy
 
 	r.mu.Lock()
 	r.cacheProviderHealthLocked(providerName, health, now)
@@ -666,6 +671,7 @@ func (r *Registry) applyHealthToReadinessLocked(providerName string, health Prov
 	entry.Models = append([]string(nil), health.Models...)
 	entry.StaticModels = append([]string(nil), health.StaticModels...)
 	entry.LiveModels = append([]string(nil), health.LiveModels...)
+	entry.RetryPolicy = health.RetryPolicy
 	entry.ModelCatalogSource = health.ModelSource
 	entry.ModelsStale = health.ModelsStale
 

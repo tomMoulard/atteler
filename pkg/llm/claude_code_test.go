@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -304,6 +305,85 @@ func TestClaudeCodeProvider_RefreshFailureSurfaced(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "refresh after 401")
+}
+
+func TestClaudeCodeProvider_HTTPErrorIsTyped(t *testing.T) {
+	t.Parallel()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("request-id", "req-claude-code")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, err := w.Write([]byte(`{"error":{"type":"overloaded_error","message":"busy"}}`))
+		assert.NoError(t, err)
+	}))
+	defer apiSrv.Close()
+
+	auth := newTestClaudeCodeAuth(t, "access-1", "refresh-1", futureExpiry())
+	p := &ClaudeCodeProvider{
+		client:  apiSrv.Client(),
+		auth:    auth,
+		baseURL: apiSrv.URL,
+		models:  []string{"claude-opus-4-7"},
+	}
+
+	_, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "claude-opus-4-7",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerClaudeCode, providerErr.Provider)
+	assert.Equal(t, http.StatusServiceUnavailable, providerErr.StatusCode)
+	assert.Equal(t, "req-claude-code", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Contains(t, providerErr.Message, "overloaded_error")
+}
+
+func TestClaudeCodeProvider_ErrorPayloadIsTyped(t *testing.T) {
+	t.Parallel()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "9")
+		w.Header().Set("request-id", "req-claude-code-payload")
+		w.Header().Set("Content-Type", "application/json")
+
+		resp := anthropicResponse{}
+		resp.Error = &struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}{
+			Type:    "rate_limit_error",
+			Message: "slow down",
+		}
+
+		assert.NoError(t, json.NewEncoder(w).Encode(resp))
+	}))
+	defer apiSrv.Close()
+
+	auth := newTestClaudeCodeAuth(t, "access-1", "refresh-1", futureExpiry())
+	p := &ClaudeCodeProvider{
+		client:  apiSrv.Client(),
+		auth:    auth,
+		baseURL: apiSrv.URL,
+		models:  []string{"claude-opus-4-7"},
+	}
+
+	_, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "claude-opus-4-7",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerClaudeCode, providerErr.Provider)
+	assert.Equal(t, http.StatusOK, providerErr.StatusCode)
+	assert.Equal(t, 9*time.Second, providerErr.RetryAfter)
+	assert.Equal(t, "req-claude-code-payload", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "rate_limit_error: slow down", providerErr.Message)
 }
 
 func TestClaudeCodeProvider_RefreshHonorsCanceledContext(t *testing.T) {

@@ -110,7 +110,7 @@ func (o *OpenAIProvider) FetchModels(ctx context.Context) ([]string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openai: models HTTP %d: %s", resp.StatusCode, body)
+		return nil, newProviderHTTPError(providerOpenAI, resp, body)
 	}
 
 	var mr openaiModelsResponse
@@ -182,6 +182,7 @@ type openaiResponse struct {
 	Error *struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
+		Code    string `json:"code"`
 	} `json:"error"`
 	Model   string `json:"model"`
 	Choices []struct {
@@ -240,11 +241,7 @@ func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, retryableHTTPStatusError(
-			fmt.Errorf("openai: HTTP %d: %s", resp.StatusCode, respBody),
-			resp.StatusCode,
-			resp.Header.Get("Retry-After"),
-		)
+		return nil, newProviderHTTPError(providerOpenAI, resp, respBody)
 	}
 
 	var or openaiResponse
@@ -253,7 +250,13 @@ func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*
 	}
 
 	if or.Error != nil {
-		return nil, fmt.Errorf("openai: %s: %s", or.Error.Type, or.Error.Message)
+		return nil, newProviderPayloadError(
+			providerOpenAI,
+			resp.StatusCode,
+			resp.Header,
+			firstNonEmptyString(or.Error.Code, or.Error.Type),
+			or.Error.Message,
+		)
 	}
 
 	return parseOpenAIResponse(or), nil

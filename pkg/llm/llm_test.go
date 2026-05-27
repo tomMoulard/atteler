@@ -1225,7 +1225,7 @@ func TestRegistry_CompleteWithFallbackRecordsRateLimitTelemetry(t *testing.T) {
 	telemetry := modelroute.NewTelemetry()
 	r.SetRouteTelemetry(telemetry)
 	r.Register(&fakeProvider{
-		err:    retryableHTTPStatusError(errors.New("openai: HTTP 429: rate limited"), 429, "2"),
+		err:    &ProviderError{Provider: providerOpenAI, StatusCode: 429, RetryAfter: 2 * time.Second, Message: "rate limited"},
 		name:   providerOpenAI,
 		models: []string{"gpt-4.1-mini"},
 		resp:   &Response{},
@@ -2636,6 +2636,36 @@ func TestRegistry_CheckHealth(t *testing.T) {
 	if len(results[1].Models) != 1 {
 		assert.Failf(t, "assertion failed", "beta models = %d, want 1", len(results[1].Models))
 	}
+
+	assert.Equal(t, defaultRetryConfig().info(), results[0].RetryPolicy)
+}
+
+func TestRegistry_CheckHealthIncludesProviderRetryPolicy(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   alphaProvider,
+		models: []string{"a-1"},
+		resp:   &Response{},
+	})
+	r.SetProviderRetry(alphaProvider, RetryPolicy{
+		MaxAttempts:    4,
+		InitialBackoff: 25 * time.Millisecond,
+		MaxBackoff:     250 * time.Millisecond,
+		MaxElapsedTime: 500 * time.Millisecond,
+		JitterFraction: 0.3,
+	})
+
+	results := r.CheckHealth(context.Background())
+	require.Len(t, results, 1)
+	assert.Equal(t, RetryPolicyInfo{
+		MaxAttempts:    4,
+		InitialBackoff: 25 * time.Millisecond,
+		MaxBackoff:     250 * time.Millisecond,
+		MaxElapsedTime: 500 * time.Millisecond,
+		JitterFraction: 0.3,
+	}, results[0].RetryPolicy)
 }
 
 func TestRegistry_CheckHealthUseFetchedModels(t *testing.T) {

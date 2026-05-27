@@ -595,6 +595,91 @@ func TestCodexProvider_RefreshFailureSurfaced(t *testing.T) {
 	assert.Contains(t, err.Error(), "refresh after 401")
 }
 
+func TestCodexProvider_HTTPErrorIsTyped(t *testing.T) {
+	t.Parallel()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("x-request-id", "req-codex")
+		w.WriteHeader(http.StatusBadGateway)
+		_, err := w.Write([]byte(`{"error":"temporary gateway"}`))
+		assert.NoError(t, err)
+	}))
+	defer apiSrv.Close()
+
+	auth := newTestCodexAuth(t, "access-1", "refresh-1", "acct-42")
+	p := &CodexProvider{client: apiSrv.Client(), auth: auth, baseURL: apiSrv.URL, models: []string{"gpt-5.5"}}
+
+	_, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerCodex, providerErr.Provider)
+	assert.Equal(t, http.StatusBadGateway, providerErr.StatusCode)
+	assert.Equal(t, "req-codex", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+}
+
+func TestParseCodexSSE_ErrorEventIsTyped(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseCodexSSE(context.Background(), strings.NewReader(`data: {"type":"error","code":"rate_limit_error","message":"slow down"}
+
+`))
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerCodex, providerErr.Provider)
+	assert.Equal(t, http.StatusOK, providerErr.StatusCode)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "rate_limit_error: slow down", providerErr.Message)
+}
+
+func TestParseCodexSSE_ErrorEventCarriesResponseHeaders(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseCodexSSEWithHeader(
+		context.Background(),
+		strings.NewReader(`data: {"type":"response.failed","response":{"error":{"code":"rate_limit_error","message":"slow down"}}}
+
+`),
+		http.Header{
+			"Retry-After":  []string{"11"},
+			"X-Request-Id": []string{"req-codex-stream"},
+		},
+	)
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerCodex, providerErr.Provider)
+	assert.Equal(t, http.StatusOK, providerErr.StatusCode)
+	assert.Equal(t, 11*time.Second, providerErr.RetryAfter)
+	assert.Equal(t, "req-codex-stream", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "rate_limit_error: slow down", providerErr.Message)
+}
+
+func TestParseCodexSSE_ResponseFailedPrefersSpecificErrorCode(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseCodexSSE(context.Background(), strings.NewReader(`data: {"type":"response.failed","response":{"error":{"type":"error","code":"server_error","message":"try later"}}}
+
+`))
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerCodex, providerErr.Provider)
+	assert.Equal(t, http.StatusOK, providerErr.StatusCode)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "server_error: try later", providerErr.Message)
+}
+
 func TestCodexProvider_RefreshHonorsCanceledContext(t *testing.T) {
 	t.Parallel()
 

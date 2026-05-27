@@ -845,7 +845,9 @@ func knownProviderFields() map[string]bool {
 	return map[string]bool{
 		"base_url":                true,
 		"disabled":                true,
+		"auto_start":              true,
 		"disable_private_adapter": true,
+		"retry":                   true,
 		"timeout_seconds":         true,
 	}
 }
