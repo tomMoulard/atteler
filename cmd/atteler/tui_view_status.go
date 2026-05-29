@@ -969,6 +969,7 @@ func (m model) idleSuggestionContextPayload() idleSuggestionContextPayload {
 	// provider-visible context unless a future explicit policy permits those
 	// categories. Local deterministic completions still use the full context.
 	privateSummary := "file/task/issue=omitted-private"
+
 	lines = append(lines, promptContextSourceStatusesForSummary(contextResult.Sources)...)
 	contextStatus := promptContextStatusLabel(contextResult.Sources)
 
