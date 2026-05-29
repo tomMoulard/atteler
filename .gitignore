@@ -2,6 +2,8 @@
 /symphony
 /dist
 /.atteler/sessions/
+/.atteler/prompt-context-cache.json
+/.atteler/.prompt-context-cache-*.tmp
 /.atteler/skill-learning/
 /.atteler/skills/generated/
 /.atteler/runs/

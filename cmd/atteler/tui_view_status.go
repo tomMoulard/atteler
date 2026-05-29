@@ -150,6 +150,10 @@ func (m model) statusLine() string {
 		parts = append(parts, "suggestion:"+suggestionLabel)
 	}
 
+	if m.promptContextStatus != "" {
+		parts = append(parts, "promptctx:"+m.promptContextStatus)
+	}
+
 	if len(parts) == 0 {
 		return ""
 	}
@@ -341,13 +345,9 @@ func (m model) promptSuggestion() (promptcomplete.Suggestion, bool) {
 		return promptcomplete.Suggestion{}, false
 	}
 
-	suggestion, ok := promptcomplete.Suggest(promptCompletionContext(m.ctx, appState{
-		agentRegistry: m.agentRegistry,
-		sessionStore:  m.sessionStore,
-		sessionState:  m.sessionState,
-		selectedAgent: m.selectedAgent,
-		cwd:           m.cwd,
-	}, value, false), promptcomplete.Options{Limit: 1})
+	contextResult := m.promptCompletionContextResult(value)
+
+	suggestion, ok := promptcomplete.Suggest(contextResult.Context, promptcomplete.Options{Limit: 1})
 	if !ok || suggestion.Suffix == "" {
 		return promptcomplete.Suggestion{}, false
 	}
@@ -371,6 +371,38 @@ func promptSuggestionAppendable(input string, suggestion promptcomplete.Suggesti
 	return strings.HasPrefix(strings.ToLower(suggestion.Text), strings.ToLower(current))
 }
 
+func (m model) promptCompletionContextResult(input string) promptCompletionContextResult {
+	return promptCompletionContextInteractive(m.ctx, appState{
+		agentRegistry:      m.agentRegistry,
+		sessionStore:       m.sessionStore,
+		sessionState:       m.sessionState,
+		contextOptions:     m.contextOptions,
+		selectedAgent:      m.selectedAgent,
+		cwd:                m.cwd,
+		worktreeInfo:       m.worktreeInfo,
+		promptContextCache: m.promptContextCache,
+	}, input, true)
+}
+
+func (m *model) refreshPromptContextStatus(input string) {
+	if strings.TrimSpace(input) == "" {
+		m.promptContextStatus = ""
+
+		return
+	}
+
+	if strings.TrimSpace(m.cwd) == "" &&
+		strings.TrimSpace(m.contextOptions.Root) == "" &&
+		m.worktreeInfo == nil {
+		m.promptContextStatus = ""
+
+		return
+	}
+
+	contextResult := m.promptCompletionContextResult(input)
+	m.promptContextStatus = promptContextStatusLabel(contextResult.Sources)
+}
+
 func (m *model) clearIdleSuggestion() {
 	m.cancelIdleSuggestionRequest()
 	m.idleSuggestionID++
@@ -380,6 +412,7 @@ func (m *model) clearIdleSuggestion() {
 	m.idleSuggestionProvider = ""
 	m.idleSuggestionModel = ""
 	m.idleSuggestionContext = ""
+	m.promptContextStatus = ""
 }
 
 func (m *model) cancelIdleSuggestionRequest() {
@@ -394,10 +427,18 @@ func (m *model) cancelIdleSuggestionRequest() {
 func (m *model) scheduleIdleSuggestion() tea.Cmd {
 	value := m.textarea.Value()
 	if m.waiting ||
-		m.registry == nil ||
-		!m.modelBackedIdleSuggestionsEnabled() ||
 		strings.TrimSpace(value) == "" ||
 		textareaCursorOffset(m.textarea) != len(value) {
+		if strings.TrimSpace(value) == "" {
+			m.promptContextStatus = ""
+		}
+
+		return nil
+	}
+
+	if m.registry == nil || !m.modelBackedIdleSuggestionsEnabled() {
+		m.refreshPromptContextStatus(value)
+
 		return nil
 	}
 
@@ -534,6 +575,8 @@ func (m model) startIdleSuggestionRequest(id int, input string, force bool) (tea
 	} else {
 		m.idleSuggestionStatus = idleSuggestionStatusSending
 	}
+
+	m.promptContextStatus = contextPayload.Status
 
 	return m, requestIdleSuggestion(
 		requestCtx,
@@ -893,16 +936,12 @@ func requestIdleSuggestion(
 type idleSuggestionContextPayload struct {
 	Content string
 	Summary string
+	Status  string
 }
 
 func (m model) idleSuggestionContextPayload() idleSuggestionContextPayload {
-	completionContext := promptCompletionContext(m.ctx, appState{
-		agentRegistry: m.agentRegistry,
-		sessionStore:  m.sessionStore,
-		sessionState:  m.sessionState,
-		selectedAgent: m.selectedAgent,
-		cwd:           m.cwd,
-	}, m.textarea.Value(), false)
+	contextResult := m.promptCompletionContextResult(m.textarea.Value())
+	completionContext := contextResult.Context
 
 	var lines []string
 
@@ -922,6 +961,7 @@ func (m model) idleSuggestionContextPayload() idleSuggestionContextPayload {
 	appendCandidates("agent", completionContext.Agents, 4)
 	appendCandidates("tool", completionContext.Tools, 4)
 	appendCandidates("slash", completionContext.SlashCommands, 6)
+	appendCandidates("symbol", completionContext.ProjectSymbols, 4)
 	appendCandidates("permission", completionContext.Permissions, 4)
 
 	// Files, tasks, and issue references often contain private repository or
@@ -930,10 +970,14 @@ func (m model) idleSuggestionContextPayload() idleSuggestionContextPayload {
 	// categories. Local deterministic completions still use the full context.
 	privateSummary := "file/task/issue=omitted-private"
 
+	lines = append(lines, promptContextSourceStatusesForSummary(contextResult.Sources)...)
+	contextStatus := promptContextStatusLabel(contextResult.Sources)
+
 	if len(lines) == 0 {
 		return idleSuggestionContextPayload{
 			Content: "minimal deterministic context available; private file/task/issue context omitted.",
 			Summary: privateSummary,
+			Status:  contextStatus,
 		}
 	}
 
@@ -941,6 +985,7 @@ func (m model) idleSuggestionContextPayload() idleSuggestionContextPayload {
 		"agent=" + strconv.Itoa(counts["agent"]),
 		"tool=" + strconv.Itoa(counts["tool"]),
 		"slash=" + strconv.Itoa(counts["slash"]),
+		"symbol=" + strconv.Itoa(counts["symbol"]),
 		"permission=" + strconv.Itoa(counts["permission"]),
 		privateSummary,
 	}
@@ -948,7 +993,14 @@ func (m model) idleSuggestionContextPayload() idleSuggestionContextPayload {
 	return idleSuggestionContextPayload{
 		Content: strings.Join(lines, "\n") + "\nprivacy: private file/task/issue context omitted; candidate descriptions omitted from background suggestions.",
 		Summary: strings.Join(summary, ","),
+		Status:  contextStatus,
 	}
+}
+
+func (m model) idleSuggestionContextForPrompt() (summary, status string) {
+	payload := m.idleSuggestionContextPayload()
+
+	return payload.Content, payload.Status
 }
 
 func idleSuggestionContextLine(label string, candidate promptcomplete.Candidate) string {

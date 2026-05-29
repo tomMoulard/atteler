@@ -412,9 +412,16 @@ func commandContractsByName() map[string]commandContract {
 			withExamples(`atteler agents plan "review auth changes"`),
 		),
 		"prompt-complete-providerless": commandContractFor(
-			"preview local context-aware prompt completions",
+			"preview local prompt completions with context freshness",
 			[]string{"--prompt-complete", "--prompt-complete-limit", "--session", "--agent"},
-			[]string{commandEffectConfigRead, commandEffectSessionRead, commandEffectUserOutput},
+			[]string{
+				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectFilesystemWrite,
+				commandEffectGitRead,
+				commandEffectSessionRead,
+				commandEffectUserOutput,
+			},
 			[]string{commandOutputText},
 			withInputType("promptCompleteCommandInput"),
 			withExamples(`atteler agents prompt-complete "review"`),

@@ -400,6 +400,18 @@ func TestCommandSurface_RepresentativeSideEffectsAndOutputsAreStable(t *testing.
 			outputModes: []string{commandOutputText},
 		},
 		{
+			name: "prompt-complete-providerless",
+			sideEffects: []string{
+				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectFilesystemWrite,
+				commandEffectGitRead,
+				commandEffectSessionRead,
+				commandEffectUserOutput,
+			},
+			outputModes: []string{commandOutputText},
+		},
+		{
 			name:        "watch-scan-providerless",
 			sideEffects: []string{commandEffectFilesystemRead, commandEffectUserOutput},
 			outputModes: []string{commandOutputText, commandOutputJSON},

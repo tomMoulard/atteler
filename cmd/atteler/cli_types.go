@@ -530,6 +530,7 @@ type appState struct {
 	providerReadiness           llm.ProviderReadinessReport
 	worktreeInfo                *worktree.Info
 	pluginPolicy                *attelerplugin.Policy
+	promptContextCache          *promptContextCache
 	fallbackModels              []string
 	pluginPaths                 []string
 	providers                   []string

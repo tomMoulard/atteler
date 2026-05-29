@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 func providerlessConfigAgentPluginCommands() []command {
@@ -57,7 +58,11 @@ func providerlessConfigAgentPluginCommands() []command {
 					s.sessionState = saved
 				}
 
-				s.selectedAgent = o.agentName
+				s.selectedAgent = strings.TrimSpace(o.agentName)
+				if s.selectedAgent == "" {
+					s.selectedAgent = strings.TrimSpace(s.sessionState.DefaultAgent)
+				}
+
 				promptComplete(ctx, s, o.promptCompleteInput, o.promptCompleteLimit.value)
 
 				return nil
