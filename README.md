@@ -828,7 +828,6 @@ atteler memory search "OAuth retry storm"
 atteler memory retrieve "OAuth retry storm"
 atteler memory git-history "memory regression"
 atteler memory vector-search "redirect risks" --vector-index docs/research.md --vectorizer lexical
-atteler memory vector-search "redirect risks" --vector-index docs/research.md --vectorizer embedding --vector-provider ollama --vector-model nomic-embed-text
 
 atteler code-intel summary
 atteler code-intel summary --json
@@ -946,7 +945,7 @@ atteler agents skill-learning-enable-all
 
 atteler plugins list
 atteler plugins describe reviewer
-atteler plugins run reviewer/check --plugin-dry-run
+atteler plugins run reviewer/check
 
 atteler session record-failure "retry token refresh timer" \
   --session 20260430-120000-deadbeef \
@@ -963,12 +962,11 @@ atteler session export 20260430-120000-deadbeef \
   --export-format private-markdown # explicit full-fidelity/private export
 atteler session export 20260430-120000-deadbeef \
   --export-format issue           # compact issue/PR-ready summary
-atteler session --session 20260430-120000-deadbeef runs
-atteler session --session 20260430-120000-deadbeef show-run latest
-atteler session --session 20260430-120000-deadbeef export-run review \
-  --export-format json
-atteler session --session 20260430-120000-deadbeef replay-run speculation
-atteler session --session 20260430-120000-deadbeef resume-run latest
+atteler session runs
+atteler session show-run latest
+atteler session export-run review
+atteler session replay-run speculation
+atteler session resume-run latest
 
 atteler worktrees run "Add unit tests for the auth package"
 atteler worktrees list

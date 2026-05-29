@@ -598,6 +598,7 @@ func (r *multiAgentRunRecorder) perCallOutputRejectionLocked(call session.MultiA
 	return "", 0, 0
 }
 
+//nolint:gocognit,nestif // State transitions intentionally stay together so call receipts remain atomic.
 func (r *multiAgentRunRecorder) finishCall(callID string, resp *llm.Response, callErr error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -869,6 +870,7 @@ func (r *multiAgentRunRecorder) recordSpeculateSession(specSession speculate.Ses
 	r.run.Artifacts = nil
 	r.run.Gates = nil
 	r.run.Decisions = nil
+	r.run.Errors = nil
 	hasVerdict := strings.TrimSpace(specSession.Verdict.Winner) != "" ||
 		strings.TrimSpace(specSession.Verdict.Reason) != "" ||
 		len(specSession.Verdict.GateChecks) > 0
@@ -955,6 +957,8 @@ func (r *multiAgentRunRecorder) recordSpeculateSession(specSession speculate.Ses
 		})
 	}
 
+	r.recordSpeculationErrorsLocked(specSession, hasVerdict)
+
 	r.pendingSummary = acceptedSpeculationSummary(specSession, verdictOutcome)
 	r.run.Summary = session.MultiAgentRunSummary{}
 
@@ -962,6 +966,21 @@ func (r *multiAgentRunRecorder) recordSpeculateSession(specSession speculate.Ses
 	r.appendUnrepresentedRawArtifactsLocked(rawArtifacts)
 
 	return r.persistLocked()
+}
+
+func (r *multiAgentRunRecorder) recordSpeculationErrorsLocked(specSession speculate.Session, hasVerdict bool) {
+	if !hasVerdict {
+		return
+	}
+
+	if err := speculationVerdictValidationError(specSession); err != nil {
+		r.appendRunErrorLocked(session.MultiAgentRunError{
+			Stage:       multiAgentPhaseAggregateVerdict,
+			Reviewer:    "judge",
+			TargetAgent: specSession.Verdict.Winner,
+			Message:     "aggregate verdict failed validation: " + err.Error(),
+		})
+	}
 }
 
 func acceptedSpeculationSummary(
@@ -1031,15 +1050,23 @@ func speculateVerdictDecisionRationale(verdict speculate.Verdict) string {
 }
 
 func speculateVerdictDecision(specSession speculate.Session) (outcome, rationale string) {
-	if err := speculate.ValidateVerdict(specSession.Verdict, specSession.Plan.GateChecks); err != nil {
-		return multiAgentDecisionRejected, "aggregate verdict failed validation: " + err.Error()
-	}
-
-	if err := validateSpeculationWinnerRecorded(specSession); err != nil {
+	if err := speculationVerdictValidationError(specSession); err != nil {
 		return multiAgentDecisionRejected, "aggregate verdict failed validation: " + err.Error()
 	}
 
 	return multiAgentDecisionAccepted, speculateVerdictDecisionRationale(specSession.Verdict)
+}
+
+func speculationVerdictValidationError(specSession speculate.Session) error {
+	if err := speculate.ValidateVerdict(specSession.Verdict, specSession.Plan.GateChecks); err != nil {
+		return fmt.Errorf("%w", err)
+	}
+
+	if err := validateSpeculationWinnerRecorded(specSession); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func validateSpeculationWinnerRecorded(specSession speculate.Session) error {
@@ -1108,6 +1135,7 @@ func (r *multiAgentRunRecorder) recordReviewSession(reviewSession review.Session
 	r.run.Artifacts = nil
 	r.run.Gates = nil
 	r.run.Decisions = nil
+	r.run.Errors = nil
 	hasVerdict := strings.TrimSpace(reviewSession.Verdict.Reviewer) != "" ||
 		len(reviewSession.Verdict.Findings) > 0 ||
 		len(reviewSession.Verdict.GateChecks) > 0
@@ -1138,6 +1166,8 @@ func (r *multiAgentRunRecorder) recordReviewSession(reviewSession review.Session
 		})
 	}
 
+	r.recordReviewErrorsLocked(reviewSession.Errors)
+	r.recordReviewValidationErrorLocked(reviewSession, hasVerdict)
 	r.recordReportLocked(now, reviewSession.Verdict, multiAgentArtifactVerdict, multiAgentPhaseAggregateVerdict, 1)
 
 	if hasVerdict {
@@ -1160,6 +1190,71 @@ func (r *multiAgentRunRecorder) recordReviewSession(reviewSession review.Session
 	return r.persistLocked()
 }
 
+func (r *multiAgentRunRecorder) recordReviewErrorsLocked(reviewErrors []review.RunError) {
+	for _, runError := range reviewErrors {
+		r.appendRunErrorLocked(session.MultiAgentRunError{
+			Stage:       runError.Stage,
+			Reviewer:    runError.Reviewer,
+			TargetAgent: runError.ReviewedReviewer,
+			Message:     runError.Message,
+		})
+	}
+}
+
+func (r *multiAgentRunRecorder) recordReviewValidationErrorLocked(reviewSession review.Session, hasVerdict bool) {
+	if !hasVerdict {
+		return
+	}
+
+	if err := reviewVerdictValidationError(reviewSession); err != nil {
+		rawMessage := err.Error()
+		persistedMessage := "aggregate verdict failed validation: " + rawMessage
+
+		if r.runErrorExistsLocked(multiAgentPhaseAggregateVerdict, reviewSession.Verdict.Reviewer, "", rawMessage) ||
+			r.runErrorExistsLocked(multiAgentPhaseAggregateVerdict, reviewSession.Verdict.Reviewer, "", persistedMessage) {
+			return
+		}
+
+		r.appendRunErrorLocked(session.MultiAgentRunError{
+			Stage:    multiAgentPhaseAggregateVerdict,
+			Reviewer: reviewSession.Verdict.Reviewer,
+			Message:  persistedMessage,
+		})
+	}
+}
+
+func (r *multiAgentRunRecorder) appendRunErrorLocked(runError session.MultiAgentRunError) {
+	runError.Stage = strings.TrimSpace(runError.Stage)
+	runError.Reviewer = strings.TrimSpace(runError.Reviewer)
+	runError.TargetAgent = strings.TrimSpace(runError.TargetAgent)
+	runError.Message = strings.TrimSpace(runError.Message)
+
+	if runError.Message == "" || r.runErrorExistsLocked(runError.Stage, runError.Reviewer, runError.TargetAgent, runError.Message) {
+		return
+	}
+
+	r.run.Errors = append(r.run.Errors, runError)
+}
+
+func (r *multiAgentRunRecorder) runErrorExistsLocked(stage, reviewer, targetAgent, message string) bool {
+	stage = strings.TrimSpace(stage)
+	reviewer = strings.TrimSpace(reviewer)
+	targetAgent = strings.TrimSpace(targetAgent)
+	message = strings.TrimSpace(message)
+
+	for i := range r.run.Errors {
+		runError := &r.run.Errors[i]
+		if strings.TrimSpace(runError.Stage) == stage &&
+			strings.TrimSpace(runError.Reviewer) == reviewer &&
+			strings.TrimSpace(runError.TargetAgent) == targetAgent &&
+			strings.TrimSpace(runError.Message) == message {
+			return true
+		}
+	}
+
+	return false
+}
+
 func acceptedReviewSummary(
 	reviewSession review.Session,
 	verdictOutcome string,
@@ -1175,11 +1270,19 @@ func acceptedReviewSummary(
 }
 
 func reviewVerdictDecision(reviewSession review.Session) (outcome, rationale string) {
-	if err := review.ValidateReport(reviewSession.Verdict, reviewSession.Plan.RequiredGates()); err != nil {
+	if err := reviewVerdictValidationError(reviewSession); err != nil {
 		return multiAgentDecisionRejected, "aggregate verdict failed validation: " + err.Error()
 	}
 
 	return multiAgentDecisionAccepted, "aggregate verdict accepted as final review output"
+}
+
+func reviewVerdictValidationError(reviewSession review.Session) error {
+	if err := review.ValidateReport(reviewSession.Verdict, reviewSession.Plan.RequiredGates()); err != nil {
+		return fmt.Errorf("%w", err)
+	}
+
+	return nil
 }
 
 func (r *multiAgentRunRecorder) recordReviewReportDecisionLocked(
@@ -1968,6 +2071,7 @@ func formatMultiAgentRunSummary(run session.MultiAgentRun) string {
 		"calls=" + strconv.Itoa(len(run.Calls)),
 		"artifacts=" + strconv.Itoa(len(run.Artifacts)),
 		"gates=" + strconv.Itoa(len(run.Gates)),
+		"errors=" + strconv.Itoa(len(run.Errors)),
 	}
 	if multiAgentRunHasAcceptedOutput(run) {
 		if run.Summary.Winner != "" {
@@ -2107,11 +2211,12 @@ func formatMultiAgentRunResume(run session.MultiAgentRun) string {
 func writeMultiAgentResumeCursor(b *strings.Builder, run session.MultiAgentRun) {
 	fmt.Fprintf(
 		b,
-		"resume_cursor: recorded_calls=%d\tartifacts=%d\tdecisions=%d\tgates=%d\n",
+		"resume_cursor: recorded_calls=%d\tartifacts=%d\tdecisions=%d\tgates=%d\terrors=%d\n",
 		len(run.Calls),
 		len(run.Artifacts),
 		len(run.Decisions),
 		len(run.Gates),
+		len(run.Errors),
 	)
 
 	if call, ok := lastMultiAgentRunCall(run.Calls); ok {
@@ -2429,6 +2534,7 @@ func formatStoredSpeculationRun(run session.MultiAgentRun) string {
 	writeStoredArtifacts(&b, "reviews", run.Artifacts, multiAgentArtifactCrossReview)
 	writeStoredArtifacts(&b, "aggregate_verdict", run.Artifacts, multiAgentArtifactVerdict)
 	writeStoredDisagreements(&b, run.Disagreements)
+	writeStoredRunErrors(&b, run.Errors)
 	writeStoredDecisions(&b, run.Decisions)
 	writeStoredGates(&b, run.Gates)
 	writeStoredCalls(&b, run.Calls)
@@ -2459,6 +2565,7 @@ func formatStoredReviewRun(run session.MultiAgentRun) string {
 	writeStoredArtifacts(&b, "cross_reviews", run.Artifacts, multiAgentArtifactCrossReview)
 	writeStoredArtifacts(&b, "aggregate_report", run.Artifacts, multiAgentArtifactVerdict)
 	writeStoredDisagreements(&b, run.Disagreements)
+	writeStoredRunErrors(&b, run.Errors)
 	writeStoredDecisions(&b, run.Decisions)
 	writeStoredGates(&b, run.Gates)
 	writeStoredCalls(&b, run.Calls)
@@ -2476,6 +2583,7 @@ func formatStoredGenericRun(run session.MultiAgentRun) string {
 	writeStoredReviewers(&b, run.Reviewers)
 	writeStoredArtifacts(&b, "artifacts", run.Artifacts, "")
 	writeStoredDisagreements(&b, run.Disagreements)
+	writeStoredRunErrors(&b, run.Errors)
 	writeStoredDecisions(&b, run.Decisions)
 	writeStoredGates(&b, run.Gates)
 	writeStoredCalls(&b, run.Calls)
@@ -2957,6 +3065,35 @@ func writeStoredDecisions(b *strings.Builder, decisions []session.MultiAgentRunD
 
 		if decision.Rationale != "" {
 			parts = append(parts, "rationale="+replayContent(decision.Rationale))
+		}
+
+		fmt.Fprintf(b, "  - %s\n", strings.Join(parts, "\t"))
+	}
+}
+
+func writeStoredRunErrors(b *strings.Builder, runErrors []session.MultiAgentRunError) {
+	if len(runErrors) == 0 {
+		return
+	}
+
+	b.WriteString("workflow_errors:\n")
+
+	for _, runError := range runErrors {
+		parts := []string{}
+		if runError.Stage != "" {
+			parts = append(parts, storedKeyValue("stage", runError.Stage))
+		}
+
+		if runError.Reviewer != "" {
+			parts = append(parts, storedKeyValue("reviewer", runError.Reviewer))
+		}
+
+		if runError.TargetAgent != "" {
+			parts = append(parts, storedKeyValue("target", runError.TargetAgent))
+		}
+
+		if runError.Message != "" {
+			parts = append(parts, "message="+replayContent(runError.Message))
 		}
 
 		fmt.Fprintf(b, "  - %s\n", strings.Join(parts, "\t"))

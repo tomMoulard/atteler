@@ -222,6 +222,7 @@ type MultiAgentRun struct {
 	Artifacts          []MultiAgentRunArtifact     `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
 	Gates              []MultiAgentRunGate         `json:"gates,omitempty" yaml:"gates,omitempty"`
 	Disagreements      []MultiAgentRunDisagreement `json:"disagreements,omitempty" yaml:"disagreements,omitempty"`
+	Errors             []MultiAgentRunError        `json:"errors,omitempty" yaml:"errors,omitempty"`
 	Decisions          []MultiAgentRunDecision     `json:"decisions,omitempty" yaml:"decisions,omitempty"`
 	Summary            MultiAgentRunSummary        `json:"summary,omitzero" yaml:"summary,omitempty"`
 	CancellationReason string                      `json:"cancellation_reason,omitempty" yaml:"cancellation_reason,omitempty"`
@@ -363,6 +364,15 @@ type MultiAgentRunDisagreement struct {
 	Subject     string `json:"subject,omitempty" yaml:"subject,omitempty"`
 	Notes       string `json:"notes,omitempty" yaml:"notes,omitempty"`
 	Index       int    `json:"index,omitempty" yaml:"index,omitempty"`
+}
+
+// MultiAgentRunError records workflow-level errors that are not provider-call
+// failures, such as structured-output parse or validation failures.
+type MultiAgentRunError struct {
+	Stage       string `json:"stage,omitempty" yaml:"stage,omitempty"`
+	Reviewer    string `json:"reviewer,omitempty" yaml:"reviewer,omitempty"`
+	TargetAgent string `json:"target_agent,omitempty" yaml:"target_agent,omitempty"`
+	Message     string `json:"message" yaml:"message"`
 }
 
 // MultiAgentRunDecision records accepted/rejected workflow outputs and rationale.

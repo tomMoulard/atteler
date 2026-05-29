@@ -1604,6 +1604,11 @@ func TestStore_SearchMultiAgentRuns(t *testing.T) {
 			Passed: false,
 			Notes:  "integration evidence missing",
 		}},
+		Errors: []MultiAgentRunError{{
+			Stage:    "aggregate-verdict",
+			Reviewer: "judge",
+			Message:  "structured verdict parse failed",
+		}},
 		Summary:      MultiAgentRunSummary{Winner: "planner", Reason: "durable receipt evidence"},
 		ResumeReason: "continue from recorded receipt",
 	}}
@@ -1633,6 +1638,11 @@ func TestStore_SearchMultiAgentRuns(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Contains(t, results[0].Snippets[0].Text, "gpt-call-fallback")
+
+	results, err = store.Search("structured verdict parse failed")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Contains(t, results[0].Snippets[0].Text, "Workflow error:")
 }
 
 func TestIndexedMultiAgentRunSearchTextRequiresAcceptedOutputForSummary(t *testing.T) {

@@ -20,7 +20,7 @@ const (
 	searchIndexFileName      = ".session-search-index"
 	searchIndexLockFileName  = ".session-search-index.lock"
 	searchIndexVersion       = 2
-	searchIndexSchemaVersion = 10
+	searchIndexSchemaVersion = 11
 	sessionSchemaVersion     = 1
 
 	defaultTranscriptRetention = 180 * 24 * time.Hour
@@ -1431,6 +1431,17 @@ func indexedMultiAgentRunSearchText(label string, run *MultiAgentRun, policy nor
 		}), " "))
 	}
 
+	for index := range run.Errors {
+		runError := &run.Errors[index]
+		errorLabel := fmt.Sprintf("%s.errors[%d]", label, index+1)
+		parts = append(parts, "Workflow error: "+strings.Join(nonEmptyIndexParts([]string{
+			sanitizeIndexFieldString(errorLabel+".stage", runError.Stage, policy),
+			sanitizeIndexFieldString(errorLabel+".reviewer", runError.Reviewer, policy),
+			sanitizeIndexFieldString(errorLabel+".target_agent", runError.TargetAgent, policy),
+			sanitizeIndexFieldString(errorLabel+".message", runError.Message, policy),
+		}), " "))
+	}
+
 	for index := range run.Calls {
 		call := &run.Calls[index]
 		callLabel := fmt.Sprintf("%s.calls[%d]", label, index+1)
@@ -1460,12 +1471,15 @@ func multiAgentRunAgentValues(run *MultiAgentRun) []string {
 	for i := range run.Branches {
 		values = append(values, run.Branches[i].Role)
 	}
+
 	for i := range run.Reviewers {
 		values = append(values, run.Reviewers[i].Name, run.Reviewers[i].Role, run.Reviewers[i].TargetAgent)
 	}
+
 	for i := range run.Artifacts {
 		values = append(values, run.Artifacts[i].Agent, run.Artifacts[i].TargetAgent)
 	}
+
 	for i := range run.Calls {
 		values = append(values, run.Calls[i].Agent, run.Calls[i].TargetAgent)
 	}
@@ -1477,12 +1491,15 @@ func multiAgentRunModelValues(run *MultiAgentRun) []string {
 	values := make([]string, 0, 1+len(run.FallbackModels)+len(run.Branches)+len(run.Reviewers)+len(run.Calls)*3)
 	values = append(values, run.Model)
 	values = append(values, run.FallbackModels...)
+
 	for i := range run.Branches {
 		values = append(values, run.Branches[i].Model)
 	}
+
 	for i := range run.Reviewers {
 		values = append(values, run.Reviewers[i].Model)
 	}
+
 	for i := range run.Calls {
 		values = append(values, run.Calls[i].RequestedModel, run.Calls[i].ResponseModel)
 		values = append(values, run.Calls[i].FallbackModels...)

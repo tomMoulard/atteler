@@ -78,6 +78,7 @@ func (rc *registryCompleter) Complete(ctx context.Context, branch, systemPrompt,
 	}
 
 	generation := generationForRequest(rc.generationBase, rc.generationOver, activeAgent)
+
 	selectedModel := rc.selectedModel
 	if strings.TrimSpace(selectedModel) == "" && !activeAgent.ok {
 		selectedModel = branch
@@ -123,8 +124,8 @@ func (rc *registryCompleter) Complete(ctx context.Context, branch, systemPrompt,
 	setExplicitContextManifestEventModel(&manifestEvent, params.Model)
 	emitHookWarning(ctx, rc.hookRunner, manifestEvent)
 
-	if err := validateRequestBudgetWithFallbacks(rc.registry, params.Model, fallbackModels, params.Messages, rc.maxInputTokens); err != nil {
-		return "", fmt.Errorf("speculate LLM budget: %w", err)
+	if budgetErr := validateRequestBudgetWithFallbacks(rc.registry, params.Model, fallbackModels, params.Messages, rc.maxInputTokens); budgetErr != nil {
+		return "", fmt.Errorf("speculate LLM budget: %w", budgetErr)
 	}
 
 	resp, err := completeMultiAgentRegistryCall(

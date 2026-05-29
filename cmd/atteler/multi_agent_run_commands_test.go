@@ -1347,6 +1347,12 @@ func TestMultiAgentRunRecorderRecordsReviewSessionArtifacts(t *testing.T) {
 			Reviewer:   "aggregate-verdict",
 			GateChecks: []review.GateCheck{{Name: "tests pass", Passed: false, Notes: "integration missing"}},
 		},
+		Errors: []review.RunError{{
+			Stage:            string(review.RoundCrossReview),
+			Reviewer:         "tests",
+			ReviewedReviewer: "quality",
+			Message:          "cross-review parse failed",
+		}},
 	}))
 
 	loaded, err := store.Load(sessionState.ID)
@@ -1390,10 +1396,76 @@ func TestMultiAgentRunRecorderRecordsReviewSessionArtifacts(t *testing.T) {
 	assert.Equal(t, "cross-review", run.Disagreements[0].Subject)
 	assert.Equal(t, "gate:tests pass", run.Disagreements[1].Subject)
 	assert.Equal(t, "pass=quality fail=aggregate-verdict", run.Disagreements[1].Notes)
+	require.Len(t, run.Errors, 2)
+	assert.Equal(t, string(review.RoundCrossReview), run.Errors[0].Stage)
+	assert.Equal(t, "tests", run.Errors[0].Reviewer)
+	assert.Equal(t, "quality", run.Errors[0].TargetAgent)
+	assert.Equal(t, "cross-review parse failed", run.Errors[0].Message)
+	assert.Equal(t, multiAgentPhaseAggregateVerdict, run.Errors[1].Stage)
+	assert.Equal(t, "aggregate-verdict", run.Errors[1].Reviewer)
+	assert.Equal(t, "aggregate verdict failed validation: gate check \"tests pass\" failed", run.Errors[1].Message)
+	assert.Contains(t, formatMultiAgentRunSummary(run), "errors=2")
+	assert.Contains(t, formatMultiAgentRunResume(run), "gates=2\terrors=2")
 
 	replay := formatMultiAgentRunReplay(run)
 	assert.Contains(t, replay, "aggregate_report:")
 	assert.Contains(t, replay, "tests pass: FAIL integration missing")
+	assert.Contains(t, replay, "workflow_errors:")
+	assert.Contains(t, replay, "message=cross-review parse failed")
+	assert.Contains(t, replay, "message=aggregate verdict failed validation: gate check \"tests pass\" failed")
+}
+
+func TestMultiAgentRunRecorderDoesNotDuplicateReviewAggregateErrors(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	sessionState := session.New("gpt-test", nil)
+	recorder := newMultiAgentRunRecorder(
+		store,
+		&sessionState,
+		session.MultiAgentRunKindReview,
+		"review aggregate error",
+		"gpt-test",
+		nil,
+		session.MultiAgentRunBudget{},
+		nil,
+		nil,
+	)
+	require.NoError(t, recorder.start())
+
+	plan, err := review.NewPlan(
+		[]review.Reviewer{{Name: "quality"}},
+		[]string{"pkg/example.go"},
+		[]string{"tests pass"},
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recorder.recordReviewSession(review.Session{
+		Plan: plan,
+		Verdict: review.Report{
+			Reviewer:   string(review.RoundAggregateVerdict),
+			GateChecks: []review.GateCheck{{Name: "tests pass", Passed: false}},
+		},
+		Errors: []review.RunError{{
+			Stage:    string(review.RoundAggregateVerdict),
+			Reviewer: string(review.RoundAggregateVerdict),
+			Message:  `gate check "tests pass" failed`,
+		}},
+	}))
+
+	loaded, err := store.Load(sessionState.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.MultiAgentRuns, 1)
+
+	run := loaded.MultiAgentRuns[0]
+	require.Len(t, run.Errors, 1)
+	assert.Equal(t, multiAgentPhaseAggregateVerdict, run.Errors[0].Stage)
+	assert.Equal(t, string(review.RoundAggregateVerdict), run.Errors[0].Reviewer)
+	assert.Equal(t, `gate check "tests pass" failed`, run.Errors[0].Message)
+
+	replay := formatMultiAgentRunReplay(run)
+	assert.Equal(t, 1, strings.Count(replay, "workflow_errors:"))
+	assert.Equal(t, 1, strings.Count(replay, `message=gate check "tests pass" failed`))
 }
 
 func multiAgentRunAggregateReviewerExists(
@@ -1690,9 +1762,16 @@ func TestMultiAgentRunRecorderRejectsSpeculationWinnerWhenGateFails(t *testing.T
 	assert.Equal(t, "aggregate verdict failed validation: gate check \"tests pass\" failed: tests were not run", run.Decisions[2].Rationale)
 	assert.Empty(t, run.Summary.Winner)
 	assert.Empty(t, run.Summary.Reason)
+	require.Len(t, run.Errors, 1)
+	assert.Equal(t, multiAgentPhaseAggregateVerdict, run.Errors[0].Stage)
+	assert.Equal(t, "judge", run.Errors[0].Reviewer)
+	assert.Equal(t, "planner", run.Errors[0].TargetAgent)
+	assert.Equal(t, "aggregate verdict failed validation: gate check \"tests pass\" failed: tests were not run", run.Errors[0].Message)
 	replay := formatMultiAgentRunReplay(run)
 	assert.Contains(t, replay, "aggregate_verdict:")
 	assert.Contains(t, replay, "winner: planner")
+	assert.Contains(t, replay, "workflow_errors:")
+	assert.Contains(t, replay, "message=aggregate verdict failed validation: gate check \"tests pass\" failed: tests were not run")
 }
 
 func TestMultiAgentRunRecorderRejectsSpeculationWinnerOutsideCandidateBranches(t *testing.T) {
@@ -3339,6 +3418,12 @@ func TestFormatMultiAgentRunReplayEscapesStoredIdentityFields(t *testing.T) {
 			Subject:     "cross\nreview",
 			Notes:       "notes",
 		}},
+		Errors: []session.MultiAgentRunError{{
+			Stage:       "aggregate\nverdict",
+			Reviewer:    "judge\tone",
+			TargetAgent: "planner\nbranch",
+			Message:     "parse\tfailed\nhard",
+		}},
 		Decisions: []session.MultiAgentRunDecision{{
 			Kind:      multiAgentArtifactCrossReview,
 			Phase:     multiAgentPhaseCrossReview,
@@ -3377,6 +3462,7 @@ func TestFormatMultiAgentRunReplayEscapesStoredIdentityFields(t *testing.T) {
 	assert.Contains(t, replay, "name=reviewer\\none\trole=cross-review\ttarget=planner\\tbranch")
 	assert.Contains(t, replay, "metadata.unsafe\\nkey=value\\tone")
 	assert.Contains(t, replay, "reviewer=reviewer\\none\ttarget=planner\\tbranch\tsubject=cross\\nreview")
+	assert.Contains(t, replay, "stage=aggregate\\nverdict\treviewer=judge\\tone\ttarget=planner\\nbranch\tmessage=parse\\tfailed\\nhard")
 	assert.Contains(t, replay, "agent=reviewer\\none")
 	assert.Contains(t, replay, "name=tests\\npass\tstatus=PASS\tphase=aggregate-verdict\tagent=judge\\tone")
 	assert.Contains(t, replay, "id=call\\n001\tphase=proposal\tstatus=completed\tagent=planner\\nbranch\ttarget=target\\tone")

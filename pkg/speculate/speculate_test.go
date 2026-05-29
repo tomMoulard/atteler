@@ -874,7 +874,6 @@ func TestRunWithLLM_FailsClosedOnInvalidJudgeGates(t *testing.T) {
 			assert.NotEmpty(t, result.Session.Verdict.Winner)
 		})
 	}
-
 }
 
 func TestRunWithLLM_ReturnsParsedVerdictWhenWinnerIsInvalid(t *testing.T) {

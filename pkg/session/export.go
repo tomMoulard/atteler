@@ -188,6 +188,7 @@ type ExportMultiAgentRun struct {
 	Artifacts          []ExportMultiAgentRunArtifact     `json:"artifacts,omitempty"`
 	Gates              []ExportMultiAgentRunGate         `json:"gates,omitempty"`
 	Disagreements      []ExportMultiAgentRunDisagreement `json:"disagreements,omitempty"`
+	Errors             []ExportMultiAgentRunError        `json:"errors,omitempty"`
 	Decisions          []ExportMultiAgentRunDecision     `json:"decisions,omitempty"`
 	Summary            ExportMultiAgentRunSummary        `json:"summary,omitzero"`
 	CancellationReason string                            `json:"cancellation_reason,omitempty"`
@@ -294,6 +295,14 @@ type ExportMultiAgentRunDisagreement struct {
 	Subject     string `json:"subject,omitempty"`
 	Notes       string `json:"notes,omitempty"`
 	Index       int    `json:"index,omitempty"`
+}
+
+// ExportMultiAgentRunError is a sanitized workflow-level error.
+type ExportMultiAgentRunError struct {
+	Stage       string `json:"stage,omitempty"`
+	Reviewer    string `json:"reviewer,omitempty"`
+	TargetAgent string `json:"target_agent,omitempty"`
+	Message     string `json:"message"`
 }
 
 // ExportMultiAgentRunDecision is a sanitized accepted/rejected output decision.
@@ -718,6 +727,7 @@ func (builder *exportBuilder) exportMultiAgentRuns(entries []MultiAgentRun) []Ex
 			Artifacts:          builder.exportMultiAgentRunArtifacts(prefix, entry.Artifacts),
 			Gates:              builder.exportMultiAgentRunGates(prefix, entry.Gates),
 			Disagreements:      builder.exportMultiAgentRunDisagreements(prefix, entry.Disagreements),
+			Errors:             builder.exportMultiAgentRunErrors(prefix, entry.Errors),
 			Decisions:          builder.exportMultiAgentRunDecisions(prefix, entry.Decisions),
 			Summary:            summary,
 			CancellationReason: builder.sanitize(prefix+".cancellation_reason", entry.CancellationReason),
@@ -924,6 +934,25 @@ func (builder *exportBuilder) exportMultiAgentRunDisagreements(prefix string, di
 				"multi-agent run disagreement notes omitted by issue/PR summary profile",
 			),
 			Index: disagreement.Index,
+		})
+	}
+
+	return exported
+}
+
+func (builder *exportBuilder) exportMultiAgentRunErrors(prefix string, runErrors []MultiAgentRunError) []ExportMultiAgentRunError {
+	if len(runErrors) == 0 {
+		return nil
+	}
+
+	exported := make([]ExportMultiAgentRunError, 0, len(runErrors))
+	for index, runError := range runErrors {
+		errorPrefix := fmt.Sprintf("%s.errors[%d]", prefix, index+1)
+		exported = append(exported, ExportMultiAgentRunError{
+			Stage:       builder.sanitize(errorPrefix+".stage", runError.Stage),
+			Reviewer:    builder.sanitize(errorPrefix+".reviewer", runError.Reviewer),
+			TargetAgent: builder.sanitize(errorPrefix+".target_agent", runError.TargetAgent),
+			Message:     builder.sanitize(errorPrefix+".message", runError.Message),
 		})
 	}
 
@@ -1448,6 +1477,7 @@ func writeArtifactWorktreeMetadata(b *strings.Builder, entry *ExportArtifact) {
 	}
 }
 
+//nolint:gocognit,cyclop // Receipt export keeps sections in one stable order for reviewable Markdown.
 func writeMultiAgentRuns(b *strings.Builder, entries []ExportMultiAgentRun) {
 	if len(entries) == 0 {
 		return
@@ -1597,6 +1627,26 @@ func writeMultiAgentRuns(b *strings.Builder, entries []ExportMultiAgentRun) {
 
 				if disagreement.Notes != "" {
 					fmt.Fprintf(b, " — %s", markdownInline(disagreement.Notes))
+				}
+
+				b.WriteByte('\n')
+			}
+		}
+
+		if len(entry.Errors) > 0 {
+			b.WriteString("  - **Workflow errors:**\n")
+
+			for _, runError := range entry.Errors {
+				fmt.Fprintf(
+					b,
+					"    - stage=%s reviewer=%s target=%s",
+					markdownInline(runError.Stage),
+					markdownInline(runError.Reviewer),
+					markdownInline(runError.TargetAgent),
+				)
+
+				if runError.Message != "" {
+					fmt.Fprintf(b, " — %s", markdownInline(runError.Message))
 				}
 
 				b.WriteByte('\n')

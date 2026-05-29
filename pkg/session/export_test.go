@@ -304,6 +304,12 @@ func TestMarkdownAndJSON_ExportMultiAgentRunArtifacts(t *testing.T) {
 				Notes:       "needs tests key=" + secret,
 				Index:       1,
 			}},
+			Errors: []MultiAgentRunError{{
+				Stage:       "aggregate-verdict",
+				Reviewer:    "judge",
+				TargetAgent: "planner",
+				Message:     "parse failed key=" + secret,
+			}},
 			Summary:            MultiAgentRunSummary{Winner: "planner", Reason: "best evidence"},
 			CancellationReason: "canceled by operator key=" + secret,
 			ResumeReason:       "continue from partial receipt key=" + secret,
@@ -353,6 +359,11 @@ func TestMarkdownAndJSON_ExportMultiAgentRunArtifacts(t *testing.T) {
 	assert.Equal(t, "critic", decoded.MultiAgentRuns[0].Disagreements[0].Reviewer)
 	assert.Equal(t, 1, decoded.MultiAgentRuns[0].Disagreements[0].Index)
 	assert.Contains(t, decoded.MultiAgentRuns[0].Disagreements[0].Notes, "[REDACTED_API_KEY]")
+	require.Len(t, decoded.MultiAgentRuns[0].Errors, 1)
+	assert.Equal(t, "aggregate-verdict", decoded.MultiAgentRuns[0].Errors[0].Stage)
+	assert.Equal(t, "judge", decoded.MultiAgentRuns[0].Errors[0].Reviewer)
+	assert.Equal(t, "planner", decoded.MultiAgentRuns[0].Errors[0].TargetAgent)
+	assert.Contains(t, decoded.MultiAgentRuns[0].Errors[0].Message, "[REDACTED_API_KEY]")
 	assert.Equal(t, "accepted", decoded.MultiAgentRuns[0].Decisions[0].Outcome)
 	assert.Equal(t, 1, decoded.MultiAgentRuns[0].Decisions[0].Index)
 	assert.Empty(t, decoded.MultiAgentRuns[0].Summary.Winner)
@@ -387,6 +398,9 @@ func TestMarkdownAndJSON_ExportMultiAgentRunArtifacts(t *testing.T) {
 	assert.Contains(t, markdown, "**Disagreements:**")
 	assert.Contains(t, markdown, "reviewer=critic target=planner subject=cross-review")
 	assert.Contains(t, markdown, "subject=cross-review index=1")
+	assert.Contains(t, markdown, "**Workflow errors:**")
+	assert.Contains(t, markdown, "stage=aggregate-verdict reviewer=judge target=planner")
+	assert.Contains(t, markdown, "parse failed key=\\[REDACTED\\_API\\_KEY\\]")
 	assert.Contains(t, markdown, "**Decisions:**")
 	assert.Contains(t, markdown, "proposal accepted phase=proposal agent=planner index=1")
 	assert.Contains(t, markdown, "model=backup-test")
@@ -964,6 +978,11 @@ func TestIssueExport_OmitsMultiAgentRunBodies(t *testing.T) {
 				Subject:     "cross-review",
 				Notes:       "private disagreement note",
 			}},
+			Errors: []MultiAgentRunError{{
+				Stage:    "aggregate-verdict",
+				Reviewer: "judge",
+				Message:  "structured verdict parse failed",
+			}},
 		}},
 	}
 	options := ExportOptions{Profile: ExportProfileIssue, ExportedAt: fixedExportedAt}
@@ -978,6 +997,7 @@ func TestIssueExport_OmitsMultiAgentRunBodies(t *testing.T) {
 	require.Len(t, decoded.MultiAgentRuns[0].Calls, 1)
 	require.Len(t, decoded.MultiAgentRuns[0].Artifacts, 1)
 	require.Len(t, decoded.MultiAgentRuns[0].Disagreements, 1)
+	require.Len(t, decoded.MultiAgentRuns[0].Errors, 1)
 	assert.Empty(t, decoded.MultiAgentRuns[0].Prompt)
 	assert.Empty(t, decoded.MultiAgentRuns[0].Calls[0].SystemPrompt)
 	assert.Empty(t, decoded.MultiAgentRuns[0].Calls[0].UserPrompt)
@@ -986,6 +1006,7 @@ func TestIssueExport_OmitsMultiAgentRunBodies(t *testing.T) {
 	assert.Empty(t, decoded.MultiAgentRuns[0].Disagreements[0].Notes)
 	assert.Equal(t, "sha256:abc", decoded.MultiAgentRuns[0].Calls[0].PromptHash)
 	assert.Equal(t, "critic", decoded.MultiAgentRuns[0].Disagreements[0].Reviewer)
+	assert.Equal(t, "structured verdict parse failed", decoded.MultiAgentRuns[0].Errors[0].Message)
 
 	for _, privateText := range []string{
 		"private run prompt",
@@ -1003,6 +1024,8 @@ func TestIssueExport_OmitsMultiAgentRunBodies(t *testing.T) {
 	assert.Contains(t, markdown, "multi-agent run provider-call prompts/responses omitted by issue/PR summary profile")
 	assert.Contains(t, markdown, "multi-agent run artifact contents omitted by issue/PR summary profile")
 	assert.Contains(t, markdown, "multi-agent run disagreement notes omitted by issue/PR summary profile")
+	assert.Contains(t, markdown, "**Workflow errors:**")
+	assert.Contains(t, markdown, "structured verdict parse failed")
 }
 
 func TestJSON_MachineReadableExportMatchesMarkdownRedaction(t *testing.T) {
