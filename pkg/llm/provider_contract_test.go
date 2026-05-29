@@ -45,6 +45,7 @@ func TestProviderCapabilities_CoverCompleteParams(t *testing.T) {
 			assert.Equal(t, capabilities.SupportsSeed, capabilities.CompleteParams["Seed"].Status == CompleteParamSupported)
 			assert.Equal(t, capabilities.SupportsTools, capabilities.CompleteParams["Tools"].Status == CompleteParamSupported)
 			assert.Equal(t, capabilities.SupportsReasoning, capabilities.CompleteParams["ReasoningLevel"].Status != CompleteParamUnsupported)
+			assert.Equal(t, capabilities.SupportsModelMode, capabilities.CompleteParams["ModelMode"].Status == CompleteParamSupported)
 		})
 	}
 }
@@ -57,6 +58,7 @@ func TestProviderCapabilities_FeatureMatrix(t *testing.T) {
 			SupportsSeed:                  true,
 			SupportsTools:                 true,
 			SupportsReasoning:             true,
+			SupportsModelMode:             true,
 			SupportsCacheAccounting:       true,
 			SupportsStreaming:             false,
 			SupportsNetworkModelDiscovery: true,
@@ -65,6 +67,7 @@ func TestProviderCapabilities_FeatureMatrix(t *testing.T) {
 			SupportsSeed:                  false,
 			SupportsTools:                 true,
 			SupportsReasoning:             true,
+			SupportsModelMode:             false,
 			SupportsCacheAccounting:       true,
 			SupportsStreaming:             false,
 			SupportsNetworkModelDiscovery: true,
@@ -73,6 +76,7 @@ func TestProviderCapabilities_FeatureMatrix(t *testing.T) {
 			SupportsSeed:                  false,
 			SupportsTools:                 true,
 			SupportsReasoning:             true,
+			SupportsModelMode:             false,
 			SupportsCacheAccounting:       true,
 			SupportsStreaming:             false,
 			SupportsNetworkModelDiscovery: false,
@@ -81,6 +85,7 @@ func TestProviderCapabilities_FeatureMatrix(t *testing.T) {
 			SupportsSeed:                  false,
 			SupportsTools:                 true,
 			SupportsReasoning:             true,
+			SupportsModelMode:             true,
 			SupportsCacheAccounting:       true,
 			SupportsStreaming:             true,
 			SupportsNetworkModelDiscovery: false,
@@ -89,6 +94,7 @@ func TestProviderCapabilities_FeatureMatrix(t *testing.T) {
 			SupportsSeed:                  true,
 			SupportsTools:                 true,
 			SupportsReasoning:             true,
+			SupportsModelMode:             false,
 			SupportsCacheAccounting:       false,
 			SupportsStreaming:             true,
 			SupportsNetworkModelDiscovery: true,
@@ -105,6 +111,7 @@ func TestProviderCapabilities_FeatureMatrix(t *testing.T) {
 			assert.Equal(t, want[providerName].SupportsSeed, capabilities.SupportsSeed)
 			assert.Equal(t, want[providerName].SupportsTools, capabilities.SupportsTools)
 			assert.Equal(t, want[providerName].SupportsReasoning, capabilities.SupportsReasoning)
+			assert.Equal(t, want[providerName].SupportsModelMode, capabilities.SupportsModelMode)
 			assert.Equal(t, want[providerName].SupportsCacheAccounting, capabilities.SupportsCacheAccounting)
 			assert.Equal(t, want[providerName].SupportsStreaming, capabilities.SupportsStreaming)
 			assert.Equal(t, want[providerName].SupportsNetworkModelDiscovery, capabilities.SupportsNetworkModelDiscovery)
@@ -317,6 +324,7 @@ func TestProviderProtocolFixtures_CoverPublicLLMSchema(t *testing.T) {
 				"TopP",
 				"Seed",
 				"Model",
+				"ModelMode",
 				"ReasoningLevel",
 				"Messages",
 				"Stop",
@@ -386,6 +394,7 @@ func TestProviderProtocolFixtures_CoverPublicLLMSchema(t *testing.T) {
 				"SupportsSeed",
 				"SupportsTools",
 				"SupportsReasoning",
+				"SupportsModelMode",
 				"SupportsCacheAccounting",
 				"SupportsStreaming",
 				"SupportsNetworkModelDiscovery",
@@ -729,6 +738,23 @@ func providerProtocolRequestFixtures() []protocolRequestFixture {
 				providerClaudeCode: `{"model":"contract-model","messages":[{"role":"user","content":"Answer directly."}],"max_tokens":4096}`,
 				providerCodex:      `{"reasoning":{"effort":"none"},"model":"contract-model","instructions":"You are a helpful assistant.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Answer directly."}]}],"stream":true,"store":false}`,
 				providerOllama:     `{"think":false,"model":"contract-model","messages":[{"role":"user","content":"Answer directly."}],"options":{},"stream":false}`,
+			},
+		},
+		{
+			name: "model mode fast",
+			params: withContractParams(baseContractParams([]Message{{Role: RoleUser, Content: "Be quick."}}), func(params *CompleteParams) {
+				params.Model = "gpt-5.5"
+				params.ModelMode = ModelModeFast
+			}),
+			covers: []string{"ModelMode"},
+			want: map[string]string{
+				providerOpenAI: `{"model":"gpt-5.5","service_tier":"priority","messages":[{"role":"user","content":"Be quick."}]}`,
+				providerCodex:  `{"model":"gpt-5.5","service_tier":"priority","instructions":"You are a helpful assistant.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Be quick."}]}],"stream":true,"store":false}`,
+			},
+			unsupported: map[string]string{
+				providerAnthropic:  "ModelMode",
+				providerClaudeCode: "ModelMode",
+				providerOllama:     "ModelMode",
 			},
 		},
 		{
@@ -1210,6 +1236,8 @@ func paramsWithOnlyFieldSet(t *testing.T, field string) CompleteParams {
 		params.Seed = &value
 	case "Model":
 		params.Model = "contract-model"
+	case "ModelMode":
+		params.ModelMode = ModelModeFast
 	case "ReasoningLevel":
 		params.ReasoningLevel = "medium"
 	case "Messages":

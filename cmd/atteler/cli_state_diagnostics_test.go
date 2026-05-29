@@ -30,6 +30,7 @@ func TestPrintStateDiagnostics_PrintsPathRevisionAndResolvedSources(t *testing.T
 	store := appconfig.NewStateStore("")
 	_, err := store.Update(func(state *appconfig.State) error {
 		state.SetModel(appconfig.ModelScopeFolder, cwd, "folder-model")
+		state.SetModelMode(appconfig.ModelScopeFolder, cwd, "fast")
 		state.SetReasoningLevel(appconfig.ModelScopeFolder, cwd, "xhigh")
 
 		return nil
@@ -62,6 +63,9 @@ func TestPrintStateDiagnostics_PrintsPathRevisionAndResolvedSources(t *testing.T
 	assert.Equal(t, "xhigh", report.ReasoningLevel.Selected)
 	assert.Equal(t, "state.folder", report.ReasoningLevel.Source)
 	assert.Equal(t, "folder", report.ReasoningLevel.Scope)
+	assert.Equal(t, "fast", report.ModelMode.Selected)
+	assert.Equal(t, "state.folder", report.ModelMode.Source)
+	assert.Equal(t, "folder", report.ModelMode.Scope)
 }
 
 func TestStateDiagnostics_PreferenceSources(t *testing.T) {

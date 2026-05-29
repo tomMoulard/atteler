@@ -80,6 +80,43 @@ model_providers.openai = { base_url = "https://openai.example/v1" }
 	assert.Equal(t, "https://openai.example/v1", cfg.Providers[testOpenAIProvider].BaseURL)
 }
 
+func TestParseCodexConfigWithDiagnostics_ImportsPriorityServiceTierAsFastMode(t *testing.T) {
+	t.Parallel()
+
+	cfg, diagnostics := parseCodexConfigWithDiagnostics("codex-service-tier.toml", []byte(`
+model = "gpt-5.5"
+model_provider = "openai"
+service_tier = "priority"
+`))
+
+	require.Empty(t, diagnostics)
+	assert.Equal(t, "fast", cfg.Generation.ModelMode)
+}
+
+func TestParseCodexConfigWithDiagnostics_IgnoresDefaultServiceTier(t *testing.T) {
+	t.Parallel()
+
+	cfg, diagnostics := parseCodexConfigWithDiagnostics("codex-service-tier.toml", []byte(`
+model = "gpt-5.5"
+service_tier = "auto"
+`))
+
+	require.Empty(t, diagnostics)
+	assert.Empty(t, cfg.Generation.ModelMode)
+}
+
+func TestParseCodexConfigWithDiagnostics_WarnsForUnsupportedServiceTier(t *testing.T) {
+	t.Parallel()
+
+	cfg, diagnostics := parseCodexConfigWithDiagnostics("codex-service-tier.toml", []byte(`
+model = "gpt-5.5"
+service_tier = "flex"
+`))
+
+	assert.Empty(t, cfg.Generation.ModelMode)
+	assertDiagnosticContains(t, diagnostics, `service_tier: ignored value: unsupported service tier "flex"`)
+}
+
 func TestParseCodexConfigWithDiagnostics_WarnsForUnsupportedTypes(t *testing.T) {
 	t.Parallel()
 

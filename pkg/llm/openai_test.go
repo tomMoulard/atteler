@@ -123,6 +123,32 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 	}
 }
 
+func TestBuildOpenAIRequest_ModelModeFastUsesPriorityServiceTier(t *testing.T) {
+	t.Parallel()
+
+	req, err := buildOpenAIRequest(CompleteParams{
+		Model:     "gpt-5.5",
+		ModelMode: ModelModeFast,
+		Messages:  []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, modelModePriority, req.ServiceTier)
+}
+
+func TestBuildOpenAIRequest_ModelModeFastRejectsUnsupportedModel(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildOpenAIRequest(CompleteParams{
+		Model:     "gpt-5.4-nano",
+		ModelMode: ModelModeFast,
+		Messages:  []Message{{Role: RoleUser, Content: "hi"}},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not support")
+}
+
 func TestOpenAIProvider_HTTPError(t *testing.T) {
 	t.Parallel()
 
@@ -229,6 +255,10 @@ func TestOpenAIProvider_NameAndModels(t *testing.T) {
 	}
 
 	assert.Contains(t, p.Models(), "gpt-5.5")
+	assert.Contains(t, p.Models(), "gpt-5")
+	assert.Contains(t, p.Models(), "gpt-5.3-codex")
+	assert.Contains(t, p.Models(), "gpt-4o")
+	assert.Contains(t, p.Models(), "o3")
 }
 
 func TestRegistry_ProviderModelsLiveFetchReplacesOpenAICatalogFallback(t *testing.T) {

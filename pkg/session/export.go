@@ -84,6 +84,7 @@ type ExportSessionMetadata struct {
 	Title                  string              `json:"title,omitempty"`
 	DefaultModel           string              `json:"default_model,omitempty"`
 	DefaultReasoningLevel  string              `json:"default_reasoning_level,omitempty"`
+	DefaultModelMode       string              `json:"default_model_mode,omitempty"`
 	DefaultAgent           string              `json:"default_agent,omitempty"`
 	AgentLoopBudget        llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
 	WorktreePath           string              `json:"worktree_path,omitempty"`
@@ -281,6 +282,7 @@ func BuildMachineReadableExport(session Session, options ExportOptions) MachineR
 			DefaultAgent:           builder.exportString("session.default_agent", SearchFieldAgent, session.DefaultAgent),
 			DefaultModel:           builder.exportString("session.default_model", SearchFieldModel, session.DefaultModel),
 			DefaultReasoningLevel:  builder.exportString("session.default_reasoning_level", SearchFieldModel, session.DefaultReasoningLevel),
+			DefaultModelMode:       builder.exportString("session.default_model_mode", SearchFieldModel, session.DefaultModelMode),
 			AgentLoopBudget:        session.AgentLoopBudget,
 			WorktreePath:           builder.exportString("session.worktree_path", SearchFieldRepo, session.WorktreePath),
 			WorktreeBranch:         builder.exportString("session.worktree_branch", SearchFieldRepo, session.WorktreeBranch),
@@ -776,6 +778,7 @@ func renderMarkdown(export MachineReadableExport) string {
 	writeMetadataString(&b, "Agent", export.Session.DefaultAgent)
 	writeMetadataString(&b, "Model", export.Session.DefaultModel)
 	writeMetadataString(&b, "Effort", export.Session.DefaultReasoningLevel)
+	writeMetadataString(&b, "Mode", export.Session.DefaultModelMode)
 	writeMetadataString(&b, "Agent loop budget", formatAgentLoopBudgetCompact(export.Session.AgentLoopBudget))
 	writeMetadataString(&b, "Worktree", export.Session.WorktreePath)
 	writeMetadataString(&b, "Branch", export.Session.WorktreeBranch)

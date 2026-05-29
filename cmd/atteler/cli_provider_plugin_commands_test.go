@@ -427,3 +427,34 @@ func TestSelectModelPersistsFolderReasoning(t *testing.T) {
 	assert.Equal(t, testCodexModel, state.ModelForFolder(dir))
 	assert.Equal(t, testReasoningXHigh, state.ReasoningLevelForFolder(dir))
 }
+
+func TestSelectModelPersistsFolderModelMode(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store := config.NewStateStore(filepath.Join(t.TempDir(), "state.yaml"))
+	m := model{stateStore: store, cwd: dir}
+
+	next, cmd := m.selectModel(
+		pickerItem{provider: "openai", model: "gpt-5.5", modelMode: llm.ModelModeFast, reasoning: llm.ReasoningLevelDefault},
+		config.ModelScopeFolder,
+	)
+
+	selected, ok := next.(model)
+	require.True(t, ok)
+	assert.Equal(t, llm.ModelModeFast, selected.generationOverrides.ModelMode)
+	assert.Equal(t, llm.ModelModeFast, selected.sessionState.DefaultModelMode)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 2)
+	saveRaw := batch[1]()
+	saveMsg, ok := saveRaw.(modelPreferenceSavedMsg)
+	require.True(t, ok)
+	require.NoError(t, saveMsg.err)
+
+	state, err := store.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "openai/gpt-5.5", state.ModelForFolder(dir))
+	assert.Equal(t, llm.ModelModeFast, state.ModelModeForFolder(dir))
+}

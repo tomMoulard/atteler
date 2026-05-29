@@ -60,8 +60,10 @@ var eventSchemas = map[string]eventSchema{
 			"count":              metadataSafe,
 			"source":             metadataSafe,
 			"mode":               metadataSafe,
+			"model_mode":         metadataSafe,
 			"tool_call_id":       metadataSafe,
 			"provider":           metadataSafe,
+			"service_tier":       metadataSafe,
 			"waves":              metadataSafe,
 			"option_adjustments": metadataSafe,
 			"command":            metadataSensitive,
@@ -171,17 +173,24 @@ var eventSchemas = map[string]eventSchema{
 	SessionEnd: lifecycleEventSchema(eventSchema{
 		Metadata: map[string]metadataPolicy{
 			"agent_loop_budget": metadataSafe,
+			"model_mode":        metadataSafe,
+			"reasoning_level":   metadataSafe,
 		},
 	}),
 	SessionStart: lifecycleEventSchema(eventSchema{
 		Metadata: map[string]metadataPolicy{
 			"agent_loop_budget": metadataSafe,
+			"model_mode":        metadataSafe,
+			"reasoning_level":   metadataSafe,
 		},
 	}),
 	ToolExecute: lifecycleEventSchema(eventSchema{
 		Metadata: map[string]metadataPolicy{
+			"model_mode":         metadataSafe,
 			"option_adjustments": metadataSafe,
 			"provider":           metadataSafe,
+			"reasoning_level":    metadataSafe,
+			"service_tier":       metadataSafe,
 			"tool":               metadataSafe,
 		},
 	}),

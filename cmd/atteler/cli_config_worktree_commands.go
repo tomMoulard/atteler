@@ -29,6 +29,7 @@ type agentDescription struct {
 	TopP           *float64 `yaml:"top_p,omitempty"`
 	Seed           *int     `yaml:"seed,omitempty"`
 	Name           string   `yaml:"name"`
+	ModelMode      string   `yaml:"model_mode,omitempty"`
 	ReasoningLevel string   `yaml:"reasoning_level,omitempty"`
 	Model          string   `yaml:"model,omitempty"`
 	Description    string   `yaml:"description,omitempty"`
@@ -68,6 +69,7 @@ func formatAgentDescription(activeAgent agent.Agent) (string, error) {
 		Temperature:    activeAgent.Temperature,
 		TopP:           activeAgent.TopP,
 		Seed:           activeAgent.Seed,
+		ModelMode:      activeAgent.ModelMode,
 		ReasoningLevel: activeAgent.ReasoningLevel,
 		Triggers:       activeAgent.Triggers,
 		MaxTokens:      activeAgent.MaxTokens,
@@ -637,6 +639,7 @@ func generationFromConfig(cfg appconfig.Config) generationSettings {
 		Temperature:    cfg.Generation.Temperature,
 		TopP:           cfg.Generation.TopP,
 		Seed:           cfg.Generation.Seed,
+		ModelMode:      strings.TrimSpace(cfg.Generation.ModelMode),
 		ReasoningLevel: strings.TrimSpace(cfg.Generation.ReasoningLevel),
 		MaxTokens:      cfg.Generation.MaxTokens,
 	}
@@ -660,6 +663,10 @@ func generationFromOptions(opts cliOptions) generationSettings {
 		generation.MaxTokens = opts.maxTokens.value
 	}
 
+	if strings.TrimSpace(opts.modelMode) != "" {
+		generation.ModelMode = strings.TrimSpace(opts.modelMode)
+	}
+
 	if strings.TrimSpace(opts.reasoningLevel) != "" {
 		generation.ReasoningLevel = strings.TrimSpace(opts.reasoningLevel)
 	}
@@ -678,6 +685,7 @@ func generationForRequest(
 			Temperature:    activeAgent.agent.Temperature,
 			TopP:           activeAgent.agent.TopP,
 			Seed:           activeAgent.agent.Seed,
+			ModelMode:      activeAgent.agent.ModelMode,
 			ReasoningLevel: activeAgent.agent.ReasoningLevel,
 			MaxTokens:      activeAgent.agent.MaxTokens,
 		})
@@ -699,6 +707,10 @@ func mergeGenerationSettings(base, override generationSettings) generationSettin
 		base.Seed = override.Seed
 	}
 
+	if override.ModelMode != "" {
+		base.ModelMode = strings.TrimSpace(override.ModelMode)
+	}
+
 	if override.ReasoningLevel != "" {
 		base.ReasoningLevel = strings.TrimSpace(override.ReasoningLevel)
 	}
@@ -715,7 +727,9 @@ func applyGenerationParams(params *llm.CompleteParams, generation generationSett
 	params.TopP = generation.TopP
 	params.Seed = generation.Seed
 
+	params.ModelMode = generation.ModelMode
 	params.ReasoningLevel = generation.ReasoningLevel
+
 	if generation.MaxTokens > 0 {
 		params.MaxTokens = generation.MaxTokens
 	}

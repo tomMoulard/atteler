@@ -49,6 +49,7 @@ agents:
     capabilities: [review, security]
     temperature: 0.2
     seed: 42
+    model_mode: fast
     reasoning_level: high
     triggers: ["review this", "code review"]
 hooks:
@@ -65,6 +66,7 @@ generation:
   temperature: 0
   top_p: 0.8
   seed: 7
+  model_mode: fast
   reasoning_level: medium
   max_tokens: 900
 agent_loop:
@@ -184,6 +186,8 @@ vector:
 		assert.Failf(t, "assertion failed", "reviewer reasoning_level = %q", reviewer.ReasoningLevel)
 	}
 
+	assert.Equal(t, "fast", reviewer.ModelMode)
+
 	if !reflect.DeepEqual(reviewer.Triggers, []string{"review this", "code review"}) {
 		assert.Failf(t, "assertion failed", "reviewer triggers = %v", reviewer.Triggers)
 	}
@@ -232,6 +236,8 @@ vector:
 	if cfg.Generation.ReasoningLevel != "medium" {
 		assert.Failf(t, "assertion failed", "generation reasoning_level = %q", cfg.Generation.ReasoningLevel)
 	}
+
+	assert.Equal(t, "fast", cfg.Generation.ModelMode)
 
 	if cfg.Generation.MaxTokens != 900 {
 		assert.Failf(t, "assertion failed", "generation max_tokens = %d, want 900", cfg.Generation.MaxTokens)

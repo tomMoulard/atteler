@@ -168,12 +168,15 @@ default_provider: openai
 default_model: gpt-4.1-mini
 fallback_models: ["gpt-4.1", "gpt-4.1-nano"]
 model_aliases:
-  fast: openai/gpt-4.1-mini
+  mini: openai/gpt-4.1-mini
 
 generation:
   temperature: 0
   top_p: 1
   seed: 1
+  # Use "fast" only for OpenAI-family models that advertise fast-mode support.
+  # For other models, omit this or leave it as "default".
+  model_mode: default
   reasoning_level: medium
   max_tokens: 2048
 
@@ -251,6 +254,10 @@ agents:
     temperature: 0
     max_tokens: 1200
 ```
+
+For OpenAI-family providers, `model_mode: fast` maps to the current
+`service_tier=priority` API field; imported Codex configs with
+`service_tier = "priority"` are normalized to this same model mode.
 
 Bare model names resolve only by exact provider catalog claim or explicit
 `model_aliases` entry. If more than one provider claims the same bare name,
@@ -381,18 +388,19 @@ state directory for diagnostics.
 
 Provider adapters intentionally expose `llm.ProviderCapabilities` metadata via
 `llm.ProviderCapabilitiesFor` and `llm.KnownProviders` so callers can check
-whether a provider supports seed, tools, reasoning, cached-token accounting,
-streaming, and network model discovery before setting provider-specific knobs.
+whether a provider supports seed, tools, reasoning, model modes, cached-token
+accounting, streaming, and network model discovery before setting
+provider-specific knobs.
 The same metadata documents lossy mappings, provider-adjusted request options,
 and unsupported `CompleteParams` fields:
 
 | Provider | Intentionally lossy or adjusted mappings | Unsupported or unavailable fields |
 | --- | --- | --- |
 | OpenAI | `ToolResult.IsError` is not represented by Chat Completions tool messages. | None currently documented. |
-| Anthropic | Reasoning levels become thinking token budgets; when thinking is enabled, `Temperature` is coerced to `1`; system messages are lifted to `system`; tool results become user-role content blocks. | `Seed` |
-| Claude Code | Same request/response mapping as Anthropic over the Claude Code OAuth path; when thinking is enabled, `Temperature` is coerced to `1`. | `Seed` |
+| Anthropic | Reasoning levels become thinking token budgets; when thinking is enabled, `Temperature` is coerced to `1`; system messages are lifted to `system`; tool results become user-role content blocks. | `Seed`, `ModelMode` |
+| Claude Code | Same request/response mapping as Anthropic over the Claude Code OAuth path; when thinking is enabled, `Temperature` is coerced to `1`. | `Seed`, `ModelMode` |
 | Codex | `Temperature` is omitted because the ChatGPT Responses adapter does not expose it; system messages become Responses `instructions`; chat/tool history becomes Responses input items; `ToolResult.IsError` is not represented. | `TopP`, `Seed`, `Stop`, `MaxTokens` |
-| Ollama | Reasoning levels become Ollama `think` values; tool-call IDs, tool-result IDs, and `ToolResult.IsError` are not represented in Ollama chat messages. | Cached-token accounting is not reported by Ollama responses. |
+| Ollama | Reasoning levels become Ollama `think` values; tool-call IDs, tool-result IDs, and `ToolResult.IsError` are not represented in Ollama chat messages. | `ModelMode`; cached-token accounting is not reported by Ollama responses. |
 
 Unsupported non-zero knobs, non-finite sampling values, and non-JSON-serializable
 tool schemas or tool-call inputs are rejected instead of silently dropped.
@@ -509,8 +517,9 @@ The printed `log=` path is the logical base, and retained chunks use
 
 In the interactive TUI, `Enter` sends the prompt, `Shift+Enter` inserts a
 newline for multi-line drafts (`Alt+Enter` remains available as a terminal
-fallback), `Ctrl+O` opens the model picker, `Tab` accepts visible prompt
-completions or, only after opt-in, requests a fresh model-backed suffix when none is valid,
+fallback), `Ctrl+O` opens the model picker (including `mode=fast` rows for
+compatible OpenAI-family models), `Tab` accepts visible prompt completions or,
+only after opt-in, requests a fresh model-backed suffix when none is valid,
 `Ctrl+R` rewrites under-specified prompts without adding boilerplate to
 already-structured drafts, and `Ctrl+Z` undoes the latest rewrite.
 Interactive prompt assistance defaults to the deterministic no-network

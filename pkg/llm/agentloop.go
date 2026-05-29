@@ -745,6 +745,7 @@ func summarizeModelRequest(params CompleteParams, fallbackModels []string) Agent
 
 	return AgentLoopModelRequestSummary{
 		Model:          params.Model,
+		ModelMode:      params.ModelMode,
 		FallbackModels: append([]string(nil), fallbackModels...),
 		ToolNames:      toolNames,
 		MessageCount:   len(params.Messages),

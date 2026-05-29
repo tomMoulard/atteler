@@ -272,6 +272,20 @@ func TestAgentLoopBudgetEventMetadataIncludesEveryCeiling(t *testing.T) {
 	assert.Equal(t, budget, decoded)
 }
 
+func TestAgentLoopBudgetModelSettingsEventMetadataIncludesGenerationKnobs(t *testing.T) {
+	t.Parallel()
+
+	metadata := agentLoopBudgetModelSettingsEventMetadata(
+		llm.AgentLoopBudget{MaxModelCalls: 2},
+		"high",
+		llm.ModelModeFast,
+	)
+
+	require.Contains(t, metadata, "agent_loop_budget")
+	assert.Equal(t, "high", metadata["reasoning_level"])
+	assert.Equal(t, llm.ModelModeFast, metadata["model_mode"])
+}
+
 func TestFormatAgentLoopBudgetCompactIncludesEveryCeiling(t *testing.T) {
 	t.Parallel()
 

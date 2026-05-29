@@ -32,6 +32,8 @@ var (
 		"model_provider",
 		"provider",
 		"default_provider",
+		"service_tier",
+		"serviceTier",
 		"model_providers",
 		"profile",
 		"profiles",
@@ -104,6 +106,8 @@ var (
 		"description",
 		"model",
 		"mode",
+		"model_mode",
+		"modelMode",
 		"prompt",
 		"temperature",
 		"top_p",
@@ -118,6 +122,8 @@ var (
 		"description",
 		"model",
 		"mode",
+		"model_mode",
+		"modelMode",
 		"prompt",
 		"temperature",
 		"top_p",
@@ -274,6 +280,14 @@ func parseCodexConfigWithDiagnostics(source string, data []byte) (Config, []Diag
 		cfg.DefaultProvider = provider
 	}
 
+	if serviceTier := strings.TrimSpace(stringAt(raw, collector, "service_tier", "service_tier", "serviceTier")); serviceTier != "" {
+		if modelMode, ok := modelModeFromOpenAIServiceTier(serviceTier); ok {
+			cfg.Generation.ModelMode = modelMode
+		} else {
+			collector.warnf("service_tier", "ignored value: unsupported service tier %q for model_mode import", serviceTier)
+		}
+	}
+
 	modelProviders, _ := mapAt(raw, collector, "model_providers")
 	for _, name := range sortedMapKeys(modelProviders) {
 		value := modelProviders[name]
@@ -313,6 +327,17 @@ func parseCodexConfigWithDiagnostics(source string, data []byte) (Config, []Diag
 	diagnostics = append(diagnostics, collector.all()...)
 
 	return cfg, diagnostics
+}
+
+func modelModeFromOpenAIServiceTier(serviceTier string) (string, bool) {
+	switch strings.ToLower(strings.ReplaceAll(strings.TrimSpace(serviceTier), "_", "-")) {
+	case "", "auto", "default", "standard":
+		return "", true
+	case "priority", "fast":
+		return "fast", true
+	default:
+		return "", false
+	}
 }
 
 func importClaudeConfigDetailed() harnessImportResult {
@@ -944,6 +969,7 @@ func parseOpenCodeAgentFrontmatterWithDiagnostics(
 		Description:     strings.TrimSpace(stringAt(raw, collector, "frontmatter.description", "description")),
 		Model:           strings.TrimSpace(stringAt(raw, collector, "frontmatter.model", "model")),
 		Mode:            strings.TrimSpace(stringAt(raw, collector, "frontmatter.mode", "mode")),
+		ModelMode:       strings.TrimSpace(stringAt(raw, collector, "frontmatter.model_mode", "model_mode", "modelMode")),
 		ToolPermissions: toolPermissionsAt(raw, collector, "frontmatter.tools"),
 	}
 
@@ -993,6 +1019,7 @@ func parseOpenCodeAgentMapWithDiagnostics(
 		Description: strings.TrimSpace(stringAt(raw, collector, joinPath(agentPath, "description"), "description")),
 		Model:       strings.TrimSpace(stringAt(raw, collector, joinPath(agentPath, "model"), "model")),
 		Mode:        strings.TrimSpace(stringAt(raw, collector, joinPath(agentPath, "mode"), "mode")),
+		ModelMode:   strings.TrimSpace(stringAt(raw, collector, joinPath(agentPath, "model_mode"), "model_mode", "modelMode")),
 	}
 
 	if maxTokens, ok := nonNegativeIntAt(raw, collector, joinPath(agentPath, "max_tokens"), "max_tokens", "maxTokens"); ok {
@@ -1178,6 +1205,7 @@ func agentConfigHasText(cfg AgentConfig) bool {
 	return firstNonEmpty(
 		cfg.Model,
 		cfg.Mode,
+		cfg.ModelMode,
 		cfg.ReasoningLevel,
 		cfg.Description,
 		cfg.Personality,

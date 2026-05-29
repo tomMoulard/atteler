@@ -186,7 +186,12 @@ func TestBuiltinCatalog_ProvidesVersionedMetadata(t *testing.T) {
 	assert.Greater(t, metadata.CachedInputTokenCost, 0.0)
 	assert.Greater(t, metadata.OutputTokenCost, 0.0)
 	assert.Contains(t, metadata.Capabilities, capabilityPromptCache)
-	assert.Equal(t, "https://developers.openai.com/api/docs/models/compare", metadata.SourceURL)
+	assert.Contains(t, metadata.Capabilities, capabilityFastMode)
+	assert.Equal(t, "https://developers.openai.com/api/docs/pricing", metadata.SourceURL)
+
+	fastMetadata, ok := catalog.Lookup("openai", "gpt-5.5")
+	require.True(t, ok)
+	assert.Contains(t, fastMetadata.Capabilities, capabilityFastMode)
 
 	candidate := metadata.Candidate(0)
 	assert.Equal(t, BuiltinCatalogVersion, candidate.MetadataVersion)

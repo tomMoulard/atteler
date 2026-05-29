@@ -17,6 +17,7 @@ func TestStore_SaveLoadByID(t *testing.T) {
 	store := NewStore(t.TempDir())
 	session := New("gpt-4.1", nil)
 	session.DefaultReasoningLevel = "high"
+	session.DefaultModelMode = "fast"
 	session.AgentLoopBudget = llm.AgentLoopBudget{
 		MaxWallTime:     time.Minute,
 		MaxOutputBytes:  4096,
@@ -51,6 +52,8 @@ func TestStore_SaveLoadByID(t *testing.T) {
 	if loaded.DefaultReasoningLevel != "high" {
 		assert.Failf(t, "assertion failed", "DefaultReasoningLevel = %q", loaded.DefaultReasoningLevel)
 	}
+
+	assert.Equal(t, "fast", loaded.DefaultModelMode)
 
 	assert.Equal(t, session.AgentLoopBudget, loaded.AgentLoopBudget)
 

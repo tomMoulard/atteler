@@ -55,6 +55,11 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Message: "provider/model default reasoning effort is used unless config, state, agent config, or CLI flags set it",
 		},
 		{
+			Field:   "generation.model_mode",
+			Value:   "unset",
+			Message: "provider/model default mode is used unless config, state, agent config, or CLI flags set it",
+		},
+		{
 			Field:   "generation.max_tokens",
 			Value:   "0",
 			Message: "no config-level completion token cap is sent unless config, agent config, or CLI flags set one",

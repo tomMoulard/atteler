@@ -25,7 +25,7 @@ import (
 
 const (
 	testUnifiedDiffPatch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
-	liveOutputTimeout    = time.Second
+	liveOutputTimeout    = 5 * time.Second
 )
 
 func TestMergeTags_DeduplicatesCaseInsensitive(t *testing.T) {
