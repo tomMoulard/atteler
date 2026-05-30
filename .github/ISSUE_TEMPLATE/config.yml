@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private vulnerability report
+    url: https://github.com/tomMoulard/atteler/security/advisories/new
+    about: Report exploitable vulnerabilities, leaked secrets, or private data exposure privately instead of opening a public issue.
+  - name: Maintainer triage guide
+    url: https://github.com/tomMoulard/atteler/blob/main/.github/ISSUE_TRIAGE.md
+    about: Maintainers can use this guide to map issue-form answers to labels, project fields, and Symphony dispatch decisions.

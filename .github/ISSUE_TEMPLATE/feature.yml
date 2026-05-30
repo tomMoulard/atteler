@@ -1,0 +1,166 @@
+name: Feature or documentation request
+description: Propose new behavior or documentation with current gap, desired outcome, and routing metadata.
+title: "[Feature]: "
+labels: ["enhancement", "roadmap"]
+projects: ["tomMoulard/3"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for product, UX, documentation, or workflow improvements. Roadmap membership is for prioritization only; it does not imply Symphony automation.
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One sentence describing the feature or documentation gap.
+      placeholder: "Document ... so users can ..."
+    validations:
+      required: true
+  - type: dropdown
+    id: request_type
+    attributes:
+      label: Request type
+      description: Helps maintainers route feature behavior separately from documentation/help text work.
+      options:
+        - Feature behavior
+        - Documentation/help text
+        - Both feature and documentation
+      default: 0
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Link user reports, issues, docs, code paths, command output, or examples proving the gap.
+      placeholder: |
+        Evidence that this is needed, confusing, duplicated, or missing.
+    validations:
+      required: true
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Current behavior
+      description: How is this handled today? Include existing docs, commands, issues, or workarounds.
+      placeholder: "Today users have to ..."
+    validations:
+      required: true
+  - type: textarea
+    id: desired_behavior
+    attributes:
+      label: Desired behavior
+      description: What should exist after this is complete?
+      placeholder: "Users should be able to ..."
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope / boundaries
+      description: What is in scope for this request, and what should not be changed?
+      placeholder: |
+        In scope:
+        - ...
+        Out of scope:
+        - ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Match the atteler roadmap Area project field.
+      options:
+        - Roadmap
+        - CLI/UX
+        - Scanner
+        - RAG
+        - Review Gates
+        - Workflow Audit
+        - Providers
+        - Permissions
+        - Worktree
+        - SDK
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Affected provider
+      description: Name the provider/model/backend if relevant; enter `none` when not provider-specific.
+      placeholder: "openai, anthropic, codex, ollama, none"
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      description: Proposed atteler roadmap Status value. New issues normally start as Todo.
+      options:
+        - Todo
+        - In Progress
+        - Done
+      default: 0
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Match the atteler roadmap Priority project field.
+      options:
+        - P0 - Now
+        - P1 - Next
+        - P2 - Later
+      default: 1
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      description: Match the atteler roadmap Risk project field.
+      options:
+        - Trust/Safety
+        - Product Coherence
+        - Architecture Debt
+        - Quality Signal
+      default: 1
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification command
+      description: Which command, doc preview, or manual check proves completion? Say `not run` only with a reason.
+      placeholder: "make test, make lint, markdown link check, or manual doc review"
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: Bullet the observable conditions that must be true before this can close.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Duplicate search
+      options:
+        - label: I searched existing issues and linked likely duplicates or related issues above.
+          required: true
+  - type: dropdown
+    id: automation_dispatch
+    attributes:
+      label: Automation dispatch intent
+      description: Ordinary roadmap items do not dispatch Symphony. Maintainers add the `symphony` label only after explicit opt-in and safety review.
+      options:
+        - No — roadmap/triage only; do not dispatch Symphony
+        - Maybe — maintainer should decide before adding the symphony label
+      default: 0
+    validations:
+      required: true
