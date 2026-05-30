@@ -318,6 +318,68 @@ func TestSanitizeEventForHook_KeepsRouteDecisionProfileModeMetadata(t *testing.T
 	assert.True(t, got.Redacted)
 }
 
+func TestSanitizeEventForHook_ErrorKeepsProviderFailureMetadata(t *testing.T) {
+	t.Parallel()
+
+	readiness := "provider readiness: openai=registered models=static stale=true " +
+		"classification=configuration_error error=OpenAI regional hostname mismatch; " +
+		"set OPENAI_BASE_URL or providers.openai.base_url to https://us.api.openai.com " +
+		"(base URL without the v1 path)"
+	got := sanitizeEventForHook(Event{
+		Type:  Error,
+		Error: "raw error with OPENAI_API_KEY=sk-errorsecret1234567890",
+		Metadata: map[string]string{
+			"authentication_error_providers":     "anthropic",
+			"configuration_error_providers":      "openai",
+			"exhausted_fallback_route_providers": "unresolved",
+			"fallback_attempts":                  "claude-code/claude-opus-4-7=transient_rate_limit,openai/gpt-4.1-mini=configuration_error",
+			"fallback_failure_classifications":   "claude-code=transient_rate_limit,openai=configuration_error",
+			"fallback_rate_limit_scopes":         "claude-code/claude-opus-4-7=provider",
+			"permanent_error_providers":          "anthropic",
+			"provider_not_ready_providers":       "codex",
+			"provider_readiness":                 readiness,
+			"rate_limited_providers":             "claude-code",
+			"transient_error_providers":          "openai",
+			"token":                              "sk-metasecret1234567890",
+		},
+	}, PayloadMetadata)
+
+	assert.Empty(t, got.Error)
+	assert.Equal(t, "openai", got.Metadata["configuration_error_providers"])
+	assert.Equal(t, "claude-code", got.Metadata["rate_limited_providers"])
+	assert.Equal(t, "openai", got.Metadata["transient_error_providers"])
+	assert.Equal(t, "anthropic", got.Metadata["permanent_error_providers"])
+	assert.Equal(t, readiness, got.Metadata["provider_readiness"])
+	assert.Contains(t, got.Metadata["fallback_failure_classifications"], "openai=configuration_error")
+	assert.Equal(t, "claude-code/claude-opus-4-7=provider", got.Metadata["fallback_rate_limit_scopes"])
+	assert.NotContains(t, got.Metadata, "token")
+	assert.True(t, got.Redacted)
+}
+
+func TestFormatLine_ErrorIncludesProviderFailureMetadata(t *testing.T) {
+	t.Parallel()
+
+	got := FormatLine(Event{
+		Type:  Error,
+		Error: "raw error with bearer abcdefghijklmnopqrstuvwxyz",
+		Metadata: map[string]string{
+			"fallback_failure_classifications": "claude-code=transient_rate_limit,openai=configuration_error",
+			"provider_readiness":               "provider readiness: openai=registered classification=configuration_error",
+			"token":                            "sk-metasecret1234567890",
+		},
+	})
+
+	assert.Contains(t, got, "event:error")
+	assert.Contains(t, got, "fallback_failure_classifications=claude-code=transient_rate_limit,openai=configuration_error")
+	assert.Contains(t, got, "provider_readiness=")
+	assert.Contains(t, got, "openai=registered")
+	assert.Contains(t, got, "error=")
+	assert.Contains(t, got, "redacted=true")
+	assert.NotContains(t, got, "raw error")
+	assert.NotContains(t, got, "sk-metasecret")
+	assert.NotContains(t, got, "token=")
+}
+
 func TestSanitizeEventForHook_FileEventsFullDropFileContent(t *testing.T) {
 	t.Parallel()
 

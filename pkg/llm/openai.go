@@ -389,7 +389,7 @@ func (o *OpenAIProvider) FetchModels(ctx context.Context) ([]string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, newProviderHTTPError(o.Name(), resp, body)
+		return nil, wrapOpenAIRegionalHostnameError(newProviderHTTPError(o.Name(), resp, body))
 	}
 
 	var mr openaiModelsResponse
@@ -570,7 +570,7 @@ func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, newProviderHTTPError(o.Name(), resp, respBody)
+		return nil, wrapOpenAIRegionalHostnameError(newProviderHTTPError(o.Name(), resp, respBody))
 	}
 
 	var or openaiResponse
@@ -657,7 +657,7 @@ func (o *OpenAIProvider) sendEmbeddingRequest(ctx context.Context, params Embedd
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, newProviderHTTPError(o.Name(), resp, respBody)
+		return nil, wrapOpenAIRegionalHostnameError(newProviderHTTPError(o.Name(), resp, respBody))
 	}
 
 	return respBody, nil

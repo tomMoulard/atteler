@@ -1969,6 +1969,14 @@ func appendCandidateEvidence(parts []string, candidate modelroute.CandidateDecis
 		parts = append(parts, "failure_count="+strconv.Itoa(candidate.FailureCount))
 	}
 
+	if candidate.LastFailureKind != "" {
+		parts = append(parts, "last_failure_kind="+candidate.LastFailureKind)
+	}
+
+	if candidate.LastFailureRateLimitScope != "" {
+		parts = append(parts, "last_failure_rate_limit_scope="+candidate.LastFailureRateLimitScope)
+	}
+
 	if candidate.RateLimitCount > 0 {
 		parts = append(parts, "rate_limit_count="+strconv.Itoa(candidate.RateLimitCount))
 	}

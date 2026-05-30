@@ -251,6 +251,42 @@ type retryDecision struct {
 	legacyMatch bool
 }
 
+// isRetryable exposes the retry decision for fallback classification and tests.
+func isRetryable(err error) (time.Duration, bool) {
+	decision := retryDecisionForError(err)
+
+	return decision.retryAfter, decision.retryable
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var providerErr *ProviderError
+	if errors.As(err, &providerErr) {
+		if providerErr.StatusCode == http.StatusTooManyRequests {
+			return true
+		}
+
+		if providerErr.Retryability == RetryabilityRetryable && rateLimitText(providerErr.Message) {
+			return true
+		}
+	}
+
+	return rateLimitText(err.Error())
+}
+
+func rateLimitText(value string) bool {
+	normalized := strings.ToLower(value)
+	underscoreNormalized := strings.NewReplacer("-", "_", " ", "_").Replace(normalized)
+
+	return strings.Contains(normalized, "http 429") ||
+		strings.Contains(normalized, "status 429") ||
+		strings.Contains(underscoreNormalized, "rate_limit") ||
+		strings.Contains(underscoreNormalized, "too_many_requests")
+}
+
 const (
 	retryOutcomeBudgetExhausted = "budget_exhausted"
 	retryOutcomeCanceled        = "canceled"
@@ -408,6 +444,15 @@ func retryDecisionForError(err error) retryDecision {
 			class:      providerErr.retryability(),
 			statusCode: providerErr.StatusCode,
 			retryable:  providerErr.IsRetryable(),
+		}
+	}
+
+	if isRateLimitError(err) {
+		return retryDecision{
+			class:       RetryabilityRetryable,
+			statusCode:  http.StatusTooManyRequests,
+			retryable:   true,
+			legacyMatch: true,
 		}
 	}
 

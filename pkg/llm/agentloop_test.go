@@ -848,6 +848,74 @@ func TestAgentLoop_JSONLCheckpointPersistsAutonomy(t *testing.T) {
 	assert.Equal(t, autonomy.High, loaded.Steps[1].Autonomy)
 }
 
+func TestAgentLoop_CheckpointStopMetadataClassifiesFallbackFailures(t *testing.T) {
+	t.Parallel()
+
+	regionalErr := wrapOpenAIRegionalHostnameError(errors.New(`openai: models HTTP 401: {"error":{"message":"Attempted to access resource with incorrect regional hostname. Please make your request to us.api.openai.com"}}`))
+
+	reg := NewRegistry()
+	reg.SetRetry(retryConfig{})
+	reg.Register(&fakeProvider{
+		err:    errors.New(`claude code: HTTP 429: {"type":"error","error":{"type":"rate_limit_error","message":"Error"}}`),
+		name:   providerClaudeCode,
+		models: []string{"claude-opus-4-7"},
+		resp:   &Response{},
+	})
+	reg.Register(&fakeProvider{
+		err:    regionalErr,
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{},
+	})
+
+	reg.mu.Lock()
+	reg.upsertReadinessProviderLocked(ProviderReadiness{
+		Error:              regionalErr,
+		Name:               providerOpenAI,
+		Status:             ProviderStatusRegistered,
+		ModelCatalogSource: ModelCatalogSourceStatic,
+		Models:             []string{"gpt-4.1-mini"},
+		StaticModels:       []string{"gpt-4.1-mini"},
+		Registered:         true,
+		ModelsStale:        true,
+	})
+	reg.mu.Unlock()
+
+	checkpointPath := filepath.Join(t.TempDir(), "agentloop.jsonl")
+	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "claude-code/claude-opus-4-7",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, []string{"openai/gpt-4.1-mini"}, nil, AgentLoopConfig{
+		CheckpointSink: NewAgentLoopJSONLCheckpoint(checkpointPath),
+	})
+	require.Error(t, err)
+
+	eventMetadata := ProviderFailureMetadata(err)
+	require.NotEmpty(t, eventMetadata)
+	assert.Contains(t, eventMetadata["fallback_failure_classifications"], "claude-code="+string(providerFailureRateLimit))
+	assert.Contains(t, eventMetadata["fallback_failure_classifications"], "openai="+string(providerFailureConfiguration))
+	assert.Contains(t, eventMetadata["fallback_rate_limit_scopes"], "claude-code/claude-opus-4-7")
+	assert.Contains(t, eventMetadata["fallback_rate_limit_scopes"], "=provider")
+
+	ledger, loadErr := LoadAgentLoopLedger(checkpointPath)
+	require.NoError(t, loadErr)
+	require.Len(t, ledger.Steps, 1)
+	require.NotNil(t, ledger.Steps[0].StopCondition)
+
+	metadata := ledger.Steps[0].StopCondition.Metadata
+	require.NotEmpty(t, metadata)
+	assert.Contains(t, metadata["fallback_failure_classifications"], "claude-code="+string(providerFailureRateLimit))
+	assert.Contains(t, metadata["fallback_failure_classifications"], "openai="+string(providerFailureConfiguration))
+	assert.Contains(t, metadata["fallback_attempts"], "claude-code/claude-opus-4-7")
+	assert.Contains(t, metadata["fallback_attempts"], "openai/gpt-4.1-mini")
+	assert.Contains(t, metadata["fallback_rate_limit_scopes"], "claude-code/claude-opus-4-7")
+	assert.Contains(t, metadata["fallback_rate_limit_scopes"], "=provider")
+	assert.Equal(t, providerClaudeCode, metadata["rate_limited_providers"])
+	assert.Equal(t, providerOpenAI, metadata["configuration_error_providers"])
+	assert.Contains(t, metadata["provider_readiness"], "stale=true")
+	assert.Contains(t, metadata["provider_readiness"], "OpenAI regional hostname mismatch")
+}
+
 func TestAgentLoopBudgetSnapshotJSONPreservesZeroRemainingConfiguredCeilings(t *testing.T) {
 	t.Parallel()
 

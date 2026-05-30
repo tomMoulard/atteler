@@ -658,11 +658,39 @@ func (r *Registry) CompleteWithFallback(
 		return r.Complete(ctx, params)
 	}
 
-	var failures []error
+	var failures []fallbackAttemptFailure
+
+	rateLimitedProviders := make(map[string]fallbackAttemptFailure)
 
 	for _, model := range models {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("llm: fallback canceled: %w", err)
+		}
+
+		target := r.fallbackAttemptTarget(model)
+		if prior, ok := rateLimitedProviders[target.providerName]; ok && target.resolved && target.providerName != "" {
+			skipped := skippedRateLimitFailure(model, target, prior)
+			failures = append(failures, skipped)
+			r.recordRouteFailureWithScope(
+				target.providerName,
+				fallbackObservationModel(model, target),
+				skipped.err,
+				skipped.rateLimitScope,
+			)
+
+			continue
+		}
+
+		if skipped, ok := r.providerCooldownFailure(model, target); ok {
+			failures = append(failures, skipped)
+			r.recordRouteFailureWithScope(
+				target.providerName,
+				fallbackObservationModel(model, target),
+				skipped.err,
+				skipped.rateLimitScope,
+			)
+
+			continue
 		}
 
 		next := params
@@ -673,10 +701,102 @@ func (r *Registry) CompleteWithFallback(
 			return resp, nil
 		}
 
-		failures = append(failures, fmt.Errorf("%s via %s: %w", model, r.modelResolutionLabel(model), err))
+		failure := fallbackAttemptFailure{
+			err:            err,
+			classification: classifyProviderFailure(err),
+			model:          model,
+			providerName:   target.providerName,
+			label:          target.label,
+		}
+		if failure.classification.RateLimited {
+			failure.rateLimitScope = modelroute.RateLimitScopeProvider
+		}
+
+		failures = append(failures, failure)
+
+		if failure.classification.RateLimited && target.providerName != "" {
+			rateLimitedProviders[target.providerName] = failure
+		}
 	}
 
-	return nil, r.withReadinessContext(fmt.Errorf("llm: all fallback models failed: %w", joinFallbackFailures(failures)))
+	r.mu.RLock()
+	readiness := r.readinessReportLocked()
+	r.mu.RUnlock()
+
+	return nil, newFallbackError(failures, readiness)
+}
+
+func fallbackObservationModel(model string, target fallbackAttemptTarget) string {
+	if target.providerModel != "" {
+		return target.providerModel
+	}
+
+	return model
+}
+
+func (r *Registry) providerCooldownFailure(model string, target fallbackAttemptTarget) (fallbackAttemptFailure, bool) {
+	if !target.resolved || target.providerName == "" {
+		return fallbackAttemptFailure{}, false
+	}
+
+	r.mu.RLock()
+	telemetry := r.routeTelemetry
+	r.mu.RUnlock()
+
+	if telemetry == nil {
+		return fallbackAttemptFailure{}, false
+	}
+
+	now := time.Now().UTC()
+
+	var (
+		cooldownObs   modelroute.Observation
+		cooldownScope string
+	)
+
+	if obs, ok := telemetry.ProviderRateLimitObservation(target.providerName, now); ok {
+		cooldownObs = obs
+		cooldownScope = modelroute.RateLimitScopeProvider
+	}
+
+	cooldownModel := model
+	if target.providerModel != "" {
+		cooldownModel = target.providerModel
+	}
+
+	candidate, _ := routeObservationCandidate(target.providerName, cooldownModel)
+
+	if obs, ok := telemetry.Snapshot(candidate.ID()); ok && obs.RateLimitActive(now) {
+		if cooldownScope != "" && !cooldownObs.RateLimitUntil().Before(obs.RateLimitUntil()) {
+			return skippedProviderCooldownFailure(
+				model,
+				target,
+				cooldownObs.RateLimitUntil(),
+				cooldownObs.LastError,
+				cooldownScope,
+			), true
+		}
+
+		return skippedProviderCooldownFailure(
+			model,
+			target,
+			obs.RateLimitUntil(),
+			obs.LastError,
+			modelroute.RateLimitScopeModel,
+		), true
+	}
+
+	if cooldownScope != "" {
+		return skippedProviderCooldownFailure(
+			model,
+			target,
+			cooldownObs.RateLimitUntil(),
+			cooldownObs.LastError,
+			cooldownScope,
+		), true
+	}
+
+	return fallbackAttemptFailure{}, false
 }
 
 func (r *Registry) resolve(params CompleteParams) (Provider, CompleteParams, error) {
@@ -772,6 +892,10 @@ func formatCompleteParamAdjustments(adjustments []completeParamAdjustment) strin
 }
 
 func (r *Registry) recordRouteFailure(providerName, requestedModel string, err error) {
+	r.recordRouteFailureWithScope(providerName, requestedModel, err, "")
+}
+
+func (r *Registry) recordRouteFailureWithScope(providerName, requestedModel string, err error, rateLimitScope string) {
 	if err == nil {
 		return
 	}
@@ -786,12 +910,15 @@ func (r *Registry) recordRouteFailure(providerName, requestedModel string, err e
 
 	candidate, _ := routeObservationCandidate(providerName, requestedModel)
 	decision := retryDecisionForError(err)
+	classification := classifyProviderFailure(err)
 
 	telemetry.RecordFailure(candidate, modelroute.Failure{
-		RetryAfter:  decision.retryAfter,
-		Error:       err.Error(),
-		Retryable:   decision.retryable,
-		RateLimited: decision.statusCode == 429 || decision.retryAfter > 0,
+		RetryAfter:     decision.retryAfter,
+		Error:          err.Error(),
+		Kind:           string(classification.Kind),
+		RateLimitScope: rateLimitScope,
+		Retryable:      decision.retryable,
+		RateLimited:    classification.RateLimited,
 	}, time.Now().UTC())
 }
 

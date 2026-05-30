@@ -575,6 +575,8 @@ func runOnceWithOptions(
 		},
 	)
 	if err != nil {
+		providerFailureMetadata := llm.ProviderFailureMetadata(err)
+
 		emitHookWarning(ctx, hooks, events.Event{
 			Type:        events.Error,
 			SessionID:   sessionState.ID,
@@ -582,8 +584,9 @@ func runOnceWithOptions(
 			Agent:       prepared.activeAgent.name,
 			Model:       sessionState.DefaultModel,
 			Error:       err.Error(),
+			Metadata:    providerFailureMetadata,
 		})
-		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, err.Error())
+		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, err.Error(), providerFailureMetadata)
 
 		return fmt.Errorf("one-shot complete: %w", err)
 	}
@@ -1365,7 +1368,7 @@ func appendHeadlessContextManifestLog(store *session.Store, run *session.Headles
 	return nil
 }
 
-func finishHeadlessRun(store *session.Store, run *session.HeadlessRun, status session.HeadlessStatus, message string) {
+func finishHeadlessRun(store *session.Store, run *session.HeadlessRun, status session.HeadlessStatus, message string, metadata ...map[string]string) {
 	if store == nil || run == nil {
 		return
 	}
@@ -1389,7 +1392,7 @@ func finishHeadlessRun(store *session.Store, run *session.HeadlessRun, status se
 	}
 
 	appendFinishedHeadlessLog(store, run, status, now)
-	appendFinishedHeadlessEvent(store, run, status)
+	appendFinishedHeadlessEvent(store, run, status, headlessFinishMetadata(metadata...))
 }
 
 func finishHeadlessStatus(status session.HeadlessStatus, message string) session.HeadlessStatus {
@@ -1464,7 +1467,7 @@ func appendFinishedHeadlessLog(store *session.Store, run *session.HeadlessRun, s
 	}
 }
 
-func appendFinishedHeadlessEvent(store *session.Store, run *session.HeadlessRun, status session.HeadlessStatus) {
+func appendFinishedHeadlessEvent(store *session.Store, run *session.HeadlessRun, status session.HeadlessStatus, metadata map[string]string) {
 	eventType := session.HeadlessEventType(status)
 	if status == session.HeadlessStatusCompleted {
 		eventType = session.HeadlessEventCompleted
@@ -1496,9 +1499,39 @@ func appendFinishedHeadlessEvent(store *session.Store, run *session.HeadlessRun,
 		PID:             run.PID,
 		ParentPID:       run.ParentPID,
 		ProcessGroupID:  run.ProcessGroupID,
+		Metadata:        metadata,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
+}
+
+func headlessFinishMetadata(metadata ...map[string]string) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+
+	var out map[string]string
+
+	for _, values := range metadata {
+		for key, value := range values {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+
+			if out == nil {
+				out = make(map[string]string, len(values))
+			}
+
+			out[key] = value
+		}
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+
+	return out
 }
 
 func ensureHeadlessRunCanRecordResponse(store *session.Store, run *session.HeadlessRun) error {

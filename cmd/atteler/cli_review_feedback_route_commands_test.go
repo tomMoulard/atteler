@@ -859,10 +859,12 @@ func TestFormatRouteDecisionIncludesMetadataAndTelemetryEvidence(t *testing.T) {
 	telemetry := modelroute.NewTelemetry()
 	observedAt := time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC)
 	telemetry.RecordFailure(candidate, modelroute.Failure{
-		RetryAfter:  time.Second,
-		Error:       "openai: HTTP 429: rate limited",
-		Retryable:   true,
-		RateLimited: true,
+		RetryAfter:     time.Second,
+		Error:          "openai: HTTP 429: rate limited",
+		Kind:           "transient_rate_limit",
+		RateLimitScope: modelroute.RateLimitScopeProvider,
+		Retryable:      true,
+		RateLimited:    true,
 	}, observedAt)
 
 	decision := modelroute.DecideAt(
@@ -879,6 +881,8 @@ func TestFormatRouteDecisionIncludesMetadataAndTelemetryEvidence(t *testing.T) {
 	assert.Contains(t, got, "metadata_source=https://")
 	assert.Contains(t, got, "deprecated=true")
 	assert.Contains(t, got, "failure_count=1")
+	assert.Contains(t, got, "last_failure_kind=transient_rate_limit")
+	assert.Contains(t, got, "last_failure_rate_limit_scope=provider")
 	assert.Contains(t, got, "rate_limit_count=1")
 	assert.Contains(t, got, "rate_limit_until=")
 	assert.Contains(t, got, modelroute.ReasonRateLimited)

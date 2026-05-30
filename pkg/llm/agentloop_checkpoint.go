@@ -65,10 +65,13 @@ const (
 )
 
 // AgentLoopStopCondition is a durable, structured explanation for loop exit.
+//
+//nolint:govet // Field order follows JSON/audit readability rather than fieldalignment.
 type AgentLoopStopCondition struct {
 	Kind        AgentLoopStopKind `json:"kind"`
 	Reason      string            `json:"reason"`
 	MatchedRule string            `json:"matched_rule,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // AgentLoopModelRequestSummary records the request shape without copying the

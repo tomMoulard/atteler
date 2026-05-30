@@ -2647,7 +2647,10 @@ func TestFinishHeadlessRunRecordsFailedStatus(t *testing.T) {
 	loaded, err := store.LoadHeadlessRun(run.ID)
 	require.NoError(t, err)
 
-	finishHeadlessRun(store, &loaded, session.HeadlessStatusFailed, "provider unavailable")
+	finishHeadlessRun(store, &loaded, session.HeadlessStatusFailed, "provider unavailable", map[string]string{
+		"fallback_failure_classifications": "alpha=permanent_error",
+		"provider_readiness":               "provider readiness: alpha=registered models=static",
+	})
 
 	failed, err := store.LoadHeadlessRun(run.ID)
 	require.NoError(t, err)
@@ -2661,6 +2664,8 @@ func TestFinishHeadlessRunRecordsFailedStatus(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, headlessEvents, 1)
 	assert.Equal(t, session.HeadlessEventFailed, headlessEvents[0].Type)
+	assert.Equal(t, "alpha=permanent_error", headlessEvents[0].Metadata["fallback_failure_classifications"])
+	assert.Equal(t, "provider readiness: alpha=registered models=static", headlessEvents[0].Metadata["provider_readiness"])
 }
 
 func TestFinishHeadlessRunRecordsTimedOutStatus(t *testing.T) {

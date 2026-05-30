@@ -41,14 +41,7 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 		cmds = append(
 			cmds,
 			tea.Println(errStyle.Render(errorLine)),
-			emitHook(m.ctx, m.hookRunner, events.Event{
-				Type:        events.Error,
-				SessionID:   m.sessionState.ID,
-				SessionPath: m.sessionPath,
-				Agent:       m.sessionState.DefaultAgent,
-				Model:       m.sessionState.DefaultModel,
-				Error:       msg.err.Error(),
-			}),
+			emitHook(m.ctx, m.hookRunner, m.llmErrorEvent(msg.err)),
 		)
 
 		return m.continueWithQueuedPrompt(tea.Sequence(cmds...))
@@ -99,6 +92,22 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m.continueWithQueuedPrompt(tea.Sequence(cmds...))
+}
+
+func (m model) llmErrorEvent(err error) events.Event {
+	event := events.Event{
+		Type:        events.Error,
+		SessionID:   m.sessionState.ID,
+		SessionPath: m.sessionPath,
+		Agent:       m.sessionState.DefaultAgent,
+		Model:       m.sessionState.DefaultModel,
+		Metadata:    llm.ProviderFailureMetadata(err),
+	}
+	if err != nil {
+		event.Error = err.Error()
+	}
+
+	return event
 }
 
 func llmToolLogCommands(toolLog []string, liveEvents bool) []tea.Cmd {

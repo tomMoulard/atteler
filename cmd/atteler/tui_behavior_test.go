@@ -3417,6 +3417,36 @@ func TestUpdateLLMResponse_ClearsCompletedTaskTimer(t *testing.T) {
 	assert.True(t, next.runningTaskStarted.IsZero())
 }
 
+func TestLLMErrorEventIncludesProviderFailureMetadata(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(failingIdleSuggestionProvider{model: "model"})
+
+	_, err := registry.CompleteWithFallback(context.Background(), llm.CompleteParams{Model: "suggest/model"}, nil)
+	require.Error(t, err)
+
+	sessionState := session.New("suggest/model", nil)
+	sessionState.DefaultAgent = testReviewerName
+
+	m := model{
+		sessionState: sessionState,
+		sessionPath:  "/tmp/session.jsonl",
+	}
+
+	event := m.llmErrorEvent(err)
+	require.NotNil(t, event.Metadata)
+	assert.Equal(t, events.Error, event.Type)
+	assert.Equal(t, sessionState.ID, event.SessionID)
+	assert.Equal(t, "/tmp/session.jsonl", event.SessionPath)
+	assert.Equal(t, testReviewerName, event.Agent)
+	assert.Equal(t, "suggest/model", event.Model)
+	assert.Equal(t, err.Error(), event.Error)
+	assert.Equal(t, "suggest=permanent_error", event.Metadata["fallback_failure_classifications"])
+	assert.Equal(t, "suggest/model (static)=permanent_error", event.Metadata["fallback_attempts"])
+	assert.Equal(t, "suggest", event.Metadata["permanent_error_providers"])
+}
+
 func TestLLMToolLogCommands_SkipsBufferedLogsAfterLiveStreaming(t *testing.T) {
 	t.Parallel()
 
@@ -3586,6 +3616,52 @@ func TestRunInteractive_ReplacesHookLoggerBeforeSessionStart(t *testing.T) {
 		assert.Equal(t, llm.ModelModeFast, event.Metadata["model_mode"])
 		assert.Equal(t, "high", event.Metadata["reasoning_level"])
 	}
+}
+
+//nolint:paralleltest // Mutates the package-level runInteractiveProgram seam.
+func TestRunInteractive_ErrorEventIncludesProviderFailureMetadata(t *testing.T) {
+	registry := llm.NewRegistry()
+	registry.Register(failingIdleSuggestionProvider{model: "model"})
+
+	_, providerErr := registry.CompleteWithFallback(context.Background(), llm.CompleteParams{Model: "suggest/model"}, nil)
+	require.Error(t, providerErr)
+
+	originalRunInteractiveProgram := runInteractiveProgram
+	runInteractiveProgram = func(m model) (tea.Model, error) {
+		return m, providerErr
+	}
+
+	t.Cleanup(func() {
+		runInteractiveProgram = originalRunInteractiveProgram
+	})
+
+	store := session.NewStore(t.TempDir())
+	observer := &recordingTUIObserver{}
+	state := appState{
+		registry:       registry,
+		agentRegistry:  agent.NewRegistry(nil),
+		hookRunner:     events.NewRunner(nil),
+		eventObservers: []events.Observer{observer},
+		sessionStore:   store,
+		sessionState:   session.New("suggest/model", nil),
+		contextOptions: contextref.Options{Root: t.TempDir()},
+		selectedModel:  "suggest/model",
+		selectedAgent:  testReviewerName,
+		cwd:            t.TempDir(),
+	}
+
+	err := runInteractive(context.Background(), state)
+	require.Error(t, err)
+	require.ErrorIs(t, err, providerErr)
+
+	event := observer.eventByType(events.Error)
+	require.NotNil(t, event)
+	assert.Equal(t, testReviewerName, event.Agent)
+	assert.Equal(t, "suggest/model", event.Model)
+	assert.Equal(t, providerErr.Error(), event.Error)
+	require.NotNil(t, event.Metadata)
+	assert.Equal(t, "suggest=permanent_error", event.Metadata["fallback_failure_classifications"])
+	assert.Equal(t, "suggest", event.Metadata["permanent_error_providers"])
 }
 
 type panicWriter struct{}
