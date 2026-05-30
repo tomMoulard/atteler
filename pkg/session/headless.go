@@ -193,6 +193,7 @@ type HeadlessRun struct {
 	CWD                string              `json:"cwd,omitempty"`
 	Prompt             string              `json:"prompt"`
 	Model              string              `json:"model"`
+	ModelMode          string              `json:"model_mode,omitempty"`
 	AgentLoopBudget    llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
 	Agent              string              `json:"agent"`
 	Owner              string              `json:"owner,omitempty"`

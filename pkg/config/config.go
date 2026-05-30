@@ -69,6 +69,7 @@ type AgentConfig struct {
 	RoutingPolicy    RoutingPolicyConfig `json:"routing_policy,omitzero" yaml:"routing_policy,omitempty"`
 	Model            string              `json:"model,omitempty" yaml:"model,omitempty"`
 	Mode             string              `json:"mode,omitempty" yaml:"mode,omitempty"`
+	ModelMode        string              `json:"model_mode,omitempty" yaml:"model_mode,omitempty"`
 	ReasoningLevel   string              `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
 	Description      string              `json:"description,omitempty" yaml:"description,omitempty"`
 	Personality      string              `json:"personality,omitempty" yaml:"personality,omitempty"`
@@ -138,6 +139,7 @@ type GenerationConfig struct {
 	Temperature    *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
 	TopP           *float64 `json:"top_p,omitempty" yaml:"top_p,omitempty"`
 	Seed           *int     `json:"seed,omitempty" yaml:"seed,omitempty"`
+	ModelMode      string   `json:"model_mode,omitempty" yaml:"model_mode,omitempty"`
 	ReasoningLevel string   `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
 	MaxTokens      int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
 }
@@ -342,6 +344,7 @@ type fileAgentConfig struct {
 	RoutingPolicy    *RoutingPolicyConfig `json:"routing_policy" yaml:"routing_policy"`
 	Model            *string              `json:"model" yaml:"model"`
 	Mode             *string              `json:"mode" yaml:"mode"`
+	ModelMode        *string              `json:"model_mode" yaml:"model_mode"`
 	ReasoningLevel   *string              `json:"reasoning_level" yaml:"reasoning_level"`
 	Description      *string              `json:"description" yaml:"description"`
 	Temperature      *float64             `json:"temperature" yaml:"temperature"`
@@ -390,6 +393,7 @@ type fileGenerationConfig struct {
 	Temperature    *float64 `json:"temperature" yaml:"temperature"`
 	TopP           *float64 `json:"top_p" yaml:"top_p"`
 	Seed           *int     `json:"seed" yaml:"seed"`
+	ModelMode      *string  `json:"model_mode" yaml:"model_mode"`
 	ReasoningLevel *string  `json:"reasoning_level" yaml:"reasoning_level"`
 	MaxTokens      *int     `json:"max_tokens" yaml:"max_tokens"`
 
@@ -828,6 +832,11 @@ func mergeFileAgent(current *AgentConfig, agent fileAgentConfig, rec *originReco
 		rec.set(agentFieldPath(name, "mode"), source, current.Mode)
 	}
 
+	if agent.ModelMode != nil {
+		current.ModelMode = strings.TrimSpace(*agent.ModelMode)
+		rec.set(agentFieldPath(name, "model_mode"), source, current.ModelMode)
+	}
+
 	if agent.ToolPermissions != nil {
 		current.ToolPermissions = make(map[string]bool, len(agent.ToolPermissions))
 		maps.Copy(current.ToolPermissions, agent.ToolPermissions)
@@ -1065,6 +1074,11 @@ func mergeGeneration(dst *Config, generation fileGenerationConfig, rec *originRe
 	if generation.Seed != nil {
 		dst.Generation.Seed = generation.Seed
 		rec.set("generation.seed", source, *generation.Seed)
+	}
+
+	if generation.ModelMode != nil {
+		dst.Generation.ModelMode = strings.TrimSpace(*generation.ModelMode)
+		rec.set("generation.model_mode", source, dst.Generation.ModelMode)
 	}
 
 	if generation.ReasoningLevel != nil {
@@ -1408,6 +1422,11 @@ func mergeConfigAgent(current *AgentConfig, agent AgentConfig, rec *originRecord
 		rec.set(agentFieldPath(name, "mode"), source, agent.Mode)
 	}
 
+	if agent.ModelMode != "" {
+		current.ModelMode = strings.TrimSpace(agent.ModelMode)
+		rec.set(agentFieldPath(name, "model_mode"), source, current.ModelMode)
+	}
+
 	if agent.ToolPermissions != nil {
 		current.ToolPermissions = make(map[string]bool, len(agent.ToolPermissions))
 		maps.Copy(current.ToolPermissions, agent.ToolPermissions)
@@ -1635,6 +1654,11 @@ func mergeConfigGeneration(dst *Config, generation GenerationConfig, rec *origin
 	if generation.Seed != nil {
 		dst.Generation.Seed = generation.Seed
 		rec.set("generation.seed", source, *generation.Seed)
+	}
+
+	if generation.ModelMode != "" {
+		dst.Generation.ModelMode = strings.TrimSpace(generation.ModelMode)
+		rec.set("generation.model_mode", source, dst.Generation.ModelMode)
 	}
 
 	if generation.ReasoningLevel != "" {
@@ -1886,6 +1910,12 @@ func mergeConfigAgentFromOrigins(current *AgentConfig, agent AgentConfig, dstOri
 		appendOriginChain(dstOrigins, agentFieldPath(name, "mode"), srcOrigins, false)
 	}
 
+	if agent.ModelMode != "" {
+		current.ModelMode = strings.TrimSpace(agent.ModelMode)
+
+		appendOriginChain(dstOrigins, agentFieldPath(name, "model_mode"), srcOrigins, false)
+	}
+
 	if agent.ToolPermissions != nil {
 		current.ToolPermissions = make(map[string]bool, len(agent.ToolPermissions))
 		maps.Copy(current.ToolPermissions, agent.ToolPermissions)
@@ -2122,6 +2152,12 @@ func mergeConfigGenerationFromOrigins(dst *Config, generation GenerationConfig, 
 		dst.Generation.Seed = generation.Seed
 
 		appendOriginChain(dstOrigins, "generation.seed", srcOrigins, false)
+	}
+
+	if generation.ModelMode != "" {
+		dst.Generation.ModelMode = strings.TrimSpace(generation.ModelMode)
+
+		appendOriginChain(dstOrigins, "generation.model_mode", srcOrigins, false)
 	}
 
 	if generation.ReasoningLevel != "" {

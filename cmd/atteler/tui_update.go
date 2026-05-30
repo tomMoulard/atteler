@@ -813,6 +813,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 	}
 
 	m.sessionState.DefaultReasoningLevel = strings.TrimSpace(m.generationOverrides.ReasoningLevel)
+	m.sessionState.DefaultModelMode = strings.TrimSpace(m.generationOverrides.ModelMode)
 
 	confirmCh := make(chan agentLoopConfirmRequest, 1)
 	responseCh := make(chan bool, 1)

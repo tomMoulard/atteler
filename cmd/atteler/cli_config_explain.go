@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/llm"
 )
 
 func explainConfig(opts cliOptions) error {
@@ -365,6 +366,26 @@ func addRuntimeGenerationOrigins(
 		})
 	}
 
+	if cfg.Generation.ModelMode != "" {
+		copyOriginChain(origins, "runtime.generation.model_mode", "generation.model_mode")
+	}
+
+	if mode, source := stateModelModeOrigin(persistedState, cwd, statePath); mode != "" {
+		appendDiagnosticOrigin(origins, "runtime.generation.model_mode", appconfig.OriginEvent{
+			Kind:   appconfig.OriginStateOverride,
+			Source: source,
+			Value:  mode,
+		})
+	}
+
+	if opts.modelMode != "" {
+		appendDiagnosticOrigin(origins, "runtime.generation.model_mode", appconfig.OriginEvent{
+			Kind:   appconfig.OriginCLIFlag,
+			Source: "--model-mode",
+			Value:  strings.TrimSpace(opts.modelMode),
+		})
+	}
+
 	if cfg.Generation.ReasoningLevel != "" {
 		copyOriginChain(origins, "runtime.generation.reasoning_level", "generation.reasoning_level")
 	}
@@ -415,6 +436,24 @@ func stateReasoningOrigin(state appconfig.State, cwd, statePath string) (level, 
 	}
 
 	return level, statePath + " global"
+}
+
+func stateModelModeOrigin(state appconfig.State, cwd, statePath string) (mode, source string) {
+	resolution := state.ResolveModelModePreference(cwd)
+	if resolution.Source == "" {
+		return "", ""
+	}
+
+	mode = resolution.Value
+	if mode == "" {
+		mode = llm.ModelModeDefault
+	}
+
+	if resolution.Scope == appconfig.ModelScopeFolder {
+		return mode, statePath + " folder " + resolution.FolderKey
+	}
+
+	return mode, statePath + " global"
 }
 
 func copyOriginChain(origins appconfig.OriginMap, targetPath, sourcePath string) {

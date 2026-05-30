@@ -138,6 +138,10 @@ func (m model) statusLine() string {
 		parts = append(parts, "effort:"+reasoningLabel)
 	}
 
+	if modeLabel := m.modelModeStatusLabel(); modeLabel != "" && modeLabel != llm.ModelModeDefault {
+		parts = append(parts, "model-mode:"+modeLabel)
+	}
+
 	if budget := formatAgentLoopBudgetCompact(m.agentLoopBudget); budget != "" {
 		parts = append(parts, "budget:"+budget)
 	}
@@ -226,6 +230,22 @@ func (m model) reasoningStatusLabel() string {
 	}
 
 	return strings.TrimSpace(m.generationDefaults.ReasoningLevel)
+}
+
+func (m model) modelModeStatusLabel() string {
+	if mode := strings.TrimSpace(m.generationOverrides.ModelMode); mode != "" {
+		return mode
+	}
+
+	if m.selectedAgent != "" && m.agentRegistry != nil {
+		if activeAgent, ok := m.agentRegistry.Get(m.selectedAgent); ok {
+			if mode := strings.TrimSpace(activeAgent.ModelMode); mode != "" {
+				return mode
+			}
+		}
+	}
+
+	return strings.TrimSpace(m.generationDefaults.ModelMode)
 }
 
 func (m model) waitingStatus() string {

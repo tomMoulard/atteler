@@ -984,6 +984,7 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 		AgentLoopBudget:         llm.AgentLoopBudget{MaxInputTokens: 100, MaxOutputTokens: 50},
 		HeadlessID:              "headless-id",
 		Model:                   "gpt-test",
+		ModelMode:               "fast",
 		Content:                 "answer",
 		TokenUsage:              tokenUsage{InputTokens: 1, CachedInputTokens: 2, OutputTokens: 3, Responses: 1},
 	}
@@ -999,6 +1000,7 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded))
 	assert.Equal(t, result.SessionID, decoded.SessionID)
 	assert.Equal(t, result.HeadlessID, decoded.HeadlessID)
+	assert.Equal(t, result.ModelMode, decoded.ModelMode)
 	assert.Equal(t, result.AgentLoopCheckpointPath, decoded.AgentLoopCheckpointPath)
 	assert.Equal(t, result.AgentLoopBudget, decoded.AgentLoopBudget)
 	assert.Equal(t, result.TokenUsage.OutputTokens, decoded.TokenUsage.OutputTokens)
@@ -1262,6 +1264,47 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 	require.NoError(t, streamHeadlessLog(context.Background(), store, headlessID))
 }
 
+func TestRunOnceWithOptions_HeadlessPreflightRecordsModelMode(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	headlessID := "preflight-model-mode"
+
+	err := runOnceWithOptions(
+		context.Background(),
+		llm.NewRegistry(),
+		agent.NewRegistry(nil),
+		events.NewRunnerWithLogger(nil, nil),
+		store,
+		session.New("openai/gpt-5.5", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"openai/gpt-5.5",
+		"",
+		nil,
+		generationSettings{ModelMode: llm.ModelModeFast},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat: "yaml",
+			HeadlessID:   headlessID,
+			Headless:     true,
+		},
+		true,
+		"hello",
+	)
+	require.ErrorContains(t, err, "unsupported output format")
+
+	run, err := store.LoadHeadlessRun(headlessID)
+	require.NoError(t, err)
+	assert.Equal(t, session.HeadlessStatusFailed, run.Status)
+	assert.Equal(t, llm.ModelModeFast, run.ModelMode)
+}
+
 func TestStartHeadlessRunRejectsWhitespacePaddedExplicitID(t *testing.T) {
 	t.Parallel()
 
@@ -1272,6 +1315,7 @@ func TestStartHeadlessRunRejectsWhitespacePaddedExplicitID(t *testing.T) {
 		session.New("gpt-test", nil),
 		"hello",
 		"gpt-test",
+		"",
 		"default",
 	)
 
@@ -1289,6 +1333,7 @@ func TestStartHeadlessRunRejectsWhitespacePaddedParentID(t *testing.T) {
 		session.New("gpt-test", nil),
 		"hello",
 		"gpt-test",
+		"",
 		"default",
 	)
 
@@ -1317,6 +1362,7 @@ func TestStartHeadlessRunRecordsParentRunRelationship(t *testing.T) {
 		session.New("gpt-test", nil),
 		"hello",
 		"gpt-test",
+		"",
 		"",
 	)
 	require.NoError(t, err)
@@ -1356,6 +1402,7 @@ func TestStartHeadlessRunRejectsExistingExplicitID(t *testing.T) {
 		session.New("gpt-test", nil),
 		"hello",
 		"gpt-test",
+		"",
 		"",
 	)
 	require.ErrorContains(t, err, "already exists")
@@ -1745,12 +1792,16 @@ func TestRunWithState_HeadlessRecordsOutputFormatFailure(t *testing.T) {
 		sessionState:   sessionState,
 		contextOptions: contextref.Options{Root: dir},
 		selectedModel:  "gpt-test",
+		generationDefaults: generationSettings{
+			ModelMode: llm.ModelModeFast,
+		},
 	})
 	require.ErrorContains(t, err, "unsupported output format")
 
 	loaded, loadErr := store.LoadHeadlessRun(headlessID)
 	require.NoError(t, loadErr)
 	assert.Equal(t, session.HeadlessStatusFailed, loaded.Status)
+	assert.Equal(t, llm.ModelModeFast, loaded.ModelMode)
 	assert.Equal(t, sessionState.ID, loaded.SessionID)
 	assert.Contains(t, loaded.Error, "unsupported output format")
 }
@@ -1773,12 +1824,16 @@ func TestRunWithState_HeadlessRecordsMissingPromptFailure(t *testing.T) {
 		sessionState:   sessionState,
 		contextOptions: contextref.Options{Root: dir},
 		selectedModel:  "gpt-test",
+		generationDefaults: generationSettings{
+			ModelMode: llm.ModelModeFast,
+		},
 	})
 	require.ErrorContains(t, err, "headless mode requires")
 
 	loaded, loadErr := store.LoadHeadlessRun(headlessID)
 	require.NoError(t, loadErr)
 	assert.Equal(t, session.HeadlessStatusFailed, loaded.Status)
+	assert.Equal(t, llm.ModelModeFast, loaded.ModelMode)
 	assert.Equal(t, sessionState.ID, loaded.SessionID)
 	assert.Contains(t, loaded.Error, "headless mode requires")
 	assert.Equal(t, loaded.Error, loaded.TerminalReason)

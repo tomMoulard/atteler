@@ -49,6 +49,7 @@ type Session struct {
 	Title                 string              `json:"title,omitempty"`
 	DefaultModel          string              `json:"default_model,omitempty"`
 	DefaultReasoningLevel string              `json:"default_reasoning_level,omitempty"`
+	DefaultModelMode      string              `json:"default_model_mode,omitempty"`
 	DefaultAgent          string              `json:"default_agent,omitempty"`
 	AgentLoopBudget       llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
 	// PromptSuggestions stores the session-scoped background prompt suggestion

@@ -664,6 +664,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 			state.sessionState,
 			opts.oncePrompt,
 			state.selectedModel,
+			appStateSessionGeneration(state).ModelMode,
 			state.selectedAgent,
 			err,
 		)
@@ -687,6 +688,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 			state.sessionState,
 			opts.oncePrompt,
 			state.selectedModel,
+			appStateSessionGeneration(state).ModelMode,
 			state.selectedAgent,
 			err,
 		)
@@ -748,6 +750,7 @@ func recordHeadlessLoadStateFailure(store *session.Store, opts cliOptions, failu
 		sessionState,
 		opts.oncePrompt,
 		opts.model,
+		opts.modelMode,
 		opts.agentName,
 		failure,
 	)

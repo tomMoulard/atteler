@@ -7,7 +7,7 @@ import (
 
 const (
 	// BuiltinCatalogVersion changes whenever maintained model metadata changes.
-	BuiltinCatalogVersion = "2026-05-22.4"
+	BuiltinCatalogVersion = "2026-05-29.1"
 
 	capabilityText        = "text"
 	capabilityTools       = "tools"
@@ -15,11 +15,12 @@ const (
 	capabilityVision      = "vision"
 	capabilityPromptCache = "prompt_cache"
 	capabilityLocal       = "local"
+	capabilityFastMode    = "fast_mode"
 )
 
 var (
-	builtinCatalogUpdatedAt = time.Date(2026, time.May, 22, 0, 0, 0, 0, time.UTC)
-	builtinCatalogStaleAt   = time.Date(2026, time.August, 20, 0, 0, 0, 0, time.UTC)
+	builtinCatalogUpdatedAt = time.Date(2026, time.May, 29, 0, 0, 0, 0, time.UTC)
+	builtinCatalogStaleAt   = time.Date(2026, time.August, 27, 0, 0, 0, 0, time.UTC)
 )
 
 // Catalog is a versioned metadata snapshot used to build route candidates from
@@ -62,18 +63,28 @@ func BuiltinCatalog() Catalog {
 		UpdatedAt:  builtinCatalogUpdatedAt,
 		StaleAfter: builtinCatalogStaleAt,
 		Models: []ModelMetadata{
-			openAIMetadata("gpt-5.5", 1_050_000, 128_000, 5, 0.5, 30, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			openAIMetadata("gpt-5.4", 1_050_000, 128_000, 2.5, 0.25, 15, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			openAIMetadata("gpt-5.4-mini", 400_000, 128_000, 0.75, 0.075, 4.5, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
+			openAIMetadata("gpt-5.5", 1_050_000, 128_000, 5, 0.5, 30, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-5.4", 1_050_000, 128_000, 2.5, 0.25, 15, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-5.4-mini", 400_000, 128_000, 0.75, 0.075, 4.5, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
 			openAIMetadata("gpt-5.4-nano", 400_000, 128_000, 0.2, 0.02, 1.25, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			openAIMetadata("gpt-4.1", 1_047_576, 32_768, 2, 0.5, 8, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache),
-			openAIMetadata("gpt-4.1-mini", 1_047_576, 32_768, 0.4, 0.1, 1.6, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache),
-			openAIMetadata("gpt-4.1-nano", 1_047_576, 32_768, 0.1, 0.025, 0.4, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache),
-			openAIMetadata("o4-mini", 200_000, 100_000, 1.1, 0.275, 4.4, capabilityText, capabilityTools, capabilityVision, capabilityReasoning, capabilityPromptCache),
-			codexMetadata("gpt-5.5", 1_050_000, 5, 0.5, 30, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			codexMetadata("gpt-5.4", 1_050_000, 2.5, 0.25, 15, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			codexMetadata("gpt-5.4-mini", 400_000, 0.75, 0.075, 4.5, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			codexMetadata("gpt-5.3-codex", 200_000, 1.75, 0.175, 14, capabilityText, capabilityTools, capabilityReasoning, capabilityPromptCache),
+			openAIMetadata("gpt-5.2", 400_000, 128_000, 1.75, 0.175, 14, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-5.1", 400_000, 128_000, 1.25, 0.125, 10, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-5", 400_000, 128_000, 1.25, 0.125, 10, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-5-mini", 400_000, 128_000, 0.25, 0.025, 2, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-5.3-codex", 400_000, 128_000, 1.75, 0.175, 14, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-5.1-codex", 400_000, 128_000, 1.25, 0.125, 10, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-5-codex", 400_000, 128_000, 1.25, 0.125, 10, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-4.1", 1_047_576, 32_768, 2, 0.5, 8, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-4.1-mini", 1_047_576, 32_768, 0.4, 0.1, 1.6, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-4.1-nano", 1_047_576, 32_768, 0.1, 0.025, 0.4, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-4o", 128_000, 16_384, 2.5, 1.25, 10, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("gpt-4o-mini", 128_000, 16_384, 0.15, 0.075, 0.6, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("o3", 200_000, 100_000, 2, 0.5, 8, capabilityText, capabilityTools, capabilityVision, capabilityReasoning, capabilityPromptCache, capabilityFastMode),
+			openAIMetadata("o4-mini", 200_000, 100_000, 1.1, 0.275, 4.4, capabilityText, capabilityTools, capabilityVision, capabilityReasoning, capabilityPromptCache, capabilityFastMode),
+			codexMetadata("gpt-5.5", 1_050_000, 5, 0.5, 30, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			codexMetadata("gpt-5.4", 1_050_000, 2.5, 0.25, 15, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			codexMetadata("gpt-5.4-mini", 400_000, 0.75, 0.075, 4.5, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
+			codexMetadata("gpt-5.3-codex", 200_000, 1.75, 0.175, 14, capabilityText, capabilityTools, capabilityReasoning, capabilityPromptCache, capabilityFastMode),
 			anthropicMetadata("anthropic", "claude-opus-4-7", 1_000_000, 128_000, 5, 0.5, 25, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
 			anthropicMetadata("anthropic", "claude-opus-4-6", 1_000_000, 128_000, 5, 0.5, 25, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
 			anthropicMetadata("anthropic", "claude-opus-4-5-20251101", 200_000, 64_000, 5, 0.5, 25, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
@@ -290,7 +301,7 @@ func (c Catalog) Candidates(ids []string) (candidates []Candidate, unknown []str
 }
 
 func openAIMetadata(name string, contextWindow, maxOutputTokens int, inputPerMillion, cachedPerMillion, outputPerMillion float64, capabilities ...string) ModelMetadata {
-	metadata := pricedMetadata("openai", name, contextWindow, maxOutputTokens, inputPerMillion, cachedPerMillion, 0, outputPerMillion, false, "OpenAI API model comparison and pricing", "https://developers.openai.com/api/docs/models/compare", "2026-05-22", capabilities...)
+	metadata := pricedMetadata("openai", name, contextWindow, maxOutputTokens, inputPerMillion, cachedPerMillion, 0, outputPerMillion, false, "OpenAI API model comparison, pricing, and priority processing", "https://developers.openai.com/api/docs/pricing", "2026-05-29", capabilities...)
 	switch name {
 	case "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano":
 		metadata.ProviderReportedAlias = name + "-2025-04-14"
@@ -300,7 +311,7 @@ func openAIMetadata(name string, contextWindow, maxOutputTokens int, inputPerMil
 }
 
 func codexMetadata(name string, contextWindow int, inputPerMillion, cachedPerMillion, outputPerMillion float64, capabilities ...string) ModelMetadata {
-	return pricedMetadata("codex", name, contextWindow, 128_000, inputPerMillion, cachedPerMillion, 0, outputPerMillion, false, "OpenAI API pricing (Codex reference)", "https://developers.openai.com/api/docs/pricing", "2026-05-22", capabilities...)
+	return pricedMetadata("codex", name, contextWindow, 128_000, inputPerMillion, cachedPerMillion, 0, outputPerMillion, false, "OpenAI API pricing and priority processing (Codex reference)", "https://developers.openai.com/api/docs/pricing", "2026-05-29", capabilities...)
 }
 
 func anthropicMetadata(provider, name string, contextWindow, maxOutputTokens int, inputPerMillion, cacheReadPerMillion, outputPerMillion float64, deprecated bool, capabilities ...string) ModelMetadata {

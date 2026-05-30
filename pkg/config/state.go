@@ -29,6 +29,7 @@ const (
 	ModelScopeGlobal  ModelScope = "global"
 
 	stateReasoningLevelDefault = "default"
+	stateModelModeDefault      = "default"
 )
 
 // PromptSuggestionPreference controls whether background model-backed prompt
@@ -57,6 +58,9 @@ type State struct {
 	// selected interactively. It intentionally lives in state rather than
 	// config because it is a user preference, not project policy.
 	DefaultReasoningLevel string `json:"default_reasoning_level,omitempty" yaml:"default_reasoning_level,omitempty"`
+	// DefaultModelMode stores the global model mode selected interactively
+	// (for example, OpenAI fast mode).
+	DefaultModelMode string `json:"default_model_mode,omitempty" yaml:"default_model_mode,omitempty"`
 	// DefaultPromptSuggestions stores the global background prompt suggestion
 	// preference. Empty means the safe default: local-only deterministic
 	// suggestions.
@@ -73,6 +77,7 @@ type State struct {
 type FolderState struct {
 	DefaultModel             string `json:"default_model,omitempty" yaml:"default_model,omitempty"`
 	DefaultReasoningLevel    string `json:"default_reasoning_level,omitempty" yaml:"default_reasoning_level,omitempty"`
+	DefaultModelMode         string `json:"default_model_mode,omitempty" yaml:"default_model_mode,omitempty"`
 	DefaultPromptSuggestions string `json:"default_prompt_suggestions,omitempty" yaml:"default_prompt_suggestions,omitempty"`
 	// UnknownFields preserves unrecognized per-folder YAML keys across writes.
 	UnknownFields map[string]any `json:"-" yaml:",inline,omitempty"`
@@ -453,6 +458,12 @@ func (s *State) ReasoningLevelForFolder(cwd string) string {
 	return s.ResolveReasoningPreference(cwd).Value
 }
 
+// ModelModeForFolder resolves the persisted model mode for cwd, preferring
+// folder state over the global default.
+func (s *State) ModelModeForFolder(cwd string) string {
+	return s.ResolveModelModePreference(cwd).Value
+}
+
 // PromptSuggestionsForFolder resolves the persisted prompt suggestion
 // preference for cwd, preferring folder state over the global default. Empty
 // means local-only.
@@ -527,6 +538,45 @@ func (s *State) ResolveReasoningPreference(cwd string) PreferenceResolution {
 		}
 		if s.DefaultReasoningLevel != stateReasoningLevelDefault {
 			resolution.Value = s.DefaultReasoningLevel
+		}
+
+		return resolution
+	}
+
+	return PreferenceResolution{FolderKey: key}
+}
+
+// ResolveModelModePreference resolves the persisted model mode for cwd and
+// reports the state scope that supplied it.
+func (s *State) ResolveModelModePreference(cwd string) PreferenceResolution {
+	if s == nil {
+		return PreferenceResolution{}
+	}
+
+	key := FolderKey(cwd)
+	if key != "" && s.Folders != nil {
+		if folder, ok := s.Folders[key]; ok && folder.DefaultModelMode != "" {
+			resolution := PreferenceResolution{
+				Source:    "state.folder",
+				Scope:     ModelScopeFolder,
+				FolderKey: key,
+			}
+			if folder.DefaultModelMode != stateModelModeDefault {
+				resolution.Value = folder.DefaultModelMode
+			}
+
+			return resolution
+		}
+	}
+
+	if s.DefaultModelMode != "" {
+		resolution := PreferenceResolution{
+			Source:    "state.global",
+			Scope:     ModelScopeGlobal,
+			FolderKey: key,
+		}
+		if s.DefaultModelMode != stateModelModeDefault {
+			resolution.Value = s.DefaultModelMode
 		}
 
 		return resolution
@@ -614,6 +664,35 @@ func (s *State) SetReasoningLevel(scope ModelScope, cwd, level string) {
 
 		folder := s.Folders[key]
 		folder.DefaultReasoningLevel = level
+		s.Folders[key] = folder
+	}
+}
+
+// SetModelMode stores model mode at the requested scope. Session scope is
+// intentionally not persisted. The "default" sentinel clears the global
+// preference and shadows a global preference for folder scope.
+func (s *State) SetModelMode(scope ModelScope, cwd, mode string) {
+	mode = strings.TrimSpace(mode)
+
+	switch scope {
+	case ModelScopeGlobal:
+		if mode == stateModelModeDefault {
+			mode = ""
+		}
+
+		s.DefaultModelMode = mode
+	case ModelScopeFolder:
+		key := FolderKey(cwd)
+		if key == "" {
+			return
+		}
+
+		if s.Folders == nil {
+			s.Folders = make(map[string]FolderState)
+		}
+
+		folder := s.Folders[key]
+		folder.DefaultModelMode = mode
 		s.Folders[key] = folder
 	}
 }

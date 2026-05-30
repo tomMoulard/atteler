@@ -346,6 +346,18 @@ func TestGenerationForRequest_CLIReasoningLevelOverridesAgent(t *testing.T) {
 	}
 }
 
+func TestGenerationForRequest_ModelModeMergesLikeReasoning(t *testing.T) {
+	t.Parallel()
+
+	generation := generationForRequest(
+		generationSettings{ModelMode: "default"},
+		generationSettings{ModelMode: "fast"},
+		agentSelection{ok: true, agent: agent.Agent{ModelMode: "default"}},
+	)
+
+	assert.Equal(t, "fast", generation.ModelMode)
+}
+
 func TestApplyGenerationParams_AllowsExplicitZeroTemperature(t *testing.T) {
 	t.Parallel()
 
@@ -353,7 +365,7 @@ func TestApplyGenerationParams_AllowsExplicitZeroTemperature(t *testing.T) {
 	seed := 0
 	params := llm.CompleteParams{}
 
-	applyGenerationParams(&params, generationSettings{Temperature: &temperature, Seed: &seed, ReasoningLevel: "low"})
+	applyGenerationParams(&params, generationSettings{Temperature: &temperature, Seed: &seed, ModelMode: "fast", ReasoningLevel: "low"})
 
 	if params.Temperature == nil || *params.Temperature != 0 {
 		require.Failf(t, "unexpected failure", "temperature = %v, want explicit zero", params.Temperature)
@@ -362,6 +374,8 @@ func TestApplyGenerationParams_AllowsExplicitZeroTemperature(t *testing.T) {
 	if params.Seed == nil || *params.Seed != 0 {
 		require.Failf(t, "unexpected failure", "seed = %v, want explicit zero", params.Seed)
 	}
+
+	assert.Equal(t, "fast", params.ModelMode)
 }
 
 func TestValidateRequestBudget_MaxInputTokens(t *testing.T) {

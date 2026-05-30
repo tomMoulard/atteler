@@ -155,6 +155,8 @@ func callLLMWithTools(
 		"agent", request.agent.Name,
 		"hasAgent", request.hasAgent,
 		"model", params.Model,
+		"model_mode", params.ModelMode,
+		"reasoning_level", params.ReasoningLevel,
 		"tools", toolNames,
 		"messages", len(params.Messages),
 	)

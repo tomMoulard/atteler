@@ -25,6 +25,7 @@ const (
 	diagnosticStatusPresent = "present"
 
 	fieldDefaultModel          = "default_model"
+	fieldDefaultModelMode      = "default_model_mode"
 	fieldDefaultReasoningLevel = "default_reasoning_level"
 	fieldRevision              = "revision"
 )
@@ -341,7 +342,7 @@ func inspectStateNode(path string, root *yaml.Node) []Diagnostic {
 		switch key {
 		case "version":
 			diagnostics = append(diagnostics, inspectStateVersion(path, value)...)
-		case fieldRevision, fieldDefaultModel, fieldDefaultReasoningLevel:
+		case fieldRevision, fieldDefaultModel, fieldDefaultModelMode, fieldDefaultReasoningLevel:
 			return
 		case "folders":
 			diagnostics = append(diagnostics, inspectStateFolders(path, value)...)
@@ -363,7 +364,7 @@ func inspectStateFolders(path string, value *yaml.Node) []Diagnostic {
 	forEachMappingField(value, func(_ string, folder *yaml.Node) {
 		forEachMappingField(folder, func(key string, _ *yaml.Node) {
 			switch key {
-			case fieldDefaultModel, fieldDefaultReasoningLevel:
+			case fieldDefaultModel, fieldDefaultModelMode, fieldDefaultReasoningLevel:
 				return
 			default:
 				diagnostics = append(diagnostics, unknownStateDiagnostic(path, "folders.*."+key))
@@ -787,6 +788,7 @@ func knownGenerationFields() map[string]bool {
 		"temperature":     true,
 		"top_p":           true,
 		"seed":            true,
+		"model_mode":      true,
 		"reasoning_level": true,
 		"max_tokens":      true,
 	}
@@ -892,6 +894,7 @@ func knownAgentFields() map[string]bool {
 		"routing_policy":    true,
 		"model":             true,
 		"mode":              true,
+		"model_mode":        true,
 		"reasoning_level":   true,
 		"description":       true,
 		"personality":       true,

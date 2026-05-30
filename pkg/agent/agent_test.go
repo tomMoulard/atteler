@@ -124,6 +124,7 @@ func TestAgent_CompleteParams(t *testing.T) {
 		Temperature:    &temp,
 		TopP:           &topP,
 		Seed:           &seed,
+		ModelMode:      "fast",
 		ReasoningLevel: "high",
 		MaxTokens:      100,
 	}
@@ -153,6 +154,8 @@ func TestAgent_CompleteParams(t *testing.T) {
 	if params.ReasoningLevel != "high" {
 		assert.Failf(t, "assertion failed", "ReasoningLevel = %q", params.ReasoningLevel)
 	}
+
+	assert.Equal(t, "fast", params.ModelMode)
 
 	if params.MaxTokens != 100 {
 		assert.Failf(t, "assertion failed", "MaxTokens = %d", params.MaxTokens)

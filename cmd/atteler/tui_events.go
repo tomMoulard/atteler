@@ -117,6 +117,8 @@ func saveModelPreference(
 	model string,
 	reasoningLevel string,
 	reasoningSelected bool,
+	modelMode string,
+	modeSelected bool,
 	scope appconfig.ModelScope,
 	runner *events.Runner,
 ) tea.Cmd {
@@ -130,6 +132,10 @@ func saveModelPreference(
 
 			if reasoningSelected {
 				state.SetReasoningLevel(scope, cwd, reasoningLevel)
+			}
+
+			if modeSelected {
+				state.SetModelMode(scope, cwd, modelMode)
 			}
 
 			return nil

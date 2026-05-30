@@ -81,6 +81,7 @@ type CompleteParams struct {
 	TopP           *float64
 	Seed           *int
 	Model          string
+	ModelMode      string
 	ReasoningLevel string
 	Messages       []Message
 	Stop           []string
@@ -455,7 +456,7 @@ func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Respon
 	retryCfg := r.retry
 	r.mu.RUnlock()
 
-	emitToolExecute(ctx, p, params.Model, adjustments)
+	emitToolExecute(ctx, p, params, adjustments)
 
 	startedAt := time.Now()
 
@@ -572,20 +573,40 @@ func (r *Registry) resolve(params CompleteParams) (Provider, CompleteParams, err
 	return p, params, nil
 }
 
-func emitToolExecute(ctx context.Context, provider Provider, model string, adjustments []completeParamAdjustment) {
+func emitToolExecute(ctx context.Context, provider Provider, params CompleteParams, adjustments []completeParamAdjustment) {
 	metadata := map[string]string{
 		"provider": provider.Name(),
 		"tool":     "llm.complete",
 	}
+	if level := normalizeReasoningLevel(params.ReasoningLevel); level != "" {
+		metadata["reasoning_level"] = level
+	}
+
+	if mode := normalizeModelMode(params.ModelMode); mode != "" {
+		metadata["model_mode"] = mode
+		if tier := openAIServiceTierForProviderModelMode(provider.Name(), mode); tier != "" {
+			metadata["service_tier"] = tier
+		}
+	}
+
 	if len(adjustments) > 0 {
 		metadata["option_adjustments"] = formatCompleteParamAdjustments(adjustments)
 	}
 
 	emitActivity(ctx, events.Event{
 		Type:     events.ToolExecute,
-		Model:    model,
+		Model:    params.Model,
 		Metadata: metadata,
 	})
+}
+
+func openAIServiceTierForProviderModelMode(providerName, mode string) string {
+	switch providerName {
+	case providerOpenAI, providerCodex:
+		return openAIServiceTierForModelMode(mode)
+	default:
+		return ""
+	}
 }
 
 func formatCompleteParamAdjustments(adjustments []completeParamAdjustment) string {

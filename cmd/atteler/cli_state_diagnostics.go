@@ -25,6 +25,7 @@ type stateDiagnosticsReport struct {
 	Version        int                   `yaml:"version"`
 	Revision       int64                 `yaml:"revision"`
 	Model          statePreferenceReport `yaml:"model"`
+	ModelMode      statePreferenceReport `yaml:"model_mode"`
 	ReasoningLevel statePreferenceReport `yaml:"reasoning_level"`
 	Providers      []stateProviderReport `yaml:"providers,omitempty"`
 }
@@ -78,6 +79,7 @@ func printStateDiagnostics(opts cliOptions, state appState) error {
 		Version:     stateDiagnosticVersion(persisted),
 		Revision:    persisted.Revision,
 		Model:       modelPreferenceReport(opts, state, persisted, state.cwd, sessionPrefs),
+		ModelMode:   modelModePreferenceReport(opts, state, persisted, state.cwd, sessionPrefs),
 		ReasoningLevel: reasoningPreferenceReport(
 			opts,
 			state,
@@ -145,6 +147,7 @@ func stateDiagnosticVersion(state appconfig.State) int {
 type stateSessionPreferences struct {
 	ID            string
 	DefaultModel  string
+	DefaultMode   string
 	DefaultReason string
 	DefaultAgent  string
 }
@@ -167,6 +170,7 @@ func stateDiagnosticSession(opts cliOptions, store *session.Store) (stateSession
 	return stateSessionPreferences{
 		ID:            loaded.ID,
 		DefaultModel:  strings.TrimSpace(loaded.DefaultModel),
+		DefaultMode:   strings.TrimSpace(loaded.DefaultModelMode),
 		DefaultReason: strings.TrimSpace(loaded.DefaultReasoningLevel),
 		DefaultAgent:  strings.TrimSpace(loaded.DefaultAgent),
 	}, nil
@@ -219,6 +223,65 @@ func modelPreferenceReport(
 		return statePreferenceReport{
 			Selected: model,
 			Source:   "config.default_model",
+			Scope:    "config",
+		}
+	}
+
+	return statePreferenceReport{Source: "none", Scope: "none"}
+}
+
+func modelModePreferenceReport(
+	opts cliOptions,
+	state appState,
+	persisted appconfig.State,
+	cwd string,
+	sessionPrefs stateSessionPreferences,
+) statePreferenceReport {
+	if mode := strings.TrimSpace(opts.modelMode); mode != "" {
+		return statePreferenceReport{
+			Selected: mode,
+			Source:   "flag.--model-mode",
+			Scope:    "flag",
+		}
+	}
+
+	if sessionPrefs.DefaultMode != "" {
+		return statePreferenceReport{
+			Selected: sessionPrefs.DefaultMode,
+			Source:   "session.default_model_mode",
+			Scope:    "session",
+		}
+	}
+
+	resolution := persisted.ResolveModelModePreference(cwd)
+	if resolution.Source != "" {
+		selected := resolution.Value
+		if selected == "" {
+			selected = llm.ModelModeDefault
+		}
+
+		return statePreferenceReport{
+			Selected: selected,
+			Source:   resolution.Source,
+			Scope:    string(resolution.Scope),
+		}
+	}
+
+	agentName := diagnosticAgentName(opts, sessionPrefs)
+	if agentName != "" && state.agentRegistry != nil {
+		if activeAgent, ok := state.agentRegistry.Get(agentName); ok && strings.TrimSpace(activeAgent.ModelMode) != "" {
+			return statePreferenceReport{
+				Selected: strings.TrimSpace(activeAgent.ModelMode),
+				Source:   "agent." + agentName + ".model_mode",
+				Scope:    "agent",
+			}
+		}
+	}
+
+	if mode := strings.TrimSpace(state.config.Generation.ModelMode); mode != "" {
+		return statePreferenceReport{
+			Selected: mode,
+			Source:   "config.generation.model_mode",
 			Scope:    "config",
 		}
 	}

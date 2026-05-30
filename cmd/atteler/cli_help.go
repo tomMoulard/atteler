@@ -355,7 +355,7 @@ func lookupFlagDomain(name string) (string, bool) {
 		name == "list-providers" || name == "explain-model-resolution" ||
 		name == commandOllamaStatus || name == commandOllamaStop ||
 		name == "temperature" || name == "top-p" ||
-		name == "max-tokens" || name == "seed" || name == "reasoning-level" ||
+		name == "max-tokens" || name == "seed" || name == "model-mode" || name == "reasoning-level" ||
 		name == "max-input-tokens" || strings.HasPrefix(name, "route-"):
 		return "providers", true
 	case name == "agent" || name == "list-agents" || name == "describe-agent" ||

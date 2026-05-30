@@ -39,13 +39,15 @@ func TestFZFInputAndSelection(t *testing.T) {
 		{provider: "claude-code", model: "claude-opus-4-6"},
 		{provider: "codex", model: "gpt-5.5"},
 		{provider: "codex", model: "gpt-5.5", reasoning: testReasoningXHigh},
+		{provider: "codex", model: "gpt-5.5", modelMode: llm.ModelModeFast, reasoning: llm.ReasoningLevelDefault},
 	}
 
 	input := fzfInput(items)
 	for _, want := range []string{
-		"claude-code/claude-opus-4-6\tclaude-code\tclaude-opus-4-6\t\n",
-		"codex/gpt-5.5\tcodex\tgpt-5.5\t\n",
-		"codex/gpt-5.5:xhigh\tcodex\tgpt-5.5\txhigh\n",
+		"claude-code/claude-opus-4-6\tclaude-code\tclaude-opus-4-6\t\t\n",
+		"codex/gpt-5.5\tcodex\tgpt-5.5\t\t\n",
+		"codex/gpt-5.5:xhigh\tcodex\tgpt-5.5\txhigh\t\n",
+		"codex/gpt-5.5:mode=fast:effort=default\tcodex\tgpt-5.5\tdefault\tfast\n",
 	} {
 		if !strings.Contains(input, want) {
 			require.Failf(t, "unexpected failure", "fzf input missing %q in:\n%s", want, input)
@@ -60,6 +62,10 @@ func TestFZFInputAndSelection(t *testing.T) {
 	if item.provider != "codex" || item.model != "gpt-5.5" || item.reasoning != testReasoningXHigh {
 		require.Failf(t, "unexpected failure", "selection = %+v, want codex/gpt-5.5:xhigh", item)
 	}
+
+	item, ok = parseFZFSelection("codex/gpt-5.5:mode=fast:effort=default\tcodex\tgpt-5.5\tdefault\tfast\n", items)
+	require.True(t, ok)
+	assert.Equal(t, llm.ModelModeFast, item.modelMode)
 
 	item, ok = parseFZFSelection("codex/gpt-5.5\tcodex\tgpt-5.5\n", []pickerItem{
 		{provider: "codex", model: "gpt-5.5", reasoning: llm.ReasoningLevelDefault},
@@ -621,16 +627,40 @@ func TestPickerItemsForProviderCatalogUsesBareConfiguredAlias(t *testing.T) {
 	t.Parallel()
 
 	items := pickerItemsForProviderCatalog("openai", llm.ProviderModelCatalog{
-		Models: []string{"gpt-4.1-mini", "fast"},
+		Models: []string{"gpt-5.4-nano", "gpt-5.5", "fast"},
 		ModelProvenance: map[string]llm.ModelProvenance{
 			"fast":         llm.ModelProvenanceConfiguredAlias,
-			"gpt-4.1-mini": llm.ModelProvenanceStatic,
+			"gpt-5.4-nano": llm.ModelProvenanceStatic,
+			"gpt-5.5":      llm.ModelProvenanceStatic,
 		},
 	})
 
-	assert.Contains(t, items, pickerItem{provider: "", model: "fast", reasoning: llm.ReasoningLevelDefault})
-	assert.Contains(t, items, pickerItem{provider: "openai", model: "gpt-4.1-mini", reasoning: llm.ReasoningLevelDefault})
-	assert.NotContains(t, items, pickerItem{provider: "openai", model: "fast", reasoning: llm.ReasoningLevelDefault})
+	assert.Contains(t, items, pickerItem{provider: "", model: "fast", modelMode: llm.ModelModeDefault, reasoning: llm.ReasoningLevelDefault})
+	assert.Contains(t, items, pickerItem{provider: "openai", model: "gpt-5.4-nano", modelMode: llm.ModelModeDefault, reasoning: llm.ReasoningLevelDefault})
+	assert.Contains(t, items, pickerItem{provider: "openai", model: "gpt-5.5", modelMode: llm.ModelModeFast, reasoning: llm.ReasoningLevelDefault})
+	assert.NotContains(t, items, pickerItem{provider: "openai", model: "fast", modelMode: llm.ModelModeDefault, reasoning: llm.ReasoningLevelDefault})
+	assert.NotContains(t, items, pickerItem{provider: "", model: "fast", modelMode: llm.ModelModeFast, reasoning: llm.ReasoningLevelDefault})
+	assert.NotContains(t, items, pickerItem{provider: "openai", model: "gpt-5.4-nano", modelMode: llm.ModelModeFast, reasoning: llm.ReasoningLevelDefault})
+}
+
+func TestPickerItemsForProviderCatalogWithRegistryUsesConfiguredAliasTargetModelModes(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-5.4-nano", "gpt-5.5"}})
+	require.NoError(t, registry.SetModelAlias("frontier", "openai", "gpt-5.5"))
+	require.NoError(t, registry.SetModelAlias("nano", "openai", "gpt-5.4-nano"))
+
+	catalog, err := registry.ProviderModelCatalog(context.Background(), "openai")
+	require.NoError(t, err)
+
+	items := pickerItemsForProviderCatalogWithRegistry(registry, "openai", catalog)
+
+	assert.Contains(t, items, pickerItem{provider: "", model: "frontier", modelMode: llm.ModelModeDefault, reasoning: llm.ReasoningLevelDefault})
+	assert.Contains(t, items, pickerItem{provider: "", model: "frontier", modelMode: llm.ModelModeFast, reasoning: llm.ReasoningLevelDefault})
+	assert.Contains(t, items, pickerItem{provider: "", model: "nano", modelMode: llm.ModelModeDefault, reasoning: llm.ReasoningLevelDefault})
+	assert.NotContains(t, items, pickerItem{provider: "", model: "nano", modelMode: llm.ModelModeFast, reasoning: llm.ReasoningLevelDefault})
+	assert.NotContains(t, items, pickerItem{provider: "openai", model: "frontier", modelMode: llm.ModelModeFast, reasoning: llm.ReasoningLevelDefault})
 }
 
 // expandReasoningItems expands each base picker item into one entry per picker
@@ -642,7 +672,7 @@ func expandReasoningItems(bases []pickerItem) []pickerItem {
 	out := make([]pickerItem, 0, len(bases)*len(levels))
 	for _, base := range bases {
 		for _, level := range levels {
-			out = append(out, pickerItem{provider: base.provider, model: base.model, reasoning: level})
+			out = append(out, pickerItem{provider: base.provider, model: base.model, modelMode: llm.ModelModeDefault, reasoning: level})
 		}
 	}
 
@@ -3435,14 +3465,18 @@ func TestRunInteractive_ReplacesHookLoggerBeforeSessionStart(t *testing.T) {
 		MaxOutputTokens: 50,
 	}
 	state := appState{
-		registry:        llm.NewRegistry(),
-		agentRegistry:   agent.NewRegistry(nil),
-		hookRunner:      events.NewRunnerWithLogger(nil, panicWriter{}),
-		eventObservers:  []events.Observer{observer},
-		sessionStore:    store,
-		sessionState:    session.New("gpt-test", nil),
-		contextOptions:  contextref.Options{Root: t.TempDir()},
-		selectedModel:   "gpt-test",
+		registry:       llm.NewRegistry(),
+		agentRegistry:  agent.NewRegistry(nil),
+		hookRunner:     events.NewRunnerWithLogger(nil, panicWriter{}),
+		eventObservers: []events.Observer{observer},
+		sessionStore:   store,
+		sessionState:   session.New("gpt-test", nil),
+		contextOptions: contextref.Options{Root: t.TempDir()},
+		selectedModel:  "gpt-test",
+		generationDefaults: generationSettings{
+			ModelMode:      llm.ModelModeFast,
+			ReasoningLevel: "high",
+		},
 		agentLoopBudget: budget,
 		cwd:             t.TempDir(),
 	}
@@ -3459,6 +3493,8 @@ func TestRunInteractive_ReplacesHookLoggerBeforeSessionStart(t *testing.T) {
 		var decoded llm.AgentLoopBudget
 		require.NoError(t, json.Unmarshal([]byte(event.Metadata["agent_loop_budget"]), &decoded))
 		assert.Equal(t, budget, decoded)
+		assert.Equal(t, llm.ModelModeFast, event.Metadata["model_mode"])
+		assert.Equal(t, "high", event.Metadata["reasoning_level"])
 	}
 }
 

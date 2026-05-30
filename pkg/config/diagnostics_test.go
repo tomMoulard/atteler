@@ -306,7 +306,17 @@ func TestInspectStatePath_ReportsStateMetadataWithoutPreferences(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "state.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("version: 1\nrevision: 7\ndefault_model: secret-model\n"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte(`version: 1
+revision: 7
+default_model: secret-model
+default_reasoning_level: high
+default_model_mode: fast
+folders:
+  /private/project:
+    default_model: folder-model
+    default_reasoning_level: xhigh
+    default_model_mode: default
+`), 0o600))
 
 	report := InspectStatePath(path)
 	assert.Equal(t, path, report.Path)

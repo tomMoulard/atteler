@@ -142,6 +142,7 @@ type openaiRequest struct {
 	TopP            *float64        `json:"top_p,omitempty"`
 	Seed            *int            `json:"seed,omitempty"`
 	Model           string          `json:"model"`
+	ServiceTier     string          `json:"service_tier,omitempty"`
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 	Messages        []openaiMessage `json:"messages"`
 	Stop            []string        `json:"stop,omitempty"`
@@ -287,6 +288,10 @@ func buildOpenAIRequest(params CompleteParams) (openaiRequest, error) {
 
 	if effort := openAIReasoningEffort(params.ReasoningLevel); effort != "" {
 		req.ReasoningEffort = effort
+	}
+
+	if tier := openAIServiceTierForModelMode(params.ModelMode); tier != "" {
+		req.ServiceTier = tier
 	}
 
 	for _, tool := range params.Tools {

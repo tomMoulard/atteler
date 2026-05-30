@@ -52,11 +52,12 @@ type hookMsg struct {
 }
 
 // pickerItem represents one selectable entry in the model picker. An empty
-// reasoning means "do not change the reasoning override"; otherwise the value
-// is one of llm.ReasoningPickerLevels (a mappable level or "default" to clear).
+// reasoning/modelMode means "do not change that override"; otherwise the value
+// is one of the picker levels/modes (a mappable value or "default" to clear).
 type pickerItem struct {
 	provider  string
 	model     string
+	modelMode string
 	reasoning string
 }
 
@@ -75,11 +76,20 @@ func (p pickerItem) modelID() string {
 // when set so each effort variant has a unique row in the picker.
 func (p pickerItem) label() string {
 	id := p.modelID()
-	if p.reasoning == "" {
+	if p.reasoning == "" && pickerItemDisplayModelMode(p.modelMode) == "" {
 		return id
 	}
 
-	return id + ":" + p.reasoning
+	if pickerItemDisplayModelMode(p.modelMode) == "" {
+		return id + ":" + p.reasoning
+	}
+
+	parts := []string{id, "mode=" + pickerItemDisplayModelMode(p.modelMode)}
+	if p.reasoning != "" {
+		parts = append(parts, "effort="+p.reasoning)
+	}
+
+	return strings.Join(parts, ":")
 }
 
 func (m model) openModelPicker() (tea.Model, tea.Cmd, bool) {
@@ -199,9 +209,18 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 		m.sessionState.DefaultReasoningLevel = strings.TrimSpace(m.generationOverrides.ReasoningLevel)
 	}
 
-	suffix := ""
-	if item.reasoning != "" {
-		suffix = dimStyle.Render(":") + pickerSelectedStyle.Render(item.reasoning)
+	modeSelected := item.modelMode != ""
+	switch item.modelMode {
+	case "":
+		// No mode information attached — leave the override unchanged.
+	case llm.ModelModeDefault:
+		m.generationOverrides.ModelMode = llm.ModelModeDefault
+	default:
+		m.generationOverrides.ModelMode = item.modelMode
+	}
+
+	if modeSelected {
+		m.sessionState.DefaultModelMode = strings.TrimSpace(m.generationOverrides.ModelMode)
 	}
 
 	persistedReasoningLevel := m.sessionState.DefaultReasoningLevel
@@ -209,10 +228,15 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 		persistedReasoningLevel = llm.ReasoningLevelDefault
 	}
 
+	persistedModelMode := m.sessionState.DefaultModelMode
+	if item.modelMode == llm.ModelModeDefault {
+		persistedModelMode = llm.ModelModeDefault
+	}
+
 	cmds := []tea.Cmd{tea.Println(
 		dimStyle.Render("Model set to ") +
 			pickerSelectedStyle.Render(pickerSelectionLabel(item)) +
-			suffix +
+			modelSelectionSuffix(item) +
 			dimStyle.Render(" ("+modelScopeLabel(scope)+")"),
 	)}
 	if scope != appconfig.ModelScopeSession {
@@ -226,6 +250,8 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 			m.selectedModel,
 			persistedReasoningLevel,
 			reasoningSelected,
+			persistedModelMode,
+			modeSelected,
 			scope,
 			m.hookRunner,
 		)()
@@ -286,10 +312,7 @@ func (m model) viewPicker() string {
 			style = pickerSelectedStyle
 		}
 
-		row := item.model
-		if item.reasoning != "" {
-			row += ":" + item.reasoning
-		}
+		row := pickerRowLabel(item)
 
 		b.WriteString(cursor + style.Render(row) + "\n")
 	}
@@ -321,7 +344,7 @@ func loadModels(ctx context.Context, reg *llm.Registry, providers []string, fetc
 				return modelsLoadedMsg{provider: provider, fetchID: fetchID, err: err}
 			}
 
-			items := pickerItemsForProviderCatalog(provider, catalog)
+			items := pickerItemsForProviderCatalogWithRegistry(reg, provider, catalog)
 			if len(items) == 0 {
 				return modelsLoadedMsg{provider: provider, fetchID: fetchID, err: fmt.Errorf("no models available from %s", provider)}
 			}
@@ -346,7 +369,7 @@ func loadModelsForFZF(ctx context.Context, reg *llm.Registry, fetchID int) tea.C
 				continue
 			}
 
-			items = append(items, pickerItemsForProviderCatalog(provider, catalog)...)
+			items = append(items, pickerItemsForProviderCatalogWithRegistry(reg, provider, catalog)...)
 		}
 
 		if len(items) == 0 {
@@ -376,6 +399,27 @@ func fallbackModelPickerItems(reg *llm.Registry) []pickerItem {
 }
 
 func pickerItemsForProviderCatalog(provider string, catalog llm.ProviderModelCatalog) []pickerItem {
+	return pickerItemsForProviderCatalogWithModeResolver(provider, catalog, llm.ModelModePickerModes)
+}
+
+func pickerItemsForProviderCatalogWithRegistry(reg *llm.Registry, provider string, catalog llm.ProviderModelCatalog) []pickerItem {
+	return pickerItemsForProviderCatalogWithModeResolver(provider, catalog, func(itemProvider, modelName string) []string {
+		if catalog.ModelProvenance[modelName] == llm.ModelProvenanceConfiguredAlias && reg != nil {
+			diagnostic := reg.ExplainModelResolution(modelName)
+			if diagnostic.Resolved() {
+				return llm.ModelModePickerModes(diagnostic.ProviderName, diagnostic.ProviderModel)
+			}
+		}
+
+		return llm.ModelModePickerModes(itemProvider, modelName)
+	})
+}
+
+func pickerItemsForProviderCatalogWithModeResolver(
+	provider string,
+	catalog llm.ProviderModelCatalog,
+	modesFor func(itemProvider, modelName string) []string,
+) []pickerItem {
 	models := append([]string(nil), catalog.Models...)
 	sort.Strings(models)
 
@@ -392,8 +436,10 @@ func pickerItemsForProviderCatalog(provider string, catalog llm.ProviderModelCat
 			itemProvider = ""
 		}
 
-		for _, level := range levels {
-			items = append(items, pickerItem{provider: itemProvider, model: modelName, reasoning: level})
+		for _, mode := range modesFor(itemProvider, modelName) {
+			for _, level := range levels {
+				items = append(items, pickerItem{provider: itemProvider, model: modelName, modelMode: mode, reasoning: level})
+			}
 		}
 	}
 
@@ -412,8 +458,10 @@ func pickerItemsForProvider(provider string, models []string) []pickerItem {
 			continue
 		}
 
-		for _, level := range levels {
-			items = append(items, pickerItem{provider: provider, model: modelName, reasoning: level})
+		for _, mode := range llm.ModelModePickerModes(provider, modelName) {
+			for _, level := range levels {
+				items = append(items, pickerItem{provider: provider, model: modelName, modelMode: mode, reasoning: level})
+			}
 		}
 	}
 
@@ -441,6 +489,10 @@ func sortPickerItems(items []pickerItem) []pickerItem {
 
 		if items[i].model != items[j].model {
 			return items[i].model < items[j].model
+		}
+
+		if llm.ModelModeRank(items[i].modelMode) != llm.ModelModeRank(items[j].modelMode) {
+			return llm.ModelModeRank(items[i].modelMode) < llm.ModelModeRank(items[j].modelMode)
 		}
 
 		return llm.ReasoningEffortRank(items[i].reasoning) < llm.ReasoningEffortRank(items[j].reasoning)
@@ -510,6 +562,8 @@ func fzfInput(items []pickerItem) string {
 		b.WriteString(item.model)
 		b.WriteString("\t")
 		b.WriteString(item.reasoning)
+		b.WriteString("\t")
+		b.WriteString(item.modelMode)
 		b.WriteString("\n")
 	}
 
@@ -540,7 +594,12 @@ func parseFZFSelection(selection string, items []pickerItem) (pickerItem, bool) 
 			reasoning = strings.TrimSpace(fields[3])
 		}
 
-		if item, ok := findPickerItemByColumns(items, provider, model, reasoning); ok {
+		modelMode := ""
+		if len(fields) >= 5 {
+			modelMode = strings.TrimSpace(fields[4])
+		}
+
+		if item, ok := findPickerItemByColumns(items, provider, model, reasoning, modelMode); ok {
 			return item, true
 		}
 	}
@@ -548,28 +607,113 @@ func parseFZFSelection(selection string, items []pickerItem) (pickerItem, bool) 
 	return pickerItem{}, false
 }
 
-func findPickerItemByColumns(items []pickerItem, provider, model, reasoning string) (pickerItem, bool) {
-	for _, item := range items {
-		if item.provider == provider && item.model == model && item.reasoning == reasoning {
-			return item, true
-		}
+func findPickerItemByColumns(items []pickerItem, provider, model, reasoning, modelMode string) (pickerItem, bool) {
+	search := pickerItemColumnSearch{
+		provider:  provider,
+		model:     model,
+		reasoning: reasoning,
+		modelMode: modelMode,
 	}
 
-	if reasoning != "" {
+	if item, ok := findPickerItem(items, search.exact); ok {
+		return item, true
+	}
+
+	if modelMode != "" {
 		return pickerItem{}, false
 	}
 
-	for _, item := range items {
-		if item.provider == provider && item.model == model && item.reasoning == llm.ReasoningLevelDefault {
-			return item, true
-		}
+	if reasoning != "" {
+		return findPickerItem(items, search.defaultMode)
 	}
 
+	if item, ok := findPickerItem(items, search.defaultReasoning); ok {
+		return item, true
+	}
+
+	return findPickerItem(items, search.legacyNoReasoning)
+}
+
+func findPickerItem(items []pickerItem, matches func(pickerItem) bool) (pickerItem, bool) {
 	for _, item := range items {
-		if item.provider == provider && item.model == model && item.reasoning == "" {
+		if matches(item) {
 			return item, true
 		}
 	}
 
 	return pickerItem{}, false
+}
+
+type pickerItemColumnSearch struct {
+	provider  string
+	model     string
+	reasoning string
+	modelMode string
+}
+
+func (s pickerItemColumnSearch) exact(item pickerItem) bool {
+	return s.sameModel(item) && item.reasoning == s.reasoning && item.modelMode == s.modelMode
+}
+
+func (s pickerItemColumnSearch) defaultMode(item pickerItem) bool {
+	return s.sameModel(item) && item.reasoning == s.reasoning && item.modelMode == llm.ModelModeDefault
+}
+
+func (s pickerItemColumnSearch) defaultReasoning(item pickerItem) bool {
+	if !s.sameModel(item) || item.reasoning != llm.ReasoningLevelDefault {
+		return false
+	}
+
+	return item.modelMode == llm.ModelModeDefault || item.modelMode == ""
+}
+
+func (s pickerItemColumnSearch) legacyNoReasoning(item pickerItem) bool {
+	return s.sameModel(item) && item.reasoning == ""
+}
+
+func (s pickerItemColumnSearch) sameModel(item pickerItem) bool {
+	return item.provider == s.provider && item.model == s.model
+}
+
+func pickerItemDisplayModelMode(mode string) string {
+	if mode == llm.ModelModeDefault {
+		return ""
+	}
+
+	return strings.TrimSpace(mode)
+}
+
+func pickerRowLabel(item pickerItem) string {
+	row := item.model
+	if mode := pickerItemDisplayModelMode(item.modelMode); mode != "" {
+		row += ":mode=" + mode
+		if item.reasoning != "" {
+			row += ":effort=" + item.reasoning
+		}
+
+		return row
+	}
+
+	if item.reasoning != "" {
+		row += ":" + item.reasoning
+	}
+
+	return row
+}
+
+func modelSelectionSuffix(item pickerItem) string {
+	parts := make([]string, 0, 2)
+	if mode := pickerItemDisplayModelMode(item.modelMode); mode != "" {
+		parts = append(parts, "mode="+mode)
+	}
+
+	if item.reasoning != "" {
+		parts = append(parts, "effort="+item.reasoning)
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return dimStyle.Render(":") + pickerSelectedStyle.Render(strings.Join(parts, ":"))
 }

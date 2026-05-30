@@ -40,6 +40,14 @@ func TestWriteConfigExplanation_IncludesProviderModelAndRuntimeProvenance(t *tes
 				Value:     "medium",
 			}},
 		},
+		"generation.model_mode": {
+			Chain: []appconfig.OriginEvent{{
+				Kind:      appconfig.OriginProjectFile,
+				Operation: appconfig.OriginSet,
+				Source:    ".atteler/config.yaml",
+				Value:     "default",
+			}},
+		},
 		"providers.openai.base_url": {
 			Chain: []appconfig.OriginEvent{{
 				Kind:      appconfig.OriginProjectFile,
@@ -54,13 +62,14 @@ func TestWriteConfigExplanation_IncludesProviderModelAndRuntimeProvenance(t *tes
 		DefaultModel:    "config-model",
 		Generation: appconfig.GenerationConfig{
 			ReasoningLevel: "medium",
+			ModelMode:      "default",
 		},
 	}
 
 	addRuntimeConfigOrigins(
 		origins,
 		cfg,
-		cliOptions{model: "cli-model", reasoningLevel: "high"},
+		cliOptions{model: "cli-model", modelMode: "fast", reasoningLevel: "high"},
 		appconfig.State{DefaultReasoningLevel: "low"},
 		"/repo",
 		"state.yaml",
@@ -78,7 +87,9 @@ func TestWriteConfigExplanation_IncludesProviderModelAndRuntimeProvenance(t *tes
 	assert.Contains(t, got, "--model [cli-flag]")
 	assert.Contains(t, got, "runtime.selected_provider: openai")
 	assert.Contains(t, got, "runtime.generation.reasoning_level: high")
+	assert.Contains(t, got, "runtime.generation.model_mode: fast")
 	assert.Contains(t, got, "state.yaml global [state-override]")
+	assert.Contains(t, got, "--model-mode [cli-flag]")
 	assert.Contains(t, got, "--reasoning-level [cli-flag]")
 }
 

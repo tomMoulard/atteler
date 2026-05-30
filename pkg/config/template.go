@@ -43,12 +43,13 @@ func starterTemplateConfig() Config {
 		DefaultModel:    templateDefaultModel,
 		FallbackModels:  []string{templateFallbackModel},
 		ModelAliases: map[string]string{
-			"fast": templateDefaultProvider + "/" + templateFallbackModel,
+			"mini": templateDefaultProvider + "/" + templateFallbackModel,
 		},
 		Generation: GenerationConfig{
 			Temperature:    &temperature,
 			TopP:           &topP,
 			Seed:           &seed,
+			ModelMode:      "default",
 			ReasoningLevel: "medium",
 			MaxTokens:      2048,
 		},

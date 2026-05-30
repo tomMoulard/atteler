@@ -256,6 +256,7 @@ type codexResponsesRequest struct {
 	Reasoning    *codexRequestReasoning `json:"reasoning,omitempty"`
 	Tools        []codexTool            `json:"tools,omitempty"`
 	Model        string                 `json:"model"`
+	ServiceTier  string                 `json:"service_tier,omitempty"`
 	Instructions string                 `json:"instructions,omitempty"`
 	Input        []codexInputItem       `json:"input"`
 	Stream       bool                   `json:"stream"`
@@ -360,6 +361,14 @@ func (c *CodexProvider) buildResponsesBody(ctx context.Context, params CompleteP
 		"command":  "codex.responses",
 		"provider": providerCodex,
 	}
+
+	if mode := normalizeModelMode(params.ModelMode); mode != "" {
+		metadata["model_mode"] = mode
+		if tier := openAIServiceTierForModelMode(mode); tier != "" {
+			metadata["service_tier"] = tier
+		}
+	}
+
 	if len(adjustments) > 0 {
 		metadata["option_adjustments"] = formatCompleteParamAdjustments(adjustments)
 	}
@@ -399,6 +408,10 @@ func buildCodexResponsesRequest(params CompleteParams) (codexResponsesRequest, e
 
 	if effort := openAIReasoningEffort(params.ReasoningLevel); effort != "" {
 		req.Reasoning = &codexRequestReasoning{Effort: effort}
+	}
+
+	if tier := openAIServiceTierForModelMode(params.ModelMode); tier != "" {
+		req.ServiceTier = tier
 	}
 
 	return req, nil

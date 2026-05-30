@@ -205,6 +205,23 @@ func agentLoopBudgetEventMetadata(budget llm.AgentLoopBudget) map[string]string 
 	}
 }
 
+func agentLoopBudgetModelSettingsEventMetadata(budget llm.AgentLoopBudget, reasoningLevel, modelMode string) map[string]string {
+	metadata := agentLoopBudgetEventMetadata(budget)
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+
+	if reasoningLevel = strings.TrimSpace(reasoningLevel); reasoningLevel != "" {
+		metadata["reasoning_level"] = reasoningLevel
+	}
+
+	if modelMode = strings.TrimSpace(modelMode); modelMode != "" {
+		metadata["model_mode"] = modelMode
+	}
+
+	return metadata
+}
+
 func agentLoopCostEstimatorForBudget(
 	reg *llm.Registry,
 	model string,

@@ -25,6 +25,7 @@ type Agent struct {
 	Name            string
 	Model           string
 	Mode            string
+	ModelMode       string
 	Description     string
 	Personality     string
 	SystemPrompt    string
@@ -59,6 +60,7 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 			Name:            name,
 			Model:           cfg.Model,
 			Mode:            strings.TrimSpace(cfg.Mode),
+			ModelMode:       strings.TrimSpace(cfg.ModelMode),
 			ToolPermissions: cloneToolPermissions(cfg.ToolPermissions),
 			RoutingPolicy:   routingPolicyFromConfig(cfg.RoutingPolicy),
 			Description:     strings.TrimSpace(cfg.Description),
@@ -232,6 +234,7 @@ func (a Agent) CompleteParams(model string, messages []llm.Message) llm.Complete
 		Temperature:    a.Temperature,
 		TopP:           a.TopP,
 		Seed:           a.Seed,
+		ModelMode:      a.ModelMode,
 		ReasoningLevel: a.ReasoningLevel,
 	}
 

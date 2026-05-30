@@ -116,6 +116,19 @@ func TestCodexProvider_Complete(t *testing.T) {
 	assert.Equal(t, codexOriginatorHeader, gotHeaders.Get("originator"))
 }
 
+func TestBuildCodexResponsesRequest_ModelModeFastUsesPriorityServiceTier(t *testing.T) {
+	t.Parallel()
+
+	req, err := buildCodexResponsesRequest(CompleteParams{
+		Model:     "gpt-5.3-codex",
+		ModelMode: ModelModeFast,
+		Messages:  []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, modelModePriority, req.ServiceTier)
+}
+
 func TestCodexProvider_CompleteOmitsUnsupportedTemperature(t *testing.T) {
 	t.Parallel()
 
@@ -149,6 +162,7 @@ func TestCodexProvider_CompleteOmitsUnsupportedTemperature(t *testing.T) {
 	temperature := 0.2
 	resp, err := p.Complete(ctx, CompleteParams{
 		Model:       "gpt-5.5",
+		ModelMode:   ModelModeFast,
 		Temperature: &temperature,
 		Messages:    []Message{{Role: RoleUser, Content: "say ok"}},
 	})
@@ -158,8 +172,11 @@ func TestCodexProvider_CompleteOmitsUnsupportedTemperature(t *testing.T) {
 	assert.NotContains(t, string(gotBody), "temperature")
 	assert.Contains(t, log.String(), "option_adjustments")
 	assert.Contains(t, log.String(), "Temperature omitted")
+	assert.Contains(t, log.String(), "model_mode=fast")
+	assert.Contains(t, log.String(), "service_tier=priority")
 	assert.JSONEq(t, `{
 		"model": "gpt-5.5",
+		"service_tier": "priority",
 		"instructions": "You are a helpful assistant.",
 		"input": [
 			{

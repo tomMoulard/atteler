@@ -121,21 +121,75 @@ func TestSanitizeEventForHook_CommandExecuteKeepsSafeMetadataOnly(t *testing.T) 
 	got := sanitizeEventForHook(Event{
 		Type: CommandExecute,
 		Metadata: map[string]string{
-			"provider": "codex",
-			"source":   "llm_tool",
-			"count":    "3",
-			"waves":    "2",
-			"command":  "cat ~/.env",
-			"cwd":      "/Users/example/project",
-			"token":    "sk-metasecret1234567890",
+			"provider":     "codex",
+			"source":       "llm_tool",
+			"model_mode":   "fast",
+			"service_tier": "priority",
+			"count":        "3",
+			"waves":        "2",
+			"command":      "cat ~/.env",
+			"cwd":          "/Users/example/project",
+			"token":        "sk-metasecret1234567890",
 		},
 	}, PayloadMetadata)
 
 	assert.Equal(t, map[string]string{
-		"count":    "3",
-		"provider": "codex",
-		"source":   "llm_tool",
-		"waves":    "2",
+		"count":        "3",
+		"model_mode":   "fast",
+		"provider":     "codex",
+		"service_tier": "priority",
+		"source":       "llm_tool",
+		"waves":        "2",
+	}, got.Metadata)
+	assert.True(t, got.Redacted)
+}
+
+func TestSanitizeEventForHook_LifecycleKeepsModelSettingsMetadata(t *testing.T) {
+	t.Parallel()
+
+	for _, eventType := range []string{SessionStart, SessionEnd} {
+		got := sanitizeEventForHook(Event{
+			Type: eventType,
+			Metadata: map[string]string{
+				"agent_loop_budget": `{"max_model_calls":2}`,
+				"model_mode":        "fast",
+				"reasoning_level":   "high",
+				"prompt":            "secret=sk-metasecret1234567890",
+			},
+		}, PayloadMetadata)
+
+		assert.Equal(t, map[string]string{
+			"agent_loop_budget": `{"max_model_calls":2}`,
+			"model_mode":        "fast",
+			"reasoning_level":   "high",
+		}, got.Metadata)
+		assert.True(t, got.Redacted)
+	}
+}
+
+func TestSanitizeEventForHook_ToolExecuteKeepsModelSettingsMetadata(t *testing.T) {
+	t.Parallel()
+
+	got := sanitizeEventForHook(Event{
+		Type: ToolExecute,
+		Metadata: map[string]string{
+			"provider":           "openai",
+			"tool":               "llm.complete",
+			"model_mode":         "fast",
+			"reasoning_level":    "high",
+			"service_tier":       "priority",
+			"option_adjustments": "Temperature omitted",
+			"prompt":             "secret=sk-metasecret1234567890",
+		},
+	}, PayloadMetadata)
+
+	assert.Equal(t, map[string]string{
+		"provider":           "openai",
+		"tool":               "llm.complete",
+		"model_mode":         "fast",
+		"reasoning_level":    "high",
+		"service_tier":       "priority",
+		"option_adjustments": "Temperature omitted",
 	}, got.Metadata)
 	assert.True(t, got.Redacted)
 }

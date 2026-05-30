@@ -72,6 +72,7 @@ func runInteractive(ctx context.Context, state appState) error {
 	// runner that loadAppState set up with a logger-less one. Utility commands
 	// and one-shot mode keep the stderr logger.
 	state.hookRunner = events.NewRunnerWithLoggerAndObservers(state.hookConfig, nil, state.eventObservers...)
+	sessionGeneration := appStateSessionGeneration(state)
 
 	emitHookWarning(ctx, state.hookRunner, events.Event{
 		Type:        events.SessionStart,
@@ -79,7 +80,11 @@ func runInteractive(ctx context.Context, state appState) error {
 		SessionPath: state.sessionStore.Path(state.sessionState.ID),
 		Agent:       state.selectedAgent,
 		Model:       state.selectedModel,
-		Metadata:    agentLoopBudgetEventMetadata(state.agentLoopBudget),
+		Metadata: agentLoopBudgetModelSettingsEventMetadata(
+			state.agentLoopBudget,
+			sessionGeneration.ReasoningLevel,
+			sessionGeneration.ModelMode,
+		),
 	})
 
 	finalModel, err := runInteractiveProgram(initialModel(
@@ -159,12 +164,28 @@ func runInteractive(ctx context.Context, state appState) error {
 		SessionPath: state.sessionStore.Path(finalSession.ID),
 		Agent:       finalSession.DefaultAgent,
 		Model:       finalSession.DefaultModel,
-		Metadata:    agentLoopBudgetEventMetadata(finalSession.AgentLoopBudget),
+		Metadata: agentLoopBudgetModelSettingsEventMetadata(
+			finalSession.AgentLoopBudget,
+			firstNonEmpty(finalSession.DefaultReasoningLevel, sessionGeneration.ReasoningLevel),
+			firstNonEmpty(finalSession.DefaultModelMode, sessionGeneration.ModelMode),
+		),
 	})
 
 	finalizeWorktree(ctx, &state)
 
 	return nil
+}
+
+func appStateSessionGeneration(state appState) generationSettings {
+	var activeAgent agentSelection
+
+	if state.selectedAgent != "" && state.agentRegistry != nil {
+		if configuredAgent, ok := state.agentRegistry.Get(state.selectedAgent); ok {
+			activeAgent = agentSelection{name: state.selectedAgent, agent: configuredAgent, ok: true}
+		}
+	}
+
+	return generationForRequest(state.generationDefaults, state.generationOverrides, activeAgent)
 }
 
 func printStartupPromptSuggestionStatus(state appState) {

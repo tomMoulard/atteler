@@ -61,6 +61,7 @@ type runOnceResult struct {
 	HeadlessID              string              `json:"headless_id,omitempty"`
 	Agent                   string              `json:"agent,omitempty"`
 	Model                   string              `json:"model,omitempty"`
+	ModelMode               string              `json:"model_mode,omitempty"`
 	Content                 string              `json:"content"`
 	TokenUsage              tokenUsage          `json:"token_usage"`
 }
@@ -90,6 +91,7 @@ type responseRecordRequest struct {
 	TopP           *float64      `json:"top_p,omitempty"`
 	Seed           *int          `json:"seed,omitempty"`
 	Model          string        `json:"model,omitempty"`
+	ModelMode      string        `json:"model_mode,omitempty"`
 	FallbackModels []string      `json:"fallback_models,omitempty"`
 	Messages       []llm.Message `json:"messages"`
 	MaxTokens      int           `json:"max_tokens,omitempty"`
@@ -117,6 +119,7 @@ func saveRecordedResponse(path string, params llm.CompleteParams, fallbackModels
 		RecordedAt: time.Now().UTC(),
 		Request: responseRecordRequest{
 			Model:          params.Model,
+			ModelMode:      params.ModelMode,
 			Messages:       append([]llm.Message(nil), params.Messages...),
 			FallbackModels: append([]string(nil), fallbackModels...),
 			MaxTokens:      params.MaxTokens,
@@ -269,7 +272,16 @@ func runOnceWithOptions(
 ) error {
 	outputFormat, err := normalizeOutputFormat(executionOptions.OutputFormat)
 	if err != nil {
-		recordHeadlessPreflightFailure(store, executionOptions, sessionState, prompt, selectedModel, selectedAgent, err)
+		recordHeadlessPreflightFailure(
+			store,
+			executionOptions,
+			sessionState,
+			prompt,
+			selectedModel,
+			headlessPreflightModelMode(generationDefaults, generationOverrides, selectedAgent, agents),
+			selectedAgent,
+			err,
+		)
 
 		return err
 	}
@@ -293,7 +305,12 @@ func runOnceWithOptions(
 			return handleRunOncePrepareError(ctx, hooks, reg, store, sessionState, prepared, referenceManifest, maxInputTokens, executionOptions, err)
 		}
 
-		recordHeadlessPreflightFailure(store, executionOptions, sessionState, prompt, selectedModel, selectedAgent, err)
+		modelMode := prepared.generation.ModelMode
+		if modelMode == "" {
+			modelMode = headlessPreflightModelMode(generationDefaults, generationOverrides, selectedAgent, agents)
+		}
+
+		recordHeadlessPreflightFailure(store, executionOptions, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
 		emitRouteDecisionWarning(
 			ctx,
 			hooks,
@@ -317,7 +334,11 @@ func runOnceWithOptions(
 		SessionPath: store.Path(sessionState.ID),
 		Agent:       prepared.activeAgent.name,
 		Model:       sessionState.DefaultModel,
-		Metadata:    agentLoopBudgetEventMetadata(executionOptions.AgentLoopBudget),
+		Metadata: agentLoopBudgetModelSettingsEventMetadata(
+			executionOptions.AgentLoopBudget,
+			prepared.generation.ReasoningLevel,
+			prepared.generation.ModelMode,
+		),
 	})
 	defer emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.SessionEnd,
@@ -325,7 +346,11 @@ func runOnceWithOptions(
 		SessionPath: store.Path(sessionState.ID),
 		Agent:       prepared.activeAgent.name,
 		Model:       sessionState.DefaultModel,
-		Metadata:    agentLoopBudgetEventMetadata(executionOptions.AgentLoopBudget),
+		Metadata: agentLoopBudgetModelSettingsEventMetadata(
+			executionOptions.AgentLoopBudget,
+			prepared.generation.ReasoningLevel,
+			prepared.generation.ModelMode,
+		),
 	})
 
 	params := llm.CompleteParams{
@@ -405,6 +430,7 @@ func runOnceWithOptions(
 		sessionState,
 		prepared.prompt,
 		prepared.requestModel,
+		params.ModelMode,
 		prepared.activeAgent.name,
 		manifestEvent.Metadata["context_manifest"],
 	)
@@ -438,6 +464,8 @@ func runOnceWithOptions(
 	slog.Debug("one-shot LLM request",
 		"agent", prepared.activeAgent.name,
 		"model", params.Model,
+		"model_mode", params.ModelMode,
+		"reasoning_level", params.ReasoningLevel,
 		"tools", len(params.Tools),
 		"messages", len(params.Messages),
 	)
@@ -485,6 +513,7 @@ func runOnceWithOptions(
 		store,
 		&sessionState,
 		prepared.activeAgent.name,
+		params.ModelMode,
 		resp,
 		checkpointPath,
 		outputFormat,
@@ -501,6 +530,7 @@ func finishRunOnceSuccess(
 	store *session.Store,
 	sessionState *session.Session,
 	agentName string,
+	modelMode string,
 	resp *llm.Response,
 	checkpointPath string,
 	outputFormat string,
@@ -538,6 +568,7 @@ func finishRunOnceSuccess(
 		AgentLoopBudget:         executionOptions.AgentLoopBudget,
 		Agent:                   agentName,
 		Model:                   resp.Model,
+		ModelMode:               modelMode,
 		Content:                 resp.Content,
 		TokenUsage:              usage,
 	}
@@ -566,6 +597,27 @@ func applyRunOnceSessionDefaults(sessionState *session.Session, prepared runOnce
 	if level := strings.TrimSpace(generationOverrides.ReasoningLevel); level != "" {
 		sessionState.DefaultReasoningLevel = level
 	}
+
+	if mode := strings.TrimSpace(generationOverrides.ModelMode); mode != "" {
+		sessionState.DefaultModelMode = mode
+	}
+}
+
+func headlessPreflightModelMode(
+	generationDefaults generationSettings,
+	generationOverrides generationSettings,
+	selectedAgent string,
+	agents *agent.Registry,
+) string {
+	var activeAgent agentSelection
+
+	if selectedAgent != "" && agents != nil {
+		if configuredAgent, ok := agents.Get(selectedAgent); ok {
+			activeAgent = agentSelection{name: selectedAgent, agent: configuredAgent, ok: true}
+		}
+	}
+
+	return generationForRequest(generationDefaults, generationOverrides, activeAgent).ModelMode
 }
 
 func handleRunOncePrepareError(
@@ -593,6 +645,7 @@ func handleRunOncePrepareError(
 		sessionState,
 		prepared.prompt,
 		prepared.requestModel,
+		prepared.generation.ModelMode,
 		prepared.activeAgent.name,
 		manifestEvent.Metadata["context_manifest"],
 	)
@@ -852,6 +905,7 @@ func recordHeadlessPreflightFailure(
 	sessionState session.Session,
 	prompt string,
 	modelName string,
+	modelMode string,
 	agentName string,
 	failure error,
 ) {
@@ -859,7 +913,7 @@ func recordHeadlessPreflightFailure(
 		return
 	}
 
-	run, err := startHeadlessRun(store, options, sessionState, prompt, modelName, agentName)
+	run, err := startHeadlessRun(store, options, sessionState, prompt, modelName, modelMode, agentName)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 
@@ -1009,6 +1063,7 @@ func startHeadlessRun(
 	sessionState session.Session,
 	prompt string,
 	modelName string,
+	modelMode string,
 	agentName string,
 	contextManifestJSON ...string,
 ) (*session.HeadlessRun, error) {
@@ -1032,6 +1087,7 @@ func startHeadlessRun(
 		SessionPath:     store.Path(sessionState.ID),
 		Prompt:          strings.TrimSpace(prompt),
 		Model:           modelName,
+		ModelMode:       strings.TrimSpace(modelMode),
 		AgentLoopBudget: options.AgentLoopBudget,
 		Agent:           agentName,
 		StartedCommand:  strings.Join(os.Args, " "),
