@@ -1689,9 +1689,18 @@ Local development uses the Makefile as the main build surface:
 - `make release-check` validates `.goreleaser.yaml`.
 - `make release-snapshot` builds local GoReleaser artifacts in `dist/` without publishing.
 
-GitHub Actions runs CI on pull requests and branch pushes. Pushing a semantic
-version tag such as `v0.1.0` triggers the release workflow and GoReleaser
-packaging.
+GitHub Actions and opt-in local checks run on these surfaces:
+
+| Surface | Checks |
+| --- | --- |
+| Pull requests targeting any branch | On open, reopen, commit update, or ready-for-review events, the `CI` workflow runs the stable check `Generate, lint, test, build, and package snapshot`: `go mod tidy`, `make generate`, committed-file diff verification, `make lint`, the context-convention scan, `make test` across all packages including non-live `test/e2e`, `make build`, GoReleaser config validation, and a snapshot package build. Fork PRs run this same PR-safe job with read-only repository permissions and no repository secrets. |
+| Branch pushes to any branch | The same `CI` workflow and stable check run for pushed branch refs. |
+| Tag pushes | The `Release` workflow runs `Build and publish release`: generation, committed-file diff verification, lint, `make test`, and GoReleaser publishing with `GITHUB_TOKEN`. The `CI` workflow is branch/PR scoped and does not run separately on tags. |
+| Local E2E shortcuts and live-provider checks | Non-live black-box CLI tests in `test/e2e` run through `make test` in CI and release jobs; `make e2e` is a local shortcut for just those tests. There is currently no manual GitHub Actions workflow for live-provider checks. `make e2e-live` requires `ATTELER_E2E_LIVE=1` and provider credentials, so it is intentionally not run for PRs or forked contributions. |
+
+Use the stable `CI / Generate, lint, test, build, and package snapshot` status
+check for branch protection.
+Pushing a semantic version tag such as `v0.1.0` triggers GoReleaser publishing.
 
 Release checklist:
 

@@ -1,6 +1,14 @@
 name: CI
 
 on:
+  pull_request:
+    branches:
+      - "**"
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
   push:
     branches:
       - "**"
@@ -8,12 +16,16 @@ on:
 permissions:
   contents: read
 
+# Full CI is intentionally PR-safe: the job uses read-only repository
+# permissions, never references repository secrets, and avoids
+# pull_request_target privileges for forked contributions.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
+    # Keep this check name stable for branch-protection rules.
     name: Generate, lint, test, build, and package snapshot
     runs-on: ubuntu-latest
     steps:
