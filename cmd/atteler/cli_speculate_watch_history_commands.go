@@ -15,10 +15,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/agent"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/speculate"
 	"github.com/tommoulard/atteler/pkg/symphony"
@@ -56,45 +58,103 @@ func runSpeculatePlan(input speculatePlanCommandInput) error {
 // interface so the speculative execution pipeline can make real LLM calls.
 type registryCompleter struct {
 	registry       *llm.Registry
+	agents         *agent.Registry
+	recorder       *multiAgentRunRecorder
 	hookRunner     *events.Runner
+	selectedModel  string
 	fallbackModels []string
-	generation     generationSettings
+	generationBase generationSettings
+	generationOver generationSettings
 	maxInputTokens int
+	modelLocked    bool
 }
 
-func (rc *registryCompleter) Complete(ctx context.Context, model, systemPrompt, userPrompt string) (string, error) {
-	params := llm.CompleteParams{
-		Model: model,
-		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: systemPrompt},
-			{Role: llm.RoleUser, Content: userPrompt},
-		},
+func (rc *registryCompleter) Complete(ctx context.Context, branch, systemPrompt, userPrompt string) (string, error) {
+	activeAgent := agentSelection{name: branch}
+	if rc.agents != nil {
+		if configuredAgent, ok := rc.agents.Get(branch); ok {
+			activeAgent = agentSelection{name: branch, agent: configuredAgent, ok: true}
+		}
 	}
 
-	applyGenerationParams(&params, rc.generation)
+	generation := generationForRequest(rc.generationBase, rc.generationOver, activeAgent)
+
+	selectedModel := rc.selectedModel
+	if strings.TrimSpace(selectedModel) == "" && !activeAgent.ok {
+		selectedModel = branch
+	}
+
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: systemPrompt},
+		{Role: llm.RoleUser, Content: userPrompt},
+	}
+
+	requestModel, fallbackModels, _, err := requestModelAndFallbacks(
+		selectedModel,
+		rc.modelLocked,
+		rc.fallbackModels,
+		activeAgent,
+		routeProfileForMessages(requestMessagesForBudget(selectedModel, messages, activeAgent, generation, "", false), generation),
+		routeTelemetryFromRegistry(rc.registry),
+		routeAvailabilityFromRegistryWithRefresh(ctx, rc.registry, effectiveRouteCandidateChain(selectedModel, rc.fallbackModels, activeAgent, rc.modelLocked)),
+	)
+	if err != nil {
+		return "", err
+	}
+
+	params := llm.CompleteParams{
+		Model:    requestModel,
+		Messages: messages,
+	}
+	if activeAgent.ok {
+		params = activeAgent.agent.CompleteParams(requestModel, messages)
+	}
+
+	applyGenerationParams(&params, generation)
 
 	manifestEvent := requestContextManifestEvent(newRequestContextManifestForModels(
 		rc.registry,
 		params.Model,
-		rc.fallbackModels,
+		fallbackModels,
 		params.Messages,
 		rc.maxInputTokens,
 		contextref.ReferenceManifest{},
 	))
-	manifestEvent.Agent = model
+	manifestEvent.Agent = branch
 	setExplicitContextManifestEventModel(&manifestEvent, params.Model)
 	emitHookWarning(ctx, rc.hookRunner, manifestEvent)
 
-	if err := validateRequestBudgetWithFallbacks(rc.registry, params.Model, rc.fallbackModels, params.Messages, rc.maxInputTokens); err != nil {
-		return "", fmt.Errorf("speculate LLM budget: %w", err)
+	if budgetErr := validateRequestBudgetWithFallbacks(rc.registry, params.Model, fallbackModels, params.Messages, rc.maxInputTokens); budgetErr != nil {
+		return "", fmt.Errorf("speculate LLM budget: %w", budgetErr)
 	}
 
-	resp, err := rc.registry.CompleteWithFallback(ctx, params, rc.fallbackModels)
+	resp, err := completeMultiAgentRegistryCall(
+		ctx,
+		rc.recorder,
+		rc.registry,
+		speculateCallInfo(branch, systemPrompt, userPrompt),
+		params,
+		fallbackModels,
+	)
 	if err != nil {
 		return "", fmt.Errorf("speculate LLM complete: %w", err)
 	}
 
 	return resp.Content, nil
+}
+
+func speculateCallInfo(agentName, systemPrompt, userPrompt string) multiAgentCallInfo {
+	info := multiAgentCallInfo{Agent: agentName, Phase: multiAgentPhaseProposal}
+
+	switch {
+	case strings.Contains(systemPrompt, "aggregating speculative execution results"):
+		info.Phase = multiAgentPhaseAggregateVerdict
+	case strings.Contains(systemPrompt, "reviewing a proposal"):
+		info.Phase = multiAgentPhaseCrossReview
+		info.TargetAgent = targetAfter(userPrompt, "Proposal from ", ":")
+	}
+
+	return info
 }
 
 func runSpeculateExecution(ctx context.Context, state appState, input speculateRunCommandInput) error {
@@ -118,17 +178,53 @@ func runSpeculateExecution(ctx context.Context, state appState, input speculateR
 		return fmt.Errorf("speculate-run: %w", err)
 	}
 
+	sessionState := state.sessionState
+	budget := multiAgentBudgetFromState(state)
+	recorder := newMultiAgentRunRecorder(
+		state.sessionStore,
+		&sessionState,
+		session.MultiAgentRunKindSpeculation,
+		prompt,
+		state.selectedModel,
+		state.fallbackModels,
+		budget,
+		state.registry.ContextWindow,
+		nil,
+	)
+
+	if startErr := recorder.start(); startErr != nil {
+		return startErr
+	}
+
 	completer := &registryCompleter{
 		registry:       state.registry,
+		agents:         state.agentRegistry,
+		recorder:       recorder,
 		hookRunner:     state.hookRunner,
+		selectedModel:  state.selectedModel,
 		fallbackModels: state.fallbackModels,
-		generation:     mergeGenerationSettings(state.generationDefaults, state.generationOverrides),
+		generationBase: state.generationDefaults,
+		generationOver: state.generationOverrides,
 		maxInputTokens: state.maxInputTokens,
+		modelLocked:    state.modelLocked,
 	}
 
 	fmt.Fprintln(os.Stderr, "speculate: running three-round pipeline with "+strings.Join(agents, ", ")+"...")
 
-	result, err := speculate.RunWithLLM(ctx, plan, completer, prompt)
+	runCtx, cancelRun := contextWithMultiAgentRunBudget(ctx, budget)
+	defer cancelRun()
+
+	result, err := speculate.RunWithLLM(runCtx, plan, completer, prompt)
+
+	err = multiAgentRunErrorForBudgetContext(ctx, runCtx, err, budget, recorder.run.StartedAt)
+	if recordErr := recorder.recordSpeculateSession(result.Session); recordErr != nil {
+		return multiAgentPersistenceError(err, recordErr)
+	}
+
+	if finishErr := recorder.finish(err); finishErr != nil {
+		return multiAgentPersistenceError(err, finishErr)
+	}
+
 	if err != nil {
 		// Print partial results even on error.
 		if len(result.Session.Proposals) > 0 {
@@ -180,9 +276,9 @@ func formatSpeculateResult(result speculate.Result) string {
 		b.WriteString("gates:\n")
 
 		for _, gc := range result.Session.Verdict.GateChecks {
-			status := statusFail
+			status := gateStatusFail
 			if gc.Passed {
-				status = "PASS"
+				status = gateStatusPass
 			}
 
 			fmt.Fprintf(&b, "  - %s: %s %s\n", gc.Name, status, gc.Notes)

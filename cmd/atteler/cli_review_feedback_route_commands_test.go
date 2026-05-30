@@ -136,6 +136,7 @@ func TestFormatReviewReport(t *testing.T) {
 				Message:  "file is above threshold",
 			},
 		},
+		GateChecks: []review.GateCheck{{Name: "tests pass", Passed: false, Notes: "unit evidence missing"}},
 	}
 
 	got := formatReviewReport(report)
@@ -145,6 +146,8 @@ func TestFormatReviewReport(t *testing.T) {
 		"findings:\n",
 		"severity=medium\tcategory=maintainability\tpath=assets/blob.txt\tmessage=file is above threshold",
 		"severity=info\tcategory=tests\tpath=pkg/example/example.go\tmessage=missing _test.go companion",
+		"gates:\n",
+		"tests pass: FAIL unit evidence missing",
 	} {
 		if !strings.Contains(got, want) {
 			require.Failf(t, "formatted review report missing content", "missing %q in:\n%s", want, got)

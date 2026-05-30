@@ -301,6 +301,31 @@ func TestTranslateCLIArgs_DomainLevelFlagsCanPrecedeCommands(t *testing.T) {
 			want: []string{"--session", "demo", "--list-messages"},
 		},
 		{
+			name: "session selector before run listing command",
+			args: []string{"session", "--session", "demo", "runs"},
+			want: []string{"--session", "demo", "--list-runs"},
+		},
+		{
+			name: "session selector before run show command",
+			args: []string{"session", "--session", "demo", "show-run", "latest"},
+			want: []string{"--session", "demo", "--show-run", "latest"},
+		},
+		{
+			name: "session selector before run export command",
+			args: []string{"session", "--session", "demo", "export-run", "review", "--export-format", "json"},
+			want: []string{"--session", "demo", "--export-run", "review", "--export-format", "json"},
+		},
+		{
+			name: "session selector before run replay command",
+			args: []string{"session", "--session", "demo", "replay-run", "speculation"},
+			want: []string{"--session", "demo", "--replay-run", "speculation"},
+		},
+		{
+			name: "session selector before run resume command",
+			args: []string{"session", "--session", "demo", "resume-run", "latest"},
+			want: []string{"--session", "demo", "--resume-run", "latest"},
+		},
+		{
 			name: "top-level stdin before one-shot command",
 			args: []string{"--stdin", "chat", "once"},
 			want: []string{"--stdin"},

@@ -171,6 +171,10 @@ type cliOptions struct {
 	replayRef                          string
 	exportRef                          string
 	exportFormat                       string
+	showRunRef                         string
+	exportRunRef                       string
+	replayRunRef                       string
+	resumeRunRef                       string
 	outputFormat                       string
 	listSessionsTag                    string
 	headlessID                         string
@@ -455,6 +459,7 @@ type cliOptions struct {
 	listEvaluations                    bool
 	listFailures                       bool
 	listMessages                       bool
+	listRuns                           bool
 	listConfigPaths                    bool
 	stateDiagnostics                   bool
 	commandSurfaceJSON                 bool

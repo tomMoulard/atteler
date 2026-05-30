@@ -1283,6 +1283,7 @@ func flagRequiresFixtureValue(flag string) bool {
 		"list-models",
 		"list-plugins",
 		"list-providers",
+		"list-runs",
 		"list-session-tags",
 		"list-sessions",
 		"list-worktrees",

@@ -613,3 +613,81 @@ func mustParseSessionTestTime(t *testing.T, value string) time.Time {
 
 	return parsed
 }
+
+func TestSession_UpsertAndFindMultiAgentRun(t *testing.T) {
+	t.Parallel()
+
+	session := New("gpt-4.1", nil)
+	specRun := NewMultiAgentRun(MultiAgentRunKindSpeculation, "ship it", "gpt-4.1", []string{"backup"}, MultiAgentRunBudget{
+		MaxModelCalls: 3,
+	})
+	assert.Equal(t, specRun.ID, specRun.ReceiptID)
+
+	reviewRun := NewMultiAgentRun(MultiAgentRunKindReview, "audit it", "gpt-4.1", nil, MultiAgentRunBudget{})
+	reviewRun.ID = "review-run"
+	reviewRun.ReceiptID = "receipt-review"
+	reviewRun.Status = MultiAgentRunStatusCompleted
+
+	require.True(t, session.UpsertMultiAgentRun(specRun))
+	require.True(t, session.UpsertMultiAgentRun(reviewRun))
+
+	reviewRun.Status = MultiAgentRunStatusFailed
+	require.True(t, session.UpsertMultiAgentRun(reviewRun))
+	require.Len(t, session.MultiAgentRuns, 2)
+
+	found, ok := session.FindMultiAgentRun("review-run")
+	require.True(t, ok)
+	assert.Equal(t, MultiAgentRunStatusFailed, found.Status)
+	assert.Equal(t, "receipt-review", found.ReceiptID)
+
+	byReceipt, ok := session.FindMultiAgentRun("receipt-review")
+	require.True(t, ok)
+	assert.Equal(t, "review-run", byReceipt.ID)
+
+	latest, ok := session.FindMultiAgentRun("latest")
+	require.True(t, ok)
+	assert.Equal(t, "review-run", latest.ID)
+
+	byKind, ok := session.FindMultiAgentRun(MultiAgentRunKindSpeculation)
+	require.True(t, ok)
+	assert.Equal(t, specRun.ID, byKind.ID)
+
+	_, ok = session.FindMultiAgentRun("missing")
+	assert.False(t, ok)
+	assert.False(t, session.UpsertMultiAgentRun(MultiAgentRun{}))
+}
+
+func TestAcceptedMultiAgentRunArtifactPrefersIndexedDecisionMatch(t *testing.T) {
+	t.Parallel()
+
+	run := MultiAgentRun{
+		Status: MultiAgentRunStatusCompleted,
+		Artifacts: []MultiAgentRunArtifact{
+			{
+				Kind:    "verdict",
+				Phase:   "aggregate-verdict",
+				Agent:   "judge",
+				Content: "legacy stale verdict",
+			},
+			{
+				Kind:    "verdict",
+				Phase:   "aggregate-verdict",
+				Agent:   "judge",
+				Content: "accepted verdict",
+				Index:   2,
+			},
+		},
+		Decisions: []MultiAgentRunDecision{{
+			Kind:    "verdict",
+			Phase:   "aggregate-verdict",
+			Agent:   "judge",
+			Outcome: "accepted",
+			Index:   2,
+		}},
+	}
+
+	artifact, ok := acceptedMultiAgentRunArtifact(run)
+	require.True(t, ok)
+	assert.Equal(t, "accepted verdict", artifact.Content)
+	assert.True(t, multiAgentRunHasAcceptedOutput(run))
+}

@@ -484,14 +484,19 @@ func commandContractsByName() map[string]commandContract {
 		),
 		"session-read": commandContractFor(
 			"read selected session details, transcripts, summaries, and records",
-			[]string{"--show-session", "--session-summary", "--replay", "--export-session", "--export-format", "--list-artifacts", "--list-evaluations", "--list-failures", "--list-messages"},
+			[]string{"--show-session", "--session-summary", "--replay", "--export-session", "--export-format", "--show-run", "--export-run", "--replay-run", "--resume-run", "--list-artifacts", "--list-evaluations", "--list-failures", "--list-messages", "--list-runs"},
 			[]string{commandEffectSessionRead, commandEffectUserOutput},
 			[]string{commandOutputText, commandOutputYAML, commandOutputMarkdown, commandOutputJSON},
 			withInputType("sessionReadCommandInput"),
-			withExamples("atteler session show demo"),
+			withExamples(
+				"atteler session show demo",
+				"atteler session --session demo runs",
+				"atteler session --session demo replay-run latest",
+				"atteler session --session demo resume-run review",
+			),
 			withConflictRule(commandConflictRule{
 				Kind:   commandConflictOneOf,
-				With:   []string{"--show-session", "--session-summary", "--replay", "--export-session", "--list-artifacts", "--list-evaluations", "--list-failures", "--list-messages"},
+				With:   []string{"--show-session", "--session-summary", "--replay", "--export-session", "--show-run", "--export-run", "--replay-run", "--resume-run", "--list-artifacts", "--list-evaluations", "--list-failures", "--list-messages", "--list-runs"},
 				Reason: "session read aliases select exactly one read operation",
 			}),
 		),

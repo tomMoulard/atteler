@@ -30,6 +30,7 @@ type sessionDetails struct {
 	NegativeKnowledge []session.NegativeKnowledge `yaml:"negative_knowledge,omitempty"`
 	Evaluations       []session.AgentEvaluation   `yaml:"evaluations,omitempty"`
 	Artifacts         []session.Artifact          `yaml:"artifacts,omitempty"`
+	MultiAgentRuns    []session.MultiAgentRun     `yaml:"multi_agent_runs,omitempty"`
 }
 
 //nolint:govet // YAML output order mirrors the documented agent_loop config schema.
@@ -62,6 +63,7 @@ func formatSessionDetailsSummary(sessionState session.Session, path string) stri
 		"failures=" + strconv.Itoa(len(sessionState.NegativeKnowledge)),
 		"evaluations=" + strconv.Itoa(len(sessionState.Evaluations)),
 		"artifacts=" + strconv.Itoa(len(sessionState.Artifacts)),
+		"multi_agent_runs=" + strconv.Itoa(len(sessionState.MultiAgentRuns)),
 	}
 	if !sessionState.CreatedAt.IsZero() {
 		parts = append(parts, "created_at="+sessionState.CreatedAt.Format(time.RFC3339))
@@ -131,6 +133,10 @@ func formatSessionDetails(sessionState session.Session, path string) (string, er
 		),
 		Evaluations: append([]session.AgentEvaluation(nil), sessionState.Evaluations...),
 		Artifacts:   append([]session.Artifact(nil), sessionState.Artifacts...),
+		MultiAgentRuns: append(
+			[]session.MultiAgentRun(nil),
+			sessionState.MultiAgentRuns...,
+		),
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal session details: %w", err)

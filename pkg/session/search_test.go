@@ -1561,3 +1561,143 @@ func TestStore_SearchRetrievalRedactsSensitiveSessionMetadata(t *testing.T) {
 	assert.NotContains(t, results[0].Metadata["session_title"], "metadata-secret-token")
 	assert.Contains(t, results[0].Metadata["session_title"], "[REDACTED]")
 }
+
+func TestStore_SearchMultiAgentRuns(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	session := New("gpt-review", nil)
+	session.MultiAgentRuns = []MultiAgentRun{{
+		ID:        "run-1",
+		ReceiptID: "receipt-1",
+		Kind:      MultiAgentRunKindSpeculation,
+		Status:    MultiAgentRunStatusBudgetExhausted,
+		Prompt:    "Choose durable branch",
+		Model:     "gpt-test",
+		FallbackModels: []string{
+			"gpt-fallback",
+		},
+		Calls: []MultiAgentRunCall{{
+			ID:             "call-001",
+			Phase:          "proposal",
+			Agent:          "planner",
+			Status:         MultiAgentRunStatusCompleted,
+			PromptHash:     "sha256:abc",
+			UserPrompt:     "record auditable provider prompt",
+			Response:       "durable branch proposal",
+			ResponseModel:  "gpt-test",
+			FallbackModels: []string{"gpt-call-fallback"},
+		}},
+		Artifacts: []MultiAgentRunArtifact{{
+			Kind:    "proposal",
+			Phase:   "proposal",
+			Agent:   "planner",
+			Content: "durable branch proposal",
+			Metadata: map[string]string{
+				"call_id": "call-001",
+			},
+		}},
+		Gates: []MultiAgentRunGate{{
+			Name:   "tests pass",
+			Phase:  "aggregate-verdict",
+			Agent:  "planner",
+			Passed: false,
+			Notes:  "integration evidence missing",
+		}},
+		Errors: []MultiAgentRunError{{
+			Stage:    "aggregate-verdict",
+			Reviewer: "judge",
+			Message:  "structured verdict parse failed",
+		}},
+		Summary:      MultiAgentRunSummary{Winner: "planner", Reason: "durable receipt evidence"},
+		ResumeReason: "continue from recorded receipt",
+	}}
+	require.NoError(t, store.Save(session))
+
+	results, err := store.Search("integration evidence")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Snippets, 1)
+	assert.Equal(t, llm.Role("multi_agent_run"), results[0].Snippets[0].Role)
+	assert.Equal(t, SearchFieldMultiAgent, results[0].Snippets[0].Field)
+	assert.Equal(t, "multi_agent_run", results[0].Snippets[0].Kind)
+	assert.Contains(t, results[0].Snippets[0].Text, "Gate: tests pass")
+	assert.Contains(t, results[0].Snippets[0].Text, "integration evidence missing")
+
+	results, err = store.Search("receipt-1")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Contains(t, results[0].Snippets[0].Text, "Receipt: receipt-1")
+
+	results, err = store.Search("call_id=call-001")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Contains(t, results[0].Snippets[0].Text, "call_id=call-001")
+
+	results, err = store.Search("gpt-call-fallback")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Contains(t, results[0].Snippets[0].Text, "gpt-call-fallback")
+
+	results, err = store.Search("structured verdict parse failed")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Contains(t, results[0].Snippets[0].Text, "Workflow error:")
+}
+
+func TestIndexedMultiAgentRunSearchTextRequiresAcceptedOutputForSummary(t *testing.T) {
+	t.Parallel()
+
+	policy := normalizeSearchIndexPolicy(SearchIndexPolicy{MaxTranscriptAge: -1})
+	staleRun := MultiAgentRun{
+		ID:      "run-running",
+		Kind:    MultiAgentRunKindSpeculation,
+		Status:  MultiAgentRunStatusRunning,
+		Summary: MultiAgentRunSummary{Winner: "stale-winner", Reason: "stale-reason"},
+		Artifacts: []MultiAgentRunArtifact{{
+			Kind:    "verdict",
+			Phase:   "aggregate-verdict",
+			Agent:   "judge",
+			Content: "recorded but not terminal",
+			Index:   1,
+		}},
+		Decisions: []MultiAgentRunDecision{{
+			Kind:    "verdict",
+			Phase:   "aggregate-verdict",
+			Agent:   "judge",
+			Outcome: "accepted",
+			Index:   1,
+		}},
+	}
+	stale := indexedMultiAgentRunSearchText("multi_agent_runs[1]", &staleRun, policy)
+	assert.NotContains(t, stale, "stale-winner")
+	assert.NotContains(t, stale, "stale-reason")
+	assert.Contains(t, stale, "Artifact: verdict aggregate-verdict judge")
+
+	acceptedRun := MultiAgentRun{
+		ID:     "run-final",
+		Kind:   MultiAgentRunKindSpeculation,
+		Status: MultiAgentRunStatusCompleted,
+		Summary: MultiAgentRunSummary{
+			Winner: "final-winner",
+			Reason: "accepted-reason",
+		},
+		Artifacts: []MultiAgentRunArtifact{{
+			Kind:    "verdict",
+			Phase:   "aggregate-verdict",
+			Agent:   "judge",
+			Content: "winner: final-winner",
+			Index:   1,
+		}},
+		Decisions: []MultiAgentRunDecision{{
+			Kind:    "verdict",
+			Phase:   "aggregate-verdict",
+			Agent:   "judge",
+			Outcome: "accepted",
+			Index:   1,
+		}},
+	}
+	accepted := indexedMultiAgentRunSearchText("multi_agent_runs[1]", &acceptedRun, policy)
+	assert.Contains(t, accepted, "Winner: final-winner")
+	assert.Contains(t, accepted, "Reason: accepted-reason")
+}

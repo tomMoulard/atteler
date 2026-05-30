@@ -57,7 +57,7 @@ var cliHelpDomains = []cliHelpDomain{
 	{
 		Name:    "chat/session",
 		Title:   "Chat & sessions",
-		Summary: "Run the TUI or one-shot prompts, manage saved sessions, transcripts, headless runs, and artifacts.",
+		Summary: "Run the TUI or one-shot prompts, manage saved sessions, transcripts, headless runs, artifacts, and multi-agent run records.",
 		Aliases: []string{"chat", helpSelectorSession, "sessions"},
 		Commands: []cliCommandAlias{
 			{Name: "run", Args: "[prompt]", Summary: "start chat or run positional one-shot prompt text", JoinArgs: true},
@@ -69,6 +69,11 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "summary", Args: "<id-or-path>", Summary: "print compact saved session metadata", Legacy: []string{"--session-summary"}},
 			{Name: "replay", Args: "<id-or-path>", Summary: "print a previous transcript", Legacy: []string{"--replay"}},
 			{Name: "export", Args: "<id-or-path>", Summary: "export a previous transcript", Legacy: []string{"--export-session"}},
+			{Name: "runs", Summary: "list review/speculation runs for --session", Legacy: []string{"--list-runs"}},
+			{Name: "show-run", Args: "<id|latest|review|speculation>", Summary: "show one review/speculation run as YAML", Legacy: []string{"--show-run"}},
+			{Name: "export-run", Args: "<id|latest|review|speculation>", Summary: "export one review/speculation run", Legacy: []string{"--export-run"}},
+			{Name: "replay-run", Args: "<id|latest|review|speculation>", Summary: "replay recorded run artifacts without provider calls", Legacy: []string{"--replay-run"}},
+			{Name: "resume-run", Args: "<id|latest|review|speculation>", Summary: "resume from recorded run artifacts without provider calls", Legacy: []string{"--resume-run"}},
 			{Name: "messages", Summary: "list compact message records for --session", Legacy: []string{"--list-messages"}},
 			{Name: "artifacts", Summary: "list artifact records for --session", Legacy: []string{"--list-artifacts"}},
 			{Name: "failures", Summary: "list negative-knowledge records for --session", Legacy: []string{"--list-failures"}},

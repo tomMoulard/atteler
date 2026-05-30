@@ -738,10 +738,15 @@ func sessionReadUtilityRequested(opts cliOptions) bool {
 		opts.exportRef != "" ||
 		opts.showSessionRef != "" ||
 		opts.summarySessionRef != "" ||
+		opts.showRunRef != "" ||
+		opts.exportRunRef != "" ||
+		opts.replayRunRef != "" ||
+		opts.resumeRunRef != "" ||
 		opts.listArtifacts ||
 		opts.listEvaluations ||
 		opts.listFailures ||
-		opts.listMessages
+		opts.listMessages ||
+		opts.listRuns
 }
 
 func sessionWriteUtilityRequested(opts cliOptions) bool {

@@ -138,6 +138,12 @@ func TestFormatSessionDetails(t *testing.T) {
 	sessionState.RecordNegativeKnowledge("try cache bust", "broke auth", "abc123", "reviewer")
 	sessionState.RecordEvaluation("reviewer", "pass", "caught auth regression", "eval.md", 5)
 	sessionState.RecordArtifact("docs/research.md", "research", "auth notes", "reviewer")
+	sessionState.MultiAgentRuns = []session.MultiAgentRun{{
+		ID:        "run-1",
+		ReceiptID: "receipt-1",
+		Kind:      session.MultiAgentRunKindReview,
+		Status:    session.MultiAgentRunStatusCompleted,
+	}}
 
 	out, err := formatSessionDetails(sessionState, "/tmp/session.json")
 	if err != nil {
@@ -167,6 +173,8 @@ func TestFormatSessionDetails(t *testing.T) {
 		"outcome: pass",
 		"artifacts:",
 		"path: docs/research.md",
+		"multi_agent_runs:",
+		"receipt_id: receipt-1",
 	} {
 		if !strings.Contains(out, want) {
 			require.Failf(t, "unexpected failure", "session details missing %q in:\n%s", want, out)
@@ -811,6 +819,11 @@ func TestFormatSessionDetailsSummary(t *testing.T) {
 		},
 		Evaluations: []session.AgentEvaluation{{Agent: "reviewer", Outcome: "pass"}},
 		Artifacts:   []session.Artifact{{Path: "plan.md", Kind: "plan"}},
+		MultiAgentRuns: []session.MultiAgentRun{{
+			ID:     "run-1",
+			Kind:   session.MultiAgentRunKindSpeculation,
+			Status: session.MultiAgentRunStatusCompleted,
+		}},
 	}
 
 	got := formatSessionDetailsSummary(sessionState, "/tmp/demo.json")
@@ -821,6 +834,7 @@ func TestFormatSessionDetailsSummary(t *testing.T) {
 		"failures=1",
 		"evaluations=1",
 		"artifacts=1",
+		"multi_agent_runs=1",
 		"created_at=2026-05-01T13:15:00Z",
 		"updated_at=2026-05-01T13:30:00Z",
 		"title=Auth refresh",

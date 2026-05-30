@@ -110,9 +110,9 @@ func TestAgentLoopBudgetFromConfig(t *testing.T) {
 
 	byteLimit := int64(4096)
 	costLimit := int64(250_000)
-	inputLimit := 100_000
-	outputLimit := 20_000
 	tokenLimit := 200000
+	inputTokenLimit := 120000
+	outputTokenLimit := 80000
 	iterationLimit := 50
 	modelCallLimit := 12
 	toolCallLimit := 34
@@ -121,8 +121,8 @@ func TestAgentLoopBudgetFromConfig(t *testing.T) {
 		AgentLoop: appconfig.AgentLoopConfig{
 			MaxOutputBytes:  &byteLimit,
 			MaxCostMicros:   &costLimit,
-			MaxInputTokens:  &inputLimit,
-			MaxOutputTokens: &outputLimit,
+			MaxInputTokens:  &inputTokenLimit,
+			MaxOutputTokens: &outputTokenLimit,
 			MaxTotalTokens:  &tokenLimit,
 			MaxIterations:   &iterationLimit,
 			MaxModelCalls:   &modelCallLimit,
@@ -133,8 +133,8 @@ func TestAgentLoopBudgetFromConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, byteLimit, budget.MaxOutputBytes)
 	assert.Equal(t, costLimit, budget.MaxCostMicros)
-	assert.Equal(t, inputLimit, budget.MaxInputTokens)
-	assert.Equal(t, outputLimit, budget.MaxOutputTokens)
+	assert.Equal(t, inputTokenLimit, budget.MaxInputTokens)
+	assert.Equal(t, outputTokenLimit, budget.MaxOutputTokens)
 	assert.Equal(t, tokenLimit, budget.MaxTotalTokens)
 	assert.Equal(t, iterationLimit, budget.MaxIterations)
 	assert.Equal(t, modelCallLimit, budget.MaxModelCalls)
