@@ -383,6 +383,37 @@ func TestPrintProviderReadinessReport_ShowsStatusReasonAndModelSource(t *testing
 	assert.Contains(t, out, "models: static fallback (stale)")
 }
 
+func TestPrintProviderReadinessReport_UsesRegionalHostnameRemediation(t *testing.T) { //nolint:paralleltest // Captures process stdout.
+	regionalErr := errors.New(
+		`openai: models HTTP 401: {"error":{"message":"Attempted to access resource with incorrect regional hostname. Please make your request to us.api.openai.com","type":"invalid_request_error"}}`,
+	)
+	report := llm.ProviderReadinessReport{
+		Providers: []llm.ProviderReadiness{
+			{
+				Name:               "openai",
+				Status:             llm.ProviderStatusFailedHealthCheck,
+				Registered:         true,
+				Configured:         true,
+				HealthChecked:      true,
+				ModelCatalogSource: llm.ModelCatalogSourceStatic,
+				Models:             []string{"gpt-static"},
+				StaticModels:       []string{"gpt-static"},
+				Error:              regionalErr,
+			},
+		},
+	}
+
+	out := captureStdoutForStateDiagnostics(t, func() {
+		_ = printProviderReadinessReport(report)
+	})
+
+	assert.Contains(t, out, "reason: OpenAI regional hostname mismatch")
+	assert.Contains(t, out, "OPENAI_BASE_URL")
+	assert.Contains(t, out, "https://us.api.openai.com")
+	assert.NotContains(t, out, "invalid_request_error")
+	assert.NotContains(t, out, "models HTTP 401")
+}
+
 func TestStartupProviderReadinessSummary_FiltersUnrequestedProviders(t *testing.T) {
 	t.Parallel()
 

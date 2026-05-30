@@ -184,6 +184,19 @@ func ProviderFailureSummary(err error) string {
 	return classifiedProviderError(err)
 }
 
+// ProviderFailureRemediationSummary returns an actionable provider failure
+// summary when the failure classifier knows a remediation hint. It returns
+// false for ordinary provider errors where callers should prefer the original
+// provider text for diagnostic detail.
+func ProviderFailureRemediationSummary(err error) (string, bool) {
+	classification := classifyProviderFailure(err)
+	if classification.Remediation == "" {
+		return "", false
+	}
+
+	return classification.Summary + "; " + classification.Remediation, true
+}
+
 func wrapOpenAIRegionalHostnameError(err error) error {
 	if err == nil || !isOpenAIRegionalHostnameError(err) {
 		return err

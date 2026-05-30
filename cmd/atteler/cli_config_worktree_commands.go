@@ -508,16 +508,28 @@ func printProviderReadinessReason(provider *llm.ProviderReadiness) {
 	}
 
 	if provider.Error != nil {
-		fmt.Printf("         reason: %v\n", provider.Error)
+		fmt.Printf("         reason: %s\n", providerReadinessDisplayError(provider.Error))
 	}
 
 	if provider.HealthError != nil && errorString(provider.HealthError) != errorString(provider.Error) {
-		fmt.Printf("         health: %v\n", provider.HealthError)
+		fmt.Printf("         health: %s\n", providerReadinessDisplayError(provider.HealthError))
 	}
 
 	if provider.ModelFetchError != nil && errorString(provider.ModelFetchError) != errorString(provider.Error) {
-		fmt.Printf("         model_fetch: %v\n", provider.ModelFetchError)
+		fmt.Printf("         model_fetch: %s\n", providerReadinessDisplayError(provider.ModelFetchError))
 	}
+}
+
+func providerReadinessDisplayError(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	if summary, ok := llm.ProviderFailureRemediationSummary(err); ok {
+		return summary
+	}
+
+	return err.Error()
 }
 
 func errorString(err error) string {
