@@ -755,6 +755,9 @@ func TestLoadFilesWithOrigins_TracksMapMergeProviderAgentAndPluginReplacement(t 
 providers:
   anthropic:
     base_url: https://anthropic.first
+    retry:
+      max_attempts: 1
+      initial_backoff_ms: 250
   openai:
     base_url: https://openai.first
 agents:
@@ -771,6 +774,9 @@ providers:
     base_url: https://openai.second
     disabled: false
     auto_start: true
+    retry:
+      max_attempts: 0
+      jitter_fraction: 0.1
 agents:
   reviewer:
     model: gpt-review-second
@@ -785,6 +791,14 @@ plugins:
 	assert.Equal(t, "https://anthropic.first", cfg.Providers["anthropic"].BaseURL)
 	assert.Equal(t, "https://openai.second", cfg.Providers["openai"].BaseURL)
 	assert.True(t, cfg.Providers["openai"].AutoStart)
+	require.NotNil(t, cfg.Providers["anthropic"].Retry.MaxAttempts)
+	assert.Equal(t, 1, *cfg.Providers["anthropic"].Retry.MaxAttempts)
+	require.NotNil(t, cfg.Providers["anthropic"].Retry.InitialBackoffMS)
+	assert.Equal(t, 250, *cfg.Providers["anthropic"].Retry.InitialBackoffMS)
+	require.NotNil(t, cfg.Providers["openai"].Retry.MaxAttempts)
+	assert.Equal(t, 0, *cfg.Providers["openai"].Retry.MaxAttempts)
+	require.NotNil(t, cfg.Providers["openai"].Retry.JitterFraction)
+	assert.InEpsilon(t, 0.1, *cfg.Providers["openai"].Retry.JitterFraction, 0.0001)
 	assert.Equal(t, "gpt-review-second", cfg.Agents["reviewer"].Model)
 	assert.Equal(t, map[string]bool{"shell": false}, cfg.Agents["reviewer"].ToolPermissions)
 	assert.Equal(t, []string{"./plugin-b"}, cfg.Plugins.Paths)
@@ -803,6 +817,11 @@ plugins:
 	require.Len(t, autoStartOrigin, 1)
 	assert.Equal(t, OriginSet, autoStartOrigin[0].Operation)
 	assert.Equal(t, second, autoStartOrigin[0].Source)
+
+	retryOrigin := origins["providers.openai.retry.max_attempts"].Chain
+	require.Len(t, retryOrigin, 1)
+	assert.Equal(t, OriginSet, retryOrigin[0].Operation)
+	assert.Equal(t, second, retryOrigin[0].Source)
 
 	agentOrigin := origins["agents.reviewer.model"].Chain
 	require.Len(t, agentOrigin, 2)

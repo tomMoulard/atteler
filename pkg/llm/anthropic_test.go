@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -190,6 +191,7 @@ func TestAnthropicProvider_HTTPError(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("request-id", "req-anthropic")
 		w.WriteHeader(http.StatusTooManyRequests)
 
 		if _, err := w.Write([]byte(`{"error":{"type":"rate_limit","message":"slow down"}}`)); err != nil {
@@ -207,6 +209,80 @@ func TestAnthropicProvider_HTTPError(t *testing.T) {
 	if err == nil {
 		require.FailNow(t, "expected error on 429")
 	}
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerAnthropic, providerErr.Provider)
+	assert.Equal(t, http.StatusTooManyRequests, providerErr.StatusCode)
+	assert.Equal(t, "req-anthropic", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Contains(t, providerErr.Message, "rate_limit")
+}
+
+func TestAnthropicProvider_FetchModelsHTTPErrorIsTyped(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("request-id", "req-anthropic-models")
+		w.WriteHeader(http.StatusServiceUnavailable)
+
+		if _, err := w.Write([]byte(`{"error":{"type":"overloaded_error","message":"busy"}}`)); err != nil {
+			return // best-effort in test handler
+		}
+	}))
+	defer srv.Close()
+
+	p := &AnthropicProvider{apiKey: "k", baseURL: srv.URL, client: srv.Client()}
+
+	_, err := p.FetchModels(context.Background())
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerAnthropic, providerErr.Provider)
+	assert.Equal(t, http.StatusServiceUnavailable, providerErr.StatusCode)
+	assert.Equal(t, "req-anthropic-models", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Contains(t, providerErr.Message, "overloaded_error")
+}
+
+func TestAnthropicProvider_ErrorPayloadIsTyped(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "6")
+		w.Header().Set("request-id", "req-anthropic-payload")
+		w.Header().Set("Content-Type", "application/json")
+
+		resp := anthropicResponse{}
+		resp.Error = &struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}{
+			Type:    "overloaded_error",
+			Message: "busy",
+		}
+
+		assert.NoError(t, json.NewEncoder(w).Encode(resp))
+	}))
+	defer srv.Close()
+
+	p := &AnthropicProvider{apiKey: "k", baseURL: srv.URL, client: srv.Client()}
+
+	_, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerAnthropic, providerErr.Provider)
+	assert.Equal(t, http.StatusOK, providerErr.StatusCode)
+	assert.Equal(t, 6*time.Second, providerErr.RetryAfter)
+	assert.Equal(t, "req-anthropic-payload", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "overloaded_error: busy", providerErr.Message)
 }
 
 func TestAnthropicProvider_DefaultMaxTokens(t *testing.T) {

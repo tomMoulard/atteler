@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -153,6 +154,8 @@ func TestOpenAIProvider_HTTPError(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "2")
+		w.Header().Set("X-Request-ID", "req-openai")
 		w.WriteHeader(http.StatusUnauthorized)
 
 		if _, err := w.Write([]byte(`{"error":{"type":"invalid_api_key","message":"bad key"}}`)); err != nil {
@@ -170,6 +173,117 @@ func TestOpenAIProvider_HTTPError(t *testing.T) {
 	if err == nil {
 		require.FailNow(t, "expected error on 401")
 	}
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerOpenAI, providerErr.Provider)
+	assert.Equal(t, http.StatusUnauthorized, providerErr.StatusCode)
+	assert.Equal(t, 2*time.Second, providerErr.RetryAfter)
+	assert.Equal(t, "req-openai", providerErr.RequestID)
+	assert.Equal(t, RetryabilityNonRetryable, providerErr.Retryability)
+	assert.Contains(t, providerErr.Message, "invalid_api_key")
+}
+
+func TestOpenAIProvider_FetchModelsHTTPErrorIsTyped(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "4")
+		w.Header().Set("X-Request-ID", "req-openai-models")
+		w.WriteHeader(http.StatusInternalServerError)
+
+		if _, err := w.Write([]byte(`{"error":{"type":"server_error","message":"try again"}}`)); err != nil {
+			return // best-effort in test handler
+		}
+	}))
+	defer srv.Close()
+
+	p := &OpenAIProvider{apiKey: "k", baseURL: srv.URL, client: srv.Client()}
+
+	_, err := p.FetchModels(context.Background())
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerOpenAI, providerErr.Provider)
+	assert.Equal(t, http.StatusInternalServerError, providerErr.StatusCode)
+	assert.Equal(t, 4*time.Second, providerErr.RetryAfter)
+	assert.Equal(t, "req-openai-models", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Contains(t, providerErr.Message, "server_error")
+}
+
+func TestOpenAIProvider_ErrorPayloadIsTyped(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("X-Request-ID", "req-openai-payload")
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(openaiResponse{
+			Error: &struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+				Code    string `json:"code"`
+			}{
+				Type:    "rate_limit_error",
+				Message: "slow down",
+			},
+		}))
+	}))
+	defer srv.Close()
+
+	p := &OpenAIProvider{apiKey: "k", baseURL: srv.URL, client: srv.Client()}
+
+	_, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "gpt-4.1",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerOpenAI, providerErr.Provider)
+	assert.Equal(t, http.StatusOK, providerErr.StatusCode)
+	assert.Equal(t, 5*time.Second, providerErr.RetryAfter)
+	assert.Equal(t, "req-openai-payload", providerErr.RequestID)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "rate_limit_error: slow down", providerErr.Message)
+}
+
+func TestOpenAIProvider_ErrorPayloadPrefersSpecificCode(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(openaiResponse{
+			Error: &struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+				Code    string `json:"code"`
+			}{
+				Type:    "error",
+				Code:    "server_error",
+				Message: "try again",
+			},
+		}))
+	}))
+	defer srv.Close()
+
+	p := &OpenAIProvider{apiKey: "k", baseURL: srv.URL, client: srv.Client()}
+
+	_, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "gpt-4.1",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, providerOpenAI, providerErr.Provider)
+	assert.Equal(t, http.StatusOK, providerErr.StatusCode)
+	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
+	assert.Equal(t, "server_error: try again", providerErr.Message)
 }
 
 func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {

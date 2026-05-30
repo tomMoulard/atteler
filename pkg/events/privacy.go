@@ -131,6 +131,23 @@ var eventSchemas = map[string]eventSchema{
 			"path": metadataSensitive,
 		},
 	}),
+	ProviderRetry: lifecycleEventSchema(eventSchema{
+		Metadata: map[string]metadataPolicy{
+			"attempt":         metadataSafe,
+			"classification":  metadataSafe,
+			"delay_ms":        metadataSafe,
+			"elapsed_ms":      metadataSafe,
+			"legacy_fallback": metadataSafe,
+			"max_attempts":    metadataSafe,
+			"max_retries":     metadataSafe,
+			"outcome":         metadataSafe,
+			"provider":        metadataSafe,
+			"request_id":      metadataSafe,
+			"retry_after_ms":  metadataSafe,
+			"retryable":       metadataSafe,
+			"status":          metadataSafe,
+		},
+	}),
 	RouteDecision: lifecycleEventSchema(eventSchema{
 		Content: true,
 		Metadata: map[string]metadataPolicy{

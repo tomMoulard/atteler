@@ -36,6 +36,11 @@ func starterTemplateConfig() Config {
 	skillLearningEnabled := true
 	workspaceVectorEnabled := false
 	workspaceAllowRemoteEmbeddings := false
+	retryMaxAttempts := 2
+	retryInitialBackoffMS := 1000
+	retryMaxBackoffMS := 10000
+	retryMaxElapsedMS := 30000
+	retryJitterFraction := 0.2
 
 	return Config{
 		Version:         ConfigSchemaVersion,
@@ -66,11 +71,19 @@ func starterTemplateConfig() Config {
 			CheckpointInterval: &agentLoopCheckpointInterval,
 		},
 		Providers: map[string]ProviderConfig{
-			"claude-code":           {},
-			"codex":                 {},
-			"anthropic":             {},
-			templateDefaultProvider: {},
-			"ollama":                {BaseURL: "http://127.0.0.1:11434"},
+			"claude-code": {},
+			"codex":       {},
+			"anthropic":   {},
+			templateDefaultProvider: {
+				Retry: RetryConfig{
+					MaxAttempts:      &retryMaxAttempts,
+					InitialBackoffMS: &retryInitialBackoffMS,
+					MaxBackoffMS:     &retryMaxBackoffMS,
+					MaxElapsedMS:     &retryMaxElapsedMS,
+					JitterFraction:   &retryJitterFraction,
+				},
+			},
+			"ollama": {BaseURL: "http://127.0.0.1:11434"},
 		},
 		Agents: map[string]AgentConfig{
 			"reviewer": {

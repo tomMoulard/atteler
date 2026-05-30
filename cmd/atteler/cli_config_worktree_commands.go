@@ -441,9 +441,22 @@ func printProviderReadinessModels(provider *llm.ProviderReadiness) {
 		}
 	}
 
+	fmt.Printf("         retry: %s\n", formatRetryPolicy(provider.RetryPolicy))
+
 	for _, model := range models {
 		fmt.Printf("         - %s\n", model)
 	}
+}
+
+func formatRetryPolicy(policy llm.RetryPolicyInfo) string {
+	return fmt.Sprintf(
+		"max_retries=%d initial=%s max_backoff=%s budget=%s jitter=%.0f%%",
+		policy.MaxAttempts,
+		policy.InitialBackoff,
+		policy.MaxBackoff,
+		policy.MaxElapsedTime,
+		policy.JitterFraction*100,
+	)
 }
 
 //nolint:unparam // error return kept for consistency with other command handlers.
@@ -466,17 +479,36 @@ func doctorOffline(opts cliOptions) error {
 	store := session.NewStore(opts.sessionDir)
 	fmt.Println("sessions: " + store.Dir() + " (" + pathStatus(store.Dir()) + ")")
 
-	providerNames := make([]string, 0)
+	knownProviderNames := make([]string, 0)
+	retryProviderSet := make(map[string]bool, len(cfg.Providers))
+
 	for _, provider := range llm.KnownProviders() {
-		providerNames = append(providerNames, provider.Name)
+		knownProviderNames = append(knownProviderNames, provider.Name)
+		retryProviderSet[provider.Name] = true
 	}
 
-	sort.Strings(providerNames)
+	sort.Strings(knownProviderNames)
 
-	if len(providerNames) == 0 {
+	if len(knownProviderNames) == 0 {
 		fmt.Println("known_providers: none")
 	} else {
-		fmt.Println("known_providers: " + strings.Join(providerNames, ", "))
+		fmt.Println("known_providers: " + strings.Join(knownProviderNames, ", "))
+	}
+
+	retryProviderNames := append([]string(nil), knownProviderNames...)
+
+	for name := range cfg.Providers {
+		if !retryProviderSet[name] {
+			retryProviderNames = append(retryProviderNames, name)
+		}
+	}
+
+	sort.Strings(retryProviderNames)
+
+	fmt.Println("provider_retries:")
+
+	for _, name := range retryProviderNames {
+		fmt.Printf("  %s: %s\n", name, formatRetryPolicy(retryPolicyInfoForConfig(name, cfg.Providers[name])))
 	}
 
 	agents := agent.NewRegistry(cfg.Agents).List()
@@ -603,6 +635,7 @@ func llmConfig(
 			AutoStart:             provider.AutoStart,
 			DisablePrivateAdapter: provider.DisablePrivateAdapter,
 			BaseURL:               provider.BaseURL,
+			Retry:                 llmRetryPolicyConfig(provider.Retry),
 			TimeoutSeconds:        provider.TimeoutSeconds,
 		}
 	}
@@ -632,6 +665,56 @@ func cloneStringMap(in map[string]string) map[string]string {
 	maps.Copy(out, in)
 
 	return out
+}
+
+func llmRetryPolicyConfig(cfg appconfig.RetryConfig) llm.RetryPolicyConfig {
+	return llm.RetryPolicyConfig{
+		MaxAttempts:      cfg.MaxAttempts,
+		InitialBackoffMS: cfg.InitialBackoffMS,
+		MaxBackoffMS:     cfg.MaxBackoffMS,
+		MaxElapsedMS:     cfg.MaxElapsedMS,
+		JitterFraction:   cfg.JitterFraction,
+	}
+}
+
+func retryPolicyInfoForConfig(providerName string, provider appconfig.ProviderConfig) llm.RetryPolicyInfo {
+	r := llm.NewRegistry()
+	policy := retryPolicyFromInfo(r.RetryPolicyForProvider(providerName))
+	retry := provider.Retry
+
+	if retry.MaxAttempts != nil {
+		policy.MaxAttempts = *retry.MaxAttempts
+	}
+
+	if retry.InitialBackoffMS != nil {
+		policy.InitialBackoff = time.Duration(*retry.InitialBackoffMS) * time.Millisecond
+	}
+
+	if retry.MaxBackoffMS != nil {
+		policy.MaxBackoff = time.Duration(*retry.MaxBackoffMS) * time.Millisecond
+	}
+
+	if retry.MaxElapsedMS != nil {
+		policy.MaxElapsedTime = time.Duration(*retry.MaxElapsedMS) * time.Millisecond
+	}
+
+	if retry.JitterFraction != nil {
+		policy.JitterFraction = *retry.JitterFraction
+	}
+
+	r.SetProviderRetry(providerName, policy)
+
+	return r.RetryPolicyForProvider(providerName)
+}
+
+func retryPolicyFromInfo(info llm.RetryPolicyInfo) llm.RetryPolicy {
+	return llm.RetryPolicy{
+		MaxAttempts:    info.MaxAttempts,
+		InitialBackoff: info.InitialBackoff,
+		MaxBackoff:     info.MaxBackoff,
+		MaxElapsedTime: info.MaxElapsedTime,
+		JitterFraction: info.JitterFraction,
+	}
 }
 
 func generationFromConfig(cfg appconfig.Config) generationSettings {

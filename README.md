@@ -216,6 +216,12 @@ agent_loop:
 providers:
   openai:
     base_url: https://api.openai.com
+    retry:
+      max_attempts: 2        # additional retries after the first request
+      initial_backoff_ms: 1000
+      max_backoff_ms: 10000
+      max_elapsed_ms: 30000
+      jitter_fraction: 0.2
   anthropic:
     disabled: false
     base_url: https://api.anthropic.com
@@ -283,6 +289,16 @@ the same catalog-backed estimates; `--route-input-tokens`,
 `--route-output-tokens`, `--route-cache-reuse`, and
 `--route-cache-write-tokens` let operators model prompt-cache read/write costs
 before a live call.
+
+Provider retry settings are per-provider. `max_attempts` is the number of
+additional retries after the first request, and the elapsed budget, max backoff,
+and jitter are applied before each retry. Set `max_attempts: 0` to disable
+provider retries for a specific provider. `atteler config doctor-offline` prints
+the effective retry policy for known and configured providers; live
+`atteler doctor` prints the policy next to each health-checked provider. Retry
+lifecycle events use the `provider_retry` hook type and include attempt,
+provider, model, status, delay, request ID, and final outcome metadata without
+prompt or credential content.
 
 Credentials come from environment variables, supported local harness config,
 provider-owned credential stores, or local daemons depending on the provider.
@@ -1170,6 +1186,7 @@ linked from the row.
 | CLI command routing, grouped help, and compatibility flags | [`cmd/atteler/cli_args.go`](cmd/atteler/cli_args.go), [`cmd/atteler/cli_help_domains.go`](cmd/atteler/cli_help_domains.go), [`cmd/atteler/cli_args_test.go`](cmd/atteler/cli_args_test.go), [`cmd/atteler/cli_help_test.go`](cmd/atteler/cli_help_test.go) |
 | Error-aware streaming completion contract with bounded-buffer guidance | [`pkg/llm/stream.go`](pkg/llm/stream.go), [`pkg/llm/stream_test.go`](pkg/llm/stream_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
 | OpenAI, Anthropic, Codex, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go), [`pkg/llm/capabilities.go`](pkg/llm/capabilities.go), [`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go), [`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go), [`pkg/llm/provider_runtime_test.go`](pkg/llm/provider_runtime_test.go) |
+| Typed provider errors, jittered retry budgets, retry lifecycle events, and provider retry diagnostics | [`pkg/llm/provider_error.go`](pkg/llm/provider_error.go), [`pkg/llm/provider_error_test.go`](pkg/llm/provider_error_test.go), [`pkg/llm/retry.go`](pkg/llm/retry.go), [`pkg/llm/retry_test.go`](pkg/llm/retry_test.go), [`pkg/events/events.go`](pkg/events/events.go), [`cmd/atteler/cli_config_worktree_commands.go`](cmd/atteler/cli_config_worktree_commands.go) |
 | Evidence-backed model routing with catalog metadata, per-agent policy, route-decision artifacts, and usage telemetry | [`pkg/modelroute/catalog.go`](pkg/modelroute/catalog.go), [`pkg/modelroute/decision.go`](pkg/modelroute/decision.go), [`pkg/modelroute/telemetry.go`](pkg/modelroute/telemetry.go), [`pkg/modelroute/modelroute_test.go`](pkg/modelroute/modelroute_test.go), [`pkg/llm/llm.go`](pkg/llm/llm.go), [`cmd/atteler/route_decision_event.go`](cmd/atteler/route_decision_event.go), [`cmd/atteler/agent_resolution_test.go`](cmd/atteler/agent_resolution_test.go) |
 | Configuration loading, migration, redacted diagnostics, atomic state, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/migrate.go`](pkg/config/migrate.go), [`pkg/config/migrate_test.go`](pkg/config/migrate_test.go), [`pkg/config/diagnostics.go`](pkg/config/diagnostics.go), [`pkg/config/diagnostics_test.go`](pkg/config/diagnostics_test.go), [`pkg/config/redaction.go`](pkg/config/redaction.go), [`pkg/config/state.go`](pkg/config/state.go), [`pkg/config/state_test.go`](pkg/config/state_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
 | Sessions, transcript search/export, evaluations, failures, provenance-rich artifacts, multi-agent run audits, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`cmd/atteler/multi_agent_run_commands.go`](cmd/atteler/multi_agent_run_commands.go), [`cmd/atteler/multi_agent_run_commands_test.go`](cmd/atteler/multi_agent_run_commands_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/artifactmerge/artifactmerge.go`](pkg/artifactmerge/artifactmerge.go), [`pkg/artifactmerge/artifactmerge_test.go`](pkg/artifactmerge/artifactmerge_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |

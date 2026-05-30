@@ -45,6 +45,8 @@ const (
 	CommandOutput = "command_output"
 	// ToolExecute is emitted when Atteler invokes a provider/tool.
 	ToolExecute = "tool_execute"
+	// ProviderRetry is emitted for each provider retry schedule/final outcome.
+	ProviderRetry = "provider_retry"
 	// AgentExecute is emitted when a configured agent is selected for work.
 	AgentExecute = "agent_execute"
 	// RouteDecision is emitted when model routing selects or rejects candidates.
@@ -81,6 +83,7 @@ var supportedEventTypes = []SupportedEventType{
 	{Type: Error, Description: "Emitted when an LLM request or session operation fails."},
 	{Type: FileRead, Description: "Emitted when Atteler reads a user or project file."},
 	{Type: FileWrite, Description: "Emitted when Atteler writes a local file."},
+	{Type: ProviderRetry, Description: "Emitted when provider retry lifecycle state changes."},
 	{Type: RouteDecision, Description: "Emitted when model routing selects or rejects candidates."},
 	{Type: SessionEnd, Description: "Emitted when an interactive or one-shot session ends."},
 	{Type: SessionStart, Description: "Emitted when an interactive or one-shot session starts."},

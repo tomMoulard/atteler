@@ -1681,6 +1681,10 @@ func setProvider(cfg *Config, name string, provider ProviderConfig) {
 		current.TimeoutSeconds = provider.TimeoutSeconds
 	}
 
+	if provider.Retry.hasFields() {
+		current.Retry = provider.Retry
+	}
+
 	cfg.Providers[name] = current
 }
 

@@ -200,6 +200,7 @@ type Registry struct {
 	modelProvenance    map[string]map[string]ModelProvenance
 	catalogProvenance  map[string]map[string]ModelProvenance
 	modelOverrides     map[string]map[string]bool
+	providerRetries    map[string]retryConfig
 	providerModelsLive map[string]bool
 	fallback           string
 	defaultModel       string
@@ -223,6 +224,7 @@ func NewRegistry() *Registry {
 		modelProvenance:    make(map[string]map[string]ModelProvenance),
 		catalogProvenance:  make(map[string]map[string]ModelProvenance),
 		modelOverrides:     make(map[string]map[string]bool),
+		providerRetries:    make(map[string]retryConfig),
 		providerModelsLive: make(map[string]bool),
 		retry:              defaultRetryConfig(),
 		routeTelemetry:     modelroute.NewTelemetry(),
@@ -231,11 +233,68 @@ func NewRegistry() *Registry {
 
 // SetRetry overrides the default retry policy. Pass a zero MaxAttempts to
 // disable retries entirely, which is useful for fast test runs.
-func (r *Registry) SetRetry(cfg retryConfig) {
+func (r *Registry) SetRetry(cfg RetryPolicy) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.retry = cfg
+}
+
+// SetProviderRetry overrides the retry policy for one provider. Pass a zero
+// MaxAttempts to disable retries for that provider.
+func (r *Registry) SetProviderRetry(providerName string, cfg RetryPolicy) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.providerRetries == nil {
+		r.providerRetries = make(map[string]retryConfig)
+	}
+
+	r.providerRetries[providerName] = cfg
+}
+
+func (r *Registry) applyProviderRetryConfig(providerName string, cfg RetryPolicyConfig) {
+	if !cfg.hasOverrides() {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.providerRetries == nil {
+		r.providerRetries = make(map[string]retryConfig)
+	}
+
+	r.providerRetries[providerName] = cfg.apply(r.retryPolicyForProviderLocked(providerName))
+}
+
+// RetryPolicyForProvider returns the active retry policy for diagnostics.
+func (r *Registry) RetryPolicyForProvider(providerName string) RetryPolicyInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.retryPolicyForProviderLocked(providerName).info()
+}
+
+func (r *Registry) retryPolicyForProviderLocked(providerName string) retryConfig {
+	if cfg, ok := r.providerRetries[providerName]; ok {
+		return cfg
+	}
+
+	return r.retry
+}
+
+func contextualizeProviderError(providerName string, err error) error {
+	var providerErr *ProviderError
+	if errors.As(err, &providerErr) {
+		if providerErr.Provider == "" {
+			return fmt.Errorf("llm: %s: %w", providerName, err)
+		}
+
+		return err
+	}
+
+	return fmt.Errorf("llm: %s: %w", providerName, err)
 }
 
 // RouteTelemetry returns the registry-owned route telemetry store.
@@ -453,17 +512,17 @@ func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Respon
 
 	// Snapshot retry config under the lock so concurrent SetRetry calls are safe.
 	r.mu.RLock()
-	retryCfg := r.retry
+	retryCfg := r.retryPolicyForProviderLocked(p.Name())
 	r.mu.RUnlock()
 
 	emitToolExecute(ctx, p, params, adjustments)
 
 	startedAt := time.Now()
 
-	resp, err := completeWithRetry(ctx, retryCfg, func(ctx context.Context) (*Response, error) {
+	resp, err := completeWithRetry(ctx, retryCfg, retryMetadata{provider: p.Name(), model: params.Model}, func(ctx context.Context) (*Response, error) {
 		providerResp, completeErr := p.Complete(ctx, params)
 		if completeErr != nil {
-			wrappedErr := fmt.Errorf("llm: %s: %w", p.Name(), completeErr)
+			wrappedErr := contextualizeProviderError(p.Name(), completeErr)
 			r.recordRouteFailure(p.Name(), params.Model, wrappedErr)
 
 			return nil, wrappedErr
@@ -637,13 +696,13 @@ func (r *Registry) recordRouteFailure(providerName, requestedModel string, err e
 	}
 
 	candidate, _ := routeObservationCandidate(providerName, requestedModel)
-	retryAfter, retryable := isRetryable(err)
+	decision := retryDecisionForError(err)
 
 	telemetry.RecordFailure(candidate, modelroute.Failure{
-		RetryAfter:  retryAfter,
+		RetryAfter:  decision.retryAfter,
 		Error:       err.Error(),
-		Retryable:   retryable,
-		RateLimited: isRateLimitError(err),
+		Retryable:   decision.retryable,
+		RateLimited: decision.statusCode == 429 || decision.retryAfter > 0,
 	}, time.Now().UTC())
 }
 
@@ -1579,6 +1638,7 @@ type ProviderHealth struct {
 	LiveModels      []string
 	Checks          []ReadinessCheck
 	Warnings        []string
+	RetryPolicy     RetryPolicyInfo
 	ModelSource     ModelCatalogSource
 	Healthy         bool
 	Cached          bool

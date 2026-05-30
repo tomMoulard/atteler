@@ -23,6 +23,7 @@ func TestSupportedEventTypes_ReturnsStableSortedEvents(t *testing.T) {
 		Error,
 		FileRead,
 		FileWrite,
+		ProviderRetry,
 		RouteDecision,
 		SessionEnd,
 		SessionStart,
