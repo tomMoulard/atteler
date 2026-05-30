@@ -1,0 +1,163 @@
+name: Symphony-dispatchable task
+description: Request an explicitly automation-dispatchable coding task with safety, scope, and verification details.
+title: "[Symphony]: "
+labels: ["symphony"]
+projects: ["tomMoulard/3"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form only when you are explicitly opting a task into Symphony automation. Roadmap/project membership alone is not dispatch consent; this template adds the `symphony` label and requires a public-safe, verifiable scope.
+  - type: checkboxes
+    id: dispatch_opt_in
+    attributes:
+      label: Explicit automation opt-in
+      options:
+        - label: I explicitly request Symphony automation for this issue.
+          required: true
+        - label: This task is scoped for a coding agent and can be verified by commands, tests, or concrete file review.
+          required: true
+        - label: I have removed secrets, credentials, private data, and unsafe exploit details from this public issue.
+          required: true
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One sentence describing the task for automation routing.
+      placeholder: "Add ... and verify with ..."
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Provide issue links, file references, command output, failing tests, or docs proving the task is needed.
+      placeholder: |
+        - Related issue: #...
+        - File references: ...
+        - Failing command/output: ...
+    validations:
+      required: true
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Current behavior
+      description: What exists today, and what should the agent inspect first?
+      placeholder: "Currently ..."
+    validations:
+      required: true
+  - type: textarea
+    id: desired_behavior
+    attributes:
+      label: Desired behavior
+      description: What should be true when the automation run is done?
+      placeholder: "After completion ..."
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope / boundaries
+      description: What may the automation run change, and what must it leave alone?
+      placeholder: |
+        In scope:
+        - ...
+        Out of scope:
+        - ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Match the atteler roadmap Area project field.
+      options:
+        - Roadmap
+        - CLI/UX
+        - Scanner
+        - RAG
+        - Review Gates
+        - Workflow Audit
+        - Providers
+        - Permissions
+        - Worktree
+        - SDK
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Affected provider
+      description: Name the provider/model/backend if relevant; enter `none` when not provider-specific.
+      placeholder: "openai, anthropic, codex, ollama, none"
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      description: Proposed atteler roadmap Status value. New issues normally start as Todo.
+      options:
+        - Todo
+        - In Progress
+        - Done
+      default: 0
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Match the atteler roadmap Priority project field.
+      options:
+        - P0 - Now
+        - P1 - Next
+        - P2 - Later
+      default: 1
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      description: Match the atteler roadmap Risk project field.
+      options:
+        - Trust/Safety
+        - Product Coherence
+        - Architecture Debt
+        - Quality Signal
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification command
+      description: The smallest useful command or review that proves the task. Say `not run` only with a reason.
+      placeholder: "go test ./... -run TestName -count=1, make lint, or focused manual review"
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: Bullet the observable conditions that must be true before the automation task can close.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: automation_dispatch
+    attributes:
+      label: Automation dispatch intent
+      description: Explain why this is safe and suitable for Symphony rather than human-only triage.
+      placeholder: "This is safe for Symphony because ..."
+    validations:
+      required: true
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Duplicate search
+      options:
+        - label: I searched existing issues and linked likely duplicates or related issues above.
+          required: true

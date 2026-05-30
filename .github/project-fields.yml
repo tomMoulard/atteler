@@ -1,0 +1,32 @@
+# Supported GitHub Project field vocabulary for the atteler roadmap.
+# Source: user project `tomMoulard/3` (`atteler roadmap`), refreshed 2026-05-30.
+# Keep this file in sync with the live ProjectV2 single-select options; the
+# repository issue-template test fails when forms or triage docs drift from it.
+project: atteler roadmap
+owner: tomMoulard
+number: 3
+fields:
+  Status:
+    - Todo
+    - In Progress
+    - Done
+  Priority:
+    - P0 - Now
+    - P1 - Next
+    - P2 - Later
+  Area:
+    - Roadmap
+    - CLI/UX
+    - Scanner
+    - RAG
+    - Review Gates
+    - Workflow Audit
+    - Providers
+    - Permissions
+    - Worktree
+    - SDK
+  Risk:
+    - Trust/Safety
+    - Product Coherence
+    - Architecture Debt
+    - Quality Signal

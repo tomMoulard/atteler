@@ -43,6 +43,9 @@ jobs:
       - name: Context convention scan
         run: go test ./pkg/watch -run TestRepositoryContextRootsStayAtEntrypoints -count=1
 
+      - name: Issue template vocabulary check
+        run: go test ./test/repository -count=1
+
       - name: Test
         run: make test
 

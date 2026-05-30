@@ -1,0 +1,167 @@
+name: Provider integration
+description: Request or change an LLM provider/model integration with capability, evidence, and verification details.
+title: "[Provider]: "
+labels: ["enhancement", "provider"]
+projects: ["tomMoulard/3"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for provider adapters, model routing, auth, capability flags, pricing/catalog behavior, and provider-specific diagnostics.
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One sentence describing the provider integration need.
+      placeholder: "Add/adjust ... support for ..."
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Affected provider
+      description: Name the provider, model family, SDK, or backend.
+      placeholder: "openai, anthropic, codex, ollama, openrouter, ..."
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Link official docs, API responses, issue reports, catalog output, or local command evidence.
+      placeholder: |
+        - Provider docs: ...
+        - atteler providers ... output: ...
+    validations:
+      required: true
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Current behavior
+      description: How does atteler handle this provider/model today?
+      placeholder: "Currently atteler ..."
+    validations:
+      required: true
+  - type: textarea
+    id: desired_behavior
+    attributes:
+      label: Desired behavior
+      description: What should the provider integration do after the change?
+      placeholder: "atteler should ..."
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope / boundaries
+      description: What provider behavior is in scope, and what should not be changed?
+      placeholder: |
+        In scope:
+        - ...
+        Out of scope:
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: capability_scope
+    attributes:
+      label: Capability scope
+      description: List affected auth, streaming, tools, reasoning, seed, pricing, retry, diagnostics, or model-catalog behavior.
+      placeholder: |
+        - Auth: ...
+        - Model catalog: ...
+        - Tool use / reasoning / pricing: ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Match the atteler roadmap Area project field.
+      options:
+        - Roadmap
+        - CLI/UX
+        - Scanner
+        - RAG
+        - Review Gates
+        - Workflow Audit
+        - Providers
+        - Permissions
+        - Worktree
+        - SDK
+      default: 6
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      description: Proposed atteler roadmap Status value. New issues normally start as Todo.
+      options:
+        - Todo
+        - In Progress
+        - Done
+      default: 0
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Match the atteler roadmap Priority project field.
+      options:
+        - P0 - Now
+        - P1 - Next
+        - P2 - Later
+      default: 1
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      description: Match the atteler roadmap Risk project field.
+      options:
+        - Trust/Safety
+        - Product Coherence
+        - Architecture Debt
+        - Quality Signal
+      default: 2
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification command
+      description: Which local or live-safe command proves the integration? Say `not run` only with a reason.
+      placeholder: "make test TESTPACKAGE=\"./pkg/llm\" or atteler providers ..."
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: Bullet the observable conditions that must be true before this can close.
+      placeholder: |
+        - [ ] Provider behavior is covered by unit tests.
+        - [ ] Docs/diagnostics explain unsupported parameters.
+    validations:
+      required: true
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Duplicate search
+      options:
+        - label: I searched existing issues and linked likely duplicates or related issues above.
+          required: true
+  - type: dropdown
+    id: automation_dispatch
+    attributes:
+      label: Automation dispatch intent
+      description: Provider roadmap items do not dispatch Symphony by default. Maintainers add the `symphony` label only after explicit opt-in and safety review.
+      options:
+        - No — roadmap/triage only; do not dispatch Symphony
+        - Maybe — maintainer should decide before adding the symphony label
+      default: 0
+    validations:
+      required: true

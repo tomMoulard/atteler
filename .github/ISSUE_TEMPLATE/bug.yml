@@ -1,0 +1,156 @@
+name: Bug report
+description: Report a reproducible defect with evidence, expected behavior, and routing metadata.
+title: "[Bug]: "
+labels: ["bug", "quality"]
+projects: ["tomMoulard/3"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for behavior that is broken or regressed. If the report includes exploitable security details, secrets, or private user data, stop and use the private vulnerability report link from the template chooser instead.
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One sentence describing the bug and user-visible impact.
+      placeholder: "atteler ... fails when ..."
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Paste logs, command output, screenshots, trace IDs, linked issues, or other concrete proof.
+      placeholder: |
+        Command/output, stack trace, screenshots, or links that prove the behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Current behavior
+      description: What happens today? Include exact commands, inputs, or reproduction steps when possible.
+      placeholder: |
+        1. Run ...
+        2. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: desired_behavior
+    attributes:
+      label: Desired behavior
+      description: What should happen instead?
+      placeholder: "The command should ..."
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope / boundaries
+      description: What is in scope for this bug report, and what should not be changed?
+      placeholder: |
+        In scope:
+        - ...
+        Out of scope:
+        - ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Match the atteler roadmap Area project field.
+      options:
+        - Roadmap
+        - CLI/UX
+        - Scanner
+        - RAG
+        - Review Gates
+        - Workflow Audit
+        - Providers
+        - Permissions
+        - Worktree
+        - SDK
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Affected provider
+      description: Name the provider/model/backend if relevant; enter `none` when not provider-specific.
+      placeholder: "openai, anthropic, codex, ollama, none"
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      description: Proposed atteler roadmap Status value. New issues normally start as Todo.
+      options:
+        - Todo
+        - In Progress
+        - Done
+      default: 0
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Match the atteler roadmap Priority project field.
+      options:
+        - P0 - Now
+        - P1 - Next
+        - P2 - Later
+      default: 1
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      description: Match the atteler roadmap Risk project field.
+      options:
+        - Trust/Safety
+        - Product Coherence
+        - Architecture Debt
+        - Quality Signal
+      default: 3
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification command
+      description: Which command proves the bug or verifies the fix? Say `not run` only with a reason.
+      placeholder: "go test ./... -run TestName -count=1"
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: Bullet the observable conditions that must be true before this can close.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: duplicates
+    attributes:
+      label: Duplicate search
+      options:
+        - label: I searched existing issues and linked likely duplicates or related issues above.
+          required: true
+  - type: dropdown
+    id: automation_dispatch
+    attributes:
+      label: Automation dispatch intent
+      description: Ordinary roadmap/bug issues do not dispatch Symphony. Maintainers add the `symphony` label only after explicit opt-in and safety review.
+      options:
+        - No — roadmap/triage only; do not dispatch Symphony
+        - Maybe — maintainer should decide before adding the symphony label
+      default: 0
+    validations:
+      required: true
