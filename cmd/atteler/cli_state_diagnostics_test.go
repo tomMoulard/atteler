@@ -406,6 +406,30 @@ func TestStartupProviderReadinessSummary_FiltersUnrequestedProviders(t *testing.
 	assert.NotContains(t, summary, "anthropic")
 }
 
+func TestStartupProviderReadinessSummary_UsesRegionalHostnameRemediation(t *testing.T) {
+	t.Parallel()
+
+	summary := startupProviderReadinessSummary(llm.ProviderReadinessReport{
+		Providers: []llm.ProviderReadiness{
+			{
+				Name:       "openai",
+				Status:     llm.ProviderStatusFailedHealthCheck,
+				Configured: true,
+				Error: errors.New(
+					`openai: models HTTP 401: {"error":{"message":"Attempted to access resource with incorrect regional hostname. Please make your request to us.api.openai.com","type":"invalid_request_error"}}`,
+				),
+			},
+		},
+	})
+
+	assert.Contains(t, summary, "openai failed_health_check")
+	assert.Contains(t, summary, "OpenAI regional hostname mismatch")
+	assert.Contains(t, summary, "OPENAI_BASE_URL")
+	assert.Contains(t, summary, "https://us.api.openai.com")
+	assert.NotContains(t, summary, "invalid_request_error")
+	assert.NotContains(t, summary, "models HTTP 401")
+}
+
 func TestStartupProviderReadinessSummary_IncludesDefaultSelectionWarnings(t *testing.T) {
 	t.Parallel()
 

@@ -242,7 +242,7 @@ func startupProviderReadinessSummary(report llm.ProviderReadinessReport) string 
 		case llm.ProviderStatusFailed, llm.ProviderStatusFailedHealthCheck:
 			reason := provider.Name + " " + string(provider.Status)
 			if provider.Error != nil {
-				reason += ": " + truncateStartupReadinessError(provider.Error.Error())
+				reason += ": " + truncateStartupReadinessError(llm.ProviderFailureSummary(provider.Error))
 			}
 
 			unavailable = append(unavailable, reason)

@@ -177,6 +177,13 @@ func classifiedProviderError(err error) string {
 	return msg
 }
 
+// ProviderFailureSummary returns a concise, user-facing provider failure
+// summary. Known configuration failures include remediation hints and avoid
+// repeating long raw provider payloads.
+func ProviderFailureSummary(err error) string {
+	return classifiedProviderError(err)
+}
+
 func wrapOpenAIRegionalHostnameError(err error) error {
 	if err == nil || !isOpenAIRegionalHostnameError(err) {
 		return err
