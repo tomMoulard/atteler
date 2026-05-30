@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1720,6 +1721,60 @@ func TestRegistry_CompleteWithFallbackRetriesRateLimitBeforeFallback(t *testing.
 
 	_, providerLimited := telemetry.ProviderRateLimitObservation(providerClaudeCode, time.Now().UTC())
 	assert.False(t, providerLimited)
+}
+
+func TestRegistry_CompleteWithFallbackRoutesAroundLongRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{
+		MaxAttempts:    2,
+		InitialBackoff: time.Millisecond,
+	})
+
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+
+	attempts := 0
+	primary := &retryFakeProvider{
+		fakeProvider: fakeProvider{
+			name:   providerClaudeCode,
+			models: []string{"claude-opus-4-7"},
+			resp:   &Response{Content: "primary"},
+		},
+		failCount: 3,
+		failErr: &ProviderError{
+			Provider:     providerClaudeCode,
+			StatusCode:   http.StatusTooManyRequests,
+			RetryAfter:   60 * time.Second,
+			Message:      "rate limited",
+			Retryability: RetryabilityRetryable,
+		},
+		attempts: &attempts,
+	}
+	fallback := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "fallback"},
+	}
+
+	r.Register(primary)
+	r.Register(fallback)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "claude-code/claude-opus-4-7",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, err)
+	assert.Equal(t, "fallback", resp.Content)
+	assert.Equal(t, 1, attempts, "long Retry-After should mark cooldown and try another provider without sleeping through retries")
+	require.Len(t, fallback.calls, 1)
+
+	obs, ok := telemetry.Snapshot("claude-code/claude-opus-4-7")
+	require.True(t, ok)
+	assert.Equal(t, 1, obs.RateLimitCount)
+	assert.Equal(t, 60000, obs.LastRetryAfterMS)
+	assert.Equal(t, modelroute.RateLimitScopeProvider, obs.LastFailureRateLimitScope)
+	assert.True(t, obs.LastFailureRateLimited)
 }
 
 func TestRegistry_CompleteWithFallbackSkipsRateLimitedProviderSiblings(t *testing.T) {

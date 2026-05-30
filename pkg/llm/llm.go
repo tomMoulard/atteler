@@ -530,6 +530,15 @@ func (r *Registry) SetProviderModelOverride(providerName, model string) error {
 // Transient errors (429, 5xx) are retried according to the registry's retry
 // configuration.
 func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
+	// Snapshot retry config under the lock so concurrent SetRetry calls are safe.
+	r.mu.RLock()
+	retryCfg := r.retry
+	r.mu.RUnlock()
+
+	return r.complete(ctx, params, retryCfg)
+}
+
+func (r *Registry) complete(ctx context.Context, params CompleteParams, retryCfg retryConfig) (*Response, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, err
 	}
@@ -539,14 +548,14 @@ func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Respon
 	} else if routed {
 		params = routedParams
 		if len(routedFallbacks) > 0 {
-			return r.completeResolvedWithFallback(ctx, params, routedFallbacks)
+			return r.completeResolvedWithFallback(ctx, params, routedFallbacks, retryCfg)
 		}
 	}
 
-	return r.completeResolved(ctx, params)
+	return r.completeResolved(ctx, params, retryCfg)
 }
 
-func (r *Registry) completeResolved(ctx context.Context, params CompleteParams) (*Response, error) {
+func (r *Registry) completeResolved(ctx context.Context, params CompleteParams, retryCfg retryConfig) (*Response, error) {
 	p, params, err := r.resolve(params)
 	if err != nil {
 		return nil, err
@@ -563,8 +572,9 @@ func (r *Registry) completeResolved(ctx context.Context, params CompleteParams) 
 
 	// Snapshot retry config under the lock so concurrent SetRetry calls are safe.
 	r.mu.RLock()
-	retryCfg := r.retryPolicyForProviderLocked(p.Name())
+	providerRetryCfg := r.retryPolicyForProviderLocked(p.Name())
 	r.mu.RUnlock()
+	retryCfg = mergeRouteRetryConfig(providerRetryCfg, retryCfg)
 
 	emitToolExecute(ctx, p, params, adjustments)
 
@@ -607,10 +617,11 @@ func (r *Registry) completeResolvedWithFallback(
 	ctx context.Context,
 	params CompleteParams,
 	fallbackModels []string,
+	retryCfg retryConfig,
 ) (*Response, error) {
 	models := modelFallbackChain(params.Model, fallbackModels)
 	if len(models) == 0 {
-		return r.completeResolved(ctx, params)
+		return r.completeResolved(ctx, params, retryCfg)
 	}
 
 	var failures []error
@@ -623,7 +634,7 @@ func (r *Registry) completeResolvedWithFallback(
 		next := params
 		next.Model = model
 
-		resp, err := r.completeResolved(ctx, next)
+		resp, err := r.completeResolved(ctx, next, retryCfg)
 		if err == nil {
 			return resp, nil
 		}
@@ -657,6 +668,8 @@ func (r *Registry) CompleteWithFallback(
 	if len(models) == 0 {
 		return r.Complete(ctx, params)
 	}
+
+	retryCfg := r.fallbackRetryConfig(len(models) > 1)
 
 	var failures []fallbackAttemptFailure
 
@@ -696,7 +709,7 @@ func (r *Registry) CompleteWithFallback(
 		next := params
 		next.Model = model
 
-		resp, err := r.Complete(ctx, next)
+		resp, err := r.complete(ctx, next, retryCfg)
 		if err == nil {
 			return resp, nil
 		}
@@ -724,6 +737,43 @@ func (r *Registry) CompleteWithFallback(
 	r.mu.RUnlock()
 
 	return nil, newFallbackError(failures, readiness)
+}
+
+func (r *Registry) fallbackRetryConfig(hasAlternateRoute bool) retryConfig {
+	r.mu.RLock()
+	cfg := r.retry
+	r.mu.RUnlock()
+
+	if !hasAlternateRoute || cfg.MaxAttempts <= 0 || cfg.MaxRetryAfter > 0 {
+		return cfg
+	}
+
+	// In a fallback chain, long provider Retry-After values are better recorded
+	// as cooldown telemetry while another provider is tried. Short Retry-After
+	// values still get one normal recovery chance before routing away.
+	cfg.MaxRetryAfter = fallbackMaxRetryAfter(cfg)
+
+	return cfg
+}
+
+func mergeRouteRetryConfig(providerCfg, routeCfg retryConfig) retryConfig {
+	if routeCfg.MaxRetryAfter <= 0 {
+		return providerCfg
+	}
+
+	if providerCfg.MaxRetryAfter <= 0 || routeCfg.MaxRetryAfter < providerCfg.MaxRetryAfter {
+		providerCfg.MaxRetryAfter = routeCfg.MaxRetryAfter
+	}
+
+	return providerCfg
+}
+
+func fallbackMaxRetryAfter(cfg retryConfig) time.Duration {
+	if cfg.InitialBackoff > 0 {
+		return cfg.InitialBackoff
+	}
+
+	return time.Second
 }
 
 func fallbackObservationModel(model string, target fallbackAttemptTarget) string {
