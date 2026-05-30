@@ -45,7 +45,6 @@ const (
 	issueFieldTypeInput      = "input"
 	issueFieldTypeMarkdown   = "markdown"
 	issueFieldTypeTextarea   = "textarea"
-	issueFieldTypeUpload     = "upload"
 )
 
 var projectFieldIDs = map[string]string{
@@ -65,7 +64,6 @@ var allowedIssueFieldTypes = map[string]struct{}{
 	issueFieldTypeInput:      {},
 	issueFieldTypeMarkdown:   {},
 	issueFieldTypeTextarea:   {},
-	issueFieldTypeUpload:     {},
 }
 
 var supportedIssueLabels = map[string]struct{}{
