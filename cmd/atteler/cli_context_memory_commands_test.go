@@ -724,6 +724,23 @@ func TestSourceVectorIndexRequestedUsesExplicitLexicalSourceConfig(t *testing.T)
 	assert.True(t, requested)
 }
 
+func TestSourceVectorIndexRequestedIgnoresGlobalIndexPathWithoutSourceConfig(t *testing.T) {
+	t.Parallel()
+
+	requested, err := sourceVectorIndexRequested(appconfig.VectorConfig{
+		IndexPath: ".atteler/shared-vector-index.json",
+	}, vector.SourceKindSession)
+	require.NoError(t, err)
+	assert.False(t, requested)
+
+	root := t.TempDir()
+	settings, err := sourceVectorSettings(root, appconfig.VectorConfig{
+		IndexPath: ".atteler/shared-vector-index.json",
+	}, vector.SourceKindSession, sourceVectorSessionIndex)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(root, sourceVectorSessionIndex), settings.IndexPath)
+}
+
 func TestRetrievalSearcherUsesPersistedSessionVectorSourceConfig(t *testing.T) {
 	t.Parallel()
 
