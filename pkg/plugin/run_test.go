@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/permission"
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
 func TestRunEntrypoint_CapturesOutputAndUsesPluginRoot(t *testing.T) {
@@ -153,6 +157,148 @@ printf executed > executed
 	require.NoFileExists(t, marker)
 }
 
+func TestRunEntrypoint_RequiresCompatibilityDeclarationBeforeExecution(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	marker := filepath.Join(root, "executed")
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf executed > executed
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	manifest.MinimumAttelerVersion = ""
+
+	_, err := runEntrypointForTest(t, root, manifest, "run", 5*time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "min_atteler_version must be declared")
+	require.NoFileExists(t, marker)
+}
+
+func TestRunEntrypoint_RequiresOutputContractBeforeExecution(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	marker := filepath.Join(root, "executed")
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf executed > executed
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	manifest.EntrypointContracts = nil
+
+	_, err := runEntrypointForTest(t, root, manifest, "run", 5*time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `entrypoint "run" output contract must be declared`)
+	require.NoFileExists(t, marker)
+}
+
+func TestRunEntrypoint_CentralPermissionPolicyDeniesExecution(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	marker := filepath.Join(root, "executed")
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf executed > executed
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	acceptedPolicy := AcceptManifestPolicy(manifest)
+	permissionPolicy := permission.DefaultPolicy()
+	permissionPolicy.SetMode(permission.OperationExecute, permission.ModeDeny)
+
+	_, err := RunEntrypointWithOptions(
+		context.Background(),
+		root,
+		manifest,
+		"run",
+		RunOptions{
+			Policy:     &acceptedPolicy,
+			Permission: &permissionPolicy,
+			Timeout:    5 * time.Second,
+		},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "permission.execute.deny")
+	require.True(t, permission.ErrDenied(err))
+	require.NoFileExists(t, marker)
+}
+
+func TestRunEntrypoint_CentralPermissionPolicyDeniesDeclaredNetwork(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	marker := filepath.Join(root, "executed")
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf executed > executed
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	manifest.Permissions.Network = NetworkPermissions{Allow: true, Hosts: []string{"api.example.com"}}
+	acceptedPolicy := AcceptManifestPolicy(manifest)
+	permissionPolicy := permission.DefaultPolicy()
+	permissionPolicy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &permissionPolicy)
+
+	_, err := RunEntrypointWithOptions(
+		ctx,
+		root,
+		manifest,
+		"run",
+		RunOptions{
+			Policy:  &acceptedPolicy,
+			Timeout: 5 * time.Second,
+		},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "permission.network.deny")
+	require.Contains(t, err.Error(), "plugin entrypoint runner/run")
+
+	var permissionErr *permission.Error
+	require.ErrorAs(t, err, &permissionErr)
+	requirePermissionOperation(t, permissionErr.Decision.Operations, permission.OperationNetwork, permission.Operation{
+		Metadata: map[string]string{
+			"plugin":     "runner",
+			"entrypoint": "run",
+		},
+		Kind:   permission.OperationNetwork,
+		Action: "plugin entrypoint runner/run",
+		Target: "api.example.com",
+		Source: "atteler.plugin.runner.run",
+	})
+	require.NoFileExists(t, marker)
+}
+
+func TestRunEntrypoint_ReadOnlyPolicyDeniesPluginExecution(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	marker := filepath.Join(root, "executed")
+	writeScript(t, root, "bin/printf", `#!/bin/sh
+printf executed > executed
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/printf"})
+	acceptedPolicy := AcceptManifestPolicy(manifest)
+	permissionPolicy := permission.ReadOnlyPolicy()
+
+	_, err := RunEntrypointWithOptions(
+		context.Background(),
+		root,
+		manifest,
+		"run",
+		RunOptions{
+			Policy:     &acceptedPolicy,
+			Permission: &permissionPolicy,
+			Timeout:    5 * time.Second,
+		},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "permission.execute.deny")
+	require.True(t, permission.ErrDenied(err))
+	require.NoFileExists(t, marker)
+}
+
 func TestRunEntrypoint_RequiresActiveContext(t *testing.T) {
 	t.Parallel()
 
@@ -176,6 +322,35 @@ printf executed > executed
 	_, err = RunEntrypointWithOptions(ctx, root, manifest, "run", RunOptions{Timeout: 5 * time.Second, Policy: &policy})
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
+	require.NoFileExists(t, marker)
+}
+
+func TestRunEntrypoint_RejectsIncompatibleAttelerVersion(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	marker := filepath.Join(root, "executed")
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf executed > executed
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	manifest.MinimumAttelerVersion = "9.0.0"
+	acceptedPolicy := AcceptManifestPolicy(manifest)
+
+	_, err := RunEntrypointWithOptions(
+		context.Background(),
+		root,
+		manifest,
+		"run",
+		RunOptions{
+			Policy:         &acceptedPolicy,
+			Timeout:        5 * time.Second,
+			AttelerVersion: "1.2.3",
+		},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "requires atteler >= 9.0.0")
 	require.NoFileExists(t, marker)
 }
 
@@ -475,6 +650,105 @@ printf 'ABCDEFGHIJKLMNOPQRSTUVWXYZ\n' >&2
 	require.Contains(t, result.Stderr, "output truncated")
 }
 
+func TestRunEntrypoint_AdaptsStructuredJSONOutput(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf '{"summary":"ok","passed":true}\n'
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	manifest.EntrypointContracts = map[string]EntrypointContract{
+		"run": {
+			Output: &StructuredOutputContract{
+				Format: OutputFormatJSON,
+				Schema: &JSONSchema{
+					Type:     "object",
+					Required: []string{"summary", "passed"},
+					Properties: map[string]JSONSchemaProperty{
+						"summary": {Type: "string"},
+						"passed":  {Type: "boolean"},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := runEntrypointForTest(t, root, manifest, "run", 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{
+		"summary": "ok",
+		"passed":  true,
+	}, result.Structured)
+}
+
+func TestRunEntrypoint_RejectsMalformedStructuredOutput(t *testing.T) {
+	root := t.TempDir()
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	t.Setenv(attshell.EnvAuditDir, auditDir)
+
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf 'not-json\n'
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	manifest.EntrypointContracts = map[string]EntrypointContract{
+		"run": {
+			Output: &StructuredOutputContract{
+				Format: OutputFormatJSON,
+				Schema: &JSONSchema{
+					Type:     "object",
+					Required: []string{"summary"},
+				},
+			},
+		},
+	}
+
+	result, err := runEntrypointForTest(t, root, manifest, "run", 5*time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "parse JSON stdout")
+	require.Equal(t, "not-json\n", result.Stdout)
+	require.Nil(t, result.Structured)
+
+	records := readPluginAuditRecords(t, auditDir)
+	require.Len(t, records, 2)
+	require.Equal(t, "finish", records[1].Phase)
+	require.Contains(t, records[1].Error, "parse JSON stdout")
+}
+
+func TestRunEntrypoint_RejectsStructuredOutputMissingRequiredField(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf '{"summary":"missing passed"}\n'
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	manifest.EntrypointContracts = map[string]EntrypointContract{
+		"run": {
+			Output: &StructuredOutputContract{
+				Format: OutputFormatJSON,
+				Schema: &JSONSchema{
+					Type:     "object",
+					Required: []string{"summary", "passed"},
+					Properties: map[string]JSONSchemaProperty{
+						"summary": {Type: "string"},
+						"passed":  {Type: "boolean"},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := runEntrypointForTest(t, root, manifest, "run", 5*time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `missing required property "passed"`)
+	require.JSONEq(t, `{"summary":"missing passed"}`, result.Stdout)
+	require.Nil(t, result.Structured)
+}
+
 func TestRunEntrypoint_ValidatesDeclaredArgs(t *testing.T) {
 	t.Parallel()
 
@@ -500,6 +774,49 @@ printf 'mode:%s\n' "$1"
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "is not allowed")
+
+	result, err := RunEntrypointWithOptions(
+		context.Background(),
+		root,
+		manifest,
+		"run",
+		RunOptions{Policy: &policy, Timeout: 5 * time.Second, Args: []string{"safe"}},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "mode:safe\n", result.Stdout)
+}
+
+func TestRunEntrypoint_UsesContractInputArgs(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf 'mode:%s\n' "$1"
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	manifest.EntrypointArgs = nil
+	manifest.EntrypointContracts["run"] = EntrypointContract{
+		Inputs: EntrypointInputs{
+			Args: []ArgumentSpec{{
+				Name:     "mode",
+				Allowed:  []string{"safe"},
+				Required: true,
+			}},
+		},
+		Output: &StructuredOutputContract{Format: OutputFormatText},
+	}
+
+	policy := AcceptManifestPolicy(manifest)
+	_, err := RunEntrypointWithOptions(
+		context.Background(),
+		root,
+		manifest,
+		"run",
+		RunOptions{Policy: &policy, Timeout: 5 * time.Second},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `missing required arg "mode"`)
 
 	result, err := RunEntrypointWithOptions(
 		context.Background(),
@@ -552,17 +869,67 @@ func runEntrypointForTest(
 	})
 }
 
+func readPluginAuditRecords(t *testing.T, auditDir string) []attshell.AuditRecord {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+
+	records := make([]attshell.AuditRecord, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record attshell.AuditRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+
+	return records
+}
+
+func requirePermissionOperation(
+	t *testing.T,
+	operations []permission.Operation,
+	kind permission.OperationKind,
+	want permission.Operation,
+) {
+	t.Helper()
+
+	for _, operation := range operations {
+		if operation.Kind == kind {
+			require.Equal(t, want, operation)
+
+			return
+		}
+	}
+
+	require.Failf(t, "missing permission operation", "kind %s not found in %#v", kind, operations)
+}
+
 func runnableManifest(entrypoints map[string]string) Manifest {
-	entrypointArgs := make(map[string][]ArgumentSpec, len(entrypoints))
+	var (
+		entrypointArgs      = make(map[string][]ArgumentSpec, len(entrypoints))
+		entrypointContracts = make(map[string]EntrypointContract, len(entrypoints))
+	)
+
 	for name := range entrypoints {
 		entrypointArgs[name] = nil
+		entrypointContracts[name] = EntrypointContract{
+			Output: &StructuredOutputContract{Format: OutputFormatText},
+		}
 	}
 
 	return Manifest{
-		Name:           "runner",
-		Version:        "1.0.0",
-		Entrypoints:    entrypoints,
-		EntrypointArgs: entrypointArgs,
+		Name:                  "runner",
+		Version:               "1.0.0",
+		MinimumAttelerVersion: "0.1.0",
+		Entrypoints:           entrypoints,
+		EntrypointArgs:        entrypointArgs,
+		EntrypointContracts:   entrypointContracts,
 		Permissions: &PermissionSet{
 			Filesystem: FilesystemPermissions{
 				Read: []string{"."},

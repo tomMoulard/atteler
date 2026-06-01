@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 func TestRunBash_CapturesStdoutAndEnv(t *testing.T) {
@@ -313,6 +315,69 @@ func TestRunBash_PolicyDenialHappensBeforeProcessStart(t *testing.T) {
 	require.Equal(t, "test-denial", records[0].Caller)
 	require.False(t, records[0].StartedAt.IsZero())
 	require.False(t, records[0].EndedAt.IsZero())
+}
+
+func TestRunBash_CentralPermissionDenialHappensBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	_, err := RunBash(ctx, Options{
+		Command: "touch denied-by-permission",
+		Dir:     tmp,
+		Audit: AuditContext{
+			Caller:   "test-permission-denial",
+			AuditDir: auditDir,
+		},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.NoFileExists(t, filepath.Join(tmp, "denied-by-permission"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Phase)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.write.deny", records[0].DecisionRule)
+	require.Contains(t, records[0].OperationKinds, "execute")
+	require.Contains(t, records[0].OperationKinds, "write")
+}
+
+func TestRunBash_CentralPermissionDenialRedactsCredentialAssignments(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := DefaultPolicy()
+	permissionPolicy := permission.DefaultPolicy()
+	permissionPolicy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &permissionPolicy)
+
+	_, err := RunBash(ctx, Options{
+		Command: `API_TOKEN=super-secret-token printf 'blocked\n'`,
+		Dir:     tmp,
+		Policy:  &policy,
+		Audit: AuditContext{
+			Caller:   "test-permission-redaction",
+			AuditDir: auditDir,
+		},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	require.NotContains(t, err.Error(), "super-secret-token")
+	require.Contains(t, err.Error(), "API_TOKEN=<redacted:API_TOKEN>")
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "permission.credential_access.deny", records[0].DecisionRule)
+	require.NotContains(t, records[0].DecisionReason, "super-secret-token")
+	require.Contains(t, records[0].DecisionReason, "API_TOKEN=<redacted:API_TOKEN>")
 }
 
 func TestRunBash_CommandDenyRuleInspectsShellCommandString(t *testing.T) {

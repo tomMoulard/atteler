@@ -615,6 +615,37 @@ func TestFormatPluginDryRun(t *testing.T) {
 			Path:           "/tmp/plugin/bin/run",
 			Root:           "/tmp/plugin",
 		},
+		Contract: &attelerplugin.EntrypointContract{
+			Inputs: attelerplugin.EntrypointInputs{
+				Args: []attelerplugin.ArgumentSpec{{
+					Name:     "mode",
+					Required: true,
+				}},
+			},
+			Output: &attelerplugin.StructuredOutputContract{
+				Format: attelerplugin.OutputFormatJSON,
+				Schema: &attelerplugin.JSONSchema{Type: "object"},
+			},
+		},
+		Permissions: &attelerplugin.PermissionSet{
+			Filesystem: attelerplugin.FilesystemPermissions{
+				Read:  []string{"."},
+				Write: []string{"tmp"},
+			},
+			Network: attelerplugin.NetworkPermissions{
+				Allow: true,
+				Hosts: []string{"api.example.com"},
+			},
+			Shell: attelerplugin.ShellPermissions{Allow: true},
+			Env:   []string{"PATH"},
+			Tools: []string{"reviewer"},
+		},
+		Output: &attelerplugin.OutputLimits{
+			StdoutMaxBytes: 4096,
+			StderrMaxBytes: 1024,
+		},
+		MinimumAttelerVersion: "1.2.0",
+		PolicyChecked:         true,
 	})
 	for _, want := range []string{
 		"would run plugin",
@@ -622,6 +653,19 @@ func TestFormatPluginDryRun(t *testing.T) {
 		"entrypoint=run",
 		"path=/tmp/plugin/bin/run",
 		"cwd=/tmp/plugin",
+		"policy_checked=true",
+		"output_format=json",
+		"output_schema=true",
+		"min_atteler_version=1.2.0",
+		"output_limits=stdout:4096,stderr:1024",
+		"filesystem.read=[.]",
+		"filesystem.write=[tmp]",
+		"network.allow=true",
+		"network.hosts=[api.example.com]",
+		"shell.allow=true",
+		"env=[PATH]",
+		"tools=[reviewer]",
+		"input_args=1,required:1",
 	} {
 		assert.Contains(t, got, want)
 	}
@@ -671,6 +715,11 @@ printf executed > executed
 	require.NoError(t, os.Chmod(scriptPath, 0o700))
 
 	err := runPluginEntrypoint(t.Context(), []string{root}, nil, "runner/run", "", false, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plugins.policy must accept requested permissions")
+	require.NoFileExists(t, marker)
+
+	err = runPluginEntrypoint(t.Context(), []string{root}, nil, "runner/run", "", true, 5)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "plugins.policy must accept requested permissions")
 	require.NoFileExists(t, marker)
@@ -1172,6 +1221,7 @@ func TestInitRTKPluginWritesManifestAndScripts(t *testing.T) {
 	manifest, err := attelerplugin.LoadDir(dir)
 	require.NoError(t, err)
 	assert.Equal(t, "rtk", manifest.Name)
+	assert.Equal(t, "0.1.0", manifest.MinimumAttelerVersion)
 	assert.Contains(t, manifest.Capabilities, "token-optimization")
 	assert.Equal(t, "bin/init-codex", manifest.Entrypoints["init-codex"])
 	require.NotNil(t, manifest.Permissions)
@@ -1183,8 +1233,14 @@ func TestInitRTKPluginWritesManifestAndScripts(t *testing.T) {
 	require.NotNil(t, manifest.Trust)
 	assert.True(t, manifest.Trust.Enabled)
 	assert.Equal(t, "atteler plugins init-rtk", manifest.Trust.InstallSource)
+	require.NotNil(t, manifest.Provenance)
+	assert.Equal(t, "atteler plugins init-rtk", manifest.Provenance.Source)
 	_, ok := manifest.EntrypointArgs["init-codex"]
 	assert.True(t, ok)
+	contract, ok := manifest.EntrypointContracts["init-codex"]
+	require.True(t, ok)
+	require.NotNil(t, contract.Output)
+	assert.Equal(t, attelerplugin.OutputFormatText, contract.Output.Format)
 
 	snippet := rtkPluginConfigSnippet(dir)
 	assert.Contains(t, snippet, "policy:")

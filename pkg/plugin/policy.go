@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -66,7 +67,7 @@ func clonePermissionSet(in PermissionSet) PermissionSet {
 	return out
 }
 
-func authorizeRun(root string, manifest Manifest, entrypointName string, policy Policy) error {
+func authorizeRun(root string, manifest Manifest, entrypointName string, policy Policy, attelerVersion string) error {
 	if manifest.Permissions == nil {
 		return errors.New("permissions must be declared before running plugin")
 	}
@@ -79,8 +80,20 @@ func authorizeRun(root string, manifest Manifest, entrypointName string, policy 
 		return errors.New("trust provenance must be declared before running plugin")
 	}
 
-	if _, ok := manifest.EntrypointArgs[entrypointName]; !ok {
+	if strings.TrimSpace(manifest.MinimumAttelerVersion) == "" {
+		return errors.New("min_atteler_version must be declared before running plugin")
+	}
+
+	if _, ok := entrypointArgsFor(manifest, entrypointName); !ok {
 		return fmt.Errorf("entrypoint %q args must be declared before running plugin", entrypointName)
+	}
+
+	if _, ok := entrypointOutputContractFor(manifest, entrypointName); !ok {
+		return fmt.Errorf("entrypoint %q output contract must be declared before running plugin", entrypointName)
+	}
+
+	if err := authorizeCompatibility(manifest.MinimumAttelerVersion, attelerVersion); err != nil {
+		return fmt.Errorf("compatibility policy: %w", err)
 	}
 
 	if err := validatePermissions(root, policy.Permissions); err != nil {
@@ -109,6 +122,103 @@ func authorizeRun(root string, manifest Manifest, entrypointName string, policy 
 	}
 
 	return nil
+}
+
+func entrypointArgsFor(manifest Manifest, entrypointName string) ([]ArgumentSpec, bool) {
+	if contract, ok := manifest.EntrypointContracts[entrypointName]; ok && contract.Inputs.Args != nil {
+		return contract.Inputs.Args, true
+	}
+
+	args, ok := manifest.EntrypointArgs[entrypointName]
+
+	return args, ok
+}
+
+func entrypointOutputContractFor(manifest Manifest, entrypointName string) (StructuredOutputContract, bool) {
+	contract, ok := manifest.EntrypointContracts[entrypointName]
+	if !ok || contract.Output == nil {
+		return StructuredOutputContract{}, false
+	}
+
+	return *contract.Output, true
+}
+
+func authorizeCompatibility(minimumAttelerVersion, attelerVersion string) error {
+	minimumAttelerVersion = strings.TrimSpace(minimumAttelerVersion)
+	if minimumAttelerVersion == "" {
+		return nil
+	}
+
+	attelerVersion = strings.TrimSpace(attelerVersion)
+	if attelerVersion == "" || strings.EqualFold(attelerVersion, "dev") {
+		return nil
+	}
+
+	cmp, ok := compareVersionCore(attelerVersion, minimumAttelerVersion)
+	if !ok {
+		return fmt.Errorf("atteler version %q cannot be compared with minimum %q", attelerVersion, minimumAttelerVersion)
+	}
+
+	if cmp < 0 {
+		return fmt.Errorf("plugin requires atteler >= %s; current version is %s", minimumAttelerVersion, attelerVersion)
+	}
+
+	return nil
+}
+
+func compareVersionCore(left, right string) (int, bool) {
+	leftParts, ok := parseVersionCore(left)
+	if !ok {
+		return 0, false
+	}
+
+	rightParts, ok := parseVersionCore(right)
+	if !ok {
+		return 0, false
+	}
+
+	for i := range leftParts {
+		switch {
+		case leftParts[i] > rightParts[i]:
+			return 1, true
+		case leftParts[i] < rightParts[i]:
+			return -1, true
+		}
+	}
+
+	return 0, true
+}
+
+func parseVersionCore(version string) ([3]int, bool) {
+	var out [3]int
+
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	version, _, _ = strings.Cut(version, "-")
+
+	version, _, _ = strings.Cut(version, "+")
+	if version == "" {
+		return out, false
+	}
+
+	parts := strings.Split(version, ".")
+	if len(parts) > len(out) {
+		parts = parts[:len(out)]
+	}
+
+	for i, part := range parts {
+		if part == "" {
+			return out, false
+		}
+
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return out, false
+		}
+
+		out[i] = n
+	}
+
+	return out, true
 }
 
 func authorizeTrust(trust Trust, policy Policy) error {

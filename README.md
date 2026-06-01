@@ -738,16 +738,33 @@ assertions:
 Configured `plugins.paths` entries point at local plugin directories or manifest
 files. `atteler plugins list` validates `plugin.yaml`, `plugin.yml`, or
 `plugin.json` manifests with `name`, `version`, optional `description`,
-`capabilities`, relative `entrypoints`, and optional security metadata.
+`capabilities`, relative `entrypoints`, optional `min_atteler_version`,
+structured entrypoint contracts, and optional security/provenance metadata.
 
 Executable plugin entrypoints must declare their runtime contract before they
 can run:
 
 ```yaml
+name: reviewer
+version: "1.2.3"
+min_atteler_version: "1.0.0"
 entrypoints:
   check: bin/check
-entrypoint_args:
-  check: []
+entrypoint_contracts:
+  check:
+    inputs:
+      args: []
+    output:
+      format: json
+      adapter: stdout
+      schema:
+        type: object
+        required: [summary, passed]
+        properties:
+          summary:
+            type: string
+          passed:
+            type: boolean
 permissions:
   filesystem:
     read: ["."]
@@ -772,10 +789,16 @@ trust:
     - action: accepted
       actor: local-admin
       at: "2026-05-21T00:00:00Z"
+provenance:
+  source: registry
+  repository: gh:owner/plugin
+  ref: v1.2.3
+  digest: sha256:<package-digest>
 ```
 
-CLI plugin runs also require an accepted local policy in config. The policy is
-an upper bound: manifests requesting anything outside it fail before execution.
+CLI plugin runs and dry-runs also require an accepted local policy in config.
+The policy is an upper bound: manifests requesting anything outside it fail
+before execution or before a dry-run can claim the entrypoint would run.
 
 ```yaml
 plugins:
@@ -803,13 +826,26 @@ The SDK package `pkg/plugin` also exposes validated run helpers for local
 workflows that want to execute a manifest entrypoint. Runs resolve paths under
 the plugin root, keep the process working directory at that root, reject
 undeclared/unaccepted permissions at the policy layer, require an explicit
-accepted policy, require shell permission for shell-script entrypoints, pass
-only allowlisted environment variables, validate declared args, and return
-stdout/stderr after size limiting plus secret redaction.
+accepted policy, route process start through the central side-effect policy,
+including declared network/write/secret access, enforce `min_atteler_version`
+when the caller supplies a release version, require shell permission for
+shell-script entrypoints, pass only allowlisted environment variables, validate
+declared args, and return stdout/stderr after size limiting plus secret
+redaction. Entrypoints with `format: json` output contracts also populate
+structured results and fail closed when stdout is malformed or misses required
+schema fields.
+
+Loaded registries can emit installed-version metadata with
+`Registry.Lockfile()`, `SaveLockfile`, and `LoadLockfile`; lockfiles record the
+resolved plugin version, paths, capabilities, trust checksum/signature, minimum
+Atteler version, and provenance source/repository/ref/commit/digest/signature
+plus installed-at/by metadata so installs are reviewable.
 
 Plugin entrypoints can be inspected or run with `atteler plugins list`,
 `atteler plugins describe reviewer`, and
-`atteler plugins run reviewer/check --plugin-dry-run`.
+`atteler plugins run reviewer/check --plugin-dry-run`. Dry-run output includes
+the resolved path/cwd, policy check status, compatibility floor, input count,
+output format/schema flag, output limits, and declared permission envelope.
 
 ### Command policy and audit ledger
 
@@ -1196,7 +1232,7 @@ linked from the row.
 | Automatic recurring-workflow skill learning with redacted observations, generated-skill revisions, relevant future context injection, and management/opt-out controls | [`pkg/skill/learning.go`](pkg/skill/learning.go), [`pkg/skill/learning_test.go`](pkg/skill/learning_test.go), [`pkg/events/events.go`](pkg/events/events.go), [`cmd/atteler/skill_learning_setup.go`](cmd/atteler/skill_learning_setup.go), [`cmd/atteler/cli_skill_learning_commands.go`](cmd/atteler/cli_skill_learning_commands.go), [`cmd/atteler/cli_skill_learning_commands_test.go`](cmd/atteler/cli_skill_learning_commands_test.go) |
 | Speculative and review-agent planning/execution with durable audit artifacts | [`pkg/speculate/speculate.go`](pkg/speculate/speculate.go), [`pkg/speculate/speculate_test.go`](pkg/speculate/speculate_test.go), [`pkg/review/review.go`](pkg/review/review.go), [`pkg/review/review_test.go`](pkg/review/review_test.go), [`pkg/review/llm.go`](pkg/review/llm.go), [`pkg/review/llm_test.go`](pkg/review/llm_test.go), [`cmd/atteler/cli_speculate_watch_history_commands.go`](cmd/atteler/cli_speculate_watch_history_commands.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go), [`cmd/atteler/multi_agent_run_commands.go`](cmd/atteler/multi_agent_run_commands.go), [`cmd/atteler/multi_agent_run_commands_test.go`](cmd/atteler/multi_agent_run_commands_test.go) |
 | Memory/retrieval, unified retrieval contract, per-agent memory, local lexical/embedding vector search, workspace ANN vector context, git-history search, Go code intelligence, import graphs, structured code-intel CLI output, and optional LSP lookups | [`pkg/retrieval/types.go`](pkg/retrieval/types.go), [`pkg/retrieval/search.go`](pkg/retrieval/search.go), [`pkg/retrieval/retrieval_test.go`](pkg/retrieval/retrieval_test.go), [`pkg/memory/memory.go`](pkg/memory/memory.go), [`pkg/memory/memory_test.go`](pkg/memory/memory_test.go), [`pkg/agentmemory/agentmemory.go`](pkg/agentmemory/agentmemory.go), [`pkg/agentmemory/agentmemory_test.go`](pkg/agentmemory/agentmemory_test.go), [`pkg/vector/vector.go`](pkg/vector/vector.go), [`pkg/vector/vector_test.go`](pkg/vector/vector_test.go), [`pkg/vector/index.go`](pkg/vector/index.go), [`pkg/vector/index_test.go`](pkg/vector/index_test.go), [`pkg/vector/ann.go`](pkg/vector/ann.go), [`pkg/vector/ann_test.go`](pkg/vector/ann_test.go), [`pkg/vector/workspace.go`](pkg/vector/workspace.go), [`pkg/vector/workspace_test.go`](pkg/vector/workspace_test.go), [`pkg/vector/index_searcher.go`](pkg/vector/index_searcher.go), [`pkg/vector/index_searcher_test.go`](pkg/vector/index_searcher_test.go), [`cmd/atteler/workspace_vector_context.go`](cmd/atteler/workspace_vector_context.go), [`cmd/atteler/workspace_vector_context_test.go`](cmd/atteler/workspace_vector_context_test.go), [`cmd/atteler/cli_vector_search_commands.go`](cmd/atteler/cli_vector_search_commands.go), [`cmd/atteler/cli_vector_search_commands_test.go`](cmd/atteler/cli_vector_search_commands_test.go), [`pkg/githistory/githistory.go`](pkg/githistory/githistory.go), [`pkg/githistory/githistory_test.go`](pkg/githistory/githistory_test.go), [`pkg/codeintel/codeintel.go`](pkg/codeintel/codeintel.go), [`pkg/codeintel/codeintel_test.go`](pkg/codeintel/codeintel_test.go), [`pkg/codegraph/codegraph.go`](pkg/codegraph/codegraph.go), [`pkg/codegraph/codegraph_test.go`](pkg/codegraph/codegraph_test.go), [`cmd/atteler/codeintel_schema.go`](cmd/atteler/codeintel_schema.go), [`cmd/atteler/codeintel_response_render.go`](cmd/atteler/codeintel_response_render.go), [`cmd/atteler/codeintel_command_descriptors.go`](cmd/atteler/codeintel_command_descriptors.go), [`cmd/atteler/codeintel_schema_test.go`](cmd/atteler/codeintel_schema_test.go), [`pkg/lsp/client.go`](pkg/lsp/client.go), [`pkg/lsp/client_test.go`](pkg/lsp/client_test.go) |
-| Plugin manifests, safe local entrypoint execution, MCP manifest validation, and stdio JSON-RPC calls | [`pkg/plugin/manifest.go`](pkg/plugin/manifest.go), [`pkg/plugin/manifest_test.go`](pkg/plugin/manifest_test.go), [`pkg/plugin/run.go`](pkg/plugin/run.go), [`pkg/plugin/run_test.go`](pkg/plugin/run_test.go), [`pkg/mcp/manifest.go`](pkg/mcp/manifest.go), [`pkg/mcp/manifest_test.go`](pkg/mcp/manifest_test.go), [`pkg/mcp/client.go`](pkg/mcp/client.go), [`pkg/mcp/client_test.go`](pkg/mcp/client_test.go), [`cmd/atteler/cli_plugin_commands.go`](cmd/atteler/cli_plugin_commands.go), [`cmd/atteler/cli_mcp_commands.go`](cmd/atteler/cli_mcp_commands.go) |
+| Governed plugin manifests, lockfiles, structured entrypoint output, policy-gated local execution, MCP manifest validation, and stdio JSON-RPC calls | [`pkg/plugin/manifest.go`](pkg/plugin/manifest.go), [`pkg/plugin/manifest_test.go`](pkg/plugin/manifest_test.go), [`pkg/plugin/policy.go`](pkg/plugin/policy.go), [`pkg/plugin/lockfile.go`](pkg/plugin/lockfile.go), [`pkg/plugin/registry.go`](pkg/plugin/registry.go), [`pkg/plugin/registry_test.go`](pkg/plugin/registry_test.go), [`pkg/plugin/run.go`](pkg/plugin/run.go), [`pkg/plugin/run_test.go`](pkg/plugin/run_test.go), [`pkg/permission/permission.go`](pkg/permission/permission.go), [`pkg/permission/permission_test.go`](pkg/permission/permission_test.go), [`pkg/mcp/manifest.go`](pkg/mcp/manifest.go), [`pkg/mcp/manifest_test.go`](pkg/mcp/manifest_test.go), [`pkg/mcp/client.go`](pkg/mcp/client.go), [`pkg/mcp/client_test.go`](pkg/mcp/client_test.go), [`cmd/atteler/cli_plugin_commands.go`](cmd/atteler/cli_plugin_commands.go), [`cmd/atteler/cli_mcp_commands.go`](cmd/atteler/cli_mcp_commands.go) |
 | Background repository scanning, baseline/gate comparisons, suppressions, issue upserts, and review-scan formatting | [`pkg/watch/watch.go`](pkg/watch/watch.go), [`pkg/watch/baseline.go`](pkg/watch/baseline.go), [`pkg/watch/issues.go`](pkg/watch/issues.go), [`pkg/watch/watch_test.go`](pkg/watch/watch_test.go), [`pkg/symphony/tracker.go`](pkg/symphony/tracker.go), [`cmd/atteler/cli_speculate_watch_history_commands.go`](cmd/atteler/cli_speculate_watch_history_commands.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
 | Event hook privacy, metadata, and local hook execution | [`pkg/events/events.go`](pkg/events/events.go), [`pkg/events/events_test.go`](pkg/events/events_test.go), [`pkg/events/privacy.go`](pkg/events/privacy.go), [`pkg/events/privacy_test.go`](pkg/events/privacy_test.go), [`pkg/events/logger.go`](pkg/events/logger.go), [`pkg/events/discoverability_test.go`](pkg/events/discoverability_test.go) |
 | Automatic worktree isolation | [`pkg/worktree/worktree.go`](pkg/worktree/worktree.go), [`pkg/worktree/worktree_test.go`](pkg/worktree/worktree_test.go), [`cmd/atteler/cli_worktree_commands.go`](cmd/atteler/cli_worktree_commands.go) |

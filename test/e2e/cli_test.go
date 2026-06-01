@@ -474,11 +474,16 @@ plugins:
 `)
 	writeFile(t, filepath.Join(pluginDir, "plugin.yaml"), `name: runner
 version: "1.0.0"
+min_atteler_version: "0.1.0"
 description: Runner plugin
 entrypoints:
   run: bin/run
 entrypoint_args:
   run: []
+entrypoint_contracts:
+  run:
+    output:
+      format: text
 permissions:
   filesystem:
     read:

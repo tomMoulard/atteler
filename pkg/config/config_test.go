@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
 )
 
 func TestLoadFiles_MergesInOrder(t *testing.T) {
@@ -518,6 +520,76 @@ plugins:
 	assert.Equal(t, 1024, cfg.Plugins.Policy.Output.StderrMaxBytes)
 	assert.Equal(t, []string{"local"}, cfg.Plugins.Policy.TrustedInstallSources)
 	assert.True(t, cfg.Plugins.Policy.RequireSignature)
+}
+
+func TestMergeConfigFromSource_PluginPolicy(t *testing.T) {
+	t.Parallel()
+
+	policy := attelerplugin.Policy{
+		Permissions: attelerplugin.PermissionSet{
+			Filesystem: attelerplugin.FilesystemPermissions{
+				Read:  []string{"."},
+				Write: []string{"tmp"},
+			},
+			Network: attelerplugin.NetworkPermissions{
+				Allow: true,
+				Hosts: []string{"api.example.com"},
+			},
+			Shell:   attelerplugin.ShellPermissions{Allow: true},
+			Env:     []string{"PATH"},
+			Secrets: []string{"API_TOKEN"},
+			Tools:   []string{"git"},
+		},
+		Output: attelerplugin.OutputLimits{
+			StdoutMaxBytes: 4096,
+			StderrMaxBytes: 1024,
+		},
+		TrustedInstallSources: []string{"local"},
+		RequireSignature:      true,
+	}
+
+	origins := OriginMap{}
+
+	var cfg Config
+
+	mergeConfigFromSource(&cfg, Config{
+		Plugins: PluginConfig{
+			Paths:  []string{"./plugin-a"},
+			Policy: &policy,
+		},
+	}, newOriginRecorder(origins), originSource{
+		kind:   OriginRuntimeSelection,
+		source: "test",
+	})
+
+	require.NotNil(t, cfg.Plugins.Policy)
+	assert.Equal(t, []string{"./plugin-a"}, cfg.Plugins.Paths)
+	assert.Equal(t, []string{"."}, cfg.Plugins.Policy.Permissions.Filesystem.Read)
+	assert.Equal(t, []string{"tmp"}, cfg.Plugins.Policy.Permissions.Filesystem.Write)
+	assert.True(t, cfg.Plugins.Policy.Permissions.Network.Allow)
+	assert.Equal(t, []string{"api.example.com"}, cfg.Plugins.Policy.Permissions.Network.Hosts)
+	assert.True(t, cfg.Plugins.Policy.Permissions.Shell.Allow)
+	assert.Equal(t, []string{"PATH"}, cfg.Plugins.Policy.Permissions.Env)
+	assert.Equal(t, []string{"API_TOKEN"}, cfg.Plugins.Policy.Permissions.Secrets)
+	assert.Equal(t, []string{"git"}, cfg.Plugins.Policy.Permissions.Tools)
+	assert.Equal(t, 4096, cfg.Plugins.Policy.Output.StdoutMaxBytes)
+	assert.Equal(t, 1024, cfg.Plugins.Policy.Output.StderrMaxBytes)
+	assert.Equal(t, []string{"local"}, cfg.Plugins.Policy.TrustedInstallSources)
+	assert.True(t, cfg.Plugins.Policy.RequireSignature)
+
+	const mutatedPolicyValue = "mutated"
+
+	policy.Permissions.Filesystem.Read[0] = mutatedPolicyValue
+	policy.TrustedInstallSources[0] = mutatedPolicyValue
+
+	assert.Equal(t, []string{"."}, cfg.Plugins.Policy.Permissions.Filesystem.Read)
+	assert.Equal(t, []string{"local"}, cfg.Plugins.Policy.TrustedInstallSources)
+
+	policyOrigin, ok := origins.Final("plugins.policy")
+	require.True(t, ok)
+	assert.Equal(t, OriginRuntimeSelection, policyOrigin.Kind)
+	assert.Equal(t, "test", policyOrigin.Source)
+	assert.Equal(t, "configured", policyOrigin.Value)
 }
 
 func TestLoadFilesWithOrigins_TracksScalarOverwriteAndSliceReplacement(t *testing.T) {

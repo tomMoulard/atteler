@@ -472,6 +472,7 @@ func (r *Registry) checkProviderHealth(ctx context.Context, providerName string,
 
 	if cached, ok := r.cachedProviderHealthLocked(providerName, ttl, now); ok {
 		cached.RetryPolicy = retryPolicy
+
 		r.mu.RUnlock()
 		r.mu.Lock()
 		r.applyHealthToReadinessLocked(providerName, cached)

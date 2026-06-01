@@ -146,6 +146,62 @@ trust:
 	}}, manifest.EntrypointArgs["run"])
 }
 
+func TestLoadDir_LoadsExtensionContractMetadata(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeManifest(t, dir, "plugin.yaml", `
+name: structured
+version: "1.0.0"
+min_atteler_version: "1.2.0"
+description: Emits structured findings
+capabilities:
+  - review
+entrypoints:
+  run: bin/run
+entrypoint_contracts:
+  run:
+    inputs:
+      args:
+        - name: mode
+          required: true
+          allowed: [safe]
+    output:
+      format: json
+      schema:
+        type: object
+        required: [summary, passed]
+        properties:
+          summary:
+            type: string
+          passed:
+            type: boolean
+provenance:
+  source: registry
+  repository: gh:tomMoulard/structured
+  ref: v1.0.0
+  digest: sha256:abc123
+`)
+
+	manifest, err := LoadDir(dir)
+	require.NoError(t, err)
+	require.Equal(t, "1.2.0", manifest.MinimumAttelerVersion)
+	require.Equal(t, "registry", manifest.Provenance.Source)
+	require.Equal(t, "sha256:abc123", manifest.Provenance.Digest)
+
+	contract := manifest.EntrypointContracts["run"]
+	require.Equal(t, []ArgumentSpec{{
+		Name:     "mode",
+		Allowed:  []string{"safe"},
+		Required: true,
+	}}, contract.Inputs.Args)
+	require.NotNil(t, contract.Output)
+	require.Equal(t, "json", contract.Output.Format)
+	require.NotNil(t, contract.Output.Schema)
+	require.Equal(t, []string{"summary", "passed"}, contract.Output.Schema.Required)
+	require.Equal(t, "string", contract.Output.Schema.Properties["summary"].Type)
+	require.Equal(t, "boolean", contract.Output.Schema.Properties["passed"].Type)
+}
+
 func TestFindManifest_PrefersYAMLThenYMLThenJSON(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -334,6 +390,40 @@ entrypoint_args:
       required: true
 `,
 			want: `required after optional argument`,
+		},
+		{
+			name: "duplicate capabilities",
+			content: `
+name: duplicate-capability
+version: "1"
+capabilities:
+  - review
+  - review
+`,
+			want: `capabilities duplicate value "review"`,
+		},
+		{
+			name: "invalid structured output format",
+			content: `
+name: bad-output-contract
+version: "1"
+entrypoints:
+  run: bin/run
+entrypoint_contracts:
+  run:
+    output:
+      format: xml
+`,
+			want: `output format "xml" is not supported`,
+		},
+		{
+			name: "invalid minimum atteler version",
+			content: `
+name: bad-version
+version: "1"
+min_atteler_version: latest
+`,
+			want: `min_atteler_version "latest" is not a supported version requirement`,
 		},
 	}
 
