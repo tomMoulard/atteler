@@ -2,7 +2,17 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
+)
+
+const (
+	vectorIndexLifecycleAgentMemory = "agent-memory"
+	vectorIndexLifecycleFile        = "file"
+	vectorIndexLifecycleWorkspace   = "workspace"
+	vectorIndexLifecycleSession     = "session"
+	vectorIndexLifecycleGitHistory  = "git-history"
+	vectorIndexLifecycleADR         = "adr"
 )
 
 // ValidateVectorConfig checks vectorizer scope names and enum values that are
@@ -32,6 +42,7 @@ func validateVectorConfigIssues(cfg VectorConfig) []string {
 	issues = append(issues, validateVectorStoreScopes(cfg.Stores)...)
 	issues = append(issues, validateVectorAgentScopes(cfg.Agents)...)
 	issues = append(issues, validateVectorSourceScopes(cfg.Sources)...)
+	issues = append(issues, validateVectorIndexPathIsolation(cfg)...)
 
 	return issues
 }
@@ -116,9 +127,119 @@ func validateVectorizerConfigValues(field string, cfg VectorizerConfig) []string
 	return issues
 }
 
+type vectorIndexPathUse struct {
+	field     string
+	path      string
+	lifecycle string
+}
+
+func validateVectorIndexPathIsolation(cfg VectorConfig) []string {
+	var issues []string
+
+	seen := make(map[string]vectorIndexPathUse)
+
+	for _, use := range vectorConfiguredIndexPathUses(cfg) {
+		normalizedPath := normalizeVectorIndexPathForCompare(use.path)
+		if normalizedPath == "" {
+			continue
+		}
+
+		previous, ok := seen[normalizedPath]
+		if !ok {
+			seen[normalizedPath] = use
+			continue
+		}
+
+		if previous.lifecycle == use.lifecycle {
+			continue
+		}
+
+		issues = append(issues, fmt.Sprintf(
+			"%s index_path %q conflicts with %s; %s and %s indexes must not share a persisted path",
+			use.field,
+			use.path,
+			previous.field,
+			use.lifecycle,
+			previous.lifecycle,
+		))
+	}
+
+	return issues
+}
+
+func vectorConfiguredIndexPathUses(cfg VectorConfig) []vectorIndexPathUse {
+	uses := make([]vectorIndexPathUse, 0, len(cfg.Stores)+len(cfg.Agents)+len(cfg.Sources)+2)
+	uses = appendVectorIndexPathUse(uses, "vector.index_path", cfg.IndexPath, vectorIndexLifecycleFile)
+	uses = appendVectorIndexPathUse(uses, "vector.workspace_index_path", cfg.WorkspaceIndexPath, vectorIndexLifecycleWorkspace)
+
+	for _, name := range sortedMapKeys(cfg.Stores) {
+		lifecycle, ok := vectorStoreIndexLifecycle(name)
+		if !ok {
+			continue
+		}
+
+		uses = appendVectorIndexPathUse(uses, "vector.stores."+name, cfg.Stores[name].IndexPath, lifecycle)
+	}
+
+	for _, name := range sortedMapKeys(cfg.Agents) {
+		uses = appendVectorIndexPathUse(uses, "vector.agents."+name, cfg.Agents[name].IndexPath, vectorIndexLifecycleAgentMemory)
+	}
+
+	for _, name := range sortedMapKeys(cfg.Sources) {
+		lifecycle, ok := vectorSourceIndexLifecycle(name)
+		if !ok {
+			continue
+		}
+
+		uses = appendVectorIndexPathUse(uses, "vector.sources."+name, cfg.Sources[name].IndexPath, lifecycle)
+	}
+
+	return uses
+}
+
+func appendVectorIndexPathUse(uses []vectorIndexPathUse, field, path, lifecycle string) []vectorIndexPathUse {
+	if strings.TrimSpace(path) == "" {
+		return uses
+	}
+
+	return append(uses, vectorIndexPathUse{
+		field:     field,
+		path:      path,
+		lifecycle: lifecycle,
+	})
+}
+
+func vectorStoreIndexLifecycle(name string) (string, bool) {
+	switch normalizeVectorizerScopeKey(name) {
+	case vectorIndexLifecycleAgentMemory:
+		return vectorIndexLifecycleAgentMemory, true
+	case "vector-search":
+		return vectorIndexLifecycleFile, true
+	case vectorIndexLifecycleWorkspace:
+		return vectorIndexLifecycleWorkspace, true
+	default:
+		return "", false
+	}
+}
+
+func vectorSourceIndexLifecycle(name string) (string, bool) {
+	switch normalizeVectorizerScopeKey(name) {
+	case vectorIndexLifecycleFile:
+		return vectorIndexLifecycleFile, true
+	case vectorIndexLifecycleSession:
+		return vectorIndexLifecycleSession, true
+	case vectorIndexLifecycleGitHistory:
+		return vectorIndexLifecycleGitHistory, true
+	case vectorIndexLifecycleADR:
+		return vectorIndexLifecycleADR, true
+	default:
+		return "", false
+	}
+}
+
 func knownVectorStoreScope(name string) bool {
 	switch normalizeVectorizerScopeKey(name) {
-	case "agent-memory", "vector-search", "workspace":
+	case vectorIndexLifecycleAgentMemory, "vector-search", vectorIndexLifecycleWorkspace:
 		return true
 	default:
 		return false
@@ -127,7 +248,7 @@ func knownVectorStoreScope(name string) bool {
 
 func knownVectorSourceScope(name string) bool {
 	switch normalizeVectorizerScopeKey(name) {
-	case "file", "session", "git-history", "adr":
+	case vectorIndexLifecycleFile, vectorIndexLifecycleSession, vectorIndexLifecycleGitHistory, vectorIndexLifecycleADR:
 		return true
 	default:
 		return false
@@ -194,4 +315,18 @@ func normalizeVectorConfigValue(value string) string {
 	value = strings.ReplaceAll(value, "_", "-")
 
 	return value
+}
+
+func normalizeVectorIndexPathForCompare(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+
+	path = filepath.Clean(path)
+	if path == "." {
+		return ""
+	}
+
+	return filepath.ToSlash(path)
 }

@@ -1223,14 +1223,16 @@ scopes are `agent-memory`, `vector-search`, and `workspace`; supported source
 scopes are `file`, `session`, `git_history`/`git-history`, and `adr`, while
 agent scopes are the configured agent names. `atteler config validate` reports
 malformed scopes, unknown store/source/agent scope names, and unsupported
-vectorizer/provider/fallback values before an index refresh starts. Persisted
-`index_path` values are intentionally store/source-specific so agent memory,
-workspace files, sessions, git history, and ADRs do not accidentally share one
-JSON datastore; relative index paths resolve under the workspace root. The
-legacy top-level `vector.index_path` remains the generic file-vector search
-store path, and `vector.sources.file.index_path` applies to explicit file-vector
-retrieval rather than the workspace-wide file crawl. Workspace vector context
-uses `vector.workspace_index_path` or `vector.stores.workspace.index_path`,
+vectorizer/provider/fallback values before an index refresh starts; it also
+rejects one configured `index_path` shared by incompatible index lifecycles.
+Persisted `index_path` values are intentionally store/source-specific so agent
+memory, workspace files, sessions, git history, and ADRs do not accidentally
+share one JSON datastore; relative index paths resolve under the workspace
+root. The legacy top-level `vector.index_path` remains the generic file-vector
+search store path, and `vector.sources.file.index_path` applies to explicit
+file-vector retrieval rather than the workspace-wide file crawl. Workspace
+vector context uses `vector.workspace_index_path` or
+`vector.stores.workspace.index_path`,
 while session, git-history, ADR, and per-agent memory indexes need their own
 scoped `index_path` when they should persist somewhere other than the built-in
 defaults. Valid source indexes are also guarded by

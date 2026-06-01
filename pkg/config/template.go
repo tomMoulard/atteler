@@ -225,6 +225,7 @@ func templateYAML() string {
 	out.WriteString("# when an embedding endpoint is unavailable or not explicitly consented.\n\n")
 	out.WriteString("# Top-level vector.index_path is the generic file-vector search store path.\n")
 	out.WriteString("# Workspace vectors use vector.workspace_index_path or vector.stores.workspace.index_path.\n")
+	out.WriteString("# Do not share one index_path across workspace, file, session, git, ADR, or agent-memory indexes.\n")
 	out.WriteString("# Use vector.stores.<name>, vector.agents.<name>, and vector.sources.<kind>\n")
 	out.WriteString("# for per-agent memory plus session, git-history, ADR, and file-source indexes.\n\n")
 	out.WriteString("# Supported vector store scopes: agent-memory, vector-search, workspace.\n")

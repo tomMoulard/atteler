@@ -84,3 +84,50 @@ func TestValidateVectorConfigWithAgentsChecksAgentScopes(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "vector.agents.reviwer unknown agent scope")
 }
+
+func TestValidateVectorConfigRejectsIndexPathCollisionsAcrossLifecycles(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateVectorConfig(VectorConfig{
+		WorkspaceIndexPath: "./.atteler/shared-index.json",
+		Sources: map[string]VectorizerConfig{
+			"file": {
+				IndexPath: ".atteler/shared-index.json",
+			},
+			"session": {
+				IndexPath: ".atteler/session-index.json",
+			},
+			"git_history": {
+				IndexPath: "./.atteler/session-index.json",
+			},
+		},
+	})
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "vector.sources.file index_path")
+	assert.Contains(t, message, "file and workspace indexes must not share")
+	assert.Contains(t, message, "vector.sources.session index_path")
+	assert.Contains(t, message, "session and git-history indexes must not share")
+}
+
+func TestValidateVectorConfigAllowsIndexPathAliasesWithinLifecycle(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateVectorConfig(VectorConfig{
+		IndexPath:          ".atteler/file-index.json",
+		WorkspaceIndexPath: ".atteler/workspace-index.json",
+		Stores: map[string]VectorizerConfig{
+			"vector-search": {IndexPath: "./.atteler/file-index.json"},
+			"workspace":     {IndexPath: "./.atteler/workspace-index.json"},
+			"agent-memory":  {IndexPath: ".atteler/agent-memory.json"},
+		},
+		Agents: map[string]VectorizerConfig{
+			"reviewer": {IndexPath: "./.atteler/agent-memory.json"},
+		},
+		Sources: map[string]VectorizerConfig{
+			"file": {IndexPath: "./.atteler/file-index.json"},
+		},
+	})
+	require.NoError(t, err)
+}
