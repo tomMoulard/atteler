@@ -610,9 +610,32 @@ func vectorIndexSourcePaths(indexPath string) []string {
 }
 
 func vectorSearchFallbackPaths(paths []string, indexPath string) []string {
-	fallbackPaths := append([]string(nil), paths...)
-	if len(fallbackPaths) == 0 {
-		fallbackPaths = vectorIndexSourcePaths(indexPath)
+	return presentVectorSearchFallbackPaths(vectorIndexSourcePaths(indexPath), paths)
+}
+
+func presentVectorSearchFallbackPaths(existing, requested []string) []string {
+	merged := mergeVectorSourcePaths(existing, requested)
+	if len(merged) == 0 {
+		return nil
+	}
+
+	requestedSet := cleanedPathSet(requested)
+
+	fallbackPaths := make([]string, 0, len(merged))
+	for _, path := range merged {
+		clean := filepath.Clean(strings.TrimSpace(path))
+		if clean == "" || clean == "." {
+			continue
+		}
+
+		if requestedSet[clean] {
+			fallbackPaths = append(fallbackPaths, clean)
+			continue
+		}
+
+		if _, err := os.Stat(clean); err == nil {
+			fallbackPaths = append(fallbackPaths, clean)
+		}
 	}
 
 	return fallbackPaths

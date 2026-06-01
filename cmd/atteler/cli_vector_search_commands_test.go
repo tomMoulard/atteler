@@ -746,6 +746,21 @@ func TestLexicalFallbackIndexPathDoesNotClobberEmbeddingIndex(t *testing.T) {
 	assert.Equal(t, ".atteler/vector-index.lexical", lexicalFallbackIndexPath(".atteler/vector-index.lexical"))
 }
 
+func TestPresentVectorSearchFallbackPathsSkipsDeletedReusableSources(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	present := filepath.Join(dir, "present.md")
+	deleted := filepath.Join(dir, "deleted.md")
+	requested := filepath.Join(dir, "requested.md")
+
+	require.NoError(t, os.WriteFile(present, []byte("present source"), 0o600))
+
+	got := presentVectorSearchFallbackPaths([]string{present, deleted}, []string{requested})
+
+	assert.ElementsMatch(t, []string{filepath.Clean(present), filepath.Clean(requested)}, got)
+}
+
 //nolint:paralleltest // Captures process stdout to verify user-facing fallback output.
 func TestRunVectorSearchEmbeddingFailureFallsBackToLexicalIndex(t *testing.T) {
 	dir := t.TempDir()
@@ -838,6 +853,68 @@ func TestRunVectorSearchEmbeddingFailureFallsBackUsingReusableIndexSources(t *te
 	assert.Equal(t, filepath.Clean(note), loaded.Sources[0].Path)
 }
 
+//nolint:paralleltest // Captures process stdout to verify user-facing fallback output.
+func TestRunVectorSearchEmbeddingFailureFallbackMergesReusableAndRequestedSources(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "fallback-existing.md")
+	existingText := "existing fallback source remains searchable during embedding outage"
+	requested := filepath.Join(dir, "fallback-requested.md")
+	requestedText := "requested fallback source is appended during embedding outage"
+
+	require.NoError(t, os.WriteFile(existing, []byte(existingText), 0o600))
+	require.NoError(t, os.WriteFile(requested, []byte(requestedText), 0o600))
+
+	indexPath := filepath.Join(dir, "embedding-index.json")
+	idx := &vector.Index{
+		Version:    vector.IndexVersion,
+		CreatedAt:  time.Unix(1, 0).UTC(),
+		Vectorizer: vector.NewEmbeddingMetadata("ollama", "offline-embed", "://invalid-embedding-endpoint", 2),
+		Dimensions: 2,
+		Chunk:      vector.ChunkOptions{}.Normalize(),
+		Sources: []vector.SourceMetadata{
+			vector.SourceMetadataForText(existing, existingText),
+		},
+		Documents: []vector.Document{{
+			ID:         filepath.Clean(existing) + "#chunk=0000",
+			Text:       existingText,
+			SourceHash: privacy.SourceHash(existingText),
+			Vector:     vector.Vector{1, 0},
+			Metadata: map[string]string{
+				"path":          filepath.Clean(existing),
+				"source_digest": vector.DigestText(existingText),
+			},
+			Provenance: map[string]string{
+				"source_type":    "file",
+				"privacy_policy": privacy.RedactionPolicyVersion,
+			},
+		}},
+	}
+	require.NoError(t, idx.Save(indexPath))
+
+	var runErr error
+
+	output := captureVectorSearchStdout(t, func() {
+		runErr = runVectorSearch(context.TODO(), dir, appconfig.VectorConfig{}, cliOptions{
+			vectorSearch:         "existing fallback source",
+			vectorIndexFiles:     stringListFlag{requested},
+			vectorStorePath:      indexPath,
+			vectorizer:           vector.VectorizerKindEmbedding,
+			vectorModel:          "offline-embed",
+			vectorBaseURL:        "://invalid-embedding-endpoint",
+			vectorFallbackPolicy: vector.VectorizerKindLexical,
+			vectorLimit:          positiveIntFlag{value: 1, set: true},
+		})
+	})
+	require.NoError(t, runErr)
+	assert.Contains(t, output, "vectorizer=lexical-fallback")
+	assert.Contains(t, output, filepath.Clean(existing)+"#chunk=0000")
+
+	loaded, err := vector.LoadIndex(lexicalFallbackIndexPath(indexPath))
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
+	assert.ElementsMatch(t, []string{filepath.Clean(existing), filepath.Clean(requested)}, sourceMetadataPaths(loaded.Sources))
+}
+
 func captureVectorSearchStdout(t *testing.T, fn func()) string {
 	t.Helper()
 
@@ -858,6 +935,15 @@ func captureVectorSearchStdout(t *testing.T, fn func()) string {
 	require.NoError(t, reader.Close())
 
 	return strings.TrimSpace(string(data))
+}
+
+func sourceMetadataPaths(sources []vector.SourceMetadata) []string {
+	paths := make([]string, 0, len(sources))
+	for _, source := range sources {
+		paths = append(paths, source.Path)
+	}
+
+	return paths
 }
 
 type countingTestVectorizer struct {
