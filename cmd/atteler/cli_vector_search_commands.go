@@ -40,6 +40,24 @@ func runVectorSearch(ctx context.Context, cwd string, cfg appconfig.VectorConfig
 		return err
 	}
 
+	if settings.Vectorizer == vector.VectorizerKindEmbedding &&
+		!workspaceRemoteEmbeddingAllowed(settings.BaseURL, cfg.WorkspaceAllowRemoteEmbeddings) {
+		if settings.FallbackPolicy != vector.VectorizerKindLexical {
+			return fmt.Errorf("vector search: remote embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings", workspaceDisplayEmbeddingEndpoint(settings.BaseURL))
+		}
+
+		fmt.Fprintf(
+			os.Stderr,
+			"warning: remote embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings; falling back to lexical hashed token-frequency retrieval\n",
+			workspaceDisplayEmbeddingEndpoint(settings.BaseURL),
+		)
+
+		fallbackPaths := vectorSearchFallbackPaths(opts.vectorIndexFiles, settings.IndexPath)
+		settings = lexicalVectorFallbackSettings(settings)
+
+		return runVectorSearchOnce(ctx, settings, opts.vectorSearch, fallbackPaths)
+	}
+
 	err = runVectorSearchOnce(ctx, settings, opts.vectorSearch, opts.vectorIndexFiles)
 	if err == nil {
 		return nil
@@ -53,17 +71,8 @@ func runVectorSearch(ctx context.Context, cwd string, cfg appconfig.VectorConfig
 
 	fmt.Fprintln(os.Stderr, "warning: embedding vector search failed; falling back to lexical hashed token-frequency retrieval: "+err.Error())
 
-	fallbackPaths := append([]string(nil), opts.vectorIndexFiles...)
-	if len(fallbackPaths) == 0 {
-		fallbackPaths = vectorIndexSourcePaths(settings.IndexPath)
-	}
-
-	settings.Vectorizer = vector.VectorizerKindLexical
-	settings.Provider = ""
-	settings.BaseURL = ""
-	settings.Model = vector.LexicalFallbackModel
-	settings.FallbackPolicy = vectorFallbackPolicyFail
-	settings.IndexPath = lexicalFallbackIndexPath(settings.IndexPath)
+	fallbackPaths := vectorSearchFallbackPaths(opts.vectorIndexFiles, settings.IndexPath)
+	settings = lexicalVectorFallbackSettings(settings)
 
 	return runVectorSearchOnce(ctx, settings, opts.vectorSearch, fallbackPaths)
 }
@@ -598,6 +607,26 @@ func vectorIndexSourcePaths(indexPath string) []string {
 	}
 
 	return indexSourcePaths(idx)
+}
+
+func vectorSearchFallbackPaths(paths []string, indexPath string) []string {
+	fallbackPaths := append([]string(nil), paths...)
+	if len(fallbackPaths) == 0 {
+		fallbackPaths = vectorIndexSourcePaths(indexPath)
+	}
+
+	return fallbackPaths
+}
+
+func lexicalVectorFallbackSettings(settings vectorSearchSettings) vectorSearchSettings {
+	settings.Vectorizer = vector.VectorizerKindLexical
+	settings.Provider = ""
+	settings.BaseURL = ""
+	settings.Model = vector.LexicalFallbackModel
+	settings.FallbackPolicy = vectorFallbackPolicyFail
+	settings.IndexPath = lexicalFallbackIndexPath(settings.IndexPath)
+
+	return settings
 }
 
 func lexicalFallbackIndexPath(indexPath string) string {

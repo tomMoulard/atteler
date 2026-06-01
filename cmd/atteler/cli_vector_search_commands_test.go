@@ -179,6 +179,57 @@ func TestRunVectorSearchPersistsEmbeddingIndexAndReportsModel(t *testing.T) {
 	assert.Equal(t, 2, loaded.Dimensions)
 }
 
+func TestRunVectorSearchRejectsRemoteEmbeddingWithoutConsent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	note := filepath.Join(dir, "remote.md")
+	require.NoError(t, os.WriteFile(note, []byte("remote embedding should require consent"), 0o600))
+
+	indexPath := filepath.Join(dir, "embedding-index.json")
+	err := runVectorSearch(context.TODO(), dir, appconfig.VectorConfig{}, cliOptions{
+		vectorSearch:     "remote embedding",
+		vectorIndexFiles: stringListFlag{note},
+		vectorStorePath:  indexPath,
+		vectorizer:       vector.VectorizerKindEmbedding,
+		vectorBaseURL:    privateRemoteEmbeddingEndpoint(),
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "remote embedding endpoint")
+	require.ErrorContains(t, err, "vector.workspace_allow_remote_embeddings")
+	assert.NoFileExists(t, indexPath)
+	assert.NoFileExists(t, lexicalFallbackIndexPath(indexPath))
+}
+
+//nolint:paralleltest // Captures process stdout to verify user-facing CLI output.
+func TestRunVectorSearchUsesLexicalFallbackForRemoteEmbeddingWithoutConsent(t *testing.T) {
+	dir := t.TempDir()
+	note := filepath.Join(dir, "remote-fallback.md")
+	require.NoError(t, os.WriteFile(note, []byte("remote embedding fallback stays local"), 0o600))
+
+	indexPath := filepath.Join(dir, "embedding-index.json")
+
+	var runErr error
+
+	output := captureVectorSearchStdout(t, func() {
+		runErr = runVectorSearch(context.TODO(), dir, appconfig.VectorConfig{}, cliOptions{
+			vectorSearch:         "remote fallback",
+			vectorIndexFiles:     stringListFlag{note},
+			vectorStorePath:      indexPath,
+			vectorizer:           vector.VectorizerKindEmbedding,
+			vectorBaseURL:        privateRemoteEmbeddingEndpoint(),
+			vectorFallbackPolicy: vector.VectorizerKindLexical,
+			vectorLimit:          positiveIntFlag{value: 1, set: true},
+		})
+	})
+	require.NoError(t, runErr)
+	assert.Contains(t, output, "vectorizer=lexical-fallback")
+	assert.Contains(t, output, filepath.Clean(note)+"#chunk=0000")
+	assert.NoFileExists(t, indexPath)
+	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
+}
+
 func TestRunVectorSearchAddsFilesToReusableIndex(t *testing.T) {
 	t.Parallel()
 

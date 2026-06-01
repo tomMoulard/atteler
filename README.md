@@ -1305,7 +1305,9 @@ workspace vectorizer is local lexical hashing; setting `vector.vectorizer:
 embedding` sends indexed chunks to `vector.base_url`. Non-loopback embedding
 endpoints require `vector.workspace_allow_remote_embeddings: true`; with
 `vector.fallback_policy: lexical`, Atteler stays local and uses the lexical
-workspace index instead of uploading chunks without consent.
+workspace index instead of uploading chunks without consent. The same remote
+embedding consent gate applies to explicit file, session, git-history, and ADR
+vector indexes.
 
 The local ANN layer still exact-scans small corpora by design. The default
 threshold is 64 documents (`vector.DefaultANNExactSearchMaxDocuments`); above

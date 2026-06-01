@@ -435,6 +435,75 @@ func TestBuildVectorRetrievalSearcherFallsBackToSeparateLexicalFileIndex(t *test
 	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
 }
 
+func TestBuildVectorRetrievalSearcherRejectsRemoteFileEmbeddingWithoutConsent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	semanticPath := filepath.Join(dir, "semantic.md")
+	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
+
+	indexPath := filepath.Join(dir, "embedding-file-vector-index.json")
+	_, err := buildVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Stores: map[string]appconfig.VectorizerConfig{
+				vectorSearchVectorStore: {
+					Vectorizer: vector.VectorizerKindEmbedding,
+					BaseURL:    privateRemoteEmbeddingEndpoint(),
+					IndexPath:  indexPath,
+				},
+			},
+		},
+	}, retrievalCommandInput{
+		Search:           "semantic retrieval",
+		VectorIndexFiles: []string{semanticPath},
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "remote file embedding endpoint")
+	require.ErrorContains(t, err, "vector.workspace_allow_remote_embeddings")
+	assert.NoFileExists(t, indexPath)
+	assert.NoFileExists(t, lexicalFallbackIndexPath(indexPath))
+}
+
+func TestBuildVectorRetrievalSearcherUsesLexicalFallbackForRemoteFileEmbeddingWithoutConsent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	semanticPath := filepath.Join(dir, "semantic.md")
+	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
+
+	indexPath := filepath.Join(dir, "embedding-file-vector-index.json")
+	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Stores: map[string]appconfig.VectorizerConfig{
+				vectorSearchVectorStore: {
+					Vectorizer:     vector.VectorizerKindEmbedding,
+					BaseURL:        privateRemoteEmbeddingEndpoint(),
+					FallbackPolicy: vector.VectorizerKindLexical,
+					IndexPath:      indexPath,
+				},
+			},
+		},
+	}, retrievalCommandInput{
+		Search:           "semantic retrieval",
+		VectorIndexFiles: []string{semanticPath},
+	})
+	require.NoError(t, err)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "lexical-file-vector-index", results[0].Scorer.Name)
+	assert.NoFileExists(t, indexPath)
+	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
+}
+
 func TestBuildVectorRetrievalSearcherFallsBackWhenReusableEmbeddingIndexCannotVectorizeQuery(t *testing.T) {
 	t.Parallel()
 

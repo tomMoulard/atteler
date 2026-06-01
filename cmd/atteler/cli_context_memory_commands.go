@@ -1240,14 +1240,7 @@ func adrVectorRetrievalSource(root string, settings vectorSearchSettings) retrie
 }
 
 func lexicalSourceVectorFallbackSettings(settings vectorSearchSettings) vectorSearchSettings {
-	settings.Vectorizer = vector.VectorizerKindLexical
-	settings.Provider = ""
-	settings.BaseURL = ""
-	settings.Model = vector.LexicalFallbackModel
-	settings.FallbackPolicy = vectorFallbackPolicyFail
-	settings.IndexPath = lexicalFallbackIndexPath(settings.IndexPath)
-
-	return settings
+	return lexicalVectorFallbackSettings(settings)
 }
 
 func sourceVectorSettings(
@@ -1841,6 +1834,21 @@ func buildVectorRetrievalSearcher(ctx context.Context, state appState, input ret
 		return nil, err
 	}
 
+	if settings.Vectorizer == vector.VectorizerKindEmbedding &&
+		!workspaceRemoteEmbeddingAllowed(settings.BaseURL, state.vectorConfig.WorkspaceAllowRemoteEmbeddings) {
+		if settings.FallbackPolicy == vector.VectorizerKindLexical {
+			return buildFileVectorRetrievalSearcherOnce(
+				ctx,
+				state.cwd,
+				lexicalVectorFallbackSettings(settings),
+				input.Search,
+				paths,
+			)
+		}
+
+		return nil, fmt.Errorf("retrieval: remote file embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings", workspaceDisplayEmbeddingEndpoint(settings.BaseURL))
+	}
+
 	searcher, err := buildFileVectorRetrievalSearcherOnce(ctx, state.cwd, settings, input.Search, paths)
 	if err == nil ||
 		settings.Vectorizer != vector.VectorizerKindEmbedding ||
@@ -1849,14 +1857,13 @@ func buildVectorRetrievalSearcher(ctx context.Context, state appState, input ret
 		return searcher, err
 	}
 
-	settings.Vectorizer = vector.VectorizerKindLexical
-	settings.Provider = ""
-	settings.BaseURL = ""
-	settings.Model = vector.LexicalFallbackModel
-	settings.FallbackPolicy = vectorFallbackPolicyFail
-	settings.IndexPath = lexicalFallbackIndexPath(settings.IndexPath)
-
-	return buildFileVectorRetrievalSearcherOnce(ctx, state.cwd, settings, input.Search, paths)
+	return buildFileVectorRetrievalSearcherOnce(
+		ctx,
+		state.cwd,
+		lexicalVectorFallbackSettings(settings),
+		input.Search,
+		paths,
+	)
 }
 
 func buildFileVectorRetrievalSearcherOnce(
