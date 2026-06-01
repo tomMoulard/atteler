@@ -1179,7 +1179,10 @@ session output.
 `atteler memory retrieve` prints the shared retrieval contract fields agents
 should cite before injecting context: `source`, `document`, `stable_id`,
 `chunk`, `range`, `scorer`, `inject_allowed`, freshness flags, and an optional
-`why` ranking explanation.
+`why` ranking explanation. With `--retrieval-explain`, numeric scorer details
+are also rendered as stable `detail_<name>=...` fields (for example
+`detail_ann_documents=65`) so agents can audit ranking mode without parsing
+the JSON internals.
 
 Memory and vector stores persist schema, source-hash, provenance, redaction
 policy version, timestamps, TTL, and embedding/vectorizer metadata where
@@ -1314,9 +1317,10 @@ go test ./pkg/vector -bench BenchmarkSearchScale -benchmem
 Benchmark subcases are named `bruteforce`, `ann-exact`, and `ann-approx` so
 regressions show whether a corpus is still on the exact-scan side of the
 threshold or has crossed into approximate candidate search. Retrieval explain
-output records the same ANN mode and candidate count in scorer details so
-agents can distinguish exact small-corpus rankings from approximate large-index
-rankings.
+output records the same ANN mode and candidate count in scorer details and
+the text fields `detail_ann_exact_scan`, `detail_ann_documents`, and
+`detail_ann_min_candidates`, so agents can distinguish exact small-corpus
+rankings from approximate large-index rankings.
 
 Search-quality smoke coverage lives in
 `pkg/vector/testdata/retrieval_quality.json`; it guards fallback ranking on a

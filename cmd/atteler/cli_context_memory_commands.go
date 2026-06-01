@@ -2101,15 +2101,93 @@ func formatRetrievalResult(result retrieval.Result, explain bool) string {
 		parts = append(parts, "indexed_at="+result.Freshness.IndexedAt.Format(time.RFC3339))
 	}
 
+	parts = appendRetrievalContentParts(parts, result, explain)
+
+	return strings.Join(parts, "\t")
+}
+
+func appendRetrievalContentParts(parts []string, result retrieval.Result, explain bool) []string {
 	if result.Snippet != "" {
 		parts = append(parts, "snippet="+result.Snippet)
 	}
 
-	if explain && len(result.Scorer.Explanation) > 0 {
+	if !explain {
+		return parts
+	}
+
+	parts = appendRetrievalScorerDetails(parts, result.Scorer.Details)
+	if len(result.Scorer.Explanation) > 0 {
 		parts = append(parts, "why="+strings.Join(result.Scorer.Explanation, " | "))
 	}
 
-	return strings.Join(parts, "\t")
+	return parts
+}
+
+func appendRetrievalScorerDetails(parts []string, details map[string]float64) []string {
+	if len(details) == 0 {
+		return parts
+	}
+
+	keys := make([]string, 0, len(details))
+	for key := range details {
+		if strings.TrimSpace(key) != "" {
+			keys = append(keys, key)
+		}
+	}
+
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		field := retrievalScorerDetailField(key)
+		if field == "" {
+			continue
+		}
+
+		parts = append(parts, field+"="+formatRetrievalScorerDetailValue(key, details[key]))
+	}
+
+	return parts
+}
+
+func retrievalScorerDetailField(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key == "" {
+		return ""
+	}
+
+	var out strings.Builder
+	previousSeparator := false
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z':
+			out.WriteRune(r)
+			previousSeparator = false
+		case r >= '0' && r <= '9':
+			out.WriteRune(r)
+			previousSeparator = false
+		case r == '_' || r == '-' || r == '.':
+			if out.Len() > 0 && !previousSeparator {
+				out.WriteByte('_')
+				previousSeparator = true
+			}
+		}
+	}
+
+	name := strings.TrimRight(out.String(), "_")
+	if name == "" {
+		return ""
+	}
+
+	return "detail_" + name
+}
+
+func formatRetrievalScorerDetailValue(key string, value float64) string {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "ann_exact_scan":
+		return strconv.FormatBool(value != 0)
+	default:
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	}
 }
 
 func appendRetrievalSourceParts(parts []string, source retrieval.Source) []string {

@@ -173,6 +173,56 @@ func TestAgentMemoryStorePathResolvesRelativeIndexPathAgainstRoot(t *testing.T) 
 	)
 }
 
+func TestFormatRetrievalResultIncludesScorerDetailsWhenExplaining(t *testing.T) {
+	t.Parallel()
+
+	result := retrieval.Result{
+		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: "workspace"},
+		DocumentID: "docs/local-rag.md#chunk=0000",
+		Score:      0.875,
+		Safety:     retrieval.Safety{InjectAllowed: true},
+		Scorer: retrieval.Scorer{
+			Name: "embedding-file-vector-index",
+			Details: map[string]float64{
+				"ann_min_candidates": 64,
+				"ann_exact_scan":     0,
+				"ann_documents":      65,
+				"cosine.similarity":  0.875,
+			},
+			Explanation: []string{"ranked by ANN candidate search"},
+		},
+	}
+
+	got := formatRetrievalResult(result, true)
+
+	assert.Contains(t, got, "detail_ann_documents=65")
+	assert.Contains(t, got, "detail_ann_exact_scan=false")
+	assert.Contains(t, got, "detail_ann_min_candidates=64")
+	assert.Contains(t, got, "detail_cosine_similarity=0.875")
+	assert.Contains(t, got, "why=ranked by ANN candidate search")
+	assert.Less(t, strings.Index(got, "detail_ann_documents=65"), strings.Index(got, "detail_ann_exact_scan=false"))
+	assert.Less(t, strings.Index(got, "detail_ann_exact_scan=false"), strings.Index(got, "detail_ann_min_candidates=64"))
+}
+
+func TestFormatRetrievalResultOmitsScorerDetailsWithoutExplain(t *testing.T) {
+	t.Parallel()
+
+	result := retrieval.Result{
+		Source:     retrieval.Source{Type: retrieval.SourceVector},
+		DocumentID: "docs/local-rag.md#chunk=0000",
+		Score:      0.875,
+		Safety:     retrieval.Safety{InjectAllowed: true},
+		Scorer: retrieval.Scorer{
+			Name:    "embedding-file-vector-index",
+			Details: map[string]float64{"ann_documents": 65},
+		},
+	}
+
+	got := formatRetrievalResult(result, false)
+
+	assert.NotContains(t, got, "detail_ann_documents")
+}
+
 func TestBuildVectorRetrievalSearcherUsesScopedEmbeddingVectorizerConfig(t *testing.T) {
 	t.Parallel()
 
