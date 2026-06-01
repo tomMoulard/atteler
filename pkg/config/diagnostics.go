@@ -714,6 +714,7 @@ func inspectVectorizerScopeEntries(path, prefix string, value *yaml.Node) []Diag
 	var diagnostics []Diagnostic
 	forEachMappingField(value, func(name string, entry *yaml.Node) {
 		field := prefix + "." + name
+		diagnostics = append(diagnostics, inspectVectorizerScopeName(path, prefix, name)...)
 		if entry == nil || entry.Kind != yaml.MappingNode {
 			diagnostics = append(diagnostics, Diagnostic{
 				Severity: DiagnosticError,
@@ -730,6 +731,24 @@ func inspectVectorizerScopeEntries(path, prefix string, value *yaml.Node) []Diag
 	})
 
 	return diagnostics
+}
+
+func inspectVectorizerScopeName(path, prefix, name string) []Diagnostic {
+	if prefix != "vector.sources" {
+		return nil
+	}
+
+	switch normalizeVectorizerScopeKey(name) {
+	case "file", "session", "git-history", "adr":
+		return nil
+	default:
+		return []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    prefix + "." + name,
+			Message:  "unknown vector source scope (supported: file, session, git_history, adr)",
+		}}
+	}
 }
 
 func inspectVectorizerValueFields(path, prefix string, value *yaml.Node) []Diagnostic {

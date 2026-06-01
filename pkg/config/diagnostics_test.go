@@ -258,6 +258,29 @@ vector:
 	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "fallback_policy must be a string")
 }
 
+func TestInspectPathSources_ReportsUnknownVectorSourceScopes(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  sources:
+    git-history:
+      vectorizer: lexical
+    git_histry:
+      vectorizer: embedding
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git-history")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git-history.vectorizer")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.sources.git_histry", "")
+}
+
 func TestInspectPathSources_ReportsNonMappingConfig(t *testing.T) {
 	t.Parallel()
 
