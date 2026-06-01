@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -152,6 +153,86 @@ func TestIndexSearcher_RejectsStalePrebuiltANNForSameDocumentID(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrVectorMismatch)
 	assert.Contains(t, err.Error(), "ANN index")
+}
+
+func TestIndexSearcher_ExplainReportsExactANNModeForSmallIndex(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	idx, err := BuildIndex(
+		context.TODO(),
+		[]Source{{Path: "docs/auth.md", Text: "OAuth callback state validation"}},
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 100},
+		time.Unix(1, 0),
+	)
+	require.NoError(t, err)
+
+	searcher := IndexSearcher{Index: idx, Vectorizer: vectorizer}
+	results, err := searcher.SearchRetrieval(context.TODO(), retrieval.Query{
+		Text:          "OAuth state",
+		Limit:         1,
+		Explain:       true,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	assert.InDelta(t, 1, results[0].Scorer.Details["ann_exact_scan"], 0)
+	assert.InDelta(t, 1, results[0].Scorer.Details["ann_documents"], 0)
+	assert.Contains(t, results[0].Scorer.Explanation, "ANN exact-scan searched all 1 indexed document(s)")
+}
+
+func TestIndexSearcher_ExplainReportsApproximateANNModeForLargeIndex(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	sources := make([]Source, 0, DefaultANNExactSearchMaxDocuments+1)
+	for i := range DefaultANNExactSearchMaxDocuments + 1 {
+		text := "needle semantic retrieval target generic local RAG benchmark filler document"
+		if i == DefaultANNExactSearchMaxDocuments {
+			text = "needle semantic retrieval target for approximate ANN diagnostics"
+		}
+
+		sources = append(sources, Source{
+			Path: filepath.ToSlash(filepath.Join("docs", "doc-"+strconv.Itoa(i)+".md")),
+			Text: text,
+		})
+	}
+
+	idx, err := BuildIndex(
+		context.TODO(),
+		sources,
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 100},
+		time.Unix(1, 0),
+	)
+	require.NoError(t, err)
+
+	ann, err := NewANNIndex(idx.Documents, idx.Dimensions, ANNOptions{})
+	require.NoError(t, err)
+
+	searcher := IndexSearcher{Index: idx, Vectorizer: vectorizer, IndexANN: ann}
+	results, err := searcher.SearchRetrieval(context.TODO(), retrieval.Query{
+		Text:          "needle semantic retrieval target",
+		Limit:         1,
+		Explain:       true,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+
+	assert.InDelta(t, 0, results[0].Scorer.Details["ann_exact_scan"], 0)
+	assert.InDelta(t, DefaultANNExactSearchMaxDocuments+1, results[0].Scorer.Details["ann_documents"], 0)
+	assert.InDelta(t, DefaultANNExactSearchMaxDocuments, results[0].Scorer.Details["ann_min_candidates"], 0)
+	assert.Contains(t, results[0].Scorer.Explanation,
+		"ANN candidate search considered at least 64 of 65 indexed document(s) before exact reranking")
 }
 
 func TestIndexSearcher_SearchRetrievalRedactsQueryBeforeVectorizing(t *testing.T) {

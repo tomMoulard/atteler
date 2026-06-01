@@ -1313,7 +1313,10 @@ go test ./pkg/vector -bench BenchmarkSearchScale -benchmem
 
 Benchmark subcases are named `bruteforce`, `ann-exact`, and `ann-approx` so
 regressions show whether a corpus is still on the exact-scan side of the
-threshold or has crossed into approximate candidate search.
+threshold or has crossed into approximate candidate search. Retrieval explain
+output records the same ANN mode and candidate count in scorer details so
+agents can distinguish exact small-corpus rankings from approximate large-index
+rankings.
 
 Search-quality smoke coverage lives in
 `pkg/vector/testdata/retrieval_quality.json`; it guards fallback ranking on a
