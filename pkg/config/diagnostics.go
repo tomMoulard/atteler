@@ -734,10 +734,31 @@ func inspectVectorizerScopeEntries(path, prefix string, value *yaml.Node) []Diag
 }
 
 func inspectVectorizerScopeName(path, prefix, name string) []Diagnostic {
-	if prefix != "vector.sources" {
+	switch prefix {
+	case "vector.stores":
+		return inspectVectorStoreScopeName(path, prefix, name)
+	case "vector.sources":
+		return inspectVectorSourceScopeName(path, prefix, name)
+	default:
 		return nil
 	}
+}
 
+func inspectVectorStoreScopeName(path, prefix, name string) []Diagnostic {
+	switch normalizeVectorizerScopeKey(name) {
+	case "agent-memory", "vector-search", "workspace":
+		return nil
+	default:
+		return []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    prefix + "." + name,
+			Message:  "unknown vector store scope (supported: agent-memory, vector-search, workspace)",
+		}}
+	}
+}
+
+func inspectVectorSourceScopeName(path, prefix, name string) []Diagnostic {
 	switch normalizeVectorizerScopeKey(name) {
 	case "file", "session", "git-history", "adr":
 		return nil

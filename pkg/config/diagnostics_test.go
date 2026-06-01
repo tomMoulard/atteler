@@ -111,6 +111,10 @@ vector:
       timeout_seconds: 5
       chunk_max_runes: 600
       chunk_overlap_runes: 60
+    vector-search:
+      vectorizer: lexical
+    workspace:
+      vectorizer: lexical
   agents:
     reviewer:
       model: reviewer-memory-embed
@@ -139,6 +143,10 @@ vector:
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.timeout_seconds")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.chunk_max_runes")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.chunk_overlap_runes")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.workspace")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.workspace.vectorizer")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.agents")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.agents.reviewer.model")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.agents.reviewer.index_path")
@@ -279,6 +287,29 @@ vector:
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git-history")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git-history.vectorizer")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.sources.git_histry", "")
+}
+
+func TestInspectPathSources_ReportsUnknownVectorStoreScopes(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  stores:
+    agentmemory:
+      vectorizer: embedding
+    workspace:
+      vectorizer: lexical
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agentmemory", "")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.workspace")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.workspace.vectorizer")
 }
 
 func TestInspectPathSources_ReportsNonMappingConfig(t *testing.T) {
