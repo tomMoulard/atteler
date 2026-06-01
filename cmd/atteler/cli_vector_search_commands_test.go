@@ -737,6 +737,47 @@ func TestVectorSearchSettings_SourceFileConfigOverridesStoreConfig(t *testing.T)
 	assert.Equal(t, 70, settings.Chunk.OverlapRunes)
 }
 
+func TestVectorSearchSettings_CLIOverridesSourceFileConfig(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	settings, err := vectorSearchSettingsFromOptions(root, appconfig.VectorConfig{
+		Vectorizer:     vector.VectorizerKindLexical,
+		Provider:       ollamaProviderName,
+		Model:          testGlobalVectorModel,
+		FallbackPolicy: vector.VectorizerKindLexical,
+		Sources: map[string]appconfig.VectorizerConfig{
+			vector.SourceKindFile: {
+				Vectorizer:        vector.VectorizerKindEmbedding,
+				Model:             "source-file-embed",
+				IndexPath:         "./source-file-index.json",
+				TimeoutSeconds:    7,
+				ChunkMaxRunes:     700,
+				ChunkOverlapRunes: 70,
+			},
+		},
+	}, cliOptions{
+		vectorizer:              vector.VectorizerKindLexical,
+		vectorModel:             "cli-file-model",
+		vectorStorePath:         "./cli-file-index.json",
+		vectorFallbackPolicy:    "fail",
+		vectorTimeout:           positiveIntFlag{value: 3, set: true},
+		vectorChunkMaxRunes:     positiveIntFlag{value: 300, set: true},
+		vectorChunkOverlapRunes: positiveIntFlag{value: 30, set: true},
+		vectorLimit:             positiveIntFlag{value: 9, set: true},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, vector.VectorizerKindLexical, settings.Vectorizer)
+	assert.Equal(t, "cli-file-model", settings.Model)
+	assert.Equal(t, filepath.Join(root, "cli-file-index.json"), settings.IndexPath)
+	assert.Equal(t, "fail", settings.FallbackPolicy)
+	assert.Equal(t, 3, int(settings.Timeout.Seconds()))
+	assert.Equal(t, 300, settings.Chunk.MaxRunes)
+	assert.Equal(t, 30, settings.Chunk.OverlapRunes)
+	assert.Equal(t, 9, settings.Limit)
+}
+
 func TestVectorSearchSettings_ResolvesRelativeCLIStoreAgainstRoot(t *testing.T) {
 	t.Parallel()
 
