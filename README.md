@@ -1244,10 +1244,11 @@ does not silently fall back to lexical after an embedding-backed store is
 configured. All-source retrieval includes that default file-vector store when
 it already exists, is still reusable, and workspace vectors are disabled, and
 includes the selected agent's memory store when an agent is active; if that
-optional file-vector source or git-history source becomes unavailable at query
-time, broad retrieval continues with the other selected sources.
-Explicit vector-source or git-history retrieval still reports the stale or
-unavailable source so it can be rebuilt or debugged.
+optional file-vector source, git-history source, or implicit selected-agent
+memory source becomes unavailable at query time, broad retrieval continues with
+the other selected sources. Explicit vector-source, git-history, or
+agent-memory retrieval still reports the stale or unavailable source so it can
+be rebuilt or debugged.
 
 ```yaml
 vector:

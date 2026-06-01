@@ -1046,7 +1046,7 @@ func allRetrievalSources(input retrievalCommandInput, includeVectorSource bool) 
 		sources = append(sources, retrieval.SourceVector)
 	}
 
-	if strings.TrimSpace(input.AgentMemoryAgent) != "" || strings.TrimSpace(input.AgentName) != "" || strings.TrimSpace(input.AgentMemoryStorePath) != "" {
+	if retrievalExplicitAgentMemorySourceRequested(input) {
 		sources = append(sources, retrieval.SourceAgentMemory)
 	}
 
@@ -1102,6 +1102,7 @@ func shouldSkipRetrievalSourceError(
 ) bool {
 	return shouldSkipEmptyWorkspaceVectorSource(input, sources, source, err) ||
 		shouldSkipUnavailableGitHistorySource(input, sources, source, err) ||
+		shouldSkipImplicitAgentMemorySourceError(state, input, sources, source) ||
 		shouldSkipImplicitFileVectorSourceError(state, input, sources, source)
 }
 
@@ -1131,6 +1132,19 @@ func shouldSkipImplicitFileVectorSourceError(
 		!workspaceVectorEnabled(state.vectorConfig)
 }
 
+func shouldSkipImplicitAgentMemorySourceError(
+	state appState,
+	input retrievalCommandInput,
+	sources []retrieval.SourceType,
+	source retrieval.SourceType,
+) bool {
+	return source == retrieval.SourceAgentMemory &&
+		len(sources) > 1 &&
+		retrievalSourceAllRequested(input.Sources) &&
+		strings.TrimSpace(state.selectedAgent) != "" &&
+		!retrievalExplicitAgentMemorySourceRequested(input)
+}
+
 func shouldSkipUnavailableGitHistorySource(
 	input retrievalCommandInput,
 	sources []retrieval.SourceType,
@@ -1157,6 +1171,12 @@ func retrievalSourceAllRequested(sources []string) bool {
 
 func retrievalExplicitFileVectorIndexRequested(input retrievalCommandInput) bool {
 	return len(input.VectorIndexFiles) > 0 || strings.TrimSpace(input.Vector.StorePath) != ""
+}
+
+func retrievalExplicitAgentMemorySourceRequested(input retrievalCommandInput) bool {
+	return strings.TrimSpace(input.AgentMemoryAgent) != "" ||
+		strings.TrimSpace(input.AgentName) != "" ||
+		strings.TrimSpace(input.AgentMemoryStorePath) != ""
 }
 
 func retrievalSourceSet(sources []retrieval.SourceType) map[retrieval.SourceType]bool {

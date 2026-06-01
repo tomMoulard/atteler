@@ -758,6 +758,46 @@ func TestRetrievalSearchersAllSkipsUnavailableGitHistorySource(t *testing.T) {
 	require.Len(t, searchers, 1)
 }
 
+func TestRetrievalSearchersAllSkipsUnavailableImplicitAgentMemorySource(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".atteler"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".atteler", "agent-memory.json"), []byte("{invalid"), 0o600))
+
+	searchers, err := retrievalSearchers(
+		context.TODO(),
+		appState{cwd: root, selectedAgent: testReviewerName},
+		retrievalCommandInput{
+			Sources: []string{retrievalSourceAll},
+			Search:  "semantic retrieval",
+		},
+		[]retrieval.SourceType{retrieval.SourceMemory, retrieval.SourceAgentMemory},
+	)
+	require.NoError(t, err)
+	require.Len(t, searchers, 1)
+}
+
+func TestRetrievalSearchersExplicitAgentMemoryReportsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".atteler"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".atteler", "agent-memory.json"), []byte("{invalid"), 0o600))
+
+	_, err := retrievalSearchers(
+		context.TODO(),
+		appState{cwd: root, selectedAgent: testReviewerName},
+		retrievalCommandInput{
+			Sources: []string{memoryAgentKey},
+			Search:  "semantic retrieval",
+		},
+		[]retrieval.SourceType{retrieval.SourceAgentMemory},
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "agent memory: load store")
+}
+
 func TestRetrievalSearchersExplicitGitHistoryReportsUnavailable(t *testing.T) {
 	t.Parallel()
 
