@@ -1312,6 +1312,7 @@ brute-force-vs-ANN decision explicit. Track scale with:
 
 ```sh
 go test ./pkg/vector -bench BenchmarkSearchScale -benchmem
+go test ./pkg/vector -bench BenchmarkIndexANNLifecycle -benchmem
 ```
 
 Benchmark subcases are named `bruteforce`, `ann-exact`, and `ann-approx` so
@@ -1320,7 +1321,9 @@ threshold or has crossed into approximate candidate search. Retrieval explain
 output records the same ANN mode and candidate count in scorer details and
 the text fields `detail_ann_exact_scan`, `detail_ann_documents`, and
 `detail_ann_min_candidates`, so agents can distinguish exact small-corpus
-rankings from approximate large-index rankings.
+rankings from approximate large-index rankings. `BenchmarkIndexANNLifecycle`
+contrasts transient `Index.SearchANN` calls with a prebuilt `ANNIndex`, making
+the lifecycle cost visible when wiring long-lived retrieval adapters.
 
 Search-quality smoke coverage lives in
 `pkg/vector/testdata/retrieval_quality.json`; it guards fallback ranking on a

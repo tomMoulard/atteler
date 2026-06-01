@@ -3,6 +3,7 @@ package vector
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 func BenchmarkSearchScale(b *testing.B) {
@@ -63,6 +64,45 @@ func BenchmarkSearchScale(b *testing.B) {
 	}
 }
 
+func BenchmarkIndexANNLifecycle(b *testing.B) {
+	const (
+		dimensions = 128
+		docCount   = 4096
+		limit      = 8
+	)
+
+	docs := benchmarkDocuments(docCount, dimensions)
+	query := docs[docCount/2].Vector
+	idx := benchmarkIndex(docs, dimensions)
+
+	ann, err := NewANNIndex(docs, dimensions, ANNOptions{})
+	if err != nil {
+		b.Fatalf("NewANNIndex(%d): %v", docCount, err)
+	}
+
+	b.Run("transient-ann/docs=4096", func(b *testing.B) {
+		b.ReportMetric(float64(docCount), "docs")
+		b.ReportMetric(0, "prebuilt_ann")
+
+		for b.Loop() {
+			if _, err := idx.SearchANN(query, limit, ANNOptions{}); err != nil {
+				b.Fatalf("Index.SearchANN: %v", err)
+			}
+		}
+	})
+
+	b.Run("prebuilt-ann/docs=4096", func(b *testing.B) {
+		b.ReportMetric(float64(docCount), "docs")
+		b.ReportMetric(1, "prebuilt_ann")
+
+		for b.Loop() {
+			if _, err := ann.Search(query, limit); err != nil {
+				b.Fatalf("ANNIndex.Search: %v", err)
+			}
+		}
+	})
+}
+
 func boolMetric(value bool) int {
 	if value {
 		return 1
@@ -90,4 +130,23 @@ func benchmarkDocuments(count, dimensions int) []Document {
 	}
 
 	return docs
+}
+
+func benchmarkIndex(docs []Document, dimensions int) *Index {
+	timestamp := time.Unix(1, 0).UTC()
+
+	return &Index{
+		Version:   IndexVersion,
+		CreatedAt: timestamp,
+		UpdatedAt: timestamp,
+		Vectorizer: VectorizerMetadata{
+			Kind:       VectorizerKindEmbedding,
+			Provider:   "benchmark",
+			Model:      "synthetic",
+			Dimensions: dimensions,
+		},
+		Chunk:      ChunkOptions{MaxRunes: 1024, OverlapRunes: 128},
+		Dimensions: dimensions,
+		Documents:  cloneDocuments(docs),
+	}
 }
