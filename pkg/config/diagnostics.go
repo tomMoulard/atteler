@@ -475,7 +475,7 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 		case "context":
 			diagnostics = append(diagnostics, inspectContextFields(path, value)...)
 		case "providers":
-			diagnostics = append(diagnostics, inspectMapEntries(path, "providers", value, knownProviderFields(), nil)...)
+			diagnostics = append(diagnostics, inspectMapEntries(path, "providers", value, knownProviderFields())...)
 		case "agents":
 			diagnostics = append(diagnostics, inspectAgents(path, value)...)
 		case "hooks":
@@ -485,7 +485,7 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 		case "skill_learning":
 			diagnostics = append(diagnostics, inspectNamedFields(path, "skill_learning", value, knownSkillLearningFields(), nil)...)
 		case "vector":
-			diagnostics = append(diagnostics, inspectNamedFields(path, "vector", value, knownVectorFields(), nil)...)
+			diagnostics = append(diagnostics, inspectVectorFields(path, value)...)
 		case "worktree":
 			diagnostics = append(diagnostics, inspectNamedFields(path, "worktree", value, knownWorktreeFields(), nil)...)
 		case "model_aliases":
@@ -666,6 +666,23 @@ func inspectHooks(path string, value *yaml.Node) []Diagnostic {
 	return diagnostics
 }
 
+func inspectVectorFields(path string, value *yaml.Node) []Diagnostic {
+	diagnostics := inspectNamedFields(path, "vector", value, knownVectorFields(), nil)
+	if stores := mappingValue(value, "stores"); stores != nil {
+		diagnostics = append(diagnostics, inspectMapEntries(path, "vector.stores", stores, knownVectorizerFields())...)
+	}
+
+	if agents := mappingValue(value, "agents"); agents != nil {
+		diagnostics = append(diagnostics, inspectMapEntries(path, "vector.agents", agents, knownVectorizerFields())...)
+	}
+
+	if sources := mappingValue(value, "sources"); sources != nil {
+		diagnostics = append(diagnostics, inspectMapEntries(path, "vector.sources", sources, knownVectorizerFields())...)
+	}
+
+	return diagnostics
+}
+
 func inspectAgents(path string, value *yaml.Node) []Diagnostic {
 	var diagnostics []Diagnostic
 
@@ -707,12 +724,11 @@ func inspectMapEntries(
 	prefix string,
 	value *yaml.Node,
 	known map[string]bool,
-	deprecated map[string]string,
 ) []Diagnostic {
 	var diagnostics []Diagnostic
 
 	forEachMappingField(value, func(name string, entry *yaml.Node) {
-		diagnostics = append(diagnostics, inspectNamedFields(path, prefix+"."+name, entry, known, deprecated)...)
+		diagnostics = append(diagnostics, inspectNamedFields(path, prefix+"."+name, entry, known, nil)...)
 	})
 
 	return diagnostics
@@ -900,6 +916,9 @@ func knownSkillLearningFields() map[string]bool {
 
 func knownVectorFields() map[string]bool {
 	return map[string]bool{
+		"stores":                            true,
+		"agents":                            true,
+		"sources":                           true,
 		"workspace_enabled":                 true,
 		"workspace_allow_remote_embeddings": true,
 		"vectorizer":                        true,
@@ -925,6 +944,20 @@ func knownWorktreeFields() map[string]bool {
 		"auto_merge":            true,
 		"verification_commands": true,
 		"override_verification": true,
+	}
+}
+
+func knownVectorizerFields() map[string]bool {
+	return map[string]bool{
+		"vectorizer":          true,
+		"provider":            true,
+		"model":               true,
+		"base_url":            true,
+		"fallback_policy":     true,
+		"index_path":          true,
+		"timeout_seconds":     true,
+		"chunk_max_runes":     true,
+		"chunk_overlap_runes": true,
 	}
 }
 

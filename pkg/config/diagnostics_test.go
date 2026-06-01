@@ -91,6 +91,65 @@ skill_learning:
 	assertNoDiagnostic(t, reports[0].Diagnostics, "skill_learning.enabled")
 }
 
+func TestInspectPathSources_AcceptsScopedVectorizerConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  vectorizer: lexical
+  stores:
+    agent-memory:
+      vectorizer: embedding
+      provider: ollama
+      model: memory-embed
+      base_url: http://127.0.0.1:11434
+      fallback_policy: lexical
+      index_path: ./.atteler/agent-memory.json
+      timeout_seconds: 5
+      chunk_max_runes: 600
+      chunk_overlap_runes: 60
+  agents:
+    reviewer:
+      model: reviewer-memory-embed
+      index_path: ./.atteler/reviewer-memory.json
+  sources:
+    session:
+      vectorizer: embedding
+      index_path: ./.atteler/session-vector-index.json
+      surprise: true
+    git_history:
+      vectorizer: lexical
+      index_path: ./.atteler/git-history-vector-index.json
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.provider")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.model")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.base_url")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.fallback_policy")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.index_path")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.timeout_seconds")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.chunk_max_runes")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.chunk_overlap_runes")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.agents")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.agents.reviewer.model")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.agents.reviewer.index_path")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.session.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.session.index_path")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.index_path")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.sources.session.surprise", "")
+}
+
 func TestInspectPathSources_ReportsNonMappingConfig(t *testing.T) {
 	t.Parallel()
 
