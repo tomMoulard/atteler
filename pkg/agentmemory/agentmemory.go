@@ -699,7 +699,66 @@ func LoadWithOptionsContext(ctx context.Context, path string, opts LoadOptions) 
 	})
 }
 
+// LoadAndCompact reads a JSON store, removes expired memories at now, validates
+// the remaining data, and returns the number of memories removed. It is useful
+// for explicit maintenance commands that need to report how much cleanup they
+// performed while preserving Load's fail-closed validation behavior for the
+// persisted, non-expired corpus.
+func LoadAndCompact(path string, now time.Time) (*Store, int, error) {
+	return loadAndCompact(path, now)
+}
+
+// LoadAndCompactContext is LoadAndCompact with caller-provided cancellation.
+func LoadAndCompactContext(ctx context.Context, path string, now time.Time) (*Store, int, error) {
+	if ctx == nil {
+		return nil, 0, vector.ErrContextRequired
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, 0, fmt.Errorf("agent memory: load canceled: %w", err)
+	}
+
+	return loadAndCompact(path, now)
+}
+
 func loadWithOptions(path string, opts LoadOptions, migrate func(*Store) error) (*Store, error) {
+	store, err := readAgentMemoryStore(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if opts.Migrate {
+		if err := migrate(store); err != nil {
+			return nil, fmt.Errorf("migrate agent memory store %q: %w", path, err)
+		}
+
+		return store, nil
+	}
+
+	store.Compact(time.Now().UTC())
+
+	if err := store.validateLoaded(); err != nil {
+		return nil, fmt.Errorf("validate agent memory store %q: %w", path, err)
+	}
+
+	return store, nil
+}
+
+func loadAndCompact(path string, now time.Time) (*Store, int, error) {
+	store, err := readAgentMemoryStore(path)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	removed := store.Compact(now)
+	if err := store.validateLoaded(); err != nil {
+		return nil, 0, fmt.Errorf("validate agent memory store %q: %w", path, err)
+	}
+
+	return store, removed, nil
+}
+
+func readAgentMemoryStore(path string) (*Store, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read agent memory store %q: %w", path, err)
@@ -708,20 +767,6 @@ func loadWithOptions(path string, opts LoadOptions, migrate func(*Store) error) 
 	var store Store
 	if err := json.Unmarshal(data, &store); err != nil {
 		return nil, fmt.Errorf("decode agent memory store %q: %w", path, err)
-	}
-
-	if opts.Migrate {
-		if err := migrate(&store); err != nil {
-			return nil, fmt.Errorf("migrate agent memory store %q: %w", path, err)
-		}
-
-		return &store, nil
-	}
-
-	store.Compact(time.Now().UTC())
-
-	if err := store.validateLoaded(); err != nil {
-		return nil, fmt.Errorf("validate agent memory store %q: %w", path, err)
 	}
 
 	return &store, nil

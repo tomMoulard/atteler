@@ -577,6 +577,29 @@ func TestLoadCompactsExpiredStaleContentBeforeValidation(t *testing.T) {
 	assert.True(t, loaded.Vectorizer.CompatibleWith(vector.TextVectorizerSpec(loaded.Dimensions)))
 }
 
+func TestLoadAndCompactReportsExpiredDocumentsBeforeValidation(t *testing.T) {
+	t.Parallel()
+
+	expired := time.Now().UTC().Add(-time.Second)
+	store, err := NewStore(16)
+	require.NoError(t, err)
+	require.NoError(t, store.AddTextWithOptions("agent", "expired", "expired stale agent memory", WithExpiresAt(expired)))
+	store.Vectorizer.Model = staleHashModel
+	store.Agents["agent"][0].Vectorizer = store.Vectorizer
+	store.Agents["agent"][0].Provenance = nil
+
+	path := filepath.Join(t.TempDir(), "agent-memory.json")
+	data, err := json.Marshal(store)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	loaded, removed, err := LoadAndCompact(path, time.Now().UTC())
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed)
+	assert.Empty(t, loaded.Documents("agent"))
+	assert.True(t, loaded.Vectorizer.CompatibleWith(vector.TextVectorizerSpec(loaded.Dimensions)))
+}
+
 func TestLoadCompactsExpiredLegacySchemaContentBeforeValidation(t *testing.T) {
 	t.Parallel()
 

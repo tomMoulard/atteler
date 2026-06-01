@@ -414,12 +414,12 @@ func runAgentMemoryCommand(
 		return err
 	}
 
-	store, err := loadAgentMemoryStore(ctx, storePath, input.Migrate, runtime)
+	store, compactedOnLoad, err := loadAgentMemoryStore(ctx, storePath, input.Migrate, input.Compact, runtime)
 	if err != nil {
 		return err
 	}
 
-	storeChanged, messages, err := mutateAgentMemoryStore(ctx, store, agentName, storePath, input)
+	storeChanged, messages, err := mutateAgentMemoryStore(ctx, store, agentName, storePath, input, compactedOnLoad)
 	if err != nil {
 		return err
 	}
@@ -490,6 +490,7 @@ func mutateAgentMemoryStore(
 	agentName string,
 	storePath string,
 	input agentMemoryCommandInput,
+	compactedOnLoad int,
 ) (storeChanged bool, messages []string, err error) {
 	messages = make([]string, 0, len(input.IndexFiles)+3)
 
@@ -503,7 +504,7 @@ func mutateAgentMemoryStore(
 	storeChanged = storeChanged || deleted
 	messages = appendAgentMemoryMessage(messages, message)
 
-	compacted, message := compactAgentMemoryDocuments(store, storePath, input.Compact)
+	compacted, message := compactAgentMemoryDocuments(store, storePath, input.Compact, compactedOnLoad)
 	storeChanged = storeChanged || compacted
 	messages = appendAgentMemoryMessage(messages, message)
 
@@ -549,12 +550,12 @@ func deleteAgentMemoryDocument(store *agentmemory.Store, agentName, storePath, i
 	)
 }
 
-func compactAgentMemoryDocuments(store *agentmemory.Store, storePath string, enabled bool) (changed bool, message string) {
+func compactAgentMemoryDocuments(store *agentmemory.Store, storePath string, enabled bool, compactedOnLoad int) (changed bool, message string) {
 	if !enabled {
 		return false, ""
 	}
 
-	removed := store.Compact(time.Now().UTC())
+	removed := compactedOnLoad + store.Compact(time.Now().UTC())
 	message = fmt.Sprintf("Compacted %d expired agent memory document(s) from %s", removed, memoryDisplayValue(storePath))
 
 	return true, message
@@ -714,17 +715,28 @@ func loadAgentMemoryStore(
 	ctx context.Context,
 	path string,
 	migrate bool,
+	countCompacted bool,
 	runtime agentMemoryVectorizerRuntime,
-) (*agentmemory.Store, error) {
+) (*agentmemory.Store, int, error) {
 	if _, err := os.Stat(path); err != nil {
-		return loadMissingAgentMemoryStore(path, migrate, runtime, err)
+		store, loadErr := loadMissingAgentMemoryStore(path, migrate, runtime, err)
+		return store, 0, loadErr
 	}
 
 	loadOptions := agentmemory.LoadOptions{Migrate: migrate}
 
-	store, err := agentmemory.LoadWithOptionsContext(ctx, path, loadOptions)
+	var (
+		compactedOnLoad int
+		store           *agentmemory.Store
+		err             error
+	)
+	if countCompacted && !migrate {
+		store, compactedOnLoad, err = agentmemory.LoadAndCompactContext(ctx, path, time.Now().UTC())
+	} else {
+		store, err = agentmemory.LoadWithOptionsContext(ctx, path, loadOptions)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("agent memory: load store: %w", err)
+		return nil, 0, fmt.Errorf("agent memory: load store: %w", err)
 	}
 
 	if runtime.configured {
@@ -735,11 +747,11 @@ func loadAgentMemoryStore(
 		}
 
 		if err != nil {
-			return nil, fmt.Errorf("agent memory: configure vectorizer: %w", err)
+			return nil, 0, fmt.Errorf("agent memory: configure vectorizer: %w", err)
 		}
 	}
 
-	return store, nil
+	return store, compactedOnLoad, nil
 }
 
 func loadMissingAgentMemoryStore(
@@ -2083,7 +2095,7 @@ func buildAgentMemoryRetrievalSearcher(
 		return nil, err
 	}
 
-	store, err := loadAgentMemoryStore(ctx, storePath, false, runtime)
+	store, _, err := loadAgentMemoryStore(ctx, storePath, false, false, runtime)
 	if err != nil {
 		return nil, err
 	}

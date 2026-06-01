@@ -173,9 +173,8 @@ func TestRunAgentMemoryCommandAllowsDeleteWithRemoteEmbeddingConfigWithoutConsen
 	assert.Empty(t, loaded.Documents(testReviewerName))
 }
 
+//nolint:paralleltest // Captures process-wide stdout.
 func TestRunAgentMemoryCommandAllowsCompactWithRemoteEmbeddingConfigWithoutConsent(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "remote-agent-memory.json")
 
@@ -190,7 +189,9 @@ func TestRunAgentMemoryCommandAllowsCompactWithRemoteEmbeddingConfigWithoutConse
 		"Semantic retrieval memory for local RAG",
 		agentmemory.WithExpiresAt(time.Unix(1, 0).UTC()),
 	))
-	require.NoError(t, store.Save(storePath))
+	data, err := json.MarshalIndent(store, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(storePath, append(data, '\n'), 0o600))
 
 	cfg := appconfig.VectorConfig{
 		Stores: map[string]appconfig.VectorizerConfig{
@@ -202,10 +203,12 @@ func TestRunAgentMemoryCommandAllowsCompactWithRemoteEmbeddingConfigWithoutConse
 		},
 	}
 
-	err = runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
-		agentMemoryCompact: true,
-	}))
-	require.NoError(t, err)
+	output := captureMemoryStdout(t, func() error {
+		return runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
+			agentMemoryCompact: true,
+		}))
+	})
+	assert.Contains(t, output, "Compacted 1 expired agent memory document(s)")
 
 	loaded, err := agentmemory.Load(storePath)
 	require.NoError(t, err)
