@@ -1508,6 +1508,16 @@ func sessionVectorSources(store *session.Store) ([]vector.Source, error) {
 		metadata := map[string]string{
 			"session_id": saved.ID,
 		}
+		if !saved.CreatedAt.IsZero() {
+			metadata["created_at"] = saved.CreatedAt.UTC().Format(time.RFC3339)
+		}
+
+		if !saved.UpdatedAt.IsZero() {
+			updatedAt := saved.UpdatedAt.UTC()
+			metadata["updated_at"] = updatedAt.Format(time.RFC3339)
+			metadata[retrieval.MetadataSourceUpdatedAt] = updatedAt.Format(time.RFC3339Nano)
+		}
+
 		if saved.Title != "" {
 			metadata["title"] = saved.Title
 		}
@@ -1603,7 +1613,9 @@ func gitHistoryVectorSources(commits []githistory.Commit) []vector.Source {
 		}
 
 		if !commit.Date.IsZero() {
-			metadata["date"] = commit.Date.UTC().Format(time.RFC3339)
+			updatedAt := commit.Date.UTC()
+			metadata["date"] = updatedAt.Format(time.RFC3339)
+			metadata[retrieval.MetadataSourceUpdatedAt] = updatedAt.Format(time.RFC3339Nano)
 		}
 
 		sources = append(sources, vector.Source{
@@ -1753,10 +1765,13 @@ func appendADRVectorSource(
 	adrID := strings.TrimSuffix(filepath.Base(relPath), filepath.Ext(relPath))
 	source.Kind = vector.SourceKindADR
 	source.Path = relPath
-	source.Metadata = map[string]string{
-		"adr_id": adrID,
-		"path":   relPath,
+	metadata := maps.Clone(source.Metadata)
+	if metadata == nil {
+		metadata = make(map[string]string, 3)
 	}
+	metadata["adr_id"] = adrID
+	metadata["path"] = relPath
+	source.Metadata = metadata
 	source.Provenance = map[string]string{
 		"adr_id": adrID,
 	}

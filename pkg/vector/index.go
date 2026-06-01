@@ -500,7 +500,17 @@ func SourceFromFile(path string) (Source, error) {
 		return Source{}, fmt.Errorf("read vector source %q: %w", path, ErrInvalidUTF8)
 	}
 
-	return Source{Path: filepath.Clean(path), Text: string(data)}, nil
+	info, err := os.Stat(path)
+	if err != nil {
+		return Source{}, fmt.Errorf("stat vector source %q: %w", path, err)
+	}
+
+	metadata := make(map[string]string, 1)
+	if updatedAt := info.ModTime().UTC(); !updatedAt.IsZero() {
+		metadata[retrieval.MetadataSourceUpdatedAt] = updatedAt.Format(time.RFC3339Nano)
+	}
+
+	return Source{Path: filepath.Clean(path), Text: string(data), Metadata: metadata}, nil
 }
 
 // SourceMetadataForText returns digest metadata for source text. Digests and

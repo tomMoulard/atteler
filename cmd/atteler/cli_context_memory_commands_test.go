@@ -574,11 +574,13 @@ func TestRetrievalSearcherUsesPersistedSessionVectorSourceConfig(t *testing.T) {
 	assert.Equal(t, retrieval.SourceSession, results[0].Source.Type)
 	assert.Contains(t, results[0].DocumentID, "sessions/session-vector-test")
 	assert.Equal(t, "embedding-session-ann", results[0].Scorer.Name)
+	assert.NotZero(t, results[0].Freshness.SourceUpdatedAt)
 
 	loaded, err := vector.LoadIndex(indexPath)
 	require.NoError(t, err)
 	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
 	assert.ElementsMatch(t, []string{vector.SourceKindSession}, sourceMetadataKinds(loaded.Sources))
+	assert.NotEmpty(t, loaded.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
 }
 
 func TestBuildSessionVectorRetrievalSearcherFallbackPersistsLexicalIndex(t *testing.T) {
@@ -680,6 +682,7 @@ func TestBuildGitHistoryVectorRetrievalSearcherUsesPersistedSourceConfig(t *test
 	assert.Equal(t, retrieval.SourceGitHistory, results[0].Source.Type)
 	assert.Contains(t, results[0].DocumentID, "git/abc123")
 	assert.Equal(t, "embedding-git-history-ann", results[0].Scorer.Name)
+	assert.Equal(t, commits[0].Date, results[0].Freshness.SourceUpdatedAt)
 
 	loaded, err := vector.LoadIndex(indexPath)
 	require.NoError(t, err)
@@ -793,11 +796,13 @@ func TestBuildADRVectorRetrievalSearcherUsesPersistedSourceConfig(t *testing.T) 
 	assert.Contains(t, filepath.ToSlash(results[0].DocumentID), "docs/adr/0001-local-rag.md")
 	assert.Equal(t, "embedding-adr-ann", results[0].Scorer.Name)
 	assert.Equal(t, "0001-local-rag", results[0].Metadata["adr_id"])
+	assert.NotZero(t, results[0].Freshness.SourceUpdatedAt)
 
 	loaded, err := vector.LoadIndex(indexPath)
 	require.NoError(t, err)
 	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
 	assert.ElementsMatch(t, []string{vector.SourceKindADR, vector.SourceKindADR}, sourceMetadataKinds(loaded.Sources))
+	assert.NotEmpty(t, loaded.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
 }
 
 func TestBuildADRVectorRetrievalSearcherFallbackUsesLexicalIndexURI(t *testing.T) {

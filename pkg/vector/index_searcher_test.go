@@ -235,6 +235,75 @@ func TestIndexSearcher_ExplainReportsApproximateANNModeForLargeIndex(t *testing.
 		"ANN candidate search considered at least 64 of 65 indexed document(s) before exact reranking")
 }
 
+func TestIndexSearcher_SearchRetrievalReportsFileFreshness(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "auth.md")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("OAuth callback state validation"), 0o600))
+
+	initialModTime := time.Date(2026, 6, 1, 10, 30, 0, 0, time.UTC)
+	require.NoError(t, os.Chtimes(sourcePath, initialModTime, initialModTime))
+
+	source, err := SourceFromFile(sourcePath)
+	require.NoError(t, err)
+	recordedSourceUpdatedAt, err := time.Parse(time.RFC3339Nano, source.Metadata[retrieval.MetadataSourceUpdatedAt])
+	require.NoError(t, err)
+
+	vectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	idx, err := BuildIndex(
+		context.TODO(),
+		[]Source{source},
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 100},
+		time.Unix(1, 0),
+	)
+	require.NoError(t, err)
+
+	searcher := IndexSearcher{Index: idx, Vectorizer: vectorizer}
+	results, err := searcher.SearchRetrieval(context.TODO(), retrieval.Query{
+		Text:          "OAuth state",
+		Limit:         1,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "current", results[0].Freshness.Status)
+	assert.False(t, results[0].Freshness.Deleted)
+	assert.Equal(t, recordedSourceUpdatedAt, results[0].Freshness.SourceUpdatedAt)
+
+	updatedModTime := recordedSourceUpdatedAt.Add(time.Hour)
+	require.NoError(t, os.Chtimes(sourcePath, updatedModTime, updatedModTime))
+	info, err := os.Stat(sourcePath)
+	require.NoError(t, err)
+
+	results, err = searcher.SearchRetrieval(context.TODO(), retrieval.Query{
+		Text:          "OAuth state",
+		Limit:         1,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "stale", results[0].Freshness.Status)
+	assert.False(t, results[0].Freshness.Deleted)
+	assert.Equal(t, info.ModTime().UTC(), results[0].Freshness.SourceUpdatedAt)
+
+	require.NoError(t, os.Remove(sourcePath))
+
+	results, err = searcher.SearchRetrieval(context.TODO(), retrieval.Query{
+		Text:          "OAuth state",
+		Limit:         1,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "deleted", results[0].Freshness.Status)
+	assert.True(t, results[0].Freshness.Deleted)
+}
+
 func TestIndexSearcher_SearchRetrievalRedactsQueryBeforeVectorizing(t *testing.T) {
 	t.Parallel()
 
