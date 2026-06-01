@@ -11,7 +11,7 @@ func BenchmarkSearchScale(b *testing.B) {
 		limit      = 8
 	)
 
-	for _, docCount := range []int{64, 512, 4096} {
+	for _, docCount := range []int{64, 65, 512, 4096} {
 		docs := benchmarkDocuments(docCount, dimensions)
 		query := docs[docCount/2].Vector
 
@@ -42,11 +42,17 @@ func BenchmarkSearchScale(b *testing.B) {
 			}
 		})
 
-		b.Run(fmt.Sprintf("ann/docs=%d", docCount), func(b *testing.B) {
+		mode := "ann-approx"
+		if (ANNOptions{}).UsesExactSearch(docCount, limit) {
+			mode = "ann-exact"
+		}
+
+		b.Run(fmt.Sprintf("%s/docs=%d", mode, docCount), func(b *testing.B) {
 			options := (ANNOptions{}).Normalize(docCount, limit)
 			b.ReportMetric(float64(docCount), "docs")
 			b.ReportMetric(float64(options.MinCandidates), "ann_candidates")
 			b.ReportMetric(float64(DefaultANNExactSearchMaxDocuments), "exact_threshold")
+			b.ReportMetric(float64(boolMetric((ANNOptions{}).UsesExactSearch(docCount, limit))), "exact_scan")
 
 			for b.Loop() {
 				if _, err := ann.Search(query, limit); err != nil {
@@ -55,6 +61,14 @@ func BenchmarkSearchScale(b *testing.B) {
 			}
 		})
 	}
+}
+
+func boolMetric(value bool) int {
+	if value {
+		return 1
+	}
+
+	return 0
 }
 
 func benchmarkDocuments(count, dimensions int) []Document {

@@ -1303,11 +1303,17 @@ workspace index instead of uploading chunks without consent.
 The local ANN layer still exact-scans small corpora by design. The default
 threshold is 64 documents (`vector.DefaultANNExactSearchMaxDocuments`); above
 that, limited searches use ANN candidates unless callers raise
-`ANNOptions.MinCandidates`. Track scale with:
+`ANNOptions.MinCandidates`. Runtime code can call
+`ANNOptions.UsesExactSearch(documentCount, limit)` to make the same
+brute-force-vs-ANN decision explicit. Track scale with:
 
 ```sh
 go test ./pkg/vector -bench BenchmarkSearchScale -benchmem
 ```
+
+Benchmark subcases are named `bruteforce`, `ann-exact`, and `ann-approx` so
+regressions show whether a corpus is still on the exact-scan side of the
+threshold or has crossed into approximate candidate search.
 
 Search-quality smoke coverage lives in
 `pkg/vector/testdata/retrieval_quality.json`; it guards fallback ranking on a

@@ -61,6 +61,16 @@ func TestANNOptionsNormalizeUsesExactSearchThresholdForSmallIndexes(t *testing.T
 	assert.Equal(t, DefaultANNExactSearchMaxDocuments, approximate.MinCandidates)
 }
 
+func TestANNOptionsUsesExactSearchDocumentsThreshold(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, (ANNOptions{}).UsesExactSearch(DefaultANNExactSearchMaxDocuments, 1))
+	assert.False(t, (ANNOptions{}).UsesExactSearch(DefaultANNExactSearchMaxDocuments+1, 1))
+	assert.True(t, (ANNOptions{}).UsesExactSearch(DefaultANNExactSearchMaxDocuments+1, 0))
+	assert.True(t, (ANNOptions{MinCandidates: DefaultANNExactSearchMaxDocuments + 1}).
+		UsesExactSearch(DefaultANNExactSearchMaxDocuments+1, 1))
+}
+
 func TestANNIndexRejectsUnsafePersistedDocument(t *testing.T) {
 	t.Parallel()
 
