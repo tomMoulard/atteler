@@ -539,6 +539,18 @@ func TestSelectedRetrievalSourcesAllIncludesExplicitVectorStorePath(t *testing.T
 	assert.Contains(t, sources, retrieval.SourceVector)
 }
 
+func TestSelectedRetrievalSourcesForStateAllIncludesSelectedAgentMemory(t *testing.T) {
+	t.Parallel()
+
+	sources, err := selectedRetrievalSourcesForState(appState{
+		selectedAgent: testReviewerName,
+	}, retrievalCommandInput{
+		Sources: []string{retrievalSourceAll},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, sources, retrieval.SourceAgentMemory)
+}
+
 func TestSelectedRetrievalSourcesDefaultIncludesExplicitVectorStorePath(t *testing.T) {
 	t.Parallel()
 

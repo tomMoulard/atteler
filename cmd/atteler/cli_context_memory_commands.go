@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -952,7 +953,24 @@ func selectedRetrievalSourcesForState(state appState, input retrievalCommandInpu
 	includeVector := workspaceVectorEnabled(state.vectorConfig) ||
 		retrievalReusableFileVectorIndexExists(state.cwd, state.vectorConfig, input)
 
-	return selectedRetrievalSources(input, includeVector)
+	sources, err := selectedRetrievalSources(input, includeVector)
+	if err != nil {
+		return nil, err
+	}
+
+	if retrievalSourceAllRequested(input.Sources) && strings.TrimSpace(state.selectedAgent) != "" {
+		sources = appendRetrievalSourceIfMissing(sources, retrieval.SourceAgentMemory)
+	}
+
+	return sources, nil
+}
+
+func appendRetrievalSourceIfMissing(sources []retrieval.SourceType, source retrieval.SourceType) []retrieval.SourceType {
+	if slices.Contains(sources, source) {
+		return sources
+	}
+
+	return append(sources, source)
 }
 
 func retrievalReusableFileVectorIndexExists(root string, cfg appconfig.VectorConfig, input retrievalCommandInput) bool {
