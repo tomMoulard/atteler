@@ -14,7 +14,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/tommoulard/atteler/internal/atomicfile"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 )
@@ -472,16 +472,8 @@ func (s *Store) Save(path string) error {
 
 	data = append(data, '\n')
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("create vector store dir: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write vector store %q: %w", path, err)
-	}
-
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("chmod vector store %q: %w", path, err)
+	if err := atomicfile.WriteFile(path, data, 0o600, ".vector-store-*.tmp"); err != nil {
+		return fmt.Errorf("write vector store %q atomically: %w", path, err)
 	}
 
 	return nil

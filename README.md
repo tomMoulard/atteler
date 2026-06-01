@@ -1267,7 +1267,10 @@ distinct `index_path` values when they intentionally use different embedding
 models or endpoints. Source kinds persisted by the vector index include `file`,
 `session`, `git_history`, and `adr`; source digests, source kind, vectorizer
 metadata, chunk settings, provenance, and privacy-policy metadata are part of
-the reuse/invalidation contract.
+the reuse/invalidation contract. Vector indexes, vector stores, and
+agent-memory stores are written through same-directory temp files and atomic
+rename so an interrupted refresh does not leave a partially written JSON store
+at the configured path.
 Configured `vector.sources.session`, `vector.sources.git_history`, and
 `vector.sources.adr` entries are used by the session, git-history, and ADR
 retrieval source modes. Explicit source config builds persisted source indexes

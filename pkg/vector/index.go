@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tommoulard/atteler/internal/atomicfile"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 )
@@ -618,18 +619,8 @@ func (idx *Index) Save(path string) error {
 
 	data = append(data, '\n')
 
-	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return fmt.Errorf("create vector index dir: %w", err)
-		}
-	}
-
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write vector index %q: %w", path, err)
-	}
-
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("chmod vector index %q: %w", path, err)
+	if err := atomicfile.WriteFile(path, data, 0o600, ".vector-index-*.tmp"); err != nil {
+		return fmt.Errorf("write vector index %q atomically: %w", path, err)
 	}
 
 	return nil
