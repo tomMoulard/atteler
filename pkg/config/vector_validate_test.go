@@ -131,3 +131,54 @@ func TestValidateVectorConfigAllowsIndexPathAliasesWithinLifecycle(t *testing.T)
 	})
 	require.NoError(t, err)
 }
+
+func TestValidateVectorConfigWithAgentsRejectsSharedMemoryPathForDifferentVectorizers(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateVectorConfigWithAgents(VectorConfig{
+		Stores: map[string]VectorizerConfig{
+			"agent-memory": {
+				Vectorizer: "embedding",
+				Model:      "shared-memory-embed",
+				IndexPath:  ".atteler/agent-memory.json",
+			},
+		},
+		Agents: map[string]VectorizerConfig{
+			"reviewer": {
+				Model: "reviewer-memory-embed",
+			},
+		},
+	}, map[string]AgentConfig{
+		"planner":  {},
+		"reviewer": {},
+	})
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "vector.agents.reviewer shares agent-memory index_path")
+	assert.Contains(t, message, "different vectorizer identity")
+}
+
+func TestValidateVectorConfigWithAgentsAllowsDistinctMemoryPathsForDifferentVectorizers(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateVectorConfigWithAgents(VectorConfig{
+		Stores: map[string]VectorizerConfig{
+			"agent-memory": {
+				Vectorizer: "embedding",
+				Model:      "shared-memory-embed",
+				IndexPath:  ".atteler/agent-memory.json",
+			},
+		},
+		Agents: map[string]VectorizerConfig{
+			"reviewer": {
+				Model:     "reviewer-memory-embed",
+				IndexPath: ".atteler/reviewer-memory.json",
+			},
+		},
+	}, map[string]AgentConfig{
+		"planner":  {},
+		"reviewer": {},
+	})
+	require.NoError(t, err)
+}

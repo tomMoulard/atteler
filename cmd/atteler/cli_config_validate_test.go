@@ -780,6 +780,45 @@ vector:
 	assert.Contains(t, message, "file and workspace indexes must not share")
 }
 
+func TestValidateConfig_RejectsSharedAgentMemoryPathWithDifferentVectorizers(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
+agents:
+  planner:
+    model: gpt-4.1
+  reviewer:
+    model: gpt-4.1
+vector:
+  stores:
+    agent-memory:
+      vectorizer: embedding
+      model: shared-memory-embed
+      index_path: .atteler/agent-memory.json
+  agents:
+    reviewer:
+      model: reviewer-memory-embed
+`), 0o600))
+
+	err := validateConfig()
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "validate config: vector config")
+	assert.Contains(t, message, "vector.agents.reviewer shares agent-memory index_path")
+	assert.Contains(t, message, "different vectorizer identity")
+}
+
 func TestValidateHookConfig_AcceptsKnownPayloadModes(t *testing.T) {
 	t.Parallel()
 

@@ -1299,7 +1299,9 @@ after enabling an embedding vectorizer to re-embed an existing lexical
 per-agent store intentionally instead of silently mixing vector models. One
 persisted agent-memory JSON store is pinned to one vectorizer; give agents
 distinct `index_path` values when they intentionally use different embedding
-models or endpoints. Non-loopback agent-memory embedding endpoints also require
+models or endpoints. `atteler config validate` rejects configured agents that
+would share an agent-memory index path while resolving different vectorizer
+identities. Non-loopback agent-memory embedding endpoints also require
 `vector.workspace_allow_remote_embeddings: true`. Source kinds persisted by
 the vector index include `file`, `session`, `git_history`, and `adr`; source
 digests, source kind, vectorizer

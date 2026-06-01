@@ -13,6 +13,16 @@ const (
 	vectorIndexLifecycleSession     = "session"
 	vectorIndexLifecycleGitHistory  = "git-history"
 	vectorIndexLifecycleADR         = "adr"
+
+	vectorAgentMemoryDefaultIndexPath = ".atteler/agent-memory.json"
+
+	vectorValidationDefaultEmbeddingProvider = "ollama"
+	vectorValidationDefaultEmbeddingModel    = "nomic-embed-text"
+	vectorValidationDefaultEmbeddingBaseURL  = "http://127.0.0.1:11434"
+	vectorValidationKindLexical              = "lexical"
+	vectorValidationKindEmbedding            = "embedding"
+	vectorValidationAliasLexicalFallback     = "lexical-fallback"
+	vectorValidationAliasFallback            = "fallback"
 )
 
 // ValidateVectorConfig checks vectorizer scope names and enum values that are
@@ -31,6 +41,7 @@ func ValidateVectorConfig(cfg VectorConfig) error {
 func ValidateVectorConfigWithAgents(cfg VectorConfig, agents map[string]AgentConfig) error {
 	issues := validateVectorConfigIssues(cfg)
 	issues = append(issues, validateVectorAgentScopeNames(cfg.Agents, agents)...)
+	issues = append(issues, validateVectorAgentMemorySharing(cfg, agents)...)
 
 	return vectorConfigError(issues)
 }
@@ -167,6 +178,129 @@ func validateVectorIndexPathIsolation(cfg VectorConfig) []string {
 	return issues
 }
 
+type vectorAgentMemoryUse struct {
+	identity vectorAgentMemoryIdentity
+	field    string
+	path     string
+}
+
+type vectorAgentMemoryIdentity struct {
+	kind     string
+	provider string
+	model    string
+	baseURL  string
+}
+
+func validateVectorAgentMemorySharing(cfg VectorConfig, agents map[string]AgentConfig) []string {
+	var issues []string
+
+	seen := make(map[string]vectorAgentMemoryUse, len(agents))
+
+	for _, agentName := range sortedMapKeys(agents) {
+		use := vectorAgentMemoryUseForAgent(cfg, agentName)
+		if use.path == "" {
+			continue
+		}
+
+		previous, ok := seen[use.path]
+		if !ok {
+			seen[use.path] = use
+			continue
+		}
+
+		if previous.identity == use.identity {
+			continue
+		}
+
+		issues = append(issues, fmt.Sprintf(
+			"%s shares agent-memory index_path %q with %s but resolves a different vectorizer identity; give agents distinct index_path values or use one shared vectorizer",
+			use.field,
+			use.path,
+			previous.field,
+		))
+	}
+
+	return issues
+}
+
+func vectorAgentMemoryUseForAgent(cfg VectorConfig, agentName string) vectorAgentMemoryUse {
+	resolved := cfg.ResolveVectorizerConfig(VectorScope{
+		Store: vectorIndexLifecycleAgentMemory,
+		Agent: agentName,
+	})
+
+	return vectorAgentMemoryUse{
+		identity: vectorAgentMemoryIdentityForConfig(resolved),
+		field:    vectorAgentMemoryFieldForAgent(cfg, agentName),
+		path:     normalizeVectorIndexPathForCompare(vectorAgentMemoryPathForAgent(cfg, agentName)),
+	}
+}
+
+func vectorAgentMemoryFieldForAgent(cfg VectorConfig, agentName string) string {
+	if scoped, ok := vectorizerScopeConfig(cfg.Agents, agentName); ok && vectorizerConfigHasValue(scoped) {
+		return "vector.agents." + agentName
+	}
+
+	if scoped, ok := vectorizerScopeConfig(cfg.Stores, vectorIndexLifecycleAgentMemory); ok && vectorizerConfigHasValue(scoped) {
+		return "vector.stores." + vectorIndexLifecycleAgentMemory
+	}
+
+	return "agents." + agentName
+}
+
+func vectorizerConfigHasValue(cfg VectorizerConfig) bool {
+	return strings.TrimSpace(cfg.Vectorizer) != "" ||
+		strings.TrimSpace(cfg.Provider) != "" ||
+		strings.TrimSpace(cfg.Model) != "" ||
+		strings.TrimSpace(cfg.BaseURL) != "" ||
+		strings.TrimSpace(cfg.FallbackPolicy) != "" ||
+		strings.TrimSpace(cfg.IndexPath) != "" ||
+		cfg.TimeoutSeconds > 0 ||
+		cfg.ChunkMaxRunes > 0 ||
+		cfg.ChunkOverlapRunes > 0
+}
+
+func vectorAgentMemoryPathForAgent(cfg VectorConfig, agentName string) string {
+	storeConfig, _ := vectorizerScopeConfig(cfg.Stores, vectorIndexLifecycleAgentMemory)
+	agentConfig, _ := vectorizerScopeConfig(cfg.Agents, agentName)
+
+	return firstTrimmedNonEmpty(agentConfig.IndexPath, storeConfig.IndexPath, vectorAgentMemoryDefaultIndexPath)
+}
+
+func vectorAgentMemoryIdentityForConfig(cfg VectorizerConfig) vectorAgentMemoryIdentity {
+	kind := canonicalVectorizerKindForValidation(cfg.Vectorizer)
+	if kind != vectorValidationKindEmbedding {
+		return vectorAgentMemoryIdentity{kind: vectorValidationKindLexical}
+	}
+
+	return vectorAgentMemoryIdentity{
+		kind:     kind,
+		provider: canonicalVectorProviderForValidation(cfg.Provider),
+		model:    firstTrimmedNonEmpty(cfg.Model, vectorValidationDefaultEmbeddingModel),
+		baseURL:  firstTrimmedNonEmpty(cfg.BaseURL, vectorValidationDefaultEmbeddingBaseURL),
+	}
+}
+
+func canonicalVectorizerKindForValidation(kind string) string {
+	switch normalizeVectorConfigValue(kind) {
+	case "", vectorValidationKindLexical, vectorValidationAliasLexicalFallback, vectorValidationAliasFallback, "text", "hashed", "hashed-token-frequency":
+		return vectorValidationKindLexical
+	case vectorValidationKindEmbedding, "embed", "embeddings":
+		return vectorValidationKindEmbedding
+	default:
+		return normalizeVectorConfigValue(kind)
+	}
+}
+
+func canonicalVectorProviderForValidation(provider string) string {
+	switch normalizeVectorConfigValue(provider) {
+	case "", "ollama", "ollama-compatible":
+		return vectorValidationDefaultEmbeddingProvider
+	default:
+		return normalizeVectorConfigValue(provider)
+	}
+}
+
 func vectorConfiguredIndexPathUses(cfg VectorConfig) []vectorIndexPathUse {
 	uses := make([]vectorIndexPathUse, 0, len(cfg.Stores)+len(cfg.Agents)+len(cfg.Sources)+2)
 	uses = appendVectorIndexPathUse(uses, "vector.index_path", cfg.IndexPath, vectorIndexLifecycleFile)
@@ -284,8 +418,8 @@ func knownVectorAgentScope(name string, agents map[string]AgentConfig) bool {
 
 func knownVectorizerKind(kind string) bool {
 	switch normalizeVectorConfigValue(kind) {
-	case "", "lexical", "lexical-fallback", "fallback", "text", "hashed", "hashed-token-frequency",
-		"embedding", "embed", "embeddings":
+	case "", vectorValidationKindLexical, vectorValidationAliasLexicalFallback, vectorValidationAliasFallback, "text", "hashed", "hashed-token-frequency",
+		vectorValidationKindEmbedding, "embed", "embeddings":
 		return true
 	default:
 		return false
@@ -303,7 +437,7 @@ func knownVectorProvider(provider string) bool {
 
 func knownVectorFallbackPolicy(policy string) bool {
 	switch normalizeVectorConfigValue(policy) {
-	case "", "fail", "none", "lexical", "lexical-fallback", "fallback":
+	case "", "fail", "none", vectorValidationKindLexical, vectorValidationAliasLexicalFallback, vectorValidationAliasFallback:
 		return true
 	default:
 		return false
@@ -329,4 +463,15 @@ func normalizeVectorIndexPathForCompare(path string) string {
 	}
 
 	return filepath.ToSlash(path)
+}
+
+func firstTrimmedNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+
+	return ""
 }
