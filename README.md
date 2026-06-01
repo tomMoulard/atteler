@@ -1197,12 +1197,13 @@ options only when needed.
 Vector search is explicit about retrieval quality: lexical mode uses the
 deterministic hashed token-frequency fallback, while embedding mode uses an
 Ollama-compatible embedding endpoint. The lexical fallback is not semantic
-retrieval. Search output prints the vectorizer/model that produced the ranking
-and reuses `.atteler` indexes only while source digests, vectorizer metadata,
-dimensions, and chunk settings still match. Searching with new file inputs
-refreshes the file index from still-present indexed files plus the requested
-files, re-vectorizing only changed or added files and removing deleted files
-from persisted source metadata instead of keeping stale chunks.
+retrieval. Search output prints the vectorizer/model and index
+`created_at`/`updated_at` metadata that produced the ranking and reuses
+`.atteler` indexes only while source digests, vectorizer metadata, dimensions,
+and chunk settings still match. Searching with new file inputs refreshes the
+file index from still-present indexed files plus the requested files,
+re-vectorizing only changed or added files and removing deleted files from
+persisted source metadata instead of keeping stale chunks.
 
 Vectorizer config can be scoped so local RAG stores do not all share one
 quality/cost tradeoff. Top-level vectorizer/provider/model/base-url,
@@ -1268,10 +1269,9 @@ models or endpoints. Source kinds persisted by the vector index include `file`,
 `session`, `git_history`, and `adr`; source digests, source kind, vectorizer
 metadata, chunk settings, `created_at`/`updated_at`, provenance, and
 privacy-policy metadata are part of the reuse/invalidation contract. Vector
-indexes, vector stores, and
-agent-memory stores are written through same-directory temp files and atomic
-rename so an interrupted refresh does not leave a partially written JSON store
-at the configured path.
+indexes, vector stores, and agent-memory stores are written through
+same-directory temp files and atomic rename so an interrupted refresh does not
+leave a partially written JSON store at the configured path.
 Configured `vector.sources.session`, `vector.sources.git_history`, and
 `vector.sources.adr` entries are used by the session, git-history, and ADR
 retrieval source modes. Explicit source config builds persisted source indexes

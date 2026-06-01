@@ -649,11 +649,23 @@ func formatVectorSearchHeader(idx *vector.Index, indexPath string, rebuilt bool)
 		parts = append(parts, "rebuilt=true")
 	}
 
-	if !idx.CreatedAt.IsZero() {
-		parts = append(parts, "created_at="+idx.CreatedAt.UTC().Format(time.RFC3339))
+	if createdAt := formatVectorIndexTimestamp(idx.CreatedAt); createdAt != "" {
+		parts = append(parts, "created_at="+createdAt)
+	}
+
+	if updatedAt := formatVectorIndexTimestamp(idx.UpdatedAt); updatedAt != "" {
+		parts = append(parts, "updated_at="+updatedAt)
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func formatVectorIndexTimestamp(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+
+	return t.UTC().Format(time.RFC3339)
 }
 
 func formatVectorizerMetadata(metadata vector.VectorizerMetadata) string {

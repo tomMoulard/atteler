@@ -561,6 +561,8 @@ func TestFormatVectorSearchHeaderReportsEmbeddingMetadata(t *testing.T) {
 	header := formatVectorSearchHeader(&vector.Index{
 		Vectorizer: vector.NewEmbeddingMetadata("ollama", "eval-embed", "http://127.0.0.1:11434", 2),
 		Dimensions: 2,
+		CreatedAt:  time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC),
+		UpdatedAt:  time.Date(2026, 6, 1, 10, 30, 0, 0, time.UTC),
 		Documents: []vector.Document{{
 			ID:     "docs/retrieval.md#chunk=0000",
 			Text:   "embedding retrieval metadata",
@@ -576,6 +578,8 @@ func TestFormatVectorSearchHeaderReportsEmbeddingMetadata(t *testing.T) {
 	assert.Contains(t, header, "vectorizer=embedding/ollama")
 	assert.Contains(t, header, "model=eval-embed")
 	assert.Contains(t, header, "base_url=http://127.0.0.1:11434")
+	assert.Contains(t, header, "created_at=2026-06-01T10:00:00Z")
+	assert.Contains(t, header, "updated_at=2026-06-01T10:30:00Z")
 }
 
 func TestVectorSearchSettings_CLIOverridesConfig(t *testing.T) {

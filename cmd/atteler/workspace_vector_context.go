@@ -389,6 +389,20 @@ func formatWorkspaceVectorReferenceContext(results []retrieval.Result, refresh v
 		b.WriteString(`"`)
 	}
 
+	if refresh.Index != nil {
+		if createdAt := formatVectorIndexTimestamp(refresh.Index.CreatedAt); createdAt != "" {
+			b.WriteString(` created_at="`)
+			b.WriteString(escapeContextAttr(createdAt))
+			b.WriteString(`"`)
+		}
+
+		if updatedAt := formatVectorIndexTimestamp(refresh.Index.UpdatedAt); updatedAt != "" {
+			b.WriteString(` updated_at="`)
+			b.WriteString(escapeContextAttr(updatedAt))
+			b.WriteString(`"`)
+		}
+	}
+
 	b.WriteString(">\n")
 
 	for i := range results {
