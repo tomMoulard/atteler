@@ -61,3 +61,26 @@ func TestValidateVectorConfigRejectsUnsupportedScopesAndValues(t *testing.T) {
 	assert.Contains(t, message, "vector.sources.git_histry unknown source scope")
 	assert.Contains(t, message, `vector.sources.git_histry.fallback_policy unsupported value "remote"`)
 }
+
+func TestValidateVectorConfigWithAgentsChecksAgentScopes(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateVectorConfigWithAgents(VectorConfig{
+		Agents: map[string]VectorizerConfig{
+			"review-team": {Vectorizer: "embedding"},
+		},
+	}, map[string]AgentConfig{
+		"Review_Team": {},
+	})
+	require.NoError(t, err)
+
+	err = ValidateVectorConfigWithAgents(VectorConfig{
+		Agents: map[string]VectorizerConfig{
+			"reviwer": {Vectorizer: "embedding"},
+		},
+	}, map[string]AgentConfig{
+		"reviewer": {},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vector.agents.reviwer unknown agent scope")
+}

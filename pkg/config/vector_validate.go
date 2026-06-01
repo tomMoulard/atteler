@@ -11,6 +11,21 @@ import (
 // resolution and would otherwise leave persisted indexes on unintended
 // vectorizer defaults.
 func ValidateVectorConfig(cfg VectorConfig) error {
+	return vectorConfigError(validateVectorConfigIssues(cfg))
+}
+
+// ValidateVectorConfigWithAgents checks vector config values and verifies that
+// vector.agents scopes can resolve to configured agent names. Plain
+// ValidateVectorConfig leaves agent names unconstrained because callers may
+// validate vector settings without loading the full agent registry.
+func ValidateVectorConfigWithAgents(cfg VectorConfig, agents map[string]AgentConfig) error {
+	issues := validateVectorConfigIssues(cfg)
+	issues = append(issues, validateVectorAgentScopeNames(cfg.Agents, agents)...)
+
+	return vectorConfigError(issues)
+}
+
+func validateVectorConfigIssues(cfg VectorConfig) []string {
 	var issues []string
 
 	issues = append(issues, validateVectorizerConfigValues("vector", cfg.DefaultVectorizerConfig())...)
@@ -18,6 +33,10 @@ func ValidateVectorConfig(cfg VectorConfig) error {
 	issues = append(issues, validateVectorAgentScopes(cfg.Agents)...)
 	issues = append(issues, validateVectorSourceScopes(cfg.Sources)...)
 
+	return issues
+}
+
+func vectorConfigError(issues []string) error {
 	if len(issues) == 0 {
 		return nil
 	}
@@ -42,8 +61,24 @@ func validateVectorStoreScopes(stores map[string]VectorizerConfig) []string {
 
 func validateVectorAgentScopes(agents map[string]VectorizerConfig) []string {
 	var issues []string
+
 	for _, name := range sortedMapKeys(agents) {
 		issues = append(issues, validateVectorizerConfigValues("vector.agents."+name, agents[name])...)
+	}
+
+	return issues
+}
+
+func validateVectorAgentScopeNames(scopes map[string]VectorizerConfig, agents map[string]AgentConfig) []string {
+	var issues []string
+
+	for _, name := range sortedMapKeys(scopes) {
+		if knownVectorAgentScope(name, agents) {
+			continue
+		}
+
+		field := "vector.agents." + name
+		issues = append(issues, field+" unknown agent scope (configure matching agents."+name+" or remove this override)")
 	}
 
 	return issues
@@ -97,6 +132,33 @@ func knownVectorSourceScope(name string) bool {
 	default:
 		return false
 	}
+}
+
+func knownVectorAgentScope(name string, agents map[string]AgentConfig) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+
+	if _, ok := agents[name]; ok {
+		return true
+	}
+
+	lowerName := strings.ToLower(name)
+	for configured := range agents {
+		if strings.ToLower(strings.TrimSpace(configured)) == lowerName {
+			return true
+		}
+	}
+
+	normalizedName := normalizeVectorizerScopeKey(name)
+	for configured := range agents {
+		if normalizeVectorizerScopeKey(configured) == normalizedName {
+			return true
+		}
+	}
+
+	return false
 }
 
 func knownVectorizerKind(kind string) bool {

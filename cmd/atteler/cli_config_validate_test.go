@@ -723,10 +723,16 @@ func TestValidateConfig_RejectsUnsupportedVectorConfig(t *testing.T) {
 	configDir := filepath.Join(tempDir, ".atteler")
 	require.NoError(t, os.MkdirAll(configDir, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
+agents:
+  reviewer:
+    model: gpt-4.1
 vector:
   vectorizer: semantic
   stores:
     agentmemory:
+      vectorizer: embedding
+  agents:
+    reviwer:
       vectorizer: embedding
   sources:
     git_histry:
@@ -740,6 +746,7 @@ vector:
 	assert.Contains(t, message, "validate config: vector config")
 	assert.Contains(t, message, `vector.vectorizer unsupported value "semantic"`)
 	assert.Contains(t, message, "vector.stores.agentmemory unknown store scope")
+	assert.Contains(t, message, "vector.agents.reviwer unknown agent scope")
 	assert.Contains(t, message, "vector.sources.git_histry unknown source scope")
 }
 

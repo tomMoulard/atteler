@@ -58,6 +58,7 @@ func TestTemplateYAML(t *testing.T) {
 		"Use vector.stores.<name>, vector.agents.<name>, and vector.sources.<kind>",
 		"Supported vector store scopes: agent-memory, vector-search, workspace.",
 		"Supported vector source scopes: file, session, git_history, adr.",
+		"Vector agent scopes must match configured agent names.",
 		"vectorizer: lexical",
 		"fallback_policy: fail",
 		"workspace_index_path: ./.atteler/workspace-vector-index.json",

@@ -406,7 +406,7 @@ func validateConfig() error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
-	if err := appconfig.ValidateVectorConfig(cfg.Vector); err != nil {
+	if err := appconfig.ValidateVectorConfigWithAgents(cfg.Vector, cfg.Agents); err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
