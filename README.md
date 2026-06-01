@@ -1228,9 +1228,12 @@ vectorizer/provider/fallback values before an index refresh starts. Persisted
 workspace files, sessions, git history, and ADRs do not accidentally share one
 JSON datastore; relative index paths resolve under the workspace root. The
 legacy top-level `vector.index_path` remains the generic file-vector search
-store path, while session, git-history, ADR, workspace, and per-agent memory
-indexes need their own scoped `index_path` when they should persist somewhere
-other than the built-in defaults. Valid source indexes are also guarded by
+store path, and `vector.sources.file.index_path` applies to explicit file-vector
+retrieval rather than the workspace-wide file crawl. Workspace vector context
+uses `vector.workspace_index_path` or `vector.stores.workspace.index_path`,
+while session, git-history, ADR, and per-agent memory indexes need their own
+scoped `index_path` when they should persist somewhere other than the built-in
+defaults. Valid source indexes are also guarded by
 persisted source kind, so Atteler refuses to
 refresh or clear a session index over a file/git/ADR index (and vice versa)
 rather than silently clobbering another local RAG corpus. For example,

@@ -224,6 +224,7 @@ func templateYAML() string {
 	out.WriteString("# Set vector.fallback_policy: lexical to stay local with lexical workspace search\n")
 	out.WriteString("# when an embedding endpoint is unavailable or not explicitly consented.\n\n")
 	out.WriteString("# Top-level vector.index_path is the generic file-vector search store path.\n")
+	out.WriteString("# Workspace vectors use vector.workspace_index_path or vector.stores.workspace.index_path.\n")
 	out.WriteString("# Use vector.stores.<name>, vector.agents.<name>, and vector.sources.<kind>\n")
 	out.WriteString("# for per-agent memory plus session, git-history, ADR, and file-source indexes.\n\n")
 	out.WriteString("# Supported vector store scopes: agent-memory, vector-search, workspace.\n")

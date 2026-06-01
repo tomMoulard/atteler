@@ -55,6 +55,7 @@ func TestTemplateYAML(t *testing.T) {
 		"workspace_enabled: false",
 		"workspace_allow_remote_embeddings: false",
 		"Top-level vector.index_path is the generic file-vector search store path.",
+		"Workspace vectors use vector.workspace_index_path or vector.stores.workspace.index_path.",
 		"Use vector.stores.<name>, vector.agents.<name>, and vector.sources.<kind>",
 		"Supported vector store scopes: agent-memory, vector-search, workspace.",
 		"Supported vector source scopes: file, session, git_history, adr.",

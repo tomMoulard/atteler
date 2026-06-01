@@ -225,7 +225,6 @@ func workspaceVectorSettings(cwd string, cfg appconfig.VectorConfig) (vectorSear
 		Source: vector.SourceKindFile,
 	})
 	storeConfig := scopedVectorizerConfig(cfg.Stores, workspaceVectorStore)
-	sourceConfig := scopedVectorizerConfig(cfg.Sources, vector.SourceKindFile)
 
 	settings := vectorSearchSettings{
 		Vectorizer:     firstNonEmpty(resolved.Vectorizer, vector.VectorizerKindLexical),
@@ -233,7 +232,7 @@ func workspaceVectorSettings(cwd string, cfg appconfig.VectorConfig) (vectorSear
 		Model:          firstNonEmpty(resolved.Model),
 		BaseURL:        firstNonEmpty(resolved.BaseURL),
 		FallbackPolicy: firstNonEmpty(resolved.FallbackPolicy, vectorFallbackPolicyFail),
-		IndexPath:      firstNonEmpty(sourceConfig.IndexPath, storeConfig.IndexPath, cfg.WorkspaceIndexPath, vector.DefaultWorkspaceIndexPath),
+		IndexPath:      firstNonEmpty(storeConfig.IndexPath, cfg.WorkspaceIndexPath, vector.DefaultWorkspaceIndexPath),
 		Limit:          cfg.WorkspaceLimit,
 		Chunk: vector.ChunkOptions{
 			MaxRunes:     resolved.ChunkMaxRunes,

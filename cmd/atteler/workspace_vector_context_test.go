@@ -156,13 +156,33 @@ func TestWorkspaceVectorSettings_UsesScopedVectorizerConfig(t *testing.T) {
 	assert.Equal(t, vector.VectorizerKindEmbedding, settings.Vectorizer)
 	assert.Equal(t, "ollama", settings.Provider)
 	assert.Equal(t, "workspace-embed", settings.Model)
-	assert.Equal(t, filepath.Join(root, ".atteler", "file-source-index.json"), settings.IndexPath)
+	assert.Equal(t, filepath.Join(root, ".atteler", "scoped-workspace-index.json"), settings.IndexPath)
 	assert.Equal(t, 11, int(settings.Timeout.Seconds()))
 	assert.Equal(t, 800, settings.Chunk.MaxRunes)
 	assert.Equal(t, 80, settings.Chunk.OverlapRunes)
 	assert.Equal(t, settings.IndexPath, opts.IndexPath)
 	assert.Equal(t, 7, opts.MaxFiles)
 	assert.EqualValues(t, 4096, opts.MaxFileBytes)
+}
+
+func TestWorkspaceVectorSettingsKeepsFileSourceIndexPathSeparate(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	settings, opts, err := workspaceVectorSettings(root, appconfig.VectorConfig{
+		WorkspaceIndexPath: filepath.Join(root, ".atteler", "workspace-index.json"),
+		Sources: map[string]appconfig.VectorizerConfig{
+			vector.SourceKindFile: {
+				Vectorizer: vector.VectorizerKindEmbedding,
+				IndexPath:  filepath.Join(root, ".atteler", "file-source-index.json"),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, vector.VectorizerKindEmbedding, settings.Vectorizer)
+	assert.Equal(t, filepath.Join(root, ".atteler", "workspace-index.json"), settings.IndexPath)
+	assert.Equal(t, settings.IndexPath, opts.IndexPath)
 }
 
 func TestWorkspaceVectorSettingsIgnoresGlobalIndexPath(t *testing.T) {
