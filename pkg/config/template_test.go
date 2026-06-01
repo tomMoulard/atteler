@@ -54,6 +54,8 @@ func TestTemplateYAML(t *testing.T) {
 		"vector:",
 		"workspace_enabled: false",
 		"workspace_allow_remote_embeddings: false",
+		"Top-level vector.index_path is the generic file-vector search store path.",
+		"Use vector.stores.<name>, vector.agents.<name>, and vector.sources.<kind>",
 		"vectorizer: lexical",
 		"fallback_policy: fail",
 		"workspace_index_path: ./.atteler/workspace-vector-index.json",
