@@ -929,6 +929,8 @@ type codexEventError struct {
 	Code    string `json:"code,omitempty"`
 }
 
+const codexStreamError = "codex stream error"
+
 func (e *codexEventError) UnmarshalJSON(data []byte) error {
 	var message string
 	if err := json.Unmarshal(data, &message); err == nil {
@@ -941,7 +943,7 @@ func (e *codexEventError) UnmarshalJSON(data []byte) error {
 
 	var value object
 	if err := json.Unmarshal(data, &value); err != nil {
-		return err
+		return fmt.Errorf("decode codex event error: %w", err)
 	}
 
 	*e = codexEventError(value)
@@ -958,11 +960,11 @@ func (e codexStreamEvent) providerError(header http.Header) *ProviderError {
 	if eventError != nil {
 		errorType := firstNonEmptyString(eventError.Code, eventError.Type, e.Code)
 		if errorType == "" {
-			errorType = "codex stream error"
+			errorType = codexStreamError
 		}
 
-		message := firstNonEmptyString(eventError.Message, "codex stream error")
-		if errorType == "codex stream error" && e.Type != "" && message != e.Type {
+		message := firstNonEmptyString(eventError.Message, codexStreamError)
+		if errorType == codexStreamError && e.Type != "" && message != e.Type {
 			message = e.Type + ": " + message
 		}
 
@@ -977,11 +979,11 @@ func (e codexStreamEvent) providerError(header http.Header) *ProviderError {
 
 	errorType := firstNonEmptyString(e.Code, e.Type)
 	if errorType == "" {
-		errorType = "codex stream error"
+		errorType = codexStreamError
 	}
 
-	message := firstNonEmptyString(e.Message, "codex stream error")
-	if errorType == "codex stream error" && e.Type != "" && message != e.Type {
+	message := firstNonEmptyString(e.Message, codexStreamError)
+	if errorType == codexStreamError && e.Type != "" && message != e.Type {
 		message = e.Type + ": " + message
 	}
 

@@ -742,7 +742,8 @@ func TestRunSpeculateExecutionPersistsFallbackAttemptErrors(t *testing.T) { //no
 	assert.Contains(t, replay, "id=call-001")
 	assert.Contains(t, replay, "status=error")
 	assert.Contains(t, replay, "model=primary-model")
-	assert.Contains(t, replay, "error=llm: multi-agent-test: primary model unavailable")
+	assert.Contains(t, replay, "error=llm: multi-agent-test/primary-model failed after 1 attempt")
+	assert.Contains(t, replay, "primary model unavailable")
 }
 
 func TestMultiAgentRunRecorderAnnotatesStructuredArtifactWithSuccessfulFallbackCall(t *testing.T) {
