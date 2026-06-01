@@ -1209,7 +1209,10 @@ file index from still-present indexed files plus the requested files,
 re-vectorizing only changed or added files and removing deleted files from
 persisted source metadata instead of keeping stale chunks. Freshness-only
 timestamp updates or removals are persisted without re-vectorizing unchanged
-text.
+text. When embedding-backed file search falls back to lexical, Atteler applies
+the same still-present-plus-requested source lifecycle to the separate
+`.lexical` index instead of narrowing the fallback corpus to only the current
+CLI inputs.
 
 Vectorizer config can be scoped so local RAG stores do not all share one
 quality/cost tradeoff. Top-level vectorizer/provider/model/base-url,
