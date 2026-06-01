@@ -815,6 +815,12 @@ func TestSourceVectorIndexRequestedUsesExplicitLexicalSourceConfig(t *testing.T)
 	}, vector.SourceKindSession)
 	require.NoError(t, err)
 	assert.True(t, requested)
+
+	requested, err = sourceVectorIndexRequested(appconfig.VectorConfig{
+		Vectorizer: vector.VectorizerKindLexical,
+	}, vector.SourceKindSession)
+	require.NoError(t, err)
+	assert.True(t, requested)
 }
 
 func TestSourceVectorIndexRequestedIgnoresGlobalIndexPathWithoutSourceConfig(t *testing.T) {
@@ -908,6 +914,44 @@ func TestRetrievalSearcherUsesPersistedSessionVectorSourceConfig(t *testing.T) {
 	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
 	assert.ElementsMatch(t, []string{vector.SourceKindSession}, sourceMetadataKinds(loaded.Sources))
 	assert.NotEmpty(t, loaded.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
+}
+
+func TestRetrievalSearcherUsesGlobalLexicalVectorizerForSessionIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	saved := session.New("test-model", []llm.Message{
+		{Role: llm.RoleUser, Content: "Semantic retrieval session memory for local RAG"},
+		{Role: llm.RoleAssistant, Content: "Persist lexical session indexes from global vectorizer config."},
+	})
+	saved.ID = "global-lexical-session-test"
+	saved.Title = "Global lexical session vector test"
+	require.NoError(t, store.Save(saved))
+
+	searcher, err := retrievalSearcher(context.TODO(), appState{
+		cwd:          dir,
+		sessionStore: store,
+		vectorConfig: appconfig.VectorConfig{Vectorizer: vector.VectorizerKindLexical},
+	}, retrievalCommandInput{}, retrieval.SourceSession)
+	require.NoError(t, err)
+	require.NotNil(t, searcher)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, retrieval.SourceSession, results[0].Source.Type)
+	assert.Equal(t, "lexical-session-ann", results[0].Scorer.Name)
+
+	indexPath := filepath.Join(dir, sourceVectorSessionIndex)
+	loaded, err := vector.LoadIndex(indexPath)
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
+	assert.ElementsMatch(t, []string{vector.SourceKindSession}, sourceMetadataKinds(loaded.Sources))
 }
 
 func TestBuildSessionVectorRetrievalSearcherFallbackPersistsLexicalIndex(t *testing.T) {

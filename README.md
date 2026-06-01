@@ -1304,9 +1304,11 @@ such as `.atteler/session-vector-index.json`,
 `.atteler/git-history-vector-index.json`, and
 `.atteler/adr-vector-index.json` with the selected vectorizer. Embedding-backed
 source indexes provide the best semantic recall; explicit lexical source
-indexes are persisted local fallback quality, and only unconfigured
-lexical/default session or git modes keep the existing dependency-free
-searchers. Changed sessions, commits, or ADR files are re-vectorized, deleted
+indexes are persisted local fallback quality. Setting top-level
+`vector.vectorizer` (including `lexical`) opts session and git-history source
+modes into those persisted indexes; leaving the vectorizer unset keeps the
+existing dependency-free searchers for unconfigured session or git modes.
+Changed sessions, commits, or ADR files are re-vectorized, deleted
 source records are removed from the persisted vector index, and
 `vector.fallback_policy: lexical` writes a separate `.lexical` source index so
 fallback rankings stay local without mixing lexical vectors into an embedding

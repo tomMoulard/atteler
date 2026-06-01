@@ -1205,6 +1205,10 @@ func sourceVectorIndexRequested(cfg appconfig.VectorConfig, sourceKind string) (
 		return true, nil
 	}
 
+	if strings.TrimSpace(cfg.Vectorizer) != "" {
+		return true, nil
+	}
+
 	scoped := scopedVectorizerConfig(cfg.Sources, sourceKind)
 
 	return vectorizerConfigExplicit(scoped), nil
