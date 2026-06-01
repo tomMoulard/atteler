@@ -964,26 +964,33 @@ func retrievalReusableFileVectorIndexExists(root string, cfg appconfig.VectorCon
 		return false
 	}
 
-	indexPath := retrievalDefaultFileVectorIndexPath(root, cfg)
-	if strings.TrimSpace(indexPath) == "" {
+	settings, err := vectorSearchSettingsFromOptions(root, cfg, cliOptions{})
+	if err != nil {
 		return false
 	}
 
-	_, err := os.Stat(indexPath)
+	if settings.Vectorizer == vector.VectorizerKindEmbedding &&
+		!workspaceRemoteEmbeddingAllowed(settings.BaseURL, cfg.WorkspaceAllowRemoteEmbeddings) {
+		if settings.FallbackPolicy != vector.VectorizerKindLexical {
+			return false
+		}
 
-	return err == nil || !errors.Is(err, os.ErrNotExist)
-}
-
-func retrievalDefaultFileVectorIndexPath(root string, cfg appconfig.VectorConfig) string {
-	resolved := cfg.ResolveVectorizerConfig(appconfig.VectorScope{
-		Store:  vectorSearchVectorStore,
-		Source: vector.SourceKindFile,
-	})
-	if strings.TrimSpace(resolved.IndexPath) != "" {
-		return rootRelativePath(root, resolved.IndexPath)
+		settings = lexicalVectorFallbackSettings(settings)
 	}
 
-	return filepath.Join(root, ".atteler", "vector-index.json")
+	_, metadata, err := newVectorSearchVectorizer(settings)
+	if err != nil {
+		return false
+	}
+
+	idx, err := vector.LoadIndex(settings.IndexPath)
+	if err != nil {
+		return false
+	}
+
+	reuse, _, err := reusableVectorIndex(idx, metadata, settings.Chunk, settings.IndexPath, nil)
+
+	return err == nil && reuse
 }
 
 func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {

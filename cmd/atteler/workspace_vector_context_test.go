@@ -554,11 +554,17 @@ func TestSelectedRetrievalSourcesForStateAllIncludesReusableDefaultFileIndex(t *
 	t.Parallel()
 
 	root := t.TempDir()
+	sourcePath := filepath.Join(root, "docs", "auth.md")
+	sourceText := "OAuth token rotation notes for reusable all-source retrieval."
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(sourcePath), 0o700))
+	require.NoError(t, os.WriteFile(sourcePath, []byte(sourceText), 0o600))
+
 	indexPath := filepath.Join(root, ".atteler", "vector-index.json")
-	writeSourceVectorIndex(t, indexPath, []vector.Source{{
+	writeDefaultFileVectorIndex(t, indexPath, []vector.Source{{
 		Kind: vector.SourceKindFile,
-		Path: filepath.Join(root, "docs", "auth.md"),
-		Text: "OAuth token rotation notes for reusable all-source retrieval.",
+		Path: sourcePath,
+		Text: sourceText,
 	}})
 
 	sources, err := selectedRetrievalSourcesForState(appState{cwd: root}, retrievalCommandInput{
@@ -567,6 +573,49 @@ func TestSelectedRetrievalSourcesForStateAllIncludesReusableDefaultFileIndex(t *
 	require.NoError(t, err)
 
 	assert.Contains(t, sources, retrieval.SourceVector)
+}
+
+func TestSelectedRetrievalSourcesForStateAllSkipsStaleDefaultFileIndex(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "docs", "auth.md")
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(sourcePath), 0o700))
+	require.NoError(t, os.WriteFile(sourcePath, []byte("OAuth original retrieval notes."), 0o600))
+
+	indexPath := filepath.Join(root, ".atteler", "vector-index.json")
+	writeDefaultFileVectorIndex(t, indexPath, []vector.Source{{
+		Kind: vector.SourceKindFile,
+		Path: sourcePath,
+		Text: "OAuth original retrieval notes.",
+	}})
+	require.NoError(t, os.WriteFile(sourcePath, []byte("OAuth changed retrieval notes."), 0o600))
+
+	sources, err := selectedRetrievalSourcesForState(appState{cwd: root}, retrievalCommandInput{
+		Sources: []string{retrievalSourceAll},
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, sources, retrieval.SourceVector)
+}
+
+func writeDefaultFileVectorIndex(t *testing.T, indexPath string, sources []vector.Source) {
+	t.Helper()
+
+	vectorizer, err := vector.NewTextVectorizer(0)
+	require.NoError(t, err)
+
+	refresh, err := vector.RefreshSourceIndex(context.TODO(), vector.SourceIndexOptions{
+		IndexPath:          indexPath,
+		Sources:            sources,
+		Vectorizer:         vectorizer,
+		VectorizerMetadata: vectorizer.Metadata(),
+		Chunk:              vector.ChunkOptions{}.Normalize(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, refresh.Index)
+	require.FileExists(t, indexPath)
 }
 
 func TestSelectedRetrievalSourcesDefaultOmitsWorkspaceVectorWhenEnabled(t *testing.T) {
