@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	// DefaultWorkspaceIndexPath is the per-workspace persisted ANN/vector
-	// datastore path used when callers do not configure a custom location.
+	// DefaultWorkspaceIndexPath is the per-workspace persisted vector datastore
+	// path used when callers do not configure a custom location. ANN buckets are
+	// derived in memory from this JSON index when searching.
 	DefaultWorkspaceIndexPath = ".atteler/workspace-vector-index.json"
 	// DefaultWorkspaceMaxFileBytes prevents accidentally embedding huge files.
 	DefaultWorkspaceMaxFileBytes = 256 * 1024

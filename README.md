@@ -1319,8 +1319,9 @@ through `vector.RefreshSourceIndexAsync`; workspace file sync uses
 `vector.RefreshWorkspaceIndexAsync`.
 
 Workspace vector context is opt-in with `vector.workspace_enabled: true`. When
-enabled, Atteler builds or refreshes a per-workspace ANN datastore at
-`.atteler/workspace-vector-index.json`, respects `.gitignore`,
+enabled, Atteler builds or refreshes a per-workspace persisted vector datastore
+at `.atteler/workspace-vector-index.json`, derives ANN buckets in memory for
+search, respects `.gitignore`,
 `.attelerignore`, and `vector.workspace_exclude`, and skips binary, large,
 cache, dependency, generated, and secret-looking files by default. The default
 workspace vectorizer is local lexical hashing; setting `vector.vectorizer:
