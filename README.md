@@ -1235,9 +1235,13 @@ an embedding-backed agent-memory pipeline can use
 local. Explicit file-vector retrieval through the memory retrieval command
 resolves the same `vector.stores.vector-search` / `vector.sources.file`
 settings as `atteler memory vector-*` and saves/reuses the configured file
-index with source metadata. It also honors the vector runtime flags documented
-by generated help when file inputs are supplied, so ad-hoc file RAG does not
-silently fall back to lexical after an embedding-backed store is configured.
+index with source metadata. With workspace vectors disabled, explicit
+vector-source retrieval searches that reusable file index by default; with
+workspace vectors enabled, pass a vector store path to disambiguate a file
+index from workspace-vector retrieval. It also honors the vector runtime flags
+documented by generated help when file inputs are supplied, so ad-hoc file RAG
+does not silently fall back to lexical after an embedding-backed store is
+configured.
 
 ```yaml
 vector:

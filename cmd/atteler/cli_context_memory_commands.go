@@ -1866,7 +1866,7 @@ func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput
 
 func buildVectorRetrievalSearcher(ctx context.Context, state appState, input retrievalCommandInput) (retrieval.Searcher, error) {
 	paths := input.VectorIndexFiles
-	if !retrievalExplicitFileVectorIndexRequested(input) {
+	if !retrievalExplicitFileVectorIndexRequested(input) && workspaceVectorEnabled(state.vectorConfig) {
 		return buildWorkspaceVectorRetrievalSearcher(ctx, state)
 	}
 

@@ -577,6 +577,39 @@ func TestBuildVectorRetrievalSearcherSearchesExplicitReusableFileIndex(t *testin
 	assert.Equal(t, filepath.Base(indexPath), results[0].Source.URI)
 }
 
+func TestBuildVectorRetrievalSearcherSearchesDefaultFileIndexWhenWorkspaceDisabled(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	semanticPath := filepath.Join(dir, "semantic.md")
+	shellPath := filepath.Join(dir, "shell.md")
+	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
+	require.NoError(t, os.WriteFile(shellPath, []byte("Shell output capture and command timeout notes"), 0o600))
+
+	_, err := buildVectorRetrievalSearcher(context.TODO(), appState{cwd: dir}, retrievalCommandInput{
+		Search:           "semantic retrieval",
+		VectorIndexFiles: []string{semanticPath, shellPath},
+	})
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(dir, ".atteler", "vector-index.json"))
+
+	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{cwd: dir}, retrievalCommandInput{
+		Search: "semantic retrieval",
+	})
+	require.NoError(t, err)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "lexical-file-vector-index", results[0].Scorer.Name)
+	assert.Contains(t, filepath.ToSlash(results[0].Metadata["path"]), "semantic.md")
+	assert.Equal(t, ".atteler/vector-index.json", results[0].Source.URI)
+}
+
 func TestBuildVectorRetrievalSearcherFallsBackToSeparateLexicalFileIndex(t *testing.T) {
 	t.Parallel()
 
