@@ -525,6 +525,58 @@ func TestRefreshWorkspaceIndex_PersistsAndIncrementallyUpdates(t *testing.T) {
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
+func TestRefreshWorkspaceIndex_UpdatesFreshnessMetadataWithoutRevectorizing(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.md", "alpha workspace retrieval")
+	sourcePath := filepath.Join(root, "a.md")
+	firstSourceUpdatedAt := time.Date(2026, 6, 1, 10, 30, 0, 0, time.UTC)
+	secondSourceUpdatedAt := firstSourceUpdatedAt.Add(time.Hour)
+	require.NoError(t, os.Chtimes(sourcePath, firstSourceUpdatedAt, firstSourceUpdatedAt))
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	counting := &countingVectorizer{inner: vectorizer}
+	indexPath := filepath.Join(root, ".atteler", "workspace-index.json")
+	now := time.Unix(10, 0).UTC()
+	opts := WorkspaceOptions{
+		Root:               root,
+		IndexPath:          indexPath,
+		Vectorizer:         counting,
+		VectorizerMetadata: vectorizer.Metadata(),
+		Chunk:              ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
+		Now:                func() time.Time { return now },
+	}
+
+	first, err := RefreshWorkspaceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, first.Index)
+	require.Len(t, first.Index.Documents, 1)
+	assert.Equal(t, 1, counting.calls)
+	assert.Equal(t, firstSourceUpdatedAt.Format(time.RFC3339Nano),
+		first.Index.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
+
+	counting.calls = 0
+	now = time.Unix(20, 0).UTC()
+
+	require.NoError(t, os.Chtimes(sourcePath, secondSourceUpdatedAt, secondSourceUpdatedAt))
+
+	second, err := RefreshWorkspaceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, second.Index)
+	assert.True(t, second.Refreshed)
+	assert.Equal(t, 1, second.Updated)
+	assert.Equal(t, 0, second.Unchanged)
+	assert.Equal(t, 0, counting.calls, "freshness-only metadata updates should not re-vectorize unchanged files")
+	require.Len(t, second.Index.Documents, 1)
+	assert.Equal(t, time.Unix(10, 0).UTC(), second.Index.Documents[0].UpdatedAt)
+	assert.Equal(t, secondSourceUpdatedAt.Format(time.RFC3339Nano),
+		second.Index.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
+	assert.Equal(t, time.Unix(20, 0).UTC(), second.Index.UpdatedAt)
+}
+
 func TestRefreshWorkspaceIndexAsync_IncrementallyHandlesChangedAndDeletedFiles(t *testing.T) {
 	t.Parallel()
 

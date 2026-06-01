@@ -428,7 +428,15 @@ func planSourceIndexCurrentSource(
 		result.Unchanged++
 
 		plan.retainedSources = append(plan.retainedSources, meta)
-		plan.retainedDocuments = append(plan.retainedDocuments, cloneDocuments(docs)...)
+
+		docs, metadataChanged := refreshRetainedDocumentFreshnessMetadata(docs, source, opts.Chunk)
+		if metadataChanged {
+			result.Updated++
+			result.Unchanged--
+			plan.changed = true
+		}
+
+		plan.retainedDocuments = append(plan.retainedDocuments, docs...)
 	}
 }
 

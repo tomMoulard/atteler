@@ -434,19 +434,20 @@ func refreshExistingWorkspaceIndex(
 				continue
 			}
 
-			result.Unchanged++
-
 			retainedSources = append(retainedSources, meta)
-			retainedDocuments = append(retainedDocuments, cloneDocuments(docs)...)
+			docs, metadataChanged := retainWorkspaceSourceDocuments(
+				result,
+				docs,
+				currentByPath[meta.Path],
+				opts.Chunk,
+			)
+			changed = changed || metadataChanged
+
+			retainedDocuments = append(retainedDocuments, docs...)
 		}
 	}
 
-	for _, meta := range existing.Sources {
-		if _, ok := currentByPath[filepath.Clean(meta.Path)]; !ok {
-			result.Deleted++
-			changed = true
-		}
-	}
+	changed = markDeletedWorkspaceSources(result, existing.Sources, currentByPath) || changed
 
 	if !changed {
 		return existing, false, nil
@@ -493,6 +494,42 @@ func refreshExistingWorkspaceIndex(
 	})
 
 	return index, true, nil
+}
+
+func markDeletedWorkspaceSources(
+	result *WorkspaceRefreshResult,
+	sources []SourceMetadata,
+	currentByPath map[string]Source,
+) bool {
+	changed := false
+
+	for _, meta := range sources {
+		if _, ok := currentByPath[filepath.Clean(meta.Path)]; !ok {
+			result.Deleted++
+			changed = true
+		}
+	}
+
+	return changed
+}
+
+func retainWorkspaceSourceDocuments(
+	result *WorkspaceRefreshResult,
+	docs []Document,
+	source Source,
+	chunk ChunkOptions,
+) ([]Document, bool) {
+	result.Unchanged++
+
+	retained, metadataChanged := refreshRetainedDocumentFreshnessMetadata(docs, source, chunk)
+	if !metadataChanged {
+		return retained, false
+	}
+
+	result.Updated++
+	result.Unchanged--
+
+	return retained, true
 }
 
 func loadWorkspaceRefreshIndex(path string) (*Index, error) {
@@ -1416,6 +1453,53 @@ func workspaceDocumentMetadataMatches(actual, expected map[string]string) bool {
 	delete(expected, retrieval.MetadataSourceUpdatedAt)
 
 	return maps.Equal(actual, expected)
+}
+
+func refreshRetainedDocumentFreshnessMetadata(
+	docs []Document,
+	source Source,
+	chunk ChunkOptions,
+) ([]Document, bool) {
+	retained := cloneDocuments(docs)
+	if strings.TrimSpace(source.Metadata[retrieval.MetadataSourceUpdatedAt]) == "" {
+		return retained, false
+	}
+
+	sourceMetadata := sourceMetadataForSource(source)
+	if sourceMetadata.Path == "" {
+		return retained, false
+	}
+
+	chunks, err := ChunkText(sourceMetadata.Path, privacy.RedactText(source.Text), chunk)
+	if err != nil {
+		return retained, false
+	}
+
+	freshnessByChunkID := make(map[string]string, len(chunks))
+	for _, chunk := range chunks {
+		_, metadata := chunkDocumentPayload(source, sourceMetadata.Path, sourceMetadata, chunk)
+		if freshness := strings.TrimSpace(metadata[retrieval.MetadataSourceUpdatedAt]); freshness != "" {
+			freshnessByChunkID[chunk.ID] = freshness
+		}
+	}
+
+	changed := false
+
+	for i := range retained {
+		freshness := freshnessByChunkID[retained[i].ID]
+		if freshness == "" || retained[i].Metadata[retrieval.MetadataSourceUpdatedAt] == freshness {
+			continue
+		}
+
+		if retained[i].Metadata == nil {
+			retained[i].Metadata = make(map[string]string, 1)
+		}
+
+		retained[i].Metadata[retrieval.MetadataSourceUpdatedAt] = freshness
+		changed = true
+	}
+
+	return retained, changed
 }
 
 func hasNUL(data []byte) bool {

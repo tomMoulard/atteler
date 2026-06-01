@@ -287,6 +287,64 @@ func TestRefreshSourceIndex_PersistsSessionAndGitHistoryIncrementally(t *testing
 	assert.Equal(t, time.Unix(20, 0).UTC(), loaded.UpdatedAt)
 }
 
+func TestRefreshSourceIndex_UpdatesFreshnessMetadataWithoutRevectorizing(t *testing.T) {
+	t.Parallel()
+
+	textVectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	counting := &countingVectorizer{inner: textVectorizer}
+	indexPath := filepath.Join(t.TempDir(), "source-index.json")
+	firstSourceUpdatedAt := time.Date(2026, 6, 1, 10, 30, 0, 0, time.UTC)
+	secondSourceUpdatedAt := firstSourceUpdatedAt.Add(time.Hour)
+	source := Source{
+		Kind: SourceKindSession,
+		Path: "sessions/session-123",
+		Text: "Planner session keeps the same text while saved metadata changes.",
+		Metadata: map[string]string{
+			"session_id":                      "session-123",
+			retrieval.MetadataSourceUpdatedAt: firstSourceUpdatedAt.Format(time.RFC3339Nano),
+		},
+		Provenance: map[string]string{"session_id": "session-123"},
+	}
+
+	now := time.Unix(10, 0).UTC()
+	opts := SourceIndexOptions{
+		IndexPath:          indexPath,
+		Sources:            []Source{source},
+		Vectorizer:         counting,
+		VectorizerMetadata: textVectorizer.Metadata(),
+		Chunk:              ChunkOptions{MaxRunes: 400, OverlapRunes: 40},
+		Now:                func() time.Time { return now },
+	}
+
+	first, err := RefreshSourceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, first.Index)
+	assert.Equal(t, 1, counting.calls)
+	require.Len(t, first.Index.Documents, 1)
+	assert.Equal(t, firstSourceUpdatedAt.Format(time.RFC3339Nano),
+		first.Index.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
+
+	source.Metadata[retrieval.MetadataSourceUpdatedAt] = secondSourceUpdatedAt.Format(time.RFC3339Nano)
+	opts.Sources = []Source{source}
+	counting.calls = 0
+	now = time.Unix(20, 0).UTC()
+
+	second, err := RefreshSourceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, second.Index)
+	assert.True(t, second.Refreshed)
+	assert.Equal(t, 1, second.Updated)
+	assert.Equal(t, 0, second.Unchanged)
+	assert.Equal(t, 0, counting.calls, "freshness-only metadata updates should not re-vectorize unchanged text")
+	require.Len(t, second.Index.Documents, 1)
+	assert.Equal(t, time.Unix(10, 0).UTC(), second.Index.Documents[0].UpdatedAt)
+	assert.Equal(t, secondSourceUpdatedAt.Format(time.RFC3339Nano),
+		second.Index.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
+	assert.Equal(t, time.Unix(20, 0).UTC(), second.Index.UpdatedAt)
+}
+
 func TestRefreshSourceIndex_InvalidatesRemovedMetadataAndChangedProvenance(t *testing.T) {
 	t.Parallel()
 
