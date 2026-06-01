@@ -1174,9 +1174,20 @@ func retrievalExplicitFileVectorIndexRequested(input retrievalCommandInput) bool
 }
 
 func retrievalExplicitAgentMemorySourceRequested(input retrievalCommandInput) bool {
-	return strings.TrimSpace(input.AgentMemoryAgent) != "" ||
-		strings.TrimSpace(input.AgentName) != "" ||
+	return retrievalAgentMemorySourceRequested(input.Sources) ||
+		strings.TrimSpace(input.AgentMemoryAgent) != "" ||
 		strings.TrimSpace(input.AgentMemoryStorePath) != ""
+}
+
+func retrievalAgentMemorySourceRequested(sources []string) bool {
+	for _, raw := range sources {
+		source, all, err := parseRetrievalSource(raw)
+		if err == nil && !all && source == retrieval.SourceAgentMemory {
+			return true
+		}
+	}
+
+	return false
 }
 
 func retrievalSourceSet(sources []retrieval.SourceType) map[retrieval.SourceType]bool {
