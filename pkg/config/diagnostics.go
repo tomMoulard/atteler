@@ -667,18 +667,65 @@ func inspectHooks(path string, value *yaml.Node) []Diagnostic {
 }
 
 func inspectVectorFields(path string, value *yaml.Node) []Diagnostic {
+	if value == nil {
+		return nil
+	}
+
+	if value.Kind != yaml.MappingNode {
+		return []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    "vector",
+			Message:  "vector must be a mapping",
+		}}
+	}
+
 	diagnostics := inspectNamedFields(path, "vector", value, knownVectorFields(), nil)
 	if stores := mappingValue(value, "stores"); stores != nil {
-		diagnostics = append(diagnostics, inspectMapEntries(path, "vector.stores", stores, knownVectorizerFields())...)
+		diagnostics = append(diagnostics, inspectVectorizerScopeEntries(path, "vector.stores", stores)...)
 	}
 
 	if agents := mappingValue(value, "agents"); agents != nil {
-		diagnostics = append(diagnostics, inspectMapEntries(path, "vector.agents", agents, knownVectorizerFields())...)
+		diagnostics = append(diagnostics, inspectVectorizerScopeEntries(path, "vector.agents", agents)...)
 	}
 
 	if sources := mappingValue(value, "sources"); sources != nil {
-		diagnostics = append(diagnostics, inspectMapEntries(path, "vector.sources", sources, knownVectorizerFields())...)
+		diagnostics = append(diagnostics, inspectVectorizerScopeEntries(path, "vector.sources", sources)...)
 	}
+
+	return diagnostics
+}
+
+func inspectVectorizerScopeEntries(path, prefix string, value *yaml.Node) []Diagnostic {
+	if value == nil {
+		return nil
+	}
+
+	if value.Kind != yaml.MappingNode {
+		return []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    prefix,
+			Message:  prefix + " must be a mapping",
+		}}
+	}
+
+	var diagnostics []Diagnostic
+	forEachMappingField(value, func(name string, entry *yaml.Node) {
+		field := prefix + "." + name
+		if entry == nil || entry.Kind != yaml.MappingNode {
+			diagnostics = append(diagnostics, Diagnostic{
+				Severity: DiagnosticError,
+				Path:     path,
+				Field:    field,
+				Message:  field + " must be a mapping",
+			})
+
+			return
+		}
+
+		diagnostics = append(diagnostics, inspectNamedFields(path, field, entry, knownVectorizerFields(), nil)...)
+	})
 
 	return diagnostics
 }

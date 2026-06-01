@@ -150,6 +150,47 @@ vector:
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.sources.session.surprise", "")
 }
 
+func TestInspectPathSources_ReportsMalformedVectorScopeConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  stores:
+    agent-memory: embedding
+  agents: reviewer
+  sources:
+    git_history:
+      vectorizer: lexical
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agent-memory must be a mapping")
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "vector.agents must be a mapping")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.vectorizer")
+}
+
+func TestInspectPathSources_ReportsMalformedVectorConfig(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector: embedding
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "vector must be a mapping")
+}
+
 func TestInspectPathSources_ReportsNonMappingConfig(t *testing.T) {
 	t.Parallel()
 
