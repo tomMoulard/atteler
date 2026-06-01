@@ -1845,6 +1845,13 @@ func mergeConfigPlugins(dst *Config, plugins PluginConfig, rec *originRecorder, 
 		dst.Plugins.Paths = append([]string(nil), plugins.Paths...)
 		rec.replace("plugins.paths", source, dst.Plugins.Paths, "replaces the entire plugin path list")
 	}
+
+	if plugins.Policy != nil {
+		policy := attelerplugin.ClonePolicy(*plugins.Policy)
+		dst.Plugins.Policy = &policy
+
+		rec.replace("plugins.policy", source, "configured", "replaces the plugin execution policy")
+	}
 }
 
 func mergeConfigSkillLearning(dst *Config, skillLearning SkillLearningConfig, rec *originRecorder, source originSource) {
