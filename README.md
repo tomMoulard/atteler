@@ -1224,7 +1224,8 @@ scopes are `file`, `session`, `git_history`/`git-history`, and `adr`, while
 agent scopes are the configured agent names. `atteler config validate` reports
 malformed scopes, unknown store/source/agent scope names, and unsupported
 vectorizer/provider/fallback values before an index refresh starts; it also
-rejects one configured `index_path` shared by incompatible index lifecycles.
+rejects one configured or built-in default `index_path` shared by incompatible
+index lifecycles.
 Persisted `index_path` values are intentionally store/source-specific so agent
 memory, workspace files, sessions, git history, and ADRs do not accidentally
 share one JSON datastore; relative index paths resolve under the workspace

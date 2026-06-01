@@ -14,7 +14,12 @@ const (
 	vectorIndexLifecycleGitHistory  = "git-history"
 	vectorIndexLifecycleADR         = "adr"
 
+	vectorFileDefaultIndexPath        = ".atteler/vector-index.json"
+	vectorWorkspaceDefaultIndexPath   = ".atteler/workspace-vector-index.json"
 	vectorAgentMemoryDefaultIndexPath = ".atteler/agent-memory.json"
+	vectorSessionDefaultIndexPath     = ".atteler/session-vector-index.json"
+	vectorGitHistoryDefaultIndexPath  = ".atteler/git-history-vector-index.json"
+	vectorADRDefaultIndexPath         = ".atteler/adr-vector-index.json"
 
 	vectorValidationDefaultEmbeddingProvider = "ollama"
 	vectorValidationDefaultEmbeddingModel    = "nomic-embed-text"
@@ -165,17 +170,29 @@ func validateVectorIndexPathIsolation(cfg VectorConfig) []string {
 			continue
 		}
 
-		issues = append(issues, fmt.Sprintf(
-			"%s index_path %q conflicts with %s; %s and %s indexes must not share a persisted path",
-			use.field,
-			use.path,
-			previous.field,
-			use.lifecycle,
-			previous.lifecycle,
-		))
+		issues = append(issues, vectorIndexPathConflictMessage(use, previous))
 	}
 
 	return issues
+}
+
+func vectorIndexPathConflictMessage(use, previous vectorIndexPathUse) string {
+	if vectorIndexPathUseIsDefault(use) && !vectorIndexPathUseIsDefault(previous) {
+		use, previous = previous, use
+	}
+
+	return fmt.Sprintf(
+		"%s index_path %q conflicts with %s; %s and %s indexes must not share a persisted path",
+		use.field,
+		use.path,
+		previous.field,
+		use.lifecycle,
+		previous.lifecycle,
+	)
+}
+
+func vectorIndexPathUseIsDefault(use vectorIndexPathUse) bool {
+	return strings.Contains(use.field, " default")
 }
 
 type vectorAgentMemoryUse struct {
@@ -302,9 +319,23 @@ func canonicalVectorProviderForValidation(provider string) string {
 }
 
 func vectorConfiguredIndexPathUses(cfg VectorConfig) []vectorIndexPathUse {
-	uses := make([]vectorIndexPathUse, 0, len(cfg.Stores)+len(cfg.Agents)+len(cfg.Sources)+2)
-	uses = appendVectorIndexPathUse(uses, "vector.index_path", cfg.IndexPath, vectorIndexLifecycleFile)
-	uses = appendVectorIndexPathUse(uses, "vector.workspace_index_path", cfg.WorkspaceIndexPath, vectorIndexLifecycleWorkspace)
+	uses := make([]vectorIndexPathUse, 0, len(cfg.Stores)+len(cfg.Agents)+len(cfg.Sources)+6)
+	uses = appendVectorIndexPathUse(
+		uses,
+		vectorIndexPathField("vector.index_path", cfg.IndexPath),
+		firstTrimmedNonEmpty(cfg.IndexPath, vectorFileDefaultIndexPath),
+		vectorIndexLifecycleFile,
+	)
+	uses = appendVectorIndexPathUse(
+		uses,
+		vectorIndexPathField("vector.workspace_index_path", cfg.WorkspaceIndexPath),
+		firstTrimmedNonEmpty(cfg.WorkspaceIndexPath, vectorWorkspaceDefaultIndexPath),
+		vectorIndexLifecycleWorkspace,
+	)
+	uses = appendVectorIndexPathUse(uses, "vector.stores.agent-memory default", vectorAgentMemoryDefaultIndexPath, vectorIndexLifecycleAgentMemory)
+	uses = appendVectorIndexPathUse(uses, "vector.sources.session default", vectorSessionDefaultIndexPath, vectorIndexLifecycleSession)
+	uses = appendVectorIndexPathUse(uses, "vector.sources.git_history default", vectorGitHistoryDefaultIndexPath, vectorIndexLifecycleGitHistory)
+	uses = appendVectorIndexPathUse(uses, "vector.sources.adr default", vectorADRDefaultIndexPath, vectorIndexLifecycleADR)
 
 	for _, name := range sortedMapKeys(cfg.Stores) {
 		lifecycle, ok := vectorStoreIndexLifecycle(name)
@@ -329,6 +360,14 @@ func vectorConfiguredIndexPathUses(cfg VectorConfig) []vectorIndexPathUse {
 	}
 
 	return uses
+}
+
+func vectorIndexPathField(field, path string) string {
+	if strings.TrimSpace(path) == "" {
+		return field + " default"
+	}
+
+	return field
 }
 
 func appendVectorIndexPathUse(uses []vectorIndexPathUse, field, path, lifecycle string) []vectorIndexPathUse {

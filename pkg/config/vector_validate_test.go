@@ -132,6 +132,26 @@ func TestValidateVectorConfigAllowsIndexPathAliasesWithinLifecycle(t *testing.T)
 	require.NoError(t, err)
 }
 
+func TestValidateVectorConfigRejectsIndexPathCollisionsWithDefaults(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateVectorConfig(VectorConfig{
+		WorkspaceIndexPath: ".atteler/agent-memory.json",
+		Sources: map[string]VectorizerConfig{
+			"session": {
+				IndexPath: ".atteler/vector-index.json",
+			},
+		},
+	})
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "vector.workspace_index_path index_path")
+	assert.Contains(t, message, "workspace and agent-memory indexes must not share")
+	assert.Contains(t, message, "vector.sources.session index_path")
+	assert.Contains(t, message, "session and file indexes must not share")
+}
+
 func TestValidateVectorConfigWithAgentsRejectsSharedMemoryPathForDifferentVectorizers(t *testing.T) {
 	t.Parallel()
 
