@@ -144,7 +144,7 @@ func inlineCommandContractsByName() map[string]commandContract {
 func commandContractsByName() map[string]commandContract {
 	return map[string]commandContract{
 		"agent-memory": commandContractFor(
-			"search or update one agent's lexical memory",
+			"search or update one agent's vector memory",
 			[]string{"--agent-memory-search", "--agent-memory-index", "--agent-memory-delete", "--agent-memory-compact", "--agent-memory-migrate", "--agent-memory-store", "--agent-memory-agent", "--agent-memory-limit", "--agent-memory-ttl-seconds"},
 			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectSessionRead, commandEffectUserOutput},
 			[]string{commandOutputText},
@@ -541,7 +541,7 @@ func commandContractsByName() map[string]commandContract {
 		),
 		"retrieval-search": commandContractFor(
 			"search selected retrieval sources with the shared result contract",
-			[]string{"--retrieval-search", "--retrieval-source", "--retrieval-filter", "--retrieval-limit", "--retrieval-explain", "--retrieval-include-unsafe", "--memory-store", "--memory-index", "--vector-index", "--agent-memory-store", "--agent-memory-agent", "--agent"},
+			retrievalSearchInputFlags(),
 			[]string{commandEffectConfigRead, commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectGitRead, commandEffectSessionRead, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("retrievalCommandInput"),
@@ -688,8 +688,8 @@ func commandContractsByName() map[string]commandContract {
 			}),
 		),
 		"vector-search": commandContractFor(
-			"search dependency-free local vector indexes",
-			[]string{"--vector-search", "--vector-index", "--vector-limit"},
+			"search local lexical or embedding vector indexes",
+			vectorSearchInputFlags(),
 			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("vectorSearchCommandInput"),
@@ -711,6 +711,45 @@ func commandContractsByName() map[string]commandContract {
 			withInputType("watchScanCommandInput"),
 			withExamples("atteler watch json"),
 		),
+	}
+}
+
+func retrievalSearchInputFlags() []string {
+	return append([]string{
+		"--retrieval-search",
+		"--retrieval-source",
+		"--retrieval-filter",
+		"--retrieval-limit",
+		"--retrieval-explain",
+		"--retrieval-include-unsafe",
+		"--memory-store",
+		"--memory-index",
+		"--vector-index",
+		"--agent-memory-store",
+		"--agent-memory-agent",
+		"--agent",
+	}, vectorRuntimeInputFlags()...)
+}
+
+func vectorSearchInputFlags() []string {
+	return append([]string{
+		"--vector-search",
+		"--vector-index",
+		"--vector-limit",
+	}, vectorRuntimeInputFlags()...)
+}
+
+func vectorRuntimeInputFlags() []string {
+	return []string{
+		"--vector-store",
+		"--vectorizer",
+		"--vector-provider",
+		"--vector-model",
+		"--vector-base-url",
+		"--vector-fallback",
+		"--vector-timeout-seconds",
+		"--vector-chunk-max-runes",
+		"--vector-chunk-overlap-runes",
 	}
 }
 

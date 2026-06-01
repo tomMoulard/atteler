@@ -325,8 +325,8 @@ func statefulRetrievalCommands() []command {
 					o.agentMemoryCompact ||
 					o.agentMemoryMigrate)
 			},
-			runStateful: func(_ context.Context, o cliOptions, s appState) error {
-				return runAgentMemoryCommand(s.cwd, s.selectedAgent, agentMemoryCommandInputFromOptions(o))
+			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
+				return runAgentMemoryCommand(ctx, s.cwd, s.selectedAgent, s.vectorConfig, agentMemoryCommandInputFromOptions(o))
 			},
 		},
 		{

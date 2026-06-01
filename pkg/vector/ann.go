@@ -11,6 +11,12 @@ const (
 	defaultANNProbes              = 16
 	defaultANNMinCandidates       = 64
 	defaultANNCandidateMultiplier = 8
+
+	// DefaultANNExactSearchMaxDocuments is the default index size at or below
+	// which ANNOptions intentionally falls back to exact brute-force ranking.
+	// Above this size, limited searches use ANN candidates unless callers raise
+	// MinCandidates.
+	DefaultANNExactSearchMaxDocuments = defaultANNMinCandidates
 )
 
 // ANNOptions controls the local approximate-nearest-neighbor search layer.

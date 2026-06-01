@@ -329,6 +329,8 @@ func TestCallLLMBuffersProviderActivityEvents(t *testing.T) {
 func TestCallLLMWithToolsStreamsCommandOutputBeforeCompletion(t *testing.T) {
 	t.Parallel()
 
+	const liveToolCompletionTimeout = 3 * time.Second
+
 	registry := llm.NewRegistry()
 	registry.Register(&toolCallingProvider{})
 
@@ -371,13 +373,15 @@ func TestCallLLMWithToolsStreamsCommandOutputBeforeCompletion(t *testing.T) {
 	select {
 	case raw := <-done:
 		assert.Nil(t, raw)
-	case <-time.After(liveOutputTimeout):
+	case <-time.After(liveToolCompletionTimeout):
 		require.FailNow(t, "timed out waiting for callLLM command return")
 	}
 }
 
 func TestCallLLMWithToolsStreamsCommandStderrBeforeCompletion(t *testing.T) {
 	t.Parallel()
+
+	const liveToolCompletionTimeout = 3 * time.Second
 
 	registry := llm.NewRegistry()
 	registry.Register(&toolCallingProvider{command: `printf 'warn\n' >&2; sleep 0.4; printf 'done\n' >&2`})
@@ -420,7 +424,7 @@ func TestCallLLMWithToolsStreamsCommandStderrBeforeCompletion(t *testing.T) {
 	select {
 	case raw := <-done:
 		assert.Nil(t, raw)
-	case <-time.After(liveOutputTimeout):
+	case <-time.After(liveToolCompletionTimeout):
 		require.FailNow(t, "timed out waiting for callLLM command return")
 	}
 }

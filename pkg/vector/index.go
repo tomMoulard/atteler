@@ -41,6 +41,17 @@ const (
 	// boundaries without producing excessive duplicate chunks.
 	DefaultChunkOverlapRunes = 120
 
+	// SourceKindFile identifies file/workspace sources.
+	SourceKindFile = "file"
+	// SourceKindSession identifies persisted session transcript/artifact
+	// sources.
+	SourceKindSession = "session"
+	// SourceKindGitHistory identifies git history sources.
+	SourceKindGitHistory = "git_history"
+	// SourceKindADR identifies architecture decision record sources.
+	SourceKindADR = "adr"
+
+	provenanceSourceTypeKey         = "source_type"
 	vectorizerMetadataRedactedValue = "[REDACTED]"
 )
 
@@ -391,17 +402,24 @@ type Chunk struct {
 	EndRune   int
 }
 
-// Source is a UTF-8 text source that can be chunked and indexed.
+// Source is a UTF-8 text source that can be chunked and indexed. Kind and
+// metadata let one persisted Index represent files, sessions, git history, ADRs
+// or other local corpora while keeping the same digest-based invalidation
+// lifecycle.
 type Source struct {
-	Path string
-	Text string
+	Metadata   map[string]string
+	Provenance map[string]string
+	Kind       string
+	Path       string
+	Text       string
 }
 
 // SourceMetadata records the digest used to decide whether persisted chunks
-// are still fresh for a source file.
+// are still fresh for a source.
 type SourceMetadata struct {
 	Path   string `json:"path"`
 	Digest string `json:"digest"`
+	Kind   string `json:"kind,omitempty"`
 	Bytes  int    `json:"bytes"`
 }
 
@@ -487,12 +505,20 @@ func SourceFromFile(path string) (Source, error) {
 // byte counts are derived from redacted text so persisted indexes do not retain
 // fingerprints of raw credential values.
 func SourceMetadataForText(path, text string) SourceMetadata {
+	return SourceMetadataForTextWithKind(path, text, SourceKindFile)
+}
+
+// SourceMetadataForTextWithKind returns digest metadata for a typed source.
+// Digests and byte counts are derived from redacted text so persisted indexes
+// do not retain fingerprints of raw credential values.
+func SourceMetadataForTextWithKind(path, text, kind string) SourceMetadata {
 	path = redactSourcePath(path)
 	text = privacy.RedactText(text)
 
 	return SourceMetadata{
 		Path:   path,
 		Digest: DigestText(text),
+		Kind:   normalizeSourceKind(kind),
 		Bytes:  len([]byte(text)),
 	}
 }
@@ -533,6 +559,10 @@ func BuildIndex(
 
 	if vectorizer == nil {
 		return nil, errors.New("vectorizer is required")
+	}
+
+	if err := validateUniqueSourceIndexSources(sources); err != nil {
+		return nil, err
 	}
 
 	if createdAt.IsZero() {
@@ -684,6 +714,7 @@ func (idx *Index) validate(opts indexValidationOptions) error {
 func validateIndexSourceMetadata(source SourceMetadata, seen map[string]struct{}) error {
 	sourcePath := strings.TrimSpace(source.Path)
 	sourceDigest := strings.TrimSpace(source.Digest)
+	sourceKind := normalizeSourceKind(source.Kind)
 
 	if sourcePath == "" || sourceDigest == "" {
 		return fmt.Errorf("%w: source metadata missing path or digest", ErrSourceStale)
@@ -703,6 +734,10 @@ func validateIndexSourceMetadata(source SourceMetadata, seen map[string]struct{}
 		return fmt.Errorf("%w: source metadata %q has invalid digest or byte count", ErrSourceStale, cleanPath)
 	}
 
+	if sourceKind == "" {
+		return fmt.Errorf("%w: source metadata %q has invalid source kind", ErrSourceStale, cleanPath)
+	}
+
 	if _, ok := seen[cleanPath]; ok {
 		return fmt.Errorf("%w: duplicate source metadata path %q", ErrSourceStale, cleanPath)
 	}
@@ -720,6 +755,18 @@ func validSourceDigest(digest string) bool {
 	_, err := hex.DecodeString(digest)
 
 	return err == nil
+}
+
+func normalizeSourceKind(kind string) string {
+	kind = strings.ToLower(strings.TrimSpace(privacy.RedactIdentifier(kind)))
+	kind = strings.ReplaceAll(kind, "-", "_")
+	kind = strings.ReplaceAll(kind, " ", "_")
+
+	if kind == "" {
+		return SourceKindFile
+	}
+
+	return kind
 }
 
 func validateIndexDocument(
@@ -811,7 +858,15 @@ func validateDocumentVectorizerMatchesIndex(spec VectorizerSpec, metadata Vector
 			return ErrVectorizerMismatch
 		}
 	case VectorizerKindEmbedding:
+		if metadata.Provider != "" && spec.Provider != "" && spec.Provider != metadata.Provider {
+			return ErrVectorizerMismatch
+		}
+
 		if metadata.Model != "" && spec.Model != "" && spec.Model != metadata.Model {
+			return ErrVectorizerMismatch
+		}
+
+		if metadata.BaseURL != "" && spec.BaseURL != "" && spec.BaseURL != metadata.BaseURL {
 			return ErrVectorizerMismatch
 		}
 	}
@@ -878,6 +933,7 @@ func (idx *Index) validateFor(
 		indexed[filepath.Clean(source.Path)] = source
 	}
 
+	seenCurrent := make(map[string]struct{}, len(currentSources))
 	for _, current := range currentSources {
 		path := filepath.Clean(current.Path)
 
@@ -888,6 +944,19 @@ func (idx *Index) validateFor(
 
 		if previous.Digest != current.Digest {
 			return fmt.Errorf("%w: %s digest changed", ErrSourceStale, path)
+		}
+
+		if normalizeSourceKind(previous.Kind) != normalizeSourceKind(current.Kind) {
+			return fmt.Errorf("%w: %s source kind changed", ErrSourceStale, path)
+		}
+
+		seenCurrent[path] = struct{}{}
+	}
+
+	for _, source := range idx.Sources {
+		path := filepath.Clean(source.Path)
+		if _, ok := seenCurrent[path]; !ok {
+			return fmt.Errorf("%w: %s was deleted", ErrSourceStale, path)
 		}
 	}
 
@@ -933,7 +1002,8 @@ func (idx *Index) addSource(ctx context.Context, source Source, vectorizer Vecto
 		return fmt.Errorf("vector source %s: %w", rawPath, ErrInvalidUTF8)
 	}
 
-	sourceMetadata := SourceMetadataForText(rawPath, source.Text)
+	sourceKind := normalizeSourceKind(source.Kind)
+	sourceMetadata := SourceMetadataForTextWithKind(rawPath, source.Text, sourceKind)
 	documentPath := sourceMetadata.Path
 
 	if documentPath == "" {
@@ -950,7 +1020,7 @@ func (idx *Index) addSource(ctx context.Context, source Source, vectorizer Vecto
 	idx.Sources = append(idx.Sources, sourceMetadata)
 
 	for _, chunk := range chunks {
-		text, metadata := chunkDocumentPayload(documentPath, sourceMetadata, chunk)
+		text, metadata := chunkDocumentPayload(source, documentPath, sourceMetadata, chunk)
 
 		vec, err := vectorizeWithContext(ctx, vectorizer, text)
 		if err != nil {
@@ -980,24 +1050,37 @@ func (idx *Index) addSource(ctx context.Context, source Source, vectorizer Vecto
 			Vector:     cloneVector(vec),
 			Vectorizer: documentVectorizerSpec(vectorizer, len(vec)),
 			Metadata:   metadata,
-			Provenance: ensureProvenance(map[string]string{
-				"source_type": "file",
-				"path":        documentPath,
-			}, "file"),
+			Provenance: sourceProvenance(source, sourceKind, documentPath),
 		})
 	}
 
 	return nil
 }
 
-func chunkDocumentPayload(documentPath string, sourceMetadata SourceMetadata, chunk Chunk) (text string, metadata map[string]string) {
+func chunkDocumentPayload(source Source, documentPath string, sourceMetadata SourceMetadata, chunk Chunk) (text string, metadata map[string]string) {
 	metadata = map[string]string{
 		"path":             documentPath,
+		"source_kind":      normalizeSourceKind(source.Kind),
 		"chunk_index":      strconv.Itoa(chunk.Index),
 		"chunk_start_rune": strconv.Itoa(chunk.StartRune),
 		"chunk_end_rune":   strconv.Itoa(chunk.EndRune),
 		"source_digest":    sourceMetadata.Digest,
 	}
+	for key, value := range privacy.RedactMetadata(source.Metadata) {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+
+		if key == "" || value == "" {
+			continue
+		}
+
+		if _, reserved := metadata[key]; reserved {
+			continue
+		}
+
+		metadata[key] = value
+	}
+
 	policyContext := retrieval.PolicyContext{
 		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: documentPath, URI: documentPath},
 		Metadata:   metadata,
@@ -1025,6 +1108,30 @@ func chunkDocumentPayload(documentPath string, sourceMetadata SourceMetadata, ch
 	}
 
 	return text, metadata
+}
+
+func sourceProvenance(source Source, sourceKind, documentPath string) map[string]string {
+	provenance := map[string]string{
+		provenanceSourceTypeKey: sourceKind,
+		"path":                  documentPath,
+	}
+
+	for key, value := range privacy.RedactMetadata(source.Provenance) {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+
+		if key == "" || value == "" {
+			continue
+		}
+
+		if _, reserved := provenance[key]; reserved {
+			continue
+		}
+
+		provenance[key] = value
+	}
+
+	return ensureProvenance(provenance, sourceKind)
 }
 
 type vectorizerDimensionSpecProvider interface {

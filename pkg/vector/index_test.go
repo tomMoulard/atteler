@@ -18,7 +18,10 @@ import (
 	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
-const indexTestAuthText = "OAuth callback state validation"
+const (
+	indexTestAuthText = "OAuth callback state validation"
+	indexTestCommit   = "abc123"
+)
 
 func TestChunkText_StableChunkIDs(t *testing.T) {
 	t.Parallel()
@@ -68,6 +71,445 @@ func TestIndex_ValidateForMetadataMismatch(t *testing.T) {
 	err = idx.ValidateFor(NewEmbeddingMetadata("ollama", "nomic-embed-text", "http://127.0.0.1:11434", 0), current)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrMetadataMismatch)
+}
+
+func TestIndex_PersistsLocalRAGSourcesWithInvalidationMetadata(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	sources := []Source{
+		{
+			Kind: SourceKindFile,
+			Path: "docs/retrieval.md",
+			Text: "Workspace files chunk into persistent local RAG indexes.",
+			Metadata: map[string]string{
+				"language": "markdown",
+			},
+			Provenance: map[string]string{
+				"root": "workspace",
+			},
+		},
+		{
+			Kind: SourceKindSession,
+			Path: "sessions/session-123/messages/0",
+			Text: "Planner session selected embedding-backed memory for local RAG.",
+			Metadata: map[string]string{
+				"session_id": "session-123",
+				"agent":      "planner",
+			},
+			Provenance: map[string]string{
+				"session_id": "session-123",
+			},
+		},
+		{
+			Kind: SourceKindGitHistory,
+			Path: "git/" + indexTestCommit,
+			Text: indexTestCommit + " Make vector indexes reuse source digests for invalidation.",
+			Metadata: map[string]string{
+				"commit": indexTestCommit,
+			},
+			Provenance: map[string]string{
+				"commit": indexTestCommit,
+			},
+		},
+		{
+			Kind: SourceKindADR,
+			Path: "docs/adr/0001-local-rag.md",
+			Text: "ADR 0001 records the decision to keep retrieval indexes local.",
+			Metadata: map[string]string{
+				"adr_id": "0001",
+			},
+			Provenance: map[string]string{
+				"adr_id": "0001",
+			},
+		},
+	}
+
+	idx, err := BuildIndex(
+		context.TODO(),
+		sources,
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 400, OverlapRunes: 40},
+		time.Unix(5, 0),
+	)
+	require.NoError(t, err)
+	require.Len(t, idx.Sources, len(sources))
+
+	path := filepath.Join(t.TempDir(), "local-rag-index.json")
+	require.NoError(t, idx.Save(path))
+
+	loaded, err := LoadIndex(path)
+	require.NoError(t, err)
+	assert.ElementsMatch(t,
+		[]string{SourceKindFile, SourceKindSession, SourceKindGitHistory, SourceKindADR},
+		sourceMetadataKinds(loaded.Sources),
+	)
+	assert.Contains(t, documentMetadataSourceKinds(loaded.Documents), SourceKindFile)
+	assert.Contains(t, documentMetadataSourceKinds(loaded.Documents), SourceKindSession)
+	assert.Contains(t, documentMetadataSourceKinds(loaded.Documents), SourceKindGitHistory)
+	assert.Contains(t, documentMetadataSourceKinds(loaded.Documents), SourceKindADR)
+	assert.Contains(t, documentProvenanceTypes(loaded.Documents), SourceKindFile)
+	assert.Contains(t, documentProvenanceTypes(loaded.Documents), SourceKindSession)
+	assert.Contains(t, documentProvenanceTypes(loaded.Documents), SourceKindGitHistory)
+	assert.Contains(t, documentProvenanceTypes(loaded.Documents), SourceKindADR)
+
+	current := sourceMetadataForSources(sources)
+	require.NoError(t, loaded.ValidateFor(vectorizer.Metadata(), current, ChunkOptions{MaxRunes: 400, OverlapRunes: 40}))
+
+	stale := append([]SourceMetadata(nil), current...)
+	stale[1] = SourceMetadataForTextWithKind(sources[1].Path, "changed session text", sources[1].Kind)
+	err = loaded.ValidateFor(vectorizer.Metadata(), stale, ChunkOptions{MaxRunes: 400, OverlapRunes: 40})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSourceStale)
+
+	wrongKind := append([]SourceMetadata(nil), current...)
+	wrongKind[2] = SourceMetadataForTextWithKind(sources[2].Path, sources[2].Text, SourceKindSession)
+	err = loaded.ValidateFor(vectorizer.Metadata(), wrongKind, ChunkOptions{MaxRunes: 400, OverlapRunes: 40})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSourceStale)
+
+	deleted := current[:len(current)-1]
+	err = loaded.ValidateFor(vectorizer.Metadata(), deleted, ChunkOptions{MaxRunes: 400, OverlapRunes: 40})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSourceStale)
+}
+
+func TestRefreshSourceIndex_PersistsSessionAndGitHistoryIncrementally(t *testing.T) {
+	t.Parallel()
+
+	textVectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	counting := &countingVectorizer{inner: textVectorizer}
+	indexPath := filepath.Join(t.TempDir(), "source-index.json")
+	sources := []Source{
+		{
+			Kind: SourceKindSession,
+			Path: "sessions/session-123",
+			Text: "Planner session chose embedding-backed local RAG memory.",
+			Metadata: map[string]string{
+				"session_id": "session-123",
+				"agent":      "planner",
+			},
+			Provenance: map[string]string{
+				"session_id": "session-123",
+			},
+		},
+		{
+			Kind: SourceKindGitHistory,
+			Path: "git/abc123",
+			Text: "abc123 Persist git history source digests for local RAG.",
+			Metadata: map[string]string{
+				"commit": "abc123",
+			},
+			Provenance: map[string]string{
+				"commit": "abc123",
+			},
+		},
+	}
+	opts := SourceIndexOptions{
+		IndexPath:          indexPath,
+		Sources:            sources,
+		Vectorizer:         counting,
+		VectorizerMetadata: textVectorizer.Metadata(),
+		Chunk:              ChunkOptions{MaxRunes: 400, OverlapRunes: 40},
+		Now:                func() time.Time { return time.Unix(10, 0) },
+	}
+
+	first, err := RefreshSourceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, first.Index)
+	assert.True(t, first.Initialized)
+	assert.True(t, first.Refreshed)
+	assert.Equal(t, 2, first.Added)
+	assert.Equal(t, 2, counting.calls)
+	assert.ElementsMatch(t, []string{SourceKindSession, SourceKindGitHistory}, sourceMetadataKinds(first.Index.Sources))
+
+	counting.calls = 0
+	opts.Sources = []Source{
+		{
+			Kind: SourceKindSession,
+			Path: "sessions/session-123",
+			Text: "Planner session changed to prefer lexical fallback during outage.",
+			Metadata: map[string]string{
+				"session_id": "session-123",
+				"agent":      "planner",
+			},
+			Provenance: map[string]string{
+				"session_id": "session-123",
+			},
+		},
+	}
+
+	second, err := RefreshSourceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, second.Index)
+	assert.False(t, second.Initialized)
+	assert.True(t, second.Refreshed)
+	assert.Equal(t, 1, second.Updated)
+	assert.Equal(t, 1, second.Deleted)
+	assert.Equal(t, 1, counting.calls, "incremental refresh should vectorize only the changed session source")
+	assert.ElementsMatch(t, []string{SourceKindSession}, sourceMetadataKinds(second.Index.Sources))
+	assert.NotContains(t, sourceMetadataPaths(second.Index.Sources), "git/abc123")
+
+	loaded, err := LoadIndex(indexPath)
+	require.NoError(t, err)
+	require.NoError(t, loaded.ValidateFor(textVectorizer.Metadata(), sourceMetadataForSources(opts.Sources), opts.Chunk))
+	assert.Contains(t, documentMetadataSourceKinds(loaded.Documents), SourceKindSession)
+	assert.NotContains(t, documentMetadataSourceKinds(loaded.Documents), SourceKindGitHistory)
+}
+
+func TestRefreshSourceIndex_InvalidatesRemovedMetadataAndChangedProvenance(t *testing.T) {
+	t.Parallel()
+
+	textVectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	counting := &countingVectorizer{inner: textVectorizer}
+	indexPath := filepath.Join(t.TempDir(), "source-index.json")
+	opts := SourceIndexOptions{
+		IndexPath: indexPath,
+		Sources: []Source{
+			{
+				Kind: SourceKindSession,
+				Path: "sessions/session-123",
+				Text: "Stable session text about local RAG metadata invalidation.",
+				Metadata: map[string]string{
+					"session_id":     "session-123",
+					"stale_metadata": "remove-me",
+				},
+				Provenance: map[string]string{
+					"default_model":    "gpt-old",
+					"stale_provenance": "remove-me",
+				},
+			},
+		},
+		Vectorizer:         counting,
+		VectorizerMetadata: textVectorizer.Metadata(),
+		Chunk:              ChunkOptions{MaxRunes: 400, OverlapRunes: 40},
+	}
+
+	first, err := RefreshSourceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, first.Index)
+	assert.Equal(t, 1, first.Added)
+	assert.Equal(t, 1, counting.calls)
+
+	counting.calls = 0
+	opts.Sources = []Source{
+		{
+			Kind: SourceKindSession,
+			Path: "sessions/session-123",
+			Text: "Stable session text about local RAG metadata invalidation.",
+			Metadata: map[string]string{
+				"session_id": "session-123",
+			},
+			Provenance: map[string]string{
+				"default_model": "gpt-new",
+			},
+		},
+	}
+
+	second, err := RefreshSourceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, second.Index)
+	assert.True(t, second.Refreshed)
+	assert.Equal(t, 1, second.Updated)
+	assert.Equal(t, 0, second.Unchanged)
+	assert.Equal(t, 1, counting.calls, "metadata/provenance invalidation should re-vectorize only the changed source")
+
+	loaded, err := LoadIndex(indexPath)
+	require.NoError(t, err)
+	require.Len(t, loaded.Documents, 1)
+	assert.Equal(t, "session-123", loaded.Documents[0].Metadata["session_id"])
+	assert.NotContains(t, loaded.Documents[0].Metadata, "stale_metadata")
+	assert.Equal(t, "gpt-new", loaded.Documents[0].Provenance["default_model"])
+	assert.NotContains(t, loaded.Documents[0].Provenance, "stale_provenance")
+}
+
+func TestRefreshSourceIndex_RefusesToOverwriteExistingNonIndexPath(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	indexPath := filepath.Join(t.TempDir(), "source-index.json")
+	original := []byte("not a vector index")
+	require.NoError(t, os.WriteFile(indexPath, original, 0o600))
+
+	_, err = RefreshSourceIndex(context.TODO(), SourceIndexOptions{
+		IndexPath:          indexPath,
+		Sources:            []Source{{Kind: SourceKindSession, Path: "sessions/session-123", Text: "Session memory source"}},
+		Vectorizer:         vectorizer,
+		VectorizerMetadata: vectorizer.Metadata(),
+		Chunk:              ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to overwrite existing non-index file")
+
+	data, readErr := os.ReadFile(indexPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, original, data)
+}
+
+func TestRefreshSourceIndex_RemovesIndexWhenAllSourcesDeleted(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	indexPath := filepath.Join(t.TempDir(), "source-index.json")
+	opts := SourceIndexOptions{
+		IndexPath:          indexPath,
+		Sources:            []Source{{Kind: SourceKindSession, Path: "sessions/session-123", Text: "Session memory source"}},
+		Vectorizer:         vectorizer,
+		VectorizerMetadata: vectorizer.Metadata(),
+		Chunk:              ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
+	}
+
+	_, err = RefreshSourceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.FileExists(t, indexPath)
+
+	opts.Sources = nil
+	refresh, err := RefreshSourceIndex(context.TODO(), opts)
+	require.ErrorIs(t, err, ErrNoSources)
+	assert.Equal(t, 1, refresh.Deleted)
+	assert.True(t, refresh.Refreshed)
+	assert.NoFileExists(t, indexPath)
+}
+
+func TestRefreshSourceIndex_RemovesStaleManagedIndexWhenAllSourcesDeleted(t *testing.T) {
+	t.Parallel()
+
+	indexPath := filepath.Join(t.TempDir(), "source-index.json")
+	staleManagedIndex := `{
+  "version": 1,
+  "created_at": "2026-01-01T00:00:00Z",
+  "vectorizer": {"kind": "lexical", "dimensions": 2},
+  "chunk": {"max_runes": 200, "overlap_runes": 20},
+  "dimensions": 2,
+  "sources": [
+    {"path": "sessions/deleted", "digest": "not-a-valid-digest", "kind": "session", "bytes": 7}
+  ],
+  "documents": []
+}`
+	require.NoError(t, os.WriteFile(indexPath, []byte(staleManagedIndex), 0o600))
+
+	refresh, err := RefreshSourceIndex(context.TODO(), SourceIndexOptions{
+		IndexPath: indexPath,
+		Sources:   nil,
+	})
+	require.ErrorIs(t, err, ErrNoSources)
+	assert.True(t, refresh.Refreshed)
+	assert.NoFileExists(t, indexPath)
+}
+
+func TestRefreshSourceIndex_RejectsDuplicateRedactedSourcePaths(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	rawSecret := "secret-" + "token"
+	_, err = RefreshSourceIndex(context.TODO(), SourceIndexOptions{
+		IndexPath:          filepath.Join(t.TempDir(), "source-index.json"),
+		Vectorizer:         vectorizer,
+		VectorizerMetadata: vectorizer.Metadata(),
+		Sources: []Source{
+			{Kind: SourceKindSession, Path: "sessions/api_key=" + rawSecret + "/notes.md", Text: "first session note"},
+			{Kind: SourceKindSession, Path: "sessions/api_key=other-" + rawSecret + "/notes.md", Text: "second session note"},
+		},
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSourceStale)
+	assert.Contains(t, err.Error(), "duplicate source path")
+	assert.Contains(t, err.Error(), "[REDACTED]")
+	assert.NotContains(t, err.Error(), rawSecret)
+}
+
+func TestBuildIndex_RejectsDuplicateRedactedSourcePathsBeforeVectorizing(t *testing.T) {
+	t.Parallel()
+
+	vectorizer := &recordingVectorizer{vector: Vector{1, 0}}
+	rawSecret := "secret-" + "token"
+
+	_, err := BuildIndex(
+		context.TODO(),
+		[]Source{
+			{Kind: SourceKindFile, Path: "docs/api_key=" + rawSecret + "/auth.md", Text: "first auth note"},
+			{Kind: SourceKindFile, Path: "docs/api_key=other-" + rawSecret + "/auth.md", Text: "second auth note"},
+		},
+		vectorizer,
+		NewLexicalMetadata(2),
+		ChunkOptions{MaxRunes: 100},
+		time.Unix(1, 0),
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSourceStale)
+	assert.Contains(t, err.Error(), "duplicate source path")
+	assert.Contains(t, err.Error(), "[REDACTED]")
+	assert.NotContains(t, err.Error(), rawSecret)
+	assert.Empty(t, vectorizer.texts)
+}
+
+func TestRefreshSourceIndexAsync_IncrementallyHandlesChangedAndDeletedSources(t *testing.T) {
+	t.Parallel()
+
+	textVectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	counting := &countingVectorizer{inner: textVectorizer}
+	indexPath := filepath.Join(t.TempDir(), "async-source-index.json")
+	opts := SourceIndexOptions{
+		IndexPath: indexPath,
+		Sources: []Source{
+			{
+				Kind: SourceKindSession,
+				Path: "sessions/session-123",
+				Text: "Session source records the embedding memory plan.",
+			},
+			{
+				Kind: SourceKindGitHistory,
+				Path: "git/abc123",
+				Text: "Commit source records persisted local RAG indexes.",
+			},
+		},
+		Vectorizer:         counting,
+		VectorizerMetadata: textVectorizer.Metadata(),
+		Chunk:              ChunkOptions{MaxRunes: 400, OverlapRunes: 40},
+	}
+
+	first := <-RefreshSourceIndexAsync(context.TODO(), opts)
+	require.NoError(t, first.Err)
+	require.NotNil(t, first.Refresh.Index)
+	assert.Equal(t, 2, first.Refresh.Added)
+
+	counting.calls = 0
+	opts.Sources = []Source{
+		{
+			Kind: SourceKindSession,
+			Path: "sessions/session-123",
+			Text: "Session source changed after the local RAG plan update.",
+		},
+	}
+
+	second := <-RefreshSourceIndexAsync(context.TODO(), opts)
+	require.NoError(t, second.Err)
+	require.NotNil(t, second.Refresh.Index)
+	assert.True(t, second.Refresh.Refreshed)
+	assert.Equal(t, 1, second.Refresh.Updated)
+	assert.Equal(t, 1, second.Refresh.Deleted)
+	assert.Equal(t, 0, second.Refresh.Added)
+	assert.Equal(t, 1, counting.calls, "async source refresh should vectorize only the changed source")
+
+	loaded, err := LoadIndex(indexPath)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"sessions/session-123"}, sourceMetadataPaths(loaded.Sources))
+	assert.ElementsMatch(t, []string{SourceKindSession}, sourceMetadataKinds(loaded.Sources))
 }
 
 func TestVectorizerMetadata_CompatibleWithProviderAlias(t *testing.T) {
@@ -401,33 +843,73 @@ func TestIndex_ValidateRejectsDocumentVectorizerDimensionMismatch(t *testing.T) 
 func TestIndex_ValidateRejectsDocumentVectorizerMetadataMismatch(t *testing.T) {
 	t.Parallel()
 
-	text := indexTestAuthText
-	idx := &Index{
-		Version:    IndexVersion,
-		Vectorizer: NewEmbeddingMetadata("ollama", "nomic-embed-text", "http://127.0.0.1:11434", 2),
-		Dimensions: 2,
-		Chunk:      ChunkOptions{MaxRunes: 100, OverlapRunes: 10},
-		Sources:    []SourceMetadata{SourceMetadataForText("docs/auth.md", text)},
-		Documents: []Document{{
-			ID:         "docs/auth.md#chunk=0000",
-			Text:       text,
-			SourceHash: sourceHash(text),
-			Vector:     Vector{1, 0},
-			Vectorizer: VectorizerSpec{
+	tests := []struct {
+		name string
+		spec VectorizerSpec
+	}{
+		{
+			name: "provider",
+			spec: VectorizerSpec{
+				ID:            "ollama-compatible-embedding",
+				Provider:      "other-provider",
+				Model:         "nomic-embed-text",
+				BaseURL:       "http://127.0.0.1:11434",
+				Normalization: "trim-space-v1",
+				Version:       vectorizerSpecVersion,
+				Dimensions:    2,
+			},
+		},
+		{
+			name: "model",
+			spec: VectorizerSpec{
 				ID:            "ollama-compatible-embedding",
 				Model:         "other-embedding-model",
 				Normalization: "trim-space-v1",
 				Version:       vectorizerSpecVersion,
 				Dimensions:    2,
 			},
-			Metadata:   map[string]string{"path": "docs/auth.md"},
-			Provenance: ensureProvenance(map[string]string{"source_type": "file"}, "file"),
-		}},
+		},
+		{
+			name: "base_url",
+			spec: VectorizerSpec{
+				ID:            "ollama-compatible-embedding",
+				Provider:      "ollama",
+				Model:         "nomic-embed-text",
+				BaseURL:       "http://127.0.0.1:11435",
+				Normalization: "trim-space-v1",
+				Version:       vectorizerSpecVersion,
+				Dimensions:    2,
+			},
+		},
 	}
 
-	err := idx.Validate()
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrVectorizerMismatch)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			text := indexTestAuthText
+			idx := &Index{
+				Version:    IndexVersion,
+				Vectorizer: NewEmbeddingMetadata("ollama", "nomic-embed-text", "http://127.0.0.1:11434", 2),
+				Dimensions: 2,
+				Chunk:      ChunkOptions{MaxRunes: 100, OverlapRunes: 10},
+				Sources:    []SourceMetadata{SourceMetadataForText("docs/auth.md", text)},
+				Documents: []Document{{
+					ID:         "docs/auth.md#chunk=0000",
+					Text:       text,
+					SourceHash: sourceHash(text),
+					Vector:     Vector{1, 0},
+					Vectorizer: tc.spec,
+					Metadata:   map[string]string{"path": "docs/auth.md"},
+					Provenance: ensureProvenance(map[string]string{"source_type": "file"}, "file"),
+				}},
+			}
+
+			err := idx.Validate()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrVectorizerMismatch)
+		})
+	}
 }
 
 func TestIndex_ValidateRejectsMismatchedTextHashVector(t *testing.T) {
@@ -1003,6 +1485,42 @@ func assertTopVectorResult(t *testing.T, idx *Index, vectorizer Vectorizer, quer
 	require.NoError(t, err, name)
 	require.Len(t, results, 1, name)
 	assert.Equal(t, wantID, results[0].Document.ID, name)
+}
+
+func sourceMetadataKinds(sources []SourceMetadata) []string {
+	kinds := make([]string, 0, len(sources))
+	for i := range sources {
+		kinds = append(kinds, sources[i].Kind)
+	}
+
+	return kinds
+}
+
+func sourceMetadataForSources(sources []Source) []SourceMetadata {
+	out := make([]SourceMetadata, 0, len(sources))
+	for _, source := range sources {
+		out = append(out, SourceMetadataForTextWithKind(source.Path, source.Text, source.Kind))
+	}
+
+	return out
+}
+
+func documentMetadataSourceKinds(docs []Document) []string {
+	kinds := make([]string, 0, len(docs))
+	for i := range docs {
+		kinds = append(kinds, docs[i].Metadata["source_kind"])
+	}
+
+	return kinds
+}
+
+func documentProvenanceTypes(docs []Document) []string {
+	types := make([]string, 0, len(docs))
+	for i := range docs {
+		types = append(types, docs[i].Provenance["source_type"])
+	}
+
+	return types
 }
 
 type semanticEvalVectorizer struct{}

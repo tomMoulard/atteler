@@ -124,6 +124,47 @@ func TestBuildWorkspaceVectorReferenceContext_DefaultIndexPathUsesRelativeRootOn
 	assert.Contains(t, refCtx.Content, `index_path="`+filepath.ToSlash(vector.DefaultWorkspaceIndexPath)+`"`)
 }
 
+func TestWorkspaceVectorSettings_UsesScopedVectorizerConfig(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	settings, opts, err := workspaceVectorSettings(root, appconfig.VectorConfig{
+		Vectorizer:            vector.VectorizerKindLexical,
+		Provider:              ollamaProviderName,
+		Model:                 testGlobalVectorModel,
+		WorkspaceIndexPath:    filepath.Join(root, ".atteler", "global-workspace-index.json"),
+		WorkspaceMaxFiles:     7,
+		WorkspaceMaxFileBytes: 4096,
+		Stores: map[string]appconfig.VectorizerConfig{
+			workspaceVectorStore: {
+				Vectorizer:        vector.VectorizerKindEmbedding,
+				Model:             "workspace-embed",
+				IndexPath:         filepath.Join(root, ".atteler", "scoped-workspace-index.json"),
+				TimeoutSeconds:    11,
+				ChunkMaxRunes:     800,
+				ChunkOverlapRunes: 80,
+			},
+		},
+		Sources: map[string]appconfig.VectorizerConfig{
+			vector.SourceKindFile: {
+				IndexPath: filepath.Join(root, ".atteler", "file-source-index.json"),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, vector.VectorizerKindEmbedding, settings.Vectorizer)
+	assert.Equal(t, "ollama", settings.Provider)
+	assert.Equal(t, "workspace-embed", settings.Model)
+	assert.Equal(t, filepath.Join(root, ".atteler", "file-source-index.json"), settings.IndexPath)
+	assert.Equal(t, 11, int(settings.Timeout.Seconds()))
+	assert.Equal(t, 800, settings.Chunk.MaxRunes)
+	assert.Equal(t, 80, settings.Chunk.OverlapRunes)
+	assert.Equal(t, settings.IndexPath, opts.IndexPath)
+	assert.Equal(t, 7, opts.MaxFiles)
+	assert.EqualValues(t, 4096, opts.MaxFileBytes)
+}
+
 func TestFormatWorkspaceVectorReferenceContextEscapesChunkText(t *testing.T) {
 	t.Parallel()
 
@@ -383,6 +424,19 @@ func TestSelectedRetrievalSourcesAllIncludesWorkspaceVectorWhenEnabled(t *testin
 	require.NoError(t, err)
 
 	assert.Contains(t, sources, retrieval.SourceVector)
+}
+
+func TestSelectedRetrievalSourcesIncludesADR(t *testing.T) {
+	t.Parallel()
+
+	sources, err := selectedRetrievalSources(retrievalCommandInput{Sources: []string{"adr"}}, false)
+	require.NoError(t, err)
+
+	assert.Equal(t, []retrieval.SourceType{retrieval.SourceADR}, sources)
+
+	allSources, err := selectedRetrievalSources(retrievalCommandInput{Sources: []string{retrievalSourceAll}}, false)
+	require.NoError(t, err)
+	assert.Contains(t, allSources, retrieval.SourceADR)
 }
 
 func TestSelectedRetrievalSourcesAllOmitsWorkspaceVectorWhenDisabledAndNoExplicitIndex(t *testing.T) {

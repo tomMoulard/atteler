@@ -2,10 +2,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,9 +19,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agentmemory"
+	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/memory"
+	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
+	"github.com/tommoulard/atteler/pkg/vector"
 )
 
 const (
@@ -38,7 +45,7 @@ func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {
 
 	storePath := filepath.Join(dir, "agent-memory.json")
 
-	err := runAgentMemoryCommand(dir, testReviewerName, agentMemoryCommandInputFromOptions(cliOptions{
+	err := runAgentMemoryCommand(context.TODO(), dir, testReviewerName, appconfig.VectorConfig{}, agentMemoryCommandInputFromOptions(cliOptions{
 		agentMemoryStorePath:  storePath,
 		agentMemorySearch:     "callback retry",
 		agentMemoryIndexFiles: stringListFlag{note},
@@ -52,6 +59,1002 @@ func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, filepath.Clean(note), results[0].Document.ID)
+}
+
+func TestRunAgentMemoryCommandUsesScopedEmbeddingVectorizerConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	note := filepath.Join(dir, "semantic.txt")
+	require.NoError(t, os.WriteFile(note, []byte("Semantic retrieval memory for local RAG"), 0o600))
+
+	server := newAgentMemoryEmbeddingTestServer()
+	defer server.Close()
+
+	storePath := filepath.Join(dir, "configured-agent-memory.json")
+	cfg := appconfig.VectorConfig{
+		Stores: map[string]appconfig.VectorizerConfig{
+			"agent_memory": {
+				Vectorizer: vector.VectorizerKindLexical,
+				IndexPath:  storePath,
+			},
+		},
+		Agents: map[string]appconfig.VectorizerConfig{
+			testReviewerName: {
+				Vectorizer: vector.VectorizerKindEmbedding,
+				Model:      "agent-memory-test-embed",
+				BaseURL:    server.URL,
+			},
+		},
+		Sources: map[string]appconfig.VectorizerConfig{
+			vector.SourceKindFile: {
+				Vectorizer: vector.VectorizerKindLexical,
+			},
+		},
+	}
+
+	err := runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
+		agentMemoryIndexFiles: stringListFlag{note},
+	}))
+	require.NoError(t, err)
+
+	loaded, err := agentmemory.Load(storePath)
+	require.NoError(t, err)
+	assert.Equal(t, "ollama-compatible-embedding", loaded.Vectorizer.ID)
+	assert.Equal(t, "agent-memory-test-embed", loaded.Vectorizer.Model)
+	assert.Equal(t, 2, loaded.Dimensions)
+
+	_, err = loaded.SearchContext(context.TODO(), testReviewerName, "semantic retrieval", 1)
+	require.ErrorIs(t, err, vector.ErrVectorizerMismatch)
+
+	err = runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
+		agentMemorySearch: "semantic retrieval",
+		agentMemoryLimit:  positiveIntFlag{value: 1, set: true},
+	}))
+	require.NoError(t, err)
+}
+
+func TestRunAgentMemoryCommandMigratesLexicalStoreToScopedEmbeddingVectorizer(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "agent-memory.json")
+
+	store, err := agentmemory.NewStore(16)
+	require.NoError(t, err)
+	require.NoError(t, store.AddText(testReviewerName, "rag", "Semantic retrieval memory for local RAG"))
+	require.NoError(t, store.Save(storePath))
+
+	server := newAgentMemoryEmbeddingTestServer()
+	defer server.Close()
+
+	cfg := appconfig.VectorConfig{
+		Stores: map[string]appconfig.VectorizerConfig{
+			agentMemoryVectorStore: {
+				Vectorizer: vector.VectorizerKindEmbedding,
+				Model:      "migrated-agent-memory-embed",
+				BaseURL:    server.URL,
+				IndexPath:  storePath,
+			},
+		},
+	}
+
+	err = runAgentMemoryCommand(context.TODO(), dir, "", cfg, agentMemoryCommandInputFromOptions(cliOptions{
+		agentMemoryMigrate: true,
+	}))
+	require.NoError(t, err)
+
+	loaded, err := agentmemory.Load(storePath)
+	require.NoError(t, err)
+	assert.Equal(t, "ollama-compatible-embedding", loaded.Vectorizer.ID)
+	assert.Equal(t, "migrated-agent-memory-embed", loaded.Vectorizer.Model)
+	assert.Equal(t, 2, loaded.Dimensions)
+}
+
+func TestAgentMemoryStorePathResolvesRelativeIndexPathAgainstRoot(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cfg := appconfig.VectorConfig{
+		Stores: map[string]appconfig.VectorizerConfig{
+			agentMemoryVectorStore: {
+				IndexPath: "./configured-agent-memory.json",
+			},
+		},
+	}
+
+	assert.Equal(t,
+		filepath.Join(root, "configured-agent-memory.json"),
+		agentMemoryStorePath(root, testReviewerName, "", cfg),
+	)
+	assert.Equal(t,
+		filepath.Join(root, "cli-agent-memory.json"),
+		agentMemoryStorePath(root, testReviewerName, "./cli-agent-memory.json", appconfig.VectorConfig{}),
+	)
+}
+
+func TestBuildVectorRetrievalSearcherUsesScopedEmbeddingVectorizerConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	semanticPath := filepath.Join(dir, "semantic.md")
+	shellPath := filepath.Join(dir, "shell.md")
+	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
+	require.NoError(t, os.WriteFile(shellPath, []byte("Shell output capture and command timeout notes"), 0o600))
+
+	server := newAgentMemoryEmbeddingTestServer()
+	defer server.Close()
+
+	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Stores: map[string]appconfig.VectorizerConfig{
+				vectorSearchVectorStore: {
+					Vectorizer: vector.VectorizerKindEmbedding,
+					Model:      "retrieval-file-embed",
+					BaseURL:    server.URL,
+				},
+			},
+		},
+	}, retrievalCommandInput{
+		Search:           "semantic retrieval",
+		VectorIndexFiles: []string{semanticPath, shellPath},
+	})
+	require.NoError(t, err)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Contains(t, filepath.ToSlash(results[0].Metadata["path"]), "semantic.md")
+	assert.Equal(t, "embedding-file-vector-index", results[0].Scorer.Name)
+}
+
+func TestBuildVectorRetrievalSearcherUsesVectorCLIOverrides(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	semanticPath := filepath.Join(dir, "semantic.md")
+	shellPath := filepath.Join(dir, "shell.md")
+	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
+	require.NoError(t, os.WriteFile(shellPath, []byte("Shell output capture and command timeout notes"), 0o600))
+
+	server := newAgentMemoryEmbeddingTestServer()
+	defer server.Close()
+
+	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Stores: map[string]appconfig.VectorizerConfig{
+				vectorSearchVectorStore: {
+					Vectorizer: vector.VectorizerKindLexical,
+					IndexPath:  ".atteler/configured-file-index.json",
+				},
+			},
+		},
+	}, retrievalCommandInput{
+		Search: "semantic retrieval",
+		Vector: retrievalVectorCommandInput{
+			Vectorizer:        vector.VectorizerKindEmbedding,
+			Model:             "cli-retrieval-embed",
+			BaseURL:           server.URL,
+			StorePath:         "./cli-retrieval-vector-index.json",
+			ChunkMaxRunes:     600,
+			ChunkOverlapRunes: 60,
+			ChunkMaxSet:       true,
+			ChunkOverlapSet:   true,
+		},
+		VectorIndexFiles: []string{semanticPath, shellPath},
+	})
+	require.NoError(t, err)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "embedding-file-vector-index", results[0].Scorer.Name)
+
+	loaded, err := vector.LoadIndex(filepath.Join(dir, "cli-retrieval-vector-index.json"))
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
+	assert.Equal(t, "cli-retrieval-embed", loaded.Vectorizer.Model)
+	assert.Equal(t, 600, loaded.Chunk.MaxRunes)
+	assert.Equal(t, 60, loaded.Chunk.OverlapRunes)
+	assert.NoFileExists(t, filepath.Join(dir, ".atteler", "configured-file-index.json"))
+}
+
+func TestRetrievalCommandInputFromOptionsCarriesVectorOverrides(t *testing.T) {
+	t.Parallel()
+
+	input := retrievalCommandInputFromOptions(cliOptions{
+		vectorizer:              vector.VectorizerKindEmbedding,
+		vectorProvider:          "ollama",
+		vectorModel:             "cli-embed",
+		vectorBaseURL:           "http://127.0.0.1:11434",
+		vectorFallbackPolicy:    vector.VectorizerKindLexical,
+		vectorStorePath:         "./cli-vector-index.json",
+		vectorTimeout:           positiveIntFlag{value: 9, set: true},
+		vectorChunkMaxRunes:     positiveIntFlag{value: 700, set: true},
+		vectorChunkOverlapRunes: positiveIntFlag{value: 70, set: true},
+	})
+
+	assert.Equal(t, vector.VectorizerKindEmbedding, input.Vector.Vectorizer)
+	assert.Equal(t, "ollama", input.Vector.Provider)
+	assert.Equal(t, "cli-embed", input.Vector.Model)
+	assert.Equal(t, "http://127.0.0.1:11434", input.Vector.BaseURL)
+	assert.Equal(t, vector.VectorizerKindLexical, input.Vector.FallbackPolicy)
+	assert.Equal(t, "./cli-vector-index.json", input.Vector.StorePath)
+	assert.Equal(t, 9, input.Vector.TimeoutSeconds)
+	assert.Equal(t, 700, input.Vector.ChunkMaxRunes)
+	assert.Equal(t, 70, input.Vector.ChunkOverlapRunes)
+	assert.True(t, input.Vector.TimeoutSet)
+	assert.True(t, input.Vector.ChunkMaxSet)
+	assert.True(t, input.Vector.ChunkOverlapSet)
+}
+
+func TestBuildVectorRetrievalSearcherPersistsConfiguredFileIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	semanticPath := filepath.Join(dir, "semantic.md")
+	shellPath := filepath.Join(dir, "shell.md")
+	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
+	require.NoError(t, os.WriteFile(shellPath, []byte("Shell output capture and command timeout notes"), 0o600))
+
+	indexPath := filepath.Join(dir, "configured-file-vector-index.json")
+	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Stores: map[string]appconfig.VectorizerConfig{
+				vectorSearchVectorStore: {
+					Vectorizer: vector.VectorizerKindLexical,
+					IndexPath:  indexPath,
+				},
+			},
+		},
+	}, retrievalCommandInput{
+		Search:           "semantic retrieval",
+		VectorIndexFiles: []string{semanticPath, shellPath},
+	})
+	require.NoError(t, err)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Contains(t, filepath.ToSlash(results[0].Metadata["path"]), "semantic.md")
+	assert.Equal(t, "configured-file-vector-index.json", results[0].Source.URI)
+	assert.NotContains(t, results[0].Source.URI, dir)
+
+	loaded, err := vector.LoadIndex(indexPath)
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
+	assert.ElementsMatch(t, []string{vector.SourceKindFile, vector.SourceKindFile}, sourceMetadataKinds(loaded.Sources))
+}
+
+func TestBuildVectorRetrievalSearcherFallsBackToSeparateLexicalFileIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	semanticPath := filepath.Join(dir, "semantic.md")
+	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "embedding endpoint unavailable", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	indexPath := filepath.Join(dir, "embedding-file-vector-index.json")
+	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Stores: map[string]appconfig.VectorizerConfig{
+				vectorSearchVectorStore: {
+					Vectorizer:     vector.VectorizerKindEmbedding,
+					Model:          "retrieval-file-embed",
+					BaseURL:        server.URL,
+					FallbackPolicy: vector.VectorizerKindLexical,
+					IndexPath:      indexPath,
+				},
+			},
+		},
+	}, retrievalCommandInput{
+		Search:           "semantic retrieval",
+		VectorIndexFiles: []string{semanticPath},
+	})
+	require.NoError(t, err)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "lexical-file-vector-index", results[0].Scorer.Name)
+	assert.NoFileExists(t, indexPath)
+	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
+}
+
+func TestBuildVectorRetrievalSearcherFallsBackWhenReusableEmbeddingIndexCannotVectorizeQuery(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	semanticPath := filepath.Join(dir, "semantic.md")
+	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
+
+	server := newAgentMemoryEmbeddingTestServer()
+	indexPath := filepath.Join(dir, "embedding-file-vector-index.json")
+	cfg := appconfig.VectorConfig{
+		Stores: map[string]appconfig.VectorizerConfig{
+			vectorSearchVectorStore: {
+				Vectorizer:     vector.VectorizerKindEmbedding,
+				Model:          "retrieval-file-embed",
+				BaseURL:        server.URL,
+				FallbackPolicy: vector.VectorizerKindLexical,
+				IndexPath:      indexPath,
+			},
+		},
+	}
+
+	_, err := buildVectorRetrievalSearcher(context.TODO(), appState{
+		cwd:          dir,
+		vectorConfig: cfg,
+	}, retrievalCommandInput{
+		Search:           "semantic retrieval",
+		VectorIndexFiles: []string{semanticPath},
+	})
+	require.NoError(t, err)
+	require.FileExists(t, indexPath)
+
+	server.Close()
+
+	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
+		cwd:          dir,
+		vectorConfig: cfg,
+	}, retrievalCommandInput{
+		Search:           "semantic retrieval",
+		VectorIndexFiles: []string{semanticPath},
+	})
+	require.NoError(t, err)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "lexical-file-vector-index", results[0].Scorer.Name)
+	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
+}
+
+func TestSourceVectorSettingsResolvesRelativeIndexPathAgainstRoot(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	settings, err := sourceVectorSettings(root, appconfig.VectorConfig{
+		Sources: map[string]appconfig.VectorizerConfig{
+			vector.SourceKindSession: {
+				Vectorizer: vector.VectorizerKindLexical,
+				IndexPath:  "./session-vector-index.json",
+			},
+		},
+	}, vector.SourceKindSession, sourceVectorSessionIndex)
+	require.NoError(t, err)
+
+	assert.Equal(t, filepath.Join(root, "session-vector-index.json"), settings.IndexPath)
+}
+
+func TestSourceVectorIndexRequestedUsesExplicitLexicalSourceConfig(t *testing.T) {
+	t.Parallel()
+
+	requested, err := sourceVectorIndexRequested(appconfig.VectorConfig{}, vector.SourceKindGitHistory)
+	require.NoError(t, err)
+	assert.False(t, requested)
+
+	requested, err = sourceVectorIndexRequested(appconfig.VectorConfig{
+		Sources: map[string]appconfig.VectorizerConfig{
+			"git-history": {
+				Vectorizer: vector.VectorizerKindLexical,
+			},
+		},
+	}, vector.SourceKindGitHistory)
+	require.NoError(t, err)
+	assert.True(t, requested)
+
+	requested, err = sourceVectorIndexRequested(appconfig.VectorConfig{
+		Vectorizer: vector.VectorizerKindEmbedding,
+	}, vector.SourceKindSession)
+	require.NoError(t, err)
+	assert.True(t, requested)
+}
+
+func TestRetrievalSearcherUsesPersistedSessionVectorSourceConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	saved := session.New("test-model", []llm.Message{
+		{Role: llm.RoleUser, Content: "Semantic retrieval session memory for local RAG"},
+		{Role: llm.RoleAssistant, Content: "Use persisted embeddings for session recall."},
+	})
+	saved.ID = "session-vector-test"
+	saved.Title = "Session vector test"
+	saved.DefaultAgent = testReviewerName
+	require.NoError(t, store.Save(saved))
+
+	server := newAgentMemoryEmbeddingTestServer()
+	defer server.Close()
+
+	indexPath := filepath.Join(dir, "session-vector-index.json")
+	searcher, err := retrievalSearcher(context.TODO(), appState{
+		cwd:          dir,
+		sessionStore: store,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindSession: {
+					Vectorizer: vector.VectorizerKindEmbedding,
+					Model:      "session-test-embed",
+					BaseURL:    server.URL,
+					IndexPath:  indexPath,
+				},
+			},
+		},
+	}, retrievalCommandInput{}, retrieval.SourceSession)
+	require.NoError(t, err)
+	require.NotNil(t, searcher)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, retrieval.SourceSession, results[0].Source.Type)
+	assert.Contains(t, results[0].DocumentID, "sessions/session-vector-test")
+	assert.Equal(t, "embedding-session-ann", results[0].Scorer.Name)
+
+	loaded, err := vector.LoadIndex(indexPath)
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
+	assert.ElementsMatch(t, []string{vector.SourceKindSession}, sourceMetadataKinds(loaded.Sources))
+}
+
+func TestBuildSessionVectorRetrievalSearcherFallbackPersistsLexicalIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	saved := session.New("test-model", []llm.Message{
+		{Role: llm.RoleUser, Content: "Semantic retrieval session memory for local RAG"},
+		{Role: llm.RoleAssistant, Content: "Persist fallback indexes for local session recall."},
+	})
+	saved.ID = "session-vector-fallback-test"
+	saved.Title = "Session vector fallback test"
+	require.NoError(t, store.Save(saved))
+
+	indexPath := filepath.Join(dir, "session-vector-index.json")
+	searcher, err := buildSessionVectorRetrievalSearcher(context.TODO(), appState{
+		cwd:          dir,
+		sessionStore: store,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindSession: {
+					Vectorizer:     vector.VectorizerKindEmbedding,
+					BaseURL:        privateRemoteEmbeddingEndpoint(),
+					FallbackPolicy: vector.VectorizerKindLexical,
+					IndexPath:      indexPath,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, searcher)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, retrieval.SourceSession, results[0].Source.Type)
+	assert.Equal(t, "lexical-session-ann", results[0].Scorer.Name)
+	assert.Equal(t, "session-vector-index.lexical.json", results[0].Source.URI)
+	assert.NoFileExists(t, indexPath)
+	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
+
+	loaded, err := vector.LoadIndex(lexicalFallbackIndexPath(indexPath))
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
+	assert.ElementsMatch(t, []string{vector.SourceKindSession}, sourceMetadataKinds(loaded.Sources))
+}
+
+func TestBuildGitHistoryVectorRetrievalSearcherUsesPersistedSourceConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	server := newAgentMemoryEmbeddingTestServer()
+	defer server.Close()
+
+	indexPath := filepath.Join(dir, "git-history-vector-index.json")
+	commits := []githistory.Commit{
+		{
+			Hash:       "abc123",
+			AuthorName: "Dev",
+			Date:       time.Unix(10, 0).UTC(),
+			Subject:    "Semantic git history for local RAG",
+			Body:       "Persist embeddings for commit retrieval.",
+			Files:      []string{"pkg/vector/source_index.go"},
+		},
+		{
+			Hash:    "def456",
+			Subject: "Shell timeout cleanup",
+			Files:   []string{"pkg/shell/shell.go"},
+		},
+	}
+
+	searcher, err := buildGitHistoryVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindGitHistory: {
+					Vectorizer: vector.VectorizerKindEmbedding,
+					Model:      "git-history-test-embed",
+					BaseURL:    server.URL,
+					IndexPath:  indexPath,
+				},
+			},
+		},
+	}, commits)
+	require.NoError(t, err)
+	require.NotNil(t, searcher)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:  "semantic retrieval",
+		Limit: 1,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, retrieval.SourceGitHistory, results[0].Source.Type)
+	assert.Contains(t, results[0].DocumentID, "git/abc123")
+	assert.Equal(t, "embedding-git-history-ann", results[0].Scorer.Name)
+
+	loaded, err := vector.LoadIndex(indexPath)
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
+	assert.NotEmpty(t, loaded.Sources)
+	for _, kind := range sourceMetadataKinds(loaded.Sources) {
+		assert.Equal(t, vector.SourceKindGitHistory, kind)
+	}
+}
+
+func TestBuildGitHistoryVectorRetrievalSearcherFallbackPersistsLexicalIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	indexPath := filepath.Join(dir, "git-history-vector-index.json")
+	commits := []githistory.Commit{
+		{
+			Hash:    "abc123",
+			Subject: "Semantic git history for local RAG",
+			Body:    "Persist lexical fallback indexes for commit retrieval.",
+			Files:   []string{"pkg/vector/source_index.go"},
+		},
+		{
+			Hash:    "def456",
+			Subject: "Shell timeout cleanup",
+			Files:   []string{"pkg/shell/shell.go"},
+		},
+	}
+
+	searcher, err := buildGitHistoryVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindGitHistory: {
+					Vectorizer:     vector.VectorizerKindEmbedding,
+					BaseURL:        privateRemoteEmbeddingEndpoint(),
+					FallbackPolicy: vector.VectorizerKindLexical,
+					IndexPath:      indexPath,
+				},
+			},
+		},
+	}, commits)
+	require.NoError(t, err)
+	require.NotNil(t, searcher)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, retrieval.SourceGitHistory, results[0].Source.Type)
+	assert.Equal(t, "lexical-git-history-ann", results[0].Scorer.Name)
+	assert.Equal(t, "git-history-vector-index.lexical.json", results[0].Source.URI)
+	assert.NoFileExists(t, indexPath)
+	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
+
+	loaded, err := vector.LoadIndex(lexicalFallbackIndexPath(indexPath))
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
+	assert.ElementsMatch(t, []string{vector.SourceKindGitHistory, vector.SourceKindGitHistory}, sourceMetadataKinds(loaded.Sources))
+}
+
+func TestBuildADRVectorRetrievalSearcherUsesPersistedSourceConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	adrDir := filepath.Join(dir, "docs", "adr")
+	require.NoError(t, os.MkdirAll(adrDir, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(adrDir, "0001-local-rag.md"),
+		[]byte("# 0001 Local RAG\n\nSemantic retrieval ADR keeps embeddings local."),
+		0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(adrDir, "0002-shell-timeouts.md"),
+		[]byte("# 0002 Shell timeouts\n\nCommand timeout policy for local execution."),
+		0o600,
+	))
+
+	server := newAgentMemoryEmbeddingTestServer()
+	defer server.Close()
+
+	indexPath := filepath.Join(dir, "adr-vector-index.json")
+	searcher, err := buildADRVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindADR: {
+					Vectorizer: vector.VectorizerKindEmbedding,
+					Model:      "adr-test-embed",
+					BaseURL:    server.URL,
+					IndexPath:  indexPath,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, searcher)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, retrieval.SourceADR, results[0].Source.Type)
+	assert.Contains(t, filepath.ToSlash(results[0].DocumentID), "docs/adr/0001-local-rag.md")
+	assert.Equal(t, "embedding-adr-ann", results[0].Scorer.Name)
+	assert.Equal(t, "0001-local-rag", results[0].Metadata["adr_id"])
+
+	loaded, err := vector.LoadIndex(indexPath)
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
+	assert.ElementsMatch(t, []string{vector.SourceKindADR, vector.SourceKindADR}, sourceMetadataKinds(loaded.Sources))
+}
+
+func TestBuildADRVectorRetrievalSearcherFallbackUsesLexicalIndexURI(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	adrDir := filepath.Join(dir, "docs", "adr")
+	require.NoError(t, os.MkdirAll(adrDir, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(adrDir, "0001-local-rag.md"),
+		[]byte("# 0001 Local RAG\n\nSemantic retrieval ADR keeps embeddings local."),
+		0o600,
+	))
+
+	indexPath := filepath.Join(dir, "adr-vector-index.json")
+	searcher, err := buildADRVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindADR: {
+					Vectorizer:        vector.VectorizerKindEmbedding,
+					BaseURL:           privateRemoteEmbeddingEndpoint(),
+					FallbackPolicy:    vector.VectorizerKindLexical,
+					IndexPath:         indexPath,
+					ChunkMaxRunes:     400,
+					ChunkOverlapRunes: 40,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, searcher)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:  "semantic retrieval",
+		Limit: 1,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "lexical-adr-ann", results[0].Scorer.Name)
+	assert.Equal(t, "adr-vector-index.lexical.json", results[0].Source.URI)
+	assert.NoFileExists(t, indexPath)
+	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
+}
+
+func TestBuildADRVectorRetrievalSearcherClearsIndexWhenADRsDeleted(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "adr-vector-index.json")
+	writeSourceVectorIndex(t, indexPath, []vector.Source{{
+		Kind: vector.SourceKindADR,
+		Path: "docs/adr/0001-deleted.md",
+		Text: "Deleted ADR should be removed from persisted local RAG index.",
+	}})
+
+	searcher, err := buildADRVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindADR: {
+					Vectorizer: vector.VectorizerKindLexical,
+					IndexPath:  indexPath,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, searcher)
+	assert.NoFileExists(t, indexPath)
+}
+
+func TestADRVectorSourcesSkipsSymlinkFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	adrDir := filepath.Join(dir, "docs", "adr")
+	require.NoError(t, os.MkdirAll(adrDir, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(adrDir, "0001-real.md"),
+		[]byte("# 0001 Real ADR\n\nKeep local RAG indexes persistent."),
+		0o600,
+	))
+	outside := filepath.Join(dir, "outside.md")
+	require.NoError(t, os.WriteFile(outside, []byte("# Outside\n\nDo not follow symlinked ADR files."), 0o600))
+	if err := os.Symlink(outside, filepath.Join(adrDir, "0002-linked.md")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	sources, err := adrVectorSources(context.TODO(), dir)
+	require.NoError(t, err)
+
+	require.Len(t, sources, 1)
+	assert.Equal(t, vector.SourceKindADR, sources[0].Kind)
+	assert.Equal(t, "docs/adr/0001-real.md", sources[0].Path)
+	assert.NotContains(t, sources[0].Text, "Do not follow symlinked ADR files")
+}
+
+func TestBuildSessionVectorRetrievalSearcherClearsIndexWhenSessionsDeleted(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "session-vector-index.json")
+	writeSourceVectorIndex(t, indexPath, []vector.Source{{
+		Kind: vector.SourceKindSession,
+		Path: "sessions/deleted-session",
+		Text: "Deleted session should be removed from persisted local RAG index.",
+	}})
+
+	searcher, err := buildSessionVectorRetrievalSearcher(context.TODO(), appState{
+		cwd:          dir,
+		sessionStore: session.NewStore(filepath.Join(dir, "sessions")),
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindSession: {
+					Vectorizer: vector.VectorizerKindLexical,
+					IndexPath:  indexPath,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, searcher)
+	assert.NoFileExists(t, indexPath)
+}
+
+func TestBuildSessionVectorRetrievalSearcherClearsFallbackIndexWhenSessionsDeleted(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "session-vector-index.json")
+	staleSources := []vector.Source{{
+		Kind: vector.SourceKindSession,
+		Path: "sessions/deleted-session",
+		Text: "Deleted session should be removed from embedding and fallback local RAG indexes.",
+	}}
+	writeSourceVectorIndex(t, indexPath, staleSources)
+	writeSourceVectorIndex(t, lexicalFallbackIndexPath(indexPath), staleSources)
+
+	searcher, err := buildSessionVectorRetrievalSearcher(context.TODO(), appState{
+		cwd:          dir,
+		sessionStore: session.NewStore(filepath.Join(dir, "sessions")),
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindSession: {
+					Vectorizer:     vector.VectorizerKindEmbedding,
+					BaseURL:        privateRemoteEmbeddingEndpoint(),
+					FallbackPolicy: vector.VectorizerKindLexical,
+					IndexPath:      indexPath,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, searcher)
+	assert.NoFileExists(t, indexPath)
+	assert.NoFileExists(t, lexicalFallbackIndexPath(indexPath))
+}
+
+func TestBuildSessionVectorRetrievalSearcherRefusesToClearDifferentSourceIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "shared-vector-index.json")
+	writeSourceVectorIndex(t, indexPath, []vector.Source{{
+		Kind: vector.SourceKindFile,
+		Path: "docs/auth.md",
+		Text: "OAuth token rotation notes for file retrieval.",
+	}})
+
+	searcher, err := buildSessionVectorRetrievalSearcher(context.TODO(), appState{
+		cwd:          dir,
+		sessionStore: session.NewStore(filepath.Join(dir, "sessions")),
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindSession: {
+					Vectorizer: vector.VectorizerKindLexical,
+					IndexPath:  indexPath,
+				},
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.Nil(t, searcher)
+	assert.Contains(t, err.Error(), "refusing to clear session vector index")
+	assert.FileExists(t, indexPath)
+}
+
+func TestBuildSessionVectorRetrievalSearcherRefusesToRefreshDifferentSourceIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "shared-vector-index.json")
+	writeSourceVectorIndex(t, indexPath, []vector.Source{{
+		Kind: vector.SourceKindFile,
+		Path: "docs/auth.md",
+		Text: "OAuth token rotation notes for file retrieval.",
+	}})
+
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	saved := session.New("test-model", []llm.Message{
+		{Role: llm.RoleUser, Content: "Session source should not clobber a file vector index."},
+		{Role: llm.RoleAssistant, Content: "Persist source metadata by family before refreshing."},
+	})
+	saved.ID = "active-session"
+	require.NoError(t, store.Save(saved))
+
+	searcher, err := buildSessionVectorRetrievalSearcher(context.TODO(), appState{
+		cwd:          dir,
+		sessionStore: store,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindSession: {
+					Vectorizer: vector.VectorizerKindLexical,
+					IndexPath:  indexPath,
+				},
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.Nil(t, searcher)
+	assert.Contains(t, err.Error(), "refusing to refresh session vector index")
+
+	loaded, loadErr := vector.LoadIndex(indexPath)
+	require.NoError(t, loadErr)
+	assert.ElementsMatch(t, []string{vector.SourceKindFile}, sourceMetadataKinds(loaded.Sources))
+}
+
+func TestBuildGitHistoryVectorRetrievalSearcherClearsIndexWhenCommitsDeleted(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "git-history-vector-index.json")
+	writeSourceVectorIndex(t, indexPath, []vector.Source{{
+		Kind: vector.SourceKindGitHistory,
+		Path: "git/deletedcommit",
+		Text: "Deleted commit should be removed from persisted local RAG index.",
+	}})
+
+	searcher, err := buildGitHistoryVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindGitHistory: {
+					Vectorizer: vector.VectorizerKindLexical,
+					IndexPath:  indexPath,
+				},
+			},
+		},
+	}, nil)
+	require.NoError(t, err)
+	assert.Nil(t, searcher)
+	assert.NoFileExists(t, indexPath)
+}
+
+func writeSourceVectorIndex(t *testing.T, indexPath string, sources []vector.Source) {
+	t.Helper()
+
+	vectorizer, err := vector.NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	refresh, err := vector.RefreshSourceIndex(context.TODO(), vector.SourceIndexOptions{
+		IndexPath:          indexPath,
+		Sources:            sources,
+		Vectorizer:         vectorizer,
+		VectorizerMetadata: vectorizer.Metadata(),
+		Chunk:              vector.ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, refresh.Index)
+	require.FileExists(t, indexPath)
+}
+
+func sourceMetadataKinds(sources []vector.SourceMetadata) []string {
+	out := make([]string, 0, len(sources))
+	for _, source := range sources {
+		out = append(out, source.Kind)
+	}
+
+	return out
+}
+
+func newAgentMemoryEmbeddingTestServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Input any    `json:"input"`
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+
+			return
+		}
+
+		text := strings.ToLower(fmt.Sprint(req.Input))
+		embedding := []float64{0, 1}
+		if strings.Contains(text, "semantic") || strings.Contains(text, "retrieval") || strings.Contains(text, "rag") {
+			embedding = []float64{1, 0}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"embeddings": [][]float64{embedding},
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}))
 }
 
 func TestFormatAgentMemoryResult(t *testing.T) {

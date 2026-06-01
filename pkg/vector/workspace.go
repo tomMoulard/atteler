@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,7 +17,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/tommoulard/atteler/pkg/privacy"
-	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 const (
@@ -72,6 +72,30 @@ type WorkspaceRefreshResult struct {
 	Rebuilt     bool
 	Refreshed   bool
 	Initialized bool
+}
+
+// WorkspaceAsyncResult is returned by RefreshWorkspaceIndexAsync.
+type WorkspaceAsyncResult struct {
+	Err     error
+	Refresh WorkspaceRefreshResult
+}
+
+// RefreshWorkspaceIndexAsync starts the same incremental index lifecycle as
+// RefreshWorkspaceIndex in a goroutine and returns exactly one result. This is
+// intentionally a small primitive so callers can schedule background local RAG
+// sync without changing the persistence, invalidation, and privacy behavior
+// that the synchronous path already tests.
+func RefreshWorkspaceIndexAsync(ctx context.Context, opts WorkspaceOptions) <-chan WorkspaceAsyncResult {
+	results := make(chan WorkspaceAsyncResult, 1)
+
+	go func() {
+		defer close(results)
+
+		refresh, err := RefreshWorkspaceIndex(ctx, opts)
+		results <- WorkspaceAsyncResult{Refresh: refresh, Err: err}
+	}()
+
+	return results
 }
 
 // RefreshWorkspaceIndex discovers supported files under Root, loads any
@@ -369,7 +393,7 @@ func refreshExistingWorkspaceIndex(
 	currentByPath := make(map[string]Source, len(sources))
 
 	for _, source := range sources {
-		meta := SourceMetadataForText(source.Path, source.Text)
+		meta := sourceMetadataForSource(source)
 		currentMeta = append(currentMeta, meta)
 		currentByPath[meta.Path] = source
 	}
@@ -1322,7 +1346,7 @@ func workspaceLexicalVectorMatchesText(doc Document) bool {
 }
 
 func workspaceDocumentsMatchSource(docs []Document, source Source, chunk ChunkOptions) bool {
-	sourceMetadata := SourceMetadataForText(source.Path, source.Text)
+	sourceMetadata := sourceMetadataForSource(source)
 	if sourceMetadata.Path == "" {
 		return false
 	}
@@ -1348,7 +1372,7 @@ func workspaceDocumentsMatchSource(docs []Document, source Source, chunk ChunkOp
 
 	for _, chunk := range chunks {
 		doc, ok := docsByID[chunk.ID]
-		if !ok || !workspaceDocumentMatchesChunk(doc, sourceMetadata, chunk) {
+		if !ok || !workspaceDocumentMatchesChunk(doc, source, sourceMetadata, chunk) {
 			return false
 		}
 	}
@@ -1356,8 +1380,8 @@ func workspaceDocumentsMatchSource(docs []Document, source Source, chunk ChunkOp
 	return true
 }
 
-func workspaceDocumentMatchesChunk(doc Document, sourceMetadata SourceMetadata, chunk Chunk) bool {
-	expectedText, expectedMetadata := chunkDocumentPayload(sourceMetadata.Path, sourceMetadata, chunk)
+func workspaceDocumentMatchesChunk(doc Document, source Source, sourceMetadata SourceMetadata, chunk Chunk) bool {
+	expectedText, expectedMetadata := chunkDocumentPayload(source, sourceMetadata.Path, sourceMetadata, chunk)
 	if doc.Text != expectedText {
 		return false
 	}
@@ -1366,33 +1390,13 @@ func workspaceDocumentMatchesChunk(doc Document, sourceMetadata SourceMetadata, 
 		return false
 	}
 
-	for key, expectedValue := range expectedMetadata {
-		if doc.Metadata[key] != expectedValue {
-			return false
-		}
+	if !maps.Equal(doc.Metadata, expectedMetadata) {
+		return false
 	}
 
-	for _, key := range workspaceSafetyMetadataKeys() {
-		if _, expected := expectedMetadata[key]; expected {
-			continue
-		}
+	expectedProvenance := sourceProvenance(source, normalizeSourceKind(source.Kind), sourceMetadata.Path)
 
-		if _, actual := doc.Metadata[key]; actual {
-			return false
-		}
-	}
-
-	return true
-}
-
-func workspaceSafetyMetadataKeys() []string {
-	return []string{
-		retrieval.MetadataSafetyInjectAllowed,
-		retrieval.MetadataSafetyPrivate,
-		retrieval.MetadataSafetyRedacted,
-		retrieval.MetadataSafetySensitive,
-		retrieval.MetadataSafetyReasons,
-	}
+	return maps.Equal(doc.Provenance, expectedProvenance)
 }
 
 func hasNUL(data []byte) bool {

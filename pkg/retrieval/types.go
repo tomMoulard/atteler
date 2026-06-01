@@ -17,6 +17,8 @@ const (
 	SourceVector SourceType = "vector"
 	// SourceFile identifies file-backed memory documents.
 	SourceFile SourceType = "file"
+	// SourceADR identifies architecture decision record sources.
+	SourceADR SourceType = "adr"
 )
 
 const (

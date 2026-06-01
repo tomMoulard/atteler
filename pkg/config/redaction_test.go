@@ -101,12 +101,30 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 			WorkspaceEnabled: &workspaceEnabled,
 			Model:            "tenant-embed?api_" + "key=secret-token/v1",
 			BaseURL:          "https://user:" + "pass" + "@example.com/embed",
+			Stores: map[string]VectorizerConfig{
+				"agent-memory": {
+					Model:     "store-api_key=secret-token",
+					BaseURL:   "https://user:" + "pass" + "@example.com/store-embed",
+					IndexPath: "tmp/auth_token=secret-token/agent-memory.json",
+				},
+			},
+			Agents: map[string]VectorizerConfig{
+				"reviewer": {
+					BaseURL: "https://user:" + "pass" + "@example.com/agent-embed",
+				},
+			},
+			Sources: map[string]VectorizerConfig{
+				"git_history": {
+					IndexPath: "git/auth_token=secret-token/history.json",
+				},
+			},
 			WorkspaceInclude: []string{"*.go", "docs/api_key=secret-token/*.md"},
 			WorkspaceExclude: []string{"vendor/", "tmp/auth_token=secret-token/"},
 		},
 	}
 
 	redacted := RedactedConfig(cfg)
+	storeModelBeforeMutation := redacted.Vector.Stores["agent-memory"].Model
 	*redacted.Generation.Temperature = 0.9
 	*redacted.AgentLoop.MaxOutputBytes = 8192
 	*redacted.AgentLoop.MaxCostMicros = 50_000
@@ -148,6 +166,9 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	redacted.Context.ReferencePolicy.ContentTypes[0] = "application/json"
 	*redacted.SkillLearning.Enabled = false
 	*redacted.Vector.WorkspaceEnabled = false
+	storeVector := redacted.Vector.Stores["agent-memory"]
+	storeVector.Model = "changed"
+	redacted.Vector.Stores["agent-memory"] = storeVector
 	redacted.Vector.WorkspaceInclude[0] = "*.md"
 	redacted.Vector.WorkspaceExclude[0] = "node_modules/"
 
@@ -190,6 +211,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.Equal(t, []string{"text/*"}, cfg.Context.ReferencePolicy.ContentTypes)
 	assert.True(t, *cfg.SkillLearning.Enabled)
 	assert.True(t, *cfg.Vector.WorkspaceEnabled)
+	assert.Equal(t, "store-api_key=secret-token", cfg.Vector.Stores["agent-memory"].Model)
 	assert.Equal(t, []string{"*.go", "docs/api_key=secret-token/*.md"}, cfg.Vector.WorkspaceInclude)
 	assert.Equal(t, []string{"vendor/", "tmp/auth_token=secret-token/"}, cfg.Vector.WorkspaceExclude)
 	assert.NotContains(t, redacted.Providers["compatible"].BaseURL, "pass")
@@ -202,6 +224,11 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.Contains(t, redacted.Providers["compatible"].ModelsPath, "redacted")
 	assert.NotContains(t, redacted.Vector.BaseURL, "pass")
 	assert.NotContains(t, redacted.Vector.Model, "secret-token")
+	assert.NotContains(t, redacted.Vector.Stores["agent-memory"].BaseURL, "pass")
+	assert.NotContains(t, storeModelBeforeMutation, "secret-token")
+	assert.NotContains(t, redacted.Vector.Stores["agent-memory"].IndexPath, "secret-token")
+	assert.NotContains(t, redacted.Vector.Agents["reviewer"].BaseURL, "pass")
+	assert.NotContains(t, redacted.Vector.Sources["git_history"].IndexPath, "secret-token")
 	assert.NotContains(t, redacted.Vector.WorkspaceInclude[1], "secret-token")
 	assert.NotContains(t, redacted.Vector.WorkspaceExclude[1], "secret-token")
 	assert.Equal(t, RedactedValue, redacted.Agents["reviewer"].SystemPrompt)

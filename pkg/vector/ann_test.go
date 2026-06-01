@@ -51,6 +51,16 @@ func TestANNIndexCandidateIndexesWithoutLimitScansAllDocuments(t *testing.T) {
 	assert.Len(t, ann.candidateIndexes(docs[0].Vector, 0), docCount)
 }
 
+func TestANNOptionsNormalizeUsesExactSearchThresholdForSmallIndexes(t *testing.T) {
+	t.Parallel()
+
+	exact := (ANNOptions{}).Normalize(DefaultANNExactSearchMaxDocuments, 1)
+	assert.Equal(t, DefaultANNExactSearchMaxDocuments, exact.MinCandidates)
+
+	approximate := (ANNOptions{}).Normalize(DefaultANNExactSearchMaxDocuments+1, 1)
+	assert.Equal(t, DefaultANNExactSearchMaxDocuments, approximate.MinCandidates)
+}
+
 func TestANNIndexRejectsUnsafePersistedDocument(t *testing.T) {
 	t.Parallel()
 
