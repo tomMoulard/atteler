@@ -293,6 +293,26 @@ func TestAgentMemoryStorePathResolvesRelativeIndexPathAgainstRoot(t *testing.T) 
 		filepath.Join(root, "configured-agent-memory.json"),
 		agentMemoryStorePath(root, testReviewerName, "", cfg),
 	)
+
+	agentCfg := cfg
+	agentCfg.Agents = map[string]appconfig.VectorizerConfig{
+		testReviewerName: {
+			IndexPath: "./reviewer-agent-memory.json",
+		},
+	}
+	assert.Equal(t,
+		filepath.Join(root, "reviewer-agent-memory.json"),
+		agentMemoryStorePath(root, testReviewerName, "", agentCfg),
+	)
+
+	globalCfg := appconfig.VectorConfig{
+		IndexPath: "./shared-vector-index.json",
+	}
+	assert.Equal(t,
+		filepath.Join(root, ".atteler", "agent-memory.json"),
+		agentMemoryStorePath(root, testReviewerName, "", globalCfg),
+	)
+
 	assert.Equal(t,
 		filepath.Join(root, "cli-agent-memory.json"),
 		agentMemoryStorePath(root, testReviewerName, "./cli-agent-memory.json", appconfig.VectorConfig{}),
