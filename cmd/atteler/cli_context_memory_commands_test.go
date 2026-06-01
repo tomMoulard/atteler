@@ -1070,6 +1070,38 @@ func TestBuildADRVectorRetrievalSearcherClearsIndexWhenADRsDeleted(t *testing.T)
 	assert.NoFileExists(t, indexPath)
 }
 
+func TestBuildADRVectorRetrievalSearcherClearsFallbackIndexWhenADRsDeleted(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "adr-vector-index.json")
+	staleSources := []vector.Source{{
+		Kind: vector.SourceKindADR,
+		Path: "docs/adr/0001-deleted.md",
+		Text: "Deleted ADR should be removed from embedding and fallback local RAG indexes.",
+	}}
+	writeSourceVectorIndex(t, indexPath, staleSources)
+	writeSourceVectorIndex(t, lexicalFallbackIndexPath(indexPath), staleSources)
+
+	searcher, err := buildADRVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindADR: {
+					Vectorizer:     vector.VectorizerKindEmbedding,
+					BaseURL:        privateRemoteEmbeddingEndpoint(),
+					FallbackPolicy: vector.VectorizerKindLexical,
+					IndexPath:      indexPath,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, searcher)
+	assert.NoFileExists(t, indexPath)
+	assert.NoFileExists(t, lexicalFallbackIndexPath(indexPath))
+}
+
 func TestADRVectorSourcesSkipsSymlinkFiles(t *testing.T) {
 	t.Parallel()
 
@@ -1251,6 +1283,38 @@ func TestBuildGitHistoryVectorRetrievalSearcherClearsIndexWhenCommitsDeleted(t *
 	require.NoError(t, err)
 	assert.Nil(t, searcher)
 	assert.NoFileExists(t, indexPath)
+}
+
+func TestBuildGitHistoryVectorRetrievalSearcherClearsFallbackIndexWhenCommitsDeleted(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "git-history-vector-index.json")
+	staleSources := []vector.Source{{
+		Kind: vector.SourceKindGitHistory,
+		Path: "git/deletedcommit",
+		Text: "Deleted commit should be removed from embedding and fallback local RAG indexes.",
+	}}
+	writeSourceVectorIndex(t, indexPath, staleSources)
+	writeSourceVectorIndex(t, lexicalFallbackIndexPath(indexPath), staleSources)
+
+	searcher, err := buildGitHistoryVectorRetrievalSearcher(context.TODO(), appState{
+		cwd: dir,
+		vectorConfig: appconfig.VectorConfig{
+			Sources: map[string]appconfig.VectorizerConfig{
+				vector.SourceKindGitHistory: {
+					Vectorizer:     vector.VectorizerKindEmbedding,
+					BaseURL:        privateRemoteEmbeddingEndpoint(),
+					FallbackPolicy: vector.VectorizerKindLexical,
+					IndexPath:      indexPath,
+				},
+			},
+		},
+	}, nil)
+	require.NoError(t, err)
+	assert.Nil(t, searcher)
+	assert.NoFileExists(t, indexPath)
+	assert.NoFileExists(t, lexicalFallbackIndexPath(indexPath))
 }
 
 func writeSourceVectorIndex(t *testing.T, indexPath string, sources []vector.Source) {
