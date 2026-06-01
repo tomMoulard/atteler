@@ -676,6 +676,57 @@ func TestRetrievalSearchersAllSkipsEmptyWorkspaceVectorSource(t *testing.T) {
 	require.Len(t, searchers, 1)
 }
 
+func TestRetrievalSearchersAllSkipsUnavailableImplicitFileVectorSource(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "semantic.md")
+
+	require.NoError(t, os.WriteFile(sourcePath, []byte("Semantic retrieval memory for local RAG"), 0o600))
+
+	server := newAgentMemoryEmbeddingTestServer()
+	cfg := appconfig.VectorConfig{
+		Stores: map[string]appconfig.VectorizerConfig{
+			vectorSearchVectorStore: {
+				Vectorizer: vector.VectorizerKindEmbedding,
+				Model:      "retrieval-file-embed",
+				BaseURL:    server.URL,
+			},
+		},
+	}
+	state := appState{cwd: root, vectorConfig: cfg}
+
+	_, err := buildVectorRetrievalSearcher(context.TODO(), state, retrievalCommandInput{
+		Search:           "semantic retrieval",
+		VectorIndexFiles: []string{sourcePath},
+	})
+	require.NoError(t, err)
+	server.Close()
+
+	input := retrievalCommandInput{
+		Sources: []string{retrievalSourceAll},
+		Search:  "semantic retrieval",
+	}
+	sources, err := selectedRetrievalSourcesForState(state, input)
+	require.NoError(t, err)
+	require.Contains(t, sources, retrieval.SourceVector)
+
+	searchers, err := retrievalSearchers(
+		context.TODO(),
+		state,
+		input,
+		[]retrieval.SourceType{retrieval.SourceMemory, retrieval.SourceVector},
+	)
+	require.NoError(t, err)
+	require.Len(t, searchers, 1)
+
+	_, err = retrievalSearchers(context.TODO(), state, retrievalCommandInput{
+		Sources: []string{"vector"},
+		Search:  "semantic retrieval",
+	}, []retrieval.SourceType{retrieval.SourceVector})
+	require.Error(t, err)
+}
+
 func TestRetrievalSearchersExplicitVectorReportsEmptyWorkspace(t *testing.T) {
 	t.Parallel()
 

@@ -1060,7 +1060,7 @@ func retrievalSearchers(
 
 		searcher, err := retrievalSearcher(ctx, state, input, source)
 		if err != nil {
-			if shouldSkipEmptyWorkspaceVectorSource(input, sources, source, err) {
+			if shouldSkipRetrievalSourceError(state, input, sources, source, err) {
 				continue
 			}
 
@@ -1075,6 +1075,17 @@ func retrievalSearchers(
 	return searchers, nil
 }
 
+func shouldSkipRetrievalSourceError(
+	state appState,
+	input retrievalCommandInput,
+	sources []retrieval.SourceType,
+	source retrieval.SourceType,
+	err error,
+) bool {
+	return shouldSkipEmptyWorkspaceVectorSource(input, sources, source, err) ||
+		shouldSkipImplicitFileVectorSourceError(state, input, sources, source)
+}
+
 func shouldSkipEmptyWorkspaceVectorSource(
 	input retrievalCommandInput,
 	sources []retrieval.SourceType,
@@ -1086,6 +1097,19 @@ func shouldSkipEmptyWorkspaceVectorSource(
 		!retrievalExplicitFileVectorIndexRequested(input) &&
 		retrievalSourceAllRequested(input.Sources) &&
 		errors.Is(err, vector.ErrNoSources)
+}
+
+func shouldSkipImplicitFileVectorSourceError(
+	state appState,
+	input retrievalCommandInput,
+	sources []retrieval.SourceType,
+	source retrieval.SourceType,
+) bool {
+	return source == retrieval.SourceVector &&
+		len(sources) > 1 &&
+		retrievalSourceAllRequested(input.Sources) &&
+		!retrievalExplicitFileVectorIndexRequested(input) &&
+		!workspaceVectorEnabled(state.vectorConfig)
 }
 
 func retrievalSourceAllRequested(sources []string) bool {
