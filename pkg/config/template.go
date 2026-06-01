@@ -226,6 +226,8 @@ func templateYAML() string {
 	out.WriteString("# Top-level vector.index_path is the generic file-vector search store path.\n")
 	out.WriteString("# Use vector.stores.<name>, vector.agents.<name>, and vector.sources.<kind>\n")
 	out.WriteString("# for per-agent memory plus session, git-history, ADR, and file-source indexes.\n\n")
+	out.WriteString("# Supported vector store scopes: agent-memory, vector-search, workspace.\n")
+	out.WriteString("# Supported vector source scopes: file, session, git_history, adr.\n\n")
 	out.WriteString("# Worktree isolation preserves session worktrees by default. Set\n")
 	out.WriteString("# worktree.auto_merge: true only with reviewed verification_commands, or set\n")
 	out.WriteString("# override_verification: true as an explicit no-verification override when no\n")
