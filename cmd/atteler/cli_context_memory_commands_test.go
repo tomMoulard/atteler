@@ -741,6 +741,28 @@ func TestSourceVectorIndexRequestedIgnoresGlobalIndexPathWithoutSourceConfig(t *
 	assert.Equal(t, filepath.Join(root, sourceVectorSessionIndex), settings.IndexPath)
 }
 
+func TestSourceVectorIndexRequestedUsesExplicitSourceIndexPath(t *testing.T) {
+	t.Parallel()
+
+	cfg := appconfig.VectorConfig{
+		Sources: map[string]appconfig.VectorizerConfig{
+			"git-history": {
+				IndexPath: ".atteler/custom-git-history-vector-index.json",
+			},
+		},
+	}
+
+	requested, err := sourceVectorIndexRequested(cfg, vector.SourceKindGitHistory)
+	require.NoError(t, err)
+	assert.True(t, requested)
+
+	root := t.TempDir()
+	settings, err := sourceVectorSettings(root, cfg, vector.SourceKindGitHistory, sourceVectorGitHistoryIndex)
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindLexical, settings.Vectorizer)
+	assert.Equal(t, filepath.Join(root, ".atteler", "custom-git-history-vector-index.json"), settings.IndexPath)
+}
+
 func TestRetrievalSearcherUsesPersistedSessionVectorSourceConfig(t *testing.T) {
 	t.Parallel()
 
