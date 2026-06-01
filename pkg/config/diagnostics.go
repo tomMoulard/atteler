@@ -738,6 +738,10 @@ func inspectVectorizerValueFields(path, prefix string, value *yaml.Node) []Diagn
 		diagnostics = append(diagnostics, inspectVectorizerKindValue(path, prefix+".vectorizer", vectorizer)...)
 	}
 
+	if provider := mappingValue(value, "provider"); provider != nil {
+		diagnostics = append(diagnostics, inspectVectorProviderValue(path, prefix+".provider", provider)...)
+	}
+
 	if fallback := mappingValue(value, "fallback_policy"); fallback != nil {
 		diagnostics = append(diagnostics, inspectVectorFallbackPolicyValue(path, prefix+".fallback_policy", fallback)...)
 	}
@@ -761,6 +765,25 @@ func inspectVectorizerKindValue(path, field string, value *yaml.Node) []Diagnost
 			Path:     path,
 			Field:    field,
 			Message:  fmt.Sprintf("unsupported vectorizer %q (supported: lexical, embedding)", value.Value),
+		}}
+	}
+}
+
+func inspectVectorProviderValue(path, field string, value *yaml.Node) []Diagnostic {
+	normalized, diagnostics := normalizedVectorScalarValue(path, field, value, "provider")
+	if len(diagnostics) > 0 || normalized == "" {
+		return diagnostics
+	}
+
+	switch normalized {
+	case "ollama", "ollama-compatible":
+		return nil
+	default:
+		return []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    field,
+			Message:  fmt.Sprintf("unsupported vector provider %q (supported: ollama-compatible)", value.Value),
 		}}
 	}
 }

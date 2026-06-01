@@ -199,17 +199,21 @@ func TestInspectPathSources_ReportsUnsupportedVectorizerValues(t *testing.T) {
 version: 1
 vector:
   vectorizer: semantic
+  provider: openai
   fallback_policy: retry
   stores:
     agent-memory:
       vectorizer: dense
+      provider: anthropic
       fallback_policy: remote
     vector-search:
       vectorizer: lexical_fallback
+      provider: ollama_compatible
       fallback_policy: none
   sources:
     git_history:
       vectorizer: embed
+      provider: ollama
       fallback_policy: lexical
 `), 0o600))
 
@@ -218,12 +222,16 @@ vector:
 	assert.Equal(t, "present", reports[0].Status)
 
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.vectorizer", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.provider", "")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.fallback_policy", "")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agent-memory.vectorizer", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agent-memory.provider", "")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agent-memory.fallback_policy", "")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search.provider")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search.fallback_policy")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.provider")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.fallback_policy")
 }
 
@@ -235,6 +243,7 @@ func TestInspectPathSources_ReportsNonStringVectorizerValues(t *testing.T) {
 version: 1
 vector:
   vectorizer: [embedding]
+  provider: [ollama]
   stores:
     agent-memory:
       fallback_policy: [lexical]
@@ -245,6 +254,7 @@ vector:
 	assert.Equal(t, "present", reports[0].Status)
 
 	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "vectorizer must be a string")
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "provider must be a string")
 	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "fallback_policy must be a string")
 }
 
