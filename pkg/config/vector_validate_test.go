@@ -32,6 +32,13 @@ func TestValidateVectorConfigAcceptsSupportedScopesAndAliases(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestValidateVectorConfigAcceptsStarterTemplateDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg := starterTemplateConfig()
+	require.NoError(t, ValidateVectorConfigWithAgents(cfg.Vector, cfg.Agents))
+}
+
 func TestValidateVectorConfigRejectsUnsupportedScopesAndValues(t *testing.T) {
 	t.Parallel()
 
