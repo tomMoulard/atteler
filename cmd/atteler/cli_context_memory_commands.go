@@ -974,7 +974,7 @@ func allRetrievalSources(input retrievalCommandInput, includeWorkspaceVector boo
 		retrieval.SourceGitHistory,
 		retrieval.SourceADR,
 	}
-	if len(input.VectorIndexFiles) > 0 || includeWorkspaceVector {
+	if retrievalExplicitFileVectorIndexRequested(input) || includeWorkspaceVector {
 		sources = append(sources, retrieval.SourceVector)
 	}
 
@@ -1033,7 +1033,7 @@ func shouldSkipEmptyWorkspaceVectorSource(
 ) bool {
 	return source == retrieval.SourceVector &&
 		len(sources) > 1 &&
-		len(input.VectorIndexFiles) == 0 &&
+		!retrievalExplicitFileVectorIndexRequested(input) &&
 		retrievalSourceAllRequested(input.Sources) &&
 		errors.Is(err, vector.ErrNoSources)
 }
@@ -1047,6 +1047,10 @@ func retrievalSourceAllRequested(sources []string) bool {
 	}
 
 	return false
+}
+
+func retrievalExplicitFileVectorIndexRequested(input retrievalCommandInput) bool {
+	return len(input.VectorIndexFiles) > 0 || strings.TrimSpace(input.Vector.StorePath) != ""
 }
 
 func retrievalSourceSet(sources []retrieval.SourceType) map[retrieval.SourceType]bool {
@@ -1862,7 +1866,7 @@ func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput
 
 func buildVectorRetrievalSearcher(ctx context.Context, state appState, input retrievalCommandInput) (retrieval.Searcher, error) {
 	paths := input.VectorIndexFiles
-	if len(paths) == 0 {
+	if !retrievalExplicitFileVectorIndexRequested(input) {
 		return buildWorkspaceVectorRetrievalSearcher(ctx, state)
 	}
 

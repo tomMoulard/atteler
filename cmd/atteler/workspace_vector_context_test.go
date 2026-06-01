@@ -527,6 +527,18 @@ func TestSelectedRetrievalSourcesAllIncludesExplicitVectorIndex(t *testing.T) {
 	assert.Contains(t, sources, retrieval.SourceVector)
 }
 
+func TestSelectedRetrievalSourcesAllIncludesExplicitVectorStorePath(t *testing.T) {
+	t.Parallel()
+
+	sources, err := selectedRetrievalSources(retrievalCommandInput{
+		Sources: []string{retrievalSourceAll},
+		Vector:  retrievalVectorCommandInput{StorePath: "workspace-index.json"},
+	}, false)
+	require.NoError(t, err)
+
+	assert.Contains(t, sources, retrieval.SourceVector)
+}
+
 func TestSelectedRetrievalSourcesDefaultOmitsWorkspaceVectorWhenEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -553,6 +565,11 @@ func TestShouldSkipEmptyWorkspaceVectorSourceOnlyForAll(t *testing.T) {
 	assert.False(t, shouldSkipEmptyWorkspaceVectorSource(retrievalCommandInput{
 		Sources:          []string{retrievalSourceAll},
 		VectorIndexFiles: []string{"workspace-index.json"},
+	}, allSources, retrieval.SourceVector, err))
+
+	assert.False(t, shouldSkipEmptyWorkspaceVectorSource(retrievalCommandInput{
+		Sources: []string{retrievalSourceAll},
+		Vector:  retrievalVectorCommandInput{StorePath: "workspace-index.json"},
 	}, allSources, retrieval.SourceVector, err))
 
 	assert.False(t, shouldSkipEmptyWorkspaceVectorSource(retrievalCommandInput{
