@@ -681,6 +681,7 @@ func inspectVectorFields(path string, value *yaml.Node) []Diagnostic {
 	}
 
 	diagnostics := inspectNamedFields(path, "vector", value, knownVectorFields(), nil)
+
 	diagnostics = append(diagnostics, inspectVectorizerValueFields(path, "vector", value)...)
 	if stores := mappingValue(value, "stores"); stores != nil {
 		diagnostics = append(diagnostics, inspectVectorizerScopeEntries(path, "vector.stores", stores)...)
@@ -712,8 +713,10 @@ func inspectVectorizerScopeEntries(path, prefix string, value *yaml.Node) []Diag
 	}
 
 	var diagnostics []Diagnostic
+
 	forEachMappingField(value, func(name string, entry *yaml.Node) {
 		field := prefix + "." + name
+
 		diagnostics = append(diagnostics, inspectVectorizerScopeName(path, prefix, name)...)
 		if entry == nil || entry.Kind != yaml.MappingNode {
 			diagnostics = append(diagnostics, Diagnostic{
@@ -745,31 +748,29 @@ func inspectVectorizerScopeName(path, prefix, name string) []Diagnostic {
 }
 
 func inspectVectorStoreScopeName(path, prefix, name string) []Diagnostic {
-	switch normalizeVectorizerScopeKey(name) {
-	case "agent-memory", "vector-search", "workspace":
+	if knownVectorStoreScope(name) {
 		return nil
-	default:
-		return []Diagnostic{{
-			Severity: DiagnosticError,
-			Path:     path,
-			Field:    prefix + "." + name,
-			Message:  "unknown vector store scope (supported: agent-memory, vector-search, workspace)",
-		}}
 	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    prefix + "." + name,
+		Message:  "unknown vector store scope (supported: agent-memory, vector-search, workspace)",
+	}}
 }
 
 func inspectVectorSourceScopeName(path, prefix, name string) []Diagnostic {
-	switch normalizeVectorizerScopeKey(name) {
-	case "file", "session", "git-history", "adr":
+	if knownVectorSourceScope(name) {
 		return nil
-	default:
-		return []Diagnostic{{
-			Severity: DiagnosticError,
-			Path:     path,
-			Field:    prefix + "." + name,
-			Message:  "unknown vector source scope (supported: file, session, git_history, adr)",
-		}}
 	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    prefix + "." + name,
+		Message:  "unknown vector source scope (supported: file, session, git_history, adr)",
+	}}
 }
 
 func inspectVectorizerValueFields(path, prefix string, value *yaml.Node) []Diagnostic {
@@ -795,18 +796,16 @@ func inspectVectorizerKindValue(path, field string, value *yaml.Node) []Diagnost
 		return diagnostics
 	}
 
-	switch normalized {
-	case "lexical", "lexical-fallback", "fallback", "text", "hashed", "hashed-token-frequency",
-		"embedding", "embed", "embeddings":
+	if knownVectorizerKind(normalized) {
 		return nil
-	default:
-		return []Diagnostic{{
-			Severity: DiagnosticError,
-			Path:     path,
-			Field:    field,
-			Message:  fmt.Sprintf("unsupported vectorizer %q (supported: lexical, embedding)", value.Value),
-		}}
 	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    field,
+		Message:  fmt.Sprintf("unsupported vectorizer %q (supported: lexical, embedding)", value.Value),
+	}}
 }
 
 func inspectVectorProviderValue(path, field string, value *yaml.Node) []Diagnostic {
@@ -815,17 +814,16 @@ func inspectVectorProviderValue(path, field string, value *yaml.Node) []Diagnost
 		return diagnostics
 	}
 
-	switch normalized {
-	case "ollama", "ollama-compatible":
+	if knownVectorProvider(normalized) {
 		return nil
-	default:
-		return []Diagnostic{{
-			Severity: DiagnosticError,
-			Path:     path,
-			Field:    field,
-			Message:  fmt.Sprintf("unsupported vector provider %q (supported: ollama-compatible)", value.Value),
-		}}
 	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    field,
+		Message:  fmt.Sprintf("unsupported vector provider %q (supported: ollama-compatible)", value.Value),
+	}}
 }
 
 func inspectVectorFallbackPolicyValue(path, field string, value *yaml.Node) []Diagnostic {
@@ -834,17 +832,16 @@ func inspectVectorFallbackPolicyValue(path, field string, value *yaml.Node) []Di
 		return diagnostics
 	}
 
-	switch normalized {
-	case "fail", "none", "lexical", "lexical-fallback", "fallback":
+	if knownVectorFallbackPolicy(normalized) {
 		return nil
-	default:
-		return []Diagnostic{{
-			Severity: DiagnosticError,
-			Path:     path,
-			Field:    field,
-			Message:  fmt.Sprintf("unsupported vector fallback policy %q (supported: fail, lexical)", value.Value),
-		}}
 	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    field,
+		Message:  fmt.Sprintf("unsupported vector fallback policy %q (supported: fail, lexical)", value.Value),
+	}}
 }
 
 func normalizedVectorScalarValue(path, field string, value *yaml.Node, name string) (string, []Diagnostic) {

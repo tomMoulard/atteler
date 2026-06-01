@@ -406,6 +406,10 @@ func validateConfig() error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
+	if err := appconfig.ValidateVectorConfig(cfg.Vector); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
 	if _, err := agentLoopBudgetFromConfig(cfg); err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
