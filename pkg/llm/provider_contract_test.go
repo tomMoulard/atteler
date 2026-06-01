@@ -6,6 +6,8 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -182,6 +184,26 @@ func TestProviderCapabilities_FeatureMatrix(t *testing.T) {
 			assert.Equal(t, want[providerName].SupportsRetries, capabilities.SupportsRetries)
 			assert.Equal(t, want[providerName].SupportsFallbacks, capabilities.SupportsFallbacks)
 			assert.Equal(t, want[providerName].SupportsCostTracking, capabilities.SupportsCostTracking)
+		})
+	}
+}
+
+func TestProviderCapabilities_BuiltInsDocumentUnavailableParams(t *testing.T) {
+	t.Parallel()
+
+	for _, providerName := range protocolProviderNames() {
+		t.Run(providerName, func(t *testing.T) {
+			t.Parallel()
+
+			capabilities, ok := BuiltInProviderCapabilities(providerName)
+			require.True(t, ok, "missing capability metadata for %s", providerName)
+
+			for field, support := range capabilities.CompleteParams {
+				switch support.Status {
+				case CompleteParamUnsupported, CompleteParamOmitted:
+					assert.NotEmpty(t, support.Note, "%s %s must explain unavailable support", providerName, field)
+				}
+			}
 		})
 	}
 }
@@ -389,6 +411,36 @@ func TestProviderProtocolRequestFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProviderProtocolRecordedRequestFixturesMatchAdapters(t *testing.T) { //nolint:paralleltest // update mode rewrites a golden fixture and must not run in parallel.
+	if os.Getenv("UPDATE_PROVIDER_REQUEST_FIXTURES") == "" {
+		t.Parallel()
+	}
+
+	fixturePath := filepath.Join("testdata", "provider_request_fixtures.json")
+	got := recordedProviderRequestFixturesJSON(t)
+
+	want, err := os.ReadFile(fixturePath)
+	if err != nil && os.Getenv("UPDATE_PROVIDER_REQUEST_FIXTURES") != "1" {
+		require.NoError(t, err)
+	}
+
+	if err == nil && string(want) == got {
+		return
+	}
+
+	if err == nil && os.Getenv("UPDATE_PROVIDER_REQUEST_FIXTURES") != "1" {
+		assert.JSONEq(t, string(want), got)
+
+		return
+	}
+
+	require.Equal(t, "1", os.Getenv("UPDATE_PROVIDER_REQUEST_FIXTURES"))
+	require.NoError(t, os.MkdirAll(filepath.Dir(fixturePath), 0o750))
+	// #nosec G306 -- opt-in golden update preserves a reviewable fixture mode.
+	require.NoError(t, os.WriteFile(fixturePath, []byte(got), 0o600))
+	t.Log("updated provider request fixture golden")
 }
 
 func TestProviderProtocolRequestFixtures_CoverCompleteParamsFields(t *testing.T) {
@@ -995,6 +1047,75 @@ func providerProtocolRequestFixtures() []protocolRequestFixture {
 			unsupported: map[string]string{providerCodex: "TopP"},
 		},
 	}
+}
+
+//nolint:govet // JSON field order keeps the recorded fixture schema readable.
+type recordedProviderRequestFixtureSet struct {
+	SchemaVersion int                              `json:"schema_version"`
+	Fixtures      []recordedProviderRequestFixture `json:"fixtures"`
+}
+
+type recordedProviderRequestFixture struct {
+	Name      string                            `json:"name"`
+	Covers    []string                          `json:"covers"`
+	Providers []recordedProviderRequestProvider `json:"providers"`
+}
+
+//nolint:govet // JSON field order keeps provider/status before the rendered body.
+type recordedProviderRequestProvider struct {
+	Provider      string          `json:"provider"`
+	Status        string          `json:"status"`
+	Body          json.RawMessage `json:"body,omitempty"`
+	ErrorContains string          `json:"error_contains,omitempty"`
+}
+
+func recordedProviderRequestFixturesJSON(t *testing.T) string {
+	t.Helper()
+
+	adapters := protocolRequestAdapters()
+	fixtures := providerProtocolRequestFixtures()
+	recorded := recordedProviderRequestFixtureSet{
+		SchemaVersion: 1,
+		Fixtures:      make([]recordedProviderRequestFixture, 0, len(fixtures)),
+	}
+
+	for i := range fixtures {
+		fixture := &fixtures[i]
+		entry := recordedProviderRequestFixture{
+			Name:      fixture.name,
+			Covers:    append([]string(nil), fixture.covers...),
+			Providers: make([]recordedProviderRequestProvider, 0, len(adapters)),
+		}
+
+		for _, adapter := range adapters {
+			providerEntry := recordedProviderRequestProvider{Provider: adapter.name}
+			if unsupportedField, hasUnsupported := fixture.unsupported[adapter.name]; hasUnsupported {
+				_, err := adapter.build(fixture.params)
+				require.Error(t, err)
+				require.Contains(t, err.Error(), unsupportedField)
+
+				providerEntry.Status = "unsupported"
+				providerEntry.ErrorContains = unsupportedField
+				entry.Providers = append(entry.Providers, providerEntry)
+
+				continue
+			}
+
+			got, err := adapter.build(fixture.params)
+			require.NoError(t, err)
+
+			providerEntry.Status = "rendered"
+			providerEntry.Body = json.RawMessage(mustJSON(t, got))
+			entry.Providers = append(entry.Providers, providerEntry)
+		}
+
+		recorded.Fixtures = append(recorded.Fixtures, entry)
+	}
+
+	body, err := json.MarshalIndent(recorded, "", "  ")
+	require.NoError(t, err)
+
+	return string(body) + "\n"
 }
 
 //nolint:govet // Test fixture field order groups assertions by purpose.

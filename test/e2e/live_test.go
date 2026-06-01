@@ -11,15 +11,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/llm"
 )
 
 const liveTimeout = 2 * time.Minute
+
+const (
+	liveOpenAIDefaultModel         = "gpt-4.1-mini"
+	liveAnthropicDefaultModel      = "claude-haiku-4-5-20251001"
+	liveForgeAnthropicDefaultModel = "claude-haiku-4-5-20251001"
+	liveClaudeCodeDefaultModel     = "claude-haiku-4-5-20251001"
+	liveCodexDefaultModel          = "gpt-5.5"
+)
 
 //nolint:paralleltest // reads live provider environment and may consume provider quota.
 func TestLiveOpenAIOneShot(t *testing.T) {
 	requireLive(t)
 	apiKey, baseURL := requireOpenAI(t)
-	model := envOrDefault("ATTELER_E2E_OPENAI_MODEL", "gpt-4.1-mini")
+	model := envOrDefault("ATTELER_E2E_OPENAI_MODEL", liveOpenAIDefaultModel)
 	marker := "atteler-live-openai-ok"
 
 	workDir := t.TempDir()
@@ -50,7 +60,7 @@ generation:
 func TestLiveAnthropicOneShot(t *testing.T) {
 	requireLive(t)
 	apiKey := requireAnthropic(t)
-	model := envOrDefault("ATTELER_E2E_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+	model := envOrDefault("ATTELER_E2E_ANTHROPIC_MODEL", liveAnthropicDefaultModel)
 	marker := "atteler-live-anthropic-ok"
 
 	workDir := t.TempDir()
@@ -80,7 +90,7 @@ generation:
 func TestLiveForgeClaudeOneShot(t *testing.T) {
 	requireLive(t)
 	forgeConfig := requireForgeConfig(t)
-	model := envOrDefault("ATTELER_E2E_FORGE_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+	model := envOrDefault("ATTELER_E2E_FORGE_ANTHROPIC_MODEL", liveForgeAnthropicDefaultModel)
 	marker := "atteler-live-forge-claude-ok"
 
 	workDir := t.TempDir()
@@ -111,7 +121,7 @@ func TestLiveClaudeCodeOneShot(t *testing.T) {
 	requireLive(t)
 	requireClaudeCode(t)
 
-	model := envOrDefault("ATTELER_E2E_CLAUDE_CODE_MODEL", "claude-haiku-4-5-20251001")
+	model := envOrDefault("ATTELER_E2E_CLAUDE_CODE_MODEL", liveClaudeCodeDefaultModel)
 	marker := "atteler-live-claude-code-ok"
 
 	workDir := t.TempDir()
@@ -153,18 +163,12 @@ generation:
 func TestLiveCodexOneShot(t *testing.T) {
 	requireLive(t)
 	codexHome := requireCodexHome(t)
-	model := envOrDefault("ATTELER_E2E_CODEX_MODEL", "gpt-5.5")
+	model := envOrDefault("ATTELER_E2E_CODEX_MODEL", liveCodexDefaultModel)
 	marker := "atteler-live-codex-ok"
 
 	workDir := t.TempDir()
 	configPath := filepath.Join(workDir, "atteler.yaml")
-	writeFile(t, configPath, `default_provider: codex
-providers:
-  anthropic:
-    disabled: true
-  openai:
-    disabled: true
-`)
+	writeFile(t, configPath, liveCodexConfig())
 
 	result := runOK(t, runSpec{
 		dir:     workDir,
@@ -176,6 +180,75 @@ providers:
 
 	assertContains(t, result.stdout, marker)
 	assertContains(t, result.stderr, "session:")
+}
+
+func TestLiveCodexConfigAvoidsUnsupportedOrOmittedKnobs(t *testing.T) {
+	t.Parallel()
+
+	config := liveCodexConfig()
+	for _, unsupported := range []string{"max_tokens", "temperature", "top_p", "seed"} {
+		if strings.Contains(config, unsupported+":") {
+			t.Fatalf("live Codex config must not set unsupported or omitted %s", unsupported)
+		}
+	}
+}
+
+func TestLiveProviderDefaultModelsAreKnown(t *testing.T) {
+	t.Parallel()
+
+	knownModels := knownModelsByProvider()
+	for _, tc := range []struct {
+		provider string
+		model    string
+	}{
+		{provider: "openai", model: liveOpenAIDefaultModel},
+		{provider: "anthropic", model: liveAnthropicDefaultModel},
+		{provider: "anthropic", model: liveForgeAnthropicDefaultModel},
+		{provider: "claude-code", model: liveClaudeCodeDefaultModel},
+		{provider: "codex", model: liveCodexDefaultModel},
+	} {
+		if !knownModels[tc.provider][tc.model] {
+			t.Fatalf("live default model %s/%s is not in llm.KnownProviders", tc.provider, tc.model)
+		}
+	}
+}
+
+func TestLiveProviderDocsMatchLiveTestConfiguration(t *testing.T) {
+	t.Parallel()
+
+	root, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readme, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	docs := string(readme)
+	for _, expected := range []string{
+		"`TestLiveOpenAIOneShot` | `OPENAI_API_KEY` | `ATTELER_E2E_OPENAI_MODEL` | `" + liveOpenAIDefaultModel + "`",
+		"`TestLiveAnthropicOneShot` | `ANTHROPIC_API_KEY` | `ATTELER_E2E_ANTHROPIC_MODEL` | `" + liveAnthropicDefaultModel + "`",
+		"`TestLiveForgeClaudeOneShot` | `ATTELER_E2E_FORGE_CONFIG`",
+		"`ATTELER_E2E_FORGE_ANTHROPIC_MODEL` | `" + liveForgeAnthropicDefaultModel + "`",
+		"`TestLiveClaudeCodeOneShot` | Claude Code login",
+		"`ATTELER_E2E_CLAUDE_CODE_MODEL` | `" + liveClaudeCodeDefaultModel + "`",
+		"`TestLiveCodexOneShot` | Codex `auth.json`",
+		"`ATTELER_E2E_CODEX_MODEL` | `" + liveCodexDefaultModel + "`",
+	} {
+		assertContains(t, docs, expected)
+	}
+}
+
+func liveCodexConfig() string {
+	return `default_provider: codex
+providers:
+  anthropic:
+    disabled: true
+  openai:
+    disabled: true
+`
 }
 
 func requireLive(t *testing.T) {
@@ -335,6 +408,21 @@ func requireForgeConfig(t *testing.T) string {
 	}
 
 	return dir
+}
+
+func knownModelsByProvider() map[string]map[string]bool {
+	out := make(map[string]map[string]bool)
+
+	for _, provider := range llm.KnownProviders() {
+		models := make(map[string]bool, len(provider.Models))
+		for _, model := range provider.Models {
+			models[model] = true
+		}
+
+		out[provider.Name] = models
+	}
+
+	return out
 }
 
 func envOrDefault(name, fallback string) string {

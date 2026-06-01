@@ -491,6 +491,92 @@ boundary, health check, or model inventory changes. Refresh the block with
 - Health check: Network check: calls `GET /v1/models` through `FetchModels`.
 <!-- END GENERATED PROVIDER RUNTIME DOCS -->
 
+### Provider compatibility matrix
+
+The compatibility matrix below is generated from `llm.ProviderCompatibilityMatrix`
+and checked by `go test ./pkg/llm`. It is credential-free and should match what
+`atteler config doctor` and `atteler config doctor-offline` summarize under
+`compatibility_matrix`.
+
+<!-- BEGIN GENERATED PROVIDER COMPATIBILITY MATRIX -->
+| Dimension | `anthropic` | `claude-code` | `codex` | `ollama` | `openai` |
+| --- | --- | --- | --- | --- | --- |
+| `auth_source` | api-key/oauth — `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, ForgeCode credentials, or borrowed Claude Code credentials | borrowed-oauth — Claude Code OAuth from macOS Keychain or `~/.claude/.credentials.json` | borrowed-chatgpt — `$CODEX_HOME/auth.json` or `~/.codex/auth.json` in ChatGPT auth mode | none — no API credential is used by the built-in adapter | api-key — `OPENAI_API_KEY` or the `OPENAI_API_KEY` field in Codex `auth.json` |
+| `model_discovery` | live+static — `GET /v1/models` when registered; static fallback for offline known-models | static — static Claude Code adapter catalog; no model-list network call | static+config — static Codex catalog plus configured Codex model; no backend model-list endpoint | local-live+static — `GET /api/tags` against the configured daemon; static fallback for offline known-models | live+static — `GET /v1/models` when registered; static fallback for offline known-models |
+| `completion` | messages-api — `POST /v1/messages` direct HTTPS | messages-api — `POST /v1/messages` direct HTTPS using Claude Code OAuth | responses-api — `POST /responses` direct HTTPS to the ChatGPT Codex backend | ollama-chat — `POST /api/chat` against a local or configured Ollama daemon | chat-completions — `POST /v1/chat/completions` direct HTTPS |
+| `streaming` | unsupported — no caller-facing streaming provider | unsupported — no caller-facing streaming provider | supported — llm.StreamProvider implementation | supported — llm.StreamProvider implementation | unsupported — no caller-facing streaming provider |
+| `tool_use` | supported — maps to tools input_schema | supported — maps to tools input_schema | supported — maps to Responses function tools | supported — maps to function tools | supported — maps to function tools |
+| `shell_access` | none — no subprocess, CLI, or workspace shell/tool sandbox | none — does not run the Claude Code CLI or expose its file/search/edit tools | none — does not run `codex exec` or expose Codex CLI workspace tools | daemon-autostart — no shell/tool access; may start `ollama serve` only when auto-start is explicitly enabled | none — no subprocess, CLI, or workspace shell/tool sandbox |
+| `reasoning_effort` | lossy — maps Atteler levels to Anthropic thinking token budgets | lossy — maps Atteler levels to Anthropic thinking token budgets | supported — maps to responses reasoning.effort | lossy — maps Atteler levels to Ollama think false/low/medium/high | supported — maps to reasoning_effort |
+| `seed` | unsupported — Anthropic Messages has no seed parameter | unsupported — Claude Code OAuth path uses Anthropic Messages, which has no seed parameter | unsupported — Codex ChatGPT responses endpoint does not expose seed in this adapter | supported — maps to options.seed | supported — maps to chat.completions seed |
+| `temperature_top_p` | supported — temperature and top_p are sent directly unless provider-specific constraints apply | supported — temperature and top_p are sent directly unless provider-specific constraints apply | partial — temperature=omitted (Codex ChatGPT responses endpoint does not expose temperature in this adapter); top_p=unsupported (Codex ChatGPT responses endpoint does not expose top_p in this adapter) | supported — temperature and top_p are sent directly unless provider-specific constraints apply | supported — temperature and top_p are sent directly unless provider-specific constraints apply |
+| `max_tokens` | supported — maps to max_tokens; defaults to 4096 when unset | supported — maps to max_tokens; defaults to 4096 when unset | omitted — Codex ChatGPT responses endpoint does not expose max output tokens in this adapter | supported — maps to options.num_predict | supported — maps to max_tokens |
+| `context_window` | catalog+heuristic — versioned catalog metadata, with Anthropic-name fallback for newer Claude IDs | static — static Claude Code adapter catalog with reviewed context-window assumptions | static+unknown-overrides — static Codex catalog for known IDs; user-configured model overrides intentionally return unknown context | static+unknown — static defaults for common local model families; unknown for unrecognized local tags | catalog+heuristic — versioned catalog metadata, with heuristic fallback for legacy OpenAI IDs |
+| `token_usage` | usage+cache-read-write — input, output, cache-read, and cache-write token counts | usage+cache-read-write — input, output, cache-read, and cache-write token counts from Anthropic responses | usage+cache-read — input, output, and cached-input token counts from Responses events | usage-no-cache — prompt/eval token counts; no cached-token accounting | usage+cache-read — prompt, completion, and cached-input token counts |
+| `retry_behavior` | registry — registry retries transient 429/5xx responses; adapter does not refresh on 401 | registry+oauth-refresh — registry retries transient 429/5xx responses; adapter refreshes OAuth once after 401 | registry+oauth-refresh — registry retries transient 429/5xx responses; adapter refreshes ChatGPT OAuth once after 401 | registry — registry retries transient 429/5xx responses from the daemon | registry — registry retries transient 429/5xx responses; API keys are not refreshed |
+| `offline_mode` | metadata-only — known providers/models/matrix work offline; completion and health require network credentials | local-auth+metadata — static catalog and local credential checks work offline; completion requires network | local-auth+metadata — static catalog and local credential checks work offline; completion requires network | local-daemon — matrix and static known-models work offline; local completion needs a reachable daemon/model | metadata-only — known providers/models/matrix work offline; completion and health require network credentials |
+
+#### Model context and output limits
+
+The max-output column is catalog metadata about model limits; request-level `CompleteParams.MaxTokens` support is the separate `max_tokens` compatibility row above.
+
+| Provider | Model | Context window | Max output tokens | Provenance |
+| --- | --- | ---: | ---: | --- |
+| `anthropic` | `claude-haiku-4-5-20251001` | 200000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `anthropic` | `claude-opus-4-20250514` | 200000 | 32000 | builtin_catalog — Anthropic Claude pricing |
+| `anthropic` | `claude-opus-4-5-20251101` | 200000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `anthropic` | `claude-opus-4-6` | 1000000 | 128000 | builtin_catalog — Anthropic Claude pricing |
+| `anthropic` | `claude-opus-4-7` | 1000000 | 128000 | builtin_catalog — Anthropic Claude pricing |
+| `anthropic` | `claude-sonnet-4-20250514` | 200000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `anthropic` | `claude-sonnet-4-5-20250929` | 200000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `anthropic` | `claude-sonnet-4-6` | 1000000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `claude-haiku-4-5` | 200000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `claude-haiku-4-5-20251001` | 200000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `claude-opus-4-1-20250805` | 200000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `claude-opus-4-20250514` | 200000 | 32000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `claude-opus-4-5-20251101` | 200000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `claude-opus-4-6` | 1000000 | 128000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `claude-opus-4-7` | 1000000 | 128000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `claude-sonnet-4-20250514` | 200000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `claude-sonnet-4-5-20250929` | 200000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `claude-sonnet-4-6` | 1000000 | 64000 | builtin_catalog — Anthropic Claude pricing |
+| `claude-code` | `haiku` | 200000 | unknown | adapter_static — static Claude Code CLI alias reviewed against the local provider contract; not network verified |
+| `claude-code` | `opus` | 200000 | unknown | adapter_static — static Claude Code CLI alias reviewed against the local provider contract; not network verified |
+| `claude-code` | `sonnet` | 200000 | unknown | adapter_static — static Claude Code CLI alias reviewed against the local provider contract; not network verified |
+| `codex` | `gpt-5.3-codex` | 200000 | 128000 | builtin_catalog — OpenAI API pricing and priority processing (Codex reference) |
+| `codex` | `gpt-5.3-codex-spark` | 200000 | unknown | adapter_static — static Codex adapter catalog reviewed against the local provider contract; not network verified |
+| `codex` | `gpt-5.4` | 1050000 | 128000 | builtin_catalog — OpenAI API pricing and priority processing (Codex reference) |
+| `codex` | `gpt-5.4-mini` | 400000 | 128000 | builtin_catalog — OpenAI API pricing and priority processing (Codex reference) |
+| `codex` | `gpt-5.5` | 1050000 | 128000 | builtin_catalog — OpenAI API pricing and priority processing (Codex reference) |
+| `ollama` | `deepseek-r1` | 128000 | unknown | builtin_catalog — local Ollama catalog |
+| `ollama` | `gemma3` | 128000 | unknown | builtin_catalog — local Ollama catalog |
+| `ollama` | `llama3.1` | 128000 | unknown | builtin_catalog — local Ollama catalog |
+| `ollama` | `llama3.2` | 128000 | unknown | builtin_catalog — local Ollama catalog |
+| `ollama` | `mistral` | 128000 | unknown | builtin_catalog — local Ollama catalog |
+| `ollama` | `nomic-embed-text` | 8192 | unknown | builtin_catalog — local Ollama catalog |
+| `ollama` | `qwen2.5` | 128000 | unknown | builtin_catalog — local Ollama catalog |
+| `openai` | `gpt-4.1` | 1047576 | 32768 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-4.1-mini` | 1047576 | 32768 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-4.1-nano` | 1047576 | 32768 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-4o` | 128000 | 16384 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-4o-mini` | 128000 | 16384 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5` | 400000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5-codex` | 400000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5-mini` | 400000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5.1` | 400000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5.1-codex` | 400000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5.2` | 400000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5.3-codex` | 400000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5.4` | 1050000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5.4-mini` | 400000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5.4-nano` | 400000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `gpt-5.5` | 1050000 | 128000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `o3` | 200000 | 100000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `o4-mini` | 200000 | 100000 | builtin_catalog — OpenAI API model comparison, pricing, and priority processing |
+| `openai` | `text-embedding-3-large` | 8192 | unknown | builtin_catalog — OpenAI API embedding model pricing |
+| `openai` | `text-embedding-3-small` | 8192 | unknown | builtin_catalog — OpenAI API embedding model pricing |
+<!-- END GENERATED PROVIDER COMPATIBILITY MATRIX -->
+
 ### Private provider adapter contracts
 
 The `codex` and `claude-code` providers are explicit private compatibility
@@ -537,14 +623,42 @@ lossy mappings, provider-adjusted request options, and unsupported
 | Codex | `Temperature` and `MaxTokens` are omitted because the ChatGPT Responses adapter does not expose them; system messages become Responses `instructions`; chat/tool history becomes Responses input items; `ToolResult.IsError` is not represented. | `TopP`, `Seed`, `Stop` |
 | Ollama | Reasoning levels become Ollama `think` values; `ResponseFormat` maps to Ollama `format` but `Name`/`Strict` are not represented; tool-call IDs, tool-result IDs, and `ToolResult.IsError` are not represented in Ollama chat messages. | `ModelMode`; cached-token accounting is not reported by Ollama responses. |
 
-Unsupported non-zero knobs, non-finite sampling values, and non-JSON-serializable
+Unsupported set knobs, non-finite sampling values, and non-JSON-serializable
 tool schemas, tool-call inputs, or response schemas are rejected instead of
 silently dropped.
 Unavailable knobs or provider-constrained values with explicit adapter handling
 are normalized before dispatch and reported in activity metadata.
+Recorded request fixtures in
+[`pkg/llm/testdata/provider_request_fixtures.json`](pkg/llm/testdata/provider_request_fixtures.json)
+and response fixtures in
+[`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go) cover
+provider-specific request rendering for every `CompleteParams` field and the
+normalized token/tool response contract.
 `SupportsStreaming` in the capability metadata means caller-facing
 `llm.StreamProvider` support, not whether an adapter happens to use a streaming
 wire transport internally.
+
+### Opt-in live provider tests
+
+Live provider e2e tests are off by default and skip unless
+`ATTELER_E2E_LIVE=1` is set. Run them explicitly with:
+
+```sh
+ATTELER_E2E_LIVE=1 go test ./test/e2e -run TestLive -count=1 -v
+```
+
+Each live test also requires the provider-specific credential below. If the
+credential is missing, the test calls `t.Skip` with the missing credential or
+login path instead of failing; if the credential is present, the test may make a
+billable provider request.
+
+| Test | Required credential | Optional model override | Default model |
+| --- | --- | --- | --- |
+| `TestLiveOpenAIOneShot` | `OPENAI_API_KEY` | `ATTELER_E2E_OPENAI_MODEL` | `gpt-4.1-mini` |
+| `TestLiveAnthropicOneShot` | `ANTHROPIC_API_KEY` | `ATTELER_E2E_ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` |
+| `TestLiveForgeClaudeOneShot` | `ATTELER_E2E_FORGE_CONFIG` pointing at a ForgeCode config directory containing `.credentials.json` | `ATTELER_E2E_FORGE_ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` |
+| `TestLiveClaudeCodeOneShot` | Claude Code login in macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json` | `ATTELER_E2E_CLAUDE_CODE_MODEL` | `claude-haiku-4-5-20251001` |
+| `TestLiveCodexOneShot` | Codex `auth.json` in `ATTELER_E2E_CODEX_HOME` or, when unset, `$HOME/.codex/auth.json` | `ATTELER_E2E_CODEX_MODEL` | `gpt-5.5` |
 
 ### Lifecycle hook privacy
 
@@ -1647,7 +1761,7 @@ linked from the row.
 | --- | --- |
 | CLI command routing, grouped help, and compatibility flags | [`cmd/atteler/cli_args.go`](cmd/atteler/cli_args.go), [`cmd/atteler/cli_help_domains.go`](cmd/atteler/cli_help_domains.go), [`cmd/atteler/cli_args_test.go`](cmd/atteler/cli_args_test.go), [`cmd/atteler/cli_help_test.go`](cmd/atteler/cli_help_test.go) |
 | Error-aware streaming completion contract with bounded-buffer guidance | [`pkg/llm/stream.go`](pkg/llm/stream.go), [`pkg/llm/stream_test.go`](pkg/llm/stream_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
-| OpenAI, OpenAI-compatible endpoints, Anthropic, Codex, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go), [`pkg/llm/capabilities.go`](pkg/llm/capabilities.go), [`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go), [`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go), [`pkg/llm/provider_runtime_test.go`](pkg/llm/provider_runtime_test.go) |
+| OpenAI, OpenAI-compatible endpoints, Anthropic, Codex, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go), [`pkg/llm/capabilities.go`](pkg/llm/capabilities.go), [`pkg/llm/provider_compatibility.go`](pkg/llm/provider_compatibility.go), [`pkg/llm/provider_compatibility_test.go`](pkg/llm/provider_compatibility_test.go), [`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go), [`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go), [`pkg/llm/provider_runtime_test.go`](pkg/llm/provider_runtime_test.go), [`test/e2e/live_test.go`](test/e2e/live_test.go) |
 | Typed provider errors, jittered retry budgets, retry lifecycle events, and provider retry diagnostics | [`pkg/llm/provider_error.go`](pkg/llm/provider_error.go), [`pkg/llm/provider_error_test.go`](pkg/llm/provider_error_test.go), [`pkg/llm/retry.go`](pkg/llm/retry.go), [`pkg/llm/retry_test.go`](pkg/llm/retry_test.go), [`pkg/events/events.go`](pkg/events/events.go), [`cmd/atteler/cli_config_worktree_commands.go`](cmd/atteler/cli_config_worktree_commands.go) |
 | Evidence-backed model routing with catalog metadata, model roles, per-agent policy, route-decision artifacts, agent-loop checkpoint metadata, and usage telemetry | [`pkg/modelroute/catalog.go`](pkg/modelroute/catalog.go), [`pkg/modelroute/decision.go`](pkg/modelroute/decision.go), [`pkg/modelroute/telemetry.go`](pkg/modelroute/telemetry.go), [`pkg/modelroute/modelroute_test.go`](pkg/modelroute/modelroute_test.go), [`pkg/llm/model_role.go`](pkg/llm/model_role.go), [`pkg/llm/llm.go`](pkg/llm/llm.go), [`pkg/llm/agentloop_checkpoint.go`](pkg/llm/agentloop_checkpoint.go), [`pkg/llm/agentloop_test.go`](pkg/llm/agentloop_test.go), [`cmd/atteler/route_decision_event.go`](cmd/atteler/route_decision_event.go), [`cmd/atteler/agent_resolution_test.go`](cmd/atteler/agent_resolution_test.go) |
 | Configuration loading, migration, redacted diagnostics, atomic state, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/migrate.go`](pkg/config/migrate.go), [`pkg/config/migrate_test.go`](pkg/config/migrate_test.go), [`pkg/config/diagnostics.go`](pkg/config/diagnostics.go), [`pkg/config/diagnostics_test.go`](pkg/config/diagnostics_test.go), [`pkg/config/redaction.go`](pkg/config/redaction.go), [`pkg/config/state.go`](pkg/config/state.go), [`pkg/config/state_test.go`](pkg/config/state_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
@@ -1698,11 +1812,17 @@ Release checklist:
 - When a provider implementation changes its execution path, credential source,
   token refresh, endpoint, sandbox/tool boundary, health check, or built-in
   model catalog, update
-  [`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go) and refresh the
-  generated README provider block before tagging with
+  [`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go) and
+  [`pkg/llm/provider_compatibility.go`](pkg/llm/provider_compatibility.go),
+  then refresh the generated README provider blocks before tagging with
   `UPDATE_PROVIDER_RUNTIME_DOCS=1 go test ./pkg/llm -run TestProviderRuntimeDocs_ReadmeSectionMatchesMetadata`.
-  `go test ./pkg/llm` verifies that the README block still matches metadata
-  keyed to the provider inventory.
+  Use
+  `UPDATE_PROVIDER_COMPATIBILITY_DOCS=1 go test ./pkg/llm -run TestProviderCompatibilityDocs_ReadmeSectionMatchesMetadata`
+  for the matrix block. If request serialization changes, refresh the recorded
+  provider request fixtures with
+  `UPDATE_PROVIDER_REQUEST_FIXTURES=1 go test ./pkg/llm -run TestProviderProtocolRecordedRequestFixturesMatchAdapters`.
+  `go test ./pkg/llm` verifies that both README blocks and the recorded request
+  fixture still match metadata keyed to the provider inventory.
 
 ## License
 

@@ -111,6 +111,8 @@ func TestOfflineProviderCommands(t *testing.T) {
 	assertContains(t, result.stdout, "config_diagnostics:")
 	assertContains(t, result.stdout, "state_diagnostics:")
 	assertContains(t, result.stdout, "known_providers:")
+	assertContains(t, result.stdout, "compatibility_matrix:")
+	assertContains(t, result.stdout, "offline_mode=metadata-only")
 	assertContains(t, result.stdout, "ollama")
 	assertContains(t, result.stdout, "hook_events:")
 

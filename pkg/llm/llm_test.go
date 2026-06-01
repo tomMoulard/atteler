@@ -1381,6 +1381,42 @@ func TestRegistry_CompleteUnknownModel(t *testing.T) {
 	}
 }
 
+func TestRegistry_CompleteRejectsUnsupportedProviderParamsBeforeDispatch(t *testing.T) {
+	t.Parallel()
+
+	for _, providerName := range protocolProviderNames() {
+		capabilities, ok := BuiltInProviderCapabilities(providerName)
+		require.True(t, ok)
+
+		for field, support := range capabilities.CompleteParams {
+			if support.Status != CompleteParamUnsupported {
+				continue
+			}
+
+			t.Run(providerName+"/"+field, func(t *testing.T) {
+				t.Parallel()
+
+				provider := &fakeProvider{
+					name:   providerName,
+					models: []string{"contract-model"},
+					resp:   &Response{Content: "unexpected"},
+				}
+
+				r := NewRegistry()
+				r.Register(provider)
+
+				params := paramsWithOnlyFieldSet(t, field)
+				params.Model = providerName + "/contract-model"
+
+				_, err := r.Complete(context.Background(), params)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "CompleteParams."+field+" is unsupported")
+				assert.Empty(t, provider.calls)
+			})
+		}
+	}
+}
+
 func TestRegistry_CompleteWithFallback(t *testing.T) {
 	t.Parallel()
 
