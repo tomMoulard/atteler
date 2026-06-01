@@ -16,21 +16,44 @@ var manifestFilenames = []string{"plugin.yaml", "plugin.yml", "plugin.json"}
 
 const hardOutputLimitBytes = 1024 * 1024
 
-var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var (
+	envNamePattern            = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	versionRequirementPattern = regexp.MustCompile(`^v?\d+(\.\d+){0,2}([-.+][0-9A-Za-z.-]+)?$`)
+)
+
+const (
+	// OutputFormatText leaves captured stdout as unstructured text.
+	OutputFormatText = "text"
+	// OutputFormatJSON parses captured stdout as JSON and validates any schema.
+	OutputFormatJSON = "json"
+
+	outputAdapterStdout = "stdout"
+
+	jsonTypeAny     = "any"
+	jsonTypeArray   = "array"
+	jsonTypeBoolean = "boolean"
+	jsonTypeInteger = "integer"
+	jsonTypeNumber  = "number"
+	jsonTypeObject  = "object"
+	jsonTypeString  = "string"
+)
 
 // Manifest describes an atteler plugin.
 //
 //nolint:govet // Field order follows manifest readability, not memory layout.
 type Manifest struct {
-	Permissions    *PermissionSet            `json:"permissions,omitempty" yaml:"permissions,omitempty"`
-	Output         *OutputLimits             `json:"output,omitempty" yaml:"output,omitempty"`
-	Trust          *Trust                    `json:"trust,omitempty" yaml:"trust,omitempty"`
-	EntrypointArgs map[string][]ArgumentSpec `json:"entrypoint_args,omitempty" yaml:"entrypoint_args,omitempty"`
-	Name           string                    `json:"name" yaml:"name"`
-	Version        string                    `json:"version" yaml:"version"`
-	Description    string                    `json:"description,omitempty" yaml:"description,omitempty"`
-	Capabilities   []string                  `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
-	Entrypoints    map[string]string         `json:"entrypoints,omitempty" yaml:"entrypoints,omitempty"`
+	Permissions           *PermissionSet                `json:"permissions,omitempty" yaml:"permissions,omitempty"`
+	Output                *OutputLimits                 `json:"output,omitempty" yaml:"output,omitempty"`
+	Trust                 *Trust                        `json:"trust,omitempty" yaml:"trust,omitempty"`
+	Provenance            *Provenance                   `json:"provenance,omitempty" yaml:"provenance,omitempty"`
+	EntrypointArgs        map[string][]ArgumentSpec     `json:"entrypoint_args,omitempty" yaml:"entrypoint_args,omitempty"`
+	EntrypointContracts   map[string]EntrypointContract `json:"entrypoint_contracts,omitempty" yaml:"entrypoint_contracts,omitempty"`
+	Name                  string                        `json:"name" yaml:"name"`
+	Version               string                        `json:"version" yaml:"version"`
+	MinimumAttelerVersion string                        `json:"min_atteler_version,omitempty" yaml:"min_atteler_version,omitempty"`
+	Description           string                        `json:"description,omitempty" yaml:"description,omitempty"`
+	Capabilities          []string                      `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+	Entrypoints           map[string]string             `json:"entrypoints,omitempty" yaml:"entrypoints,omitempty"`
 }
 
 // PermissionSet declares the ambient resources a plugin requests before it can
@@ -73,11 +96,60 @@ type ArgumentSpec struct {
 	Required bool     `json:"required,omitempty" yaml:"required,omitempty"`
 }
 
+// EntrypointContract describes the stable input and output contract for an
+// entrypoint. EntrypointArgs remains supported for older manifests; new
+// manifests should prefer this contract so agents can reason about both sides
+// of the plugin call.
+type EntrypointContract struct {
+	Output *StructuredOutputContract `json:"output,omitempty" yaml:"output,omitempty"`
+	Inputs EntrypointInputs          `json:"inputs" yaml:"inputs"`
+}
+
+// EntrypointInputs declares the expected inputs for an entrypoint.
+type EntrypointInputs struct {
+	Args []ArgumentSpec `json:"args,omitempty" yaml:"args,omitempty"`
+}
+
+// StructuredOutputContract tells atteler how to adapt captured output into a
+// machine-usable value.
+type StructuredOutputContract struct {
+	Schema  *JSONSchema `json:"schema,omitempty" yaml:"schema,omitempty"`
+	Format  string      `json:"format,omitempty" yaml:"format,omitempty"`
+	Adapter string      `json:"adapter,omitempty" yaml:"adapter,omitempty"`
+}
+
+// JSONSchema is the small schema subset Atteler validates for structured
+// plugin output. It intentionally covers the common agent contract use case
+// without pulling in a full JSON Schema implementation.
+type JSONSchema struct {
+	Type       string                        `json:"type,omitempty" yaml:"type,omitempty"`
+	Properties map[string]JSONSchemaProperty `json:"properties,omitempty" yaml:"properties,omitempty"`
+	Required   []string                      `json:"required,omitempty" yaml:"required,omitempty"`
+}
+
+// JSONSchemaProperty declares the expected type for one object property.
+type JSONSchemaProperty struct {
+	Type string `json:"type,omitempty" yaml:"type,omitempty"`
+}
+
 // OutputLimits declares the maximum captured stdout/stderr bytes for a plugin
 // process before atteler truncates the stream.
 type OutputLimits struct {
 	StdoutMaxBytes int `json:"stdout_max_bytes" yaml:"stdout_max_bytes"`
 	StderrMaxBytes int `json:"stderr_max_bytes" yaml:"stderr_max_bytes"`
+}
+
+// Provenance records optional distribution metadata that can be copied into
+// lockfiles and registry metadata.
+type Provenance struct {
+	Source      string `json:"source,omitempty" yaml:"source,omitempty"`
+	Repository  string `json:"repository,omitempty" yaml:"repository,omitempty"`
+	Ref         string `json:"ref,omitempty" yaml:"ref,omitempty"`
+	Commit      string `json:"commit,omitempty" yaml:"commit,omitempty"`
+	Digest      string `json:"digest,omitempty" yaml:"digest,omitempty"`
+	Signature   string `json:"signature,omitempty" yaml:"signature,omitempty"`
+	InstalledAt string `json:"installed_at,omitempty" yaml:"installed_at,omitempty"`
+	InstalledBy string `json:"installed_by,omitempty" yaml:"installed_by,omitempty"`
 }
 
 // Trust records local trust provenance and lifecycle state for a plugin.
@@ -175,6 +247,18 @@ func loadFile(path, root string) (Manifest, error) {
 // the shape of any declared security metadata. Runtime execution requires the
 // security metadata to be present and accepted by policy.
 func (m Manifest) Validate(root string) error {
+	if err := validateManifestMetadata(m); err != nil {
+		return err
+	}
+
+	if err := validateManifestEntrypoints(root, m); err != nil {
+		return err
+	}
+
+	return validateManifestGovernance(root, m)
+}
+
+func validateManifestMetadata(m Manifest) error {
 	if strings.TrimSpace(m.Name) == "" {
 		return errors.New("missing name")
 	}
@@ -183,6 +267,18 @@ func (m Manifest) Validate(root string) error {
 		return errors.New("missing version")
 	}
 
+	if err := validateVersionRequirement("min_atteler_version", m.MinimumAttelerVersion); err != nil {
+		return err
+	}
+
+	if err := validateUniqueNonEmpty("capabilities", m.Capabilities); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateManifestEntrypoints(root string, m Manifest) error {
 	for name, path := range m.Entrypoints {
 		if strings.TrimSpace(name) == "" {
 			return errors.New("entrypoint has empty name")
@@ -197,6 +293,14 @@ func (m Manifest) Validate(root string) error {
 		return err
 	}
 
+	if err := validateEntrypointContracts(m); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateManifestGovernance(root string, m Manifest) error {
 	if m.Permissions != nil {
 		if err := validatePermissions(root, *m.Permissions); err != nil {
 			return fmt.Errorf("permissions: %w", err)
@@ -212,6 +316,12 @@ func (m Manifest) Validate(root string) error {
 	if m.Trust != nil {
 		if err := validateTrust(*m.Trust); err != nil {
 			return fmt.Errorf("trust: %w", err)
+		}
+	}
+
+	if m.Provenance != nil {
+		if err := validateProvenance(*m.Provenance); err != nil {
+			return fmt.Errorf("provenance: %w", err)
 		}
 	}
 
@@ -301,6 +411,138 @@ func validateEntrypointArgList(entrypointName string, args []ArgumentSpec) error
 	}
 
 	return nil
+}
+
+func validateEntrypointContracts(manifest Manifest) error {
+	for name, contract := range manifest.EntrypointContracts {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return errors.New("entrypoint_contracts has empty entrypoint name")
+		}
+
+		if _, ok := manifest.Entrypoints[name]; !ok {
+			return fmt.Errorf("entrypoint_contracts %q has no matching entrypoint", name)
+		}
+
+		if _, hasLegacyArgs := manifest.EntrypointArgs[name]; hasLegacyArgs && contract.Inputs.Args != nil {
+			return fmt.Errorf("entrypoint_contracts %q inputs.args duplicates entrypoint_args", name)
+		}
+
+		if contract.Inputs.Args != nil {
+			if err := validateEntrypointArgList(name, contract.Inputs.Args); err != nil {
+				return err
+			}
+		}
+
+		if contract.Output != nil {
+			if err := validateStructuredOutputContract(name, *contract.Output); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func validateStructuredOutputContract(entrypointName string, output StructuredOutputContract) error {
+	format := normalizedOutputFormat(output)
+	switch format {
+	case OutputFormatText, OutputFormatJSON:
+	default:
+		return fmt.Errorf("entrypoint_contracts %q output format %q is not supported", entrypointName, output.Format)
+	}
+
+	adapter := strings.TrimSpace(output.Adapter)
+	if adapter == "" {
+		adapter = outputAdapterStdout
+	}
+
+	if adapter != outputAdapterStdout {
+		return fmt.Errorf("entrypoint_contracts %q output adapter %q is not supported", entrypointName, output.Adapter)
+	}
+
+	if format == OutputFormatText && output.Schema != nil {
+		return fmt.Errorf("entrypoint_contracts %q output schema requires format: json", entrypointName)
+	}
+
+	if output.Schema != nil {
+		if err := validateJSONSchema("output.schema", *output.Schema); err != nil {
+			return fmt.Errorf("entrypoint_contracts %q: %w", entrypointName, err)
+		}
+	}
+
+	return nil
+}
+
+func normalizedOutputFormat(output StructuredOutputContract) string {
+	format := strings.TrimSpace(strings.ToLower(output.Format))
+	if format == "" {
+		if output.Schema != nil {
+			return OutputFormatJSON
+		}
+
+		return OutputFormatText
+	}
+
+	return format
+}
+
+func validateJSONSchema(path string, schema JSONSchema) error {
+	schemaType := normalizedJSONType(schema.Type)
+	if err := validateJSONType(path+".type", schemaType); err != nil {
+		return err
+	}
+
+	if len(schema.Required) > 0 && schemaType != jsonTypeObject {
+		return fmt.Errorf("%s.required requires type: object", path)
+	}
+
+	if len(schema.Properties) > 0 && schemaType != jsonTypeObject {
+		return fmt.Errorf("%s.properties requires type: object", path)
+	}
+
+	if err := validateUniqueNonEmpty(path+".required", schema.Required); err != nil {
+		return err
+	}
+
+	for name, property := range schema.Properties {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("%s.properties has empty name", path)
+		}
+
+		if err := validateJSONType(path+".properties."+name+".type", normalizedJSONPropertyType(property.Type)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func normalizedJSONType(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return jsonTypeObject
+	}
+
+	return value
+}
+
+func normalizedJSONPropertyType(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return jsonTypeAny
+	}
+
+	return value
+}
+
+func validateJSONType(field, value string) error {
+	switch value {
+	case jsonTypeAny, jsonTypeObject, jsonTypeArray, jsonTypeString, jsonTypeNumber, jsonTypeInteger, jsonTypeBoolean:
+		return nil
+	default:
+		return fmt.Errorf("%s %q is not supported", field, value)
+	}
 }
 
 func validatePermissions(root string, permissions PermissionSet) error {
@@ -430,6 +672,38 @@ func validateTrust(trust Trust) error {
 		if strings.TrimSpace(event.Action) == "" {
 			return fmt.Errorf("audit event %d missing action", i)
 		}
+	}
+
+	return nil
+}
+
+func validateProvenance(provenance Provenance) error {
+	for field, value := range map[string]string{
+		"source":       provenance.Source,
+		"repository":   provenance.Repository,
+		"ref":          provenance.Ref,
+		"commit":       provenance.Commit,
+		"digest":       provenance.Digest,
+		"signature":    provenance.Signature,
+		"installed_at": provenance.InstalledAt,
+		"installed_by": provenance.InstalledBy,
+	} {
+		if strings.ContainsAny(value, "\x00\r\n") {
+			return fmt.Errorf("%s contains control characters", field)
+		}
+	}
+
+	return nil
+}
+
+func validateVersionRequirement(field, version string) error {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return nil
+	}
+
+	if !versionRequirementPattern.MatchString(version) {
+		return fmt.Errorf("%s %q is not a supported version requirement", field, version)
 	}
 
 	return nil

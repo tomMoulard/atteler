@@ -1,11 +1,15 @@
 package plugin
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 // Plugin is a loaded plugin manifest plus its filesystem locations.
@@ -29,8 +33,29 @@ type Entrypoint struct {
 // DryRun describes what would be executed for a plugin entrypoint without
 // running it.
 type DryRun struct {
-	Entrypoint  Entrypoint
-	Description string
+	Entrypoint            Entrypoint
+	Contract              *EntrypointContract
+	Permissions           *PermissionSet
+	Output                *OutputLimits
+	Description           string
+	MinimumAttelerVersion string
+	PolicyChecked         bool
+}
+
+// DryRunOptions controls policy and input validation for dry-run previews.
+type DryRunOptions struct {
+	Policy         *Policy
+	Permission     *permission.Policy
+	AttelerVersion string
+	Args           []string
+	// RequireAcceptedPolicy makes dry-run fail the same way execution would
+	// when no accepted plugin policy is available.
+	RequireAcceptedPolicy bool
+}
+
+type dryRunPermissionContext struct {
+	ctx context.Context
+	ok  bool
 }
 
 // Registry stores configured plugins by manifest name.
@@ -132,20 +157,130 @@ func (r *Registry) ResolveEntrypoint(pluginName, entrypointName string) (Entrypo
 
 // DryRunEntrypoint describes a named plugin entrypoint without executing it.
 func (r *Registry) DryRunEntrypoint(pluginName, entrypointName string) (DryRun, error) {
+	return r.dryRunEntrypoint(pluginName, entrypointName, DryRunOptions{}, dryRunPermissionContext{})
+}
+
+// DryRunEntrypointWithOptions describes a named plugin entrypoint without
+// executing it. When a policy is supplied through options or context, it runs
+// the same manifest, compatibility, permissions, and argument gates used by
+// execution.
+func (r *Registry) DryRunEntrypointWithOptions(
+	ctx context.Context,
+	pluginName, entrypointName string,
+	options DryRunOptions,
+) (DryRun, error) {
+	return r.dryRunEntrypoint(pluginName, entrypointName, options, dryRunPermissionContext{
+		ctx: ctx,
+		ok:  true,
+	})
+}
+
+func (r *Registry) dryRunEntrypoint(
+	pluginName, entrypointName string,
+	options DryRunOptions,
+	permissionContext dryRunPermissionContext,
+) (DryRun, error) {
 	entrypoint, err := r.ResolveEntrypoint(pluginName, entrypointName)
 	if err != nil {
 		return DryRun{}, err
 	}
 
+	plugin, _ := r.Get(pluginName)
+
+	policyChecked := options.Policy != nil
+	if options.RequireAcceptedPolicy && options.Policy == nil {
+		return DryRun{}, fmt.Errorf("plugin: authorize entrypoint %q: accepted policy must be provided", entrypoint.EntrypointName)
+	}
+
+	if options.Policy != nil {
+		accepted := ClonePolicy(*options.Policy)
+		if err := authorizeRun(plugin.Root, plugin.Manifest, entrypoint.EntrypointName, accepted, options.AttelerVersion); err != nil {
+			return DryRun{}, err
+		}
+
+		if err := authorizeEntrypointRuntimeShape(entrypoint.Path, plugin.Manifest); err != nil {
+			return DryRun{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypoint.EntrypointName, err)
+		}
+
+		argSchema, _ := entrypointArgsFor(plugin.Manifest, entrypoint.EntrypointName)
+		if _, err := validateRunArgs(entrypoint.EntrypointName, argSchema, options.Args); err != nil {
+			return DryRun{}, err
+		}
+	}
+
+	hasPermissionPolicy := options.Permission != nil ||
+		(permissionContext.ok && permission.PolicyFromContext(permissionContext.ctx) != nil)
+	if hasPermissionPolicy {
+		if err := authorizeDryRunCentralPermission(permissionContext, plugin, entrypoint, options); err != nil {
+			return DryRun{}, err
+		}
+
+		policyChecked = true
+	}
+
 	description := fmt.Sprintf(
-		"would run plugin %q entrypoint %q at %s with working directory %s",
+		"would run plugin %q entrypoint %q at %s with working directory %s; policy_checked=%t",
 		entrypoint.PluginName,
 		entrypoint.EntrypointName,
 		entrypoint.Path,
 		entrypoint.Root,
+		policyChecked,
 	)
 
-	return DryRun{Entrypoint: entrypoint, Description: description}, nil
+	var contract *EntrypointContract
+
+	if value, ok := plugin.Manifest.EntrypointContracts[entrypoint.EntrypointName]; ok {
+		contractCopy := copyEntrypointContract(value)
+		contract = &contractCopy
+	}
+
+	return DryRun{
+		Entrypoint:            entrypoint,
+		Contract:              contract,
+		Permissions:           copyPermissions(plugin.Manifest.Permissions),
+		Output:                copyOutputLimits(plugin.Manifest.Output),
+		Description:           description,
+		MinimumAttelerVersion: plugin.Manifest.MinimumAttelerVersion,
+		PolicyChecked:         policyChecked,
+	}, nil
+}
+
+func authorizeDryRunCentralPermission(
+	permissionContext dryRunPermissionContext,
+	plugin Plugin,
+	entrypoint Entrypoint,
+	options DryRunOptions,
+) error {
+	if !permissionContext.ok || permissionContext.ctx == nil {
+		return errors.New("plugin: context is required")
+	}
+
+	permissionOps := pluginPermissionOperations(plugin.Manifest, entrypoint.EntrypointName, entrypoint.Path)
+
+	commandOps := permission.CommandOperations(
+		entrypoint.Path,
+		options.Args,
+		"",
+		entrypoint.Root,
+		pluginPermissionSource(plugin.Manifest.Name, entrypoint.EntrypointName),
+	)
+	for i := range commandOps {
+		commandOps[i].Action = pluginPermissionAction(plugin.Manifest.Name, entrypoint.EntrypointName)
+	}
+
+	permissionOps = append(permissionOps, commandOps...)
+
+	permissionDecision := permission.Evaluate(permissionContext.ctx, options.Permission, permission.Request{
+		Operations: permissionOps,
+		Action:     pluginPermissionAction(plugin.Manifest.Name, entrypoint.EntrypointName),
+		Source:     pluginPermissionSource(plugin.Manifest.Name, entrypoint.EntrypointName),
+		Target:     entrypoint.Root,
+	})
+	if !permissionDecision.Allowed {
+		return fmt.Errorf("%s: %w", permissionDecision.Rule, &permission.Error{Decision: permissionDecision})
+	}
+
+	return nil
 }
 
 func loadPlugin(path string) (Plugin, error) {
@@ -182,4 +317,50 @@ func loadPlugin(path string) (Plugin, error) {
 	}
 
 	return Plugin{Manifest: manifest, Root: root, ManifestPath: manifestPath}, nil
+}
+
+func copyPermissions(in *PermissionSet) *PermissionSet {
+	if in == nil {
+		return nil
+	}
+
+	out := clonePermissionSet(*in)
+
+	return &out
+}
+
+func copyOutputLimits(in *OutputLimits) *OutputLimits {
+	if in == nil {
+		return nil
+	}
+
+	out := *in
+
+	return &out
+}
+
+func copyEntrypointContract(in EntrypointContract) EntrypointContract {
+	out := in
+	out.Inputs.Args = append([]ArgumentSpec(nil), in.Inputs.Args...)
+
+	if in.Output == nil {
+		return out
+	}
+
+	output := *in.Output
+	if in.Output.Schema != nil {
+		schema := *in.Output.Schema
+		schema.Required = append([]string(nil), in.Output.Schema.Required...)
+
+		if len(in.Output.Schema.Properties) > 0 {
+			schema.Properties = make(map[string]JSONSchemaProperty, len(in.Output.Schema.Properties))
+			maps.Copy(schema.Properties, in.Output.Schema.Properties)
+		}
+
+		output.Schema = &schema
+	}
+
+	out.Output = &output
+
+	return out
 }

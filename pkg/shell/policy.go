@@ -18,6 +18,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 const (
@@ -25,7 +27,8 @@ const (
 	// redacted output captures.
 	EnvAuditDir = "ATTELER_COMMAND_AUDIT_DIR"
 
-	ledgerFileName = "commands.jsonl"
+	auditDecisionDenied = "denied"
+	ledgerFileName      = "commands.jsonl"
 )
 
 // EnvMode controls which ambient environment variables are visible to a child
@@ -105,10 +108,13 @@ func DefaultPolicy() Policy {
 }
 
 // PolicyError reports a command denied before process start.
+//
+//nolint:govet // Field order keeps the user-facing denial fields together.
 type PolicyError struct {
 	Command string
 	Reason  string
 	Rule    string
+	Err     error
 }
 
 func (e *PolicyError) Error() string {
@@ -121,6 +127,14 @@ func (e *PolicyError) Error() string {
 	}
 
 	return "shell: command denied by policy (" + e.Rule + "): " + e.Reason
+}
+
+func (e *PolicyError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+
+	return e.Err
 }
 
 // EnvChange records how the policy changed the child process environment.
@@ -138,6 +152,7 @@ type AuditRecord struct {
 	EndedAt         time.Time   `json:"ended_at,omitzero"`
 	EnvDiff         []EnvChange `json:"env_diff,omitempty"`
 	Args            []string    `json:"args,omitempty"`
+	OperationKinds  []string    `json:"operation_kinds,omitempty"`
 	ID              string      `json:"id"`
 	Phase           string      `json:"phase"`
 	Program         string      `json:"program"`
@@ -164,20 +179,22 @@ type AuditRecord struct {
 //
 //nolint:govet // Field order keeps execution inputs before metadata.
 type CommandOptions struct {
-	Stdin        io.Reader
-	Stdout       io.Writer
-	Stderr       io.Writer
-	Policy       *Policy
-	Env          map[string]string
-	Audit        AuditContext
-	Mode         ExecutionMode
-	EnvMode      EnvMode
-	Program      string
-	Command      string
-	Dir          string
-	Args         []string
-	EnvList      []string
-	SecretValues []string
+	Stdin                io.Reader
+	Stdout               io.Writer
+	Stderr               io.Writer
+	Policy               *Policy
+	Permission           *permission.Policy
+	Env                  map[string]string
+	Audit                AuditContext
+	Mode                 ExecutionMode
+	EnvMode              EnvMode
+	Program              string
+	Command              string
+	Dir                  string
+	Args                 []string
+	EnvList              []string
+	PermissionOperations []permission.Operation
+	SecretValues         []string
 }
 
 // FinishOptions records the result of an already-authorized command.
@@ -234,6 +251,13 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 	auditArgs := redactArgValues(opts.Args, opts.SecretValues)
 	auditArgs = redactArgs(auditArgs, secrets)
 	command := redactText(displayCommand(program, auditArgs, opts.Command), secrets)
+	permissionOps := append([]permission.Operation(nil), opts.PermissionOperations...)
+	commandOps := permission.CommandOperations(program, opts.Args, opts.Command, cwd, opts.Audit.Caller)
+	for i := range commandOps {
+		commandOps[i].Action = command
+	}
+
+	permissionOps = append(permissionOps, commandOps...)
 	mode := opts.Mode
 	if mode == "" {
 		mode = ModeCaptured
@@ -247,6 +271,7 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 			ID:              nextAuditID(),
 			Program:         program,
 			Args:            auditArgs,
+			OperationKinds:  permissionOperationKindStrings(permissionOps),
 			Command:         command,
 			CWD:             cwd,
 			Caller:          strings.TrimSpace(opts.Audit.Caller),
@@ -259,10 +284,36 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 		},
 	}
 
+	permissionDecision := permission.Evaluate(ctx, opts.Permission, permission.Request{
+		Operations: permissionOps,
+		Action:     command,
+		Source:     strings.TrimSpace(opts.Audit.Caller),
+		Target:     cwd,
+	})
+	if !permissionDecision.Allowed {
+		inv.record.Phase = auditDecisionDenied
+		inv.record.Decision = auditDecisionDenied
+		inv.record.DecisionReason = permissionDecision.Reason
+		inv.record.DecisionRule = permissionDecision.Rule
+		inv.record.StartedAt = inv.startTime
+		inv.record.EndedAt = time.Now().UTC()
+		inv.record.DurationMillis = inv.record.EndedAt.Sub(inv.startTime).Milliseconds()
+		if err := inv.appendRecord(inv.record); err != nil {
+			return nil, nil, err
+		}
+
+		return nil, nil, &PolicyError{
+			Command: command,
+			Reason:  permissionDecision.Reason,
+			Rule:    permissionDecision.Rule,
+			Err:     &permission.Error{Decision: permissionDecision},
+		}
+	}
+
 	decision := authorizeCommand(opts, policy, rawCommand)
 	if !decision.allowed {
-		inv.record.Phase = "denied"
-		inv.record.Decision = "denied"
+		inv.record.Phase = auditDecisionDenied
+		inv.record.Decision = auditDecisionDenied
 		inv.record.DecisionReason = decision.reason
 		inv.record.DecisionRule = decision.rule
 		inv.record.StartedAt = inv.startTime
@@ -315,6 +366,23 @@ func commandCWD(dir string) (string, error) {
 	}
 
 	return filepath.Clean(abs), nil
+}
+
+func permissionOperationKindStrings(ops []permission.Operation) []string {
+	if len(ops) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(ops))
+	seen := make(map[permission.OperationKind]bool, len(ops))
+	for _, op := range ops {
+		if op.Kind != "" && !seen[op.Kind] {
+			seen[op.Kind] = true
+			out = append(out, string(op.Kind))
+		}
+	}
+
+	return out
 }
 
 // RunCommand runs a command with captured stdout/stderr through the policy gate.

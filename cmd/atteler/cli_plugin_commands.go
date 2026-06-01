@@ -46,17 +46,20 @@ func listPlugins(paths []string) error {
 
 //nolint:govet // YAML readability is more important than pointer-byte packing here.
 type pluginDescription struct {
-	Permissions    *attelerplugin.PermissionSet            `yaml:"permissions,omitempty"`
-	Output         *attelerplugin.OutputLimits             `yaml:"output,omitempty"`
-	Trust          *attelerplugin.Trust                    `yaml:"trust,omitempty"`
-	EntrypointArgs map[string][]attelerplugin.ArgumentSpec `yaml:"entrypoint_args,omitempty"`
-	Entrypoints    map[string]string                       `yaml:"entrypoints,omitempty"`
-	Capabilities   []string                                `yaml:"capabilities,omitempty"`
-	Name           string                                  `yaml:"name"`
-	Version        string                                  `yaml:"version"`
-	Description    string                                  `yaml:"description,omitempty"`
-	Root           string                                  `yaml:"root"`
-	ManifestPath   string                                  `yaml:"manifest_path"`
+	Permissions           *attelerplugin.PermissionSet                `yaml:"permissions,omitempty"`
+	Output                *attelerplugin.OutputLimits                 `yaml:"output,omitempty"`
+	Trust                 *attelerplugin.Trust                        `yaml:"trust,omitempty"`
+	Provenance            *attelerplugin.Provenance                   `yaml:"provenance,omitempty"`
+	EntrypointArgs        map[string][]attelerplugin.ArgumentSpec     `yaml:"entrypoint_args,omitempty"`
+	EntrypointContracts   map[string]attelerplugin.EntrypointContract `yaml:"entrypoint_contracts,omitempty"`
+	Entrypoints           map[string]string                           `yaml:"entrypoints,omitempty"`
+	Capabilities          []string                                    `yaml:"capabilities,omitempty"`
+	Name                  string                                      `yaml:"name"`
+	Version               string                                      `yaml:"version"`
+	MinimumAttelerVersion string                                      `yaml:"min_atteler_version,omitempty"`
+	Description           string                                      `yaml:"description,omitempty"`
+	Root                  string                                      `yaml:"root"`
+	ManifestPath          string                                      `yaml:"manifest_path"`
 }
 
 func describePlugin(paths []string, name string) error {
@@ -82,19 +85,22 @@ func describePlugin(paths []string, name string) error {
 
 func formatPluginDescription(plugin attelerplugin.Plugin) (string, error) {
 	out, err := yaml.Marshal(pluginDescription{
-		Name:         plugin.Manifest.Name,
-		Version:      plugin.Manifest.Version,
-		Description:  plugin.Manifest.Description,
-		Capabilities: append([]string(nil), plugin.Manifest.Capabilities...),
-		Entrypoints:  copyStringMap(plugin.Manifest.Entrypoints),
+		Name:                  plugin.Manifest.Name,
+		Version:               plugin.Manifest.Version,
+		MinimumAttelerVersion: plugin.Manifest.MinimumAttelerVersion,
+		Description:           plugin.Manifest.Description,
+		Capabilities:          append([]string(nil), plugin.Manifest.Capabilities...),
+		Entrypoints:           copyStringMap(plugin.Manifest.Entrypoints),
 		EntrypointArgs: copyEntrypointArgsMap(
 			plugin.Manifest.EntrypointArgs,
 		),
-		Permissions:  copyPermissions(plugin.Manifest.Permissions),
-		Output:       copyOutputLimits(plugin.Manifest.Output),
-		Trust:        copyTrust(plugin.Manifest.Trust),
-		Root:         plugin.Root,
-		ManifestPath: plugin.ManifestPath,
+		EntrypointContracts: copyEntrypointContractsMap(plugin.Manifest.EntrypointContracts),
+		Permissions:         copyPermissions(plugin.Manifest.Permissions),
+		Output:              copyOutputLimits(plugin.Manifest.Output),
+		Trust:               copyTrust(plugin.Manifest.Trust),
+		Provenance:          copyProvenance(plugin.Manifest.Provenance),
+		Root:                plugin.Root,
+		ManifestPath:        plugin.ManifestPath,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal plugin description: %w", err)
@@ -114,6 +120,7 @@ func initRTKPlugin(dir string) error {
 			mode: 0o600,
 			content: `name: rtk
 version: "0.1.0"
+min_atteler_version: "0.1.0"
 description: RTK token-saving CLI proxy helpers for Atteler.
 capabilities:
   - rtk
@@ -129,6 +136,19 @@ entrypoint_args:
   gain: []
   show: []
   init-codex: []
+entrypoint_contracts:
+  version:
+    output:
+      format: text
+  gain:
+    output:
+      format: text
+  show:
+    output:
+      format: text
+  init-codex:
+    output:
+      format: text
 permissions:
   filesystem:
     read:
@@ -156,6 +176,9 @@ trust:
     - action: accepted
       actor: atteler
       at: scaffold
+provenance:
+  source: atteler plugins init-rtk
+  digest: generated-local-scaffold
 `,
 		},
 		"bin/version": {
@@ -266,8 +289,27 @@ func runPluginEntrypoint(
 		return fmt.Errorf("run plugin: %w", err)
 	}
 
+	var acceptedPolicy *attelerplugin.Policy
+
+	if policy != nil {
+		clonedPolicy := attelerplugin.ClonePolicy(*policy)
+		acceptedPolicy = &clonedPolicy
+	}
+
 	if dryRun {
-		preview, previewErr := registry.DryRunEntrypoint(pluginName, entrypointName)
+		if acceptedPolicy == nil {
+			if _, resolveErr := registry.ResolveEntrypoint(pluginName, entrypointName); resolveErr != nil {
+				return fmt.Errorf("run plugin: %w", resolveErr)
+			}
+
+			return errors.New("run plugin: plugins.policy must accept requested permissions before execution")
+		}
+
+		preview, previewErr := registry.DryRunEntrypointWithOptions(ctx, pluginName, entrypointName, attelerplugin.DryRunOptions{
+			Policy:                acceptedPolicy,
+			AttelerVersion:        version,
+			RequireAcceptedPolicy: true,
+		})
 		if previewErr != nil {
 			return fmt.Errorf("run plugin: %w", previewErr)
 		}
@@ -287,15 +329,14 @@ func runPluginEntrypoint(
 		timeout = 30 * time.Second
 	}
 
-	if policy == nil {
+	if acceptedPolicy == nil {
 		return errors.New("run plugin: plugins.policy must accept requested permissions before execution")
 	}
 
-	acceptedPolicy := attelerplugin.ClonePolicy(*policy)
-
 	result, err := attelerplugin.RunEntrypointWithOptions(ctx, plugin.Root, plugin.Manifest, entrypointName, attelerplugin.RunOptions{
-		Policy:  &acceptedPolicy,
-		Timeout: timeout,
+		Policy:         acceptedPolicy,
+		Timeout:        timeout,
+		AttelerVersion: version,
 	})
 	if result.Stdout != "" {
 		fmt.Print(result.Stdout)
@@ -335,13 +376,89 @@ func parsePluginTarget(target, entrypointName string) (pluginName, entrypoint st
 func formatPluginDryRun(dryRun attelerplugin.DryRun) string {
 	entrypoint := dryRun.Entrypoint
 
-	return strings.Join([]string{
+	outputFormat := attelerplugin.OutputFormatText
+	outputSchema := false
+
+	if dryRun.Contract != nil && dryRun.Contract.Output != nil {
+		outputFormat = strings.TrimSpace(dryRun.Contract.Output.Format)
+		if outputFormat == "" {
+			outputFormat = attelerplugin.OutputFormatText
+			if dryRun.Contract.Output.Schema != nil {
+				outputFormat = attelerplugin.OutputFormatJSON
+			}
+		}
+
+		outputSchema = dryRun.Contract.Output.Schema != nil
+	}
+
+	lines := []string{
 		dryRun.Description,
 		"plugin=" + entrypoint.PluginName,
 		"entrypoint=" + entrypoint.EntrypointName,
 		"path=" + entrypoint.Path,
 		"cwd=" + entrypoint.Root,
-	}, "\n")
+		"policy_checked=" + strconv.FormatBool(dryRun.PolicyChecked),
+		"output_format=" + outputFormat,
+		"output_schema=" + strconv.FormatBool(outputSchema),
+	}
+
+	if strings.TrimSpace(dryRun.MinimumAttelerVersion) != "" {
+		lines = append(lines, "min_atteler_version="+strings.TrimSpace(dryRun.MinimumAttelerVersion))
+	}
+
+	if dryRun.Output != nil {
+		lines = append(lines, fmt.Sprintf(
+			"output_limits=stdout:%d,stderr:%d",
+			dryRun.Output.StdoutMaxBytes,
+			dryRun.Output.StderrMaxBytes,
+		))
+	}
+
+	if dryRun.Permissions != nil {
+		lines = append(lines, "permissions="+formatPluginDryRunPermissions(*dryRun.Permissions))
+	}
+
+	if dryRun.Contract != nil {
+		argCount, requiredCount := pluginDryRunArgCounts(dryRun.Contract.Inputs.Args)
+		lines = append(lines, fmt.Sprintf("input_args=%d,required:%d", argCount, requiredCount))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func pluginDryRunArgCounts(args []attelerplugin.ArgumentSpec) (argCount, requiredCount int) {
+	for _, arg := range args {
+		argCount++
+
+		if arg.Required {
+			requiredCount++
+		}
+	}
+
+	return argCount, requiredCount
+}
+
+func formatPluginDryRunPermissions(permissions attelerplugin.PermissionSet) string {
+	parts := []string{
+		"filesystem.read=" + formatPluginDryRunList(permissions.Filesystem.Read),
+		"filesystem.write=" + formatPluginDryRunList(permissions.Filesystem.Write),
+		"network.allow=" + strconv.FormatBool(permissions.Network.Allow),
+		"network.hosts=" + formatPluginDryRunList(permissions.Network.Hosts),
+		"shell.allow=" + strconv.FormatBool(permissions.Shell.Allow),
+		"env=" + formatPluginDryRunList(permissions.Env),
+		"secrets=" + formatPluginDryRunList(permissions.Secrets),
+		"tools=" + formatPluginDryRunList(permissions.Tools),
+	}
+
+	return strings.Join(parts, ";")
+}
+
+func formatPluginDryRunList(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+
+	return "[" + strings.Join(values, ",") + "]"
 }
 
 func copyStringMap(in map[string]string) map[string]string {
@@ -363,6 +480,45 @@ func copyEntrypointArgsMap(in map[string][]attelerplugin.ArgumentSpec) map[strin
 	out := make(map[string][]attelerplugin.ArgumentSpec, len(in))
 	for name, args := range in {
 		out[name] = append([]attelerplugin.ArgumentSpec(nil), args...)
+	}
+
+	return out
+}
+
+func copyEntrypointContractsMap(
+	in map[string]attelerplugin.EntrypointContract,
+) map[string]attelerplugin.EntrypointContract {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string]attelerplugin.EntrypointContract, len(in))
+	for name, contract := range in {
+		out[name] = copyEntrypointContract(contract)
+	}
+
+	return out
+}
+
+func copyEntrypointContract(in attelerplugin.EntrypointContract) attelerplugin.EntrypointContract {
+	out := in
+
+	out.Inputs.Args = append([]attelerplugin.ArgumentSpec(nil), in.Inputs.Args...)
+	if in.Output != nil {
+		output := *in.Output
+		if in.Output.Schema != nil {
+			schema := *in.Output.Schema
+
+			schema.Required = append([]string(nil), in.Output.Schema.Required...)
+			if len(in.Output.Schema.Properties) > 0 {
+				schema.Properties = make(map[string]attelerplugin.JSONSchemaProperty, len(in.Output.Schema.Properties))
+				maps.Copy(schema.Properties, in.Output.Schema.Properties)
+			}
+
+			output.Schema = &schema
+		}
+
+		out.Output = &output
 	}
 
 	return out
@@ -401,6 +557,16 @@ func copyTrust(in *attelerplugin.Trust) *attelerplugin.Trust {
 
 	out := *in
 	out.Audit = append([]attelerplugin.TrustAudit(nil), in.Audit...)
+
+	return &out
+}
+
+func copyProvenance(in *attelerplugin.Provenance) *attelerplugin.Provenance {
+	if in == nil {
+		return nil
+	}
+
+	out := *in
 
 	return &out
 }
