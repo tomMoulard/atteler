@@ -1083,6 +1083,7 @@ func shouldSkipRetrievalSourceError(
 	err error,
 ) bool {
 	return shouldSkipEmptyWorkspaceVectorSource(input, sources, source, err) ||
+		shouldSkipUnavailableGitHistorySource(input, sources, source, err) ||
 		shouldSkipImplicitFileVectorSourceError(state, input, sources, source)
 }
 
@@ -1110,6 +1111,19 @@ func shouldSkipImplicitFileVectorSourceError(
 		retrievalSourceAllRequested(input.Sources) &&
 		!retrievalExplicitFileVectorIndexRequested(input) &&
 		!workspaceVectorEnabled(state.vectorConfig)
+}
+
+func shouldSkipUnavailableGitHistorySource(
+	input retrievalCommandInput,
+	sources []retrieval.SourceType,
+	source retrieval.SourceType,
+	err error,
+) bool {
+	return source == retrieval.SourceGitHistory &&
+		len(sources) > 1 &&
+		retrievalSourceAllRequested(input.Sources) &&
+		err != nil &&
+		strings.Contains(err.Error(), "git history: run git log:")
 }
 
 func retrievalSourceAllRequested(sources []string) bool {

@@ -727,6 +727,43 @@ func TestRetrievalSearchersAllSkipsUnavailableImplicitFileVectorSource(t *testin
 	require.Error(t, err)
 }
 
+func TestRetrievalSearchersAllSkipsUnavailableGitHistorySource(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	input := retrievalCommandInput{
+		Sources: []string{retrievalSourceAll},
+		Search:  "semantic retrieval",
+	}
+
+	searchers, err := retrievalSearchers(
+		context.TODO(),
+		appState{cwd: root},
+		input,
+		[]retrieval.SourceType{retrieval.SourceMemory, retrieval.SourceGitHistory},
+	)
+	require.NoError(t, err)
+	require.Len(t, searchers, 1)
+}
+
+func TestRetrievalSearchersExplicitGitHistoryReportsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	_, err := retrievalSearchers(
+		context.TODO(),
+		appState{cwd: root},
+		retrievalCommandInput{
+			Sources: []string{"git"},
+			Search:  "semantic retrieval",
+		},
+		[]retrieval.SourceType{retrieval.SourceGitHistory},
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "git history: run git log")
+}
+
 func TestRetrievalSearchersExplicitVectorReportsEmptyWorkspace(t *testing.T) {
 	t.Parallel()
 
