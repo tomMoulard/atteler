@@ -1208,7 +1208,8 @@ and chunk settings still match. Searching with new file inputs refreshes the
 file index from still-present indexed files plus the requested files,
 re-vectorizing only changed or added files and removing deleted files from
 persisted source metadata instead of keeping stale chunks. Freshness-only
-timestamp updates are persisted without re-vectorizing unchanged text.
+timestamp updates or removals are persisted without re-vectorizing unchanged
+text.
 
 Vectorizer config can be scoped so local RAG stores do not all share one
 quality/cost tradeoff. Top-level vectorizer/provider/model/base-url,

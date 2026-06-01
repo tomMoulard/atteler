@@ -1461,9 +1461,6 @@ func refreshRetainedDocumentFreshnessMetadata(
 	chunk ChunkOptions,
 ) ([]Document, bool) {
 	retained := cloneDocuments(docs)
-	if strings.TrimSpace(source.Metadata[retrieval.MetadataSourceUpdatedAt]) == "" {
-		return retained, false
-	}
 
 	sourceMetadata := sourceMetadataForSource(source)
 	if sourceMetadata.Path == "" {
@@ -1478,16 +1475,22 @@ func refreshRetainedDocumentFreshnessMetadata(
 	freshnessByChunkID := make(map[string]string, len(chunks))
 	for _, chunk := range chunks {
 		_, metadata := chunkDocumentPayload(source, sourceMetadata.Path, sourceMetadata, chunk)
-		if freshness := strings.TrimSpace(metadata[retrieval.MetadataSourceUpdatedAt]); freshness != "" {
-			freshnessByChunkID[chunk.ID] = freshness
-		}
+		freshnessByChunkID[chunk.ID] = strings.TrimSpace(metadata[retrieval.MetadataSourceUpdatedAt])
 	}
 
 	changed := false
 
 	for i := range retained {
-		freshness := freshnessByChunkID[retained[i].ID]
-		if freshness == "" || retained[i].Metadata[retrieval.MetadataSourceUpdatedAt] == freshness {
+		freshness, ok := freshnessByChunkID[retained[i].ID]
+		if !ok || strings.TrimSpace(retained[i].Metadata[retrieval.MetadataSourceUpdatedAt]) == freshness {
+			continue
+		}
+
+		if freshness == "" {
+			delete(retained[i].Metadata, retrieval.MetadataSourceUpdatedAt)
+
+			changed = true
+
 			continue
 		}
 

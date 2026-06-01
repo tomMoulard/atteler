@@ -343,6 +343,23 @@ func TestRefreshSourceIndex_UpdatesFreshnessMetadataWithoutRevectorizing(t *test
 	assert.Equal(t, secondSourceUpdatedAt.Format(time.RFC3339Nano),
 		second.Index.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
 	assert.Equal(t, time.Unix(20, 0).UTC(), second.Index.UpdatedAt)
+
+	delete(source.Metadata, retrieval.MetadataSourceUpdatedAt)
+	opts.Sources = []Source{source}
+	counting.calls = 0
+	now = time.Unix(30, 0).UTC()
+
+	third, err := RefreshSourceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, third.Index)
+	assert.True(t, third.Refreshed)
+	assert.Equal(t, 1, third.Updated)
+	assert.Equal(t, 0, third.Unchanged)
+	assert.Equal(t, 0, counting.calls, "freshness-only metadata removal should not re-vectorize unchanged text")
+	require.Len(t, third.Index.Documents, 1)
+	assert.Equal(t, time.Unix(10, 0).UTC(), third.Index.Documents[0].UpdatedAt)
+	assert.NotContains(t, third.Index.Documents[0].Metadata, retrieval.MetadataSourceUpdatedAt)
+	assert.Equal(t, time.Unix(30, 0).UTC(), third.Index.UpdatedAt)
 }
 
 func TestRefreshSourceIndex_InvalidatesRemovedMetadataAndChangedProvenance(t *testing.T) {
