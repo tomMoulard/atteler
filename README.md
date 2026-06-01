@@ -1218,7 +1218,12 @@ Vectorizer config can be scoped so local RAG stores do not all share one
 quality/cost tradeoff. Top-level vectorizer/provider/model/base-url,
 fallback, timeout, and chunk fields are defaults; optional
 `vector.stores.<name>`, `vector.agents.<name>`, and
-`vector.sources.<kind>` entries override them in that order. Persisted
+`vector.sources.<kind>` entries override them in that order. Supported store
+scopes are `agent-memory`, `vector-search`, and `workspace`; supported source
+scopes are `file`, `session`, `git_history`/`git-history`, and `adr`, while
+agent scopes are the configured agent names. `atteler config validate` reports
+malformed scopes, unknown store/source scope names, and unsupported
+vectorizer/provider/fallback values before an index refresh starts. Persisted
 `index_path` values are intentionally store/source-specific so agent memory,
 workspace files, sessions, git history, and ADRs do not accidentally share one
 JSON datastore; relative index paths resolve under the workspace root. The
