@@ -173,6 +173,45 @@ func TestRunAgentMemoryCommandAllowsDeleteWithRemoteEmbeddingConfigWithoutConsen
 	assert.Empty(t, loaded.Documents(testReviewerName))
 }
 
+func TestRunAgentMemoryCommandAllowsCompactWithRemoteEmbeddingConfigWithoutConsent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "remote-agent-memory.json")
+
+	vectorizer := staticAgentMemoryEmbeddingVectorizer{}
+	spec := vectorizer.Spec(2)
+	store, err := agentmemory.NewStoreWithVectorizer(spec, vectorizer)
+	require.NoError(t, err)
+	require.NoError(t, store.AddTextWithOptionsContext(
+		context.TODO(),
+		testReviewerName,
+		"expired-note",
+		"Semantic retrieval memory for local RAG",
+		agentmemory.WithExpiresAt(time.Unix(1, 0).UTC()),
+	))
+	require.NoError(t, store.Save(storePath))
+
+	cfg := appconfig.VectorConfig{
+		Stores: map[string]appconfig.VectorizerConfig{
+			agentMemoryVectorStore: {
+				Vectorizer: vector.VectorizerKindEmbedding,
+				BaseURL:    privateRemoteEmbeddingEndpoint(),
+				IndexPath:  storePath,
+			},
+		},
+	}
+
+	err = runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
+		agentMemoryCompact: true,
+	}))
+	require.NoError(t, err)
+
+	loaded, err := agentmemory.Load(storePath)
+	require.NoError(t, err)
+	assert.Empty(t, loaded.Documents(testReviewerName))
+}
+
 func TestBuildAgentMemoryRetrievalSearcherRejectsRemoteEmbeddingWithoutConsent(t *testing.T) {
 	t.Parallel()
 
@@ -3331,6 +3370,32 @@ func writeMemorySessionFixture(t *testing.T, store *session.Store, saved session
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(store.Dir(), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(store.Dir(), saved.ID+".json"), data, 0o600))
+}
+
+type staticAgentMemoryEmbeddingVectorizer struct{}
+
+func (staticAgentMemoryEmbeddingVectorizer) Vectorize(text string) (vector.Vector, error) {
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "semantic") || strings.Contains(lower, "retrieval") || strings.Contains(lower, "rag") {
+		return vector.Vector{1, 0}, nil
+	}
+
+	return vector.Vector{0, 1}, nil
+}
+
+func (staticAgentMemoryEmbeddingVectorizer) Spec(dimensions int) vector.VectorizerSpec {
+	if dimensions <= 0 {
+		dimensions = 2
+	}
+
+	return vector.VectorizerSpec{
+		ID:            "test-agent-memory-embedding",
+		Provider:      "test",
+		Model:         "agent-memory-test-embed",
+		Normalization: "test-normalization-v1",
+		Version:       "test-version-v1",
+		Dimensions:    dimensions,
+	}
 }
 
 func findMemoryDocumentByPath(store *memory.Store, path string) *memory.Document {
