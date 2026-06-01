@@ -681,6 +681,7 @@ func inspectVectorFields(path string, value *yaml.Node) []Diagnostic {
 	}
 
 	diagnostics := inspectNamedFields(path, "vector", value, knownVectorFields(), nil)
+	diagnostics = append(diagnostics, inspectVectorizerValueFields(path, "vector", value)...)
 	if stores := mappingValue(value, "stores"); stores != nil {
 		diagnostics = append(diagnostics, inspectVectorizerScopeEntries(path, "vector.stores", stores)...)
 	}
@@ -725,9 +726,82 @@ func inspectVectorizerScopeEntries(path, prefix string, value *yaml.Node) []Diag
 		}
 
 		diagnostics = append(diagnostics, inspectNamedFields(path, field, entry, knownVectorizerFields(), nil)...)
+		diagnostics = append(diagnostics, inspectVectorizerValueFields(path, field, entry)...)
 	})
 
 	return diagnostics
+}
+
+func inspectVectorizerValueFields(path, prefix string, value *yaml.Node) []Diagnostic {
+	var diagnostics []Diagnostic
+	if vectorizer := mappingValue(value, "vectorizer"); vectorizer != nil {
+		diagnostics = append(diagnostics, inspectVectorizerKindValue(path, prefix+".vectorizer", vectorizer)...)
+	}
+
+	if fallback := mappingValue(value, "fallback_policy"); fallback != nil {
+		diagnostics = append(diagnostics, inspectVectorFallbackPolicyValue(path, prefix+".fallback_policy", fallback)...)
+	}
+
+	return diagnostics
+}
+
+func inspectVectorizerKindValue(path, field string, value *yaml.Node) []Diagnostic {
+	normalized, diagnostics := normalizedVectorScalarValue(path, field, value, "vectorizer")
+	if len(diagnostics) > 0 || normalized == "" {
+		return diagnostics
+	}
+
+	switch normalized {
+	case "lexical", "lexical-fallback", "fallback", "text", "hashed", "hashed-token-frequency",
+		"embedding", "embed", "embeddings":
+		return nil
+	default:
+		return []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    field,
+			Message:  fmt.Sprintf("unsupported vectorizer %q (supported: lexical, embedding)", value.Value),
+		}}
+	}
+}
+
+func inspectVectorFallbackPolicyValue(path, field string, value *yaml.Node) []Diagnostic {
+	normalized, diagnostics := normalizedVectorScalarValue(path, field, value, "fallback_policy")
+	if len(diagnostics) > 0 || normalized == "" {
+		return diagnostics
+	}
+
+	switch normalized {
+	case "fail", "none", "lexical", "lexical-fallback", "fallback":
+		return nil
+	default:
+		return []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    field,
+			Message:  fmt.Sprintf("unsupported vector fallback policy %q (supported: fail, lexical)", value.Value),
+		}}
+	}
+}
+
+func normalizedVectorScalarValue(path, field string, value *yaml.Node, name string) (string, []Diagnostic) {
+	if value == nil {
+		return "", nil
+	}
+
+	if value.Kind != yaml.ScalarNode {
+		return "", []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    field,
+			Message:  name + " must be a string",
+		}}
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(value.Value))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+
+	return normalized, nil
 }
 
 func inspectAgents(path string, value *yaml.Node) []Diagnostic {

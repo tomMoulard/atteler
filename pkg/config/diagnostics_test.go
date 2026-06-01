@@ -191,6 +191,63 @@ vector: embedding
 	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "vector must be a mapping")
 }
 
+func TestInspectPathSources_ReportsUnsupportedVectorizerValues(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  vectorizer: semantic
+  fallback_policy: retry
+  stores:
+    agent-memory:
+      vectorizer: dense
+      fallback_policy: remote
+    vector-search:
+      vectorizer: lexical_fallback
+      fallback_policy: none
+  sources:
+    git_history:
+      vectorizer: embed
+      fallback_policy: lexical
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.vectorizer", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.fallback_policy", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agent-memory.vectorizer", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agent-memory.fallback_policy", "")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search.fallback_policy")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.fallback_policy")
+}
+
+func TestInspectPathSources_ReportsNonStringVectorizerValues(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  vectorizer: [embedding]
+  stores:
+    agent-memory:
+      fallback_policy: [lexical]
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "vectorizer must be a string")
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "fallback_policy must be a string")
+}
+
 func TestInspectPathSources_ReportsNonMappingConfig(t *testing.T) {
 	t.Parallel()
 
