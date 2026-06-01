@@ -1271,8 +1271,10 @@ after enabling an embedding vectorizer to re-embed an existing lexical
 per-agent store intentionally instead of silently mixing vector models. One
 persisted agent-memory JSON store is pinned to one vectorizer; give agents
 distinct `index_path` values when they intentionally use different embedding
-models or endpoints. Source kinds persisted by the vector index include `file`,
-`session`, `git_history`, and `adr`; source digests, source kind, vectorizer
+models or endpoints. Non-loopback agent-memory embedding endpoints also require
+`vector.workspace_allow_remote_embeddings: true`. Source kinds persisted by
+the vector index include `file`, `session`, `git_history`, and `adr`; source
+digests, source kind, vectorizer
 metadata, source `updated_at` timestamps, chunk settings,
 `created_at`/`updated_at`, provenance, and privacy-policy metadata are part
 of the reuse/invalidation contract. Vector
@@ -1307,7 +1309,7 @@ endpoints require `vector.workspace_allow_remote_embeddings: true`; with
 `vector.fallback_policy: lexical`, Atteler stays local and uses the lexical
 workspace index instead of uploading chunks without consent. The same remote
 embedding consent gate applies to explicit file, session, git-history, and ADR
-vector indexes.
+vector indexes, plus embedding-backed agent-memory stores.
 
 The local ANN layer still exact-scans small corpora by design. The default
 threshold is 64 documents (`vector.DefaultANNExactSearchMaxDocuments`); above

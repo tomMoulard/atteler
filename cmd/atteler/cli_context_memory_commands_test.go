@@ -114,6 +114,59 @@ func TestRunAgentMemoryCommandUsesScopedEmbeddingVectorizerConfig(t *testing.T) 
 	require.NoError(t, err)
 }
 
+func TestRunAgentMemoryCommandRejectsRemoteEmbeddingWithoutConsent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	note := filepath.Join(dir, "semantic.txt")
+	require.NoError(t, os.WriteFile(note, []byte("Semantic retrieval memory for local RAG"), 0o600))
+
+	storePath := filepath.Join(dir, "remote-agent-memory.json")
+	cfg := appconfig.VectorConfig{
+		Stores: map[string]appconfig.VectorizerConfig{
+			agentMemoryVectorStore: {
+				Vectorizer: vector.VectorizerKindEmbedding,
+				BaseURL:    privateRemoteEmbeddingEndpoint(),
+				IndexPath:  storePath,
+			},
+		},
+	}
+
+	err := runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
+		agentMemoryIndexFiles: stringListFlag{note},
+	}))
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "agent memory: remote embedding endpoint")
+	require.ErrorContains(t, err, "vector.workspace_allow_remote_embeddings")
+	assert.NoFileExists(t, storePath)
+}
+
+func TestBuildAgentMemoryRetrievalSearcherRejectsRemoteEmbeddingWithoutConsent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "remote-agent-memory.json")
+	cfg := appconfig.VectorConfig{
+		Stores: map[string]appconfig.VectorizerConfig{
+			agentMemoryVectorStore: {
+				Vectorizer: vector.VectorizerKindEmbedding,
+				BaseURL:    privateRemoteEmbeddingEndpoint(),
+				IndexPath:  storePath,
+			},
+		},
+	}
+
+	_, err := buildAgentMemoryRetrievalSearcher(context.TODO(), dir, testReviewerName, cfg, retrievalCommandInput{
+		Search: "semantic retrieval",
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "agent memory: remote embedding endpoint")
+	require.ErrorContains(t, err, "vector.workspace_allow_remote_embeddings")
+	assert.NoFileExists(t, storePath)
+}
+
 func TestRunAgentMemoryCommandMigratesLexicalStoreToScopedEmbeddingVectorizer(t *testing.T) {
 	t.Parallel()
 

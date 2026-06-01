@@ -598,6 +598,13 @@ func agentMemoryVectorizerRuntimeFromConfig(
 		return agentMemoryVectorizerRuntime{}, nil
 	}
 
+	if !workspaceRemoteEmbeddingAllowed(settings.BaseURL, cfg.WorkspaceAllowRemoteEmbeddings) {
+		return agentMemoryVectorizerRuntime{}, fmt.Errorf(
+			"agent memory: remote embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings",
+			workspaceDisplayEmbeddingEndpoint(settings.BaseURL),
+		)
+	}
+
 	vectorizer, spec, err := newAgentMemoryVectorizer(settings)
 	if err != nil {
 		return agentMemoryVectorizerRuntime{}, err
