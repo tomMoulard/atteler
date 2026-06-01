@@ -274,6 +274,52 @@ func TestBuildWorkspaceVectorReferenceContextFallsBackToLexicalWhenRemoteEmbeddi
 	assert.NoFileExists(t, indexPath)
 }
 
+func TestBuildWorkspaceVectorReferenceContextFallbackClearsStaleIndexesWhenWorkspaceEmpty(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "docs"), 0o750))
+	sourcePath := filepath.Join(root, "docs", "auth.md")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("OAuth callback stale workspace vector source."), 0o600))
+
+	indexPath := filepath.Join(root, ".atteler", "workspace-index.json")
+	vectorizer, err := vector.NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	for _, path := range []string{indexPath, lexicalFallbackIndexPath(indexPath)} {
+		refresh, refreshErr := vector.RefreshWorkspaceIndex(context.TODO(), vector.WorkspaceOptions{
+			Root:               root,
+			IndexPath:          path,
+			Vectorizer:         vectorizer,
+			VectorizerMetadata: vectorizer.Metadata(),
+			Chunk:              vector.ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
+			MaxFileBytes:       1024,
+		})
+		require.NoError(t, refreshErr)
+		require.NotNil(t, refresh.Index)
+	}
+
+	require.NoError(t, os.Remove(sourcePath))
+
+	enabled := true
+	refCtx, refresh, err := buildWorkspaceVectorReferenceContext(context.TODO(), root, appconfig.VectorConfig{
+		WorkspaceEnabled:      &enabled,
+		WorkspaceIndexPath:    indexPath,
+		Vectorizer:            vector.VectorizerKindEmbedding,
+		BaseURL:               privateRemoteEmbeddingEndpoint(),
+		FallbackPolicy:        vector.VectorizerKindLexical,
+		WorkspaceLimit:        1,
+		WorkspaceMaxFileBytes: 1024,
+	}, "OAuth callback")
+	require.Error(t, err)
+	require.ErrorIs(t, err, vector.ErrNoSources)
+
+	assert.Empty(t, refCtx.Content)
+	assert.True(t, refresh.Refreshed)
+	assert.NoFileExists(t, indexPath)
+	assert.NoFileExists(t, lexicalFallbackIndexPath(indexPath))
+}
+
 func TestRetrievalSearcherWorkspaceVectorFallsBackToLexicalWhenRemoteEmbeddingNeedsConsent(t *testing.T) {
 	t.Parallel()
 
