@@ -142,6 +142,37 @@ func TestRunAgentMemoryCommandRejectsRemoteEmbeddingWithoutConsent(t *testing.T)
 	assert.NoFileExists(t, storePath)
 }
 
+func TestRunAgentMemoryCommandAllowsDeleteWithRemoteEmbeddingConfigWithoutConsent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "remote-agent-memory.json")
+
+	store, err := agentmemory.NewStore(16)
+	require.NoError(t, err)
+	require.NoError(t, store.AddText(testReviewerName, "stale-note", "Semantic retrieval memory for local RAG"))
+	require.NoError(t, store.Save(storePath))
+
+	cfg := appconfig.VectorConfig{
+		Stores: map[string]appconfig.VectorizerConfig{
+			agentMemoryVectorStore: {
+				Vectorizer: vector.VectorizerKindEmbedding,
+				BaseURL:    privateRemoteEmbeddingEndpoint(),
+				IndexPath:  storePath,
+			},
+		},
+	}
+
+	err = runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
+		agentMemoryDelete: "stale-note",
+	}))
+	require.NoError(t, err)
+
+	loaded, err := agentmemory.Load(storePath)
+	require.NoError(t, err)
+	assert.Empty(t, loaded.Documents(testReviewerName))
+}
+
 func TestBuildAgentMemoryRetrievalSearcherRejectsRemoteEmbeddingWithoutConsent(t *testing.T) {
 	t.Parallel()
 

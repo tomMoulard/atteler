@@ -409,7 +409,7 @@ func runAgentMemoryCommand(
 
 	storePath := agentMemoryStorePath(root, agentName, input.StorePath, cfg)
 
-	runtime, err := agentMemoryVectorizerRuntimeFromConfig(cfg, agentName)
+	runtime, err := agentMemoryRuntimeForCommand(cfg, agentName, input)
 	if err != nil {
 		return err
 	}
@@ -460,10 +460,28 @@ func runAgentMemoryCommand(
 	return nil
 }
 
+func agentMemoryRuntimeForCommand(
+	cfg appconfig.VectorConfig,
+	agentName string,
+	input agentMemoryCommandInput,
+) (agentMemoryVectorizerRuntime, error) {
+	if !agentMemoryCommandNeedsVectorizer(input) {
+		return agentMemoryVectorizerRuntime{}, nil
+	}
+
+	return agentMemoryVectorizerRuntimeFromConfig(cfg, agentName)
+}
+
 func agentMemoryCommandNeedsAgent(input agentMemoryCommandInput) bool {
 	return strings.TrimSpace(input.Search) != "" ||
 		strings.TrimSpace(input.DeleteID) != "" ||
 		len(input.IndexFiles) > 0
+}
+
+func agentMemoryCommandNeedsVectorizer(input agentMemoryCommandInput) bool {
+	return strings.TrimSpace(input.Search) != "" ||
+		len(input.IndexFiles) > 0 ||
+		input.Migrate
 }
 
 func mutateAgentMemoryStore(
