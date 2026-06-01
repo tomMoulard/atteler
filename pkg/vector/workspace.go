@@ -451,9 +451,12 @@ func refreshExistingWorkspaceIndex(
 		return existing, false, nil
 	}
 
+	refreshedAt := workspaceNow(opts)
+
 	index := &Index{
 		Version:    IndexVersion,
 		CreatedAt:  existing.CreatedAt,
+		UpdatedAt:  refreshedAt,
 		Vectorizer: existing.Vectorizer.Normalize(),
 		Chunk:      opts.Chunk.Normalize(),
 		Dimensions: existing.Dimensions,
@@ -461,7 +464,7 @@ func refreshExistingWorkspaceIndex(
 		Documents:  retainedDocuments,
 	}
 	if index.CreatedAt.IsZero() {
-		index.CreatedAt = workspaceNow(opts)
+		index.CreatedAt = refreshedAt
 	}
 
 	if len(retainedDocuments) == 0 {

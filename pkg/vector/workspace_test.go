@@ -454,13 +454,14 @@ func TestRefreshWorkspaceIndex_PersistsAndIncrementallyUpdates(t *testing.T) {
 
 	counting := &countingVectorizer{inner: vectorizer}
 	indexPath := filepath.Join(root, ".atteler", "workspace-index.json")
+	now := time.Unix(10, 0).UTC()
 	opts := WorkspaceOptions{
 		Root:               root,
 		IndexPath:          indexPath,
 		Vectorizer:         counting,
 		VectorizerMetadata: vectorizer.Metadata(),
 		Chunk:              ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
-		Now:                func() time.Time { return time.Unix(10, 0) },
+		Now:                func() time.Time { return now },
 	}
 
 	first, err := RefreshWorkspaceIndex(context.TODO(), opts)
@@ -470,6 +471,8 @@ func TestRefreshWorkspaceIndex_PersistsAndIncrementallyUpdates(t *testing.T) {
 	assert.True(t, first.Refreshed)
 	assert.Equal(t, 2, first.Added)
 	assert.Equal(t, 2, counting.calls)
+	assert.Equal(t, time.Unix(10, 0).UTC(), first.Index.CreatedAt)
+	assert.Equal(t, time.Unix(10, 0).UTC(), first.Index.UpdatedAt)
 
 	loaded, err := LoadIndex(indexPath)
 	require.NoError(t, err)
@@ -481,6 +484,7 @@ func TestRefreshWorkspaceIndex_PersistsAndIncrementallyUpdates(t *testing.T) {
 	writeWorkspaceFile(t, root, "c.md", "gamma workspace retrieval")
 
 	counting.calls = 0
+	now = time.Unix(20, 0).UTC()
 	second, err := RefreshWorkspaceIndex(context.TODO(), opts)
 	require.NoError(t, err)
 
@@ -490,11 +494,15 @@ func TestRefreshWorkspaceIndex_PersistsAndIncrementallyUpdates(t *testing.T) {
 	assert.Equal(t, 1, second.Updated)
 	assert.Equal(t, 1, second.Deleted)
 	assert.Equal(t, 2, counting.calls, "only changed and added sources should be vectorized")
+	assert.Equal(t, time.Unix(10, 0).UTC(), second.Index.CreatedAt)
+	assert.Equal(t, time.Unix(20, 0).UTC(), second.Index.UpdatedAt)
 
 	loaded, err = LoadIndex(indexPath)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"a.md", "c.md"}, sourceMetadataPaths(loaded.Sources))
 	assert.ElementsMatch(t, []string{"a.md#chunk=0000", "c.md#chunk=0000"}, documentIDs(loaded.Documents))
+	assert.Equal(t, time.Unix(10, 0).UTC(), loaded.CreatedAt)
+	assert.Equal(t, time.Unix(20, 0).UTC(), loaded.UpdatedAt)
 
 	require.NoError(t, os.Remove(filepath.Join(root, "a.md")))
 	require.NoError(t, os.Remove(filepath.Join(root, "c.md")))

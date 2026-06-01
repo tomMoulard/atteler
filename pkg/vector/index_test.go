@@ -216,8 +216,9 @@ func TestRefreshSourceIndex_PersistsSessionAndGitHistoryIncrementally(t *testing
 		Vectorizer:         counting,
 		VectorizerMetadata: textVectorizer.Metadata(),
 		Chunk:              ChunkOptions{MaxRunes: 400, OverlapRunes: 40},
-		Now:                func() time.Time { return time.Unix(10, 0) },
 	}
+	now := time.Unix(10, 0).UTC()
+	opts.Now = func() time.Time { return now }
 
 	first, err := RefreshSourceIndex(context.TODO(), opts)
 	require.NoError(t, err)
@@ -227,8 +228,11 @@ func TestRefreshSourceIndex_PersistsSessionAndGitHistoryIncrementally(t *testing
 	assert.Equal(t, 2, first.Added)
 	assert.Equal(t, 2, counting.calls)
 	assert.ElementsMatch(t, []string{SourceKindSession, SourceKindGitHistory}, sourceMetadataKinds(first.Index.Sources))
+	assert.Equal(t, time.Unix(10, 0).UTC(), first.Index.CreatedAt)
+	assert.Equal(t, time.Unix(10, 0).UTC(), first.Index.UpdatedAt)
 
 	counting.calls = 0
+	now = time.Unix(20, 0).UTC()
 	opts.Sources = []Source{
 		{
 			Kind: SourceKindSession,
@@ -254,12 +258,28 @@ func TestRefreshSourceIndex_PersistsSessionAndGitHistoryIncrementally(t *testing
 	assert.Equal(t, 1, counting.calls, "incremental refresh should vectorize only the changed session source")
 	assert.ElementsMatch(t, []string{SourceKindSession}, sourceMetadataKinds(second.Index.Sources))
 	assert.NotContains(t, sourceMetadataPaths(second.Index.Sources), "git/abc123")
+	assert.Equal(t, time.Unix(10, 0).UTC(), second.Index.CreatedAt)
+	assert.Equal(t, time.Unix(20, 0).UTC(), second.Index.UpdatedAt)
+
+	counting.calls = 0
+	now = time.Unix(30, 0).UTC()
+
+	third, err := RefreshSourceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, third.Index)
+	assert.False(t, third.Refreshed)
+	assert.Equal(t, 1, third.Unchanged)
+	assert.Equal(t, 0, counting.calls)
+	assert.Equal(t, time.Unix(10, 0).UTC(), third.Index.CreatedAt)
+	assert.Equal(t, time.Unix(20, 0).UTC(), third.Index.UpdatedAt)
 
 	loaded, err := LoadIndex(indexPath)
 	require.NoError(t, err)
 	require.NoError(t, loaded.ValidateFor(textVectorizer.Metadata(), sourceMetadataForSources(opts.Sources), opts.Chunk))
 	assert.Contains(t, documentMetadataSourceKinds(loaded.Documents), SourceKindSession)
 	assert.NotContains(t, documentMetadataSourceKinds(loaded.Documents), SourceKindGitHistory)
+	assert.Equal(t, time.Unix(10, 0).UTC(), loaded.CreatedAt)
+	assert.Equal(t, time.Unix(20, 0).UTC(), loaded.UpdatedAt)
 }
 
 func TestRefreshSourceIndex_InvalidatesRemovedMetadataAndChangedProvenance(t *testing.T) {

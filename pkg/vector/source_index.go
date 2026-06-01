@@ -289,9 +289,12 @@ func refreshExistingSourceIndex(
 		return existing, false, nil
 	}
 
+	refreshedAt := sourceIndexNow(opts)
+
 	index := &Index{
 		Version:    IndexVersion,
 		CreatedAt:  existing.CreatedAt,
+		UpdatedAt:  refreshedAt,
 		Vectorizer: existing.Vectorizer.Normalize(),
 		Chunk:      opts.Chunk.Normalize(),
 		Dimensions: existing.Dimensions,
@@ -299,7 +302,7 @@ func refreshExistingSourceIndex(
 		Documents:  plan.retainedDocuments,
 	}
 	if index.CreatedAt.IsZero() {
-		index.CreatedAt = sourceIndexNow(opts)
+		index.CreatedAt = refreshedAt
 	}
 
 	if len(plan.retainedDocuments) == 0 {

@@ -428,6 +428,7 @@ type SourceMetadata struct {
 type Index struct {
 	Vectorizer VectorizerMetadata `json:"vectorizer"`
 	CreatedAt  time.Time          `json:"created_at"`
+	UpdatedAt  time.Time          `json:"updated_at,omitzero"`
 	Sources    []SourceMetadata   `json:"sources"`
 	Documents  []Document         `json:"documents"`
 	Chunk      ChunkOptions       `json:"chunk"`
@@ -570,6 +571,8 @@ func BuildIndex(
 		createdAt = time.Now().UTC()
 	}
 
+	createdAt = createdAt.UTC()
+
 	metadata = normalizeVectorizerMetadataForIndex(vectorizer, metadata)
 	if metadata.Kind == "" {
 		return nil, fmt.Errorf("%w: vectorizer metadata is required", ErrMetadataMismatch)
@@ -577,7 +580,8 @@ func BuildIndex(
 
 	idx := &Index{
 		Version:    IndexVersion,
-		CreatedAt:  createdAt.UTC(),
+		CreatedAt:  createdAt,
+		UpdatedAt:  createdAt,
 		Vectorizer: metadata,
 		Chunk:      chunkOptions.Normalize(),
 		Sources:    make([]SourceMetadata, 0, len(sources)),
@@ -676,6 +680,8 @@ func (idx *Index) validate(opts indexValidationOptions) error {
 	if idx.Version != IndexVersion {
 		return fmt.Errorf("unsupported vector index version %d", idx.Version)
 	}
+
+	idx.normalizeTimestamps()
 
 	if idx.Dimensions <= 0 {
 		return ErrInvalidDimensions
@@ -884,6 +890,24 @@ func (idx *Index) validateVectorizerMetadata() error {
 	}
 
 	return nil
+}
+
+func (idx *Index) normalizeTimestamps() {
+	if idx.CreatedAt.IsZero() && !idx.UpdatedAt.IsZero() {
+		idx.CreatedAt = idx.UpdatedAt
+	}
+
+	if idx.UpdatedAt.IsZero() && !idx.CreatedAt.IsZero() {
+		idx.UpdatedAt = idx.CreatedAt
+	}
+
+	if !idx.CreatedAt.IsZero() {
+		idx.CreatedAt = idx.CreatedAt.UTC()
+	}
+
+	if !idx.UpdatedAt.IsZero() {
+		idx.UpdatedAt = idx.UpdatedAt.UTC()
+	}
 }
 
 // ValidateFor checks whether idx can be reused for expected metadata and the
