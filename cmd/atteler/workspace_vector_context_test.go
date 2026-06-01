@@ -165,6 +165,19 @@ func TestWorkspaceVectorSettings_UsesScopedVectorizerConfig(t *testing.T) {
 	assert.EqualValues(t, 4096, opts.MaxFileBytes)
 }
 
+func TestWorkspaceVectorSettingsIgnoresGlobalIndexPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	settings, opts, err := workspaceVectorSettings(root, appconfig.VectorConfig{
+		IndexPath: "./shared-vector-index.json",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, vector.DefaultWorkspaceIndexPath, settings.IndexPath)
+	assert.Equal(t, vector.DefaultWorkspaceIndexPath, opts.IndexPath)
+}
+
 func TestFormatWorkspaceVectorReferenceContextEscapesChunkText(t *testing.T) {
 	t.Parallel()
 
