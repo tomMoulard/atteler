@@ -539,6 +539,36 @@ func TestSelectedRetrievalSourcesAllIncludesExplicitVectorStorePath(t *testing.T
 	assert.Contains(t, sources, retrieval.SourceVector)
 }
 
+func TestSelectedRetrievalSourcesDefaultIncludesExplicitVectorStorePath(t *testing.T) {
+	t.Parallel()
+
+	sources, err := selectedRetrievalSources(retrievalCommandInput{
+		Vector: retrievalVectorCommandInput{StorePath: "workspace-index.json"},
+	}, false)
+	require.NoError(t, err)
+
+	assert.Contains(t, sources, retrieval.SourceVector)
+}
+
+func TestSelectedRetrievalSourcesForStateAllIncludesReusableDefaultFileIndex(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	indexPath := filepath.Join(root, ".atteler", "vector-index.json")
+	writeSourceVectorIndex(t, indexPath, []vector.Source{{
+		Kind: vector.SourceKindFile,
+		Path: filepath.Join(root, "docs", "auth.md"),
+		Text: "OAuth token rotation notes for reusable all-source retrieval.",
+	}})
+
+	sources, err := selectedRetrievalSourcesForState(appState{cwd: root}, retrievalCommandInput{
+		Sources: []string{retrievalSourceAll},
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, sources, retrieval.SourceVector)
+}
+
 func TestSelectedRetrievalSourcesDefaultOmitsWorkspaceVectorWhenEnabled(t *testing.T) {
 	t.Parallel()
 

@@ -1241,7 +1241,8 @@ workspace vectors enabled, pass a vector store path to disambiguate a file
 index from workspace-vector retrieval. It also honors the vector runtime flags
 documented by generated help when file inputs are supplied, so ad-hoc file RAG
 does not silently fall back to lexical after an embedding-backed store is
-configured.
+configured. All-source retrieval includes that default file-vector store when
+it already exists and workspace vectors are disabled.
 
 ```yaml
 vector:

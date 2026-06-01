@@ -850,7 +850,7 @@ func runRetrievalCommand(ctx context.Context, state appState, input retrievalCom
 		limit = 5
 	}
 
-	sources, err := selectedRetrievalSources(input, workspaceVectorEnabled(state.vectorConfig))
+	sources, err := selectedRetrievalSourcesForState(state, input)
 	if err != nil {
 		return err
 	}
@@ -914,9 +914,14 @@ func retrievalFilters(rawFilters []string) (map[string]string, error) {
 	return filters, nil
 }
 
-func selectedRetrievalSources(input retrievalCommandInput, includeWorkspaceVector bool) ([]retrieval.SourceType, error) {
+func selectedRetrievalSources(input retrievalCommandInput, includeVectorSource bool) ([]retrieval.SourceType, error) {
 	if len(input.Sources) == 0 {
-		return []retrieval.SourceType{retrieval.SourceMemory, retrieval.SourceFile, retrieval.SourceSession}, nil
+		sources := []retrieval.SourceType{retrieval.SourceMemory, retrieval.SourceFile, retrieval.SourceSession}
+		if retrievalExplicitFileVectorIndexRequested(input) {
+			sources = append(sources, retrieval.SourceVector)
+		}
+
+		return sources, nil
 	}
 
 	seen := make(map[retrieval.SourceType]struct{}, len(input.Sources))
@@ -929,7 +934,7 @@ func selectedRetrievalSources(input retrievalCommandInput, includeWorkspaceVecto
 		}
 
 		if all {
-			return allRetrievalSources(input, includeWorkspaceVector), nil
+			return allRetrievalSources(input, includeVectorSource), nil
 		}
 
 		if _, ok := seen[source]; ok {
@@ -941,6 +946,44 @@ func selectedRetrievalSources(input retrievalCommandInput, includeWorkspaceVecto
 	}
 
 	return out, nil
+}
+
+func selectedRetrievalSourcesForState(state appState, input retrievalCommandInput) ([]retrieval.SourceType, error) {
+	includeVector := workspaceVectorEnabled(state.vectorConfig) ||
+		retrievalReusableFileVectorIndexExists(state.cwd, state.vectorConfig, input)
+
+	return selectedRetrievalSources(input, includeVector)
+}
+
+func retrievalReusableFileVectorIndexExists(root string, cfg appconfig.VectorConfig, input retrievalCommandInput) bool {
+	if retrievalExplicitFileVectorIndexRequested(input) {
+		return true
+	}
+
+	if !retrievalSourceAllRequested(input.Sources) {
+		return false
+	}
+
+	indexPath := retrievalDefaultFileVectorIndexPath(root, cfg)
+	if strings.TrimSpace(indexPath) == "" {
+		return false
+	}
+
+	_, err := os.Stat(indexPath)
+
+	return err == nil || !errors.Is(err, os.ErrNotExist)
+}
+
+func retrievalDefaultFileVectorIndexPath(root string, cfg appconfig.VectorConfig) string {
+	resolved := cfg.ResolveVectorizerConfig(appconfig.VectorScope{
+		Store:  vectorSearchVectorStore,
+		Source: vector.SourceKindFile,
+	})
+	if strings.TrimSpace(resolved.IndexPath) != "" {
+		return rootRelativePath(root, resolved.IndexPath)
+	}
+
+	return filepath.Join(root, ".atteler", "vector-index.json")
 }
 
 func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {
@@ -966,7 +1009,7 @@ func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {
 	}
 }
 
-func allRetrievalSources(input retrievalCommandInput, includeWorkspaceVector bool) []retrieval.SourceType {
+func allRetrievalSources(input retrievalCommandInput, includeVectorSource bool) []retrieval.SourceType {
 	sources := []retrieval.SourceType{
 		retrieval.SourceMemory,
 		retrieval.SourceFile,
@@ -974,7 +1017,7 @@ func allRetrievalSources(input retrievalCommandInput, includeWorkspaceVector boo
 		retrieval.SourceGitHistory,
 		retrieval.SourceADR,
 	}
-	if retrievalExplicitFileVectorIndexRequested(input) || includeWorkspaceVector {
+	if retrievalExplicitFileVectorIndexRequested(input) || includeVectorSource {
 		sources = append(sources, retrieval.SourceVector)
 	}
 
