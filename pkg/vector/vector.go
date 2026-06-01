@@ -1681,6 +1681,11 @@ func (s Searcher) retrievalResult(result Result, query retrieval.Query) retrieva
 		scorer.Explanation = []string{"ranked by cosine similarity between query vector and document vector"}
 	}
 
+	freshness := retrieval.FreshnessFromMetadata(metadata)
+	if !doc.UpdatedAt.IsZero() {
+		freshness.IndexedAt = doc.UpdatedAt.UTC()
+	}
+
 	return retrieval.NormalizeResult(retrieval.Result{
 		Source:     source,
 		DocumentID: doc.ID,
@@ -1689,7 +1694,7 @@ func (s Searcher) retrievalResult(result Result, query retrieval.Query) retrieva
 		Scorer:     scorer,
 		Snippet:    retrieval.Snippet(chunk.Text, 160),
 		Metadata:   metadata,
-		Freshness:  retrieval.FreshnessFromMetadata(metadata),
+		Freshness:  freshness,
 		Safety:     safety,
 	})
 }

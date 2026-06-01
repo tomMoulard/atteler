@@ -1178,11 +1178,12 @@ session output.
 
 `atteler memory retrieve` prints the shared retrieval contract fields agents
 should cite before injecting context: `source`, `document`, `stable_id`,
-`chunk`, `range`, `scorer`, `inject_allowed`, freshness flags, and an optional
-`why` ranking explanation. With `--retrieval-explain`, numeric scorer details
-are also rendered as stable `detail_<name>=...` fields (for example
-`detail_ann_documents=65`) so agents can audit ranking mode without parsing
-the JSON internals.
+`chunk`, `range`, `scorer`, `inject_allowed`, freshness flags including
+`source_updated_at`/`indexed_at` when known, and an optional `why` ranking
+explanation. With `--retrieval-explain`, numeric scorer details are also
+rendered as stable `detail_<name>=...` fields (for example
+`detail_ann_documents=65`) so agents can audit ranking mode without parsing the
+JSON internals.
 
 Memory and vector stores persist schema, source-hash, provenance, redaction
 policy version, timestamps, TTL, and embedding/vectorizer metadata where

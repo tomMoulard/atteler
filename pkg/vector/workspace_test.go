@@ -479,6 +479,12 @@ func TestRefreshWorkspaceIndex_PersistsAndIncrementallyUpdates(t *testing.T) {
 	require.Len(t, loaded.Sources, 2)
 	require.Len(t, loaded.Documents, 2)
 
+	for i := range loaded.Documents {
+		assert.Equal(t, time.Unix(10, 0).UTC(), loaded.Documents[i].CreatedAt)
+		assert.Equal(t, time.Unix(10, 0).UTC(), loaded.Documents[i].UpdatedAt)
+		assert.NotEmpty(t, loaded.Documents[i].Metadata[retrieval.MetadataSourceUpdatedAt])
+	}
+
 	writeWorkspaceFile(t, root, "a.md", "alpha changed workspace retrieval")
 	require.NoError(t, os.Remove(filepath.Join(root, "b.md")))
 	writeWorkspaceFile(t, root, "c.md", "gamma workspace retrieval")

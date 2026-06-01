@@ -274,6 +274,7 @@ func TestIndexSearcher_SearchRetrievalReportsFileFreshness(t *testing.T) {
 	assert.Equal(t, "current", results[0].Freshness.Status)
 	assert.False(t, results[0].Freshness.Deleted)
 	assert.Equal(t, recordedSourceUpdatedAt, results[0].Freshness.SourceUpdatedAt)
+	assert.Equal(t, idx.UpdatedAt, results[0].Freshness.IndexedAt)
 
 	updatedModTime := recordedSourceUpdatedAt.Add(time.Hour)
 	require.NoError(t, os.Chtimes(sourcePath, updatedModTime, updatedModTime))

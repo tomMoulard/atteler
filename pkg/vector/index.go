@@ -1068,6 +1068,7 @@ func (idx *Index) addSource(ctx context.Context, source Source, vectorizer Vecto
 			return fmt.Errorf("%w: chunk %s has %d, want %d", ErrDimensionMismatch, chunk.ID, len(vec), idx.Dimensions)
 		}
 
+		indexedAt := idxDocumentTimestamp(idx)
 		idx.Documents = append(idx.Documents, Document{
 			ID:         chunk.ID,
 			Text:       text,
@@ -1076,10 +1077,28 @@ func (idx *Index) addSource(ctx context.Context, source Source, vectorizer Vecto
 			Vectorizer: documentVectorizerSpec(vectorizer, len(vec)),
 			Metadata:   metadata,
 			Provenance: sourceProvenance(source, sourceKind, documentPath),
+			CreatedAt:  indexedAt,
+			UpdatedAt:  indexedAt,
 		})
 	}
 
 	return nil
+}
+
+func idxDocumentTimestamp(idx *Index) time.Time {
+	if idx == nil {
+		return time.Time{}
+	}
+
+	if !idx.UpdatedAt.IsZero() {
+		return idx.UpdatedAt.UTC()
+	}
+
+	if !idx.CreatedAt.IsZero() {
+		return idx.CreatedAt.UTC()
+	}
+
+	return time.Time{}
 }
 
 func chunkDocumentPayload(source Source, documentPath string, sourceMetadata SourceMetadata, chunk Chunk) (text string, metadata map[string]string) {

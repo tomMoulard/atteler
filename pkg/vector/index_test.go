@@ -156,6 +156,11 @@ func TestIndex_PersistsLocalRAGSourcesWithInvalidationMetadata(t *testing.T) {
 	assert.Contains(t, documentProvenanceTypes(loaded.Documents), SourceKindGitHistory)
 	assert.Contains(t, documentProvenanceTypes(loaded.Documents), SourceKindADR)
 
+	for i := range loaded.Documents {
+		assert.Equal(t, time.Unix(5, 0).UTC(), loaded.Documents[i].CreatedAt)
+		assert.Equal(t, time.Unix(5, 0).UTC(), loaded.Documents[i].UpdatedAt)
+	}
+
 	current := sourceMetadataForSources(sources)
 	require.NoError(t, loaded.ValidateFor(vectorizer.Metadata(), current, ChunkOptions{MaxRunes: 400, OverlapRunes: 40}))
 

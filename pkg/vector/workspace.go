@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tommoulard/atteler/pkg/privacy"
+	"github.com/tommoulard/atteler/pkg/retrieval"
 )
 
 const (
@@ -835,7 +836,12 @@ func (w *workspaceWalker) sourceFromFile(abs, rel string, entry fs.DirEntry) (So
 		return Source{}, false
 	}
 
-	return Source{Path: rel, Text: text}, true
+	metadata := make(map[string]string, 1)
+	if updatedAt := info.ModTime().UTC(); !updatedAt.IsZero() {
+		metadata[retrieval.MetadataSourceUpdatedAt] = updatedAt.Format(time.RFC3339Nano)
+	}
+
+	return Source{Path: rel, Text: text, Metadata: metadata}, true
 }
 
 func readWorkspaceFileWithinLimit(path string, maxBytes int64) (data []byte, tooLarge bool, err error) {
@@ -1393,13 +1399,23 @@ func workspaceDocumentMatchesChunk(doc Document, source Source, sourceMetadata S
 		return false
 	}
 
-	if !maps.Equal(doc.Metadata, expectedMetadata) {
+	if !workspaceDocumentMetadataMatches(doc.Metadata, expectedMetadata) {
 		return false
 	}
 
 	expectedProvenance := sourceProvenance(source, normalizeSourceKind(source.Kind), sourceMetadata.Path)
 
 	return maps.Equal(doc.Provenance, expectedProvenance)
+}
+
+func workspaceDocumentMetadataMatches(actual, expected map[string]string) bool {
+	actual = maps.Clone(actual)
+	expected = maps.Clone(expected)
+
+	delete(actual, retrieval.MetadataSourceUpdatedAt)
+	delete(expected, retrieval.MetadataSourceUpdatedAt)
+
+	return maps.Equal(actual, expected)
 }
 
 func hasNUL(data []byte) bool {
