@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -952,6 +953,66 @@ func TestRetrievalSearcherUsesGlobalLexicalVectorizerForSessionIndex(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
 	assert.ElementsMatch(t, []string{vector.SourceKindSession}, sourceMetadataKinds(loaded.Sources))
+}
+
+func TestRetrievalSearcherUsesGlobalLexicalVectorizerForGitHistoryIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	initGitHistoryRetrievalRepo(t, dir)
+
+	searcher, err := retrievalSearcher(context.TODO(), appState{
+		cwd:          dir,
+		vectorConfig: appconfig.VectorConfig{Vectorizer: vector.VectorizerKindLexical},
+	}, retrievalCommandInput{}, retrieval.SourceGitHistory)
+	require.NoError(t, err)
+	require.NotNil(t, searcher)
+
+	results, err := retrieval.Search(context.TODO(), retrieval.Query{
+		Text:          "semantic retrieval",
+		Limit:         1,
+		IncludeUnsafe: true,
+	}, searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, retrieval.SourceGitHistory, results[0].Source.Type)
+	assert.Equal(t, "lexical-git-history-ann", results[0].Scorer.Name)
+
+	indexPath := filepath.Join(dir, sourceVectorGitHistoryIndex)
+	loaded, err := vector.LoadIndex(indexPath)
+	require.NoError(t, err)
+	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
+	assert.ElementsMatch(t, []string{vector.SourceKindGitHistory}, sourceMetadataKinds(loaded.Sources))
+}
+
+func initGitHistoryRetrievalRepo(t *testing.T, dir string) {
+	t.Helper()
+
+	runGitHistoryRetrievalRepoCommand(t, dir, "init")
+	runGitHistoryRetrievalRepoCommand(t, dir, "config", "user.name", "Atteler Test")
+	runGitHistoryRetrievalRepoCommand(t, dir, "config", "user.email", "atteler@example.com")
+	runGitHistoryRetrievalRepoCommand(t, dir, "config", "commit.gpgsign", "false")
+
+	path := filepath.Join(dir, "docs", "retrieval.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	require.NoError(t, os.WriteFile(path, []byte("Semantic retrieval git history for local RAG."), 0o600))
+
+	runGitHistoryRetrievalRepoCommand(t, dir, "add", "docs/retrieval.md")
+	runGitHistoryRetrievalRepoCommand(t, dir, "commit", "-m", "Semantic git history for local RAG")
+}
+
+func runGitHistoryRetrievalRepoCommand(t *testing.T, dir string, args ...string) {
+	t.Helper()
+
+	cmdArgs := append([]string{"-C", dir}, args...)
+	cmd := exec.CommandContext(t.Context(), "git", cmdArgs...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
+		"GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
+	)
+
+	output, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "git %s: %s", strings.Join(cmdArgs, " "), string(output))
 }
 
 func TestBuildSessionVectorRetrievalSearcherFallbackPersistsLexicalIndex(t *testing.T) {
