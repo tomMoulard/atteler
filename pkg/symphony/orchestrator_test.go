@@ -27,6 +27,20 @@ func (noopTracker) FetchIssueStatesByIDs(context.Context, []string) ([]Issue, er
 	return nil, nil
 }
 
+type candidateTracker struct {
+	noopTracker
+	issues []Issue
+	err    error
+}
+
+func (t candidateTracker) FetchCandidateIssues(context.Context) ([]Issue, error) {
+	if t.err != nil {
+		return nil, t.err
+	}
+
+	return t.issues, nil
+}
+
 type checkTracker struct {
 	noopTracker
 	checks PullRequestCheckSnapshot
@@ -130,6 +144,53 @@ func TestHandleWorkerExit_PublishedPRSchedulesMonitorAndReleasesClaim(t *testing
 	assert.False(t, monitor.NextCheckAt.IsZero())
 	require.NotNil(t, monitor.Timer)
 	monitor.Timer.Stop()
+}
+
+func TestHandleRetryDue_PreservesAttemptWhenNoSlotsAvailable(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	cfg := Config{
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 1,
+			MaxRetryBackoff:     time.Hour,
+		},
+		Tracker: TrackerConfig{
+			ActiveStates: []string{"OPEN"},
+		},
+	}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker: candidateTracker{issues: []Issue{issue}},
+		logger:  slog.Default(),
+		events:  make(chan orchestratorEvent, 4),
+		state: runtimeState{
+			Running: map[string]*runningEntry{
+				"other-issue": {
+					Issue: Issue{ID: "other-issue", Identifier: "GH-3", Title: "Busy", State: "OPEN"},
+					State: "OPEN",
+				},
+			},
+			Claimed:       map[string]struct{}{issue.ID: {}},
+			RetryAttempts: map[string]*RetryEntry{issue.ID: {IssueID: issue.ID, Identifier: issue.Identifier, Attempt: 42}},
+			PullRequests:  map[int]*pullRequestMonitorEntry{},
+			Completed:     map[string]struct{}{},
+			StartedAt:     time.Now(),
+		},
+	}
+
+	orchestrator.handleRetryDue(t.Context(), issue.ID)
+
+	retry := orchestrator.state.RetryAttempts[issue.ID]
+	require.NotNil(t, retry)
+	assert.Equal(t, 42, retry.Attempt)
+	assert.Equal(t, "no available orchestrator slots", retry.Error)
+	assert.Contains(t, orchestrator.state.Claimed, issue.ID)
+	require.NotNil(t, retry.Timer)
+	retry.Timer.Stop()
 }
 
 func TestHandleCodexUpdateRecordsCommandOutputMetadata(t *testing.T) {

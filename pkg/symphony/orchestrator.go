@@ -895,10 +895,10 @@ func (o *Orchestrator) handleRetryDue(ctx context.Context, issueID string) {
 	delete(o.state.Claimed, issueID)
 	if !o.canDispatch(*found, snapshot.Config) {
 		o.state.Claimed[issueID] = struct{}{}
-		o.scheduleRetry(issueID, found.Identifier, retry.Attempt+1, "no available orchestrator slots", snapshot.Config.Agent.MaxRetryBackoff)
+		o.scheduleRetry(issueID, found.Identifier, retry.Attempt, "no available orchestrator slots", snapshot.Config.Agent.MaxRetryBackoff)
 		o.recordIssueEvent(
 			"retry_deferred", *found, "retry deferred; no available orchestrator slots",
-			"attempt", retry.Attempt+1,
+			"attempt", retry.Attempt,
 		)
 		return
 	}
