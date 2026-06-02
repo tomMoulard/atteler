@@ -640,7 +640,9 @@ func TestProviderProtocolRequestUnsupportedParams(t *testing.T) {
 
 				_, err := adapter.build(paramsWithOnlyFieldSet(t, field))
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), field)
+				assert.Contains(t, err.Error(), providerName)
+				assert.Contains(t, err.Error(), "CompleteParams."+field+" is unsupported")
+				assert.Contains(t, err.Error(), support.Note)
 			})
 		}
 	}
