@@ -45,8 +45,11 @@ nfpms:
     homepage: https://github.com/tomMoulard/atteler
     maintainer: Tom Moulard <tommoulard@users.noreply.github.com>
     description: Terminal LLM harness and Bubble Tea TUI for multi-provider chat and agent orchestration experiments.
-    license: UNLICENSED
+    license: MIT
     bindir: /usr/bin
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/atteler/LICENSE
     formats:
       - apk
       - deb
