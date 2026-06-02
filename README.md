@@ -651,14 +651,17 @@ Each live test also requires the provider-specific credential below. If the
 credential is missing, the test calls `t.Skip` with the missing credential or
 login path instead of failing; if the credential is present, the test may make a
 billable provider request.
+With `ATTELER_E2E_LIVE` unset or set to any value other than `1`, every live
+test skips with:
+`set ATTELER_E2E_LIVE=1 to run live LLM e2e tests`.
 
-| Test | Required credential | Optional model override | Default model |
-| --- | --- | --- | --- |
-| `TestLiveOpenAIOneShot` | `OPENAI_API_KEY` | `ATTELER_E2E_OPENAI_MODEL` | `gpt-4.1-mini` |
-| `TestLiveAnthropicOneShot` | `ANTHROPIC_API_KEY` | `ATTELER_E2E_ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` |
-| `TestLiveForgeClaudeOneShot` | `ATTELER_E2E_FORGE_CONFIG` pointing at a ForgeCode config directory containing `.credentials.json` | `ATTELER_E2E_FORGE_ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` |
-| `TestLiveClaudeCodeOneShot` | Claude Code login in macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json` | `ATTELER_E2E_CLAUDE_CODE_MODEL` | `claude-haiku-4-5-20251001` |
-| `TestLiveCodexOneShot` | Codex `auth.json` in `ATTELER_E2E_CODEX_HOME` or, when unset, `$HOME/.codex/auth.json` | `ATTELER_E2E_CODEX_MODEL` | `gpt-5.5` |
+| Test | Required credential | Expected skip when missing | Optional model override | Default model |
+| --- | --- | --- | --- | --- |
+| `TestLiveOpenAIOneShot` | `OPENAI_API_KEY` | `OPENAI_API_KEY is required for this live e2e test` | `ATTELER_E2E_OPENAI_MODEL` | `gpt-4.1-mini` |
+| `TestLiveAnthropicOneShot` | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY is required for this live e2e test` | `ATTELER_E2E_ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` |
+| `TestLiveForgeClaudeOneShot` | `ATTELER_E2E_FORGE_CONFIG` pointing at a ForgeCode config directory containing `.credentials.json` | `ATTELER_E2E_FORGE_CONFIG is required for this live ForgeCode test`, or `ForgeCode credentials not available in <dir>` | `ATTELER_E2E_FORGE_ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` |
+| `TestLiveClaudeCodeOneShot` | Claude Code login in macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json` | `Claude Code login is required for this live test` | `ATTELER_E2E_CLAUDE_CODE_MODEL` | `claude-haiku-4-5-20251001` |
+| `TestLiveCodexOneShot` | Codex `auth.json` in `ATTELER_E2E_CODEX_HOME` or, when unset, `$HOME/.codex/auth.json` | `Codex credentials not available in <dir>` | `ATTELER_E2E_CODEX_MODEL` | `gpt-5.5` |
 
 ### Lifecycle hook privacy
 

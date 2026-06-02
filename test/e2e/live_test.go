@@ -228,13 +228,18 @@ func TestLiveProviderDocsMatchLiveTestConfiguration(t *testing.T) {
 
 	docs := string(readme)
 	for _, expected := range []string{
-		"`TestLiveOpenAIOneShot` | `OPENAI_API_KEY` | `ATTELER_E2E_OPENAI_MODEL` | `" + liveOpenAIDefaultModel + "`",
-		"`TestLiveAnthropicOneShot` | `ANTHROPIC_API_KEY` | `ATTELER_E2E_ANTHROPIC_MODEL` | `" + liveAnthropicDefaultModel + "`",
+		"set ATTELER_E2E_LIVE=1 to run live LLM e2e tests",
+		"`TestLiveOpenAIOneShot` | `OPENAI_API_KEY` | `OPENAI_API_KEY is required for this live e2e test` | `ATTELER_E2E_OPENAI_MODEL` | `" + liveOpenAIDefaultModel + "`",
+		"`TestLiveAnthropicOneShot` | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY is required for this live e2e test` | `ATTELER_E2E_ANTHROPIC_MODEL` | `" + liveAnthropicDefaultModel + "`",
 		"`TestLiveForgeClaudeOneShot` | `ATTELER_E2E_FORGE_CONFIG`",
+		"`ATTELER_E2E_FORGE_CONFIG is required for this live ForgeCode test`",
+		"`ForgeCode credentials not available in <dir>`",
 		"`ATTELER_E2E_FORGE_ANTHROPIC_MODEL` | `" + liveForgeAnthropicDefaultModel + "`",
 		"`TestLiveClaudeCodeOneShot` | Claude Code login",
+		"`Claude Code login is required for this live test`",
 		"`ATTELER_E2E_CLAUDE_CODE_MODEL` | `" + liveClaudeCodeDefaultModel + "`",
 		"`TestLiveCodexOneShot` | Codex `auth.json`",
+		"`Codex credentials not available in <dir>`",
 		"`ATTELER_E2E_CODEX_MODEL` | `" + liveCodexDefaultModel + "`",
 	} {
 		assertContains(t, docs, expected)
