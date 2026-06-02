@@ -39,6 +39,24 @@ func TestProviderCompatibilityMatrix_CoversKnownProvidersAndDimensions(t *testin
 	assert.ElementsMatch(t, knownNames, rowNames)
 }
 
+func TestProviderCompatibilityFor_NormalizesLookupAndReturnsIndependentRows(t *testing.T) {
+	t.Parallel()
+
+	row, ok := ProviderCompatibilityFor(" OpenAI ")
+	require.True(t, ok)
+	assert.Equal(t, providerOpenAI, row.Provider)
+	require.NotEmpty(t, row.Models)
+
+	row.Models[0].Model = "mutated-by-caller"
+
+	again, ok := ProviderCompatibilityFor(providerOpenAI)
+	require.True(t, ok)
+	assert.NotEqual(t, "mutated-by-caller", again.Models[0].Model)
+
+	_, ok = ProviderCompatibilityFor("cohere")
+	assert.False(t, ok)
+}
+
 func TestProviderCompatibilityMatrix_UsesRequiredDimensions(t *testing.T) {
 	t.Parallel()
 
