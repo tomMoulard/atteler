@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,44 @@ func TestProviderCompatibilityFor_NormalizesLookupAndReturnsIndependentRows(t *t
 
 	_, ok = ProviderCompatibilityFor("cohere")
 	assert.False(t, ok)
+}
+
+func TestProviderCompatibilityMatrix_JSONSchemaContainsRequiredFields(t *testing.T) {
+	t.Parallel()
+
+	rows := ProviderCompatibilityMatrix()
+	body, err := json.Marshal(rows)
+	require.NoError(t, err)
+
+	var decoded []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &decoded))
+	require.Len(t, decoded, len(rows))
+
+	requiredFields := append([]string{"provider", "models"}, providerCompatibilityDimensionNames()...)
+	for i, row := range decoded {
+		for _, field := range requiredFields {
+			require.Containsf(t, row, field, "row %d should include JSON field %s", i, field)
+		}
+
+		for _, dimension := range ProviderCompatibilityDimensions() {
+			var cell ProviderCompatibilityCell
+			require.NoErrorf(t, json.Unmarshal(row[string(dimension)], &cell), "row %d %s", i, dimension)
+			assert.NotEmpty(t, cell.Status, "row %d %s status", i, dimension)
+			assert.NotEmpty(t, cell.Detail, "row %d %s detail", i, dimension)
+		}
+
+		var models []ProviderModelCompatibility
+		require.NoError(t, json.Unmarshal(row["models"], &models))
+		require.NotEmpty(t, models)
+
+		for _, model := range models {
+			assert.NotEmpty(t, model.Provider)
+			assert.NotEmpty(t, model.Model)
+			assert.Positive(t, model.ContextWindow)
+			assert.NotEmpty(t, model.ContextWindowSource)
+			assert.NotEmpty(t, model.Provenance)
+		}
+	}
 }
 
 func TestProviderCompatibilityMatrix_UsesRequiredDimensions(t *testing.T) {
@@ -372,6 +411,17 @@ func boolStatus(ok bool) string {
 	}
 
 	return string(CompleteParamUnsupported)
+}
+
+func providerCompatibilityDimensionNames() []string {
+	dimensions := ProviderCompatibilityDimensions()
+	names := make([]string, 0, len(dimensions))
+
+	for _, dimension := range dimensions {
+		names = append(names, string(dimension))
+	}
+
+	return names
 }
 
 func readmeGeneratedProviderCompatibilitySection(t *testing.T, readme string) string {
