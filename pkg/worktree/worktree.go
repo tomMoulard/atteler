@@ -2,9 +2,8 @@
 //
 // When multiple atteler sessions run in the same repository, each session
 // can operate in its own git worktree so that file changes do not collide.
-// A session creates a branch and a linked worktree; when the session ends
-// (or the user explicitly requests it) the branch is merged back into the
-// original branch and the worktree is removed.
+// A session creates a branch and a linked worktree; the worktree is preserved
+// unless a caller explicitly requests a reviewed merge-back transaction.
 package worktree
 
 import (
@@ -75,6 +74,9 @@ type MergeOptions struct {
 	// Strategy is the explicit merge-back strategy. Use MergeStrategyMerge for
 	// the currently supported reviewed merge transaction.
 	Strategy MergeStrategy
+	// VerificationCommands are run in the session worktree before Atteler is
+	// allowed to commit or merge session changes. Every command must exit cleanly.
+	VerificationCommands []string
 	// Provenance adds optional caller-provided context to auto-commit messages.
 	Provenance []string
 	// AutoCommit permits atteler to stage and commit dirty worktree files before
@@ -90,9 +92,40 @@ type MergeOptions struct {
 	// makes auto-merge call sites opt in instead of reaching the merge path by
 	// accident.
 	AutoMerge bool
+	// OverrideVerification is an explicit reviewed override for callers that
+	// intentionally want to merge without a verification command list.
+	OverrideVerification bool
 	// AllowBaseBranchMismatch permits merging even when the main worktree is not
 	// checked out to Info.BaseBranch. Keep false for normal session finalization.
 	AllowBaseBranchMismatch bool
+}
+
+// VerificationResult records one reviewed command that gated a merge.
+type VerificationResult struct {
+	Command   string
+	Stdout    string
+	Stderr    string
+	ExitError string
+	Duration  time.Duration
+	Passed    bool
+}
+
+// MergeResult describes a completed merge transaction for review output.
+//
+//nolint:govet // Field order groups review sections in the order they are printed.
+type MergeResult struct {
+	Verification           []VerificationResult
+	RollbackCommands       []string
+	SessionID              string
+	Branch                 string
+	BaseBranch             string
+	WorktreePath           string
+	BaseRepoPath           string
+	TransactionLog         string
+	DiffSummary            string
+	PreMergeSHA            string
+	CommitSHA              string
+	VerificationOverridden bool
 }
 
 // RemoveOptions controls destructive cleanup of a session worktree.
@@ -111,6 +144,7 @@ type MergeError struct {
 	BaseBranch     string
 	SessionID      string
 	WorktreePath   string
+	BaseRepoPath   string
 	TransactionLog string
 	RolledBack     bool
 }
@@ -134,11 +168,25 @@ func (e *MergeError) Error() string {
 	}
 
 	if e.WorktreePath != "" {
-		b.WriteString("\nrecovery: inspect with: git -C " + e.WorktreePath + " status --short")
+		b.WriteString("\nrecovery: inspect worktree with: git -C " + shellQuoteArg(e.WorktreePath) + " status --short")
+	}
+
+	if e.BaseRepoPath != "" {
+		b.WriteString("\nrecovery: inspect base with: git -C " + shellQuoteArg(e.BaseRepoPath) + " status --short")
+		b.WriteString("\nrecovery: save base changes with: git -C " + shellQuoteArg(e.BaseRepoPath) + " stash push -u")
 	}
 
 	if e.BaseBranch != "" && e.Branch != "" {
-		b.WriteString("\nrecovery: review diff with: git diff --stat " + e.BaseBranch + "..." + e.Branch)
+		b.WriteString("\nrecovery: review diff with: git diff --stat " + shellQuoteArg(e.BaseBranch+"..."+e.Branch))
+	}
+
+	if e.BaseRepoPath != "" && e.BaseBranch != "" {
+		b.WriteString("\nrecovery: restore base branch with: git -C " + shellQuoteArg(e.BaseRepoPath) + " checkout " + shellQuoteArg(e.BaseBranch))
+	}
+
+	if e.BaseRepoPath != "" && e.BaseBranch != "" && e.Branch != "" {
+		b.WriteString("\nrecovery: manual merge after review: git -C " + shellQuoteArg(e.BaseRepoPath) + " checkout " + shellQuoteArg(e.BaseBranch) +
+			" && git -C " + shellQuoteArg(e.BaseRepoPath) + " merge --no-ff " + shellQuoteArg(e.Branch))
 	}
 
 	if e.SessionID != "" {
@@ -329,24 +377,45 @@ func MergeContext(ctx context.Context, repoDir string, info *Info) error {
 
 // MergeWithOptionsContext merges the worktree using an explicit safety policy.
 func MergeWithOptionsContext(ctx context.Context, repoDir string, info *Info, opts MergeOptions) error {
+	_, err := MergeWithResultContext(ctx, repoDir, info, opts)
+
+	return err
+}
+
+// MergeWithResultContext merges the worktree using an explicit safety policy
+// and returns the review summary needed for user-facing merge output.
+func MergeWithResultContext(ctx context.Context, repoDir string, info *Info, opts MergeOptions) (MergeResult, error) {
 	if err := requireCommandContext(ctx); err != nil {
-		return err
+		return MergeResult{}, err
 	}
 
 	repoRoot, manifest, log, err := beginMergeTransaction(ctx, repoDir, info, opts)
 	if err != nil {
-		return err
+		return MergeResult{}, err
 	}
 
-	if err := runMergeTransaction(ctx, repoRoot, info, opts, manifest, log); err != nil {
+	result := MergeResult{
+		SessionID:      info.SessionID,
+		Branch:         info.Branch,
+		BaseBranch:     info.BaseBranch,
+		WorktreePath:   info.Path,
+		BaseRepoPath:   repoRoot,
+		TransactionLog: transactionLogPath(log),
+	}
+
+	if err := runMergeTransaction(ctx, repoRoot, info, opts, manifest, log, &result); err != nil {
 		if markErr := markMergeFailed(ctx, repoRoot, manifest, err); markErr != nil {
-			return errors.Join(err, markErr)
+			return result, errors.Join(err, markErr)
 		}
 
-		return err
+		return result, err
 	}
 
-	return completeMergeTransaction(ctx, repoRoot, info, manifest, log)
+	if err := completeMergeTransaction(ctx, repoRoot, info, manifest, log); err != nil {
+		return result, err
+	}
+
+	return result, nil
 }
 
 func runMergeTransaction(
@@ -356,6 +425,7 @@ func runMergeTransaction(
 	opts MergeOptions,
 	manifest *worktreeManifest,
 	log *transactionLog,
+	result *MergeResult,
 ) error {
 	if policyErr := requireAutoMergePolicy(opts); policyErr != nil {
 		return mergeFailure("auto-merge policy", info, log, policyErr)
@@ -369,15 +439,19 @@ func runMergeTransaction(
 		return mergeFailure("write transaction log", info, log, appendErr)
 	}
 
+	if verificationErr := runVerificationCommands(ctx, info, opts, log, result); verificationErr != nil {
+		return verificationErr
+	}
+
 	if commitErr := autoCommitIfNeeded(ctx, info, opts, log); commitErr != nil {
 		return commitErr
 	}
 
-	if dryRunErr := dryRunMerge(ctx, repoRoot, info, log); dryRunErr != nil {
+	if dryRunErr := dryRunMerge(ctx, repoRoot, info, log, result); dryRunErr != nil {
 		return dryRunErr
 	}
 
-	if mergeErr := mergeBranch(ctx, repoRoot, info, log, manifest); mergeErr != nil {
+	if mergeErr := mergeBranch(ctx, repoRoot, info, log, manifest, result); mergeErr != nil {
 		return mergeErr
 	}
 
@@ -842,6 +916,10 @@ func requireAutoMergePolicy(opts MergeOptions) error {
 		return fmt.Errorf("merge strategy %q is not supported", opts.Strategy)
 	}
 
+	if len(cleanVerificationCommands(opts.VerificationCommands)) == 0 && !opts.OverrideVerification {
+		return errors.New("auto-merge policy requires at least one verification command or an explicit verification override")
+	}
+
 	return nil
 }
 
@@ -867,7 +945,11 @@ func preflightCreateCleanState(ctx context.Context, repoRoot, wtDir string) erro
 	}
 
 	if !summary.empty() {
-		return fmt.Errorf("worktree: main worktree has uncommitted or untracked files before isolation:\n%s", summary.String())
+		return fmt.Errorf("worktree: main worktree has uncommitted or untracked files before isolation:\n%s\nrecovery: inspect base with: git -C %s status --short\nrecovery: save base changes with: git -C %s stash push -u\nrecovery: rerun after committing, stashing, or removing the base changes",
+			summary.String(),
+			shellQuoteArg(repoRoot),
+			shellQuoteArg(repoRoot),
+		)
 	}
 
 	return nil
@@ -1204,6 +1286,131 @@ func preflightMergeBase(ctx context.Context, repoRoot string, info *Info, manife
 	return nil
 }
 
+func runVerificationCommands(ctx context.Context, info *Info, opts MergeOptions, log *transactionLog, result *MergeResult) error {
+	commands := cleanVerificationCommands(opts.VerificationCommands)
+	if len(commands) == 0 {
+		if opts.OverrideVerification {
+			return recordVerificationOverride(info, log, result)
+		}
+
+		return nil
+	}
+
+	for _, command := range commands {
+		verification, err := runVerificationCommand(ctx, info, command, log)
+		if result != nil {
+			result.Verification = append(result.Verification, verification)
+		}
+
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func recordVerificationOverride(info *Info, log *transactionLog, result *MergeResult) error {
+	if result != nil {
+		result.VerificationOverridden = true
+	}
+
+	if appendErr := log.append("verification", "skipped by explicit override"); appendErr != nil {
+		return mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	return nil
+}
+
+func runVerificationCommand(ctx context.Context, info *Info, command string, log *transactionLog) (VerificationResult, error) {
+	if appendErr := log.append("verification", "run: "+command); appendErr != nil {
+		return VerificationResult{}, mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	start := time.Now()
+
+	shellResult, err := shell.RunBash(ctx, shell.Options{
+		Command:        command,
+		Dir:            info.Path,
+		MaxOutputBytes: 64 * 1024,
+		Audit: shell.AuditContext{
+			Caller:    "atteler.worktree.verify",
+			SessionID: info.SessionID,
+		},
+	})
+
+	verification := VerificationResult{
+		Command:   command,
+		Stdout:    shellResult.Stdout,
+		Stderr:    shellResult.Stderr,
+		ExitError: shellResult.ExitError,
+		Duration:  time.Since(start),
+		Passed:    err == nil,
+	}
+
+	if shellResult.Duration > 0 {
+		verification.Duration = shellResult.Duration
+	}
+
+	if err != nil {
+		return verification, failedVerification(command, shellResult, err, info, log)
+	}
+
+	if appendErr := log.append("verification", "ok: "+command); appendErr != nil {
+		return verification, mergeFailure("write transaction log", info, log, appendErr)
+	}
+
+	return verification, nil
+}
+
+func failedVerification(command string, result shell.Result, err error, info *Info, log *transactionLog) error {
+	detail := verificationFailureDetail(command, result, err)
+
+	failureErr := errors.New(detail)
+	if appendErr := log.append("verification", "failed: "+detail); appendErr != nil {
+		failureErr = errors.Join(failureErr, fmt.Errorf("write transaction log: %w", appendErr))
+	}
+
+	return mergeFailure("verification", info, log, failureErr)
+}
+
+func cleanVerificationCommands(commands []string) []string {
+	cleaned := make([]string, 0, len(commands))
+	for _, command := range commands {
+		command = strings.TrimSpace(command)
+		if command != "" {
+			cleaned = append(cleaned, command)
+		}
+	}
+
+	return cleaned
+}
+
+func verificationFailureDetail(command string, result shell.Result, err error) string {
+	parts := []string{fmt.Sprintf("verification command %q failed: %v", command, err)}
+	if stdout := truncateForError(strings.TrimSpace(result.Stdout), 2048); stdout != "" {
+		parts = append(parts, "stdout:\n"+stdout)
+	}
+
+	if stderr := truncateForError(strings.TrimSpace(result.Stderr), 2048); stderr != "" {
+		parts = append(parts, "stderr:\n"+stderr)
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+func truncateForError(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+
+	if limit <= len("...<truncated>") {
+		return value[:limit]
+	}
+
+	return value[:limit-len("...<truncated>")] + "...<truncated>"
+}
+
 func autoCommitIfNeeded(ctx context.Context, info *Info, opts MergeOptions, log *transactionLog) error {
 	summary, err := gitStatusSummary(ctx, info.Path)
 	if err != nil {
@@ -1245,7 +1452,7 @@ func autoCommitIfNeeded(ctx context.Context, info *Info, opts MergeOptions, log 
 	return nil
 }
 
-func dryRunMerge(ctx context.Context, repoRoot string, info *Info, log *transactionLog) error {
+func dryRunMerge(ctx context.Context, repoRoot string, info *Info, log *transactionLog, result *MergeResult) error {
 	currentHead, err := gitRevParse(ctx, repoRoot, "HEAD")
 	if err != nil {
 		return mergeFailure("dry-run merge", info, log, fmt.Errorf("detect current HEAD: %w", err))
@@ -1270,6 +1477,11 @@ func dryRunMerge(ctx context.Context, repoRoot string, info *Info, log *transact
 		diffSummary = "no file changes"
 	}
 
+	if result != nil {
+		result.PreMergeSHA = currentHead
+		result.DiffSummary = strings.TrimSpace(diffSummary)
+	}
+
 	detail := fmt.Sprintf("strategy=%s base=%s current=%s branch=%s\n%s", MergeStrategyMerge, mergeBase, currentHead, branchHead, strings.TrimSpace(diffSummary))
 	if appendErr := log.append("dry-run merge", detail); appendErr != nil {
 		return mergeFailure("write transaction log", info, log, appendErr)
@@ -1292,7 +1504,7 @@ func dryRunMerge(ctx context.Context, repoRoot string, info *Info, log *transact
 	return nil
 }
 
-func mergeBranch(ctx context.Context, repoRoot string, info *Info, log *transactionLog, manifest *worktreeManifest) error {
+func mergeBranch(ctx context.Context, repoRoot string, info *Info, log *transactionLog, manifest *worktreeManifest, result *MergeResult) error {
 	mergeMsg := "atteler: merge session " + info.SessionID
 
 	detail := fmt.Sprintf("git merge --no-ff %s into %s", info.Branch, info.BaseBranch)
@@ -1328,6 +1540,11 @@ func mergeBranch(ctx context.Context, repoRoot string, info *Info, log *transact
 		if writeErr := writeWorktreeManifest(ctx, repoRoot, manifest, "merge-verified", "head="+mergeHead); writeErr != nil {
 			return mergeFailure("write ownership manifest", info, log, writeErr)
 		}
+	}
+
+	if result != nil {
+		result.CommitSHA = mergeHead
+		result.RollbackCommands = rollbackCommands(repoRoot, result.PreMergeSHA, mergeHead)
 	}
 
 	if appendErr := log.append("merge branch", "ok"); appendErr != nil {
@@ -1471,7 +1688,8 @@ func statusRelativePath(repoRoot, path string) (string, bool) {
 }
 
 type transactionLog struct {
-	path string
+	path     string
+	repoRoot string
 }
 
 func newTransactionLog(ctx context.Context, repoRoot, sessionID string) (*transactionLog, error) {
@@ -1497,7 +1715,7 @@ func newTransactionLog(ctx context.Context, repoRoot, sessionID string) (*transa
 		return nil, fmt.Errorf("write transaction log header %s: %w", path, err)
 	}
 
-	return &transactionLog{path: path}, nil
+	return &transactionLog{path: path, repoRoot: repoRoot}, nil
 }
 
 func (l *transactionLog) append(step, detail string) error {
@@ -1538,9 +1756,18 @@ func mergeFailureWithRollback(step string, info *Info, log *transactionLog, err 
 		BaseBranch:     info.BaseBranch,
 		SessionID:      info.SessionID,
 		WorktreePath:   info.Path,
+		BaseRepoPath:   mergeFailureRepoRoot(log),
 		TransactionLog: transactionLogPath(log),
 		RolledBack:     rolledBack,
 	}
+}
+
+func mergeFailureRepoRoot(log *transactionLog) string {
+	if log == nil {
+		return ""
+	}
+
+	return log.repoRoot
 }
 
 func transactionLogPath(log *transactionLog) string {
@@ -1549,6 +1776,40 @@ func transactionLogPath(log *transactionLog) string {
 	}
 
 	return log.path
+}
+
+func rollbackCommands(repoRoot, preMergeSHA, mergeSHA string) []string {
+	repo := shellQuoteArg(repoRoot)
+
+	commands := make([]string, 0, 2)
+	if mergeSHA != "" && mergeSHA != preMergeSHA {
+		commands = append(commands, "git -C "+repo+" revert -m 1 "+shellQuoteArg(mergeSHA))
+	}
+
+	if preMergeSHA != "" {
+		commands = append(commands, "git -C "+repo+" reset --hard "+shellQuoteArg(preMergeSHA))
+	}
+
+	return commands
+}
+
+func shellQuoteArg(value string) string {
+	if value == "" {
+		return "''"
+	}
+
+	if strings.IndexFunc(value, needsShellQuote) == -1 {
+		return value
+	}
+
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func needsShellQuote(r rune) bool {
+	return r != '-' && r != '_' && r != '.' && r != '/' && r != ':' &&
+		(r < '0' || r > '9') &&
+		(r < 'A' || r > 'Z') &&
+		(r < 'a' || r > 'z')
 }
 
 func rollbackFailedMerge(ctx context.Context, repoRoot string, log *transactionLog) (bool, error) {

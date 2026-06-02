@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
+
+const worktreeVerificationStatusPass = "PASS"
 
 func listWorktrees(ctx context.Context) error {
 	cwd, err := os.Getwd()
@@ -40,7 +43,7 @@ func listWorktrees(ctx context.Context) error {
 	return nil
 }
 
-func mergeWorktreeBySession(ctx context.Context, sessionRef string, allowBaseMismatch bool) error {
+func mergeWorktreeBySession(ctx context.Context, sessionRef string, policy cliWorktreeMergePolicy) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("merge worktree: %w", err)
@@ -70,12 +73,15 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string, allowBaseMis
 
 	fmt.Fprintf(os.Stderr, "worktree: merging %s into %s...\n", info.Branch, info.BaseBranch)
 
-	if err := worktree.MergeWithOptionsContext(ctx, cwd, info, worktree.MergeOptions{
+	result, err := worktree.MergeWithResultContext(ctx, cwd, info, worktree.MergeOptions{
 		AutoMerge:               true,
 		Strategy:                worktree.MergeStrategyMerge,
-		AllowBaseBranchMismatch: allowBaseMismatch,
+		OverrideVerification:    policy.OverrideVerification,
+		VerificationCommands:    policy.VerificationCommands,
+		AllowBaseBranchMismatch: policy.AllowBaseMismatch,
 		Provenance:              worktreeMergeProvenance(sess),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("merge worktree: %w", err)
 	}
 
@@ -88,9 +94,58 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string, allowBaseMis
 		fmt.Fprintf(os.Stderr, "warning: could not update session after merge: %v\n", err)
 	}
 
+	printWorktreeMergeResult(os.Stderr, result)
 	fmt.Fprintf(os.Stderr, "worktree: merged and cleaned up session %s\n", sess.ID)
 
 	return nil
+}
+
+func printWorktreeMergeResult(w io.Writer, result worktree.MergeResult) {
+	if strings.TrimSpace(result.DiffSummary) != "" {
+		fmt.Fprintln(w, "worktree: diff summary:")
+		printIndentedLines(w, result.DiffSummary)
+	}
+
+	fmt.Fprintln(w, "worktree: tests run:")
+
+	if len(result.Verification) == 0 {
+		if result.VerificationOverridden {
+			fmt.Fprintln(w, "  - verification override: no commands run")
+		} else {
+			fmt.Fprintln(w, "  - none recorded")
+		}
+	} else {
+		for _, verification := range result.Verification {
+			status := worktreeVerificationStatusPass
+			if !verification.Passed {
+				status = "FAIL"
+			}
+
+			fmt.Fprintf(w, "  - %s %s\n", status, verification.Command)
+		}
+	}
+
+	if result.CommitSHA != "" {
+		fmt.Fprintln(w, "worktree: commit SHA: "+result.CommitSHA)
+	}
+
+	if result.TransactionLog != "" {
+		fmt.Fprintln(w, "worktree: transaction log: "+result.TransactionLog)
+	}
+
+	if len(result.RollbackCommands) > 0 {
+		fmt.Fprintln(w, "worktree: rollback instructions:")
+
+		for _, command := range result.RollbackCommands {
+			fmt.Fprintln(w, "  - "+command)
+		}
+	}
+}
+
+func printIndentedLines(w io.Writer, text string) {
+	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
+		fmt.Fprintln(w, "  "+line)
+	}
 }
 
 func worktreeMergeProvenance(sess session.Session) []string {

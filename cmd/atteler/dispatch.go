@@ -579,7 +579,7 @@ func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
 	case opts.listWorktrees:
 		return true, listWorktrees(ctx)
 	case opts.mergeWorktreeRef != "":
-		return true, mergeWorktreeBySession(ctx, opts.mergeWorktreeRef, opts.mergeWorktreeAllowBaseMismatch)
+		return true, mergeWorktreeBySession(ctx, opts.mergeWorktreeRef, worktreeManualMergePolicyFromOptions(opts))
 	default:
 		return false, nil
 	}
@@ -718,9 +718,13 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 		state.modelLocked,
 		prompt,
 	)
-	finalizeWorktree(ctx, &state)
+	if runErr != nil && state.worktreeInfo != nil && state.autoMergeWorktree {
+		fmt.Fprintln(os.Stderr, "worktree: auto-merge skipped because session failed: "+runErr.Error())
 
-	return runErr
+		state.autoMergeWorktree = false
+	}
+
+	return errors.Join(runErr, finalizeWorktree(ctx, &state))
 }
 
 func runOnceExecutionOptionsFromOptions(opts cliOptions) runOnceExecutionOptions {
@@ -821,12 +825,14 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		return appState{}, err
 	}
 
+	worktreePolicy := worktreeMergePolicyFromConfigOptions(cfg, opts)
+
 	providers := reg.ListProviders()
 	if len(providers) == 0 && !opts.headless && !opts.doctor {
 		fmt.Fprintln(os.Stderr, "warning: no LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY")
 	}
 
-	wtInfo, err := setupWorktreeIfRequested(ctx, opts, cwd, &selection)
+	wtInfo, err := setupWorktreeIfRequested(ctx, opts, cwd, &selection, worktreePolicy)
 	if err != nil {
 		return appState{}, err
 	}
@@ -844,46 +850,114 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	)
 
 	return appState{
-		config:                      cfg,
-		registry:                    reg,
-		providerReadiness:           providerReadiness,
-		agentRegistry:               agentRegistry,
-		hookRunner:                  hookRunner,
-		eventObservers:              eventObservers,
-		sessionStore:                store,
-		stateStore:                  stateStore,
-		contextOptions:              contextOptions,
-		configuredReferences:        append([]string(nil), cfg.Context.References...),
-		referenceContext:            referenceContext.Content,
-		referenceManifest:           referenceContext.Manifest,
-		referenceContextEstimator:   referenceContext.Estimator,
-		skillLearningStoreDir:       skillLearningOpts.StoreDir,
-		skillLearningSkillDir:       skillLearningOpts.SkillDir,
-		sessionState:                selection.sessionState,
-		worktreeInfo:                wtInfo,
-		cwd:                         cwd,
-		loadedConfigPaths:           loadedConfigPaths,
-		providers:                   providers,
-		selectedModel:               selection.selectedModel,
-		selectedAgent:               selection.selectedAgent,
-		promptSuggestionConsent:     suggestionConsent,
-		idleSuggestionBudget:        defaultIdleSuggestionBudget(),
-		fallbackModels:              selection.fallbackModels,
-		pluginPaths:                 append([]string(nil), cfg.Plugins.Paths...),
-		pluginPolicy:                clonePluginPolicy(cfg.Plugins.Policy),
-		promptContextCache:          newPromptContextCache(promptContextCachePath(store)),
-		generationDefaults:          generationDefaults,
-		generationOverrides:         generationOverrides,
-		agentLoopBudget:             agentLoopBudget,
-		agentLoopCheckpointInterval: agentLoopCheckpointInterval,
-		maxInputTokens:              maxInputTokens,
-		hookConfig:                  cfg.Hooks,
-		vectorConfig:                cfg.Vector,
-		modelLocked:                 selection.modelLocked,
-		autoMergeWorktree:           opts.useWorktree && !opts.noAutoMerge,
-		promptLocalOnly:             opts.promptLocalOnly,
-		skillLearningEnabled:        skillLearningEnabled,
+		config:                       cfg,
+		registry:                     reg,
+		providerReadiness:            providerReadiness,
+		agentRegistry:                agentRegistry,
+		hookRunner:                   hookRunner,
+		eventObservers:               eventObservers,
+		sessionStore:                 store,
+		stateStore:                   stateStore,
+		contextOptions:               contextOptions,
+		configuredReferences:         append([]string(nil), cfg.Context.References...),
+		referenceContext:             referenceContext.Content,
+		referenceManifest:            referenceContext.Manifest,
+		referenceContextEstimator:    referenceContext.Estimator,
+		skillLearningStoreDir:        skillLearningOpts.StoreDir,
+		skillLearningSkillDir:        skillLearningOpts.SkillDir,
+		sessionState:                 selection.sessionState,
+		worktreeInfo:                 wtInfo,
+		cwd:                          cwd,
+		loadedConfigPaths:            loadedConfigPaths,
+		providers:                    providers,
+		selectedModel:                selection.selectedModel,
+		selectedAgent:                selection.selectedAgent,
+		promptSuggestionConsent:      suggestionConsent,
+		idleSuggestionBudget:         defaultIdleSuggestionBudget(),
+		fallbackModels:               selection.fallbackModels,
+		pluginPaths:                  append([]string(nil), cfg.Plugins.Paths...),
+		pluginPolicy:                 clonePluginPolicy(cfg.Plugins.Policy),
+		promptContextCache:           newPromptContextCache(promptContextCachePath(store)),
+		generationDefaults:           generationDefaults,
+		generationOverrides:          generationOverrides,
+		agentLoopBudget:              agentLoopBudget,
+		agentLoopCheckpointInterval:  agentLoopCheckpointInterval,
+		maxInputTokens:               maxInputTokens,
+		hookConfig:                   cfg.Hooks,
+		vectorConfig:                 cfg.Vector,
+		modelLocked:                  selection.modelLocked,
+		autoMergeWorktree:            opts.useWorktree && worktreePolicy.AutoMerge,
+		worktreeMergeOverride:        worktreePolicy.OverrideVerification,
+		worktreeVerificationCommands: worktreePolicy.VerificationCommands,
+		promptLocalOnly:              opts.promptLocalOnly,
+		skillLearningEnabled:         skillLearningEnabled,
 	}, nil
+}
+
+type cliWorktreeMergePolicy struct {
+	VerificationCommands []string
+	AutoMerge            bool
+	OverrideVerification bool
+	AllowBaseMismatch    bool
+}
+
+func worktreeMergePolicyFromConfigOptions(cfg appconfig.Config, opts cliOptions) cliWorktreeMergePolicy {
+	autoMerge := false
+	if cfg.Worktree.AutoMerge != nil {
+		autoMerge = *cfg.Worktree.AutoMerge
+	}
+
+	if opts.worktreeAutoMerge {
+		autoMerge = true
+	}
+
+	if opts.noAutoMerge {
+		autoMerge = false
+	}
+
+	commands := make([]string, 0, len(cfg.Worktree.VerificationCommands)+len(opts.worktreeVerificationCommands))
+	commands = append(commands, cfg.Worktree.VerificationCommands...)
+	commands = append(commands, opts.worktreeVerificationCommands...)
+
+	return cliWorktreeMergePolicy{
+		AutoMerge:            autoMerge,
+		VerificationCommands: cleanCLIStrings(commands),
+		OverrideVerification: cfg.Worktree.OverrideVerification || opts.worktreeMergeOverride,
+	}
+}
+
+func validateWorktreeAutoMergePolicy(policy cliWorktreeMergePolicy) error {
+	if !policy.AutoMerge {
+		return nil
+	}
+
+	if len(policy.VerificationCommands) > 0 || policy.OverrideVerification {
+		return nil
+	}
+
+	return errors.New("worktree auto-merge requires at least one --worktree-verify-command or worktree.verification_commands entry; use --worktree-merge-override only for an explicit no-verification override")
+}
+
+func worktreeManualMergePolicyFromOptions(opts cliOptions) cliWorktreeMergePolicy {
+	commands := cleanCLIStrings(opts.worktreeVerificationCommands)
+
+	return cliWorktreeMergePolicy{
+		VerificationCommands: commands,
+		OverrideVerification: opts.worktreeMergeOverride || len(commands) == 0,
+		AllowBaseMismatch:    opts.mergeWorktreeAllowBaseMismatch,
+	}
+}
+
+func cleanCLIStrings(values []string) []string {
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			cleaned = append(cleaned, value)
+		}
+	}
+
+	return cleaned
 }
 
 func setupWorktreeIfRequested(
@@ -891,9 +965,14 @@ func setupWorktreeIfRequested(
 	opts cliOptions,
 	cwd string,
 	selection *selectionState,
+	policy cliWorktreeMergePolicy,
 ) (*worktree.Info, error) {
 	if !opts.useWorktree || cwd == "" {
 		return nil, nil
+	}
+
+	if err := validateWorktreeAutoMergePolicy(policy); err != nil {
+		return nil, err
 	}
 
 	// If continuing a session that already has a worktree, re-use it.

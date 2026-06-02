@@ -261,8 +261,10 @@ type mergeArtifactsCommandInput struct {
 }
 
 type mergeWorktreeCommandInput struct {
-	Ref               string
-	AllowBaseMismatch bool
+	Ref                  string
+	VerificationCommands []string
+	AllowBaseMismatch    bool
+	OverrideVerification bool
 }
 
 type planAgentsCommandInput struct {
@@ -773,8 +775,10 @@ func mergeArtifactsCommandInputFromOptions(opts cliOptions) mergeArtifactsComman
 
 func mergeWorktreeCommandInputFromOptions(opts cliOptions) mergeWorktreeCommandInput {
 	return mergeWorktreeCommandInput{
-		Ref:               opts.mergeWorktreeRef,
-		AllowBaseMismatch: opts.mergeWorktreeAllowBaseMismatch,
+		Ref:                  opts.mergeWorktreeRef,
+		VerificationCommands: append([]string(nil), opts.worktreeVerificationCommands...),
+		AllowBaseMismatch:    opts.mergeWorktreeAllowBaseMismatch,
+		OverrideVerification: opts.worktreeMergeOverride,
 	}
 }
 

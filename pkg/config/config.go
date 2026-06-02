@@ -45,6 +45,7 @@ type Config struct {
 	Plugins         PluginConfig              `json:"plugins" yaml:"plugins"`
 	SkillLearning   SkillLearningConfig       `json:"skill_learning" yaml:"skill_learning"`
 	Vector          VectorConfig              `json:"vector" yaml:"vector"`
+	Worktree        WorktreeConfig            `json:"worktree" yaml:"worktree"`
 }
 
 // ProviderConfig configures an individual LLM provider.
@@ -318,6 +319,31 @@ type VectorConfig struct {
 	WorkspaceMaxFiles              int      `json:"workspace_max_files,omitempty" yaml:"workspace_max_files,omitempty"`
 }
 
+// WorktreeConfig configures opt-in worktree merge-back behavior.
+type WorktreeConfig struct {
+	AutoMerge            *bool    `json:"auto_merge,omitempty" yaml:"auto_merge,omitempty"`
+	VerificationCommands []string `json:"verification_commands,omitempty" yaml:"verification_commands,omitempty"`
+	OverrideVerification bool     `json:"override_verification,omitempty" yaml:"override_verification,omitempty"`
+}
+
+// MarshalYAML keeps override_verification visible when a worktree merge policy
+// is shown, even when the safe default is false.
+func (w WorktreeConfig) MarshalYAML() (any, error) {
+	out := make(map[string]any, 3)
+
+	if w.AutoMerge != nil {
+		out["auto_merge"] = *w.AutoMerge
+	}
+
+	marshalStringListYAML(out, "verification_commands", w.VerificationCommands)
+
+	if w.OverrideVerification || w.AutoMerge != nil || w.VerificationCommands != nil {
+		out["override_verification"] = w.OverrideVerification
+	}
+
+	return out, nil
+}
+
 //nolint:govet // fieldalignment: field order follows config-file grouping; deprecated aliases stay last.
 type fileConfig struct {
 	Version         *int                          `json:"version" yaml:"version"`
@@ -327,6 +353,7 @@ type fileConfig struct {
 	Plugins         filePluginConfig              `json:"plugins" yaml:"plugins"`
 	SkillLearning   fileSkillLearningConfig       `json:"skill_learning" yaml:"skill_learning"`
 	Vector          fileVectorConfig              `json:"vector" yaml:"vector"`
+	Worktree        fileWorktreeConfig            `json:"worktree" yaml:"worktree"`
 	DefaultProvider *string                       `json:"default_provider" yaml:"default_provider"`
 	DefaultModel    *string                       `json:"default_model" yaml:"default_model"`
 	ModelAliases    map[string]string             `json:"model_aliases" yaml:"model_aliases"`
@@ -466,6 +493,12 @@ type fileVectorConfig struct {
 	WorkspaceLimit                 *int     `json:"workspace_limit" yaml:"workspace_limit"`
 	WorkspaceMaxFileBytes          *int     `json:"workspace_max_file_bytes" yaml:"workspace_max_file_bytes"`
 	WorkspaceMaxFiles              *int     `json:"workspace_max_files" yaml:"workspace_max_files"`
+}
+
+type fileWorktreeConfig struct {
+	AutoMerge            *bool    `json:"auto_merge" yaml:"auto_merge"`
+	OverrideVerification *bool    `json:"override_verification" yaml:"override_verification"`
+	VerificationCommands []string `json:"verification_commands" yaml:"verification_commands"`
 }
 
 // Load reads the default configuration files and returns the merged result plus
@@ -761,6 +794,7 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 	mergePlugins(dst, src.Plugins, rec, source)
 	mergeSkillLearning(dst, src.SkillLearning, rec, source)
 	mergeVector(dst, src.Vector, rec, source)
+	mergeWorktree(dst, src.Worktree, rec, source)
 }
 
 func mergeModelAliases(dst *Config, aliases map[string]string, rec *originRecorder, source originSource) {
@@ -1367,6 +1401,24 @@ func mergeVector(dst *Config, vector fileVectorConfig, rec *originRecorder, sour
 	}
 }
 
+func mergeWorktree(dst *Config, worktree fileWorktreeConfig, rec *originRecorder, source originSource) {
+	if worktree.AutoMerge != nil {
+		value := *worktree.AutoMerge
+		dst.Worktree.AutoMerge = &value
+		rec.set("worktree.auto_merge", source, value)
+	}
+
+	if worktree.VerificationCommands != nil {
+		dst.Worktree.VerificationCommands = append([]string(nil), worktree.VerificationCommands...)
+		rec.replace("worktree.verification_commands", source, dst.Worktree.VerificationCommands, "replaces the entire worktree verification command list")
+	}
+
+	if worktree.OverrideVerification != nil {
+		dst.Worktree.OverrideVerification = *worktree.OverrideVerification
+		rec.set("worktree.override_verification", source, dst.Worktree.OverrideVerification)
+	}
+}
+
 func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source originSource) {
 	if src.Version > 0 {
 		dst.Version = src.Version
@@ -1398,6 +1450,7 @@ func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source 
 	mergeConfigPlugins(dst, src.Plugins, rec, source)
 	mergeConfigSkillLearning(dst, src.SkillLearning, rec, source)
 	mergeConfigVector(dst, src.Vector, rec, source)
+	mergeConfigWorktree(dst, src.Worktree, rec, source)
 }
 
 func mergeConfigModelAliases(dst *Config, aliases map[string]string, rec *originRecorder, source originSource) {
@@ -1922,6 +1975,7 @@ func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins Orig
 	mergeConfigPluginsFromOrigins(dst, src.Plugins, dstOrigins, srcOrigins)
 	mergeConfigSkillLearningFromOrigins(dst, src.SkillLearning, dstOrigins, srcOrigins)
 	mergeConfigVectorFromOrigins(dst, src.Vector, dstOrigins, srcOrigins)
+	mergeConfigWorktreeFromOrigins(dst, src.Worktree, dstOrigins, srcOrigins)
 }
 
 func mergeConfigModelAliasesFromOrigins(dst *Config, aliases map[string]string, dstOrigins, srcOrigins OriginMap) {
@@ -2571,6 +2625,27 @@ func mergeConfigVectorFromOrigins(dst *Config, vector VectorConfig, dstOrigins, 
 	}
 }
 
+func mergeConfigWorktreeFromOrigins(dst *Config, worktree WorktreeConfig, dstOrigins, srcOrigins OriginMap) {
+	if worktree.AutoMerge != nil {
+		value := *worktree.AutoMerge
+		dst.Worktree.AutoMerge = &value
+
+		appendOriginChain(dstOrigins, "worktree.auto_merge", srcOrigins, false)
+	}
+
+	if worktree.VerificationCommands != nil {
+		dst.Worktree.VerificationCommands = append([]string(nil), worktree.VerificationCommands...)
+
+		appendOriginChain(dstOrigins, "worktree.verification_commands", srcOrigins, true)
+	}
+
+	if originPathExists(srcOrigins, "worktree.override_verification") {
+		dst.Worktree.OverrideVerification = worktree.OverrideVerification
+
+		appendOriginChain(dstOrigins, "worktree.override_verification", srcOrigins, false)
+	}
+}
+
 //nolint:cyclop // Merge functions intentionally mirror each schema field for origin tracking.
 func mergeConfigVector(dst *Config, vector VectorConfig, rec *originRecorder, source originSource) {
 	if vector.WorkspaceEnabled != nil {
@@ -2665,6 +2740,25 @@ func mergeConfigVector(dst *Config, vector VectorConfig, rec *originRecorder, so
 	if vector.WorkspaceMaxFiles > 0 {
 		dst.Vector.WorkspaceMaxFiles = vector.WorkspaceMaxFiles
 		rec.set("vector.workspace_max_files", source, vector.WorkspaceMaxFiles)
+	}
+}
+
+func mergeConfigWorktree(dst *Config, worktree WorktreeConfig, rec *originRecorder, source originSource) {
+	if worktree.AutoMerge != nil {
+		value := *worktree.AutoMerge
+		dst.Worktree.AutoMerge = &value
+		rec.set("worktree.auto_merge", source, value)
+	}
+
+	if worktree.VerificationCommands != nil {
+		dst.Worktree.VerificationCommands = append([]string(nil), worktree.VerificationCommands...)
+		rec.replace("worktree.verification_commands", source, dst.Worktree.VerificationCommands, "replaces the entire worktree verification command list")
+	}
+
+	if worktree.OverrideVerification {
+		dst.Worktree.OverrideVerification = true
+
+		rec.set("worktree.override_verification", source, true)
 	}
 }
 

@@ -1135,11 +1135,18 @@ a process. `ATTELER_SKILL_LEARNING_DIR` and
 temporary or profile-specific directories.
 
 `atteler worktrees run` creates an isolated git worktree for a session with an
-ownership manifest under `.git/atteler/worktrees/`. Merge-back now runs as a
-reviewed transaction: the base worktree must be clean, session changes must be
-committed (or explicitly reviewed for auto-commit by an API caller), a dry-run
-merge must pass, and failed merges preserve the branch/worktree with recovery
-commands. See `atteler help worktrees` for the current command contract.
+ownership manifest under `.git/atteler/worktrees/`. Worktrees are preserved on
+session exit by default; merge with `atteler worktrees merge <session-id>` after
+review. Exit-time auto-merge is opt-in via the worktree auto-merge flag or
+`worktree.auto_merge: true`, and it must have passing verification commands from
+flag/config; the merge override flag (or
+`worktree.override_verification: true`) permits an explicit no-verification
+merge only when no verification commands are supplied. Successful merge output
+includes the diff summary, verification commands run, resulting commit SHA,
+transaction log, and rollback commands. The base worktree must be clean, a
+dry-run merge must pass, and failed merges preserve the branch/worktree with
+recovery commands. See `atteler help worktrees` for the current command
+contract.
 
 ## Symphony
 

@@ -357,8 +357,11 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.BoolVar(&opts.headlessPrivateLog, "headless-private-log", false, "store unredacted headless prompts, errors, event summaries, and logs; use only for local private runs")
 	fs.BoolVar(&opts.showVersion, "version", false, "print version and exit")
 	fs.BoolVar(&opts.useWorktree, "worktree", false, "isolate session in a git worktree")
+	fs.BoolVar(&opts.worktreeAutoMerge, "worktree-auto-merge", false, "opt in to reviewed worktree auto-merge on session exit")
+	fs.Var(&opts.worktreeVerificationCommands, "worktree-verify-command", "verification command to run inside the session worktree before merge (repeatable)")
+	fs.BoolVar(&opts.worktreeMergeOverride, "worktree-merge-override", false, "explicitly allow worktree merge without verification commands")
 	fs.BoolVar(&opts.listWorktrees, "list-worktrees", false, "list active atteler worktrees and exit")
-	fs.BoolVar(&opts.noAutoMerge, "no-auto-merge", false, "keep worktree alive on exit instead of auto-merging")
+	fs.BoolVar(&opts.noAutoMerge, "no-auto-merge", false, "keep worktree alive on exit (default; overrides configured auto-merge)")
 	fs.StringVar(&opts.mergeWorktreeRef, "merge-worktree", "", "merge a session worktree back into its base branch and exit")
 	fs.BoolVar(&opts.mergeWorktreeAllowBaseMismatch, "merge-worktree-allow-base-mismatch", false, "allow manual worktree merge when current branch differs from recorded base")
 }

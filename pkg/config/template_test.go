@@ -54,6 +54,10 @@ func TestTemplateYAML(t *testing.T) {
 		"workspace_index_path: ./.atteler/workspace-vector-index.json",
 		"workspace_exclude:",
 		"workspace_limit: 4",
+		"worktree:",
+		"auto_merge: false",
+		"verification_commands:",
+		"override_verification: false",
 	} {
 		if !strings.Contains(template, want) {
 			require.Failf(t, "unexpected failure", "TemplateYAML missing %q in:\n%s", want, template)

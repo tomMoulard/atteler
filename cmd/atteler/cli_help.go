@@ -383,7 +383,7 @@ func lookupFlagDomain(name string) (string, bool) {
 		name == "list-plugins" || name == "describe-plugin" || name == "run-plugin" ||
 		name == "init-rtk-plugin":
 		return "plugins", true
-	case name == "worktree" || name == "no-auto-merge" ||
+	case strings.HasPrefix(name, "worktree-") || name == "worktree" || name == "no-auto-merge" ||
 		name == "list-worktrees" || name == "merge-worktree" ||
 		name == "merge-worktree-allow-base-mismatch":
 		return "worktrees", true

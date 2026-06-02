@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -377,6 +378,159 @@ assertions:
 
 	result = runOK(t, runSpec{dir: workDir, stdin: "stdin before command\n"}, "chat", "--stdin", "once", "--replay-response", replayPath)
 	assertContains(t, result.stdout, "fixture replayed")
+}
+
+func TestWorktreeMergeReviewGateE2E(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("worktree verification commands use POSIX shell syntax")
+	}
+
+	t.Run("preserve by default", func(t *testing.T) {
+		t.Parallel()
+		repo := initE2EGitRepo(t)
+		sessionDir := filepath.Join(t.TempDir(), "sessions")
+		replayPath := writeReplayResponse(t, t.TempDir())
+
+		result := runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--worktree", "--replay-response", replayPath, "--once", "noop")
+		assertContains(t, result.stderr, "worktree: session files are in ")
+		assertContains(t, result.stderr, "worktree: merge with: atteler --merge-worktree ")
+		assertNotContains(t, result.stderr, "worktree: merged and cleaned up")
+
+		sess := readOnlyE2ESession(t, sessionDir)
+		require.DirExists(t, sess.WorktreePath)
+		assertContains(t, gitOutputE2E(t, repo, "branch", "--list", sess.WorktreeBranch), sess.WorktreeBranch)
+	})
+
+	t.Run("ungated auto merge rejected before worktree creation", func(t *testing.T) {
+		t.Parallel()
+		repo := initE2EGitRepo(t)
+		sessionDir := filepath.Join(t.TempDir(), "sessions")
+		replayPath := writeReplayResponse(t, t.TempDir())
+
+		result, err := runAtteler(t, runSpec{dir: repo, sessionDir: sessionDir},
+			"--worktree",
+			"--worktree-auto-merge",
+			"--replay-response", replayPath,
+			"--once", "noop",
+		)
+		require.Error(t, err)
+		assertContains(t, result.stderr, "worktree auto-merge requires")
+		assertContains(t, result.stderr, "--worktree-verify-command")
+		assertNotContains(t, result.stderr, "worktree: created")
+
+		matches, globErr := filepath.Glob(filepath.Join(sessionDir, "*.json"))
+		require.NoError(t, globErr)
+		require.Empty(t, matches)
+	})
+
+	t.Run("verified auto merge", func(t *testing.T) {
+		t.Parallel()
+		repo := initE2EGitRepo(t)
+		sessionDir := filepath.Join(t.TempDir(), "sessions")
+		replayPath := writeReplayResponse(t, t.TempDir())
+		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--worktree", "--replay-response", replayPath, "--once", "setup")
+		sess := readOnlyE2ESession(t, sessionDir)
+
+		writeFile(t, filepath.Join(sess.WorktreePath, "verified.txt"), "verified\n")
+
+		result := runOK(t, runSpec{dir: repo, sessionDir: sessionDir},
+			"--session", sess.ID,
+			"--worktree",
+			"--worktree-auto-merge",
+			"--worktree-verify-command", "test -f verified.txt",
+			"--replay-response", replayPath,
+			"--once", "merge",
+		)
+
+		assertContains(t, result.stderr, "worktree: diff summary:")
+		assertContains(t, result.stderr, "verified.txt")
+		assertContains(t, result.stderr, "worktree: tests run:")
+		assertContains(t, result.stderr, "PASS test -f verified.txt")
+		assertContains(t, result.stderr, "worktree: commit SHA:")
+		assertContains(t, result.stderr, "worktree: rollback instructions:")
+		require.FileExists(t, filepath.Join(repo, "verified.txt"))
+		require.NoDirExists(t, sess.WorktreePath)
+	})
+
+	t.Run("failed verification preserves worktree", func(t *testing.T) {
+		t.Parallel()
+		repo := initE2EGitRepo(t)
+		sessionDir := filepath.Join(t.TempDir(), "sessions")
+		replayPath := writeReplayResponse(t, t.TempDir())
+		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--worktree", "--replay-response", replayPath, "--once", "setup")
+		sess := readOnlyE2ESession(t, sessionDir)
+		writeFile(t, filepath.Join(sess.WorktreePath, "blocked.txt"), "blocked\n")
+
+		result, err := runAtteler(t, runSpec{dir: repo, sessionDir: sessionDir},
+			"--session", sess.ID,
+			"--worktree",
+			"--worktree-auto-merge",
+			"--worktree-verify-command", "test -f missing.txt",
+			"--replay-response", replayPath,
+			"--once", "merge",
+		)
+		require.Error(t, err)
+
+		assertContains(t, result.stderr, "worktree: auto-merge failed:")
+		assertContains(t, result.stderr, "verification command")
+		require.NoFileExists(t, filepath.Join(repo, "blocked.txt"))
+		require.DirExists(t, sess.WorktreePath)
+	})
+
+	t.Run("conflict preservation", func(t *testing.T) {
+		t.Parallel()
+		repo := initE2EGitRepo(t)
+		writeFile(t, filepath.Join(repo, "conflict.txt"), "base\n")
+		gitOutputE2E(t, repo, "add", "conflict.txt")
+		gitOutputE2E(t, repo, "commit", "-m", "base conflict")
+
+		sessionDir := filepath.Join(t.TempDir(), "sessions")
+		replayPath := writeReplayResponse(t, t.TempDir())
+		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--worktree", "--replay-response", replayPath, "--once", "setup")
+		sess := readOnlyE2ESession(t, sessionDir)
+
+		writeFile(t, filepath.Join(sess.WorktreePath, "conflict.txt"), "branch\n")
+		gitOutputE2E(t, sess.WorktreePath, "add", "conflict.txt")
+		gitOutputE2E(t, sess.WorktreePath, "commit", "-m", "branch conflict")
+		writeFile(t, filepath.Join(repo, "conflict.txt"), "main\n")
+		gitOutputE2E(t, repo, "add", "conflict.txt")
+		gitOutputE2E(t, repo, "commit", "-m", "main conflict")
+
+		result, err := runAtteler(t, runSpec{dir: repo, sessionDir: sessionDir}, "worktrees", "merge", sess.ID)
+		require.Error(t, err)
+		assertContains(t, result.stderr, "merge dry-run reported conflicts")
+		assertContains(t, result.stderr, "recovery: manual merge after review:")
+		require.DirExists(t, sess.WorktreePath)
+
+		data, readErr := os.ReadFile(filepath.Join(repo, "conflict.txt"))
+		require.NoError(t, readErr)
+		require.Equal(t, "main\n", string(data))
+	})
+
+	t.Run("manual merge reports review output", func(t *testing.T) {
+		t.Parallel()
+		repo := initE2EGitRepo(t)
+		sessionDir := filepath.Join(t.TempDir(), "sessions")
+		replayPath := writeReplayResponse(t, t.TempDir())
+		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--worktree", "--replay-response", replayPath, "--once", "setup")
+		sess := readOnlyE2ESession(t, sessionDir)
+
+		writeFile(t, filepath.Join(sess.WorktreePath, "manual.txt"), "manual\n")
+		gitOutputE2E(t, sess.WorktreePath, "add", "manual.txt")
+		gitOutputE2E(t, sess.WorktreePath, "commit", "-m", "manual change")
+
+		result := runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "worktrees", "merge", sess.ID)
+		assertContains(t, result.stderr, "worktree: diff summary:")
+		assertContains(t, result.stderr, "manual.txt")
+		assertContains(t, result.stderr, "worktree: tests run:")
+		assertContains(t, result.stderr, "verification override")
+		assertContains(t, result.stderr, "worktree: commit SHA:")
+		assertContains(t, result.stderr, "worktree: rollback instructions:")
+		require.FileExists(t, filepath.Join(repo, "manual.txt"))
+		require.NoDirExists(t, sess.WorktreePath)
+	})
 }
 
 func TestReadOnlyCommandsDoNotAutoRegisterProviders(t *testing.T) {
@@ -1616,6 +1770,73 @@ func testEnv(t *testing.T, spec runSpec) []string {
 	env = append(env, spec.env...)
 
 	return env
+}
+
+type e2eSavedSession struct {
+	ID             string `json:"id"`
+	WorktreePath   string `json:"worktree_path"`
+	WorktreeBranch string `json:"worktree_branch"`
+	WorktreeBase   string `json:"worktree_base"`
+}
+
+func initE2EGitRepo(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	gitOutputE2E(t, dir, "init")
+	gitOutputE2E(t, dir, "config", "user.email", "e2e@example.com")
+	gitOutputE2E(t, dir, "config", "user.name", "Atteler E2E")
+	gitOutputE2E(t, dir, "config", "commit.gpgsign", "false")
+	gitOutputE2E(t, dir, "config", "core.excludesFile", os.DevNull)
+	gitOutputE2E(t, dir, "commit", "--allow-empty", "-m", "init")
+
+	return dir
+}
+
+func gitOutputE2E(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		require.Failf(t, "unexpected git failure", "git %v in %s failed: %v\n%s", args, dir, err, output)
+	}
+
+	return string(output)
+}
+
+func writeReplayResponse(t *testing.T, dir string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, "replay.json")
+	writeFile(t, path, `{"response":{"content":"ok","model":"replay/model"}}`)
+
+	return path
+}
+
+func readOnlyE2ESession(t *testing.T, sessionDir string) e2eSavedSession {
+	t.Helper()
+
+	matches, err := filepath.Glob(filepath.Join(sessionDir, "*.json"))
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+
+	data, err := os.ReadFile(matches[0])
+	require.NoError(t, err)
+
+	var sess e2eSavedSession
+	require.NoError(t, json.Unmarshal(data, &sess))
+	require.NotEmpty(t, sess.ID)
+	require.NotEmpty(t, sess.WorktreePath)
+	require.NotEmpty(t, sess.WorktreeBranch)
+	require.NotEmpty(t, sess.WorktreeBase)
+
+	return sess
 }
 
 func writeExecutable(t *testing.T, path, content string) {

@@ -180,6 +180,21 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Message: "no local plugin manifests are loaded unless this list is set",
 		},
 		{
+			Field:   "worktree.auto_merge",
+			Value:   "false",
+			Message: "worktree sessions are preserved on exit unless config or CLI explicitly enables reviewed auto-merge",
+		},
+		{
+			Field:   "worktree.verification_commands",
+			Value:   "[]",
+			Message: "auto-merge has no verification gate unless config or CLI supplies commands; an explicit override is required to merge without them",
+		},
+		{
+			Field:   "worktree.override_verification",
+			Value:   "false",
+			Message: "auto-merge cannot skip verification commands unless config or CLI deliberately sets an override",
+		},
+		{
 			Field:   "providers.*.disable_private_adapter",
 			Value:   "false",
 			Message: "private provider adapters remain eligible unless a provider config or environment kill switch disables them",

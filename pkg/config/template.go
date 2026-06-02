@@ -41,6 +41,7 @@ func starterTemplateConfig() Config {
 	retryMaxBackoffMS := 10000
 	retryMaxElapsedMS := 30000
 	retryJitterFraction := 0.2
+	worktreeAutoMerge := false
 
 	return Config{
 		Version:         ConfigSchemaVersion,
@@ -163,6 +164,11 @@ func starterTemplateConfig() Config {
 			WorkspaceMaxFiles:              5000,
 			WorkspaceExclude:               []string{"tmp/", "*.generated.*"},
 		},
+		Worktree: WorktreeConfig{
+			AutoMerge:            &worktreeAutoMerge,
+			VerificationCommands: []string{"go test ./..."},
+			OverrideVerification: false,
+		},
 	}
 }
 
@@ -192,6 +198,10 @@ func templateYAML() string {
 	out.WriteString("# non-loopback embedding endpoints also require workspace_allow_remote_embeddings: true.\n\n")
 	out.WriteString("# Set vector.fallback_policy: lexical to stay local with lexical workspace search\n")
 	out.WriteString("# when an embedding endpoint is unavailable or not explicitly consented.\n\n")
+	out.WriteString("# Worktree isolation preserves session worktrees by default. Set\n")
+	out.WriteString("# worktree.auto_merge: true only with reviewed verification_commands, or set\n")
+	out.WriteString("# override_verification: true as an explicit no-verification override when no\n")
+	out.WriteString("# verification commands are supplied.\n\n")
 	out.Write(data)
 	out.WriteString("\n#vim: setf=conf\n")
 
