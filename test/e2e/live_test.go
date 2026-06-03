@@ -247,15 +247,15 @@ func requireAnthropic(t *testing.T) string {
 // functional. The setAuth callback may set headers, change the method, or
 // attach a body. Skips the test if the endpoint returns 401, 403, or any
 // other 4xx status (e.g., billing issues).
-//
-//nolint:gosec // Live opt-in probes intentionally call provider endpoints supplied by test configuration.
 func probeAPI(t *testing.T, provider, url string, setAuth func(*http.Request)) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	// The callers pass fixed provider endpoints from this file; the parameter
+	// keeps the shared probe small without accepting user-controlled URLs.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody) //nolint:gosec // trusted live-test provider endpoint.
 	if err != nil {
 		t.Skipf("%s API probe failed to build request: %v", provider, err)
 	}
@@ -263,7 +263,7 @@ func probeAPI(t *testing.T, provider, url string, setAuth func(*http.Request)) {
 	// The callback may upgrade the method to POST and attach a body.
 	setAuth(req)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // request was built from trusted live-test provider endpoint.
 	if err != nil {
 		t.Skipf("%s API probe failed: %v", provider, err)
 	}

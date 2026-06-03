@@ -26,6 +26,7 @@ const (
 	vectorValidationDefaultEmbeddingBaseURL  = "http://127.0.0.1:11434"
 	vectorValidationKindLexical              = "lexical"
 	vectorValidationKindEmbedding            = "embedding"
+	vectorValidationAliasEmbeddings          = "embeddings"
 	vectorValidationFallbackFail             = "fail"
 	vectorValidationAliasLexicalFallback     = "lexical-fallback"
 	vectorValidationAliasFallback            = "fallback"
@@ -349,7 +350,7 @@ func canonicalVectorizerKindForValidation(kind string) string {
 	switch normalizeVectorConfigValue(kind) {
 	case "", vectorValidationKindLexical, vectorValidationAliasLexicalFallback, vectorValidationAliasFallback, "text", "hashed", "hashed-token-frequency":
 		return vectorValidationKindLexical
-	case vectorValidationKindEmbedding, "embed", "embeddings":
+	case vectorValidationKindEmbedding, "embed", vectorValidationAliasEmbeddings:
 		return vectorValidationKindEmbedding
 	default:
 		return normalizeVectorConfigValue(kind)
@@ -358,7 +359,7 @@ func canonicalVectorizerKindForValidation(kind string) string {
 
 func canonicalVectorProviderForValidation(provider string) string {
 	switch normalizeVectorConfigValue(provider) {
-	case "", "ollama", "ollama-compatible":
+	case "", vectorValidationDefaultEmbeddingProvider, "ollama-compatible":
 		return vectorValidationDefaultEmbeddingProvider
 	default:
 		return normalizeVectorConfigValue(provider)
@@ -697,7 +698,7 @@ func canonicalKnownVectorAgentScopeName(name string, agents map[string]AgentConf
 func knownVectorizerKind(kind string) bool {
 	switch normalizeVectorConfigValue(kind) {
 	case "", vectorValidationKindLexical, vectorValidationAliasLexicalFallback, vectorValidationAliasFallback, "text", "hashed", "hashed-token-frequency",
-		vectorValidationKindEmbedding, "embed", "embeddings":
+		vectorValidationKindEmbedding, "embed", vectorValidationAliasEmbeddings:
 		return true
 	default:
 		return false
@@ -706,7 +707,7 @@ func knownVectorizerKind(kind string) bool {
 
 func knownVectorProvider(provider string) bool {
 	switch normalizeVectorConfigValue(provider) {
-	case "", "ollama", "ollama-compatible":
+	case "", vectorValidationDefaultEmbeddingProvider, "ollama-compatible":
 		return true
 	default:
 		return false

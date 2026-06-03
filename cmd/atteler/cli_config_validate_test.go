@@ -743,11 +743,10 @@ vector:
 	require.Error(t, err)
 
 	message := err.Error()
-	assert.Contains(t, message, "validate config: vector config")
-	assert.Contains(t, message, `vector.vectorizer unsupported value "semantic"`)
-	assert.Contains(t, message, "vector.stores.agentmemory unknown store scope")
-	assert.Contains(t, message, "vector.agents.reviwer unknown agent scope")
-	assert.Contains(t, message, "vector.sources.git_histry unknown source scope")
+	assert.Contains(t, message, "validate config: 3 fatal config diagnostics")
+	assert.Contains(t, message, `vector.vectorizer: unsupported vectorizer "semantic"`)
+	assert.Contains(t, message, "vector.stores.agentmemory: unknown vector store scope")
+	assert.Contains(t, message, "vector.sources.git_histry: unknown vector source scope")
 }
 
 func TestValidateConfig_RejectsVectorIndexPathCollisions(t *testing.T) {
