@@ -445,7 +445,7 @@ func validateReusableSourceIndex(existing *Index, opts SourceIndexOptions) error
 		return err
 	}
 
-	return validateWorkspaceIndexSourceCoverage(existing)
+	return validateIndexSourceCoverage(existing)
 }
 
 func sourceMetadataForSource(source Source) SourceMetadata {

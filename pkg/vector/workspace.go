@@ -542,10 +542,10 @@ func validateReusableWorkspaceRefreshIndex(existing *Index, opts WorkspaceOption
 		return err
 	}
 
-	return validateWorkspaceIndexSourceCoverage(existing)
+	return validateIndexSourceCoverage(existing)
 }
 
-func validateWorkspaceIndexSourceCoverage(idx *Index) error {
+func validateIndexSourceCoverage(idx *Index) error {
 	sources := make(map[string]struct{}, len(idx.Sources))
 	for _, source := range idx.Sources {
 		sources[filepath.Clean(source.Path)] = struct{}{}
