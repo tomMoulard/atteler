@@ -72,7 +72,7 @@ func (a *AnthropicProvider) Name() string { return providerAnthropic }
 func (a *AnthropicProvider) Models() []string {
 	static := []string{
 		"claude-sonnet-4-20250514",
-		"claude-haiku-4-20250414",
+		"claude-haiku-4-5-20251001",
 		"claude-opus-4-20250514",
 	}
 
@@ -472,7 +472,7 @@ func (a *AnthropicProvider) ModelContextWindow(model string) int {
 func anthropicContextWindow(model string) int {
 	switch model {
 	case "claude-opus-4-20250514", "claude-sonnet-4-20250514",
-		"claude-haiku-4-20250414":
+		"claude-haiku-4-5-20251001":
 		return 200_000
 	default:
 		// Newer models default to 200k; fall back for unknowns.

@@ -2,10 +2,13 @@ package e2e
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,7 +18,7 @@ const liveTimeout = 2 * time.Minute
 //nolint:paralleltest // reads live provider environment and may consume provider quota.
 func TestLiveOpenAIOneShot(t *testing.T) {
 	requireLive(t)
-	apiKey := requireEnv(t, "OPENAI_API_KEY")
+	apiKey, baseURL := requireOpenAI(t)
 	model := envOrDefault("ATTELER_E2E_OPENAI_MODEL", "gpt-4.1-mini")
 	marker := "atteler-live-openai-ok"
 
@@ -35,6 +38,7 @@ generation:
 		timeout: liveTimeout,
 		env: []string{
 			"OPENAI_API_KEY=" + apiKey,
+			"OPENAI_BASE_URL=" + baseURL,
 		},
 	}, "--config", configPath, "--model", model, "--once", "Reply with exactly: "+marker)
 
@@ -45,8 +49,8 @@ generation:
 //nolint:paralleltest // reads live provider environment and may consume provider quota.
 func TestLiveAnthropicOneShot(t *testing.T) {
 	requireLive(t)
-	apiKey := requireEnv(t, "ANTHROPIC_API_KEY")
-	model := envOrDefault("ATTELER_E2E_ANTHROPIC_MODEL", "claude-haiku-4-20250414")
+	apiKey := requireAnthropic(t)
+	model := envOrDefault("ATTELER_E2E_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 	marker := "atteler-live-anthropic-ok"
 
 	workDir := t.TempDir()
@@ -107,7 +111,7 @@ func TestLiveClaudeCodeOneShot(t *testing.T) {
 	requireLive(t)
 	requireClaudeCode(t)
 
-	model := envOrDefault("ATTELER_E2E_CLAUDE_CODE_MODEL", "claude-haiku-4-5")
+	model := envOrDefault("ATTELER_E2E_CLAUDE_CODE_MODEL", "claude-haiku-4-5-20251001")
 	marker := "atteler-live-claude-code-ok"
 
 	workDir := t.TempDir()
@@ -125,11 +129,19 @@ generation:
   max_tokens: 16
 `)
 
+	// Create an isolated CODEX_HOME with an empty config.toml so the harness
+	// import reads it (and gets nothing) instead of falling through to the
+	// real ~/.codex/config.toml which may set model_mode or other overrides.
+	codexHome := t.TempDir()
+	writeFile(t, filepath.Join(codexHome, "config.toml"), "")
+
 	result := runOK(t, runSpec{
 		dir:     workDir,
 		timeout: liveTimeout,
 		env: []string{
 			"HOME=" + os.Getenv("HOME"),
+			"CODEX_HOME=" + codexHome,
+			"ATTELER_STATE=" + filepath.Join(t.TempDir(), "state.yaml"),
 		},
 	}, "--config", configPath, "--model", model, "--once", "Reply with exactly: "+marker)
 
@@ -152,9 +164,6 @@ providers:
     disabled: true
   openai:
     disabled: true
-generation:
-  temperature: 0
-  max_tokens: 16
 `)
 
 	result := runOK(t, runSpec{
@@ -186,6 +195,89 @@ func requireEnv(t *testing.T, name string) string {
 	}
 
 	return value
+}
+
+// requireOpenAI verifies that the OPENAI_API_KEY is set and the account is
+// reachable (correct regional endpoint, valid key). Skips the test when the
+// key is missing or the API returns an auth error.
+func requireOpenAI(t *testing.T) (apiKey, baseURL string) {
+	t.Helper()
+
+	apiKey = requireEnv(t, "OPENAI_API_KEY")
+	baseURL = os.Getenv("OPENAI_BASE_URL")
+
+	endpoint := baseURL
+	if endpoint == "" {
+		endpoint = "https://api.openai.com"
+	}
+
+	probeAPI(t, "OpenAI", endpoint+"/v1/models", func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+apiKey)
+	})
+
+	return apiKey, baseURL
+}
+
+// requireAnthropic verifies that the ANTHROPIC_API_KEY is set and the account
+// is usable (valid key, sufficient credits). Skips the test otherwise.
+// The /v1/models endpoint succeeds even without credits, so we probe
+// /v1/messages with a minimal request to catch billing issues early.
+func requireAnthropic(t *testing.T) string {
+	t.Helper()
+
+	apiKey := requireEnv(t, "ANTHROPIC_API_KEY")
+
+	// Minimal messages request — the model is cheap and the max_tokens is 1.
+	// If the account has no credits, Anthropic returns HTTP 400 with
+	// "credit balance is too low".
+	body := `{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"x"}]}`
+	probeAPI(t, "Anthropic", "https://api.anthropic.com/v1/messages", func(r *http.Request) {
+		r.Method = http.MethodPost
+		r.Body = io.NopCloser(strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("x-api-key", apiKey)
+		r.Header.Set("anthropic-version", "2023-06-01")
+	})
+
+	return apiKey
+}
+
+// probeAPI makes a lightweight HTTP request to verify provider credentials are
+// functional. The setAuth callback may set headers, change the method, or
+// attach a body. Skips the test if the endpoint returns 401, 403, or any
+// other 4xx status (e.g., billing issues).
+func probeAPI(t *testing.T, provider, url string, setAuth func(*http.Request)) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Skipf("%s API probe failed to build request: %v", provider, err)
+	}
+
+	// The callback may upgrade the method to POST and attach a body.
+	setAuth(req)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Skipf("%s API probe failed: %v", provider, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // best-effort probe
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return
+	case http.StatusUnauthorized, http.StatusForbidden:
+		t.Skipf("%s credentials are not valid (HTTP %d); skipping live test", provider, resp.StatusCode)
+	default:
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			t.Skipf("%s API rejected the request (HTTP %d); skipping live test", provider, resp.StatusCode)
+		}
+
+		t.Skipf("%s API probe returned unexpected status %d; skipping live test", provider, resp.StatusCode)
+	}
 }
 
 func requireClaudeCode(t *testing.T) {
