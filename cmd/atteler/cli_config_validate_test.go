@@ -780,6 +780,36 @@ vector:
 	assert.Contains(t, message, "file and workspace indexes must not share")
 }
 
+func TestValidateConfig_RejectsVectorLexicalFallbackIndexPathCollisions(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
+vector:
+  vectorizer: embedding
+  fallback_policy: lexical
+  workspace_index_path: .atteler/git-history-vector-index.lexical.json
+`), 0o600))
+
+	err := validateConfig()
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "validate config: vector config")
+	assert.Contains(t, message, "vector.workspace_index_path index_path")
+	assert.Contains(t, message, "vector.sources.git_history default lexical fallback")
+	assert.Contains(t, message, "workspace and git-history indexes must not share")
+}
+
 func TestValidateConfig_RejectsSharedAgentMemoryPathWithDifferentVectorizers(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv("HOME", tempDir)

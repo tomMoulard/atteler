@@ -1226,7 +1226,10 @@ malformed scopes, unknown store/source/agent scope names, and unsupported
 vectorizer/provider/fallback values before an index refresh starts. It rejects
 ambiguous aliases such as configuring both `git_history` and `git-history` for
 one source scope, and also rejects one configured or built-in default
-`index_path` shared by incompatible index lifecycles.
+`index_path` shared by incompatible index lifecycles. Embedding indexes that
+can write a generated `.lexical` fallback file reserve that fallback path too,
+so a workspace, file, session, git-history, ADR, or agent-memory index cannot
+silently clobber another store's fallback artifact.
 Persisted `index_path` values are intentionally store/source-specific so agent
 memory, workspace files, sessions, git history, and ADRs do not accidentally
 share one JSON datastore; relative index paths resolve under the workspace
