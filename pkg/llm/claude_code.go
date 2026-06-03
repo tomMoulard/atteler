@@ -193,8 +193,18 @@ func (c *ClaudeCodeProvider) ModelCatalog() []ModelMetadata {
 	return out
 }
 
-// ModelMetadata returns provenance for a Claude Code static model entry.
+// ModelMetadata returns provenance for a Claude Code model entry.
 func (c *ClaudeCodeProvider) ModelMetadata(model string) (ModelMetadata, bool) {
+	if metadata, ok := builtinCatalogModelMetadata(
+		providerClaudeCode,
+		model,
+		claudeCodeAdapterReviewedAt,
+		claudeCodeAdapterReviewAfter,
+		"Claude Code auth mode has no model metadata endpoint; built-in catalog metadata is used for known Claude IDs",
+	); ok {
+		return metadata, true
+	}
+
 	for _, entry := range claudeCodeModelCatalog() {
 		if entry.ID == model {
 			return entry, true

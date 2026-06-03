@@ -799,7 +799,7 @@ func TestDoctorReportsUnregisteredPrivateAdapterCredentialFailures(t *testing.T)
 	assert.Contains(t, stdout, "[fail] local_credentials")
 	assert.Contains(t, stdout, "[skip] token_refresh")
 	assert.Contains(t, stdout, "[skip] network_reachability")
-	assert.Contains(t, stdout, "- gpt-5.5 (context=400000; provenance=static Codex adapter catalog")
+	assert.Contains(t, stdout, "- gpt-5.5 (context=1050000; provenance=built-in provider/model catalog")
 	assert.Contains(t, stdout, "reviewed=2026-05-22; review_after=2026-08-22; notes=private Codex backend")
 }
 

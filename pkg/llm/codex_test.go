@@ -936,8 +936,8 @@ func TestCodexProvider_ModelMetadataAndContextFallback(t *testing.T) {
 
 	metadata, ok := p.ModelMetadata("gpt-5.5")
 	require.True(t, ok)
-	assert.Equal(t, 400_000, metadata.ContextWindow)
-	assert.NotEmpty(t, metadata.Provenance)
+	assert.Equal(t, 1_050_000, metadata.ContextWindow)
+	assert.Contains(t, metadata.Provenance, "built-in provider/model catalog")
 	assert.NotEmpty(t, metadata.ReviewedAt)
 	assert.NotEmpty(t, metadata.ReviewAfter)
 
@@ -967,8 +967,8 @@ func TestCodexProvider_StaticModelCatalogConformance(t *testing.T) {
 	assert.Equal(t, codexAdapterReviewAfter, catalog[0].ReviewAfter)
 
 	assert.Equal(t, "gpt-5.5", catalog[1].ID)
-	assert.Equal(t, 400_000, catalog[1].ContextWindow)
-	assert.Contains(t, catalog[1].Provenance, "static Codex adapter catalog")
+	assert.Equal(t, 1_050_000, catalog[1].ContextWindow)
+	assert.Contains(t, catalog[1].Provenance, "built-in provider/model catalog")
 	assert.Equal(t, codexAdapterReviewAfter, catalog[1].ReviewAfter)
 }
 
