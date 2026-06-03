@@ -714,6 +714,8 @@ func inspectVectorizerScopeEntries(path, prefix string, value *yaml.Node) []Diag
 
 	var diagnostics []Diagnostic
 
+	diagnostics = append(diagnostics, inspectVectorizerScopeAliases(path, prefix, value)...)
+
 	forEachMappingField(value, func(name string, entry *yaml.Node) {
 		field := prefix + "." + name
 
@@ -734,6 +736,57 @@ func inspectVectorizerScopeEntries(path, prefix string, value *yaml.Node) []Diag
 	})
 
 	return diagnostics
+}
+
+func inspectVectorizerScopeAliases(path, prefix string, value *yaml.Node) []Diagnostic {
+	canonicalName := vectorizerScopeDiagnosticCanonicalName(prefix)
+	if canonicalName == nil {
+		return nil
+	}
+
+	var diagnostics []Diagnostic
+
+	seen := make(map[string]string)
+
+	forEachMappingField(value, func(name string, _ *yaml.Node) {
+		canonical, ok := canonicalName(name)
+		if !ok {
+			return
+		}
+
+		if previous, exists := seen[canonical]; exists {
+			field := prefix + "." + name
+			diagnostics = append(diagnostics, Diagnostic{
+				Severity: DiagnosticError,
+				Path:     path,
+				Field:    field,
+				Message: fmt.Sprintf(
+					"%s duplicates %s.%s (both resolve to %s); keep one scope name",
+					field,
+					prefix,
+					previous,
+					canonical,
+				),
+			})
+
+			return
+		}
+
+		seen[canonical] = name
+	})
+
+	return diagnostics
+}
+
+func vectorizerScopeDiagnosticCanonicalName(prefix string) func(string) (string, bool) {
+	switch prefix {
+	case "vector.stores":
+		return canonicalVectorStoreScopeName
+	case "vector.sources":
+		return canonicalVectorSourceScopeName
+	default:
+		return nil
+	}
 }
 
 func inspectVectorizerScopeName(path, prefix, name string) []Diagnostic {

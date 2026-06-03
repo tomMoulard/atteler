@@ -312,6 +312,43 @@ vector:
 	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.workspace.vectorizer")
 }
 
+func TestInspectPathSources_ReportsDuplicateVectorScopeAliases(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  stores:
+    vector-search:
+      vectorizer: lexical
+    vector_search:
+      vectorizer: embedding
+  sources:
+    git-history:
+      vectorizer: lexical
+    git_history:
+      vectorizer: embedding
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnosticMessage(
+		t,
+		reports[0].Diagnostics,
+		DiagnosticError,
+		"vector.stores.vector_search duplicates vector.stores.vector-search (both resolve to vector-search); keep one scope name",
+	)
+	assertDiagnosticMessage(
+		t,
+		reports[0].Diagnostics,
+		DiagnosticError,
+		"vector.sources.git_history duplicates vector.sources.git-history (both resolve to git_history); keep one scope name",
+	)
+}
+
 func TestInspectPathSources_ReportsNonMappingConfig(t *testing.T) {
 	t.Parallel()
 
