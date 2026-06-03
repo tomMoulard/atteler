@@ -75,6 +75,8 @@ func vectorConfigError(issues []string) error {
 func validateVectorStoreScopes(stores map[string]VectorizerConfig) []string {
 	var issues []string
 
+	issues = append(issues, validateVectorScopeAliases(stores, "vector.stores", canonicalVectorStoreScopeName)...)
+
 	for _, name := range sortedMapKeys(stores) {
 		field := "vector.stores." + name
 		if !knownVectorStoreScope(name) {
@@ -100,6 +102,10 @@ func validateVectorAgentScopes(agents map[string]VectorizerConfig) []string {
 func validateVectorAgentScopeNames(scopes map[string]VectorizerConfig, agents map[string]AgentConfig) []string {
 	var issues []string
 
+	issues = append(issues, validateVectorScopeAliases(scopes, "vector.agents", func(name string) (string, bool) {
+		return canonicalKnownVectorAgentScopeName(name, agents)
+	})...)
+
 	for _, name := range sortedMapKeys(scopes) {
 		if knownVectorAgentScope(name, agents) {
 			continue
@@ -115,6 +121,8 @@ func validateVectorAgentScopeNames(scopes map[string]VectorizerConfig, agents ma
 func validateVectorSourceScopes(sources map[string]VectorizerConfig) []string {
 	var issues []string
 
+	issues = append(issues, validateVectorScopeAliases(sources, "vector.sources", canonicalVectorSourceScopeName)...)
+
 	for _, name := range sortedMapKeys(sources) {
 		field := "vector.sources." + name
 		if !knownVectorSourceScope(name) {
@@ -122,6 +130,44 @@ func validateVectorSourceScopes(sources map[string]VectorizerConfig) []string {
 		}
 
 		issues = append(issues, validateVectorizerConfigValues(field, sources[name])...)
+	}
+
+	return issues
+}
+
+func validateVectorScopeAliases(
+	scopes map[string]VectorizerConfig,
+	prefix string,
+	canonicalName func(string) (string, bool),
+) []string {
+	if len(scopes) < 2 {
+		return nil
+	}
+
+	var issues []string
+
+	seen := make(map[string]string, len(scopes))
+
+	for _, name := range sortedMapKeys(scopes) {
+		canonical, ok := canonicalName(name)
+		if !ok {
+			continue
+		}
+
+		if previous, exists := seen[canonical]; exists {
+			issues = append(issues, fmt.Sprintf(
+				"%s.%s duplicates %s.%s (both resolve to %s); keep one scope name",
+				prefix,
+				name,
+				prefix,
+				previous,
+				canonical,
+			))
+
+			continue
+		}
+
+		seen[canonical] = name
 	}
 
 	return issues
@@ -548,7 +594,12 @@ func appendVectorIndexPathUse(uses []vectorIndexPathUse, field, path, lifecycle 
 }
 
 func vectorStoreIndexLifecycle(name string) (string, bool) {
-	switch normalizeVectorizerScopeKey(name) {
+	canonical, ok := canonicalVectorStoreScopeName(name)
+	if !ok {
+		return "", false
+	}
+
+	switch canonical {
 	case vectorIndexLifecycleAgentMemory:
 		return vectorIndexLifecycleAgentMemory, true
 	case "vector-search":
@@ -561,12 +612,17 @@ func vectorStoreIndexLifecycle(name string) (string, bool) {
 }
 
 func vectorSourceIndexLifecycle(name string) (string, bool) {
-	switch normalizeVectorizerScopeKey(name) {
+	canonical, ok := canonicalVectorSourceScopeName(name)
+	if !ok {
+		return "", false
+	}
+
+	switch canonical {
 	case vectorIndexLifecycleFile:
 		return vectorIndexLifecycleFile, true
 	case vectorIndexLifecycleSession:
 		return vectorIndexLifecycleSession, true
-	case vectorIndexLifecycleGitHistory:
+	case "git_history":
 		return vectorIndexLifecycleGitHistory, true
 	case vectorIndexLifecycleADR:
 		return vectorIndexLifecycleADR, true
@@ -576,48 +632,66 @@ func vectorSourceIndexLifecycle(name string) (string, bool) {
 }
 
 func knownVectorStoreScope(name string) bool {
+	_, ok := canonicalVectorStoreScopeName(name)
+
+	return ok
+}
+
+func canonicalVectorStoreScopeName(name string) (string, bool) {
 	switch normalizeVectorizerScopeKey(name) {
 	case vectorIndexLifecycleAgentMemory, "vector-search", vectorIndexLifecycleWorkspace:
-		return true
+		return normalizeVectorizerScopeKey(name), true
 	default:
-		return false
+		return "", false
 	}
 }
 
 func knownVectorSourceScope(name string) bool {
+	_, ok := canonicalVectorSourceScopeName(name)
+
+	return ok
+}
+
+func canonicalVectorSourceScopeName(name string) (string, bool) {
 	switch normalizeVectorizerScopeKey(name) {
 	case vectorIndexLifecycleFile, vectorIndexLifecycleSession, vectorIndexLifecycleGitHistory, vectorIndexLifecycleADR:
-		return true
+		return vectorSourceConfigFieldName(normalizeVectorizerScopeKey(name)), true
 	default:
-		return false
+		return "", false
 	}
 }
 
 func knownVectorAgentScope(name string, agents map[string]AgentConfig) bool {
+	_, ok := canonicalKnownVectorAgentScopeName(name, agents)
+
+	return ok
+}
+
+func canonicalKnownVectorAgentScopeName(name string, agents map[string]AgentConfig) (string, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return false
+		return "", false
 	}
 
 	if _, ok := agents[name]; ok {
-		return true
+		return name, true
 	}
 
 	lowerName := strings.ToLower(name)
-	for configured := range agents {
+	for _, configured := range sortedMapKeys(agents) {
 		if strings.ToLower(strings.TrimSpace(configured)) == lowerName {
-			return true
+			return configured, true
 		}
 	}
 
 	normalizedName := normalizeVectorizerScopeKey(name)
-	for configured := range agents {
+	for _, configured := range sortedMapKeys(agents) {
 		if normalizeVectorizerScopeKey(configured) == normalizedName {
-			return true
+			return configured, true
 		}
 	}
 
-	return false
+	return "", false
 }
 
 func knownVectorizerKind(kind string) bool {

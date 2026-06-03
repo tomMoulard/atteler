@@ -69,6 +69,28 @@ func TestValidateVectorConfigRejectsUnsupportedScopesAndValues(t *testing.T) {
 	assert.Contains(t, message, `vector.sources.git_histry.fallback_policy unsupported value "remote"`)
 }
 
+func TestValidateVectorConfigRejectsDuplicateScopeAliases(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateVectorConfig(VectorConfig{
+		Stores: map[string]VectorizerConfig{
+			"vector-search": {},
+			"vector_search": {},
+		},
+		Sources: map[string]VectorizerConfig{
+			"git-history": {},
+			"git_history": {},
+		},
+	})
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "vector.stores.vector_search duplicates vector.stores.vector-search")
+	assert.Contains(t, message, "both resolve to vector-search")
+	assert.Contains(t, message, "vector.sources.git_history duplicates vector.sources.git-history")
+	assert.Contains(t, message, "both resolve to git_history")
+}
+
 func TestValidateVectorConfigWithAgentsChecksAgentScopes(t *testing.T) {
 	t.Parallel()
 
@@ -90,6 +112,24 @@ func TestValidateVectorConfigWithAgentsChecksAgentScopes(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "vector.agents.reviwer unknown agent scope")
+}
+
+func TestValidateVectorConfigWithAgentsRejectsDuplicateAgentScopeAliases(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateVectorConfigWithAgents(VectorConfig{
+		Agents: map[string]VectorizerConfig{
+			"Review Team": {Vectorizer: "lexical"},
+			"review-team": {Vectorizer: "embedding"},
+		},
+	}, map[string]AgentConfig{
+		"Review Team": {},
+	})
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "vector.agents.review-team duplicates vector.agents.Review Team")
+	assert.Contains(t, message, "both resolve to Review Team")
 }
 
 func TestValidateVectorConfigRejectsIndexPathCollisionsAcrossLifecycles(t *testing.T) {
