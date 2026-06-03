@@ -1363,9 +1363,11 @@ go test ./pkg/vector -bench BenchmarkIndexANNLifecycle -benchmem
 
 Benchmark subcases are named `bruteforce`, `ann-exact`, and `ann-approx` so
 regressions show whether a corpus is still on the exact-scan side of the
-threshold or has crossed into approximate candidate search. Retrieval explain
-output records the same ANN mode and candidate count in scorer details and
-the text fields `detail_ann_exact_scan`, `detail_ann_documents`, and
+threshold or has crossed into approximate candidate search. Direct vector
+search output prints `ann_exact_scan`, `ann_documents`, and
+`ann_min_candidates` in the ranking header; retrieval explain output records
+the same ANN mode and candidate count in scorer details and the text fields
+`detail_ann_exact_scan`, `detail_ann_documents`, and
 `detail_ann_min_candidates`, so agents can distinguish exact small-corpus
 rankings from approximate large-index rankings. `BenchmarkIndexANNLifecycle`
 contrasts transient `Index.SearchANN` calls with a prebuilt `ANNIndex`, making

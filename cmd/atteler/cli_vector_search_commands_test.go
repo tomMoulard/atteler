@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -606,7 +607,7 @@ func TestRunVectorSearchRebuildsDimensionMismatchWhenSourcesProvided(t *testing.
 	assert.Equal(t, 3, loaded.Vectorizer.Dimensions)
 }
 
-func TestFormatVectorSearchHeaderReportsEmbeddingMetadata(t *testing.T) {
+func TestFormatVectorSearchHeaderReportsEmbeddingMetadataAndANNMode(t *testing.T) {
 	t.Parallel()
 
 	header := formatVectorSearchHeader(&vector.Index{
@@ -624,13 +625,44 @@ func TestFormatVectorSearchHeaderReportsEmbeddingMetadata(t *testing.T) {
 			Digest: vector.DigestText("embedding retrieval metadata"),
 			Bytes:  len("embedding retrieval metadata"),
 		}},
-	}, ".atteler/vector-index.json", false)
+	}, ".atteler/vector-index.json", false, 5)
 
 	assert.Contains(t, header, "vectorizer=embedding/ollama")
 	assert.Contains(t, header, "model=eval-embed")
 	assert.Contains(t, header, "base_url=http://127.0.0.1:11434")
+	assert.Contains(t, header, "ann_exact_scan=true")
+	assert.Contains(t, header, "ann_documents=1")
+	assert.Contains(t, header, "ann_min_candidates=1")
 	assert.Contains(t, header, "created_at=2026-06-01T10:00:00Z")
 	assert.Contains(t, header, "updated_at=2026-06-01T10:30:00Z")
+}
+
+func TestFormatVectorSearchHeaderReportsApproximateANNMode(t *testing.T) {
+	t.Parallel()
+
+	docs := make([]vector.Document, 0, vector.DefaultANNExactSearchMaxDocuments+1)
+	for i := range vector.DefaultANNExactSearchMaxDocuments + 1 {
+		docs = append(docs, vector.Document{
+			ID:     fmt.Sprintf("docs/%03d.md#chunk=0000", i),
+			Text:   "local RAG benchmark scale fixture",
+			Vector: vector.Vector{1, 0},
+		})
+	}
+
+	header := formatVectorSearchHeader(&vector.Index{
+		Vectorizer: vector.NewLexicalMetadata(2),
+		Dimensions: 2,
+		Documents:  docs,
+		Sources: []vector.SourceMetadata{{
+			Path:   "docs/scale.md",
+			Digest: vector.DigestText("local RAG benchmark scale fixture"),
+			Bytes:  len("local RAG benchmark scale fixture"),
+		}},
+	}, ".atteler/vector-index.json", false, 1)
+
+	assert.Contains(t, header, "ann_exact_scan=false")
+	assert.Contains(t, header, "ann_documents=65")
+	assert.Contains(t, header, "ann_min_candidates=64")
 }
 
 func TestVectorSearchSettings_CLIOverridesConfig(t *testing.T) {

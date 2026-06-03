@@ -130,7 +130,7 @@ func runVectorSearchOnce(ctx context.Context, settings vectorSearchSettings, que
 		return fmt.Errorf("vector search failed: %w", err)
 	}
 
-	fmt.Println(formatVectorSearchHeader(idx, settings.IndexPath, rebuilt))
+	fmt.Println(formatVectorSearchHeader(idx, settings.IndexPath, rebuilt, settings.Limit))
 
 	if len(results) == 0 {
 		fmt.Println("No vector results found.")
@@ -688,13 +688,18 @@ func rootRelativePath(root, path string) string {
 	return filepath.Join(root, path)
 }
 
-func formatVectorSearchHeader(idx *vector.Index, indexPath string, rebuilt bool) string {
+func formatVectorSearchHeader(idx *vector.Index, indexPath string, rebuilt bool, limit int) string {
+	ann := (vector.ANNOptions{}).Normalize(len(idx.Documents), limit)
+
 	parts := []string{
 		"vector_ranking",
 		formatVectorizerMetadata(idx.Vectorizer),
 		fmt.Sprintf("dimensions=%d", idx.Dimensions),
 		fmt.Sprintf("chunks=%d", len(idx.Documents)),
 		fmt.Sprintf("sources=%d", len(idx.Sources)),
+		fmt.Sprintf("ann_exact_scan=%t", (vector.ANNOptions{}).UsesExactSearch(len(idx.Documents), limit)),
+		fmt.Sprintf("ann_documents=%d", len(idx.Documents)),
+		fmt.Sprintf("ann_min_candidates=%d", ann.MinCandidates),
 		"index=" + indexPath,
 	}
 	if rebuilt {
