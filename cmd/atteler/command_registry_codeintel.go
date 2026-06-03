@@ -18,8 +18,8 @@ func providerlessConfigCodeIntelCommands() []command {
 			name:  codeIntelDomainName,
 			tier:  tierProviderlessConfig,
 			match: codeIntelCommandRequested,
-			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
-				return runCodeIntelCommand(s.cwd, codeIntelCommandInputFromOptions(o))
+			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
+				return runCodeIntelCommand(ctx, s.cwd, codeIntelCommandInputFromOptions(o))
 			},
 		},
 	}
@@ -29,11 +29,11 @@ func codeIntelCommandRequested(opts cliOptions) bool {
 	return matchingCodeIntelCommand(codeIntelCommandInputFromOptions(opts)) != nil
 }
 
-func runCodeIntelCommand(cwd string, input codeIntelCommandInput) error {
-	return runCodeIntelCommandWithWriter(nil, cwd, input)
+func runCodeIntelCommand(ctx context.Context, cwd string, input codeIntelCommandInput) error {
+	return runCodeIntelCommandWithWriter(ctx, nil, cwd, input)
 }
 
-func runCodeIntelCommandWithWriter(w io.Writer, cwd string, input codeIntelCommandInput) error {
+func runCodeIntelCommandWithWriter(ctx context.Context, w io.Writer, cwd string, input codeIntelCommandInput) error {
 	cmd, err := selectCodeIntelCommand(input)
 	if err != nil {
 		return err
@@ -44,10 +44,10 @@ func runCodeIntelCommandWithWriter(w io.Writer, cwd string, input codeIntelComma
 	}
 
 	if w != nil {
-		return runCodeIntelSchemaCommandWithWriter(w, cwd, input, cmd.name)
+		return runCodeIntelSchemaCommandWithWriter(ctx, w, cwd, input, cmd.name)
 	}
 
-	return runCodeIntelSchemaCommand(cwd, input, cmd.name)
+	return runCodeIntelSchemaCommand(ctx, cwd, input, cmd.name)
 }
 
 func matchingCodeIntelCommand(input codeIntelCommandInput) *codeIntelCommand {

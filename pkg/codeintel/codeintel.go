@@ -1,5 +1,6 @@
-// Package codeintel provides Go code intelligence primitives backed by package
-// loading, type information, and provenance-aware graph metadata.
+// Package codeintel provides code intelligence primitives backed by package
+// loading, language adapters, incremental persistence, and provenance-aware
+// graph metadata.
 //
 //nolint:govet,wsl_v5 // Public metadata structs prioritize stable/readable field order; wsl is noisy for evidence-building code.
 package codeintel
@@ -142,6 +143,7 @@ type SourceFile struct {
 	BuildTags   []string
 	Range       SourceRange
 	ContentHash string
+	Size        int64
 	ModTime     time.Time
 	Build       BuildContext
 	Provenance  Provenance
@@ -207,6 +209,7 @@ type IndexStats struct {
 	FilesScanned int
 	FilesReused  int
 	FilesChanged int
+	FilesDeleted int
 }
 
 // Index contains legacy summaries plus semantic code intelligence data.
@@ -223,6 +226,7 @@ type Index struct {
 	CallEdges    []CallEdge
 	Graph        *codegraph.EvidenceGraph
 	Diagnostics  []Diagnostic
+	Model        Model
 	Stats        IndexStats
 }
 
@@ -311,9 +315,10 @@ func (idxr *Indexer) indexDirWithOptions(root string, opts IndexOptions, req loa
 	cacheKey := "dir\x00" + cleanPath(root) + "\x00" + optionsKey(opts)
 	if cached, ok := idxr.cached(cacheKey, fingerprint); ok {
 		cached.Stats = IndexStats{CacheHit: true, FilesScanned: cached.Stats.FilesScanned, FilesReused: cached.Stats.FilesScanned}
+		cached.Model.Stats = cached.Stats
 		return cached, nil
 	}
-	reused := idxr.reusedFileCount(cacheKey, fingerprints)
+	reused, deleted := idxr.fileChangeCounts(cacheKey, fingerprints)
 
 	loadDir, patterns := packageLoadTarget(root, paths)
 	req.Dir = loadDir
@@ -326,7 +331,8 @@ func (idxr *Indexer) indexDirWithOptions(root string, opts IndexOptions, req loa
 		return Index{}, err
 	}
 
-	index.Stats = IndexStats{FilesScanned: len(paths), FilesReused: reused, FilesChanged: len(paths) - reused}
+	index.Stats = IndexStats{FilesScanned: len(paths), FilesReused: reused, FilesChanged: len(paths) - reused, FilesDeleted: deleted}
+	index.Model.Stats = index.Stats
 	idxr.store(cacheKey, fingerprint, fingerprints, index)
 
 	return index, nil
@@ -369,9 +375,10 @@ func (idxr *Indexer) indexFiles(paths []string, req loadRequest) (Index, error) 
 	cacheKey := "files\x00" + strings.Join(paths, "\x00")
 	if cached, ok := idxr.cached(cacheKey, fingerprint); ok {
 		cached.Stats = IndexStats{CacheHit: true, FilesScanned: cached.Stats.FilesScanned, FilesReused: cached.Stats.FilesScanned}
+		cached.Model.Stats = cached.Stats
 		return cached, nil
 	}
-	reused := idxr.reusedFileCount(cacheKey, fingerprints)
+	reused, deleted := idxr.fileChangeCounts(cacheKey, fingerprints)
 
 	root := commonDir(paths)
 	patterns := make([]string, 0, len(paths))
@@ -388,7 +395,8 @@ func (idxr *Indexer) indexFiles(paths []string, req loadRequest) (Index, error) 
 		return Index{}, err
 	}
 
-	index.Stats = IndexStats{FilesScanned: len(paths), FilesReused: reused, FilesChanged: len(paths) - reused}
+	index.Stats = IndexStats{FilesScanned: len(paths), FilesReused: reused, FilesChanged: len(paths) - reused, FilesDeleted: deleted}
+	index.Model.Stats = index.Stats
 	idxr.store(cacheKey, fingerprint, fingerprints, index)
 
 	return index, nil
@@ -423,9 +431,9 @@ func (idxr *Indexer) cached(key, fingerprint string) (Index, bool) {
 	return cloneIndex(cached.index), true
 }
 
-func (idxr *Indexer) reusedFileCount(key string, fingerprints map[string]fileFingerprint) int {
+func (idxr *Indexer) fileChangeCounts(key string, fingerprints map[string]fileFingerprint) (reused, deleted int) {
 	if idxr == nil {
-		return 0
+		return 0, 0
 	}
 
 	idxr.mu.Lock()
@@ -433,17 +441,21 @@ func (idxr *Indexer) reusedFileCount(key string, fingerprints map[string]fileFin
 
 	cached, ok := idxr.cache[key]
 	if !ok {
-		return 0
+		return 0, 0
 	}
 
-	var reused int
 	for path, current := range fingerprints {
 		if previous, ok := cached.fingerprints[path]; ok && sameFileFingerprint(previous, current) {
 			reused++
 		}
 	}
+	for path := range cached.fingerprints {
+		if _, ok := fingerprints[path]; !ok {
+			deleted++
+		}
+	}
 
-	return reused
+	return reused, deleted
 }
 
 func (idxr *Indexer) store(key, fingerprint string, fingerprints map[string]fileFingerprint, index Index) {
@@ -482,6 +494,7 @@ func cloneIndex(index Index) Index {
 	index.References = cloneReferences(index.References)
 	index.CallEdges = cloneCallEdges(index.CallEdges)
 	index.Diagnostics = append([]Diagnostic(nil), index.Diagnostics...)
+	index.Model = cloneModel(index.Model)
 	index.Graph = index.Graph.Clone()
 	return index
 }
@@ -748,7 +761,7 @@ func cleanPath(path string) string {
 
 func skipDir(name string) bool {
 	switch name {
-	case ".git", ".hg", ".svn", "node_modules", "vendor":
+	case ".atteler", ".git", ".hg", ".svn", "node_modules", "vendor":
 		return true
 	default:
 		return false

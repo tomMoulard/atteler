@@ -40,6 +40,8 @@ type childExecutionCommandInput struct {
 }
 
 type codeIntelCommandInput struct {
+	ModelQuery                     string
+	ModelLanguage                  string
 	SymbolName                     string
 	SymbolFileSummary              string
 	SymbolPackageSummary           string
@@ -557,6 +559,8 @@ func childExecutionCommandInputFromOptions(opts cliOptions) childExecutionComman
 
 func codeIntelCommandInputFromOptions(opts cliOptions) codeIntelCommandInput {
 	return codeIntelCommandInput{
+		ModelQuery:                     opts.codeQuery,
+		ModelLanguage:                  opts.codeLanguage,
 		SymbolName:                     opts.codeSymbolName,
 		SymbolFileSummary:              opts.codeSymbolFileSummary,
 		SymbolPackageSummary:           opts.codeSymbolPackageSummary,

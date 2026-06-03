@@ -39,21 +39,16 @@ func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
 		return err
 	}
 
-	pool := lsp.NewServerPool(lsp.PoolOptions{CommandPolicy: authorizeLSPCommand})
-
-	defer func() {
-		if shutdownErr := pool.Shutdown(ctx); shutdownErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "lsp shutdown: %v\n", shutdownErr)
-		}
-	}()
-
+	// Use the package managed pool so repeated lookups in a long-lived atteler
+	// process reuse healthy language servers. The per-request policy still runs
+	// before both new starts and healthy reuse.
 	lspOptions := lsp.Options{
-		Command:    strings.TrimSpace(input.Command),
-		Args:       append([]string(nil), input.Args...),
-		FilePath:   strings.TrimSpace(input.FilePath),
-		RootPath:   strings.TrimSpace(input.RootPath),
-		LanguageID: strings.TrimSpace(input.LanguageID),
-		Pool:       pool,
+		Command:       strings.TrimSpace(input.Command),
+		Args:          append([]string(nil), input.Args...),
+		FilePath:      strings.TrimSpace(input.FilePath),
+		RootPath:      strings.TrimSpace(input.RootPath),
+		LanguageID:    strings.TrimSpace(input.LanguageID),
+		CommandPolicy: authorizeLSPCommand,
 	}
 
 	var symbols []lsp.Symbol

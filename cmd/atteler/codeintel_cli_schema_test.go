@@ -29,7 +29,7 @@ func TestCodeIntelQueryDocExamplesRunThroughCLIAsJSON(t *testing.T) {
 					opts := parseGroupedOptionsForRouteTest(t, args[1:])
 
 					var out bytes.Buffer
-					require.NoError(t, runCodeIntelCommandWithWriter(&out, root, codeIntelCommandInputFromOptions(opts)))
+					require.NoError(t, runCodeIntelCommandWithWriter(t.Context(), &out, root, codeIntelCommandInputFromOptions(opts)))
 
 					var decoded codeIntelResponse
 					require.NoError(t, json.Unmarshal(out.Bytes(), &decoded))
@@ -60,7 +60,7 @@ func TestCodeIntelLegacyFlagsRunThroughCLIAsJSON(t *testing.T) {
 				applyPositionalOptions(opts, fs.Args())
 
 				var out bytes.Buffer
-				require.NoError(t, runCodeIntelCommandWithWriter(&out, root, codeIntelCommandInputFromOptions(*opts)))
+				require.NoError(t, runCodeIntelCommandWithWriter(t.Context(), &out, root, codeIntelCommandInputFromOptions(*opts)))
 
 				var decoded codeIntelResponse
 				require.NoError(t, json.Unmarshal(out.Bytes(), &decoded))
@@ -90,7 +90,7 @@ func TestCodeIntelLegacyFlagsRunThroughCLIAsText(t *testing.T) {
 			applyPositionalOptions(opts, fs.Args())
 
 			var out bytes.Buffer
-			require.NoError(t, runCodeIntelCommandWithWriter(&out, root, codeIntelCommandInputFromOptions(*opts)))
+			require.NoError(t, runCodeIntelCommandWithWriter(t.Context(), &out, root, codeIntelCommandInputFromOptions(*opts)))
 			assert.NotEmpty(t, out.String())
 
 			if !codeIntelExampleMayBeEmpty(descriptor.Name) {
@@ -126,7 +126,7 @@ func TestCodeIntelPaginationFlagsReachSchemaOutputThroughCLI(t *testing.T) {
 			opts := parseGroupedOptionsForRouteTest(t, test.args)
 
 			var out bytes.Buffer
-			require.NoError(t, runCodeIntelCommandWithWriter(&out, root, codeIntelCommandInputFromOptions(opts)))
+			require.NoError(t, runCodeIntelCommandWithWriter(t.Context(), &out, root, codeIntelCommandInputFromOptions(opts)))
 
 			var decoded codeIntelResponse
 			require.NoError(t, json.Unmarshal(out.Bytes(), &decoded))
@@ -159,7 +159,7 @@ func TestCodeIntelQueryDocExamplesRunThroughCLIAsText(t *testing.T) {
 				opts := parseGroupedOptionsForRouteTest(t, args[1:])
 
 				var out bytes.Buffer
-				require.NoError(t, runCodeIntelCommandWithWriter(&out, root, codeIntelCommandInputFromOptions(opts)))
+				require.NoError(t, runCodeIntelCommandWithWriter(t.Context(), &out, root, codeIntelCommandInputFromOptions(opts)))
 				assert.NotEmpty(t, out.String())
 
 				if !codeIntelExampleMayBeEmpty(query.Name) {

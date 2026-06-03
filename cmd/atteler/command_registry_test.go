@@ -960,7 +960,8 @@ func TestCommandSurface_MarkdownDocsRenderFromSurface(t *testing.T) {
 	assert.Contains(t, docs, "Policy: `mutates-filesystem`")
 	assert.Contains(t, docs, "- Policy: `runs-local-process`, `mutates-worktree`")
 	assert.Contains(t, docs, "`code-intel` (providerless-config)")
-	assert.Contains(t, docs, "- Input fields: `SymbolName`, `SymbolFileSummary`")
+	assert.Contains(t, docs, "- Input fields: `ModelQuery`, `ModelLanguage`, `SymbolName`, `SymbolFileSummary`")
+	assert.Contains(t, docs, "`--code-language`")
 	assert.Contains(t, docs, "`--code-limit`")
 	assert.Contains(t, docs, "`--code-offset`")
 }
@@ -1727,6 +1728,12 @@ func TestCommandRegistry_GroupedCommandsWithSupplementalFlagsReachExpectedHandle
 			args:     []string{"code-intel", "lsp-workspace", "Handler", "--lsp-command", "gopls"},
 			wantName: codeIntelLSPSymbolsName,
 			wantTier: tierProviderless,
+		},
+		{
+			name:     "code-intel query routes to shared code index handler",
+			args:     []string{"code-intel", "query", "definitions:helper", "--code-language", "python"},
+			wantName: "code-intel",
+			wantTier: tierProviderlessConfig,
 		},
 		{
 			name:     "review run routes stateful when executed",

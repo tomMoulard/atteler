@@ -184,6 +184,38 @@ func TestServerPool_ReusesHealthyServer(t *testing.T) {
 	assert.Equal(t, 1, fakeLaunchCount(t, launchFile))
 }
 
+func TestPackageConvenienceFunctionsReuseDefaultPool(t *testing.T) {
+	t.Parallel()
+	shutdownDefaultPoolForTest(t)
+
+	file := writeTempSource(t, "package main\nfunc main() {}\n")
+	launchFile := t.TempDir() + "/launches.log"
+	var authorizations atomic.Int32
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	opts := Options{
+		Command:  os.Args[0],
+		Env:      []string{"ATTELER_LSP_FAKE_SERVER=document", "ATTELER_LSP_FAKE_LAUNCH_FILE=" + launchFile},
+		FilePath: file,
+		CommandPolicy: func(_ context.Context, spec CommandSpec) error {
+			authorizations.Add(1)
+			assert.Equal(t, os.Args[0], spec.Command)
+
+			return nil
+		},
+	}
+
+	_, err := DocumentSymbols(ctx, opts)
+	require.NoError(t, err)
+	_, err = DocumentSymbols(ctx, opts)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, fakeLaunchCount(t, launchFile))
+	assert.Equal(t, int32(2), authorizations.Load())
+}
+
 func TestServerPool_ReusesServerAfterRequestContextCanceled(t *testing.T) {
 	t.Parallel()
 	pool := newTestPool(t)
@@ -754,6 +786,19 @@ func newTestPool(t *testing.T) *ServerPool {
 	})
 
 	return pool
+}
+
+func shutdownDefaultPoolForTest(t *testing.T) {
+	t.Helper()
+
+	shutdown := func() {
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+		defer cancel()
+		require.NoError(t, ShutdownDefaultPool(shutdownCtx))
+	}
+
+	shutdown()
+	t.Cleanup(shutdown)
 }
 
 func writeTempSource(t *testing.T, content string) string {

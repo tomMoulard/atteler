@@ -105,6 +105,7 @@ func loadIndex(req loadRequest) (Index, error) {
 	builder.collectPackages(pkgs)
 	builder.collectReferencesAndCalls()
 	builder.finish()
+	builder.index.Model = modelFromGoIndex(builder.index)
 
 	return builder.index, nil
 }
@@ -331,6 +332,7 @@ func (builder *semanticBuilder) collectFile(file includedFile, pkgNode codegraph
 		BuildTags:   buildTagExpressions(file.syntax),
 		Range:       fileRange,
 		ContentHash: file.fingerprint.Hash,
+		Size:        file.fingerprint.Size,
 		ModTime:     file.fingerprint.ModTime,
 		Build:       file.build,
 		Provenance:  fileProvenance,
