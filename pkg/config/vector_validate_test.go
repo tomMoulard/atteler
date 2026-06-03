@@ -159,6 +159,48 @@ func TestValidateVectorConfigRejectsIndexPathCollisionsWithDefaults(t *testing.T
 	assert.Contains(t, message, "session and file indexes must not share")
 }
 
+func TestValidateVectorConfigRejectsLexicalFallbackIndexPathCollisions(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateVectorConfig(VectorConfig{
+		Vectorizer:         "embedding",
+		FallbackPolicy:     "lexical",
+		WorkspaceIndexPath: ".atteler/git-history-vector-index.lexical.json",
+	})
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "vector.workspace_index_path index_path")
+	assert.Contains(t, message, "vector.sources.git_history default lexical fallback")
+	assert.Contains(t, message, "workspace and git-history indexes must not share")
+}
+
+func TestValidateVectorConfigAllowsLexicalFallbackAliasesWithinLifecycle(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateVectorConfig(VectorConfig{
+		Vectorizer:     "embedding",
+		FallbackPolicy: "lexical",
+		IndexPath:      ".atteler/file-index.json",
+		Stores: map[string]VectorizerConfig{
+			"vector-search": {
+				IndexPath: ".atteler/file-index.lexical.json",
+			},
+		},
+	})
+	require.NoError(t, err)
+}
+
+func TestVectorLexicalFallbackIndexPath(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, ".atteler/vector-index.lexical.json", vectorLexicalFallbackIndexPath(".atteler/vector-index.json"))
+	assert.Equal(t, ".atteler/vector-index.lexical", vectorLexicalFallbackIndexPath(".atteler/vector-index"))
+	assert.Equal(t, ".atteler/vector-index.lexical.json", vectorLexicalFallbackIndexPath(".atteler/vector-index.lexical.json"))
+	assert.Equal(t, ".atteler/vector-index.lexical", vectorLexicalFallbackIndexPath(".atteler/vector-index.lexical"))
+	assert.Equal(t, "vector-index.lexical.json", vectorLexicalFallbackIndexPath(""))
+}
+
 func TestValidateVectorConfigWithAgentsRejectsSharedMemoryPathForDifferentVectorizers(t *testing.T) {
 	t.Parallel()
 

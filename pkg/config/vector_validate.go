@@ -26,6 +26,7 @@ const (
 	vectorValidationDefaultEmbeddingBaseURL  = "http://127.0.0.1:11434"
 	vectorValidationKindLexical              = "lexical"
 	vectorValidationKindEmbedding            = "embedding"
+	vectorValidationFallbackFail             = "fail"
 	vectorValidationAliasLexicalFallback     = "lexical-fallback"
 	vectorValidationAliasFallback            = "fallback"
 )
@@ -318,8 +319,19 @@ func canonicalVectorProviderForValidation(provider string) string {
 	}
 }
 
+func canonicalVectorFallbackPolicyForValidation(policy string) string {
+	switch normalizeVectorConfigValue(policy) {
+	case "", vectorValidationFallbackFail, "none":
+		return vectorValidationFallbackFail
+	case vectorValidationKindLexical, vectorValidationAliasLexicalFallback, vectorValidationAliasFallback:
+		return vectorValidationKindLexical
+	default:
+		return normalizeVectorConfigValue(policy)
+	}
+}
+
 func vectorConfiguredIndexPathUses(cfg VectorConfig) []vectorIndexPathUse {
-	uses := make([]vectorIndexPathUse, 0, len(cfg.Stores)+len(cfg.Agents)+len(cfg.Sources)+6)
+	uses := make([]vectorIndexPathUse, 0, len(cfg.Stores)+len(cfg.Agents)+len(cfg.Sources)+11)
 	uses = appendVectorIndexPathUse(
 		uses,
 		vectorIndexPathField("vector.index_path", cfg.IndexPath),
@@ -359,7 +371,160 @@ func vectorConfiguredIndexPathUses(cfg VectorConfig) []vectorIndexPathUse {
 		uses = appendVectorIndexPathUse(uses, "vector.sources."+name, cfg.Sources[name].IndexPath, lifecycle)
 	}
 
+	uses = appendVectorLexicalFallbackIndexPathUses(uses, cfg)
+
 	return uses
+}
+
+func appendVectorLexicalFallbackIndexPathUses(uses []vectorIndexPathUse, cfg VectorConfig) []vectorIndexPathUse {
+	fileField, filePath := vectorEffectiveFileIndexPath(cfg)
+	uses = appendVectorLexicalFallbackIndexPathUse(
+		uses,
+		fileField,
+		filePath,
+		vectorIndexLifecycleFile,
+		cfg.ResolveVectorizerConfig(VectorScope{
+			Store:  "vector-search",
+			Source: vectorIndexLifecycleFile,
+		}),
+	)
+
+	workspaceField, workspacePath := vectorEffectiveWorkspaceIndexPath(cfg)
+	uses = appendVectorLexicalFallbackIndexPathUse(
+		uses,
+		workspaceField,
+		workspacePath,
+		vectorIndexLifecycleWorkspace,
+		cfg.ResolveVectorizerConfig(VectorScope{
+			Store:  vectorIndexLifecycleWorkspace,
+			Source: vectorIndexLifecycleFile,
+		}),
+	)
+
+	sessionField, sessionPath := vectorEffectiveSourceIndexPath(cfg, vectorIndexLifecycleSession, vectorSessionDefaultIndexPath)
+	uses = appendVectorLexicalFallbackIndexPathUse(
+		uses,
+		sessionField,
+		sessionPath,
+		vectorIndexLifecycleSession,
+		cfg.ResolveVectorizerConfig(VectorScope{Source: vectorIndexLifecycleSession}),
+	)
+
+	gitHistoryField, gitHistoryPath := vectorEffectiveSourceIndexPath(cfg, vectorIndexLifecycleGitHistory, vectorGitHistoryDefaultIndexPath)
+	uses = appendVectorLexicalFallbackIndexPathUse(
+		uses,
+		gitHistoryField,
+		gitHistoryPath,
+		vectorIndexLifecycleGitHistory,
+		cfg.ResolveVectorizerConfig(VectorScope{Source: vectorIndexLifecycleGitHistory}),
+	)
+
+	adrField, adrPath := vectorEffectiveSourceIndexPath(cfg, vectorIndexLifecycleADR, vectorADRDefaultIndexPath)
+	uses = appendVectorLexicalFallbackIndexPathUse(
+		uses,
+		adrField,
+		adrPath,
+		vectorIndexLifecycleADR,
+		cfg.ResolveVectorizerConfig(VectorScope{Source: vectorIndexLifecycleADR}),
+	)
+
+	return uses
+}
+
+func appendVectorLexicalFallbackIndexPathUse(
+	uses []vectorIndexPathUse,
+	field string,
+	path string,
+	lifecycle string,
+	resolved VectorizerConfig,
+) []vectorIndexPathUse {
+	if !vectorizerConfigUsesLexicalFallback(resolved) {
+		return uses
+	}
+
+	fallbackPath := vectorLexicalFallbackIndexPath(path)
+	if normalizeVectorIndexPathForCompare(fallbackPath) == normalizeVectorIndexPathForCompare(path) {
+		return uses
+	}
+
+	return appendVectorIndexPathUse(uses, field+" lexical fallback", fallbackPath, lifecycle)
+}
+
+func vectorizerConfigUsesLexicalFallback(cfg VectorizerConfig) bool {
+	return canonicalVectorizerKindForValidation(cfg.Vectorizer) == vectorValidationKindEmbedding &&
+		canonicalVectorFallbackPolicyForValidation(cfg.FallbackPolicy) == vectorValidationKindLexical
+}
+
+func vectorEffectiveFileIndexPath(cfg VectorConfig) (field, path string) {
+	if sourceConfig, ok := vectorizerScopeConfig(cfg.Sources, vectorIndexLifecycleFile); ok &&
+		strings.TrimSpace(sourceConfig.IndexPath) != "" {
+		return "vector.sources.file", sourceConfig.IndexPath
+	}
+
+	if storeConfig, ok := vectorizerScopeConfig(cfg.Stores, "vector-search"); ok &&
+		strings.TrimSpace(storeConfig.IndexPath) != "" {
+		return "vector.stores.vector-search", storeConfig.IndexPath
+	}
+
+	if strings.TrimSpace(cfg.IndexPath) != "" {
+		return "vector.index_path", cfg.IndexPath
+	}
+
+	return "vector.index_path default", vectorFileDefaultIndexPath
+}
+
+func vectorEffectiveWorkspaceIndexPath(cfg VectorConfig) (field, path string) {
+	if storeConfig, ok := vectorizerScopeConfig(cfg.Stores, vectorIndexLifecycleWorkspace); ok &&
+		strings.TrimSpace(storeConfig.IndexPath) != "" {
+		return "vector.stores.workspace", storeConfig.IndexPath
+	}
+
+	if strings.TrimSpace(cfg.WorkspaceIndexPath) != "" {
+		return "vector.workspace_index_path", cfg.WorkspaceIndexPath
+	}
+
+	return "vector.workspace_index_path default", vectorWorkspaceDefaultIndexPath
+}
+
+func vectorEffectiveSourceIndexPath(cfg VectorConfig, sourceKind, defaultIndexPath string) (field, path string) {
+	field = "vector.sources." + vectorSourceConfigFieldName(sourceKind)
+	if sourceConfig, ok := vectorizerScopeConfig(cfg.Sources, sourceKind); ok &&
+		strings.TrimSpace(sourceConfig.IndexPath) != "" {
+		return field, sourceConfig.IndexPath
+	}
+
+	return field + " default", defaultIndexPath
+}
+
+func vectorSourceConfigFieldName(sourceKind string) string {
+	if sourceKind == vectorIndexLifecycleGitHistory {
+		return "git_history"
+	}
+
+	return sourceKind
+}
+
+func vectorLexicalFallbackIndexPath(indexPath string) string {
+	indexPath = strings.TrimSpace(indexPath)
+	if indexPath == "" {
+		return "vector-index.lexical.json"
+	}
+
+	if strings.HasSuffix(indexPath, ".lexical") {
+		return indexPath
+	}
+
+	extension := filepath.Ext(indexPath)
+	if extension == "" {
+		return indexPath + ".lexical"
+	}
+
+	stem := strings.TrimSuffix(indexPath, extension)
+	if strings.HasSuffix(stem, ".lexical") {
+		return indexPath
+	}
+
+	return stem + ".lexical" + extension
 }
 
 func vectorIndexPathField(field, path string) string {
@@ -476,7 +641,7 @@ func knownVectorProvider(provider string) bool {
 
 func knownVectorFallbackPolicy(policy string) bool {
 	switch normalizeVectorConfigValue(policy) {
-	case "", "fail", "none", vectorValidationKindLexical, vectorValidationAliasLexicalFallback, vectorValidationAliasFallback:
+	case "", vectorValidationFallbackFail, "none", vectorValidationKindLexical, vectorValidationAliasLexicalFallback, vectorValidationAliasFallback:
 		return true
 	default:
 		return false
