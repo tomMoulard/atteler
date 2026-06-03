@@ -1716,6 +1716,20 @@ type runResult struct {
 	stderr string
 }
 
+func TestE2ETestEnvIsolatesPersistentState(t *testing.T) {
+	t.Setenv("ATTELER_STATE", filepath.Join(t.TempDir(), "host-state.yaml"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "host-xdg-state"))
+
+	env := testEnv(t, runSpec{env: []string{"HOME=" + filepath.Join(t.TempDir(), "credential-home")}})
+	values := envValues(env)
+
+	require.NotEmpty(t, values["ATTELER_STATE"])
+	require.NotContains(t, values["ATTELER_STATE"], "host-state")
+	require.NotContains(t, values["ATTELER_STATE"], "credential-home")
+	require.NotContains(t, values["XDG_STATE_HOME"], "host-xdg-state")
+	require.NotContains(t, values["XDG_STATE_HOME"], "credential-home")
+}
+
 func runOK(t *testing.T, spec runSpec, args ...string) runResult {
 	t.Helper()
 
@@ -1788,6 +1802,7 @@ func testEnv(t *testing.T, spec runSpec) []string {
 		"ANTHROPIC_API_KEY":                true,
 		"ANTHROPIC_BASE_URL":               true,
 		"ATTELER_CONFIG":                   true,
+		"ATTELER_STATE":                    true,
 		"ATTELER_SKILL_LEARNING":           true,
 		"ATTELER_SKILL_LEARNING_DIR":       true,
 		"ATTELER_SKILL_LEARNING_SKILL_DIR": true,
@@ -1799,9 +1814,10 @@ func testEnv(t *testing.T, spec runSpec) []string {
 		"OPENAI_BASE_URL":                  true,
 		"OLLAMA_BASE_URL":                  true,
 		"XDG_CONFIG_HOME":                  true,
+		"XDG_STATE_HOME":                   true,
 	}
 
-	env := make([]string, 0, len(os.Environ())+12+len(spec.env))
+	env := make([]string, 0, len(os.Environ())+14+len(spec.env))
 	for _, item := range os.Environ() {
 		key, _, _ := strings.Cut(item, "=")
 		if !skip[key] {
@@ -1820,6 +1836,7 @@ func testEnv(t *testing.T, spec runSpec) []string {
 		"ANTHROPIC_API_KEY=",
 		"ANTHROPIC_BASE_URL=",
 		"ATTELER_CONFIG=",
+		"ATTELER_STATE="+filepath.Join(home, "state.yaml"),
 		"ATTELER_SKILL_LEARNING=false",
 		"ATTELER_SESSION_DIR="+sessionDir,
 		"CODEX_HOME=",
@@ -1829,6 +1846,7 @@ func testEnv(t *testing.T, spec runSpec) []string {
 		"OPENAI_BASE_URL=",
 		"OLLAMA_BASE_URL=",
 		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"XDG_STATE_HOME="+filepath.Join(home, ".local", "state"),
 	)
 	env = append(env, spec.env...)
 
@@ -1900,6 +1918,20 @@ func readOnlyE2ESession(t *testing.T, sessionDir string) e2eSavedSession {
 	require.NotEmpty(t, sess.WorktreeBase)
 
 	return sess
+}
+
+func envValues(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+
+		out[key] = value
+	}
+
+	return out
 }
 
 func writeExecutable(t *testing.T, path, content string) {
