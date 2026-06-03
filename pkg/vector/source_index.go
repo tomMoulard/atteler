@@ -346,7 +346,7 @@ func planSourceIndexRefresh(
 ) sourceIndexRefreshPlan {
 	currentMeta, currentByPath := sourceIndexCurrentMetadata(opts.Sources)
 	existingMeta := sourceIndexExistingMetadata(existing.Sources)
-	documentsByPath := workspaceDocumentsByPath(existing.Documents)
+	documentsByPath := indexDocumentsByPath(existing.Documents)
 
 	plan := sourceIndexRefreshPlan{
 		changedSources:    make([]Source, 0),
@@ -416,7 +416,7 @@ func planSourceIndexCurrentSource(
 		plan.changedSources = append(plan.changedSources, source)
 	default:
 		docs := documentsByPath[meta.Path]
-		if workspaceDocumentsNeedRefresh(docs, existing.Vectorizer, source, opts.Chunk) {
+		if indexDocumentsNeedRefresh(docs, existing.Vectorizer, source, opts.Chunk) {
 			result.Updated++
 			plan.changed = true
 

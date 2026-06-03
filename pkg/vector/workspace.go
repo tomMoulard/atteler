@@ -405,7 +405,7 @@ func refreshExistingWorkspaceIndex(
 		existingMeta[filepath.Clean(meta.Path)] = meta
 	}
 
-	documentsByPath := workspaceDocumentsByPath(existing.Documents)
+	documentsByPath := indexDocumentsByPath(existing.Documents)
 	changedSources := make([]Source, 0)
 	retainedDocuments := make([]Document, 0, len(existing.Documents))
 	retainedSources := make([]SourceMetadata, 0, len(sources))
@@ -426,7 +426,7 @@ func refreshExistingWorkspaceIndex(
 			changedSources = append(changedSources, currentByPath[meta.Path])
 		default:
 			docs := documentsByPath[meta.Path]
-			if workspaceDocumentsNeedRefresh(docs, existing.Vectorizer, currentByPath[meta.Path], opts.Chunk) {
+			if indexDocumentsNeedRefresh(docs, existing.Vectorizer, currentByPath[meta.Path], opts.Chunk) {
 				result.Updated++
 				changed = true
 
@@ -1326,7 +1326,7 @@ func workspaceFileSupported(path string) bool {
 	return ok
 }
 
-func workspaceDocumentsByPath(docs []Document) map[string][]Document {
+func indexDocumentsByPath(docs []Document) map[string][]Document {
 	out := make(map[string][]Document)
 
 	for i := range docs {
@@ -1343,13 +1343,13 @@ func workspaceDocumentsByPath(docs []Document) map[string][]Document {
 	return out
 }
 
-func workspaceDocumentsNeedRefresh(docs []Document, vectorizer VectorizerMetadata, source Source, chunk ChunkOptions) bool {
+func indexDocumentsNeedRefresh(docs []Document, vectorizer VectorizerMetadata, source Source, chunk ChunkOptions) bool {
 	return len(docs) == 0 ||
-		!workspaceDocumentsReusable(docs, vectorizer) ||
-		!workspaceDocumentsMatchSource(docs, source, chunk)
+		!indexDocumentsReusable(docs, vectorizer) ||
+		!indexDocumentsMatchSource(docs, source, chunk)
 }
 
-func workspaceDocumentsReusable(docs []Document, vectorizer VectorizerMetadata) bool {
+func indexDocumentsReusable(docs []Document, vectorizer VectorizerMetadata) bool {
 	vectorizer = vectorizer.Normalize()
 
 	for i := range docs {
@@ -1392,7 +1392,7 @@ func workspaceLexicalVectorMatchesText(doc Document) bool {
 	return vectorsEqual(doc.Vector, expected)
 }
 
-func workspaceDocumentsMatchSource(docs []Document, source Source, chunk ChunkOptions) bool {
+func indexDocumentsMatchSource(docs []Document, source Source, chunk ChunkOptions) bool {
 	sourceMetadata := sourceMetadataForSource(source)
 	if sourceMetadata.Path == "" {
 		return false
@@ -1419,7 +1419,7 @@ func workspaceDocumentsMatchSource(docs []Document, source Source, chunk ChunkOp
 
 	for _, chunk := range chunks {
 		doc, ok := docsByID[chunk.ID]
-		if !ok || !workspaceDocumentMatchesChunk(doc, source, sourceMetadata, chunk) {
+		if !ok || !indexDocumentMatchesChunk(doc, source, sourceMetadata, chunk) {
 			return false
 		}
 	}
@@ -1427,7 +1427,7 @@ func workspaceDocumentsMatchSource(docs []Document, source Source, chunk ChunkOp
 	return true
 }
 
-func workspaceDocumentMatchesChunk(doc Document, source Source, sourceMetadata SourceMetadata, chunk Chunk) bool {
+func indexDocumentMatchesChunk(doc Document, source Source, sourceMetadata SourceMetadata, chunk Chunk) bool {
 	expectedText, expectedMetadata := chunkDocumentPayload(source, sourceMetadata.Path, sourceMetadata, chunk)
 	if doc.Text != expectedText {
 		return false
@@ -1437,7 +1437,7 @@ func workspaceDocumentMatchesChunk(doc Document, source Source, sourceMetadata S
 		return false
 	}
 
-	if !workspaceDocumentMetadataMatches(doc.Metadata, expectedMetadata) {
+	if !indexDocumentMetadataMatches(doc.Metadata, expectedMetadata) {
 		return false
 	}
 
@@ -1446,7 +1446,7 @@ func workspaceDocumentMatchesChunk(doc Document, source Source, sourceMetadata S
 	return maps.Equal(doc.Provenance, expectedProvenance)
 }
 
-func workspaceDocumentMetadataMatches(actual, expected map[string]string) bool {
+func indexDocumentMetadataMatches(actual, expected map[string]string) bool {
 	actual = maps.Clone(actual)
 	expected = maps.Clone(expected)
 
