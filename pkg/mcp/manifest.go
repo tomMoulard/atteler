@@ -1,4 +1,4 @@
-// Package mcp defines dependency-free MCP manifest configuration primitives.
+// Package mcp defines MCP manifest configuration primitives and stdio client lifecycle helpers.
 package mcp
 
 import (
