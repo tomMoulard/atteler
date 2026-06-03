@@ -660,6 +660,107 @@ func TestProviderRegistrationSelectedModelUsesExplainTarget(t *testing.T) {
 	assert.Equal(t, "gpt-live-only", got)
 }
 
+func TestWorktreeMergePolicyFromConfigOptions_PreservesByDefault(t *testing.T) {
+	t.Parallel()
+
+	got := worktreeMergePolicyFromConfigOptions(appconfig.Config{}, cliOptions{})
+
+	assert.False(t, got.AutoMerge)
+	assert.False(t, got.OverrideVerification)
+	assert.Empty(t, got.VerificationCommands)
+}
+
+func TestWorktreeMergePolicyFromConfigOptions_RequiresExplicitAutoMerge(t *testing.T) {
+	t.Parallel()
+
+	configAutoMerge := true
+	got := worktreeMergePolicyFromConfigOptions(appconfig.Config{
+		Worktree: appconfig.WorktreeConfig{
+			AutoMerge:            &configAutoMerge,
+			VerificationCommands: []string{" go test ./... "},
+		},
+	}, cliOptions{
+		worktreeVerificationCommands: rawStringListFlag{" make test "},
+	})
+
+	assert.True(t, got.AutoMerge)
+	assert.Equal(t, []string{"go test ./...", "make test"}, got.VerificationCommands)
+	assert.False(t, got.OverrideVerification)
+
+	disabled := worktreeMergePolicyFromConfigOptions(appconfig.Config{
+		Worktree: appconfig.WorktreeConfig{AutoMerge: &configAutoMerge},
+	}, cliOptions{noAutoMerge: true})
+	assert.False(t, disabled.AutoMerge)
+}
+
+func TestValidateWorktreeAutoMergePolicy_RejectsUngatedAutoMerge(t *testing.T) {
+	t.Parallel()
+
+	err := validateWorktreeAutoMergePolicy(cliWorktreeMergePolicy{AutoMerge: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--worktree-verify-command")
+	assert.Contains(t, err.Error(), "--worktree-merge-override")
+
+	require.NoError(t, validateWorktreeAutoMergePolicy(cliWorktreeMergePolicy{}))
+	require.NoError(t, validateWorktreeAutoMergePolicy(cliWorktreeMergePolicy{
+		AutoMerge:            true,
+		VerificationCommands: []string{"go test ./..."},
+	}))
+	require.NoError(t, validateWorktreeAutoMergePolicy(cliWorktreeMergePolicy{
+		AutoMerge:            true,
+		OverrideVerification: true,
+	}))
+}
+
+func TestWorktreeManualMergePolicyFromOptions_UsesManualOverrideWhenNoCommands(t *testing.T) {
+	t.Parallel()
+
+	got := worktreeManualMergePolicyFromOptions(cliOptions{mergeWorktreeAllowBaseMismatch: true})
+
+	assert.True(t, got.OverrideVerification)
+	assert.True(t, got.AllowBaseMismatch)
+	assert.Empty(t, got.VerificationCommands)
+
+	withCommand := worktreeManualMergePolicyFromOptions(cliOptions{
+		worktreeVerificationCommands: rawStringListFlag{" test -f reviewed.txt "},
+	})
+	assert.False(t, withCommand.OverrideVerification)
+	assert.Equal(t, []string{"test -f reviewed.txt"}, withCommand.VerificationCommands)
+}
+
+func TestClearWorktreeMetadataFromLatestSessionPreservesSavedSessionChanges(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	stale := session.New("gpt-test", nil)
+	stale.WorktreePath = "/tmp/atteler-worktree"
+	stale.WorktreeBranch = "atteler/session"
+	stale.WorktreeBase = "main"
+	require.NoError(t, store.Save(stale))
+
+	latest := stale
+	latest.DefaultAgent = "executor"
+	latest.Append(llm.RoleUser, "keep this message")
+	require.NoError(t, store.Save(latest))
+
+	state := appState{
+		sessionStore: store,
+		sessionState: stale,
+	}
+
+	require.NoError(t, clearWorktreeMetadataFromLatestSession(&state))
+
+	got, err := store.Load(stale.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.WorktreePath)
+	assert.Empty(t, got.WorktreeBranch)
+	assert.Empty(t, got.WorktreeBase)
+	assert.Equal(t, "executor", got.DefaultAgent)
+	require.Len(t, got.Messages, 1)
+	assert.Equal(t, "keep this message", got.Messages[0].Content)
+	assert.Equal(t, got, state.sessionState)
+}
+
 func TestDoctorForcesFreshProviderReadiness(t *testing.T) { //nolint:paralleltest // Captures process stdout.
 	provider := &providerCommandTestProvider{
 		healthErr: errors.New("cached failure"),

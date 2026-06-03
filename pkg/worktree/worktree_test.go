@@ -98,17 +98,19 @@ func commitAll(t *testing.T, repo, message string) {
 
 func mergeOptions() MergeOptions {
 	return MergeOptions{
-		AutoMerge: true,
-		Strategy:  MergeStrategyMerge,
+		AutoMerge:            true,
+		OverrideVerification: true,
+		Strategy:             MergeStrategyMerge,
 	}
 }
 
 func reviewedAutoCommitMergeOptions() MergeOptions {
 	return MergeOptions{
-		AutoCommit:         true,
-		ReviewedAutoCommit: true,
-		AutoMerge:          true,
-		Strategy:           MergeStrategyMerge,
+		AutoCommit:           true,
+		ReviewedAutoCommit:   true,
+		AutoMerge:            true,
+		OverrideVerification: true,
+		Strategy:             MergeStrategyMerge,
 	}
 }
 
@@ -264,6 +266,10 @@ func TestCreateRefusesDirtyBaseBeforeManifest(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "before isolation")
 	assert.Contains(t, err.Error(), "dirty.txt")
+	assert.Contains(t, err.Error(), "recovery: inspect base with: git -C ")
+	assert.Contains(t, err.Error(), " status --short")
+	assert.Contains(t, err.Error(), "recovery: save base changes with: git -C ")
+	assert.Contains(t, err.Error(), " stash push -u")
 
 	branchExists, branchErr := gitBranchExists(t.Context(), repo, "atteler/dirty-create")
 	require.NoError(t, branchErr)
@@ -411,6 +417,141 @@ func TestMergeWithExplicitPolicy(t *testing.T) {
 	}
 }
 
+func TestMergeWithVerificationCommandsReportsResult(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := CreateContext(context.Background(), repo, "verified-result")
+	require.NoError(t, err)
+	writeFile(t, filepath.Join(info.Path, "verified.txt"), "verified\n")
+
+	result, err := MergeWithResultContext(t.Context(), repo, info, MergeOptions{
+		AutoCommit:           true,
+		ReviewedAutoCommit:   true,
+		AutoMerge:            true,
+		Strategy:             MergeStrategyMerge,
+		VerificationCommands: []string{"test -f verified.txt"},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, info.SessionID, result.SessionID)
+	assert.Contains(t, result.DiffSummary, "verified.txt")
+	require.Len(t, result.Verification, 1)
+	assert.Equal(t, "test -f verified.txt", result.Verification[0].Command)
+	assert.True(t, result.Verification[0].Passed)
+	assert.NotEmpty(t, result.CommitSHA)
+	assert.NotEmpty(t, result.PreMergeSHA)
+	assert.NotEmpty(t, result.TransactionLog)
+	assert.Contains(t, result.RollbackCommands[0], "revert -m 1")
+
+	data, readErr := os.ReadFile(filepath.Join(repo, "verified.txt"))
+	require.NoError(t, readErr)
+	assert.Equal(t, "verified\n", string(data))
+}
+
+func TestMergeWithNoChangesReportsResetRollbackOnly(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := CreateContext(context.Background(), repo, "no-change-result")
+	require.NoError(t, err)
+
+	result, err := MergeWithResultContext(t.Context(), repo, info, MergeOptions{
+		AutoMerge:            true,
+		OverrideVerification: true,
+		Strategy:             MergeStrategyMerge,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "no file changes", result.DiffSummary)
+	assert.Equal(t, result.PreMergeSHA, result.CommitSHA)
+	assert.NotEmpty(t, result.RollbackCommands)
+	assert.NotContains(t, strings.Join(result.RollbackCommands, "\n"), "revert -m 1")
+	assert.Contains(t, strings.Join(result.RollbackCommands, "\n"), "reset --hard")
+}
+
+func TestMergeFailedVerificationPreservesWorktree(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := CreateContext(context.Background(), repo, "failed-verification")
+	require.NoError(t, err)
+	writeFile(t, filepath.Join(info.Path, "unmerged.txt"), "unmerged\n")
+
+	result, err := MergeWithResultContext(t.Context(), repo, info, MergeOptions{
+		AutoCommit:           true,
+		ReviewedAutoCommit:   true,
+		AutoMerge:            true,
+		Strategy:             MergeStrategyMerge,
+		VerificationCommands: []string{"echo nope >&2; exit 7"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "verification")
+	assert.Contains(t, err.Error(), "nope")
+	require.Len(t, result.Verification, 1)
+	assert.False(t, result.Verification[0].Passed)
+
+	_, readErr := os.ReadFile(filepath.Join(repo, "unmerged.txt"))
+	assert.True(t, os.IsNotExist(readErr))
+
+	exists, existsErr := pathExists(info.Path)
+	require.NoError(t, existsErr)
+	assert.True(t, exists)
+	branchExists, branchErr := gitBranchExists(t.Context(), repo, info.Branch)
+	require.NoError(t, branchErr)
+	assert.True(t, branchExists)
+
+	require.NoError(t, RemoveWithOptionsContext(t.Context(), repo, info, RemoveOptions{Force: true}))
+}
+
+func TestMergeVerificationOverridePermitsNoCommands(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := CreateContext(context.Background(), repo, "override-verification")
+	require.NoError(t, err)
+	writeFile(t, filepath.Join(info.Path, "override.txt"), "override\n")
+
+	result, err := MergeWithResultContext(t.Context(), repo, info, MergeOptions{
+		AutoCommit:           true,
+		ReviewedAutoCommit:   true,
+		AutoMerge:            true,
+		OverrideVerification: true,
+		Strategy:             MergeStrategyMerge,
+	})
+	require.NoError(t, err)
+
+	assert.True(t, result.VerificationOverridden)
+	assert.Empty(t, result.Verification)
+	assert.NotEmpty(t, result.CommitSHA)
+	require.FileExists(t, filepath.Join(repo, "override.txt"))
+}
+
+func TestMergeVerificationCommandsRunWhenOverrideAlsoSet(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t)
+
+	info, err := CreateContext(context.Background(), repo, "override-with-command")
+	require.NoError(t, err)
+	writeFile(t, filepath.Join(info.Path, "reviewed.txt"), "reviewed\n")
+
+	result, err := MergeWithResultContext(t.Context(), repo, info, MergeOptions{
+		AutoCommit:           true,
+		ReviewedAutoCommit:   true,
+		AutoMerge:            true,
+		OverrideVerification: true,
+		Strategy:             MergeStrategyMerge,
+		VerificationCommands: []string{"test -f reviewed.txt"},
+	})
+	require.NoError(t, err)
+
+	assert.False(t, result.VerificationOverridden)
+	require.Len(t, result.Verification, 1)
+	assert.Equal(t, "test -f reviewed.txt", result.Verification[0].Command)
+	assert.True(t, result.Verification[0].Passed)
+	require.FileExists(t, filepath.Join(repo, "reviewed.txt"))
+}
+
 func TestMergeRequiresExplicitAutoMergePolicy(t *testing.T) {
 	t.Parallel()
 	repo := initTestRepo(t)
@@ -515,6 +656,10 @@ func TestMergeRequiresExplicitPolicies(t *testing.T) {
 	assert.Contains(t, err.Error(), "explicit strategy")
 
 	err = MergeWithOptionsContext(t.Context(), repo, info, MergeOptions{AutoMerge: true, Strategy: MergeStrategyMerge})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "verification command")
+
+	err = MergeWithOptionsContext(t.Context(), repo, info, MergeOptions{AutoMerge: true, Strategy: MergeStrategyMerge, OverrideVerification: true})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auto-commit policy")
 
@@ -714,6 +859,10 @@ func TestMergeRefusesDirtyBaseWorktree(t *testing.T) {
 	assert.Contains(t, err.Error(), "preflight main repository")
 	assert.Contains(t, err.Error(), "uncommitted or untracked")
 	assert.Contains(t, err.Error(), "untracked.txt")
+	assert.Contains(t, err.Error(), "recovery: inspect base with: git -C ")
+	assert.Contains(t, err.Error(), " status --short")
+	assert.Contains(t, err.Error(), "recovery: restore base branch with: git -C ")
+	assert.Contains(t, err.Error(), " checkout")
 
 	require.NoError(t, os.Remove(filepath.Join(repo, "untracked.txt")))
 	require.NoError(t, RemoveContext(context.Background(), repo, info))

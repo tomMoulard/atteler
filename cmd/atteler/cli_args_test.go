@@ -63,6 +63,11 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			want: []string{"--run-plugin", "reviewer/check", "--plugin-dry-run"},
 		},
 		{
+			name: "worktrees run auto merge gate",
+			args: []string{"worktrees", "run", "add", "tests", "--worktree-auto-merge", "--worktree-verify-command", "go test ./..."},
+			want: []string{"--worktree", "--worktree-auto-merge", "--worktree-verify-command", "go test ./...", "add tests"},
+		},
+		{
 			name: "leading flags stay parseable before domain command",
 			args: []string{"--model", "openai/gpt-5.4", "chat", "once", "explain", "this", "repo"},
 			want: []string{"--model", "openai/gpt-5.4", "--once", "explain this repo"},
@@ -443,6 +448,8 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "plugins", args: []string{"plugins", "describe", "reviewer"}, want: []string{"--describe-plugin", "reviewer"}},
 		{name: "worktrees", args: []string{"worktrees", "merge", "session-123"}, want: []string{"--merge-worktree", "session-123"}},
 		{name: "worktrees merge base mismatch override", args: []string{"worktrees", "merge", "session-123", "--merge-worktree-allow-base-mismatch"}, want: []string{"--merge-worktree", "session-123", "--merge-worktree-allow-base-mismatch"}},
+		{name: "worktrees merge verification command", args: []string{"worktrees", "merge", "session-123", "--worktree-verify-command", "go test ./..."}, want: []string{"--merge-worktree", "session-123", "--worktree-verify-command", "go test ./..."}},
+		{name: "worktrees merge verification override", args: []string{"worktrees", "merge", "session-123", "--worktree-merge-override"}, want: []string{"--merge-worktree", "session-123", "--worktree-merge-override"}},
 		{name: "worktrees run prompt", args: []string{"worktrees", "run", "add", "tests"}, want: []string{"--worktree", "add tests"}},
 		{name: "eval", args: []string{"eval", "output", "actual.txt"}, want: []string{"--eval-output", "actual.txt"}},
 		{name: "eval run", args: []string{"eval", "run", "suite.eval.yaml"}, want: []string{"--eval-assertions", "suite.eval.yaml"}},

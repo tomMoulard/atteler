@@ -1168,41 +1168,83 @@ func firstNonEmpty(values ...string) string {
 // Worktree commands
 // ---------------------------------------------------------------------------
 
-// finalizeWorktree auto-merges the session worktree when enabled, or prints
-// a reminder for manual merge.
-func finalizeWorktree(ctx context.Context, state *appState) {
+// finalizeWorktree preserves the session worktree by default, or runs a
+// reviewed auto-merge transaction when explicitly configured.
+func finalizeWorktree(ctx context.Context, state *appState) error {
 	if state.worktreeInfo == nil {
-		return
+		return nil
 	}
 
 	if !state.autoMergeWorktree {
 		fmt.Fprintln(os.Stderr, "worktree: session files are in "+state.worktreeInfo.Path)
 		fmt.Fprintln(os.Stderr, "worktree: merge with: atteler --merge-worktree "+state.sessionState.ID)
 
-		return
+		return nil
 	}
 
 	fmt.Fprintln(os.Stderr, "worktree: merging "+state.worktreeInfo.Branch+" into "+state.worktreeInfo.BaseBranch+"...")
 
-	if err := worktree.MergeWithOptionsContext(ctx, state.cwd, state.worktreeInfo, worktree.MergeOptions{
-		AutoMerge:  true,
-		Strategy:   worktree.MergeStrategyMerge,
-		Provenance: worktreeMergeProvenance(state.sessionState),
-	}); err != nil {
+	result, err := worktree.MergeWithResultContext(ctx, state.cwd, state.worktreeInfo, worktree.MergeOptions{
+		AutoCommit:           true,
+		ReviewedAutoCommit:   true,
+		AutoMerge:            true,
+		OverrideVerification: state.worktreeMergeOverride,
+		Strategy:             worktree.MergeStrategyMerge,
+		VerificationCommands: state.worktreeVerificationCommands,
+		Provenance:           worktreeMergeProvenance(state.sessionState),
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "worktree: auto-merge failed: "+err.Error())
 		fmt.Fprintln(os.Stderr, "worktree: files preserved in "+state.worktreeInfo.Path)
 		fmt.Fprintln(os.Stderr, "worktree: retry with: atteler --merge-worktree "+state.sessionState.ID)
 
-		return
+		return fmt.Errorf("worktree auto-merge failed: %w", err)
 	}
 
-	state.sessionState.WorktreePath = ""
-	state.sessionState.WorktreeBranch = ""
-
-	state.sessionState.WorktreeBase = ""
-	if saveErr := state.sessionStore.Save(state.sessionState); saveErr != nil {
+	if saveErr := clearWorktreeMetadataFromLatestSession(state); saveErr != nil {
 		fmt.Fprintln(os.Stderr, "warning: could not update session after merge: "+saveErr.Error())
 	}
 
+	printWorktreeMergeResult(os.Stderr, result)
 	fmt.Fprintln(os.Stderr, "worktree: merged and cleaned up")
+
+	return nil
+}
+
+func clearWorktreeMetadataFromLatestSession(state *appState) error {
+	if state == nil {
+		return nil
+	}
+
+	latest := state.sessionState
+	if state.sessionStore != nil && latest.ID != "" {
+		loaded, err := state.sessionStore.Load(latest.ID)
+		if err != nil {
+			return fmt.Errorf("reload session: %w", err)
+		}
+
+		latest = loaded
+	}
+
+	latest.WorktreePath = ""
+	latest.WorktreeBranch = ""
+	latest.WorktreeBase = ""
+	state.sessionState = latest
+
+	if state.sessionStore == nil || latest.ID == "" {
+		return nil
+	}
+
+	if err := state.sessionStore.Save(latest); err != nil {
+		return fmt.Errorf("save session: %w", err)
+	}
+
+	saved, err := state.sessionStore.Load(latest.ID)
+	if err != nil {
+		return fmt.Errorf("reload saved session: %w", err)
+	}
+
+	state.sessionState = saved
+
+	return nil
 }

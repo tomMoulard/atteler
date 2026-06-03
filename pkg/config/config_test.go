@@ -110,6 +110,11 @@ vector:
   workspace_limit: 3
   workspace_max_file_bytes: 12345
   workspace_max_files: 321
+worktree:
+  auto_merge: true
+  verification_commands:
+    - go test ./...
+  override_verification: false
 `)
 
 	cfg, loaded, err := LoadFiles([]string{global, filepath.Join(dir, "missing.json"), local})
@@ -317,6 +322,10 @@ vector:
 	assert.Equal(t, 3, cfg.Vector.WorkspaceLimit)
 	assert.Equal(t, 12345, cfg.Vector.WorkspaceMaxFileBytes)
 	assert.Equal(t, 321, cfg.Vector.WorkspaceMaxFiles)
+	require.NotNil(t, cfg.Worktree.AutoMerge)
+	assert.True(t, *cfg.Worktree.AutoMerge)
+	assert.Equal(t, []string{"go test ./..."}, cfg.Worktree.VerificationCommands)
+	assert.False(t, cfg.Worktree.OverrideVerification)
 }
 
 func TestLoadFiles_ConfiguresAllAgentLoopBudgetFields(t *testing.T) {

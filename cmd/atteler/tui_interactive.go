@@ -171,9 +171,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		),
 	})
 
-	finalizeWorktree(ctx, &state)
-
-	return nil
+	return finalizeWorktree(ctx, &state)
 }
 
 func appStateSessionGeneration(state appState) generationSettings {

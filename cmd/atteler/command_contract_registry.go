@@ -108,8 +108,8 @@ func inlineCommandContractsByName() map[string]commandContract {
 		),
 		"merge-worktree": commandContractFor(
 			"merge a session worktree back into its base branch",
-			[]string{"--merge-worktree", "--merge-worktree-allow-base-mismatch"},
-			[]string{commandEffectFilesystemRead, commandEffectGitRead, commandEffectWorktreeWrite, commandEffectUserOutput},
+			[]string{"--merge-worktree", "--merge-worktree-allow-base-mismatch", "--worktree-verify-command", "--worktree-merge-override"},
+			[]string{commandEffectFilesystemRead, commandEffectGitRead, commandEffectProcessExecute, commandEffectWorktreeWrite, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("mergeWorktreeCommandInput"),
 			withExamples("atteler worktrees merge 20260430-120000-deadbeef"),

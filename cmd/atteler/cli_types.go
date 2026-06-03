@@ -361,6 +361,7 @@ type cliOptions struct {
 	watchIssueLabels                   stringListFlag
 	agentMemoryIndexFiles              stringListFlag
 	memoryRedactRules                  rawStringListFlag
+	worktreeVerificationCommands       rawStringListFlag
 	memoryTags                         stringListFlag
 	planAgentNames                     stringListFlag
 	retrievalFilters                   stringListFlag
@@ -507,6 +508,8 @@ type cliOptions struct {
 	headlessPrivateLog                 bool
 	showVersion                        bool
 	useWorktree                        bool
+	worktreeAutoMerge                  bool
+	worktreeMergeOverride              bool
 	mergeWorktreeAllowBaseMismatch     bool
 	memoryGlobal                       bool
 	memoryListCorpus                   bool
@@ -519,43 +522,45 @@ type cliOptions struct {
 
 //nolint:govet // field order follows app state grouping; padding is not performance-sensitive.
 type appState struct {
-	config                      appconfig.Config
-	sessionState                session.Session
-	contextOptions              contextref.Options
-	generationDefaults          generationSettings
-	generationOverrides         generationSettings
-	agentLoopBudget             llm.AgentLoopBudget
-	agentLoopCheckpointInterval int
-	hookConfig                  map[string][]appconfig.HookConfig
-	vectorConfig                appconfig.VectorConfig
-	agentRegistry               *agent.Registry
-	hookRunner                  *events.Runner
-	eventObservers              []events.Observer
-	sessionStore                *session.Store
-	stateStore                  *appconfig.StateStore
-	registry                    *llm.Registry
-	providerReadiness           llm.ProviderReadinessReport
-	worktreeInfo                *worktree.Info
-	pluginPolicy                *attelerplugin.Policy
-	promptContextCache          *promptContextCache
-	fallbackModels              []string
-	pluginPaths                 []string
-	providers                   []string
-	loadedConfigPaths           []string
-	configuredReferences        []string
-	referenceManifest           contextref.ReferenceManifest
-	referenceContext            string
-	referenceContextEstimator   string
-	skillLearningStoreDir       string
-	skillLearningSkillDir       string
-	selectedModel               string
-	selectedAgent               string
-	promptSuggestionConsent     promptSuggestionConsent
-	idleSuggestionBudget        idleSuggestionBudget
-	cwd                         string
-	maxInputTokens              int
-	modelLocked                 bool
-	autoMergeWorktree           bool
-	promptLocalOnly             bool
-	skillLearningEnabled        bool
+	config                       appconfig.Config
+	sessionState                 session.Session
+	contextOptions               contextref.Options
+	generationDefaults           generationSettings
+	generationOverrides          generationSettings
+	agentLoopBudget              llm.AgentLoopBudget
+	agentLoopCheckpointInterval  int
+	hookConfig                   map[string][]appconfig.HookConfig
+	vectorConfig                 appconfig.VectorConfig
+	agentRegistry                *agent.Registry
+	hookRunner                   *events.Runner
+	eventObservers               []events.Observer
+	sessionStore                 *session.Store
+	stateStore                   *appconfig.StateStore
+	registry                     *llm.Registry
+	providerReadiness            llm.ProviderReadinessReport
+	worktreeInfo                 *worktree.Info
+	pluginPolicy                 *attelerplugin.Policy
+	promptContextCache           *promptContextCache
+	fallbackModels               []string
+	pluginPaths                  []string
+	providers                    []string
+	loadedConfigPaths            []string
+	configuredReferences         []string
+	referenceManifest            contextref.ReferenceManifest
+	referenceContext             string
+	referenceContextEstimator    string
+	skillLearningStoreDir        string
+	skillLearningSkillDir        string
+	selectedModel                string
+	selectedAgent                string
+	promptSuggestionConsent      promptSuggestionConsent
+	idleSuggestionBudget         idleSuggestionBudget
+	cwd                          string
+	maxInputTokens               int
+	modelLocked                  bool
+	autoMergeWorktree            bool
+	worktreeMergeOverride        bool
+	promptLocalOnly              bool
+	skillLearningEnabled         bool
+	worktreeVerificationCommands []string
 }

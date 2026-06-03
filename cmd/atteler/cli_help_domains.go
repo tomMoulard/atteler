@@ -287,12 +287,12 @@ var cliHelpDomains = []cliHelpDomain{
 	{
 		Name:    "worktrees",
 		Title:   "Worktrees",
-		Summary: "Run sessions in isolated git worktrees and list or merge existing session worktrees.",
+		Summary: "Run sessions in isolated git worktrees; worktrees are preserved by default and merge-back is review-gated.",
 		Aliases: []string{"worktree", "wt"},
 		Commands: []cliCommandAlias{
-			{Name: "run", Args: "[prompt]", Summary: "enable worktree isolation for this session", Legacy: []string{"--worktree"}, JoinArgs: true},
+			{Name: "run", Args: "[prompt]", Summary: "enable worktree isolation for this session; add --worktree-auto-merge plus --worktree-verify-command to merge on exit", Legacy: []string{"--worktree"}, JoinArgs: true},
 			{Name: "list", Summary: "list active atteler worktrees", Legacy: []string{"--list-worktrees"}},
-			{Name: "merge", Args: "<session-id>", Summary: "merge a session worktree back into its base branch; add --merge-worktree-allow-base-mismatch to override the recorded-base preflight", Legacy: []string{"--merge-worktree"}},
+			{Name: "merge", Args: "<session-id>", Summary: "manually merge a session worktree back into its base branch; add --worktree-verify-command to run checks first or --merge-worktree-allow-base-mismatch to override the recorded-base preflight", Legacy: []string{"--merge-worktree"}},
 		},
 		Examples: []string{
 			`atteler worktrees run "Add unit tests for auth"`,

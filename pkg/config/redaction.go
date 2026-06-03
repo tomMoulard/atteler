@@ -21,6 +21,7 @@ func RedactedConfig(cfg Config) Config {
 	out.AgentLoop = redactedAgentLoopConfig(cfg.AgentLoop)
 	out.SkillLearning.Enabled = clonePtr(cfg.SkillLearning.Enabled)
 	out.Vector = redactedVectorConfig(cfg.Vector)
+	out.Worktree = redactedWorktreeConfig(cfg.Worktree)
 
 	out.Providers = make(map[string]ProviderConfig, len(cfg.Providers))
 	for name, provider := range cfg.Providers {
@@ -111,6 +112,17 @@ func redactedAgentLoopConfig(cfg AgentLoopConfig) AgentLoopConfig {
 	return cfg
 }
 
+func redactedWorktreeConfig(cfg WorktreeConfig) WorktreeConfig {
+	cfg.AutoMerge = clonePtr(cfg.AutoMerge)
+
+	cfg.VerificationCommands = append([]string(nil), cfg.VerificationCommands...)
+	for i := range cfg.VerificationCommands {
+		cfg.VerificationCommands[i] = redactPotentialSecretString(cfg.VerificationCommands[i])
+	}
+
+	return cfg
+}
+
 func redactedReferencePolicyConfig(policy ReferencePolicyConfig) ReferencePolicyConfig {
 	policy.AllowedSchemes = append([]string(nil), policy.AllowedSchemes...)
 	policy.DeniedSchemes = append([]string(nil), policy.DeniedSchemes...)
@@ -177,6 +189,8 @@ func RedactOriginValue(path, value string) string {
 		return redactSerializedHooks(value)
 	case path == "context.references" || strings.HasSuffix(path, ".references"):
 		return redactSerializedStringSlice("references", value)
+	case path == "worktree.verification_commands":
+		return redactSerializedStringSlice("worktree.verification_commands", value)
 	case path == "vector.workspace_include" || path == "vector.workspace_exclude":
 		return redactSerializedStringSlice(path, value)
 	case strings.HasSuffix(path, ".base_url"):

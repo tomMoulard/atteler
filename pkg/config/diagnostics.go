@@ -486,6 +486,8 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 			diagnostics = append(diagnostics, inspectNamedFields(path, "skill_learning", value, knownSkillLearningFields(), nil)...)
 		case "vector":
 			diagnostics = append(diagnostics, inspectNamedFields(path, "vector", value, knownVectorFields(), nil)...)
+		case "worktree":
+			diagnostics = append(diagnostics, inspectNamedFields(path, "worktree", value, knownWorktreeFields(), nil)...)
 		case "model_aliases":
 			diagnostics = append(diagnostics, inspectModelAliases(path, value)...)
 		case "default_provider", fieldDefaultModel, "fallback_models":
@@ -884,6 +886,14 @@ func knownVectorFields() map[string]bool {
 		"workspace_limit":                   true,
 		"workspace_max_file_bytes":          true,
 		"workspace_max_files":               true,
+	}
+}
+
+func knownWorktreeFields() map[string]bool {
+	return map[string]bool{
+		"auto_merge":            true,
+		"verification_commands": true,
+		"override_verification": true,
 	}
 }
 
