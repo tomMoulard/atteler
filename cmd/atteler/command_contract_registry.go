@@ -406,7 +406,7 @@ func commandContractsByName() map[string]commandContract {
 		"plan-agents-providerless": commandContractFor(
 			"preview configured agents for a prompt",
 			[]string{"--plan-agents", "--plan-agent", "--plan-max-agents"},
-			[]string{commandEffectConfigRead, commandEffectUserOutput},
+			[]string{commandEffectConfigRead, commandEffectSessionRead, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("planAgentsCommandInput"),
 			withExamples(`atteler agents plan "review auth changes"`),

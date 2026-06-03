@@ -471,9 +471,99 @@ func TestFormatAgentPlanParticipant(t *testing.T) {
 		},
 		Source:  agent.ParticipantSourceCapability,
 		Pattern: "review",
+		Score:   64.2,
+		Roles:   []string{"review"},
 	})
-	want := "reviewer\tsource=capability\tmatch=review\tcapabilities=review,security\tmodel=gpt-test"
+	want := "reviewer\tsource=capability\tmatch=review\tscore=64.2\troles=review\tcapabilities=review,security\tmodel=gpt-test"
 	assert.Equal(t, want, got)
+}
+
+func TestFormatAgentPlanMetadata(t *testing.T) {
+	t.Parallel()
+
+	got := formatAgentPlanMetadata(agent.PlanMetadata{
+		ScoringVersion:       "agent-planner-v1",
+		PromptTokens:         []string{"review", "auth"},
+		RequestedNames:       []string{"reviewer"},
+		RequestedRoles:       []string{"review", "security"},
+		RecentAgentNames:     []string{"planner"},
+		RequiredTools:        []string{"bash"},
+		SelectedNames:        []string{"reviewer"},
+		CandidateNames:       []string{"reviewer", "planner"},
+		RejectedNames:        []string{"planner"},
+		ToolOverrideNames:    []string{"reviewer"},
+		SelectionThreshold:   40,
+		AmbiguityScoreWindow: 8,
+		AmbiguityCount:       1,
+	})
+
+	want := "metadata\tscoring_version=agent-planner-v1\trequested_roles=review,security\trequested_agents=reviewer\trecent_agents=planner\trequired_tools=bash\tselected_agents=reviewer\tcandidate_agents=reviewer,planner\trejected_agents=planner\ttool_override_agents=reviewer\tselection_threshold=40.0\tambiguity_window=8.0\tambiguity_count=1\tprompt_tokens=review,auth"
+	assert.Equal(t, want, got)
+}
+
+//nolint:paralleltest // Captures process-wide stdout.
+func TestPlanAgents_PrintsEvidenceBackedDiagnostics(t *testing.T) {
+	registry := agent.NewRegistry(map[string]config.AgentConfig{
+		"auth-a": {Triggers: []string{"auth"}},
+		"auth-b": {Triggers: []string{"auth"}},
+	})
+
+	out := captureStdoutForStateDiagnostics(t, func() {
+		require.NoError(t, planAgents(registry, "review auth permissions", nil, 1))
+	})
+
+	assert.Contains(t, out, "auth-a\tsource=trigger\tmatch=auth\tscore=")
+	assert.Contains(t, out, "rationale=trigger \"auth\" matched")
+	assert.Contains(t, out, "metadata\tscoring_version=agent-planner-v1")
+	assert.Contains(t, out, "candidate\tname=auth-a")
+	assert.Contains(t, out, "candidate\tname=auth-b")
+	assert.Contains(t, out, "ambiguity\trole=security")
+	assert.Contains(t, out, "action=override_required")
+	assert.Contains(t, out, "evidence=auth-a[trigger:auth=")
+}
+
+func TestPlanAgents_IncludesRecentSessionContext(t *testing.T) {
+	t.Parallel()
+
+	registry := agent.NewRegistry(map[string]config.AgentConfig{
+		"alpha-reviewer": {Triggers: []string{"review"}},
+		"beta-reviewer":  {Triggers: []string{"review"}},
+	})
+
+	plan, err := registry.PlanOrchestration(agent.OrchestrationRequest{
+		Prompt:           "review this change",
+		RecentAgentNames: recentAgentNamesForPlan(appState{selectedAgent: "beta-reviewer"}),
+		MaxParticipants:  1,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"beta-reviewer"}, plan.Metadata.RecentAgentNames)
+	assert.Equal(t, "beta-reviewer", plan.Participants[0].Agent.Name)
+}
+
+func TestRecentAgentNamesForPlan_DeduplicatesSessionContext(t *testing.T) {
+	t.Parallel()
+
+	got := recentAgentNamesForPlan(appState{
+		selectedAgent: "reviewer",
+		sessionState: session.Session{
+			DefaultAgent: "planner",
+			Evaluations: []session.AgentEvaluation{
+				{Agent: "older"},
+				{Agent: "reviewer"},
+				{Agent: "critic"},
+			},
+			Artifacts: []session.Artifact{
+				{SourceAgent: "writer"},
+				{SourceAgent: "critic"},
+			},
+			NegativeKnowledge: []session.NegativeKnowledge{
+				{Agent: "debugger"},
+			},
+		},
+	})
+
+	assert.Equal(t, []string{"reviewer", "planner", "critic", "older", "writer"}, got)
 }
 
 func TestEvalOutput_PassAndFail(t *testing.T) {

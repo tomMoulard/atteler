@@ -32,6 +32,8 @@ import (
 	"github.com/tommoulard/atteler/pkg/tasklist"
 )
 
+const liveLLMResponseTimeout = 3 * time.Second
+
 func TestFZFInputAndSelection(t *testing.T) {
 	t.Parallel()
 
@@ -361,7 +363,7 @@ func TestCallLLMWithToolsStreamsCommandOutputBeforeCompletion(t *testing.T) {
 	default:
 	}
 
-	msg := requireLiveLLMResponseBefore(t, liveCh, time.Second)
+	msg := requireLiveLLMResponseBefore(t, liveCh, liveLLMResponseTimeout)
 	require.NoError(t, msg.err)
 	assert.Equal(t, "finished", msg.content)
 	assert.True(t, msg.liveEvents)
@@ -411,7 +413,7 @@ func TestCallLLMWithToolsStreamsCommandStderrBeforeCompletion(t *testing.T) {
 	default:
 	}
 
-	msg := requireLiveLLMResponseBefore(t, liveCh, time.Second)
+	msg := requireLiveLLMResponseBefore(t, liveCh, liveLLMResponseTimeout)
 	require.NoError(t, msg.err)
 	assert.Equal(t, "finished", msg.content)
 

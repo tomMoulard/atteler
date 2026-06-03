@@ -17,7 +17,7 @@ type agentSelection struct {
 }
 
 func (m model) resolveAgent(input string) (agentSelection, string, error) {
-	return resolveAgent(m.agentRegistry, m.selectedAgent, input)
+	return resolveAgent(m.agentRegistry, m.selectedAgent, input, recentAgentNamesForSelection(m.selectedAgent, m.sessionState))
 }
 
 // updateLLMResponse handles the message received when an LLM call completes.

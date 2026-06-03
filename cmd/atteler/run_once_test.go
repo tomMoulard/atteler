@@ -402,6 +402,7 @@ func TestPrepareRunOnceRequestReturnsRouteDecisionOnRoutingError(t *testing.T) {
 		"",
 		"reviewer",
 		nil,
+		nil,
 		generationSettings{},
 		generationSettings{},
 		false,
