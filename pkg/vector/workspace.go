@@ -558,11 +558,11 @@ func validateWorkspaceIndexSourceCoverage(idx *Index) error {
 
 		path := filepath.Clean(strings.TrimSpace(doc.Metadata["path"]))
 		if path == "" || path == "." {
-			return fmt.Errorf("%w: document %q is missing workspace source path metadata", ErrSourceStale, doc.ID)
+			return fmt.Errorf("%w: document %q is missing source path metadata", ErrSourceStale, doc.ID)
 		}
 
 		if _, ok := sources[path]; !ok {
-			return fmt.Errorf("%w: document %q references unindexed workspace source %q", ErrSourceStale, doc.ID, path)
+			return fmt.Errorf("%w: document %q references unindexed source %q", ErrSourceStale, doc.ID, path)
 		}
 
 		documentCounts[path]++
@@ -570,7 +570,7 @@ func validateWorkspaceIndexSourceCoverage(idx *Index) error {
 
 	for path := range sources {
 		if documentCounts[path] == 0 {
-			return fmt.Errorf("%w: workspace source %q has no indexed documents", ErrSourceStale, path)
+			return fmt.Errorf("%w: source %q has no indexed documents", ErrSourceStale, path)
 		}
 	}
 
