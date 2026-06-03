@@ -534,11 +534,11 @@ func retainWorkspaceSourceDocuments(
 }
 
 func loadWorkspaceRefreshIndex(path string) (*Index, error) {
-	return loadIndex(path, workspaceRefreshIndexValidationOptions())
+	return loadIndex(path, refreshIndexValidationOptions())
 }
 
 func validateReusableWorkspaceRefreshIndex(existing *Index, opts WorkspaceOptions) error {
-	if err := existing.validateFor(opts.VectorizerMetadata, nil, workspaceRefreshIndexValidationOptions(), opts.Chunk); err != nil {
+	if err := existing.validateFor(opts.VectorizerMetadata, nil, refreshIndexValidationOptions(), opts.Chunk); err != nil {
 		return err
 	}
 
@@ -577,7 +577,7 @@ func validateIndexSourceCoverage(idx *Index) error {
 	return nil
 }
 
-func workspaceRefreshIndexValidationOptions() indexValidationOptions {
+func refreshIndexValidationOptions() indexValidationOptions {
 	return indexValidationOptions{AllowStaleTextHashVector: true}
 }
 

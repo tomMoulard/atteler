@@ -86,7 +86,7 @@ func RefreshSourceIndex(ctx context.Context, opts SourceIndexOptions) (SourceInd
 		return clearSourceIndexForNoSources(opts, result)
 	}
 
-	existing, loadErr := loadIndex(opts.IndexPath, workspaceRefreshIndexValidationOptions())
+	existing, loadErr := loadIndex(opts.IndexPath, refreshIndexValidationOptions())
 	switch {
 	case loadErr == nil:
 		refreshed, reused, reuseErr := refreshReusableSourceIndex(ctx, existing, opts, result)
@@ -441,7 +441,7 @@ func planSourceIndexCurrentSource(
 }
 
 func validateReusableSourceIndex(existing *Index, opts SourceIndexOptions) error {
-	if err := existing.validateFor(opts.VectorizerMetadata, nil, workspaceRefreshIndexValidationOptions(), opts.Chunk); err != nil {
+	if err := existing.validateFor(opts.VectorizerMetadata, nil, refreshIndexValidationOptions(), opts.Chunk); err != nil {
 		return err
 	}
 
