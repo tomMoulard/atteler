@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/artifactmerge"
+	atteval "github.com/tommoulard/atteler/pkg/eval"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/watch"
@@ -99,6 +101,169 @@ func evaluationModelForRecord(modelOverride string, state appState) string {
 	} {
 		if value := strings.TrimSpace(candidate); value != "" {
 			return value
+		}
+	}
+
+	return ""
+}
+
+func evaluationFromSessionWriteInput(input sessionWriteCommandInput, state appState) (session.AgentEvaluation, error) {
+	evaluation := session.AgentEvaluation{
+		Agent:           input.RecordEvaluation,
+		Outcome:         input.EvaluationOutcome,
+		Notes:           input.EvaluationNotes,
+		Reference:       input.EvaluationReference,
+		Source:          input.EvaluationSource,
+		Evaluator:       input.EvaluationEvaluator,
+		RubricVersion:   input.EvaluationRubricVersion,
+		TaskType:        input.EvaluationTaskType,
+		Difficulty:      input.EvaluationDifficulty,
+		ExpectedOutcome: input.EvaluationExpectedOutcome,
+		Provider:        input.EvaluationProvider,
+		Model:           strings.TrimSpace(input.EvaluationModel),
+		FixtureVersion:  input.EvaluationFixtureVersion,
+		AgentVersion:    input.EvaluationAgentVersion,
+		Score:           input.EvaluationScore,
+		PassRate:        input.EvaluationPassRate,
+		HasPassRate:     input.evaluationPassRateSet,
+		FlakeCount:      input.EvaluationFlakeCount,
+		DurationMillis:  int64(input.EvaluationDurationMillis),
+		InputTokens:     input.EvaluationInputTokens,
+		OutputTokens:    input.EvaluationOutputTokens,
+		TotalTokens:     input.EvaluationTotalTokens,
+		Cost:            input.EvaluationCost,
+		Confidence:      input.EvaluationConfidence,
+	}
+
+	if strings.TrimSpace(input.EvaluationReportPath) != "" {
+		report, err := readEvaluationReport(input.EvaluationReportPath)
+		if err != nil {
+			return session.AgentEvaluation{}, err
+		}
+
+		applyEvaluationReport(&evaluation, report, input.evaluationPassRateSet)
+
+		if strings.TrimSpace(evaluation.Reference) == "" {
+			evaluation.Reference = input.EvaluationReportPath
+		}
+	}
+
+	if strings.TrimSpace(evaluation.Model) == "" {
+		evaluation.Model = evaluationModelForRecord("", state)
+	}
+
+	return evaluation, nil
+}
+
+func readEvaluationReport(path string) (atteval.Report, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return atteval.Report{}, fmt.Errorf("record evaluation: read eval report %s: %w", path, err)
+	}
+
+	var report atteval.Report
+	if err := json.Unmarshal(data, &report); err != nil {
+		return atteval.Report{}, fmt.Errorf("record evaluation: parse eval report %s: %w", path, err)
+	}
+
+	return report, nil
+}
+
+func applyEvaluationReport(evaluation *session.AgentEvaluation, report atteval.Report, passRateExplicit bool) {
+	applyEvaluationReportProvenance(evaluation)
+	applyEvaluationReportOutcomeAndMetadata(evaluation, report, passRateExplicit)
+	applyEvaluationReportMetrics(evaluation, report)
+}
+
+func applyEvaluationReportProvenance(evaluation *session.AgentEvaluation) {
+	if strings.TrimSpace(evaluation.Source) == "" {
+		evaluation.Source = session.EvaluationSourceHarness
+	}
+
+	if strings.TrimSpace(evaluation.Evaluator) == "" {
+		evaluation.Evaluator = "atteler-eval"
+	}
+}
+
+func applyEvaluationReportOutcomeAndMetadata(
+	evaluation *session.AgentEvaluation,
+	report atteval.Report,
+	passRateExplicit bool,
+) {
+	if strings.TrimSpace(evaluation.Outcome) == "" {
+		evaluation.Outcome = "fail"
+		if report.Passed {
+			evaluation.Outcome = "pass"
+		}
+	}
+
+	if strings.TrimSpace(evaluation.Reference) == "" {
+		evaluation.Reference = evaluationReportReference(report)
+	}
+
+	if strings.TrimSpace(evaluation.Provider) == "" {
+		evaluation.Provider = report.Metadata.Provider
+	}
+
+	if strings.TrimSpace(evaluation.Model) == "" {
+		evaluation.Model = report.Metadata.Model
+	}
+
+	if strings.TrimSpace(evaluation.FixtureVersion) == "" {
+		evaluation.FixtureVersion = report.Metadata.FixtureVersion
+	}
+
+	if !passRateExplicit && report.Summary.Total > 0 {
+		evaluation.PassRate = report.Summary.PassRate
+		evaluation.HasPassRate = true
+	}
+}
+
+func applyEvaluationReportMetrics(evaluation *session.AgentEvaluation, report atteval.Report) {
+	if evaluation.FlakeCount == 0 {
+		evaluation.FlakeCount = report.Summary.FlakeCount
+	}
+
+	if evaluation.DurationMillis == 0 {
+		evaluation.DurationMillis = report.Metrics.LatencyMillis
+	}
+
+	if evaluation.InputTokens == 0 {
+		evaluation.InputTokens = report.Metrics.InputTokens
+	}
+
+	if evaluation.OutputTokens == 0 {
+		evaluation.OutputTokens = report.Metrics.OutputTokens
+	}
+
+	if evaluation.TotalTokens == 0 {
+		evaluation.TotalTokens = report.Metrics.TotalTokens
+	}
+
+	if evaluation.Cost == 0 {
+		evaluation.Cost = report.Metrics.Cost
+	}
+}
+
+func evaluationReportReference(report atteval.Report) string {
+	reference := firstNonBlankString(report.Suite, report.ActualRef)
+	if reference != "" {
+		return reference
+	}
+
+	for i := range report.Suites {
+		if reference = firstNonBlankString(report.Suites[i].Path, report.Suites[i].ActualRef); reference != "" {
+			return reference
+		}
+	}
+
+	return ""
+}
+
+func firstNonBlankString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
 		}
 	}
 
@@ -236,6 +401,22 @@ func appendEvaluationNumbers(parts []string, evaluation session.AgentEvaluation)
 		parts = append(parts, "duration_millis="+strconv.FormatInt(evaluation.DurationMillis, 10))
 	}
 
+	if evaluation.PassRateRecorded() {
+		parts = append(parts, fmt.Sprintf("pass_rate=%.2f", evaluation.PassRate))
+	}
+
+	if evaluation.FlakeCount != 0 {
+		parts = append(parts, "flake_count="+strconv.Itoa(evaluation.FlakeCount))
+	}
+
+	if evaluation.TotalTokens != 0 {
+		parts = append(parts, "total_tokens="+strconv.Itoa(evaluation.TotalTokens))
+	}
+
+	if evaluation.InputTokens != 0 || evaluation.OutputTokens != 0 {
+		parts = append(parts, fmt.Sprintf("tokens=input:%d,output:%d", evaluation.InputTokens, evaluation.OutputTokens))
+	}
+
 	if evaluation.Cost != 0 {
 		parts = append(parts, fmt.Sprintf("cost=%.6f", evaluation.Cost))
 	}
@@ -258,7 +439,9 @@ func appendEvaluationStrings(parts []string, evaluation session.AgentEvaluation)
 		{key: "task_type", value: evaluation.TaskType},
 		{key: "difficulty", value: evaluation.Difficulty},
 		{key: "expected_outcome", value: evaluation.ExpectedOutcome},
+		{key: "provider", value: evaluation.Provider},
 		{key: "model", value: evaluation.Model},
+		{key: "fixture_version", value: evaluation.FixtureVersion},
 		{key: "agent_version", value: evaluation.AgentVersion},
 		{key: "reference", value: evaluation.Reference},
 		{key: "notes", value: evaluation.Notes},

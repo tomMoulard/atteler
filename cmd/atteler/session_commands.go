@@ -330,6 +330,8 @@ func formatAgentPerformanceSummary(summary session.AgentPerformanceSummary) stri
 		)
 	}
 
+	parts = appendPerformanceEvalMetrics(parts, summary)
+
 	if len(summary.Outcomes) > 0 {
 		parts = append(parts, "outcomes="+formatOutcomeCounts(summary.Outcomes))
 	}
@@ -353,6 +355,48 @@ func formatAgentPerformanceSummary(summary session.AgentPerformanceSummary) stri
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func appendPerformanceEvalMetrics(parts []string, summary session.AgentPerformanceSummary) []string {
+	if summary.PassRateSampleCount > 0 {
+		parts = append(parts,
+			"pass_rate_samples="+strconv.Itoa(summary.PassRateSampleCount),
+			fmt.Sprintf("avg_pass_rate=%.2f", summary.AveragePassRate),
+		)
+	}
+
+	if summary.FlakeCount > 0 {
+		parts = append(parts,
+			"flake_count="+strconv.Itoa(summary.FlakeCount),
+			"flaky_evaluations="+strconv.Itoa(summary.FlakyEvaluationCount),
+		)
+	}
+
+	if summary.TokenSampleCount > 0 {
+		parts = append(parts,
+			"token_samples="+strconv.Itoa(summary.TokenSampleCount),
+			"input_tokens="+strconv.Itoa(summary.InputTokens),
+			"output_tokens="+strconv.Itoa(summary.OutputTokens),
+			"total_tokens="+strconv.Itoa(summary.TotalTokens),
+		)
+	}
+
+	if summary.DurationSampleCount > 0 {
+		parts = append(parts,
+			"duration_samples="+strconv.Itoa(summary.DurationSampleCount),
+			fmt.Sprintf("avg_duration_ms=%.2f", summary.AverageDurationMillis),
+		)
+	}
+
+	if summary.CostSampleCount > 0 {
+		parts = append(parts,
+			"cost_samples="+strconv.Itoa(summary.CostSampleCount),
+			fmt.Sprintf("total_cost=%.6f", summary.TotalCost),
+			fmt.Sprintf("avg_cost=%.6f", summary.AverageCost),
+		)
+	}
+
+	return parts
 }
 
 func formatPerformanceValidity(validity session.PerformanceValidity) []string {
@@ -409,20 +453,30 @@ func formatScoreBuckets(buckets []session.ScoreBucketSummary) string {
 			"rubric=" + bucket.RubricVersion,
 			"task=" + bucket.TaskType,
 			"difficulty=" + bucket.Difficulty,
-			"model=" + bucket.Model,
-			"agent_version=" + bucket.AgentVersion,
-			"routing_eligible=" + strconv.FormatBool(bucket.RoutingEligible),
-			"sample=" + strconv.Itoa(bucket.SampleSize),
+		}
+		if bucket.Provider != "" {
+			fields = append(fields, "provider="+bucket.Provider)
+		}
+
+		fields = append(fields, "model="+bucket.Model)
+		if bucket.FixtureVersion != "" {
+			fields = append(fields, "fixture_version="+bucket.FixtureVersion)
+		}
+
+		fields = append(fields,
+			"agent_version="+bucket.AgentVersion,
+			"routing_eligible="+strconv.FormatBool(bucket.RoutingEligible),
+			"sample="+strconv.Itoa(bucket.SampleSize),
 			fmt.Sprintf("avg=%.2f", bucket.AverageScore),
 			fmt.Sprintf("ci95=%.2f..%.2f", bucket.ConfidenceIntervalLow, bucket.ConfidenceIntervalHigh),
 			fmt.Sprintf("stderr=%.2f", bucket.StandardError),
-			"uncertainty=" + bucket.Uncertainty,
-			"recent_sample=" + strconv.Itoa(bucket.RecentSampleSize),
+			"uncertainty="+bucket.Uncertainty,
+			"recent_sample="+strconv.Itoa(bucket.RecentSampleSize),
 			fmt.Sprintf("recent_avg=%.2f", bucket.RecentAverageScore),
-			"previous_sample=" + strconv.Itoa(bucket.PreviousSampleSize),
+			"previous_sample="+strconv.Itoa(bucket.PreviousSampleSize),
 			fmt.Sprintf("previous_avg=%.2f", bucket.PreviousAverageScore),
-			"regression=" + bucket.RegressionStatus,
-		}
+			"regression="+bucket.RegressionStatus,
+		)
 		if bucket.RecentSampleSize > 0 && bucket.PreviousSampleSize > 0 {
 			fields = append(fields, fmt.Sprintf("regression_delta=%.2f", bucket.RegressionDelta))
 		}
@@ -435,27 +489,7 @@ func formatScoreBuckets(buckets []session.ScoreBucketSummary) string {
 			fields = append(fields, "recent_since="+bucket.RecentWindowStart.UTC().Format(time.RFC3339))
 		}
 
-		if bucket.ConfidenceSampleCount > 0 {
-			fields = append(fields,
-				"confidence_sample="+strconv.Itoa(bucket.ConfidenceSampleCount),
-				fmt.Sprintf("avg_confidence=%.2f", bucket.AverageConfidence),
-			)
-		}
-
-		if bucket.DurationSampleCount > 0 {
-			fields = append(fields,
-				"duration_sample="+strconv.Itoa(bucket.DurationSampleCount),
-				fmt.Sprintf("avg_duration_ms=%.2f", bucket.AverageDurationMillis),
-			)
-		}
-
-		if bucket.CostSampleCount > 0 {
-			fields = append(fields,
-				"cost_sample="+strconv.Itoa(bucket.CostSampleCount),
-				fmt.Sprintf("total_cost=%.6f", bucket.TotalCost),
-				fmt.Sprintf("avg_cost=%.6f", bucket.AverageCost),
-			)
-		}
+		fields = appendScoreBucketEvalMetrics(fields, bucket)
 
 		if len(bucket.ValidityReasons) > 0 {
 			fields = append(fields, "validity_reasons="+strings.Join(bucket.ValidityReasons, "|"))
@@ -465,6 +499,55 @@ func formatScoreBuckets(buckets []session.ScoreBucketSummary) string {
 	}
 
 	return strings.Join(parts, ";")
+}
+
+func appendScoreBucketEvalMetrics(fields []string, bucket *session.ScoreBucketSummary) []string {
+	if bucket.ConfidenceSampleCount > 0 {
+		fields = append(fields,
+			"confidence_sample="+strconv.Itoa(bucket.ConfidenceSampleCount),
+			fmt.Sprintf("avg_confidence=%.2f", bucket.AverageConfidence),
+		)
+	}
+
+	if bucket.PassRateSampleCount > 0 {
+		fields = append(fields,
+			"pass_rate_sample="+strconv.Itoa(bucket.PassRateSampleCount),
+			fmt.Sprintf("avg_pass_rate=%.2f", bucket.AveragePassRate),
+		)
+	}
+
+	if bucket.FlakeCount > 0 {
+		fields = append(fields,
+			"flake_count="+strconv.Itoa(bucket.FlakeCount),
+			"flaky_evaluations="+strconv.Itoa(bucket.FlakyEvaluationCount),
+		)
+	}
+
+	if bucket.DurationSampleCount > 0 {
+		fields = append(fields,
+			"duration_sample="+strconv.Itoa(bucket.DurationSampleCount),
+			fmt.Sprintf("avg_duration_ms=%.2f", bucket.AverageDurationMillis),
+		)
+	}
+
+	if bucket.CostSampleCount > 0 {
+		fields = append(fields,
+			"cost_sample="+strconv.Itoa(bucket.CostSampleCount),
+			fmt.Sprintf("total_cost=%.6f", bucket.TotalCost),
+			fmt.Sprintf("avg_cost=%.6f", bucket.AverageCost),
+		)
+	}
+
+	if bucket.TokenSampleCount > 0 {
+		fields = append(fields,
+			"token_sample="+strconv.Itoa(bucket.TokenSampleCount),
+			"input_tokens="+strconv.Itoa(bucket.InputTokens),
+			"output_tokens="+strconv.Itoa(bucket.OutputTokens),
+			"total_tokens="+strconv.Itoa(bucket.TotalTokens),
+		)
+	}
+
+	return fields
 }
 
 func formatNegativeKnowledgeBreakdown(counts []session.NegativeKnowledgeCategoryCount) string {

@@ -451,10 +451,16 @@ func TestSession_RecordEvaluationDetailsStoresVersionedMetadata(t *testing.T) {
 		TaskType:        "code-review",
 		Difficulty:      "medium",
 		ExpectedOutcome: "find regression",
+		Provider:        " openai ",
 		Model:           "gpt-test",
+		FixtureVersion:  " fixture-v2 ",
 		AgentVersion:    "reviewer@abc123",
 		Score:           88,
+		PassRate:        0.75,
+		FlakeCount:      2,
 		DurationMillis:  1200,
+		InputTokens:     20,
+		OutputTokens:    10,
 		Cost:            0.0123,
 		Confidence:      0.91,
 	})
@@ -468,10 +474,18 @@ func TestSession_RecordEvaluationDetailsStoresVersionedMetadata(t *testing.T) {
 	assert.Equal(t, "code-review", entry.TaskType)
 	assert.Equal(t, "medium", entry.Difficulty)
 	assert.Equal(t, "find regression", entry.ExpectedOutcome)
+	assert.Equal(t, "openai", entry.Provider)
 	assert.Equal(t, "gpt-test", entry.Model)
+	assert.Equal(t, "fixture-v2", entry.FixtureVersion)
 	assert.Equal(t, "reviewer@abc123", entry.AgentVersion)
 	assert.Equal(t, AgentEvaluationSchemaVersion, entry.SchemaVersion)
+	assert.InEpsilon(t, 0.75, entry.PassRate, 0.0001)
+	assert.True(t, entry.PassRateRecorded())
+	assert.Equal(t, 2, entry.FlakeCount)
 	assert.Equal(t, int64(1200), entry.DurationMillis)
+	assert.Equal(t, 20, entry.InputTokens)
+	assert.Equal(t, 10, entry.OutputTokens)
+	assert.Equal(t, 30, entry.TotalTokens)
 	assert.InEpsilon(t, 0.0123, entry.Cost, 0.0001)
 	assert.InEpsilon(t, 0.91, entry.Confidence, 0.0001)
 }
@@ -514,6 +528,21 @@ func TestSession_RecordEvaluationDetailsRejectsInvalidCalibration(t *testing.T) 
 		Agent:   "reviewer",
 		Outcome: "pass",
 		Source:  "spreadsheet",
+	}))
+	assert.False(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:    "reviewer",
+		Outcome:  "pass",
+		PassRate: 1.1,
+	}))
+	assert.False(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:      "reviewer",
+		Outcome:    "pass",
+		FlakeCount: -1,
+	}))
+	assert.False(t, session.RecordEvaluationDetails(AgentEvaluation{
+		Agent:       "reviewer",
+		Outcome:     "pass",
+		InputTokens: -1,
 	}))
 	assert.Empty(t, session.Evaluations)
 }

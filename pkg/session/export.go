@@ -123,6 +123,8 @@ type ExportNegativeKnowledge struct {
 }
 
 // ExportAgentEvaluation is a redaction-aware exported evaluation record.
+//
+//nolint:govet // JSON field order keeps exported evaluation metadata readable and stable.
 type ExportAgentEvaluation struct {
 	CreatedAt       time.Time `json:"created_at,omitzero"`
 	Agent           string    `json:"agent"`
@@ -135,11 +137,18 @@ type ExportAgentEvaluation struct {
 	TaskType        string    `json:"task_type,omitempty"`
 	Difficulty      string    `json:"difficulty,omitempty"`
 	ExpectedOutcome string    `json:"expected_outcome,omitempty"`
+	Provider        string    `json:"provider,omitempty"`
 	Model           string    `json:"model,omitempty"`
+	FixtureVersion  string    `json:"fixture_version,omitempty"`
 	AgentVersion    string    `json:"agent_version,omitempty"`
 	SchemaVersion   int       `json:"schema_version,omitempty"`
 	Score           int       `json:"score,omitempty"`
+	PassRate        *float64  `json:"pass_rate,omitempty"`
+	FlakeCount      int       `json:"flake_count,omitempty"`
 	DurationMillis  int64     `json:"duration_millis,omitempty"`
+	InputTokens     int       `json:"input_tokens,omitempty"`
+	OutputTokens    int       `json:"output_tokens,omitempty"`
+	TotalTokens     int       `json:"total_tokens,omitempty"`
 	Cost            float64   `json:"cost,omitempty"`
 	Confidence      float64   `json:"confidence,omitempty"`
 }
@@ -626,17 +635,34 @@ func (builder *exportBuilder) exportEvaluations(entries []AgentEvaluation) []Exp
 			TaskType:        builder.exportString(prefix+".task_type", SearchFieldEvaluations, entry.TaskType),
 			Difficulty:      builder.exportString(prefix+".difficulty", SearchFieldEvaluations, entry.Difficulty),
 			ExpectedOutcome: builder.exportString(prefix+".expected_outcome", SearchFieldEvaluations, entry.ExpectedOutcome),
+			Provider:        builder.exportString(prefix+".provider", SearchFieldModel, entry.Provider),
 			Model:           builder.exportString(prefix+".model", SearchFieldModel, entry.Model),
+			FixtureVersion:  builder.exportString(prefix+".fixture_version", SearchFieldEvaluations, entry.FixtureVersion),
 			AgentVersion:    builder.exportString(prefix+".agent_version", SearchFieldEvaluations, entry.AgentVersion),
 			SchemaVersion:   entry.SchemaVersion,
 			Score:           entry.Score,
+			PassRate:        exportPassRate(entry),
+			FlakeCount:      entry.FlakeCount,
 			DurationMillis:  entry.DurationMillis,
+			InputTokens:     entry.InputTokens,
+			OutputTokens:    entry.OutputTokens,
+			TotalTokens:     entry.TotalTokens,
 			Cost:            entry.Cost,
 			Confidence:      entry.Confidence,
 		})
 	}
 
 	return exported
+}
+
+func exportPassRate(entry *AgentEvaluation) *float64 {
+	if entry == nil || !entry.PassRateRecorded() {
+		return nil
+	}
+
+	passRate := entry.PassRate
+
+	return &passRate
 }
 
 func (builder *exportBuilder) exportArtifacts(entries []Artifact) []ExportArtifact {
@@ -1390,7 +1416,9 @@ func writeEvaluationMetadata(b *strings.Builder, entry *ExportAgentEvaluation) {
 	writeIndentedMetadataString(b, "Task Type", entry.TaskType)
 	writeIndentedMetadataString(b, "Difficulty", entry.Difficulty)
 	writeIndentedMetadataString(b, "Expected Outcome", entry.ExpectedOutcome)
+	writeIndentedMetadataString(b, "Provider", entry.Provider)
 	writeIndentedMetadataString(b, "Model", entry.Model)
+	writeIndentedMetadataString(b, "Fixture Version", entry.FixtureVersion)
 	writeIndentedMetadataString(b, "Agent Version", entry.AgentVersion)
 
 	if entry.SchemaVersion != 0 {
@@ -1399,6 +1427,22 @@ func writeEvaluationMetadata(b *strings.Builder, entry *ExportAgentEvaluation) {
 
 	if entry.DurationMillis != 0 {
 		fmt.Fprintf(b, "  - **Duration Millis:** %d\n", entry.DurationMillis)
+	}
+
+	if entry.PassRate != nil {
+		fmt.Fprintf(b, "  - **Pass Rate:** %.2f\n", *entry.PassRate)
+	}
+
+	if entry.FlakeCount != 0 {
+		fmt.Fprintf(b, "  - **Flake Count:** %d\n", entry.FlakeCount)
+	}
+
+	if entry.TotalTokens != 0 {
+		fmt.Fprintf(b, "  - **Total Tokens:** %d\n", entry.TotalTokens)
+	}
+
+	if entry.InputTokens != 0 || entry.OutputTokens != 0 {
+		fmt.Fprintf(b, "  - **Tokens:** input=%d output=%d\n", entry.InputTokens, entry.OutputTokens)
 	}
 
 	if entry.Cost != 0 {

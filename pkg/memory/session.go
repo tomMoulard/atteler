@@ -3,6 +3,7 @@ package memory
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -392,8 +393,23 @@ func evaluationText(entry session.AgentEvaluation) string {
 		appendPart(&parts, "Score", strconv.Itoa(entry.Score))
 	}
 
+	if entry.PassRateRecorded() {
+		appendPart(&parts, "Pass rate", fmt.Sprintf("%.2f", entry.PassRate))
+	}
+
+	if entry.FlakeCount != 0 {
+		appendPart(&parts, "Flake count", strconv.Itoa(entry.FlakeCount))
+	}
+
 	appendPart(&parts, "Reference", entry.Reference)
 	appendPart(&parts, "Notes", entry.Notes)
+	appendPart(&parts, "Provider", entry.Provider)
+	appendPart(&parts, "Model", entry.Model)
+	appendPart(&parts, "Fixture version", entry.FixtureVersion)
+
+	if entry.TotalTokens != 0 {
+		appendPart(&parts, "Total tokens", strconv.Itoa(entry.TotalTokens))
+	}
 
 	if !entry.CreatedAt.IsZero() {
 		appendPart(&parts, "Created", entry.CreatedAt.UTC().Format(time.RFC3339))

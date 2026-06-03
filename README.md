@@ -79,13 +79,18 @@ from the same descriptors that route the commands.
 | `watch` | `atteler watch scan`, `atteler watch json`, `atteler watch loop` |
 | `plugins` | `atteler plugins list`, `atteler plugins run reviewer/check`, `atteler plugins manifest .atteler/mcp.yaml` |
 | `worktrees` | `atteler worktrees run "Add unit tests for auth"`, `atteler worktrees list`, `atteler worktrees merge 20260430-120000-deadbeef` |
-| `eval` | `atteler eval output .atteler/fixtures/readme-summary.txt --eval-expected "package overview"`, `atteler eval run .atteler/evals/readme.eval.yaml --eval-json`, `atteler eval fixtures .atteler/evals --eval-report .atteler/eval-report.json`, `atteler eval record reviewer`, `atteler eval replay-response .atteler/fixtures/once.json "Summarize @README.md"` |
+| `eval` | `atteler eval output .atteler/fixtures/readme-summary.txt --eval-expected "package overview"`, `atteler eval run .atteler/evals/readme.eval.yaml`, `atteler eval fixtures .atteler/evals --eval-report .atteler/eval-report.json`, `atteler eval record reviewer`, `atteler eval replay-response .atteler/fixtures/once.json "Summarize @README.md"` |
 <!-- atteler:cli-domains:end -->
 
 Use `atteler providers resolve <model>` when routing is unclear. It prints the
 selected provider/model when resolution is safe, lists every provider claim
 considered for ambiguous bare names, and includes provenance/stale-catalog
 markers so static fallbacks are not mistaken for fresh live catalogs.
+
+Eval suites support behavior-oriented checks beyond exact text: JSON/YAML path
+assertions, regexes, unordered list matching, schema checks, required/forbidden
+content, workflow side-effect assertions, replayed judge decisions, and run
+metrics in the machine-readable report.
 
 Common options for model, agent, output, generation settings, provider routing
 settings, and compatibility flags can still be combined with domain commands
@@ -568,8 +573,11 @@ Saved sessions can record agent evaluations, negative-knowledge incidents, and
 artifacts for later review. Evaluation records include versioned metadata for
 provenance (`human`, `harness`, or `ci`), evaluator identity, rubric version,
 task type, difficulty, expected outcome, model, agent version, duration, cost,
-and evaluator confidence. Negative knowledge is tracked separately by task type
-and severity instead of being flattened into a score.
+and evaluator confidence. `atteler eval record <agent> --evaluation-report
+report.json` imports pass rate, flake count, provider/model, fixture version,
+latency, token, and cost metadata from a machine-readable eval report. Negative
+knowledge is tracked separately by task type and severity instead of being
+flattened into a score.
 
 `atteler agents performance` is a diagnostic summary, not an automatic routing
 signal. Scores are grouped into compatible source, rubric, task, difficulty,
@@ -707,31 +715,85 @@ atteler eval run .atteler/evals/readme.eval.yaml \
 ```
 
 Replay writes normal session messages while avoiding provider availability and
-sampling noise in tests. Structured eval files can combine contains,
-not-contains, regex, JSON/YAML path, inline or file-backed schema, numeric,
-artifact-existence, and exit-code assertions. Reports are JSON with
-per-assertion status, evidence, severity, remediation hints, and redacted
-snippets for CI consumption. Golden updates require both `--eval-update-golden` and
+sampling noise in tests. Structured eval files can combine required/forbidden
+content, regex, JSON/YAML path, unordered list, inline or file-backed schema,
+numeric, workflow side-effect, artifact-produced/artifact-existence, exit-code,
+and recorded judge decision assertions. Reports are JSON with per-assertion
+status, evidence, severity, remediation hints, redacted snippets, pass rate,
+flake count, run metrics, and fixture/model/provider metadata for CI
+consumption. Golden updates require both `--eval-update-golden` and
 `--eval-approve-golden-update` so fixture refreshes remain reviewable.
 
 ```yaml
 version: 1
 metadata:
   target_command: atteler chat once "Summarize @README.md"
+  provider: openai
   model: openai/gpt-5.4
   agent: reviewer
   input_fixture: prompts/readme-summary.txt
+  fixture_version: readme-summary/v2
   owner: qa
-actual: ../fixtures/readme-summary.txt
+metrics:
+  latency_millis: 1200
+  input_tokens: 900
+  output_tokens: 180
+actual: ../fixtures/readme-summary.json
+workflow_file: ../fixtures/readme-summary.workflow.yaml
 assertions:
-  - id: mentions-package-overview
+  - id: status-json-shape
+    type: json_path
+    path: $.status
+    equals: ok
+  - id: summary-schema
+    type: schema
+    schema:
+      type: object
+      required: [status, bullets]
+      properties:
+        status:
+          const: ok
+        bullets:
+          type: array
+          minItems: 3
+  - id: required-bullets
+    type: unordered_list
+    path: $.bullets
+    items: [package overview, quickstart, feature map]
+    allow_extra: true
+  - id: used-file-context
+    type: tool_called
+    name: read_file
+    args:
+      path: README.md
+  - id: produced-report-artifact
+    type: artifact_produced
+    path: reports/readme-summary.json
+    kind: report
+  - id: wrote-no-secrets
     type: contains
-    value: package overview
+    required: [package overview, quickstart]
   - id: no-secret-dump
     type: not_contains
-    value: api_key=
+    forbidden: [api_key=, Authorization:]
     remediation: Remove secret-looking debug output from the response.
+  - id: rubric-replay
+    type: judge_decision
+    equals: pass
+    judge:
+      judge: rubric-bot
+      model: openai/gpt-5.4
+      rubric_version: summary-rubric/v1
+      input_ref: prompts/readme-summary.txt
+      output_ref: ../fixtures/readme-summary.json
+      decision: pass
+      rationale: Covers the required README sections.
 ```
+
+Judge assertions only replay recorded decisions; the eval runner never calls a
+judge model during evaluation and rejects suites where a judge is the only
+signal. Recorded judge metadata is copied into the machine-readable result so
+the decision can be audited later.
 
 ### Plugins and local run policy
 
@@ -1233,6 +1295,7 @@ linked from the row.
 | Evidence-backed model routing with catalog metadata, per-agent policy, route-decision artifacts, and usage telemetry | [`pkg/modelroute/catalog.go`](pkg/modelroute/catalog.go), [`pkg/modelroute/decision.go`](pkg/modelroute/decision.go), [`pkg/modelroute/telemetry.go`](pkg/modelroute/telemetry.go), [`pkg/modelroute/modelroute_test.go`](pkg/modelroute/modelroute_test.go), [`pkg/llm/llm.go`](pkg/llm/llm.go), [`cmd/atteler/route_decision_event.go`](cmd/atteler/route_decision_event.go), [`cmd/atteler/agent_resolution_test.go`](cmd/atteler/agent_resolution_test.go) |
 | Configuration loading, migration, redacted diagnostics, atomic state, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/migrate.go`](pkg/config/migrate.go), [`pkg/config/migrate_test.go`](pkg/config/migrate_test.go), [`pkg/config/diagnostics.go`](pkg/config/diagnostics.go), [`pkg/config/diagnostics_test.go`](pkg/config/diagnostics_test.go), [`pkg/config/redaction.go`](pkg/config/redaction.go), [`pkg/config/state.go`](pkg/config/state.go), [`pkg/config/state_test.go`](pkg/config/state_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
 | Sessions, transcript search/export, evaluations, failures, provenance-rich artifacts, multi-agent run audits, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`cmd/atteler/multi_agent_run_commands.go`](cmd/atteler/multi_agent_run_commands.go), [`cmd/atteler/multi_agent_run_commands_test.go`](cmd/atteler/multi_agent_run_commands_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/artifactmerge/artifactmerge.go`](pkg/artifactmerge/artifactmerge.go), [`pkg/artifactmerge/artifactmerge_test.go`](pkg/artifactmerge/artifactmerge_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |
+| Behavior-oriented eval assertions and machine-readable eval reports | [`pkg/eval/eval.go`](pkg/eval/eval.go), [`pkg/eval/structured.go`](pkg/eval/structured.go), [`pkg/eval/structured_test.go`](pkg/eval/structured_test.go), [`cmd/atteler/cli_agent_eval_feedback_route_commands.go`](cmd/atteler/cli_agent_eval_feedback_route_commands.go), [`cmd/atteler/main_test.go`](cmd/atteler/main_test.go) |
 | Bounded and policy-gated context references for local files, directories, globs, and remote URLs | [`pkg/contextref/references.go`](pkg/contextref/references.go), [`pkg/contextref/references_test.go`](pkg/contextref/references_test.go), [`pkg/contextref/contextref.go`](pkg/contextref/contextref.go), [`pkg/contextref/contextref_test.go`](pkg/contextref/contextref_test.go) |
 | Agent metadata, matching, orchestration planning, bounded async waves, and auditable sub-agent fan-out | [`pkg/agent/agent.go`](pkg/agent/agent.go), [`pkg/agent/orchestration.go`](pkg/agent/orchestration.go), [`pkg/agent/orchestration_test.go`](pkg/agent/orchestration_test.go), [`pkg/async/plan.go`](pkg/async/plan.go), [`pkg/async/run_options.go`](pkg/async/run_options.go), [`pkg/async/plan_test.go`](pkg/async/plan_test.go), [`pkg/subagent/subagent.go`](pkg/subagent/subagent.go), [`pkg/subagent/subagent_test.go`](pkg/subagent/subagent_test.go), [`cmd/atteler/cli_async_commands.go`](cmd/atteler/cli_async_commands.go), [`cmd/atteler/cli_shell_spawn_commands.go`](cmd/atteler/cli_shell_spawn_commands.go), [`test/e2e/cli_test.go`](test/e2e/cli_test.go) |
 | Skill synthesis into reviewable `SKILL.md` directories with trigger eval fixtures | [`pkg/skill/suggestion.go`](pkg/skill/suggestion.go), [`pkg/skill/persist.go`](pkg/skill/persist.go), [`pkg/skill/trigger.go`](pkg/skill/trigger.go), [`pkg/skill/suggestion_test.go`](pkg/skill/suggestion_test.go), [`test/e2e/cli_test.go`](test/e2e/cli_test.go) |

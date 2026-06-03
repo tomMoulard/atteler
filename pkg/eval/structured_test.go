@@ -78,7 +78,10 @@ func TestRunSuite_MixedAssertionsAndRedactedReport(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, report.Passed)
-	assert.Equal(t, ReportSummary{Total: 13, Passed: 12, Failed: 1}, report.Summary)
+	assert.Equal(t, 13, report.Summary.Total)
+	assert.Equal(t, 12, report.Summary.Passed)
+	assert.Equal(t, 1, report.Summary.Failed)
+	assert.InEpsilon(t, 12.0/13.0, report.Summary.PassRate, 0.0001)
 	assert.Equal(t, "quality", report.Metadata.Owner)
 
 	failed := findResult(t, report, "missing-secret")
@@ -101,10 +104,11 @@ func TestRunSuite_SchemaValidationConstraints(t *testing.T) {
 
 	report, err := RunSuite(Suite{Assertions: []Assertion{
 		{ID: "schema-pass", Type: AssertionSchema, Schema: map[string]any{
-			"type":     "object",
-			"required": []any{"name", "score", "items"},
+			"type":                 "object",
+			"required":             []any{"name", "score", "items"},
+			"additionalProperties": false,
 			"properties": map[string]any{
-				"name":  map[string]any{"type": "string", "minLength": 3, "maxLength": 10},
+				"name":  map[string]any{"type": "string", "minLength": 3, "maxLength": 10, "pattern": "^alp", "enum": []string{"alpha"}},
 				"score": map[string]any{"type": "number", "minimum": 0.8, "maximum": 1.0},
 				"items": map[string]any{"type": "array", "minItems": 1, "maxItems": 2},
 			},
@@ -112,10 +116,17 @@ func TestRunSuite_SchemaValidationConstraints(t *testing.T) {
 		{ID: "schema-fail", Type: AssertionSchema, Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"name":  map[string]any{"type": "string", "minLength": 8},
+				"name":  map[string]any{"type": "string", "minLength": 8, "pattern": "^beta$", "enum": []string{"beta"}},
 				"score": map[string]any{"type": "number", "maximum": 0.5},
 				"items": map[string]any{"type": "array", "maxItems": 1},
 			},
+		}},
+		{ID: "schema-additional-fail", Type: AssertionSchema, Schema: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+		}},
+		{ID: "schema-enum-definition-fail", Type: AssertionSchema, Schema: map[string]any{
+			"enum": "alpha",
 		}},
 	}}, RunOptions{
 		ActualText:    `{"name":"alpha","score":0.96,"items":["one","two"]}`,
@@ -130,8 +141,18 @@ func TestRunSuite_SchemaValidationConstraints(t *testing.T) {
 	failed := findResult(t, report, "schema-fail")
 	assert.Equal(t, assertionStatusFail, failed.Status)
 	assert.Contains(t, failed.Error, "minLength")
+	assert.Contains(t, failed.Error, "pattern")
+	assert.Contains(t, failed.Error, "enum")
 	assert.Contains(t, failed.Error, "maximum")
 	assert.Contains(t, failed.Error, "maxItems")
+
+	failed = findResult(t, report, "schema-additional-fail")
+	assert.Equal(t, assertionStatusFail, failed.Status)
+	assert.Contains(t, failed.Error, "additional property not allowed")
+
+	failed = findResult(t, report, "schema-enum-definition-fail")
+	assert.Equal(t, assertionStatusFail, failed.Status)
+	assert.Contains(t, failed.Error, "enum must be an array")
 }
 
 func TestRunSuite_TopLevelExitCodeExpectation(t *testing.T) {
@@ -153,11 +174,32 @@ func TestRunSuite_TopLevelExitCodeExpectation(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, report.Passed)
-	assert.Equal(t, ReportSummary{Total: 2, Passed: 1, Failed: 1}, report.Summary)
+	assert.Equal(t, 2, report.Summary.Total)
+	assert.Equal(t, 1, report.Summary.Passed)
+	assert.Equal(t, 1, report.Summary.Failed)
+	assert.InEpsilon(t, 0.5, report.Summary.PassRate, 0.0001)
 	failed := findResult(t, report, "exit_code")
 	assert.Equal(t, AssertionExitCode, failed.Type)
 	assert.Equal(t, "2", failed.ExpectedSnippet)
 	assert.Equal(t, "1", failed.ActualSnippet)
+}
+
+func TestRunSuite_ExitCodeAssertionAcceptsExitCodeField(t *testing.T) {
+	t.Parallel()
+
+	actualExit := 0
+	report, err := RunSuite(Suite{Assertions: []Assertion{
+		{ID: "exit", Type: AssertionExitCode, ExitCode: &actualExit},
+	}}, RunOptions{
+		ActualText:    "ok",
+		UseActualText: true,
+		ExitCode:      &actualExit,
+		Now:           time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.True(t, report.Passed)
+	assert.Equal(t, assertionStatusPass, findResult(t, report, "exit").Status)
 }
 
 func TestRunSuiteFile_LoadsStructuredAssertionFile(t *testing.T) {
@@ -178,6 +220,18 @@ properties:
     minimum: 6
     maximum: 8
 `), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "workflow.yaml"), []byte(`
+tool_calls:
+  - name: read_file
+    status: ok
+    args:
+      path: README.md
+      limit: 4096
+commands:
+  - command: go test ./pkg/eval
+    status: pass
+    exit_code: 0
+`), 0o600))
 
 	suitePath := filepath.Join(dir, "cli.eval.yaml")
 	require.NoError(t, os.WriteFile(suitePath, []byte(`
@@ -186,6 +240,7 @@ metadata:
   target_command: atteler demo
   owner: qa
 actual: actual.yaml
+workflow_file: workflow.yaml
 assertions:
   - id: status
     type: yaml_path
@@ -204,15 +259,307 @@ assertions:
   - id: schema-file
     type: schema
     schema_file: schema.yaml
+  - id: tool
+    type: tool_called
+    name: read_file
+  - id: tool-args
+    type: tool_called
+    name: read_file
+    args:
+      path: README.md
+  - id: command
+    type: command_run
+    command: go test ./pkg/eval
+    exit_code: 0
 `), 0o600))
 
 	report, err := RunSuiteFile(suitePath, RunOptions{Now: time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)})
 	require.NoError(t, err)
 
 	assert.True(t, report.Passed)
-	assert.Equal(t, ReportSummary{Total: 4, Passed: 4}, report.Summary)
+	assert.Equal(t, 7, report.Summary.Total)
+	assert.Equal(t, 7, report.Summary.Passed)
+	assert.InEpsilon(t, 1.0, report.Summary.PassRate, 0.0001)
 	assert.Equal(t, actualPath, report.ActualRef)
 	assert.Equal(t, "qa", report.Metadata.Owner)
+}
+
+func TestRunSuite_UnorderedListsRequiredContentAndMetrics(t *testing.T) {
+	t.Parallel()
+
+	report, err := RunSuite(Suite{
+		Metadata: Metadata{
+			Provider:       "openai",
+			Model:          "gpt-test",
+			FixtureVersion: "fixture-v2",
+		},
+		Metrics: ReportMetrics{
+			LatencyMillis: 1200,
+			InputTokens:   10,
+			OutputTokens:  5,
+			Cost:          0.002,
+		},
+		Assertions: []Assertion{
+			{ID: "unordered", Type: AssertionUnorderedList, Items: []string{"Fix bug", "Run tests", "Write report"}},
+			{ID: "required", Type: AssertionContains, Required: []string{"Fix bug", "Run tests"}},
+			{ID: "contains-field", Type: AssertionContains, Contains: "Write report"},
+			{ID: "forbidden", Type: AssertionNotContains, Forbidden: []string{"panic", "TODO"}},
+			{ID: "not-contains-field", Type: AssertionNotContains, NotContains: "deploy prod"},
+		},
+	}, RunOptions{
+		ActualText:    "- Run tests\n- Write report\n- Fix bug\n",
+		UseActualText: true,
+		Now:           time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.True(t, report.Passed)
+	assert.Equal(t, "openai", report.Metadata.Provider)
+	assert.Equal(t, "fixture-v2", report.Metadata.FixtureVersion)
+	assert.Equal(t, int64(1200), report.Metrics.LatencyMillis)
+	assert.Equal(t, 10, report.Metrics.InputTokens)
+	assert.Equal(t, 5, report.Metrics.OutputTokens)
+	assert.Equal(t, 15, report.Metrics.TotalTokens)
+	assert.InEpsilon(t, 0.002, report.Metrics.Cost, 0.0001)
+	assert.InEpsilon(t, 1.0, report.Summary.PassRate, 0.0001)
+}
+
+func TestRunSuite_OverrideTokenMetricsRecomputesTotal(t *testing.T) {
+	t.Parallel()
+
+	report, err := RunSuite(Suite{
+		Metrics: ReportMetrics{
+			InputTokens:  1,
+			OutputTokens: 2,
+			TotalTokens:  99,
+		},
+		Assertions: []Assertion{
+			{ID: "ok", Type: AssertionContains, Value: "ok"},
+		},
+	}, RunOptions{
+		ActualText:    "ok",
+		UseActualText: true,
+		Metrics: ReportMetrics{
+			InputTokens:  10,
+			OutputTokens: 5,
+		},
+		Now: time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.True(t, report.Passed)
+	assert.Equal(t, 10, report.Metrics.InputTokens)
+	assert.Equal(t, 5, report.Metrics.OutputTokens)
+	assert.Equal(t, 15, report.Metrics.TotalTokens)
+}
+
+func TestRunSuite_WorkflowAssertions(t *testing.T) {
+	t.Parallel()
+
+	exitCode := 0
+	gatePassed := true
+	absent := false
+	report, err := RunSuite(Suite{Assertions: []Assertion{
+		{ID: "tool", Type: AssertionToolCalled, Name: "read_file"},
+		{ID: "tool-pattern", Type: AssertionToolCalled, Pattern: `read_.*`},
+		{ID: "tool-args", Type: AssertionToolCalled, Name: "read_file", Args: map[string]any{"path": "README.md"}},
+		{ID: "no-deploy", Type: AssertionToolCalled, Name: "deploy_prod", Exists: &absent},
+		{ID: "no-secret-tool", Type: AssertionToolCalled, Name: "read_file", Args: map[string]any{"path": ".env"}, Exists: &absent},
+		{ID: "file", Type: AssertionFileTouched, Path: "pkg/eval/structured.go", Action: "write"},
+		{ID: "file-pattern", Type: AssertionFileTouched, Pattern: `pkg/eval/.*\.go`, Action: "write"},
+		{ID: "no-secret-file", Type: AssertionFileTouched, Path: "secrets.env", Exists: &absent},
+		{ID: "command", Type: AssertionCommandRun, Pattern: `go test ./pkg/eval`, ExitCode: &exitCode},
+		{ID: "no-deploy-command", Type: AssertionCommandRun, Pattern: `deploy prod`, Exists: &absent},
+		{ID: "gate", Type: AssertionGatePassed, Gate: "tests"},
+		{ID: "no-security-waiver", Type: AssertionGatePassed, Gate: "security-waiver", Exists: &absent},
+		{ID: "artifact-produced", Type: AssertionArtifactMade, Path: "reports/eval.json", Kind: "report"},
+		{ID: "no-debug-artifact", Type: AssertionArtifactMade, Pattern: `debug/.*`, Exists: &absent},
+	}}, RunOptions{
+		ActualText:    "ok",
+		UseActualText: true,
+		Workflow: WorkflowTrace{
+			ToolCalls: []WorkflowToolCall{{Name: "read_file", Status: "ok", Args: map[string]any{"path": "README.md", "limit": 4096}}},
+			Files:     []WorkflowFile{{Path: "pkg/eval/structured.go", Action: "write"}},
+			Commands:  []WorkflowCommand{{Command: "go test ./pkg/eval", ExitCode: &exitCode, Status: "pass"}},
+			Gates:     []WorkflowGate{{Name: "tests", Passed: &gatePassed}},
+			Artifacts: []WorkflowArtifact{{Path: "reports/eval.json", Kind: "report", Status: "ok"}},
+		},
+		Now: time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.True(t, report.Passed)
+	assert.Equal(t, 14, report.Summary.Passed)
+}
+
+func TestRunSuite_WorkflowAssertionRejectsInvalidPattern(t *testing.T) {
+	t.Parallel()
+
+	report, err := RunSuite(Suite{Assertions: []Assertion{
+		{ID: "tool", Type: AssertionToolCalled, Pattern: "["},
+	}}, RunOptions{
+		ActualText:    "ok",
+		UseActualText: true,
+		Workflow:      WorkflowTrace{ToolCalls: []WorkflowToolCall{{Name: "read_file"}}},
+		Now:           time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.False(t, report.Passed)
+	failed := findResult(t, report, "tool")
+	assert.Equal(t, assertionStatusFail, failed.Status)
+	assert.Contains(t, failed.Evidence, "pattern is invalid")
+	assert.NotEmpty(t, failed.Error)
+}
+
+func TestRunSuite_GatePassedExistsFalseAllowsObservedFailedGate(t *testing.T) {
+	t.Parallel()
+
+	absent := false
+	failedGate := false
+	report, err := RunSuite(Suite{Assertions: []Assertion{
+		{ID: "no-passed-waiver", Type: AssertionGatePassed, Gate: "security-waiver", Exists: &absent},
+	}}, RunOptions{
+		ActualText:    "ok",
+		UseActualText: true,
+		Workflow: WorkflowTrace{Gates: []WorkflowGate{
+			{Name: "security-waiver", Status: "fail", Passed: &failedGate},
+		}},
+		Now: time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.True(t, report.Passed)
+	assert.Equal(t, assertionStatusPass, findResult(t, report, "no-passed-waiver").Status)
+}
+
+func TestRunSuite_GatePassedExistsFalseFailsObservedPassedGate(t *testing.T) {
+	t.Parallel()
+
+	absent := false
+	passedGate := true
+	report, err := RunSuite(Suite{Assertions: []Assertion{
+		{ID: "no-passed-waiver", Type: AssertionGatePassed, Gate: "security-waiver", Exists: &absent},
+	}}, RunOptions{
+		ActualText:    "ok",
+		UseActualText: true,
+		Workflow: WorkflowTrace{Gates: []WorkflowGate{
+			{Name: "security-waiver", Status: "pass", Passed: &passedGate},
+		}},
+		Now: time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.False(t, report.Passed)
+	failed := findResult(t, report, "no-passed-waiver")
+	assert.Equal(t, assertionStatusFail, failed.Status)
+	assert.Contains(t, failed.Evidence, "forbidden gate passed")
+}
+
+func TestRunSuite_GatePassedFindsLaterPassingObservation(t *testing.T) {
+	t.Parallel()
+
+	failedGate := false
+	passedGate := true
+	report, err := RunSuite(Suite{Assertions: []Assertion{
+		{ID: "eventual-pass", Type: AssertionGatePassed, Gate: "tests"},
+	}}, RunOptions{
+		ActualText:    "ok",
+		UseActualText: true,
+		Workflow: WorkflowTrace{Gates: []WorkflowGate{
+			{Name: "tests", Status: "fail", Passed: &failedGate},
+			{Name: "tests", Status: "pass", Passed: &passedGate},
+		}},
+		Now: time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.True(t, report.Passed)
+	assert.Equal(t, assertionStatusPass, findResult(t, report, "eventual-pass").Status)
+}
+
+func TestRunSuite_WorkflowMissingDiagnosticsShowObservedSideEffects(t *testing.T) {
+	t.Parallel()
+
+	exitCode := 0
+	gatePassed := false
+	report, err := RunSuite(Suite{Assertions: []Assertion{
+		{ID: "tool", Type: AssertionToolCalled, Name: "write_file"},
+		{ID: "file", Type: AssertionFileTouched, Path: "pkg/eval/eval.go", Action: "write"},
+		{ID: "command", Type: AssertionCommandRun, Command: "go test ./pkg/eval -run Missing"},
+		{ID: "gate", Type: AssertionGatePassed, Gate: "lint"},
+		{ID: "artifact", Type: AssertionArtifactMade, Path: "reports/final.json", Kind: "report"},
+	}}, RunOptions{
+		ActualText:    "ok",
+		UseActualText: true,
+		Workflow: WorkflowTrace{
+			ToolCalls: []WorkflowToolCall{{Name: "read_file", Status: "ok", Args: map[string]any{"path": "README.md"}}},
+			Files:     []WorkflowFile{{Path: "pkg/eval/structured.go", Action: "write", Status: "ok"}},
+			Commands:  []WorkflowCommand{{Command: "go test ./pkg/eval", ExitCode: &exitCode, Status: "pass"}},
+			Gates:     []WorkflowGate{{Name: "tests", Passed: &gatePassed, Status: "fail"}},
+			Artifacts: []WorkflowArtifact{{Path: "reports/draft.json", Kind: "report", Status: "ok"}},
+		},
+		Now: time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.False(t, report.Passed)
+	assert.Contains(t, findResult(t, report, "tool").ActualSnippet, "read_file")
+	assert.Contains(t, findResult(t, report, "tool").ActualSnippet, "README.md")
+	assert.Contains(t, findResult(t, report, "file").ActualSnippet, "pkg/eval/structured.go")
+	assert.Contains(t, findResult(t, report, "command").ActualSnippet, "go test ./pkg/eval")
+	assert.Contains(t, findResult(t, report, "gate").ActualSnippet, "tests")
+	assert.Contains(t, findResult(t, report, "artifact").ActualSnippet, "reports/draft.json")
+}
+
+func TestRunSuite_JudgeDecisionRequiresIndependentSignal(t *testing.T) {
+	t.Parallel()
+
+	judge := &JudgeDecision{
+		Judge:         "rubric-bot",
+		Model:         "gpt-judge",
+		RubricVersion: "rubric/v1",
+		InputRef:      "inputs/case.json",
+		OutputRef:     "outputs/case.json",
+		Decision:      "pass",
+		Rationale:     "meets rubric api_key=supersecret",
+		Score:         0.9,
+		RecordedAt:    "2026-05-22T12:00:00Z",
+	}
+	_, err := RunSuite(Suite{Assertions: []Assertion{
+		{ID: "judge", Type: AssertionJudgeDecision, Judge: judge, Equals: "pass"},
+	}}, RunOptions{ActualText: "ok", UseActualText: true})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "at least one non-judge")
+
+	report, err := RunSuite(Suite{Assertions: []Assertion{
+		{ID: "content", Type: AssertionContains, Value: "ok"},
+		{ID: "judge", Type: AssertionJudgeDecision, Judge: judge, Equals: "pass"},
+	}}, RunOptions{
+		ActualText:    "ok",
+		UseActualText: true,
+		Now:           time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.True(t, report.Passed)
+	result := findResult(t, report, "judge")
+	assert.Contains(t, result.Evidence, "input_ref=inputs/case.json")
+	require.NotNil(t, result.Judge)
+	assert.Equal(t, "rubric-bot", result.Judge.Judge)
+	assert.Equal(t, "gpt-judge", result.Judge.Model)
+	assert.Equal(t, "rubric/v1", result.Judge.RubricVersion)
+	assert.Equal(t, "inputs/case.json", result.Judge.InputRef)
+	assert.Equal(t, "outputs/case.json", result.Judge.OutputRef)
+	assert.Equal(t, "pass", result.Judge.Decision)
+	assert.Equal(t, "meets rubric api_key=[REDACTED]", result.Judge.Rationale)
+	assert.InEpsilon(t, 0.9, result.Judge.Score, 0.0001)
+
+	reportJSON, err := report.JSON()
+	require.NoError(t, err)
+	assert.Contains(t, string(reportJSON), `"judge": {`)
+	assert.Contains(t, string(reportJSON), `"input_ref": "inputs/case.json"`)
+	assert.NotContains(t, string(reportJSON), "supersecret")
 }
 
 func TestLoadSuiteFile_RejectsUnknownFields(t *testing.T) {
@@ -331,6 +678,107 @@ assertions:
 	require.NoError(t, err)
 	assert.Contains(t, string(reportJSON), `"suites"`)
 	assert.Contains(t, string(reportJSON), `"owner": "qa-one"`)
+}
+
+func TestRunSuiteFiles_DetectsFlakyAssertionGroups(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeEvalFile(t, filepath.Join(dir, "pass.txt"), "status ok")
+	writeEvalFile(t, filepath.Join(dir, "fail.txt"), "status regressed")
+	passSuite := filepath.Join(dir, "pass.eval.yaml")
+	failSuite := filepath.Join(dir, "fail.eval.yaml")
+
+	writeEvalFile(t, passSuite, `
+version: 1
+actual: pass.txt
+assertions:
+  - id: status
+    type: contains
+    value: ok
+    flake_group: status-case
+`)
+	writeEvalFile(t, failSuite, `
+version: 1
+actual: fail.txt
+assertions:
+  - id: status
+    type: contains
+    value: ok
+    flake_group: status-case
+`)
+
+	report, err := RunSuiteFiles([]string{passSuite, failSuite}, RunOptions{Now: time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)})
+	require.NoError(t, err)
+
+	assert.False(t, report.Passed)
+	assert.Equal(t, 2, report.Summary.Total)
+	assert.Equal(t, 2, report.Summary.Failed)
+	assert.Equal(t, 2, report.Summary.FlakeCount)
+	assert.Equal(t, assertionStatusFlaky, report.Results[0].Status)
+	assert.Equal(t, assertionStatusFlaky, report.Results[1].Status)
+	assert.True(t, report.Results[0].Flaky)
+	assert.True(t, report.Results[1].Flaky)
+	assert.Contains(t, report.Results[0].Evidence, "non-deterministic assertion result")
+	assert.Contains(t, report.Results[0].Evidence, "original evidence: actual output contained expected text")
+	assert.Contains(t, report.Results[1].Evidence, "non-deterministic assertion result")
+	assert.Contains(t, report.Results[1].Evidence, "original evidence: actual output did not contain required text")
+}
+
+func TestRunSuiteFiles_AppliesRunMetricsOnce(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeEvalFile(t, filepath.Join(dir, "one.txt"), "one ok")
+	writeEvalFile(t, filepath.Join(dir, "two.txt"), "two ok")
+	oneSuite := filepath.Join(dir, "one.eval.yaml")
+	twoSuite := filepath.Join(dir, "two.eval.yaml")
+
+	writeEvalFile(t, oneSuite, `
+version: 1
+metadata:
+  provider: openai
+  model: gpt-test
+  fixture_version: fixture-v2
+actual: one.txt
+assertions:
+  - id: one
+    type: contains
+    value: ok
+`)
+	writeEvalFile(t, twoSuite, `
+version: 1
+metadata:
+  provider: openai
+  model: gpt-test
+  fixture_version: fixture-v2
+actual: two.txt
+assertions:
+  - id: two
+    type: contains
+    value: ok
+`)
+
+	report, err := RunSuiteFiles([]string{oneSuite, twoSuite}, RunOptions{
+		Metrics: ReportMetrics{
+			LatencyMillis: 1200,
+			InputTokens:   10,
+			OutputTokens:  5,
+			Cost:          0.002,
+		},
+		Now: time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	assert.True(t, report.Passed)
+	assert.Equal(t, "openai", report.Metadata.Provider)
+	assert.Equal(t, "gpt-test", report.Metadata.Model)
+	assert.Equal(t, "fixture-v2", report.Metadata.FixtureVersion)
+	assert.Equal(t, int64(1200), report.Metrics.LatencyMillis)
+	assert.Equal(t, 10, report.Metrics.InputTokens)
+	assert.Equal(t, 5, report.Metrics.OutputTokens)
+	assert.Equal(t, 15, report.Metrics.TotalTokens)
+	assert.InEpsilon(t, 0.002, report.Metrics.Cost, 0.0001)
 }
 
 func TestRunSuite_GoldenUpdateRequiresExplicitApproval(t *testing.T) {

@@ -53,10 +53,18 @@ type sessionWriteCommandInput struct {
 	EvaluationTaskType        string
 	EvaluationDifficulty      string
 	EvaluationExpectedOutcome string
+	EvaluationProvider        string
 	EvaluationModel           string
+	EvaluationFixtureVersion  string
 	EvaluationAgentVersion    string
+	EvaluationReportPath      string
 	EvaluationScore           int
+	EvaluationPassRate        float64
+	EvaluationFlakeCount      int
 	EvaluationDurationMillis  int
+	EvaluationInputTokens     int
+	EvaluationOutputTokens    int
+	EvaluationTotalTokens     int
 	EvaluationCost            float64
 	EvaluationConfidence      float64
 	RecordArtifact            string
@@ -66,6 +74,7 @@ type sessionWriteCommandInput struct {
 	ArtifactSummary           string
 	FeedbackApplyConfig       string
 	FeedbackHistoryPath       string
+	evaluationPassRateSet     bool
 }
 
 func sessionWriteCommandInputFromOptions(opts cliOptions) sessionWriteCommandInput {
@@ -85,10 +94,18 @@ func sessionWriteCommandInputFromOptions(opts cliOptions) sessionWriteCommandInp
 		EvaluationTaskType:        opts.evaluationTaskType,
 		EvaluationDifficulty:      opts.evaluationDifficulty,
 		EvaluationExpectedOutcome: opts.evaluationExpectedOutcome,
+		EvaluationProvider:        opts.evaluationProvider,
 		EvaluationModel:           opts.evaluationModel,
+		EvaluationFixtureVersion:  opts.evaluationFixtureVersion,
 		EvaluationAgentVersion:    opts.evaluationAgentVersion,
+		EvaluationReportPath:      opts.evaluationReportPath,
 		EvaluationScore:           opts.evaluationScore.value,
+		EvaluationPassRate:        opts.evaluationPassRate.value,
+		EvaluationFlakeCount:      opts.evaluationFlakeCount.value,
 		EvaluationDurationMillis:  opts.evaluationDurationMillis.value,
+		EvaluationInputTokens:     opts.evaluationInputTokens.value,
+		EvaluationOutputTokens:    opts.evaluationOutputTokens.value,
+		EvaluationTotalTokens:     opts.evaluationTotalTokens.value,
 		EvaluationCost:            opts.evaluationCost.value,
 		EvaluationConfidence:      opts.evaluationConfidence.value,
 		RecordArtifact:            opts.recordArtifact,
@@ -98,5 +115,6 @@ func sessionWriteCommandInputFromOptions(opts cliOptions) sessionWriteCommandInp
 		ArtifactSummary:           opts.artifactSummary,
 		FeedbackApplyConfig:       opts.feedbackApplyConfig,
 		FeedbackHistoryPath:       opts.feedbackHistoryPath,
+		evaluationPassRateSet:     opts.evaluationPassRate.set,
 	}
 }

@@ -922,7 +922,20 @@ func TestFormatAgentPerformanceSummary(t *testing.T) {
 		FailureCount:             1,
 		DefaultAgentSessionCount: 1,
 		ScoredEvaluationCount:    2,
+		PassRateSampleCount:      1,
+		FlakeCount:               2,
+		FlakyEvaluationCount:     1,
+		TokenSampleCount:         1,
+		InputTokens:              100,
+		OutputTokens:             40,
+		TotalTokens:              140,
+		DurationSampleCount:      1,
+		AverageDurationMillis:    1234,
+		CostSampleCount:          1,
+		TotalCost:                0.012345,
+		AverageCost:              0.012345,
 		AverageScore:             7.5,
+		AveragePassRate:          0.75,
 		MinScore:                 6,
 		MaxScore:                 9,
 		RecentWindowDays:         30,
@@ -934,7 +947,9 @@ func TestFormatAgentPerformanceSummary(t *testing.T) {
 			RubricVersion:          "review/v1",
 			TaskType:               "code-review",
 			Difficulty:             "medium",
+			Provider:               "openai",
 			Model:                  "gpt-test",
+			FixtureVersion:         "fixture-v2",
 			AgentVersion:           "reviewer@1",
 			RoutingEligible:        false,
 			ValidityReasons:        []string{"sample size 2 is below required 10", "recent sample size 1 is below required 3"},
@@ -954,11 +969,19 @@ func TestFormatAgentPerformanceSummary(t *testing.T) {
 			RecentWindowStart:      time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC),
 			ConfidenceSampleCount:  2,
 			AverageConfidence:      0.8,
+			PassRateSampleCount:    1,
+			AveragePassRate:        0.75,
+			FlakeCount:             2,
+			FlakyEvaluationCount:   1,
 			DurationSampleCount:    1,
 			AverageDurationMillis:  1234,
 			CostSampleCount:        1,
 			TotalCost:              0.012345,
 			AverageCost:            0.012345,
+			TokenSampleCount:       1,
+			InputTokens:            100,
+			OutputTokens:           40,
+			TotalTokens:            140,
 		}},
 		Outcomes: []session.OutcomeCount{{Outcome: "pass", Count: 1}, {Outcome: "fail", Count: 1}},
 		NegativeKnowledgeBreakdown: []session.NegativeKnowledgeCategoryCount{
@@ -988,11 +1011,24 @@ func TestFormatAgentPerformanceSummary(t *testing.T) {
 		"provenance=human:2",
 		"rubrics=review/v1:2",
 		"evaluators=alice:2",
-		"score_buckets=source=human/rubric=review/v1/task=code-review/difficulty=medium/model=gpt-test/agent_version=reviewer@1/routing_eligible=false/sample=2/avg=7.50/ci95=4.56..10.44/stderr=1.50/uncertainty=low_sample/recent_sample=1/recent_avg=9.00/previous_sample=1/previous_avg=6.00/regression=insufficient_history/regression_delta=3.00/latest_score=2026-05-02T10:00:00Z/recent_since=2026-04-02T10:00:00Z/confidence_sample=2/avg_confidence=0.80/duration_sample=1/avg_duration_ms=1234.00/cost_sample=1/total_cost=0.012345/avg_cost=0.012345/validity_reasons=sample size 2 is below required 10|recent sample size 1 is below required 3",
+		"score_buckets=source=human/rubric=review/v1/task=code-review/difficulty=medium/provider=openai/model=gpt-test/fixture_version=fixture-v2/agent_version=reviewer@1/routing_eligible=false/sample=2/avg=7.50/ci95=4.56..10.44/stderr=1.50/uncertainty=low_sample/recent_sample=1/recent_avg=9.00/previous_sample=1/previous_avg=6.00/regression=insufficient_history/regression_delta=3.00/latest_score=2026-05-02T10:00:00Z/recent_since=2026-04-02T10:00:00Z/confidence_sample=2/avg_confidence=0.80/pass_rate_sample=1/avg_pass_rate=0.75/flake_count=2/flaky_evaluations=1/duration_sample=1/avg_duration_ms=1234.00/cost_sample=1/total_cost=0.012345/avg_cost=0.012345/token_sample=1/input_tokens=100/output_tokens=40/total_tokens=140/validity_reasons=sample size 2 is below required 10|recent sample size 1 is below required 3",
 		"scored=2",
 		"avg_score=7.50",
 		"min_score=6",
 		"max_score=9",
+		"pass_rate_samples=1",
+		"avg_pass_rate=0.75",
+		"flake_count=2",
+		"flaky_evaluations=1",
+		"token_samples=1",
+		"input_tokens=100",
+		"output_tokens=40",
+		"total_tokens=140",
+		"duration_samples=1",
+		"avg_duration_ms=1234.00",
+		"cost_samples=1",
+		"total_cost=0.012345",
+		"avg_cost=0.012345",
 		"outcomes=pass:1,fail:1",
 		"negative_knowledge_breakdown=code-review/medium:1",
 		"validity_eligible_buckets=0",
@@ -1049,11 +1085,19 @@ func TestFormatEvaluation(t *testing.T) {
 		TaskType:        "code-review",
 		Difficulty:      "medium",
 		ExpectedOutcome: "catch regression",
+		Provider:        "openai",
 		Model:           "gpt-test",
+		FixtureVersion:  "fixture-v2",
 		AgentVersion:    "reviewer@abc123",
 		SchemaVersion:   session.AgentEvaluationSchemaVersion,
 		Score:           9,
+		PassRate:        0,
+		HasPassRate:     true,
+		FlakeCount:      2,
 		DurationMillis:  1234,
+		InputTokens:     100,
+		OutputTokens:    40,
+		TotalTokens:     140,
 		Cost:            0.012345,
 		Confidence:      0.85,
 		CreatedAt:       time.Date(2026, 5, 1, 12, 45, 0, 0, time.UTC),
@@ -1071,10 +1115,16 @@ func TestFormatEvaluation(t *testing.T) {
 		"task_type=code-review",
 		"difficulty=medium",
 		"expected_outcome=catch regression",
+		"provider=openai",
 		"model=gpt-test",
+		"fixture_version=fixture-v2",
 		"agent_version=reviewer@abc123",
-		"schema_version=1",
+		"schema_version=2",
+		"pass_rate=0.00",
+		"flake_count=2",
 		"duration_millis=1234",
+		"total_tokens=140",
+		"tokens=input:100,output:40",
 		"cost=0.012345",
 		"confidence=0.85",
 		"reference=eval.md",
@@ -1155,6 +1205,8 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 		Model:          "gpt-plan",
 		AgentVersion:   "planner@2",
 		Score:          88,
+		PassRate:       0,
+		HasPassRate:    true,
 		Confidence:     0.9,
 		DurationMillis: 2500,
 		Cost:           0.02,
@@ -1172,6 +1224,8 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 	assert.Equal(t, session.EvaluationSourceCI, loaded.Evaluations[1].Source)
 	assert.Equal(t, "planning/v3", loaded.Evaluations[1].RubricVersion)
 	assert.Equal(t, "planning", loaded.Evaluations[1].TaskType)
+	assert.True(t, loaded.Evaluations[1].PassRateRecorded())
+	assert.Zero(t, loaded.Evaluations[1].PassRate)
 	assert.Equal(t, int64(2500), loaded.Evaluations[1].DurationMillis)
 	assert.InEpsilon(t, 0.9, loaded.Evaluations[1].Confidence, 0.0001)
 
@@ -1198,6 +1252,102 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 	assert.Equal(t, "record-artifact", loaded.Artifacts[0].SourceCommand)
 	assert.Equal(t, "atteler", loaded.Artifacts[0].SourceTool)
 	assert.Equal(t, "approved", loaded.Artifacts[0].ReviewStatus)
+}
+
+func TestEvaluationFromSessionWriteInput_MergesEvalReportMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	reportPath := filepath.Join(dir, "eval-report.json")
+	report := atteval.Report{
+		Version: 1,
+		Suite:   "fixtures/workflow.eval.yaml",
+		Passed:  false,
+		Metadata: atteval.Metadata{
+			Provider:       "openai",
+			Model:          "gpt-report",
+			FixtureVersion: "fixture-v3",
+		},
+		Metrics: atteval.ReportMetrics{
+			LatencyMillis: 1500,
+			InputTokens:   100,
+			OutputTokens:  40,
+			TotalTokens:   140,
+			Cost:          0.012,
+		},
+		Summary: atteval.ReportSummary{
+			Total:      5,
+			Passed:     4,
+			Failed:     1,
+			FlakeCount: 2,
+			PassRate:   0.8,
+		},
+	}
+	data, err := report.JSON()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(reportPath, data, 0o600))
+
+	evaluation, err := evaluationFromSessionWriteInput(sessionWriteCommandInput{
+		RecordEvaluation:     "reviewer",
+		EvaluationReportPath: reportPath,
+	}, appState{selectedModel: "fallback-model"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "reviewer", evaluation.Agent)
+	assert.Equal(t, "fail", evaluation.Outcome)
+	assert.Equal(t, session.EvaluationSourceHarness, evaluation.Source)
+	assert.Equal(t, "atteler-eval", evaluation.Evaluator)
+	assert.Equal(t, "fixtures/workflow.eval.yaml", evaluation.Reference)
+	assert.Equal(t, "openai", evaluation.Provider)
+	assert.Equal(t, "gpt-report", evaluation.Model)
+	assert.Equal(t, "fixture-v3", evaluation.FixtureVersion)
+	assert.True(t, evaluation.PassRateRecorded())
+	assert.InEpsilon(t, 0.8, evaluation.PassRate, 0.0001)
+	assert.Equal(t, 2, evaluation.FlakeCount)
+	assert.Equal(t, int64(1500), evaluation.DurationMillis)
+	assert.Equal(t, 100, evaluation.InputTokens)
+	assert.Equal(t, 40, evaluation.OutputTokens)
+	assert.Equal(t, 140, evaluation.TotalTokens)
+	assert.InEpsilon(t, 0.012, evaluation.Cost, 0.0001)
+
+	explicit, err := evaluationFromSessionWriteInput(sessionWriteCommandInput{
+		RecordEvaluation:      "reviewer",
+		EvaluationOutcome:     "warn",
+		EvaluationSource:      session.EvaluationSourceCI,
+		EvaluationEvaluator:   "ci-eval",
+		EvaluationReportPath:  reportPath,
+		EvaluationModel:       "explicit-model",
+		EvaluationPassRate:    0.25,
+		evaluationPassRateSet: true,
+	}, appState{selectedModel: "fallback-model"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "warn", explicit.Outcome)
+	assert.Equal(t, session.EvaluationSourceCI, explicit.Source)
+	assert.Equal(t, "ci-eval", explicit.Evaluator)
+	assert.Equal(t, "explicit-model", explicit.Model)
+	assert.InEpsilon(t, 0.25, explicit.PassRate, 0.0001)
+
+	aggregateReportPath := filepath.Join(dir, "aggregate-report.json")
+	aggregate := atteval.Report{
+		Version: 1,
+		Passed:  true,
+		Suites: []atteval.SuiteReport{{
+			Path: "fixtures/aggregate-one.eval.yaml",
+		}},
+		Summary: atteval.ReportSummary{Total: 1, Passed: 1, PassRate: 1},
+	}
+	aggregateData, err := aggregate.JSON()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(aggregateReportPath, aggregateData, 0o600))
+
+	fromAggregate, err := evaluationFromSessionWriteInput(sessionWriteCommandInput{
+		RecordEvaluation:     "reviewer",
+		EvaluationReportPath: aggregateReportPath,
+	}, appState{selectedModel: "fallback-model"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "fixtures/aggregate-one.eval.yaml", fromAggregate.Reference)
 }
 
 func TestFormatSessionReuseCommand(t *testing.T) {

@@ -47,10 +47,23 @@ type AgentPerformanceSummary struct {
 	Validity                   PerformanceValidity
 	RecentWindowDays           int
 	AverageScore               float64
+	AveragePassRate            float64
 	EvaluationCount            int
 	NegativeKnowledgeCount     int
 	FailureCount               int
 	ScoredEvaluationCount      int
+	PassRateSampleCount        int
+	FlakeCount                 int
+	FlakyEvaluationCount       int
+	InputTokens                int
+	OutputTokens               int
+	TotalTokens                int
+	TokenSampleCount           int
+	AverageDurationMillis      float64
+	DurationSampleCount        int
+	TotalCost                  float64
+	AverageCost                float64
+	CostSampleCount            int
 	MinScore                   int
 	MaxScore                   int
 	DefaultAgentSessionCount   int
@@ -70,7 +83,9 @@ type ScoreBucketSummary struct {
 	RubricVersion          string
 	TaskType               string
 	Difficulty             string
+	Provider               string
 	Model                  string
+	FixtureVersion         string
 	AgentVersion           string
 	Uncertainty            string
 	RegressionStatus       string
@@ -82,6 +97,7 @@ type ScoreBucketSummary struct {
 	ConfidenceIntervalLow  float64
 	ConfidenceIntervalHigh float64
 	AverageConfidence      float64
+	AveragePassRate        float64
 	AverageDurationMillis  float64
 	TotalCost              float64
 	AverageCost            float64
@@ -90,8 +106,15 @@ type ScoreBucketSummary struct {
 	RegressionDelta        float64
 	SampleSize             int
 	ConfidenceSampleCount  int
+	PassRateSampleCount    int
+	FlakeCount             int
+	FlakyEvaluationCount   int
 	DurationSampleCount    int
 	CostSampleCount        int
+	InputTokens            int
+	OutputTokens           int
+	TotalTokens            int
+	TokenSampleCount       int
 	RecentSampleSize       int
 	PreviousSampleSize     int
 	RoutingEligible        bool
@@ -160,18 +183,19 @@ func (summary AgentPerformanceSummary) RoutingEligibleScoreBuckets() []ScoreBuck
 
 type agentPerformanceAccumulator struct {
 	latestActivity           time.Time
-	outcomeDisplay           map[string]string
-	outcomeCounts            map[string]int
+	evaluatorCounts          map[string]int
+	negativeCategoryCounts   map[string]int
 	provenanceDisplay        map[string]string
 	provenanceCounts         map[string]int
 	rubricDisplay            map[string]string
 	rubricCounts             map[string]int
 	evaluatorDisplay         map[string]string
-	evaluatorCounts          map[string]int
-	negativeCategoryDisplay  map[string]negativeKnowledgeCategoryKey
-	negativeCategoryCounts   map[string]int
+	outcomeDisplay           map[string]string
+	outcomeCounts            map[string]int
 	scoreBuckets             map[string]*scoreBucketAccumulator
+	negativeCategoryDisplay  map[string]negativeKnowledgeCategoryKey
 	agent                    string
+	evalMetrics              []evaluationMetricObservation
 	evaluationCount          int
 	negativeKnowledgeCount   int
 	failureCount             int
@@ -185,22 +209,45 @@ type scoreBucketAccumulator struct {
 
 type scoreObservation struct {
 	createdAt     time.Time
-	score         int
-	durationMS    int64
 	confidence    float64
 	cost          float64
+	passRate      float64
+	durationMS    int64
+	score         int
+	flakeCount    int
+	inputTokens   int
+	outputTokens  int
+	totalTokens   int
 	hasConfidence bool
 	hasDuration   bool
 	hasCost       bool
+	hasPassRate   bool
+	hasTokens     bool
+}
+
+type evaluationMetricObservation struct {
+	passRate     float64
+	flakeCount   int
+	inputTokens  int
+	outputTokens int
+	totalTokens  int
+	durationMS   int64
+	cost         float64
+	hasPassRate  bool
+	hasTokens    bool
+	hasDuration  bool
+	hasCost      bool
 }
 
 type scoreBucketKey struct {
-	source        string
-	rubricVersion string
-	taskType      string
-	difficulty    string
-	model         string
-	agentVersion  string
+	source         string
+	rubricVersion  string
+	taskType       string
+	difficulty     string
+	provider       string
+	model          string
+	fixtureVersion string
+	agentVersion   string
 }
 
 type negativeKnowledgeCategoryKey struct {
@@ -407,6 +454,7 @@ func (a *agentPerformanceAccumulator) summary(referenceTime time.Time) AgentPerf
 
 	summary.ScoreBuckets = a.scoreBucketSummaries(referenceTime)
 	applyScoreBucketTotals(&summary)
+	applyEvaluationMetricTotals(&summary, a.evalMetrics)
 
 	// Backward-compatible aggregate score fields are populated only when all
 	// score-bearing records are in one compatible cohort. Cross-rubric/source
@@ -435,6 +483,28 @@ func applyScoreBucketTotals(summary *AgentPerformanceSummary) {
 	summary.MaxScore = summary.ScoreBuckets[0].MaxScore
 }
 
+func applyEvaluationMetricTotals(summary *AgentPerformanceSummary, observations []evaluationMetricObservation) {
+	passRateAverage, passRateSample := summarizeEvaluationPassRate(observations)
+	flakeCount, flakyEvaluationCount := summarizeEvaluationFlakes(observations)
+	inputTokens, outputTokens, totalTokens, tokenSample := summarizeEvaluationTokens(observations)
+	averageDuration, durationSample := summarizeEvaluationDuration(observations)
+	totalCost, averageCost, costSample := summarizeEvaluationCost(observations)
+
+	summary.AveragePassRate = passRateAverage
+	summary.PassRateSampleCount = passRateSample
+	summary.FlakeCount = flakeCount
+	summary.FlakyEvaluationCount = flakyEvaluationCount
+	summary.InputTokens = inputTokens
+	summary.OutputTokens = outputTokens
+	summary.TotalTokens = totalTokens
+	summary.TokenSampleCount = tokenSample
+	summary.AverageDurationMillis = averageDuration
+	summary.DurationSampleCount = durationSample
+	summary.TotalCost = totalCost
+	summary.AverageCost = averageCost
+	summary.CostSampleCount = costSample
+}
+
 func (a *agentPerformanceAccumulator) observeActivity(activity time.Time) {
 	if activity.After(a.latestActivity) {
 		a.latestActivity = activity
@@ -454,6 +524,7 @@ func (a *agentPerformanceAccumulator) observeEvaluation(
 	a.observeProvenance(source)
 	a.observeRubric(rubricVersion)
 	a.observeEvaluator(evaluation.Evaluator)
+	a.observeEvaluationMetrics(evaluation)
 	a.observeScore(evaluation, sessionModel, source, rubricVersion, activity)
 
 	if failureOutcome(evaluation.Outcome) {
@@ -515,6 +586,45 @@ func (a *agentPerformanceAccumulator) observeNegativeKnowledgeCategory(knowledge
 	a.negativeCategoryCounts[key]++
 }
 
+func (a *agentPerformanceAccumulator) observeEvaluationMetrics(evaluation AgentEvaluation) {
+	observation := evaluationMetricObservation{}
+	if evaluation.PassRateRecorded() {
+		observation.passRate = evaluation.PassRate
+		observation.hasPassRate = true
+	}
+
+	if evaluation.FlakeCount > 0 {
+		observation.flakeCount = evaluation.FlakeCount
+	}
+
+	if evaluation.InputTokens > 0 || evaluation.OutputTokens > 0 || evaluation.TotalTokens > 0 {
+		observation.inputTokens = evaluation.InputTokens
+		observation.outputTokens = evaluation.OutputTokens
+		observation.totalTokens = evaluation.TotalTokens
+
+		if observation.totalTokens == 0 {
+			observation.totalTokens = observation.inputTokens + observation.outputTokens
+		}
+
+		observation.hasTokens = true
+	}
+
+	if evaluation.DurationMillis > 0 {
+		observation.durationMS = evaluation.DurationMillis
+		observation.hasDuration = true
+	}
+
+	if evaluation.Cost > 0 {
+		observation.cost = evaluation.Cost
+		observation.hasCost = true
+	}
+
+	if observation.hasPassRate || observation.flakeCount > 0 || observation.hasTokens ||
+		observation.hasDuration || observation.hasCost {
+		a.evalMetrics = append(a.evalMetrics, observation)
+	}
+}
+
 func (a *agentPerformanceAccumulator) observeScore(
 	evaluation AgentEvaluation,
 	sessionModel string,
@@ -527,12 +637,14 @@ func (a *agentPerformanceAccumulator) observeScore(
 	}
 
 	key := scoreBucketKey{
-		source:        source,
-		rubricVersion: rubricVersion,
-		taskType:      normalizedDimension(evaluation.TaskType),
-		difficulty:    normalizedDimension(evaluation.Difficulty),
-		model:         normalizedDimension(firstNonBlank(evaluation.Model, sessionModel)),
-		agentVersion:  normalizedDimension(evaluation.AgentVersion),
+		source:         source,
+		rubricVersion:  rubricVersion,
+		taskType:       normalizedDimension(evaluation.TaskType),
+		difficulty:     normalizedDimension(evaluation.Difficulty),
+		provider:       normalizedOptionalDimension(evaluation.Provider),
+		model:          normalizedDimension(firstNonBlank(evaluation.Model, sessionModel)),
+		fixtureVersion: normalizedOptionalDimension(evaluation.FixtureVersion),
+		agentVersion:   normalizedDimension(evaluation.AgentVersion),
 	}
 	bucketKey := key.string()
 
@@ -559,6 +671,27 @@ func (a *agentPerformanceAccumulator) observeScore(
 	if evaluation.Cost > 0 {
 		observation.cost = evaluation.Cost
 		observation.hasCost = true
+	}
+
+	if evaluation.PassRateRecorded() {
+		observation.passRate = evaluation.PassRate
+		observation.hasPassRate = true
+	}
+
+	if evaluation.FlakeCount > 0 {
+		observation.flakeCount = evaluation.FlakeCount
+	}
+
+	if evaluation.InputTokens > 0 || evaluation.OutputTokens > 0 || evaluation.TotalTokens > 0 {
+		observation.inputTokens = evaluation.InputTokens
+		observation.outputTokens = evaluation.OutputTokens
+		observation.totalTokens = evaluation.TotalTokens
+
+		if observation.totalTokens == 0 {
+			observation.totalTokens = observation.inputTokens + observation.outputTokens
+		}
+
+		observation.hasTokens = true
 	}
 
 	bucket.observations = append(bucket.observations, observation)
@@ -658,8 +791,11 @@ func (a *agentPerformanceAccumulator) scoreBucketSummaries(latestActivity time.T
 		recentStats := summarizeObservations(recent)
 		previousStats := summarizeObservations(previous)
 		confidenceAverage, confidenceSample := summarizeObservationConfidence(bucket.observations)
+		passRateAverage, passRateSample := summarizeObservationPassRate(bucket.observations)
 		averageDuration, durationSample := summarizeObservationDuration(bucket.observations)
 		totalCost, averageCost, costSample := summarizeObservationCost(bucket.observations)
+		flakeCount, flakyEvaluationCount := summarizeObservationFlakes(bucket.observations)
+		inputTokens, outputTokens, totalTokens, tokenSample := summarizeObservationTokens(bucket.observations)
 
 		summary := ScoreBucketSummary{
 			LatestScoreAt:          latestObservationActivity(bucket.observations),
@@ -668,7 +804,9 @@ func (a *agentPerformanceAccumulator) scoreBucketSummaries(latestActivity time.T
 			RubricVersion:          bucket.key.rubricVersion,
 			TaskType:               bucket.key.taskType,
 			Difficulty:             bucket.key.difficulty,
+			Provider:               bucket.key.provider,
 			Model:                  bucket.key.model,
+			FixtureVersion:         bucket.key.fixtureVersion,
 			AgentVersion:           bucket.key.agentVersion,
 			SampleSize:             all.sample,
 			AverageScore:           all.average,
@@ -680,11 +818,19 @@ func (a *agentPerformanceAccumulator) scoreBucketSummaries(latestActivity time.T
 			Uncertainty:            uncertaintyLabel(all.sample, all.stdErr),
 			AverageConfidence:      confidenceAverage,
 			ConfidenceSampleCount:  confidenceSample,
+			AveragePassRate:        passRateAverage,
+			PassRateSampleCount:    passRateSample,
+			FlakeCount:             flakeCount,
+			FlakyEvaluationCount:   flakyEvaluationCount,
 			AverageDurationMillis:  averageDuration,
 			DurationSampleCount:    durationSample,
 			TotalCost:              totalCost,
 			AverageCost:            averageCost,
 			CostSampleCount:        costSample,
+			InputTokens:            inputTokens,
+			OutputTokens:           outputTokens,
+			TotalTokens:            totalTokens,
+			TokenSampleCount:       tokenSample,
 			RecentSampleSize:       recentStats.sample,
 			RecentAverageScore:     recentStats.average,
 			PreviousSampleSize:     previousStats.sample,
@@ -993,6 +1139,25 @@ func summarizeObservationConfidence(observations []scoreObservation) (average fl
 	return total / float64(count), count
 }
 
+func summarizeObservationPassRate(observations []scoreObservation) (average float64, count int) {
+	var total float64
+
+	for _, observation := range observations {
+		if !observation.hasPassRate {
+			continue
+		}
+
+		total += observation.passRate
+		count++
+	}
+
+	if count == 0 {
+		return 0, 0
+	}
+
+	return total / float64(count), count
+}
+
 func summarizeObservationDuration(observations []scoreObservation) (average float64, count int) {
 	var total int64
 
@@ -1013,6 +1178,117 @@ func summarizeObservationDuration(observations []scoreObservation) (average floa
 }
 
 func summarizeObservationCost(observations []scoreObservation) (total, average float64, count int) {
+	for _, observation := range observations {
+		if !observation.hasCost {
+			continue
+		}
+
+		total += observation.cost
+		count++
+	}
+
+	if count == 0 {
+		return 0, 0, 0
+	}
+
+	return total, total / float64(count), count
+}
+
+func summarizeObservationFlakes(observations []scoreObservation) (flakeCount, flakyEvaluationCount int) {
+	for _, observation := range observations {
+		if observation.flakeCount == 0 {
+			continue
+		}
+
+		flakeCount += observation.flakeCount
+		flakyEvaluationCount++
+	}
+
+	return flakeCount, flakyEvaluationCount
+}
+
+func summarizeObservationTokens(observations []scoreObservation) (inputTokens, outputTokens, totalTokens, count int) {
+	for _, observation := range observations {
+		if !observation.hasTokens {
+			continue
+		}
+
+		inputTokens += observation.inputTokens
+		outputTokens += observation.outputTokens
+		totalTokens += observation.totalTokens
+		count++
+	}
+
+	return inputTokens, outputTokens, totalTokens, count
+}
+
+func summarizeEvaluationPassRate(observations []evaluationMetricObservation) (average float64, count int) {
+	var total float64
+
+	for _, observation := range observations {
+		if !observation.hasPassRate {
+			continue
+		}
+
+		total += observation.passRate
+		count++
+	}
+
+	if count == 0 {
+		return 0, 0
+	}
+
+	return total / float64(count), count
+}
+
+func summarizeEvaluationFlakes(observations []evaluationMetricObservation) (flakeCount, flakyEvaluationCount int) {
+	for _, observation := range observations {
+		if observation.flakeCount == 0 {
+			continue
+		}
+
+		flakeCount += observation.flakeCount
+		flakyEvaluationCount++
+	}
+
+	return flakeCount, flakyEvaluationCount
+}
+
+func summarizeEvaluationTokens(observations []evaluationMetricObservation) (inputTokens, outputTokens, totalTokens, count int) {
+	for _, observation := range observations {
+		if !observation.hasTokens {
+			continue
+		}
+
+		inputTokens += observation.inputTokens
+		outputTokens += observation.outputTokens
+		totalTokens += observation.totalTokens
+		count++
+	}
+
+	return inputTokens, outputTokens, totalTokens, count
+}
+
+func summarizeEvaluationDuration(observations []evaluationMetricObservation) (average float64, count int) {
+	var total int64
+
+	for _, observation := range observations {
+		if !observation.hasDuration {
+			continue
+		}
+
+		total += observation.durationMS
+		count++
+	}
+
+	if count == 0 {
+		return 0, 0
+	}
+
+	return float64(total) / float64(count), count
+}
+
+func summarizeEvaluationCost(observations []evaluationMetricObservation) (total, average float64, count int) {
 	for _, observation := range observations {
 		if !observation.hasCost {
 			continue
@@ -1135,6 +1411,10 @@ func normalizedDimension(value string) string {
 	return value
 }
 
+func normalizedOptionalDimension(value string) string {
+	return strings.TrimSpace(value)
+}
+
 func firstNonBlank(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -1163,7 +1443,9 @@ func (key scoreBucketKey) string() string {
 		strings.ToLower(key.rubricVersion),
 		strings.ToLower(key.taskType),
 		strings.ToLower(key.difficulty),
+		strings.ToLower(key.provider),
 		strings.ToLower(key.model),
+		strings.ToLower(key.fixtureVersion),
 		strings.ToLower(key.agentVersion),
 	}, "\x00")
 }
@@ -1174,7 +1456,9 @@ func (bucket ScoreBucketSummary) sortKey() string {
 		strings.ToLower(bucket.RubricVersion),
 		strings.ToLower(bucket.TaskType),
 		strings.ToLower(bucket.Difficulty),
+		strings.ToLower(bucket.Provider),
 		strings.ToLower(bucket.Model),
+		strings.ToLower(bucket.FixtureVersion),
 		strings.ToLower(bucket.AgentVersion),
 	}, "\x00")
 }

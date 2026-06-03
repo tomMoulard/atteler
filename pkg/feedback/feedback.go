@@ -348,6 +348,26 @@ func evaluationEvidence(entry session.AgentEvaluation) string {
 		parts = append(parts, fmt.Sprintf("score %d", entry.Score))
 	}
 
+	if entry.PassRateRecorded() {
+		parts = append(parts, fmt.Sprintf("pass_rate %.2f", entry.PassRate))
+	}
+
+	if entry.FlakeCount != 0 {
+		parts = append(parts, fmt.Sprintf("flakes %d", entry.FlakeCount))
+	}
+
+	if provider := strings.TrimSpace(entry.Provider); provider != "" {
+		parts = append(parts, "provider "+provider)
+	}
+
+	if model := strings.TrimSpace(entry.Model); model != "" {
+		parts = append(parts, "model "+model)
+	}
+
+	if fixtureVersion := strings.TrimSpace(entry.FixtureVersion); fixtureVersion != "" {
+		parts = append(parts, "fixture "+fixtureVersion)
+	}
+
 	if notes := strings.TrimSpace(entry.Notes); notes != "" {
 		parts = append(parts, notes)
 	}
