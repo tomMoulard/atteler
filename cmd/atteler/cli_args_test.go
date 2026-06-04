@@ -192,6 +192,18 @@ func TestTranslateCLIArgs_CodeIntelPaginationFlagsStayWithGroupedCommand(t *test
 	assert.Equal(t, []string{"--code-symbol", "main", "--code-limit", "1", "--code-offset", "2"}, got.Args)
 }
 
+func TestTranslateCLIArgs_CodeIntelQueryKeepsLanguageFilter(t *testing.T) {
+	t.Parallel()
+
+	got := translateCLIArgsWithFlagSet(
+		[]string{"code-intel", "query", "definitions:helper", "--code-language", "python"},
+		newRegisteredFlagSetForTest(t),
+	)
+	require.NoError(t, got.Err)
+	assert.False(t, got.Help)
+	assert.Equal(t, []string{"--code-query", "definitions:helper", "--code-language", "python"}, got.Args)
+}
+
 func TestTranslateCLIArgs_DomainWordsCanStartPositionalPrompts(t *testing.T) {
 	t.Parallel()
 

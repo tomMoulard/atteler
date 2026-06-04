@@ -190,6 +190,8 @@ type cliOptions struct {
 	model                              string
 	explainModelResolution             string
 	describeAgentName                  string
+	codeQuery                          string
+	codeLanguage                       string
 	codeSymbolName                     string
 	codeSymbolFileSummary              string
 	codeSymbolPackageSummary           string

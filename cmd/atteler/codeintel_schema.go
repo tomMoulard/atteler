@@ -27,6 +27,7 @@ const (
 	codeIntelTextCycles                    codeIntelTextKind = "cycles"
 	codeIntelTextLayers                    codeIntelTextKind = "layers"
 	codeIntelTextLSPSymbols                codeIntelTextKind = "lsp_symbols"
+	codeIntelTextQuery                     codeIntelTextKind = "query"
 )
 
 // codeIntelResponse is the stable structured contract for code-intel command output.
@@ -39,23 +40,25 @@ type codeIntelResponse struct {
 	// more specific than the grouped CLI word so automation can distinguish
 	// variants such as symbol and symbol file summary; grouped aliases that share
 	// a dispatch command, such as LSP workspace symbols, are distinguished by Query.
-	Command    string               `json:"command"`
-	Query      map[string]string    `json:"query,omitempty"`
-	Empty      bool                 `json:"empty"`
-	Message    string               `json:"message,omitempty"`
-	Summary    *codeIntelSummary    `json:"summary,omitempty"`
-	Files      []codeIntelFile      `json:"files,omitempty"`
-	Packages   []codeIntelPackage   `json:"packages,omitempty"`
-	Symbols    []codeIntelSymbol    `json:"symbols,omitempty"`
-	Imports    []codeIntelImport    `json:"imports,omitempty"`
-	Edges      []codeIntelEdge      `json:"edges,omitempty"`
-	ImpactSet  []codeIntelNode      `json:"impact_set,omitempty"`
-	Nodes      []codeIntelNode      `json:"nodes,omitempty"`
-	Cycles     []codeIntelCycle     `json:"cycles,omitempty"`
-	Layers     []codeIntelLayer     `json:"layers,omitempty"`
-	LSPSymbols []codeIntelLSPSymbol `json:"lsp_symbols,omitempty"`
-	Pagination *codeIntelPagination `json:"pagination,omitempty"`
-	TextKind   codeIntelTextKind    `json:"-"`
+	Command     string               `json:"command"`
+	Query       map[string]string    `json:"query,omitempty"`
+	Empty       bool                 `json:"empty"`
+	Message     string               `json:"message,omitempty"`
+	Summary     *codeIntelSummary    `json:"summary,omitempty"`
+	Files       []codeIntelFile      `json:"files,omitempty"`
+	Packages    []codeIntelPackage   `json:"packages,omitempty"`
+	Symbols     []codeIntelSymbol    `json:"symbols,omitempty"`
+	Imports     []codeIntelImport    `json:"imports,omitempty"`
+	Edges       []codeIntelEdge      `json:"edges,omitempty"`
+	ImpactSet   []codeIntelNode      `json:"impact_set,omitempty"`
+	Nodes       []codeIntelNode      `json:"nodes,omitempty"`
+	Cycles      []codeIntelCycle     `json:"cycles,omitempty"`
+	Layers      []codeIntelLayer     `json:"layers,omitempty"`
+	LSPSymbols  []codeIntelLSPSymbol `json:"lsp_symbols,omitempty"`
+	Records     []codeIntelRecord    `json:"records,omitempty"`
+	Uncertainty []string             `json:"uncertainty,omitempty"`
+	Pagination  *codeIntelPagination `json:"pagination,omitempty"`
+	TextKind    codeIntelTextKind    `json:"-"`
 }
 
 type codeIntelSummary struct {
@@ -140,6 +143,26 @@ type codeIntelLSPSymbol struct {
 	Children       []codeIntelLSPSymbol `json:"children,omitempty"`
 }
 
+//nolint:govet // JSON field order keeps common record identity before optional details.
+type codeIntelRecord struct {
+	Type             string `json:"type"`
+	Language         string `json:"language,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Kind             string `json:"kind,omitempty"`
+	Path             string `json:"path,omitempty"`
+	Line             int    `json:"line,omitempty"`
+	Column           int    `json:"column,omitempty"`
+	EndLine          int    `json:"end_line,omitempty"`
+	EndColumn        int    `json:"end_column,omitempty"`
+	ID               string `json:"id,omitempty"`
+	Source           string `json:"source,omitempty"`
+	FromID           string `json:"from_id,omitempty"`
+	ToID             string `json:"to_id,omitempty"`
+	RelationshipKind string `json:"relationship_kind,omitempty"`
+	Severity         string `json:"severity,omitempty"`
+	Message          string `json:"message,omitempty"`
+}
+
 type codeIntelLSPPosition struct {
 	Line      int `json:"line"`
 	Character int `json:"character"`
@@ -189,7 +212,7 @@ func responseHasData(response codeIntelResponse) bool {
 	return response.Summary != nil || len(response.Files) > 0 || len(response.Packages) > 0 || len(response.Symbols) > 0 ||
 		len(response.Imports) > 0 || len(response.Edges) > 0 || len(response.ImpactSet) > 0 || len(response.Nodes) > 0 ||
 		len(response.Cycles) > 0 || len(response.Layers) > 0 ||
-		len(response.LSPSymbols) > 0
+		len(response.LSPSymbols) > 0 || len(response.Records) > 0
 }
 
 func codeIntelPayloadFieldForKind(kind codeIntelTextKind) (string, bool) {
@@ -216,6 +239,8 @@ func codeIntelPayloadFieldForKind(kind codeIntelTextKind) (string, bool) {
 		return "layers", true
 	case codeIntelTextLSPSymbols:
 		return "lsp_symbols", true
+	case codeIntelTextQuery:
+		return "records", true
 	default:
 		return "", false
 	}

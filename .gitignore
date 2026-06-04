@@ -8,5 +8,6 @@
 /.atteler/skills/generated/
 /.atteler/runs/
 **/.atteler/workspace-vector-index*.json
+**/.atteler/codeintel-index*.json
 /.symphony/workspaces/
 cmd/atteler/.atteler/

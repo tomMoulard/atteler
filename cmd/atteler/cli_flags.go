@@ -35,6 +35,8 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.StringVar(&opts.model, "model", "", "model ID to use")
 	fs.StringVar(&opts.agentName, "agent", "", "agent name to use for prompts")
 	fs.StringVar(&opts.describeAgentName, "describe-agent", "", "print a configured agent as YAML and exit")
+	fs.StringVar(&opts.codeQuery, "code-query", "", "query the shared code-intelligence index: files, symbols, definitions, references, diagnostics, or relationships; optionally append :value")
+	fs.StringVar(&opts.codeLanguage, "code-language", "", "filter --code-query by language, such as go or python")
 	fs.StringVar(&opts.codeSymbolName, "code-symbol", "", "find Go symbols by exact name in the current repository and exit")
 	fs.Var(&opts.codeLimit, "code-limit", "maximum code-intel rows to emit for list-style results")
 	fs.Var(&opts.codeOffset, "code-offset", "number of code-intel rows to skip before emitting list-style results")

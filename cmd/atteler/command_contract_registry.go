@@ -198,7 +198,7 @@ func commandContractsByName() map[string]commandContract {
 			withExamples(`atteler agents bash "go test ./cmd/atteler"`),
 		),
 		codeIntelDomainName: commandContractFor(
-			"run Go code index, import graph, package/file/symbol, and impact queries",
+			"run code-intelligence index, shared query, import graph, package/file/symbol, and impact queries",
 			codeIntelInputFlags(),
 			[]string{commandEffectFilesystemRead, commandEffectUserOutput},
 			[]string{commandOutputText, commandOutputJSON},
@@ -722,5 +722,5 @@ func codeIntelInputFlags() []string {
 		flags = append(flags, descriptor.LegacyFlag)
 	}
 
-	return append(flags, "--code-limit", "--code-offset", "--json", "--output")
+	return append(flags, "--code-language", "--code-limit", "--code-offset", "--json", "--output")
 }

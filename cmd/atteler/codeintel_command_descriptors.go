@@ -2,11 +2,12 @@ package main
 
 import "strings"
 
-// codeIntelCommandDescriptor is the single source for Go code-intel query
-// selectors. It feeds command matching, compatibility flags, and grouped help so
-// new queries do not need separate registry and documentation edits.
+// codeIntelCommandDescriptor is the single source for code-intel query
+// selectors. It feeds command matching, compatibility flags, and grouped help
+// so new queries do not need separate registry and documentation edits.
 const (
 	codeIntelDomainName         = "code-intel"
+	codeIntelQueryCommandName   = "code-query"
 	codeIntelSummaryCommandName = "code-summary"
 	codeIntelCyclesCommandName  = "list-code-cycles"
 	codeIntelLSPSymbolsName     = "lsp-symbols"
@@ -97,6 +98,7 @@ func codeIntelCommandDescriptors() []codeIntelCommandDescriptor {
 		codeIntelDescriptor("code-file-import-path", "file-import-path", "<path:import>", "--code-file-import-path", "check one file import path", codeIntelTextImports, func(input codeIntelCommandInput) bool { return input.FileImportPath != "" }),
 
 		// Graph / repository structure.
+		codeIntelDescriptor(codeIntelQueryCommandName, "query", "<kind[:value]>", "--code-query", "query the shared multi-language code-intelligence index", codeIntelTextQuery, func(input codeIntelCommandInput) bool { return input.ModelQuery != "" }),
 		codeIntelDescriptor("list-code-layers", "layers", "", "--code-layers", "list topological Go import graph layers", codeIntelTextLayers, func(input codeIntelCommandInput) bool { return input.ListLayers }),
 		codeIntelDescriptor(codeIntelCyclesCommandName, "cycles", "", "--code-cycles", "list Go import graph cycles", codeIntelTextCycles, func(input codeIntelCommandInput) bool { return input.ListCycles }),
 		codeIntelDescriptor(codeIntelSummaryCommandName, "summary", "", "--code-summary", "print compact Go code index counts", codeIntelTextSummary, func(input codeIntelCommandInput) bool { return input.Summary }),
@@ -192,6 +194,7 @@ func codeIntelCommandDescriptorsByName() map[string]codeIntelCommandDescriptor {
 func focusedCodeIntelCommandDescriptorNames() []string {
 	return []string{
 		codeIntelSummaryCommandName,
+		codeIntelQueryCommandName,
 		"list-code-files",
 		"list-code-packages",
 		"code-package-name",
@@ -236,6 +239,7 @@ func codeIntelDomainExamples() []string {
 	return []string{
 		codeIntelCommandExample(summary),
 		codeIntelCommandExample(summary, "--json"),
+		codeIntelCommandExample(descriptors[codeIntelQueryCommandName], "definitions:Run"),
 		codeIntelCommandExample(descriptors["code-symbol-name"], "NewRegistry"),
 		codeIntelCommandExample(descriptors["code-import-prefix"], "github.com/tommoulard/atteler/pkg/"),
 	}
@@ -361,6 +365,7 @@ var codeIntelExampleArgsByShape = map[string][]string{
 	"<path:kind>":                    {"runner.go:func"},
 	"<path:prefix>":                  {"runner.go:Ru"},
 	"<path:import>":                  {"runner.go:context"},
+	"<kind[:value]>":                 {"definitions:Run"},
 	"import-prefix:<prefix>":         {"con"},
 	"import-prefix:<package:prefix>": {"main:con"},
 	"import-prefix:<path:prefix>":    {"runner.go:con"},
@@ -400,6 +405,7 @@ var codeIntelTextOutputsByKind = map[codeIntelTextKind]string{
 	codeIntelTextCycles:                    `cycle=<n>\tnodes=<path> -> <path>`,
 	codeIntelTextLayers:                    `layer=<n>\tnodes=<path>,<path>`,
 	codeIntelTextLSPSymbols:                `<name>\tkind=<n>\trange=<start-end>[\tdetail=<detail>][\tcontainer=<name>][\turi=<uri>]`,
+	codeIntelTextQuery:                     `type=<record>\tlanguage=<language>[\tname=<name>][\tkind=<kind>][\tpath=<path>][\tline=<n>]...`,
 }
 
 func codeIntelTextOutputForKind(kind codeIntelTextKind) string {

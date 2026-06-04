@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -9,13 +10,17 @@ import (
 
 type codeIntelResponseBuilder func(string, codeintel.Index, codeIntelCommandInput, codeIntelResponse, string) (codeIntelResponse, bool, error)
 
-func buildCodeIntelResponse(root string, input codeIntelCommandInput, commandName string) (codeIntelResponse, error) {
+func buildCodeIntelResponse(ctx context.Context, root string, input codeIntelCommandInput, commandName string) (codeIntelResponse, error) {
 	textKind := codeIntelTextKindForCommand(commandName)
 	if textKind == "" {
 		return codeIntelResponse{}, fmt.Errorf("unsupported code-intel command %q", commandName)
 	}
 
-	idx, err := codeintel.IndexDir(root)
+	if commandName == codeIntelQueryCommandName {
+		return buildCodeIntelModelQueryResponse(ctx, root, input, commandName, textKind)
+	}
+
+	idx, err := codeintel.IndexDirContext(ctx, root)
 	if err != nil {
 		return codeIntelResponse{}, fmt.Errorf("%s: index %s: %w", commandName, root, err)
 	}
@@ -125,6 +130,10 @@ func paginateCodeIntelResponse(response codeIntelResponse, input codeIntelComman
 		total := len(response.Layers)
 		response.Layers = paginateCodeIntelSlice(response.Layers, limit, offset)
 		response.Pagination = newCodeIntelPagination(limit, offset, total, len(response.Layers))
+	case len(response.Records) > 0:
+		total := len(response.Records)
+		response.Records = paginateCodeIntelSlice(response.Records, limit, offset)
+		response.Pagination = newCodeIntelPagination(limit, offset, total, len(response.Records))
 	default:
 		response.Pagination = newCodeIntelPagination(limit, offset, 0, 0)
 	}

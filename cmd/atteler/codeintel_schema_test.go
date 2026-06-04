@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/codeintel"
 	"github.com/tommoulard/atteler/pkg/lsp"
 )
 
@@ -20,7 +21,7 @@ func TestCodeIntelResponse_JSONSchemaForSymbol(t *testing.T) {
 	t.Parallel()
 
 	root := writeCodeIntelSchemaFixture(t)
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{SymbolName: "Run"}, "code-symbol-name")
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{SymbolName: "Run"}, "code-symbol-name")
 	require.NoError(t, err)
 
 	var out bytes.Buffer
@@ -39,7 +40,7 @@ func TestCodeIntelResponse_TextRendersFromSchema(t *testing.T) {
 	t.Parallel()
 
 	root := writeCodeIntelSchemaFixture(t)
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{SymbolName: "Run"}, "code-symbol-name")
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{SymbolName: "Run"}, "code-symbol-name")
 	require.NoError(t, err)
 
 	var out bytes.Buffer
@@ -196,6 +197,13 @@ func TestCodeIntelResponse_TextRendererCoversDocumentedKinds(t *testing.T) {
 			}}},
 			want: "Handle\tkind=12\trange=2:1-4:2\tdetail=func()\tcontainer=server\turi=file:///repo/main.go\n",
 		},
+		{
+			kind: codeIntelTextQuery,
+			response: codeIntelResponse{Records: []codeIntelRecord{{
+				Type: "definition", Language: "python", Name: "helper", Kind: "function", Path: "worker.py", Line: 3, Column: 5,
+			}}},
+			want: "type=definition\tlanguage=python\tname=helper\tkind=function\tpath=worker.py\tline=3\tcolumn=5\n",
+		},
 	}
 
 	for _, test := range tests {
@@ -342,7 +350,7 @@ func TestCodeIntelResponse_PackageCountsIncludeRelevantZeroes(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "empty.go"), []byte("package empty\n"), 0o600))
 
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{ListPackages: true}, "list-code-packages")
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{ListPackages: true}, "list-code-packages")
 	require.NoError(t, err)
 
 	var out bytes.Buffer
@@ -360,7 +368,7 @@ func TestCodeIntelResponse_ImpactSetUsesDedicatedSchemaField(t *testing.T) {
 	t.Parallel()
 
 	root := writeCodeIntelFullSchemaFixture(t)
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{ImpactTarget: "context"}, "code-impact-target")
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{ImpactTarget: "context"}, "code-impact-target")
 	require.NoError(t, err)
 
 	assert.False(t, response.Empty)
@@ -387,7 +395,7 @@ func TestCodeIntelResponse_EmptyStateIsConsistent(t *testing.T) {
 	t.Parallel()
 
 	root := writeCodeIntelSchemaFixture(t)
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{SymbolName: "Missing"}, "code-symbol-name")
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{SymbolName: "Missing"}, "code-symbol-name")
 	require.NoError(t, err)
 
 	assert.True(t, response.Empty)
@@ -482,7 +490,7 @@ func TestCodeIntelResponse_EmptyStateConsistentAcrossQueryTypes(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			response, err := buildCodeIntelResponse(root, test.input, test.name)
+			response, err := buildCodeIntelResponse(t.Context(), root, test.input, test.name)
 			require.NoError(t, err)
 			assert.True(t, response.Empty)
 			assert.Equal(t, codeIntelEmptyMessage, response.Message)
@@ -522,7 +530,7 @@ func TestCodeIntelResponse_EmptyStateConsistentForEveryDescriptor(t *testing.T) 
 			input, ok := inputs[descriptor.Name]
 			require.Truef(t, ok, "missing test input for %s", descriptor.Name)
 
-			response, err := buildCodeIntelResponse(root, input, descriptor.Name)
+			response, err := buildCodeIntelResponse(t.Context(), root, input, descriptor.Name)
 			require.NoError(t, err)
 			assert.True(t, response.Empty)
 			assert.Equal(t, codeIntelEmptyMessage, response.Message)
@@ -548,7 +556,7 @@ func TestCodeIntelResponse_PaginatesRepeatedResults(t *testing.T) {
 	t.Parallel()
 
 	root := writeCodeIntelFullSchemaFixture(t)
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{
 		ListSymbolSummary: true,
 		Limit:             1,
 		Offset:            1,
@@ -581,7 +589,7 @@ func TestCodeIntelResponse_EmptyPageKeepsPaginationMetadata(t *testing.T) {
 	t.Parallel()
 
 	root := writeCodeIntelFullSchemaFixture(t)
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{
 		ListSymbolSummary: true,
 		Offset:            10,
 	}, "list-code-symbol-summary")
@@ -610,7 +618,7 @@ func TestCodeIntelResponse_NormalizesNegativePaginationOffset(t *testing.T) {
 	t.Parallel()
 
 	root := writeCodeIntelFullSchemaFixture(t)
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{
 		ListSymbolSummary: true,
 		Limit:             1,
 		Offset:            -10,
@@ -629,7 +637,7 @@ func TestCodeIntelResponse_EmptyPaginatedListKeepsPaginationMetadata(t *testing.
 	t.Parallel()
 
 	root := writeCodeIntelFullSchemaFixture(t)
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{
 		SymbolName: "Missing",
 		Limit:      10,
 	}, "code-symbol-name")
@@ -659,7 +667,7 @@ func TestCodeIntelResponse_SummaryIgnoresPaginationFlags(t *testing.T) {
 	t.Parallel()
 
 	root := writeCodeIntelFullSchemaFixture(t)
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{
 		Summary: true,
 		Limit:   1,
 		Offset:  1,
@@ -678,7 +686,7 @@ func TestCodeIntelResponse_FileDetailIgnoresPaginationFlags(t *testing.T) {
 	t.Parallel()
 
 	root := writeCodeIntelFullSchemaFixture(t)
-	response, err := buildCodeIntelResponse(root, codeIntelCommandInput{
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{
 		FilePath: "runner.go",
 		Offset:   1,
 	}, "code-file-path")
@@ -702,6 +710,118 @@ func TestCodeIntelResponse_LSPIgnoresPaginationFlags(t *testing.T) {
 	require.Len(t, response.LSPSymbols, 1)
 	require.Len(t, response.LSPSymbols[0].Children, 1)
 	assert.NotContains(t, codeIntelJSONFieldsForKind(codeIntelTextLSPSymbols), "pagination")
+}
+
+func TestCodeIntelResponse_QueryCommandUsesSharedWorkspaceIndex(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "worker.py"), []byte("def helper():\n\treturn 'ok'\n"), 0o600))
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{
+		ModelQuery:    "Definitions:helper",
+		ModelLanguage: "Python",
+		Limit:         1,
+	}, codeIntelQueryCommandName)
+	require.NoError(t, err)
+
+	assert.False(t, response.Empty)
+	assert.Equal(t, map[string]string{"kind": "definitions", "language": "python", "value": "helper"}, response.Query)
+	require.Len(t, response.Records, 1)
+	assert.Equal(t, "definition", response.Records[0].Type)
+	assert.Equal(t, "python", response.Records[0].Language)
+	assert.Equal(t, "helper", response.Records[0].Name)
+	assert.Equal(t, "worker.py", response.Records[0].Path)
+	require.NotNil(t, response.Pagination)
+	assert.Equal(t, 1, *response.Pagination.Limit)
+	assert.FileExists(t, filepath.Join(root, ".atteler", "codeintel-index.json"))
+}
+
+func TestCodeIntelResponse_QueryCommandFiltersFilesByRelativePath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "nested"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "nested", "worker.py"), []byte("def helper():\n\treturn 'ok'\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "other.py"), []byte("def other():\n\treturn 'ok'\n"), 0o600))
+
+	response, err := buildCodeIntelResponse(t.Context(), root, codeIntelCommandInput{
+		ModelQuery:    "files:nested/worker.py",
+		ModelLanguage: "python",
+	}, codeIntelQueryCommandName)
+	require.NoError(t, err)
+
+	assert.False(t, response.Empty)
+	assert.Equal(t, map[string]string{"kind": "files", "language": "python", "value": "nested/worker.py"}, response.Query)
+	require.Len(t, response.Records, 1)
+	assert.Equal(t, "file", response.Records[0].Type)
+	assert.Equal(t, "nested/worker.py", response.Records[0].Path)
+}
+
+func TestCodeIntelModelQueryFromInputNormalizesAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		wantValues map[string]string
+		wantQuery  codeintel.Query
+		name       string
+		input      codeIntelCommandInput
+	}{
+		{
+			name:       "definitions alias",
+			input:      codeIntelCommandInput{ModelQuery: "defs:Run", ModelLanguage: "Go"},
+			wantQuery:  codeintel.Query{Kind: codeintel.QueryDefinitions, Name: "Run", Language: "go"},
+			wantValues: map[string]string{"kind": "definitions", "language": "go", "value": "Run"},
+		},
+		{
+			name:       "references alias",
+			input:      codeIntelCommandInput{ModelQuery: "refs:Runner.Run"},
+			wantQuery:  codeintel.Query{Kind: codeintel.QueryReferences, Name: "Runner.Run"},
+			wantValues: map[string]string{"kind": "references", "value": "Runner.Run"},
+		},
+		{
+			name:       "diagnostics alias",
+			input:      codeIntelCommandInput{ModelQuery: "diags:parse", ModelLanguage: "Python"},
+			wantQuery:  codeintel.Query{Kind: codeintel.QueryDiagnostics, Name: "parse", Language: "python"},
+			wantValues: map[string]string{"kind": "diagnostics", "language": "python", "value": "parse"},
+		},
+		{
+			name:       "relationships alias",
+			input:      codeIntelCommandInput{ModelQuery: "relations:Imports"},
+			wantQuery:  codeintel.Query{Kind: codeintel.QueryRelationships, RelationshipKind: "imports"},
+			wantValues: map[string]string{"kind": "relationships", "value": "imports"},
+		},
+		{
+			name:       "edges alias",
+			input:      codeIntelCommandInput{ModelQuery: "edges:declares"},
+			wantQuery:  codeintel.Query{Kind: codeintel.QueryRelationships, RelationshipKind: "declares"},
+			wantValues: map[string]string{"kind": "relationships", "value": "declares"},
+		},
+		{
+			name:       "files filter",
+			input:      codeIntelCommandInput{ModelQuery: "files:worker.py"},
+			wantQuery:  codeintel.Query{Kind: codeintel.QueryFiles, File: "worker.py"},
+			wantValues: map[string]string{"kind": "files", "value": "worker.py"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			query, values, err := codeIntelModelQueryFromInput(test.input)
+			require.NoError(t, err)
+			assert.Equal(t, test.wantQuery, query)
+			assert.Equal(t, test.wantValues, values)
+		})
+	}
+}
+
+func TestCodeIntelModelQueryFromInputRejectsUnsupportedKind(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := codeIntelModelQueryFromInput(codeIntelCommandInput{ModelQuery: "unknown:value"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported code-query kind")
 }
 
 func TestCodeIntelResponse_RendererFinalizesEmptyState(t *testing.T) {
@@ -1056,7 +1176,7 @@ func TestCodeIntelResponse_GoldenTextAndJSONOutputs(t *testing.T) {
 				testRoot = test.root
 			}
 
-			response, err := buildCodeIntelResponse(testRoot, test.input, test.command)
+			response, err := buildCodeIntelResponse(t.Context(), testRoot, test.input, test.command)
 			require.NoError(t, err)
 
 			var out bytes.Buffer
@@ -1162,7 +1282,7 @@ func TestCodeIntelResponse_FilteredCommandPayloadsAreStable(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			response, err := buildCodeIntelResponse(root, test.input, test.command)
+			response, err := buildCodeIntelResponse(t.Context(), root, test.input, test.command)
 			require.NoError(t, err)
 
 			var text bytes.Buffer
@@ -1190,7 +1310,7 @@ func TestCodeIntelResponse_AllRegisteredCommandsBuildTextAndJSON(t *testing.T) {
 			input, ok := inputs[command.name]
 			require.True(t, ok, "missing test input for %s", command.name)
 
-			response, err := buildCodeIntelResponse(root, input, command.name)
+			response, err := buildCodeIntelResponse(t.Context(), root, input, command.name)
 			require.NoError(t, err)
 			assert.Equal(t, codeIntelSchemaVersion, response.Schema)
 			assert.Equal(t, command.name, response.Command)
@@ -1242,6 +1362,7 @@ func TestCodeIntelDescriptorsSelectExpectedCommands(t *testing.T) {
 
 func codeIntelTestInputsByCommand() map[string]codeIntelCommandInput {
 	return map[string]codeIntelCommandInput{
+		codeIntelQueryCommandName:                 {ModelQuery: "definitions:Run"},
 		"code-symbol-name":                        {SymbolName: "Run"},
 		"code-symbol-file-summary":                {SymbolFileSummary: "Run"},
 		"code-symbol-package-summary":             {SymbolPackageSummary: "Run"},
@@ -1333,7 +1454,7 @@ func TestRunCodeIntelCommandRejectsInvalidOutputBeforeIndexing(t *testing.T) {
 
 	var out bytes.Buffer
 
-	err := runCodeIntelCommandWithWriter(&out, filepath.Join(t.TempDir(), "missing"), codeIntelCommandInput{
+	err := runCodeIntelCommandWithWriter(t.Context(), &out, filepath.Join(t.TempDir(), "missing"), codeIntelCommandInput{
 		SymbolName:   "Run",
 		OutputFormat: "xml",
 	})
@@ -1345,7 +1466,7 @@ func TestRunCodeIntelCommandRejectsInvalidOutputBeforeIndexing(t *testing.T) {
 func TestBuildCodeIntelResponseRejectsUnknownCommandBeforeIndexing(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildCodeIntelResponse(filepath.Join(t.TempDir(), "missing"), codeIntelCommandInput{}, "missing-command")
+	_, err := buildCodeIntelResponse(t.Context(), filepath.Join(t.TempDir(), "missing"), codeIntelCommandInput{}, "missing-command")
 
 	require.EqualError(t, err, `unsupported code-intel command "missing-command"`)
 }
@@ -1356,11 +1477,11 @@ func TestRunCodeIntelCommandWritesSelectedSchemaOutput(t *testing.T) {
 	root := writeCodeIntelSchemaFixture(t)
 
 	var text bytes.Buffer
-	require.NoError(t, runCodeIntelCommandWithWriter(&text, root, codeIntelCommandInput{SymbolName: "Run"}))
+	require.NoError(t, runCodeIntelCommandWithWriter(t.Context(), &text, root, codeIntelCommandInput{SymbolName: "Run"}))
 	assert.Equal(t, "Run\tkind=func\tpath=runner.go\tline=3\n", text.String())
 
 	var jsonOut bytes.Buffer
-	require.NoError(t, runCodeIntelCommandWithWriter(&jsonOut, root, codeIntelCommandInput{SymbolName: "Run", OutputFormat: outputFormatJSON}))
+	require.NoError(t, runCodeIntelCommandWithWriter(t.Context(), &jsonOut, root, codeIntelCommandInput{SymbolName: "Run", OutputFormat: outputFormatJSON}))
 	assert.JSONEq(t, `{
 		"schema": "atteler.code_intel.v1",
 		"command": "code-symbol-name",
@@ -1382,7 +1503,7 @@ func TestRunCodeIntelCommandGroupedJSONRendersSchemaOutput(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	require.NoError(t, runCodeIntelCommandWithWriter(&out, root, codeIntelCommandInputFromOptions(opts)))
+	require.NoError(t, runCodeIntelCommandWithWriter(t.Context(), &out, root, codeIntelCommandInputFromOptions(opts)))
 
 	assert.JSONEq(t, `{
 		"schema": "atteler.code_intel.v1",
@@ -1441,7 +1562,7 @@ func TestCodeIntelResponse_InvalidPairSpecErrorsNameFields(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := buildCodeIntelResponse(root, test.input, test.name)
+			_, err := buildCodeIntelResponse(t.Context(), root, test.input, test.name)
 			require.Error(t, err)
 			assert.EqualError(t, err, test.want)
 		})
@@ -1571,6 +1692,7 @@ func TestCodeIntelDomainExamplesAreDescriptorDerived(t *testing.T) {
 	assert.Equal(t, []string{
 		codeIntelCommandExample(descriptors[codeIntelSummaryCommandName]),
 		codeIntelCommandExample(descriptors[codeIntelSummaryCommandName], "--json"),
+		codeIntelCommandExample(descriptors[codeIntelQueryCommandName], "definitions:Run"),
 		codeIntelCommandExample(descriptors["code-symbol-name"], "NewRegistry"),
 		codeIntelCommandExample(descriptors["code-import-prefix"], "github.com/tommoulard/atteler/pkg/"),
 	}, codeIntelDomainExamples())
@@ -2004,15 +2126,17 @@ func TestCodeIntelResponseBuildersOnlyHandleDescribedCommands(t *testing.T) {
 
 	builderCases := make(map[string]int)
 	caseNames := map[string]string{
+		"codeIntelQueryCommandName":  codeIntelQueryCommandName,
 		"codeIntelCyclesCommandName": codeIntelCyclesCommandName,
 	}
 	casePattern := regexp.MustCompile(`case (?:"([^"]+)"|(codeIntel[A-Za-z0-9_]*CommandName))`)
+	ifPattern := regexp.MustCompile(`if commandName == (?:"([^"]+)"|(codeIntel[A-Za-z0-9_]*CommandName))`)
 
 	for _, path := range builderFiles {
 		data, err := os.ReadFile(path)
 		require.NoError(t, err)
 
-		for _, match := range casePattern.FindAllStringSubmatch(string(data), -1) {
+		for _, match := range append(casePattern.FindAllStringSubmatch(string(data), -1), ifPattern.FindAllStringSubmatch(string(data), -1)...) {
 			require.Len(t, match, 3)
 
 			commandName := match[1]
@@ -2148,6 +2272,7 @@ const Value = 1
 func Run(ctx context.Context) {}
 `
 	require.NoError(t, os.WriteFile(filepath.Join(root, "runner.go"), []byte(source), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "worker.py"), []byte("def helper():\n\treturn 'ok'\n"), 0o600))
 
 	return root
 }

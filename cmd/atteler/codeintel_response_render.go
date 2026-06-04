@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,17 +11,17 @@ import (
 	"strings"
 )
 
-func runCodeIntelSchemaCommand(root string, input codeIntelCommandInput, commandName string) error {
-	return runCodeIntelSchemaCommandWithWriter(os.Stdout, root, input, commandName)
+func runCodeIntelSchemaCommand(ctx context.Context, root string, input codeIntelCommandInput, commandName string) error {
+	return runCodeIntelSchemaCommandWithWriter(ctx, os.Stdout, root, input, commandName)
 }
 
-func runCodeIntelSchemaCommandWithWriter(w io.Writer, root string, input codeIntelCommandInput, commandName string) error {
+func runCodeIntelSchemaCommandWithWriter(ctx context.Context, w io.Writer, root string, input codeIntelCommandInput, commandName string) error {
 	format, err := codeIntelOutputFormat(input)
 	if err != nil {
 		return err
 	}
 
-	response, err := buildCodeIntelResponse(root, input, commandName)
+	response, err := buildCodeIntelResponse(ctx, root, input, commandName)
 	if err != nil {
 		return err
 	}
@@ -95,6 +96,8 @@ func writeCodeIntelText(w io.Writer, response codeIntelResponse) error {
 		err = writeCodeIntelLines(w, len(response.Layers), func(i int) string { return formatCodeIntelLayer(response.Layers[i]) })
 	case codeIntelTextLSPSymbols:
 		err = writeCodeIntelLSPSymbols(w, response.LSPSymbols, 0)
+	case codeIntelTextQuery:
+		err = writeCodeIntelLines(w, len(response.Records), func(i int) string { return formatCodeIntelRecord(response.Records[i]) })
 	default:
 		err = fmt.Errorf("unsupported code-intel text renderer %q", response.TextKind)
 	}
@@ -131,6 +134,8 @@ func codeIntelTextPayloadPresent(response codeIntelResponse) (field string, pres
 		return field, len(response.Layers) > 0, true
 	case "lsp_symbols":
 		return field, len(response.LSPSymbols) > 0, true
+	case "records":
+		return field, len(response.Records) > 0, true
 	default:
 		return field, false, true
 	}
@@ -257,6 +262,45 @@ func formatCodeIntelSymbol(symbol codeIntelSymbol, includePath bool) string {
 
 func formatCodeIntelSymbolSummary(symbol codeIntelSymbol) string {
 	return "kind=" + symbol.Kind + "\tsymbols=" + strconv.Itoa(symbol.Count)
+}
+
+func formatCodeIntelRecord(record codeIntelRecord) string {
+	parts := []string{"type=" + record.Type}
+	if record.Language != "" {
+		parts = append(parts, "language="+record.Language)
+	}
+	if record.Name != "" {
+		parts = append(parts, "name="+record.Name)
+	}
+	if record.Kind != "" {
+		parts = append(parts, "kind="+record.Kind)
+	}
+	if record.Path != "" {
+		parts = append(parts, "path="+record.Path)
+	}
+	if record.Line > 0 {
+		parts = append(parts, "line="+strconv.Itoa(record.Line))
+	}
+	if record.Column > 0 {
+		parts = append(parts, "column="+strconv.Itoa(record.Column))
+	}
+	if record.FromID != "" {
+		parts = append(parts, "from="+record.FromID)
+	}
+	if record.ToID != "" {
+		parts = append(parts, "to="+record.ToID)
+	}
+	if record.Source != "" {
+		parts = append(parts, "source="+record.Source)
+	}
+	if record.Severity != "" {
+		parts = append(parts, "severity="+record.Severity)
+	}
+	if record.Message != "" {
+		parts = append(parts, "message="+record.Message)
+	}
+
+	return strings.Join(parts, "\t")
 }
 
 func formatCodeIntelSymbolFileSummary(file codeIntelFile) string {

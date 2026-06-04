@@ -2,6 +2,8 @@
 package codeintel
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/codegraph"
@@ -162,6 +165,16 @@ func writeGoFile(t *testing.T, dir, name, content string) string {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
+
+	return path
+}
+
+func writeTextFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 
 	return path
 }
@@ -451,6 +464,503 @@ func TestIndexer_CachedIndexesAreIndependent(t *testing.T) {
 	require.False(t, second.Graph.Graph().HasNode("mutated"))
 }
 
+func TestWorkspaceIndexer_PersistsPythonIndexAndInvalidatesChangedDeletedFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, ".atteler", "codeintel.json")
+	pythonFile := writeTextFile(t, dir, "worker.py", `import os
+
+class Worker:
+	pass
+
+def run():
+	return os.name
+`)
+
+	indexer := NewWorkspaceIndexer(WorkspaceIndexOptions{CachePath: cachePath})
+	first, err := indexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.False(t, first.Stats.CacheHit)
+	require.Equal(t, 1, first.Stats.FilesScanned)
+	require.Equal(t, 1, first.Stats.FilesChanged)
+	require.Len(t, first.Query(Query{Kind: QueryDefinitions, Name: "run", Language: LanguagePython}).Definitions, 1)
+	require.Len(t, first.Query(Query{Kind: QueryDefinitions, Name: "Worker", Language: LanguagePython}).Definitions, 1)
+	require.Len(t, first.Query(Query{Kind: QueryFiles, File: "worker.py", Language: LanguagePython}).Files, 1)
+	require.Len(t, first.Query(Query{Kind: QueryRelationships, RelationshipKind: "imports", Language: LanguagePython}).Relationships, 1)
+	firstSnapshot, ok, err := readPersistedWorkspaceIndex(cachePath)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Contains(t, firstSnapshot.FileModels, pythonFile)
+
+	secondIndexer := NewWorkspaceIndexer(WorkspaceIndexOptions{CachePath: cachePath})
+	second, err := secondIndexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.True(t, second.Stats.CacheHit)
+	require.Equal(t, 1, second.Stats.FilesReused)
+	require.Len(t, second.Query(Query{Kind: QueryDefinitions, Name: "run", Language: LanguagePython}).Definitions, 1)
+
+	writeTextFile(t, dir, "worker.py", `class Worker:
+	pass
+
+def changed():
+	return "changed"
+`)
+	third, err := secondIndexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.False(t, third.Stats.CacheHit)
+	require.Zero(t, third.Stats.FilesReused)
+	require.Equal(t, 1, third.Stats.FilesChanged)
+	require.Empty(t, third.Query(Query{Kind: QueryDefinitions, Name: "run", Language: LanguagePython}).Definitions)
+	require.Len(t, third.Query(Query{Kind: QueryDefinitions, Name: "changed", Language: LanguagePython}).Definitions, 1)
+
+	require.NoError(t, os.Remove(pythonFile))
+	fourth, err := secondIndexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.False(t, fourth.Stats.CacheHit)
+	require.Zero(t, fourth.Stats.FilesScanned)
+	require.Equal(t, 1, fourth.Stats.FilesDeleted)
+	require.Empty(t, fourth.Query(Query{Kind: QueryDefinitions, Language: LanguagePython}).Definitions)
+	fourthSnapshot, ok, err := readPersistedWorkspaceIndex(cachePath)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotContains(t, fourthSnapshot.FileModels, pythonFile)
+}
+
+func TestWorkspaceIndexer_ReusesInMemorySnapshotWithoutCachePath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	alphaFile := writeTextFile(t, dir, "alpha.py", `def alpha():
+	return "alpha"
+`)
+	writeTextFile(t, dir, "beta.py", `def beta():
+	return "beta"
+`)
+
+	indexer := NewWorkspaceIndexer(WorkspaceIndexOptions{})
+	first, err := indexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.False(t, first.Stats.CacheHit)
+	require.Equal(t, 2, first.Stats.FilesChanged)
+
+	second, err := indexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.True(t, second.Stats.CacheHit)
+	require.Equal(t, 2, second.Stats.FilesReused)
+	require.Len(t, second.Query(Query{Kind: QueryDefinitions, Name: "alpha", Language: LanguagePython}).Definitions, 1)
+
+	writeTextFile(t, dir, "beta.py", `def changed():
+	return "changed"
+`)
+	third, err := indexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.False(t, third.Stats.CacheHit)
+	require.Equal(t, 1, third.Stats.FilesReused)
+	require.Equal(t, 1, third.Stats.FilesChanged)
+	require.Len(t, third.Query(Query{Kind: QueryDefinitions, Name: "alpha", Language: LanguagePython}).Definitions, 1)
+	require.Empty(t, third.Query(Query{Kind: QueryDefinitions, Name: "beta", Language: LanguagePython}).Definitions)
+	require.Len(t, third.Query(Query{Kind: QueryDefinitions, Name: "changed", Language: LanguagePython}).Definitions, 1)
+
+	require.NoError(t, os.Remove(alphaFile))
+	fourth, err := indexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.False(t, fourth.Stats.CacheHit)
+	require.Equal(t, 1, fourth.Stats.FilesReused)
+	require.Equal(t, 1, fourth.Stats.FilesDeleted)
+	require.Empty(t, fourth.Query(Query{Kind: QueryDefinitions, Name: "alpha", Language: LanguagePython}).Definitions)
+	require.Len(t, fourth.Query(Query{Kind: QueryDefinitions, Name: "changed", Language: LanguagePython}).Definitions, 1)
+}
+
+func TestWorkspaceIndexer_DoesNotReuseSnapshotAcrossRoots(t *testing.T) {
+	t.Parallel()
+
+	firstRoot := t.TempDir()
+	secondRoot := t.TempDir()
+	writeTextFile(t, firstRoot, "first.py", `def first():
+	return "first"
+`)
+	writeTextFile(t, secondRoot, "second.py", `def second():
+	return "second"
+`)
+
+	indexer := NewWorkspaceIndexer(WorkspaceIndexOptions{})
+	first, err := indexer.IndexDirContext(t.Context(), firstRoot)
+	require.NoError(t, err)
+	require.Equal(t, 1, first.Stats.FilesChanged)
+	require.Len(t, first.Query(Query{Kind: QueryDefinitions, Name: "first", Language: LanguagePython}).Definitions, 1)
+
+	second, err := indexer.IndexDirContext(t.Context(), secondRoot)
+	require.NoError(t, err)
+	require.False(t, second.Stats.CacheHit)
+	require.Equal(t, 1, second.Stats.FilesScanned)
+	require.Equal(t, 1, second.Stats.FilesChanged)
+	require.Zero(t, second.Stats.FilesDeleted)
+	require.Empty(t, second.Query(Query{Kind: QueryDefinitions, Name: "first", Language: LanguagePython}).Definitions)
+	require.Len(t, second.Query(Query{Kind: QueryDefinitions, Name: "second", Language: LanguagePython}).Definitions, 1)
+}
+
+func TestWorkspaceIndexer_RecordsAndInvalidatesPythonParseDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, ".atteler", "codeintel.json")
+	pythonFile := writeTextFile(t, dir, "broken.py", "def broken(\n\treturn 1\n")
+	indexer := NewWorkspaceIndexer(WorkspaceIndexOptions{CachePath: cachePath})
+
+	broken, err := indexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	diagnostics := broken.Query(Query{Kind: QueryDiagnostics, Language: LanguagePython}).Diagnostics
+	require.Len(t, diagnostics, 1)
+	assert.Equal(t, pythonFile, diagnostics[0].File)
+	assert.Contains(t, diagnostics[0].Message, "function definition")
+	require.Empty(t, broken.Query(Query{Kind: QueryDefinitions, Name: "broken", Language: LanguagePython}).Definitions)
+
+	writeTextFile(t, dir, "broken.py", "def broken():\n\treturn 1\n")
+	fixed, err := indexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.Empty(t, fixed.Query(Query{Kind: QueryDiagnostics, Language: LanguagePython}).Diagnostics)
+	require.Len(t, fixed.Query(Query{Kind: QueryDefinitions, Name: "broken", Language: LanguagePython}).Definitions, 1)
+}
+
+func TestWorkspaceIndexer_IndexesPythonCommaImportsAsReferences(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTextFile(t, dir, "imports.py", `import os, sys as system
+from pathlib import Path
+
+def helper():
+	return Path(os.getcwd()).name + system.version
+`)
+
+	index, err := NewWorkspaceIndexer(WorkspaceIndexOptions{}).IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+
+	references := index.Query(Query{Kind: QueryReferences, Language: LanguagePython}).References
+	assert.Contains(t, codeReferenceNames(references), "os")
+	assert.Contains(t, codeReferenceNames(references), "sys")
+	assert.Contains(t, codeReferenceNames(references), "pathlib")
+
+	imports := index.Query(Query{Kind: QueryRelationships, RelationshipKind: "imports", Language: LanguagePython}).Relationships
+	require.Len(t, imports, 3)
+	assert.True(t, codeRelationshipsSorted(imports), "relationships are not deterministic: %#v", imports)
+}
+
+func TestWorkspaceIndexer_StopsAdapterIndexingOnCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, ".atteler", "codeintel.json")
+	writeTextFile(t, dir, "worker.py", `def run():
+	return "ok"
+`)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	indexer := NewWorkspaceIndexer(WorkspaceIndexOptions{CachePath: cachePath})
+	goLoaderCalled := false
+	indexer.goLoader = func(*Indexer, string, IndexOptions, workspaceIndexRequest) (Index, error) {
+		goLoaderCalled = true
+
+		return Index{}, errors.New("go loader should not run for an already-canceled context")
+	}
+
+	_, err := indexer.IndexDirContext(ctx, dir)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, goLoaderCalled)
+	assert.NoFileExists(t, cachePath)
+}
+
+func TestWorkspaceIndexer_MergesGoAndPythonIntoDeterministicQueryModel(t *testing.T) {
+	t.Parallel()
+	opts := packageLoaderOptions(t)
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/mixed\n\ngo 1.26.2\n"), 0o600))
+	goFile := writeGoFile(t, dir, "main.go", `package mixed
+
+func GoThing() {}
+`)
+	pythonFile := writeTextFile(t, dir, "tools.py", `def helper():
+	return "ok"
+`)
+
+	indexer := NewWorkspaceIndexer(WorkspaceIndexOptions{Go: opts})
+	index, err := indexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+
+	goDefinitions := index.Query(Query{Kind: QueryDefinitions, Name: "GoThing", Language: LanguageGo}).Definitions
+	pythonDefinitions := index.Query(Query{Kind: QueryDefinitions, Name: "helper", Language: LanguagePython}).Definitions
+	require.Len(t, goDefinitions, 1)
+	require.Len(t, pythonDefinitions, 1)
+	assert.Equal(t, goFile, goDefinitions[0].File)
+	assert.Equal(t, pythonFile, pythonDefinitions[0].File)
+
+	files := index.Query(Query{Kind: QueryFiles}).Files
+	require.Len(t, files, 2)
+	assert.Equal(t, []string{LanguageGo, LanguagePython}, []string{files[0].Language, files[1].Language})
+
+	relationships := index.Query(Query{Kind: QueryRelationships, RelationshipKind: "declares"}).Relationships
+	require.NotEmpty(t, relationships)
+	assert.True(t, codeRelationshipsSorted(relationships), "relationships are not deterministic: %#v", relationships)
+	require.NotEmpty(t, relationshipWhere(relationships, func(relationship CodeRelationship) bool {
+		return relationship.Language == LanguagePython && relationship.ToID == pythonDefinitions[0].ID
+	}))
+}
+
+func TestWorkspaceIndexer_ReusesPersistedGoIndexWhenOnlyPythonChanges(t *testing.T) {
+	t.Parallel()
+	opts := packageLoaderOptions(t)
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, ".atteler", "codeintel.json")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/reuse\n\ngo 1.26.2\n"), 0o600))
+	writeGoFile(t, dir, "main.go", `package reuse
+
+func GoThing() {}
+`)
+	writeTextFile(t, dir, "tools.py", `def helper():
+	return "ok"
+`)
+
+	firstIndexer := NewWorkspaceIndexer(WorkspaceIndexOptions{CachePath: cachePath, Go: opts})
+	first, err := firstIndexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.Len(t, first.Query(Query{Kind: QueryDefinitions, Name: "GoThing", Language: LanguageGo}).Definitions, 1)
+	require.Len(t, first.Query(Query{Kind: QueryDefinitions, Name: "helper", Language: LanguagePython}).Definitions, 1)
+
+	writeTextFile(t, dir, "tools.py", `def changed():
+	return "changed"
+`)
+	errGoLoaderCalled := errors.New("go loader should not run for a python-only change")
+	secondIndexer := NewWorkspaceIndexer(WorkspaceIndexOptions{CachePath: cachePath, Go: opts})
+	secondIndexer.goLoader = func(*Indexer, string, IndexOptions, workspaceIndexRequest) (Index, error) {
+		return Index{}, errGoLoaderCalled
+	}
+	second, err := secondIndexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.False(t, second.Stats.CacheHit)
+	require.Equal(t, 1, second.Stats.FilesReused)
+	require.Equal(t, 1, second.Stats.FilesChanged)
+	require.Len(t, second.Query(Query{Kind: QueryDefinitions, Name: "GoThing", Language: LanguageGo}).Definitions, 1)
+	require.Empty(t, second.Query(Query{Kind: QueryDefinitions, Name: "helper", Language: LanguagePython}).Definitions)
+	require.Len(t, second.Query(Query{Kind: QueryDefinitions, Name: "changed", Language: LanguagePython}).Definitions, 1)
+}
+
+func TestWorkspaceIndexer_ReindexesGoWhenOptionsChange(t *testing.T) {
+	t.Parallel()
+	opts := packageLoaderOptions(t)
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, ".atteler", "codeintel.json")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/options\n\ngo 1.26.2\n"), 0o600))
+	writeGoFile(t, dir, "main.go", `package options
+
+func Runtime() {}
+`)
+	writeGoFile(t, dir, "main_test.go", `package options
+
+func TestOnly() {}
+`)
+
+	first, err := NewWorkspaceIndexer(WorkspaceIndexOptions{CachePath: cachePath, Go: opts}).IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.Len(t, first.Query(Query{Kind: QueryDefinitions, Name: "TestOnly", Language: LanguageGo}).Definitions, 1)
+
+	changedOpts := opts
+	changedOpts.ExcludeTests = true
+	second, err := NewWorkspaceIndexer(WorkspaceIndexOptions{CachePath: cachePath, Go: changedOpts}).IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.False(t, second.Stats.CacheHit)
+	require.Len(t, second.Query(Query{Kind: QueryDefinitions, Name: "Runtime", Language: LanguageGo}).Definitions, 1)
+	require.Empty(t, second.Query(Query{Kind: QueryDefinitions, Name: "TestOnly", Language: LanguageGo}).Definitions)
+}
+
+func TestWorkspaceIndexer_ReusesPythonFileModelsWithGraphMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, ".atteler", "codeintel.json")
+	writeTextFile(t, dir, "alpha.py", `import os
+
+def alpha():
+	return os.name
+`)
+	writeTextFile(t, dir, "beta.py", `import sys
+
+def beta():
+	return sys.version
+`)
+
+	indexer := NewWorkspaceIndexer(WorkspaceIndexOptions{CachePath: cachePath})
+	first, err := indexer.IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.Len(t, first.Query(Query{Kind: QueryDefinitions, Name: "alpha", Language: LanguagePython}).Definitions, 1)
+	require.Len(t, first.Query(Query{Kind: QueryReferences, Name: "os", Language: LanguagePython}).References, 1)
+
+	writeTextFile(t, dir, "beta.py", `import sys
+
+def changed():
+	return sys.version
+`)
+	second, err := NewWorkspaceIndexer(WorkspaceIndexOptions{CachePath: cachePath}).IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.False(t, second.Stats.CacheHit)
+	require.Equal(t, 1, second.Stats.FilesReused)
+	require.Equal(t, 1, second.Stats.FilesChanged)
+	require.Len(t, second.Query(Query{Kind: QueryDefinitions, Name: "alpha", Language: LanguagePython}).Definitions, 1)
+	require.Empty(t, second.Query(Query{Kind: QueryDefinitions, Name: "beta", Language: LanguagePython}).Definitions)
+	require.Len(t, second.Query(Query{Kind: QueryDefinitions, Name: "changed", Language: LanguagePython}).Definitions, 1)
+	require.Len(t, second.Query(Query{Kind: QueryReferences, Name: "os", Language: LanguagePython}).References, 1)
+
+	alphaNode, ok := graphNodeWhere(second.Graph.Nodes(), func(node codegraph.Node) bool {
+		return node.Name == "alpha"
+	})
+	require.True(t, ok)
+	assert.Equal(t, "declaration", alphaNode.Kind)
+
+	osImportNode, ok := graphNodeWhere(second.Graph.Nodes(), func(node codegraph.Node) bool {
+		return node.Name == "os"
+	})
+	require.True(t, ok)
+	assert.Equal(t, "import", osImportNode.Kind)
+}
+
+func TestWorkspaceIndexer_SkipsAttelerStateDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTextFile(t, dir, "visible.py", `def visible():
+	return "visible"
+`)
+	writeTextFile(t, dir, filepath.Join(".atteler", "generated.py"), `def hidden():
+	return "hidden"
+`)
+
+	index, err := NewWorkspaceIndexer(WorkspaceIndexOptions{
+		CachePath: filepath.Join(dir, ".atteler", "codeintel.json"),
+	}).IndexDirContext(t.Context(), dir)
+	require.NoError(t, err)
+	require.Len(t, index.Query(Query{Kind: QueryDefinitions, Name: "visible", Language: LanguagePython}).Definitions, 1)
+	require.Empty(t, index.Query(Query{Kind: QueryDefinitions, Name: "hidden", Language: LanguagePython}).Definitions)
+}
+
+func TestWorkspaceIndexer_IndexesNonGoFixture(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join("testdata", "multilang")
+	index, err := NewWorkspaceIndexer(WorkspaceIndexOptions{}).IndexDirContext(t.Context(), root)
+	require.NoError(t, err)
+
+	definitions := index.Query(Query{Kind: QueryDefinitions, Language: LanguagePython}).Definitions
+	assert.Contains(t, codeDefinitionNames(definitions), "Worker")
+	assert.Contains(t, codeDefinitionNames(definitions), "helper")
+
+	references := index.Query(Query{Kind: QueryReferences, Language: LanguagePython}).References
+	assert.Contains(t, codeReferenceNames(references), "os")
+	assert.Contains(t, codeReferenceNames(references), "pathlib")
+	assert.Empty(t, index.Query(Query{Kind: QueryDefinitions, Name: "helper", Language: LanguageGo}).Definitions)
+}
+
+func TestModelQuery_NormalizesKindAndLanguage(t *testing.T) {
+	t.Parallel()
+
+	model := Model{
+		Definitions: []CodeDefinition{{
+			ID:       "decl:python:helper",
+			Name:     "helper",
+			Kind:     "function",
+			Language: LanguagePython,
+			File:     "worker.py",
+		}},
+		Relationships: []CodeRelationship{{
+			FromID:   "file:worker.py",
+			ToID:     "import:python:worker.py:os:1",
+			Kind:     "imports",
+			Language: LanguagePython,
+			File:     "worker.py",
+		}},
+		Diagnostics: []CodeDiagnostic{{
+			ID:       "diagnostic:python:parse:worker.py:1",
+			Language: LanguagePython,
+			File:     "worker.py",
+			Source:   "python:scanner",
+			Severity: "parse",
+			Message:  "Unable to parse Python function definition",
+		}},
+	}
+
+	result := model.Query(Query{Kind: QueryKind("Definitions"), Name: "helper", Language: "Python"})
+	require.Len(t, result.Definitions, 1)
+	assert.Empty(t, result.Uncertainty)
+
+	result = model.Query(Query{Kind: QueryKind("Relationships"), RelationshipKind: "Imports", Language: "Python"})
+	require.Len(t, result.Relationships, 1)
+	assert.Empty(t, result.Uncertainty)
+
+	result = model.Query(Query{Kind: QueryKind("Diagnostics"), Name: "PYTHON:SCANNER", Language: "Python"})
+	require.Len(t, result.Diagnostics, 1)
+	assert.Empty(t, result.Uncertainty)
+
+	result = model.Query(Query{Kind: QueryDiagnostics, Name: "Parse", Language: LanguagePython})
+	require.Len(t, result.Diagnostics, 1)
+	assert.Empty(t, result.Uncertainty)
+}
+
+func TestIndexQuery_BuildsModelFallbackFromGoSemanticFields(t *testing.T) {
+	t.Parallel()
+
+	graph := codegraph.NewEvidence()
+	fileRange := SourceRange{File: "runner.go", StartLine: 1, StartColumn: 1, EndLine: 3, EndColumn: 1}
+	definitionRange := SourceRange{File: "runner.go", StartLine: 3, StartColumn: 6, EndLine: 3, EndColumn: 9}
+	graph.AddNode(codegraph.Node{ID: "file:runner.go", Kind: "file", Name: "runner.go"})
+	graph.AddNode(codegraph.Node{ID: "decl:go:runner:Run", Kind: "declaration", Name: "Run"})
+	graph.AddRelationship(codegraph.Relationship{
+		From: "file:runner.go",
+		To:   "decl:go:runner:Run",
+		Kind: "declares",
+		Provenance: []codegraph.Provenance{{
+			Source:      "go/packages",
+			File:        "runner.go",
+			StartLine:   3,
+			StartColumn: 6,
+			EndLine:     3,
+			EndColumn:   9,
+			Confidence:  "high",
+		}},
+	})
+
+	index := Index{
+		FileDetails: []SourceFile{{
+			Path:        "runner.go",
+			ContentHash: "hash",
+			Size:        42,
+			Range:       fileRange,
+		}},
+		Declarations: []Declaration{{
+			ID:       "decl:go:runner:Run",
+			Name:     "Run",
+			Kind:     kindFunc,
+			File:     "runner.go",
+			Range:    definitionRange,
+			Exported: true,
+		}},
+		Graph: graph,
+	}
+
+	result := index.Query(Query{Kind: QueryDefinitions, Name: "Run", Language: LanguageGo})
+	require.Len(t, result.Definitions, 1)
+	assert.Equal(t, "Run", result.Definitions[0].Name)
+	assert.Empty(t, result.Uncertainty)
+
+	relationships := index.Query(Query{Kind: QueryRelationships, RelationshipKind: "declares", Language: LanguageGo}).Relationships
+	require.Len(t, relationships, 1)
+	assert.Equal(t, "file:runner.go", relationships[0].FromID)
+	assert.Equal(t, "decl:go:runner:Run", relationships[0].ToID)
+}
+
 func writeSemanticModule(t *testing.T) string {
 	t.Helper()
 
@@ -619,4 +1129,53 @@ func uncertaintyContains(uncertainty []string, text string) bool {
 	}
 
 	return false
+}
+
+func codeRelationshipsSorted(relationships []CodeRelationship) bool {
+	for i := 1; i < len(relationships); i++ {
+		if codeRelationshipLess(relationships[i], relationships[i-1]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func relationshipWhere(relationships []CodeRelationship, keep func(CodeRelationship) bool) []CodeRelationship {
+	var out []CodeRelationship
+	for i := range relationships {
+		if keep(relationships[i]) {
+			out = append(out, relationships[i])
+		}
+	}
+
+	return out
+}
+
+func codeDefinitionNames(definitions []CodeDefinition) []string {
+	out := make([]string, 0, len(definitions))
+	for i := range definitions {
+		out = append(out, definitions[i].Name)
+	}
+
+	return out
+}
+
+func codeReferenceNames(references []CodeReference) []string {
+	out := make([]string, 0, len(references))
+	for i := range references {
+		out = append(out, references[i].Name)
+	}
+
+	return out
+}
+
+func graphNodeWhere(nodes []codegraph.Node, keep func(codegraph.Node) bool) (codegraph.Node, bool) {
+	for i := range nodes {
+		if keep(nodes[i]) {
+			return nodes[i], true
+		}
+	}
+
+	return codegraph.Node{}, false
 }
