@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"sort"
@@ -40,6 +41,91 @@ type agentDescription struct {
 	Capabilities   []string `yaml:"capabilities,omitempty"`
 	Triggers       []string `yaml:"triggers,omitempty"`
 	MaxTokens      int      `yaml:"max_tokens,omitempty"`
+}
+
+type doctorDiagnosticLevel struct {
+	Severity string `json:"severity"`
+	Meaning  string `json:"meaning"`
+}
+
+type doctorDiagnostic struct {
+	Severity    string `json:"severity"`
+	Message     string `json:"message"`
+	Path        string `json:"path,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Importer    string `json:"importer,omitempty"`
+	Field       string `json:"field,omitempty"`
+	Replacement string `json:"replacement,omitempty"`
+}
+
+type doctorDiagnosticCounts struct {
+	Fatal    int `json:"fatal,omitempty"`
+	Errors   int `json:"errors"`
+	Warnings int `json:"warnings"`
+	Info     int `json:"info"`
+}
+
+//nolint:govet // field order follows the user-facing JSON report grouping.
+type doctorOfflineJSONReport struct {
+	SchemaVersion     int                          `json:"schema_version"`
+	Command           string                       `json:"command"`
+	Status            string                       `json:"status"`
+	DiagnosticLevels  []doctorDiagnosticLevel      `json:"diagnostic_levels"`
+	Config            doctorOfflineConfigReport    `json:"config"`
+	ConfigDiagnostics doctorDiagnosticCounts       `json:"config_diagnostics"`
+	State             doctorOfflineStateReport     `json:"state"`
+	StateDiagnostics  doctorDiagnosticCounts       `json:"state_diagnostics"`
+	Sessions          doctorOfflinePathReport      `json:"sessions"`
+	KnownProviders    []string                     `json:"known_providers"`
+	Agents            []string                     `json:"agents"`
+	HookEvents        int                          `json:"hook_events"`
+	Plugins           []string                     `json:"plugins"`
+	Diagnostics       []doctorDiagnostic           `json:"diagnostics,omitempty"`
+	Sources           []appconfig.SourceDiagnostic `json:"sources,omitempty"`
+}
+
+//nolint:govet // field order follows the user-facing JSON report grouping.
+type doctorOfflineConfigReport struct {
+	Loaded     []string `json:"loaded,omitempty"`
+	LoadError  string   `json:"load_error,omitempty"`
+	FatalError string   `json:"fatal_error,omitempty"`
+	Status     string   `json:"status"`
+}
+
+//nolint:govet // field order follows the user-facing JSON report grouping.
+type doctorOfflineStateReport struct {
+	Path     string `json:"path"`
+	Status   string `json:"status"`
+	Version  int    `json:"version,omitempty"`
+	Revision int64  `json:"revision,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+type doctorOfflinePathReport struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
+}
+
+const (
+	doctorCommandNameOffline = "doctor-offline"
+	doctorStatusFailed       = "failed"
+	doctorStatusOK           = "ok"
+	doctorSeverityFatal      = "fatal"
+)
+
+var configDoctorDiagnosticLevels = []doctorDiagnosticLevel{
+	{
+		Severity: doctorSeverityFatal,
+		Meaning:  "selected Atteler config failed strict read, parse, schema, or migration checks; command exits non-zero",
+	},
+	{
+		Severity: string(appconfig.DiagnosticWarning),
+		Meaning:  "non-fatal best-effort diagnostics such as harness-import fallbacks or deprecated fields",
+	},
+	{
+		Severity: string(appconfig.DiagnosticInfo),
+		Meaning:  "informational context such as implicit defaults, schema notes, or missing optional files",
+	},
 }
 
 func describeAgent(agents *agent.Registry, name string) error {
@@ -84,6 +170,15 @@ func formatAgentDescription(activeAgent agent.Agent) (string, error) {
 
 func doctor(ctx context.Context, state appState) error {
 	fmt.Println("Atteler doctor")
+
+	if state.configLoadErr != nil {
+		printConfigDoctorDiagnosticLevels(os.Stdout)
+		fmt.Println("config_status: " + doctorStatusFailed)
+		printFatalConfigDiagnostic(os.Stderr, state.configLoadErr)
+		fmt.Println("doctor_status: " + doctorStatusFailed)
+
+		return fmt.Errorf("config doctor: fatal config error: %w", state.configLoadErr)
+	}
 
 	providers := state.registry.ListProviders()
 	sort.Strings(providers)
@@ -460,57 +555,54 @@ func formatRetryPolicy(policy llm.RetryPolicyInfo) string {
 	)
 }
 
-//nolint:unparam // error return kept for consistency with other command handlers.
 func doctorOffline(opts cliOptions) error {
-	cfg, loadedConfigPaths, err := appconfig.Load()
+	cfg, loadedConfigPaths, _, diagnostics, loadErr := appconfig.LoadWithDiagnostics()
+	sources := appconfig.InspectPathSources(appconfig.DefaultPathSources())
+	fatalErr := configDoctorFatalError(loadErr, sources)
+
+	outputFormat, err := structuredCommandOutputFormat(opts.jsonOutput, opts.outputFormat)
 	if err != nil {
-		fmt.Println("config_error: " + err.Error())
+		return err
+	}
+
+	if outputFormat == outputFormatJSON {
+		return printDoctorOfflineJSON(opts, cfg, loadedConfigPaths, diagnostics, sources, loadErr, fatalErr)
 	}
 
 	fmt.Println("Atteler offline doctor")
+	printConfigDoctorDiagnosticLevels(os.Stdout)
 
-	if len(loadedConfigPaths) == 0 {
-		fmt.Println("config: no config files loaded")
+	if fatalErr != nil {
+		fmt.Println("config_status: " + doctorStatusFailed)
+		printFatalConfigDiagnostic(os.Stderr, fatalErr)
 	} else {
+		fmt.Println("config_status: " + doctorStatusOK)
+	}
+
+	printDiagnostics(os.Stdout, diagnostics)
+
+	switch {
+	case len(loadedConfigPaths) == 0 && fatalErr != nil:
+		fmt.Println("config: no config files loaded successfully")
+	case len(loadedConfigPaths) == 0:
+		fmt.Println("config: no config files loaded")
+	default:
 		fmt.Println("config: " + strings.Join(loadedConfigPaths, ", "))
 	}
 
-	printConfigStateDoctorSummary()
+	printConfigStateDoctorSummaryWithDiagnostics(fatalErr, diagnostics)
 
 	store := session.NewStore(opts.sessionDir)
 	fmt.Println("sessions: " + store.Dir() + " (" + pathStatus(store.Dir()) + ")")
 
-	knownProviderNames := make([]string, 0)
-	retryProviderSet := make(map[string]bool, len(cfg.Providers))
-
-	for _, provider := range llm.KnownProviders() {
-		knownProviderNames = append(knownProviderNames, provider.Name)
-		retryProviderSet[provider.Name] = true
-	}
-
-	sort.Strings(knownProviderNames)
-
-	if len(knownProviderNames) == 0 {
+	providerNames := knownProviderNames()
+	if len(providerNames) == 0 {
 		fmt.Println("known_providers: none")
 	} else {
-		fmt.Println("known_providers: " + strings.Join(knownProviderNames, ", "))
+		fmt.Println("known_providers: " + strings.Join(providerNames, ", "))
 	}
 
-	retryProviderNames := append([]string(nil), knownProviderNames...)
-
-	for name := range cfg.Providers {
-		if !retryProviderSet[name] {
-			retryProviderNames = append(retryProviderNames, name)
-		}
-	}
-
-	sort.Strings(retryProviderNames)
-
-	fmt.Println("provider_retries:")
-
-	for _, name := range retryProviderNames {
-		fmt.Printf("  %s: %s\n", name, formatRetryPolicy(retryPolicyInfoForConfig(name, cfg.Providers[name])))
-	}
+	printDoctorOfflineProviderRetries(os.Stdout, cfg, providerNames)
 
 	agents := agent.NewRegistry(cfg.Agents).List()
 	if len(agents) == 0 {
@@ -527,16 +619,308 @@ func doctorOffline(opts cliOptions) error {
 		fmt.Println("plugins: " + strings.Join(cfg.Plugins.Paths, ", "))
 	}
 
+	if fatalErr != nil {
+		fmt.Println("doctor_status: " + doctorStatusFailed)
+
+		return fmt.Errorf("config doctor-offline: fatal config error: %w", fatalErr)
+	}
+
+	fmt.Println("doctor_status: " + doctorStatusOK)
+
 	return nil
 }
 
+func printDoctorOfflineJSON(
+	opts cliOptions,
+	cfg appconfig.Config,
+	loadedConfigPaths []string,
+	diagnostics []appconfig.Diagnostic,
+	sources []appconfig.SourceDiagnostic,
+	loadErr error,
+	fatalErr error,
+) error {
+	report := newDoctorOfflineJSONReport(opts, cfg, loadedConfigPaths, diagnostics, sources, loadErr, fatalErr)
+	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+		return fmt.Errorf("config doctor-offline: encode JSON: %w", err)
+	}
+
+	if fatalErr != nil {
+		return fmt.Errorf("config doctor-offline: fatal config error: %w", fatalErr)
+	}
+
+	return nil
+}
+
+func newDoctorOfflineJSONReport(
+	opts cliOptions,
+	cfg appconfig.Config,
+	loadedConfigPaths []string,
+	diagnostics []appconfig.Diagnostic,
+	sources []appconfig.SourceDiagnostic,
+	loadErr error,
+	fatalErr error,
+) doctorOfflineJSONReport {
+	status := doctorStatusOK
+	configStatus := doctorStatusOK
+
+	if fatalErr != nil {
+		status = doctorStatusFailed
+		configStatus = doctorStatusFailed
+	}
+
+	state := appconfig.InspectStatePath(appconfig.DefaultStatePath())
+	store := session.NewStore(opts.sessionDir)
+	providerNames := knownProviderNames()
+
+	agents := append([]string{}, agent.NewRegistry(cfg.Agents).List()...)
+	plugins := append([]string{}, cfg.Plugins.Paths...)
+
+	configSummary := summarizeSourceDiagnostics(sources)
+	configSummary.add(diagnostics)
+	configSummary.addFatal(fatalErr)
+
+	stateSummary := summarizeDiagnostics(state.Diagnostics)
+
+	reportDiagnostics := make([]doctorDiagnostic, 0, len(diagnostics)+1)
+	if loadErr != nil {
+		reportDiagnostics = append(reportDiagnostics, fatalDoctorDiagnostic(loadErr, sources))
+	} else {
+		reportDiagnostics = append(reportDiagnostics, fatalConfigSourceDiagnostics(sources)...)
+	}
+
+	for _, diagnostic := range diagnostics {
+		reportDiagnostics = append(reportDiagnostics, doctorDiagnosticFromConfigDiagnostic(diagnostic))
+	}
+
+	return doctorOfflineJSONReport{
+		SchemaVersion:    1,
+		Command:          doctorCommandNameOffline,
+		Status:           status,
+		DiagnosticLevels: append([]doctorDiagnosticLevel(nil), configDoctorDiagnosticLevels...),
+		Config: doctorOfflineConfigReport{
+			Status:     configStatus,
+			Loaded:     append([]string(nil), loadedConfigPaths...),
+			LoadError:  loadErrorString(loadErr),
+			FatalError: loadErrorString(fatalErr),
+		},
+		ConfigDiagnostics: doctorDiagnosticCountsFromSummary(configSummary),
+		State: doctorOfflineStateReport{
+			Path:     state.Path,
+			Status:   state.Status,
+			Version:  state.Version,
+			Revision: state.Revision,
+			Error:    state.Error,
+		},
+		StateDiagnostics: doctorDiagnosticCountsFromSummary(stateSummary),
+		Sessions: doctorOfflinePathReport{
+			Path:   store.Dir(),
+			Status: pathStatus(store.Dir()),
+		},
+		KnownProviders: providerNames,
+		Agents:         agents,
+		HookEvents:     len(events.SupportedEventTypes()),
+		Plugins:        plugins,
+		Diagnostics:    reportDiagnostics,
+		Sources:        sources,
+	}
+}
+
+func printConfigDoctorDiagnosticLevels(w io.Writer) {
+	fmt.Fprintln(w, "diagnostic_levels:")
+
+	for _, level := range configDoctorDiagnosticLevels {
+		fmt.Fprintf(w, "  - %s: %s\n", level.Severity, level.Meaning)
+	}
+}
+
+func printFatalConfigDiagnostic(w io.Writer, err error) {
+	if err == nil {
+		return
+	}
+
+	fmt.Fprintln(w, "fatal:")
+
+	lines := strings.Split(err.Error(), "\n")
+	for i, line := range lines {
+		if i == 0 {
+			fmt.Fprintf(w, "  - %s\n", line)
+
+			continue
+		}
+
+		fmt.Fprintf(w, "    %s\n", line)
+	}
+}
+
+func knownProviderNames() []string {
+	providers := llm.KnownProviders()
+	providerNames := make([]string, 0, len(providers))
+
+	for _, provider := range providers {
+		providerNames = append(providerNames, provider.Name)
+	}
+
+	sort.Strings(providerNames)
+
+	return providerNames
+}
+
+func printDoctorOfflineProviderRetries(w io.Writer, cfg appconfig.Config, providerNames []string) {
+	fmt.Fprintln(w, "provider_retries:")
+
+	for _, name := range doctorOfflineProviderRetryNames(cfg, providerNames) {
+		fmt.Fprintf(w, "  %s: %s\n", name, formatRetryPolicy(retryPolicyInfoForConfig(name, cfg.Providers[name])))
+	}
+}
+
+func doctorOfflineProviderRetryNames(cfg appconfig.Config, providerNames []string) []string {
+	retryProviderSet := make(map[string]bool, len(providerNames))
+
+	for _, name := range providerNames {
+		retryProviderSet[name] = true
+	}
+
+	retryProviderNames := append([]string(nil), providerNames...)
+
+	for name := range cfg.Providers {
+		if !retryProviderSet[name] {
+			retryProviderNames = append(retryProviderNames, name)
+		}
+	}
+
+	sort.Strings(retryProviderNames)
+
+	return retryProviderNames
+}
+
+func configDoctorFatalError(loadErr error, sources []appconfig.SourceDiagnostic) error {
+	if loadErr != nil {
+		return loadErr
+	}
+
+	fatalDiagnostics := fatalConfigSourceDiagnostics(sources)
+	if len(fatalDiagnostics) == 0 {
+		return nil
+	}
+
+	messages := make([]string, 0, len(fatalDiagnostics))
+	for _, diagnostic := range fatalDiagnostics {
+		messages = append(messages, diagnostic.Message)
+	}
+
+	if len(messages) == 1 {
+		return errors.New(messages[0])
+	}
+
+	return fmt.Errorf("%d fatal config diagnostics: %s", len(messages), strings.Join(messages, "; "))
+}
+
+func fatalConfigSourceDiagnostics(sources []appconfig.SourceDiagnostic) []doctorDiagnostic {
+	var out []doctorDiagnostic
+
+	for _, source := range sources {
+		for _, diagnostic := range source.Diagnostics {
+			if diagnostic.Severity != appconfig.DiagnosticError {
+				continue
+			}
+
+			fatalDiagnostic := doctorDiagnosticFromConfigDiagnostic(diagnostic)
+			fatalDiagnostic.Severity = doctorSeverityFatal
+
+			if fatalDiagnostic.Path == "" {
+				fatalDiagnostic.Path = source.Path
+			}
+
+			out = append(out, fatalDiagnostic)
+		}
+	}
+
+	return out
+}
+
+func fatalDoctorDiagnostic(loadErr error, sources []appconfig.SourceDiagnostic) doctorDiagnostic {
+	diagnostic := doctorDiagnostic{
+		Severity: doctorSeverityFatal,
+		Message:  loadErr.Error(),
+	}
+
+	for _, source := range sources {
+		if source.Status == "error" {
+			diagnostic.Path = source.Path
+
+			return diagnostic
+		}
+
+		for _, sourceDiagnostic := range source.Diagnostics {
+			if sourceDiagnostic.Severity == appconfig.DiagnosticError {
+				diagnostic.Path = source.Path
+
+				return diagnostic
+			}
+		}
+	}
+
+	for _, source := range sources {
+		if source.Path != "" && strings.Contains(loadErr.Error(), source.Path) {
+			diagnostic.Path = source.Path
+
+			return diagnostic
+		}
+	}
+
+	return diagnostic
+}
+
+func doctorDiagnosticFromConfigDiagnostic(diagnostic appconfig.Diagnostic) doctorDiagnostic {
+	severity := diagnostic.Severity
+	if severity == "" {
+		severity = appconfig.DiagnosticWarning
+	}
+
+	return doctorDiagnostic{
+		Severity:    string(severity),
+		Message:     diagnostic.String(),
+		Path:        diagnostic.Path,
+		Source:      diagnostic.Source,
+		Importer:    diagnostic.Importer,
+		Field:       diagnostic.Field,
+		Replacement: diagnostic.Replacement,
+	}
+}
+
+func doctorDiagnosticCountsFromSummary(summary configDoctorDiagnosticSummary) doctorDiagnosticCounts {
+	return doctorDiagnosticCounts{
+		Fatal:    summary.fatal,
+		Errors:   summary.errors,
+		Warnings: summary.warnings,
+		Info:     summary.info,
+	}
+}
+
+func loadErrorString(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	return err.Error()
+}
+
 type configDoctorDiagnosticSummary struct {
+	fatal    int
 	errors   int
 	warnings int
 	info     int
 }
 
 func printConfigStateDoctorSummary() {
+	printConfigStateDoctorSummaryWithFatal(nil)
+}
+
+func printConfigStateDoctorSummaryWithFatal(fatalErr error) {
+	printConfigStateDoctorSummaryWithDiagnostics(fatalErr, nil)
+}
+
+func printConfigStateDoctorSummaryWithDiagnostics(fatalErr error, diagnostics []appconfig.Diagnostic) {
 	fmt.Printf(
 		"schema: config=%d state=%d\n",
 		appconfig.ConfigSchemaVersion,
@@ -544,12 +928,9 @@ func printConfigStateDoctorSummary() {
 	)
 
 	configSummary := summarizeSourceDiagnostics(appconfig.InspectPathSources(appconfig.DefaultPathSources()))
-	fmt.Printf(
-		"config_diagnostics: errors=%d warnings=%d info=%d\n",
-		configSummary.errors,
-		configSummary.warnings,
-		configSummary.info,
-	)
+	configSummary.add(diagnostics)
+	configSummary.addFatal(fatalErr)
+	fmt.Println("config_diagnostics: " + formatConfigDoctorDiagnosticSummary(configSummary))
 
 	stateReport := appconfig.InspectStatePath(appconfig.DefaultStatePath())
 
@@ -570,6 +951,20 @@ func printConfigStateDoctorSummary() {
 		stateSummary.warnings,
 		stateSummary.info,
 	)
+}
+
+func formatConfigDoctorDiagnosticSummary(summary configDoctorDiagnosticSummary) string {
+	out := fmt.Sprintf(
+		"errors=%d warnings=%d info=%d",
+		summary.errors,
+		summary.warnings,
+		summary.info,
+	)
+	if summary.fatal > 0 {
+		out += fmt.Sprintf(" fatal=%d", summary.fatal)
+	}
+
+	return out
 }
 
 func summarizeSourceDiagnostics(sources []appconfig.SourceDiagnostic) configDoctorDiagnosticSummary {
@@ -603,6 +998,14 @@ func (s *configDoctorDiagnosticSummary) add(diagnostics []appconfig.Diagnostic) 
 			s.info++
 		}
 	}
+}
+
+func (s *configDoctorDiagnosticSummary) addFatal(err error) {
+	if s == nil || err == nil {
+		return
+	}
+
+	s.fatal++
 }
 
 func pathStatus(path string) string {

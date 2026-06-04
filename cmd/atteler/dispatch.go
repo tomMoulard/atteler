@@ -394,6 +394,10 @@ func validateConfig() error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
+	if err := configDoctorFatalError(nil, appconfig.InspectPathSources(appconfig.DefaultPathSources())); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
 	if err := validateHookConfig(cfg.Hooks); err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
@@ -1042,39 +1046,44 @@ func recordHeadlessLoadStateFailure(store *session.Store, opts cliOptions, failu
 }
 
 func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
-	cfg, loadedConfigPaths, err := appconfig.Load()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+	cfg, loadedConfigPaths, configFatalErr := loadConfigForAppState(opts)
+	agentRegistry := agent.NewRegistry(cfg.Agents)
+	store := session.NewStore(opts.sessionDir)
+	stateStore := appconfig.NewStateStore("")
+	cwd := currentWorkingDirectoryOrEmpty()
+
+	if configFatalErr != nil && opts.doctor {
+		return appState{
+			config:            cfg,
+			agentRegistry:     agentRegistry,
+			sessionStore:      store,
+			stateStore:        stateStore,
+			cwd:               cwd,
+			loadedConfigPaths: loadedConfigPaths,
+			configLoadErr:     configFatalErr,
+			pluginPaths:       append([]string(nil), cfg.Plugins.Paths...),
+			pluginPolicy:      clonePluginPolicy(cfg.Plugins.Policy),
+			vectorConfig:      cfg.Vector,
+		}, nil
 	}
 
-	warnInvalidHookConfig(cfg.Hooks)
-
-	agentRegistry := agent.NewRegistry(cfg.Agents)
 	// Default to a stderr logger so events from utility commands (--bash,
 	// --mcp, one-shot, etc.) are visible without extra configuration. Headless
 	// runs stay quiet so JSON output isn't polluted; runInteractive replaces
 	// this with a logger-less runner so stderr writes don't bleed onto the TUI.
-	var hookLogWriter io.Writer
-	if !opts.headless {
-		hookLogWriter = os.Stderr
-	}
+	hookLogWriter := hookLogWriterForOptions(opts)
 
 	skillLearningOpts, configuredSkillLearningEnabled := skillLearningOptionsFromConfig(cfg, opts, os.Getenv)
 	skillLearningEnabled := skillLearningEffectiveEnabled(skillLearningOpts, configuredSkillLearningEnabled)
 	eventObservers := skillLearningObserversFromOptions(ctx, skillLearningOpts, skillLearningEnabled)
 	hookRunner := events.NewRunnerWithLoggerAndObservers(cfg.Hooks, hookLogWriter, eventObservers...)
-	store := session.NewStore(opts.sessionDir)
-	stateStore := appconfig.NewStateStore("")
 
 	persistedState, stateErr := stateStore.Load()
 	if stateErr != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+stateErr.Error())
 	}
 
-	cwd, cwdErr := os.Getwd()
-	if cwdErr != nil {
-		cwd = ""
-	}
+	warnInvalidHookConfig(cfg.Hooks)
 
 	selection, err := resolveSelection(opts, cfg, persistedState.ModelForFolder(cwd), agentRegistry, store)
 	if err != nil {
@@ -1154,6 +1163,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		selectedModel:                selection.selectedModel,
 		selectedAgent:                selection.selectedAgent,
 		promptSuggestionConsent:      suggestionConsent,
+		configLoadErr:                configFatalErr,
 		idleSuggestionBudget:         defaultIdleSuggestionBudget(),
 		fallbackModels:               selection.fallbackModels,
 		pluginPaths:                  append([]string(nil), cfg.Plugins.Paths...),
@@ -1173,6 +1183,40 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		promptLocalOnly:              opts.promptLocalOnly,
 		skillLearningEnabled:         skillLearningEnabled,
 	}, nil
+}
+
+func loadConfigForAppState(opts cliOptions) (appconfig.Config, []string, error) {
+	cfg, loadedConfigPaths, loadErr := appconfig.Load()
+	if loadErr != nil && !opts.doctor {
+		fmt.Fprintln(os.Stderr, "warning: "+loadErr.Error())
+	}
+
+	return cfg, loadedConfigPaths, configFatalErrorForOptions(opts, loadErr)
+}
+
+func configFatalErrorForOptions(opts cliOptions, loadErr error) error {
+	if !opts.doctor || loadErr != nil {
+		return loadErr
+	}
+
+	return configDoctorFatalError(nil, appconfig.InspectPathSources(appconfig.DefaultPathSources()))
+}
+
+func hookLogWriterForOptions(opts cliOptions) io.Writer {
+	if opts.headless {
+		return nil
+	}
+
+	return os.Stderr
+}
+
+func currentWorkingDirectoryOrEmpty() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	return cwd
 }
 
 type cliWorktreeMergePolicy struct {

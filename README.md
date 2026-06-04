@@ -138,8 +138,34 @@ atteler config validate
 atteler config explain default_model
 atteler config migrate
 atteler config report
+atteler config doctor-offline
 atteler config doctor
 ```
+
+Use the diagnostics commands for different readiness questions:
+
+- `atteler config validate` is the strict config/schema gate. It loads the
+  merged Atteler config, prints non-fatal harness-import warnings, and exits
+  non-zero for parse, unknown-field, migration, hook-payload, or agent-loop
+  budget errors.
+- `atteler config doctor-offline` is the provider-independent readiness check
+  for CI, support bundles, and machines without network/provider credentials. It
+  exits non-zero on the same fatal Atteler config load errors as `validate`,
+  still prints best-effort local summaries, prints text-mode fatal reasons to
+  stderr, and supports machine-readable JSON output for CI; run
+  `atteler help config` for the exact flag.
+- `atteler config doctor` includes provider-aware readiness and credential
+  checks. Run it after `validate` or `doctor-offline` when you want to confirm
+  local provider registration, credential availability, and provider health.
+
+Diagnostic severities are:
+
+- `fatal`: a selected Atteler config file could not be read, strictly parsed,
+  migrated, or schema-decoded; readiness commands exit non-zero.
+- `warning`: non-fatal issues such as best-effort harness-import warnings,
+  deprecated fields, or optional provider/file fallbacks.
+- `info`: contextual notes such as implicit defaults, schema metadata, or
+  missing optional conventional files.
 
 Use `atteler config explain` without a field prefix to print every tracked
 field, or pass a prefix such as `default_model`, `providers.openai`, or

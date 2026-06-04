@@ -425,6 +425,7 @@ func TestTranslateCLIArgs_AcceptanceDomainsRouteToLegacyCompatibility(t *testing
 		{name: "config migrate", args: []string{"config", "migrate"}, want: []string{"--config-migrate"}},
 		{name: "config report", args: []string{"config", "report"}, want: []string{"--config-report"}},
 		{name: "config explain", args: []string{"config", "explain", "default_model"}, want: []string{"--explain-config", "default_model"}},
+		{name: "config doctor offline json", args: []string{"config", "doctor-offline", "--output", "json"}, want: []string{"--doctor-offline", "--output", "json"}},
 		{name: "providers", args: []string{"providers", "list"}, want: []string{"--list-providers"}},
 		{name: "agents", args: []string{"agents", "plan", "review", "auth"}, want: []string{"--plan-agents", "review auth"}},
 		{name: "agents performance", args: []string{"agents", "performance"}, want: []string{"--agent-performance-summary"}},

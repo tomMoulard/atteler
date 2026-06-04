@@ -126,7 +126,9 @@ type describePluginCommandInput struct {
 type doctorCommandInput struct{}
 
 type doctorOfflineCommandInput struct {
-	SessionDir string
+	OutputFormat string
+	SessionDir   string
+	JSON         bool
 }
 
 type configMigrateCommandInput struct{}
@@ -646,7 +648,7 @@ func doctorCommandInputFromOptions(_ cliOptions) doctorCommandInput {
 }
 
 func doctorOfflineCommandInputFromOptions(opts cliOptions) doctorOfflineCommandInput {
-	return doctorOfflineCommandInput{SessionDir: opts.sessionDir}
+	return doctorOfflineCommandInput{OutputFormat: opts.outputFormat, SessionDir: opts.sessionDir, JSON: opts.jsonOutput}
 }
 
 func configMigrateCommandInputFromOptions(_ cliOptions) configMigrateCommandInput {
