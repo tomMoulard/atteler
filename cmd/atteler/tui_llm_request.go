@@ -39,6 +39,7 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 		}
 
 		prependReferenceContext(&params, request.referenceContext)
+		prependAutonomyInstructions(&params, request.autonomy)
 
 		applyGenerationParams(&params, request.generation)
 
@@ -187,6 +188,7 @@ func callLLMWithTools(
 				"input":        command,
 				"source":       "llm_tool",
 				"tool_call_id": call.ID,
+				"autonomy":     request.autonomy.String(),
 			},
 		})
 
@@ -199,6 +201,7 @@ func callLLMWithTools(
 				Caller:      "atteler.tui.llm_tool",
 				SessionID:   request.eventBase.SessionID,
 				SessionPath: request.eventBase.SessionPath,
+				Autonomy:    request.autonomy.String(),
 			},
 			OutputCallback: func(chunk attshell.OutputChunk) {
 				sendLiveLLMToolOutput(request.liveCh, command, chunk)
@@ -213,6 +216,7 @@ func callLLMWithTools(
 						"source":       "llm_tool",
 						"stream":       string(chunk.Stream),
 						"tool_call_id": call.ID,
+						"autonomy":     request.autonomy.String(),
 					},
 				})
 			},
@@ -230,6 +234,7 @@ func callLLMWithTools(
 			map[string]string{
 				"source":       "llm_tool",
 				"tool_call_id": call.ID,
+				"autonomy":     request.autonomy.String(),
 			},
 		))
 
@@ -277,9 +282,10 @@ func callLLMWithTools(
 		ConfirmToolCall:    confirmToolFn,
 		BeforeModelCall:    agentLoopManifestPreflight(ctx, reg, request),
 		Budget:             request.agentLoopBudget,
+		Autonomy:           request.autonomy,
 		EstimateCostMicros: costEstimator,
 		CheckpointInterval: request.agentLoopCheckpointInterval,
-		Policy:             llm.BashToolPolicy,
+		Policy:             llm.BashToolPolicyForAutonomy(request.autonomy),
 		CheckpointSink:     agentLoopCheckpointSink(request.agentLoopCheckpointPath),
 	})
 	if err != nil {

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/autonomy"
 )
 
 const (
@@ -101,6 +103,7 @@ type Config struct {
 	Hooks        HooksConfig
 	Agent        AgentConfig
 	Codex        CodexConfig
+	Autonomy     autonomy.Level
 }
 
 // TrackerConfig configures issue tracker access.
@@ -460,6 +463,7 @@ type CodexEvent struct {
 	SessionID    string
 	AppServerPID string
 	Message      string
+	Autonomy     string
 	CommandID    string
 	ProcessID    string
 	Command      string
@@ -496,6 +500,7 @@ type Options struct {
 	Logger       *slog.Logger
 	WorkflowPath string
 	WorkDir      string
+	Autonomy     autonomy.Level
 }
 
 // ErrorClass identifies typed errors required by the specification.

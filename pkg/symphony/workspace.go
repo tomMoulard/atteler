@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -37,8 +39,8 @@ func (m *WorkspaceManager) Ensure(ctx context.Context, cfg Config, issue Issue) 
 	}
 
 	root := filepath.Clean(cfg.Workspace.Root)
-	if err := os.MkdirAll(root, workspaceDirPermissions); err != nil {
-		return Workspace{}, fmt.Errorf("workspace: create root %s: %w", root, err)
+	if err := ensureWorkspaceRoot(root, cfg.Autonomy); err != nil {
+		return Workspace{}, err
 	}
 
 	path := filepath.Join(root, key)
@@ -46,20 +48,9 @@ func (m *WorkspaceManager) Ensure(ctx context.Context, cfg Config, issue Issue) 
 		return Workspace{}, err
 	}
 
-	var createdNow bool
-	info, statErr := os.Stat(path)
-	switch {
-	case statErr == nil && !info.IsDir():
-		return Workspace{}, fmt.Errorf("workspace: %s exists and is not a directory", path)
-	case statErr == nil:
-	case errors.Is(statErr, os.ErrNotExist):
-		if err := os.Mkdir(path, workspaceDirPermissions); err != nil {
-			return Workspace{}, fmt.Errorf("workspace: create %s: %w", path, err)
-		}
-
-		createdNow = true
-	default:
-		return Workspace{}, fmt.Errorf("workspace: stat %s: %w", path, statErr)
+	createdNow, err := ensureWorkspaceIssueDir(path, cfg.Autonomy)
+	if err != nil {
+		return Workspace{}, err
 	}
 
 	workspace := Workspace{Path: path, WorkspaceKey: key, CreatedNow: createdNow}
@@ -70,6 +61,50 @@ func (m *WorkspaceManager) Ensure(ctx context.Context, cfg Config, issue Issue) 
 	}
 
 	return workspace, nil
+}
+
+func ensureWorkspaceRoot(root string, level autonomy.Level) error {
+	info, statErr := os.Stat(root)
+	switch {
+	case statErr == nil && !info.IsDir():
+		return fmt.Errorf("workspace: %s exists and is not a directory", root)
+	case statErr == nil:
+		return nil
+	case errors.Is(statErr, os.ErrNotExist):
+		if err := requireWorkspaceFileWrite(level, "workspace creation"); err != nil {
+			return err
+		}
+
+		if err := os.MkdirAll(root, workspaceDirPermissions); err != nil {
+			return fmt.Errorf("workspace: create root %s: %w", root, err)
+		}
+
+		return nil
+	default:
+		return fmt.Errorf("workspace: stat root %s: %w", root, statErr)
+	}
+}
+
+func ensureWorkspaceIssueDir(path string, level autonomy.Level) (bool, error) {
+	info, statErr := os.Stat(path)
+	switch {
+	case statErr == nil && !info.IsDir():
+		return false, fmt.Errorf("workspace: %s exists and is not a directory", path)
+	case statErr == nil:
+		return false, nil
+	case errors.Is(statErr, os.ErrNotExist):
+		if err := requireWorkspaceFileWrite(level, "workspace creation"); err != nil {
+			return false, err
+		}
+
+		if err := os.Mkdir(path, workspaceDirPermissions); err != nil {
+			return false, fmt.Errorf("workspace: create %s: %w", path, err)
+		}
+
+		return true, nil
+	default:
+		return false, fmt.Errorf("workspace: stat %s: %w", path, statErr)
+	}
 }
 
 // Remove runs before_remove best-effort and deletes the issue workspace.
@@ -96,6 +131,10 @@ func (m *WorkspaceManager) Remove(ctx context.Context, cfg Config, issue Issue) 
 		return fmt.Errorf("workspace: stat %s: %w", workspace.Path, err)
 	}
 
+	if err := requireWorkspaceFileWrite(cfg.Autonomy, "workspace removal"); err != nil {
+		return err
+	}
+
 	if strings.TrimSpace(cfg.Hooks.BeforeRemove) != "" {
 		if err := RunHook(ctx, cfg, issue, workspace, "before_remove", cfg.Hooks.BeforeRemove); err != nil {
 			m.logger.Warn(
@@ -113,6 +152,14 @@ func (m *WorkspaceManager) Remove(ctx context.Context, cfg Config, issue Issue) 
 	}
 
 	return nil
+}
+
+func requireWorkspaceFileWrite(level autonomy.Level, detail string) error {
+	if autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return nil
+	}
+
+	return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, detail))
 }
 
 // SanitizeWorkspaceKey converts an issue identifier to a safe directory name.
@@ -135,6 +182,11 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 		return nil
 	}
 
+	level := autonomy.Normalize(cfg.Autonomy)
+	if err := authorizeHookAutonomy(ctx, level, hookName, script); err != nil {
+		return err
+	}
+
 	workspace.WorkspaceKey = hookWorkspaceKey(issue, workspace)
 	if workspace.WorkspaceKey == "" {
 		return fmt.Errorf("hook %s workspace key is empty for issue %q", hookName, issue.Identifier)
@@ -154,7 +206,7 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 		Args:    []string{"--noprofile", "--norc", "-lc", script},
 		Command: script,
 		Dir:     workspace.Path,
-		EnvList: hookEnv(cfg, issue, workspace, hookName),
+		EnvList: append(hookEnv(cfg, issue, workspace, hookName), "ATTELER_AUTONOMY="+level.String()),
 		Policy:  symphonyHookPolicy(),
 		Mode:    shell.ModeCaptured,
 		Stdout:  &stdout,
@@ -163,6 +215,7 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 			Caller:          "symphony.hook." + hookName,
 			IssueID:         issue.ID,
 			IssueIdentifier: issue.Identifier,
+			Autonomy:        level.String(),
 		},
 	})
 	if err != nil {
@@ -197,6 +250,31 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 	}
 
 	return nil
+}
+
+func authorizeHookAutonomy(ctx context.Context, level autonomy.Level, hookName, script string) error {
+	level = autonomy.Normalize(level)
+	if level == autonomy.Low {
+		return fmt.Errorf("hook %s blocked: autonomy low is advisory-only and blocks Symphony hooks", hookName)
+	}
+
+	decision := llm.BashToolPolicyForAutonomy(level)(ctx, llm.ToolCall{
+		Name: "bash",
+		Input: map[string]any{
+			"command": script,
+		},
+	}, llm.AgentLoopBudgetSnapshot{})
+
+	switch decision.Verdict {
+	case llm.ToolPolicyAllow:
+		return nil
+	case llm.ToolPolicyRequireConfirm:
+		return fmt.Errorf("hook %s blocked: %s requires confirmation, but Symphony hooks run non-interactively", hookName, decision.Reason)
+	case llm.ToolPolicyDeny:
+		return fmt.Errorf("hook %s blocked: %s", hookName, decision.Reason)
+	default:
+		return fmt.Errorf("hook %s blocked: policy returned %s: %s", hookName, decision.Verdict, decision.Reason)
+	}
 }
 
 func symphonyHookPolicy() *shell.Policy {

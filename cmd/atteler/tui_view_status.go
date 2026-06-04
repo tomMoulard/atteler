@@ -146,6 +146,8 @@ func (m model) statusLine() string {
 		parts = append(parts, "budget:"+budget)
 	}
 
+	parts = append(parts, "autonomy:"+m.autonomy.String())
+
 	if ctx := m.contextUsage(); ctx != "" {
 		parts = append(parts, ctx)
 	}

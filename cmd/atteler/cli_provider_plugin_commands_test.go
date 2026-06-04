@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -146,6 +147,18 @@ func TestRunLSPSymbolsRejectsInvalidOutputBeforeStartingLSP(t *testing.T) {
 	})
 
 	require.EqualError(t, err, `unsupported output format "xml" (supported: text, json)`)
+}
+
+func TestAuthorizeLSPCommandRespectsLowAutonomy(t *testing.T) {
+	t.Parallel()
+
+	err := authorizeLSPCommandWithAutonomy(t.Context(), lsp.CommandSpec{
+		Command: "bash",
+		Args:    []string{"-lc", "touch generated.txt"},
+	}, autonomy.Low)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low is advisory-only")
 }
 
 func TestFormatHookEventType(t *testing.T) {
@@ -404,6 +417,38 @@ func TestSelectModelPersistsFolderModel(t *testing.T) {
 	if got := state.ModelForFolder(dir); got != "claude-code/claude-opus-4-6" {
 		require.Failf(t, "unexpected failure", "folder model = %q", got)
 	}
+}
+
+func TestSelectModelLowAutonomyBlocksFolderPreferencePersistence(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "state.yaml")
+	store := config.NewStateStore(statePath)
+	m := model{stateStore: store, cwd: dir, autonomy: autonomy.Low}
+
+	next, cmd := m.selectModel(
+		pickerItem{provider: "claude-code", model: "claude-opus-4-6"},
+		config.ModelScopeFolder,
+	)
+
+	selected, ok := next.(model)
+	require.True(t, ok)
+	assert.Equal(t, "claude-code/claude-opus-4-6", selected.selectedModel)
+	assert.True(t, selected.modelLocked)
+
+	raw := cmd()
+	batch, ok := raw.(tea.BatchMsg)
+	require.True(t, ok)
+	require.Len(t, batch, 2)
+
+	saveRaw := batch[1]()
+	saveMsg, ok := saveRaw.(modelPreferenceSavedMsg)
+	require.True(t, ok)
+	require.Error(t, saveMsg.err)
+	assert.Contains(t, saveMsg.err.Error(), "autonomy low blocks file writes")
+	assert.Contains(t, saveMsg.err.Error(), "model preference")
+	assert.NoFileExists(t, statePath)
 }
 
 func TestSelectModelPersistsFolderReasoning(t *testing.T) {

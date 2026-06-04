@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -413,6 +414,10 @@ func validateConfig() error {
 		return fmt.Errorf("validate config: %w", err)
 	}
 
+	if _, err := autonomy.FromConfig(cfg.Autonomy); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
 	if _, err := agentLoopBudgetFromConfig(cfg); err != nil {
 		return fmt.Errorf("validate config: %w", err)
 	}
@@ -798,7 +803,7 @@ func run(ctx context.Context) error {
 
 	// Phase 1: providerless commands (no LLM registry needed).
 	store := session.NewStore(opts.sessionDir)
-	if !opts.recoverHeadless {
+	if !opts.recoverHeadless && shouldReconcileHeadlessRunsAtStartup(opts) {
 		reconcileHeadlessRunsAtStartup(store)
 	}
 
@@ -808,7 +813,7 @@ func run(ctx context.Context) error {
 
 	// Phase 2: providerless-config commands (need config/agents but no LLM).
 	if providerlessConfigRequested(opts) {
-		state, stateErr := providerlessState(store)
+		state, stateErr := providerlessState(store, opts)
 		if stateErr != nil {
 			return stateErr
 		}
@@ -839,6 +844,17 @@ func reconcileHeadlessRunsAtStartup(store *session.Store) {
 	}
 }
 
+func shouldReconcileHeadlessRunsAtStartup(opts cliOptions) bool {
+	level, err := autonomyForEarlyCommand(opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+
+		return false
+	}
+
+	return autonomy.Normalize(level).Allows(autonomy.ActionFileWrite)
+}
+
 func runParseControlCommand(opts cliOptions) (bool, error) {
 	switch {
 	case opts.parseErr != nil:
@@ -867,11 +883,25 @@ func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
 	case opts.ollamaStatus:
 		return true, printOllamaStatus(ctx)
 	case opts.ollamaStop:
+		if err := authorizeEarlyAutonomyAction(opts, autonomy.ActionMutatingShell, "--ollama-stop"); err != nil {
+			return true, err
+		}
+
 		return true, stopOllamaDaemon(ctx)
 	case opts.listWorktrees:
-		return true, listWorktrees(ctx)
+		level, err := autonomyForEarlyCommand(opts)
+		if err != nil {
+			return true, err
+		}
+
+		return true, listWorktrees(ctx, level)
 	case opts.mergeWorktreeRef != "":
-		return true, mergeWorktreeBySession(ctx, opts.mergeWorktreeRef, worktreeManualMergePolicyFromOptions(opts))
+		level, err := autonomyForEarlyCommand(opts)
+		if err != nil {
+			return true, err
+		}
+
+		return true, mergeWorktreeBySession(ctx, opts.mergeWorktreeRef, worktreeManualMergePolicyFromOptions(opts), level)
 	default:
 		return false, nil
 	}
@@ -886,14 +916,14 @@ func runInlineConfigCommand(opts cliOptions) (bool, error) {
 		fmt.Println(versionString())
 		return true, nil
 	case opts.initConfigPath != "":
-		return true, initConfig(opts.initConfigPath)
+		return true, initConfigWithAutonomy(opts)
 	case opts.listConfigPaths:
 		listConfigPaths()
 		return true, nil
 	case opts.validateConfig:
 		return true, validateConfig()
 	case opts.configMigrate:
-		return true, migrateConfigAndState()
+		return true, migrateConfigAndStateWithAutonomy(opts)
 	case opts.configReport:
 		return true, printConfigReport()
 	case opts.explainConfig:
@@ -909,7 +939,36 @@ func runInlineConfigCommand(opts cliOptions) (bool, error) {
 	}
 }
 
-func providerlessState(store *session.Store) (appState, error) {
+func initConfigWithAutonomy(opts cliOptions) error {
+	if err := authorizeEarlyAutonomyAction(opts, autonomy.ActionFileWrite, "--init-config"); err != nil {
+		return err
+	}
+
+	return initConfig(opts.initConfigPath)
+}
+
+func migrateConfigAndStateWithAutonomy(opts cliOptions) error {
+	if err := authorizeEarlyAutonomyAction(opts, autonomy.ActionFileWrite, "--config-migrate"); err != nil {
+		return err
+	}
+
+	return migrateConfigAndState()
+}
+
+func authorizeEarlyAutonomyAction(opts cliOptions, action autonomy.Action, contextLabel string) error {
+	level, err := autonomyForEarlyCommand(opts)
+	if err != nil {
+		return err
+	}
+
+	if !autonomy.Normalize(level).Allows(action) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, action, contextLabel))
+	}
+
+	return nil
+}
+
+func providerlessState(store *session.Store, opts cliOptions) (appState, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return appState{}, fmt.Errorf("locate working directory: %w", err)
@@ -918,6 +977,11 @@ func providerlessState(store *session.Store) (appState, error) {
 	cfg, loadedConfigPaths, cfgErr := appconfig.Load()
 	if cfgErr != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+cfgErr.Error())
+	}
+
+	autonomyLevel, autonomyErr := autonomyFromConfigOptions(cfg, opts)
+	if autonomyErr != nil {
+		return appState{}, autonomyErr
 	}
 
 	return appState{
@@ -930,6 +994,7 @@ func providerlessState(store *session.Store) (appState, error) {
 		pluginPolicy:       clonePluginPolicy(cfg.Plugins.Policy),
 		vectorConfig:       cfg.Vector,
 		promptContextCache: newPromptContextCache(promptContextCachePath(store)),
+		autonomy:           autonomyLevel,
 	}, nil
 }
 
@@ -950,6 +1015,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 	executionOptions.SkillLearningSkillDir = state.skillLearningSkillDir
 	executionOptions.SkillLearningEnabled = state.skillLearningEnabled
 	executionOptions.VectorConfig = state.vectorConfig
+	executionOptions.Autonomy = state.autonomy
 
 	if opts.headless && opts.oncePrompt == "" && !opts.readStdin {
 		err := errors.New("headless mode requires --once, positional prompt text, or --stdin")
@@ -1023,6 +1089,11 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 }
 
 func runOnceExecutionOptionsFromOptions(opts cliOptions) runOnceExecutionOptions {
+	autonomyLevel := autonomy.Level("")
+	if opts.autonomy.set {
+		autonomyLevel = opts.autonomy.value
+	}
+
 	return runOnceExecutionOptions{
 		Response: responseRecordOptions{
 			RecordPath: opts.recordResponsePath,
@@ -1032,7 +1103,30 @@ func runOnceExecutionOptionsFromOptions(opts cliOptions) runOnceExecutionOptions
 		Headless:           opts.headless,
 		HeadlessID:         opts.headlessID,
 		HeadlessPrivateLog: opts.headlessPrivateLog,
+		Autonomy:           autonomyLevel,
 	}
+}
+
+func autonomyFromConfigOptions(cfg appconfig.Config, opts cliOptions) (autonomy.Level, error) {
+	if opts.autonomy.set {
+		return opts.autonomy.value, nil
+	}
+
+	level, err := autonomy.FromConfig(cfg.Autonomy)
+	if err != nil {
+		return "", fmt.Errorf("resolve autonomy: %w", err)
+	}
+
+	return level, nil
+}
+
+func autonomyForEarlyCommand(opts cliOptions) (autonomy.Level, error) {
+	cfg, _, err := appconfig.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+	}
+
+	return autonomyFromConfigOptions(cfg, opts)
 }
 
 func recordHeadlessLoadStateFailure(store *session.Store, opts cliOptions, failure error) {
@@ -1040,12 +1134,23 @@ func recordHeadlessLoadStateFailure(store *session.Store, opts cliOptions, failu
 		return
 	}
 
+	autonomyLevel, err := autonomyForEarlyCommand(opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+
+		return
+	}
+
 	sessionState := session.New(opts.model, nil)
 	sessionState.DefaultAgent = opts.agentName
+	sessionState.Autonomy = autonomyLevel.String()
+
+	executionOptions := runOnceExecutionOptionsFromOptions(opts)
+	executionOptions.Autonomy = autonomyLevel
 
 	recordHeadlessPreflightFailure(
 		store,
-		runOnceExecutionOptionsFromOptions(opts),
+		executionOptions,
 		sessionState,
 		opts.oncePrompt,
 		opts.model,
@@ -1077,6 +1182,13 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		}, nil
 	}
 
+	warnInvalidHookConfig(cfg.Hooks)
+
+	autonomyLevel, err := autonomyFromConfigOptions(cfg, opts)
+	if err != nil {
+		return appState{}, err
+	}
+
 	// Default to a stderr logger so events from utility commands (--bash,
 	// --mcp, one-shot, etc.) are visible without extra configuration. Headless
 	// runs stay quiet so JSON output isn't polluted; runInteractive replaces
@@ -1090,13 +1202,14 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	skillLearningOpts, configuredSkillLearningEnabled := skillLearningOptionsFromConfig(cfg, opts, os.Getenv)
 	skillLearningEnabled := skillLearningEffectiveEnabled(skillLearningOpts, configuredSkillLearningEnabled)
+	skillLearningEnabled = skillLearningEnabledForAutonomy(skillLearningEnabled, autonomyLevel)
 	eventObservers := skillLearningObserversFromOptions(ctx, skillLearningOpts, skillLearningEnabled)
 	hookRunner := events.NewRunnerWithOptions(cfg.Hooks, events.RunnerOptions{
 		DeliveryContext: events.DetachContext(ctx),
 		LogWriter:       hookLogWriter,
 		Ledger:          hookLedger,
 		Observers:       eventObservers,
-	})
+	}).WithAutonomy(autonomyLevel)
 
 	ledgerTransferred := false
 	defer closeHookRunnerUnlessTransferred(ctx, hookRunner, &ledgerTransferred)
@@ -1105,8 +1218,6 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	if stateErr != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+stateErr.Error())
 	}
-
-	warnInvalidHookConfig(cfg.Hooks)
 
 	selection, err := resolveSelection(opts, cfg, persistedState.ModelForFolder(cwd), agentRegistry, store)
 	if err != nil {
@@ -1120,6 +1231,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		selection.selectedModel,
 		selection.fallbackModels,
 		selection.sessionState.ID,
+		autonomyLevel,
 	)
 	contextOptions := contextOptionsFromConfig(cfg)
 	contextOptions = contextOptionsForRequestModels(contextOptions, reg, selection.selectedModel, selection.fallbackModels)
@@ -1145,7 +1257,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		fmt.Fprintln(os.Stderr, "warning: no LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY")
 	}
 
-	wtInfo, err := setupWorktreeIfRequested(ctx, opts, cwd, &selection, worktreePolicy)
+	wtInfo, err := setupWorktreeIfRequested(ctx, opts, cwd, &selection, worktreePolicy, autonomyLevel)
 	if err != nil {
 		return appState{}, err
 	}
@@ -1156,6 +1268,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	referenceContext := loadConfiguredReferenceContext(ctx, cfg.Context.References, contextOptions)
 	selection.sessionState.AgentLoopBudget = agentLoopBudget
+	selection.sessionState.Autonomy = autonomyLevel.String()
 	suggestionConsent := promptSuggestionConsentFromPreferences(
 		opts.promptLocalOnly,
 		selection.sessionState.PromptSuggestions,
@@ -1196,6 +1309,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		generationOverrides:          generationOverrides,
 		agentLoopBudget:              agentLoopBudget,
 		agentLoopCheckpointInterval:  agentLoopCheckpointInterval,
+		autonomy:                     autonomyLevel,
 		maxInputTokens:               maxInputTokens,
 		hookConfig:                   cfg.Hooks,
 		vectorConfig:                 cfg.Vector,
@@ -1344,9 +1458,14 @@ func setupWorktreeIfRequested(
 	cwd string,
 	selection *selectionState,
 	policy cliWorktreeMergePolicy,
+	autonomyLevel autonomy.Level,
 ) (*worktree.Info, error) {
 	if !opts.useWorktree || cwd == "" {
 		return nil, nil
+	}
+
+	if !autonomy.Normalize(autonomyLevel).Allows(autonomy.ActionBranch) {
+		return nil, fmt.Errorf("%s", autonomy.DenialMessage(autonomyLevel, autonomy.ActionBranch, "--worktree"))
 	}
 
 	if err := validateWorktreeAutoMergePolicy(policy); err != nil {
@@ -1366,7 +1485,11 @@ func setupWorktreeIfRequested(
 		return wtInfo, nil
 	}
 
-	wtInfo, err := worktree.CreateContext(ctx, cwd, selection.sessionState.ID)
+	wtInfo, err := worktree.CreateContext(
+		worktree.WithAuditContext(ctx, worktreeShellAuditContext(selection.sessionState, autonomyLevel)),
+		cwd,
+		selection.sessionState.ID,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("worktree setup: %w", err)
 	}
@@ -1386,6 +1509,7 @@ func autoRegisterForOptions(
 	selectedModel string,
 	fallbackModels []string,
 	sessionID string,
+	autonomyLevel autonomy.Level,
 ) (*llm.Registry, llm.ProviderReadinessReport) {
 	regCfg := llmConfig(
 		cfg,
@@ -1395,7 +1519,7 @@ func autoRegisterForOptions(
 		os.Args,
 	)
 
-	if providerInspectionUtilityRequested(opts) {
+	if shouldDisableProviderAutoStart(opts, autonomyLevel) {
 		regCfg.DisableAutoStart = true
 	}
 
@@ -1404,6 +1528,11 @@ func autoRegisterForOptions(
 	}
 
 	return llm.AutoRegisterWithConfigContextReport(ctx, regCfg)
+}
+
+func shouldDisableProviderAutoStart(opts cliOptions, level autonomy.Level) bool {
+	return providerInspectionUtilityRequested(opts) ||
+		!autonomy.Normalize(level).Allows(autonomy.ActionMutatingShell)
 }
 
 func providerRegistrationSelectedModel(opts cliOptions, selectedModel string) string {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
 )
@@ -26,6 +27,14 @@ func agentLoopCheckpointPath(sessionPath string) string {
 	}
 
 	return strings.TrimSuffix(sessionPath, ext) + ".agentloop.jsonl"
+}
+
+func agentLoopCheckpointPathForAutonomy(sessionPath string, level autonomy.Level) string {
+	if !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return ""
+	}
+
+	return agentLoopCheckpointPath(sessionPath)
 }
 
 func agentLoopCheckpointSink(path string) llm.AgentLoopCheckpointSink {
@@ -218,6 +227,25 @@ func agentLoopBudgetModelSettingsEventMetadata(budget llm.AgentLoopBudget, reaso
 	if modelMode = strings.TrimSpace(modelMode); modelMode != "" {
 		metadata["model_mode"] = modelMode
 	}
+
+	return metadata
+}
+
+func sessionRunEventMetadata(budget llm.AgentLoopBudget, level autonomy.Level, modelSettings ...string) map[string]string {
+	reasoningLevel := ""
+	modelMode := ""
+	if len(modelSettings) > 0 {
+		reasoningLevel = modelSettings[0]
+	}
+	if len(modelSettings) > 1 {
+		modelMode = modelSettings[1]
+	}
+
+	metadata := agentLoopBudgetModelSettingsEventMetadata(budget, reasoningLevel, modelMode)
+	if metadata == nil {
+		metadata = make(map[string]string, 1)
+	}
+	metadata["autonomy"] = autonomy.Normalize(level).String()
 
 	return metadata
 }

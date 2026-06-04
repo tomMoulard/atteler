@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
@@ -44,16 +45,18 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 			Model:       m.sessionState.DefaultModel,
 			Content:     command,
 			Metadata: map[string]string{
-				"command": command,
-				"cwd":     m.cwd,
-				"input":   "!" + command,
-				"source":  "user",
+				"command":  command,
+				"cwd":      m.cwd,
+				"input":    "!" + command,
+				"source":   "user",
+				"autonomy": m.autonomy.String(),
 			},
 		}),
-		runShellCommandCmd(ctx, command, m.cwd, outputCh, attshell.AuditContext{
+		runShellCommandCmdWithAutonomy(ctx, command, m.cwd, outputCh, m.autonomy, attshell.AuditContext{
 			Caller:      "atteler.tui.shell",
 			SessionID:   m.sessionState.ID,
 			SessionPath: m.sessionPath,
+			Autonomy:    m.autonomy.String(),
 		}),
 	), tickCmd, listenForShellOutput(outputCh))
 }
@@ -62,6 +65,20 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 // tea.ExecProcess so interactive programs (vim, less, htop, nested atteler)
 // can use the PTY directly.
 func (m model) runInteractiveShellCommand(command, line string) (model, tea.Cmd) {
+	if err := authorizeBashCommandWithAutonomy(m.ctx, m.autonomy, command, "interactive shell"); err != nil {
+		return m, tea.Sequence(
+			tea.Println(line),
+			func() tea.Msg {
+				return shellResultMsg{
+					err:         err,
+					completedAt: time.Now(),
+					command:     command,
+					stderr:      err.Error(),
+				}
+			},
+		)
+	}
+
 	cmd, invocation, err := attshell.CommandContext(m.ctx, attshell.CommandOptions{
 		Program: "bash",
 		Args:    []string{"--noprofile", "--norc", "-lc", command},
@@ -72,6 +89,7 @@ func (m model) runInteractiveShellCommand(command, line string) (model, tea.Cmd)
 			Caller:      "atteler.tui.interactive_shell",
 			SessionID:   m.sessionState.ID,
 			SessionPath: m.sessionPath,
+			Autonomy:    m.autonomy.String(),
 		},
 	})
 	if err != nil {
@@ -98,11 +116,12 @@ func (m model) runInteractiveShellCommand(command, line string) (model, tea.Cmd)
 			Model:       m.sessionState.DefaultModel,
 			Content:     command,
 			Metadata: map[string]string{
-				"command": command,
-				"cwd":     m.cwd,
-				"input":   "!" + command,
-				"mode":    "interactive",
-				"source":  "user",
+				"command":  command,
+				"cwd":      m.cwd,
+				"input":    "!" + command,
+				"mode":     "interactive",
+				"source":   "user",
+				"autonomy": m.autonomy.String(),
 			},
 		}),
 		tea.ExecProcess(cmd, func(err error) tea.Msg {
@@ -226,9 +245,35 @@ func listenForShellOutput(outputCh <-chan tea.Msg) tea.Cmd {
 }
 
 func runShellCommandCmd(ctx context.Context, command, dir string, outputCh chan<- tea.Msg, audit attshell.AuditContext) tea.Cmd {
+	return runShellCommandCmdWithAutonomy(ctx, command, dir, outputCh, autonomy.DefaultLevel, audit)
+}
+
+func runShellCommandCmdWithAutonomy(ctx context.Context, command, dir string, outputCh chan<- tea.Msg, level autonomy.Level, audit attshell.AuditContext) tea.Cmd {
+	level = autonomy.Normalize(level)
+	if strings.TrimSpace(audit.Autonomy) == "" {
+		audit.Autonomy = level.String()
+	}
+
 	return func() tea.Msg {
 		if outputCh != nil {
 			defer close(outputCh)
+		}
+
+		if err := authorizeBashCommandWithAutonomy(ctx, level, command, "TUI shell"); err != nil {
+			msg := shellResultMsg{
+				err:         err,
+				completedAt: time.Now(),
+				command:     command,
+				stderr:      err.Error(),
+				streamed:    outputCh != nil,
+			}
+			if outputCh != nil {
+				outputCh <- msg
+
+				return nil
+			}
+
+			return msg
 		}
 
 		result, err := attshell.RunBash(ctx, attshell.Options{
@@ -275,6 +320,7 @@ func (m model) updateShellOutput(msg shellOutputMsg) (tea.Model, tea.Cmd) {
 		"sequence": strconv.FormatInt(msg.sequence, 10),
 		"source":   "user",
 		"stream":   msg.stream,
+		"autonomy": m.autonomy.String(),
 	}
 
 	cmds := []tea.Cmd{
@@ -319,7 +365,7 @@ func (m model) updateShellResult(msg shellResultMsg) (tea.Model, tea.Cmd) {
 		msg.command,
 		content,
 		msg.err,
-		map[string]string{"source": "user"},
+		map[string]string{"source": "user", "autonomy": m.autonomy.String()},
 	)
 	m.history = append(m.history, llm.Message{
 		Role:    llm.RoleUser,

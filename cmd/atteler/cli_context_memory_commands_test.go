@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agentmemory"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -1608,6 +1609,40 @@ func newAgentMemoryEmbeddingTestServer() *httptest.Server {
 	}))
 }
 
+func TestRunAgentMemoryCommandLowAutonomyBlocksIndexWrites(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	note := filepath.Join(dir, "note.txt")
+	require.NoError(t, os.WriteFile(note, []byte("OAuth callback retry memory"), 0o600))
+
+	storePath := filepath.Join(dir, "agent-memory.json")
+	err := runAgentMemoryCommandWithAutonomy(
+		context.Background(),
+		dir,
+		testReviewerName,
+		appconfig.VectorConfig{},
+		agentMemoryCommandInputFromOptions(cliOptions{
+			agentMemoryStorePath:  storePath,
+			agentMemoryIndexFiles: stringListFlag{note},
+		}),
+		autonomy.Low,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
+	assert.Contains(t, err.Error(), "--agent-memory-index")
+	assert.NoFileExists(t, storePath)
+}
+
+func TestLSPCommandAuditContextIncludesAutonomy(t *testing.T) {
+	t.Parallel()
+
+	got := lspCommandAuditContext(autonomy.Full)
+	assert.Equal(t, "atteler.lsp", got.Caller)
+	assert.Equal(t, "full", got.Autonomy)
+}
+
 func TestFormatAgentMemoryResult(t *testing.T) {
 	t.Parallel()
 
@@ -3042,6 +3077,25 @@ func TestRunMemoryCommandIndexWithoutSearchRequiresStoreBeforeSessionLoad(t *tes
 		assert.NotContains(t, err.Error(), "malformed")
 		assert.NotContains(t, err.Error(), "parse")
 	}
+}
+
+func TestRunMemoryCommandLowAutonomyBlocksStoreWrites(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	notePath := filepath.Join(dir, "note.txt")
+	require.NoError(t, os.WriteFile(notePath, []byte("OAuth callback notes\n"), 0o600))
+
+	storePath := filepath.Join(dir, "memory.json")
+	err := runMemoryCommandWithAutonomy(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		memoryStorePath:  storePath,
+		memoryIndexFiles: stringListFlag{notePath},
+	}, autonomy.Low)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
+	assert.Contains(t, err.Error(), "--memory-index")
+	assert.NoFileExists(t, storePath)
 }
 
 //nolint:paralleltest // Exercises store maintenance command flow.

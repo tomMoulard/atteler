@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
@@ -29,6 +30,31 @@ func TestCopyToClipboard_RequiresActiveContext(t *testing.T) {
 	err = copyToClipboard(ctx, "text")
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSlashCommandAuditContextIncludesAutonomy(t *testing.T) {
+	t.Parallel()
+
+	got := slashCommandAuditContext(model{
+		sessionState: session.Session{ID: "session-id"},
+		sessionPath:  "/tmp/session.json",
+		autonomy:     autonomy.High,
+	}, "atteler.clipboard")
+
+	assert.Equal(t, "atteler.clipboard", got.Caller)
+	assert.Equal(t, "session-id", got.SessionID)
+	assert.Equal(t, "/tmp/session.json", got.SessionPath)
+	assert.Equal(t, "high", got.Autonomy)
+}
+
+func TestCopyToClipboardBlocksLowAutonomyBeforeShellExecution(t *testing.T) {
+	t.Parallel()
+
+	err := copyToClipboardWithAudit(context.Background(), "text", slashCommandAuditContext(model{autonomy: autonomy.Low}, "atteler.clipboard"))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low is advisory-only")
+	assert.Contains(t, err.Error(), "--autonomy medium")
 }
 
 func TestSlashHelp_Golden(t *testing.T) {
@@ -1073,6 +1099,215 @@ func TestSaveCodeSlashCommand_WritesSelectedCodeBlock(t *testing.T) {
 	assert.Equal(t, "two", string(data))
 }
 
+func TestExportSlashCommand_BlocksLowAutonomyFilesystemWrite(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "session.md")
+	m := model{
+		autonomy:     autonomy.Low,
+		sessionState: session.New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "hello"}}),
+	}
+
+	next, cmd, handled := runExportSlashCommand(m, slashOptionalValueInput{Value: path})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, autonomy.Low, next.autonomy)
+	assert.Contains(t, stripANSI(toStringMsg(cmd())), "autonomy low blocks file writes")
+
+	_, err := os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestSaveCodeSlashCommand_BlocksLowAutonomy(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "out.go")
+	m := model{
+		autonomy: autonomy.Low,
+		history: []llm.Message{
+			{Role: llm.RoleAssistant, Content: "```go\nfmt.Println(\"one\")\n```"},
+		},
+	}
+
+	next, cmd, handled := runSaveCodeSlashCommand(m, slashSaveCodeInput{Block: 1, Path: path})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, autonomy.Low, next.autonomy)
+
+	_, err := os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestCopySlashCommands_BlockLowAutonomyClipboardWrites(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		autonomy: autonomy.Low,
+		history: []llm.Message{
+			{Role: llm.RoleAssistant, Content: "answer\n```go\nfmt.Println(\"one\")\n```"},
+		},
+	}
+
+	next, cmd, handled := runCopySlashCommand(m, slashCopyInput{Target: "last"})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, autonomy.Low, next.autonomy)
+	assert.Contains(t, stripANSI(toStringMsg(cmd())), "autonomy low blocks mutating shell commands")
+
+	next, cmd, handled = runCopyCodeSlashCommand(m, slashCopyCodeInput{Block: 1})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, autonomy.Low, next.autonomy)
+	assert.Contains(t, stripANSI(toStringMsg(cmd())), "autonomy low blocks mutating shell commands")
+}
+
+func TestMutatingSlashCommands_BlockLowAutonomySessionWrites(t *testing.T) {
+	t.Parallel()
+
+	baseMessages := []llm.Message{
+		{Role: llm.RoleUser, Content: "hello"},
+		{Role: llm.RoleAssistant, Content: "plan"},
+	}
+
+	tests := []struct {
+		run    func(model) (model, tea.Cmd, bool)
+		check  func(*testing.T, model)
+		name   string
+		detail string
+	}{
+		{
+			name:   "clear",
+			detail: "/clear",
+			run: func(m model) (model, tea.Cmd, bool) {
+				return runClearSlashCommand(m, slashNoArgsInput{})
+			},
+			check: func(t *testing.T, next model) {
+				t.Helper()
+				assert.Len(t, next.history, 2)
+				assert.Len(t, next.sessionState.Messages, 2)
+			},
+		},
+		{
+			name:   "model",
+			detail: "/model",
+			run: func(m model) (model, tea.Cmd, bool) {
+				return runModelSlashCommand(m, slashOptionalValueInput{Value: "new-model"})
+			},
+			check: func(t *testing.T, next model) {
+				t.Helper()
+				assert.Equal(t, "old-model", next.selectedModel)
+				assert.False(t, next.modelLocked)
+				assert.Equal(t, "old-model", next.sessionState.DefaultModel)
+			},
+		},
+		{
+			name:   "profile",
+			detail: "/profile",
+			run: func(m model) (model, tea.Cmd, bool) {
+				return runProfileSlashCommand(m, slashOptionalValueInput{Value: "new-agent"})
+			},
+			check: func(t *testing.T, next model) {
+				t.Helper()
+				assert.Equal(t, "old-agent", next.selectedAgent)
+				assert.Equal(t, "old-agent", next.sessionState.DefaultAgent)
+			},
+		},
+		{
+			name:   "save",
+			detail: "/save",
+			run: func(m model) (model, tea.Cmd, bool) {
+				return runSaveSlashCommand(m, slashNoArgsInput{})
+			},
+		},
+		{
+			name:   "pin",
+			detail: "/pin",
+			run: func(m model) (model, tea.Cmd, bool) {
+				return runPinSlashCommand(m, slashMessageNumberInput{Number: 2})
+			},
+			check: func(t *testing.T, next model) {
+				t.Helper()
+				assert.False(t, next.pinnedMessages[1])
+			},
+		},
+		{
+			name:   "context prune",
+			detail: "/context prune",
+			run: func(m model) (model, tea.Cmd, bool) {
+				return runContextSlashCommand(m, slashContextInput{Prune: true})
+			},
+			check: func(t *testing.T, next model) {
+				t.Helper()
+				assert.Len(t, next.history, 2)
+				assert.Len(t, next.sessionState.Messages, 2)
+			},
+		},
+		{
+			name:   "suggestions",
+			detail: "/suggestions",
+			run: func(m model) (model, tea.Cmd, bool) {
+				return runSuggestionsSlashCommand(m, slashSuggestionsInput{Mode: string(promptSuggestionConsentSession)})
+			},
+			check: func(t *testing.T, next model) {
+				t.Helper()
+				assert.Empty(t, next.promptSuggestionConsent)
+				assert.Empty(t, next.sessionState.PromptSuggestions)
+			},
+		},
+		{
+			name:   "retry",
+			detail: "/retry",
+			run: func(m model) (model, tea.Cmd, bool) {
+				return runRetrySlashCommand(m, slashNoArgsInput{})
+			},
+		},
+		{
+			name:   "edit",
+			detail: "/edit",
+			run: func(m model) (model, tea.Cmd, bool) {
+				return runEditSlashCommand(m, slashNoArgsInput{})
+			},
+		},
+		{
+			name:   "fork",
+			detail: "/fork",
+			run: func(m model) (model, tea.Cmd, bool) {
+				return runForkSlashCommand(m, slashForkInput{})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			sessionState := session.New("old-model", append([]llm.Message(nil), baseMessages...))
+			sessionState.DefaultAgent = "old-agent"
+			m := model{
+				autonomy:       autonomy.Low,
+				history:        append([]llm.Message(nil), baseMessages...),
+				modelLocked:    false,
+				pinnedMessages: map[int]bool{0: true},
+				selectedAgent:  "old-agent",
+				selectedModel:  "old-model",
+				sessionState:   sessionState,
+			}
+
+			next, cmd, handled := tt.run(m)
+			require.True(t, handled)
+			require.NotNil(t, cmd)
+
+			output := stripANSI(toStringMsg(cmd()))
+			assert.Contains(t, output, "autonomy low blocks file writes")
+			assert.Contains(t, output, tt.detail)
+
+			if tt.check != nil {
+				tt.check(t, next)
+			}
+		})
+	}
+}
+
 func TestCountEvalCases_CountsOnlyTopLevelJSONFiles(t *testing.T) {
 	t.Parallel()
 
@@ -1111,6 +1346,28 @@ func TestEvalSlashCommand_AddWritesCaseAndRunCountsCases(t *testing.T) {
 	count, err := countEvalCases(filepath.Dir(path))
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
+}
+
+func TestEvalSlashCommand_BlocksLowAutonomyAdd(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sessionState := session.New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
+	m := model{
+		autonomy:     autonomy.Low,
+		cwd:          dir,
+		sessionState: sessionState,
+	}
+
+	next, cmd, handled := runEvalSlashCommand(m, slashEvalInput{Action: "add"})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.Equal(t, autonomy.Low, next.autonomy)
+	assert.Contains(t, stripANSI(toStringMsg(cmd())), "autonomy low blocks file writes")
+
+	path := filepath.Join(dir, ".atteler", "evals", sessionState.ID+".json")
+	_, err := os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestEvalSlashCommand_RunCountsCasesWithoutShellTask(t *testing.T) {

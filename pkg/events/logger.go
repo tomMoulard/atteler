@@ -91,6 +91,16 @@ func FormatLine(event Event) string {
 	return formatLine(sanitizeEventForLog(event))
 }
 
+// FormatLine formats an event as this runner would emit it, including default
+// autonomy metadata supplied by WithAutonomy.
+func (r *Runner) FormatLine(event Event) string {
+	if r != nil {
+		event = r.applyDefaultAutonomy(event)
+	}
+
+	return FormatLine(event)
+}
+
 func formatLine(event Event) string {
 	parts := []string{"event:" + event.Type}
 	if event.Agent != "" {
@@ -168,6 +178,8 @@ func (r *Runner) emitBestEffort(ctx context.Context, event Event) error {
 	if r == nil || event.Type == "" {
 		return nil
 	}
+
+	event = r.applyDefaultAutonomy(event)
 
 	if err := ctx.Err(); err != nil {
 		event = normalizeEventFields(event)

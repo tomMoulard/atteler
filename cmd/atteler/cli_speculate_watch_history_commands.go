@@ -9,13 +9,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/githistory"
@@ -56,6 +56,8 @@ func runSpeculatePlan(input speculatePlanCommandInput) error {
 
 // registryCompleter adapts the llm.Registry to the speculate.LLMCompleter
 // interface so the speculative execution pipeline can make real LLM calls.
+//
+//nolint:govet // Field order groups LLM routing, generation, and autonomy settings for readability.
 type registryCompleter struct {
 	registry       *llm.Registry
 	agents         *agent.Registry
@@ -65,6 +67,7 @@ type registryCompleter struct {
 	fallbackModels []string
 	generationBase generationSettings
 	generationOver generationSettings
+	autonomy       autonomy.Level
 	maxInputTokens int
 	modelLocked    bool
 }
@@ -89,17 +92,32 @@ func (rc *registryCompleter) Complete(ctx context.Context, branch, systemPrompt,
 		{Role: llm.RoleUser, Content: userPrompt},
 	}
 
-	requestModel, fallbackModels, _, err := requestModelAndFallbacks(
+	requestModel := selectedModel
+	fallbackModels := append([]string(nil), rc.fallbackModels...)
+	if activeAgent.ok && !rc.modelLocked {
+		requestModel, fallbackModels = effectiveAgentModelSelection(selectedModel, rc.fallbackModels, activeAgent)
+	}
+
+	budgetMessages := requestMessagesForBudget(requestModel, messages, activeAgent, generation, "", false)
+
+	requestModel, fallbackModels, routeDecision, err := requestModelRoutingAndFallbacks(
+		ctx,
+		rc.registry,
 		selectedModel,
 		rc.modelLocked,
 		rc.fallbackModels,
 		activeAgent,
-		routeProfileForMessages(requestMessagesForBudget(selectedModel, messages, activeAgent, generation, "", false), generation),
+		requestModel,
+		fallbackModels,
+		routeCompleteParamsForRequest(requestModel, budgetMessages, generation, activeAgent, false),
+		routeProfileForMessages(budgetMessages, generation),
 		routeTelemetryFromRegistry(rc.registry),
 		routeAvailabilityFromRegistryWithRefresh(ctx, rc.registry, effectiveRouteCandidateChain(selectedModel, rc.fallbackModels, activeAgent, rc.modelLocked)),
 	)
 	if err != nil {
-		return "", err
+		emitRouteDecisionWarning(ctx, rc.hookRunner, "", "", branch, requestModel, routeDecision)
+
+		return "", fmt.Errorf("speculate LLM route: %w", err)
 	}
 
 	params := llm.CompleteParams{
@@ -111,25 +129,7 @@ func (rc *registryCompleter) Complete(ctx context.Context, branch, systemPrompt,
 	}
 
 	applyGenerationParams(&params, generation)
-
-	fallbackModels = append([]string(nil), fallbackModels...)
-
-	requestModel, fallbackModels, routeDecision, routed, err := requestModelRoleAndFallbacks(
-		ctx,
-		rc.registry,
-		params.Model,
-		fallbackModels,
-		params,
-	)
-	if err != nil {
-		emitRouteDecisionWarning(ctx, rc.hookRunner, "", "", branch, requestModel, routeDecision)
-
-		return "", fmt.Errorf("speculate LLM route: %w", err)
-	}
-
-	if routed {
-		params.Model = requestModel
-	}
+	prependAutonomyInstructions(&params, rc.autonomy)
 
 	manifestEvent := requestContextManifestEvent(newRequestContextManifestForModels(
 		rc.registry,
@@ -235,6 +235,7 @@ func runSpeculateExecution(ctx context.Context, state appState, input speculateR
 		fallbackModels: state.fallbackModels,
 		generationBase: state.generationDefaults,
 		generationOver: state.generationOverrides,
+		autonomy:       state.autonomy,
 		maxInputTokens: state.maxInputTokens,
 		modelLocked:    state.modelLocked,
 	}
@@ -425,6 +426,7 @@ type watchCLIOptions struct {
 	IssueRepository  string
 	GitHubEndpoint   string
 	GitHubToken      string
+	Autonomy         autonomy.Level
 	IssueLabels      []string
 	LargeFileBytes   int
 	JSONOutput       bool
@@ -448,7 +450,12 @@ type watchBaselineInfo struct {
 	Findings int    `json:"findings"`
 }
 
-func watchCLIOptionsFrom(options cliOptions) watchCLIOptions {
+func watchCLIOptionsFrom(options cliOptions, levels ...autonomy.Level) watchCLIOptions {
+	level := autonomy.DefaultLevel
+	if len(levels) > 0 {
+		level = autonomy.Normalize(levels[0])
+	}
+
 	return watchCLIOptions{
 		BaselinePath:     options.watchBaselinePath,
 		BaselineRef:      options.watchBaselineRef,
@@ -460,6 +467,7 @@ func watchCLIOptionsFrom(options cliOptions) watchCLIOptions {
 		GitHubEndpoint:   options.watchGitHubEndpoint,
 		GitHubToken:      options.watchGitHubToken,
 		IssueLabels:      []string(options.watchIssueLabels),
+		Autonomy:         level,
 		LargeFileBytes:   options.watchLargeFileBytes.value,
 		JSONOutput:       options.watchJSON,
 		GateEnabled:      options.watchGate,
@@ -634,7 +642,11 @@ func watchQualityInputs(ctx context.Context, root string, options watchCLIOption
 	}
 
 	if options.BaselineRef != "" {
-		loaded, commit, err := readWatchBaselineRef(ctx, root, scanOptions, options.BaselineRef)
+		if !autonomy.Normalize(options.Autonomy).Allows(autonomy.ActionFileWrite) {
+			return watch.Options{}, nil, nil, watch.GateOptions{}, fmt.Errorf("%s", autonomy.DenialMessage(options.Autonomy, autonomy.ActionFileWrite, "--watch-baseline-ref"))
+		}
+
+		loaded, commit, err := readWatchBaselineRef(ctx, root, scanOptions, options.BaselineRef, options.Autonomy)
 		if err != nil {
 			return watch.Options{}, nil, nil, watch.GateOptions{}, err
 		}
@@ -692,6 +704,10 @@ func watchIssueInputs(options watchCLIOptions, tracker watch.IssueTracker) (watc
 
 	if !options.IssueUpsert {
 		return nil, issueOptions, nil
+	}
+
+	if !autonomy.Normalize(options.Autonomy).Allows(autonomy.ActionRemoteMutation) {
+		return nil, watch.IssueOptions{}, fmt.Errorf("%s", autonomy.DenialMessage(options.Autonomy, autonomy.ActionRemoteMutation, "--watch-issue-upsert"))
 	}
 
 	if tracker != nil {
@@ -779,13 +795,13 @@ func readWatchBaseline(path string) (watch.Baseline, error) {
 	return baseline, nil
 }
 
-func readWatchBaselineRef(ctx context.Context, root string, scanOptions watch.Options, ref string) (watch.Baseline, string, error) {
+func readWatchBaselineRef(ctx context.Context, root string, scanOptions watch.Options, ref string, level autonomy.Level) (watch.Baseline, string, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return watch.Baseline{}, "", errors.New("watch baseline ref is required")
 	}
 
-	mergeBase, err := gitMergeBase(ctx, root, ref)
+	mergeBase, err := gitMergeBase(ctx, root, ref, level)
 	if err != nil {
 		return watch.Baseline{}, "", err
 	}
@@ -796,7 +812,7 @@ func readWatchBaselineRef(ctx context.Context, root string, scanOptions watch.Op
 	}
 	defer os.RemoveAll(tmp)
 
-	if archiveErr := gitArchiveToDir(ctx, root, mergeBase, tmp); archiveErr != nil {
+	if archiveErr := gitArchiveToDir(ctx, root, mergeBase, tmp, level); archiveErr != nil {
 		return watch.Baseline{}, "", archiveErr
 	}
 
@@ -808,8 +824,8 @@ func readWatchBaselineRef(ctx context.Context, root string, scanOptions watch.Op
 	return watch.Baseline{Findings: findings}, mergeBase, nil
 }
 
-func gitMergeBase(ctx context.Context, root, ref string) (string, error) {
-	output, err := runGitOutput(ctx, root, "merge-base", "HEAD", ref)
+func gitMergeBase(ctx context.Context, root, ref string, level autonomy.Level) (string, error) {
+	output, err := runGitOutput(ctx, root, level, "merge-base", "HEAD", ref)
 	if err != nil {
 		return "", fmt.Errorf("watch baseline ref %s: find merge-base: %w", ref, err)
 	}
@@ -822,8 +838,8 @@ func gitMergeBase(ctx context.Context, root, ref string) (string, error) {
 	return mergeBase, nil
 }
 
-func gitArchiveToDir(ctx context.Context, root, ref, dir string) error {
-	data, err := runGitOutput(ctx, root, "archive", "--format=tar", ref)
+func gitArchiveToDir(ctx context.Context, root, ref, dir string, level autonomy.Level) error {
+	data, err := runGitOutput(ctx, root, level, "archive", "--format=tar", ref)
 	if err != nil {
 		return fmt.Errorf("watch baseline ref %s: archive: %w", ref, err)
 	}
@@ -900,16 +916,42 @@ func safeArchivePath(dir, name string) (string, error) {
 	return target, nil
 }
 
-func runGitOutput(ctx context.Context, root string, args ...string) ([]byte, error) {
+func runGitOutput(ctx context.Context, root string, level autonomy.Level, args ...string) ([]byte, error) {
 	fullArgs := append([]string{"-C", root}, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
 
-	output, err := cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+		Program: "git",
+		Args:    fullArgs,
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Mode:    shell.ModeCaptured,
+		Audit:   watchGitAuditContext(level),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		return nil, fmt.Errorf("git %s authorize: %w", strings.Join(args, " "), err)
 	}
 
-	return output, nil
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Stderr: stderr.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+		return nil, fmt.Errorf("git %s audit: %w", strings.Join(args, " "), finishErr)
+	}
+
+	if runErr != nil {
+		output := strings.TrimSpace(stdout.String() + stderr.String())
+
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), runErr, output)
+	}
+
+	return stdout.Bytes(), nil
+}
+
+func watchGitAuditContext(level autonomy.Level) shell.AuditContext {
+	return shell.AuditContext{
+		Caller:   "atteler.watch.git",
+		Autonomy: autonomy.Normalize(level).String(),
+	}
 }
 
 type watchRulesConfig struct {
@@ -1223,12 +1265,17 @@ func formatWatchFinding(finding watch.Finding) string {
 	return strings.Join(parts, "\t")
 }
 
-func runGitHistorySearch(ctx context.Context, root, query string, limit int) error {
+func runGitHistorySearch(ctx context.Context, root, query string, limit int, level autonomy.Level) error {
+	level = autonomy.Normalize(level)
+	if level == autonomy.Low {
+		return errors.New("git history: autonomy low is advisory-only and blocks git history shell execution; rerun with --autonomy medium or higher")
+	}
+
 	if limit == 0 {
 		limit = 5
 	}
 
-	logText, err := gitHistoryLog(ctx, root)
+	logText, err := gitHistoryLog(ctx, root, level)
 	if err != nil {
 		return err
 	}
@@ -1251,9 +1298,9 @@ func runGitHistorySearch(ctx context.Context, root, query string, limit int) err
 	return nil
 }
 
-func gitHistoryLog(ctx context.Context, root string) (string, error) {
+func gitHistoryLog(ctx context.Context, root string, level autonomy.Level) (string, error) {
 	return gitHistoryLogWithOptions(ctx, root, gitHistoryLogOptions{
-		Audit: shell.AuditContext{Caller: "atteler.git_history"},
+		Audit: gitHistoryAuditContext(level),
 	})
 }
 
@@ -1310,6 +1357,13 @@ func gitHistoryLogWithOptions(ctx context.Context, root string, opts gitHistoryL
 	}
 
 	return stdout.String(), nil
+}
+
+func gitHistoryAuditContext(level autonomy.Level) shell.AuditContext {
+	return shell.AuditContext{
+		Caller:   "atteler.git_history",
+		Autonomy: autonomy.Normalize(level).String(),
+	}
 }
 
 func formatGitHistoryResult(result githistory.Result) string {

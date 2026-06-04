@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
@@ -47,6 +48,7 @@ type runOnceExecutionOptions struct {
 	VectorConfig                appconfig.VectorConfig
 	Response                    responseRecordOptions
 	AgentLoopBudget             llm.AgentLoopBudget
+	Autonomy                    autonomy.Level
 	AgentLoopCheckpointInterval int
 	Headless                    bool
 	HeadlessPrivateLog          bool
@@ -57,8 +59,10 @@ type runOnceExecutionOptions struct {
 type runOnceResult struct {
 	SessionID               string              `json:"session_id"`
 	SessionPath             string              `json:"session_path"`
+	SessionPersisted        bool                `json:"session_persisted"`
 	AgentLoopCheckpointPath string              `json:"agent_loop_checkpoint_path,omitempty"`
 	AgentLoopBudget         llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
+	Autonomy                string              `json:"autonomy"`
 	HeadlessID              string              `json:"headless_id,omitempty"`
 	Agent                   string              `json:"agent,omitempty"`
 	Model                   string              `json:"model,omitempty"`
@@ -287,6 +291,15 @@ func runOnceWithOptions(
 	modelLocked bool,
 	prompt string,
 ) error {
+	executionOptions.Autonomy = autonomy.Normalize(executionOptions.Autonomy)
+
+	if err := validateRunOnceAutonomyOptions(executionOptions); err != nil {
+		modelMode := headlessPreflightModelMode(generationDefaults, generationOverrides, selectedAgent, agents)
+		recordHeadlessPreflightFailure(store, executionOptions, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
+
+		return err
+	}
+
 	outputFormat, err := normalizeOutputFormat(executionOptions.OutputFormat)
 	if err != nil {
 		recordHeadlessPreflightFailure(
@@ -316,6 +329,7 @@ func runOnceWithOptions(
 		generationDefaults,
 		generationOverrides,
 		modelLocked,
+		executionOptions.Autonomy.AllowsAgentTools(),
 		prompt,
 	)
 	if err != nil {
@@ -345,6 +359,14 @@ func runOnceWithOptions(
 	applyRunOnceSessionDefaults(&sessionState, prepared, generationOverrides)
 	sessionState.DefaultAgent = prepared.activeAgent.name
 	sessionState.AgentLoopBudget = executionOptions.AgentLoopBudget
+	sessionState.Autonomy = executionOptions.Autonomy.String()
+
+	runMetadata := sessionRunEventMetadata(
+		executionOptions.AgentLoopBudget,
+		executionOptions.Autonomy,
+		prepared.generation.ReasoningLevel,
+		prepared.generation.ModelMode,
+	)
 
 	emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.SessionStart,
@@ -352,11 +374,7 @@ func runOnceWithOptions(
 		SessionPath: store.Path(sessionState.ID),
 		Agent:       prepared.activeAgent.name,
 		Model:       sessionState.DefaultModel,
-		Metadata: agentLoopBudgetModelSettingsEventMetadata(
-			executionOptions.AgentLoopBudget,
-			prepared.generation.ReasoningLevel,
-			prepared.generation.ModelMode,
-		),
+		Metadata:    runMetadata,
 	})
 	defer emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.SessionEnd,
@@ -364,11 +382,7 @@ func runOnceWithOptions(
 		SessionPath: store.Path(sessionState.ID),
 		Agent:       prepared.activeAgent.name,
 		Model:       sessionState.DefaultModel,
-		Metadata: agentLoopBudgetModelSettingsEventMetadata(
-			executionOptions.AgentLoopBudget,
-			prepared.generation.ReasoningLevel,
-			prepared.generation.ModelMode,
-		),
+		Metadata:    runMetadata,
 	})
 
 	params := llm.CompleteParams{
@@ -396,32 +410,33 @@ func runOnceWithOptions(
 		refCtx.Estimator = generatedSkillRefCtx.Estimator
 	}
 
-	workspaceRefCtx := workspaceVectorReferenceContextWithWarning(
+	refCtx = appendWorkspaceVectorReferenceContextForAutonomy(
 		ctx,
+		refCtx,
+		executionOptions.Autonomy,
 		contextOptions.Root,
 		executionOptions.VectorConfig,
 		prepared.prompt,
 		true,
 		requestContextOptions,
 	)
-	refCtx.Content = appendReferenceContext(refCtx.Content, workspaceRefCtx.Content)
-
-	refCtx.Manifest = mergeReferenceManifests(refCtx.Manifest, workspaceRefCtx.Manifest)
-	if refCtx.Estimator == "" {
-		refCtx.Estimator = workspaceRefCtx.Estimator
-	}
 
 	prependReferenceContext(&params, refCtx.Content)
+	prependAutonomyInstructions(&params, executionOptions.Autonomy)
 
 	applyGenerationParams(&params, prepared.generation)
 
 	// Enable tool use for one-shot calls: the LLM can invoke bash commands.
 	// Apply agent-level tool filtering when an agent is active.
-	tools := defaultToolsForAgent(prepared.activeAgent)
+	var tools []llm.ToolDefinition
+	if executionOptions.Autonomy.AllowsAgentTools() {
+		tools = defaultToolsForAgent(prepared.activeAgent)
+		params.Tools = tools
+	} else {
+		params.Tools = nil
+	}
 
-	params.Tools = tools
-
-	if len(tools) > 0 {
+	if len(params.Tools) > 0 {
 		prependToolReminder(&params, tools)
 	}
 
@@ -481,23 +496,25 @@ func runOnceWithOptions(
 		"model", params.Model,
 		"model_mode", params.ModelMode,
 		"reasoning_level", params.ReasoningLevel,
+		"autonomy", executionOptions.Autonomy.String(),
 		"tools", len(params.Tools),
 		"messages", len(params.Messages),
 	)
 
-	checkpointPath := agentLoopCheckpointPath(store.Path(sessionState.ID))
+	checkpointPath := agentLoopCheckpointPathForAutonomy(store.Path(sessionState.ID), executionOptions.Autonomy)
 	if executionOptions.Response.ReplayPath != "" {
 		checkpointPath = ""
 	}
 
 	agentLoopPreflight := runOnceAgentLoopManifestPreflight(ctx, hooks, reg, store, headlessRun, store.Path(sessionState.ID), sessionState.ID, prepared.activeAgent.name, prepared.fallbackModels, prepared.inlineReferenceEvents, refCtx.Manifest, maxInputTokens)
 
-	resp, err := runOnceComplete(
+	resp, err := runOnceCompleteWithAutonomy(
 		ctx,
 		reg,
 		params,
 		prepared.fallbackModels,
 		executionOptions.AgentLoopBudget,
+		executionOptions.Autonomy,
 		executionOptions.AgentLoopCheckpointInterval,
 		executionOptions.Response,
 		checkpointPath,
@@ -506,6 +523,7 @@ func runOnceWithOptions(
 			Caller:      "atteler.once.llm_tool",
 			SessionID:   sessionState.ID,
 			SessionPath: store.Path(sessionState.ID),
+			Autonomy:    executionOptions.Autonomy.String(),
 		},
 	)
 	if err != nil {
@@ -579,8 +597,10 @@ func finishRunOnceSuccess(
 	result := runOnceResult{
 		SessionID:               sessionState.ID,
 		SessionPath:             store.Path(sessionState.ID),
+		SessionPersisted:        sessionPersistenceAllowed(*sessionState),
 		AgentLoopCheckpointPath: checkpointPath,
 		AgentLoopBudget:         executionOptions.AgentLoopBudget,
+		Autonomy:                executionOptions.Autonomy.String(),
 		Agent:                   agentName,
 		Model:                   resp.Model,
 		ModelMode:               modelMode,
@@ -745,6 +765,7 @@ func prepareRunOnceRequest(
 	generationDefaults generationSettings,
 	generationOverrides generationSettings,
 	modelLocked bool,
+	useTools bool,
 	prompt string,
 ) (runOncePrepared, error) {
 	activeAgent, userPrompt, err := resolveAgent(agents, selectedAgent, prompt, recentAgentNames)
@@ -778,7 +799,7 @@ func prepareRunOnceRequest(
 		Content:   referenceContext,
 		Estimator: estimatorSummaryForContextOptions(contextOptions),
 	}, activeAgent, contextOptions)
-	budgetMessages := requestMessagesForBudget(requestModel, requestMessages, activeAgent, generation, requestReferenceContext.Content, true)
+	budgetMessages := requestMessagesForBudget(requestModel, requestMessages, activeAgent, generation, requestReferenceContext.Content, useTools)
 
 	requestModel, fallbackModels, routeDecision, err := requestModelRoutingAndFallbacks(
 		ctx,
@@ -789,7 +810,7 @@ func prepareRunOnceRequest(
 		activeAgent,
 		requestModel,
 		fallbackModels,
-		routeCompleteParamsForRequest(requestModel, budgetMessages, generation, activeAgent, true),
+		routeCompleteParamsForRequest(requestModel, budgetMessages, generation, activeAgent, useTools),
 		routeProfileForMessages(budgetMessages, generation),
 		routeTelemetryFromRegistry(reg),
 		routeAvailabilityFromRegistryWithRefresh(ctx, reg, effectiveRouteCandidateChain(selectedModel, selectedFallbackModels, activeAgent, modelLocked)),
@@ -828,20 +849,22 @@ func saveRunOnceUserMessage(
 ) error {
 	sessionState.Append(llm.RoleUser, prepared.prompt)
 
-	if err := store.Save(*sessionState); err != nil {
-		emitHookWarning(ctx, hooks, events.Event{
-			Type:        events.Error,
-			SessionID:   sessionState.ID,
-			SessionPath: store.Path(sessionState.ID),
-			Agent:       prepared.activeAgent.name,
-			Model:       sessionState.DefaultModel,
-			Error:       err.Error(),
-		})
+	if sessionPersistenceAllowed(*sessionState) {
+		if err := store.Save(*sessionState); err != nil {
+			emitHookWarning(ctx, hooks, events.Event{
+				Type:        events.Error,
+				SessionID:   sessionState.ID,
+				SessionPath: store.Path(sessionState.ID),
+				Agent:       prepared.activeAgent.name,
+				Model:       sessionState.DefaultModel,
+				Error:       err.Error(),
+			})
 
-		return fmt.Errorf("save session before request: %w", err)
+			return fmt.Errorf("save session before request: %w", err)
+		}
+
+		emitFileWriteWarning(ctx, hooks, *sessionState, store.Path(sessionState.ID), prepared.activeAgent.name, "session")
 	}
-
-	emitFileWriteWarning(ctx, hooks, *sessionState, store.Path(sessionState.ID), prepared.activeAgent.name, "session")
 
 	for _, ref := range prepared.refs {
 		emitHookWarning(ctx, hooks, fileReadEvent(sessionState.ID, store.Path(sessionState.ID), prepared.activeAgent.name, sessionState.DefaultModel, ref))
@@ -895,20 +918,23 @@ func saveRunOnceAssistantResponse(
 		sessionState.DefaultModel = resp.Model
 	}
 
-	if err := store.Save(*sessionState); err != nil {
-		emitHookWarning(ctx, hooks, events.Event{
-			Type:        events.Error,
-			SessionID:   sessionState.ID,
-			SessionPath: store.Path(sessionState.ID),
-			Agent:       agentName,
-			Model:       sessionState.DefaultModel,
-			Error:       err.Error(),
-		})
+	if sessionPersistenceAllowed(*sessionState) {
+		if err := store.Save(*sessionState); err != nil {
+			emitHookWarning(ctx, hooks, events.Event{
+				Type:        events.Error,
+				SessionID:   sessionState.ID,
+				SessionPath: store.Path(sessionState.ID),
+				Agent:       agentName,
+				Model:       sessionState.DefaultModel,
+				Error:       err.Error(),
+			})
 
-		return fmt.Errorf("save session after response: %w", err)
+			return fmt.Errorf("save session after response: %w", err)
+		}
+
+		emitFileWriteWarning(ctx, hooks, *sessionState, store.Path(sessionState.ID), agentName, "session")
 	}
 
-	emitFileWriteWarning(ctx, hooks, *sessionState, store.Path(sessionState.ID), agentName, "session")
 	emitHookWarning(ctx, hooks, events.Event{
 		Type:        events.AssistantMessage,
 		SessionID:   sessionState.ID,
@@ -918,6 +944,20 @@ func saveRunOnceAssistantResponse(
 		Role:        string(llm.RoleAssistant),
 		Content:     resp.Content,
 	})
+
+	return nil
+}
+
+func validateRunOnceAutonomyOptions(options runOnceExecutionOptions) error {
+	if options.Headless &&
+		!autonomy.Normalize(options.Autonomy).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(options.Autonomy, autonomy.ActionFileWrite, "--headless run metadata"))
+	}
+
+	if strings.TrimSpace(options.Response.RecordPath) != "" &&
+		!autonomy.Normalize(options.Autonomy).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(options.Autonomy, autonomy.ActionFileWrite, "--record-response"))
+	}
 
 	return nil
 }
@@ -933,6 +973,10 @@ func recordHeadlessPreflightFailure(
 	failure error,
 ) {
 	if failure == nil || !options.Headless {
+		return
+	}
+
+	if !autonomy.Normalize(options.Autonomy).Allows(autonomy.ActionFileWrite) {
 		return
 	}
 
@@ -1000,6 +1044,7 @@ func recordHeadlessAssistantMessage(store *session.Store, run *session.HeadlessR
 		SessionPath:     run.SessionPath,
 		Agent:           run.Agent,
 		Model:           run.Model,
+		Autonomy:        run.Autonomy,
 		AgentLoopBudget: run.AgentLoopBudget,
 		CWD:             run.CWD,
 		Hostname:        run.Hostname,
@@ -1094,6 +1139,10 @@ func startHeadlessRun(
 		return nil, nil
 	}
 
+	if !autonomy.Normalize(options.Autonomy).Allows(autonomy.ActionFileWrite) {
+		return nil, fmt.Errorf("%s", autonomy.DenialMessage(options.Autonomy, autonomy.ActionFileWrite, "--headless run metadata"))
+	}
+
 	if store == nil {
 		return nil, errors.New("headless mode requires a session store")
 	}
@@ -1111,6 +1160,7 @@ func startHeadlessRun(
 		Prompt:          strings.TrimSpace(prompt),
 		Model:           modelName,
 		ModelMode:       strings.TrimSpace(modelMode),
+		Autonomy:        autonomy.Normalize(options.Autonomy).String(),
 		AgentLoopBudget: options.AgentLoopBudget,
 		Agent:           agentName,
 		StartedCommand:  strings.Join(os.Args, " "),
@@ -1146,6 +1196,7 @@ func startHeadlessRun(
 		SessionPath:     saved.SessionPath,
 		Agent:           saved.Agent,
 		Model:           saved.Model,
+		Autonomy:        saved.Autonomy,
 		AgentLoopBudget: saved.AgentLoopBudget,
 		CWD:             saved.CWD,
 		Hostname:        saved.Hostname,
@@ -1206,6 +1257,7 @@ func appendHeadlessUserMessageEvent(store *session.Store, id string, run session
 		SessionPath:     run.SessionPath,
 		Agent:           run.Agent,
 		Model:           run.Model,
+		Autonomy:        run.Autonomy,
 		AgentLoopBudget: run.AgentLoopBudget,
 		CWD:             run.CWD,
 		Hostname:        run.Hostname,
@@ -1369,6 +1421,7 @@ func appendFinishedHeadlessEvent(store *session.Store, run *session.HeadlessRun,
 		Error:           run.Error,
 		Agent:           run.Agent,
 		Model:           run.Model,
+		Autonomy:        run.Autonomy,
 		AgentLoopBudget: run.AgentLoopBudget,
 		CWD:             run.CWD,
 		Hostname:        run.Hostname,
@@ -1461,7 +1514,7 @@ func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFo
 		if !headless {
 			fmt.Fprintln(stdout, result.Content)
 			printTokenUsageSummary(stderr, result.TokenUsage)
-			fmt.Fprintln(stderr, "session: "+result.SessionID+" ("+result.SessionPath+")")
+			fmt.Fprintln(stderr, formatRunOnceSessionSummary(result))
 
 			if result.AgentLoopCheckpointPath != "" {
 				fmt.Fprintln(stderr, "agent loop checkpoint: "+result.AgentLoopCheckpointPath)
@@ -1470,10 +1523,37 @@ func writeRunOnceResult(stdout, stderr io.Writer, result runOnceResult, outputFo
 			if budget := formatAgentLoopBudgetCompact(result.AgentLoopBudget); budget != "" {
 				fmt.Fprintln(stderr, "agent loop budget: "+budget)
 			}
+
+			if strings.TrimSpace(result.Autonomy) != "" {
+				fmt.Fprintln(stderr, "autonomy: "+result.Autonomy)
+			}
 		}
 
 		return nil
 	}
+}
+
+func formatRunOnceSessionSummary(result runOnceResult) string {
+	return "session: " + formatSessionLocation(result.SessionID, result.SessionPath, result.SessionPersisted, result.Autonomy)
+}
+
+func formatSessionLocation(sessionID, sessionPath string, persisted bool, autonomyLabel string) string {
+	line := sessionID
+
+	if persisted {
+		if strings.TrimSpace(sessionPath) != "" {
+			line += " (" + sessionPath + ")"
+		}
+
+		return line
+	}
+
+	reason := "not persisted"
+	if strings.EqualFold(strings.TrimSpace(autonomyLabel), autonomy.Low.String()) {
+		reason = "not persisted: autonomy low"
+	}
+
+	return line + " (" + reason + ")"
 }
 
 // runOnceAgentLoopManifestPreflight emits follow-up context manifests before
@@ -1522,12 +1602,42 @@ func runOnceAgentLoopManifestPreflight(
 // runOnceComplete handles replay or live agent-loop completion for one-shot
 // mode. If a replay path is set, it loads the recorded response; otherwise it
 // runs the agentic loop with tool execution support.
+//
+//nolint:unparam // Compatibility wrapper kept for existing focused tests that exercise default-autonomy completion.
 func runOnceComplete(
 	ctx context.Context,
 	reg *llm.Registry,
 	params llm.CompleteParams,
 	fallbackModels []string,
 	agentLoopBudget llm.AgentLoopBudget,
+	agentLoopCheckpointInterval int,
+	responseOptions responseRecordOptions,
+	checkpointPath string,
+	beforeModelCall func(iteration int, params llm.CompleteParams) error,
+	audit attshell.AuditContext,
+) (*llm.Response, error) {
+	return runOnceCompleteWithAutonomy(
+		ctx,
+		reg,
+		params,
+		fallbackModels,
+		agentLoopBudget,
+		autonomy.DefaultLevel,
+		agentLoopCheckpointInterval,
+		responseOptions,
+		checkpointPath,
+		beforeModelCall,
+		audit,
+	)
+}
+
+func runOnceCompleteWithAutonomy(
+	ctx context.Context,
+	reg *llm.Registry,
+	params llm.CompleteParams,
+	fallbackModels []string,
+	agentLoopBudget llm.AgentLoopBudget,
+	autonomyLevel autonomy.Level,
 	agentLoopCheckpointInterval int,
 	responseOptions responseRecordOptions,
 	checkpointPath string,
@@ -1568,9 +1678,10 @@ func runOnceComplete(
 		ConfirmToolCall:    confirmToolCallStdin,
 		BeforeModelCall:    beforeModelCall,
 		Budget:             agentLoopBudget,
+		Autonomy:           autonomyLevel,
 		EstimateCostMicros: costEstimator,
 		CheckpointInterval: agentLoopCheckpointInterval,
-		Policy:             llm.BashToolPolicy,
+		Policy:             llm.BashToolPolicyForAutonomy(autonomyLevel),
 		CheckpointSink:     agentLoopCheckpointSink(checkpointPath),
 	})
 	if err != nil {
@@ -1820,6 +1931,12 @@ func confirmToolCallStdin(_ context.Context, call llm.ToolCall, decision llm.Too
 // newBashExecutor creates a ToolExecutor that runs bash commands in the given
 // working directory, logging output to the provided writer.
 func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) llm.ToolExecutor {
+	if strings.TrimSpace(audit.Autonomy) == "" {
+		audit.Autonomy = autonomy.DefaultLevel.String()
+	} else {
+		audit.Autonomy = autonomy.Normalize(autonomy.Level(audit.Autonomy)).String()
+	}
+
 	return func(ctx context.Context, call llm.ToolCall) llm.ToolResult {
 		if call.Name != "bash" {
 			return llm.ToolResult{
@@ -1847,6 +1964,7 @@ func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) ll
 				"input":        command,
 				"source":       "llm_tool",
 				"tool_call_id": call.ID,
+				"autonomy":     audit.Autonomy,
 			},
 		})
 
@@ -1876,6 +1994,7 @@ func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) ll
 						"source":       "llm_tool",
 						"stream":       string(chunk.Stream),
 						"tool_call_id": call.ID,
+						"autonomy":     audit.Autonomy,
 					},
 				})
 			},
@@ -1896,6 +2015,7 @@ func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) ll
 			map[string]string{
 				"source":       "llm_tool",
 				"tool_call_id": call.ID,
+				"autonomy":     audit.Autonomy,
 			},
 		))
 

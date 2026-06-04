@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 	attskill "github.com/tommoulard/atteler/pkg/skill"
 )
 
@@ -24,8 +25,12 @@ func skillLearningCommandRequested(opts cliOptions) bool {
 		opts.skillLearningDisableAll
 }
 
-//nolint:cyclop // Each branch maps one explicit management operation to a small handler.
 func runSkillLearningCommand(ctx context.Context, input skillLearningCommandInput) error {
+	return runSkillLearningCommandWithAutonomy(ctx, input, autonomy.DefaultLevel)
+}
+
+//nolint:cyclop // Each branch maps one explicit management operation to a small handler.
+func runSkillLearningCommandWithAutonomy(ctx context.Context, input skillLearningCommandInput, level autonomy.Level) error {
 	if ctx == nil {
 		return errors.New("skill learning: context is required")
 	}
@@ -41,6 +46,9 @@ func runSkillLearningCommand(ctx context.Context, input skillLearningCommandInpu
 	if operationCount > 1 {
 		return errors.New("skill learning: choose only one skill suggestion or learning management operation")
 	}
+	if skillLearningManagementWritesFiles(input) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, skillLearningAutonomyContext(input)))
+	}
 
 	store := attskill.NewLearningStore(input.Dir)
 
@@ -50,7 +58,7 @@ func runSkillLearningCommand(ctx context.Context, input skillLearningCommandInpu
 	case input.Show != "":
 		return showSkillLearning(store, input.Show, input.SkillDir)
 	case input.Edit != "":
-		return editSkillLearning(ctx, store, input.Edit, input.SkillDir, input.Editor)
+		return editSkillLearning(ctx, store, input.Edit, input.SkillDir, input.Editor, level)
 	case input.Enable != "":
 		return setGeneratedSkillStatus(store, input.Enable, attskill.LearningSkillStatusActive, input.SkillDir)
 	case input.Disable != "":
@@ -75,6 +83,34 @@ func runSkillLearningCommand(ctx context.Context, input skillLearningCommandInpu
 		return nil
 	default:
 		return nil
+	}
+}
+
+func skillLearningManagementWritesFiles(input skillLearningCommandInput) bool {
+	return input.Edit != "" ||
+		input.Enable != "" ||
+		input.Disable != "" ||
+		input.Delete != "" ||
+		input.EnableAll ||
+		input.DisableAll
+}
+
+func skillLearningAutonomyContext(input skillLearningCommandInput) string {
+	switch {
+	case input.Edit != "":
+		return "--skill-learning-edit"
+	case input.Enable != "":
+		return "--skill-learning-enable"
+	case input.Disable != "":
+		return "--skill-learning-disable"
+	case input.Delete != "":
+		return "--skill-learning-delete"
+	case input.EnableAll:
+		return "--skill-learning-enable-all"
+	case input.DisableAll:
+		return "--skill-learning-disable-all"
+	default:
+		return "skill learning management"
 	}
 }
 
@@ -150,7 +186,7 @@ func showSkillLearning(store *attskill.LearningStore, slug, skillDir string) err
 	return nil
 }
 
-func editSkillLearning(ctx context.Context, store *attskill.LearningStore, slug, skillDir, editor string) error {
+func editSkillLearning(ctx context.Context, store *attskill.LearningStore, slug, skillDir, editor string, level autonomy.Level) error {
 	skill, err := findGeneratedSkill(store, slug)
 	if err != nil {
 		return err
@@ -168,18 +204,43 @@ func editSkillLearning(ctx context.Context, store *attskill.LearningStore, slug,
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // User explicitly selected editor; generated skill path is passed as an argument without shell expansion.
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("skill learning: edit %s with %q: %w", slug, name, err)
+	cmd, invocation, err := attshell.CommandContext(ctx, attshell.CommandOptions{
+		Program: name,
+		Args:    args,
+		Stdin:   os.Stdin,
+		Stdout:  os.Stdout,
+		Stderr:  os.Stderr,
+		Mode:    attshell.ModeInteractive,
+		Audit:   skillLearningEditorAuditContext(level),
+	})
+	if err != nil {
+		return fmt.Errorf("skill learning: authorize edit %s with %q: %w", slug, name, err)
+	}
+
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(attshell.FinishOptions{
+		Error:         runErr,
+		OutputCapture: attshell.OutputNotCaptured,
+		OutputNote:    "interactive editor output was not captured",
+	}); finishErr != nil {
+		return fmt.Errorf("skill learning: audit edit %s with %q: %w", slug, name, finishErr)
+	}
+
+	if runErr != nil {
+		return fmt.Errorf("skill learning: edit %s with %q: %w", slug, name, runErr)
 	}
 
 	fmt.Println("edited: " + skill.Slug)
 	fmt.Println("skill path: " + skill.SkillPath)
 
 	return nil
+}
+
+func skillLearningEditorAuditContext(level autonomy.Level) attshell.AuditContext {
+	return attshell.AuditContext{
+		Caller:   "atteler.skill_learning.editor",
+		Autonomy: autonomy.Normalize(level).String(),
+	}
 }
 
 func setGeneratedSkillStatus(store *attskill.LearningStore, slug, status, skillDir string) error {

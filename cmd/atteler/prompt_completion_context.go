@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/promptcomplete"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/shell"
@@ -23,7 +24,38 @@ const (
 var issueRefPattern = regexp.MustCompile(`(?i)(?:\bGH-\d+\b|#\d+\b)`)
 
 func promptCompletionContext(ctx context.Context, state appState, input string, includeRepo bool) promptcomplete.Context {
+	ctx = contextWithPromptGitAutonomy(ctx, state.autonomy)
+
 	return promptCompletionContextWithFreshness(ctx, state, input, includeRepo).Context
+}
+
+func promptGitCompletionAllowed(level autonomy.Level) bool {
+	// Git completion probes are read-only, but they still pass through the
+	// shell/audit layer. Low autonomy is advisory-only and must not create
+	// audit files while the user is only typing a prompt.
+	return autonomy.Normalize(level).Allows(autonomy.ActionFileWrite)
+}
+
+type promptGitAutonomyContextKey struct{}
+
+func contextWithPromptGitAutonomy(ctx context.Context, level autonomy.Level) context.Context {
+	if ctx == nil {
+		return nil
+	}
+
+	return context.WithValue(ctx, promptGitAutonomyContextKey{}, autonomy.Normalize(level))
+}
+
+func promptGitAutonomyFromContext(ctx context.Context) autonomy.Level {
+	if ctx == nil {
+		return autonomy.DefaultLevel
+	}
+
+	if level, ok := ctx.Value(promptGitAutonomyContextKey{}).(autonomy.Level); ok {
+		return autonomy.Normalize(level)
+	}
+
+	return autonomy.DefaultLevel
 }
 
 func dedupePromptCandidates(candidates []promptcomplete.Candidate) []promptcomplete.Candidate {
@@ -144,7 +176,7 @@ func promptGitOutput(ctx context.Context, root string, args ...string) (string, 
 		Stdout:  stdout,
 		Stderr:  stderr,
 		Mode:    shell.ModeCaptured,
-		Audit:   shell.AuditContext{Caller: "atteler.prompt_completion.git"},
+		Audit:   promptGitAuditContext(promptGitAutonomyFromContext(ctx)),
 	})
 	if err != nil {
 		return "", fmt.Errorf("prompt git: authorize: %w", err)
@@ -234,6 +266,13 @@ func (b *promptLimitedOutputBuffer) String() string {
 
 func (b *promptLimitedOutputBuffer) Truncated() bool {
 	return b != nil && b.truncated
+}
+
+func promptGitAuditContext(level autonomy.Level) shell.AuditContext {
+	return shell.AuditContext{
+		Caller:   "atteler.prompt_completion.git",
+		Autonomy: autonomy.Normalize(level).String(),
+	}
 }
 
 func parseGitStatusPath(line string) string {

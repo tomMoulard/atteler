@@ -8,18 +8,21 @@ import (
 	"os"
 	"strings"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/session"
+	"github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
 
 const worktreeVerificationStatusPass = "PASS"
 
-func listWorktrees(ctx context.Context) error {
+func listWorktrees(ctx context.Context, level autonomy.Level) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("list worktrees: %w", err)
 	}
 
+	ctx = worktree.WithAuditContext(ctx, worktreeShellAuditContext(session.Session{}, level))
 	if !worktree.IsGitRepoContext(ctx, cwd) {
 		return errors.New("list worktrees: not inside a git repository")
 	}
@@ -43,12 +46,17 @@ func listWorktrees(ctx context.Context) error {
 	return nil
 }
 
-func mergeWorktreeBySession(ctx context.Context, sessionRef string, policy cliWorktreeMergePolicy) error {
+func mergeWorktreeBySession(ctx context.Context, sessionRef string, policy cliWorktreeMergePolicy, level autonomy.Level) error {
+	if !autonomy.Normalize(level).Allows(autonomy.ActionCommit) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionCommit, "--merge-worktree"))
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("merge worktree: %w", err)
 	}
 
+	ctx = worktree.WithAuditContext(ctx, worktreeShellAuditContext(session.Session{}, level))
 	if !worktree.IsGitRepoContext(ctx, cwd) {
 		return errors.New("merge worktree: not inside a git repository")
 	}
@@ -73,6 +81,7 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string, policy cliWo
 
 	fmt.Fprintf(os.Stderr, "worktree: merging %s into %s...\n", info.Branch, info.BaseBranch)
 
+	ctx = worktree.WithAuditContext(ctx, worktreeShellAuditContext(sess, level))
 	result, err := worktree.MergeWithResultContext(ctx, cwd, info, worktree.MergeOptions{
 		AutoMerge:               true,
 		Strategy:                worktree.MergeStrategyMerge,
@@ -145,6 +154,14 @@ func printWorktreeMergeResult(w io.Writer, result worktree.MergeResult) {
 func printIndentedLines(w io.Writer, text string) {
 	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
 		fmt.Fprintln(w, "  "+line)
+	}
+}
+
+func worktreeShellAuditContext(sess session.Session, level autonomy.Level) shell.AuditContext {
+	return shell.AuditContext{
+		Caller:    "atteler.worktree.git",
+		SessionID: sess.ID,
+		Autonomy:  autonomy.Normalize(level).String(),
 	}
 }
 

@@ -1445,6 +1445,7 @@ func TestPlan_RunWithOptions_PersistsAdmissionDenialBeforeSpawn(t *testing.T) {
 		AllowedWriteScope: t.TempDir(),
 		Model:             "codex/gpt-test",
 		Provider:          "codex",
+		Autonomy:          "high",
 		Timeout:           time.Second,
 		RetryPolicy:       RetryPolicy{MaxAttempts: 3},
 		Budget:            Budget{MaxPromptTokens: 5},
@@ -1460,6 +1461,7 @@ func TestPlan_RunWithOptions_PersistsAdmissionDenialBeforeSpawn(t *testing.T) {
 	data, readErr := os.ReadFile(ledgerPath)
 	require.NoError(t, readErr)
 	require.NoError(t, json.Unmarshal(data, &ledger))
+	assert.Equal(t, "high", ledger.Options.Autonomy)
 	require.Len(t, ledger.Admissions, 1)
 	admission := ledger.Admissions[0]
 	assert.NotEmpty(t, admission.AdmissionID)
@@ -1468,6 +1470,7 @@ func TestPlan_RunWithOptions_PersistsAdmissionDenialBeforeSpawn(t *testing.T) {
 	assert.Equal(t, "parent-session/expensive", admission.WorkspaceID)
 	assert.Equal(t, "codex/gpt-test", admission.Model)
 	assert.Equal(t, "codex", admission.Provider)
+	assert.Equal(t, "high", admission.Autonomy)
 	assert.Equal(t, time.Second, admission.Timeout)
 	assert.Equal(t, Budget{MaxPromptTokens: 5}, admission.Budget)
 	assert.Equal(t, RetryPolicy{MaxAttempts: 3}, admission.RetryPolicy)

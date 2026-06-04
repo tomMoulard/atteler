@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -324,6 +325,7 @@ func formatReviewEvidenceSources(sources []review.EvidenceSource) string {
 	return strings.Join(parts, ";")
 }
 
+//nolint:govet // Field order groups review routing, context, and autonomy settings for readability.
 type reviewCompleter struct {
 	registry          *llm.Registry
 	agents            *agent.Registry
@@ -337,6 +339,7 @@ type reviewCompleter struct {
 	referenceManifest contextref.ReferenceManifest
 	maxInputTokens    int
 	modelLocked       bool
+	autonomy          autonomy.Level
 }
 
 func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt, userPrompt string) (string, error) {
@@ -406,6 +409,8 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 		prependReferenceContext(&params, referenceContext.Content)
 		manifest = referenceContext.Manifest
 	}
+
+	prependAutonomyInstructions(&params, rc.autonomy)
 
 	manifestEvent := requestContextManifestEvent(newRequestContextManifestForModels(
 		rc.registry,
@@ -505,6 +510,7 @@ func runReviewExecution(ctx context.Context, state appState, input reviewRunComm
 		referenceManifest: reviewContext.Manifest,
 		maxInputTokens:    state.maxInputTokens,
 		modelLocked:       state.modelLocked,
+		autonomy:          state.autonomy,
 	}
 
 	reviewerNames := make([]string, 0, len(plan.Reviewers()))

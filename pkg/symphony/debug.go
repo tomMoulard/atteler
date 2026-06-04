@@ -65,6 +65,7 @@ type DebugConfigSnapshot struct {
 	TrackerRepository                 string                  `json:"tracker_repository,omitempty"`
 	TrackerActiveStates               []string                `json:"tracker_active_states,omitempty"`
 	TrackerLabels                     []string                `json:"tracker_labels,omitempty"`
+	Autonomy                          string                  `json:"autonomy"`
 	PollIntervalMS                    int64                   `json:"poll_interval_ms"`
 	MaxConcurrentAgents               int                     `json:"max_concurrent_agents"`
 	MaxTurns                          int                     `json:"max_turns"`
@@ -550,6 +551,7 @@ func debugConfigSnapshot(cfg Config) DebugConfigSnapshot {
 		TrackerRepository:                 firstNonEmpty(cfg.Tracker.Repository, cfg.Tracker.Owner+"/"+cfg.Tracker.Repo),
 		TrackerActiveStates:               append([]string(nil), cfg.Tracker.ActiveStates...),
 		TrackerLabels:                     append([]string(nil), cfg.Tracker.Labels...),
+		Autonomy:                          cfg.Autonomy.String(),
 		PollIntervalMS:                    cfg.Polling.Interval.Milliseconds(),
 		MaxConcurrentAgents:               cfg.Agent.MaxConcurrentAgents,
 		MaxTurns:                          cfg.Agent.MaxTurns,

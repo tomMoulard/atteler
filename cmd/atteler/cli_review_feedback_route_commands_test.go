@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
@@ -360,8 +361,9 @@ func TestReviewCompleterIncludesAgentReferencesInPromptAndManifest(t *testing.T)
 
 	require.NotNil(t, provider.params)
 	require.NotEmpty(t, provider.params.Messages)
-	assert.Contains(t, provider.params.Messages[0].Content, "<configured_references>")
-	assert.Contains(t, provider.params.Messages[0].Content, `source="rubric.md"`)
+	assertRunOnceRequestContains(t, *provider.params, "Autonomy: medium")
+	assertRunOnceRequestContains(t, *provider.params, "<configured_references>")
+	assertRunOnceRequestContains(t, *provider.params, `source="rubric.md"`)
 
 	log := eventLog.String()
 	assert.Contains(t, log, "context_manifest")
@@ -409,6 +411,28 @@ func TestReviewCompleterEmitsRouteDecisionForModelRole(t *testing.T) {
 	assert.Contains(t, log, "actual_selected=openai/gpt-4.1-mini")
 }
 
+func TestReviewCompleterPrependsAutonomyInstructions(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{model: "gpt-test", response: "ok"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	completer := reviewCompleter{
+		registry:       registry,
+		agents:         agent.NewRegistry(nil),
+		selectedModel:  "gpt-test",
+		maxInputTokens: 10_000,
+		autonomy:       autonomy.Low,
+	}
+
+	_, err := completer.Complete(t.Context(), "quality-reviewer", "system", "Review context:\nprimary review surface")
+	require.NoError(t, err)
+	require.NotNil(t, provider.params)
+
+	assertRunOnceRequestContains(t, *provider.params, "Autonomy: low")
+}
+
 func TestRegistryCompleterEmitsContextManifestBeforeBudgetFailure(t *testing.T) {
 	t.Parallel()
 
@@ -433,6 +457,27 @@ func TestRegistryCompleterEmitsContextManifestBeforeBudgetFailure(t *testing.T) 
 	assert.Contains(t, log, "agent=gpt-test")
 	assert.Contains(t, log, "fits_configured_token_budget=false")
 	assert.Contains(t, log, "estimated_token_upper_bound=")
+}
+
+func TestRegistryCompleterPrependsAutonomyInstructions(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{model: "gpt-test", response: "ok"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	completer := registryCompleter{
+		registry:       registry,
+		autonomy:       autonomy.Full,
+		maxInputTokens: 10_000,
+	}
+
+	_, err := completer.Complete(t.Context(), "gpt-test", "system", "user")
+	require.NoError(t, err)
+	require.NotNil(t, provider.params)
+
+	assertRunOnceRequestContains(t, *provider.params, "Autonomy: full")
+	assertRunOnceRequestContains(t, *provider.params, "Do not merge PRs")
 }
 
 func TestFormatReviewRunResult(t *testing.T) {

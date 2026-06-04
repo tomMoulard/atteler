@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
@@ -150,6 +151,31 @@ func (f *rawStringListFlag) String() string {
 	}
 
 	return strings.Join(*f, ",")
+}
+
+type autonomyFlag struct {
+	value autonomy.Level
+	set   bool
+}
+
+func (f *autonomyFlag) Set(raw string) error {
+	level, err := autonomy.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse autonomy: %w", err)
+	}
+
+	f.value = level
+	f.set = true
+
+	return nil
+}
+
+func (f *autonomyFlag) String() string {
+	if f == nil || !f.set {
+		return ""
+	}
+
+	return f.value.String()
 }
 
 type generationSettings struct {
@@ -447,6 +473,7 @@ type cliOptions struct {
 	spawnRetries                       nonNegativeIntFlag
 	seed                               nonNegativeIntFlag
 	modelMode                          string
+	autonomy                           autonomyFlag
 	reasoningLevel                     string
 	temperature                        floatFlag
 	evaluationCost                     floatFlag
@@ -568,6 +595,7 @@ type appState struct {
 	generationOverrides          generationSettings
 	agentLoopBudget              llm.AgentLoopBudget
 	agentLoopCheckpointInterval  int
+	autonomy                     autonomy.Level
 	hookConfig                   map[string][]appconfig.HookConfig
 	vectorConfig                 appconfig.VectorConfig
 	agentRegistry                *agent.Registry

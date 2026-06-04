@@ -14,6 +14,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -28,10 +29,11 @@ type WorkflowSnapshot struct {
 
 // WorkflowManager owns loading and lightweight polling-based dynamic reloads.
 type WorkflowManager struct {
-	path    string
-	workDir string
-	current WorkflowSnapshot
-	loaded  bool
+	path             string
+	workDir          string
+	current          WorkflowSnapshot
+	autonomyOverride autonomy.Level
+	loaded           bool
 }
 
 // NewWorkflowManager returns a loader for an explicit workflow path or the
@@ -75,6 +77,27 @@ func (m *WorkflowManager) Path() string {
 	return m.path
 }
 
+// SetAutonomyOverride pins the effective workflow autonomy level across the
+// initial load and every later reload. An empty level clears the override.
+func (m *WorkflowManager) SetAutonomyOverride(level autonomy.Level) error {
+	if m == nil {
+		return errors.New("workflow manager is nil")
+	}
+
+	if level == "" {
+		m.autonomyOverride = ""
+		return nil
+	}
+
+	parsed, err := autonomy.Parse(string(level))
+	if err != nil {
+		return fmt.Errorf("autonomy override: %w", err)
+	}
+
+	m.autonomyOverride = parsed
+	return nil
+}
+
 // Load reads and validates the workflow file, replacing the current snapshot.
 func (m *WorkflowManager) Load(ctx context.Context) (WorkflowSnapshot, error) {
 	if m == nil {
@@ -95,9 +118,22 @@ func (m *WorkflowManager) Load(ctx context.Context) (WorkflowSnapshot, error) {
 		return WorkflowSnapshot{}, err
 	}
 
-	cfg, err := ResolveConfig(ctx, def.Config, m.path)
+	config := def.Config
+	if m.autonomyOverride != "" {
+		config = make(map[string]any, len(def.Config)+1)
+		for key, value := range def.Config {
+			config[key] = value
+		}
+
+		config["autonomy"] = m.autonomyOverride.String()
+	}
+
+	cfg, err := ResolveConfig(ctx, config, m.path)
 	if err != nil {
 		return WorkflowSnapshot{}, err
+	}
+	if m.autonomyOverride != "" {
+		cfg.Autonomy = m.autonomyOverride
 	}
 
 	snapshot := WorkflowSnapshot{
@@ -311,6 +347,7 @@ func normalizeYAMLValue(value any) any {
 }
 
 type rawConfig struct {
+	Autonomy  *string            `yaml:"autonomy"`
 	Tracker   rawTrackerConfig   `yaml:"tracker"`
 	Polling   rawPollingConfig   `yaml:"polling"`
 	Workspace rawWorkspaceConfig `yaml:"workspace"`
@@ -450,7 +487,8 @@ func ResolveConfig(ctx context.Context, config map[string]any, workflowPath stri
 			Address:    defaultDebugAddress,
 			EventLimit: defaultDebugEventLimit,
 		},
-		Hooks: HooksConfig{Timeout: defaultHookTimeout},
+		Hooks:    HooksConfig{Timeout: defaultHookTimeout},
+		Autonomy: autonomy.DefaultLevel,
 		Agent: AgentConfig{
 			MaxConcurrentAgents:        defaultMaxConcurrent,
 			MaxTurns:                   defaultMaxTurns,
@@ -467,6 +505,9 @@ func ResolveConfig(ctx context.Context, config map[string]any, workflowPath stri
 	}
 
 	applyRawConfig(&cfg, raw)
+	if cfg.Autonomy == "" {
+		cfg.Autonomy = autonomy.DefaultLevel
+	}
 	if err := resolveConfigValues(ctx, &cfg, workflowDir); err != nil {
 		return Config{}, err
 	}
@@ -479,6 +520,10 @@ func ResolveConfig(ctx context.Context, config map[string]any, workflowPath stri
 }
 
 func applyRawConfig(cfg *Config, raw rawConfig) {
+	if raw.Autonomy != nil {
+		cfg.Autonomy = autonomy.Level(strings.ToLower(strings.TrimSpace(*raw.Autonomy)))
+	}
+
 	if raw.Tracker.Kind != nil {
 		cfg.Tracker.Kind = strings.TrimSpace(*raw.Tracker.Kind)
 	}
@@ -806,7 +851,7 @@ func resolveConfigValues(ctx context.Context, cfg *Config, workflowDir string) e
 		cfg.Tracker.APIKey = firstNonEmpty(os.Getenv(githubTokenEnv), os.Getenv(githubCLITokenEnv))
 	}
 
-	if cfg.Tracker.Kind == trackerKindGitHub && cfg.Tracker.APIKey == "" {
+	if cfg.Tracker.Kind == trackerKindGitHub && cfg.Tracker.APIKey == "" && autonomy.Normalize(cfg.Autonomy) != autonomy.Low {
 		cfg.Tracker.APIKey = githubTokenFromCLI(ctx)
 	}
 
@@ -996,6 +1041,14 @@ func resolveDebugDefaults(cfg *Config) {
 
 // ValidatePreflight checks the config required to poll and launch workers.
 func (cfg Config) ValidatePreflight() error {
+	level := cfg.Autonomy
+	if level == "" {
+		level = autonomy.DefaultLevel
+	}
+	if _, err := autonomy.Parse(string(level)); err != nil {
+		return fmt.Errorf("autonomy: %w", err)
+	}
+
 	switch strings.ToLower(strings.TrimSpace(cfg.Tracker.Kind)) {
 	case "":
 		return errors.New("tracker.kind is required")
@@ -1100,6 +1153,10 @@ func (cfg Config) validatePublishConfigWithOptions(requireRemoveLabels bool) err
 	}
 
 	if err := validateVerificationGates(cfg.Publish.VerificationGates); err != nil {
+		return err
+	}
+
+	if err := requireFullAutonomyCheckMonitoring(cfg.Autonomy, cfg.Publish); err != nil {
 		return err
 	}
 

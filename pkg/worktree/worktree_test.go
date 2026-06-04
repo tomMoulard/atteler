@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 // initTestRepo creates a temporary git repository with one commit and
@@ -149,6 +152,28 @@ func TestCreateAndRemove(t *testing.T) {
 	}
 
 	require.NoError(t, RemoveContext(context.Background(), repo, info))
+}
+
+func TestWorktreeGitAuditRecordsAutonomy(t *testing.T) {
+	t.Parallel()
+
+	repo := initTestRepo(t)
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	ctx := WithAuditContext(context.Background(), shell.AuditContext{
+		AuditDir: auditDir,
+		Autonomy: "high",
+	})
+
+	_, err := ListContext(ctx, repo)
+	require.NoError(t, err)
+
+	records := readWorktreeAuditRecords(t, auditDir)
+	require.NotEmpty(t, records)
+
+	for _, record := range records {
+		assert.Equal(t, "atteler.worktree.git", record.Caller)
+		assert.Equal(t, "high", record.Autonomy)
+	}
 }
 
 func TestCompatibilityHelpersRequireContext(t *testing.T) {
@@ -1344,4 +1369,26 @@ branch refs/heads/feature/other
 	if results[0].Branch != "atteler/session-1" {
 		assert.Failf(t, "assertion failed", "first branch = %q, want %q", results[0].Branch, "atteler/session-1")
 	}
+}
+
+func readWorktreeAuditRecords(t *testing.T, auditDir string) []shell.AuditRecord {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	records := make([]shell.AuditRecord, 0, len(lines))
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record shell.AuditRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+
+	return records
 }

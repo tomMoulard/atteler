@@ -63,6 +63,7 @@ tracker:
   active_states: [OPEN]
   terminal_states: [CLOSED]
   labels: [codex]
+autonomy: high
 workspace:
   root: ./.symphony/workspaces
 publish:
@@ -164,6 +165,17 @@ publication path:
   report covering changes, validation, risk, reviewer notes, suggested
   reviewers, and issue linkage
 - remove `publish.remove_labels` from the source issue
+
+Publishing requires `autonomy: high` or `autonomy: full`; lower levels block
+branch creation, commits, pushes, and PR creation. Even `full` autonomy never
+merges PRs automatically.
+When publishing with `autonomy: full`, set `publish.monitor_checks: true`; the
+workflow is rejected otherwise because full autonomy must report whether CI
+passed or failed. Use `autonomy: high` for PR creation without check
+monitoring.
+For one-off service runs, `symphony --autonomy low|medium|high|full` overrides
+the workflow autonomy while preserving the same hard capability boundaries on
+reloads.
 
 Removing the dispatch label is the finalization signal for GitHub-backed
 workflows: once the PR exists, the issue no longer matches the tracker label

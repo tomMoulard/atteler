@@ -109,6 +109,7 @@ type Options struct {
 	AllowedWriteScope string        `json:"allowed_write_scope,omitempty"`
 	Model             string        `json:"model,omitempty"`
 	Provider          string        `json:"provider,omitempty"`
+	Autonomy          string        `json:"autonomy,omitempty"`
 	MaxConcurrency    int           `json:"max_concurrency,omitempty"`
 	CancelOnFailure   bool          `json:"cancel_on_failure,omitempty"`
 	Resume            bool          `json:"resume,omitempty"`
@@ -171,6 +172,7 @@ type Admission struct {
 	AllowedWriteScope string        `json:"allowed_write_scope,omitempty"`
 	Model             string        `json:"model,omitempty"`
 	Provider          string        `json:"provider,omitempty"`
+	Autonomy          string        `json:"autonomy,omitempty"`
 	Timeout           time.Duration `json:"timeout,omitempty"`
 	Budget            Budget        `json:"budget,omitempty"`
 	RetryPolicy       RetryPolicy   `json:"retry_policy,omitempty"`
@@ -213,6 +215,8 @@ type CommandOptions struct {
 	Env            map[string]string
 	Binary         string
 	Dir            string
+	Autonomy       string
+	AuditDir       string
 	Args           []string
 	MaxOutputBytes int64
 }
@@ -425,12 +429,14 @@ func AttelerCommandDetailedWithOptions(opts CommandOptions) DetailedRunner {
 			Program: binary,
 			Args:    args,
 			Dir:     opts.Dir,
-			EnvList: childEnv(opts.Env, request),
+			EnvList: childEnv(opts.Env, request, opts.Autonomy),
 			Mode:    shell.ModeCaptured,
 			Stdout:  stdoutWriter,
 			Stderr:  stderrWriter,
 			Audit: shell.AuditContext{
-				Caller: "atteler.subagent",
+				Caller:   "atteler.subagent",
+				Autonomy: strings.TrimSpace(opts.Autonomy),
+				AuditDir: strings.TrimSpace(opts.AuditDir),
 			},
 		})
 		if err != nil {
@@ -692,10 +698,10 @@ func runRequest(
 		attemptErr := attemptCtx.Err()
 		parentErr := ctx.Err()
 		timeoutExceeded := opts.Timeout > 0 && duration >= opts.Timeout
-		cancel()
 
 		status := statusForAttempt(attemptErr, parentErr, err, timeoutExceeded)
 		err = errorForStatus(attemptCtx, ctx, status, err)
+		cancel()
 		reserved := usage
 		usage = mergeUsage(usage, out)
 		if budgetErr := budget.recordActual(reserved, usage); budgetErr != nil {
@@ -953,6 +959,7 @@ func admissionForRequest(
 		AllowedWriteScope: request.AllowedWriteScope,
 		Model:             request.Model,
 		Provider:          request.Provider,
+		Autonomy:          strings.TrimSpace(opts.Autonomy),
 		Timeout:           opts.Timeout,
 		Budget:            opts.Budget,
 		RetryPolicy:       opts.RetryPolicy,
@@ -1243,7 +1250,7 @@ func commandExitStatus(err error) int {
 	return -1
 }
 
-func childEnv(extra map[string]string, request Request) []string {
+func childEnv(extra map[string]string, request Request, autonomy string) []string {
 	envValues := map[string]string{}
 	for key, value := range extra {
 		key = strings.TrimSpace(key)
@@ -1258,6 +1265,7 @@ func childEnv(extra map[string]string, request Request) []string {
 	addEnvIfSet(envValues, "ATTELER_ALLOWED_WRITE_SCOPE", request.AllowedWriteScope)
 	addEnvIfSet(envValues, "ATTELER_CHILD_MODEL", request.Model)
 	addEnvIfSet(envValues, "ATTELER_CHILD_PROVIDER", request.Provider)
+	addEnvIfSet(envValues, "ATTELER_AUTONOMY", autonomy)
 
 	if len(envValues) == 0 {
 		return nil

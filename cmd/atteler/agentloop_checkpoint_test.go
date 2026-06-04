@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
 )
@@ -29,6 +30,14 @@ func TestAgentLoopCheckpointPath(t *testing.T) {
 		"/tmp/sessions/abc.agentloop.jsonl",
 		agentLoopCheckpointPath("/tmp/sessions/abc"),
 	)
+}
+
+func TestAgentLoopCheckpointPathForAutonomy(t *testing.T) {
+	t.Parallel()
+
+	sessionPath := "/tmp/sessions/abc.json"
+	assert.Empty(t, agentLoopCheckpointPathForAutonomy(sessionPath, autonomy.Low))
+	assert.Equal(t, "/tmp/sessions/abc.agentloop.jsonl", agentLoopCheckpointPathForAutonomy(sessionPath, autonomy.Medium))
 }
 
 func TestAgentLoopCheckpointSinkWritesJSONL(t *testing.T) {

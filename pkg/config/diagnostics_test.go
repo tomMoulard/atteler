@@ -373,6 +373,19 @@ func TestInspectPathSources_AcceptsGeneratedTemplate(t *testing.T) {
 	assert.Empty(t, reports[0].Diagnostics)
 }
 
+func TestInspectPathSources_ReportsInvalidAutonomy(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("autonomy: unsafe\n"), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+
+	require.Len(t, reports, 1)
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "autonomy", "")
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, `unsupported autonomy "unsafe" (supported: low, medium, high, full)`)
+}
+
 func TestInspectPathSources_ReportsInvalidModelAliases(t *testing.T) {
 	t.Parallel()
 

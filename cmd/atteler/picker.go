@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/shell"
@@ -110,11 +111,13 @@ func (m model) openModelPicker() (tea.Model, tea.Cmd, bool) {
 	m.pickerCursor = 0
 
 	m.modelFetchID++
-	if _, ok := findFZF(); ok {
-		m.pickerLoading = true
-		m.modelFetchesPending = 1
+	if externalModelPickerAllowed(m.autonomy) {
+		if _, ok := findFZF(); ok {
+			m.pickerLoading = true
+			m.modelFetchesPending = 1
 
-		return m, loadModelsForFZF(pickerCtx, m.registry, m.modelFetchID), true
+			return m, loadModelsForFZF(pickerCtx, m.registry, m.modelFetchID), true
+		}
 	}
 
 	providers := m.registry.ListProviders()
@@ -123,6 +126,10 @@ func (m model) openModelPicker() (tea.Model, tea.Cmd, bool) {
 	m.pickerLoading = m.modelFetchesPending > 0
 
 	return m, loadModels(pickerCtx, m.registry, providers, m.modelFetchID), true
+}
+
+func externalModelPickerAllowed(level autonomy.Level) bool {
+	return autonomy.Normalize(level).Allows(autonomy.ActionFileWrite)
 }
 
 func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -253,6 +260,7 @@ func (m model) selectModel(item pickerItem, scope appconfig.ModelScope) (tea.Mod
 			persistedModelMode,
 			modeSelected,
 			scope,
+			m.autonomy,
 			m.hookRunner,
 		)()
 
@@ -516,10 +524,14 @@ func findFZF() (string, bool) {
 	return path, true
 }
 
-func runFZFModelPicker(ctx context.Context, fzfPath string, items []pickerItem) tea.Cmd {
+func runFZFModelPicker(ctx context.Context, fzfPath string, items []pickerItem, audit shell.AuditContext) tea.Cmd {
 	var stdout bytes.Buffer
 
 	input := fzfInput(items)
+
+	if strings.TrimSpace(audit.Caller) == "" {
+		audit.Caller = "atteler.fzf_model_picker"
+	}
 
 	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
 		Program: fzfPath,
@@ -533,7 +545,7 @@ func runFZFModelPicker(ctx context.Context, fzfPath string, items []pickerItem) 
 		Stdin:  strings.NewReader(input),
 		Stdout: &stdout,
 		Mode:   shell.ModeInteractive,
-		Audit:  shell.AuditContext{Caller: "atteler.fzf_model_picker"},
+		Audit:  audit,
 	})
 	if err != nil {
 		return func() tea.Msg { return fzfModelSelectedMsg{err: err} }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/session"
 )
@@ -46,8 +47,16 @@ func headlessCommandRequested(opts cliOptions) bool {
 }
 
 func runHeadlessCommand(ctx context.Context, opts cliOptions, store *session.Store) error {
+	return runHeadlessCommandWithAutonomy(ctx, opts, store, autonomy.DefaultLevel)
+}
+
+func runHeadlessCommandWithAutonomy(ctx context.Context, opts cliOptions, store *session.Store, level autonomy.Level) error {
 	if headlessCommandCount(opts) > 1 {
 		return errors.New("headless command: choose only one of list, recover, status, cancel, or stream")
+	}
+
+	if headlessCommandMayWrite(opts) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, headlessAutonomyContext(opts)))
 	}
 
 	switch {
@@ -63,6 +72,28 @@ func runHeadlessCommand(ctx context.Context, opts cliOptions, store *session.Sto
 		return listHeadlessRuns(store)
 	default:
 		return nil
+	}
+}
+
+func headlessCommandMayWrite(opts cliOptions) bool {
+	return opts.listHeadless ||
+		opts.recoverHeadless ||
+		opts.statusHeadlessID != "" ||
+		opts.cancelHeadlessID != ""
+}
+
+func headlessAutonomyContext(opts cliOptions) string {
+	switch {
+	case opts.listHeadless:
+		return "--list-headless"
+	case opts.recoverHeadless:
+		return "--recover-headless"
+	case opts.statusHeadlessID != "":
+		return "--status-headless"
+	case opts.cancelHeadlessID != "":
+		return "--cancel-headless"
+	default:
+		return "headless command"
 	}
 }
 
@@ -610,7 +641,11 @@ func formatHookEventType(eventType events.SupportedEventType) string {
 	return eventType.Type + "\t" + eventType.Description
 }
 
-func searchSessions(store *session.Store, query string) error {
+func searchSessionsWithAutonomy(store *session.Store, query string, level autonomy.Level) error {
+	if !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "--search"))
+	}
+
 	results, err := store.Search(query)
 	if err != nil {
 		return fmt.Errorf("search sessions: %w", err)
@@ -660,6 +695,10 @@ func formatSessionSummary(summary session.Summary) string {
 		parts = append(parts, "budget="+budget)
 	}
 
+	if strings.TrimSpace(summary.Autonomy) != "" {
+		parts = append(parts, "autonomy="+summary.Autonomy)
+	}
+
 	if summary.Title != "" {
 		parts = append(parts, "title="+summary.Title)
 	}
@@ -698,6 +737,7 @@ func formatHeadlessRun(run session.HeadlessRun) string {
 		"session=" + fallbackDash(run.SessionID),
 		"agent=" + agentName,
 		"model=" + modelName,
+		"autonomy=" + fallbackDash(run.Autonomy),
 		"started=" + started,
 		"updated=" + updated,
 		"heartbeat=" + heartbeat,

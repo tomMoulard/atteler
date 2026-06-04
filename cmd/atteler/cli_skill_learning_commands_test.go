@@ -16,11 +16,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 	attskill "github.com/tommoulard/atteler/pkg/skill"
 )
 
@@ -176,6 +178,28 @@ func TestSkillLearningEffectiveEnabledRespectsPersistedDisableAll(t *testing.T) 
 	require.Empty(t, skillLearningObserversFromOptions(t.Context(), unreadableOpts, skillLearningEffectiveEnabled(unreadableOpts, true)))
 }
 
+func TestSkillLearningEnabledForAutonomyDisablesLow(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, skillLearningEnabledForAutonomy(true, autonomy.Low))
+	assert.False(t, skillLearningEnabledForAutonomy(false, autonomy.High))
+	assert.True(t, skillLearningEnabledForAutonomy(true, autonomy.Medium))
+	assert.True(t, skillLearningEnabledForAutonomy(true, autonomy.Full))
+}
+
+func TestRunSkillLearningCommandLowAutonomyBlocksStateWrites(t *testing.T) {
+	t.Parallel()
+
+	err := runSkillLearningCommandWithAutonomy(t.Context(), skillLearningCommandInput{
+		Dir:        t.TempDir(),
+		DisableAll: true,
+	}, autonomy.Low)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
+	assert.Contains(t, err.Error(), "--skill-learning-disable-all")
+}
+
 func TestRunSkillLearningCommandManagesState(t *testing.T) {
 	t.Parallel()
 
@@ -239,6 +263,8 @@ func TestRunSkillLearningCommandEditLaunchesEditorWithoutAcceptingBaseline(t *te
 	skillPath := filepath.Join(skillRoot, "SKILL.md")
 	require.NoError(t, os.MkdirAll(skillRoot, 0o750))
 	require.NoError(t, os.WriteFile(skillPath, []byte("# Plan Code Skill\n"), 0o600))
+	auditDir := filepath.Join(root, "audit")
+	t.Setenv(attshell.EnvAuditDir, auditDir)
 
 	store := attskill.NewLearningStore(storeDir)
 	require.NoError(t, store.Save(attskill.LearningState{Skills: []attskill.GeneratedSkill{{
@@ -267,6 +293,14 @@ func TestRunSkillLearningCommandEditLaunchesEditorWithoutAcceptingBaseline(t *te
 	require.NoError(t, err)
 	require.Len(t, state.Skills, 1)
 	require.Equal(t, "tracked-hash", state.Skills[0].SkillHash)
+
+	records := readCommandAuditRecords(t, auditDir)
+	require.Len(t, records, 2)
+
+	for _, record := range records {
+		require.Equal(t, "atteler.skill_learning.editor", record.Caller)
+		require.Equal(t, "medium", record.Autonomy)
+	}
 }
 
 func TestRunSkillLearningCommandEditRequiresEditor(t *testing.T) {

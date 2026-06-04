@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/vector"
 )
@@ -34,7 +35,12 @@ const (
 	vectorSearchVectorStore     = "vector-search"
 )
 
+//nolint:unparam // Compatibility wrapper kept for focused tests that exercise default-autonomy vector search.
 func runVectorSearch(ctx context.Context, cwd string, cfg appconfig.VectorConfig, opts cliOptions) error {
+	return runVectorSearchWithAutonomy(ctx, cwd, cfg, opts, autonomy.DefaultLevel)
+}
+
+func runVectorSearchWithAutonomy(ctx context.Context, cwd string, cfg appconfig.VectorConfig, opts cliOptions, level autonomy.Level) error {
 	settings, err := vectorSearchSettingsFromOptions(cwd, cfg, opts)
 	if err != nil {
 		return err
@@ -55,10 +61,10 @@ func runVectorSearch(ctx context.Context, cwd string, cfg appconfig.VectorConfig
 		fallbackPaths := vectorSearchFallbackPaths(opts.vectorIndexFiles, settings.IndexPath)
 		settings = lexicalVectorFallbackSettings(settings)
 
-		return runVectorSearchOnce(ctx, settings, opts.vectorSearch, fallbackPaths)
+		return runVectorSearchOnceWithAutonomy(ctx, settings, opts.vectorSearch, fallbackPaths, level)
 	}
 
-	err = runVectorSearchOnce(ctx, settings, opts.vectorSearch, opts.vectorIndexFiles)
+	err = runVectorSearchOnceWithAutonomy(ctx, settings, opts.vectorSearch, opts.vectorIndexFiles, level)
 	if err == nil {
 		return nil
 	}
@@ -74,7 +80,7 @@ func runVectorSearch(ctx context.Context, cwd string, cfg appconfig.VectorConfig
 	fallbackPaths := vectorSearchFallbackPaths(opts.vectorIndexFiles, settings.IndexPath)
 	settings = lexicalVectorFallbackSettings(settings)
 
-	return runVectorSearchOnce(ctx, settings, opts.vectorSearch, fallbackPaths)
+	return runVectorSearchOnceWithAutonomy(ctx, settings, opts.vectorSearch, fallbackPaths, level)
 }
 
 func runVectorSearchOnce(ctx context.Context, settings vectorSearchSettings, query string, paths []string) error {
@@ -142,6 +148,14 @@ func runVectorSearchOnce(ctx context.Context, settings vectorSearchSettings, que
 	}
 
 	return nil
+}
+
+func runVectorSearchOnceWithAutonomy(ctx context.Context, settings vectorSearchSettings, query string, paths []string, level autonomy.Level) error {
+	if len(paths) > 0 && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "--vector-index"))
+	}
+
+	return runVectorSearchOnce(ctx, settings, query, paths)
 }
 
 func prepareVectorSearchQuery(

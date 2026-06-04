@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/tommoulard/atteler/pkg/autonomy"
 )
 
 // DiagnosticSeverity identifies how strongly a config diagnostic should be
@@ -492,6 +494,8 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 			diagnostics = append(diagnostics, inspectModelAliases(path, value)...)
 		case "models":
 			diagnostics = append(diagnostics, inspectModelRoles(path, value)...)
+		case "autonomy":
+			diagnostics = append(diagnostics, inspectAutonomy(path, value)...)
 		case "default_provider", fieldDefaultModel, "event_ledger_path", "fallback_models":
 			return
 		default:
@@ -509,6 +513,31 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 	}
 
 	return diagnostics
+}
+
+func inspectAutonomy(path string, value *yaml.Node) []Diagnostic {
+	if value == nil {
+		return nil
+	}
+
+	if value.Kind != yaml.ScalarNode {
+		return []Diagnostic{autonomyDiagnostic(path, "autonomy must be one of: "+strings.Join(autonomy.SupportedValues(), ", "))}
+	}
+
+	if _, err := autonomy.Parse(value.Value); err != nil {
+		return []Diagnostic{autonomyDiagnostic(path, err.Error())}
+	}
+
+	return nil
+}
+
+func autonomyDiagnostic(path, message string) Diagnostic {
+	return Diagnostic{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    "autonomy",
+		Message:  message,
+	}
 }
 
 func inspectModelAliases(path string, value *yaml.Node) []Diagnostic {

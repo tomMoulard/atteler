@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
@@ -43,6 +44,12 @@ type gitCommandRunner func(context.Context, string, []string, shell.AuditContext
 func PublishWorkspace(ctx context.Context, cfg Config, issue Issue, workspace Workspace, logger *slog.Logger) (*PublishResult, error) {
 	if !cfg.Publish.Enabled {
 		return nil, nil
+	}
+	if err := requireAutonomyForPublish(cfg.Autonomy); err != nil {
+		return nil, err
+	}
+	if err := requireFullAutonomyCheckMonitoring(cfg.Autonomy, cfg.Publish); err != nil {
+		return nil, fmt.Errorf("publish: %w", err)
 	}
 
 	if ctx == nil {
@@ -93,6 +100,10 @@ func PublishFailureDraft(ctx context.Context, cfg Config, issue Issue, workspace
 // and pushes the rebased branch back to GitHub. Rebase conflicts are returned
 // to the orchestrator so it can dispatch a PR rework worker on the same branch.
 func UpdatePullRequestBranch(ctx context.Context, cfg Config, issue Issue, branch string, logger *slog.Logger) (string, error) {
+	if err := requireAutonomyForPublish(cfg.Autonomy); err != nil {
+		return "", err
+	}
+
 	if ctx == nil {
 		return "", errors.New("publish: context is required")
 	}
@@ -121,7 +132,7 @@ func UpdatePullRequestBranch(ctx context.Context, cfg Config, issue Issue, branc
 		client: NewGitHubClient(cfg.Tracker),
 		runGit: defaultGitCommandRunner,
 		logger: loggerOrDefault(logger),
-		audit:  symphonyIssueAudit("symphony.git", issue),
+		audit:  symphonyIssueAudit("symphony.git", issue, cfg.Autonomy),
 	}
 
 	return publisher.updatePullRequestBranch(ctx, workspace.Path, branch)
@@ -137,6 +148,9 @@ func PreparePullRequestReworkWorkspace(ctx context.Context, cfg Config, pullRequ
 
 	if normalizeState(cfg.Tracker.Kind) != trackerKindGitHub {
 		return nil
+	}
+	if err := requireAutonomyForPublish(cfg.Autonomy); err != nil {
+		return err
 	}
 
 	hasGit, err := workspaceHasGitCheckout(workspace)
@@ -198,7 +212,6 @@ func workspaceHasGitCheckout(workspace Workspace) (bool, error) {
 	return false, fmt.Errorf("publish: inspect git checkout %s: %w", gitPath, err)
 }
 
-//nolint:govet // Keep the heavyweight config first; this struct is not allocated in hot paths.
 type githubPublisher struct {
 	cfg             Config
 	client          *GitHubClient
@@ -218,7 +231,7 @@ func (p *githubPublisher) Publish(ctx context.Context, issue Issue, workspace Wo
 		return nil, err
 	}
 
-	p.audit = symphonyIssueAudit("symphony.git", issue)
+	p.audit = symphonyIssueAudit("symphony.git", issue, p.cfg.Autonomy)
 
 	branch := publishBranchName(p.cfg.Publish, issue)
 	result := &PublishResult{Branch: branch}
@@ -348,7 +361,7 @@ func (p *githubPublisher) PublishFailureDraft(ctx context.Context, issue Issue, 
 		return nil, err
 	}
 
-	p.audit = symphonyIssueAudit("symphony.git", issue)
+	p.audit = symphonyIssueAudit("symphony.git", issue, p.cfg.Autonomy)
 
 	branch := publishBranchName(p.cfg.Publish, issue)
 	result := &PublishResult{
@@ -1209,12 +1222,32 @@ func envNames(env []string) []string {
 	return names
 }
 
-func symphonyIssueAudit(caller string, issue Issue) shell.AuditContext {
+func symphonyIssueAudit(caller string, issue Issue, level autonomy.Level) shell.AuditContext {
 	return shell.AuditContext{
 		Caller:          caller,
 		IssueID:         issue.ID,
 		IssueIdentifier: issue.Identifier,
+		Autonomy:        autonomy.Normalize(level).String(),
 	}
+}
+
+func requireAutonomyForPublish(level autonomy.Level) error {
+	level = autonomy.Normalize(level)
+	for _, action := range []autonomy.Action{autonomy.ActionBranch, autonomy.ActionCommit, autonomy.ActionPush, autonomy.ActionPullRequestCreate} {
+		if !level.Allows(action) {
+			return fmt.Errorf("publish: %s", autonomy.DenialMessage(level, action, "Symphony publish requires branch, commit, push, and PR creation"))
+		}
+	}
+
+	return nil
+}
+
+func requireFullAutonomyCheckMonitoring(level autonomy.Level, publish PublishConfig) error {
+	if publish.Enabled && autonomy.Normalize(level) == autonomy.Full && !publish.MonitorChecks {
+		return errors.New("autonomy full with publish.enabled requires publish.monitor_checks: true so CI pass/failure is reported; use autonomy high for PR creation without CI monitoring")
+	}
+
+	return nil
 }
 
 func publishBranchName(cfg PublishConfig, issue Issue) string {

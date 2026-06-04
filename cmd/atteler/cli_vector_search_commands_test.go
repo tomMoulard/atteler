@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/vector"
@@ -116,6 +117,26 @@ func TestRunVectorSearchPersistsLexicalIndexAndReportsVectorizer(t *testing.T) {
 	require.NoError(t, runErr)
 	assert.Contains(t, output, "vectorizer=lexical-fallback")
 	assert.NotContains(t, output, "rebuilt=true")
+}
+
+func TestRunVectorSearchLowAutonomyBlocksIndexWrites(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	note := filepath.Join(dir, "retrieval.md")
+	require.NoError(t, os.WriteFile(note, []byte("OAuth retry retrieval notes"), 0o600))
+
+	indexPath := filepath.Join(dir, "vector-index.json")
+	err := runVectorSearchWithAutonomy(context.TODO(), dir, appconfig.VectorConfig{}, cliOptions{
+		vectorSearch:     "OAuth retry",
+		vectorIndexFiles: stringListFlag{note},
+		vectorStorePath:  indexPath,
+	}, autonomy.Low)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
+	assert.Contains(t, err.Error(), "--vector-index")
+	assert.NoFileExists(t, indexPath)
 }
 
 //nolint:paralleltest // Captures process stdout to verify user-facing CLI output.

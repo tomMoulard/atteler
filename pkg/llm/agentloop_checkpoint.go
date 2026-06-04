@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/autonomy"
 )
 
 // AgentLoopStepKind identifies what a checkpoint record describes.
@@ -107,6 +109,7 @@ type AgentLoopStep struct {
 	Iteration     int                            `json:"iteration"`
 	At            time.Time                      `json:"at"`
 	Kind          AgentLoopStepKind              `json:"kind"`
+	Autonomy      autonomy.Level                 `json:"autonomy,omitempty"`
 	Budget        AgentLoopBudget                `json:"budget,omitzero"`
 	ModelRequest  *AgentLoopModelRequestSummary  `json:"model_request,omitempty"`
 	ModelResponse *AgentLoopModelResponseSummary `json:"model_response,omitempty"`

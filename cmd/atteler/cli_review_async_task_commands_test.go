@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	attasync "github.com/tommoulard/atteler/pkg/async"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/review"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/speculate"
@@ -244,6 +245,27 @@ func TestWatchIssueOptionsDefaultsLabelsAndValidatesSeverity(t *testing.T) {
 	assert.Contains(t, err.Error(), "watch issue min severity")
 }
 
+func TestWatchCLIOptionsFromIncludesAutonomy(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, autonomy.DefaultLevel, watchCLIOptionsFrom(cliOptions{}).Autonomy)
+	assert.Equal(t, autonomy.Full, watchCLIOptionsFrom(cliOptions{}, autonomy.Full).Autonomy)
+}
+
+func TestWatchQualityInputsLowAutonomyBlocksBaselineRefExtraction(t *testing.T) {
+	t.Parallel()
+
+	_, _, _, _, err := watchQualityInputs(context.Background(), t.TempDir(), watchCLIOptions{
+		Autonomy:       autonomy.Low,
+		BaselineRef:    "main",
+		LargeFileBytes: 1024,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
+	assert.Contains(t, err.Error(), "--watch-baseline-ref")
+}
+
 func TestWatchQualityInputsLoadsBaselineFromGitBranchPoint(t *testing.T) {
 	t.Parallel()
 
@@ -294,6 +316,7 @@ func TestUpsertWatchScanIssuesWhenEnabled(t *testing.T) {
 	err := upsertWatchScanIssues(context.Background(), watchCLIOptions{
 		IssueMinSeverity: watch.SeverityMaintenance,
 		IssueUpsert:      true,
+		Autonomy:         autonomy.High,
 	}, tracker, &output)
 	require.NoError(t, err)
 
@@ -303,6 +326,32 @@ func TestUpsertWatchScanIssuesWhenEnabled(t *testing.T) {
 	assert.Equal(t, watch.IssueActionCreated, output.Issues[0].Action)
 	assert.Equal(t, 1, tracker.createCalls)
 	assert.Equal(t, 0, tracker.updateCalls)
+}
+
+func TestUpsertWatchScanIssuesRequiresHighAutonomy(t *testing.T) {
+	t.Parallel()
+
+	tracker := newFakeWatchIssueTracker()
+	output := buildWatchScanOutput([]watch.Finding{{
+		Path:     "todo.txt",
+		Kind:     watch.KindStaleTODO,
+		Severity: watch.SeverityMaintenance,
+		RuleID:   "watch." + watch.KindStaleTODO,
+		Message:  "contains stale TODO/FIXME marker",
+	}}, nil, nil, watch.GateOptions{})
+
+	err := upsertWatchScanIssues(context.Background(), watchCLIOptions{
+		IssueMinSeverity: watch.SeverityMaintenance,
+		IssueUpsert:      true,
+		Autonomy:         autonomy.Medium,
+	}, tracker, &output)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy medium blocks remote service mutations")
+	assert.Contains(t, err.Error(), "--autonomy high or full")
+	assert.Equal(t, 0, tracker.createCalls)
+	assert.Equal(t, 0, tracker.updateCalls)
+	assert.Empty(t, output.Issues)
 }
 
 func TestWatchQualityInputsRejectsInvalidGateSeverity(t *testing.T) {
@@ -432,6 +481,7 @@ func TestRunWatchScanIssueUpsertCreatesThenUpdatesByFingerprint(t *testing.T) { 
 	options := watchCLIOptions{
 		IssueMinSeverity: watch.SeverityMaintenance,
 		IssueUpsert:      true,
+		Autonomy:         autonomy.High,
 		LargeFileBytes:   1024,
 	}
 
@@ -468,6 +518,7 @@ func TestRunWatchScanJSONIncludesIssueUpserts(t *testing.T) { //nolint:parallelt
 		runErr = runWatchScanWithIssueTracker(context.Background(), root, watchCLIOptions{
 			IssueMinSeverity: watch.SeverityMaintenance,
 			IssueUpsert:      true,
+			Autonomy:         autonomy.High,
 			LargeFileBytes:   1024,
 			JSONOutput:       true,
 		}, tracker)
@@ -529,6 +580,7 @@ func TestRunWatchScanIssueUpsertSkipsSuppressedHighSeverityFindings(t *testing.T
 			RulesPath:        rulesPath,
 			SuppressionsPath: suppressionsPath,
 			IssueUpsert:      true,
+			Autonomy:         autonomy.High,
 			LargeFileBytes:   1024,
 		}, tracker)
 	})
@@ -570,6 +622,7 @@ func TestRunWatchScanGateAndIssueUpsertIgnoreBaselineHighSeverityDebt(t *testing
 			RulesPath:      rulesPath,
 			GateEnabled:    true,
 			IssueUpsert:    true,
+			Autonomy:       autonomy.High,
 			LargeFileBytes: 1024,
 		}, tracker)
 	})
@@ -797,6 +850,7 @@ func TestChildExecutionOptionsFromCLIFlags(t *testing.T) {
 
 	state := appState{
 		cwd:           t.TempDir(),
+		autonomy:      autonomy.High,
 		selectedModel: "openai/gpt-test",
 		sessionState:  session.Session{ID: "session-1"},
 	}
@@ -826,6 +880,7 @@ func TestChildExecutionOptionsFromCLIFlags(t *testing.T) {
 	assert.Equal(t, int64(300), spawnOpts.Budget.MaxOutputBytes)
 	assert.Equal(t, "openai/gpt-test", spawnOpts.Model)
 	assert.Equal(t, "openai", spawnOpts.Provider)
+	assert.Equal(t, autonomy.High.String(), spawnOpts.Autonomy)
 	assert.True(t, spawnOpts.CancelOnFailure)
 	assert.True(t, spawnOpts.Resume)
 
@@ -837,6 +892,7 @@ func TestChildExecutionOptionsFromCLIFlags(t *testing.T) {
 	assert.Equal(t, spawnOpts.RetryPolicy.MaxAttempts, asyncOpts.RetryPolicy.MaxAttempts)
 	assert.Equal(t, spawnOpts.RetryPolicy.Backoff, asyncOpts.RetryPolicy.Backoff)
 	assert.Equal(t, spawnOpts.Budget.MaxPromptTokens, asyncOpts.Budget.MaxPromptTokens)
+	assert.Equal(t, autonomy.High.String(), asyncOpts.Autonomy)
 }
 
 func TestChildExecutionLedgerPathDefaultsUnderIgnoredRunsDir(t *testing.T) {
@@ -952,6 +1008,24 @@ func TestRunTaskListCommandPersistsTaskLifecycle(t *testing.T) {
 	err = runTaskListCommand(ctx, store, taskCommandInput{FilePath: taskFile, AddTitle: "new", List: true})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "choose only one")
+}
+
+func TestRunTaskListCommandLowAutonomyBlocksMutations(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	taskFile := filepath.Join(t.TempDir(), "tasks.json")
+	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
+
+	err := runTaskListCommandWithAutonomy(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		AddTitle: "draft task package",
+	}, autonomy.Low)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
+	assert.Contains(t, err.Error(), "--task-add")
+	assert.NoFileExists(t, taskFile)
 }
 
 func TestFormatSpeculatePlan(t *testing.T) {

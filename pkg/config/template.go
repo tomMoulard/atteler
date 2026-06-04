@@ -6,6 +6,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
 )
 
@@ -48,6 +49,7 @@ func starterTemplateConfig() Config {
 		DefaultProvider: templateDefaultProvider,
 		DefaultModel:    templateDefaultModel,
 		FallbackModels:  []string{templateFallbackModel},
+		Autonomy:        autonomy.DefaultLevel.String(),
 		ModelAliases: map[string]string{
 			"mini": templateDefaultProvider + "/" + templateFallbackModel,
 		},

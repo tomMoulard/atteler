@@ -94,6 +94,7 @@ func startClient(
 	args []string,
 	env []string,
 	maxDiagnosticBytes int,
+	audit shell.AuditContext,
 ) (*rpcClient, error) {
 	select {
 	case <-startCtx.Done():
@@ -104,6 +105,9 @@ func startClient(
 	secrets := secretValuesFromEnv(env)
 	stderr := newDiagnosticBuffer(maxDiagnosticBytes, secrets)
 	stdout := newDiagnosticBuffer(maxDiagnosticBytes, secrets)
+	if strings.TrimSpace(audit.Caller) == "" {
+		audit.Caller = "atteler.lsp"
+	}
 
 	cmd, invocation, err := shell.CommandContext(startCtx, shell.CommandOptions{
 		Program:      command,
@@ -111,7 +115,7 @@ func startClient(
 		EnvList:      env,
 		Stderr:       stderr,
 		Mode:         shell.ModeStreaming,
-		Audit:        shell.AuditContext{Caller: "atteler.lsp"},
+		Audit:        audit,
 		SecretValues: secrets,
 	})
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -193,6 +194,10 @@ func runStatefulSessionWriteCommand(ctx context.Context, opts cliOptions, state 
 		return nil
 	}
 
+	if !autonomy.Normalize(state.autonomy).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(state.autonomy, autonomy.ActionFileWrite, cmd.name))
+	}
+
 	return cmd.run(ctx, input, state)
 }
 
@@ -233,7 +238,7 @@ func statefulSessionWriteCommandSet() []statefulSessionCommand[sessionWriteComma
 			}),
 		statefulSessionCmd("record-artifact", func(input sessionWriteCommandInput) bool { return input.RecordArtifact != "" },
 			func(ctx context.Context, input sessionWriteCommandInput, s appState) error {
-				return recordArtifact(ctx, s.sessionStore, s.sessionState, s.cwd, input.RecordArtifact, input.ArtifactKind, input.ArtifactLogicalPath, input.ArtifactReviewStatus, input.ArtifactSummary, s.selectedAgent)
+				return recordArtifact(ctx, s.sessionStore, s.sessionState, s.cwd, input.RecordArtifact, input.ArtifactKind, input.ArtifactLogicalPath, input.ArtifactReviewStatus, input.ArtifactSummary, s.selectedAgent, s.autonomy)
 			}),
 		statefulSessionCmd("feedback-apply", func(input sessionWriteCommandInput) bool { return input.FeedbackApplyConfig != "" },
 			func(_ context.Context, input sessionWriteCommandInput, s appState) error {
@@ -280,6 +285,10 @@ func statefulExecutionCommands() []command {
 			tier:  tierStateful,
 			match: func(o cliOptions) bool { return o.asyncRun },
 			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
+				if !autonomy.Normalize(s.autonomy).Allows(autonomy.ActionMutatingShell) {
+					return fmt.Errorf("%s", autonomy.DenialMessage(s.autonomy, autonomy.ActionMutatingShell, "--async-run"))
+				}
+
 				return runAsyncTasks(ctx, s, asyncRunCommandInputFromOptions(o))
 			},
 		},
@@ -326,7 +335,7 @@ func statefulRetrievalCommands() []command {
 					o.agentMemoryMigrate)
 			},
 			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
-				return runAgentMemoryCommand(ctx, s.cwd, s.selectedAgent, s.vectorConfig, agentMemoryCommandInputFromOptions(o))
+				return runAgentMemoryCommandWithAutonomy(ctx, s.cwd, s.selectedAgent, s.vectorConfig, agentMemoryCommandInputFromOptions(o), s.autonomy)
 			},
 		},
 		{
@@ -334,6 +343,10 @@ func statefulRetrievalCommands() []command {
 			tier:  tierStateful,
 			match: func(o cliOptions) bool { return o.mergeArtifactsPath != "" },
 			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
+				if !autonomy.Normalize(s.autonomy).Allows(autonomy.ActionFileWrite) {
+					return fmt.Errorf("%s", autonomy.DenialMessage(s.autonomy, autonomy.ActionFileWrite, "--merge-artifacts"))
+				}
+
 				return mergeArtifacts(ctx, s, o.mergeArtifactsPath, o.mergeArtifactsFormat, o.mergeArtifactMaxBytes.value)
 			},
 		},

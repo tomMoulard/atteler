@@ -22,6 +22,7 @@ type sessionDetails struct {
 	DefaultModel      string                      `yaml:"default_model,omitempty"`
 	DefaultReasoning  string                      `yaml:"default_reasoning_level,omitempty"`
 	DefaultModelMode  string                      `yaml:"default_model_mode,omitempty"`
+	Autonomy          string                      `yaml:"autonomy,omitempty"`
 	AgentLoopBudget   *agentLoopBudgetDetails     `yaml:"agent_loop_budget,omitempty"`
 	WorktreePath      string                      `yaml:"worktree_path,omitempty"`
 	WorktreeBranch    string                      `yaml:"worktree_branch,omitempty"`
@@ -94,6 +95,10 @@ func formatSessionDetailsSummary(sessionState session.Session, path string) stri
 		parts = append(parts, "mode="+sessionState.DefaultModelMode)
 	}
 
+	if sessionState.Autonomy != "" {
+		parts = append(parts, "autonomy="+sessionState.Autonomy)
+	}
+
 	if budget := formatAgentLoopBudgetCompact(sessionState.AgentLoopBudget); budget != "" {
 		parts = append(parts, "budget="+budget)
 	}
@@ -127,6 +132,7 @@ func formatSessionDetails(sessionState session.Session, path string) (string, er
 		DefaultModel:     sessionState.DefaultModel,
 		DefaultReasoning: sessionState.DefaultReasoningLevel,
 		DefaultModelMode: sessionState.DefaultModelMode,
+		Autonomy:         sessionState.Autonomy,
 		AgentLoopBudget:  sessionAgentLoopBudgetDetails(sessionState.AgentLoopBudget),
 		WorktreePath:     sessionState.WorktreePath,
 		WorktreeBranch:   sessionState.WorktreeBranch,

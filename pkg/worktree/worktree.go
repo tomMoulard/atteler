@@ -33,9 +33,21 @@ const (
 
 var safeSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
+type auditContextKey struct{}
+
 // ErrContextRequired is returned by compatibility helpers that would otherwise
 // need to manufacture a hidden root context for git commands.
 var ErrContextRequired = errors.New("worktree: context is required")
+
+// WithAuditContext annotates git command audit records created by worktree
+// operations.
+func WithAuditContext(ctx context.Context, audit shell.AuditContext) context.Context {
+	if ctx == nil {
+		return nil
+	}
+
+	return context.WithValue(ctx, auditContextKey{}, audit)
+}
 
 func requireCommandContext(ctx context.Context) error {
 	if ctx == nil {
@@ -2125,7 +2137,7 @@ func gitCommand(ctx context.Context, dir string, stderr, stdout *bytes.Buffer, a
 		Args:    args,
 		Dir:     dir,
 		Mode:    shell.ModeCaptured,
-		Audit:   shell.AuditContext{Caller: "atteler.worktree.git"},
+		Audit:   gitAuditContext(ctx),
 	}
 	if stderr != nil {
 		opts.Stderr = stderr
@@ -2145,6 +2157,22 @@ func gitCommand(ctx context.Context, dir string, stderr, stdout *bytes.Buffer, a
 	}
 
 	return cmd, invocation, nil
+}
+
+func gitAuditContext(ctx context.Context) shell.AuditContext {
+	audit := shell.AuditContext{Caller: "atteler.worktree.git"}
+	if ctx == nil {
+		return audit
+	}
+
+	if value, ok := ctx.Value(auditContextKey{}).(shell.AuditContext); ok {
+		audit = value
+		if strings.TrimSpace(audit.Caller) == "" {
+			audit.Caller = "atteler.worktree.git"
+		}
+	}
+
+	return audit
 }
 
 // parseWorktreeList parses the porcelain output of `git worktree list`

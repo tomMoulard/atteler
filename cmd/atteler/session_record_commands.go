@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/artifactmerge"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	atteval "github.com/tommoulard/atteler/pkg/eval"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
@@ -621,12 +622,14 @@ func recordArtifact(
 	reviewStatus string,
 	summary string,
 	sourceAgent string,
+	level autonomy.Level,
 ) error {
 	artifact, err := artifactmerge.CaptureArtifact(ctx, cwd, sessionState, path, kind, summary, sourceAgent, artifactmerge.CaptureOptions{
 		MaxBytes:      watch.DefaultLargeFileBytes,
 		LogicalPath:   logicalPath,
 		SourceCommand: "record-artifact",
 		SourceTool:    "atteler",
+		Autonomy:      autonomy.Normalize(level).String(),
 	})
 	if err != nil {
 		return fmt.Errorf("record artifact: %w", err)

@@ -87,6 +87,7 @@ type ExportSessionMetadata struct {
 	DefaultReasoningLevel  string              `json:"default_reasoning_level,omitempty"`
 	DefaultModelMode       string              `json:"default_model_mode,omitempty"`
 	DefaultAgent           string              `json:"default_agent,omitempty"`
+	Autonomy               string              `json:"autonomy,omitempty"`
 	AgentLoopBudget        llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
 	WorktreePath           string              `json:"worktree_path,omitempty"`
 	WorktreeBranch         string              `json:"worktree_branch,omitempty"`
@@ -452,6 +453,7 @@ func BuildMachineReadableExport(session Session, options ExportOptions) MachineR
 			DefaultModel:           builder.exportString("session.default_model", SearchFieldModel, session.DefaultModel),
 			DefaultReasoningLevel:  builder.exportString("session.default_reasoning_level", SearchFieldModel, session.DefaultReasoningLevel),
 			DefaultModelMode:       builder.exportString("session.default_model_mode", SearchFieldModel, session.DefaultModelMode),
+			Autonomy:               builder.exportString("session.autonomy", SearchFieldSession, session.Autonomy),
 			AgentLoopBudget:        session.AgentLoopBudget,
 			WorktreePath:           builder.exportString("session.worktree_path", SearchFieldRepo, session.WorktreePath),
 			WorktreeBranch:         builder.exportString("session.worktree_branch", SearchFieldRepo, session.WorktreeBranch),

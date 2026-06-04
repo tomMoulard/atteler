@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -20,7 +19,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/session"
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 const (
@@ -176,6 +177,8 @@ type CaptureOptions struct {
 	LogicalPath   string
 	SourceCommand string
 	SourceTool    string
+	Autonomy      string
+	AuditDir      string
 	MaxBytes      int64
 }
 
@@ -327,7 +330,7 @@ func CaptureArtifact(
 		return session.Artifact{}, fmt.Errorf("artifactmerge: validate %s: %s", warning.Path, warning.Reason)
 	}
 
-	metadata := captureGitMetadata(ctx, rootInfo.abs)
+	metadata := captureGitMetadata(ctx, rootInfo.abs, options)
 	logicalPath := normalizeLogicalPath(options.LogicalPath)
 
 	if logicalPath == "" {
@@ -783,33 +786,46 @@ func sameContent(entries []*Entry) bool {
 	return true
 }
 
-func captureGitMetadata(ctx context.Context, root string) gitMetadata {
+func captureGitMetadata(ctx context.Context, root string, options CaptureOptions) gitMetadata {
 	metadata := gitMetadata{}
-	if commit, ok := gitOutput(ctx, root, "rev-parse", "HEAD"); ok {
+	audit := artifactGitAuditContext(options)
+
+	if commit, ok := gitOutput(ctx, root, audit, "rev-parse", "HEAD"); ok {
 		metadata.Commit = commit
 	}
 
-	if branch, ok := gitOutput(ctx, root, "branch", "--show-current"); ok {
+	if branch, ok := gitOutput(ctx, root, audit, "branch", "--show-current"); ok {
 		metadata.Branch = branch
 	}
 
-	if status, ok := gitOutput(ctx, root, "status", "--porcelain"); ok {
+	if status, ok := gitOutput(ctx, root, audit, "status", "--porcelain"); ok {
 		metadata.Dirty = strings.TrimSpace(status) != ""
 	}
 
 	return metadata
 }
 
-func gitOutput(ctx context.Context, root string, args ...string) (string, bool) {
-	gitArgs := append([]string{"-C", root}, args...)
-	cmd := exec.CommandContext(ctx, "git", gitArgs...)
+func artifactGitAuditContext(options CaptureOptions) shell.AuditContext {
+	return shell.AuditContext{
+		Caller:   "artifactmerge.git_metadata",
+		Autonomy: autonomy.Normalize(autonomy.Level(options.Autonomy)).String(),
+		AuditDir: options.AuditDir,
+	}
+}
 
-	out, err := cmd.Output()
+func gitOutput(ctx context.Context, root string, audit shell.AuditContext, args ...string) (string, bool) {
+	result, err := shell.RunCommand(ctx, shell.CommandOptions{
+		Program: "git",
+		Args:    args,
+		Dir:     root,
+		Mode:    shell.ModeCaptured,
+		Audit:   audit,
+	})
 	if err != nil {
 		return "", false
 	}
 
-	return strings.TrimSpace(string(out)), true
+	return strings.TrimSpace(result.Stdout), true
 }
 
 func renderMarkdown(entries []Entry) string {

@@ -530,6 +530,19 @@ func TestMergeConfigModelRolesFromOrigins_CanClearScalars(t *testing.T) {
 	assert.Equal(t, "false", origin.Value)
 }
 
+func TestLoadFiles_AutonomyScalarMerges(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	global := writeConfig(t, dir, "global.yaml", `autonomy: low`)
+	local := writeConfig(t, dir, "local.yaml", `autonomy: high`)
+
+	cfg, loaded, err := LoadFiles([]string{global, local})
+	require.NoError(t, err)
+	assert.Equal(t, []string{global, local}, loaded)
+	assert.Equal(t, "high", cfg.Autonomy)
+}
+
 func TestLoadFiles_ConfiguresAllAgentLoopBudgetFields(t *testing.T) {
 	t.Parallel()
 

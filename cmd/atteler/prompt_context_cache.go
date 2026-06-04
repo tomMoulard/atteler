@@ -453,6 +453,11 @@ func promptTaskSource(
 
 func promptRepoSnapshotForState(ctx context.Context, state appState, opts promptCompletionContextOptions) promptRepoContextSnapshot {
 	key := promptContextCacheKeyForState(state)
+	ctx = contextWithPromptGitAutonomy(ctx, state.autonomy)
+
+	if !promptGitCompletionAllowed(state.autonomy) {
+		return buildPromptRepoContextSnapshot(ctx, key, opts)
+	}
 
 	cache := state.promptContextCache
 	if cache == nil {
@@ -775,11 +780,17 @@ func buildPromptRepoContextSnapshot(
 	}
 
 	jobs := []repoSourceJob{}
+	gitAllowed := promptGitCompletionAllowed(promptGitAutonomyFromContext(ctx))
 
 	if key.GitRevision == promptGitRevisionNoGit {
 		snapshot.Sources = append(snapshot.Sources,
 			promptContextSourceReport(promptContextSourceGitBranch, promptContextFreshnessSkipped, "no .git metadata"),
 			promptContextSourceReport(promptContextSourceGitStatus, promptContextFreshnessSkipped, "no .git metadata"),
+		)
+	} else if !gitAllowed {
+		snapshot.Sources = append(snapshot.Sources,
+			promptContextSourceReport(promptContextSourceGitBranch, promptContextFreshnessSkipped, "autonomy low skips git completion probes"),
+			promptContextSourceReport(promptContextSourceGitStatus, promptContextFreshnessSkipped, "autonomy low skips git completion probes"),
 		)
 	} else {
 		jobs = append(jobs,

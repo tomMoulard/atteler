@@ -15,7 +15,7 @@ func Run(ctx context.Context, opts Options) error {
 
 	logger := loggerOrDefault(opts.Logger)
 
-	manager, err := NewWorkflowManager(opts.WorkDir, opts.WorkflowPath)
+	manager, err := workflowManagerFromOptions(opts)
 	if err != nil {
 		return err
 	}
@@ -52,6 +52,7 @@ func Run(ctx context.Context, opts Options) error {
 		"workflow_path", snapshot.Config.WorkflowPath,
 		"tracker_kind", snapshot.Config.Tracker.Kind,
 		"workspace_root", snapshot.Config.Workspace.Root,
+		"autonomy", snapshot.Config.Autonomy.String(),
 		"debug_enabled", snapshot.Config.Debug.Enabled,
 		"debug_address", snapshot.Config.Debug.Address,
 	)
@@ -62,11 +63,17 @@ func Run(ctx context.Context, opts Options) error {
 // ValidateWorkflow loads and validates the selected workflow without starting
 // the scheduler.
 func ValidateWorkflow(ctx context.Context, workDir, workflowPath string) (Config, error) {
+	return ValidateWorkflowWithOptions(ctx, Options{WorkDir: workDir, WorkflowPath: workflowPath})
+}
+
+// ValidateWorkflowWithOptions loads and validates the selected workflow using
+// the same option overrides as Run, without starting the scheduler.
+func ValidateWorkflowWithOptions(ctx context.Context, opts Options) (Config, error) {
 	if ctx == nil {
 		return Config{}, errors.New("symphony validate: context is required")
 	}
 
-	manager, err := NewWorkflowManager(workDir, workflowPath)
+	manager, err := workflowManagerFromOptions(opts)
 	if err != nil {
 		return Config{}, err
 	}
@@ -77,4 +84,19 @@ func ValidateWorkflow(ctx context.Context, workDir, workflowPath string) (Config
 	}
 
 	return snapshot.Config, nil
+}
+
+func workflowManagerFromOptions(opts Options) (*WorkflowManager, error) {
+	manager, err := NewWorkflowManager(opts.WorkDir, opts.WorkflowPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if opts.Autonomy != "" {
+		if err := manager.SetAutonomyOverride(opts.Autonomy); err != nil {
+			return nil, err
+		}
+	}
+
+	return manager, nil
 }

@@ -381,6 +381,25 @@ func TestRunBash_CentralPermissionDenialRedactsCredentialAssignments(t *testing.
 	require.Contains(t, records[0].DecisionReason, "API_TOKEN=<redacted:API_TOKEN>")
 }
 
+func TestRunBash_AuditRecordsAutonomy(t *testing.T) {
+	t.Parallel()
+
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	_, err := RunBash(context.Background(), Options{
+		Command: "printf ok",
+		Audit: AuditContext{
+			AuditDir: auditDir,
+			Autonomy: "medium",
+		},
+	})
+	require.NoError(t, err)
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 2)
+	require.Equal(t, "medium", records[0].Autonomy)
+	require.Equal(t, "medium", records[1].Autonomy)
+}
+
 func TestRunBash_CommandDenyRuleInspectsShellCommandString(t *testing.T) {
 	t.Parallel()
 

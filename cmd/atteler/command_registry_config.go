@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/tommoulard/atteler/pkg/autonomy"
 )
 
 func providerlessConfigAgentPluginCommands() []command {
@@ -78,7 +80,11 @@ func providerlessConfigAgentPluginCommands() []command {
 			name:  "feedback-rollback",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.feedbackRollbackConfig != "" },
-			runProviderlessConfig: func(_ context.Context, o cliOptions, _ appState) error {
+			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
+				if !autonomy.Normalize(s.autonomy).Allows(autonomy.ActionFileWrite) {
+					return fmt.Errorf("%s", autonomy.DenialMessage(s.autonomy, autonomy.ActionFileWrite, "--feedback-rollback"))
+				}
+
 				return rollbackFeedbackGuidance(
 					o.feedbackRollbackConfig,
 					o.feedbackHistoryPath,
@@ -92,7 +98,11 @@ func providerlessConfigAgentPluginCommands() []command {
 			name:  "feedback-approve",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.feedbackApproveConfig != "" },
-			runProviderlessConfig: func(_ context.Context, o cliOptions, _ appState) error {
+			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
+				if !autonomy.Normalize(s.autonomy).Allows(autonomy.ActionFileWrite) {
+					return fmt.Errorf("%s", autonomy.DenialMessage(s.autonomy, autonomy.ActionFileWrite, "--feedback-approve"))
+				}
+
 				return approveFeedbackGuidance(
 					o.feedbackApproveConfig,
 					o.feedbackHistoryPath,
@@ -122,6 +132,10 @@ func providerlessConfigAgentPluginCommands() []command {
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.runPluginTarget != "" },
 			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
+				if !o.pluginDryRun && !autonomy.Normalize(s.autonomy).Allows(autonomy.ActionMutatingShell) {
+					return fmt.Errorf("%s", autonomy.DenialMessage(s.autonomy, autonomy.ActionMutatingShell, "--run-plugin"))
+				}
+
 				return runPluginEntrypoint(
 					ctx,
 					s.pluginPaths,
@@ -130,6 +144,7 @@ func providerlessConfigAgentPluginCommands() []command {
 					o.pluginEntrypoint,
 					o.pluginDryRun,
 					o.pluginTimeout.value,
+					s.autonomy,
 				)
 			},
 		},
@@ -154,7 +169,7 @@ func providerlessConfigLocalAnalysisCommands() []command {
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.gitHistorySearch != "" },
 			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
-				return runGitHistorySearch(ctx, s.cwd, o.gitHistorySearch, o.gitHistoryLimit.value)
+				return runGitHistorySearch(ctx, s.cwd, o.gitHistorySearch, o.gitHistoryLimit.value, s.autonomy)
 			},
 		},
 		{
@@ -170,7 +185,7 @@ func providerlessConfigLocalAnalysisCommands() []command {
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.watchLoop },
 			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
-				return runWatchLoop(ctx, s.cwd, watchCLIOptionsFrom(o), o.watchIntervalSeconds.value, o.watchMaxIterations.value)
+				return runWatchLoop(ctx, s.cwd, watchCLIOptionsFrom(o, s.autonomy), o.watchIntervalSeconds.value, o.watchMaxIterations.value)
 			},
 		},
 		{
@@ -178,7 +193,7 @@ func providerlessConfigLocalAnalysisCommands() []command {
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.watchScan },
 			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
-				return runWatchScan(ctx, s.cwd, watchCLIOptionsFrom(o))
+				return runWatchScan(ctx, s.cwd, watchCLIOptionsFrom(o, s.autonomy))
 			},
 		},
 		{
@@ -186,7 +201,7 @@ func providerlessConfigLocalAnalysisCommands() []command {
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.reviewScan },
 			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
-				return runReviewScan(ctx, s.cwd, watchCLIOptionsFrom(o))
+				return runReviewScan(ctx, s.cwd, watchCLIOptionsFrom(o, s.autonomy))
 			},
 		},
 	}

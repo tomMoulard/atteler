@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
@@ -157,6 +158,7 @@ type Observer interface {
 // Runner emits events to configured hooks.
 type Runner struct {
 	deliveryCtx context.Context
+	autonomy    autonomy.Level
 	logger      *Logger
 	ledger      *Ledger
 	hooks       map[string][]Hook
@@ -238,7 +240,7 @@ func (r *Runner) WithLogger(logWriter io.Writer) *Runner {
 		return NewRunnerWithLogger(nil, logWriter)
 	}
 
-	return r.clone(logWriter, append([]Observer(nil), r.observers...))
+	return r.clone(NewLogger(logWriter), append([]Observer(nil), r.observers...))
 }
 
 // WithLoggerAndObservers returns a runner with the same hooks, durable ledger,
@@ -248,30 +250,32 @@ func (r *Runner) WithLoggerAndObservers(logWriter io.Writer, observers ...Observ
 		return NewRunnerWithLoggerAndObservers(nil, logWriter, observers...)
 	}
 
-	return r.clone(logWriter, compactObservers(observers))
+	return r.clone(NewLogger(logWriter), compactObservers(observers))
 }
 
-func (r *Runner) clone(logWriter io.Writer, observers []Observer) *Runner {
-	hooks := make(map[string][]Hook, len(r.hooks))
-	for eventType, configured := range r.hooks {
-		for _, hook := range configured {
-			hooks[eventType] = append(hooks[eventType], Hook{
-				Command:      append([]string(nil), hook.Command...),
-				Env:          cloneMap(hook.Env),
-				Timeout:      hook.Timeout,
-				RetryBackoff: hook.RetryBackoff,
-				MaxAttempts:  hook.MaxAttempts,
-				PayloadMode:  hook.PayloadMode,
-				InheritEnv:   hook.InheritEnv,
-				Blocking:     hook.Blocking,
-			})
-		}
+// WithAutonomy returns a runner that annotates events with level before
+// logging, notifying observers, or running hooks. The runner-level autonomy is
+// the active execution boundary, so it intentionally overrides any event-level
+// value that may have been supplied by lower-level emitters.
+func (r *Runner) WithAutonomy(level autonomy.Level) *Runner {
+	if r == nil {
+		return nil
 	}
 
+	level = autonomy.Normalize(level)
+
+	cloned := r.clone(r.logger, append([]Observer(nil), r.observers...))
+	cloned.autonomy = level
+
+	return cloned
+}
+
+func (r *Runner) clone(logger *Logger, observers []Observer) *Runner {
 	return &Runner{
 		deliveryCtx: r.deliveryCtx,
-		hooks:       hooks,
-		logger:      NewLogger(logWriter),
+		autonomy:    r.autonomy,
+		hooks:       cloneHooks(r.hooks),
+		logger:      logger,
 		ledger:      r.ledger,
 		observers:   observers,
 		wg:          r.waitGroup(),
@@ -288,6 +292,8 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 	if err != nil {
 		return err
 	}
+
+	event = r.applyDefaultAutonomy(event)
 
 	if r.logger != nil {
 		r.logger.Log(event)
@@ -359,6 +365,21 @@ func normalizeEventFields(event Event) Event {
 	if event.EventID == "" {
 		event.EventID = nextEventID(event.Timestamp)
 	}
+
+	return event
+}
+
+func (r *Runner) applyDefaultAutonomy(event Event) Event {
+	if r == nil || r.autonomy == "" {
+		return event
+	}
+
+	event.Metadata = maps.Clone(event.Metadata)
+	if event.Metadata == nil {
+		event.Metadata = make(map[string]string, 1)
+	}
+
+	event.Metadata["autonomy"] = autonomy.Normalize(r.autonomy).String()
 
 	return event
 }
@@ -446,6 +467,30 @@ func compactObservers(observers []Observer) []Observer {
 	for _, observer := range observers {
 		if observer != nil {
 			out = append(out, observer)
+		}
+	}
+
+	return out
+}
+
+func cloneHooks(in map[string][]Hook) map[string][]Hook {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string][]Hook, len(in))
+	for eventType, configured := range in {
+		for _, hook := range configured {
+			out[eventType] = append(out[eventType], Hook{
+				Command:      append([]string(nil), hook.Command...),
+				Env:          cloneMap(hook.Env),
+				Timeout:      hook.Timeout,
+				RetryBackoff: hook.RetryBackoff,
+				MaxAttempts:  hook.MaxAttempts,
+				PayloadMode:  hook.PayloadMode,
+				InheritEnv:   hook.InheritEnv,
+				Blocking:     hook.Blocking,
+			})
 		}
 	}
 
@@ -579,6 +624,29 @@ func runHook(ctx context.Context, hook Hook, event Event, payload []byte) hookRu
 
 	var stderr hookStderrCounter
 
+	autonomyLevel := eventAutonomyLevel(event)
+	if autonomyLevel == autonomy.Low {
+		// Low autonomy is advisory-only: do not even enter the shell policy
+		// path, because denied shell invocations are audited to disk.
+		err := fmt.Errorf("events: autonomy low blocks event hook command %q", hookAuditCommand(hook.Command))
+
+		return hookRunResult{
+			Err:          err,
+			Outcome:      HookOutcomeDenied,
+			ErrorSummary: "hook authorization failed",
+			Duration:     time.Since(started),
+		}
+	}
+
+	if err := authorizeEventHookAutonomy(autonomyLevel, hook.Command); err != nil {
+		return hookRunResult{
+			Err:          err,
+			Outcome:      HookOutcomeDenied,
+			ErrorSummary: "hook authorization failed",
+			Duration:     time.Since(started),
+		}
+	}
+
 	cmd, invocation, err := shell.CommandContext(hookCtx, shell.CommandOptions{
 		Program: hook.Command[0],
 		Args:    hook.Command[1:],
@@ -586,12 +654,13 @@ func runHook(ctx context.Context, hook Hook, event Event, payload []byte) hookRu
 		Stderr:  &stderr,
 		EnvList: hookEnvList(hook, event),
 		EnvMode: shell.EnvModeExplicitOnly,
-		Policy:  hookPolicy(hook),
+		Policy:  hookPolicy(hook, autonomyLevel),
 		Mode:    shell.ModeCaptured,
 		Audit: shell.AuditContext{
 			Caller:      "atteler.event_hook." + event.Type,
 			SessionID:   event.SessionID,
 			SessionPath: event.SessionPath,
+			Autonomy:    eventAutonomy(event),
 		},
 		SecretValues: hook.Command,
 	})
@@ -789,9 +858,13 @@ func hookEnvList(hook Hook, event Event) []string {
 	return env
 }
 
-func hookPolicy(hook Hook) *shell.Policy {
+func hookPolicy(hook Hook, level autonomy.Level) *shell.Policy {
 	policy := shell.DefaultPolicy()
 	policy.AllowCredentialEnv = hookAllowedCredentialEnv(hook)
+
+	if autonomy.Normalize(level) == autonomy.Low && len(hook.Command) > 0 {
+		policy.DenyCommands = []string{hook.Command[0]}
+	}
 
 	return &policy
 }
@@ -968,7 +1041,7 @@ func slogWarnHookDelivery(eventType string, hook Hook, err error) {
 }
 
 func eventEnv(event Event, extra map[string]string) []string {
-	env := make([]string, 0, len(extra)+10)
+	env := make([]string, 0, len(extra)+11)
 	for key, value := range extra {
 		if isReservedEventEnvKey(key) {
 			continue
@@ -1005,6 +1078,10 @@ func eventEnv(event Event, extra map[string]string) []string {
 
 	if event.Role != "" {
 		env = append(env, eventEnvEntry("ATTELER_ROLE", event.Role))
+	}
+
+	if level := eventAutonomy(event); level != "" {
+		env = append(env, eventEnvEntry("ATTELER_AUTONOMY", level))
 	}
 
 	if event.Redacted {
@@ -1076,6 +1153,7 @@ func isReservedEventEnvKey(key string) bool {
 		strings.EqualFold(key, "ATTELER_AGENT"),
 		strings.EqualFold(key, "ATTELER_MODEL"),
 		strings.EqualFold(key, "ATTELER_ROLE"),
+		strings.EqualFold(key, "ATTELER_AUTONOMY"),
 		strings.EqualFold(key, "ATTELER_EVENT_REDACTED"),
 		strings.EqualFold(key, "ATTELER_EVENT_TRUNCATED"),
 		strings.EqualFold(key, "ATTELER_EVENT_SCHEMA_VERSION"),
@@ -1084,6 +1162,28 @@ func isReservedEventEnvKey(key string) bool {
 	default:
 		return false
 	}
+}
+
+func eventAutonomy(event Event) string {
+	if len(event.Metadata) == 0 {
+		return ""
+	}
+
+	return strings.TrimSpace(event.Metadata["autonomy"])
+}
+
+func eventAutonomyLevel(event Event) autonomy.Level {
+	raw := eventAutonomy(event)
+	if raw == "" {
+		return ""
+	}
+
+	level, err := autonomy.Parse(raw)
+	if err != nil {
+		return ""
+	}
+
+	return level
 }
 
 func cloneMap(in map[string]string) map[string]string {

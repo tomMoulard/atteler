@@ -9,6 +9,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 func TestParseWorkflow_FrontMatterAndPrompt(t *testing.T) {
@@ -55,6 +58,86 @@ func TestResolveConfig_GitHubDefaultsAndRepository(t *testing.T) {
 	assert.Equal(t, []string{"OPEN"}, cfg.Tracker.ActiveStates)
 	assert.Equal(t, []string{"CLOSED"}, cfg.Tracker.TerminalStates)
 	assert.Equal(t, filepath.Join(dir, "workspaces"), cfg.Workspace.Root)
+	assert.Equal(t, autonomy.DefaultLevel, cfg.Autonomy)
+}
+
+func TestResolveConfig_Autonomy(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	cfg, err := ResolveConfig(t.Context(), map[string]any{
+		"autonomy": "full",
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+		},
+	}, path)
+	require.NoError(t, err)
+	assert.Equal(t, autonomy.Full, cfg.Autonomy)
+}
+
+func TestWorkflowManager_AutonomyOverridePersistsAcrossReloads(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+	writeWorkflow := func(level, prompt string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(path, []byte("---\nautonomy: "+level+"\ntracker:\n  kind: github\n  repository: openai/symphony\n---\n"+prompt+"\n"), 0o600))
+	}
+
+	writeWorkflow("low", "first")
+
+	manager, err := NewWorkflowManager(dir, path)
+	require.NoError(t, err)
+	require.NoError(t, manager.SetAutonomyOverride(autonomy.Full))
+
+	snapshot, err := manager.Load(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, autonomy.Full, snapshot.Config.Autonomy)
+
+	writeWorkflow("medium", "second prompt with different size")
+
+	future := time.Now().Add(time.Second)
+	require.NoError(t, os.Chtimes(path, future, future))
+
+	snapshot, changed, err := manager.ReloadIfChanged(t.Context())
+	require.NoError(t, err)
+	require.True(t, changed)
+	assert.Equal(t, autonomy.Full, snapshot.Config.Autonomy)
+}
+
+func TestWorkflowManager_AutonomyOverrideAppliesBeforeGitHubCLIFallback(t *testing.T) {
+	t.Setenv(githubTokenEnv, "")
+	t.Setenv(githubCLITokenEnv, "")
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	t.Setenv(shell.EnvAuditDir, auditDir)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+	require.NoError(t, os.WriteFile(path, []byte("---\nautonomy: high\ntracker:\n  kind: github\n  repository: openai/symphony\n---\nDo the issue.\n"), 0o600))
+
+	_, err := ValidateWorkflowWithOptions(t.Context(), Options{WorkflowPath: path, Autonomy: autonomy.Low})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing_github_token")
+	assert.NoFileExists(t, filepath.Join(auditDir, "commands.jsonl"))
+}
+
+func TestResolveConfig_RejectsInvalidAutonomy(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	_, err := ResolveConfig(t.Context(), map[string]any{
+		"autonomy": "unsafe",
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+		},
+	}, path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported autonomy")
 }
 
 func TestResolveConfig_PublishDefaultsRemoveTrackerLabels(t *testing.T) {
@@ -291,6 +374,27 @@ func TestResolveConfig_PublishCheckMonitorConfig(t *testing.T) {
 	assert.Equal(t, PullRequestNoChecksPending, cfg.Publish.NoChecksPolicy)
 	assert.False(t, cfg.Publish.DiscoverRequiredChecks)
 	assert.True(t, cfg.Publish.ReworkOptionalChecks)
+}
+
+func TestResolveConfig_FullPublishRequiresCheckMonitoring(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	_, err := ResolveConfig(t.Context(), map[string]any{
+		"autonomy": "full",
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+			"labels":     []any{"symphony"},
+		},
+		"publish": map[string]any{
+			"enabled": true,
+		},
+	}, path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy full with publish.enabled requires publish.monitor_checks: true")
+	assert.Contains(t, err.Error(), "use autonomy high")
 }
 
 func TestResolveConfig_RejectsInvalidPublishNoChecksPolicy(t *testing.T) {
