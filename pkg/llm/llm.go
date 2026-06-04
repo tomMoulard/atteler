@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -114,6 +115,7 @@ type CompleteParams struct {
 
 // Response is the provider-normalised result of a completion.
 type Response struct {
+	metadata              map[string]string
 	Content               string
 	Provider              string // Provider that produced the response.
 	Model                 string // Model that actually answered.
@@ -711,6 +713,14 @@ func (r *Registry) CompleteWithFallback(
 
 		resp, err := r.complete(ctx, next, retryCfg)
 		if err == nil {
+			if len(failures) > 0 {
+				r.mu.RLock()
+				readiness := r.readinessReportLocked()
+				r.mu.RUnlock()
+
+				resp = responseWithFallbackMetadata(resp, fallbackMetadataForAttempts(failures, readiness))
+			}
+
 			return resp, nil
 		}
 
@@ -737,6 +747,35 @@ func (r *Registry) CompleteWithFallback(
 	r.mu.RUnlock()
 
 	return nil, newFallbackError(failures, readiness)
+}
+
+func responseWithFallbackMetadata(resp *Response, metadata map[string]string) *Response {
+	if resp == nil || len(metadata) == 0 {
+		return resp
+	}
+
+	resp.metadata = mergeResponseMetadata(resp.metadata, metadata)
+
+	return resp
+}
+
+func mergeResponseMetadata(existing, metadata map[string]string) map[string]string {
+	out := make(map[string]string, len(existing)+len(metadata))
+	maps.Copy(out, existing)
+	maps.Copy(out, metadata)
+
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(in))
+	maps.Copy(out, in)
+
+	return out
 }
 
 func (r *Registry) fallbackRetryConfig(hasAlternateRoute bool) retryConfig {

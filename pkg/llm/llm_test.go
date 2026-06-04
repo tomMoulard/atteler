@@ -1809,6 +1809,12 @@ func TestRegistry_CompleteWithFallbackSkipsRateLimitedProviderSiblings(t *testin
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "ok", resp.Content)
+	require.NotEmpty(t, resp.metadata)
+	assert.Contains(t, resp.metadata["fallback_failure_classifications"], "claude-code="+string(providerFailureRateLimit))
+	assert.Contains(t, resp.metadata["fallback_attempts"], "claude-code/claude-opus-4-7")
+	assert.Contains(t, resp.metadata["fallback_attempts"], "claude-code/claude-sonnet-4-5")
+	assert.Contains(t, resp.metadata["fallback_rate_limit_scopes"], "="+modelroute.RateLimitScopeProvider)
+	assert.Equal(t, providerClaudeCode, resp.metadata["rate_limited_providers"])
 	require.Len(t, claudeCode.calls, 1, "second claude-code route should be skipped after provider rate limit")
 	require.Len(t, anthropic.calls, 1, "fallback should continue to another provider")
 

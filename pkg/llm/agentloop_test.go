@@ -916,6 +916,55 @@ func TestAgentLoop_CheckpointStopMetadataClassifiesFallbackFailures(t *testing.T
 	assert.Contains(t, metadata["provider_readiness"], "OpenAI regional hostname mismatch")
 }
 
+func TestAgentLoop_CheckpointResponseMetadataClassifiesSuccessfulFallbackFailures(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.SetRetry(retryConfig{})
+	reg.Register(&fakeProvider{
+		err:    errors.New(`claude code: HTTP 429: {"type":"error","error":{"type":"rate_limit_error","message":"Error"}}`),
+		name:   providerClaudeCode,
+		models: []string{"claude-opus-4-7"},
+		resp:   &Response{},
+	})
+	reg.Register(&fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "fallback ok"},
+	})
+
+	ledger := &AgentLoopLedger{}
+	resp, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "claude-code/claude-opus-4-7",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, []string{"anthropic/claude-sonnet-4-20250514"}, nil, AgentLoopConfig{
+		CheckpointSink: ledger,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "fallback ok", resp.Content)
+	require.NotEmpty(t, resp.metadata)
+	assert.Contains(t, resp.metadata["fallback_failure_classifications"], "claude-code="+string(providerFailureRateLimit))
+
+	var responseStep *AgentLoopStep
+
+	for i := range ledger.Steps {
+		if ledger.Steps[i].Kind == AgentLoopStepModelResponse {
+			responseStep = &ledger.Steps[i]
+			break
+		}
+	}
+
+	require.NotNil(t, responseStep)
+	require.NotNil(t, responseStep.ModelResponse)
+	metadata := responseStep.ModelResponse.Metadata
+	require.NotEmpty(t, metadata)
+	assert.Contains(t, metadata["fallback_failure_classifications"], "claude-code="+string(providerFailureRateLimit))
+	assert.Contains(t, metadata["fallback_attempts"], "claude-code/claude-opus-4-7")
+	assert.Contains(t, metadata["fallback_rate_limit_scopes"], "claude-code/claude-opus-4-7")
+	assert.Contains(t, metadata["fallback_rate_limit_scopes"], "=provider")
+	assert.Equal(t, providerClaudeCode, metadata["rate_limited_providers"])
+}
+
 func TestAgentLoopBudgetSnapshotJSONPreservesZeroRemainingConfiguredCeilings(t *testing.T) {
 	t.Parallel()
 

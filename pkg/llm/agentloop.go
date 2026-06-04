@@ -594,6 +594,7 @@ func (s *agentLoopState) recordModelResponse(
 		Budget:       s.budget,
 		ModelRequest: &request,
 		ModelResponse: &AgentLoopModelResponseSummary{
+			Metadata:            cloneStringMap(resp.metadata),
 			Model:               resp.Model,
 			Provider:            resp.Provider,
 			StopReason:          resp.StopReason,

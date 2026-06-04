@@ -289,44 +289,61 @@ func fallbackFailureMetadata(err error) map[string]string {
 		return nil
 	}
 
-	metadata := map[string]string{
-		"fallback_failure_classifications": fb.classificationMetadata(),
-		"fallback_attempts":                fb.attemptsMetadata(),
+	return fb.metadata()
+}
+
+func fallbackMetadataForAttempts(attempts []fallbackAttemptFailure, readiness ProviderReadinessReport) map[string]string {
+	if len(attempts) == 0 {
+		return nil
 	}
 
-	if scopes := fb.rateLimitScopesMetadata(); scopes != "" {
+	fb := &fallbackError{
+		attempts:  append([]fallbackAttemptFailure(nil), attempts...),
+		readiness: cloneProviderReadinessReport(readiness),
+	}
+
+	return fb.metadata()
+}
+
+func (e *fallbackError) metadata() map[string]string {
+	metadata := map[string]string{
+		"fallback_failure_classifications": e.classificationMetadata(),
+		"fallback_attempts":                e.attemptsMetadata(),
+	}
+
+	if scopes := e.rateLimitScopesMetadata(); scopes != "" {
 		metadata["fallback_rate_limit_scopes"] = scopes
 	}
 
-	if rateLimited := fb.providersForKindIncludingReadiness(providerFailureRateLimit); rateLimited != "" {
+	if rateLimited := e.providersForKindIncludingReadiness(providerFailureRateLimit); rateLimited != "" {
 		metadata["rate_limited_providers"] = rateLimited
 	}
 
-	if transient := fb.providersForKind(providerFailureTransient); transient != "" {
+	if transient := e.providersForKind(providerFailureTransient); transient != "" {
 		metadata["transient_error_providers"] = transient
 	}
 
-	if configErrors := fb.providersForKindIncludingReadiness(providerFailureConfiguration); configErrors != "" {
+	if configErrors := e.providersForKindIncludingReadiness(providerFailureConfiguration); configErrors != "" {
 		metadata["configuration_error_providers"] = configErrors
 	}
 
-	if authErrors := fb.providersForKindIncludingReadiness(providerFailureAuthentication); authErrors != "" {
+	if authErrors := e.providersForKindIncludingReadiness(providerFailureAuthentication); authErrors != "" {
 		metadata["authentication_error_providers"] = authErrors
 	}
 
-	if notReady := fb.providersForKindIncludingReadiness(providerFailureNotReady); notReady != "" {
+	if notReady := e.providersForKindIncludingReadiness(providerFailureNotReady); notReady != "" {
 		metadata["provider_not_ready_providers"] = notReady
 	}
 
-	if exhausted := fb.providersForKind(providerFailureRouteExhausted); exhausted != "" {
+	if exhausted := e.providersForKind(providerFailureRouteExhausted); exhausted != "" {
 		metadata["exhausted_fallback_route_providers"] = exhausted
 	}
 
-	if permanent := fb.providersForKind(providerFailurePermanent); permanent != "" {
+	if permanent := e.providersForKind(providerFailurePermanent); permanent != "" {
 		metadata["permanent_error_providers"] = permanent
 	}
 
-	if readiness := fallbackReadinessMetadata(fb.readiness, fb.providerSet()); readiness != "" {
+	if readiness := fallbackReadinessMetadata(e.readiness, e.providerSet()); readiness != "" {
 		metadata["provider_readiness"] = readiness
 	}
 

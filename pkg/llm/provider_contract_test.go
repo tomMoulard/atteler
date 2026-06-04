@@ -536,6 +536,7 @@ func TestProviderProtocolFixtures_CoverPublicLLMSchema(t *testing.T) {
 				"CachedInputTokens",
 				"CacheWriteInputTokens",
 				"OutputTokens",
+				"metadata",
 			},
 		},
 		{
