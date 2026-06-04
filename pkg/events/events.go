@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -52,8 +55,17 @@ const (
 	// RouteDecision is emitted when model routing selects or rejects candidates.
 	RouteDecision = "route_decision"
 
-	defaultTimeout = 10 * time.Second
+	// EventSchemaVersion is the current lifecycle hook payload schema.
+	EventSchemaVersion = 1
+
+	defaultTimeout      = 10 * time.Second
+	defaultMaxAttempts  = 1
+	maxHookAttempts     = 10
+	defaultRetryBackoff = 100 * time.Millisecond
+	maxRetryBackoff     = 30 * time.Second
 )
+
+var eventIDCounter atomic.Uint64
 
 // PayloadMode controls how much event data is passed to a hook.
 type PayloadMode string
@@ -100,9 +112,13 @@ func SupportedEventTypes() []SupportedEventType {
 }
 
 // Event is the JSON payload sent to hooks on stdin.
+//
+//nolint:govet // Field order follows the public JSON payload schema.
 type Event struct {
 	Metadata       map[string]string `json:"metadata,omitempty"`
 	Timestamp      time.Time         `json:"timestamp"`
+	SchemaVersion  int               `json:"schema_version,omitempty"`
+	EventID        string            `json:"event_id,omitempty"`
 	Type           string            `json:"type"`
 	SessionID      string            `json:"session_id,omitempty"`
 	SessionPath    string            `json:"session_path,omitempty"`
@@ -122,11 +138,14 @@ type Event struct {
 //
 //nolint:govet // fieldalignment: field order groups command, timeout, and privacy controls.
 type Hook struct {
-	Env         map[string]string
-	Command     []string
-	Timeout     time.Duration
-	PayloadMode PayloadMode
-	InheritEnv  bool
+	Env          map[string]string
+	Command      []string
+	Timeout      time.Duration
+	RetryBackoff time.Duration
+	MaxAttempts  int
+	PayloadMode  PayloadMode
+	InheritEnv   bool
+	Blocking     bool
 }
 
 // Observer receives lifecycle events for best-effort local background work.
@@ -137,9 +156,21 @@ type Observer interface {
 
 // Runner emits events to configured hooks.
 type Runner struct {
-	logger    *Logger
-	hooks     map[string][]Hook
-	observers []Observer
+	deliveryCtx context.Context
+	logger      *Logger
+	ledger      *Ledger
+	hooks       map[string][]Hook
+	wg          *sync.WaitGroup
+	observers   []Observer
+}
+
+// RunnerOptions configures lifecycle event delivery surfaces.
+type RunnerOptions struct {
+	DeliveryContext context.Context
+	LogWriter       io.Writer
+	LedgerWriter    io.Writer
+	Ledger          *Ledger
+	Observers       []Observer
 }
 
 // NewRunner creates a hook runner from config.
@@ -155,6 +186,12 @@ func NewRunnerWithLogger(configured map[string][]config.HookConfig, logWriter io
 // NewRunnerWithLoggerAndObservers creates a hook runner, optional event logger,
 // and best-effort local observers.
 func NewRunnerWithLoggerAndObservers(configured map[string][]config.HookConfig, logWriter io.Writer, observers ...Observer) *Runner {
+	return NewRunnerWithOptions(configured, RunnerOptions{LogWriter: logWriter, Observers: observers})
+}
+
+// NewRunnerWithOptions creates a hook runner with explicit logging, durable
+// ledger, and observer options.
+func NewRunnerWithOptions(configured map[string][]config.HookConfig, opts RunnerOptions) *Runner {
 	hooks := make(map[string][]Hook, len(configured))
 	for eventType, configs := range configured {
 		for _, cfg := range configs {
@@ -168,19 +205,30 @@ func NewRunnerWithLoggerAndObservers(configured map[string][]config.HookConfig, 
 			}
 
 			hooks[eventType] = append(hooks[eventType], Hook{
-				Command:     append([]string(nil), cfg.Command...),
-				Env:         cloneMap(cfg.Env),
-				Timeout:     timeout,
-				PayloadMode: normalizePayloadMode(cfg.Payload),
-				InheritEnv:  cfg.InheritEnv,
+				Command:      append([]string(nil), cfg.Command...),
+				Env:          cloneMap(cfg.Env),
+				Timeout:      timeout,
+				RetryBackoff: normalizeRetryBackoff(cfg.RetryBackoffMillis),
+				MaxAttempts:  normalizeMaxAttempts(cfg.MaxAttempts),
+				PayloadMode:  normalizePayloadMode(cfg.Payload),
+				InheritEnv:   cfg.InheritEnv,
+				Blocking:     cfg.Blocking,
 			})
 		}
 	}
 
+	ledger := opts.Ledger
+	if ledger == nil && opts.LedgerWriter != nil {
+		ledger = NewLedger(opts.LedgerWriter)
+	}
+
 	return &Runner{
-		hooks:     hooks,
-		logger:    NewLogger(logWriter),
-		observers: compactObservers(observers),
+		deliveryCtx: opts.DeliveryContext,
+		hooks:       hooks,
+		logger:      NewLogger(opts.LogWriter),
+		ledger:      ledger,
+		observers:   compactObservers(opts.Observers),
+		wg:          &sync.WaitGroup{},
 	}
 }
 
@@ -190,20 +238,44 @@ func (r *Runner) WithLogger(logWriter io.Writer) *Runner {
 		return NewRunnerWithLogger(nil, logWriter)
 	}
 
+	return r.clone(logWriter, append([]Observer(nil), r.observers...))
+}
+
+// WithLoggerAndObservers returns a runner with the same hooks, durable ledger,
+// and delivery group, while replacing the compact logger and observer list.
+func (r *Runner) WithLoggerAndObservers(logWriter io.Writer, observers ...Observer) *Runner {
+	if r == nil {
+		return NewRunnerWithLoggerAndObservers(nil, logWriter, observers...)
+	}
+
+	return r.clone(logWriter, compactObservers(observers))
+}
+
+func (r *Runner) clone(logWriter io.Writer, observers []Observer) *Runner {
 	hooks := make(map[string][]Hook, len(r.hooks))
 	for eventType, configured := range r.hooks {
 		for _, hook := range configured {
 			hooks[eventType] = append(hooks[eventType], Hook{
-				Command:     append([]string(nil), hook.Command...),
-				Env:         cloneMap(hook.Env),
-				Timeout:     hook.Timeout,
-				PayloadMode: hook.PayloadMode,
-				InheritEnv:  hook.InheritEnv,
+				Command:      append([]string(nil), hook.Command...),
+				Env:          cloneMap(hook.Env),
+				Timeout:      hook.Timeout,
+				RetryBackoff: hook.RetryBackoff,
+				MaxAttempts:  hook.MaxAttempts,
+				PayloadMode:  hook.PayloadMode,
+				InheritEnv:   hook.InheritEnv,
+				Blocking:     hook.Blocking,
 			})
 		}
 	}
 
-	return &Runner{hooks: hooks, logger: NewLogger(logWriter), observers: append([]Observer(nil), r.observers...)}
+	return &Runner{
+		deliveryCtx: r.deliveryCtx,
+		hooks:       hooks,
+		logger:      NewLogger(logWriter),
+		ledger:      r.ledger,
+		observers:   observers,
+		wg:          r.waitGroup(),
+	}
 }
 
 // Emit sends event to every hook registered for event.Type.
@@ -212,16 +284,9 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 		return nil
 	}
 
-	if ctx == nil {
-		return errors.New("events: context is required")
-	}
-
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("events: context already done: %w", err)
-	}
-
-	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now().UTC()
+	event, err := normalizeEventForEmit(ctx, event)
+	if err != nil {
+		return err
 	}
 
 	if r.logger != nil {
@@ -229,6 +294,10 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 	}
 
 	r.notifyObservers(ctx, event)
+
+	if err := r.appendLedgerEvent(event); err != nil {
+		return err
+	}
 
 	if len(r.hooks) == 0 {
 		return nil
@@ -252,12 +321,84 @@ func (r *Runner) Emit(ctx context.Context, event Event) error {
 		payload = append(payload, '\n')
 		logHookInvocation(hookEvent, hook, len(payload))
 
-		if err := runHook(ctx, hook, hookEvent, payload); err != nil {
-			failures = append(failures, err)
+		if hook.Blocking {
+			if err := r.deliverHook(ctx, hook, hookEvent, payload); err != nil {
+				failures = append(failures, err)
+			}
+
+			continue
 		}
+
+		r.queueHook(ctx, hook, hookEvent, payload)
 	}
 
 	return errors.Join(failures...)
+}
+
+func normalizeEventForEmit(ctx context.Context, event Event) (Event, error) {
+	if ctx == nil {
+		return Event{}, errors.New("events: context is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return Event{}, fmt.Errorf("events: context already done: %w", err)
+	}
+
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+
+	if event.SchemaVersion == 0 {
+		event.SchemaVersion = EventSchemaVersion
+	}
+
+	if event.EventID == "" {
+		event.EventID = nextEventID(event.Timestamp)
+	}
+
+	return event, nil
+}
+
+// Wait waits for non-blocking hook deliveries queued before this call to finish.
+func (r *Runner) Wait(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+
+	if ctx == nil {
+		return errors.New("events: context is required")
+	}
+
+	done := make(chan struct{})
+	go func() { //nolint:wsl_v5 // Standard bridge from WaitGroup to select.
+		r.waitGroup().Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("events: wait for hooks: %w", ctx.Err())
+	}
+}
+
+// Close waits for queued non-blocking hooks and closes the durable ledger when
+// the runner owns a closeable ledger.
+func (r *Runner) Close(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+
+	if err := r.Wait(ctx); err != nil {
+		return err
+	}
+
+	if err := r.ledger.Close(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (r *Runner) notifyObservers(ctx context.Context, event Event) {
@@ -307,7 +448,123 @@ func compactObservers(observers []Observer) []Observer {
 	return out
 }
 
-func runHook(ctx context.Context, hook Hook, event Event, payload []byte) error {
+//nolint:contextcheck // Uses the runner lifecycle context so queued telemetry delivery is not canceled by short-lived request contexts.
+func (r *Runner) queueHook(ctx context.Context, hook Hook, event Event, payload []byte) {
+	r.appendHookLedgerRecord(hook, event, hookLedgerRecord{
+		Phase:        LedgerPhaseHookQueued,
+		Outcome:      HookOutcomeQueued,
+		PayloadBytes: len(payload),
+	})
+
+	// Telemetry hooks are non-blocking and run on the runner lifecycle context
+	// when one is available, so request-scoped cancellation does not turn a
+	// queued delivery into best-effort-only work.
+	deliveryCtx := r.deliveryCtx
+	if deliveryCtx == nil {
+		deliveryCtx = DetachContext(ctx)
+	}
+
+	r.waitGroup().Go(func() {
+		if err := r.deliverHook(deliveryCtx, hook, event, payload); err != nil {
+			auditEvent := Event{}
+			safeType := sanitizeEventType(&auditEvent, event.Type)
+			slogWarnHookDelivery(safeType, hook, err)
+		}
+	})
+}
+
+func (r *Runner) waitGroup() *sync.WaitGroup {
+	if r.wg == nil {
+		r.wg = &sync.WaitGroup{}
+	}
+
+	return r.wg
+}
+
+// DetachContext returns a context that preserves values from ctx while ignoring
+// its deadline and cancellation signal. Hook telemetry uses it so request
+// cancellation does not discard already accepted non-blocking deliveries.
+func DetachContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+
+	return detachedDeliveryContext{Context: ctx}
+}
+
+type detachedDeliveryContext struct {
+	context.Context
+}
+
+func (detachedDeliveryContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (detachedDeliveryContext) Done() <-chan struct{} {
+	return nil
+}
+
+func (detachedDeliveryContext) Err() error {
+	return nil
+}
+
+func (r *Runner) deliverHook(ctx context.Context, hook Hook, event Event, payload []byte) error {
+	maxAttempts := normalizeMaxAttempts(hook.MaxAttempts)
+
+	var finalErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		result := runHook(ctx, hook, event, payload)
+		r.appendHookLedgerRecord(hook, event, hookLedgerRecord{
+			Phase:                 LedgerPhaseHookAttempt,
+			Attempt:               attempt,
+			MaxAttempts:           maxAttempts,
+			Outcome:               result.Outcome,
+			ErrorSummary:          result.ErrorSummary,
+			TimeoutClassification: result.TimeoutClassification,
+			PayloadBytes:          len(payload),
+			DurationMillis:        result.Duration.Milliseconds(),
+			StderrBytes:           result.StderrBytes,
+		})
+
+		if result.Err == nil {
+			return nil
+		}
+
+		finalErr = result.Err
+
+		if attempt < maxAttempts {
+			if err := sleepBeforeRetry(ctx, hook.RetryBackoff); err != nil {
+				finalErr = err
+				break
+			}
+		}
+	}
+
+	r.appendHookLedgerRecord(hook, event, hookLedgerRecord{
+		Phase:                 LedgerPhaseHookDeadLetter,
+		MaxAttempts:           maxAttempts,
+		Outcome:               HookOutcomeDeadLetter,
+		ErrorSummary:          safeErrorSummary(finalErr),
+		TimeoutClassification: timeoutClassification(finalErr),
+		PayloadBytes:          len(payload),
+	})
+
+	return finalErr
+}
+
+type hookRunResult struct {
+	Err                   error
+	Outcome               string
+	ErrorSummary          string
+	TimeoutClassification string
+	Duration              time.Duration
+	StderrBytes           int
+}
+
+func runHook(ctx context.Context, hook Hook, event Event, payload []byte) hookRunResult {
+	started := time.Now()
+
 	timeout := hook.Timeout
 	if timeout <= 0 {
 		timeout = defaultTimeout
@@ -321,7 +578,6 @@ func runHook(ctx context.Context, hook Hook, event Event, payload []byte) error 
 	cmd, invocation, err := shell.CommandContext(hookCtx, shell.CommandOptions{
 		Program: hook.Command[0],
 		Args:    hook.Command[1:],
-		Command: strings.Join(hook.Command, " "),
 		Stdin:   bytes.NewReader(payload),
 		Stderr:  &stderr,
 		EnvList: hookEnvList(hook, event),
@@ -333,9 +589,24 @@ func runHook(ctx context.Context, hook Hook, event Event, payload []byte) error 
 			SessionID:   event.SessionID,
 			SessionPath: event.SessionPath,
 		},
+		SecretValues: hook.Command,
 	})
 	if err != nil {
-		return fmt.Errorf("events: authorize hook %q: %w", hookAuditCommand(hook.Command), err)
+		outcome := HookOutcomeDenied
+		classification := ""
+
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			outcome = hookOutcomeForContextError(err)
+			classification = timeoutClassification(err)
+		}
+
+		return hookRunResult{
+			Err:                   hookAuthorizationError(hook, err),
+			Outcome:               outcome,
+			ErrorSummary:          safeErrorSummary(err),
+			TimeoutClassification: classification,
+			Duration:              time.Since(started),
+		}
 	}
 
 	runErr := cmd.Run()
@@ -346,24 +617,163 @@ func runHook(ctx context.Context, hook Hook, event Event, payload []byte) error 
 		OutputNote:    "hook stdout/stderr omitted by lifecycle privacy policy",
 	})
 	if finishErr != nil {
-		return fmt.Errorf("events: audit hook %q: %w", hookAuditCommand(hook.Command), finishErr)
+		return hookRunResult{
+			Err:          hookAuditError(hook, finishErr),
+			Outcome:      HookOutcomeAuditFailed,
+			ErrorSummary: safeErrorSummary(finishErr),
+			Duration:     time.Since(started),
+			StderrBytes:  stderr.Bytes(),
+		}
+	}
+
+	if hookCtx.Err() != nil {
+		err := hookTimeoutError(event, hook, timeout, hookCtx.Err(), stderr.Bytes())
+
+		return hookRunResult{
+			Err:                   err,
+			Outcome:               hookOutcomeForContextError(hookCtx.Err()),
+			ErrorSummary:          hookErrorSummary(hookCtx.Err()),
+			TimeoutClassification: timeoutClassification(hookCtx.Err()),
+			Duration:              time.Since(started),
+			StderrBytes:           stderr.Bytes(),
+		}
 	}
 
 	if runErr != nil {
-		if stderr.Bytes() > 0 {
-			return fmt.Errorf(
-				"events: %s hook %q failed: %s (stderr %d bytes omitted)",
-				event.Type,
-				hookAuditCommand(hook.Command),
-				hookErrorSummary(runErr),
-				stderr.Bytes(),
-			)
-		}
+		err := hookFailureError(event, hook, runErr, stderr.Bytes())
 
-		return fmt.Errorf("events: %s hook %q failed: %s", event.Type, hookAuditCommand(hook.Command), hookErrorSummary(runErr))
+		return hookRunResult{
+			Err:          err,
+			Outcome:      HookOutcomeFailed,
+			ErrorSummary: hookErrorSummary(runErr),
+			Duration:     time.Since(started),
+			StderrBytes:  stderr.Bytes(),
+		}
 	}
 
-	return nil
+	return hookRunResult{
+		Outcome:      HookOutcomeSuccess,
+		Duration:     time.Since(started),
+		StderrBytes:  stderr.Bytes(),
+		ErrorSummary: "",
+	}
+}
+
+func sleepBeforeRetry(ctx context.Context, backoff time.Duration) error {
+	if backoff <= 0 {
+		backoff = defaultRetryBackoff
+	}
+
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("events: retry canceled: %w", ctx.Err())
+	}
+}
+
+func hookAuthorizationError(hook Hook, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var policyErr *shell.PolicyError
+	if errors.As(err, &policyErr) {
+		return fmt.Errorf("events: authorize hook %q: %w", hookAuditCommand(hook.Command), sanitizedPolicyError(policyErr))
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("events: authorize hook %q: %w", hookAuditCommand(hook.Command), context.DeadlineExceeded)
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("events: authorize hook %q: %w", hookAuditCommand(hook.Command), context.Canceled)
+	}
+
+	return fmt.Errorf("events: authorize hook %q: hook authorization failed", hookAuditCommand(hook.Command))
+}
+
+func sanitizedPolicyError(err *shell.PolicyError) *shell.PolicyError {
+	if err == nil {
+		return nil
+	}
+
+	rule := strings.TrimSpace(err.Rule)
+	if rule != "" {
+		rule = sanitizeAuditLabel("policy_rule", rule)
+	}
+
+	return &shell.PolicyError{
+		Rule:   rule,
+		Reason: "command denied by policy",
+	}
+}
+
+func hookAuditError(hook Hook, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("events: audit hook %q: %w", hookAuditCommand(hook.Command), context.DeadlineExceeded)
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("events: audit hook %q: %w", hookAuditCommand(hook.Command), context.Canceled)
+	}
+
+	return fmt.Errorf("events: audit hook %q: hook audit failed", hookAuditCommand(hook.Command))
+}
+
+func hookFailureError(event Event, hook Hook, err error, stderrBytes int) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return hookExitError(event, hook, exitErr, stderrBytes)
+	}
+
+	if stderrBytes > 0 {
+		return fmt.Errorf(
+			"events: %s hook %q failed: %s (stderr %d bytes omitted)",
+			event.Type,
+			hookAuditCommand(hook.Command),
+			hookErrorSummary(err),
+			stderrBytes,
+		)
+	}
+
+	return fmt.Errorf("events: %s hook %q failed: %s", event.Type, hookAuditCommand(hook.Command), hookErrorSummary(err))
+}
+
+func hookExitError(event Event, hook Hook, err *exec.ExitError, stderrBytes int) error {
+	if stderrBytes > 0 {
+		return fmt.Errorf(
+			"events: %s hook %q failed: %w (stderr %d bytes omitted)",
+			event.Type,
+			hookAuditCommand(hook.Command),
+			err,
+			stderrBytes,
+		)
+	}
+
+	return fmt.Errorf("events: %s hook %q failed: %w", event.Type, hookAuditCommand(hook.Command), err)
+}
+
+func hookTimeoutError(event Event, hook Hook, timeout time.Duration, err error, stderrBytes int) error {
+	if stderrBytes > 0 {
+		return fmt.Errorf(
+			"events: %s hook %q timed out after %s: %w (stderr %d bytes omitted)",
+			event.Type,
+			hookAuditCommand(hook.Command),
+			timeout,
+			err,
+			stderrBytes,
+		)
+	}
+
+	return fmt.Errorf("events: %s hook %q timed out after %s: %w", event.Type, hookAuditCommand(hook.Command), timeout, err)
 }
 
 func hookEnvList(hook Hook, event Event) []string {
@@ -438,6 +848,121 @@ func hookErrorSummary(err error) string {
 	return "command start failed"
 }
 
+func safeErrorSummary(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded.Error()
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled.Error()
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.String()
+	}
+
+	var policyErr *shell.PolicyError
+	if errors.As(err, &policyErr) {
+		if policyErr.Rule != "" {
+			return "command denied by policy (" + sanitizeAuditLabel("policy_rule", policyErr.Rule) + ")"
+		}
+
+		return "command denied by policy"
+	}
+
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "audit hook"):
+		return "hook audit failed"
+	case strings.Contains(message, "authorize hook"):
+		return "hook authorization failed"
+	case strings.Contains(message, "retry canceled"):
+		return "retry canceled"
+	default:
+		return "command start failed"
+	}
+}
+
+func hookOutcomeForContextError(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return HookOutcomeTimeout
+	case errors.Is(err, context.Canceled):
+		return HookOutcomeCanceled
+	default:
+		return HookOutcomeFailed
+	}
+}
+
+func timeoutClassification(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return ""
+	}
+}
+
+func normalizeMaxAttempts(attempts int) int {
+	switch {
+	case attempts <= 0:
+		return defaultMaxAttempts
+	case attempts > maxHookAttempts:
+		return maxHookAttempts
+	default:
+		return attempts
+	}
+}
+
+func normalizeRetryBackoff(backoffMillis int) time.Duration {
+	if backoffMillis <= 0 {
+		return defaultRetryBackoff
+	}
+
+	maxMillis := int(maxRetryBackoff / time.Millisecond)
+	if backoffMillis > maxMillis {
+		return maxRetryBackoff
+	}
+
+	return time.Duration(backoffMillis) * time.Millisecond
+}
+
+func nextEventID(ts time.Time) string {
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+
+	return fmt.Sprintf("evt_%d_%d", ts.UnixNano(), eventIDCounter.Add(1))
+}
+
+func slogWarnHookDelivery(eventType string, hook Hook, err error) {
+	if err == nil {
+		return
+	}
+
+	auditEvent := Event{}
+	eventType = sanitizeEventType(&auditEvent, eventType)
+
+	slogAttrs := []any{
+		"event_type", eventType,
+		"hook_command", hookAuditCommand(hook.Command),
+		"delivery", hookDelivery(hook),
+		"error", safeErrorSummary(err),
+	}
+	if classification := timeoutClassification(err); classification != "" {
+		slogAttrs = append(slogAttrs, "timeout_classification", classification)
+	}
+
+	slog.Warn("lifecycle hook delivery failed", slogAttrs...)
+}
+
 func eventEnv(event Event, extra map[string]string) []string {
 	env := make([]string, 0, len(extra)+10)
 	for key, value := range extra {
@@ -449,6 +974,10 @@ func eventEnv(event Event, extra map[string]string) []string {
 	}
 
 	env = append(env, eventEnvEntry("ATTELER_EVENT_TYPE", event.Type))
+
+	if event.EventID != "" {
+		env = append(env, eventEnvEntry("ATTELER_EVENT_ID", event.EventID))
+	}
 
 	if event.PayloadMode != "" {
 		env = append(env, eventEnvEntry("ATTELER_PAYLOAD_MODE", event.PayloadMode))
@@ -480,6 +1009,10 @@ func eventEnv(event Event, extra map[string]string) []string {
 
 	if event.Truncated {
 		env = append(env, "ATTELER_EVENT_TRUNCATED=true")
+	}
+
+	if event.SchemaVersion > 0 {
+		env = append(env, "ATTELER_EVENT_SCHEMA_VERSION="+strconv.Itoa(event.SchemaVersion))
 	}
 
 	if !event.Timestamp.IsZero() {
@@ -532,6 +1065,7 @@ func isReservedEventEnvKey(key string) bool {
 
 	switch {
 	case strings.EqualFold(key, "ATTELER_EVENT_TYPE"),
+		strings.EqualFold(key, "ATTELER_EVENT_ID"),
 		strings.EqualFold(key, "ATTELER_PAYLOAD_MODE"),
 		strings.EqualFold(key, "ATTELER_SESSION_ID"),
 		strings.EqualFold(key, "ATTELER_SESSION_PATH"),
@@ -540,6 +1074,7 @@ func isReservedEventEnvKey(key string) bool {
 		strings.EqualFold(key, "ATTELER_ROLE"),
 		strings.EqualFold(key, "ATTELER_EVENT_REDACTED"),
 		strings.EqualFold(key, "ATTELER_EVENT_TRUNCATED"),
+		strings.EqualFold(key, "ATTELER_EVENT_SCHEMA_VERSION"),
 		strings.EqualFold(key, "ATTELER_EVENT_UNIX"):
 		return true
 	default:

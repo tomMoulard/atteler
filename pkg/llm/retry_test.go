@@ -936,6 +936,11 @@ func TestCompleteWithRetry_EmitsProviderRetryHookPayload(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWait()
+
+	require.NoError(t, runner.Wait(waitCtx))
+
 	data, err := os.ReadFile(out)
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), sensitive)
@@ -943,9 +948,21 @@ func TestCompleteWithRetry_EmitsProviderRetryHookPayload(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	require.Len(t, lines, 2)
 
-	var scheduled, final events.Event
-	require.NoError(t, json.Unmarshal([]byte(lines[0]), &scheduled))
-	require.NoError(t, json.Unmarshal([]byte(lines[1]), &final))
+	eventsByOutcome := make(map[string]events.Event, len(lines))
+	for _, line := range lines {
+		var delivered events.Event
+		require.NoError(t, json.Unmarshal([]byte(line), &delivered))
+		require.NotEmpty(t, delivered.Metadata["outcome"])
+		require.NotContains(t, eventsByOutcome, delivered.Metadata["outcome"])
+
+		eventsByOutcome[delivered.Metadata["outcome"]] = delivered
+	}
+
+	require.Contains(t, eventsByOutcome, retryOutcomeScheduled)
+	require.Contains(t, eventsByOutcome, retryOutcomeSuccess)
+
+	scheduled := eventsByOutcome[retryOutcomeScheduled]
+	final := eventsByOutcome[retryOutcomeSuccess]
 
 	assert.Equal(t, events.ProviderRetry, scheduled.Type)
 	assert.Equal(t, "session-1", scheduled.SessionID)

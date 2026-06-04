@@ -45,6 +45,7 @@ providers:
 `)
 	local := writeConfig(t, dir, "local.yml", `
 default_model: gpt-local
+event_ledger_path: ./.atteler/events.jsonl
 fallback_models: [gpt-backup]
 model_aliases:
   fast: openai/gpt-local
@@ -89,6 +90,9 @@ hooks:
   assistant_message:
     - command: [logger, --assistant]
       timeout_seconds: 3
+      max_attempts: 4
+      retry_backoff_millis: 25
+      blocking: true
       env:
         EXTRA: "1"
 context:
@@ -266,9 +270,15 @@ worktree:
 		assert.Failf(t, "assertion failed", "hook timeout = %d", hooks[0].TimeoutSeconds)
 	}
 
+	assert.Equal(t, 4, hooks[0].MaxAttempts)
+	assert.Equal(t, 25, hooks[0].RetryBackoffMillis)
+	assert.True(t, hooks[0].Blocking)
+
 	if hooks[0].Env["EXTRA"] != "1" {
 		assert.Failf(t, "assertion failed", "hook env EXTRA = %q", hooks[0].Env["EXTRA"])
 	}
+
+	assert.Equal(t, "./.atteler/events.jsonl", cfg.EventLedgerPath)
 
 	if cfg.Context.MaxFileBytes != 123 {
 		assert.Failf(t, "assertion failed", "MaxFileBytes = %d, want 123", cfg.Context.MaxFileBytes)
@@ -733,6 +743,9 @@ hooks:
       payload: full
       inherit_env: true
       timeout_seconds: 10
+      max_attempts: 5
+      retry_backoff_millis: 100
+      blocking: true
       env:
         OLD: "1"
 `)
@@ -743,6 +756,9 @@ hooks:
       payload: summary
       inherit_env: false
       timeout_seconds: 2
+      max_attempts: 3
+      retry_backoff_millis: 25
+      blocking: false
       env:
         NEW: "1"
 `)
@@ -756,6 +772,9 @@ hooks:
 	assert.Equal(t, "summary", hooks[0].Payload)
 	assert.False(t, hooks[0].InheritEnv)
 	assert.Equal(t, 2, hooks[0].TimeoutSeconds)
+	assert.Equal(t, 3, hooks[0].MaxAttempts)
+	assert.Equal(t, 25, hooks[0].RetryBackoffMillis)
+	assert.False(t, hooks[0].Blocking)
 	assert.Equal(t, map[string]string{"NEW": "1"}, hooks[0].Env)
 }
 

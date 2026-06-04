@@ -75,10 +75,16 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 				RequiredCapabilities: []string{"json_schema"},
 			},
 		},
+		EventLedgerPath: "/tmp/api_key=secret-token/events.jsonl",
 		Hooks: map[string][]HookConfig{
 			"session_end": {{
 				Command: []string{"echo", "done"},
 				Env:     map[string]string{"SAFE": "value"},
+				Payload: "api_key=secret-token",
+			}},
+			"session_start": {{
+				Command: []string{"echo", "start"},
+				Payload: "full",
 			}},
 		},
 		Context: ContextConfig{
@@ -150,6 +156,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	redacted.ModelRoles["planner"].BannedProviders[0] = "ollama"
 	redacted.ModelRoles["planner"].BannedModels[0] = changedModel
 	redacted.ModelRoles["planner"].RequiredCapabilities[0] = "tools"
+	redacted.EventLedgerPath = "changed"
 	redacted.Agents["reviewer"].ToolPermissions["read"] = false
 	redacted.Hooks["session_end"][0].Command[0] = "printf"
 	redacted.Hooks["session_end"][0].Env["SAFE"] = "changed"
@@ -195,9 +202,12 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.Equal(t, []string{"anthropic"}, cfg.ModelRoles["planner"].BannedProviders)
 	assert.Equal(t, []string{"openai/gpt-4.1-nano"}, cfg.ModelRoles["planner"].BannedModels)
 	assert.Equal(t, []string{"json_schema"}, cfg.ModelRoles["planner"].RequiredCapabilities)
+	assert.Equal(t, "/tmp/api_key=secret-token/events.jsonl", cfg.EventLedgerPath)
 	assert.True(t, cfg.Agents["reviewer"].ToolPermissions["read"])
 	assert.Equal(t, []string{"echo", "done"}, cfg.Hooks["session_end"][0].Command)
 	assert.Equal(t, "value", cfg.Hooks["session_end"][0].Env["SAFE"])
+	assert.Equal(t, "api_key=secret-token", cfg.Hooks["session_end"][0].Payload)
+	assert.Equal(t, "full", cfg.Hooks["session_start"][0].Payload)
 	assert.Equal(t, []string{"https"}, cfg.Context.ReferencePolicy.AllowedSchemes)
 	assert.Equal(t, []string{"http"}, cfg.Context.ReferencePolicy.DeniedSchemes)
 	assert.Equal(t, []string{"docs.example.com"}, cfg.Context.ReferencePolicy.AllowedHosts)
@@ -231,6 +241,10 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.NotContains(t, redacted.Vector.Sources["git_history"].IndexPath, "secret-token")
 	assert.NotContains(t, redacted.Vector.WorkspaceInclude[1], "secret-token")
 	assert.NotContains(t, redacted.Vector.WorkspaceExclude[1], "secret-token")
+	assert.NotContains(t, redacted.EventLedgerPath, "secret-token")
+	assert.NotContains(t, redacted.Hooks["session_end"][0].Payload, "secret-token")
+	assert.Equal(t, RedactedValue, redacted.Hooks["session_end"][0].Payload)
+	assert.Equal(t, "full", redacted.Hooks["session_start"][0].Payload)
 	assert.Equal(t, RedactedValue, redacted.Agents["reviewer"].SystemPrompt)
 	assert.Empty(t, redacted.Agents["reviewer"].FeedbackGuidance)
 }
@@ -272,4 +286,38 @@ func TestRedactedOriginMap_RedactsWorkspaceVectorPatternLists(t *testing.T) {
 	require.Len(t, excludePatterns, 2)
 	assert.Equal(t, "vendor/", excludePatterns[0])
 	assert.NotContains(t, excludePatterns[1], "secret-token")
+}
+
+func TestRedactedOriginMap_RedactsHookPayloadsAndCommandDetails(t *testing.T) {
+	t.Parallel()
+
+	origins := OriginMap{
+		"hooks.user_message": {Chain: []OriginEvent{{
+			Kind:      OriginProjectFile,
+			Operation: OriginSet,
+			Source:    "atteler.yaml",
+			Value:     `[{"command":["notify","--token=secret-token"],"payload":"api_key=secret-token","timeout_seconds":5,"max_attempts":2,"retry_backoff_millis":25,"inherit_env":true,"blocking":true,"env":{"API_KEY":"secret-token","SAFE":"ok"}},{"command":["metrics"],"payload":"summary"}]`,
+		}}},
+	}
+
+	redacted := RedactedOriginMap(origins)
+	value := redacted["hooks.user_message"].Chain[0].Value
+
+	assert.NotContains(t, value, "secret-token")
+
+	var hooks []HookConfig
+	require.NoError(t, json.Unmarshal([]byte(value), &hooks))
+	require.Len(t, hooks, 2)
+
+	assert.Equal(t, []string{"notify", "--token=" + RedactedValue}, hooks[0].Command)
+	assert.Equal(t, RedactedValue, hooks[0].Payload)
+	assert.Equal(t, RedactedValue, hooks[0].Env["API_KEY"])
+	assert.Equal(t, "ok", hooks[0].Env["SAFE"])
+	assert.Equal(t, 5, hooks[0].TimeoutSeconds)
+	assert.Equal(t, 2, hooks[0].MaxAttempts)
+	assert.Equal(t, 25, hooks[0].RetryBackoffMillis)
+	assert.True(t, hooks[0].InheritEnv)
+	assert.True(t, hooks[0].Blocking)
+
+	assert.Equal(t, "summary", hooks[1].Payload)
 }

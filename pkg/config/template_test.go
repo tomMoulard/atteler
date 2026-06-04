@@ -214,9 +214,11 @@ func TestTemplateYAMLDocumentsHookPrivacyDefaults(t *testing.T) {
 	for _, want := range []string{
 		"payload defaults to metadata",
 		"payload: metadata",
+		"blocking: false",
 		"inherit_env: false",
 		"Explicit env values are passed verbatim",
 		"ATTELER_* variables are reserved",
+		"event_ledger_path",
 	} {
 		require.Contains(t, template, want)
 	}

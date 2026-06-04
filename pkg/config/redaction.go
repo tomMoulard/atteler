@@ -22,6 +22,7 @@ func RedactedConfig(cfg Config) Config {
 	out.SkillLearning.Enabled = clonePtr(cfg.SkillLearning.Enabled)
 	out.Vector = redactedVectorConfig(cfg.Vector)
 	out.Worktree = redactedWorktreeConfig(cfg.Worktree)
+	out.EventLedgerPath = redactPotentialSecretString(cfg.EventLedgerPath)
 
 	out.Providers = make(map[string]ProviderConfig, len(cfg.Providers))
 	for name := range cfg.Providers {
@@ -264,9 +265,14 @@ func redactHooks(hooks []HookConfig) []HookConfig {
 	out := make([]HookConfig, 0, len(hooks))
 	for _, hook := range hooks {
 		next := HookConfig{
-			Command:        redactCommandArgs(hook.Command),
-			Env:            make(map[string]string, len(hook.Env)),
-			TimeoutSeconds: hook.TimeoutSeconds,
+			Command:            redactCommandArgs(hook.Command),
+			Env:                make(map[string]string, len(hook.Env)),
+			Payload:            redactHookPayload(hook.Payload),
+			TimeoutSeconds:     hook.TimeoutSeconds,
+			MaxAttempts:        hook.MaxAttempts,
+			RetryBackoffMillis: hook.RetryBackoffMillis,
+			InheritEnv:         hook.InheritEnv,
+			Blocking:           hook.Blocking,
 		}
 		for key, value := range hook.Env {
 			next.Env[key] = redactValueForKey(key, value)
@@ -280,6 +286,15 @@ func redactHooks(hooks []HookConfig) []HookConfig {
 	}
 
 	return out
+}
+
+func redactHookPayload(payload string) string {
+	switch strings.ToLower(strings.TrimSpace(payload)) {
+	case "", "metadata", "summary", "full":
+		return payload
+	default:
+		return RedactedValue
+	}
 }
 
 func cloneBoolMap(in map[string]bool) map[string]bool {

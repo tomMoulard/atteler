@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tommoulard/atteler/pkg/agent"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
@@ -36,6 +37,8 @@ const (
 	providerNameCodex       = "codex"
 	providerNameClaudeCode  = "claude-code"
 	providerTypeClaudeAlias = "claude"
+
+	hookShutdownTimeout = 2 * time.Second
 )
 
 func parseOptions() cliOptions {
@@ -931,6 +934,9 @@ func providerlessState(store *session.Store) (appState, error) {
 }
 
 func runWithState(ctx context.Context, opts cliOptions, state appState) error {
+	defer func() {
+		closeHookRunner(ctx, state.hookRunner)
+	}()
 	defer flushEventObservers(ctx, state.eventObservers)
 
 	if handled, err := dispatchStateful(ctx, opts, state); handled {
@@ -1077,10 +1083,23 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 	// this with a logger-less runner so stderr writes don't bleed onto the TUI.
 	hookLogWriter := hookLogWriterForOptions(opts)
 
+	hookLedger, err := events.NewFileLedger(cfg.EventLedgerPath)
+	if err != nil {
+		return appState{}, fmt.Errorf("open event ledger: %w", err)
+	}
+
 	skillLearningOpts, configuredSkillLearningEnabled := skillLearningOptionsFromConfig(cfg, opts, os.Getenv)
 	skillLearningEnabled := skillLearningEffectiveEnabled(skillLearningOpts, configuredSkillLearningEnabled)
 	eventObservers := skillLearningObserversFromOptions(ctx, skillLearningOpts, skillLearningEnabled)
-	hookRunner := events.NewRunnerWithLoggerAndObservers(cfg.Hooks, hookLogWriter, eventObservers...)
+	hookRunner := events.NewRunnerWithOptions(cfg.Hooks, events.RunnerOptions{
+		DeliveryContext: events.DetachContext(ctx),
+		LogWriter:       hookLogWriter,
+		Ledger:          hookLedger,
+		Observers:       eventObservers,
+	})
+
+	ledgerTransferred := false
+	defer closeHookRunnerUnlessTransferred(ctx, hookRunner, &ledgerTransferred)
 
 	persistedState, stateErr := stateStore.Load()
 	if stateErr != nil {
@@ -1143,7 +1162,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		persistedState.ResolvePromptSuggestionPreference(cwd),
 	)
 
-	return appState{
+	state := appState{
 		config:                       cfg,
 		registry:                     reg,
 		providerReadiness:            providerReadiness,
@@ -1186,7 +1205,37 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		worktreeVerificationCommands: worktreePolicy.VerificationCommands,
 		promptLocalOnly:              opts.promptLocalOnly,
 		skillLearningEnabled:         skillLearningEnabled,
-	}, nil
+	}
+
+	ledgerTransferred = true
+
+	return state, nil
+}
+
+func closeHookRunnerUnlessTransferred(ctx context.Context, hookRunner *events.Runner, transferred *bool) {
+	if transferred != nil && *transferred {
+		return
+	}
+
+	closeHookRunner(ctx, hookRunner)
+}
+
+func closeHookRunner(ctx context.Context, hookRunner *events.Runner) {
+	if hookRunner == nil {
+		return
+	}
+
+	if ctx == nil {
+		fmt.Fprintln(os.Stderr, "warning: events: context is required")
+		return
+	}
+
+	closeCtx, cancel := context.WithTimeout(events.DetachContext(ctx), hookShutdownTimeout)
+	defer cancel()
+
+	if err := hookRunner.Close(closeCtx); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+	}
 }
 
 func loadConfigForAppState(opts cliOptions) (appconfig.Config, []string, error) {

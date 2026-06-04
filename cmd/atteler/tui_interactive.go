@@ -68,10 +68,11 @@ func runInteractive(ctx context.Context, state appState) error {
 	}
 
 	// In TUI mode the runner's logger has to stay quiet — stderr writes would
-	// bleed onto bubbletea's alt-screen rendering. Replace the stderr-logger
-	// runner that loadAppState set up with a logger-less one. Utility commands
-	// and one-shot mode keep the stderr logger.
-	state.hookRunner = events.NewRunnerWithLoggerAndObservers(state.hookConfig, nil, state.eventObservers...)
+	// bleed onto bubbletea's alt-screen rendering. Swap only the compact line
+	// logger so durable ledger state and queued non-blocking deliveries remain
+	// attached to the app-state runner. Utility commands and one-shot mode keep
+	// the stderr logger.
+	state.hookRunner = hookRunnerWithLogger(state, nil)
 	sessionGeneration := appStateSessionGeneration(state)
 
 	emitHookWarning(ctx, state.hookRunner, events.Event{
@@ -126,7 +127,7 @@ func runInteractive(ctx context.Context, state appState) error {
 
 	// Once the program exits, restore the stderr logger so SessionEnd / Error
 	// events are visible after the TUI has released the screen.
-	state.hookRunner = events.NewRunnerWithLoggerAndObservers(state.hookConfig, os.Stderr, state.eventObservers...)
+	state.hookRunner = hookRunnerWithLogger(state, os.Stderr)
 
 	if err != nil {
 		emitHookWarning(ctx, state.hookRunner, events.Event{
@@ -184,6 +185,14 @@ func appStateSessionGeneration(state appState) generationSettings {
 	}
 
 	return generationForRequest(state.generationDefaults, state.generationOverrides, activeAgent)
+}
+
+func hookRunnerWithLogger(state appState, logWriter io.Writer) *events.Runner {
+	if state.hookRunner == nil {
+		return events.NewRunnerWithLoggerAndObservers(state.hookConfig, logWriter, state.eventObservers...)
+	}
+
+	return state.hookRunner.WithLoggerAndObservers(logWriter, state.eventObservers...)
 }
 
 func printStartupPromptSuggestionStatus(state appState) {

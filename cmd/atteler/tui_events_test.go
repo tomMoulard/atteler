@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
@@ -28,6 +30,7 @@ func TestEmitFromContextWarningRedactsEventType(t *testing.T) {
 		eventType: {{
 			Command:        []string{"sk-missinghooksecret1234567890"},
 			TimeoutSeconds: 2,
+			Blocking:       true,
 		}},
 	})
 	ctx := events.WithEmitter(context.Background(), runner, events.Event{})
@@ -43,4 +46,41 @@ func TestEmitFromContextWarningRedactsEventType(t *testing.T) {
 	assert.NotContains(t, got, "sk-contextwarnsecret")
 	assert.NotContains(t, got, "sk-missinghooksecret")
 	assert.NotContains(t, got, "raw prompt content")
+}
+
+func TestCloseHookRunnerFlushesWithCanceledParentContext(t *testing.T) {
+	t.Parallel()
+
+	markerPath := t.TempDir() + "/hook-delivered.txt"
+	runner := events.NewRunner(map[string][]appconfig.HookConfig{
+		events.UserMessage: {{
+			Command: []string{os.Args[0], "-test.run=^TestCloseHookRunnerMarkerHelperProcess$"},
+			Env: map[string]string{
+				"ATTELER_TEST_CLOSE_HOOK_HELPER": "1",
+				"ATTELER_TEST_CLOSE_HOOK_MARKER": markerPath,
+			},
+			TimeoutSeconds: 10,
+		}},
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	require.NoError(t, runner.Emit(ctx, events.Event{Type: events.UserMessage}))
+	cancel()
+
+	closeHookRunner(ctx, runner)
+
+	data, err := os.ReadFile(markerPath)
+	require.NoError(t, err)
+	assert.Equal(t, "delivered", string(data))
+}
+
+//nolint:paralleltest // Helper-process sentinel exits the child test binary.
+func TestCloseHookRunnerMarkerHelperProcess(t *testing.T) {
+	if os.Getenv("ATTELER_TEST_CLOSE_HOOK_HELPER") != "1" {
+		return
+	}
+
+	markerPath := os.Getenv("ATTELER_TEST_CLOSE_HOOK_MARKER")
+	require.NotEmpty(t, markerPath)
+	require.NoError(t, os.WriteFile(markerPath, []byte("delivered"), 0o600)) //nolint:gosec // Test helper writes to a temp path supplied by the parent test.
 }

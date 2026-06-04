@@ -1754,6 +1754,26 @@ func TestCommandContext_RedactsSensitiveArgsInDeniedAudit(t *testing.T) {
 	require.Contains(t, string(ledgerBytes), "redacted:command_arg")
 }
 
+func TestCommandContext_RedactsSensitiveProgramInDeniedAudit(t *testing.T) {
+	t.Parallel()
+
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	secretProgram := filepath.Join(t.TempDir(), "sk-auditprogramsecret1234567890-tool")
+
+	_, _, err := CommandContext(context.Background(), CommandOptions{
+		Program:      secretProgram,
+		SecretValues: []string{secretProgram},
+		Policy:       &Policy{DenyCommands: []string{secretProgram}},
+		Audit:        AuditContext{Caller: "test-sensitive-program", AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	ledgerBytes, err := os.ReadFile(filepath.Join(auditDir, ledgerFileName))
+	require.NoError(t, err)
+	require.NotContains(t, string(ledgerBytes), "sk-auditprogramsecret")
+	require.Contains(t, string(ledgerBytes), "redacted:command_arg")
+}
+
 func TestRunBash_RedactsAuthorizationHeaderInDeniedAudit(t *testing.T) {
 	t.Parallel()
 
