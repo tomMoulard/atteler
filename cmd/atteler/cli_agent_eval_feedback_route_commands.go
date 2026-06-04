@@ -23,28 +23,102 @@ import (
 	attskill "github.com/tommoulard/atteler/pkg/skill"
 )
 
-func planAgents(registry *agent.Registry, prompt string, requested []string, maxAgents int) error {
-	plan, err := registry.PlanAgents(prompt, requested, maxAgents)
+func planAgents(registry *agent.Registry, prompt string, requested []string, maxAgents int, recentAgentNames ...[]string) error {
+	request := agent.OrchestrationRequest{
+		Prompt:          prompt,
+		RequestedNames:  requested,
+		MaxParticipants: maxAgents,
+	}
+	if len(recentAgentNames) > 0 {
+		request.RecentAgentNames = append([]string(nil), recentAgentNames[0]...)
+	}
+
+	return planAgentsWithRequest(registry, request)
+}
+
+func planAgentsWithRequest(registry *agent.Registry, request agent.OrchestrationRequest) error {
+	plan, err := registry.PlanOrchestration(request)
 	if err != nil {
 		return fmt.Errorf("plan agents: %w", err)
 	}
 
 	if len(plan.Participants) == 0 {
 		fmt.Println("No agents matched.")
-		return nil
+	} else {
+		for i := range plan.Participants {
+			fmt.Println(formatAgentPlanParticipant(&plan.Participants[i]))
+		}
 	}
 
-	for i := range plan.Participants {
-		fmt.Println(formatAgentPlanParticipant(&plan.Participants[i]))
+	fmt.Println(formatAgentPlanComposition(plan.Composition))
+	fmt.Println(formatAgentPlanMetadata(plan.Metadata))
+
+	for i := range plan.Composition.Roles {
+		fmt.Println(formatAgentPlanRole(plan.Composition.Roles[i]))
+	}
+
+	for i := range plan.Composition.Dependencies {
+		fmt.Println(formatAgentPlanDependency(plan.Composition.Dependencies[i]))
+	}
+
+	for i := range plan.Ambiguities {
+		fmt.Println(formatAgentPlanAmbiguity(plan.Ambiguities[i]))
+	}
+
+	for i := range plan.Candidates {
+		fmt.Println(formatAgentPlanCandidate(&plan.Candidates[i]))
 	}
 
 	return nil
+}
+
+func recentAgentNamesForPlan(state appState) []string {
+	return recentAgentNamesForSelection(state.selectedAgent, state.sessionState)
+}
+
+func recentAgentNamesForSelection(selectedAgent string, sessionState session.Session) []string {
+	names := make([]string, 0, 4)
+	names = appendPlanAgentName(names, selectedAgent)
+	names = appendPlanAgentName(names, sessionState.DefaultAgent)
+
+	for i := len(sessionState.Evaluations) - 1; i >= 0; i-- {
+		names = appendPlanAgentName(names, sessionState.Evaluations[i].Agent)
+	}
+
+	for i := len(sessionState.Artifacts) - 1; i >= 0; i-- {
+		names = appendPlanAgentName(names, sessionState.Artifacts[i].SourceAgent)
+	}
+
+	return names
+}
+
+func appendPlanAgentName(names []string, name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" || containsString(names, name) {
+		return names
+	}
+
+	return append(names, name)
 }
 
 func formatAgentPlanParticipant(participant *agent.Participant) string {
 	parts := []string{participant.Agent.Name, "source=" + participant.Source}
 	if participant.Pattern != "" {
 		parts = append(parts, "match="+participant.Pattern)
+	}
+
+	parts = append(parts, fmt.Sprintf("score=%.1f", participant.Score))
+
+	if len(participant.Roles) > 0 {
+		parts = append(parts, "roles="+strings.Join(participant.Roles, ","))
+	}
+
+	if participant.Rationale != "" {
+		parts = append(parts, "rationale="+singleLineAgentPlanField(participant.Rationale))
+	}
+
+	if toolSummary := formatToolConstraints(participant.ToolConstraints); toolSummary != "" {
+		parts = append(parts, "tools="+toolSummary)
 	}
 
 	if len(participant.Agent.Capabilities) > 0 {
@@ -56,6 +130,230 @@ func formatAgentPlanParticipant(participant *agent.Participant) string {
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func formatAgentPlanComposition(composition agent.PlanComposition) string {
+	parts := []string{
+		"composition",
+		fmt.Sprintf("max_concurrency=%d", composition.MaxConcurrency),
+		"stop=" + emptyPlanValue(composition.StopReason),
+		fmt.Sprintf("selected=%d", composition.Budget.SelectedCount),
+		fmt.Sprintf("candidates=%d", composition.Budget.CandidateCount),
+	}
+	if composition.Budget.MaxParticipants > 0 {
+		parts = append(parts, fmt.Sprintf("max_participants=%d", composition.Budget.MaxParticipants))
+	}
+
+	if len(composition.Budget.Truncated) > 0 {
+		parts = append(parts, "truncated="+strings.Join(composition.Budget.Truncated, ","))
+	}
+
+	if len(composition.RequiredTools) > 0 {
+		parts = append(parts, "required_tools="+strings.Join(composition.RequiredTools, ","))
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func formatAgentPlanMetadata(metadata agent.PlanMetadata) string {
+	parts := []string{
+		"metadata",
+		"scoring_version=" + emptyPlanValue(metadata.ScoringVersion),
+	}
+
+	if len(metadata.RequestedRoles) > 0 {
+		parts = append(parts, "requested_roles="+strings.Join(metadata.RequestedRoles, ","))
+	}
+
+	if len(metadata.RequestedNames) > 0 {
+		parts = append(parts, "requested_agents="+strings.Join(metadata.RequestedNames, ","))
+	}
+
+	if len(metadata.RecentAgentNames) > 0 {
+		parts = append(parts, "recent_agents="+strings.Join(metadata.RecentAgentNames, ","))
+	}
+
+	if len(metadata.RequiredTools) > 0 {
+		parts = append(parts, "required_tools="+strings.Join(metadata.RequiredTools, ","))
+	}
+
+	if len(metadata.SelectedNames) > 0 {
+		parts = append(parts, "selected_agents="+strings.Join(metadata.SelectedNames, ","))
+	}
+
+	if len(metadata.CandidateNames) > 0 {
+		parts = append(parts, "candidate_agents="+strings.Join(metadata.CandidateNames, ","))
+	}
+
+	if len(metadata.RejectedNames) > 0 {
+		parts = append(parts, "rejected_agents="+strings.Join(metadata.RejectedNames, ","))
+	}
+
+	if len(metadata.ToolOverrideNames) > 0 {
+		parts = append(parts, "tool_override_agents="+strings.Join(metadata.ToolOverrideNames, ","))
+	}
+
+	if metadata.SelectionThreshold > 0 {
+		parts = append(parts, fmt.Sprintf("selection_threshold=%.1f", metadata.SelectionThreshold))
+	}
+
+	if metadata.AmbiguityScoreWindow > 0 {
+		parts = append(parts, fmt.Sprintf("ambiguity_window=%.1f", metadata.AmbiguityScoreWindow))
+	}
+
+	if metadata.AmbiguityCount > 0 {
+		parts = append(parts, fmt.Sprintf("ambiguity_count=%d", metadata.AmbiguityCount))
+	}
+
+	if len(metadata.PromptTokens) > 0 {
+		parts = append(parts, "prompt_tokens="+strings.Join(metadata.PromptTokens, ","))
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func formatAgentPlanRole(role agent.PlannedRole) string {
+	parts := []string{
+		"role",
+		"name=" + role.Name,
+		fmt.Sprintf("covered=%t", role.Covered),
+		fmt.Sprintf("required=%t", role.Required),
+	}
+	if role.Agent != "" {
+		parts = append(parts, "agent="+role.Agent)
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func formatAgentPlanDependency(dependency agent.PlanDependency) string {
+	return strings.Join([]string{
+		"dependency",
+		"before=" + dependency.Before,
+		"after=" + dependency.After,
+		"reason=" + singleLineAgentPlanField(dependency.Reason),
+	}, "\t")
+}
+
+func formatAgentPlanAmbiguity(ambiguity agent.Ambiguity) string {
+	candidates := make([]string, 0, len(ambiguity.Candidates))
+	evidence := make([]string, 0, len(ambiguity.Candidates))
+
+	for _, candidate := range ambiguity.Candidates {
+		candidates = append(candidates, fmt.Sprintf("%s=%.1f", candidate.Name, candidate.Score))
+		if formatted := formatMatchEvidence(candidate.Evidence); formatted != "" {
+			evidence = append(evidence, candidate.Name+"["+formatted+"]")
+		}
+	}
+
+	parts := []string{
+		"ambiguity",
+		"role=" + ambiguity.Role,
+		"winner=" + ambiguity.Winner,
+		"action=override_required",
+		"candidates=" + strings.Join(candidates, ","),
+		"reason=" + singleLineAgentPlanField(ambiguity.Reason),
+	}
+
+	if len(evidence) > 0 {
+		parts = append(parts, "evidence="+strings.Join(evidence, ","))
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func formatAgentPlanCandidate(candidate *agent.Candidate) string {
+	parts := []string{
+		"candidate",
+		"name=" + candidate.Agent.Name,
+		fmt.Sprintf("score=%.1f", candidate.Score),
+		fmt.Sprintf("eligible=%t", candidate.Eligible),
+	}
+	if candidate.Source != "" {
+		parts = append(parts, "source="+candidate.Source)
+	}
+
+	if candidate.Pattern != "" {
+		parts = append(parts, "match="+candidate.Pattern)
+	}
+
+	if len(candidate.Roles) > 0 {
+		parts = append(parts, "roles="+strings.Join(candidate.Roles, ","))
+	}
+
+	if evidence := formatMatchEvidence(candidate.Evidence); evidence != "" {
+		parts = append(parts, "evidence="+evidence)
+	}
+
+	if candidate.RejectedReason != "" {
+		parts = append(parts, "rejected="+singleLineAgentPlanField(candidate.RejectedReason))
+	}
+
+	if candidate.Rationale != "" {
+		parts = append(parts, "rationale="+singleLineAgentPlanField(candidate.Rationale))
+	}
+
+	if toolSummary := formatToolConstraints(candidate.ToolConstraints); toolSummary != "" {
+		parts = append(parts, "tools="+toolSummary)
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func formatMatchEvidence(evidence []agent.MatchEvidence) string {
+	if len(evidence) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		label := item.Kind
+		if item.Pattern != "" {
+			label += ":" + item.Pattern
+		}
+
+		value := fmt.Sprintf("%s=%.1f", label, item.Score)
+		if item.Kind == agent.ParticipantSourceTrigger || item.Kind == agent.ParticipantSourceCapability {
+			value += fmt.Sprintf("@%d", item.TokenIndex)
+		}
+
+		parts = append(parts, value)
+	}
+
+	return strings.Join(parts, ",")
+}
+
+func formatToolConstraints(constraints []agent.ToolConstraint) string {
+	if len(constraints) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(constraints))
+	for _, constraint := range constraints {
+		status := "denied"
+		if constraint.Allowed {
+			status = "allowed"
+		}
+
+		parts = append(parts, constraint.Tool+":"+status)
+	}
+
+	return strings.Join(parts, ",")
+}
+
+func singleLineAgentPlanField(value string) string {
+	value = strings.ReplaceAll(value, "\t", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+
+	return strings.TrimSpace(value)
+}
+
+func emptyPlanValue(value string) string {
+	if value == "" {
+		return "-"
+	}
+
+	return value
 }
 
 func evalOutput(actualPath, expectedText, expectedPath string, mode atteval.MatchMode) error {

@@ -41,7 +41,13 @@ func providerlessConfigAgentPluginCommands() []command {
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.planAgentsPrompt != "" },
 			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
-				return planAgents(s.agentRegistry, o.planAgentsPrompt, o.planAgentNames, o.planMaxAgents.value)
+				return planAgents(
+					s.agentRegistry,
+					o.planAgentsPrompt,
+					o.planAgentNames,
+					o.planMaxAgents.value,
+					recentAgentNamesForPlan(s),
+				)
 			},
 		},
 		{

@@ -295,6 +295,7 @@ func runOnceWithOptions(
 		selectedModel,
 		selectedAgent,
 		fallbackModels,
+		recentAgentNamesForSelection(selectedAgent, sessionState),
 		generationDefaults,
 		generationOverrides,
 		modelLocked,
@@ -726,12 +727,13 @@ func prepareRunOnceRequest(
 	selectedModel string,
 	selectedAgent string,
 	fallbackModels []string,
+	recentAgentNames []string,
 	generationDefaults generationSettings,
 	generationOverrides generationSettings,
 	modelLocked bool,
 	prompt string,
 ) (runOncePrepared, error) {
-	activeAgent, userPrompt, err := resolveAgent(agents, selectedAgent, prompt)
+	activeAgent, userPrompt, err := resolveAgent(agents, selectedAgent, prompt, recentAgentNames)
 	if err != nil {
 		return runOncePrepared{}, err
 	}

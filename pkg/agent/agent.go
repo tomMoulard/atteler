@@ -2,7 +2,6 @@
 package agent
 
 import (
-	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -88,7 +87,22 @@ func cloneToolPermissions(in map[string]bool) map[string]bool {
 	}
 
 	out := make(map[string]bool, len(in))
-	maps.Copy(out, in)
+	for tool, allowed := range in {
+		tool = normalizeToolName(tool)
+		if tool == "" {
+			continue
+		}
+
+		if !allowed {
+			out[tool] = false
+
+			continue
+		}
+
+		if _, ok := out[tool]; !ok {
+			out[tool] = true
+		}
+	}
 
 	return out
 }
@@ -117,7 +131,7 @@ func (a Agent) HasToolPermission(tool string) bool {
 		return true
 	}
 
-	return a.ToolPermissions[tool]
+	return a.ToolPermissions[normalizeToolName(tool)]
 }
 
 // FilterTools returns only the tools the agent is permitted to use.
@@ -169,51 +183,50 @@ func (r *Registry) List() []string {
 	return names
 }
 
-// MatchPrompt returns the first agent whose configured trigger appears in
-// prompt. Matching is case-insensitive and stable by sorted agent name.
+// MatchPrompt returns the highest-scoring unambiguous agent for prompt.
 func (r *Registry) MatchPrompt(prompt string) (Agent, bool) {
 	match, ok := r.MatchPromptWithReason(prompt)
-	return match.Agent, ok
+	if !ok || len(match.Ambiguities) > 0 {
+		return Agent{}, false
+	}
+
+	return match.Agent, true
 }
 
 // Match identifies why a prompt matched an agent.
 //
 //nolint:govet // Field order groups the matched agent before reason metadata.
 type Match struct {
-	Agent   Agent
-	Kind    string
-	Pattern string
+	Agent       Agent
+	Kind        string
+	Pattern     string
+	Evidence    []MatchEvidence
+	Ambiguities []Ambiguity
+	Score       float64
 }
 
-// MatchPromptWithReason returns the first agent whose configured trigger or
-// capability appears in prompt. Triggers take priority over capabilities, and
-// matching is case-insensitive and stable by sorted agent name.
+// MatchPromptWithReason returns the highest-scoring prompt match with the
+// evidence that made the selected agent win.
 func (r *Registry) MatchPromptWithReason(prompt string) (Match, bool) {
 	if r == nil {
 		return Match{}, false
 	}
 
-	prompt = strings.ToLower(prompt)
-
-	for _, name := range r.List() {
-		agent := r.agents[name]
-		for _, trigger := range agent.Triggers {
-			if trigger != "" && strings.Contains(prompt, trigger) {
-				return Match{Agent: agent, Kind: "trigger", Pattern: trigger}, true
-			}
-		}
+	plan, err := r.PlanOrchestration(OrchestrationRequest{Prompt: prompt, MaxParticipants: 1})
+	if err != nil || len(plan.Participants) == 0 {
+		return Match{}, false
 	}
 
-	for _, name := range r.List() {
-		agent := r.agents[name]
-		for _, capability := range agent.Capabilities {
-			if capability != "" && strings.Contains(prompt, capability) {
-				return Match{Agent: agent, Kind: "capability", Pattern: capability}, true
-			}
-		}
-	}
+	participant := plan.Participants[0]
 
-	return Match{}, false
+	return Match{
+		Agent:       participant.Agent,
+		Kind:        participant.Source,
+		Pattern:     participant.Pattern,
+		Evidence:    append([]MatchEvidence(nil), participant.Evidence...),
+		Ambiguities: append([]Ambiguity(nil), plan.Ambiguities...),
+		Score:       participant.Score,
+	}, true
 }
 
 // CompleteParams applies the agent persona to an LLM completion request.
@@ -243,14 +256,21 @@ func (a Agent) CompleteParams(model string, messages []llm.Message) llm.Complete
 
 func normalizePhrases(phrases []string) []string {
 	out := make([]string, 0, len(phrases))
+	seen := make(map[string]bool, len(phrases))
+
 	for _, phrase := range phrases {
 		phrase = strings.ToLower(strings.TrimSpace(phrase))
-		if phrase != "" {
+		if phrase != "" && !seen[phrase] {
+			seen[phrase] = true
 			out = append(out, phrase)
 		}
 	}
 
 	return out
+}
+
+func normalizeToolName(tool string) string {
+	return strings.ToLower(strings.TrimSpace(tool))
 }
 
 func normalizeModels(models []string) []string {

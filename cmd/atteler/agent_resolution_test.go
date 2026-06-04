@@ -89,6 +89,75 @@ func TestResolveAgent_Unknown(t *testing.T) {
 	}
 }
 
+func TestResolveAgent_AmbiguousPromptRequiresOverride(t *testing.T) {
+	t.Parallel()
+
+	registry := agent.NewRegistry(map[string]config.AgentConfig{
+		"auth-a": {Triggers: []string{"auth"}},
+		"auth-b": {Triggers: []string{"auth"}},
+	})
+
+	_, prompt, err := resolveAgent(registry, "", "review auth permissions")
+	require.Error(t, err)
+
+	assert.Equal(t, "review auth permissions", prompt)
+	require.ErrorContains(t, err, "ambiguous agent match")
+	require.ErrorContains(t, err, "use @agent or --agent to override")
+	require.ErrorContains(t, err, "auth-a")
+	require.ErrorContains(t, err, "auth-b")
+	require.ErrorContains(t, err, "scores tied")
+}
+
+func TestResolveAgent_ExplicitOverrideBypassesAmbiguousPrompt(t *testing.T) {
+	t.Parallel()
+
+	registry := agent.NewRegistry(map[string]config.AgentConfig{
+		"auth-a": {Triggers: []string{"auth"}},
+		"auth-b": {Triggers: []string{"auth"}},
+	})
+
+	selected, prompt, err := resolveAgent(registry, "", "@auth-b review auth permissions")
+	require.NoError(t, err)
+
+	assert.Equal(t, "auth-b", selected.name)
+	assert.Equal(t, "review auth permissions", prompt)
+}
+
+func TestResolveAgent_RecentSessionContextBreaksAmbiguousTie(t *testing.T) {
+	t.Parallel()
+
+	registry := agent.NewRegistry(map[string]config.AgentConfig{
+		"alpha-reviewer": {Triggers: []string{"review"}},
+		"beta-reviewer":  {Triggers: []string{"review"}},
+	})
+
+	selected, prompt, err := resolveAgent(registry, "", "review this", []string{"beta-reviewer"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "beta-reviewer", selected.name)
+	assert.Equal(t, "review this", prompt)
+}
+
+func TestResolveAgent_IneligibleToolMatchRequiresOverride(t *testing.T) {
+	t.Parallel()
+
+	registry := agent.NewRegistry(map[string]config.AgentConfig{
+		"blocked-runner": {
+			Triggers:        []string{"run tests"},
+			ToolPermissions: map[string]bool{"bash": false},
+		},
+	})
+
+	_, prompt, err := resolveAgent(registry, "", "run tests")
+	require.Error(t, err)
+
+	assert.Equal(t, "run tests", prompt)
+	require.ErrorContains(t, err, "no eligible agent match")
+	require.ErrorContains(t, err, "use @agent or --agent to override")
+	require.ErrorContains(t, err, "blocked-runner")
+	require.ErrorContains(t, err, "missing required tool permission")
+}
+
 func TestRequestModelAndFallbacks_AppliesAgentRoutingPolicy(t *testing.T) {
 	t.Parallel()
 

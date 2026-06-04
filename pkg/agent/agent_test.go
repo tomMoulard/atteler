@@ -80,6 +80,31 @@ func TestRegistry_GetAndList(t *testing.T) {
 	assert.True(t, agent.RoutingPolicy.RequireFreshMetadata)
 }
 
+func TestRegistry_NormalizesAndDeduplicatesPhrases(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"reviewer": {
+			Capabilities: []string{" Review ", "review", "SECURITY", "security"},
+			Triggers:     []string{" Review this ", "review this"},
+			RoutingPolicy: config.RoutingPolicyConfig{
+				PreferredProviders:   []string{"OpenAI", "openai"},
+				BannedProviders:      []string{"Ollama", "ollama"},
+				RequiredCapabilities: []string{"Tools", "tools"},
+			},
+		},
+	})
+
+	reviewer, ok := registry.Get("reviewer")
+	require.True(t, ok)
+
+	assert.Equal(t, []string{"review", "security"}, reviewer.Capabilities)
+	assert.Equal(t, []string{"review this"}, reviewer.Triggers)
+	assert.Equal(t, []string{"openai"}, reviewer.RoutingPolicy.PreferredProviders)
+	assert.Equal(t, []string{"ollama"}, reviewer.RoutingPolicy.BannedProviders)
+	assert.Equal(t, []string{"tools"}, reviewer.RoutingPolicy.RequiredCapabilities)
+}
+
 func TestRegistry_MatchPrompt(t *testing.T) {
 	t.Parallel()
 
@@ -109,6 +134,36 @@ func TestRegistry_MatchPrompt(t *testing.T) {
 	if _, ok := registry.MatchPrompt("summarize this"); ok {
 		require.FailNow(t, "expected no trigger match")
 	}
+}
+
+func TestRegistry_MatchPromptWithReasonReportsAmbiguity(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"auth-a": {Triggers: []string{"auth"}},
+		"auth-b": {Triggers: []string{"auth"}},
+	})
+
+	match, ok := registry.MatchPromptWithReason("review auth permissions")
+	require.True(t, ok)
+
+	assert.Equal(t, "auth-a", match.Agent.Name)
+	require.NotEmpty(t, match.Ambiguities)
+	assert.Equal(t, "security", match.Ambiguities[0].Role)
+	assert.Len(t, match.Ambiguities[0].Candidates, 2)
+}
+
+func TestRegistry_MatchPromptRejectsAmbiguousMatch(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"auth-a": {Triggers: []string{"auth"}},
+		"auth-b": {Triggers: []string{"auth"}},
+	})
+
+	_, ok := registry.MatchPrompt("review auth permissions")
+
+	assert.False(t, ok)
 }
 
 func TestAgent_CompleteParams(t *testing.T) {
@@ -269,9 +324,13 @@ func TestAgent_HasToolPermission_ExplicitPermissions(t *testing.T) {
 	}
 
 	assert.True(t, a.HasToolPermission("bash"))
+	assert.True(t, a.HasToolPermission(" Bash "))
+	assert.True(t, a.HasToolPermission("READ"))
 	assert.True(t, a.HasToolPermission("read"))
+	assert.False(t, a.HasToolPermission(" Write "), "explicitly false should deny after normalization")
 	assert.False(t, a.HasToolPermission("write"), "explicitly false should deny")
 	assert.False(t, a.HasToolPermission("edit"), "missing key should deny")
+	assert.False(t, a.HasToolPermission(" "), "blank tool name should deny")
 }
 
 func TestAgent_FilterTools_NilPermissions(t *testing.T) {
@@ -291,14 +350,14 @@ func TestAgent_FilterTools_ExplicitPermissions(t *testing.T) {
 		ToolPermissions: map[string]bool{"bash": true},
 	}
 	tools := []llm.ToolDefinition{
-		{Name: "bash", Description: "Run commands"},
+		{Name: " Bash ", Description: "Run commands"},
 		{Name: "write", Description: "Write files"},
 		{Name: "read", Description: "Read files"},
 	}
 
 	filtered := a.FilterTools(tools)
 	require.Len(t, filtered, 1)
-	assert.Equal(t, "bash", filtered[0].Name)
+	assert.Equal(t, " Bash ", filtered[0].Name)
 }
 
 func TestAgent_FilterTools_EmptyPermissions(t *testing.T) {
@@ -321,9 +380,12 @@ func TestRegistry_ModeAndToolPermissions(t *testing.T) {
 			Description: "Code review agent",
 			Mode:        "subagent",
 			ToolPermissions: map[string]bool{
-				"bash":  true,
-				"read":  true,
-				"write": true,
+				" Bash ": true,
+				"READ":   true,
+				"write":  true,
+				" EDIT ": true,
+				"edit":   false,
+				" ":      true,
 			},
 		},
 		"simple": {
@@ -338,6 +400,7 @@ func TestRegistry_ModeAndToolPermissions(t *testing.T) {
 	assert.True(t, cr.HasToolPermission("read"))
 	assert.True(t, cr.HasToolPermission("write"))
 	assert.False(t, cr.HasToolPermission("edit"))
+	assert.NotContains(t, cr.ToolPermissions, "")
 
 	simple, ok := registry.Get("simple")
 	require.True(t, ok)

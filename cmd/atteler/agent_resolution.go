@@ -570,7 +570,7 @@ func formatRouteRejections(decision modelroute.Decision) string {
 	return strings.Join(rejected, ", ")
 }
 
-func resolveAgent(agents *agent.Registry, selectedAgent, input string) (agentSelection, string, error) {
+func resolveAgent(agents *agent.Registry, selectedAgent, input string, recentAgentNames ...[]string) (agentSelection, string, error) {
 	agentName := selectedAgent
 
 	prompt := input
@@ -580,11 +580,9 @@ func resolveAgent(agents *agent.Registry, selectedAgent, input string) (agentSel
 	}
 
 	if agentName == "" {
-		if matchedAgent, ok := agents.MatchPrompt(prompt); ok {
-			return agentSelection{name: matchedAgent.Name, agent: matchedAgent, ok: true}, prompt, nil
-		}
+		resolved, err := resolvePromptAgent(agents, prompt, recentAgentNames...)
 
-		return agentSelection{}, prompt, nil
+		return resolved, prompt, err
 	}
 
 	activeAgent, ok := agents.Get(agentName)
@@ -597,6 +595,110 @@ func resolveAgent(agents *agent.Registry, selectedAgent, input string) (agentSel
 	}
 
 	return agentSelection{name: agentName, agent: activeAgent, ok: true}, prompt, nil
+}
+
+func resolvePromptAgent(agents *agent.Registry, prompt string, recentAgentNames ...[]string) (agentSelection, error) {
+	request := agent.OrchestrationRequest{
+		Prompt:          prompt,
+		MaxParticipants: 1,
+	}
+	if len(recentAgentNames) > 0 {
+		request.RecentAgentNames = append([]string(nil), recentAgentNames[0]...)
+	}
+
+	plan, err := agents.PlanOrchestration(request)
+	if err != nil {
+		return agentSelection{}, fmt.Errorf("plan agent selection: %w", err)
+	}
+
+	if plan.Ambiguous() {
+		return agentSelection{}, fmt.Errorf(
+			"ambiguous agent match; use @agent or --agent to override: %s",
+			formatAgentAmbiguityOverrideHint(plan.Ambiguities),
+		)
+	}
+
+	if len(plan.Participants) == 0 && plan.Composition.StopReason == "no_eligible_candidates" {
+		if hint := formatAgentIneligibleOverrideHint(plan.Candidates); hint != "" {
+			return agentSelection{}, fmt.Errorf(
+				"no eligible agent match; use @agent or --agent to override: %s",
+				hint,
+			)
+		}
+	}
+
+	if len(plan.Participants) == 0 {
+		return agentSelection{}, nil
+	}
+
+	matchedAgent := plan.Participants[0].Agent
+
+	return agentSelection{name: matchedAgent.Name, agent: matchedAgent, ok: true}, nil
+}
+
+func formatAgentAmbiguityOverrideHint(ambiguities []agent.Ambiguity) string {
+	parts := make([]string, 0, len(ambiguities))
+
+	for _, ambiguity := range ambiguities {
+		candidates := make([]string, 0, len(ambiguity.Candidates))
+		for _, candidate := range ambiguity.Candidates {
+			candidates = append(candidates, fmt.Sprintf("%s=%.1f", candidate.Name, candidate.Score))
+		}
+
+		role := ambiguity.Role
+		if role == "" {
+			role = "general"
+		}
+
+		part := fmt.Sprintf("role %s candidates %s", role, strings.Join(candidates, ", "))
+		if ambiguity.Reason != "" {
+			part += "; reason " + ambiguity.Reason
+		}
+
+		parts = append(parts, part)
+	}
+
+	if len(parts) == 0 {
+		return "no disambiguation details available"
+	}
+
+	return strings.Join(parts, "; ")
+}
+
+func formatAgentIneligibleOverrideHint(candidates []agent.Candidate) string {
+	parts := make([]string, 0)
+
+	for i := range candidates {
+		candidate := &candidates[i]
+		if len(deniedAgentPlanTools(candidate.ToolConstraints)) == 0 {
+			continue
+		}
+
+		reason := candidate.RejectedReason
+		if reason == "" {
+			reason = "missing required tool permission"
+		}
+
+		parts = append(parts, fmt.Sprintf("%s %.1f %s", candidate.Agent.Name, candidate.Score, reason))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return strings.Join(parts, "; ")
+}
+
+func deniedAgentPlanTools(constraints []agent.ToolConstraint) []string {
+	denied := make([]string, 0)
+
+	for _, constraint := range constraints {
+		if !constraint.Allowed {
+			denied = append(denied, constraint.Tool)
+		}
+	}
+
+	return denied
 }
 
 func generationOverridesFromState(opts cliOptions, selection selectionState, persistedState appconfig.State, cwd string) generationSettings {
