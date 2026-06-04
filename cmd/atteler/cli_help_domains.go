@@ -316,7 +316,7 @@ var cliHelpDomains = []cliHelpDomain{
 		},
 		Examples: []string{
 			`atteler eval output .atteler/fixtures/readme-summary.txt --eval-expected "package overview"`,
-			`atteler eval run .atteler/evals/readme.eval.yaml --eval-json`,
+			`atteler eval run .atteler/evals/readme.eval.yaml`,
 			`atteler eval fixtures .atteler/evals --eval-report .atteler/eval-report.json`,
 			`atteler eval record reviewer`,
 			`atteler eval replay-response .atteler/fixtures/once.json "Summarize @README.md"`,

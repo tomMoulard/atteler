@@ -24,7 +24,7 @@ const (
 	sessionFileExt = ".json"
 
 	// AgentEvaluationSchemaVersion is the current persisted evaluation metadata schema.
-	AgentEvaluationSchemaVersion = 1
+	AgentEvaluationSchemaVersion = 2
 
 	// EvaluationSourceHuman marks an evaluation entered by a person.
 	EvaluationSourceHuman = "human"
@@ -135,13 +135,28 @@ type AgentEvaluation struct {
 	TaskType        string    `json:"task_type,omitempty" yaml:"task_type,omitempty"`
 	Difficulty      string    `json:"difficulty,omitempty" yaml:"difficulty,omitempty"`
 	ExpectedOutcome string    `json:"expected_outcome,omitempty" yaml:"expected_outcome,omitempty"`
+	Provider        string    `json:"provider,omitempty" yaml:"provider,omitempty"`
 	Model           string    `json:"model,omitempty" yaml:"model,omitempty"`
+	FixtureVersion  string    `json:"fixture_version,omitempty" yaml:"fixture_version,omitempty"`
 	AgentVersion    string    `json:"agent_version,omitempty" yaml:"agent_version,omitempty"`
 	SchemaVersion   int       `json:"schema_version,omitempty" yaml:"schema_version,omitempty"`
 	Score           int       `json:"score,omitempty" yaml:"score,omitempty"`
+	PassRate        float64   `json:"pass_rate,omitempty" yaml:"pass_rate,omitempty"`
+	HasPassRate     bool      `json:"has_pass_rate,omitempty" yaml:"has_pass_rate,omitempty"`
+	FlakeCount      int       `json:"flake_count,omitempty" yaml:"flake_count,omitempty"`
 	DurationMillis  int64     `json:"duration_millis,omitempty" yaml:"duration_millis,omitempty"`
+	InputTokens     int       `json:"input_tokens,omitempty" yaml:"input_tokens,omitempty"`
+	OutputTokens    int       `json:"output_tokens,omitempty" yaml:"output_tokens,omitempty"`
+	TotalTokens     int       `json:"total_tokens,omitempty" yaml:"total_tokens,omitempty"`
 	Cost            float64   `json:"cost,omitempty" yaml:"cost,omitempty"`
 	Confidence      float64   `json:"confidence,omitempty" yaml:"confidence,omitempty"`
+}
+
+// PassRateRecorded reports whether PassRate was intentionally recorded. A zero
+// pass rate is meaningful for failed eval suites, so callers must not infer
+// presence from PassRate != 0 alone.
+func (evaluation AgentEvaluation) PassRateRecorded() bool {
+	return evaluation.HasPassRate || evaluation.PassRate != 0
 }
 
 // Artifact records a useful file or research artifact produced during a session.
@@ -844,10 +859,20 @@ func normalizeEvaluationDetails(evaluation AgentEvaluation) (AgentEvaluation, bo
 	evaluation.TaskType = strings.TrimSpace(evaluation.TaskType)
 	evaluation.Difficulty = strings.TrimSpace(evaluation.Difficulty)
 	evaluation.ExpectedOutcome = strings.TrimSpace(evaluation.ExpectedOutcome)
+	evaluation.Provider = strings.TrimSpace(evaluation.Provider)
 	evaluation.Model = strings.TrimSpace(evaluation.Model)
+	evaluation.FixtureVersion = strings.TrimSpace(evaluation.FixtureVersion)
 
 	evaluation.AgentVersion = strings.TrimSpace(evaluation.AgentVersion)
 	evaluation.SchemaVersion = normalizeEvaluationSchemaVersion(evaluation.SchemaVersion)
+
+	if evaluation.PassRate != 0 {
+		evaluation.HasPassRate = true
+	}
+
+	if evaluation.TotalTokens == 0 {
+		evaluation.TotalTokens = evaluation.InputTokens + evaluation.OutputTokens
+	}
 
 	if evaluation.RubricVersion == "" {
 		evaluation.RubricVersion = RubricVersionLegacy
@@ -862,8 +887,11 @@ func normalizeEvaluationDetails(evaluation AgentEvaluation) (AgentEvaluation, bo
 
 func invalidEvaluationCalibration(evaluation AgentEvaluation) bool {
 	return evaluation.Confidence < 0 || evaluation.Confidence > 1 ||
+		evaluation.PassRate < 0 || evaluation.PassRate > 1 ||
 		evaluation.DurationMillis < 0 || evaluation.Cost < 0 ||
-		evaluation.Score < 0 || evaluation.SchemaVersion < 0 ||
+		evaluation.Score < 0 || evaluation.FlakeCount < 0 ||
+		evaluation.InputTokens < 0 || evaluation.OutputTokens < 0 || evaluation.TotalTokens < 0 ||
+		evaluation.SchemaVersion < 0 ||
 		evaluation.SchemaVersion > AgentEvaluationSchemaVersion
 }
 

@@ -1,4 +1,4 @@
-//nolint:cyclop,gocognit,goconst,gocritic,govet,modernize,nestif,perfsprint,revive,staticcheck,wrapcheck,wsl_v5 // Structured eval keeps explicit dependency-free assertion, path, and schema logic.
+//nolint:cyclop,gocognit,goconst,gocritic,govet,modernize,nestif,perfsprint,revive,staticcheck,wrapcheck,wsl_v5 // Structured eval keeps explicit assertion, path, workflow, and schema logic.
 package eval
 
 import (
@@ -29,10 +29,17 @@ const (
 	AssertionRegex          AssertionType = "regex"
 	AssertionJSONPath       AssertionType = "json_path"
 	AssertionYAMLPath       AssertionType = "yaml_path"
+	AssertionUnorderedList  AssertionType = "unordered_list"
 	AssertionSchema         AssertionType = "schema"
 	AssertionNumeric        AssertionType = "numeric"
+	AssertionToolCalled     AssertionType = "tool_called"
+	AssertionFileTouched    AssertionType = "file_touched"
+	AssertionCommandRun     AssertionType = "command_run"
+	AssertionGatePassed     AssertionType = "gate_passed"
+	AssertionArtifactMade   AssertionType = "artifact_produced"
 	AssertionArtifactExists AssertionType = "artifact_exists"
 	AssertionExitCode       AssertionType = "exit_code"
+	AssertionJudgeDecision  AssertionType = "judge_decision"
 )
 
 // Severity labels how important one assertion is in the machine-readable
@@ -49,30 +56,36 @@ const (
 const (
 	reportVersion = 1
 
-	assertionStatusPass = "pass"
-	assertionStatusFail = "fail"
+	assertionStatusPass  = "pass"
+	assertionStatusFail  = "fail"
+	assertionStatusFlaky = "flaky"
 )
 
 // Metadata records the provenance of a structured eval fixture.
 type Metadata struct {
-	TargetCommand string            `json:"target_command,omitempty" yaml:"target_command,omitempty"`
-	Model         string            `json:"model,omitempty" yaml:"model,omitempty"`
-	Agent         string            `json:"agent,omitempty" yaml:"agent,omitempty"`
-	InputFixture  string            `json:"input_fixture,omitempty" yaml:"input_fixture,omitempty"`
-	Environment   map[string]string `json:"environment,omitempty" yaml:"environment,omitempty"`
-	CreatedAt     string            `json:"created_at,omitempty" yaml:"created_at,omitempty"`
-	UpdatedAt     string            `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
-	Owner         string            `json:"owner,omitempty" yaml:"owner,omitempty"`
+	TargetCommand  string            `json:"target_command,omitempty" yaml:"target_command,omitempty"`
+	Provider       string            `json:"provider,omitempty" yaml:"provider,omitempty"`
+	Model          string            `json:"model,omitempty" yaml:"model,omitempty"`
+	Agent          string            `json:"agent,omitempty" yaml:"agent,omitempty"`
+	InputFixture   string            `json:"input_fixture,omitempty" yaml:"input_fixture,omitempty"`
+	FixtureVersion string            `json:"fixture_version,omitempty" yaml:"fixture_version,omitempty"`
+	Environment    map[string]string `json:"environment,omitempty" yaml:"environment,omitempty"`
+	CreatedAt      string            `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+	UpdatedAt      string            `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
+	Owner          string            `json:"owner,omitempty" yaml:"owner,omitempty"`
 }
 
 // Suite is a YAML/JSON assertion file for one output eval.
 type Suite struct {
-	Version    int         `json:"version,omitempty" yaml:"version,omitempty"`
-	Metadata   Metadata    `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	ActualPath string      `json:"actual,omitempty" yaml:"actual,omitempty"`
-	GoldenPath string      `json:"golden,omitempty" yaml:"golden,omitempty"`
-	ExitCode   *int        `json:"exit_code,omitempty" yaml:"exit_code,omitempty"`
-	Assertions []Assertion `json:"assertions,omitempty" yaml:"assertions,omitempty"`
+	Version      int           `json:"version,omitempty" yaml:"version,omitempty"`
+	Metadata     Metadata      `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Metrics      ReportMetrics `json:"metrics,omitempty,omitzero" yaml:"metrics,omitempty"`
+	Workflow     WorkflowTrace `json:"workflow,omitempty,omitzero" yaml:"workflow,omitempty"`
+	ActualPath   string        `json:"actual,omitempty" yaml:"actual,omitempty"`
+	GoldenPath   string        `json:"golden,omitempty" yaml:"golden,omitempty"`
+	WorkflowPath string        `json:"workflow_file,omitempty" yaml:"workflow_file,omitempty"`
+	ExitCode     *int          `json:"exit_code,omitempty" yaml:"exit_code,omitempty"`
+	Assertions   []Assertion   `json:"assertions,omitempty" yaml:"assertions,omitempty"`
 }
 
 // Assertion describes one typed check in a structured eval suite.
@@ -81,8 +94,19 @@ type Assertion struct {
 	Type        AssertionType  `json:"type" yaml:"type"`
 	Severity    Severity       `json:"severity,omitempty" yaml:"severity,omitempty"`
 	Value       string         `json:"value,omitempty" yaml:"value,omitempty"`
+	Items       []string       `json:"items,omitempty" yaml:"items,omitempty"`
+	Required    []string       `json:"required,omitempty" yaml:"required,omitempty"`
+	Forbidden   []string       `json:"forbidden,omitempty" yaml:"forbidden,omitempty"`
+	AllowExtra  bool           `json:"allow_extra,omitempty" yaml:"allow_extra,omitempty"`
 	Pattern     string         `json:"pattern,omitempty" yaml:"pattern,omitempty"`
 	Path        string         `json:"path,omitempty" yaml:"path,omitempty"`
+	Name        string         `json:"name,omitempty" yaml:"name,omitempty"`
+	Args        map[string]any `json:"args,omitempty" yaml:"args,omitempty"`
+	Command     string         `json:"command,omitempty" yaml:"command,omitempty"`
+	Gate        string         `json:"gate,omitempty" yaml:"gate,omitempty"`
+	Kind        string         `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Action      string         `json:"action,omitempty" yaml:"action,omitempty"`
+	Status      string         `json:"status,omitempty" yaml:"status,omitempty"`
 	Equals      any            `json:"equals,omitempty" yaml:"equals,omitempty"`
 	Contains    string         `json:"contains,omitempty" yaml:"contains,omitempty"`
 	NotContains string         `json:"not_contains,omitempty" yaml:"not_contains,omitempty"`
@@ -92,7 +116,10 @@ type Assertion struct {
 	Tolerance   *float64       `json:"tolerance,omitempty" yaml:"tolerance,omitempty"`
 	Schema      map[string]any `json:"schema,omitempty" yaml:"schema,omitempty"`
 	SchemaPath  string         `json:"schema_file,omitempty" yaml:"schema_file,omitempty"`
+	ExitCode    *int           `json:"exit_code,omitempty" yaml:"exit_code,omitempty"`
 	Exists      *bool          `json:"exists,omitempty" yaml:"exists,omitempty"`
+	FlakeGroup  string         `json:"flake_group,omitempty" yaml:"flake_group,omitempty"`
+	Judge       *JudgeDecision `json:"judge,omitempty" yaml:"judge,omitempty"`
 	Remediation string         `json:"remediation,omitempty" yaml:"remediation,omitempty"`
 }
 
@@ -104,6 +131,8 @@ type RunOptions struct {
 	ExitCode            *int
 	ArtifactRoot        string
 	SuitePath           string
+	Metrics             ReportMetrics
+	Workflow            WorkflowTrace
 	Now                 time.Time
 	UpdateGolden        bool
 	ApproveGoldenUpdate bool
@@ -116,6 +145,7 @@ type Report struct {
 	Passed    bool              `json:"passed"`
 	RunAt     string            `json:"run_at,omitempty"`
 	Metadata  Metadata          `json:"metadata,omitempty"`
+	Metrics   ReportMetrics     `json:"metrics,omitempty,omitzero"`
 	Summary   ReportSummary     `json:"summary"`
 	Suites    []SuiteReport     `json:"suites,omitempty"`
 	Results   []AssertionResult `json:"results"`
@@ -128,31 +158,106 @@ type SuiteReport struct {
 	Path      string        `json:"path"`
 	Passed    bool          `json:"passed"`
 	Metadata  Metadata      `json:"metadata,omitempty"`
+	Metrics   ReportMetrics `json:"metrics,omitempty,omitzero"`
 	Summary   ReportSummary `json:"summary"`
 	ActualRef string        `json:"actual_ref,omitempty"`
 }
 
 // ReportSummary counts assertion outcomes in a structured eval report.
 type ReportSummary struct {
-	Total    int `json:"total"`
-	Passed   int `json:"passed"`
-	Failed   int `json:"failed"`
-	Warnings int `json:"warnings"`
+	Total      int     `json:"total"`
+	Passed     int     `json:"passed"`
+	Failed     int     `json:"failed"`
+	FlakeCount int     `json:"flake_count,omitempty"`
+	Warnings   int     `json:"warnings"`
+	PassRate   float64 `json:"pass_rate"`
+}
+
+// ReportMetrics carries repeatable run metrics alongside pass/fail results.
+// Zero values are omitted from JSON/YAML so old fixtures remain compact.
+type ReportMetrics struct {
+	LatencyMillis int64   `json:"latency_millis,omitempty" yaml:"latency_millis,omitempty"`
+	InputTokens   int     `json:"input_tokens,omitempty" yaml:"input_tokens,omitempty"`
+	OutputTokens  int     `json:"output_tokens,omitempty" yaml:"output_tokens,omitempty"`
+	TotalTokens   int     `json:"total_tokens,omitempty" yaml:"total_tokens,omitempty"`
+	Cost          float64 `json:"cost,omitempty" yaml:"cost,omitempty"`
+}
+
+// WorkflowTrace records observed side effects from an agent or harness run.
+type WorkflowTrace struct {
+	ToolCalls []WorkflowToolCall `json:"tool_calls,omitempty" yaml:"tool_calls,omitempty"`
+	Files     []WorkflowFile     `json:"files,omitempty" yaml:"files,omitempty"`
+	Commands  []WorkflowCommand  `json:"commands,omitempty" yaml:"commands,omitempty"`
+	Gates     []WorkflowGate     `json:"gates,omitempty" yaml:"gates,omitempty"`
+	Artifacts []WorkflowArtifact `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
+}
+
+// WorkflowToolCall records one observed tool invocation.
+type WorkflowToolCall struct {
+	Name   string         `json:"name" yaml:"name"`
+	Status string         `json:"status,omitempty" yaml:"status,omitempty"`
+	Args   map[string]any `json:"args,omitempty" yaml:"args,omitempty"`
+}
+
+// WorkflowFile records one observed file side effect.
+type WorkflowFile struct {
+	Path   string `json:"path" yaml:"path"`
+	Action string `json:"action,omitempty" yaml:"action,omitempty"`
+	Status string `json:"status,omitempty" yaml:"status,omitempty"`
+}
+
+// WorkflowCommand records one observed command execution.
+type WorkflowCommand struct {
+	Command  string `json:"command" yaml:"command"`
+	Status   string `json:"status,omitempty" yaml:"status,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty" yaml:"exit_code,omitempty"`
+}
+
+// WorkflowGate records one observed review/test/workflow gate outcome.
+type WorkflowGate struct {
+	Name   string `json:"name" yaml:"name"`
+	Status string `json:"status,omitempty" yaml:"status,omitempty"`
+	Passed *bool  `json:"passed,omitempty" yaml:"passed,omitempty"`
+}
+
+// WorkflowArtifact records one produced artifact from an agent or harness run.
+type WorkflowArtifact struct {
+	Path   string `json:"path" yaml:"path"`
+	Kind   string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Status string `json:"status,omitempty" yaml:"status,omitempty"`
+}
+
+// JudgeDecision records a replayable rubric or judge decision. The eval runner
+// only checks recorded decisions; it never calls a judge while evaluating.
+type JudgeDecision struct {
+	Judge         string  `json:"judge,omitempty" yaml:"judge,omitempty"`
+	Model         string  `json:"model,omitempty" yaml:"model,omitempty"`
+	Rubric        string  `json:"rubric,omitempty" yaml:"rubric,omitempty"`
+	RubricVersion string  `json:"rubric_version,omitempty" yaml:"rubric_version,omitempty"`
+	InputRef      string  `json:"input_ref,omitempty" yaml:"input_ref,omitempty"`
+	OutputRef     string  `json:"output_ref,omitempty" yaml:"output_ref,omitempty"`
+	Decision      string  `json:"decision,omitempty" yaml:"decision,omitempty"`
+	Rationale     string  `json:"rationale,omitempty" yaml:"rationale,omitempty"`
+	Score         float64 `json:"score,omitempty" yaml:"score,omitempty"`
+	RecordedAt    string  `json:"recorded_at,omitempty" yaml:"recorded_at,omitempty"`
 }
 
 // AssertionResult is one per-assertion machine-readable result.
 type AssertionResult struct {
-	ID              string        `json:"id"`
-	Type            AssertionType `json:"type"`
-	Severity        Severity      `json:"severity"`
-	Status          string        `json:"status"`
-	Passed          bool          `json:"passed"`
-	Suite           string        `json:"suite,omitempty"`
-	Evidence        string        `json:"evidence,omitempty"`
-	ExpectedSnippet string        `json:"expected_snippet,omitempty"`
-	ActualSnippet   string        `json:"actual_snippet,omitempty"`
-	Remediation     string        `json:"remediation,omitempty"`
-	Error           string        `json:"error,omitempty"`
+	ID              string         `json:"id"`
+	Type            AssertionType  `json:"type"`
+	Severity        Severity       `json:"severity"`
+	Status          string         `json:"status"`
+	Passed          bool           `json:"passed"`
+	Flaky           bool           `json:"flaky,omitempty"`
+	Suite           string         `json:"suite,omitempty"`
+	FlakeGroup      string         `json:"flake_group,omitempty"`
+	Judge           *JudgeDecision `json:"judge,omitempty"`
+	Evidence        string         `json:"evidence,omitempty"`
+	ExpectedSnippet string         `json:"expected_snippet,omitempty"`
+	ActualSnippet   string         `json:"actual_snippet,omitempty"`
+	Remediation     string         `json:"remediation,omitempty"`
+	Error           string         `json:"error,omitempty"`
 }
 
 // LoadSuiteFile reads a YAML or JSON structured eval suite.
@@ -270,10 +375,15 @@ func RunFixtureDir(dir string, opts RunOptions) (Report, error) {
 // results into one report for CI consumers.
 func RunSuiteFiles(paths []string, opts RunOptions) (Report, error) {
 	report := newReport(Metadata{}, opts)
+	runMetrics := opts.Metrics
 	for _, path := range paths {
 		suiteOpts := opts
 		suiteOpts.ArtifactRoot = filepath.Dir(path)
 		suiteOpts.SuitePath = path
+		// Run-level metrics describe the evaluated run, not each fixture file.
+		// Apply them once to the aggregate report after per-suite metrics are
+		// combined so multi-suite runs do not multiply tokens, cost, or latency.
+		suiteOpts.Metrics = ReportMetrics{}
 
 		suiteReport, err := RunSuiteFile(path, suiteOpts)
 		if err != nil {
@@ -281,15 +391,19 @@ func RunSuiteFiles(paths []string, opts RunOptions) (Report, error) {
 		}
 
 		report.Results = append(report.Results, suiteReport.Results...)
+		report.Metrics = combineReportMetrics(report.Metrics, suiteReport.Metrics)
 		report.Suites = append(report.Suites, SuiteReport{
 			Path:      path,
 			Passed:    suiteReport.Passed,
 			Metadata:  suiteReport.Metadata,
+			Metrics:   suiteReport.Metrics,
 			Summary:   suiteReport.Summary,
 			ActualRef: suiteReport.ActualRef,
 		})
 	}
 
+	report.Metadata = commonSuiteMetadata(report.Suites)
+	report.Metrics = mergeReportMetrics(report.Metrics, runMetrics)
 	finalizeReport(&report)
 	return report, nil
 }
@@ -307,6 +421,12 @@ func RunSuite(suite Suite, opts RunOptions) (Report, error) {
 
 	report := newReport(suite.Metadata, opts)
 	report.ActualRef = actualRef
+	report.Metrics = mergeReportMetrics(suite.Metrics, opts.Metrics)
+
+	workflow, err := workflowTraceForSuite(suite, opts)
+	if err != nil {
+		return Report{}, err
+	}
 
 	assertions := append([]Assertion(nil), suite.Assertions...)
 	if suite.ExitCode != nil {
@@ -358,12 +478,16 @@ func RunSuite(suite Suite, opts RunOptions) (Report, error) {
 		}
 	}
 
+	if judgeAssertionsRequireIndependentSignal(assertions) {
+		return Report{}, errors.New("judge assertions require at least one non-judge assertion")
+	}
+
 	if len(assertions) == 0 && len(report.Results) == 0 {
 		return Report{}, errors.New("eval suite has no assertions")
 	}
 
 	for i, assertion := range assertions {
-		report.Results = append(report.Results, evaluateAssertion(assertion, i, actual, opts))
+		report.Results = append(report.Results, evaluateAssertion(assertion, i, actual, workflow, opts))
 	}
 
 	finalizeReport(&report)
@@ -401,6 +525,7 @@ func newReport(metadata Metadata, opts RunOptions) Report {
 }
 
 func finalizeReport(report *Report) {
+	markFlakyResults(report.Results)
 	report.Summary = ReportSummary{Total: len(report.Results)}
 	report.Passed = true
 	for i := range report.Results {
@@ -410,10 +535,218 @@ func finalizeReport(report *Report) {
 			report.Summary.Failed++
 			report.Passed = false
 		}
+		if report.Results[i].Flaky || report.Results[i].Status == assertionStatusFlaky {
+			report.Summary.FlakeCount++
+		}
 		if report.Results[i].Severity == SeverityWarning {
 			report.Summary.Warnings++
 		}
 	}
+	if report.Summary.Total > 0 {
+		report.Summary.PassRate = float64(report.Summary.Passed) / float64(report.Summary.Total)
+	}
+}
+
+func mergeReportMetrics(suite, opts ReportMetrics) ReportMetrics {
+	merged := suite
+	tokenPartsOverridden := false
+	if opts.LatencyMillis != 0 {
+		merged.LatencyMillis = opts.LatencyMillis
+	}
+	if opts.InputTokens != 0 {
+		merged.InputTokens = opts.InputTokens
+		tokenPartsOverridden = true
+	}
+	if opts.OutputTokens != 0 {
+		merged.OutputTokens = opts.OutputTokens
+		tokenPartsOverridden = true
+	}
+	if opts.TotalTokens != 0 {
+		merged.TotalTokens = opts.TotalTokens
+	} else if tokenPartsOverridden {
+		merged.TotalTokens = merged.InputTokens + merged.OutputTokens
+	}
+	if opts.Cost != 0 {
+		merged.Cost = opts.Cost
+	}
+	if merged.TotalTokens == 0 {
+		merged.TotalTokens = merged.InputTokens + merged.OutputTokens
+	}
+
+	return merged
+}
+
+func combineReportMetrics(left, right ReportMetrics) ReportMetrics {
+	return ReportMetrics{
+		LatencyMillis: left.LatencyMillis + right.LatencyMillis,
+		InputTokens:   left.InputTokens + right.InputTokens,
+		OutputTokens:  left.OutputTokens + right.OutputTokens,
+		TotalTokens:   left.TotalTokens + right.TotalTokens,
+		Cost:          left.Cost + right.Cost,
+	}
+}
+
+func commonSuiteMetadata(suites []SuiteReport) Metadata {
+	if len(suites) == 0 {
+		return Metadata{}
+	}
+
+	common := suites[0].Metadata
+	for i := 1; i < len(suites); i++ {
+		common = intersectMetadata(common, suites[i].Metadata)
+	}
+
+	return common
+}
+
+func intersectMetadata(left, right Metadata) Metadata {
+	return Metadata{
+		TargetCommand:  commonMetadataString(left.TargetCommand, right.TargetCommand),
+		Provider:       commonMetadataString(left.Provider, right.Provider),
+		Model:          commonMetadataString(left.Model, right.Model),
+		Agent:          commonMetadataString(left.Agent, right.Agent),
+		InputFixture:   commonMetadataString(left.InputFixture, right.InputFixture),
+		FixtureVersion: commonMetadataString(left.FixtureVersion, right.FixtureVersion),
+		Environment:    commonMetadataEnvironment(left.Environment, right.Environment),
+		CreatedAt:      commonMetadataString(left.CreatedAt, right.CreatedAt),
+		UpdatedAt:      commonMetadataString(left.UpdatedAt, right.UpdatedAt),
+		Owner:          commonMetadataString(left.Owner, right.Owner),
+	}
+}
+
+func commonMetadataString(left, right string) string {
+	if left == right {
+		return left
+	}
+
+	return ""
+}
+
+func commonMetadataEnvironment(left, right map[string]string) map[string]string {
+	if !reflect.DeepEqual(left, right) {
+		return nil
+	}
+
+	return left
+}
+
+func workflowTraceForSuite(suite Suite, opts RunOptions) (WorkflowTrace, error) {
+	workflow := suite.Workflow
+	if !workflowTraceEmpty(opts.Workflow) {
+		workflow = opts.Workflow
+	}
+	if strings.TrimSpace(suite.WorkflowPath) == "" {
+		return workflow, nil
+	}
+	if !workflowTraceEmpty(opts.Workflow) {
+		return workflow, nil
+	}
+
+	path := resolveSuitePath(opts.ArtifactRoot, suite.WorkflowPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return WorkflowTrace{}, fmt.Errorf("read workflow trace %s: %w", path, err)
+	}
+
+	var loaded WorkflowTrace
+	if strings.EqualFold(filepath.Ext(path), ".json") {
+		decoder := json.NewDecoder(strings.NewReader(string(data)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&loaded); err != nil {
+			return WorkflowTrace{}, fmt.Errorf("parse workflow trace %s: %w", path, err)
+		}
+	} else {
+		decoder := yaml.NewDecoder(strings.NewReader(string(data)))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&loaded); err != nil {
+			return WorkflowTrace{}, fmt.Errorf("parse workflow trace %s: %w", path, err)
+		}
+	}
+
+	return loaded, nil
+}
+
+func workflowTraceEmpty(workflow WorkflowTrace) bool {
+	return len(workflow.ToolCalls) == 0 &&
+		len(workflow.Files) == 0 &&
+		len(workflow.Commands) == 0 &&
+		len(workflow.Gates) == 0 &&
+		len(workflow.Artifacts) == 0
+}
+
+func judgeAssertionsRequireIndependentSignal(assertions []Assertion) bool {
+	judgeCount := 0
+	nonJudgeCount := 0
+	for i := range assertions {
+		assertionType := normalizeAssertionType(assertions[i].Type)
+		if assertionType == AssertionJudgeDecision {
+			judgeCount++
+			continue
+		}
+		nonJudgeCount++
+	}
+
+	return judgeCount > 0 && nonJudgeCount == 0
+}
+
+func markFlakyResults(results []AssertionResult) {
+	type state struct {
+		passed bool
+		failed bool
+	}
+
+	states := make(map[string]state)
+	for i := range results {
+		key := flakeKey(results[i])
+		if key == "" {
+			continue
+		}
+		current := states[key]
+		if results[i].Passed {
+			current.passed = true
+		} else {
+			current.failed = true
+		}
+		states[key] = current
+	}
+
+	for i := range results {
+		key := flakeKey(results[i])
+		current := states[key]
+		if key == "" || !current.passed || !current.failed {
+			continue
+		}
+
+		results[i].Status = assertionStatusFlaky
+		results[i].Passed = false
+		results[i].Flaky = true
+		results[i].Evidence = flakyResultEvidence(results[i].Evidence)
+	}
+}
+
+func flakyResultEvidence(evidence string) string {
+	const flakyEvidence = "non-deterministic assertion result across repeated runs"
+
+	evidence = strings.TrimSpace(evidence)
+	if strings.Contains(evidence, flakyEvidence) {
+		return evidence
+	}
+	if evidence == "" {
+		return flakyEvidence
+	}
+
+	return Redact(flakyEvidence + "; original evidence: " + evidence)
+}
+
+func flakeKey(result AssertionResult) string {
+	if result.FlakeGroup != "" {
+		return "group:" + strings.ToLower(strings.TrimSpace(result.FlakeGroup))
+	}
+	if result.ID == "" {
+		return ""
+	}
+
+	return strings.ToLower(strings.TrimSpace(result.Suite)) + "\x00" + strings.ToLower(strings.TrimSpace(result.ID))
 }
 
 func actualTextForSuite(suite Suite, opts RunOptions) (string, string, error) {
@@ -441,7 +774,7 @@ func actualTextForSuite(suite Suite, opts RunOptions) (string, string, error) {
 	return "", "", nil
 }
 
-func evaluateAssertion(assertion Assertion, index int, actual string, opts RunOptions) AssertionResult {
+func evaluateAssertion(assertion Assertion, index int, actual string, workflow WorkflowTrace, opts RunOptions) AssertionResult {
 	assertion = normalizeAssertion(assertion, index)
 
 	switch assertion.Type {
@@ -455,23 +788,25 @@ func evaluateAssertion(assertion Assertion, index int, actual string, opts RunOp
 		}
 		return failResult(assertion, opts, "actual output differed from expected text", expected, actual, diffSnippet(expected, actual))
 	case AssertionContains:
-		expected := textExpectation(assertion)
-		if expected == "" {
+		expected := requiredExpectations(assertion)
+		if len(expected) == 0 {
 			return failResult(assertion, opts, "contains assertion is missing value", "", actual, "")
 		}
-		if strings.Contains(actual, expected) {
+		missing := missingContents(actual, expected)
+		if len(missing) == 0 {
 			return passResult(assertion, opts, "actual output contained expected text")
 		}
-		return failResult(assertion, opts, "actual output did not contain expected text", expected, actual, containsSnippet(expected, actual))
+		return failResult(assertion, opts, "actual output did not contain required text", strings.Join(missing, "\n"), actual, containsSnippet(strings.Join(missing, "\n"), actual))
 	case AssertionNotContains:
-		forbidden := textExpectation(assertion)
-		if forbidden == "" {
+		forbidden := forbiddenExpectations(assertion)
+		if len(forbidden) == 0 {
 			return failResult(assertion, opts, "not_contains assertion is missing value", "", actual, "")
 		}
-		if !strings.Contains(actual, forbidden) {
+		present := presentContents(actual, forbidden)
+		if len(present) == 0 {
 			return passResult(assertion, opts, "forbidden content was absent")
 		}
-		return failResult(assertion, opts, "actual output contained forbidden content", forbidden, actual, "forbidden content was present")
+		return failResult(assertion, opts, "actual output contained forbidden content", strings.Join(present, "\n"), actual, "forbidden content was present")
 	case AssertionRegex:
 		pattern := assertion.Pattern
 		if pattern == "" {
@@ -492,14 +827,28 @@ func evaluateAssertion(assertion Assertion, index int, actual string, opts RunOp
 		return evaluatePathAssertion(assertion, actual, opts, decodeJSONValue)
 	case AssertionYAMLPath:
 		return evaluatePathAssertion(assertion, actual, opts, decodeYAMLValue)
+	case AssertionUnorderedList:
+		return evaluateUnorderedListAssertion(assertion, actual, opts)
 	case AssertionSchema:
 		return evaluateSchemaAssertion(assertion, actual, opts)
 	case AssertionNumeric:
 		return evaluateNumericAssertion(assertion, actual, opts)
+	case AssertionToolCalled:
+		return evaluateToolCallAssertion(assertion, workflow, opts)
+	case AssertionFileTouched:
+		return evaluateFileTouchedAssertion(assertion, workflow, opts)
+	case AssertionCommandRun:
+		return evaluateCommandRunAssertion(assertion, workflow, opts)
+	case AssertionGatePassed:
+		return evaluateGatePassedAssertion(assertion, workflow, opts)
+	case AssertionArtifactMade:
+		return evaluateArtifactProducedAssertion(assertion, workflow, opts)
 	case AssertionArtifactExists:
 		return evaluateArtifactAssertion(assertion, opts)
 	case AssertionExitCode:
 		return evaluateExitCodeAssertion(assertion, opts)
+	case AssertionJudgeDecision:
+		return evaluateJudgeAssertion(assertion, opts)
 	default:
 		return failResult(assertion, opts, fmt.Sprintf("unsupported assertion type %q", assertion.Type), "", actual, "")
 	}
@@ -520,7 +869,7 @@ func normalizeAssertionType(assertionType AssertionType) AssertionType {
 	switch strings.ToLower(strings.TrimSpace(string(assertionType))) {
 	case "exact":
 		return AssertionExact
-	case "contains":
+	case "contains", "required", "required_content", "required-content":
 		return AssertionContains
 	case "not_contains", "not-contains", "forbidden", "forbidden_content", "forbidden-content":
 		return AssertionNotContains
@@ -530,14 +879,28 @@ func normalizeAssertionType(assertionType AssertionType) AssertionType {
 		return AssertionJSONPath
 	case "yaml_path", "yaml-path", "yamlpath":
 		return AssertionYAMLPath
+	case "unordered_list", "unordered-list", "unordered_bullets", "unordered-bullets", "list":
+		return AssertionUnorderedList
 	case "schema", "json_schema", "json-schema":
 		return AssertionSchema
 	case "numeric", "number":
 		return AssertionNumeric
+	case "tool_called", "tool-called", "tool_call", "tool-call":
+		return AssertionToolCalled
+	case "file_touched", "file-touched", "file_touch", "file-touch":
+		return AssertionFileTouched
+	case "command_run", "command-run", "command":
+		return AssertionCommandRun
+	case "gate_passed", "gate-passed", "gate":
+		return AssertionGatePassed
+	case "artifact_produced", "artifact-produced", "artifact_made", "artifact-made", "produced_artifact", "produced-artifact":
+		return AssertionArtifactMade
 	case "artifact_exists", "artifact-exists", "artifact":
 		return AssertionArtifactExists
 	case "exit_code", "exit-code":
 		return AssertionExitCode
+	case "judge_decision", "judge-decision", "judge", "rubric":
+		return AssertionJudgeDecision
 	default:
 		return assertionType
 	}
@@ -551,6 +914,77 @@ func textExpectation(assertion Assertion) string {
 		return valueToString(assertion.Equals)
 	}
 	return ""
+}
+
+func requiredExpectations(assertion Assertion) []string {
+	values := append([]string(nil), assertion.Required...)
+	if assertion.Contains != "" {
+		values = append(values, assertion.Contains)
+	}
+	if assertion.Value != "" {
+		values = append(values, assertion.Value)
+	} else if assertion.Equals != nil {
+		values = append(values, valueToString(assertion.Equals))
+	}
+
+	return nonEmptyStrings(values)
+}
+
+func forbiddenExpectations(assertion Assertion) []string {
+	values := append([]string(nil), assertion.Forbidden...)
+	if assertion.NotContains != "" {
+		values = append(values, assertion.NotContains)
+	}
+	if assertion.Value != "" {
+		values = append(values, assertion.Value)
+	} else if assertion.Equals != nil {
+		values = append(values, valueToString(assertion.Equals))
+	}
+
+	return nonEmptyStrings(values)
+}
+
+func nonEmptyStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			out = append(out, value)
+		}
+	}
+
+	return out
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func missingContents(actual string, required []string) []string {
+	missing := make([]string, 0, len(required))
+	for _, value := range required {
+		if !strings.Contains(actual, value) {
+			missing = append(missing, value)
+		}
+	}
+
+	return missing
+}
+
+func presentContents(actual string, forbidden []string) []string {
+	present := make([]string, 0, len(forbidden))
+	for _, value := range forbidden {
+		if strings.Contains(actual, value) {
+			present = append(present, value)
+		}
+	}
+
+	return present
 }
 
 func evaluatePathAssertion(assertion Assertion, actual string, opts RunOptions, decode func(string) (any, error)) AssertionResult {
@@ -601,6 +1035,152 @@ func evaluateValueExpectation(assertion Assertion, value any, opts RunOptions) A
 	default:
 		return passResult(assertion, opts, fmt.Sprintf("%s existed with value %s", assertion.Path, Redact(compact(actualText, 80))))
 	}
+}
+
+func evaluateUnorderedListAssertion(assertion Assertion, actual string, opts RunOptions) AssertionResult {
+	expected := unorderedExpectedItems(assertion)
+	if len(expected) == 0 {
+		return failResult(assertion, opts, "unordered_list assertion is missing items or value", "", actual, "")
+	}
+
+	actualItems, err := unorderedActualItems(assertion, actual)
+	if err != nil {
+		return failResult(assertion, opts, "unordered_list actual items were unavailable", strings.Join(expected, "\n"), actual, err.Error())
+	}
+
+	missing, extra := compareUnorderedItems(expected, actualItems, assertion.AllowExtra)
+	if len(missing) == 0 && len(extra) == 0 {
+		return passResult(assertion, opts, "actual list contained expected items regardless of order")
+	}
+
+	var details []string
+	if len(missing) > 0 {
+		details = append(details, "missing: "+strings.Join(missing, ", "))
+	}
+	if len(extra) > 0 {
+		details = append(details, "extra: "+strings.Join(extra, ", "))
+	}
+
+	return failResult(assertion, opts, "actual list did not match expected unordered items", strings.Join(expected, "\n"), strings.Join(actualItems, "\n"), strings.Join(details, "; "))
+}
+
+func unorderedExpectedItems(assertion Assertion) []string {
+	if len(assertion.Items) > 0 {
+		return nonEmptyStrings(assertion.Items)
+	}
+	if assertion.Value != "" {
+		return nonEmptyStrings(strings.Split(assertion.Value, "\n"))
+	}
+	if assertion.Equals != nil {
+		if values, ok := stringSlice(normalizeValue(assertion.Equals)); ok {
+			return nonEmptyStrings(values)
+		}
+	}
+
+	return nil
+}
+
+func unorderedActualItems(assertion Assertion, actual string) ([]string, error) {
+	if assertion.Path == "" {
+		return bulletListItems(actual), nil
+	}
+
+	document, err := decodeStructuredValue(actual)
+	if err != nil {
+		return nil, fmt.Errorf("parse structured list output: %w", err)
+	}
+
+	value, err := lookupPath(document, assertion.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	items, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s is %T, not an array", assertion.Path, value)
+	}
+
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, valueToString(item))
+	}
+
+	return nonEmptyStrings(out), nil
+}
+
+func bulletListItems(actual string) []string {
+	var items []string
+	for _, line := range strings.Split(actual, "\n") {
+		item, ok := stripListMarker(line)
+		if ok {
+			items = append(items, item)
+		}
+	}
+	if len(items) > 0 {
+		return nonEmptyStrings(items)
+	}
+
+	return nonEmptyStrings(strings.Split(actual, "\n"))
+}
+
+func stripListMarker(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", false
+	}
+	for _, prefix := range []string{"- ", "* ", "+ "} {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
+		}
+	}
+
+	for i, r := range line {
+		if r < '0' || r > '9' {
+			if i > 0 && (r == '.' || r == ')') {
+				return strings.TrimSpace(line[i+1:]), true
+			}
+			break
+		}
+	}
+
+	return line, false
+}
+
+func compareUnorderedItems(expected, actual []string, allowExtra bool) (missing, extra []string) {
+	expectedCounts := normalizedItemCounts(expected)
+	actualCounts := normalizedItemCounts(actual)
+
+	for key, want := range expectedCounts {
+		if got := actualCounts[key]; got < want {
+			missing = append(missing, key)
+		}
+	}
+
+	if !allowExtra {
+		for key, got := range actualCounts {
+			if want := expectedCounts[key]; got > want {
+				extra = append(extra, key)
+			}
+		}
+	}
+
+	sort.Strings(missing)
+	sort.Strings(extra)
+
+	return missing, extra
+}
+
+func normalizedItemCounts(items []string) map[string]int {
+	counts := make(map[string]int, len(items))
+	for _, item := range items {
+		item = Normalize(item)
+		if item == "" {
+			continue
+		}
+		counts[item]++
+	}
+
+	return counts
 }
 
 func evaluateSchemaAssertion(assertion Assertion, actual string, opts RunOptions) AssertionResult {
@@ -698,6 +1278,430 @@ func evaluateNumericAssertion(assertion Assertion, actual string, opts RunOption
 	return passResult(assertion, opts, "numeric value satisfied tolerance")
 }
 
+func evaluateToolCallAssertion(assertion Assertion, workflow WorkflowTrace, opts RunOptions) AssertionResult {
+	name := firstNonBlank(assertion.Name, assertion.Value)
+	if name == "" && assertion.Pattern == "" {
+		return failResult(assertion, opts, "tool_called assertion is missing name, value, or pattern", "", "", "")
+	}
+	if err := validateWorkflowPattern(assertion.Pattern); err != nil {
+		return failResult(assertion, opts, "tool_called pattern is invalid", assertion.Pattern, "", err.Error())
+	}
+
+	wantExists := expectedExists(assertion)
+	for i := range workflow.ToolCalls {
+		call := workflow.ToolCalls[i]
+		if workflowStringMatches(call.Name, name, assertion.Pattern) &&
+			workflowStatusMatches(call.Status, assertion.Status) &&
+			workflowArgsMatch(call.Args, assertion.Args) {
+			if wantExists {
+				return passResult(assertion, opts, "required tool call was observed")
+			}
+			return failResult(assertion, opts, "forbidden tool call was observed", "absent", call.Name, "")
+		}
+	}
+
+	if wantExists {
+		return failResult(assertion, opts, "required tool call was missing", firstNonBlank(name, assertion.Pattern), observedToolCalls(workflow), "")
+	}
+
+	return passResult(assertion, opts, "forbidden tool call was absent")
+}
+
+func workflowArgsMatch(actual, expected map[string]any) bool {
+	if len(expected) == 0 {
+		return true
+	}
+	if len(actual) == 0 {
+		return false
+	}
+
+	for key, expectedValue := range expected {
+		actualValue, ok := actual[key]
+		if !ok || !valuesEqual(actualValue, expectedValue) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func evaluateFileTouchedAssertion(assertion Assertion, workflow WorkflowTrace, opts RunOptions) AssertionResult {
+	path := firstNonBlank(assertion.Path, assertion.Value)
+	if path == "" && assertion.Pattern == "" {
+		return failResult(assertion, opts, "file_touched assertion is missing path, value, or pattern", "", "", "")
+	}
+	if err := validateWorkflowPattern(assertion.Pattern); err != nil {
+		return failResult(assertion, opts, "file_touched pattern is invalid", assertion.Pattern, "", err.Error())
+	}
+
+	wantExists := expectedExists(assertion)
+	for i := range workflow.Files {
+		file := workflow.Files[i]
+		if workflowPathMatches(file.Path, path, assertion.Pattern) &&
+			workflowStatusMatches(file.Status, assertion.Status) &&
+			workflowStatusMatches(file.Action, assertion.Action) {
+			if wantExists {
+				return passResult(assertion, opts, "required file touch was observed")
+			}
+			return failResult(assertion, opts, "forbidden file touch was observed", "absent", file.Path, "")
+		}
+	}
+
+	if wantExists {
+		return failResult(assertion, opts, "required file touch was missing", firstNonBlank(path, assertion.Pattern), observedFiles(workflow), "")
+	}
+
+	return passResult(assertion, opts, "forbidden file touch was absent")
+}
+
+func evaluateCommandRunAssertion(assertion Assertion, workflow WorkflowTrace, opts RunOptions) AssertionResult {
+	command := firstNonBlank(assertion.Command, assertion.Value)
+	if command == "" && assertion.Pattern == "" {
+		return failResult(assertion, opts, "command_run assertion is missing command, value, or pattern", "", "", "")
+	}
+	if err := validateWorkflowPattern(assertion.Pattern); err != nil {
+		return failResult(assertion, opts, "command_run pattern is invalid", assertion.Pattern, "", err.Error())
+	}
+
+	wantExists := expectedExists(assertion)
+	for i := range workflow.Commands {
+		run := workflow.Commands[i]
+		if !workflowCommandMatches(run.Command, command, assertion.Pattern) ||
+			!workflowStatusMatches(run.Status, assertion.Status) ||
+			!workflowExitCodeMatches(run.ExitCode, assertion.ExitCode) {
+			continue
+		}
+
+		if wantExists {
+			return passResult(assertion, opts, "required command run was observed")
+		}
+		return failResult(assertion, opts, "forbidden command run was observed", "absent", run.Command, "")
+	}
+
+	if wantExists {
+		return failResult(assertion, opts, "required command run was missing", firstNonBlank(command, assertion.Pattern), observedCommands(workflow), "")
+	}
+
+	return passResult(assertion, opts, "forbidden command run was absent")
+}
+
+func evaluateGatePassedAssertion(assertion Assertion, workflow WorkflowTrace, opts RunOptions) AssertionResult {
+	name := firstNonBlank(assertion.Gate, assertion.Name, assertion.Value)
+	if name == "" {
+		return failResult(assertion, opts, "gate_passed assertion is missing gate, name, or value", "", "", "")
+	}
+
+	wantExists := expectedExists(assertion)
+	matching := WorkflowTrace{}
+	for i := range workflow.Gates {
+		gate := workflow.Gates[i]
+		if !workflowNameMatches(gate.Name, name) || !workflowStatusMatches(gate.Status, assertion.Status) {
+			continue
+		}
+
+		matching.Gates = append(matching.Gates, gate)
+		passed := gatePassed(gate)
+		if wantExists && passed {
+			return passResult(assertion, opts, "required gate passed")
+		}
+		if passed {
+			return failResult(assertion, opts, "forbidden gate passed", "not passed", gate.Name, "")
+		}
+	}
+
+	if wantExists {
+		if len(matching.Gates) > 0 {
+			return failResult(assertion, opts, "gate was observed but did not pass", "passed", observedGates(matching), "")
+		}
+
+		return failResult(assertion, opts, "required gate was missing", name, observedGates(workflow), "")
+	}
+
+	return passResult(assertion, opts, "forbidden gate did not pass")
+}
+
+func evaluateArtifactProducedAssertion(assertion Assertion, workflow WorkflowTrace, opts RunOptions) AssertionResult {
+	path := firstNonBlank(assertion.Path, assertion.Value)
+	if path == "" && assertion.Pattern == "" {
+		return failResult(assertion, opts, "artifact_produced assertion is missing path, value, or pattern", "", "", "")
+	}
+	if err := validateWorkflowPattern(assertion.Pattern); err != nil {
+		return failResult(assertion, opts, "artifact_produced pattern is invalid", assertion.Pattern, "", err.Error())
+	}
+
+	wantExists := expectedExists(assertion)
+	for i := range workflow.Artifacts {
+		artifact := workflow.Artifacts[i]
+		if !workflowPathMatches(artifact.Path, path, assertion.Pattern) ||
+			!workflowStatusMatches(artifact.Status, assertion.Status) ||
+			!workflowStatusMatches(artifact.Kind, assertion.Kind) {
+			continue
+		}
+
+		if wantExists {
+			return passResult(assertion, opts, "required artifact production was observed")
+		}
+		return failResult(assertion, opts, "forbidden artifact production was observed", "absent", artifact.Path, "")
+	}
+
+	if wantExists {
+		return failResult(assertion, opts, "required artifact production was missing", firstNonBlank(path, assertion.Pattern), observedArtifacts(workflow), "")
+	}
+
+	return passResult(assertion, opts, "forbidden artifact production was absent")
+}
+
+func observedToolCalls(workflow WorkflowTrace) string {
+	parts := make([]string, 0, len(workflow.ToolCalls))
+	for i := range workflow.ToolCalls {
+		call := workflow.ToolCalls[i]
+		part := call.Name
+		if call.Status != "" {
+			part += " status=" + call.Status
+		}
+		if len(call.Args) > 0 {
+			part += " args=" + valueToString(call.Args)
+		}
+		parts = append(parts, strings.TrimSpace(part))
+	}
+
+	return strings.Join(nonEmptyStrings(parts), "\n")
+}
+
+func observedFiles(workflow WorkflowTrace) string {
+	parts := make([]string, 0, len(workflow.Files))
+	for i := range workflow.Files {
+		file := workflow.Files[i]
+		part := file.Path
+		if file.Action != "" {
+			part += " action=" + file.Action
+		}
+		if file.Status != "" {
+			part += " status=" + file.Status
+		}
+		parts = append(parts, strings.TrimSpace(part))
+	}
+
+	return strings.Join(nonEmptyStrings(parts), "\n")
+}
+
+func observedCommands(workflow WorkflowTrace) string {
+	parts := make([]string, 0, len(workflow.Commands))
+	for i := range workflow.Commands {
+		command := workflow.Commands[i]
+		part := command.Command
+		if command.Status != "" {
+			part += " status=" + command.Status
+		}
+		if command.ExitCode != nil {
+			part += " exit_code=" + strconv.Itoa(*command.ExitCode)
+		}
+		parts = append(parts, strings.TrimSpace(part))
+	}
+
+	return strings.Join(nonEmptyStrings(parts), "\n")
+}
+
+func observedGates(workflow WorkflowTrace) string {
+	parts := make([]string, 0, len(workflow.Gates))
+	for i := range workflow.Gates {
+		gate := workflow.Gates[i]
+		part := gate.Name
+		if gate.Status != "" {
+			part += " status=" + gate.Status
+		}
+		if gate.Passed != nil {
+			part += " passed=" + strconv.FormatBool(*gate.Passed)
+		}
+		parts = append(parts, strings.TrimSpace(part))
+	}
+
+	return strings.Join(nonEmptyStrings(parts), "\n")
+}
+
+func observedArtifacts(workflow WorkflowTrace) string {
+	parts := make([]string, 0, len(workflow.Artifacts))
+	for i := range workflow.Artifacts {
+		artifact := workflow.Artifacts[i]
+		part := artifact.Path
+		if artifact.Kind != "" {
+			part += " kind=" + artifact.Kind
+		}
+		if artifact.Status != "" {
+			part += " status=" + artifact.Status
+		}
+		parts = append(parts, strings.TrimSpace(part))
+	}
+
+	return strings.Join(nonEmptyStrings(parts), "\n")
+}
+
+func evaluateJudgeAssertion(assertion Assertion, opts RunOptions) AssertionResult {
+	if assertion.Judge == nil {
+		return failResult(assertion, opts, "judge_decision assertion is missing recorded judge", "", "", "")
+	}
+
+	decision := strings.TrimSpace(assertion.Judge.Decision)
+	if decision == "" {
+		return withJudgeDecision(failResult(assertion, opts, "judge_decision is missing decision", expectedJudgeDecision(assertion), "", ""), *assertion.Judge)
+	}
+	if strings.TrimSpace(assertion.Judge.InputRef) == "" || strings.TrimSpace(assertion.Judge.OutputRef) == "" {
+		return withJudgeDecision(failResult(assertion, opts, "judge_decision must record input_ref and output_ref for replay", expectedJudgeDecision(assertion), decision, ""), *assertion.Judge)
+	}
+	if strings.TrimSpace(assertion.Judge.RubricVersion) == "" && strings.TrimSpace(assertion.Judge.Rubric) == "" {
+		return withJudgeDecision(failResult(assertion, opts, "judge_decision must record rubric or rubric_version", expectedJudgeDecision(assertion), decision, ""), *assertion.Judge)
+	}
+
+	expected := expectedJudgeDecision(assertion)
+	if Normalize(decision) != Normalize(expected) {
+		return withJudgeDecision(failResult(assertion, opts, "recorded judge decision did not match expected decision", expected, decision, ""), *assertion.Judge)
+	}
+
+	return withJudgeDecision(passResult(assertion, opts, judgeEvidence(*assertion.Judge)), *assertion.Judge)
+}
+
+func withJudgeDecision(result AssertionResult, decision JudgeDecision) AssertionResult {
+	sanitized := sanitizeJudgeDecision(decision)
+	result.Judge = &sanitized
+
+	return result
+}
+
+func sanitizeJudgeDecision(decision JudgeDecision) JudgeDecision {
+	return JudgeDecision{
+		Judge:         Redact(strings.TrimSpace(decision.Judge)),
+		Model:         Redact(strings.TrimSpace(decision.Model)),
+		Rubric:        Redact(strings.TrimSpace(decision.Rubric)),
+		RubricVersion: Redact(strings.TrimSpace(decision.RubricVersion)),
+		InputRef:      Redact(strings.TrimSpace(decision.InputRef)),
+		OutputRef:     Redact(strings.TrimSpace(decision.OutputRef)),
+		Decision:      Redact(strings.TrimSpace(decision.Decision)),
+		Rationale:     Redact(strings.TrimSpace(decision.Rationale)),
+		Score:         decision.Score,
+		RecordedAt:    Redact(strings.TrimSpace(decision.RecordedAt)),
+	}
+}
+
+func expectedExists(assertion Assertion) bool {
+	if assertion.Exists == nil {
+		return true
+	}
+
+	return *assertion.Exists
+}
+
+func validateWorkflowPattern(pattern string) error {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return nil
+	}
+
+	_, err := regexp.Compile(pattern)
+
+	return err
+}
+
+func workflowNameMatches(actual, expected string) bool {
+	return strings.EqualFold(strings.TrimSpace(actual), strings.TrimSpace(expected))
+}
+
+func workflowStringMatches(actual, expected, pattern string) bool {
+	actual = strings.TrimSpace(actual)
+	if strings.TrimSpace(pattern) != "" {
+		matched, err := regexp.MatchString(pattern, actual)
+		return err == nil && matched
+	}
+
+	return workflowNameMatches(actual, expected)
+}
+
+func workflowPathMatches(actual, expected, pattern string) bool {
+	actual = filepath.Clean(strings.TrimSpace(actual))
+	if strings.TrimSpace(pattern) != "" {
+		matched, err := regexp.MatchString(pattern, actual)
+		return err == nil && matched
+	}
+
+	expected = filepath.Clean(strings.TrimSpace(expected))
+
+	return actual == expected
+}
+
+func workflowStatusMatches(actual, expected string) bool {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return true
+	}
+
+	return strings.EqualFold(strings.TrimSpace(actual), expected)
+}
+
+func workflowCommandMatches(actual, expected, pattern string) bool {
+	actual = strings.TrimSpace(actual)
+	if pattern != "" {
+		matched, err := regexp.MatchString(pattern, actual)
+		return err == nil && matched
+	}
+
+	return actual == strings.TrimSpace(expected)
+}
+
+func workflowExitCodeMatches(actual, expected *int) bool {
+	if expected == nil {
+		return true
+	}
+	if actual == nil {
+		return false
+	}
+
+	return *actual == *expected
+}
+
+func gatePassed(gate WorkflowGate) bool {
+	if gate.Passed != nil {
+		return *gate.Passed
+	}
+
+	switch strings.ToLower(strings.TrimSpace(gate.Status)) {
+	case "pass", "passed", "success", "succeeded", "ok":
+		return true
+	default:
+		return false
+	}
+}
+
+func expectedJudgeDecision(assertion Assertion) string {
+	expected := textExpectation(assertion)
+	if expected == "" {
+		return "pass"
+	}
+
+	return expected
+}
+
+func judgeEvidence(decision JudgeDecision) string {
+	parts := []string{"recorded judge decision " + strings.TrimSpace(decision.Decision)}
+	if decision.Judge != "" {
+		parts = append(parts, "judge="+decision.Judge)
+	}
+	if decision.Model != "" {
+		parts = append(parts, "model="+decision.Model)
+	}
+	if decision.RubricVersion != "" {
+		parts = append(parts, "rubric_version="+decision.RubricVersion)
+	} else if decision.Rubric != "" {
+		parts = append(parts, "rubric="+decision.Rubric)
+	}
+	if decision.InputRef != "" {
+		parts = append(parts, "input_ref="+decision.InputRef)
+	}
+	if decision.OutputRef != "" {
+		parts = append(parts, "output_ref="+decision.OutputRef)
+	}
+
+	return strings.Join(parts, " ")
+}
+
 func evaluateArtifactAssertion(assertion Assertion, opts RunOptions) AssertionResult {
 	if assertion.Path == "" {
 		return failResult(assertion, opts, "artifact assertion is missing path", "", "", "")
@@ -737,6 +1741,10 @@ func evaluateExitCodeAssertion(assertion Assertion, opts RunOptions) AssertionRe
 	if assertion.Equals == nil {
 		expected, ok = valueInt(assertion.Value)
 	}
+	if assertion.ExitCode != nil {
+		expected = *assertion.ExitCode
+		ok = true
+	}
 	if !ok {
 		return failResult(assertion, opts, "exit_code assertion is missing numeric equals/value", "", strconv.Itoa(*opts.ExitCode), "")
 	}
@@ -756,6 +1764,7 @@ func passResult(assertion Assertion, opts RunOptions, evidence string) Assertion
 		Status:      assertionStatusPass,
 		Passed:      true,
 		Suite:       opts.SuitePath,
+		FlakeGroup:  strings.TrimSpace(assertion.FlakeGroup),
 		Evidence:    Redact(evidence),
 		Remediation: assertion.Remediation,
 	}
@@ -769,6 +1778,7 @@ func failResult(assertion Assertion, opts RunOptions, evidence, expected, actual
 		Status:          assertionStatusFail,
 		Passed:          false,
 		Suite:           opts.SuitePath,
+		FlakeGroup:      strings.TrimSpace(assertion.FlakeGroup),
 		Evidence:        Redact(evidence),
 		ExpectedSnippet: compact(Redact(expected), 160),
 		ActualSnippet:   compact(Redact(actual), 160),
@@ -993,21 +2003,10 @@ func validateSchema(value any, schema any, path string) []string {
 		failures = append(failures, fmt.Sprintf("%s: expected const %s", path, valueToString(constValue)))
 	}
 
-	if enumValues, ok := schemaMap["enum"].([]any); ok {
-		matched := false
-		for _, enumValue := range enumValues {
-			if valuesEqual(value, enumValue) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			failures = append(failures, fmt.Sprintf("%s: value is not in enum", path))
-		}
-	}
-
+	failures = append(failures, validateSchemaEnum(value, schemaMap, path)...)
 	failures = append(failures, validateSchemaNumericBounds(value, schemaMap, path)...)
 	failures = append(failures, validateSchemaStringBounds(value, schemaMap, path)...)
+	failures = append(failures, validateSchemaStringPattern(value, schemaMap, path)...)
 	failures = append(failures, validateSchemaArrayBounds(value, schemaMap, path)...)
 
 	object, objectOK := value.(map[string]any)
@@ -1023,7 +2022,11 @@ func validateSchema(value any, schema any, path string) []string {
 		}
 	}
 
-	if properties, ok := schemaMap["properties"].(map[string]any); ok {
+	properties, propertiesOK := schemaMap["properties"].(map[string]any)
+	if _, exists := schemaMap["properties"]; exists && !propertiesOK {
+		failures = append(failures, path+": properties must be an object")
+	}
+	if propertiesOK {
 		if !objectOK {
 			failures = append(failures, path+": properties need an object")
 		} else {
@@ -1033,12 +2036,12 @@ func validateSchema(value any, schema any, path string) []string {
 				}
 			}
 		}
+	}
 
-		if additional, ok := boolValue(schemaMap["additionalProperties"]); ok && !additional && objectOK {
-			for field := range object {
-				if _, allowed := properties[field]; !allowed {
-					failures = append(failures, fmt.Sprintf("%s.%s: additional property not allowed", path, field))
-				}
+	if additional, ok := boolValue(schemaMap["additionalProperties"]); ok && !additional && objectOK {
+		for field := range object {
+			if _, allowed := properties[field]; !allowed {
+				failures = append(failures, fmt.Sprintf("%s.%s: additional property not allowed", path, field))
 			}
 		}
 	}
@@ -1055,6 +2058,48 @@ func validateSchema(value any, schema any, path string) []string {
 	}
 
 	return failures
+}
+
+func validateSchemaEnum(value any, schemaMap map[string]any, path string) []string {
+	rawEnum, exists := schemaMap["enum"]
+	if !exists {
+		return nil
+	}
+
+	enumValues, ok := schemaEnumValues(rawEnum)
+	if !ok {
+		return []string{path + ": enum must be an array"}
+	}
+
+	for _, enumValue := range enumValues {
+		if valuesEqual(value, enumValue) {
+			return nil
+		}
+	}
+
+	return []string{fmt.Sprintf("%s: value is not in enum", path)}
+}
+
+func schemaEnumValues(value any) ([]any, bool) {
+	value = normalizeValue(value)
+	if values, ok := value.([]any); ok {
+		return values, true
+	}
+	if value == nil {
+		return nil, false
+	}
+
+	reflected := reflect.ValueOf(value)
+	if reflected.Kind() != reflect.Slice && reflected.Kind() != reflect.Array {
+		return nil, false
+	}
+
+	values := make([]any, 0, reflected.Len())
+	for i := range reflected.Len() {
+		values = append(values, normalizeValue(reflected.Index(i).Interface()))
+	}
+
+	return values, true
 }
 
 func validateSchemaNumericBounds(value any, schemaMap map[string]any, path string) []string {
@@ -1102,6 +2147,29 @@ func validateSchemaStringBounds(value any, schemaMap map[string]any, path string
 	}
 
 	return failures
+}
+
+func validateSchemaStringPattern(value any, schemaMap map[string]any, path string) []string {
+	pattern, ok := schemaMap["pattern"].(string)
+	if !ok {
+		return nil
+	}
+
+	text, textOK := value.(string)
+	if !textOK {
+		return []string{path + ": pattern needs a string"}
+	}
+
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return []string{fmt.Sprintf("%s: invalid pattern %q: %v", path, pattern, err)}
+	}
+
+	if !re.MatchString(text) {
+		return []string{fmt.Sprintf("%s: string does not match pattern %q", path, pattern)}
+	}
+
+	return nil
 }
 
 func validateSchemaArrayBounds(value any, schemaMap map[string]any, path string) []string {

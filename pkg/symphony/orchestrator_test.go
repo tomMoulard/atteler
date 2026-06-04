@@ -29,8 +29,8 @@ func (noopTracker) FetchIssueStatesByIDs(context.Context, []string) ([]Issue, er
 
 type candidateTracker struct {
 	noopTracker
-	issues []Issue
 	err    error
+	issues []Issue
 }
 
 func (t candidateTracker) FetchCandidateIssues(context.Context) ([]Issue, error) {

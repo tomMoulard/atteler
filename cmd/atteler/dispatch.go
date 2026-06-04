@@ -70,6 +70,7 @@ func initCLIFlagValues(opts *cliOptions) {
 	opts.routeCacheWriteTokens = positiveIntFlag{name: "route-cache-write-tokens"}
 	opts.evaluationCost = floatFlag{name: "evaluation-cost", min: 0}
 	opts.evaluationConfidence = floatFlag{name: "evaluation-confidence", min: 0, max: 1, hasMax: true}
+	opts.evaluationPassRate = floatFlag{name: "evaluation-pass-rate", min: 0, max: 1, hasMax: true}
 	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
 	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
 	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
@@ -112,6 +113,10 @@ func initCLIFlagValues(opts *cliOptions) {
 	opts.seed = nonNegativeIntFlag{name: "seed"}
 	opts.evalExitCode = nonNegativeIntFlag{name: "eval-exit-code"}
 	opts.evaluationDurationMillis = nonNegativeIntFlag{name: "evaluation-duration-millis"}
+	opts.evaluationFlakeCount = nonNegativeIntFlag{name: "evaluation-flake-count"}
+	opts.evaluationInputTokens = nonNegativeIntFlag{name: "evaluation-input-tokens"}
+	opts.evaluationOutputTokens = nonNegativeIntFlag{name: "evaluation-output-tokens"}
+	opts.evaluationTotalTokens = nonNegativeIntFlag{name: "evaluation-total-tokens"}
 }
 
 func applyPositionalOptions(opts *cliOptions, args []string) {

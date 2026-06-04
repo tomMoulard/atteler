@@ -231,6 +231,7 @@ func requireAnthropic(t *testing.T) string {
 	// If the account has no credits, Anthropic returns HTTP 400 with
 	// "credit balance is too low".
 	body := `{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"x"}]}`
+
 	probeAPI(t, "Anthropic", "https://api.anthropic.com/v1/messages", func(r *http.Request) {
 		r.Method = http.MethodPost
 		r.Body = io.NopCloser(strings.NewReader(body))
@@ -246,13 +247,15 @@ func requireAnthropic(t *testing.T) string {
 // functional. The setAuth callback may set headers, change the method, or
 // attach a body. Skips the test if the endpoint returns 401, 403, or any
 // other 4xx status (e.g., billing issues).
+//
+//nolint:gosec // Live tests only pass fixed provider URLs from test helpers.
 func probeAPI(t *testing.T, provider, url string, setAuth func(*http.Request)) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		t.Skipf("%s API probe failed to build request: %v", provider, err)
 	}
@@ -264,7 +267,7 @@ func probeAPI(t *testing.T, provider, url string, setAuth func(*http.Request)) {
 	if err != nil {
 		t.Skipf("%s API probe failed: %v", provider, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort probe
+	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case http.StatusOK:

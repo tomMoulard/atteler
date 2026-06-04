@@ -224,23 +224,9 @@ func statefulSessionWriteCommandSet() []statefulSessionCommand[sessionWriteComma
 			}),
 		statefulSessionCmd("record-evaluation", func(input sessionWriteCommandInput) bool { return input.RecordEvaluation != "" },
 			func(_ context.Context, input sessionWriteCommandInput, s appState) error {
-				evaluation := session.AgentEvaluation{
-					Agent:           input.RecordEvaluation,
-					Outcome:         input.EvaluationOutcome,
-					Notes:           input.EvaluationNotes,
-					Reference:       input.EvaluationReference,
-					Source:          input.EvaluationSource,
-					Evaluator:       input.EvaluationEvaluator,
-					RubricVersion:   input.EvaluationRubricVersion,
-					TaskType:        input.EvaluationTaskType,
-					Difficulty:      input.EvaluationDifficulty,
-					ExpectedOutcome: input.EvaluationExpectedOutcome,
-					Model:           evaluationModelForRecord(input.EvaluationModel, s),
-					AgentVersion:    input.EvaluationAgentVersion,
-					Score:           input.EvaluationScore,
-					DurationMillis:  int64(input.EvaluationDurationMillis),
-					Cost:            input.EvaluationCost,
-					Confidence:      input.EvaluationConfidence,
+				evaluation, err := evaluationFromSessionWriteInput(input, s)
+				if err != nil {
+					return err
 				}
 
 				return recordEvaluationDetails(s.sessionStore, s.sessionState, evaluation)

@@ -1365,6 +1365,7 @@ func TestCommandRegistry_SessionCommandInputsCopyOnlySessionFields(t *testing.T)
 		evaluationOutcome:     "pass",
 		evaluationNotes:       "clear",
 		evaluationReference:   "run-1",
+		evaluationReportPath:  "eval-report.json",
 		recordArtifact:        "artifact.md",
 		artifactKind:          "report",
 		artifactLogicalPath:   "docs/decision.md",
@@ -1377,6 +1378,7 @@ func TestCommandRegistry_SessionCommandInputsCopyOnlySessionFields(t *testing.T)
 		routeInteractive:      true,
 		listProviders:         true,
 		evaluationScore:       nonNegativeIntFlag{value: 3, set: true},
+		evaluationPassRate:    floatFlag{value: 0, set: true},
 		mergeArtifactMaxBytes: positiveIntFlag{value: 1024, set: true},
 	}
 
@@ -1404,7 +1406,10 @@ func TestCommandRegistry_SessionCommandInputsCopyOnlySessionFields(t *testing.T)
 	assert.Equal(t, "pass", writeInput.EvaluationOutcome)
 	assert.Equal(t, "clear", writeInput.EvaluationNotes)
 	assert.Equal(t, "run-1", writeInput.EvaluationReference)
+	assert.Equal(t, "eval-report.json", writeInput.EvaluationReportPath)
 	assert.Equal(t, 3, writeInput.EvaluationScore)
+	assert.True(t, writeInput.evaluationPassRateSet)
+	assert.Zero(t, writeInput.EvaluationPassRate)
 	assert.Equal(t, "artifact.md", writeInput.RecordArtifact)
 	assert.Equal(t, "report", writeInput.ArtifactKind)
 	assert.Equal(t, "docs/decision.md", writeInput.ArtifactLogicalPath)

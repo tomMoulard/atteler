@@ -1,5 +1,5 @@
-// Package eval provides small, dependency-free helpers for checking agent
-// outputs against expected text.
+// Package eval provides text, structured, and workflow helpers for checking
+// agent outputs and side effects.
 package eval
 
 import (

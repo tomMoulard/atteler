@@ -255,8 +255,11 @@ type cliOptions struct {
 	evaluationTaskType                 string
 	evaluationDifficulty               string
 	evaluationExpectedOutcome          string
+	evaluationProvider                 string
 	evaluationModel                    string
+	evaluationFixtureVersion           string
 	evaluationAgentVersion             string
+	evaluationReportPath               string
 	planAgentsPrompt                   string
 	evalOutputPath                     string
 	evalAssertionsPath                 string
@@ -413,6 +416,10 @@ type cliOptions struct {
 	evaluationScore                    nonNegativeIntFlag
 	evalExitCode                       nonNegativeIntFlag
 	evaluationDurationMillis           nonNegativeIntFlag
+	evaluationFlakeCount               nonNegativeIntFlag
+	evaluationInputTokens              nonNegativeIntFlag
+	evaluationOutputTokens             nonNegativeIntFlag
+	evaluationTotalTokens              nonNegativeIntFlag
 	codeOffset                         nonNegativeIntFlag
 	spawnRetries                       nonNegativeIntFlag
 	seed                               nonNegativeIntFlag
@@ -421,6 +428,7 @@ type cliOptions struct {
 	temperature                        floatFlag
 	evaluationCost                     floatFlag
 	evaluationConfidence               floatFlag
+	evaluationPassRate                 floatFlag
 	routeBudget                        floatFlag
 	routeCacheReuse                    floatFlag
 	topP                               floatFlag

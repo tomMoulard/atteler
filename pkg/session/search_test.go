@@ -168,8 +168,14 @@ func TestStore_SearchEvaluationsAndArtifacts(t *testing.T) {
 		Source:         EvaluationSourceHarness,
 		RubricVersion:  "review/v2",
 		TaskType:       "auth",
+		Provider:       "openai",
 		Model:          "gpt-review",
+		FixtureVersion: "fixture-v2",
+		PassRate:       0.75,
+		FlakeCount:     1,
 		DurationMillis: 1200,
+		InputTokens:    20,
+		OutputTokens:   10,
 		Confidence:     0.91,
 		Score:          90,
 	}))
@@ -191,11 +197,27 @@ func TestStore_SearchEvaluationsAndArtifacts(t *testing.T) {
 	assert.Equal(t, llm.Role("evaluation"), results[0].Snippets[0].Role)
 	assert.Contains(t, results[0].Snippets[0].Text, "Rubric Version: review/v2")
 
-	results, err = store.Search("0.91")
+	results, err = store.Search("Confidence 0.91")
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, llm.Role("evaluation"), results[0].Snippets[0].Role)
 	assert.Contains(t, results[0].Snippets[0].Text, "Confidence: 0.91")
+
+	results, err = store.Search("fixture-v2")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, llm.Role("evaluation"), results[0].Snippets[0].Role)
+	assert.Contains(t, results[0].Snippets[0].Text, "Provider: openai")
+	assert.Contains(t, results[0].Snippets[0].Text, "Fixture Version: fixture-v2")
+	assert.Contains(t, results[0].Snippets[0].Text, "Pass Rate: 0.75")
+	assert.Contains(t, results[0].Snippets[0].Text, "Flake Count: 1")
+
+	results, err = store.Search("input=20")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, llm.Role("evaluation"), results[0].Snippets[0].Role)
+	assert.Contains(t, results[0].Snippets[0].Text, "Total Tokens: 30")
+	assert.Contains(t, results[0].Snippets[0].Text, "Tokens: input=20 output=10")
 
 	results, err = store.Search("findings")
 	require.NoError(t, err)

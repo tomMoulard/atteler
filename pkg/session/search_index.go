@@ -20,7 +20,7 @@ const (
 	searchIndexFileName      = ".session-search-index"
 	searchIndexLockFileName  = ".session-search-index.lock"
 	searchIndexVersion       = 2
-	searchIndexSchemaVersion = 11
+	searchIndexSchemaVersion = 12
 	sessionSchemaVersion     = 1
 
 	defaultTranscriptRetention = 180 * 24 * time.Hour
@@ -1217,6 +1217,8 @@ func indexedEvaluationSearchText(label string, entry *AgentEvaluation, policy no
 		{label: "Task Type", name: ".task_type", value: entry.TaskType},
 		{label: "Difficulty", name: ".difficulty", value: entry.Difficulty},
 		{label: "Expected Outcome", name: ".expected_outcome", value: entry.ExpectedOutcome},
+		{label: "Provider", name: ".provider", value: entry.Provider},
+		{label: "Fixture Version", name: ".fixture_version", value: entry.FixtureVersion},
 		{label: "Agent Version", name: ".agent_version", value: entry.AgentVersion},
 	}
 
@@ -1234,8 +1236,34 @@ func indexedEvaluationSearchText(label string, entry *AgentEvaluation, policy no
 		parts = append(parts, fmt.Sprintf("Schema Version: %d", entry.SchemaVersion))
 	}
 
+	parts = appendEvaluationMetricParts(parts, entry)
+
+	if entry.Notes != "" {
+		parts = append(parts, "Notes: "+sanitizeIndexFieldString(label+".notes", entry.Notes, policy))
+	}
+
+	return strings.Join(parts, " | ")
+}
+
+func appendEvaluationMetricParts(parts []string, entry *AgentEvaluation) []string {
 	if entry.DurationMillis != 0 {
 		parts = append(parts, fmt.Sprintf("Duration Millis: %d", entry.DurationMillis))
+	}
+
+	if entry.PassRateRecorded() {
+		parts = append(parts, fmt.Sprintf("Pass Rate: %.2f", entry.PassRate))
+	}
+
+	if entry.FlakeCount != 0 {
+		parts = append(parts, fmt.Sprintf("Flake Count: %d", entry.FlakeCount))
+	}
+
+	if entry.TotalTokens != 0 {
+		parts = append(parts, fmt.Sprintf("Total Tokens: %d", entry.TotalTokens))
+	}
+
+	if entry.InputTokens != 0 || entry.OutputTokens != 0 {
+		parts = append(parts, fmt.Sprintf("Tokens: input=%d output=%d", entry.InputTokens, entry.OutputTokens))
 	}
 
 	if entry.Cost != 0 {
@@ -1246,11 +1274,7 @@ func indexedEvaluationSearchText(label string, entry *AgentEvaluation, policy no
 		parts = append(parts, fmt.Sprintf("Confidence: %.2f", entry.Confidence))
 	}
 
-	if entry.Notes != "" {
-		parts = append(parts, "Notes: "+sanitizeIndexFieldString(label+".notes", entry.Notes, policy))
-	}
-
-	return strings.Join(parts, " | ")
+	return parts
 }
 
 func indexedArtifactSearchText(label string, entry *Artifact, policy normalizedSearchIndexPolicy) string {

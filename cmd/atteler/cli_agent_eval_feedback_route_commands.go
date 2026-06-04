@@ -210,6 +210,7 @@ func simpleEvalReport(opts cliOptions) (atteval.Report, error) {
 	summary := atteval.ReportSummary{Total: 1}
 	if result.Passed {
 		summary.Passed = 1
+		summary.PassRate = 1
 	} else {
 		summary.Failed = 1
 	}
@@ -267,7 +268,13 @@ func printEvalReportText(report atteval.Report, reportPath string) {
 		status = "FAIL"
 	}
 
-	fmt.Printf("%s\ttotal=%d\tpassed=%d\tfailed=%d\n", status, report.Summary.Total, report.Summary.Passed, report.Summary.Failed)
+	fmt.Printf("%s\ttotal=%d\tpassed=%d\tfailed=%d\tpass_rate=%.2f", status, report.Summary.Total, report.Summary.Passed, report.Summary.Failed, report.Summary.PassRate)
+	if report.Summary.FlakeCount != 0 {
+		fmt.Printf("\tflake_count=%d", report.Summary.FlakeCount)
+	}
+	fmt.Println()
+	printEvalReportMetadata(report)
+	printEvalReportMetrics(report.Metrics)
 	for i := range report.Results {
 		result := &report.Results[i]
 		fmt.Printf("%s\tid=%s\ttype=%s\tseverity=%s", strings.ToUpper(result.Status), result.ID, result.Type, result.Severity)
@@ -296,6 +303,52 @@ func printEvalReportText(report atteval.Report, reportPath string) {
 	}
 	if reportPath != "" {
 		fmt.Printf("report=%s\n", reportPath)
+	}
+}
+
+func printEvalReportMetadata(report atteval.Report) {
+	var parts []string
+	if report.Metadata.Provider != "" {
+		parts = append(parts, "provider="+report.Metadata.Provider)
+	}
+
+	if report.Metadata.Model != "" {
+		parts = append(parts, "model="+report.Metadata.Model)
+	}
+
+	if report.Metadata.FixtureVersion != "" {
+		parts = append(parts, "fixture_version="+report.Metadata.FixtureVersion)
+	}
+
+	if len(parts) > 0 {
+		fmt.Println("metadata\t" + strings.Join(parts, "\t"))
+	}
+}
+
+func printEvalReportMetrics(metrics atteval.ReportMetrics) {
+	var parts []string
+	if metrics.LatencyMillis != 0 {
+		parts = append(parts, "latency_millis="+strconv.FormatInt(metrics.LatencyMillis, 10))
+	}
+
+	if metrics.InputTokens != 0 {
+		parts = append(parts, "input_tokens="+strconv.Itoa(metrics.InputTokens))
+	}
+
+	if metrics.OutputTokens != 0 {
+		parts = append(parts, "output_tokens="+strconv.Itoa(metrics.OutputTokens))
+	}
+
+	if metrics.TotalTokens != 0 {
+		parts = append(parts, "total_tokens="+strconv.Itoa(metrics.TotalTokens))
+	}
+
+	if metrics.Cost != 0 {
+		parts = append(parts, fmt.Sprintf("cost=%.6f", metrics.Cost))
+	}
+
+	if len(parts) > 0 {
+		fmt.Println("metrics\t" + strings.Join(parts, "\t"))
 	}
 }
 

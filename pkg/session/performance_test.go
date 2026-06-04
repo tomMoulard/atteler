@@ -254,6 +254,123 @@ func TestStore_AgentPerformanceSummarySeparatesTaskNormalizedBuckets(t *testing.
 	assert.InEpsilon(t, 50.0, copyEditBucket.AverageScore, 0.0001)
 }
 
+func TestStore_AgentPerformanceSummaryTracksEvalReportMetrics(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	writeSessionSnapshot(t, store, Session{
+		ID:        "metrics",
+		CreatedAt: base,
+		UpdatedAt: base,
+		Evaluations: []AgentEvaluation{{
+			Agent:          "runner",
+			Outcome:        "pass",
+			Source:         EvaluationSourceHarness,
+			Evaluator:      "eval-runner",
+			RubricVersion:  "behavior/v1",
+			TaskType:       "workflow",
+			Difficulty:     "medium",
+			Provider:       "openai",
+			Model:          "gpt-metric",
+			FixtureVersion: "fixture-v2",
+			AgentVersion:   "runner@1",
+			Score:          88,
+			PassRate:       0.8,
+			FlakeCount:     2,
+			DurationMillis: 1500,
+			InputTokens:    100,
+			OutputTokens:   40,
+			Cost:           0.03,
+			Confidence:     0.9,
+			SchemaVersion:  AgentEvaluationSchemaVersion,
+			CreatedAt:      base.Add(time.Minute),
+		}},
+	})
+
+	summaries, err := store.agentPerformanceSummary(base.Add(time.Hour))
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	summary := summaries[0]
+	require.Len(t, summary.ScoreBuckets, 1)
+	bucket := summary.ScoreBuckets[0]
+
+	assert.Equal(t, "openai", bucket.Provider)
+	assert.Equal(t, "gpt-metric", bucket.Model)
+	assert.Equal(t, "fixture-v2", bucket.FixtureVersion)
+	assert.InEpsilon(t, 0.8, bucket.AveragePassRate, 0.0001)
+	assert.Equal(t, 1, bucket.PassRateSampleCount)
+	assert.Equal(t, 2, bucket.FlakeCount)
+	assert.Equal(t, 1, bucket.FlakyEvaluationCount)
+	assert.Equal(t, 100, bucket.InputTokens)
+	assert.Equal(t, 40, bucket.OutputTokens)
+	assert.Equal(t, 140, bucket.TotalTokens)
+	assert.Equal(t, 1, bucket.TokenSampleCount)
+	assert.InEpsilon(t, 0.8, summary.AveragePassRate, 0.0001)
+	assert.Equal(t, 2, summary.FlakeCount)
+	assert.Equal(t, 140, summary.TotalTokens)
+	assert.Equal(t, 1, summary.DurationSampleCount)
+	assert.InEpsilon(t, 1500.0, summary.AverageDurationMillis, 0.0001)
+	assert.Equal(t, 1, summary.CostSampleCount)
+	assert.InEpsilon(t, 0.03, summary.TotalCost, 0.0001)
+	assert.InEpsilon(t, 0.03, summary.AverageCost, 0.0001)
+}
+
+func TestStore_AgentPerformanceSummaryTracksUnscoredEvalReportMetrics(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	writeSessionSnapshot(t, store, Session{
+		ID:        "unscored-metrics",
+		CreatedAt: base,
+		UpdatedAt: base,
+		Evaluations: []AgentEvaluation{{
+			Agent:          "runner",
+			Outcome:        "fail",
+			Source:         EvaluationSourceHarness,
+			Evaluator:      "eval-runner",
+			RubricVersion:  "behavior/v1",
+			TaskType:       "workflow",
+			Difficulty:     "medium",
+			Provider:       "anthropic",
+			Model:          "gpt-metric",
+			FixtureVersion: "fixture-v3",
+			AgentVersion:   "runner@1",
+			PassRate:       0,
+			HasPassRate:    true,
+			FlakeCount:     3,
+			DurationMillis: 2500,
+			InputTokens:    25,
+			OutputTokens:   75,
+			Cost:           0.02,
+			SchemaVersion:  AgentEvaluationSchemaVersion,
+			CreatedAt:      base.Add(time.Minute),
+		}},
+	})
+
+	summaries, err := store.agentPerformanceSummary(base.Add(time.Hour))
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+
+	summary := summaries[0]
+	assert.Empty(t, summary.ScoreBuckets)
+	assert.Equal(t, 0, summary.ScoredEvaluationCount)
+	assert.Equal(t, 1, summary.PassRateSampleCount)
+	assert.Zero(t, summary.AveragePassRate)
+	assert.Equal(t, 3, summary.FlakeCount)
+	assert.Equal(t, 1, summary.FlakyEvaluationCount)
+	assert.Equal(t, 1, summary.TokenSampleCount)
+	assert.Equal(t, 25, summary.InputTokens)
+	assert.Equal(t, 75, summary.OutputTokens)
+	assert.Equal(t, 100, summary.TotalTokens)
+	assert.Equal(t, 1, summary.DurationSampleCount)
+	assert.InEpsilon(t, 2500.0, summary.AverageDurationMillis, 0.0001)
+	assert.Equal(t, 1, summary.CostSampleCount)
+	assert.InEpsilon(t, 0.02, summary.TotalCost, 0.0001)
+	assert.InEpsilon(t, 0.02, summary.AverageCost, 0.0001)
+}
+
 func TestStore_AgentPerformanceSummaryMarksRoutingEligibleWithValidEvidence(t *testing.T) {
 	t.Parallel()
 
