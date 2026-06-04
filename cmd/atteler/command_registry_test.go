@@ -437,7 +437,7 @@ func TestCommandSurface_RepresentativeSideEffectsAndOutputsAreStable(t *testing.
 				commandEffectStateRead,
 				commandEffectUserOutput,
 			},
-			outputModes: []string{commandOutputText},
+			outputModes: []string{commandOutputText, commandOutputJSON},
 		},
 		{
 			name: "doctor",
@@ -1528,6 +1528,19 @@ func TestCommandRegistry_GroupedInlineCommandsBypassRegistry(t *testing.T) {
 	assertInlineGroupedRoute(t, []string{"config", "commands-docs"}, func(t *testing.T, opts cliOptions) {
 		t.Helper()
 		assert.True(t, opts.commandSurfaceDocs)
+	})
+	assertInlineGroupedRoute(t, []string{"config", testCommandDoctorOffline, "--output", outputFormatJSON}, func(t *testing.T, opts cliOptions) {
+		t.Helper()
+		assert.True(t, opts.doctorOffline)
+
+		if opts.outputFormat != outputFormatJSON {
+			t.Fatalf("output format = %q", opts.outputFormat)
+		}
+	})
+	assertInlineGroupedRoute(t, []string{"config", testCommandDoctorOffline, "--json"}, func(t *testing.T, opts cliOptions) {
+		t.Helper()
+		assert.True(t, opts.doctorOffline)
+		assert.True(t, opts.jsonOutput)
 	})
 	assertInlineGroupedRoute(t, []string{"config", testCommandVersion}, func(t *testing.T, opts cliOptions) {
 		t.Helper()

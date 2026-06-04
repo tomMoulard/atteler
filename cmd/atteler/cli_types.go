@@ -582,6 +582,7 @@ type appState struct {
 	selectedModel                string
 	selectedAgent                string
 	promptSuggestionConsent      promptSuggestionConsent
+	configLoadErr                error
 	idleSuggestionBudget         idleSuggestionBudget
 	cwd                          string
 	maxInputTokens               int

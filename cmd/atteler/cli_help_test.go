@@ -671,6 +671,29 @@ func TestPrintCLIHelp_DomainIncludesCommandsExamplesAndGeneratedFlags(t *testing
 	assert.NotContains(t, out, "--review-scan")
 }
 
+func TestPrintCLIHelp_ConfigDoctorOfflineIncludesStructuredOutputFlags(t *testing.T) {
+	t.Parallel()
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.Bool("doctor-offline", false, "print offline readiness diagnostics without provider health checks and exit")
+	fs.Bool("json", false, "emit JSON for commands with structured output, such as code-intel or config doctor-offline")
+	fs.String("output", "text", "output format for commands that support it: text or json")
+	fs.Bool("review-scan", false, "scan the current repository and print a structured review report and exit")
+
+	var buf bytes.Buffer
+
+	err := printCLIHelp(&buf, fs, "config")
+	require.NoError(t, err)
+
+	out := buf.String()
+	assert.Contains(t, out, "doctor-offline")
+	assert.Contains(t, out, "use --output json for CI")
+	assert.Contains(t, out, "--doctor-offline")
+	assert.Contains(t, out, "--json")
+	assert.Contains(t, out, "--output")
+	assert.NotContains(t, out, "--review-scan")
+}
+
 func TestPrintCLIHelp_MultipleCompatibilityAliasesAreReadable(t *testing.T) {
 	t.Parallel()
 

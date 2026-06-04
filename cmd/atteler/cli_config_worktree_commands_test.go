@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/url"
@@ -20,6 +21,442 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
 )
+
+func TestDoctorOfflineFailsClosedForInvalidEnvConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	configPath := filepath.Join(tempDir, "bad-env-config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+not_a_valid_atteler_key: true
+agent_loop:
+  nope: 1
+`), 0o600))
+	t.Setenv(appconfig.EnvPath, configPath)
+
+	var (
+		err    error
+		stdout string
+	)
+
+	stderr := captureStderr(t, func() {
+		stdout = captureStdoutForStateDiagnostics(t, func() {
+			err = doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
+		})
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "config doctor-offline:")
+	assert.Contains(t, err.Error(), "fatal config error")
+	assert.Contains(t, err.Error(), configPath)
+	assert.Contains(t, stdout, "Atteler offline doctor")
+	assert.Contains(t, stdout, "diagnostic_levels:")
+	assert.Contains(t, stdout, "config_status: failed")
+	assert.Contains(t, stdout, "config: no config files loaded successfully")
+	assert.Contains(t, stdout, "doctor_status: failed")
+	assert.NotContains(t, stdout, "\nfatal:\n")
+	assert.NotContains(t, stdout, "config_error:")
+	assert.Contains(t, stderr, "fatal:")
+	assert.Contains(t, stderr, configPath)
+}
+
+func TestDoctorOfflineFailsClosedForInvalidProjectConfig(t *testing.T) { //nolint:paralleltest // mutates process env/cwd and captures stdout.
+	tempDir := t.TempDir()
+	projectDir := filepath.Join(tempDir, "project")
+	configPath := filepath.Join(projectDir, ".atteler", "config.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o700))
+	require.NoError(t, os.WriteFile(configPath, []byte(`agent_loop:
+  nope: 1
+`), 0o600))
+	setDoctorOfflineTestEnv(t, projectDir)
+
+	var (
+		err    error
+		stdout string
+	)
+
+	stderr := captureStderr(t, func() {
+		stdout = captureStdoutForStateDiagnostics(t, func() {
+			err = doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
+		})
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), configPath)
+	assert.Contains(t, stdout, "config_status: failed")
+	assert.Contains(t, stdout, "doctor_status: failed")
+	assert.NotContains(t, stdout, "\nfatal:\n")
+	assert.Contains(t, stderr, "fatal:")
+	assert.Contains(t, stderr, configPath)
+}
+
+func TestDoctorOfflineFailsClosedForConfigSchemaDiagnostics(t *testing.T) {
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	configPath := filepath.Join(tempDir, "invalid-schema.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`model_aliases:
+  fast: missing-provider-prefix
+`), 0o600))
+	t.Setenv(appconfig.EnvPath, configPath)
+
+	var (
+		err    error
+		stdout string
+	)
+
+	stderr := captureStderr(t, func() {
+		stdout = captureStdoutForStateDiagnostics(t, func() {
+			err = doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
+		})
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "config doctor-offline:")
+	assert.Contains(t, err.Error(), "model_aliases.fast")
+	assert.Contains(t, stdout, "config_status: failed")
+	assert.Contains(t, stdout, "config: "+configPath)
+	assert.Contains(t, stdout, "config_diagnostics: errors=1")
+	assert.Contains(t, stdout, "doctor_status: failed")
+	assert.Contains(t, stderr, "fatal:")
+	assert.Contains(t, stderr, "model_aliases.fast")
+}
+
+func TestDoctorOfflineTreatsMissingOptionalConfigAsNonFatal(t *testing.T) { //nolint:paralleltest // mutates process env/cwd and captures stdout.
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	var err error
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		err = doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "config_status: ok")
+	assert.Contains(t, stdout, "config: no config files loaded")
+	assert.Contains(t, stdout, "config_diagnostics: errors=0")
+	assert.Contains(t, stdout, "doctor_status: ok")
+	assert.NotContains(t, stdout, "\nfatal:\n")
+}
+
+func TestDoctorOfflineReportsHarnessImporterWarningsAsNonFatal(t *testing.T) {
+	tempDir := t.TempDir()
+	codexHome := filepath.Join(tempDir, "codex")
+	require.NoError(t, os.MkdirAll(codexHome, 0o700))
+	codexConfig := filepath.Join(codexHome, "config.toml")
+	require.NoError(t, os.WriteFile(codexConfig, []byte(`
+model = "gpt-5.5"
+trusted_project_roots = ["/repo"]
+`), 0o600))
+	setDoctorOfflineTestEnv(t, tempDir)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	var err error
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		err = doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "config_status: ok")
+	assert.Contains(t, stdout, "Config importer warnings:")
+	assert.Contains(t, stdout, "[warning] codex: "+codexConfig+" trusted_project_roots: ignored unsupported field")
+	assert.Contains(t, stdout, "config_diagnostics: errors=0 warnings=1")
+	assert.Contains(t, stdout, "doctor_status: ok")
+	assert.NotContains(t, stdout, "\nfatal:\n")
+
+	stdout = captureStdoutForStateDiagnostics(t, func() {
+		err = doctorOffline(cliOptions{
+			sessionDir:   filepath.Join(tempDir, "sessions"),
+			outputFormat: outputFormatJSON,
+		})
+	})
+
+	require.NoError(t, err)
+
+	var report doctorOfflineJSONReport
+	require.NoError(t, json.Unmarshal([]byte(stdout), &report))
+	assert.Equal(t, "ok", report.Status)
+	assert.Equal(t, 1, report.ConfigDiagnostics.Warnings)
+	require.NotEmpty(t, report.Diagnostics)
+	assert.Equal(t, "warning", report.Diagnostics[0].Severity)
+	assert.Equal(t, "codex", report.Diagnostics[0].Importer)
+}
+
+func TestDoctorOfflineJSONReportsFatalConfigStatus(t *testing.T) {
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	configPath := filepath.Join(tempDir, "bad-env-config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`agent_loop:
+  nope: 1
+`), 0o600))
+	t.Setenv(appconfig.EnvPath, configPath)
+
+	var err error
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		err = doctorOffline(cliOptions{
+			sessionDir: filepath.Join(tempDir, "sessions"),
+			jsonOutput: true,
+		})
+	})
+
+	require.Error(t, err)
+
+	var report struct {
+		Status string `json:"status"`
+		Config struct {
+			Status    string   `json:"status"`
+			LoadError string   `json:"load_error"`
+			Loaded    []string `json:"loaded"`
+		} `json:"config"`
+		Diagnostics []struct {
+			Severity string `json:"severity"`
+			Path     string `json:"path"`
+			Message  string `json:"message"`
+		} `json:"diagnostics"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &report))
+	assert.Equal(t, "failed", report.Status)
+	assert.Equal(t, "failed", report.Config.Status)
+	assert.Contains(t, report.Config.LoadError, configPath)
+	require.NotEmpty(t, report.Diagnostics)
+	assert.Equal(t, "fatal", report.Diagnostics[0].Severity)
+	assert.Equal(t, configPath, report.Diagnostics[0].Path)
+	assert.Contains(t, report.Diagnostics[0].Message, configPath)
+	assert.Empty(t, report.Config.Loaded)
+}
+
+func TestDoctorOfflineJSONReportsStrictParseFatalPath(t *testing.T) {
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	configPath := filepath.Join(tempDir, "bad-type-config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`generation:
+  max_tokens: not-a-number
+`), 0o600))
+	t.Setenv(appconfig.EnvPath, configPath)
+
+	var err error
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		err = doctorOffline(cliOptions{
+			sessionDir:   filepath.Join(tempDir, "sessions"),
+			outputFormat: outputFormatJSON,
+		})
+	})
+
+	require.Error(t, err)
+
+	var report doctorOfflineJSONReport
+	require.NoError(t, json.Unmarshal([]byte(stdout), &report))
+	assert.Equal(t, "failed", report.Status)
+	assert.Equal(t, "failed", report.Config.Status)
+	assert.Contains(t, report.Config.LoadError, configPath)
+	assert.Equal(t, 1, report.ConfigDiagnostics.Fatal)
+	require.NotEmpty(t, report.Diagnostics)
+	assert.Equal(t, "fatal", report.Diagnostics[0].Severity)
+	assert.Equal(t, configPath, report.Diagnostics[0].Path)
+	assert.Contains(t, report.Diagnostics[0].Message, "cannot unmarshal")
+}
+
+func TestDoctorOfflineJSONReportsOKForMissingOptionalConfig(t *testing.T) { //nolint:paralleltest // mutates process env/cwd and captures stdout.
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	var err error
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		err = doctorOffline(cliOptions{
+			sessionDir:   filepath.Join(tempDir, "sessions"),
+			outputFormat: outputFormatJSON,
+		})
+	})
+
+	require.NoError(t, err)
+	assert.NotContains(t, stdout, "Atteler offline doctor")
+
+	var report struct {
+		Status string `json:"status"`
+		Config struct {
+			Status    string   `json:"status"`
+			LoadError string   `json:"load_error"`
+			Loaded    []string `json:"loaded"`
+		} `json:"config"`
+		Diagnostics []struct {
+			Severity string `json:"severity"`
+		} `json:"diagnostics"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &report))
+	assert.Equal(t, "ok", report.Status)
+	assert.Equal(t, "ok", report.Config.Status)
+	assert.Empty(t, report.Config.LoadError)
+	assert.Empty(t, report.Config.Loaded)
+	assert.Empty(t, report.Diagnostics)
+}
+
+func TestDoctorOfflineJSONReportsFatalSchemaDiagnostics(t *testing.T) {
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	configPath := filepath.Join(tempDir, "invalid-schema.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`model_aliases:
+  fast: missing-provider-prefix
+`), 0o600))
+	t.Setenv(appconfig.EnvPath, configPath)
+
+	var err error
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		err = doctorOffline(cliOptions{
+			sessionDir:   filepath.Join(tempDir, "sessions"),
+			outputFormat: outputFormatJSON,
+		})
+	})
+
+	require.Error(t, err)
+
+	var report struct {
+		Status string `json:"status"`
+		Config struct {
+			Status     string `json:"status"`
+			LoadError  string `json:"load_error"`
+			FatalError string `json:"fatal_error"`
+		} `json:"config"`
+		Diagnostics []struct {
+			Severity string `json:"severity"`
+			Path     string `json:"path"`
+			Field    string `json:"field"`
+			Message  string `json:"message"`
+		} `json:"diagnostics"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &report))
+	assert.Equal(t, "failed", report.Status)
+	assert.Equal(t, "failed", report.Config.Status)
+	assert.Empty(t, report.Config.LoadError)
+	assert.Contains(t, report.Config.FatalError, "model_aliases.fast")
+	require.NotEmpty(t, report.Diagnostics)
+	assert.Equal(t, "fatal", report.Diagnostics[0].Severity)
+	assert.Equal(t, configPath, report.Diagnostics[0].Path)
+	assert.Equal(t, "model_aliases.fast", report.Diagnostics[0].Field)
+	assert.Contains(t, report.Diagnostics[0].Message, "model alias target must be provider/model")
+}
+
+func TestValidateConfigFailsClosedForConfigSchemaDiagnostics(t *testing.T) {
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	configPath := filepath.Join(tempDir, "invalid-schema.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`model_aliases:
+  fast: missing-provider-prefix
+`), 0o600))
+	t.Setenv(appconfig.EnvPath, configPath)
+
+	err := validateConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "validate config:")
+	assert.Contains(t, err.Error(), "model_aliases.fast")
+	assert.Contains(t, err.Error(), "model alias target must be provider/model")
+}
+
+func TestDoctorFailsClosedForInvalidConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	configPath := filepath.Join(tempDir, "bad-env-config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`agent_loop:
+  nope: 1
+`), 0o600))
+	t.Setenv(appconfig.EnvPath, configPath)
+
+	var (
+		state appState
+		err   error
+	)
+
+	loadStderr := captureStderr(t, func() {
+		state, err = loadAppState(t.Context(), cliOptions{
+			doctor:     true,
+			sessionDir: filepath.Join(tempDir, "sessions"),
+		})
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, loadStderr, "warning:")
+
+	var (
+		doctorErr error
+		stdout    string
+	)
+
+	doctorStderr := captureStderr(t, func() {
+		stdout = captureStdoutForStateDiagnostics(t, func() {
+			doctorErr = doctor(t.Context(), state)
+		})
+	})
+
+	require.Error(t, doctorErr)
+	assert.Contains(t, doctorErr.Error(), "config doctor:")
+	assert.Contains(t, doctorErr.Error(), "fatal config error")
+	assert.Contains(t, doctorErr.Error(), configPath)
+	assert.Contains(t, stdout, "Atteler doctor")
+	assert.Contains(t, stdout, "config_status: failed")
+	assert.NotContains(t, stdout, "\nfatal:\n")
+	assert.NotContains(t, stdout, "[ok]")
+	assert.Contains(t, doctorStderr, "fatal:")
+	assert.Contains(t, doctorStderr, configPath)
+}
+
+func TestDoctorFailsClosedForConfigSchemaDiagnostics(t *testing.T) {
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	configPath := filepath.Join(tempDir, "invalid-schema.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`model_aliases:
+  fast: missing-provider-prefix
+`), 0o600))
+	t.Setenv(appconfig.EnvPath, configPath)
+
+	state, err := loadAppState(t.Context(), cliOptions{
+		doctor:     true,
+		sessionDir: filepath.Join(tempDir, "sessions"),
+	})
+	require.NoError(t, err)
+
+	var (
+		doctorErr error
+		stdout    string
+	)
+
+	doctorStderr := captureStderr(t, func() {
+		stdout = captureStdoutForStateDiagnostics(t, func() {
+			doctorErr = doctor(t.Context(), state)
+		})
+	})
+
+	require.Error(t, doctorErr)
+	assert.Contains(t, doctorErr.Error(), "model_aliases.fast")
+	assert.Contains(t, stdout, "config_status: failed")
+	assert.Contains(t, stdout, "doctor_status: failed")
+	assert.NotContains(t, stdout, "[ok]")
+	assert.Contains(t, doctorStderr, "fatal:")
+	assert.Contains(t, doctorStderr, "model_aliases.fast")
+}
+
+func setDoctorOfflineTestEnv(t *testing.T, cwd string) {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv(appconfig.EnvPath, "")
+	t.Chdir(cwd)
+}
 
 func TestContextOptionsFromConfig_MapsReferencePolicy(t *testing.T) {
 	t.Parallel()

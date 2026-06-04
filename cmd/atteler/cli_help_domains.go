@@ -93,7 +93,7 @@ var cliHelpDomains = []cliHelpDomain{
 		},
 	},
 	{
-		Name:    "config",
+		Name:    configDomainName,
 		Title:   "Configuration & diagnostics",
 		Summary: "Inspect config load order, templates, validation, lifecycle hooks, readiness, and version metadata.",
 		Aliases: []string{"cfg", "diagnostics", "diag"},
@@ -106,7 +106,7 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "report", Summary: "print redacted config diagnostics for issue reports", Legacy: []string{"--config-report"}},
 			{Name: "explain", Args: "[field-prefix]", Summary: "print merged config values with per-field provenance", Legacy: []string{"--explain-config"}},
 			{Name: "doctor", Summary: "run provider-aware readiness diagnostics", Legacy: []string{"--doctor"}},
-			{Name: "doctor-offline", Summary: "run offline readiness diagnostics", Legacy: []string{"--doctor-offline"}},
+			{Name: "doctor-offline", Summary: "run offline readiness diagnostics; use --output json for CI", Legacy: []string{"--doctor-offline"}},
 			{Name: "state", Summary: "show interactive state path, revision, and selected preference sources", Legacy: []string{"--state-diagnostics"}},
 			{Name: "commands-json", Summary: "dump the inspectable CLI command surface as JSON", Legacy: []string{"--command-surface-json"}},
 			{Name: "commands-docs", Summary: "render command surface docs from the dispatch contract", Legacy: []string{"--command-surface-docs"}},

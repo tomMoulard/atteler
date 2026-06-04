@@ -20,11 +20,11 @@ func inlineCommandContractsByName() map[string]commandContract {
 		),
 		"doctor-offline": commandContractFor(
 			"print offline readiness diagnostics without provider health checks",
-			[]string{"--doctor-offline", "--session-dir"},
+			[]string{"--doctor-offline", "--session-dir", "--output", "--json"},
 			[]string{commandEffectConfigRead, commandEffectFilesystemRead, commandEffectStateRead, commandEffectUserOutput},
-			[]string{commandOutputText},
+			[]string{commandOutputText, commandOutputJSON},
 			withInputType("doctorOfflineCommandInput"),
-			withExamples("atteler config doctor-offline"),
+			withExamples("atteler config doctor-offline", "atteler config doctor-offline --output json"),
 		),
 		"config-migrate": commandContractFor(
 			"migrate existing Atteler config and state files to the current schema",

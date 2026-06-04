@@ -114,6 +114,45 @@ func TestOfflineProviderCommands(t *testing.T) {
 	assertContains(t, result.stdout, "ollama")
 	assertContains(t, result.stdout, "hook_events:")
 
+	badConfig := filepath.Join(workDir, "bad-atteler.yaml")
+	writeFile(t, badConfig, `not_a_valid_atteler_key: true
+agent_loop:
+  nope: 1
+`)
+	result, err := runAtteler(t, runSpec{dir: workDir}, "--config", badConfig, "--doctor-offline")
+	require.Error(t, err)
+	assertContains(t, result.stdout, "Atteler offline doctor")
+	assertContains(t, result.stdout, "config_status: failed")
+	assertContains(t, result.stdout, "config: no config files loaded successfully")
+	assertContains(t, result.stdout, "doctor_status: failed")
+	assertNotContains(t, result.stdout, "config_error:")
+	assertContains(t, result.stderr, "fatal:")
+	assertContains(t, result.stderr, badConfig)
+
+	result, err = runAtteler(t, runSpec{dir: workDir}, "--config", badConfig, "config", "doctor-offline", "--output", "json")
+	require.Error(t, err)
+	assertNotContains(t, result.stdout, "Atteler offline doctor")
+	assertContains(t, result.stderr, "error:")
+
+	var report struct {
+		Status string `json:"status"`
+		Config struct {
+			Status    string `json:"status"`
+			LoadError string `json:"load_error"`
+		} `json:"config"`
+		Diagnostics []struct {
+			Severity string `json:"severity"`
+			Path     string `json:"path"`
+		} `json:"diagnostics"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.stdout), &report))
+	require.Equal(t, "failed", report.Status)
+	require.Equal(t, "failed", report.Config.Status)
+	assertContains(t, report.Config.LoadError, badConfig)
+	require.NotEmpty(t, report.Diagnostics)
+	require.Equal(t, "fatal", report.Diagnostics[0].Severity)
+	require.Equal(t, badConfig, report.Diagnostics[0].Path)
+
 	result = runOK(t, runSpec{dir: workDir}, "--list-providers")
 	assertContains(t, result.stdout, "anthropic")
 	assertContains(t, result.stdout, "openai")
