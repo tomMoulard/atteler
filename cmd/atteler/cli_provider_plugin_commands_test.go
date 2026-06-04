@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/lsp"
 	"github.com/tommoulard/atteler/pkg/mcp"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/subagent"
 )
 
@@ -76,6 +78,30 @@ func TestRunMCPInvokeRequiresManifest(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--mcp-manifest")
 	assert.Contains(t, err.Error(), "atteler help plugins")
+}
+
+func TestRunMCPManifestPermissionPolicyDeniesRead(t *testing.T) {
+	t.Parallel()
+
+	manifestPath := filepath.Join(t.TempDir(), "mcp.yaml")
+	require.NoError(t, os.WriteFile(manifestPath, []byte("servers:\n- name: repo\n  command: atteler-mcp\n"), 0o600))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := runMCPManifest(ctx, mcpManifestCommandInput{Path: manifestPath})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read MCP manifest")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestMCPCommandInputsFromOptions(t *testing.T) {

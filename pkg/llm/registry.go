@@ -175,6 +175,44 @@ func KnownProviders() []ProviderInfo {
 	return out
 }
 
+// KnownProvidersContext returns built-in provider model catalogs while routing
+// any local provider configuration inspection through ctx-scoped permission
+// policy.
+func KnownProvidersContext(ctx context.Context) ([]ProviderInfo, error) {
+	providers := []Provider{
+		&AnthropicProvider{},
+		&ClaudeCodeProvider{},
+		&CodexProvider{},
+		&OpenAIProvider{},
+		&OllamaProvider{},
+	}
+	catalogModels := catalogModelsByProvider()
+
+	out := make([]ProviderInfo, 0, len(providers))
+	for _, provider := range providers {
+		models, err := knownProviderModelsContext(ctx, provider)
+		if err != nil {
+			return nil, err
+		}
+
+		out = append(out, ProviderInfo{
+			Capabilities: ProviderCapabilitiesFor(provider),
+			Name:         provider.Name(),
+			Models:       mergeModelLists(models, catalogModels[provider.Name()]),
+		})
+	}
+
+	return out, nil
+}
+
+func knownProviderModelsContext(ctx context.Context, provider Provider) ([]string, error) {
+	if provider != nil && provider.Name() == providerCodex {
+		return codexModelsContext(ctx)
+	}
+
+	return provider.Models(), nil
+}
+
 func catalogModelsByProvider() map[string][]string {
 	catalog := modelroute.BuiltinCatalog()
 	models := make(map[string][]string, len(catalog.Models))
@@ -506,7 +544,7 @@ func PrivateAdapterDiagnostics(ctx context.Context, cfg AutoRegisterConfig) []Pr
 			results = append(results, privateAdapterCredentialFailure(
 				providerName,
 				privateAdapterContract(providerName),
-				privateAdapterModels(providerName),
+				privateAdapterModelsContext(ctx, providerName),
 				ctxErr,
 			))
 
@@ -524,7 +562,7 @@ func privateAdapterHealth(ctx context.Context, providerName string, cfg Provider
 	case providerCodex:
 		provider, err := NewCodexProviderWithConfigContext(ctx, cfg)
 		if err != nil {
-			return privateAdapterCredentialFailure(providerCodex, codexAdapterContract(), codexModels(), err)
+			return privateAdapterCredentialFailure(providerCodex, codexAdapterContract(), privateAdapterModelsContext(ctx, providerCodex), err)
 		}
 
 		return providerHealthFromDiagnostics(providerCodex, provider.AdapterDiagnostics())
@@ -551,10 +589,15 @@ func privateAdapterContract(providerName string) AdapterContract {
 	}
 }
 
-func privateAdapterModels(providerName string) []string {
+func privateAdapterModelsContext(ctx context.Context, providerName string) []string {
 	switch providerName {
 	case providerCodex:
-		return codexModels()
+		models, err := codexModelsContext(ctx)
+		if err != nil {
+			return defaultCodexModels()
+		}
+
+		return models
 	case providerClaudeCode:
 		return defaultClaudeCodeModels()
 	default:

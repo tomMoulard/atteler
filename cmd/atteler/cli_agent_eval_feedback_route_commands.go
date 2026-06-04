@@ -358,13 +358,17 @@ func emptyPlanValue(value string) string {
 	return value
 }
 
-func evalOutput(actualPath, expectedText, expectedPath string, mode atteval.MatchMode) error {
+func evalOutput(ctx context.Context, actualPath, expectedText, expectedPath string, mode atteval.MatchMode) error {
+	if err := authorizeReadPermission(ctx, "read eval actual output", "atteler.eval", actualPath); err != nil {
+		return err
+	}
+
 	actual, err := os.ReadFile(actualPath)
 	if err != nil {
 		return fmt.Errorf("eval output: read actual %s: %w", actualPath, err)
 	}
 
-	expected, err := expectedEvalText(expectedText, expectedPath)
+	expected, err := expectedEvalText(ctx, expectedText, expectedPath)
 	if err != nil {
 		return err
 	}
@@ -398,22 +402,14 @@ func evalCommandRequested(opts cliOptions) bool {
 		opts.evalExitCode.set
 }
 
-func evalOutputCommand(opts cliOptions) error {
-	return evalOutputCommandWithAutonomy(opts, autonomy.DefaultLevel)
-}
-
-func evalOutputCommandWithAutonomy(opts cliOptions, level autonomy.Level) error {
-	if evalCommandWritesFiles(opts) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
-		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, evalAutonomyContext(opts)))
-	}
-
+func evalOutputCommand(ctx context.Context, opts cliOptions) error {
 	if structuredEvalRequested(opts) || opts.evalJSON || opts.evalReportPath != "" {
-		report, err := evalReportForCommand(opts)
+		report, err := evalReportForCommand(ctx, opts)
 		if err != nil {
 			return err
 		}
 
-		if err := emitEvalReport(report, opts); err != nil {
+		if err := emitEvalReport(ctx, report, opts); err != nil {
 			return err
 		}
 
@@ -424,7 +420,15 @@ func evalOutputCommandWithAutonomy(opts cliOptions, level autonomy.Level) error 
 		return nil
 	}
 
-	return evalOutput(opts.evalOutputPath, opts.evalExpected, opts.evalExpectedPath, atteval.MatchMode(opts.evalMode))
+	return evalOutput(ctx, opts.evalOutputPath, opts.evalExpected, opts.evalExpectedPath, atteval.MatchMode(opts.evalMode))
+}
+
+func evalOutputCommandWithAutonomy(opts cliOptions, level autonomy.Level) error {
+	if evalCommandWritesFiles(opts) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, evalAutonomyContext(opts)))
+	}
+
+	return evalOutputCommand(rootContext(), opts)
 }
 
 func evalCommandWritesFiles(opts cliOptions) bool {
@@ -451,7 +455,7 @@ func structuredEvalRequested(opts cliOptions) bool {
 		opts.evalApproveGoldenUpdate
 }
 
-func evalReportForCommand(opts cliOptions) (atteval.Report, error) {
+func evalReportForCommand(ctx context.Context, opts cliOptions) (atteval.Report, error) {
 	if opts.evalAssertionsPath != "" && opts.evalFixtureDir != "" {
 		return atteval.Report{}, errors.New("eval output: pass either --eval-assertions or --eval-fixture-dir, not both")
 	}
@@ -460,7 +464,7 @@ func evalReportForCommand(opts cliOptions) (atteval.Report, error) {
 		return atteval.Report{}, errors.New("eval output: pass --eval-output, --eval-assertions, or --eval-fixture-dir")
 	}
 
-	runOptions := evalRunOptions(opts)
+	runOptions := evalRunOptions(ctx, opts)
 	switch {
 	case opts.evalFixtureDir != "":
 		report, err := atteval.RunFixtureDir(opts.evalFixtureDir, runOptions)
@@ -479,11 +483,11 @@ func evalReportForCommand(opts cliOptions) (atteval.Report, error) {
 	case opts.evalUpdateGolden || opts.evalApproveGoldenUpdate:
 		return atteval.Report{}, errors.New("eval output: golden update flags require --eval-assertions or --eval-fixture-dir")
 	default:
-		return simpleEvalReport(opts)
+		return simpleEvalReport(ctx, opts)
 	}
 }
 
-func evalRunOptions(opts cliOptions) atteval.RunOptions {
+func evalRunOptions(ctx context.Context, opts cliOptions) atteval.RunOptions {
 	runOptions := atteval.RunOptions{
 		ActualPath:          opts.evalOutputPath,
 		UpdateGolden:        opts.evalUpdateGolden,
@@ -493,16 +497,30 @@ func evalRunOptions(opts cliOptions) atteval.RunOptions {
 		runOptions.ExitCode = &opts.evalExitCode.value
 	}
 
+	if opts.evalUpdateGolden || opts.evalApproveGoldenUpdate {
+		runOptions.AuthorizeGoldenWrite = func(path string) error {
+			return authorizeWritePermission(ctx, "update eval golden file", "atteler.eval.golden", path)
+		}
+	}
+
+	runOptions.AuthorizeRead = func(path string) error {
+		return authorizeReadPermission(ctx, "read eval input", "atteler.eval", path)
+	}
+
 	return runOptions
 }
 
-func simpleEvalReport(opts cliOptions) (atteval.Report, error) {
+func simpleEvalReport(ctx context.Context, opts cliOptions) (atteval.Report, error) {
+	if err := authorizeReadPermission(ctx, "read eval actual output", "atteler.eval", opts.evalOutputPath); err != nil {
+		return atteval.Report{}, err
+	}
+
 	actual, err := os.ReadFile(opts.evalOutputPath)
 	if err != nil {
 		return atteval.Report{}, fmt.Errorf("eval output: read actual %s: %w", opts.evalOutputPath, err)
 	}
 
-	expected, err := expectedEvalText(opts.evalExpected, opts.evalExpectedPath)
+	expected, err := expectedEvalText(ctx, opts.evalExpected, opts.evalExpectedPath)
 	if err != nil {
 		return atteval.Report{}, err
 	}
@@ -550,14 +568,14 @@ func simpleEvalReport(opts cliOptions) (atteval.Report, error) {
 	}, nil
 }
 
-func emitEvalReport(report atteval.Report, opts cliOptions) error {
+func emitEvalReport(ctx context.Context, report atteval.Report, opts cliOptions) error {
 	data, err := report.JSON()
 	if err != nil {
 		return fmt.Errorf("eval output: encode report: %w", err)
 	}
 
 	if opts.evalReportPath != "" {
-		if err := writeEvalReport(opts.evalReportPath, data); err != nil {
+		if err := writeEvalReport(ctx, opts.evalReportPath, data); err != nil {
 			return err
 		}
 	}
@@ -572,7 +590,11 @@ func emitEvalReport(report atteval.Report, opts cliOptions) error {
 	return nil
 }
 
-func writeEvalReport(path string, data []byte) error {
+func writeEvalReport(ctx context.Context, path string, data []byte) error {
+	if err := authorizeWritePermission(ctx, "write eval report", "atteler.eval.report", path); err != nil {
+		return fmt.Errorf("eval output: %w", err)
+	}
+
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("eval output: create report directory: %w", err)
@@ -690,13 +712,17 @@ func evalReportSnippet(value string) string {
 	return string(runes[:limit-1]) + "…"
 }
 
-func expectedEvalText(expectedText, expectedPath string) (string, error) {
+func expectedEvalText(ctx context.Context, expectedText, expectedPath string) (string, error) {
 	switch {
 	case expectedText != "" && expectedPath != "":
 		return "", errors.New("eval output: pass either --eval-expected or --eval-expected-file, not both")
 	case expectedText != "":
 		return expectedText, nil
 	case expectedPath != "":
+		if err := authorizeReadPermission(ctx, "read eval expected output", "atteler.eval", expectedPath); err != nil {
+			return "", err
+		}
+
 		data, err := os.ReadFile(expectedPath)
 		if err != nil {
 			return "", fmt.Errorf("eval output: read expected %s: %w", expectedPath, err)
@@ -708,7 +734,7 @@ func expectedEvalText(expectedText, expectedPath string) (string, error) {
 	}
 }
 
-func suggestSkill(steps []string, maxSteps, minOccurrences int, saveDir string, reviewOnly bool) error {
+func suggestSkill(ctx context.Context, steps []string, maxSteps, minOccurrences int, saveDir string, reviewOnly bool) error {
 	suggestion, ok := attskill.SuggestWithOptions(steps, attskill.Options{
 		MaxSteps:       maxSteps,
 		MinOccurrences: minOccurrences,
@@ -739,6 +765,14 @@ func suggestSkill(steps []string, maxSteps, minOccurrences int, saveDir string, 
 	if reviewOnly {
 		fmt.Println("review-only: no files written")
 		return nil
+	}
+
+	if authErr := authorizeReadPermission(ctx, "inspect skill suggestion save target", "atteler.skill.suggest", review.Root); authErr != nil {
+		return fmt.Errorf("save skill suggestion: %w", authErr)
+	}
+
+	if authErr := authorizeWritePermission(ctx, "save skill suggestion", "atteler.skill.suggest", review.Root); authErr != nil {
+		return fmt.Errorf("save skill suggestion: %w", authErr)
 	}
 
 	path, err := attskill.PersistReview(review)
@@ -1065,10 +1099,14 @@ func cleanFeedbackStrings(values []string) []string {
 	return cleaned
 }
 
-func applyFeedbackProposals(saved session.Session, configPath, historyPath string) error {
+func applyFeedbackProposals(ctx context.Context, saved session.Session, configPath, historyPath string) error {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
 		return errors.New("feedback apply: config path is required")
+	}
+
+	if err := authorizeFeedbackConfigRead(ctx, "apply feedback guidance", configPath); err != nil {
+		return fmt.Errorf("feedback apply: %w", err)
 	}
 
 	cfg, loaded, err := appconfig.LoadFiles([]string{configPath})
@@ -1095,11 +1133,16 @@ func applyFeedbackProposals(saved session.Session, configPath, historyPath strin
 	}
 
 	cfg.Agents = updatedAgents
+
+	historyPath = feedbackHistoryDefault(configPath, historyPath)
+	if err := authorizeFeedbackFileWrites(ctx, "apply feedback guidance", configPath, historyPath); err != nil {
+		return fmt.Errorf("feedback apply: %w", err)
+	}
+
 	if err := writeConfigFile(configPath, cfg); err != nil {
 		return fmt.Errorf("feedback apply: %w", err)
 	}
 
-	historyPath = feedbackHistoryDefault(configPath, historyPath)
 	if err := appendFeedbackHistory(historyPath, history, appliedAt); err != nil {
 		if restoreErr := writeConfigFile(configPath, originalCfg); restoreErr != nil {
 			return fmt.Errorf("feedback apply: append history failed and restore config failed: %w", errors.Join(err, restoreErr))
@@ -1115,7 +1158,7 @@ func applyFeedbackProposals(saved session.Session, configPath, historyPath strin
 	return nil
 }
 
-func approveFeedbackGuidance(configPath, historyPath, agentName, guidanceID string) error {
+func approveFeedbackGuidance(ctx context.Context, configPath, historyPath, agentName, guidanceID string) error {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
 		return errors.New("feedback approve: config path is required")
@@ -1129,6 +1172,10 @@ func approveFeedbackGuidance(configPath, historyPath, agentName, guidanceID stri
 	guidanceID = strings.TrimSpace(guidanceID)
 	if guidanceID == "" {
 		return errors.New("feedback approve: guidance id is required")
+	}
+
+	if err := authorizeFeedbackConfigRead(ctx, "approve feedback guidance", configPath); err != nil {
+		return fmt.Errorf("feedback approve: %w", err)
 	}
 
 	cfg, loaded, err := appconfig.LoadFiles([]string{configPath})
@@ -1154,11 +1201,16 @@ func approveFeedbackGuidance(configPath, historyPath, agentName, guidanceID stri
 	}
 
 	cfg.Agents = updatedAgents
+
+	historyPath = feedbackHistoryDefault(configPath, historyPath)
+	if err := authorizeFeedbackFileWrites(ctx, "approve feedback guidance", configPath, historyPath); err != nil {
+		return fmt.Errorf("feedback approve: %w", err)
+	}
+
 	if err := writeConfigFile(configPath, cfg); err != nil {
 		return fmt.Errorf("feedback approve: %w", err)
 	}
 
-	historyPath = feedbackHistoryDefault(configPath, historyPath)
 	if err := appendFeedbackHistory(historyPath, []feedback.HistoryEntry{history}, approvedAt); err != nil {
 		return fmt.Errorf("feedback approve: %w", err)
 	}
@@ -1178,7 +1230,7 @@ func approveFeedbackGuidance(configPath, historyPath, agentName, guidanceID stri
 	return nil
 }
 
-func rollbackFeedbackGuidance(configPath, historyPath, agentName, guidanceID, reason string) error {
+func rollbackFeedbackGuidance(ctx context.Context, configPath, historyPath, agentName, guidanceID, reason string) error {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
 		return errors.New("feedback rollback: config path is required")
@@ -1192,6 +1244,10 @@ func rollbackFeedbackGuidance(configPath, historyPath, agentName, guidanceID, re
 	guidanceID = strings.TrimSpace(guidanceID)
 	if guidanceID == "" {
 		return errors.New("feedback rollback: guidance id is required")
+	}
+
+	if err := authorizeFeedbackConfigRead(ctx, "rollback feedback guidance", configPath); err != nil {
+		return fmt.Errorf("feedback rollback: %w", err)
 	}
 
 	cfg, loaded, err := appconfig.LoadFiles([]string{configPath})
@@ -1218,11 +1274,16 @@ func rollbackFeedbackGuidance(configPath, historyPath, agentName, guidanceID, re
 	}
 
 	cfg.Agents = updatedAgents
+
+	historyPath = feedbackHistoryDefault(configPath, historyPath)
+	if err := authorizeFeedbackFileWrites(ctx, "rollback feedback guidance", configPath, historyPath); err != nil {
+		return fmt.Errorf("feedback rollback: %w", err)
+	}
+
 	if err := writeConfigFile(configPath, cfg); err != nil {
 		return fmt.Errorf("feedback rollback: %w", err)
 	}
 
-	historyPath = feedbackHistoryDefault(configPath, historyPath)
 	if err := appendFeedbackHistory(historyPath, []feedback.HistoryEntry{history}, rolledBackAt); err != nil {
 		return fmt.Errorf("feedback rollback: %w", err)
 	}
@@ -1241,6 +1302,26 @@ func feedbackHistoryDefault(configPath, historyPath string) string {
 	}
 
 	return configPath + ".feedback.md"
+}
+
+func authorizeFeedbackFileWrites(ctx context.Context, action, configPath, historyPath string) error {
+	if err := authorizeWritePermission(ctx, action+" config", "atteler.feedback", configPath); err != nil {
+		return err
+	}
+
+	if err := authorizeWritePermission(ctx, action+" history", "atteler.feedback", historyPath); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func authorizeFeedbackConfigRead(ctx context.Context, action, configPath string) error {
+	if err := authorizeReadPermission(ctx, action+" config", "atteler.feedback", configPath); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func writeConfigFile(path string, cfg appconfig.Config) error {

@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/tommoulard/atteler/pkg/shell"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 func TestMain(m *testing.M) {
@@ -744,37 +744,66 @@ func TestServerPool_CommandPolicyDeniesExecution(t *testing.T) {
 	assert.Equal(t, 0, fakeLaunchCount(t, launchFile))
 }
 
-func TestServerPool_AuditRecordsAutonomy(t *testing.T) {
+func TestServerPool_PermissionPolicyDeniesDocumentReadBeforeServerStart(t *testing.T) {
 	t.Parallel()
 
-	auditDir := filepath.Join(t.TempDir(), "audit")
-	pool := NewServerPool(PoolOptions{
-		ShutdownTimeout: 5 * time.Second,
-		Audit: shell.AuditContext{
-			AuditDir: auditDir,
-			Autonomy: "high",
-		},
-	})
-	t.Cleanup(func() {
-		require.NoError(t, pool.Shutdown(context.Background()))
-	})
-
 	file := writeTempSource(t, "package main\nfunc main() {}\n")
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
+	launchFile := filepath.Join(t.TempDir(), "launches.log")
 
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	pool := newTestPool(t)
 	_, err := pool.DocumentSymbols(ctx, Options{
 		Command:  os.Args[0],
-		Env:      []string{"ATTELER_LSP_FAKE_SERVER=document"},
+		Env:      []string{"ATTELER_LSP_FAKE_SERVER=document", "ATTELER_LSP_FAKE_LAUNCH_FILE=" + launchFile},
 		FilePath: file,
 		Pool:     pool,
 	})
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.Equal(t, 0, fakeLaunchCount(t, launchFile))
 
-	records := readLSPAuditRecords(t, auditDir)
-	require.NotEmpty(t, records)
-	assert.Equal(t, "atteler.lsp", records[0].Caller)
-	assert.Equal(t, "high", records[0].Autonomy)
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read LSP document")
+	assert.Contains(t, string(auditData), "permission.read.deny")
+}
+
+func TestServerPool_PermissionPolicyDeniesWorkspaceReadBeforeServerStart(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	launchFile := filepath.Join(t.TempDir(), "launches.log")
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	pool := newTestPool(t)
+	_, err := pool.WorkspaceSymbols(ctx, Options{
+		Command:  os.Args[0],
+		Env:      []string{"ATTELER_LSP_FAKE_SERVER=workspace", "ATTELER_LSP_FAKE_LAUNCH_FILE=" + launchFile},
+		RootPath: root,
+		Pool:     pool,
+	}, "answer")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.Equal(t, 0, fakeLaunchCount(t, launchFile))
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read LSP workspace")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestServerPool_CommandPolicyRunsBeforeHealthyReuse(t *testing.T) {
@@ -853,27 +882,6 @@ func fakeLaunchCount(t *testing.T, path string) int {
 	require.NoError(t, err)
 
 	return strings.Count(string(data), "start\n")
-}
-
-func readLSPAuditRecords(t *testing.T, auditDir string) []shell.AuditRecord {
-	t.Helper()
-
-	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
-	require.NoError(t, err)
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	records := make([]shell.AuditRecord, 0, len(lines))
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-
-		var record shell.AuditRecord
-		require.NoError(t, json.Unmarshal([]byte(line), &record))
-		records = append(records, record)
-	}
-
-	return records
 }
 
 func readFakeEvents(t *testing.T, path string) string {

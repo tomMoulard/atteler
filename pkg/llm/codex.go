@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 // codexChatGPTAPIBase is the base URL the codex CLI uses when authenticated
@@ -88,11 +89,16 @@ func NewCodexProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) 
 		return nil, fmt.Errorf("no Codex credentials found: %w (run `codex login`)", err)
 	}
 
+	models, err := codexModelsContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	return &CodexProvider{
 		client:  providerHTTPClient(cfg),
 		auth:    auth,
 		baseURL: configuredBaseURL("CODEX_BASE_URL", cfg.BaseURL, codexChatGPTAPIBase),
-		models:  codexModels(),
+		models:  models,
 	}, nil
 }
 
@@ -180,6 +186,10 @@ func (c *CodexProvider) HealthCheck(ctx context.Context) error {
 		return err
 	}
 
+	if err := authorizeProviderPermission(ctx, providerCodex, "check Codex credentials", "Codex auth", permission.OperationCredentialAccess); err != nil {
+		return err
+	}
+
 	emitActivity(ctx, events.Event{
 		Type: events.CommandExecute,
 		Metadata: map[string]string{
@@ -247,7 +257,7 @@ func (c *CodexProvider) ModelMetadata(model string) (ModelMetadata, bool) {
 		}
 	}
 
-	if slices.Contains(c.Models(), model) || model == codexConfiguredModel() {
+	if slices.Contains(c.Models(), model) {
 		return ModelMetadata{
 			ID:          model,
 			Provenance:  "user Codex config.toml model override; no Codex backend model-metadata endpoint exists for this auth mode",
@@ -319,12 +329,16 @@ func (c *CodexProvider) Complete(ctx context.Context, params CompleteParams) (*R
 		return nil, err
 	}
 
-	model, body, err := c.buildResponsesBody(ctx, params)
+	model, body, metadata, err := c.buildResponsesBody(params)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := c.doResponsesRequest(ctx, body)
+	resp, err := c.doResponsesRequest(ctx, body, commandActivityOnce(ctx, events.Event{
+		Type:     events.CommandExecute,
+		Model:    model,
+		Metadata: metadata,
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -341,20 +355,24 @@ func (c *CodexProvider) CompleteStream(ctx context.Context, params CompleteParam
 		return nil, err
 	}
 
-	model, body, err := c.buildResponsesBody(ctx, params)
+	model, body, metadata, err := c.buildResponsesBody(params)
 	if err != nil {
 		return nil, err
 	}
 
-	return c.doResponsesStream(ctx, body, model)
+	return c.doResponsesStream(ctx, body, model, commandActivityOnce(ctx, events.Event{
+		Type:     events.CommandExecute,
+		Model:    model,
+		Metadata: metadata,
+	}))
 }
 
-func (c *CodexProvider) buildResponsesBody(ctx context.Context, params CompleteParams) (model string, body []byte, err error) {
+func (c *CodexProvider) buildResponsesBody(params CompleteParams) (model string, body []byte, metadata map[string]string, err error) {
 	model = params.Model
 	if model == "" {
 		models := c.Models()
 		if len(models) == 0 {
-			return "", nil, errors.New("codex model not configured")
+			return "", nil, nil, errors.New("codex model not configured")
 		}
 
 		model = models[0]
@@ -364,22 +382,22 @@ func (c *CodexProvider) buildResponsesBody(ctx context.Context, params CompleteP
 
 	preparedParams, adjustments, err := prepareCompleteParamsForProvider(providerCodex, params)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	params = preparedParams
 
 	req, err := buildCodexResponsesRequest(params)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	body, err = json.Marshal(req)
 	if err != nil {
-		return "", nil, fmt.Errorf("codex marshal: %w", err)
+		return "", nil, nil, fmt.Errorf("codex marshal: %w", err)
 	}
 
-	metadata := map[string]string{
+	metadata = map[string]string{
 		"command":  "codex.responses",
 		"provider": providerCodex,
 	}
@@ -395,13 +413,7 @@ func (c *CodexProvider) buildResponsesBody(ctx context.Context, params CompleteP
 		metadata["option_adjustments"] = formatCompleteParamAdjustments(adjustments)
 	}
 
-	emitActivity(ctx, events.Event{
-		Type:     events.CommandExecute,
-		Model:    model,
-		Metadata: metadata,
-	})
-
-	return model, body, nil
+	return model, body, metadata, nil
 }
 
 func buildCodexResponsesRequest(params CompleteParams) (codexResponsesRequest, error) {
@@ -473,10 +485,10 @@ func buildCodexResponseFormat(format *ResponseFormat) (*codexResponseFormat, err
 	}
 }
 
-func (c *CodexProvider) doResponsesRequest(ctx context.Context, body []byte) (*Response, error) {
+func (c *CodexProvider) doResponsesRequest(ctx context.Context, body []byte, startCallback func()) (*Response, error) {
 	access, accountID := c.auth.snapshot()
 
-	resp, err := c.sendResponses(ctx, body, access, accountID)
+	resp, err := c.sendResponses(ctx, body, access, accountID, startCallback)
 	if err == nil {
 		return resp, nil
 	}
@@ -492,7 +504,7 @@ func (c *CodexProvider) doResponsesRequest(ctx context.Context, body []byte) (*R
 
 	access, accountID = c.auth.snapshot()
 
-	resp, err = c.sendResponses(ctx, body, access, accountID)
+	resp, err = c.sendResponses(ctx, body, access, accountID, startCallback)
 	if err != nil {
 		return nil, err
 	}
@@ -500,12 +512,12 @@ func (c *CodexProvider) doResponsesRequest(ctx context.Context, body []byte) (*R
 	return resp, nil
 }
 
-func (c *CodexProvider) doResponsesStream(ctx context.Context, body []byte, model string) (<-chan Chunk, error) {
+func (c *CodexProvider) doResponsesStream(ctx context.Context, body []byte, model string, startCallback func()) (<-chan Chunk, error) {
 	access, accountID := c.auth.snapshot()
 
 	startedAt := time.Now()
 
-	bodyStream, err := c.sendResponsesStream(ctx, body, access, accountID)
+	bodyStream, err := c.sendResponsesStream(ctx, body, access, accountID, startCallback)
 	if err == nil {
 		return streamCodexResponseBody(ctx, bodyStream, model, startedAt, time.Now), nil
 	}
@@ -523,7 +535,7 @@ func (c *CodexProvider) doResponsesStream(ctx context.Context, body []byte, mode
 
 	startedAt = time.Now()
 
-	bodyStream, err = c.sendResponsesStream(ctx, body, access, accountID)
+	bodyStream, err = c.sendResponsesStream(ctx, body, access, accountID, startCallback)
 	if err != nil {
 		return nil, err
 	}
@@ -543,10 +555,10 @@ func (e *codexUnauthorizedError) Unwrap() error {
 	return e.err
 }
 
-func (c *CodexProvider) sendResponses(ctx context.Context, body []byte, access, accountID string) (*Response, error) {
+func (c *CodexProvider) sendResponses(ctx context.Context, body []byte, access, accountID string, startCallback func()) (*Response, error) {
 	startedAt := time.Now()
 
-	bodyStream, err := c.sendResponsesStream(ctx, body, access, accountID)
+	bodyStream, err := c.sendResponsesStream(ctx, body, access, accountID, startCallback)
 	if err != nil {
 		return nil, err
 	}
@@ -555,7 +567,11 @@ func (c *CodexProvider) sendResponses(ctx context.Context, body []byte, access, 
 	return parseCodexSSEWithClock(ctx, bodyStream, startedAt, time.Now)
 }
 
-func (c *CodexProvider) sendResponsesStream(ctx context.Context, body []byte, access, accountID string) (io.ReadCloser, error) {
+func (c *CodexProvider) sendResponsesStream(ctx context.Context, body []byte, access, accountID string, startCallback func()) (io.ReadCloser, error) {
+	if err := authorizeProviderPermission(ctx, providerCodex, "call Codex responses", c.baseURL+"/responses", permission.OperationNetwork, permission.OperationCredentialAccess); err != nil {
+		return nil, err
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/responses", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("codex new request: %w", err)
@@ -571,6 +587,10 @@ func (c *CodexProvider) sendResponsesStream(ctx context.Context, body []byte, ac
 
 	httpReq.Header.Set("OpenAI-Beta", "responses=experimental")
 	httpReq.Header.Set("originator", codexOriginatorHeader)
+
+	if startCallback != nil {
+		startCallback()
+	}
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
@@ -1237,13 +1257,19 @@ func codexBuildTools(tools []ToolDefinition) []codexTool {
 	return out
 }
 
-func codexModels() []string {
+func codexModelsContext(ctx context.Context) ([]string, error) {
 	models := defaultCodexModels()
-	if model := codexConfiguredModel(); model != "" {
+
+	model, err := codexConfiguredModelContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if model != "" {
 		models = append([]string{model}, models...)
 	}
 
-	return dedupeStrings(models)
+	return dedupeStrings(models), nil
 }
 
 func defaultCodexModels() []string {
@@ -1315,10 +1341,38 @@ func codexAdapterContract() AdapterContract {
 	}
 }
 
-func codexConfiguredModel() string {
-	data, err := os.ReadFile(filepath.Join(codexConfigDir(), "config.toml"))
+func codexConfiguredModelContext(ctx context.Context) (string, error) {
+	configPath := filepath.Join(codexConfigDir(), "config.toml")
+	if policyErr := authorizeProviderPermission(
+		ctx,
+		providerCodex,
+		"read Codex config",
+		configPath,
+		permission.OperationRead,
+	); policyErr != nil {
+		return "", policyErr
+	}
+
+	model, err := readCodexConfiguredModelFile(configPath)
 	if err != nil {
-		return ""
+		return "", optionalCodexConfigError(err)
+	}
+
+	return model, nil
+}
+
+func optionalCodexConfigError(err error) error {
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	return err
+}
+
+func readCodexConfiguredModelFile(configPath string) (string, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", fmt.Errorf("read Codex config %s: %w", configPath, err)
 	}
 
 	for line := range strings.SplitSeq(string(data), "\n") {
@@ -1332,10 +1386,10 @@ func codexConfiguredModel() string {
 			continue
 		}
 
-		return strings.Trim(strings.TrimSpace(value), `"'`)
+		return strings.Trim(strings.TrimSpace(value), `"'`), nil
 	}
 
-	return ""
+	return "", nil
 }
 
 func codexConfigDir() string {

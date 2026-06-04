@@ -213,6 +213,7 @@ type Ledger struct {
 // CommandOptions controls AttelerCommand invocations.
 type CommandOptions struct {
 	Env            map[string]string
+	StartCallback  func()
 	Binary         string
 	Dir            string
 	Autonomy       string
@@ -426,13 +427,14 @@ func AttelerCommandDetailedWithOptions(opts CommandOptions) DetailedRunner {
 		}
 
 		cmd, invocation, err := shell.CommandContext(cmdCtx, shell.CommandOptions{
-			Program: binary,
-			Args:    args,
-			Dir:     opts.Dir,
-			EnvList: childEnv(opts.Env, request, opts.Autonomy),
-			Mode:    shell.ModeCaptured,
-			Stdout:  stdoutWriter,
-			Stderr:  stderrWriter,
+			Program:       binary,
+			Args:          args,
+			Dir:           opts.Dir,
+			EnvList:       childEnv(opts.Env, request, opts.Autonomy),
+			Mode:          shell.ModeCaptured,
+			Stdout:        stdoutWriter,
+			Stderr:        stderrWriter,
+			StartCallback: opts.StartCallback,
 			Audit: shell.AuditContext{
 				Caller:   "atteler.subagent",
 				Autonomy: strings.TrimSpace(opts.Autonomy),

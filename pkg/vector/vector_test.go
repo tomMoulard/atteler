@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 )
@@ -2677,6 +2679,30 @@ func TestEmbeddingVectorizer_PropagatesInFlightCancellation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("VectorizeContext did not return after context cancellation")
 	}
+}
+
+func TestEmbeddingVectorizer_PermissionPolicyDeniesNetworkBeforeRequest(t *testing.T) {
+	t.Parallel()
+
+	called := atomic.Bool{}
+	client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		called.Store(true)
+
+		return nil, errors.New("unexpected embedding request")
+	})}
+	vectorizer := NewEmbeddingVectorizer(
+		WithEmbeddingBaseURL("http://embedding.test"),
+		WithEmbeddingHTTPClient(client),
+	)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	_, err := vectorizer.VectorizeContext(ctx, "blocked")
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.False(t, called.Load(), "network-denied embedding requests must not reach the HTTP client")
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

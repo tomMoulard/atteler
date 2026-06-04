@@ -21,6 +21,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/modelroute"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
@@ -46,6 +47,7 @@ type runOnceExecutionOptions struct {
 	SkillLearningStoreDir       string
 	SkillLearningSkillDir       string
 	VectorConfig                appconfig.VectorConfig
+	PermissionPolicy            *permission.Policy
 	Response                    responseRecordOptions
 	AgentLoopBudget             llm.AgentLoopBudget
 	Autonomy                    autonomy.Level
@@ -116,9 +118,13 @@ type responseRecordPayload struct {
 	OutputTokens          int    `json:"output_tokens,omitempty"`
 }
 
-func saveRecordedResponse(path string, params llm.CompleteParams, fallbackModels []string, resp *llm.Response) error {
+func saveRecordedResponse(ctx context.Context, path string, params llm.CompleteParams, fallbackModels []string, resp *llm.Response) error {
 	if strings.TrimSpace(path) == "" || resp == nil {
 		return nil
+	}
+
+	if err := authorizeWritePermission(ctx, "record one-shot response", "atteler.eval.record_response", path); err != nil {
+		return fmt.Errorf("record response: %w", err)
 	}
 
 	record := responseRecordFile{
@@ -179,7 +185,11 @@ func cloneResponseFormat(format *llm.ResponseFormat) *llm.ResponseFormat {
 	return &clone
 }
 
-func loadRecordedResponse(path string) (*llm.Response, error) {
+func loadRecordedResponse(ctx context.Context, path string) (*llm.Response, error) {
+	if err := authorizeReadPermission(ctx, "replay one-shot response", "atteler.eval.replay_response", path); err != nil {
+		return nil, fmt.Errorf("replay response: %w", err)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("replay response: read %s: %w", path, err)
@@ -270,6 +280,7 @@ func runOnce(
 }
 
 func prepareRunOnceExecutionOptions(
+	ctx context.Context,
 	store *session.Store,
 	options runOnceExecutionOptions,
 	sessionState session.Session,
@@ -284,14 +295,14 @@ func prepareRunOnceExecutionOptions(
 	modelMode := headlessPreflightModelMode(generationDefaults, generationOverrides, selectedAgent, agents)
 
 	if err := validateRunOnceAutonomyOptions(options); err != nil {
-		recordHeadlessPreflightFailure(store, options, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
+		recordHeadlessPreflightFailure(ctx, store, options, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
 
 		return options, "", err
 	}
 
 	outputFormat, err := normalizeOutputFormat(options.OutputFormat)
 	if err != nil {
-		recordHeadlessPreflightFailure(store, options, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
+		recordHeadlessPreflightFailure(ctx, store, options, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
 
 		return options, "", err
 	}
@@ -322,6 +333,7 @@ func runOnceWithOptions(
 	prompt string,
 ) error {
 	executionOptions, outputFormat, err := prepareRunOnceExecutionOptions(
+		ctx,
 		store,
 		executionOptions,
 		sessionState,
@@ -333,6 +345,18 @@ func runOnceWithOptions(
 		generationOverrides,
 	)
 	if err != nil {
+		recordHeadlessPreflightFailure(
+			ctx,
+			store,
+			executionOptions,
+			sessionState,
+			prompt,
+			selectedModel,
+			headlessPreflightModelMode(generationDefaults, generationOverrides, selectedAgent, agents),
+			selectedAgent,
+			err,
+		)
+
 		return err
 	}
 
@@ -362,7 +386,7 @@ func runOnceWithOptions(
 			modelMode = headlessPreflightModelMode(generationDefaults, generationOverrides, selectedAgent, agents)
 		}
 
-		recordHeadlessPreflightFailure(store, executionOptions, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
+		recordHeadlessPreflightFailure(ctx, store, executionOptions, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
 		emitRouteDecisionWarning(
 			ctx,
 			hooks,
@@ -473,8 +497,10 @@ func runOnceWithOptions(
 		Agent:       prepared.activeAgent.name,
 		Model:       prepared.requestModel,
 	})
+	ctx = contextWithPermissionAuditMetadata(ctx, store, sessionState, prepared.activeAgent.name, prepared.requestModel)
 
 	headlessRun, err := startHeadlessRun(
+		ctx,
 		store,
 		executionOptions,
 		sessionState,
@@ -537,6 +563,8 @@ func runOnceWithOptions(
 		executionOptions.Autonomy,
 		executionOptions.AgentLoopCheckpointInterval,
 		executionOptions.Response,
+		executionOptions.PermissionPolicy,
+		!executionOptions.Headless,
 		checkpointPath,
 		agentLoopPreflight,
 		attshell.AuditContext{
@@ -695,6 +723,7 @@ func handleRunOncePrepareError(
 	emitHookWarning(ctx, hooks, manifestEvent)
 
 	headlessRun, headlessErr := startHeadlessRun(
+		ctx,
 		store,
 		executionOptions,
 		sessionState,
@@ -867,6 +896,10 @@ func saveRunOnceUserMessage(
 	sessionState *session.Session,
 	prepared runOncePrepared,
 ) error {
+	if err := authorizeSessionStoreWrite(ctx, store, *sessionState, "save user session message"); err != nil {
+		return fmt.Errorf("save session before request: %w", err)
+	}
+
 	sessionState.Append(llm.RoleUser, prepared.prompt)
 
 	if sessionPersistenceAllowed(*sessionState) {
@@ -932,6 +965,10 @@ func saveRunOnceAssistantResponse(
 	agentName string,
 	resp *llm.Response,
 ) error {
+	if err := authorizeSessionStoreWrite(ctx, store, *sessionState, "save assistant session response"); err != nil {
+		return fmt.Errorf("save session after response: %w", err)
+	}
+
 	sessionState.Append(llm.RoleAssistant, resp.Content)
 
 	if resp.Model != "" {
@@ -983,6 +1020,7 @@ func validateRunOnceAutonomyOptions(options runOnceExecutionOptions) error {
 }
 
 func recordHeadlessPreflightFailure(
+	ctx context.Context,
 	store *session.Store,
 	options runOnceExecutionOptions,
 	sessionState session.Session,
@@ -996,11 +1034,7 @@ func recordHeadlessPreflightFailure(
 		return
 	}
 
-	if !autonomy.Normalize(options.Autonomy).Allows(autonomy.ActionFileWrite) {
-		return
-	}
-
-	run, err := startHeadlessRun(store, options, sessionState, prompt, modelName, modelMode, agentName)
+	run, err := startHeadlessRun(ctx, store, options, sessionState, prompt, modelName, modelMode, agentName)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 
@@ -1146,6 +1180,7 @@ func startHeadlessHeartbeat(ctx context.Context, store *session.Store, run *sess
 }
 
 func startHeadlessRun(
+	ctx context.Context,
 	store *session.Store,
 	options runOnceExecutionOptions,
 	sessionState session.Session,
@@ -1170,6 +1205,10 @@ func startHeadlessRun(
 	id := options.HeadlessID
 	if id == "" {
 		id = session.New("", nil).ID
+	}
+
+	if err := authorizeHeadlessPermission(ctx, "start headless run", store, id, permission.OperationWrite); err != nil {
+		return nil, fmt.Errorf("start headless run: %w", err)
 	}
 
 	run := session.HeadlessRun{
@@ -1632,6 +1671,8 @@ func runOnceComplete(
 	agentLoopBudget llm.AgentLoopBudget,
 	agentLoopCheckpointInterval int,
 	responseOptions responseRecordOptions,
+	permissionPolicy *permission.Policy,
+	allowPermissionPrompt bool,
 	checkpointPath string,
 	beforeModelCall func(iteration int, params llm.CompleteParams) error,
 	audit attshell.AuditContext,
@@ -1645,6 +1686,8 @@ func runOnceComplete(
 		autonomy.DefaultLevel,
 		agentLoopCheckpointInterval,
 		responseOptions,
+		permissionPolicy,
+		allowPermissionPrompt,
 		checkpointPath,
 		beforeModelCall,
 		audit,
@@ -1660,12 +1703,21 @@ func runOnceCompleteWithAutonomy(
 	autonomyLevel autonomy.Level,
 	agentLoopCheckpointInterval int,
 	responseOptions responseRecordOptions,
+	permissionPolicy *permission.Policy,
+	allowPermissionPrompt bool,
 	checkpointPath string,
 	beforeModelCall func(iteration int, params llm.CompleteParams) error,
 	audit attshell.AuditContext,
 ) (*llm.Response, error) {
+	autonomyLevel = autonomy.Normalize(autonomyLevel)
+
+	ctx = permission.ContextWithPolicy(ctx, permissionPolicy)
+	if permissionPolicy != nil && allowPermissionPrompt {
+		ctx = permission.ContextWithConfirmer(ctx, confirmPermissionStdin)
+	}
+
 	if responseOptions.ReplayPath != "" {
-		resp, err := loadRecordedResponse(responseOptions.ReplayPath)
+		resp, err := loadRecordedResponse(ctx, responseOptions.ReplayPath)
 		if err != nil {
 			return nil, err
 		}
@@ -1674,7 +1726,7 @@ func runOnceCompleteWithAutonomy(
 			return nil, err
 		}
 
-		if err := saveRecordedResponse(responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
+		if err := saveRecordedResponse(ctx, responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
 			return nil, err
 		}
 
@@ -1686,7 +1738,7 @@ func runOnceCompleteWithAutonomy(
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
-	executor := newBashExecutor(cwd, os.Stderr, audit)
+	executor := newBashExecutor(cwd, os.Stderr, audit, permissionPolicy)
 
 	costEstimator, err := agentLoopCostEstimatorForBudget(reg, params.Model, fallbackModels, agentLoopBudget)
 	if err != nil {
@@ -1708,7 +1760,7 @@ func runOnceCompleteWithAutonomy(
 		return nil, agentLoopError(err, checkpointPath)
 	}
 
-	if err := saveRecordedResponse(responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
+	if err := saveRecordedResponse(ctx, responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
 		return nil, err
 	}
 
@@ -1948,13 +2000,36 @@ func confirmToolCallStdin(_ context.Context, call llm.ToolCall, decision llm.Too
 	return answer == "y" || answer == affirmativeYes
 }
 
+func confirmPermissionStdin(_ context.Context, request permission.Request, decision permission.Decision) bool {
+	action := strings.TrimSpace(request.Action)
+	if action == "" {
+		action = strings.TrimSpace(decision.Reason)
+	}
+
+	fmt.Fprintf(
+		os.Stderr,
+		"\nPermission policy requires confirmation (%s, policy: %s): %s\n%s\nAllow? [y/N] ",
+		decision.Rule,
+		permissionPromptPolicy(decision),
+		decision.Reason,
+		action,
+	)
+
+	var answer string
+	if _, err := fmt.Scanln(&answer); err != nil {
+		return false
+	}
+
+	answer = strings.TrimSpace(strings.ToLower(answer))
+
+	return answer == "y" || answer == affirmativeYes
+}
+
 // newBashExecutor creates a ToolExecutor that runs bash commands in the given
 // working directory, logging output to the provided writer.
-func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) llm.ToolExecutor {
+func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext, permissionPolicy *permission.Policy) llm.ToolExecutor {
 	if strings.TrimSpace(audit.Autonomy) == "" {
 		audit.Autonomy = autonomy.DefaultLevel.String()
-	} else {
-		audit.Autonomy = autonomy.Normalize(autonomy.Level(audit.Autonomy)).String()
 	}
 
 	return func(ctx context.Context, call llm.ToolCall) llm.ToolResult {
@@ -1975,7 +2050,7 @@ func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) ll
 			}
 		}
 
-		emitFromContextWarning(ctx, events.Event{
+		commandEvent := events.Event{
 			Type:    events.CommandExecute,
 			Content: command,
 			Metadata: map[string]string{
@@ -1986,7 +2061,7 @@ func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) ll
 				"tool_call_id": call.ID,
 				"autonomy":     audit.Autonomy,
 			},
-		})
+		}
 
 		if logw != nil {
 			fmt.Fprintln(logw, dimStyle.Render("  $ "+command))
@@ -1998,6 +2073,10 @@ func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext) ll
 			Timeout:        5 * time.Minute,
 			MaxOutputBytes: agentLoopToolOutputLimit(ctx),
 			Audit:          audit,
+			Permission:     permissionPolicy,
+			StartCallback: func() {
+				emitFromContextWarning(ctx, commandEvent)
+			},
 			OutputCallback: func(chunk attshell.OutputChunk) {
 				if logw != nil {
 					fmt.Fprint(logw, dimStyle.Render(string(chunk.Data)))

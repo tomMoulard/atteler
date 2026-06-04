@@ -11,6 +11,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/worktree"
@@ -397,6 +398,7 @@ type cliOptions struct {
 	artifactSummary                    string
 	recordResponsePath                 string
 	replayResponsePath                 string
+	permissionMode                     string
 	watchBaselinePath                  string
 	watchBaselineRef                   string
 	watchRulesPath                     string
@@ -423,6 +425,8 @@ type cliOptions struct {
 	spawnAgentSpecs                    rawStringListFlag
 	speculateAgents                    stringListFlag
 	speculateGates                     stringListFlag
+	allowOperations                    stringListFlag
+	denyOperations                     stringListFlag
 	memoryIndexFiles                   stringListFlag
 	vectorIndexFiles                   stringListFlag
 	maxTokens                          positiveIntFlag
@@ -607,6 +611,7 @@ type appState struct {
 	providerReadiness            llm.ProviderReadinessReport
 	worktreeInfo                 *worktree.Info
 	pluginPolicy                 *attelerplugin.Policy
+	permissionPolicy             *permission.Policy
 	promptContextCache           *promptContextCache
 	fallbackModels               []string
 	pluginPaths                  []string

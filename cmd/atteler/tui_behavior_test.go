@@ -726,7 +726,7 @@ func TestCompletionCandidates_AgentAndPath(t *testing.T) {
 		"reviewer": {Description: "reviews code"},
 	})
 
-	items, ok := completionCandidates("Ask @rev", registry, dir, 8)
+	items, ok := completionCandidates(t.Context(), "Ask @rev", registry, dir)
 	if !ok {
 		require.FailNow(t, "expected active completion token")
 	}
@@ -739,7 +739,7 @@ func TestCompletionCandidates_AgentAndPath(t *testing.T) {
 		require.Failf(t, "unexpected completion", "got %q", got)
 	}
 
-	items, ok = completionCandidates("Read @REA", registry, dir, 8)
+	items, ok = completionCandidates(t.Context(), "Read @REA", registry, dir)
 	if !ok {
 		require.FailNow(t, "expected path completion token")
 	}
@@ -774,7 +774,7 @@ func TestPromptHistoryFromStore_LoadsNewestUserPrompts(t *testing.T) {
 		{Role: llm.RoleUser, Content: "current prompt"},
 	})
 
-	got := promptHistoryFromStore(store, current, 4)
+	got := promptHistoryFromStore(t.Context(), store, current, 4)
 
 	assert.Equal(t, []string{"current prompt", "duplicate prompt", "older prompt"}, got)
 }
@@ -2456,6 +2456,7 @@ func TestInitialModelHonorsPersistedIdleSuggestionBudgetUsage(t *testing.T) {
 		false,
 		promptSuggestionConsentSession,
 		defaultIdleSuggestionBudget(),
+		nil,
 		nil,
 		nil,
 	)

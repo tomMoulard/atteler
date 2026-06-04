@@ -423,6 +423,745 @@ func TestRunBash_CommandDenyRuleInspectsShellCommandString(t *testing.T) {
 	require.Contains(t, records[0].DecisionReason, "touch")
 }
 
+func TestRunBash_PermissionPolicyDeniesWriteBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.ReadOnlyPolicy()
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "touch denied-by-permission",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit: AuditContext{
+			AuditDir:    auditDir,
+			SessionID:   "session-shell-denied",
+			SessionPath: filepath.Join(tmp, "session.json"),
+		},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.NoFileExists(t, filepath.Join(tmp, "denied-by-permission"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.write.deny", records[0].DecisionRule)
+	require.Equal(t, "read-only", records[0].PermissionPolicy)
+	require.Equal(t, "permission.write.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationWrite))
+
+	sideEffects := readPermissionSideEffectRecords(t, auditDir)
+	require.Len(t, sideEffects, 1)
+	require.Equal(t, "denied", sideEffects[0]["decision"])
+	require.Equal(t, "permission.write.deny", sideEffects[0]["rule"])
+	require.Equal(t, "session-shell-denied", sideEffects[0]["session_id"])
+}
+
+func TestRunBash_UsesPermissionPolicyFromContext(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	_, err := RunBash(ctx, Options{
+		Command: "touch denied-by-context-policy",
+		Dir:     tmp,
+		Audit:   AuditContext{AuditDir: filepath.Join(tmp, "audit")},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	require.NoFileExists(t, filepath.Join(tmp, "denied-by-context-policy"))
+}
+
+func TestRunBash_PermissionPolicyDeniesShellExecutionBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "printf denied",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.execute.deny", records[0].DecisionRule)
+	require.Equal(t, "permission.execute.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationExecute))
+}
+
+func TestRunBash_PermissionPolicyDeniesCredentialEnvironmentBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    `printf "%s" "$OPENAI_API_KEY"`,
+		Env:        map[string]string{"OPENAI_API_KEY": "sk-denied"},
+		Permission: &policy,
+		Policy:     &Policy{AllowCredentialEnv: []string{"OPENAI_API_KEY"}},
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.credential_access.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationCredentialAccess))
+}
+
+func TestRunBash_PermissionPolicyDeniesSudoCredentialAccessBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "sudo true",
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.credential_access.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationCredentialAccess))
+}
+
+func TestRunBash_PermissionPolicyDeniesSecurityCredentialAccessBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	started := false
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "security find-generic-password -s Claude",
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+		StartCallback: func() {
+			started = true
+		},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.False(t, started)
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.credential_access.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationCredentialAccess))
+}
+
+func TestRunBash_PermissionPolicyDeniesNetworkHiddenBehindAssignment(t *testing.T) {
+	t.Parallel()
+
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "API_TOKEN=secret curl https://example.invalid",
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.network.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationNetwork))
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationCredentialAccess))
+}
+
+func TestRunBash_PermissionPolicyDeniesNetworkWithAttachedRedirection(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "curl https://example.invalid>network-output",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	require.NoFileExists(t, filepath.Join(tmp, "network-output"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.network.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationNetwork))
+}
+
+func TestRunBash_PermissionPolicyDeniesCurlOutputFlagWriteBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "curl -o network-output https://example.invalid",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	require.NoFileExists(t, filepath.Join(tmp, "network-output"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.write.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationWrite))
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationNetwork))
+}
+
+func TestRunBash_PermissionPolicyDeniesLeadingRedirectionNetworkBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "2>network-stderr curl https://example.invalid",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	require.NoFileExists(t, filepath.Join(tmp, "network-stderr"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.network.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationNetwork))
+}
+
+func TestRunBash_PermissionPolicyDeniesGitHubCLIAsNetworkBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "gh api user > gh-output",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	require.NoFileExists(t, filepath.Join(tmp, "gh-output"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.network.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationNetwork))
+}
+
+func TestRunBash_PermissionPolicyDeniesWriteHiddenBehindAssignmentShellWrapper(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "MODE=test bash -lc 'touch denied-through-wrapper'",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.NoFileExists(t, filepath.Join(tmp, "denied-through-wrapper"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.write.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationWrite))
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationExecute))
+}
+
+func TestRunBash_PermissionPolicyDeniesWriteHiddenBehindEvalBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "eval 'touch denied-through-eval'",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.NoFileExists(t, filepath.Join(tmp, "denied-through-eval"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.write.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationWrite))
+}
+
+func TestRunBash_PermissionPolicyDeniesWriteAfterReadInShellWrapper(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "data.txt"), []byte("inspected"), 0o600))
+
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "bash -lc 'cat data.txt; touch denied-after-read'",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.NoFileExists(t, filepath.Join(tmp, "denied-after-read"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.write.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationRead))
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationWrite))
+}
+
+func TestRunBash_PermissionPolicyDeniesCredentialVariableReferenceBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    `printf attempted > marker; printf "%s" "$OPENAI_API_KEY"`,
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.NoFileExists(t, filepath.Join(tmp, "marker"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.credential_access.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationCredentialAccess))
+}
+
+func TestRunBash_PermissionPolicyDeniesCredentialFileReadBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, ".env"), []byte("OPENAI_API_KEY=sk-denied"), 0o600))
+
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "cat .env",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.credential_access.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationCredentialAccess))
+}
+
+func TestRunBash_PermissionPolicyDeniesCredentialOutputRedirectionBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "printf safe>.env",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	require.NoFileExists(t, filepath.Join(tmp, ".env"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.credential_access.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationCredentialAccess))
+}
+
+func TestRunBash_PermissionPolicyDeniesInputRedirectionReadBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "README.md"), []byte("private input\n"), 0o600))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "custom-helper < README.md",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.read.deny", records[0].DecisionRule)
+	require.Equal(t, "permission.read.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationRead))
+}
+
+func TestRunBash_PermissionPolicyDeniesBacktickWriteBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.ReadOnlyPolicy()
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "printf before `touch denied-by-backtick-policy`",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.NoFileExists(t, filepath.Join(tmp, "denied-by-backtick-policy"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.write.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationWrite))
+}
+
+func TestRunBash_PermissionPolicyDeniesDollarSubstitutionWriteBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.ReadOnlyPolicy()
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    `printf "%s" "$(touch denied-by-dollar-substitution-policy)"`,
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.NoFileExists(t, filepath.Join(tmp, "denied-by-dollar-substitution-policy"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.write.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationWrite))
+}
+
+func TestRunBash_PermissionPolicyAllowsReadOnlyInspection(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "data.txt"), []byte("inspected"), 0o600))
+
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.ReadOnlyPolicy()
+
+	result, err := RunBash(context.Background(), Options{
+		Command:    "cat data.txt",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "inspected", result.Stdout)
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 2)
+	require.Equal(t, "allowed", records[0].Decision)
+	require.Equal(t, "read-only", records[0].PermissionPolicy)
+	require.Equal(t, "permission.read.allow", records[0].PermissionRule)
+	require.Contains(t, records[0].PermissionReason, "allowed")
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationRead))
+}
+
+func TestRunBash_ReadOnlyPolicyAllowsQuotedRedirectionLiteral(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.ReadOnlyPolicy()
+
+	result, err := RunBash(context.Background(), Options{
+		Command:    "printf '%s' 'a>b'",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "a>b", result.Stdout)
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 2)
+	require.Equal(t, "allowed", records[0].Decision)
+	require.Equal(t, "permission.read.allow", records[0].PermissionRule)
+	require.NotContains(t, records[0].OperationKinds, string(permission.OperationWrite))
+}
+
+func TestRunBash_ReadOnlyPolicyAllowsFileDescriptorDuplication(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.ReadOnlyPolicy()
+
+	result, err := RunBash(context.Background(), Options{
+		Command:    "printf '%s' ok 2>&1",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "ok", result.Stdout)
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 2)
+	require.Equal(t, "allowed", records[0].Decision)
+	require.Equal(t, "permission.read.allow", records[0].PermissionRule)
+	require.NotContains(t, records[0].OperationKinds, string(permission.OperationWrite))
+}
+
+func TestRunBash_ReadOnlyPolicyDeniesFindExecNetworkBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.ReadOnlyPolicy()
+	started := false
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "find . -name '*.txt' -exec curl https://example.com/{} ;",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+		StartCallback: func() {
+			started = true
+		},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.False(t, started)
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.network.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationNetwork))
+}
+
+func TestRunBash_ReadOnlyPolicyDeniesUnknownCommandAfterReadBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "data.txt"), []byte("inspected"), 0o600))
+
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.ReadOnlyPolicy()
+	started := false
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "cat data.txt && custom-tool --version",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+		StartCallback: func() {
+			started = true
+		},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.False(t, started)
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.execute.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationRead))
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationExecute))
+}
+
+func TestRunBash_DefaultAuditDirUsesSessionPath(t *testing.T) {
+	t.Setenv(EnvAuditDir, "")
+
+	tmp := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "data.txt"), []byte("inspected"), 0o600))
+
+	sessionPath := filepath.Join(tmp, "session.json")
+	auditDir := sessionAuditDirFromPath(sessionPath, "session-audit")
+	policy := permission.ReadOnlyPolicy()
+
+	result, err := RunBash(context.Background(), Options{
+		Command:    "cat data.txt",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit: AuditContext{
+			SessionID:   "session-audit",
+			SessionPath: sessionPath,
+		},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "inspected", result.Stdout)
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 2)
+	require.Equal(t, "session-audit", records[0].SessionID)
+	require.Equal(t, sessionPath, records[0].SessionPath)
+
+	sideEffects := readPermissionSideEffectRecords(t, auditDir)
+	require.Len(t, sideEffects, 1)
+	require.Equal(t, "allowed", sideEffects[0]["decision"])
+	require.Equal(t, "session-audit", sideEffects[0]["session_id"])
+}
+
+func TestRunBash_UsesPermissionContextAuditDirWhenAuditContextOmitsSessionPath(t *testing.T) {
+	t.Setenv(EnvAuditDir, "")
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "session-audit")
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "data.txt"), []byte("inspected"), 0o600))
+
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+	ctx = permission.ContextWithPolicy(ctx, &policy)
+	ctx = permission.ContextWithAuditMetadata(ctx, map[string]string{
+		"session_id":       "session-context",
+		"session_path":     filepath.Join(tmp, "session.json"),
+		"issue_id":         "8",
+		"issue_identifier": "GH-8",
+	})
+
+	result, err := RunBash(ctx, Options{
+		Command:    "cat data.txt",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{Caller: "test-context-audit"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "inspected", result.Stdout)
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 2)
+	require.Equal(t, "test-context-audit", records[0].Caller)
+	require.Equal(t, "session-context", records[0].SessionID)
+	require.Equal(t, filepath.Join(tmp, "session.json"), records[0].SessionPath)
+	require.Equal(t, "8", records[0].IssueID)
+	require.Equal(t, "GH-8", records[0].IssueIdentifier)
+	require.Equal(t, "session-context", records[1].SessionID)
+
+	sideEffects := readPermissionSideEffectRecords(t, auditDir)
+	require.Len(t, sideEffects, 1)
+	require.Equal(t, "allowed", sideEffects[0]["decision"])
+	require.Equal(t, "session-context", sideEffects[0]["session_id"])
+}
+
 func TestRunBash_CommandDenyRuleInspectsCommandWithAttachedRedirection(t *testing.T) {
 	t.Parallel()
 
@@ -884,6 +1623,177 @@ func TestRunBash_DeniesNetworkCommandBeforeStart(t *testing.T) {
 	require.Equal(t, "network.deny", records[0].DecisionRule)
 }
 
+func TestRunBash_PermissionPolicyDeniesCredentialBackedNetworkCLIBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command string
+		output  string
+	}{
+		{name: "github cli", command: "gh api user > gh-output", output: "gh-output"},
+		{name: "gcloud cli", command: "gcloud logging read projects/example/logs/app > gcloud-output", output: "gcloud-output"},
+		{name: "aws cli", command: "aws sts get-caller-identity > aws-output", output: "aws-output"},
+		{name: "azure cli", command: "az account show > az-output", output: "az-output"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmp := t.TempDir()
+			auditDir := filepath.Join(tmp, "audit")
+			policy := permission.DefaultPolicy()
+			policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+			_, err := RunBash(context.Background(), Options{
+				Command:    tt.command,
+				Dir:        tmp,
+				Permission: &policy,
+				Audit:      AuditContext{AuditDir: auditDir},
+			})
+
+			require.Error(t, err)
+			require.True(t, permission.ErrDenied(err))
+			require.NoFileExists(t, filepath.Join(tmp, tt.output))
+
+			records := readAuditRecords(t, auditDir)
+			require.Len(t, records, 1)
+			require.Equal(t, "denied", records[0].Decision)
+			require.Equal(t, "permission.credential_access.deny", records[0].PermissionRule)
+			require.Contains(t, records[0].OperationKinds, string(permission.OperationNetwork))
+			require.Contains(t, records[0].OperationKinds, string(permission.OperationCredentialAccess))
+		})
+	}
+}
+
+func TestRunBash_PermissionPolicyDeniesGitNetworkCredentialAccessBeforeProcessStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	_, err := RunBash(context.Background(), Options{
+		Command:    "git fetch origin > git-output",
+		Dir:        tmp,
+		Permission: &policy,
+		Audit:      AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	require.NoFileExists(t, filepath.Join(tmp, "git-output"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "denied", records[0].Decision)
+	require.Equal(t, "permission.credential_access.deny", records[0].PermissionRule)
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationNetwork))
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationCredentialAccess))
+	require.Contains(t, records[0].OperationKinds, string(permission.OperationGitMutation))
+}
+
+func TestRunBash_DeniesNetworkCommandAliasesBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{name: "gitlab cli", command: `glab --version; touch network-alias-started`},
+		{name: "hub cli", command: `hub version; touch network-alias-started`},
+		{name: "dig", command: `dig example.invalid; touch network-alias-started`},
+		{name: "nslookup", command: `nslookup example.invalid; touch network-alias-started`},
+		{name: "ping", command: `ping -c 1 127.0.0.1; touch network-alias-started`},
+		{name: "kubectl", command: `kubectl get pods; touch network-alias-started`},
+		{name: "aws cli", command: `aws sts get-caller-identity; touch network-alias-started`},
+		{name: "gcloud cli", command: `gcloud logging read projects/example/logs/app; touch network-alias-started`},
+		{name: "azure cli", command: `az account show; touch network-alias-started`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmp := t.TempDir()
+			auditDir := filepath.Join(tmp, "audit")
+
+			_, err := RunBash(context.Background(), Options{
+				Command: tt.command,
+				Dir:     tmp,
+				Policy:  &Policy{DenyNetwork: true},
+				Audit:   AuditContext{AuditDir: auditDir},
+			})
+
+			require.Error(t, err)
+			require.ErrorAs(t, err, new(*PolicyError))
+			require.NoFileExists(t, filepath.Join(tmp, "network-alias-started"))
+
+			records := readAuditRecords(t, auditDir)
+			require.Len(t, records, 1)
+			require.Equal(t, "network.deny", records[0].DecisionRule)
+		})
+	}
+}
+
+func TestRunBash_DeniesDependencyNetworkCommandBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{name: "go get", command: `go get example.com/module; touch dependency-network-started`},
+		{name: "npm install", command: `npm --prefix web install; touch dependency-network-started`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmp := t.TempDir()
+			auditDir := filepath.Join(tmp, "audit")
+
+			_, err := RunBash(context.Background(), Options{
+				Command: tt.command,
+				Dir:     tmp,
+				Policy:  &Policy{DenyNetwork: true},
+				Audit:   AuditContext{AuditDir: auditDir},
+			})
+
+			require.Error(t, err)
+			require.ErrorAs(t, err, new(*PolicyError))
+			require.NoFileExists(t, filepath.Join(tmp, "dependency-network-started"))
+
+			records := readAuditRecords(t, auditDir)
+			require.Len(t, records, 1)
+			require.Equal(t, "network.deny", records[0].DecisionRule)
+		})
+	}
+}
+
+func TestCommandContext_DeniesDependencyNetworkCommand(t *testing.T) {
+	t.Parallel()
+
+	auditDir := filepath.Join(t.TempDir(), "audit")
+
+	_, _, err := CommandContext(context.Background(), CommandOptions{
+		Program: "go",
+		Args:    []string{"get", "example.com/module"},
+		Policy:  &Policy{DenyNetwork: true},
+		Audit:   AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "network.deny", records[0].DecisionRule)
+}
+
 func TestRunBash_DeniesNestedNetworkCommandBeforeStart(t *testing.T) {
 	t.Parallel()
 
@@ -1044,6 +1954,92 @@ func TestCommandContext_DeniesGitNetworkSubcommandAfterGlobalFlags(t *testing.T)
 	_, _, err := CommandContext(context.Background(), CommandOptions{
 		Program: "git",
 		Args:    []string{"-C", tmp, "-c", "credential.helper=", "fetch", "origin"},
+		Policy:  &Policy{DenyNetwork: true},
+		Audit:   AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "network.deny", records[0].DecisionRule)
+}
+
+func TestRunBash_DeniesGitRemoteShowAsNetworkBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+
+	_, err := RunBash(context.Background(), Options{
+		Command: `git -C . remote show origin > git-remote-show-started`,
+		Dir:     tmp,
+		Policy:  &Policy{DenyNetwork: true},
+		Audit:   AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.NoFileExists(t, filepath.Join(tmp, "git-remote-show-started"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "network.deny", records[0].DecisionRule)
+}
+
+func TestCommandContext_DeniesGitRemoteShowAsNetwork(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+
+	_, _, err := CommandContext(context.Background(), CommandOptions{
+		Program: "git",
+		Args:    []string{"-C", tmp, "remote", "show", "origin"},
+		Policy:  &Policy{DenyNetwork: true},
+		Audit:   AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "network.deny", records[0].DecisionRule)
+}
+
+func TestRunBash_DeniesGitSubmoduleUpdateAsNetworkBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+
+	_, err := RunBash(context.Background(), Options{
+		Command: `git -C . submodule update --init --recursive > git-submodule-started`,
+		Dir:     tmp,
+		Policy:  &Policy{DenyNetwork: true},
+		Audit:   AuditContext{AuditDir: auditDir},
+	})
+
+	require.Error(t, err)
+	require.ErrorAs(t, err, new(*PolicyError))
+	require.NoFileExists(t, filepath.Join(tmp, "git-submodule-started"))
+
+	records := readAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	require.Equal(t, "network.deny", records[0].DecisionRule)
+}
+
+func TestCommandContext_DeniesGitSubmoduleUpdateAsNetwork(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	auditDir := filepath.Join(tmp, "audit")
+
+	_, _, err := CommandContext(context.Background(), CommandOptions{
+		Program: "git",
+		Args:    []string{"-C", tmp, "submodule", "update", "--init", "--recursive"},
 		Policy:  &Policy{DenyNetwork: true},
 		Audit:   AuditContext{AuditDir: auditDir},
 	})
@@ -1747,6 +2743,28 @@ func readAuditRecords(t *testing.T, auditDir string) []AuditRecord {
 	return records
 }
 
+func readPermissionSideEffectRecords(t *testing.T, auditDir string) []map[string]any {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	records := make([]map[string]any, 0, len(lines))
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+
+	return records
+}
+
 func testAuditContext(t *testing.T) AuditContext {
 	t.Helper()
 
@@ -2047,6 +3065,13 @@ func TestRunBash_PolicyUsesUnredactedCommandForDenial(t *testing.T) {
 	records := readAuditRecords(t, auditDir)
 	require.Len(t, records, 1)
 	require.Equal(t, "command.deny", records[0].DecisionRule)
+
+	sideEffects := readPermissionSideEffectRecords(t, auditDir)
+	require.Len(t, sideEffects, 1)
+	sideEffectJSON, err := json.Marshal(sideEffects[0])
+	require.NoError(t, err)
+	require.NotContains(t, string(sideEffectJSON), "ATTELER_SECRET_TOKEN=touch touch")
+	require.Contains(t, string(sideEffectJSON), "redacted:ATTELER_SECRET_TOKEN")
 }
 
 func TestBuildCommandEnvironment_SanitizedAmbientKeepsNonSecretVarsAndStripsSecrets(t *testing.T) {

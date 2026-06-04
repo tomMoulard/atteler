@@ -20,6 +20,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/speculate"
@@ -486,6 +487,10 @@ func runWatchScanWithIssueTracker(ctx context.Context, root string, options watc
 		return err
 	}
 
+	if authErr := authorizeWatchScanRead(ctx, root); authErr != nil {
+		return authErr
+	}
+
 	findings, err := watch.ScanWithOptions(root, scanOptions)
 	if err != nil {
 		return fmt.Errorf("watch scan: %w", err)
@@ -550,7 +555,11 @@ func runWatchLoop(ctx context.Context, root string, options watchCLIOptions, int
 		return err
 	}
 
-	issueTracker, issueOptions, err := watchIssueInputs(options, nil)
+	if authErr := authorizeWatchScanRead(ctx, root); authErr != nil {
+		return authErr
+	}
+
+	issueTracker, issueOptions, err := watchIssueInputs(ctx, options, nil)
 	if err != nil {
 		return err
 	}
@@ -601,7 +610,7 @@ func watchQualityInputs(ctx context.Context, root string, options watchCLIOption
 	scanOptions := watch.Options{LargeFileBytes: int64(options.LargeFileBytes)}
 
 	if options.RulesPath != "" {
-		config, err := readWatchRulesConfig(options.RulesPath)
+		config, err := readWatchRulesConfig(ctx, options.RulesPath)
 		if err != nil {
 			return watch.Options{}, nil, nil, watch.GateOptions{}, err
 		}
@@ -611,7 +620,7 @@ func watchQualityInputs(ctx context.Context, root string, options watchCLIOption
 	}
 
 	if options.SuppressionsPath != "" {
-		suppressions, err := readWatchSuppressions(options.SuppressionsPath)
+		suppressions, err := readWatchSuppressions(ctx, options.SuppressionsPath)
 		if err != nil {
 			return watch.Options{}, nil, nil, watch.GateOptions{}, err
 		}
@@ -629,7 +638,7 @@ func watchQualityInputs(ctx context.Context, root string, options watchCLIOption
 	}
 
 	if options.BaselinePath != "" {
-		loaded, err := readWatchBaseline(options.BaselinePath)
+		loaded, err := readWatchBaseline(ctx, options.BaselinePath)
 		if err != nil {
 			return watch.Options{}, nil, nil, watch.GateOptions{}, err
 		}
@@ -673,7 +682,7 @@ func watchQualityInputs(ctx context.Context, root string, options watchCLIOption
 }
 
 func upsertWatchScanIssues(ctx context.Context, options watchCLIOptions, tracker watch.IssueTracker, output *watchScanOutput) error {
-	tracker, issueOptions, err := watchIssueInputs(options, tracker)
+	tracker, issueOptions, err := watchIssueInputs(ctx, options, tracker)
 	if err != nil {
 		return err
 	}
@@ -697,7 +706,15 @@ func upsertWatchScanIssues(ctx context.Context, options watchCLIOptions, tracker
 	return nil
 }
 
-func watchIssueInputs(options watchCLIOptions, tracker watch.IssueTracker) (watch.IssueTracker, watch.IssueOptions, error) {
+func authorizeWatchScanRead(ctx context.Context, root string) error {
+	if err := authorizeReadPermission(ctx, "scan watch root", "atteler.watch", root); err != nil {
+		return fmt.Errorf("watch scan: authorize read: %w", err)
+	}
+
+	return nil
+}
+
+func watchIssueInputs(ctx context.Context, options watchCLIOptions, tracker watch.IssueTracker) (watch.IssueTracker, watch.IssueOptions, error) {
 	issueOptions, err := watchIssueOptions(options)
 	if err != nil {
 		return nil, watch.IssueOptions{}, err
@@ -715,7 +732,7 @@ func watchIssueInputs(options watchCLIOptions, tracker watch.IssueTracker) (watc
 		return tracker, issueOptions, nil
 	}
 
-	config, err := watchGitHubTrackerConfig(options)
+	config, err := watchGitHubTrackerConfig(ctx, options)
 	if err != nil {
 		return nil, watch.IssueOptions{}, err
 	}
@@ -740,10 +757,14 @@ func watchIssueOptions(options watchCLIOptions) (watch.IssueOptions, error) {
 	}, nil
 }
 
-func watchGitHubTrackerConfig(options watchCLIOptions) (symphony.TrackerConfig, error) {
+func watchGitHubTrackerConfig(ctx context.Context, options watchCLIOptions) (symphony.TrackerConfig, error) {
 	owner, repo := splitGitHubRepository(options.IssueRepository)
 	if owner == "" || repo == "" {
 		return symphony.TrackerConfig{}, errors.New("watch issue upsert requires --watch-github-repository owner/repo")
+	}
+
+	if err := authorizeWatchGitHubTokenAccess(ctx); err != nil {
+		return symphony.TrackerConfig{}, err
 	}
 
 	token := firstNonEmpty(strings.TrimSpace(options.GitHubToken), os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN"))
@@ -764,6 +785,25 @@ func watchGitHubTrackerConfig(options watchCLIOptions) (symphony.TrackerConfig, 
 	}, nil
 }
 
+func authorizeWatchGitHubTokenAccess(ctx context.Context) error {
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: "resolve watch GitHub token",
+		Source: "atteler.watch.github",
+		Target: "--watch-github-token/GITHUB_TOKEN/GH_TOKEN",
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationCredentialAccess,
+			Action: "resolve watch GitHub token",
+			Source: "atteler.watch.github",
+			Target: "--watch-github-token/GITHUB_TOKEN/GH_TOKEN",
+		}},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
+}
+
 func splitGitHubRepository(repository string) (owner, repo string) {
 	parts := strings.Split(strings.TrimSpace(repository), "/")
 	if len(parts) != 2 {
@@ -782,7 +822,11 @@ func validWatchGateSeverity(severity string) bool {
 	}
 }
 
-func readWatchBaseline(path string) (watch.Baseline, error) {
+func readWatchBaseline(ctx context.Context, path string) (watch.Baseline, error) {
+	if err := authorizeReadPermission(ctx, "read watch baseline", "atteler.watch", path); err != nil {
+		return watch.Baseline{}, fmt.Errorf("watch baseline: authorize read: %w", err)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return watch.Baseline{}, fmt.Errorf("watch baseline: read %s: %w", path, err)
@@ -807,6 +851,10 @@ func readWatchBaselineRef(ctx context.Context, root string, scanOptions watch.Op
 		return watch.Baseline{}, "", err
 	}
 
+	if authErr := authorizeWatchBaselineRefMaterialization(ctx, ref, mergeBase); authErr != nil {
+		return watch.Baseline{}, "", fmt.Errorf("watch baseline ref %s: %w", ref, authErr)
+	}
+
 	tmp, err := os.MkdirTemp("", "atteler-watch-baseline-*")
 	if err != nil {
 		return watch.Baseline{}, "", fmt.Errorf("watch baseline ref: create temp dir: %w", err)
@@ -823,6 +871,45 @@ func readWatchBaselineRef(ctx context.Context, root string, scanOptions watch.Op
 	}
 
 	return watch.Baseline{Findings: findings}, mergeBase, nil
+}
+
+func authorizeWatchBaselineRefMaterialization(ctx context.Context, ref, mergeBase string) error {
+	target := strings.TrimSpace(ref)
+	if strings.TrimSpace(mergeBase) != "" {
+		target += "@" + strings.TrimSpace(mergeBase)
+	}
+
+	if target == "" {
+		target = "watch baseline ref"
+	}
+
+	action := "materialize watch baseline ref"
+	operations := []permission.Operation{
+		{
+			Kind:   permission.OperationWrite,
+			Action: action,
+			Source: "atteler.watch.baseline_ref",
+			Target: target,
+		},
+		{
+			Kind:   permission.OperationMergeDelete,
+			Action: action,
+			Source: "atteler.watch.baseline_ref",
+			Target: target,
+		},
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action:     action,
+		Source:     "atteler.watch.baseline_ref",
+		Target:     target,
+		Operations: operations,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }
 
 func gitMergeBase(ctx context.Context, root, ref string, level autonomy.Level) (string, error) {
@@ -920,32 +1007,18 @@ func safeArchivePath(dir, name string) (string, error) {
 func runGitOutput(ctx context.Context, root string, level autonomy.Level, args ...string) ([]byte, error) {
 	fullArgs := append([]string{"-C", root}, args...)
 
-	var stdout, stderr bytes.Buffer
-
-	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+	result, err := shell.RunCommand(ctx, shell.CommandOptions{
 		Program: "git",
 		Args:    fullArgs,
-		Stdout:  &stdout,
-		Stderr:  &stderr,
 		Mode:    shell.ModeCaptured,
 		Audit:   watchGitAuditContext(level),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("git %s authorize: %w", strings.Join(args, " "), err)
+		output := strings.TrimSpace(result.Stdout + result.Stderr)
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, output)
 	}
 
-	runErr := cmd.Run()
-	if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Stderr: stderr.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
-		return nil, fmt.Errorf("git %s audit: %w", strings.Join(args, " "), finishErr)
-	}
-
-	if runErr != nil {
-		output := strings.TrimSpace(stdout.String() + stderr.String())
-
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), runErr, output)
-	}
-
-	return stdout.Bytes(), nil
+	return []byte(result.Stdout), nil
 }
 
 func watchGitAuditContext(level autonomy.Level) shell.AuditContext {
@@ -960,8 +1033,8 @@ type watchRulesConfig struct {
 	IgnorePaths []string           `json:"ignore_paths"`
 }
 
-func readWatchRules(path string) ([]watch.RuleConfig, error) {
-	config, err := readWatchRulesConfig(path)
+func readWatchRules(ctx context.Context, path string) ([]watch.RuleConfig, error) {
+	config, err := readWatchRulesConfig(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -969,7 +1042,11 @@ func readWatchRules(path string) ([]watch.RuleConfig, error) {
 	return config.Rules, nil
 }
 
-func readWatchRulesConfig(path string) (watchRulesConfig, error) {
+func readWatchRulesConfig(ctx context.Context, path string) (watchRulesConfig, error) {
+	if err := authorizeReadPermission(ctx, "read watch rules", "atteler.watch", path); err != nil {
+		return watchRulesConfig{}, fmt.Errorf("watch rules: authorize read: %w", err)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return watchRulesConfig{}, fmt.Errorf("watch rules: read %s: %w", path, err)
@@ -985,7 +1062,11 @@ func readWatchRulesConfig(path string) (watchRulesConfig, error) {
 	return payload, nil
 }
 
-func readWatchSuppressions(path string) ([]watch.Suppression, error) {
+func readWatchSuppressions(ctx context.Context, path string) ([]watch.Suppression, error) {
+	if err := authorizeReadPermission(ctx, "read watch suppressions", "atteler.watch", path); err != nil {
+		return nil, fmt.Errorf("watch suppressions: authorize read: %w", err)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("watch suppressions: read %s: %w", path, err)

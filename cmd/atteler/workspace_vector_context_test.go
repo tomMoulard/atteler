@@ -562,7 +562,7 @@ func TestSelectedRetrievalSourcesAllIncludesExplicitVectorStorePath(t *testing.T
 func TestSelectedRetrievalSourcesForStateAllIncludesSelectedAgentMemory(t *testing.T) {
 	t.Parallel()
 
-	sources, err := selectedRetrievalSourcesForState(appState{
+	sources, err := selectedRetrievalSourcesForState(context.Background(), appState{
 		selectedAgent: testReviewerName,
 	}, retrievalCommandInput{
 		Sources: []string{retrievalSourceAll},
@@ -599,7 +599,7 @@ func TestSelectedRetrievalSourcesForStateAllIncludesReusableDefaultFileIndex(t *
 		Text: sourceText,
 	}})
 
-	sources, err := selectedRetrievalSourcesForState(appState{cwd: root}, retrievalCommandInput{
+	sources, err := selectedRetrievalSourcesForState(context.Background(), appState{cwd: root}, retrievalCommandInput{
 		Sources: []string{retrievalSourceAll},
 	})
 	require.NoError(t, err)
@@ -624,7 +624,7 @@ func TestSelectedRetrievalSourcesForStateAllSkipsStaleDefaultFileIndex(t *testin
 	}})
 	require.NoError(t, os.WriteFile(sourcePath, []byte("OAuth changed retrieval notes."), 0o600))
 
-	sources, err := selectedRetrievalSourcesForState(appState{cwd: root}, retrievalCommandInput{
+	sources, err := selectedRetrievalSourcesForState(context.Background(), appState{cwd: root}, retrievalCommandInput{
 		Sources: []string{retrievalSourceAll},
 	})
 	require.NoError(t, err)
@@ -739,7 +739,7 @@ func TestRetrievalSearchersAllSkipsUnavailableImplicitFileVectorSource(t *testin
 		Sources: []string{retrievalSourceAll},
 		Search:  "semantic retrieval",
 	}
-	sources, err := selectedRetrievalSourcesForState(state, input)
+	sources, err := selectedRetrievalSourcesForState(context.Background(), state, input)
 	require.NoError(t, err)
 	require.Contains(t, sources, retrieval.SourceVector)
 

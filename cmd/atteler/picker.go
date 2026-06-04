@@ -104,6 +104,19 @@ func (m model) openModelPicker() (tea.Model, tea.Cmd, bool) {
 	}
 
 	pickerCtx, pickerCancel := context.WithCancel(m.ctx) //nolint:gosec // cancel stored in m.pickerCancel, called on picker close
+	pickerCtx = contextWithTUIPermissionPrompt(pickerCtx, m.permissionPolicy, nil, nil)
+	fzfLookupCtx := pickerCtx
+
+	var permissionPromptCmd tea.Cmd
+
+	var permissionPromptCh chan agentLoopConfirmRequest
+
+	if permissionPolicyNeedsPrompt(m.permissionPolicy) {
+		permissionPromptCh = make(chan agentLoopConfirmRequest, 1)
+		permissionResponseCh := make(chan bool, 1)
+		pickerCtx = contextWithTUIPermissionPrompt(pickerCtx, m.permissionPolicy, permissionPromptCh, permissionResponseCh)
+		permissionPromptCmd = listenForCheckpoint(permissionPromptCh, permissionResponseCh)
+	}
 
 	m.pickerOpen = true
 	m.pickerCancel = pickerCancel
@@ -111,13 +124,16 @@ func (m model) openModelPicker() (tea.Model, tea.Cmd, bool) {
 	m.pickerCursor = 0
 
 	m.modelFetchID++
-	if externalModelPickerAllowed(m.autonomy) {
-		if _, ok := findFZF(); ok {
-			m.pickerLoading = true
-			m.modelFetchesPending = 1
+	if _, ok := findFZF(fzfLookupCtx); ok {
+		m.pickerLoading = true
+		m.modelFetchesPending = 1
 
-			return m, loadModelsForFZF(pickerCtx, m.registry, m.modelFetchID), true
+		cmd := loadModelsForFZF(pickerCtx, m.registry, m.modelFetchID)
+		if permissionPromptCmd != nil {
+			cmd = tea.Batch(withPermissionPromptClose(cmd, permissionPromptCh), permissionPromptCmd)
 		}
+
+		return m, cmd, true
 	}
 
 	providers := m.registry.ListProviders()
@@ -125,7 +141,12 @@ func (m model) openModelPicker() (tea.Model, tea.Cmd, bool) {
 	m.modelFetchesPending = len(providers)
 	m.pickerLoading = m.modelFetchesPending > 0
 
-	return m, loadModels(pickerCtx, m.registry, providers, m.modelFetchID), true
+	cmd := loadModels(pickerCtx, m.registry, providers, m.modelFetchID)
+	if permissionPromptCmd != nil {
+		cmd = withPermissionPromptLifecycle(cmd, permissionPromptCh, permissionPromptCmd)
+	}
+
+	return m, cmd, true
 }
 
 func externalModelPickerAllowed(level autonomy.Level) bool {
@@ -361,7 +382,13 @@ func loadModels(ctx context.Context, reg *llm.Registry, providers []string, fetc
 		})
 	}
 
-	return tea.Batch(cmds...)
+	if len(cmds) == 0 {
+		return nil
+	}
+
+	return func() tea.Msg {
+		return tea.BatchMsg(cmds)
+	}
 }
 
 func loadModelsForFZF(ctx context.Context, reg *llm.Registry, fetchID int) tea.Cmd {
@@ -371,16 +398,31 @@ func loadModelsForFZF(ctx context.Context, reg *llm.Registry, fetchID int) tea.C
 
 		items := modelRolePickerItems(reg)
 
+		var firstErr error
+
 		for _, provider := range providers {
 			catalog, err := reg.ProviderModelCatalog(ctx, provider)
 			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+
 				continue
 			}
 
-			items = append(items, pickerItemsForProviderCatalogWithRegistry(reg, provider, catalog)...)
+			providerItems := pickerItemsForProviderCatalogWithRegistry(reg, provider, catalog)
+			if len(providerItems) == 0 && catalog.Error != nil && firstErr == nil {
+				firstErr = catalog.Error
+			}
+
+			items = append(items, providerItems...)
 		}
 
 		if len(items) == 0 {
+			if firstErr != nil {
+				return modelsLoadedMsg{fetchID: fetchID, err: firstErr}
+			}
+
 			return modelsLoadedMsg{fetchID: fetchID, err: errors.New("no models available from any provider")}
 		}
 
@@ -515,7 +557,11 @@ func sortPickerItems(items []pickerItem) []pickerItem {
 
 var execLookPath = exec.LookPath
 
-func findFZF() (string, bool) {
+func findFZF(ctx context.Context) (string, bool) {
+	if err := authorizeReadPermission(ctx, "locate fzf model picker", "atteler.model_picker", "PATH"); err != nil {
+		return "", false
+	}
+
 	path, err := execLookPath("fzf")
 	if err != nil {
 		return "", false
@@ -524,48 +570,47 @@ func findFZF() (string, bool) {
 	return path, true
 }
 
-func runFZFModelPicker(ctx context.Context, fzfPath string, items []pickerItem, audit shell.AuditContext) tea.Cmd {
-	var stdout bytes.Buffer
+func runFZFModelPicker(ctx context.Context, fzfPath string, items []pickerItem, startCallback func()) tea.Cmd {
+	return func() tea.Msg {
+		var stdout bytes.Buffer
 
-	input := fzfInput(items)
+		input := fzfInput(items)
 
-	if strings.TrimSpace(audit.Caller) == "" {
-		audit.Caller = "atteler.fzf_model_picker"
-	}
-
-	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
-		Program: fzfPath,
-		Args: []string{
-			"--prompt", "atteler model> ",
-			"--height", "80%",
-			"--border",
-			"--delimiter", "\t",
-			"--with-nth", "1",
-		},
-		Stdin:  strings.NewReader(input),
-		Stdout: &stdout,
-		Mode:   shell.ModeInteractive,
-		Audit:  audit,
-	})
-	if err != nil {
-		return func() tea.Msg { return fzfModelSelectedMsg{err: err} }
-	}
-
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Error: err, OutputCapture: shell.OutputCaptured}); finishErr != nil && err == nil {
-			err = finishErr
-		}
-
-		if item, ok := parseFZFSelection(stdout.String(), items); ok {
-			return fzfModelSelectedMsg{item: item, selected: true}
-		}
-
+		cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+			Program: fzfPath,
+			Args: []string{
+				"--prompt", "atteler model> ",
+				"--height", "80%",
+				"--border",
+				"--delimiter", "\t",
+				"--with-nth", "1",
+			},
+			Stdin:         strings.NewReader(input),
+			Stdout:        &stdout,
+			Mode:          shell.ModeInteractive,
+			Audit:         shell.AuditContext{Caller: "atteler.fzf_model_picker"},
+			StartCallback: startCallback,
+		})
 		if err != nil {
-			return fzfModelSelectedMsg{}
+			return fzfModelSelectedMsg{err: err}
 		}
 
-		return fzfModelSelectedMsg{}
-	})
+		return tea.ExecProcess(cmd, func(err error) tea.Msg {
+			if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Error: err, OutputCapture: shell.OutputCaptured}); finishErr != nil && err == nil {
+				err = finishErr
+			}
+
+			if item, ok := parseFZFSelection(stdout.String(), items); ok {
+				return fzfModelSelectedMsg{item: item, selected: true}
+			}
+
+			if err != nil {
+				return fzfModelSelectedMsg{}
+			}
+
+			return fzfModelSelectedMsg{}
+		})()
+	}
 }
 
 func fzfInput(items []pickerItem) string {

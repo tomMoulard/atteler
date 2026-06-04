@@ -16,8 +16,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/vector"
 )
@@ -119,24 +119,56 @@ func TestRunVectorSearchPersistsLexicalIndexAndReportsVectorizer(t *testing.T) {
 	assert.NotContains(t, output, "rebuilt=true")
 }
 
-func TestRunVectorSearchLowAutonomyBlocksIndexWrites(t *testing.T) {
+func TestRunVectorSearchPermissionPolicyDeniesIndexWrite(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	note := filepath.Join(dir, "retrieval.md")
-	require.NoError(t, os.WriteFile(note, []byte("OAuth retry retrieval notes"), 0o600))
+	note := filepath.Join(dir, "notes.md")
+	require.NoError(t, os.WriteFile(note, []byte("OAuth retry notes"), 0o600))
 
 	indexPath := filepath.Join(dir, "vector-index.json")
-	err := runVectorSearchWithAutonomy(context.TODO(), dir, appconfig.VectorConfig{}, cliOptions{
-		vectorSearch:     "OAuth retry",
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithAuditDir(t.Context(), filepath.Join(dir, "audit"))
+	ctx = permission.ContextWithPolicy(ctx, &policy)
+
+	err := runVectorSearch(ctx, dir, appconfig.VectorConfig{}, cliOptions{
 		vectorIndexFiles: stringListFlag{note},
 		vectorStorePath:  indexPath,
-	}, autonomy.Low)
+	})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
-	assert.Contains(t, err.Error(), "--vector-index")
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
 	assert.NoFileExists(t, indexPath)
+}
+
+func TestRunVectorSearchPermissionPolicyDeniesReusableIndexRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	note := filepath.Join(dir, "notes.md")
+	require.NoError(t, os.WriteFile(note, []byte("OAuth retry notes"), 0o600))
+
+	indexPath := filepath.Join(dir, "vector-index.json")
+	require.NoError(t, runVectorSearch(t.Context(), dir, appconfig.VectorConfig{}, cliOptions{
+		vectorIndexFiles: stringListFlag{note},
+		vectorStorePath:  indexPath,
+	}))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	err := runVectorSearch(ctx, dir, appconfig.VectorConfig{}, cliOptions{
+		vectorSearch:    "OAuth retry",
+		vectorStorePath: indexPath,
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
 }
 
 //nolint:paralleltest // Captures process stdout to verify user-facing CLI output.

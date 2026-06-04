@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/modelroute"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 const defaultOpenAIBase = "https://api.openai.com"
@@ -365,6 +366,10 @@ func (o *OpenAIProvider) FetchModels(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("%s: models endpoint is not configured", o.Name())
 	}
 
+	if policyErr := authorizeProviderPermission(ctx, o.Name(), "fetch OpenAI models", endpoint, permission.OperationNetwork, permission.OperationCredentialAccess); policyErr != nil {
+		return nil, policyErr
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("%s: new request: %w", o.Name(), err)
@@ -539,6 +544,10 @@ func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*
 	endpoint, err := o.endpointURL(o.effectiveChatPath(), params.Model)
 	if err != nil {
 		return nil, err
+	}
+
+	if policyErr := authorizeProviderPermission(ctx, o.Name(), "call OpenAI chat completions", endpoint, permission.OperationNetwork, permission.OperationCredentialAccess); policyErr != nil {
+		return nil, policyErr
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))

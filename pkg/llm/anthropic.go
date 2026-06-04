@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 const (
@@ -93,6 +94,10 @@ type anthropicModelsResponse struct {
 func (a *AnthropicProvider) FetchModels(ctx context.Context) ([]string, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, err
+	}
+
+	if policyErr := authorizeProviderPermission(ctx, providerAnthropic, "fetch Anthropic models", a.baseURL+"/v1/models", permission.OperationNetwork, permission.OperationCredentialAccess); policyErr != nil {
+		return nil, policyErr
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/models", http.NoBody)
@@ -231,6 +236,10 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: marshal: %w", err)
+	}
+
+	if policyErr := authorizeProviderPermission(ctx, providerAnthropic, "call Anthropic messages", a.baseURL+"/v1/messages", permission.OperationNetwork, permission.OperationCredentialAccess); policyErr != nil {
+		return nil, policyErr
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/v1/messages", bytes.NewReader(body))

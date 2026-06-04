@@ -16,6 +16,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	attskill "github.com/tommoulard/atteler/pkg/skill"
 )
 
@@ -46,7 +47,59 @@ func skillLearningObserversFromOptions(ctx context.Context, opts attskill.Learni
 		return nil
 	}
 
-	return []events.Observer{newBackgroundObserver(ctx, attskill.NewLearner(opts), skillLearningObserverQueueSize)}
+	observer := permissionGatedSkillLearningObserver{
+		inner:     attskill.NewLearner(opts),
+		statePath: attskill.NewLearningStore(opts.StoreDir).StatePath(),
+		skillDir:  opts.SkillDir,
+	}
+
+	return []events.Observer{newBackgroundObserver(ctx, observer, skillLearningObserverQueueSize)}
+}
+
+type permissionGatedSkillLearningObserver struct {
+	inner     events.Observer
+	statePath string
+	skillDir  string
+}
+
+func (o permissionGatedSkillLearningObserver) ObserveEvent(ctx context.Context, event events.Event) error {
+	if o.inner == nil {
+		return nil
+	}
+
+	operations := []permission.Operation{{
+		Kind:   permission.OperationWrite,
+		Action: "record automatic skill learning observation",
+		Target: o.statePath,
+		Source: "atteler.skill_learning.auto",
+	}}
+
+	target := o.statePath
+	if strings.TrimSpace(o.skillDir) != "" {
+		operations = append(operations, permission.Operation{
+			Kind:   permission.OperationWrite,
+			Action: "update automatic generated skills",
+			Target: o.skillDir,
+			Source: "atteler.skill_learning.auto",
+		})
+		target = target + ";" + o.skillDir
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action:     "automatic skill learning",
+		Source:     "atteler.skill_learning.auto",
+		Target:     target,
+		Operations: operations,
+	})
+	if !decision.Allowed {
+		return nil
+	}
+
+	if err := o.inner.ObserveEvent(ctx, event); err != nil {
+		return fmt.Errorf("automatic skill learning: %w", err)
+	}
+
+	return nil
 }
 
 func skillLearningEffectiveEnabled(opts attskill.LearningOptions, configuredEnabled bool) bool {

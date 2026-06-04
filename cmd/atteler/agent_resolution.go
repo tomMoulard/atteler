@@ -1059,6 +1059,7 @@ type selectionState struct {
 }
 
 func resolveSelection(
+	ctx context.Context,
 	opts cliOptions,
 	cfg appconfig.Config,
 	persistedModel string,
@@ -1076,7 +1077,7 @@ func resolveSelection(
 	}
 
 	state.sessionState = session.New(state.selectedModel, nil)
-	if err := loadRequestedSession(opts, store, &state); err != nil {
+	if err := loadRequestedSession(ctx, opts, store, &state); err != nil {
 		return selectionState{}, err
 	}
 
@@ -1111,12 +1112,16 @@ func resolveSelection(
 	return state, nil
 }
 
-func loadRequestedSession(opts cliOptions, store *session.Store, state *selectionState) error {
+func loadRequestedSession(ctx context.Context, opts cliOptions, store *session.Store, state *selectionState) error {
 	if opts.sessionRef == "" && opts.replayRef == "" && opts.exportRef == "" && opts.showSessionRef == "" && opts.summarySessionRef == "" {
 		return nil
 	}
 
 	ref := firstNonEmpty(opts.replayRef, opts.showSessionRef, opts.summarySessionRef, opts.exportRef, opts.sessionRef)
+
+	if err := authorizeSessionStoreRead(ctx, store, ref, "load requested session"); err != nil {
+		return fmt.Errorf("load session: %w", err)
+	}
 
 	loadedSession, err := store.Load(ref)
 	if err != nil {

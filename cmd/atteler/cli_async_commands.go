@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	attasync "github.com/tommoulard/atteler/pkg/async"
@@ -47,7 +48,9 @@ func runAsyncTasks(ctx context.Context, state appState, input asyncRunCommandInp
 		defer cancel()
 	}
 
-	emitHookWarning(ctx, state.hookRunner, events.Event{
+	var startEventOnce sync.Once
+
+	commandEvent := events.Event{
 		Type:        events.CommandExecute,
 		SessionID:   state.sessionState.ID,
 		SessionPath: state.sessionStore.Path(state.sessionState.ID),
@@ -59,11 +62,15 @@ func runAsyncTasks(ctx context.Context, state appState, input asyncRunCommandInp
 			"count":    strconv.Itoa(len(tasks)),
 			"waves":    strconv.Itoa(len(plan.ReadyBatches())),
 		},
-	})
+	}
 
 	asyncOpts, err := asyncRunOptionsFromInput(state, input.Execution)
 	if err != nil {
 		return err
+	}
+
+	if err := authorizeChildExecutionSideEffects(ctx, state.permissionPolicy, "run async child tasks", "atteler.async", asyncOpts.LedgerPath, asyncOpts.Resume); err != nil {
+		return fmt.Errorf("async run: %w", err)
 	}
 
 	runner := subagent.AttelerCommandDetailedWithOptions(subagent.CommandOptions{
@@ -72,6 +79,11 @@ func runAsyncTasks(ctx context.Context, state appState, input asyncRunCommandInp
 		Binary:         resolveSpawnBinary(input.SpawnBinary),
 		Dir:            state.cwd,
 		MaxOutputBytes: int64(input.Execution.OutputBudgetBytes),
+		StartCallback: func() {
+			startEventOnce.Do(func() {
+				emitHookWarning(ctx, state.hookRunner, commandEvent)
+			})
+		},
 	})
 	results, runErr := plan.RunDetailedWithOptions(ctx, func(ctx context.Context, task attasync.Task) (attasync.TaskRunOutput, error) {
 		if outputBytesRemaining := attasync.OutputByteLimit(ctx); outputBytesRemaining > 0 {

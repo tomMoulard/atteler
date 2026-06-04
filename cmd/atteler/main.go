@@ -16,6 +16,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/modelroute"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
@@ -39,6 +40,7 @@ var runInteractiveProgram = func(m model) (tea.Model, error) {
 }
 
 const (
+	unknownLabel         = "unknown"
 	executionModePlan    = "plan"
 	executionModeExecute = "execute"
 )
@@ -220,6 +222,7 @@ type agentLoopConfirmKind string
 
 const (
 	agentLoopConfirmCheckpoint agentLoopConfirmKind = "checkpoint"
+	agentLoopConfirmPermission agentLoopConfirmKind = "permission"
 	agentLoopConfirmToolCall   agentLoopConfirmKind = "tool_call"
 )
 
@@ -273,6 +276,7 @@ type llmRequest struct {
 	generation                  generationSettings
 	agentLoopBudget             llm.AgentLoopBudget
 	autonomy                    autonomy.Level
+	permissionPolicy            *permission.Policy
 	agentLoopCheckpointInterval int
 	maxInputTokens              int
 	routeDecision               *modelroute.Decision
@@ -350,6 +354,7 @@ type model struct {
 	skillLearningSkillDir     string
 	worktreeInfo              *worktree.Info
 	promptContextCache        *promptContextCache
+	permissionPolicy          *permission.Policy
 	tokenUsage                tokenUsage
 	runningTaskStarted        time.Time
 	idleSuggestionInput       string
@@ -396,6 +401,7 @@ type model struct {
 	checkpointResponseCh chan<- bool
 	checkpointRequestCh  <-chan agentLoopConfirmRequest
 	checkpointPrompt     string
+	checkpointKind       agentLoopConfirmKind
 	pinnedMessages       map[int]bool
 	executionMode        string
 }
@@ -434,6 +440,7 @@ func initialModel(
 	idleSuggestionBudget idleSuggestionBudget,
 	wtInfo *worktree.Info,
 	promptContextCache *promptContextCache,
+	permissionPolicy *permission.Policy,
 ) model {
 	ta := newPromptTextarea()
 	selectedProvider, _ := reg.ProviderForModel(selectedModel)
@@ -471,7 +478,7 @@ func initialModel(
 		agentLoopCheckpointInterval: agentLoopCheckpointInterval,
 		maxInputTokens:              maxInputTokens,
 		history:                     append([]llm.Message(nil), sessionState.Messages...),
-		promptHistory:               promptHistoryFromStore(store, sessionState, maxPromptHistoryEntries),
+		promptHistory:               promptHistoryFromStore(ctx, store, sessionState, maxPromptHistoryEntries),
 		promptHistoryCursor:         -1,
 		textarea:                    ta,
 		modelLocked:                 modelLocked,
@@ -484,6 +491,7 @@ func initialModel(
 		idleSuggestionTokens:        idleSuggestionTokens,
 		worktreeInfo:                wtInfo,
 		promptContextCache:          promptContextCache,
+		permissionPolicy:            permissionPolicy,
 		pinnedMessages:              make(map[int]bool),
 		executionMode:               executionModeExecute,
 	}

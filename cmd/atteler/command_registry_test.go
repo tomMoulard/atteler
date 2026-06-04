@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"os"
@@ -10,6 +11,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/permission"
+	"github.com/tommoulard/atteler/pkg/session"
 )
 
 const (
@@ -673,6 +677,56 @@ func TestCommandRegistry_StatefulSessionWriteSubcommandAmbiguityFailsHelpfulErro
 	assert.Contains(t, err.Error(), "record-artifact")
 }
 
+func TestCommandRegistry_RecordFailurePermissionPolicyDeniesSessionWrite(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	sessionState := session.New("gpt-test", nil)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	err := runStatefulSessionWriteCommand(ctx, cliOptions{
+		recordFailure: "try cache bust",
+		failureReason: "broke auth",
+	}, appState{
+		sessionStore:  store,
+		sessionState:  sessionState,
+		selectedAgent: "reviewer",
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	assert.NoFileExists(t, store.Path(sessionState.ID))
+}
+
+func TestCommandRegistry_RecordEvaluationPermissionPolicyDeniesSessionWrite(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	sessionState := session.New("gpt-test", nil)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	err := runStatefulSessionWriteCommand(ctx, cliOptions{
+		recordEvaluation:  "reviewer",
+		evaluationOutcome: "pass",
+	}, appState{
+		sessionStore:  store,
+		sessionState:  sessionState,
+		selectedAgent: "reviewer",
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	assert.NoFileExists(t, store.Path(sessionState.ID))
+}
+
 func TestCommandRegistry_ExplicitPrecedenceResolvesDeclaredOverlap(t *testing.T) {
 	t.Parallel()
 
@@ -1307,6 +1361,93 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			assert.Equal(t, tt.wantTier, got.tier)
 		})
 	}
+}
+
+func TestDispatchProviderlessAppliesPermissionPolicy(t *testing.T) {
+	t.Parallel()
+
+	manifestPath := t.TempDir() + "/mcp.yaml"
+	require.NoError(t, os.WriteFile(manifestPath, []byte(`servers:
+  - name: denied
+    command: definitely-not-run
+`), 0o600))
+
+	handled, err := dispatchProviderless(context.Background(), cliOptions{
+		mcpManifestPath: manifestPath,
+		mcpServerName:   "denied",
+		mcpMethod:       "tools/list",
+		permissionMode:  "deny",
+		allowOperations: stringListFlag{"read"},
+		headless:        true,
+	}, session.NewStore(t.TempDir()))
+
+	require.True(t, handled)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "permission.execute.deny")
+}
+
+func TestDispatchProviderlessSkillLearningPermissionPolicyDeniesConfigRead(t *testing.T) {
+	t.Parallel()
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+	handled, err := dispatchProviderless(ctx, cliOptions{
+		skillLearningList: true,
+		permissionMode:    permissionModeDeny,
+		headless:          true,
+	}, session.NewStore(t.TempDir()))
+
+	require.True(t, handled)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(auditDir + "/side_effects.jsonl")
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "load config for skill learning command")
+	assert.Contains(t, string(auditData), "permission.read.deny")
+}
+
+func TestDispatchProviderlessConfigPromptCompletePermissionPolicyDeniesSessionRead(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	saved := session.New("gpt-test", nil)
+	saved.ID = "prompt-complete-demo"
+	require.NoError(t, store.Save(saved))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	handled, err := dispatchProviderlessConfig(context.Background(), cliOptions{
+		promptCompleteInput: "prompt",
+		sessionRef:          saved.ID,
+		headless:            true,
+	}, appState{
+		sessionStore:     store,
+		permissionPolicy: &policy,
+	})
+
+	require.True(t, handled)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.Contains(t, err.Error(), "load session for prompt completion")
+}
+
+func TestRunInlineCommandListKnownModelsPermissionPolicyDeniesConfigRead(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+
+	handled, err := runInlineCommand(context.Background(), cliOptions{
+		listKnownModels: true,
+		permissionMode:  permissionModeDeny,
+		headless:        true,
+	})
+
+	require.True(t, handled)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
 }
 
 func TestCommandRegistry_CodeIntelGroupedStructuredFlagsReachSchemaInput(t *testing.T) {

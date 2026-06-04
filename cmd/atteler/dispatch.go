@@ -22,6 +22,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/modelroute"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
@@ -304,10 +305,14 @@ func versionString() string {
 	return fmt.Sprintf("atteler %s (commit %s, built %s)", version, commit, date)
 }
 
-func initConfig(path string) error {
+func initConfig(ctx context.Context, path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return errors.New("config path is required")
+	}
+
+	if err := authorizeWritePermission(ctx, "write starter config", "atteler.config.init", path); err != nil {
+		return err
 	}
 
 	dir := filepath.Dir(path)
@@ -384,13 +389,31 @@ func appendStdinContext(prompt, stdin string) string {
 	return prompt + "\n\n<stdin>\n" + stdin + "\n</stdin>"
 }
 
-func listConfigPaths() {
+func listConfigPaths(ctx context.Context) error {
 	for _, path := range appconfig.DefaultPaths() {
+		if err := authorizeReadPermission(ctx, "list config path status", "atteler.config.paths", path); err != nil {
+			return fmt.Errorf("list config paths: %w", err)
+		}
+
 		fmt.Println(path + "\t" + configPathStatus(path))
 	}
+
+	return nil
 }
 
-func validateConfig() error {
+func authorizeConfigStackRead(ctx context.Context, action, source string) error {
+	return authorizeReadPermission(ctx, action, source, "default config stack")
+}
+
+func authorizeStateFileRead(ctx context.Context, action, source, path string) error {
+	return authorizeReadPermission(ctx, action, source, path)
+}
+
+func validateConfig(ctx context.Context) error {
+	if err := authorizeConfigStackRead(ctx, "validate config", "atteler.config.validate"); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
 	cfg, loaded, _, diagnostics, err := appconfig.LoadWithDiagnostics()
 	printDiagnostics(os.Stdout, diagnostics)
 
@@ -762,14 +785,25 @@ func listKnownProviders() {
 	}
 }
 
-func listKnownModels() {
-	for _, provider := range knownProvidersSorted() {
+func listKnownModels(ctx context.Context) error {
+	providers, err := llm.KnownProvidersContext(ctx)
+	if err != nil {
+		return fmt.Errorf("list known models: %w", err)
+	}
+
+	sort.Slice(providers, func(i, j int) bool {
+		return providers[i].Name < providers[j].Name
+	})
+
+	for _, provider := range providers {
 		sort.Strings(provider.Models)
 
 		for _, model := range provider.Models {
 			fmt.Println(provider.Name + "/" + model)
 		}
 	}
+
+	return nil
 }
 
 func knownProvidersSorted() []llm.ProviderInfo {
@@ -803,8 +837,8 @@ func run(ctx context.Context) error {
 
 	// Phase 1: providerless commands (no LLM registry needed).
 	store := session.NewStore(opts.sessionDir)
-	if !opts.recoverHeadless && shouldReconcileHeadlessRunsAtStartup(opts) {
-		reconcileHeadlessRunsAtStartup(store)
+	if !opts.recoverHeadless {
+		reconcileHeadlessRunsAtStartup(ctx, opts, store)
 	}
 
 	if handled, err := dispatchProviderless(ctx, opts, store); handled {
@@ -813,7 +847,7 @@ func run(ctx context.Context) error {
 
 	// Phase 2: providerless-config commands (need config/agents but no LLM).
 	if providerlessConfigRequested(opts) {
-		state, stateErr := providerlessState(store, opts)
+		state, stateErr := providerlessState(ctx, store, opts)
 		if stateErr != nil {
 			return stateErr
 		}
@@ -826,7 +860,7 @@ func run(ctx context.Context) error {
 	// Phase 3: full state (LLM providers, hooks, sessions).
 	state, err := loadAppState(ctx, opts)
 	if err != nil {
-		recordHeadlessLoadStateFailure(store, opts, err)
+		recordHeadlessLoadStateFailure(ctx, store, opts, err)
 
 		return err
 	}
@@ -834,8 +868,21 @@ func run(ctx context.Context) error {
 	return runWithState(ctx, opts, state)
 }
 
-func reconcileHeadlessRunsAtStartup(store *session.Store) {
+func reconcileHeadlessRunsAtStartup(ctx context.Context, opts cliOptions, store *session.Store) {
 	if store == nil {
+		return
+	}
+
+	ctx, _, err := contextWithPermissionPolicyFromOptions(ctx, opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: reconcile headless runs: "+err.Error())
+
+		return
+	}
+
+	if err := authorizeHeadlessPermission(ctx, "reconcile headless runs at startup", store, "", permission.OperationRead, permission.OperationWrite); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: reconcile headless runs: "+err.Error())
+
 		return
 	}
 
@@ -869,7 +916,12 @@ func runParseControlCommand(opts cliOptions) (bool, error) {
 // runInlineCommand handles trivial early-exit commands (version, config
 // template, etc.) that need no session store or provider.
 func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
-	if handled, err := runInlineConfigCommand(opts); handled {
+	if handled, err := runInlineConfigCommand(ctx, opts); handled {
+		return true, err
+	}
+
+	ctx, _, err := contextWithPermissionPolicyFromOptions(ctx, opts)
+	if err != nil {
 		return true, err
 	}
 
@@ -878,8 +930,7 @@ func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
 		listKnownProviders()
 		return true, nil
 	case opts.listKnownModels:
-		listKnownModels()
-		return true, nil
+		return true, listKnownModels(ctx)
 	case opts.ollamaStatus:
 		return true, printOllamaStatus(ctx)
 	case opts.ollamaStop:
@@ -907,7 +958,15 @@ func runInlineCommand(ctx context.Context, opts cliOptions) (bool, error) {
 	}
 }
 
-func runInlineConfigCommand(opts cliOptions) (bool, error) {
+func runInlineConfigCommand(ctx context.Context, opts cliOptions) (bool, error) {
+	if handled, err := runPureInlineConfigCommand(ctx, opts); handled {
+		return true, err
+	}
+
+	return runPermissionedInlineConfigCommand(ctx, opts)
+}
+
+func runPureInlineConfigCommand(ctx context.Context, opts cliOptions) (bool, error) {
 	switch {
 	case opts.printConfigTemplate:
 		fmt.Print(appconfig.TemplateYAML())
@@ -915,44 +974,74 @@ func runInlineConfigCommand(opts cliOptions) (bool, error) {
 	case opts.showVersion:
 		fmt.Println(versionString())
 		return true, nil
-	case opts.initConfigPath != "":
-		return true, initConfigWithAutonomy(opts)
-	case opts.listConfigPaths:
-		listConfigPaths()
-		return true, nil
-	case opts.validateConfig:
-		return true, validateConfig()
-	case opts.configMigrate:
-		return true, migrateConfigAndStateWithAutonomy(opts)
-	case opts.configReport:
-		return true, printConfigReport()
-	case opts.explainConfig:
-		return true, explainConfig(opts)
 	case opts.commandSurfaceJSON:
 		return true, printCommandSurfaceJSON(os.Stdout)
 	case opts.commandSurfaceDocs:
 		return true, printCommandSurfaceMarkdown(os.Stdout)
 	case opts.doctorOffline:
-		return true, doctorOffline(opts)
+		permissionCtx, _, err := contextWithPermissionPolicyFromOptions(ctx, opts)
+		if err != nil {
+			return true, err
+		}
+
+		return true, doctorOffline(permissionCtx, opts)
 	default:
 		return false, nil
 	}
 }
 
-func initConfigWithAutonomy(opts cliOptions) error {
-	if err := authorizeEarlyAutonomyAction(opts, autonomy.ActionFileWrite, "--init-config"); err != nil {
-		return err
+func runPermissionedInlineConfigCommand(ctx context.Context, opts cliOptions) (bool, error) {
+	if !permissionedInlineConfigRequested(opts) {
+		return false, nil
 	}
 
-	return initConfig(opts.initConfigPath)
+	permissionCtx, err := inlineConfigPermissionContext(ctx, opts)
+	if err != nil {
+		return true, err
+	}
+
+	switch {
+	case opts.initConfigPath != "":
+		if err := authorizeEarlyAutonomyAction(opts, autonomy.ActionFileWrite, "--init-config"); err != nil {
+			return true, err
+		}
+
+		return true, initConfig(permissionCtx, opts.initConfigPath)
+	case opts.listConfigPaths:
+		return true, listConfigPaths(permissionCtx)
+	case opts.validateConfig:
+		return true, validateConfig(permissionCtx)
+	case opts.configMigrate:
+		if err := authorizeEarlyAutonomyAction(opts, autonomy.ActionFileWrite, "--config-migrate"); err != nil {
+			return true, err
+		}
+
+		return true, migrateConfigAndState(permissionCtx)
+	case opts.configReport:
+		return true, printConfigReport(permissionCtx)
+	case opts.explainConfig:
+		return true, explainConfig(permissionCtx, opts)
+	default:
+		return false, nil
+	}
 }
 
-func migrateConfigAndStateWithAutonomy(opts cliOptions) error {
-	if err := authorizeEarlyAutonomyAction(opts, autonomy.ActionFileWrite, "--config-migrate"); err != nil {
-		return err
+func permissionedInlineConfigRequested(opts cliOptions) bool {
+	return opts.initConfigPath != "" ||
+		opts.listConfigPaths ||
+		opts.validateConfig ||
+		opts.configMigrate ||
+		opts.configReport ||
+		opts.explainConfig
+}
+
+func inlineConfigPermissionContext(ctx context.Context, opts cliOptions) (context.Context, error) {
+	ctx, _, err := contextWithPermissionPolicyFromOptions(ctx, opts)
+	if err != nil {
+		return ctx, err
 	}
 
-	return migrateConfigAndState()
+	return ctx, nil
 }
 
 func authorizeEarlyAutonomyAction(opts cliOptions, action autonomy.Action, contextLabel string) error {
@@ -968,15 +1057,25 @@ func authorizeEarlyAutonomyAction(opts cliOptions, action autonomy.Action, conte
 	return nil
 }
 
-func providerlessState(store *session.Store, opts cliOptions) (appState, error) {
+func providerlessState(ctx context.Context, store *session.Store, opts cliOptions) (appState, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return appState{}, fmt.Errorf("locate working directory: %w", err)
 	}
 
-	cfg, loadedConfigPaths, cfgErr := appconfig.Load()
-	if cfgErr != nil {
-		fmt.Fprintln(os.Stderr, "warning: "+cfgErr.Error())
+	ctx, permissionPolicy, err := contextWithPermissionPolicyFromOptions(ctx, opts)
+	if err != nil {
+		return appState{}, err
+	}
+
+	cfg, loadedConfigPaths, err := loadConfigWithPermission(
+		ctx,
+		"load config for providerless command",
+		"atteler.config.load",
+		"load providerless config",
+	)
+	if err != nil {
+		return appState{}, err
 	}
 
 	autonomyLevel, autonomyErr := autonomyFromConfigOptions(cfg, opts)
@@ -992,16 +1091,47 @@ func providerlessState(store *session.Store, opts cliOptions) (appState, error) 
 		loadedConfigPaths:  loadedConfigPaths,
 		pluginPaths:        append([]string(nil), cfg.Plugins.Paths...),
 		pluginPolicy:       clonePluginPolicy(cfg.Plugins.Policy),
+		permissionPolicy:   permissionPolicy,
 		vectorConfig:       cfg.Vector,
 		promptContextCache: newPromptContextCache(promptContextCachePath(store)),
 		autonomy:           autonomyLevel,
 	}, nil
 }
 
+func loadConfigWithPermission(ctx context.Context, action, source, errorPrefix string) (appconfig.Config, []string, error) {
+	if authErr := authorizeConfigStackRead(ctx, action, source); authErr != nil {
+		return appconfig.Config{}, nil, fmt.Errorf("%s: %w", errorPrefix, authErr)
+	}
+
+	cfg, loadedConfigPaths, err := appconfig.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+	}
+
+	return cfg, loadedConfigPaths, nil
+}
+
+func loadStateWithPermission(
+	ctx context.Context,
+	stateStore *appconfig.StateStore,
+	action, source, errorPrefix string,
+) (appconfig.State, error) {
+	if authErr := authorizeStateFileRead(ctx, action, source, stateStore.Path()); authErr != nil {
+		return appconfig.State{}, fmt.Errorf("%s: %w", errorPrefix, authErr)
+	}
+
+	persistedState, err := stateStore.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+	}
+
+	return persistedState, nil
+}
+
 func runWithState(ctx context.Context, opts cliOptions, state appState) error {
-	defer func() {
-		closeHookRunner(ctx, state.hookRunner)
-	}()
+	ctx = contextWithPermissionPolicyForOptions(ctx, opts, state.permissionPolicy)
+
+	ctx = contextWithPermissionAuditMetadata(ctx, state.sessionStore, state.sessionState, state.selectedAgent, state.selectedModel)
 	defer flushEventObservers(ctx, state.eventObservers)
 
 	if handled, err := dispatchStateful(ctx, opts, state); handled {
@@ -1015,11 +1145,12 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 	executionOptions.SkillLearningSkillDir = state.skillLearningSkillDir
 	executionOptions.SkillLearningEnabled = state.skillLearningEnabled
 	executionOptions.VectorConfig = state.vectorConfig
-	executionOptions.Autonomy = state.autonomy
+	executionOptions.PermissionPolicy = state.permissionPolicy
 
 	if opts.headless && opts.oncePrompt == "" && !opts.readStdin {
 		err := errors.New("headless mode requires --once, positional prompt text, or --stdin")
 		recordHeadlessPreflightFailure(
+			ctx,
 			state.sessionStore,
 			executionOptions,
 			state.sessionState,
@@ -1044,6 +1175,7 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 	prompt, err := oneShotPrompt(opts.oncePrompt, opts.readStdin)
 	if err != nil {
 		recordHeadlessPreflightFailure(
+			ctx,
 			state.sessionStore,
 			executionOptions,
 			state.sessionState,
@@ -1129,9 +1261,13 @@ func autonomyForEarlyCommand(opts cliOptions) (autonomy.Level, error) {
 	return autonomyFromConfigOptions(cfg, opts)
 }
 
-func recordHeadlessLoadStateFailure(store *session.Store, opts cliOptions, failure error) {
+func recordHeadlessLoadStateFailure(ctx context.Context, store *session.Store, opts cliOptions, failure error) {
 	if failure == nil || !opts.headless {
 		return
+	}
+
+	if permissionPolicy, err := permissionPolicyFromOptions(opts); err == nil {
+		ctx = contextWithPermissionPolicyForOptions(ctx, opts, permissionPolicy)
 	}
 
 	autonomyLevel, err := autonomyForEarlyCommand(opts)
@@ -1149,6 +1285,7 @@ func recordHeadlessLoadStateFailure(store *session.Store, opts cliOptions, failu
 	executionOptions.Autonomy = autonomyLevel
 
 	recordHeadlessPreflightFailure(
+		ctx,
 		store,
 		executionOptions,
 		sessionState,
@@ -1160,7 +1297,17 @@ func recordHeadlessLoadStateFailure(store *session.Store, opts cliOptions, failu
 	)
 }
 
+//nolint:cyclop // App-state bootstrapping deliberately centralizes config, hooks, selection, and worktree setup.
 func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
+	ctx, permissionPolicy, err := contextWithPermissionPolicyFromOptions(ctx, opts)
+	if err != nil {
+		return appState{}, err
+	}
+
+	if authErr := authorizeConfigStackRead(ctx, "load config", "atteler.config.load"); authErr != nil {
+		return appState{}, fmt.Errorf("load config: %w", authErr)
+	}
+
 	cfg, loadedConfigPaths, configFatalErr := loadConfigForAppState(opts)
 	agentRegistry := agent.NewRegistry(cfg.Agents)
 	store := session.NewStore(opts.sessionDir)
@@ -1169,16 +1316,18 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	if configFatalErr != nil && opts.doctor {
 		return appState{
-			config:            cfg,
-			agentRegistry:     agentRegistry,
-			sessionStore:      store,
-			stateStore:        stateStore,
-			cwd:               cwd,
-			loadedConfigPaths: loadedConfigPaths,
-			configLoadErr:     configFatalErr,
-			pluginPaths:       append([]string(nil), cfg.Plugins.Paths...),
-			pluginPolicy:      clonePluginPolicy(cfg.Plugins.Policy),
-			vectorConfig:      cfg.Vector,
+			config:             cfg,
+			agentRegistry:      agentRegistry,
+			sessionStore:       store,
+			stateStore:         stateStore,
+			cwd:                cwd,
+			loadedConfigPaths:  loadedConfigPaths,
+			configLoadErr:      configFatalErr,
+			pluginPaths:        append([]string(nil), cfg.Plugins.Paths...),
+			pluginPolicy:       clonePluginPolicy(cfg.Plugins.Policy),
+			permissionPolicy:   permissionPolicy,
+			promptContextCache: newPromptContextCache(promptContextCachePath(store)),
+			vectorConfig:       cfg.Vector,
 		}, nil
 	}
 
@@ -1202,6 +1351,21 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	skillLearningOpts, configuredSkillLearningEnabled := skillLearningOptionsFromConfig(cfg, opts, os.Getenv)
 	skillLearningEnabled := skillLearningEffectiveEnabled(skillLearningOpts, configuredSkillLearningEnabled)
+
+	persistedState, err := loadStateWithPermission(ctx, stateStore, "load persisted state", "atteler.state.load", "load persisted state")
+	if err != nil {
+		return appState{}, err
+	}
+
+	warnInvalidHookConfig(cfg.Hooks)
+
+	selection, err := resolveSelection(ctx, opts, cfg, persistedState.ModelForFolder(cwd), agentRegistry, store)
+	if err != nil {
+		return appState{}, err
+	}
+
+	ctx = contextWithPermissionAuditMetadata(ctx, store, selection.sessionState, selection.selectedAgent, selection.selectedModel)
+
 	skillLearningEnabled = skillLearningEnabledForAutonomy(skillLearningEnabled, autonomyLevel)
 	eventObservers := skillLearningObserversFromOptions(ctx, skillLearningOpts, skillLearningEnabled)
 	hookRunner := events.NewRunnerWithOptions(cfg.Hooks, events.RunnerOptions{
@@ -1213,16 +1377,6 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	ledgerTransferred := false
 	defer closeHookRunnerUnlessTransferred(ctx, hookRunner, &ledgerTransferred)
-
-	persistedState, stateErr := stateStore.Load()
-	if stateErr != nil {
-		fmt.Fprintln(os.Stderr, "warning: "+stateErr.Error())
-	}
-
-	selection, err := resolveSelection(opts, cfg, persistedState.ModelForFolder(cwd), agentRegistry, store)
-	if err != nil {
-		return appState{}, err
-	}
 
 	reg, providerReadiness := autoRegisterForOptions(
 		ctx,
@@ -1304,6 +1458,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		fallbackModels:               selection.fallbackModels,
 		pluginPaths:                  append([]string(nil), cfg.Plugins.Paths...),
 		pluginPolicy:                 clonePluginPolicy(cfg.Plugins.Policy),
+		permissionPolicy:             permissionPolicy,
 		promptContextCache:           newPromptContextCache(promptContextCachePath(store)),
 		generationDefaults:           generationDefaults,
 		generationOverrides:          generationOverrides,
@@ -1418,7 +1573,7 @@ func worktreeMergePolicyFromConfigOptions(cfg appconfig.Config, opts cliOptions)
 	}
 }
 
-func validateWorktreeAutoMergePolicy(policy cliWorktreeMergePolicy) error {
+func validateWorktreeAutoMergePolicy(policy cliWorktreeMergePolicy, _ ...autonomy.Level) error {
 	if !policy.AutoMerge {
 		return nil
 	}

@@ -90,9 +90,42 @@ func LoadRegistry(paths []string) (*Registry, error) {
 	return registry, nil
 }
 
+// LoadRegistryContext loads all configured plugin paths through Atteler's
+// central permission policy.
+func LoadRegistryContext(ctx context.Context, paths []string) (*Registry, error) {
+	registry := &Registry{plugins: make(map[string]Plugin, len(paths))}
+	for _, path := range paths {
+		plugin, err := loadPluginContext(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+
+		name := strings.TrimSpace(plugin.Manifest.Name)
+		if existing, ok := registry.plugins[name]; ok {
+			return nil, fmt.Errorf(
+				"plugin: duplicate plugin name %q in %s and %s",
+				name,
+				existing.ManifestPath,
+				plugin.ManifestPath,
+			)
+		}
+
+		registry.plugins[name] = plugin
+		registry.order = append(registry.order, name)
+	}
+
+	return registry, nil
+}
+
 // NewRegistry loads all configured plugin paths into a registry.
 func NewRegistry(paths []string) (*Registry, error) {
 	return LoadRegistry(paths)
+}
+
+// NewRegistryContext loads all configured plugin paths through Atteler's
+// central permission policy.
+func NewRegistryContext(ctx context.Context, paths []string) (*Registry, error) {
+	return LoadRegistryContext(ctx, paths)
 }
 
 // List returns loaded plugin names in configuration order.
@@ -142,6 +175,47 @@ func (r *Registry) ResolveEntrypoint(pluginName, entrypointName string) (Entrypo
 
 	root, target, err := resolveEntrypoint(plugin.Root, relativePath)
 	if err != nil {
+		return Entrypoint{}, fmt.Errorf("plugin: resolve entrypoint %q: %w", entrypointName, err)
+	}
+
+	return Entrypoint{
+		PluginName:     strings.TrimSpace(plugin.Manifest.Name),
+		EntrypointName: entrypointName,
+		Root:           root,
+		ManifestPath:   plugin.ManifestPath,
+		RelativePath:   strings.TrimSpace(relativePath),
+		Path:           target,
+	}, nil
+}
+
+// ResolveEntrypointContext is ResolveEntrypoint with an explicit central
+// permission gate around filesystem inspection needed to resolve symlinks.
+func (r *Registry) ResolveEntrypointContext(ctx context.Context, policy *permission.Policy, pluginName, entrypointName string) (Entrypoint, error) {
+	plugin, ok := r.Get(pluginName)
+	if !ok {
+		return Entrypoint{}, fmt.Errorf("plugin: %q not found", strings.TrimSpace(pluginName))
+	}
+
+	entrypointName = strings.TrimSpace(entrypointName)
+	if entrypointName == "" {
+		return Entrypoint{}, errors.New("plugin: empty entrypoint name")
+	}
+
+	if err := plugin.Manifest.Validate(plugin.Root); err != nil {
+		return Entrypoint{}, fmt.Errorf("plugin: validate manifest: %w", err)
+	}
+
+	relativePath, ok := plugin.Manifest.Entrypoints[entrypointName]
+	if !ok {
+		return Entrypoint{}, fmt.Errorf("plugin: entrypoint %q not found", entrypointName)
+	}
+
+	root, target, err := authorizeAndResolveEntrypoint(ctx, policy, plugin.Root, plugin.Manifest, relativePath)
+	if err != nil {
+		if permission.ErrDenied(err) {
+			return Entrypoint{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, err)
+		}
+
 		return Entrypoint{}, fmt.Errorf("plugin: resolve entrypoint %q: %w", entrypointName, err)
 	}
 
@@ -283,6 +357,25 @@ func authorizeDryRunCentralPermission(
 	return nil
 }
 
+// DryRunEntrypointContext describes a named plugin entrypoint without executing
+// it, while still gating entrypoint filesystem inspection.
+func (r *Registry) DryRunEntrypointContext(ctx context.Context, policy *permission.Policy, pluginName, entrypointName string) (DryRun, error) {
+	entrypoint, err := r.ResolveEntrypointContext(ctx, policy, pluginName, entrypointName)
+	if err != nil {
+		return DryRun{}, err
+	}
+
+	description := fmt.Sprintf(
+		"would run plugin %q entrypoint %q at %s with working directory %s",
+		entrypoint.PluginName,
+		entrypoint.EntrypointName,
+		entrypoint.Path,
+		entrypoint.Root,
+	)
+
+	return DryRun{Entrypoint: entrypoint, Description: description}, nil
+}
+
 func loadPlugin(path string) (Plugin, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -363,4 +456,40 @@ func copyEntrypointContract(in EntrypointContract) EntrypointContract {
 	out.Output = &output
 
 	return out
+}
+
+func loadPluginContext(ctx context.Context, path string) (Plugin, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return Plugin{}, errors.New("plugin: empty manifest path")
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return Plugin{}, fmt.Errorf("plugin: resolve %s: %w", path, err)
+	}
+
+	info, err := statManifestPath(ctx, absPath)
+	if err != nil {
+		return Plugin{}, err
+	}
+
+	root := filepath.Dir(absPath)
+
+	manifestPath := absPath
+	if info.IsDir() {
+		root = absPath
+
+		manifestPath, err = FindManifestContext(ctx, root)
+		if err != nil {
+			return Plugin{}, err
+		}
+	}
+
+	manifest, err := LoadFileContext(ctx, manifestPath)
+	if err != nil {
+		return Plugin{}, err
+	}
+
+	return Plugin{Manifest: manifest, Root: root, ManifestPath: manifestPath}, nil
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ func TestValidateConfig_PrintsHarnessImporterWarnings(t *testing.T) {
 	}`), 0o600))
 
 	out := captureStdoutForStateDiagnostics(t, func() {
-		require.NoError(t, validateConfig())
+		require.NoError(t, validateConfig(t.Context()))
 	})
 
 	assert.Contains(t, out, "Config importer warnings:")
@@ -61,7 +62,7 @@ base_url = "https://openai.example"
 	t.Chdir(tempDir)
 
 	out := captureStdoutForStateDiagnostics(t, func() {
-		require.NoError(t, validateConfig())
+		require.NoError(t, validateConfig(t.Context()))
 	})
 
 	assert.Contains(t, out, "Config importer warnings:")
@@ -94,7 +95,7 @@ func TestValidateConfig_PrintsHarnessImporterWarningsBeforeConfigError(t *testin
 	var err error
 
 	out := captureStdoutForStateDiagnostics(t, func() {
-		err = validateConfig()
+		err = validateConfig(t.Context())
 	})
 
 	require.Error(t, err)
@@ -131,7 +132,7 @@ func TestValidateConfig_AcceptsAllAgentLoopBudgetFields(t *testing.T) {
 `), 0o600))
 
 	out := captureStdoutForStateDiagnostics(t, func() {
-		require.NoError(t, validateConfig())
+		require.NoError(t, validateConfig(t.Context()))
 	})
 
 	assert.Contains(t, out, "Config valid: "+configPath)
@@ -220,7 +221,7 @@ func TestValidateConfig_RejectsAgentLoopBudgetFields(t *testing.T) {
 			require.NoError(t, os.MkdirAll(configDir, 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("agent_loop:\n  "+tc.field+": "+tc.value+"\n"), 0o600))
 
-			err := validateConfig()
+			err := validateConfig(t.Context())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantError)
 		})
@@ -306,7 +307,7 @@ func TestValidateConfig_RejectsNegativeRoutingLimits(t *testing.T) {
 			require.NoError(t, os.MkdirAll(configDir, 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(tc.config), 0o600))
 
-			err := validateConfig()
+			err := validateConfig(t.Context())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantError)
 		})
@@ -364,7 +365,7 @@ func TestValidateConfig_RejectsNonFiniteRoutingLimits(t *testing.T) {
 			require.NoError(t, os.MkdirAll(configDir, 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(tc.config), 0o600))
 
-			err := validateConfig()
+			err := validateConfig(t.Context())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantError)
 		})
@@ -426,7 +427,7 @@ func TestValidateConfig_RejectsInvalidModelRoleDefinitions(t *testing.T) {
 			require.NoError(t, os.MkdirAll(configDir, 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(tc.config), 0o600))
 
-			err := validateConfig()
+			err := validateConfig(t.Context())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantError)
 		})
@@ -497,7 +498,7 @@ func TestValidateConfig_RejectsUnknownRouteCapabilities(t *testing.T) {
 			require.NoError(t, os.MkdirAll(configDir, 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(tc.config), 0o600))
 
-			err := validateConfig()
+			err := validateConfig(t.Context())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantError)
 			assert.Contains(t, err.Error(), validCapabilities)
@@ -525,7 +526,7 @@ func TestValidateConfig_RejectsUnknownProviderType(t *testing.T) {
     models: [tiny]
 `), 0o600))
 
-	err := validateConfig()
+	err := validateConfig(t.Context())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `providers.localai.type unsupported provider type "telepathy"`)
 	assert.Contains(t, err.Error(), "openai_compatible")
@@ -550,7 +551,7 @@ func TestValidateConfig_RejectsCustomProviderWithoutType(t *testing.T) {
     models: [tiny]
 `), 0o600))
 
-	err := validateConfig()
+	err := validateConfig(t.Context())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `providers.localai.type missing for custom provider "localai"`)
 	assert.Contains(t, err.Error(), "openai_compatible")
@@ -597,7 +598,7 @@ func TestValidateConfig_RejectsOpenAICompatibleProviderWithoutBaseURL(t *testing
 			require.NoError(t, os.MkdirAll(configDir, 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(tc.config), 0o600))
 
-			err := validateConfig()
+			err := validateConfig(t.Context())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantError)
 		})
@@ -651,7 +652,7 @@ func TestValidateConfig_RejectsInvalidOpenAICompatibleProviderPath(t *testing.T)
 `, tc.field)
 			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(config), 0o600))
 
-			err := validateConfig()
+			err := validateConfig(t.Context())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantError)
 		})
@@ -676,7 +677,7 @@ func TestValidateConfig_RejectsIncompatibleBuiltinProviderType(t *testing.T) {
     type: openai_compatible
 `), 0o600))
 
-	err := validateConfig()
+	err := validateConfig(t.Context())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `providers.anthropic.type unsupported provider type "openai_compatible"`)
 }
@@ -706,7 +707,7 @@ func TestValidateConfig_AcceptsProviderTypeAliases(t *testing.T) {
     type: anthropic
 `), 0o600))
 
-	require.NoError(t, validateConfig())
+	require.NoError(t, validateConfig(t.Context()))
 }
 
 func TestValidateConfig_RejectsUnsupportedVectorConfig(t *testing.T) {
@@ -739,7 +740,7 @@ vector:
       fallback_policy: lexical
 `), 0o600))
 
-	err := validateConfig()
+	err := validateConfig(context.Background())
 	require.Error(t, err)
 
 	message := err.Error()
@@ -770,7 +771,7 @@ vector:
       index_path: ./.atteler/shared-vector-index.json
 `), 0o600))
 
-	err := validateConfig()
+	err := validateConfig(context.Background())
 	require.Error(t, err)
 
 	message := err.Error()
@@ -799,7 +800,7 @@ vector:
   workspace_index_path: .atteler/git-history-vector-index.lexical.json
 `), 0o600))
 
-	err := validateConfig()
+	err := validateConfig(context.Background())
 	require.Error(t, err)
 
 	message := err.Error()
@@ -839,7 +840,7 @@ vector:
       model: reviewer-memory-embed
 `), 0o600))
 
-	err := validateConfig()
+	err := validateConfig(context.Background())
 	require.Error(t, err)
 
 	message := err.Error()
@@ -923,7 +924,7 @@ hooks:
 	t.Setenv(appconfig.EnvPath, configPath)
 	t.Chdir(tempDir)
 
-	err := validateConfig()
+	err := validateConfig(t.Context())
 	require.Error(t, err)
 
 	message := err.Error()

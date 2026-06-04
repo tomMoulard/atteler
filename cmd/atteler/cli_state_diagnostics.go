@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -56,12 +57,18 @@ type stateProviderReport struct {
 	Healthy            bool     `yaml:"healthy,omitempty"`
 }
 
-func printStateDiagnostics(opts cliOptions, state appState) error {
+func printStateDiagnostics(ctx context.Context, opts cliOptions, state appState) error {
 	store := appconfig.NewStateStore("")
 
-	persisted, err := store.Load()
+	persisted, err := loadStateWithPermission(
+		ctx,
+		store,
+		"read state diagnostics",
+		"atteler.state.diagnostics",
+		"state diagnostics",
+	)
 	if err != nil {
-		return fmt.Errorf("state diagnostics: load %s: %w", store.Path(), err)
+		return err
 	}
 
 	sessionPrefs, err := stateDiagnosticSession(opts, state.sessionStore)

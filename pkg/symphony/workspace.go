@@ -15,6 +15,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -39,8 +40,12 @@ func (m *WorkspaceManager) Ensure(ctx context.Context, cfg Config, issue Issue) 
 	}
 
 	root := filepath.Clean(cfg.Workspace.Root)
-	if err := ensureWorkspaceRoot(root, cfg.Autonomy); err != nil {
-		return Workspace{}, err
+	if err := authorizeWorkspacePermission(ctx, "create Symphony workspace root", root, issue, permission.OperationWrite); err != nil {
+		return Workspace{}, fmt.Errorf("workspace: create root %s: %w", root, err)
+	}
+
+	if err := os.MkdirAll(root, workspaceDirPermissions); err != nil {
+		return Workspace{}, fmt.Errorf("workspace: create root %s: %w", root, err)
 	}
 
 	path := filepath.Join(root, key)
@@ -48,7 +53,7 @@ func (m *WorkspaceManager) Ensure(ctx context.Context, cfg Config, issue Issue) 
 		return Workspace{}, err
 	}
 
-	createdNow, err := ensureWorkspaceIssueDir(path, cfg.Autonomy)
+	createdNow, err := ensureIssueWorkspaceDir(ctx, path, issue)
 	if err != nil {
 		return Workspace{}, err
 	}
@@ -63,29 +68,11 @@ func (m *WorkspaceManager) Ensure(ctx context.Context, cfg Config, issue Issue) 
 	return workspace, nil
 }
 
-func ensureWorkspaceRoot(root string, level autonomy.Level) error {
-	info, statErr := os.Stat(root)
-	switch {
-	case statErr == nil && !info.IsDir():
-		return fmt.Errorf("workspace: %s exists and is not a directory", root)
-	case statErr == nil:
-		return nil
-	case errors.Is(statErr, os.ErrNotExist):
-		if err := requireWorkspaceFileWrite(level, "workspace creation"); err != nil {
-			return err
-		}
-
-		if err := os.MkdirAll(root, workspaceDirPermissions); err != nil {
-			return fmt.Errorf("workspace: create root %s: %w", root, err)
-		}
-
-		return nil
-	default:
-		return fmt.Errorf("workspace: stat root %s: %w", root, statErr)
+func ensureIssueWorkspaceDir(ctx context.Context, path string, issue Issue) (bool, error) {
+	if err := authorizeWorkspacePermission(ctx, "inspect Symphony issue workspace", path, issue, permission.OperationRead); err != nil {
+		return false, err
 	}
-}
 
-func ensureWorkspaceIssueDir(path string, level autonomy.Level) (bool, error) {
 	info, statErr := os.Stat(path)
 	switch {
 	case statErr == nil && !info.IsDir():
@@ -93,8 +80,8 @@ func ensureWorkspaceIssueDir(path string, level autonomy.Level) (bool, error) {
 	case statErr == nil:
 		return false, nil
 	case errors.Is(statErr, os.ErrNotExist):
-		if err := requireWorkspaceFileWrite(level, "workspace creation"); err != nil {
-			return false, err
+		if err := authorizeWorkspacePermission(ctx, "create Symphony issue workspace", path, issue, permission.OperationWrite); err != nil {
+			return false, fmt.Errorf("workspace: create %s: %w", path, err)
 		}
 
 		if err := os.Mkdir(path, workspaceDirPermissions); err != nil {
@@ -123,6 +110,10 @@ func (m *WorkspaceManager) Remove(ctx context.Context, cfg Config, issue Issue) 
 		return err
 	}
 
+	if err := authorizeWorkspacePermission(ctx, "inspect Symphony workspace before removal", workspace.Path, issue, permission.OperationRead); err != nil {
+		return err
+	}
+
 	if _, err := os.Stat(workspace.Path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -131,7 +122,7 @@ func (m *WorkspaceManager) Remove(ctx context.Context, cfg Config, issue Issue) 
 		return fmt.Errorf("workspace: stat %s: %w", workspace.Path, err)
 	}
 
-	if err := requireWorkspaceFileWrite(cfg.Autonomy, "workspace removal"); err != nil {
+	if err := authorizeWorkspacePermission(ctx, "remove Symphony workspace", workspace.Path, issue, permission.OperationWrite, permission.OperationMergeDelete); err != nil {
 		return err
 	}
 
@@ -154,12 +145,45 @@ func (m *WorkspaceManager) Remove(ctx context.Context, cfg Config, issue Issue) 
 	return nil
 }
 
-func requireWorkspaceFileWrite(level autonomy.Level, detail string) error {
-	if autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+func authorizeWorkspacePermission(
+	ctx context.Context,
+	action, target string,
+	issue Issue,
+	kinds ...permission.OperationKind,
+) error {
+	ops := make([]permission.Operation, 0, len(kinds))
+	for _, kind := range kinds {
+		if kind == "" {
+			continue
+		}
+
+		op := permission.Operation{
+			Kind:   kind,
+			Action: action,
+			Source: "symphony.workspace",
+			Target: target,
+		}
+		if issue.ID != "" || issue.Identifier != "" {
+			op.Metadata = map[string]string{
+				"issue_id":         issue.ID,
+				"issue_identifier": issue.Identifier,
+			}
+		}
+
+		ops = append(ops, op)
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Operations: ops,
+		Action:     action,
+		Source:     "symphony.workspace",
+		Target:     target,
+	})
+	if decision.Allowed {
 		return nil
 	}
 
-	return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, detail))
+	return &permission.Error{Decision: decision}
 }
 
 // SanitizeWorkspaceKey converts an issue identifier to a safe directory name.

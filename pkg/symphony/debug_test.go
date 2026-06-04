@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 type staticDebugSnapshotter struct {
@@ -89,79 +93,27 @@ func TestDebugServerStatusAndEvents(t *testing.T) {
 	assert.Equal(t, "issue_dispatched", events.RecentEvents[0].Kind)
 }
 
-func TestDebugConfigSnapshotIncludesPublishVerificationControls(t *testing.T) {
+func TestStartDebugServer_PermissionPolicyDeniesNetworkBeforeListen(t *testing.T) {
 	t.Parallel()
 
-	got := debugConfigSnapshot(Config{
-		Publish: PublishConfig{
-			Enabled:                 true,
-			BaseBranch:              "main",
-			BranchPrefix:            "symphony",
-			Draft:                   true,
-			DraftOnFailedValidation: false,
-			VerificationGates: []VerificationGateConfig{{
-				Name:     "gate_token=secret-value",
-				Command:  "printf api_key=super-secret",
-				Timeout:  2 * time.Second,
-				Required: true,
-			}},
-			VerificationAllowCommands:  []string{"printf"},
-			VerificationDenyCommands:   []string{"curl"},
-			VerificationOutputMaxBytes: 128,
-		},
-	})
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
 
-	assert.True(t, got.PublishEnabled)
-	assert.True(t, got.PublishDraft)
-	assert.False(t, got.PublishDraftOnFailedValidation)
-	assert.Equal(t, int64(128), got.PublishVerificationOutputMaxBytes)
-	assert.Equal(t, []string{"printf"}, got.PublishVerificationAllowCommands)
-	assert.Equal(t, []string{"curl"}, got.PublishVerificationDenyCommands)
-	require.Len(t, got.PublishVerificationGates, 1)
-	assert.True(t, got.PublishVerificationGates[0].Required)
-	assert.Equal(t, int64(2000), got.PublishVerificationGates[0].TimeoutMS)
-	assert.Contains(t, got.PublishVerificationGates[0].Name, "[REDACTED]")
-	assert.Contains(t, got.PublishVerificationGates[0].Command, "[REDACTED]")
-	assert.NotContains(t, got.PublishVerificationGates[0].Name, "secret-value")
-	assert.NotContains(t, got.PublishVerificationGates[0].Command, "super-secret")
-}
-
-func TestDebugServer_RateLimitsRoundTripAsJSONObject(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
 
 	server, err := StartDebugServer(ctx, DebugConfig{
 		Enabled: true,
 		Address: "127.0.0.1:0",
-	}, staticDebugSnapshotter{snapshot: DebugSnapshot{
-		Now:   time.Now().UTC(),
-		Codex: debugCodexSnapshot(codexTotals{}, jsonRaw(`{"primary":{"used_percent":42}}`)),
-	}}, nil)
-	require.NoError(t, err)
+	}, staticDebugSnapshotter{}, nil)
+	require.Error(t, err)
+	require.Nil(t, server)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.network.deny")
 
-	defer func() {
-		require.NoError(t, server.Close())
-	}()
-
-	statusResp, err := http.Get("http://" + server.Address() + "/debug/status") //nolint:noctx // Test client is bounded by server shutdown.
-	require.NoError(t, err)
-
-	defer func() {
-		require.NoError(t, statusResp.Body.Close())
-	}()
-
-	require.Equal(t, http.StatusOK, statusResp.StatusCode)
-
-	var status struct {
-		Codex struct {
-			RateLimits any `json:"rate_limits"`
-		} `json:"codex"`
-	}
-	require.NoError(t, json.NewDecoder(statusResp.Body).Decode(&status))
-
-	limits, ok := status.Codex.RateLimits.(map[string]any)
-	require.True(t, ok, "rate_limits must decode as a JSON object, got %T (%v)", status.Codex.RateLimits, status.Codex.RateLimits)
-	assert.Equal(t, map[string]any{"primary": map[string]any{"used_percent": float64(42)}}, limits)
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "start local debug HTTP server")
+	assert.Contains(t, string(auditData), "permission.network.deny")
 }

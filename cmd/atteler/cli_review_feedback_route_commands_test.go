@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/feedback"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/modelroute"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/review"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/watch"
@@ -116,6 +118,57 @@ func TestMergeArtifactsWritesJSONBundle(t *testing.T) {
 	jsonConsumedAt, err := time.Parse(time.RFC3339Nano, out.Entries[0].ConsumedAt)
 	require.NoError(t, err)
 	assert.True(t, loaded.Artifacts[0].ConsumedAt.Equal(jsonConsumedAt))
+}
+
+func TestMergeArtifactsPermissionPolicyDeniesOutputWrite(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "research.md")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("research notes"), 0o600))
+
+	outputPath := filepath.Join(dir, "merged.md")
+	sessionState := session.New("gpt-test", nil)
+	assert.True(t, sessionState.RecordArtifact("research.md", "research", "notes", "reviewer"))
+
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, filepath.Join(dir, "audit"))
+
+	err := mergeArtifacts(ctx, appState{
+		cwd:           dir,
+		sessionState:  sessionState,
+		selectedAgent: "reviewer",
+	}, outputPath, "markdown", 1024)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	require.NoFileExists(t, outputPath)
+}
+
+func TestMergeArtifactsPermissionPolicyDeniesArtifactRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "research.md")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("research notes"), 0o600))
+
+	sessionState := session.New("gpt-test", nil)
+	assert.True(t, sessionState.RecordArtifact("research.md", "research", "notes", "reviewer"))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	err := mergeArtifacts(ctx, appState{
+		cwd:          dir,
+		sessionState: sessionState,
+	}, "-", "markdown", 1024)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
 }
 
 func TestFormatReviewReport(t *testing.T) {
@@ -1206,7 +1259,7 @@ func TestApplyFeedbackProposalsWritesConfigAndHistory(t *testing.T) {
 		require.FailNow(t, "expected after evaluation to be recorded")
 	}
 
-	err := applyFeedbackProposals(saved, configPath, historyPath)
+	err := applyFeedbackProposals(t.Context(), saved, configPath, historyPath)
 
 	require.NoError(t, err)
 	cfg, _, err := config.LoadFiles([]string{configPath})
@@ -1234,6 +1287,90 @@ func TestApplyFeedbackProposalsWritesConfigAndHistory(t *testing.T) {
 	assert.Contains(t, history, "negative knowledge: skip regression tests -> hid an auth regression")
 }
 
+func TestApplyFeedbackProposalsPermissionPolicyDeniesWrite(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "atteler.yaml")
+	historyPath := filepath.Join(dir, "feedback.md")
+
+	require.NoError(t, os.WriteFile(configPath, []byte(`agents:
+  reviewer:
+    system_prompt: Review code.
+`), 0o600))
+
+	saved := session.New("gpt-test", nil)
+	require.True(t, saved.RecordNegativeKnowledge("skip regression tests", "hid an auth regression", "abc123", "reviewer"))
+	require.True(t, saved.RecordEvaluation("reviewer", "fail", "missed auth regression", "eval-before.md", 1))
+	require.True(t, saved.RecordEvaluation("reviewer", "pass", "auth regression covered", "eval-after.md", 5))
+
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, filepath.Join(dir, "audit"))
+
+	err := applyFeedbackProposals(ctx, saved, configPath, historyPath)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	require.NoFileExists(t, historyPath)
+
+	cfg, _, loadErr := config.LoadFiles([]string{configPath})
+	require.NoError(t, loadErr)
+	require.Contains(t, cfg.Agents, "reviewer")
+	assert.Empty(t, cfg.Agents["reviewer"].FeedbackGuidance)
+}
+
+func TestFeedbackGuidanceCommandsPermissionPolicyDeniesConfigRead(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		run  func(context.Context, session.Session, string, string) error
+		name string
+	}{
+		{
+			name: "apply",
+			run:  applyFeedbackProposals,
+		},
+		{
+			name: "approve",
+			run: func(ctx context.Context, _ session.Session, configPath, historyPath string) error {
+				return approveFeedbackGuidance(ctx, configPath, historyPath, "reviewer", "fg-denied")
+			},
+		},
+		{
+			name: "rollback",
+			run: func(ctx context.Context, _ session.Session, configPath, historyPath string) error {
+				return rollbackFeedbackGuidance(ctx, configPath, historyPath, "reviewer", "fg-denied", "superseded")
+			},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "atteler.yaml")
+			historyPath := filepath.Join(dir, "feedback.md")
+
+			require.NoError(t, os.WriteFile(configPath, []byte(`agents: {}`), 0o600))
+
+			policy := permission.DefaultPolicy()
+			policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+			ctx := permission.ContextWithPolicy(t.Context(), &policy)
+			ctx = permission.ContextWithAuditDir(ctx, filepath.Join(dir, "audit"))
+			err := tt.run(ctx, session.New("gpt-test", nil), configPath, historyPath)
+
+			require.Error(t, err)
+			require.True(t, permission.ErrDenied(err))
+			assert.Contains(t, err.Error(), "permission.read.deny")
+			assert.NoFileExists(t, historyPath)
+		})
+	}
+}
+
 func TestApplyFeedbackProposalsRestoresConfigWhenHistoryWriteFails(t *testing.T) {
 	t.Parallel()
 
@@ -1255,7 +1392,7 @@ func TestApplyFeedbackProposalsRestoresConfigWhenHistoryWriteFails(t *testing.T)
 	require.True(t, saved.RecordEvaluation("reviewer", "fail", "missed auth regression", "eval-before.md", 1))
 	require.True(t, saved.RecordEvaluation("reviewer", "pass", "auth regression covered", "eval-after.md", 5))
 
-	err := applyFeedbackProposals(saved, configPath, historyPath)
+	err := applyFeedbackProposals(t.Context(), saved, configPath, historyPath)
 
 	require.Error(t, err)
 
@@ -1295,7 +1432,7 @@ func TestApproveFeedbackGuidanceWritesConfigAndHistory(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	err := approveFeedbackGuidance(configPath, historyPath, "reviewer", "fg-approve")
+	err := approveFeedbackGuidance(t.Context(), configPath, historyPath, "reviewer", "fg-approve")
 
 	require.NoError(t, err)
 	cfg, _, err := config.LoadFiles([]string{configPath})
@@ -1348,7 +1485,7 @@ func TestApproveFeedbackGuidanceQuarantinesUnapprovableGuidance(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	err := approveFeedbackGuidance(configPath, historyPath, "reviewer", "fg-missing-source")
+	err := approveFeedbackGuidance(t.Context(), configPath, historyPath, "reviewer", "fg-missing-source")
 
 	require.NoError(t, err)
 	cfg, _, err := config.LoadFiles([]string{configPath})
@@ -1397,7 +1534,7 @@ func TestRollbackFeedbackGuidanceWritesConfigAndHistory(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	err := rollbackFeedbackGuidance(configPath, historyPath, "reviewer", "fg-rollback", "superseded")
+	err := rollbackFeedbackGuidance(t.Context(), configPath, historyPath, "reviewer", "fg-rollback", "superseded")
 
 	require.NoError(t, err)
 	cfg, _, err := config.LoadFiles([]string{configPath})

@@ -53,8 +53,8 @@ func mcpInvokeCommandInputFromOptions(opts cliOptions) mcpInvokeCommandInput {
 	}
 }
 
-func runMCPManifest(input mcpManifestCommandInput) error {
-	manifest, err := loadMCPManifest(input.Path)
+func runMCPManifest(ctx context.Context, input mcpManifestCommandInput) error {
+	manifest, err := loadMCPManifest(ctx, input.Path)
 	if err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func runMCPInvokeWithLevel(ctx context.Context, input mcpInvokeCommandInput, lev
 		return errors.New("mcp invoke: --mcp-server is required")
 	}
 
-	manifest, err := loadMCPManifest(input.ManifestPath)
+	manifest, err := loadMCPManifest(ctx, input.ManifestPath)
 	if err != nil {
 		return err
 	}
@@ -154,36 +154,11 @@ func runMCPInvokeWithLevel(ctx context.Context, input mcpInvokeCommandInput, lev
 	return nil
 }
 
-func authorizeMCPServerCommandWithAutonomy(ctx context.Context, server mcp.Server, level autonomy.Level) error {
-	level = autonomy.Normalize(level)
-	if level == autonomy.Low {
-		return fmt.Errorf(
-			"mcp server command denied by local process policy (autonomy.low): %s",
-			autonomy.DenialMessage(level, autonomy.ActionMutatingShell, "mcp server command execution"),
-		)
+func loadMCPManifest(ctx context.Context, path string) (mcp.Manifest, error) {
+	if err := authorizeReadPermission(ctx, "read MCP manifest", "atteler.mcp", path); err != nil {
+		return mcp.Manifest{}, err
 	}
 
-	command := strings.Join(append([]string{server.Command}, server.Args...), " ")
-	decision := llm.BashToolPolicyForAutonomy(level)(ctx, llm.ToolCall{
-		Name:  "bash",
-		Input: map[string]any{"command": command},
-	}, llm.AgentLoopBudgetSnapshot{})
-
-	switch decision.Verdict {
-	case llm.ToolPolicyAllow:
-		return nil
-	case llm.ToolPolicyRequireConfirm:
-		return fmt.Errorf("mcp server command requires confirmation by local process policy (%s): %s", decision.MatchedRule, decision.Reason)
-	case llm.ToolPolicyDeny:
-		return fmt.Errorf("mcp server command denied by local process policy (%s): %s", decision.MatchedRule, decision.Reason)
-	case llm.ToolPolicyDryRun:
-		return fmt.Errorf("mcp server command blocked by local process policy dry-run decision (%s): %s", decision.MatchedRule, decision.Reason)
-	default:
-		return fmt.Errorf("mcp server command blocked by unknown local process policy verdict %q (%s): %s", decision.Verdict, decision.MatchedRule, decision.Reason)
-	}
-}
-
-func loadMCPManifest(path string) (mcp.Manifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return mcp.Manifest{}, fmt.Errorf("mcp manifest: read %s: %w", path, err)
@@ -210,6 +185,40 @@ func findMCPServer(manifest mcp.Manifest, name string) (mcp.Server, bool) {
 	}
 
 	return mcp.Server{}, false
+}
+
+func authorizeMCPServerCommandWithAutonomy(ctx context.Context, server mcp.Server, level autonomy.Level) error {
+	level = autonomy.Normalize(level)
+	if level == autonomy.Low {
+		return fmt.Errorf(
+			"mcp server command denied by local process policy (autonomy.low): %s",
+			autonomy.DenialMessage(level, autonomy.ActionMutatingShell, "mcp server command execution"),
+		)
+	}
+
+	command := strings.Join(append([]string{server.Command}, server.Args...), " ")
+	decision := llm.BashToolPolicyForAutonomy(level)(ctx, llm.ToolCall{
+		Name:  "bash",
+		Input: map[string]any{"command": command},
+	}, llm.AgentLoopBudgetSnapshot{})
+
+	switch decision.Verdict {
+	case llm.ToolPolicyAllow:
+		return nil
+	case llm.ToolPolicyRequireConfirm:
+		return fmt.Errorf("mcp server command requires confirmation: %s", decision.Reason)
+	case llm.ToolPolicyDeny:
+		reason := decision.Reason
+		if strings.Contains(reason, "denied by permission policy") && !strings.Contains(reason, "permission.") {
+			reason += " (permission.execute.deny)"
+		}
+
+		return fmt.Errorf("mcp server command denied by local process policy: %s", reason)
+	case llm.ToolPolicyDryRun:
+		return fmt.Errorf("mcp server command blocked by dry-run policy: %s", decision.Reason)
+	default:
+		return fmt.Errorf("mcp server command blocked by unknown policy verdict %q: %s", decision.Verdict, decision.Reason)
+	}
 }
 
 func formatMCPServer(server mcp.Server) string {

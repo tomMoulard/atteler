@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 const worktreeManifestVersion = 1
@@ -73,6 +75,12 @@ func loadWorktreeManifest(ctx context.Context, repoRoot, sessionID string) (*wor
 		return nil, false, err
 	}
 
+	if permissionErr := authorizeWorktreePermission(ctx, "read worktree ownership manifest", path, sessionID, []permission.OperationKind{
+		permission.OperationRead,
+	}); permissionErr != nil {
+		return nil, false, permissionErr
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -100,6 +108,12 @@ func writeWorktreeManifest(ctx context.Context, repoRoot string, manifest *workt
 	path, err := worktreeManifestPath(ctx, repoRoot, manifest.SessionID)
 	if err != nil {
 		return err
+	}
+
+	if permissionErr := authorizeWorktreePermission(ctx, "write worktree ownership manifest", path, manifest.SessionID, []permission.OperationKind{
+		permission.OperationWrite,
+	}); permissionErr != nil {
+		return permissionErr
 	}
 
 	mkdirErr := os.MkdirAll(filepath.Dir(path), 0o700)
@@ -148,6 +162,12 @@ func appendWorktreeLedger(ctx context.Context, repoRoot, sessionID, event, detai
 	path, err := worktreeLedgerPath(ctx, repoRoot, sessionID)
 	if err != nil {
 		return err
+	}
+
+	if permissionErr := authorizeWorktreePermission(ctx, "write worktree ownership ledger", path, sessionID, []permission.OperationKind{
+		permission.OperationWrite,
+	}); permissionErr != nil {
+		return permissionErr
 	}
 
 	mkdirErr := os.MkdirAll(filepath.Dir(path), 0o700)

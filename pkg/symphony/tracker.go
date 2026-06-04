@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/watch"
 )
 
@@ -110,6 +111,17 @@ func (c *LinearClient) fetchIssues(ctx context.Context, states []string, query s
 
 func (c *LinearClient) graphql(ctx context.Context, query string, variables map[string]any, out any) error {
 	if err := requireTrackerContext(ctx); err != nil {
+		return err
+	}
+
+	if err := authorizeTrackerPermission(
+		ctx,
+		"call Linear GraphQL API",
+		"atteler.tracker.linear",
+		c.cfg.Endpoint,
+		permission.OperationNetwork,
+		permission.OperationCredentialAccess,
+	); err != nil {
 		return err
 	}
 
@@ -669,6 +681,16 @@ func (c *GitHubClient) do(ctx context.Context, method, path string, in any, out 
 	}
 
 	endpoint := strings.TrimRight(c.cfg.Endpoint, "/") + path
+	if err := authorizeTrackerPermission(
+		ctx,
+		"github "+method+" "+path,
+		"atteler.tracker.github",
+		endpoint,
+		githubTrackerOperationKinds(method)...,
+	); err != nil {
+		return err
+	}
+
 	var body io.Reader
 	if in != nil {
 		data, err := json.Marshal(in)
@@ -718,6 +740,54 @@ func (c *GitHubClient) do(ctx context.Context, method, path string, in any, out 
 	}
 
 	return nil
+}
+
+func authorizeTrackerPermission(
+	ctx context.Context,
+	action, source, target string,
+	kinds ...permission.OperationKind,
+) error {
+	ops := make([]permission.Operation, 0, len(kinds))
+	for _, kind := range kinds {
+		if kind == "" {
+			continue
+		}
+
+		ops = append(ops, permission.Operation{
+			Kind:   kind,
+			Action: action,
+			Source: source,
+			Target: target,
+		})
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Operations: ops,
+		Action:     action,
+		Source:     source,
+		Target:     target,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
+}
+
+func githubTrackerOperationKinds(method string) []permission.OperationKind {
+	kinds := []permission.OperationKind{
+		permission.OperationNetwork,
+		permission.OperationCredentialAccess,
+	}
+
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet, http.MethodHead:
+		return kinds
+	case http.MethodDelete:
+		return append(kinds, permission.OperationWrite, permission.OperationMergeDelete)
+	default:
+		return append(kinds, permission.OperationWrite)
+	}
 }
 
 func requireTrackerContext(ctx context.Context) error {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -66,7 +68,7 @@ func TestWriteSessionExport_JSONUsesRedactedMachineExport(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "session.json")
 
-	require.NoError(t, writeSessionExport(sessionState, path))
+	require.NoError(t, writeSessionExport(context.Background(), sessionState, path))
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -78,6 +80,25 @@ func TestWriteSessionExport_JSONUsesRedactedMachineExport(t *testing.T) {
 	assert.Contains(t, out, "[REDACTED_PATH]")
 	assert.NotContains(t, out, secret)
 	assert.NotContains(t, out, "/Users/tom")
+}
+
+func TestWriteSessionExportPermissionPolicyDeniesWriteBeforeCreatingDir(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "nested", "session.md")
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithAuditDir(t.Context(), filepath.Join(root, "audit"))
+	ctx = permission.ContextWithPolicy(ctx, &policy)
+
+	err := writeSessionExport(ctx, session.New("gpt-test", nil), path)
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	assert.NoDirExists(t, filepath.Dir(path))
 }
 
 func captureStdoutForExport(t *testing.T, fn func()) string {

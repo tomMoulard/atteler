@@ -336,13 +336,23 @@ create the worker branch from the same base used for PR publication.
 
 The runner launches `codex.command` with `bash -lc` inside the issue workspace
 and speaks the current Codex app-server JSONL protocol over stdio.
+Startup goes through Atteler's central permission/audit gate as an
+`execute` plus Codex-specific `write`, `network`, and `credential_access`
+side-effect request. A stricter policy can therefore block the app-server
+before the `codex` process starts, and the command/side-effect ledgers record
+the allow or deny reason.
+Command execution, file-change, and session-network approval requests from the
+app-server are also evaluated against the same policy before Atteler responds
+to Codex.
 
 Implementation-defined safety posture:
 
 - Approval requests for command execution and file changes are auto-approved
-  for the current app-server session.
-- Permission requests grant session-scoped network permission and otherwise
-  leave filesystem policy to the configured Codex sandbox.
+  for the current app-server session only after the central policy allows their
+  classified side effects.
+- Permission requests grant session-scoped network permission only after the
+  central network gate allows it and otherwise leave filesystem policy to the
+  configured Codex sandbox.
 - Unsupported dynamic client-side tool calls return structured
   `success=false` tool output so the turn does not stall.
 - User-input-required and MCP elicitation requests fail the run attempt

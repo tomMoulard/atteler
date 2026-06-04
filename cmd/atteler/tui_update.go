@@ -61,7 +61,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case llmResponseMsg, llmEventLineMsg, llmToolOutputMsg:
 		return m.updateLLMMessage(msg)
 
-	case shellResultMsg, shellOutputMsg:
+	case shellResultMsg, shellOutputMsg, interactiveShellReadyMsg:
 		return m.updateShellMessage(msg)
 
 	case idleSuggestionRequestMsg, idleSuggestionMsg:
@@ -130,6 +130,8 @@ func (m model) updateShellMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateShellResult(msg)
 	case shellOutputMsg:
 		return m.updateShellOutput(msg)
+	case interactiveShellReadyMsg:
+		return m.updateInteractiveShellReady(msg)
 	default:
 		return m, nil
 	}
@@ -152,44 +154,7 @@ func (m model) updateModelsLoaded(msg modelsLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if msg.provider == "" {
-		m.pickerLoading = false
-
-		m.modelFetchesPending = 0
-		if msg.err != nil {
-			m.pickerOpen = false
-			return m, tea.Println(errStyle.Render("Error loading models: " + msg.err.Error()))
-		}
-
-		if externalModelPickerAllowed(m.autonomy) {
-			if fzfPath, ok := findFZF(); ok {
-				m.pickerOpen = false
-
-				return m, tea.Batch(
-					emitHook(m.ctx, m.hookRunner, events.Event{
-						Type:        events.CommandExecute,
-						SessionID:   m.sessionState.ID,
-						SessionPath: m.sessionPath,
-						Agent:       m.selectedAgent,
-						Model:       m.selectedModel,
-						Metadata: map[string]string{
-							"autonomy": m.autonomy.String(),
-							"command":  "fzf",
-						},
-					}),
-					runFZFModelPicker(m.ctx, fzfPath, msg.items, attshell.AuditContext{
-						Caller:      "atteler.fzf_model_picker",
-						SessionID:   m.sessionState.ID,
-						SessionPath: m.sessionPath,
-						Autonomy:    m.autonomy.String(),
-					}),
-				)
-			}
-		}
-
-		m.pickerItems = msg.items
-		m.pickerCursor = 0
-
-		return m, nil
+		return m.updateAllModelsLoaded(msg)
 	}
 
 	if m.modelFetchesPending > 0 {
@@ -212,6 +177,69 @@ func (m model) updateModelsLoaded(msg modelsLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m model) updateAllModelsLoaded(msg modelsLoadedMsg) (tea.Model, tea.Cmd) {
+	m.pickerLoading = false
+	m.modelFetchesPending = 0
+
+	if msg.err != nil {
+		m.pickerOpen = false
+
+		return m, tea.Println(errStyle.Render("Error loading models: " + msg.err.Error()))
+	}
+
+	fzfLookupCtx := contextWithTUIPermissionPrompt(m.ctx, m.permissionPolicy, nil, nil)
+	if fzfPath, ok := findFZF(fzfLookupCtx); ok {
+		m.pickerOpen = false
+
+		return m, m.fzfModelPickerCommand(fzfPath, msg.items)
+	}
+
+	m.pickerItems = msg.items
+	m.pickerCursor = 0
+
+	return m, nil
+}
+
+func (m model) fzfModelPickerCommand(fzfPath string, items []pickerItem) tea.Cmd {
+	requestCtx := m.ctx
+
+	var permissionPromptCmd tea.Cmd
+
+	var permissionPromptCh chan agentLoopConfirmRequest
+
+	if permissionPolicyNeedsPrompt(m.permissionPolicy) {
+		permissionPromptCh = make(chan agentLoopConfirmRequest, 1)
+		permissionResponseCh := make(chan bool, 1)
+		requestCtx = contextWithTUIPermissionPrompt(requestCtx, m.permissionPolicy, permissionPromptCh, permissionResponseCh)
+		permissionPromptCmd = listenForCheckpoint(permissionPromptCh, permissionResponseCh)
+	}
+
+	commandEvent := events.Event{
+		Type:        events.CommandExecute,
+		SessionID:   m.sessionState.ID,
+		SessionPath: m.sessionPath,
+		Agent:       m.selectedAgent,
+		Model:       m.selectedModel,
+		Metadata: map[string]string{
+			"command": "fzf",
+		},
+	}
+
+	fzfCmd := runFZFModelPicker(requestCtx, fzfPath, items, func() {
+		emitHookWarning(m.ctx, m.hookRunner, commandEvent)
+	})
+	if permissionPromptCmd != nil {
+		fzfCmd = withPermissionPromptClose(fzfCmd, permissionPromptCh)
+	}
+
+	cmds := []tea.Cmd{fzfCmd}
+	if permissionPromptCmd != nil {
+		cmds = append(cmds, permissionPromptCmd)
+	}
+
+	return tea.Batch(cmds...)
 }
 
 func (m model) updateFZFModelSelected(msg fzfModelSelectedMsg) (tea.Model, tea.Cmd) {
@@ -305,6 +333,7 @@ func (m model) updateLoopCheckpoint(msg loopCheckpointMsg) (tea.Model, tea.Cmd) 
 	m.checkpointResponseCh = msg.responseCh
 	m.checkpointRequestCh = msg.requestCh
 	m.checkpointPrompt = msg.request.prompt
+	m.checkpointKind = msg.request.kind
 
 	if m.checkpointPrompt == "" {
 		m.checkpointPrompt = fmt.Sprintf("Agent loop reached %d iterations. Continue? [Y/n] ", msg.request.iterations)
@@ -314,39 +343,89 @@ func (m model) updateLoopCheckpoint(msg loopCheckpointMsg) (tea.Model, tea.Cmd) 
 }
 
 // handleCheckpointKey handles Y/N key presses during an agent-loop prompt.
-// Y (or Enter) continues the loop, N (or Esc) stops it.
+// Enter follows the visible prompt default: checkpoint prompts continue, while
+// tool and permission prompts deny.
 func (m model) handleCheckpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	ch := m.checkpointResponseCh
 	reqCh := m.checkpointRequestCh
+	kind := m.checkpointKind
 
 	switch msg.String() {
-	case "y", "Y", "enter":
+	case "y", "Y":
 		m.checkpointResponseCh = nil
 		m.checkpointRequestCh = nil
 		m.checkpointPrompt = ""
+		m.checkpointKind = ""
 
 		ch <- true
 
 		// Re-listen for the next checkpoint or require-confirm tool call.
 		return m, tea.Batch(
-			tea.Println(dimStyle.Render("Continuing agent loop...")),
+			tea.Println(dimStyle.Render(confirmationAcceptedMessage(kind))),
 			tea.SetWindowTitle(m.terminalWorkingTitle()),
 			taskTickCmd(m.runningTaskID),
 			relistenForCheckpoint(reqCh, ch),
 		)
 
-	case "n", "N", "esc":
+	case "enter":
 		m.checkpointResponseCh = nil
 		m.checkpointRequestCh = nil
 		m.checkpointPrompt = ""
 
+		if m.checkpointKind == agentLoopConfirmCheckpoint {
+			m.checkpointKind = ""
+
+			ch <- true
+
+			return m, tea.Batch(
+				tea.Println(dimStyle.Render("Continuing agent loop...")),
+				tea.SetWindowTitle(m.terminalWorkingTitle()),
+				taskTickCmd(m.runningTaskID),
+				relistenForCheckpoint(reqCh, ch),
+			)
+		}
+
+		m.checkpointKind = ""
+
 		ch <- false
 
-		return m, tea.Batch(tea.Println(warnStyle.Render("Stopping agent loop.")), tea.SetWindowTitle(m.terminalWorkingTitle()))
+		return m, tea.Batch(tea.Println(warnStyle.Render(confirmationDeniedMessage(kind))), tea.SetWindowTitle(m.terminalWorkingTitle()))
+
+	case "n", "N", "esc":
+		m.checkpointResponseCh = nil
+		m.checkpointRequestCh = nil
+		m.checkpointPrompt = ""
+		m.checkpointKind = ""
+
+		ch <- false
+
+		return m, tea.Batch(tea.Println(warnStyle.Render(confirmationDeniedMessage(kind))), tea.SetWindowTitle(m.terminalWorkingTitle()))
 
 	default:
 		// Ignore other keys; keep waiting for Y/N.
 		return m, nil
+	}
+}
+
+func confirmationAcceptedMessage(kind agentLoopConfirmKind) string {
+	switch kind {
+	case agentLoopConfirmPermission:
+		return "Permission granted; continuing..."
+	case agentLoopConfirmToolCall:
+		return "Tool call approved; continuing..."
+	default:
+		return "Continuing agent loop..."
+	}
+}
+
+func confirmationDeniedMessage(kind agentLoopConfirmKind) string {
+	switch kind {
+	case agentLoopConfirmPermission:
+		return "Permission denied."
+	case agentLoopConfirmToolCall:
+		return "Tool call denied."
+	default:
+		return "Stopping agent loop."
 	}
 }
 
@@ -503,7 +582,7 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd, bool) {
 }
 
 func (m model) acceptCompletion() (tea.Model, tea.Cmd, bool) {
-	items, ok := completionCandidates(m.textarea.Value(), m.agentRegistry, m.contextOptions.Root, 8)
+	items, ok := completionCandidates(m.ctx, m.textarea.Value(), m.agentRegistry, m.contextOptions.Root)
 	if ok && len(items) > 0 {
 		m.completionOpen = true
 		m.completionItems = items
@@ -868,6 +947,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		generation:                  generation,
 		agentLoopBudget:             m.agentLoopBudget,
 		autonomy:                    m.autonomy,
+		permissionPolicy:            m.permissionPolicy,
 		agentLoopCheckpointInterval: m.agentLoopCheckpointInterval,
 		maxInputTokens:              m.maxInputTokens,
 		routeDecision:               routeDecision,

@@ -1333,6 +1333,6 @@ func (tier commandTier) String() string {
 	case tierStateful:
 		return "stateful"
 	default:
-		return "unknown"
+		return unknownLabel
 	}
 }

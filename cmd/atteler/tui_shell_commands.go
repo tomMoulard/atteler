@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,8 +15,17 @@ import (
 	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
+
+type interactiveShellReadyMsg struct {
+	cancel     context.CancelFunc
+	cmd        *exec.Cmd
+	invocation *attshell.Invocation
+	err        error
+	command    string
+}
 
 func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 	if command == "" {
@@ -34,80 +44,119 @@ func (m model) runShellCommand(command string) (tea.Model, tea.Cmd) {
 	m.cancel = cancel
 	tickCmd := m.startRunningTask("command")
 	outputCh := make(chan tea.Msg, 32)
+	confirmCh := make(chan agentLoopConfirmRequest, 1)
+	responseCh := make(chan bool, 1)
+
+	ctx = contextWithTUIPermissionPrompt(ctx, m.permissionPolicy, confirmCh, responseCh)
+
+	commandEvent := events.Event{
+		Type:        events.CommandExecute,
+		SessionID:   m.sessionState.ID,
+		SessionPath: m.sessionPath,
+		Agent:       m.selectedAgent,
+		Model:       m.sessionState.DefaultModel,
+		Content:     command,
+		Metadata: map[string]string{
+			"autonomy": m.autonomy.String(),
+			"command":  command,
+			"cwd":      m.cwd,
+			"input":    "!" + command,
+			"source":   "user",
+		},
+	}
+
+	shellCmd := runShellCommandCmdWithAutonomyAndPermission(ctx, command, m.cwd, outputCh, m.autonomy, attshell.AuditContext{
+		Caller:      "atteler.tui.shell",
+		SessionID:   m.sessionState.ID,
+		SessionPath: m.sessionPath,
+		Autonomy:    m.autonomy.String(),
+	}, m.permissionPolicy, func() {
+		emitHookWarning(m.ctx, m.hookRunner, commandEvent)
+	})
+	wrappedShellCmd := func() tea.Msg {
+		defer close(confirmCh)
+
+		return shellCmd()
+	}
 
 	return m, tea.Batch(tea.Sequence(
 		tea.Println(line),
-		emitHook(m.ctx, m.hookRunner, events.Event{
-			Type:        events.CommandExecute,
-			SessionID:   m.sessionState.ID,
-			SessionPath: m.sessionPath,
-			Agent:       m.selectedAgent,
-			Model:       m.sessionState.DefaultModel,
-			Content:     command,
-			Metadata: map[string]string{
-				"command":  command,
-				"cwd":      m.cwd,
-				"input":    "!" + command,
-				"source":   "user",
-				"autonomy": m.autonomy.String(),
-			},
-		}),
-		runShellCommandCmdWithAutonomy(ctx, command, m.cwd, outputCh, m.autonomy, attshell.AuditContext{
-			Caller:      "atteler.tui.shell",
-			SessionID:   m.sessionState.ID,
-			SessionPath: m.sessionPath,
-			Autonomy:    m.autonomy.String(),
-		}),
-	), tickCmd, listenForShellOutput(outputCh))
+		wrappedShellCmd,
+	), tickCmd, listenForShellOutput(outputCh), listenForCheckpoint(confirmCh, responseCh))
 }
 
 // runInteractiveShellCommand hands the terminal to a child process via
 // tea.ExecProcess so interactive programs (vim, less, htop, nested atteler)
 // can use the PTY directly.
 func (m model) runInteractiveShellCommand(command, line string) (model, tea.Cmd) {
-	if err := authorizeBashCommandWithAutonomy(m.ctx, m.autonomy, command, "interactive shell"); err != nil {
-		return m, tea.Sequence(
-			tea.Println(line),
-			func() tea.Msg {
-				return shellResultMsg{
-					err:         err,
-					completedAt: time.Now(),
-					command:     command,
-					stderr:      err.Error(),
-				}
-			},
-		)
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.cancel = cancel
+
+	confirmCh := make(chan agentLoopConfirmRequest, 1)
+	responseCh := make(chan bool, 1)
+
+	ctx = contextWithTUIPermissionPrompt(ctx, m.permissionPolicy, confirmCh, responseCh)
+
+	authorizeCmd := authorizeInteractiveShellCommandCmd(ctx, cancel, command, m.cwd, attshell.AuditContext{
+		Caller:      "atteler.tui.interactive_shell",
+		SessionID:   m.sessionState.ID,
+		SessionPath: m.sessionPath,
+	}, m.permissionPolicy)
+	wrappedAuthorizeCmd := func() tea.Msg {
+		defer close(confirmCh)
+
+		return authorizeCmd()
 	}
 
-	cmd, invocation, err := attshell.CommandContext(m.ctx, attshell.CommandOptions{
-		Program: "bash",
-		Args:    []string{"--noprofile", "--norc", "-lc", command},
-		Command: command,
-		Dir:     m.cwd,
-		Mode:    attshell.ModeInteractive,
-		Audit: attshell.AuditContext{
-			Caller:      "atteler.tui.interactive_shell",
-			SessionID:   m.sessionState.ID,
-			SessionPath: m.sessionPath,
-			Autonomy:    m.autonomy.String(),
-		},
-	})
-	if err != nil {
-		return m, tea.Sequence(
-			tea.Println(line),
-			func() tea.Msg {
-				return shellResultMsg{
-					err:         err,
-					completedAt: time.Now(),
-					command:     command,
-					stdout:      "(interactive session" + exitErrorSuffix(err.Error()) + ")",
-				}
-			},
-		)
+	return m, tea.Batch(
+		tea.Sequence(tea.Println(line), wrappedAuthorizeCmd),
+		listenForCheckpoint(confirmCh, responseCh),
+	)
+}
+
+func authorizeInteractiveShellCommandCmd(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	command, cwd string,
+	audit attshell.AuditContext,
+	permissionPolicy *permission.Policy,
+) tea.Cmd {
+	return func() tea.Msg {
+		cmd, invocation, err := attshell.CommandContext(ctx, attshell.CommandOptions{
+			Program:    "bash",
+			Args:       []string{"--noprofile", "--norc", "-lc", command},
+			Command:    command,
+			Dir:        cwd,
+			Mode:       attshell.ModeInteractive,
+			Permission: permissionPolicy,
+			Audit:      audit,
+		})
+		if err != nil && cancel != nil {
+			cancel()
+		}
+
+		return interactiveShellReadyMsg{
+			cancel:     cancel,
+			cmd:        cmd,
+			invocation: invocation,
+			err:        err,
+			command:    command,
+		}
+	}
+}
+
+func (m model) updateInteractiveShellReady(msg interactiveShellReadyMsg) (tea.Model, tea.Cmd) {
+	command := msg.command
+	if msg.err != nil {
+		return m.updateShellResult(shellResultMsg{
+			err:         msg.err,
+			completedAt: time.Now(),
+			command:     command,
+			stdout:      "(interactive session" + exitErrorSuffix(msg.err.Error()) + ")",
+		})
 	}
 
 	return m, tea.Sequence(
-		tea.Println(line),
 		emitHook(m.ctx, m.hookRunner, events.Event{
 			Type:        events.CommandExecute,
 			SessionID:   m.sessionState.ID,
@@ -124,13 +173,17 @@ func (m model) runInteractiveShellCommand(command, line string) (model, tea.Cmd)
 				"autonomy": m.autonomy.String(),
 			},
 		}),
-		tea.ExecProcess(cmd, func(err error) tea.Msg {
+		tea.ExecProcess(msg.cmd, func(err error) tea.Msg {
+			if msg.cancel != nil {
+				msg.cancel()
+			}
+
 			exitError := ""
 			if err != nil {
 				exitError = err.Error()
 			}
 
-			if finishErr := invocation.Finish(attshell.FinishOptions{
+			if finishErr := msg.invocation.Finish(attshell.FinishOptions{
 				Error:         err,
 				OutputCapture: attshell.OutputNotCaptured,
 				OutputNote:    "interactive terminal takeover; stdout/stderr not captured",
@@ -244,11 +297,45 @@ func listenForShellOutput(outputCh <-chan tea.Msg) tea.Cmd {
 	}
 }
 
-func runShellCommandCmd(ctx context.Context, command, dir string, outputCh chan<- tea.Msg, audit attshell.AuditContext) tea.Cmd {
-	return runShellCommandCmdWithAutonomy(ctx, command, dir, outputCh, autonomy.DefaultLevel, audit)
+func runShellCommandCmd(
+	ctx context.Context,
+	command, dir string,
+	outputCh chan<- tea.Msg,
+	audit attshell.AuditContext,
+	permissionPolicy *permission.Policy,
+	startCallback func(),
+) tea.Cmd {
+	return runShellCommandCmdWithAutonomyAndPermission(
+		ctx,
+		command,
+		dir,
+		outputCh,
+		autonomy.DefaultLevel,
+		audit,
+		permissionPolicy,
+		startCallback,
+	)
 }
 
-func runShellCommandCmdWithAutonomy(ctx context.Context, command, dir string, outputCh chan<- tea.Msg, level autonomy.Level, audit attshell.AuditContext) tea.Cmd {
+func runShellCommandCmdWithAutonomy(
+	ctx context.Context,
+	command, dir string,
+	outputCh chan<- tea.Msg,
+	level autonomy.Level,
+	audit attshell.AuditContext,
+) tea.Cmd {
+	return runShellCommandCmdWithAutonomyAndPermission(ctx, command, dir, outputCh, level, audit, nil, nil)
+}
+
+func runShellCommandCmdWithAutonomyAndPermission(
+	ctx context.Context,
+	command, dir string,
+	outputCh chan<- tea.Msg,
+	level autonomy.Level,
+	audit attshell.AuditContext,
+	permissionPolicy *permission.Policy,
+	startCallback func(),
+) tea.Cmd {
 	level = autonomy.Normalize(level)
 	if strings.TrimSpace(audit.Autonomy) == "" {
 		audit.Autonomy = level.String()
@@ -277,9 +364,11 @@ func runShellCommandCmdWithAutonomy(ctx context.Context, command, dir string, ou
 		}
 
 		result, err := attshell.RunBash(ctx, attshell.Options{
-			Command: command,
-			Dir:     dir,
-			Audit:   audit,
+			Command:       command,
+			Dir:           dir,
+			Audit:         audit,
+			Permission:    permissionPolicy,
+			StartCallback: startCallback,
 			OutputCallback: func(chunk attshell.OutputChunk) {
 				if outputCh == nil {
 					return

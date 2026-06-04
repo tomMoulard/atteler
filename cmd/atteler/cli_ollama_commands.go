@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -20,9 +19,14 @@ const (
 )
 
 func printOllamaStatus(ctx context.Context) error {
-	cfg, _, err := appconfig.Load()
+	cfg, _, err := loadConfigWithPermission(
+		ctx,
+		"load config for Ollama status",
+		"atteler.provider.ollama.status",
+		"ollama status",
+	)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -137,7 +141,7 @@ func formatOllamaDoctorLine(ctx context.Context, cfg appconfig.Config) string {
 
 func formatOllamaCommand(command []string) string {
 	if len(command) == 0 {
-		return "unknown"
+		return unknownLabel
 	}
 
 	return strings.Join(command, " ")

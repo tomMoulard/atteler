@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/privacy"
 )
 
@@ -212,6 +213,10 @@ func StartDebugServer(ctx context.Context, cfg DebugConfig, source DebugSnapshot
 	}
 
 	address := firstNonEmpty(cfg.Address, defaultDebugAddress)
+	if err := authorizeDebugServerPermission(ctx, address); err != nil {
+		return nil, fmt.Errorf("debug server: %w", err)
+	}
+
 	var listenConfig net.ListenConfig
 	listener, err := listenConfig.Listen(ctx, "tcp", address)
 	if err != nil {
@@ -232,6 +237,27 @@ func StartDebugServer(ctx context.Context, cfg DebugConfig, source DebugSnapshot
 
 	debugServer.logger.Info("symphony debug server listening", "address", listener.Addr().String())
 	return debugServer, nil
+}
+
+func authorizeDebugServerPermission(ctx context.Context, address string) error {
+	action := "start local debug HTTP server"
+	source := "symphony.debug"
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: action,
+		Source: source,
+		Target: address,
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationNetwork,
+			Action: action,
+			Source: source,
+			Target: address,
+		}},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }
 
 // Address returns the actual listen address. It is useful when address port 0

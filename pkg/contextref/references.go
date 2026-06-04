@@ -25,6 +25,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/eval"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 const (
@@ -557,7 +558,7 @@ func loadReference(
 	}
 
 	if isGlob(ref) {
-		return loadGlob(ref, opts, policy, total, entryCount)
+		return loadGlob(ctx, ref, opts, policy, total, entryCount)
 	}
 
 	resolved, err := resolvePolicyPath(ref, opts.Root, policy)
@@ -591,7 +592,7 @@ func loadReference(
 	}
 
 	if info.IsDir() {
-		return loadDirectory(resolved, ref, opts, policy, total, entryCount, policyPath)
+		return loadDirectory(ctx, resolved, ref, opts, policy, total, entryCount, policyPath)
 	}
 
 	if !info.Mode().IsRegular() {
@@ -612,7 +613,7 @@ func loadReference(
 		return nil, []ReferenceEvent{event}, globErr
 	}
 
-	loaded, event, err := loadSingleFile(resolved, ref, limit, opts)
+	loaded, event, err := loadSingleFile(ctx, resolved, ref, limit, opts)
 	if err == nil {
 		annotateOutOfRootLocalReference(&loaded, &event, policy, policyPath, resolved)
 	}
@@ -1069,7 +1070,7 @@ func isGlob(ref string) bool {
 // pattern may contain ** to match zero or more directory levels.
 //
 //nolint:gocognit,cyclop // Keeps ordered policy, budget, and symlink manifest decisions in one loop.
-func loadGlob(pattern string, opts Options, policy normalizedReferencePolicy, total, entryCount int) ([]LoadedReference, []ReferenceEvent, error) {
+func loadGlob(ctx context.Context, pattern string, opts Options, policy normalizedReferencePolicy, total, entryCount int) ([]LoadedReference, []ReferenceEvent, error) {
 	if err := validateReferenceGlob(pattern); err != nil {
 		event := newReferenceEvent(pattern, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error())
 
@@ -1149,10 +1150,15 @@ func loadGlob(pattern string, opts Options, policy normalizedReferencePolicy, to
 
 		limit := min(opts.MaxFileBytes, remaining)
 
-		loaded, event, loadErr := loadSingleFile(loadPath, source, limit, opts)
+		loaded, event, loadErr := loadSingleFile(ctx, loadPath, source, limit, opts)
 		if loadErr != nil {
-			event = withReferenceDecision(event, ReferenceDecisionSkipped, event.PolicyReason)
 			events = append(events, event)
+			if permission.ErrDenied(loadErr) {
+				return out, events, loadErr
+			}
+
+			event = withReferenceDecision(event, ReferenceDecisionSkipped, event.PolicyReason)
+			events[len(events)-1] = event
 
 			continue // skip unreadable files in a glob
 		}
@@ -1567,7 +1573,9 @@ func matchDoublestar(patAfter, nameParts []string) bool {
 // file. Binary files and common non-source directories (.git, node_modules,
 // __pycache__) are skipped. The source field uses ref as a prefix so the LLM
 // sees the original reference path the user configured.
-func loadDirectory(dir, ref string, opts Options, policy normalizedReferencePolicy, total, entryCount int, auditPaths ...string) ([]LoadedReference, []ReferenceEvent, error) {
+//
+//nolint:gocognit // Directory walks keep ordered policy, budget, symlink, and permission decisions in one traversal.
+func loadDirectory(ctx context.Context, dir, ref string, opts Options, policy normalizedReferencePolicy, total, entryCount int, auditPaths ...string) ([]LoadedReference, []ReferenceEvent, error) {
 	var (
 		out    []LoadedReference
 		events []ReferenceEvent
@@ -1607,8 +1615,13 @@ func loadDirectory(dir, ref string, opts Options, policy normalizedReferencePoli
 		}
 
 		policySources := directoryPolicySources(path, dir, auditPaths, opts, policy)
-		loaded, event, included, stopWalk := loadDirectoryFile(path, source, policySources, opts, policy, total, entryCount, auditPaths)
+		loaded, event, included, stopWalk, loadErr := loadDirectoryFile(ctx, path, source, policySources, opts, policy, total, entryCount, auditPaths)
+
 		events = append(events, event)
+
+		if loadErr != nil {
+			return loadErr
+		}
 
 		if stopWalk {
 			return fs.SkipAll
@@ -1626,6 +1639,10 @@ func loadDirectory(dir, ref string, opts Options, policy normalizedReferencePoli
 		return nil
 	})
 	if err != nil {
+		if permission.ErrDenied(err) {
+			return out, events, fmt.Errorf("read directory reference: %w", err)
+		}
+
 		return out, events, fmt.Errorf("walk directory reference: %s", safePathErrorMessage(err))
 	}
 
@@ -1652,6 +1669,7 @@ func directoryDeniedRootEvent(path, dir, ref string, entry fs.DirEntry, opts Opt
 }
 
 func loadDirectoryFile(
+	ctx context.Context,
 	path string,
 	source string,
 	policySources []string,
@@ -1660,45 +1678,54 @@ func loadDirectoryFile(
 	total int,
 	entryCount int,
 	auditPaths []string,
-) (LoadedReference, ReferenceEvent, bool, bool) {
+) (loaded LoadedReference, event ReferenceEvent, included, stopWalk bool, err error) {
 	if err := validateLocalGlobPolicySources(policy, policySources...); err != nil {
-		event := newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error())
-		return LoadedReference{}, event, false, false
+		event = newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error())
+
+		return LoadedReference{}, event, false, false, nil
 	}
 
 	loadPath, symlinkEvent, ok := directoryLoadPath(path, source, opts, policy)
 	if !ok {
-		return LoadedReference{}, symlinkEvent, false, false
+		return LoadedReference{}, symlinkEvent, false, false, nil
 	}
 
 	if err := validateSymlinkTargetGlobPolicy(path, loadPath, source, opts, policy); err != nil {
-		event := newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error())
-		return LoadedReference{}, event, false, false
+		event = newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error())
+
+		return LoadedReference{}, event, false, false, nil
 	}
 
 	if policy.maxFiles > 0 && entryCount >= policy.maxFiles {
-		event := newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionSkipped, "max_files reached")
-		return LoadedReference{}, event, false, true
+		event = newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionSkipped, "max_files reached")
+
+		return LoadedReference{}, event, false, true, nil
 	}
 
 	remaining := opts.MaxTotalBytes - total
 	if remaining <= 0 {
-		event := newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionSkipped, "max_total_bytes reached")
-		return LoadedReference{}, event, false, true
+		event = newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionSkipped, "max_total_bytes reached")
+
+		return LoadedReference{}, event, false, true, nil
 	}
 
 	limit := min(opts.MaxFileBytes, remaining)
 
-	loaded, event, loadErr := loadSingleFile(loadPath, source, limit, opts)
+	loaded, event, loadErr := loadSingleFile(ctx, loadPath, source, limit, opts)
 	if loadErr != nil {
+		if permission.ErrDenied(loadErr) {
+			return LoadedReference{}, event, false, false, loadErr
+		}
+
 		event = withReferenceDecision(event, ReferenceDecisionSkipped, event.PolicyReason)
-		return LoadedReference{}, event, false, false
+
+		return LoadedReference{}, event, false, false, nil
 	}
 
 	paths := append([]string{path, loadPath}, auditPaths...)
 	annotateOutOfRootLocalReference(&loaded, &event, policy, paths...)
 
-	return loaded, event, true, false
+	return loaded, event, true, false, nil
 }
 
 func directoryPolicySources(path, dir string, auditPaths []string, opts Options, policy normalizedReferencePolicy) []string {
@@ -1874,7 +1901,14 @@ func syncReferencePolicyReason(loaded *LoadedReference, event *ReferenceEvent) {
 // loadSingleFile reads a single file up to limit bytes and returns it as a
 // LoadedReference. Binary files (detected by null bytes in the first 512
 // bytes) are rejected.
-func loadSingleFile(path, source string, limit int, opts Options) (LoadedReference, ReferenceEvent, error) {
+func loadSingleFile(ctx context.Context, path, source string, limit int, opts Options) (LoadedReference, ReferenceEvent, error) {
+	if err := authorizeLocalReferenceRead(ctx, source, path); err != nil {
+		reason := sanitizeReferenceDiagnostic(err.Error())
+		event := newReferenceEvent(source, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, reason)
+
+		return LoadedReference{}, event, err
+	}
+
 	content, probe, truncated, err := readReferenceFile(path, limit)
 	if err != nil {
 		reason := "read file: " + safePathErrorMessage(err)
@@ -2082,6 +2116,13 @@ func loadURL(ctx context.Context, rawURL string, limit int, opts Options, policy
 		return LoadedReference{}, event, policyErr
 	}
 
+	if policyErr := authorizeURLReferenceNetwork(ctx, source); policyErr != nil {
+		reason := sanitizeURLPolicyReason(policyErr.Error(), rawURL, source)
+		event := newReferenceEvent(source, kindURL, referenceLocationRemote, opts, ReferenceDecisionRejected, reason)
+
+		return LoadedReference{}, event, policyErr
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, http.NoBody)
 	if err != nil {
 		reason := sanitizeURLPolicyReason(err.Error(), rawURL, source)
@@ -2175,6 +2216,47 @@ func withURLResolvedSource(event *ReferenceEvent, source string, finalURL *url.U
 	}
 
 	event.ResolvedSource = resolvedSource
+}
+
+func authorizeURLReferenceNetwork(ctx context.Context, source string) error {
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: "fetch URL reference",
+		Source: "atteler.contextref.url",
+		Target: source,
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationNetwork,
+			Action: "fetch URL reference",
+			Source: "atteler.contextref.url",
+			Target: source,
+		}},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return fmt.Errorf("URL reference: %w", &permission.Error{Decision: decision})
+}
+
+func authorizeLocalReferenceRead(ctx context.Context, source, path string) error {
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: "read local reference",
+		Source: "atteler.contextref.local",
+		Target: path,
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationRead,
+			Action: "read local reference",
+			Source: "atteler.contextref.local",
+			Target: path,
+			Metadata: map[string]string{
+				"reference": source,
+			},
+		}},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return fmt.Errorf("local reference: %w", &permission.Error{Decision: decision})
 }
 
 func referenceHTTPClient(policy normalizedReferencePolicy) *http.Client {

@@ -3,11 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
-	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -43,37 +41,32 @@ func providerlessSessionCommands() []command {
 			name:  "list-sessions",
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.listSessions },
-			runProviderless: func(_ context.Context, o cliOptions, s *session.Store) error {
-				return listSessions(s, o.listSessionsTag)
+			runProviderless: func(ctx context.Context, o cliOptions, s *session.Store) error {
+				return listSessions(ctx, s, o.listSessionsTag)
 			},
 		},
 		{
 			name:  "list-session-tags",
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.listSessionTags },
-			runProviderless: func(_ context.Context, _ cliOptions, s *session.Store) error {
-				return listSessionTags(s)
+			runProviderless: func(ctx context.Context, _ cliOptions, s *session.Store) error {
+				return listSessionTags(ctx, s)
 			},
 		},
 		{
 			name:  "agent-performance-summary",
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.agentPerformanceSummary },
-			runProviderless: func(_ context.Context, _ cliOptions, s *session.Store) error {
-				return listAgentPerformance(s)
+			runProviderless: func(ctx context.Context, _ cliOptions, s *session.Store) error {
+				return listAgentPerformance(ctx, s)
 			},
 		},
 		{
 			name:  "search-sessions",
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.searchQuery != "" },
-			runProviderless: func(_ context.Context, o cliOptions, s *session.Store) error {
-				level, err := autonomyForEarlyCommand(o)
-				if err != nil {
-					return err
-				}
-
-				return searchSessionsWithAutonomy(s, o.searchQuery, level)
+			runProviderless: func(ctx context.Context, o cliOptions, s *session.Store) error {
+				return searchSessions(ctx, s, o.searchQuery)
 			},
 		},
 	}
@@ -101,38 +94,24 @@ func providerlessFileCommands() []command {
 			name:  "eval-output",
 			tier:  tierProviderless,
 			match: evalCommandRequested,
-			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				level, err := autonomyForEarlyCommand(o)
-				if err != nil {
-					return err
-				}
-
-				return evalOutputCommandWithAutonomy(o, level)
+			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
+				return evalOutputCommand(ctx, o)
 			},
 		},
 		{
 			name:  "context-pack",
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.contextPackPath != "" },
-			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return runContextPack(o.contextPackPath, o.contextPackTokens.value, o.model)
+			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
+				return runContextPack(ctx, o.contextPackPath, o.contextPackTokens.value, o.model)
 			},
 		},
 		{
 			name:  "init-rtk-plugin",
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.initRTKPluginDir != "" },
-			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				level, err := autonomyForEarlyCommand(o)
-				if err != nil {
-					return err
-				}
-
-				if !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
-					return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "--init-rtk-plugin"))
-				}
-
-				return initRTKPlugin(o.initRTKPluginDir)
+			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
+				return initRTKPlugin(ctx, o.initRTKPluginDir)
 			},
 		},
 		{
@@ -154,13 +133,13 @@ func providerlessFileCommands() []command {
 			name:  "memory-command",
 			tier:  tierProviderless,
 			match: memoryCommandRequested,
-			runProviderless: func(_ context.Context, o cliOptions, s *session.Store) error {
+			runProviderless: func(ctx context.Context, o cliOptions, s *session.Store) error {
 				level, err := autonomyForEarlyCommand(o)
 				if err != nil {
 					return err
 				}
 
-				return runMemoryCommandWithAutonomy(s, o, level)
+				return runMemoryCommandWithAutonomy(ctx, s, o, level)
 			},
 		},
 		{
@@ -196,8 +175,8 @@ func providerlessPlanningCommands() []command {
 			name:  "mcp-manifest",
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.mcpManifestPath != "" },
-			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return runMCPManifest(mcpManifestCommandInputFromOptions(o))
+			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
+				return runMCPManifest(ctx, mcpManifestCommandInputFromOptions(o))
 			},
 		},
 		{
@@ -242,9 +221,14 @@ func providerlessPlanningCommands() []command {
 			match: func(o cliOptions) bool { return len(o.suggestSkillSteps) > 0 || skillLearningCommandRequested(o) },
 			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
 				if skillLearningCommandRequested(o) {
-					cfg, _, cfgErr := appconfig.Load()
+					cfg, _, cfgErr := loadConfigWithPermission(
+						ctx,
+						"load config for skill learning command",
+						"atteler.skill_learning",
+						"load skill learning config",
+					)
 					if cfgErr != nil {
-						fmt.Fprintln(os.Stderr, "warning: "+cfgErr.Error())
+						return cfgErr
 					}
 
 					input := skillLearningCommandInputFromOptions(o)
@@ -270,7 +254,7 @@ func providerlessPlanningCommands() []command {
 					return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "--skill-save-dir"))
 				}
 
-				return suggestSkill(o.suggestSkillSteps, o.skillMaxSteps.value, o.skillMinOccurrences.value, o.skillSaveDir, o.skillReviewOnly)
+				return suggestSkill(ctx, o.suggestSkillSteps, o.skillMaxSteps.value, o.skillMinOccurrences.value, o.skillSaveDir, o.skillReviewOnly)
 			},
 		},
 	}

@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 )
@@ -129,7 +130,7 @@ func RefreshWorkspaceIndex(ctx context.Context, opts WorkspaceOptions) (Workspac
 	}
 
 	if len(sources) == 0 {
-		return clearWorkspaceIndexForNoSources(opts, result)
+		return clearWorkspaceIndexForNoSources(ctx, opts, result)
 	}
 
 	existing, loadErr := loadWorkspaceRefreshIndex(opts.IndexPath)
@@ -157,8 +158,8 @@ func RefreshWorkspaceIndex(ctx context.Context, opts WorkspaceOptions) (Workspac
 		return WorkspaceRefreshResult{}, fmt.Errorf("workspace vector index: build: %w", err)
 	}
 
-	if err := index.Save(opts.IndexPath); err != nil {
-		return WorkspaceRefreshResult{}, fmt.Errorf("workspace vector index: save: %w", err)
+	if err := saveWorkspaceIndexWithPermission(ctx, index, opts.IndexPath); err != nil {
+		return WorkspaceRefreshResult{}, err
 	}
 
 	result.Index = index
@@ -171,7 +172,7 @@ func RefreshWorkspaceIndex(ctx context.Context, opts WorkspaceOptions) (Workspac
 	return result, nil
 }
 
-func clearWorkspaceIndexForNoSources(opts WorkspaceOptions, result WorkspaceRefreshResult) (WorkspaceRefreshResult, error) {
+func clearWorkspaceIndexForNoSources(ctx context.Context, opts WorkspaceOptions, result WorkspaceRefreshResult) (WorkspaceRefreshResult, error) {
 	existing, err := LoadIndex(opts.IndexPath)
 	if err != nil {
 		requiresCleanup := errors.Is(err, os.ErrNotExist) || workspaceIndexRequiresRebuild(err)
@@ -179,7 +180,7 @@ func clearWorkspaceIndexForNoSources(opts WorkspaceOptions, result WorkspaceRefr
 			return WorkspaceRefreshResult{}, fmt.Errorf("workspace vector index: load: %w", err)
 		}
 
-		removed, removeErr := removeWorkspaceIndexArtifacts(opts.Root, opts.IndexPath)
+		removed, removeErr := removeWorkspaceIndexArtifactsWithPermission(ctx, opts.Root, opts.IndexPath)
 		if removeErr != nil {
 			return WorkspaceRefreshResult{}, removeErr
 		}
@@ -191,7 +192,7 @@ func clearWorkspaceIndexForNoSources(opts WorkspaceOptions, result WorkspaceRefr
 
 	result.Deleted = len(existing.Sources)
 
-	removed, removeErr := removeWorkspaceIndexArtifacts(opts.Root, opts.IndexPath)
+	removed, removeErr := removeWorkspaceIndexArtifactsWithPermission(ctx, opts.Root, opts.IndexPath)
 	if removeErr != nil {
 		return WorkspaceRefreshResult{}, removeErr
 	}
@@ -199,6 +200,28 @@ func clearWorkspaceIndexForNoSources(opts WorkspaceOptions, result WorkspaceRefr
 	result.Refreshed = result.Deleted > 0 || len(existing.Documents) > 0 || removed
 
 	return result, ErrNoSources
+}
+
+func workspaceIndexArtifactsPresent(root, indexPath string) bool {
+	for path := range workspaceIndexArtifactPaths(root, indexPath) {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+func removeWorkspaceIndexArtifactsWithPermission(ctx context.Context, root, indexPath string) (bool, error) {
+	if !workspaceIndexArtifactsPresent(root, indexPath) {
+		return false, nil
+	}
+
+	if err := authorizeWorkspaceIndexPermission(ctx, "remove empty workspace vector index artifacts", indexPath, permission.OperationWrite, permission.OperationMergeDelete); err != nil {
+		return false, err
+	}
+
+	return removeWorkspaceIndexArtifacts(root, indexPath)
 }
 
 func removeWorkspaceIndexArtifacts(root, indexPath string) (bool, error) {
@@ -319,6 +342,10 @@ func refreshReusableWorkspaceIndex(
 	result.Refreshed = changed
 
 	if !changed {
+		if err := authorizeWorkspaceIndexPermission(ctx, "tighten workspace vector index permissions", opts.IndexPath, permission.OperationWrite); err != nil {
+			return WorkspaceRefreshResult{}, false, err
+		}
+
 		if err := tightenWorkspaceIndexPermissions(opts.IndexPath); err != nil {
 			return WorkspaceRefreshResult{}, false, err
 		}
@@ -326,11 +353,47 @@ func refreshReusableWorkspaceIndex(
 		return result, true, nil
 	}
 
-	if saveErr := index.Save(opts.IndexPath); saveErr != nil {
-		return WorkspaceRefreshResult{}, false, fmt.Errorf("workspace vector index: save: %w", saveErr)
+	if saveErr := saveWorkspaceIndexWithPermission(ctx, index, opts.IndexPath); saveErr != nil {
+		return WorkspaceRefreshResult{}, false, saveErr
 	}
 
 	return result, true, nil
+}
+
+func saveWorkspaceIndexWithPermission(ctx context.Context, index *Index, indexPath string) error {
+	if err := authorizeWorkspaceIndexPermission(ctx, "write workspace vector index", indexPath, permission.OperationWrite); err != nil {
+		return err
+	}
+
+	if err := index.Save(indexPath); err != nil {
+		return fmt.Errorf("workspace vector index: save: %w", err)
+	}
+
+	return nil
+}
+
+func authorizeWorkspaceIndexPermission(ctx context.Context, action, target string, kinds ...permission.OperationKind) error {
+	ops := make([]permission.Operation, 0, len(kinds))
+	for _, kind := range kinds {
+		ops = append(ops, permission.Operation{
+			Kind:   kind,
+			Action: action,
+			Target: target,
+			Source: "atteler.vector.workspace_index",
+		})
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Operations: ops,
+		Action:     action,
+		Source:     "atteler.vector.workspace_index",
+		Target:     target,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return fmt.Errorf("workspace vector index: %w", &permission.Error{Decision: decision})
 }
 
 func tightenWorkspaceIndexPermissions(indexPath string) error {

@@ -16,6 +16,10 @@ func buildCodeIntelResponse(ctx context.Context, root string, input codeIntelCom
 		return codeIntelResponse{}, fmt.Errorf("unsupported code-intel command %q", commandName)
 	}
 
+	if err := authorizeCodeIntelRead(ctx, root); err != nil {
+		return codeIntelResponse{}, err
+	}
+
 	if commandName == codeIntelQueryCommandName {
 		return buildCodeIntelModelQueryResponse(ctx, root, input, commandName, textKind)
 	}
@@ -54,6 +58,14 @@ func buildCodeIntelResponse(ctx context.Context, root string, input codeIntelCom
 	}
 
 	return response, fmt.Errorf("unsupported code-intel command %q", commandName)
+}
+
+func authorizeCodeIntelRead(ctx context.Context, root string) error {
+	if err := authorizeReadPermission(ctx, "index code-intel workspace", "atteler.code_intel", root); err != nil {
+		return fmt.Errorf("code-intel: authorize read: %w", err)
+	}
+
+	return nil
 }
 
 func codeIntelQuery(key, value string) map[string]string {

@@ -340,6 +340,7 @@ func lookupFlagDomain(name string) (string, bool) {
 		name == "headless-id" || name == "headless-private-log" ||
 		name == helpSelectorSession || name == "session-id" || name == "session-dir" ||
 		name == "session-title" || name == "session-tag" ||
+		name == "permission-mode" || name == "allow-operation" || name == "deny-operation" ||
 		strings.HasPrefix(name, "list-session") || strings.HasPrefix(name, "show-session") ||
 		strings.HasPrefix(name, "session-summary") || name == "replay" ||
 		strings.HasPrefix(name, "export-session") || name == "export-format" ||

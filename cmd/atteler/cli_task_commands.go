@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/tasklist"
 )
@@ -26,6 +27,12 @@ type taskCommandInput struct {
 	AssignSpec string
 	CompleteID string
 	List       bool
+}
+
+type taskListAction struct {
+	run       func(context.Context, *tasklist.Store, taskCommandInput) error
+	name      string
+	operation []permission.OperationKind
 }
 
 func taskCommandInputFromOptions(opts cliOptions) taskCommandInput {
@@ -49,71 +56,127 @@ func runTaskListCommandWithAutonomy(ctx context.Context, sessionStore *session.S
 		return err
 	}
 
+	action, ok := taskListActionForInput(input)
+	if !ok {
+		return errors.New("task list: no task operation requested")
+	}
+
 	if taskCommandWritesFiles(input) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
 		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, taskCommandAutonomyContext(input)))
 	}
 
-	return runTaskListCommandValidated(ctx, sessionStore, input)
+	path := taskListPath(sessionStore, input.FilePath)
+	store := tasklist.NewStore(path)
+
+	if err := authorizeTaskListPermission(ctx, action.name, path, action.operation...); err != nil {
+		return fmt.Errorf("task list: %w", err)
+	}
+
+	return action.run(ctx, store, input)
 }
 
-func runTaskListCommandValidated(ctx context.Context, sessionStore *session.Store, input taskCommandInput) error {
-	store := tasklist.NewStore(taskListPath(sessionStore, input.FilePath))
+func taskListActionForInput(input taskCommandInput) (taskListAction, bool) {
 	switch {
 	case input.AddTitle != "":
-		task, err := store.Add(ctx, tasklist.AddRequest{
-			ID:    input.AddID,
-			Title: input.AddTitle,
-			Agent: input.Agent,
-		})
-		if err != nil {
-			return fmt.Errorf("task add: %w", err)
-		}
-
-		fmt.Println(formatTaskListItem(task))
-
-		return nil
+		return taskListAction{name: "add task", operation: taskListWriteOperations(), run: runTaskListAdd}, true
 	case input.AssignSpec != "":
-		id, agentName, err := parseTaskAssignmentSpec(input.AssignSpec)
-		if err != nil {
-			return err
-		}
-
-		task, err := store.Assign(ctx, id, agentName)
-		if err != nil {
-			return fmt.Errorf("task assign: %w", err)
-		}
-
-		fmt.Println(formatTaskListItem(task))
-
-		return nil
+		return taskListAction{name: "assign task", operation: taskListWriteOperations(), run: runTaskListAssign}, true
 	case input.CompleteID != "":
-		task, err := store.Complete(ctx, input.CompleteID, input.Agent)
-		if err != nil {
-			return fmt.Errorf("task complete: %w", err)
-		}
-
-		fmt.Println(formatTaskListItem(task))
-
-		return nil
+		return taskListAction{name: "complete task", operation: taskListWriteOperations(), run: runTaskListComplete}, true
 	case input.List:
-		tasks, err := store.List(ctx)
-		if err != nil {
-			return fmt.Errorf("task list: %w", err)
-		}
+		return taskListAction{name: "list tasks", operation: []permission.OperationKind{permission.OperationRead}, run: runTaskListList}, true
+	default:
+		return taskListAction{}, false
+	}
+}
 
-		if len(tasks) == 0 {
-			fmt.Println("No tasks found.")
-			return nil
-		}
+func taskListWriteOperations() []permission.OperationKind {
+	return []permission.OperationKind{permission.OperationRead, permission.OperationWrite}
+}
 
-		for i := range tasks {
-			fmt.Println(formatTaskListItem(tasks[i]))
-		}
+func runTaskListAdd(ctx context.Context, store *tasklist.Store, input taskCommandInput) error {
+	task, err := store.Add(ctx, tasklist.AddRequest{
+		ID:    input.AddID,
+		Title: input.AddTitle,
+		Agent: input.Agent,
+	})
+	if err != nil {
+		return fmt.Errorf("task add: %w", err)
+	}
+
+	fmt.Println(formatTaskListItem(task))
+
+	return nil
+}
+
+func runTaskListAssign(ctx context.Context, store *tasklist.Store, input taskCommandInput) error {
+	id, agentName, err := parseTaskAssignmentSpec(input.AssignSpec)
+	if err != nil {
+		return err
+	}
+
+	task, err := store.Assign(ctx, id, agentName)
+	if err != nil {
+		return fmt.Errorf("task assign: %w", err)
+	}
+
+	fmt.Println(formatTaskListItem(task))
+
+	return nil
+}
+
+func runTaskListComplete(ctx context.Context, store *tasklist.Store, input taskCommandInput) error {
+	task, err := store.Complete(ctx, input.CompleteID, input.Agent)
+	if err != nil {
+		return fmt.Errorf("task complete: %w", err)
+	}
+
+	fmt.Println(formatTaskListItem(task))
+
+	return nil
+}
+
+func runTaskListList(ctx context.Context, store *tasklist.Store, _ taskCommandInput) error {
+	tasks, err := store.List(ctx)
+	if err != nil {
+		return fmt.Errorf("task list: %w", err)
+	}
+
+	if len(tasks) == 0 {
+		fmt.Println("No tasks found.")
 
 		return nil
-	default:
-		return errors.New("task list: no task operation requested")
 	}
+
+	for i := range tasks {
+		fmt.Println(formatTaskListItem(tasks[i]))
+	}
+
+	return nil
+}
+
+func authorizeTaskListPermission(ctx context.Context, action, target string, kinds ...permission.OperationKind) error {
+	operations := make([]permission.Operation, 0, len(kinds))
+	for _, kind := range kinds {
+		operations = append(operations, permission.Operation{
+			Kind:   kind,
+			Action: action,
+			Source: "atteler.task_list",
+			Target: target,
+		})
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action:     action,
+		Source:     "atteler.task_list",
+		Target:     target,
+		Operations: operations,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }
 
 func taskCommandWritesFiles(input taskCommandInput) bool {

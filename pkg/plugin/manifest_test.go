@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 func TestLoadDir_LoadsYAMLManifest(t *testing.T) {
@@ -81,6 +84,37 @@ func TestLoad_LoadsExplicitJSONManifest(t *testing.T) {
 	if !reflect.DeepEqual(manifest.Entrypoints, map[string]string{"run": "main.js"}) {
 		require.Failf(t, "unexpected manifest", "Entrypoints = %v", manifest.Entrypoints)
 	}
+}
+
+func TestLoadContext_PermissionPolicyDeniesManifestFileRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeManifest(t, dir, "plugin.yaml", `
+name: denied
+version: "1"
+`)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeAsk)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+	ctx = permission.ContextWithConfirmer(ctx, func(_ context.Context, req permission.Request, _ permission.Decision) bool {
+		return req.Action != manifestReadAction
+	})
+
+	_, err := LoadContext(ctx, path)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	require.Contains(t, err.Error(), "permission.read.ask")
+
+	data, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	require.Contains(t, string(data), manifestReadAction)
+	require.Contains(t, string(data), "permission.read.ask")
+	require.Contains(t, string(data), "confirmation declined")
 }
 
 func TestLoadDir_LoadsSecurityDeclarations(t *testing.T) {
@@ -343,6 +377,17 @@ permissions:
     - BAD-NAME
 `,
 			want: "not a valid environment variable name",
+		},
+		{
+			name: "credential env declared as plain env",
+			content: `
+name: bad-secret-env
+version: "1"
+permissions:
+  env:
+    - OPENAI_API_KEY
+`,
+			want: "declare it in permissions.secrets",
 		},
 		{
 			name: "network hosts without allow",

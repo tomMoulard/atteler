@@ -217,8 +217,8 @@ func selectStatefulSessionWriteCommand(input sessionWriteCommandInput) (*statefu
 func statefulSessionWriteCommandSet() []statefulSessionCommand[sessionWriteCommandInput] {
 	return []statefulSessionCommand[sessionWriteCommandInput]{
 		statefulSessionCmd("record-failure", func(input sessionWriteCommandInput) bool { return input.RecordFailure != "" },
-			func(_ context.Context, input sessionWriteCommandInput, s appState) error {
-				return recordFailureDetails(s.sessionStore, s.sessionState, session.NegativeKnowledge{
+			func(ctx context.Context, input sessionWriteCommandInput, s appState) error {
+				return recordFailureDetails(ctx, s.sessionStore, s.sessionState, session.NegativeKnowledge{
 					Approach: input.RecordFailure,
 					Reason:   input.FailureReason,
 					Commit:   input.FailureCommit,
@@ -228,21 +228,21 @@ func statefulSessionWriteCommandSet() []statefulSessionCommand[sessionWriteComma
 				})
 			}),
 		statefulSessionCmd("record-evaluation", func(input sessionWriteCommandInput) bool { return input.RecordEvaluation != "" },
-			func(_ context.Context, input sessionWriteCommandInput, s appState) error {
+			func(ctx context.Context, input sessionWriteCommandInput, s appState) error {
 				evaluation, err := evaluationFromSessionWriteInput(input, s)
 				if err != nil {
 					return err
 				}
 
-				return recordEvaluationDetails(s.sessionStore, s.sessionState, evaluation)
+				return recordEvaluationDetails(ctx, s.sessionStore, s.sessionState, evaluation)
 			}),
 		statefulSessionCmd("record-artifact", func(input sessionWriteCommandInput) bool { return input.RecordArtifact != "" },
 			func(ctx context.Context, input sessionWriteCommandInput, s appState) error {
 				return recordArtifact(ctx, s.sessionStore, s.sessionState, s.cwd, input.RecordArtifact, input.ArtifactKind, input.ArtifactLogicalPath, input.ArtifactReviewStatus, input.ArtifactSummary, s.selectedAgent, s.autonomy)
 			}),
 		statefulSessionCmd("feedback-apply", func(input sessionWriteCommandInput) bool { return input.FeedbackApplyConfig != "" },
-			func(_ context.Context, input sessionWriteCommandInput, s appState) error {
-				return applyFeedbackProposals(s.sessionState, input.FeedbackApplyConfig, input.FeedbackHistoryPath)
+			func(ctx context.Context, input sessionWriteCommandInput, s appState) error {
+				return applyFeedbackProposals(ctx, s.sessionState, input.FeedbackApplyConfig, input.FeedbackHistoryPath)
 			}),
 	}
 }
@@ -335,7 +335,7 @@ func statefulRetrievalCommands() []command {
 					o.agentMemoryMigrate)
 			},
 			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
-				return runAgentMemoryCommandWithAutonomy(ctx, s.cwd, s.selectedAgent, s.vectorConfig, agentMemoryCommandInputFromOptions(o), s.autonomy)
+				return runAgentMemoryCommand(ctx, s.cwd, s.selectedAgent, agentMemoryCommandInputFromOptions(o))
 			},
 		},
 		{

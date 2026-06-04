@@ -500,7 +500,7 @@ func fetchMCPIncident(ctx context.Context, input incidentDiagnoseCommandInput, t
 		return incidentFetchResult{}, errors.New("incident mcp: --incident-mcp-tool is required")
 	}
 
-	manifest, err := loadMCPManifest(input.MCPManifestPath)
+	manifest, err := loadMCPManifest(ctx, input.MCPManifestPath)
 	if err != nil {
 		return incidentFetchResult{}, fmt.Errorf("incident mcp: %s", incident.RedactText(err.Error()))
 	}

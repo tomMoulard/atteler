@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -20,7 +22,11 @@ const (
 	headlessTerminalDrainInterval = 100 * time.Millisecond
 )
 
-func listSessions(store *session.Store, tag string) error {
+func listSessions(ctx context.Context, store *session.Store, tag string) error {
+	if err := authorizeSessionStoreRead(ctx, store, "", "list sessions"); err != nil {
+		return fmt.Errorf("list sessions: %w", err)
+	}
+
 	summaries, err := listSessionSummaries(store, tag)
 	if err != nil {
 		return fmt.Errorf("list sessions: %w", err)
@@ -61,15 +67,15 @@ func runHeadlessCommandWithAutonomy(ctx context.Context, opts cliOptions, store 
 
 	switch {
 	case opts.statusHeadlessID != "":
-		return statusHeadlessRun(store, opts.statusHeadlessID)
+		return statusHeadlessRun(ctx, store, opts.statusHeadlessID)
 	case opts.cancelHeadlessID != "":
-		return cancelHeadlessRun(store, opts.cancelHeadlessID)
+		return cancelHeadlessRun(ctx, store, opts.cancelHeadlessID)
 	case opts.streamHeadlessID != "":
 		return streamHeadlessLog(ctx, store, opts.streamHeadlessID)
 	case opts.recoverHeadless:
-		return recoverHeadlessRuns(store)
+		return recoverHeadlessRuns(ctx, store)
 	case opts.listHeadless:
-		return listHeadlessRuns(store)
+		return listHeadlessRuns(ctx, store)
 	default:
 		return nil
 	}
@@ -122,7 +128,11 @@ func headlessCommandCount(opts cliOptions) int {
 	return count
 }
 
-func listHeadlessRuns(store *session.Store) error {
+func listHeadlessRuns(ctx context.Context, store *session.Store) error {
+	if err := authorizeHeadlessPermission(ctx, "list headless runs", store, "", permission.OperationRead); err != nil {
+		return fmt.Errorf("list headless runs: %w", err)
+	}
+
 	runs, err := store.ListHeadlessRuns()
 	if err != nil {
 		return fmt.Errorf("list headless runs: %w", err)
@@ -151,7 +161,11 @@ func listHeadlessRuns(store *session.Store) error {
 	return nil
 }
 
-func recoverHeadlessRuns(store *session.Store) error {
+func recoverHeadlessRuns(ctx context.Context, store *session.Store) error {
+	if err := authorizeHeadlessPermission(ctx, "recover headless runs", store, "", permission.OperationRead, permission.OperationWrite); err != nil {
+		return fmt.Errorf("recover headless runs: %w", err)
+	}
+
 	recovered, err := store.RecoverStaleHeadlessRuns(0)
 	if err != nil {
 		return fmt.Errorf("recover headless runs: %w", err)
@@ -169,9 +183,13 @@ func recoverHeadlessRuns(store *session.Store) error {
 	return nil
 }
 
-func statusHeadlessRun(store *session.Store, id string) error {
+func statusHeadlessRun(ctx context.Context, store *session.Store, id string) error {
 	if id == "" {
 		return errors.New("status headless: id is required")
+	}
+
+	if err := authorizeHeadlessPermission(ctx, "status headless run", store, id, permission.OperationRead); err != nil {
+		return fmt.Errorf("status headless: %w", err)
 	}
 
 	run, err := store.HeadlessRunStatus(id)
@@ -184,9 +202,13 @@ func statusHeadlessRun(store *session.Store, id string) error {
 	return nil
 }
 
-func cancelHeadlessRun(store *session.Store, id string) error {
+func cancelHeadlessRun(ctx context.Context, store *session.Store, id string) error {
 	if id == "" {
 		return errors.New("cancel headless: id is required")
+	}
+
+	if err := authorizeHeadlessPermission(ctx, "cancel headless run", store, id, permission.OperationExecute, permission.OperationWrite, permission.OperationMergeDelete); err != nil {
+		return fmt.Errorf("cancel headless: %w", err)
 	}
 
 	run, err := store.CancelHeadlessRun(id, "canceled by atteler session cancel-headless")
@@ -199,9 +221,55 @@ func cancelHeadlessRun(store *session.Store, id string) error {
 	return nil
 }
 
+func authorizeHeadlessPermission(
+	ctx context.Context,
+	action string,
+	store *session.Store,
+	id string,
+	kinds ...permission.OperationKind,
+) error {
+	if len(kinds) == 0 {
+		return nil
+	}
+
+	target := "headless runs"
+	if store != nil {
+		target = filepath.Join(store.Dir(), "headless")
+		if strings.TrimSpace(id) != "" {
+			target = filepath.Join(target, strings.TrimSpace(id))
+		}
+	}
+
+	operations := make([]permission.Operation, 0, len(kinds))
+	for _, kind := range kinds {
+		operations = append(operations, permission.Operation{
+			Kind:   kind,
+			Action: action,
+			Source: "atteler.session.headless",
+			Target: target,
+		})
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action:     action,
+		Source:     "atteler.session.headless",
+		Target:     target,
+		Operations: operations,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
+}
+
 func streamHeadlessLog(ctx context.Context, store *session.Store, id string) error {
 	if id == "" {
 		return errors.New("stream headless: id is required")
+	}
+
+	if err := authorizeHeadlessPermission(ctx, "stream headless run log", store, id, permission.OperationRead); err != nil {
+		return fmt.Errorf("stream headless: %w", err)
 	}
 
 	offset := session.HeadlessLogOffset{}
@@ -307,7 +375,11 @@ func listSessionSummaries(store *session.Store, tag string) ([]session.Summary, 
 	return summaries, nil
 }
 
-func listAgentPerformance(store *session.Store) error {
+func listAgentPerformance(ctx context.Context, store *session.Store) error {
+	if err := authorizeSessionStoreRead(ctx, store, "", "summarize agent performance"); err != nil {
+		return fmt.Errorf("agent performance summary: %w", err)
+	}
+
 	summaries, err := store.AgentPerformanceSummary()
 	if err != nil {
 		return fmt.Errorf("agent performance summary: %w", err)
@@ -599,7 +671,11 @@ func formatOutcomeCounts(outcomes []session.OutcomeCount) string {
 	return strings.Join(parts, ",")
 }
 
-func listSessionTags(store *session.Store) error {
+func listSessionTags(ctx context.Context, store *session.Store) error {
+	if err := authorizeSessionStoreRead(ctx, store, "", "list session tags"); err != nil {
+		return fmt.Errorf("list session tags: %w", err)
+	}
+
 	tags, err := store.Tags()
 	if err != nil {
 		return fmt.Errorf("list session tags: %w", err)
@@ -641,9 +717,9 @@ func formatHookEventType(eventType events.SupportedEventType) string {
 	return eventType.Type + "\t" + eventType.Description
 }
 
-func searchSessionsWithAutonomy(store *session.Store, query string, level autonomy.Level) error {
-	if !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
-		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "--search"))
+func searchSessions(ctx context.Context, store *session.Store, query string) error {
+	if err := authorizeSessionSearchSideEffects(ctx, store); err != nil {
+		return fmt.Errorf("search sessions: %w", err)
 	}
 
 	results, err := store.Search(query)
@@ -666,6 +742,44 @@ func searchSessionsWithAutonomy(store *session.Store, query string, level autono
 	}
 
 	return nil
+}
+
+func searchSessionsWithAutonomy(store *session.Store, query string, level autonomy.Level) error {
+	if !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "--search"))
+	}
+
+	return searchSessions(rootContext(), store, query)
+}
+
+func authorizeSessionSearchSideEffects(ctx context.Context, store *session.Store) error {
+	action := "search sessions"
+	target := sessionReadTarget(store, "")
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: action,
+		Source: "atteler.session",
+		Target: target,
+		Operations: []permission.Operation{
+			{
+				Kind:   permission.OperationRead,
+				Action: action,
+				Source: "atteler.session",
+				Target: target,
+			},
+			{
+				Kind:   permission.OperationWrite,
+				Action: "update session search index",
+				Source: "atteler.session",
+				Target: target,
+			},
+		},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }
 
 func formatSessionSummary(summary session.Summary) string {

@@ -4,6 +4,7 @@ package symphony
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -33,6 +35,34 @@ func TestParseWorkflow_FrontMatterMustBeMap(t *testing.T) {
 	var classed *ClassedError
 	require.ErrorAs(t, err, &classed)
 	assert.Equal(t, ErrWorkflowFrontMatterNotMap, classed.Class)
+}
+
+func TestWorkflowManagerLoadPermissionPolicyDeniesWorkflowRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+	require.NoError(t, os.WriteFile(path, []byte("Inspect the issue."), 0o600))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	manager, err := NewWorkflowManager(dir, path)
+	require.NoError(t, err)
+
+	_, err = manager.Load(ctx)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read workflow file")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestResolveConfig_GitHubDefaultsAndRepository(t *testing.T) {
@@ -138,6 +168,35 @@ func TestResolveConfig_RejectsInvalidAutonomy(t *testing.T) {
 	}, path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported autonomy")
+}
+
+func TestResolveConfig_PermissionPolicyDeniesTrackerEnvCredentialAccess(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	_, err := ResolveConfig(ctx, map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+		},
+	}, path)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.credential_access.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "resolve GitHub token from environment")
+	assert.Contains(t, string(auditData), "permission.credential_access.deny")
 }
 
 func TestResolveConfig_PublishDefaultsRemoveTrackerLabels(t *testing.T) {
@@ -548,6 +607,34 @@ exit 1
 	require.NoError(t, err)
 
 	assert.Equal(t, "status-token", cfg.Tracker.APIKey)
+}
+
+func TestRunGitHubCLI_PermissionPolicyDeniesCredentialAccessBeforeExecution(t *testing.T) {
+	binDir := t.TempDir()
+	markerPath := filepath.Join(t.TempDir(), "ran")
+	ghPath := filepath.Join(binDir, "gh")
+	script := "#!/usr/bin/env sh\nprintf ran > " + strconv.Quote(markerPath) + "\nprintf '%s\\n' 'cli-token'\n"
+	require.NoError(t, os.WriteFile(ghPath, []byte(script), 0o700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	token := runGitHubCLI(ctx, "auth", "token")
+
+	assert.Empty(t, token)
+
+	_, markerErr := os.Stat(markerPath)
+	require.True(t, os.IsNotExist(markerErr), "fake gh should not execute when credential access is denied")
+
+	auditData, err := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, err)
+	assert.Contains(t, string(auditData), "permission.credential_access.deny")
+	assert.Contains(t, string(auditData), string(permission.OperationCredentialAccess))
 }
 
 func TestWorkflowManager_ReloadKeepsLastGoodConfigOnInvalidChange(t *testing.T) {

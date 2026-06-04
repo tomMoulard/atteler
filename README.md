@@ -1186,13 +1186,49 @@ output format/schema flag, output limits, and declared permission envelope.
 
 ### Command policy and audit ledger
 
+Atteler also has a central side-effect permission policy layered above command
+allow/deny rules. It classifies pending work as `read`, `write`, `execute`,
+`network`, `credential_access`, `git_mutation`, or `merge_delete`. Configure
+it with the permission-mode flag (`allow`, `ask`, `deny`, or `read-only`),
+then narrow CI/headless runs with repeatable allow-operation and
+deny-operation flags. For example, allow mode plus denying network,
+credential_access, git_mutation, and merge_delete keeps local session/audit
+writes available while blocking external or destructive work.
+The allow-operation and deny-operation flags also accept comma-separated lists
+so CI profiles can keep the external/destructive deny list in one place.
+
+Interactive sessions print the active policy in the
+startup/status surfaces; `ask` mode prompts in the TUI and non-headless
+one-shot runs, while headless runs fail closed when an operation needs
+confirmation.
+Provider credential/network calls, Ollama daemon startup/stop, Symphony Codex
+app-server startup and approval requests, worktree create/merge/remove actions,
+plugin scaffolding and entrypoints, and shell/tool execution all evaluate the
+same policy before taking side effects.
+URL reference fetches and model-backed embedding/vectorization requests use
+the central network gate, while vector index persistence and cleanup use the
+write/merge-delete gates. Watch scans, code-intelligence indexing, memory
+inspection, and context-pack inputs use the read gate before walking local
+files. Config scaffolding/migration and TUI file/clipboard-writing slash
+commands such as `/save-code`, `/eval add`, and `/copy-code` also pass through
+the central write gate before changing local state.
+
 All local process launches go through the `pkg/shell` policy/audit gate before
 `exec` starts. The gate records allowed, denied, and completed commands in a
 JSONL ledger named `commands.jsonl`; set `ATTELER_COMMAND_AUDIT_DIR` to choose a
-durable directory, otherwise Atteler writes under the process temp directory.
+durable directory. When a session is active and no audit directory override is
+set, Atteler writes under that session store's `audit/<session-id>/` directory;
+otherwise it falls back to the process temp directory.
 Captured stdout/stderr is written separately under `outputs/` after redaction.
-Interactive and long-lived stdio protocol commands are still represented in the
-ledger with an explicit `not_captured` or `sensitive_not_captured` output status.
+Interactive and long-lived stdio protocol commands are still represented in
+the ledger with an explicit `not_captured` or `sensitive_not_captured` output
+status.
+The central policy also writes `side_effects.jsonl` in the same audit
+directory for every classified allowed or denied side-effect decision,
+including the rule, reason, operation kinds, and session metadata when a
+session is active.
+Command records include the classified operation kinds plus the permission
+allow/deny rule and reason that were applied before process start.
 
 The default policy strips credential-like environment variables (`*_TOKEN`,
 `*_SECRET`, `*_KEY`, auth/password/cookie/private-key names), records the env

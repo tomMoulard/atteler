@@ -16,6 +16,8 @@ import (
 
 	attasync "github.com/tommoulard/atteler/pkg/async"
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/review"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/speculate"
@@ -206,15 +208,49 @@ func TestReadWatchBaselineAcceptsWatchJSONOutputAndArrayPayload(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(arrayPath, arrayJSON, 0o600))
 
-	fromWatchJSON, err := readWatchBaseline(watchJSONPath)
+	fromWatchJSON, err := readWatchBaseline(t.Context(), watchJSONPath)
 	require.NoError(t, err)
 	require.Len(t, fromWatchJSON.Findings, 1)
 	assert.Equal(t, "old.go", fromWatchJSON.Findings[0].Path)
 
-	fromArray, err := readWatchBaseline(arrayPath)
+	fromArray, err := readWatchBaseline(t.Context(), arrayPath)
 	require.NoError(t, err)
 	require.Len(t, fromArray.Findings, 1)
 	assert.Equal(t, "old.go", fromArray.Findings[0].Path)
+}
+
+func TestReadWatchBaselinePermissionPolicyDeniesRead(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "watch-baseline.json")
+	require.NoError(t, os.WriteFile(path, []byte(`[]`), 0o600))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	_, err := readWatchBaseline(ctx, path)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+}
+
+func TestRunWatchScanPermissionPolicyDeniesRootRead(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeWatchScanTestFile(t, root, "todo.txt", "TODO: inspect me\n")
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	err := runWatchScan(ctx, root, watchCLIOptions{LargeFileBytes: 1024})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
 }
 
 func TestReadWatchRulesAcceptsArrayPayload(t *testing.T) {
@@ -223,7 +259,7 @@ func TestReadWatchRulesAcceptsArrayPayload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rules.json")
 	require.NoError(t, os.WriteFile(path, []byte(`[{"rule_id":"watch.large_file","severity":"high"}]`), 0o600))
 
-	rules, err := readWatchRules(path)
+	rules, err := readWatchRules(t.Context(), path)
 	require.NoError(t, err)
 
 	require.Len(t, rules, 1)
@@ -298,6 +334,34 @@ func TestWatchQualityInputsLoadsBaselineFromGitBranchPoint(t *testing.T) {
 	comparison := watch.CompareFindings(baseline.Findings, current)
 	assert.Equal(t, []string{"new.txt"}, watchFindingPaths(comparison.NewFindings))
 	assert.Equal(t, []string{"existing.txt"}, watchFindingPaths(comparison.UnchangedFindings))
+}
+
+func TestReadWatchBaselineRefPermissionPolicyDeniesTempMaterialization(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	runGitForWatchTest(t, root, "init")
+	runGitForWatchTest(t, root, "config", "user.email", "watch@example.test")
+	runGitForWatchTest(t, root, "config", "user.name", "Watch Test")
+	runGitForWatchTest(t, root, "config", "commit.gpgsign", "false")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "existing.txt"), []byte("TODO: existing debt\n"), 0o600))
+	runGitForWatchTest(t, root, "add", ".")
+	runGitForWatchTest(t, root, "commit", "-m", "baseline")
+	runGitForWatchTest(t, root, "branch", "-M", "main")
+	runGitForWatchTest(t, root, "switch", "-c", "feature")
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	_, _, _, _, err := watchQualityInputs(ctx, root, watchCLIOptions{
+		BaselineRef:    "main",
+		LargeFileBytes: 1024,
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
 }
 
 func TestUpsertWatchScanIssuesWhenEnabled(t *testing.T) {
@@ -534,6 +598,30 @@ func TestRunWatchScanJSONIncludesIssueUpserts(t *testing.T) { //nolint:parallelt
 	assert.Equal(t, 1, tracker.createCalls)
 	assert.Equal(t, 0, tracker.updateCalls)
 	assert.Len(t, output.Findings, 1)
+}
+
+func TestWatchGitHubTrackerConfigPermissionPolicyDeniesCredentialAccess(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := watchGitHubTrackerConfig(ctx, watchCLIOptions{
+		IssueRepository: "owner/repo",
+		GitHubToken:     "token",
+	})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.credential_access.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.credential_access.deny")
+	assert.Contains(t, string(auditData), "resolve watch GitHub token")
 }
 
 func TestRunWatchScanGateIgnoresSuppressedHighSeverityFindings(t *testing.T) { //nolint:paralleltest // captures process-global stdout.
@@ -845,6 +933,67 @@ func TestValidateAndFormatAsyncRun(t *testing.T) {
 	assert.Contains(t, got, "stop_id=stop-timeout")
 }
 
+func TestRunAsyncTasksPermissionPolicyDeniesExecutionBeforeCommandEvent(t *testing.T) {
+	t.Parallel()
+
+	cwd := t.TempDir()
+	recorder := newEventLogRecorder()
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+	err := runAsyncTasks(ctx, appState{
+		cwd:              cwd,
+		hookRunner:       events.NewRunnerWithLogger(nil, recorder),
+		sessionStore:     session.NewStore(t.TempDir()),
+		sessionState:     session.New("gpt-test", nil),
+		permissionPolicy: &policy,
+	}, asyncRunCommandInput{
+		SpawnBinary: filepath.Join(cwd, "missing-atteler-binary"),
+		TaskSpecs:   []string{"plan|planner|inspect the repository"},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "permission.execute.deny")
+	assert.NoDirExists(t, filepath.Join(cwd, ".atteler"))
+	assert.NotContains(t, strings.Join(recorder.Lines(), "\n"), "event:command_execute")
+}
+
+func TestRunAsyncTasksPermissionPolicyDeniesLedgerWriteBeforeLedgerCreation(t *testing.T) {
+	t.Parallel()
+
+	cwd := t.TempDir()
+	auditDir := t.TempDir()
+	ledgerPath := filepath.Join(t.TempDir(), "runs", "ledger.json")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+	err := runAsyncTasks(ctx, appState{
+		cwd:              cwd,
+		sessionStore:     session.NewStore(t.TempDir()),
+		sessionState:     session.New("gpt-test", nil),
+		permissionPolicy: &policy,
+	}, asyncRunCommandInput{
+		SpawnBinary: filepath.Join(cwd, "missing-atteler-binary"),
+		TaskSpecs:   []string{"plan|planner|inspect the repository"},
+		Execution: childExecutionCommandInput{
+			LedgerPath: ledgerPath,
+		},
+	})
+
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	assert.NoFileExists(t, ledgerPath)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), `"decision":"denied"`)
+	assert.Contains(t, string(auditData), `"write"`)
+}
+
 func TestChildExecutionOptionsFromCLIFlags(t *testing.T) {
 	t.Parallel()
 
@@ -1010,22 +1159,53 @@ func TestRunTaskListCommandPersistsTaskLifecycle(t *testing.T) {
 	assert.Contains(t, err.Error(), "choose only one")
 }
 
-func TestRunTaskListCommandLowAutonomyBlocksMutations(t *testing.T) {
+func TestRunTaskListCommandPermissionPolicyDeniesWriteBeforeFileCreate(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
 	taskFile := filepath.Join(t.TempDir(), "tasks.json")
 	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
 
-	err := runTaskListCommandWithAutonomy(ctx, store, taskCommandInput{
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, t.TempDir())
+	err := runTaskListCommand(ctx, store, taskCommandInput{
 		FilePath: taskFile,
+		AddID:    "todo-1",
 		AddTitle: "draft task package",
-	}, autonomy.Low)
+		Agent:    "planner",
+	})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
-	assert.Contains(t, err.Error(), "--task-add")
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
 	assert.NoFileExists(t, taskFile)
+}
+
+func TestRunTaskListCommandPermissionPolicyDeniesReadBeforeList(t *testing.T) {
+	t.Parallel()
+
+	taskFile := filepath.Join(t.TempDir(), "tasks.json")
+	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
+	_, err := tasklist.NewStore(taskFile).Add(t.Context(), tasklist.AddRequest{
+		ID:    "todo-1",
+		Title: "draft task package",
+	})
+	require.NoError(t, err)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, t.TempDir())
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		List:     true,
+	})
+
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
 }
 
 func TestFormatSpeculatePlan(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -19,6 +18,7 @@ import (
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
@@ -36,7 +36,7 @@ func (m model) handleSlashCommand(input string) (model, tea.Cmd, bool) {
 	return descriptor.Run(m, parsed)
 }
 
-func writeSessionExport(s session.Session, path string) error {
+func writeSessionExport(ctx context.Context, s session.Session, path string) error {
 	var data []byte
 
 	var err error
@@ -60,6 +60,10 @@ func writeSessionExport(s session.Session, path string) error {
 		fmt.Print(string(data))
 
 		return nil
+	}
+
+	if err := authorizeWritePermission(ctx, "export session transcript", "atteler.slash.export", path); err != nil {
+		return fmt.Errorf("export session: %w", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil && filepath.Dir(path) != "." {
@@ -188,19 +192,24 @@ func runExportSlashCommand(m model, input slashOptionalValueInput) (model, tea.C
 		path = "session.md"
 	}
 
-	if path != "-" && !m.autonomy.Allows(autonomy.ActionFileWrite) {
-		return m, tea.Println(errStyle.Render(autonomy.DenialMessage(m.autonomy, autonomy.ActionFileWrite, "/export"))), true
+	if path == "-" {
+		if err := writeSessionExport(m.ctx, m.sessionState, path); err != nil {
+			return m, tea.Println(errStyle.Render("export: " + err.Error())), true
+		}
+
+		return m, tea.Println(dimStyle.Render("exported " + path)), true
 	}
 
-	if err := writeSessionExport(m.sessionState, path); err != nil {
-		return m, tea.Println(errStyle.Render("export: " + err.Error())), true
-	}
+	cmd := runPermissionPromptedLocalActionCmd(
+		m.ctx,
+		m.permissionPolicy,
+		func(ctx context.Context) error {
+			return writeSessionExport(ctx, m.sessionState, path)
+		},
+		"exported "+path,
+	)
 
-	if path != "-" {
-		emitFileWriteWarning(m.ctx, m.hookRunner, m.sessionState, path, m.selectedAgent, "slash-export")
-	}
-
-	return m, tea.Println(dimStyle.Render("exported " + path)), true
+	return m, cmd, true
 }
 
 func runRetrySlashCommand(m model, _ slashNoArgsInput) (model, tea.Cmd, bool) {
@@ -641,13 +650,21 @@ func runSaveCodeSlashCommand(m model, input slashSaveCodeInput) (model, tea.Cmd,
 		return m, tea.Println(errStyle.Render("invalid code block")), true
 	}
 
-	if err := os.WriteFile(input.Path, []byte(bs[input.Block-1]), 0o600); err != nil {
-		return m, tea.Println(errStyle.Render(err.Error())), true
-	}
+	cmd := runPermissionGatedLocalActionCmd(
+		m.ctx,
+		m.permissionPolicy,
+		writePermissionRequest("save code block", "atteler.slash.save_code", input.Path),
+		func() error {
+			if err := os.WriteFile(input.Path, []byte(bs[input.Block-1]), 0o600); err != nil {
+				return fmt.Errorf("save code block: %w", err)
+			}
 
-	emitFileWriteWarning(m.ctx, m.hookRunner, m.sessionState, input.Path, m.selectedAgent, "slash-save-code")
+			return nil
+		},
+		"saved "+input.Path,
+	)
 
-	return m, tea.Println(dimStyle.Render("saved " + input.Path)), true
+	return m, cmd, true
 }
 
 func runCopySlashCommand(m model, input slashCopyInput) (model, tea.Cmd, bool) {
@@ -660,11 +677,20 @@ func runCopySlashCommand(m model, input slashCopyInput) (model, tea.Cmd, bool) {
 		text = plainTranscript(m.history)
 	}
 
-	if err := copyToClipboardWithAudit(m.ctx, text, slashCommandAuditContext(m, "atteler.clipboard")); err != nil {
-		return m, tea.Println(errStyle.Render("copy: " + err.Error())), true
-	}
+	cmd := runPermissionPromptedLocalActionCmd(
+		m.ctx,
+		m.permissionPolicy,
+		func(ctx context.Context) error {
+			if err := copyToClipboard(ctx, text); err != nil {
+				return fmt.Errorf("copy: %w", err)
+			}
 
-	return m, tea.Println(dimStyle.Render("copied")), true
+			return nil
+		},
+		"copied",
+	)
+
+	return m, cmd, true
 }
 
 func runCopyCodeSlashCommand(m model, input slashCopyCodeInput) (model, tea.Cmd, bool) {
@@ -679,11 +705,20 @@ func runCopyCodeSlashCommand(m model, input slashCopyCodeInput) (model, tea.Cmd,
 		return m, tea.Println(errStyle.Render("invalid code block")), true
 	}
 
-	if err := copyToClipboardWithAudit(m.ctx, blocks[input.Block-1], slashCommandAuditContext(m, "atteler.clipboard")); err != nil {
-		return m, tea.Println(errStyle.Render("copy: " + err.Error())), true
-	}
+	cmd := runPermissionPromptedLocalActionCmd(
+		m.ctx,
+		m.permissionPolicy,
+		func(ctx context.Context) error {
+			if err := copyToClipboard(ctx, blocks[input.Block-1]); err != nil {
+				return fmt.Errorf("copy: %w", err)
+			}
 
-	return m, tea.Println(dimStyle.Render("copied")), true
+			return nil
+		},
+		"copied",
+	)
+
+	return m, cmd, true
 }
 
 func copyToClipboard(ctx context.Context, text string) error {
@@ -712,6 +747,10 @@ func copyToClipboardWithAudit(ctx context.Context, text string, audit shell.Audi
 		return fmt.Errorf("context already done: %w", err)
 	}
 
+	if err := authorizeReadPermission(ctx, "locate clipboard command", "atteler.clipboard", "PATH"); err != nil {
+		return fmt.Errorf("authorize clipboard command lookup: %w", err)
+	}
+
 	cmds := [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}}
 
 	if strings.TrimSpace(audit.Caller) == "" {
@@ -719,7 +758,7 @@ func copyToClipboardWithAudit(ctx context.Context, text string, audit shell.Audi
 	}
 
 	for _, c := range cmds {
-		if _, err := exec.LookPath(c[0]); err != nil {
+		if _, err := execLookPath(c[0]); err != nil {
 			continue
 		}
 
@@ -728,7 +767,13 @@ func copyToClipboardWithAudit(ctx context.Context, text string, audit shell.Audi
 			Args:    c[1:],
 			Stdin:   strings.NewReader(text),
 			Mode:    shell.ModeCaptured,
-			Audit:   audit,
+			PermissionOperations: []permission.Operation{{
+				Kind:   permission.OperationWrite,
+				Action: "copy to clipboard",
+				Target: c[0],
+				Source: "atteler.clipboard",
+			}},
+			Audit: shell.AuditContext{Caller: "atteler.clipboard"},
 		})
 		if err != nil {
 			return fmt.Errorf("authorize %s: %w", c[0], err)
@@ -791,28 +836,42 @@ func (m model) runGitApplyPatch(patch string) (model, tea.Cmd) {
 	m.cancel = cancel
 	tickCmd := m.startRunningTask("apply-patch")
 
+	displayCommand := gitApplyPatchDisplayCommand
+	confirmCh := make(chan agentLoopConfirmRequest, 1)
+	responseCh := make(chan bool, 1)
+	ctx = contextWithTUIPermissionPrompt(ctx, m.permissionPolicy, confirmCh, responseCh)
+	commandEvent := events.Event{
+		Type:        events.CommandExecute,
+		SessionID:   m.sessionState.ID,
+		SessionPath: m.sessionPath,
+		Agent:       m.selectedAgent,
+		Model:       m.sessionState.DefaultModel,
+		Content:     displayCommand,
+		Metadata: map[string]string{
+			"command": displayCommand,
+			"cwd":     m.cwd,
+			"input":   "/apply-patch",
+			"source":  "slash",
+		},
+	}
+	applyCmd := runGitApplyPatchCmd(ctx, patch, m.cwd, slashCommandAuditContext(m, "atteler.slash.apply_patch.git"), func() {
+		emitHookWarning(m.ctx, m.hookRunner, commandEvent)
+	})
+	wrappedApplyCmd := func() tea.Msg {
+		defer close(confirmCh)
+
+		return applyCmd()
+	}
+
 	return m, tea.Batch(tea.Sequence(
 		tea.Println(line),
-		emitHook(m.ctx, m.hookRunner, events.Event{
-			Type:        events.CommandExecute,
-			SessionID:   m.sessionState.ID,
-			SessionPath: m.sessionPath,
-			Agent:       m.selectedAgent,
-			Model:       m.sessionState.DefaultModel,
-			Content:     gitApplyPatchDisplayCommand,
-			Metadata: map[string]string{
-				"autonomy": m.autonomy.String(),
-				"command":  gitApplyPatchDisplayCommand,
-				"cwd":      m.cwd,
-				"input":    "/apply-patch",
-				"source":   "slash",
-			},
-		}),
-		runGitApplyPatchCmd(ctx, patch, m.cwd, slashCommandAuditContext(m, "atteler.slash.apply_patch.git")),
-	), tickCmd)
+		wrappedApplyCmd,
+	), tickCmd, listenForCheckpoint(confirmCh, responseCh))
 }
 
-func runGitApplyPatchCmd(ctx context.Context, patch, dir string, audit shell.AuditContext) tea.Cmd {
+func runGitApplyPatchCmd(ctx context.Context, patch, dir string, options ...any) tea.Cmd {
+	audit, startCallback := gitApplyPatchOptions(options...)
+
 	return func() tea.Msg {
 		autonomyLevel := autonomy.Normalize(autonomy.Level(audit.Autonomy))
 		if decision := llm.BashAutonomyDecision(autonomyLevel, gitApplyPatchDisplayCommand); decision.Verdict == llm.ToolPolicyDeny {
@@ -826,11 +885,11 @@ func runGitApplyPatchCmd(ctx context.Context, patch, dir string, audit shell.Aud
 			}
 		}
 
-		stdout, stderr, err := runGitApply(ctx, dir, []string{"--check", "-"}, patch, audit)
+		stdout, stderr, err := runGitApply(ctx, dir, []string{"--check", "-"}, patch, audit, nil)
 		if err == nil {
 			var applyStdout, applyStderr string
 
-			applyStdout, applyStderr, err = runGitApply(ctx, dir, []string{"-"}, patch, audit)
+			applyStdout, applyStderr, err = runGitApply(ctx, dir, []string{"-"}, patch, audit, startCallback)
 			stdout += applyStdout
 			stderr += applyStderr
 		}
@@ -845,18 +904,42 @@ func runGitApplyPatchCmd(ctx context.Context, patch, dir string, audit shell.Aud
 	}
 }
 
-func runGitApply(ctx context.Context, dir string, args []string, patch string, audit shell.AuditContext) (stdoutText, stderrText string, err error) {
+func gitApplyPatchOptions(options ...any) (audit shell.AuditContext, startCallback func()) {
+	audit = shell.AuditContext{Caller: "atteler.slash.apply_patch"}
+
+	for _, option := range options {
+		switch value := option.(type) {
+		case nil:
+		case shell.AuditContext:
+			audit = value
+		case func():
+			startCallback = value
+		}
+	}
+
+	return audit, startCallback
+}
+
+func runGitApply(
+	ctx context.Context,
+	dir string,
+	args []string,
+	patch string,
+	audit shell.AuditContext,
+	startCallback func(),
+) (stdoutText, stderrText string, err error) {
 	var stdout, stderr bytes.Buffer
 
 	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
-		Program: "git",
-		Args:    append([]string{"apply"}, args...),
-		Dir:     dir,
-		Stdin:   strings.NewReader(patch),
-		Stdout:  &stdout,
-		Stderr:  &stderr,
-		Mode:    shell.ModeCaptured,
-		Audit:   audit,
+		Program:       "git",
+		Args:          append([]string{"apply"}, args...),
+		Dir:           dir,
+		Stdin:         strings.NewReader(patch),
+		Stdout:        &stdout,
+		Stderr:        &stderr,
+		Mode:          shell.ModeCaptured,
+		Audit:         audit,
+		StartCallback: startCallback,
 	})
 	if err != nil {
 		return stdout.String(), stderr.String(), fmt.Errorf("git apply %s authorize: %w", strings.Join(args, " "), err)
@@ -909,29 +992,51 @@ func runEvalSlashCommand(m model, input slashEvalInput) (model, tea.Cmd, bool) {
 		}
 
 		path := filepath.Join(evalCasesDir(m.cwd), m.sessionState.ID+".json")
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			return m, tea.Println(errStyle.Render(err.Error())), true
-		}
 
 		data, err := json.MarshalIndent(m.sessionState, "", "  ")
 		if err != nil {
 			return m, tea.Println(errStyle.Render("eval add: " + err.Error())), true
 		}
 
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			return m, tea.Println(errStyle.Render(err.Error())), true
-		}
+		cmd := runPermissionGatedLocalActionCmd(
+			m.ctx,
+			m.permissionPolicy,
+			writePermissionRequest("add eval case", "atteler.slash.eval", path),
+			func() error {
+				if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+					return fmt.Errorf("create eval dir: %w", err)
+				}
 
-		emitFileWriteWarning(m.ctx, m.hookRunner, m.sessionState, path, m.selectedAgent, "slash-eval")
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					return fmt.Errorf("write eval case: %w", err)
+				}
 
-		return m, tea.Println(dimStyle.Render("added eval " + path)), true
+				return nil
+			},
+			"added eval "+path,
+		)
+
+		return m, cmd, true
 	case "run":
-		count, err := countEvalCases(evalCasesDir(m.cwd))
-		if err != nil {
-			return m, tea.Println(errStyle.Render("eval run: " + err.Error())), true
-		}
+		dir := evalCasesDir(m.cwd)
+		cmd := runPermissionPromptedLocalMessageCmd(
+			m.ctx,
+			m.permissionPolicy,
+			func(ctx context.Context) (string, error) {
+				if err := authorizeReadPermission(ctx, "count eval cases", "atteler.slash.eval", dir); err != nil {
+					return "", fmt.Errorf("eval run: %w", err)
+				}
 
-		return m, tea.Println(fmt.Sprintf("eval cases: %d", count)), true
+				count, err := countEvalCases(dir)
+				if err != nil {
+					return "", fmt.Errorf("eval run: %w", err)
+				}
+
+				return fmt.Sprintf("eval cases: %d", count), nil
+			},
+		)
+
+		return m, cmd, true
 	}
 
 	return m, tea.Println("usage: /eval add|run"), true
@@ -943,6 +1048,89 @@ func evalCasesDir(cwd string) string {
 	}
 
 	return filepath.Join(cwd, ".atteler", "evals")
+}
+
+func writePermissionRequest(action, source, target string) permission.Request {
+	return permission.Request{
+		Action: action,
+		Source: source,
+		Target: target,
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationWrite,
+			Action: action,
+			Source: source,
+			Target: target,
+		}},
+	}
+}
+
+func runPermissionGatedLocalActionCmd(
+	ctx context.Context,
+	policy *permission.Policy,
+	request permission.Request,
+	run func() error,
+	success string,
+) tea.Cmd {
+	return runPermissionPromptedLocalActionCmd(ctx, policy, func(ctx context.Context) error {
+		decision := permission.Evaluate(ctx, policy, request)
+		if !decision.Allowed {
+			return &permission.Error{Decision: decision}
+		}
+
+		return run()
+	}, success)
+}
+
+func runPermissionPromptedLocalActionCmd(
+	ctx context.Context,
+	policy *permission.Policy,
+	run func(context.Context) error,
+	success string,
+) tea.Cmd {
+	return runPermissionPromptedLocalMessageCmd(ctx, policy, func(ctx context.Context) (string, error) {
+		if err := run(ctx); err != nil {
+			return "", err
+		}
+
+		return success, nil
+	})
+}
+
+func runPermissionPromptedLocalMessageCmd(
+	ctx context.Context,
+	policy *permission.Policy,
+	run func(context.Context) (string, error),
+) tea.Cmd {
+	var requestCh chan agentLoopConfirmRequest
+
+	var responseCh chan bool
+
+	if permissionPolicyNeedsPrompt(policy) {
+		requestCh = make(chan agentLoopConfirmRequest, 1)
+		responseCh = make(chan bool, 1)
+		ctx = contextWithTUIPermissionPrompt(ctx, policy, requestCh, responseCh)
+	} else {
+		ctx = permission.ContextWithPolicy(ctx, policy)
+	}
+
+	actionCmd := func() tea.Msg {
+		if requestCh != nil {
+			defer close(requestCh)
+		}
+
+		message, err := run(ctx)
+		if err != nil {
+			return tea.Println(errStyle.Render(err.Error()))()
+		}
+
+		return tea.Println(dimStyle.Render(message))()
+	}
+
+	if requestCh == nil {
+		return actionCmd
+	}
+
+	return tea.Batch(actionCmd, listenForCheckpoint(requestCh, responseCh))
 }
 
 func countEvalCases(dir string) (int, error) {

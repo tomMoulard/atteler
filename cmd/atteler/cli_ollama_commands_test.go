@@ -13,6 +13,7 @@ import (
 
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 func TestPrintOllamaStatusReportsRemoteWithoutStarting(t *testing.T) {
@@ -31,6 +32,27 @@ func TestPrintOllamaStatusReportsRemoteWithoutStarting(t *testing.T) {
 	assert.Contains(t, out, "auto_start: enabled (env.ATTELER_OLLAMA_AUTO_START)")
 	assert.Contains(t, out, "ownership: none")
 	assert.Contains(t, out, "stop: no Atteler-owned daemon recorded")
+}
+
+func TestPrintOllamaStatusPermissionPolicyDeniesConfigRead(t *testing.T) {
+	t.Parallel()
+
+	auditDir := t.TempDir()
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+	err := printOllamaStatus(ctx)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "load config for Ollama status")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestStopOllamaDaemonReportsNoRecord(t *testing.T) {

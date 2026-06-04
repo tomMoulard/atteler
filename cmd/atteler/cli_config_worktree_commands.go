@@ -184,7 +184,10 @@ func doctor(ctx context.Context, state appState) error {
 	providers := state.registry.ListProviders()
 	sort.Strings(providers)
 
-	printDoctorOverview(state, providers)
+	if err := printDoctorOverview(ctx, state, providers); err != nil {
+		return err
+	}
+
 	fmt.Println(formatOllamaDoctorLine(ctx, state.config))
 
 	// Health check every registered provider and list their models.
@@ -233,15 +236,18 @@ func doctor(ctx context.Context, state appState) error {
 	return nil
 }
 
-func printDoctorOverview(state appState, providers []string) {
+func printDoctorOverview(ctx context.Context, state appState, providers []string) error {
 	if len(state.loadedConfigPaths) == 0 {
 		fmt.Println("config: no config files loaded")
 	} else {
 		fmt.Println("config: " + strings.Join(state.loadedConfigPaths, ", "))
 	}
 
-	printConfigStateDoctorSummary()
-	fmt.Println("sessions: " + state.sessionStore.Dir() + " (" + pathStatus(state.sessionStore.Dir()) + ")")
+	if err := printConfigStateDoctorSummary(ctx); err != nil {
+		return err
+	}
+
+	fmt.Println("sessions: " + state.sessionStore.Dir() + " (" + pathStatus(ctx, state.sessionStore.Dir()) + ")")
 
 	if len(providers) == 0 {
 		fmt.Println("providers: none registered")
@@ -261,6 +267,8 @@ func printDoctorOverview(state appState, providers []string) {
 	if state.worktreeInfo != nil {
 		fmt.Println("worktree: " + worktree.Status(state.worktreeInfo))
 	}
+
+	return nil
 }
 
 func providerHealthResults(ctx context.Context, state appState, registeredProviders []string) []llm.ProviderHealth {
@@ -558,10 +566,14 @@ func formatRetryPolicy(policy llm.RetryPolicyInfo) string {
 	)
 }
 
-func doctorOffline(opts cliOptions) error {
+func doctorOffline(ctx context.Context, opts cliOptions) error {
+	if err := authorizeConfigStackRead(ctx, "run offline doctor", "atteler.doctor.offline"); err != nil {
+		return fmt.Errorf("doctor offline: %w", err)
+	}
+
 	cfg, loadedConfigPaths, _, diagnostics, loadErr := appconfig.LoadWithDiagnostics()
 	sources := appconfig.InspectPathSources(appconfig.DefaultPathSources())
-	fatalErr := configDoctorFatalError(loadErr, sources)
+	fatalErr := configDoctorFatalError(loadErr, sources, diagnostics)
 
 	outputFormat, err := structuredCommandOutputFormat(opts.jsonOutput, opts.outputFormat)
 	if err != nil {
@@ -569,7 +581,7 @@ func doctorOffline(opts cliOptions) error {
 	}
 
 	if outputFormat == outputFormatJSON {
-		return printDoctorOfflineJSON(opts, cfg, loadedConfigPaths, diagnostics, sources, loadErr, fatalErr)
+		return printDoctorOfflineJSON(ctx, opts, cfg, loadedConfigPaths, diagnostics, sources, loadErr, fatalErr)
 	}
 
 	fmt.Println("Atteler offline doctor")
@@ -593,10 +605,12 @@ func doctorOffline(opts cliOptions) error {
 		fmt.Println("config: " + strings.Join(loadedConfigPaths, ", "))
 	}
 
-	printConfigStateDoctorSummaryWithDiagnostics(fatalErr, diagnostics)
+	if err := printConfigStateDoctorSummaryWithDiagnostics(ctx, fatalErr, diagnostics); err != nil {
+		return err
+	}
 
 	store := session.NewStore(opts.sessionDir)
-	fmt.Println("sessions: " + store.Dir() + " (" + pathStatus(store.Dir()) + ")")
+	fmt.Println("sessions: " + store.Dir() + " (" + pathStatus(ctx, store.Dir()) + ")")
 
 	providerNames := knownProviderNames()
 	if len(providerNames) == 0 {
@@ -636,6 +650,7 @@ func doctorOffline(opts cliOptions) error {
 }
 
 func printDoctorOfflineJSON(
+	ctx context.Context,
 	opts cliOptions,
 	cfg appconfig.Config,
 	loadedConfigPaths []string,
@@ -644,7 +659,11 @@ func printDoctorOfflineJSON(
 	loadErr error,
 	fatalErr error,
 ) error {
-	report := newDoctorOfflineJSONReport(opts, cfg, loadedConfigPaths, diagnostics, sources, loadErr, fatalErr)
+	report, err := newDoctorOfflineJSONReport(ctx, opts, cfg, loadedConfigPaths, diagnostics, sources, loadErr, fatalErr)
+	if err != nil {
+		return err
+	}
+
 	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
 		return fmt.Errorf("config doctor-offline: encode JSON: %w", err)
 	}
@@ -657,6 +676,7 @@ func printDoctorOfflineJSON(
 }
 
 func newDoctorOfflineJSONReport(
+	ctx context.Context,
 	opts cliOptions,
 	cfg appconfig.Config,
 	loadedConfigPaths []string,
@@ -664,7 +684,7 @@ func newDoctorOfflineJSONReport(
 	sources []appconfig.SourceDiagnostic,
 	loadErr error,
 	fatalErr error,
-) doctorOfflineJSONReport {
+) (doctorOfflineJSONReport, error) {
 	status := doctorStatusOK
 	configStatus := doctorStatusOK
 
@@ -673,7 +693,12 @@ func newDoctorOfflineJSONReport(
 		configStatus = doctorStatusFailed
 	}
 
-	state := appconfig.InspectStatePath(appconfig.DefaultStatePath())
+	statePath := appconfig.DefaultStatePath()
+	if err := authorizeStateFileRead(ctx, "inspect state for offline doctor", "atteler.doctor.offline", statePath); err != nil {
+		return doctorOfflineJSONReport{}, fmt.Errorf("doctor offline: %w", err)
+	}
+
+	state := appconfig.InspectStatePath(statePath)
 	store := session.NewStore(opts.sessionDir)
 	providerNames := knownProviderNames()
 
@@ -719,7 +744,7 @@ func newDoctorOfflineJSONReport(
 		StateDiagnostics: doctorDiagnosticCountsFromSummary(stateSummary),
 		Sessions: doctorOfflinePathReport{
 			Path:   store.Dir(),
-			Status: pathStatus(store.Dir()),
+			Status: pathStatus(ctx, store.Dir()),
 		},
 		KnownProviders: providerNames,
 		Agents:         agents,
@@ -727,7 +752,7 @@ func newDoctorOfflineJSONReport(
 		Plugins:        plugins,
 		Diagnostics:    reportDiagnostics,
 		Sources:        sources,
-	}
+	}, nil
 }
 
 func printConfigDoctorDiagnosticLevels(w io.Writer) {
@@ -798,12 +823,16 @@ func doctorOfflineProviderRetryNames(cfg appconfig.Config, providerNames []strin
 	return retryProviderNames
 }
 
-func configDoctorFatalError(loadErr error, sources []appconfig.SourceDiagnostic) error {
+func configDoctorFatalError(loadErr error, sources []appconfig.SourceDiagnostic, diagnosticGroups ...[]appconfig.Diagnostic) error {
 	if loadErr != nil {
 		return loadErr
 	}
 
 	fatalDiagnostics := fatalConfigSourceDiagnostics(sources)
+	for _, diagnostics := range diagnosticGroups {
+		fatalDiagnostics = append(fatalDiagnostics, fatalConfigDiagnostics(diagnostics)...)
+	}
+
 	if len(fatalDiagnostics) == 0 {
 		return nil
 	}
@@ -818,6 +847,22 @@ func configDoctorFatalError(loadErr error, sources []appconfig.SourceDiagnostic)
 	}
 
 	return fmt.Errorf("%d fatal config diagnostics: %s", len(messages), strings.Join(messages, "; "))
+}
+
+func fatalConfigDiagnostics(diagnostics []appconfig.Diagnostic) []doctorDiagnostic {
+	var out []doctorDiagnostic
+
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Severity != appconfig.DiagnosticError {
+			continue
+		}
+
+		fatalDiagnostic := doctorDiagnosticFromConfigDiagnostic(diagnostic)
+		fatalDiagnostic.Severity = doctorSeverityFatal
+		out = append(out, fatalDiagnostic)
+	}
+
+	return out
 }
 
 func fatalConfigSourceDiagnostics(sources []appconfig.SourceDiagnostic) []doctorDiagnostic {
@@ -933,15 +978,15 @@ type configDoctorDiagnosticSummary struct {
 	info     int
 }
 
-func printConfigStateDoctorSummary() {
-	printConfigStateDoctorSummaryWithFatal(nil)
+func printConfigStateDoctorSummary(ctx context.Context) error {
+	return printConfigStateDoctorSummaryWithFatal(ctx, nil)
 }
 
-func printConfigStateDoctorSummaryWithFatal(fatalErr error) {
-	printConfigStateDoctorSummaryWithDiagnostics(fatalErr, nil)
+func printConfigStateDoctorSummaryWithFatal(ctx context.Context, fatalErr error) error {
+	return printConfigStateDoctorSummaryWithDiagnostics(ctx, fatalErr, nil)
 }
 
-func printConfigStateDoctorSummaryWithDiagnostics(fatalErr error, diagnostics []appconfig.Diagnostic) {
+func printConfigStateDoctorSummaryWithDiagnostics(ctx context.Context, fatalErr error, diagnostics []appconfig.Diagnostic) error {
 	fmt.Printf(
 		"schema: config=%d state=%d\n",
 		appconfig.ConfigSchemaVersion,
@@ -953,7 +998,12 @@ func printConfigStateDoctorSummaryWithDiagnostics(fatalErr error, diagnostics []
 	configSummary.addFatal(fatalErr)
 	fmt.Println("config_diagnostics: " + formatConfigDoctorDiagnosticSummary(configSummary))
 
-	stateReport := appconfig.InspectStatePath(appconfig.DefaultStatePath())
+	statePath := appconfig.DefaultStatePath()
+	if err := authorizeStateFileRead(ctx, "inspect state for offline doctor", "atteler.doctor.offline", statePath); err != nil {
+		return fmt.Errorf("doctor offline: %w", err)
+	}
+
+	stateReport := appconfig.InspectStatePath(statePath)
 
 	stateStatus := stateReport.Status
 	if stateReport.Version > 0 {
@@ -972,6 +1022,8 @@ func printConfigStateDoctorSummaryWithDiagnostics(fatalErr error, diagnostics []
 		stateSummary.warnings,
 		stateSummary.info,
 	)
+
+	return nil
 }
 
 func formatConfigDoctorDiagnosticSummary(summary configDoctorDiagnosticSummary) string {
@@ -1029,7 +1081,11 @@ func (s *configDoctorDiagnosticSummary) addFatal(err error) {
 	s.fatal++
 }
 
-func pathStatus(path string) string {
+func pathStatus(ctx context.Context, path string) string {
+	if err := authorizeReadPermission(ctx, "inspect session path status", "atteler.session.path_status", path); err != nil {
+		return "blocked: " + err.Error()
+	}
+
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1671,7 +1727,15 @@ func finalizeWorktree(ctx context.Context, state *appState) error {
 
 	fmt.Fprintln(os.Stderr, "worktree: merging "+state.worktreeInfo.Branch+" into "+state.worktreeInfo.BaseBranch+"...")
 
-	result, err := worktree.MergeWithResultContext(worktree.WithAuditContext(ctx, worktreeShellAuditContext(state.sessionState, state.autonomy)), state.cwd, state.worktreeInfo, worktree.MergeOptions{
+	if err := authorizeSessionStoreWrite(ctx, state.sessionStore, state.sessionState, "update session after worktree merge"); err != nil {
+		fmt.Fprintln(os.Stderr, "worktree: auto-merge blocked: "+err.Error())
+		fmt.Fprintln(os.Stderr, "worktree: files preserved in "+state.worktreeInfo.Path)
+		fmt.Fprintln(os.Stderr, "worktree: retry with: atteler --merge-worktree "+state.sessionState.ID)
+
+		return fmt.Errorf("worktree auto-merge blocked: %w", err)
+	}
+
+	result, err := worktree.MergeWithResultContext(ctx, state.cwd, state.worktreeInfo, worktree.MergeOptions{
 		AutoCommit:           true,
 		ReviewedAutoCommit:   true,
 		AutoMerge:            true,

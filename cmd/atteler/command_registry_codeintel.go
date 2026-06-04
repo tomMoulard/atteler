@@ -50,6 +50,10 @@ func runCodeIntelCommandWithWriter(ctx context.Context, w io.Writer, cwd string,
 	return runCodeIntelSchemaCommand(ctx, cwd, input, cmd.name)
 }
 
+func runCodeIntelCommandWithWriterContext(ctx context.Context, w io.Writer, cwd string, input codeIntelCommandInput) error {
+	return runCodeIntelCommandWithWriter(ctx, w, cwd, input)
+}
+
 func matchingCodeIntelCommand(input codeIntelCommandInput) *codeIntelCommand {
 	matches := matchingCodeIntelCommands(input)
 	if len(matches) == 0 {

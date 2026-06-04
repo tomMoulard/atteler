@@ -456,7 +456,15 @@ func promptRepoSnapshotForState(ctx context.Context, state appState, opts prompt
 	ctx = contextWithPromptGitAutonomy(ctx, state.autonomy)
 
 	if !promptGitCompletionAllowed(state.autonomy) {
-		return buildPromptRepoContextSnapshot(ctx, key, opts)
+		return promptRepoContextSnapshot{
+			CapturedAt: opts.Now(),
+			Key:        key,
+			Sources: []promptContextSourceStatus{
+				promptContextSourceReport(promptContextSourceGitBranch, promptContextFreshnessSkipped, "autonomy low skips repository completion probes"),
+				promptContextSourceReport(promptContextSourceGitStatus, promptContextFreshnessSkipped, "autonomy low skips repository completion probes"),
+				promptContextSourceReport(promptContextSourceProjectSymbols, promptContextFreshnessSkipped, "autonomy low skips repository completion probes"),
+			},
+		}
 	}
 
 	cache := state.promptContextCache
@@ -1321,6 +1329,10 @@ func promptProjectSymbolCandidatesWithError(
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return nil, promptContextSkipError{reason: "repository root is empty"}
+	}
+
+	if err := authorizeCodeIntelRead(ctx, root); err != nil {
+		return nil, err
 	}
 
 	goFiles, tooMany, err := countPromptContextGoFiles(ctx, root, maxIndexFiles)

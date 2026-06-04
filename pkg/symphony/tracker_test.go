@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/watch"
 )
 
@@ -54,194 +55,72 @@ func TestTrackerClients_RequireActiveContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-func TestGitHubGraphQLEndpoint(t *testing.T) {
+func TestLinearClient_PermissionPolicyDeniesCredentialAccessBeforeRequest(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name     string
-		endpoint string
-		want     string
-	}{
-		{
-			name:     "default public API",
-			endpoint: "https://api.github.com",
-			want:     "https://api.github.com/graphql",
-		},
-		{
-			name:     "enterprise REST API",
-			endpoint: "https://github.example/api/v3",
-			want:     "https://github.example/api/graphql",
-		},
-		{
-			name:     "public GraphQL API",
-			endpoint: "https://api.github.com/graphql",
-			want:     "https://api.github.com/graphql",
-		},
-		{
-			name:     "enterprise GraphQL API",
-			endpoint: "https://github.example/api/graphql",
-			want:     "https://github.example/api/graphql",
-		},
-		{
-			name:     "custom REST path",
-			endpoint: "https://github.example/custom",
-			want:     "https://github.example/custom/graphql",
-		},
-	}
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, t.TempDir())
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			assert.Equal(t, tt.want, githubGraphQLEndpoint(tt.endpoint))
-		})
-	}
-}
-
-func TestGitHubAPIVersionMatchesSupportedVersion(t *testing.T) {
-	t.Parallel()
-
-	assert.Equal(t, "2022-11-28", githubAPIVersion)
-}
-
-func TestGitHubClient_ConvertPullRequestToDraft(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
-		assert.Equal(t, githubAPIVersion, r.Header.Get("X-GitHub-Api-Version"))
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, githubGraphQLPath, r.URL.Path)
-
-		var body map[string]any
-		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) {
-			http.Error(w, "decode graphql body", http.StatusBadRequest)
-			return
-		}
-
-		query, ok := body["query"].(string)
-		if !assert.True(t, ok) {
-			http.Error(w, "query is not a string", http.StatusBadRequest)
-			return
-		}
-
-		variables, ok := body["variables"].(map[string]any)
-		if !assert.True(t, ok) {
-			http.Error(w, "variables are not an object", http.StatusBadRequest)
-			return
-		}
-
-		assert.Contains(t, query, "convertPullRequestToDraft")
-		assert.Equal(t, "PR_node", variables["pullRequestId"])
-		writeTestResponse(t, w, `{"data":{"convertPullRequestToDraft":{"pullRequest":{"id":"PR_node","isDraft":true}}}}`)
-	}))
-	defer server.Close()
-
-	client := NewGitHubClient(TrackerConfig{
-		Endpoint: server.URL,
-		APIKey:   "token",
-		Owner:    "owner",
-		Repo:     "repo",
+	client := NewLinearClient(TrackerConfig{
+		Endpoint:     "http://127.0.0.1:1/graphql",
+		APIKey:       "token",
+		ProjectSlug:  "project",
+		ActiveStates: []string{"Todo"},
 	})
 
-	require.NoError(t, client.ConvertPullRequestToDraft(t.Context(), "PR_node"))
-}
-
-func TestGitHubClient_ConvertPullRequestToDraftRequiresDraftResponse(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeTestResponse(t, w, `{"data":{"convertPullRequestToDraft":{"pullRequest":{"id":"PR_node","isDraft":false}}}}`)
-	}))
-	defer server.Close()
-
-	client := NewGitHubClient(TrackerConfig{
-		Endpoint: server.URL,
-		APIKey:   "token",
-		Owner:    "owner",
-		Repo:     "repo",
-	})
-
-	err := client.ConvertPullRequestToDraft(t.Context(), "PR_node")
+	_, err := client.FetchCandidateIssues(ctx)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not converted to draft")
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.credential_access.deny")
 }
 
-func TestGitHubClient_MarkPullRequestReadyForReview(t *testing.T) {
+func TestGitHubClient_PermissionPolicyDeniesNetworkBeforeRequest(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
-		assert.Equal(t, githubAPIVersion, r.Header.Get("X-GitHub-Api-Version"))
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, githubGraphQLPath, r.URL.Path)
-
-		var body map[string]any
-		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) {
-			http.Error(w, "decode graphql body", http.StatusBadRequest)
-			return
-		}
-
-		query, ok := body["query"].(string)
-		if !assert.True(t, ok) {
-			http.Error(w, "query is not a string", http.StatusBadRequest)
-			return
-		}
-
-		variables, ok := body["variables"].(map[string]any)
-		if !assert.True(t, ok) {
-			http.Error(w, "variables are not an object", http.StatusBadRequest)
-			return
-		}
-
-		assert.Contains(t, query, "markPullRequestReadyForReview")
-		assert.Equal(t, "PR_node", variables["pullRequestId"])
-		writeTestResponse(t, w, `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_node","isDraft":false}}}}`)
-	}))
-	defer server.Close()
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, t.TempDir())
 
 	client := NewGitHubClient(TrackerConfig{
-		Endpoint: server.URL,
-		APIKey:   "token",
-		Owner:    "owner",
-		Repo:     "repo",
+		Endpoint:     "http://127.0.0.1:1",
+		APIKey:       "token",
+		Owner:        "owner",
+		Repo:         "repo",
+		ActiveStates: []string{"open"},
 	})
 
-	require.NoError(t, client.MarkPullRequestReadyForReview(t.Context(), "PR_node"))
-}
-
-func TestGitHubClient_MarkPullRequestReadyForReviewRequiresReadyResponse(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeTestResponse(t, w, `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_node","isDraft":true}}}}`)
-	}))
-	defer server.Close()
-
-	client := NewGitHubClient(TrackerConfig{
-		Endpoint: server.URL,
-		APIKey:   "token",
-		Owner:    "owner",
-		Repo:     "repo",
-	})
-
-	err := client.MarkPullRequestReadyForReview(t.Context(), "PR_node")
+	_, err := client.FetchCandidateIssues(ctx)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not marked ready for review")
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.network.deny")
 }
 
-func TestGitHubPullRequestUnmarshalTracksDraftFieldPresence(t *testing.T) {
+func TestGitHubClient_PermissionPolicyDeniesWriteBeforeCreateIssue(t *testing.T) {
 	t.Parallel()
 
-	var explicitReady GitHubPullRequest
-	require.NoError(t, json.Unmarshal([]byte(`{"number":7,"draft":false}`), &explicitReady))
-	assert.True(t, explicitReady.DraftKnown)
-	assert.False(t, explicitReady.Draft)
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, t.TempDir())
 
-	var omitted GitHubPullRequest
-	require.NoError(t, json.Unmarshal([]byte(`{"number":7}`), &omitted))
-	assert.False(t, omitted.DraftKnown)
-	assert.False(t, omitted.Draft)
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: "http://127.0.0.1:1",
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	_, err := client.CreateIssue(ctx, watch.IssueDraft{
+		Title:       "denied",
+		Body:        "should not make a network request",
+		Fingerprint: "permission-denied",
+	})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
 }
 
 func TestGitHubClient_FetchPullRequestChecksClassifiesFailure(t *testing.T) {

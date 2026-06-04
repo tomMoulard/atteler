@@ -95,6 +95,10 @@ func saveSession(ctx context.Context, store *session.Store, sessionState session
 			return sessionSavedMsg{}
 		}
 
+		if err := authorizeSessionStoreWrite(ctx, store, sessionState, "save TUI session"); err != nil {
+			return sessionSavedMsg{err: err}
+		}
+
 		if err := store.Save(sessionState); err != nil {
 			return sessionSavedMsg{err: err}
 		}
@@ -138,12 +142,15 @@ func saveModelPreference(
 			return modelPreferenceSavedMsg{scope: scope}
 		}
 
-		level = autonomy.Normalize(level)
-		if !level.Allows(autonomy.ActionFileWrite) {
+		if !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
 			return modelPreferenceSavedMsg{
 				err:   fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "model preference")),
 				scope: scope,
 			}
+		}
+
+		if err := authorizeStateStoreWrite(ctx, store, "save model preference"); err != nil {
+			return modelPreferenceSavedMsg{err: err, scope: scope}
 		}
 
 		_, err := store.Update(func(state *appconfig.State) error {
@@ -190,12 +197,8 @@ func savePromptSuggestionPreference(
 			return promptSuggestionPreferenceSavedMsg{scope: scope}
 		}
 
-		level = autonomy.Normalize(level)
-		if !level.Allows(autonomy.ActionFileWrite) {
-			return promptSuggestionPreferenceSavedMsg{
-				err:   fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "prompt suggestion preference")),
-				scope: scope,
-			}
+		if err := authorizeStateStoreWrite(ctx, store, "save prompt suggestion preference"); err != nil {
+			return promptSuggestionPreferenceSavedMsg{err: err, scope: scope}
 		}
 
 		_, err := store.Update(func(state *appconfig.State) error {
@@ -218,6 +221,15 @@ func savePromptSuggestionPreference(
 
 		return promptSuggestionPreferenceSavedMsg{scope: scope}
 	}
+}
+
+func authorizeStateStoreWrite(ctx context.Context, store *appconfig.StateStore, action string) error {
+	target := "state store"
+	if store != nil {
+		target = store.Path()
+	}
+
+	return authorizeWritePermission(ctx, action, "atteler.state", target)
 }
 
 func emitFileRead(

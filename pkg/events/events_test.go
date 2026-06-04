@@ -770,7 +770,7 @@ func TestRunner_EmitRedactsSecretEventTypeInPayloadAndEnv(t *testing.T) {
 				"ATTELER_TEST_OUT":     payloadOut,
 				"ATTELER_TEST_ENV_OUT": envOut,
 			},
-			TimeoutSeconds: 10,
+			TimeoutSeconds: 5,
 			Blocking:       true,
 		}},
 	})

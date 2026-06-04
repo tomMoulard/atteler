@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -108,7 +109,7 @@ func (m *WorkflowManager) Load(ctx context.Context) (WorkflowSnapshot, error) {
 		return WorkflowSnapshot{}, errors.New("workflow load: context is required")
 	}
 
-	data, info, err := readWorkflowFile(m.path)
+	data, info, err := readWorkflowFile(ctx, m.path)
 	if err != nil {
 		return WorkflowSnapshot{}, err
 	}
@@ -174,7 +175,7 @@ func (m *WorkflowManager) ReloadIfChanged(ctx context.Context) (WorkflowSnapshot
 		return snapshot, true, err
 	}
 
-	info, err := os.Stat(m.path)
+	info, err := statWorkflowFile(ctx, m.path, "inspect workflow file for reload")
 	if err != nil {
 		return m.current, false, &ClassedError{Class: ErrMissingWorkflowFile, Err: fmt.Errorf("read %s: %w", m.path, err)}
 	}
@@ -217,8 +218,8 @@ func ParseWorkflow(data []byte) (WorkflowDefinition, error) {
 	}, nil
 }
 
-func readWorkflowFile(path string) ([]byte, os.FileInfo, error) {
-	info, err := os.Stat(path)
+func readWorkflowFile(ctx context.Context, path string) ([]byte, os.FileInfo, error) {
+	info, err := statWorkflowFile(ctx, path, "read workflow file")
 	if err != nil {
 		return nil, nil, &ClassedError{Class: ErrMissingWorkflowFile, Err: fmt.Errorf("read %s: %w", path, err)}
 	}
@@ -233,6 +234,38 @@ func readWorkflowFile(path string) ([]byte, os.FileInfo, error) {
 	}
 
 	return data, info, nil
+}
+
+func statWorkflowFile(ctx context.Context, path, action string) (os.FileInfo, error) {
+	if err := authorizeWorkflowRead(ctx, action, path); err != nil {
+		return nil, err
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s: stat %s: %w", action, path, err)
+	}
+
+	return info, nil
+}
+
+func authorizeWorkflowRead(ctx context.Context, action, path string) error {
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: action,
+		Source: "symphony.workflow",
+		Target: path,
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationRead,
+			Action: action,
+			Source: "symphony.workflow",
+			Target: path,
+		}},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }
 
 func startsWithFrontMatterFence(body string) bool {
@@ -840,14 +873,27 @@ func resolveConfigValues(ctx context.Context, cfg *Config, workflowDir string) e
 	}
 
 	if strings.HasPrefix(cfg.Tracker.APIKey, "$") {
-		cfg.Tracker.APIKey = os.Getenv(strings.TrimPrefix(cfg.Tracker.APIKey, "$"))
+		envName := strings.TrimPrefix(cfg.Tracker.APIKey, "$")
+		if err := authorizeTrackerCredentialEnvAccess(ctx, "resolve tracker API key from environment", envName); err != nil {
+			return err
+		}
+
+		cfg.Tracker.APIKey = os.Getenv(envName)
 	}
 
 	if cfg.Tracker.Kind == trackerKindLinear && cfg.Tracker.APIKey == "" {
+		if err := authorizeTrackerCredentialEnvAccess(ctx, "resolve Linear API key from environment", linearAPIKeyEnv); err != nil {
+			return err
+		}
+
 		cfg.Tracker.APIKey = os.Getenv(linearAPIKeyEnv)
 	}
 
 	if cfg.Tracker.Kind == trackerKindGitHub && cfg.Tracker.APIKey == "" {
+		if err := authorizeTrackerCredentialEnvAccess(ctx, "resolve GitHub token from environment", githubTokenEnv+"/"+githubCLITokenEnv); err != nil {
+			return err
+		}
+
 		cfg.Tracker.APIKey = firstNonEmpty(os.Getenv(githubTokenEnv), os.Getenv(githubCLITokenEnv))
 	}
 
@@ -887,6 +933,25 @@ func resolveConfigValues(ctx context.Context, cfg *Config, workflowDir string) e
 	resolveDebugDefaults(cfg)
 
 	return nil
+}
+
+func authorizeTrackerCredentialEnvAccess(ctx context.Context, action, target string) error {
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: action,
+		Source: "symphony.workflow.tracker",
+		Target: target,
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationCredentialAccess,
+			Action: action,
+			Source: "symphony.workflow.tracker",
+			Target: target,
+		}},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }
 
 func resolvePublishDefaults(cfg *Config) {
@@ -1235,12 +1300,13 @@ func runGitHubCLI(ctx context.Context, args ...string) string {
 
 	var output bytes.Buffer
 	cmd, invocation, err := shell.CommandContext(cmdCtx, shell.CommandOptions{
-		Program: "gh",
-		Args:    args,
-		Stdout:  &output,
-		Stderr:  &output,
-		Mode:    shell.ModeCaptured,
-		Audit:   shell.AuditContext{Caller: "symphony.gh_token"},
+		Program:              "gh",
+		Args:                 args,
+		Stdout:               &output,
+		Stderr:               &output,
+		Mode:                 shell.ModeCaptured,
+		PermissionOperations: githubCLITokenPermissionOperations(args),
+		Audit:                shell.AuditContext{Caller: "symphony.gh_token"},
 	})
 	if err != nil {
 		return ""
@@ -1278,6 +1344,17 @@ func parseGitHubAuthStatusToken(output string) string {
 	}
 
 	return ""
+}
+
+func githubCLITokenPermissionOperations(args []string) []permission.Operation {
+	action := "gh " + strings.Join(args, " ")
+
+	return []permission.Operation{{
+		Kind:   permission.OperationCredentialAccess,
+		Action: action,
+		Source: "symphony.gh_token",
+		Target: "GitHub CLI auth",
+	}}
 }
 
 func codexExtraConfig(config map[string]any) map[string]any {

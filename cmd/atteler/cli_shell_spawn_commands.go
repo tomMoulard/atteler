@@ -7,11 +7,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/subagent"
 )
@@ -67,11 +69,7 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 		dir = state.cwd
 	}
 
-	if err := authorizeBashCommandWithAutonomy(ctx, state.autonomy, input.Command, "--bash"); err != nil {
-		return err
-	}
-
-	emitHookWarning(ctx, state.hookRunner, events.Event{
+	commandEvent := events.Event{
 		Type:        events.CommandExecute,
 		SessionID:   state.sessionState.ID,
 		SessionPath: state.sessionStore.Path(state.sessionState.ID),
@@ -85,7 +83,7 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 			"source":   "cli",
 			"autonomy": state.autonomy.String(),
 		},
-	})
+	}
 
 	result, err := attshell.RunBash(ctx, attshell.Options{
 		Command: input.Command,
@@ -96,6 +94,10 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 			SessionID:   state.sessionState.ID,
 			SessionPath: state.sessionStore.Path(state.sessionState.ID),
 			Autonomy:    state.autonomy.String(),
+		},
+		Permission: state.permissionPolicy,
+		StartCallback: func() {
+			emitHookWarning(ctx, state.hookRunner, commandEvent)
 		},
 		OutputCallback: func(chunk attshell.OutputChunk) {
 			switch chunk.Stream {
@@ -202,7 +204,9 @@ func runSpawnAgents(ctx context.Context, state appState, input spawnAgentsComman
 		defer cancel()
 	}
 
-	emitHookWarning(ctx, state.hookRunner, events.Event{
+	var startEventOnce sync.Once
+
+	commandEvent := events.Event{
 		Type:        events.CommandExecute,
 		SessionID:   state.sessionState.ID,
 		SessionPath: state.sessionStore.Path(state.sessionState.ID),
@@ -213,11 +217,15 @@ func runSpawnAgents(ctx context.Context, state appState, input spawnAgentsComman
 			"command":  "spawn-agent",
 			"count":    strconv.Itoa(len(requests)),
 		},
-	})
+	}
 
 	spawnOpts, err := subagentOptionsFromInput(state, input.Execution, "spawn")
 	if err != nil {
 		return err
+	}
+
+	if err := authorizeChildExecutionSideEffects(ctx, state.permissionPolicy, "spawn child agents", "atteler.spawn", spawnOpts.LedgerPath, spawnOpts.Resume); err != nil {
+		return fmt.Errorf("spawn agents: %w", err)
 	}
 
 	results, runErr := subagent.SpawnAllDetailed(ctx, requests, subagent.AttelerCommandDetailedWithOptions(subagent.CommandOptions{
@@ -226,6 +234,11 @@ func runSpawnAgents(ctx context.Context, state appState, input spawnAgentsComman
 		Binary:         resolveSpawnBinary(input.Binary),
 		Dir:            state.cwd,
 		MaxOutputBytes: int64(input.Execution.OutputBudgetBytes),
+		StartCallback: func() {
+			startEventOnce.Do(func() {
+				emitHookWarning(ctx, state.hookRunner, commandEvent)
+			})
+		},
 	}), spawnOpts)
 	fmt.Print(formatSpawnResults(results))
 
@@ -234,6 +247,52 @@ func runSpawnAgents(ctx context.Context, state appState, input spawnAgentsComman
 	}
 
 	return nil
+}
+
+func authorizeChildExecutionSideEffects(ctx context.Context, policy *permission.Policy, action, source, ledgerPath string, resume bool) error {
+	target := "atteler child process"
+
+	ledgerPath = strings.TrimSpace(ledgerPath)
+	if ledgerPath != "" {
+		target = ledgerPath
+	}
+
+	operations := []permission.Operation{{
+		Kind:   permission.OperationExecute,
+		Action: action,
+		Source: source,
+		Target: "atteler child process",
+	}}
+
+	if ledgerPath != "" {
+		if resume {
+			operations = append(operations, permission.Operation{
+				Kind:   permission.OperationRead,
+				Action: "read child execution ledger",
+				Source: source,
+				Target: ledgerPath,
+			})
+		}
+
+		operations = append(operations, permission.Operation{
+			Kind:   permission.OperationWrite,
+			Action: "write child execution ledger/transcripts",
+			Source: source,
+			Target: ledgerPath,
+		})
+	}
+
+	decision := permission.Evaluate(ctx, policy, permission.Request{
+		Action:     action,
+		Source:     source,
+		Target:     target,
+		Operations: operations,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }
 
 func resolveSpawnBinary(explicit string) string {
@@ -259,7 +318,7 @@ func subagentCommandArgs(state appState) []string {
 		args = append(args, "--session-dir", state.sessionStore.Dir())
 	}
 
-	args = append(args, "--autonomy", state.autonomy.String())
+	args = append(args, permissionPolicyCommandArgs(state.permissionPolicy)...)
 
 	return args
 }

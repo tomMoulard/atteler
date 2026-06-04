@@ -21,6 +21,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 	attskill "github.com/tommoulard/atteler/pkg/skill"
@@ -251,6 +252,220 @@ func TestRunSkillLearningCommandManagesState(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, state.Skills)
 	require.NoFileExists(t, skillPath)
+}
+
+func TestRunSkillLearningCommandPermissionPolicyDeniesDisableAllWrite(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store := attskill.NewLearningStore(filepath.Join(root, "learning"))
+
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, filepath.Join(root, "audit"))
+
+	err := runSkillLearningCommand(ctx, skillLearningCommandInput{Dir: store.StoreDir(), DisableAll: true})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	require.NoFileExists(t, store.StatePath())
+}
+
+func TestRunSkillLearningCommandPermissionPolicyDeniesListRead(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store := attskill.NewLearningStore(filepath.Join(root, "learning"))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, filepath.Join(root, "audit"))
+
+	err := runSkillLearningCommand(ctx, skillLearningCommandInput{Dir: store.StoreDir(), List: true})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.Contains(t, err.Error(), "skill learning: list")
+	require.NoDirExists(t, store.StoreDir())
+}
+
+func TestRunSkillLearningCommandPermissionPolicyDeniesShowRead(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	storeDir := filepath.Join(root, "learning")
+	skillDir := filepath.Join(root, "skills")
+	skillRoot := filepath.Join(skillDir, "plan-code")
+	skillPath := filepath.Join(skillRoot, "SKILL.md")
+	require.NoError(t, os.MkdirAll(skillRoot, 0o750))
+	require.NoError(t, os.WriteFile(skillPath, []byte("# Plan Code Skill\n"), 0o600))
+
+	store := attskill.NewLearningStore(storeDir)
+	require.NoError(t, store.Save(attskill.LearningState{Skills: []attskill.GeneratedSkill{{
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+		Name:        "Plan Code Skill",
+		Slug:        "plan-code",
+		Status:      attskill.LearningSkillStatusActive,
+		SkillPath:   skillPath,
+		Occurrences: 2,
+	}}}))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, filepath.Join(root, "audit"))
+
+	err := runSkillLearningCommand(ctx, skillLearningCommandInput{Dir: storeDir, SkillDir: skillDir, Show: "plan-code"})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+}
+
+func TestRunSkillLearningCommandPermissionPolicyDeniesEditReadBeforeStat(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	storeDir := filepath.Join(root, "learning")
+	skillDir := filepath.Join(root, "skills")
+	skillPath := filepath.Join(skillDir, "plan-code", "SKILL.md")
+
+	store := attskill.NewLearningStore(storeDir)
+	require.NoError(t, store.Save(attskill.LearningState{Skills: []attskill.GeneratedSkill{{
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+		Name:        "Plan Code Skill",
+		Slug:        "plan-code",
+		Status:      attskill.LearningSkillStatusActive,
+		SkillPath:   skillPath,
+		Occurrences: 2,
+	}}}))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, filepath.Join(root, "audit"))
+
+	err := runSkillLearningCommand(ctx, skillLearningCommandInput{
+		Dir:      storeDir,
+		SkillDir: skillDir,
+		Edit:     "plan-code",
+		Editor:   os.Args[0] + " -test.run=TestSkillLearningEditorHelper --",
+	})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.NotContains(t, err.Error(), "generated skill file")
+	require.NoFileExists(t, skillPath)
+}
+
+func TestRunSkillLearningCommandPermissionPolicyDeniesEnableReadBeforeStat(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	storeDir := filepath.Join(root, "learning")
+	skillDir := filepath.Join(root, "skills")
+	skillPath := filepath.Join(skillDir, "plan-code", "SKILL.md")
+
+	store := attskill.NewLearningStore(storeDir)
+	require.NoError(t, store.Save(attskill.LearningState{Skills: []attskill.GeneratedSkill{{
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+		Name:        "Plan Code Skill",
+		Slug:        "plan-code",
+		Status:      attskill.LearningSkillStatusDisabled,
+		SkillPath:   skillPath,
+		Occurrences: 2,
+	}}}))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, filepath.Join(root, "audit"))
+
+	err := runSkillLearningCommand(ctx, skillLearningCommandInput{Dir: storeDir, SkillDir: skillDir, Enable: "plan-code"})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.NotContains(t, err.Error(), "generated skill file")
+	require.NoFileExists(t, skillPath)
+}
+
+func TestRunSkillLearningCommandPermissionPolicyDeniesDelete(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	storeDir := filepath.Join(root, "learning")
+	skillDir := filepath.Join(root, "skills")
+	skillRoot := filepath.Join(skillDir, "plan-code")
+	skillPath := filepath.Join(skillRoot, "SKILL.md")
+	require.NoError(t, os.MkdirAll(skillRoot, 0o750))
+	require.NoError(t, os.WriteFile(skillPath, []byte("# Plan Code Skill\n"), 0o600))
+
+	store := attskill.NewLearningStore(storeDir)
+	require.NoError(t, store.Save(attskill.LearningState{Skills: []attskill.GeneratedSkill{{
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+		Name:        "Plan Code Skill",
+		Slug:        "plan-code",
+		Status:      attskill.LearningSkillStatusActive,
+		SkillPath:   skillPath,
+		Occurrences: 2,
+	}}}))
+
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, filepath.Join(root, "audit"))
+
+	err := runSkillLearningCommand(ctx, skillLearningCommandInput{Dir: storeDir, SkillDir: skillDir, Delete: "plan-code"})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.merge_delete.deny")
+	require.FileExists(t, skillPath)
+
+	state, loadErr := store.Load()
+	require.NoError(t, loadErr)
+	require.Len(t, state.Skills, 1)
+	assert.Equal(t, "plan-code", state.Skills[0].Slug)
+}
+
+func TestSkillLearningObserverPermissionPolicyDeniesAutomaticWrites(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	opts := attskill.DefaultLearningOptions()
+	opts.StoreDir = filepath.Join(root, "learning")
+	opts.SkillDir = filepath.Join(root, "skills")
+
+	policy := permission.ReadOnlyPolicy()
+	auditDir := filepath.Join(root, "audit")
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	observers := skillLearningObserversFromOptions(ctx, opts, true)
+	require.Len(t, observers, 1)
+
+	require.NoError(t, observers[0].ObserveEvent(t.Context(), events.Event{
+		Type:     events.CommandExecute,
+		Metadata: map[string]string{"command": "kubectl get pods"},
+	}))
+
+	flushCtx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
+	flushable, ok := observers[0].(flushingObserver)
+	require.True(t, ok)
+	require.NoError(t, flushable.Flush(flushCtx))
+	require.NoFileExists(t, attskill.NewLearningStore(opts.StoreDir).StatePath())
+
+	audit, err := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, err)
+	assert.Contains(t, string(audit), "permission.write.deny")
 }
 
 func TestRunSkillLearningCommandEditLaunchesEditorWithoutAcceptingBaseline(t *testing.T) {
@@ -588,7 +803,7 @@ func TestRunWithState_HeadlessGeneratedSkillAppearsInContextManifest(t *testing.
 	}}}))
 
 	replayPath := filepath.Join(root, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "claude-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "Investigate this Kubernetes incident."}}},
 		nil,
@@ -887,7 +1102,7 @@ func TestRunWithStateInjectsMatchingGeneratedSkillContext(t *testing.T) {
 
 	replayPath := filepath.Join(root, "response.json")
 	recordPath := filepath.Join(root, "request.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "replay"}}},
 		nil,

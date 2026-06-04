@@ -2,6 +2,7 @@
 package plugin
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,11 +11,16 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 var manifestFilenames = []string{"plugin.yaml", "plugin.yml", "plugin.json"}
 
-const hardOutputLimitBytes = 1024 * 1024
+const (
+	hardOutputLimitBytes = 1024 * 1024
+	manifestReadAction   = "read plugin manifest"
+)
 
 var (
 	envNamePattern            = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -190,6 +196,26 @@ func Load(path string) (Manifest, error) {
 	return LoadFile(path)
 }
 
+// LoadContext reads and validates a plugin manifest through Atteler's central
+// permission policy before each filesystem inspection.
+func LoadContext(ctx context.Context, path string) (Manifest, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return Manifest{}, errors.New("plugin: empty manifest path")
+	}
+
+	info, err := statManifestPath(ctx, path)
+	if err != nil {
+		return Manifest{}, err
+	}
+
+	if info.IsDir() {
+		return LoadDirContext(ctx, path)
+	}
+
+	return LoadFileContext(ctx, path)
+}
+
 // LoadDir reads and validates the first conventional plugin manifest found in
 // dir. The search order is plugin.yaml, plugin.yml, then plugin.json.
 func LoadDir(dir string) (Manifest, error) {
@@ -201,9 +227,26 @@ func LoadDir(dir string) (Manifest, error) {
 	return loadFile(path, dir)
 }
 
+// LoadDirContext reads and validates the first conventional plugin manifest
+// found in dir through Atteler's central permission policy.
+func LoadDirContext(ctx context.Context, dir string) (Manifest, error) {
+	path, err := FindManifestContext(ctx, dir)
+	if err != nil {
+		return Manifest{}, err
+	}
+
+	return loadFileContext(ctx, path, dir)
+}
+
 // LoadFile reads and validates an explicit plugin manifest file.
 func LoadFile(path string) (Manifest, error) {
 	return loadFile(path, filepath.Dir(path))
+}
+
+// LoadFileContext reads and validates an explicit plugin manifest file through
+// Atteler's central permission policy.
+func LoadFileContext(ctx context.Context, path string) (Manifest, error) {
+	return loadFileContext(ctx, path, filepath.Dir(path))
 }
 
 // FindManifest returns the first conventional plugin manifest path in dir. The
@@ -219,6 +262,25 @@ func FindManifest(dir string) (string, error) {
 
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("plugin: stat %s: %w", path, err)
+		}
+	}
+
+	return "", fmt.Errorf("plugin: no manifest found in %s", dir)
+}
+
+// FindManifestContext returns the first conventional plugin manifest path in
+// dir through Atteler's central permission policy.
+func FindManifestContext(ctx context.Context, dir string) (string, error) {
+	for _, name := range manifestFilenames {
+		path := filepath.Join(dir, name)
+
+		info, err := statManifestPath(ctx, path)
+		if err == nil && !info.IsDir() {
+			return path, nil
+		}
+
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
 		}
 	}
 
@@ -241,6 +303,51 @@ func loadFile(path, root string) (Manifest, error) {
 	}
 
 	return manifest, nil
+}
+
+func loadFileContext(ctx context.Context, path, root string) (Manifest, error) {
+	if err := authorizeManifestRead(ctx, manifestReadAction, path); err != nil {
+		return Manifest{}, err
+	}
+
+	return loadFile(path, root)
+}
+
+func statManifestPath(ctx context.Context, path string) (os.FileInfo, error) {
+	if err := authorizeManifestRead(ctx, "stat plugin manifest path", path); err != nil {
+		return nil, err
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("plugin: stat %s: %w", path, err)
+	}
+
+	return info, nil
+}
+
+func authorizeManifestRead(ctx context.Context, action, target string) error {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		action = manifestReadAction
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationRead,
+			Action: action,
+			Target: target,
+			Source: "atteler.plugin.manifest",
+		}},
+		Action: action,
+		Source: "atteler.plugin.manifest",
+		Target: target,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return fmt.Errorf("plugin: %s %s: %w", action, target, &permission.Error{Decision: decision})
 }
 
 // Validate checks required manifest fields, entrypoint path containment, and
@@ -566,6 +673,10 @@ func validatePermissions(root string, permissions PermissionSet) error {
 		return err
 	}
 
+	if err := validatePlainEnvDoesNotDeclareCredentials(permissions.Env, permissions.Secrets); err != nil {
+		return err
+	}
+
 	if err := validateUniqueNonEmpty("tools", permissions.Tools); err != nil {
 		return err
 	}
@@ -590,6 +701,23 @@ func validateScopes(root, field string, scopes []string) error {
 		if err := validatePathInRoot(root, scope); err != nil {
 			return fmt.Errorf("%s %q: %w", field, scope, err)
 		}
+	}
+
+	return nil
+}
+
+func validatePlainEnvDoesNotDeclareCredentials(envNames, secretNames []string) error {
+	secrets := make(map[string]struct{}, len(secretNames))
+	for _, name := range secretNames {
+		secrets[name] = struct{}{}
+	}
+
+	for _, name := range envNames {
+		if _, isSecret := secrets[name]; isSecret || !permission.CredentialName(name) {
+			continue
+		}
+
+		return fmt.Errorf("env %q looks credential-like; declare it in permissions.secrets instead", name)
 	}
 
 	return nil

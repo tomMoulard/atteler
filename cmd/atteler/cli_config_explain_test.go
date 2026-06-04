@@ -224,7 +224,7 @@ wire_api = "responses"
 	var err error
 
 	out := captureStdoutForStateDiagnostics(t, func() {
-		err = explainConfig(cliOptions{})
+		err = explainConfig(t.Context(), cliOptions{})
 	})
 
 	require.NoError(t, err)
@@ -263,7 +263,7 @@ func TestExplainConfig_PrintsHarnessImporterWarningsBeforeConfigError(t *testing
 	var err error
 
 	out := captureStdoutForStateDiagnostics(t, func() {
-		err = explainConfig(cliOptions{})
+		err = explainConfig(t.Context(), cliOptions{})
 	})
 
 	require.Error(t, err)

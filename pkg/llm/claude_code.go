@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 const (
@@ -149,6 +150,10 @@ func (c *ClaudeCodeProvider) HealthCheck(ctx context.Context) error {
 		return err
 	}
 
+	if err := authorizeProviderPermission(ctx, providerClaudeCode, "check Claude Code credentials", "Claude Code OAuth", permission.OperationCredentialAccess); err != nil {
+		return err
+	}
+
 	emitActivity(ctx, events.Event{
 		Type: events.CommandExecute,
 		Metadata: map[string]string{
@@ -248,13 +253,11 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 		return nil, fmt.Errorf("claude code: marshal: %w", err)
 	}
 
-	emitActivity(ctx, events.Event{
+	resp, err := c.doMessagesRequest(ctx, body, commandActivityOnce(ctx, events.Event{
 		Type:     events.CommandExecute,
 		Model:    model,
 		Metadata: claudeCodeCommandMetadata(adjustments),
-	})
-
-	resp, err := c.doMessagesRequest(ctx, body)
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -276,10 +279,10 @@ func claudeCodeCommandMetadata(adjustments []completeParamAdjustment) map[string
 	return metadata
 }
 
-func (c *ClaudeCodeProvider) doMessagesRequest(ctx context.Context, body []byte) (*Response, error) {
+func (c *ClaudeCodeProvider) doMessagesRequest(ctx context.Context, body []byte, startCallback func()) (*Response, error) {
 	access := c.auth.snapshot()
 
-	resp, err := c.sendMessages(ctx, body, access)
+	resp, err := c.sendMessages(ctx, body, access, startCallback)
 	if err == nil {
 		return resp, nil
 	}
@@ -295,7 +298,7 @@ func (c *ClaudeCodeProvider) doMessagesRequest(ctx context.Context, body []byte)
 
 	access = c.auth.snapshot()
 
-	return c.sendMessages(ctx, body, access)
+	return c.sendMessages(ctx, body, access, startCallback)
 }
 
 type claudeCodeUnauthorizedError struct {
@@ -310,7 +313,11 @@ func (e *claudeCodeUnauthorizedError) Unwrap() error {
 	return e.err
 }
 
-func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, access string) (*Response, error) {
+func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, access string, startCallback func()) (*Response, error) {
+	if err := authorizeProviderPermission(ctx, providerClaudeCode, "call Claude Code messages", c.baseURL+"/v1/messages", permission.OperationNetwork, permission.OperationCredentialAccess); err != nil {
+		return nil, err
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("claude code: new request: %w", err)
@@ -320,6 +327,10 @@ func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, acce
 	httpReq.Header.Set("anthropic-version", defaultAnthropicVersion)
 	httpReq.Header.Set("anthropic-beta", anthropicOAuthBetas)
 	httpReq.Header.Set("Authorization", "Bearer "+access)
+
+	if startCallback != nil {
+		startCallback()
+	}
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {

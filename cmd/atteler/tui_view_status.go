@@ -146,7 +146,9 @@ func (m model) statusLine() string {
 		parts = append(parts, "budget:"+budget)
 	}
 
-	parts = append(parts, "autonomy:"+m.autonomy.String())
+	if policy := permissionPolicySummary(m.permissionPolicy); policy != "" {
+		parts = append(parts, "policy:"+policy)
+	}
 
 	if ctx := m.contextUsage(); ctx != "" {
 		parts = append(parts, ctx)
@@ -583,6 +585,19 @@ func (m model) startIdleSuggestionRequest(id int, input string, force bool) (tea
 		m.idleSuggestionCancel = cancel
 	}
 
+	requestCtx = contextWithTUIPermissionPrompt(requestCtx, m.permissionPolicy, nil, nil)
+
+	var permissionPromptCmd tea.Cmd
+
+	var permissionPromptCh chan agentLoopConfirmRequest
+
+	if permissionPolicyNeedsPrompt(m.permissionPolicy) {
+		permissionPromptCh = make(chan agentLoopConfirmRequest, 1)
+		permissionResponseCh := make(chan bool, 1)
+		requestCtx = contextWithTUIPermissionPrompt(requestCtx, m.permissionPolicy, permissionPromptCh, permissionResponseCh)
+		permissionPromptCmd = listenForCheckpoint(permissionPromptCh, permissionResponseCh)
+	}
+
 	m.idleSuggestionID = id
 	m.idleSuggestionInput = input
 	m.idleSuggestionText = ""
@@ -600,7 +615,7 @@ func (m model) startIdleSuggestionRequest(id int, input string, force bool) (tea
 
 	m.promptContextStatus = contextPayload.Status
 
-	return m, requestIdleSuggestion(
+	cmd := requestIdleSuggestion(
 		requestCtx,
 		m.registry,
 		m.selectedModel,
@@ -619,6 +634,11 @@ func (m model) startIdleSuggestionRequest(id int, input string, force bool) (tea
 		contextPayload.Summary,
 		force,
 	)
+	if permissionPromptCmd != nil {
+		cmd = tea.Batch(withPermissionPromptClose(cmd, permissionPromptCh), permissionPromptCmd)
+	}
+
+	return m, cmd
 }
 
 func (m model) updateIdleSuggestion(msg idleSuggestionMsg) (tea.Model, tea.Cmd) {

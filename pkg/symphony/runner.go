@@ -60,7 +60,7 @@ func (r *DefaultAgentRunner) Run(ctx context.Context, req RunRequest, emit func(
 		}
 	}()
 
-	if shouldRunBeforeRunHook(req, workspace) {
+	if shouldRunBeforeRunHook(ctx, req, workspace) {
 		if err := RunHook(ctx, req.Config, req.Issue, workspace, "before_run", req.Config.Hooks.BeforeRun); err != nil {
 			result.CompletedAt = time.Now().UTC()
 			result.Error = err.Error()
@@ -138,7 +138,7 @@ func (r *DefaultAgentRunner) Run(ctx context.Context, req RunRequest, emit func(
 	return result, nil
 }
 
-func shouldRunBeforeRunHook(req RunRequest, workspace Workspace) bool {
+func shouldRunBeforeRunHook(ctx context.Context, req RunRequest, workspace Workspace) bool {
 	if strings.TrimSpace(req.Config.Hooks.BeforeRun) == "" {
 		return false
 	}
@@ -147,7 +147,7 @@ func shouldRunBeforeRunHook(req RunRequest, workspace Workspace) bool {
 		return true
 	}
 
-	hasGit, err := workspaceHasGitCheckout(workspace)
+	hasGit, err := workspaceHasGitCheckout(ctx, workspace)
 	return err != nil || !hasGit
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/codeintel"
 	"github.com/tommoulard/atteler/pkg/lsp"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 func TestCodeIntelResponse_JSONSchemaForSymbol(t *testing.T) {
@@ -1489,6 +1490,26 @@ func TestRunCodeIntelCommandWritesSelectedSchemaOutput(t *testing.T) {
 		"empty": false,
 		"symbols": [{"name": "Run", "kind": "func", "path": "runner.go", "line": 3}]
 	}`, jsonOut.String())
+}
+
+func TestRunCodeIntelCommandPermissionPolicyDeniesWorkspaceRead(t *testing.T) {
+	t.Parallel()
+
+	root := writeCodeIntelSchemaFixture(t)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+
+	var out bytes.Buffer
+
+	err := runCodeIntelCommandWithWriterContext(ctx, &out, root, codeIntelCommandInput{SymbolName: "Run"})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.Empty(t, out.String())
 }
 
 func TestRunCodeIntelCommandGroupedJSONRendersSchemaOutput(t *testing.T) {

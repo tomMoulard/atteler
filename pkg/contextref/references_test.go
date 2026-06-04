@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/contextpack"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,33 @@ func TestLoadReferences_LocalFile(t *testing.T) {
 	assert.Equal(t, "file", refs[0].Kind)
 	assert.Contains(t, refs[0].Content, "# Guide")
 	assert.False(t, refs[0].Truncated)
+}
+
+func TestLoadReferences_LocalFilePermissionPolicyDeniesReadBeforeOpen(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeFile(t, dir, "docs/guide.md", "# Guide\nHello world\n")
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	refs, events, err := LoadReferencesWithReport(ctx, []string{"docs/guide.md"}, Options{Root: dir})
+
+	require.Error(t, err)
+	assert.Empty(t, refs)
+	require.Len(t, events, 1)
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Contains(t, events[0].PolicyReason, "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.read.deny")
+	assert.Contains(t, string(auditData), string(permission.OperationRead))
 }
 
 func TestLoadReferences_TruncatesLargeFile(t *testing.T) {
@@ -2349,6 +2377,37 @@ func TestLoadReferences_URL(t *testing.T) {
 	assert.Equal(t, 1, manifest.SchemaVersion)
 	assert.Equal(t, 1, manifest.IncludedCount)
 	assert.Equal(t, "loaded.allowed", manifest.Entries[0].PolicyReasonCode)
+}
+
+func TestLoadReferences_URLPermissionPolicyDeniesNetworkBeforeRequest(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+
+		if _, err := w.Write([]byte("should not be fetched")); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer srv.Close()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	refs, events, err := LoadReferencesWithReport(ctx, []string{srv.URL + "/doc.txt"}, Options{
+		Root:            t.TempDir(),
+		ReferencePolicy: testURLPolicy(t, srv),
+	})
+
+	require.Error(t, err)
+	assert.Empty(t, refs)
+	require.Len(t, events, 1)
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Contains(t, events[0].PolicyReason, "permission.network.deny")
+	assert.Zero(t, hits.Load(), "network-denied URL references must not reach the server")
 }
 
 func TestLoadReferences_URLRecordsAllowedRedirectTarget(t *testing.T) {

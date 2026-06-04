@@ -17,27 +17,29 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 // AppServerClient speaks Codex app-server JSONL over stdio.
 type AppServerClient struct {
-	stdin        io.WriteCloser
-	cmd          *exec.Cmd
-	emit         func(CodexEvent)
-	lines        chan appServerMessage
-	done         chan error
-	waitDone     chan struct{}
-	quit         chan struct{}
-	readDone     chan struct{}
-	stderr       <-chan string
-	commandLinks map[string]commandLink
-	mu           sync.Mutex
-	commandMu    sync.Mutex
-	quitOnce     sync.Once
-	nextID       int64
-	pid          string
-	autonomy     autonomy.Level
+	stdin         io.WriteCloser
+	cmd           *exec.Cmd
+	emit          func(CodexEvent)
+	lines         chan appServerMessage
+	done          chan error
+	waitDone      chan struct{}
+	quit          chan struct{}
+	readDone      chan struct{}
+	stderr        <-chan string
+	commandLinks  map[string]commandLink
+	mu            sync.Mutex
+	commandMu     sync.Mutex
+	quitOnce      sync.Once
+	nextID        int64
+	pid           string
+	workspacePath string
+	autonomy      autonomy.Level
 }
 
 type commandLink struct {
@@ -68,9 +70,11 @@ func (e *appServerError) Error() string {
 	return fmt.Sprintf("response_error: %d: %s", e.Code, e.Message)
 }
 
+const codexAppServerPermissionSource = "symphony.codex_app_server"
+
 // StartAppServer launches the configured Codex app-server command.
 func StartAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, emit func(CodexEvent)) (*AppServerClient, error) {
-	return startAppServer(ctx, cfg, workspacePath, shell.AuditContext{Caller: "symphony.codex_app_server"}, emit)
+	return startAppServer(ctx, cfg, workspacePath, shell.AuditContext{Caller: codexAppServerPermissionSource}, emit)
 }
 
 // StartAppServerForIssue launches the configured Codex app-server command and
@@ -83,7 +87,7 @@ func StartAppServerForIssue(ctx context.Context, cfg CodexConfig, issue Issue, w
 // command and records the selected autonomy in launch audit metadata.
 func StartAppServerForIssueWithAutonomy(ctx context.Context, cfg CodexConfig, level autonomy.Level, issue Issue, workspacePath string, emit func(CodexEvent)) (*AppServerClient, error) {
 	return startAppServer(ctx, cfg, workspacePath, shell.AuditContext{
-		Caller:          "symphony.codex_app_server",
+		Caller:          codexAppServerPermissionSource,
 		IssueID:         issue.ID,
 		IssueIdentifier: issue.Identifier,
 		Autonomy:        autonomy.Normalize(level).String(),
@@ -101,19 +105,20 @@ func startAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 	}
 
 	if strings.TrimSpace(audit.Caller) == "" {
-		audit.Caller = "symphony.codex_app_server"
+		audit.Caller = codexAppServerPermissionSource
 	}
 	if strings.TrimSpace(audit.Autonomy) == "" {
 		audit.Autonomy = autonomy.DefaultLevel.String()
 	}
 
 	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
-		Program: "bash",
-		Args:    []string{"--noprofile", "--norc", "-lc", command},
-		Command: command,
-		Dir:     workspacePath,
-		Mode:    shell.ModeStreaming,
-		Audit:   audit,
+		Program:              "bash",
+		Args:                 []string{"--noprofile", "--norc", "-lc", command},
+		Command:              command,
+		Dir:                  workspacePath,
+		Mode:                 shell.ModeStreaming,
+		PermissionOperations: codexAppServerPermissionOperations(workspacePath),
+		Audit:                audit,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("codex_not_found: authorize %q: %w", command, err)
@@ -143,17 +148,18 @@ func startAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 	}
 
 	client := &AppServerClient{
-		stdin:        stdin,
-		cmd:          cmd,
-		emit:         emit,
-		lines:        make(chan appServerMessage, 64),
-		done:         make(chan error, 1),
-		waitDone:     make(chan struct{}),
-		quit:         make(chan struct{}),
-		readDone:     make(chan struct{}),
-		stderr:       readString(stderr),
-		commandLinks: make(map[string]commandLink),
-		nextID:       1,
+		stdin:         stdin,
+		cmd:           cmd,
+		emit:          emit,
+		lines:         make(chan appServerMessage, 64),
+		done:          make(chan error, 1),
+		waitDone:      make(chan struct{}),
+		quit:          make(chan struct{}),
+		readDone:      make(chan struct{}),
+		stderr:        readString(stderr),
+		commandLinks:  make(map[string]commandLink),
+		nextID:        1,
+		workspacePath: workspacePath,
 	}
 	if cmd.Process != nil {
 		client.pid = fmt.Sprint(cmd.Process.Pid)
@@ -175,6 +181,34 @@ func startAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 	}
 
 	return client, nil
+}
+
+func codexAppServerPermissionOperations(workspacePath string) []permission.Operation {
+	const (
+		action = "start Codex app-server"
+		source = codexAppServerPermissionSource
+	)
+
+	return []permission.Operation{
+		{
+			Kind:   permission.OperationWrite,
+			Action: action,
+			Target: workspacePath,
+			Source: source,
+		},
+		{
+			Kind:   permission.OperationNetwork,
+			Action: action,
+			Target: "Codex backend",
+			Source: source,
+		},
+		{
+			Kind:   permission.OperationCredentialAccess,
+			Action: action,
+			Target: "Codex credentials",
+			Source: source,
+		},
+	}
 }
 
 func requireAppServerContext(ctx context.Context) error {
@@ -492,16 +526,21 @@ func (c *AppServerClient) handleOutOfBand(ctx context.Context, msg appServerMess
 	return nil
 }
 
+//nolint:cyclop // JSON-RPC request routing keeps permission and autonomy gates adjacent to each request kind.
 func (c *AppServerClient) handleServerRequest(ctx context.Context, msg appServerMessage) error {
 	switch msg.Method {
 	case "item/commandExecution/requestApproval", "execCommandApproval":
-		if autonomy.Normalize(c.autonomy) == autonomy.Low {
-			return c.denyApproval(ctx, msg, "autonomy low is advisory-only and blocks command execution approvals")
+		if err := c.authorizeApproval(ctx, msg, codexCommandApprovalOperations(c.workspacePath, msg.Params)); err != nil {
+			return c.denyServerRequest(ctx, msg, err)
 		}
 
 		command := extractCommandFromApproval(msg.Params)
 		if command == "" {
 			return c.denyApproval(ctx, msg, "command approval omitted a command; cannot evaluate against selected autonomy")
+		}
+
+		if autonomy.Normalize(c.autonomy) == autonomy.Low {
+			return c.denyApproval(ctx, msg, "autonomy low is advisory-only and blocks Codex app-server command approvals; rerun with --autonomy medium or higher")
 		}
 
 		decision := llm.BashToolPolicyForAutonomy(c.autonomy)(ctx, llm.ToolCall{
@@ -518,6 +557,10 @@ func (c *AppServerClient) handleServerRequest(ctx context.Context, msg appServer
 		c.emitEvent(CodexEvent{Event: "approval_auto_approved", AppServerPID: c.pid, Payload: msg.raw, Message: msg.Method})
 		return c.respond(ctx, msg.ID, map[string]any{"decision": "acceptForSession"})
 	case "item/fileChange/requestApproval", "applyPatchApproval":
+		if err := c.authorizeApproval(ctx, msg, codexFileChangeApprovalOperations(c.workspacePath, msg.Params)); err != nil {
+			return c.denyServerRequest(ctx, msg, err)
+		}
+
 		if !autonomy.Normalize(c.autonomy).Allows(autonomy.ActionFileWrite) {
 			return c.denyApproval(ctx, msg, autonomy.DenialMessage(c.autonomy, autonomy.ActionFileWrite, msg.Method))
 		}
@@ -525,6 +568,10 @@ func (c *AppServerClient) handleServerRequest(ctx context.Context, msg appServer
 		c.emitEvent(CodexEvent{Event: "approval_auto_approved", AppServerPID: c.pid, Payload: msg.raw, Message: msg.Method})
 		return c.respond(ctx, msg.ID, map[string]any{"decision": "acceptForSession"})
 	case "item/permissions/requestApproval":
+		if err := c.authorizeApproval(ctx, msg, codexSessionPermissionApprovalOperations(c.workspacePath)); err != nil {
+			return c.denyServerRequest(ctx, msg, err)
+		}
+
 		action, detail := permissionApprovalAutonomyAction(msg.Params)
 		if !autonomy.Normalize(c.autonomy).Allows(action) {
 			return c.denyApproval(ctx, msg, autonomy.DenialMessage(c.autonomy, action, detail))
@@ -555,6 +602,38 @@ func (c *AppServerClient) handleServerRequest(ctx context.Context, msg appServer
 	}
 }
 
+func (c *AppServerClient) authorizeApproval(ctx context.Context, msg appServerMessage, ops []permission.Operation) error {
+	if len(ops) == 0 {
+		return nil
+	}
+
+	source := firstNonEmpty(firstOperationSource(ops), codexAppServerPermissionSource)
+	target := firstNonEmpty(firstOperationTarget(ops), c.workspacePath)
+	action := firstNonEmpty(firstOperationAction(ops), msg.Method)
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Operations: ops,
+		Action:     action,
+		Source:     source,
+		Target:     target,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
+}
+
+func (c *AppServerClient) denyServerRequest(ctx context.Context, msg appServerMessage, err error) error {
+	c.emitEvent(CodexEvent{Event: "approval_denied", AppServerPID: c.pid, Payload: msg.raw, Message: msg.Method + ": " + err.Error()})
+
+	if responseErr := c.respondError(ctx, msg.ID, -32000, err.Error()); responseErr != nil {
+		return errors.Join(err, responseErr)
+	}
+
+	return err
+}
+
 func (c *AppServerClient) denyApproval(ctx context.Context, msg appServerMessage, reason string) error {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
@@ -567,6 +646,242 @@ func (c *AppServerClient) denyApproval(ctx context.Context, msg appServerMessage
 		"decision": "deny",
 		"message":  reason,
 	})
+}
+
+func codexCommandApprovalOperations(workspacePath string, params json.RawMessage) []permission.Operation {
+	command := appServerApprovalCommand(params)
+	source := codexAppServerPermissionSource
+	if command == "" {
+		return []permission.Operation{{
+			Kind:   permission.OperationExecute,
+			Action: "approve Codex app-server command execution",
+			Source: source,
+			Target: firstNonEmpty(workspacePath, "Codex app-server command"),
+		}}
+	}
+
+	ops := permission.CommandOperations("bash", []string{"-lc", command}, command, workspacePath, source)
+	for i := range ops {
+		ops[i].Action = "approve Codex app-server command: " + command
+		ops[i].Source = source
+		if strings.TrimSpace(ops[i].Target) == "" {
+			ops[i].Target = firstNonEmpty(workspacePath, command)
+		}
+	}
+
+	return ops
+}
+
+func codexFileChangeApprovalOperations(workspacePath string, params json.RawMessage) []permission.Operation {
+	action := "approve Codex app-server file changes"
+	source := codexAppServerPermissionSource
+	target := firstNonEmpty(appServerApprovalPath(params), workspacePath, "Codex app-server file changes")
+	ops := []permission.Operation{{
+		Kind:   permission.OperationWrite,
+		Action: action,
+		Source: source,
+		Target: target,
+	}}
+
+	if appServerApprovalMentionsDelete(params) {
+		ops = append(ops, permission.Operation{
+			Kind:   permission.OperationMergeDelete,
+			Action: action,
+			Source: source,
+			Target: target,
+		})
+	}
+
+	return ops
+}
+
+func codexSessionPermissionApprovalOperations(workspacePath string) []permission.Operation {
+	return []permission.Operation{{
+		Kind:   permission.OperationNetwork,
+		Action: "approve Codex app-server network permission",
+		Source: codexAppServerPermissionSource,
+		Target: firstNonEmpty(workspacePath, "Codex app-server session permissions"),
+	}}
+}
+
+func firstOperationAction(ops []permission.Operation) string {
+	for _, op := range ops {
+		if action := strings.TrimSpace(op.Action); action != "" {
+			return action
+		}
+	}
+
+	return ""
+}
+
+func firstOperationSource(ops []permission.Operation) string {
+	for _, op := range ops {
+		if source := strings.TrimSpace(op.Source); source != "" {
+			return source
+		}
+	}
+
+	return ""
+}
+
+func firstOperationTarget(ops []permission.Operation) string {
+	for _, op := range ops {
+		if target := strings.TrimSpace(op.Target); target != "" {
+			return target
+		}
+	}
+
+	return ""
+}
+
+func appServerApprovalCommand(params json.RawMessage) string {
+	value, ok := decodeAppServerApprovalParams(params)
+	if !ok {
+		return ""
+	}
+
+	return firstApprovalString(value, map[string]bool{
+		"cmd":          true,
+		"command":      true,
+		"shellcommand": true,
+	})
+}
+
+func appServerApprovalPath(params json.RawMessage) string {
+	value, ok := decodeAppServerApprovalParams(params)
+	if !ok {
+		return ""
+	}
+
+	return firstApprovalString(value, map[string]bool{
+		"file":         true,
+		"filepath":     true,
+		"path":         true,
+		"relativepath": true,
+	})
+}
+
+func appServerApprovalMentionsDelete(params json.RawMessage) bool {
+	value, ok := decodeAppServerApprovalParams(params)
+	if !ok {
+		return false
+	}
+
+	return approvalValueMentionsDelete(value)
+}
+
+func decodeAppServerApprovalParams(params json.RawMessage) (any, bool) {
+	if len(params) == 0 {
+		return nil, false
+	}
+
+	var value any
+	if err := json.Unmarshal(params, &value); err != nil {
+		return nil, false
+	}
+
+	return value, true
+}
+
+func firstApprovalString(value any, keys map[string]bool) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, candidate := range typed {
+			if keys[normalizedApprovalKey(key)] {
+				if text := approvalStringValue(candidate); text != "" {
+					return text
+				}
+			}
+		}
+
+		for _, candidate := range typed {
+			if text := firstApprovalString(candidate, keys); text != "" {
+				return text
+			}
+		}
+	case []any:
+		for _, candidate := range typed {
+			if text := firstApprovalString(candidate, keys); text != "" {
+				return text
+			}
+		}
+	}
+
+	return ""
+}
+
+func approvalStringValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				return ""
+			}
+
+			parts = append(parts, strings.TrimSpace(text))
+		}
+
+		return strings.Join(parts, " ")
+	default:
+		return ""
+	}
+}
+
+func approvalValueMentionsDelete(value any) bool {
+	return approvalValueMentionsDeleteIn(value, false)
+}
+
+func approvalValueMentionsDeleteIn(value any, inspectString bool) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, candidate := range typed {
+			if approvalDeleteToken(key) || approvalValueMentionsDeleteIn(candidate, approvalDeleteValueKey(key)) {
+				return true
+			}
+		}
+	case []any:
+		for _, candidate := range typed {
+			if approvalValueMentionsDeleteIn(candidate, inspectString) {
+				return true
+			}
+		}
+	case string:
+		return inspectString && approvalDeleteToken(typed)
+	}
+
+	return false
+}
+
+func approvalDeleteValueKey(key string) bool {
+	switch normalizedApprovalKey(key) {
+	case "action", "change", "changetype", "kind", "operation", "status", "type":
+		return true
+	default:
+		return false
+	}
+}
+
+func approvalDeleteToken(value string) bool {
+	normalized := normalizedApprovalKey(value)
+
+	return strings.Contains(normalized, "delete") ||
+		strings.Contains(normalized, "deleted") ||
+		strings.Contains(normalized, "deletion") ||
+		strings.Contains(normalized, "remove") ||
+		strings.Contains(normalized, "removed") ||
+		strings.Contains(normalized, "unlink")
+}
+
+func normalizedApprovalKey(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "_", "")
+	value = strings.ReplaceAll(value, "-", "")
+
+	return value
 }
 
 func (c *AppServerClient) respond(ctx context.Context, id any, result any) error {
