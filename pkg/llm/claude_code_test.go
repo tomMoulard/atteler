@@ -607,6 +607,11 @@ func TestClaudeCodeProvider_ModelMetadataAndContextFallback(t *testing.T) {
 	assert.Equal(t, 200_000, alias.ContextWindow)
 	assert.Contains(t, alias.Provenance, "alias")
 
+	haikuAlias, ok := p.ModelMetadata("claude-haiku-4-5")
+	require.True(t, ok)
+	assert.Equal(t, 200_000, haikuAlias.ContextWindow)
+	assert.Contains(t, haikuAlias.Provenance, "alias")
+
 	assert.Zero(t, p.ModelContextWindow("claude-unknown-private"))
 }
 

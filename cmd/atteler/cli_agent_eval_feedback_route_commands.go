@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1268,6 +1269,7 @@ func formatFeedbackHistory(entries []feedback.HistoryEntry, appliedAt time.Time)
 
 type routeModelsCommandInput struct {
 	Candidates []string
+	Policy     modelroute.Policy
 	Profile    modelroute.RequestProfile
 }
 
@@ -1290,6 +1292,8 @@ func routeModelsCommandInputFromOptions(opts cliOptions) routeModelsCommandInput
 		input.Profile.PromptCacheReuseEstimate = opts.routeCacheReuse.value
 	}
 
+	input.Policy.RequiredCapabilities = append([]string(nil), opts.routeRequiredCapabilities...)
+
 	return input
 }
 
@@ -1303,7 +1307,11 @@ func runRouteModels(input routeModelsCommandInput) error {
 		return err
 	}
 
-	decision := decideRouteCandidates(candidates, profile)
+	if err := validateRouteModelPolicy(input.Policy); err != nil {
+		return err
+	}
+
+	decision := decideRouteCandidatesWithPolicy(candidates, profile, input.Policy)
 	if decision.Selected == "" {
 		fmt.Println("No model route candidates fit.")
 
@@ -1343,7 +1351,11 @@ func applyRouteSelection(input routeModelsCommandInput, state *selectionState) e
 		return err
 	}
 
-	decision := decideRouteCandidates(candidates, profile)
+	if err := validateRouteModelPolicy(input.Policy); err != nil {
+		return err
+	}
+
+	decision := decideRouteCandidatesWithPolicy(candidates, profile, input.Policy)
 	if len(decision.FallbackOrder) == 0 {
 		return errors.New("model route: no candidates fit request budget/context")
 	}
@@ -1357,11 +1369,28 @@ func applyRouteSelection(input routeModelsCommandInput, state *selectionState) e
 }
 
 func decideRouteCandidates(candidates []modelroute.Candidate, profile modelroute.RequestProfile) modelroute.Decision {
-	return decideRouteCandidatesAt(candidates, profile, time.Now().UTC())
+	return decideRouteCandidatesWithPolicy(candidates, profile, modelroute.Policy{})
+}
+
+func decideRouteCandidatesWithPolicy(
+	candidates []modelroute.Candidate,
+	profile modelroute.RequestProfile,
+	policy modelroute.Policy,
+) modelroute.Decision {
+	return decideRouteCandidatesWithPolicyAt(candidates, profile, policy, time.Now().UTC())
 }
 
 func decideRouteCandidatesAt(candidates []modelroute.Candidate, profile modelroute.RequestProfile, now time.Time) modelroute.Decision {
-	decision := modelroute.Decide(candidates, profile, modelroute.Policy{}, nil)
+	return decideRouteCandidatesWithPolicyAt(candidates, profile, modelroute.Policy{}, now)
+}
+
+func decideRouteCandidatesWithPolicyAt(
+	candidates []modelroute.Candidate,
+	profile modelroute.RequestProfile,
+	policy modelroute.Policy,
+	now time.Time,
+) modelroute.Decision {
+	decision := modelroute.Decide(candidates, profile, policy, nil)
 
 	version, ok := routeCandidateCatalogVersion(candidates)
 	if !ok {
@@ -1379,6 +1408,23 @@ func decideRouteCandidatesAt(candidates []modelroute.Candidate, profile modelrou
 	}
 
 	return decision
+}
+
+func validateRouteModelPolicy(policy modelroute.Policy) error {
+	for _, capability := range policy.RequiredCapabilities {
+		capability = strings.ToLower(strings.TrimSpace(capability))
+		if capability == "" || modelroute.IsKnownCapability(capability) {
+			continue
+		}
+
+		return fmt.Errorf(
+			"model route required capabilities contains unknown capability %q (valid: %s)",
+			capability,
+			strings.Join(modelroute.KnownCapabilities(), ","),
+		)
+	}
+
+	return nil
 }
 
 func routeCandidateCatalogVersion(candidates []modelroute.Candidate) (string, bool) {
@@ -1451,34 +1497,34 @@ func parseRouteCandidate(raw string) (modelroute.Candidate, error) {
 	return candidate, nil
 }
 
-//nolint:cyclop // Flat CLI field parsing keeps each accepted spelling close to its validation.
+//nolint:cyclop,gocognit // Flat CLI field parsing keeps each accepted spelling close to its validation.
 func applyRouteCandidateField(candidate *modelroute.Candidate, field, value string) error {
 	switch field {
 	case "input", "input_cost":
-		parsed, err := strconv.ParseFloat(value, 64)
+		parsed, err := parseRouteCandidateNonNegativeFloat("input cost", value)
 		if err != nil {
-			return fmt.Errorf("route candidate input cost: %w", err)
+			return err
 		}
 
 		candidate.InputTokenCost = parsed
 	case "output", "output_cost":
-		parsed, err := strconv.ParseFloat(value, 64)
+		parsed, err := parseRouteCandidateNonNegativeFloat("output cost", value)
 		if err != nil {
-			return fmt.Errorf("route candidate output cost: %w", err)
+			return err
 		}
 
 		candidate.OutputTokenCost = parsed
 	case "cached", "cached_input", "cached_input_cost":
-		parsed, err := strconv.ParseFloat(value, 64)
+		parsed, err := parseRouteCandidateNonNegativeFloat("cached input cost", value)
 		if err != nil {
-			return fmt.Errorf("route candidate cached input cost: %w", err)
+			return err
 		}
 
 		candidate.CachedInputTokenCost = parsed
 	case "cache_write", "cache_write_cost":
-		parsed, err := strconv.ParseFloat(value, 64)
+		parsed, err := parseRouteCandidateNonNegativeFloat("cache write cost", value)
 		if err != nil {
-			return fmt.Errorf("route candidate cache write cost: %w", err)
+			return err
 		}
 
 		candidate.CacheWriteTokenCost = parsed
@@ -1490,38 +1536,107 @@ func applyRouteCandidateField(candidate *modelroute.Candidate, field, value stri
 
 		candidate.Priority = parsed
 	case "max", "max_input":
-		parsed, err := strconv.Atoi(value)
+		parsed, err := parseRouteCandidateNonNegativeInt("max input", value)
 		if err != nil {
-			return fmt.Errorf("route candidate max input: %w", err)
+			return err
 		}
 
 		candidate.MaxInputTokens = parsed
 	case "max_output", "output_max":
-		parsed, err := strconv.Atoi(value)
+		parsed, err := parseRouteCandidateNonNegativeInt("max output", value)
 		if err != nil {
-			return fmt.Errorf("route candidate max output: %w", err)
+			return err
 		}
 
 		candidate.MaxOutputTokens = parsed
 	case "latency":
-		parsed, err := strconv.Atoi(value)
+		parsed, err := parseRouteCandidateNonNegativeInt("latency", value)
 		if err != nil {
-			return fmt.Errorf("route candidate latency: %w", err)
+			return err
 		}
 
 		candidate.ExpectedLatencyMS = parsed
 	case "ttft":
-		parsed, err := strconv.Atoi(value)
+		parsed, err := parseRouteCandidateNonNegativeInt("ttft", value)
 		if err != nil {
-			return fmt.Errorf("route candidate ttft: %w", err)
+			return err
 		}
 
 		candidate.ExpectedTTFTMS = parsed
+	case "capability", "capabilities", "caps":
+		capabilities, err := parseRouteCandidateCapabilities(value)
+		if err != nil {
+			return err
+		}
+
+		candidate.Capabilities = capabilities
 	default:
 		return fmt.Errorf("route candidate: unknown field %q", field)
 	}
 
 	return nil
+}
+
+func parseRouteCandidateNonNegativeFloat(name, value string) (float64, error) {
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("route candidate %s: %w", name, err)
+	}
+
+	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, fmt.Errorf("route candidate %s must be finite", name)
+	}
+
+	if parsed < 0 {
+		return 0, fmt.Errorf("route candidate %s must be >= 0", name)
+	}
+
+	return parsed, nil
+}
+
+func parseRouteCandidateCapabilities(value string) ([]string, error) {
+	values := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '|' || r == '+' || r == ';'
+	})
+	out := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+
+	for _, capability := range values {
+		capability = strings.ToLower(strings.TrimSpace(capability))
+		if capability == "" || seen[capability] {
+			continue
+		}
+
+		if !modelroute.IsKnownCapability(capability) {
+			return nil, fmt.Errorf(
+				"route candidate capabilities contains unknown capability %q (valid: %s)",
+				capability,
+				strings.Join(modelroute.KnownCapabilities(), ","),
+			)
+		}
+
+		seen[capability] = true
+		out = append(out, capability)
+	}
+
+	if len(out) == 0 {
+		return nil, errors.New("route candidate capabilities must include at least one capability")
+	}
+
+	return out, nil
+}
+
+func parseRouteCandidateNonNegativeInt(name, value string) (int, error) {
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("route candidate %s: %w", name, err)
+	}
+
+	if parsed < 0 {
+		return 0, fmt.Errorf("route candidate %s must be >= 0", name)
+	}
+
+	return parsed, nil
 }
 
 func formatRouteCandidate(candidate modelroute.Candidate, profile modelroute.RequestProfile) string {
@@ -1539,6 +1654,10 @@ func formatRouteCandidate(candidate modelroute.Candidate, profile modelroute.Req
 
 	if candidate.Deprecated {
 		parts = append(parts, "deprecated=true")
+	}
+
+	if len(candidate.Capabilities) > 0 {
+		parts = append(parts, "capabilities="+strings.Join(candidate.Capabilities, ","))
 	}
 
 	if candidate.Priority != 0 {
@@ -1602,10 +1721,22 @@ func formatRouteDecisionHeader(decision modelroute.Decision) []string {
 		header = append(header, "constraints="+strings.Join(decision.Constraints, ","))
 	}
 
+	if len(decision.Policy.RequiredCapabilities) > 0 {
+		header = append(header, "required_capabilities="+strings.Join(decision.Policy.RequiredCapabilities, ","))
+	}
+
 	return header
 }
 
 func appendRouteProfileEvidence(parts []string, profile modelroute.RequestProfile) []string {
+	if profile.Interactive {
+		parts = append(parts, "interactive=true")
+	}
+
+	if profile.Batch {
+		parts = append(parts, "batch=true")
+	}
+
 	if profile.EstimatedInputTokens > 0 {
 		parts = append(parts, "estimated_input_tokens="+strconv.Itoa(profile.EstimatedInputTokens))
 	}
@@ -1701,6 +1832,10 @@ func appendCandidateEvidence(parts []string, candidate modelroute.CandidateDecis
 
 	if candidate.Candidate.Deprecated {
 		parts = append(parts, "deprecated=true")
+	}
+
+	if len(candidate.Candidate.Capabilities) > 0 {
+		parts = append(parts, "capabilities="+strings.Join(candidate.Candidate.Capabilities, ","))
 	}
 
 	if candidate.ExpectedLatencyMS > 0 {

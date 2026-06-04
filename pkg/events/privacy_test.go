@@ -298,6 +298,26 @@ func TestSanitizeEventForHook_DropsArbitraryMetadataWhileKeepingAllowlist(t *tes
 	assert.True(t, got.Redacted)
 }
 
+func TestSanitizeEventForHook_KeepsRouteDecisionProfileModeMetadata(t *testing.T) {
+	t.Parallel()
+
+	got := sanitizeEventForHook(Event{
+		Type: RouteDecision,
+		Metadata: map[string]string{
+			"selected":    "openai/gpt-4.1-mini",
+			"interactive": "true",
+			"batch":       "true",
+			"raw_prompt":  "secret=sk-metasecret1234567890",
+		},
+	}, PayloadMetadata)
+
+	assert.Equal(t, "openai/gpt-4.1-mini", got.Metadata["selected"])
+	assert.Equal(t, "true", got.Metadata["interactive"])
+	assert.Equal(t, "true", got.Metadata["batch"])
+	assert.NotContains(t, got.Metadata, "raw_prompt")
+	assert.True(t, got.Redacted)
+}
+
 func TestSanitizeEventForHook_FileEventsFullDropFileContent(t *testing.T) {
 	t.Parallel()
 

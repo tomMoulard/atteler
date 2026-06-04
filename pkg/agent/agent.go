@@ -114,6 +114,8 @@ func routingPolicyFromConfig(cfg config.RoutingPolicyConfig) modelroute.Policy {
 		BannedModels:         normalizeModels(cfg.BannedModels),
 		RequiredCapabilities: normalizePhrases(cfg.RequiredCapabilities),
 		MaxBudget:            cfg.MaxBudget,
+		MaxLatencyMS:         cfg.MaxLatencyMS,
+		MaxTTFTMS:            cfg.MaxTTFTMS,
 		RequireFreshMetadata: cfg.RequireFreshMetadata,
 	}
 }

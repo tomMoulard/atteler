@@ -46,6 +46,7 @@ func TestProviderCapabilities_CoverCompleteParams(t *testing.T) {
 			assert.Equal(t, capabilities.SupportsTools, capabilities.CompleteParams["Tools"].Status == CompleteParamSupported)
 			assert.Equal(t, capabilities.SupportsReasoning, capabilities.CompleteParams["ReasoningLevel"].Status != CompleteParamUnsupported)
 			assert.Equal(t, capabilities.SupportsModelMode, capabilities.CompleteParams["ModelMode"].Status == CompleteParamSupported)
+			assert.Equal(t, capabilities.SupportsJSONSchema, capabilities.CompleteParams["ResponseFormat"].Status != CompleteParamUnsupported)
 		})
 	}
 }
@@ -55,49 +56,104 @@ func TestProviderCapabilities_FeatureMatrix(t *testing.T) {
 
 	want := map[string]ProviderCapabilities{
 		providerOpenAI: {
+			SupportsChatCompletions:       true,
 			SupportsSeed:                  true,
 			SupportsTools:                 true,
 			SupportsReasoning:             true,
 			SupportsModelMode:             true,
+			SupportsJSONSchema:            true,
+			SupportsEmbeddings:            true,
+			SupportsMultimodalInput:       true,
+			SupportsMultimodalOutput:      true,
+			SupportsBatch:                 true,
+			SupportsPromptCaching:         true,
 			SupportsCacheAccounting:       true,
 			SupportsStreaming:             false,
 			SupportsNetworkModelDiscovery: true,
+			SupportsRateLimitMetadata:     true,
+			SupportsRetries:               true,
+			SupportsFallbacks:             true,
+			SupportsCostTracking:          true,
 		},
 		providerAnthropic: {
+			SupportsChatCompletions:       true,
 			SupportsSeed:                  false,
 			SupportsTools:                 true,
 			SupportsReasoning:             true,
 			SupportsModelMode:             false,
+			SupportsJSONSchema:            false,
+			SupportsEmbeddings:            false,
+			SupportsMultimodalInput:       true,
+			SupportsMultimodalOutput:      false,
+			SupportsBatch:                 true,
+			SupportsPromptCaching:         true,
 			SupportsCacheAccounting:       true,
 			SupportsStreaming:             false,
 			SupportsNetworkModelDiscovery: true,
+			SupportsRateLimitMetadata:     true,
+			SupportsRetries:               true,
+			SupportsFallbacks:             true,
+			SupportsCostTracking:          true,
 		},
 		providerClaudeCode: {
+			SupportsChatCompletions:       true,
 			SupportsSeed:                  false,
 			SupportsTools:                 true,
 			SupportsReasoning:             true,
 			SupportsModelMode:             false,
+			SupportsJSONSchema:            false,
+			SupportsEmbeddings:            false,
+			SupportsMultimodalInput:       true,
+			SupportsMultimodalOutput:      false,
+			SupportsBatch:                 false,
+			SupportsPromptCaching:         true,
 			SupportsCacheAccounting:       true,
 			SupportsStreaming:             false,
 			SupportsNetworkModelDiscovery: false,
+			SupportsRateLimitMetadata:     true,
+			SupportsRetries:               true,
+			SupportsFallbacks:             true,
+			SupportsCostTracking:          true,
 		},
 		providerCodex: {
+			SupportsChatCompletions:       true,
 			SupportsSeed:                  false,
 			SupportsTools:                 true,
 			SupportsReasoning:             true,
 			SupportsModelMode:             true,
+			SupportsJSONSchema:            true,
+			SupportsEmbeddings:            false,
+			SupportsMultimodalInput:       true,
+			SupportsMultimodalOutput:      false,
+			SupportsBatch:                 false,
+			SupportsPromptCaching:         true,
 			SupportsCacheAccounting:       true,
 			SupportsStreaming:             true,
 			SupportsNetworkModelDiscovery: false,
+			SupportsRateLimitMetadata:     true,
+			SupportsRetries:               true,
+			SupportsFallbacks:             true,
+			SupportsCostTracking:          true,
 		},
 		providerOllama: {
+			SupportsChatCompletions:       true,
 			SupportsSeed:                  true,
 			SupportsTools:                 true,
 			SupportsReasoning:             true,
 			SupportsModelMode:             false,
+			SupportsJSONSchema:            true,
+			SupportsEmbeddings:            true,
+			SupportsMultimodalInput:       true,
+			SupportsMultimodalOutput:      false,
+			SupportsBatch:                 false,
+			SupportsPromptCaching:         false,
 			SupportsCacheAccounting:       false,
 			SupportsStreaming:             true,
 			SupportsNetworkModelDiscovery: true,
+			SupportsRateLimitMetadata:     true,
+			SupportsRetries:               true,
+			SupportsFallbacks:             true,
+			SupportsCostTracking:          true,
 		},
 	}
 
@@ -108,13 +164,24 @@ func TestProviderCapabilities_FeatureMatrix(t *testing.T) {
 			capabilities, ok := BuiltInProviderCapabilities(providerName)
 			require.True(t, ok)
 
+			assert.Equal(t, want[providerName].SupportsChatCompletions, capabilities.SupportsChatCompletions)
 			assert.Equal(t, want[providerName].SupportsSeed, capabilities.SupportsSeed)
 			assert.Equal(t, want[providerName].SupportsTools, capabilities.SupportsTools)
 			assert.Equal(t, want[providerName].SupportsReasoning, capabilities.SupportsReasoning)
 			assert.Equal(t, want[providerName].SupportsModelMode, capabilities.SupportsModelMode)
+			assert.Equal(t, want[providerName].SupportsJSONSchema, capabilities.SupportsJSONSchema)
+			assert.Equal(t, want[providerName].SupportsEmbeddings, capabilities.SupportsEmbeddings)
+			assert.Equal(t, want[providerName].SupportsMultimodalInput, capabilities.SupportsMultimodalInput)
+			assert.Equal(t, want[providerName].SupportsMultimodalOutput, capabilities.SupportsMultimodalOutput)
+			assert.Equal(t, want[providerName].SupportsBatch, capabilities.SupportsBatch)
+			assert.Equal(t, want[providerName].SupportsPromptCaching, capabilities.SupportsPromptCaching)
 			assert.Equal(t, want[providerName].SupportsCacheAccounting, capabilities.SupportsCacheAccounting)
 			assert.Equal(t, want[providerName].SupportsStreaming, capabilities.SupportsStreaming)
 			assert.Equal(t, want[providerName].SupportsNetworkModelDiscovery, capabilities.SupportsNetworkModelDiscovery)
+			assert.Equal(t, want[providerName].SupportsRateLimitMetadata, capabilities.SupportsRateLimitMetadata)
+			assert.Equal(t, want[providerName].SupportsRetries, capabilities.SupportsRetries)
+			assert.Equal(t, want[providerName].SupportsFallbacks, capabilities.SupportsFallbacks)
+			assert.Equal(t, want[providerName].SupportsCostTracking, capabilities.SupportsCostTracking)
 		})
 	}
 }
@@ -175,6 +242,28 @@ func TestProviderCapabilities_StreamingFlagMatchesProviderInterfaces(t *testing.
 			capabilities := ProviderCapabilitiesFor(provider)
 			_, implementsStreaming := provider.(StreamProvider)
 			assert.Equal(t, implementsStreaming, capabilities.SupportsStreaming)
+		})
+	}
+}
+
+func TestProviderCapabilities_EmbeddingFlagMatchesProviderInterfaces(t *testing.T) {
+	t.Parallel()
+
+	providers := []Provider{
+		&AnthropicProvider{},
+		&ClaudeCodeProvider{},
+		&CodexProvider{},
+		&OpenAIProvider{},
+		&OllamaProvider{},
+	}
+
+	for _, provider := range providers {
+		t.Run(provider.Name(), func(t *testing.T) {
+			t.Parallel()
+
+			capabilities := ProviderCapabilitiesFor(provider)
+			_, implementsEmbeddings := provider.(EmbeddingProvider)
+			assert.Equal(t, implementsEmbeddings, capabilities.SupportsEmbeddings)
 		})
 	}
 }
@@ -323,6 +412,7 @@ func TestProviderProtocolFixtures_CoverPublicLLMSchema(t *testing.T) {
 				"Temperature",
 				"TopP",
 				"Seed",
+				"ResponseFormat",
 				"Model",
 				"ModelMode",
 				"ReasoningLevel",
@@ -330,6 +420,16 @@ func TestProviderProtocolFixtures_CoverPublicLLMSchema(t *testing.T) {
 				"Stop",
 				"Tools",
 				"MaxTokens",
+			},
+		},
+		{
+			name: "ResponseFormat",
+			got:  structFieldNames[ResponseFormat](),
+			want: []string{
+				"Schema",
+				"Type",
+				"Name",
+				"Strict",
 			},
 		},
 		{
@@ -387,17 +487,64 @@ func TestProviderProtocolFixtures_CoverPublicLLMSchema(t *testing.T) {
 			},
 		},
 		{
+			name: "EmbeddingParams",
+			got:  structFieldNames[EmbeddingParams](),
+			want: []string{
+				"Model",
+				"Input",
+				"Dimensions",
+			},
+		},
+		{
+			name: "EmbeddingResponse",
+			got:  structFieldNames[EmbeddingResponse](),
+			want: []string{
+				"Provider",
+				"Model",
+				"Embeddings",
+				"Latency",
+				"InputTokens",
+			},
+		},
+		{
+			name: "BatchCompleteParams",
+			got:  structFieldNames[BatchCompleteParams](),
+			want: []string{
+				"Model",
+				"Requests",
+			},
+		},
+		{
+			name: "BatchResponse",
+			got:  structFieldNames[BatchResponse](),
+			want: []string{
+				"Responses",
+				"Latency",
+			},
+		},
+		{
 			name: "ProviderCapabilities",
 			got:  structFieldNames[ProviderCapabilities](),
 			want: []string{
 				"CompleteParams",
+				"SupportsChatCompletions",
 				"SupportsSeed",
 				"SupportsTools",
 				"SupportsReasoning",
 				"SupportsModelMode",
+				"SupportsJSONSchema",
+				"SupportsEmbeddings",
+				"SupportsMultimodalInput",
+				"SupportsMultimodalOutput",
+				"SupportsBatch",
+				"SupportsPromptCaching",
 				"SupportsCacheAccounting",
 				"SupportsStreaming",
 				"SupportsNetworkModelDiscovery",
+				"SupportsRateLimitMetadata",
+				"SupportsRetries",
+				"SupportsFallbacks",
+				"SupportsCostTracking",
 			},
 		},
 		{
@@ -758,6 +905,24 @@ func providerProtocolRequestFixtures() []protocolRequestFixture {
 			},
 		},
 		{
+			name: "json schema response format",
+			params: withContractParams(baseContractParams([]Message{{Role: RoleUser, Content: "Return structured output."}}), func(params *CompleteParams) {
+				params.ResponseFormat = &ResponseFormat{
+					Type:   ResponseFormatJSONSchema,
+					Name:   "answer",
+					Strict: true,
+					Schema: contractResponseSchema(),
+				}
+			}),
+			covers: []string{"ResponseFormat"},
+			want: map[string]string{
+				providerOpenAI: `{"model":"contract-model","response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false},"strict":true}},"messages":[{"role":"user","content":"Return structured output."}]}`,
+				providerCodex:  `{"text":{"format":{"type":"json_schema","name":"answer","schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false},"strict":true}},"model":"contract-model","instructions":"You are a helpful assistant.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Return structured output."}]}],"stream":true,"store":false}`,
+				providerOllama: `{"format":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false},"model":"contract-model","messages":[{"role":"user","content":"Return structured output."}],"options":{},"stream":false}`,
+			},
+			unsupported: map[string]string{providerAnthropic: "ResponseFormat", providerClaudeCode: "ResponseFormat"},
+		},
+		{
 			name: "max tokens",
 			params: withContractParams(baseContractParams([]Message{{Role: RoleUser, Content: "Limit."}}), func(params *CompleteParams) {
 				params.MaxTokens = 123
@@ -767,9 +932,9 @@ func providerProtocolRequestFixtures() []protocolRequestFixture {
 				providerOpenAI:     `{"model":"contract-model","messages":[{"role":"user","content":"Limit."}],"max_tokens":123}`,
 				providerAnthropic:  `{"model":"contract-model","messages":[{"role":"user","content":"Limit."}],"max_tokens":123}`,
 				providerClaudeCode: `{"model":"contract-model","messages":[{"role":"user","content":"Limit."}],"max_tokens":123}`,
+				providerCodex:      `{"model":"contract-model","instructions":"You are a helpful assistant.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Limit."}]}],"stream":true,"store":false}`,
 				providerOllama:     `{"model":"contract-model","messages":[{"role":"user","content":"Limit."}],"options":{"num_predict":123},"stream":false}`,
 			},
-			unsupported: map[string]string{providerCodex: "MaxTokens"},
 		},
 		{
 			name: "stop sequences",
@@ -1137,6 +1302,35 @@ func providerProtocolRequestImpossibleCombinations() []protocolNegativeRequestFi
 			},
 		},
 		{
+			name: "non-json response schema",
+			params: withContractParams(baseContractParams([]Message{{Role: RoleUser, Content: "Return JSON."}}), func(params *CompleteParams) {
+				params.ResponseFormat = &ResponseFormat{
+					Type:   ResponseFormatJSONSchema,
+					Schema: map[string]any{"invalid": make(chan int)},
+				}
+			}),
+			wantError: map[string]string{
+				providerOpenAI:     "ResponseFormat",
+				providerAnthropic:  "ResponseFormat",
+				providerClaudeCode: "ResponseFormat",
+				providerCodex:      "ResponseFormat",
+				providerOllama:     "ResponseFormat",
+			},
+		},
+		{
+			name: "response format name without schema",
+			params: withContractParams(baseContractParams([]Message{{Role: RoleUser, Content: "Return text."}}), func(params *CompleteParams) {
+				params.ResponseFormat = &ResponseFormat{Name: "answer"}
+			}),
+			wantError: map[string]string{
+				providerOpenAI:     "ResponseFormat",
+				providerAnthropic:  "ResponseFormat",
+				providerClaudeCode: "ResponseFormat",
+				providerCodex:      "ResponseFormat",
+				providerOllama:     "ResponseFormat",
+			},
+		},
+		{
 			name: "negative max tokens",
 			params: withContractParams(baseContractParams([]Message{{Role: RoleUser, Content: "Limit."}}), func(params *CompleteParams) {
 				params.MaxTokens = -1
@@ -1158,7 +1352,6 @@ func providerProtocolRequestImpossibleCombinations() []protocolNegativeRequestFi
 			wantError: map[string]string{
 				providerAnthropic:  "max_tokens greater than 1024",
 				providerClaudeCode: "max_tokens greater than 1024",
-				providerCodex:      "MaxTokens",
 			},
 		},
 	}
@@ -1234,6 +1427,11 @@ func paramsWithOnlyFieldSet(t *testing.T, field string) CompleteParams {
 	case "Seed":
 		value := 42
 		params.Seed = &value
+	case "ResponseFormat":
+		params.ResponseFormat = &ResponseFormat{
+			Type:   ResponseFormatJSONSchema,
+			Schema: contractResponseSchema(),
+		}
 	case "Model":
 		params.Model = "contract-model"
 	case "ModelMode":
@@ -1267,6 +1465,17 @@ func contractToolDefinition() ToolDefinition {
 			"required":             []string{"query"},
 			"additionalProperties": false,
 		},
+	}
+}
+
+func contractResponseSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"answer": map[string]any{"type": "string"},
+		},
+		"required":             []string{"answer"},
+		"additionalProperties": false,
 	}
 }
 

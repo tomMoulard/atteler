@@ -24,8 +24,14 @@ func RedactedConfig(cfg Config) Config {
 	out.Worktree = redactedWorktreeConfig(cfg.Worktree)
 
 	out.Providers = make(map[string]ProviderConfig, len(cfg.Providers))
-	for name, provider := range cfg.Providers {
+	for name := range cfg.Providers {
+		provider := cfg.Providers[name]
 		provider.BaseURL = redactURL(provider.BaseURL)
+		provider.ChatCompletionsPath = redactURL(provider.ChatCompletionsPath)
+		provider.EmbeddingsPath = redactURL(provider.EmbeddingsPath)
+		provider.ModelsPath = redactURL(provider.ModelsPath)
+		provider.Models = append([]string(nil), provider.Models...)
+		provider.Capabilities = append([]string(nil), provider.Capabilities...)
 		out.Providers[name] = provider
 	}
 
@@ -77,6 +83,7 @@ func RedactedConfig(cfg Config) Config {
 
 	out.FallbackModels = append([]string(nil), cfg.FallbackModels...)
 	out.ModelAliases = maps.Clone(cfg.ModelAliases)
+	out.ModelRoles = redactedModelRoles(cfg.ModelRoles)
 	out.Context.References = redactStringSlice("references", cfg.Context.References)
 	out.Context.ReferencePolicy = redactedReferencePolicyConfig(cfg.Context.ReferencePolicy)
 
@@ -151,6 +158,26 @@ func redactedVectorConfig(cfg VectorConfig) VectorConfig {
 	cfg.WorkspaceExclude = redactStringSlice("workspace_exclude", cfg.WorkspaceExclude)
 
 	return cfg
+}
+
+func redactedModelRoles(roles map[string]ModelRoleConfig) map[string]ModelRoleConfig {
+	if len(roles) == 0 {
+		return nil
+	}
+
+	out := make(map[string]ModelRoleConfig, len(roles))
+	for name := range roles {
+		role := roles[name]
+		role.FallbackModels = append([]string(nil), role.FallbackModels...)
+		role.RoutingPolicy = cloneRoutingPolicy(role.RoutingPolicy)
+		role.PreferredProviders = append([]string(nil), role.PreferredProviders...)
+		role.BannedProviders = append([]string(nil), role.BannedProviders...)
+		role.BannedModels = append([]string(nil), role.BannedModels...)
+		role.RequiredCapabilities = append([]string(nil), role.RequiredCapabilities...)
+		out[name] = role
+	}
+
+	return out
 }
 
 func clonePtr[T any](value *T) *T {

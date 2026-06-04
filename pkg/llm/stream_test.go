@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/modelroute"
 )
 
 func TestStreamFromComplete_SingleChunk(t *testing.T) {
@@ -87,6 +89,74 @@ func TestCompleteStreamOrFallback_FallsBackToNonStream(t *testing.T) {
 	assert.Equal(t, "full response", resp.Content)
 	assert.Equal(t, "n-1", resp.Model)
 	assert.Equal(t, StopEndTurn, resp.StopReason)
+}
+
+func TestRegistry_CompleteStreamFallsBackWhenProviderDeclaresStreamingUnsupported(t *testing.T) {
+	t.Parallel()
+
+	provider := &capabilityFakeStreamProvider{
+		capabilities: ProviderCapabilities{
+			SupportsChatCompletions: true,
+			SupportsStreaming:       false,
+		},
+		fakeStreamProvider: fakeStreamProvider{
+			fakeProvider: fakeProvider{
+				name:   "buffered-stream",
+				models: []string{"model"},
+				resp:   &Response{Content: "buffered", StopReason: StopEndTurn},
+			},
+			chunks: []Chunk{{Content: "should not stream", Done: true}},
+		},
+	}
+
+	r := NewRegistry()
+	r.Register(provider)
+
+	ch, err := r.CompleteStream(context.Background(), CompleteParams{
+		Model:    "buffered-stream/model",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+	assert.Equal(t, "buffered", resp.Content)
+	assert.Empty(t, provider.streamCalls)
+	require.Len(t, provider.calls, 1)
+}
+
+func TestRegistry_CompleteStreamRejectsUnsupportedDeclaredProviderParams(t *testing.T) {
+	t.Parallel()
+
+	provider := &capabilityFakeStreamProvider{
+		capabilities: ProviderCapabilities{
+			SupportsChatCompletions: true,
+			SupportsStreaming:       true,
+			CompleteParams: map[string]CompleteParamSupport{
+				"Tools": unsupported("stream endpoint does not support tools"),
+			},
+		},
+		fakeStreamProvider: fakeStreamProvider{
+			fakeProvider: fakeProvider{
+				name:   "stream-compatible",
+				models: []string{"stream-coder"},
+			},
+			chunks: []Chunk{{Content: "should not stream", Done: true}},
+		},
+	}
+
+	r := NewRegistry()
+	r.Register(provider)
+
+	_, err := r.CompleteStream(context.Background(), CompleteParams{
+		Model:    "stream-compatible/stream-coder",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+		Tools:    DefaultTools(),
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CompleteParams.Tools is unsupported")
+	assert.Empty(t, provider.streamCalls)
 }
 
 func TestStreamHelpers_RequireActiveContext(t *testing.T) {
@@ -249,6 +319,188 @@ func TestCompleteStreamOrFallback_MidStreamProviderErrorReachesCaller(t *testing
 	assert.False(t, chunks[1].Done)
 }
 
+func TestRegistry_CompleteStreamWithModelRoleRequiresStreamingCapability(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "buffered"},
+	}
+	codex := &fakeStreamProvider{
+		fakeProvider: fakeProvider{
+			name:   providerCodex,
+			models: []string{"gpt-5.4-mini"},
+		},
+		chunks: []Chunk{
+			{Content: "streamed"},
+			{Done: true, Model: "gpt-5.4-mini", StopReason: StopEndTurn},
+		},
+	}
+
+	r.Register(openAI)
+	r.Register(codex)
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:      "openai/gpt-5.4-mini",
+		FallbackModels: []string{"codex/gpt-5.4-mini"},
+	}))
+
+	ch, err := r.CompleteStreamWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+	assert.Equal(t, "streamed", resp.Content)
+	assert.Equal(t, "gpt-5.4-mini", resp.Model)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, codex.streamCalls, 1)
+	assert.Equal(t, "gpt-5.4-mini", codex.streamCalls[0].Model)
+
+	resolution, ok, err := r.resolveModelRoleWithCapabilities(
+		"planner",
+		CompleteParams{},
+		nil,
+		[]string{modelroute.CapabilityStreaming},
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "codex/gpt-5.4-mini", resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-5.4-mini", modelroute.ReasonMissingCapability)
+}
+
+func TestRegistry_CompleteStreamWithModelRoleRequiresActualStreamProvider(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	buffered := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{
+			SupportsChatCompletions: true,
+			SupportsStreaming:       true,
+		},
+		fakeProvider: fakeProvider{
+			name:   "buffered",
+			models: []string{"b-1"},
+			resp:   &Response{Content: "buffered"},
+		},
+	}
+	codex := &fakeStreamProvider{
+		fakeProvider: fakeProvider{
+			name:   providerCodex,
+			models: []string{"gpt-5.4-mini"},
+		},
+		chunks: []Chunk{
+			{Content: "streamed", Model: "gpt-5.4-mini"},
+			{Done: true, Model: "gpt-5.4-mini", StopReason: StopEndTurn},
+		},
+	}
+
+	r.Register(buffered)
+	r.Register(codex)
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:      "buffered/b-1",
+		FallbackModels: []string{"codex/gpt-5.4-mini"},
+	}))
+
+	ch, err := r.CompleteStreamWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+	assert.Equal(t, "streamed", resp.Content)
+	assert.Empty(t, buffered.calls)
+	require.Len(t, codex.streamCalls, 1)
+	assert.Equal(t, "gpt-5.4-mini", codex.streamCalls[0].Model)
+
+	resolution, ok, err := r.resolveModelRoleWithCapabilities(
+		"planner",
+		CompleteParams{},
+		nil,
+		[]string{modelroute.CapabilityStreaming},
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "codex/gpt-5.4-mini", resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "buffered/b-1", modelroute.ReasonMissingCapability)
+}
+
+func TestRegistry_CompleteStreamWithModelRoleFallsBackOnSetupFailure(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+
+	ollama := &fakeStreamProvider{
+		fakeProvider: fakeProvider{
+			name:   providerOllama,
+			models: []string{"llama3.2"},
+		},
+		streamErr: errors.New("stream setup failed"),
+	}
+	codex := &fakeStreamProvider{
+		fakeProvider: fakeProvider{
+			name:   providerCodex,
+			models: []string{"gpt-5.4-mini"},
+		},
+		chunks: []Chunk{
+			{Content: "fallback stream"},
+			{Done: true, Model: "gpt-5.4-mini", StopReason: StopEndTurn},
+		},
+	}
+
+	r.Register(ollama)
+	r.Register(codex)
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:      "ollama/llama3.2",
+		FallbackModels: []string{"codex/gpt-5.4-mini"},
+	}))
+
+	ch, err := r.CompleteStream(context.Background(), CompleteParams{Model: "planner"})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+	assert.Equal(t, "fallback stream", resp.Content)
+	assert.Equal(t, "gpt-5.4-mini", resp.Model)
+	require.Len(t, ollama.streamCalls, 1)
+	require.Len(t, codex.streamCalls, 1)
+}
+
+func TestRegistry_CompleteStreamRecordsRouteTelemetry(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+	r.Register(&fakeStreamProvider{
+		fakeProvider: fakeProvider{
+			name:   providerCodex,
+			models: []string{"gpt-5.4-mini"},
+		},
+		chunks: []Chunk{
+			{Content: "hi", FirstTokenLatency: 12 * time.Millisecond},
+			{Done: true, Model: "gpt-5.4-mini", InputTokens: 1000, OutputTokens: 50},
+		},
+	})
+
+	ch, err := r.CompleteStream(context.Background(), CompleteParams{Model: "codex/gpt-5.4-mini"})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+	assert.Equal(t, "hi", resp.Content)
+
+	require.Eventually(t, func() bool {
+		obs, ok := telemetry.Snapshot("codex/gpt-5.4-mini")
+
+		return ok &&
+			obs.Count == 1 &&
+			obs.InputTokens == 1000 &&
+			obs.OutputTokens == 50 &&
+			obs.AvgTTFTMS == 12 &&
+			obs.LastLatencyMS > 0
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestCollectStream_ContextCancellationReturnsPartialAndError(t *testing.T) {
 	t.Parallel()
 
@@ -282,11 +534,28 @@ func TestCollectStream_ContextCancellationReturnsPartialAndError(t *testing.T) {
 }
 
 type fakeStreamProvider struct {
-	chunks []Chunk
+	streamErr   error
+	chunks      []Chunk
+	streamCalls []CompleteParams
 	fakeProvider
 }
 
-func (f *fakeStreamProvider) CompleteStream(ctx context.Context, _ CompleteParams) (<-chan Chunk, error) {
+type capabilityFakeStreamProvider struct {
+	capabilities ProviderCapabilities
+	fakeStreamProvider
+}
+
+func (f *capabilityFakeStreamProvider) Capabilities() ProviderCapabilities {
+	return f.capabilities
+}
+
+func (f *fakeStreamProvider) CompleteStream(ctx context.Context, p CompleteParams) (<-chan Chunk, error) {
+	f.streamCalls = append(f.streamCalls, p)
+
+	if f.streamErr != nil {
+		return nil, f.streamErr
+	}
+
 	ch := make(chan Chunk, DefaultStreamBuffer)
 
 	go func() {

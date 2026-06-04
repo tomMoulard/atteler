@@ -490,6 +490,8 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 			diagnostics = append(diagnostics, inspectNamedFields(path, "worktree", value, knownWorktreeFields(), nil)...)
 		case "model_aliases":
 			diagnostics = append(diagnostics, inspectModelAliases(path, value)...)
+		case "models":
+			diagnostics = append(diagnostics, inspectModelRoles(path, value)...)
 		case "default_provider", fieldDefaultModel, "fallback_models":
 			return
 		default:
@@ -682,6 +684,24 @@ func inspectAgents(path string, value *yaml.Node) []Diagnostic {
 	return diagnostics
 }
 
+func inspectModelRoles(path string, value *yaml.Node) []Diagnostic {
+	var diagnostics []Diagnostic
+
+	forEachMappingField(value, func(name string, entry *yaml.Node) {
+		prefix := "models." + name
+
+		diagnostics = append(diagnostics, inspectNamedFields(path, prefix, entry, knownModelRoleFields(), nil)...)
+		if routingPolicy := mappingValue(entry, "routing_policy"); routingPolicy != nil {
+			diagnostics = append(
+				diagnostics,
+				inspectNamedFields(path, prefix+".routing_policy", routingPolicy, knownRoutingPolicyFields(), nil)...,
+			)
+		}
+	})
+
+	return diagnostics
+}
+
 func inspectMapEntries(
 	path string,
 	prefix string,
@@ -848,7 +868,18 @@ func knownReferencePolicyFields() map[string]bool {
 func knownProviderFields() map[string]bool {
 	return map[string]bool{
 		"base_url":                true,
+		"type":                    true,
+		"api_key_env":             true,
+		"api_key_header":          true,
+		"api_key_scheme":          true,
+		"chat_completions_path":   true,
+		"embeddings_path":         true,
+		"models_path":             true,
+		"api_version":             true,
+		"models":                  true,
+		"capabilities":            true,
 		"disabled":                true,
+		"local":                   true,
 		"auto_start":              true,
 		"disable_private_adapter": true,
 		"retry":                   true,
@@ -921,6 +952,25 @@ func knownAgentFields() map[string]bool {
 	}
 }
 
+func knownModelRoleFields() map[string]bool {
+	return map[string]bool{
+		"preferred":              true,
+		"fallback":               true,
+		"fallbacks":              true,
+		"fallback_models":        true,
+		"routing_policy":         true,
+		"preferred_providers":    true,
+		"banned_providers":       true,
+		"banned_models":          true,
+		"required_capabilities":  true,
+		"max_cost_usd":           true,
+		"max_latency_ms":         true,
+		"max_ttft_ms":            true,
+		"require_fresh_metadata": true,
+		"prefer_local":           true,
+	}
+}
+
 func knownRoutingPolicyFields() map[string]bool {
 	return map[string]bool{
 		"preferred_providers":    true,
@@ -928,6 +978,8 @@ func knownRoutingPolicyFields() map[string]bool {
 		"banned_models":          true,
 		"required_capabilities":  true,
 		"max_budget":             true,
+		"max_latency_ms":         true,
+		"max_ttft_ms":            true,
 		"require_fresh_metadata": true,
 	}
 }

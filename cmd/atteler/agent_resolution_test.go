@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,6 +180,52 @@ func TestRequestModelAndFallbacks_AppliesAgentRoutingPolicy(t *testing.T) {
 	assert.Equal(t, []string{"openai/gpt-4.1-mini"}, fallbackModels)
 }
 
+func TestRequestModelAndFallbacks_RejectsUnknownAgentRouteCapability(t *testing.T) {
+	t.Parallel()
+
+	requestModel, fallbackModels, routeDecision, err := requestModelAndFallbacks("", false, nil, agentSelection{
+		ok: true,
+		agent: agent.Agent{
+			Model: "openai/gpt-4.1-mini",
+			RoutingPolicy: modelroute.Policy{
+				RequiredCapabilities: []string{"teleport"},
+			},
+		},
+	}, modelroute.RequestProfile{}, nil)
+
+	require.Error(t, err)
+	require.NotNil(t, routeDecision)
+	assert.Empty(t, requestModel)
+	assert.Nil(t, fallbackModels)
+	assert.Contains(t, err.Error(), `unknown capability "teleport"`)
+	assert.Equal(t, []string{"teleport"}, routeDecision.Policy.RequiredCapabilities)
+	assert.Contains(t, routeDecision.Constraints, modelroute.ConstraintRequiredCapabilities)
+	assert.Empty(t, routeDecision.FallbackOrder)
+}
+
+func TestRequestModelAndFallbacks_RejectsInvalidAgentRoutePolicyLimit(t *testing.T) {
+	t.Parallel()
+
+	requestModel, fallbackModels, routeDecision, err := requestModelAndFallbacks("", false, nil, agentSelection{
+		ok: true,
+		agent: agent.Agent{
+			Model: "openai/gpt-4.1-mini",
+			RoutingPolicy: modelroute.Policy{
+				MaxBudget: -0.01,
+			},
+		},
+	}, modelroute.RequestProfile{}, nil)
+
+	require.Error(t, err)
+	require.NotNil(t, routeDecision)
+	assert.Empty(t, requestModel)
+	assert.Nil(t, fallbackModels)
+	assert.Contains(t, err.Error(), "agent routing_policy.max_budget must be >= 0")
+	assert.InDelta(t, -0.01, routeDecision.Policy.MaxBudget, 0.000000001)
+	assert.Contains(t, routeDecision.Constraints, modelroute.ConstraintBudget)
+	assert.Empty(t, routeDecision.FallbackOrder)
+}
+
 func TestRequestModelAndFallbacks_IncludesSelectedModelWhenAgentHasOnlyFallbacks(t *testing.T) {
 	t.Parallel()
 
@@ -198,6 +245,206 @@ func TestRequestModelAndFallbacks_IncludesSelectedModelWhenAgentHasOnlyFallbacks
 	assert.Empty(t, fallbackModels)
 	assert.Equal(t, []string{"openai/gpt-4.1-mini"}, routeDecision.FallbackOrder)
 	assertRejectionContainsCommand(t, *routeDecision, "openai/gpt-4.1-nano", modelroute.ReasonModelBanned)
+}
+
+func TestRequestModelRoleAndFallbacks_ResolvesRoleWithDecision(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1", "gpt-4.1-mini"}})
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred:            "openai/gpt-4.1",
+		FallbackModels:       []string{"openai/gpt-4.1-mini"},
+		RequiredCapabilities: []string{modelroute.CapabilityJSONSchema},
+		MaxCostUSD:           0.00005,
+	}))
+
+	requestModel, fallbackModels, routeDecision, routed, err := requestModelRoleAndFallbacks(
+		context.Background(),
+		registry,
+		"planner",
+		nil,
+		llm.CompleteParams{
+			Messages:  []llm.Message{{Role: llm.RoleUser, Content: "plan this"}},
+			MaxTokens: 10,
+		},
+	)
+
+	require.NoError(t, err)
+	require.True(t, routed)
+	require.NotNil(t, routeDecision)
+	assert.Equal(t, "planner", routeDecision.ModelRole)
+	assert.Equal(t, "openai/gpt-4.1-mini", requestModel)
+	assert.Empty(t, fallbackModels)
+	assert.Equal(t, []string{"openai/gpt-4.1-mini"}, routeDecision.FallbackOrder)
+	assert.Contains(t, routeDecision.Constraints, modelroute.ConstraintRequiredCapabilities)
+	assert.Contains(t, routeDecision.Constraints, modelroute.ConstraintBudget)
+	assert.Contains(t, routeDecision.Constraints, modelroute.ConstraintRuntimeAvailability)
+	require.NotNil(t, routeDecision.Availability)
+	assert.True(t, routeDecision.Availability.RefreshAttempted)
+	assert.Equal(t, int(routeAvailabilityRefreshTimeout/time.Millisecond), routeDecision.Availability.RefreshTimeoutMS)
+	assertRejectionContainsCommand(t, *routeDecision, "openai/gpt-4.1", modelroute.ReasonOverBudget)
+}
+
+func TestRequestModelRoleAndFallbacks_UsesDefaultModelRole(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1-mini"}})
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+	}))
+	require.NoError(t, registry.SetDefaultModel("planner"))
+
+	requestModel, fallbackModels, routeDecision, routed, err := requestModelRoleAndFallbacks(
+		context.Background(),
+		registry,
+		"",
+		nil,
+		llm.CompleteParams{
+			Messages: []llm.Message{{Role: llm.RoleUser, Content: "plan this"}},
+		},
+	)
+
+	require.NoError(t, err)
+	require.True(t, routed)
+	require.NotNil(t, routeDecision)
+	assert.Equal(t, "openai/gpt-4.1-mini", requestModel)
+	assert.Empty(t, fallbackModels)
+	assert.Equal(t, []string{"openai/gpt-4.1-mini"}, routeDecision.FallbackOrder)
+}
+
+func TestRequestModelRoutingAndFallbacks_AppliesAgentPolicyToModelRole(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1-mini"}})
+	registry.Register(routeFakeProvider{name: "codex", models: []string{"gpt-5.4-mini"}})
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"codex/gpt-5.4-mini"},
+	}))
+
+	requestModel, fallbackModels, routeDecision, err := requestModelRoutingAndFallbacks(
+		context.Background(),
+		registry,
+		"",
+		false,
+		nil,
+		agentSelection{
+			ok: true,
+			agent: agent.Agent{
+				Model: "planner",
+				RoutingPolicy: modelroute.Policy{
+					BannedProviders: []string{"openai"},
+				},
+			},
+		},
+		"planner",
+		nil,
+		llm.CompleteParams{
+			Model:    "planner",
+			Messages: []llm.Message{{Role: llm.RoleUser, Content: "plan this"}},
+		},
+		modelroute.RequestProfile{},
+		routeTelemetryFromRegistry(registry),
+		modelroute.Availability{},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, routeDecision)
+	assert.Equal(t, "codex/gpt-5.4-mini", requestModel)
+	assert.Empty(t, fallbackModels)
+	assert.Contains(t, routeDecision.Policy.BannedProviders, "openai")
+	assertRejectionContainsCommand(t, *routeDecision, "openai/gpt-4.1-mini", modelroute.ReasonProviderBanned)
+}
+
+func TestRequestModelRoleAndFallbacks_RefreshesNestedRoleProviders(t *testing.T) {
+	t.Parallel()
+
+	var anthropicFetches atomic.Int32
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1-mini"}})
+	registry.Register(routeFakeProvider{
+		name: "anthropic",
+		fetch: func(context.Context) ([]string, error) {
+			anthropicFetches.Add(1)
+
+			return []string{"claude-sonnet-4-20250514"}, nil
+		},
+	})
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"writer"},
+	}))
+	require.NoError(t, registry.SetModelRole("writer", llm.ModelRole{
+		Preferred: "anthropic/claude-sonnet-4-20250514",
+	}))
+
+	requestModel, fallbackModels, routeDecision, routed, err := requestModelRoleAndFallbacks(
+		context.Background(),
+		registry,
+		"planner",
+		nil,
+		llm.CompleteParams{
+			Messages: []llm.Message{{Role: llm.RoleUser, Content: "plan this"}},
+		},
+	)
+
+	require.NoError(t, err)
+	require.True(t, routed)
+	require.NotNil(t, routeDecision)
+	assert.Equal(t, "openai/gpt-4.1-mini", requestModel)
+	assert.Equal(t, []string{"anthropic/claude-sonnet-4-20250514"}, fallbackModels)
+	assert.Equal(t, int32(1), anthropicFetches.Load())
+	require.NotNil(t, routeDecision.Availability)
+	assert.True(t, routeDecision.Availability.ProviderModelsVerified["anthropic"])
+	assert.Contains(t, routeDecision.Availability.ProviderModels["anthropic"], "claude-sonnet-4-20250514")
+	assert.Empty(t, routeDecision.Availability.Unverified)
+}
+
+func TestRequestModelRoleAndFallbacks_RefreshesAmbiguousBareRoleProviders(t *testing.T) {
+	t.Parallel()
+
+	var anthropicFetches atomic.Int32
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-5.4-mini"}})
+	registry.Register(routeFakeProvider{
+		name:   "anthropic",
+		models: []string{"gpt-5.4-mini"},
+		fetch: func(context.Context) ([]string, error) {
+			anthropicFetches.Add(1)
+
+			return []string{"gpt-5.4-mini"}, nil
+		},
+	})
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred:          "gpt-5.4-mini",
+		PreferredProviders: []string{"anthropic"},
+	}))
+
+	requestModel, fallbackModels, routeDecision, routed, err := requestModelRoleAndFallbacks(
+		context.Background(),
+		registry,
+		"planner",
+		nil,
+		llm.CompleteParams{
+			Messages: []llm.Message{{Role: llm.RoleUser, Content: "plan this"}},
+		},
+	)
+
+	require.NoError(t, err)
+	require.True(t, routed)
+	require.NotNil(t, routeDecision)
+	assert.Equal(t, "anthropic/gpt-5.4-mini", requestModel)
+	assert.Empty(t, fallbackModels)
+	assert.Equal(t, int32(1), anthropicFetches.Load())
+	require.NotNil(t, routeDecision.Availability)
+	assert.True(t, routeDecision.Availability.RefreshAttempted)
+	assert.True(t, routeDecision.Availability.ProviderModelsVerified["anthropic"])
+	assert.Contains(t, routeDecision.Availability.ProviderModels["anthropic"], "gpt-5.4-mini")
 }
 
 func TestRequestModelAndFallbacks_PreservesAgentOrderWithoutRoutingPolicy(t *testing.T) {
@@ -595,6 +842,20 @@ func TestRouteAvailabilityFromRegistryMarksProviderQualifiedModelUnverified(t *t
 	assert.Contains(t, availability.Unavailable["anthropic/claude-sonnet-4-20250514"], modelroute.ReasonProviderUnavailable)
 }
 
+func TestRouteAvailabilityFromRegistryDoesNotMarkAmbiguousCatalogModelUnavailable(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-5.4-mini"}})
+	registry.Register(routeFakeProvider{name: "codex", models: []string{"gpt-5.4-mini"}})
+
+	availability := routeAvailabilityFromRegistry(registry, []string{"gpt-5.4-mini"})
+
+	assert.True(t, availability.Checked)
+	assert.NotContains(t, availability.Unavailable, "gpt-5.4-mini")
+	assert.NotContains(t, availability.Unverified, "gpt-5.4-mini")
+}
+
 func TestRouteAvailabilityFromRegistryAcceptsExactSlashModelID(t *testing.T) {
 	t.Parallel()
 
@@ -873,6 +1134,9 @@ func TestRouteDecisionEvent_EmbedsInspectableArtifact(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "route_decision", event.Type)
 	assert.Equal(t, decision.Selected, event.Metadata["selected"])
+	assert.Equal(t, "openai", event.Metadata["selected_provider"])
+	assert.Equal(t, "gpt-4.1-mini", event.Metadata["selected_model"])
+	assert.Equal(t, "0", event.Metadata["fallback_count"])
 	assert.Equal(t, modelroute.BuiltinCatalogVersion, event.Metadata["catalog_version"])
 	assert.Equal(t, "2", event.Metadata["candidate_count"])
 	assert.Equal(t, "1", event.Metadata["rejected_count"])
@@ -891,13 +1155,22 @@ func TestRouteDecisionEvent_MetadataIncludesRequestProfileEvidence(t *testing.T)
 	t.Parallel()
 
 	decision := modelroute.Decide(
-		[]modelroute.Candidate{{Name: "primary", Provider: "openai"}},
+		[]modelroute.Candidate{{
+			Name:                 "primary",
+			Provider:             "openai",
+			InputTokenCost:       0.000001,
+			CachedInputTokenCost: 0.0000005,
+			CacheWriteTokenCost:  0.000001,
+			OutputTokenCost:      0.000004,
+		}},
 		modelroute.RequestProfile{
 			EstimatedInputTokens:      100,
 			EstimatedOutputTokens:     50,
 			EstimatedCacheWriteTokens: 20,
 			PromptCacheReuseEstimate:  0.5,
 			Budget:                    0.25,
+			Interactive:               true,
+			Batch:                     true,
 		},
 		modelroute.Policy{},
 		nil,
@@ -911,6 +1184,9 @@ func TestRouteDecisionEvent_MetadataIncludesRequestProfileEvidence(t *testing.T)
 	assert.Equal(t, "20", event.Metadata["estimated_cache_write_tokens"])
 	assert.Equal(t, "0.5", event.Metadata["prompt_cache_reuse_estimate"])
 	assert.Equal(t, "0.250000", event.Metadata["budget"])
+	assert.Equal(t, "true", event.Metadata["interactive"])
+	assert.Equal(t, "true", event.Metadata["batch"])
+	assert.Equal(t, "0.000275", event.Metadata["estimated_cost"])
 }
 
 func TestRouteDecisionEvent_MetadataIncludesAvailabilityEvidence(t *testing.T) {
@@ -1127,6 +1403,11 @@ func TestRouteDecisionWithResponseAnnotatesActualFallback(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "actual", event.Metadata["phase"])
 	assert.Equal(t, "openai/fallback", event.Metadata["actual_selected"])
+	assert.Equal(t, "openai", event.Metadata["actual_provider"])
+	assert.Equal(t, "fallback", event.Metadata["actual_model"])
+	assert.Equal(t, "openai", event.Metadata["selected_provider"])
+	assert.Equal(t, "primary", event.Metadata["selected_model"])
+	assert.Equal(t, "1", event.Metadata["fallback_count"])
 	assert.Equal(t, "0.000200", event.Metadata["estimated_cost"])
 	assert.Equal(t, "0.000240", event.Metadata["actual_cost"])
 	assert.Equal(t, "0.000040", event.Metadata["actual_cost_delta"])

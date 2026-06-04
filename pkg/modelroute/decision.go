@@ -3,6 +3,7 @@ package modelroute
 import (
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -35,6 +36,8 @@ const (
 	ReasonContextOverflow = "context overflow"
 	// ReasonOverBudget means the estimated cost exceeds the effective route budget.
 	ReasonOverBudget = "over budget"
+	// ReasonCostUnknown means a budget was configured but no price metadata exists.
+	ReasonCostUnknown = "cost metadata unavailable"
 	// ReasonProviderUnavailable means the runtime registry cannot serve this provider.
 	ReasonProviderUnavailable = "provider unavailable"
 	// ReasonModelUnavailable means the runtime registry cannot resolve this model.
@@ -43,6 +46,10 @@ const (
 	ReasonModelUnverified = "model availability not verified"
 	// ReasonRateLimited means recent telemetry observed a provider rate limit.
 	ReasonRateLimited = "recent rate limit"
+	// ReasonLatencyExceeded means observed or expected end-to-end latency exceeded policy.
+	ReasonLatencyExceeded = "latency limit exceeded"
+	// ReasonTTFTExceeded means observed or expected time-to-first-token exceeded policy.
+	ReasonTTFTExceeded = "ttft limit exceeded"
 
 	// ConstraintCatalogMetadata records that candidates were resolved through a maintained catalog.
 	ConstraintCatalogMetadata = "catalog_metadata"
@@ -85,6 +92,10 @@ type Policy struct {
 	RequiredCapabilities []string `json:"required_capabilities,omitempty"`
 	// MaxBudget caps the effective request budget, even when the CLI/caller did not set one.
 	MaxBudget float64 `json:"max_budget,omitempty"`
+	// MaxLatencyMS rejects candidates with observed or expected end-to-end latency above this limit.
+	MaxLatencyMS int `json:"max_latency_ms,omitempty"`
+	// MaxTTFTMS rejects candidates with observed or expected time-to-first-token above this limit.
+	MaxTTFTMS int `json:"max_ttft_ms,omitempty"`
 	// RequireFreshMetadata rejects catalog-backed routes when the metadata snapshot is stale.
 	RequireFreshMetadata bool `json:"require_fresh_metadata,omitempty"`
 }
@@ -98,6 +109,7 @@ type Decision struct {
 	CatalogStale   bool                `json:"catalog_stale,omitempty"`
 	Warnings       []string            `json:"warnings,omitempty"`
 	Availability   *Availability       `json:"availability,omitempty"`
+	ModelRole      string              `json:"model_role,omitempty"`
 	Profile        RequestProfile      `json:"profile"`
 	Policy         Policy              `json:"policy,omitzero"`
 	Constraints    []string            `json:"constraints_applied,omitempty"`
@@ -163,10 +175,11 @@ func DecideAt(candidates []Candidate, profile RequestProfile, policy Policy, tel
 		now = time.Now().UTC()
 	}
 
+	policy = normalizePolicy(policy)
 	effectiveProfile := policy.applyBudget(profile)
 	decision := Decision{
 		Profile:     effectiveProfile,
-		Policy:      normalizePolicy(policy),
+		Policy:      policy,
 		Constraints: baseConstraints(effectiveProfile, policy),
 	}
 
@@ -752,9 +765,36 @@ func rejectionReasons(candidate Candidate, profile RequestProfile, policy Policy
 	}
 
 	reasons = append(reasons, contextRejectionReasons(candidate, profile)...)
+	reasons = append(reasons, latencyRejectionReasons(candidate, policy)...)
 
-	if !FitsBudget(candidate, profile) {
+	if profile.Budget > 0 && !HasCostEstimateForProfile(candidate, profile) {
+		reasons = append(reasons, ReasonCostUnknown)
+	} else if !FitsBudget(candidate, profile) {
 		reasons = append(reasons, fmt.Sprintf("%s: estimated cost %.6f > budget %.6f", ReasonOverBudget, EstimateCost(candidate, profile), profile.Budget))
+	}
+
+	return reasons
+}
+
+func latencyRejectionReasons(candidate Candidate, policy Policy) []string {
+	var reasons []string
+
+	if policy.MaxLatencyMS > 0 && candidate.ExpectedLatencyMS > policy.MaxLatencyMS {
+		reasons = append(reasons, fmt.Sprintf(
+			"%s: %dms > %dms",
+			ReasonLatencyExceeded,
+			candidate.ExpectedLatencyMS,
+			policy.MaxLatencyMS,
+		))
+	}
+
+	if policy.MaxTTFTMS > 0 && candidate.ExpectedTTFTMS > policy.MaxTTFTMS {
+		reasons = append(reasons, fmt.Sprintf(
+			"%s: %dms > %dms",
+			ReasonTTFTExceeded,
+			candidate.ExpectedTTFTMS,
+			policy.MaxTTFTMS,
+		))
 	}
 
 	return reasons
@@ -822,6 +862,14 @@ func baseConstraints(profile RequestProfile, policy Policy) []string {
 		constraints = append(constraints, ConstraintProviderPreference)
 	}
 
+	if policy.MaxLatencyMS > 0 {
+		constraints = appendUnique(constraints, ConstraintLatency)
+	}
+
+	if policy.MaxTTFTMS > 0 {
+		constraints = appendUnique(constraints, ConstraintTTFT)
+	}
+
 	return constraints
 }
 
@@ -847,6 +895,8 @@ func routePolicyHasConstraints(policy Policy) bool {
 		len(policy.BannedModels) > 0 ||
 		len(policy.RequiredCapabilities) > 0 ||
 		policy.MaxBudget > 0 ||
+		policy.MaxLatencyMS > 0 ||
+		policy.MaxTTFTMS > 0 ||
 		policy.RequireFreshMetadata
 }
 
@@ -877,6 +927,8 @@ func providerPreference(policy Policy, provider string) int {
 }
 
 func (p Policy) applyBudget(profile RequestProfile) RequestProfile {
+	profile = normalizeProfile(profile)
+
 	if p.MaxBudget <= 0 {
 		return profile
 	}
@@ -888,13 +940,55 @@ func (p Policy) applyBudget(profile RequestProfile) RequestProfile {
 	return profile
 }
 
+func normalizeProfile(profile RequestProfile) RequestProfile {
+	if profile.EstimatedInputTokens < 0 {
+		profile.EstimatedInputTokens = 0
+	}
+
+	if profile.EstimatedOutputTokens < 0 {
+		profile.EstimatedOutputTokens = 0
+	}
+
+	if profile.EstimatedCacheWriteTokens < 0 {
+		profile.EstimatedCacheWriteTokens = 0
+	}
+
+	if !finiteFloat(profile.Budget) || profile.Budget < 0 {
+		profile.Budget = 0
+	}
+
+	if !finiteFloat(profile.PromptCacheReuseEstimate) {
+		profile.PromptCacheReuseEstimate = 0
+	}
+
+	profile.PromptCacheReuseEstimate = clamp01(profile.PromptCacheReuseEstimate)
+
+	return profile
+}
+
 func normalizePolicy(policy Policy) Policy {
 	policy.PreferredProviders = normalizeStrings(policy.PreferredProviders)
 	policy.BannedProviders = normalizeStrings(policy.BannedProviders)
 	policy.BannedModels = normalizeStrings(policy.BannedModels)
 	policy.RequiredCapabilities = normalizeStrings(policy.RequiredCapabilities)
 
+	if !finiteFloat(policy.MaxBudget) || policy.MaxBudget < 0 {
+		policy.MaxBudget = 0
+	}
+
+	if policy.MaxLatencyMS < 0 {
+		policy.MaxLatencyMS = 0
+	}
+
+	if policy.MaxTTFTMS < 0 {
+		policy.MaxTTFTMS = 0
+	}
+
 	return policy
+}
+
+func finiteFloat(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func normalizeStrings(in []string) []string {

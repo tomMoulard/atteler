@@ -11,6 +11,8 @@ import (
 func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	t.Parallel()
 
+	const changedModel = "openai/changed"
+
 	temperature := 0.2
 	seed := 7
 	maxOutputBytes := int64(4096)
@@ -42,6 +44,16 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 			MaxWallTime:        &maxWallTime,
 			CheckpointInterval: &checkpointInterval,
 		},
+		Providers: map[string]ProviderConfig{
+			"compatible": {
+				BaseURL:             "https://user:" + "pass" + "@example.com/openai?api_key=secret-token",
+				ChatCompletionsPath: "/v1/chat/completions?api_key=secret-token",
+				EmbeddingsPath:      "/v1/embeddings?auth_token=secret-token",
+				ModelsPath:          "/v1/models?access_token=secret-token",
+				Models:              []string{"compatible/secret-model"},
+				Capabilities:        []string{"chat"},
+			},
+		},
 		Agents: map[string]AgentConfig{
 			"reviewer": {
 				Seed:             &seed,
@@ -53,6 +65,16 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 			},
 		},
 		ModelAliases: map[string]string{"fast": "openai/gpt-4.1-mini"},
+		ModelRoles: map[string]ModelRoleConfig{
+			"planner": {
+				FallbackModels:       []string{"openai/gpt-4.1-mini"},
+				RoutingPolicy:        RoutingPolicyConfig{RequiredCapabilities: []string{"tools"}},
+				PreferredProviders:   []string{"openai"},
+				BannedProviders:      []string{"anthropic"},
+				BannedModels:         []string{"openai/gpt-4.1-nano"},
+				RequiredCapabilities: []string{"json_schema"},
+			},
+		},
 		Hooks: map[string][]HookConfig{
 			"session_end": {{
 				Command: []string{"echo", "done"},
@@ -96,10 +118,20 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	*redacted.AgentLoop.MaxToolCalls = 55
 	*redacted.AgentLoop.MaxWallTime = "2m"
 	*redacted.AgentLoop.CheckpointInterval = 44
+	redactedProvider := redacted.Providers["compatible"]
+	redactedProvider.Models[0] = changedModel
+	redactedProvider.Capabilities[0] = "embeddings"
+	redacted.Providers["compatible"] = redactedProvider
 	*redacted.Agents["reviewer"].Seed = 42
 	redacted.Agents["reviewer"].RoutingPolicy.PreferredProviders[0] = "anthropic"
 	redacted.Agents["reviewer"].FallbackModels[0] = "fallback-b"
-	redacted.ModelAliases["fast"] = "openai/changed"
+	redacted.ModelAliases["fast"] = changedModel
+	redacted.ModelRoles["planner"].FallbackModels[0] = changedModel
+	redacted.ModelRoles["planner"].RoutingPolicy.RequiredCapabilities[0] = "vision"
+	redacted.ModelRoles["planner"].PreferredProviders[0] = "codex"
+	redacted.ModelRoles["planner"].BannedProviders[0] = "ollama"
+	redacted.ModelRoles["planner"].BannedModels[0] = changedModel
+	redacted.ModelRoles["planner"].RequiredCapabilities[0] = "tools"
 	redacted.Agents["reviewer"].ToolPermissions["read"] = false
 	redacted.Hooks["session_end"][0].Command[0] = "printf"
 	redacted.Hooks["session_end"][0].Env["SAFE"] = "changed"
@@ -130,10 +162,18 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.Equal(t, 5, *cfg.AgentLoop.MaxToolCalls)
 	assert.Equal(t, "1m", *cfg.AgentLoop.MaxWallTime)
 	assert.Equal(t, 2, *cfg.AgentLoop.CheckpointInterval)
+	assert.Equal(t, []string{"compatible/secret-model"}, cfg.Providers["compatible"].Models)
+	assert.Equal(t, []string{"chat"}, cfg.Providers["compatible"].Capabilities)
 	assert.Equal(t, 7, *cfg.Agents["reviewer"].Seed)
 	assert.Equal(t, []string{"openai"}, cfg.Agents["reviewer"].RoutingPolicy.PreferredProviders)
 	assert.Equal(t, []string{"fallback-a"}, cfg.Agents["reviewer"].FallbackModels)
 	assert.Equal(t, "openai/gpt-4.1-mini", cfg.ModelAliases["fast"])
+	assert.Equal(t, []string{"openai/gpt-4.1-mini"}, cfg.ModelRoles["planner"].FallbackModels)
+	assert.Equal(t, []string{"tools"}, cfg.ModelRoles["planner"].RoutingPolicy.RequiredCapabilities)
+	assert.Equal(t, []string{"openai"}, cfg.ModelRoles["planner"].PreferredProviders)
+	assert.Equal(t, []string{"anthropic"}, cfg.ModelRoles["planner"].BannedProviders)
+	assert.Equal(t, []string{"openai/gpt-4.1-nano"}, cfg.ModelRoles["planner"].BannedModels)
+	assert.Equal(t, []string{"json_schema"}, cfg.ModelRoles["planner"].RequiredCapabilities)
 	assert.True(t, cfg.Agents["reviewer"].ToolPermissions["read"])
 	assert.Equal(t, []string{"echo", "done"}, cfg.Hooks["session_end"][0].Command)
 	assert.Equal(t, "value", cfg.Hooks["session_end"][0].Env["SAFE"])
@@ -152,6 +192,14 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.True(t, *cfg.Vector.WorkspaceEnabled)
 	assert.Equal(t, []string{"*.go", "docs/api_key=secret-token/*.md"}, cfg.Vector.WorkspaceInclude)
 	assert.Equal(t, []string{"vendor/", "tmp/auth_token=secret-token/"}, cfg.Vector.WorkspaceExclude)
+	assert.NotContains(t, redacted.Providers["compatible"].BaseURL, "pass")
+	assert.NotContains(t, redacted.Providers["compatible"].BaseURL, "secret-token")
+	assert.NotContains(t, redacted.Providers["compatible"].ChatCompletionsPath, "secret-token")
+	assert.NotContains(t, redacted.Providers["compatible"].EmbeddingsPath, "secret-token")
+	assert.NotContains(t, redacted.Providers["compatible"].ModelsPath, "secret-token")
+	assert.Contains(t, redacted.Providers["compatible"].ChatCompletionsPath, "redacted")
+	assert.Contains(t, redacted.Providers["compatible"].EmbeddingsPath, "redacted")
+	assert.Contains(t, redacted.Providers["compatible"].ModelsPath, "redacted")
 	assert.NotContains(t, redacted.Vector.BaseURL, "pass")
 	assert.NotContains(t, redacted.Vector.Model, "secret-token")
 	assert.NotContains(t, redacted.Vector.WorkspaceInclude[1], "secret-token")

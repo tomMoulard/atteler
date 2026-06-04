@@ -125,6 +125,122 @@ func TestRegistry_AgentLoopCostEstimatorUsesFallbackPricingWhenPrimaryOmitted(t 
 	assert.Contains(t, err.Error(), "openai/gpt-4.1")
 }
 
+func TestRegistry_AgentLoopCostEstimatorExpandsModelRoleFallbackPricing(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.Register(&agentLoopCostProvider{name: "openai", models: []string{"gpt-4.1-mini", "gpt-4.1"}})
+	require.NoError(t, reg.SetModelRole("planner", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"openai/gpt-4.1"},
+	}))
+
+	estimator, err := reg.AgentLoopCostEstimator("planner", nil)
+	require.NoError(t, err)
+
+	costMicros, err := estimator(&Response{
+		Provider:     "openai",
+		Model:        "gpt-4.1",
+		InputTokens:  1,
+		OutputTokens: 1,
+	})
+	require.NoError(t, err)
+	assert.EqualValues(t, 10, costMicros)
+}
+
+func TestRegistry_AgentLoopCostEstimatorExpandsDefaultModelRole(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.Register(&agentLoopCostProvider{name: "openai", models: []string{"gpt-4.1-mini", "gpt-4.1"}})
+	require.NoError(t, reg.SetModelRole("planner", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"openai/gpt-4.1"},
+	}))
+	require.NoError(t, reg.SetDefaultModel("planner"))
+
+	estimator, err := reg.AgentLoopCostEstimator("", nil)
+	require.NoError(t, err)
+
+	costMicros, err := estimator(&Response{
+		Provider:     "openai",
+		Model:        "gpt-4.1",
+		InputTokens:  1,
+		OutputTokens: 1,
+	})
+	require.NoError(t, err)
+	assert.EqualValues(t, 10, costMicros)
+}
+
+func TestRegistry_AgentLoopCostEstimatorUsesSingleRolePricingWhenResponseOmitsModel(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.Register(&agentLoopCostProvider{name: "openai", models: []string{"gpt-4.1-mini"}})
+	require.NoError(t, reg.SetModelRole("planner", ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+	}))
+
+	estimator, err := reg.AgentLoopCostEstimator("planner", nil)
+	require.NoError(t, err)
+
+	costMicros, err := estimator(&Response{
+		InputTokens:  1,
+		OutputTokens: 1,
+	})
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, costMicros)
+}
+
+func TestRegistry_AgentLoopCostEstimatorHonorsModelRolePreferredProviders(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.Register(&agentLoopCostProvider{name: providerOpenAI, models: []string{"gpt-5.4"}})
+	reg.Register(&agentLoopCostProvider{name: providerCodex, models: []string{"gpt-5.4"}})
+	require.NoError(t, reg.SetModelRole("planner", ModelRole{
+		Preferred:          "gpt-5.4",
+		PreferredProviders: []string{providerOpenAI},
+	}))
+
+	estimator, err := reg.AgentLoopCostEstimator("planner", nil)
+	require.NoError(t, err)
+
+	costMicros, err := estimator(&Response{
+		Provider:     providerOpenAI,
+		Model:        "gpt-5.4",
+		InputTokens:  1,
+		OutputTokens: 1,
+	})
+	require.NoError(t, err)
+	assert.EqualValues(t, 18, costMicros)
+
+	_, err = estimator(&Response{
+		Provider:     providerCodex,
+		Model:        "gpt-5.4",
+		InputTokens:  1,
+		OutputTokens: 1,
+	})
+	require.ErrorIs(t, err, ErrAgentLoopCostPricingUnavailable)
+	assert.Contains(t, err.Error(), "codex/gpt-5.4")
+}
+
+func TestRegistry_AgentLoopCostEstimatorRequiresModelRoleFallbackPricing(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.Register(&agentLoopCostProvider{name: "openai", models: []string{"gpt-4.1-mini"}})
+	reg.Register(&agentLoopCostProvider{name: "ollama", models: []string{"llama3.2"}})
+	require.NoError(t, reg.SetModelRole("planner", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"ollama/llama3.2"},
+	}))
+
+	_, err := reg.AgentLoopCostEstimator("planner", nil)
+	require.ErrorIs(t, err, ErrAgentLoopCostPricingUnavailable)
+	assert.Contains(t, err.Error(), "ollama/llama3.2")
+}
+
 func TestRegistry_AgentLoopCostEstimatorAllowsSingleConfiguredModelWhenResponseOmitsModel(t *testing.T) {
 	t.Parallel()
 

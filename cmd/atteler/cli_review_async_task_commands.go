@@ -352,16 +352,32 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 		{Role: llm.RoleUser, Content: userPrompt},
 	}
 
-	requestModel, fallbackModels, _, err := requestModelAndFallbacks(
+	requestModel := rc.selectedModel
+
+	fallbackModels := append([]string(nil), rc.fallbackModels...)
+	if activeAgent.ok && !rc.modelLocked {
+		requestModel, fallbackModels = effectiveAgentModelSelection(rc.selectedModel, rc.fallbackModels, activeAgent)
+	}
+
+	budgetMessages := requestMessagesForBudget(requestModel, messages, activeAgent, generation, "", false)
+
+	requestModel, fallbackModels, routeDecision, err := requestModelRoutingAndFallbacks(
+		ctx,
+		rc.registry,
 		rc.selectedModel,
 		rc.modelLocked,
 		rc.fallbackModels,
 		activeAgent,
-		routeProfileForMessages(requestMessagesForBudget(rc.selectedModel, messages, activeAgent, generation, "", false), generation),
+		requestModel,
+		fallbackModels,
+		routeCompleteParamsForRequest(requestModel, budgetMessages, generation, activeAgent, false),
+		routeProfileForMessages(budgetMessages, generation),
 		routeTelemetryFromRegistry(rc.registry),
 		routeAvailabilityFromRegistryWithRefresh(ctx, rc.registry, effectiveRouteCandidateChain(rc.selectedModel, rc.fallbackModels, activeAgent, rc.modelLocked)),
 	)
 	if err != nil {
+		emitRouteDecisionWarning(ctx, rc.hookRunner, "", "", reviewer, requestModel, routeDecision)
+
 		return "", err
 	}
 
@@ -402,6 +418,7 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 	manifestEvent.Agent = reviewer
 	setExplicitContextManifestEventModel(&manifestEvent, params.Model)
 	emitHookWarning(ctx, rc.hookRunner, manifestEvent)
+	emitRouteDecisionWarning(ctx, rc.hookRunner, "", "", reviewer, params.Model, routeDecision)
 
 	if budgetErr := validateRequestBudgetWithFallbacks(rc.registry, params.Model, fallbackModels, params.Messages, rc.maxInputTokens); budgetErr != nil {
 		return "", fmt.Errorf("review LLM budget: %w", budgetErr)
@@ -418,6 +435,16 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 	if err != nil {
 		return "", fmt.Errorf("review LLM complete: %w", err)
 	}
+
+	emitRouteDecisionWarning(
+		ctx,
+		rc.hookRunner,
+		"",
+		"",
+		reviewer,
+		routeResponseModelID(resp.Provider, resp.Model),
+		routeDecisionWithResponse(routeDecision, resp, routeTelemetryFromRegistry(rc.registry)),
+	)
 
 	return resp.Content, nil
 }

@@ -53,6 +53,28 @@ type ToolDefinition struct {
 	Description string         `json:"description"`
 }
 
+const (
+	// ResponseFormatText leaves provider output unconstrained.
+	ResponseFormatText = "text"
+
+	// ResponseFormatJSONObject asks providers to return syntactically valid
+	// JSON without enforcing a particular schema.
+	ResponseFormatJSONObject = "json_object"
+
+	// ResponseFormatJSONSchema asks providers to constrain output to Schema.
+	ResponseFormatJSONSchema = "json_schema"
+)
+
+// ResponseFormat describes provider-agnostic structured-output constraints.
+// Providers that cannot safely honor the requested format reject it instead of
+// silently falling back to unconstrained text.
+type ResponseFormat struct {
+	Schema map[string]any `json:"schema,omitempty"`
+	Type   string         `json:"type,omitempty"`
+	Name   string         `json:"name,omitempty"`
+	Strict bool           `json:"strict,omitempty"`
+}
+
 // ToolCall is a tool invocation requested by the model.
 type ToolCall struct {
 	Input map[string]any `json:"input"`
@@ -80,6 +102,7 @@ type CompleteParams struct {
 	Temperature    *float64
 	TopP           *float64
 	Seed           *int
+	ResponseFormat *ResponseFormat
 	Model          string
 	ModelMode      string
 	ReasoningLevel string
@@ -201,6 +224,7 @@ type Registry struct {
 	catalogProvenance  map[string]map[string]ModelProvenance
 	modelOverrides     map[string]map[string]bool
 	providerRetries    map[string]retryConfig
+	modelRoles         map[string]ModelRole
 	providerModelsLive map[string]bool
 	fallback           string
 	defaultModel       string
@@ -225,6 +249,7 @@ func NewRegistry() *Registry {
 		catalogProvenance:  make(map[string]map[string]ModelProvenance),
 		modelOverrides:     make(map[string]map[string]bool),
 		providerRetries:    make(map[string]retryConfig),
+		modelRoles:         make(map[string]ModelRole),
 		providerModelsLive: make(map[string]bool),
 		retry:              defaultRetryConfig(),
 		routeTelemetry:     modelroute.NewTelemetry(),
@@ -364,6 +389,15 @@ func (r *Registry) SetDefaultModel(model string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if _, ok := r.modelRoles[model]; ok {
+		r.defaultModel = model
+		r.defaultConfigured = true
+		r.defaultProviderSet = false
+		r.defaultQualified = false
+
+		return nil
+	}
+
 	if providerName, providerModel, ok := splitProviderModel(model); ok {
 		if _, ok := r.providers[providerName]; ok {
 			if r.defaultProviderSet && !strings.EqualFold(providerName, r.fallback) {
@@ -500,14 +534,31 @@ func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Respon
 		return nil, err
 	}
 
+	if routedParams, routedFallbacks, routed, err := r.routeModelRoleRequest(params, nil); err != nil {
+		return nil, err
+	} else if routed {
+		params = routedParams
+		if len(routedFallbacks) > 0 {
+			return r.completeResolvedWithFallback(ctx, params, routedFallbacks)
+		}
+	}
+
+	return r.completeResolved(ctx, params)
+}
+
+func (r *Registry) completeResolved(ctx context.Context, params CompleteParams) (*Response, error) {
 	p, params, err := r.resolve(params)
 	if err != nil {
 		return nil, err
 	}
 
-	params, adjustments, err := prepareCompleteParamsForProvider(p.Name(), params)
+	params, adjustments, err := prepareRoutedCompleteParamsForProviderCapabilities(p.Name(), ProviderCapabilitiesFor(p), params)
 	if err != nil {
 		return nil, err
+	}
+
+	if validateErr := validateCompleteParamsAgainstDeclaredCapabilities(p, params); validateErr != nil {
+		return nil, validateErr
 	}
 
 	// Snapshot retry config under the lock so concurrent SetRetry calls are safe.
@@ -552,6 +603,37 @@ func (r *Registry) Complete(ctx context.Context, params CompleteParams) (*Respon
 	return resp, nil
 }
 
+func (r *Registry) completeResolvedWithFallback(
+	ctx context.Context,
+	params CompleteParams,
+	fallbackModels []string,
+) (*Response, error) {
+	models := modelFallbackChain(params.Model, fallbackModels)
+	if len(models) == 0 {
+		return r.completeResolved(ctx, params)
+	}
+
+	var failures []error
+
+	for _, model := range models {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("llm: fallback canceled: %w", err)
+		}
+
+		next := params
+		next.Model = model
+
+		resp, err := r.completeResolved(ctx, next)
+		if err == nil {
+			return resp, nil
+		}
+
+		failures = append(failures, fmt.Errorf("%s via %s: %w", model, r.modelResolutionLabel(model), err))
+	}
+
+	return nil, r.withReadinessContext(fmt.Errorf("llm: all fallback models failed: %w", joinFallbackFailures(failures)))
+}
+
 // CompleteWithFallback tries params.Model followed by fallbackModels until one
 // completion succeeds. If neither params.Model nor fallbackModels are set, it
 // behaves like Complete.
@@ -562,6 +644,13 @@ func (r *Registry) CompleteWithFallback(
 ) (*Response, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, err
+	}
+
+	if routedParams, routedFallbacks, routed, err := r.routeModelRoleRequest(params, fallbackModels); err != nil {
+		return nil, err
+	} else if routed {
+		params = routedParams
+		fallbackModels = routedFallbacks
 	}
 
 	models := modelFallbackChain(params.Model, fallbackModels)
@@ -823,6 +912,10 @@ func (r *Registry) explainModelResolutionLocked(model string) ModelResolutionDia
 		DefaultProviderConfigured: r.defaultConfigured,
 	}
 
+	if role, ok := r.modelRoles[model]; ok {
+		return r.explainModelRoleLocked(diagnostic, role)
+	}
+
 	providerName, providerModel, providerQualified := splitProviderModel(model)
 	if qualifiedDiagnostic, ok := r.explainProviderQualifiedModelLocked(
 		diagnostic,
@@ -892,6 +985,38 @@ func (r *Registry) explainModelResolutionLocked(model string) ModelResolutionDia
 	return diagnostic
 }
 
+func (r *Registry) explainModelRoleLocked(
+	diagnostic ModelResolutionDiagnostic,
+	role ModelRole,
+) ModelResolutionDiagnostic {
+	diagnostic.Reason = "model role selected the first resolvable preferred/fallback model"
+
+	for _, model := range r.expandedModelRoleChainLocked(diagnostic.RequestedModel, role, nil) {
+		if strings.TrimSpace(model) == "" || strings.TrimSpace(model) == diagnostic.RequestedModel {
+			continue
+		}
+
+		candidate := r.explainModelResolutionLocked(model)
+		if candidate.Error != nil {
+			diagnostic.Candidates = append(diagnostic.Candidates, candidate.Candidates...)
+
+			continue
+		}
+
+		diagnostic.ProviderName = candidate.ProviderName
+		diagnostic.ProviderModel = candidate.ProviderModel
+		diagnostic.Provenance = candidate.Provenance
+		diagnostic.Stale = candidate.Stale
+		diagnostic.Candidates = candidate.Candidates
+
+		return diagnostic
+	}
+
+	diagnostic.Error = fmt.Errorf("llm: model role %q has no resolvable candidates", diagnostic.RequestedModel)
+
+	return diagnostic
+}
+
 func (r *Registry) explainProviderQualifiedModelLocked(
 	diagnostic ModelResolutionDiagnostic,
 	providerName string,
@@ -952,6 +1077,7 @@ func modelResolutionRequestKind(providerQualified bool) string {
 	return "bare model"
 }
 
+//nolint:nestif // Keeps default-model diagnostic branches together for explain output.
 func (r *Registry) explainDefaultModelLocked() ModelResolutionDiagnostic {
 	diagnostic := ModelResolutionDiagnostic{
 		DefaultProvider:           r.fallback,
@@ -959,6 +1085,10 @@ func (r *Registry) explainDefaultModelLocked() ModelResolutionDiagnostic {
 	}
 
 	if r.defaultModel != "" {
+		if role, ok := r.modelRoles[r.defaultModel]; ok {
+			return r.explainDefaultModelRoleLocked(diagnostic, role)
+		}
+
 		p, ok := r.providers[r.fallback]
 		if !ok {
 			diagnostic.RequestedModel = r.defaultModel
@@ -1026,6 +1156,39 @@ func (r *Registry) explainDefaultModelLocked() ModelResolutionDiagnostic {
 			Stale:        diagnostic.Stale,
 		}}
 	}
+
+	return diagnostic
+}
+
+func (r *Registry) explainDefaultModelRoleLocked(
+	diagnostic ModelResolutionDiagnostic,
+	role ModelRole,
+) ModelResolutionDiagnostic {
+	diagnostic.RequestedModel = r.defaultModel
+	diagnostic.Reason = "empty request used configured model role"
+
+	for _, model := range r.expandedModelRoleChainLocked(r.defaultModel, role, nil) {
+		if strings.TrimSpace(model) == "" || strings.TrimSpace(model) == r.defaultModel {
+			continue
+		}
+
+		candidate := r.explainModelResolutionLocked(model)
+		if candidate.Error != nil {
+			diagnostic.Candidates = append(diagnostic.Candidates, candidate.Candidates...)
+
+			continue
+		}
+
+		diagnostic.ProviderName = candidate.ProviderName
+		diagnostic.ProviderModel = candidate.ProviderModel
+		diagnostic.Provenance = candidate.Provenance
+		diagnostic.Stale = candidate.Stale
+		diagnostic.Candidates = candidate.Candidates
+
+		return diagnostic
+	}
+
+	diagnostic.Error = fmt.Errorf("llm: model role %q has no resolvable candidates", r.defaultModel)
 
 	return diagnostic
 }

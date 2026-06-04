@@ -19,6 +19,11 @@ func TestTemplateYAML(t *testing.T) {
 	for _, want := range []string{
 		"default_provider:",
 		"model_aliases:",
+		"models:",
+		"planner:",
+		"fast_coder:",
+		"max_latency_ms: 2500",
+		"max_ttft_ms: 900",
 		"version:",
 		"generation:",
 		"agent_loop:",
@@ -75,6 +80,7 @@ func TestTemplateYAML(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ConfigSchemaVersion, cfg.Version)
 	assert.Equal(t, starterTemplateConfig(), cfg)
+	assert.NotContains(t, cfg.Providers["vllm"].Capabilities, "streaming")
 }
 
 func TestTemplateYAMLAgentLoopSchemaMatchesDiagnostics(t *testing.T) {

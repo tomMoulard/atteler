@@ -2,7 +2,10 @@
 // candidates against request cost, context, policy, and latency constraints.
 package modelroute
 
-import "sort"
+import (
+	"math"
+	"sort"
+)
 
 // Candidate describes a routable model and the metadata needed to estimate
 // whether it can serve a request.
@@ -134,10 +137,69 @@ func FitsContext(candidate Candidate, profile RequestProfile) bool {
 	return inputFits && outputFits
 }
 
+// HasCostEstimate reports whether candidate has enough pricing metadata to
+// prove it fits an explicit budget. Local candidates are treated as zero-cost
+// for routing because the provider is self-hosted.
+func HasCostEstimate(candidate Candidate) bool {
+	if containsFold(candidate.Capabilities, CapabilityLocal) {
+		return true
+	}
+
+	return candidate.InputTokenCost > 0 ||
+		candidate.CachedInputTokenCost > 0 ||
+		candidate.CacheWriteTokenCost > 0 ||
+		candidate.OutputTokenCost > 0
+}
+
+// HasCostEstimateForProfile reports whether candidate has enough per-token
+// pricing metadata for every estimated token class in profile. A budgeted route
+// should fail closed when remote model pricing is incomplete instead of treating
+// unknown prices as free.
+func HasCostEstimateForProfile(candidate Candidate, profile RequestProfile) bool {
+	if containsFold(candidate.Capabilities, CapabilityLocal) {
+		return true
+	}
+
+	if !HasCostEstimate(candidate) {
+		return false
+	}
+
+	inputTokens := float64(nonNegative(profile.EstimatedInputTokens))
+	cachedInputTokens := inputTokens * clamp01(profile.PromptCacheReuseEstimate)
+
+	cacheWriteTokens := float64(nonNegative(profile.EstimatedCacheWriteTokens))
+	if remaining := inputTokens - cachedInputTokens; cacheWriteTokens > remaining {
+		cacheWriteTokens = remaining
+	}
+
+	uncachedInputTokens := inputTokens - cachedInputTokens - cacheWriteTokens
+	if uncachedInputTokens < 0 {
+		uncachedInputTokens = 0
+	}
+
+	if uncachedInputTokens > 0 && candidate.InputTokenCost <= 0 {
+		return false
+	}
+
+	if cachedInputTokens > 0 && candidate.CachedInputTokenCost <= 0 {
+		return false
+	}
+
+	if cacheWriteTokens > 0 && candidate.CacheWriteTokenCost <= 0 && candidate.InputTokenCost <= 0 {
+		return false
+	}
+
+	if nonNegative(profile.EstimatedOutputTokens) > 0 && candidate.OutputTokenCost <= 0 {
+		return false
+	}
+
+	return true
+}
+
 // FitsBudget reports whether candidate is within the request budget. A zero or
 // negative budget means no budget limit is applied.
 func FitsBudget(candidate Candidate, profile RequestProfile) bool {
-	return profile.Budget <= 0 || EstimateCost(candidate, profile) <= profile.Budget
+	return profile.Budget <= 0 || (HasCostEstimateForProfile(candidate, profile) && EstimateCost(candidate, profile) <= profile.Budget)
 }
 
 // Filter returns candidates that fit both budget and input context constraints.
@@ -208,6 +270,10 @@ func nonNegative(value int) int {
 }
 
 func clamp01(value float64) float64 {
+	if math.IsNaN(value) {
+		return 0
+	}
+
 	if value < 0 {
 		return 0
 	}

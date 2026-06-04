@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"slices"
@@ -40,6 +41,8 @@ func providerHTTPClient(cfg ProviderConfig) *http.Client {
 }
 
 // ProviderInfo describes a built-in provider without requiring credentials.
+//
+//nolint:govet // Field order keeps provider capability metadata first for display callers.
 type ProviderInfo struct {
 	Capabilities ProviderCapabilities
 	Name         string
@@ -56,6 +59,7 @@ type AutoRegisterConfig struct {
 
 	Providers      map[string]ProviderConfig
 	ModelAliases   map[string]string
+	ModelRoles     map[string]ModelRole
 	FallbackModels []string
 	CommandLine    []string
 
@@ -97,11 +101,22 @@ func (c AutoRegisterConfig) logger() *slog.Logger {
 type ProviderConfig struct {
 	Retry                 RetryPolicyConfig
 	BaseURL               string
+	Type                  string
+	APIKeyEnv             string
+	APIKeyHeader          string
+	APIKeyScheme          string
+	ChatCompletionsPath   string
+	EmbeddingsPath        string
+	ModelsPath            string
+	APIVersion            string
 	OwnershipPath         string
 	SessionID             string
+	Models                []string
+	Capabilities          []string
 	CommandLine           []string
 	DisablePrivateAdapter bool
 	Disabled              bool
+	Local                 bool
 	AutoStart             bool
 	TimeoutSeconds        int
 
@@ -198,6 +213,7 @@ func mergeModelLists(lists ...[]string) []string {
 // Deprecated: use AutoRegisterWithConfigContext.
 func AutoRegisterWithConfig(cfg AutoRegisterConfig) *Registry {
 	r := NewRegistry()
+	applyModelRoles(r, cfg)
 	report := applyDefaultSelection(r, cfg)
 	r.mu.Lock()
 	r.readiness.Default = report
@@ -250,7 +266,7 @@ func AutoRegisterWithConfigContextReport(ctx context.Context, cfg AutoRegisterCo
 }
 
 func builtinProviderRegistrations(ctx context.Context, cfg AutoRegisterConfig) []providerRegistration {
-	return []providerRegistration{
+	registrations := []providerRegistration{
 		{
 			name:         providerAnthropic,
 			staticModels: (&AnthropicProvider{}).Models(),
@@ -290,6 +306,87 @@ func builtinProviderRegistrations(ctx context.Context, cfg AutoRegisterConfig) [
 			},
 		},
 	}
+
+	return append(registrations, openAICompatibleProviderRegistrations(ctx, cfg)...)
+}
+
+func openAICompatibleProviderRegistrations(ctx context.Context, cfg AutoRegisterConfig) []providerRegistration {
+	names := make([]string, 0, len(cfg.Providers))
+	for name := range cfg.Providers {
+		if isBuiltinProviderName(name) {
+			continue
+		}
+
+		if _, ok := openAICompatibleProviderConfig(cfg, name); !ok {
+			continue
+		}
+
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	registrations := make([]providerRegistration, 0, len(names))
+	for _, name := range names {
+		providerName := name
+		providerCfg, _ := openAICompatibleProviderConfig(cfg, providerName)
+		registrations = append(registrations, providerRegistration{
+			name:         providerName,
+			staticModels: cleanModelList(providerCfg.Models),
+			factory: func() (Provider, error) {
+				return NewOpenAICompatibleProviderWithConfigContext(ctx, providerName, providerCfg)
+			},
+		})
+	}
+
+	return registrations
+}
+
+func openAICompatibleProviderConfig(cfg AutoRegisterConfig, name string) (ProviderConfig, bool) {
+	providerCfg := providerConfig(cfg, name)
+	if isOpenAICompatibleProviderType(providerCfg.Type) {
+		return providerCfg, true
+	}
+
+	// Treat well-known OpenAI-compatible backend names such as "groq" and
+	// "vllm" as type aliases when a base URL is configured. This keeps custom
+	// endpoints first-class without forcing users to repeat
+	// `type: openai_compatible` for common provider names.
+	if strings.TrimSpace(providerCfg.Type) == "" &&
+		strings.TrimSpace(providerCfg.BaseURL) != "" &&
+		isOpenAICompatibleProviderType(name) {
+		providerCfg.Type = name
+
+		return providerCfg, true
+	}
+
+	return ProviderConfig{}, false
+}
+
+func isBuiltinProviderName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case providerAnthropic, providerOpenAI, providerOllama, providerClaudeCode, providerCodex:
+		return true
+	default:
+		return false
+	}
+}
+
+func isOpenAICompatibleProviderType(providerType string) bool {
+	switch normalizeOpenAIProviderType(providerType) {
+	case openAICompatibleType, azureOpenAIType:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsOpenAICompatibleProviderType reports whether providerType is accepted for
+// OpenAI-compatible endpoint auto-registration. It includes Azure/OpenAI path
+// aliases and hosted/self-hosted provider aliases that expose the OpenAI wire
+// shape.
+func IsOpenAICompatibleProviderType(providerType string) bool {
+	return isOpenAICompatibleProviderType(providerType)
 }
 
 func autoRegisterWithFactoriesContext(ctx context.Context, cfg AutoRegisterConfig, registrations []providerRegistration) *Registry {
@@ -300,6 +397,7 @@ func autoRegisterWithFactoriesContext(ctx context.Context, cfg AutoRegisterConfi
 	}
 
 	applyModelAliases(r, cfg)
+	applyModelRoles(r, cfg)
 	applyUserModelOverrides(r, cfg)
 
 	defaultReport := applyDefaultSelection(r, cfg)
@@ -578,6 +676,23 @@ func applyModelAliases(r *Registry, cfg AutoRegisterConfig) {
 	}
 }
 
+func applyModelRoles(r *Registry, cfg AutoRegisterConfig) {
+	logger := cfg.logger()
+
+	roles := make([]string, 0, len(cfg.ModelRoles))
+	for role := range cfg.ModelRoles {
+		roles = append(roles, role)
+	}
+
+	sort.Strings(roles)
+
+	for _, role := range roles {
+		if err := r.SetModelRole(role, cfg.ModelRoles[role]); err != nil {
+			logger.Warn("llm model role ignored", "role", role, "error", err)
+		}
+	}
+}
+
 func applyUserModelOverrides(r *Registry, cfg AutoRegisterConfig) {
 	logger := cfg.logger()
 
@@ -666,6 +781,9 @@ func providerConfig(cfg AutoRegisterConfig, name string) ProviderConfig {
 		provider.CommandLine = append([]string(nil), cfg.CommandLine...)
 	}
 
+	provider.Models = append([]string(nil), provider.Models...)
+	provider.Capabilities = append([]string(nil), provider.Capabilities...)
+
 	return provider
 }
 
@@ -685,6 +803,10 @@ func providerRequested(cfg AutoRegisterConfig, name string) bool {
 	}
 
 	if providerRequestedByModelAlias(cfg, name) {
+		return true
+	}
+
+	if providerRequestedByModelRole(cfg, name) {
 		return true
 	}
 
@@ -735,6 +857,178 @@ func providerRequestedByModelAlias(cfg AutoRegisterConfig, name string) bool {
 	}
 
 	return false
+}
+
+func providerRequestedByModelRole(cfg AutoRegisterConfig, name string) bool {
+	for roleName := range cfg.ModelRoles {
+		role := cfg.ModelRoles[roleName]
+		if strings.TrimSpace(roleName) == "" {
+			continue
+		}
+
+		if !modelRoleSelectedByConfig(cfg, roleName) {
+			continue
+		}
+
+		if modelRoleReferencesProvider(cfg.ModelRoles, roleName, role, name, nil) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func modelRoleSelectedByConfig(cfg AutoRegisterConfig, roleName string) bool {
+	roleName = strings.TrimSpace(roleName)
+	if roleName == "" {
+		return false
+	}
+
+	return strings.TrimSpace(cfg.DefaultModel) == roleName ||
+		strings.TrimSpace(cfg.SelectedModel) == roleName ||
+		slices.ContainsFunc(cfg.FallbackModels, func(model string) bool {
+			return strings.TrimSpace(model) == roleName
+		})
+}
+
+func modelRoleReferencesProvider(
+	roles map[string]ModelRole,
+	roleName string,
+	role ModelRole,
+	providerName string,
+	visited map[string]bool,
+) bool {
+	return modelRoleReferencesProviderWithPolicy(
+		roles,
+		roleName,
+		role,
+		providerName,
+		visited,
+		modelroute.Policy{},
+	)
+}
+
+func modelRoleReferencesProviderWithPolicy(
+	roles map[string]ModelRole,
+	roleName string,
+	role ModelRole,
+	providerName string,
+	visited map[string]bool,
+	inheritedPolicy modelroute.Policy,
+) bool {
+	policy := mergeModelRoleRoutingPolicy(inheritedPolicy, role.policy())
+	if routePolicyBansProvider(policy, providerName) {
+		return false
+	}
+
+	roleName = strings.TrimSpace(roleName)
+	if roleName != "" {
+		if visited[roleName] {
+			return false
+		}
+
+		nextVisited := make(map[string]bool, len(visited)+1)
+		maps.Copy(nextVisited, visited)
+		nextVisited[roleName] = true
+		visited = nextVisited
+	}
+
+	if routePolicyPrefersProvider(policy, providerName) {
+		return true
+	}
+
+	for _, model := range modelFallbackChain(role.Preferred, role.FallbackModels) {
+		nestedRole, ok := roles[strings.TrimSpace(model)]
+		if ok {
+			if modelRoleReferencesProviderWithPolicy(roles, model, nestedRole, providerName, visited, policy) {
+				return true
+			}
+
+			continue
+		}
+
+		if routePolicyBansModelForProvider(policy, model, providerName) {
+			continue
+		}
+
+		if modelNamesProvider(model, providerName) || catalogModelNamesProvider(model, providerName) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func routePolicyPrefersProvider(policy modelroute.Policy, providerName string) bool {
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		return false
+	}
+
+	return slices.ContainsFunc(policy.PreferredProviders, func(candidate string) bool {
+		return strings.EqualFold(strings.TrimSpace(candidate), providerName)
+	})
+}
+
+func routePolicyBansProvider(policy modelroute.Policy, providerName string) bool {
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		return false
+	}
+
+	return slices.ContainsFunc(policy.BannedProviders, func(candidate string) bool {
+		return strings.EqualFold(strings.TrimSpace(candidate), providerName)
+	})
+}
+
+func routePolicyBansModelForProvider(policy modelroute.Policy, model, providerName string) bool {
+	ids := routePolicyModelIDsForProvider(model, providerName)
+	if len(ids) == 0 {
+		return false
+	}
+
+	return slices.ContainsFunc(policy.BannedModels, func(candidate string) bool {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+
+		return candidate != "" && slices.Contains(ids, candidate)
+	})
+}
+
+func routePolicyModelIDsForProvider(model, providerName string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+
+	if provider, providerModel, ok := splitProviderModel(model); ok {
+		return uniqueRoleStrings([]string{
+			model,
+			providerModel,
+			provider + "/" + providerModel,
+		})
+	}
+
+	providerName = strings.TrimSpace(providerName)
+
+	return uniqueRoleStrings([]string{
+		model,
+		providerName + "/" + model,
+	})
+}
+
+func catalogModelNamesProvider(model, providerName string) bool {
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		return false
+	}
+
+	if provider, _, ok := splitProviderModel(model); ok {
+		return strings.EqualFold(provider, providerName)
+	}
+
+	_, ok := modelroute.BuiltinCatalog().Lookup(providerName, model)
+
+	return ok
 }
 
 func providerRequestedByLegacyModelPrefix(cfg AutoRegisterConfig, prefixes ...string) bool {
@@ -893,9 +1187,29 @@ func shouldAutoStartOllama(cfg AutoRegisterConfig) bool {
 		slices.ContainsFunc(cfg.FallbackModels, func(model string) bool {
 			return modelNamesProvider(model, providerOllama)
 		}) ||
+		modelRolesReferenceOllama(cfg) ||
 		isKnownOllamaModelName(cfg.DefaultModel) ||
 		isKnownOllamaModelName(cfg.SelectedModel) ||
 		slices.ContainsFunc(cfg.FallbackModels, isKnownOllamaModelName)
+}
+
+func modelRolesReferenceOllama(cfg AutoRegisterConfig) bool {
+	for roleName := range cfg.ModelRoles {
+		role := cfg.ModelRoles[roleName]
+		if strings.TrimSpace(roleName) == "" {
+			continue
+		}
+
+		if !modelRoleSelectedByConfig(cfg, roleName) {
+			continue
+		}
+
+		if modelRoleReferencesProvider(cfg.ModelRoles, roleName, role, providerOllama, nil) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func modelNamesProvider(model, provider string) bool {

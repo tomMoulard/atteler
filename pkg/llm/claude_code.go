@@ -364,6 +364,7 @@ func claudeCodeModelCatalog() []ModelMetadata {
 		claudeCodeAliasCatalogEntry("opus"),
 		claudeCodeAliasCatalogEntry("sonnet"),
 		claudeCodeAliasCatalogEntry("haiku"),
+		claudeCodeAliasCatalogEntry("claude-haiku-4-5"),
 	})
 }
 

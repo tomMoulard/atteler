@@ -224,6 +224,19 @@ func isRetryableStatus(code int) bool {
 	}
 }
 
+func retryableHTTPStatusError(err error, statusCode int, retryAfter string) error {
+	if err == nil || !isRetryableStatus(statusCode) {
+		return err
+	}
+
+	return &ProviderError{
+		StatusCode:   statusCode,
+		RetryAfter:   parseRetryAfter(retryAfter),
+		Message:      err.Error(),
+		Retryability: RetryabilityRetryable,
+	}
+}
+
 type retryMetadata struct {
 	provider string
 	model    string
@@ -256,8 +269,28 @@ func completeWithRetry(
 	meta retryMetadata,
 	fn func(context.Context) (*Response, error),
 ) (*Response, error) {
+	return withRetry(ctx, cfg, meta, fn)
+}
+
+func embeddingWithRetry(
+	ctx context.Context,
+	cfg retryConfig,
+	meta retryMetadata,
+	fn func(context.Context) (*EmbeddingResponse, error),
+) (*EmbeddingResponse, error) {
+	return withRetry(ctx, cfg, meta, fn)
+}
+
+func withRetry[T any](
+	ctx context.Context,
+	cfg retryConfig,
+	meta retryMetadata,
+	fn func(context.Context) (T, error),
+) (T, error) {
+	var zero T
+
 	if err := requireCredentialContext(ctx); err != nil {
-		return nil, err
+		return zero, err
 	}
 
 	cfg = cfg.normalized()
@@ -274,7 +307,7 @@ func completeWithRetry(
 		outcome := retryOutcomeCanceled
 		emitRetryFinal(ctx, meta, decision, 1, cfg.MaxAttempts, start, cfg, outcome)
 
-		return nil, newRetryError(meta, retryCanceledError(err, ctxErr), decision, 1, start, cfg, outcome)
+		return zero, newRetryError(meta, retryCanceledError(err, ctxErr), decision, 1, start, cfg, outcome)
 	}
 
 	if !decision.retryable {
@@ -292,7 +325,7 @@ func completeWithRetry(
 			outcome := retryOutcomeCanceled
 			emitRetryFinal(ctx, meta, decision, attempts, cfg.MaxAttempts, start, cfg, outcome)
 
-			return nil, newRetryError(meta, retryCanceledError(lastErr, ctxErr), decision, attempts, start, cfg, outcome)
+			return zero, newRetryError(meta, retryCanceledError(lastErr, ctxErr), decision, attempts, start, cfg, outcome)
 		}
 
 		delay := retryDelay(cfg, retryIndex, decision.retryAfter)
@@ -301,7 +334,7 @@ func completeWithRetry(
 
 			emitRetryBudgetExhausted(ctx, meta, decision, attempts, cfg.MaxAttempts, start, cfg, delay)
 
-			return nil, newRetryError(meta, lastErr, decision, attempts, start, cfg, outcome)
+			return zero, newRetryError(meta, lastErr, decision, attempts, start, cfg, outcome)
 		}
 
 		emitRetryScheduled(ctx, meta, decision, attempts+1, cfg.MaxAttempts, delay)
@@ -310,7 +343,7 @@ func completeWithRetry(
 			outcome := retryOutcomeCanceled
 			emitRetryFinal(ctx, meta, decision, attempts, cfg.MaxAttempts, start, cfg, outcome)
 
-			return nil, newRetryError(meta, retryCanceledError(lastErr, sleepErr), decision, attempts, start, cfg, outcome)
+			return zero, newRetryError(meta, retryCanceledError(lastErr, sleepErr), decision, attempts, start, cfg, outcome)
 		}
 
 		resp, err = fn(ctx)
@@ -329,7 +362,7 @@ func completeWithRetry(
 			decision = retryDecisionWithFallback(attemptDecision, decision)
 			emitRetryFinal(ctx, meta, decision, attempts, cfg.MaxAttempts, start, cfg, outcome)
 
-			return nil, newRetryError(meta, retryAttemptCanceledError(lastErr, err, ctxErr), decision, attempts, start, cfg, outcome)
+			return zero, newRetryError(meta, retryAttemptCanceledError(lastErr, err, ctxErr), decision, attempts, start, cfg, outcome)
 		}
 
 		lastErr = err
@@ -346,7 +379,7 @@ func completeWithRetry(
 	outcome := retryOutcomeExhausted
 	emitRetryFinal(ctx, meta, decision, attempts, cfg.MaxAttempts, start, cfg, outcome)
 
-	return nil, newRetryError(meta, lastErr, decision, attempts, start, cfg, outcome)
+	return zero, newRetryError(meta, lastErr, decision, attempts, start, cfg, outcome)
 }
 
 func retryDecisionWithFallback(primary, fallback retryDecision) retryDecision {

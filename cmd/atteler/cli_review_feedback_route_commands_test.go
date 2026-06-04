@@ -369,6 +369,46 @@ func TestReviewCompleterIncludesAgentReferencesInPromptAndManifest(t *testing.T)
 	assert.Contains(t, log, "rubric.md")
 }
 
+func TestReviewCompleterEmitsRouteDecisionForModelRole(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{
+		providerName: "openai",
+		model:        "gpt-4.1-mini",
+		response:     "review ok",
+	}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+	}))
+
+	var eventLog bytes.Buffer
+
+	completer := reviewCompleter{
+		registry:       registry,
+		agents:         agent.NewRegistry(nil),
+		hookRunner:     events.NewRunnerWithLogger(nil, &eventLog),
+		selectedModel:  "planner",
+		maxInputTokens: 10_000,
+	}
+
+	got, err := completer.Complete(t.Context(), "quality-reviewer", "system", "review this")
+
+	require.NoError(t, err)
+	assert.Equal(t, "review ok", got)
+
+	log := eventLog.String()
+	assert.Contains(t, log, "event:route_decision")
+	assert.Contains(t, log, "agent=quality-reviewer")
+	assert.Contains(t, log, "model_role=planner")
+	assert.Contains(t, log, "phase=estimated")
+	assert.Contains(t, log, "phase=actual")
+	assert.Contains(t, log, "selected=openai/gpt-4.1-mini")
+	assert.Contains(t, log, "fallback_order=openai/gpt-4.1-mini")
+	assert.Contains(t, log, "actual_selected=openai/gpt-4.1-mini")
+}
+
 func TestRegistryCompleterEmitsContextManifestBeforeBudgetFailure(t *testing.T) {
 	t.Parallel()
 
@@ -470,7 +510,7 @@ func TestFormatReviewRunResult(t *testing.T) {
 func TestParseAndFormatRouteCandidate(t *testing.T) {
 	t.Parallel()
 
-	candidate, err := parseRouteCandidate("openai/gpt-mini,input=0.001,output=0.002,priority=2,max=1000,max_output=200,latency=500,ttft=100")
+	candidate, err := parseRouteCandidate("openai/gpt-mini,input=0.001,output=0.002,priority=2,max=1000,max_output=200,latency=500,ttft=100,capabilities=chat|tools|chat")
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -478,6 +518,8 @@ func TestParseAndFormatRouteCandidate(t *testing.T) {
 	if candidate.Provider != "openai" || candidate.Name != "gpt-mini" {
 		require.Failf(t, "unexpected route candidate id", "candidate = %+v", candidate)
 	}
+
+	assert.Equal(t, []string{modelroute.CapabilityChat, modelroute.CapabilityTools}, candidate.Capabilities)
 
 	got := formatRouteCandidate(candidate, modelroute.RequestProfile{
 		EstimatedInputTokens:  100,
@@ -491,6 +533,7 @@ func TestParseAndFormatRouteCandidate(t *testing.T) {
 		"max_output=200",
 		"latency_ms=500",
 		"ttft_ms=100",
+		"capabilities=chat,tools",
 	} {
 		if !strings.Contains(got, want) {
 			require.Failf(t, "formatted route candidate missing content", "missing %q in %q", want, got)
@@ -579,6 +622,116 @@ func TestParseRouteCandidateAllowsExplicitManualMetadata(t *testing.T) {
 	assert.Equal(t, 1000, candidate.MaxInputTokens)
 }
 
+func TestParseRouteCandidateRejectsUnknownManualCapability(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseRouteCandidate("openai/not-real,input=0.001,capabilities=chat|teleport")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown capability "teleport"`)
+	assert.Contains(t, err.Error(), "valid: text,chat,tools")
+}
+
+func TestParseRouteCandidateRejectsNegativeManualMetadata(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		candidate string
+		wantError string
+	}{
+		{
+			name:      "input cost",
+			candidate: "openai/not-real,input=-0.001,output=0.002,max=1000",
+			wantError: "route candidate input cost must be >= 0",
+		},
+		{
+			name:      "output cost",
+			candidate: "openai/not-real,input=0.001,output=-0.002,max=1000",
+			wantError: "route candidate output cost must be >= 0",
+		},
+		{
+			name:      "cached cost",
+			candidate: "openai/not-real,input=0.001,output=0.002,cached=-0.001,max=1000",
+			wantError: "route candidate cached input cost must be >= 0",
+		},
+		{
+			name:      "cache write cost",
+			candidate: "openai/not-real,input=0.001,output=0.002,cache_write=-0.001,max=1000",
+			wantError: "route candidate cache write cost must be >= 0",
+		},
+		{
+			name:      "max input",
+			candidate: "openai/not-real,input=0.001,output=0.002,max=-1000",
+			wantError: "route candidate max input must be >= 0",
+		},
+		{
+			name:      "max output",
+			candidate: "openai/not-real,input=0.001,output=0.002,max=1000,max_output=-10",
+			wantError: "route candidate max output must be >= 0",
+		},
+		{
+			name:      "latency",
+			candidate: "openai/not-real,input=0.001,output=0.002,max=1000,latency=-10",
+			wantError: "route candidate latency must be >= 0",
+		},
+		{
+			name:      "ttft",
+			candidate: "openai/not-real,input=0.001,output=0.002,max=1000,ttft=-10",
+			wantError: "route candidate ttft must be >= 0",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := parseRouteCandidate(tc.candidate)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantError)
+		})
+	}
+}
+
+func TestParseRouteCandidateRejectsNonFiniteManualCosts(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		candidate string
+		wantError string
+	}{
+		{
+			name:      "nan input",
+			candidate: "openai/not-real,input=NaN,output=0.002,max=1000",
+			wantError: "route candidate input cost must be finite",
+		},
+		{
+			name:      "infinite output",
+			candidate: "openai/not-real,input=0.001,output=+Inf,max=1000",
+			wantError: "route candidate output cost must be finite",
+		},
+		{
+			name:      "infinite cached",
+			candidate: "openai/not-real,input=0.001,output=0.002,cached=Inf,max=1000",
+			wantError: "route candidate cached input cost must be finite",
+		},
+		{
+			name:      "infinite cache write",
+			candidate: "openai/not-real,input=0.001,output=0.002,cache_write=Inf,max=1000",
+			wantError: "route candidate cache write cost must be finite",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := parseRouteCandidate(tc.candidate)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantError)
+		})
+	}
+}
+
 func TestFormatRouteDecisionIncludesRejectedCandidates(t *testing.T) {
 	t.Parallel()
 
@@ -665,6 +818,26 @@ func TestFormatRouteDecisionIncludesLatencyEvidence(t *testing.T) {
 	assert.Contains(t, got, "observed_ttft_ms=10")
 }
 
+func TestFormatRouteDecisionIncludesProfileModeEvidence(t *testing.T) {
+	t.Parallel()
+
+	decision := modelroute.Decide(
+		[]modelroute.Candidate{{
+			Name:           "batch-friendly",
+			Provider:       "openai",
+			InputTokenCost: 0.000001,
+		}},
+		modelroute.RequestProfile{EstimatedInputTokens: 100, Interactive: true, Batch: true},
+		modelroute.Policy{},
+		nil,
+	)
+
+	got := formatRouteDecision(decision)
+
+	assert.Contains(t, got, "interactive=true")
+	assert.Contains(t, got, "batch=true")
+}
+
 func TestFormatRouteDecisionIncludesActualCostDelta(t *testing.T) {
 	t.Parallel()
 
@@ -685,6 +858,47 @@ func TestFormatRouteDecisionIncludesActualCostDelta(t *testing.T) {
 	assert.Contains(t, got, "actual_cost_delta=0.000040")
 	assert.Contains(t, got, "actual_input_tokens=100")
 	assert.Contains(t, got, "actual_output_tokens=10")
+}
+
+func TestFormatRouteDecisionIncludesCapabilityMetadata(t *testing.T) {
+	t.Parallel()
+
+	decision := modelroute.Decide(
+		[]modelroute.Candidate{{
+			Name:           "gpt-test",
+			Provider:       "openai",
+			InputTokenCost: 0.000001,
+			Capabilities:   []string{modelroute.CapabilityChat, modelroute.CapabilityTools},
+		}},
+		modelroute.RequestProfile{EstimatedInputTokens: 100},
+		modelroute.Policy{},
+		nil,
+	)
+
+	got := formatRouteDecision(decision)
+
+	assert.Contains(t, got, "capabilities=chat,tools")
+}
+
+func TestFormatRouteDecisionIncludesRequiredCapabilities(t *testing.T) {
+	t.Parallel()
+
+	decision := modelroute.Decide(
+		[]modelroute.Candidate{{
+			Name:           "gpt-test",
+			Provider:       "openai",
+			InputTokenCost: 0.000001,
+			Capabilities:   []string{modelroute.CapabilityChat, modelroute.CapabilityTools},
+		}},
+		modelroute.RequestProfile{EstimatedInputTokens: 100},
+		modelroute.Policy{RequiredCapabilities: []string{modelroute.CapabilityTools}},
+		nil,
+	)
+
+	got := formatRouteDecision(decision)
+
+	assert.Contains(t, got, "required_capabilities=tools")
+	assert.Contains(t, got, "constraints=context_window,estimated_cost,routing_policy,required_capabilities")
 }
 
 func TestApplyRouteSelectionChoosesBudgetedFallbackChain(t *testing.T) {
@@ -709,6 +923,44 @@ func TestApplyRouteSelectionChoosesBudgetedFallbackChain(t *testing.T) {
 	assert.Equal(t, []string{"openai/backup"}, state.fallbackModels)
 	assert.True(t, state.modelLocked)
 	assert.Equal(t, "openai/fast", state.sessionState.DefaultModel)
+}
+
+func TestApplyRouteSelectionRespectsRequiredCapability(t *testing.T) {
+	t.Parallel()
+
+	input := routeModelsCommandInputFromOptions(cliOptions{
+		routeCandidates: rawStringListFlag{
+			"openai/chatty,input=0.001,output=0.001,max=1000,capabilities=chat",
+			"openai/tooly,input=0.002,output=0.002,max=1000,capabilities=chat|tools",
+		},
+		routeInputTokens:          positiveIntFlag{value: 100, set: true},
+		routeRequiredCapabilities: stringListFlag{modelroute.CapabilityTools},
+	})
+	state := selectionState{sessionState: session.New("", nil)}
+
+	err := applyRouteSelection(input, &state)
+
+	require.NoError(t, err)
+	assert.Equal(t, "openai/tooly", state.selectedModel)
+	assert.Empty(t, state.fallbackModels)
+	assert.True(t, state.modelLocked)
+}
+
+func TestApplyRouteSelectionRejectsUnknownRequiredCapability(t *testing.T) {
+	t.Parallel()
+
+	input := routeModelsCommandInputFromOptions(cliOptions{
+		routeCandidates:           rawStringListFlag{"openai/chatty,input=0.001,output=0.001,max=1000,capabilities=chat"},
+		routeInputTokens:          positiveIntFlag{value: 100, set: true},
+		routeRequiredCapabilities: stringListFlag{"teleport"},
+	})
+	state := selectionState{sessionState: session.New("", nil)}
+
+	err := applyRouteSelection(input, &state)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown capability "teleport"`)
+	assert.Contains(t, err.Error(), "valid: text,chat,tools")
 }
 
 func TestApplyRouteSelectionErrorsWhenBudgetFiltersAllCandidates(t *testing.T) {
@@ -748,7 +1000,11 @@ func TestRouteModelsCommandInputFromOptions(t *testing.T) {
 		routeCacheWriteTokens: positiveIntFlag{value: 20, set: true},
 		routeBudget:           floatFlag{value: 0.25, set: true},
 		routeCacheReuse:       floatFlag{value: 0.75, set: true},
-		routeInteractive:      true,
+		routeRequiredCapabilities: stringListFlag{
+			modelroute.CapabilityTools,
+			modelroute.CapabilityJSONSchema,
+		},
+		routeInteractive: true,
 	})
 
 	assert.Equal(t, []string{"openai/fast,input=0.001,output=0.002,max=1000"}, got.Candidates)
@@ -760,6 +1016,10 @@ func TestRouteModelsCommandInputFromOptions(t *testing.T) {
 		Interactive:               true,
 		PromptCacheReuseEstimate:  0.75,
 	}, got.Profile)
+	assert.Equal(t, []string{
+		modelroute.CapabilityTools,
+		modelroute.CapabilityJSONSchema,
+	}, got.Policy.RequiredCapabilities)
 }
 
 func TestRouteModelsCacheWriteTokensAffectEstimatedCost(t *testing.T) {

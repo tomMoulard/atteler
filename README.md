@@ -175,6 +175,19 @@ default_model: gpt-4.1-mini
 fallback_models: ["gpt-4.1", "gpt-4.1-nano"]
 model_aliases:
   mini: openai/gpt-4.1-mini
+  fast: openai/gpt-4.1-mini
+models:
+  planner:
+    preferred: openai/gpt-4.1
+    fallback: openai/gpt-4.1-mini
+    required_capabilities: ["tools", "json_schema"]
+    max_cost_usd: 0.25
+    max_latency_ms: 2500
+    max_ttft_ms: 900
+  fast_coder:
+    preferred: openai/gpt-4.1-mini
+    fallback_models: ["ollama/llama3.2"]
+    prefer_local: true
 
 generation:
   temperature: 0
@@ -245,6 +258,24 @@ providers:
     base_url: http://127.0.0.1:11434
     # Opt in before Atteler starts a local long-lived "ollama serve" daemon.
     auto_start: false
+  vllm:
+    type: openai_compatible
+    base_url: http://127.0.0.1:8000
+    local: true
+    models: ["qwen2.5-coder"]
+    capabilities: ["chat", "tools", "json_schema", "local"]
+  groq:
+    type: openai_compatible
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    models: ["llama-3.3-70b-versatile"]
+    capabilities: ["chat", "tools", "json_schema"]
+  azure:
+    type: azure_openai
+    base_url: https://example-resource.openai.azure.com
+    api_key_env: AZURE_OPENAI_API_KEY
+    api_version: 2025-01-01-preview
+    models: ["deployment-name"]
 
 agents:
   reviewer:
@@ -258,6 +289,8 @@ agents:
       banned_providers: ["ollama"]
       required_capabilities: ["tools"]
       max_budget: 0.25
+      max_latency_ms: 2000
+      max_ttft_ms: 800
     reasoning_level: high
     triggers: ["review this", "code review"]
     system_prompt: >
@@ -271,16 +304,54 @@ For OpenAI-family providers, `model_mode: fast` maps to the current
 `service_tier=priority` API field; imported Codex configs with
 `service_tier = "priority"` are normalized to this same model mode.
 
-Bare model names resolve only by exact provider catalog claim or explicit
-`model_aliases` entry. If more than one provider claims the same bare name,
-Atteler reports the collision unless a configured default provider/model makes
-the provider choice deterministic. Legacy `gpt*`/`claude*` prefixes are kept
-only as readiness-discovery hints, not as completion-routing rules.
+Bare model names resolve only by exact provider catalog claim, explicit
+`model_aliases` entry, or configured `models.<role>` entry. Role entries such as
+`planner` and `fast_coder` keep task intent separate from concrete models:
+Atteler evaluates the preferred model plus fallbacks against required
+capabilities, budget, local preference, provider availability, telemetry, and
+rate-limit evidence before sending the request. If more than one provider claims
+the same bare name, Atteler reports the collision unless a configured default
+provider/model or role routing policy (for example preferred/banned providers)
+makes the provider choice deterministic. Legacy `gpt*`/`claude*`
+prefixes are kept only as readiness-discovery hints, not as completion-routing
+rules. When constraints force an ambiguous bare model to be evaluated across
+providers, the configured default provider remains the tie-breaker unless it is
+rejected by a hard constraint such as budget, capability, availability, or
+latency.
+
+Custom providers with `type: openai_compatible` use the same chat-completions
+wire contract as OpenAI while keeping their own provider name for routing, model
+selection, and run metadata. Set `api_key_env` for hosted endpoints; omit it for
+local/self-hosted endpoints that do not require Authorization. `type:
+azure_openai` uses Azure's deployment path shape with `api-key` auth and
+`api_version`; advanced compatible endpoints can override `api_key_header`,
+`api_key_scheme`, `chat_completions_path`, `embeddings_path`, and `models_path`. Set
+`local: true` for self-hosted compatible endpoints when `prefer_local` roles
+should prefer them; loopback URLs such as `127.0.0.1` are inferred as local.
+Provider `type` aliases such as `groq`, `mistral`, `cohere`, `gemini`,
+`google_gemini`, `google_ai_studio`, `vertex_ai`, `bedrock`, `aws_bedrock`,
+`vllm`, `tgi`, `self_hosted`, `litellm`, and `openrouter` are accepted as
+OpenAI-compatible endpoints when the configured `base_url` serves that wire
+shape. When the provider name itself is one of those aliases and `base_url` is
+set, the `type` field can be omitted.
+Use `capabilities` on compatible endpoints to narrow route metadata and safely
+reject unsupported knobs (for example tools or JSON/schema output) instead of
+assuming every OpenAI-compatible backend supports the full OpenAI feature set.
+Accepted route capability names are `text`, `chat`, `tools`, `reasoning`,
+`json_schema`, `embeddings`, `vision`, `multimodal`, `batch`, `prompt_cache`,
+`streaming`, `rate_limits`, `retries`, `fallback`, `cost_tracking`, `local`,
+and `fast_mode`; `atteler config validate` rejects unknown route capability
+names so a typo cannot silently reject every candidate at runtime.
+Embedding calls use the same registry, role, capability, fallback, and telemetry
+path as chat calls, with an implicit `embeddings` capability requirement.
+Batch completion calls similarly resolve roles with an implicit `batch`
+capability requirement and use the same retry/fallback/error handling path for
+each item in the batch.
 
 Agent `routing_policy` entries are evaluated against the built-in versioned
 model catalog plus runtime provider evidence. The router considers context
 windows, output limits, input/output/cache prices, required capabilities,
-provider bans/preferences, budget caps, live provider/model availability when
+provider bans/preferences, budget and latency/TTFT caps, live provider/model availability when
 known, observed latency/TTFT, rate-limit telemetry, and actual token usage from
 previous calls. When routing evidence is used, Atteler emits a `route_decision`
 hook artifact with every candidate considered, constraints applied, rejection
@@ -288,13 +359,27 @@ reasons, estimated cost, fallback order, provider-model verification state, and
 post-response actual cost/usage when available. Runtime calls refresh provider
 model lists within a short bounded window before applying availability
 constraints, and event metadata repeats profile estimates, availability counts,
-constraints, observed latency/TTFT, and actual usage/cost deltas for quick log
-inspection without parsing the full JSON artifact.
+constraints, selected estimated cost, observed latency/TTFT, and actual
+usage/cost deltas, including whether the profile was interactive or batch, for
+quick log inspection without parsing the full JSON artifact.
+Agent-loop checkpoint ledgers also record the concrete provider/model that
+answered each model call, per-call latency/TTFT, token usage, and estimated
+cost micros so resumed or audited tool loops keep the same routing/cost trail.
+When an agent selects a model role, the agent `routing_policy` is layered on top
+of the role's own constraints so per-agent provider bans, capability
+requirements, freshness requirements, and budget caps still apply.
 Manual `providers route-interactive` and `providers route-batch` previews use
 the same catalog-backed estimates; `--route-input-tokens`,
 `--route-output-tokens`, `--route-cache-reuse`, and
 `--route-cache-write-tokens` let operators model prompt-cache read/write costs
-before a live call.
+before a live call. Unknown manual candidates can supply explicit metadata like
+`provider/model,input=0.001,output=0.002,max=1000`;
+optional keys include `cached`, `cache_write`, `max_output`, `latency`, `ttft`,
+and `capabilities=chat|tools|json_schema`. Manual capabilities are validated
+using the same route capability vocabulary as config files. The route
+required-capability option is repeatable/comma-separated so previews can show
+how hard capability constraints affect the selected candidate and fallback
+order.
 
 Provider retry settings are per-provider. `max_attempts` is the number of
 additional retries after the first request, and the elapsed budget, max backoff,
@@ -411,21 +496,22 @@ state directory for diagnostics.
 Provider adapters intentionally expose `llm.ProviderCapabilities` metadata via
 `llm.ProviderCapabilitiesFor` and `llm.KnownProviders` so callers can check
 whether a provider supports seed, tools, reasoning, model modes, cached-token
-accounting, streaming, and network model discovery before setting
-provider-specific knobs.
-The same metadata documents lossy mappings, provider-adjusted request options,
-and unsupported `CompleteParams` fields:
+accounting, JSON/schema-constrained outputs, streaming, and network model
+discovery before setting provider-specific knobs. The same metadata documents
+lossy mappings, provider-adjusted request options, and unsupported
+`CompleteParams` fields:
 
 | Provider | Intentionally lossy or adjusted mappings | Unsupported or unavailable fields |
 | --- | --- | --- |
 | OpenAI | `ToolResult.IsError` is not represented by Chat Completions tool messages. | None currently documented. |
-| Anthropic | Reasoning levels become thinking token budgets; when thinking is enabled, `Temperature` is coerced to `1`; system messages are lifted to `system`; tool results become user-role content blocks. | `Seed`, `ModelMode` |
-| Claude Code | Same request/response mapping as Anthropic over the Claude Code OAuth path; when thinking is enabled, `Temperature` is coerced to `1`. | `Seed`, `ModelMode` |
-| Codex | `Temperature` is omitted because the ChatGPT Responses adapter does not expose it; system messages become Responses `instructions`; chat/tool history becomes Responses input items; `ToolResult.IsError` is not represented. | `TopP`, `Seed`, `Stop`, `MaxTokens` |
-| Ollama | Reasoning levels become Ollama `think` values; tool-call IDs, tool-result IDs, and `ToolResult.IsError` are not represented in Ollama chat messages. | `ModelMode`; cached-token accounting is not reported by Ollama responses. |
+| Anthropic | Reasoning levels become thinking token budgets; when thinking is enabled, `Temperature` is coerced to `1`; system messages are lifted to `system`; tool results become user-role content blocks. | `Seed`, `ModelMode`, `ResponseFormat` |
+| Claude Code | Same request/response mapping as Anthropic over the Claude Code OAuth path; when thinking is enabled, `Temperature` is coerced to `1`. | `Seed`, `ModelMode`, `ResponseFormat` |
+| Codex | `Temperature` and `MaxTokens` are omitted because the ChatGPT Responses adapter does not expose them; system messages become Responses `instructions`; chat/tool history becomes Responses input items; `ToolResult.IsError` is not represented. | `TopP`, `Seed`, `Stop` |
+| Ollama | Reasoning levels become Ollama `think` values; `ResponseFormat` maps to Ollama `format` but `Name`/`Strict` are not represented; tool-call IDs, tool-result IDs, and `ToolResult.IsError` are not represented in Ollama chat messages. | `ModelMode`; cached-token accounting is not reported by Ollama responses. |
 
 Unsupported non-zero knobs, non-finite sampling values, and non-JSON-serializable
-tool schemas or tool-call inputs are rejected instead of silently dropped.
+tool schemas, tool-call inputs, or response schemas are rejected instead of
+silently dropped.
 Unavailable knobs or provider-constrained values with explicit adapter handling
 are normalized before dispatch and reported in activity metadata.
 `SupportsStreaming` in the capability metadata means caller-facing
@@ -1355,9 +1441,9 @@ linked from the row.
 | --- | --- |
 | CLI command routing, grouped help, and compatibility flags | [`cmd/atteler/cli_args.go`](cmd/atteler/cli_args.go), [`cmd/atteler/cli_help_domains.go`](cmd/atteler/cli_help_domains.go), [`cmd/atteler/cli_args_test.go`](cmd/atteler/cli_args_test.go), [`cmd/atteler/cli_help_test.go`](cmd/atteler/cli_help_test.go) |
 | Error-aware streaming completion contract with bounded-buffer guidance | [`pkg/llm/stream.go`](pkg/llm/stream.go), [`pkg/llm/stream_test.go`](pkg/llm/stream_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go) |
-| OpenAI, Anthropic, Codex, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go), [`pkg/llm/capabilities.go`](pkg/llm/capabilities.go), [`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go), [`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go), [`pkg/llm/provider_runtime_test.go`](pkg/llm/provider_runtime_test.go) |
+| OpenAI, OpenAI-compatible endpoints, Anthropic, Codex, Claude Code, and Ollama providers | [`pkg/llm/openai.go`](pkg/llm/openai.go), [`pkg/llm/openai_test.go`](pkg/llm/openai_test.go), [`pkg/llm/anthropic.go`](pkg/llm/anthropic.go), [`pkg/llm/anthropic_test.go`](pkg/llm/anthropic_test.go), [`pkg/llm/codex.go`](pkg/llm/codex.go), [`pkg/llm/codex_test.go`](pkg/llm/codex_test.go), [`pkg/llm/claude_code.go`](pkg/llm/claude_code.go), [`pkg/llm/claude_code_test.go`](pkg/llm/claude_code_test.go), [`pkg/llm/ollama.go`](pkg/llm/ollama.go), [`pkg/llm/ollama_test.go`](pkg/llm/ollama_test.go), [`pkg/llm/capabilities.go`](pkg/llm/capabilities.go), [`pkg/llm/provider_contract_test.go`](pkg/llm/provider_contract_test.go), [`pkg/llm/provider_runtime.go`](pkg/llm/provider_runtime.go), [`pkg/llm/provider_runtime_test.go`](pkg/llm/provider_runtime_test.go) |
 | Typed provider errors, jittered retry budgets, retry lifecycle events, and provider retry diagnostics | [`pkg/llm/provider_error.go`](pkg/llm/provider_error.go), [`pkg/llm/provider_error_test.go`](pkg/llm/provider_error_test.go), [`pkg/llm/retry.go`](pkg/llm/retry.go), [`pkg/llm/retry_test.go`](pkg/llm/retry_test.go), [`pkg/events/events.go`](pkg/events/events.go), [`cmd/atteler/cli_config_worktree_commands.go`](cmd/atteler/cli_config_worktree_commands.go) |
-| Evidence-backed model routing with catalog metadata, per-agent policy, route-decision artifacts, and usage telemetry | [`pkg/modelroute/catalog.go`](pkg/modelroute/catalog.go), [`pkg/modelroute/decision.go`](pkg/modelroute/decision.go), [`pkg/modelroute/telemetry.go`](pkg/modelroute/telemetry.go), [`pkg/modelroute/modelroute_test.go`](pkg/modelroute/modelroute_test.go), [`pkg/llm/llm.go`](pkg/llm/llm.go), [`cmd/atteler/route_decision_event.go`](cmd/atteler/route_decision_event.go), [`cmd/atteler/agent_resolution_test.go`](cmd/atteler/agent_resolution_test.go) |
+| Evidence-backed model routing with catalog metadata, model roles, per-agent policy, route-decision artifacts, agent-loop checkpoint metadata, and usage telemetry | [`pkg/modelroute/catalog.go`](pkg/modelroute/catalog.go), [`pkg/modelroute/decision.go`](pkg/modelroute/decision.go), [`pkg/modelroute/telemetry.go`](pkg/modelroute/telemetry.go), [`pkg/modelroute/modelroute_test.go`](pkg/modelroute/modelroute_test.go), [`pkg/llm/model_role.go`](pkg/llm/model_role.go), [`pkg/llm/llm.go`](pkg/llm/llm.go), [`pkg/llm/agentloop_checkpoint.go`](pkg/llm/agentloop_checkpoint.go), [`pkg/llm/agentloop_test.go`](pkg/llm/agentloop_test.go), [`cmd/atteler/route_decision_event.go`](cmd/atteler/route_decision_event.go), [`cmd/atteler/agent_resolution_test.go`](cmd/atteler/agent_resolution_test.go) |
 | Configuration loading, migration, redacted diagnostics, atomic state, harness import, templates, and validation | [`pkg/config/config.go`](pkg/config/config.go), [`pkg/config/config_test.go`](pkg/config/config_test.go), [`pkg/config/migrate.go`](pkg/config/migrate.go), [`pkg/config/migrate_test.go`](pkg/config/migrate_test.go), [`pkg/config/diagnostics.go`](pkg/config/diagnostics.go), [`pkg/config/diagnostics_test.go`](pkg/config/diagnostics_test.go), [`pkg/config/redaction.go`](pkg/config/redaction.go), [`pkg/config/state.go`](pkg/config/state.go), [`pkg/config/state_test.go`](pkg/config/state_test.go), [`pkg/config/harness.go`](pkg/config/harness.go), [`pkg/config/harness_test.go`](pkg/config/harness_test.go), [`pkg/config/template.go`](pkg/config/template.go), [`pkg/config/template_test.go`](pkg/config/template_test.go) |
 | Sessions, transcript search/export, evaluations, failures, provenance-rich artifacts, multi-agent run audits, and performance summaries | [`pkg/session/session.go`](pkg/session/session.go), [`pkg/session/session_test.go`](pkg/session/session_test.go), [`pkg/session/export.go`](pkg/session/export.go), [`pkg/session/export_test.go`](pkg/session/export_test.go), [`cmd/atteler/multi_agent_run_commands.go`](cmd/atteler/multi_agent_run_commands.go), [`cmd/atteler/multi_agent_run_commands_test.go`](cmd/atteler/multi_agent_run_commands_test.go), [`pkg/session/search.go`](pkg/session/search.go), [`pkg/session/search_test.go`](pkg/session/search_test.go), [`pkg/artifactmerge/artifactmerge.go`](pkg/artifactmerge/artifactmerge.go), [`pkg/artifactmerge/artifactmerge_test.go`](pkg/artifactmerge/artifactmerge_test.go), [`pkg/session/performance.go`](pkg/session/performance.go), [`pkg/session/performance_test.go`](pkg/session/performance_test.go) |
 | Behavior-oriented eval assertions and machine-readable eval reports | [`pkg/eval/eval.go`](pkg/eval/eval.go), [`pkg/eval/structured.go`](pkg/eval/structured.go), [`pkg/eval/structured_test.go`](pkg/eval/structured_test.go), [`cmd/atteler/cli_agent_eval_feedback_route_commands.go`](cmd/atteler/cli_agent_eval_feedback_route_commands.go), [`cmd/atteler/main_test.go`](cmd/atteler/main_test.go) |
@@ -1379,9 +1465,9 @@ linked from the row.
 The repository has reusable Go packages, but this README does not promise a
 separately versioned public SDK contract. The current code-intelligence support
 uses Go parser packages and optional LSP calls; tree-sitter support would be
-future work and is not documented as implemented here. The provider list is
-limited to the providers linked above; additional providers should be tracked as
-GitHub Issues until code and tests exist.
+future work and is not documented as implemented here. Native provider adapters
+beyond the providers linked above and configurable OpenAI-compatible endpoints
+should be tracked as GitHub Issues until code and tests exist.
 
 ## Build, CI, and releases
 

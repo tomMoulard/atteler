@@ -1,6 +1,7 @@
 package modelroute
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,35 @@ func TestEstimateCost_UsesOutputAndCachedInput(t *testing.T) {
 	if got != want {
 		t.Fatalf("EstimateCost() = %v, want %v", got, want)
 	}
+}
+
+func TestKnownCapabilitiesRecognizesNormalizedRouteCapabilities(t *testing.T) {
+	t.Parallel()
+
+	assert.ElementsMatch(t, []string{
+		CapabilityText,
+		CapabilityChat,
+		CapabilityTools,
+		CapabilityReasoning,
+		CapabilityJSONSchema,
+		CapabilityEmbeddings,
+		CapabilityVision,
+		CapabilityMultimodal,
+		CapabilityBatch,
+		CapabilityPromptCache,
+		CapabilityStreaming,
+		CapabilityRateLimits,
+		CapabilityRetries,
+		CapabilityFallback,
+		CapabilityCostTracking,
+		CapabilityLocal,
+		CapabilityFastMode,
+	}, KnownCapabilities())
+	assert.True(t, IsKnownCapability(" Tools "))
+	assert.True(t, IsKnownCapability(CapabilityJSONSchema))
+	assert.True(t, IsKnownCapability(CapabilityFastMode))
+	assert.False(t, IsKnownCapability(""))
+	assert.False(t, IsKnownCapability("teleport"))
 }
 
 func TestEstimateCost_ClampsNegativeTokensAndCacheReuse(t *testing.T) {
@@ -72,10 +102,10 @@ func TestFilter_RemovesOverBudgetAndOverContextCandidates(t *testing.T) {
 	t.Parallel()
 
 	candidates := []Candidate{
-		{Name: "too-small-context", MaxInputTokens: 1000, InputTokenCost: 0.01},
-		{Name: "too-small-output", MaxInputTokens: 2000, MaxOutputTokens: 10, InputTokenCost: 0.01},
-		{Name: "too-expensive", MaxInputTokens: 2000, InputTokenCost: 1},
-		{Name: "fits", MaxInputTokens: 2000, InputTokenCost: 0.01},
+		{Name: "too-small-context", MaxInputTokens: 1000, InputTokenCost: 0.01, OutputTokenCost: 0.01},
+		{Name: "too-small-output", MaxInputTokens: 2000, MaxOutputTokens: 10, InputTokenCost: 0.01, OutputTokenCost: 0.01},
+		{Name: "too-expensive", MaxInputTokens: 2000, InputTokenCost: 1, OutputTokenCost: 1},
+		{Name: "fits", MaxInputTokens: 2000, InputTokenCost: 0.01, OutputTokenCost: 0.01},
 	}
 	profile := RequestProfile{EstimatedInputTokens: 1500, EstimatedOutputTokens: 50, Budget: 20}
 
@@ -83,6 +113,46 @@ func TestFilter_RemovesOverBudgetAndOverContextCandidates(t *testing.T) {
 	if len(got) != 1 || got[0].Name != "fits" {
 		t.Fatalf("Filter() = %#v, want only fits", got)
 	}
+}
+
+func TestDecide_RejectsUnpricedRemoteWhenBudgeted(t *testing.T) {
+	t.Parallel()
+
+	decision := Decide(
+		[]Candidate{{Name: "live-only", Provider: "openai", Capabilities: []string{capabilityText}}},
+		RequestProfile{EstimatedInputTokens: 100, Budget: 0.01},
+		Policy{},
+		nil,
+	)
+
+	assert.Empty(t, decision.FallbackOrder)
+	assertRejectionContains(t, decision, "openai/live-only", ReasonCostUnknown)
+}
+
+func TestDecide_RejectsPartiallyPricedRemoteWhenBudgeted(t *testing.T) {
+	t.Parallel()
+
+	decision := Decide(
+		[]Candidate{{Name: "input-only", Provider: "openai", InputTokenCost: 0.000001, Capabilities: []string{capabilityText}}},
+		RequestProfile{EstimatedInputTokens: 100, EstimatedOutputTokens: 10, Budget: 0.01},
+		Policy{},
+		nil,
+	)
+
+	assert.Empty(t, decision.FallbackOrder)
+	assertRejectionContains(t, decision, "openai/input-only", ReasonCostUnknown)
+}
+
+func TestFitsBudget_AllowsLocalZeroCostWhenBudgeted(t *testing.T) {
+	t.Parallel()
+
+	candidate := Candidate{
+		Name:         "llama3.2",
+		Provider:     "ollama",
+		Capabilities: []string{capabilityLocal},
+	}
+
+	assert.True(t, FitsBudget(candidate, RequestProfile{EstimatedInputTokens: 100, Budget: 0.01}))
 }
 
 func TestFitsContext_ReservesEstimatedOutputInContextWindow(t *testing.T) {
@@ -185,8 +255,12 @@ func TestBuiltinCatalog_ProvidesVersionedMetadata(t *testing.T) {
 	assert.Greater(t, metadata.InputTokenCost, 0.0)
 	assert.Greater(t, metadata.CachedInputTokenCost, 0.0)
 	assert.Greater(t, metadata.OutputTokenCost, 0.0)
+	assert.Contains(t, metadata.Capabilities, capabilityChat)
+	assert.Contains(t, metadata.Capabilities, capabilityJSONSchema)
 	assert.Contains(t, metadata.Capabilities, capabilityPromptCache)
 	assert.Contains(t, metadata.Capabilities, capabilityFastMode)
+	assert.Contains(t, metadata.Capabilities, capabilityStreaming)
+	assert.Contains(t, metadata.Capabilities, capabilityCost)
 	assert.Equal(t, "https://developers.openai.com/api/docs/pricing", metadata.SourceURL)
 
 	fastMetadata, ok := catalog.Lookup("openai", "gpt-5.5")
@@ -215,6 +289,34 @@ func TestBuiltinCatalog_RecordsOfficialPricingSources(t *testing.T) {
 	anthropic, ok := catalog.Lookup("anthropic", "claude-opus-4-7")
 	require.True(t, ok)
 	assert.Equal(t, "https://platform.claude.com/docs/en/about-claude/pricing", anthropic.SourceURL)
+}
+
+func TestBuiltinCatalog_IncludesEmbeddingMetadata(t *testing.T) {
+	t.Parallel()
+
+	catalog := BuiltinCatalog()
+
+	small, ok := catalog.Lookup("openai", "text-embedding-3-small")
+	require.True(t, ok)
+	assert.Equal(t, 8192, small.ContextWindow)
+	assert.Zero(t, small.MaxOutputTokens)
+	assert.InDelta(t, 0.02/1_000_000, small.InputTokenCost, 0.000000000001)
+	assert.Zero(t, small.OutputTokenCost)
+	assert.Contains(t, small.Capabilities, capabilityEmbeddings)
+	assert.Contains(t, small.Capabilities, capabilityBatch)
+	assert.Contains(t, small.Capabilities, capabilityCost)
+	assert.NotContains(t, small.Capabilities, capabilityChat)
+	assert.Equal(t, "https://developers.openai.com/api/docs/models/text-embedding-3-small", small.SourceURL)
+
+	large, ok := catalog.Lookup("openai", "text-embedding-3-large")
+	require.True(t, ok)
+	assert.InDelta(t, 0.13/1_000_000, large.InputTokenCost, 0.000000000001)
+
+	local, ok := catalog.Lookup("ollama", "nomic-embed-text")
+	require.True(t, ok)
+	assert.Contains(t, local.Capabilities, capabilityEmbeddings)
+	assert.Contains(t, local.Capabilities, capabilityLocal)
+	assert.Zero(t, local.InputTokenCost)
 }
 
 func TestBuiltinCatalog_IncludesCurrentProviderLimits(t *testing.T) {
@@ -371,12 +473,12 @@ func TestDecide_AppliesPolicyBudgetContextAndFallbackOrder(t *testing.T) {
 	t.Parallel()
 
 	candidates := []Candidate{
-		{Name: "too-small", Provider: "openai", MaxInputTokens: 100, InputTokenCost: 0.000001, Capabilities: []string{capabilityText}},
-		{Name: "too-small-output", Provider: "openai", MaxInputTokens: 10_000, MaxOutputTokens: 10, InputTokenCost: 0.000001, Capabilities: []string{capabilityText, capabilityTools}},
-		{Name: "too-expensive", Provider: "openai", MaxInputTokens: 10_000, InputTokenCost: 0.01, Capabilities: []string{capabilityText, capabilityTools}},
-		{Name: "banned", Provider: "anthropic", MaxInputTokens: 10_000, InputTokenCost: 0.000001, Capabilities: []string{capabilityText, capabilityTools}},
-		{Name: "selected", Provider: "openai", MaxInputTokens: 10_000, InputTokenCost: 0.000001, Priority: 1, Capabilities: []string{capabilityText, capabilityTools}},
-		{Name: "fallback", Provider: "openai", MaxInputTokens: 10_000, InputTokenCost: 0.000002, Priority: 2, Capabilities: []string{capabilityText, capabilityTools}},
+		{Name: "too-small", Provider: "openai", MaxInputTokens: 100, InputTokenCost: 0.000001, OutputTokenCost: 0.000001, Capabilities: []string{capabilityText}},
+		{Name: "too-small-output", Provider: "openai", MaxInputTokens: 10_000, MaxOutputTokens: 10, InputTokenCost: 0.000001, OutputTokenCost: 0.000001, Capabilities: []string{capabilityText, capabilityTools}},
+		{Name: "too-expensive", Provider: "openai", MaxInputTokens: 10_000, InputTokenCost: 0.01, OutputTokenCost: 0.01, Capabilities: []string{capabilityText, capabilityTools}},
+		{Name: "banned", Provider: "anthropic", MaxInputTokens: 10_000, InputTokenCost: 0.000001, OutputTokenCost: 0.000001, Capabilities: []string{capabilityText, capabilityTools}},
+		{Name: "selected", Provider: "openai", MaxInputTokens: 10_000, InputTokenCost: 0.000001, OutputTokenCost: 0.000001, Priority: 1, Capabilities: []string{capabilityText, capabilityTools}},
+		{Name: "fallback", Provider: "openai", MaxInputTokens: 10_000, InputTokenCost: 0.000002, OutputTokenCost: 0.000002, Priority: 2, Capabilities: []string{capabilityText, capabilityTools}},
 	}
 
 	decision := Decide(candidates, RequestProfile{EstimatedInputTokens: 500, EstimatedOutputTokens: 50}, Policy{
@@ -401,6 +503,90 @@ func TestDecide_AppliesPolicyBudgetContextAndFallbackOrder(t *testing.T) {
 	assertRejectionContains(t, decision, "anthropic/banned", ReasonProviderBanned)
 }
 
+func TestDecide_NormalizesNegativeProfileAndPolicyLimits(t *testing.T) {
+	t.Parallel()
+
+	decision := Decide(
+		[]Candidate{{Name: "selected", Provider: "openai", InputTokenCost: 0.000001, OutputTokenCost: 0.000001}},
+		RequestProfile{
+			EstimatedInputTokens:      -10,
+			EstimatedOutputTokens:     -5,
+			EstimatedCacheWriteTokens: -3,
+			Budget:                    -1,
+			PromptCacheReuseEstimate:  2,
+		},
+		Policy{
+			MaxBudget:    -0.01,
+			MaxLatencyMS: -1,
+			MaxTTFTMS:    -1,
+		},
+		nil,
+	)
+
+	assert.Equal(t, "openai/selected", decision.Selected)
+	assert.Zero(t, decision.Profile.EstimatedInputTokens)
+	assert.Zero(t, decision.Profile.EstimatedOutputTokens)
+	assert.Zero(t, decision.Profile.EstimatedCacheWriteTokens)
+	assert.Zero(t, decision.Profile.Budget)
+	assert.InDelta(t, 1.0, decision.Profile.PromptCacheReuseEstimate, 0.000000001)
+	assert.Zero(t, decision.Policy.MaxBudget)
+	assert.Zero(t, decision.Policy.MaxLatencyMS)
+	assert.Zero(t, decision.Policy.MaxTTFTMS)
+	assert.NotContains(t, decision.Constraints, ConstraintBudget)
+	assert.NotContains(t, decision.Constraints, ConstraintLatency)
+	assert.NotContains(t, decision.Constraints, ConstraintTTFT)
+}
+
+func TestDecide_NormalizesNonFiniteProfileAndPolicyLimits(t *testing.T) {
+	t.Parallel()
+
+	decision := Decide(
+		[]Candidate{{Name: "selected", Provider: "openai", InputTokenCost: 0.000001}},
+		RequestProfile{
+			EstimatedInputTokens:     100,
+			Budget:                   math.Inf(1),
+			PromptCacheReuseEstimate: math.NaN(),
+		},
+		Policy{MaxBudget: math.NaN()},
+		nil,
+	)
+
+	assert.Equal(t, "openai/selected", decision.Selected)
+	assert.Zero(t, decision.Profile.Budget)
+	assert.Zero(t, decision.Profile.PromptCacheReuseEstimate)
+	assert.Zero(t, decision.Policy.MaxBudget)
+	assert.NotContains(t, decision.Constraints, ConstraintBudget)
+}
+
+func TestDecide_UsesNormalizedPolicyForConstraintEvidence(t *testing.T) {
+	t.Parallel()
+
+	decision := Decide(
+		[]Candidate{{Name: "selected", Provider: "openai", InputTokenCost: 0.000001}},
+		RequestProfile{EstimatedInputTokens: 100},
+		Policy{
+			PreferredProviders:   []string{" "},
+			BannedProviders:      []string{" "},
+			BannedModels:         []string{" "},
+			RequiredCapabilities: []string{" "},
+			MaxBudget:            -0.01,
+			MaxLatencyMS:         -1,
+			MaxTTFTMS:            -1,
+		},
+		nil,
+	)
+
+	assert.Equal(t, "openai/selected", decision.Selected)
+	assert.Empty(t, decision.Policy.PreferredProviders)
+	assert.Empty(t, decision.Policy.BannedProviders)
+	assert.Empty(t, decision.Policy.BannedModels)
+	assert.Empty(t, decision.Policy.RequiredCapabilities)
+	assert.NotContains(t, decision.Constraints, ConstraintRoutingPolicy)
+	assert.NotContains(t, decision.Constraints, ConstraintRequiredCapabilities)
+	assert.NotContains(t, decision.Constraints, ConstraintProviderPreference)
+	assert.NotContains(t, decision.Constraints, ConstraintBudget)
+}
+
 func TestDecide_PrefersPolicyProviderBeforeCost(t *testing.T) {
 	t.Parallel()
 
@@ -412,6 +598,47 @@ func TestDecide_PrefersPolicyProviderBeforeCost(t *testing.T) {
 	decision := Decide(candidates, RequestProfile{EstimatedInputTokens: 100}, Policy{PreferredProviders: []string{"anthropic"}}, nil)
 
 	assert.Equal(t, "anthropic/preferred", decision.Selected)
+}
+
+func TestDecide_AppliesLatencyPolicyLimits(t *testing.T) {
+	t.Parallel()
+
+	candidates := []Candidate{
+		{Name: "slow", Provider: "openai", InputTokenCost: 0.000001, ExpectedLatencyMS: 900, ExpectedTTFTMS: 80},
+		{Name: "slow-ttft", Provider: "openai", InputTokenCost: 0.000001, ExpectedLatencyMS: 100, ExpectedTTFTMS: 500},
+		{Name: "fast", Provider: "openai", InputTokenCost: 0.000001, ExpectedLatencyMS: 100, ExpectedTTFTMS: 80},
+		{Name: "unknown", Provider: "openai", InputTokenCost: 0.000001},
+	}
+
+	decision := Decide(candidates, RequestProfile{Interactive: true}, Policy{
+		MaxLatencyMS: 250,
+		MaxTTFTMS:    150,
+	}, nil)
+
+	assert.Contains(t, decision.Constraints, ConstraintRoutingPolicy)
+	assert.Contains(t, decision.Constraints, ConstraintLatency)
+	assert.Contains(t, decision.Constraints, ConstraintTTFT)
+	assert.Equal(t, "openai/fast", decision.Selected)
+	assert.Equal(t, []string{"openai/fast", "openai/unknown"}, decision.FallbackOrder)
+	assertRejectionContains(t, decision, "openai/slow", ReasonLatencyExceeded)
+	assertRejectionContains(t, decision, "openai/slow-ttft", ReasonTTFTExceeded)
+}
+
+func TestDecide_AppliesObservedLatencyPolicyLimits(t *testing.T) {
+	t.Parallel()
+
+	candidate := Candidate{Name: "observed-slow", Provider: "openai", InputTokenCost: 0.000001}
+	telemetry := NewTelemetry()
+	telemetry.Record(candidate, ActualUsage{Latency: 900 * time.Millisecond, TTFT: 500 * time.Millisecond}, time.Now())
+
+	decision := Decide([]Candidate{candidate}, RequestProfile{Interactive: true}, Policy{
+		MaxLatencyMS: 250,
+		MaxTTFTMS:    150,
+	}, telemetry)
+
+	assert.Empty(t, decision.Selected)
+	assertRejectionContains(t, decision, "openai/observed-slow", ReasonLatencyExceeded)
+	assertRejectionContains(t, decision, "openai/observed-slow", ReasonTTFTExceeded)
 }
 
 func TestDecide_BannedModelsMatchProviderReportedAliases(t *testing.T) {
@@ -434,6 +661,20 @@ func TestDecide_BannedModelsMatchProviderReportedAliases(t *testing.T) {
 		assert.Equal(t, "openai/gpt-4.1-nano", decision.Selected)
 		assertRejectionContains(t, decision, "openai/gpt-4.1-mini", ReasonModelBanned)
 	}
+}
+
+func TestCatalogCandidatesForModelReturnsAmbiguousMatches(t *testing.T) {
+	t.Parallel()
+
+	candidates := BuiltinCatalog().CandidatesForModel("gpt-5.4-mini")
+
+	ids := make([]string, 0, len(candidates))
+	for i := range candidates {
+		ids = append(ids, candidates[i].ID())
+	}
+
+	assert.Contains(t, ids, "openai/gpt-5.4-mini")
+	assert.Contains(t, ids, "codex/gpt-5.4-mini")
 }
 
 func TestDecisionWithAvailabilityRejectsUnavailableAndReranksFallback(t *testing.T) {

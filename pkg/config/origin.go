@@ -250,6 +250,10 @@ func modelAliasFieldPath(alias string) string {
 	return dottedPath("model_aliases", alias)
 }
 
+func modelRoleFieldPath(name string, fields ...string) string {
+	return dottedPath(append([]string{"models", name}, fields...)...)
+}
+
 func agentFieldPath(name string, fields ...string) string {
 	return dottedPath(append([]string{"agents", name}, fields...)...)
 }

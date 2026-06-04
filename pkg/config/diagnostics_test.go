@@ -33,7 +33,17 @@ agents:
     prompt: review safely
     routing_policy:
       preferred_providers: [openai]
+      max_latency_ms: 1200
+      max_ttft_ms: 300
       surprise: true
+models:
+  planner:
+    preferred: openai/gpt-4.1
+    fallback: anthropic/claude-sonnet
+    routing_policy:
+      required_capabilities: [tools]
+      max_latency_ms: 2000
+      max_ttft_ms: 800
 providers:
   openai:
     disable_private_adapter: true
@@ -60,8 +70,16 @@ skill_learning:
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "generation.surprise", "")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "agents.reviewer.routing_policy.surprise", "")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "providers.openai.token", "")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "models")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "models.planner.preferred")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "models.planner.fallback")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "models.planner.routing_policy.required_capabilities")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "models.planner.routing_policy.max_latency_ms")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "models.planner.routing_policy.max_ttft_ms")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agents.reviewer.routing_policy")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agents.reviewer.routing_policy.preferred_providers")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agents.reviewer.routing_policy.max_latency_ms")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "agents.reviewer.routing_policy.max_ttft_ms")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_tool_calls")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.max_wall_time")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "agent_loop.checkpoint_interval")

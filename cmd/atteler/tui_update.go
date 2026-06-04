@@ -652,6 +652,23 @@ func (m model) submitInput() (tea.Model, tea.Cmd) {
 	return m.submitPrompt(input)
 }
 
+func routeDecisionErrorCommand(
+	ctx context.Context,
+	hooks *events.Runner,
+	sessionID string,
+	sessionPath string,
+	agentName string,
+	routeDecision *modelroute.Decision,
+	err error,
+) tea.Cmd {
+	cmds := []tea.Cmd{tea.Println(errStyle.Render("Error: " + err.Error()))}
+	if event, ok := routeDecisionEvent(sessionID, sessionPath, agentName, "", routeDecision); ok {
+		cmds = append(cmds, emitHook(ctx, hooks, event))
+	}
+
+	return tea.Batch(cmds...)
+}
+
 // submitPrompt sends a prompt that is already detached from the textarea.
 func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(input, "!") {
@@ -702,22 +719,28 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 	routeReferenceContext := buildReferenceContextWithManifest(m.ctx, routeGlobalReferenceContext, activeAgent, contextOptions)
 	budgetMessages := requestMessagesForBudget(requestModel, msgs, activeAgent, generation, routeReferenceContext.Content, m.executionMode != executionModePlan)
 
-	requestModel, fallbackModels, routeDecision, err := requestModelAndFallbacks(
+	requestModel, fallbackModels, routeDecision, err := requestModelRoutingAndFallbacks(
+		m.ctx,
+		m.registry,
 		m.selectedModel,
 		m.modelLocked,
 		m.fallbackModels,
 		activeAgent,
+		requestModel,
+		fallbackModels,
+		routeCompleteParamsForRequest(
+			requestModel,
+			budgetMessages,
+			generation,
+			activeAgent,
+			m.executionMode != executionModePlan,
+		),
 		routeProfileForMessages(budgetMessages, generation),
 		routeTelemetryFromRegistry(m.registry),
 		routeAvailabilityFromRegistryWithRefresh(m.ctx, m.registry, effectiveRouteCandidateChain(m.selectedModel, m.fallbackModels, activeAgent, m.modelLocked)),
 	)
 	if err != nil {
-		cmds := []tea.Cmd{tea.Println(errStyle.Render("Error: " + err.Error()))}
-		if event, ok := routeDecisionEvent(m.sessionState.ID, m.sessionPath, activeAgent.name, "", routeDecision); ok {
-			cmds = append(cmds, emitHook(m.ctx, m.hookRunner, event))
-		}
-
-		return m, tea.Batch(cmds...)
+		return m, routeDecisionErrorCommand(m.ctx, m.hookRunner, m.sessionState.ID, m.sessionPath, activeAgent.name, routeDecision, err)
 	}
 
 	contextOptions = contextOptionsForRequestModels(m.contextOptions, m.registry, requestModel, fallbackModels)

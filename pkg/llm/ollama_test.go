@@ -95,6 +95,68 @@ func TestOllamaProvider_Complete(t *testing.T) {
 	assert.Equal(t, 4, resp.OutputTokens)
 }
 
+func TestOllamaProvider_Embed(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotReq         ollamaEmbedRequest
+		gotPath        string
+		gotContentType string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(ollamaEmbedResponse{
+			Model:      gotReq.Model,
+			Embeddings: [][]float64{{1, 0}, {0, 1}},
+		}))
+	}))
+	defer srv.Close()
+
+	p := &OllamaProvider{baseURL: srv.URL, client: srv.Client()}
+
+	resp, err := p.Embed(context.Background(), EmbeddingParams{
+		Model: "nomic-embed-text",
+		Input: []string{"alpha", "beta"},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "/api/embed", gotPath)
+	assert.Equal(t, "application/json", gotContentType)
+	assert.Equal(t, "nomic-embed-text", gotReq.Model)
+	assert.Equal(t, []any{"alpha", "beta"}, gotReq.Input)
+	assert.Equal(t, providerOllama, resp.Provider)
+	assert.Equal(t, "nomic-embed-text", resp.Model)
+	assert.Equal(t, [][]float64{{1, 0}, {0, 1}}, resp.Embeddings)
+}
+
+func TestOllamaProvider_EmbedRejectsDimensions(t *testing.T) {
+	t.Parallel()
+
+	p := &OllamaProvider{baseURL: "http://127.0.0.1:11434"}
+
+	_, err := p.Embed(context.Background(), EmbeddingParams{
+		Model:      "nomic-embed-text",
+		Input:      []string{"alpha"},
+		Dimensions: 128,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "EmbeddingParams.Dimensions is unsupported")
+}
+
 func TestOllamaProvider_CompleteStream_Success(t *testing.T) {
 	t.Parallel()
 

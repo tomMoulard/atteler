@@ -853,6 +853,34 @@ func requestIdleSuggestion(
 		}
 		applyGenerationParams(&params, generation)
 
+		fallbackModels = append([]string(nil), fallbackModels...)
+
+		requestModel, resolvedFallbackModels, routeDecision, routed, routeErr := requestModelRoleAndFallbacks(
+			reqCtx,
+			reg,
+			params.Model,
+			fallbackModels,
+			params,
+		)
+		if routeErr != nil {
+			emitRouteDecisionWarning(reqCtx, hookRunner, "", "", "", requestModel, routeDecision)
+
+			return idleSuggestionMsg{
+				id:             id,
+				input:          input,
+				err:            fmt.Errorf("idle suggestion route: %w", routeErr),
+				provider:       providerNameForModel(reg, requestModel),
+				model:          requestModel,
+				contextSummary: contextStatusSummary,
+				force:          force,
+			}
+		}
+
+		if routed {
+			params.Model = requestModel
+			fallbackModels = resolvedFallbackModels
+		}
+
 		manifestEvent := requestContextManifestEvent(newRequestContextManifestForModels(
 			reg,
 			params.Model,
@@ -866,6 +894,7 @@ func requestIdleSuggestion(
 		manifestEvent.Metadata["background_suggestion"] = "true"
 		manifestEvent.Metadata["context_summary"] = contextStatusSummary
 		emitHookWarning(reqCtx, hookRunner, manifestEvent)
+		emitRouteDecisionWarning(reqCtx, hookRunner, "", "", "", params.Model, routeDecision)
 
 		estimatedInputTokens, estimatedCostUSD, budgetErr := validateIdleSuggestionRequestBudget(
 			reg,
@@ -891,11 +920,11 @@ func requestIdleSuggestion(
 			}
 		}
 
-		if err := reqCtx.Err(); err != nil {
+		if cancelErr := reqCtx.Err(); cancelErr != nil {
 			return idleSuggestionMsg{
 				id:                    id,
 				input:                 input,
-				err:                   err,
+				err:                   cancelErr,
 				provider:              providerNameForModel(reg, params.Model),
 				model:                 params.Model,
 				contextSummary:        contextStatusSummary,
@@ -922,6 +951,16 @@ func requestIdleSuggestion(
 				providerCall:          true,
 			}
 		}
+
+		emitRouteDecisionWarning(
+			reqCtx,
+			hookRunner,
+			"",
+			"",
+			"",
+			routeResponseModelID(resp.Provider, resp.Model),
+			routeDecisionWithResponse(routeDecision, resp, routeTelemetryFromRegistry(reg)),
+		)
 
 		usage := tokenUsage{}
 		usage.addResponse(resp)
