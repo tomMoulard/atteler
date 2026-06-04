@@ -170,6 +170,52 @@ type gitHistorySearchCommandInput struct {
 	Limit int
 }
 
+//nolint:govet // Field order follows grouped incident source/report controls.
+type incidentDiagnoseCommandInput struct {
+	SentryIssue        string
+	Reference          string
+	FilePath           string
+	SentryOrg          string
+	SentryBaseURL      string
+	SentryTokenEnv     string
+	SentryEventID      string
+	MCPManifestPath    string
+	MCPServerName      string
+	MCPToolName        string
+	MCPToolArgsJSON    string
+	ReproCommand       string
+	ValidationCommands []string
+	ReportPath         string
+	PRBodyPath         string
+	OutputFormat       string
+	TimeoutSeconds     int
+	JSON               bool
+	ApplyFix           bool
+	OpenPR             bool
+}
+
+//nolint:govet // Field order follows grouped incident source/report controls.
+type incidentDiagnoseOnlyCommandInput struct {
+	SentryIssue        string
+	Reference          string
+	FilePath           string
+	SentryOrg          string
+	SentryBaseURL      string
+	SentryTokenEnv     string
+	SentryEventID      string
+	MCPManifestPath    string
+	MCPServerName      string
+	MCPToolName        string
+	MCPToolArgsJSON    string
+	ReproCommand       string
+	ValidationCommands []string
+	ReportPath         string
+	PRBodyPath         string
+	OutputFormat       string
+	TimeoutSeconds     int
+	JSON               bool
+}
+
 type initConfigCommandInput struct {
 	Path string
 }
@@ -411,6 +457,8 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"feedbackProposalsCommandInput":       func(opts cliOptions) any { return feedbackProposalsCommandInputFromOptions(opts) },
 		"feedbackRollbackCommandInput":        func(opts cliOptions) any { return feedbackRollbackCommandInputFromOptions(opts) },
 		"gitHistorySearchCommandInput":        func(opts cliOptions) any { return gitHistorySearchCommandInputFromOptions(opts) },
+		"incidentDiagnoseCommandInput":        func(opts cliOptions) any { return incidentDiagnoseCommandInputFromOptions(opts) },
+		"incidentDiagnoseOnlyCommandInput":    func(opts cliOptions) any { return incidentDiagnoseOnlyCommandInputFromOptions(opts) },
 		"headlessCommandInput":                func(opts cliOptions) any { return headlessCommandInputFromOptions(opts) },
 		"initConfigCommandInput":              func(opts cliOptions) any { return initConfigCommandInputFromOptions(opts) },
 		"initRTKPluginCommandInput":           func(opts cliOptions) any { return initRTKPluginCommandInputFromOptions(opts) },
@@ -647,6 +695,54 @@ func feedbackRollbackCommandInputFromOptions(opts cliOptions) feedbackRollbackCo
 
 func gitHistorySearchCommandInputFromOptions(opts cliOptions) gitHistorySearchCommandInput {
 	return gitHistorySearchCommandInput{Query: opts.gitHistorySearch, Limit: opts.gitHistoryLimit.value}
+}
+
+func incidentDiagnoseCommandInputFromOptions(opts cliOptions) incidentDiagnoseCommandInput {
+	return incidentDiagnoseCommandInput{
+		SentryIssue:        opts.sentryIssue,
+		Reference:          opts.incidentReference,
+		FilePath:           opts.incidentFilePath,
+		SentryOrg:          opts.incidentSentryOrg,
+		SentryBaseURL:      opts.incidentSentryBaseURL,
+		SentryTokenEnv:     opts.incidentSentryTokenEnv,
+		SentryEventID:      opts.incidentSentryEventID,
+		MCPManifestPath:    opts.incidentMCPManifestPath,
+		MCPServerName:      opts.incidentMCPServerName,
+		MCPToolName:        opts.incidentMCPToolName,
+		MCPToolArgsJSON:    opts.incidentMCPToolArgsJSON,
+		ReproCommand:       opts.incidentReproCommand,
+		ValidationCommands: append([]string(nil), opts.incidentValidationCommands...),
+		ReportPath:         opts.incidentReportPath,
+		PRBodyPath:         opts.incidentPRBodyPath,
+		OutputFormat:       opts.outputFormat,
+		TimeoutSeconds:     opts.incidentTimeout.value,
+		JSON:               opts.jsonOutput,
+		ApplyFix:           opts.incidentApplyFix,
+		OpenPR:             opts.incidentOpenPR,
+	}
+}
+
+func incidentDiagnoseOnlyCommandInputFromOptions(opts cliOptions) incidentDiagnoseOnlyCommandInput {
+	return incidentDiagnoseOnlyCommandInput{
+		SentryIssue:        opts.sentryIssue,
+		Reference:          opts.incidentReference,
+		FilePath:           opts.incidentFilePath,
+		SentryOrg:          opts.incidentSentryOrg,
+		SentryBaseURL:      opts.incidentSentryBaseURL,
+		SentryTokenEnv:     opts.incidentSentryTokenEnv,
+		SentryEventID:      opts.incidentSentryEventID,
+		MCPManifestPath:    opts.incidentMCPManifestPath,
+		MCPServerName:      opts.incidentMCPServerName,
+		MCPToolName:        opts.incidentMCPToolName,
+		MCPToolArgsJSON:    opts.incidentMCPToolArgsJSON,
+		ReproCommand:       opts.incidentReproCommand,
+		ValidationCommands: append([]string(nil), opts.incidentValidationCommands...),
+		ReportPath:         opts.incidentReportPath,
+		PRBodyPath:         opts.incidentPRBodyPath,
+		OutputFormat:       opts.outputFormat,
+		TimeoutSeconds:     opts.incidentTimeout.value,
+		JSON:               opts.jsonOutput,
+	}
 }
 
 func headlessCommandInputFromOptions(opts cliOptions) headlessCommandInput {

@@ -233,6 +233,24 @@ var cliHelpDomains = []cliHelpDomain{
 		Examples:        codeIntelDomainExamples(),
 	},
 	{
+		Name:    "incident",
+		Title:   "Incidents",
+		Summary: "Diagnose production incidents from observability sources and prepare test-first fixes with redacted reports.",
+		Aliases: []string{"incidents", "prod-incident"},
+		Commands: []cliCommandAlias{
+			{
+				Name:    "diagnose",
+				Summary: "fetch incident context, link stack traces to code, plan reproduction/tests/fix, and optionally prepare a PR body",
+				Legacy:  []string{"--incident-diagnose"},
+			},
+		},
+		Examples: []string{
+			`atteler incident diagnose --sentry ISSUE-912`,
+			`atteler incident diagnose --incident-file redacted-sentry-event.json`,
+			`atteler incident diagnose --sentry ISSUE-912 --incident-apply-fix --incident-validation-command "go test ./pkg/auth"`,
+		},
+	},
+	{
 		Name:    "review",
 		Title:   "Review",
 		Summary: "Scan the current repository or plan/run review-agent workflows with explicit gates.",

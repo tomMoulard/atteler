@@ -20,8 +20,8 @@ const (
 )
 
 var (
-	secretAssignments           = regexp.MustCompile(`(?i)\b([a-z0-9_-]*(?:password|passwd|pwd|api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|token|secret|private[_-]?key)[a-z0-9_-]*)\s*[:=]\s*("[^"]*"|'[^']*'|\S+)`)
-	quotedSecretAssignments     = regexp.MustCompile(`(?i)["']([a-z0-9_-]*(?:password|passwd|pwd|api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|token|secret|private[_-]?key)[a-z0-9_-]*)["']\s*:\s*("[^"]*"|'[^']*'|\S+)`)
+	secretAssignments           = regexp.MustCompile(`(?i)\b([a-z0-9_-]*(?:password|passwd|pwd|api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|token|secret|private[_-]?key)[a-z0-9_-]*)\s*[:=]\s*("[^"]*"|'[^']*'|[^"'\\\s]+)`)
+	quotedSecretAssignments     = regexp.MustCompile(`(?i)["']([a-z0-9_-]*(?:password|passwd|pwd|api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|token|secret|private[_-]?key)[a-z0-9_-]*)["']\s*:\s*("[^"]*"|'[^']*'|[^"'\\\s]+)`)
 	identifierSecretAssignments = regexp.MustCompile(`(?i)\b([a-z0-9_-]*(?:password|passwd|pwd|api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|session[_-]?token|token|secret|private[_-]?key)[a-z0-9_-]*)\s*[:=]\s*("[^"]*"|'[^']*'|[^\s/?&#]+)`)
 )
 

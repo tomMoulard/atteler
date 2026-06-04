@@ -83,6 +83,16 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			want: []string{"--memory-search", "OAuth retry", "--memory-scope", "repo", "--memory-tag", "security"},
 		},
 		{
+			name: "incident diagnose maps to incident flags",
+			args: []string{"incident", "diagnose", "--sentry", "ISSUE-912"},
+			want: []string{"--incident-diagnose", "--sentry", "ISSUE-912"},
+		},
+		{
+			name: "incident diagnose keeps json flag",
+			args: []string{"incident", "diagnose", "--incident-file", "incident.json", "--json"},
+			want: []string{"--incident-diagnose", "--incident-file", "incident.json", "--json"},
+		},
+		{
 			name: "positional run command keeps trailing flags parseable",
 			args: []string{"chat", "run", "explain", "this", "repo", "--model", "openai/gpt-5.4"},
 			want: []string{"--model", "openai/gpt-5.4", "explain this repo"},

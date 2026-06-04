@@ -14,9 +14,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
-const helperTimeout = 5 * time.Second
+const (
+	helperTimeout     = 5 * time.Second
+	helperSecretToken = "mcp-secret-token"
+)
 
 func TestInvoke_SendsNewlineDelimitedJSONAndReadsResponse(t *testing.T) {
 	t.Parallel()
@@ -93,6 +98,37 @@ func TestInvoke_ReturnsRPCError(t *testing.T) {
 	assert.Equal(t, -32000, response.Error.Code)
 }
 
+func TestInvoke_RedactsExplicitCredentialEnvFromErrors(t *testing.T) {
+	t.Parallel()
+
+	server := helperServer(t, "stderr-secret-exit")
+	server.Env["MCP_SECRET_TOKEN"] = helperSecretToken
+
+	response, err := Invoke(t.Context(), server, Request{Method: "fail"}, helperTimeout)
+
+	require.Error(t, err)
+	assert.Nil(t, response)
+	assert.NotContains(t, err.Error(), helperSecretToken)
+	assert.Contains(t, err.Error(), "<redacted:mcp_server_env>")
+}
+
+func TestInvoke_RedactsExplicitCredentialEnvFromRPCErrorMessage(t *testing.T) {
+	t.Parallel()
+
+	server := helperServer(t, "rpc-error-secret")
+	server.Env["MCP_SECRET_TOKEN"] = helperSecretToken
+
+	response, err := Invoke(t.Context(), server, Request{Method: "fail"}, helperTimeout)
+
+	require.Error(t, err)
+	require.NotNil(t, response)
+	require.NotNil(t, response.Error)
+	assert.NotContains(t, err.Error(), helperSecretToken)
+	assert.NotContains(t, response.Error.Message, helperSecretToken)
+	assert.Contains(t, err.Error(), "<redacted:mcp_server_env>")
+	assert.Contains(t, response.Error.Message, "<redacted:mcp_server_env>")
+}
+
 func TestInvoke_HonorsTimeout(t *testing.T) {
 	t.Parallel()
 
@@ -134,6 +170,30 @@ func TestInvoke_RequiresActiveContext(t *testing.T) {
 	_, err = Invoke(ctx, helperServer(t, "echo"), Request{Method: "ping"}, helperTimeout)
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestInvoke_AllowsExplicitCredentialEnvAndRedactsAudit(t *testing.T) {
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	t.Setenv(shell.EnvAuditDir, auditDir)
+
+	server := helperServer(t, "echo")
+	server.Env["MCP_SECRET_TOKEN"] = "mcp-secret-token"
+
+	response, err := Invoke(t.Context(), server, Request{
+		ID:     "req-secret-env",
+		Method: "ping",
+	}, helperTimeout)
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(response.Result, &result))
+	assert.Equal(t, "mcp-secret-token", result["secret_env"])
+
+	ledger, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(ledger), "mcp-secret-token")
+	assert.Contains(t, string(ledger), `"name":"MCP_SECRET_TOKEN"`)
+	assert.Contains(t, string(ledger), `"value":"\u003credacted\u003e"`)
 }
 
 func helperServer(t *testing.T, mode string) Server {
@@ -181,6 +241,11 @@ func TestMCPHelperProcess(_ *testing.T) {
 		runEchoHelper()
 	case "rpc-error":
 		runErrorHelper()
+	case "rpc-error-secret":
+		runSecretErrorHelper()
+	case "stderr-secret-exit":
+		fmt.Fprintf(os.Stderr, "server failed with token %s", os.Getenv("MCP_SECRET_TOKEN"))
+		os.Exit(2)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown helper mode %q", mode)
 		os.Exit(2)
@@ -192,10 +257,11 @@ func TestMCPHelperProcess(_ *testing.T) {
 func runEchoHelper() {
 	request := readHelperRequest()
 	result := map[string]any{
-		"method": request.Method,
-		"params": request.Params,
-		"env":    os.Getenv("MCP_HELPER_ENV"),
-		"cwd":    mustGetwd(),
+		"method":     request.Method,
+		"params":     request.Params,
+		"env":        os.Getenv("MCP_HELPER_ENV"),
+		"secret_env": os.Getenv("MCP_SECRET_TOKEN"),
+		"cwd":        mustGetwd(),
 	}
 	writeHelperResponse(Response{JSONRPC: "2.0", ID: request.ID, Result: mustMarshal(result)})
 }
@@ -203,6 +269,15 @@ func runEchoHelper() {
 func runErrorHelper() {
 	request := readHelperRequest()
 	writeHelperResponse(Response{JSONRPC: "2.0", ID: request.ID, Error: &ResponseError{Code: -32000, Message: "boom"}})
+}
+
+func runSecretErrorHelper() {
+	request := readHelperRequest()
+	writeHelperResponse(Response{
+		JSONRPC: "2.0",
+		ID:      request.ID,
+		Error:   &ResponseError{Code: -32000, Message: "boom " + os.Getenv("MCP_SECRET_TOKEN")},
+	})
 }
 
 func readHelperRequest() Request {

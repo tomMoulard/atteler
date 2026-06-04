@@ -75,6 +75,7 @@ from the same descriptors that route the commands.
 | `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
 | `memory` / `retrieval` | `atteler memory search "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm" --retrieval-source vector`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"`, `atteler memory vector-index docs/research.md` |
 | `code-intel` | `atteler code-intel summary`, `atteler code-intel summary --json`, `atteler code-intel symbol NewRegistry`, `atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/` |
+| `incident` | `atteler incident diagnose --sentry ISSUE-912`, `atteler incident diagnose --incident-file redacted-sentry-event.json`, `atteler incident diagnose --sentry ISSUE-912 --incident-apply-fix --incident-validation-command "go test ./pkg/auth"` |
 | `review` | `atteler review scan`, `atteler review plan`, `atteler review run` |
 | `watch` | `atteler watch scan`, `atteler watch json`, `atteler watch loop` |
 | `plugins` | `atteler plugins list`, `atteler plugins run reviewer/check`, `atteler plugins manifest .atteler/mcp.yaml` |
@@ -927,10 +928,21 @@ destructive allow/deny rules for narrower execution surfaces. Command rules
 inspect both direct process launches and simple command words inside audited
 `bash -lc` strings.
 
-### Review, watch, memory, and code intelligence
+### Incidents, review, watch, memory, and code intelligence
 
 
 ```sh
+atteler incident diagnose --sentry ISSUE-912
+atteler incident diagnose --incident-file redacted-sentry-event.json
+atteler incident diagnose --sentry ISSUE-912 \
+  --incident-apply-fix \
+  --incident-validation-command "go test ./pkg/auth" \
+  --incident-open-pr
+atteler incident diagnose --incident-ref alert-42 \
+  --incident-mcp-manifest .atteler/mcp.yaml \
+  --incident-mcp-server grafana \
+  --incident-mcp-tool get_incident
+
 atteler review scan
 atteler review plan \
   --review-agent quality-reviewer \
@@ -957,6 +969,59 @@ atteler code-intel summary --json
 atteler code-intel symbol NewRegistry
 atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/
 ```
+
+`atteler incident diagnose` normalizes incident context from Sentry, a redacted
+JSON fixture, or an MCP-backed observability connector. Generic JSON/MCP
+payloads recognize common OpenTelemetry and OTLP `resourceSpans` /
+`resourceLogs`, Datadog-like log API/data-array/monitor tags, Grafana Loki,
+Prometheus query/Alertmanager webhook, CloudWatch Logs/Logs Insights/alarm
+events, GCP Cloud Logging/Error Reporting, Kubernetes event/list, GitHub deployment,
+and Azure Monitor/Application Insights shapes, including Log Analytics table
+results and top-level log/event arrays from simple connector exports and MCP
+text, JSON, or resource-text tool content. MCP server credentials that are
+explicitly listed in a manifest server `env` block are passed to that configured
+server and remain redacted in command audit records. The local JSON fixture path also accepts
+newline-delimited JSON log exports. The report links stack frames to local source files,
+correlates local git history when available,
+extracts PR references from matching commits, adds CODEOWNERS-based reviewer
+hints when ownership files are present, summarizes redacted
+request/log/trace/metric/deploy context, records safe repro/validation command
+status, duration, and bounded output excerpts when explicitly supplied, and
+adds local worktree change summaries after the repair loop, compared with the
+pre-repair status when available, so PR bodies can name changed code/test
+files. It emits a test-first fix prompt plus a redacted
+PR body template. Sentry tokens
+are read from `SENTRY_AUTH_TOKEN` by default, then `SENTRY_ACCESS_TOKEN` or
+`SENTRY_TOKEN` as fallbacks, with an override for the token environment-variable
+name rather than a CLI token value. Sentry base URLs default to
+`SENTRY_BASE_URL`, then `SENTRY_HOST`, then the host from a Sentry issue URL,
+then `https://sentry.io`. Generated reports redact secrets, tokens, cookies,
+emails, IPv4/IPv6 addresses, and sensitive request metadata before they are written to stdout,
+files, command audit logs, tests, or PR bodies. Report and PR-body artifact
+paths are resolved under the current workspace, and outside-workspace writes are
+rejected by default.
+User-supplied repro and validation commands are treated as local-only repair
+evidence: they still run through the command policy/audit gate, deny destructive
+patterns, and deny network-like commands unless a future command surface adds an
+explicit approval path. Live incident fetches and optional PR creation use their
+own explicit flags as separate external-system gates.
+
+The apply-fix switch is an explicit approval gate for the expensive,
+credentialed repair loop: after diagnosis and any supplied repro command, the
+redacted fix prompt is handed to the selected Atteler agent so it can create a
+failing regression test, implement the smallest fix, and then run supplied
+validation-command checks before optional PR creation. The repair loop streams
+agent output, so structured JSON/Markdown report output is reserved for
+diagnose-only runs.
+Diagnose-only runs can use the standard structured-output switch or Markdown
+output format for machine-readable reports and PR templates; direct PR creation
+requires the apply-fix gate plus at least one harness-captured validation
+command, and stops on supplied validation failures so Atteler does not open an
+empty or known-failing diagnosis-only PR. PR creation runs through GitHub CLI
+and allows the standard `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and
+`GITHUB_ENTERPRISE_TOKEN` credential environment variables while keeping them
+redacted in command audit records. When GitHub CLI returns a created PR URL,
+Atteler adds the redacted link to the final diagnosis output.
 
 Watch baselines accept either the JSON emitted by `atteler watch json`, a
 `{"findings":[...]}` payload, or a baseline-ref option to scan the git

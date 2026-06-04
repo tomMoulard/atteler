@@ -83,13 +83,19 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 		request.ID = 1
 	}
 
+	serverSecretValues := explicitServerSecretValues(server.Env)
+
 	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
 		Program: strings.TrimSpace(server.Command),
 		Args:    server.Args,
 		Dir:     server.CWD,
 		Env:     server.Env,
 		Mode:    shell.ModeStreaming,
-		Audit:   shell.AuditContext{Caller: "atteler.mcp." + strings.TrimSpace(server.Name)},
+		Policy: &shell.Policy{
+			AllowCredentialEnv: explicitServerEnvNames(server.Env),
+		},
+		SecretValues: serverSecretValues,
+		Audit:        shell.AuditContext{Caller: "atteler.mcp." + strings.TrimSpace(server.Name)},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("authorize mcp server %q: %w", strings.TrimSpace(server.Name), err)
@@ -126,7 +132,7 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 	waitCh := waitFor(cmd)
 	killed, waitErr := finishProcess(ctx, cmd, waitCh)
 
-	stderrText := strings.TrimSpace(<-stderrCh)
+	stderrText := strings.TrimSpace(redactServerSecretValues(<-stderrCh, serverSecretValues))
 	if finishErr := invocation.Finish(shell.FinishOptions{Stderr: stderrText, Error: waitErr, OutputCapture: shell.OutputNotCaptured, OutputNote: "MCP JSON-RPC protocol output was not captured"}); finishErr != nil {
 		return nil, fmt.Errorf("audit mcp server %q: %w", strings.TrimSpace(server.Name), finishErr)
 	}
@@ -150,10 +156,66 @@ func Invoke(ctx context.Context, server Server, request Request, timeout time.Du
 	}
 
 	if response.Error != nil {
+		response.Error.Message = redactServerSecretValues(response.Error.Message, serverSecretValues)
 		return response, fmt.Errorf("mcp server %q returned error %d: %s", strings.TrimSpace(server.Name), response.Error.Code, response.Error.Message)
 	}
 
 	return response, nil
+}
+
+func explicitServerEnvNames(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(env))
+	for name := range env {
+		if strings.TrimSpace(name) != "" {
+			names = append(names, name)
+		}
+	}
+
+	return names
+}
+
+func explicitServerSecretValues(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+
+	values := make([]string, 0, len(env))
+	for name, value := range env {
+		value = strings.TrimSpace(value)
+		if value != "" && mcpCredentialEnvName(name) {
+			values = append(values, value)
+		}
+	}
+
+	return values
+}
+
+func mcpCredentialEnvName(name string) bool {
+	name = strings.ToUpper(strings.TrimSpace(name))
+	for _, marker := range []string{"TOKEN", "SECRET", "KEY", "AUTH", "PASSWORD", "PASSWD", "COOKIE", "CREDENTIAL", "PRIVATE"} {
+		if strings.Contains(name, marker) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func redactServerSecretValues(text string, secrets []string) string {
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			continue
+		}
+
+		text = strings.ReplaceAll(text, secret, "<redacted:mcp_server_env>")
+	}
+
+	return text
 }
 
 func requireInvokeContext(ctx context.Context) error {

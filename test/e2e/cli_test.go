@@ -237,6 +237,7 @@ printf 'plugin-check\n'
 		"agents",
 		"memory",
 		"code-intel",
+		"incident",
 		"review",
 		"watch",
 		"plugins",
@@ -323,6 +324,22 @@ printf 'plugin-check\n'
 
 	result = runOK(t, runSpec{dir: workDir}, "code-intel", "summary")
 	assertContains(t, result.stdout, "files=")
+
+	incidentPath := filepath.Join(workDir, "incident.json")
+	writeFile(t, incidentPath, `{
+  "source": "file",
+  "reference": "e2e-incident",
+  "service": "api-gateway",
+  "message": "nil OAuth state for alice@example.com access_token=secret-token",
+  "stack_trace": [{"file": "main.go", "line": 1, "function": "main"}]
+}`)
+	result = runOK(t, runSpec{dir: workDir}, "incident", "diagnose", "--incident-file", incidentPath, "--json")
+	assertContains(t, result.stdout, `"reference": "e2e-incident"`)
+	assertContains(t, result.stdout, `"redaction_policy":`)
+	assertContains(t, result.stdout, "main.go:1")
+	assertContains(t, result.stdout, "[REDACTED")
+	assertNotContains(t, result.stdout, "alice@example.com")
+	assertNotContains(t, result.stdout, "secret-token")
 
 	result = runOK(t, runSpec{dir: workDir}, "review", "scan")
 	assertContains(t, result.stdout, "reviewer: watch-scan")

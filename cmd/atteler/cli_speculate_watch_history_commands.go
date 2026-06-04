@@ -1222,9 +1222,26 @@ func runGitHistorySearch(ctx context.Context, root, query string, limit int) err
 }
 
 func gitHistoryLog(ctx context.Context, root string) (string, error) {
+	return gitHistoryLogWithOptions(ctx, root, gitHistoryLogOptions{
+		Audit: shell.AuditContext{Caller: "atteler.git_history"},
+	})
+}
+
+type gitHistoryLogOptions struct {
+	Audit        shell.AuditContext
+	RedactOutput func(string) string
+	OutputNote   string
+}
+
+func gitHistoryLogWithOptions(ctx context.Context, root string, opts gitHistoryLogOptions) (string, error) {
 	var stdout, stderr bytes.Buffer
 
 	args := []string{"log", "--name-only", "--date=iso-strict", "--pretty=format:%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e", "--"}
+	audit := opts.Audit
+
+	if strings.TrimSpace(audit.Caller) == "" {
+		audit.Caller = "atteler.git_history"
+	}
 
 	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
 		Program: "git",
@@ -1233,14 +1250,28 @@ func gitHistoryLog(ctx context.Context, root string) (string, error) {
 		Stdout:  &stdout,
 		Stderr:  &stderr,
 		Mode:    shell.ModeCaptured,
-		Audit:   shell.AuditContext{Caller: "atteler.git_history"},
+		Audit:   audit,
 	})
 	if err != nil {
 		return "", fmt.Errorf("git history: authorize git log: %w", err)
 	}
 
 	runErr := cmd.Run()
-	if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Stderr: stderr.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+	auditStdout := stdout.String()
+	auditStderr := stderr.String()
+
+	if opts.RedactOutput != nil {
+		auditStdout = opts.RedactOutput(auditStdout)
+		auditStderr = opts.RedactOutput(auditStderr)
+	}
+
+	if finishErr := invocation.Finish(shell.FinishOptions{
+		Stdout:        auditStdout,
+		Stderr:        auditStderr,
+		Error:         runErr,
+		OutputCapture: shell.OutputCaptured,
+		OutputNote:    opts.OutputNote,
+	}); finishErr != nil {
 		return "", fmt.Errorf("git history: audit git log: %w", finishErr)
 	}
 

@@ -37,6 +37,7 @@ func TestPrintTopLevelHelp_ShrinksFlagCatalogToDomains(t *testing.T) {
 		"agents",
 		"memory/retrieval",
 		"code-intel",
+		"incident",
 		"review",
 		"watch",
 		"plugins",
@@ -251,6 +252,7 @@ func TestREADME_CLIDocumentationDefersToGeneratedHelp(t *testing.T) {
 		"agents",
 		"memory",
 		"code-intel",
+		"incident",
 		"review",
 		"watch",
 		"plugins",
@@ -263,7 +265,7 @@ func TestREADME_CLIDocumentationDefersToGeneratedHelp(t *testing.T) {
 	// README should show representative examples and defer the exhaustive
 	// compatibility catalog to generated/tested help output.
 	legacyFlagMentions := regexp.MustCompile(`--[a-z0-9][a-z0-9-]+`).FindAllString(readme, -1)
-	assert.LessOrEqual(t, len(legacyFlagMentions), 80)
+	assert.LessOrEqual(t, len(legacyFlagMentions), 95)
 }
 
 func TestREADME_GroupedDomainTableMatchesHelpMetadata(t *testing.T) {
@@ -382,6 +384,7 @@ func TestCLIHelpDomains_MatchAcceptanceDomains(t *testing.T) {
 		"agents",
 		"memory/retrieval",
 		"code-intel",
+		"incident",
 		"review",
 		"watch",
 		"plugins",

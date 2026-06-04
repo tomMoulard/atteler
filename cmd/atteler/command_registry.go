@@ -186,6 +186,10 @@ func validateCLICommandSelection(opts cliOptions) error {
 		return errors.New("--headless-private-log requires --headless")
 	}
 
+	if err := validateIncidentCommandSelection(opts); err != nil {
+		return err
+	}
+
 	matches := matchingRegistryCommands(commandRegistry, tierAny, opts)
 	inlineCommands := buildInlineCommandRegistry()
 

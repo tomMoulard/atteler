@@ -28,6 +28,7 @@ const (
 	commandEffectFilesystemWrite = "filesystem-write"
 	commandEffectGitRead         = "git-read"
 	commandEffectLLMProviderRead = "llm-provider-read"
+	commandEffectNetworkRead     = "network-read"
 	commandEffectProcessExecute  = "process-execute"
 	commandEffectSessionRead     = "session-store-read"
 	commandEffectSessionWrite    = "session-store-write"
@@ -201,6 +202,12 @@ func withOverrides(names ...string) func(*commandContract) {
 func withExamples(examples ...string) func(*commandContract) {
 	return func(contract *commandContract) {
 		contract.Examples = normalizeContractList(examples)
+	}
+}
+
+func withFixtures(fixtures ...commandFixture) func(*commandContract) {
+	return func(contract *commandContract) {
+		contract.Fixtures = append([]commandFixture(nil), fixtures...)
 	}
 }
 
@@ -453,6 +460,7 @@ func isKnownCommandSideEffect(value string) bool {
 		commandEffectFilesystemWrite,
 		commandEffectGitRead,
 		commandEffectLLMProviderRead,
+		commandEffectNetworkRead,
 		commandEffectProcessExecute,
 		commandEffectSessionRead,
 		commandEffectSessionWrite,
