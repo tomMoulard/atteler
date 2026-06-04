@@ -344,6 +344,10 @@ func normalizeEventForEmit(ctx context.Context, event Event) (Event, error) {
 		return Event{}, fmt.Errorf("events: context already done: %w", err)
 	}
 
+	return normalizeEventFields(event), nil
+}
+
+func normalizeEventFields(event Event) Event {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
@@ -356,7 +360,7 @@ func normalizeEventForEmit(ctx context.Context, event Event) (Event, error) {
 		event.EventID = nextEventID(event.Timestamp)
 	}
 
-	return event, nil
+	return event
 }
 
 // Wait waits for non-blocking hook deliveries queued before this call to finish.

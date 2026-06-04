@@ -1736,23 +1736,45 @@ func TestRunner_EmitMarshalFailureRedactsEventType(t *testing.T) {
 	assert.NotContains(t, got, "sk-marshalerrorsecret")
 }
 
-func TestEmitFromContextBestEffortLogsCanceledContext(t *testing.T) {
+func TestEmitFromContextBestEffortLogsAndLedgersCanceledContext(t *testing.T) {
 	t.Parallel()
 
-	var out bytes.Buffer
+	var (
+		out    bytes.Buffer
+		ledger bytes.Buffer
+	)
+
+	dir := t.TempDir()
+	hookOut := filepath.Join(dir, "hook.json")
 
 	ctx := WithEmitter(
 		context.Background(),
-		NewRunnerWithLogger(nil, &out),
-		Event{Model: "gpt-test"},
+		NewRunnerWithOptions(map[string][]config.HookConfig{
+			ProviderRetry: {{
+				Command: []string{os.Args[0], "-test.run=^TestHookHelperProcess$"},
+				Env: map[string]string{
+					"ATTELER_TEST_HOOK": "1",
+					"ATTELER_TEST_OUT":  hookOut,
+				},
+				TimeoutSeconds: 10,
+				Blocking:       true,
+			}},
+		}, RunnerOptions{
+			LogWriter:    &out,
+			LedgerWriter: &ledger,
+		}),
+		Event{SessionID: "session-1", Model: "gpt-test"},
 	)
 	ctx, cancel := context.WithCancel(ctx)
 	cancel()
 
 	err := EmitFromContextBestEffort(ctx, Event{
-		Type: ProviderRetry,
+		Type:    ProviderRetry,
+		Content: "retry payload token=sk-besteffortpayloadsecret1234567890",
 		Metadata: map[string]string{
-			"outcome": "canceled",
+			"outcome":    "canceled",
+			"request_id": "req-sk-besteffortrequestsecret1234567890",
+			"raw":        "sk-besteffortmetasecret1234567890",
 		},
 	})
 	require.Error(t, err)
@@ -1760,8 +1782,40 @@ func TestEmitFromContextBestEffortLogsCanceledContext(t *testing.T) {
 
 	logs := out.String()
 	assert.Contains(t, logs, "event:provider_retry")
+	assert.Contains(t, logs, "session=session-1")
 	assert.Contains(t, logs, "model=gpt-test")
 	assert.Contains(t, logs, "outcome=canceled")
+	assert.Contains(t, logs, "request_id=req-"+redactedValue)
+
+	records := readLedgerRecords(t, ledger.String())
+	require.Len(t, records, 1)
+	require.NotNil(t, records[0].Event)
+	assert.Equal(t, LedgerPhaseEvent, records[0].Phase)
+	assert.Equal(t, ProviderRetry, records[0].Event.Type)
+	assert.Equal(t, EventSchemaVersion, records[0].Event.SchemaVersion)
+	assert.NotEmpty(t, records[0].Event.EventID)
+	assert.False(t, records[0].Event.Timestamp.IsZero())
+	assert.Equal(t, "session-1", records[0].Event.SessionID)
+	assert.Equal(t, "gpt-test", records[0].Event.Model)
+	assert.Equal(t, "canceled", records[0].Event.Metadata["outcome"])
+	assert.Equal(t, "req-"+redactedValue, records[0].Event.Metadata["request_id"])
+	assert.Empty(t, records[0].Event.Content)
+	assert.True(t, records[0].Event.Redacted)
+
+	_, hookErr := os.Stat(hookOut)
+	require.ErrorIs(t, hookErr, os.ErrNotExist, "canceled best-effort emission must not run hooks")
+
+	for _, got := range []string{logs, ledger.String()} {
+		for _, leaked := range []string{
+			"sk-besteffortpayloadsecret",
+			"retry payload",
+			"sk-besteffortrequestsecret",
+			"sk-besteffortmetasecret",
+			"raw",
+		} {
+			assert.NotContains(t, got, leaked)
+		}
+	}
 }
 
 func TestLogger_LogsAnyEvent(t *testing.T) {

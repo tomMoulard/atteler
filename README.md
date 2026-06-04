@@ -721,8 +721,10 @@ hooks:
   after `max_attempts` are exhausted. Attempts are capped at 10 to keep delivery
   bounded, and retry backoff is capped at 30 seconds. Non-blocking hooks detach
   from the caller's cancellation context but remain bounded by their own hook
-  timeout. Hook timeout failures are classified in the durable ledger as
-  `deadline_exceeded` or `canceled`.
+  timeout. Cancellation-sensitive lifecycle events can still be recorded by the
+  compact logger and durable ledger after the request context is done; configured
+  hooks are skipped on that canceled best-effort path. Hook timeout failures are
+  classified in the durable ledger as `deadline_exceeded` or `canceled`.
 - Hook commands run through Atteler's local shell policy gate before process
   start. Policy denials such as destructive command patterns are recorded as
   `denied` hook attempts and, after retries are exhausted, dead-letter records.

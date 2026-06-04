@@ -742,11 +742,17 @@ func TestCompleteWithRetry_CanceledRetryAttemptReportsFinalProviderError(t *test
 func TestCompleteWithRetry_EmitsCanceledOutcomeAfterContextCancellation(t *testing.T) {
 	t.Parallel()
 
-	var out bytes.Buffer
+	var (
+		out    bytes.Buffer
+		ledger bytes.Buffer
+	)
 
 	baseCtx := events.WithEmitter(
 		context.Background(),
-		events.NewRunnerWithLogger(nil, &out),
+		events.NewRunnerWithOptions(nil, events.RunnerOptions{
+			LogWriter:    &out,
+			LedgerWriter: &ledger,
+		}),
 		events.Event{},
 	)
 
@@ -782,6 +788,17 @@ func TestCompleteWithRetry_EmitsCanceledOutcomeAfterContextCancellation(t *testi
 	assert.Contains(t, logs, "outcome=canceled")
 	assert.Contains(t, logs, "provider=openai")
 	assert.Contains(t, logs, "model=gpt-test")
+
+	records := readRetryLifecycleLedgerRecords(t, ledger.String())
+	require.Len(t, records, 2)
+	require.NotNil(t, records[0].Event)
+	require.NotNil(t, records[1].Event)
+	assert.Equal(t, events.ProviderRetry, records[0].Event.Type)
+	assert.Equal(t, retryOutcomeScheduled, records[0].Event.Metadata["outcome"])
+	assert.Equal(t, events.ProviderRetry, records[1].Event.Type)
+	assert.Equal(t, retryOutcomeCanceled, records[1].Event.Metadata["outcome"])
+	assert.NotEmpty(t, records[1].Event.EventID)
+	assert.False(t, records[1].Event.Timestamp.IsZero())
 }
 
 func TestCompleteWithRetry_EmitsRetryLifecycleEvents(t *testing.T) {
@@ -901,6 +918,9 @@ func TestCompleteWithRetry_EmitsProviderRetryHookPayload(t *testing.T) {
 				"ATTELER_LLM_RETRY_HOOK_OUT": out,
 			},
 			TimeoutSeconds: 2,
+			// This test asserts provider_retry payload shape, not delivery mode.
+			// Keep helpers sequential so race-mode subprocesses do not overlap.
+			Blocking: true,
 		}},
 	})
 
@@ -1317,6 +1337,26 @@ func assertLogLineContains(t *testing.T, logs string, required ...string) {
 	}
 
 	assert.Failf(t, "missing log line", "no log line contained %v in:\n%s", required, logs)
+}
+
+func readRetryLifecycleLedgerRecords(t *testing.T, data string) []events.LedgerRecord {
+	t.Helper()
+
+	lines := strings.Split(strings.TrimSpace(data), "\n")
+	records := make([]events.LedgerRecord, 0, len(lines))
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record events.LedgerRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+
+		records = append(records, record)
+	}
+
+	return records
 }
 
 func retryHookHelper(t *testing.T) {
