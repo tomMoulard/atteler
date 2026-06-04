@@ -3241,6 +3241,59 @@ func TestRegistry_ModelRolePreferLocalDisambiguatesBareRuntimeCollision(t *testi
 	assert.NotContains(t, formatModelRoleRejections(resolution.Decision), modelroute.ReasonAmbiguousMetadata)
 }
 
+func TestRegistry_ModelRolePrefersUniqueConfiguredProviderForBareRuntimeCollision(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+	groq := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   "groq",
+			models: []string{"gpt-4.1-mini"},
+			resp:   &Response{Content: "configured compatible"},
+		},
+	}
+
+	r.Register(openAI)
+	r.Register(groq)
+
+	r.mu.Lock()
+	r.upsertReadinessProviderLocked(ProviderReadiness{
+		Name:       providerOpenAI,
+		Status:     ProviderStatusRegistered,
+		Registered: true,
+	})
+	r.upsertReadinessProviderLocked(ProviderReadiness{
+		Name:       "groq",
+		Status:     ProviderStatusRegistered,
+		Registered: true,
+		Configured: true,
+	})
+	r.mu.Unlock()
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "gpt-4.1-mini",
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "configured compatible", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, groq.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", groq.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "groq/gpt-4.1-mini", resolution.SelectedModel)
+}
+
 func TestRegistry_ModelRoleAllowsOpenAICompatibleUnknownProviderModel(t *testing.T) {
 	t.Parallel()
 

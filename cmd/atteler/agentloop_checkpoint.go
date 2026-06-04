@@ -234,9 +234,11 @@ func agentLoopBudgetModelSettingsEventMetadata(budget llm.AgentLoopBudget, reaso
 func sessionRunEventMetadata(budget llm.AgentLoopBudget, level autonomy.Level, modelSettings ...string) map[string]string {
 	reasoningLevel := ""
 	modelMode := ""
+
 	if len(modelSettings) > 0 {
 		reasoningLevel = modelSettings[0]
 	}
+
 	if len(modelSettings) > 1 {
 		modelMode = modelSettings[1]
 	}
@@ -245,6 +247,7 @@ func sessionRunEventMetadata(budget llm.AgentLoopBudget, level autonomy.Level, m
 	if metadata == nil {
 		metadata = make(map[string]string, 1)
 	}
+
 	metadata["autonomy"] = autonomy.Normalize(level).String()
 
 	return metadata

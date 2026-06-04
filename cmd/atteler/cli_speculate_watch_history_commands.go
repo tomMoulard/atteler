@@ -93,6 +93,7 @@ func (rc *registryCompleter) Complete(ctx context.Context, branch, systemPrompt,
 	}
 
 	requestModel := selectedModel
+
 	fallbackModels := append([]string(nil), rc.fallbackModels...)
 	if activeAgent.ok && !rc.modelLocked {
 		requestModel, fallbackModels = effectiveAgentModelSelection(selectedModel, rc.fallbackModels, activeAgent)

@@ -269,6 +269,36 @@ func runOnce(
 	)
 }
 
+func prepareRunOnceExecutionOptions(
+	store *session.Store,
+	options runOnceExecutionOptions,
+	sessionState session.Session,
+	prompt string,
+	selectedModel string,
+	selectedAgent string,
+	agents *agent.Registry,
+	generationDefaults generationSettings,
+	generationOverrides generationSettings,
+) (runOnceExecutionOptions, string, error) {
+	options.Autonomy = autonomy.Normalize(options.Autonomy)
+	modelMode := headlessPreflightModelMode(generationDefaults, generationOverrides, selectedAgent, agents)
+
+	if err := validateRunOnceAutonomyOptions(options); err != nil {
+		recordHeadlessPreflightFailure(store, options, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
+
+		return options, "", err
+	}
+
+	outputFormat, err := normalizeOutputFormat(options.OutputFormat)
+	if err != nil {
+		recordHeadlessPreflightFailure(store, options, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
+
+		return options, "", err
+	}
+
+	return options, outputFormat, nil
+}
+
 func runOnceWithOptions(
 	ctx context.Context,
 	reg *llm.Registry,
@@ -291,28 +321,18 @@ func runOnceWithOptions(
 	modelLocked bool,
 	prompt string,
 ) error {
-	executionOptions.Autonomy = autonomy.Normalize(executionOptions.Autonomy)
-
-	if err := validateRunOnceAutonomyOptions(executionOptions); err != nil {
-		modelMode := headlessPreflightModelMode(generationDefaults, generationOverrides, selectedAgent, agents)
-		recordHeadlessPreflightFailure(store, executionOptions, sessionState, prompt, selectedModel, modelMode, selectedAgent, err)
-
-		return err
-	}
-
-	outputFormat, err := normalizeOutputFormat(executionOptions.OutputFormat)
+	executionOptions, outputFormat, err := prepareRunOnceExecutionOptions(
+		store,
+		executionOptions,
+		sessionState,
+		prompt,
+		selectedModel,
+		selectedAgent,
+		agents,
+		generationDefaults,
+		generationOverrides,
+	)
 	if err != nil {
-		recordHeadlessPreflightFailure(
-			store,
-			executionOptions,
-			sessionState,
-			prompt,
-			selectedModel,
-			headlessPreflightModelMode(generationDefaults, generationOverrides, selectedAgent, agents),
-			selectedAgent,
-			err,
-		)
-
 		return err
 	}
 

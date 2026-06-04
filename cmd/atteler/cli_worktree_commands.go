@@ -82,6 +82,7 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string, policy cliWo
 	fmt.Fprintf(os.Stderr, "worktree: merging %s into %s...\n", info.Branch, info.BaseBranch)
 
 	ctx = worktree.WithAuditContext(ctx, worktreeShellAuditContext(sess, level))
+
 	result, err := worktree.MergeWithResultContext(ctx, cwd, info, worktree.MergeOptions{
 		AutoMerge:               true,
 		Strategy:                worktree.MergeStrategyMerge,
