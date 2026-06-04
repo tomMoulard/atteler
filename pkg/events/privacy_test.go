@@ -356,6 +356,29 @@ func TestSanitizeEventForHook_ErrorKeepsProviderFailureMetadata(t *testing.T) {
 	assert.True(t, got.Redacted)
 }
 
+func TestSanitizeEventForHook_AssistantKeepsProviderFailureMetadata(t *testing.T) {
+	t.Parallel()
+
+	got := sanitizeEventForHook(Event{
+		Type:    AssistantMessage,
+		Content: "fallback succeeded after a provider rate limit",
+		Role:    "assistant",
+		Metadata: map[string]string{
+			"fallback_failure_classifications": "claude-code=transient_rate_limit",
+			"fallback_attempts":                "claude-code/claude-opus-4-7=transient_rate_limit",
+			"rate_limited_providers":           "claude-code",
+			"token":                            "sk-metasecret1234567890",
+		},
+	}, PayloadMetadata)
+
+	assert.Empty(t, got.Content)
+	assert.Equal(t, "assistant", got.Role)
+	assert.Equal(t, "claude-code=transient_rate_limit", got.Metadata["fallback_failure_classifications"])
+	assert.Equal(t, "claude-code", got.Metadata["rate_limited_providers"])
+	assert.NotContains(t, got.Metadata, "token")
+	assert.True(t, got.Redacted)
+}
+
 func TestFormatLine_ErrorIncludesProviderFailureMetadata(t *testing.T) {
 	t.Parallel()
 

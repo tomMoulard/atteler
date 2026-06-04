@@ -664,7 +664,7 @@ func finishRunOnceSuccess(
 			headlessRun.Model = resp.Model
 		}
 
-		recordHeadlessAssistantMessage(store, headlessRun, len(resp.Content))
+		recordHeadlessAssistantMessage(store, headlessRun, len(resp.Content), resp.ProviderFailureMetadata())
 		finishHeadlessRun(store, headlessRun, session.HeadlessStatusCompleted, "")
 
 		if err := headlessCompletionError(headlessRun); err != nil {
@@ -1003,6 +1003,7 @@ func saveRunOnceAssistantResponse(
 		Model:       resp.Model,
 		Role:        string(llm.RoleAssistant),
 		Content:     resp.Content,
+		Metadata:    resp.ProviderFailureMetadata(),
 	})
 
 	return nil
@@ -1047,7 +1048,12 @@ func recordHeadlessPreflightFailure(
 	finishHeadlessRun(store, run, session.HeadlessStatusFailed, failure.Error())
 }
 
-func recordHeadlessAssistantMessage(store *session.Store, run *session.HeadlessRun, contentBytes int) {
+func recordHeadlessAssistantMessage(
+	store *session.Store,
+	run *session.HeadlessRun,
+	contentBytes int,
+	providerFailureMetadata ...map[string]string,
+) {
 	if store == nil || run == nil {
 		return
 	}
@@ -1116,13 +1122,25 @@ func recordHeadlessAssistantMessage(store *session.Store, run *session.HeadlessR
 		PID:             run.PID,
 		ParentPID:       run.ParentPID,
 		ProcessGroupID:  run.ProcessGroupID,
-		Metadata: map[string]string{
-			"bytes": strconv.Itoa(contentBytes),
-		},
+		Metadata:        headlessAssistantMetadata(contentBytes, providerFailureMetadata...),
 	}
 	if err := store.AppendHeadlessEvent(run.ID, event); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
+}
+
+func headlessAssistantMetadata(contentBytes int, providerFailureMetadata ...map[string]string) map[string]string {
+	metadata := map[string]string{
+		"bytes": strconv.Itoa(contentBytes),
+	}
+
+	for _, next := range providerFailureMetadata {
+		maps.Copy(metadata, next)
+	}
+
+	metadata["bytes"] = strconv.Itoa(contentBytes)
+
+	return metadata
 }
 
 func mergeHeadlessRunForAssistantRecording(run *session.HeadlessRun, current session.HeadlessRun) {

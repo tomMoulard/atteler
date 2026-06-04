@@ -2874,6 +2874,32 @@ func TestRecordHeadlessAssistantMessageRevivesOrphanedRun(t *testing.T) {
 	assert.Empty(t, headlessEvents[0].OrphanedReason)
 }
 
+func TestRecordHeadlessAssistantMessageIncludesProviderFailureMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	run := session.HeadlessRun{
+		ID:     "test-headless-assistant-provider-metadata",
+		Model:  "anthropic/claude-sonnet-4-20250514",
+		Status: session.HeadlessStatusRunning,
+	}
+	require.NoError(t, store.SaveHeadlessRun(run))
+
+	recordHeadlessAssistantMessage(store, &run, 42, map[string]string{
+		"fallback_failure_classifications": "claude-code=transient_rate_limit",
+		"rate_limited_providers":           "claude-code",
+		"bytes":                            "should-not-override-response-size",
+	})
+
+	headlessEvents, err := store.ReadHeadlessEvents(run.ID)
+	require.NoError(t, err)
+	require.Len(t, headlessEvents, 1)
+	assert.Equal(t, session.HeadlessEventAssistantMessage, headlessEvents[0].Type)
+	assert.Equal(t, "42", headlessEvents[0].Metadata["bytes"])
+	assert.Equal(t, "claude-code=transient_rate_limit", headlessEvents[0].Metadata["fallback_failure_classifications"])
+	assert.Equal(t, "claude-code", headlessEvents[0].Metadata["rate_limited_providers"])
+}
+
 func TestFormatHeadlessRun(t *testing.T) {
 	t.Parallel()
 

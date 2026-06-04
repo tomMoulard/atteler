@@ -129,6 +129,17 @@ type Response struct {
 	OutputTokens          int
 }
 
+// ProviderFailureMetadata returns classified provider failures observed before
+// this response, such as fallback attempts skipped because another provider was
+// rate-limited. The returned map is a copy and is safe for callers to mutate.
+func (r *Response) ProviderFailureMetadata() map[string]string {
+	if r == nil {
+		return nil
+	}
+
+	return cloneStringMap(r.metadata)
+}
+
 // WantsToolUse returns true if the model stopped because it wants to call tools.
 func (r *Response) WantsToolUse() bool {
 	return r.StopReason == StopToolUse || len(r.ToolCalls) > 0
@@ -576,6 +587,7 @@ func (r *Registry) completeResolved(ctx context.Context, params CompleteParams, 
 	r.mu.RLock()
 	providerRetryCfg := r.retryPolicyForProviderLocked(p.Name())
 	r.mu.RUnlock()
+
 	retryCfg = mergeRouteRetryConfig(providerRetryCfg, retryCfg)
 
 	emitToolExecute(ctx, p, params, adjustments)

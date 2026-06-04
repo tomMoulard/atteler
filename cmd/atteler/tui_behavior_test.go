@@ -232,6 +232,36 @@ func (p failingIdleSuggestionProvider) Complete(context.Context, llm.CompletePar
 
 func (p failingIdleSuggestionProvider) ModelContextWindow(string) int { return 0 }
 
+type fallbackMetadataTestProvider struct {
+	err      error
+	response string
+	name     string
+	model    string
+}
+
+func (p fallbackMetadataTestProvider) Name() string { return p.name }
+
+func (p fallbackMetadataTestProvider) Models() []string { return []string{p.model} }
+
+func (p fallbackMetadataTestProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p fallbackMetadataTestProvider) HealthCheck(context.Context) error { return nil }
+
+func (p fallbackMetadataTestProvider) Complete(context.Context, llm.CompleteParams) (*llm.Response, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+
+	return &llm.Response{
+		Content: p.response,
+		Model:   p.model,
+	}, nil
+}
+
+func (p fallbackMetadataTestProvider) ModelContextWindow(string) int { return 0 }
+
 type capturingIdleSuggestionProvider struct {
 	params       *llm.CompleteParams
 	response     string
@@ -3445,6 +3475,63 @@ func TestLLMErrorEventIncludesProviderFailureMetadata(t *testing.T) {
 	assert.Equal(t, "suggest=permanent_error", event.Metadata["fallback_failure_classifications"])
 	assert.Equal(t, "suggest/model (static)=permanent_error", event.Metadata["fallback_attempts"])
 	assert.Equal(t, "suggest", event.Metadata["permanent_error_providers"])
+}
+
+func TestCallLLMIncludesSuccessfulFallbackFailureMetadata(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(fallbackMetadataTestProvider{
+		err:   errors.New(`claude code: HTTP 429: {"error":{"type":"rate_limit_error"}}`),
+		name:  "claude-code",
+		model: "claude-opus-4-7",
+	})
+	registry.Register(fallbackMetadataTestProvider{
+		response: "fallback ok",
+		name:     "anthropic",
+		model:    "claude-sonnet-4-20250514",
+	})
+
+	msg, ok := callLLM(context.Background(), registry, llmRequest{
+		hookRunner:     events.NewRunner(nil),
+		model:          "claude-code/claude-opus-4-7",
+		fallbackModels: []string{"anthropic/claude-sonnet-4-20250514"},
+		messages:       []llm.Message{{Role: llm.RoleUser, Content: "hello"}},
+	})().(llmResponseMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+	assert.Equal(t, "fallback ok", msg.content)
+	require.NotEmpty(t, msg.providerFailureMetadata)
+	assert.Contains(t, msg.providerFailureMetadata["fallback_failure_classifications"], "claude-code=transient_rate_limit")
+	assert.Equal(t, "claude-code", msg.providerFailureMetadata["rate_limited_providers"])
+}
+
+func TestAssistantMessageEventIncludesProviderFailureMetadata(t *testing.T) {
+	t.Parallel()
+
+	sessionState := session.New("claude-code/claude-opus-4-7", nil)
+	sessionState.DefaultAgent = testReviewerName
+	m := model{
+		sessionState: sessionState,
+		sessionPath:  "/tmp/session.jsonl",
+	}
+
+	event := m.assistantMessageEvent(llmResponseMsg{
+		content: "fallback ok",
+		model:   "anthropic/claude-sonnet-4-20250514",
+		providerFailureMetadata: map[string]string{
+			"fallback_failure_classifications": "claude-code=transient_rate_limit",
+			"rate_limited_providers":           "claude-code",
+		},
+	})
+
+	assert.Equal(t, events.AssistantMessage, event.Type)
+	assert.Equal(t, testReviewerName, event.Agent)
+	assert.Equal(t, "anthropic/claude-sonnet-4-20250514", event.Model)
+	assert.Equal(t, "fallback ok", event.Content)
+	require.NotNil(t, event.Metadata)
+	assert.Equal(t, "claude-code=transient_rate_limit", event.Metadata["fallback_failure_classifications"])
+	assert.Equal(t, "claude-code", event.Metadata["rate_limited_providers"])
 }
 
 func TestLLMToolLogCommands_SkipsBufferedLogsAfterLiveStreaming(t *testing.T) {

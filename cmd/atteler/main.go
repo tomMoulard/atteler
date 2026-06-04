@@ -131,16 +131,17 @@ var terminalTitleSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "�
 
 // llmResponseMsg is sent when the LLM call completes.
 type llmResponseMsg struct {
-	err           error
-	completedAt   time.Time
-	content       string
-	provider      string
-	model         string
-	eventLines    []string
-	routeDecision *modelroute.Decision
-	toolLog       []string // tool call summaries (command + truncated output)
-	tokenUsage    tokenUsage
-	liveEvents    bool
+	err                     error
+	completedAt             time.Time
+	content                 string
+	provider                string
+	model                   string
+	eventLines              []string
+	providerFailureMetadata map[string]string
+	routeDecision           *modelroute.Decision
+	toolLog                 []string // tool call summaries (command + truncated output)
+	tokenUsage              tokenUsage
+	liveEvents              bool
 }
 
 type llmEventLineMsg struct {

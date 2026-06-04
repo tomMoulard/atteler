@@ -51,8 +51,9 @@ var eventSchemas = map[string]eventSchema{
 		},
 	}),
 	AssistantMessage: lifecycleEventSchema(eventSchema{
-		Content: true,
-		Role:    true,
+		Content:  true,
+		Role:     true,
+		Metadata: providerFailureMetadataSchema(),
 	}),
 	CommandExecute: lifecycleEventSchema(eventSchema{
 		Content: true,
@@ -122,20 +123,8 @@ var eventSchemas = map[string]eventSchema{
 		},
 	}),
 	Error: lifecycleEventSchema(eventSchema{
-		Error: true,
-		Metadata: map[string]metadataPolicy{
-			"authentication_error_providers":     metadataSafe,
-			"configuration_error_providers":      metadataSafe,
-			"exhausted_fallback_route_providers": metadataSafe,
-			"fallback_attempts":                  metadataSafe,
-			"fallback_failure_classifications":   metadataSafe,
-			"fallback_rate_limit_scopes":         metadataSafe,
-			"permanent_error_providers":          metadataSafe,
-			"provider_not_ready_providers":       metadataSafe,
-			"provider_readiness":                 metadataSafe,
-			"rate_limited_providers":             metadataSafe,
-			"transient_error_providers":          metadataSafe,
-		},
+		Error:    true,
+		Metadata: providerFailureMetadataSchema(),
 	}),
 	FileRead: lifecycleEventSchema(eventSchema{
 		Metadata: fileReferenceMetadataSchema(),
@@ -286,6 +275,22 @@ func fileReferenceMetadataSchema() map[string]metadataPolicy {
 		"bytes":     metadataSafe,
 		"truncated": metadataSafe,
 		"path":      metadataSensitive,
+	}
+}
+
+func providerFailureMetadataSchema() map[string]metadataPolicy {
+	return map[string]metadataPolicy{
+		"authentication_error_providers":     metadataSafe,
+		"configuration_error_providers":      metadataSafe,
+		"exhausted_fallback_route_providers": metadataSafe,
+		"fallback_attempts":                  metadataSafe,
+		"fallback_failure_classifications":   metadataSafe,
+		"fallback_rate_limit_scopes":         metadataSafe,
+		"permanent_error_providers":          metadataSafe,
+		"provider_not_ready_providers":       metadataSafe,
+		"provider_readiness":                 metadataSafe,
+		"rate_limited_providers":             metadataSafe,
+		"transient_error_providers":          metadataSafe,
 	}
 }
 
