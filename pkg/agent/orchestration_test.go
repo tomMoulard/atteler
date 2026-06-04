@@ -101,6 +101,32 @@ func TestRegistry_PlanOrchestration_OverlappingCapabilitiesPreferSpecificIntent(
 	assert.Equal(t, ParticipantSourceCapability, plan.Participants[0].Source)
 	assert.Equal(t, "integration test", plan.Participants[0].Pattern)
 	assert.Greater(t, plan.Participants[0].Score, candidateScore(t, plan, "aaa-general"))
+	assert.False(t, plan.Ambiguous())
+}
+
+func TestRegistry_PlanOrchestration_SpecificCapabilityCanBeatGenericTrigger(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"aaa-general": {
+			Triggers: []string{"test"},
+		},
+		"zzz-specialist": {
+			Capabilities: []string{"integration test"},
+		},
+	})
+
+	plan, err := registry.PlanOrchestration(OrchestrationRequest{
+		Prompt:          "run the integration test suite",
+		MaxParticipants: 1,
+	})
+	require.NoError(t, err)
+
+	assertParticipantNames(t, plan, []string{"zzz-specialist"})
+	assert.Equal(t, ParticipantSourceCapability, plan.Participants[0].Source)
+	assert.Equal(t, "integration test", plan.Participants[0].Pattern)
+	assert.Greater(t, plan.Participants[0].Score, candidateScore(t, plan, "aaa-general"))
+	assert.False(t, plan.Ambiguous())
 }
 
 func TestRegistry_PlanOrchestration_DoesNotMatchInsideWords(t *testing.T) {
@@ -160,6 +186,90 @@ func TestRegistry_PlanOrchestration_ShortTriggerCollisionReportsAmbiguity(t *tes
 	assert.Equal(t, "general", plan.Ambiguities[0].Role)
 	assert.Len(t, plan.Ambiguities[0].Candidates, 2)
 	assert.Equal(t, "go", plan.Participants[0].Pattern)
+}
+
+func TestRegistry_PlanOrchestration_ShortCapabilityMatchesAtBoundary(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"api-specialist": {Capabilities: []string{"api"}},
+	})
+
+	plan, err := registry.PlanOrchestration(OrchestrationRequest{Prompt: "api"})
+	require.NoError(t, err)
+
+	assertParticipantNames(t, plan, []string{"api-specialist"})
+	assert.Equal(t, ParticipantSourceCapability, plan.Participants[0].Source)
+	assert.Equal(t, "api", plan.Participants[0].Pattern)
+	assert.GreaterOrEqual(t, plan.Participants[0].Score, selectionScoreThreshold)
+}
+
+func TestRegistry_PlanOrchestration_ShortCapabilityCollisionReportsAmbiguity(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"aaa-api": {Capabilities: []string{"api"}},
+		"zzz-api": {Capabilities: []string{"api"}},
+	})
+
+	plan, err := registry.PlanOrchestration(OrchestrationRequest{
+		Prompt:          "api",
+		MaxParticipants: 1,
+	})
+	require.NoError(t, err)
+
+	assertParticipantNames(t, plan, []string{"aaa-api"})
+	require.True(t, plan.Ambiguous())
+	require.NotEmpty(t, plan.Ambiguities)
+	assert.Equal(t, "general", plan.Ambiguities[0].Role)
+	assert.Len(t, plan.Ambiguities[0].Candidates, 2)
+}
+
+func TestRegistry_PlanOrchestration_PhrasePositionBreaksEqualScoreTie(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"aaa-cli": {Capabilities: []string{"cli"}},
+		"zzz-api": {Capabilities: []string{"api"}},
+	})
+
+	plan, err := registry.PlanOrchestration(OrchestrationRequest{
+		Prompt:          "api cli",
+		MaxParticipants: 1,
+	})
+	require.NoError(t, err)
+
+	assertParticipantNames(t, plan, []string{"zzz-api"})
+	assert.InDelta(t, candidateScore(t, plan, "zzz-api"), candidateScore(t, plan, "aaa-cli"), 0.000000001)
+	assert.Equal(t, 0, plan.Participants[0].Evidence[0].TokenIndex)
+	require.True(t, plan.Ambiguous())
+	require.NotEmpty(t, plan.Ambiguities)
+	assert.Equal(t, "zzz-api", plan.Ambiguities[0].Winner)
+	assert.Contains(t, plan.Ambiguities[0].Reason, "winner matched earlier in prompt")
+	assert.Contains(t, plan.Ambiguities[0].Reason, "token 0 before token 1")
+}
+
+func TestRegistry_PlanOrchestration_EvidenceOrderUsesPromptPosition(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"agent": {Capabilities: []string{"api", "cli"}},
+	})
+
+	plan, err := registry.PlanOrchestration(OrchestrationRequest{
+		Prompt:          "cli api",
+		MaxParticipants: 1,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, plan.Participants, 1)
+	assert.Equal(t, "cli", plan.Participants[0].Pattern)
+	require.Len(t, plan.Participants[0].Evidence, 2)
+	assert.Equal(t, "cli", plan.Participants[0].Evidence[0].Pattern)
+	assert.Equal(t, 0, plan.Participants[0].Evidence[0].TokenIndex)
+	assert.Equal(t, "api", plan.Participants[0].Evidence[1].Pattern)
+	assert.Equal(t, 1, plan.Participants[0].Evidence[1].TokenIndex)
+	assert.Contains(t, plan.Participants[0].Rationale, `capability "cli"`)
 }
 
 func TestRegistry_PlanOrchestration_RecentSessionContextBreaksCloseTie(t *testing.T) {
@@ -288,6 +398,69 @@ func TestRegistry_PlanOrchestration_MaxParticipantTruncationRecordsDiagnostics(t
 	require.NotNil(t, charlie)
 	assert.Contains(t, charlie.RejectedReason, "max participants")
 	assert.Contains(t, charlie.Rationale, "not selected")
+}
+
+func TestRegistry_PlanOrchestration_RolePhaseBreaksEqualScoreTie(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"aaa-tester":  {Description: "Testing specialist"},
+		"zzz-planner": {Description: "Planning specialist"},
+	})
+
+	plan, err := registry.PlanOrchestration(OrchestrationRequest{
+		Prompt:          "plan and test this",
+		MaxParticipants: 1,
+	})
+	require.NoError(t, err)
+
+	assertParticipantNames(t, plan, []string{"zzz-planner"})
+	assert.Equal(t, []string{"planning", "verification"}, plan.Metadata.RequestedRoles)
+	assert.Equal(t, "max_participants", plan.Composition.StopReason)
+	assert.Equal(t, []string{"aaa-tester"}, plan.Composition.Budget.Truncated)
+	assert.Contains(t, plan.Participants[0].Rationale, "covers requested role")
+}
+
+func TestRegistry_PlanOrchestration_RoleOrderBreaksSamePhaseTie(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"aaa-security": {Description: "Security specialist"},
+		"zzz-reviewer": {Description: "Review specialist"},
+	})
+
+	plan, err := registry.PlanOrchestration(OrchestrationRequest{
+		Prompt:          "review auth",
+		MaxParticipants: 1,
+	})
+	require.NoError(t, err)
+
+	assertParticipantNames(t, plan, []string{"zzz-reviewer"})
+	assert.Equal(t, []string{"review", "security"}, plan.Metadata.RequestedRoles)
+	assert.Equal(t, "max_participants", plan.Composition.StopReason)
+	assert.Equal(t, []string{"aaa-security"}, plan.Composition.Budget.Truncated)
+	assert.Contains(t, plan.Participants[0].Rationale, "covers requested role")
+}
+
+func TestRegistry_PlanOrchestration_PromptRoleOrderBreaksSamePhaseTie(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"aaa-reviewer": {Description: "Review specialist"},
+		"zzz-security": {Description: "Security specialist"},
+	})
+
+	plan, err := registry.PlanOrchestration(OrchestrationRequest{
+		Prompt:          "auth review",
+		MaxParticipants: 1,
+	})
+	require.NoError(t, err)
+
+	assertParticipantNames(t, plan, []string{"zzz-security"})
+	assert.Equal(t, []string{"security", "review"}, plan.Metadata.RequestedRoles)
+	assert.Equal(t, "max_participants", plan.Composition.StopReason)
+	assert.Equal(t, []string{"aaa-reviewer"}, plan.Composition.Budget.Truncated)
+	assert.Contains(t, plan.Participants[0].Rationale, "covers requested role")
 }
 
 func TestRegistry_PlanOrchestration_MaxParticipantOverflowDeduplicatesRequestedCandidates(t *testing.T) {
@@ -640,6 +813,38 @@ func TestRegistry_PlanOrchestration_WriteDocsDoesNotRequestResearchRole(t *testi
 	assertParticipantNames(t, plan, []string{"writer"})
 	assert.Equal(t, []string{"documentation"}, plan.Metadata.RequestedRoles)
 	assert.Nil(t, findCandidate(plan, "researcher"))
+}
+
+func TestRegistry_PlanOrchestration_WriteCodeDoesNotRequestDocumentationRole(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"executor": {Description: "Implementation specialist for coding"},
+		"writer":   {Description: "Documentation specialist"},
+	})
+
+	plan, err := registry.PlanOrchestration(OrchestrationRequest{Prompt: "write code"})
+	require.NoError(t, err)
+
+	assertParticipantNames(t, plan, []string{"executor"})
+	assert.Equal(t, []string{"implementation"}, plan.Metadata.RequestedRoles)
+	assert.Nil(t, findCandidate(plan, "writer"))
+}
+
+func TestRegistry_PlanOrchestration_WriteTestsDoesNotRequestDocumentationRole(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"tester": {Description: "Testing specialist"},
+		"writer": {Description: "Documentation specialist"},
+	})
+
+	plan, err := registry.PlanOrchestration(OrchestrationRequest{Prompt: "write tests"})
+	require.NoError(t, err)
+
+	assertParticipantNames(t, plan, []string{"tester"})
+	assert.Equal(t, []string{"verification"}, plan.Metadata.RequestedRoles)
+	assert.Nil(t, findCandidate(plan, "writer"))
 }
 
 func TestRegistry_PlanOrchestration_RoleCoverageSelectsWithoutPhraseMatch(t *testing.T) {

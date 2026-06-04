@@ -25,6 +25,7 @@ const (
 	requestedEvidenceScore    = 1000.0
 	roleCoverageScore         = 42.0
 	recencyEvidenceScore      = 12.0
+	multiTokenPhraseBonus     = 18.0
 	selectionScoreThreshold   = 40.0
 	ambiguityScoreWindow      = 8.0
 	minAmbiguityScore         = selectionScoreThreshold
@@ -105,10 +106,11 @@ type Candidate struct {
 
 // MatchEvidence records one scoring signal used to rank an agent.
 type MatchEvidence struct {
-	Kind    string
-	Pattern string
-	Detail  string
-	Score   float64
+	Kind       string
+	Pattern    string
+	Detail     string
+	Score      float64
+	TokenIndex int
 }
 
 // ToolConstraint records whether a candidate can use a required tool.
@@ -337,7 +339,7 @@ func (p *scoredOrchestrationPlanner) addAutomaticCandidates(names []string) {
 		p.plan.Candidates = append(p.plan.Candidates, candidate)
 	}
 
-	sortCandidates(p.plan.Candidates)
+	p.sortCandidates(p.plan.Candidates)
 }
 
 func (p *scoredOrchestrationPlanner) selectCandidates() {
@@ -351,7 +353,7 @@ func (p *scoredOrchestrationPlanner) selectCandidates() {
 		eligible = append(eligible, candidate)
 	}
 
-	sortCandidates(eligible)
+	p.sortCandidates(eligible)
 
 	coveredRoles := coveredRequestedRoles(p.requestedRoles, p.plan.Participants)
 	skippedCoveredRoles := false
@@ -509,6 +511,10 @@ func (p *scoredOrchestrationPlanner) canAddParticipant() bool {
 	return p.maxParticipants <= 0 || len(p.plan.Participants) < p.maxParticipants
 }
 
+func (p *scoredOrchestrationPlanner) sortCandidates(candidates []Candidate) {
+	sortCandidatesForRoles(candidates, p.requestedRoles)
+}
+
 func (p *scoredOrchestrationPlanner) composePlan() PlanComposition {
 	stopReason := p.stopReason
 	if stopReason == "" {
@@ -612,7 +618,9 @@ func phraseEvidenceForPatterns(promptTokens []string, kind string, patterns []st
 
 func phraseEvidence(promptTokens []string, kind, pattern string) (MatchEvidence, bool) {
 	phraseTokens := tokenizeWords(pattern)
-	if len(phraseTokens) == 0 || !tokensContainPhrase(promptTokens, phraseTokens) {
+	index, ok := tokensIndexPhrase(promptTokens, phraseTokens)
+
+	if len(phraseTokens) == 0 || !ok {
 		return MatchEvidence{}, false
 	}
 
@@ -622,22 +630,33 @@ func phraseEvidence(promptTokens []string, kind, pattern string) (MatchEvidence,
 	}
 
 	specificity := float64(len(phraseTokens))*8 + math.Min(float64(joinedTokenLength(phraseTokens))/2, 16)
-	score := base + specificity - shortPhrasePenalty(phraseTokens)
+	if len(phraseTokens) > 1 {
+		specificity += multiTokenPhraseBonus
+	}
+
+	score := base + specificity - shortPhrasePenalty(phraseTokens, kind)
 
 	return MatchEvidence{
-		Kind:    kind,
-		Pattern: pattern,
-		Detail:  fmt.Sprintf("phrase-boundary match across %d token(s)", len(phraseTokens)),
-		Score:   roundScore(score),
+		Kind:       kind,
+		Pattern:    pattern,
+		Detail:     fmt.Sprintf("phrase-boundary match across %d token(s) at token %d", len(phraseTokens), index),
+		Score:      roundScore(score),
+		TokenIndex: index,
 	}, true
 }
 
-func shortPhrasePenalty(tokens []string) float64 {
+func shortPhrasePenalty(tokens []string, kind string) float64 {
 	if len(tokens) != 1 {
 		return 0
 	}
 
 	switch l := len(tokens[0]); {
+	case kind == ParticipantSourceCapability && l <= 1:
+		return 30
+	case kind == ParticipantSourceCapability && l == 2:
+		return 16
+	case kind == ParticipantSourceCapability && l == 3:
+		return 8
 	case l <= 2:
 		return 30
 	case l == 3:
@@ -691,8 +710,23 @@ func sortEvidence(evidence []MatchEvidence) {
 			return evidencePriority(evidence[i].Kind) > evidencePriority(evidence[j].Kind)
 		}
 
+		leftTokenIndex := matchEvidencePhraseTokenIndex(evidence[i])
+		rightTokenIndex := matchEvidencePhraseTokenIndex(evidence[j])
+
+		if leftTokenIndex != rightTokenIndex {
+			return leftTokenIndex < rightTokenIndex
+		}
+
 		return evidence[i].Pattern < evidence[j].Pattern
 	})
+}
+
+func matchEvidencePhraseTokenIndex(evidence MatchEvidence) int {
+	if evidence.Kind == ParticipantSourceTrigger || evidence.Kind == ParticipantSourceCapability {
+		return evidence.TokenIndex
+	}
+
+	return noPhraseTokenIndex()
 }
 
 func evidencePriority(kind string) int {
@@ -713,6 +747,10 @@ func evidencePriority(kind string) int {
 }
 
 func sortCandidates(candidates []Candidate) {
+	sortCandidatesForRoles(candidates, nil)
+}
+
+func sortCandidatesForRoles(candidates []Candidate, requestedRoles []string) {
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].Score != candidates[j].Score {
 			return candidates[i].Score > candidates[j].Score
@@ -726,8 +764,91 @@ func sortCandidates(candidates []Candidate) {
 			return len(candidates[i].Evidence) > len(candidates[j].Evidence)
 		}
 
+		leftPhraseIndex := candidatePhraseTokenIndex(candidates[i])
+		rightPhraseIndex := candidatePhraseTokenIndex(candidates[j])
+
+		if leftPhraseIndex != rightPhraseIndex {
+			return leftPhraseIndex < rightPhraseIndex
+		}
+
+		leftPhase := candidateRolePhase(candidates[i])
+		rightPhase := candidateRolePhase(candidates[j])
+
+		if leftPhase != rightPhase {
+			return candidateRolePhasePrecedes(leftPhase, rightPhase)
+		}
+
+		leftRoleOrder := candidateRoleOrder(candidates[i])
+		rightRoleOrder := candidateRoleOrder(candidates[j])
+
+		if len(requestedRoles) > 0 {
+			leftRoleOrder = candidateRequestedRoleOrder(candidates[i], requestedRoles)
+			rightRoleOrder = candidateRequestedRoleOrder(candidates[j], requestedRoles)
+		}
+
+		if leftRoleOrder != rightRoleOrder {
+			return leftRoleOrder < rightRoleOrder
+		}
+
 		return candidates[i].Agent.Name < candidates[j].Agent.Name
 	})
+}
+
+func candidatePhraseTokenIndex(candidate Candidate) int {
+	best := noPhraseTokenIndex()
+
+	for _, item := range candidate.Evidence {
+		if item.Kind != ParticipantSourceTrigger && item.Kind != ParticipantSourceCapability {
+			continue
+		}
+
+		if item.TokenIndex < best {
+			best = item.TokenIndex
+		}
+	}
+
+	return best
+}
+
+func noPhraseTokenIndex() int {
+	return int(^uint(0) >> 1)
+}
+
+func candidateRolePhase(candidate Candidate) int {
+	_, phase, _ := primaryRoleSortKey(candidate.Roles)
+
+	return phase
+}
+
+func candidateRoleOrder(candidate Candidate) int {
+	_, _, order := primaryRoleSortKey(candidate.Roles)
+
+	return order
+}
+
+func candidateRequestedRoleOrder(candidate Candidate, requestedRoles []string) int {
+	best := len(requestedRoles)
+	for _, role := range candidate.Roles {
+		for i, requestedRole := range requestedRoles {
+			if role == requestedRole && i < best {
+				best = i
+			}
+		}
+	}
+
+	return best
+}
+
+func candidateRolePhasePrecedes(left, right int) bool {
+	if left == 0 {
+		return false
+	}
+
+	if right == 0 {
+		return true
+	}
+
+	return left < right
 }
 
 func rationaleForCandidate(candidate Candidate) string {
@@ -935,7 +1056,7 @@ var plannerRoles = []plannerRoleDefinition{
 	},
 	{
 		Name:    "implementation",
-		Aliases: []string{"implement", "implementation", "coding", "executor", "build", "feature", "fix", "refactor"},
+		Aliases: []string{"implement", "implementation", "coding", "executor", "build", "feature", "fix", "refactor", "write code"},
 		Phase:   30,
 	},
 	{
@@ -955,31 +1076,66 @@ var plannerRoles = []plannerRoleDefinition{
 	},
 	{
 		Name:    "documentation",
-		Aliases: []string{"doc", "docs", "document", "documentation", "write", "writer", "readme", "guide"},
+		Aliases: []string{"doc", "docs", "document", "documentation", "writer", "readme", "guide"},
 		Phase:   60,
 	},
 }
 
 func requestedRolesForPrompt(promptTokens []string) []string {
-	roles := make([]string, 0)
+	type roleMatch struct {
+		name       string
+		tokenIndex int
+		roleOrder  int
+	}
 
-	for _, role := range plannerRoles {
-		if roleMatchesTokens(role, promptTokens) {
-			roles = append(roles, role.Name)
+	matches := make([]roleMatch, 0)
+
+	for i, role := range plannerRoles {
+		if index, ok := firstRoleMatchIndex(role, promptTokens); ok {
+			matches = append(matches, roleMatch{
+				name:       role.Name,
+				tokenIndex: index,
+				roleOrder:  i,
+			})
 		}
+	}
+
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].tokenIndex != matches[j].tokenIndex {
+			return matches[i].tokenIndex < matches[j].tokenIndex
+		}
+
+		return matches[i].roleOrder < matches[j].roleOrder
+	})
+
+	roles := make([]string, 0, len(matches))
+	for _, match := range matches {
+		roles = append(roles, match.name)
 	}
 
 	return roles
 }
 
 func roleMatchesTokens(role plannerRoleDefinition, tokens []string) bool {
+	_, ok := firstRoleMatchIndex(role, tokens)
+
+	return ok
+}
+
+func firstRoleMatchIndex(role plannerRoleDefinition, tokens []string) (int, bool) {
+	best := len(tokens)
+
 	for _, alias := range role.Aliases {
-		if tokensContainPhrase(tokens, tokenizeWords(alias)) {
-			return true
+		if index, ok := tokensIndexPhrase(tokens, tokenizeWords(alias)); ok && index < best {
+			best = index
 		}
 	}
 
-	return false
+	if best == len(tokens) {
+		return 0, false
+	}
+
+	return best, true
 }
 
 func coveredRolesForAgent(agent Agent, requestedRoles []string) []string {
@@ -1018,13 +1174,19 @@ func agentRoleText(agent Agent) []string {
 }
 
 func plannerRoleByName(name string) (plannerRoleDefinition, bool) {
-	for _, role := range plannerRoles {
+	role, _, ok := plannerRoleByNameWithOrder(name)
+
+	return role, ok
+}
+
+func plannerRoleByNameWithOrder(name string) (plannerRoleDefinition, int, bool) {
+	for i, role := range plannerRoles {
 		if role.Name == name {
-			return role, true
+			return role, i, true
 		}
 	}
 
-	return plannerRoleDefinition{}, false
+	return plannerRoleDefinition{}, len(plannerRoles), false
 }
 
 func plannedRoles(requestedRoles []string, participants []Participant) []PlannedRole {
@@ -1146,19 +1308,28 @@ func planDependencies(participants []Participant) []PlanDependency {
 }
 
 func primaryParticipantPhase(participant *Participant) (bestRole string, bestPhase int) {
-	for _, roleName := range participant.Roles {
-		role, ok := plannerRoleByName(roleName)
+	bestRole, bestPhase, _ = primaryRoleSortKey(participant.Roles)
+
+	return bestRole, bestPhase
+}
+
+func primaryRoleSortKey(roles []string) (bestRole string, bestPhase, bestOrder int) {
+	bestOrder = len(plannerRoles)
+
+	for _, roleName := range roles {
+		role, order, ok := plannerRoleByNameWithOrder(roleName)
 		if !ok {
 			continue
 		}
 
-		if bestPhase == 0 || role.Phase < bestPhase {
+		if bestPhase == 0 || role.Phase < bestPhase || (role.Phase == bestPhase && order < bestOrder) {
 			bestRole = role.Name
 			bestPhase = role.Phase
+			bestOrder = order
 		}
 	}
 
-	return bestRole, bestPhase
+	return bestRole, bestPhase, bestOrder
 }
 
 func plannerMaxConcurrency(requested, participantCount, maxParticipants int) int {
@@ -1252,6 +1423,20 @@ func ambiguityReason(winner, runnerUp Candidate, closeCandidateCount int) string
 			closeCandidateCount,
 			ambiguityScoreWindow,
 			margin,
+		)
+	}
+
+	winnerPhraseIndex := candidatePhraseTokenIndex(winner)
+	runnerUpPhraseIndex := candidatePhraseTokenIndex(runnerUp)
+	noPhraseIndex := noPhraseTokenIndex()
+
+	if winnerPhraseIndex != noPhraseIndex && runnerUpPhraseIndex != noPhraseIndex && winnerPhraseIndex != runnerUpPhraseIndex {
+		return fmt.Sprintf(
+			"%d candidates scored within %.1f points; scores tied, winner matched earlier in prompt (token %d before token %d)",
+			closeCandidateCount,
+			ambiguityScoreWindow,
+			winnerPhraseIndex,
+			runnerUpPhraseIndex,
 		)
 	}
 
@@ -1349,8 +1534,14 @@ func tokenizeWords(text string) []string {
 }
 
 func tokensContainPhrase(tokens, phrase []string) bool {
+	_, ok := tokensIndexPhrase(tokens, phrase)
+
+	return ok
+}
+
+func tokensIndexPhrase(tokens, phrase []string) (int, bool) {
 	if len(tokens) == 0 || len(phrase) == 0 || len(phrase) > len(tokens) {
-		return false
+		return 0, false
 	}
 
 	for i := 0; i <= len(tokens)-len(phrase); i++ {
@@ -1364,11 +1555,11 @@ func tokensContainPhrase(tokens, phrase []string) bool {
 		}
 
 		if matched {
-			return true
+			return i, true
 		}
 	}
 
-	return false
+	return 0, false
 }
 
 func joinedTokenLength(tokens []string) int {

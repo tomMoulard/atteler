@@ -501,6 +501,26 @@ func TestFormatAgentPlanMetadata(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+func TestFormatMatchEvidenceIncludesPromptPosition(t *testing.T) {
+	t.Parallel()
+
+	got := formatMatchEvidence([]agent.MatchEvidence{
+		{
+			Kind:       agent.ParticipantSourceCapability,
+			Pattern:    "api",
+			Score:      51.5,
+			TokenIndex: 2,
+		},
+		{
+			Kind:    agent.ParticipantSourceRole,
+			Pattern: "review",
+			Score:   42,
+		},
+	})
+
+	assert.Equal(t, "capability:api=51.5@2,role:review=42.0", got)
+}
+
 //nolint:paralleltest // Captures process-wide stdout.
 func TestPlanAgents_PrintsEvidenceBackedDiagnostics(t *testing.T) {
 	registry := agent.NewRegistry(map[string]config.AgentConfig{

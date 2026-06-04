@@ -312,7 +312,12 @@ func formatMatchEvidence(evidence []agent.MatchEvidence) string {
 			label += ":" + item.Pattern
 		}
 
-		parts = append(parts, fmt.Sprintf("%s=%.1f", label, item.Score))
+		value := fmt.Sprintf("%s=%.1f", label, item.Score)
+		if item.Kind == agent.ParticipantSourceTrigger || item.Kind == agent.ParticipantSourceCapability {
+			value += fmt.Sprintf("@%d", item.TokenIndex)
+		}
+
+		parts = append(parts, value)
 	}
 
 	return strings.Join(parts, ",")
