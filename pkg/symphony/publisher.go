@@ -12,8 +12,27 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/shell"
+)
+
+const (
+	publishLabelAPI            = "api"
+	publishLabelArchitecture   = "architecture"
+	publishLabelAuth           = "auth"
+	publishLabelAuthentication = "authentication"
+	publishLabelBackend        = "backend"
+	publishLabelDocs           = "docs"
+	publishLabelDocumentation  = "documentation"
+	publishLabelFrontend       = "frontend"
+	publishLabelQuality        = "quality"
+	publishLabelSecurity       = "security"
+	publishLabelTest           = "test"
+	publishLabelTesting        = "testing"
+	publishLabelUI             = "ui"
+	publishLabelUX             = "ux"
 )
 
 type gitCommandRunner func(context.Context, string, []string, shell.AuditContext, ...string) ([]byte, error)
@@ -42,6 +61,32 @@ func PublishWorkspace(ctx context.Context, cfg Config, issue Issue, workspace Wo
 	}
 
 	return publisher.Publish(ctx, issue, workspace)
+}
+
+// PublishFailureDraft creates or refreshes a draft pull request for a one-shot
+// issue implementation run that could not complete before normal verification
+// and publication.
+func PublishFailureDraft(ctx context.Context, cfg Config, issue Issue, workspace Workspace, runErr error, logger *slog.Logger) (*PublishResult, error) {
+	if !cfg.Publish.Enabled || !cfg.Publish.DraftOnFailedValidation {
+		return nil, nil
+	}
+
+	if ctx == nil {
+		return nil, errors.New("publish: context is required")
+	}
+
+	if normalizeState(cfg.Tracker.Kind) != trackerKindGitHub {
+		return nil, errors.New("publish: only github tracker publishing is supported")
+	}
+
+	publisher := &githubPublisher{
+		cfg:    cfg,
+		client: NewGitHubClient(cfg.Tracker),
+		runGit: defaultGitCommandRunner,
+		logger: loggerOrDefault(logger),
+	}
+
+	return publisher.PublishFailureDraft(ctx, issue, workspace, runErr)
 }
 
 // UpdatePullRequestBranch refreshes a monitored PR branch from its base branch
@@ -155,11 +200,12 @@ func workspaceHasGitCheckout(workspace Workspace) (bool, error) {
 
 //nolint:govet // Keep the heavyweight config first; this struct is not allocated in hot paths.
 type githubPublisher struct {
-	cfg    Config
-	client *GitHubClient
-	runGit gitCommandRunner
-	logger *slog.Logger
-	audit  shell.AuditContext
+	cfg             Config
+	client          *GitHubClient
+	runGit          gitCommandRunner
+	runVerification func(context.Context, Config, Issue, Workspace) (VerificationReport, error)
+	logger          *slog.Logger
+	audit           shell.AuditContext
 }
 
 func (p *githubPublisher) Publish(ctx context.Context, issue Issue, workspace Workspace) (*PublishResult, error) {
@@ -187,6 +233,12 @@ func (p *githubPublisher) Publish(ctx context.Context, issue Issue, workspace Wo
 	}
 
 	if hasChanges {
+		changedFiles, filesErr := p.changedFiles(ctx, workspace.Path)
+		if filesErr != nil {
+			return nil, filesErr
+		}
+		result.ChangedFiles = changedFiles
+
 		commitSHA, commitErr := p.commit(ctx, workspace.Path, issue)
 		if commitErr != nil {
 			return nil, commitErr
@@ -199,53 +251,203 @@ func (p *githubPublisher) Publish(ctx context.Context, issue Issue, workspace Wo
 	if err != nil {
 		return nil, err
 	}
+	if hasCommits {
+		if filesErr := p.refreshCommittedChangedFiles(ctx, workspace.Path, result); filesErr != nil {
+			return nil, filesErr
+		}
+	}
 
 	existingPR, err := p.client.FetchOpenPullRequestByHead(ctx, branch)
 	if err != nil {
 		return nil, err
 	}
 
-	if !hasCommits && existingPR == nil {
+	if !hasCommits {
+		result.ExistingPullRequest = existingPR != nil
 		result.SkippedReason = "workspace has no changes to publish"
 		return result, nil
+	}
+
+	verificationRunner := p.runVerification
+	if verificationRunner == nil {
+		verificationRunner = runVerificationGates
+	}
+
+	verificationReport, err := verificationRunner(ctx, p.cfg, issue, workspace)
+	if err != nil {
+		result.Verification = verificationReportPointer(verificationReport)
+		return result, err
+	}
+	result.Verification = &verificationReport
+	verificationReport, err = p.failVerificationIfWorkspaceDirty(ctx, workspace.Path, verificationReport)
+	if err != nil {
+		return result, err
+	}
+	result.Verification = &verificationReport
+	if !verificationReport.Passed {
+		if !p.cfg.Publish.DraftOnFailedValidation {
+			return result, &VerificationGateError{Report: verificationReport}
+		}
+		result.DraftDueToFailedVerification = true
 	}
 
 	if hasCommits {
 		if result.CommitSHA == "" {
 			result.CommitSHA, err = p.currentCommit(ctx, workspace.Path)
 			if err != nil {
-				return nil, err
+				return result, err
 			}
 		}
 
 		if remoteErr := p.setRemote(ctx, workspace.Path); remoteErr != nil {
-			return nil, remoteErr
+			return result, remoteErr
 		}
 
 		if pushErr := p.push(ctx, workspace.Path, branch); pushErr != nil {
-			return nil, pushErr
+			return result, pushErr
 		}
 	}
 
 	pr := existingPR
 	if pr == nil {
-		created, createErr := p.createPullRequest(ctx, issue, branch)
+		created, reusedExisting, createErr := p.createPullRequest(ctx, issue, branch, verificationReport, result.DraftDueToFailedVerification, result.ChangedFiles)
 		if createErr != nil {
-			return nil, createErr
+			result.ExistingPullRequest = reusedExisting
+			attachPullRequestResult(result, created)
+			return result, createErr
 		}
 
 		pr = &created
+		result.ExistingPullRequest = reusedExisting
 	} else {
 		result.ExistingPullRequest = true
+		attachPullRequestResult(result, *pr)
+		if updateErr := p.updatePullRequestReport(ctx, *pr, issue, verificationReport, result.DraftDueToFailedVerification, result.ChangedFiles); updateErr != nil {
+			return result, updateErr
+		}
 	}
 
-	result.PullRequestNumber = pr.Number
-	result.PullRequestURL = pr.HTMLURL
-	result.Published = true
+	attachPullRequestResult(result, *pr)
 
-	removed, finalizeErr := p.finalizeIssue(ctx, issueNumber, issue, *pr)
+	removed, finalizeErr := p.finalizeIssue(ctx, issueNumber, issue, *pr, result.DraftDueToFailedVerification)
 	if finalizeErr != nil {
-		return nil, finalizeErr
+		return result, finalizeErr
+	}
+
+	result.RemovedLabels = removed
+	return result, nil
+}
+
+func (p *githubPublisher) PublishFailureDraft(ctx context.Context, issue Issue, workspace Workspace, runErr error) (*PublishResult, error) {
+	if strings.TrimSpace(workspace.Path) == "" {
+		return nil, errors.New("publish: workspace path is required")
+	}
+
+	issueNumber, err := githubIssueNumber(issue)
+	if err != nil {
+		return nil, err
+	}
+
+	p.audit = symphonyIssueAudit("symphony.git", issue)
+
+	branch := publishBranchName(p.cfg.Publish, issue)
+	result := &PublishResult{
+		Branch:               branch,
+		DraftDueToRunFailure: true,
+		FailureReason:        redactedRunFailure(runErr),
+		Verification:         failureVerificationReport(runErr),
+	}
+
+	if checkoutErr := p.checkoutBranch(ctx, workspace.Path, branch); checkoutErr != nil {
+		return result, checkoutErr
+	}
+
+	hasChanges, err := p.hasChanges(ctx, workspace.Path)
+	if err != nil {
+		return result, err
+	}
+
+	if hasChanges {
+		changedFiles, filesErr := p.changedFiles(ctx, workspace.Path)
+		if filesErr != nil {
+			return result, filesErr
+		}
+		result.ChangedFiles = changedFiles
+
+		commitSHA, commitErr := p.commitFailure(ctx, workspace.Path, issue, runErr, false)
+		if commitErr != nil {
+			return result, commitErr
+		}
+		result.CommitSHA = commitSHA
+	}
+
+	hasCommits, err := p.hasCommitsAhead(ctx, workspace.Path)
+	if err != nil {
+		return result, err
+	}
+	if hasCommits {
+		if filesErr := p.refreshCommittedChangedFiles(ctx, workspace.Path, result); filesErr != nil {
+			return result, filesErr
+		}
+	}
+
+	existingPR, err := p.client.FetchOpenPullRequestByHead(ctx, branch)
+	if err != nil {
+		return result, err
+	}
+
+	emptyFailureCommit := false
+	if !hasCommits && existingPR == nil {
+		commitSHA, commitErr := p.commitFailure(ctx, workspace.Path, issue, runErr, true)
+		if commitErr != nil {
+			return result, commitErr
+		}
+		result.CommitSHA = commitSHA
+		hasCommits = true
+		emptyFailureCommit = true
+	}
+
+	if hasCommits {
+		if result.CommitSHA == "" {
+			result.CommitSHA, err = p.currentCommit(ctx, workspace.Path)
+			if err != nil {
+				return result, err
+			}
+		}
+
+		if remoteErr := p.setRemote(ctx, workspace.Path); remoteErr != nil {
+			return result, remoteErr
+		}
+
+		if pushErr := p.push(ctx, workspace.Path, branch); pushErr != nil {
+			return result, pushErr
+		}
+	}
+
+	pr := existingPR
+	if pr == nil {
+		created, reusedExisting, createErr := p.createFailurePullRequest(ctx, issue, branch, result.FailureReason, result.ChangedFiles, emptyFailureCommit)
+		if createErr != nil {
+			result.ExistingPullRequest = reusedExisting
+			attachPullRequestResult(result, created)
+			return result, createErr
+		}
+
+		pr = &created
+		result.ExistingPullRequest = reusedExisting
+	} else {
+		result.ExistingPullRequest = true
+		attachPullRequestResult(result, *pr)
+		if updateErr := p.updateFailurePullRequestReport(ctx, *pr, issue, result.FailureReason, result.ChangedFiles, emptyFailureCommit); updateErr != nil {
+			return result, updateErr
+		}
+	}
+
+	attachPullRequestResult(result, *pr)
+
+	removed, finalizeErr := p.finalizeFailureIssue(ctx, issueNumber, issue, *pr)
+	if finalizeErr != nil {
+		return result, finalizeErr
 	}
 
 	result.RemovedLabels = removed
@@ -257,13 +459,124 @@ func (p *githubPublisher) checkoutBranch(ctx context.Context, dir, branch string
 	return err
 }
 
+func attachPullRequestResult(result *PublishResult, pr GitHubPullRequest) {
+	if result == nil {
+		return
+	}
+
+	if pr.Number > 0 {
+		result.PullRequestNumber = pr.Number
+	}
+
+	if strings.TrimSpace(pr.HTMLURL) != "" {
+		result.PullRequestURL = pr.HTMLURL
+	}
+
+	result.Published = result.PullRequestNumber > 0 || strings.TrimSpace(result.PullRequestURL) != ""
+}
+
 func (p *githubPublisher) hasChanges(ctx context.Context, dir string) (bool, error) {
-	output, err := p.git(ctx, dir, nil, "status", "--porcelain")
+	status, err := p.workspaceStatus(ctx, dir)
 	if err != nil {
 		return false, err
 	}
 
-	return strings.TrimSpace(string(output)) != "", nil
+	return status != "", nil
+}
+
+func (p *githubPublisher) workspaceStatus(ctx context.Context, dir string) (string, error) {
+	output, err := p.git(ctx, dir, nil, "status", "--porcelain")
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+func (p *githubPublisher) changedFiles(ctx context.Context, dir string) ([]string, error) {
+	output, err := p.git(ctx, dir, nil, "status", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+
+	return parseGitStatusChangedFiles(string(output)), nil
+}
+
+func parseGitStatusChangedFiles(output string) []string {
+	var files []string
+	seen := make(map[string]struct{})
+
+	for line := range strings.SplitSeq(output, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		path := strings.TrimSpace(line)
+		if len(line) > 3 {
+			path = strings.TrimSpace(line[3:])
+		}
+		if strings.Contains(path, " -> ") {
+			parts := strings.Split(path, " -> ")
+			path = strings.TrimSpace(parts[len(parts)-1])
+		}
+		if path == "" {
+			continue
+		}
+
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		files = append(files, path)
+	}
+
+	return files
+}
+
+func (p *githubPublisher) committedChangedFiles(ctx context.Context, dir string) ([]string, error) {
+	base := strings.TrimSpace(p.cfg.Publish.BaseBranch)
+	output, err := p.git(ctx, dir, nil, "diff", "--name-only", "--diff-filter=ACDMRT", base+"..HEAD")
+	if err != nil {
+		return nil, err
+	}
+
+	return parseGitNameOnlyFiles(string(output)), nil
+}
+
+func (p *githubPublisher) refreshCommittedChangedFiles(ctx context.Context, dir string, result *PublishResult) error {
+	if result == nil {
+		return nil
+	}
+
+	changedFiles, err := p.committedChangedFiles(ctx, dir)
+	if err != nil {
+		return err
+	}
+	if len(changedFiles) > 0 {
+		result.ChangedFiles = changedFiles
+	}
+
+	return nil
+}
+
+func parseGitNameOnlyFiles(output string) []string {
+	var files []string
+	seen := make(map[string]struct{})
+
+	for line := range strings.SplitSeq(output, "\n") {
+		path := strings.TrimSpace(line)
+		if path == "" {
+			continue
+		}
+
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		files = append(files, path)
+	}
+
+	return files
 }
 
 func (p *githubPublisher) hasCommitsAhead(ctx context.Context, dir string) (bool, error) {
@@ -282,6 +595,14 @@ func (p *githubPublisher) hasCommitsAhead(ctx context.Context, dir string) (bool
 }
 
 func (p *githubPublisher) commit(ctx context.Context, dir string, issue Issue) (string, error) {
+	return p.commitWithMessage(ctx, dir, publishCommitMessage(issue), false)
+}
+
+func (p *githubPublisher) commitFailure(ctx context.Context, dir string, issue Issue, runErr error, allowEmpty bool) (string, error) {
+	return p.commitWithMessage(ctx, dir, publishFailureCommitMessage(issue, runErr), allowEmpty)
+}
+
+func (p *githubPublisher) commitWithMessage(ctx context.Context, dir, message string, allowEmpty bool) (string, error) {
 	if _, configNameErr := p.git(ctx, dir, nil, "config", "user.name", p.cfg.Publish.GitUserName); configNameErr != nil {
 		return "", configNameErr
 	}
@@ -303,7 +624,7 @@ func (p *githubPublisher) commit(ctx context.Context, dir string, issue Issue) (
 		_ = os.Remove(messagePath)
 	}()
 
-	if _, writeErr := messageFile.WriteString(publishCommitMessage(issue)); writeErr != nil {
+	if _, writeErr := messageFile.WriteString(message); writeErr != nil {
 		_ = messageFile.Close()
 		return "", fmt.Errorf("publish: write commit message: %w", writeErr)
 	}
@@ -312,7 +633,13 @@ func (p *githubPublisher) commit(ctx context.Context, dir string, issue Issue) (
 		return "", fmt.Errorf("publish: close commit message: %w", closeErr)
 	}
 
-	if _, commitErr := p.git(ctx, dir, nil, "commit", "-F", messagePath); commitErr != nil {
+	args := []string{"commit"}
+	if allowEmpty {
+		args = append(args, "--allow-empty")
+	}
+	args = append(args, "-F", messagePath)
+
+	if _, commitErr := p.git(ctx, dir, nil, args...); commitErr != nil {
 		return "", commitErr
 	}
 
@@ -326,6 +653,62 @@ func (p *githubPublisher) currentCommit(ctx context.Context, dir string) (string
 	}
 
 	return strings.TrimSpace(string(output)), nil
+}
+
+func (p *githubPublisher) failVerificationIfWorkspaceDirty(ctx context.Context, dir string, report VerificationReport) (VerificationReport, error) {
+	if !report.Configured {
+		return report, nil
+	}
+
+	status, err := p.workspaceStatus(ctx, dir)
+	if err != nil {
+		return report, err
+	}
+
+	if strings.TrimSpace(status) == "" {
+		return report, nil
+	}
+
+	now := time.Now().UTC()
+	report.Configured = true
+	report.Passed = false
+	report.CompletedAt = now
+	report.FailedRequired = appendMissingVerificationName(report.FailedRequired, "workspace_clean")
+	report.Gates = append(report.Gates, VerificationGateResult{
+		StartedAt:   now,
+		CompletedAt: now,
+		Name:        "workspace_clean",
+		Command:     "git status --porcelain",
+		Status:      VerificationFailed,
+		Stdout:      truncateOneLine(privacy.RedactText(status)),
+		Error:       "workspace has uncommitted changes after verification gates; commit or revert generated files and rerun verification",
+		Required:    true,
+	})
+
+	return report, nil
+}
+
+func verificationReportPointer(report VerificationReport) *VerificationReport {
+	if !report.Configured && len(report.Gates) == 0 && len(report.FailedRequired) == 0 && report.StartedAt.IsZero() && report.CompletedAt.IsZero() {
+		return nil
+	}
+
+	return &report
+}
+
+func appendMissingVerificationName(names []string, name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return names
+	}
+
+	for _, existing := range names {
+		if strings.EqualFold(strings.TrimSpace(existing), name) {
+			return names
+		}
+	}
+
+	return append(names, name)
 }
 
 func (p *githubPublisher) setRemote(ctx context.Context, dir string) error {
@@ -520,37 +903,186 @@ esac
 	return err
 }
 
-func (p *githubPublisher) createPullRequest(ctx context.Context, issue Issue, branch string) (GitHubPullRequest, error) {
+func (p *githubPublisher) createPullRequest(ctx context.Context, issue Issue, branch string, report VerificationReport, draftDueToFailedValidation bool, changedFiles []string) (GitHubPullRequest, bool, error) {
+	shouldBeDraft := p.cfg.Publish.Draft || draftDueToFailedValidation
 	pr, err := p.client.CreatePullRequest(
 		ctx,
 		branch,
 		p.cfg.Publish.BaseBranch,
 		publishPRTitle(issue),
-		publishPRBody(issue),
-		p.cfg.Publish.Draft,
+		publishPRBody(issue, report, draftDueToFailedValidation, changedFiles),
+		shouldBeDraft,
 	)
 	if err == nil {
-		return pr, nil
+		if draftErr := p.ensurePullRequestDraftState(ctx, pr, shouldBeDraft); draftErr != nil {
+			return pr, false, draftErr
+		}
+
+		return pr, false, nil
 	}
 
 	var statusErr *githubAPIStatusError
 	if !errors.As(err, &statusErr) || statusErr.StatusCode != httpStatusValidationFailed {
-		return GitHubPullRequest{}, err
+		return GitHubPullRequest{}, false, err
 	}
 
 	existing, findErr := p.client.FetchOpenPullRequestByHead(ctx, branch)
 	if findErr != nil {
-		return GitHubPullRequest{}, findErr
+		return GitHubPullRequest{}, false, findErr
 	}
 
 	if existing == nil {
-		return GitHubPullRequest{}, err
+		return GitHubPullRequest{}, false, err
 	}
 
-	return *existing, nil
+	updated, updateErr := p.client.UpdatePullRequest(ctx, existing.Number, publishPRTitle(issue), publishPRBody(issue, report, draftDueToFailedValidation, changedFiles))
+	if updateErr != nil {
+		return GitHubPullRequest{}, false, updateErr
+	}
+	updated = mergePullRequestIdentity(updated, *existing)
+	if draftErr := p.ensurePullRequestDraftState(ctx, updated, shouldBeDraft); draftErr != nil {
+		return updated, true, draftErr
+	}
+
+	return updated, true, nil
 }
 
-func (p *githubPublisher) finalizeIssue(ctx context.Context, issueNumber int, issue Issue, pr GitHubPullRequest) ([]string, error) {
+func (p *githubPublisher) updatePullRequestReport(ctx context.Context, pr GitHubPullRequest, issue Issue, report VerificationReport, draftDueToFailedValidation bool, changedFiles []string) error {
+	if pr.Number <= 0 {
+		return nil
+	}
+
+	updated, err := p.client.UpdatePullRequest(ctx, pr.Number, publishPRTitle(issue), publishPRBody(issue, report, draftDueToFailedValidation, changedFiles))
+	if err != nil {
+		return err
+	}
+
+	return p.ensurePullRequestDraftState(ctx, mergePullRequestIdentity(updated, pr), p.cfg.Publish.Draft || draftDueToFailedValidation)
+}
+
+func (p *githubPublisher) createFailurePullRequest(ctx context.Context, issue Issue, branch, failureReason string, changedFiles []string, emptyFailureCommit bool) (GitHubPullRequest, bool, error) {
+	pr, err := p.client.CreatePullRequest(
+		ctx,
+		branch,
+		p.cfg.Publish.BaseBranch,
+		publishPRTitle(issue),
+		publishFailurePRBody(issue, failureReason, changedFiles, emptyFailureCommit),
+		true,
+	)
+	if err == nil {
+		if draftErr := p.ensurePullRequestDraftState(ctx, pr, true); draftErr != nil {
+			return pr, false, draftErr
+		}
+
+		return pr, false, nil
+	}
+
+	var statusErr *githubAPIStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != httpStatusValidationFailed {
+		return GitHubPullRequest{}, false, err
+	}
+
+	existing, findErr := p.client.FetchOpenPullRequestByHead(ctx, branch)
+	if findErr != nil {
+		return GitHubPullRequest{}, false, findErr
+	}
+
+	if existing == nil {
+		return GitHubPullRequest{}, false, err
+	}
+
+	updated, updateErr := p.client.UpdatePullRequest(ctx, existing.Number, publishPRTitle(issue), publishFailurePRBody(issue, failureReason, changedFiles, emptyFailureCommit))
+	if updateErr != nil {
+		return GitHubPullRequest{}, false, updateErr
+	}
+	updated = mergePullRequestIdentity(updated, *existing)
+	if draftErr := p.ensurePullRequestDraftState(ctx, updated, true); draftErr != nil {
+		return updated, true, draftErr
+	}
+
+	return updated, true, nil
+}
+
+func (p *githubPublisher) updateFailurePullRequestReport(ctx context.Context, pr GitHubPullRequest, issue Issue, failureReason string, changedFiles []string, emptyFailureCommit bool) error {
+	if pr.Number <= 0 {
+		return nil
+	}
+
+	updated, err := p.client.UpdatePullRequest(ctx, pr.Number, publishPRTitle(issue), publishFailurePRBody(issue, failureReason, changedFiles, emptyFailureCommit))
+	if err != nil {
+		return err
+	}
+
+	return p.ensurePullRequestDraftState(ctx, mergePullRequestIdentity(updated, pr), true)
+}
+
+func (p *githubPublisher) ensurePullRequestDraftState(ctx context.Context, pr GitHubPullRequest, shouldBeDraft bool) error {
+	if pr.Draft == shouldBeDraft {
+		return nil
+	}
+
+	nodeID := strings.TrimSpace(pr.NodeID)
+	if nodeID == "" {
+		action := "convert"
+		if !shouldBeDraft {
+			action = "mark ready for review"
+		}
+
+		return fmt.Errorf("publish: %s pull request #%d: GitHub node_id is missing", action, pr.Number)
+	}
+
+	if shouldBeDraft {
+		if err := p.client.ConvertPullRequestToDraft(ctx, nodeID); err != nil {
+			return fmt.Errorf("publish: convert pull request #%d to draft: %w", pr.Number, err)
+		}
+
+		return nil
+	}
+
+	if err := p.client.MarkPullRequestReadyForReview(ctx, nodeID); err != nil {
+		return fmt.Errorf("publish: mark pull request #%d ready for review: %w", pr.Number, err)
+	}
+
+	return nil
+}
+
+func mergePullRequestIdentity(updated, existing GitHubPullRequest) GitHubPullRequest {
+	if updated.Number == 0 {
+		updated.Number = existing.Number
+	}
+	if strings.TrimSpace(updated.HTMLURL) == "" {
+		updated.HTMLURL = existing.HTMLURL
+	}
+	if strings.TrimSpace(updated.NodeID) == "" {
+		updated.NodeID = existing.NodeID
+	}
+	if updated.Head.Ref == "" {
+		updated.Head = existing.Head
+	}
+	if updated.Base.Ref == "" {
+		updated.Base = existing.Base
+	}
+	if !updated.DraftKnown && existing.DraftKnown {
+		updated.Draft = existing.Draft
+		updated.DraftKnown = true
+	}
+
+	return updated
+}
+
+func (p *githubPublisher) finalizeIssue(ctx context.Context, issueNumber int, issue Issue, pr GitHubPullRequest, draftDueToFailedValidation bool) ([]string, error) {
+	if draftDueToFailedValidation {
+		return p.finalizeIssueWithComment(ctx, issueNumber, issue, pr, publishValidationFailureIssueComment)
+	}
+
+	return p.finalizeIssueWithComment(ctx, issueNumber, issue, pr, publishIssueComment)
+}
+
+func (p *githubPublisher) finalizeFailureIssue(ctx context.Context, issueNumber int, issue Issue, pr GitHubPullRequest) ([]string, error) {
+	return p.finalizeIssueWithComment(ctx, issueNumber, issue, pr, publishFailureIssueComment)
+}
+
+func (p *githubPublisher) finalizeIssueWithComment(ctx context.Context, issueNumber int, issue Issue, pr GitHubPullRequest, commentFor func(GitHubPullRequest, []string) string) ([]string, error) {
 	removed := trimNonEmptyStrings(p.cfg.Publish.RemoveLabels)
 	for _, label := range removed {
 		if labelErr := p.client.RemoveIssueLabel(ctx, issueNumber, label); labelErr != nil {
@@ -558,7 +1090,7 @@ func (p *githubPublisher) finalizeIssue(ctx context.Context, issueNumber int, is
 		}
 	}
 
-	comment := publishIssueComment(pr, removed)
+	comment := commentFor(pr, removed)
 	if commentErr := p.client.AddIssueComment(ctx, issueNumber, comment); commentErr != nil {
 		p.logger.Warn(
 			"symphony issue comment failed after publish",
@@ -697,42 +1229,425 @@ func githubIssueNumber(issue Issue) (int, error) {
 
 func publishCommitMessage(issue Issue) string {
 	var body bytes.Buffer
-	fmt.Fprintf(&body, "chore: publish %s Symphony workspace\n\n", issue.Identifier)
-	fmt.Fprintf(&body, "Symphony completed a worker run for %s: %s.\n\n", issue.Identifier, issue.Title)
+	issueIdentifier := redactedIssueIdentifier(issue)
+	fmt.Fprintf(&body, "chore: publish %s Symphony workspace\n\n", issueIdentifier)
+	fmt.Fprintf(&body, "Symphony completed a worker run for %s: %s.\n\n", issueIdentifier, redactedIssueTitle(issue))
 	fmt.Fprintln(&body, "Constraint: Publication is automated from the issue workspace")
 	fmt.Fprintln(&body, "Confidence: medium")
 	fmt.Fprintln(&body, "Scope-risk: moderate")
 	fmt.Fprintln(&body, "Tested: See the Symphony pull request body and worker output")
 	fmt.Fprintln(&body, "Not-tested: Human review pending")
-	fmt.Fprintf(&body, "Related: %s\n", issue.Identifier)
+	fmt.Fprintf(&body, "Related: %s\n", issueIdentifier)
+	return body.String()
+}
+
+func publishFailureCommitMessage(issue Issue, runErr error) string {
+	var body bytes.Buffer
+	issueIdentifier := redactedIssueIdentifier(issue)
+	fmt.Fprintf(&body, "chore: publish %s incomplete Symphony draft\n\n", issueIdentifier)
+	fmt.Fprintf(&body, "Symphony could not complete the implementation for %s: %s.\n", issueIdentifier, redactedIssueTitle(issue))
+	if reason := redactedRunFailure(runErr); reason != "" {
+		fmt.Fprintf(&body, "Failure: %s.\n", oneLine(reason))
+	}
+	fmt.Fprintln(&body)
+	fmt.Fprintln(&body, "Constraint: Publication is automated from an incomplete issue workspace")
+	fmt.Fprintln(&body, "Confidence: medium")
+	fmt.Fprintln(&body, "Scope-risk: moderate")
+	fmt.Fprintln(&body, "Tested: Implementation did not reach normal verification gates")
+	fmt.Fprintln(&body, "Not-tested: Implementation incomplete; human review pending")
+	fmt.Fprintf(&body, "Related: %s\n", issueIdentifier)
 	return body.String()
 }
 
 func publishPRTitle(issue Issue) string {
-	return strings.TrimSpace(issue.Identifier + ": " + issue.Title)
+	return strings.TrimSpace(redactedIssueIdentifier(issue) + ": " + redactedIssueTitle(issue))
 }
 
-func publishPRBody(issue Issue) string {
+func publishPRBody(issue Issue, report VerificationReport, draftDueToFailedValidation bool, changedFiles []string) string {
 	var body bytes.Buffer
-	fmt.Fprintf(&body, "Automated Symphony publication for %s.\n\n", issue.Identifier)
+	issueIdentifier := redactedIssueIdentifier(issue)
+	fmt.Fprintf(&body, "Automated Symphony publication for %s.\n\n", issueIdentifier)
+
+	fmt.Fprintln(&body, "## What changed")
+	fmt.Fprintf(&body, "- Prepared worker changes for %s: %s.\n", issueIdentifier, redactedIssueTitle(issue))
+	fmt.Fprintln(&body, "- Committed the worker workspace to a deterministic Symphony branch.")
+	for _, file := range changedFiles {
+		fmt.Fprintf(&body, "- Changed file: `%s`\n", privacy.RedactIdentifier(file))
+	}
+	fmt.Fprintln(&body)
+
+	fmt.Fprintln(&body, "## Validation")
+	body.WriteString(formatVerificationReport(report))
+	fmt.Fprintln(&body)
+
+	fmt.Fprintln(&body, "## Risk")
+	fmt.Fprintf(&body, "- %s\n", publishRiskAssessment(issue, report))
+	if draftDueToFailedValidation {
+		fmt.Fprintln(&body, "- This PR is not ready because at least one required local verification gate failed; keep it draft until resolved.")
+	}
+	fmt.Fprintln(&body)
+
+	fmt.Fprintln(&body, "## Reviewer notes")
+	fmt.Fprintln(&body, "- Review the worker commit, CI output, and the verification evidence above.")
+	fmt.Fprintln(&body, "- Confirm generated claims against the diff before marking this PR ready.")
+	if focus := publishReviewerFocus(issue); focus != "" {
+		fmt.Fprintf(&body, "- Suggested reviewer focus: %s.\n", focus)
+	}
+	if reviewers := publishSuggestedReviewers(issue, report); reviewers != "" {
+		fmt.Fprintf(&body, "- Suggested reviewers: %s.\n", reviewers)
+	}
+	if len(issue.Labels) > 0 {
+		fmt.Fprintf(&body, "- Issue labels for reviewer routing: %s.\n", strings.Join(redactedIssueLabels(issue.Labels), ", "))
+	}
+	fmt.Fprintln(&body)
+
+	fmt.Fprintln(&body, "## Linked issue")
 	if issue.URL != nil && strings.TrimSpace(*issue.URL) != "" {
-		fmt.Fprintf(&body, "Issue: %s\n\n", strings.TrimSpace(*issue.URL))
+		fmt.Fprintf(&body, "- Issue: %s\n", privacy.RedactIdentifier(strings.TrimSpace(*issue.URL)))
 	}
-
 	if number, err := githubIssueNumber(issue); err == nil {
-		fmt.Fprintf(&body, "Closes #%d\n\n", number)
+		if draftDueToFailedValidation || len(report.FailedRequired) > 0 {
+			fmt.Fprintf(&body, "- Related to #%d\n", number)
+		} else {
+			fmt.Fprintf(&body, "- Closes #%d\n", number)
+		}
 	}
 
-	fmt.Fprintln(&body, "## Verification")
-	fmt.Fprintln(&body, "Review the worker commit, CI output, and any verification notes left by the Symphony run.")
 	return body.String()
+}
+
+func publishFailurePRBody(issue Issue, failureReason string, changedFiles []string, emptyFailureCommit bool) string {
+	var body bytes.Buffer
+	issueIdentifier := redactedIssueIdentifier(issue)
+	failureReason = privacy.RedactText(strings.TrimSpace(failureReason))
+
+	fmt.Fprintf(&body, "Automated Symphony draft for %s could not complete.\n\n", issueIdentifier)
+
+	fmt.Fprintln(&body, "## What changed")
+	fmt.Fprintf(&body, "- Symphony attempted to implement %s: %s.\n", issueIdentifier, redactedIssueTitle(issue))
+	switch {
+	case len(changedFiles) == 0 && emptyFailureCommit:
+		fmt.Fprintln(&body, "- No changed files were captured before the incomplete run ended; an empty draft commit was published so the run is reviewable.")
+	case len(changedFiles) == 0:
+		fmt.Fprintln(&body, "- No changed files were captured before the incomplete run ended.")
+	default:
+		fmt.Fprintln(&body, "- Partial implementation changes were committed for reviewer inspection.")
+		for _, file := range changedFiles {
+			fmt.Fprintf(&body, "- Changed file: `%s`\n", privacy.RedactIdentifier(file))
+		}
+	}
+	fmt.Fprintln(&body)
+
+	fmt.Fprintln(&body, "## Validation")
+	fmt.Fprintln(&body, "- FAIL `worker_run` (required): issue implementation did not complete.")
+	if failureReason != "" {
+		fmt.Fprintf(&body, "  - error: %s\n", oneLine(failureReason))
+	}
+	fmt.Fprintln(&body, "- Local verification gates were not run because the implementation did not reach the normal publish gate.")
+	fmt.Fprintln(&body, "- Required verification gate(s) failed: worker_run.")
+	fmt.Fprintln(&body)
+
+	fmt.Fprintln(&body, "## Risk")
+	fmt.Fprintln(&body, "- High: implementation is incomplete; do not merge until the incomplete run is resolved and verification gates pass.")
+	fmt.Fprintln(&body, "- This PR is a draft because the autonomous implementation did not fully complete the issue.")
+	fmt.Fprintln(&body)
+
+	fmt.Fprintln(&body, "## Reviewer notes")
+	fmt.Fprintln(&body, "- Review the failure evidence above and any partial diff before deciding whether to continue manually or rerun Symphony.")
+	fmt.Fprintln(&body, "- Confirm no generated claim here is treated as proof of implementation completion.")
+	if focus := publishReviewerFocus(issue); focus != "" {
+		fmt.Fprintf(&body, "- Suggested reviewer focus: %s.\n", focus)
+	}
+	if reviewers := publishSuggestedReviewers(issue, VerificationReport{FailedRequired: []string{"worker_run"}}); reviewers != "" {
+		fmt.Fprintf(&body, "- Suggested reviewers: %s.\n", reviewers)
+	}
+	if len(issue.Labels) > 0 {
+		fmt.Fprintf(&body, "- Issue labels for reviewer routing: %s.\n", strings.Join(redactedIssueLabels(issue.Labels), ", "))
+	}
+	fmt.Fprintln(&body)
+
+	fmt.Fprintln(&body, "## Linked issue")
+	if issue.URL != nil && strings.TrimSpace(*issue.URL) != "" {
+		fmt.Fprintf(&body, "- Issue: %s\n", privacy.RedactIdentifier(strings.TrimSpace(*issue.URL)))
+	}
+	if number, err := githubIssueNumber(issue); err == nil {
+		fmt.Fprintf(&body, "- Related to #%d\n", number)
+	}
+
+	return body.String()
+}
+
+func redactedIssueIdentifier(issue Issue) string {
+	return privacy.RedactIdentifier(strings.TrimSpace(issue.Identifier))
+}
+
+func redactedIssueTitle(issue Issue) string {
+	return privacy.RedactText(strings.TrimSpace(issue.Title))
+}
+
+func redactedIssueLabels(labels []string) []string {
+	out := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(privacy.RedactText(label))
+		if label != "" {
+			out = append(out, label)
+		}
+	}
+
+	return out
+}
+
+func formatVerificationReport(report VerificationReport) string {
+	var body strings.Builder
+	if !report.Configured {
+		body.WriteString("- No local verification gates configured; review worker output and CI before merging.\n")
+		return body.String()
+	}
+
+	for i := range report.Gates {
+		gate := report.Gates[i]
+		status := "FAIL"
+		if gate.Status == VerificationPassed {
+			status = "PASS"
+		}
+		required := "optional"
+		if gate.Required {
+			required = "required"
+		}
+
+		fmt.Fprintf(&body, "- %s `%s` (%s): `%s`", status, privacy.RedactText(gate.Name), required, privacy.RedactText(gate.Command))
+		if gate.Duration > 0 {
+			fmt.Fprintf(&body, " in %s", gate.Duration.Round(time.Millisecond))
+		}
+		body.WriteByte('\n')
+
+		if gate.Error != "" {
+			fmt.Fprintf(&body, "  - error: %s\n", oneLine(privacy.RedactText(gate.Error)))
+		}
+		if gate.Stdout != "" {
+			fmt.Fprintf(&body, "  - stdout: %s\n", truncateOneLine(privacy.RedactText(gate.Stdout)))
+		}
+		if gate.Stderr != "" {
+			fmt.Fprintf(&body, "  - stderr: %s\n", truncateOneLine(privacy.RedactText(gate.Stderr)))
+		}
+		if gate.OutputTruncated {
+			body.WriteString("  - output was truncated by the configured capture limit\n")
+		}
+	}
+
+	if len(report.FailedRequired) > 0 {
+		fmt.Fprintf(&body, "- Required verification gate(s) failed: %s.\n", strings.Join(redactVerificationNames(report.FailedRequired), ", "))
+	} else {
+		body.WriteString("- All required local verification gates passed.\n")
+	}
+	if failedOptional := failedOptionalGateNames(report); len(failedOptional) > 0 {
+		fmt.Fprintf(&body, "- Optional verification gate(s) failed: %s.\n", strings.Join(failedOptional, ", "))
+	}
+
+	return body.String()
+}
+
+func failureVerificationReport(runErr error) *VerificationReport {
+	now := time.Now().UTC()
+	reason := redactedRunFailure(runErr)
+
+	return &VerificationReport{
+		StartedAt:      now,
+		CompletedAt:    now,
+		Configured:     true,
+		Passed:         false,
+		FailedRequired: []string{"worker_run"},
+		Gates: []VerificationGateResult{{
+			StartedAt:   now,
+			CompletedAt: now,
+			Name:        "worker_run",
+			Command:     "symphony worker run",
+			Status:      VerificationFailed,
+			Error:       reason,
+			Required:    true,
+		}},
+	}
+}
+
+func publishRiskAssessment(issue Issue, report VerificationReport) string {
+	if len(report.FailedRequired) > 0 {
+		return "High: required local verification failed; do not merge until the failed gate output is resolved."
+	}
+
+	if len(failedOptionalGateNames(report)) > 0 {
+		return "Medium: optional local verification failed; review the failed gate output before merging."
+	}
+
+	for _, label := range issue.Labels {
+		switch normalizeState(label) {
+		case publishLabelSecurity, publishLabelAuth, publishLabelAuthentication, publishLabelArchitecture:
+			return "Medium: issue labels indicate a security- or architecture-sensitive change."
+		}
+	}
+
+	if !report.Configured {
+		return "Medium: no local verification gates were configured, so CI and human review remain the proof gates."
+	}
+
+	return "Low: configured local verification passed; human review and CI are still required before merge."
+}
+
+func failedOptionalGateNames(report VerificationReport) []string {
+	var failed []string
+	for i := range report.Gates {
+		gate := report.Gates[i]
+		if gate.Required || gate.Status == VerificationPassed {
+			continue
+		}
+
+		name := strings.TrimSpace(gate.Name)
+		if name != "" {
+			failed = append(failed, privacy.RedactText(name))
+		}
+	}
+
+	return failed
+}
+
+func redactVerificationNames(names []string) []string {
+	redacted := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(privacy.RedactText(name))
+		if name != "" {
+			redacted = append(redacted, name)
+		}
+	}
+
+	return redacted
+}
+
+func redactedRunFailure(runErr error) string {
+	if runErr == nil {
+		return "worker run failed before completion"
+	}
+
+	return privacy.RedactText(runErr.Error())
+}
+
+func publishReviewerFocus(issue Issue) string {
+	seen := make(map[string]struct{})
+	var focus []string
+
+	add := func(value string) {
+		if value == "" {
+			return
+		}
+
+		if _, ok := seen[value]; ok {
+			return
+		}
+
+		seen[value] = struct{}{}
+		focus = append(focus, value)
+	}
+
+	for _, label := range issue.Labels {
+		switch normalizeState(label) {
+		case publishLabelSecurity, publishLabelAuth, publishLabelAuthentication:
+			add("security")
+		case publishLabelArchitecture, publishLabelAPI, publishLabelBackend:
+			add("architecture/backend")
+		case publishLabelQuality, publishLabelTesting, publishLabelTest:
+			add("quality/testing")
+		case publishLabelDocs, publishLabelDocumentation:
+			add("documentation")
+		case publishLabelUX, publishLabelUI, publishLabelFrontend:
+			add("UX/frontend")
+		}
+	}
+
+	return strings.Join(focus, ", ")
+}
+
+func publishSuggestedReviewers(issue Issue, report VerificationReport) string {
+	seen := make(map[string]struct{})
+	var reviewers []string
+
+	add := func(value string) {
+		if value == "" {
+			return
+		}
+
+		if _, ok := seen[value]; ok {
+			return
+		}
+
+		seen[value] = struct{}{}
+		reviewers = append(reviewers, value)
+	}
+
+	for _, label := range issue.Labels {
+		switch normalizeState(label) {
+		case publishLabelSecurity, publishLabelAuth, publishLabelAuthentication:
+			add("security reviewer")
+		case publishLabelArchitecture, publishLabelAPI, publishLabelBackend:
+			add("backend/architecture reviewer")
+		case publishLabelQuality, publishLabelTesting, publishLabelTest:
+			add("test/quality reviewer")
+		case publishLabelDocs, publishLabelDocumentation:
+			add("documentation reviewer")
+		case publishLabelUX, publishLabelUI, publishLabelFrontend:
+			add("UX/frontend reviewer")
+		}
+	}
+
+	if len(report.FailedRequired) > 0 || len(failedOptionalGateNames(report)) > 0 {
+		add("CI/build owner for failed validation evidence")
+	}
+
+	if len(reviewers) == 0 {
+		add("maintainer familiar with the changed area")
+	}
+
+	return strings.Join(reviewers, ", ")
+}
+
+func oneLine(value string) string {
+	return truncateOneLine(value)
+}
+
+func truncateOneLine(value string) string {
+	const limit = 240
+
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) <= limit {
+		return value
+	}
+
+	return value[:limit] + "..."
 }
 
 func publishIssueComment(pr GitHubPullRequest, removedLabels []string) string {
 	var body bytes.Buffer
-	fmt.Fprintf(&body, "Symphony opened pull request #%d\n\n", pr.Number)
-	if len(removedLabels) > 0 {
-		fmt.Fprintf(&body, "Removed dispatch label(s) `%s` so this issue stops redispatching while the PR is open.\n", strings.Join(removedLabels, "`, `"))
+	fmt.Fprintf(&body, "Symphony published pull request #%d\n\n", pr.Number)
+	labels := redactedIssueLabels(removedLabels)
+	if len(labels) > 0 {
+		fmt.Fprintf(&body, "Removed dispatch label(s) `%s` so this issue stops redispatching while the PR is open.\n", strings.Join(labels, "`, `"))
+	}
+	return body.String()
+}
+
+func publishFailureIssueComment(pr GitHubPullRequest, removedLabels []string) string {
+	var body bytes.Buffer
+	fmt.Fprintf(&body, "Symphony published draft pull request #%d after the implementation could not complete before verification.\n\n", pr.Number)
+	labels := redactedIssueLabels(removedLabels)
+	if len(labels) > 0 {
+		fmt.Fprintf(&body, "Removed dispatch label(s) `%s` so this issue stops redispatching while the draft PR documents the failure.\n", strings.Join(labels, "`, `"))
+	}
+	return body.String()
+}
+
+func publishValidationFailureIssueComment(pr GitHubPullRequest, removedLabels []string) string {
+	var body bytes.Buffer
+	fmt.Fprintf(&body, "Symphony published draft pull request #%d after required local verification failed.\n\n", pr.Number)
+	labels := redactedIssueLabels(removedLabels)
+	if len(labels) > 0 {
+		fmt.Fprintf(&body, "Removed dispatch label(s) `%s` so this issue stops redispatching while the draft PR documents failed verification.\n", strings.Join(labels, "`, `"))
 	}
 	return body.String()
 }

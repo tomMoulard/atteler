@@ -468,6 +468,14 @@ func commandContractsByName() map[string]commandContract {
 			withInputType("mergeArtifactsCommandInput"),
 			withExamples("atteler session merge-artifacts merged.json --merge-artifacts-format json --session demo"),
 		),
+		"issue-implement": commandContractFor(
+			"implement one tracker issue through Symphony and optionally open a verified PR",
+			[]string{"--issue-implement", "--issue-workflow", "--open-pr", "--base", "--run-tests", "--run-lint", "--update-docs", "--update-changelog"},
+			[]string{commandEffectConfigRead, commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectGitRead, commandEffectGitWrite, commandEffectNetwork, commandEffectProcessExecute, commandEffectWorktreeWrite, commandEffectUserOutput},
+			[]string{commandOutputText},
+			withInputType("issueImplementCommandInput"),
+			withExamples("atteler issue implement GH-218 --open-pr --run-tests --run-lint"),
+		),
 		"plan-agents-providerless": commandContractFor(
 			"preview configured agents for a prompt",
 			[]string{"--plan-agents", "--plan-agent", "--plan-max-agents"},

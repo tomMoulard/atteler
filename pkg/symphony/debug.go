@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/privacy"
 )
 
 // DebugSnapshotter is implemented by the orchestrator and kept small for HTTP
@@ -57,30 +59,45 @@ type DebugWorkflowSnapshot struct {
 
 // DebugConfigSnapshot reports non-secret operational config.
 type DebugConfigSnapshot struct {
-	WorkflowPath                  string   `json:"workflow_path"`
-	WorkspaceRoot                 string   `json:"workspace_root"`
-	TrackerKind                   string   `json:"tracker_kind"`
-	TrackerRepository             string   `json:"tracker_repository,omitempty"`
-	TrackerActiveStates           []string `json:"tracker_active_states,omitempty"`
-	TrackerLabels                 []string `json:"tracker_labels,omitempty"`
-	PollIntervalMS                int64    `json:"poll_interval_ms"`
-	MaxConcurrentAgents           int      `json:"max_concurrent_agents"`
-	MaxTurns                      int      `json:"max_turns"`
-	StallTimeoutMS                int64    `json:"stall_timeout_ms"`
-	PublishEnabled                bool     `json:"publish_enabled"`
-	PublishBaseBranch             string   `json:"publish_base_branch,omitempty"`
-	PublishBranchPrefix           string   `json:"publish_branch_prefix,omitempty"`
-	PublishRemoveLabels           []string `json:"publish_remove_labels,omitempty"`
-	PublishRequiredChecks         []string `json:"publish_required_checks,omitempty"`
-	PublishRequiredCheckPatterns  []string `json:"publish_required_check_patterns,omitempty"`
-	PublishNoChecksPolicy         string   `json:"publish_no_checks_policy,omitempty"`
-	PublishMonitorChecks          bool     `json:"publish_monitor_checks"`
-	PublishCheckIntervalMS        int64    `json:"publish_check_interval_ms,omitempty"`
-	PublishMaxCheckReworkAttempts int      `json:"publish_max_check_rework_attempts,omitempty"`
-	PublishDiscoverRequiredChecks bool     `json:"publish_discover_required_checks"`
-	PublishReworkOptionalChecks   bool     `json:"publish_rework_optional_checks"`
-	DebugEnabled                  bool     `json:"debug_enabled"`
-	DebugAddress                  string   `json:"debug_address,omitempty"`
+	WorkflowPath                      string                  `json:"workflow_path"`
+	WorkspaceRoot                     string                  `json:"workspace_root"`
+	TrackerKind                       string                  `json:"tracker_kind"`
+	TrackerRepository                 string                  `json:"tracker_repository,omitempty"`
+	TrackerActiveStates               []string                `json:"tracker_active_states,omitempty"`
+	TrackerLabels                     []string                `json:"tracker_labels,omitempty"`
+	PollIntervalMS                    int64                   `json:"poll_interval_ms"`
+	MaxConcurrentAgents               int                     `json:"max_concurrent_agents"`
+	MaxTurns                          int                     `json:"max_turns"`
+	StallTimeoutMS                    int64                   `json:"stall_timeout_ms"`
+	PublishEnabled                    bool                    `json:"publish_enabled"`
+	PublishBaseBranch                 string                  `json:"publish_base_branch,omitempty"`
+	PublishBranchPrefix               string                  `json:"publish_branch_prefix,omitempty"`
+	PublishDraft                      bool                    `json:"publish_draft"`
+	PublishDraftOnFailedValidation    bool                    `json:"publish_draft_on_failed_validation"`
+	PublishRemoveLabels               []string                `json:"publish_remove_labels,omitempty"`
+	PublishVerificationGates          []DebugVerificationGate `json:"publish_verification_gates,omitempty"`
+	PublishVerificationAllowCommands  []string                `json:"publish_verification_allow_commands,omitempty"`
+	PublishVerificationDenyCommands   []string                `json:"publish_verification_deny_commands,omitempty"`
+	PublishVerificationOutputMaxBytes int64                   `json:"publish_verification_output_max_bytes,omitempty"`
+	PublishRequiredChecks             []string                `json:"publish_required_checks,omitempty"`
+	PublishRequiredCheckPatterns      []string                `json:"publish_required_check_patterns,omitempty"`
+	PublishNoChecksPolicy             string                  `json:"publish_no_checks_policy,omitempty"`
+	PublishMonitorChecks              bool                    `json:"publish_monitor_checks"`
+	PublishCheckIntervalMS            int64                   `json:"publish_check_interval_ms,omitempty"`
+	PublishMaxCheckReworkAttempts     int                     `json:"publish_max_check_rework_attempts,omitempty"`
+	PublishDiscoverRequiredChecks     bool                    `json:"publish_discover_required_checks"`
+	PublishReworkOptionalChecks       bool                    `json:"publish_rework_optional_checks"`
+	DebugEnabled                      bool                    `json:"debug_enabled"`
+	DebugAddress                      string                  `json:"debug_address,omitempty"`
+}
+
+// DebugVerificationGate summarizes one local PR verification gate without
+// exposing unredacted command text.
+type DebugVerificationGate struct {
+	Name      string `json:"name"`
+	Command   string `json:"command"`
+	Required  bool   `json:"required"`
+	TimeoutMS int64  `json:"timeout_ms,omitempty"`
 }
 
 // DebugCounts summarizes scheduler queues.
@@ -527,31 +544,71 @@ func (o *Orchestrator) debugPullRequests(now time.Time) []DebugPullRequest {
 
 func debugConfigSnapshot(cfg Config) DebugConfigSnapshot {
 	return DebugConfigSnapshot{
-		WorkflowPath:                  cfg.WorkflowPath,
-		WorkspaceRoot:                 cfg.Workspace.Root,
-		TrackerKind:                   cfg.Tracker.Kind,
-		TrackerRepository:             firstNonEmpty(cfg.Tracker.Repository, cfg.Tracker.Owner+"/"+cfg.Tracker.Repo),
-		TrackerActiveStates:           append([]string(nil), cfg.Tracker.ActiveStates...),
-		TrackerLabels:                 append([]string(nil), cfg.Tracker.Labels...),
-		PollIntervalMS:                cfg.Polling.Interval.Milliseconds(),
-		MaxConcurrentAgents:           cfg.Agent.MaxConcurrentAgents,
-		MaxTurns:                      cfg.Agent.MaxTurns,
-		StallTimeoutMS:                cfg.Codex.StallTimeout.Milliseconds(),
-		PublishEnabled:                cfg.Publish.Enabled,
-		PublishBaseBranch:             cfg.Publish.BaseBranch,
-		PublishBranchPrefix:           cfg.Publish.BranchPrefix,
-		PublishRemoveLabels:           append([]string(nil), cfg.Publish.RemoveLabels...),
-		PublishRequiredChecks:         append([]string(nil), cfg.Publish.RequiredCheckNames...),
-		PublishRequiredCheckPatterns:  append([]string(nil), cfg.Publish.RequiredCheckPatterns...),
-		PublishNoChecksPolicy:         string(cfg.Publish.NoChecksPolicy),
-		PublishMonitorChecks:          cfg.Publish.MonitorChecks,
-		PublishCheckIntervalMS:        cfg.Publish.CheckInterval.Milliseconds(),
-		PublishMaxCheckReworkAttempts: cfg.Publish.MaxCheckReworkAttempts,
-		PublishDiscoverRequiredChecks: cfg.Publish.DiscoverRequiredChecks,
-		PublishReworkOptionalChecks:   cfg.Publish.ReworkOptionalChecks,
-		DebugEnabled:                  cfg.Debug.Enabled,
-		DebugAddress:                  cfg.Debug.Address,
+		WorkflowPath:                      cfg.WorkflowPath,
+		WorkspaceRoot:                     cfg.Workspace.Root,
+		TrackerKind:                       cfg.Tracker.Kind,
+		TrackerRepository:                 firstNonEmpty(cfg.Tracker.Repository, cfg.Tracker.Owner+"/"+cfg.Tracker.Repo),
+		TrackerActiveStates:               append([]string(nil), cfg.Tracker.ActiveStates...),
+		TrackerLabels:                     append([]string(nil), cfg.Tracker.Labels...),
+		PollIntervalMS:                    cfg.Polling.Interval.Milliseconds(),
+		MaxConcurrentAgents:               cfg.Agent.MaxConcurrentAgents,
+		MaxTurns:                          cfg.Agent.MaxTurns,
+		StallTimeoutMS:                    cfg.Codex.StallTimeout.Milliseconds(),
+		PublishEnabled:                    cfg.Publish.Enabled,
+		PublishBaseBranch:                 cfg.Publish.BaseBranch,
+		PublishBranchPrefix:               cfg.Publish.BranchPrefix,
+		PublishDraft:                      cfg.Publish.Draft,
+		PublishDraftOnFailedValidation:    cfg.Publish.DraftOnFailedValidation,
+		PublishRemoveLabels:               append([]string(nil), cfg.Publish.RemoveLabels...),
+		PublishVerificationGates:          debugVerificationGates(cfg.Publish.VerificationGates),
+		PublishVerificationAllowCommands:  debugRedactedStrings(cfg.Publish.VerificationAllowCommands),
+		PublishVerificationDenyCommands:   debugRedactedStrings(cfg.Publish.VerificationDenyCommands),
+		PublishVerificationOutputMaxBytes: cfg.Publish.VerificationOutputMaxBytes,
+		PublishRequiredChecks:             append([]string(nil), cfg.Publish.RequiredCheckNames...),
+		PublishRequiredCheckPatterns:      append([]string(nil), cfg.Publish.RequiredCheckPatterns...),
+		PublishNoChecksPolicy:             string(cfg.Publish.NoChecksPolicy),
+		PublishMonitorChecks:              cfg.Publish.MonitorChecks,
+		PublishCheckIntervalMS:            cfg.Publish.CheckInterval.Milliseconds(),
+		PublishMaxCheckReworkAttempts:     cfg.Publish.MaxCheckReworkAttempts,
+		PublishDiscoverRequiredChecks:     cfg.Publish.DiscoverRequiredChecks,
+		PublishReworkOptionalChecks:       cfg.Publish.ReworkOptionalChecks,
+		DebugEnabled:                      cfg.Debug.Enabled,
+		DebugAddress:                      cfg.Debug.Address,
 	}
+}
+
+func debugVerificationGates(gates []VerificationGateConfig) []DebugVerificationGate {
+	if len(gates) == 0 {
+		return nil
+	}
+
+	out := make([]DebugVerificationGate, 0, len(gates))
+	for _, gate := range gates {
+		out = append(out, DebugVerificationGate{
+			Name:      privacy.RedactText(strings.TrimSpace(gate.Name)),
+			Command:   privacy.RedactText(strings.TrimSpace(gate.Command)),
+			Required:  gate.Required,
+			TimeoutMS: gate.Timeout.Milliseconds(),
+		})
+	}
+
+	return out
+}
+
+func debugRedactedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(privacy.RedactText(value))
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+
+	return out
 }
 
 func debugCodexSnapshot(totals codexTotals, rateLimits jsonRaw) DebugCodexSnapshot {

@@ -154,7 +154,7 @@ func RunHook(ctx context.Context, cfg Config, issue Issue, workspace Workspace, 
 		Args:    []string{"--noprofile", "--norc", "-lc", script},
 		Command: script,
 		Dir:     workspace.Path,
-		EnvList: hookEnv(issue, workspace, hookName),
+		EnvList: hookEnv(cfg, issue, workspace, hookName),
 		Policy:  symphonyHookPolicy(),
 		Mode:    shell.ModeCaptured,
 		Stdout:  &stdout,
@@ -215,13 +215,14 @@ func hookWorkspaceKey(issue Issue, workspace Workspace) string {
 	return SanitizeWorkspaceKey(issue.Identifier)
 }
 
-func hookEnv(issue Issue, workspace Workspace, hookName string) []string {
+func hookEnv(cfg Config, issue Issue, workspace Workspace, hookName string) []string {
 	workspaceKey := hookWorkspaceKey(issue, workspace)
 
 	return []string{
 		"SYMPHONY_HOOK=" + hookName,
 		"SYMPHONY_WORKSPACE_PATH=" + workspace.Path,
 		"SYMPHONY_WORKSPACE_KEY=" + workspaceKey,
+		"SYMPHONY_BASE_BRANCH=" + cfg.Publish.BaseBranch,
 		"SYMPHONY_ISSUE_ID=" + issue.ID,
 		"SYMPHONY_ISSUE_IDENTIFIER=" + issue.Identifier,
 		"SYMPHONY_ISSUE_TITLE=" + issue.Title,

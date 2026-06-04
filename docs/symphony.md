@@ -3,7 +3,7 @@
 Atteler includes a standalone `symphony` command that implements the Symphony
 service contract from OpenAI's draft specification.
 
-Run it without adding flags to the main `atteler` CLI:
+Run the long-lived scheduler via the standalone command:
 
 ```sh
 go run ./cmd/symphony --validate
@@ -13,6 +13,40 @@ make run-symphony
 make build-symphony
 ./symphony ./WORKFLOW.md
 ```
+
+For a one-shot autonomous issue-to-PR run from the main CLI, use:
+
+```sh
+atteler issue implement GH-218 --open-pr --run-tests --run-lint
+atteler issue implement GH-218 --open-pr --base main
+```
+
+This loads the same `WORKFLOW.md`, fetches the referenced issue, and runs the
+worker once. GitHub issue references can be passed as `GH-218`, `#218`, `218`,
+or the issue URL. It only enables publication when `--open-pr` is present, even
+if the workflow file has `publish.enabled: true`; without `--open-pr`, the
+one-shot command leaves the workspace changes local for review. When publication is
+enabled, configured and flag-selected verification gates run before the push/PR
+step. When `--run-tests` or `--run-lint` provides the first verification gates
+for the run, the command also seeds the local verification allow list with the
+needed executables (`go` and/or `make`) instead of leaving the gate execution
+surface open-ended.
+Unlike the long-lived scheduler, the one-shot `--open-pr` path does not require
+`publish.remove_labels`; ad-hoc issue implementation can publish a verified PR
+even when there is no dispatch label to remove.
+Use `--update-docs` and `--update-changelog` to add explicit worker
+instructions for documentation or changelog edits when they are relevant; these
+flags do not force blind documentation changes when the issue does not need
+them.
+
+If the one-shot worker fails after preparing a workspace, or completes without
+leaving publishable changes, `--open-pr` uses the same draft fallback control
+(`publish.draft_on_failed_validation`, enabled by default in resolved config)
+to publish a draft PR with an auditable failure report. When no partial diff was
+captured, Symphony creates an empty draft commit so the failure remains linked
+to the source issue instead of disappearing into local logs. If the draft
+fallback is disabled, the one-shot command fails instead of silently treating a
+no-change worker run as a verified implementation.
 
 ## Workflow File
 
@@ -37,6 +71,16 @@ publish:
   base_branch: main
   branch_prefix: symphony
   draft: false
+  draft_on_failed_validation: true
+  verification_gates:
+    - go_test                  # preset: go test ./...
+    - name: lint
+      command: make lint
+      required: true
+      timeout_ms: 600000
+  verification_allow_commands: [go, make]
+  verification_deny_commands: [curl, wget]
+  verification_output_max_bytes: 32768
   remove_labels: [codex]
   monitor_checks: true
   required_checks: []          # exact check/status names, optional
@@ -113,14 +157,66 @@ by GitHub's Issues API are ignored.
 publication path:
 
 - commit the worker workspace locally
+- run configured local verification gates and capture bounded evidence
 - set `publish.remote` to the GitHub repository URL
 - push `publish.branch_prefix/<issue identifier>` to that remote
-- open or reuse a pull request against `publish.base_branch`
+- open or reuse a pull request against `publish.base_branch` with a generated
+  report covering changes, validation, risk, reviewer notes, suggested
+  reviewers, and issue linkage
 - remove `publish.remove_labels` from the source issue
 
 Removing the dispatch label is the finalization signal for GitHub-backed
 workflows: once the PR exists, the issue no longer matches the tracker label
 filter and Symphony will not redispatch it.
+
+Local PR verification gates are configured with
+`publish.verification_gates`. Entries can use presets (`go_test`,
+`go_build`, `make_test`, `make_lint`, `golangci_lint`) or explicit commands:
+
+```yaml
+publish:
+  verification_gates:
+    - go_test
+    - name: docs
+      command: test -f README.md
+      required: false
+      timeout_ms: 30000
+  verification_allow_commands: [go, test]
+  verification_deny_commands: [curl, wget]
+  draft_on_failed_validation: true
+  verification_output_max_bytes: 32768
+```
+
+Symphony runs these commands from the issue workspace through Atteler's audited
+shell policy before pushing/opening the PR. `verification_allow_commands` and
+`verification_deny_commands` are passed into that policy so operators can make
+the executable surface explicit; the verification policy also denies
+network-like commands named directly in the configured command string by
+default. This is an audited process-launch policy, not a syscall sandbox: only
+allow wrappers such as `make` when the repository-controlled recipes they run
+are trusted for verification. Required gate failures are never silently
+skipped: when `publish.draft_on_failed_validation: true` (the default for
+resolved workflow config), Symphony continues by opening the PR as a draft and
+puts the failed gate output in the PR body. Failed-validation draft bodies use
+`Related to #...` rather than an issue-closing keyword until a later passing
+run refreshes the PR report. If the deterministic branch already
+has an open non-draft PR, Symphony attempts to convert that PR back to draft
+through GitHub before finalizing the issue. Conversely, when a later run updates
+an existing draft PR and all required gates pass, Symphony attempts to mark the
+PR ready for review unless `publish.draft: true` still requires draft mode. When
+the fallback is false, publication stops before the push/PR step. After
+configured gates run, Symphony also checks that the workspace is still clean;
+verification commands that modify generated files or docs are reported as a
+required `workspace_clean` failure instead of being silently left out of the PR.
+Captured commands and output are redacted with
+Atteler's conservative secret scrubber, then truncated/fail-closed at
+`publish.verification_output_max_bytes` so generated validation claims stay
+bounded and backed by captured evidence without publishing obvious tokens.
+The same draft fallback is used by `atteler issue implement ... --open-pr` when
+the worker fails before reaching verification or exits without publishable
+changes: the PR body records the incomplete run as a required `worker_run`
+validation failure, marks the PR draft, and links it back to the source issue
+without claiming the implementation is complete.
 
 With `publish.monitor_checks: true`, published PRs enter a separate check
 monitor lane. Symphony polls GitHub check runs and commit-status contexts for
@@ -171,7 +267,9 @@ workflow file.
 - `GET /debug/status` returns workflow/config summaries, running workers,
   queued retries, watched pull requests, recent events, token totals, and a
   `summary` object with `what_happened`, `what_is_going_on`, and
-  `what_will_do`
+  `what_will_do`. The config summary also includes redacted publication
+  verification controls such as draft fallback, gate commands, command
+  allow/deny lists, and output capture limits.
 - `GET /debug/events` returns the recent scheduler event ring
 
 The API is intended for local debugging and does not expose tracker tokens.
@@ -212,10 +310,15 @@ Hooks run through `bash -lc` with the workspace as `cwd`. Symphony sets:
 - `SYMPHONY_HOOK`
 - `SYMPHONY_WORKSPACE_PATH`
 - `SYMPHONY_WORKSPACE_KEY`
+- `SYMPHONY_BASE_BRANCH`
 - `SYMPHONY_ISSUE_ID`
 - `SYMPHONY_ISSUE_IDENTIFIER`
 - `SYMPHONY_ISSUE_TITLE`
 - `SYMPHONY_ISSUE_STATE`
+
+`SYMPHONY_BASE_BRANCH` is the resolved `publish.base_branch`, including the
+one-shot `atteler issue implement ... --base` override, so setup hooks can
+create the worker branch from the same base used for PR publication.
 
 ## Codex App-Server Policy
 

@@ -54,11 +54,202 @@ func TestTrackerClients_RequireActiveContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+func TestGitHubGraphQLEndpoint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		endpoint string
+		want     string
+	}{
+		{
+			name:     "default public API",
+			endpoint: "https://api.github.com",
+			want:     "https://api.github.com/graphql",
+		},
+		{
+			name:     "enterprise REST API",
+			endpoint: "https://github.example/api/v3",
+			want:     "https://github.example/api/graphql",
+		},
+		{
+			name:     "public GraphQL API",
+			endpoint: "https://api.github.com/graphql",
+			want:     "https://api.github.com/graphql",
+		},
+		{
+			name:     "enterprise GraphQL API",
+			endpoint: "https://github.example/api/graphql",
+			want:     "https://github.example/api/graphql",
+		},
+		{
+			name:     "custom REST path",
+			endpoint: "https://github.example/custom",
+			want:     "https://github.example/custom/graphql",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, githubGraphQLEndpoint(tt.endpoint))
+		})
+	}
+}
+
+func TestGitHubAPIVersionMatchesSupportedVersion(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "2022-11-28", githubAPIVersion)
+}
+
+func TestGitHubClient_ConvertPullRequestToDraft(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+		assert.Equal(t, githubAPIVersion, r.Header.Get("X-GitHub-Api-Version"))
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, githubGraphQLPath, r.URL.Path)
+
+		var body map[string]any
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) {
+			http.Error(w, "decode graphql body", http.StatusBadRequest)
+			return
+		}
+
+		query, ok := body["query"].(string)
+		if !assert.True(t, ok) {
+			http.Error(w, "query is not a string", http.StatusBadRequest)
+			return
+		}
+
+		variables, ok := body["variables"].(map[string]any)
+		if !assert.True(t, ok) {
+			http.Error(w, "variables are not an object", http.StatusBadRequest)
+			return
+		}
+
+		assert.Contains(t, query, "convertPullRequestToDraft")
+		assert.Equal(t, "PR_node", variables["pullRequestId"])
+		writeTestResponse(t, w, `{"data":{"convertPullRequestToDraft":{"pullRequest":{"id":"PR_node","isDraft":true}}}}`)
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	require.NoError(t, client.ConvertPullRequestToDraft(t.Context(), "PR_node"))
+}
+
+func TestGitHubClient_ConvertPullRequestToDraftRequiresDraftResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeTestResponse(t, w, `{"data":{"convertPullRequestToDraft":{"pullRequest":{"id":"PR_node","isDraft":false}}}}`)
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	err := client.ConvertPullRequestToDraft(t.Context(), "PR_node")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not converted to draft")
+}
+
+func TestGitHubClient_MarkPullRequestReadyForReview(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+		assert.Equal(t, githubAPIVersion, r.Header.Get("X-GitHub-Api-Version"))
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, githubGraphQLPath, r.URL.Path)
+
+		var body map[string]any
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) {
+			http.Error(w, "decode graphql body", http.StatusBadRequest)
+			return
+		}
+
+		query, ok := body["query"].(string)
+		if !assert.True(t, ok) {
+			http.Error(w, "query is not a string", http.StatusBadRequest)
+			return
+		}
+
+		variables, ok := body["variables"].(map[string]any)
+		if !assert.True(t, ok) {
+			http.Error(w, "variables are not an object", http.StatusBadRequest)
+			return
+		}
+
+		assert.Contains(t, query, "markPullRequestReadyForReview")
+		assert.Equal(t, "PR_node", variables["pullRequestId"])
+		writeTestResponse(t, w, `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_node","isDraft":false}}}}`)
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	require.NoError(t, client.MarkPullRequestReadyForReview(t.Context(), "PR_node"))
+}
+
+func TestGitHubClient_MarkPullRequestReadyForReviewRequiresReadyResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeTestResponse(t, w, `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_node","isDraft":true}}}}`)
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	err := client.MarkPullRequestReadyForReview(t.Context(), "PR_node")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not marked ready for review")
+}
+
+func TestGitHubPullRequestUnmarshalTracksDraftFieldPresence(t *testing.T) {
+	t.Parallel()
+
+	var explicitReady GitHubPullRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"number":7,"draft":false}`), &explicitReady))
+	assert.True(t, explicitReady.DraftKnown)
+	assert.False(t, explicitReady.Draft)
+
+	var omitted GitHubPullRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"number":7}`), &omitted))
+	assert.False(t, omitted.DraftKnown)
+	assert.False(t, omitted.Draft)
+}
+
 func TestGitHubClient_FetchPullRequestChecksClassifiesFailure(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+		assert.Equal(t, githubAPIVersion, r.Header.Get("X-GitHub-Api-Version"))
 
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
@@ -963,6 +1154,83 @@ func TestGitHubClient_FetchCandidateIssuesIncludesDiscussionComments(t *testing.
 	assert.Equal(t, "OWNER", issues[0].Comments[0].AuthorAssociation)
 	assert.Contains(t, issues[0].Comments[0].Body, "denied before spawn")
 	assert.Contains(t, issues[0].Comments[1].Body, "admitted then halted")
+}
+
+func TestGitHubClient_FetchIssueStatesByIDsAcceptsIssueReference(t *testing.T) {
+	t.Parallel()
+
+	var (
+		issueFetches  int
+		requestedList bool
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/218":
+			issueFetches++
+
+			writeTestResponse(t, w, `{"node_id":"node-218","number":218,"title":"Autonomous PR agent","state":"open","html_url":"https://github.com/owner/repo/issues/218","body":"Implement issue-to-PR flow.","labels":[{"name":"symphony"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/218/comments":
+			writeTestResponse(t, w, `[{"html_url":"https://github.com/owner/repo/issues/218#issuecomment-1","user":{"login":"maintainer"},"author_association":"OWNER","created_at":"2026-05-26T08:52:52Z","updated_at":"2026-05-26T08:52:52Z","body":"Use draft PRs on failed validation."}]`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubIssuesPath:
+			requestedList = true
+
+			http.Error(w, "issue-reference lookup should fetch by number", http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	issues, err := client.FetchIssueStatesByIDs(t.Context(), []string{"218", "gh-218", "https://github.com/owner/repo/issues/218", "GH-218"})
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+
+	assert.Equal(t, 1, issueFetches)
+	assert.False(t, requestedList)
+	assert.Equal(t, "node-218", issues[0].ID)
+	assert.Equal(t, "GH-218", issues[0].Identifier)
+	assert.Equal(t, "Autonomous PR agent", issues[0].Title)
+	require.Len(t, issues[0].Comments, 1)
+	assert.Contains(t, issues[0].Comments[0].Body, "draft PRs")
+}
+
+func TestGitHubClient_FetchIssueStatesByIDsRejectsPullRequestReference(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/218":
+			writeTestResponse(t, w, `{"node_id":"PR_node","number":218,"title":"Existing PR","state":"open","html_url":"https://github.com/owner/repo/pull/218","pull_request":{}}`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	_, err := client.FetchIssueStatesByIDs(t.Context(), []string{"GH-218"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "github issue 218 is a pull request, not an issue")
 }
 
 func TestGitHubClient_UpsertsWatchIssuesByFingerprint(t *testing.T) {

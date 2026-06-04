@@ -120,13 +120,15 @@ func translateDomainCommandArgs(prefix []string, domain cliHelpDomain, rest []st
 }
 
 func strictUnknownDomainCommand(domain cliHelpDomain, selector string) bool {
-	if domain.Name != codeIntelDomainName {
+	if domain.Name != codeIntelDomainName && domain.Name != issueCommandName {
 		return false
 	}
 
 	selector = normalizeHelpName(selector)
 	switch selector {
 	case codeIntelDomainName, "codeintel", "code-intelligence":
+		return true
+	case issueCommandName, "issues":
 		return true
 	default:
 		return false

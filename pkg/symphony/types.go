@@ -33,6 +33,8 @@ const (
 	defaultDebugAddress      = "127.0.0.1:34000"
 	defaultDebugEventLimit   = 200
 	defaultPRCheckInterval   = 30 * time.Second
+	defaultPRGateTimeout     = 10 * time.Minute
+	defaultPRGateOutputBytes = 32 * 1024
 	defaultMaxPRRework       = 3
 	defaultNoChecksPolicy    = PullRequestNoChecksPass
 	linearAPIKeyEnv          = "LINEAR_API_KEY" //nolint:gosec // Environment variable name, not a credential value.
@@ -125,26 +127,81 @@ type WorkspaceConfig struct {
 	Root string
 }
 
-// PublishConfig configures the explicit local commit, push, PR, and tracker
-// finalization path after a worker leaves a successful workspace.
+// PublishConfig configures the explicit local commit, verification, push, PR,
+// and tracker finalization path after a worker leaves a successful workspace.
+//
+//nolint:govet // Field order follows workflow-file grouping rather than byte packing.
 type PublishConfig struct {
-	Remote                 string
-	RemoteURL              string
-	BaseBranch             string
-	BranchPrefix           string
-	GitUserName            string
-	GitUserEmail           string
-	NoChecksPolicy         PullRequestNoChecksPolicy
-	RemoveLabels           []string
-	RequiredCheckNames     []string
-	RequiredCheckPatterns  []string
-	CheckInterval          time.Duration
-	MaxCheckReworkAttempts int
-	Enabled                bool
-	Draft                  bool
-	MonitorChecks          bool
-	DiscoverRequiredChecks bool
-	ReworkOptionalChecks   bool
+	Remote                     string
+	RemoteURL                  string
+	BaseBranch                 string
+	BranchPrefix               string
+	GitUserName                string
+	GitUserEmail               string
+	VerificationGates          []VerificationGateConfig
+	VerificationAllowCommands  []string
+	VerificationDenyCommands   []string
+	NoChecksPolicy             PullRequestNoChecksPolicy
+	VerificationOutputMaxBytes int64
+	RemoveLabels               []string
+	RequiredCheckNames         []string
+	RequiredCheckPatterns      []string
+	CheckInterval              time.Duration
+	MaxCheckReworkAttempts     int
+	Enabled                    bool
+	Draft                      bool
+	DraftOnFailedValidation    bool
+	MonitorChecks              bool
+	DiscoverRequiredChecks     bool
+	ReworkOptionalChecks       bool
+}
+
+// VerificationGateConfig describes one local command that must be run before
+// a Symphony workspace is published to a pull request.
+type VerificationGateConfig struct {
+	Name     string
+	Command  string
+	Timeout  time.Duration
+	Required bool
+}
+
+// VerificationStatus is the normalized result state for one local PR gate.
+type VerificationStatus string
+
+const (
+	// VerificationPassed means the gate command exited successfully.
+	VerificationPassed VerificationStatus = "passed"
+	// VerificationFailed means the gate command ran or was authorized and did
+	// not prove the gate.
+	VerificationFailed VerificationStatus = "failed"
+)
+
+// VerificationReport captures the local verification evidence generated
+// before Symphony opens or updates a pull request.
+type VerificationReport struct {
+	StartedAt      time.Time                `json:"started_at,omitzero"`
+	CompletedAt    time.Time                `json:"completed_at,omitzero"`
+	Gates          []VerificationGateResult `json:"gates,omitempty"`
+	FailedRequired []string                 `json:"failed_required,omitempty"`
+	Passed         bool                     `json:"passed"`
+	Configured     bool                     `json:"configured"`
+}
+
+// VerificationGateResult is the bounded evidence for one configured command.
+//
+//nolint:govet // Field order groups the command identity before captured evidence.
+type VerificationGateResult struct {
+	StartedAt       time.Time          `json:"started_at,omitzero"`
+	CompletedAt     time.Time          `json:"completed_at,omitzero"`
+	Duration        time.Duration      `json:"duration,omitempty"`
+	Name            string             `json:"name"`
+	Command         string             `json:"command"`
+	Status          VerificationStatus `json:"status"`
+	Stdout          string             `json:"stdout,omitempty"`
+	Stderr          string             `json:"stderr,omitempty"`
+	Error           string             `json:"error,omitempty"`
+	Required        bool               `json:"required"`
+	OutputTruncated bool               `json:"output_truncated,omitempty"`
 }
 
 // DebugConfig configures the local HTTP status/debug API.
@@ -215,15 +272,22 @@ type RunResult struct {
 
 // PublishResult records the optional publish/finalization result for a worker
 // attempt.
+//
+//nolint:govet // Field order groups PR evidence before terminal booleans.
 type PublishResult struct {
-	Branch              string
-	CommitSHA           string
-	PullRequestURL      string
-	SkippedReason       string
-	RemovedLabels       []string
-	PullRequestNumber   int
-	Published           bool
-	ExistingPullRequest bool
+	Verification                 *VerificationReport
+	Branch                       string
+	CommitSHA                    string
+	PullRequestURL               string
+	SkippedReason                string
+	ChangedFiles                 []string
+	RemovedLabels                []string
+	FailureReason                string
+	PullRequestNumber            int
+	Published                    bool
+	ExistingPullRequest          bool
+	DraftDueToFailedVerification bool
+	DraftDueToRunFailure         bool
 }
 
 // RunContext carries orchestration context that is not part of the original

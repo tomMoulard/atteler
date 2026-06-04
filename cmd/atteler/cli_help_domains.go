@@ -9,6 +9,7 @@ import (
 const (
 	bashCommandName    = "bash"
 	helpCommandName    = "help"
+	issueCommandName   = "issue"
 	sessionCommandName = "session"
 	helpLongFlag       = "--help"
 	helpGoFlag         = "-help"
@@ -184,6 +185,25 @@ var cliHelpDomains = []cliHelpDomain{
 			`atteler agents list`,
 			`atteler agents plan "review auth changes"`,
 			`atteler agents task-list`,
+		},
+	},
+	{
+		Name:    issueCommandName,
+		Title:   "Issue implementation",
+		Summary: "Run the autonomous Symphony issue-to-PR agent with explicit verification gates.",
+		Aliases: []string{"issues"},
+		Commands: []cliCommandAlias{
+			{
+				Name:    "implement",
+				Args:    "<issue-ref>",
+				Summary: "implement one tracker issue and optionally open a verified pull request",
+				Legacy:  []string{"--issue-implement"},
+			},
+		},
+		Examples: []string{
+			`atteler issue implement GH-218 --open-pr`,
+			`atteler issue implement https://github.com/owner/repo/issues/218 --open-pr`,
+			`atteler issue implement GH-218 --open-pr --base main --run-tests --run-lint`,
 		},
 	},
 	{
