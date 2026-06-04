@@ -361,7 +361,7 @@ func loadModelsForFZF(ctx context.Context, reg *llm.Registry, fetchID int) tea.C
 		providers := reg.ListProviders()
 		sort.Strings(providers)
 
-		var items []pickerItem
+		items := modelRolePickerItems(reg)
 
 		for _, provider := range providers {
 			catalog, err := reg.ProviderModelCatalog(ctx, provider)
@@ -384,7 +384,7 @@ func fallbackModelPickerItems(reg *llm.Registry) []pickerItem {
 	providers := reg.ListProviders()
 	sort.Strings(providers)
 
-	items := make([]pickerItem, 0)
+	items := modelRolePickerItems(reg)
 
 	for _, providerName := range providers {
 		provider, ok := reg.Provider(providerName)
@@ -396,6 +396,10 @@ func fallbackModelPickerItems(reg *llm.Registry) []pickerItem {
 	}
 
 	return sortPickerItems(items)
+}
+
+func modelRolePickerItems(reg *llm.Registry) []pickerItem {
+	return pickerItemsForProvider("", reg.ListModelRoles())
 }
 
 func pickerItemsForProviderCatalog(provider string, catalog llm.ProviderModelCatalog) []pickerItem {

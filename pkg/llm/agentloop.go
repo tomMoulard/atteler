@@ -199,10 +199,12 @@ func AgentLoop(
 			return nil, state.messages, fmt.Errorf("llm: agent loop iteration %d: %w", state.usage.Iterations, err)
 		}
 
+		previousCostMicros := state.usage.EstimatedCostMicros
 		usageErr := state.usage.addResponse(resp, state.budget, cfg.EstimateCostMicros)
+		responseCostMicros := state.usage.EstimatedCostMicros - previousCostMicros
 		state.refreshElapsed()
 
-		if err := state.recordModelResponse(ctx, cfg.CheckpointSink, requestSummary, resp); err != nil {
+		if err := state.recordModelResponse(ctx, cfg.CheckpointSink, requestSummary, resp, responseCostMicros); err != nil {
 			return nil, state.messages, err
 		}
 
@@ -569,6 +571,7 @@ func (s *agentLoopState) recordModelResponse(
 	sink AgentLoopCheckpointSink,
 	request AgentLoopModelRequestSummary,
 	resp *Response,
+	estimatedCostMicros int64,
 ) error {
 	if sink == nil {
 		return nil
@@ -580,15 +583,19 @@ func (s *agentLoopState) recordModelResponse(
 		Budget:       s.budget,
 		ModelRequest: &request,
 		ModelResponse: &AgentLoopModelResponseSummary{
-			Model:             resp.Model,
-			StopReason:        resp.StopReason,
-			Content:           resp.Content,
-			ContentBytes:      len([]byte(resp.Content)),
-			ToolCalls:         append([]ToolCall(nil), resp.ToolCalls...),
-			InputTokens:       resp.InputTokens,
-			CachedInputTokens: resp.CachedInputTokens,
-			CacheWriteTokens:  resp.CacheWriteInputTokens,
-			OutputTokens:      resp.OutputTokens,
+			Model:               resp.Model,
+			Provider:            resp.Provider,
+			StopReason:          resp.StopReason,
+			Content:             resp.Content,
+			ContentBytes:        len([]byte(resp.Content)),
+			ToolCalls:           append([]ToolCall(nil), resp.ToolCalls...),
+			EstimatedCostMicros: max(0, estimatedCostMicros),
+			LatencyMS:           agentLoopDurationMS(resp.Latency),
+			FirstTokenLatencyMS: agentLoopDurationMS(resp.FirstTokenLatency),
+			InputTokens:         resp.InputTokens,
+			CachedInputTokens:   resp.CachedInputTokens,
+			CacheWriteTokens:    resp.CacheWriteInputTokens,
+			OutputTokens:        resp.OutputTokens,
 		},
 		Usage: s.usage,
 	}
@@ -752,6 +759,14 @@ func summarizeModelRequest(params CompleteParams, fallbackModels []string) Agent
 		MessageBytes:   messageBytes,
 		MaxTokens:      params.MaxTokens,
 	}
+}
+
+func agentLoopDurationMS(d time.Duration) int {
+	if d <= 0 {
+		return 0
+	}
+
+	return int(d / time.Millisecond)
 }
 
 func promptToolResult(result ToolResult, limit int) ToolResult {

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -44,6 +46,179 @@ func requestModelAndFallbacks(
 	}
 
 	return requestModel, modelFallbacks, routeDecision, nil
+}
+
+func requestModelRoleAndFallbacks(
+	ctx context.Context,
+	registry *llm.Registry,
+	requestModel string,
+	fallbackModels []string,
+	params llm.CompleteParams,
+	routePolicies ...modelroute.Policy,
+) (resolvedModel string, resolvedFallbacks []string, routeDecision *modelroute.Decision, routed bool, err error) {
+	resolvedModel = requestModel
+	resolvedFallbacks = fallbackModels
+
+	if registry == nil {
+		return resolvedModel, resolvedFallbacks, nil, false, nil
+	}
+
+	roleName, role, ok := registry.ModelRoleForRequest(requestModel)
+	if !ok {
+		return resolvedModel, resolvedFallbacks, nil, false, nil
+	}
+
+	candidateChain := routeModelRoleCandidateChain(registry, roleName, role, fallbackModels)
+	refreshRouteProviderModels(ctx, registry, candidateChain)
+
+	params.Model = roleName
+
+	resolution, ok, err := registry.ResolveModelRoleWithPolicy(
+		roleName,
+		params,
+		fallbackModels,
+		optionalRoutePolicy(routePolicies),
+	)
+	if !ok {
+		return resolvedModel, resolvedFallbacks, nil, false, nil
+	}
+
+	markRouteDecisionAvailabilityRefresh(ctx, registry, &resolution.Decision, candidateChain)
+
+	if err != nil {
+		return resolvedModel, resolvedFallbacks, &resolution.Decision, true, fmt.Errorf("resolve model role %q: %w", roleName, err)
+	}
+
+	return resolution.SelectedModel, resolution.FallbackModels, &resolution.Decision, true, nil
+}
+
+func requestModelRoutingAndFallbacks(
+	ctx context.Context,
+	registry *llm.Registry,
+	selectedModel string,
+	modelLocked bool,
+	selectedFallbacks []string,
+	activeAgent agentSelection,
+	requestModel string,
+	requestFallbacks []string,
+	params llm.CompleteParams,
+	routeProfile modelroute.RequestProfile,
+	routeTelemetry *modelroute.Telemetry,
+	routeAvailability modelroute.Availability,
+) (resolvedModel string, resolvedFallbacks []string, routeDecision *modelroute.Decision, err error) {
+	resolvedModel, resolvedFallbacks, roleDecision, roleRouted, err := requestModelRoleAndFallbacks(
+		ctx,
+		registry,
+		requestModel,
+		requestFallbacks,
+		params,
+		activeAgentRolePolicy(activeAgent, modelLocked),
+	)
+	if err != nil || roleRouted {
+		return resolvedModel, resolvedFallbacks, roleDecision, err
+	}
+
+	return requestModelAndFallbacks(
+		selectedModel,
+		modelLocked,
+		selectedFallbacks,
+		activeAgent,
+		routeProfile,
+		routeTelemetry,
+		routeAvailability,
+	)
+}
+
+func optionalRoutePolicy(policies []modelroute.Policy) modelroute.Policy {
+	if len(policies) == 0 {
+		return modelroute.Policy{}
+	}
+
+	return policies[0]
+}
+
+func activeAgentRolePolicy(activeAgent agentSelection, modelLocked bool) modelroute.Policy {
+	if !activeAgent.ok || modelLocked {
+		return modelroute.Policy{}
+	}
+
+	return activeAgent.agent.RoutingPolicy
+}
+
+func routeModelRoleCandidateChain(
+	registry *llm.Registry,
+	roleName string,
+	role llm.ModelRole,
+	fallbackModels []string,
+) []string {
+	roleName = strings.TrimSpace(roleName)
+
+	visited := make(map[string]bool)
+	if roleName != "" {
+		visited[roleName] = true
+	}
+
+	return expandRouteModelRoleCandidateChain(
+		registry,
+		routeModelChain(role.Preferred, append(append([]string(nil), role.FallbackModels...), fallbackModels...)),
+		visited,
+	)
+}
+
+func expandRouteModelRoleCandidateChain(
+	registry *llm.Registry,
+	chain []string,
+	visited map[string]bool,
+) []string {
+	if len(chain) == 0 {
+		return nil
+	}
+
+	expanded := make([]string, 0, len(chain))
+	for _, model := range chain {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+
+		if registry == nil || visited[model] {
+			expanded = append(expanded, model)
+
+			continue
+		}
+
+		nestedRole, ok := registry.ModelRole(model)
+		if !ok {
+			expanded = append(expanded, model)
+
+			continue
+		}
+
+		nextVisited := make(map[string]bool, len(visited)+1)
+		maps.Copy(nextVisited, visited)
+		nextVisited[model] = true
+		expanded = append(expanded, expandRouteModelRoleCandidateChain(
+			registry,
+			routeModelChain(nestedRole.Preferred, nestedRole.FallbackModels),
+			nextVisited,
+		)...)
+	}
+
+	return routeModelChain("", expanded)
+}
+
+func markRouteDecisionAvailabilityRefresh(
+	ctx context.Context,
+	registry *llm.Registry,
+	decision *modelroute.Decision,
+	candidateIDs []string,
+) {
+	if decision == nil || decision.Availability == nil || ctx == nil || registry == nil || len(candidateIDs) == 0 {
+		return
+	}
+
+	decision.Availability.RefreshAttempted = true
+	decision.Availability.RefreshTimeoutMS = int(routeAvailabilityRefreshTimeout / time.Millisecond)
 }
 
 func optionalRouteAvailability(values []modelroute.Availability) modelroute.Availability {
@@ -106,6 +281,14 @@ func routeAgentModelChain(activeAgent agent.Agent, chain []string, profile model
 		return "", nil, nil, false, nil
 	}
 
+	if err := validateAgentRoutePolicy(activeAgent.RoutingPolicy); err != nil {
+		return "", nil, &modelroute.Decision{
+			Profile:     profile,
+			Policy:      validationDecisionRoutePolicy(activeAgent.RoutingPolicy),
+			Constraints: validationDecisionRouteConstraints(activeAgent.RoutingPolicy),
+		}, true, fmt.Errorf("agent routing policy invalid: %w", err)
+	}
+
 	now := time.Now().UTC()
 	if !routeAgentChainHasEvidence(activeAgent.RoutingPolicy, telemetry, availability, chain, profile, now) {
 		return "", nil, nil, false, nil
@@ -133,12 +316,64 @@ func routeAgentModelChain(activeAgent agent.Agent, chain []string, profile model
 	return routeDecision.FallbackOrder[0], append([]string(nil), routeDecision.FallbackOrder[1:]...), &routeDecision, true, nil
 }
 
+func validateAgentRoutePolicy(policy modelroute.Policy) error {
+	if !isFiniteRouteFloat(policy.MaxBudget) {
+		return errors.New("agent routing_policy.max_budget must be finite")
+	}
+
+	if policy.MaxBudget < 0 {
+		return errors.New("agent routing_policy.max_budget must be >= 0")
+	}
+
+	if policy.MaxLatencyMS < 0 {
+		return errors.New("agent routing_policy.max_latency_ms must be >= 0")
+	}
+
+	if policy.MaxTTFTMS < 0 {
+		return errors.New("agent routing_policy.max_ttft_ms must be >= 0")
+	}
+
+	return validateRouteCapabilityList("agent routing_policy.required_capabilities", policy.RequiredCapabilities)
+}
+
+func validationDecisionRoutePolicy(policy modelroute.Policy) modelroute.Policy {
+	if !isFiniteRouteFloat(policy.MaxBudget) {
+		policy.MaxBudget = 0
+	}
+
+	return policy
+}
+
+func validationDecisionRouteConstraints(policy modelroute.Policy) []string {
+	constraints := []string{modelroute.ConstraintRoutingPolicy}
+
+	if len(policy.RequiredCapabilities) > 0 {
+		constraints = append(constraints, modelroute.ConstraintRequiredCapabilities)
+	}
+
+	if policy.MaxBudget != 0 || !isFiniteRouteFloat(policy.MaxBudget) {
+		constraints = append(constraints, modelroute.ConstraintBudget)
+	}
+
+	if policy.MaxLatencyMS != 0 {
+		constraints = append(constraints, modelroute.ConstraintLatency)
+	}
+
+	if policy.MaxTTFTMS != 0 {
+		constraints = append(constraints, modelroute.ConstraintTTFT)
+	}
+
+	return constraints
+}
+
 func routePolicyConfigured(policy modelroute.Policy) bool {
 	return len(policy.PreferredProviders) > 0 ||
 		len(policy.BannedProviders) > 0 ||
 		len(policy.BannedModels) > 0 ||
 		len(policy.RequiredCapabilities) > 0 ||
 		policy.MaxBudget > 0 ||
+		policy.MaxLatencyMS > 0 ||
+		policy.MaxTTFTMS > 0 ||
 		policy.RequireFreshMetadata
 }
 
@@ -242,6 +477,36 @@ func routeProfileForMessages(messages []llm.Message, generation generationSettin
 	}
 }
 
+func routeCompleteParamsForRequest(
+	modelName string,
+	messages []llm.Message,
+	generation generationSettings,
+	activeAgent agentSelection,
+	useTools bool,
+) llm.CompleteParams {
+	params := llm.CompleteParams{
+		Model:    modelName,
+		Messages: append([]llm.Message(nil), messages...),
+	}
+
+	applyGenerationParams(&params, generation)
+
+	if useTools {
+		params.Tools = defaultToolsForAgent(activeAgent)
+	}
+
+	return params
+}
+
+func defaultToolsForAgent(activeAgent agentSelection) []llm.ToolDefinition {
+	tools := llm.DefaultTools()
+	if activeAgent.ok {
+		tools = activeAgent.agent.FilterTools(tools)
+	}
+
+	return tools
+}
+
 func routeTelemetryFromRegistry(registry *llm.Registry) *modelroute.Telemetry {
 	if registry == nil {
 		return nil
@@ -285,12 +550,9 @@ func routeAvailabilityProviders(registry *llm.Registry, candidateIDs []string) [
 	seen := make(map[string]bool)
 
 	for _, id := range candidateIDs {
-		providerName := routeAvailabilityCandidate(registry, id).provider
-		if providerName == "" {
-			continue
+		for _, providerName := range routeAvailabilityProviderCandidates(registry, id) {
+			seen[providerName] = true
 		}
-
-		seen[providerName] = true
 	}
 
 	providers := make([]string, 0, len(seen))
@@ -301,6 +563,51 @@ func routeAvailabilityProviders(registry *llm.Registry, candidateIDs []string) [
 	sort.Strings(providers)
 
 	return providers
+}
+
+func routeAvailabilityProviderCandidates(registry *llm.Registry, id string) []string {
+	evidence := routeAvailabilityCandidate(registry, id)
+
+	providers := make([]string, 0, 1)
+	if evidence.provider != "" {
+		providers = append(providers, evidence.provider)
+	}
+
+	if registry == nil {
+		return uniqueRouteProviderNames(providers)
+	}
+
+	diagnostic := registry.ExplainModelResolution(id)
+	for _, candidate := range diagnostic.Candidates {
+		if candidate.ProviderName == "" {
+			continue
+		}
+
+		providers = append(providers, candidate.ProviderName)
+	}
+
+	return uniqueRouteProviderNames(providers)
+}
+
+func uniqueRouteProviderNames(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+
+		seen[value] = true
+		out = append(out, value)
+	}
+
+	return out
 }
 
 func routeAvailabilityFromRegistry(registry *llm.Registry, candidateIDs []string) modelroute.Availability {
@@ -349,6 +656,10 @@ func routeAvailabilityFromRegistry(registry *llm.Registry, candidateIDs []string
 			continue
 		}
 
+		if candidate.ambiguous {
+			continue
+		}
+
 		if candidate.provider != "" && !containsString(providers, candidate.provider) {
 			availability.Unavailable = addUnavailableRoute(
 				availability.Unavailable,
@@ -385,6 +696,7 @@ type routeAvailabilityCandidateEvidence struct {
 	model             string
 	aliases           []string
 	resolvable        bool
+	ambiguous         bool
 	providerQualified bool
 }
 
@@ -400,6 +712,8 @@ func routeAvailabilityCandidate(registry *llm.Registry, id string) routeAvailabi
 		candidate.provider = catalogCandidate.Provider
 		candidate.model = catalogCandidate.Name
 		candidate.aliases = append([]string(nil), catalogCandidate.Aliases...)
+	} else if modelroute.BuiltinCatalog().CandidateFailureReason(id) == modelroute.ReasonAmbiguousMetadata {
+		candidate.ambiguous = true
 	}
 
 	if provider, model, ok := strings.Cut(id, "/"); ok {

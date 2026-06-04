@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,6 +108,21 @@ func (f *modelOmittingProvider) Complete(ctx context.Context, p CompleteParams) 
 
 	return resp, err
 }
+
+type capabilityFakeProvider struct {
+	capabilities ProviderCapabilities
+	fakeProvider
+}
+
+func (f *capabilityFakeProvider) Capabilities() ProviderCapabilities {
+	return f.capabilities
+}
+
+type localCapabilityFakeProvider struct {
+	capabilityFakeProvider
+}
+
+func (f *localCapabilityFakeProvider) Local() bool { return true }
 
 func TestRegistry_RegisterAndListModels(t *testing.T) {
 	t.Parallel()
@@ -257,6 +273,228 @@ func TestAutoRegisterWithConfigContextReport_ReportsDisabledAndMissingCredential
 	assert.True(t, beta.Requested)
 	assert.False(t, beta.Registered)
 	assert.Contains(t, beta.Error.Error(), "no beta credentials")
+}
+
+func TestAutoRegisterWithConfigContextReport_MarksProviderRequestedByCatalogModelRole(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		Logger:       slog.New(slog.NewTextHandler(&logs, nil)),
+		DefaultModel: "planner",
+		ModelRoles: map[string]ModelRole{
+			"planner": {Preferred: "gpt-4.1-mini"},
+		},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: []string{"gpt-4.1-mini"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no openai credentials found")
+			},
+		},
+	})
+
+	report := r.ReadinessReport()
+	openai := requireReadinessProvider(t, report, providerOpenAI)
+	assert.Equal(t, ProviderStatusMissingCredential, openai.Status)
+	assert.True(t, openai.Requested)
+	assert.False(t, openai.Registered)
+}
+
+func TestAutoRegisterWithConfigContextReport_DoesNotRequestBannedCatalogProviderFromModelRole(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		Logger:       slog.New(slog.NewTextHandler(&logs, nil)),
+		DefaultModel: "planner",
+		ModelRoles: map[string]ModelRole{
+			"planner": {
+				Preferred:       "gpt-4.1-mini",
+				BannedProviders: []string{providerOpenAI},
+			},
+		},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: []string{"gpt-4.1-mini"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no openai credentials found")
+			},
+		},
+	})
+
+	openai := requireReadinessProvider(t, r.ReadinessReport(), providerOpenAI)
+	assert.False(t, openai.Requested)
+	assert.False(t, openai.Registered)
+	assert.Empty(t, logs.String())
+}
+
+func TestAutoRegisterWithConfigContextReport_DoesNotRequestBannedCatalogModelFromModelRole(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		Logger:       slog.New(slog.NewTextHandler(&logs, nil)),
+		DefaultModel: "planner",
+		ModelRoles: map[string]ModelRole{
+			"planner": {
+				Preferred:    "gpt-4.1-mini",
+				BannedModels: []string{"openai/gpt-4.1-mini"},
+			},
+		},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: []string{"gpt-4.1-mini"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no openai credentials found")
+			},
+		},
+	})
+
+	openai := requireReadinessProvider(t, r.ReadinessReport(), providerOpenAI)
+	assert.False(t, openai.Requested)
+	assert.False(t, openai.Registered)
+	assert.Empty(t, logs.String())
+}
+
+func TestAutoRegisterWithConfigContextReport_AppliesBannedCatalogModelToNestedModelRole(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		Logger:       slog.New(slog.NewTextHandler(&logs, nil)),
+		DefaultModel: "planner",
+		ModelRoles: map[string]ModelRole{
+			"planner": {
+				Preferred:    "writer",
+				BannedModels: []string{"openai/gpt-4.1-mini"},
+			},
+			"writer": {
+				Preferred: "gpt-4.1-mini",
+			},
+		},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerOpenAI,
+			staticModels: []string{"gpt-4.1-mini"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no openai credentials found")
+			},
+		},
+	})
+
+	openai := requireReadinessProvider(t, r.ReadinessReport(), providerOpenAI)
+	assert.False(t, openai.Requested)
+	assert.False(t, openai.Registered)
+	assert.Empty(t, logs.String())
+}
+
+func TestAutoRegisterWithConfigContextReport_MarksProviderRequestedByNestedModelRole(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		Logger:       slog.New(slog.NewTextHandler(&logs, nil)),
+		DefaultModel: "planner",
+		ModelRoles: map[string]ModelRole{
+			"planner": {
+				Preferred:      "openai/gpt-4.1-mini",
+				FallbackModels: []string{"writer"},
+			},
+			"writer": {
+				Preferred: "anthropic/claude-sonnet-4-20250514",
+			},
+		},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         providerAnthropic,
+			staticModels: []string{"claude-sonnet-4-20250514"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no anthropic credentials found")
+			},
+		},
+	})
+
+	report := r.ReadinessReport()
+	anthropic := requireReadinessProvider(t, report, providerAnthropic)
+	assert.Equal(t, ProviderStatusMissingCredential, anthropic.Status)
+	assert.True(t, anthropic.Requested)
+	assert.False(t, anthropic.Registered)
+}
+
+func TestAutoRegisterWithConfigContextReport_MarksProviderRequestedByModelRolePreferredProvider(t *testing.T) {
+	t.Parallel()
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultModel: "planner",
+		ModelRoles: map[string]ModelRole{
+			"planner": {
+				Preferred:          "llama-3.3-70b-versatile",
+				PreferredProviders: []string{"groq"},
+			},
+		},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         "groq",
+			staticModels: []string{"llama-3.3-70b-versatile"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no groq credentials found")
+			},
+		},
+	})
+
+	groq := requireReadinessProvider(t, r.ReadinessReport(), "groq")
+	assert.Equal(t, ProviderStatusMissingCredential, groq.Status)
+	assert.True(t, groq.Requested)
+	assert.False(t, groq.Registered)
+}
+
+func TestAutoRegisterWithConfigContextReport_MarksProviderRequestedByNestedModelRoleRoutingPolicy(t *testing.T) {
+	t.Parallel()
+
+	r := autoRegisterWithFactoriesContext(context.Background(), AutoRegisterConfig{
+		DefaultModel: "planner",
+		ModelRoles: map[string]ModelRole{
+			"planner": {
+				Preferred:      "openai/gpt-4.1-mini",
+				FallbackModels: []string{"summarizer"},
+			},
+			"summarizer": {
+				Preferred: "command-r-plus",
+				RoutingPolicy: modelroute.Policy{
+					PreferredProviders: []string{"cohere"},
+				},
+			},
+		},
+		DisableReadinessChecks: true,
+	}, []providerRegistration{
+		{
+			name:         "cohere",
+			staticModels: []string{"command-r-plus"},
+			factory: func() (Provider, error) {
+				return nil, errors.New("no cohere credentials found")
+			},
+		},
+	})
+
+	cohere := requireReadinessProvider(t, r.ReadinessReport(), "cohere")
+	assert.Equal(t, ProviderStatusMissingCredential, cohere.Status)
+	assert.True(t, cohere.Requested)
+	assert.False(t, cohere.Registered)
 }
 
 func TestAutoRegisterWithConfigContextReport_LogsMissingCredentialsOnlyWhenVisible(t *testing.T) {
@@ -1171,6 +1409,105 @@ func TestRegistry_CompleteWithFallback(t *testing.T) {
 	}
 }
 
+func TestRegistry_CompleteRejectsUnsupportedDeclaredProviderParams(t *testing.T) {
+	t.Parallel()
+
+	provider := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{
+			SupportsChatCompletions: true,
+			CompleteParams: map[string]CompleteParamSupport{
+				"Tools": unsupported("custom endpoint does not support tools"),
+			},
+		},
+		fakeProvider: fakeProvider{
+			name:   "compatible",
+			models: []string{"coder"},
+			resp:   &Response{Content: "should not be called"},
+		},
+	}
+
+	r := NewRegistry()
+	r.Register(provider)
+
+	_, err := r.Complete(context.Background(), CompleteParams{
+		Model:    "compatible/coder",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+		Tools:    DefaultTools(),
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CompleteParams.Tools is unsupported")
+	assert.Empty(t, provider.calls)
+}
+
+func TestRegistry_CompleteRejectsUnsupportedDeclaredProviderCapabilities(t *testing.T) {
+	t.Parallel()
+
+	provider := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{
+			SupportsChatCompletions: true,
+		},
+		fakeProvider: fakeProvider{
+			name:   "compatible",
+			models: []string{"coder"},
+			resp:   &Response{Content: "should not be called"},
+		},
+	}
+
+	r := NewRegistry()
+	r.Register(provider)
+
+	_, err := r.Complete(context.Background(), CompleteParams{
+		Model:    "compatible/coder",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+		Tools:    DefaultTools(),
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CompleteParams.Tools is unsupported")
+	assert.Contains(t, err.Error(), "provider capability metadata does not include tools")
+	assert.Empty(t, provider.calls)
+}
+
+func TestRegistry_CompleteWithFallbackSkipsUnsupportedDeclaredProviderParams(t *testing.T) {
+	t.Parallel()
+
+	primary := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{
+			SupportsChatCompletions: true,
+			CompleteParams: map[string]CompleteParamSupport{
+				"Tools": unsupported("custom endpoint does not support tools"),
+			},
+		},
+		fakeProvider: fakeProvider{
+			name:   "compatible",
+			models: []string{"coder"},
+			resp:   &Response{Content: "should not be called"},
+		},
+	}
+	fallback := &fakeProvider{
+		name:   "toolhost",
+		models: []string{"tool-coder"},
+		resp:   &Response{Content: "tool fallback"},
+	}
+
+	r := NewRegistry()
+	r.Register(primary)
+	r.Register(fallback)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:    "compatible/coder",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+		Tools:    DefaultTools(),
+	}, []string{"toolhost/tool-coder"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "tool fallback", resp.Content)
+	assert.Empty(t, primary.calls)
+	require.Len(t, fallback.calls, 1)
+	assert.Equal(t, "tool-coder", fallback.calls[0].Model)
+}
+
 func TestRegistry_CompleteWithFallbackNormalizesTemperaturePerProvider(t *testing.T) {
 	t.Parallel()
 
@@ -1199,6 +1536,7 @@ func TestRegistry_CompleteWithFallbackNormalizesTemperaturePerProvider(t *testin
 		Model:          "codex/gpt-5.5",
 		ReasoningLevel: "high",
 		Temperature:    &temperature,
+		MaxTokens:      2048,
 		Messages:       []Message{{Role: RoleUser, Content: "hi"}},
 	}, []string{"claude-code/claude-opus-4-7"})
 	require.NoError(t, err)
@@ -1206,14 +1544,51 @@ func TestRegistry_CompleteWithFallbackNormalizesTemperaturePerProvider(t *testin
 	assert.Equal(t, "ok", resp.Content)
 	require.Len(t, codexProvider.calls, 1)
 	assert.Nil(t, codexProvider.calls[0].Temperature)
+	assert.Zero(t, codexProvider.calls[0].MaxTokens)
 	require.Len(t, claudeCodeProvider.calls, 1)
 	require.NotNil(t, claudeCodeProvider.calls[0].Temperature)
 	assert.InEpsilon(t, 1.0, *claudeCodeProvider.calls[0].Temperature, 0.0001)
+	assert.Equal(t, 2048, claudeCodeProvider.calls[0].MaxTokens)
 
 	logOutput := log.String()
 	assert.Contains(t, logOutput, "option_adjustments")
 	assert.Contains(t, logOutput, "Temperature omitted")
+	assert.Contains(t, logOutput, "MaxTokens omitted")
 	assert.Contains(t, logOutput, "Temperature coerced")
+}
+
+func TestRegistry_CompleteOmitsAnthropicReasoningWhenMaxTokensTooSmall(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{
+		name:   providerClaudeCode,
+		models: []string{"claude-haiku-4-5"},
+		resp:   &Response{Content: "ok"},
+	}
+
+	r := NewRegistry()
+	r.Register(provider)
+
+	var log bytes.Buffer
+
+	ctx := events.WithEmitter(context.Background(), events.NewRunnerWithLogger(nil, &log), events.Event{})
+
+	temperature := 0.2
+	resp, err := r.Complete(ctx, CompleteParams{
+		Model:          "claude-code/claude-haiku-4-5",
+		ReasoningLevel: "medium",
+		Temperature:    &temperature,
+		MaxTokens:      16,
+		Messages:       []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "ok", resp.Content)
+	require.Len(t, provider.calls, 1)
+	assert.Empty(t, provider.calls[0].ReasoningLevel)
+	require.NotNil(t, provider.calls[0].Temperature)
+	assert.InEpsilon(t, 0.2, *provider.calls[0].Temperature, 0.0001)
+	assert.Contains(t, log.String(), "ReasoningLevel omitted")
 }
 
 func TestRegistry_CompleteWithFallbackRecordsRateLimitTelemetry(t *testing.T) {
@@ -1254,6 +1629,1661 @@ func TestRegistry_CompleteWithFallbackRecordsRateLimitTelemetry(t *testing.T) {
 	anthropicObs, ok := telemetry.Snapshot("anthropic/claude-sonnet-4-20250514")
 	require.True(t, ok)
 	assert.Equal(t, 1, anthropicObs.Count)
+}
+
+func TestRegistry_CompleteWithModelRoleRoutesByCapabilitiesAndBudget(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1", "gpt-4.1-mini"},
+		resp:   &Response{Content: "ok"},
+	}
+	r.Register(openAI)
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:            "openai/gpt-4.1",
+		FallbackModels:       []string{"openai/gpt-4.1-mini"},
+		RequiredCapabilities: []string{modelroute.CapabilityTools},
+		MaxCostUSD:           0.0005,
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:     "planner",
+		Messages:  []Message{{Role: RoleUser, Content: strings.Repeat("hello ", 100)}},
+		MaxTokens: 100,
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "ok", resp.Content)
+	assert.Equal(t, "gpt-4.1-mini", resp.Model)
+	require.Len(t, openAI.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", openAI.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		Messages:  []Message{{Role: RoleUser, Content: strings.Repeat("hello ", 100)}},
+		MaxTokens: 100,
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-4.1-mini", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Constraints, modelroute.ConstraintRequiredCapabilities)
+	assert.Contains(t, resolution.Decision.Constraints, modelroute.ConstraintBudget)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-4.1", modelroute.ReasonOverBudget)
+}
+
+func TestRegistry_SetModelRoleRejectsNegativeLimits(t *testing.T) {
+	t.Parallel()
+
+	assertInvalid := func(name string, role ModelRole, wantErr string) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			r := NewRegistry()
+
+			err := r.SetModelRole("planner", role)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), wantErr)
+		})
+	}
+
+	assertInvalid("max cost", ModelRole{
+		Preferred:  "openai/gpt-4.1-mini",
+		MaxCostUSD: -0.01,
+	}, "max_cost_usd must be >= 0")
+	assertInvalid("non finite max cost", ModelRole{
+		Preferred:  "openai/gpt-4.1-mini",
+		MaxCostUSD: math.NaN(),
+	}, "max_cost_usd must be finite")
+	assertInvalid("max latency", ModelRole{
+		Preferred:    "openai/gpt-4.1-mini",
+		MaxLatencyMS: -1,
+	}, "max_latency_ms must be >= 0")
+	assertInvalid("max ttft", ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+		MaxTTFTMS: -1,
+	}, "max_ttft_ms must be >= 0")
+	assertInvalid("routing max budget", ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+		RoutingPolicy: modelroute.Policy{
+			MaxBudget: -0.01,
+		},
+	}, "routing_policy.max_budget must be >= 0")
+	assertInvalid("non finite routing max budget", ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+		RoutingPolicy: modelroute.Policy{
+			MaxBudget: math.Inf(1),
+		},
+	}, "routing_policy.max_budget must be finite")
+	assertInvalid("routing max latency", ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+		RoutingPolicy: modelroute.Policy{
+			MaxLatencyMS: -1,
+		},
+	}, "routing_policy.max_latency_ms must be >= 0")
+	assertInvalid("routing max ttft", ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+		RoutingPolicy: modelroute.Policy{
+			MaxTTFTMS: -1,
+		},
+	}, "routing_policy.max_ttft_ms must be >= 0")
+}
+
+func TestRegistry_SetModelRoleRejectsUnknownCapabilities(t *testing.T) {
+	t.Parallel()
+
+	assertInvalid := func(name string, role ModelRole, wantErr string) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			r := NewRegistry()
+
+			err := r.SetModelRole("planner", role)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), wantErr)
+			assert.Contains(t, err.Error(), "valid: text,chat,tools")
+		})
+	}
+
+	assertInvalid("role required capabilities", ModelRole{
+		Preferred:            "openai/gpt-4.1-mini",
+		RequiredCapabilities: []string{"tools", "clairvoyance"},
+	}, `required_capabilities contains unknown capability "clairvoyance"`)
+	assertInvalid("routing policy required capabilities", ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+		RoutingPolicy: modelroute.Policy{
+			RequiredCapabilities: []string{"json_schema", "teleport"},
+		},
+	}, `routing_policy.required_capabilities contains unknown capability "teleport"`)
+}
+
+func TestRegistry_ResolveModelRoleWithPolicyRejectsUnknownCapabilities(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+	}))
+
+	resolution, ok, err := r.ResolveModelRoleWithPolicy(
+		"planner",
+		CompleteParams{},
+		nil,
+		modelroute.Policy{RequiredCapabilities: []string{"teleport"}},
+	)
+
+	require.Error(t, err)
+	assert.True(t, ok)
+	assert.Contains(t, err.Error(), `routing_policy.required_capabilities contains unknown capability "teleport"`)
+	assert.Contains(t, err.Error(), "valid: text,chat,tools")
+	assert.Equal(t, "planner", resolution.Decision.ModelRole)
+	assert.Contains(t, resolution.Decision.Policy.RequiredCapabilities, "teleport")
+}
+
+func TestRegistry_ResolveModelRoleWithPolicyRejectsInvalidLimits(t *testing.T) {
+	t.Parallel()
+
+	assertInvalid := func(name string, policy modelroute.Policy, wantErr string) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			r := NewRegistry()
+			require.NoError(t, r.SetModelRole("planner", ModelRole{
+				Preferred: "openai/gpt-4.1-mini",
+			}))
+
+			resolution, ok, err := r.ResolveModelRoleWithPolicy(
+				"planner",
+				CompleteParams{},
+				nil,
+				policy,
+			)
+
+			require.Error(t, err)
+			assert.True(t, ok)
+			assert.Contains(t, err.Error(), wantErr)
+			assert.Equal(t, "planner", resolution.Decision.ModelRole)
+		})
+	}
+
+	assertInvalid("negative max budget", modelroute.Policy{
+		MaxBudget: -0.01,
+	}, "routing_policy.max_budget must be >= 0")
+	assertInvalid("non finite max budget", modelroute.Policy{
+		MaxBudget: math.NaN(),
+	}, "routing_policy.max_budget must be finite")
+	assertInvalid("negative latency", modelroute.Policy{
+		MaxLatencyMS: -1,
+	}, "routing_policy.max_latency_ms must be >= 0")
+	assertInvalid("negative ttft", modelroute.Policy{
+		MaxTTFTMS: -1,
+	}, "routing_policy.max_ttft_ms must be >= 0")
+}
+
+func TestRegistry_ResolveModelRoleRejectsUnknownRequestCapabilities(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+	}))
+
+	resolution, ok, err := r.resolveModelRoleWithCapabilities(
+		"planner",
+		CompleteParams{},
+		nil,
+		[]string{"clairvoyance"},
+	)
+
+	require.Error(t, err)
+	assert.True(t, ok)
+	assert.Contains(t, err.Error(), `request.required_capabilities contains unknown capability "clairvoyance"`)
+	assert.Contains(t, err.Error(), "valid: text,chat,tools")
+	assert.Equal(t, "planner", resolution.Decision.ModelRole)
+}
+
+func TestRegistry_CompleteWithModelRoleFallsBackOnProviderFailure(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	openAI := &fakeProvider{
+		err:    errors.New("HTTP 503: unavailable"),
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+	}
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "fallback ok"},
+	}
+
+	r.Register(openAI)
+	r.Register(anthropic)
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"anthropic/claude-sonnet-4-20250514"},
+	}))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{
+		Model:    "planner",
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "fallback ok", resp.Content)
+	assert.Equal(t, "anthropic", resp.Provider)
+	assert.Equal(t, "claude-sonnet-4-20250514", resp.Model)
+	require.Len(t, openAI.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", openAI.calls[0].Model)
+	require.Len(t, anthropic.calls, 1)
+	assert.Equal(t, "claude-sonnet-4-20250514", anthropic.calls[0].Model)
+}
+
+func TestRegistry_CompleteUsesConfiguredDefaultModelRole(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "default role ok"},
+	}
+
+	r.Register(provider)
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+	}))
+	require.NoError(t, r.SetDefaultModel("planner"))
+
+	resp, err := r.Complete(context.Background(), CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "default role ok", resp.Content)
+	assert.Equal(t, providerOpenAI, resp.Provider)
+	assert.Equal(t, "gpt-4.1-mini", resp.Model)
+	require.Len(t, provider.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", provider.calls[0].Model)
+}
+
+func TestRegistry_ModelRolePreservesPreferredBeforeCheaperFallback(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1", "gpt-4.1-mini"},
+		resp:   &Response{Content: "ok"},
+	})
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:      "openai/gpt-4.1",
+		FallbackModels: []string{"openai/gpt-4.1-mini"},
+	}))
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		Messages:  []Message{{Role: RoleUser, Content: "plan"}},
+		MaxTokens: 10,
+	}, nil)
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-4.1", resolution.SelectedModel)
+	assert.Equal(t, []string{"openai/gpt-4.1", "openai/gpt-4.1-mini"}, resolution.Decision.FallbackOrder)
+}
+
+func TestRegistry_ModelRoleUsesCatalogMetadataAfterDefaultProviderDisambiguatesBareModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+	codex := &fakeProvider{
+		name:   providerCodex,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "codex"},
+	}
+
+	r.Register(openAI)
+	r.Register(codex)
+	require.NoError(t, r.SetDefault(providerOpenAI))
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:  "gpt-5.4-mini",
+		MaxCostUSD: 0.01,
+	}))
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		Messages:  []Message{{Role: RoleUser, Content: "plan"}},
+		MaxTokens: 100,
+	}, nil)
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-5.4-mini", resolution.SelectedModel)
+	selected := requireDecisionCandidate(t, resolution.Decision, "openai/gpt-5.4-mini")
+	assert.Greater(t, selected.Candidate.InputTokenCost, 0.0)
+	assert.Greater(t, selected.Candidate.OutputTokenCost, 0.0)
+	assert.NotContains(t, selected.Rejected, modelroute.ReasonCostUnknown)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:     "planner",
+		Messages:  []Message{{Role: RoleUser, Content: "plan"}},
+		MaxTokens: 100,
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "openai", resp.Content)
+	require.Len(t, openAI.calls, 1)
+	assert.Empty(t, codex.calls)
+}
+
+func TestRegistry_ModelRoleReportsAmbiguousBareCatalogModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "openai"},
+	})
+	r.Register(&fakeProvider{
+		name:   providerCodex,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "codex"},
+	})
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "gpt-5.4-mini",
+	}))
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+
+	require.Error(t, err)
+	require.True(t, ok)
+	assert.Empty(t, resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "gpt-5.4-mini", modelroute.ReasonAmbiguousMetadata)
+	assertRejectionDoesNotContain(t, resolution.Decision, "gpt-5.4-mini", modelroute.ReasonModelUnavailable)
+	assert.NotContains(t, formatModelRoleRejections(resolution.Decision), modelroute.ReasonUnknownMetadata)
+}
+
+func TestRegistry_ModelRolePreferredProvidersDisambiguateBareCatalogModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+	codex := &fakeProvider{
+		name:   providerCodex,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "codex"},
+	}
+
+	r.Register(openAI)
+	r.Register(codex)
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:          "gpt-5.4-mini",
+		PreferredProviders: []string{providerCodex},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:    "planner",
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "codex", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, codex.calls, 1)
+	assert.Equal(t, "gpt-5.4-mini", codex.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "codex/gpt-5.4-mini", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Constraints, modelroute.ConstraintProviderPreference)
+	assert.Empty(t, resolution.Decision.Candidates[0].Rejected)
+}
+
+func TestRegistry_ModelRolePreferredProvidersDisambiguateBareRuntimeModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	groq := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   "groq",
+			models: []string{"llama-3.3-70b-versatile"},
+			resp:   &Response{Content: "groq"},
+		},
+	}
+	openRouter := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   "openrouter",
+			models: []string{"llama-3.3-70b-versatile"},
+			resp:   &Response{Content: "openrouter"},
+		},
+	}
+
+	r.Register(groq)
+	r.Register(openRouter)
+	require.NoError(t, r.SetModelRole("fast_coder", ModelRole{
+		Preferred:          "llama-3.3-70b-versatile",
+		PreferredProviders: []string{"groq"},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:    "fast_coder",
+		Messages: []Message{{Role: RoleUser, Content: "implement"}},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "groq", resp.Content)
+	require.Len(t, groq.calls, 1)
+	assert.Equal(t, "llama-3.3-70b-versatile", groq.calls[0].Model)
+	assert.Empty(t, openRouter.calls)
+
+	resolution, ok, err := r.ResolveModelRole("fast_coder", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "implement"}},
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "groq/llama-3.3-70b-versatile", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Constraints, modelroute.ConstraintProviderPreference)
+	require.Len(t, resolution.Decision.Candidates, 1)
+	assert.Equal(t, "runtime registry", resolution.Decision.Candidates[0].Candidate.MetadataSource)
+}
+
+func TestRegistry_ModelRoleReportsAmbiguousBareRuntimeModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   "groq",
+		models: []string{"llama-3.3-70b-versatile"},
+		resp:   &Response{Content: "groq"},
+	})
+	r.Register(&fakeProvider{
+		name:   "openrouter",
+		models: []string{"llama-3.3-70b-versatile"},
+		resp:   &Response{Content: "openrouter"},
+	})
+
+	require.NoError(t, r.SetModelRole("fast_coder", ModelRole{
+		Preferred: "llama-3.3-70b-versatile",
+	}))
+
+	resolution, ok, err := r.ResolveModelRole("fast_coder", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "implement"}},
+	}, nil)
+
+	require.Error(t, err)
+	require.True(t, ok)
+	assert.Empty(t, resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "llama-3.3-70b-versatile", modelroute.ReasonAmbiguousMetadata)
+	assert.NotContains(t, formatModelRoleRejections(resolution.Decision), modelroute.ReasonUnknownMetadata)
+}
+
+func TestRegistry_ModelRoleReportsBareRuntimeCollisionWithCatalogModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+	groq := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   "groq",
+			models: []string{"gpt-4.1-mini"},
+			resp:   &Response{Content: "groq"},
+		},
+	}
+
+	r.Register(openAI)
+	r.Register(groq)
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "gpt-4.1-mini",
+	}))
+
+	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:    "planner",
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), modelroute.ReasonAmbiguousMetadata)
+	assert.Empty(t, openAI.calls)
+	assert.Empty(t, groq.calls)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.Error(t, err)
+	require.True(t, ok)
+	assert.Empty(t, resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "gpt-4.1-mini", modelroute.ReasonAmbiguousMetadata)
+}
+
+func TestRegistry_ModelRoleBudgetRejectsAmbiguousUnpricedRuntimeModels(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	alpha := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   alphaProvider,
+			models: []string{"live-only"},
+			resp:   &Response{Content: "alpha"},
+		},
+	}
+	beta := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   "beta",
+			models: []string{"live-only"},
+			resp:   &Response{Content: "beta"},
+		},
+	}
+
+	r.Register(alpha)
+	r.Register(beta)
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:  "live-only",
+		MaxCostUSD: 0.01,
+	}))
+
+	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:    "planner",
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), modelroute.ReasonCostUnknown)
+	assert.Empty(t, alpha.calls)
+	assert.Empty(t, beta.calls)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.Error(t, err)
+	require.True(t, ok)
+	assert.Empty(t, resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "alpha/live-only", modelroute.ReasonCostUnknown)
+	assertRejectionContains(t, resolution.Decision, "beta/live-only", modelroute.ReasonCostUnknown)
+	assert.NotContains(t, formatModelRoleRejections(resolution.Decision), modelroute.ReasonAmbiguousMetadata)
+}
+
+func TestRegistry_ModelRoleBudgetPolicyCanOverrideDefaultProviderCollision(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+	ollama := &localCapabilityFakeProvider{
+		capabilityFakeProvider: capabilityFakeProvider{
+			capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+			fakeProvider: fakeProvider{
+				name:   providerOllama,
+				models: []string{"gpt-4.1-mini"},
+				resp:   &Response{Content: "local"},
+			},
+		},
+	}
+
+	r.Register(openAI)
+	r.Register(ollama)
+	require.NoError(t, r.SetDefault(providerOpenAI))
+	require.NoError(t, r.SetModelRole("fast_coder", ModelRole{
+		Preferred:  "gpt-4.1-mini",
+		MaxCostUSD: 0.000001,
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:     "fast_coder",
+		Messages:  []Message{{Role: RoleUser, Content: "implement a small helper"}},
+		MaxTokens: 10,
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "local", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, ollama.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", ollama.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("fast_coder", CompleteParams{
+		Messages:  []Message{{Role: RoleUser, Content: "implement a small helper"}},
+		MaxTokens: 10,
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "ollama/gpt-4.1-mini", resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-4.1-mini", modelroute.ReasonOverBudget)
+	assert.NotContains(t, formatModelRoleRejections(resolution.Decision), modelroute.ReasonAmbiguousMetadata)
+}
+
+func TestRegistry_ModelRoleLatencyPolicyCanOverrideDefaultProviderCollision(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+	codex := &fakeProvider{
+		name:   providerCodex,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "codex"},
+	}
+
+	r.Register(openAI)
+	r.Register(codex)
+	require.NoError(t, r.SetDefault(providerOpenAI))
+	telemetry.Record(
+		modelroute.Candidate{Provider: providerOpenAI, Name: "gpt-5.4-mini"},
+		modelroute.ActualUsage{Latency: 900 * time.Millisecond, TTFT: 400 * time.Millisecond},
+		time.Now(),
+	)
+	telemetry.Record(
+		modelroute.Candidate{Provider: providerCodex, Name: "gpt-5.4-mini"},
+		modelroute.ActualUsage{Latency: 50 * time.Millisecond, TTFT: 25 * time.Millisecond},
+		time.Now(),
+	)
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:    "gpt-5.4-mini",
+		MaxLatencyMS: 250,
+		MaxTTFTMS:    100,
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:    "planner",
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "codex", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, codex.calls, 1)
+	assert.Equal(t, "gpt-5.4-mini", codex.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "codex/gpt-5.4-mini", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Constraints, modelroute.ConstraintLatency)
+	assert.Contains(t, resolution.Decision.Constraints, modelroute.ConstraintTTFT)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-5.4-mini", modelroute.ReasonLatencyExceeded)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-5.4-mini", modelroute.ReasonTTFTExceeded)
+	assert.NotContains(t, formatModelRoleRejections(resolution.Decision), modelroute.ReasonAmbiguousMetadata)
+}
+
+func TestRegistry_ModelRolePreferredProvidersFallbackWhenFirstProviderUnavailable(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+
+	r.Register(openAI)
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:          "gpt-5.4-mini",
+		PreferredProviders: []string{providerCodex, providerOpenAI},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:    "planner",
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "openai", resp.Content)
+	require.Len(t, openAI.calls, 1)
+	assert.Equal(t, "gpt-5.4-mini", openAI.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-5.4-mini", resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "codex/gpt-5.4-mini", modelroute.ReasonProviderUnavailable)
+}
+
+func TestRegistry_ModelRoleBannedProviderDisambiguatesBareCatalogModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+	codex := &fakeProvider{
+		name:   providerCodex,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "codex"},
+	}
+
+	r.Register(openAI)
+	r.Register(codex)
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:       "gpt-5.4-mini",
+		BannedProviders: []string{providerCodex},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:    "planner",
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "openai", resp.Content)
+	require.Len(t, openAI.calls, 1)
+	assert.Empty(t, codex.calls)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "plan"}},
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-5.4-mini", resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "codex/gpt-5.4-mini", modelroute.ReasonProviderBanned)
+}
+
+func TestRegistry_ResolveModelRoleWithPolicyAppliesAdditionalConstraints(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+	codex := &fakeProvider{
+		name:   providerCodex,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "codex"},
+	}
+
+	r.Register(openAI)
+	r.Register(codex)
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:      "openai/gpt-5.4-mini",
+		FallbackModels: []string{"codex/gpt-5.4-mini"},
+	}))
+
+	resolution, ok, err := r.ResolveModelRoleWithPolicy(
+		"planner",
+		CompleteParams{Messages: []Message{{Role: RoleUser, Content: "plan"}}},
+		nil,
+		modelroute.Policy{BannedProviders: []string{providerOpenAI}},
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "codex/gpt-5.4-mini", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Policy.BannedProviders, providerOpenAI)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-5.4-mini", modelroute.ReasonProviderBanned)
+}
+
+func TestRegistry_ModelRoleHonorsProviderCapabilityMetadata(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&capabilityFakeProvider{
+		fakeProvider: fakeProvider{
+			name:   providerOpenAI,
+			models: []string{"gpt-4.1-mini"},
+			resp:   &Response{Content: "ok"},
+		},
+		capabilities: ProviderCapabilities{
+			SupportsChatCompletions: true,
+			SupportsTools:           true,
+			SupportsCostTracking:    true,
+		},
+	})
+
+	require.NoError(t, r.SetModelRole("streamer", ModelRole{
+		Preferred:            "openai/gpt-4.1-mini",
+		RequiredCapabilities: []string{modelroute.CapabilityStreaming},
+	}))
+
+	resolution, ok, err := r.ResolveModelRole("streamer", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "stream this"}},
+	}, nil)
+
+	require.Error(t, err)
+	require.True(t, ok)
+	assert.Empty(t, resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-4.1-mini", modelroute.ReasonMissingCapability)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-4.1-mini", modelroute.CapabilityStreaming)
+}
+
+func TestRegistry_ModelRoleInfersRequiredChatCapabilityFromRequest(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	embeddingsOnly := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsEmbeddings: true},
+		fakeProvider: fakeProvider{
+			name:   "embedder",
+			models: []string{"embed-only"},
+			resp:   &Response{Content: "embedding endpoint"},
+		},
+	}
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "chat endpoint"},
+	}
+
+	r.Register(embeddingsOnly)
+	r.Register(openAI)
+
+	require.NoError(t, r.SetModelRole("summarizer", ModelRole{
+		Preferred:      "embedder/embed-only",
+		FallbackModels: []string{"openai/gpt-4.1-mini"},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:    "summarizer",
+		Messages: []Message{{Role: RoleUser, Content: "summarize"}},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "chat endpoint", resp.Content)
+	assert.Empty(t, embeddingsOnly.calls)
+	require.Len(t, openAI.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", openAI.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("summarizer", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "summarize"}},
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-4.1-mini", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Policy.RequiredCapabilities, modelroute.CapabilityChat)
+	assertRejectionContains(t, resolution.Decision, "embedder/embed-only", modelroute.ReasonMissingCapability)
+	assertRejectionContains(t, resolution.Decision, "embedder/embed-only", modelroute.CapabilityChat)
+}
+
+func TestRegistry_ModelRoleRequiresChatCapabilityForEmptyCompletion(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	embeddingsOnly := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsEmbeddings: true},
+		fakeProvider: fakeProvider{
+			name:   "embedder",
+			models: []string{"embed-only"},
+			resp:   &Response{Content: "embedding endpoint"},
+		},
+	}
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "chat endpoint"},
+	}
+
+	r.Register(embeddingsOnly)
+	r.Register(openAI)
+	require.NoError(t, r.SetModelRole("summarizer", ModelRole{
+		Preferred:      "embedder/embed-only",
+		FallbackModels: []string{"openai/gpt-4.1-mini"},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "summarizer",
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "chat endpoint", resp.Content)
+	assert.Empty(t, embeddingsOnly.calls)
+	require.Len(t, openAI.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", openAI.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("summarizer", CompleteParams{}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-4.1-mini", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Policy.RequiredCapabilities, modelroute.CapabilityChat)
+	assertRejectionContains(t, resolution.Decision, "embedder/embed-only", modelroute.ReasonMissingCapability)
+	assertRejectionContains(t, resolution.Decision, "embedder/embed-only", modelroute.CapabilityChat)
+}
+
+func TestRegistry_ModelRoleInfersRequiredReasoningCapabilityFromRequest(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini", "gpt-5.4-mini"},
+		resp:   &Response{Content: "ok"},
+	}
+	r.Register(openAI)
+
+	require.NoError(t, r.SetModelRole("reasoner", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"openai/gpt-5.4-mini"},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:          "reasoner",
+		ReasoningLevel: reasoningLevelHigh,
+		Messages:       []Message{{Role: RoleUser, Content: "think"}},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "gpt-5.4-mini", resp.Model)
+	require.Len(t, openAI.calls, 1)
+	assert.Equal(t, "gpt-5.4-mini", openAI.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("reasoner", CompleteParams{
+		ReasoningLevel: reasoningLevelHigh,
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-5.4-mini", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Policy.RequiredCapabilities, modelroute.CapabilityReasoning)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-4.1-mini", modelroute.ReasonMissingCapability)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-4.1-mini", modelroute.CapabilityReasoning)
+}
+
+func TestRegistry_ModelRoleRejectsAnthropicReasoningWhenMaxTokensTooSmall(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	claudeCode := &fakeProvider{
+		name:   providerClaudeCode,
+		models: []string{"claude-sonnet-4-6"},
+		resp:   &Response{Content: "claude"},
+	}
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+
+	r.Register(claudeCode)
+	r.Register(openAI)
+
+	require.NoError(t, r.SetModelRole("reasoner", ModelRole{
+		Preferred:      "claude-code/claude-sonnet-4-6",
+		FallbackModels: []string{"openai/gpt-5.4-mini"},
+	}))
+
+	params := CompleteParams{
+		Model:          "reasoner",
+		ReasoningLevel: reasoningLevelHigh,
+		MaxTokens:      16,
+		Messages:       []Message{{Role: RoleUser, Content: "think"}},
+	}
+	resp, err := r.Complete(context.Background(), params)
+	require.NoError(t, err)
+
+	assert.Equal(t, "openai", resp.Content)
+	assert.Empty(t, claudeCode.calls)
+	require.Len(t, openAI.calls, 1)
+	assert.Equal(t, "gpt-5.4-mini", openAI.calls[0].Model)
+	assert.Equal(t, reasoningLevelHigh, openAI.calls[0].ReasoningLevel)
+
+	resolution, ok, err := r.ResolveModelRole("reasoner", params, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-5.4-mini", resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "claude-code/claude-sonnet-4-6", modelroute.ReasonMissingCapability)
+	assertRejectionContains(t, resolution.Decision, "claude-code/claude-sonnet-4-6", modelroute.CapabilityReasoning)
+}
+
+func TestRegistry_ModelRoleDoesNotInferReasoningCapabilityForDisabledReasoning(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini", "gpt-5.4-mini"},
+		resp:   &Response{Content: "ok"},
+	})
+
+	require.NoError(t, r.SetModelRole("direct", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"openai/gpt-5.4-mini"},
+	}))
+
+	resolution, ok, err := r.ResolveModelRole("direct", CompleteParams{
+		ReasoningLevel: reasoningLevelNone,
+	}, nil)
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-4.1-mini", resolution.SelectedModel)
+	assert.NotContains(t, resolution.Decision.Policy.RequiredCapabilities, modelroute.CapabilityReasoning)
+}
+
+func TestRegistry_ModelRoleDoesNotInventProviderInfrastructureCapabilities(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   "custom",
+		models: []string{"model-a"},
+		resp:   &Response{Content: "ok"},
+	})
+
+	require.NoError(t, r.SetModelRole("needs_retries", ModelRole{
+		Preferred:            "custom/model-a",
+		RequiredCapabilities: []string{modelroute.CapabilityRetries},
+	}))
+
+	resolution, ok, err := r.ResolveModelRole("needs_retries", CompleteParams{}, nil)
+
+	require.Error(t, err)
+	require.True(t, ok)
+	assert.Empty(t, resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "custom/model-a", modelroute.ReasonMissingCapability)
+	assertRejectionContains(t, resolution.Decision, "custom/model-a", modelroute.CapabilityRetries)
+}
+
+func TestRegistry_ModelRoleInfersRequiredToolCapabilityFromRequest(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   providerOpenAI,
+			models: []string{"gpt-4.1-mini"},
+			resp:   &Response{Content: "remote"},
+		},
+	}
+	ollama := &fakeProvider{
+		name:   providerOllama,
+		models: []string{"llama3.2"},
+		resp:   &Response{Content: "tool-capable"},
+	}
+
+	r.Register(openAI)
+	r.Register(ollama)
+
+	require.NoError(t, r.SetModelRole("tool_runner", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"ollama/llama3.2"},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "tool_runner",
+		Tools: []ToolDefinition{{
+			Name:        "lookup",
+			Description: "lookup a value",
+			Parameters:  map[string]any{"type": "object"},
+		}},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "tool-capable", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, ollama.calls, 1)
+
+	resolution, ok, err := r.ResolveModelRole("tool_runner", CompleteParams{
+		Tools: []ToolDefinition{{Name: "lookup"}},
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "ollama/llama3.2", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Policy.RequiredCapabilities, modelroute.CapabilityTools)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-4.1-mini", modelroute.ReasonMissingCapability)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-4.1-mini", modelroute.CapabilityTools)
+}
+
+func TestRegistry_ModelRoleInfersRequiredJSONSchemaCapabilityFromRequest(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "text"},
+	}
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "json"},
+	}
+
+	r.Register(anthropic)
+	r.Register(openAI)
+
+	require.NoError(t, r.SetModelRole("summarizer", ModelRole{
+		Preferred:      "anthropic/claude-sonnet-4-20250514",
+		FallbackModels: []string{"openai/gpt-4.1-mini"},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "summarizer",
+		ResponseFormat: &ResponseFormat{
+			Type:   ResponseFormatJSONSchema,
+			Schema: map[string]any{"type": "object"},
+		},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "json", resp.Content)
+	assert.Empty(t, anthropic.calls)
+	require.Len(t, openAI.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", openAI.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("summarizer", CompleteParams{
+		ResponseFormat: &ResponseFormat{Schema: map[string]any{"type": "object"}},
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-4.1-mini", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Policy.RequiredCapabilities, modelroute.CapabilityJSONSchema)
+	assertRejectionContains(t, resolution.Decision, "anthropic/claude-sonnet-4-20250514", modelroute.ReasonMissingCapability)
+	assertRejectionContains(t, resolution.Decision, "anthropic/claude-sonnet-4-20250514", modelroute.CapabilityJSONSchema)
+}
+
+func TestRegistry_CompleteWithModelRoleFallsBackOnProviderError(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	openAI := &fakeProvider{
+		err:    errors.New("primary offline"),
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{},
+	}
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "fallback ok"},
+	}
+
+	r.Register(openAI)
+	r.Register(anthropic)
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"anthropic/claude-sonnet-4-20250514"},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "fallback ok", resp.Content)
+	assert.Equal(t, "claude-sonnet-4-20250514", resp.Model)
+	require.Len(t, openAI.calls, 1)
+	require.Len(t, anthropic.calls, 1)
+}
+
+func TestRegistry_CompleteWithModelRoleExpandsNestedFallbackRole(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1"},
+		resp:   &Response{Content: "primary"},
+	}
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "nested fallback"},
+	}
+
+	r.Register(openAI)
+	r.Register(anthropic)
+
+	require.NoError(t, r.SetModelRole("fallback_writer", ModelRole{
+		Preferred: "anthropic/claude-sonnet-4-20250514",
+	}))
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:      "openai/gpt-4.1",
+		FallbackModels: []string{"fallback_writer"},
+		BannedModels:   []string{"openai/gpt-4.1"},
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "nested fallback", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, anthropic.calls, 1)
+	assert.Equal(t, "claude-sonnet-4-20250514", anthropic.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "anthropic/claude-sonnet-4-20250514", resolution.SelectedModel)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-4.1", modelroute.ReasonModelBanned)
+}
+
+func TestRegistry_CompleteWithModelRoleAppliesNestedPreferredProviderPolicy(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+	codex := &fakeProvider{
+		name:   providerCodex,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "codex"},
+	}
+
+	r.Register(openAI)
+	r.Register(codex)
+
+	require.NoError(t, r.SetModelRole("writer", ModelRole{
+		Preferred:          "gpt-5.4-mini",
+		PreferredProviders: []string{providerCodex},
+	}))
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "writer",
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "codex", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, codex.calls, 1)
+	assert.Equal(t, "gpt-5.4-mini", codex.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "codex/gpt-5.4-mini", resolution.SelectedModel)
+	assert.NotContains(t, formatModelRoleRejections(resolution.Decision), modelroute.ReasonAmbiguousMetadata)
+}
+
+func TestRegistry_CompleteWithModelRoleAppliesNestedBannedProviderPolicy(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "openai"},
+	}
+	codex := &fakeProvider{
+		name:   providerCodex,
+		models: []string{"gpt-5.4-mini"},
+		resp:   &Response{Content: "codex"},
+	}
+
+	r.Register(openAI)
+	r.Register(codex)
+
+	require.NoError(t, r.SetModelRole("writer", ModelRole{
+		Preferred:       "openai/gpt-5.4-mini",
+		FallbackModels:  []string{"codex/gpt-5.4-mini"},
+		BannedProviders: []string{providerOpenAI},
+	}))
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "writer",
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "codex", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, codex.calls, 1)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "codex/gpt-5.4-mini", resolution.SelectedModel)
+}
+
+func TestRegistry_CompleteWithModelRoleAppliesNestedBudgetPolicy(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1", "gpt-4.1-mini"},
+		resp:   &Response{Content: "within budget"},
+	}
+
+	r.Register(openAI)
+
+	require.NoError(t, r.SetModelRole("writer", ModelRole{
+		Preferred:      "openai/gpt-4.1",
+		FallbackModels: []string{"openai/gpt-4.1-mini"},
+		MaxCostUSD:     0.002,
+	}))
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "writer",
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:     "planner",
+		MaxTokens: 1000,
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "within budget", resp.Content)
+	require.Len(t, openAI.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", openAI.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		MaxTokens: 1000,
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/gpt-4.1-mini", resolution.SelectedModel)
+}
+
+func TestRegistry_ResolveModelRoleReportsNestedPolicyRejections(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1"},
+		resp:   &Response{Content: "too expensive"},
+	}
+
+	r.Register(openAI)
+
+	require.NoError(t, r.SetModelRole("writer", ModelRole{
+		Preferred:  "openai/gpt-4.1",
+		MaxCostUSD: 0.001,
+	}))
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "writer",
+	}))
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{
+		MaxTokens: 1000,
+	}, nil)
+	require.Error(t, err)
+	require.True(t, ok)
+	assert.Empty(t, resolution.SelectedModel)
+	assert.Contains(t, err.Error(), modelroute.ReasonOverBudget)
+	assertRejectionContains(t, resolution.Decision, "openai/gpt-4.1", modelroute.ReasonOverBudget)
+	assert.Empty(t, openAI.calls)
+}
+
+func TestRegistry_CompleteWithModelRoleAppliesNestedPreferLocalPolicy(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "remote"},
+	}
+	ollama := &fakeProvider{
+		name:   providerOllama,
+		models: []string{"llama3.2"},
+		resp:   &Response{Content: "local"},
+	}
+
+	r.Register(openAI)
+	r.Register(ollama)
+
+	require.NoError(t, r.SetModelRole("writer", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"ollama/llama3.2"},
+		PreferLocal:    true,
+	}))
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "writer",
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "local", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, ollama.calls, 1)
+	assert.Equal(t, "llama3.2", ollama.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "ollama/llama3.2", resolution.SelectedModel)
+}
+
+func TestRegistry_CompleteWithModelRolePrefersLocalCandidate(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "remote"},
+	}
+	ollama := &fakeProvider{
+		name:   providerOllama,
+		models: []string{"llama3.2"},
+		resp:   &Response{Content: "local"},
+	}
+
+	r.Register(openAI)
+	r.Register(ollama)
+
+	require.NoError(t, r.SetModelRole("fast_coder", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"ollama/llama3.2"},
+		PreferLocal:    true,
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "fast_coder"}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "local", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, ollama.calls, 1)
+	assert.Equal(t, "llama3.2", ollama.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("fast_coder", CompleteParams{}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "ollama/llama3.2", resolution.SelectedModel)
+}
+
+func TestRegistry_CompleteWithModelRolePrefersLocalOpenAICompatibleCandidate(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "remote"},
+	}
+	vllm := &localCapabilityFakeProvider{capabilityFakeProvider: capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   "vllm",
+			models: []string{"qwen2.5-coder"},
+			resp:   &Response{Content: "local-compatible"},
+		},
+	}}
+
+	r.Register(openAI)
+	r.Register(vllm)
+
+	require.NoError(t, r.SetModelRole("fast_coder", ModelRole{
+		Preferred:      "openai/gpt-4.1-mini",
+		FallbackModels: []string{"vllm/qwen2.5-coder"},
+		PreferLocal:    true,
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "fast_coder"}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "local-compatible", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, vllm.calls, 1)
+	assert.Equal(t, "qwen2.5-coder", vllm.calls[0].Model)
+}
+
+func TestRegistry_ModelRolePreferLocalDisambiguatesBareRuntimeCollision(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAI := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   providerOpenAI,
+			models: []string{"shared-coder"},
+			resp:   &Response{Content: "remote"},
+		},
+	}
+	vllm := &localCapabilityFakeProvider{capabilityFakeProvider: capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   "vllm",
+			models: []string{"shared-coder"},
+			resp:   &Response{Content: "local"},
+		},
+	}}
+
+	r.Register(openAI)
+	r.Register(vllm)
+	require.NoError(t, r.SetDefault(providerOpenAI))
+	require.NoError(t, r.SetModelRole("fast_coder", ModelRole{
+		Preferred:   "shared-coder",
+		PreferLocal: true,
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model:    "fast_coder",
+		Messages: []Message{{Role: RoleUser, Content: "implement"}},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "local", resp.Content)
+	assert.Empty(t, openAI.calls)
+	require.Len(t, vllm.calls, 1)
+	assert.Equal(t, "shared-coder", vllm.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("fast_coder", CompleteParams{
+		Messages: []Message{{Role: RoleUser, Content: "implement"}},
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "vllm/shared-coder", resolution.SelectedModel)
+	assert.NotContains(t, formatModelRoleRejections(resolution.Decision), modelroute.ReasonAmbiguousMetadata)
+}
+
+func TestRegistry_ModelRoleAllowsOpenAICompatibleUnknownProviderModel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	openAICompatible := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "compatible"},
+	}
+	r.Register(openAICompatible)
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "openai/azure-deployment",
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "compatible", resp.Content)
+	require.Len(t, openAICompatible.calls, 1)
+	assert.Equal(t, "azure-deployment", openAICompatible.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "openai/azure-deployment", resolution.SelectedModel)
+	assert.Contains(t, resolution.Decision.Availability.Unverified["openai/azure-deployment"], modelroute.ReasonModelUnverified)
+}
+
+func TestRegistry_ModelRoleUsesRuntimeProviderWhenBareCatalogProviderUnavailable(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	azure := &capabilityFakeProvider{
+		capabilities: ProviderCapabilities{SupportsChatCompletions: true},
+		fakeProvider: fakeProvider{
+			name:   "azure",
+			models: []string{"gpt-4.1-mini"},
+			resp:   &Response{Content: "azure compatible"},
+		},
+	}
+	r.Register(azure)
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred: "gpt-4.1-mini",
+	}))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "azure compatible", resp.Content)
+	require.Len(t, azure.calls, 1)
+	assert.Equal(t, "gpt-4.1-mini", azure.calls[0].Model)
+
+	resolution, ok, err := r.ResolveModelRole("planner", CompleteParams{}, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "azure/gpt-4.1-mini", resolution.SelectedModel)
+	assert.NotContains(t, resolution.Decision.Availability.Unavailable, "openai/gpt-4.1-mini")
+}
+
+func TestRegistry_ModelRoleRejectsUnpricedCandidateWithBudget(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.Register(&fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"live-only"},
+		resp:   &Response{Content: "should not route"},
+	})
+
+	require.NoError(t, r.SetModelRole("planner", ModelRole{
+		Preferred:  "openai/live-only",
+		MaxCostUSD: 0.01,
+	}))
+
+	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "planner"}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), modelroute.ReasonCostUnknown)
 }
 
 func TestRegistry_CompleteRecordsRouteTelemetry(t *testing.T) {
@@ -2922,4 +4952,59 @@ func requireReadinessProvider(t *testing.T, report ProviderReadinessReport, prov
 	require.Failf(t, "provider missing", "readiness report missing provider %q: %+v", providerName, report.Providers)
 
 	return ProviderReadiness{}
+}
+
+func requireDecisionCandidate(t *testing.T, decision modelroute.Decision, id string) modelroute.CandidateDecision {
+	t.Helper()
+
+	for i := range decision.Candidates {
+		candidate := decision.Candidates[i]
+		if candidate.ID == id {
+			return candidate
+		}
+	}
+
+	require.Failf(t, "candidate missing", "decision missing candidate %q: %+v", id, decision.Candidates)
+
+	return modelroute.CandidateDecision{}
+}
+
+func assertRejectionContains(t *testing.T, decision modelroute.Decision, id, want string) {
+	t.Helper()
+
+	for i := range decision.Candidates {
+		candidate := &decision.Candidates[i]
+		if candidate.ID != id {
+			continue
+		}
+
+		for _, reason := range candidate.Rejected {
+			if strings.Contains(reason, want) {
+				return
+			}
+		}
+
+		require.Failf(t, "rejection missing", "%s rejected with %v, want substring %q", id, candidate.Rejected, want)
+	}
+
+	require.Failf(t, "candidate missing", "decision missing candidate %q: %+v", id, decision.Candidates)
+}
+
+func assertRejectionDoesNotContain(t *testing.T, decision modelroute.Decision, id, unwanted string) {
+	t.Helper()
+
+	for i := range decision.Candidates {
+		candidate := &decision.Candidates[i]
+		if candidate.ID != id {
+			continue
+		}
+
+		for _, reason := range candidate.Rejected {
+			assert.NotContains(t, reason, unwanted)
+		}
+
+		return
+	}
+
+	require.Failf(t, "candidate missing", "decision missing candidate %q: %+v", id, decision.Candidates)
 }

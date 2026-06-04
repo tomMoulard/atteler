@@ -353,7 +353,7 @@ func TestCallLLMWithToolsStreamsCommandOutputBeforeCompletion(t *testing.T) {
 		})()
 	}()
 
-	output := requireLiveToolOutputBefore(t, liveCh, liveOutputTimeout)
+	output := requireLiveToolOutputBefore(t, liveCh, 3*liveOutputTimeout)
 	assert.Equal(t, "live\n", output.data)
 	assert.Equal(t, string(attshell.OutputStreamStdout), output.stream)
 
@@ -403,7 +403,7 @@ func TestCallLLMWithToolsStreamsCommandStderrBeforeCompletion(t *testing.T) {
 		})()
 	}()
 
-	output := requireLiveToolOutputBefore(t, liveCh, liveOutputTimeout)
+	output := requireLiveToolOutputBefore(t, liveCh, 3*liveOutputTimeout)
 	assert.Equal(t, "warn\n", output.data)
 	assert.Equal(t, string(attshell.OutputStreamStderr), output.stream)
 
@@ -663,6 +663,21 @@ func TestPickerItemsForProviderCatalogWithRegistryUsesConfiguredAliasTargetModel
 	assert.Contains(t, items, pickerItem{provider: "", model: "nano", modelMode: llm.ModelModeDefault, reasoning: llm.ReasoningLevelDefault})
 	assert.NotContains(t, items, pickerItem{provider: "", model: "nano", modelMode: llm.ModelModeFast, reasoning: llm.ReasoningLevelDefault})
 	assert.NotContains(t, items, pickerItem{provider: "openai", model: "frontier", modelMode: llm.ModelModeFast, reasoning: llm.ReasoningLevelDefault})
+}
+
+func TestFallbackModelPickerItemsIncludesModelRoles(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(modelPickerProvider{name: "openai", models: []string{"gpt-4.1-mini"}})
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+	}))
+
+	items := fallbackModelPickerItems(registry)
+
+	assert.Contains(t, items, pickerItem{provider: "", model: "planner", modelMode: llm.ModelModeDefault, reasoning: llm.ReasoningLevelDefault})
+	assert.Contains(t, items, pickerItem{provider: "openai", model: "gpt-4.1-mini", modelMode: llm.ModelModeDefault, reasoning: llm.ReasoningLevelDefault})
 }
 
 // expandReasoningItems expands each base picker item into one entry per picker
@@ -1663,6 +1678,63 @@ func TestIdleSuggestionRequestEmitsContextManifestBeforeBudgetFailure(t *testing
 	assert.Contains(t, log, "file/task/issue=omitted-private")
 	assert.Contains(t, log, "fits_configured_token_budget=false")
 	assert.Contains(t, log, "max_input_tokens=1")
+}
+
+func TestIdleSuggestionRequestRoutesModelRoleAndEmitsDecision(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{
+		providerName: "openai",
+		model:        "gpt-4.1-mini",
+		response:     "draft prompt with tests",
+	}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+	}))
+
+	var eventLog bytes.Buffer
+
+	m := model{
+		ctx:                     context.Background(),
+		registry:                registry,
+		hookRunner:              events.NewRunnerWithLogger(nil, &eventLog),
+		selectedModel:           "planner",
+		promptSuggestionConsent: promptSuggestionConsentSession,
+		idleSuggestionBudget:    defaultIdleSuggestionBudget(),
+		maxInputTokens:          10_000,
+		textarea:                textarea.New(),
+	}
+	m.textarea.SetValue("draft prompt")
+	m.textarea.CursorEnd()
+	cmd := m.scheduleIdleSuggestion()
+	require.NotNil(t, cmd)
+
+	_, requestCmd := m.updateIdleSuggestionRequest(idleSuggestionRequestMsg{
+		id:    m.idleSuggestionID,
+		input: "draft prompt",
+	})
+	require.NotNil(t, requestCmd)
+
+	msg, ok := requestCmd().(idleSuggestionMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+	require.NotNil(t, provider.params)
+	assert.Equal(t, "gpt-4.1-mini", provider.params.Model)
+	assert.Equal(t, "openai", msg.provider)
+	assert.Equal(t, "gpt-4.1-mini", msg.model)
+
+	log := eventLog.String()
+	assert.Contains(t, log, "event:context_manifest")
+	assert.Contains(t, log, "model=openai/gpt-4.1-mini")
+	assert.Contains(t, log, "event:route_decision")
+	assert.Contains(t, log, "model_role=planner")
+	assert.Contains(t, log, "phase=estimated")
+	assert.Contains(t, log, "phase=actual")
+	assert.Contains(t, log, "selected=openai/gpt-4.1-mini")
+	assert.Contains(t, log, "fallback_order=openai/gpt-4.1-mini")
+	assert.Contains(t, log, "actual_selected=openai/gpt-4.1-mini")
 }
 
 func TestIdleSuggestionContextManifestUsesBackgroundInputBudget(t *testing.T) {

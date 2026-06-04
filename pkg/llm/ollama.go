@@ -375,6 +375,7 @@ func (o *OllamaProvider) Models() []string {
 		"mistral",
 		"gemma3",
 		"deepseek-r1",
+		"nomic-embed-text",
 	}
 }
 
@@ -437,6 +438,7 @@ func (o *OllamaProvider) HealthCheck(ctx context.Context) error {
 
 type ollamaChatRequest struct {
 	Think    any             `json:"think,omitempty"`
+	Format   any             `json:"format,omitempty"`
 	Model    string          `json:"model"`
 	Messages []ollamaMessage `json:"messages"`
 	Tools    []ollamaTool    `json:"tools,omitempty"`
@@ -486,6 +488,17 @@ type ollamaChatResponse struct {
 	PromptEvalCount int           `json:"prompt_eval_count"`
 	EvalCount       int           `json:"eval_count"`
 	Done            bool          `json:"done"`
+}
+
+type ollamaEmbedRequest struct {
+	Input any    `json:"input"`
+	Model string `json:"model"`
+}
+
+type ollamaEmbedResponse struct {
+	Error      string      `json:"error"`
+	Model      string      `json:"model,omitempty"`
+	Embeddings [][]float64 `json:"embeddings"`
 }
 
 // Complete performs a non-streaming chat completion using Ollama's /api/chat endpoint.
@@ -541,6 +554,114 @@ func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*
 	return parseOllamaChatResponse(or, params.Model), nil
 }
 
+// Embed performs a vector embedding request using Ollama's /api/embed endpoint.
+func (o *OllamaProvider) Embed(ctx context.Context, params EmbeddingParams) (*EmbeddingResponse, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	if len(params.Input) == 0 {
+		return nil, errors.New("ollama: embedding input cannot be empty")
+	}
+
+	if params.Dimensions > 0 {
+		return nil, errors.New("ollama: EmbeddingParams.Dimensions is unsupported")
+	}
+
+	respBody, err := o.sendEmbeddingRequest(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseOllamaEmbeddingResponse(respBody, params.Model)
+}
+
+func (o *OllamaProvider) sendEmbeddingRequest(ctx context.Context, params EmbeddingParams) ([]byte, error) {
+	if o.client == nil {
+		o.client = providerHTTPClient(ProviderConfig{})
+	}
+
+	body, err := json.Marshal(ollamaEmbedRequest{
+		Model: params.Model,
+		Input: append([]string(nil), params.Input...),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ollama: marshal embeddings request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/embed", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("ollama: new embeddings request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := o.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("ollama: embeddings request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("ollama: read embeddings body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, retryableHTTPStatusError(
+			fmt.Errorf("ollama: embeddings HTTP %d: %s", resp.StatusCode, respBody),
+			resp.StatusCode,
+			resp.Header.Get("Retry-After"),
+		)
+	}
+
+	return respBody, nil
+}
+
+func parseOllamaEmbeddingResponse(respBody []byte, requestedModel string) (*EmbeddingResponse, error) {
+	var embedResp ollamaEmbedResponse
+	if err := json.Unmarshal(respBody, &embedResp); err != nil {
+		return nil, fmt.Errorf("ollama: unmarshal embeddings: %w", err)
+	}
+
+	if embedResp.Error != "" {
+		return nil, fmt.Errorf("ollama: embeddings: %s", embedResp.Error)
+	}
+
+	if len(embedResp.Embeddings) == 0 {
+		return nil, fmt.Errorf("ollama: embeddings empty response from %s", requestedModel)
+	}
+
+	vectors, err := ollamaEmbeddingVectors(embedResp.Embeddings)
+	if err != nil {
+		return nil, err
+	}
+
+	model := strings.TrimSpace(embedResp.Model)
+	if model == "" {
+		model = requestedModel
+	}
+
+	return &EmbeddingResponse{
+		Provider:   providerOllama,
+		Model:      model,
+		Embeddings: vectors,
+	}, nil
+}
+
+func ollamaEmbeddingVectors(in [][]float64) ([][]float64, error) {
+	vectors := make([][]float64, len(in))
+	for i := range in {
+		if len(in[i]) == 0 {
+			return nil, fmt.Errorf("ollama: embeddings empty vector at index %d", i)
+		}
+
+		vectors[i] = append([]float64(nil), in[i]...)
+	}
+
+	return vectors, nil
+}
+
 func buildOllamaChatRequest(params CompleteParams) (ollamaChatRequest, error) {
 	return buildOllamaChatRequestForStream(params, false)
 }
@@ -573,6 +694,15 @@ func buildOllamaChatRequestForStream(params CompleteParams, stream bool) (ollama
 		req.Think = think
 	}
 
+	if params.ResponseFormat != nil {
+		format, err := buildOllamaResponseFormat(params.ResponseFormat)
+		if err != nil {
+			return ollamaChatRequest{}, err
+		}
+
+		req.Format = format
+	}
+
 	for _, tool := range params.Tools {
 		req.Tools = append(req.Tools, ollamaTool{
 			Type:     "function",
@@ -581,6 +711,24 @@ func buildOllamaChatRequestForStream(params CompleteParams, stream bool) (ollama
 	}
 
 	return req, nil
+}
+
+func buildOllamaResponseFormat(format *ResponseFormat) (any, error) {
+	normalized, err := normalizeResponseFormat(format)
+	if err != nil {
+		return nil, fmt.Errorf("ollama: CompleteParams.ResponseFormat: %w", err)
+	}
+
+	switch normalized.Type {
+	case "":
+		return nil, nil
+	case ResponseFormatJSONObject:
+		return "json", nil
+	case ResponseFormatJSONSchema:
+		return normalized.Schema, nil
+	default:
+		return nil, fmt.Errorf("ollama: CompleteParams.ResponseFormat: unsupported type %q", normalized.Type)
+	}
 }
 
 func parseOllamaChatResponse(or ollamaChatResponse, fallbackModel string) *Response {

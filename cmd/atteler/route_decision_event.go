@@ -43,21 +43,34 @@ func routeDecisionMetadata(decision *modelroute.Decision) map[string]string {
 	metadata := map[string]string{
 		"selected":        decision.Selected,
 		"fallback_order":  strings.Join(decision.FallbackOrder, ","),
+		"fallback_count":  strconv.Itoa(routeDecisionFallbackCount(decision)),
 		"candidate_count": strconv.Itoa(len(decision.Candidates)),
 		"rejected_count":  strconv.Itoa(routeDecisionRejectedCount(decision)),
 		"phase":           routeDecisionPhase(decision),
 	}
+	addRoutePlannedSelectionMetadata(metadata, decision)
+
 	if len(decision.Constraints) > 0 {
 		metadata["constraints"] = strings.Join(decision.Constraints, ",")
+	}
+
+	if len(decision.Policy.RequiredCapabilities) > 0 {
+		metadata["required_capabilities"] = strings.Join(decision.Policy.RequiredCapabilities, ",")
+	}
+
+	if reasons := routeDecisionRejectedReasons(decision); len(reasons) > 0 {
+		metadata["rejection_reasons"] = strings.Join(reasons, ",")
+	}
+
+	if decision.ModelRole != "" {
+		metadata["model_role"] = decision.ModelRole
 	}
 
 	if len(decision.Warnings) > 0 {
 		metadata["warning_count"] = strconv.Itoa(len(decision.Warnings))
 	}
 
-	if decision.ActualSelected != "" {
-		metadata["actual_selected"] = decision.ActualSelected
-	}
+	addRouteActualSelectionMetadata(metadata, decision)
 
 	if decision.CatalogVersion != "" {
 		metadata["catalog_version"] = decision.CatalogVersion
@@ -94,6 +107,24 @@ func routeDecisionMetadata(decision *modelroute.Decision) map[string]string {
 	return metadata
 }
 
+func addRoutePlannedSelectionMetadata(metadata map[string]string, decision *modelroute.Decision) {
+	if selected, ok := routeDecisionCandidateByID(decision, decision.Selected); ok {
+		addRouteCandidateIdentityMetadata(metadata, "selected", selected)
+		metadata["estimated_cost"] = fmt.Sprintf("%.6f", selected.EstimatedCost)
+	}
+}
+
+func addRouteActualSelectionMetadata(metadata map[string]string, decision *modelroute.Decision) {
+	if decision.ActualSelected == "" {
+		return
+	}
+
+	metadata["actual_selected"] = decision.ActualSelected
+	if actual, ok := routeDecisionCandidateByID(decision, decision.ActualSelected); ok {
+		addRouteCandidateIdentityMetadata(metadata, "actual", actual)
+	}
+}
+
 func addRouteActualMetadata(metadata map[string]string, actual modelroute.CandidateDecision) {
 	if actual.ObservedLatencyMS > 0 {
 		metadata["actual_latency_ms"] = strconv.Itoa(actual.ObservedLatencyMS)
@@ -122,7 +153,52 @@ func addRouteActualMetadata(metadata map[string]string, actual modelroute.Candid
 	}
 }
 
+func addRouteCandidateIdentityMetadata(metadata map[string]string, prefix string, candidate modelroute.CandidateDecision) {
+	provider, model := routeCandidateIdentity(candidate)
+	if provider != "" {
+		metadata[prefix+"_provider"] = provider
+	}
+
+	if model != "" {
+		metadata[prefix+"_model"] = model
+	}
+}
+
+func routeCandidateIdentity(candidate modelroute.CandidateDecision) (provider, model string) {
+	provider = strings.TrimSpace(candidate.Candidate.Provider)
+	model = strings.TrimSpace(candidate.Candidate.Name)
+
+	if provider != "" && model != "" {
+		return provider, model
+	}
+
+	id := strings.TrimSpace(candidate.ID)
+	idProvider, idModel, idQualified := strings.Cut(id, "/")
+
+	if provider == "" && idQualified {
+		provider = strings.TrimSpace(idProvider)
+	}
+
+	if model == "" {
+		if idQualified {
+			model = strings.TrimSpace(idModel)
+		} else {
+			model = id
+		}
+	}
+
+	return provider, model
+}
+
 func addRouteProfileMetadata(metadata map[string]string, profile modelroute.RequestProfile) {
+	if profile.Interactive {
+		metadata["interactive"] = strconv.FormatBool(true)
+	}
+
+	if profile.Batch {
+		metadata["batch"] = strconv.FormatBool(true)
+	}
+
 	if profile.EstimatedInputTokens > 0 {
 		metadata["estimated_input_tokens"] = strconv.Itoa(profile.EstimatedInputTokens)
 	}
@@ -227,9 +303,18 @@ func routeDecisionActualCandidate(decision *modelroute.Decision) (modelroute.Can
 		return modelroute.CandidateDecision{}, false
 	}
 
+	return routeDecisionCandidateByID(decision, decision.ActualSelected)
+}
+
+func routeDecisionCandidateByID(decision *modelroute.Decision, id string) (modelroute.CandidateDecision, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return modelroute.CandidateDecision{}, false
+	}
+
 	for i := range decision.Candidates {
 		candidate := decision.Candidates[i]
-		if candidate.ID == decision.ActualSelected {
+		if strings.TrimSpace(candidate.ID) == id || strings.TrimSpace(candidate.Candidate.ID()) == id {
 			return candidate, true
 		}
 	}
@@ -247,6 +332,34 @@ func routeDecisionRejectedCount(decision *modelroute.Decision) int {
 	}
 
 	return count
+}
+
+func routeDecisionFallbackCount(decision *modelroute.Decision) int {
+	if len(decision.FallbackOrder) == 0 {
+		return 0
+	}
+
+	return len(decision.FallbackOrder) - 1
+}
+
+func routeDecisionRejectedReasons(decision *modelroute.Decision) []string {
+	seen := make(map[string]bool)
+
+	var reasons []string
+
+	for i := range decision.Candidates {
+		for _, reason := range decision.Candidates[i].Rejected {
+			reason = strings.TrimSpace(reason)
+			if reason == "" || seen[reason] {
+				continue
+			}
+
+			seen[reason] = true
+			reasons = append(reasons, reason)
+		}
+	}
+
+	return reasons
 }
 
 func verifiedProviderModelCount(providers map[string]bool) int {

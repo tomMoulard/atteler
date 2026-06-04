@@ -20,6 +20,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
@@ -214,9 +215,9 @@ func doctorMetadataProvider(state appState, providerName string) llm.ModelMetada
 	}
 
 	switch providerName {
-	case "codex":
+	case providerNameCodex:
 		return &llm.CodexProvider{}
-	case "claude-code":
+	case providerNameClaudeCode:
 		return &llm.ClaudeCodeProvider{}
 	default:
 		return nil
@@ -629,9 +630,22 @@ func llmConfig(
 	commandLine []string,
 ) llm.AutoRegisterConfig {
 	providers := make(map[string]llm.ProviderConfig, len(cfg.Providers))
-	for name, provider := range cfg.Providers {
+	for name := range cfg.Providers {
+		provider := cfg.Providers[name]
+
 		providers[name] = llm.ProviderConfig{
+			Type:                  provider.Type,
+			APIKeyEnv:             provider.APIKeyEnv,
+			APIKeyHeader:          provider.APIKeyHeader,
+			APIKeyScheme:          provider.APIKeyScheme,
+			ChatCompletionsPath:   provider.ChatCompletionsPath,
+			EmbeddingsPath:        provider.EmbeddingsPath,
+			ModelsPath:            provider.ModelsPath,
+			APIVersion:            provider.APIVersion,
+			Models:                append([]string(nil), provider.Models...),
+			Capabilities:          append([]string(nil), provider.Capabilities...),
 			Disabled:              provider.Disabled,
+			Local:                 provider.Local,
 			AutoStart:             provider.AutoStart,
 			DisablePrivateAdapter: provider.DisablePrivateAdapter,
 			BaseURL:               provider.BaseURL,
@@ -648,11 +662,52 @@ func llmConfig(
 		DefaultProvider: cfg.DefaultProvider,
 		DefaultModel:    cfg.DefaultModel,
 		ModelAliases:    cloneStringMap(cfg.ModelAliases),
+		ModelRoles:      llmModelRolesFromConfig(cfg.ModelRoles),
 		SelectedModel:   selectedModel,
 		FallbackModels:  append([]string(nil), fallbackModels...),
 		SessionID:       sessionID,
 		CommandLine:     append([]string(nil), commandLine...),
 		Providers:       providers,
+	}
+}
+
+func llmModelRolesFromConfig(roles map[string]appconfig.ModelRoleConfig) map[string]llm.ModelRole {
+	if len(roles) == 0 {
+		return nil
+	}
+
+	out := make(map[string]llm.ModelRole, len(roles))
+	for name := range roles {
+		role := roles[name]
+		out[name] = llm.ModelRole{
+			Preferred:            role.Preferred,
+			FallbackModels:       append([]string(nil), role.FallbackModels...),
+			RoutingPolicy:        routingPolicyFromConfig(role.RoutingPolicy),
+			PreferredProviders:   append([]string(nil), role.PreferredProviders...),
+			BannedProviders:      append([]string(nil), role.BannedProviders...),
+			BannedModels:         append([]string(nil), role.BannedModels...),
+			RequiredCapabilities: append([]string(nil), role.RequiredCapabilities...),
+			MaxCostUSD:           role.MaxCostUSD,
+			MaxLatencyMS:         role.MaxLatencyMS,
+			MaxTTFTMS:            role.MaxTTFTMS,
+			RequireFreshMetadata: role.RequireFreshMetadata,
+			PreferLocal:          role.PreferLocal,
+		}
+	}
+
+	return out
+}
+
+func routingPolicyFromConfig(policy appconfig.RoutingPolicyConfig) modelroute.Policy {
+	return modelroute.Policy{
+		PreferredProviders:   append([]string(nil), policy.PreferredProviders...),
+		BannedProviders:      append([]string(nil), policy.BannedProviders...),
+		BannedModels:         append([]string(nil), policy.BannedModels...),
+		RequiredCapabilities: append([]string(nil), policy.RequiredCapabilities...),
+		MaxBudget:            policy.MaxBudget,
+		MaxLatencyMS:         policy.MaxLatencyMS,
+		MaxTTFTMS:            policy.MaxTTFTMS,
+		RequireFreshMetadata: policy.RequireFreshMetadata,
 	}
 }
 

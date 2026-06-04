@@ -65,6 +65,7 @@ func TestOpenAIReasoningEffort(t *testing.T) {
 		want  string
 	}{
 		{input: "", want: ""},
+		{input: ReasoningLevelDefault, want: ""},
 		{input: "none", want: "none"},
 		{input: "minimal", want: "minimal"},
 		{input: "low", want: "low"},
@@ -85,15 +86,16 @@ func TestCLIReasoningEffort(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]string{
-		"":        "",
-		"none":    "",
-		"minimal": "low",
-		"low":     "low",
-		"medium":  "medium",
-		"high":    "high",
-		"xhigh":   "xhigh",
-		"x-high":  "xhigh",
-		"max":     "max",
+		"":                    "",
+		ReasoningLevelDefault: "",
+		"none":                "",
+		"minimal":             "low",
+		"low":                 "low",
+		"medium":              "medium",
+		"high":                "high",
+		"xhigh":               "xhigh",
+		"x-high":              "xhigh",
+		"max":                 "max",
 	}
 
 	for input, want := range cases {
@@ -110,16 +112,17 @@ func TestOllamaThink(t *testing.T) {
 	}
 
 	cases := map[string]result{
-		"":        {nil, false},
-		"none":    {false, true},
-		"minimal": {"low", true},
-		"low":     {"low", true},
-		"medium":  {"medium", true},
-		"high":    {"high", true},
-		"xhigh":   {"high", true},
-		"x-high":  {"high", true},
-		"max":     {"high", true},
-		"custom":  {"custom", true},
+		"":                    {nil, false},
+		ReasoningLevelDefault: {nil, false},
+		"none":                {false, true},
+		"minimal":             {"low", true},
+		"low":                 {"low", true},
+		"medium":              {"medium", true},
+		"high":                {"high", true},
+		"xhigh":               {"high", true},
+		"x-high":              {"high", true},
+		"max":                 {"high", true},
+		"custom":              {"custom", true},
 	}
 
 	for input, want := range cases {
@@ -133,7 +136,7 @@ func TestOllamaThink(t *testing.T) {
 func TestAnthropicThinkingBudgetDisabled(t *testing.T) {
 	t.Parallel()
 
-	for _, level := range []string{"", "none", "minimal"} {
+	for _, level := range []string{"", ReasoningLevelDefault, "none", "minimal"} {
 		budget, enabled, err := anthropicThinkingBudget(level, 8192)
 
 		require.NoError(t, err)

@@ -734,11 +734,13 @@ func TestAgentLoop_CheckpointsRecordEffectiveBudget(t *testing.T) {
 	reg.Register(&agentTestProvider{
 		responses: []*Response{
 			{
-				Content:      "done",
-				Model:        "test-model",
-				StopReason:   StopEndTurn,
-				InputTokens:  10,
-				OutputTokens: 5,
+				Content:           "done",
+				Model:             "test-model",
+				StopReason:        StopEndTurn,
+				Latency:           123 * time.Millisecond,
+				FirstTokenLatency: 45 * time.Millisecond,
+				InputTokens:       10,
+				OutputTokens:      5,
 			},
 		},
 	})
@@ -758,6 +760,12 @@ func TestAgentLoop_CheckpointsRecordEffectiveBudget(t *testing.T) {
 	assert.Equal(t, budget, ledger.Budget)
 	assert.Equal(t, budget, ledger.Steps[0].Budget)
 	assert.Equal(t, budget, ledger.Steps[1].Budget)
+	require.NotNil(t, ledger.Steps[0].ModelResponse)
+	assert.Equal(t, "test", ledger.Steps[0].ModelResponse.Provider)
+	assert.Equal(t, "test-model", ledger.Steps[0].ModelResponse.Model)
+	assert.EqualValues(t, 100, ledger.Steps[0].ModelResponse.EstimatedCostMicros)
+	assert.Equal(t, 123, ledger.Steps[0].ModelResponse.LatencyMS)
+	assert.Equal(t, 45, ledger.Steps[0].ModelResponse.FirstTokenLatencyMS)
 }
 
 func TestAgentLoop_JSONLCheckpointPersistsEffectiveBudget(t *testing.T) {
@@ -806,6 +814,9 @@ func TestAgentLoop_JSONLCheckpointPersistsEffectiveBudget(t *testing.T) {
 	assert.Equal(t, budget, loaded.Budget)
 	assert.Equal(t, budget, loaded.Steps[0].Budget)
 	assert.Equal(t, budget, loaded.Steps[1].Budget)
+	require.NotNil(t, loaded.Steps[0].ModelResponse)
+	assert.Equal(t, "test", loaded.Steps[0].ModelResponse.Provider)
+	assert.EqualValues(t, 100, loaded.Steps[0].ModelResponse.EstimatedCostMicros)
 }
 
 func TestAgentLoopBudgetSnapshotJSONPreservesZeroRemainingConfiguredCeilings(t *testing.T) {

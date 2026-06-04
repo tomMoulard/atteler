@@ -32,6 +32,8 @@ func TestRegistry_GetAndList(t *testing.T) {
 				BannedModels:         []string{"openai/gpt-expensive"},
 				RequiredCapabilities: []string{"Tools"},
 				MaxBudget:            0.25,
+				MaxLatencyMS:         1200,
+				MaxTTFTMS:            300,
 				RequireFreshMetadata: true,
 			},
 		},
@@ -77,6 +79,8 @@ func TestRegistry_GetAndList(t *testing.T) {
 	assert.Equal(t, []string{"openai/gpt-expensive"}, agent.RoutingPolicy.BannedModels)
 	assert.Equal(t, []string{"tools"}, agent.RoutingPolicy.RequiredCapabilities)
 	assert.InDelta(t, 0.25, agent.RoutingPolicy.MaxBudget, 0.000000001)
+	assert.Equal(t, 1200, agent.RoutingPolicy.MaxLatencyMS)
+	assert.Equal(t, 300, agent.RoutingPolicy.MaxTTFTMS)
 	assert.True(t, agent.RoutingPolicy.RequireFreshMetadata)
 }
 

@@ -18,6 +18,8 @@ const (
 	// configured default" — i.e. clear any session override and fall back to
 	// the agent or config-level reasoning_level.
 	ReasoningLevelDefault = "default"
+
+	anthropicThinkingMinMaxTokens = 1024
 )
 
 // ReasoningEffortLevels returns the canonical mappable reasoning-effort labels
@@ -69,6 +71,8 @@ func normalizeReasoningLevel(level string) string {
 
 func openAIReasoningEffort(level string) string {
 	switch normalizeReasoningLevel(level) {
+	case "", ReasoningLevelDefault:
+		return ""
 	case reasoningLevelNone, reasoningLevelMinimal, reasoningLevelLow,
 		reasoningLevelMedium, reasoningLevelHigh, reasoningLevelXHigh:
 		return normalizeReasoningLevel(level)
@@ -81,6 +85,8 @@ func openAIReasoningEffort(level string) string {
 
 func cliReasoningEffort(level string) string {
 	switch normalizeReasoningLevel(level) {
+	case "", ReasoningLevelDefault:
+		return ""
 	case reasoningLevelMinimal:
 		return reasoningLevelLow
 	case reasoningLevelNone:
@@ -92,7 +98,7 @@ func cliReasoningEffort(level string) string {
 
 func ollamaThink(level string) (any, bool) {
 	switch normalizeReasoningLevel(level) {
-	case "":
+	case "", ReasoningLevelDefault:
 		return nil, false
 	case reasoningLevelNone:
 		return false, true
@@ -109,27 +115,27 @@ func ollamaThink(level string) (any, bool) {
 
 func anthropicThinkingBudget(level string, maxTokens int) (budget int, enabled bool, err error) {
 	switch normalizeReasoningLevel(level) {
-	case "":
+	case "", ReasoningLevelDefault:
 		return 0, false, nil
 	case reasoningLevelNone, reasoningLevelMinimal:
 		return 0, false, nil
 	}
 
-	if maxTokens <= 1024 {
+	if maxTokens <= anthropicThinkingMinMaxTokens {
 		return 0, false, fmt.Errorf("reasoning_level requires anthropic max_tokens greater than 1024, got %d", maxTokens)
 	}
 
 	switch normalizeReasoningLevel(level) {
 	case reasoningLevelLow:
-		budget = 1024
+		budget = anthropicThinkingMinMaxTokens
 	case reasoningLevelMedium:
-		budget = max(1024, maxTokens/3)
+		budget = max(anthropicThinkingMinMaxTokens, maxTokens/3)
 	case reasoningLevelHigh:
-		budget = max(1024, maxTokens/2)
+		budget = max(anthropicThinkingMinMaxTokens, maxTokens/2)
 	case reasoningLevelXHigh, reasoningLevelMax:
-		budget = max(1024, (maxTokens*3)/4)
+		budget = max(anthropicThinkingMinMaxTokens, (maxTokens*3)/4)
 	default:
-		budget = max(1024, maxTokens/3)
+		budget = max(anthropicThinkingMinMaxTokens, maxTokens/3)
 	}
 
 	if budget >= maxTokens {

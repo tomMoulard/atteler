@@ -24,6 +24,11 @@ fallback_models: [claude-fallback]
 model_aliases:
   fast: openai/gpt-global
   safe: anthropic/claude-global
+models:
+  planner:
+    preferred: anthropic/claude-global
+    fallback: openai/gpt-global
+    required_capabilities: [tools]
 providers:
   anthropic:
     base_url: https://anthropic.global
@@ -39,9 +44,30 @@ fallback_models: [gpt-backup]
 model_aliases:
   fast: openai/gpt-local
   review: codex/gpt-5.5
+models:
+  planner:
+    preferred: openai/gpt-local
+    fallback_models: [openai/gpt-backup]
+    preferred_providers: [openai]
+    max_cost_usd: 0.25
+    max_latency_ms: 2500
+    max_ttft_ms: 900
+    prefer_local: true
 providers:
   openai:
     disabled: false
+  vllm:
+    type: openai_compatible
+    base_url: http://127.0.0.1:8000
+    local: true
+    api_key_env: VLLM_API_KEY
+    api_key_header: Authorization
+    api_key_scheme: Bearer
+    chat_completions_path: /v1/chat/completions
+    models_path: /v1/models
+    api_version: preview
+    models: [qwen2.5-coder]
+    capabilities: [chat, tools, json_schema, local]
 agents:
   reviewer:
     description: Reviews code changes
@@ -144,6 +170,16 @@ worktree:
 		"safe":   "anthropic/claude-global",
 	}, cfg.ModelAliases)
 
+	planner := cfg.ModelRoles["planner"]
+	assert.Equal(t, "openai/gpt-local", planner.Preferred)
+	assert.Equal(t, []string{"openai/gpt-backup"}, planner.FallbackModels)
+	assert.Equal(t, []string{"tools"}, planner.RequiredCapabilities)
+	assert.Equal(t, []string{"openai"}, planner.PreferredProviders)
+	assert.InDelta(t, 0.25, planner.MaxCostUSD, 0.000000001)
+	assert.Equal(t, 2500, planner.MaxLatencyMS)
+	assert.Equal(t, 900, planner.MaxTTFTMS)
+	assert.True(t, planner.PreferLocal)
+
 	openai := cfg.Providers["openai"]
 	if openai.Disabled {
 		assert.Fail(t, "openai disabled should be overridden to false")
@@ -159,6 +195,19 @@ worktree:
 	}
 
 	assert.True(t, cfg.Providers["codex"].DisablePrivateAdapter)
+
+	vllm := cfg.Providers["vllm"]
+	assert.Equal(t, "openai_compatible", vllm.Type)
+	assert.Equal(t, "http://127.0.0.1:8000", vllm.BaseURL)
+	assert.True(t, vllm.Local)
+	assert.Equal(t, "VLLM_API_KEY", vllm.APIKeyEnv)
+	assert.Equal(t, "Authorization", vllm.APIKeyHeader)
+	assert.Equal(t, "Bearer", vllm.APIKeyScheme)
+	assert.Equal(t, "/v1/chat/completions", vllm.ChatCompletionsPath)
+	assert.Equal(t, "/v1/models", vllm.ModelsPath)
+	assert.Equal(t, "preview", vllm.APIVersion)
+	assert.Equal(t, []string{"qwen2.5-coder"}, vllm.Models)
+	assert.Equal(t, []string{"chat", "tools", "json_schema", "local"}, vllm.Capabilities)
 
 	reviewer := cfg.Agents["reviewer"]
 	if reviewer.SystemPrompt != "review code" {
@@ -326,6 +375,144 @@ worktree:
 	assert.True(t, *cfg.Worktree.AutoMerge)
 	assert.Equal(t, []string{"go test ./..."}, cfg.Worktree.VerificationCommands)
 	assert.False(t, cfg.Worktree.OverrideVerification)
+}
+
+func TestMergeConfigFromSource_ModelRolesAndProviderLocal(t *testing.T) {
+	t.Parallel()
+
+	origins := OriginMap{}
+	cfg := Config{}
+	mergeConfigFromSource(&cfg, Config{
+		ModelRoles: map[string]ModelRoleConfig{
+			"planner": {
+				Preferred:            "openai/gpt-4.1",
+				FallbackModels:       []string{"openai/gpt-4.1-mini"},
+				RequiredCapabilities: []string{"tools", "json_schema"},
+				MaxCostUSD:           0.25,
+				MaxLatencyMS:         2500,
+				MaxTTFTMS:            900,
+				PreferLocal:          true,
+			},
+		},
+		Providers: map[string]ProviderConfig{
+			"vllm": {
+				Type:    "openai_compatible",
+				BaseURL: "https://vllm.example",
+				Local:   true,
+			},
+		},
+	}, newOriginRecorder(origins), originSource{
+		kind:   OriginHarnessImport,
+		source: "test",
+	})
+
+	planner := cfg.ModelRoles["planner"]
+	assert.Equal(t, "openai/gpt-4.1", planner.Preferred)
+	assert.Equal(t, []string{"openai/gpt-4.1-mini"}, planner.FallbackModels)
+	assert.Equal(t, []string{"tools", "json_schema"}, planner.RequiredCapabilities)
+	assert.InDelta(t, 0.25, planner.MaxCostUSD, 0.000000001)
+	assert.Equal(t, 2500, planner.MaxLatencyMS)
+	assert.Equal(t, 900, planner.MaxTTFTMS)
+	assert.True(t, planner.PreferLocal)
+	assert.True(t, cfg.Providers["vllm"].Local)
+
+	roleOrigin, ok := origins.Final("models.planner.prefer_local")
+	require.True(t, ok)
+	assert.Equal(t, OriginSet, roleOrigin.Operation)
+	assert.Equal(t, "true", roleOrigin.Value)
+
+	origin, ok := origins.Final("providers.vllm.local")
+	require.True(t, ok)
+	assert.Equal(t, OriginSet, origin.Operation)
+	assert.Equal(t, "true", origin.Value)
+}
+
+func TestLoadFiles_ModelRoleFallbackAliases(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "config.yaml", `
+models:
+  planner:
+    preferred: openai/gpt-4.1
+    fallback: openai/gpt-4.1-mini
+  fast_coder:
+    preferred: openai/gpt-4.1-mini
+    fallbacks: [ollama/llama3.2]
+`)
+
+	cfg, _, origins, err := LoadFilesWithOrigins([]string{path})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"openai/gpt-4.1-mini"}, cfg.ModelRoles["planner"].FallbackModels)
+	assert.Equal(t, []string{"ollama/llama3.2"}, cfg.ModelRoles["fast_coder"].FallbackModels)
+
+	origin, ok := origins.Final("models.planner.fallback")
+	require.True(t, ok)
+	assert.Equal(t, OriginSet, origin.Operation)
+	assert.Equal(t, `["openai/gpt-4.1-mini"]`, origin.Value)
+}
+
+func TestMergeConfigModelRolesFromOrigins_CanClearScalars(t *testing.T) {
+	t.Parallel()
+
+	dst := Config{
+		ModelRoles: map[string]ModelRoleConfig{
+			"planner": {
+				Preferred:            "openai/gpt-4.1",
+				FallbackModels:       []string{"openai/gpt-4.1-mini"},
+				RoutingPolicy:        RoutingPolicyConfig{RequiredCapabilities: []string{"tools"}},
+				PreferredProviders:   []string{"openai"},
+				BannedProviders:      []string{"anthropic"},
+				BannedModels:         []string{"openai/gpt-4.1-nano"},
+				RequiredCapabilities: []string{"tools"},
+				MaxCostUSD:           1.25,
+				MaxLatencyMS:         2500,
+				MaxTTFTMS:            900,
+				RequireFreshMetadata: true,
+				PreferLocal:          true,
+			},
+		},
+	}
+	dstOrigins := OriginMap{}
+	srcOrigins := OriginMap{}
+	rec := newOriginRecorder(srcOrigins)
+	source := originSource{kind: OriginExplicitFile, source: "override.yaml"}
+	rec.set(modelRoleFieldPath("planner", "preferred"), source, "")
+	rec.replace(modelRoleFieldPath("planner", "fallback_models"), source, []string{}, "replaces the model role fallback list")
+	rec.replace(modelRoleFieldPath("planner", "routing_policy"), source, RoutingPolicyConfig{}, "replaces the model role routing policy")
+	rec.replace(modelRoleFieldPath("planner", "preferred_providers"), source, []string{}, "replaces the model role preferred provider list")
+	rec.replace(modelRoleFieldPath("planner", "banned_providers"), source, []string{}, "replaces the model role banned provider list")
+	rec.replace(modelRoleFieldPath("planner", "banned_models"), source, []string{}, "replaces the model role banned model list")
+	rec.replace(modelRoleFieldPath("planner", "required_capabilities"), source, []string{}, "replaces the model role required capability list")
+	rec.set(modelRoleFieldPath("planner", "max_cost_usd"), source, 0)
+	rec.set(modelRoleFieldPath("planner", "max_latency_ms"), source, 0)
+	rec.set(modelRoleFieldPath("planner", "max_ttft_ms"), source, 0)
+	rec.set(modelRoleFieldPath("planner", "require_fresh_metadata"), source, false)
+	rec.set(modelRoleFieldPath("planner", "prefer_local"), source, false)
+
+	mergeConfigModelRolesFromOrigins(&dst, map[string]ModelRoleConfig{
+		"planner": {},
+	}, dstOrigins, srcOrigins)
+
+	planner := dst.ModelRoles["planner"]
+	assert.Empty(t, planner.Preferred)
+	assert.Empty(t, planner.FallbackModels)
+	assert.Empty(t, planner.RoutingPolicy.RequiredCapabilities)
+	assert.Empty(t, planner.PreferredProviders)
+	assert.Empty(t, planner.BannedProviders)
+	assert.Empty(t, planner.BannedModels)
+	assert.Empty(t, planner.RequiredCapabilities)
+	assert.Zero(t, planner.MaxCostUSD)
+	assert.Zero(t, planner.MaxLatencyMS)
+	assert.Zero(t, planner.MaxTTFTMS)
+	assert.False(t, planner.RequireFreshMetadata)
+	assert.False(t, planner.PreferLocal)
+
+	origin, ok := dstOrigins.Final("models.planner.prefer_local")
+	require.True(t, ok)
+	assert.Equal(t, OriginSet, origin.Operation)
+	assert.Equal(t, "false", origin.Value)
 }
 
 func TestLoadFiles_ConfiguresAllAgentLoopBudgetFields(t *testing.T) {
@@ -700,6 +887,8 @@ agents:
       banned_models: [openai/gpt-expensive]
       required_capabilities: [tools]
       max_budget: 0.25
+      max_latency_ms: 1200
+      max_ttft_ms: 300
       require_fresh_metadata: true
 `)
 
@@ -712,6 +901,8 @@ agents:
 	assert.Equal(t, []string{"openai/gpt-expensive"}, policy.BannedModels)
 	assert.Equal(t, []string{"tools"}, policy.RequiredCapabilities)
 	assert.InDelta(t, 0.25, policy.MaxBudget, 0.000000001)
+	assert.Equal(t, 1200, policy.MaxLatencyMS)
+	assert.Equal(t, 300, policy.MaxTTFTMS)
 	assert.True(t, policy.RequireFreshMetadata)
 
 	origin := origins["agents.reviewer.routing_policy"].Chain

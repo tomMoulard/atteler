@@ -1,6 +1,7 @@
 package modelroute
 
 import (
+	"slices"
 	"strings"
 	"time"
 )
@@ -9,14 +10,94 @@ const (
 	// BuiltinCatalogVersion changes whenever maintained model metadata changes.
 	BuiltinCatalogVersion = "2026-05-29.1"
 
-	capabilityText        = "text"
-	capabilityTools       = "tools"
-	capabilityReasoning   = "reasoning"
-	capabilityVision      = "vision"
-	capabilityPromptCache = "prompt_cache"
-	capabilityLocal       = "local"
-	capabilityFastMode    = "fast_mode"
+	// CapabilityText marks text generation support.
+	CapabilityText = "text"
+	// CapabilityChat marks chat-completion/message input support.
+	CapabilityChat = "chat"
+	// CapabilityTools marks tool/function calling support.
+	CapabilityTools = "tools"
+	// CapabilityReasoning marks explicit reasoning-effort controls.
+	CapabilityReasoning = "reasoning"
+	// CapabilityJSONSchema marks JSON/schema-constrained output support.
+	CapabilityJSONSchema = "json_schema"
+	// CapabilityEmbeddings marks embedding-vector generation support.
+	CapabilityEmbeddings = "embeddings"
+	// CapabilityVision marks image/multimodal input support.
+	CapabilityVision = "vision"
+	// CapabilityMultimodal marks non-text input or output support.
+	CapabilityMultimodal = "multimodal"
+	// CapabilityBatch marks batch-inference support.
+	CapabilityBatch = "batch"
+	// CapabilityPromptCache marks prompt-cache read/write support.
+	CapabilityPromptCache = "prompt_cache"
+	// CapabilityStreaming marks caller-facing streaming support.
+	CapabilityStreaming = "streaming"
+	// CapabilityRateLimits marks normalized rate-limit telemetry support.
+	CapabilityRateLimits = "rate_limits"
+	// CapabilityRetries marks normalized retry handling support.
+	CapabilityRetries = "retries"
+	// CapabilityFallback marks normalized fallback routing support.
+	CapabilityFallback = "fallback"
+	// CapabilityCostTracking marks estimated or actual cost metadata support.
+	CapabilityCostTracking = "cost_tracking"
+	// CapabilityLocal marks local/self-hosted execution.
+	CapabilityLocal = "local"
+	// CapabilityFastMode marks OpenAI-family priority/fast service-tier support.
+	CapabilityFastMode = "fast_mode"
+
+	capabilityText        = CapabilityText
+	capabilityChat        = CapabilityChat
+	capabilityTools       = CapabilityTools
+	capabilityReasoning   = CapabilityReasoning
+	capabilityJSONSchema  = CapabilityJSONSchema
+	capabilityEmbeddings  = CapabilityEmbeddings
+	capabilityVision      = CapabilityVision
+	capabilityMultimodal  = CapabilityMultimodal
+	capabilityBatch       = CapabilityBatch
+	capabilityPromptCache = CapabilityPromptCache
+	capabilityStreaming   = CapabilityStreaming
+	capabilityRateLimits  = CapabilityRateLimits
+	capabilityRetries     = CapabilityRetries
+	capabilityFallback    = CapabilityFallback
+	capabilityCost        = CapabilityCostTracking
+	capabilityLocal       = CapabilityLocal
+	capabilityFastMode    = CapabilityFastMode
 )
+
+// KnownCapabilities returns the normalized route capability names accepted in
+// model/provider routing policy configuration.
+func KnownCapabilities() []string {
+	return []string{
+		CapabilityText,
+		CapabilityChat,
+		CapabilityTools,
+		CapabilityReasoning,
+		CapabilityJSONSchema,
+		CapabilityEmbeddings,
+		CapabilityVision,
+		CapabilityMultimodal,
+		CapabilityBatch,
+		CapabilityPromptCache,
+		CapabilityStreaming,
+		CapabilityRateLimits,
+		CapabilityRetries,
+		CapabilityFallback,
+		CapabilityCostTracking,
+		CapabilityLocal,
+		CapabilityFastMode,
+	}
+}
+
+// IsKnownCapability reports whether capability is one of Atteler's normalized
+// route capability names.
+func IsKnownCapability(capability string) bool {
+	capability = normalize(capability)
+	if capability == "" {
+		return false
+	}
+
+	return slices.Contains(KnownCapabilities(), capability)
+}
 
 var (
 	builtinCatalogUpdatedAt = time.Date(2026, time.May, 29, 0, 0, 0, 0, time.UTC)
@@ -63,51 +144,55 @@ func BuiltinCatalog() Catalog {
 		UpdatedAt:  builtinCatalogUpdatedAt,
 		StaleAfter: builtinCatalogStaleAt,
 		Models: []ModelMetadata{
-			openAIMetadata("gpt-5.5", 1_050_000, 128_000, 5, 0.5, 30, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-5.4", 1_050_000, 128_000, 2.5, 0.25, 15, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-5.4-mini", 400_000, 128_000, 0.75, 0.075, 4.5, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-5.4-nano", 400_000, 128_000, 0.2, 0.02, 1.25, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			openAIMetadata("gpt-5.2", 400_000, 128_000, 1.75, 0.175, 14, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-5.1", 400_000, 128_000, 1.25, 0.125, 10, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-5", 400_000, 128_000, 1.25, 0.125, 10, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-5-mini", 400_000, 128_000, 0.25, 0.025, 2, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-5.3-codex", 400_000, 128_000, 1.75, 0.175, 14, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-5.1-codex", 400_000, 128_000, 1.25, 0.125, 10, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-5-codex", 400_000, 128_000, 1.25, 0.125, 10, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-4.1", 1_047_576, 32_768, 2, 0.5, 8, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-4.1-mini", 1_047_576, 32_768, 0.4, 0.1, 1.6, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-4.1-nano", 1_047_576, 32_768, 0.1, 0.025, 0.4, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-4o", 128_000, 16_384, 2.5, 1.25, 10, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("gpt-4o-mini", 128_000, 16_384, 0.15, 0.075, 0.6, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("o3", 200_000, 100_000, 2, 0.5, 8, capabilityText, capabilityTools, capabilityVision, capabilityReasoning, capabilityPromptCache, capabilityFastMode),
-			openAIMetadata("o4-mini", 200_000, 100_000, 1.1, 0.275, 4.4, capabilityText, capabilityTools, capabilityVision, capabilityReasoning, capabilityPromptCache, capabilityFastMode),
-			codexMetadata("gpt-5.5", 1_050_000, 5, 0.5, 30, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			codexMetadata("gpt-5.4", 1_050_000, 2.5, 0.25, 15, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			codexMetadata("gpt-5.4-mini", 400_000, 0.75, 0.075, 4.5, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache, capabilityFastMode),
-			codexMetadata("gpt-5.3-codex", 200_000, 1.75, 0.175, 14, capabilityText, capabilityTools, capabilityReasoning, capabilityPromptCache, capabilityFastMode),
-			anthropicMetadata("anthropic", "claude-opus-4-7", 1_000_000, 128_000, 5, 0.5, 25, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("anthropic", "claude-opus-4-6", 1_000_000, 128_000, 5, 0.5, 25, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("anthropic", "claude-opus-4-5-20251101", 200_000, 64_000, 5, 0.5, 25, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("anthropic", "claude-opus-4-20250514", 200_000, 32_000, 15, 1.5, 75, true, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("anthropic", "claude-sonnet-4-6", 1_000_000, 64_000, 3, 0.3, 15, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("anthropic", "claude-sonnet-4-5-20250929", 200_000, 64_000, 3, 0.3, 15, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("anthropic", "claude-sonnet-4-20250514", 200_000, 64_000, 3, 0.3, 15, true, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("anthropic", "claude-haiku-4-5-20251001", 200_000, 64_000, 1, 0.1, 5, false, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("claude-code", "claude-opus-4-7", 1_000_000, 128_000, 5, 0.5, 25, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("claude-code", "claude-opus-4-6", 1_000_000, 128_000, 5, 0.5, 25, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("claude-code", "claude-opus-4-5-20251101", 200_000, 64_000, 5, 0.5, 25, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("claude-code", "claude-opus-4-1-20250805", 200_000, 64_000, 15, 1.5, 75, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("claude-code", "claude-opus-4-20250514", 200_000, 32_000, 15, 1.5, 75, true, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("claude-code", "claude-sonnet-4-6", 1_000_000, 64_000, 3, 0.3, 15, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("claude-code", "claude-sonnet-4-5-20250929", 200_000, 64_000, 3, 0.3, 15, false, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("claude-code", "claude-sonnet-4-20250514", 200_000, 64_000, 3, 0.3, 15, true, capabilityText, capabilityTools, capabilityReasoning, capabilityVision, capabilityPromptCache),
-			anthropicMetadata("claude-code", "claude-haiku-4-5-20251001", 200_000, 64_000, 1, 0.1, 5, false, capabilityText, capabilityTools, capabilityVision, capabilityPromptCache),
+			openAIMetadata("gpt-5.5", 1_050_000, 128_000, 5, 0.5, 30, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-5.4", 1_050_000, 128_000, 2.5, 0.25, 15, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-5.4-mini", 400_000, 128_000, 0.75, 0.075, 4.5, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-5.4-nano", 400_000, 128_000, 0.2, 0.02, 1.25, remoteChatCapabilities(true, true, true)...),
+			openAIMetadata("gpt-5.2", 400_000, 128_000, 1.75, 0.175, 14, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-5.1", 400_000, 128_000, 1.25, 0.125, 10, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-5", 400_000, 128_000, 1.25, 0.125, 10, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-5-mini", 400_000, 128_000, 0.25, 0.025, 2, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-5.3-codex", 400_000, 128_000, 1.75, 0.175, 14, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-5.1-codex", 400_000, 128_000, 1.25, 0.125, 10, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-5-codex", 400_000, 128_000, 1.25, 0.125, 10, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-4.1", 1_047_576, 32_768, 2, 0.5, 8, remoteChatCapabilities(false, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-4.1-mini", 1_047_576, 32_768, 0.4, 0.1, 1.6, remoteChatCapabilities(false, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-4.1-nano", 1_047_576, 32_768, 0.1, 0.025, 0.4, remoteChatCapabilities(false, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-4o", 128_000, 16_384, 2.5, 1.25, 10, remoteChatCapabilities(false, true, true, capabilityFastMode)...),
+			openAIMetadata("gpt-4o-mini", 128_000, 16_384, 0.15, 0.075, 0.6, remoteChatCapabilities(false, true, true, capabilityFastMode)...),
+			openAIMetadata("o3", 200_000, 100_000, 2, 0.5, 8, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIMetadata("o4-mini", 200_000, 100_000, 1.1, 0.275, 4.4, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			openAIEmbeddingMetadata("text-embedding-3-small", 0.02),
+			openAIEmbeddingMetadata("text-embedding-3-large", 0.13),
+			codexMetadata("gpt-5.5", 1_050_000, 5, 0.5, 30, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			codexMetadata("gpt-5.4", 1_050_000, 2.5, 0.25, 15, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			codexMetadata("gpt-5.4-mini", 400_000, 0.75, 0.075, 4.5, remoteChatCapabilities(true, true, true, capabilityFastMode)...),
+			codexMetadata("gpt-5.3-codex", 200_000, 1.75, 0.175, 14, remoteChatCapabilities(true, false, true, capabilityFastMode)...),
+			anthropicMetadata("anthropic", "claude-opus-4-7", 1_000_000, 128_000, 5, 0.5, 25, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("anthropic", "claude-opus-4-6", 1_000_000, 128_000, 5, 0.5, 25, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("anthropic", "claude-opus-4-5-20251101", 200_000, 64_000, 5, 0.5, 25, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("anthropic", "claude-opus-4-20250514", 200_000, 32_000, 15, 1.5, 75, true, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("anthropic", "claude-sonnet-4-6", 1_000_000, 64_000, 3, 0.3, 15, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("anthropic", "claude-sonnet-4-5-20250929", 200_000, 64_000, 3, 0.3, 15, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("anthropic", "claude-sonnet-4-20250514", 200_000, 64_000, 3, 0.3, 15, true, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("anthropic", "claude-haiku-4-5-20251001", 200_000, 64_000, 1, 0.1, 5, false, remoteChatCapabilities(false, true, false)...),
+			anthropicMetadata("claude-code", "claude-opus-4-7", 1_000_000, 128_000, 5, 0.5, 25, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("claude-code", "claude-opus-4-6", 1_000_000, 128_000, 5, 0.5, 25, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("claude-code", "claude-opus-4-5-20251101", 200_000, 64_000, 5, 0.5, 25, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("claude-code", "claude-opus-4-1-20250805", 200_000, 64_000, 15, 1.5, 75, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("claude-code", "claude-opus-4-20250514", 200_000, 32_000, 15, 1.5, 75, true, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("claude-code", "claude-sonnet-4-6", 1_000_000, 64_000, 3, 0.3, 15, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("claude-code", "claude-sonnet-4-5-20250929", 200_000, 64_000, 3, 0.3, 15, false, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("claude-code", "claude-sonnet-4-20250514", 200_000, 64_000, 3, 0.3, 15, true, remoteChatCapabilities(true, true, false)...),
+			anthropicMetadata("claude-code", "claude-haiku-4-5-20251001", 200_000, 64_000, 1, 0.1, 5, false, remoteChatCapabilities(false, true, false)...),
+			anthropicMetadata("claude-code", "claude-haiku-4-5", 200_000, 64_000, 1, 0.1, 5, false, remoteChatCapabilities(false, true, false)...),
 			ollamaMetadata("llama3.2"),
 			ollamaMetadata("llama3.1"),
 			ollamaMetadata("qwen2.5"),
 			ollamaMetadata("mistral"),
 			ollamaMetadata("gemma3"),
 			ollamaMetadata("deepseek-r1"),
+			ollamaEmbeddingMetadata("nomic-embed-text"),
 		},
 	}
 }
@@ -199,6 +284,39 @@ func (c Catalog) Candidate(id string) (Candidate, bool) {
 	return candidate, ok
 }
 
+// CandidatesForModel returns every catalog candidate matching a provider-local
+// model name or provider-reported alias. It intentionally ignores provider
+// ambiguity so higher-level routers can apply explicit role constraints such as
+// banned or preferred providers before selecting one concrete backend.
+func (c Catalog) CandidatesForModel(name string) []Candidate {
+	name = normalizeModelName(name)
+	if name == "" {
+		return nil
+	}
+
+	candidates := make([]Candidate, 0)
+	seen := make(map[string]bool)
+
+	for i := range c.Models {
+		metadata := c.Models[i]
+		if !metadata.matchesName(name) {
+			continue
+		}
+
+		candidate := metadata.Candidate(0)
+		candidate.MetadataVersion = c.Version
+
+		if seen[candidate.ID()] {
+			continue
+		}
+
+		seen[candidate.ID()] = true
+		candidates = append(candidates, candidate)
+	}
+
+	return candidates
+}
+
 func (c Catalog) resolveCandidate(id string) (Candidate, string, bool) {
 	provider, model := splitID(id)
 
@@ -265,6 +383,12 @@ func (c Catalog) candidateFailureReason(id string) string {
 	return reason
 }
 
+// CandidateFailureReason reports why id cannot resolve to one catalog
+// candidate. It returns an empty string when id resolves successfully.
+func (c Catalog) CandidateFailureReason(id string) string {
+	return c.candidateFailureReason(id)
+}
+
 // Candidates returns all catalog-backed candidates for ids and the ids that had
 // no maintained metadata.
 func (c Catalog) Candidates(ids []string) (candidates []Candidate, unknown []string) {
@@ -310,6 +434,24 @@ func openAIMetadata(name string, contextWindow, maxOutputTokens int, inputPerMil
 	return metadata
 }
 
+func openAIEmbeddingMetadata(name string, inputPerMillion float64) ModelMetadata {
+	return pricedMetadata(
+		"openai",
+		name,
+		8192,
+		0,
+		inputPerMillion,
+		0,
+		0,
+		0,
+		false,
+		"OpenAI API embedding model pricing",
+		"https://developers.openai.com/api/docs/models/"+name,
+		"2026-05-30",
+		embeddingCapabilities(false)...,
+	)
+}
+
 func codexMetadata(name string, contextWindow int, inputPerMillion, cachedPerMillion, outputPerMillion float64, capabilities ...string) ModelMetadata {
 	return pricedMetadata("codex", name, contextWindow, 128_000, inputPerMillion, cachedPerMillion, 0, outputPerMillion, false, "OpenAI API pricing and priority processing (Codex reference)", "https://developers.openai.com/api/docs/pricing", "2026-05-29", capabilities...)
 }
@@ -323,9 +465,78 @@ func ollamaMetadata(name string) ModelMetadata {
 		Provider:      "ollama",
 		Name:          name,
 		ContextWindow: 128_000,
-		Capabilities:  []string{capabilityText, capabilityTools, capabilityLocal},
+		Capabilities: []string{
+			capabilityText,
+			capabilityChat,
+			capabilityTools,
+			capabilityJSONSchema,
+			capabilityStreaming,
+			capabilityRetries,
+			capabilityFallback,
+			capabilityRateLimits,
+			capabilityLocal,
+		},
+		Source: "local Ollama catalog",
+	}
+}
+
+func ollamaEmbeddingMetadata(name string) ModelMetadata {
+	return ModelMetadata{
+		Provider:      "ollama",
+		Name:          name,
+		ContextWindow: 8192,
+		Capabilities:  embeddingCapabilities(true),
 		Source:        "local Ollama catalog",
 	}
+}
+
+func embeddingCapabilities(local bool) []string {
+	capabilities := []string{
+		capabilityEmbeddings,
+		capabilityBatch,
+		capabilityRetries,
+		capabilityFallback,
+		capabilityRateLimits,
+	}
+
+	if local {
+		capabilities = append(capabilities, capabilityLocal)
+	} else {
+		capabilities = append(capabilities, capabilityCost)
+	}
+
+	return capabilities
+}
+
+func remoteChatCapabilities(reasoning, multimodal, jsonSchema bool, extra ...string) []string {
+	capabilities := []string{
+		capabilityText,
+		capabilityChat,
+		capabilityTools,
+		capabilityBatch,
+		capabilityPromptCache,
+		capabilityStreaming,
+		capabilityRetries,
+		capabilityFallback,
+		capabilityRateLimits,
+		capabilityCost,
+	}
+
+	if jsonSchema {
+		capabilities = append(capabilities, capabilityJSONSchema)
+	}
+
+	if reasoning {
+		capabilities = append(capabilities, capabilityReasoning)
+	}
+
+	if multimodal {
+		capabilities = append(capabilities, capabilityVision, capabilityMultimodal)
+	}
+
+	capabilities = append(capabilities, extra...)
+
+	return capabilities
 }
 
 func pricedMetadata(provider, name string, contextWindow, maxOutputTokens int, inputPerMillion, cachedPerMillion, cacheWritePerMillion, outputPerMillion float64, deprecated bool, source, sourceURL, sourcePublished string, capabilities ...string) ModelMetadata {

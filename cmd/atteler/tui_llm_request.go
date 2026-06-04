@@ -126,10 +126,7 @@ func callLLMWithTools(
 		defer close(request.confirmRequestCh)
 	}
 
-	tools := llm.DefaultTools()
-	if request.hasAgent {
-		tools = request.agent.FilterTools(tools)
-	}
+	tools := defaultToolsForAgent(agentSelection{agent: request.agent, ok: request.hasAgent})
 
 	params.Tools = tools
 
@@ -418,10 +415,7 @@ func requestMessagesForBudget(
 	applyGenerationParams(&params, generation)
 
 	if useTools {
-		tools := llm.DefaultTools()
-		if activeAgent.ok {
-			tools = activeAgent.agent.FilterTools(tools)
-		}
+		tools := defaultToolsForAgent(activeAgent)
 
 		if len(tools) > 0 {
 			prependToolReminder(&params, tools)

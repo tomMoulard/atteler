@@ -386,6 +386,7 @@ type cliOptions struct {
 	retrievalSources                   stringListFlag
 	suggestSkillSteps                  stringListFlag
 	routeCandidates                    rawStringListFlag
+	routeRequiredCapabilities          stringListFlag
 	lspArgs                            rawStringListFlag
 	spawnAgentSpecs                    rawStringListFlag
 	speculateAgents                    stringListFlag

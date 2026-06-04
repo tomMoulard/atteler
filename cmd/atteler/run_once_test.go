@@ -56,6 +56,15 @@ func (p *runOnceCostProvider) Complete(_ context.Context, _ llm.CompleteParams) 
 	return p.response, nil
 }
 
+type runOnceCapabilityProvider struct {
+	routeFakeProvider
+	capabilities llm.ProviderCapabilities
+}
+
+func (p runOnceCapabilityProvider) Capabilities() llm.ProviderCapabilities {
+	return p.capabilities
+}
+
 func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -115,6 +124,48 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	if len(loaded.Messages) != 2 || loaded.Messages[1].Content != "recorded answer" {
 		require.Failf(t, "unexpected replayed session", "messages = %+v", loaded.Messages)
 	}
+}
+
+func TestSaveRecordedResponse_IncludesResponseFormat(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	recordPath := filepath.Join(dir, "response.json")
+
+	require.NoError(t, saveRecordedResponse(
+		recordPath,
+		llm.CompleteParams{
+			Model: "gpt-test",
+			Messages: []llm.Message{{
+				Role:    llm.RoleUser,
+				Content: "hello",
+			}},
+			ResponseFormat: &llm.ResponseFormat{
+				Type:   llm.ResponseFormatJSONSchema,
+				Name:   "answer",
+				Strict: true,
+				Schema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"answer": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+		nil,
+		&llm.Response{Content: "recorded answer", Model: "gpt-test"},
+	))
+
+	data, err := os.ReadFile(recordPath)
+	require.NoError(t, err)
+
+	var record responseRecordFile
+	require.NoError(t, json.Unmarshal(data, &record))
+	require.NotNil(t, record.Request.ResponseFormat)
+	assert.Equal(t, llm.ResponseFormatJSONSchema, record.Request.ResponseFormat.Type)
+	assert.Equal(t, "answer", record.Request.ResponseFormat.Name)
+	assert.True(t, record.Request.ResponseFormat.Strict)
+	assert.Equal(t, "object", record.Request.ResponseFormat.Schema["type"])
 }
 
 func TestRunOnceComplete_CostBudgetFailsClosedWithoutPricing(t *testing.T) {
@@ -500,6 +551,233 @@ func TestRunOnceWithOptions_EmitsEstimatedAndActualRouteDecisionEvents(t *testin
 	assert.Contains(t, log, "actual_selected=openai/gpt-4.1-nano")
 	assert.Contains(t, log, "fallback_order=openai/gpt-4.1-nano,openai/gpt-4.1-mini")
 	assert.Contains(t, log, "verified_provider_model_count=1")
+}
+
+func TestRunOnceWithOptions_EmitsRouteDecisionForModelRole(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "plan this"}}},
+		nil,
+		&llm.Response{
+			Content:           "recorded plan",
+			Provider:          "openai",
+			Model:             "gpt-4.1-mini",
+			Latency:           21 * time.Millisecond,
+			FirstTokenLatency: 5 * time.Millisecond,
+			InputTokens:       25,
+			OutputTokens:      10,
+		},
+	))
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1", "gpt-4.1-mini"}})
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred:            "openai/gpt-4.1",
+		FallbackModels:       []string{"openai/gpt-4.1-mini"},
+		RequiredCapabilities: []string{modelroute.CapabilityJSONSchema},
+		MaxCostUSD:           0.00005,
+	}))
+
+	var eventLog bytes.Buffer
+
+	err := runOnceWithOptions(
+		context.Background(),
+		registry,
+		agent.NewRegistry(nil),
+		events.NewRunnerWithLogger(nil, &eventLog),
+		session.NewStore(filepath.Join(dir, "sessions")),
+		session.New("planner", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"planner",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat: outputFormatText,
+			Headless:     true,
+			Response:     responseRecordOptions{ReplayPath: replayPath},
+		},
+		false,
+		"plan this",
+	)
+	require.NoError(t, err)
+
+	log := eventLog.String()
+	assert.Contains(t, log, "event:route_decision")
+	assert.Contains(t, log, "phase=estimated")
+	assert.Contains(t, log, "model_role=planner")
+	assert.Contains(t, log, "phase=actual")
+	assert.Contains(t, log, "selected=openai/gpt-4.1-mini")
+	assert.Contains(t, log, "fallback_order=openai/gpt-4.1-mini")
+	assert.Contains(t, log, "constraints=")
+	assert.Contains(t, log, modelroute.ConstraintRequiredCapabilities)
+	assert.Contains(t, log, modelroute.ConstraintBudget)
+	assert.Contains(t, log, modelroute.ConstraintRuntimeAvailability)
+	assert.Contains(t, log, "actual_selected=openai/gpt-4.1-mini")
+	assert.Contains(t, log, "actual_cost=")
+	assert.Contains(t, log, "actual_latency_ms=21")
+	assert.Contains(t, log, "actual_ttft_ms=5")
+	assert.Contains(t, log, "actual_input_tokens=25")
+	assert.Contains(t, log, "actual_output_tokens=10")
+}
+
+func TestRunOnceWithOptions_ModelRoleInfersToolCapabilityFromOneShotRequest(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "toolbox/small", Messages: []llm.Message{{Role: llm.RoleUser, Content: "fix this"}}},
+		nil,
+		&llm.Response{
+			Content:      "recorded fix",
+			Provider:     "toolbox",
+			Model:        "small",
+			InputTokens:  12,
+			OutputTokens: 8,
+		},
+	))
+
+	registry := llm.NewRegistry()
+	registry.Register(runOnceCapabilityProvider{
+		routeFakeProvider: routeFakeProvider{name: "basic", models: []string{"small"}},
+		capabilities: llm.ProviderCapabilities{
+			SupportsChatCompletions: true,
+		},
+	})
+	registry.Register(runOnceCapabilityProvider{
+		routeFakeProvider: routeFakeProvider{name: "toolbox", models: []string{"small"}},
+		capabilities: llm.ProviderCapabilities{
+			SupportsChatCompletions: true,
+			SupportsTools:           true,
+		},
+	})
+	require.NoError(t, registry.SetModelRole("fast_coder", llm.ModelRole{
+		Preferred:      "basic/small",
+		FallbackModels: []string{"toolbox/small"},
+	}))
+
+	var eventLog bytes.Buffer
+
+	err := runOnceWithOptions(
+		context.Background(),
+		registry,
+		agent.NewRegistry(nil),
+		events.NewRunnerWithLogger(nil, &eventLog),
+		session.NewStore(filepath.Join(dir, "sessions")),
+		session.New("fast_coder", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"fast_coder",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat: outputFormatText,
+			Headless:     true,
+			Response:     responseRecordOptions{ReplayPath: replayPath},
+		},
+		false,
+		"fix this",
+	)
+	require.NoError(t, err)
+
+	log := eventLog.String()
+	assert.Contains(t, log, "event:route_decision")
+	assert.Contains(t, log, "model_role=fast_coder")
+	assert.Contains(t, log, "selected=toolbox/small")
+	assert.Contains(t, log, "fallback_order=toolbox/small")
+	assert.Contains(t, log, modelroute.ConstraintRequiredCapabilities)
+	assert.Contains(t, log, modelroute.ReasonMissingCapability)
+	assert.Contains(t, log, "actual_selected=toolbox/small")
+}
+
+func TestRunOnceWithOptions_AgentModelRoleBypassesAgentCatalogRoute(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "response.json")
+	require.NoError(t, saveRecordedResponse(
+		replayPath,
+		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "plan this"}}},
+		nil,
+		&llm.Response{
+			Content:      "recorded plan",
+			Provider:     "openai",
+			Model:        "gpt-4.1-mini",
+			InputTokens:  25,
+			OutputTokens: 10,
+		},
+	))
+
+	registry := llm.NewRegistry()
+	registry.Register(routeFakeProvider{name: "openai", models: []string{"gpt-4.1", "gpt-4.1-mini"}})
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred:            "openai/gpt-4.1",
+		FallbackModels:       []string{"openai/gpt-4.1-mini"},
+		RequiredCapabilities: []string{modelroute.CapabilityJSONSchema},
+		MaxCostUSD:           0.00005,
+	}))
+
+	var eventLog bytes.Buffer
+
+	err := runOnceWithOptions(
+		context.Background(),
+		registry,
+		agent.NewRegistry(map[string]config.AgentConfig{
+			"reviewer": {
+				Model: "planner",
+				RoutingPolicy: config.RoutingPolicyConfig{
+					RequiredCapabilities: []string{modelroute.CapabilityJSONSchema},
+				},
+			},
+		}),
+		events.NewRunnerWithLogger(nil, &eventLog),
+		session.NewStore(filepath.Join(dir, "sessions")),
+		session.New("", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"",
+		"reviewer",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			OutputFormat: outputFormatText,
+			Headless:     true,
+			Response:     responseRecordOptions{ReplayPath: replayPath},
+		},
+		false,
+		"plan this",
+	)
+	require.NoError(t, err)
+
+	log := eventLog.String()
+	assert.Contains(t, log, "event:route_decision")
+	assert.Contains(t, log, "agent=reviewer")
+	assert.Contains(t, log, "model_role=planner")
+	assert.Contains(t, log, "selected=openai/gpt-4.1-mini")
+	assert.Contains(t, log, modelroute.ConstraintRequiredCapabilities)
 }
 
 func TestRunOnceWithOptions_AppendsWorkspaceVectorContext(t *testing.T) {

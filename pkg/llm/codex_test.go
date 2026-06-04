@@ -129,7 +129,7 @@ func TestBuildCodexResponsesRequest_ModelModeFastUsesPriorityServiceTier(t *test
 	assert.Equal(t, modelModePriority, req.ServiceTier)
 }
 
-func TestCodexProvider_CompleteOmitsUnsupportedTemperature(t *testing.T) {
+func TestCodexProvider_CompleteOmitsPortableUnsupportedOptions(t *testing.T) {
 	t.Parallel()
 
 	var gotBody []byte
@@ -164,16 +164,20 @@ func TestCodexProvider_CompleteOmitsUnsupportedTemperature(t *testing.T) {
 		Model:       "gpt-5.5",
 		ModelMode:   ModelModeFast,
 		Temperature: &temperature,
+		MaxTokens:   16,
 		Messages:    []Message{{Role: RoleUser, Content: "say ok"}},
 	})
 	require.NoError(t, err)
 
 	assert.Equal(t, "ok", resp.Content)
 	assert.NotContains(t, string(gotBody), "temperature")
+	assert.NotContains(t, string(gotBody), "max_output_tokens")
+	assert.NotContains(t, string(gotBody), "max_tokens")
 	assert.Contains(t, log.String(), "option_adjustments")
 	assert.Contains(t, log.String(), "Temperature omitted")
 	assert.Contains(t, log.String(), "model_mode=fast")
 	assert.Contains(t, log.String(), "service_tier=priority")
+	assert.Contains(t, log.String(), "MaxTokens omitted")
 	assert.JSONEq(t, `{
 		"model": "gpt-5.5",
 		"service_tier": "priority",

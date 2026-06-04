@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/modelroute"
 )
 
 const (
@@ -83,6 +85,154 @@ type StreamProvider interface {
 	CompleteStream(ctx context.Context, params CompleteParams) (<-chan Chunk, error)
 }
 
+// CompleteStream resolves params.Model through the registry and returns a
+// provider-agnostic completion stream. Model roles are resolved with an
+// implicit "streaming" capability requirement so a role does not silently pick
+// a backend that can only produce a buffered non-streaming response.
+func (r *Registry) CompleteStream(ctx context.Context, params CompleteParams) (<-chan Chunk, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	if routedParams, routedFallbacks, routed, err := r.routeModelRoleRequestWithCapabilities(
+		params,
+		nil,
+		[]string{modelroute.CapabilityStreaming},
+	); err != nil {
+		return nil, err
+	} else if routed {
+		params = routedParams
+		if len(routedFallbacks) > 0 {
+			return r.completeStreamResolvedWithFallback(ctx, params, routedFallbacks)
+		}
+	}
+
+	return r.completeStreamResolved(ctx, params)
+}
+
+func (r *Registry) completeStreamResolved(ctx context.Context, params CompleteParams) (<-chan Chunk, error) {
+	p, params, err := r.resolve(params)
+	if err != nil {
+		return nil, err
+	}
+
+	capabilities := ProviderCapabilitiesFor(p)
+
+	sp, ok := p.(StreamProvider)
+	if !ok || !capabilities.SupportsStreaming {
+		resp, completeErr := r.completeResolved(ctx, params)
+		if completeErr != nil {
+			return nil, completeErr
+		}
+
+		return streamFromResponse(resp), nil
+	}
+
+	params, adjustments, err := prepareRoutedCompleteParamsForProviderCapabilities(p.Name(), capabilities, params)
+	if err != nil {
+		return nil, err
+	}
+
+	if validateErr := validateCompleteParamsAgainstDeclaredCapabilities(p, params); validateErr != nil {
+		return nil, validateErr
+	}
+
+	emitToolExecute(ctx, p, params, adjustments)
+
+	startedAt := time.Now()
+
+	ch, err := sp.CompleteStream(ctx, params)
+	if err != nil {
+		wrappedErr := fmt.Errorf("llm: %s stream: %w", p.Name(), err)
+		r.recordRouteFailure(p.Name(), params.Model, wrappedErr)
+
+		return nil, wrappedErr
+	}
+
+	return r.observeCompletionStream(ctx, p.Name(), params.Model, ch, startedAt), nil
+}
+
+func (r *Registry) completeStreamResolvedWithFallback(
+	ctx context.Context,
+	params CompleteParams,
+	fallbackModels []string,
+) (<-chan Chunk, error) {
+	models := modelFallbackChain(params.Model, fallbackModels)
+	if len(models) == 0 {
+		return r.completeStreamResolved(ctx, params)
+	}
+
+	var failures []error
+
+	for _, model := range models {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("llm: stream fallback canceled: %w", err)
+		}
+
+		next := params
+		next.Model = model
+
+		ch, err := r.completeStreamResolved(ctx, next)
+		if err == nil {
+			return ch, nil
+		}
+
+		failures = append(failures, fmt.Errorf("%s via %s: %w", model, r.modelResolutionLabel(model), err))
+	}
+
+	return nil, r.withReadinessContext(fmt.Errorf("llm: all stream fallback models failed: %w", joinFallbackFailures(failures)))
+}
+
+// CompleteStreamWithFallback tries params.Model followed by fallbackModels
+// until one stream starts successfully. Once a provider returns a stream,
+// mid-stream failures are delivered to the caller as terminal error chunks
+// rather than replaying partial output against another model.
+func (r *Registry) CompleteStreamWithFallback(
+	ctx context.Context,
+	params CompleteParams,
+	fallbackModels []string,
+) (<-chan Chunk, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	if routedParams, routedFallbacks, routed, err := r.routeModelRoleRequestWithCapabilities(
+		params,
+		fallbackModels,
+		[]string{modelroute.CapabilityStreaming},
+	); err != nil {
+		return nil, err
+	} else if routed {
+		params = routedParams
+		fallbackModels = routedFallbacks
+	}
+
+	models := modelFallbackChain(params.Model, fallbackModels)
+	if len(models) == 0 {
+		return r.CompleteStream(ctx, params)
+	}
+
+	var failures []error
+
+	for _, model := range models {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("llm: stream fallback canceled: %w", err)
+		}
+
+		next := params
+		next.Model = model
+
+		ch, err := r.CompleteStream(ctx, next)
+		if err == nil {
+			return ch, nil
+		}
+
+		failures = append(failures, fmt.Errorf("%s via %s: %w", model, r.modelResolutionLabel(model), err))
+	}
+
+	return nil, r.withReadinessContext(fmt.Errorf("llm: all stream fallback models failed: %w", joinFallbackFailures(failures)))
+}
+
 // StreamFromComplete wraps a non-streaming Complete call as a single-chunk
 // stream. This is useful as a fallback for providers that do not implement
 // StreamProvider.
@@ -94,6 +244,14 @@ func StreamFromComplete(ctx context.Context, p Provider, params CompleteParams) 
 	resp, err := p.Complete(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("stream fallback: %w", err)
+	}
+
+	return streamFromResponse(resp), nil
+}
+
+func streamFromResponse(resp *Response) <-chan Chunk {
+	if resp == nil {
+		resp = &Response{}
 	}
 
 	ch := make(chan Chunk, DefaultStreamBuffer)
@@ -112,7 +270,70 @@ func StreamFromComplete(ctx context.Context, p Provider, params CompleteParams) 
 
 	close(ch)
 
-	return ch, nil
+	return ch
+}
+
+func (r *Registry) observeCompletionStream(
+	ctx context.Context,
+	providerName string,
+	requestedModel string,
+	ch <-chan Chunk,
+	startedAt time.Time,
+) <-chan Chunk {
+	out := make(chan Chunk, DefaultStreamBuffer)
+
+	go func() {
+		defer close(out)
+
+		var firstTokenLatency time.Duration
+
+		for chunk := range ch {
+			if firstTokenLatency <= 0 && chunk.FirstTokenLatency > 0 {
+				firstTokenLatency = chunk.FirstTokenLatency
+			}
+
+			select {
+			case out <- chunk:
+			case <-ctx.Done():
+				r.recordRouteFailure(providerName, requestedModel, ctx.Err())
+
+				return
+			}
+
+			if chunk.Err != nil {
+				r.recordRouteFailure(providerName, requestedModel, chunk.Err)
+
+				return
+			}
+
+			if chunk.Done {
+				if chunk.FirstTokenLatency <= 0 {
+					chunk.FirstTokenLatency = firstTokenLatency
+				}
+
+				r.recordRouteObservation(providerName, requestedModel, responseFromStreamChunk(chunk), time.Since(startedAt))
+
+				return
+			}
+		}
+
+		r.recordRouteFailure(providerName, requestedModel, ErrStreamIncomplete)
+	}()
+
+	return out
+}
+
+func responseFromStreamChunk(chunk Chunk) *Response {
+	return &Response{
+		Model:                 chunk.Model,
+		StopReason:            chunk.StopReason,
+		ToolCalls:             append([]ToolCall(nil), chunk.ToolCalls...),
+		FirstTokenLatency:     chunk.FirstTokenLatency,
+		InputTokens:           chunk.InputTokens,
+		CachedInputTokens:     chunk.CachedInputTokens,
+		CacheWriteInputTokens: chunk.CacheWriteInputTokens,
+		OutputTokens:          chunk.OutputTokens,
+	}
 }
 
 // CompleteStreamOrFallback attempts to use the streaming interface if the

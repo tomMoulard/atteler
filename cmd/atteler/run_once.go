@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -87,15 +88,16 @@ type responseRecordFile struct {
 
 //nolint:govet // JSON field order is grouped for stable recording readability.
 type responseRecordRequest struct {
-	Temperature    *float64      `json:"temperature,omitempty"`
-	TopP           *float64      `json:"top_p,omitempty"`
-	Seed           *int          `json:"seed,omitempty"`
-	Model          string        `json:"model,omitempty"`
-	ModelMode      string        `json:"model_mode,omitempty"`
-	FallbackModels []string      `json:"fallback_models,omitempty"`
-	Messages       []llm.Message `json:"messages"`
-	MaxTokens      int           `json:"max_tokens,omitempty"`
-	ReasoningLevel string        `json:"reasoning_level,omitempty"`
+	Temperature    *float64            `json:"temperature,omitempty"`
+	TopP           *float64            `json:"top_p,omitempty"`
+	Seed           *int                `json:"seed,omitempty"`
+	ResponseFormat *llm.ResponseFormat `json:"response_format,omitempty"`
+	Model          string              `json:"model,omitempty"`
+	ModelMode      string              `json:"model_mode,omitempty"`
+	FallbackModels []string            `json:"fallback_models,omitempty"`
+	Messages       []llm.Message       `json:"messages"`
+	MaxTokens      int                 `json:"max_tokens,omitempty"`
+	ReasoningLevel string              `json:"reasoning_level,omitempty"`
 }
 
 type responseRecordPayload struct {
@@ -126,6 +128,7 @@ func saveRecordedResponse(path string, params llm.CompleteParams, fallbackModels
 			Temperature:    params.Temperature,
 			TopP:           params.TopP,
 			Seed:           params.Seed,
+			ResponseFormat: cloneResponseFormat(params.ResponseFormat),
 			ReasoningLevel: params.ReasoningLevel,
 		},
 		Response: responseRecordPayload{
@@ -156,6 +159,20 @@ func saveRecordedResponse(path string, params llm.CompleteParams, fallbackModels
 	}
 
 	return nil
+}
+
+func cloneResponseFormat(format *llm.ResponseFormat) *llm.ResponseFormat {
+	if format == nil {
+		return nil
+	}
+
+	clone := *format
+	if format.Schema != nil {
+		clone.Schema = make(map[string]any, len(format.Schema))
+		maps.Copy(clone.Schema, format.Schema)
+	}
+
+	return &clone
 }
 
 func loadRecordedResponse(path string) (*llm.Response, error) {
@@ -400,10 +417,7 @@ func runOnceWithOptions(
 
 	// Enable tool use for one-shot calls: the LLM can invoke bash commands.
 	// Apply agent-level tool filtering when an agent is active.
-	tools := llm.DefaultTools()
-	if prepared.activeAgent.ok {
-		tools = prepared.activeAgent.agent.FilterTools(tools)
-	}
+	tools := defaultToolsForAgent(prepared.activeAgent)
 
 	params.Tools = tools
 
@@ -739,6 +753,8 @@ func prepareRunOnceRequest(
 	}
 
 	requestModel := selectedModel
+
+	selectedFallbackModels := append([]string(nil), fallbackModels...)
 	if activeAgent.ok && !modelLocked {
 		requestModel, fallbackModels = effectiveAgentModelSelection(selectedModel, fallbackModels, activeAgent)
 	}
@@ -764,14 +780,19 @@ func prepareRunOnceRequest(
 	}, activeAgent, contextOptions)
 	budgetMessages := requestMessagesForBudget(requestModel, requestMessages, activeAgent, generation, requestReferenceContext.Content, true)
 
-	requestModel, fallbackModels, routeDecision, err := requestModelAndFallbacks(
+	requestModel, fallbackModels, routeDecision, err := requestModelRoutingAndFallbacks(
+		ctx,
+		reg,
 		selectedModel,
 		modelLocked,
-		fallbackModels,
+		selectedFallbackModels,
 		activeAgent,
+		requestModel,
+		fallbackModels,
+		routeCompleteParamsForRequest(requestModel, budgetMessages, generation, activeAgent, true),
 		routeProfileForMessages(budgetMessages, generation),
 		routeTelemetryFromRegistry(reg),
-		routeAvailabilityFromRegistryWithRefresh(ctx, reg, effectiveRouteCandidateChain(selectedModel, fallbackModels, activeAgent, modelLocked)),
+		routeAvailabilityFromRegistryWithRefresh(ctx, reg, effectiveRouteCandidateChain(selectedModel, selectedFallbackModels, activeAgent, modelLocked)),
 	)
 	if err != nil {
 		return runOncePrepared{

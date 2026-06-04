@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -224,6 +225,488 @@ func TestValidateConfig_RejectsAgentLoopBudgetFields(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantError)
 		})
 	}
+}
+
+func TestValidateConfig_RejectsNegativeRoutingLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		config    string
+		wantError string
+	}{
+		{
+			name: "model role cost",
+			config: `models:
+  planner:
+    preferred: openai/gpt-4.1-mini
+    max_cost_usd: -0.01
+`,
+			wantError: "models.planner.max_cost_usd must be >= 0",
+		},
+		{
+			name: "model role latency",
+			config: `models:
+  planner:
+    preferred: openai/gpt-4.1-mini
+    max_latency_ms: -1
+`,
+			wantError: "models.planner.max_latency_ms must be >= 0",
+		},
+		{
+			name: "model role ttft",
+			config: `models:
+  planner:
+    preferred: openai/gpt-4.1-mini
+    max_ttft_ms: -1
+`,
+			wantError: "models.planner.max_ttft_ms must be >= 0",
+		},
+		{
+			name: "model role routing budget",
+			config: `models:
+  planner:
+    preferred: openai/gpt-4.1-mini
+    routing_policy:
+      max_budget: -0.01
+`,
+			wantError: "models.planner.routing_policy.max_budget must be >= 0",
+		},
+		{
+			name: "agent routing latency",
+			config: `agents:
+  reviewer:
+    model: openai/gpt-4.1-mini
+    routing_policy:
+      max_latency_ms: -1
+`,
+			wantError: "agents.reviewer.routing_policy.max_latency_ms must be >= 0",
+		},
+		{
+			name: "agent routing ttft",
+			config: `agents:
+  reviewer:
+    model: openai/gpt-4.1-mini
+    routing_policy:
+      max_ttft_ms: -1
+`,
+			wantError: "agents.reviewer.routing_policy.max_ttft_ms must be >= 0",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("HOME", tempDir)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+			t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+			t.Setenv("OPENCODE_CONFIG", "")
+			t.Setenv("OPENCODE_CONFIG_DIR", "")
+			t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+			t.Setenv("ATTELER_CONFIG", "")
+			t.Chdir(tempDir)
+
+			configDir := filepath.Join(tempDir, ".atteler")
+			require.NoError(t, os.MkdirAll(configDir, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(tc.config), 0o600))
+
+			err := validateConfig()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantError)
+		})
+	}
+}
+
+func TestValidateConfig_RejectsNonFiniteRoutingLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		config    string
+		wantError string
+	}{
+		{
+			name: "model role cost",
+			config: `models:
+  planner:
+    preferred: openai/gpt-4.1-mini
+    max_cost_usd: .nan
+`,
+			wantError: "models.planner.max_cost_usd must be finite",
+		},
+		{
+			name: "model role routing budget",
+			config: `models:
+  planner:
+    preferred: openai/gpt-4.1-mini
+    routing_policy:
+      max_budget: .inf
+`,
+			wantError: "models.planner.routing_policy.max_budget must be finite",
+		},
+		{
+			name: "agent routing budget",
+			config: `agents:
+  reviewer:
+    model: openai/gpt-4.1-mini
+    routing_policy:
+      max_budget: -.inf
+`,
+			wantError: "agents.reviewer.routing_policy.max_budget must be finite",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("HOME", tempDir)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+			t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+			t.Setenv("OPENCODE_CONFIG", "")
+			t.Setenv("OPENCODE_CONFIG_DIR", "")
+			t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+			t.Setenv("ATTELER_CONFIG", "")
+			t.Chdir(tempDir)
+
+			configDir := filepath.Join(tempDir, ".atteler")
+			require.NoError(t, os.MkdirAll(configDir, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(tc.config), 0o600))
+
+			err := validateConfig()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantError)
+		})
+	}
+}
+
+func TestValidateConfig_RejectsInvalidModelRoleDefinitions(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		config    string
+		wantError string
+	}{
+		{
+			name: "empty role name",
+			config: `models:
+  "":
+    preferred: openai/gpt-4.1-mini
+`,
+			wantError: "models role name cannot be empty",
+		},
+		{
+			name: "provider qualified role name",
+			config: `models:
+  openai/planner:
+    preferred: openai/gpt-4.1-mini
+`,
+			wantError: "models.openai/planner role name must be a bare name",
+		},
+		{
+			name: "empty candidate chain",
+			config: `models:
+  planner:
+    required_capabilities: [tools]
+`,
+			wantError: "models.planner needs a preferred model or fallback model",
+		},
+		{
+			name: "blank candidate chain",
+			config: `models:
+  planner:
+    preferred: " "
+    fallback_models: [" "]
+`,
+			wantError: "models.planner needs a preferred model or fallback model",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("HOME", tempDir)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+			t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+			t.Setenv("OPENCODE_CONFIG", "")
+			t.Setenv("OPENCODE_CONFIG_DIR", "")
+			t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+			t.Setenv("ATTELER_CONFIG", "")
+			t.Chdir(tempDir)
+
+			configDir := filepath.Join(tempDir, ".atteler")
+			require.NoError(t, os.MkdirAll(configDir, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(tc.config), 0o600))
+
+			err := validateConfig()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantError)
+		})
+	}
+}
+
+func TestValidateConfig_RejectsUnknownRouteCapabilities(t *testing.T) {
+	const validCapabilities = "valid: text,chat,tools,reasoning,json_schema,embeddings,vision,multimodal,batch,prompt_cache,streaming,rate_limits,retries,fallback,cost_tracking,local"
+
+	for _, tc := range []struct {
+		name      string
+		config    string
+		wantError string
+	}{
+		{
+			name: "provider capabilities",
+			config: `providers:
+  localai:
+    type: openai-compatible
+    base_url: http://127.0.0.1:8080/v1
+    models: [tiny]
+    capabilities: [chat, time_travel]
+`,
+			wantError: `providers.localai.capabilities contains unknown capability "time_travel"`,
+		},
+		{
+			name: "model role required capabilities",
+			config: `models:
+  planner:
+    preferred: openai/gpt-4.1-mini
+    required_capabilities: [tools, clairvoyance]
+`,
+			wantError: `models.planner.required_capabilities contains unknown capability "clairvoyance"`,
+		},
+		{
+			name: "model role routing policy capabilities",
+			config: `models:
+  planner:
+    preferred: openai/gpt-4.1-mini
+    routing_policy:
+      required_capabilities: [json_schema, teleport]
+`,
+			wantError: `models.planner.routing_policy.required_capabilities contains unknown capability "teleport"`,
+		},
+		{
+			name: "agent routing policy capabilities",
+			config: `agents:
+  reviewer:
+    model: openai/gpt-4.1-mini
+    routing_policy:
+      required_capabilities: [tools, impossible]
+`,
+			wantError: `agents.reviewer.routing_policy.required_capabilities contains unknown capability "impossible"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("HOME", tempDir)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+			t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+			t.Setenv("OPENCODE_CONFIG", "")
+			t.Setenv("OPENCODE_CONFIG_DIR", "")
+			t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+			t.Setenv("ATTELER_CONFIG", "")
+			t.Chdir(tempDir)
+
+			configDir := filepath.Join(tempDir, ".atteler")
+			require.NoError(t, os.MkdirAll(configDir, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(tc.config), 0o600))
+
+			err := validateConfig()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantError)
+			assert.Contains(t, err.Error(), validCapabilities)
+		})
+	}
+}
+
+func TestValidateConfig_RejectsUnknownProviderType(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`providers:
+  localai:
+    type: telepathy
+    base_url: http://127.0.0.1:8080/v1
+    models: [tiny]
+`), 0o600))
+
+	err := validateConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `providers.localai.type unsupported provider type "telepathy"`)
+	assert.Contains(t, err.Error(), "openai_compatible")
+}
+
+func TestValidateConfig_RejectsCustomProviderWithoutType(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`providers:
+  localai:
+    base_url: http://127.0.0.1:8080/v1
+    models: [tiny]
+`), 0o600))
+
+	err := validateConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `providers.localai.type missing for custom provider "localai"`)
+	assert.Contains(t, err.Error(), "openai_compatible")
+}
+
+func TestValidateConfig_RejectsOpenAICompatibleProviderWithoutBaseURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    string
+		wantError string
+	}{
+		{
+			name: "explicit compatible type",
+			config: `providers:
+  localai:
+    type: openai_compatible
+    models: [tiny]
+`,
+			wantError: `providers.localai.base_url missing for OpenAI-compatible provider "localai"`,
+		},
+		{
+			name: "alias provider name",
+			config: `providers:
+  groq:
+    models: [llama-test]
+`,
+			wantError: `providers.groq.base_url missing for OpenAI-compatible provider "groq"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("HOME", tempDir)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+			t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+			t.Setenv("OPENCODE_CONFIG", "")
+			t.Setenv("OPENCODE_CONFIG_DIR", "")
+			t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+			t.Setenv("ATTELER_CONFIG", "")
+			t.Chdir(tempDir)
+
+			configDir := filepath.Join(tempDir, ".atteler")
+			require.NoError(t, os.MkdirAll(configDir, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(tc.config), 0o600))
+
+			err := validateConfig()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantError)
+		})
+	}
+}
+
+func TestValidateConfig_RejectsInvalidOpenAICompatibleProviderPath(t *testing.T) {
+	tests := []struct {
+		name      string
+		field     string
+		wantError string
+	}{
+		{
+			name:      "chat completions path",
+			field:     "chat_completions_path: v1/chat/completions",
+			wantError: "providers.localai.chat_completions_path must start with /",
+		},
+		{
+			name:      "embeddings path",
+			field:     "embeddings_path: v1/embeddings",
+			wantError: "providers.localai.embeddings_path must start with /",
+		},
+		{
+			name:      "models path",
+			field:     "models_path: v1/models",
+			wantError: "providers.localai.models_path must start with /",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("HOME", tempDir)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+			t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+			t.Setenv("OPENCODE_CONFIG", "")
+			t.Setenv("OPENCODE_CONFIG_DIR", "")
+			t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+			t.Setenv("ATTELER_CONFIG", "")
+			t.Chdir(tempDir)
+
+			configDir := filepath.Join(tempDir, ".atteler")
+			require.NoError(t, os.MkdirAll(configDir, 0o700))
+
+			config := fmt.Sprintf(`providers:
+  localai:
+    type: openai_compatible
+    base_url: http://127.0.0.1:8080/v1
+    %s
+    models: [tiny]
+`, tc.field)
+			require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(config), 0o600))
+
+			err := validateConfig()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantError)
+		})
+	}
+}
+
+func TestValidateConfig_RejectsIncompatibleBuiltinProviderType(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`providers:
+  anthropic:
+    type: openai_compatible
+`), 0o600))
+
+	err := validateConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `providers.anthropic.type unsupported provider type "openai_compatible"`)
+}
+
+func TestValidateConfig_AcceptsProviderTypeAliases(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`providers:
+  gemini:
+    type: google_ai_studio
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    models: [gemini-test]
+  vllm:
+    base_url: http://127.0.0.1:8000
+    models: [qwen-test]
+  anthropic:
+    type: anthropic
+`), 0o600))
+
+	require.NoError(t, validateConfig())
 }
 
 func TestValidateHookConfig_AcceptsKnownPayloadModes(t *testing.T) {

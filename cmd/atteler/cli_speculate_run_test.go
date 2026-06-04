@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
@@ -110,6 +111,46 @@ func TestRunSpeculateExecution_SucceedsWithExplicitPassingGates(t *testing.T) {
 	assert.Contains(t, stdout, "winner: planner")
 	assert.Contains(t, stdout, "gates:\n  - tests pass: PASS covered\n  - lint pass: PASS clean")
 	assert.NotContains(t, stdout, "error:")
+}
+
+func TestRegistryCompleterEmitsRouteDecisionForModelRole(t *testing.T) {
+	t.Parallel()
+
+	provider := &capturingIdleSuggestionProvider{
+		providerName: "openai",
+		model:        "gpt-4.1-mini",
+		response:     "proposal ok",
+	}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+	require.NoError(t, registry.SetModelRole("planner", llm.ModelRole{
+		Preferred: "openai/gpt-4.1-mini",
+	}))
+
+	var eventLog bytes.Buffer
+
+	completer := registryCompleter{
+		registry:       registry,
+		hookRunner:     events.NewRunnerWithLogger(nil, &eventLog),
+		maxInputTokens: 10_000,
+	}
+
+	got, err := completer.Complete(t.Context(), "planner", "system", "propose this")
+
+	require.NoError(t, err)
+	assert.Equal(t, "proposal ok", got)
+	require.NotNil(t, provider.params)
+	assert.Equal(t, "gpt-4.1-mini", provider.params.Model)
+
+	log := eventLog.String()
+	assert.Contains(t, log, "event:route_decision")
+	assert.Contains(t, log, "agent=planner")
+	assert.Contains(t, log, "model_role=planner")
+	assert.Contains(t, log, "phase=estimated")
+	assert.Contains(t, log, "phase=actual")
+	assert.Contains(t, log, "selected=openai/gpt-4.1-mini")
+	assert.Contains(t, log, "fallback_order=openai/gpt-4.1-mini")
+	assert.Contains(t, log, "actual_selected=openai/gpt-4.1-mini")
 }
 
 func speculateRunTestRegistry(judgeOutput string) *llm.Registry {

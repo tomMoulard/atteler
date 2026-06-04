@@ -112,6 +112,25 @@ func (rc *registryCompleter) Complete(ctx context.Context, branch, systemPrompt,
 
 	applyGenerationParams(&params, generation)
 
+	fallbackModels = append([]string(nil), fallbackModels...)
+
+	requestModel, fallbackModels, routeDecision, routed, err := requestModelRoleAndFallbacks(
+		ctx,
+		rc.registry,
+		params.Model,
+		fallbackModels,
+		params,
+	)
+	if err != nil {
+		emitRouteDecisionWarning(ctx, rc.hookRunner, "", "", branch, requestModel, routeDecision)
+
+		return "", fmt.Errorf("speculate LLM route: %w", err)
+	}
+
+	if routed {
+		params.Model = requestModel
+	}
+
 	manifestEvent := requestContextManifestEvent(newRequestContextManifestForModels(
 		rc.registry,
 		params.Model,
@@ -123,6 +142,7 @@ func (rc *registryCompleter) Complete(ctx context.Context, branch, systemPrompt,
 	manifestEvent.Agent = branch
 	setExplicitContextManifestEventModel(&manifestEvent, params.Model)
 	emitHookWarning(ctx, rc.hookRunner, manifestEvent)
+	emitRouteDecisionWarning(ctx, rc.hookRunner, "", "", branch, params.Model, routeDecision)
 
 	if budgetErr := validateRequestBudgetWithFallbacks(rc.registry, params.Model, fallbackModels, params.Messages, rc.maxInputTokens); budgetErr != nil {
 		return "", fmt.Errorf("speculate LLM budget: %w", budgetErr)
@@ -139,6 +159,16 @@ func (rc *registryCompleter) Complete(ctx context.Context, branch, systemPrompt,
 	if err != nil {
 		return "", fmt.Errorf("speculate LLM complete: %w", err)
 	}
+
+	emitRouteDecisionWarning(
+		ctx,
+		rc.hookRunner,
+		"",
+		"",
+		branch,
+		routeResponseModelID(resp.Provider, resp.Model),
+		routeDecisionWithResponse(routeDecision, resp, routeTelemetryFromRegistry(rc.registry)),
+	)
 
 	return resp.Content, nil
 }

@@ -31,28 +31,40 @@ const ConfigSchemaVersion = 1
 //
 //nolint:govet // fieldalignment: field order follows config-file grouping.
 type Config struct {
-	Version         int                       `json:"version,omitempty" yaml:"version,omitempty"`
-	Providers       map[string]ProviderConfig `json:"providers,omitempty" yaml:"providers,omitempty"`
-	Agents          map[string]AgentConfig    `json:"agents,omitempty" yaml:"agents,omitempty"`
-	Hooks           map[string][]HookConfig   `json:"hooks,omitempty" yaml:"hooks,omitempty"`
-	Generation      GenerationConfig          `json:"generation" yaml:"generation"`
-	AgentLoop       AgentLoopConfig           `json:"agent_loop" yaml:"agent_loop"`
-	DefaultProvider string                    `json:"default_provider,omitempty" yaml:"default_provider,omitempty"`
-	DefaultModel    string                    `json:"default_model,omitempty" yaml:"default_model,omitempty"`
-	ModelAliases    map[string]string         `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty"`
-	FallbackModels  []string                  `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
-	Context         ContextConfig             `json:"context" yaml:"context"`
-	Plugins         PluginConfig              `json:"plugins" yaml:"plugins"`
-	SkillLearning   SkillLearningConfig       `json:"skill_learning" yaml:"skill_learning"`
-	Vector          VectorConfig              `json:"vector" yaml:"vector"`
-	Worktree        WorktreeConfig            `json:"worktree" yaml:"worktree"`
+	Version         int                        `json:"version,omitempty" yaml:"version,omitempty"`
+	Providers       map[string]ProviderConfig  `json:"providers,omitempty" yaml:"providers,omitempty"`
+	Agents          map[string]AgentConfig     `json:"agents,omitempty" yaml:"agents,omitempty"`
+	Hooks           map[string][]HookConfig    `json:"hooks,omitempty" yaml:"hooks,omitempty"`
+	Generation      GenerationConfig           `json:"generation" yaml:"generation"`
+	AgentLoop       AgentLoopConfig            `json:"agent_loop" yaml:"agent_loop"`
+	DefaultProvider string                     `json:"default_provider,omitempty" yaml:"default_provider,omitempty"`
+	DefaultModel    string                     `json:"default_model,omitempty" yaml:"default_model,omitempty"`
+	ModelAliases    map[string]string          `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty"`
+	ModelRoles      map[string]ModelRoleConfig `json:"models,omitempty" yaml:"models,omitempty"`
+	FallbackModels  []string                   `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
+	Context         ContextConfig              `json:"context" yaml:"context"`
+	Plugins         PluginConfig               `json:"plugins" yaml:"plugins"`
+	SkillLearning   SkillLearningConfig        `json:"skill_learning" yaml:"skill_learning"`
+	Vector          VectorConfig               `json:"vector" yaml:"vector"`
+	Worktree        WorktreeConfig             `json:"worktree" yaml:"worktree"`
 }
 
 // ProviderConfig configures an individual LLM provider.
 type ProviderConfig struct {
 	Retry                 RetryConfig `json:"retry,omitzero" yaml:"retry,omitempty"`
 	BaseURL               string      `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	Type                  string      `json:"type,omitempty" yaml:"type,omitempty"`
+	APIKeyEnv             string      `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	APIKeyHeader          string      `json:"api_key_header,omitempty" yaml:"api_key_header,omitempty"`
+	APIKeyScheme          string      `json:"api_key_scheme,omitempty" yaml:"api_key_scheme,omitempty"`
+	ChatCompletionsPath   string      `json:"chat_completions_path,omitempty" yaml:"chat_completions_path,omitempty"`
+	EmbeddingsPath        string      `json:"embeddings_path,omitempty" yaml:"embeddings_path,omitempty"`
+	ModelsPath            string      `json:"models_path,omitempty" yaml:"models_path,omitempty"`
+	APIVersion            string      `json:"api_version,omitempty" yaml:"api_version,omitempty"`
+	Models                []string    `json:"models,omitempty" yaml:"models,omitempty"`
+	Capabilities          []string    `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 	Disabled              bool        `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+	Local                 bool        `json:"local,omitempty" yaml:"local,omitempty"`
 	AutoStart             bool        `json:"auto_start,omitempty" yaml:"auto_start,omitempty"`
 	DisablePrivateAdapter bool        `json:"disable_private_adapter,omitempty" yaml:"disable_private_adapter,omitempty"`
 	TimeoutSeconds        int         `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
@@ -66,6 +78,25 @@ type RetryConfig struct {
 	MaxBackoffMS     *int     `json:"max_backoff_ms,omitempty" yaml:"max_backoff_ms,omitempty"`
 	MaxElapsedMS     *int     `json:"max_elapsed_ms,omitempty" yaml:"max_elapsed_ms,omitempty"`
 	JitterFraction   *float64 `json:"jitter_fraction,omitempty" yaml:"jitter_fraction,omitempty"`
+}
+
+// ModelRoleConfig configures a task-oriented model role such as "planner" or
+// "fast_coder".
+//
+//nolint:govet // Field order follows the public YAML shape.
+type ModelRoleConfig struct {
+	Preferred            string              `json:"preferred,omitempty" yaml:"preferred,omitempty"`
+	FallbackModels       []string            `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
+	RoutingPolicy        RoutingPolicyConfig `json:"routing_policy,omitzero" yaml:"routing_policy,omitempty"`
+	PreferredProviders   []string            `json:"preferred_providers,omitempty" yaml:"preferred_providers,omitempty"`
+	BannedProviders      []string            `json:"banned_providers,omitempty" yaml:"banned_providers,omitempty"`
+	BannedModels         []string            `json:"banned_models,omitempty" yaml:"banned_models,omitempty"`
+	RequiredCapabilities []string            `json:"required_capabilities,omitempty" yaml:"required_capabilities,omitempty"`
+	MaxCostUSD           float64             `json:"max_cost_usd,omitempty" yaml:"max_cost_usd,omitempty"`
+	MaxLatencyMS         int                 `json:"max_latency_ms,omitempty" yaml:"max_latency_ms,omitempty"`
+	MaxTTFTMS            int                 `json:"max_ttft_ms,omitempty" yaml:"max_ttft_ms,omitempty"`
+	RequireFreshMetadata bool                `json:"require_fresh_metadata,omitempty" yaml:"require_fresh_metadata,omitempty"`
+	PreferLocal          bool                `json:"prefer_local,omitempty" yaml:"prefer_local,omitempty"`
 }
 
 // AgentConfig configures a named agent persona.
@@ -104,6 +135,8 @@ type RoutingPolicyConfig struct {
 	BannedModels         []string `json:"banned_models,omitempty" yaml:"banned_models,omitempty"`
 	RequiredCapabilities []string `json:"required_capabilities,omitempty" yaml:"required_capabilities,omitempty"`
 	MaxBudget            float64  `json:"max_budget,omitempty" yaml:"max_budget,omitempty"`
+	MaxLatencyMS         int      `json:"max_latency_ms,omitempty" yaml:"max_latency_ms,omitempty"`
+	MaxTTFTMS            int      `json:"max_ttft_ms,omitempty" yaml:"max_ttft_ms,omitempty"`
 	RequireFreshMetadata bool     `json:"require_fresh_metadata,omitempty" yaml:"require_fresh_metadata,omitempty"`
 }
 
@@ -346,31 +379,44 @@ func (w WorktreeConfig) MarshalYAML() (any, error) {
 
 //nolint:govet // fieldalignment: field order follows config-file grouping; deprecated aliases stay last.
 type fileConfig struct {
-	Version         *int                          `json:"version" yaml:"version"`
-	Generation      fileGenerationConfig          `json:"generation" yaml:"generation"`
-	AgentLoop       fileAgentLoopConfig           `json:"agent_loop" yaml:"agent_loop"`
-	Context         fileContextConfig             `json:"context" yaml:"context"`
-	Plugins         filePluginConfig              `json:"plugins" yaml:"plugins"`
-	SkillLearning   fileSkillLearningConfig       `json:"skill_learning" yaml:"skill_learning"`
-	Vector          fileVectorConfig              `json:"vector" yaml:"vector"`
-	Worktree        fileWorktreeConfig            `json:"worktree" yaml:"worktree"`
-	DefaultProvider *string                       `json:"default_provider" yaml:"default_provider"`
-	DefaultModel    *string                       `json:"default_model" yaml:"default_model"`
-	ModelAliases    map[string]string             `json:"model_aliases" yaml:"model_aliases"`
-	Providers       map[string]fileProviderConfig `json:"providers" yaml:"providers"`
-	Agents          map[string]fileAgentConfig    `json:"agents" yaml:"agents"`
-	Hooks           map[string][]HookConfig       `json:"hooks" yaml:"hooks"`
-	FallbackModels  []string                      `json:"fallback_models" yaml:"fallback_models"`
+	Version         *int                           `json:"version" yaml:"version"`
+	Generation      fileGenerationConfig           `json:"generation" yaml:"generation"`
+	AgentLoop       fileAgentLoopConfig            `json:"agent_loop" yaml:"agent_loop"`
+	Context         fileContextConfig              `json:"context" yaml:"context"`
+	Plugins         filePluginConfig               `json:"plugins" yaml:"plugins"`
+	SkillLearning   fileSkillLearningConfig        `json:"skill_learning" yaml:"skill_learning"`
+	Vector          fileVectorConfig               `json:"vector" yaml:"vector"`
+	DefaultProvider *string                        `json:"default_provider" yaml:"default_provider"`
+	DefaultModel    *string                        `json:"default_model" yaml:"default_model"`
+	ModelAliases    map[string]string              `json:"model_aliases" yaml:"model_aliases"`
+	ModelRoles      map[string]fileModelRoleConfig `json:"models" yaml:"models"`
+	Providers       map[string]fileProviderConfig  `json:"providers" yaml:"providers"`
+	Agents          map[string]fileAgentConfig     `json:"agents" yaml:"agents"`
+	Hooks           map[string][]HookConfig        `json:"hooks" yaml:"hooks"`
+	FallbackModels  []string                       `json:"fallback_models" yaml:"fallback_models"`
+	Worktree        fileWorktreeConfig             `json:"worktree" yaml:"worktree"`
 
 	DeprecatedProvider *string `json:"provider" yaml:"provider"`
 	DeprecatedModel    *string `json:"model" yaml:"model"`
 }
 
+//nolint:govet // Field order follows the public provider YAML shape.
 type fileProviderConfig struct {
 	Disabled              *bool           `json:"disabled" yaml:"disabled"`
+	Local                 *bool           `json:"local" yaml:"local"`
 	AutoStart             *bool           `json:"auto_start" yaml:"auto_start"`
 	DisablePrivateAdapter *bool           `json:"disable_private_adapter" yaml:"disable_private_adapter"`
 	BaseURL               *string         `json:"base_url" yaml:"base_url"`
+	Type                  *string         `json:"type" yaml:"type"`
+	APIKeyEnv             *string         `json:"api_key_env" yaml:"api_key_env"`
+	APIKeyHeader          *string         `json:"api_key_header" yaml:"api_key_header"`
+	APIKeyScheme          *string         `json:"api_key_scheme" yaml:"api_key_scheme"`
+	ChatCompletionsPath   *string         `json:"chat_completions_path" yaml:"chat_completions_path"`
+	EmbeddingsPath        *string         `json:"embeddings_path" yaml:"embeddings_path"`
+	ModelsPath            *string         `json:"models_path" yaml:"models_path"`
+	APIVersion            *string         `json:"api_version" yaml:"api_version"`
+	Models                []string        `json:"models" yaml:"models"`
+	Capabilities          []string        `json:"capabilities" yaml:"capabilities"`
 	Retry                 fileRetryConfig `json:"retry" yaml:"retry"`
 	TimeoutSeconds        *int            `json:"timeout_seconds" yaml:"timeout_seconds"`
 }
@@ -381,6 +427,23 @@ type fileRetryConfig struct {
 	MaxBackoffMS     *int     `json:"max_backoff_ms" yaml:"max_backoff_ms"`
 	MaxElapsedMS     *int     `json:"max_elapsed_ms" yaml:"max_elapsed_ms"`
 	JitterFraction   *float64 `json:"jitter_fraction" yaml:"jitter_fraction"`
+}
+
+type fileModelRoleConfig struct {
+	RoutingPolicy        *RoutingPolicyConfig `json:"routing_policy" yaml:"routing_policy"`
+	Preferred            *string              `json:"preferred" yaml:"preferred"`
+	Fallback             *string              `json:"fallback" yaml:"fallback"`
+	MaxCostUSD           *float64             `json:"max_cost_usd" yaml:"max_cost_usd"`
+	MaxLatencyMS         *int                 `json:"max_latency_ms" yaml:"max_latency_ms"`
+	MaxTTFTMS            *int                 `json:"max_ttft_ms" yaml:"max_ttft_ms"`
+	RequireFreshMetadata *bool                `json:"require_fresh_metadata" yaml:"require_fresh_metadata"`
+	PreferLocal          *bool                `json:"prefer_local" yaml:"prefer_local"`
+	FallbackModels       []string             `json:"fallback_models" yaml:"fallback_models"`
+	Fallbacks            []string             `json:"fallbacks" yaml:"fallbacks"`
+	PreferredProviders   []string             `json:"preferred_providers" yaml:"preferred_providers"`
+	BannedProviders      []string             `json:"banned_providers" yaml:"banned_providers"`
+	BannedModels         []string             `json:"banned_models" yaml:"banned_models"`
+	RequiredCapabilities []string             `json:"required_capabilities" yaml:"required_capabilities"`
 }
 
 //nolint:govet // fieldalignment: field order follows config-file grouping; deprecated aliases stay last.
@@ -754,6 +817,10 @@ func normalizeEmptyMaps(cfg *Config) {
 		cfg.ModelAliases = nil
 	}
 
+	if len(cfg.ModelRoles) == 0 {
+		cfg.ModelRoles = nil
+	}
+
 	if len(cfg.Agents) == 0 {
 		cfg.Agents = nil
 	}
@@ -785,6 +852,7 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 	}
 
 	mergeModelAliases(dst, src.ModelAliases, rec, source)
+	mergeModelRoles(dst, src.ModelRoles, rec, source)
 	mergeProviders(dst, src.Providers, rec, source)
 	mergeAgents(dst, src.Agents, rec, source)
 	mergeHooks(dst, src.Hooks, rec, source)
@@ -813,12 +881,130 @@ func mergeModelAliases(dst *Config, aliases map[string]string, rec *originRecord
 	}
 }
 
+func mergeModelRoles(dst *Config, roles map[string]fileModelRoleConfig, rec *originRecorder, source originSource) {
+	if roles != nil {
+		rec.merge("models", source, sortedMapKeys(roles), "merges model role definitions by name")
+	}
+
+	for name := range roles {
+		role := roles[name]
+
+		if dst.ModelRoles == nil {
+			dst.ModelRoles = make(map[string]ModelRoleConfig)
+		}
+
+		entityPath := modelRoleFieldPath(name)
+		rec.merge(entityPath, source, name, "merges model role fields by name")
+
+		current := dst.ModelRoles[name]
+		mergeFileModelRole(&current, role, rec, source, name)
+		dst.ModelRoles[name] = current
+	}
+}
+
+func mergeFileModelRole(
+	current *ModelRoleConfig,
+	role fileModelRoleConfig,
+	rec *originRecorder,
+	source originSource,
+	name string,
+) {
+	if role.Preferred != nil {
+		current.Preferred = strings.TrimSpace(*role.Preferred)
+		rec.set(modelRoleFieldPath(name, "preferred"), source, current.Preferred)
+	}
+
+	if role.Fallback != nil {
+		fallback := strings.TrimSpace(*role.Fallback)
+		if fallback != "" {
+			current.FallbackModels = []string{fallback}
+		} else {
+			current.FallbackModels = nil
+		}
+
+		rec.replace(modelRoleFieldPath(name, "fallback"), source, current.FallbackModels, "replaces the model role fallback list")
+	}
+
+	if role.Fallbacks != nil {
+		current.FallbackModels = append([]string(nil), role.Fallbacks...)
+		rec.replace(modelRoleFieldPath(name, "fallbacks"), source, current.FallbackModels, "replaces the model role fallback list")
+	}
+
+	if role.FallbackModels != nil {
+		current.FallbackModels = append([]string(nil), role.FallbackModels...)
+		rec.replace(modelRoleFieldPath(name, "fallback_models"), source, current.FallbackModels, "replaces the model role fallback list")
+	}
+
+	if role.RoutingPolicy != nil {
+		current.RoutingPolicy = cloneRoutingPolicy(*role.RoutingPolicy)
+		rec.replace(modelRoleFieldPath(name, "routing_policy"), source, current.RoutingPolicy, "replaces the model role routing policy")
+	}
+
+	if role.PreferredProviders != nil {
+		current.PreferredProviders = append([]string(nil), role.PreferredProviders...)
+		rec.replace(modelRoleFieldPath(name, "preferred_providers"), source, current.PreferredProviders, "replaces the model role preferred provider list")
+	}
+
+	if role.BannedProviders != nil {
+		current.BannedProviders = append([]string(nil), role.BannedProviders...)
+		rec.replace(modelRoleFieldPath(name, "banned_providers"), source, current.BannedProviders, "replaces the model role banned provider list")
+	}
+
+	if role.BannedModels != nil {
+		current.BannedModels = append([]string(nil), role.BannedModels...)
+		rec.replace(modelRoleFieldPath(name, "banned_models"), source, current.BannedModels, "replaces the model role banned model list")
+	}
+
+	if role.RequiredCapabilities != nil {
+		current.RequiredCapabilities = append([]string(nil), role.RequiredCapabilities...)
+		rec.replace(modelRoleFieldPath(name, "required_capabilities"), source, current.RequiredCapabilities, "replaces the model role required capability list")
+	}
+
+	mergeFileModelRoleLimits(current, role, rec, source, name)
+
+	if role.RequireFreshMetadata != nil {
+		current.RequireFreshMetadata = *role.RequireFreshMetadata
+		rec.set(modelRoleFieldPath(name, "require_fresh_metadata"), source, current.RequireFreshMetadata)
+	}
+
+	if role.PreferLocal != nil {
+		current.PreferLocal = *role.PreferLocal
+		rec.set(modelRoleFieldPath(name, "prefer_local"), source, current.PreferLocal)
+	}
+}
+
+func mergeFileModelRoleLimits(
+	current *ModelRoleConfig,
+	role fileModelRoleConfig,
+	rec *originRecorder,
+	source originSource,
+	name string,
+) {
+	if role.MaxCostUSD != nil {
+		current.MaxCostUSD = *role.MaxCostUSD
+		rec.set(modelRoleFieldPath(name, "max_cost_usd"), source, current.MaxCostUSD)
+	}
+
+	if role.MaxLatencyMS != nil {
+		current.MaxLatencyMS = *role.MaxLatencyMS
+		rec.set(modelRoleFieldPath(name, "max_latency_ms"), source, current.MaxLatencyMS)
+	}
+
+	if role.MaxTTFTMS != nil {
+		current.MaxTTFTMS = *role.MaxTTFTMS
+		rec.set(modelRoleFieldPath(name, "max_ttft_ms"), source, current.MaxTTFTMS)
+	}
+}
+
+//nolint:gocognit,cyclop // Sequential nil-guarded provider field merge mirrors the YAML shape.
 func mergeProviders(dst *Config, providers map[string]fileProviderConfig, rec *originRecorder, source originSource) {
 	if providers != nil {
 		rec.merge("providers", source, sortedMapKeys(providers), "merges provider definitions by name")
 	}
 
-	for name, provider := range providers {
+	for name := range providers {
+		provider := providers[name]
+
 		if dst.Providers == nil {
 			dst.Providers = make(map[string]ProviderConfig)
 		}
@@ -832,6 +1018,11 @@ func mergeProviders(dst *Config, providers map[string]fileProviderConfig, rec *o
 			rec.set(providerFieldPath(name, "disabled"), source, *provider.Disabled)
 		}
 
+		if provider.Local != nil {
+			current.Local = *provider.Local
+			rec.set(providerFieldPath(name, "local"), source, *provider.Local)
+		}
+
 		if provider.AutoStart != nil {
 			current.AutoStart = *provider.AutoStart
 			rec.set(providerFieldPath(name, "auto_start"), source, *provider.AutoStart)
@@ -840,6 +1031,56 @@ func mergeProviders(dst *Config, providers map[string]fileProviderConfig, rec *o
 		if provider.BaseURL != nil {
 			current.BaseURL = *provider.BaseURL
 			rec.set(providerFieldPath(name, "base_url"), source, *provider.BaseURL)
+		}
+
+		if provider.Type != nil {
+			current.Type = strings.TrimSpace(*provider.Type)
+			rec.set(providerFieldPath(name, "type"), source, current.Type)
+		}
+
+		if provider.APIKeyEnv != nil {
+			current.APIKeyEnv = strings.TrimSpace(*provider.APIKeyEnv)
+			rec.set(providerFieldPath(name, "api_key_env"), source, current.APIKeyEnv)
+		}
+
+		if provider.APIKeyHeader != nil {
+			current.APIKeyHeader = strings.TrimSpace(*provider.APIKeyHeader)
+			rec.set(providerFieldPath(name, "api_key_header"), source, current.APIKeyHeader)
+		}
+
+		if provider.APIKeyScheme != nil {
+			current.APIKeyScheme = strings.TrimSpace(*provider.APIKeyScheme)
+			rec.set(providerFieldPath(name, "api_key_scheme"), source, current.APIKeyScheme)
+		}
+
+		if provider.ChatCompletionsPath != nil {
+			current.ChatCompletionsPath = strings.TrimSpace(*provider.ChatCompletionsPath)
+			rec.set(providerFieldPath(name, "chat_completions_path"), source, current.ChatCompletionsPath)
+		}
+
+		if provider.EmbeddingsPath != nil {
+			current.EmbeddingsPath = strings.TrimSpace(*provider.EmbeddingsPath)
+			rec.set(providerFieldPath(name, "embeddings_path"), source, current.EmbeddingsPath)
+		}
+
+		if provider.ModelsPath != nil {
+			current.ModelsPath = strings.TrimSpace(*provider.ModelsPath)
+			rec.set(providerFieldPath(name, "models_path"), source, current.ModelsPath)
+		}
+
+		if provider.APIVersion != nil {
+			current.APIVersion = strings.TrimSpace(*provider.APIVersion)
+			rec.set(providerFieldPath(name, "api_version"), source, current.APIVersion)
+		}
+
+		if provider.Models != nil {
+			current.Models = append([]string(nil), provider.Models...)
+			rec.replace(providerFieldPath(name, "models"), source, current.Models, "replaces the provider static model list")
+		}
+
+		if provider.Capabilities != nil {
+			current.Capabilities = append([]string(nil), provider.Capabilities...)
+			rec.replace(providerFieldPath(name, "capabilities"), source, current.Capabilities, "replaces the provider capability list")
 		}
 
 		if provider.DisablePrivateAdapter != nil {
@@ -1441,6 +1682,7 @@ func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source 
 	}
 
 	mergeConfigModelAliases(dst, src.ModelAliases, rec, source)
+	mergeConfigModelRoles(dst, src.ModelRoles, rec, source)
 	mergeConfigProviders(dst, src.Providers, rec, source)
 	mergeConfigAgents(dst, src.Agents, rec, source)
 	mergeConfigHooks(dst, src.Hooks, rec, source)
@@ -1469,12 +1711,97 @@ func mergeConfigModelAliases(dst *Config, aliases map[string]string, rec *origin
 	}
 }
 
+func mergeConfigModelRoles(dst *Config, roles map[string]ModelRoleConfig, rec *originRecorder, source originSource) {
+	if roles != nil {
+		rec.merge("models", source, sortedMapKeys(roles), "merges model role definitions by name")
+	}
+
+	for name := range roles {
+		role := roles[name]
+
+		if dst.ModelRoles == nil {
+			dst.ModelRoles = make(map[string]ModelRoleConfig)
+		}
+
+		rec.merge(modelRoleFieldPath(name), source, name, "merges model role fields by name")
+
+		current := dst.ModelRoles[name]
+		mergeConfigModelRole(&current, role, rec, source, name)
+		dst.ModelRoles[name] = current
+	}
+}
+
+func mergeConfigModelRole(current *ModelRoleConfig, role ModelRoleConfig, rec *originRecorder, source originSource, name string) {
+	if role.Preferred != "" {
+		current.Preferred = strings.TrimSpace(role.Preferred)
+		rec.set(modelRoleFieldPath(name, "preferred"), source, current.Preferred)
+	}
+
+	if role.FallbackModels != nil {
+		current.FallbackModels = append([]string(nil), role.FallbackModels...)
+		rec.replace(modelRoleFieldPath(name, "fallback_models"), source, current.FallbackModels, "replaces the model role fallback list")
+	}
+
+	if routingPolicyConfigured(role.RoutingPolicy) {
+		current.RoutingPolicy = cloneRoutingPolicy(role.RoutingPolicy)
+		rec.replace(modelRoleFieldPath(name, "routing_policy"), source, current.RoutingPolicy, "replaces the model role routing policy")
+	}
+
+	if role.PreferredProviders != nil {
+		current.PreferredProviders = append([]string(nil), role.PreferredProviders...)
+		rec.replace(modelRoleFieldPath(name, "preferred_providers"), source, current.PreferredProviders, "replaces the model role preferred provider list")
+	}
+
+	if role.BannedProviders != nil {
+		current.BannedProviders = append([]string(nil), role.BannedProviders...)
+		rec.replace(modelRoleFieldPath(name, "banned_providers"), source, current.BannedProviders, "replaces the model role banned provider list")
+	}
+
+	if role.BannedModels != nil {
+		current.BannedModels = append([]string(nil), role.BannedModels...)
+		rec.replace(modelRoleFieldPath(name, "banned_models"), source, current.BannedModels, "replaces the model role banned model list")
+	}
+
+	if role.RequiredCapabilities != nil {
+		current.RequiredCapabilities = append([]string(nil), role.RequiredCapabilities...)
+		rec.replace(modelRoleFieldPath(name, "required_capabilities"), source, current.RequiredCapabilities, "replaces the model role required capability list")
+	}
+
+	if role.MaxCostUSD > 0 {
+		current.MaxCostUSD = role.MaxCostUSD
+		rec.set(modelRoleFieldPath(name, "max_cost_usd"), source, current.MaxCostUSD)
+	}
+
+	if role.MaxLatencyMS > 0 {
+		current.MaxLatencyMS = role.MaxLatencyMS
+		rec.set(modelRoleFieldPath(name, "max_latency_ms"), source, current.MaxLatencyMS)
+	}
+
+	if role.MaxTTFTMS > 0 {
+		current.MaxTTFTMS = role.MaxTTFTMS
+		rec.set(modelRoleFieldPath(name, "max_ttft_ms"), source, current.MaxTTFTMS)
+	}
+
+	if role.RequireFreshMetadata {
+		current.RequireFreshMetadata = true
+		rec.set(modelRoleFieldPath(name, "require_fresh_metadata"), source, current.RequireFreshMetadata)
+	}
+
+	if role.PreferLocal {
+		current.PreferLocal = true
+		rec.set(modelRoleFieldPath(name, "prefer_local"), source, current.PreferLocal)
+	}
+}
+
+//nolint:gocognit,cyclop // Sequential non-zero provider field merge mirrors the public config shape.
 func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec *originRecorder, source originSource) {
 	if providers != nil {
 		rec.merge("providers", source, sortedMapKeys(providers), "merges provider definitions by name")
 	}
 
-	for name, provider := range providers {
+	for name := range providers {
+		provider := providers[name]
+
 		if dst.Providers == nil {
 			dst.Providers = make(map[string]ProviderConfig)
 		}
@@ -1487,9 +1814,64 @@ func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec 
 			rec.set(providerFieldPath(name, "base_url"), source, provider.BaseURL)
 		}
 
+		if provider.Type != "" {
+			current.Type = strings.TrimSpace(provider.Type)
+			rec.set(providerFieldPath(name, "type"), source, current.Type)
+		}
+
+		if provider.APIKeyEnv != "" {
+			current.APIKeyEnv = strings.TrimSpace(provider.APIKeyEnv)
+			rec.set(providerFieldPath(name, "api_key_env"), source, current.APIKeyEnv)
+		}
+
+		if provider.APIKeyHeader != "" {
+			current.APIKeyHeader = strings.TrimSpace(provider.APIKeyHeader)
+			rec.set(providerFieldPath(name, "api_key_header"), source, current.APIKeyHeader)
+		}
+
+		if provider.APIKeyScheme != "" {
+			current.APIKeyScheme = strings.TrimSpace(provider.APIKeyScheme)
+			rec.set(providerFieldPath(name, "api_key_scheme"), source, current.APIKeyScheme)
+		}
+
+		if provider.ChatCompletionsPath != "" {
+			current.ChatCompletionsPath = strings.TrimSpace(provider.ChatCompletionsPath)
+			rec.set(providerFieldPath(name, "chat_completions_path"), source, current.ChatCompletionsPath)
+		}
+
+		if provider.EmbeddingsPath != "" {
+			current.EmbeddingsPath = strings.TrimSpace(provider.EmbeddingsPath)
+			rec.set(providerFieldPath(name, "embeddings_path"), source, current.EmbeddingsPath)
+		}
+
+		if provider.ModelsPath != "" {
+			current.ModelsPath = strings.TrimSpace(provider.ModelsPath)
+			rec.set(providerFieldPath(name, "models_path"), source, current.ModelsPath)
+		}
+
+		if provider.APIVersion != "" {
+			current.APIVersion = strings.TrimSpace(provider.APIVersion)
+			rec.set(providerFieldPath(name, "api_version"), source, current.APIVersion)
+		}
+
+		if provider.Models != nil {
+			current.Models = append([]string(nil), provider.Models...)
+			rec.replace(providerFieldPath(name, "models"), source, current.Models, "replaces the provider static model list")
+		}
+
+		if provider.Capabilities != nil {
+			current.Capabilities = append([]string(nil), provider.Capabilities...)
+			rec.replace(providerFieldPath(name, "capabilities"), source, current.Capabilities, "replaces the provider capability list")
+		}
+
 		if provider.Disabled {
 			current.Disabled = true
 			rec.set(providerFieldPath(name, "disabled"), source, provider.Disabled)
+		}
+
+		if provider.Local {
+			current.Local = true
+			rec.set(providerFieldPath(name, "local"), source, provider.Local)
 		}
 
 		if provider.DisablePrivateAdapter {
@@ -1966,6 +2348,7 @@ func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins Orig
 	}
 
 	mergeConfigModelAliasesFromOrigins(dst, src.ModelAliases, dstOrigins, srcOrigins)
+	mergeConfigModelRolesFromOrigins(dst, src.ModelRoles, dstOrigins, srcOrigins)
 	mergeConfigProvidersFromOrigins(dst, src.Providers, dstOrigins, srcOrigins)
 	mergeConfigAgentsFromOrigins(dst, src.Agents, dstOrigins, srcOrigins)
 	mergeConfigHooksFromOrigins(dst, src.Hooks, dstOrigins, srcOrigins)
@@ -1993,12 +2376,132 @@ func mergeConfigModelAliasesFromOrigins(dst *Config, aliases map[string]string, 
 	}
 }
 
+func mergeConfigModelRolesFromOrigins(dst *Config, roles map[string]ModelRoleConfig, dstOrigins, srcOrigins OriginMap) {
+	if roles != nil {
+		appendOriginChain(dstOrigins, "models", srcOrigins, false)
+	}
+
+	for name := range roles {
+		role := roles[name]
+
+		if dst.ModelRoles == nil {
+			dst.ModelRoles = make(map[string]ModelRoleConfig)
+		}
+
+		appendOriginChain(dstOrigins, modelRoleFieldPath(name), srcOrigins, false)
+
+		current := dst.ModelRoles[name]
+		mergeConfigModelRoleFromOrigins(&current, role, dstOrigins, srcOrigins, name)
+		dst.ModelRoles[name] = current
+	}
+}
+
+func mergeConfigModelRoleFromOrigins(
+	current *ModelRoleConfig,
+	role ModelRoleConfig,
+	dstOrigins OriginMap,
+	srcOrigins OriginMap,
+	name string,
+) {
+	preferredPath := modelRoleFieldPath(name, "preferred")
+	if originPathExists(srcOrigins, preferredPath) {
+		current.Preferred = strings.TrimSpace(role.Preferred)
+
+		appendOriginChain(dstOrigins, preferredPath, srcOrigins, false)
+	}
+
+	fallbackModelsPath := firstExistingOriginPath(
+		srcOrigins,
+		modelRoleFieldPath(name, "fallback_models"),
+		modelRoleFieldPath(name, "fallbacks"),
+		modelRoleFieldPath(name, "fallback"),
+	)
+	if fallbackModelsPath != "" {
+		current.FallbackModels = append([]string(nil), role.FallbackModels...)
+
+		appendOriginChain(dstOrigins, fallbackModelsPath, srcOrigins, true)
+	}
+
+	routingPolicyPath := modelRoleFieldPath(name, "routing_policy")
+	if originPathExists(srcOrigins, routingPolicyPath) {
+		current.RoutingPolicy = cloneRoutingPolicy(role.RoutingPolicy)
+
+		appendOriginChain(dstOrigins, routingPolicyPath, srcOrigins, true)
+	}
+
+	preferredProvidersPath := modelRoleFieldPath(name, "preferred_providers")
+	if originPathExists(srcOrigins, preferredProvidersPath) {
+		current.PreferredProviders = append([]string(nil), role.PreferredProviders...)
+
+		appendOriginChain(dstOrigins, preferredProvidersPath, srcOrigins, true)
+	}
+
+	bannedProvidersPath := modelRoleFieldPath(name, "banned_providers")
+	if originPathExists(srcOrigins, bannedProvidersPath) {
+		current.BannedProviders = append([]string(nil), role.BannedProviders...)
+
+		appendOriginChain(dstOrigins, bannedProvidersPath, srcOrigins, true)
+	}
+
+	bannedModelsPath := modelRoleFieldPath(name, "banned_models")
+	if originPathExists(srcOrigins, bannedModelsPath) {
+		current.BannedModels = append([]string(nil), role.BannedModels...)
+
+		appendOriginChain(dstOrigins, bannedModelsPath, srcOrigins, true)
+	}
+
+	requiredCapabilitiesPath := modelRoleFieldPath(name, "required_capabilities")
+	if originPathExists(srcOrigins, requiredCapabilitiesPath) {
+		current.RequiredCapabilities = append([]string(nil), role.RequiredCapabilities...)
+
+		appendOriginChain(dstOrigins, requiredCapabilitiesPath, srcOrigins, true)
+	}
+
+	maxCostPath := modelRoleFieldPath(name, "max_cost_usd")
+	if originPathExists(srcOrigins, maxCostPath) {
+		current.MaxCostUSD = role.MaxCostUSD
+
+		appendOriginChain(dstOrigins, maxCostPath, srcOrigins, false)
+	}
+
+	maxLatencyPath := modelRoleFieldPath(name, "max_latency_ms")
+	if originPathExists(srcOrigins, maxLatencyPath) {
+		current.MaxLatencyMS = role.MaxLatencyMS
+
+		appendOriginChain(dstOrigins, maxLatencyPath, srcOrigins, false)
+	}
+
+	maxTTFTPath := modelRoleFieldPath(name, "max_ttft_ms")
+	if originPathExists(srcOrigins, maxTTFTPath) {
+		current.MaxTTFTMS = role.MaxTTFTMS
+
+		appendOriginChain(dstOrigins, maxTTFTPath, srcOrigins, false)
+	}
+
+	requireFreshMetadataPath := modelRoleFieldPath(name, "require_fresh_metadata")
+	if originPathExists(srcOrigins, requireFreshMetadataPath) {
+		current.RequireFreshMetadata = role.RequireFreshMetadata
+
+		appendOriginChain(dstOrigins, requireFreshMetadataPath, srcOrigins, false)
+	}
+
+	preferLocalPath := modelRoleFieldPath(name, "prefer_local")
+	if originPathExists(srcOrigins, preferLocalPath) {
+		current.PreferLocal = role.PreferLocal
+
+		appendOriginChain(dstOrigins, preferLocalPath, srcOrigins, false)
+	}
+}
+
+//nolint:gocognit,cyclop // Sequential origin-aware provider field merge keeps provenance explicit.
 func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderConfig, dstOrigins, srcOrigins OriginMap) {
 	if providers != nil {
 		appendOriginChain(dstOrigins, "providers", srcOrigins, false)
 	}
 
-	for name, provider := range providers {
+	for name := range providers {
+		provider := providers[name]
+
 		if dst.Providers == nil {
 			dst.Providers = make(map[string]ProviderConfig)
 		}
@@ -2012,11 +2515,78 @@ func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderC
 			appendOriginChain(dstOrigins, providerFieldPath(name, "base_url"), srcOrigins, false)
 		}
 
+		if provider.Type != "" {
+			current.Type = strings.TrimSpace(provider.Type)
+
+			appendOriginChain(dstOrigins, providerFieldPath(name, "type"), srcOrigins, false)
+		}
+
+		if provider.APIKeyEnv != "" {
+			current.APIKeyEnv = strings.TrimSpace(provider.APIKeyEnv)
+
+			appendOriginChain(dstOrigins, providerFieldPath(name, "api_key_env"), srcOrigins, false)
+		}
+
+		if provider.APIKeyHeader != "" {
+			current.APIKeyHeader = strings.TrimSpace(provider.APIKeyHeader)
+
+			appendOriginChain(dstOrigins, providerFieldPath(name, "api_key_header"), srcOrigins, false)
+		}
+
+		if provider.APIKeyScheme != "" {
+			current.APIKeyScheme = strings.TrimSpace(provider.APIKeyScheme)
+
+			appendOriginChain(dstOrigins, providerFieldPath(name, "api_key_scheme"), srcOrigins, false)
+		}
+
+		if provider.ChatCompletionsPath != "" {
+			current.ChatCompletionsPath = strings.TrimSpace(provider.ChatCompletionsPath)
+
+			appendOriginChain(dstOrigins, providerFieldPath(name, "chat_completions_path"), srcOrigins, false)
+		}
+
+		if provider.EmbeddingsPath != "" {
+			current.EmbeddingsPath = strings.TrimSpace(provider.EmbeddingsPath)
+
+			appendOriginChain(dstOrigins, providerFieldPath(name, "embeddings_path"), srcOrigins, false)
+		}
+
+		if provider.ModelsPath != "" {
+			current.ModelsPath = strings.TrimSpace(provider.ModelsPath)
+
+			appendOriginChain(dstOrigins, providerFieldPath(name, "models_path"), srcOrigins, false)
+		}
+
+		if provider.APIVersion != "" {
+			current.APIVersion = strings.TrimSpace(provider.APIVersion)
+
+			appendOriginChain(dstOrigins, providerFieldPath(name, "api_version"), srcOrigins, false)
+		}
+
+		if provider.Models != nil {
+			current.Models = append([]string(nil), provider.Models...)
+
+			appendOriginChain(dstOrigins, providerFieldPath(name, "models"), srcOrigins, true)
+		}
+
+		if provider.Capabilities != nil {
+			current.Capabilities = append([]string(nil), provider.Capabilities...)
+
+			appendOriginChain(dstOrigins, providerFieldPath(name, "capabilities"), srcOrigins, true)
+		}
+
 		disabledPath := providerFieldPath(name, "disabled")
 		if originPathExists(srcOrigins, disabledPath) {
 			current.Disabled = provider.Disabled
 
 			appendOriginChain(dstOrigins, disabledPath, srcOrigins, false)
+		}
+
+		localPath := providerFieldPath(name, "local")
+		if originPathExists(srcOrigins, localPath) {
+			current.Local = provider.Local
+
+			appendOriginChain(dstOrigins, localPath, srcOrigins, false)
 		}
 
 		disablePrivateAdapterPath := providerFieldPath(name, "disable_private_adapter")
@@ -2096,6 +2666,16 @@ func mergeRetryConfigFromOrigins(
 	}
 
 	return current
+}
+
+func firstExistingOriginPath(origins OriginMap, paths ...string) string {
+	for _, path := range paths {
+		if originPathExists(origins, path) {
+			return path
+		}
+	}
+
+	return ""
 }
 
 func mergeConfigAgentsFromOrigins(dst *Config, agents map[string]AgentConfig, dstOrigins, srcOrigins OriginMap) {
@@ -2819,6 +3399,8 @@ func cloneRoutingPolicy(policy RoutingPolicyConfig) RoutingPolicyConfig {
 		BannedModels:         append([]string(nil), policy.BannedModels...),
 		RequiredCapabilities: append([]string(nil), policy.RequiredCapabilities...),
 		MaxBudget:            policy.MaxBudget,
+		MaxLatencyMS:         policy.MaxLatencyMS,
+		MaxTTFTMS:            policy.MaxTTFTMS,
 		RequireFreshMetadata: policy.RequireFreshMetadata,
 	}
 }
@@ -2828,7 +3410,9 @@ func routingPolicyConfigured(policy RoutingPolicyConfig) bool {
 		len(policy.BannedProviders) > 0 ||
 		len(policy.BannedModels) > 0 ||
 		len(policy.RequiredCapabilities) > 0 ||
-		policy.MaxBudget > 0 ||
+		policy.MaxBudget != 0 ||
+		policy.MaxLatencyMS != 0 ||
+		policy.MaxTTFTMS != 0 ||
 		policy.RequireFreshMetadata
 }
 

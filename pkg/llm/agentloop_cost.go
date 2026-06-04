@@ -3,6 +3,7 @@ package llm
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strings"
 
@@ -25,7 +26,11 @@ var ErrAgentLoopCostUsageUnavailable = errors.New("llm: agent loop cost usage me
 // verifies the provider/model and usage reported by each response so provider
 // aliases and unexpected fallbacks cannot bypass MaxCostMicros.
 func (r *Registry) AgentLoopCostEstimator(primaryModel string, fallbackModels []string) (AgentLoopCostEstimator, error) {
-	models := modelFallbackChain(primaryModel, fallbackModels)
+	models, err := r.agentLoopCostModelChain(primaryModel, fallbackModels)
+	if err != nil {
+		return nil, err
+	}
+
 	if len(models) == 0 && strings.TrimSpace(primaryModel) == "" {
 		if providerName, providerModel, ok := r.resolveModelForCost(""); ok {
 			models = append(models, modelrouteID(providerName, providerModel))
@@ -67,6 +72,96 @@ func (r *Registry) AgentLoopCostEstimator(primaryModel string, fallbackModels []
 	}, nil
 }
 
+func (r *Registry) agentLoopCostModelChain(primaryModel string, fallbackModels []string) ([]string, error) {
+	models := modelFallbackChain(primaryModel, fallbackModels)
+	if r == nil {
+		return models, nil
+	}
+
+	if roleName, _, ok := r.ModelRoleForRequest(primaryModel); ok {
+		return r.agentLoopCostResolvedRoleModels(roleName, fallbackModels)
+	}
+
+	return r.expandAgentLoopCostModelRoles(models, nil)
+}
+
+func (r *Registry) expandAgentLoopCostModelRoles(models []string, visited map[string]bool) ([]string, error) {
+	if len(models) == 0 {
+		return nil, nil
+	}
+
+	expanded := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+
+		if _, ok := r.agentLoopCostModelRole(model); !ok {
+			expanded = append(expanded, model)
+
+			continue
+		}
+
+		if visited[model] {
+			expanded = append(expanded, model)
+
+			continue
+		}
+
+		nextVisited := cloneBoolMap(visited)
+		nextVisited[model] = true
+
+		roleModels, err := r.agentLoopCostResolvedRoleModels(model, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		nested, err := r.expandAgentLoopCostModelRoles(roleModels, nextVisited)
+		if err != nil {
+			return nil, err
+		}
+
+		expanded = append(expanded, nested...)
+	}
+
+	return modelFallbackChain("", expanded), nil
+}
+
+func (r *Registry) agentLoopCostResolvedRoleModels(roleName string, fallbackModels []string) ([]string, error) {
+	resolution, ok, err := r.ResolveModelRole(roleName, CompleteParams{
+		Model:    roleName,
+		Messages: []Message{{Role: RoleUser}},
+	}, fallbackModels)
+	if !ok {
+		return modelFallbackChain(roleName, fallbackModels), nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return modelFallbackChain(resolution.SelectedModel, resolution.FallbackModels), nil
+}
+
+func (r *Registry) agentLoopCostModelRole(model string) (ModelRole, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ModelRole{}, false
+	}
+
+	role, ok := r.ModelRole(model)
+
+	return role, ok
+}
+
+func cloneBoolMap(in map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(in)+1)
+	maps.Copy(out, in)
+
+	return out
+}
+
 func (r *Registry) agentLoopPricingMetadataForResponse(
 	resp *Response,
 	fallbackModel string,
@@ -82,6 +177,10 @@ func (r *Registry) agentLoopPricingMetadataForResponse(
 	if model == "" {
 		if len(configuredMetadata) > 1 {
 			return modelroute.ModelMetadata{}, fmt.Errorf("%w for %q", ErrAgentLoopCostPricingUnavailable, "unknown")
+		}
+
+		if len(configuredMetadata) == 1 {
+			return configuredMetadata[0], nil
 		}
 
 		model = strings.TrimSpace(fallbackModel)

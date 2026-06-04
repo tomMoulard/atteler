@@ -51,6 +51,24 @@ func starterTemplateConfig() Config {
 		ModelAliases: map[string]string{
 			"mini": templateDefaultProvider + "/" + templateFallbackModel,
 		},
+		ModelRoles: map[string]ModelRoleConfig{
+			"planner": {
+				Preferred:      templateDefaultProvider + "/" + templateDefaultModel,
+				FallbackModels: []string{templateDefaultProvider + "/" + templateFallbackModel},
+				RequiredCapabilities: []string{
+					"tools",
+					"json_schema",
+				},
+				MaxCostUSD:   0.25,
+				MaxLatencyMS: 2500,
+				MaxTTFTMS:    900,
+			},
+			"fast_coder": {
+				Preferred:      templateDefaultProvider + "/" + templateFallbackModel,
+				FallbackModels: []string{"ollama/llama3.2"},
+				PreferLocal:    true,
+			},
+		},
 		Generation: GenerationConfig{
 			Temperature:    &temperature,
 			TopP:           &topP,
@@ -85,6 +103,13 @@ func starterTemplateConfig() Config {
 				},
 			},
 			"ollama": {BaseURL: "http://127.0.0.1:11434"},
+			"vllm": {
+				Type:         "openai_compatible",
+				BaseURL:      "http://127.0.0.1:8000",
+				Models:       []string{"qwen2.5-coder"},
+				Capabilities: []string{"chat", "tools", "json_schema", "local"},
+				Local:        true,
+			},
 		},
 		Agents: map[string]AgentConfig{
 			"reviewer": {

@@ -254,6 +254,7 @@ func (c *CodexProvider) ModelMetadata(model string) (ModelMetadata, bool) {
 // the codex backend accepts.
 type codexResponsesRequest struct {
 	Reasoning    *codexRequestReasoning `json:"reasoning,omitempty"`
+	Text         *codexResponseText     `json:"text,omitempty"`
 	Tools        []codexTool            `json:"tools,omitempty"`
 	Model        string                 `json:"model"`
 	ServiceTier  string                 `json:"service_tier,omitempty"`
@@ -265,6 +266,17 @@ type codexResponsesRequest struct {
 
 type codexRequestReasoning struct {
 	Effort string `json:"effort,omitempty"`
+}
+
+type codexResponseText struct {
+	Format *codexResponseFormat `json:"format,omitempty"`
+}
+
+type codexResponseFormat struct {
+	Schema map[string]any `json:"schema,omitempty"`
+	Type   string         `json:"type"`
+	Name   string         `json:"name,omitempty"`
+	Strict bool           `json:"strict,omitempty"`
 }
 
 // codexTool is the Responses API tool definition format.
@@ -414,7 +426,41 @@ func buildCodexResponsesRequest(params CompleteParams) (codexResponsesRequest, e
 		req.ServiceTier = tier
 	}
 
+	if params.ResponseFormat != nil {
+		format, err := buildCodexResponseFormat(params.ResponseFormat)
+		if err != nil {
+			return codexResponsesRequest{}, err
+		}
+
+		if format != nil {
+			req.Text = &codexResponseText{Format: format}
+		}
+	}
+
 	return req, nil
+}
+
+func buildCodexResponseFormat(format *ResponseFormat) (*codexResponseFormat, error) {
+	normalized, err := normalizeResponseFormat(format)
+	if err != nil {
+		return nil, fmt.Errorf("codex: CompleteParams.ResponseFormat: %w", err)
+	}
+
+	switch normalized.Type {
+	case "":
+		return nil, nil
+	case ResponseFormatJSONObject:
+		return &codexResponseFormat{Type: ResponseFormatJSONObject}, nil
+	case ResponseFormatJSONSchema:
+		return &codexResponseFormat{
+			Type:   ResponseFormatJSONSchema,
+			Name:   normalized.Name,
+			Schema: normalized.Schema,
+			Strict: normalized.Strict,
+		}, nil
+	default:
+		return nil, fmt.Errorf("codex: CompleteParams.ResponseFormat: unsupported type %q", normalized.Type)
+	}
 }
 
 func (c *CodexProvider) doResponsesRequest(ctx context.Context, body []byte) (*Response, error) {

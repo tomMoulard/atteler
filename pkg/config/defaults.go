@@ -35,6 +35,11 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Message: "no response-level fallback models are configured unless a source sets this list",
 		},
 		{
+			Field:   "models",
+			Value:   "{}",
+			Message: "no task-oriented model roles are configured unless a source defines entries such as planner or fast_coder",
+		},
+		{
 			Field:   "generation.temperature",
 			Value:   "unset",
 			Message: "provider/model default temperature is used unless config, agent config, or CLI flags set it",
@@ -198,6 +203,11 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Field:   "providers.*.disable_private_adapter",
 			Value:   "false",
 			Message: "private provider adapters remain eligible unless a provider config or environment kill switch disables them",
+		},
+		{
+			Field:   "providers.*.local",
+			Value:   "false",
+			Message: "custom providers are treated as remote unless local is true or the provider can infer loopback/self-hosted execution",
 		},
 		{
 			Field:   "skill_learning.enabled",
