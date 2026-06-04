@@ -791,16 +791,18 @@ func TestTranslateCLIArgsWithFlagSet_PreservesParseableFlagOrder(t *testing.T) {
 		assert.Equal(t, "test/model", *model)
 	})
 
-	t.Run("headless list and recover commands map to compatibility flags", func(t *testing.T) {
+	t.Run("headless list recover and cleanup commands map to compatibility flags", func(t *testing.T) {
 		t.Parallel()
 
 		opts, fs := newCLIOptionsAndFlagSetForTest(t)
-		got := translateCLIArgsWithFlagSet([]string{"session", "headless"}, fs)
+		got := translateCLIArgsWithFlagSet([]string{"session", "headless", "--headless-status", "failed", "--headless-max-age", "24h"}, fs)
 		require.NoError(t, got.Err)
 		require.False(t, got.Help)
 		require.NoError(t, fs.Parse(got.Args))
 
 		assert.True(t, opts.listHeadless)
+		assert.Equal(t, "failed", opts.headlessStatusFilter)
+		assert.Equal(t, "24h", opts.headlessMaxAge)
 
 		opts, fs = newCLIOptionsAndFlagSetForTest(t)
 		got = translateCLIArgsWithFlagSet([]string{"session", "recover-headless"}, fs)
@@ -809,6 +811,15 @@ func TestTranslateCLIArgsWithFlagSet_PreservesParseableFlagOrder(t *testing.T) {
 		require.NoError(t, fs.Parse(got.Args))
 
 		assert.True(t, opts.recoverHeadless)
+
+		opts, fs = newCLIOptionsAndFlagSetForTest(t)
+		got = translateCLIArgsWithFlagSet([]string{"session", "cleanup-headless", "--headless-max-age", "168h"}, fs)
+		require.NoError(t, got.Err)
+		require.False(t, got.Help)
+		require.NoError(t, fs.Parse(got.Args))
+
+		assert.True(t, opts.cleanupHeadless)
+		assert.Equal(t, "168h", opts.headlessMaxAge)
 	})
 
 	t.Run("headless ID commands map IDs to compatibility flags", func(t *testing.T) {
@@ -829,6 +840,14 @@ func TestTranslateCLIArgsWithFlagSet_PreservesParseableFlagOrder(t *testing.T) {
 		assert.Equal(t, "run-456", opts.cancelHeadlessID)
 
 		opts, fs = newCLIOptionsAndFlagSetForTest(t)
+		got = translateCLIArgsWithFlagSet([]string{"session", "retry-headless", "run-654", "--retry-headless-id", "run-654-retry"}, fs)
+		require.NoError(t, got.Err)
+		require.False(t, got.Help)
+		require.NoError(t, fs.Parse(got.Args))
+		assert.Equal(t, "run-654", opts.retryHeadlessID)
+		assert.Equal(t, "run-654-retry", opts.retryHeadlessNewID)
+
+		opts, fs = newCLIOptionsAndFlagSetForTest(t)
 		got = translateCLIArgsWithFlagSet([]string{"session", "stream-headless", "run-789"}, fs)
 		require.NoError(t, got.Err)
 		require.False(t, got.Help)
@@ -845,6 +864,7 @@ func TestTranslateCLIArgsWithFlagSet_PreservesParseableFlagOrder(t *testing.T) {
 		}{
 			{name: "status", args: []string{"session", "status-headless"}},
 			{name: "cancel", args: []string{"session", "cancel-headless"}},
+			{name: "retry", args: []string{"session", "retry-headless"}},
 			{name: "stream", args: []string{"session", "stream-headless"}},
 		}
 

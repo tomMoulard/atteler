@@ -9,29 +9,24 @@ import (
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
-// commandTier controls at which phase of the dispatch pipeline a command
-// runs. Providerless commands run before loadAppState (no LLM registry
-// needed); stateful commands run after a full appState is available.
+// commandTier controls where a command runs in the dispatch pipeline.
+// Providerless commands run before loadAppState; stateful commands run after it.
 type commandTier int
 
 const (
 	tierAny commandTier = -1
 
-	// tierInline commands are handled directly in run() before the registry
-	// is consulted (version, config template, etc.).  They are listed here
-	// only for documentation; the registry does not store them.
+	// tierInline commands are handled directly in run() before the registry.
+	// They are listed here for documentation; the registry does not store them.
 	tierInline commandTier = iota
 
-	// tierProviderless commands need only a session.Store and cwd -- no LLM
-	// providers.  They run before loadAppState to keep startup fast.
+	// tierProviderless commands need only session.Store and cwd.
 	tierProviderless
 
-	// tierProviderlessConfig commands need a session.Store plus loaded
-	// config (agent registry, plugin paths) but still no LLM provider.
+	// tierProviderlessConfig commands need loaded config but no LLM provider.
 	tierProviderlessConfig
 
-	// tierStateful commands require a fully initialized appState including
-	// an LLM registry and hook runner.
+	// tierStateful commands require a fully initialized appState.
 	tierStateful
 )
 
@@ -199,6 +194,18 @@ func validateCLICommandSelection(opts cliOptions) error {
 
 	if err := validateIncidentCommandSelection(opts); err != nil {
 		return err
+	}
+
+	if opts.retryHeadlessNewID != "" && opts.retryHeadlessID == "" {
+		return errors.New("--retry-headless-id requires --retry-headless")
+	}
+
+	if opts.headlessStatusFilter != "" && !opts.listHeadless {
+		return errors.New("--headless-status requires --list-headless")
+	}
+
+	if opts.headlessMaxAge != "" && !opts.listHeadless && !opts.cleanupHeadless {
+		return errors.New("--headless-max-age requires --list-headless or --cleanup-headless")
 	}
 
 	matches := matchingRegistryCommands(commandRegistry, tierAny, opts)

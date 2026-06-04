@@ -240,11 +240,16 @@ type issueImplementCommandInput struct {
 }
 
 type headlessCommandInput struct {
-	StatusID string
-	CancelID string
-	StreamID string
-	Recover  bool
-	List     bool
+	StatusID     string
+	CancelID     string
+	RetryID      string
+	RetryNewID   string
+	StreamID     string
+	StatusFilter string
+	MaxAge       string
+	Recover      bool
+	List         bool
+	Cleanup      bool
 }
 
 type listAgentsCommandInput struct{}
@@ -782,11 +787,16 @@ func incidentDiagnoseOnlyCommandInputFromOptions(opts cliOptions) incidentDiagno
 
 func headlessCommandInputFromOptions(opts cliOptions) headlessCommandInput {
 	return headlessCommandInput{
-		StatusID: opts.statusHeadlessID,
-		CancelID: opts.cancelHeadlessID,
-		StreamID: opts.streamHeadlessID,
-		Recover:  opts.recoverHeadless,
-		List:     opts.listHeadless,
+		StatusID:     opts.statusHeadlessID,
+		CancelID:     opts.cancelHeadlessID,
+		RetryID:      opts.retryHeadlessID,
+		RetryNewID:   opts.retryHeadlessNewID,
+		StreamID:     opts.streamHeadlessID,
+		StatusFilter: opts.headlessStatusFilter,
+		MaxAge:       opts.headlessMaxAge,
+		Recover:      opts.recoverHeadless,
+		List:         opts.listHeadless,
+		Cleanup:      opts.cleanupHeadless,
 	}
 }
 

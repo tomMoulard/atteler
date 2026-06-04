@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +22,7 @@ import (
 const (
 	headlessStreamPollInterval    = time.Second
 	headlessTerminalDrainInterval = 100 * time.Millisecond
+	headlessRetryRedactedValue    = "[REDACTED]"
 )
 
 func listSessions(ctx context.Context, store *session.Store, tag string) error {
@@ -47,8 +50,10 @@ func listSessions(ctx context.Context, store *session.Store, tag string) error {
 func headlessCommandRequested(opts cliOptions) bool {
 	return opts.listHeadless ||
 		opts.recoverHeadless ||
+		opts.cleanupHeadless ||
 		opts.statusHeadlessID != "" ||
 		opts.cancelHeadlessID != "" ||
+		opts.retryHeadlessID != "" ||
 		opts.streamHeadlessID != ""
 }
 
@@ -58,7 +63,7 @@ func runHeadlessCommand(ctx context.Context, opts cliOptions, store *session.Sto
 
 func runHeadlessCommandWithAutonomy(ctx context.Context, opts cliOptions, store *session.Store, level autonomy.Level) error {
 	if headlessCommandCount(opts) > 1 {
-		return errors.New("headless command: choose only one of list, recover, status, cancel, or stream")
+		return errors.New("headless command: choose only one of list, recover, cleanup, status, cancel, retry, or stream")
 	}
 
 	if headlessCommandMayWrite(opts) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
@@ -70,12 +75,16 @@ func runHeadlessCommandWithAutonomy(ctx context.Context, opts cliOptions, store 
 		return statusHeadlessRun(ctx, store, opts.statusHeadlessID)
 	case opts.cancelHeadlessID != "":
 		return cancelHeadlessRun(ctx, store, opts.cancelHeadlessID)
+	case opts.retryHeadlessID != "":
+		return retryHeadlessRun(ctx, store, opts.retryHeadlessID, opts.retryHeadlessNewID)
 	case opts.streamHeadlessID != "":
 		return streamHeadlessLog(ctx, store, opts.streamHeadlessID)
+	case opts.cleanupHeadless:
+		return cleanupHeadlessRuns(ctx, store, opts.headlessMaxAge)
 	case opts.recoverHeadless:
 		return recoverHeadlessRuns(ctx, store)
 	case opts.listHeadless:
-		return listHeadlessRuns(ctx, store)
+		return listHeadlessRuns(ctx, store, opts.headlessStatusFilter, opts.headlessMaxAge)
 	default:
 		return nil
 	}
@@ -84,8 +93,10 @@ func runHeadlessCommandWithAutonomy(ctx context.Context, opts cliOptions, store 
 func headlessCommandMayWrite(opts cliOptions) bool {
 	return opts.listHeadless ||
 		opts.recoverHeadless ||
+		opts.cleanupHeadless ||
 		opts.statusHeadlessID != "" ||
-		opts.cancelHeadlessID != ""
+		opts.cancelHeadlessID != "" ||
+		opts.retryHeadlessID != ""
 }
 
 func headlessAutonomyContext(opts cliOptions) string {
@@ -98,6 +109,10 @@ func headlessAutonomyContext(opts cliOptions) string {
 		return "--status-headless"
 	case opts.cancelHeadlessID != "":
 		return "--cancel-headless"
+	case opts.retryHeadlessID != "":
+		return "--retry-headless"
+	case opts.cleanupHeadless:
+		return "--cleanup-headless"
 	default:
 		return "headless command"
 	}
@@ -113,11 +128,19 @@ func headlessCommandCount(opts cliOptions) int {
 		count++
 	}
 
+	if opts.cleanupHeadless {
+		count++
+	}
+
 	if opts.statusHeadlessID != "" {
 		count++
 	}
 
 	if opts.cancelHeadlessID != "" {
+		count++
+	}
+
+	if opts.retryHeadlessID != "" {
 		count++
 	}
 
@@ -128,9 +151,14 @@ func headlessCommandCount(opts cliOptions) int {
 	return count
 }
 
-func listHeadlessRuns(ctx context.Context, store *session.Store) error {
+func listHeadlessRuns(ctx context.Context, store *session.Store, statusFilter, maxAgeFilter string) error {
 	if err := authorizeHeadlessPermission(ctx, "list headless runs", store, "", permission.OperationRead); err != nil {
 		return fmt.Errorf("list headless runs: %w", err)
+	}
+
+	filter, err := parseHeadlessListFilter(statusFilter, maxAgeFilter)
+	if err != nil {
+		return err
 	}
 
 	runs, err := store.ListHeadlessRuns()
@@ -138,27 +166,114 @@ func listHeadlessRuns(ctx context.Context, store *session.Store) error {
 		return fmt.Errorf("list headless runs: %w", err)
 	}
 
-	active := make([]session.HeadlessRun, 0, len(runs))
+	filtered := make([]session.HeadlessRun, 0, len(runs))
 	for i := range runs {
 		run := &runs[i]
-		if run.Status == session.HeadlessStatusRunning ||
-			run.Status == session.HeadlessStatusStale ||
-			run.Status == session.HeadlessStatusOrphaned ||
-			run.Status == session.HeadlessStatusCorrupt {
-			active = append(active, *run)
+		if filter.matches(*run) {
+			filtered = append(filtered, *run)
 		}
 	}
 
-	if len(active) == 0 {
-		fmt.Println("No active headless runs found.")
+	if len(filtered) == 0 {
+		if filter.enabled() {
+			fmt.Println("No headless runs matched filters.")
+			return nil
+		}
+
+		fmt.Println("No headless runs found.")
+
 		return nil
 	}
 
-	for i := range active {
-		fmt.Println(formatHeadlessRun(active[i]))
+	for i := range filtered {
+		fmt.Println(formatHeadlessRun(filtered[i]))
 	}
 
 	return nil
+}
+
+type headlessListFilter struct {
+	statuses map[session.HeadlessStatus]struct{}
+	maxAge   time.Duration
+}
+
+func parseHeadlessListFilter(statusFilter, maxAgeFilter string) (headlessListFilter, error) {
+	filter := headlessListFilter{}
+
+	statusFilter = strings.TrimSpace(statusFilter)
+	if statusFilter != "" {
+		statuses := strings.Split(statusFilter, ",")
+		filter.statuses = make(map[session.HeadlessStatus]struct{}, len(statuses))
+
+		for _, raw := range statuses {
+			status, err := session.ParseHeadlessStatus(raw)
+			if err != nil {
+				return headlessListFilter{}, fmt.Errorf("list headless runs: %w", err)
+			}
+
+			filter.statuses[status] = struct{}{}
+		}
+	}
+
+	maxAgeFilter = strings.TrimSpace(maxAgeFilter)
+	if maxAgeFilter != "" {
+		maxAge, err := time.ParseDuration(maxAgeFilter)
+		if err != nil {
+			return headlessListFilter{}, fmt.Errorf("list headless runs: parse --headless-max-age: %w", err)
+		}
+
+		if maxAge <= 0 {
+			return headlessListFilter{}, errors.New("list headless runs: --headless-max-age must be greater than zero")
+		}
+
+		filter.maxAge = maxAge
+	}
+
+	return filter, nil
+}
+
+func (f headlessListFilter) enabled() bool {
+	return len(f.statuses) > 0 || f.maxAge > 0
+}
+
+func (f headlessListFilter) matches(run session.HeadlessRun) bool {
+	if len(f.statuses) > 0 {
+		if _, ok := f.statuses[run.Status]; !ok {
+			return false
+		}
+	}
+
+	if f.maxAge > 0 {
+		ageTime := headlessListAgeTime(run)
+		if ageTime.IsZero() || time.Since(ageTime) > f.maxAge {
+			return false
+		}
+	}
+
+	return true
+}
+
+func headlessListAgeTime(run session.HeadlessRun) time.Time {
+	for _, at := range []*time.Time{
+		run.ExpiredAt,
+		run.RetriedAt,
+		run.CanceledAt,
+		run.CompletedAt,
+	} {
+		if at != nil && !at.IsZero() {
+			return at.UTC()
+		}
+	}
+
+	if !run.LastHeartbeatAt.IsZero() {
+		return run.LastHeartbeatAt.UTC()
+	}
+
+	if !run.UpdatedAt.IsZero() {
+		return run.UpdatedAt.UTC()
+	}
+
+	return run.StartedAt.UTC()
 }
 
 func recoverHeadlessRuns(ctx context.Context, store *session.Store) error {
@@ -172,7 +287,7 @@ func recoverHeadlessRuns(ctx context.Context, store *session.Store) error {
 	}
 
 	if len(recovered) == 0 {
-		fmt.Println("No recoverable stale/orphaned headless runs found.")
+		fmt.Println("No recoverable stale/orphaned/expired headless runs found.")
 		return nil
 	}
 
@@ -261,6 +376,469 @@ func authorizeHeadlessPermission(
 	}
 
 	return &permission.Error{Decision: decision}
+}
+
+//nolint:govet // Field order follows retry output readability; padding is irrelevant for tiny CLI metadata.
+type headlessRetryProcess struct {
+	ID         string
+	Executable string
+	PID        int
+	Args       []string
+}
+
+var startHeadlessRetryProcess = startHeadlessRetryProcessDefault
+
+func retryHeadlessRun(ctx context.Context, store *session.Store, id, requestedNewID string) error {
+	if id == "" {
+		return errors.New("retry headless: id is required")
+	}
+
+	if err := session.ValidateHeadlessID(id); err != nil {
+		return fmt.Errorf("retry headless: %w", err)
+	}
+
+	newID := requestedNewID
+	if newID == "" {
+		newID = newHeadlessRetryID(id)
+	}
+
+	if validateErr := session.ValidateHeadlessID(newID); validateErr != nil {
+		return fmt.Errorf("retry headless: %w", validateErr)
+	}
+
+	if err := authorizeHeadlessPermission(ctx, "retry headless run", store, id, permission.OperationRead, permission.OperationExecute, permission.OperationWrite); err != nil {
+		return fmt.Errorf("retry headless: %w", err)
+	}
+
+	var started headlessRetryProcess
+
+	reason := "retried by atteler session retry-headless as " + newID
+
+	retried, err := store.MarkHeadlessRunRetriedAfterStart(id, newID, reason, func(parent session.HeadlessRun) error {
+		process, startErr := startHeadlessRetryProcess(ctx, store, parent, newID)
+		if startErr != nil {
+			return startErr
+		}
+
+		started = process
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("retry headless: %w", err)
+	}
+
+	fmt.Println(formatHeadlessRun(retried))
+	fmt.Println(formatHeadlessRetryProcess(started))
+
+	return nil
+}
+
+func newHeadlessRetryID(parentID string) string {
+	return parentID + "-retry-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+}
+
+func startHeadlessRetryProcessDefault(ctx context.Context, store *session.Store, parent session.HeadlessRun, newID string) (headlessRetryProcess, error) {
+	if err := ctx.Err(); err != nil {
+		return headlessRetryProcess{}, fmt.Errorf("retry context: %w", err)
+	}
+
+	executable, err := headlessRetryExecutable(parent)
+	if err != nil {
+		return headlessRetryProcess{}, err
+	}
+
+	args, err := headlessRetryArgs(store, parent, newID)
+	if err != nil {
+		return headlessRetryProcess{}, err
+	}
+
+	// The retry is intentionally detached from this CLI invocation after
+	// Start/Release. Do not use exec.CommandContext here: the command context
+	// belongs to the short-lived retry command and must not be able to kill the
+	// newly launched headless job after this process exits.
+	//nolint:noctx // The retry process must outlive this short-lived command context.
+	cmd := exec.Command(executable, args...)
+	if dir := headlessRetryWorkingDir(parent); dir != "" {
+		cmd.Dir = dir
+	}
+
+	cmd.Env = headlessRetryEnv(os.Environ(), parent)
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err == nil {
+		defer devNull.Close()
+
+		cmd.Stdin = devNull
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
+	}
+
+	configureHeadlessRetryCommand(cmd)
+
+	if err := cmd.Start(); err != nil {
+		return headlessRetryProcess{}, fmt.Errorf("start retry process: %w", err)
+	}
+
+	pid := cmd.Process.Pid
+	if err := cmd.Process.Release(); err != nil {
+		return headlessRetryProcess{}, fmt.Errorf("release retry process %d: %w", pid, err)
+	}
+
+	return headlessRetryProcess{
+		ID:         newID,
+		Executable: executable,
+		PID:        pid,
+		Args:       args,
+	}, nil
+}
+
+func headlessRetryExecutable(parent session.HeadlessRun) (string, error) {
+	if executable := strings.TrimSpace(parent.Executable); headlessRetryRecordedFileUsable(executable) {
+		return executable, nil
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve current executable: %w", err)
+	}
+
+	return executable, nil
+}
+
+func headlessRetryWorkingDir(parent session.HeadlessRun) string {
+	cwd := strings.TrimSpace(parent.CWD)
+	if !headlessRetryRecordedDirUsable(cwd) {
+		return ""
+	}
+
+	return cwd
+}
+
+func headlessRetryRecordedFileUsable(path string) bool {
+	if !headlessRetryRecordedValueUsable(path) {
+		return false
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+
+	return !info.IsDir()
+}
+
+func headlessRetryRecordedDirUsable(path string) bool {
+	if !headlessRetryRecordedValueUsable(path) {
+		return false
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+
+	return info.IsDir()
+}
+
+func headlessRetryRecordedValueUsable(value string) bool {
+	return strings.TrimSpace(value) != "" && !strings.Contains(value, headlessRetryRedactedValue)
+}
+
+type headlessEnvOverride struct {
+	key   string
+	value string
+}
+
+func headlessRetryEnv(base []string, parent session.HeadlessRun) []string {
+	return overrideEnv(base,
+		headlessEnvOverride{key: headlessParentRunIDEnv, value: parent.ID},
+		headlessEnvOverride{key: headlessRetryOfRunIDEnv, value: parent.ID},
+		headlessEnvOverride{key: headlessRetryCountEnv, value: strconv.Itoa(parent.RetryCount + 1)},
+	)
+}
+
+func overrideEnv(base []string, overrides ...headlessEnvOverride) []string {
+	overrideByKey := make(map[string]string, len(overrides))
+
+	overrideOrder := make([]string, 0, len(overrides))
+	for _, override := range overrides {
+		if override.key == "" {
+			continue
+		}
+
+		if _, ok := overrideByKey[override.key]; !ok {
+			overrideOrder = append(overrideOrder, override.key)
+		}
+
+		overrideByKey[override.key] = override.value
+	}
+
+	out := make([]string, 0, len(base)+len(overrideOrder))
+	wroteOverride := make(map[string]struct{}, len(overrideOrder))
+
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			out = append(out, entry)
+			continue
+		}
+
+		value, shouldOverride := overrideByKey[key]
+		if !shouldOverride {
+			out = append(out, entry)
+			continue
+		}
+
+		if _, alreadyWrote := wroteOverride[key]; alreadyWrote {
+			continue
+		}
+
+		out = append(out, key+"="+value)
+		wroteOverride[key] = struct{}{}
+	}
+
+	for _, key := range overrideOrder {
+		if _, alreadyWrote := wroteOverride[key]; alreadyWrote {
+			continue
+		}
+
+		out = append(out, key+"="+overrideByKey[key])
+	}
+
+	return out
+}
+
+func headlessRetryArgs(store *session.Store, parent session.HeadlessRun, newID string) ([]string, error) {
+	if args, ok := headlessRetryArgsFromRecordedCommand(store, parent, newID); ok {
+		return args, nil
+	}
+
+	if strings.TrimSpace(parent.Prompt) == "" {
+		return nil, fmt.Errorf("headless run %q has no stored prompt to retry", parent.ID)
+	}
+
+	args := []string{
+		"--session-dir", store.Dir(),
+		"--headless",
+		"--headless-id", newID,
+	}
+
+	if parent.PrivateLogs {
+		args = append(args, "--headless-private-log")
+	}
+
+	if parent.Model != "" {
+		args = append(args, "--model", parent.Model)
+	}
+
+	if parent.Agent != "" {
+		args = append(args, "--agent", parent.Agent)
+	}
+
+	args = append(args, "chat", "once", "--", parent.Prompt)
+
+	return args, nil
+}
+
+func headlessRetryArgsFromRecordedCommand(store *session.Store, parent session.HeadlessRun, newID string) ([]string, bool) {
+	if len(parent.CommandArgs) <= 1 {
+		return nil, false
+	}
+
+	args := append([]string(nil), parent.CommandArgs[1:]...)
+	if !parent.PrivateLogs && headlessCommandArgsContainRedaction(args) {
+		return nil, false
+	}
+
+	args, hasHeadless := replaceHeadlessRetryBoolFlag(args, "--headless", true)
+	args, hasPrivateLogs := replaceHeadlessRetryBoolFlag(args, "--headless-private-log", parent.PrivateLogs)
+	args, hasHeadlessID := replaceHeadlessRetryFlag(args, "--headless-id", newID)
+	args, hasSessionDir := replaceHeadlessRetryFlag(args, "--session-dir", store.Dir())
+
+	prepend := make([]string, 0, 5)
+	if !hasSessionDir {
+		prepend = append(prepend, "--session-dir", store.Dir())
+	}
+
+	if !hasHeadless {
+		prepend = append(prepend, "--headless")
+	}
+
+	if !hasHeadlessID {
+		prepend = append(prepend, "--headless-id", newID)
+	}
+
+	if parent.PrivateLogs && !hasPrivateLogs {
+		prepend = append(prepend, "--headless-private-log")
+	}
+
+	if len(prepend) > 0 {
+		args = append(prepend, args...)
+	}
+
+	return args, true
+}
+
+func headlessCommandArgsContainRedaction(args []string) bool {
+	for _, arg := range args {
+		if strings.Contains(arg, headlessRetryRedactedValue) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func replaceHeadlessRetryFlag(args []string, name, value string) ([]string, bool) {
+	out := make([]string, 0, len(args))
+	found := false
+
+	aliases := []string{name}
+	if suffix, ok := strings.CutPrefix(name, "--"); ok {
+		aliases = append(aliases, "-"+suffix)
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+
+		if retryFlagAliasMatches(arg, aliases) {
+			found = true
+
+			if name == "--headless" {
+				out = append(out, name)
+				continue
+			}
+
+			out = append(out, name)
+			if i+1 < len(args) {
+				out = append(out, value)
+				i++
+			} else {
+				out = append(out, value)
+			}
+
+			continue
+		}
+
+		if retryFlagAliasHasValue(arg, aliases) {
+			found = true
+
+			if name == "--headless" {
+				out = append(out, name+"=true")
+			} else {
+				out = append(out, name+"="+value)
+			}
+
+			continue
+		}
+
+		out = append(out, arg)
+	}
+
+	return out, found
+}
+
+func replaceHeadlessRetryBoolFlag(args []string, name string, enabled bool) ([]string, bool) {
+	out := make([]string, 0, len(args))
+	found := false
+
+	aliases := []string{name}
+	if suffix, ok := strings.CutPrefix(name, "--"); ok {
+		aliases = append(aliases, "-"+suffix)
+	}
+
+	for i, arg := range args {
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+
+		if retryFlagAliasMatches(arg, aliases) {
+			found = true
+
+			if enabled {
+				out = append(out, name)
+			}
+
+			continue
+		}
+
+		if retryFlagAliasHasValue(arg, aliases) {
+			found = true
+
+			if enabled {
+				out = append(out, name+"=true")
+			}
+
+			continue
+		}
+
+		out = append(out, arg)
+	}
+
+	return out, found
+}
+
+func retryFlagAliasMatches(arg string, aliases []string) bool {
+	return slices.Contains(aliases, arg)
+}
+
+func retryFlagAliasHasValue(arg string, aliases []string) bool {
+	for _, alias := range aliases {
+		if strings.HasPrefix(arg, alias+"=") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func formatHeadlessRetryProcess(process headlessRetryProcess) string {
+	parts := []string{
+		"retry_run=" + process.ID,
+		"pid=" + strconv.Itoa(process.PID),
+		"executable=" + formatHeadlessFieldValue(process.Executable),
+		"command_args=" + formatHeadlessArgs(process.Args),
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func cleanupHeadlessRuns(ctx context.Context, store *session.Store, maxAge string) error {
+	maxAge = strings.TrimSpace(maxAge)
+	if maxAge == "" {
+		return errors.New("cleanup headless runs: --headless-max-age is required")
+	}
+
+	parsed, err := time.ParseDuration(maxAge)
+	if err != nil {
+		return fmt.Errorf("cleanup headless runs: parse --headless-max-age: %w", err)
+	}
+
+	if authErr := authorizeHeadlessPermission(ctx, "cleanup headless runs", store, "", permission.OperationRead, permission.OperationWrite, permission.OperationMergeDelete); authErr != nil {
+		return fmt.Errorf("cleanup headless runs: %w", authErr)
+	}
+
+	removed, err := store.CleanupHeadlessRuns(session.HeadlessRetentionPolicy{MaxAge: parsed})
+	if err != nil {
+		return fmt.Errorf("cleanup headless runs: %w", err)
+	}
+
+	if len(removed) == 0 {
+		fmt.Println("No expired terminal headless runs found.")
+		return nil
+	}
+
+	for i := range removed {
+		fmt.Println(formatHeadlessRun(removed[i]))
+	}
+
+	return nil
 }
 
 func streamHeadlessLog(ctx context.Context, store *session.Store, id string) error {
@@ -842,6 +1420,11 @@ func formatHeadlessRun(run session.HeadlessRun) string {
 		heartbeat = run.LastHeartbeatAt.UTC().Format(time.RFC3339)
 	}
 
+	leaseExpires := "-"
+	if !run.LeaseExpiresAt.IsZero() {
+		leaseExpires = run.LeaseExpiresAt.UTC().Format(time.RFC3339)
+	}
+
 	agentName := fallbackDash(run.Agent)
 	modelName := fallbackDash(run.Model)
 
@@ -855,6 +1438,7 @@ func formatHeadlessRun(run session.HeadlessRun) string {
 		"started=" + started,
 		"updated=" + updated,
 		"heartbeat=" + heartbeat,
+		"lease_expires=" + leaseExpires,
 		"log=" + fallbackDash(run.LogPath),
 	}
 
@@ -879,10 +1463,26 @@ func appendHeadlessRunTimeDetails(parts []string, run session.HeadlessRun) []str
 		parts = append(parts, "canceled="+run.CanceledAt.UTC().Format(time.RFC3339))
 	}
 
+	if run.RetriedAt != nil {
+		parts = append(parts, "retried="+run.RetriedAt.UTC().Format(time.RFC3339))
+	}
+
+	if run.ExpiredAt != nil {
+		parts = append(parts, "expired="+run.ExpiredAt.UTC().Format(time.RFC3339))
+	}
+
 	return parts
 }
 
 func appendHeadlessRunProcessDetails(parts []string, run session.HeadlessRun) []string {
+	parts = appendHeadlessRunPIDDetails(parts, run)
+	parts = appendHeadlessRunRelationshipDetails(parts, run)
+	parts = appendHeadlessRunCommandDetails(parts, run)
+
+	return appendHeadlessRunHostDetails(parts, run)
+}
+
+func appendHeadlessRunPIDDetails(parts []string, run session.HeadlessRun) []string {
 	if run.PID != 0 {
 		parts = append(parts, "pid="+strconv.Itoa(run.PID))
 	}
@@ -895,16 +1495,48 @@ func appendHeadlessRunProcessDetails(parts []string, run session.HeadlessRun) []
 		parts = append(parts, "pgid="+strconv.Itoa(run.ProcessGroupID))
 	}
 
+	if run.ExitCode != nil {
+		parts = append(parts, "exit_code="+strconv.Itoa(*run.ExitCode))
+	}
+
+	return parts
+}
+
+func appendHeadlessRunRelationshipDetails(parts []string, run session.HeadlessRun) []string {
 	if run.ParentRunID != "" {
 		parts = append(parts, "parent_run="+formatHeadlessFieldValue(run.ParentRunID))
+	}
+
+	if run.RetryOfRunID != "" {
+		parts = append(parts, "retry_of="+formatHeadlessFieldValue(run.RetryOfRunID))
+	}
+
+	if run.SupersededByRunID != "" {
+		parts = append(parts, "superseded_by="+formatHeadlessFieldValue(run.SupersededByRunID))
 	}
 
 	if len(run.ChildRunIDs) > 0 {
 		parts = append(parts, "child_runs="+formatHeadlessArgs(run.ChildRunIDs))
 	}
 
+	if run.RetryCount > 0 {
+		parts = append(parts, "retry_count="+strconv.Itoa(run.RetryCount))
+	}
+
+	return parts
+}
+
+func appendHeadlessRunCommandDetails(parts []string, run session.HeadlessRun) []string {
 	if run.StartMethod != "" {
 		parts = append(parts, "start_method="+formatHeadlessFieldValue(run.StartMethod))
+	}
+
+	if run.Executable != "" {
+		parts = append(parts, "executable="+formatHeadlessFieldValue(run.Executable))
+	}
+
+	if run.Version != "" {
+		parts = append(parts, "version="+formatHeadlessFieldValue(run.Version))
 	}
 
 	if run.StartedCommand != "" {
@@ -915,16 +1547,20 @@ func appendHeadlessRunProcessDetails(parts []string, run session.HeadlessRun) []
 		parts = append(parts, "command_args="+formatHeadlessArgs(run.CommandArgs))
 	}
 
+	return parts
+}
+
+func appendHeadlessRunHostDetails(parts []string, run session.HeadlessRun) []string {
+	if run.Owner != "" {
+		parts = append(parts, "owner="+formatHeadlessFieldValue(run.Owner))
+	}
+
 	if run.Hostname != "" {
 		parts = append(parts, "host="+formatHeadlessFieldValue(run.Hostname))
 	}
 
 	if run.CWD != "" {
 		parts = append(parts, "cwd="+formatHeadlessFieldValue(run.CWD))
-	}
-
-	if run.ExitCode != nil {
-		parts = append(parts, "exit_code="+strconv.Itoa(*run.ExitCode))
 	}
 
 	return parts

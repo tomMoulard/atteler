@@ -1283,6 +1283,7 @@ func flagRequiresFixtureValue(flag string) bool {
 		"code-summary",
 		"command-surface-docs",
 		"command-surface-json",
+		"cleanup-headless",
 		"doctor",
 		"doctor-offline",
 		"explain-config",

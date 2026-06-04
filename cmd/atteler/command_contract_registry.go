@@ -365,8 +365,8 @@ func commandContractsByName() map[string]commandContract {
 			withExamples("atteler agents list"),
 		),
 		"headless-command": commandContractFor(
-			"inspect, reconcile, stream, or cancel headless runs",
-			[]string{"--list-headless", "--recover-headless", "--status-headless", "--cancel-headless", "--stream-headless"},
+			"inspect, reconcile, stream, cancel, retry, or clean up headless runs",
+			[]string{"--list-headless", "--recover-headless", "--status-headless", "--cancel-headless", "--retry-headless", "--retry-headless-id", "--stream-headless", "--cleanup-headless", "--headless-status", "--headless-max-age"},
 			[]string{commandEffectSessionRead, commandEffectSessionWrite, commandEffectUserOutput, commandEffectProcessExecute},
 			[]string{commandOutputText},
 			withInputType("headlessCommandInput"),
@@ -374,8 +374,10 @@ func commandContractsByName() map[string]commandContract {
 				"atteler session headless",
 				"atteler session status-headless run-123",
 				"atteler session cancel-headless run-123",
+				"atteler session retry-headless run-123",
 				"atteler session recover-headless",
 				"atteler session stream-headless run-123",
+				"atteler session cleanup-headless --headless-max-age 168h",
 			),
 		),
 		"list-hook-events": commandContractFor(

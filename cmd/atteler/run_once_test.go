@@ -1867,6 +1867,8 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 	assert.Equal(t, "gpt-4.1-mini", headlessEvents[3].Model)
 	assert.Equal(t, agentLoopBudget, headlessEvents[3].AgentLoopBudget)
 	assert.Equal(t, "headless", headlessEvents[0].StartMethod)
+	assert.Equal(t, run.Executable, headlessEvents[0].Executable)
+	assert.Equal(t, run.Version, headlessEvents[0].Version)
 	assert.NotEmpty(t, headlessEvents[0].StartedCommand)
 	assert.NotEmpty(t, headlessEvents[0].CommandArgs)
 	assert.Equal(t, string(llm.RoleUser), headlessEvents[1].Role)
@@ -1875,6 +1877,8 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 	assert.Equal(t, string(llm.RoleAssistant), headlessEvents[2].Role)
 	assert.Equal(t, "15", headlessEvents[2].Metadata["bytes"])
 	assert.Equal(t, "headless", headlessEvents[3].StartMethod)
+	assert.Equal(t, run.Executable, headlessEvents[3].Executable)
+	assert.Equal(t, run.Version, headlessEvents[3].Version)
 	assert.NotEmpty(t, headlessEvents[3].StartedCommand)
 	assert.NotEmpty(t, headlessEvents[3].CommandArgs)
 	assert.Equal(t, "completed", headlessEvents[3].TerminalReason)
@@ -1968,6 +1972,72 @@ func TestStartHeadlessRunRejectsWhitespacePaddedParentID(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestStartHeadlessRunRejectsWhitespacePaddedRetryOfID(t *testing.T) {
+	store := session.NewStore(t.TempDir())
+	t.Setenv(headlessRetryOfRunIDEnv, " failed-headless ")
+
+	run, err := startHeadlessRun(
+		t.Context(),
+		store,
+		runOnceExecutionOptions{Headless: true, HeadlessID: "retry-child-headless"},
+		session.New("gpt-test", nil),
+		"hello",
+		"gpt-test",
+		"",
+		"default",
+	)
+
+	require.ErrorContains(t, err, "invalid retry_of headless id")
+	assert.Nil(t, run)
+
+	_, err = store.LoadHeadlessRun("retry-child-headless")
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestStartHeadlessRunRejectsSelfRelationshipIDsFromEnv(t *testing.T) {
+	tests := []struct {
+		env     string
+		wantErr string
+		name    string
+	}{
+		{
+			name:    "parent",
+			env:     headlessParentRunIDEnv,
+			wantErr: "cannot be its own parent",
+		},
+		{
+			name:    "retry_of",
+			env:     headlessRetryOfRunIDEnv,
+			wantErr: "cannot retry itself",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := session.NewStore(t.TempDir())
+			headlessID := "self-" + tt.name + "-headless"
+			t.Setenv(tt.env, headlessID)
+
+			run, err := startHeadlessRun(
+				t.Context(),
+				store,
+				runOnceExecutionOptions{Headless: true, HeadlessID: headlessID},
+				session.New("gpt-test", nil),
+				"hello",
+				"gpt-test",
+				"",
+				"default",
+			)
+
+			require.ErrorContains(t, err, tt.wantErr)
+			assert.Nil(t, run)
+
+			_, err = store.LoadHeadlessRun(headlessID)
+			require.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
 func TestStartHeadlessRunRecordsParentRunRelationship(t *testing.T) {
 	store := session.NewStore(t.TempDir())
 	require.NoError(t, store.SaveHeadlessRun(session.HeadlessRun{
@@ -1993,6 +2063,7 @@ func TestStartHeadlessRunRecordsParentRunRelationship(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, child)
 	assert.Equal(t, "parent-headless", child.ParentRunID)
+	assert.Empty(t, child.RetryOfRunID)
 
 	parent, err := store.LoadHeadlessRun("parent-headless")
 	require.NoError(t, err)
@@ -2004,6 +2075,41 @@ func TestStartHeadlessRunRecordsParentRunRelationship(t *testing.T) {
 	assert.Equal(t, "parent-headless", headlessEvents[0].ParentRunID)
 	assert.Equal(t, session.HeadlessEventUserMessage, headlessEvents[1].Type)
 	assert.Equal(t, "parent-headless", headlessEvents[1].ParentRunID)
+	assert.Empty(t, headlessEvents[1].RetryOfRunID)
+}
+
+func TestStartHeadlessRunRecordsRetryRelationshipFromRetryEnv(t *testing.T) {
+	store := session.NewStore(t.TempDir())
+	t.Setenv(headlessParentRunIDEnv, "parent-headless")
+	t.Setenv(headlessRetryOfRunIDEnv, "failed-headless")
+	t.Setenv(headlessRetryCountEnv, "2")
+
+	child, err := startHeadlessRun(
+		t.Context(),
+		store,
+		runOnceExecutionOptions{
+			HeadlessID: "retry-child-headless",
+			Headless:   true,
+		},
+		session.New("gpt-test", nil),
+		"hello",
+		"gpt-test",
+		"",
+		"",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, child)
+	assert.Equal(t, "parent-headless", child.ParentRunID)
+	assert.Equal(t, "failed-headless", child.RetryOfRunID)
+	assert.Equal(t, 2, child.RetryCount)
+
+	headlessEvents, err := store.ReadHeadlessEvents("retry-child-headless")
+	require.NoError(t, err)
+	require.Len(t, headlessEvents, 2)
+	assert.Equal(t, "failed-headless", headlessEvents[0].RetryOfRunID)
+	assert.Equal(t, 2, headlessEvents[0].RetryCount)
+	assert.Equal(t, "failed-headless", headlessEvents[1].RetryOfRunID)
+	assert.Equal(t, 2, headlessEvents[1].RetryCount)
 }
 
 func TestStartHeadlessRunRejectsExistingExplicitID(t *testing.T) {
@@ -2915,6 +3021,7 @@ func TestFormatHeadlessRun(t *testing.T) {
 		LogPath:          "/tmp/headless.log",
 		EventsPath:       "/tmp/headless.events.jsonl",
 		Model:            "gpt-test",
+		Owner:            "alice",
 		Hostname:         "host-one",
 		StartedCommand:   "atteler chat once hello --headless",
 		CommandArgs:      []string{"atteler", "chat", "once", "hello", "--headless"},
@@ -2947,6 +3054,7 @@ func TestFormatHeadlessRun(t *testing.T) {
 		"pgid=10",
 		"parent_run=parent-headless-id",
 		`child_runs=["child-headless-id"]`,
+		"owner=alice",
 		"host=host-one",
 		"cwd=/repo",
 		"start_method=headless",

@@ -63,10 +63,14 @@ const (
 	HeadlessStatusCanceled HeadlessStatus = "canceled"
 	// HeadlessStatusTimedOut indicates a run exceeded its execution deadline.
 	HeadlessStatusTimedOut HeadlessStatus = "timed_out"
+	// HeadlessStatusExpired indicates a retained run aged out of its useful lifecycle window.
+	HeadlessStatusExpired HeadlessStatus = "expired"
 	// HeadlessStatusStale indicates a previously running run no longer appears healthy.
 	HeadlessStatusStale HeadlessStatus = "stale"
 	// HeadlessStatusOrphaned indicates a local process still exists but no longer heartbeats.
 	HeadlessStatusOrphaned HeadlessStatus = "orphaned"
+	// HeadlessStatusRetried indicates a terminal run has been replaced by a retry run.
+	HeadlessStatusRetried HeadlessStatus = "retried"
 	// HeadlessStatusSuperseded indicates a run was intentionally replaced by another run.
 	HeadlessStatusSuperseded HeadlessStatus = "superseded"
 	// HeadlessStatusCorrupt indicates metadata exists but could not be parsed.
@@ -91,10 +95,14 @@ const (
 	HeadlessEventCanceled HeadlessEventType = "canceled"
 	// HeadlessEventTimedOut records deadline-based termination.
 	HeadlessEventTimedOut HeadlessEventType = "timed_out"
+	// HeadlessEventExpired records retention or lease expiry.
+	HeadlessEventExpired HeadlessEventType = "expired"
 	// HeadlessEventStale records stale-run reconciliation.
 	HeadlessEventStale HeadlessEventType = "stale"
 	// HeadlessEventOrphaned records a live local process with stale metadata.
 	HeadlessEventOrphaned HeadlessEventType = "orphaned"
+	// HeadlessEventRetried records that a retry was launched for a terminal run.
+	HeadlessEventRetried HeadlessEventType = "retried"
 	// HeadlessEventSuperseded records that a run was intentionally replaced.
 	HeadlessEventSuperseded HeadlessEventType = "superseded"
 )
@@ -109,6 +117,11 @@ type HeadlessLogPolicy struct {
 	MaxAge        time.Duration
 	MaxChunkBytes int64
 	MaxChunks     int
+}
+
+// HeadlessRetentionPolicy bounds retained metadata and artifacts for terminal runs.
+type HeadlessRetentionPolicy struct {
+	MaxAge time.Duration
 }
 
 // HeadlessLogWriteOptions controls one headless log append.
@@ -143,35 +156,40 @@ type HeadlessLogTail struct {
 //
 //nolint:govet // JSON summary fields are grouped by lifecycle and metadata readability.
 type HeadlessEvent struct {
-	At              time.Time           `json:"at"`
-	RunID           string              `json:"run_id"`
-	ParentRunID     string              `json:"parent_run_id,omitempty"`
-	SessionID       string              `json:"session_id,omitempty"`
-	SessionPath     string              `json:"session_path,omitempty"`
-	Type            HeadlessEventType   `json:"type"`
-	Status          HeadlessStatus      `json:"status,omitempty"`
-	Role            string              `json:"role,omitempty"`
-	Message         string              `json:"message,omitempty"`
-	Error           string              `json:"error,omitempty"`
-	Agent           string              `json:"agent,omitempty"`
-	Model           string              `json:"model,omitempty"`
-	Autonomy        string              `json:"autonomy,omitempty"`
-	AgentLoopBudget llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
-	CWD             string              `json:"cwd,omitempty"`
-	Hostname        string              `json:"hostname,omitempty"`
-	StartedCommand  string              `json:"started_command,omitempty"`
-	StartMethod     string              `json:"start_method,omitempty"`
-	TerminalReason  string              `json:"terminal_reason,omitempty"`
-	CancelReason    string              `json:"cancellation_reason,omitempty"`
-	StaleReason     string              `json:"stale_reason,omitempty"`
-	OrphanedReason  string              `json:"orphaned_reason,omitempty"`
-	ExitCode        *int                `json:"exit_code,omitempty"`
-	CommandArgs     []string            `json:"command_args,omitempty"`
-	ChildRunIDs     []string            `json:"child_run_ids,omitempty"`
-	PID             int                 `json:"pid,omitempty"`
-	ParentPID       int                 `json:"parent_pid,omitempty"`
-	ProcessGroupID  int                 `json:"process_group_id,omitempty"`
-	Metadata        map[string]string   `json:"metadata,omitempty"`
+	At                time.Time           `json:"at"`
+	RunID             string              `json:"run_id"`
+	ParentRunID       string              `json:"parent_run_id,omitempty"`
+	RetryOfRunID      string              `json:"retry_of_run_id,omitempty"`
+	SupersededByRunID string              `json:"superseded_by_run_id,omitempty"`
+	SessionID         string              `json:"session_id,omitempty"`
+	SessionPath       string              `json:"session_path,omitempty"`
+	Type              HeadlessEventType   `json:"type"`
+	Status            HeadlessStatus      `json:"status,omitempty"`
+	Role              string              `json:"role,omitempty"`
+	Message           string              `json:"message,omitempty"`
+	Error             string              `json:"error,omitempty"`
+	Agent             string              `json:"agent,omitempty"`
+	Model             string              `json:"model,omitempty"`
+	Autonomy          string              `json:"autonomy,omitempty"`
+	AgentLoopBudget   llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
+	CWD               string              `json:"cwd,omitempty"`
+	Executable        string              `json:"executable,omitempty"`
+	Version           string              `json:"version,omitempty"`
+	Hostname          string              `json:"hostname,omitempty"`
+	StartedCommand    string              `json:"started_command,omitempty"`
+	StartMethod       string              `json:"start_method,omitempty"`
+	TerminalReason    string              `json:"terminal_reason,omitempty"`
+	CancelReason      string              `json:"cancellation_reason,omitempty"`
+	StaleReason       string              `json:"stale_reason,omitempty"`
+	OrphanedReason    string              `json:"orphaned_reason,omitempty"`
+	ExitCode          *int                `json:"exit_code,omitempty"`
+	CommandArgs       []string            `json:"command_args,omitempty"`
+	ChildRunIDs       []string            `json:"child_run_ids,omitempty"`
+	PID               int                 `json:"pid,omitempty"`
+	ParentPID         int                 `json:"parent_pid,omitempty"`
+	ProcessGroupID    int                 `json:"process_group_id,omitempty"`
+	RetryCount        int                 `json:"retry_count,omitempty"`
+	Metadata          map[string]string   `json:"metadata,omitempty"`
 }
 
 // HeadlessRun records metadata for an atteler headless execution.
@@ -181,11 +199,16 @@ type HeadlessRun struct {
 	StartedAt          time.Time           `json:"started_at"`
 	UpdatedAt          time.Time           `json:"updated_at"`
 	LastHeartbeatAt    time.Time           `json:"last_heartbeat_at,omitzero"`
+	LeaseExpiresAt     time.Time           `json:"lease_expires_at,omitzero"`
 	CompletedAt        *time.Time          `json:"completed_at,omitempty"`
 	CanceledAt         *time.Time          `json:"canceled_at,omitempty"`
+	RetriedAt          *time.Time          `json:"retried_at,omitempty"`
+	ExpiredAt          *time.Time          `json:"expired_at,omitempty"`
 	ExitCode           *int                `json:"exit_code,omitempty"`
 	ID                 string              `json:"id"`
 	ParentRunID        string              `json:"parent_run_id,omitempty"`
+	RetryOfRunID       string              `json:"retry_of_run_id,omitempty"`
+	SupersededByRunID  string              `json:"superseded_by_run_id,omitempty"`
 	SessionID          string              `json:"session_id"`
 	SessionPath        string              `json:"session_path"`
 	LogPath            string              `json:"log_path"`
@@ -199,6 +222,8 @@ type HeadlessRun struct {
 	AgentLoopBudget    llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
 	Agent              string              `json:"agent"`
 	Owner              string              `json:"owner,omitempty"`
+	Executable         string              `json:"executable,omitempty"`
+	Version            string              `json:"version,omitempty"`
 	Hostname           string              `json:"hostname,omitempty"`
 	StartedCommand     string              `json:"started_command,omitempty"`
 	StartMethod        string              `json:"start_method,omitempty"`
@@ -214,6 +239,7 @@ type HeadlessRun struct {
 	ProcessGroupID     int                 `json:"process_group_id,omitempty"`
 	LogMaxChunkBytes   int64               `json:"log_max_chunk_bytes,omitempty"`
 	LogMaxChunks       int                 `json:"log_max_chunks,omitempty"`
+	RetryCount         int                 `json:"retry_count,omitempty"`
 	Status             HeadlessStatus      `json:"status"`
 	PrivateLogs        bool                `json:"private_logs,omitempty"`
 	Stale              bool                `json:"stale,omitempty"`
@@ -232,6 +258,21 @@ func DefaultHeadlessLogPolicy() HeadlessLogPolicy {
 		MaxChunkBytes: defaultHeadlessLogMaxChunkBytes,
 		MaxChunks:     defaultHeadlessLogMaxChunks,
 	}
+}
+
+// ParseHeadlessStatus validates and normalizes an operator-supplied headless status.
+func ParseHeadlessStatus(value string) (HeadlessStatus, error) {
+	status := HeadlessStatus(strings.ToLower(strings.TrimSpace(value)))
+	if !isKnownHeadlessStatus(status) {
+		return "", fmt.Errorf("session: unknown headless status %q", value)
+	}
+
+	return status, nil
+}
+
+// ValidateHeadlessID validates a caller-provided headless run ID.
+func ValidateHeadlessID(id string) error {
+	return validateHeadlessID(id)
 }
 
 // RedactHeadlessText removes common secret values from headless metadata and logs.
@@ -404,6 +445,129 @@ func (s *Store) CancelHeadlessRun(id, reason string) (HeadlessRun, error) {
 	return canceled, nil
 }
 
+// MarkHeadlessRunRetried records that a retry run has replaced a terminal run.
+func (s *Store) MarkHeadlessRunRetried(id, childID, reason string) (HeadlessRun, error) {
+	return s.MarkHeadlessRunRetriedAfterStart(id, childID, reason, nil)
+}
+
+// MarkHeadlessRunRetriedAfterStart runs start while holding the parent run lock,
+// then records that the retry run has replaced the parent. Holding the lock
+// across the short process-start window prevents concurrent retry commands from
+// both launching child runs before either marks the parent retried.
+func (s *Store) MarkHeadlessRunRetriedAfterStart(id, childID, reason string, start func(HeadlessRun) error) (HeadlessRun, error) {
+	if err := validateHeadlessID(id); err != nil {
+		return HeadlessRun{}, err
+	}
+
+	if err := validateHeadlessID(childID); err != nil {
+		return HeadlessRun{}, fmt.Errorf("session: invalid retry headless id %q: %w", childID, err)
+	}
+
+	if id == childID {
+		return HeadlessRun{}, fmt.Errorf("session: headless run %q cannot retry itself", id)
+	}
+
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "retried by user"
+	}
+
+	now := time.Now().UTC()
+
+	var retried HeadlessRun
+
+	lockErr := s.withHeadlessLock(id, func() error {
+		var markErr error
+
+		retried, markErr = s.markHeadlessRunRetriedAfterStartUnlocked(id, childID, reason, now, start)
+
+		return markErr
+	})
+	if lockErr != nil {
+		return HeadlessRun{}, lockErr
+	}
+
+	return retried, nil
+}
+
+func (s *Store) markHeadlessRunRetriedAfterStartUnlocked(id, childID, reason string, now time.Time, start func(HeadlessRun) error) (HeadlessRun, error) {
+	run, err := s.loadRetryableHeadlessRunForRetryUnlocked(id, now)
+	if err != nil {
+		return HeadlessRun{}, err
+	}
+
+	if availabilityErr := s.ensureHeadlessRunArtifactsAbsentUnlocked(childID); availabilityErr != nil {
+		return HeadlessRun{}, availabilityErr
+	}
+
+	if start != nil {
+		if startErr := start(run); startErr != nil {
+			return HeadlessRun{}, startErr
+		}
+	}
+
+	return s.saveRetriedHeadlessRunUnlocked(run, childID, reason, now)
+}
+
+func (s *Store) loadRetryableHeadlessRunForRetryUnlocked(id string, now time.Time) (HeadlessRun, error) {
+	run, err := s.loadHeadlessRunUnlocked(id)
+	if err != nil {
+		return HeadlessRun{}, err
+	}
+
+	reconciled, _, err := s.reconcileHeadlessRunUnlocked(run, now, defaultHeadlessStaleAfter)
+	if err != nil {
+		return HeadlessRun{}, err
+	}
+
+	if !isRetryableHeadlessStatus(reconciled.Status) {
+		return HeadlessRun{}, fmt.Errorf("session: headless run %q is %s; only completed, failed, canceled, timed_out, stale, or expired runs can be retried", id, reconciled.Status)
+	}
+
+	return reconciled, nil
+}
+
+func (s *Store) saveRetriedHeadlessRunUnlocked(run HeadlessRun, childID, reason string, now time.Time) (HeadlessRun, error) {
+	run.Status = HeadlessStatusRetried
+	run.RetriedAt = &now
+
+	if run.CompletedAt == nil {
+		run.CompletedAt = &now
+	}
+
+	run.SupersededByRunID = childID
+	run.TerminalReason = reason
+	run.ChildRunIDs = mergeHeadlessChildRunIDs(run.ChildRunIDs, []string{childID})
+
+	saved, err := s.saveAndLoadHeadlessRunUnlocked(run)
+	if err != nil {
+		return HeadlessRun{}, err
+	}
+
+	if err := s.appendRetriedHeadlessRunLogUnlocked(saved, childID, reason, now); err != nil {
+		return HeadlessRun{}, err
+	}
+
+	if err := s.appendRetriedHeadlessRunEventUnlocked(saved, childID, reason); err != nil {
+		return HeadlessRun{}, err
+	}
+
+	return saved, nil
+}
+
+func (s *Store) appendRetriedHeadlessRunLogUnlocked(run HeadlessRun, childID, reason string, now time.Time) error {
+	line := "retried\t" + now.Format(time.RFC3339) + "\tchild_run=" + childID + "\treason=" + reason + "\n"
+
+	return s.appendHeadlessLogTextUnlocked(run.ID, headlessLifecycleLogLine(run, line), headlessLogPolicyForRun(run))
+}
+
+func (s *Store) appendRetriedHeadlessRunEventUnlocked(run HeadlessRun, childID, reason string) error {
+	event := headlessEventForRun(run, HeadlessEventRetried, reason)
+	event.Metadata = map[string]string{"child_run_id": childID}
+
+	return s.appendHeadlessEventUnlocked(run.ID, event)
+}
+
 // HeartbeatHeadlessRun records liveness for a running headless run. Terminal
 // runs are left untouched so late heartbeat goroutines cannot move completed or
 // canceled runs back to a running lifecycle.
@@ -428,6 +592,7 @@ func (s *Store) HeartbeatHeadlessRun(id string) error {
 		run.Stale = false
 		run.OrphanedReason = ""
 		run.LastHeartbeatAt = now
+		run.LeaseExpiresAt = headlessLeaseExpiresAt(now)
 
 		return s.saveHeadlessRunUnlocked(run)
 	})
@@ -578,14 +743,42 @@ func mergeFinishedHeadlessTiming(current, run HeadlessRun) HeadlessRun {
 		run.LastHeartbeatAt = current.LastHeartbeatAt
 	}
 
+	if current.LeaseExpiresAt.After(run.LeaseExpiresAt) {
+		run.LeaseExpiresAt = current.LeaseExpiresAt
+	}
+
 	return run
 }
 
 func mergeFinishedHeadlessIdentity(current, run HeadlessRun) HeadlessRun {
+	run = mergeFinishedHeadlessRelationships(current, run)
+	run = mergeFinishedHeadlessSessionIdentity(current, run)
+	run = mergeFinishedHeadlessCommandIdentity(current, run)
+
+	return run
+}
+
+func mergeFinishedHeadlessRelationships(current, run HeadlessRun) HeadlessRun {
 	if run.ParentRunID == "" {
 		run.ParentRunID = current.ParentRunID
 	}
 
+	if run.RetryOfRunID == "" {
+		run.RetryOfRunID = current.RetryOfRunID
+	}
+
+	if run.SupersededByRunID == "" {
+		run.SupersededByRunID = current.SupersededByRunID
+	}
+
+	if run.RetryCount == 0 {
+		run.RetryCount = current.RetryCount
+	}
+
+	return run
+}
+
+func mergeFinishedHeadlessSessionIdentity(current, run HeadlessRun) HeadlessRun {
 	if run.SessionID == "" {
 		run.SessionID = current.SessionID
 	}
@@ -616,6 +809,18 @@ func mergeFinishedHeadlessIdentity(current, run HeadlessRun) HeadlessRun {
 
 	if run.Owner == "" {
 		run.Owner = current.Owner
+	}
+
+	return run
+}
+
+func mergeFinishedHeadlessCommandIdentity(current, run HeadlessRun) HeadlessRun {
+	if run.Executable == "" {
+		run.Executable = current.Executable
+	}
+
+	if run.Version == "" {
+		run.Version = current.Version
 	}
 
 	if run.Hostname == "" {
@@ -830,10 +1035,12 @@ func (s *Store) AppendHeadlessLogWithOptions(id, text string, options HeadlessLo
 		}
 
 		if found && (run.Status == HeadlessStatusRunning || run.Status == HeadlessStatusOrphaned) {
+			now := time.Now().UTC()
 			run.Status = HeadlessStatusRunning
 			run.Stale = false
 			run.OrphanedReason = ""
-			run.LastHeartbeatAt = time.Now().UTC()
+			run.LastHeartbeatAt = now
+			run.LeaseExpiresAt = headlessLeaseExpiresAt(now)
 
 			return s.saveHeadlessRunUnlocked(run)
 		}
@@ -977,8 +1184,163 @@ func (s *Store) CleanupHeadlessLogs(id string, policy HeadlessLogPolicy) error {
 	})
 }
 
-// RecoverStaleHeadlessRuns reconciles stale or orphaned running jobs and
-// returns the records that changed.
+// CleanupHeadlessRuns removes terminal headless metadata, logs, events, and
+// artifacts older than policy.MaxAge. Running and orphaned runs are never
+// removed by retention cleanup.
+func (s *Store) CleanupHeadlessRuns(policy HeadlessRetentionPolicy) ([]HeadlessRun, error) {
+	if policy.MaxAge <= 0 {
+		return nil, errors.New("session: headless retention max age must be greater than zero")
+	}
+
+	entries, err := os.ReadDir(s.headlessDir())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("session: list headless %s: %w", s.headlessDir(), err)
+	}
+
+	now := time.Now().UTC()
+	cutoff := now.Add(-policy.MaxAge)
+	removed := make([]HeadlessRun, 0)
+
+	for _, entry := range entries {
+		id, ok := headlessMetadataEntryID(entry)
+		if !ok {
+			continue
+		}
+
+		run, ok, err := s.cleanupHeadlessRunIfExpired(id, cutoff, now)
+		if err != nil {
+			return nil, err
+		}
+
+		if ok {
+			removed = append(removed, run)
+		}
+	}
+
+	sort.Slice(removed, func(i, j int) bool {
+		return removed[i].UpdatedAt.After(removed[j].UpdatedAt)
+	})
+
+	return removed, nil
+}
+
+func (s *Store) cleanupHeadlessRunIfExpired(id string, cutoff, now time.Time) (HeadlessRun, bool, error) {
+	var removed HeadlessRun
+
+	err := s.withHeadlessLock(id, func() error {
+		run, err := s.loadHeadlessRunUnlocked(id)
+		if err != nil {
+			if !errors.Is(err, ErrCorruptHeadlessRun) {
+				return err
+			}
+
+			run = s.corruptHeadlessRun(id, err)
+		} else {
+			reconciled, _, reconcileErr := s.reconcileHeadlessRunUnlocked(run, now, defaultHeadlessStaleAfter)
+			if reconcileErr != nil {
+				return reconcileErr
+			}
+
+			run = reconciled
+		}
+
+		if !headlessRunEligibleForRetentionCleanup(run, cutoff) {
+			return nil
+		}
+
+		removed = expireHeadlessRunForCleanup(run, now)
+
+		return s.removeHeadlessRunArtifactsUnlocked(id)
+	})
+	if err != nil {
+		return HeadlessRun{}, false, err
+	}
+
+	return removed, removed.ID != "", nil
+}
+
+func expireHeadlessRunForCleanup(run HeadlessRun, now time.Time) HeadlessRun {
+	expiredAt := now.UTC()
+	run.Status = HeadlessStatusExpired
+	run.ExpiredAt = &expiredAt
+	run.UpdatedAt = expiredAt
+	run.TerminalReason = "expired by headless retention cleanup"
+
+	return run
+}
+
+func headlessRunEligibleForRetentionCleanup(run HeadlessRun, cutoff time.Time) bool {
+	if run.Status == HeadlessStatusRunning || run.Status == HeadlessStatusOrphaned {
+		return false
+	}
+
+	if !isTerminalHeadlessStatus(run.Status) {
+		return false
+	}
+
+	retentionTime := headlessRunRetentionTime(run)
+	if retentionTime.IsZero() {
+		return false
+	}
+
+	return retentionTime.Before(cutoff)
+}
+
+func headlessRunRetentionTime(run HeadlessRun) time.Time {
+	for _, at := range []*time.Time{
+		run.ExpiredAt,
+		run.RetriedAt,
+		run.CanceledAt,
+		run.CompletedAt,
+	} {
+		if at != nil && !at.IsZero() {
+			return at.UTC()
+		}
+	}
+
+	if !run.UpdatedAt.IsZero() {
+		return run.UpdatedAt.UTC()
+	}
+
+	return run.StartedAt.UTC()
+}
+
+func (s *Store) removeHeadlessRunArtifactsUnlocked(id string) error {
+	chunks, err := s.headlessLogChunksUnlocked(id)
+	if err != nil {
+		return err
+	}
+
+	for _, chunk := range chunks {
+		if err := os.Remove(chunk.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("session: remove headless log chunk %s: %w", chunk.path, err)
+		}
+	}
+
+	for _, path := range []string{
+		s.headlessJSONPath(id),
+		s.headlessEventsPath(id),
+		s.headlessLogPath(id),
+	} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("session: remove headless artifact %s: %w", path, err)
+		}
+	}
+
+	if err := os.RemoveAll(s.headlessArtifactDir(id)); err != nil {
+		return fmt.Errorf("session: remove headless artifact dir %s: %w", s.headlessArtifactDir(id), err)
+	}
+
+	return nil
+}
+
+// RecoverStaleHeadlessRuns reconciles recoverable running jobs and returns the
+// records that changed. A recovered run may become stale, orphaned, or expired
+// depending on its heartbeat, lease, and recorded process state.
 func (s *Store) RecoverStaleHeadlessRuns(staleAfter time.Duration) ([]HeadlessRun, error) {
 	if staleAfter <= 0 {
 		staleAfter = defaultHeadlessStaleAfter
@@ -1087,6 +1449,8 @@ func (s *Store) reconcileHeadlessRunUnlocked(run HeadlessRun, now time.Time, sta
 	switch status {
 	case HeadlessStatusOrphaned:
 		run, err = s.markHeadlessRunOrphanedUnlocked(run, now, reason)
+	case HeadlessStatusExpired:
+		run, err = s.markHeadlessRunExpiredUnlocked(run, now, reason)
 	default:
 		run, err = s.markHeadlessRunStaleUnlocked(run, now, reason)
 	}
@@ -1122,6 +1486,37 @@ func (s *Store) markHeadlessRunStaleUnlocked(run HeadlessRun, now time.Time, rea
 	}
 
 	if err := s.appendHeadlessEventUnlocked(run.ID, headlessEventForRun(run, HeadlessEventStale, reason)); err != nil {
+		return HeadlessRun{}, err
+	}
+
+	return run, nil
+}
+
+func (s *Store) markHeadlessRunExpiredUnlocked(run HeadlessRun, now time.Time, reason string) (HeadlessRun, error) {
+	exitCode := 1
+	run.Status = HeadlessStatusExpired
+	run.Stale = false
+	run.StaleReason = ""
+	run.OrphanedReason = ""
+	run.CancellationReason = ""
+	run.TerminalReason = reason
+	run.CompletedAt = &now
+	run.ExpiredAt = &now
+	run.ExitCode = &exitCode
+
+	saved, err := s.saveAndLoadHeadlessRunUnlocked(run)
+	if err != nil {
+		return HeadlessRun{}, err
+	}
+
+	run = saved
+
+	line := "expired\t" + now.Format(time.RFC3339) + "\treason=" + reason + "\n"
+	if err := s.appendHeadlessLogTextUnlocked(run.ID, headlessLifecycleLogLine(run, line), headlessLogPolicyForRun(run)); err != nil {
+		return HeadlessRun{}, err
+	}
+
+	if err := s.appendHeadlessEventUnlocked(run.ID, headlessEventForRun(run, HeadlessEventExpired, reason)); err != nil {
 		return HeadlessRun{}, err
 	}
 
@@ -1314,6 +1709,8 @@ func prepareRunningHeadlessRun(run HeadlessRun, now time.Time) HeadlessRun {
 		run.LastHeartbeatAt = now
 	}
 
+	run.LeaseExpiresAt = normalizeHeadlessLease(run.LastHeartbeatAt, run.LeaseExpiresAt)
+
 	run = prepareRunningHeadlessHost(run)
 	localHost := headlessHostnameIsLocal(run.Hostname)
 
@@ -1373,6 +1770,13 @@ func prepareRunningHeadlessProcess(run HeadlessRun) HeadlessRun {
 }
 
 func prepareRunningHeadlessCommand(run HeadlessRun) HeadlessRun {
+	if run.Executable == "" {
+		executable, err := os.Executable()
+		if err == nil {
+			run.Executable = executable
+		}
+	}
+
 	if run.StartedCommand == "" {
 		run.StartedCommand = strings.Join(os.Args, " ")
 	}
@@ -1388,6 +1792,17 @@ func normalizeHeadlessRunLifecycleFields(run HeadlessRun) HeadlessRun {
 	if run.Status != HeadlessStatusCanceled {
 		run.CanceledAt = nil
 		run.CancellationReason = ""
+	}
+
+	if run.Status != HeadlessStatusRetried {
+		run.RetriedAt = nil
+		if run.Status != HeadlessStatusSuperseded {
+			run.SupersededByRunID = ""
+		}
+	}
+
+	if run.Status != HeadlessStatusExpired {
+		run.ExpiredAt = nil
 	}
 
 	switch run.Status {
@@ -1413,14 +1828,8 @@ func normalizeHeadlessRunLifecycleFields(run HeadlessRun) HeadlessRun {
 }
 
 func validateHeadlessRunRelationships(run HeadlessRun) error {
-	if run.ParentRunID != "" {
-		if err := validateHeadlessID(run.ParentRunID); err != nil {
-			return fmt.Errorf("session: invalid parent headless id %q: %w", run.ParentRunID, err)
-		}
-
-		if run.ParentRunID == run.ID {
-			return fmt.Errorf("session: headless run %q cannot be its own parent", run.ID)
-		}
+	if err := validateHeadlessRunReferenceIDs(run); err != nil {
+		return err
 	}
 
 	seenChildren := make(map[string]struct{}, len(run.ChildRunIDs))
@@ -1438,6 +1847,34 @@ func validateHeadlessRunRelationships(run HeadlessRun) error {
 		}
 
 		seenChildren[childID] = struct{}{}
+	}
+
+	return nil
+}
+
+func validateHeadlessRunReferenceIDs(run HeadlessRun) error {
+	references := []struct {
+		value       string
+		field       string
+		selfMessage string
+	}{
+		{value: run.ParentRunID, field: "parent", selfMessage: "cannot be its own parent"},
+		{value: run.RetryOfRunID, field: "retry_of", selfMessage: "cannot retry itself"},
+		{value: run.SupersededByRunID, field: "superseded_by", selfMessage: "cannot supersede itself"},
+	}
+
+	for _, ref := range references {
+		if ref.value == "" {
+			continue
+		}
+
+		if err := validateHeadlessID(ref.value); err != nil {
+			return fmt.Errorf("session: invalid %s headless id %q: %w", ref.field, ref.value, err)
+		}
+
+		if ref.value == run.ID {
+			return fmt.Errorf("session: headless run %q %s", run.ID, ref.selfMessage)
+		}
 	}
 
 	return nil
@@ -1461,6 +1898,8 @@ func redactHeadlessRun(run HeadlessRun) HeadlessRun {
 	run.EventsPath = RedactHeadlessText(run.EventsPath)
 	run.ArtifactDir = RedactHeadlessText(run.ArtifactDir)
 	run.CWD = RedactHeadlessText(run.CWD)
+	run.Executable = RedactHeadlessText(run.Executable)
+	run.Version = RedactHeadlessText(run.Version)
 	run.CancellationReason = RedactHeadlessText(run.CancellationReason)
 	run.StaleReason = RedactHeadlessText(run.StaleReason)
 	run.OrphanedReason = RedactHeadlessText(run.OrphanedReason)
@@ -1571,7 +2010,36 @@ func (s *Store) loadHeadlessRunUnlocked(id string) (HeadlessRun, error) {
 		return HeadlessRun{}, fmt.Errorf("%w: parse headless %s: %w", ErrCorruptHeadlessRun, path, err)
 	}
 
-	return run, nil
+	return s.withLoadedHeadlessStorageDefaults(run), nil
+}
+
+func (s *Store) withLoadedHeadlessStorageDefaults(run HeadlessRun) HeadlessRun {
+	if run.LogPath == "" {
+		run.LogPath = s.headlessLogPath(run.ID)
+	}
+
+	if run.EventsPath == "" {
+		run.EventsPath = s.headlessEventsPath(run.ID)
+	}
+
+	if run.ArtifactDir == "" {
+		run.ArtifactDir = s.headlessArtifactDir(run.ID)
+	}
+
+	policy := DefaultHeadlessLogPolicy()
+	if run.LogMaxChunkBytes <= 0 {
+		run.LogMaxChunkBytes = policy.MaxChunkBytes
+	}
+
+	if run.LogMaxChunks <= 0 {
+		run.LogMaxChunks = policy.MaxChunks
+	}
+
+	if !run.PrivateLogs {
+		run = redactHeadlessRun(run)
+	}
+
+	return run
 }
 
 func (s *Store) loadOptionalHeadlessRunUnlocked(id string) (HeadlessRun, bool, error) {
@@ -1658,6 +2126,8 @@ func prepareHeadlessEvent(id string, event HeadlessEvent, private bool) Headless
 	event.Error = RedactHeadlessText(event.Error)
 	event.SessionPath = RedactHeadlessText(event.SessionPath)
 	event.CWD = RedactHeadlessText(event.CWD)
+	event.Executable = RedactHeadlessText(event.Executable)
+	event.Version = RedactHeadlessText(event.Version)
 	event.TerminalReason = RedactHeadlessText(event.TerminalReason)
 	event.CancelReason = RedactHeadlessText(event.CancelReason)
 	event.StaleReason = RedactHeadlessText(event.StaleReason)
@@ -1698,14 +2168,8 @@ func validateHeadlessEvent(id string, event HeadlessEvent) error {
 		return err
 	}
 
-	if event.ParentRunID != "" {
-		if err := validateHeadlessID(event.ParentRunID); err != nil {
-			return fmt.Errorf("session: invalid headless event parent_run_id %q: %w", event.ParentRunID, err)
-		}
-
-		if event.ParentRunID == id {
-			return fmt.Errorf("session: headless event run %q cannot be its own parent", id)
-		}
+	if err := validateHeadlessEventReferenceIDs(id, event); err != nil {
+		return err
 	}
 
 	seenChildren := make(map[string]struct{}, len(event.ChildRunIDs))
@@ -1723,6 +2187,34 @@ func validateHeadlessEvent(id string, event HeadlessEvent) error {
 		}
 
 		seenChildren[childID] = struct{}{}
+	}
+
+	return nil
+}
+
+func validateHeadlessEventReferenceIDs(id string, event HeadlessEvent) error {
+	references := []struct {
+		value       string
+		field       string
+		selfMessage string
+	}{
+		{value: event.ParentRunID, field: "parent_run_id", selfMessage: "cannot be its own parent"},
+		{value: event.RetryOfRunID, field: "retry_of_run_id", selfMessage: "cannot retry itself"},
+		{value: event.SupersededByRunID, field: "superseded_by_run_id", selfMessage: "cannot supersede itself"},
+	}
+
+	for _, ref := range references {
+		if ref.value == "" {
+			continue
+		}
+
+		if err := validateHeadlessID(ref.value); err != nil {
+			return fmt.Errorf("session: invalid headless event %s %q: %w", ref.field, ref.value, err)
+		}
+
+		if ref.value == id {
+			return fmt.Errorf("session: headless event run %q %s", id, ref.selfMessage)
+		}
 	}
 
 	return nil
@@ -1746,33 +2238,38 @@ func validateHeadlessEventLifecycle(event HeadlessEvent) error {
 
 func headlessEventForRun(run HeadlessRun, eventType HeadlessEventType, message string) HeadlessEvent {
 	return HeadlessEvent{
-		At:              time.Now().UTC(),
-		RunID:           run.ID,
-		ParentRunID:     run.ParentRunID,
-		SessionID:       run.SessionID,
-		SessionPath:     run.SessionPath,
-		Type:            eventType,
-		Status:          run.Status,
-		Message:         message,
-		Error:           run.Error,
-		Agent:           run.Agent,
-		Model:           run.Model,
-		Autonomy:        run.Autonomy,
-		AgentLoopBudget: run.AgentLoopBudget,
-		CWD:             run.CWD,
-		Hostname:        run.Hostname,
-		StartedCommand:  run.StartedCommand,
-		StartMethod:     run.StartMethod,
-		TerminalReason:  run.TerminalReason,
-		CancelReason:    run.CancellationReason,
-		StaleReason:     run.StaleReason,
-		OrphanedReason:  run.OrphanedReason,
-		ExitCode:        run.ExitCode,
-		CommandArgs:     append([]string(nil), run.CommandArgs...),
-		ChildRunIDs:     append([]string(nil), run.ChildRunIDs...),
-		PID:             run.PID,
-		ParentPID:       run.ParentPID,
-		ProcessGroupID:  run.ProcessGroupID,
+		At:                time.Now().UTC(),
+		RunID:             run.ID,
+		ParentRunID:       run.ParentRunID,
+		RetryOfRunID:      run.RetryOfRunID,
+		SupersededByRunID: run.SupersededByRunID,
+		SessionID:         run.SessionID,
+		SessionPath:       run.SessionPath,
+		Type:              eventType,
+		Status:            run.Status,
+		Message:           message,
+		Error:             run.Error,
+		Agent:             run.Agent,
+		Model:             run.Model,
+		Autonomy:          run.Autonomy,
+		AgentLoopBudget:   run.AgentLoopBudget,
+		CWD:               run.CWD,
+		Executable:        run.Executable,
+		Version:           run.Version,
+		Hostname:          run.Hostname,
+		StartedCommand:    run.StartedCommand,
+		StartMethod:       run.StartMethod,
+		TerminalReason:    run.TerminalReason,
+		CancelReason:      run.CancellationReason,
+		StaleReason:       run.StaleReason,
+		OrphanedReason:    run.OrphanedReason,
+		ExitCode:          run.ExitCode,
+		CommandArgs:       append([]string(nil), run.CommandArgs...),
+		ChildRunIDs:       append([]string(nil), run.ChildRunIDs...),
+		PID:               run.PID,
+		ParentPID:         run.ParentPID,
+		ProcessGroupID:    run.ProcessGroupID,
+		RetryCount:        run.RetryCount,
 	}
 }
 
@@ -2179,6 +2676,32 @@ func normalizeTailStart(chunks []headlessLogChunk, offset HeadlessLogOffset) hea
 		start.truncated = true
 	}
 
+	for _, chunk := range chunks {
+		if chunk.index < start.chunk {
+			continue
+		}
+
+		if chunk.index > start.chunk {
+			start.chunk = chunk.index
+			start.byte = 0
+			start.truncated = true
+
+			return start
+		}
+
+		if start.byte > chunk.size {
+			start.byte = chunk.size
+			start.truncated = true
+		}
+
+		return start
+	}
+
+	last := chunks[len(chunks)-1]
+	start.chunk = last.index
+	start.byte = last.size
+	start.truncated = true
+
 	return start
 }
 
@@ -2270,20 +2793,24 @@ func headlessReconcileStatus(run HeadlessRun, now time.Time, staleAfter time.Dur
 		return HeadlessStatusOrphaned, fmt.Sprintf("process pid %d exited but process group %d is still running", run.PID, run.ProcessGroupID), true
 	}
 
+	stale, reason := headlessHeartbeatStaleReason(headlessLastActivity(run), now, staleAfter)
+	if expired, expiredReason := headlessLeaseExpiredReason(run, now); expired && !stale {
+		return HeadlessStatusExpired, expiredReason, true
+	}
+
 	if unavailable, unavailableReason := headlessProcessUnavailableReason(run); unavailable {
 		return HeadlessStatusStale, unavailableReason, true
 	}
 
-	stale, reason := headlessHeartbeatStaleReason(headlessLastActivity(run), now, staleAfter)
-	if !stale {
-		return "", "", false
+	if stale {
+		if headlessRecordedProcessIsLiveLocal(run) {
+			return HeadlessStatusOrphaned, reason, true
+		}
+
+		return HeadlessStatusStale, reason, true
 	}
 
-	if headlessRecordedProcessIsLiveLocal(run) {
-		return HeadlessStatusOrphaned, reason, true
-	}
-
-	return HeadlessStatusStale, reason, true
+	return "", "", false
 }
 
 func headlessHeartbeatStaleReason(activity, now time.Time, staleAfter time.Duration) (stale bool, reason string) {
@@ -2298,13 +2825,21 @@ func headlessHeartbeatStaleReason(activity, now time.Time, staleAfter time.Durat
 	return true, "no heartbeat since " + activity.UTC().Format(time.RFC3339)
 }
 
-func headlessProcessUnavailableReason(run HeadlessRun) (unavailable bool, reason string) {
-	if run.PID <= 0 {
-		return true, "no process pid recorded"
+func headlessLeaseExpiredReason(run HeadlessRun, now time.Time) (expired bool, reason string) {
+	if run.LeaseExpiresAt.IsZero() || now.Before(run.LeaseExpiresAt) {
+		return false, ""
 	}
 
-	if !headlessPIDIsLocal(run) {
+	return true, "lease expired at " + run.LeaseExpiresAt.UTC().Format(time.RFC3339)
+}
+
+func headlessProcessUnavailableReason(run HeadlessRun) (unavailable bool, reason string) {
+	if !headlessHostnameIsLocal(run.Hostname) {
 		return false, ""
+	}
+
+	if run.PID <= 0 {
+		return true, "no process pid recorded"
 	}
 
 	if !headlessProcessAlive(run.PID) {
@@ -2363,7 +2898,21 @@ func headlessCanSignalRecordedProcessGroup(run HeadlessRun) bool {
 
 func isTerminalHeadlessStatus(status HeadlessStatus) bool {
 	switch status {
-	case HeadlessStatusCompleted, HeadlessStatusFailed, HeadlessStatusCanceled, HeadlessStatusTimedOut, HeadlessStatusStale, HeadlessStatusSuperseded, HeadlessStatusCorrupt:
+	case HeadlessStatusCompleted, HeadlessStatusFailed, HeadlessStatusCanceled, HeadlessStatusTimedOut, HeadlessStatusExpired, HeadlessStatusStale, HeadlessStatusRetried, HeadlessStatusSuperseded, HeadlessStatusCorrupt:
+		return true
+	default:
+		return false
+	}
+}
+
+func isRetryableHeadlessStatus(status HeadlessStatus) bool {
+	switch status {
+	case HeadlessStatusCompleted,
+		HeadlessStatusFailed,
+		HeadlessStatusCanceled,
+		HeadlessStatusTimedOut,
+		HeadlessStatusExpired,
+		HeadlessStatusStale:
 		return true
 	default:
 		return false
@@ -2377,8 +2926,10 @@ func isKnownHeadlessStatus(status HeadlessStatus) bool {
 		HeadlessStatusFailed,
 		HeadlessStatusCanceled,
 		HeadlessStatusTimedOut,
+		HeadlessStatusExpired,
 		HeadlessStatusStale,
 		HeadlessStatusOrphaned,
+		HeadlessStatusRetried,
 		HeadlessStatusSuperseded,
 		HeadlessStatusCorrupt:
 		return true
@@ -2400,8 +2951,10 @@ func isKnownHeadlessEventType(eventType HeadlessEventType) bool {
 		HeadlessEventFailed,
 		HeadlessEventCanceled,
 		HeadlessEventTimedOut,
+		HeadlessEventExpired,
 		HeadlessEventStale,
 		HeadlessEventOrphaned,
+		HeadlessEventRetried,
 		HeadlessEventSuperseded:
 		return true
 	default:
@@ -2425,10 +2978,14 @@ func headlessEventStatusMatchesType(eventType HeadlessEventType, status Headless
 		return status == HeadlessStatusCanceled
 	case HeadlessEventTimedOut:
 		return status == HeadlessStatusTimedOut
+	case HeadlessEventExpired:
+		return status == HeadlessStatusExpired
 	case HeadlessEventStale:
 		return status == HeadlessStatusStale
 	case HeadlessEventOrphaned:
 		return status == HeadlessStatusOrphaned
+	case HeadlessEventRetried:
+		return status == HeadlessStatusRetried
 	case HeadlessEventSuperseded:
 		return status == HeadlessStatusSuperseded
 	default:
@@ -2482,6 +3039,26 @@ func headlessLastActivity(run HeadlessRun) time.Time {
 	}
 
 	return run.StartedAt
+}
+
+func normalizeHeadlessLease(heartbeatAt, leaseExpiresAt time.Time) time.Time {
+	if heartbeatAt.IsZero() {
+		return leaseExpiresAt
+	}
+
+	if leaseExpiresAt.IsZero() || leaseExpiresAt.Before(heartbeatAt) {
+		return headlessLeaseExpiresAt(heartbeatAt)
+	}
+
+	return leaseExpiresAt
+}
+
+func headlessLeaseExpiresAt(heartbeatAt time.Time) time.Time {
+	if heartbeatAt.IsZero() {
+		return time.Time{}
+	}
+
+	return heartbeatAt.UTC().Add(defaultHeadlessStaleAfter)
 }
 
 func headlessLegacyMigrationLimit(policy HeadlessLogPolicy) int64 {
