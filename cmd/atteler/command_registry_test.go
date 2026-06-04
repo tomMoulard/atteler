@@ -17,6 +17,7 @@ const (
 	testDomainConfig         = "config"
 	testDomainProviders      = "providers"
 	testDomainPlugins        = "plugins"
+	testDomainIncident       = "incident"
 	testDomainWorktrees      = "worktrees"
 	testDomainEval           = "eval"
 	testCommandList          = "list"
@@ -79,7 +80,7 @@ func TestCommandRegistry_TopLevelRegistryStaysSmall(t *testing.T) {
 	t.Parallel()
 
 	registry := buildCommandRegistry()
-	assert.LessOrEqual(t, len(registry), 50, "top-level command registry should stay grouped by domain instead of one entry per flag")
+	assert.LessOrEqual(t, len(registry), 52, "top-level command registry should stay grouped by domain instead of one entry per flag")
 }
 
 func TestCommandRegistry_ContractsAreWellFormed(t *testing.T) {
@@ -544,6 +545,41 @@ func TestCommandRegistry_HeadlessPrivateLogRequiresHeadlessMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "--headless-private-log requires --headless")
 }
 
+func TestCommandRegistry_IncidentSupplementalFlagsRequireDiagnose(t *testing.T) {
+	t.Parallel()
+
+	err := validateCLICommandSelection(cliOptions{incidentApplyFix: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "incident flags require --incident-diagnose")
+
+	err = validateCLICommandSelection(cliOptions{incidentDiagnose: true, incidentApplyFix: true})
+	require.NoError(t, err)
+
+	err = validateCLICommandSelection(cliOptions{incidentDiagnose: true, incidentApplyFix: true, jsonOutput: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "incident apply fix currently supports --output text only")
+
+	err = validateCLICommandSelection(cliOptions{incidentDiagnose: true, incidentApplyFix: true, outputFormat: commandOutputMarkdown})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "incident apply fix currently supports --output text only")
+
+	err = validateCLICommandSelection(cliOptions{incidentDiagnose: true, incidentOpenPR: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--incident-open-pr requires --incident-apply-fix")
+
+	err = validateCLICommandSelection(cliOptions{incidentDiagnose: true, incidentApplyFix: true, incidentOpenPR: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--incident-open-pr requires at least one --incident-validation-command")
+
+	err = validateCLICommandSelection(cliOptions{
+		incidentDiagnose:           true,
+		incidentApplyFix:           true,
+		incidentOpenPR:             true,
+		incidentValidationCommands: rawStringListFlag{"go test ./..."},
+	})
+	require.NoError(t, err)
+}
+
 func TestCommandRegistry_InlineAmbiguityFailsHelpfulError(t *testing.T) {
 	t.Parallel()
 
@@ -743,6 +779,8 @@ func TestCommandSurface_JSONDumpIncludesDispatchContract(t *testing.T) {
 	assert.Contains(t, commands, "list-sessions")
 	assert.Contains(t, commands, "headless-command")
 	assert.Contains(t, commands, "mcp-invoke")
+	assert.Contains(t, commands, "incident-diagnose-providerless")
+	assert.Contains(t, commands, "incident-diagnose")
 	assert.Equal(t, "providerless", commands["list-sessions"].Tier)
 	assert.Equal(t, "listSessionsCommandInput", commands["list-sessions"].InputType)
 	assert.Equal(t, "headlessCommandInput", commands["headless-command"].InputType)
@@ -758,6 +796,20 @@ func TestCommandSurface_JSONDumpIncludesDispatchContract(t *testing.T) {
 	assert.Contains(t, commands["spawn-agents"].InputFields, "Specs")
 	assert.Contains(t, commands["mcp-invoke"].Overrides, "mcp-manifest")
 	assert.Contains(t, commands["mcp-invoke"].OutputModes, commandOutputJSON)
+	assert.Equal(t, "providerless-config", commands["incident-diagnose-providerless"].Tier)
+	assert.Equal(t, "stateful", commands["incident-diagnose"].Tier)
+	assert.Contains(t, commands["incident-diagnose-providerless"].SideEffects, commandEffectGitRead)
+	assert.Contains(t, commands["incident-diagnose-providerless"].SideEffects, commandEffectNetworkRead)
+	assert.NotContains(t, commands["incident-diagnose-providerless"].SideEffects, commandEffectLLMProviderRead)
+	assert.Contains(t, commands["incident-diagnose-providerless"].OutputModes, commandOutputJSON)
+	assert.Equal(t, "incidentDiagnoseOnlyCommandInput", commands["incident-diagnose-providerless"].InputType)
+	assert.NotContains(t, commands["incident-diagnose-providerless"].InputFlags, "--incident-open-pr")
+	assert.Contains(t, commands["incident-diagnose"].SideEffects, commandEffectLLMProviderRead)
+	assert.Contains(t, commands["incident-diagnose"].SideEffects, commandEffectNetworkRead)
+	assert.Contains(t, commands["incident-diagnose"].SideEffects, commandEffectWorktreeWrite)
+	assert.NotContains(t, commands["incident-diagnose"].OutputModes, commandOutputJSON)
+	assert.Contains(t, commands["incident-diagnose"].InputFlags, "--incident-open-pr")
+	assert.NotContains(t, commands["incident-diagnose"].InputFlags, "--json")
 	assert.Contains(t, commands["list-sessions"].SideEffects, commandEffectSessionRead)
 	assert.Contains(t, commands["headless-command"].SideEffects, commandEffectProcessExecute)
 	assert.Contains(t, commands["headless-command"].SideEffects, commandEffectSessionWrite)
@@ -796,6 +848,10 @@ func TestCommandSurface_DomainCommandsLinkToDispatchContract(t *testing.T) {
 
 	mcpManifest := requireDomainCommand(t, surface, "plugins", "mcp-manifest")
 	assert.Equal(t, []string{"mcp-manifest"}, mcpManifest.DispatchCommands)
+
+	incidentDiagnose := requireDomainCommand(t, surface, testDomainIncident, "diagnose")
+	assert.Contains(t, incidentDiagnose.DispatchCommands, "incident-diagnose-providerless")
+	assert.Contains(t, incidentDiagnose.DispatchCommands, "incident-diagnose")
 
 	routeBatch := requireDomainCommand(t, surface, "providers", "route-batch")
 	assert.Equal(t, []string{"route-models-providerless"}, routeBatch.DispatchCommands)
@@ -1106,6 +1162,18 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			args:     []string{"watch", "json"},
 			wantName: "watch-scan-providerless",
 			wantTier: tierProviderlessConfig,
+		},
+		{
+			name:     "incident diagnose routes providerless without repair loop",
+			args:     []string{"incident", "diagnose", "--incident-file", "incident.json"},
+			wantName: "incident-diagnose-providerless",
+			wantTier: tierProviderlessConfig,
+		},
+		{
+			name:     "incident diagnose apply fix routes stateful repair loop",
+			args:     []string{"incident", "diagnose", "--incident-file", "incident.json", "--incident-apply-fix"},
+			wantName: "incident-diagnose",
+			wantTier: tierStateful,
 		},
 		{
 			name:     "plugins manifest routes providerless MCP manifest",
@@ -1847,6 +1915,7 @@ func knownSideEffectsForTest() map[string]bool {
 		commandEffectFilesystemWrite: true,
 		commandEffectGitRead:         true,
 		commandEffectLLMProviderRead: true,
+		commandEffectNetworkRead:     true,
 		commandEffectProcessExecute:  true,
 		commandEffectSessionRead:     true,
 		commandEffectSessionWrite:    true,

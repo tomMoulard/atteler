@@ -375,6 +375,8 @@ func lookupFlagDomain(name string) (string, bool) {
 		return "memory/retrieval", true
 	case name == commandOutputJSON || strings.HasPrefix(name, "code-") || strings.HasPrefix(name, "lsp-"):
 		return codeIntelDomainName, true
+	case name == "sentry" || strings.HasPrefix(name, "incident-"):
+		return "incident", true
 	case strings.HasPrefix(name, "review-"):
 		return "review", true
 	case strings.HasPrefix(name, "watch-"):

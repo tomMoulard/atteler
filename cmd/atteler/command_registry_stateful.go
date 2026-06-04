@@ -284,6 +284,14 @@ func statefulExecutionCommands() []command {
 			},
 		},
 		{
+			name:  "incident-diagnose",
+			tier:  tierStateful,
+			match: func(o cliOptions) bool { return o.incidentDiagnose && o.incidentApplyFix },
+			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
+				return runIncidentDiagnose(ctx, s, incidentDiagnoseCommandInputFromOptions(o))
+			},
+		},
+		{
 			name:  "spawn-agents",
 			tier:  tierStateful,
 			match: func(o cliOptions) bool { return len(o.spawnAgentSpecs) > 0 },

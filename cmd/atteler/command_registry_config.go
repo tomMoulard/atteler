@@ -136,6 +136,14 @@ func providerlessConfigLocalAnalysisCommands() []command {
 		// Tier: providerless config -- local analysis (non-code)
 		// ---------------------------------------------------------------
 		{
+			name:  "incident-diagnose-providerless",
+			tier:  tierProviderlessConfig,
+			match: func(o cliOptions) bool { return o.incidentDiagnose && !o.incidentApplyFix },
+			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
+				return runIncidentDiagnose(ctx, s, incidentDiagnoseCommandInputFromOptions(o))
+			},
+		},
+		{
 			name:  "git-history-search-providerless",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.gitHistorySearch != "" },

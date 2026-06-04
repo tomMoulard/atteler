@@ -269,6 +269,20 @@ type cliOptions struct {
 	evalExpectedPath                   string
 	evalMode                           string
 	gitHistorySearch                   string
+	incidentFilePath                   string
+	incidentMCPManifestPath            string
+	incidentMCPServerName              string
+	incidentMCPToolArgsJSON            string
+	incidentMCPToolName                string
+	incidentPRBodyPath                 string
+	incidentReference                  string
+	incidentReportPath                 string
+	incidentReproCommand               string
+	incidentSentryBaseURL              string
+	incidentSentryEventID              string
+	incidentSentryOrg                  string
+	incidentSentryTokenEnv             string
+	sentryIssue                        string
 	describePluginName                 string
 	runPluginTarget                    string
 	pluginEntrypoint                   string
@@ -365,6 +379,7 @@ type cliOptions struct {
 	agentMemoryIndexFiles              stringListFlag
 	memoryRedactRules                  rawStringListFlag
 	worktreeVerificationCommands       rawStringListFlag
+	incidentValidationCommands         rawStringListFlag
 	memoryTags                         stringListFlag
 	planAgentNames                     stringListFlag
 	retrievalFilters                   stringListFlag
@@ -397,6 +412,7 @@ type cliOptions struct {
 	routeOutputTokens                  positiveIntFlag
 	routeCacheWriteTokens              positiveIntFlag
 	gitHistoryLimit                    positiveIntFlag
+	incidentTimeout                    positiveIntFlag
 	pluginTimeout                      positiveIntFlag
 	bashTimeout                        positiveIntFlag
 	mcpTimeout                         positiveIntFlag
@@ -486,6 +502,9 @@ type cliOptions struct {
 	watchLoop                          bool
 	watchGate                          bool
 	watchIssueUpsert                   bool
+	incidentApplyFix                   bool
+	incidentDiagnose                   bool
+	incidentOpenPR                     bool
 	reviewScan                         bool
 	lspSymbols                         bool
 	asyncPlan                          bool
