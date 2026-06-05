@@ -28,7 +28,6 @@ func (noopTracker) FetchIssueStatesByIDs(context.Context, []string) ([]Issue, er
 }
 
 type candidateTracker struct {
-	noopTracker
 	err    error
 	issues []Issue
 }
@@ -39,6 +38,14 @@ func (t candidateTracker) FetchCandidateIssues(context.Context) ([]Issue, error)
 	}
 
 	return t.issues, nil
+}
+
+func (candidateTracker) FetchIssuesByStates(context.Context, []string) ([]Issue, error) {
+	return nil, nil
+}
+
+func (candidateTracker) FetchIssueStatesByIDs(context.Context, []string) ([]Issue, error) {
+	return nil, nil
 }
 
 type checkTracker struct {

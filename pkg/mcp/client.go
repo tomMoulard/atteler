@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -227,6 +228,7 @@ type ListPromptsResult struct {
 // SessionOptions controls a long-lived MCP stdio server session.
 type SessionOptions struct {
 	Policy             *shell.Policy
+	Permission         *permission.Policy
 	Audit              shell.AuditContext
 	ClientInfo         Implementation
 	ClientCapabilities ClientCapabilities
@@ -373,14 +375,16 @@ func (s *Session) Start(ctx context.Context) error {
 	// down while procCtx preserves caller values for command setup.
 	procCtx, cancel := newSessionProcessContext(ctx)
 	cmd, invocation, err := shell.CommandContext(procCtx, shell.CommandOptions{
-		Program:      strings.TrimSpace(s.server.Command),
-		Args:         s.server.Args,
-		Dir:          s.server.CWD,
-		Env:          s.server.Env,
-		Policy:       mcpShellPolicy(s.opts.Policy, s.server.Env),
-		Mode:         shell.ModeStreaming,
-		SecretValues: s.secrets,
-		Audit:        s.auditContext(),
+		Program:              strings.TrimSpace(s.server.Command),
+		Args:                 s.server.Args,
+		Dir:                  s.server.CWD,
+		Env:                  s.server.Env,
+		Policy:               mcpShellPolicy(s.opts.Policy, s.server.Env),
+		Permission:           s.opts.Permission,
+		PermissionOperations: mcpPermissionOperations(s.server),
+		Mode:                 shell.ModeStreaming,
+		SecretValues:         s.secrets,
+		Audit:                s.auditContext(),
 	})
 	if err != nil {
 		cancel()
@@ -454,6 +458,11 @@ func (s *Session) Start(ctx context.Context) error {
 	s.initializeResult = initResult
 	s.initMu.Unlock()
 
+	if err := s.validateDeclaredCapabilities(initResult.Capabilities); err != nil {
+		_ = s.close(newShutdownContext(ctx))
+		return err
+	}
+
 	if err := s.notify(initCtx, "notifications/initialized", nil); err != nil {
 		_ = s.close(newShutdownContext(ctx))
 		return withProcessOutput(fmt.Errorf("initialize mcp server %q: send initialized notification: %w", strings.TrimSpace(s.server.Name), err), s.Stderr())
@@ -462,11 +471,6 @@ func (s *Session) Start(ctx context.Context) error {
 	s.stateMu.Lock()
 	s.initialized = true
 	s.stateMu.Unlock()
-
-	if err := s.validateDeclaredCapabilities(initResult.Capabilities); err != nil {
-		_ = s.close(newShutdownContext(ctx))
-		return err
-	}
 
 	if initResult.Capabilities.Has("tools") {
 		if _, err := s.ListTools(initCtx); err != nil {
@@ -1147,7 +1151,7 @@ func (s *Session) invoke(ctx context.Context, request Request, validate bool) (*
 			return nil, err
 		}
 
-		if err := s.validateRequest(request); err != nil {
+		if err := s.validateRequest(ctx, request); err != nil {
 			return nil, err
 		}
 	}
@@ -1238,7 +1242,7 @@ func (s *Session) sendCancelled(requestID any, reason error) error {
 	return s.writeMessageNoContext(notification)
 }
 
-func (s *Session) validateRequest(request Request) error {
+func (s *Session) validateRequest(ctx context.Context, request Request) error {
 	method := strings.TrimSpace(request.Method)
 	if managedLifecycleMethod(method) {
 		return fmt.Errorf("mcp lifecycle method %q is managed by the session", method)
@@ -1267,7 +1271,11 @@ func (s *Session) validateRequest(request Request) error {
 		return err
 	}
 
-	return s.validateToolCall(params)
+	if err := s.validateToolCall(params); err != nil {
+		return err
+	}
+
+	return s.authorizeToolCall(ctx, params)
 }
 
 func managedLifecycleMethod(method string) bool {
@@ -1333,6 +1341,21 @@ func (s *Session) validateToolCall(params CallToolParams) error {
 	}
 
 	return nil
+}
+
+func (s *Session) authorizeToolCall(ctx context.Context, params CallToolParams) error {
+	toolName := strings.TrimSpace(params.Name)
+	decision := permission.Evaluate(ctx, s.opts.Permission, permission.Request{
+		Operations: []permission.Operation{mcpToolPermissionOperation(s.server, toolName)},
+		Action:     mcpToolPermissionAction(s.server.Name, toolName),
+		Source:     mcpPermissionSource(s.server.Name),
+		Target:     toolName,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }
 
 func (s *Session) requireCapability(capability, method string) error {
@@ -1511,6 +1534,79 @@ func redactServerSecretValues(text string, secrets []string) string {
 	}
 
 	return text
+}
+
+func mcpPermissionOperations(server Server) []permission.Operation {
+	return []permission.Operation{mcpServerPermissionOperation(server)}
+}
+
+func mcpServerPermissionOperation(server Server) permission.Operation {
+	name := strings.TrimSpace(server.Name)
+
+	metadata := map[string]string{"server": name}
+	if name == "" {
+		metadata = nil
+	}
+
+	return permission.Operation{
+		Kind:     permission.OperationExecute,
+		Action:   mcpServerPermissionAction(name),
+		Target:   strings.TrimSpace(server.Command),
+		Source:   mcpPermissionSource(name),
+		Metadata: metadata,
+	}
+}
+
+func mcpToolPermissionOperation(server Server, toolName string) permission.Operation {
+	serverName := strings.TrimSpace(server.Name)
+	toolName = strings.TrimSpace(toolName)
+	metadata := map[string]string{"server": serverName, "tool": toolName}
+	for key, value := range metadata {
+		if value == "" {
+			delete(metadata, key)
+		}
+	}
+
+	return permission.Operation{
+		Kind:     permission.OperationExecute,
+		Action:   mcpToolPermissionAction(serverName, toolName),
+		Target:   toolName,
+		Source:   mcpPermissionSource(serverName),
+		Metadata: metadata,
+	}
+}
+
+func mcpServerPermissionAction(serverName string) string {
+	serverName = strings.TrimSpace(serverName)
+	if serverName != "" {
+		return "mcp server " + serverName
+	}
+
+	return "mcp server"
+}
+
+func mcpToolPermissionAction(serverName, toolName string) string {
+	serverName = strings.TrimSpace(serverName)
+	toolName = strings.TrimSpace(toolName)
+	switch {
+	case serverName != "" && toolName != "":
+		return "mcp tool " + serverName + "/" + toolName
+	case toolName != "":
+		return "mcp tool " + toolName
+	case serverName != "":
+		return "mcp tool " + serverName
+	default:
+		return "mcp tool"
+	}
+}
+
+func mcpPermissionSource(serverName string) string {
+	source := "atteler.mcp"
+	if serverName = strings.TrimSpace(serverName); serverName != "" {
+		source += "." + serverName
+	}
+
+	return source
 }
 
 func (s *Session) nextRequestID() int64 {

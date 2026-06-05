@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -131,6 +132,31 @@ func TestSession_ReusesProcessDiscoversToolsAndValidatesSchema(t *testing.T) {
 	assert.True(t, health.Healthy)
 	assert.True(t, health.Running)
 	assert.True(t, health.Initialized)
+}
+
+func TestSession_ToolCallUsesCentralPermissionPolicy(t *testing.T) {
+	session := NewSession(helperServer(t, "tools"), SessionOptions{})
+	require.NoError(t, session.Start(t.Context()))
+	defer func() { require.NoError(t, session.Close(context.WithoutCancel(t.Context()))) }()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+
+	response, err := session.CallTool(ctx, "search", map[string]any{"query": "blocked"})
+
+	require.Error(t, err)
+	assert.Nil(t, response)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), `execute operation "mcp tool helper/search" is denied by permission policy`)
+
+	response, err = session.CallTool(t.Context(), "search", map[string]any{"query": "allowed"})
+	require.NoError(t, err)
+
+	var result callToolResult
+	require.NoError(t, json.Unmarshal(response.Result, &result))
+	assert.Equal(t, 1, result.Count, "denied tool call should not be sent to the server")
+	assert.Equal(t, "allowed", result.Params.Arguments["query"])
 }
 
 func TestSession_ValidatesCompositeToolArgumentSchemas(t *testing.T) {
@@ -582,14 +608,18 @@ func TestSession_StderrDiagnosticsAreAttached(t *testing.T) {
 }
 
 func TestSession_RejectsDeclaredCapabilityMismatch(t *testing.T) {
-	server := helperServer(t, "echo")
+	server := helperServer(t, "record-initialized")
 	server.Capabilities = []string{"tools"}
+	initializedPath := filepath.Join(server.CWD, "initialized.txt")
 	session := NewSession(server, SessionOptions{})
 
 	err := session.Start(t.Context())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `declares "tools" capability`)
+
+	_, statErr := os.Stat(initializedPath)
+	assert.True(t, os.IsNotExist(statErr), "capability mismatch should fail before notifications/initialized")
 }
 
 func TestSession_RejectsMalformedToolsList(t *testing.T) {
@@ -661,6 +691,31 @@ func TestSession_RoutesProcessStartThroughShellPolicy(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "command denied by policy")
+}
+
+func TestSession_RoutesProcessStartThroughCentralPermissionPolicy(t *testing.T) {
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
+	session := NewSession(helperServer(t, "echo"), SessionOptions{Permission: &policy})
+
+	err := session.Start(t.Context())
+
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), `execute operation "mcp server helper" is denied by permission policy`)
+}
+
+func TestSession_RoutesProcessStartThroughContextPermissionPolicy(t *testing.T) {
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	session := NewSession(helperServer(t, "echo"), SessionOptions{})
+
+	err := session.Start(ctx)
+
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), `execute operation "mcp server helper" is denied by permission policy`)
 }
 
 func TestSession_RejectsUnsupportedAdvertisedClientCapabilities(t *testing.T) {
@@ -859,6 +914,50 @@ func TestSessionPool_ReusesInitializedSession(t *testing.T) {
 	var secondResult callToolResult
 	require.NoError(t, json.Unmarshal(second.Result, &secondResult))
 	assert.Equal(t, 2, secondResult.Count)
+}
+
+func TestSessionPool_RoutesProcessStartThroughCentralPermissionPolicy(t *testing.T) {
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
+	pool := NewSessionPool(SessionOptions{Permission: &policy})
+
+	session, err := pool.Session(t.Context(), helperServer(t, "echo"))
+
+	require.Error(t, err)
+	assert.Nil(t, session)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), `execute operation "mcp server helper" is denied by permission policy`)
+}
+
+func TestSessionPool_ToolCallUsesContextPermissionPolicyOnReusedSession(t *testing.T) {
+	pool := NewSessionPool(SessionOptions{})
+	defer func() {
+		require.NoError(t, pool.CloseAll(context.WithoutCancel(t.Context())))
+	}()
+
+	server := helperServer(t, "tools")
+	session, err := pool.Session(t.Context(), server)
+	require.NoError(t, err)
+	require.True(t, session.Health(t.Context()).Healthy)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+
+	response, err := pool.CallTool(ctx, server, "search", map[string]any{"query": "blocked"})
+
+	require.Error(t, err)
+	assert.Nil(t, response)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), `execute operation "mcp tool helper/search" is denied by permission policy`)
+
+	response, err = pool.CallTool(t.Context(), server, "search", map[string]any{"query": "allowed"})
+	require.NoError(t, err)
+
+	var result callToolResult
+	require.NoError(t, json.Unmarshal(response.Result, &result))
+	assert.Equal(t, 1, result.Count, "denied pooled tool call should not be sent to the server")
+	assert.Equal(t, "allowed", result.Params.Arguments["query"])
 }
 
 func TestSessionPool_CloseAllShutsDownAndRestarts(t *testing.T) {
@@ -1156,7 +1255,7 @@ func TestMCPHelperProcess(_ *testing.T) {
 	case "stderr-secret-exit":
 		fmt.Fprintf(os.Stderr, "server failed with token %s", os.Getenv("MCP_SECRET_TOKEN"))
 		os.Exit(2)
-	case "echo", "rpc-error", "rpc-error-secret", "tools", "complex-tool", "number-tool", "utilities", "ping-before-init", "unsupported-server-request-before-init", "health-fails-after-call", "health-hangs-after-call", "slow-tool", "slow-tool-close-marker", "out-of-order-tool", "blocking-slow-tool", "malformed-tools", "malformed-tool-schema", "missing-tool-schema", "duplicate-required-tool-schema", "repeated-tools-cursor", "too-many-tools-pages", "malformed-operation", "response-with-method", "malformed-error-object", "malformed-response-id", "catalog", "close-marker", "strict-close", "slow-initialize-response", "stubborn-close", "start-count", "unsupported-protocol", "missing-init-capabilities", "exit-after-init":
+	case "echo", "rpc-error", "rpc-error-secret", "tools", "complex-tool", "number-tool", "utilities", "ping-before-init", "unsupported-server-request-before-init", "health-fails-after-call", "health-hangs-after-call", "slow-tool", "slow-tool-close-marker", "out-of-order-tool", "blocking-slow-tool", "malformed-tools", "malformed-tool-schema", "missing-tool-schema", "duplicate-required-tool-schema", "repeated-tools-cursor", "too-many-tools-pages", "malformed-operation", "response-with-method", "malformed-error-object", "malformed-response-id", "catalog", "close-marker", "strict-close", "slow-initialize-response", "stubborn-close", "start-count", "unsupported-protocol", "missing-init-capabilities", "exit-after-init", "record-initialized":
 		runLifecycleHelper(mode)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown helper mode %q", mode)
@@ -1219,6 +1318,9 @@ func runLifecycleHelper(mode string) {
 			writeInitializeResponse(request, mode)
 		case "notifications/initialized":
 			initialized = true
+			if mode == "record-initialized" {
+				writeHelperMarker("initialized.txt", "initialized")
+			}
 			if mode == "exit-after-init" {
 				return
 			}
