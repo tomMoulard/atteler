@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -1403,31 +1404,86 @@ func TestIncidentMCPHelperProcess(_ *testing.T) {
 		return
 	}
 
-	var request struct {
-		ID     any    `json:"id"`
-		Method string `json:"method"`
-		Params struct {
-			Arguments map[string]any `json:"arguments"`
-			Name      string         `json:"name"`
-		} `json:"params"`
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var request incidentMCPHelperRequest
+		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+			os.Exit(2)
+		}
+
+		switch request.Method {
+		case "initialize":
+			writeIncidentMCPHelperResponse(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      request.ID,
+				"result": map[string]any{
+					"protocolVersion": "2025-11-25",
+					"capabilities": map[string]any{
+						"tools": map[string]any{},
+					},
+					"serverInfo": map[string]any{
+						"name":    "incident-helper",
+						"version": "1.0.0",
+					},
+				},
+			})
+		case "notifications/initialized":
+			continue
+		case "tools/list":
+			writeIncidentMCPToolsListResponse(request.ID)
+		case "tools/call":
+			handleIncidentMCPToolCall(request)
+			os.Exit(0)
+		default:
+			writeIncidentMCPUnexpectedResponse(request.ID)
+			os.Exit(0)
+		}
 	}
-	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
+	if err := scanner.Err(); err != nil {
 		os.Exit(2)
 	}
+	os.Exit(0)
+}
 
+type incidentMCPHelperRequest struct {
+	ID     any    `json:"id"`
+	Method string `json:"method"`
+	Params struct {
+		Arguments map[string]any `json:"arguments"`
+		Name      string         `json:"name"`
+	} `json:"params"`
+}
+
+func writeIncidentMCPToolsListResponse(id any) {
+	writeIncidentMCPHelperResponse(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result": map[string]any{
+			"tools": []map[string]any{{
+				"name": "get_incident",
+				"inputSchema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"reference": map[string]any{"type": "string"},
+						"severity":  map[string]any{"type": "string"},
+						"api_key":   map[string]any{"type": "string"},
+					},
+					"required":             []string{"reference"},
+					"additionalProperties": false,
+				},
+			}},
+		},
+	})
+}
+
+func handleIncidentMCPToolCall(request incidentMCPHelperRequest) {
 	if request.Method != "tools/call" ||
 		request.Params.Name != "get_incident" ||
 		request.Params.Arguments["reference"] != "alert-42" ||
 		!incidentMCPHelperSeverityAllowed(request.Params.Arguments["severity"]) {
-		writeIncidentMCPHelperResponse(map[string]any{
-			"jsonrpc": "2.0",
-			"id":      request.ID,
-			"error": map[string]any{
-				"code":    -32000,
-				"message": "unexpected incident MCP tool request",
-			},
-		})
-		os.Exit(0)
+		writeIncidentMCPUnexpectedResponse(request.ID)
+		return
 	}
 
 	if request.Params.Arguments["severity"] == "explode" {
@@ -1439,7 +1495,7 @@ func TestIncidentMCPHelperProcess(_ *testing.T) {
 				"message": "failed for bob@example.com access_token=secret-token " + incidentMCPHelperAPIKeySuffix(request.Params.Arguments),
 			},
 		})
-		os.Exit(0)
+		return
 	}
 
 	if request.Params.Arguments["severity"] == "result-error" {
@@ -1454,7 +1510,7 @@ func TestIncidentMCPHelperProcess(_ *testing.T) {
 				}},
 			},
 		})
-		os.Exit(0)
+		return
 	}
 
 	toolPayload := `{
@@ -1474,7 +1530,17 @@ func TestIncidentMCPHelperProcess(_ *testing.T) {
 			}},
 		},
 	})
-	os.Exit(0)
+}
+
+func writeIncidentMCPUnexpectedResponse(id any) {
+	writeIncidentMCPHelperResponse(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error": map[string]any{
+			"code":    -32000,
+			"message": "unexpected incident MCP tool request",
+		},
+	})
 }
 
 func incidentMCPHelperSeverityAllowed(value any) bool {
