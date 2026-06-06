@@ -751,8 +751,13 @@ printf 'plugin-output\n'
 
 		mcpHelper := filepath.Join(workDir, "mcp-helper")
 		writeExecutable(t, mcpHelper, `#!/bin/sh
-read line
-printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true,"source":"mcp-helper"}}\n'
+read init
+printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"e2e-helper","version":"1.0.0"}}}\n'
+read initialized
+read list
+printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}}]}}\n'
+read call
+printf '{"jsonrpc":"2.0","id":3,"result":{"ok":true,"source":"mcp-helper"}}\n'
 `)
 
 		mcpManifest := filepath.Join(workDir, "mcp.yaml")

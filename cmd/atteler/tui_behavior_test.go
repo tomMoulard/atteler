@@ -371,7 +371,7 @@ func TestCallLLMWithToolsStreamsCommandOutputBeforeCompletion(t *testing.T) {
 	select {
 	case raw := <-done:
 		assert.Nil(t, raw)
-	case <-time.After(time.Second):
+	case <-time.After(liveOutputTimeout):
 		require.FailNow(t, "timed out waiting for callLLM command return")
 	}
 }
@@ -420,7 +420,7 @@ func TestCallLLMWithToolsStreamsCommandStderrBeforeCompletion(t *testing.T) {
 	select {
 	case raw := <-done:
 		assert.Nil(t, raw)
-	case <-time.After(time.Second):
+	case <-time.After(liveOutputTimeout):
 		require.FailNow(t, "timed out waiting for callLLM command return")
 	}
 }

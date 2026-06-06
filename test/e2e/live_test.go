@@ -248,7 +248,7 @@ func requireAnthropic(t *testing.T) string {
 // attach a body. Skips the test if the endpoint returns 401, 403, or any
 // other 4xx status (e.g., billing issues).
 //
-//nolint:gosec // Live tests only pass fixed provider URLs from test helpers.
+//nolint:gosec // Live opt-in probes intentionally call provider endpoints supplied by test configuration.
 func probeAPI(t *testing.T, provider, url string, setAuth func(*http.Request)) {
 	t.Helper()
 

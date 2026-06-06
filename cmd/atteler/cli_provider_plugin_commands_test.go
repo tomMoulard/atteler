@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,12 +51,20 @@ func TestMCPInvokeHelpers(t *testing.T) {
 
 	param, err := parseJSONParam(`[1,"two"]`, "mcp params")
 	require.NoError(t, err)
-	assert.Equal(t, []any{float64(1), "two"}, param)
+	assert.Equal(t, []any{json.Number("1"), "two"}, param)
+
+	largeArgs, err := parseMCPToolArgs(`{"n":9007199254740993}`)
+	require.NoError(t, err)
+	assert.Equal(t, json.Number("9007199254740993"), largeArgs["n"])
 
 	response := &mcp.Response{Result: []byte(`{"ok":true,"count":2}`)}
 	got := formatMCPResponse(response)
 	assert.Contains(t, got, `"ok": true`)
 	assert.Contains(t, got, `"count": 2`)
+
+	response = &mcp.Response{Result: []byte(`{"id":9007199254740993}`)}
+	got = formatMCPResponse(response)
+	assert.Contains(t, got, `"id": 9007199254740993`)
 }
 
 func TestRunMCPInvokeRequiresManifest(t *testing.T) {

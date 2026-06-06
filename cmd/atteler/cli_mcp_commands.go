@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -193,7 +194,7 @@ func parseMCPToolArgs(raw string) (map[string]any, error) {
 	}
 
 	var args map[string]any
-	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+	if err := decodeMCPJSON(raw, &args); err != nil {
 		return nil, fmt.Errorf("mcp tool args: parse JSON object: %w", err)
 	}
 
@@ -211,11 +212,31 @@ func parseJSONParam(raw, label string) (any, error) {
 	}
 
 	var value any
-	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+	if err := decodeMCPJSON(raw, &value); err != nil {
 		return nil, fmt.Errorf("%s: parse JSON: %w", label, err)
 	}
 
 	return value, nil
+}
+
+func decodeMCPJSON(raw string, target any) error {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("decode JSON: %w", err)
+	}
+
+	var extra any
+	if err := decoder.Decode(&extra); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		return fmt.Errorf("decode trailing JSON: %w", err)
+	}
+
+	return errors.New("multiple JSON values")
 }
 
 func formatMCPResponse(response *mcp.Response) string {
@@ -237,7 +258,7 @@ func formatMCPResponse(response *mcp.Response) string {
 	}
 
 	var value any
-	if err := json.Unmarshal(response.Result, &value); err != nil {
+	if err := decodeMCPJSON(string(response.Result), &value); err != nil {
 		return string(response.Result)
 	}
 
