@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1355,4 +1357,117 @@ func startOllamaTagsServer(ctx context.Context, t *testing.T, baseURL string) (*
 	}()
 
 	return srv, nil
+}
+
+func TestOllamaProvider_ConcurrentStartDaemonAndWaitStartsOnce(t *testing.T) { //nolint:paralleltest // Mutates the global Ollama serve starter.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"models":[]}`))
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	var starts atomic.Int64
+
+	withOllamaServeStarter(t, func(context.Context, ollamaStartRequest) (*ollamaDaemonStart, error) {
+		starts.Add(1)
+		return &ollamaDaemonStart{}, nil
+	})
+
+	p := &OllamaProvider{baseURL: srv.URL, client: srv.Client()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const goroutines = 16
+
+	errs := make([]error, goroutines)
+
+	var wg sync.WaitGroup
+	for i := range goroutines {
+		wg.Go(func() {
+			errs[i] = p.startDaemonAndWait(ctx)
+		})
+	}
+
+	wg.Wait()
+
+	assert.Equal(t, int64(1), starts.Load(), "ollama serve must be spawned exactly once")
+
+	successes := 0
+
+	for _, err := range errs {
+		if err == nil {
+			successes++
+			continue
+		}
+
+		require.ErrorContains(t, err, "already attempted")
+	}
+
+	assert.Equal(t, 1, successes, "exactly one caller should perform the start")
+}
+
+func TestOllamaProvider_ConcurrentLazyClientInitIsRaceFree(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"models":[{"name":"llama3.2"}]}`))
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	// The client is intentionally left nil to exercise the lazy init path.
+	p := &OllamaProvider{baseURL: srv.URL}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const goroutines = 16
+
+	errs := make([]error, goroutines)
+
+	var wg sync.WaitGroup
+	for i := range goroutines {
+		wg.Go(func() {
+			_, errs[i] = p.FetchModels(ctx)
+		})
+	}
+
+	wg.Wait()
+
+	for _, err := range errs {
+		assert.NoError(t, err)
+	}
+}
+
+func TestRecordOllamaOwnership_RefusesToOverwriteLiveOwner(t *testing.T) { //nolint:paralleltest // Mutates global Ollama process hooks.
+	withOllamaProcessHooks(t,
+		func(int) bool { return true },
+		func(int) error { return nil },
+		func(int) error { return nil },
+	)
+
+	path := filepath.Join(t.TempDir(), "ollama-daemon.json")
+	first := OllamaDaemonOwnership{
+		Owner:   "atteler",
+		PID:     1234,
+		Command: []string{"ollama", "serve"},
+	}
+	require.NoError(t, recordOllamaOwnership(path, first))
+
+	second := first
+	second.PID = 5678
+
+	err := recordOllamaOwnership(path, second)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1234")
+
+	got, readErr := readOllamaOwnership(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, 1234, got.PID)
+
+	// Re-recording the same live PID stays allowed.
+	require.NoError(t, recordOllamaOwnership(path, first))
 }

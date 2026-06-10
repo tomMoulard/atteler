@@ -20,6 +20,7 @@ const (
 	envAttelerStatePath    = "ATTELER_STATE"
 
 	ollamaOwnershipFilename = "ollama-daemon.json"
+	ollamaOwnershipOwner    = "atteler"
 	ollamaStartupLogBytes   = 16 * 1024
 )
 
@@ -228,7 +229,7 @@ func StopOwnedOllamaDaemon(ctx context.Context, ownershipPath string) (OllamaSto
 	}
 
 	result.Ownership = ownership
-	if ownership.Owner != "atteler" {
+	if ownership.Owner != ollamaOwnershipOwner {
 		return result, fmt.Errorf("ollama: ownership record %s is owned by %q, not atteler", path, ownership.Owner)
 	}
 
@@ -394,7 +395,7 @@ func ollamaOwnershipStatus(baseURL string, ownership *OllamaDaemonOwnership) str
 	switch {
 	case ownership == nil:
 		return "none"
-	case ownership.Owner != "atteler":
+	case ownership.Owner != ollamaOwnershipOwner:
 		return "recorded-untrusted-owner"
 	case !ollamaServeCommandRecorded(ownership.Command):
 		return "recorded-invalid-command"
@@ -426,6 +427,18 @@ func readOllamaOwnership(path string) (*OllamaDaemonOwnership, error) {
 }
 
 func recordOllamaOwnership(path string, ownership OllamaDaemonOwnership) error {
+	// Refuse to silently overwrite a record for another live atteler-owned
+	// daemon: doing so would orphan that daemon and make it unstoppable via
+	// `atteler --ollama-stop`.
+	if existing, err := readOllamaOwnership(path); err == nil &&
+		existing.Owner == ollamaOwnershipOwner &&
+		existing.PID > 0 &&
+		existing.PID != ownership.PID &&
+		ollamaPIDAlive(existing.PID) &&
+		ollamaPIDMatchesOwnership(existing) {
+		return fmt.Errorf("ownership file %s already records live daemon PID %d", path, existing.PID)
+	}
+
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("create ownership dir %s: %w", dir, err)
