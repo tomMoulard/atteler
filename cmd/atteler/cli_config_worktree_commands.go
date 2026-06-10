@@ -248,6 +248,8 @@ func printDoctorOverview(state appState, providers []string) {
 		fmt.Println("providers: " + strings.Join(providers, ", "))
 	}
 
+	printProviderCompatibilityMatrixSummary()
+
 	agents := state.agentRegistry.List()
 	if len(agents) == 0 {
 		fmt.Println("agents: none configured")
@@ -604,6 +606,8 @@ func doctorOffline(opts cliOptions) error {
 
 	printDoctorOfflineProviderRetries(os.Stdout, cfg, providerNames)
 
+	printProviderCompatibilityMatrixSummary()
+
 	agents := agent.NewRegistry(cfg.Agents).List()
 	if len(agents) == 0 {
 		fmt.Println("agents: none configured")
@@ -903,6 +907,22 @@ func loadErrorString(err error) string {
 	}
 
 	return err.Error()
+}
+
+func printProviderCompatibilityMatrixSummary() {
+	matrix := llm.ProviderCompatibilityMatrix()
+	if len(matrix) == 0 {
+		fmt.Println("compatibility_matrix: none")
+
+		return
+	}
+
+	fmt.Println("compatibility_matrix:")
+
+	for i := range matrix {
+		row := &matrix[i]
+		fmt.Printf("  - %s: %s\n", row.Provider, llm.ProviderCompatibilityStatusSummary(row))
+	}
 }
 
 type configDoctorDiagnosticSummary struct {

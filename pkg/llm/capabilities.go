@@ -396,7 +396,7 @@ func validateCompleteParamsAgainstCapabilities(
 			continue
 		}
 
-		return fmt.Errorf("%s: CompleteParams.%s is unsupported: %s", providerName, check.name, support.Note)
+		return fmt.Errorf("%s: CompleteParams.%s is %s: %s", providerName, check.name, support.Status, support.Note)
 	}
 
 	if err := validateModelModeForProviderModel(providerName, params); err != nil {
@@ -731,6 +731,12 @@ func prepareCompleteParamsForProviderCapabilitiesMode(
 		return params, nil, err
 	}
 
+	if declaresCompleteParamCapabilities(capabilities) {
+		if err := validateCompleteParamsAgainstCapabilities(providerName, capabilities, params); err != nil {
+			return params, nil, err
+		}
+	}
+
 	params, adjustments := normalizeCompleteParamsForProvider(
 		providerName,
 		capabilities,
@@ -738,7 +744,17 @@ func prepareCompleteParamsForProviderCapabilitiesMode(
 		omitImpossiblePortableReasoning,
 	)
 
+	if declaresCompleteParamCapabilities(capabilities) {
+		if err := validateCompleteParamsAgainstCapabilities(providerName, capabilities, params); err != nil {
+			return params, nil, err
+		}
+	}
+
 	return params, adjustments, nil
+}
+
+func declaresCompleteParamCapabilities(capabilities ProviderCapabilities) bool {
+	return capabilities.SupportsChatCompletions || len(capabilities.CompleteParams) > 0
 }
 
 func normalizeCompleteParamsForProvider(

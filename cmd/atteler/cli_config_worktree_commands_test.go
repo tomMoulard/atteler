@@ -799,7 +799,7 @@ func TestDoctorReportsUnregisteredPrivateAdapterCredentialFailures(t *testing.T)
 	assert.Contains(t, stdout, "[fail] local_credentials")
 	assert.Contains(t, stdout, "[skip] token_refresh")
 	assert.Contains(t, stdout, "[skip] network_reachability")
-	assert.Contains(t, stdout, "- gpt-5.5 (context=400000; provenance=static Codex adapter catalog")
+	assert.Contains(t, stdout, "- gpt-5.5 (context=1050000; provenance=built-in provider/model catalog")
 	assert.Contains(t, stdout, "reviewed=2026-05-22; review_after=2026-08-22; notes=private Codex backend")
 }
 
@@ -851,6 +851,89 @@ func TestDoctorIncludesProviderRuntimeMetadata(t *testing.T) { //nolint:parallel
 	assert.Contains(t, stdout, "         - gpt-4.1")
 	assert.Contains(t, stdout, "         runtime: Direct HTTPS calls from atteler to the OpenAI Chat Completions API.")
 	assert.Contains(t, stdout, "         health: Network check: calls `GET /v1/models` through `FetchModels`.")
+	assert.Contains(t, stdout, "compatibility_matrix:")
+	assert.Contains(t, stdout, "  - openai: auth_source=api-key")
+	assert.Contains(t, stdout, "temperature_top_p=supported")
+	assert.Contains(t, stdout, "  - codex: auth_source=borrowed-chatgpt")
+}
+
+func TestDoctorOfflineIncludesProviderCompatibilityMatrix(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv(appconfig.EnvPath, "")
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		require.NoError(t, doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")}))
+	})
+
+	assert.Contains(t, stdout, "Atteler offline doctor")
+	assert.Contains(t, stdout, "compatibility_matrix:")
+	assert.Contains(t, stdout, "  - anthropic: auth_source=api-key/oauth")
+	assert.Contains(t, stdout, "model_discovery=live+static")
+	assert.Contains(t, stdout, "offline_mode=metadata-only")
+	assert.Contains(t, stdout, "  - ollama: auth_source=none")
+}
+
+func TestDoctorAndOfflineDoctorReportSameProviderCompatibilityMatrix(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv(appconfig.EnvPath, "")
+
+	registry := llm.NewRegistry()
+	registry.Register(doctorHealthyProvider{name: "openai", models: []string{"gpt-4.1"}})
+
+	state := appState{
+		config: appconfig.Config{
+			Providers: map[string]appconfig.ProviderConfig{
+				"codex":       {DisablePrivateAdapter: true},
+				"claude-code": {DisablePrivateAdapter: true},
+			},
+		},
+		registry:      registry,
+		agentRegistry: agent.NewRegistry(nil),
+		sessionStore:  session.NewStore(filepath.Join(tempDir, "sessions")),
+	}
+
+	doctorOut := captureStdoutForStateDiagnostics(t, func() {
+		require.NoError(t, doctor(t.Context(), state))
+	})
+	offlineOut := captureStdoutForStateDiagnostics(t, func() {
+		require.NoError(t, doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")}))
+	})
+
+	doctorBlock := providerCompatibilityMatrixBlock(t, doctorOut)
+	offlineBlock := providerCompatibilityMatrixBlock(t, offlineOut)
+	assert.Equal(t, offlineBlock, doctorBlock)
+	assert.Equal(t, len(llm.KnownProviders()), strings.Count(doctorBlock, "\n  - "))
+}
+
+func providerCompatibilityMatrixBlock(t *testing.T, output string) string {
+	t.Helper()
+
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		if line != "compatibility_matrix:" {
+			continue
+		}
+
+		block := []string{line}
+
+		for _, next := range lines[i+1:] {
+			if !strings.HasPrefix(next, "  - ") {
+				break
+			}
+
+			block = append(block, next)
+		}
+
+		return strings.Join(block, "\n") + "\n"
+	}
+
+	require.FailNow(t, "missing compatibility_matrix block", output)
+
+	return ""
 }
 
 type doctorDiagnosticsProvider struct{}

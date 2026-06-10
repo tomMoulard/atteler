@@ -597,8 +597,8 @@ func TestClaudeCodeProvider_ModelMetadataAndContextFallback(t *testing.T) {
 
 	metadata, ok := p.ModelMetadata("claude-opus-4-7")
 	require.True(t, ok)
-	assert.Equal(t, 200_000, metadata.ContextWindow)
-	assert.NotEmpty(t, metadata.Provenance)
+	assert.Equal(t, 1_000_000, metadata.ContextWindow)
+	assert.Contains(t, metadata.Provenance, "built-in provider/model catalog")
 	assert.NotEmpty(t, metadata.ReviewedAt)
 	assert.NotEmpty(t, metadata.ReviewAfter)
 
@@ -610,7 +610,7 @@ func TestClaudeCodeProvider_ModelMetadataAndContextFallback(t *testing.T) {
 	haikuAlias, ok := p.ModelMetadata("claude-haiku-4-5")
 	require.True(t, ok)
 	assert.Equal(t, 200_000, haikuAlias.ContextWindow)
-	assert.Contains(t, haikuAlias.Provenance, "alias")
+	assert.Contains(t, haikuAlias.Provenance, "built-in provider/model catalog")
 
 	assert.Zero(t, p.ModelContextWindow("claude-unknown-private"))
 }
@@ -627,8 +627,8 @@ func TestClaudeCodeProvider_StaticModelCatalogConformance(t *testing.T) {
 	catalog := p.ModelCatalog()
 	require.Len(t, catalog, 2)
 	assert.Equal(t, "claude-opus-4-7", catalog[0].ID)
-	assert.Equal(t, 200_000, catalog[0].ContextWindow)
-	assert.Contains(t, catalog[0].Provenance, "static Claude Code adapter catalog")
+	assert.Equal(t, 1_000_000, catalog[0].ContextWindow)
+	assert.Contains(t, catalog[0].Provenance, "built-in provider/model catalog")
 	assert.Equal(t, claudeCodeAdapterReviewAfter, catalog[0].ReviewAfter)
 
 	assert.Equal(t, "opus", catalog[1].ID)

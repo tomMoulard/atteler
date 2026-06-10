@@ -229,8 +229,18 @@ func (c *CodexProvider) ModelCatalog() []ModelMetadata {
 	return out
 }
 
-// ModelMetadata returns provenance for a Codex static model entry.
+// ModelMetadata returns provenance for a Codex model entry.
 func (c *CodexProvider) ModelMetadata(model string) (ModelMetadata, bool) {
+	if metadata, ok := builtinCatalogModelMetadata(
+		providerCodex,
+		model,
+		codexAdapterReviewedAt,
+		codexAdapterReviewAfter,
+		"private Codex backend has no supported /models endpoint; built-in catalog metadata is used for known IDs",
+	); ok {
+		return metadata, true
+	}
+
 	for _, entry := range codexDefaultModelCatalog() {
 		if entry.ID == model {
 			return entry, true

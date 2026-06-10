@@ -1,0 +1,1389 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "name": "plain chat",
+      "covers": [
+        "Model",
+        "Messages"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Hello"
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Hello"
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Hello"
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+              {
+                "type": "message",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Hello"
+                  }
+                ]
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Hello"
+              }
+            ],
+            "options": {},
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "system prompt",
+      "covers": [
+        "Messages"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "system",
+                "content": "Be terse."
+              },
+              {
+                "role": "user",
+                "content": "Hello"
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "system": "Be terse.",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Hello"
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "system": "Be terse.",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Hello"
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "instructions": "Be terse.",
+            "input": [
+              {
+                "type": "message",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Hello"
+                  }
+                ]
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "system",
+                "content": "Be terse."
+              },
+              {
+                "role": "user",
+                "content": "Hello"
+              }
+            ],
+            "options": {},
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "tool definition",
+      "covers": [
+        "Tools"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Use a tool if needed."
+              }
+            ],
+            "tools": [
+              {
+                "function": {
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "query": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "query"
+                    ],
+                    "type": "object"
+                  },
+                  "name": "lookup",
+                  "description": "Look up a value."
+                },
+                "type": "function"
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Use a tool if needed."
+              }
+            ],
+            "tools": [
+              {
+                "input_schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "query": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "query"
+                  ],
+                  "type": "object"
+                },
+                "name": "lookup",
+                "description": "Look up a value."
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Use a tool if needed."
+              }
+            ],
+            "tools": [
+              {
+                "input_schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "query": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "query"
+                  ],
+                  "type": "object"
+                },
+                "name": "lookup",
+                "description": "Look up a value."
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "tools": [
+              {
+                "parameters": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "query": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "query"
+                  ],
+                  "type": "object"
+                },
+                "type": "function",
+                "name": "lookup",
+                "description": "Look up a value."
+              }
+            ],
+            "model": "contract-model",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+              {
+                "type": "message",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Use a tool if needed."
+                  }
+                ]
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Use a tool if needed."
+              }
+            ],
+            "tools": [
+              {
+                "function": {
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "query": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "query"
+                    ],
+                    "type": "object"
+                  },
+                  "name": "lookup",
+                  "description": "Look up a value."
+                },
+                "type": "function"
+              }
+            ],
+            "options": {},
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "assistant tool call",
+      "covers": [
+        "Messages"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Find Go."
+              },
+              {
+                "role": "assistant",
+                "content": "I'll check.",
+                "tool_calls": [
+                  {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                      "name": "lookup",
+                      "arguments": "{\"query\":\"go\"}"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Find Go."
+              },
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "I'll check."
+                  },
+                  {
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "lookup",
+                    "input": {
+                      "query": "go"
+                    }
+                  }
+                ]
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Find Go."
+              },
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "I'll check."
+                  },
+                  {
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "lookup",
+                    "input": {
+                      "query": "go"
+                    }
+                  }
+                ]
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+              {
+                "type": "message",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Find Go."
+                  }
+                ]
+              },
+              {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "I'll check."
+                  }
+                ]
+              },
+              {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "lookup",
+                "arguments": "{\"query\":\"go\"}"
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Find Go."
+              },
+              {
+                "role": "assistant",
+                "content": "I'll check.",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": {
+                        "query": "go"
+                      },
+                      "name": "lookup"
+                    }
+                  }
+                ]
+              }
+            ],
+            "options": {},
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "tool result",
+      "covers": [
+        "Messages"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "tool",
+                "content": "result",
+                "tool_call_id": "call-1"
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": "result",
+                    "is_error": true
+                  }
+                ]
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": "result",
+                    "is_error": true
+                  }
+                ]
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+              {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "result"
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "tool",
+                "content": "result"
+              }
+            ],
+            "options": {},
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "reasoning level",
+      "covers": [
+        "ReasoningLevel"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "reasoning_effort": "medium",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Think."
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "thinking": {
+              "type": "enabled",
+              "budget_tokens": 1365
+            },
+            "messages": [
+              {
+                "role": "user",
+                "content": "Think."
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "thinking": {
+              "type": "enabled",
+              "budget_tokens": 1365
+            },
+            "messages": [
+              {
+                "role": "user",
+                "content": "Think."
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "reasoning": {
+              "effort": "medium"
+            },
+            "model": "contract-model",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+              {
+                "type": "message",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Think."
+                  }
+                ]
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "think": "medium",
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Think."
+              }
+            ],
+            "options": {},
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "reasoning none",
+      "covers": [
+        "ReasoningLevel"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "reasoning_effort": "none",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Answer directly."
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Answer directly."
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Answer directly."
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "reasoning": {
+              "effort": "none"
+            },
+            "model": "contract-model",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+              {
+                "type": "message",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Answer directly."
+                  }
+                ]
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "think": false,
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Answer directly."
+              }
+            ],
+            "options": {},
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "model mode fast",
+      "covers": [
+        "ModelMode"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "model": "gpt-5.5",
+            "service_tier": "priority",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Be quick."
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "unsupported",
+          "error_contains": "ModelMode"
+        },
+        {
+          "provider": "claude-code",
+          "status": "unsupported",
+          "error_contains": "ModelMode"
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "model": "gpt-5.5",
+            "service_tier": "priority",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+              {
+                "type": "message",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Be quick."
+                  }
+                ]
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "unsupported",
+          "error_contains": "ModelMode"
+        }
+      ]
+    },
+    {
+      "name": "json schema response format",
+      "covers": [
+        "ResponseFormat"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "response_format": {
+              "json_schema": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "answer": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "answer"
+                  ],
+                  "type": "object"
+                },
+                "name": "answer",
+                "strict": true
+              },
+              "type": "json_schema"
+            },
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Return structured output."
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "unsupported",
+          "error_contains": "ResponseFormat"
+        },
+        {
+          "provider": "claude-code",
+          "status": "unsupported",
+          "error_contains": "ResponseFormat"
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "text": {
+              "format": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "answer": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "answer"
+                  ],
+                  "type": "object"
+                },
+                "type": "json_schema",
+                "name": "answer",
+                "strict": true
+              }
+            },
+            "model": "contract-model",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+              {
+                "type": "message",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Return structured output."
+                  }
+                ]
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "format": {
+              "additionalProperties": false,
+              "properties": {
+                "answer": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "answer"
+              ],
+              "type": "object"
+            },
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Return structured output."
+              }
+            ],
+            "options": {},
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "max tokens",
+      "covers": [
+        "MaxTokens"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Limit."
+              }
+            ],
+            "max_tokens": 123
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Limit."
+              }
+            ],
+            "max_tokens": 123
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Limit."
+              }
+            ],
+            "max_tokens": 123
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+              {
+                "type": "message",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Limit."
+                  }
+                ]
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Limit."
+              }
+            ],
+            "options": {
+              "num_predict": 123
+            },
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "stop sequences",
+      "covers": [
+        "Stop"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Stop."
+              }
+            ],
+            "stop": [
+              "END"
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Stop."
+              }
+            ],
+            "stop_sequences": [
+              "END"
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Stop."
+              }
+            ],
+            "stop_sequences": [
+              "END"
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "unsupported",
+          "error_contains": "Stop"
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Stop."
+              }
+            ],
+            "options": {
+              "stop": [
+                "END"
+              ]
+            },
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "seed",
+      "covers": [
+        "Seed"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "seed": 42,
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Seed."
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "unsupported",
+          "error_contains": "Seed"
+        },
+        {
+          "provider": "claude-code",
+          "status": "unsupported",
+          "error_contains": "Seed"
+        },
+        {
+          "provider": "codex",
+          "status": "unsupported",
+          "error_contains": "Seed"
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Seed."
+              }
+            ],
+            "options": {
+              "seed": 42
+            },
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "temperature",
+      "covers": [
+        "Temperature"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "temperature": 0.4,
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Sample."
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "temperature": 0.4,
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Sample."
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "temperature": 0.4,
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Sample."
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+              {
+                "type": "message",
+                "role": "user",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Sample."
+                  }
+                ]
+              }
+            ],
+            "stream": true,
+            "store": false
+          }
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Sample."
+              }
+            ],
+            "options": {
+              "temperature": 0.4
+            },
+            "stream": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "top p",
+      "covers": [
+        "TopP"
+      ],
+      "providers": [
+        {
+          "provider": "openai",
+          "status": "rendered",
+          "body": {
+            "top_p": 0.8,
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Sample."
+              }
+            ]
+          }
+        },
+        {
+          "provider": "anthropic",
+          "status": "rendered",
+          "body": {
+            "top_p": 0.8,
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Sample."
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "claude-code",
+          "status": "rendered",
+          "body": {
+            "top_p": 0.8,
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Sample."
+              }
+            ],
+            "max_tokens": 4096
+          }
+        },
+        {
+          "provider": "codex",
+          "status": "unsupported",
+          "error_contains": "TopP"
+        },
+        {
+          "provider": "ollama",
+          "status": "rendered",
+          "body": {
+            "model": "contract-model",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Sample."
+              }
+            ],
+            "options": {
+              "top_p": 0.8
+            },
+            "stream": false
+          }
+        }
+      ]
+    }
+  ]
+}

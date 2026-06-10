@@ -3,6 +3,8 @@ package llm
 import (
 	"errors"
 	"strings"
+
+	"github.com/tommoulard/atteler/pkg/modelroute"
 )
 
 // ReadinessStatus is the normalized result of one provider readiness check.
@@ -133,6 +135,22 @@ func modelIDsFromMetadata(catalog []ModelMetadata) []string {
 
 func cloneModelMetadata(catalog []ModelMetadata) []ModelMetadata {
 	return append([]ModelMetadata(nil), catalog...)
+}
+
+func builtinCatalogModelMetadata(providerName, model, reviewedAt, reviewAfter, notes string) (ModelMetadata, bool) {
+	metadata, ok := modelroute.BuiltinCatalog().Lookup(providerName, model)
+	if !ok {
+		return ModelMetadata{}, false
+	}
+
+	return ModelMetadata{
+		ID:            model,
+		ContextWindow: metadata.ContextWindow,
+		Provenance:    "built-in provider/model catalog: " + metadata.Source,
+		ReviewedAt:    reviewedAt,
+		ReviewAfter:   reviewAfter,
+		Notes:         notes,
+	}, true
 }
 
 func readinessStatus(ok bool) ReadinessStatus {
