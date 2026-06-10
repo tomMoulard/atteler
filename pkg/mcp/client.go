@@ -29,6 +29,11 @@ const (
 	defaultHealthTimeout   = 500 * time.Millisecond
 	defaultStderrBytes     = 64 * 1024
 	defaultDiscoveryPages  = 1000
+
+	// maxIncomingMessageBytes caps one newline-delimited JSON-RPC message read
+	// from server stdout. It matches the 4 MiB line caps used by the codex and
+	// ollama stream readers in pkg/llm.
+	maxIncomingMessageBytes = 4 * 1024 * 1024
 )
 
 // SupportedProtocolVersions lists MCP protocol revisions this client can use.
@@ -1752,44 +1757,23 @@ func (s *Session) readLoop(r io.Reader) {
 }
 
 func (s *Session) scanResponses(r io.Reader) error {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	reader := bufio.NewReaderSize(r, 64*1024)
 
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-
-		message, err := decodeIncomingMessage(line)
-		if err != nil {
+	for {
+		line, oversized, readErr := readIncomingLine(reader)
+		if oversized {
+			s.discardOversizedMessage()
+		} else if err := s.handleIncomingLine(bytes.TrimSpace(line)); err != nil {
 			return err
 		}
 
-		if message.Method != "" {
-			if len(message.Result) > 0 || message.Error != nil {
-				return fmt.Errorf("malformed json-rpc message: method %q cannot appear on a response", message.Method)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
 			}
 
-			s.handleServerMessage(message)
-			continue
+			return fmt.Errorf("scan response: %w", readErr)
 		}
-
-		response := Response{
-			JSONRPC: message.JSONRPC,
-			ID:      message.ID,
-			Result:  message.Result,
-			Error:   message.Error,
-		}
-		if err := validateResponse(response); err != nil {
-			return err
-		}
-
-		s.deliverResponse(&response)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan response: %w", err)
 	}
 
 	if s.hasPending() {
@@ -1797,6 +1781,107 @@ func (s *Session) scanResponses(r io.Reader) error {
 	}
 
 	return nil
+}
+
+// readIncomingLine reads one newline-terminated message, accumulating at most
+// maxIncomingMessageBytes. Oversized lines are drained and reported via the
+// second return value instead of failing the reader: bufio.Scanner cannot
+// continue after bufio.ErrTooLong, while a plain reader keeps the transport
+// alive for subsequent messages.
+func readIncomingLine(reader *bufio.Reader) (line []byte, oversized bool, err error) {
+	for {
+		chunk, readErr := reader.ReadSlice('\n')
+		if !oversized {
+			line = append(line, chunk...)
+			if len(line) > maxIncomingMessageBytes {
+				line = nil
+				oversized = true
+			}
+		}
+
+		if readErr == nil {
+			return line, oversized, nil
+		}
+
+		if errors.Is(readErr, bufio.ErrBufferFull) {
+			continue
+		}
+
+		if errors.Is(readErr, io.EOF) {
+			return line, oversized, io.EOF
+		}
+
+		return line, oversized, fmt.Errorf("read newline-delimited json: %w", readErr)
+	}
+}
+
+// handleIncomingLine dispatches one stdout line. Lines that are not JSON
+// objects (stray prints from the server or its children) are recorded and
+// skipped so one junk line does not destroy a healthy long-lived transport;
+// teardown is reserved for malformed JSON-RPC envelopes, I/O errors, and EOF.
+func (s *Session) handleIncomingLine(line []byte) error {
+	if len(line) == 0 {
+		return nil
+	}
+
+	if line[0] != '{' || !json.Valid(line) {
+		s.recordSkippedStdoutLine(line)
+		return nil
+	}
+
+	message, err := decodeIncomingMessage(line)
+	if err != nil {
+		return err
+	}
+
+	if message.Method != "" {
+		if len(message.Result) > 0 || message.Error != nil {
+			return fmt.Errorf("malformed json-rpc message: method %q cannot appear on a response", message.Method)
+		}
+
+		s.handleServerMessage(message)
+		return nil
+	}
+
+	response := Response{
+		JSONRPC: message.JSONRPC,
+		ID:      message.ID,
+		Result:  message.Result,
+		Error:   message.Error,
+	}
+	if err := validateResponse(response); err != nil {
+		return err
+	}
+
+	s.deliverResponse(&response)
+
+	return nil
+}
+
+// recordSkippedStdoutLine keeps a bounded diagnostic for a skipped stdout line
+// so the junk surfaces through Stderr() and error annotations.
+func (s *Session) recordSkippedStdoutLine(line []byte) {
+	const previewBytes = 256
+
+	preview := string(line)
+	if len(preview) > previewBytes {
+		preview = preview[:previewBytes] + "..."
+	}
+
+	_, _ = fmt.Fprintf(s.stderr, "atteler: skipped malformed mcp stdout line (%d bytes): %s\n", len(line), preview)
+}
+
+// discardOversizedMessage drops a single JSON-RPC message larger than
+// maxIncomingMessageBytes and fails the requests currently awaiting a
+// response, since the discarded message may have carried one of their
+// results. The transport itself stays open for subsequent calls.
+func (s *Session) discardOversizedMessage() {
+	err := fmt.Errorf(
+		"mcp server %q sent a json-rpc message larger than %d bytes; the message was discarded and the session remains usable",
+		strings.TrimSpace(s.server.Name), maxIncomingMessageBytes,
+	)
+	_, _ = fmt.Fprintf(s.stderr, "atteler: %v\n", err)
+	s.failPending(err)
 }
 
 func (s *Session) handleServerMessage(message incomingMessage) {

@@ -24,6 +24,13 @@ import (
 const (
 	helperTimeout     = 5 * time.Second
 	helperSecretToken = "mcp-secret-token"
+
+	// largeHelperPayloadBytes keeps the response line just under the 4 MiB
+	// message cap while staying well above the legacy 1 MiB scanner limit.
+	largeHelperPayloadBytes = maxIncomingMessageBytes - 4096
+
+	// oversizedHelperPayloadBytes pushes the response line over the 4 MiB cap.
+	oversizedHelperPayloadBytes = maxIncomingMessageBytes + 4096
 )
 
 func TestInvoke_PerformsLifecycleAndReadsResponse(t *testing.T) {
@@ -537,28 +544,67 @@ func TestSession_MalformedServerResponseFailsInitialize(t *testing.T) {
 	err := session.Start(t.Context())
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "decode newline-delimited json response")
+	assert.Contains(t, err.Error(), "unexpected EOF")
+	assert.Contains(t, err.Error(), "skipped malformed mcp stdout line")
 }
 
-func TestSession_MalformedServerResponseFailsOperation(t *testing.T) {
+func TestSession_SkipsMalformedStdoutLineAndKeepsTransport(t *testing.T) {
 	session := NewSession(helperServer(t, "malformed-operation"), SessionOptions{})
 	require.NoError(t, session.Start(t.Context()))
 	defer func() { require.NoError(t, session.Close(context.WithoutCancel(t.Context()))) }()
 
 	response, err := session.Invoke(t.Context(), Request{Method: "broken"})
 
-	require.Error(t, err)
-	assert.Nil(t, response)
-	assert.Contains(t, err.Error(), "decode newline-delimited json response")
+	require.NoError(t, err, "a junk stdout line before a valid response must be skipped")
+	require.NotNil(t, response)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(response.Result, &result))
+	assert.Equal(t, "broken", result["method"])
 
 	response, err = session.Invoke(t.Context(), Request{Method: "ping"})
-	require.Error(t, err)
-	assert.Nil(t, response)
-	assert.Contains(t, err.Error(), "transport stopped")
+	require.NoError(t, err, "session must remain usable after a malformed stdout line")
+	assert.JSONEq(t, `{}`, string(response.Result))
 
 	health := session.Health(t.Context())
-	assert.False(t, health.Healthy)
-	assert.Contains(t, health.Error, "transport stopped")
+	assert.True(t, health.Healthy)
+	assert.Contains(t, session.Stderr(), "skipped malformed mcp stdout line")
+}
+
+func TestSession_ReadsResponsesLargerThanLegacyOneMiBCap(t *testing.T) {
+	session := NewSession(helperServer(t, "large-response"), SessionOptions{})
+	require.NoError(t, session.Start(t.Context()))
+	defer func() { require.NoError(t, session.Close(context.WithoutCancel(t.Context()))) }()
+
+	response, err := session.Invoke(t.Context(), Request{Method: "large"})
+
+	require.NoError(t, err)
+
+	var result struct {
+		Payload string `json:"payload"`
+	}
+	require.NoError(t, json.Unmarshal(response.Result, &result))
+	assert.Len(t, result.Payload, largeHelperPayloadBytes)
+}
+
+func TestSession_SurvivesOversizedStdoutMessage(t *testing.T) {
+	session := NewSession(helperServer(t, "oversized-response"), SessionOptions{})
+	require.NoError(t, session.Start(t.Context()))
+	defer func() { require.NoError(t, session.Close(context.WithoutCancel(t.Context()))) }()
+
+	response, err := session.Invoke(t.Context(), Request{Method: "huge"})
+
+	require.Error(t, err)
+	assert.Nil(t, response)
+	assert.Contains(t, err.Error(), "larger than")
+	assert.Contains(t, err.Error(), "the message was discarded")
+
+	response, err = session.Invoke(t.Context(), Request{Method: "ping"})
+	require.NoError(t, err, "session must remain usable after an oversized message is discarded")
+	assert.JSONEq(t, `{}`, string(response.Result))
+
+	health := session.Health(t.Context())
+	assert.True(t, health.Healthy)
 }
 
 func TestSession_RejectsResponseWithMethodField(t *testing.T) {
@@ -1255,7 +1301,7 @@ func TestMCPHelperProcess(_ *testing.T) {
 	case "stderr-secret-exit":
 		fmt.Fprintf(os.Stderr, "server failed with token %s", os.Getenv("MCP_SECRET_TOKEN"))
 		os.Exit(2)
-	case "echo", "rpc-error", "rpc-error-secret", "tools", "complex-tool", "number-tool", "utilities", "ping-before-init", "unsupported-server-request-before-init", "health-fails-after-call", "health-hangs-after-call", "slow-tool", "slow-tool-close-marker", "out-of-order-tool", "blocking-slow-tool", "malformed-tools", "malformed-tool-schema", "missing-tool-schema", "duplicate-required-tool-schema", "repeated-tools-cursor", "too-many-tools-pages", "malformed-operation", "response-with-method", "malformed-error-object", "malformed-response-id", "catalog", "close-marker", "strict-close", "slow-initialize-response", "stubborn-close", "start-count", "unsupported-protocol", "missing-init-capabilities", "exit-after-init", "record-initialized":
+	case "echo", "rpc-error", "rpc-error-secret", "tools", "complex-tool", "number-tool", "utilities", "ping-before-init", "unsupported-server-request-before-init", "health-fails-after-call", "health-hangs-after-call", "slow-tool", "slow-tool-close-marker", "out-of-order-tool", "blocking-slow-tool", "malformed-tools", "malformed-tool-schema", "missing-tool-schema", "duplicate-required-tool-schema", "repeated-tools-cursor", "too-many-tools-pages", "malformed-operation", "large-response", "oversized-response", "response-with-method", "malformed-error-object", "malformed-response-id", "catalog", "close-marker", "strict-close", "slow-initialize-response", "stubborn-close", "start-count", "unsupported-protocol", "missing-init-capabilities", "exit-after-init", "record-initialized":
 		runLifecycleHelper(mode)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown helper mode %q", mode)
@@ -1388,7 +1434,16 @@ func runLifecycleHelper(mode string) {
 			writeHelperResponse(Response{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{}`)})
 		default:
 			if mode == "malformed-operation" {
+				// Emit one junk stdout line before the valid response; the
+				// client must skip it without killing the transport.
 				fmt.Println(`{"jsonrpc":"2.0",`)
+			}
+			if mode == "large-response" {
+				writeHelperResponse(Response{JSONRPC: "2.0", ID: request.ID, Result: mustMarshal(map[string]any{"payload": strings.Repeat("a", largeHelperPayloadBytes)})})
+				continue
+			}
+			if mode == "oversized-response" {
+				writeHelperResponse(Response{JSONRPC: "2.0", ID: request.ID, Result: mustMarshal(map[string]any{"payload": strings.Repeat("a", oversizedHelperPayloadBytes)})})
 				continue
 			}
 			if mode == "response-with-method" {
