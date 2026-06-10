@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
@@ -171,6 +172,484 @@ func TestRunner_EmitUsesLeastPrivilegeEnvByDefault(t *testing.T) {
 	assert.False(t, slices.ContainsFunc(env, func(value string) bool {
 		return strings.HasPrefix(value, "ATTELER_SESSION_PATH=")
 	}), "default payload/env must not expose session paths")
+}
+
+func TestRunner_EmitExposesAutonomyToHookEnv(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	payloadOut := dir + "/event.json"
+	envOut := dir + "/env.txt"
+
+	runner := NewRunner(map[string][]config.HookConfig{
+		SessionStart: {{
+			Command: []string{os.Args[0], "-test.run=^TestHookHelperProcess$"},
+			Env: map[string]string{
+				"ATTELER_TEST_HOOK":    "1",
+				"ATTELER_TEST_OUT":     payloadOut,
+				"ATTELER_TEST_ENV_OUT": envOut,
+				"ATTELER_AUTONOMY":     "full",
+			},
+			TimeoutSeconds: 2,
+			Blocking:       true,
+		}},
+	})
+
+	err := runner.Emit(context.Background(), Event{
+		Type:      SessionStart,
+		SessionID: "session-1",
+		Metadata:  map[string]string{"autonomy": "medium"},
+	})
+	require.NoError(t, err)
+
+	envData, err := os.ReadFile(envOut)
+	require.NoError(t, err)
+
+	env := strings.Split(strings.TrimSpace(string(envData)), "\n")
+	assert.Contains(t, env, "ATTELER_AUTONOMY=medium")
+}
+
+func TestRunner_WithAutonomyAnnotatesMissingEventMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	payloadOut := dir + "/event.json"
+	envOut := dir + "/env.txt"
+
+	runner := NewRunner(map[string][]config.HookConfig{
+		AssistantMessage: {{
+			Command: []string{os.Args[0], "-test.run=^TestHookHelperProcess$"},
+			Env: map[string]string{
+				"ATTELER_TEST_HOOK":    "1",
+				"ATTELER_TEST_OUT":     payloadOut,
+				"ATTELER_TEST_ENV_OUT": envOut,
+			},
+			TimeoutSeconds: 2,
+			Blocking:       true,
+		}},
+	}).WithAutonomy(autonomy.Medium)
+
+	err := runner.Emit(context.Background(), Event{
+		Type:      AssistantMessage,
+		SessionID: "session-1",
+		Content:   "hello",
+	})
+	require.NoError(t, err)
+
+	var payload Event
+
+	data, err := os.ReadFile(payloadOut)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &payload))
+	assert.Equal(t, "medium", payload.Metadata["autonomy"])
+
+	envData, err := os.ReadFile(envOut)
+	require.NoError(t, err)
+
+	env := strings.Split(strings.TrimSpace(string(envData)), "\n")
+	assert.Contains(t, env, "ATTELER_AUTONOMY=medium")
+}
+
+func TestRunner_FormatLineAppliesDefaultAutonomy(t *testing.T) {
+	t.Parallel()
+
+	runner := NewRunner(nil).WithAutonomy(autonomy.Low)
+
+	got := runner.FormatLine(Event{
+		Type:      CommandExecute,
+		SessionID: "session-1",
+		Metadata:  map[string]string{"command": "plan"},
+	})
+
+	assert.Contains(t, got, "autonomy=low")
+	assert.Contains(t, got, "session=session-1")
+}
+
+func TestRunner_EmitBlocksHooksInLowAutonomy(t *testing.T) {
+	t.Parallel()
+
+	out := t.TempDir() + "/event.json"
+	runner := NewRunner(map[string][]config.HookConfig{
+		SessionStart: {{
+			Command: []string{os.Args[0], "-test.run=^TestHookHelperProcess$"},
+			Env: map[string]string{
+				"ATTELER_TEST_HOOK": "1",
+				"ATTELER_TEST_OUT":  out,
+			},
+			TimeoutSeconds: 2,
+			Blocking:       true,
+		}},
+	})
+
+	err := runner.Emit(context.Background(), Event{
+		Type:      SessionStart,
+		SessionID: "session-1",
+		Metadata:  map[string]string{"autonomy": "low"},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks event hook command")
+	assert.NoFileExists(t, out)
+}
+
+func TestRunner_WithLowAutonomyBlocksHooksWithoutEventMetadata(t *testing.T) {
+	t.Parallel()
+
+	out := t.TempDir() + "/event.json"
+	runner := NewRunner(map[string][]config.HookConfig{
+		AssistantMessage: {{
+			Command: []string{os.Args[0], "-test.run=^TestHookHelperProcess$"},
+			Env: map[string]string{
+				"ATTELER_TEST_HOOK": "1",
+				"ATTELER_TEST_OUT":  out,
+			},
+			TimeoutSeconds: 2,
+			Blocking:       true,
+		}},
+	}).WithAutonomy(autonomy.Low)
+
+	err := runner.Emit(context.Background(), Event{
+		Type:      AssistantMessage,
+		SessionID: "session-1",
+		Content:   "hello",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks event hook command")
+	assert.NoFileExists(t, out)
+}
+
+func TestRunner_WithLowAutonomyOverridesInvalidEventMetadata(t *testing.T) {
+	t.Parallel()
+
+	out := t.TempDir() + "/event.json"
+	runner := NewRunner(map[string][]config.HookConfig{
+		AssistantMessage: {{
+			Command: []string{os.Args[0], "-test.run=^TestHookHelperProcess$"},
+			Env: map[string]string{
+				"ATTELER_TEST_HOOK": "1",
+				"ATTELER_TEST_OUT":  out,
+			},
+			TimeoutSeconds: 2,
+			Blocking:       true,
+		}},
+	}).WithAutonomy(autonomy.Low)
+
+	err := runner.Emit(context.Background(), Event{
+		Type:      AssistantMessage,
+		SessionID: "session-1",
+		Content:   "hello",
+		Metadata:  map[string]string{"autonomy": "unsafe"},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks event hook command")
+	assert.NoFileExists(t, out)
+}
+
+func TestRunner_WithAutonomyOverridesEventMetadata(t *testing.T) {
+	t.Parallel()
+
+	out := t.TempDir() + "/event.json"
+	runner := NewRunner(map[string][]config.HookConfig{
+		AssistantMessage: {{
+			Command: []string{os.Args[0], "-test.run=^TestHookHelperProcess$"},
+			Env: map[string]string{
+				"ATTELER_TEST_HOOK": "1",
+				"ATTELER_TEST_OUT":  out,
+			},
+			TimeoutSeconds: 2,
+			Blocking:       true,
+		}},
+	}).WithAutonomy(autonomy.Low)
+
+	err := runner.Emit(context.Background(), Event{
+		Type:      AssistantMessage,
+		SessionID: "session-1",
+		Content:   "hello",
+		Metadata:  map[string]string{"autonomy": "high"},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks event hook command")
+	assert.NoFileExists(t, out)
+}
+
+func TestRunner_EmitBlocksLowAutonomyHookBeforeShellAudit(t *testing.T) {
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	t.Setenv(shell.EnvAuditDir, auditDir)
+
+	runner := NewRunner(map[string][]config.HookConfig{
+		SessionStart: {{
+			Command:        []string{os.Args[0], "-test.run=^TestHookHelperProcess$"},
+			TimeoutSeconds: 2,
+			Blocking:       true,
+		}},
+	})
+
+	err := runner.Emit(context.Background(), Event{
+		Type:     SessionStart,
+		Metadata: map[string]string{"autonomy": "low"},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks event hook command")
+	assert.NoDirExists(t, auditDir)
+}
+
+func TestRunner_EmitBlocksPublishHooksBelowHighAutonomy(t *testing.T) {
+	t.Parallel()
+
+	runner := NewRunner(map[string][]config.HookConfig{
+		SessionEnd: {{
+			Command:        []string{"git", "push", "origin", "HEAD"},
+			TimeoutSeconds: 2,
+			Blocking:       true,
+		}},
+	})
+
+	err := runner.Emit(context.Background(), Event{
+		Type:     SessionEnd,
+		Metadata: map[string]string{"autonomy": "medium"},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy medium blocks git pushes")
+	assert.Contains(t, err.Error(), "--autonomy high or full")
+}
+
+func TestRunner_EmitBlocksPublishHooksInsideShellWrapper(t *testing.T) {
+	t.Parallel()
+
+	runner := NewRunner(map[string][]config.HookConfig{
+		SessionEnd: {{
+			Command:        []string{"bash", "-lc", "echo done; git push origin HEAD"},
+			TimeoutSeconds: 2,
+			Blocking:       true,
+		}},
+	})
+
+	err := runner.Emit(context.Background(), Event{
+		Type:     SessionEnd,
+		Metadata: map[string]string{"autonomy": "medium"},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy medium blocks git pushes")
+}
+
+func TestRunner_EmitBlocksImplicitHTTPMutationHooksBelowHighAutonomy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command []string
+	}{
+		{
+			name:    "curl body",
+			command: []string{"curl", "-fsS", "https://api.example.invalid/items", "-d", "{}"},
+		},
+		{
+			name:    "curl unknown method",
+			command: []string{"curl", "-X", "PROPPATCH", "https://api.example.invalid/items/1"},
+		},
+		{
+			name:    "wget unknown method",
+			command: []string{"wget", "--method=PROPPATCH", "https://api.example.invalid/items/1"},
+		},
+		{
+			name:    "httpie implicit body",
+			command: []string{"http", "https://api.example.invalid/items", "name=value"},
+		},
+		{
+			name:    "httpie unknown method",
+			command: []string{"http", "PROPPATCH", "https://api.example.invalid/items/1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			runner := NewRunner(map[string][]config.HookConfig{
+				SessionEnd: {{
+					Command:        tt.command,
+					TimeoutSeconds: 2,
+					Blocking:       true,
+				}},
+			})
+
+			err := runner.Emit(context.Background(), Event{
+				Type:     SessionEnd,
+				Metadata: map[string]string{"autonomy": "medium"},
+			})
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "autonomy medium blocks remote service mutations")
+			assert.Contains(t, err.Error(), "--autonomy high or full")
+		})
+	}
+}
+
+func TestAuthorizeEventHookAutonomyBlocksGitHubAPIMutationsBelowHigh(t *testing.T) {
+	t.Parallel()
+
+	//nolint:govet // Test case fields are ordered for readability.
+	tests := []struct {
+		name        string
+		command     []string
+		wantMessage string
+		wantDetail  string
+	}{
+		{
+			name:        "implicit POST from gh api field",
+			command:     []string{"gh", "api", "repos/owner/repo/issues/1/comments", "-f", "body=ship it"},
+			wantMessage: "autonomy medium blocks remote service mutations",
+			wantDetail:  "gh api POST",
+		},
+		{
+			name:        "implicit POST from gh api input body",
+			command:     []string{"gh", "api", "repos/owner/repo/issues/1/comments", "--input", "body.json"},
+			wantMessage: "autonomy medium blocks remote service mutations",
+			wantDetail:  "gh api POST",
+		},
+		{
+			name:        "explicit unknown gh api method",
+			command:     []string{"gh", "api", "repos/owner/repo/issues/1", "--method", "PROPPATCH"},
+			wantMessage: "autonomy medium blocks remote service mutations",
+			wantDetail:  "gh api PROPPATCH",
+		},
+		{
+			name:        "GraphQL pull request create",
+			command:     []string{"gh", "api", "graphql", "-f", "query=mutation{createPullRequest(input:{repositoryId:\"R\",baseRefName:\"main\",headRefName:\"feature\",title:\"change\"}){pullRequest{id}}}"},
+			wantMessage: "autonomy medium blocks PR creation",
+			wantDetail:  "gh api pull request create",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := authorizeEventHookAutonomy(autonomy.Medium, tt.command)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantMessage)
+			assert.Contains(t, err.Error(), tt.wantDetail)
+			assert.Contains(t, err.Error(), "--autonomy high or full")
+		})
+	}
+}
+
+func TestAuthorizeEventHookAutonomyBlocksOpaqueGraphQLMutationEvenAtFull(t *testing.T) {
+	t.Parallel()
+
+	err := authorizeEventHookAutonomy(autonomy.Full, []string{"gh", "api", "graphql", "--input", "body.json"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy full blocks PR merges")
+	assert.Contains(t, err.Error(), "gh api graphql opaque mutation")
+}
+
+func TestAuthorizeEventHookAutonomyBlocksCommonRemoteMutationsBelowHigh(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		detail  string
+		command []string
+	}{
+		{
+			name:    "npm publish in shell wrapper",
+			command: []string{"bash", "-lc", "npm publish"},
+			detail:  "npm publish",
+		},
+		{
+			name:    "kubectl apply with global options",
+			command: []string{"kubectl", "--context", "prod", "-n", "app", "apply", "-f", "deploy.yaml"},
+			detail:  "kubectl apply",
+		},
+		{
+			name:    "docker buildx push",
+			command: []string{"docker", "buildx", "build", "--push", "."},
+			detail:  "docker buildx build --push",
+		},
+		{
+			name:    "ssh remote session",
+			command: []string{"ssh", "prod", "deploy"},
+			detail:  "ssh remote session",
+		},
+		{
+			name:    "curl proxy with request body",
+			command: []string{"curl", "-x", "http://proxy.local:8080", "-d", "title=updated", "https://api.github.com/repos/owner/repo/issues/123"},
+			detail:  "curl remote request",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := authorizeEventHookAutonomy(autonomy.Medium, tt.command)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "autonomy medium blocks remote service mutations")
+			assert.Contains(t, err.Error(), tt.detail)
+		})
+	}
+}
+
+func TestRunner_EmitBlocksPRMergeHookEvenAtFullAutonomy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command []string
+	}{
+		{
+			name:    "gh pr merge",
+			command: []string{"bash", "-lc", "gh pr merge 123 --squash"},
+		},
+		{
+			name:    "curl pull merge api",
+			command: []string{"curl", "-X", "PUT", "https://api.github.com/repos/owner/repo/pulls/123/merge"},
+		},
+		{
+			name:    "curl proxy pull merge api",
+			command: []string{"curl", "-x", "http://proxy.local:8080", "-XPUT", "https://api.github.com/repos/owner/repo/pulls/123/merge"},
+		},
+		{
+			name:    "gh graphql pull merge",
+			command: []string{"gh", "api", "graphql", "-f", "query=mutation{mergePullRequest(input:{pullRequestId:\"PR\"}){pullRequest{id}}}"},
+		},
+		{
+			name:    "curl graphql pull merge",
+			command: []string{"curl", "-X", "POST", "https://api.github.com/graphql", "-d", "query=mutation{mergePullRequest(input:{pullRequestId:\"PR\"}){pullRequest{id}}}"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			runner := NewRunner(map[string][]config.HookConfig{
+				SessionEnd: {{
+					Command:        tt.command,
+					TimeoutSeconds: 2,
+					Blocking:       true,
+				}},
+			})
+
+			err := runner.Emit(context.Background(), Event{
+				Type:     SessionEnd,
+				Metadata: map[string]string{"autonomy": "full"},
+			})
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "blocks PR merges")
+			assert.Contains(t, err.Error(), "leaves merging to a human")
+		})
+	}
 }
 
 func TestRunner_EmitProtectsReservedEventEnvKeys(t *testing.T) {
@@ -2408,6 +2887,7 @@ func helperHook(t *testing.T) {
 			"ATTELER_AGENT",
 			"ATTELER_MODEL",
 			"ATTELER_ROLE",
+			"ATTELER_AUTONOMY",
 			"ATTELER_EVENT_REDACTED",
 			"ATTELER_EVENT_TRUNCATED",
 			"ATTELER_EVENT_SCHEMA_VERSION",

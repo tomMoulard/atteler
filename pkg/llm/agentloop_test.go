@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/autonomy"
 )
 
 // agentTestProvider is a fake provider for testing the agent loop.
@@ -817,6 +819,33 @@ func TestAgentLoop_JSONLCheckpointPersistsEffectiveBudget(t *testing.T) {
 	require.NotNil(t, loaded.Steps[0].ModelResponse)
 	assert.Equal(t, "test", loaded.Steps[0].ModelResponse.Provider)
 	assert.EqualValues(t, 100, loaded.Steps[0].ModelResponse.EstimatedCostMicros)
+}
+
+func TestAgentLoop_JSONLCheckpointPersistsAutonomy(t *testing.T) {
+	t.Parallel()
+
+	checkpointPath := filepath.Join(t.TempDir(), "agentloop.jsonl")
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{Content: "done", Model: "test-model", StopReason: StopEndTurn},
+		},
+	})
+
+	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, nil, AgentLoopConfig{
+		Autonomy:       autonomy.High,
+		CheckpointSink: NewAgentLoopJSONLCheckpoint(checkpointPath),
+	})
+	require.NoError(t, err)
+
+	loaded, err := LoadAgentLoopLedger(checkpointPath)
+	require.NoError(t, err)
+	require.Len(t, loaded.Steps, 2)
+	assert.Equal(t, autonomy.High, loaded.Steps[0].Autonomy)
+	assert.Equal(t, autonomy.High, loaded.Steps[1].Autonomy)
 }
 
 func TestAgentLoopBudgetSnapshotJSONPreservesZeroRemainingConfiguredCeilings(t *testing.T) {

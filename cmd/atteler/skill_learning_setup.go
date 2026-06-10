@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
@@ -59,6 +60,14 @@ func skillLearningEffectiveEnabled(opts attskill.LearningOptions, configuredEnab
 	}
 
 	return !state.Disabled
+}
+
+func skillLearningEnabledForAutonomy(enabled bool, level autonomy.Level) bool {
+	if autonomy.Normalize(level) == autonomy.Low {
+		return false
+	}
+
+	return enabled
 }
 
 func skillLearningOptionsFromConfig(cfg appconfig.Config, cli cliOptions, getenv func(string) string) (attskill.LearningOptions, bool) {

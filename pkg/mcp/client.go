@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"slices"
@@ -385,7 +386,7 @@ func (s *Session) Start(ctx context.Context) error {
 		Program:              strings.TrimSpace(s.server.Command),
 		Args:                 s.server.Args,
 		Dir:                  s.server.CWD,
-		Env:                  s.server.Env,
+		Env:                  mcpServerEnv(s.server.Env, s.opts.Audit.Autonomy),
 		Policy:               mcpShellPolicy(s.opts.Policy, s.server.Env),
 		Permission:           s.opts.Permission,
 		PermissionOperations: mcpPermissionOperations(s.server),
@@ -1476,6 +1477,22 @@ func (s *Session) auditContext() shell.AuditContext {
 	}
 
 	return audit
+}
+
+func mcpServerEnv(env map[string]string, autonomy string) map[string]string {
+	autonomy = strings.TrimSpace(autonomy)
+	if autonomy == "" {
+		return env
+	}
+
+	merged := maps.Clone(env)
+	if merged == nil {
+		merged = make(map[string]string, 1)
+	}
+
+	merged["ATTELER_AUTONOMY"] = autonomy
+
+	return merged
 }
 
 func mcpShellPolicy(policy *shell.Policy, env map[string]string) *shell.Policy {

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/symphony"
 )
 
@@ -51,9 +52,11 @@ func run(ctx context.Context, args []string) error {
 
 	validate := fs.Bool("validate", false, "validate WORKFLOW.md and exit")
 	workflowPath := fs.String("workflow", "", "path to WORKFLOW.md; defaults to ./WORKFLOW.md")
+	var autonomyFlag symphonyAutonomyFlag
+	fs.Var(&autonomyFlag, "autonomy", "override workflow autonomy: low, medium, high, or full")
 
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: symphony [--validate] [--workflow path] [path-to-WORKFLOW.md]")
+		fmt.Fprintln(fs.Output(), "Usage: symphony [--validate] [--workflow path] [--autonomy low|medium|high|full] [path-to-WORKFLOW.md]")
 		fs.PrintDefaults()
 	}
 
@@ -70,17 +73,54 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	if *validate {
-		cfg, err := symphony.ValidateWorkflow(ctx, "", *workflowPath)
+		cfg, err := symphony.ValidateWorkflowWithOptions(ctx, symphony.Options{
+			WorkflowPath: *workflowPath,
+			Autonomy:     autonomyFlag.level(),
+		})
 		if err != nil {
 			return err
 		}
 
-		fmt.Printf("Symphony workflow valid: %s (tracker=%s workspace_root=%s)\n", cfg.WorkflowPath, cfg.Tracker.Kind, cfg.Workspace.Root)
+		fmt.Printf("Symphony workflow valid: %s (tracker=%s workspace_root=%s autonomy=%s)\n", cfg.WorkflowPath, cfg.Tracker.Kind, cfg.Workspace.Root, cfg.Autonomy.String())
 		return nil
 	}
 
 	return symphony.Run(ctx, symphony.Options{
 		WorkflowPath: *workflowPath,
 		Logger:       slog.Default(),
+		Autonomy:     autonomyFlag.level(),
 	})
+}
+
+type symphonyAutonomyFlag struct {
+	value autonomy.Level
+	set   bool
+}
+
+func (f *symphonyAutonomyFlag) Set(raw string) error {
+	level, err := autonomy.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse autonomy: %w", err)
+	}
+
+	f.value = level
+	f.set = true
+
+	return nil
+}
+
+func (f *symphonyAutonomyFlag) String() string {
+	if f == nil || !f.set {
+		return ""
+	}
+
+	return f.value.String()
+}
+
+func (f *symphonyAutonomyFlag) level() autonomy.Level {
+	if f == nil || !f.set {
+		return ""
+	}
+
+	return f.value
 }

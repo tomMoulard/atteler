@@ -219,6 +219,36 @@ func TestCallTool_UsesDiscoveredToolsCallMethod(t *testing.T) {
 	assert.Equal(t, map[string]any{"query": "mcp"}, result.Params.Arguments)
 }
 
+func TestInvokeWithOptionsPropagatesAutonomyToEnvAndAudit(t *testing.T) {
+	server := helperServer(t, "echo")
+	server.Env["ATTELER_AUTONOMY"] = "spoofed"
+	auditDir := filepath.Join(t.TempDir(), "audit")
+
+	response, err := InvokeWithOptions(
+		t.Context(),
+		server,
+		Request{ID: "req-autonomy", Method: "custom/echo"},
+		helperTimeout,
+		SessionOptions{
+			Audit: shell.AuditContext{
+				Autonomy: "high",
+				AuditDir: auditDir,
+			},
+		},
+	)
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(response.Result, &result))
+	assert.Equal(t, "high", result["autonomy"])
+
+	records := readMCPAuditRecords(t, auditDir)
+	require.NotEmpty(t, records)
+	for _, record := range records {
+		assert.Equal(t, "high", record.Autonomy)
+	}
+}
+
 func TestSession_LongRunningToolCanBeReused(t *testing.T) {
 	session := NewSession(helperServer(t, "slow-tool"), SessionOptions{})
 	require.NoError(t, session.Start(t.Context()))
@@ -1511,6 +1541,7 @@ func runLifecycleHelper(mode string) {
 				"params":      request.Params,
 				"env":         os.Getenv("MCP_HELPER_ENV"),
 				"cwd":         mustGetwd(),
+				"autonomy":    os.Getenv("ATTELER_AUTONOMY"),
 				"initialized": initialized,
 			}
 			writeHelperResponse(Response{JSONRPC: "2.0", ID: request.ID, Result: mustMarshal(result)})
@@ -1882,4 +1913,25 @@ func mustGetwd() string {
 	}
 
 	return filepath.Clean(wd)
+}
+
+func readMCPAuditRecords(t *testing.T, auditDir string) []shell.AuditRecord {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	records := make([]shell.AuditRecord, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record shell.AuditRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+
+	return records
 }

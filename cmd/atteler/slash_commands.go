@@ -15,6 +15,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -111,7 +112,19 @@ func runHelpSlashCommand(m model, _ slashNoArgsInput) (model, tea.Cmd, bool) {
 	return m, tea.Println(slashHelp()), true
 }
 
+func slashFileWriteAutonomyBlock(m model, detail string) (tea.Cmd, bool) {
+	if m.autonomy.Allows(autonomy.ActionFileWrite) {
+		return nil, false
+	}
+
+	return tea.Println(errStyle.Render(autonomy.DenialMessage(m.autonomy, autonomy.ActionFileWrite, detail))), true
+}
+
 func runClearSlashCommand(m model, _ slashNoArgsInput) (model, tea.Cmd, bool) {
+	if cmd, blocked := slashFileWriteAutonomyBlock(m, "/clear"); blocked {
+		return m, cmd, true
+	}
+
 	m.history = nil
 	m.sessionState.Messages = nil
 	m.tokenUsage = tokenUsage{}
@@ -127,6 +140,10 @@ func runModelSlashCommand(m model, input slashOptionalValueInput) (model, tea.Cm
 		return m, tea.Println("model: " + m.selectedModel), true
 	}
 
+	if cmd, blocked := slashFileWriteAutonomyBlock(m, "/model"); blocked {
+		return m, cmd, true
+	}
+
 	m.selectedModel = input.Value
 	m.modelLocked = true
 	m.sessionState.DefaultModel = input.Value
@@ -137,6 +154,10 @@ func runModelSlashCommand(m model, input slashOptionalValueInput) (model, tea.Cm
 func runProfileSlashCommand(m model, input slashOptionalValueInput) (model, tea.Cmd, bool) {
 	if input.Value == "" {
 		return m, tea.Println("profile: " + m.selectedAgent), true
+	}
+
+	if cmd, blocked := slashFileWriteAutonomyBlock(m, "/profile"); blocked {
+		return m, cmd, true
 	}
 
 	// Profiles map to configured agents, which already carry model/system/generation presets.
@@ -151,6 +172,10 @@ func runProfileSlashCommand(m model, input slashOptionalValueInput) (model, tea.
 }
 
 func runSaveSlashCommand(m model, _ slashNoArgsInput) (model, tea.Cmd, bool) {
+	if cmd, blocked := slashFileWriteAutonomyBlock(m, "/save"); blocked {
+		return m, cmd, true
+	}
+
 	return m, tea.Sequence(
 		saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner),
 		tea.Println(dimStyle.Render("saved session "+m.sessionState.ID)),
@@ -163,22 +188,42 @@ func runExportSlashCommand(m model, input slashOptionalValueInput) (model, tea.C
 		path = "session.md"
 	}
 
+	if path != "-" && !m.autonomy.Allows(autonomy.ActionFileWrite) {
+		return m, tea.Println(errStyle.Render(autonomy.DenialMessage(m.autonomy, autonomy.ActionFileWrite, "/export"))), true
+	}
+
 	if err := writeSessionExport(m.sessionState, path); err != nil {
 		return m, tea.Println(errStyle.Render("export: " + err.Error())), true
+	}
+
+	if path != "-" {
+		emitFileWriteWarning(m.ctx, m.hookRunner, m.sessionState, path, m.selectedAgent, "slash-export")
 	}
 
 	return m, tea.Println(dimStyle.Render("exported " + path)), true
 }
 
 func runRetrySlashCommand(m model, _ slashNoArgsInput) (model, tea.Cmd, bool) {
+	if cmd, blocked := slashFileWriteAutonomyBlock(m, "/retry"); blocked {
+		return m, cmd, true
+	}
+
 	return m.regenerateLast()
 }
 
 func runEditSlashCommand(m model, _ slashNoArgsInput) (model, tea.Cmd, bool) {
+	if cmd, blocked := slashFileWriteAutonomyBlock(m, "/edit"); blocked {
+		return m, cmd, true
+	}
+
 	return m.editLastUser()
 }
 
 func runForkSlashCommand(m model, input slashForkInput) (model, tea.Cmd, bool) {
+	if cmd, blocked := slashFileWriteAutonomyBlock(m, "/fork"); blocked {
+		return m, cmd, true
+	}
+
 	return m.forkAt(input)
 }
 
@@ -191,15 +236,27 @@ func runSearchSlashCommand(m model, input slashSearchInput) (model, tea.Cmd, boo
 }
 
 func runPinSlashCommand(m model, input slashMessageNumberInput) (model, tea.Cmd, bool) {
+	if cmd, blocked := slashFileWriteAutonomyBlock(m, "/pin"); blocked {
+		return m, cmd, true
+	}
+
 	return m.pinMessage(input, true)
 }
 
 func runUnpinSlashCommand(m model, input slashMessageNumberInput) (model, tea.Cmd, bool) {
+	if cmd, blocked := slashFileWriteAutonomyBlock(m, "/unpin"); blocked {
+		return m, cmd, true
+	}
+
 	return m.pinMessage(input, false)
 }
 
 func runContextSlashCommand(m model, input slashContextInput) (model, tea.Cmd, bool) {
 	if input.Prune {
+		if cmd, blocked := slashFileWriteAutonomyBlock(m, "/context prune"); blocked {
+			return m, cmd, true
+		}
+
 		m.pruneToPinned()
 
 		return m, tea.Println(dimStyle.Render("context pruned to pinned messages")), true
@@ -223,6 +280,10 @@ func runSuggestionsSlashCommand(m model, input slashSuggestionsInput) (model, te
 		return m, tea.Println(m.promptSuggestionsSummary()), true
 	}
 
+	if cmd, blocked := slashFileWriteAutonomyBlock(m, "/suggestions"); blocked {
+		return m, cmd, true
+	}
+
 	switch input.Mode {
 	case string(promptSuggestionConsentLocalOnly), "local":
 		scope := m.promptSuggestionLocalOnlyScope()
@@ -239,6 +300,7 @@ func runSuggestionsSlashCommand(m model, input slashSuggestionsInput) (model, te
 			m.cwd,
 			appconfig.PromptSuggestionPreferenceLocalOnly,
 			scope,
+			m.autonomy,
 			m.hookRunner,
 		)()
 
@@ -270,6 +332,7 @@ func runSuggestionsSlashCommand(m model, input slashSuggestionsInput) (model, te
 			m.cwd,
 			appconfig.PromptSuggestionPreferenceModelBacked,
 			appconfig.ModelScopeFolder,
+			m.autonomy,
 			m.hookRunner,
 		)()
 
@@ -290,6 +353,7 @@ func runSuggestionsSlashCommand(m model, input slashSuggestionsInput) (model, te
 			m.cwd,
 			appconfig.PromptSuggestionPreferenceModelBacked,
 			appconfig.ModelScopeGlobal,
+			m.autonomy,
 			m.hookRunner,
 		)()
 
@@ -430,6 +494,7 @@ func (m model) forkAt(input slashForkInput) (model, tea.Cmd, bool) {
 	m.history = append([]llm.Message(nil), m.history[:n]...)
 	m.sessionState = session.New(m.selectedModel, m.history)
 	m.sessionState.AgentLoopBudget = m.agentLoopBudget
+	m.sessionState.Autonomy = m.autonomy.String()
 
 	return m, tea.Println(dimStyle.Render("forked session " + m.sessionState.ID)), true
 }
@@ -567,6 +632,10 @@ func listCodeBlocks(s string) string {
 }
 
 func runSaveCodeSlashCommand(m model, input slashSaveCodeInput) (model, tea.Cmd, bool) {
+	if !m.autonomy.Allows(autonomy.ActionFileWrite) {
+		return m, tea.Println(errStyle.Render(autonomy.DenialMessage(m.autonomy, autonomy.ActionFileWrite, "/save-code"))), true
+	}
+
 	bs := extractCodeBlocks(lastAssistantContent(m.history))
 	if input.Block < 1 || input.Block > len(bs) {
 		return m, tea.Println(errStyle.Render("invalid code block")), true
@@ -576,16 +645,22 @@ func runSaveCodeSlashCommand(m model, input slashSaveCodeInput) (model, tea.Cmd,
 		return m, tea.Println(errStyle.Render(err.Error())), true
 	}
 
+	emitFileWriteWarning(m.ctx, m.hookRunner, m.sessionState, input.Path, m.selectedAgent, "slash-save-code")
+
 	return m, tea.Println(dimStyle.Render("saved " + input.Path)), true
 }
 
 func runCopySlashCommand(m model, input slashCopyInput) (model, tea.Cmd, bool) {
+	if !m.autonomy.Allows(autonomy.ActionMutatingShell) {
+		return m, tea.Println(errStyle.Render(autonomy.DenialMessage(m.autonomy, autonomy.ActionMutatingShell, "/copy clipboard"))), true
+	}
+
 	text := lastAssistantContent(m.history)
 	if input.Target == sessionCommandName {
 		text = plainTranscript(m.history)
 	}
 
-	if err := copyToClipboard(m.ctx, text); err != nil {
+	if err := copyToClipboardWithAudit(m.ctx, text, slashCommandAuditContext(m, "atteler.clipboard")); err != nil {
 		return m, tea.Println(errStyle.Render("copy: " + err.Error())), true
 	}
 
@@ -593,6 +668,10 @@ func runCopySlashCommand(m model, input slashCopyInput) (model, tea.Cmd, bool) {
 }
 
 func runCopyCodeSlashCommand(m model, input slashCopyCodeInput) (model, tea.Cmd, bool) {
+	if !m.autonomy.Allows(autonomy.ActionMutatingShell) {
+		return m, tea.Println(errStyle.Render(autonomy.DenialMessage(m.autonomy, autonomy.ActionMutatingShell, "/copy-code clipboard"))), true
+	}
+
 	text := lastAssistantContent(m.history)
 	blocks := extractCodeBlocks(text)
 
@@ -600,7 +679,7 @@ func runCopyCodeSlashCommand(m model, input slashCopyCodeInput) (model, tea.Cmd,
 		return m, tea.Println(errStyle.Render("invalid code block")), true
 	}
 
-	if err := copyToClipboard(m.ctx, blocks[input.Block-1]); err != nil {
+	if err := copyToClipboardWithAudit(m.ctx, blocks[input.Block-1], slashCommandAuditContext(m, "atteler.clipboard")); err != nil {
 		return m, tea.Println(errStyle.Render("copy: " + err.Error())), true
 	}
 
@@ -608,6 +687,23 @@ func runCopyCodeSlashCommand(m model, input slashCopyCodeInput) (model, tea.Cmd,
 }
 
 func copyToClipboard(ctx context.Context, text string) error {
+	return copyToClipboardWithAudit(ctx, text, shell.AuditContext{Caller: "atteler.clipboard"})
+}
+
+func slashCommandAuditContext(m model, caller string) shell.AuditContext {
+	return shell.AuditContext{
+		Caller:      caller,
+		SessionID:   m.sessionState.ID,
+		SessionPath: m.sessionPath,
+		Autonomy:    m.autonomy.String(),
+	}
+}
+
+func copyToClipboardWithAudit(ctx context.Context, text string, audit shell.AuditContext) error {
+	if autonomy.Normalize(autonomy.Level(audit.Autonomy)) == autonomy.Low {
+		return errors.New("clipboard command blocked: autonomy low is advisory-only and blocks clipboard command execution; rerun with --autonomy medium or higher")
+	}
+
 	if ctx == nil {
 		return errors.New("context is required")
 	}
@@ -617,6 +713,11 @@ func copyToClipboard(ctx context.Context, text string) error {
 	}
 
 	cmds := [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}}
+
+	if strings.TrimSpace(audit.Caller) == "" {
+		audit.Caller = "atteler.clipboard"
+	}
+
 	for _, c := range cmds {
 		if _, err := exec.LookPath(c[0]); err != nil {
 			continue
@@ -627,7 +728,7 @@ func copyToClipboard(ctx context.Context, text string) error {
 			Args:    c[1:],
 			Stdin:   strings.NewReader(text),
 			Mode:    shell.ModeCaptured,
-			Audit:   shell.AuditContext{Caller: "atteler.clipboard"},
+			Audit:   audit,
 		})
 		if err != nil {
 			return fmt.Errorf("authorize %s: %w", c[0], err)
@@ -678,10 +779,14 @@ func isUnifiedDiff(value string) bool {
 	return strings.Contains(value, "---") && strings.Contains(value, "+++")
 }
 
-func (m model) runGitApplyPatch(patch string) (model, tea.Cmd) {
-	const displayCommand = "git apply --check - && git apply -"
+const gitApplyPatchDisplayCommand = "git apply --check - && git apply -"
 
-	line := userLabel.Render("$") + " " + displayCommand
+func (m model) runGitApplyPatch(patch string) (model, tea.Cmd) {
+	if decision := llm.BashAutonomyDecision(m.autonomy, gitApplyPatchDisplayCommand); decision.Verdict == llm.ToolPolicyDeny {
+		return m, tea.Println(errStyle.Render(decision.Reason))
+	}
+
+	line := userLabel.Render("$") + " " + gitApplyPatchDisplayCommand
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
 	tickCmd := m.startRunningTask("apply-patch")
@@ -694,25 +799,38 @@ func (m model) runGitApplyPatch(patch string) (model, tea.Cmd) {
 			SessionPath: m.sessionPath,
 			Agent:       m.selectedAgent,
 			Model:       m.sessionState.DefaultModel,
-			Content:     displayCommand,
+			Content:     gitApplyPatchDisplayCommand,
 			Metadata: map[string]string{
-				"command": displayCommand,
-				"cwd":     m.cwd,
-				"input":   "/apply-patch",
-				"source":  "slash",
+				"autonomy": m.autonomy.String(),
+				"command":  gitApplyPatchDisplayCommand,
+				"cwd":      m.cwd,
+				"input":    "/apply-patch",
+				"source":   "slash",
 			},
 		}),
-		runGitApplyPatchCmd(ctx, patch, m.cwd, displayCommand),
+		runGitApplyPatchCmd(ctx, patch, m.cwd, slashCommandAuditContext(m, "atteler.slash.apply_patch.git")),
 	), tickCmd)
 }
 
-func runGitApplyPatchCmd(ctx context.Context, patch, dir, displayCommand string) tea.Cmd {
+func runGitApplyPatchCmd(ctx context.Context, patch, dir string, audit shell.AuditContext) tea.Cmd {
 	return func() tea.Msg {
-		stdout, stderr, err := runGitApply(ctx, dir, []string{"--check", "-"}, patch)
+		autonomyLevel := autonomy.Normalize(autonomy.Level(audit.Autonomy))
+		if decision := llm.BashAutonomyDecision(autonomyLevel, gitApplyPatchDisplayCommand); decision.Verdict == llm.ToolPolicyDeny {
+			err := errors.New(decision.Reason)
+
+			return shellResultMsg{
+				err:         err,
+				completedAt: time.Now(),
+				command:     gitApplyPatchDisplayCommand,
+				stderr:      err.Error(),
+			}
+		}
+
+		stdout, stderr, err := runGitApply(ctx, dir, []string{"--check", "-"}, patch, audit)
 		if err == nil {
 			var applyStdout, applyStderr string
 
-			applyStdout, applyStderr, err = runGitApply(ctx, dir, []string{"-"}, patch)
+			applyStdout, applyStderr, err = runGitApply(ctx, dir, []string{"-"}, patch, audit)
 			stdout += applyStdout
 			stderr += applyStderr
 		}
@@ -720,28 +838,37 @@ func runGitApplyPatchCmd(ctx context.Context, patch, dir, displayCommand string)
 		return shellResultMsg{
 			err:         err,
 			completedAt: time.Now(),
-			command:     displayCommand,
+			command:     gitApplyPatchDisplayCommand,
 			stdout:      stdout,
 			stderr:      stderr,
 		}
 	}
 }
 
-func runGitApply(ctx context.Context, dir string, args []string, patch string) (stdoutText, stderrText string, err error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"apply"}, args...)...) //nolint:gosec // git args are static slash-command internals and patch content is passed on stdin.
-	if dir != "" {
-		cmd.Dir = dir
-	}
-
-	cmd.Stdin = strings.NewReader(patch)
-
+func runGitApply(ctx context.Context, dir string, args []string, patch string, audit shell.AuditContext) (stdoutText, stderrText string, err error) {
 	var stdout, stderr bytes.Buffer
 
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
+		Program: "git",
+		Args:    append([]string{"apply"}, args...),
+		Dir:     dir,
+		Stdin:   strings.NewReader(patch),
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Mode:    shell.ModeCaptured,
+		Audit:   audit,
+	})
+	if err != nil {
+		return stdout.String(), stderr.String(), fmt.Errorf("git apply %s authorize: %w", strings.Join(args, " "), err)
+	}
 
-	if err := cmd.Run(); err != nil {
-		return stdout.String(), stderr.String(), fmt.Errorf("git apply %s: %w", strings.Join(args, " "), err)
+	runErr := cmd.Run()
+	if finishErr := invocation.Finish(shell.FinishOptions{Stdout: stdout.String(), Stderr: stderr.String(), Error: runErr, OutputCapture: shell.OutputCaptured}); finishErr != nil {
+		return stdout.String(), stderr.String(), fmt.Errorf("git apply %s audit: %w", strings.Join(args, " "), finishErr)
+	}
+
+	if runErr != nil {
+		return stdout.String(), stderr.String(), fmt.Errorf("git apply %s: %w", strings.Join(args, " "), runErr)
 	}
 
 	return stdout.String(), stderr.String(), nil
@@ -777,6 +904,10 @@ func runTemplateSlashCommand(m model, input slashOptionalValueInput) (model, tea
 func runEvalSlashCommand(m model, input slashEvalInput) (model, tea.Cmd, bool) {
 	switch input.Action {
 	case "add":
+		if !m.autonomy.Allows(autonomy.ActionFileWrite) {
+			return m, tea.Println(errStyle.Render(autonomy.DenialMessage(m.autonomy, autonomy.ActionFileWrite, "/eval add"))), true
+		}
+
 		path := filepath.Join(evalCasesDir(m.cwd), m.sessionState.ID+".json")
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			return m, tea.Println(errStyle.Render(err.Error())), true
@@ -790,6 +921,8 @@ func runEvalSlashCommand(m model, input slashEvalInput) (model, tea.Cmd, bool) {
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			return m, tea.Println(errStyle.Render(err.Error())), true
 		}
+
+		emitFileWriteWarning(m.ctx, m.hookRunner, m.sessionState, path, m.selectedAgent, "slash-eval")
 
 		return m, tea.Println(dimStyle.Render("added eval " + path)), true
 	case "run":

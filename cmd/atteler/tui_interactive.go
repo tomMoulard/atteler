@@ -32,7 +32,13 @@ func runInteractive(ctx context.Context, state appState) error {
 		fmt.Println(dimStyle.Render("  Config: " + strings.Join(state.loadedConfigPaths, ", ")))
 	}
 
-	fmt.Println(dimStyle.Render("  Session: " + state.sessionState.ID + " (" + state.sessionStore.Path(state.sessionState.ID) + ")"))
+	fmt.Println(dimStyle.Render("  Session: " + formatSessionLocation(
+		state.sessionState.ID,
+		state.sessionStore.Path(state.sessionState.ID),
+		sessionPersistenceAllowed(state.sessionState),
+		state.autonomy.String(),
+	)))
+	fmt.Println(dimStyle.Render("  Autonomy: ") + pickerSelectedStyle.Render(state.autonomy.String()))
 
 	if state.sessionState.Title != "" {
 		fmt.Println(dimStyle.Render("  Title: ") + pickerSelectedStyle.Render(state.sessionState.Title))
@@ -81,8 +87,9 @@ func runInteractive(ctx context.Context, state appState) error {
 		SessionPath: state.sessionStore.Path(state.sessionState.ID),
 		Agent:       state.selectedAgent,
 		Model:       state.selectedModel,
-		Metadata: agentLoopBudgetModelSettingsEventMetadata(
+		Metadata: sessionRunEventMetadata(
 			state.agentLoopBudget,
+			state.autonomy,
 			sessionGeneration.ReasoningLevel,
 			sessionGeneration.ModelMode,
 		),
@@ -113,6 +120,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.generationDefaults,
 		state.generationOverrides,
 		state.agentLoopBudget,
+		state.autonomy,
 		state.agentLoopCheckpointInterval,
 		state.maxInputTokens,
 		state.modelLocked,
@@ -149,15 +157,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		finalSession = m.sessionState
 	}
 
-	if state.sessionStore != nil && finalSession.ID != "" {
-		if err := state.sessionStore.Save(finalSession); err != nil {
-			fmt.Fprintln(os.Stderr, "warning: could not save session on exit: "+err.Error())
-		} else {
-			emitFileWriteWarning(ctx, state.hookRunner, finalSession, state.sessionStore.Path(finalSession.ID), finalSession.DefaultAgent, "session")
-		}
-
-		printSessionReuseHint(os.Stderr, resolveSpawnBinary(""), state.sessionStore, finalSession.ID)
-	}
+	persistInteractiveSessionOnExit(ctx, state, finalSession)
 
 	emitHookWarning(ctx, state.hookRunner, events.Event{
 		Type:        events.SessionEnd,
@@ -165,8 +165,9 @@ func runInteractive(ctx context.Context, state appState) error {
 		SessionPath: state.sessionStore.Path(finalSession.ID),
 		Agent:       finalSession.DefaultAgent,
 		Model:       finalSession.DefaultModel,
-		Metadata: agentLoopBudgetModelSettingsEventMetadata(
+		Metadata: sessionRunEventMetadata(
 			finalSession.AgentLoopBudget,
+			state.autonomy,
 			firstNonEmpty(finalSession.DefaultReasoningLevel, sessionGeneration.ReasoningLevel),
 			firstNonEmpty(finalSession.DefaultModelMode, sessionGeneration.ModelMode),
 		),
@@ -193,6 +194,20 @@ func hookRunnerWithLogger(state appState, logWriter io.Writer) *events.Runner {
 	}
 
 	return state.hookRunner.WithLoggerAndObservers(logWriter, state.eventObservers...)
+}
+
+func persistInteractiveSessionOnExit(ctx context.Context, state appState, finalSession session.Session) {
+	if state.sessionStore == nil || finalSession.ID == "" || !sessionPersistenceAllowed(finalSession) {
+		return
+	}
+
+	if err := state.sessionStore.Save(finalSession); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: could not save session on exit: "+err.Error())
+	} else {
+		emitFileWriteWarning(ctx, state.hookRunner, finalSession, state.sessionStore.Path(finalSession.ID), finalSession.DefaultAgent, "session")
+	}
+
+	printSessionReuseHint(os.Stderr, resolveSpawnBinary(""), state.sessionStore, finalSession.ID)
 }
 
 func printStartupPromptSuggestionStatus(state appState) {

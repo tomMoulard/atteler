@@ -155,6 +155,7 @@ type HeadlessEvent struct {
 	Error           string              `json:"error,omitempty"`
 	Agent           string              `json:"agent,omitempty"`
 	Model           string              `json:"model,omitempty"`
+	Autonomy        string              `json:"autonomy,omitempty"`
 	AgentLoopBudget llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
 	CWD             string              `json:"cwd,omitempty"`
 	Hostname        string              `json:"hostname,omitempty"`
@@ -194,6 +195,7 @@ type HeadlessRun struct {
 	Prompt             string              `json:"prompt"`
 	Model              string              `json:"model"`
 	ModelMode          string              `json:"model_mode,omitempty"`
+	Autonomy           string              `json:"autonomy,omitempty"`
 	AgentLoopBudget    llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
 	Agent              string              `json:"agent"`
 	Owner              string              `json:"owner,omitempty"`
@@ -1755,6 +1757,7 @@ func headlessEventForRun(run HeadlessRun, eventType HeadlessEventType, message s
 		Error:           run.Error,
 		Agent:           run.Agent,
 		Model:           run.Model,
+		Autonomy:        run.Autonomy,
 		AgentLoopBudget: run.AgentLoopBudget,
 		CWD:             run.CWD,
 		Hostname:        run.Hostname,

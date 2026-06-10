@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
@@ -271,6 +272,7 @@ type llmRequest struct {
 	hookRunner                  *events.Runner
 	generation                  generationSettings
 	agentLoopBudget             llm.AgentLoopBudget
+	autonomy                    autonomy.Level
 	agentLoopCheckpointInterval int
 	maxInputTokens              int
 	routeDecision               *modelroute.Decision
@@ -329,6 +331,7 @@ type model struct {
 	generationDefaults          generationSettings
 	generationOverrides         generationSettings
 	agentLoopBudget             llm.AgentLoopBudget
+	autonomy                    autonomy.Level
 	agentLoopCheckpointInterval int
 
 	sessionState              session.Session
@@ -422,6 +425,7 @@ func initialModel(
 	generationDefaults generationSettings,
 	generationOverrides generationSettings,
 	agentLoopBudget llm.AgentLoopBudget,
+	autonomyLevel autonomy.Level,
 	agentLoopCheckpointInterval int,
 	maxInputTokens int,
 	modelLocked bool,
@@ -434,6 +438,7 @@ func initialModel(
 	ta := newPromptTextarea()
 	selectedProvider, _ := reg.ProviderForModel(selectedModel)
 	sessionState.AgentLoopBudget = agentLoopBudget
+	sessionState.Autonomy = autonomy.Normalize(autonomyLevel).String()
 	idleSuggestionUsage, idleSuggestionRequests, idleSuggestionTokens, idleSuggestionCostUSD := idleSuggestionBudgetStateFromSession(sessionState)
 
 	return model{
@@ -462,6 +467,7 @@ func initialModel(
 		generationDefaults:          generationDefaults,
 		generationOverrides:         generationOverrides,
 		agentLoopBudget:             agentLoopBudget,
+		autonomy:                    autonomy.Normalize(autonomyLevel),
 		agentLoopCheckpointInterval: agentLoopCheckpointInterval,
 		maxInputTokens:              maxInputTokens,
 		history:                     append([]llm.Message(nil), sessionState.Messages...),

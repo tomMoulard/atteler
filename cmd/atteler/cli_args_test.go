@@ -78,6 +78,11 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			want: []string{"--once", "explain this repo", "--model", "openai/gpt-5.4"},
 		},
 		{
+			name: "joined prompt command keeps trailing autonomy flag parseable",
+			args: []string{"chat", "once", "implement", "GH-123", "--autonomy", "high"},
+			want: []string{"--once", "implement GH-123", "--autonomy", "high"},
+		},
+		{
 			name: "memory search keeps trailing privacy flags parseable",
 			args: []string{"memory", "search", "OAuth", "retry", "--memory-scope", "repo", "--memory-tag", "security"},
 			want: []string{"--memory-search", "OAuth retry", "--memory-scope", "repo", "--memory-tag", "security"},
@@ -753,12 +758,17 @@ func TestTranslateCLIArgsWithFlagSet_PreservesParseableFlagOrder(t *testing.T) {
 		model := fs.String("model", "", "")
 		output := fs.String("output", "", "")
 
-		got := translateCLIArgsWithFlagSet([]string{"chat", "once", "explain", "this", "repo", "--model", "test/model", "--output", "json"}, fs)
+		var autonomy autonomyFlag
+
+		fs.Var(&autonomy, "autonomy", "")
+
+		got := translateCLIArgsWithFlagSet([]string{"chat", "once", "explain", "this", "repo", "--autonomy", "low", "--model", "test/model", "--output", "json"}, fs)
 		require.NoError(t, got.Err)
 		require.False(t, got.Help)
 		require.NoError(t, fs.Parse(got.Args))
 
 		assert.Equal(t, "explain this repo", *oncePrompt)
+		assert.Equal(t, "low", autonomy.String())
 		assert.Equal(t, "test/model", *model)
 		assert.Equal(t, "json", *output)
 	})

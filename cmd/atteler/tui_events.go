@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
@@ -90,6 +91,10 @@ func saveSession(ctx context.Context, store *session.Store, sessionState session
 			return sessionSavedMsg{}
 		}
 
+		if !sessionPersistenceAllowed(sessionState) {
+			return sessionSavedMsg{}
+		}
+
 		if err := store.Save(sessionState); err != nil {
 			return sessionSavedMsg{err: err}
 		}
@@ -101,13 +106,18 @@ func saveSession(ctx context.Context, store *session.Store, sessionState session
 			Agent:       sessionState.DefaultAgent,
 			Model:       sessionState.DefaultModel,
 			Metadata: map[string]string{
-				"path": store.Path(sessionState.ID),
-				"kind": "session",
+				"autonomy": sessionState.Autonomy,
+				"path":     store.Path(sessionState.ID),
+				"kind":     "session",
 			},
 		})
 
 		return sessionSavedMsg{}
 	}
+}
+
+func sessionPersistenceAllowed(sessionState session.Session) bool {
+	return autonomy.Normalize(autonomy.Level(sessionState.Autonomy)).Allows(autonomy.ActionFileWrite)
 }
 
 func saveModelPreference(
@@ -120,11 +130,20 @@ func saveModelPreference(
 	modelMode string,
 	modeSelected bool,
 	scope appconfig.ModelScope,
+	level autonomy.Level,
 	runner *events.Runner,
 ) tea.Cmd {
 	return func() tea.Msg {
 		if store == nil {
 			return modelPreferenceSavedMsg{scope: scope}
+		}
+
+		level = autonomy.Normalize(level)
+		if !level.Allows(autonomy.ActionFileWrite) {
+			return modelPreferenceSavedMsg{
+				err:   fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "model preference")),
+				scope: scope,
+			}
 		}
 
 		_, err := store.Update(func(state *appconfig.State) error {
@@ -147,8 +166,9 @@ func saveModelPreference(
 		emitHookWarning(ctx, runner, events.Event{
 			Type: events.FileWrite,
 			Metadata: map[string]string{
-				"path": store.Path(),
-				"kind": "state",
+				"autonomy": level.String(),
+				"path":     store.Path(),
+				"kind":     "state",
 			},
 		})
 
@@ -162,11 +182,20 @@ func savePromptSuggestionPreference(
 	cwd string,
 	preference appconfig.PromptSuggestionPreference,
 	scope appconfig.ModelScope,
+	level autonomy.Level,
 	runner *events.Runner,
 ) tea.Cmd {
 	return func() tea.Msg {
 		if store == nil {
 			return promptSuggestionPreferenceSavedMsg{scope: scope}
+		}
+
+		level = autonomy.Normalize(level)
+		if !level.Allows(autonomy.ActionFileWrite) {
+			return promptSuggestionPreferenceSavedMsg{
+				err:   fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "prompt suggestion preference")),
+				scope: scope,
+			}
 		}
 
 		_, err := store.Update(func(state *appconfig.State) error {
@@ -181,8 +210,9 @@ func savePromptSuggestionPreference(
 		emitHookWarning(ctx, runner, events.Event{
 			Type: events.FileWrite,
 			Metadata: map[string]string{
-				"path": store.Path(),
-				"kind": "state",
+				"autonomy": level.String(),
+				"path":     store.Path(),
+				"kind":     "state",
 			},
 		})
 
@@ -280,8 +310,9 @@ func emitFileWriteWarning(
 		Agent:       agentName,
 		Model:       sessionState.DefaultModel,
 		Metadata: map[string]string{
-			"path": path,
-			"kind": kind,
+			"autonomy": sessionState.Autonomy,
+			"path":     path,
+			"kind":     kind,
 		},
 	})
 }
@@ -305,7 +336,7 @@ func emitHook(ctx context.Context, runner *events.Runner, event events.Event) te
 			return hookMsg{}
 		}
 
-		line := events.FormatLine(event)
+		line := runner.FormatLine(event)
 
 		return hookMsg{err: runner.Emit(ctx, event), line: line}
 	}

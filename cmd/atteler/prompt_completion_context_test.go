@@ -17,12 +17,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/codeintel"
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/promptcomplete"
 	"github.com/tommoulard/atteler/pkg/session"
+	"github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/tasklist"
 	"github.com/tommoulard/atteler/pkg/worktree"
 )
@@ -90,6 +92,28 @@ func TestParseGitStatusPath_RenameUsesNewPath(t *testing.T) {
 	assert.Equal(t, "new/name.go", parseGitStatusPath("R  old/name.go -> new/name.go"))
 	assert.Equal(t, "pkg/file.go", parseGitStatusPath(" M pkg/file.go"))
 	assert.Empty(t, parseGitStatusPath(""))
+}
+
+func TestPromptGitAuditContextIncludesAutonomy(t *testing.T) {
+	t.Parallel()
+
+	got := promptGitAuditContext(autonomy.Full)
+	assert.Equal(t, "atteler.prompt_completion.git", got.Caller)
+	assert.Equal(t, "full", got.Autonomy)
+}
+
+func TestPromptCompletionContext_LowAutonomySkipsGitShellAudit(t *testing.T) {
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	t.Setenv(shell.EnvAuditDir, auditDir)
+
+	completionContext := promptCompletionContext(context.Background(), appState{
+		autonomy: autonomy.Low,
+		cwd:      t.TempDir(),
+	}, "GH-", true)
+
+	assert.Empty(t, completionContext.Issues)
+	assert.Empty(t, completionContext.RecentFiles)
+	assert.NoDirExists(t, auditDir)
 }
 
 func TestPromptLimitedOutputBuffer_LimitsBytes(t *testing.T) {

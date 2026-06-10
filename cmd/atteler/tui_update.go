@@ -160,22 +160,30 @@ func (m model) updateModelsLoaded(msg modelsLoadedMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Println(errStyle.Render("Error loading models: " + msg.err.Error()))
 		}
 
-		if fzfPath, ok := findFZF(); ok {
-			m.pickerOpen = false
+		if externalModelPickerAllowed(m.autonomy) {
+			if fzfPath, ok := findFZF(); ok {
+				m.pickerOpen = false
 
-			return m, tea.Batch(
-				emitHook(m.ctx, m.hookRunner, events.Event{
-					Type:        events.CommandExecute,
-					SessionID:   m.sessionState.ID,
-					SessionPath: m.sessionPath,
-					Agent:       m.selectedAgent,
-					Model:       m.selectedModel,
-					Metadata: map[string]string{
-						"command": "fzf",
-					},
-				}),
-				runFZFModelPicker(m.ctx, fzfPath, msg.items),
-			)
+				return m, tea.Batch(
+					emitHook(m.ctx, m.hookRunner, events.Event{
+						Type:        events.CommandExecute,
+						SessionID:   m.sessionState.ID,
+						SessionPath: m.sessionPath,
+						Agent:       m.selectedAgent,
+						Model:       m.selectedModel,
+						Metadata: map[string]string{
+							"autonomy": m.autonomy.String(),
+							"command":  "fzf",
+						},
+					}),
+					runFZFModelPicker(m.ctx, fzfPath, msg.items, attshell.AuditContext{
+						Caller:      "atteler.fzf_model_picker",
+						SessionID:   m.sessionState.ID,
+						SessionPath: m.sessionPath,
+						Autonomy:    m.autonomy.String(),
+					}),
+				)
+			}
 		}
 
 		m.pickerItems = msg.items
@@ -717,7 +725,8 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		Estimator: m.referenceContextEstimator,
 	}, contextOptions)
 	routeReferenceContext := buildReferenceContextWithManifest(m.ctx, routeGlobalReferenceContext, activeAgent, contextOptions)
-	budgetMessages := requestMessagesForBudget(requestModel, msgs, activeAgent, generation, routeReferenceContext.Content, m.executionMode != executionModePlan)
+	useTools := m.requestUsesTools()
+	budgetMessages := requestMessagesForBudget(requestModel, msgs, activeAgent, generation, routeReferenceContext.Content, useTools)
 
 	requestModel, fallbackModels, routeDecision, err := requestModelRoutingAndFallbacks(
 		m.ctx,
@@ -780,22 +789,18 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		referenceContext.Estimator = generatedSkillRefCtx.Estimator
 	}
 
-	workspaceRefCtx := workspaceVectorReferenceContextWithWarning(
+	referenceContext = appendWorkspaceVectorReferenceContextForAutonomy(
 		m.ctx,
+		referenceContext,
+		m.autonomy,
 		firstNonEmpty(m.contextOptions.Root, m.cwd),
 		m.vectorConfig,
 		input,
 		false,
 		contextOptions,
 	)
-	referenceContext.Content = appendReferenceContext(referenceContext.Content, workspaceRefCtx.Content)
 
-	referenceContext.Manifest = mergeReferenceManifests(referenceContext.Manifest, workspaceRefCtx.Manifest)
-	if referenceContext.Estimator == "" {
-		referenceContext.Estimator = workspaceRefCtx.Estimator
-	}
-
-	preflightMessages := requestMessagesForBudget(requestModel, msgs, activeAgent, generation, referenceContext.Content, m.executionMode != executionModePlan)
+	preflightMessages := requestMessagesForBudget(requestModel, msgs, activeAgent, generation, referenceContext.Content, useTools)
 	if err := validateRequestBudgetWithFallbacks(m.registry, requestModel, fallbackModels, preflightMessages, m.maxInputTokens); err != nil {
 		manifestEvent := requestContextManifestEvent(newRequestContextManifestForModelsWithInlineEvents(
 			m.registry,
@@ -827,6 +832,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 	m.history = nextHistory
 	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
 	m.sessionState.AgentLoopBudget = m.agentLoopBudget
+	m.sessionState.Autonomy = m.autonomy.String()
 
 	m.sessionState.DefaultAgent = activeAgent.name
 	if requestModel != "" {
@@ -853,7 +859,7 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		agent:                       activeAgent.agent,
 		hasAgent:                    activeAgent.ok,
 		model:                       requestModel,
-		agentLoopCheckpointPath:     agentLoopCheckpointPath(m.sessionPath),
+		agentLoopCheckpointPath:     agentLoopCheckpointPathForAutonomy(m.sessionPath, m.autonomy),
 		referenceContext:            referenceContext.Content,
 		referenceManifest:           referenceContext.Manifest,
 		workingDir:                  m.cwd,
@@ -861,12 +867,13 @@ func (m model) submitPrompt(input string) (tea.Model, tea.Cmd) {
 		fallbackModels:              fallbackModels,
 		generation:                  generation,
 		agentLoopBudget:             m.agentLoopBudget,
+		autonomy:                    m.autonomy,
 		agentLoopCheckpointInterval: m.agentLoopCheckpointInterval,
 		maxInputTokens:              m.maxInputTokens,
 		routeDecision:               routeDecision,
 		refs:                        refs,
 		inlineReferenceEvents:       inlineEvents,
-		useTools:                    m.executionMode != executionModePlan,
+		useTools:                    useTools,
 		confirmRequestCh:            confirmCh,
 		confirmResponseCh:           responseCh,
 		liveCh:                      liveCh,
@@ -940,6 +947,14 @@ func (m model) submitPromptRequestCommand(
 	)
 
 	return tea.Batch(tea.Sequence(cmds...), tickCmd, listenForCheckpoint(confirmCh, responseCh), listenForLLMLiveMessage(liveCh))
+}
+
+func (m model) requestUsesTools() bool {
+	if m.executionMode == executionModePlan {
+		return false
+	}
+
+	return m.autonomy.AllowsAgentTools()
 }
 
 func (m model) inlineReferenceErrorCommand(

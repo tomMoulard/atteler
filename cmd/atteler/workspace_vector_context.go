@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
@@ -61,6 +62,32 @@ func warnWorkspaceVectorContextOmitted(err error) {
 	}
 
 	fmt.Fprintln(os.Stderr, "warning: workspace vector context omitted: "+redactWorkspaceVectorWarning(err.Error()))
+}
+
+func appendWorkspaceVectorReferenceContextForAutonomy(
+	ctx context.Context,
+	base configuredReferenceContext,
+	level autonomy.Level,
+	cwd string,
+	cfg appconfig.VectorConfig,
+	prompt string,
+	warn bool,
+	contextOptions ...contextref.Options,
+) configuredReferenceContext {
+	if !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return base
+	}
+
+	workspaceRefCtx := workspaceVectorReferenceContextWithWarning(ctx, cwd, cfg, prompt, warn, contextOptions...)
+
+	base.Content = appendReferenceContext(base.Content, workspaceRefCtx.Content)
+	base.Manifest = mergeReferenceManifests(base.Manifest, workspaceRefCtx.Manifest)
+
+	if base.Estimator == "" {
+		base.Estimator = workspaceRefCtx.Estimator
+	}
+
+	return base
 }
 
 func redactWorkspaceVectorWarning(value string) string {

@@ -100,7 +100,7 @@ func runVerificationGate(ctx context.Context, cfg Config, issue Issue, workspace
 			DenyCommands:  append([]string(nil), cfg.Publish.VerificationDenyCommands...),
 			DenyNetwork:   true,
 		},
-		Audit: symphonyIssueAudit("symphony.verification", issue),
+		Audit: symphonyIssueAudit("symphony.verification", issue, cfg.Autonomy),
 	})
 
 	result.CompletedAt = time.Now().UTC()

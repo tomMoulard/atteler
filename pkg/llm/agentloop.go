@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/tommoulard/atteler/pkg/autonomy"
 )
 
 // ToolExecutor executes a single tool call and returns the result content.
@@ -46,6 +48,11 @@ type AgentLoopConfig struct {
 	// tool calls, output bytes, tokens, and optional estimated cost.
 	Budget AgentLoopBudget
 
+	// Autonomy records the selected risk-based action boundary for checkpoints.
+	// Tool enforcement lives in Policy so callers can combine autonomy with
+	// provider-specific or UI confirmation gates.
+	Autonomy autonomy.Level
+
 	// EstimateCostMicros is required only when Budget.MaxCostMicros is set.
 	EstimateCostMicros AgentLoopCostEstimator
 
@@ -80,6 +87,7 @@ type agentLoopState struct {
 	startedAt time.Time
 	messages  []Message
 	budget    AgentLoopBudget
+	autonomy  autonomy.Level
 	usage     AgentLoopUsage
 	now       func() time.Time
 	sequence  int
@@ -354,6 +362,7 @@ func newAgentLoopState(messages []Message, cfg AgentLoopConfig) *agentLoopState 
 		startedAt: startedAt,
 		messages:  append([]Message(nil), messages...),
 		budget:    normalizeAgentLoopBudget(cfg.Budget, cfg.MaxIterations),
+		autonomy:  autonomy.Normalize(cfg.Autonomy),
 		now:       now,
 	}
 }
@@ -580,6 +589,7 @@ func (s *agentLoopState) recordModelResponse(
 	step := AgentLoopStep{
 		Kind:         AgentLoopStepModelResponse,
 		Iteration:    s.usage.Iterations,
+		Autonomy:     s.autonomy,
 		Budget:       s.budget,
 		ModelRequest: &request,
 		ModelResponse: &AgentLoopModelResponseSummary{
@@ -625,6 +635,7 @@ func (s *agentLoopState) recordToolCall(
 	step := AgentLoopStep{
 		Kind:          AgentLoopStepToolCall,
 		Iteration:     s.usage.Iterations,
+		Autonomy:      s.autonomy,
 		Budget:        s.budget,
 		ToolCallIndex: callIndex,
 		ToolCall:      &callCopy,
@@ -647,6 +658,7 @@ func (s *agentLoopState) recordStop(ctx context.Context, sink AgentLoopCheckpoin
 	step := AgentLoopStep{
 		Kind:          AgentLoopStepStop,
 		Iteration:     s.usage.Iterations,
+		Autonomy:      s.autonomy,
 		Budget:        s.budget,
 		Usage:         s.usage,
 		StopCondition: &condCopy,

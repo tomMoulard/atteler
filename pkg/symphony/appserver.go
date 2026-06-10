@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -35,6 +37,7 @@ type AppServerClient struct {
 	quitOnce     sync.Once
 	nextID       int64
 	pid          string
+	autonomy     autonomy.Level
 }
 
 type commandLink struct {
@@ -73,10 +76,17 @@ func StartAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 // StartAppServerForIssue launches the configured Codex app-server command and
 // ties its audit records to the issue currently being worked.
 func StartAppServerForIssue(ctx context.Context, cfg CodexConfig, issue Issue, workspacePath string, emit func(CodexEvent)) (*AppServerClient, error) {
+	return StartAppServerForIssueWithAutonomy(ctx, cfg, autonomy.DefaultLevel, issue, workspacePath, emit)
+}
+
+// StartAppServerForIssueWithAutonomy launches the configured Codex app-server
+// command and records the selected autonomy in launch audit metadata.
+func StartAppServerForIssueWithAutonomy(ctx context.Context, cfg CodexConfig, level autonomy.Level, issue Issue, workspacePath string, emit func(CodexEvent)) (*AppServerClient, error) {
 	return startAppServer(ctx, cfg, workspacePath, shell.AuditContext{
 		Caller:          "symphony.codex_app_server",
 		IssueID:         issue.ID,
 		IssueIdentifier: issue.Identifier,
+		Autonomy:        autonomy.Normalize(level).String(),
 	}, emit)
 }
 
@@ -92,6 +102,9 @@ func startAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 
 	if strings.TrimSpace(audit.Caller) == "" {
 		audit.Caller = "symphony.codex_app_server"
+	}
+	if strings.TrimSpace(audit.Autonomy) == "" {
+		audit.Autonomy = autonomy.DefaultLevel.String()
 	}
 
 	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
@@ -228,6 +241,7 @@ func (c *AppServerClient) StartThread(ctx context.Context, cfg Config, issue Iss
 	if err := requireAppServerContext(ctx); err != nil {
 		return "", err
 	}
+	c.autonomy = autonomy.Normalize(cfg.Autonomy)
 
 	params := map[string]any{
 		"cwd":                   workspacePath,
@@ -235,7 +249,7 @@ func (c *AppServerClient) StartThread(ctx context.Context, cfg Config, issue Iss
 		"ephemeral":             true,
 		"serviceName":           symphonyServiceName,
 		"baseInstructions":      "You are running inside Symphony, a scheduler for issue-driven coding-agent work. Work only inside the configured workspace and follow the issue prompt.",
-		"developerInstructions": fmt.Sprintf("Current Symphony issue: %s: %s", issue.Identifier, issue.Title),
+		"developerInstructions": fmt.Sprintf("Current Symphony issue: %s: %s\nAutonomy: %s. Respect this risk-based capability boundary. Do not merge pull requests; final merge remains a human action.", issue.Identifier, issue.Title, c.autonomy.String()),
 		"config":                nil,
 	}
 
@@ -274,6 +288,7 @@ func (c *AppServerClient) StartThread(ctx context.Context, cfg Config, issue Iss
 		ThreadID:     response.Thread.ID,
 		AppServerPID: c.pid,
 		Message:      issue.Identifier + ": " + issue.Title,
+		Autonomy:     c.autonomy.String(),
 	})
 
 	return response.Thread.ID, nil
@@ -281,6 +296,8 @@ func (c *AppServerClient) StartThread(ctx context.Context, cfg Config, issue Iss
 
 // RunTurn starts a turn and streams app-server events until it completes.
 func (c *AppServerClient) RunTurn(ctx context.Context, cfg Config, threadID, prompt, workspacePath string) error {
+	c.autonomy = autonomy.Normalize(cfg.Autonomy)
+
 	params := map[string]any{
 		"threadId":              threadID,
 		"cwd":                   workspacePath,
@@ -326,6 +343,7 @@ func (c *AppServerClient) RunTurn(ctx context.Context, cfg Config, threadID, pro
 		TurnID:       response.Turn.ID,
 		SessionID:    threadID + "-" + response.Turn.ID,
 		AppServerPID: c.pid,
+		Autonomy:     c.autonomy.String(),
 	})
 
 	timeout := cfg.Codex.TurnTimeout
@@ -477,12 +495,41 @@ func (c *AppServerClient) handleOutOfBand(ctx context.Context, msg appServerMess
 func (c *AppServerClient) handleServerRequest(ctx context.Context, msg appServerMessage) error {
 	switch msg.Method {
 	case "item/commandExecution/requestApproval", "execCommandApproval":
+		if autonomy.Normalize(c.autonomy) == autonomy.Low {
+			return c.denyApproval(ctx, msg, "autonomy low is advisory-only and blocks command execution approvals")
+		}
+
+		command := extractCommandFromApproval(msg.Params)
+		if command == "" {
+			return c.denyApproval(ctx, msg, "command approval omitted a command; cannot evaluate against selected autonomy")
+		}
+
+		decision := llm.BashToolPolicyForAutonomy(c.autonomy)(ctx, llm.ToolCall{
+			Name:  "bash",
+			Input: map[string]any{"command": command},
+		}, llm.AgentLoopBudgetSnapshot{})
+		switch decision.Verdict {
+		case llm.ToolPolicyDeny:
+			return c.denyApproval(ctx, msg, decision.Reason)
+		case llm.ToolPolicyRequireConfirm:
+			return c.denyApproval(ctx, msg, decision.Reason+"; Symphony cannot auto-approve sensitive commands")
+		}
+
 		c.emitEvent(CodexEvent{Event: "approval_auto_approved", AppServerPID: c.pid, Payload: msg.raw, Message: msg.Method})
 		return c.respond(ctx, msg.ID, map[string]any{"decision": "acceptForSession"})
 	case "item/fileChange/requestApproval", "applyPatchApproval":
+		if !autonomy.Normalize(c.autonomy).Allows(autonomy.ActionFileWrite) {
+			return c.denyApproval(ctx, msg, autonomy.DenialMessage(c.autonomy, autonomy.ActionFileWrite, msg.Method))
+		}
+
 		c.emitEvent(CodexEvent{Event: "approval_auto_approved", AppServerPID: c.pid, Payload: msg.raw, Message: msg.Method})
 		return c.respond(ctx, msg.ID, map[string]any{"decision": "acceptForSession"})
 	case "item/permissions/requestApproval":
+		action, detail := permissionApprovalAutonomyAction(msg.Params)
+		if !autonomy.Normalize(c.autonomy).Allows(action) {
+			return c.denyApproval(ctx, msg, autonomy.DenialMessage(c.autonomy, action, detail))
+		}
+
 		c.emitEvent(CodexEvent{Event: "approval_auto_approved", AppServerPID: c.pid, Payload: msg.raw, Message: msg.Method})
 		return c.respond(ctx, msg.ID, map[string]any{
 			"permissions": map[string]any{
@@ -508,6 +555,20 @@ func (c *AppServerClient) handleServerRequest(ctx context.Context, msg appServer
 	}
 }
 
+func (c *AppServerClient) denyApproval(ctx context.Context, msg appServerMessage, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "request exceeds selected autonomy"
+	}
+
+	c.emitEvent(CodexEvent{Event: "approval_denied", AppServerPID: c.pid, Payload: msg.raw, Message: reason})
+
+	return c.respond(ctx, msg.ID, map[string]any{
+		"decision": "deny",
+		"message":  reason,
+	})
+}
+
 func (c *AppServerClient) respond(ctx context.Context, id any, result any) error {
 	return c.writeContext(ctx, appServerMessage{ID: id, Result: mustRaw(result)})
 }
@@ -520,6 +581,128 @@ func (c *AppServerClient) respondError(ctx context.Context, id any, code int64, 
 			Message: message,
 		},
 	})
+}
+
+func permissionApprovalAutonomyAction(raw json.RawMessage) (autonomy.Action, string) {
+	fields := rawObject(raw)
+	if jsonContainsKey(fields, "network") {
+		return autonomy.ActionRemoteMutation, "network permission escalation"
+	}
+
+	if jsonContainsAnyKey(fields, "fileSystem", "filesystem", "file_system", "workspace", "write") {
+		return autonomy.ActionFileWrite, "file-system permission escalation"
+	}
+
+	return autonomy.ActionRemoteMutation, "permission escalation"
+}
+
+func jsonContainsAnyKey(value any, keys ...string) bool {
+	for _, key := range keys {
+		if jsonContainsKey(value, key) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func jsonContainsKey(value any, key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key == "" {
+		return false
+	}
+
+	switch typed := value.(type) {
+	case map[string]any:
+		for candidate, child := range typed {
+			if strings.EqualFold(strings.TrimSpace(candidate), key) {
+				return true
+			}
+
+			if jsonContainsKey(child, key) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if jsonContainsKey(child, key) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func extractCommandFromApproval(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+
+	return firstCommandString(value)
+}
+
+func firstCommandString(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"command", "cmd", "commandLine", "command_line", "shellCommand", "shell_command", "argv", "args"} {
+			if command := stringFromJSONValue(typed[key]); command != "" {
+				return command
+			}
+		}
+
+		for _, key := range []string{"item", "params", "request", "approval", "exec", "commandExecution"} {
+			if command := firstCommandString(typed[key]); command != "" {
+				return command
+			}
+		}
+	case []any:
+		var parts []string
+		for _, item := range typed {
+			switch nested := item.(type) {
+			case string:
+				if strings.TrimSpace(nested) != "" {
+					parts = append(parts, nested)
+				}
+			default:
+				if command := firstCommandString(nested); command != "" {
+					return command
+				}
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, " ")
+		}
+	case string:
+		return strings.TrimSpace(typed)
+	}
+
+	return ""
+}
+
+func stringFromJSONValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				return ""
+			}
+			parts = append(parts, text)
+		}
+
+		return strings.Join(parts, " ")
+	default:
+		return ""
+	}
 }
 
 func (c *AppServerClient) emitNotification(msg appServerMessage, fallbackThreadID, fallbackTurnID string) {
@@ -653,6 +836,9 @@ func (c *AppServerClient) emitEvent(event CodexEvent) {
 
 	if event.AppServerPID == "" {
 		event.AppServerPID = c.pid
+	}
+	if event.Autonomy == "" {
+		event.Autonomy = autonomy.Normalize(c.autonomy).String()
 	}
 
 	c.emit(event)

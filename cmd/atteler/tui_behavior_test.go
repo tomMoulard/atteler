@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/codeintel"
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
@@ -627,6 +628,15 @@ func TestOpenModelPickerFetchesProviderModelsInBackground(t *testing.T) {
 		}),
 		picker.pickerItems,
 	)
+}
+
+func TestExternalModelPickerAllowedRespectsLowAutonomy(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, externalModelPickerAllowed(autonomy.Low))
+	assert.True(t, externalModelPickerAllowed(autonomy.Medium))
+	assert.True(t, externalModelPickerAllowed(autonomy.High))
+	assert.True(t, externalModelPickerAllowed(autonomy.Full))
 }
 
 func TestPickerItemsForProviderCatalogUsesBareConfiguredAlias(t *testing.T) {
@@ -2439,6 +2449,7 @@ func TestInitialModelHonorsPersistedIdleSuggestionBudgetUsage(t *testing.T) {
 		generationSettings{},
 		generationSettings{},
 		llm.AgentLoopBudget{},
+		autonomy.DefaultLevel,
 		0,
 		0,
 		false,

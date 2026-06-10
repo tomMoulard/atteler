@@ -13,7 +13,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/mcp"
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 type mcpManifestCommandInput struct {
@@ -82,6 +85,10 @@ func runMCPManifest(input mcpManifestCommandInput) error {
 }
 
 func runMCPInvoke(ctx context.Context, input mcpInvokeCommandInput) error {
+	return runMCPInvokeWithLevel(ctx, input, autonomy.DefaultLevel)
+}
+
+func runMCPInvokeWithLevel(ctx context.Context, input mcpInvokeCommandInput, level autonomy.Level) error {
 	if strings.TrimSpace(input.Method) != "" && strings.TrimSpace(input.ToolName) != "" {
 		return errors.New("mcp invoke: use either --mcp-method or --mcp-tool, not both")
 	}
@@ -108,7 +115,15 @@ func runMCPInvoke(ctx context.Context, input mcpInvokeCommandInput) error {
 		return fmt.Errorf("mcp invoke: server %q not found", strings.TrimSpace(input.ServerName))
 	}
 
+	level = autonomy.Normalize(level)
+	if authErr := authorizeMCPServerCommandWithAutonomy(ctx, server, level); authErr != nil {
+		return authErr
+	}
+
 	timeout := time.Duration(input.TimeoutSeconds) * time.Second
+	sessionOptions := mcp.SessionOptions{
+		Audit: shell.AuditContext{Autonomy: level.String()},
+	}
 
 	var response *mcp.Response
 
@@ -118,14 +133,14 @@ func runMCPInvoke(ctx context.Context, input mcpInvokeCommandInput) error {
 			return parseErr
 		}
 
-		response, err = mcp.CallTool(ctx, server, input.ToolName, args, timeout)
+		response, err = mcp.CallToolWithOptions(ctx, server, input.ToolName, args, timeout, sessionOptions)
 	} else {
 		params, parseErr := parseJSONParam(input.ParamsJSON, "mcp params")
 		if parseErr != nil {
 			return parseErr
 		}
 
-		response, err = mcp.Invoke(ctx, server, mcp.Request{Method: input.Method, Params: params}, timeout)
+		response, err = mcp.InvokeWithOptions(ctx, server, mcp.Request{Method: input.Method, Params: params}, timeout, sessionOptions)
 	}
 
 	if response != nil {
@@ -137,6 +152,35 @@ func runMCPInvoke(ctx context.Context, input mcpInvokeCommandInput) error {
 	}
 
 	return nil
+}
+
+func authorizeMCPServerCommandWithAutonomy(ctx context.Context, server mcp.Server, level autonomy.Level) error {
+	level = autonomy.Normalize(level)
+	if level == autonomy.Low {
+		return fmt.Errorf(
+			"mcp server command denied by local process policy (autonomy.low): %s",
+			autonomy.DenialMessage(level, autonomy.ActionMutatingShell, "mcp server command execution"),
+		)
+	}
+
+	command := strings.Join(append([]string{server.Command}, server.Args...), " ")
+	decision := llm.BashToolPolicyForAutonomy(level)(ctx, llm.ToolCall{
+		Name:  "bash",
+		Input: map[string]any{"command": command},
+	}, llm.AgentLoopBudgetSnapshot{})
+
+	switch decision.Verdict {
+	case llm.ToolPolicyAllow:
+		return nil
+	case llm.ToolPolicyRequireConfirm:
+		return fmt.Errorf("mcp server command requires confirmation by local process policy (%s): %s", decision.MatchedRule, decision.Reason)
+	case llm.ToolPolicyDeny:
+		return fmt.Errorf("mcp server command denied by local process policy (%s): %s", decision.MatchedRule, decision.Reason)
+	case llm.ToolPolicyDryRun:
+		return fmt.Errorf("mcp server command blocked by local process policy dry-run decision (%s): %s", decision.MatchedRule, decision.Reason)
+	default:
+		return fmt.Errorf("mcp server command blocked by unknown local process policy verdict %q (%s): %s", decision.Verdict, decision.MatchedRule, decision.Reason)
+	}
 }
 
 func loadMCPManifest(path string) (mcp.Manifest, error) {

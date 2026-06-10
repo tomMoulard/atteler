@@ -334,7 +334,7 @@ func lookupFlagDomain(name string) (string, bool) {
 	name = normalizeHelpName(name)
 
 	switch {
-	case name == "once" || name == "stdin" || name == "output" || name == "headless" ||
+	case name == "once" || name == "stdin" || name == "output" || name == "autonomy" || name == "headless" ||
 		name == "list-headless" || name == "stream-headless" ||
 		name == "status-headless" || name == "cancel-headless" || name == "recover-headless" ||
 		name == "headless-id" || name == "headless-private-log" ||

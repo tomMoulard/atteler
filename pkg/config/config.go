@@ -37,6 +37,7 @@ type Config struct {
 	Hooks           map[string][]HookConfig    `json:"hooks,omitempty" yaml:"hooks,omitempty"`
 	Generation      GenerationConfig           `json:"generation" yaml:"generation"`
 	AgentLoop       AgentLoopConfig            `json:"agent_loop" yaml:"agent_loop"`
+	Autonomy        string                     `json:"autonomy,omitempty" yaml:"autonomy,omitempty"`
 	DefaultProvider string                     `json:"default_provider,omitempty" yaml:"default_provider,omitempty"`
 	DefaultModel    string                     `json:"default_model,omitempty" yaml:"default_model,omitempty"`
 	EventLedgerPath string                     `json:"event_ledger_path,omitempty" yaml:"event_ledger_path,omitempty"`
@@ -456,6 +457,7 @@ type fileConfig struct {
 	SkillLearning   fileSkillLearningConfig        `json:"skill_learning" yaml:"skill_learning"`
 	Vector          fileVectorConfig               `json:"vector" yaml:"vector"`
 	Worktree        fileWorktreeConfig             `json:"worktree" yaml:"worktree"`
+	Autonomy        *string                        `json:"autonomy" yaml:"autonomy"`
 	DefaultProvider *string                        `json:"default_provider" yaml:"default_provider"`
 	DefaultModel    *string                        `json:"default_model" yaml:"default_model"`
 	EventLedgerPath *string                        `json:"event_ledger_path" yaml:"event_ledger_path"`
@@ -934,6 +936,11 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 	if src.EventLedgerPath != nil {
 		dst.EventLedgerPath = *src.EventLedgerPath
 		rec.set("event_ledger_path", source, *src.EventLedgerPath)
+	}
+
+	if src.Autonomy != nil {
+		dst.Autonomy = strings.TrimSpace(*src.Autonomy)
+		rec.set("autonomy", source, dst.Autonomy)
 	}
 
 	if src.FallbackModels != nil {
@@ -1778,6 +1785,11 @@ func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source 
 		rec.set("event_ledger_path", source, src.EventLedgerPath)
 	}
 
+	if strings.TrimSpace(src.Autonomy) != "" {
+		dst.Autonomy = strings.TrimSpace(src.Autonomy)
+		rec.set("autonomy", source, dst.Autonomy)
+	}
+
 	if src.FallbackModels != nil {
 		dst.FallbackModels = append([]string(nil), src.FallbackModels...)
 		rec.replace("fallback_models", source, dst.FallbackModels, "replaces the entire fallback model list")
@@ -2447,6 +2459,12 @@ func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins Orig
 		dst.EventLedgerPath = src.EventLedgerPath
 
 		appendOriginChain(dstOrigins, "event_ledger_path", srcOrigins, false)
+	}
+
+	if strings.TrimSpace(src.Autonomy) != "" {
+		dst.Autonomy = strings.TrimSpace(src.Autonomy)
+
+		appendOriginChain(dstOrigins, "autonomy", srcOrigins, false)
 	}
 
 	if src.FallbackModels != nil {

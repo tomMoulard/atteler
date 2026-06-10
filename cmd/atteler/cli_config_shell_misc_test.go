@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"io"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -700,6 +702,21 @@ func TestRunBashCommand_EmitsCommandEventTimeline(t *testing.T) {
 	assertLineOrder(t, lines, "event:command_execute", "partial=true", "partial=false")
 }
 
+func TestRunBashCommand_BlocksConfirmationOnlyCommands(t *testing.T) {
+	t.Parallel()
+
+	err := runBashCommand(context.Background(), appState{
+		autonomy:     autonomy.Full,
+		cwd:          t.TempDir(),
+		sessionStore: session.NewStore(t.TempDir()),
+		sessionState: session.New("gpt-test", nil),
+	}, bashCommandInput{Command: "sudo true"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires confirmation")
+	assert.Contains(t, err.Error(), "--bash")
+}
+
 type eventLogRecorder struct {
 	lineCh chan string
 	lines  []string
@@ -844,6 +861,46 @@ func TestRunShellCommandCmd_DeliversFinalResultWhenContextCanceled(t *testing.T)
 	}
 }
 
+func TestRunShellCommandCmd_BlocksConfirmationOnlyCommands(t *testing.T) {
+	t.Parallel()
+
+	outputCh := make(chan tea.Msg, 1)
+	raw := runShellCommandCmdWithAutonomy(context.Background(), "sudo true", "", outputCh, autonomy.Full, attshell.AuditContext{})()
+	assert.Nil(t, raw)
+
+	select {
+	case raw := <-outputCh:
+		msg, ok := raw.(shellResultMsg)
+		require.True(t, ok)
+		require.Error(t, msg.err)
+		assert.Contains(t, msg.err.Error(), "requires confirmation")
+		assert.Contains(t, msg.err.Error(), "TUI shell")
+		assert.True(t, msg.streamed)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for denied command result")
+	}
+}
+
+func TestRunShellCommandCmd_DefaultsAuditAutonomy(t *testing.T) {
+	t.Parallel()
+
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	raw := runShellCommandCmdWithAutonomy(context.Background(), "printf ok", "", nil, autonomy.High, attshell.AuditContext{
+		AuditDir: auditDir,
+	})()
+	msg, ok := raw.(shellResultMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+	assert.Equal(t, "ok", msg.stdout)
+
+	records := readCommandAuditRecords(t, auditDir)
+	require.NotEmpty(t, records)
+
+	for _, record := range records {
+		assert.Equal(t, "high", record.Autonomy)
+	}
+}
+
 func requireShellOutputBefore(t *testing.T, outputCh <-chan tea.Msg, timeout time.Duration) shellOutputMsg {
 	t.Helper()
 
@@ -925,6 +982,21 @@ func TestApplyPatch_UsesDirectGitApplyCommand(t *testing.T) {
 	require.True(t, next.waiting)
 }
 
+func TestApplyPatch_BlocksLowAutonomy(t *testing.T) {
+	t.Parallel()
+
+	m := model{
+		ctx:      context.Background(),
+		autonomy: autonomy.Low,
+		history:  []llm.Message{{Role: llm.RoleAssistant, Content: testUnifiedDiffPatch}},
+	}
+
+	next, cmd, handled := m.handleSlashCommand("/apply-patch")
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	require.False(t, next.waiting)
+}
+
 func TestRunGitApplyPatchCmd_InvokesGitDirectlyWithPatchOnStdin(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "git.log")
@@ -940,12 +1012,17 @@ func TestRunGitApplyPatchCmd_InvokesGitDirectlyWithPatchOnStdin(t *testing.T) {
 	t.Setenv("ATTELER_FAKE_GIT_STDIN", stdinPath)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cmd := runGitApplyPatchCmd(context.Background(), testUnifiedDiffPatch, "", "git apply --check - && git apply -")
+	auditDir := filepath.Join(dir, "audit")
+	cmd := runGitApplyPatchCmd(context.Background(), testUnifiedDiffPatch, "", attshell.AuditContext{
+		AuditDir: auditDir,
+		Autonomy: "medium",
+		Caller:   "atteler.test.git_apply",
+	})
 
 	msg, ok := cmd().(shellResultMsg)
 	require.True(t, ok)
 	require.NoError(t, msg.err)
-	assert.Equal(t, "git apply --check - && git apply -", msg.command)
+	assert.Equal(t, gitApplyPatchDisplayCommand, msg.command)
 
 	log, err := os.ReadFile(logPath)
 	require.NoError(t, err)
@@ -954,6 +1031,38 @@ func TestRunGitApplyPatchCmd_InvokesGitDirectlyWithPatchOnStdin(t *testing.T) {
 	stdin, err := os.ReadFile(stdinPath)
 	require.NoError(t, err)
 	assert.Equal(t, testUnifiedDiffPatch+"---stdin---\n"+testUnifiedDiffPatch+"---stdin---\n", string(stdin))
+
+	records := readCommandAuditRecords(t, auditDir)
+	require.Len(t, records, 4)
+
+	for _, record := range records {
+		assert.Equal(t, "atteler.test.git_apply", record.Caller)
+		assert.Equal(t, "medium", record.Autonomy)
+	}
+}
+
+func TestRunGitApplyPatchCmd_BlocksLowAutonomyBeforeGit(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "git.log")
+	fakeGit := filepath.Join(dir, "git")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$ATTELER_FAKE_GIT_LOG\"\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o600))
+	require.NoError(t, os.Chmod(fakeGit, 0o700)) //nolint:gosec // the test creates an executable fake git shim in a private temp directory.
+	t.Setenv("ATTELER_FAKE_GIT_LOG", logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := runGitApplyPatchCmd(context.Background(), testUnifiedDiffPatch, "", attshell.AuditContext{
+		AuditDir: filepath.Join(dir, "audit"),
+		Autonomy: autonomy.Low.String(),
+	})
+
+	msg, ok := cmd().(shellResultMsg)
+	require.True(t, ok)
+	require.Error(t, msg.err)
+	assert.Contains(t, msg.err.Error(), "autonomy low blocks mutating shell commands")
+	assert.Contains(t, msg.stderr, "autonomy low blocks mutating shell commands")
+	assert.NoFileExists(t, logPath)
 }
 
 func TestRunGitApplyPatchCmd_StopsWhenCheckFails(t *testing.T) {
@@ -971,7 +1080,9 @@ func TestRunGitApplyPatchCmd_StopsWhenCheckFails(t *testing.T) {
 	t.Setenv("ATTELER_FAKE_GIT_LOG", logPath)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cmd := runGitApplyPatchCmd(context.Background(), testUnifiedDiffPatch, "", "git apply --check - && git apply -")
+	cmd := runGitApplyPatchCmd(context.Background(), testUnifiedDiffPatch, "", attshell.AuditContext{
+		AuditDir: filepath.Join(dir, "audit"),
+	})
 
 	msg, ok := cmd().(shellResultMsg)
 	require.True(t, ok)
@@ -982,6 +1093,29 @@ func TestRunGitApplyPatchCmd_StopsWhenCheckFails(t *testing.T) {
 	log, err := os.ReadFile(logPath)
 	require.NoError(t, err)
 	assert.Equal(t, "apply --check -\n", string(log))
+}
+
+func readCommandAuditRecords(t *testing.T, auditDir string) []attshell.AuditRecord {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	records := make([]attshell.AuditRecord, 0, len(lines))
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record attshell.AuditRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+
+		records = append(records, record)
+	}
+
+	return records
 }
 
 func TestShellQuote_HandlesSingleQuotes(t *testing.T) {

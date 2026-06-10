@@ -13,6 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
 )
 
@@ -278,6 +279,7 @@ func runPluginEntrypoint(
 	target, entrypointName string,
 	dryRun bool,
 	timeoutSeconds int,
+	level autonomy.Level,
 ) error {
 	pluginName, entrypointName, err := parsePluginTarget(target, entrypointName)
 	if err != nil {
@@ -333,10 +335,15 @@ func runPluginEntrypoint(
 		return errors.New("run plugin: plugins.policy must accept requested permissions before execution")
 	}
 
+	if authErr := authorizePluginRunAutonomy(level, plugin.Manifest); authErr != nil {
+		return authErr
+	}
+
 	result, err := attelerplugin.RunEntrypointWithOptions(ctx, plugin.Root, plugin.Manifest, entrypointName, attelerplugin.RunOptions{
 		Policy:         acceptedPolicy,
 		Timeout:        timeout,
 		AttelerVersion: version,
+		Autonomy:       autonomy.Normalize(level).String(),
 	})
 	if result.Stdout != "" {
 		fmt.Print(result.Stdout)
@@ -348,6 +355,19 @@ func runPluginEntrypoint(
 
 	if err != nil {
 		return fmt.Errorf("run plugin: %w", err)
+	}
+
+	return nil
+}
+
+func authorizePluginRunAutonomy(level autonomy.Level, manifest attelerplugin.Manifest) error {
+	level = autonomy.Normalize(level)
+	if !level.Allows(autonomy.ActionMutatingShell) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionMutatingShell, "--run-plugin"))
+	}
+
+	if manifest.Permissions != nil && manifest.Permissions.Network.Allow && !level.Allows(autonomy.ActionRemoteMutation) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionRemoteMutation, "--run-plugin network permissions"))
 	}
 
 	return nil

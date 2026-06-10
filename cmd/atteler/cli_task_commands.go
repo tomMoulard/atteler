@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/tasklist"
 )
@@ -40,10 +41,22 @@ func taskCommandInputFromOptions(opts cliOptions) taskCommandInput {
 }
 
 func runTaskListCommand(ctx context.Context, sessionStore *session.Store, input taskCommandInput) error {
+	return runTaskListCommandWithAutonomy(ctx, sessionStore, input, autonomy.DefaultLevel)
+}
+
+func runTaskListCommandWithAutonomy(ctx context.Context, sessionStore *session.Store, input taskCommandInput, level autonomy.Level) error {
 	if err := validateSingleTaskOperation(input); err != nil {
 		return err
 	}
 
+	if taskCommandWritesFiles(input) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, taskCommandAutonomyContext(input)))
+	}
+
+	return runTaskListCommandValidated(ctx, sessionStore, input)
+}
+
+func runTaskListCommandValidated(ctx context.Context, sessionStore *session.Store, input taskCommandInput) error {
 	store := tasklist.NewStore(taskListPath(sessionStore, input.FilePath))
 	switch {
 	case input.AddTitle != "":
@@ -100,6 +113,23 @@ func runTaskListCommand(ctx context.Context, sessionStore *session.Store, input 
 		return nil
 	default:
 		return errors.New("task list: no task operation requested")
+	}
+}
+
+func taskCommandWritesFiles(input taskCommandInput) bool {
+	return input.AddTitle != "" || input.AssignSpec != "" || input.CompleteID != ""
+}
+
+func taskCommandAutonomyContext(input taskCommandInput) string {
+	switch {
+	case input.AddTitle != "":
+		return "--task-add"
+	case input.AssignSpec != "":
+		return "--task-assign"
+	case input.CompleteID != "":
+		return "--task-complete"
+	default:
+		return "task command"
 	}
 }
 

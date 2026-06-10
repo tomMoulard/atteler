@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 const (
@@ -46,6 +48,7 @@ type CommandPolicy func(context.Context, CommandSpec) error
 // PoolOptions configures a managed language-server pool.
 type PoolOptions struct {
 	CommandPolicy      CommandPolicy
+	Audit              shell.AuditContext
 	StartTimeout       time.Duration
 	RequestTimeout     time.Duration
 	ShutdownTimeout    time.Duration
@@ -460,7 +463,7 @@ func (p *ServerPool) startSession(ctx context.Context, key serverKey, spec Comma
 	startCtx, cancel := context.WithTimeout(ctx, p.opts.StartTimeout)
 	defer cancel()
 
-	client, err := startClient(startCtx, spec.Command, spec.Args, spec.Env, p.opts.MaxDiagnosticBytes)
+	client, err := startClient(startCtx, spec.Command, spec.Args, spec.Env, p.opts.MaxDiagnosticBytes, p.opts.Audit)
 	if err != nil {
 		return nil, err
 	}

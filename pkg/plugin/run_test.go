@@ -42,6 +42,78 @@ printf 'stderr:%s\n' "$(/bin/cat data.txt)" >&2
 	require.Equal(t, "stderr:root-data\n", result.Stderr)
 }
 
+func TestRunEntrypoint_PropagatesAutonomyToEnvAndAudit(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf 'autonomy=%s\n' "$ATTELER_AUTONOMY"
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	policy := AcceptManifestPolicy(manifest)
+	auditDir := filepath.Join(t.TempDir(), "audit")
+
+	result, err := RunEntrypointWithOptions(
+		context.Background(),
+		root,
+		manifest,
+		"run",
+		RunOptions{
+			Policy:   &policy,
+			Timeout:  5 * time.Second,
+			Autonomy: "full",
+			AuditDir: auditDir,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "autonomy=full\n", result.Stdout)
+
+	records := readPluginAuditRecords(t, auditDir)
+	require.NotEmpty(t, records)
+
+	for _, record := range records {
+		require.Equal(t, "full", record.Autonomy)
+	}
+}
+
+func TestRunEntrypoint_AutonomyOverridesDeclaredEnv(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeScript(t, root, "bin/run", `#!/bin/sh
+printf 'autonomy=%s\n' "$ATTELER_AUTONOMY"
+`)
+
+	manifest := runnableManifest(map[string]string{"run": "bin/run"})
+	manifest.Permissions.Env = []string{"ATTELER_AUTONOMY"}
+	policy := AcceptManifestPolicy(manifest)
+	auditDir := filepath.Join(t.TempDir(), "audit")
+
+	result, err := RunEntrypointWithOptions(
+		context.Background(),
+		root,
+		manifest,
+		"run",
+		RunOptions{
+			Policy:   &policy,
+			Timeout:  5 * time.Second,
+			Env:      map[string]string{"ATTELER_AUTONOMY": "spoofed-low"},
+			Autonomy: "high",
+			AuditDir: auditDir,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "autonomy=high\n", result.Stdout)
+
+	records := readPluginAuditRecords(t, auditDir)
+	require.NotEmpty(t, records)
+
+	for _, record := range records {
+		require.Equal(t, "high", record.Autonomy)
+	}
+}
+
 func TestRunEntrypoint_ReturnsExitErrorAndCapturedOutput(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

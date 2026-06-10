@@ -9,6 +9,7 @@ import (
 	"time"
 
 	attasync "github.com/tommoulard/atteler/pkg/async"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/subagent"
 )
@@ -35,6 +36,10 @@ func runAsyncTasks(ctx context.Context, state appState, input asyncRunCommandInp
 		return fmt.Errorf("async run: %w", validateErr)
 	}
 
+	if !autonomy.Normalize(state.autonomy).Allows(autonomy.ActionMutatingShell) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(state.autonomy, autonomy.ActionMutatingShell, "--async-run"))
+	}
+
 	if input.TimeoutSeconds > 0 {
 		var cancel context.CancelFunc
 
@@ -49,9 +54,10 @@ func runAsyncTasks(ctx context.Context, state appState, input asyncRunCommandInp
 		Agent:       state.selectedAgent,
 		Model:       state.selectedModel,
 		Metadata: map[string]string{
-			"command": "async-run",
-			"count":   strconv.Itoa(len(tasks)),
-			"waves":   strconv.Itoa(len(plan.ReadyBatches())),
+			"autonomy": state.autonomy.String(),
+			"command":  "async-run",
+			"count":    strconv.Itoa(len(tasks)),
+			"waves":    strconv.Itoa(len(plan.ReadyBatches())),
 		},
 	})
 
@@ -62,6 +68,7 @@ func runAsyncTasks(ctx context.Context, state appState, input asyncRunCommandInp
 
 	runner := subagent.AttelerCommandDetailedWithOptions(subagent.CommandOptions{
 		Args:           subagentCommandArgs(state),
+		Autonomy:       state.autonomy.String(),
 		Binary:         resolveSpawnBinary(input.SpawnBinary),
 		Dir:            state.cwd,
 		MaxOutputBytes: int64(input.Execution.OutputBudgetBytes),
@@ -157,6 +164,7 @@ func asyncRunOptionsFromInput(state appState, input childExecutionCommandInput) 
 		WorkspaceID:       state.sessionState.ID,
 		Model:             state.selectedModel,
 		Provider:          providerNameFromModel(state.selectedModel),
+		Autonomy:          state.autonomy.String(),
 		CancelOnFailure:   input.CancelOnFailure,
 		Resume:            input.Resume,
 	}

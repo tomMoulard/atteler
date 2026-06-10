@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -493,6 +494,7 @@ func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
 	}
 
 	cfg := Config{
+		Autonomy: autonomy.High,
 		Tracker: TrackerConfig{
 			Kind:     trackerKindGitHub,
 			Endpoint: server.URL,
@@ -541,6 +543,7 @@ func TestGitHubPublisher_CommitsPushesCreatesPRAndFinalizesIssue(t *testing.T) {
 		assert.Equal(t, "symphony.git", audit.Caller)
 		assert.Equal(t, "node", audit.IssueID)
 		assert.Equal(t, "GH-12", audit.IssueIdentifier)
+		assert.Equal(t, "high", audit.Autonomy)
 	}
 	requestMu.Lock()
 	defer requestMu.Unlock()
@@ -1736,6 +1739,33 @@ func TestGitHubPublisher_UpdatesExistingFailureDraftWithoutEmptyCommit(t *testin
 	assert.NotContains(t, result.FailureReason, "worker-secret")
 }
 
+func TestPublishWorkspaceBlocksBelowHighAutonomy(t *testing.T) {
+	t.Parallel()
+
+	_, err := PublishWorkspace(t.Context(), Config{
+		Autonomy: autonomy.Medium,
+		Tracker:  TrackerConfig{Kind: trackerKindGitHub},
+		Publish:  PublishConfig{Enabled: true},
+	}, Issue{ID: "node", Identifier: "GH-12"}, Workspace{Path: t.TempDir()}, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy medium blocks branch creation")
+}
+
+func TestPublishWorkspaceFullAutonomyRequiresCheckMonitoring(t *testing.T) {
+	t.Parallel()
+
+	_, err := PublishWorkspace(t.Context(), Config{
+		Autonomy: autonomy.Full,
+		Tracker:  TrackerConfig{Kind: trackerKindGitHub},
+		Publish:  PublishConfig{Enabled: true},
+	}, Issue{ID: "node", Identifier: "GH-12"}, Workspace{Path: t.TempDir()}, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "publish: autonomy full with publish.enabled requires publish.monitor_checks: true")
+	assert.Contains(t, err.Error(), "use autonomy high")
+}
+
 func TestGitHubPublisher_RebasesAndForcePushesPullRequestBranch(t *testing.T) {
 	t.Parallel()
 
@@ -1775,6 +1805,7 @@ func TestGitHubPublisher_RebasesAndForcePushesPullRequestBranch(t *testing.T) {
 	}
 
 	cfg := Config{
+		Autonomy: autonomy.High,
 		Tracker: TrackerConfig{
 			Kind:   trackerKindGitHub,
 			APIKey: "token",
@@ -1843,6 +1874,7 @@ func TestGitHubPublisher_PreparesReworkWorkspaceAndLeavesRebaseConflict(t *testi
 	}
 
 	cfg := Config{
+		Autonomy: autonomy.High,
 		Tracker: TrackerConfig{
 			Kind:   trackerKindGitHub,
 			APIKey: "token",
@@ -1901,6 +1933,7 @@ func TestGitHubPublisher_SkipsCleanWorkspaceWithoutPullRequest(t *testing.T) {
 	}
 
 	cfg := Config{
+		Autonomy: autonomy.High,
 		Tracker: TrackerConfig{
 			Kind:     trackerKindGitHub,
 			Endpoint: server.URL,

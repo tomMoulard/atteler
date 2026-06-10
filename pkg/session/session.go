@@ -51,6 +51,7 @@ type Session struct {
 	DefaultReasoningLevel string              `json:"default_reasoning_level,omitempty"`
 	DefaultModelMode      string              `json:"default_model_mode,omitempty"`
 	DefaultAgent          string              `json:"default_agent,omitempty"`
+	Autonomy              string              `json:"autonomy,omitempty" yaml:"autonomy,omitempty"`
 	AgentLoopBudget       llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
 	// PromptSuggestions stores the session-scoped background prompt suggestion
 	// preference. Empty means no session override; callers should fall back to
@@ -428,6 +429,7 @@ type Summary struct {
 	Title           string              `json:"title,omitempty"`
 	DefaultModel    string              `json:"default_model,omitempty"`
 	DefaultAgent    string              `json:"default_agent,omitempty"`
+	Autonomy        string              `json:"autonomy,omitempty" yaml:"autonomy,omitempty"`
 	AgentLoopBudget llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
 	WorktreePath    string              `json:"worktree_path,omitempty"`
 	WorktreeBranch  string              `json:"worktree_branch,omitempty"`
@@ -450,6 +452,7 @@ type sessionSummaryFile struct {
 	Title           string
 	DefaultModel    string
 	DefaultAgent    string
+	Autonomy        string
 	AgentLoopBudget llm.AgentLoopBudget
 	WorktreePath    string
 	WorktreeBranch  string
@@ -1286,6 +1289,7 @@ func summarizeFile(path string, file sessionSummaryFile) Summary {
 		AgentNames:      appendSummaryAgentNames([]string{file.DefaultAgent}, file.AgentNames...),
 		DefaultModel:    file.DefaultModel,
 		DefaultAgent:    file.DefaultAgent,
+		Autonomy:        file.Autonomy,
 		AgentLoopBudget: file.AgentLoopBudget,
 		WorktreePath:    file.WorktreePath,
 		Tags:            append([]string(nil), file.Tags...),
@@ -1356,6 +1360,8 @@ func readSummaryObjectValue(decoder *json.Decoder, key string, file *sessionSumm
 		return decodeSummaryJSONValue(decoder, key, &file.DefaultModel)
 	case "default_agent":
 		return decodeSummaryJSONValue(decoder, key, &file.DefaultAgent)
+	case "autonomy":
+		return decodeSummaryJSONValue(decoder, key, &file.Autonomy)
 	case "agent_loop_budget":
 		return decodeSummaryJSONValue(decoder, key, &file.AgentLoopBudget)
 	case "worktree_path":

@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
@@ -1660,9 +1661,17 @@ func finalizeWorktree(ctx context.Context, state *appState) error {
 		return nil
 	}
 
+	if !state.autonomy.Allows(autonomy.ActionCommit) {
+		fmt.Fprintln(os.Stderr, "worktree: auto-merge blocked: "+autonomy.DenialMessage(state.autonomy, autonomy.ActionCommit, "--worktree auto-merge"))
+		fmt.Fprintln(os.Stderr, "worktree: files preserved in "+state.worktreeInfo.Path)
+		fmt.Fprintln(os.Stderr, "worktree: rerun with --autonomy high or full and merge with: atteler --merge-worktree "+state.sessionState.ID)
+
+		return nil
+	}
+
 	fmt.Fprintln(os.Stderr, "worktree: merging "+state.worktreeInfo.Branch+" into "+state.worktreeInfo.BaseBranch+"...")
 
-	result, err := worktree.MergeWithResultContext(ctx, state.cwd, state.worktreeInfo, worktree.MergeOptions{
+	result, err := worktree.MergeWithResultContext(worktree.WithAuditContext(ctx, worktreeShellAuditContext(state.sessionState, state.autonomy)), state.cwd, state.worktreeInfo, worktree.MergeOptions{
 		AutoCommit:           true,
 		ReviewedAutoCommit:   true,
 		AutoMerge:            true,

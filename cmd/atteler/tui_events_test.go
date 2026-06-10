@@ -10,9 +10,25 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
 )
+
+func TestEmitHookLineIncludesRunnerDefaultAutonomy(t *testing.T) {
+	t.Parallel()
+
+	msg := emitHook(
+		context.Background(),
+		events.NewRunner(nil).WithAutonomy(autonomy.High),
+		events.Event{Type: events.CommandExecute},
+	)()
+
+	hook, ok := msg.(hookMsg)
+	require.True(t, ok)
+	require.NoError(t, hook.err)
+	assert.Contains(t, hook.line, "autonomy=high")
+}
 
 //nolint:paralleltest // Mutates the process-global slog default.
 func TestEmitFromContextWarningRedactsEventType(t *testing.T) {

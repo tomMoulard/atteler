@@ -202,6 +202,7 @@ version: 1
 default_provider: openai
 default_model: gpt-4.1-mini
 fallback_models: ["gpt-4.1", "gpt-4.1-nano"]
+autonomy: medium
 model_aliases:
   mini: openai/gpt-4.1-mini
   fast: openai/gpt-4.1-mini
@@ -768,6 +769,17 @@ atteler session cancel-headless <headless-id>
 atteler session recover-headless
 atteler session stream-headless <headless-id>
 ```
+
+Use the chat `autonomy` flag (`low|medium|high|full`) or top-level config
+`autonomy` to make agent action boundaries explicit. `low` is advisory-only and
+disables tools; `medium` allows local edits and validation but blocks branches,
+commits, pushes, and PRs; `high` and `full` can prepare/publish a PR, while PR
+merges always remain a human action.
+For Symphony publishing, `full` additionally requires PR check monitoring so CI
+pass/failure is reported; use `high` when you want PR creation without that
+monitor lane.
+Worktree isolation and worktree merge operations create/merge branches, so they
+require `high` or `full`.
 
 Headless metadata, event summaries, and logs are redacted by default; reserve
 `--headless-private-log` for local private runs that intentionally keep raw

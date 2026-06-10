@@ -1,6 +1,10 @@
 package config
 
-import "strconv"
+import (
+	"strconv"
+
+	"github.com/tommoulard/atteler/pkg/autonomy"
+)
 
 // DefaultDiagnostic describes an implicit config behavior that applies when a
 // higher-precedence source does not set the field explicitly.
@@ -38,6 +42,11 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Field:   "models",
 			Value:   "{}",
 			Message: "no task-oriented model roles are configured unless a source defines entries such as planner or fast_coder",
+		},
+		{
+			Field:   "autonomy",
+			Value:   autonomy.DefaultLevel.String(),
+			Message: "when unset, agent runs default to local implementation autonomy: file edits and tests are allowed, but commits, pushes, PRs, and merges are blocked",
 		},
 		{
 			Field:   "generation.temperature",

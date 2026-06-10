@@ -12,12 +12,15 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
+const highTestValue = "high"
+
 func TestStore_SaveLoadByID(t *testing.T) {
 	t.Parallel()
 	store := NewStore(t.TempDir())
 	session := New("gpt-4.1", nil)
-	session.DefaultReasoningLevel = "high"
+	session.DefaultReasoningLevel = highTestValue
 	session.DefaultModelMode = "fast"
+	session.Autonomy = highTestValue
 	session.AgentLoopBudget = llm.AgentLoopBudget{
 		MaxWallTime:     time.Minute,
 		MaxOutputBytes:  4096,
@@ -49,12 +52,12 @@ func TestStore_SaveLoadByID(t *testing.T) {
 		assert.Failf(t, "assertion failed", "DefaultModel = %q", loaded.DefaultModel)
 	}
 
-	if loaded.DefaultReasoningLevel != "high" {
+	if loaded.DefaultReasoningLevel != highTestValue {
 		assert.Failf(t, "assertion failed", "DefaultReasoningLevel = %q", loaded.DefaultReasoningLevel)
 	}
 
 	assert.Equal(t, "fast", loaded.DefaultModelMode)
-
+	assert.Equal(t, highTestValue, loaded.Autonomy)
 	assert.Equal(t, session.AgentLoopBudget, loaded.AgentLoopBudget)
 
 	if len(loaded.Messages) != 2 {
@@ -85,10 +88,12 @@ func TestHeadlessEventForRunIncludesAgentLoopBudget(t *testing.T) {
 		ID:              "run-budget",
 		SessionID:       "session-budget",
 		Status:          HeadlessStatusCanceled,
+		Autonomy:        "full",
 		AgentLoopBudget: budget,
 	}, HeadlessEventCanceled, "canceled")
 
 	assert.Equal(t, budget, event.AgentLoopBudget)
+	assert.Equal(t, "full", event.Autonomy)
 }
 
 func TestStore_LoadByPathInfersID(t *testing.T) {

@@ -451,7 +451,7 @@ func TestWorktreeMergeReviewGateE2E(t *testing.T) {
 		sessionDir := filepath.Join(t.TempDir(), "sessions")
 		replayPath := writeReplayResponse(t, t.TempDir())
 
-		result := runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--worktree", "--replay-response", replayPath, "--once", "noop")
+		result := runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--autonomy", "high", "--worktree", "--replay-response", replayPath, "--once", "noop")
 		assertContains(t, result.stderr, "worktree: session files are in ")
 		assertContains(t, result.stderr, "worktree: merge with: atteler --merge-worktree ")
 		assertNotContains(t, result.stderr, "worktree: merged and cleaned up")
@@ -469,6 +469,7 @@ func TestWorktreeMergeReviewGateE2E(t *testing.T) {
 
 		result, err := runAtteler(t, runSpec{dir: repo, sessionDir: sessionDir},
 			"--worktree",
+			"--autonomy", "high",
 			"--worktree-auto-merge",
 			"--replay-response", replayPath,
 			"--once", "noop",
@@ -488,13 +489,14 @@ func TestWorktreeMergeReviewGateE2E(t *testing.T) {
 		repo := initE2EGitRepo(t)
 		sessionDir := filepath.Join(t.TempDir(), "sessions")
 		replayPath := writeReplayResponse(t, t.TempDir())
-		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--worktree", "--replay-response", replayPath, "--once", "setup")
+		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--autonomy", "high", "--worktree", "--replay-response", replayPath, "--once", "setup")
 		sess := readOnlyE2ESession(t, sessionDir)
 
 		writeFile(t, filepath.Join(sess.WorktreePath, "verified.txt"), "verified\n")
 
 		result := runOK(t, runSpec{dir: repo, sessionDir: sessionDir},
 			"--session", sess.ID,
+			"--autonomy", "high",
 			"--worktree",
 			"--worktree-auto-merge",
 			"--worktree-verify-command", "test -f verified.txt",
@@ -517,12 +519,13 @@ func TestWorktreeMergeReviewGateE2E(t *testing.T) {
 		repo := initE2EGitRepo(t)
 		sessionDir := filepath.Join(t.TempDir(), "sessions")
 		replayPath := writeReplayResponse(t, t.TempDir())
-		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--worktree", "--replay-response", replayPath, "--once", "setup")
+		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--autonomy", "high", "--worktree", "--replay-response", replayPath, "--once", "setup")
 		sess := readOnlyE2ESession(t, sessionDir)
 		writeFile(t, filepath.Join(sess.WorktreePath, "blocked.txt"), "blocked\n")
 
 		result, err := runAtteler(t, runSpec{dir: repo, sessionDir: sessionDir},
 			"--session", sess.ID,
+			"--autonomy", "high",
 			"--worktree",
 			"--worktree-auto-merge",
 			"--worktree-verify-command", "test -f missing.txt",
@@ -546,7 +549,7 @@ func TestWorktreeMergeReviewGateE2E(t *testing.T) {
 
 		sessionDir := filepath.Join(t.TempDir(), "sessions")
 		replayPath := writeReplayResponse(t, t.TempDir())
-		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--worktree", "--replay-response", replayPath, "--once", "setup")
+		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--autonomy", "high", "--worktree", "--replay-response", replayPath, "--once", "setup")
 		sess := readOnlyE2ESession(t, sessionDir)
 
 		writeFile(t, filepath.Join(sess.WorktreePath, "conflict.txt"), "branch\n")
@@ -556,7 +559,7 @@ func TestWorktreeMergeReviewGateE2E(t *testing.T) {
 		gitOutputE2E(t, repo, "add", "conflict.txt")
 		gitOutputE2E(t, repo, "commit", "-m", "main conflict")
 
-		result, err := runAtteler(t, runSpec{dir: repo, sessionDir: sessionDir}, "worktrees", "merge", sess.ID)
+		result, err := runAtteler(t, runSpec{dir: repo, sessionDir: sessionDir}, "--autonomy", "high", "worktrees", "merge", sess.ID)
 		require.Error(t, err)
 		assertContains(t, result.stderr, "merge dry-run reported conflicts")
 		assertContains(t, result.stderr, "recovery: manual merge after review:")
@@ -572,14 +575,14 @@ func TestWorktreeMergeReviewGateE2E(t *testing.T) {
 		repo := initE2EGitRepo(t)
 		sessionDir := filepath.Join(t.TempDir(), "sessions")
 		replayPath := writeReplayResponse(t, t.TempDir())
-		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--worktree", "--replay-response", replayPath, "--once", "setup")
+		runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--autonomy", "high", "--worktree", "--replay-response", replayPath, "--once", "setup")
 		sess := readOnlyE2ESession(t, sessionDir)
 
 		writeFile(t, filepath.Join(sess.WorktreePath, "manual.txt"), "manual\n")
 		gitOutputE2E(t, sess.WorktreePath, "add", "manual.txt")
 		gitOutputE2E(t, sess.WorktreePath, "commit", "-m", "manual change")
 
-		result := runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "worktrees", "merge", sess.ID)
+		result := runOK(t, runSpec{dir: repo, sessionDir: sessionDir}, "--autonomy", "high", "worktrees", "merge", sess.ID)
 		assertContains(t, result.stderr, "worktree: diff summary:")
 		assertContains(t, result.stderr, "manual.txt")
 		assertContains(t, result.stderr, "worktree: tests run:")

@@ -16,6 +16,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/shell"
 )
 
 const (
@@ -325,17 +327,49 @@ printf 'provider=%s\n' "$ATTELER_CHILD_PROVIDER"
 	}, strings.Split(strings.TrimSpace(string(contents)), "\n"))
 }
 
+func TestAttelerCommand_PassesAutonomyEnvironmentAndAudit(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-atteler")
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	writeFakeCommand(t, fake, `#!/bin/sh
+printf 'autonomy=%s' "$ATTELER_AUTONOMY"
+`)
+
+	runner := AttelerCommandDetailedWithOptions(CommandOptions{
+		Autonomy: "high",
+		AuditDir: auditDir,
+		Binary:   fake,
+	})
+
+	output, err := runner(context.Background(), Request{ID: "child", Agent: "architect", Prompt: "draft plan"})
+
+	require.NoError(t, err)
+	assert.Equal(t, "autonomy=high", output.Stdout)
+
+	records := readSubagentAuditRecords(t, auditDir)
+	require.NotEmpty(t, records)
+
+	for _, record := range records {
+		assert.Equal(t, "high", record.Autonomy)
+	}
+}
+
 func TestChildEnv_OverridesParentAndExtraIdentity(t *testing.T) {
 	t.Setenv("ATTELER_CHILD_ID", "parent")
 	t.Setenv("ATTELER_CHILD_AGENT", "parent-agent")
+	t.Setenv("ATTELER_AUTONOMY", "parent-autonomy")
 
 	env := childEnv(map[string]string{
 		"ATTELER_CHILD_AGENT": "extra-agent",
+		"ATTELER_AUTONOMY":    "extra-autonomy",
 		"CUSTOM":              "value",
-	}, Request{ID: "child", Agent: "architect"})
+	}, Request{ID: "child", Agent: "architect"}, "medium")
 
 	assert.Equal(t, []string{"child"}, envValuesForKey(env, "ATTELER_CHILD_ID"))
 	assert.Equal(t, []string{"architect"}, envValuesForKey(env, "ATTELER_CHILD_AGENT"))
+	assert.Equal(t, []string{"medium"}, envValuesForKey(env, "ATTELER_AUTONOMY"))
 	assert.Equal(t, []string{"value"}, envValuesForKey(env, "CUSTOM"))
 }
 
@@ -463,6 +497,28 @@ func envValuesForKey(env []string, key string) []string {
 	return values
 }
 
+func readSubagentAuditRecords(t *testing.T, auditDir string) []shell.AuditRecord {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+
+	records := make([]shell.AuditRecord, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record shell.AuditRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+
+	return records
+}
+
 func TestSpawnAllWithOptions_LimitsConcurrencyAndWritesLedger(t *testing.T) {
 	t.Parallel()
 
@@ -490,7 +546,7 @@ func TestSpawnAllWithOptions_LimitsConcurrencyAndWritesLedger(t *testing.T) {
 		atomic.AddInt32(&current, -1)
 
 		return RunOutput{Stdout: request.ID + "-out", Stderr: request.ID + "-err", ExitStatus: 7, Artifacts: []string{"artifact.txt"}}, nil
-	}, Options{MaxConcurrency: 2, LedgerPath: ledgerPath, AllowedWriteScope: t.TempDir(), Model: "codex/gpt-test"})
+	}, Options{MaxConcurrency: 2, LedgerPath: ledgerPath, AllowedWriteScope: t.TempDir(), Model: "codex/gpt-test", Autonomy: "high"})
 
 	require.NoError(t, err)
 	require.Len(t, results, len(requests))
@@ -512,9 +568,12 @@ func TestSpawnAllWithOptions_LimitsConcurrencyAndWritesLedger(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &ledger))
 	require.Len(t, ledger.Attempts, len(requests))
 	require.Len(t, ledger.Results, len(requests))
+	assert.Equal(t, "high", ledger.Options.Autonomy)
 	assert.Equal(t, 7, ledger.Attempts[0].ExitStatus)
 	assert.Equal(t, []string{"artifact.txt"}, ledger.Attempts[0].Artifacts)
 	assert.Equal(t, "codex/gpt-test", ledger.Requests[0].Model)
+	require.NotEmpty(t, ledger.Admissions)
+	assert.Equal(t, "high", ledger.Admissions[0].Autonomy)
 	assert.NotEmpty(t, ledger.Requests[0].WorkspaceID)
 	assert.NotEmpty(t, ledger.Requests[0].AllowedWriteScope)
 	assert.NotEqual(t, ledger.Requests[0].WorkspaceID, ledger.Requests[1].WorkspaceID)
@@ -1068,12 +1127,12 @@ func TestSpawnAllWithOptions_CancelOnFailureBeatsTimeoutWhenSiblingIgnoresContex
 		case slowID:
 			close(slowStarted)
 			<-releaseFailure
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(75 * time.Millisecond)
 			return lateSuccessOutput, nil
 		default:
 			return "", nil
 		}
-	}, Options{MaxConcurrency: 2, CancelOnFailure: true, Timeout: 5 * time.Millisecond})
+	}, Options{MaxConcurrency: 2, CancelOnFailure: true, Timeout: 25 * time.Millisecond})
 
 	require.Error(t, err)
 	require.Len(t, results, 2)

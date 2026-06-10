@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/agentmemory"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/githistory"
@@ -27,6 +28,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
+	"github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/vector"
 )
 
@@ -50,6 +52,10 @@ var adrSourceDirectories = []string{
 }
 
 func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
+	return runLSPSymbolsWithAutonomy(ctx, input, autonomy.DefaultLevel)
+}
+
+func runLSPSymbolsWithAutonomy(ctx context.Context, input lspSymbolsCommandInput, level autonomy.Level) error {
 	format, err := structuredCommandOutputFormat(input.JSON, input.OutputFormat)
 	if err != nil {
 		return err
@@ -64,7 +70,7 @@ func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
 		FilePath:      strings.TrimSpace(input.FilePath),
 		RootPath:      strings.TrimSpace(input.RootPath),
 		LanguageID:    strings.TrimSpace(input.LanguageID),
-		CommandPolicy: authorizeLSPCommand,
+		CommandPolicy: authorizeLSPCommandForAutonomy(level),
 	}
 
 	var symbols []lsp.Symbol
@@ -84,9 +90,20 @@ func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
 	return writeCodeIntelResponse(os.Stdout, response, format)
 }
 
-func authorizeLSPCommand(ctx context.Context, spec lsp.CommandSpec) error {
+func authorizeLSPCommandForAutonomy(level autonomy.Level) func(context.Context, lsp.CommandSpec) error {
+	return func(ctx context.Context, spec lsp.CommandSpec) error {
+		return authorizeLSPCommandWithAutonomy(ctx, spec, level)
+	}
+}
+
+func authorizeLSPCommandWithAutonomy(ctx context.Context, spec lsp.CommandSpec, level autonomy.Level) error {
+	level = autonomy.Normalize(level)
+	if level == autonomy.Low {
+		return errors.New("lsp command denied by local process policy (autonomy.low): autonomy low is advisory-only and blocks language-server command execution; rerun with --autonomy medium or higher")
+	}
+
 	command := strings.Join(append([]string{spec.Command}, spec.Args...), " ")
-	decision := llm.BashToolPolicy(ctx, llm.ToolCall{
+	decision := llm.BashToolPolicyForAutonomy(level)(ctx, llm.ToolCall{
 		Name:  "bash",
 		Input: map[string]any{"command": command},
 	}, llm.AgentLoopBudgetSnapshot{})
@@ -102,6 +119,13 @@ func authorizeLSPCommand(ctx context.Context, spec lsp.CommandSpec) error {
 		return fmt.Errorf("lsp command blocked by local process policy dry-run decision (%s): %s", decision.MatchedRule, decision.Reason)
 	default:
 		return fmt.Errorf("lsp command blocked by unknown local process policy verdict %q (%s): %s", decision.Verdict, decision.MatchedRule, decision.Reason)
+	}
+}
+
+func lspCommandAuditContext(level autonomy.Level) shell.AuditContext {
+	return shell.AuditContext{
+		Caller:   "atteler.lsp",
+		Autonomy: autonomy.Normalize(level).String(),
 	}
 }
 
@@ -399,6 +423,18 @@ func runAgentMemoryCommand(
 	cfg appconfig.VectorConfig,
 	input agentMemoryCommandInput,
 ) error {
+	return runAgentMemoryCommandWithAutonomy(ctx, root, selectedAgent, cfg, input, autonomy.DefaultLevel)
+}
+
+//nolint:cyclop // Coordinates agent selection, store loading, mutation, persistence, and optional search in one CLI flow.
+func runAgentMemoryCommandWithAutonomy(
+	ctx context.Context,
+	root,
+	selectedAgent string,
+	cfg appconfig.VectorConfig,
+	input agentMemoryCommandInput,
+	level autonomy.Level,
+) error {
 	agentName := strings.TrimSpace(input.Agent)
 	if agentName == "" {
 		agentName = strings.TrimSpace(selectedAgent)
@@ -406,6 +442,9 @@ func runAgentMemoryCommand(
 
 	if agentName == "" && agentMemoryCommandNeedsAgent(input) {
 		return errors.New("agent memory: --agent-memory-agent or --agent is required")
+	}
+	if agentMemoryCommandWritesFiles(input) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, agentMemoryAutonomyContext(input)))
 	}
 
 	storePath := agentMemoryStorePath(root, agentName, input.StorePath, cfg)
@@ -471,6 +510,28 @@ func agentMemoryRuntimeForCommand(
 	}
 
 	return agentMemoryVectorizerRuntimeFromConfig(cfg, agentName)
+}
+
+func agentMemoryCommandWritesFiles(input agentMemoryCommandInput) bool {
+	return len(input.IndexFiles) > 0 ||
+		input.DeleteID != "" ||
+		input.Compact ||
+		input.Migrate
+}
+
+func agentMemoryAutonomyContext(input agentMemoryCommandInput) string {
+	switch {
+	case len(input.IndexFiles) > 0:
+		return "--agent-memory-index"
+	case input.DeleteID != "":
+		return "--agent-memory-delete"
+	case input.Compact:
+		return "--agent-memory-compact"
+	case input.Migrate:
+		return "--agent-memory-migrate"
+	default:
+		return "agent memory command"
+	}
 }
 
 func agentMemoryCommandNeedsAgent(input agentMemoryCommandInput) bool {
@@ -855,6 +916,14 @@ func runRetrievalCommand(ctx context.Context, state appState, input retrievalCom
 	if err != nil {
 		return err
 	}
+	if retrievalUsesWorkspaceVectorIndex(input, sources, state.vectorConfig) &&
+		!autonomy.Normalize(state.autonomy).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(state.autonomy, autonomy.ActionFileWrite, "--retrieval-source vector"))
+	}
+	if retrievalUsesSessionSearchIndex(sources) &&
+		!autonomy.Normalize(state.autonomy).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(state.autonomy, autonomy.ActionFileWrite, "--retrieval-source session"))
+	}
 
 	filters, err := retrievalFilters(input.Filters)
 	if err != nil {
@@ -1009,6 +1078,18 @@ func retrievalReusableFileVectorIndexExists(root string, cfg appconfig.VectorCon
 	reuse, _, err := reusableVectorIndex(idx, metadata, settings.Chunk, settings.IndexPath, nil)
 
 	return err == nil && reuse
+}
+
+func retrievalUsesWorkspaceVectorIndex(input retrievalCommandInput, sources []retrieval.SourceType, cfg appconfig.VectorConfig) bool {
+	if len(input.VectorIndexFiles) > 0 || !workspaceVectorEnabled(cfg) {
+		return false
+	}
+
+	return slices.Contains(sources, retrieval.SourceVector)
+}
+
+func retrievalUsesSessionSearchIndex(sources []retrieval.SourceType) bool {
+	return slices.Contains(sources, retrieval.SourceSession)
 }
 
 func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {
@@ -1213,7 +1294,7 @@ func retrievalSearcher(ctx context.Context, state appState, input retrievalComma
 
 		return state.sessionStore, nil
 	case retrieval.SourceGitHistory:
-		logText, err := gitHistoryLog(ctx, state.cwd)
+		logText, err := gitHistoryLog(ctx, state.cwd, state.autonomy)
 		if err != nil {
 			return nil, err
 		}
@@ -2430,8 +2511,12 @@ func addRetrievalSessionMemory(mem *memory.Store, store *session.Store) error {
 	return nil
 }
 
-//nolint:cyclop,gocognit,nestif // Coordinates purge, rebuild, list, index, retention, and search modes in CLI precedence order.
 func runMemoryCommand(store *session.Store, opts cliOptions) (err error) {
+	return runMemoryCommandWithAutonomy(store, opts, autonomy.DefaultLevel)
+}
+
+//nolint:cyclop,gocognit,nestif // Coordinates purge, rebuild, list, index, retention, and search modes in CLI precedence order.
+func runMemoryCommandWithAutonomy(store *session.Store, opts cliOptions, level autonomy.Level) (err error) {
 	redactor, err := memory.NewRedactor(opts.memoryRedactRules...)
 	if err != nil {
 		fallbackRedactor, fallbackErr := memory.NewRedactor()
@@ -2453,6 +2538,9 @@ func runMemoryCommand(store *session.Store, opts cliOptions) (err error) {
 	}
 	if strings.TrimSpace(opts.memoryPurgeSpec) != "" && opts.memoryRebuild {
 		return errors.New("memory: --memory-purge cannot be combined with --memory-rebuild")
+	}
+	if memoryCommandWritesFiles(opts) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, memoryCommandAutonomyContext(opts)))
 	}
 
 	if strings.TrimSpace(opts.memoryPurgeSpec) != "" {
@@ -2582,6 +2670,28 @@ func runMemoryCommand(store *session.Store, opts cliOptions) (err error) {
 	}
 
 	return nil
+}
+
+func memoryCommandWritesFiles(opts cliOptions) bool {
+	return strings.TrimSpace(opts.memoryPurgeSpec) != "" ||
+		opts.memoryRebuild ||
+		(opts.memoryStorePath != "" && opts.memoryRetentionDays.value > 0) ||
+		(opts.memoryStorePath != "" && len(opts.memoryIndexFiles) > 0)
+}
+
+func memoryCommandAutonomyContext(opts cliOptions) string {
+	switch {
+	case strings.TrimSpace(opts.memoryPurgeSpec) != "":
+		return "--memory-purge"
+	case opts.memoryRebuild:
+		return "--memory-rebuild"
+	case opts.memoryStorePath != "" && opts.memoryRetentionDays.value > 0:
+		return "--memory-retention-days"
+	case opts.memoryStorePath != "" && len(opts.memoryIndexFiles) > 0:
+		return "--memory-index"
+	default:
+		return "memory command"
+	}
 }
 
 func buildMemoryMaintenanceStore(opts cliOptions, redactor *memory.Redactor) (*memory.Store, error) {

@@ -81,6 +81,7 @@ type AuditContext struct {
 	SessionPath     string
 	IssueID         string
 	IssueIdentifier string
+	Autonomy        string
 	AuditDir        string
 }
 
@@ -163,6 +164,7 @@ type AuditRecord struct {
 	SessionPath     string      `json:"session_path,omitempty"`
 	IssueID         string      `json:"issue_id,omitempty"`
 	IssueIdentifier string      `json:"issue_identifier,omitempty"`
+	Autonomy        string      `json:"autonomy,omitempty"`
 	Mode            string      `json:"mode"`
 	Decision        string      `json:"decision"`
 	DecisionReason  string      `json:"decision_reason,omitempty"`
@@ -280,6 +282,7 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 			SessionPath:     strings.TrimSpace(opts.Audit.SessionPath),
 			IssueID:         strings.TrimSpace(opts.Audit.IssueID),
 			IssueIdentifier: strings.TrimSpace(opts.Audit.IssueIdentifier),
+			Autonomy:        strings.TrimSpace(opts.Audit.Autonomy),
 			Mode:            string(mode),
 			EnvDiff:         diff,
 		},

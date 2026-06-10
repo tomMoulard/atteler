@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/llm"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/subagent"
 )
@@ -65,6 +67,10 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 		dir = state.cwd
 	}
 
+	if err := authorizeBashCommandWithAutonomy(ctx, state.autonomy, input.Command, "--bash"); err != nil {
+		return err
+	}
+
 	emitHookWarning(ctx, state.hookRunner, events.Event{
 		Type:        events.CommandExecute,
 		SessionID:   state.sessionState.ID,
@@ -73,10 +79,11 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 		Model:       state.selectedModel,
 		Content:     input.Command,
 		Metadata: map[string]string{
-			"command": input.Command,
-			"cwd":     dir,
-			"input":   input.Command,
-			"source":  "cli",
+			"command":  input.Command,
+			"cwd":      dir,
+			"input":    input.Command,
+			"source":   "cli",
+			"autonomy": state.autonomy.String(),
 		},
 	})
 
@@ -88,6 +95,7 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 			Caller:      "atteler.cli.bash",
 			SessionID:   state.sessionState.ID,
 			SessionPath: state.sessionStore.Path(state.sessionState.ID),
+			Autonomy:    state.autonomy.String(),
 		},
 		OutputCallback: func(chunk attshell.OutputChunk) {
 			switch chunk.Stream {
@@ -111,6 +119,7 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 					"sequence": strconv.FormatInt(chunk.Sequence, 10),
 					"source":   "cli",
 					"stream":   string(chunk.Stream),
+					"autonomy": state.autonomy.String(),
 				},
 			})
 		},
@@ -131,7 +140,7 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 		input.Command,
 		output,
 		err,
-		map[string]string{"source": "cli"},
+		map[string]string{"source": "cli", "autonomy": state.autonomy.String()},
 	))
 
 	if err != nil {
@@ -139,6 +148,36 @@ func runBashCommand(ctx context.Context, state appState, input bashCommandInput)
 	}
 
 	return nil
+}
+
+func authorizeBashCommandWithAutonomy(ctx context.Context, level autonomy.Level, command, contextLabel string) error {
+	level = autonomy.Normalize(level)
+	if level == autonomy.Low {
+		contextLabel = strings.TrimSpace(contextLabel)
+		if contextLabel == "" {
+			contextLabel = "shell command"
+		}
+
+		return fmt.Errorf("autonomy low is advisory-only and blocks %s execution; rerun with --autonomy medium or higher", contextLabel)
+	}
+
+	decision := llm.BashToolPolicyForAutonomy(level)(ctx, llm.ToolCall{
+		Name:  "bash",
+		Input: map[string]any{"command": command},
+	}, llm.AgentLoopBudgetSnapshot{})
+
+	switch decision.Verdict {
+	case llm.ToolPolicyAllow:
+		return nil
+	case llm.ToolPolicyRequireConfirm:
+		return fmt.Errorf("%s requires confirmation; %s runs non-interactively", decision.Reason, contextLabel)
+	case llm.ToolPolicyDeny:
+		return fmt.Errorf("%s", decision.Reason)
+	case llm.ToolPolicyDryRun:
+		return fmt.Errorf("%s blocked by dry-run policy", decision.Reason)
+	default:
+		return fmt.Errorf("bash command blocked by unknown policy verdict %q: %s", decision.Verdict, decision.Reason)
+	}
 }
 
 func runSpawnAgents(ctx context.Context, state appState, input spawnAgentsCommandInput) error {
@@ -150,6 +189,10 @@ func runSpawnAgents(ctx context.Context, state appState, input spawnAgentsComman
 	if input.DryRun {
 		fmt.Print(formatSpawnDryRun(requests))
 		return nil
+	}
+
+	if !state.autonomy.Allows(autonomy.ActionMutatingShell) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(state.autonomy, autonomy.ActionMutatingShell, "spawn-agent"))
 	}
 
 	if input.TimeoutSeconds > 0 {
@@ -166,8 +209,9 @@ func runSpawnAgents(ctx context.Context, state appState, input spawnAgentsComman
 		Agent:       state.selectedAgent,
 		Model:       state.selectedModel,
 		Metadata: map[string]string{
-			"command": "spawn-agent",
-			"count":   strconv.Itoa(len(requests)),
+			"autonomy": state.autonomy.String(),
+			"command":  "spawn-agent",
+			"count":    strconv.Itoa(len(requests)),
 		},
 	})
 
@@ -178,6 +222,7 @@ func runSpawnAgents(ctx context.Context, state appState, input spawnAgentsComman
 
 	results, runErr := subagent.SpawnAllDetailed(ctx, requests, subagent.AttelerCommandDetailedWithOptions(subagent.CommandOptions{
 		Args:           subagentCommandArgs(state),
+		Autonomy:       state.autonomy.String(),
 		Binary:         resolveSpawnBinary(input.Binary),
 		Dir:            state.cwd,
 		MaxOutputBytes: int64(input.Execution.OutputBudgetBytes),
@@ -214,6 +259,8 @@ func subagentCommandArgs(state appState) []string {
 		args = append(args, "--session-dir", state.sessionStore.Dir())
 	}
 
+	args = append(args, "--autonomy", state.autonomy.String())
+
 	return args
 }
 
@@ -233,6 +280,7 @@ func subagentOptionsFromInput(state appState, input childExecutionCommandInput, 
 		WorkspaceID:       state.sessionState.ID,
 		Model:             state.selectedModel,
 		Provider:          providerNameFromModel(state.selectedModel),
+		Autonomy:          state.autonomy.String(),
 		CancelOnFailure:   input.CancelOnFailure,
 		Resume:            input.Resume,
 	}

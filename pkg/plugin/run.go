@@ -34,6 +34,8 @@ type RunOptions struct {
 	Policy         *Policy
 	Permission     *permission.Policy
 	Env            map[string]string
+	Autonomy       string
+	AuditDir       string
 	Timeout        time.Duration
 	Args           []string
 	AttelerVersion string
@@ -98,6 +100,11 @@ func RunEntrypointWithOptions(
 		return RunResult{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, err)
 	}
 
+	autonomyLevel := strings.TrimSpace(options.Autonomy)
+	if autonomyLevel != "" {
+		env = append(env, "ATTELER_AUTONOMY="+autonomyLevel)
+	}
+
 	rootAbs, targetAbs, err := resolveEntrypoint(root, entrypoint)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("plugin: resolve entrypoint %q: %w", entrypointName, err)
@@ -129,7 +136,11 @@ func RunEntrypointWithOptions(
 			targetAbs,
 		),
 		Policy: shellPolicyForPlugin(targetAbs, manifest, secrets),
-		Audit:  attshell.AuditContext{Caller: "atteler.plugin." + entrypointName},
+		Audit: attshell.AuditContext{
+			Caller:   "atteler.plugin." + entrypointName,
+			Autonomy: autonomyLevel,
+			AuditDir: strings.TrimSpace(options.AuditDir),
+		},
 	})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, err)

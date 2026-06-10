@@ -622,6 +622,9 @@ func (o *Orchestrator) handleCodexUpdate(event codexUpdateEvent) {
 	if update.CommandID != "" {
 		fields = append(fields, "command_id", update.CommandID)
 	}
+	if update.Autonomy != "" {
+		fields = append(fields, "autonomy", update.Autonomy)
+	}
 	if update.ProcessID != "" {
 		fields = append(fields, "process_id", update.ProcessID)
 	}
@@ -679,6 +682,9 @@ func codexUpdateLogAttrs(entry *runningEntry, update CodexEvent) []any {
 	}
 	if update.Message != "" {
 		attrs = append(attrs, "message", update.Message)
+	}
+	if update.Autonomy != "" {
+		attrs = append(attrs, "autonomy", update.Autonomy)
 	}
 
 	if update.CommandID != "" {

@@ -85,6 +85,7 @@ type RunOptions struct {
 	AllowedWriteScope string        `json:"allowed_write_scope,omitempty"`
 	Model             string        `json:"model,omitempty"`
 	Provider          string        `json:"provider,omitempty"`
+	Autonomy          string        `json:"autonomy,omitempty"`
 	MaxConcurrency    int           `json:"max_concurrency,omitempty"`
 	CancelOnFailure   bool          `json:"cancel_on_failure,omitempty"`
 	Resume            bool          `json:"resume,omitempty"`
@@ -128,6 +129,7 @@ type Admission struct {
 	AllowedWriteScope string        `json:"allowed_write_scope,omitempty"`
 	Model             string        `json:"model,omitempty"`
 	Provider          string        `json:"provider,omitempty"`
+	Autonomy          string        `json:"autonomy,omitempty"`
 	Timeout           time.Duration `json:"timeout,omitempty"`
 	Budget            Budget        `json:"budget,omitempty"`
 	RetryPolicy       RetryPolicy   `json:"retry_policy,omitempty"`
@@ -768,6 +770,7 @@ func admissionForTask(
 		AllowedWriteScope: task.AllowedWriteScope,
 		Model:             task.Model,
 		Provider:          task.Provider,
+		Autonomy:          strings.TrimSpace(opts.Autonomy),
 		Timeout:           opts.Timeout,
 		Budget:            opts.Budget,
 		RetryPolicy:       opts.RetryPolicy,

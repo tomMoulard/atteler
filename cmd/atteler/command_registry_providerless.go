@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/session"
 )
@@ -25,10 +27,17 @@ func providerlessSessionCommands() []command {
 			},
 		},
 		{
-			name:            "headless-command",
-			tier:            tierProviderless,
-			match:           headlessCommandRequested,
-			runProviderless: runHeadlessCommand,
+			name:  "headless-command",
+			tier:  tierProviderless,
+			match: headlessCommandRequested,
+			runProviderless: func(ctx context.Context, o cliOptions, s *session.Store) error {
+				level, err := autonomyForEarlyCommand(o)
+				if err != nil {
+					return err
+				}
+
+				return runHeadlessCommandWithAutonomy(ctx, o, s, level)
+			},
 		},
 		{
 			name:  "list-sessions",
@@ -59,7 +68,12 @@ func providerlessSessionCommands() []command {
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.searchQuery != "" },
 			runProviderless: func(_ context.Context, o cliOptions, s *session.Store) error {
-				return searchSessions(s, o.searchQuery)
+				level, err := autonomyForEarlyCommand(o)
+				if err != nil {
+					return err
+				}
+
+				return searchSessionsWithAutonomy(s, o.searchQuery, level)
 			},
 		},
 	}
@@ -75,7 +89,12 @@ func providerlessFileCommands() []command {
 			tier:  tierProviderless,
 			match: taskCommandRequested,
 			runProviderless: func(ctx context.Context, o cliOptions, s *session.Store) error {
-				return runTaskListCommand(ctx, s, taskCommandInputFromOptions(o))
+				level, err := autonomyForEarlyCommand(o)
+				if err != nil {
+					return err
+				}
+
+				return runTaskListCommandWithAutonomy(ctx, s, taskCommandInputFromOptions(o), level)
 			},
 		},
 		{
@@ -83,7 +102,12 @@ func providerlessFileCommands() []command {
 			tier:  tierProviderless,
 			match: evalCommandRequested,
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
-				return evalOutputCommand(o)
+				level, err := autonomyForEarlyCommand(o)
+				if err != nil {
+					return err
+				}
+
+				return evalOutputCommandWithAutonomy(o, level)
 			},
 		},
 		{
@@ -99,6 +123,15 @@ func providerlessFileCommands() []command {
 			tier:  tierProviderless,
 			match: func(o cliOptions) bool { return o.initRTKPluginDir != "" },
 			runProviderless: func(_ context.Context, o cliOptions, _ *session.Store) error {
+				level, err := autonomyForEarlyCommand(o)
+				if err != nil {
+					return err
+				}
+
+				if !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+					return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "--init-rtk-plugin"))
+				}
+
 				return initRTKPlugin(o.initRTKPluginDir)
 			},
 		},
@@ -109,7 +142,12 @@ func providerlessFileCommands() []command {
 				return o.lspSymbols || o.lspWorkspaceSymbols != ""
 			},
 			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
-				return runLSPSymbols(ctx, lspSymbolsCommandInputFromOptions(o))
+				level, err := autonomyForEarlyCommand(o)
+				if err != nil {
+					return err
+				}
+
+				return runLSPSymbolsWithAutonomy(ctx, lspSymbolsCommandInputFromOptions(o), level)
 			},
 		},
 		{
@@ -117,7 +155,12 @@ func providerlessFileCommands() []command {
 			tier:  tierProviderless,
 			match: memoryCommandRequested,
 			runProviderless: func(_ context.Context, o cliOptions, s *session.Store) error {
-				return runMemoryCommand(s, o)
+				level, err := autonomyForEarlyCommand(o)
+				if err != nil {
+					return err
+				}
+
+				return runMemoryCommandWithAutonomy(s, o, level)
 			},
 		},
 		{
@@ -127,7 +170,7 @@ func providerlessFileCommands() []command {
 				return o.retrievalSearch == "" && (o.vectorSearch != "" || len(o.vectorIndexFiles) > 0)
 			},
 			runProviderlessConfig: func(ctx context.Context, o cliOptions, state appState) error {
-				return runVectorSearch(ctx, state.cwd, state.vectorConfig, o)
+				return runVectorSearchWithAutonomy(ctx, state.cwd, state.vectorConfig, o, state.autonomy)
 			},
 		},
 	}
@@ -146,7 +189,7 @@ func providerlessPlanningCommands() []command {
 				return o.mcpMethod != "" || o.mcpToolName != ""
 			},
 			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
-				return runMCPInvoke(ctx, mcpInvokeCommandInputFromOptions(o))
+				return runMCPInvokeWithAutonomy(ctx, o)
 			},
 		},
 		{
@@ -210,11 +253,42 @@ func providerlessPlanningCommands() []command {
 					input.SkillDir = learningOpts.SkillDir
 					input.EffectiveEnabled = learningOpts.Enabled
 
-					return runSkillLearningCommand(ctx, input)
+					level, err := autonomyForEarlyCommand(o)
+					if err != nil {
+						return err
+					}
+
+					return runSkillLearningCommandWithAutonomy(ctx, input, level)
+				}
+
+				level, err := autonomyForEarlyCommand(o)
+				if err != nil {
+					return err
+				}
+
+				if suggestSkillWritesFiles(o) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+					return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, "--skill-save-dir"))
 				}
 
 				return suggestSkill(o.suggestSkillSteps, o.skillMaxSteps.value, o.skillMinOccurrences.value, o.skillSaveDir, o.skillReviewOnly)
 			},
 		},
 	}
+}
+
+func runMCPInvokeWithAutonomy(ctx context.Context, opts cliOptions) error {
+	level, err := autonomyForEarlyCommand(opts)
+	if err != nil {
+		return err
+	}
+
+	if !autonomy.Normalize(level).Allows(autonomy.ActionMutatingShell) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionMutatingShell, "--mcp-method/--mcp-tool"))
+	}
+
+	return runMCPInvokeWithLevel(ctx, mcpInvokeCommandInputFromOptions(opts), level)
+}
+
+func suggestSkillWritesFiles(opts cliOptions) bool {
+	return strings.TrimSpace(opts.skillSaveDir) != "" && !opts.skillReviewOnly
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/session"
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
 const testWorktreeBase = "main"
@@ -74,14 +75,28 @@ func TestCaptureArtifact_RecordsGitMetadata(t *testing.T) {
 	commit := runGit(t, root, "rev-parse", "HEAD")
 
 	writeFile(t, root, "notes/plan.md", "dirty artifact")
+	auditDir := filepath.Join(t.TempDir(), "audit")
 
-	artifact, err := CaptureArtifact(t.Context(), root, session.New("gpt-test", nil), "notes/plan.md", "note", "", "agent", CaptureOptions{MaxBytes: 1024})
+	artifact, err := CaptureArtifact(t.Context(), root, session.New("gpt-test", nil), "notes/plan.md", "note", "", "agent", CaptureOptions{
+		MaxBytes: 1024,
+		Autonomy: "high",
+		AuditDir: auditDir,
+	})
 	require.NoError(t, err)
 
 	assert.Equal(t, commit, artifact.SourceCommit)
 	assert.NotEmpty(t, artifact.WorktreeBranch)
 	assert.True(t, artifact.WorktreeDirty)
 	assert.Equal(t, filepath.Clean(root), artifact.WorktreePath)
+
+	records := readCommandAuditRecords(t, auditDir)
+	require.Len(t, records, 6)
+
+	for _, record := range records {
+		assert.Equal(t, "artifactmerge.git_metadata", record.Caller)
+		assert.Equal(t, "high", record.Autonomy)
+		assert.Equal(t, filepath.Clean(root), record.CWD)
+	}
 }
 
 func TestCaptureArtifact_RejectsUnsafeOrNonTextArtifacts(t *testing.T) {
@@ -546,6 +561,28 @@ func runGit(t *testing.T, root string, args ...string) string {
 	require.NoErrorf(t, err, "git %s failed:\n%s", strings.Join(args, " "), string(out))
 
 	return strings.TrimSpace(string(out))
+}
+
+func readCommandAuditRecords(t *testing.T, auditDir string) []attshell.AuditRecord {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	records := make([]attshell.AuditRecord, 0, len(lines))
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record attshell.AuditRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+
+	return records
 }
 
 func assertWarning(t *testing.T, warnings []Warning, path, code, severity, reason string) {

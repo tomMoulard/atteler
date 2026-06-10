@@ -32,6 +32,7 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.BoolVar(&opts.jsonOutput, "json", false, "emit JSON for commands with structured output, such as code-intel or config doctor-offline")
 	fs.StringVar(&opts.searchQuery, "search-sessions", "", "search saved session transcripts and exit")
 	fs.StringVar(&opts.oncePrompt, "once", "", "send one prompt and exit")
+	fs.Var(&opts.autonomy, "autonomy", "risk-based autonomy for agent actions: low, medium, high, or full")
 	fs.Var(issueImplementRefFlag{opts: opts}, "issue-implement", "implement one tracker issue through Symphony and exit")
 	fs.StringVar(&opts.issueWorkflowPath, "issue-workflow", "", "WORKFLOW.md path for --issue-implement; defaults to ./WORKFLOW.md")
 	fs.StringVar(&opts.issueBaseBranch, "base", "", "base branch override for --issue-implement")

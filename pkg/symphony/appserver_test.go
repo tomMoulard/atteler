@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -73,9 +75,304 @@ sleep 2
 	assert.Contains(t, eventNames(events), "notification")
 }
 
-func TestAppServerClient_RunTurnStreamsCommandOutputNotifications(t *testing.T) {
+func TestAppServerClient_MediumAutonomyDeniesPublishCommandApproval(t *testing.T) {
 	t.Parallel()
 
+	dir := t.TempDir()
+	approvalPath := filepath.Join(dir, "approval-response.json")
+	script := filepath.Join(dir, "fake-app-server.sh")
+	require.NoError(t, os.WriteFile(script, []byte(`#!/usr/bin/env bash
+read -r line
+printf '%s\n' '{"id":1,"result":{}}'
+read -r line
+read -r line
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}'
+printf '%s\n' '{"id":4,"method":"item/commandExecution/requestApproval","params":{"command":"git push --force origin feature"}}'
+read -r approval
+printf '%s\n' "$approval" > "$APPROVAL_PATH"
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[]}}}'
+sleep 2
+`), 0o700))
+
+	var events []CodexEvent
+	cfg := Config{
+		Autonomy: autonomy.Medium,
+		Codex: CodexConfig{
+			Command:     "env APPROVAL_PATH=" + strconv.Quote(approvalPath) + " " + strconv.Quote(script),
+			ReadTimeout: 5 * time.Second,
+			TurnTimeout: 5 * time.Second,
+		},
+	}
+
+	client, err := StartAppServer(context.Background(), cfg.Codex, dir, func(event CodexEvent) {
+		events = append(events, event)
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	issue := Issue{ID: "1", Identifier: "GH-1", Title: "Fix", State: "OPEN"}
+	threadID, err := client.StartThread(context.Background(), cfg, issue, dir)
+	require.NoError(t, err)
+	require.NoError(t, client.RunTurn(context.Background(), cfg, threadID, "do it", dir))
+
+	data, err := os.ReadFile(approvalPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"decision":"deny"`)
+	assert.Contains(t, string(data), "autonomy medium blocks git pushes")
+	assert.Contains(t, eventNames(events), "approval_denied")
+}
+
+func TestAppServerClient_LowAutonomyDeniesCommandApproval(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	approvalPath := filepath.Join(dir, "approval-response.json")
+	script := filepath.Join(dir, "fake-app-server.sh")
+	require.NoError(t, os.WriteFile(script, []byte(`#!/usr/bin/env bash
+read -r line
+printf '%s\n' '{"id":1,"result":{}}'
+read -r line
+read -r line
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}'
+printf '%s\n' '{"id":4,"method":"item/commandExecution/requestApproval","params":{"command":"git status --short"}}'
+read -r approval
+printf '%s\n' "$approval" > "$APPROVAL_PATH"
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[]}}}'
+sleep 2
+`), 0o700))
+
+	var events []CodexEvent
+	cfg := Config{
+		Autonomy: autonomy.Low,
+		Codex: CodexConfig{
+			Command:     "env APPROVAL_PATH=" + strconv.Quote(approvalPath) + " " + strconv.Quote(script),
+			ReadTimeout: 5 * time.Second,
+			TurnTimeout: 5 * time.Second,
+		},
+	}
+
+	client, err := StartAppServer(context.Background(), cfg.Codex, dir, func(event CodexEvent) {
+		events = append(events, event)
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	issue := Issue{ID: "1", Identifier: "GH-1", Title: "Fix", State: "OPEN"}
+	threadID, err := client.StartThread(context.Background(), cfg, issue, dir)
+	require.NoError(t, err)
+	require.NoError(t, client.RunTurn(context.Background(), cfg, threadID, "do it", dir))
+
+	data, err := os.ReadFile(approvalPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"decision":"deny"`)
+	assert.Contains(t, string(data), "autonomy low is advisory-only")
+	assert.Contains(t, eventNames(events), "approval_denied")
+}
+
+func TestAppServerClient_DeniesSensitiveCommandApprovalEvenAtHighAutonomy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	approvalPath := filepath.Join(dir, "approval-response.json")
+	script := filepath.Join(dir, "fake-app-server.sh")
+	require.NoError(t, os.WriteFile(script, []byte(`#!/usr/bin/env bash
+read -r line
+printf '%s\n' '{"id":1,"result":{}}'
+read -r line
+read -r line
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}'
+printf '%s\n' '{"id":4,"method":"item/commandExecution/requestApproval","params":{"command":"sudo make install"}}'
+read -r approval
+printf '%s\n' "$approval" > "$APPROVAL_PATH"
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[]}}}'
+sleep 2
+`), 0o700))
+
+	var events []CodexEvent
+	cfg := Config{
+		Autonomy: autonomy.High,
+		Codex: CodexConfig{
+			Command:     "env APPROVAL_PATH=" + strconv.Quote(approvalPath) + " " + strconv.Quote(script),
+			ReadTimeout: 5 * time.Second,
+			TurnTimeout: 5 * time.Second,
+		},
+	}
+
+	client, err := StartAppServer(context.Background(), cfg.Codex, dir, func(event CodexEvent) {
+		events = append(events, event)
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	issue := Issue{ID: "1", Identifier: "GH-1", Title: "Fix", State: "OPEN"}
+	threadID, err := client.StartThread(context.Background(), cfg, issue, dir)
+	require.NoError(t, err)
+	require.NoError(t, client.RunTurn(context.Background(), cfg, threadID, "do it", dir))
+
+	data, err := os.ReadFile(approvalPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"decision":"deny"`)
+	assert.Contains(t, string(data), "privileged command requires confirmation")
+	assert.Contains(t, string(data), "cannot auto-approve sensitive commands")
+	assert.Contains(t, eventNames(events), "approval_denied")
+}
+
+func TestAppServerClient_DeniesCommandApprovalWithoutCommand(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	approvalPath := filepath.Join(dir, "approval-response.json")
+	script := filepath.Join(dir, "fake-app-server.sh")
+	require.NoError(t, os.WriteFile(script, []byte(`#!/usr/bin/env bash
+read -r line
+printf '%s\n' '{"id":1,"result":{}}'
+read -r line
+read -r line
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}'
+printf '%s\n' '{"id":4,"method":"item/commandExecution/requestApproval","params":{"summary":"run a command"}}'
+read -r approval
+printf '%s\n' "$approval" > "$APPROVAL_PATH"
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[]}}}'
+sleep 2
+`), 0o700))
+
+	var events []CodexEvent
+	cfg := Config{
+		Autonomy: autonomy.High,
+		Codex: CodexConfig{
+			Command:     "env APPROVAL_PATH=" + strconv.Quote(approvalPath) + " " + strconv.Quote(script),
+			ReadTimeout: 5 * time.Second,
+			TurnTimeout: 5 * time.Second,
+		},
+	}
+
+	client, err := StartAppServer(context.Background(), cfg.Codex, dir, func(event CodexEvent) {
+		events = append(events, event)
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	issue := Issue{ID: "1", Identifier: "GH-1", Title: "Fix", State: "OPEN"}
+	threadID, err := client.StartThread(context.Background(), cfg, issue, dir)
+	require.NoError(t, err)
+	require.NoError(t, client.RunTurn(context.Background(), cfg, threadID, "do it", dir))
+
+	data, err := os.ReadFile(approvalPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"decision":"deny"`)
+	assert.Contains(t, string(data), "cannot evaluate against selected autonomy")
+	assert.Contains(t, eventNames(events), "approval_denied")
+}
+
+func TestAppServerClient_MediumAutonomyDeniesNetworkPermissionApproval(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	approvalPath := filepath.Join(dir, "approval-response.json")
+	script := filepath.Join(dir, "fake-app-server.sh")
+	require.NoError(t, os.WriteFile(script, []byte(`#!/usr/bin/env bash
+read -r line
+printf '%s\n' '{"id":1,"result":{}}'
+read -r line
+read -r line
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}'
+printf '%s\n' '{"id":4,"method":"item/permissions/requestApproval","params":{"permissions":{"network":{"enabled":true}}}}'
+read -r approval
+printf '%s\n' "$approval" > "$APPROVAL_PATH"
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[]}}}'
+sleep 2
+`), 0o700))
+
+	var events []CodexEvent
+	cfg := Config{
+		Autonomy: autonomy.Medium,
+		Codex: CodexConfig{
+			Command:     "env APPROVAL_PATH=" + strconv.Quote(approvalPath) + " " + strconv.Quote(script),
+			ReadTimeout: 5 * time.Second,
+			TurnTimeout: 5 * time.Second,
+		},
+	}
+
+	client, err := StartAppServer(context.Background(), cfg.Codex, dir, func(event CodexEvent) {
+		events = append(events, event)
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	issue := Issue{ID: "1", Identifier: "GH-1", Title: "Fix", State: "OPEN"}
+	threadID, err := client.StartThread(context.Background(), cfg, issue, dir)
+	require.NoError(t, err)
+	require.NoError(t, client.RunTurn(context.Background(), cfg, threadID, "do it", dir))
+
+	data, err := os.ReadFile(approvalPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"decision":"deny"`)
+	assert.Contains(t, string(data), "autonomy medium blocks remote service mutations")
+	assert.Contains(t, string(data), "network permission escalation")
+	assert.Contains(t, eventNames(events), "approval_denied")
+}
+
+func TestAppServerClient_FullAutonomyApprovesNetworkPermissionByPolicy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	approvalPath := filepath.Join(dir, "approval-response.json")
+	script := filepath.Join(dir, "fake-app-server.sh")
+	require.NoError(t, os.WriteFile(script, []byte(`#!/usr/bin/env bash
+read -r line
+printf '%s\n' '{"id":1,"result":{}}'
+read -r line
+read -r line
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}'
+printf '%s\n' '{"id":4,"method":"item/permissions/requestApproval","params":{"permissions":{"network":{"enabled":true}}}}'
+read -r approval
+printf '%s\n' "$approval" > "$APPROVAL_PATH"
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[]}}}'
+sleep 2
+`), 0o700))
+
+	var events []CodexEvent
+	cfg := Config{
+		Autonomy: autonomy.Full,
+		Codex: CodexConfig{
+			Command:     "env APPROVAL_PATH=" + strconv.Quote(approvalPath) + " " + strconv.Quote(script),
+			ReadTimeout: 5 * time.Second,
+			TurnTimeout: 5 * time.Second,
+		},
+	}
+
+	client, err := StartAppServer(context.Background(), cfg.Codex, dir, func(event CodexEvent) {
+		events = append(events, event)
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	issue := Issue{ID: "1", Identifier: "GH-1", Title: "Fix", State: "OPEN"}
+	threadID, err := client.StartThread(context.Background(), cfg, issue, dir)
+	require.NoError(t, err)
+	require.NoError(t, client.RunTurn(context.Background(), cfg, threadID, "do it", dir))
+
+	data, err := os.ReadFile(approvalPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"network":{"enabled":true}`)
+	assert.Contains(t, string(data), `"scope":"session"`)
+	assert.Contains(t, eventNames(events), "approval_auto_approved")
+}
+
+//nolint:paralleltest // Shares fake app-server pipe state; parallel race runs can close it before all readers drain.
+func TestAppServerClient_RunTurnStreamsCommandOutputNotifications(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-app-server.sh")
 	require.NoError(t, os.WriteFile(script, []byte(`#!/usr/bin/env bash

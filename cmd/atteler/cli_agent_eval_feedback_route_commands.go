@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	atteval "github.com/tommoulard/atteler/pkg/eval"
 	"github.com/tommoulard/atteler/pkg/feedback"
@@ -398,6 +399,14 @@ func evalCommandRequested(opts cliOptions) bool {
 }
 
 func evalOutputCommand(opts cliOptions) error {
+	return evalOutputCommandWithAutonomy(opts, autonomy.DefaultLevel)
+}
+
+func evalOutputCommandWithAutonomy(opts cliOptions, level autonomy.Level) error {
+	if evalCommandWritesFiles(opts) && !autonomy.Normalize(level).Allows(autonomy.ActionFileWrite) {
+		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, evalAutonomyContext(opts)))
+	}
+
 	if structuredEvalRequested(opts) || opts.evalJSON || opts.evalReportPath != "" {
 		report, err := evalReportForCommand(opts)
 		if err != nil {
@@ -416,6 +425,23 @@ func evalOutputCommand(opts cliOptions) error {
 	}
 
 	return evalOutput(opts.evalOutputPath, opts.evalExpected, opts.evalExpectedPath, atteval.MatchMode(opts.evalMode))
+}
+
+func evalCommandWritesFiles(opts cliOptions) bool {
+	return opts.evalReportPath != "" || opts.evalUpdateGolden || opts.evalApproveGoldenUpdate
+}
+
+func evalAutonomyContext(opts cliOptions) string {
+	switch {
+	case opts.evalReportPath != "":
+		return "--eval-report"
+	case opts.evalUpdateGolden:
+		return "--eval-update-golden"
+	case opts.evalApproveGoldenUpdate:
+		return "--eval-approve-golden-update"
+	default:
+		return "eval output"
+	}
 }
 
 func structuredEvalRequested(opts cliOptions) bool {

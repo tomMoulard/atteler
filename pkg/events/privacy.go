@@ -66,6 +66,7 @@ var eventSchemas = map[string]eventSchema{
 			"service_tier":       metadataSafe,
 			"waves":              metadataSafe,
 			"option_adjustments": metadataSafe,
+			"autonomy":           metadataSafe,
 			"command":            metadataSensitive,
 			"cwd":                metadataSensitive,
 			"input":              metadataSensitive,
@@ -80,6 +81,7 @@ var eventSchemas = map[string]eventSchema{
 			"source":       metadataSafe,
 			"stream":       metadataSafe,
 			"tool_call_id": metadataSafe,
+			"autonomy":     metadataSafe,
 			"command":      metadataSensitive,
 			"cwd":          metadataSensitive,
 		},
@@ -127,8 +129,9 @@ var eventSchemas = map[string]eventSchema{
 	}),
 	FileWrite: lifecycleEventSchema(eventSchema{
 		Metadata: map[string]metadataPolicy{
-			"kind": metadataSafe,
-			"path": metadataSensitive,
+			"autonomy": metadataSafe,
+			"kind":     metadataSafe,
+			"path":     metadataSensitive,
 		},
 	}),
 	ProviderRetry: lifecycleEventSchema(eventSchema{
@@ -200,6 +203,7 @@ var eventSchemas = map[string]eventSchema{
 	SessionEnd: lifecycleEventSchema(eventSchema{
 		Metadata: map[string]metadataPolicy{
 			"agent_loop_budget": metadataSafe,
+			"autonomy":          metadataSafe,
 			"model_mode":        metadataSafe,
 			"reasoning_level":   metadataSafe,
 		},
@@ -207,6 +211,7 @@ var eventSchemas = map[string]eventSchema{
 	SessionStart: lifecycleEventSchema(eventSchema{
 		Metadata: map[string]metadataPolicy{
 			"agent_loop_budget": metadataSafe,
+			"autonomy":          metadataSafe,
 			"model_mode":        metadataSafe,
 			"reasoning_level":   metadataSafe,
 		},
@@ -215,6 +220,7 @@ var eventSchemas = map[string]eventSchema{
 		Metadata: map[string]metadataPolicy{
 			"model_mode":         metadataSafe,
 			"option_adjustments": metadataSafe,
+			"autonomy":           metadataSafe,
 			"provider":           metadataSafe,
 			"reasoning_level":    metadataSafe,
 			"service_tier":       metadataSafe,
@@ -275,6 +281,12 @@ func lifecycleEventSchema(schema eventSchema) eventSchema {
 	schema.Agent = true
 	schema.Model = true
 	schema.SessionPath = true
+
+	if schema.Metadata == nil {
+		schema.Metadata = make(map[string]metadataPolicy, 1)
+	}
+
+	schema.Metadata["autonomy"] = metadataSafe
 
 	return schema
 }

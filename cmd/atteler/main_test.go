@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/config"
 	atteval "github.com/tommoulard/atteler/pkg/eval"
 	"github.com/tommoulard/atteler/pkg/githistory"
@@ -824,12 +825,12 @@ printf executed > executed
 	//nolint:gosec // Test fixture intentionally creates an executable plugin script.
 	require.NoError(t, os.Chmod(scriptPath, 0o700))
 
-	err := runPluginEntrypoint(t.Context(), []string{root}, nil, "runner/run", "", false, 5)
+	err := runPluginEntrypoint(t.Context(), []string{root}, nil, "runner/run", "", false, 5, autonomy.DefaultLevel)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "plugins.policy must accept requested permissions")
 	require.NoFileExists(t, marker)
 
-	err = runPluginEntrypoint(t.Context(), []string{root}, nil, "runner/run", "", true, 5)
+	err = runPluginEntrypoint(t.Context(), []string{root}, nil, "runner/run", "", true, 5, autonomy.DefaultLevel)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "plugins.policy must accept requested permissions")
 	require.NoFileExists(t, marker)
@@ -1343,7 +1344,7 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(cwd, "docs"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(cwd, "docs", "research.md"), []byte("research notes"), 0o600))
 
-	err = recordArtifact(t.Context(), store, loaded, cwd, "docs/research.md", "research", "docs/research.md", "approved", "useful", "reviewer")
+	err = recordArtifact(t.Context(), store, loaded, cwd, "docs/research.md", "research", "docs/research.md", "approved", "useful", "reviewer", autonomy.Medium)
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -1591,4 +1592,20 @@ func TestFormatGitHistoryResult(t *testing.T) {
 			require.Failf(t, "formatted git history missing content", "missing %q in %q", want, got)
 		}
 	}
+}
+
+func TestGitHistoryAuditContextIncludesAutonomy(t *testing.T) {
+	t.Parallel()
+
+	got := gitHistoryAuditContext(autonomy.High)
+	assert.Equal(t, "atteler.git_history", got.Caller)
+	assert.Equal(t, "high", got.Autonomy)
+}
+
+func TestWatchGitAuditContextIncludesAutonomy(t *testing.T) {
+	t.Parallel()
+
+	got := watchGitAuditContext(autonomy.Full)
+	assert.Equal(t, "atteler.watch.git", got.Caller)
+	assert.Equal(t, "full", got.Autonomy)
 }

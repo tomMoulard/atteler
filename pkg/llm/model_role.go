@@ -887,6 +887,10 @@ func (r *Registry) runtimeCollisionModelRoleCandidateOptionsLocked(
 	}
 
 	if !modelRolePolicyHasSelectionConstraints(policy, role) {
+		if candidate, ok := r.configuredProviderRuntimeModelRoleCandidateLocked(id); ok {
+			return []modelroute.Candidate{candidate}, true, true
+		}
+
 		if candidate, ok := r.defaultDisambiguatedRuntimeModelRoleCandidateLocked(id); ok {
 			return []modelroute.Candidate{candidate}, true, true
 		}
@@ -928,6 +932,36 @@ func (r *Registry) defaultDisambiguatedRuntimeModelRoleCandidateLocked(id string
 		Provenance:   diagnostic.Provenance,
 		Stale:        diagnostic.Stale,
 	})
+}
+
+func (r *Registry) configuredProviderRuntimeModelRoleCandidateLocked(id string) (modelroute.Candidate, bool) {
+	resolutions := r.modelResolutionCandidatesLocked(id)
+
+	var (
+		selected      modelroute.Candidate
+		selectedCount int
+	)
+
+	for _, resolution := range resolutions {
+		readiness, ok := r.readinessProviderLocked(resolution.ProviderName)
+		if !ok || !readiness.Configured {
+			continue
+		}
+
+		candidate, ok := r.modelRouteCandidateFromResolutionLocked(resolution)
+		if !ok {
+			continue
+		}
+
+		selected = candidate
+		selectedCount++
+
+		if selectedCount > 1 {
+			return modelroute.Candidate{}, false
+		}
+	}
+
+	return selected, selectedCount == 1
 }
 
 func modelRoleAvailabilityIDs(chain []string, candidates []modelroute.Candidate) []string {

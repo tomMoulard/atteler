@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/contextref"
@@ -27,11 +28,13 @@ import (
 	"github.com/tommoulard/atteler/pkg/vector"
 )
 
+//nolint:govet // Test helper field order keeps call assertions next to captured request state.
 type runOnceCostProvider struct {
+	calls    int
 	response *llm.Response
+	params   *llm.CompleteParams
 	name     string
 	models   []string
-	calls    int
 }
 
 func (p *runOnceCostProvider) Name() string { return p.name }
@@ -46,11 +49,12 @@ func (p *runOnceCostProvider) HealthCheck(context.Context) error { return nil }
 
 func (p *runOnceCostProvider) ModelContextWindow(string) int { return 128_000 }
 
-func (p *runOnceCostProvider) Complete(_ context.Context, _ llm.CompleteParams) (*llm.Response, error) {
+func (p *runOnceCostProvider) Complete(_ context.Context, params llm.CompleteParams) (*llm.Response, error) {
 	if p.response == nil {
 		return nil, errors.New("missing response")
 	}
 
+	p.params = &params
 	p.calls++
 
 	return p.response, nil
@@ -234,6 +238,167 @@ func TestRunOnceComplete_CostBudgetPassesWithCatalogPricing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "priced answer", resp.Content)
 	assert.Equal(t, 1, provider.calls)
+}
+
+func TestRunOnceWithOptions_AutonomyControlsToolExposure(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		level     autonomy.Level
+		name      string
+		wantTools bool
+	}{
+		{level: autonomy.Low, name: "low", wantTools: false},
+		{level: autonomy.Medium, name: "medium", wantTools: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			provider := &runOnceCostProvider{
+				name:   "openai",
+				models: []string{"gpt-4.1-mini"},
+				response: &llm.Response{
+					Content:    "answer",
+					Provider:   "openai",
+					Model:      "gpt-4.1-mini",
+					StopReason: llm.StopEndTurn,
+				},
+			}
+			reg := llm.NewRegistry()
+			reg.Register(provider)
+
+			err := runOnceWithOptions(
+				context.Background(),
+				reg,
+				agent.NewRegistry(nil),
+				nil,
+				session.NewStore(filepath.Join(dir, "sessions")),
+				session.New("openai/gpt-4.1-mini", nil),
+				contextref.Options{Root: dir},
+				"",
+				contextref.ReferenceManifest{},
+				"",
+				nil,
+				"openai/gpt-4.1-mini",
+				"",
+				nil,
+				generationSettings{},
+				generationSettings{},
+				0,
+				runOnceExecutionOptions{Autonomy: tt.level},
+				true,
+				"implement the change",
+			)
+			require.NoError(t, err)
+			require.Equal(t, 1, provider.calls)
+			require.NotNil(t, provider.params)
+			assert.Equal(t, tt.wantTools, len(provider.params.Tools) > 0)
+			assertRunOnceRequestContains(t, *provider.params, "Autonomy: "+tt.level.String())
+		})
+	}
+}
+
+func TestRunOnceWithOptions_LowAutonomyDoesNotPersistSession(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	provider := &runOnceCostProvider{
+		name:   "openai",
+		models: []string{"gpt-4.1-mini"},
+		response: &llm.Response{
+			Content:    "plan only",
+			Provider:   "openai",
+			Model:      "gpt-4.1-mini",
+			StopReason: llm.StopEndTurn,
+		},
+	}
+	reg := llm.NewRegistry()
+	reg.Register(provider)
+
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	sessionState := session.New("openai/gpt-4.1-mini", nil)
+	sessionPath := store.Path(sessionState.ID)
+
+	err := runOnceWithOptions(
+		context.Background(),
+		reg,
+		agent.NewRegistry(nil),
+		nil,
+		store,
+		sessionState,
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"openai/gpt-4.1-mini",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{Autonomy: autonomy.Low},
+		true,
+		"implement the change",
+	)
+
+	require.NoError(t, err)
+	assert.NoFileExists(t, sessionPath)
+	assert.NoFileExists(t, agentLoopCheckpointPath(sessionPath))
+	require.NotNil(t, provider.params)
+	assertRunOnceRequestContains(t, *provider.params, "Autonomy: low")
+}
+
+func TestRunOnceWithOptions_LowAutonomyBlocksHeadlessMetadataWrites(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+
+	err := runOnceWithOptions(
+		context.Background(),
+		nil,
+		nil,
+		nil,
+		store,
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			Autonomy:   autonomy.Low,
+			Headless:   true,
+			HeadlessID: "low-headless",
+		},
+		true,
+		"implement the change",
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
+	assert.Contains(t, err.Error(), "--headless run metadata")
+	assert.NoDirExists(t, filepath.Join(store.Dir(), "headless"))
+}
+
+func assertRunOnceRequestContains(t *testing.T, params llm.CompleteParams, want string) {
+	t.Helper()
+
+	for _, message := range params.Messages {
+		if strings.Contains(message.Content, want) {
+			return
+		}
+	}
+
+	require.Failf(t, "missing request content", "request messages do not contain %q: %+v", want, params.Messages)
 }
 
 func TestRunOnceComplete_ReplayCostBudgetFailsClosedWithoutPricing(t *testing.T) {
@@ -457,6 +622,7 @@ func TestPrepareRunOnceRequestReturnsRouteDecisionOnRoutingError(t *testing.T) {
 		generationSettings{},
 		generationSettings{},
 		false,
+		true,
 		"review this",
 	)
 
@@ -861,6 +1027,109 @@ func TestRunOnceWithOptions_AppendsWorkspaceVectorContext(t *testing.T) {
 	assert.NotContains(t, workspaceContext, dir)
 }
 
+func TestRunOnceWithOptions_LowAutonomySkipsWorkspaceVectorIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docs", "auth.md"), []byte("OAuth callback state validation and token exchange retry notes."), 0o600))
+
+	indexPath := filepath.Join(dir, ".atteler", "workspace-index.json")
+
+	provider := &runOnceCostProvider{
+		name:   "openai",
+		models: []string{"gpt-4.1-mini"},
+		response: &llm.Response{
+			Content:    "recorded answer",
+			Provider:   "openai",
+			Model:      "gpt-4.1-mini",
+			StopReason: llm.StopEndTurn,
+		},
+	}
+	reg := llm.NewRegistry()
+	reg.Register(provider)
+
+	enabled := true
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+
+	err := runOnceWithOptions(
+		context.Background(),
+		reg,
+		agent.NewRegistry(nil),
+		nil,
+		store,
+		session.New("openai/gpt-4.1-mini", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"openai/gpt-4.1-mini",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			Autonomy: autonomy.Low,
+			VectorConfig: config.VectorConfig{
+				WorkspaceEnabled:      &enabled,
+				WorkspaceIndexPath:    indexPath,
+				Vectorizer:            vector.VectorizerKindLexical,
+				WorkspaceLimit:        1,
+				WorkspaceMaxFileBytes: 1024,
+			},
+		},
+		true,
+		"Where are OAuth retry notes?",
+	)
+	require.NoError(t, err)
+	assert.NoFileExists(t, indexPath)
+	require.NotNil(t, provider.params)
+
+	for _, message := range provider.params.Messages {
+		assert.NotContains(t, message.Content, "<workspace_vector_context")
+	}
+}
+
+func TestRunOnceWithOptions_LowAutonomyBlocksResponseRecording(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	recordPath := filepath.Join(dir, "recorded-request.json")
+
+	err := runOnceWithOptions(
+		context.Background(),
+		nil,
+		nil,
+		nil,
+		session.NewStore(filepath.Join(dir, "sessions")),
+		session.New("gpt-test", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"gpt-test",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{
+			Autonomy: autonomy.Low,
+			Response: responseRecordOptions{RecordPath: recordPath},
+		},
+		true,
+		"explain the change",
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
+	assert.Contains(t, err.Error(), "--record-response")
+	assert.NoFileExists(t, recordPath)
+}
+
 func TestRunOnceWithOptions_DoesNotIndexWorkspaceVectorContextWhenDisabled(t *testing.T) {
 	t.Parallel()
 
@@ -1259,8 +1528,10 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	result := runOnceResult{
 		SessionID:               "session-id",
 		SessionPath:             "/tmp/session.json",
+		SessionPersisted:        true,
 		AgentLoopCheckpointPath: "/tmp/session.agentloop.jsonl",
 		AgentLoopBudget:         llm.AgentLoopBudget{MaxInputTokens: 100, MaxOutputTokens: 50},
+		Autonomy:                "medium",
 		HeadlessID:              "headless-id",
 		Model:                   "gpt-test",
 		ModelMode:               "fast",
@@ -1280,6 +1551,7 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	assert.Equal(t, result.SessionID, decoded.SessionID)
 	assert.Equal(t, result.HeadlessID, decoded.HeadlessID)
 	assert.Equal(t, result.ModelMode, decoded.ModelMode)
+	assert.True(t, decoded.SessionPersisted)
 	assert.Equal(t, result.AgentLoopCheckpointPath, decoded.AgentLoopCheckpointPath)
 	assert.Equal(t, result.AgentLoopBudget, decoded.AgentLoopBudget)
 	assert.Equal(t, result.TokenUsage.OutputTokens, decoded.TokenUsage.OutputTokens)
@@ -1292,10 +1564,43 @@ func TestWriteRunOnceResult_JSONAndHeadlessText(t *testing.T) {
 	assert.Empty(t, stderr.String())
 
 	require.NoError(t, writeRunOnceResult(&stdout, &stderr, result, "text", false))
+	assert.Contains(t, stderr.String(), "session: session-id (/tmp/session.json)")
 	assert.Contains(t, stderr.String(), "agent loop checkpoint: /tmp/session.agentloop.jsonl")
 	assert.Contains(t, stderr.String(), "agent loop budget:")
 	assert.Contains(t, stderr.String(), "in=100")
 	assert.Contains(t, stderr.String(), "out=50")
+	assert.Contains(t, stderr.String(), "autonomy: medium")
+}
+
+func TestWriteRunOnceResult_LowAutonomyMarksSessionUnpersisted(t *testing.T) {
+	t.Parallel()
+
+	result := runOnceResult{
+		SessionID:        "session-id",
+		SessionPath:      "/tmp/session.json",
+		SessionPersisted: false,
+		Autonomy:         "low",
+		Content:          "plan only",
+	}
+
+	var (
+		stdout bytes.Buffer
+		stderr bytes.Buffer
+	)
+
+	require.NoError(t, writeRunOnceResult(&stdout, &stderr, result, "text", false))
+	assert.Equal(t, "plan only\n", stdout.String())
+	assert.Contains(t, stderr.String(), "session: session-id (not persisted: autonomy low)")
+	assert.NotContains(t, stderr.String(), "session: session-id (/tmp/session.json)")
+	assert.Contains(t, stderr.String(), "autonomy: low")
+}
+
+func TestFormatSessionLocationExplainsLowAutonomyNonPersistence(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "session-id (/tmp/session.json)", formatSessionLocation("session-id", "/tmp/session.json", true, "low"))
+	assert.Equal(t, "session-id (not persisted: autonomy low)", formatSessionLocation("session-id", "/tmp/session.json", false, "low"))
+	assert.Equal(t, "session-id (not persisted)", formatSessionLocation("session-id", "/tmp/session.json", false, "medium"))
 }
 
 func TestBashExecutorStreamsOutputBeforeCompletion(t *testing.T) {
@@ -1329,6 +1634,28 @@ func TestBashExecutorStreamsOutputBeforeCompletion(t *testing.T) {
 		assert.Contains(t, plainLog, "done\n")
 	case <-time.After(time.Second):
 		require.FailNow(t, "timed out waiting for tool completion")
+	}
+}
+
+func TestBashExecutorDefaultsAuditAutonomy(t *testing.T) {
+	t.Parallel()
+
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	result := newBashExecutor(t.TempDir(), nil, attshell.AuditContext{
+		AuditDir: auditDir,
+	})(context.Background(), llm.ToolCall{
+		ID:    "call-1",
+		Name:  "bash",
+		Input: map[string]any{"command": "printf ok"},
+	})
+	require.False(t, result.IsError)
+	assert.Contains(t, result.Content, "ok")
+
+	records := readCommandAuditRecords(t, auditDir)
+	require.NotEmpty(t, records)
+
+	for _, record := range records {
+		assert.Equal(t, autonomy.DefaultLevel.String(), record.Autonomy)
 	}
 }
 
