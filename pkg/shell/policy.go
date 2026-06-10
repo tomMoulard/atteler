@@ -757,9 +757,25 @@ func envAuditValue(key string) string {
 	return "<set>"
 }
 
+// nonSecretEnv lists well-known environment variables that match the
+// credential heuristics in credentialEnv but carry no secret material: they
+// are paths or descriptors used to reach a local agent, not credentials.
+func nonSecretEnv(upper string) bool {
+	switch upper {
+	case "SSH_AUTH_SOCK", "GPG_AGENT_INFO":
+		return true
+	}
+
+	return strings.HasSuffix(upper, "_AUTH_SOCK")
+}
+
 func credentialEnv(key string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(key))
 	if upper == "" {
+		return false
+	}
+
+	if nonSecretEnv(upper) {
 		return false
 	}
 
@@ -783,7 +799,9 @@ func credentialEnv(key string) bool {
 		return true
 	}
 
-	return strings.HasSuffix(upper, "_KEY") || strings.HasSuffix(upper, "KEY")
+	// Only underscore-delimited KEY suffixes count: bare "...KEY" words such
+	// as LESSKEY are ordinary configuration, not secrets.
+	return strings.HasSuffix(upper, "_KEY")
 }
 
 func credentialAssignmentDenied(key string, policy Policy) bool {
