@@ -3,6 +3,7 @@ package symphony
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -51,7 +52,9 @@ type runtimeState struct {
 	CodexTotals              codexTotals
 }
 
-type jsonRaw []byte
+// jsonRaw aliases json.RawMessage so stored payloads marshal verbatim as JSON
+// (a plain []byte-kinded type would be base64-encoded by encoding/json).
+type jsonRaw = json.RawMessage
 
 type codexTotals struct {
 	RuntimeSeconds int64

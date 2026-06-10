@@ -125,3 +125,43 @@ func TestDebugConfigSnapshotIncludesPublishVerificationControls(t *testing.T) {
 	assert.NotContains(t, got.PublishVerificationGates[0].Name, "secret-value")
 	assert.NotContains(t, got.PublishVerificationGates[0].Command, "super-secret")
 }
+
+func TestDebugServer_RateLimitsRoundTripAsJSONObject(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	server, err := StartDebugServer(ctx, DebugConfig{
+		Enabled: true,
+		Address: "127.0.0.1:0",
+	}, staticDebugSnapshotter{snapshot: DebugSnapshot{
+		Now:   time.Now().UTC(),
+		Codex: debugCodexSnapshot(codexTotals{}, jsonRaw(`{"primary":{"used_percent":42}}`)),
+	}}, nil)
+	require.NoError(t, err)
+
+	defer func() {
+		require.NoError(t, server.Close())
+	}()
+
+	statusResp, err := http.Get("http://" + server.Address() + "/debug/status") //nolint:noctx // Test client is bounded by server shutdown.
+	require.NoError(t, err)
+
+	defer func() {
+		require.NoError(t, statusResp.Body.Close())
+	}()
+
+	require.Equal(t, http.StatusOK, statusResp.StatusCode)
+
+	var status struct {
+		Codex struct {
+			RateLimits any `json:"rate_limits"`
+		} `json:"codex"`
+	}
+	require.NoError(t, json.NewDecoder(statusResp.Body).Decode(&status))
+
+	limits, ok := status.Codex.RateLimits.(map[string]any)
+	require.True(t, ok, "rate_limits must decode as a JSON object, got %T (%v)", status.Codex.RateLimits, status.Codex.RateLimits)
+	assert.Equal(t, map[string]any{"primary": map[string]any{"used_percent": float64(42)}}, limits)
+}
