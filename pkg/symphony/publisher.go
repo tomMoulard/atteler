@@ -723,6 +723,11 @@ func (p *githubPublisher) setRemote(ctx context.Context, dir string) error {
 	return err
 }
 
+// errPullRequestBranchUpdateSkipped marks a branch update that was deliberately
+// not performed to protect local work in the workspace. The orchestrator
+// reschedules the next check instead of dispatching rework for it.
+var errPullRequestBranchUpdateSkipped = errors.New("publish: pull request branch update skipped")
+
 func (p *githubPublisher) updatePullRequestBranch(ctx context.Context, dir, branch string) (string, error) {
 	branch = strings.TrimSpace(branch)
 	base := strings.TrimSpace(p.cfg.Publish.BaseBranch)
@@ -747,16 +752,31 @@ func (p *githubPublisher) updatePullRequestBranch(ctx context.Context, dir, bran
 		return "", err
 	}
 
-	if _, err := p.git(ctx, dir, nil, "checkout", "-B", branch, branchRemote); err != nil {
-		return "", fmt.Errorf("publish: checkout pull request branch %s: %w", branch, err)
-	}
-
+	// Both safety checks must run before `checkout -B`, which force-resets the
+	// local branch to the remote ref and would silently discard local work.
 	dirty, err := p.hasChanges(ctx, dir)
 	if err != nil {
 		return "", err
 	}
 	if dirty {
 		return "", errors.New("publish: workspace has uncommitted changes before branch update")
+	}
+
+	unpushed, err := p.hasUnpushedCommits(ctx, dir, branch, branchRemote)
+	if err != nil {
+		return "", err
+	}
+	if unpushed {
+		p.logger.Warn(
+			"symphony pull request branch update skipped; local branch has commits not pushed to the remote",
+			"branch", branch,
+			"remote_ref", branchRemote,
+		)
+		return "", fmt.Errorf("branch %s has local commits not on %s: %w", branch, branchRemote, errPullRequestBranchUpdateSkipped)
+	}
+
+	if _, checkoutErr := p.git(ctx, dir, nil, "checkout", "-B", branch, branchRemote); checkoutErr != nil {
+		return "", fmt.Errorf("publish: checkout pull request branch %s: %w", branch, checkoutErr)
 	}
 
 	if _, rebaseErr := p.git(ctx, dir, nil, "rebase", baseRemote); rebaseErr != nil {
@@ -779,6 +799,23 @@ func (p *githubPublisher) updatePullRequestBranch(ctx context.Context, dir, bran
 	}
 
 	return commitSHA, nil
+}
+
+// hasUnpushedCommits reports whether the local branch carries commits that are
+// not on its remote counterpart, e.g. a worker committed but failed to push.
+func (p *githubPublisher) hasUnpushedCommits(ctx context.Context, dir, branch, branchRemote string) (bool, error) {
+	if _, err := p.git(ctx, dir, nil, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err != nil {
+		// rev-parse --verify exits non-zero when the local branch does not
+		// exist yet, in which case checkout -B cannot discard local commits.
+		return false, nil //nolint:nilerr // a missing local branch means there is nothing to protect
+	}
+
+	output, err := p.git(ctx, dir, nil, "rev-list", branchRemote+".."+branch)
+	if err != nil {
+		return false, err
+	}
+
+	return strings.TrimSpace(string(output)) != "", nil
 }
 
 func (p *githubPublisher) preparePullRequestReworkWorkspace(ctx context.Context, dir, branch string) error {

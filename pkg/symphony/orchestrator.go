@@ -3,6 +3,7 @@ package symphony
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -1059,6 +1060,19 @@ func (o *Orchestrator) handlePullRequestBranchUpdate(ctx context.Context, snapsh
 		return
 	}
 
+	// Never touch the per-issue workspace while a worker for the same issue is
+	// running: UpdatePullRequestBranch resets the branch in the directory the
+	// worker's Codex process is editing. Mirrors handleFailedPullRequestChecks.
+	if _, running := o.state.Running[monitor.Issue.ID]; running {
+		o.reschedulePullRequestCheck(monitor, snapshot.Config.Publish.CheckInterval, "issue worker is running; branch update deferred")
+		o.recordIssueEvent(
+			"pr_branch_update_deferred", monitor.Issue, "pull request branch update deferred; a worker is still running for this issue",
+			"pull_request_number", monitor.Number,
+			"branch", branch,
+		)
+		return
+	}
+
 	if monitor.PendingRework != nil && monitor.PendingReworkKey == pullRequestPendingReworkKey(checks) {
 		o.recordIssueEvent(
 			"pr_branch_update_rework_pending", monitor.Issue, "pull request branch update already failed; waiting for rework capacity",
@@ -1091,6 +1105,27 @@ func (o *Orchestrator) handlePullRequestBranchUpdate(ctx context.Context, snapsh
 	)
 
 	commitSHA, err := update(ctx, snapshot.Config, monitor.Issue, branch, o.logger)
+	if errors.Is(err, errPullRequestBranchUpdateSkipped) {
+		// The publisher refused to reset a branch carrying local work (e.g.
+		// committed-but-unpushed worker commits). Do not dispatch rework —
+		// rework preparation would reset the branch too. Check again later.
+		o.reschedulePullRequestCheck(monitor, snapshot.Config.Publish.CheckInterval, err.Error())
+		o.recordIssueEvent(
+			"pr_branch_update_skipped", monitor.Issue, "pull request branch update skipped to preserve local work",
+			"pull_request_number", monitor.Number,
+			"branch", branch,
+			"reason", err.Error(),
+		)
+		o.logger.Info(
+			"symphony pull request branch update skipped to preserve local work",
+			"issue_id", monitor.Issue.ID,
+			"issue_identifier", monitor.Issue.Identifier,
+			"pull_request_number", monitor.Number,
+			"branch", branch,
+			"reason", err.Error(),
+		)
+		return
+	}
 	if err != nil {
 		failed := checks
 		failed.State = PullRequestChecksFailed

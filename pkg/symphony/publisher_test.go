@@ -7,6 +7,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1753,6 +1757,10 @@ func TestGitHubPublisher_RebasesAndForcePushesPullRequestBranch(t *testing.T) {
 			return nil, nil
 		case gitStatusPorcelain:
 			return nil, nil
+		case "rev-parse --verify --quiet refs/heads/symphony/GH-12":
+			return []byte("def456\n"), nil
+		case "rev-list origin/symphony/GH-12..symphony/GH-12":
+			return nil, nil
 		case "rebase origin/main":
 			return nil, nil
 		case gitRevParseHead:
@@ -1792,6 +1800,12 @@ func TestGitHubPublisher_RebasesAndForcePushesPullRequestBranch(t *testing.T) {
 	assert.Equal(t, "def456", commitSHA)
 	assert.Contains(t, commands, "rebase origin/main")
 	assert.Contains(t, commands, "push --force-with-lease origin symphony/GH-12")
+	assert.Less(
+		t,
+		slices.Index(commands, gitStatusPorcelain),
+		slices.Index(commands, "checkout -B symphony/GH-12 origin/symphony/GH-12"),
+		"dirty-workspace check must run before the destructive checkout -B",
+	)
 	assert.Contains(t, fetchEnv, "GIT_TERMINAL_PROMPT=0")
 	assert.Contains(t, fetchEnv, "GITHUB_TOKEN=token")
 	assert.Contains(t, pushEnv, "GIT_TERMINAL_PROMPT=0")
@@ -1974,6 +1988,137 @@ func TestGitHubPublisher_SkipsCleanWorkspaceWithExistingPullRequest(t *testing.T
 	assert.Equal(t, "workspace has no changes to publish", result.SkippedReason)
 	assert.Nil(t, result.Verification)
 	assert.NotContains(t, commands, gitPushBranch)
+}
+
+func TestGitHubPublisher_BranchUpdateSkipsAndPreservesUnpushedCommits(t *testing.T) {
+	t.Parallel()
+
+	workDir, remoteDir := initBranchUpdateGitRepos(t)
+
+	writeTestFile(t, filepath.Join(workDir, "unpushed.txt"), "committed but not pushed\n")
+	runTestGit(t, workDir, "add", "-A")
+	runTestGit(t, workDir, "commit", "-m", "worker commit that failed to push")
+	unpushedSHA := runTestGit(t, workDir, "rev-parse", "refs/heads/symphony/GH-12")
+
+	publisher := newBranchUpdateTestPublisher(t, remoteDir)
+
+	_, err := publisher.updatePullRequestBranch(t.Context(), workDir, "symphony/GH-12")
+	require.ErrorIs(t, err, errPullRequestBranchUpdateSkipped)
+
+	assert.Equal(
+		t,
+		unpushedSHA,
+		runTestGit(t, workDir, "rev-parse", "refs/heads/symphony/GH-12"),
+		"committed-but-unpushed worker commit must survive a skipped branch update",
+	)
+	assert.FileExists(t, filepath.Join(workDir, "unpushed.txt"))
+}
+
+func TestGitHubPublisher_BranchUpdateRefusesDirtyWorkspaceBeforeResetting(t *testing.T) {
+	t.Parallel()
+
+	workDir, remoteDir := initBranchUpdateGitRepos(t)
+
+	writeTestFile(t, filepath.Join(workDir, "unpushed.txt"), "committed but not pushed\n")
+	runTestGit(t, workDir, "add", "-A")
+	runTestGit(t, workDir, "commit", "-m", "worker commit that failed to push")
+	unpushedSHA := runTestGit(t, workDir, "rev-parse", "refs/heads/symphony/GH-12")
+
+	// An untracked file makes the workspace dirty without blocking checkout -B,
+	// so a reset performed before the guard would still "succeed" silently.
+	writeTestFile(t, filepath.Join(workDir, "dirty.txt"), "uncommitted worker edit\n")
+
+	publisher := newBranchUpdateTestPublisher(t, remoteDir)
+
+	_, err := publisher.updatePullRequestBranch(t.Context(), workDir, "symphony/GH-12")
+	require.ErrorContains(t, err, "uncommitted changes")
+
+	assert.Equal(
+		t,
+		unpushedSHA,
+		runTestGit(t, workDir, "rev-parse", "refs/heads/symphony/GH-12"),
+		"dirty-workspace refusal must happen before the branch is reset",
+	)
+	assert.FileExists(t, filepath.Join(workDir, "dirty.txt"))
+}
+
+// initBranchUpdateGitRepos creates a bare "origin" repository plus a workspace
+// clone with main and symphony/GH-12 pushed, mirroring a worker workspace.
+func initBranchUpdateGitRepos(t *testing.T) (workDir, remoteDir string) {
+	t.Helper()
+
+	remoteDir = t.TempDir()
+	runTestGit(t, remoteDir, "init", "--bare", "--initial-branch=main", ".")
+
+	workDir = t.TempDir()
+	runTestGit(t, workDir, "init", "--initial-branch=main", ".")
+	runTestGit(t, workDir, "config", "user.name", "Symphony Test")
+	runTestGit(t, workDir, "config", "user.email", "symphony-test@example.com")
+	runTestGit(t, workDir, "remote", "add", "origin", remoteDir)
+
+	writeTestFile(t, filepath.Join(workDir, "main.txt"), "base\n")
+	runTestGit(t, workDir, "add", "-A")
+	runTestGit(t, workDir, "commit", "-m", "base commit")
+	runTestGit(t, workDir, "push", "origin", "main")
+
+	runTestGit(t, workDir, "checkout", "-b", "symphony/GH-12")
+	writeTestFile(t, filepath.Join(workDir, "feature.txt"), "feature\n")
+	runTestGit(t, workDir, "add", "-A")
+	runTestGit(t, workDir, "commit", "-m", "feature commit")
+	runTestGit(t, workDir, "push", "origin", "symphony/GH-12")
+
+	return workDir, remoteDir
+}
+
+func newBranchUpdateTestPublisher(t *testing.T, remoteDir string) *githubPublisher {
+	t.Helper()
+
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind:   trackerKindGitHub,
+			APIKey: "token",
+			Owner:  "owner",
+			Repo:   "repo",
+		},
+		Publish: PublishConfig{
+			Remote:     "origin",
+			RemoteURL:  remoteDir,
+			BaseBranch: "main",
+		},
+	}
+
+	return &githubPublisher{
+		cfg:    cfg,
+		client: NewGitHubClient(cfg.Tracker),
+		runGit: defaultGitCommandRunner,
+		logger: loggerOrDefault(nil),
+		audit: shell.AuditContext{
+			Caller:   "symphony.git",
+			AuditDir: t.TempDir(),
+		},
+	}
+}
+
+func runTestGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %s: %s", strings.Join(args, " "), output)
+
+	return strings.TrimSpace(string(output))
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 }
 
 func writeTestResponse(t *testing.T, w http.ResponseWriter, body string) {
