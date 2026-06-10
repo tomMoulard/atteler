@@ -22,7 +22,8 @@ Keep reusable logic in `pkg/`; keep command wiring and terminal UI concerns in `
 - `make all`: run generation, linting, tests, and build in sequence.
 - `make clean`: remove the local `atteler` binary.
 
-Use `make test TESTPACKAGE="./pkg/llm"` for a faster package-level feedback loop while editing LLM code.
+Use `make test TESTPACKAGE=./pkg/llm` for a faster package-level feedback loop while editing LLM code.
+Use `make test TESTFLAGS='-run TestName -count=1' TESTPACKAGE=./pkg/llm` to forward specific `go test` flags.
 
 ## Coding Style & Naming Conventions
 

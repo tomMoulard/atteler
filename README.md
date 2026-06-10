@@ -44,6 +44,8 @@ Useful local verification commands:
 
 ```sh
 make test
+make test TESTPACKAGE=./pkg/llm
+make test TESTFLAGS='-run TestName -count=1' TESTPACKAGE=./pkg/llm
 make lint
 make build
 ```
@@ -1679,7 +1681,9 @@ endpoints should be tracked as GitHub Issues until code and tests exist.
 Local development uses the Makefile as the main build surface:
 
 - `make build` compiles `./atteler` from `./cmd/atteler`.
-- `make test` runs all Go tests with the race detector.
+- `make test` runs all Go tests with the race detector and `-count=1`; override
+  `TESTPACKAGE` and `TESTFLAGS` for focused runs, for example
+  `make test TESTFLAGS='-run TestName -count=1' TESTPACKAGE=./pkg/llm`.
 - `make e2e` runs black-box CLI tests against a freshly built binary.
 - `make lint` runs the pinned golangci-lint version.
 - `make release-check` validates `.goreleaser.yaml`.

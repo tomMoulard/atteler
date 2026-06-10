@@ -30,20 +30,20 @@ run:
 run-symphony:
 	go run $(SYMPHONY_PKG)
 
-TESTFLAGS ?= ""
-TESTPACKAGE ?= "./..."
+TESTFLAGS ?=
+TESTPACKAGE ?= ./...
 
-## test: run all tests
+## test: run Go tests; override TESTPACKAGE/TESTFLAGS for focused runs
 test:
-	go test -race ./...
+	go test -race -count=1 $(value TESTFLAGS) $(TESTPACKAGE)
 
 ## e2e: run black-box CLI end-to-end tests
 e2e:
-	go test -count=1 ./test/e2e
+	go test -count=1 $(value TESTFLAGS) ./test/e2e
 
 ## e2e-live: run opt-in live LLM CLI tests (requires ATTELER_E2E_LIVE=1 and provider API keys)
 e2e-live:
-	ATTELER_E2E_LIVE=1 go test -count=1 -run TestLive -timeout=10m ./test/e2e
+	ATTELER_E2E_LIVE=1 go test -count=1 -run TestLive -timeout=10m $(value TESTFLAGS) ./test/e2e
 
 ## lint: run golangci-lint
 lint:
