@@ -12,12 +12,18 @@ import (
 	"time"
 )
 
+// workspaceRemover abstracts workspace deletion so tests can observe when the
+// orchestrator removes a per-issue workspace.
+type workspaceRemover interface {
+	Remove(ctx context.Context, cfg Config, issue Issue) error
+}
+
 // Orchestrator owns Symphony scheduling state and state transitions.
 type Orchestrator struct {
 	manager                 *WorkflowManager
 	tracker                 TrackerClient
 	runner                  AgentRunner
-	workspaces              *WorkspaceManager
+	workspaces              workspaceRemover
 	logger                  *slog.Logger
 	events                  chan orchestratorEvent
 	state                   runtimeState
@@ -28,20 +34,21 @@ type Orchestrator struct {
 type pullRequestBranchUpdater func(context.Context, Config, Issue, string, *slog.Logger) (string, error)
 
 type runtimeState struct {
-	Running               map[string]*runningEntry
-	Claimed               map[string]struct{}
-	RetryAttempts         map[string]*RetryEntry
-	PullRequests          map[int]*pullRequestMonitorEntry
-	Completed             map[string]struct{}
-	CompletedPullRequests map[int]struct{}
-	CodexRateLimits       jsonRaw
-	RecentEvents          []DebugEvent
-	StartedAt             time.Time
-	LastTickAt            time.Time
-	NextTickAt            time.Time
-	PollInterval          time.Duration
-	MaxConcurrentAgents   int
-	CodexTotals           codexTotals
+	Running                  map[string]*runningEntry
+	Claimed                  map[string]struct{}
+	RetryAttempts            map[string]*RetryEntry
+	PullRequests             map[int]*pullRequestMonitorEntry
+	Completed                map[string]struct{}
+	CompletedPullRequests    map[int]struct{}
+	PendingWorkspaceRemovals map[string]pendingWorkspaceRemoval
+	CodexRateLimits          jsonRaw
+	RecentEvents             []DebugEvent
+	StartedAt                time.Time
+	LastTickAt               time.Time
+	NextTickAt               time.Time
+	PollInterval             time.Duration
+	MaxConcurrentAgents      int
+	CodexTotals              codexTotals
 }
 
 type jsonRaw []byte
@@ -100,6 +107,15 @@ type pullRequestMonitorEntry struct {
 	Number           int
 	InRework         bool
 	Exhausted        bool
+}
+
+// pendingWorkspaceRemoval defers deleting a canceled worker's workspace until
+// its workerExitEvent arrives. Cancellation is asynchronous, so removing the
+// directory at cancel time would race live codex/git writes and could leave a
+// half-deleted workspace that poisons every future dispatch for the issue.
+type pendingWorkspaceRemoval struct {
+	Issue  Issue
+	Config Config
 }
 
 type cancelReason string
@@ -164,15 +180,16 @@ func NewOrchestrator(manager *WorkflowManager, tracker TrackerClient, runner Age
 		events:                  make(chan orchestratorEvent, 128),
 		updatePullRequestBranch: UpdatePullRequestBranch,
 		state: runtimeState{
-			Running:               map[string]*runningEntry{},
-			Claimed:               map[string]struct{}{},
-			RetryAttempts:         map[string]*RetryEntry{},
-			PullRequests:          map[int]*pullRequestMonitorEntry{},
-			Completed:             map[string]struct{}{},
-			CompletedPullRequests: map[int]struct{}{},
-			StartedAt:             time.Now().UTC(),
-			PollInterval:          snapshot.Config.Polling.Interval,
-			MaxConcurrentAgents:   snapshot.Config.Agent.MaxConcurrentAgents,
+			Running:                  map[string]*runningEntry{},
+			Claimed:                  map[string]struct{}{},
+			RetryAttempts:            map[string]*RetryEntry{},
+			PullRequests:             map[int]*pullRequestMonitorEntry{},
+			Completed:                map[string]struct{}{},
+			CompletedPullRequests:    map[int]struct{}{},
+			PendingWorkspaceRemovals: map[string]pendingWorkspaceRemoval{},
+			StartedAt:                time.Now().UTC(),
+			PollInterval:             snapshot.Config.Polling.Interval,
+			MaxConcurrentAgents:      snapshot.Config.Agent.MaxConcurrentAgents,
 		},
 	}, nil
 }
@@ -195,7 +212,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			o.recordEvent("shutdown", "context canceled; shutting down workers")
-			o.shutdown()
+			o.shutdown(ctx)
 			return nil
 		case <-timer.C:
 			now := time.Now().UTC()
@@ -338,14 +355,11 @@ func (o *Orchestrator) reconcile(ctx context.Context, cfg Config) {
 		case isTerminalState(issue.State, cfg):
 			entry.CancelReason = cancelTerminal
 			entry.Cancel()
-			if err := o.workspaces.Remove(ctx, cfg, issue); err != nil {
-				o.logger.Warn(
-					"symphony terminal workspace cleanup failed",
-					"issue_id", issue.ID,
-					"issue_identifier", issue.Identifier,
-					"error", err,
-				)
-			}
+			// Cancellation is asynchronous: the worker goroutine and its
+			// Codex subprocess are still running until workerExitEvent is
+			// processed, so removing the workspace now would race live
+			// writes. Defer the removal to handleWorkerExit.
+			o.deferWorkspaceRemoval(cfg, issue)
 		case isActiveState(issue.State, cfg):
 			continue
 		default:
@@ -548,7 +562,7 @@ func (o *Orchestrator) handleEvent(ctx context.Context, event orchestratorEvent)
 	case codexUpdateEvent:
 		o.handleCodexUpdate(typed)
 	case workerExitEvent:
-		o.handleWorkerExit(typed)
+		o.handleWorkerExit(ctx, typed)
 	case retryDueEvent:
 		o.handleRetryDue(ctx, typed.issueID)
 	case pullRequestCheckDueEvent:
@@ -708,13 +722,51 @@ func commandOutputPreview(value string) string {
 	return value[:1000] + "..."
 }
 
-func (o *Orchestrator) handleWorkerExit(event workerExitEvent) {
-	entry, ok := o.state.Running[event.issueID]
+// deferWorkspaceRemoval records that the issue workspace must be deleted once
+// the worker for the issue has actually exited.
+func (o *Orchestrator) deferWorkspaceRemoval(cfg Config, issue Issue) {
+	if o.state.PendingWorkspaceRemovals == nil {
+		o.state.PendingWorkspaceRemovals = map[string]pendingWorkspaceRemoval{}
+	}
+
+	o.state.PendingWorkspaceRemovals[issue.ID] = pendingWorkspaceRemoval{Issue: issue, Config: cfg}
+	o.logger.Info(
+		"symphony terminal workspace removal deferred until the worker exits",
+		"issue_id", issue.ID,
+		"issue_identifier", issue.Identifier,
+	)
+}
+
+// completePendingWorkspaceRemoval deletes the workspace of an issue whose
+// removal was deferred while its worker was still running.
+func (o *Orchestrator) completePendingWorkspaceRemoval(ctx context.Context, issueID string) {
+	pending, ok := o.state.PendingWorkspaceRemovals[issueID]
 	if !ok {
 		return
 	}
 
+	delete(o.state.PendingWorkspaceRemovals, issueID)
+	if err := o.workspaces.Remove(ctx, pending.Config, pending.Issue); err != nil {
+		o.logger.Warn(
+			"symphony terminal workspace cleanup failed",
+			"issue_id", pending.Issue.ID,
+			"issue_identifier", pending.Issue.Identifier,
+			"error", err,
+		)
+	}
+}
+
+func (o *Orchestrator) handleWorkerExit(ctx context.Context, event workerExitEvent) {
+	entry, ok := o.state.Running[event.issueID]
+	if !ok {
+		// The issue may have been dropped from Running already; a deferred
+		// workspace removal still becomes safe once its worker has exited.
+		o.completePendingWorkspaceRemoval(ctx, event.issueID)
+		return
+	}
+
 	delete(o.state.Running, event.issueID)
+	o.completePendingWorkspaceRemoval(ctx, event.issueID)
 	o.state.CodexTotals.RuntimeSeconds += int64(time.Since(entry.StartedAt).Seconds())
 	if entry.PullRequest != nil {
 		o.markPullRequestReworkFinished(entry.PullRequest.Number)
@@ -1456,7 +1508,7 @@ func (o *Orchestrator) hasStateSlot(state string, cfg Config) bool {
 	return count < limit
 }
 
-func (o *Orchestrator) shutdown() {
+func (o *Orchestrator) shutdown(ctx context.Context) {
 	for _, retry := range o.state.RetryAttempts {
 		if retry.Timer != nil {
 			retry.Timer.Stop()
@@ -1475,6 +1527,12 @@ func (o *Orchestrator) shutdown() {
 	}
 
 	o.wg.Wait()
+
+	// Queued worker exit events will never be processed after shutdown, but
+	// every worker has exited by now, so deferred removals are safe to run.
+	for issueID := range o.state.PendingWorkspaceRemovals {
+		o.completePendingWorkspaceRemoval(ctx, issueID)
+	}
 }
 
 func sortIssuesForDispatch(issues []Issue) {

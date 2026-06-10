@@ -74,6 +74,24 @@ func (t *policyCheckTracker) FetchPullRequestChecksWithPolicy(_ context.Context,
 	return t.checks, nil
 }
 
+type terminalStatesTracker struct {
+	noopTracker
+	issues []Issue
+}
+
+func (t terminalStatesTracker) FetchIssueStatesByIDs(context.Context, []string) ([]Issue, error) {
+	return t.issues, nil
+}
+
+type fakeWorkspaceRemover struct {
+	removed []Issue
+}
+
+func (f *fakeWorkspaceRemover) Remove(_ context.Context, _ Config, issue Issue) error {
+	f.removed = append(f.removed, issue)
+	return nil
+}
+
 type captureRunner struct {
 	requests chan RunRequest
 }
@@ -129,7 +147,7 @@ func TestHandleWorkerExit_PublishedPRSchedulesMonitorAndReleasesClaim(t *testing
 		},
 	}
 
-	orchestrator.handleWorkerExit(workerExitEvent{
+	orchestrator.handleWorkerExit(t.Context(), workerExitEvent{
 		issueID: issue.ID,
 		result: RunResult{
 			Status: AttemptSucceeded,
@@ -906,7 +924,7 @@ func TestHandleWorkerExit_CanceledPullRequestReworkSchedulesFinalCheck(t *testin
 		},
 	}
 
-	orchestrator.handleWorkerExit(workerExitEvent{issueID: issue.ID})
+	orchestrator.handleWorkerExit(t.Context(), workerExitEvent{issueID: issue.ID})
 
 	_, claimed := orchestrator.state.Claimed[issue.ID]
 	assert.False(t, claimed)
@@ -918,6 +936,95 @@ func TestHandleWorkerExit_CanceledPullRequestReworkSchedulesFinalCheck(t *testin
 	assert.False(t, monitor.NextCheckAt.IsZero())
 	require.NotNil(t, monitor.Timer)
 	monitor.Timer.Stop()
+}
+
+func TestReconcile_DefersWorkspaceRemovalUntilWorkerExit(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	terminal := issue
+	terminal.State = "DONE"
+	cfg := Config{
+		Tracker: TrackerConfig{
+			ActiveStates:   []string{"OPEN"},
+			TerminalStates: []string{"DONE"},
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 2,
+		},
+	}
+
+	workspaces := &fakeWorkspaceRemover{}
+	canceled := false
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker:    terminalStatesTracker{issues: []Issue{terminal}},
+		workspaces: workspaces,
+		logger:     slog.Default(),
+		events:     make(chan orchestratorEvent, 4),
+		state: runtimeState{
+			Running: map[string]*runningEntry{
+				issue.ID: {
+					Issue:     issue,
+					Cancel:    func() { canceled = true },
+					StartedAt: time.Now().Add(-time.Second),
+					State:     issue.State,
+				},
+			},
+			Claimed:               map[string]struct{}{issue.ID: {}},
+			RetryAttempts:         map[string]*RetryEntry{},
+			PullRequests:          map[int]*pullRequestMonitorEntry{},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.reconcile(t.Context(), cfg)
+
+	assert.True(t, canceled, "the worker must be canceled when its issue goes terminal")
+	assert.Empty(t, workspaces.removed, "workspace must not be removed while the canceled worker is still running")
+	assert.Contains(t, orchestrator.state.PendingWorkspaceRemovals, issue.ID)
+	assert.Equal(t, cancelTerminal, orchestrator.state.Running[issue.ID].CancelReason)
+
+	orchestrator.handleWorkerExit(t.Context(), workerExitEvent{issueID: issue.ID})
+
+	require.Len(t, workspaces.removed, 1)
+	assert.Equal(t, terminal.ID, workspaces.removed[0].ID)
+	assert.Empty(t, orchestrator.state.PendingWorkspaceRemovals)
+	assert.NotContains(t, orchestrator.state.Running, issue.ID)
+}
+
+func TestHandleWorkerExit_CompletesPendingRemovalForUntrackedIssue(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "DONE"}
+	workspaces := &fakeWorkspaceRemover{}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: Config{}},
+			loaded:  true,
+		},
+		workspaces: workspaces,
+		logger:     slog.Default(),
+		events:     make(chan orchestratorEvent, 4),
+		state: runtimeState{
+			Running: map[string]*runningEntry{},
+			PendingWorkspaceRemovals: map[string]pendingWorkspaceRemoval{
+				issue.ID: {Issue: issue, Config: Config{}},
+			},
+			StartedAt: time.Now(),
+		},
+	}
+
+	orchestrator.handleWorkerExit(t.Context(), workerExitEvent{issueID: issue.ID})
+
+	require.Len(t, workspaces.removed, 1)
+	assert.Equal(t, issue.ID, workspaces.removed[0].ID)
+	assert.Empty(t, orchestrator.state.PendingWorkspaceRemovals)
 }
 
 func TestRecoverPullRequestMonitorTimersRearmsStaleMonitor(t *testing.T) {
