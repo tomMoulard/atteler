@@ -26,6 +26,7 @@ import (
 
 const (
 	defaultWorkspaceVectorLimit   = 4
+	workspaceVectorStore          = "workspace"
 	workspaceVectorReferenceScope = "workspace-vector"
 )
 
@@ -170,15 +171,18 @@ func buildWorkspaceVectorReferenceContextOnce(
 		return configuredReferenceContext{}, refresh, err
 	}
 
-	searcher := vector.IndexSearcher{
-		Index:      idx,
-		Vectorizer: opts.Vectorizer,
-		Source: retrieval.Source{
+	searcher, err := newVectorIndexRetrievalSearcher(
+		idx,
+		opts.Vectorizer,
+		retrieval.Source{
 			Type: retrieval.SourceVector,
 			Name: "workspace",
 			URI:  workspaceVectorSourceURI(opts),
 		},
-		ScorerName: settings.Vectorizer + "-workspace-ann",
+		settings.Vectorizer+"-workspace-ann",
+	)
+	if err != nil {
+		return configuredReferenceContext{}, refresh, err
 	}
 
 	results, err := retrieval.Search(ctx, retrieval.Query{
@@ -216,25 +220,31 @@ func refreshWorkspaceVectorIndex(ctx context.Context, opts vector.WorkspaceOptio
 }
 
 func workspaceVectorSettings(cwd string, cfg appconfig.VectorConfig) (vectorSearchSettings, vector.WorkspaceOptions, error) {
+	resolved := cfg.ResolveVectorizerConfig(appconfig.VectorScope{
+		Store:  workspaceVectorStore,
+		Source: vector.SourceKindFile,
+	})
+	storeConfig := scopedVectorizerConfig(cfg.Stores, workspaceVectorStore)
+
 	settings := vectorSearchSettings{
-		Vectorizer:     firstNonEmpty(cfg.Vectorizer, vector.VectorizerKindLexical),
-		Provider:       firstNonEmpty(cfg.Provider, vectorDefaultProvider),
-		Model:          firstNonEmpty(cfg.Model),
-		BaseURL:        firstNonEmpty(cfg.BaseURL),
-		FallbackPolicy: firstNonEmpty(cfg.FallbackPolicy, vectorFallbackPolicyFail),
-		IndexPath:      firstNonEmpty(cfg.WorkspaceIndexPath, vector.DefaultWorkspaceIndexPath),
+		Vectorizer:     firstNonEmpty(resolved.Vectorizer, vector.VectorizerKindLexical),
+		Provider:       firstNonEmpty(resolved.Provider, vectorDefaultProvider),
+		Model:          firstNonEmpty(resolved.Model),
+		BaseURL:        firstNonEmpty(resolved.BaseURL),
+		FallbackPolicy: firstNonEmpty(resolved.FallbackPolicy, vectorFallbackPolicyFail),
+		IndexPath:      firstNonEmpty(storeConfig.IndexPath, cfg.WorkspaceIndexPath, vector.DefaultWorkspaceIndexPath),
 		Limit:          cfg.WorkspaceLimit,
 		Chunk: vector.ChunkOptions{
-			MaxRunes:     cfg.ChunkMaxRunes,
-			OverlapRunes: cfg.ChunkOverlapRunes,
+			MaxRunes:     resolved.ChunkMaxRunes,
+			OverlapRunes: resolved.ChunkOverlapRunes,
 		},
 	}
 	if settings.Limit <= 0 {
 		settings.Limit = defaultWorkspaceVectorLimit
 	}
 
-	if cfg.TimeoutSeconds > 0 {
-		settings.Timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
+	if resolved.TimeoutSeconds > 0 {
+		settings.Timeout = time.Duration(resolved.TimeoutSeconds) * time.Second
 	}
 
 	settings.Chunk = settings.Chunk.Normalize()
@@ -376,6 +386,20 @@ func formatWorkspaceVectorReferenceContext(results []retrieval.Result, refresh v
 		b.WriteString(` model="`)
 		b.WriteString(escapeContextAttr(metadata.Model))
 		b.WriteString(`"`)
+	}
+
+	if refresh.Index != nil {
+		if createdAt := formatVectorIndexTimestamp(refresh.Index.CreatedAt); createdAt != "" {
+			b.WriteString(` created_at="`)
+			b.WriteString(escapeContextAttr(createdAt))
+			b.WriteString(`"`)
+		}
+
+		if updatedAt := formatVectorIndexTimestamp(refresh.Index.UpdatedAt); updatedAt != "" {
+			b.WriteString(` updated_at="`)
+			b.WriteString(escapeContextAttr(updatedAt))
+			b.WriteString(`"`)
+		}
 	}
 
 	b.WriteString(">\n")

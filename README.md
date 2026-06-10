@@ -1178,8 +1178,12 @@ session output.
 
 `atteler memory retrieve` prints the shared retrieval contract fields agents
 should cite before injecting context: `source`, `document`, `stable_id`,
-`chunk`, `range`, `scorer`, `inject_allowed`, freshness flags, and an optional
-`why` ranking explanation.
+`chunk`, `range`, `scorer`, `inject_allowed`, freshness flags including
+`source_updated_at`/`indexed_at` when known, and an optional `why` ranking
+explanation. With `--retrieval-explain`, numeric scorer details are also
+rendered as stable `detail_<name>=...` fields (for example
+`detail_ann_documents=65`) so agents can audit ranking mode without parsing the
+JSON internals.
 
 Memory and vector stores persist schema, source-hash, provenance, redaction
 policy version, timestamps, TTL, and embedding/vectorizer metadata where
@@ -1194,23 +1198,190 @@ short-lived content. Saved-session transcript messages and worktree paths are
 excluded from local memory by default; opt in to those metadata/session-message
 options only when needed.
 
-Vector search is explicit about retrieval quality: `--vectorizer lexical` uses
-the deterministic hashed token-frequency fallback, while `--vectorizer
-embedding` uses an Ollama-compatible embedding endpoint. The lexical fallback
-is not semantic retrieval. Search output prints the vectorizer/model that
-produced the ranking and reuses `.atteler` indexes only while source digests,
-vectorizer metadata, dimensions, and chunk settings still match.
+Vector search is explicit about retrieval quality: lexical mode uses the
+deterministic hashed token-frequency fallback, while embedding mode uses an
+Ollama-compatible embedding endpoint. The lexical fallback is not semantic
+retrieval. Search output prints the vectorizer/model and index
+`created_at`/`updated_at` metadata that produced the ranking and reuses
+`.atteler` indexes only while source digests, vectorizer metadata, dimensions,
+and chunk settings still match. Searching with new file inputs refreshes the
+file index from still-present indexed files plus the requested files,
+re-vectorizing only changed or added files and removing deleted files from
+persisted source metadata instead of keeping stale chunks. Freshness-only
+timestamp updates or removals are persisted without re-vectorizing unchanged
+text. When embedding-backed file search falls back to lexical, Atteler applies
+the same still-present-plus-requested source lifecycle to the separate
+`.lexical` index instead of narrowing the fallback corpus to only the current
+CLI inputs.
+
+Vectorizer config can be scoped so local RAG stores do not all share one
+quality/cost tradeoff. Top-level vectorizer/provider/model/base-url,
+fallback, timeout, and chunk fields are defaults; optional
+`vector.stores.<name>`, `vector.agents.<name>`, and
+`vector.sources.<kind>` entries override them in that order. Supported store
+scopes are `agent-memory`, `vector-search`, and `workspace`; supported source
+scopes are `file`, `session`, `git_history`/`git-history`, and `adr`, while
+agent scopes are the configured agent names. `atteler config validate` reports
+malformed scopes, unknown store/source/agent scope names, and unsupported
+vectorizer/provider/fallback values before an index refresh starts. It rejects
+ambiguous aliases such as configuring both `git_history` and `git-history` for
+one source scope, and also rejects one configured or built-in default
+`index_path` shared by incompatible index lifecycles. Embedding indexes that
+can write a generated `.lexical` fallback file reserve that fallback path too,
+so a workspace, file, session, git-history, ADR, or agent-memory index cannot
+silently clobber another store's fallback artifact.
+Persisted `index_path` values are intentionally store/source-specific so agent
+memory, workspace files, sessions, git history, and ADRs do not accidentally
+share one JSON datastore; relative index paths resolve under the workspace
+root. The legacy top-level `vector.index_path` remains the generic file-vector
+search store path, and `vector.sources.file.index_path` applies to explicit
+file-vector retrieval rather than the workspace-wide file crawl. Workspace
+vector context uses `vector.workspace_index_path` or
+`vector.stores.workspace.index_path`,
+while session, git-history, ADR, and per-agent memory indexes need their own
+scoped `index_path` when they should persist somewhere other than the built-in
+defaults. Valid source indexes are also guarded by
+persisted source kind, so Atteler refuses to
+refresh or clear a session index over a file/git/ADR index (and vice versa)
+rather than silently clobbering another local RAG corpus. For example,
+an embedding-backed agent-memory pipeline can use
+`vector.stores.agent-memory.vectorizer: embedding` while
+`vector.sources.git_history.vectorizer: lexical` keeps git-log indexing fully
+local. Explicit file-vector retrieval through the memory retrieval command
+resolves the same `vector.stores.vector-search` / `vector.sources.file`
+settings as `atteler memory vector-*` and saves/reuses the configured file
+index with source metadata. With workspace vectors disabled, explicit
+vector-source retrieval searches that reusable file index by default; with
+workspace vectors enabled, pass a vector store path to disambiguate a file
+index from workspace-vector retrieval. It also honors the vector runtime flags
+documented by generated help when file inputs are supplied, so ad-hoc file RAG
+does not silently fall back to lexical after an embedding-backed store is
+configured. All-source retrieval includes that default file-vector store when
+it already exists, is still reusable, and workspace vectors are disabled, and
+includes the selected agent's memory store when an agent is active; if that
+optional file-vector source, git-history source, or implicit selected-agent
+memory source becomes unavailable at query time, broad retrieval continues with
+the other selected sources. Explicit vector-source, git-history, or
+agent-memory retrieval still reports the stale or unavailable source so it can
+be rebuilt or debugged.
+
+```yaml
+vector:
+  vectorizer: lexical              # safe dependency-free default/fallback
+  fallback_policy: lexical         # fall back locally if embeddings fail
+  stores:
+    agent-memory:
+      vectorizer: embedding
+      model: nomic-embed-text
+      base_url: http://127.0.0.1:11434
+  agents:
+    reviewer:
+      model: reviewer-memory-embed # same store, agent-specific model
+      index_path: .atteler/reviewer-memory.json
+  sources:
+    session:
+      vectorizer: embedding
+      index_path: .atteler/session-vector-index.json
+    git_history:
+      vectorizer: lexical          # avoid embedding private commit logs
+      index_path: .atteler/git-history-vector-index.json
+    adr:
+      vectorizer: embedding
+      index_path: .atteler/adr-vector-index.json
+```
+
+`pkg/agentmemory.NewStoreWithVectorizer` and `SetVectorizer` support
+embedding-backed per-agent memory stores; loaded embedding stores require the
+same runtime vectorizer identity to be supplied again before add/search/re-embed.
+For embedding-backed stores, that identity includes provider, model, dimensions,
+normalization/version, and the redacted embedding `base_url`, so changing an
+Ollama-compatible endpoint fails closed until the store is intentionally
+re-embedded.
+`atteler memory agent-*` and the agent-memory retrieval source now resolve the
+same scoped config, defaulting to lexical but binding the configured embedding
+vectorizer for new or already-embedding stores. Use `memory agent-migrate`
+after enabling an embedding vectorizer to re-embed an existing lexical
+per-agent store intentionally instead of silently mixing vector models. One
+persisted agent-memory JSON store is pinned to one vectorizer; give agents
+distinct `index_path` values when they intentionally use different embedding
+models or endpoints. `atteler config validate` rejects configured agents that
+would share an agent-memory index path while resolving different vectorizer
+identities. Non-loopback agent-memory embedding endpoints also require
+`vector.workspace_allow_remote_embeddings: true`. Source kinds persisted by
+the vector index include `file`, `session`, `git_history`, and `adr`; source
+digests, source kind, vectorizer
+metadata, source `updated_at` timestamps, chunk settings,
+`created_at`/`updated_at`, provenance, and privacy-policy metadata are part
+of the reuse/invalidation contract. Vector
+indexes, vector stores, and agent-memory stores are written through
+same-directory temp files and atomic rename so an interrupted refresh does not
+leave a partially written JSON store at the configured path.
+Configured `vector.sources.session`, `vector.sources.git_history`, and
+`vector.sources.adr` entries are used by the session, git-history, and ADR
+retrieval source modes. Explicit source config builds persisted source indexes
+such as `.atteler/session-vector-index.json`,
+`.atteler/git-history-vector-index.json`, and
+`.atteler/adr-vector-index.json` with the selected vectorizer. Embedding-backed
+source indexes provide the best semantic recall; explicit lexical source
+indexes are persisted local fallback quality. Setting top-level
+`vector.vectorizer` (including `lexical`) opts session and git-history source
+modes into those persisted indexes; leaving the vectorizer unset keeps the
+existing dependency-free searchers for unconfigured session or git modes.
+Changed sessions, commits, or ADR files are re-vectorized, deleted
+source records are removed from the persisted vector index, and
+`vector.fallback_policy: lexical` writes a separate `.lexical` source index so
+fallback rankings stay local without mixing lexical vectors into an embedding
+index. The same incremental lifecycle is available to background callers
+through `vector.RefreshSourceIndexAsync`; workspace file sync uses
+`vector.RefreshWorkspaceIndexAsync`.
 
 Workspace vector context is opt-in with `vector.workspace_enabled: true`. When
-enabled, Atteler builds or refreshes a per-workspace ANN datastore at
-`.atteler/workspace-vector-index.json`, respects `.gitignore`,
+enabled, Atteler builds or refreshes a per-workspace persisted vector datastore
+at `.atteler/workspace-vector-index.json`, derives ANN buckets in memory for
+search, respects `.gitignore`,
 `.attelerignore`, and `vector.workspace_exclude`, and skips binary, large,
 cache, dependency, generated, and secret-looking files by default. The default
 workspace vectorizer is local lexical hashing; setting `vector.vectorizer:
 embedding` sends indexed chunks to `vector.base_url`. Non-loopback embedding
 endpoints require `vector.workspace_allow_remote_embeddings: true`; with
 `vector.fallback_policy: lexical`, Atteler stays local and uses the lexical
-workspace index instead of uploading chunks without consent.
+workspace index instead of uploading chunks without consent. The same remote
+embedding consent gate applies to explicit file, session, git-history, and ADR
+vector indexes, plus embedding-backed agent-memory stores.
+
+The local ANN layer still exact-scans small corpora by design. The default
+threshold is 64 documents (`vector.DefaultANNExactSearchMaxDocuments`); above
+that, limited searches use ANN candidates unless callers raise
+`ANNOptions.MinCandidates`. Runtime code can call
+`ANNOptions.UsesExactSearch(documentCount, limit)` to make the same
+brute-force-vs-ANN decision explicit. Track scale with:
+
+```sh
+go test ./pkg/vector -bench BenchmarkSearchScale -benchmem
+go test ./pkg/vector -bench BenchmarkIndexANNLifecycle -benchmem
+```
+
+Benchmark subcases are named `bruteforce`, `ann-exact`, and `ann-approx` so
+regressions show whether a corpus is still on the exact-scan side of the
+threshold or has crossed into approximate candidate search. Direct vector
+search output prints `ann_exact_scan`, `ann_documents`, and
+`ann_min_candidates` in the ranking header; retrieval explain output records
+the same ANN mode and candidate count in scorer details and the text fields
+`detail_ann_exact_scan`, `detail_ann_documents`, and
+`detail_ann_min_candidates`, so agents can distinguish exact small-corpus
+rankings from approximate large-index rankings. `BenchmarkIndexANNLifecycle`
+contrasts transient `Index.SearchANN` calls with a prebuilt `ANNIndex`, making
+the lifecycle cost visible when wiring long-lived retrieval adapters.
+
+Search-quality smoke coverage lives in
+`pkg/vector/testdata/retrieval_quality.json`; it guards fallback ranking on a
+small checked-in corpus, not broad semantic quality. Use brute-force search for
+tiny stores where exact ranking is cheaper and more predictable. The CLI vector
+search and retrieval adapters use the local ANN
+layer for persisted vector indexes; small indexes still exact-scan through the
+threshold above, while larger workspace/session/git-history corpora use
+candidate buckets. Retrieval adapters prebuild the derived ANN buckets once per
+refreshed index instead of rebuilding them for each query.
 
 Code-intelligence commands accept `--json` (or `--output json`) to emit the
 stable `atteler.code_intel.v1` schema; text output is rendered from the same
@@ -1485,7 +1656,7 @@ linked from the row.
 | Skill synthesis into reviewable `SKILL.md` directories with trigger eval fixtures | [`pkg/skill/suggestion.go`](pkg/skill/suggestion.go), [`pkg/skill/persist.go`](pkg/skill/persist.go), [`pkg/skill/trigger.go`](pkg/skill/trigger.go), [`pkg/skill/suggestion_test.go`](pkg/skill/suggestion_test.go), [`test/e2e/cli_test.go`](test/e2e/cli_test.go) |
 | Automatic recurring-workflow skill learning with redacted observations, generated-skill revisions, relevant future context injection, and management/opt-out controls | [`pkg/skill/learning.go`](pkg/skill/learning.go), [`pkg/skill/learning_test.go`](pkg/skill/learning_test.go), [`pkg/events/events.go`](pkg/events/events.go), [`cmd/atteler/skill_learning_setup.go`](cmd/atteler/skill_learning_setup.go), [`cmd/atteler/cli_skill_learning_commands.go`](cmd/atteler/cli_skill_learning_commands.go), [`cmd/atteler/cli_skill_learning_commands_test.go`](cmd/atteler/cli_skill_learning_commands_test.go) |
 | Speculative and review-agent planning/execution with durable audit artifacts | [`pkg/speculate/speculate.go`](pkg/speculate/speculate.go), [`pkg/speculate/speculate_test.go`](pkg/speculate/speculate_test.go), [`pkg/review/review.go`](pkg/review/review.go), [`pkg/review/review_test.go`](pkg/review/review_test.go), [`pkg/review/llm.go`](pkg/review/llm.go), [`pkg/review/llm_test.go`](pkg/review/llm_test.go), [`cmd/atteler/cli_speculate_watch_history_commands.go`](cmd/atteler/cli_speculate_watch_history_commands.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go), [`cmd/atteler/multi_agent_run_commands.go`](cmd/atteler/multi_agent_run_commands.go), [`cmd/atteler/multi_agent_run_commands_test.go`](cmd/atteler/multi_agent_run_commands_test.go) |
-| Memory/retrieval, unified retrieval contract, per-agent memory, local lexical/embedding vector search, workspace ANN vector context, git-history search, multi-language incremental code intelligence, import graphs, structured code-intel CLI output, and optional managed LSP lookups | [`pkg/retrieval/types.go`](pkg/retrieval/types.go), [`pkg/retrieval/search.go`](pkg/retrieval/search.go), [`pkg/retrieval/retrieval_test.go`](pkg/retrieval/retrieval_test.go), [`pkg/memory/memory.go`](pkg/memory/memory.go), [`pkg/memory/memory_test.go`](pkg/memory/memory_test.go), [`pkg/agentmemory/agentmemory.go`](pkg/agentmemory/agentmemory.go), [`pkg/agentmemory/agentmemory_test.go`](pkg/agentmemory/agentmemory_test.go), [`pkg/vector/vector.go`](pkg/vector/vector.go), [`pkg/vector/vector_test.go`](pkg/vector/vector_test.go), [`pkg/vector/index.go`](pkg/vector/index.go), [`pkg/vector/index_test.go`](pkg/vector/index_test.go), [`pkg/vector/ann.go`](pkg/vector/ann.go), [`pkg/vector/ann_test.go`](pkg/vector/ann_test.go), [`pkg/vector/workspace.go`](pkg/vector/workspace.go), [`pkg/vector/workspace_test.go`](pkg/vector/workspace_test.go), [`pkg/vector/index_searcher.go`](pkg/vector/index_searcher.go), [`pkg/vector/index_searcher_test.go`](pkg/vector/index_searcher_test.go), [`cmd/atteler/workspace_vector_context.go`](cmd/atteler/workspace_vector_context.go), [`cmd/atteler/workspace_vector_context_test.go`](cmd/atteler/workspace_vector_context_test.go), [`cmd/atteler/cli_vector_search_commands.go`](cmd/atteler/cli_vector_search_commands.go), [`cmd/atteler/cli_vector_search_commands_test.go`](cmd/atteler/cli_vector_search_commands_test.go), [`pkg/githistory/githistory.go`](pkg/githistory/githistory.go), [`pkg/githistory/githistory_test.go`](pkg/githistory/githistory_test.go), [`pkg/codeintel/model.go`](pkg/codeintel/model.go), [`pkg/codeintel/codeintel.go`](pkg/codeintel/codeintel.go), [`pkg/codeintel/persistence.go`](pkg/codeintel/persistence.go), [`pkg/codeintel/query.go`](pkg/codeintel/query.go), [`pkg/codeintel/workspace.go`](pkg/codeintel/workspace.go), [`pkg/codeintel/codeintel_test.go`](pkg/codeintel/codeintel_test.go), [`pkg/codegraph/codegraph.go`](pkg/codegraph/codegraph.go), [`pkg/codegraph/codegraph_test.go`](pkg/codegraph/codegraph_test.go), [`cmd/atteler/codeintel_schema.go`](cmd/atteler/codeintel_schema.go), [`cmd/atteler/codeintel_response_render.go`](cmd/atteler/codeintel_response_render.go), [`cmd/atteler/codeintel_command_descriptors.go`](cmd/atteler/codeintel_command_descriptors.go), [`cmd/atteler/codeintel_schema_test.go`](cmd/atteler/codeintel_schema_test.go), [`pkg/lsp/client.go`](pkg/lsp/client.go), [`pkg/lsp/client_test.go`](pkg/lsp/client_test.go) |
+| Memory/retrieval, unified retrieval contract, per-agent memory, local lexical/embedding vector search, workspace ANN vector context, git-history search, multi-language incremental code intelligence, import graphs, structured code-intel CLI output, and optional managed LSP lookups | [`pkg/retrieval/types.go`](pkg/retrieval/types.go), [`pkg/retrieval/search.go`](pkg/retrieval/search.go), [`pkg/retrieval/retrieval_test.go`](pkg/retrieval/retrieval_test.go), [`pkg/memory/memory.go`](pkg/memory/memory.go), [`pkg/memory/memory_test.go`](pkg/memory/memory_test.go), [`pkg/agentmemory/agentmemory.go`](pkg/agentmemory/agentmemory.go), [`pkg/agentmemory/agentmemory_test.go`](pkg/agentmemory/agentmemory_test.go), [`pkg/vector/vector.go`](pkg/vector/vector.go), [`pkg/vector/vector_test.go`](pkg/vector/vector_test.go), [`pkg/vector/index.go`](pkg/vector/index.go), [`pkg/vector/index_test.go`](pkg/vector/index_test.go), [`pkg/vector/source_index.go`](pkg/vector/source_index.go), [`pkg/vector/ann.go`](pkg/vector/ann.go), [`pkg/vector/ann_test.go`](pkg/vector/ann_test.go), [`pkg/vector/bench_test.go`](pkg/vector/bench_test.go), [`pkg/vector/testdata/retrieval_quality.json`](pkg/vector/testdata/retrieval_quality.json), [`pkg/vector/workspace.go`](pkg/vector/workspace.go), [`pkg/vector/workspace_test.go`](pkg/vector/workspace_test.go), [`pkg/vector/index_searcher.go`](pkg/vector/index_searcher.go), [`pkg/vector/index_searcher_test.go`](pkg/vector/index_searcher_test.go), [`cmd/atteler/workspace_vector_context.go`](cmd/atteler/workspace_vector_context.go), [`cmd/atteler/workspace_vector_context_test.go`](cmd/atteler/workspace_vector_context_test.go), [`cmd/atteler/cli_vector_search_commands.go`](cmd/atteler/cli_vector_search_commands.go), [`cmd/atteler/cli_vector_search_commands_test.go`](cmd/atteler/cli_vector_search_commands_test.go), [`pkg/githistory/githistory.go`](pkg/githistory/githistory.go), [`pkg/githistory/githistory_test.go`](pkg/githistory/githistory_test.go), [`pkg/codeintel/model.go`](pkg/codeintel/model.go), [`pkg/codeintel/codeintel.go`](pkg/codeintel/codeintel.go), [`pkg/codeintel/persistence.go`](pkg/codeintel/persistence.go), [`pkg/codeintel/query.go`](pkg/codeintel/query.go), [`pkg/codeintel/workspace.go`](pkg/codeintel/workspace.go), [`pkg/codeintel/codeintel_test.go`](pkg/codeintel/codeintel_test.go), [`pkg/codegraph/codegraph.go`](pkg/codegraph/codegraph.go), [`pkg/codegraph/codegraph_test.go`](pkg/codegraph/codegraph_test.go), [`cmd/atteler/codeintel_schema.go`](cmd/atteler/codeintel_schema.go), [`cmd/atteler/codeintel_response_render.go`](cmd/atteler/codeintel_response_render.go), [`cmd/atteler/codeintel_command_descriptors.go`](cmd/atteler/codeintel_command_descriptors.go), [`cmd/atteler/codeintel_schema_test.go`](cmd/atteler/codeintel_schema_test.go), [`pkg/lsp/client.go`](pkg/lsp/client.go), [`pkg/lsp/client_test.go`](pkg/lsp/client_test.go) |
 | Governed plugin manifests, lockfiles, structured entrypoint output, policy-gated local execution, MCP manifest validation, lifecycle-negotiated sessions, discovered tool calls, and resource/prompt discovery | [`pkg/plugin/manifest.go`](pkg/plugin/manifest.go), [`pkg/plugin/manifest_test.go`](pkg/plugin/manifest_test.go), [`pkg/plugin/policy.go`](pkg/plugin/policy.go), [`pkg/plugin/lockfile.go`](pkg/plugin/lockfile.go), [`pkg/plugin/registry.go`](pkg/plugin/registry.go), [`pkg/plugin/registry_test.go`](pkg/plugin/registry_test.go), [`pkg/plugin/run.go`](pkg/plugin/run.go), [`pkg/plugin/run_test.go`](pkg/plugin/run_test.go), [`pkg/permission/permission.go`](pkg/permission/permission.go), [`pkg/permission/permission_test.go`](pkg/permission/permission_test.go), [`pkg/mcp/manifest.go`](pkg/mcp/manifest.go), [`pkg/mcp/manifest_test.go`](pkg/mcp/manifest_test.go), [`pkg/mcp/client.go`](pkg/mcp/client.go), [`pkg/mcp/pool.go`](pkg/mcp/pool.go), [`pkg/mcp/process_unix.go`](pkg/mcp/process_unix.go), [`pkg/mcp/process_windows.go`](pkg/mcp/process_windows.go), [`pkg/mcp/client_test.go`](pkg/mcp/client_test.go), [`cmd/atteler/cli_plugin_commands.go`](cmd/atteler/cli_plugin_commands.go), [`cmd/atteler/cli_mcp_commands.go`](cmd/atteler/cli_mcp_commands.go) |
 | Background repository scanning, baseline/gate comparisons, suppressions, issue upserts, and review-scan formatting | [`pkg/watch/watch.go`](pkg/watch/watch.go), [`pkg/watch/baseline.go`](pkg/watch/baseline.go), [`pkg/watch/issues.go`](pkg/watch/issues.go), [`pkg/watch/watch_test.go`](pkg/watch/watch_test.go), [`pkg/symphony/tracker.go`](pkg/symphony/tracker.go), [`cmd/atteler/cli_speculate_watch_history_commands.go`](cmd/atteler/cli_speculate_watch_history_commands.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
 | Event hook privacy, metadata, and local hook execution | [`pkg/events/events.go`](pkg/events/events.go), [`pkg/events/events_test.go`](pkg/events/events_test.go), [`pkg/events/privacy.go`](pkg/events/privacy.go), [`pkg/events/privacy_test.go`](pkg/events/privacy_test.go), [`pkg/events/logger.go`](pkg/events/logger.go), [`pkg/events/discoverability_test.go`](pkg/events/discoverability_test.go) |

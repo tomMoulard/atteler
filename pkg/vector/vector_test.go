@@ -2553,34 +2553,73 @@ func TestEmbeddingVectorizer_CustomModel(t *testing.T) {
 func TestEmbeddingVectorizer_SpecRecordsModelDimensionsAndNormalization(t *testing.T) {
 	t.Parallel()
 
-	v := NewEmbeddingVectorizer(WithEmbeddingModel("mxbai-embed-large"))
+	v := NewEmbeddingVectorizer(
+		WithEmbeddingProvider("ollama-compatible"),
+		WithEmbeddingBaseURL("http://127.0.0.1:11434/"),
+		WithEmbeddingModel("mxbai-embed-large"),
+	)
 
 	spec := v.Spec(1024)
 
 	assert.Equal(t, "ollama-compatible-embedding", spec.ID)
+	assert.Equal(t, "ollama", spec.Provider)
 	assert.Equal(t, "mxbai-embed-large", spec.Model)
+	assert.Equal(t, "http://127.0.0.1:11434", spec.BaseURL)
 	assert.Equal(t, 1024, spec.Dimensions)
 	assert.Equal(t, "trim-space-v1", spec.Normalization)
 	assert.Equal(t, vectorizerSpecVersion, spec.Version)
 	assert.True(t, spec.CompatibleWith(VectorizerSpec{
 		ID:            "ollama-compatible-embedding",
+		Provider:      "ollama",
 		Model:         "mxbai-embed-large",
+		BaseURL:       "http://127.0.0.1:11434",
 		Dimensions:    1024,
 		Normalization: "trim-space-v1",
 		Version:       vectorizerSpecVersion,
 	}))
 }
 
-func TestEmbeddingVectorizerSpecRedactsSensitiveModelIdentity(t *testing.T) {
+func TestEmbeddingVectorizerSpecRedactsSensitiveEndpointAndModelIdentity(t *testing.T) {
 	t.Parallel()
 
-	v := NewEmbeddingVectorizer(WithEmbeddingModel("tenant-embed?api_key=abc123/v1"))
+	v := NewEmbeddingVectorizer(
+		WithEmbeddingModel("tenant-embed?api_key=abc123/v1"),
+		WithEmbeddingBaseURL("https://user:pass@example.com/embed?api_key=secret-token"),
+	)
 
 	spec := v.Spec(1024)
 
 	assert.NotContains(t, spec.Model, "abc123")
 	assert.Contains(t, spec.Model, "[REDACTED]")
 	assert.Contains(t, spec.Model, "/v1")
+	assert.NotContains(t, spec.BaseURL, "user")
+	assert.NotContains(t, spec.BaseURL, "pass")
+	assert.NotContains(t, spec.BaseURL, "secret-token")
+	assert.Contains(t, spec.BaseURL, "[REDACTED]")
+	require.NoError(t, validatePersistedVectorizerSpecPrivacy(spec))
+}
+
+func TestEmbeddingVectorizerSpecRejectsDifferentKnownEndpoint(t *testing.T) {
+	t.Parallel()
+
+	local := NewEmbeddingVectorizer(
+		WithEmbeddingModel("nomic-embed-text"),
+		WithEmbeddingBaseURL("http://127.0.0.1:11434"),
+	).Spec(768)
+	otherEndpoint := NewEmbeddingVectorizer(
+		WithEmbeddingModel("nomic-embed-text"),
+		WithEmbeddingBaseURL("http://127.0.0.1:11435"),
+	).Spec(768)
+	legacyWithoutEndpoint := VectorizerSpec{
+		ID:            local.ID,
+		Model:         local.Model,
+		Dimensions:    local.Dimensions,
+		Normalization: local.Normalization,
+		Version:       local.Version,
+	}
+
+	assert.False(t, local.CompatibleWith(otherEndpoint))
+	assert.True(t, local.CompatibleWith(legacyWithoutEndpoint), "pre-endpoint persisted specs migrate compatibly until rebuilt")
 }
 
 func TestEmbeddingVectorizer_ContextCancellation(t *testing.T) {

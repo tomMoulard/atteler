@@ -14,7 +14,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/tommoulard/atteler/internal/atomicfile"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 )
@@ -49,7 +49,9 @@ type Vector []float64
 // dimensionality before retrieval can trust them.
 type VectorizerSpec struct {
 	ID            string `json:"id,omitempty"`
+	Provider      string `json:"provider,omitempty"`
 	Model         string `json:"model,omitempty"`
+	BaseURL       string `json:"base_url,omitempty"`
 	Normalization string `json:"normalization,omitempty"`
 	Version       string `json:"version,omitempty"`
 	Dimensions    int    `json:"dimensions,omitempty"`
@@ -470,16 +472,8 @@ func (s *Store) Save(path string) error {
 
 	data = append(data, '\n')
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("create vector store dir: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write vector store %q: %w", path, err)
-	}
-
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("chmod vector store %q: %w", path, err)
+	if err := atomicfile.WriteFile(path, data, 0o600, ".vector-store-*.tmp"); err != nil {
+		return fmt.Errorf("write vector store %q atomically: %w", path, err)
 	}
 
 	return nil
@@ -1412,11 +1406,20 @@ func (v *EmbeddingVectorizer) VectorizeContext(ctx context.Context, text string)
 // Spec returns the stable identity for this embedding endpoint/model. The
 // dimensions value is set after a caller knows the model response width.
 func (v *EmbeddingVectorizer) Spec(dimensions int) VectorizerSpec {
-	_, model, _ := v.embeddingSettings()
+	baseURL, model, _ := v.embeddingSettings()
+
+	provider := defaultEmbeddingProvider
+	if v != nil && strings.TrimSpace(v.provider) != "" {
+		provider = v.provider
+	}
+
+	metadata := NewEmbeddingMetadata(provider, model, baseURL, dimensions)
 
 	return normalizeVectorizerSpec(VectorizerSpec{
 		ID:            "ollama-compatible-embedding",
-		Model:         model,
+		Provider:      metadata.Provider,
+		Model:         metadata.Model,
+		BaseURL:       metadata.BaseURL,
 		Dimensions:    dimensions,
 		Normalization: "trim-space-v1",
 		Version:       vectorizerSpecVersion,
@@ -1678,6 +1681,11 @@ func (s Searcher) retrievalResult(result Result, query retrieval.Query) retrieva
 		scorer.Explanation = []string{"ranked by cosine similarity between query vector and document vector"}
 	}
 
+	freshness := retrieval.FreshnessFromMetadata(metadata)
+	if !doc.UpdatedAt.IsZero() {
+		freshness.IndexedAt = doc.UpdatedAt.UTC()
+	}
+
 	return retrieval.NormalizeResult(retrieval.Result{
 		Source:     source,
 		DocumentID: doc.ID,
@@ -1686,7 +1694,7 @@ func (s Searcher) retrievalResult(result Result, query retrieval.Query) retrieva
 		Scorer:     scorer,
 		Snippet:    retrieval.Snippet(chunk.Text, 160),
 		Metadata:   metadata,
-		Freshness:  retrieval.FreshnessFromMetadata(metadata),
+		Freshness:  freshness,
 		Safety:     safety,
 	})
 }
@@ -1932,7 +1940,13 @@ func validSourceHash(hash string) bool {
 
 // IsZero reports whether the vectorizer identity is absent.
 func (s VectorizerSpec) IsZero() bool {
-	return s.ID == "" && s.Model == "" && s.Normalization == "" && s.Version == "" && s.Dimensions == 0
+	return s.ID == "" &&
+		s.Provider == "" &&
+		s.Model == "" &&
+		s.BaseURL == "" &&
+		s.Normalization == "" &&
+		s.Version == "" &&
+		s.Dimensions == 0
 }
 
 // CompatibleWith reports whether two vectorizer identities can share a store.
@@ -1947,19 +1961,41 @@ func (s VectorizerSpec) CompatibleWith(other VectorizerSpec) bool {
 	}
 
 	return s.ID == other.ID &&
+		vectorizerSpecOptionalMatch(s.Provider, other.Provider) &&
 		s.Model == other.Model &&
+		vectorizerSpecOptionalMatch(s.BaseURL, other.BaseURL) &&
 		s.Normalization == other.Normalization &&
 		s.Version == other.Version &&
 		(s.Dimensions == 0 || other.Dimensions == 0 || s.Dimensions == other.Dimensions)
 }
 
+func vectorizerSpecOptionalMatch(left, right string) bool {
+	return left == "" || right == "" || left == right
+}
+
+// NormalizeVectorizerSpec returns spec with trimmed, redacted, canonical
+// vectorizer identity fields. It is exported so packages that persist
+// VectorizerSpec can apply the same provider/base URL privacy rules as vector
+// stores before comparing or writing metadata.
+func NormalizeVectorizerSpec(spec VectorizerSpec) VectorizerSpec {
+	return normalizeVectorizerSpec(spec)
+}
+
 func normalizeVectorizerSpec(spec VectorizerSpec) VectorizerSpec {
 	spec.ID = privacy.RedactIdentifier(strings.TrimSpace(spec.ID))
+	spec.Provider = normalizeProviderToken(spec.Provider)
 	spec.Model = privacy.RedactIdentifier(strings.TrimSpace(spec.Model))
+	spec.BaseURL = redactVectorizerMetadataURL(spec.BaseURL)
 	spec.Normalization = privacy.RedactIdentifier(strings.TrimSpace(spec.Normalization))
 	spec.Version = privacy.RedactIdentifier(strings.TrimSpace(spec.Version))
 
 	return spec
+}
+
+// ValidateVectorizerSpecPrivacy rejects vectorizer identity fields that still
+// contain unredacted secret-looking values.
+func ValidateVectorizerSpecPrivacy(spec VectorizerSpec) error {
+	return validatePersistedVectorizerSpecPrivacy(spec)
 }
 
 func validatePersistedVectorizerSpecPrivacy(spec VectorizerSpec) error {
@@ -1968,7 +2004,9 @@ func validatePersistedVectorizerSpecPrivacy(spec VectorizerSpec) error {
 	}
 
 	if privacy.RedactIdentifier(strings.TrimSpace(spec.ID)) != strings.TrimSpace(spec.ID) ||
+		vectorizerMetadataSecretValue(spec.Provider) ||
 		privacy.RedactIdentifier(strings.TrimSpace(spec.Model)) != strings.TrimSpace(spec.Model) ||
+		vectorizerMetadataURLSecretValue(spec.BaseURL) ||
 		privacy.RedactIdentifier(strings.TrimSpace(spec.Normalization)) != strings.TrimSpace(spec.Normalization) ||
 		privacy.RedactIdentifier(strings.TrimSpace(spec.Version)) != strings.TrimSpace(spec.Version) {
 		return ErrPrivacyPolicy

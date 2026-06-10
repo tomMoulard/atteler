@@ -11,6 +11,12 @@ const (
 	defaultANNProbes              = 16
 	defaultANNMinCandidates       = 64
 	defaultANNCandidateMultiplier = 8
+
+	// DefaultANNExactSearchMaxDocuments is the default index size at or below
+	// which ANNOptions intentionally falls back to exact brute-force ranking.
+	// Above this size, limited searches use ANN candidates unless callers raise
+	// MinCandidates.
+	DefaultANNExactSearchMaxDocuments = defaultANNMinCandidates
 )
 
 // ANNOptions controls the local approximate-nearest-neighbor search layer.
@@ -66,6 +72,19 @@ func (o ANNOptions) Normalize(documentCount, limit int) ANNOptions {
 	}
 
 	return o
+}
+
+// UsesExactSearch reports whether the normalized options search every
+// document. Exact search is intentional for small indexes and unbounded result
+// sets; larger limited searches use ANN candidates.
+func (o ANNOptions) UsesExactSearch(documentCount, limit int) bool {
+	options := o.Normalize(documentCount, limit)
+
+	return annUsesExactSearch(options, documentCount, limit)
+}
+
+func annUsesExactSearch(options ANNOptions, documentCount, limit int) bool {
+	return documentCount <= 0 || limit <= 0 || options.MinCandidates >= documentCount
 }
 
 func annCandidateTarget(documentCount, limit, multiplier int) int {
@@ -218,7 +237,7 @@ func (ann *ANNIndex) candidateIndexes(query Vector, limit int) []int {
 	}
 
 	options := ann.options.Normalize(docCount, limit)
-	if options.MinCandidates >= docCount {
+	if annUsesExactSearch(options, docCount, limit) {
 		return allDocumentIndexes(docCount)
 	}
 

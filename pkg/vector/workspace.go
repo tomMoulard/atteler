@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,8 +21,9 @@ import (
 )
 
 const (
-	// DefaultWorkspaceIndexPath is the per-workspace persisted ANN/vector
-	// datastore path used when callers do not configure a custom location.
+	// DefaultWorkspaceIndexPath is the per-workspace persisted vector datastore
+	// path used when callers do not configure a custom location. ANN buckets are
+	// derived in memory from this JSON index when searching.
 	DefaultWorkspaceIndexPath = ".atteler/workspace-vector-index.json"
 	// DefaultWorkspaceMaxFileBytes prevents accidentally embedding huge files.
 	DefaultWorkspaceMaxFileBytes = 256 * 1024
@@ -72,6 +74,30 @@ type WorkspaceRefreshResult struct {
 	Rebuilt     bool
 	Refreshed   bool
 	Initialized bool
+}
+
+// WorkspaceAsyncResult is returned by RefreshWorkspaceIndexAsync.
+type WorkspaceAsyncResult struct {
+	Err     error
+	Refresh WorkspaceRefreshResult
+}
+
+// RefreshWorkspaceIndexAsync starts the same incremental index lifecycle as
+// RefreshWorkspaceIndex in a goroutine and returns exactly one result. This is
+// intentionally a small primitive so callers can schedule background local RAG
+// sync without changing the persistence, invalidation, and privacy behavior
+// that the synchronous path already tests.
+func RefreshWorkspaceIndexAsync(ctx context.Context, opts WorkspaceOptions) <-chan WorkspaceAsyncResult {
+	results := make(chan WorkspaceAsyncResult, 1)
+
+	go func() {
+		defer close(results)
+
+		refresh, err := RefreshWorkspaceIndex(ctx, opts)
+		results <- WorkspaceAsyncResult{Refresh: refresh, Err: err}
+	}()
+
+	return results
 }
 
 // RefreshWorkspaceIndex discovers supported files under Root, loads any
@@ -369,7 +395,7 @@ func refreshExistingWorkspaceIndex(
 	currentByPath := make(map[string]Source, len(sources))
 
 	for _, source := range sources {
-		meta := SourceMetadataForText(source.Path, source.Text)
+		meta := sourceMetadataForSource(source)
 		currentMeta = append(currentMeta, meta)
 		currentByPath[meta.Path] = source
 	}
@@ -379,7 +405,7 @@ func refreshExistingWorkspaceIndex(
 		existingMeta[filepath.Clean(meta.Path)] = meta
 	}
 
-	documentsByPath := workspaceDocumentsByPath(existing.Documents)
+	documentsByPath := indexDocumentsByPath(existing.Documents)
 	changedSources := make([]Source, 0)
 	retainedDocuments := make([]Document, 0, len(existing.Documents))
 	retainedSources := make([]SourceMetadata, 0, len(sources))
@@ -400,7 +426,7 @@ func refreshExistingWorkspaceIndex(
 			changedSources = append(changedSources, currentByPath[meta.Path])
 		default:
 			docs := documentsByPath[meta.Path]
-			if workspaceDocumentsNeedRefresh(docs, existing.Vectorizer, currentByPath[meta.Path], opts.Chunk) {
+			if indexDocumentsNeedRefresh(docs, existing.Vectorizer, currentByPath[meta.Path], opts.Chunk) {
 				result.Updated++
 				changed = true
 
@@ -409,27 +435,31 @@ func refreshExistingWorkspaceIndex(
 				continue
 			}
 
-			result.Unchanged++
-
 			retainedSources = append(retainedSources, meta)
-			retainedDocuments = append(retainedDocuments, cloneDocuments(docs)...)
+			docs, metadataChanged := retainWorkspaceSourceDocuments(
+				result,
+				docs,
+				currentByPath[meta.Path],
+				opts.Chunk,
+			)
+			changed = changed || metadataChanged
+
+			retainedDocuments = append(retainedDocuments, docs...)
 		}
 	}
 
-	for _, meta := range existing.Sources {
-		if _, ok := currentByPath[filepath.Clean(meta.Path)]; !ok {
-			result.Deleted++
-			changed = true
-		}
-	}
+	changed = markDeletedWorkspaceSources(result, existing.Sources, currentByPath) || changed
 
 	if !changed {
 		return existing, false, nil
 	}
 
+	refreshedAt := workspaceNow(opts)
+
 	index := &Index{
 		Version:    IndexVersion,
 		CreatedAt:  existing.CreatedAt,
+		UpdatedAt:  refreshedAt,
 		Vectorizer: existing.Vectorizer.Normalize(),
 		Chunk:      opts.Chunk.Normalize(),
 		Dimensions: existing.Dimensions,
@@ -437,7 +467,7 @@ func refreshExistingWorkspaceIndex(
 		Documents:  retainedDocuments,
 	}
 	if index.CreatedAt.IsZero() {
-		index.CreatedAt = workspaceNow(opts)
+		index.CreatedAt = refreshedAt
 	}
 
 	if len(retainedDocuments) == 0 {
@@ -467,19 +497,55 @@ func refreshExistingWorkspaceIndex(
 	return index, true, nil
 }
 
+func markDeletedWorkspaceSources(
+	result *WorkspaceRefreshResult,
+	sources []SourceMetadata,
+	currentByPath map[string]Source,
+) bool {
+	changed := false
+
+	for _, meta := range sources {
+		if _, ok := currentByPath[filepath.Clean(meta.Path)]; !ok {
+			result.Deleted++
+			changed = true
+		}
+	}
+
+	return changed
+}
+
+func retainWorkspaceSourceDocuments(
+	result *WorkspaceRefreshResult,
+	docs []Document,
+	source Source,
+	chunk ChunkOptions,
+) ([]Document, bool) {
+	result.Unchanged++
+
+	retained, metadataChanged := refreshRetainedDocumentFreshnessMetadata(docs, source, chunk)
+	if !metadataChanged {
+		return retained, false
+	}
+
+	result.Updated++
+	result.Unchanged--
+
+	return retained, true
+}
+
 func loadWorkspaceRefreshIndex(path string) (*Index, error) {
-	return loadIndex(path, workspaceRefreshIndexValidationOptions())
+	return loadIndex(path, refreshIndexValidationOptions())
 }
 
 func validateReusableWorkspaceRefreshIndex(existing *Index, opts WorkspaceOptions) error {
-	if err := existing.validateFor(opts.VectorizerMetadata, nil, workspaceRefreshIndexValidationOptions(), opts.Chunk); err != nil {
+	if err := existing.validateFor(opts.VectorizerMetadata, nil, refreshIndexValidationOptions(), opts.Chunk); err != nil {
 		return err
 	}
 
-	return validateWorkspaceIndexSourceCoverage(existing)
+	return validateIndexSourceCoverage(existing)
 }
 
-func validateWorkspaceIndexSourceCoverage(idx *Index) error {
+func validateIndexSourceCoverage(idx *Index) error {
 	sources := make(map[string]struct{}, len(idx.Sources))
 	for _, source := range idx.Sources {
 		sources[filepath.Clean(source.Path)] = struct{}{}
@@ -492,11 +558,11 @@ func validateWorkspaceIndexSourceCoverage(idx *Index) error {
 
 		path := filepath.Clean(strings.TrimSpace(doc.Metadata["path"]))
 		if path == "" || path == "." {
-			return fmt.Errorf("%w: document %q is missing workspace source path metadata", ErrSourceStale, doc.ID)
+			return fmt.Errorf("%w: document %q is missing source path metadata", ErrSourceStale, doc.ID)
 		}
 
 		if _, ok := sources[path]; !ok {
-			return fmt.Errorf("%w: document %q references unindexed workspace source %q", ErrSourceStale, doc.ID, path)
+			return fmt.Errorf("%w: document %q references unindexed source %q", ErrSourceStale, doc.ID, path)
 		}
 
 		documentCounts[path]++
@@ -504,14 +570,14 @@ func validateWorkspaceIndexSourceCoverage(idx *Index) error {
 
 	for path := range sources {
 		if documentCounts[path] == 0 {
-			return fmt.Errorf("%w: workspace source %q has no indexed documents", ErrSourceStale, path)
+			return fmt.Errorf("%w: source %q has no indexed documents", ErrSourceStale, path)
 		}
 	}
 
 	return nil
 }
 
-func workspaceRefreshIndexValidationOptions() indexValidationOptions {
+func refreshIndexValidationOptions() indexValidationOptions {
 	return indexValidationOptions{AllowStaleTextHashVector: true}
 }
 
@@ -808,7 +874,12 @@ func (w *workspaceWalker) sourceFromFile(abs, rel string, entry fs.DirEntry) (So
 		return Source{}, false
 	}
 
-	return Source{Path: rel, Text: text}, true
+	metadata := make(map[string]string, 1)
+	if updatedAt := info.ModTime().UTC(); !updatedAt.IsZero() {
+		metadata[retrieval.MetadataSourceUpdatedAt] = updatedAt.Format(time.RFC3339Nano)
+	}
+
+	return Source{Path: rel, Text: text, Metadata: metadata}, true
 }
 
 func readWorkspaceFileWithinLimit(path string, maxBytes int64) (data []byte, tooLarge bool, err error) {
@@ -1255,7 +1326,7 @@ func workspaceFileSupported(path string) bool {
 	return ok
 }
 
-func workspaceDocumentsByPath(docs []Document) map[string][]Document {
+func indexDocumentsByPath(docs []Document) map[string][]Document {
 	out := make(map[string][]Document)
 
 	for i := range docs {
@@ -1272,13 +1343,13 @@ func workspaceDocumentsByPath(docs []Document) map[string][]Document {
 	return out
 }
 
-func workspaceDocumentsNeedRefresh(docs []Document, vectorizer VectorizerMetadata, source Source, chunk ChunkOptions) bool {
+func indexDocumentsNeedRefresh(docs []Document, vectorizer VectorizerMetadata, source Source, chunk ChunkOptions) bool {
 	return len(docs) == 0 ||
-		!workspaceDocumentsReusable(docs, vectorizer) ||
-		!workspaceDocumentsMatchSource(docs, source, chunk)
+		!indexDocumentsReusable(docs, vectorizer) ||
+		!indexDocumentsMatchSource(docs, source, chunk)
 }
 
-func workspaceDocumentsReusable(docs []Document, vectorizer VectorizerMetadata) bool {
+func indexDocumentsReusable(docs []Document, vectorizer VectorizerMetadata) bool {
 	vectorizer = vectorizer.Normalize()
 
 	for i := range docs {
@@ -1321,8 +1392,8 @@ func workspaceLexicalVectorMatchesText(doc Document) bool {
 	return vectorsEqual(doc.Vector, expected)
 }
 
-func workspaceDocumentsMatchSource(docs []Document, source Source, chunk ChunkOptions) bool {
-	sourceMetadata := SourceMetadataForText(source.Path, source.Text)
+func indexDocumentsMatchSource(docs []Document, source Source, chunk ChunkOptions) bool {
+	sourceMetadata := sourceMetadataForSource(source)
 	if sourceMetadata.Path == "" {
 		return false
 	}
@@ -1348,7 +1419,7 @@ func workspaceDocumentsMatchSource(docs []Document, source Source, chunk ChunkOp
 
 	for _, chunk := range chunks {
 		doc, ok := docsByID[chunk.ID]
-		if !ok || !workspaceDocumentMatchesChunk(doc, sourceMetadata, chunk) {
+		if !ok || !indexDocumentMatchesChunk(doc, source, sourceMetadata, chunk) {
 			return false
 		}
 	}
@@ -1356,8 +1427,8 @@ func workspaceDocumentsMatchSource(docs []Document, source Source, chunk ChunkOp
 	return true
 }
 
-func workspaceDocumentMatchesChunk(doc Document, sourceMetadata SourceMetadata, chunk Chunk) bool {
-	expectedText, expectedMetadata := chunkDocumentPayload(sourceMetadata.Path, sourceMetadata, chunk)
+func indexDocumentMatchesChunk(doc Document, source Source, sourceMetadata SourceMetadata, chunk Chunk) bool {
+	expectedText, expectedMetadata := chunkDocumentPayload(source, sourceMetadata.Path, sourceMetadata, chunk)
 	if doc.Text != expectedText {
 		return false
 	}
@@ -1366,33 +1437,73 @@ func workspaceDocumentMatchesChunk(doc Document, sourceMetadata SourceMetadata, 
 		return false
 	}
 
-	for key, expectedValue := range expectedMetadata {
-		if doc.Metadata[key] != expectedValue {
-			return false
-		}
+	if !indexDocumentMetadataMatches(doc.Metadata, expectedMetadata) {
+		return false
 	}
 
-	for _, key := range workspaceSafetyMetadataKeys() {
-		if _, expected := expectedMetadata[key]; expected {
+	expectedProvenance := sourceProvenance(source, normalizeSourceKind(source.Kind), sourceMetadata.Path)
+
+	return maps.Equal(doc.Provenance, expectedProvenance)
+}
+
+func indexDocumentMetadataMatches(actual, expected map[string]string) bool {
+	actual = maps.Clone(actual)
+	expected = maps.Clone(expected)
+
+	delete(actual, retrieval.MetadataSourceUpdatedAt)
+	delete(expected, retrieval.MetadataSourceUpdatedAt)
+
+	return maps.Equal(actual, expected)
+}
+
+func refreshRetainedDocumentFreshnessMetadata(
+	docs []Document,
+	source Source,
+	chunk ChunkOptions,
+) ([]Document, bool) {
+	retained := cloneDocuments(docs)
+
+	sourceMetadata := sourceMetadataForSource(source)
+	if sourceMetadata.Path == "" {
+		return retained, false
+	}
+
+	chunks, err := ChunkText(sourceMetadata.Path, privacy.RedactText(source.Text), chunk)
+	if err != nil {
+		return retained, false
+	}
+
+	freshnessByChunkID := make(map[string]string, len(chunks))
+	for _, chunk := range chunks {
+		_, metadata := chunkDocumentPayload(source, sourceMetadata.Path, sourceMetadata, chunk)
+		freshnessByChunkID[chunk.ID] = strings.TrimSpace(metadata[retrieval.MetadataSourceUpdatedAt])
+	}
+
+	changed := false
+
+	for i := range retained {
+		freshness, ok := freshnessByChunkID[retained[i].ID]
+		if !ok || strings.TrimSpace(retained[i].Metadata[retrieval.MetadataSourceUpdatedAt]) == freshness {
 			continue
 		}
 
-		if _, actual := doc.Metadata[key]; actual {
-			return false
+		if freshness == "" {
+			delete(retained[i].Metadata, retrieval.MetadataSourceUpdatedAt)
+
+			changed = true
+
+			continue
 		}
+
+		if retained[i].Metadata == nil {
+			retained[i].Metadata = make(map[string]string, 1)
+		}
+
+		retained[i].Metadata[retrieval.MetadataSourceUpdatedAt] = freshness
+		changed = true
 	}
 
-	return true
-}
-
-func workspaceSafetyMetadataKeys() []string {
-	return []string{
-		retrieval.MetadataSafetyInjectAllowed,
-		retrieval.MetadataSafetyPrivate,
-		retrieval.MetadataSafetyRedacted,
-		retrieval.MetadataSafetySensitive,
-		retrieval.MetadataSafetyReasons,
-	}
+	return retained, changed
 }
 
 func hasNUL(data []byte) bool {

@@ -24,6 +24,10 @@ func FreshnessFromMetadata(metadata map[string]string) Freshness {
 		return freshness
 	}
 
+	if !freshnessShouldCheckFilesystem(metadata) {
+		return freshness
+	}
+
 	path := strings.TrimSpace(metadata["path"])
 	if path == "" {
 		return freshness
@@ -48,4 +52,12 @@ func FreshnessFromMetadata(metadata map[string]string) Freshness {
 	}
 
 	return freshness
+}
+
+func freshnessShouldCheckFilesystem(metadata map[string]string) bool {
+	kind := strings.ToLower(strings.TrimSpace(metadata["source_kind"]))
+	kind = strings.ReplaceAll(kind, "-", "_")
+	kind = strings.ReplaceAll(kind, " ", "_")
+
+	return kind == "" || kind == "file"
 }

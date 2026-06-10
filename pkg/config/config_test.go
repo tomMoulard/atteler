@@ -14,6 +14,11 @@ import (
 	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
 )
 
+const (
+	testVectorAgentMemoryStore = "agent-memory"
+	testVectorReviewerAgent    = "reviewer"
+)
+
 func TestLoadFiles_MergesInOrder(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -557,6 +562,95 @@ agent_loop:
 	assert.Equal(t, "30m", *cfg.AgentLoop.MaxWallTime)
 	require.NotNil(t, cfg.AgentLoop.CheckpointInterval)
 	assert.Equal(t, 7, *cfg.AgentLoop.CheckpointInterval)
+}
+
+func TestLoadFiles_ResolvesScopedVectorizerConfigs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "config.yaml", `
+vector:
+  vectorizer: lexical
+  provider: ollama
+  model: default-embed
+  base_url: http://127.0.0.1:11434
+  fallback_policy: fail
+  timeout_seconds: 5
+  stores:
+    agent-memory:
+      vectorizer: embedding
+      model: memory-embed
+  agents:
+    reviewer:
+      model: reviewer-embed
+      timeout_seconds: 7
+  sources:
+    git_history:
+      vectorizer: lexical
+      index_path: ./.atteler/git-history-vector.json
+      chunk_max_runes: 600
+`)
+
+	cfg, loaded, origins, err := LoadFilesWithOrigins([]string{path})
+	require.NoError(t, err)
+	require.Equal(t, []string{path}, loaded)
+
+	memory := cfg.Vector.ResolveVectorizerConfig(VectorScope{Store: testVectorAgentMemoryStore})
+	assert.Equal(t, "embedding", memory.Vectorizer)
+	assert.Equal(t, "ollama", memory.Provider)
+	assert.Equal(t, "memory-embed", memory.Model)
+	assert.Equal(t, "http://127.0.0.1:11434", memory.BaseURL)
+	assert.Equal(t, "fail", memory.FallbackPolicy)
+	assert.Equal(t, 5, memory.TimeoutSeconds)
+
+	agentMemory := cfg.Vector.ResolveVectorizerConfig(VectorScope{
+		Store: testVectorAgentMemoryStore,
+		Agent: testVectorReviewerAgent,
+	})
+	assert.Equal(t, "embedding", agentMemory.Vectorizer)
+	assert.Equal(t, "reviewer-embed", agentMemory.Model)
+	assert.Equal(t, 7, agentMemory.TimeoutSeconds)
+
+	gitHistory := cfg.Vector.ResolveVectorizerConfig(VectorScope{
+		Store:  testVectorAgentMemoryStore,
+		Agent:  testVectorReviewerAgent,
+		Source: "git_history",
+	})
+	assert.Equal(t, "lexical", gitHistory.Vectorizer)
+	assert.Equal(t, "reviewer-embed", gitHistory.Model, "source override should inherit agent/store provider fields it does not set")
+	assert.Equal(t, "./.atteler/git-history-vector.json", gitHistory.IndexPath)
+	assert.Equal(t, 600, gitHistory.ChunkMaxRunes)
+
+	assert.Contains(t, origins, "vector.stores."+testVectorAgentMemoryStore+".vectorizer")
+	assert.Contains(t, origins, "vector.agents."+testVectorReviewerAgent+".timeout_seconds")
+	assert.Contains(t, origins, "vector.sources.git_history.index_path")
+}
+
+func TestVectorConfig_ResolveVectorizerConfigMatchesHyphenAndUnderscoreScopes(t *testing.T) {
+	t.Parallel()
+
+	cfg := VectorConfig{
+		Stores: map[string]VectorizerConfig{
+			"agent_memory": {
+				Vectorizer: "embedding",
+				Model:      "memory-embed",
+			},
+		},
+		Sources: map[string]VectorizerConfig{
+			"git-history": {
+				Vectorizer: "lexical",
+				IndexPath:  ".atteler/git-history-vector.json",
+			},
+		},
+	}
+
+	memory := cfg.ResolveVectorizerConfig(VectorScope{Store: "agent-memory"})
+	assert.Equal(t, "embedding", memory.Vectorizer)
+	assert.Equal(t, "memory-embed", memory.Model)
+
+	gitHistory := cfg.ResolveVectorizerConfig(VectorScope{Source: "git_history"})
+	assert.Equal(t, "lexical", gitHistory.Vectorizer)
+	assert.Equal(t, ".atteler/git-history-vector.json", gitHistory.IndexPath)
 }
 
 func TestLoadFiles_JSONCompatibility(t *testing.T) {

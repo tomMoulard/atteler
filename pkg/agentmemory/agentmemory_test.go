@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -572,6 +573,29 @@ func TestLoadCompactsExpiredStaleContentBeforeValidation(t *testing.T) {
 
 	loaded, err := Load(path)
 	require.NoError(t, err)
+	assert.Empty(t, loaded.Documents("agent"))
+	assert.True(t, loaded.Vectorizer.CompatibleWith(vector.TextVectorizerSpec(loaded.Dimensions)))
+}
+
+func TestLoadAndCompactReportsExpiredDocumentsBeforeValidation(t *testing.T) {
+	t.Parallel()
+
+	expired := time.Now().UTC().Add(-time.Second)
+	store, err := NewStore(16)
+	require.NoError(t, err)
+	require.NoError(t, store.AddTextWithOptions("agent", "expired", "expired stale agent memory", WithExpiresAt(expired)))
+	store.Vectorizer.Model = staleHashModel
+	store.Agents["agent"][0].Vectorizer = store.Vectorizer
+	store.Agents["agent"][0].Provenance = nil
+
+	path := filepath.Join(t.TempDir(), "agent-memory.json")
+	data, err := json.Marshal(store)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	loaded, removed, err := LoadAndCompact(path, time.Now().UTC())
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed)
 	assert.Empty(t, loaded.Documents("agent"))
 	assert.True(t, loaded.Vectorizer.CompatibleWith(vector.TextVectorizerSpec(loaded.Dimensions)))
 }
@@ -1241,6 +1265,106 @@ func TestStore_RetrievalQualityRegression(t *testing.T) {
 	}
 }
 
+func TestStore_EmbeddingVectorizerPersistsAndSearchesWithContext(t *testing.T) {
+	t.Parallel()
+
+	vectorizer := &agentMemoryEmbeddingVectorizer{}
+	store, err := NewStoreWithVectorizer(agentMemoryEmbeddingSpec(0), vectorizer)
+	require.NoError(t, err)
+
+	err = store.AddText("agent", "no-context", "semantic retrieval memory")
+	require.ErrorIs(t, err, vector.ErrContextRequired)
+
+	require.NoError(t, store.AddTextContext(context.TODO(), "agent", "rag", "semantic retrieval memory for local rag"))
+	require.NoError(t, store.AddTextContext(context.TODO(), "agent", "shell", "shell command output capture"))
+
+	assert.Equal(t, 3, store.Dimensions)
+	assert.True(t, store.Vectorizer.CompatibleWith(agentMemoryEmbeddingSpec(3)))
+
+	results, err := store.SearchContext(context.TODO(), "agent", "semantic retrieval", 1)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "rag", results[0].Document.ID)
+
+	path := filepath.Join(t.TempDir(), "embedding-agent-memory.json")
+	require.NoError(t, store.Save(path))
+
+	loaded, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, loaded.Vectorizer.CompatibleWith(agentMemoryEmbeddingSpec(3)))
+
+	_, err = loaded.SearchContext(context.TODO(), "agent", "semantic retrieval", 1)
+	require.ErrorIs(t, err, vector.ErrVectorizerMismatch)
+
+	require.NoError(t, loaded.SetVectorizer(agentMemoryEmbeddingSpec(0), &agentMemoryEmbeddingVectorizer{}))
+
+	retrievalResults, err := loaded.SearchRetrieval(context.TODO(), "agent", retrieval.Query{Text: "semantic retrieval", Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, retrievalResults, 1)
+	assert.Equal(t, "rag", retrievalResults[0].DocumentID)
+	assert.Equal(t, "agent-memory-embedding-vector-cosine", retrievalResults[0].Scorer.Name)
+
+	require.NoError(t, loaded.MigrateContext(context.TODO()))
+	assert.Equal(t, vector.TextHashVectorizerID, loaded.Vectorizer.ID)
+
+	migratedResults, err := loaded.Search("agent", "semantic retrieval", 1)
+	require.NoError(t, err)
+	require.Len(t, migratedResults, 1)
+	assert.Equal(t, "rag", migratedResults[0].Document.ID)
+}
+
+func TestStore_SetVectorizerRejectsDifferentEmbeddingEndpoint(t *testing.T) {
+	t.Parallel()
+
+	vectorizer := &agentMemoryEmbeddingVectorizer{}
+	spec := agentMemoryEmbeddingSpec(0)
+	spec.Provider = "ollama"
+	spec.BaseURL = "http://127.0.0.1:11434"
+	store, err := NewStoreWithVectorizer(spec, vectorizer)
+	require.NoError(t, err)
+	require.NoError(t, store.AddTextContext(context.TODO(), "agent", "rag", "semantic retrieval memory for local rag"))
+
+	otherEndpoint := spec
+	otherEndpoint.BaseURL = "http://127.0.0.1:11435"
+	err = store.SetVectorizer(otherEndpoint, vectorizer)
+	require.ErrorIs(t, err, vector.ErrVectorizerMismatch)
+
+	sameEndpoint := spec
+	sameEndpoint.BaseURL = "http://127.0.0.1:11434/"
+	require.NoError(t, store.SetVectorizer(sameEndpoint, vectorizer))
+}
+
+func TestStore_MigrateToVectorizerContextReembedsLexicalStore(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(16)
+	require.NoError(t, err)
+	require.NoError(t, store.AddText("agent", "rag", "semantic retrieval memory for local rag"))
+	require.NoError(t, store.AddText("agent", "shell", "shell command output capture"))
+
+	require.NoError(t, store.MigrateToVectorizerContext(
+		context.TODO(),
+		agentMemoryEmbeddingSpec(0),
+		&agentMemoryEmbeddingVectorizer{},
+	))
+
+	assert.Equal(t, 3, store.Dimensions)
+	assert.True(t, store.Vectorizer.CompatibleWith(agentMemoryEmbeddingSpec(3)))
+
+	docs := store.Documents("agent")
+	require.Len(t, docs, 2)
+
+	for _, doc := range docs {
+		assert.True(t, doc.Vectorizer.CompatibleWith(agentMemoryEmbeddingSpec(3)))
+		assert.Len(t, doc.Vector, 3)
+	}
+
+	results, err := store.SearchContext(context.TODO(), "agent", "semantic retrieval", 1)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "rag", results[0].Document.ID)
+}
+
 func TestLoadRefusesUnredactedPersistedText(t *testing.T) {
 	t.Parallel()
 
@@ -1398,6 +1522,16 @@ func assertAgentBackingOmitsText(t *testing.T, docs []Document, text string) {
 	}
 }
 
+func TestStore_SearchRetrievalRejectsNilContext(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(16)
+	require.NoError(t, err)
+
+	_, err = store.SearchRetrieval(nil, "reviewer", retrieval.Query{Text: "oauth"}) //nolint:staticcheck // Verify nil contexts are rejected instead of panicking.
+	require.ErrorIs(t, err, vector.ErrContextRequired)
+}
+
 func TestStore_SearchRetrievalUsesPersistentIndexAndSafety(t *testing.T) {
 	t.Parallel()
 
@@ -1498,4 +1632,53 @@ func TestLoad_NormalizesLegacyAgentMemoryBeforeRetrieval(t *testing.T) {
 	assert.NotContains(t, results[0].Snippet, "super-secret-token")
 	assert.Equal(t, "[REDACTED]", results[0].Metadata["api_key"])
 	assert.NotContains(t, results[0].Metadata["api_key"], "metadata-secret-token")
+}
+
+type agentMemoryEmbeddingVectorizer struct{}
+
+func (agentMemoryEmbeddingVectorizer) Vectorize(text string) (vector.Vector, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, vector.ErrEmptyText
+	}
+
+	return nil, vector.ErrContextRequired
+}
+
+func (agentMemoryEmbeddingVectorizer) VectorizeContext(ctx context.Context, text string) (vector.Vector, error) {
+	if ctx == nil {
+		return nil, vector.ErrContextRequired
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if strings.TrimSpace(text) == "" {
+		return nil, vector.ErrEmptyText
+	}
+
+	out := vector.Vector{0, 0, 0}
+
+	for token := range strings.FieldsSeq(strings.ToLower(text)) {
+		switch strings.Trim(token, ".,:;!?") {
+		case "semantic", "retrieval", "memory", "rag", "local":
+			out[0]++
+		case "shell", "command", "output", "capture":
+			out[1]++
+		default:
+			out[2]++
+		}
+	}
+
+	return out, nil
+}
+
+func agentMemoryEmbeddingSpec(dimensions int) vector.VectorizerSpec {
+	return vector.VectorizerSpec{
+		ID:            "test-agent-memory-embedding",
+		Model:         "agent-memory-embed-test",
+		Normalization: "lowercase-token-buckets-v1",
+		Version:       "1",
+		Dimensions:    dimensions,
+	}
 }

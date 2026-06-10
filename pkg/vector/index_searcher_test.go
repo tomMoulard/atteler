@@ -2,6 +2,10 @@ package vector
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -10,6 +14,296 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/retrieval"
 )
+
+func TestIndexSearcher_RetrievalQualityFixture(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "retrieval_quality.json"))
+	require.NoError(t, err)
+
+	var fixture struct {
+		Documents []struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		} `json:"documents"`
+		Cases []struct {
+			Query   string `json:"query"`
+			WantTop string `json:"want_top"`
+		} `json:"cases"`
+	}
+	require.NoError(t, json.Unmarshal(data, &fixture))
+
+	vectorizer, err := NewTextVectorizer(128)
+	require.NoError(t, err)
+
+	sources := make([]Source, 0, len(fixture.Documents))
+	for _, doc := range fixture.Documents {
+		sources = append(sources, Source{
+			Kind: SourceKindFile,
+			Path: filepath.ToSlash(filepath.Join("fixture", doc.ID+".md")),
+			Text: doc.Text,
+		})
+	}
+
+	idx, err := BuildIndex(
+		context.TODO(),
+		sources,
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 400, OverlapRunes: 40},
+		time.Unix(1, 0),
+	)
+	require.NoError(t, err)
+
+	ann, err := NewANNIndex(idx.Documents, idx.Dimensions, ANNOptions{})
+	require.NoError(t, err)
+
+	searcher := IndexSearcher{
+		Index:      idx,
+		Vectorizer: vectorizer,
+		IndexANN:   ann,
+		Source: retrieval.Source{
+			Type: retrieval.SourceVector,
+			Name: "quality-fixture",
+			URI:  filepath.ToSlash(filepath.Join("testdata", "retrieval_quality.json")),
+		},
+		ScorerName: "lexical-fixture-ann",
+	}
+
+	for _, tc := range fixture.Cases {
+		results, searchErr := retrieval.Search(context.TODO(), retrieval.Query{
+			Text:          tc.Query,
+			Limit:         1,
+			IncludeUnsafe: true,
+		}, searcher)
+		require.NoError(t, searchErr, tc.Query)
+
+		if assert.Len(t, results, 1, tc.Query) {
+			wantID := filepath.ToSlash(filepath.Join("fixture", tc.WantTop+".md")) + "#chunk=0000"
+			assert.Equal(t, wantID, results[0].DocumentID, tc.Query)
+			assert.Equal(t, "lexical-fixture-ann", results[0].Scorer.Name, tc.Query)
+		}
+	}
+}
+
+func TestIndexSearcher_RejectsMismatchedPrebuiltANN(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	idx, err := BuildIndex(
+		context.TODO(),
+		[]Source{{Path: "docs/auth.md", Text: "OAuth callback state validation"}},
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 100},
+		time.Unix(1, 0),
+	)
+	require.NoError(t, err)
+
+	other, err := BuildIndex(
+		context.TODO(),
+		[]Source{{Path: "docs/shell.md", Text: "Shell command output capture"}},
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 100},
+		time.Unix(1, 0),
+	)
+	require.NoError(t, err)
+
+	ann, err := NewANNIndex(other.Documents, other.Dimensions, ANNOptions{})
+	require.NoError(t, err)
+
+	_, err = IndexSearcher{Index: idx, Vectorizer: vectorizer, IndexANN: ann}.SearchRetrieval(
+		context.TODO(),
+		retrieval.Query{Text: "OAuth state", Limit: 1},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSourceStale)
+	assert.Contains(t, err.Error(), "ANN index")
+}
+
+func TestIndexSearcher_RejectsStalePrebuiltANNForSameDocumentID(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	idx, err := BuildIndex(
+		context.TODO(),
+		[]Source{{Path: "docs/auth.md", Text: "OAuth callback state validation"}},
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 100},
+		time.Unix(1, 0),
+	)
+	require.NoError(t, err)
+
+	ann, err := NewANNIndex(idx.Documents, idx.Dimensions, ANNOptions{})
+	require.NoError(t, err)
+	require.Len(t, ann.documents, 1)
+
+	ann.documents[0].Vector[0]++
+
+	_, err = IndexSearcher{Index: idx, Vectorizer: vectorizer, IndexANN: ann}.SearchRetrieval(
+		context.TODO(),
+		retrieval.Query{Text: "OAuth state", Limit: 1},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrVectorMismatch)
+	assert.Contains(t, err.Error(), "ANN index")
+}
+
+func TestIndexSearcher_ExplainReportsExactANNModeForSmallIndex(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	idx, err := BuildIndex(
+		context.TODO(),
+		[]Source{{Path: "docs/auth.md", Text: "OAuth callback state validation"}},
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 100},
+		time.Unix(1, 0),
+	)
+	require.NoError(t, err)
+
+	searcher := IndexSearcher{Index: idx, Vectorizer: vectorizer}
+	results, err := searcher.SearchRetrieval(context.TODO(), retrieval.Query{
+		Text:          "OAuth state",
+		Limit:         1,
+		Explain:       true,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	assert.InDelta(t, 1, results[0].Scorer.Details["ann_exact_scan"], 0)
+	assert.InDelta(t, 1, results[0].Scorer.Details["ann_documents"], 0)
+	assert.Contains(t, results[0].Scorer.Explanation, "ANN exact-scan searched all 1 indexed document(s)")
+}
+
+func TestIndexSearcher_ExplainReportsApproximateANNModeForLargeIndex(t *testing.T) {
+	t.Parallel()
+
+	vectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	sources := make([]Source, 0, DefaultANNExactSearchMaxDocuments+1)
+	for i := range DefaultANNExactSearchMaxDocuments + 1 {
+		text := "needle semantic retrieval target generic local RAG benchmark filler document"
+		if i == DefaultANNExactSearchMaxDocuments {
+			text = "needle semantic retrieval target for approximate ANN diagnostics"
+		}
+
+		sources = append(sources, Source{
+			Path: filepath.ToSlash(filepath.Join("docs", "doc-"+strconv.Itoa(i)+".md")),
+			Text: text,
+		})
+	}
+
+	idx, err := BuildIndex(
+		context.TODO(),
+		sources,
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 100},
+		time.Unix(1, 0),
+	)
+	require.NoError(t, err)
+
+	ann, err := NewANNIndex(idx.Documents, idx.Dimensions, ANNOptions{})
+	require.NoError(t, err)
+
+	searcher := IndexSearcher{Index: idx, Vectorizer: vectorizer, IndexANN: ann}
+	results, err := searcher.SearchRetrieval(context.TODO(), retrieval.Query{
+		Text:          "needle semantic retrieval target",
+		Limit:         1,
+		Explain:       true,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+
+	assert.InDelta(t, 0, results[0].Scorer.Details["ann_exact_scan"], 0)
+	assert.InDelta(t, DefaultANNExactSearchMaxDocuments+1, results[0].Scorer.Details["ann_documents"], 0)
+	assert.InDelta(t, DefaultANNExactSearchMaxDocuments, results[0].Scorer.Details["ann_min_candidates"], 0)
+	assert.Contains(t, results[0].Scorer.Explanation,
+		"ANN candidate search considered at least 64 of 65 indexed document(s) before exact reranking")
+}
+
+func TestIndexSearcher_SearchRetrievalReportsFileFreshness(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "auth.md")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("OAuth callback state validation"), 0o600))
+
+	initialModTime := time.Date(2026, 6, 1, 10, 30, 0, 0, time.UTC)
+	require.NoError(t, os.Chtimes(sourcePath, initialModTime, initialModTime))
+
+	source, err := SourceFromFile(sourcePath)
+	require.NoError(t, err)
+	recordedSourceUpdatedAt, err := time.Parse(time.RFC3339Nano, source.Metadata[retrieval.MetadataSourceUpdatedAt])
+	require.NoError(t, err)
+
+	vectorizer, err := NewTextVectorizer(32)
+	require.NoError(t, err)
+
+	idx, err := BuildIndex(
+		context.TODO(),
+		[]Source{source},
+		vectorizer,
+		vectorizer.Metadata(),
+		ChunkOptions{MaxRunes: 100},
+		time.Unix(1, 0),
+	)
+	require.NoError(t, err)
+
+	searcher := IndexSearcher{Index: idx, Vectorizer: vectorizer}
+	results, err := searcher.SearchRetrieval(context.TODO(), retrieval.Query{
+		Text:          "OAuth state",
+		Limit:         1,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "current", results[0].Freshness.Status)
+	assert.False(t, results[0].Freshness.Deleted)
+	assert.Equal(t, recordedSourceUpdatedAt, results[0].Freshness.SourceUpdatedAt)
+	assert.Equal(t, idx.UpdatedAt, results[0].Freshness.IndexedAt)
+
+	updatedModTime := recordedSourceUpdatedAt.Add(time.Hour)
+	require.NoError(t, os.Chtimes(sourcePath, updatedModTime, updatedModTime))
+	info, err := os.Stat(sourcePath)
+	require.NoError(t, err)
+
+	results, err = searcher.SearchRetrieval(context.TODO(), retrieval.Query{
+		Text:          "OAuth state",
+		Limit:         1,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "stale", results[0].Freshness.Status)
+	assert.False(t, results[0].Freshness.Deleted)
+	assert.Equal(t, info.ModTime().UTC(), results[0].Freshness.SourceUpdatedAt)
+
+	require.NoError(t, os.Remove(sourcePath))
+
+	results, err = searcher.SearchRetrieval(context.TODO(), retrieval.Query{
+		Text:          "OAuth state",
+		Limit:         1,
+		IncludeUnsafe: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "deleted", results[0].Freshness.Status)
+	assert.True(t, results[0].Freshness.Deleted)
+}
 
 func TestIndexSearcher_SearchRetrievalRedactsQueryBeforeVectorizing(t *testing.T) {
 	t.Parallel()

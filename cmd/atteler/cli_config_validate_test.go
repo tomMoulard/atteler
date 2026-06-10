@@ -709,6 +709,145 @@ func TestValidateConfig_AcceptsProviderTypeAliases(t *testing.T) {
 	require.NoError(t, validateConfig())
 }
 
+func TestValidateConfig_RejectsUnsupportedVectorConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
+agents:
+  reviewer:
+    model: gpt-4.1
+vector:
+  vectorizer: semantic
+  stores:
+    agentmemory:
+      vectorizer: embedding
+  agents:
+    reviwer:
+      vectorizer: embedding
+  sources:
+    git_histry:
+      fallback_policy: lexical
+`), 0o600))
+
+	err := validateConfig()
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "validate config: 3 fatal config diagnostics")
+	assert.Contains(t, message, `vector.vectorizer: unsupported vectorizer "semantic"`)
+	assert.Contains(t, message, "vector.stores.agentmemory: unknown vector store scope")
+	assert.Contains(t, message, "vector.sources.git_histry: unknown vector source scope")
+}
+
+func TestValidateConfig_RejectsVectorIndexPathCollisions(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
+vector:
+  workspace_index_path: .atteler/shared-vector-index.json
+  sources:
+    file:
+      index_path: ./.atteler/shared-vector-index.json
+`), 0o600))
+
+	err := validateConfig()
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "validate config: vector config")
+	assert.Contains(t, message, "vector.sources.file index_path")
+	assert.Contains(t, message, "file and workspace indexes must not share")
+}
+
+func TestValidateConfig_RejectsVectorLexicalFallbackIndexPathCollisions(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
+vector:
+  vectorizer: embedding
+  fallback_policy: lexical
+  workspace_index_path: .atteler/git-history-vector-index.lexical.json
+`), 0o600))
+
+	err := validateConfig()
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "validate config: vector config")
+	assert.Contains(t, message, "vector.workspace_index_path index_path")
+	assert.Contains(t, message, "vector.sources.git_history default lexical fallback")
+	assert.Contains(t, message, "workspace and git-history indexes must not share")
+}
+
+func TestValidateConfig_RejectsSharedAgentMemoryPathWithDifferentVectorizers(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "missing-codex"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", filepath.Join(tempDir, "missing-forge"))
+	t.Setenv("ATTELER_CONFIG", "")
+	t.Chdir(tempDir)
+
+	configDir := filepath.Join(tempDir, ".atteler")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
+agents:
+  planner:
+    model: gpt-4.1
+  reviewer:
+    model: gpt-4.1
+vector:
+  stores:
+    agent-memory:
+      vectorizer: embedding
+      model: shared-memory-embed
+      index_path: .atteler/agent-memory.json
+  agents:
+    reviewer:
+      model: reviewer-memory-embed
+`), 0o600))
+
+	err := validateConfig()
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "validate config: vector config")
+	assert.Contains(t, message, "vector.agents.reviewer shares agent-memory index_path")
+	assert.Contains(t, message, "different vectorizer identity")
+}
+
 func TestValidateHookConfig_AcceptsKnownPayloadModes(t *testing.T) {
 	t.Parallel()
 

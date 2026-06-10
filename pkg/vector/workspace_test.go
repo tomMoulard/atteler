@@ -454,13 +454,14 @@ func TestRefreshWorkspaceIndex_PersistsAndIncrementallyUpdates(t *testing.T) {
 
 	counting := &countingVectorizer{inner: vectorizer}
 	indexPath := filepath.Join(root, ".atteler", "workspace-index.json")
+	now := time.Unix(10, 0).UTC()
 	opts := WorkspaceOptions{
 		Root:               root,
 		IndexPath:          indexPath,
 		Vectorizer:         counting,
 		VectorizerMetadata: vectorizer.Metadata(),
 		Chunk:              ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
-		Now:                func() time.Time { return time.Unix(10, 0) },
+		Now:                func() time.Time { return now },
 	}
 
 	first, err := RefreshWorkspaceIndex(context.TODO(), opts)
@@ -470,17 +471,26 @@ func TestRefreshWorkspaceIndex_PersistsAndIncrementallyUpdates(t *testing.T) {
 	assert.True(t, first.Refreshed)
 	assert.Equal(t, 2, first.Added)
 	assert.Equal(t, 2, counting.calls)
+	assert.Equal(t, time.Unix(10, 0).UTC(), first.Index.CreatedAt)
+	assert.Equal(t, time.Unix(10, 0).UTC(), first.Index.UpdatedAt)
 
 	loaded, err := LoadIndex(indexPath)
 	require.NoError(t, err)
 	require.Len(t, loaded.Sources, 2)
 	require.Len(t, loaded.Documents, 2)
 
+	for i := range loaded.Documents {
+		assert.Equal(t, time.Unix(10, 0).UTC(), loaded.Documents[i].CreatedAt)
+		assert.Equal(t, time.Unix(10, 0).UTC(), loaded.Documents[i].UpdatedAt)
+		assert.NotEmpty(t, loaded.Documents[i].Metadata[retrieval.MetadataSourceUpdatedAt])
+	}
+
 	writeWorkspaceFile(t, root, "a.md", "alpha changed workspace retrieval")
 	require.NoError(t, os.Remove(filepath.Join(root, "b.md")))
 	writeWorkspaceFile(t, root, "c.md", "gamma workspace retrieval")
 
 	counting.calls = 0
+	now = time.Unix(20, 0).UTC()
 	second, err := RefreshWorkspaceIndex(context.TODO(), opts)
 	require.NoError(t, err)
 
@@ -490,11 +500,15 @@ func TestRefreshWorkspaceIndex_PersistsAndIncrementallyUpdates(t *testing.T) {
 	assert.Equal(t, 1, second.Updated)
 	assert.Equal(t, 1, second.Deleted)
 	assert.Equal(t, 2, counting.calls, "only changed and added sources should be vectorized")
+	assert.Equal(t, time.Unix(10, 0).UTC(), second.Index.CreatedAt)
+	assert.Equal(t, time.Unix(20, 0).UTC(), second.Index.UpdatedAt)
 
 	loaded, err = LoadIndex(indexPath)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"a.md", "c.md"}, sourceMetadataPaths(loaded.Sources))
 	assert.ElementsMatch(t, []string{"a.md#chunk=0000", "c.md#chunk=0000"}, documentIDs(loaded.Documents))
+	assert.Equal(t, time.Unix(10, 0).UTC(), loaded.CreatedAt)
+	assert.Equal(t, time.Unix(20, 0).UTC(), loaded.UpdatedAt)
 
 	require.NoError(t, os.Remove(filepath.Join(root, "a.md")))
 	require.NoError(t, os.Remove(filepath.Join(root, "c.md")))
@@ -509,6 +523,100 @@ func TestRefreshWorkspaceIndex_PersistsAndIncrementallyUpdates(t *testing.T) {
 
 	_, statErr := os.Stat(indexPath)
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestRefreshWorkspaceIndex_UpdatesFreshnessMetadataWithoutRevectorizing(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.md", "alpha workspace retrieval")
+	sourcePath := filepath.Join(root, "a.md")
+	firstSourceUpdatedAt := time.Date(2026, 6, 1, 10, 30, 0, 0, time.UTC)
+	secondSourceUpdatedAt := firstSourceUpdatedAt.Add(time.Hour)
+	require.NoError(t, os.Chtimes(sourcePath, firstSourceUpdatedAt, firstSourceUpdatedAt))
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	counting := &countingVectorizer{inner: vectorizer}
+	indexPath := filepath.Join(root, ".atteler", "workspace-index.json")
+	now := time.Unix(10, 0).UTC()
+	opts := WorkspaceOptions{
+		Root:               root,
+		IndexPath:          indexPath,
+		Vectorizer:         counting,
+		VectorizerMetadata: vectorizer.Metadata(),
+		Chunk:              ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
+		Now:                func() time.Time { return now },
+	}
+
+	first, err := RefreshWorkspaceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, first.Index)
+	require.Len(t, first.Index.Documents, 1)
+	assert.Equal(t, 1, counting.calls)
+	assert.Equal(t, firstSourceUpdatedAt.Format(time.RFC3339Nano),
+		first.Index.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
+
+	counting.calls = 0
+	now = time.Unix(20, 0).UTC()
+
+	require.NoError(t, os.Chtimes(sourcePath, secondSourceUpdatedAt, secondSourceUpdatedAt))
+
+	second, err := RefreshWorkspaceIndex(context.TODO(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, second.Index)
+	assert.True(t, second.Refreshed)
+	assert.Equal(t, 1, second.Updated)
+	assert.Equal(t, 0, second.Unchanged)
+	assert.Equal(t, 0, counting.calls, "freshness-only metadata updates should not re-vectorize unchanged files")
+	require.Len(t, second.Index.Documents, 1)
+	assert.Equal(t, time.Unix(10, 0).UTC(), second.Index.Documents[0].UpdatedAt)
+	assert.Equal(t, secondSourceUpdatedAt.Format(time.RFC3339Nano),
+		second.Index.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
+	assert.Equal(t, time.Unix(20, 0).UTC(), second.Index.UpdatedAt)
+}
+
+func TestRefreshWorkspaceIndexAsync_IncrementallyHandlesChangedAndDeletedFiles(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.md", "alpha async workspace retrieval")
+	writeWorkspaceFile(t, root, "b.md", "beta async workspace retrieval")
+
+	vectorizer, err := NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	counting := &countingVectorizer{inner: vectorizer}
+	opts := WorkspaceOptions{
+		Root:               root,
+		IndexPath:          filepath.Join(root, ".atteler", "workspace-index.json"),
+		Vectorizer:         counting,
+		VectorizerMetadata: vectorizer.Metadata(),
+		Chunk:              ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
+	}
+
+	first := <-RefreshWorkspaceIndexAsync(context.TODO(), opts)
+	require.NoError(t, first.Err)
+	assert.Equal(t, 2, first.Refresh.Added)
+
+	writeWorkspaceFile(t, root, "a.md", "alpha changed async workspace retrieval")
+	require.NoError(t, os.Remove(filepath.Join(root, "b.md")))
+
+	counting.calls = 0
+	second := <-RefreshWorkspaceIndexAsync(context.TODO(), opts)
+	require.NoError(t, second.Err)
+
+	assert.True(t, second.Refresh.Refreshed)
+	assert.Equal(t, 1, second.Refresh.Updated)
+	assert.Equal(t, 1, second.Refresh.Deleted)
+	assert.Equal(t, 0, second.Refresh.Added)
+	assert.Equal(t, 1, counting.calls, "async refresh should vectorize only the changed file")
+
+	loaded, err := LoadIndex(opts.IndexPath)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"a.md"}, sourceMetadataPaths(loaded.Sources))
+	assert.ElementsMatch(t, []string{"a.md#chunk=0000"}, documentIDs(loaded.Documents))
 }
 
 func TestRefreshWorkspaceIndex_TightensReusableIndexPermissions(t *testing.T) {

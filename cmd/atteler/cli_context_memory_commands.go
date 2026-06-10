@@ -7,16 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/tommoulard/atteler/pkg/agentmemory"
+	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextpack"
 	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -31,7 +33,21 @@ import (
 const (
 	retrievalSourceAll     = "all"
 	retrievalSourceSession = "session"
+
+	sourceVectorADRIndex        = ".atteler/adr-vector-index.json"
+	sourceVectorGitHistoryIndex = ".atteler/git-history-vector-index.json"
+	sourceVectorSessionIndex    = ".atteler/session-vector-index.json"
 )
+
+var adrSourceDirectories = []string{
+	"docs/adr",
+	"docs/adrs",
+	"docs/decisions",
+	"docs/architecture/decisions",
+	"adr",
+	"adrs",
+	"architecture/decisions",
+}
 
 func runLSPSymbols(ctx context.Context, input lspSymbolsCommandInput) error {
 	format, err := structuredCommandOutputFormat(input.JSON, input.OutputFormat)
@@ -368,52 +384,21 @@ func writeContextPackBudgetFailure(b *strings.Builder, stats contextpack.Stats) 
 	}
 }
 
-func addVectorFile(store *vector.Store, vectorizer *vector.TextVectorizer, path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("vector search: read %s: %w", path, err)
-	}
+const agentMemoryVectorStore = "agent-memory"
 
-	if !utf8.Valid(data) {
-		return fmt.Errorf("vector search: %s is not valid UTF-8", path)
-	}
-
-	clean := filepath.Clean(path)
-	text, safety := retrieval.Sanitize(privacy.RedactText(string(data)), retrieval.PolicyContext{
-		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: clean, URI: clean},
-		DocumentID: clean,
-		Path:       clean,
-	})
-
-	vec, err := vectorizer.Vectorize(text)
-	if err != nil {
-		return fmt.Errorf("vector search: vectorize %s: %w", path, err)
-	}
-
-	metadata := map[string]string{"path": clean}
-	if info, statErr := os.Stat(path); statErr == nil && !info.ModTime().IsZero() {
-		metadata[retrieval.MetadataSourceUpdatedAt] = info.ModTime().UTC().Format(time.RFC3339Nano)
-	}
-
-	if !retrieval.IsDefaultSafety(safety) {
-		metadata = retrieval.MergeSafetyMetadata(metadata, safety)
-	}
-
-	if err := store.Add(vector.Document{
-		ID:         clean,
-		Text:       text,
-		Vector:     vec,
-		Vectorizer: vectorizer.Spec(),
-		Metadata:   metadata,
-		Provenance: map[string]string{"source_type": "file", "path": clean},
-	}); err != nil {
-		return fmt.Errorf("vector search: index %s: %w", path, err)
-	}
-
-	return nil
+type agentMemoryVectorizerRuntime struct {
+	vectorizer vector.Vectorizer
+	spec       vector.VectorizerSpec
+	configured bool
 }
 
-func runAgentMemoryCommand(root, selectedAgent string, input agentMemoryCommandInput) error {
+func runAgentMemoryCommand(
+	ctx context.Context,
+	root,
+	selectedAgent string,
+	cfg appconfig.VectorConfig,
+	input agentMemoryCommandInput,
+) error {
 	agentName := strings.TrimSpace(input.Agent)
 	if agentName == "" {
 		agentName = strings.TrimSpace(selectedAgent)
@@ -423,17 +408,19 @@ func runAgentMemoryCommand(root, selectedAgent string, input agentMemoryCommandI
 		return errors.New("agent memory: --agent-memory-agent or --agent is required")
 	}
 
-	storePath := strings.TrimSpace(input.StorePath)
-	if storePath == "" {
-		storePath = filepath.Join(root, ".atteler", "agent-memory.json")
-	}
+	storePath := agentMemoryStorePath(root, agentName, input.StorePath, cfg)
 
-	store, err := loadAgentMemoryStore(storePath, input.Migrate)
+	runtime, err := agentMemoryRuntimeForCommand(cfg, agentName, input)
 	if err != nil {
 		return err
 	}
 
-	storeChanged, messages, err := mutateAgentMemoryStore(store, agentName, storePath, input)
+	store, compactedOnLoad, err := loadAgentMemoryStore(ctx, storePath, input.Migrate, input.Compact, runtime)
+	if err != nil {
+		return err
+	}
+
+	storeChanged, messages, err := mutateAgentMemoryStore(ctx, store, agentName, storePath, input, compactedOnLoad)
 	if err != nil {
 		return err
 	}
@@ -457,7 +444,7 @@ func runAgentMemoryCommand(root, selectedAgent string, input agentMemoryCommandI
 		limit = 5
 	}
 
-	results, err := store.Search(agentName, input.Search, limit)
+	results, err := store.SearchContext(ctx, agentName, input.Search, limit)
 	if err != nil {
 		return fmt.Errorf("agent memory: search: %w", err)
 	}
@@ -474,17 +461,37 @@ func runAgentMemoryCommand(root, selectedAgent string, input agentMemoryCommandI
 	return nil
 }
 
+func agentMemoryRuntimeForCommand(
+	cfg appconfig.VectorConfig,
+	agentName string,
+	input agentMemoryCommandInput,
+) (agentMemoryVectorizerRuntime, error) {
+	if !agentMemoryCommandNeedsVectorizer(input) {
+		return agentMemoryVectorizerRuntime{}, nil
+	}
+
+	return agentMemoryVectorizerRuntimeFromConfig(cfg, agentName)
+}
+
 func agentMemoryCommandNeedsAgent(input agentMemoryCommandInput) bool {
 	return strings.TrimSpace(input.Search) != "" ||
 		strings.TrimSpace(input.DeleteID) != "" ||
 		len(input.IndexFiles) > 0
 }
 
+func agentMemoryCommandNeedsVectorizer(input agentMemoryCommandInput) bool {
+	return strings.TrimSpace(input.Search) != "" ||
+		len(input.IndexFiles) > 0 ||
+		input.Migrate
+}
+
 func mutateAgentMemoryStore(
+	ctx context.Context,
 	store *agentmemory.Store,
 	agentName string,
 	storePath string,
 	input agentMemoryCommandInput,
+	compactedOnLoad int,
 ) (storeChanged bool, messages []string, err error) {
 	messages = make([]string, 0, len(input.IndexFiles)+3)
 
@@ -498,11 +505,11 @@ func mutateAgentMemoryStore(
 	storeChanged = storeChanged || deleted
 	messages = appendAgentMemoryMessage(messages, message)
 
-	compacted, message := compactAgentMemoryDocuments(store, storePath, input.Compact)
+	compacted, message := compactAgentMemoryDocuments(store, storePath, input.Compact, compactedOnLoad)
 	storeChanged = storeChanged || compacted
 	messages = appendAgentMemoryMessage(messages, message)
 
-	indexedMessage, err := indexAgentMemoryFiles(store, agentName, storePath, input.IndexFiles, input.TTLSeconds)
+	indexedMessage, err := indexAgentMemoryFiles(ctx, store, agentName, storePath, input.IndexFiles, input.TTLSeconds)
 	if err != nil {
 		return false, nil, err
 	}
@@ -544,21 +551,27 @@ func deleteAgentMemoryDocument(store *agentmemory.Store, agentName, storePath, i
 	)
 }
 
-func compactAgentMemoryDocuments(store *agentmemory.Store, storePath string, enabled bool) (changed bool, message string) {
+func compactAgentMemoryDocuments(store *agentmemory.Store, storePath string, enabled bool, compactedOnLoad int) (changed bool, message string) {
 	if !enabled {
 		return false, ""
 	}
 
-	removed := store.Compact(time.Now().UTC())
+	removed := compactedOnLoad + store.Compact(time.Now().UTC())
 	message = fmt.Sprintf("Compacted %d expired agent memory document(s) from %s", removed, memoryDisplayValue(storePath))
 
 	return true, message
 }
 
-func indexAgentMemoryFiles(store *agentmemory.Store, agentName, storePath string, paths []string, ttlSeconds int) (string, error) {
+func indexAgentMemoryFiles(
+	ctx context.Context,
+	store *agentmemory.Store,
+	agentName, storePath string,
+	paths []string,
+	ttlSeconds int,
+) (string, error) {
 	opts := agentMemoryIndexOptions(ttlSeconds)
 	for _, path := range paths {
-		if addErr := store.AddFileWithOptions(agentName, path, opts...); addErr != nil {
+		if addErr := store.AddFileWithOptionsContext(ctx, agentName, path, opts...); addErr != nil {
 			return "", fmt.Errorf("agent memory: index %s: %w", path, addErr)
 		}
 	}
@@ -578,28 +591,191 @@ func agentMemoryIndexOptions(ttlSeconds int) []agentmemory.AddOption {
 	return []agentmemory.AddOption{agentmemory.WithTTL(time.Duration(ttlSeconds) * time.Second)}
 }
 
-func loadAgentMemoryStore(path string, migrate bool) (*agentmemory.Store, error) {
+func agentMemoryStorePath(root, agentName, explicitPath string, cfg appconfig.VectorConfig) string {
+	if path := strings.TrimSpace(explicitPath); path != "" {
+		return rootRelativePath(root, path)
+	}
+
+	storeConfig := scopedVectorizerConfig(cfg.Stores, agentMemoryVectorStore)
+	agentConfig := scopedVectorizerConfig(cfg.Agents, agentName)
+	if path := firstNonEmpty(agentConfig.IndexPath, storeConfig.IndexPath); path != "" {
+		return rootRelativePath(root, path)
+	}
+
+	return filepath.Join(root, ".atteler", "agent-memory.json")
+}
+
+func agentMemoryVectorizerRuntimeFromConfig(
+	cfg appconfig.VectorConfig,
+	agentName string,
+) (agentMemoryVectorizerRuntime, error) {
+	settings, err := agentMemoryVectorSettings(cfg, agentName)
+	if err != nil {
+		return agentMemoryVectorizerRuntime{}, err
+	}
+
+	if settings.Vectorizer != vector.VectorizerKindEmbedding {
+		return agentMemoryVectorizerRuntime{}, nil
+	}
+
+	if !workspaceRemoteEmbeddingAllowed(settings.BaseURL, cfg.WorkspaceAllowRemoteEmbeddings) {
+		return agentMemoryVectorizerRuntime{}, fmt.Errorf(
+			"agent memory: remote embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings",
+			workspaceDisplayEmbeddingEndpoint(settings.BaseURL),
+		)
+	}
+
+	vectorizer, spec, err := newAgentMemoryVectorizer(settings)
+	if err != nil {
+		return agentMemoryVectorizerRuntime{}, err
+	}
+
+	return agentMemoryVectorizerRuntime{
+		vectorizer: vectorizer,
+		spec:       spec,
+		configured: true,
+	}, nil
+}
+
+func agentMemoryVectorSettings(cfg appconfig.VectorConfig, agentName string) (vectorSearchSettings, error) {
+	resolved := cfg.ResolveVectorizerConfig(appconfig.VectorScope{
+		Store: agentMemoryVectorStore,
+		Agent: agentName,
+	})
+	settings := vectorSearchSettings{
+		Vectorizer:     firstNonEmpty(resolved.Vectorizer, vector.VectorizerKindLexical),
+		Provider:       firstNonEmpty(resolved.Provider, vectorDefaultProvider),
+		Model:          firstNonEmpty(resolved.Model),
+		BaseURL:        firstNonEmpty(resolved.BaseURL),
+		FallbackPolicy: firstNonEmpty(resolved.FallbackPolicy, vectorFallbackPolicyFail),
+		Chunk: vector.ChunkOptions{
+			MaxRunes:     resolved.ChunkMaxRunes,
+			OverlapRunes: resolved.ChunkOverlapRunes,
+		},
+	}
+
+	if resolved.TimeoutSeconds > 0 {
+		settings.Timeout = time.Duration(resolved.TimeoutSeconds) * time.Second
+	}
+
+	settings.Chunk = settings.Chunk.Normalize()
+
+	var err error
+
+	settings.Vectorizer, err = normalizeVectorizerKind(settings.Vectorizer)
+	if err != nil {
+		return vectorSearchSettings{}, err
+	}
+
+	settings.FallbackPolicy, err = normalizeVectorFallbackPolicy(settings.FallbackPolicy)
+	if err != nil {
+		return vectorSearchSettings{}, err
+	}
+
+	return settings, nil
+}
+
+func newAgentMemoryVectorizer(settings vectorSearchSettings) (vector.Vectorizer, vector.VectorizerSpec, error) {
+	switch settings.Vectorizer {
+	case vector.VectorizerKindLexical:
+		vectorizer, err := vector.NewTextVectorizer(0)
+		if err != nil {
+			return nil, vector.VectorizerSpec{}, fmt.Errorf("agent memory: create lexical fallback vectorizer: %w", err)
+		}
+
+		return vectorizer, vectorizer.Spec(), nil
+	case vector.VectorizerKindEmbedding:
+		provider, err := normalizeEmbeddingProvider(settings.Provider)
+		if err != nil {
+			return nil, vector.VectorizerSpec{}, err
+		}
+
+		if provider == "" {
+			provider = vectorDefaultProvider
+		}
+
+		options := []vector.EmbeddingOption{
+			vector.WithEmbeddingProvider(provider),
+			vector.WithEmbeddingModel(settings.Model),
+			vector.WithEmbeddingBaseURL(settings.BaseURL),
+		}
+		if settings.Timeout > 0 {
+			options = append(options, vector.WithEmbeddingTimeout(settings.Timeout))
+		}
+
+		vectorizer := vector.NewEmbeddingVectorizer(options...)
+		spec := vectorizer.Spec(0)
+
+		return vectorizer, spec, nil
+	default:
+		return nil, vector.VectorizerSpec{}, fmt.Errorf("agent memory: unsupported vectorizer %q", settings.Vectorizer)
+	}
+}
+
+func loadAgentMemoryStore(
+	ctx context.Context,
+	path string,
+	migrate bool,
+	countCompacted bool,
+	runtime agentMemoryVectorizerRuntime,
+) (*agentmemory.Store, int, error) {
 	if _, err := os.Stat(path); err != nil {
-		return loadMissingAgentMemoryStore(path, migrate, err)
+		store, loadErr := loadMissingAgentMemoryStore(path, migrate, runtime, err)
+		return store, 0, loadErr
 	}
 
 	loadOptions := agentmemory.LoadOptions{Migrate: migrate}
 
-	store, err := agentmemory.LoadWithOptions(path, loadOptions)
+	var (
+		compactedOnLoad int
+		store           *agentmemory.Store
+		err             error
+	)
+	if countCompacted && !migrate {
+		store, compactedOnLoad, err = agentmemory.LoadAndCompactContext(ctx, path, time.Now().UTC())
+	} else {
+		store, err = agentmemory.LoadWithOptionsContext(ctx, path, loadOptions)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("agent memory: load store: %w", err)
+		return nil, 0, fmt.Errorf("agent memory: load store: %w", err)
 	}
 
-	return store, nil
+	if runtime.configured {
+		if migrate {
+			err = store.MigrateToVectorizerContext(ctx, runtime.spec, runtime.vectorizer)
+		} else {
+			err = store.SetVectorizer(runtime.spec, runtime.vectorizer)
+		}
+
+		if err != nil {
+			return nil, 0, fmt.Errorf("agent memory: configure vectorizer: %w", err)
+		}
+	}
+
+	return store, compactedOnLoad, nil
 }
 
-func loadMissingAgentMemoryStore(path string, migrate bool, statErr error) (*agentmemory.Store, error) {
+func loadMissingAgentMemoryStore(
+	path string,
+	migrate bool,
+	runtime agentMemoryVectorizerRuntime,
+	statErr error,
+) (*agentmemory.Store, error) {
 	if !errors.Is(statErr, os.ErrNotExist) {
 		return nil, fmt.Errorf("agent memory: stat store %s: %w", path, statErr)
 	}
 
 	if migrate {
 		return nil, fmt.Errorf("agent memory: migrate store %s: %w", path, statErr)
+	}
+
+	if runtime.configured {
+		store, err := agentmemory.NewStoreWithVectorizer(runtime.spec, runtime.vectorizer)
+		if err != nil {
+			return nil, fmt.Errorf("agent memory: create embedding store: %w", err)
+		}
+
+		return store, nil
 	}
 
 	store, err := agentmemory.NewStore(0)
@@ -675,7 +851,7 @@ func runRetrievalCommand(ctx context.Context, state appState, input retrievalCom
 		limit = 5
 	}
 
-	sources, err := selectedRetrievalSources(input, workspaceVectorEnabled(state.vectorConfig))
+	sources, err := selectedRetrievalSourcesForState(state, input)
 	if err != nil {
 		return err
 	}
@@ -739,9 +915,14 @@ func retrievalFilters(rawFilters []string) (map[string]string, error) {
 	return filters, nil
 }
 
-func selectedRetrievalSources(input retrievalCommandInput, includeWorkspaceVector bool) ([]retrieval.SourceType, error) {
+func selectedRetrievalSources(input retrievalCommandInput, includeVectorSource bool) ([]retrieval.SourceType, error) {
 	if len(input.Sources) == 0 {
-		return []retrieval.SourceType{retrieval.SourceMemory, retrieval.SourceFile, retrieval.SourceSession}, nil
+		sources := []retrieval.SourceType{retrieval.SourceMemory, retrieval.SourceFile, retrieval.SourceSession}
+		if retrievalExplicitFileVectorIndexRequested(input) {
+			sources = append(sources, retrieval.SourceVector)
+		}
+
+		return sources, nil
 	}
 
 	seen := make(map[retrieval.SourceType]struct{}, len(input.Sources))
@@ -754,7 +935,7 @@ func selectedRetrievalSources(input retrievalCommandInput, includeWorkspaceVecto
 		}
 
 		if all {
-			return allRetrievalSources(input, includeWorkspaceVector), nil
+			return allRetrievalSources(input, includeVectorSource), nil
 		}
 
 		if _, ok := seen[source]; ok {
@@ -766,6 +947,68 @@ func selectedRetrievalSources(input retrievalCommandInput, includeWorkspaceVecto
 	}
 
 	return out, nil
+}
+
+func selectedRetrievalSourcesForState(state appState, input retrievalCommandInput) ([]retrieval.SourceType, error) {
+	includeVector := workspaceVectorEnabled(state.vectorConfig) ||
+		retrievalReusableFileVectorIndexExists(state.cwd, state.vectorConfig, input)
+
+	sources, err := selectedRetrievalSources(input, includeVector)
+	if err != nil {
+		return nil, err
+	}
+
+	if retrievalSourceAllRequested(input.Sources) && strings.TrimSpace(state.selectedAgent) != "" {
+		sources = appendRetrievalSourceIfMissing(sources, retrieval.SourceAgentMemory)
+	}
+
+	return sources, nil
+}
+
+func appendRetrievalSourceIfMissing(sources []retrieval.SourceType, source retrieval.SourceType) []retrieval.SourceType {
+	if slices.Contains(sources, source) {
+		return sources
+	}
+
+	return append(sources, source)
+}
+
+func retrievalReusableFileVectorIndexExists(root string, cfg appconfig.VectorConfig, input retrievalCommandInput) bool {
+	if retrievalExplicitFileVectorIndexRequested(input) {
+		return true
+	}
+
+	if !retrievalSourceAllRequested(input.Sources) {
+		return false
+	}
+
+	settings, err := vectorSearchSettingsFromOptions(root, cfg, cliOptions{})
+	if err != nil {
+		return false
+	}
+
+	if settings.Vectorizer == vector.VectorizerKindEmbedding &&
+		!workspaceRemoteEmbeddingAllowed(settings.BaseURL, cfg.WorkspaceAllowRemoteEmbeddings) {
+		if settings.FallbackPolicy != vector.VectorizerKindLexical {
+			return false
+		}
+
+		settings = lexicalVectorFallbackSettings(settings)
+	}
+
+	_, metadata, err := newVectorSearchVectorizer(settings)
+	if err != nil {
+		return false
+	}
+
+	idx, err := vector.LoadIndex(settings.IndexPath)
+	if err != nil {
+		return false
+	}
+
+	reuse, _, err := reusableVectorIndex(idx, metadata, settings.Chunk, settings.IndexPath, nil)
+
+	return err == nil && reuse
 }
 
 func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {
@@ -780,6 +1023,8 @@ func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {
 		return retrieval.SourceSession, false, nil
 	case "git", "history", "git_history", "githistory":
 		return retrieval.SourceGitHistory, false, nil
+	case "adr", "adrs", "architecture_decision_record", "architecture_decision_records", "decision", "decisions":
+		return retrieval.SourceADR, false, nil
 	case "vector", "vectors":
 		return retrieval.SourceVector, false, nil
 	case memoryAgentKey, "agent_memory", "agentmemory":
@@ -789,18 +1034,19 @@ func parseRetrievalSource(raw string) (retrieval.SourceType, bool, error) {
 	}
 }
 
-func allRetrievalSources(input retrievalCommandInput, includeWorkspaceVector bool) []retrieval.SourceType {
+func allRetrievalSources(input retrievalCommandInput, includeVectorSource bool) []retrieval.SourceType {
 	sources := []retrieval.SourceType{
 		retrieval.SourceMemory,
 		retrieval.SourceFile,
 		retrieval.SourceSession,
 		retrieval.SourceGitHistory,
+		retrieval.SourceADR,
 	}
-	if len(input.VectorIndexFiles) > 0 || includeWorkspaceVector {
+	if retrievalExplicitFileVectorIndexRequested(input) || includeVectorSource {
 		sources = append(sources, retrieval.SourceVector)
 	}
 
-	if strings.TrimSpace(input.AgentMemoryAgent) != "" || strings.TrimSpace(input.AgentName) != "" || strings.TrimSpace(input.AgentMemoryStorePath) != "" {
+	if retrievalExplicitAgentMemorySourceRequested(input) {
 		sources = append(sources, retrieval.SourceAgentMemory)
 	}
 
@@ -832,7 +1078,7 @@ func retrievalSearchers(
 
 		searcher, err := retrievalSearcher(ctx, state, input, source)
 		if err != nil {
-			if shouldSkipEmptyWorkspaceVectorSource(input, sources, source, err) {
+			if shouldSkipRetrievalSourceError(state, input, sources, source, err) {
 				continue
 			}
 
@@ -847,6 +1093,19 @@ func retrievalSearchers(
 	return searchers, nil
 }
 
+func shouldSkipRetrievalSourceError(
+	state appState,
+	input retrievalCommandInput,
+	sources []retrieval.SourceType,
+	source retrieval.SourceType,
+	err error,
+) bool {
+	return shouldSkipEmptyWorkspaceVectorSource(input, sources, source, err) ||
+		shouldSkipUnavailableGitHistorySource(input, sources, source, err) ||
+		shouldSkipImplicitAgentMemorySourceError(state, input, sources, source) ||
+		shouldSkipImplicitFileVectorSourceError(state, input, sources, source)
+}
+
 func shouldSkipEmptyWorkspaceVectorSource(
 	input retrievalCommandInput,
 	sources []retrieval.SourceType,
@@ -855,15 +1114,75 @@ func shouldSkipEmptyWorkspaceVectorSource(
 ) bool {
 	return source == retrieval.SourceVector &&
 		len(sources) > 1 &&
-		len(input.VectorIndexFiles) == 0 &&
+		!retrievalExplicitFileVectorIndexRequested(input) &&
 		retrievalSourceAllRequested(input.Sources) &&
 		errors.Is(err, vector.ErrNoSources)
+}
+
+func shouldSkipImplicitFileVectorSourceError(
+	state appState,
+	input retrievalCommandInput,
+	sources []retrieval.SourceType,
+	source retrieval.SourceType,
+) bool {
+	return source == retrieval.SourceVector &&
+		len(sources) > 1 &&
+		retrievalSourceAllRequested(input.Sources) &&
+		!retrievalExplicitFileVectorIndexRequested(input) &&
+		!workspaceVectorEnabled(state.vectorConfig)
+}
+
+func shouldSkipImplicitAgentMemorySourceError(
+	state appState,
+	input retrievalCommandInput,
+	sources []retrieval.SourceType,
+	source retrieval.SourceType,
+) bool {
+	return source == retrieval.SourceAgentMemory &&
+		len(sources) > 1 &&
+		retrievalSourceAllRequested(input.Sources) &&
+		strings.TrimSpace(state.selectedAgent) != "" &&
+		!retrievalExplicitAgentMemorySourceRequested(input)
+}
+
+func shouldSkipUnavailableGitHistorySource(
+	input retrievalCommandInput,
+	sources []retrieval.SourceType,
+	source retrieval.SourceType,
+	err error,
+) bool {
+	return source == retrieval.SourceGitHistory &&
+		len(sources) > 1 &&
+		retrievalSourceAllRequested(input.Sources) &&
+		err != nil &&
+		strings.Contains(err.Error(), "git history: run git log:")
 }
 
 func retrievalSourceAllRequested(sources []string) bool {
 	for _, raw := range sources {
 		_, all, err := parseRetrievalSource(raw)
 		if err == nil && all {
+			return true
+		}
+	}
+
+	return false
+}
+
+func retrievalExplicitFileVectorIndexRequested(input retrievalCommandInput) bool {
+	return len(input.VectorIndexFiles) > 0 || strings.TrimSpace(input.Vector.StorePath) != ""
+}
+
+func retrievalExplicitAgentMemorySourceRequested(input retrievalCommandInput) bool {
+	return retrievalAgentMemorySourceRequested(input.Sources) ||
+		strings.TrimSpace(input.AgentMemoryAgent) != "" ||
+		strings.TrimSpace(input.AgentMemoryStorePath) != ""
+}
+
+func retrievalAgentMemorySourceRequested(sources []string) bool {
+	for _, raw := range sources {
+		source, all, err := parseRetrievalSource(raw)
+		if err == nil && !all && source == retrieval.SourceAgentMemory {
 			return true
 		}
 	}
@@ -883,6 +1202,15 @@ func retrievalSourceSet(sources []retrieval.SourceType) map[retrieval.SourceType
 func retrievalSearcher(ctx context.Context, state appState, input retrievalCommandInput, source retrieval.SourceType) (retrieval.Searcher, error) {
 	switch source {
 	case retrieval.SourceSession:
+		requested, err := sourceVectorIndexRequested(state.vectorConfig, vector.SourceKindSession)
+		if err != nil {
+			return nil, err
+		}
+
+		if requested {
+			return buildSessionVectorRetrievalSearcher(ctx, state)
+		}
+
 		return state.sessionStore, nil
 	case retrieval.SourceGitHistory:
 		logText, err := gitHistoryLog(ctx, state.cwd)
@@ -895,14 +1223,765 @@ func retrievalSearcher(ctx context.Context, state appState, input retrievalComma
 			return nil, fmt.Errorf("git history: parse log: %w", err)
 		}
 
+		requested, err := sourceVectorIndexRequested(state.vectorConfig, vector.SourceKindGitHistory)
+		if err != nil {
+			return nil, err
+		}
+
+		if requested {
+			return buildGitHistoryVectorRetrievalSearcher(ctx, state, commits)
+		}
+
 		return githistory.NewIndex(commits), nil
+	case retrieval.SourceADR:
+		return buildADRVectorRetrievalSearcher(ctx, state)
 	case retrieval.SourceVector:
-		return buildVectorRetrievalSearcher(ctx, state, input.VectorIndexFiles)
+		return buildVectorRetrievalSearcher(ctx, state, input)
 	case retrieval.SourceAgentMemory:
-		return buildAgentMemoryRetrievalSearcher(state.cwd, state.selectedAgent, input)
+		return buildAgentMemoryRetrievalSearcher(ctx, state.cwd, state.selectedAgent, state.vectorConfig, input)
 	default:
 		return nil, fmt.Errorf("retrieval: unsupported source %q", source)
 	}
+}
+
+func sourceVectorIndexRequested(cfg appconfig.VectorConfig, sourceKind string) (bool, error) {
+	settings, err := sourceVectorSettings("", cfg, sourceKind, "")
+	if err != nil {
+		return false, err
+	}
+
+	if settings.Vectorizer == vector.VectorizerKindEmbedding {
+		return true, nil
+	}
+
+	if strings.TrimSpace(cfg.Vectorizer) != "" {
+		return true, nil
+	}
+
+	scoped := scopedVectorizerConfig(cfg.Sources, sourceKind)
+
+	return vectorizerConfigExplicit(scoped), nil
+}
+
+func vectorizerConfigExplicit(cfg appconfig.VectorizerConfig) bool {
+	return strings.TrimSpace(cfg.Vectorizer) != "" ||
+		strings.TrimSpace(cfg.Provider) != "" ||
+		strings.TrimSpace(cfg.Model) != "" ||
+		strings.TrimSpace(cfg.BaseURL) != "" ||
+		strings.TrimSpace(cfg.FallbackPolicy) != "" ||
+		strings.TrimSpace(cfg.IndexPath) != "" ||
+		cfg.TimeoutSeconds > 0 ||
+		cfg.ChunkMaxRunes > 0 ||
+		cfg.ChunkOverlapRunes > 0
+}
+
+func buildSessionVectorRetrievalSearcher(ctx context.Context, state appState) (retrieval.Searcher, error) {
+	settings, err := sourceVectorSettings(state.cwd, state.vectorConfig, vector.SourceKindSession, sourceVectorSessionIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	sources, err := sessionVectorSources(state.sessionStore)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(sources) == 0 {
+		clearErr := clearEmptySourceVectorIndexes(ctx, settings, vector.SourceKindSession)
+		if clearErr != nil {
+			return nil, clearErr
+		}
+
+		return nil, nil
+	}
+
+	source := sessionVectorRetrievalSource(state.cwd, settings)
+	if settings.Vectorizer == vector.VectorizerKindEmbedding &&
+		!workspaceRemoteEmbeddingAllowed(settings.BaseURL, state.vectorConfig.WorkspaceAllowRemoteEmbeddings) {
+		if settings.FallbackPolicy == vector.VectorizerKindLexical {
+			return buildSourceVectorRetrievalSearcherWithLexicalFallback(ctx, state.cwd, settings, vector.SourceKindSession, source, sources)
+		}
+
+		return nil, fmt.Errorf("retrieval: remote session embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings", workspaceDisplayEmbeddingEndpoint(settings.BaseURL))
+	}
+
+	searcher, err := buildSourceVectorRetrievalSearcher(ctx, settings, vector.SourceKindSession, source, sources)
+	if err == nil ||
+		settings.Vectorizer != vector.VectorizerKindEmbedding ||
+		settings.FallbackPolicy != vector.VectorizerKindLexical ||
+		!vectorSearchEmbeddingFailure(err) {
+		return searcher, err
+	}
+
+	return buildSourceVectorRetrievalSearcherWithLexicalFallback(ctx, state.cwd, settings, vector.SourceKindSession, source, sources)
+}
+
+func buildGitHistoryVectorRetrievalSearcher(
+	ctx context.Context,
+	state appState,
+	commits []githistory.Commit,
+) (retrieval.Searcher, error) {
+	settings, err := sourceVectorSettings(state.cwd, state.vectorConfig, vector.SourceKindGitHistory, sourceVectorGitHistoryIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	sources := gitHistoryVectorSources(commits)
+	if len(sources) == 0 {
+		clearErr := clearEmptySourceVectorIndexes(ctx, settings, vector.SourceKindGitHistory)
+		if clearErr != nil {
+			return nil, clearErr
+		}
+
+		return nil, nil
+	}
+
+	source := gitHistoryVectorRetrievalSource(state.cwd, settings)
+	if settings.Vectorizer == vector.VectorizerKindEmbedding &&
+		!workspaceRemoteEmbeddingAllowed(settings.BaseURL, state.vectorConfig.WorkspaceAllowRemoteEmbeddings) {
+		if settings.FallbackPolicy == vector.VectorizerKindLexical {
+			return buildSourceVectorRetrievalSearcherWithLexicalFallback(ctx, state.cwd, settings, vector.SourceKindGitHistory, source, sources)
+		}
+
+		return nil, fmt.Errorf("retrieval: remote git-history embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings", workspaceDisplayEmbeddingEndpoint(settings.BaseURL))
+	}
+
+	searcher, err := buildSourceVectorRetrievalSearcher(ctx, settings, vector.SourceKindGitHistory, source, sources)
+	if err == nil ||
+		settings.Vectorizer != vector.VectorizerKindEmbedding ||
+		settings.FallbackPolicy != vector.VectorizerKindLexical ||
+		!vectorSearchEmbeddingFailure(err) {
+		return searcher, err
+	}
+
+	return buildSourceVectorRetrievalSearcherWithLexicalFallback(ctx, state.cwd, settings, vector.SourceKindGitHistory, source, sources)
+}
+
+func buildADRVectorRetrievalSearcher(ctx context.Context, state appState) (retrieval.Searcher, error) {
+	settings, err := sourceVectorSettings(state.cwd, state.vectorConfig, vector.SourceKindADR, sourceVectorADRIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	sources, err := adrVectorSources(ctx, state.cwd)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(sources) == 0 {
+		if clearErr := clearEmptySourceVectorIndexes(ctx, settings, vector.SourceKindADR); clearErr != nil {
+			return nil, clearErr
+		}
+
+		return nil, nil
+	}
+
+	source := adrVectorRetrievalSource(state.cwd, settings)
+	if settings.Vectorizer == vector.VectorizerKindEmbedding &&
+		!workspaceRemoteEmbeddingAllowed(settings.BaseURL, state.vectorConfig.WorkspaceAllowRemoteEmbeddings) {
+		if settings.FallbackPolicy == vector.VectorizerKindLexical {
+			return buildSourceVectorRetrievalSearcherWithLexicalFallback(ctx, state.cwd, settings, vector.SourceKindADR, source, sources)
+		}
+
+		return nil, fmt.Errorf("retrieval: remote adr embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings", workspaceDisplayEmbeddingEndpoint(settings.BaseURL))
+	}
+
+	searcher, err := buildSourceVectorRetrievalSearcher(ctx, settings, vector.SourceKindADR, source, sources)
+	if err == nil ||
+		settings.Vectorizer != vector.VectorizerKindEmbedding ||
+		settings.FallbackPolicy != vector.VectorizerKindLexical ||
+		!vectorSearchEmbeddingFailure(err) {
+		return searcher, err
+	}
+
+	return buildSourceVectorRetrievalSearcherWithLexicalFallback(ctx, state.cwd, settings, vector.SourceKindADR, source, sources)
+}
+
+func sessionVectorRetrievalSource(root string, settings vectorSearchSettings) retrieval.Source {
+	return retrieval.Source{
+		Type: retrieval.SourceSession,
+		Name: "session-vector-index",
+		URI:  sourceVectorIndexURI(root, settings.IndexPath),
+	}
+}
+
+func gitHistoryVectorRetrievalSource(root string, settings vectorSearchSettings) retrieval.Source {
+	return retrieval.Source{
+		Type: retrieval.SourceGitHistory,
+		Name: "git-history-vector-index",
+		URI:  sourceVectorIndexURI(root, settings.IndexPath),
+	}
+}
+
+func adrVectorRetrievalSource(root string, settings vectorSearchSettings) retrieval.Source {
+	return retrieval.Source{
+		Type: retrieval.SourceADR,
+		Name: "adr-vector-index",
+		URI:  sourceVectorIndexURI(root, settings.IndexPath),
+	}
+}
+
+func lexicalSourceVectorFallbackSettings(settings vectorSearchSettings) vectorSearchSettings {
+	return lexicalVectorFallbackSettings(settings)
+}
+
+func sourceVectorSettings(
+	cwd string,
+	cfg appconfig.VectorConfig,
+	sourceKind string,
+	defaultIndexPath string,
+) (vectorSearchSettings, error) {
+	resolved := cfg.ResolveVectorizerConfig(appconfig.VectorScope{Source: sourceKind})
+	sourceConfig := scopedVectorizerConfig(cfg.Sources, sourceKind)
+
+	settings := vectorSearchSettings{
+		Vectorizer:     firstNonEmpty(resolved.Vectorizer, vector.VectorizerKindLexical),
+		Provider:       firstNonEmpty(resolved.Provider, vectorDefaultProvider),
+		Model:          firstNonEmpty(resolved.Model),
+		BaseURL:        firstNonEmpty(resolved.BaseURL),
+		FallbackPolicy: firstNonEmpty(resolved.FallbackPolicy, vectorFallbackPolicyFail),
+		IndexPath:      firstNonEmpty(sourceConfig.IndexPath, defaultIndexPath),
+		Chunk: vector.ChunkOptions{
+			MaxRunes:     resolved.ChunkMaxRunes,
+			OverlapRunes: resolved.ChunkOverlapRunes,
+		},
+	}
+
+	settings.IndexPath = rootRelativePath(cwd, settings.IndexPath)
+
+	if resolved.TimeoutSeconds > 0 {
+		settings.Timeout = time.Duration(resolved.TimeoutSeconds) * time.Second
+	}
+
+	settings.Chunk = settings.Chunk.Normalize()
+
+	var err error
+
+	settings.Vectorizer, err = normalizeVectorizerKind(settings.Vectorizer)
+	if err != nil {
+		return vectorSearchSettings{}, err
+	}
+
+	settings.FallbackPolicy, err = normalizeVectorFallbackPolicy(settings.FallbackPolicy)
+	if err != nil {
+		return vectorSearchSettings{}, err
+	}
+
+	return settings, nil
+}
+
+func clearEmptySourceVectorIndexes(ctx context.Context, settings vectorSearchSettings, sourceKind string) error {
+	if err := clearEmptySourceVectorIndex(ctx, settings, sourceKind); err != nil {
+		return err
+	}
+
+	if settings.Vectorizer != vector.VectorizerKindEmbedding ||
+		settings.FallbackPolicy != vector.VectorizerKindLexical {
+		return nil
+	}
+
+	return clearEmptySourceVectorIndex(ctx, lexicalSourceVectorFallbackSettings(settings), sourceKind)
+}
+
+func clearEmptySourceVectorIndex(ctx context.Context, settings vectorSearchSettings, sourceKind string) error {
+	if err := validateEmptySourceVectorIndexMayBeCleared(settings.IndexPath, sourceKind); err != nil {
+		return err
+	}
+
+	_, err := vector.RefreshSourceIndex(ctx, vector.SourceIndexOptions{
+		IndexPath: settings.IndexPath,
+		Sources:   nil,
+		Chunk:     settings.Chunk,
+	})
+	if err == nil || errors.Is(err, vector.ErrNoSources) {
+		return nil
+	}
+
+	return fmt.Errorf("retrieval: clear %s vector index: %w", sourceKind, err)
+}
+
+func validateEmptySourceVectorIndexMayBeCleared(indexPath, sourceKind string) error {
+	return validateSourceVectorIndexSourceKind(indexPath, sourceKind, "clear")
+}
+
+func validateSourceVectorIndexMayBeRefreshed(indexPath, sourceKind string) error {
+	return validateSourceVectorIndexSourceKind(indexPath, sourceKind, "refresh")
+}
+
+func validateSourceVectorIndexSourceKind(indexPath, sourceKind, action string) error {
+	if strings.TrimSpace(indexPath) == "" {
+		return nil
+	}
+
+	sources, ok, err := sourceVectorIndexGuardSources(indexPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+
+		// Let RefreshSourceIndex decide whether a stale/corrupt managed vector
+		// index can be rebuilt or removed. This guard only prevents replacing an
+		// index whose persisted source metadata proves it belongs to another
+		// source family, even when strict vector validation would require a
+		// rebuild.
+		return nil
+	}
+
+	if !ok {
+		return nil
+	}
+
+	expectedKind := normalizeVectorSourceKindForCompare(sourceKind)
+	for _, source := range sources {
+		actualKind := normalizeVectorSourceKindForCompare(source.Kind)
+		if actualKind != expectedKind {
+			return fmt.Errorf(
+				"source vector index: refusing to %s %s vector index %s: contains %s source %q",
+				action,
+				expectedKind,
+				indexPath,
+				actualKind,
+				source.Path,
+			)
+		}
+	}
+
+	return nil
+}
+
+func sourceVectorIndexGuardSources(indexPath string) ([]vector.SourceMetadata, bool, error) {
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		return nil, false, fmt.Errorf("read source vector index guard %s: %w", indexPath, err)
+	}
+
+	var fields struct {
+		Vectorizer json.RawMessage `json:"vectorizer"`
+		Chunk      json.RawMessage `json:"chunk"`
+		Sources    json.RawMessage `json:"sources"`
+		Documents  json.RawMessage `json:"documents"`
+		Version    int             `json:"version"`
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, false, fmt.Errorf("decode source vector index guard %s: %w", indexPath, err)
+	}
+
+	if fields.Version <= 0 ||
+		!sourceVectorIndexGuardJSONFieldIsObject(fields.Vectorizer) ||
+		!sourceVectorIndexGuardJSONFieldIsObject(fields.Chunk) ||
+		!sourceVectorIndexGuardJSONFieldIsArray(fields.Sources) ||
+		!sourceVectorIndexGuardJSONFieldIsArray(fields.Documents) {
+		return nil, false, nil
+	}
+
+	var sources []vector.SourceMetadata
+	if err := json.Unmarshal(fields.Sources, &sources); err != nil {
+		return nil, true, fmt.Errorf("decode source vector index guard sources %s: %w", indexPath, err)
+	}
+
+	return sources, true, nil
+}
+
+func sourceVectorIndexGuardJSONFieldIsObject(raw json.RawMessage) bool {
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+
+	return value != nil
+}
+
+func sourceVectorIndexGuardJSONFieldIsArray(raw json.RawMessage) bool {
+	var value []json.RawMessage
+
+	return json.Unmarshal(raw, &value) == nil
+}
+
+func normalizeVectorSourceKindForCompare(kind string) string {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	kind = strings.ReplaceAll(kind, "-", "_")
+	kind = strings.ReplaceAll(kind, " ", "_")
+	if kind == "" {
+		return vector.SourceKindFile
+	}
+
+	return kind
+}
+
+func buildSourceVectorRetrievalSearcherWithLexicalFallback(
+	ctx context.Context,
+	root string,
+	settings vectorSearchSettings,
+	sourceKind string,
+	source retrieval.Source,
+	sources []vector.Source,
+) (retrieval.Searcher, error) {
+	fallbackSettings := lexicalSourceVectorFallbackSettings(settings)
+	source.URI = sourceVectorIndexURI(root, fallbackSettings.IndexPath)
+
+	return buildSourceVectorRetrievalSearcher(ctx, fallbackSettings, sourceKind, source, sources)
+}
+
+func buildSourceVectorRetrievalSearcher(
+	ctx context.Context,
+	settings vectorSearchSettings,
+	sourceKind string,
+	source retrieval.Source,
+	sources []vector.Source,
+) (retrieval.Searcher, error) {
+	if err := validateSourceVectorIndexMayBeRefreshed(settings.IndexPath, sourceKind); err != nil {
+		return nil, err
+	}
+
+	vectorizer, metadata, err := newVectorSearchVectorizer(settings)
+	if err != nil {
+		return nil, err
+	}
+
+	refresh, err := vector.RefreshSourceIndex(ctx, vector.SourceIndexOptions{
+		IndexPath:          settings.IndexPath,
+		Sources:            sources,
+		Vectorizer:         vectorizer,
+		VectorizerMetadata: metadata,
+		Chunk:              settings.Chunk,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retrieval: refresh %s vector index: %w", sourceKind, err)
+	}
+
+	return newVectorIndexRetrievalSearcher(
+		refresh.Index,
+		vectorizer,
+		source,
+		settings.Vectorizer+"-"+strings.ReplaceAll(sourceKind, "_", "-")+"-ann",
+	)
+}
+
+func sessionVectorSources(store *session.Store) ([]vector.Source, error) {
+	if store == nil {
+		return nil, nil
+	}
+
+	summaries, err := store.List()
+	if err != nil {
+		return nil, fmt.Errorf("retrieval: list sessions for vector index: %w", err)
+	}
+
+	sources := make([]vector.Source, 0, len(summaries))
+	for i := range summaries {
+		summary := &summaries[i]
+		saved, err := store.Load(summary.Path)
+		if err != nil {
+			return nil, fmt.Errorf("retrieval: load session %s for vector index: %w", summary.ID, err)
+		}
+
+		text := sessionVectorText(saved)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+
+		metadata := map[string]string{
+			"session_id": saved.ID,
+		}
+		if !saved.CreatedAt.IsZero() {
+			metadata["created_at"] = saved.CreatedAt.UTC().Format(time.RFC3339)
+		}
+
+		if !saved.UpdatedAt.IsZero() {
+			updatedAt := saved.UpdatedAt.UTC()
+			metadata["updated_at"] = updatedAt.Format(time.RFC3339)
+			metadata[retrieval.MetadataSourceUpdatedAt] = updatedAt.Format(time.RFC3339Nano)
+		}
+
+		if saved.Title != "" {
+			metadata["title"] = saved.Title
+		}
+
+		if saved.DefaultAgent != "" {
+			metadata["agent"] = saved.DefaultAgent
+		}
+
+		if saved.DefaultModel != "" {
+			metadata["model"] = saved.DefaultModel
+		}
+
+		if len(saved.Tags) > 0 {
+			metadata["tags"] = strings.Join(saved.Tags, ",")
+		}
+
+		sources = append(sources, vector.Source{
+			Kind:       vector.SourceKindSession,
+			Path:       "sessions/" + saved.ID,
+			Text:       text,
+			Metadata:   metadata,
+			Provenance: map[string]string{"session_id": saved.ID},
+		})
+	}
+
+	return sources, nil
+}
+
+func sessionVectorText(saved session.Session) string {
+	var b strings.Builder
+
+	writeSourceVectorLine(&b, "session", saved.ID)
+	writeSourceVectorLine(&b, "title", saved.Title)
+	writeSourceVectorLine(&b, "agent", saved.DefaultAgent)
+	writeSourceVectorLine(&b, "model", saved.DefaultModel)
+	if len(saved.Tags) > 0 {
+		writeSourceVectorLine(&b, "tags", strings.Join(saved.Tags, ", "))
+	}
+
+	for i, message := range saved.Messages {
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+
+		writeSourceVectorLine(&b, fmt.Sprintf("message[%d].%s", i, message.Role), content)
+	}
+
+	for i, item := range saved.NegativeKnowledge {
+		writeSourceVectorLine(&b, fmt.Sprintf("negative[%d].approach", i), item.Approach)
+		writeSourceVectorLine(&b, fmt.Sprintf("negative[%d].reason", i), item.Reason)
+	}
+
+	for i := range saved.Evaluations {
+		evaluation := &saved.Evaluations[i]
+		writeSourceVectorLine(&b, fmt.Sprintf("evaluation[%d].agent", i), evaluation.Agent)
+		writeSourceVectorLine(&b, fmt.Sprintf("evaluation[%d].outcome", i), evaluation.Outcome)
+		writeSourceVectorLine(&b, fmt.Sprintf("evaluation[%d].notes", i), evaluation.Notes)
+	}
+
+	for i := range saved.Artifacts {
+		artifact := &saved.Artifacts[i]
+		writeSourceVectorLine(&b, fmt.Sprintf("artifact[%d].kind", i), artifact.Kind)
+		writeSourceVectorLine(&b, fmt.Sprintf("artifact[%d].path", i), artifact.Path)
+		writeSourceVectorLine(&b, fmt.Sprintf("artifact[%d].summary", i), artifact.Summary)
+	}
+
+	return b.String()
+}
+
+func gitHistoryVectorSources(commits []githistory.Commit) []vector.Source {
+	sources := make([]vector.Source, 0, len(commits))
+	for i := range commits {
+		commit := &commits[i]
+		if strings.TrimSpace(commit.Hash) == "" {
+			continue
+		}
+
+		text := gitHistoryVectorText(*commit)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+
+		metadata := map[string]string{
+			"commit": commit.Hash,
+		}
+		if commit.Subject != "" {
+			metadata["subject"] = commit.Subject
+		}
+
+		if commit.AuthorName != "" {
+			metadata["author_name"] = commit.AuthorName
+		}
+
+		if !commit.Date.IsZero() {
+			updatedAt := commit.Date.UTC()
+			metadata["date"] = updatedAt.Format(time.RFC3339)
+			metadata[retrieval.MetadataSourceUpdatedAt] = updatedAt.Format(time.RFC3339Nano)
+		}
+
+		sources = append(sources, vector.Source{
+			Kind:       vector.SourceKindGitHistory,
+			Path:       "git/" + commit.Hash,
+			Text:       text,
+			Metadata:   metadata,
+			Provenance: map[string]string{"commit": commit.Hash},
+		})
+	}
+
+	return sources
+}
+
+func gitHistoryVectorText(commit githistory.Commit) string {
+	var b strings.Builder
+
+	writeSourceVectorLine(&b, "commit", commit.Hash)
+	writeSourceVectorLine(&b, "author", strings.TrimSpace(strings.TrimSpace(commit.AuthorName)+" "+strings.TrimSpace(commit.AuthorEmail)))
+	if !commit.Date.IsZero() {
+		writeSourceVectorLine(&b, "date", commit.Date.UTC().Format(time.RFC3339))
+	}
+
+	writeSourceVectorLine(&b, "subject", commit.Subject)
+	writeSourceVectorLine(&b, "body", commit.Body)
+	if len(commit.Files) > 0 {
+		writeSourceVectorLine(&b, "files", strings.Join(commit.Files, "\n"))
+	}
+
+	return b.String()
+}
+
+func adrVectorSources(ctx context.Context, root string) ([]vector.Source, error) {
+	root = cleanADRSourceRoot(root)
+
+	seen := make(map[string]struct{})
+	sources := make([]vector.Source, 0)
+	for _, dir := range adrSourceDirectories {
+		if err := appendADRVectorSourcesFromDir(ctx, root, dir, seen, &sources); err != nil {
+			return nil, err
+		}
+	}
+
+	sort.SliceStable(sources, func(i, j int) bool {
+		return sources[i].Path < sources[j].Path
+	})
+
+	return sources, nil
+}
+
+func cleanADRSourceRoot(root string) string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = "."
+	}
+
+	return filepath.Clean(root)
+}
+
+func appendADRVectorSourcesFromDir(
+	ctx context.Context,
+	root string,
+	dir string,
+	seen map[string]struct{},
+	sources *[]vector.Source,
+) error {
+	absoluteDir := filepath.Join(root, filepath.FromSlash(dir))
+	if ok, err := adrVectorSourceDirExists(absoluteDir); err != nil || !ok {
+		return err
+	}
+
+	if err := filepath.WalkDir(absoluteDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		return appendADRVectorSourceFromWalkEntry(ctx, root, path, entry, walkErr, seen, sources)
+	}); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("retrieval: discover ADR sources canceled: %w", err)
+		}
+
+		return fmt.Errorf("retrieval: discover ADR sources in %s: %w", absoluteDir, err)
+	}
+
+	return nil
+}
+
+func adrVectorSourceDirExists(absoluteDir string) (bool, error) {
+	info, err := os.Stat(absoluteDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("retrieval: inspect ADR directory %s: %w", absoluteDir, err)
+	}
+
+	return info.IsDir(), nil
+}
+
+func appendADRVectorSourceFromWalkEntry(
+	ctx context.Context,
+	root string,
+	path string,
+	entry fs.DirEntry,
+	walkErr error,
+	seen map[string]struct{},
+	sources *[]vector.Source,
+) error {
+	if walkErr != nil {
+		return walkErr
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("ADR source discovery context: %w", err)
+	}
+
+	if entry.Type()&os.ModeSymlink != 0 {
+		return nil
+	}
+
+	if entry.IsDir() || !adrVectorSourceFile(path) {
+		return nil
+	}
+
+	return appendADRVectorSource(root, path, seen, sources)
+}
+
+func appendADRVectorSource(
+	root string,
+	path string,
+	seen map[string]struct{},
+	sources *[]vector.Source,
+) error {
+	relPath, err := filepath.Rel(root, path)
+	if err != nil {
+		return fmt.Errorf("compute ADR source path for %s: %w", path, err)
+	}
+	relPath = filepath.ToSlash(filepath.Clean(relPath))
+	if _, ok := seen[relPath]; ok {
+		return nil
+	}
+	seen[relPath] = struct{}{}
+
+	source, err := vector.SourceFromFile(path)
+	if err != nil {
+		return fmt.Errorf("read ADR source %s: %w", relPath, err)
+	}
+
+	adrID := strings.TrimSuffix(filepath.Base(relPath), filepath.Ext(relPath))
+	source.Kind = vector.SourceKindADR
+	source.Path = relPath
+	metadata := maps.Clone(source.Metadata)
+	if metadata == nil {
+		metadata = make(map[string]string, 3)
+	}
+	metadata["adr_id"] = adrID
+	metadata["path"] = relPath
+	source.Metadata = metadata
+	source.Provenance = map[string]string{
+		"adr_id": adrID,
+	}
+	*sources = append(*sources, source)
+
+	return nil
+}
+
+func adrVectorSourceFile(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".adoc", ".md", ".markdown", ".rst", ".txt":
+		return true
+	default:
+		return false
+	}
+}
+
+func writeSourceVectorLine(b *strings.Builder, label, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+
+	b.WriteString(label)
+	b.WriteString(": ")
+	b.WriteString(value)
+	b.WriteString("\n")
+}
+
+func sourceVectorIndexURI(root, indexPath string) string {
+	if display := workspaceDisplayIndexPath(root, indexPath); display != "" {
+		return display
+	}
+
+	return filepath.ToSlash(privacy.RedactIdentifier(indexPath))
 }
 
 func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput, includeSessions bool) (*memory.Store, error) {
@@ -926,32 +2005,124 @@ func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput
 	return mem, nil
 }
 
-func buildVectorRetrievalSearcher(ctx context.Context, state appState, paths []string) (retrieval.Searcher, error) {
-	if len(paths) == 0 {
+func buildVectorRetrievalSearcher(ctx context.Context, state appState, input retrievalCommandInput) (retrieval.Searcher, error) {
+	paths := input.VectorIndexFiles
+	if !retrievalExplicitFileVectorIndexRequested(input) && workspaceVectorEnabled(state.vectorConfig) {
 		return buildWorkspaceVectorRetrievalSearcher(ctx, state)
 	}
 
-	vectorizer, err := vector.NewTextVectorizer(0)
+	settings, err := vectorSearchSettingsFromOptions(state.cwd, state.vectorConfig, vectorSearchOptionsFromRetrievalInput(input))
 	if err != nil {
-		return nil, fmt.Errorf("retrieval: create vectorizer: %w", err)
+		return nil, err
 	}
 
-	store, err := vector.NewStoreWithVectorizer(vectorizer.Spec())
-	if err != nil {
-		return nil, fmt.Errorf("retrieval: create vector store: %w", err)
-	}
-
-	for _, path := range paths {
-		if err := addVectorFile(store, vectorizer, path); err != nil {
-			return nil, err
+	if settings.Vectorizer == vector.VectorizerKindEmbedding &&
+		!workspaceRemoteEmbeddingAllowed(settings.BaseURL, state.vectorConfig.WorkspaceAllowRemoteEmbeddings) {
+		if settings.FallbackPolicy == vector.VectorizerKindLexical {
+			return buildFileVectorRetrievalSearcherOnce(
+				ctx,
+				state.cwd,
+				lexicalVectorFallbackSettings(settings),
+				input.Search,
+				paths,
+			)
 		}
+
+		return nil, fmt.Errorf("retrieval: remote file embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings", workspaceDisplayEmbeddingEndpoint(settings.BaseURL))
 	}
 
-	return vector.Searcher{
-		Store:      store,
-		Vectorizer: vectorizer,
-		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: "local-vector-index"},
-	}, nil
+	searcher, err := buildFileVectorRetrievalSearcherOnce(ctx, state.cwd, settings, input.Search, paths)
+	if err == nil ||
+		settings.Vectorizer != vector.VectorizerKindEmbedding ||
+		settings.FallbackPolicy != vector.VectorizerKindLexical ||
+		!vectorSearchEmbeddingFailure(err) {
+		return searcher, err
+	}
+
+	return buildFileVectorRetrievalSearcherOnce(
+		ctx,
+		state.cwd,
+		lexicalVectorFallbackSettings(settings),
+		input.Search,
+		paths,
+	)
+}
+
+func buildFileVectorRetrievalSearcherOnce(
+	ctx context.Context,
+	root string,
+	settings vectorSearchSettings,
+	query string,
+	paths []string,
+) (retrieval.Searcher, error) {
+	vectorizer, metadata, err := newVectorSearchVectorizer(settings)
+	if err != nil {
+		return nil, err
+	}
+
+	idx, _, err := loadOrBuildVectorIndex(ctx, settings, paths, vectorizer, metadata)
+	if err != nil {
+		return nil, fmt.Errorf("retrieval: load or build vector index: %w", err)
+	}
+
+	if err := validateFileVectorRetrievalQuery(ctx, settings, idx, vectorizer, query); err != nil {
+		return nil, err
+	}
+
+	return newVectorIndexRetrievalSearcher(
+		idx,
+		vectorizer,
+		retrieval.Source{
+			Type: retrieval.SourceVector,
+			Name: "local-vector-index",
+			URI:  sourceVectorIndexURI(root, settings.IndexPath),
+		},
+		settings.Vectorizer+"-file-vector-index",
+	)
+}
+
+func validateFileVectorRetrievalQuery(
+	ctx context.Context,
+	settings vectorSearchSettings,
+	idx *vector.Index,
+	vectorizer vector.Vectorizer,
+	query string,
+) error {
+	query = strings.TrimSpace(query)
+	if query == "" || idx == nil {
+		return nil
+	}
+
+	queryVector, err := vectorizeSearchText(ctx, vectorizer, query)
+	if err != nil {
+		return fmt.Errorf("retrieval: vectorize query for %s: %w", settings.IndexPath, err)
+	}
+
+	if len(queryVector) != idx.Dimensions {
+		return fmt.Errorf(
+			"retrieval: reusable index %s is invalid: %w: query has %d dimensions, index has %d; pass --vector-index to rebuild",
+			settings.IndexPath,
+			vector.ErrDimensionMismatch,
+			len(queryVector),
+			idx.Dimensions,
+		)
+	}
+
+	return nil
+}
+
+func vectorSearchOptionsFromRetrievalInput(input retrievalCommandInput) cliOptions {
+	return cliOptions{
+		vectorizer:              input.Vector.Vectorizer,
+		vectorProvider:          input.Vector.Provider,
+		vectorModel:             input.Vector.Model,
+		vectorBaseURL:           input.Vector.BaseURL,
+		vectorFallbackPolicy:    input.Vector.FallbackPolicy,
+		vectorStorePath:         input.Vector.StorePath,
+		vectorTimeout:           positiveIntFlag{value: input.Vector.TimeoutSeconds, set: input.Vector.TimeoutSet},
+		vectorChunkMaxRunes:     positiveIntFlag{value: input.Vector.ChunkMaxRunes, set: input.Vector.ChunkMaxSet},
+		vectorChunkOverlapRunes: positiveIntFlag{value: input.Vector.ChunkOverlapRunes, set: input.Vector.ChunkOverlapSet},
+	}
 }
 
 func buildWorkspaceVectorRetrievalSearcher(ctx context.Context, state appState) (retrieval.Searcher, error) {
@@ -1007,19 +2178,48 @@ func buildWorkspaceVectorRetrievalSearcherOnce(
 		return nil, err
 	}
 
-	return vector.IndexSearcher{
-		Index:      idx,
-		Vectorizer: opts.Vectorizer,
-		Source: retrieval.Source{
+	return newVectorIndexRetrievalSearcher(
+		idx,
+		opts.Vectorizer,
+		retrieval.Source{
 			Type: retrieval.SourceVector,
 			Name: "workspace",
 			URI:  workspaceVectorSourceURI(opts),
 		},
-		ScorerName: settings.Vectorizer + "-workspace-ann",
+		settings.Vectorizer+"-workspace-ann",
+	)
+}
+
+func newVectorIndexRetrievalSearcher(
+	idx *vector.Index,
+	vectorizer vector.Vectorizer,
+	source retrieval.Source,
+	scorerName string,
+) (vector.IndexSearcher, error) {
+	if idx == nil {
+		return vector.IndexSearcher{}, errors.New("retrieval: vector index is nil")
+	}
+
+	ann, err := vector.NewANNIndex(idx.Documents, idx.Dimensions, vector.ANNOptions{})
+	if err != nil {
+		return vector.IndexSearcher{}, fmt.Errorf("retrieval: build ANN index: %w", err)
+	}
+
+	return vector.IndexSearcher{
+		Index:      idx,
+		Vectorizer: vectorizer,
+		IndexANN:   ann,
+		Source:     source,
+		ScorerName: scorerName,
 	}, nil
 }
 
-func buildAgentMemoryRetrievalSearcher(root, selectedAgent string, input retrievalCommandInput) (retrieval.Searcher, error) {
+func buildAgentMemoryRetrievalSearcher(
+	ctx context.Context,
+	root, selectedAgent string,
+	cfg appconfig.VectorConfig,
+	input retrievalCommandInput,
+) (retrieval.Searcher, error) {
 	agentName := strings.TrimSpace(input.AgentMemoryAgent)
 	if agentName == "" {
 		agentName = strings.TrimSpace(input.AgentName)
@@ -1033,12 +2233,14 @@ func buildAgentMemoryRetrievalSearcher(root, selectedAgent string, input retriev
 		return nil, errors.New("retrieval: --agent-memory-agent, --agent, or a configured selected agent is required for --retrieval-source agent-memory")
 	}
 
-	storePath := strings.TrimSpace(input.AgentMemoryStorePath)
-	if storePath == "" {
-		storePath = filepath.Join(root, ".atteler", "agent-memory.json")
+	storePath := agentMemoryStorePath(root, agentName, input.AgentMemoryStorePath, cfg)
+
+	runtime, err := agentMemoryVectorizerRuntimeFromConfig(cfg, agentName)
+	if err != nil {
+		return nil, err
 	}
 
-	store, err := loadAgentMemoryStore(storePath, false)
+	store, _, err := loadAgentMemoryStore(ctx, storePath, false, false, runtime)
 	if err != nil {
 		return nil, err
 	}
@@ -1103,15 +2305,93 @@ func formatRetrievalResult(result retrieval.Result, explain bool) string {
 		parts = append(parts, "indexed_at="+result.Freshness.IndexedAt.Format(time.RFC3339))
 	}
 
+	parts = appendRetrievalContentParts(parts, result, explain)
+
+	return strings.Join(parts, "\t")
+}
+
+func appendRetrievalContentParts(parts []string, result retrieval.Result, explain bool) []string {
 	if result.Snippet != "" {
 		parts = append(parts, "snippet="+result.Snippet)
 	}
 
-	if explain && len(result.Scorer.Explanation) > 0 {
+	if !explain {
+		return parts
+	}
+
+	parts = appendRetrievalScorerDetails(parts, result.Scorer.Details)
+	if len(result.Scorer.Explanation) > 0 {
 		parts = append(parts, "why="+strings.Join(result.Scorer.Explanation, " | "))
 	}
 
-	return strings.Join(parts, "\t")
+	return parts
+}
+
+func appendRetrievalScorerDetails(parts []string, details map[string]float64) []string {
+	if len(details) == 0 {
+		return parts
+	}
+
+	keys := make([]string, 0, len(details))
+	for key := range details {
+		if strings.TrimSpace(key) != "" {
+			keys = append(keys, key)
+		}
+	}
+
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		field := retrievalScorerDetailField(key)
+		if field == "" {
+			continue
+		}
+
+		parts = append(parts, field+"="+formatRetrievalScorerDetailValue(key, details[key]))
+	}
+
+	return parts
+}
+
+func retrievalScorerDetailField(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key == "" {
+		return ""
+	}
+
+	var out strings.Builder
+	previousSeparator := false
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z':
+			out.WriteRune(r)
+			previousSeparator = false
+		case r >= '0' && r <= '9':
+			out.WriteRune(r)
+			previousSeparator = false
+		case r == '_' || r == '-' || r == '.':
+			if out.Len() > 0 && !previousSeparator {
+				out.WriteByte('_')
+				previousSeparator = true
+			}
+		}
+	}
+
+	name := strings.TrimRight(out.String(), "_")
+	if name == "" {
+		return ""
+	}
+
+	return "detail_" + name
+}
+
+func formatRetrievalScorerDetailValue(key string, value float64) string {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "ann_exact_scan":
+		return strconv.FormatBool(value != 0)
+	default:
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	}
 }
 
 func appendRetrievalSourceParts(parts []string, source retrieval.Source) []string {

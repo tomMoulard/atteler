@@ -1,5 +1,4 @@
-// Package agentmemory provides dependency-free per-agent lexical memory with
-// JSON persistence.
+// Package agentmemory provides per-agent vector memory with JSON persistence.
 package agentmemory
 
 import (
@@ -14,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tommoulard/atteler/internal/atomicfile"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/vector"
@@ -24,7 +24,7 @@ const (
 	StoreSchemaVersion = 1
 )
 
-// Document is a lexically vectorized text item stored for one agent.
+// Document is a vectorized text item stored for one agent.
 type Document struct {
 	Metadata   map[string]string     `json:"metadata,omitempty"`
 	Provenance map[string]string     `json:"provenance,omitempty"`
@@ -39,7 +39,7 @@ type Document struct {
 	Vector     vector.Vector         `json:"vector"`
 }
 
-// Result is a lexical vector-ranked agent memory search result.
+// Result is a vector-ranked agent memory search result.
 type Result struct {
 	Document Document `json:"document"`
 	Score    float64  `json:"score"`
@@ -51,7 +51,9 @@ type Searcher struct {
 	Agent string
 }
 
-// Store keeps lexically vectorized memories partitioned by agent name.
+// Store keeps vectorized memories partitioned by agent name. The persisted JSON
+// records vectorizer identity; model-backed vectorizers are process-local and
+// must be supplied again after Load before adding/searching.
 //
 //nolint:govet // Layout prioritizes JSON/API readability over pointer-byte packing.
 type Store struct {
@@ -59,6 +61,7 @@ type Store struct {
 	Vectorizer    vector.VectorizerSpec `json:"vectorizer"`
 	CreatedAt     time.Time             `json:"created_at,omitzero"`
 	UpdatedAt     time.Time             `json:"updated_at,omitzero"`
+	vectorizer    vector.Vectorizer     `json:"-"`
 	SchemaVersion int                   `json:"schema_version"`
 	Dimensions    int                   `json:"dimensions"`
 }
@@ -75,6 +78,12 @@ type addOptions struct {
 	expiresAt  *time.Time
 	ttl        time.Duration
 }
+
+type (
+	vectorizeTextFunc   func(string) (vector.Vector, error)
+	reembedDocumentFunc func(Document) (Document, error)
+	contextErrFunc      func() error
+)
 
 // AddOption configures AddWithOptions and AddTextWithOptions.
 type AddOption func(*addOptions)
@@ -114,11 +123,89 @@ func NewStore(dimensions int) (*Store, error) {
 	return &Store{
 		Agents:        make(map[string][]Document),
 		Vectorizer:    vectorizer.Spec(),
+		vectorizer:    vectorizer,
 		SchemaVersion: StoreSchemaVersion,
 		Dimensions:    vectorizer.Dimensions,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}, nil
+}
+
+// NewStoreWithVectorizer returns an empty per-agent memory store pinned to a
+// caller-provided vectorizer identity. Use it for embedding-backed agent memory;
+// context-aware vectorizers require the *Context methods for add/search/reembed.
+func NewStoreWithVectorizer(spec vector.VectorizerSpec, vectorizer vector.Vectorizer) (*Store, error) {
+	now := time.Now().UTC()
+
+	store := &Store{
+		Agents:        make(map[string][]Document),
+		SchemaVersion: StoreSchemaVersion,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+
+	if err := store.SetVectorizer(spec, vectorizer); err != nil {
+		return nil, err
+	}
+
+	return store, nil
+}
+
+// SetVectorizer binds a process-local vectorizer to a loaded store. Existing
+// documents must already declare a compatible persisted vectorizer identity; it
+// intentionally refuses silent cross-model searches instead of re-embedding.
+func (s *Store) SetVectorizer(spec vector.VectorizerSpec, vectorizer vector.Vectorizer) error {
+	if vectorizer == nil {
+		return fmt.Errorf("%w: agent memory vectorizer is required", vector.ErrVectorizerMismatch)
+	}
+
+	spec = cleanVectorizerSpec(spec)
+	if spec.IsZero() {
+		return fmt.Errorf("%w: agent memory vectorizer metadata is required", vector.ErrVectorizerMismatch)
+	}
+
+	if err := validatePersistedVectorizerSpecPrivacy(spec); err != nil {
+		return err
+	}
+
+	if s.hasDocuments() {
+		if err := s.validateSetVectorizerForExistingDocuments(&spec); err != nil {
+			return err
+		}
+	} else if spec.Dimensions > 0 {
+		s.Dimensions = spec.Dimensions
+	}
+
+	if s.Dimensions > 0 && spec.Dimensions == 0 {
+		spec.Dimensions = s.Dimensions
+	}
+
+	s.Vectorizer = spec
+	s.vectorizer = vectorizer
+
+	return s.ensureVectorizer()
+}
+
+func (s *Store) validateSetVectorizerForExistingDocuments(spec *vector.VectorizerSpec) error {
+	if s.Dimensions <= 0 {
+		return vector.ErrInvalidDimensions
+	}
+
+	if spec.Dimensions == 0 {
+		spec.Dimensions = s.Dimensions
+	}
+
+	if spec.Dimensions != s.Dimensions {
+		return fmt.Errorf("%w: vectorizer dimensions got %d, want %d",
+			vector.ErrDimensionMismatch, spec.Dimensions, s.Dimensions)
+	}
+
+	if !s.Vectorizer.IsZero() && !s.Vectorizer.CompatibleWith(*spec) {
+		return fmt.Errorf("%w: store uses %s/%s, want %s/%s",
+			vector.ErrVectorizerMismatch, s.Vectorizer.ID, s.Vectorizer.Model, spec.ID, spec.Model)
+	}
+
+	return nil
 }
 
 // AddText vectorizes and stores text for agent under id. Existing documents for
@@ -127,9 +214,21 @@ func (s *Store) AddText(agent, id, text string) error {
 	return s.Add(agent, Document{ID: id, Text: text})
 }
 
+// AddTextContext is AddText with caller-provided cancellation for
+// context-aware vectorizers.
+func (s *Store) AddTextContext(ctx context.Context, agent, id, text string) error {
+	return s.AddContext(ctx, agent, Document{ID: id, Text: text})
+}
+
 // AddTextWithOptions is AddText with TTL/provenance support.
 func (s *Store) AddTextWithOptions(agent, id, text string, opts ...AddOption) error {
 	return s.AddWithOptions(agent, Document{ID: id, Text: text}, opts...)
+}
+
+// AddTextWithOptionsContext is AddTextWithOptions with caller-provided
+// cancellation for context-aware vectorizers.
+func (s *Store) AddTextWithOptionsContext(ctx context.Context, agent, id, text string, opts ...AddOption) error {
+	return s.AddWithOptionsContext(ctx, agent, Document{ID: id, Text: text}, opts...)
 }
 
 // AddFile reads and stores a UTF-8 text file for agent. The cleaned filepath is
@@ -140,13 +239,37 @@ func (s *Store) AddFile(agent, path string) error {
 
 // AddFileWithOptions is AddFile with TTL/provenance support.
 func (s *Store) AddFileWithOptions(agent, path string, opts ...AddOption) error {
+	doc, err := agentMemoryDocumentFromFile(path)
+	if err != nil {
+		return err
+	}
+
+	return s.AddWithOptions(agent, doc, opts...)
+}
+
+// AddFileWithOptionsContext is AddFileWithOptions with caller-provided
+// cancellation for context-aware vectorizers.
+func (s *Store) AddFileWithOptionsContext(ctx context.Context, agent, path string, opts ...AddOption) error {
+	if ctx == nil {
+		return vector.ErrContextRequired
+	}
+
+	doc, err := agentMemoryDocumentFromFile(path)
+	if err != nil {
+		return err
+	}
+
+	return s.AddWithOptionsContext(ctx, agent, doc, opts...)
+}
+
+func agentMemoryDocumentFromFile(path string) (Document, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read agent memory file %q: %w", path, err)
+		return Document{}, fmt.Errorf("read agent memory file %q: %w", path, err)
 	}
 
 	if !utf8.Valid(data) {
-		return fmt.Errorf("read agent memory file %q: %w", path, ErrInvalidUTF8)
+		return Document{}, fmt.Errorf("read agent memory file %q: %w", path, ErrInvalidUTF8)
 	}
 
 	clean := filepath.Clean(path)
@@ -156,13 +279,13 @@ func (s *Store) AddFileWithOptions(agent, path string, opts ...AddOption) error 
 		metadata[retrieval.MetadataSourceUpdatedAt] = info.ModTime().UTC().Format(time.RFC3339Nano)
 	}
 
-	return s.AddWithOptions(agent, Document{
+	return Document{
 		ID:         clean,
 		Path:       clean,
 		Text:       string(data),
 		Metadata:   metadata,
 		Provenance: fileProvenance(clean),
-	}, opts...)
+	}, nil
 }
 
 // Add vectorizes and stores doc for agent. Existing documents for the same
@@ -171,26 +294,75 @@ func (s *Store) Add(agent string, doc Document) error {
 	return s.AddWithOptions(agent, doc)
 }
 
+// AddContext is Add with caller-provided cancellation for context-aware
+// vectorizers.
+func (s *Store) AddContext(ctx context.Context, agent string, doc Document) error {
+	return s.AddWithOptionsContext(ctx, agent, doc)
+}
+
 // AddWithOptions vectorizes and stores doc with TTL/provenance support.
 func (s *Store) AddWithOptions(agent string, doc Document, opts ...AddOption) error {
-	agent, agentErr := redactAgentName(agent)
+	return s.addWithOptions(agent, doc, s.vectorize, opts...)
+}
+
+// AddWithOptionsContext vectorizes and stores doc with TTL/provenance support
+// using caller-provided cancellation for context-aware vectorizers.
+func (s *Store) AddWithOptionsContext(ctx context.Context, agent string, doc Document, opts ...AddOption) error {
+	if ctx == nil {
+		return vector.ErrContextRequired
+	}
+
+	return s.addWithOptions(agent, doc, func(text string) (vector.Vector, error) {
+		return s.vectorizeContext(ctx, text)
+	}, opts...)
+}
+
+func (s *Store) addWithOptions(agent string, doc Document, vectorize vectorizeTextFunc, opts ...AddOption) error {
+	agent, doc, hasCreatedAt, err := s.prepareAddDocument(agent, doc, opts...)
+	if err != nil {
+		return err
+	}
+
+	vec, err := vectorize(doc.Text)
+	if err != nil {
+		return err
+	}
+
+	if err := s.adoptVectorDimensions(len(vec)); err != nil {
+		return err
+	}
+
+	doc.Vector = cloneVector(vec)
+	doc.Vectorizer = s.Vectorizer
+
+	s.storePreparedDocument(agent, doc, hasCreatedAt)
+
+	return nil
+}
+
+func (s *Store) prepareAddDocument(
+	rawAgent string,
+	doc Document,
+	opts ...AddOption,
+) (agent string, prepared Document, hasCreatedAt bool, err error) {
+	agent, agentErr := redactAgentName(rawAgent)
 	if agentErr != nil {
-		return agentErr
+		return "", Document{}, false, agentErr
 	}
 
 	id, idErr := redactDocumentID(doc.ID)
 	if idErr != nil {
-		return idErr
+		return "", Document{}, false, idErr
 	}
 
 	doc.ID = id
 
 	if !utf8.ValidString(doc.Text) {
-		return ErrInvalidUTF8
+		return "", Document{}, false, ErrInvalidUTF8
 	}
 
 	if err := s.ensureVectorizer(); err != nil {
-		return err
+		return "", Document{}, false, err
 	}
 
 	applied := applyAddOptions(opts...)
@@ -213,17 +385,14 @@ func (s *Store) AddWithOptions(agent string, doc Document, opts ...AddOption) er
 	doc.Provenance = ensureProvenance(cleanMetadata(doc.Provenance), "direct")
 	doc.SourceHash = privacy.SourceHash(doc.Text)
 
-	vec, err := s.vectorize(doc.Text)
-	if err != nil {
-		return err
-	}
+	hasCreatedAt = !doc.CreatedAt.IsZero()
 
-	doc.Vector = cloneVector(vec)
-	doc.Vectorizer = s.Vectorizer
+	return agent, doc, hasCreatedAt, nil
+}
 
+func (s *Store) storePreparedDocument(agent string, doc Document, hasCreatedAt bool) {
 	now := time.Now().UTC()
 
-	hasCreatedAt := !doc.CreatedAt.IsZero()
 	if doc.CreatedAt.IsZero() {
 		doc.CreatedAt = now
 	}
@@ -250,18 +419,32 @@ func (s *Store) AddWithOptions(agent string, doc Document, opts ...AddOption) er
 			docs[i] = cloneDocument(doc)
 			s.Agents[agent] = docs
 
-			return nil
+			return
 		}
 	}
 
 	s.Agents[agent] = append(docs, cloneDocument(doc))
-
-	return nil
 }
 
 // Search vectorizes query and returns results from only agent's documents. A
 // limit less than one returns every non-zero match.
 func (s *Store) Search(agent, query string, limit int) ([]Result, error) {
+	return s.searchWithVectorize(agent, query, limit, s.vectorize)
+}
+
+// SearchContext is Search with caller-provided cancellation for context-aware
+// vectorizers.
+func (s *Store) SearchContext(ctx context.Context, agent, query string, limit int) ([]Result, error) {
+	if ctx == nil {
+		return nil, vector.ErrContextRequired
+	}
+
+	return s.searchWithVectorize(agent, query, limit, func(text string) (vector.Vector, error) {
+		return s.vectorizeContext(ctx, text)
+	})
+}
+
+func (s *Store) searchWithVectorize(agent, query string, limit int, vectorize vectorizeTextFunc) ([]Result, error) {
 	agent, agentErr := redactAgentName(agent)
 	if agentErr != nil {
 		return nil, agentErr
@@ -275,7 +458,7 @@ func (s *Store) Search(agent, query string, limit int) ([]Result, error) {
 		return nil, err
 	}
 
-	queryVector, err := s.vectorize(privacy.RedactText(query))
+	queryVector, err := vectorize(privacy.RedactText(query))
 	if err != nil {
 		return nil, err
 	}
@@ -360,6 +543,10 @@ func (s *Store) SearchRetrieval(ctx context.Context, agent string, query retriev
 
 // SearchRetrieval implements retrieval.Searcher for one agent namespace.
 func (s Searcher) SearchRetrieval(ctx context.Context, query retrieval.Query) ([]retrieval.Result, error) {
+	if ctx == nil {
+		return nil, vector.ErrContextRequired
+	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("agent memory retrieval: %w", err)
 	}
@@ -368,7 +555,7 @@ func (s Searcher) SearchRetrieval(ctx context.Context, query retrieval.Query) ([
 		return nil, nil
 	}
 
-	results, err := s.Store.Search(s.Agent, query.Text, query.Limit)
+	results, err := s.Store.SearchContext(ctx, s.Agent, query.Text, query.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -476,16 +663,8 @@ func (s *Store) Save(path string) error {
 
 	data = append(data, '\n')
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("create agent memory store dir: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write agent memory store %q: %w", path, err)
-	}
-
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("chmod agent memory store %q: %w", path, err)
+	if err := atomicfile.WriteFile(path, data, 0o600, ".agent-memory-*.tmp"); err != nil {
+		return fmt.Errorf("write agent memory store %q atomically: %w", path, err)
 	}
 
 	return nil
@@ -499,6 +678,87 @@ func Load(path string) (*Store, error) {
 // LoadWithOptions reads a JSON store and optionally migrates stale vector data
 // by rebuilding vectors from redacted persisted text.
 func LoadWithOptions(path string, opts LoadOptions) (*Store, error) {
+	return loadWithOptions(path, opts, func(store *Store) error {
+		return store.Migrate()
+	})
+}
+
+// LoadWithOptionsContext is LoadWithOptions with caller-provided cancellation
+// for migrations that rebuild vectors from persisted text.
+func LoadWithOptionsContext(ctx context.Context, path string, opts LoadOptions) (*Store, error) {
+	if ctx == nil {
+		return nil, vector.ErrContextRequired
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("agent memory: load canceled: %w", err)
+	}
+
+	return loadWithOptions(path, opts, func(store *Store) error {
+		return store.MigrateContext(ctx)
+	})
+}
+
+// LoadAndCompact reads a JSON store, removes expired memories at now, validates
+// the remaining data, and returns the number of memories removed. It is useful
+// for explicit maintenance commands that need to report how much cleanup they
+// performed while preserving Load's fail-closed validation behavior for the
+// persisted, non-expired corpus.
+func LoadAndCompact(path string, now time.Time) (*Store, int, error) {
+	return loadAndCompact(path, now)
+}
+
+// LoadAndCompactContext is LoadAndCompact with caller-provided cancellation.
+func LoadAndCompactContext(ctx context.Context, path string, now time.Time) (*Store, int, error) {
+	if ctx == nil {
+		return nil, 0, vector.ErrContextRequired
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, 0, fmt.Errorf("agent memory: load canceled: %w", err)
+	}
+
+	return loadAndCompact(path, now)
+}
+
+func loadWithOptions(path string, opts LoadOptions, migrate func(*Store) error) (*Store, error) {
+	store, err := readAgentMemoryStore(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if opts.Migrate {
+		if err := migrate(store); err != nil {
+			return nil, fmt.Errorf("migrate agent memory store %q: %w", path, err)
+		}
+
+		return store, nil
+	}
+
+	store.Compact(time.Now().UTC())
+
+	if err := store.validateLoaded(); err != nil {
+		return nil, fmt.Errorf("validate agent memory store %q: %w", path, err)
+	}
+
+	return store, nil
+}
+
+func loadAndCompact(path string, now time.Time) (*Store, int, error) {
+	store, err := readAgentMemoryStore(path)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	removed := store.Compact(now)
+	if err := store.validateLoaded(); err != nil {
+		return nil, 0, fmt.Errorf("validate agent memory store %q: %w", path, err)
+	}
+
+	return store, removed, nil
+}
+
+func readAgentMemoryStore(path string) (*Store, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read agent memory store %q: %w", path, err)
@@ -509,20 +769,6 @@ func LoadWithOptions(path string, opts LoadOptions) (*Store, error) {
 		return nil, fmt.Errorf("decode agent memory store %q: %w", path, err)
 	}
 
-	if opts.Migrate {
-		if err := store.Migrate(); err != nil {
-			return nil, fmt.Errorf("migrate agent memory store %q: %w", path, err)
-		}
-
-		return &store, nil
-	}
-
-	store.Compact(time.Now().UTC())
-
-	if err := store.validateLoaded(); err != nil {
-		return nil, fmt.Errorf("validate agent memory store %q: %w", path, err)
-	}
-
 	return &store, nil
 }
 
@@ -530,6 +776,22 @@ func LoadWithOptions(path string, opts LoadOptions) (*Store, error) {
 // redacting text/metadata and rebuilding every vector with the current local
 // text-hash vectorizer.
 func (s *Store) Migrate() error {
+	return s.migrate(s.reembedDocument, noContextErr)
+}
+
+// MigrateContext is Migrate with caller-provided cancellation between
+// documents.
+func (s *Store) MigrateContext(ctx context.Context) error {
+	if ctx == nil {
+		return vector.ErrContextRequired
+	}
+
+	return s.migrate(func(doc Document) (Document, error) {
+		return s.reembedDocumentContext(ctx, doc)
+	}, ctx.Err)
+}
+
+func (s *Store) migrate(reembed reembedDocumentFunc, checkContext contextErrFunc) error {
 	if s.SchemaVersion < 0 || s.SchemaVersion > StoreSchemaVersion {
 		return ErrIncompatibleSchema
 	}
@@ -552,8 +814,14 @@ func (s *Store) Migrate() error {
 		s.Dimensions = fresh.Dimensions
 	}
 
+	vectorizer, err := vector.NewTextVectorizer(s.Dimensions)
+	if err != nil {
+		return fmt.Errorf("agent memory: create migration vectorizer: %w", err)
+	}
+
 	s.SchemaVersion = StoreSchemaVersion
-	s.Vectorizer = vector.TextVectorizerSpec(s.Dimensions)
+	s.Vectorizer = vectorizer.Spec()
+	s.vectorizer = vectorizer
 
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = now
@@ -567,12 +835,16 @@ func (s *Store) Migrate() error {
 
 	normalizedAgents := make(map[string][]Document, len(s.Agents))
 	for agent, docs := range s.Agents {
+		if err := checkContext(); err != nil {
+			return fmt.Errorf("agent memory: migrate canceled: %w", err)
+		}
+
 		normalizedAgent, err := normalizeLoadedAgentName(agent, true)
 		if err != nil {
 			return err
 		}
 
-		normalizedDocs, err := s.migrateAgent(normalizedAgent, docs)
+		normalizedDocs, err := s.migrateAgent(normalizedAgent, docs, reembed, checkContext)
 		if err != nil {
 			return err
 		}
@@ -587,6 +859,22 @@ func (s *Store) Migrate() error {
 
 // ReembedAll rebuilds every vector with the store's current vectorizer.
 func (s *Store) ReembedAll() error {
+	return s.reembedAll(s.reembedDocument, noContextErr)
+}
+
+// ReembedAllContext rebuilds every vector with caller-provided cancellation for
+// context-aware vectorizers.
+func (s *Store) ReembedAllContext(ctx context.Context) error {
+	if ctx == nil {
+		return vector.ErrContextRequired
+	}
+
+	return s.reembedAll(func(doc Document) (Document, error) {
+		return s.reembedDocumentContext(ctx, doc)
+	}, ctx.Err)
+}
+
+func (s *Store) reembedAll(reembed reembedDocumentFunc, checkContext contextErrFunc) error {
 	s.Compact(time.Now().UTC())
 
 	if err := s.ensureVectorizer(); err != nil {
@@ -601,7 +889,11 @@ func (s *Store) ReembedAll() error {
 		}
 
 		for i := range docs {
-			updated, err := s.reembedDocument(docs[i])
+			if err := checkContext(); err != nil {
+				return fmt.Errorf("agent memory: re-embed canceled: %w", err)
+			}
+
+			updated, err := reembed(docs[i])
 			if err != nil {
 				return fmt.Errorf("agent memory: re-embed %s/%s: %w", agent, docs[i].ID, err)
 			}
@@ -620,6 +912,22 @@ func (s *Store) ReembedAll() error {
 
 // Reembed rebuilds one agent document vector with the store's current vectorizer.
 func (s *Store) Reembed(agent, id string) error {
+	return s.reembed(agent, id, s.reembedDocument)
+}
+
+// ReembedContext rebuilds one agent document vector with caller-provided
+// cancellation for context-aware vectorizers.
+func (s *Store) ReembedContext(ctx context.Context, agent, id string) error {
+	if ctx == nil {
+		return vector.ErrContextRequired
+	}
+
+	return s.reembed(agent, id, func(doc Document) (Document, error) {
+		return s.reembedDocumentContext(ctx, doc)
+	})
+}
+
+func (s *Store) reembed(agent, id string, reembed reembedDocumentFunc) error {
 	agent, agentErr := redactAgentName(agent)
 	if agentErr != nil {
 		return agentErr
@@ -642,7 +950,7 @@ func (s *Store) Reembed(agent, id string) error {
 			continue
 		}
 
-		updated, err := s.reembedDocument(docs[i])
+		updated, err := reembed(docs[i])
 		if err != nil {
 			return err
 		}
@@ -667,9 +975,121 @@ func (s *Store) MigrateTextDimensions(dimensions int) error {
 
 	s.Dimensions = vectorizer.Dimensions
 	s.Vectorizer = vectorizer.Spec()
+	s.vectorizer = vectorizer
 	s.SchemaVersion = StoreSchemaVersion
 
 	return s.ReembedAll()
+}
+
+// MigrateToVectorizerContext rebuilds every persisted document with a new
+// caller-provided vectorizer. It is intended for controlled transitions from
+// the lexical fallback store to an embedding-backed per-agent memory store.
+func (s *Store) MigrateToVectorizerContext(ctx context.Context, spec vector.VectorizerSpec, vectorizer vector.Vectorizer) error {
+	if ctx == nil {
+		return vector.ErrContextRequired
+	}
+
+	if vectorizer == nil {
+		return fmt.Errorf("%w: agent memory vectorizer is required", vector.ErrVectorizerMismatch)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("agent memory: migrate vectorizer canceled: %w", err)
+	}
+
+	spec = cleanVectorizerSpec(spec)
+	if spec.IsZero() {
+		return fmt.Errorf("%w: agent memory vectorizer metadata is required", vector.ErrVectorizerMismatch)
+	}
+
+	if err := validatePersistedVectorizerSpecPrivacy(spec); err != nil {
+		return err
+	}
+
+	migrated := cloneStoreForVectorizerMigration(s)
+	migrated.SchemaVersion = StoreSchemaVersion
+	migrated.Vectorizer = spec
+	migrated.vectorizer = vectorizer
+	migrated.Dimensions = spec.Dimensions
+
+	if err := migrated.migrateToCurrentVectorizer(ctx, vectorizer); err != nil {
+		return err
+	}
+
+	*s = migrated
+
+	return nil
+}
+
+func (s *Store) migrateToCurrentVectorizer(ctx context.Context, vectorizer vector.Vectorizer) error {
+	if s.SchemaVersion < 0 || s.SchemaVersion > StoreSchemaVersion {
+		return ErrIncompatibleSchema
+	}
+
+	now := time.Now().UTC()
+	s.Compact(now)
+
+	if s.CreatedAt.IsZero() {
+		s.CreatedAt = now
+	}
+
+	s.UpdatedAt = now
+
+	if s.Agents == nil {
+		s.Agents = make(map[string][]Document)
+	}
+
+	normalizedAgents := make(map[string][]Document, len(s.Agents))
+	for agent, docs := range s.Agents {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("agent memory: migrate vectorizer canceled: %w", err)
+		}
+
+		normalizedAgent, err := normalizeLoadedAgentName(agent, true)
+		if err != nil {
+			return err
+		}
+
+		normalizedDocs, err := s.reembedAgentWithCurrentVectorizer(ctx, vectorizer, docs)
+		if err != nil {
+			return fmt.Errorf("agent memory: migrate vectorizer %s: %w", normalizedAgent, err)
+		}
+
+		normalizedAgents[normalizedAgent] = append(normalizedAgents[normalizedAgent], normalizedDocs...)
+	}
+
+	s.Agents = normalizedAgents
+
+	return s.validateLoaded()
+}
+
+func (s *Store) reembedAgentWithCurrentVectorizer(
+	ctx context.Context,
+	vectorizer vector.Vectorizer,
+	docs []Document,
+) ([]Document, error) {
+	seen := make(map[string]struct{}, len(docs))
+	for i := range docs {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("migrate canceled: %w", err)
+		}
+
+		normalized, err := s.normalizeLoadedDocument(docs[i], seen, true)
+		if err != nil {
+			return nil, err
+		}
+
+		updated, err := s.reembedDocumentWithVectorize(normalized, func(text string) (vector.Vector, error) {
+			return vectorizeAgentMemoryWithContext(ctx, vectorizer, text)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("re-embed %s: %w", normalized.ID, err)
+		}
+
+		docs[i] = updated
+	}
+
+	return docs, nil
 }
 
 // Documents returns a defensive copy of agent's documents.
@@ -689,14 +1109,33 @@ func (s *Store) Documents(agent string) []Document {
 	return out
 }
 
-func (s *Store) vectorize(text string) (vector.Vector, error) {
+func (s *Store) runtimeVectorizer() (vector.Vectorizer, error) {
 	if err := s.ensureVectorizer(); err != nil {
 		return nil, err
 	}
 
-	vectorizer, err := vector.NewTextVectorizer(s.Dimensions)
+	vectorizer := s.vectorizer
+	if vectorizer == nil {
+		if !s.usesTextHashVectorizer() {
+			return nil, fmt.Errorf("%w: agent memory runtime vectorizer is required for %s/%s",
+				vector.ErrVectorizerMismatch, s.Vectorizer.ID, s.Vectorizer.Model)
+		}
+
+		textVectorizer, err := vector.NewTextVectorizer(s.Dimensions)
+		if err != nil {
+			return nil, fmt.Errorf("agent memory: create vectorizer: %w", err)
+		}
+
+		vectorizer = textVectorizer
+	}
+
+	return vectorizer, nil
+}
+
+func (s *Store) vectorize(text string) (vector.Vector, error) {
+	vectorizer, err := s.runtimeVectorizer()
 	if err != nil {
-		return nil, fmt.Errorf("agent memory: create vectorizer: %w", err)
+		return nil, err
 	}
 
 	vec, err := vectorizer.Vectorize(text)
@@ -705,6 +1144,45 @@ func (s *Store) vectorize(text string) (vector.Vector, error) {
 	}
 
 	return vec, nil
+}
+
+func vectorizeAgentMemoryWithContext(ctx context.Context, vectorizer vector.Vectorizer, text string) (vector.Vector, error) {
+	if ctx == nil {
+		return nil, vector.ErrContextRequired
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("agent memory: vectorize context: %w", err)
+	}
+
+	if contextual, ok := vectorizer.(vector.VectorizerContext); ok {
+		vec, vectorizeErr := contextual.VectorizeContext(ctx, text)
+		if vectorizeErr != nil {
+			return nil, fmt.Errorf("agent memory: vectorize text: %w", vectorizeErr)
+		}
+
+		return vec, nil
+	}
+
+	vec, err := vectorizer.Vectorize(text)
+	if err != nil {
+		return nil, fmt.Errorf("agent memory: vectorize text: %w", err)
+	}
+
+	return vec, nil
+}
+
+func (s *Store) vectorizeContext(ctx context.Context, text string) (vector.Vector, error) {
+	if ctx == nil {
+		return nil, vector.ErrContextRequired
+	}
+
+	vectorizer, err := s.runtimeVectorizer()
+	if err != nil {
+		return nil, err
+	}
+
+	return vectorizeAgentMemoryWithContext(ctx, vectorizer, text)
 }
 
 func (s *Store) ensureVectorizer() error {
@@ -721,6 +1199,10 @@ func (s *Store) ensureVectorizer() error {
 	}
 
 	hasDocuments := s.hasDocuments()
+	if s.hasCustomVectorizer() {
+		return s.ensureCustomVectorizer(hasDocuments)
+	}
+
 	if err := s.ensureVectorizerDimensions(hasDocuments); err != nil {
 		return err
 	}
@@ -728,6 +1210,85 @@ func (s *Store) ensureVectorizer() error {
 	wanted := vector.TextVectorizerSpec(s.Dimensions)
 
 	return s.ensureVectorizerSpec(wanted, hasDocuments)
+}
+
+func (s *Store) ensureCustomVectorizer(hasDocuments bool) error {
+	if err := s.validateCustomVectorizerIdentity(); err != nil {
+		return err
+	}
+
+	return s.normalizeCustomVectorizerDimensions(hasDocuments)
+}
+
+func (s *Store) validateCustomVectorizerIdentity() error {
+	if s.Dimensions < 0 || s.Vectorizer.Dimensions < 0 {
+		return vector.ErrInvalidDimensions
+	}
+
+	if privacyErr := validatePersistedVectorizerSpecPrivacy(s.Vectorizer); privacyErr != nil {
+		return privacyErr
+	}
+
+	s.Vectorizer = cleanVectorizerSpec(s.Vectorizer)
+	if s.Vectorizer.IsZero() {
+		return vector.ErrVectorizerMismatch
+	}
+
+	if _, err := vector.NewStoreWithVectorizer(s.Vectorizer); err != nil {
+		return fmt.Errorf("agent memory: validate custom vectorizer: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) normalizeCustomVectorizerDimensions(hasDocuments bool) error {
+	if s.Dimensions == 0 && s.Vectorizer.Dimensions > 0 {
+		s.Dimensions = s.Vectorizer.Dimensions
+	}
+
+	if s.Vectorizer.Dimensions == 0 && s.Dimensions > 0 {
+		s.Vectorizer.Dimensions = s.Dimensions
+	}
+
+	if hasDocuments && s.Dimensions <= 0 {
+		return vector.ErrInvalidDimensions
+	}
+
+	if hasDocuments && s.Vectorizer.Dimensions <= 0 {
+		return fmt.Errorf("%w: store vectorizer dimensions got 0, want %d", vector.ErrDimensionMismatch, s.Dimensions)
+	}
+
+	if s.Dimensions > 0 && s.Vectorizer.Dimensions > 0 && s.Vectorizer.Dimensions != s.Dimensions {
+		return fmt.Errorf("%w: store vectorizer dimensions got %d, want %d",
+			vector.ErrDimensionMismatch, s.Vectorizer.Dimensions, s.Dimensions)
+	}
+
+	return nil
+}
+
+func (s *Store) adoptVectorDimensions(dimensions int) error {
+	if dimensions <= 0 {
+		return vector.ErrInvalidDimensions
+	}
+
+	if s.Dimensions == 0 {
+		s.Dimensions = dimensions
+	}
+
+	if s.Dimensions != dimensions {
+		return fmt.Errorf("%w: vector dimensions got %d, want %d", vector.ErrDimensionMismatch, dimensions, s.Dimensions)
+	}
+
+	if s.Vectorizer.Dimensions == 0 {
+		s.Vectorizer.Dimensions = dimensions
+	}
+
+	if s.Vectorizer.Dimensions != dimensions {
+		return fmt.Errorf("%w: vectorizer dimensions got %d, want %d",
+			vector.ErrDimensionMismatch, s.Vectorizer.Dimensions, dimensions)
+	}
+
+	return nil
 }
 
 func (s *Store) ensureVectorizerDimensions(hasDocuments bool) error {
@@ -837,6 +1398,10 @@ func (s *Store) validateLoaded() error {
 
 func (s *Store) ensureLoadedVectorizer() error {
 	hasDocuments := s.hasDocuments()
+	if s.hasCustomVectorizer() {
+		return s.ensureCustomVectorizer(hasDocuments)
+	}
+
 	if s.Dimensions <= 0 {
 		if hasDocuments {
 			return vector.ErrInvalidDimensions
@@ -881,6 +1446,18 @@ func (s *Store) ensureLoadedVectorizer() error {
 	return nil
 }
 
+func (s *Store) usesTextHashVectorizer() bool {
+	spec := cleanVectorizerSpec(s.Vectorizer)
+
+	return spec.IsZero() || spec.ID == vector.TextHashVectorizerID
+}
+
+func (s *Store) hasCustomVectorizer() bool {
+	spec := cleanVectorizerSpec(s.Vectorizer)
+
+	return !spec.IsZero() && spec.ID != vector.TextHashVectorizerID
+}
+
 func (s *Store) validateSearchDocument(doc Document) error {
 	if _, err := normalizeLoadedDocumentID(doc.ID, false); err != nil {
 		return err
@@ -899,7 +1476,7 @@ func (s *Store) validateSearchDocument(doc Document) error {
 		return ErrPrivacyPolicy
 	}
 
-	if err := validateVectorizableText(redactedText); err != nil {
+	if err := s.validateTextVectorizable(redactedText); err != nil {
 		return err
 	}
 
@@ -930,19 +1507,28 @@ func (s *Store) validateSearchDocument(doc Document) error {
 	return nil
 }
 
-func (s *Store) migrateAgent(agent string, docs []Document) ([]Document, error) {
+func (s *Store) migrateAgent(
+	agent string,
+	docs []Document,
+	reembed reembedDocumentFunc,
+	checkContext contextErrFunc,
+) ([]Document, error) {
 	if strings.TrimSpace(agent) == "" {
 		return nil, ErrMissingAgent
 	}
 
 	seen := make(map[string]struct{}, len(docs))
 	for i := range docs {
+		if err := checkContext(); err != nil {
+			return nil, fmt.Errorf("agent memory: migrate canceled: %w", err)
+		}
+
 		normalized, err := s.normalizeLoadedDocument(docs[i], seen, true)
 		if err != nil {
 			return nil, err
 		}
 
-		updated, err := s.reembedDocument(normalized)
+		updated, err := reembed(normalized)
 		if err != nil {
 			return nil, err
 		}
@@ -1015,7 +1601,7 @@ func (s *Store) normalizeLoadedDocument(doc Document, seen map[string]struct{}, 
 	}
 
 	doc = normalized
-	if validateErr := validateVectorizableText(doc.Text); validateErr != nil {
+	if validateErr := s.validateTextVectorizable(doc.Text); validateErr != nil {
 		return Document{}, validateErr
 	}
 
@@ -1115,6 +1701,20 @@ func normalizeLoadedPrivacy(doc Document, migrating bool) (Document, error) {
 }
 
 func (s *Store) reembedDocument(doc Document) (Document, error) {
+	return s.reembedDocumentWithVectorize(doc, s.vectorize)
+}
+
+func (s *Store) reembedDocumentContext(ctx context.Context, doc Document) (Document, error) {
+	if ctx == nil {
+		return Document{}, vector.ErrContextRequired
+	}
+
+	return s.reembedDocumentWithVectorize(doc, func(text string) (vector.Vector, error) {
+		return s.vectorizeContext(ctx, text)
+	})
+}
+
+func (s *Store) reembedDocumentWithVectorize(doc Document, vectorize vectorizeTextFunc) (Document, error) {
 	id, idErr := redactDocumentID(doc.ID)
 	if idErr != nil {
 		return Document{}, idErr
@@ -1129,7 +1729,7 @@ func (s *Store) reembedDocument(doc Document) (Document, error) {
 	doc.Text = privacy.RedactText(doc.Text)
 
 	doc.Path = privacy.RedactIdentifier(strings.TrimSpace(doc.Path))
-	if err := validateVectorizableText(doc.Text); err != nil {
+	if err := s.validateTextVectorizable(doc.Text); err != nil {
 		return Document{}, err
 	}
 
@@ -1137,8 +1737,12 @@ func (s *Store) reembedDocument(doc Document) (Document, error) {
 	doc.Provenance = ensureProvenance(cleanMetadata(doc.Provenance), "reembed")
 	doc.SourceHash = privacy.SourceHash(doc.Text)
 
-	vec, err := s.vectorize(doc.Text)
+	vec, err := vectorize(doc.Text)
 	if err != nil {
+		return Document{}, err
+	}
+
+	if err := s.adoptVectorDimensions(len(vec)); err != nil {
 		return Document{}, err
 	}
 
@@ -1197,7 +1801,7 @@ func agentRetrievalResult(agent string, result Result, query retrieval.Query) re
 	chunk := retrieval.BestChunkForTerms(doc.ID, text, strings.Fields(strings.ToLower(query.Text)), retrieval.ChunkOptions{})
 
 	scorer := retrieval.Scorer{
-		Name: "agent-memory-hashed-vector-cosine",
+		Name: agentMemoryScorerName(doc.Vectorizer),
 		Raw:  result.Score,
 		Details: map[string]float64{
 			"cosine_similarity": result.Score,
@@ -1220,6 +1824,14 @@ func agentRetrievalResult(agent string, result Result, query retrieval.Query) re
 	})
 }
 
+func agentMemoryScorerName(spec vector.VectorizerSpec) string {
+	if spec.ID == vector.TextHashVectorizerID || spec.IsZero() {
+		return "agent-memory-lexical-vector-cosine"
+	}
+
+	return "agent-memory-embedding-vector-cosine"
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -1240,6 +1852,10 @@ func applyAddOptions(opts ...AddOption) addOptions {
 	}
 
 	return out
+}
+
+func noContextErr() error {
+	return nil
 }
 
 func (s *Store) hasDocuments() bool {
@@ -1283,23 +1899,11 @@ func cleanMetadata(metadata map[string]string) map[string]string {
 }
 
 func cleanVectorizerSpec(spec vector.VectorizerSpec) vector.VectorizerSpec {
-	spec.ID = privacy.RedactIdentifier(strings.TrimSpace(spec.ID))
-	spec.Model = privacy.RedactIdentifier(strings.TrimSpace(spec.Model))
-	spec.Normalization = privacy.RedactIdentifier(strings.TrimSpace(spec.Normalization))
-	spec.Version = privacy.RedactIdentifier(strings.TrimSpace(spec.Version))
-
-	return spec
+	return vector.NormalizeVectorizerSpec(spec)
 }
 
 func validatePersistedVectorizerSpecPrivacy(spec vector.VectorizerSpec) error {
-	if spec.IsZero() {
-		return nil
-	}
-
-	if privacy.RedactIdentifier(strings.TrimSpace(spec.ID)) != strings.TrimSpace(spec.ID) ||
-		privacy.RedactIdentifier(strings.TrimSpace(spec.Model)) != strings.TrimSpace(spec.Model) ||
-		privacy.RedactIdentifier(strings.TrimSpace(spec.Normalization)) != strings.TrimSpace(spec.Normalization) ||
-		privacy.RedactIdentifier(strings.TrimSpace(spec.Version)) != strings.TrimSpace(spec.Version) {
+	if err := vector.ValidateVectorizerSpecPrivacy(spec); err != nil {
 		return ErrPrivacyPolicy
 	}
 
@@ -1379,6 +1983,10 @@ func (s *Store) validateDocumentVector(doc Document) error {
 			vector.ErrDimensionMismatch, doc.ID, len(doc.Vector), s.Dimensions)
 	}
 
+	if !s.usesTextHashVectorizer() {
+		return nil
+	}
+
 	vectorizer, err := vector.NewTextVectorizer(s.Dimensions)
 	if err != nil {
 		return fmt.Errorf("agent memory: create validation vectorizer: %w", err)
@@ -1391,6 +1999,22 @@ func (s *Store) validateDocumentVector(doc Document) error {
 
 	if !vectorsEqual(doc.Vector, expected) {
 		return fmt.Errorf("%w: %s", ErrVectorMismatch, doc.ID)
+	}
+
+	return nil
+}
+
+func (s *Store) validateTextVectorizable(text string) error {
+	if s.usesTextHashVectorizer() {
+		return validateVectorizableText(text)
+	}
+
+	if !utf8.ValidString(text) {
+		return ErrInvalidUTF8
+	}
+
+	if strings.TrimSpace(text) == "" {
+		return vector.ErrEmptyText
 	}
 
 	return nil
@@ -1428,6 +2052,29 @@ func cloneDocument(doc Document) Document {
 	doc.ExpiresAt = cloneTimePtr(doc.ExpiresAt)
 
 	return doc
+}
+
+func cloneStoreForVectorizerMigration(store *Store) Store {
+	if store == nil {
+		return Store{}
+	}
+
+	out := *store
+	out.vectorizer = nil
+
+	if store.Agents != nil {
+		out.Agents = make(map[string][]Document, len(store.Agents))
+		for agent, docs := range store.Agents {
+			cloned := make([]Document, 0, len(docs))
+			for i := range docs {
+				cloned = append(cloned, cloneDocument(docs[i]))
+			}
+
+			out.Agents[agent] = cloned
+		}
+	}
+
+	return out
 }
 
 func cloneVector(vec vector.Vector) vector.Vector {

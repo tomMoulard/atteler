@@ -31,12 +31,31 @@ const (
 	vectorDefaultProvider       = "ollama"
 	vectorDefaultTimeoutSeconds = "30"
 	vectorFallbackPolicyFail    = "fail"
+	vectorSearchVectorStore     = "vector-search"
 )
 
 func runVectorSearch(ctx context.Context, cwd string, cfg appconfig.VectorConfig, opts cliOptions) error {
 	settings, err := vectorSearchSettingsFromOptions(cwd, cfg, opts)
 	if err != nil {
 		return err
+	}
+
+	if settings.Vectorizer == vector.VectorizerKindEmbedding &&
+		!workspaceRemoteEmbeddingAllowed(settings.BaseURL, cfg.WorkspaceAllowRemoteEmbeddings) {
+		if settings.FallbackPolicy != vector.VectorizerKindLexical {
+			return fmt.Errorf("vector search: remote embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings", workspaceDisplayEmbeddingEndpoint(settings.BaseURL))
+		}
+
+		fmt.Fprintf(
+			os.Stderr,
+			"warning: remote embedding endpoint %s is not allowed without vector.workspace_allow_remote_embeddings; falling back to lexical hashed token-frequency retrieval\n",
+			workspaceDisplayEmbeddingEndpoint(settings.BaseURL),
+		)
+
+		fallbackPaths := vectorSearchFallbackPaths(opts.vectorIndexFiles, settings.IndexPath)
+		settings = lexicalVectorFallbackSettings(settings)
+
+		return runVectorSearchOnce(ctx, settings, opts.vectorSearch, fallbackPaths)
 	}
 
 	err = runVectorSearchOnce(ctx, settings, opts.vectorSearch, opts.vectorIndexFiles)
@@ -52,17 +71,8 @@ func runVectorSearch(ctx context.Context, cwd string, cfg appconfig.VectorConfig
 
 	fmt.Fprintln(os.Stderr, "warning: embedding vector search failed; falling back to lexical hashed token-frequency retrieval: "+err.Error())
 
-	fallbackPaths := append([]string(nil), opts.vectorIndexFiles...)
-	if len(fallbackPaths) == 0 {
-		fallbackPaths = vectorIndexSourcePaths(settings.IndexPath)
-	}
-
-	settings.Vectorizer = vector.VectorizerKindLexical
-	settings.Provider = ""
-	settings.BaseURL = ""
-	settings.Model = vector.LexicalFallbackModel
-	settings.FallbackPolicy = vectorFallbackPolicyFail
-	settings.IndexPath = lexicalFallbackIndexPath(settings.IndexPath)
+	fallbackPaths := vectorSearchFallbackPaths(opts.vectorIndexFiles, settings.IndexPath)
+	settings = lexicalVectorFallbackSettings(settings)
 
 	return runVectorSearchOnce(ctx, settings, opts.vectorSearch, fallbackPaths)
 }
@@ -88,12 +98,6 @@ func runVectorSearchOnce(ctx context.Context, settings vectorSearchSettings, que
 		return err
 	}
 
-	if rebuilt {
-		if saveErr := idx.Save(settings.IndexPath); saveErr != nil {
-			return fmt.Errorf("vector search: save index: %w", saveErr)
-		}
-	}
-
 	if query == "" {
 		fmt.Printf(
 			"Indexed %d chunk(s) from %d source file(s) with %s into %s\n",
@@ -116,17 +120,17 @@ func runVectorSearchOnce(ctx context.Context, settings vectorSearchSettings, que
 		)
 	}
 
-	store, err := idx.Store()
+	ann, err := vector.NewANNIndex(idx.Documents, idx.Dimensions, vector.ANNOptions{})
 	if err != nil {
-		return fmt.Errorf("vector search: load index: %w", err)
+		return fmt.Errorf("vector search: load ANN index: %w", err)
 	}
 
-	results, err := store.Search(queryVector, settings.Limit)
+	results, err := ann.Search(queryVector, settings.Limit)
 	if err != nil {
 		return fmt.Errorf("vector search failed: %w", err)
 	}
 
-	fmt.Println(formatVectorSearchHeader(idx, settings.IndexPath, rebuilt))
+	fmt.Println(formatVectorSearchHeader(idx, settings.IndexPath, rebuilt, settings.Limit))
 
 	if len(results) == 0 {
 		fmt.Println("No vector results found.")
@@ -187,17 +191,21 @@ func validateReusableVectorIndexForQuery(settings vectorSearchSettings, metadata
 }
 
 func vectorSearchSettingsFromOptions(cwd string, cfg appconfig.VectorConfig, opts cliOptions) (vectorSearchSettings, error) {
+	resolved := cfg.ResolveVectorizerConfig(appconfig.VectorScope{
+		Store:  vectorSearchVectorStore,
+		Source: vector.SourceKindFile,
+	})
 	settings := vectorSearchSettings{
-		Vectorizer:     firstNonEmpty(opts.vectorizer, cfg.Vectorizer, vector.VectorizerKindLexical),
-		Provider:       firstNonEmpty(opts.vectorProvider, cfg.Provider, vectorDefaultProvider),
-		Model:          firstNonEmpty(opts.vectorModel, cfg.Model),
-		BaseURL:        firstNonEmpty(opts.vectorBaseURL, cfg.BaseURL),
-		FallbackPolicy: firstNonEmpty(opts.vectorFallbackPolicy, cfg.FallbackPolicy, vectorFallbackPolicyFail),
-		IndexPath:      firstNonEmpty(opts.vectorStorePath, cfg.IndexPath),
+		Vectorizer:     firstNonEmpty(opts.vectorizer, resolved.Vectorizer, vector.VectorizerKindLexical),
+		Provider:       firstNonEmpty(opts.vectorProvider, resolved.Provider, vectorDefaultProvider),
+		Model:          firstNonEmpty(opts.vectorModel, resolved.Model),
+		BaseURL:        firstNonEmpty(opts.vectorBaseURL, resolved.BaseURL),
+		FallbackPolicy: firstNonEmpty(opts.vectorFallbackPolicy, resolved.FallbackPolicy, vectorFallbackPolicyFail),
+		IndexPath:      firstNonEmpty(opts.vectorStorePath, resolved.IndexPath),
 		Limit:          opts.vectorLimit.value,
 		Chunk: vector.ChunkOptions{
-			MaxRunes:     cfg.ChunkMaxRunes,
-			OverlapRunes: cfg.ChunkOverlapRunes,
+			MaxRunes:     resolved.ChunkMaxRunes,
+			OverlapRunes: resolved.ChunkOverlapRunes,
 		},
 	}
 
@@ -207,12 +215,14 @@ func vectorSearchSettingsFromOptions(cwd string, cfg appconfig.VectorConfig, opt
 
 	if settings.IndexPath == "" {
 		settings.IndexPath = filepath.Join(cwd, ".atteler", "vector-index.json")
+	} else {
+		settings.IndexPath = rootRelativePath(cwd, settings.IndexPath)
 	}
 
 	if opts.vectorTimeout.set {
 		settings.Timeout = time.Duration(opts.vectorTimeout.value) * time.Second
-	} else if cfg.TimeoutSeconds > 0 {
-		settings.Timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
+	} else if resolved.TimeoutSeconds > 0 {
+		settings.Timeout = time.Duration(resolved.TimeoutSeconds) * time.Second
 	}
 
 	if opts.vectorChunkMaxRunes.set {
@@ -238,6 +248,41 @@ func vectorSearchSettingsFromOptions(cwd string, cfg appconfig.VectorConfig, opt
 	}
 
 	return settings, nil
+}
+
+func scopedVectorizerConfig(scopes map[string]appconfig.VectorizerConfig, key string) appconfig.VectorizerConfig {
+	key = strings.TrimSpace(key)
+	if key == "" || len(scopes) == 0 {
+		return appconfig.VectorizerConfig{}
+	}
+
+	if scoped, ok := scopes[key]; ok {
+		return scoped
+	}
+
+	lowerKey := strings.ToLower(key)
+	for name, scoped := range scopes {
+		if strings.ToLower(strings.TrimSpace(name)) == lowerKey {
+			return scoped
+		}
+	}
+
+	normalizedKey := normalizeVectorScopeKey(key)
+	for name, scoped := range scopes {
+		if normalizeVectorScopeKey(name) == normalizedKey {
+			return scoped
+		}
+	}
+
+	return appconfig.VectorizerConfig{}
+}
+
+func normalizeVectorScopeKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.ReplaceAll(key, "_", "-")
+	key = strings.ReplaceAll(key, " ", "-")
+
+	return key
 }
 
 func newVectorSearchVectorizer(settings vectorSearchSettings) (vector.Vectorizer, vector.VectorizerMetadata, error) {
@@ -288,17 +333,9 @@ func loadOrBuildVectorIndex(
 ) (*vector.Index, bool, error) {
 	idx, loadErr := vector.LoadIndex(settings.IndexPath)
 	if loadErr == nil {
-		reuse, rebuildPaths, reuseErr := reusableVectorIndex(idx, metadata, settings.Chunk, settings.IndexPath, paths)
-		if reuseErr != nil {
-			return nil, false, reuseErr
-		}
-
-		if reuse {
-			return idx, false, nil
-		}
-
-		if len(rebuildPaths) > 0 {
-			paths = rebuildPaths
+		loaded, err := reuseOrRefreshLoadedVectorIndex(ctx, idx, settings, paths, vectorizer, metadata)
+		if loaded.handled || err != nil {
+			return loaded.index, loaded.rebuilt, err
 		}
 	} else if !errors.Is(loadErr, os.ErrNotExist) && len(paths) == 0 {
 		return nil, false, fmt.Errorf("vector search: load index: %w", loadErr)
@@ -308,17 +345,77 @@ func loadOrBuildVectorIndex(
 		return nil, false, fmt.Errorf("vector search: no reusable index at %s; pass --vector-index to build one", settings.IndexPath)
 	}
 
-	sources, err := vectorSourcesFromFiles(paths)
+	refreshed, err := refreshFileVectorIndex(ctx, settings, paths, vectorizer, metadata)
 	if err != nil {
 		return nil, false, err
 	}
 
-	idx, err = vector.BuildIndex(ctx, sources, vectorizer, metadata, settings.Chunk, time.Now().UTC())
+	return refreshed, true, nil
+}
+
+type vectorIndexLoadResult struct {
+	index   *vector.Index
+	rebuilt bool
+	handled bool
+}
+
+func reuseOrRefreshLoadedVectorIndex(
+	ctx context.Context,
+	idx *vector.Index,
+	settings vectorSearchSettings,
+	paths []string,
+	vectorizer vector.Vectorizer,
+	metadata vector.VectorizerMetadata,
+) (vectorIndexLoadResult, error) {
+	reuse, rebuildPaths, err := reusableVectorIndex(idx, metadata, settings.Chunk, settings.IndexPath, paths)
 	if err != nil {
-		return nil, false, fmt.Errorf("vector search: build index: %w", err)
+		return vectorIndexLoadResult{handled: true}, err
 	}
 
-	return idx, true, nil
+	if reuse {
+		return vectorIndexLoadResult{index: idx, handled: true}, nil
+	}
+
+	if len(rebuildPaths) == 0 {
+		return vectorIndexLoadResult{}, nil
+	}
+
+	refreshed, err := refreshFileVectorIndex(ctx, settings, rebuildPaths, vectorizer, metadata)
+	if err != nil {
+		return vectorIndexLoadResult{handled: true}, err
+	}
+
+	return vectorIndexLoadResult{index: refreshed, rebuilt: true, handled: true}, nil
+}
+
+func refreshFileVectorIndex(
+	ctx context.Context,
+	settings vectorSearchSettings,
+	paths []string,
+	vectorizer vector.Vectorizer,
+	metadata vector.VectorizerMetadata,
+) (*vector.Index, error) {
+	sources, err := vectorSourcesFromFiles(paths)
+	if err != nil {
+		return nil, err
+	}
+
+	if validateErr := validateSourceVectorIndexMayBeRefreshed(settings.IndexPath, vector.SourceKindFile); validateErr != nil {
+		return nil, validateErr
+	}
+
+	refresh, err := vector.RefreshSourceIndex(ctx, vector.SourceIndexOptions{
+		IndexPath:          settings.IndexPath,
+		Sources:            sources,
+		Vectorizer:         vectorizer,
+		VectorizerMetadata: metadata,
+		Chunk:              settings.Chunk,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("vector search: refresh file index: %w", err)
+	}
+
+	return refresh.Index, nil
 }
 
 func reusableVectorIndex(
@@ -330,7 +427,7 @@ func reusableVectorIndex(
 ) (reuse bool, rebuildPaths []string, err error) {
 	currentPaths := mergeVectorSourcePaths(indexSourcePaths(idx), paths)
 
-	currentSources, sourceErr := vectorSourceMetadata(currentPaths)
+	currentSources, presentPaths, sourceErr := vectorSourceMetadataForReusableIndex(currentPaths, paths)
 	if sourceErr != nil {
 		if len(paths) == 0 {
 			return false, nil, fmt.Errorf("vector search: validate index sources: %w", sourceErr)
@@ -348,7 +445,7 @@ func reusableVectorIndex(
 		return false, nil, fmt.Errorf("vector search: reusable index %s is invalid: %w; pass --vector-index to rebuild", indexPath, validateErr)
 	}
 
-	return false, currentPaths, nil
+	return false, presentPaths, nil
 }
 
 func vectorSourcesFromFiles(paths []string) ([]vector.Source, error) {
@@ -365,18 +462,44 @@ func vectorSourcesFromFiles(paths []string) ([]vector.Source, error) {
 	return sources, nil
 }
 
-func vectorSourceMetadata(paths []string) ([]vector.SourceMetadata, error) {
-	sources := make([]vector.SourceMetadata, 0, len(paths))
-	for _, path := range paths {
+func vectorSourceMetadataForReusableIndex(
+	currentPaths []string,
+	requestedPaths []string,
+) ([]vector.SourceMetadata, []string, error) {
+	requested := cleanedPathSet(requestedPaths)
+	sources := make([]vector.SourceMetadata, 0, len(currentPaths))
+	presentPaths := make([]string, 0, len(currentPaths))
+
+	for _, path := range currentPaths {
 		source, err := vector.SourceMetadataFromFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("vector source metadata %s: %w", path, err)
+			clean := filepath.Clean(strings.TrimSpace(path))
+			if len(requestedPaths) > 0 && !requested[clean] && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+
+			return nil, nil, fmt.Errorf("vector source metadata %s: %w", path, err)
 		}
 
 		sources = append(sources, source)
+		presentPaths = append(presentPaths, path)
 	}
 
-	return sources, nil
+	return sources, presentPaths, nil
+}
+
+func cleanedPathSet(paths []string) map[string]bool {
+	out := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		clean := filepath.Clean(strings.TrimSpace(path))
+		if clean == "" || clean == "." {
+			continue
+		}
+
+		out[clean] = true
+	}
+
+	return out
 }
 
 func vectorizeSearchText(ctx context.Context, vectorizer vector.Vectorizer, text string) (vector.Vector, error) {
@@ -486,6 +609,49 @@ func vectorIndexSourcePaths(indexPath string) []string {
 	return indexSourcePaths(idx)
 }
 
+func vectorSearchFallbackPaths(paths []string, indexPath string) []string {
+	return presentVectorSearchFallbackPaths(vectorIndexSourcePaths(indexPath), paths)
+}
+
+func presentVectorSearchFallbackPaths(existing, requested []string) []string {
+	merged := mergeVectorSourcePaths(existing, requested)
+	if len(merged) == 0 {
+		return nil
+	}
+
+	requestedSet := cleanedPathSet(requested)
+
+	fallbackPaths := make([]string, 0, len(merged))
+	for _, path := range merged {
+		clean := filepath.Clean(strings.TrimSpace(path))
+		if clean == "" || clean == "." {
+			continue
+		}
+
+		if requestedSet[clean] {
+			fallbackPaths = append(fallbackPaths, clean)
+			continue
+		}
+
+		if _, err := os.Stat(clean); err == nil {
+			fallbackPaths = append(fallbackPaths, clean)
+		}
+	}
+
+	return fallbackPaths
+}
+
+func lexicalVectorFallbackSettings(settings vectorSearchSettings) vectorSearchSettings {
+	settings.Vectorizer = vector.VectorizerKindLexical
+	settings.Provider = ""
+	settings.BaseURL = ""
+	settings.Model = vector.LexicalFallbackModel
+	settings.FallbackPolicy = vectorFallbackPolicyFail
+	settings.IndexPath = lexicalFallbackIndexPath(settings.IndexPath)
+
+	return settings
+}
+
 func lexicalFallbackIndexPath(indexPath string) string {
 	indexPath = strings.TrimSpace(indexPath)
 	if indexPath == "" {
@@ -509,24 +675,54 @@ func lexicalFallbackIndexPath(indexPath string) string {
 	return stem + ".lexical" + extension
 }
 
-func formatVectorSearchHeader(idx *vector.Index, indexPath string, rebuilt bool) string {
+func rootRelativePath(root, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+
+	if filepath.IsAbs(path) || strings.TrimSpace(root) == "" {
+		return filepath.Clean(path)
+	}
+
+	return filepath.Join(root, path)
+}
+
+func formatVectorSearchHeader(idx *vector.Index, indexPath string, rebuilt bool, limit int) string {
+	ann := (vector.ANNOptions{}).Normalize(len(idx.Documents), limit)
+
 	parts := []string{
 		"vector_ranking",
 		formatVectorizerMetadata(idx.Vectorizer),
 		fmt.Sprintf("dimensions=%d", idx.Dimensions),
 		fmt.Sprintf("chunks=%d", len(idx.Documents)),
 		fmt.Sprintf("sources=%d", len(idx.Sources)),
+		fmt.Sprintf("ann_exact_scan=%t", (vector.ANNOptions{}).UsesExactSearch(len(idx.Documents), limit)),
+		fmt.Sprintf("ann_documents=%d", len(idx.Documents)),
+		fmt.Sprintf("ann_min_candidates=%d", ann.MinCandidates),
 		"index=" + indexPath,
 	}
 	if rebuilt {
 		parts = append(parts, "rebuilt=true")
 	}
 
-	if !idx.CreatedAt.IsZero() {
-		parts = append(parts, "created_at="+idx.CreatedAt.UTC().Format(time.RFC3339))
+	if createdAt := formatVectorIndexTimestamp(idx.CreatedAt); createdAt != "" {
+		parts = append(parts, "created_at="+createdAt)
+	}
+
+	if updatedAt := formatVectorIndexTimestamp(idx.UpdatedAt); updatedAt != "" {
+		parts = append(parts, "updated_at="+updatedAt)
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func formatVectorIndexTimestamp(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+
+	return t.UTC().Format(time.RFC3339)
 }
 
 func formatVectorizerMetadata(metadata vector.VectorizerMetadata) string {

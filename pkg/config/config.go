@@ -333,23 +333,88 @@ type SkillLearningConfig struct {
 
 // VectorConfig configures local vector retrieval and persisted indexes.
 type VectorConfig struct {
-	WorkspaceEnabled               *bool    `json:"workspace_enabled,omitempty" yaml:"workspace_enabled,omitempty"`
-	WorkspaceAllowRemoteEmbeddings *bool    `json:"workspace_allow_remote_embeddings,omitempty" yaml:"workspace_allow_remote_embeddings,omitempty"`
-	Vectorizer                     string   `json:"vectorizer,omitempty" yaml:"vectorizer,omitempty"`
-	Provider                       string   `json:"provider,omitempty" yaml:"provider,omitempty"`
-	Model                          string   `json:"model,omitempty" yaml:"model,omitempty"`
-	BaseURL                        string   `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	FallbackPolicy                 string   `json:"fallback_policy,omitempty" yaml:"fallback_policy,omitempty"`
-	IndexPath                      string   `json:"index_path,omitempty" yaml:"index_path,omitempty"`
-	WorkspaceIndexPath             string   `json:"workspace_index_path,omitempty" yaml:"workspace_index_path,omitempty"`
-	WorkspaceInclude               []string `json:"workspace_include,omitempty" yaml:"workspace_include,omitempty"`
-	WorkspaceExclude               []string `json:"workspace_exclude,omitempty" yaml:"workspace_exclude,omitempty"`
-	TimeoutSeconds                 int      `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
-	ChunkMaxRunes                  int      `json:"chunk_max_runes,omitempty" yaml:"chunk_max_runes,omitempty"`
-	ChunkOverlapRunes              int      `json:"chunk_overlap_runes,omitempty" yaml:"chunk_overlap_runes,omitempty"`
-	WorkspaceLimit                 int      `json:"workspace_limit,omitempty" yaml:"workspace_limit,omitempty"`
-	WorkspaceMaxFileBytes          int      `json:"workspace_max_file_bytes,omitempty" yaml:"workspace_max_file_bytes,omitempty"`
-	WorkspaceMaxFiles              int      `json:"workspace_max_files,omitempty" yaml:"workspace_max_files,omitempty"`
+	WorkspaceEnabled               *bool                       `json:"workspace_enabled,omitempty" yaml:"workspace_enabled,omitempty"`
+	WorkspaceAllowRemoteEmbeddings *bool                       `json:"workspace_allow_remote_embeddings,omitempty" yaml:"workspace_allow_remote_embeddings,omitempty"`
+	Stores                         map[string]VectorizerConfig `json:"stores,omitempty" yaml:"stores,omitempty"`
+	Agents                         map[string]VectorizerConfig `json:"agents,omitempty" yaml:"agents,omitempty"`
+	Sources                        map[string]VectorizerConfig `json:"sources,omitempty" yaml:"sources,omitempty"`
+	Vectorizer                     string                      `json:"vectorizer,omitempty" yaml:"vectorizer,omitempty"`
+	Provider                       string                      `json:"provider,omitempty" yaml:"provider,omitempty"`
+	Model                          string                      `json:"model,omitempty" yaml:"model,omitempty"`
+	BaseURL                        string                      `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	FallbackPolicy                 string                      `json:"fallback_policy,omitempty" yaml:"fallback_policy,omitempty"`
+	IndexPath                      string                      `json:"index_path,omitempty" yaml:"index_path,omitempty"`
+	WorkspaceIndexPath             string                      `json:"workspace_index_path,omitempty" yaml:"workspace_index_path,omitempty"`
+	WorkspaceInclude               []string                    `json:"workspace_include,omitempty" yaml:"workspace_include,omitempty"`
+	WorkspaceExclude               []string                    `json:"workspace_exclude,omitempty" yaml:"workspace_exclude,omitempty"`
+	TimeoutSeconds                 int                         `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	ChunkMaxRunes                  int                         `json:"chunk_max_runes,omitempty" yaml:"chunk_max_runes,omitempty"`
+	ChunkOverlapRunes              int                         `json:"chunk_overlap_runes,omitempty" yaml:"chunk_overlap_runes,omitempty"`
+	WorkspaceLimit                 int                         `json:"workspace_limit,omitempty" yaml:"workspace_limit,omitempty"`
+	WorkspaceMaxFileBytes          int                         `json:"workspace_max_file_bytes,omitempty" yaml:"workspace_max_file_bytes,omitempty"`
+	WorkspaceMaxFiles              int                         `json:"workspace_max_files,omitempty" yaml:"workspace_max_files,omitempty"`
+}
+
+// VectorizerConfig configures the vectorizer identity for a store, agent, or
+// source-specific retrieval index. Empty fields inherit from the parent
+// VectorConfig when resolved.
+type VectorizerConfig struct {
+	Vectorizer        string `json:"vectorizer,omitempty" yaml:"vectorizer,omitempty"`
+	Provider          string `json:"provider,omitempty" yaml:"provider,omitempty"`
+	Model             string `json:"model,omitempty" yaml:"model,omitempty"`
+	BaseURL           string `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	FallbackPolicy    string `json:"fallback_policy,omitempty" yaml:"fallback_policy,omitempty"`
+	IndexPath         string `json:"index_path,omitempty" yaml:"index_path,omitempty"`
+	TimeoutSeconds    int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	ChunkMaxRunes     int    `json:"chunk_max_runes,omitempty" yaml:"chunk_max_runes,omitempty"`
+	ChunkOverlapRunes int    `json:"chunk_overlap_runes,omitempty" yaml:"chunk_overlap_runes,omitempty"`
+}
+
+// VectorScope identifies the retrieval scope whose vectorizer should be
+// resolved. Source overrides agent, agent overrides store, and all three
+// inherit from the top-level vector config.
+type VectorScope struct {
+	Store  string
+	Agent  string
+	Source string
+}
+
+// DefaultVectorizerConfig returns the top-level vectorizer fields without any
+// store, agent, or source-specific overrides.
+func (c VectorConfig) DefaultVectorizerConfig() VectorizerConfig {
+	return VectorizerConfig{
+		Vectorizer:        strings.TrimSpace(c.Vectorizer),
+		Provider:          strings.TrimSpace(c.Provider),
+		Model:             strings.TrimSpace(c.Model),
+		BaseURL:           strings.TrimSpace(c.BaseURL),
+		FallbackPolicy:    strings.TrimSpace(c.FallbackPolicy),
+		IndexPath:         strings.TrimSpace(c.IndexPath),
+		TimeoutSeconds:    c.TimeoutSeconds,
+		ChunkMaxRunes:     c.ChunkMaxRunes,
+		ChunkOverlapRunes: c.ChunkOverlapRunes,
+	}
+}
+
+// ResolveVectorizerConfig overlays store, agent, and source-specific
+// vectorizer settings on the global vector config. It lets callers select
+// lexical vs embedding vectorizers independently for workspace stores,
+// per-agent memory, and source families such as files, sessions, or git
+// history without duplicating provider/model defaults in config files.
+func (c VectorConfig) ResolveVectorizerConfig(scope VectorScope) VectorizerConfig {
+	resolved := c.DefaultVectorizerConfig()
+	if scoped, ok := vectorizerScopeConfig(c.Stores, scope.Store); ok {
+		resolved = overlayVectorizerConfig(resolved, scoped)
+	}
+
+	if scoped, ok := vectorizerScopeConfig(c.Agents, scope.Agent); ok {
+		resolved = overlayVectorizerConfig(resolved, scoped)
+	}
+
+	if scoped, ok := vectorizerScopeConfig(c.Sources, scope.Source); ok {
+		resolved = overlayVectorizerConfig(resolved, scoped)
+	}
+
+	return resolved
 }
 
 // WorktreeConfig configures opt-in worktree merge-back behavior.
@@ -539,23 +604,38 @@ type fileSkillLearningConfig struct {
 
 //nolint:govet // Field order mirrors the documented vector config schema.
 type fileVectorConfig struct {
-	WorkspaceEnabled               *bool    `json:"workspace_enabled" yaml:"workspace_enabled"`
-	WorkspaceAllowRemoteEmbeddings *bool    `json:"workspace_allow_remote_embeddings" yaml:"workspace_allow_remote_embeddings"`
-	Vectorizer                     *string  `json:"vectorizer" yaml:"vectorizer"`
-	Provider                       *string  `json:"provider" yaml:"provider"`
-	Model                          *string  `json:"model" yaml:"model"`
-	BaseURL                        *string  `json:"base_url" yaml:"base_url"`
-	FallbackPolicy                 *string  `json:"fallback_policy" yaml:"fallback_policy"`
-	IndexPath                      *string  `json:"index_path" yaml:"index_path"`
-	WorkspaceIndexPath             *string  `json:"workspace_index_path" yaml:"workspace_index_path"`
-	WorkspaceInclude               []string `json:"workspace_include" yaml:"workspace_include"`
-	WorkspaceExclude               []string `json:"workspace_exclude" yaml:"workspace_exclude"`
-	TimeoutSeconds                 *int     `json:"timeout_seconds" yaml:"timeout_seconds"`
-	ChunkMaxRunes                  *int     `json:"chunk_max_runes" yaml:"chunk_max_runes"`
-	ChunkOverlapRunes              *int     `json:"chunk_overlap_runes" yaml:"chunk_overlap_runes"`
-	WorkspaceLimit                 *int     `json:"workspace_limit" yaml:"workspace_limit"`
-	WorkspaceMaxFileBytes          *int     `json:"workspace_max_file_bytes" yaml:"workspace_max_file_bytes"`
-	WorkspaceMaxFiles              *int     `json:"workspace_max_files" yaml:"workspace_max_files"`
+	WorkspaceEnabled               *bool                           `json:"workspace_enabled" yaml:"workspace_enabled"`
+	WorkspaceAllowRemoteEmbeddings *bool                           `json:"workspace_allow_remote_embeddings" yaml:"workspace_allow_remote_embeddings"`
+	Stores                         map[string]fileVectorizerConfig `json:"stores" yaml:"stores"`
+	Agents                         map[string]fileVectorizerConfig `json:"agents" yaml:"agents"`
+	Sources                        map[string]fileVectorizerConfig `json:"sources" yaml:"sources"`
+	Vectorizer                     *string                         `json:"vectorizer" yaml:"vectorizer"`
+	Provider                       *string                         `json:"provider" yaml:"provider"`
+	Model                          *string                         `json:"model" yaml:"model"`
+	BaseURL                        *string                         `json:"base_url" yaml:"base_url"`
+	FallbackPolicy                 *string                         `json:"fallback_policy" yaml:"fallback_policy"`
+	IndexPath                      *string                         `json:"index_path" yaml:"index_path"`
+	WorkspaceIndexPath             *string                         `json:"workspace_index_path" yaml:"workspace_index_path"`
+	WorkspaceInclude               []string                        `json:"workspace_include" yaml:"workspace_include"`
+	WorkspaceExclude               []string                        `json:"workspace_exclude" yaml:"workspace_exclude"`
+	TimeoutSeconds                 *int                            `json:"timeout_seconds" yaml:"timeout_seconds"`
+	ChunkMaxRunes                  *int                            `json:"chunk_max_runes" yaml:"chunk_max_runes"`
+	ChunkOverlapRunes              *int                            `json:"chunk_overlap_runes" yaml:"chunk_overlap_runes"`
+	WorkspaceLimit                 *int                            `json:"workspace_limit" yaml:"workspace_limit"`
+	WorkspaceMaxFileBytes          *int                            `json:"workspace_max_file_bytes" yaml:"workspace_max_file_bytes"`
+	WorkspaceMaxFiles              *int                            `json:"workspace_max_files" yaml:"workspace_max_files"`
+}
+
+type fileVectorizerConfig struct {
+	Vectorizer        *string `json:"vectorizer" yaml:"vectorizer"`
+	Provider          *string `json:"provider" yaml:"provider"`
+	Model             *string `json:"model" yaml:"model"`
+	BaseURL           *string `json:"base_url" yaml:"base_url"`
+	FallbackPolicy    *string `json:"fallback_policy" yaml:"fallback_policy"`
+	IndexPath         *string `json:"index_path" yaml:"index_path"`
+	TimeoutSeconds    *int    `json:"timeout_seconds" yaml:"timeout_seconds"`
+	ChunkMaxRunes     *int    `json:"chunk_max_runes" yaml:"chunk_max_runes"`
+	ChunkOverlapRunes *int    `json:"chunk_overlap_runes" yaml:"chunk_overlap_runes"`
 }
 
 type fileWorktreeConfig struct {
@@ -1552,6 +1632,10 @@ func mergeVector(dst *Config, vector fileVectorConfig, rec *originRecorder, sour
 		dst.Vector.WorkspaceAllowRemoteEmbeddings = &value
 		rec.set("vector.workspace_allow_remote_embeddings", source, value)
 	}
+
+	dst.Vector.Stores = mergeFileVectorizerConfigMap(dst.Vector.Stores, "stores", vector.Stores, rec, source)
+	dst.Vector.Agents = mergeFileVectorizerConfigMap(dst.Vector.Agents, "agents", vector.Agents, rec, source)
+	dst.Vector.Sources = mergeFileVectorizerConfigMap(dst.Vector.Sources, "sources", vector.Sources, rec, source)
 
 	if vector.Vectorizer != nil {
 		value := strings.TrimSpace(*vector.Vectorizer)
@@ -3114,6 +3198,10 @@ func mergeConfigVectorFromOrigins(dst *Config, vector VectorConfig, dstOrigins, 
 		appendOriginChain(dstOrigins, "vector.workspace_allow_remote_embeddings", srcOrigins, false)
 	}
 
+	dst.Vector.Stores = mergeConfigVectorizerConfigMapFromOrigins(dst.Vector.Stores, "stores", vector.Stores, dstOrigins, srcOrigins)
+	dst.Vector.Agents = mergeConfigVectorizerConfigMapFromOrigins(dst.Vector.Agents, "agents", vector.Agents, dstOrigins, srcOrigins)
+	dst.Vector.Sources = mergeConfigVectorizerConfigMapFromOrigins(dst.Vector.Sources, "sources", vector.Sources, dstOrigins, srcOrigins)
+
 	if vector.Vectorizer != "" {
 		dst.Vector.Vectorizer = strings.TrimSpace(vector.Vectorizer)
 
@@ -3240,6 +3328,10 @@ func mergeConfigVector(dst *Config, vector VectorConfig, rec *originRecorder, so
 		rec.set("vector.workspace_allow_remote_embeddings", source, value)
 	}
 
+	dst.Vector.Stores = mergeConfigVectorizerConfigMap(dst.Vector.Stores, "stores", vector.Stores, rec, source)
+	dst.Vector.Agents = mergeConfigVectorizerConfigMap(dst.Vector.Agents, "agents", vector.Agents, rec, source)
+	dst.Vector.Sources = mergeConfigVectorizerConfigMap(dst.Vector.Sources, "sources", vector.Sources, rec, source)
+
 	if vector.Vectorizer != "" {
 		value := strings.TrimSpace(vector.Vectorizer)
 		dst.Vector.Vectorizer = value
@@ -3340,6 +3432,355 @@ func mergeConfigWorktree(dst *Config, worktree WorktreeConfig, rec *originRecord
 
 		rec.set("worktree.override_verification", source, true)
 	}
+}
+
+func mergeFileVectorizerConfigMap(
+	dst map[string]VectorizerConfig,
+	scopeName string,
+	scopes map[string]fileVectorizerConfig,
+	rec *originRecorder,
+	source originSource,
+) map[string]VectorizerConfig {
+	if scopes == nil {
+		return dst
+	}
+
+	if dst == nil {
+		dst = make(map[string]VectorizerConfig, len(scopes))
+	}
+
+	rec.merge(vectorScopeGroupFieldPath(scopeName), source, sortedMapKeys(scopes), "merges vectorizer configs by scope name")
+
+	for name, scoped := range scopes {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		current := dst[name]
+		fieldPath := vectorScopeFieldPath(scopeName, name)
+		rec.merge(fieldPath, source, name, "merges vectorizer config fields by scope name")
+		mergeFileVectorizerConfig(&current, scoped, rec, source, fieldPath)
+		dst[name] = current
+	}
+
+	return dst
+}
+
+func mergeFileVectorizerConfig(
+	dst *VectorizerConfig,
+	src fileVectorizerConfig,
+	rec *originRecorder,
+	source originSource,
+	fieldPath string,
+) {
+	if src.Vectorizer != nil {
+		value := strings.TrimSpace(*src.Vectorizer)
+		dst.Vectorizer = value
+		rec.set(dottedPath(fieldPath, "vectorizer"), source, value)
+	}
+
+	if src.Provider != nil {
+		value := strings.TrimSpace(*src.Provider)
+		dst.Provider = value
+		rec.set(dottedPath(fieldPath, "provider"), source, value)
+	}
+
+	if src.Model != nil {
+		value := strings.TrimSpace(*src.Model)
+		dst.Model = value
+		rec.set(dottedPath(fieldPath, "model"), source, value)
+	}
+
+	if src.BaseURL != nil {
+		value := strings.TrimSpace(*src.BaseURL)
+		dst.BaseURL = value
+		rec.set(dottedPath(fieldPath, "base_url"), source, value)
+	}
+
+	if src.FallbackPolicy != nil {
+		value := strings.TrimSpace(*src.FallbackPolicy)
+		dst.FallbackPolicy = value
+		rec.set(dottedPath(fieldPath, "fallback_policy"), source, value)
+	}
+
+	if src.IndexPath != nil {
+		value := strings.TrimSpace(*src.IndexPath)
+		dst.IndexPath = value
+		rec.set(dottedPath(fieldPath, "index_path"), source, value)
+	}
+
+	if src.TimeoutSeconds != nil {
+		dst.TimeoutSeconds = *src.TimeoutSeconds
+		rec.set(dottedPath(fieldPath, "timeout_seconds"), source, *src.TimeoutSeconds)
+	}
+
+	if src.ChunkMaxRunes != nil {
+		dst.ChunkMaxRunes = *src.ChunkMaxRunes
+		rec.set(dottedPath(fieldPath, "chunk_max_runes"), source, *src.ChunkMaxRunes)
+	}
+
+	if src.ChunkOverlapRunes != nil {
+		dst.ChunkOverlapRunes = *src.ChunkOverlapRunes
+		rec.set(dottedPath(fieldPath, "chunk_overlap_runes"), source, *src.ChunkOverlapRunes)
+	}
+}
+
+func mergeConfigVectorizerConfigMap(
+	dst map[string]VectorizerConfig,
+	scopeName string,
+	scopes map[string]VectorizerConfig,
+	rec *originRecorder,
+	source originSource,
+) map[string]VectorizerConfig {
+	if scopes == nil {
+		return dst
+	}
+
+	if dst == nil {
+		dst = make(map[string]VectorizerConfig, len(scopes))
+	}
+
+	rec.merge(vectorScopeGroupFieldPath(scopeName), source, sortedMapKeys(scopes), "merges vectorizer configs by scope name")
+
+	for name, scoped := range scopes {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		current := dst[name]
+		fieldPath := vectorScopeFieldPath(scopeName, name)
+		rec.merge(fieldPath, source, name, "merges vectorizer config fields by scope name")
+		mergeConfigVectorizerConfig(&current, scoped, rec, source, fieldPath)
+		dst[name] = current
+	}
+
+	return dst
+}
+
+func mergeConfigVectorizerConfig(
+	dst *VectorizerConfig,
+	src VectorizerConfig,
+	rec *originRecorder,
+	source originSource,
+	fieldPath string,
+) {
+	if src.Vectorizer != "" {
+		value := strings.TrimSpace(src.Vectorizer)
+		dst.Vectorizer = value
+		rec.set(dottedPath(fieldPath, "vectorizer"), source, value)
+	}
+
+	if src.Provider != "" {
+		value := strings.TrimSpace(src.Provider)
+		dst.Provider = value
+		rec.set(dottedPath(fieldPath, "provider"), source, value)
+	}
+
+	if src.Model != "" {
+		value := strings.TrimSpace(src.Model)
+		dst.Model = value
+		rec.set(dottedPath(fieldPath, "model"), source, value)
+	}
+
+	if src.BaseURL != "" {
+		value := strings.TrimSpace(src.BaseURL)
+		dst.BaseURL = value
+		rec.set(dottedPath(fieldPath, "base_url"), source, value)
+	}
+
+	if src.FallbackPolicy != "" {
+		value := strings.TrimSpace(src.FallbackPolicy)
+		dst.FallbackPolicy = value
+		rec.set(dottedPath(fieldPath, "fallback_policy"), source, value)
+	}
+
+	if src.IndexPath != "" {
+		value := strings.TrimSpace(src.IndexPath)
+		dst.IndexPath = value
+		rec.set(dottedPath(fieldPath, "index_path"), source, value)
+	}
+
+	if src.TimeoutSeconds > 0 {
+		dst.TimeoutSeconds = src.TimeoutSeconds
+		rec.set(dottedPath(fieldPath, "timeout_seconds"), source, src.TimeoutSeconds)
+	}
+
+	if src.ChunkMaxRunes > 0 {
+		dst.ChunkMaxRunes = src.ChunkMaxRunes
+		rec.set(dottedPath(fieldPath, "chunk_max_runes"), source, src.ChunkMaxRunes)
+	}
+
+	if src.ChunkOverlapRunes > 0 {
+		dst.ChunkOverlapRunes = src.ChunkOverlapRunes
+		rec.set(dottedPath(fieldPath, "chunk_overlap_runes"), source, src.ChunkOverlapRunes)
+	}
+}
+
+func mergeConfigVectorizerConfigMapFromOrigins(
+	dst map[string]VectorizerConfig,
+	scopeName string,
+	scopes map[string]VectorizerConfig,
+	dstOrigins, srcOrigins OriginMap,
+) map[string]VectorizerConfig {
+	if scopes == nil {
+		return dst
+	}
+
+	if dst == nil {
+		dst = make(map[string]VectorizerConfig, len(scopes))
+	}
+
+	appendOriginChain(dstOrigins, vectorScopeGroupFieldPath(scopeName), srcOrigins, false)
+
+	for name, scoped := range scopes {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		fieldPath := vectorScopeFieldPath(scopeName, name)
+		current := dst[name]
+
+		appendOriginChain(dstOrigins, fieldPath, srcOrigins, false)
+		mergeConfigVectorizerConfigFromOrigins(&current, scoped, fieldPath, dstOrigins, srcOrigins)
+		dst[name] = current
+	}
+
+	return dst
+}
+
+func mergeConfigVectorizerConfigFromOrigins(
+	dst *VectorizerConfig,
+	src VectorizerConfig,
+	fieldPath string,
+	dstOrigins, srcOrigins OriginMap,
+) {
+	mergeConfigVectorizerStringFromOrigins(&dst.Vectorizer, src.Vectorizer, fieldPath, "vectorizer", dstOrigins, srcOrigins)
+	mergeConfigVectorizerStringFromOrigins(&dst.Provider, src.Provider, fieldPath, "provider", dstOrigins, srcOrigins)
+	mergeConfigVectorizerStringFromOrigins(&dst.Model, src.Model, fieldPath, "model", dstOrigins, srcOrigins)
+	mergeConfigVectorizerStringFromOrigins(&dst.BaseURL, src.BaseURL, fieldPath, "base_url", dstOrigins, srcOrigins)
+	mergeConfigVectorizerStringFromOrigins(&dst.FallbackPolicy, src.FallbackPolicy, fieldPath, "fallback_policy", dstOrigins, srcOrigins)
+	mergeConfigVectorizerStringFromOrigins(&dst.IndexPath, src.IndexPath, fieldPath, "index_path", dstOrigins, srcOrigins)
+	mergeConfigVectorizerIntFromOrigins(&dst.TimeoutSeconds, src.TimeoutSeconds, fieldPath, "timeout_seconds", dstOrigins, srcOrigins)
+	mergeConfigVectorizerIntFromOrigins(&dst.ChunkMaxRunes, src.ChunkMaxRunes, fieldPath, "chunk_max_runes", dstOrigins, srcOrigins)
+	mergeConfigVectorizerIntFromOrigins(&dst.ChunkOverlapRunes, src.ChunkOverlapRunes, fieldPath, "chunk_overlap_runes", dstOrigins, srcOrigins)
+}
+
+func mergeConfigVectorizerStringFromOrigins(
+	dst *string,
+	value string,
+	fieldPath, name string,
+	dstOrigins, srcOrigins OriginMap,
+) {
+	path := dottedPath(fieldPath, name)
+	if !originPathExists(srcOrigins, path) && strings.TrimSpace(value) == "" {
+		return
+	}
+
+	*dst = strings.TrimSpace(value)
+
+	appendOriginChain(dstOrigins, path, srcOrigins, false)
+}
+
+func mergeConfigVectorizerIntFromOrigins(
+	dst *int,
+	value int,
+	fieldPath, name string,
+	dstOrigins, srcOrigins OriginMap,
+) {
+	path := dottedPath(fieldPath, name)
+	if !originPathExists(srcOrigins, path) && value == 0 {
+		return
+	}
+
+	*dst = value
+
+	appendOriginChain(dstOrigins, path, srcOrigins, false)
+}
+
+func vectorizerScopeConfig(scopes map[string]VectorizerConfig, key string) (VectorizerConfig, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" || len(scopes) == 0 {
+		return VectorizerConfig{}, false
+	}
+
+	if scoped, ok := scopes[key]; ok {
+		return scoped, true
+	}
+
+	lowerKey := strings.ToLower(key)
+	for name, scoped := range scopes {
+		if strings.ToLower(strings.TrimSpace(name)) == lowerKey {
+			return scoped, true
+		}
+	}
+
+	normalizedKey := normalizeVectorizerScopeKey(key)
+	for name, scoped := range scopes {
+		if normalizeVectorizerScopeKey(name) == normalizedKey {
+			return scoped, true
+		}
+	}
+
+	return VectorizerConfig{}, false
+}
+
+func normalizeVectorizerScopeKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.ReplaceAll(key, "_", "-")
+	key = strings.ReplaceAll(key, " ", "-")
+
+	return key
+}
+
+func overlayVectorizerConfig(base, override VectorizerConfig) VectorizerConfig {
+	if value := strings.TrimSpace(override.Vectorizer); value != "" {
+		base.Vectorizer = value
+	}
+
+	if value := strings.TrimSpace(override.Provider); value != "" {
+		base.Provider = value
+	}
+
+	if value := strings.TrimSpace(override.Model); value != "" {
+		base.Model = value
+	}
+
+	if value := strings.TrimSpace(override.BaseURL); value != "" {
+		base.BaseURL = value
+	}
+
+	if value := strings.TrimSpace(override.FallbackPolicy); value != "" {
+		base.FallbackPolicy = value
+	}
+
+	if value := strings.TrimSpace(override.IndexPath); value != "" {
+		base.IndexPath = value
+	}
+
+	if override.TimeoutSeconds > 0 {
+		base.TimeoutSeconds = override.TimeoutSeconds
+	}
+
+	if override.ChunkMaxRunes > 0 {
+		base.ChunkMaxRunes = override.ChunkMaxRunes
+	}
+
+	if override.ChunkOverlapRunes > 0 {
+		base.ChunkOverlapRunes = override.ChunkOverlapRunes
+	}
+
+	return base
+}
+
+func vectorScopeGroupFieldPath(scopeName string) string {
+	return dottedPath("vector", scopeName)
+}
+
+func vectorScopeFieldPath(scopeName, name string, fields ...string) string {
+	return dottedPath(append([]string{"vector", scopeName, name}, fields...)...)
 }
 
 func cloneHooks(hooks []HookConfig) []HookConfig {

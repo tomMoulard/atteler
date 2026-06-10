@@ -299,9 +299,25 @@ type retrievalCommandInput struct {
 	MemoryIndexFiles     []string
 	Sources              []string
 	VectorIndexFiles     []string
+	Vector               retrievalVectorCommandInput
 	Limit                int
 	Explain              bool
 	IncludeUnsafe        bool
+}
+
+type retrievalVectorCommandInput struct {
+	Vectorizer        string
+	Provider          string
+	Model             string
+	BaseURL           string
+	FallbackPolicy    string
+	StorePath         string
+	TimeoutSeconds    int
+	ChunkMaxRunes     int
+	ChunkOverlapRunes int
+	TimeoutSet        bool
+	ChunkMaxSet       bool
+	ChunkOverlapSet   bool
 }
 
 type mergeArtifactsCommandInput struct {
@@ -419,6 +435,7 @@ type skillLearningCommandInput struct {
 type vectorSearchCommandInput struct {
 	Query      string
 	IndexFiles []string
+	Vector     retrievalVectorCommandInput
 	Limit      int
 }
 
@@ -857,6 +874,7 @@ func retrievalCommandInputFromOptions(opts cliOptions) retrievalCommandInput {
 		AgentMemoryAgent:     opts.agentMemoryAgent,
 		AgentMemoryStorePath: opts.agentMemoryStorePath,
 		MemoryStorePath:      opts.memoryStorePath,
+		Vector:               retrievalVectorCommandInputFromOptions(opts),
 		Filters:              append([]string(nil), opts.retrievalFilters...),
 		MemoryIndexFiles:     append([]string(nil), opts.memoryIndexFiles...),
 		Sources:              append([]string(nil), opts.retrievalSources...),
@@ -864,6 +882,23 @@ func retrievalCommandInputFromOptions(opts cliOptions) retrievalCommandInput {
 		Limit:                opts.retrievalLimit.value,
 		Explain:              opts.retrievalExplain,
 		IncludeUnsafe:        opts.retrievalIncludeUnsafe,
+	}
+}
+
+func retrievalVectorCommandInputFromOptions(opts cliOptions) retrievalVectorCommandInput {
+	return retrievalVectorCommandInput{
+		Vectorizer:        opts.vectorizer,
+		Provider:          opts.vectorProvider,
+		Model:             opts.vectorModel,
+		BaseURL:           opts.vectorBaseURL,
+		FallbackPolicy:    opts.vectorFallbackPolicy,
+		StorePath:         opts.vectorStorePath,
+		TimeoutSeconds:    opts.vectorTimeout.value,
+		ChunkMaxRunes:     opts.vectorChunkMaxRunes.value,
+		ChunkOverlapRunes: opts.vectorChunkOverlapRunes.value,
+		TimeoutSet:        opts.vectorTimeout.set,
+		ChunkMaxSet:       opts.vectorChunkMaxRunes.set,
+		ChunkOverlapSet:   opts.vectorChunkOverlapRunes.set,
 	}
 }
 
@@ -1013,6 +1048,7 @@ func vectorSearchCommandInputFromOptions(opts cliOptions) vectorSearchCommandInp
 	return vectorSearchCommandInput{
 		Query:      opts.vectorSearch,
 		IndexFiles: append([]string(nil), opts.vectorIndexFiles...),
+		Vector:     retrievalVectorCommandInputFromOptions(opts),
 		Limit:      opts.vectorLimit.value,
 	}
 }

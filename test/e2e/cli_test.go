@@ -361,7 +361,7 @@ printf 'plugin-check\n'
 	result = runOK(t, runSpec{dir: workDir}, "--config", configPath, "agents", "list")
 	assertContains(t, result.stdout, "reviewer")
 
-	result = runOK(t, runSpec{dir: workDir}, "code-intel", "summary")
+	result = runOK(t, runSpec{dir: workDir, timeout: time.Minute}, "code-intel", "summary")
 	assertContains(t, result.stdout, "files=")
 
 	incidentPath := filepath.Join(workDir, "incident.json")

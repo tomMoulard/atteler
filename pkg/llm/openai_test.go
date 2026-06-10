@@ -877,7 +877,7 @@ func TestAutoRegisterWithConfigContext_OpenAICompatibleProviderNameAlias(t *test
 	assert.Equal(t, "llama-3.3-70b-versatile", resp.Model)
 }
 
-func TestAutoRegisterWithConfigContext_ModelRoleRoutesBareCatalogNameToCompatibleProvider(t *testing.T) {
+func TestAutoRegisterWithConfigContext_ModelRoleRoutesBareCatalogNameToPreferredCompatibleProvider(t *testing.T) {
 	t.Parallel()
 
 	var gotModel string
@@ -921,7 +921,10 @@ func TestAutoRegisterWithConfigContext_ModelRoleRoutesBareCatalogNameToCompatibl
 		},
 		DefaultModel: "planner",
 		ModelRoles: map[string]ModelRole{
-			"planner": {Preferred: "gpt-4.1-mini"},
+			"planner": {
+				Preferred:          "gpt-4.1-mini",
+				PreferredProviders: []string{"groq"},
+			},
 		},
 		DisableReadinessChecks: true,
 	})

@@ -13,6 +13,11 @@ const (
 	helpLongFlag       = "--help"
 	helpGoFlag         = "-help"
 	helpShortFlag      = "-h"
+
+	agentMemoryIndexFlag   = "--agent-memory-index"
+	agentMemoryDeleteFlag  = "--agent-memory-delete"
+	agentMemoryCompactFlag = "--agent-memory-compact"
+	agentMemoryMigrateFlag = "--agent-memory-migrate"
 )
 
 type cliCommandAlias struct {
@@ -189,7 +194,7 @@ var cliHelpDomains = []cliHelpDomain{
 	{
 		Name:    "memory/retrieval",
 		Title:   "Memory & Retrieval",
-		Summary: "Search saved sessions, UTF-8 file memory stores, workspace vector indexes, agent lexical memory, local lexical/embedding indexes, and git history.",
+		Summary: "Search saved sessions, UTF-8 file memory stores, workspace vector indexes, agent vector memory, local lexical/embedding indexes, and git history.",
 		Aliases: []string{"memory", "retrieval", "mem"},
 		// Keep old RAG-shaped routes working without advertising lexical
 		// fallback search as RAG in help output.
@@ -201,11 +206,11 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "purge", Args: "<selector>", Summary: "purge memory docs by session:<id>, tag:<tag>, repo:<path>, or all", Legacy: []string{"--memory-purge"}, JoinArgs: true},
 			{Name: "rebuild", Summary: "rebuild the JSON memory store from the selected corpus", Legacy: []string{"--memory-rebuild"}},
 			{Name: "list-corpus", Summary: "print memory corpus metadata", Legacy: []string{"--memory-list-corpus"}},
-			{Name: "agent-search", Args: "<query>", Summary: "search one agent's lexical memory", Legacy: []string{"--agent-memory-search"}, JoinArgs: true},
-			{Name: "agent-index", Args: "<file>", Summary: "add a file to one agent's lexical memory", Legacy: []string{"--agent-memory-index"}},
-			{Name: "agent-delete", Args: "<id>", Summary: "delete one document from one agent's lexical memory", Legacy: []string{"--agent-memory-delete"}},
-			{Name: "agent-compact", Summary: "remove expired documents from per-agent lexical memory", Legacy: []string{"--agent-memory-compact"}},
-			{Name: "agent-migrate", Summary: "explicitly migrate and re-vectorize per-agent lexical memory", Legacy: []string{"--agent-memory-migrate"}},
+			{Name: "agent-search", Args: "<query>", Summary: "search one agent's vector memory", Legacy: []string{"--agent-memory-search"}, JoinArgs: true},
+			{Name: "agent-index", Args: "<file>", Summary: "add a file to one agent's vector memory", Legacy: []string{agentMemoryIndexFlag}},
+			{Name: "agent-delete", Args: "<id>", Summary: "delete one document from one agent's vector memory", Legacy: []string{agentMemoryDeleteFlag}},
+			{Name: "agent-compact", Summary: "remove expired documents from per-agent vector memory", Legacy: []string{agentMemoryCompactFlag}},
+			{Name: "agent-migrate", Summary: "explicitly migrate and re-vectorize per-agent memory", Legacy: []string{agentMemoryMigrateFlag}},
 			{Name: "vector-search", Args: "<query>", Summary: "search a persisted lexical-fallback or embedding vector index", Legacy: []string{"--vector-search"}, JoinArgs: true},
 			{Name: "vector-index", Args: "<file>", Summary: "chunk and add a file to the persisted vector index", Legacy: []string{"--vector-index"}},
 			{Name: "git-history", Args: "<query>", Summary: "search local git history subjects/files/authors", Legacy: []string{"--git-history-search"}, JoinArgs: true},

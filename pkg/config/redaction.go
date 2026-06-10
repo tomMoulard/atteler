@@ -149,6 +149,9 @@ func redactedReferencePolicyConfig(policy ReferencePolicyConfig) ReferencePolicy
 func redactedVectorConfig(cfg VectorConfig) VectorConfig {
 	cfg.WorkspaceEnabled = clonePtr(cfg.WorkspaceEnabled)
 	cfg.WorkspaceAllowRemoteEmbeddings = clonePtr(cfg.WorkspaceAllowRemoteEmbeddings)
+	cfg.Stores = redactedVectorizerConfigMap(cfg.Stores)
+	cfg.Agents = redactedVectorizerConfigMap(cfg.Agents)
+	cfg.Sources = redactedVectorizerConfigMap(cfg.Sources)
 	cfg.Provider = redactPotentialSecretString(cfg.Provider)
 	cfg.Model = redactPotentialSecretString(cfg.Model)
 	cfg.BaseURL = redactURL(cfg.BaseURL)
@@ -178,6 +181,28 @@ func redactedModelRoles(roles map[string]ModelRoleConfig) map[string]ModelRoleCo
 	}
 
 	return out
+}
+
+func redactedVectorizerConfigMap(in map[string]VectorizerConfig) map[string]VectorizerConfig {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string]VectorizerConfig, len(in))
+	for name, cfg := range in {
+		out[name] = redactedVectorizerConfig(cfg)
+	}
+
+	return out
+}
+
+func redactedVectorizerConfig(cfg VectorizerConfig) VectorizerConfig {
+	cfg.Provider = redactPotentialSecretString(cfg.Provider)
+	cfg.Model = redactPotentialSecretString(cfg.Model)
+	cfg.BaseURL = redactURL(cfg.BaseURL)
+	cfg.IndexPath = redactPotentialSecretString(cfg.IndexPath)
+
+	return cfg
 }
 
 func clonePtr[T any](value *T) *T {

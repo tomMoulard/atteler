@@ -14,6 +14,10 @@ import (
 type IndexSearcher struct {
 	Index      *Index
 	Vectorizer Vectorizer
+	// IndexANN is an optional prebuilt ANN layer derived from Index.Documents.
+	// Supplying it avoids rebuilding buckets for every retrieval call while
+	// keeping Index as the persisted datastore of record.
+	IndexANN   *ANNIndex
 	Source     retrieval.Source
 	ScorerName string
 	ANN        ANNOptions
@@ -55,16 +59,21 @@ func (s IndexSearcher) SearchRetrieval(ctx context.Context, query retrieval.Quer
 		return nil, fmt.Errorf("vector index retrieval: vectorizer metadata: %w", err)
 	}
 
+	if err := validateIndexSearcherANN(s.Index, s.IndexANN); err != nil {
+		return nil, fmt.Errorf("vector index retrieval: ANN index: %w", err)
+	}
+
 	queryVector, err := vectorizeContext(ctx, s.Vectorizer, privacy.RedactText(query.Text))
 	if err != nil {
 		return nil, fmt.Errorf("vector index retrieval: vectorize query: %w", err)
 	}
 
-	results, err := s.Index.SearchANN(queryVector, query.Limit, s.ANN)
+	results, err := s.searchANN(queryVector, query.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("vector index retrieval: search ANN index: %w", err)
 	}
 
+	diagnostics := s.annDiagnostics(query.Limit)
 	adapter := Searcher{
 		Vectorizer: s.Vectorizer,
 		Source:     s.Source,
@@ -73,10 +82,93 @@ func (s IndexSearcher) SearchRetrieval(ctx context.Context, query retrieval.Quer
 
 	out := make([]retrieval.Result, 0, len(results))
 	for i := range results {
-		out = append(out, adapter.retrievalResult(results[i], query))
+		result := adapter.retrievalResult(results[i], query)
+		annotateIndexSearcherANNResult(&result, diagnostics, query.Explain)
+
+		out = append(out, result)
 	}
 
 	return out, nil
+}
+
+func (s IndexSearcher) searchANN(queryVector Vector, limit int) ([]Result, error) {
+	if s.IndexANN != nil {
+		return s.IndexANN.Search(queryVector, limit)
+	}
+
+	return s.Index.SearchANN(queryVector, limit, s.ANN)
+}
+
+type indexSearcherANNDiagnostics struct {
+	documentCount int
+	minCandidates int
+	exactScan     bool
+}
+
+func (s IndexSearcher) annDiagnostics(limit int) indexSearcherANNDiagnostics {
+	if s.Index == nil {
+		return indexSearcherANNDiagnostics{}
+	}
+
+	options := s.ANN
+	if s.IndexANN != nil {
+		options = s.IndexANN.options
+	}
+
+	documentCount := len(s.Index.Documents)
+	normalized := options.Normalize(documentCount, limit)
+
+	return indexSearcherANNDiagnostics{
+		documentCount: documentCount,
+		minCandidates: normalized.MinCandidates,
+		exactScan:     annUsesExactSearch(normalized, documentCount, limit),
+	}
+}
+
+func annotateIndexSearcherANNResult(
+	result *retrieval.Result,
+	diagnostics indexSearcherANNDiagnostics,
+	explain bool,
+) {
+	if result == nil {
+		return
+	}
+
+	if result.Scorer.Details == nil {
+		result.Scorer.Details = make(map[string]float64, 3)
+	}
+
+	result.Scorer.Details["ann_documents"] = float64(diagnostics.documentCount)
+	result.Scorer.Details["ann_min_candidates"] = float64(diagnostics.minCandidates)
+	result.Scorer.Details["ann_exact_scan"] = boolFloat(diagnostics.exactScan)
+
+	if !explain {
+		return
+	}
+
+	if diagnostics.exactScan {
+		result.Scorer.Explanation = append(result.Scorer.Explanation,
+			fmt.Sprintf("ANN exact-scan searched all %d indexed document(s)", diagnostics.documentCount),
+		)
+
+		return
+	}
+
+	result.Scorer.Explanation = append(result.Scorer.Explanation,
+		fmt.Sprintf(
+			"ANN candidate search considered at least %d of %d indexed document(s) before exact reranking",
+			diagnostics.minCandidates,
+			diagnostics.documentCount,
+		),
+	)
+}
+
+func boolFloat(value bool) float64 {
+	if value {
+		return 1
+	}
+
+	return 0
 }
 
 func validateIndexSearcherVectorizer(idx *Index, vectorizer Vectorizer) error {
@@ -86,4 +178,34 @@ func validateIndexSearcherVectorizer(idx *Index, vectorizer Vectorizer) error {
 	}
 
 	return idx.Vectorizer.CompatibleWith(metadata)
+}
+
+func validateIndexSearcherANN(idx *Index, ann *ANNIndex) error {
+	if ann == nil || idx == nil {
+		return nil
+	}
+
+	if ann.dimensions != idx.Dimensions {
+		return fmt.Errorf("%w: got %d, want %d", ErrDimensionMismatch, ann.dimensions, idx.Dimensions)
+	}
+
+	if len(ann.documents) != len(idx.Documents) {
+		return fmt.Errorf("%w: ANN document count got %d, want %d", ErrSourceStale, len(ann.documents), len(idx.Documents))
+	}
+
+	for i := range idx.Documents {
+		if ann.documents[i].ID != idx.Documents[i].ID {
+			return fmt.Errorf("%w: ANN document %d got %q, want %q", ErrSourceStale, i, ann.documents[i].ID, idx.Documents[i].ID)
+		}
+
+		if ann.documents[i].SourceHash != idx.Documents[i].SourceHash {
+			return fmt.Errorf("%w: ANN document %q source hash changed", ErrSourceStale, idx.Documents[i].ID)
+		}
+
+		if !vectorsEqual(ann.documents[i].Vector, idx.Documents[i].Vector) {
+			return fmt.Errorf("%w: ANN document %q vector changed", ErrVectorMismatch, idx.Documents[i].ID)
+		}
+	}
+
+	return nil
 }

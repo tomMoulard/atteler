@@ -475,7 +475,7 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 		case "context":
 			diagnostics = append(diagnostics, inspectContextFields(path, value)...)
 		case "providers":
-			diagnostics = append(diagnostics, inspectMapEntries(path, "providers", value, knownProviderFields(), nil)...)
+			diagnostics = append(diagnostics, inspectMapEntries(path, "providers", value, knownProviderFields())...)
 		case "agents":
 			diagnostics = append(diagnostics, inspectAgents(path, value)...)
 		case "hooks":
@@ -485,7 +485,7 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 		case "skill_learning":
 			diagnostics = append(diagnostics, inspectNamedFields(path, "skill_learning", value, knownSkillLearningFields(), nil)...)
 		case "vector":
-			diagnostics = append(diagnostics, inspectNamedFields(path, "vector", value, knownVectorFields(), nil)...)
+			diagnostics = append(diagnostics, inspectVectorFields(path, value)...)
 		case "worktree":
 			diagnostics = append(diagnostics, inspectNamedFields(path, "worktree", value, knownWorktreeFields(), nil)...)
 		case "model_aliases":
@@ -666,6 +666,257 @@ func inspectHooks(path string, value *yaml.Node) []Diagnostic {
 	return diagnostics
 }
 
+func inspectVectorFields(path string, value *yaml.Node) []Diagnostic {
+	if value == nil {
+		return nil
+	}
+
+	if value.Kind != yaml.MappingNode {
+		return []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    "vector",
+			Message:  "vector must be a mapping",
+		}}
+	}
+
+	diagnostics := inspectNamedFields(path, "vector", value, knownVectorFields(), nil)
+
+	diagnostics = append(diagnostics, inspectVectorizerValueFields(path, "vector", value)...)
+	if stores := mappingValue(value, "stores"); stores != nil {
+		diagnostics = append(diagnostics, inspectVectorizerScopeEntries(path, "vector.stores", stores)...)
+	}
+
+	if agents := mappingValue(value, "agents"); agents != nil {
+		diagnostics = append(diagnostics, inspectVectorizerScopeEntries(path, "vector.agents", agents)...)
+	}
+
+	if sources := mappingValue(value, "sources"); sources != nil {
+		diagnostics = append(diagnostics, inspectVectorizerScopeEntries(path, "vector.sources", sources)...)
+	}
+
+	return diagnostics
+}
+
+func inspectVectorizerScopeEntries(path, prefix string, value *yaml.Node) []Diagnostic {
+	if value == nil {
+		return nil
+	}
+
+	if value.Kind != yaml.MappingNode {
+		return []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    prefix,
+			Message:  prefix + " must be a mapping",
+		}}
+	}
+
+	var diagnostics []Diagnostic
+
+	diagnostics = append(diagnostics, inspectVectorizerScopeAliases(path, prefix, value)...)
+
+	forEachMappingField(value, func(name string, entry *yaml.Node) {
+		field := prefix + "." + name
+
+		diagnostics = append(diagnostics, inspectVectorizerScopeName(path, prefix, name)...)
+		if entry == nil || entry.Kind != yaml.MappingNode {
+			diagnostics = append(diagnostics, Diagnostic{
+				Severity: DiagnosticError,
+				Path:     path,
+				Field:    field,
+				Message:  field + " must be a mapping",
+			})
+
+			return
+		}
+
+		diagnostics = append(diagnostics, inspectNamedFields(path, field, entry, knownVectorizerFields(), nil)...)
+		diagnostics = append(diagnostics, inspectVectorizerValueFields(path, field, entry)...)
+	})
+
+	return diagnostics
+}
+
+func inspectVectorizerScopeAliases(path, prefix string, value *yaml.Node) []Diagnostic {
+	canonicalName := vectorizerScopeDiagnosticCanonicalName(prefix)
+	if canonicalName == nil {
+		return nil
+	}
+
+	var diagnostics []Diagnostic
+
+	seen := make(map[string]string)
+
+	forEachMappingField(value, func(name string, _ *yaml.Node) {
+		canonical, ok := canonicalName(name)
+		if !ok {
+			return
+		}
+
+		if previous, exists := seen[canonical]; exists {
+			field := prefix + "." + name
+			diagnostics = append(diagnostics, Diagnostic{
+				Severity: DiagnosticError,
+				Path:     path,
+				Field:    field,
+				Message: fmt.Sprintf(
+					"%s duplicates %s.%s (both resolve to %s); keep one scope name",
+					field,
+					prefix,
+					previous,
+					canonical,
+				),
+			})
+
+			return
+		}
+
+		seen[canonical] = name
+	})
+
+	return diagnostics
+}
+
+func vectorizerScopeDiagnosticCanonicalName(prefix string) func(string) (string, bool) {
+	switch prefix {
+	case "vector.stores":
+		return canonicalVectorStoreScopeName
+	case "vector.sources":
+		return canonicalVectorSourceScopeName
+	default:
+		return nil
+	}
+}
+
+func inspectVectorizerScopeName(path, prefix, name string) []Diagnostic {
+	switch prefix {
+	case "vector.stores":
+		return inspectVectorStoreScopeName(path, prefix, name)
+	case "vector.sources":
+		return inspectVectorSourceScopeName(path, prefix, name)
+	default:
+		return nil
+	}
+}
+
+func inspectVectorStoreScopeName(path, prefix, name string) []Diagnostic {
+	if knownVectorStoreScope(name) {
+		return nil
+	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    prefix + "." + name,
+		Message:  "unknown vector store scope (supported: agent-memory, vector-search, workspace)",
+	}}
+}
+
+func inspectVectorSourceScopeName(path, prefix, name string) []Diagnostic {
+	if knownVectorSourceScope(name) {
+		return nil
+	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    prefix + "." + name,
+		Message:  "unknown vector source scope (supported: file, session, git_history, adr)",
+	}}
+}
+
+func inspectVectorizerValueFields(path, prefix string, value *yaml.Node) []Diagnostic {
+	var diagnostics []Diagnostic
+	if vectorizer := mappingValue(value, "vectorizer"); vectorizer != nil {
+		diagnostics = append(diagnostics, inspectVectorizerKindValue(path, prefix+".vectorizer", vectorizer)...)
+	}
+
+	if provider := mappingValue(value, "provider"); provider != nil {
+		diagnostics = append(diagnostics, inspectVectorProviderValue(path, prefix+".provider", provider)...)
+	}
+
+	if fallback := mappingValue(value, "fallback_policy"); fallback != nil {
+		diagnostics = append(diagnostics, inspectVectorFallbackPolicyValue(path, prefix+".fallback_policy", fallback)...)
+	}
+
+	return diagnostics
+}
+
+func inspectVectorizerKindValue(path, field string, value *yaml.Node) []Diagnostic {
+	normalized, diagnostics := normalizedVectorScalarValue(path, field, value, "vectorizer")
+	if len(diagnostics) > 0 || normalized == "" {
+		return diagnostics
+	}
+
+	if knownVectorizerKind(normalized) {
+		return nil
+	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    field,
+		Message:  fmt.Sprintf("unsupported vectorizer %q (supported: lexical, embedding)", value.Value),
+	}}
+}
+
+func inspectVectorProviderValue(path, field string, value *yaml.Node) []Diagnostic {
+	normalized, diagnostics := normalizedVectorScalarValue(path, field, value, "provider")
+	if len(diagnostics) > 0 || normalized == "" {
+		return diagnostics
+	}
+
+	if knownVectorProvider(normalized) {
+		return nil
+	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    field,
+		Message:  fmt.Sprintf("unsupported vector provider %q (supported: ollama-compatible)", value.Value),
+	}}
+}
+
+func inspectVectorFallbackPolicyValue(path, field string, value *yaml.Node) []Diagnostic {
+	normalized, diagnostics := normalizedVectorScalarValue(path, field, value, "fallback_policy")
+	if len(diagnostics) > 0 || normalized == "" {
+		return diagnostics
+	}
+
+	if knownVectorFallbackPolicy(normalized) {
+		return nil
+	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticError,
+		Path:     path,
+		Field:    field,
+		Message:  fmt.Sprintf("unsupported vector fallback policy %q (supported: fail, lexical)", value.Value),
+	}}
+}
+
+func normalizedVectorScalarValue(path, field string, value *yaml.Node, name string) (string, []Diagnostic) {
+	if value == nil {
+		return "", nil
+	}
+
+	if value.Kind != yaml.ScalarNode {
+		return "", []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    field,
+			Message:  name + " must be a string",
+		}}
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(value.Value))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+
+	return normalized, nil
+}
+
 func inspectAgents(path string, value *yaml.Node) []Diagnostic {
 	var diagnostics []Diagnostic
 
@@ -707,12 +958,11 @@ func inspectMapEntries(
 	prefix string,
 	value *yaml.Node,
 	known map[string]bool,
-	deprecated map[string]string,
 ) []Diagnostic {
 	var diagnostics []Diagnostic
 
 	forEachMappingField(value, func(name string, entry *yaml.Node) {
-		diagnostics = append(diagnostics, inspectNamedFields(path, prefix+"."+name, entry, known, deprecated)...)
+		diagnostics = append(diagnostics, inspectNamedFields(path, prefix+"."+name, entry, known, nil)...)
 	})
 
 	return diagnostics
@@ -900,6 +1150,9 @@ func knownSkillLearningFields() map[string]bool {
 
 func knownVectorFields() map[string]bool {
 	return map[string]bool{
+		"stores":                            true,
+		"agents":                            true,
+		"sources":                           true,
 		"workspace_enabled":                 true,
 		"workspace_allow_remote_embeddings": true,
 		"vectorizer":                        true,
@@ -925,6 +1178,20 @@ func knownWorktreeFields() map[string]bool {
 		"auto_merge":            true,
 		"verification_commands": true,
 		"override_verification": true,
+	}
+}
+
+func knownVectorizerFields() map[string]bool {
+	return map[string]bool{
+		"vectorizer":          true,
+		"provider":            true,
+		"model":               true,
+		"base_url":            true,
+		"fallback_policy":     true,
+		"index_path":          true,
+		"timeout_seconds":     true,
+		"chunk_max_runes":     true,
+		"chunk_overlap_runes": true,
 	}
 }
 

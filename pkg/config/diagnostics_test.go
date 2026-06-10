@@ -91,6 +91,264 @@ skill_learning:
 	assertNoDiagnostic(t, reports[0].Diagnostics, "skill_learning.enabled")
 }
 
+func TestInspectPathSources_AcceptsScopedVectorizerConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  vectorizer: lexical
+  stores:
+    agent-memory:
+      vectorizer: embedding
+      provider: ollama
+      model: memory-embed
+      base_url: http://127.0.0.1:11434
+      fallback_policy: lexical
+      index_path: ./.atteler/agent-memory.json
+      timeout_seconds: 5
+      chunk_max_runes: 600
+      chunk_overlap_runes: 60
+    vector-search:
+      vectorizer: lexical
+    workspace:
+      vectorizer: lexical
+  agents:
+    reviewer:
+      model: reviewer-memory-embed
+      index_path: ./.atteler/reviewer-memory.json
+  sources:
+    session:
+      vectorizer: embedding
+      index_path: ./.atteler/session-vector-index.json
+      surprise: true
+    git_history:
+      vectorizer: lexical
+      index_path: ./.atteler/git-history-vector-index.json
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.provider")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.model")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.base_url")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.fallback_policy")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.index_path")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.timeout_seconds")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.chunk_max_runes")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.agent-memory.chunk_overlap_runes")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.workspace")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.workspace.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.agents")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.agents.reviewer.model")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.agents.reviewer.index_path")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.session.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.session.index_path")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.index_path")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.sources.session.surprise", "")
+}
+
+func TestInspectPathSources_ReportsMalformedVectorScopeConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  stores:
+    agent-memory: embedding
+  agents: reviewer
+  sources:
+    git_history:
+      vectorizer: lexical
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agent-memory must be a mapping")
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "vector.agents must be a mapping")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.vectorizer")
+}
+
+func TestInspectPathSources_ReportsMalformedVectorConfig(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector: embedding
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "vector must be a mapping")
+}
+
+func TestInspectPathSources_ReportsUnsupportedVectorizerValues(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  vectorizer: semantic
+  provider: openai
+  fallback_policy: retry
+  stores:
+    agent-memory:
+      vectorizer: dense
+      provider: anthropic
+      fallback_policy: remote
+    vector-search:
+      vectorizer: lexical_fallback
+      provider: ollama_compatible
+      fallback_policy: none
+  sources:
+    git_history:
+      vectorizer: embed
+      provider: ollama
+      fallback_policy: lexical
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.vectorizer", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.provider", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.fallback_policy", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agent-memory.vectorizer", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agent-memory.provider", "")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agent-memory.fallback_policy", "")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search.provider")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.vector-search.fallback_policy")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.vectorizer")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.provider")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git_history.fallback_policy")
+}
+
+func TestInspectPathSources_ReportsNonStringVectorizerValues(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  vectorizer: [embedding]
+  provider: [ollama]
+  stores:
+    agent-memory:
+      fallback_policy: [lexical]
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "vectorizer must be a string")
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "provider must be a string")
+	assertDiagnosticMessage(t, reports[0].Diagnostics, DiagnosticError, "fallback_policy must be a string")
+}
+
+func TestInspectPathSources_ReportsUnknownVectorSourceScopes(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  sources:
+    git-history:
+      vectorizer: lexical
+    git_histry:
+      vectorizer: embedding
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git-history")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.sources.git-history.vectorizer")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.sources.git_histry", "")
+}
+
+func TestInspectPathSources_ReportsUnknownVectorStoreScopes(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  stores:
+    agentmemory:
+      vectorizer: embedding
+    workspace:
+      vectorizer: lexical
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "vector.stores.agentmemory", "")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.workspace")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "vector.stores.workspace.vectorizer")
+}
+
+func TestInspectPathSources_ReportsDuplicateVectorScopeAliases(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+version: 1
+vector:
+  stores:
+    vector-search:
+      vectorizer: lexical
+    vector_search:
+      vectorizer: embedding
+  sources:
+    git-history:
+      vectorizer: lexical
+    git_history:
+      vectorizer: embedding
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assert.Equal(t, "present", reports[0].Status)
+
+	assertDiagnosticMessage(
+		t,
+		reports[0].Diagnostics,
+		DiagnosticError,
+		"vector.stores.vector_search duplicates vector.stores.vector-search (both resolve to vector-search); keep one scope name",
+	)
+	assertDiagnosticMessage(
+		t,
+		reports[0].Diagnostics,
+		DiagnosticError,
+		"vector.sources.git_history duplicates vector.sources.git-history (both resolve to git_history); keep one scope name",
+	)
+}
+
 func TestInspectPathSources_ReportsNonMappingConfig(t *testing.T) {
 	t.Parallel()
 
