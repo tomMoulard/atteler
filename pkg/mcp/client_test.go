@@ -908,6 +908,43 @@ func TestSession_CloseTerminatesServerThatIgnoresStdinShutdown(t *testing.T) {
 	assert.Contains(t, session.Stderr(), "ignoring stdin shutdown")
 }
 
+func TestSession_CloseReturnsWhenGrandchildHoldsStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("grandchild fixture uses POSIX sh")
+	}
+
+	// The background sleep inherits the wrapper's stdout/stderr write ends and
+	// outlives the exec'd server, so Close must not wait for pipe EOF forever.
+	wrapped := fmt.Sprintf("( sleep 30 & ) ; exec %q -test.run=TestMCPHelperProcess -- close-marker", os.Args[0])
+	server := Server{
+		Name:    "helper",
+		Command: "sh",
+		Args:    []string{"-c", wrapped},
+		Env: map[string]string{
+			"GO_WANT_MCP_HELPER_PROCESS": "1",
+			"MCP_HELPER_ENV":             "from-test",
+		},
+		CWD: t.TempDir(),
+	}
+
+	session := NewSession(server, SessionOptions{ShutdownTimeout: 200 * time.Millisecond})
+	require.NoError(t, session.Start(t.Context()))
+
+	started := time.Now()
+	closed := make(chan error, 1)
+	go func() {
+		closed <- session.Close(context.WithoutCancel(t.Context()))
+	}()
+
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+		assert.Less(t, time.Since(started), 5*time.Second)
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "Session.Close blocked on a grandchild holding stderr")
+	}
+}
+
 func TestSession_StartIsIdempotentUnderConcurrency(t *testing.T) {
 	server := helperServer(t, "start-count")
 	session := NewSession(server, SessionOptions{})
