@@ -695,27 +695,9 @@ func (r *Registry) CompleteWithFallback(
 		}
 
 		target := r.fallbackAttemptTarget(model)
-		if prior, ok := rateLimitedProviders[target.providerName]; ok && target.resolved && target.providerName != "" {
-			skipped := skippedRateLimitFailure(model, target, prior)
+		if skipped, ok := r.skippedFallbackFailure(model, target, rateLimitedProviders); ok {
 			failures = append(failures, skipped)
-			r.recordRouteFailureWithScope(
-				target.providerName,
-				fallbackObservationModel(model, target),
-				skipped.err,
-				skipped.rateLimitScope,
-			)
-
-			continue
-		}
-
-		if skipped, ok := r.providerCooldownFailure(model, target); ok {
-			failures = append(failures, skipped)
-			r.recordRouteFailureWithScope(
-				target.providerName,
-				fallbackObservationModel(model, target),
-				skipped.err,
-				skipped.rateLimitScope,
-			)
+			r.recordFallbackFailure(model, target, skipped)
 
 			continue
 		}
@@ -725,28 +707,10 @@ func (r *Registry) CompleteWithFallback(
 
 		resp, err := r.complete(ctx, next, retryCfg)
 		if err == nil {
-			if len(failures) > 0 {
-				r.mu.RLock()
-				readiness := r.readinessReportLocked()
-				r.mu.RUnlock()
-
-				resp = responseWithFallbackMetadata(resp, fallbackMetadataForAttempts(failures, readiness))
-			}
-
-			return resp, nil
+			return r.responseWithSuccessfulFallbackMetadata(resp, failures), nil
 		}
 
-		failure := fallbackAttemptFailure{
-			err:            err,
-			classification: classifyProviderFailure(err),
-			model:          model,
-			providerName:   target.providerName,
-			label:          target.label,
-		}
-		if failure.classification.RateLimited {
-			failure.rateLimitScope = modelroute.RateLimitScopeProvider
-		}
-
+		failure := newFallbackAttemptFailure(model, target, err)
 		failures = append(failures, failure)
 
 		if failure.classification.RateLimited && target.providerName != "" {
@@ -759,6 +723,57 @@ func (r *Registry) CompleteWithFallback(
 	r.mu.RUnlock()
 
 	return nil, newFallbackError(failures, readiness)
+}
+
+func (r *Registry) skippedFallbackFailure(
+	model string,
+	target fallbackAttemptTarget,
+	rateLimitedProviders map[string]fallbackAttemptFailure,
+) (fallbackAttemptFailure, bool) {
+	if prior, ok := rateLimitedProviders[target.providerName]; ok && target.resolved && target.providerName != "" {
+		return skippedRateLimitFailure(model, target, prior), true
+	}
+
+	return r.providerCooldownFailure(model, target)
+}
+
+func (r *Registry) recordFallbackFailure(model string, target fallbackAttemptTarget, failure fallbackAttemptFailure) {
+	r.recordRouteFailureWithScope(
+		target.providerName,
+		fallbackObservationModel(model, target),
+		failure.err,
+		failure.rateLimitScope,
+	)
+}
+
+func newFallbackAttemptFailure(model string, target fallbackAttemptTarget, err error) fallbackAttemptFailure {
+	failure := fallbackAttemptFailure{
+		err:            err,
+		classification: classifyProviderFailure(err),
+		model:          model,
+		providerName:   target.providerName,
+		label:          target.label,
+	}
+	if failure.classification.RateLimited {
+		failure.rateLimitScope = modelroute.RateLimitScopeProvider
+	}
+
+	return failure
+}
+
+func (r *Registry) responseWithSuccessfulFallbackMetadata(
+	resp *Response,
+	failures []fallbackAttemptFailure,
+) *Response {
+	if len(failures) == 0 {
+		return resp
+	}
+
+	r.mu.RLock()
+	readiness := r.readinessReportLocked()
+	r.mu.RUnlock()
+
+	return responseWithFallbackMetadata(resp, fallbackMetadataForAttempts(failures, readiness))
 }
 
 func responseWithFallbackMetadata(resp *Response, metadata map[string]string) *Response {

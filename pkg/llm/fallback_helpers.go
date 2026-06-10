@@ -21,6 +21,7 @@ func (r *Registry) withReadinessContext(err error) error {
 	r.mu.RLock()
 	readiness := r.readinessContextLocked()
 	r.mu.RUnlock()
+
 	if readiness == "" {
 		return err
 	}
