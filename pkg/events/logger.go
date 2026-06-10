@@ -147,8 +147,8 @@ func EmitFromContext(ctx context.Context, event Event) error {
 
 // EmitFromContextBestEffort emits an event through the runner stored by
 // WithEmitter. If ctx is already canceled, it still writes to the local event
-// logger, but it does not run configured hooks because hook execution must
-// respect caller cancellation.
+// logger and durable ledger, but it does not run configured hooks because hook
+// execution must respect caller cancellation.
 func EmitFromContextBestEffort(ctx context.Context, event Event) error {
 	if ctx == nil {
 		return errors.New("events: context is required")
@@ -170,11 +170,18 @@ func (r *Runner) emitBestEffort(ctx context.Context, event Event) error {
 	}
 
 	if err := ctx.Err(); err != nil {
+		event = normalizeEventFields(event)
+
 		if r.logger != nil {
 			r.logger.Log(event)
 		}
 
-		return fmt.Errorf("events: context already done: %w", err)
+		contextErr := fmt.Errorf("events: context already done: %w", err)
+		if ledgerErr := r.appendLedgerEvent(event); ledgerErr != nil {
+			return errors.Join(contextErr, ledgerErr)
+		}
+
+		return contextErr
 	}
 
 	return r.Emit(ctx, event)

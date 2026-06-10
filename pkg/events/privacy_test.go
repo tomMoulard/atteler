@@ -407,6 +407,35 @@ func TestSanitizeEventForHook_ShrinksEscapedSerializedPayload(t *testing.T) {
 	assert.True(t, got.Truncated)
 }
 
+func TestSanitizeEventForHook_ShrinksMetadataOnlyPayloadWithoutFakeSummaries(t *testing.T) {
+	t.Parallel()
+
+	metadata := make(map[string]string)
+
+	for key, policy := range eventSchemas[RouteDecision].Metadata {
+		if policy == metadataSafe {
+			metadata[key] = strings.Repeat("\x00", maxMetadataValueBytes)
+		}
+	}
+
+	got := sanitizeEventForHook(Event{
+		Type:     RouteDecision,
+		Metadata: metadata,
+	}, PayloadFull)
+
+	data, err := json.Marshal(got)
+	require.NoError(t, err)
+
+	assert.LessOrEqual(t, len(data)+1, maxHookPayloadBytes, "payload plus newline should stay within the hook byte limit")
+	assert.Empty(t, got.Content)
+	assert.Empty(t, got.ContentSummary)
+	assert.Empty(t, got.Error)
+	assert.Empty(t, got.ErrorSummary)
+	assert.Empty(t, got.Metadata)
+	assert.True(t, got.Redacted)
+	assert.True(t, got.Truncated)
+}
+
 func TestSanitizeValue_RedactsSecretCrossingOutputLimit(t *testing.T) {
 	t.Parallel()
 

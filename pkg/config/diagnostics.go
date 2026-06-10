@@ -492,7 +492,7 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 			diagnostics = append(diagnostics, inspectModelAliases(path, value)...)
 		case "models":
 			diagnostics = append(diagnostics, inspectModelRoles(path, value)...)
-		case "default_provider", fieldDefaultModel, "fallback_models":
+		case "default_provider", fieldDefaultModel, "event_ledger_path", "fallback_models":
 			return
 		default:
 			diagnostics = append(diagnostics, unknownDiagnostic(path, key))
@@ -1257,10 +1257,13 @@ func deprecatedAgentFields() map[string]string {
 
 func knownHookFields() map[string]bool {
 	return map[string]bool{
-		"env":             true,
-		"command":         true,
-		"payload":         true,
-		"timeout_seconds": true,
-		"inherit_env":     true,
+		"env":                  true,
+		"command":              true,
+		"payload":              true,
+		"timeout_seconds":      true,
+		"max_attempts":         true,
+		"retry_backoff_millis": true,
+		"inherit_env":          true,
+		"blocking":             true,
 	}
 }

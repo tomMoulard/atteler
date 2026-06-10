@@ -39,6 +39,7 @@ type Config struct {
 	AgentLoop       AgentLoopConfig            `json:"agent_loop" yaml:"agent_loop"`
 	DefaultProvider string                     `json:"default_provider,omitempty" yaml:"default_provider,omitempty"`
 	DefaultModel    string                     `json:"default_model,omitempty" yaml:"default_model,omitempty"`
+	EventLedgerPath string                     `json:"event_ledger_path,omitempty" yaml:"event_ledger_path,omitempty"`
 	ModelAliases    map[string]string          `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty"`
 	ModelRoles      map[string]ModelRoleConfig `json:"models,omitempty" yaml:"models,omitempty"`
 	FallbackModels  []string                   `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
@@ -172,11 +173,14 @@ type FeedbackGuidanceAuditEvent struct {
 //
 //nolint:govet // fieldalignment: field order follows config-file grouping.
 type HookConfig struct {
-	Env            map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	Command        []string          `json:"command,omitempty" yaml:"command,omitempty"`
-	Payload        string            `json:"payload,omitempty" yaml:"payload,omitempty"`
-	TimeoutSeconds int               `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
-	InheritEnv     bool              `json:"inherit_env,omitempty" yaml:"inherit_env,omitempty"`
+	Env                map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	Command            []string          `json:"command,omitempty" yaml:"command,omitempty"`
+	Payload            string            `json:"payload,omitempty" yaml:"payload,omitempty"`
+	TimeoutSeconds     int               `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	MaxAttempts        int               `json:"max_attempts,omitempty" yaml:"max_attempts,omitempty"`
+	RetryBackoffMillis int               `json:"retry_backoff_millis,omitempty" yaml:"retry_backoff_millis,omitempty"`
+	InheritEnv         bool              `json:"inherit_env,omitempty" yaml:"inherit_env,omitempty"`
+	Blocking           bool              `json:"blocking,omitempty" yaml:"blocking,omitempty"`
 }
 
 // GenerationConfig configures default generation parameters for all requests.
@@ -451,15 +455,16 @@ type fileConfig struct {
 	Plugins         filePluginConfig               `json:"plugins" yaml:"plugins"`
 	SkillLearning   fileSkillLearningConfig        `json:"skill_learning" yaml:"skill_learning"`
 	Vector          fileVectorConfig               `json:"vector" yaml:"vector"`
+	Worktree        fileWorktreeConfig             `json:"worktree" yaml:"worktree"`
 	DefaultProvider *string                        `json:"default_provider" yaml:"default_provider"`
 	DefaultModel    *string                        `json:"default_model" yaml:"default_model"`
+	EventLedgerPath *string                        `json:"event_ledger_path" yaml:"event_ledger_path"`
 	ModelAliases    map[string]string              `json:"model_aliases" yaml:"model_aliases"`
 	ModelRoles      map[string]fileModelRoleConfig `json:"models" yaml:"models"`
 	Providers       map[string]fileProviderConfig  `json:"providers" yaml:"providers"`
 	Agents          map[string]fileAgentConfig     `json:"agents" yaml:"agents"`
 	Hooks           map[string][]HookConfig        `json:"hooks" yaml:"hooks"`
 	FallbackModels  []string                       `json:"fallback_models" yaml:"fallback_models"`
-	Worktree        fileWorktreeConfig             `json:"worktree" yaml:"worktree"`
 
 	DeprecatedProvider *string `json:"provider" yaml:"provider"`
 	DeprecatedModel    *string `json:"model" yaml:"model"`
@@ -926,6 +931,11 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 		rec.set("default_model", source, *src.DefaultModel)
 	}
 
+	if src.EventLedgerPath != nil {
+		dst.EventLedgerPath = *src.EventLedgerPath
+		rec.set("event_ledger_path", source, *src.EventLedgerPath)
+	}
+
 	if src.FallbackModels != nil {
 		dst.FallbackModels = append([]string(nil), src.FallbackModels...)
 		rec.replace("fallback_models", source, dst.FallbackModels, "replaces the entire fallback model list")
@@ -1352,12 +1362,15 @@ func mergeHooks(dst *Config, hooks map[string][]HookConfig, rec *originRecorder,
 		merged := make([]HookConfig, 0, len(eventHooks))
 		for _, hook := range eventHooks {
 			next := HookConfig{
-				Command:    append([]string(nil), hook.Command...),
-				Env:        cloneMap(hook.Env),
-				Payload:    hook.Payload,
-				InheritEnv: hook.InheritEnv,
+				Command:            append([]string(nil), hook.Command...),
+				Env:                cloneMap(hook.Env),
+				Payload:            hook.Payload,
+				TimeoutSeconds:     hook.TimeoutSeconds,
+				MaxAttempts:        hook.MaxAttempts,
+				RetryBackoffMillis: hook.RetryBackoffMillis,
+				InheritEnv:         hook.InheritEnv,
+				Blocking:           hook.Blocking,
 			}
-			next.TimeoutSeconds = hook.TimeoutSeconds
 			merged = append(merged, next)
 		}
 
@@ -1758,6 +1771,11 @@ func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source 
 	if src.DefaultModel != "" {
 		dst.DefaultModel = src.DefaultModel
 		rec.set("default_model", source, src.DefaultModel)
+	}
+
+	if src.EventLedgerPath != "" {
+		dst.EventLedgerPath = src.EventLedgerPath
+		rec.set("event_ledger_path", source, src.EventLedgerPath)
 	}
 
 	if src.FallbackModels != nil {
@@ -2423,6 +2441,12 @@ func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins Orig
 		dst.DefaultModel = src.DefaultModel
 
 		appendOriginChain(dstOrigins, "default_model", srcOrigins, false)
+	}
+
+	if src.EventLedgerPath != "" {
+		dst.EventLedgerPath = src.EventLedgerPath
+
+		appendOriginChain(dstOrigins, "event_ledger_path", srcOrigins, false)
 	}
 
 	if src.FallbackModels != nil {
@@ -3787,11 +3811,14 @@ func cloneHooks(hooks []HookConfig) []HookConfig {
 	out := make([]HookConfig, 0, len(hooks))
 	for _, hook := range hooks {
 		out = append(out, HookConfig{
-			Command:        append([]string(nil), hook.Command...),
-			Env:            cloneMap(hook.Env),
-			Payload:        hook.Payload,
-			TimeoutSeconds: hook.TimeoutSeconds,
-			InheritEnv:     hook.InheritEnv,
+			Command:            append([]string(nil), hook.Command...),
+			Env:                cloneMap(hook.Env),
+			Payload:            hook.Payload,
+			TimeoutSeconds:     hook.TimeoutSeconds,
+			MaxAttempts:        hook.MaxAttempts,
+			RetryBackoffMillis: hook.RetryBackoffMillis,
+			InheritEnv:         hook.InheritEnv,
+			Blocking:           hook.Blocking,
 		})
 	}
 

@@ -299,10 +299,11 @@ func sanitizeEventForHook(event Event, mode PayloadMode) Event {
 	}
 
 	out := Event{
-		Timestamp:   event.Timestamp,
-		PayloadMode: string(mode),
-		Redacted:    event.Redacted,
-		Truncated:   event.Truncated,
+		Timestamp:     event.Timestamp,
+		SchemaVersion: EventSchemaVersion,
+		PayloadMode:   string(mode),
+		Redacted:      event.Redacted,
+		Truncated:     event.Truncated,
 	}
 
 	out.Type = sanitizeEventType(&out, event.Type)
@@ -347,6 +348,7 @@ func sanitizeEventForLog(event Event) Event {
 }
 
 func copySafeScalars(out *Event, event Event, schema eventSchema, mode PayloadMode, known bool) {
+	copyOptionalScalar(out, &out.EventID, true, "event_id", event.EventID)
 	copyOptionalScalar(out, &out.SessionID, schema.SessionID, "session_id", event.SessionID)
 	copyOptionalScalar(out, &out.Agent, schema.Agent, "agent", event.Agent)
 	copyOptionalScalar(out, &out.Model, schema.Model, "model", event.Model)
@@ -763,11 +765,16 @@ func truncateUTF8(value string, maxBytes int) (string, bool) {
 }
 
 func shrinkOversizedPayload(event Event) Event {
+	hadContent := event.Content != "" || event.ContentSummary != ""
+	hadError := event.Error != "" || event.ErrorSummary != ""
+
 	event.Content = ""
-	event.ContentSummary = "content redacted payload_limit=true"
+	if hadContent {
+		event.ContentSummary = "content redacted payload_limit=true"
+	}
 
 	event.Error = ""
-	if event.ErrorSummary == "" {
+	if hadError && event.ErrorSummary == "" {
 		event.ErrorSummary = "error redacted payload_limit=true"
 	}
 

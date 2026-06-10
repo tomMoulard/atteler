@@ -250,6 +250,7 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 	rawCommand := policyCommand(program, opts.Args, opts.Command)
 	auditArgs := redactArgValues(opts.Args, opts.SecretValues)
 	auditArgs = redactArgs(auditArgs, secrets)
+	auditProgram := redactText(program, secrets)
 	command := redactText(displayCommand(program, auditArgs, opts.Command), secrets)
 	permissionOps := append([]permission.Operation(nil), opts.PermissionOperations...)
 	commandOps := permission.CommandOperations(program, opts.Args, opts.Command, cwd, opts.Audit.Caller)
@@ -269,7 +270,7 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 		startTime: time.Now().UTC(),
 		record: AuditRecord{
 			ID:              nextAuditID(),
-			Program:         program,
+			Program:         auditProgram,
 			Args:            auditArgs,
 			OperationKinds:  permissionOperationKindStrings(permissionOps),
 			Command:         command,
@@ -311,10 +312,11 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 	}
 
 	decision := authorizeCommand(opts, policy, rawCommand)
+	decisionReason := redactText(decision.reason, secrets)
 	if !decision.allowed {
 		inv.record.Phase = auditDecisionDenied
 		inv.record.Decision = auditDecisionDenied
-		inv.record.DecisionReason = decision.reason
+		inv.record.DecisionReason = decisionReason
 		inv.record.DecisionRule = decision.rule
 		inv.record.StartedAt = inv.startTime
 		inv.record.EndedAt = time.Now().UTC()
@@ -323,12 +325,12 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 			return nil, nil, err
 		}
 
-		return nil, nil, &PolicyError{Command: command, Reason: decision.reason, Rule: decision.rule}
+		return nil, nil, &PolicyError{Command: command, Reason: decisionReason, Rule: decision.rule}
 	}
 
 	inv.record.Phase = "start"
 	inv.record.Decision = "allowed"
-	inv.record.DecisionReason = decision.reason
+	inv.record.DecisionReason = decisionReason
 	inv.record.DecisionRule = decision.rule
 	inv.record.StartedAt = inv.startTime
 	if err := inv.appendRecord(inv.record); err != nil {
@@ -641,6 +643,9 @@ func appendCommandSecrets(secrets []secretValue, values []string) []secretValue 
 		}
 
 		secrets = append(secrets, secretValue{name: "command_arg", value: value})
+		if base := filepath.Base(value); base != "" && base != "." && base != string(filepath.Separator) && base != value {
+			secrets = append(secrets, secretValue{name: "command_arg", value: base})
+		}
 	}
 
 	return secrets
