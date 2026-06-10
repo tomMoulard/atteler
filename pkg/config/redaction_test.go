@@ -11,7 +11,10 @@ import (
 func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	t.Parallel()
 
-	const changedModel = "openai/changed"
+	const (
+		changedModel = "openai/changed"
+		changedValue = "changed"
+	)
 
 	temperature := 0.2
 	seed := 7
@@ -156,10 +159,10 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	redacted.ModelRoles["planner"].BannedProviders[0] = "ollama"
 	redacted.ModelRoles["planner"].BannedModels[0] = changedModel
 	redacted.ModelRoles["planner"].RequiredCapabilities[0] = "tools"
-	redacted.EventLedgerPath = "changed"
+	redacted.EventLedgerPath = changedValue
 	redacted.Agents["reviewer"].ToolPermissions["read"] = false
 	redacted.Hooks["session_end"][0].Command[0] = "printf"
-	redacted.Hooks["session_end"][0].Env["SAFE"] = "changed"
+	redacted.Hooks["session_end"][0].Env["SAFE"] = changedValue
 	redacted.Context.ReferencePolicy.AllowedSchemes[0] = "http"
 	redacted.Context.ReferencePolicy.DeniedSchemes[0] = "ftp"
 	redacted.Context.ReferencePolicy.AllowedHosts[0] = "changed.example.com"
@@ -174,7 +177,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	*redacted.SkillLearning.Enabled = false
 	*redacted.Vector.WorkspaceEnabled = false
 	storeVector := redacted.Vector.Stores["agent-memory"]
-	storeVector.Model = "changed"
+	storeVector.Model = changedValue
 	redacted.Vector.Stores["agent-memory"] = storeVector
 	redacted.Vector.WorkspaceInclude[0] = "*.md"
 	redacted.Vector.WorkspaceExclude[0] = "node_modules/"
