@@ -913,7 +913,11 @@ func TestAutoRegisterWithConfigContext_ModelRoleRoutesBareCatalogNameToPreferred
 
 	registry := AutoRegisterWithConfigContext(context.Background(), AutoRegisterConfig{
 		Providers: map[string]ProviderConfig{
-			providerOpenAI: {Disabled: true},
+			providerAnthropic:  {Disabled: true},
+			providerClaudeCode: {Disabled: true},
+			providerCodex:      {Disabled: true},
+			providerOpenAI:     {Disabled: true},
+			providerOllama:     {Disabled: true},
 			"groq": {
 				Type:    "groq",
 				BaseURL: srv.URL,
