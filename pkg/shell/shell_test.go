@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -2007,4 +2008,76 @@ func TestRunBash_PolicyUsesUnredactedCommandForDenial(t *testing.T) {
 	records := readAuditRecords(t, auditDir)
 	require.Len(t, records, 1)
 	require.Equal(t, "command.deny", records[0].DecisionRule)
+}
+
+func TestBuildCommandEnvironment_SanitizedAmbientKeepsNonSecretVarsAndStripsSecrets(t *testing.T) {
+	tests := []struct {
+		name     string
+		envName  string
+		stripped bool
+	}{
+		{name: "ssh agent socket survives", envName: "SSH_AUTH_SOCK", stripped: false},
+		{name: "gpg agent info survives", envName: "GPG_AGENT_INFO", stripped: false},
+		{name: "forwarded agent socket survives", envName: "FORWARDED_SSH_AUTH_SOCK", stripped: false},
+		{name: "lesskey survives", envName: "LESSKEY", stripped: false},
+		{name: "aws secret access key is stripped", envName: "AWS_SECRET_ACCESS_KEY", stripped: true},
+		{name: "openai api key is stripped", envName: "OPENAI_API_KEY", stripped: true},
+		{name: "github token is stripped", envName: "GITHUB_TOKEN", stripped: true},
+		{name: "custom auth token is stripped", envName: "MY_AUTH_TOKEN", stripped: true},
+		{name: "underscore key suffix is stripped", envName: "DEPLOY_KEY", stripped: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := "value-for-" + test.envName
+			t.Setenv(test.envName, value)
+
+			env, diff, _ := buildCommandEnvironment(CommandOptions{EnvMode: EnvModeSanitizedAmbient}, DefaultPolicy())
+
+			child := envMap(env)
+			redacted := slices.ContainsFunc(diff, func(change EnvChange) bool {
+				return change.Name == test.envName && change.Action == "redacted"
+			})
+
+			if test.stripped {
+				require.NotContains(t, child, test.envName)
+				require.True(t, redacted, "expected %s to be audited as redacted", test.envName)
+
+				return
+			}
+
+			require.Equal(t, value, child[test.envName])
+			require.False(t, redacted, "expected %s to survive sanitization", test.envName)
+		})
+	}
+}
+
+func TestCredentialEnv_AllowsKnownNonSecretsAndKeepsSecretPatterns(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		envName    string
+		credential bool
+	}{
+		{name: "ssh agent socket", envName: "SSH_AUTH_SOCK", credential: false},
+		{name: "gpg agent info", envName: "GPG_AGENT_INFO", credential: false},
+		{name: "generic agent socket suffix", envName: "REMOTE_GIT_AUTH_SOCK", credential: false},
+		{name: "lesskey", envName: "LESSKEY", credential: false},
+		{name: "bare key word", envName: "MONKEY", credential: false},
+		{name: "api key", envName: "OPENAI_API_KEY", credential: true},
+		{name: "access key", envName: "AWS_SECRET_ACCESS_KEY", credential: true},
+		{name: "private key", envName: "TLS_PRIVATE_KEY", credential: true},
+		{name: "underscore key suffix", envName: "SIGNING_KEY", credential: true},
+		{name: "auth infix", envName: "MY_AUTH_TOKEN", credential: true},
+		{name: "token suffix", envName: "GITHUB_TOKEN", credential: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, test.credential, credentialEnv(test.envName))
+		})
+	}
 }

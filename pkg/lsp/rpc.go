@@ -43,8 +43,22 @@ type rpcClient struct {
 	handlerMu sync.RWMutex
 	handler   func(string, json.RawMessage)
 
+	notifyMu     sync.Mutex
+	notifyCond   *sync.Cond
+	notifyQueue  []serverNotification
+	notifyClosed bool
+
 	stderr *diagnosticBuffer
 	stdout *diagnosticBuffer
+}
+
+// serverNotification is a server-to-client notification queued for ordered
+// dispatch. The LSP specification requires notifications to be processed in
+// receipt order; dispatching each one in its own goroutine lets a stale
+// textDocument/publishDiagnostics payload overwrite a newer one.
+type serverNotification struct {
+	method string
+	params json.RawMessage
 }
 
 //nolint:govet // JSON field order mirrors JSON-RPC messages.
@@ -137,9 +151,17 @@ func startClient(
 		stderr:     stderr,
 		stdout:     stdout,
 	}
-	go client.readLoop(stdoutPipe)
+	client.start(stdoutPipe)
 
 	return client, nil
+}
+
+// start launches the read loop plus the single ordered notification worker.
+// It must be called exactly once before any message is read.
+func (c *rpcClient) start(reader io.Reader) {
+	c.notifyCond = sync.NewCond(&c.notifyMu)
+	go c.notificationLoop()
+	go c.readLoop(reader)
 }
 
 func finishLanguageServerSetupError(invocation *shell.Invocation, err error) error {
@@ -260,6 +282,8 @@ func (c *rpcClient) write(ctx context.Context, message rpcMessage) error {
 }
 
 func (c *rpcClient) readLoop(reader io.Reader) {
+	defer c.closeNotifications()
+
 	buffered := bufio.NewReader(reader)
 	for {
 		payload, err := readFrame(buffered)
@@ -350,12 +374,57 @@ func (c *rpcClient) handleNotification(message rpcMessage) {
 		params = raw
 	}
 
-	c.handlerMu.RLock()
-	handler := c.handler
-	c.handlerMu.RUnlock()
+	c.enqueueNotification(message.Method, params)
+}
 
-	if handler != nil {
-		go handler(message.Method, params)
+// enqueueNotification appends a notification to the ordered queue. The read
+// loop is the only producer, so queue order matches receipt order. The queue
+// is unbounded on purpose: the worker can block on session locks held across
+// in-flight requests, and blocking the read loop here would deadlock the
+// response that releases those locks.
+func (c *rpcClient) enqueueNotification(method string, params json.RawMessage) {
+	c.notifyMu.Lock()
+	if !c.notifyClosed {
+		c.notifyQueue = append(c.notifyQueue, serverNotification{method: method, params: params})
+		c.notifyCond.Signal()
+	}
+	c.notifyMu.Unlock()
+}
+
+// closeNotifications stops the notification worker once the queued backlog is
+// drained. It is safe to call multiple times.
+func (c *rpcClient) closeNotifications() {
+	c.notifyMu.Lock()
+	c.notifyClosed = true
+	c.notifyCond.Broadcast()
+	c.notifyMu.Unlock()
+}
+
+// notificationLoop drains queued server notifications one at a time, in
+// receipt order, and exits after closeNotifications once the queue is empty.
+func (c *rpcClient) notificationLoop() {
+	for {
+		c.notifyMu.Lock()
+		for len(c.notifyQueue) == 0 && !c.notifyClosed {
+			c.notifyCond.Wait()
+		}
+
+		if len(c.notifyQueue) == 0 {
+			c.notifyMu.Unlock()
+			return
+		}
+
+		next := c.notifyQueue[0]
+		c.notifyQueue = c.notifyQueue[1:]
+		c.notifyMu.Unlock()
+
+		c.handlerMu.RLock()
+		handler := c.handler
+		c.handlerMu.RUnlock()
+
+		if handler != nil {
+			handler(next.method, next.params)
+		}
 	}
 }
 

@@ -996,6 +996,76 @@ func TestRetryDecision_LegacyStringFallbackIsDegraded(t *testing.T) {
 	assert.False(t, decision.legacyMatch)
 }
 
+func TestRetryDecision_LegacyAnchoredStatusShapes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		message    string
+		retryable  bool
+		statusCode int
+	}{
+		{
+			name:    "permanent 422 quoting HTTP 503 in body is not retryable",
+			message: `openai: embeddings HTTP 422: {"error":{"message":"see HTTP 503 documentation for maintenance windows"}}`,
+		},
+		{
+			name:    "quoted HTTP 503 without adapter shape is not retryable",
+			message: "openai: embeddings invalid request: see HTTP 503 documentation for maintenance windows",
+		},
+		{
+			name:    "permanent HTTP 400 quoting status=503 in body is not retryable",
+			message: `legacy provider: HTTP 400: {"detail":"upstream reported status=503"}`,
+		},
+		{
+			name:    "prose status code without adapter terminator is not retryable",
+			message: "legacy provider: upstream returned status 503 before failing permanently",
+		},
+		{
+			name:       "adapter formatted HTTP 503 is retryable",
+			message:    "ollama: embeddings HTTP 503: model is warming up",
+			retryable:  true,
+			statusCode: 503,
+		},
+		{
+			name:       "adapter formatted HTTP 503 at end of message is retryable",
+			message:    "legacy provider: HTTP 503",
+			retryable:  true,
+			statusCode: 503,
+		},
+		{
+			name:       "adapter formatted HTTP 429 with metadata parentheses is retryable",
+			message:    "legacy provider: HTTP 429 (request_id=req-1): rate limited",
+			retryable:  true,
+			statusCode: 429,
+		},
+		{
+			name:       "status equals shape is retryable",
+			message:    "legacy provider: request failed: status=503",
+			retryable:  true,
+			statusCode: 503,
+		},
+		{
+			name:       "status space shape with colon terminator is retryable",
+			message:    "legacy provider: request failed with status 429: rate limited",
+			retryable:  true,
+			statusCode: 429,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			decision := retryDecisionForError(errors.New(tc.message))
+
+			assert.Equal(t, tc.retryable, decision.retryable)
+			assert.Equal(t, tc.retryable, decision.legacyMatch)
+			assert.Equal(t, tc.statusCode, decision.statusCode)
+		})
+	}
+}
+
 func TestRetryDecision_TypedProviderErrorTakesPrecedenceOverMessage(t *testing.T) {
 	t.Parallel()
 

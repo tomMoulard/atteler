@@ -186,6 +186,64 @@ drain:
 	}, eventNames(commandEvents))
 }
 
+func TestAppServerClient_CloseUnblocksReadLoopWhenLinesChannelIsFull(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-app-server.sh")
+	require.NoError(t, os.WriteFile(script, []byte(`#!/usr/bin/env bash
+read -r line
+printf '%s\n' '{"id":1,"result":{}}'
+read -r line
+read -r line
+printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
+read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}'
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[]}}}'
+for _ in $(seq 1 100); do
+  printf '%s\n' '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}}}'
+done
+sleep 60
+`), 0o700))
+
+	cfg := Config{
+		Codex: CodexConfig{
+			Command:     script,
+			ReadTimeout: 5 * time.Second,
+			TurnTimeout: 5 * time.Second,
+		},
+	}
+
+	client, err := StartAppServer(context.Background(), cfg.Codex, dir, nil)
+	require.NoError(t, err)
+
+	threadID, err := client.StartThread(context.Background(), cfg, Issue{ID: "1", Identifier: "GH-1", Title: "Fix", State: "OPEN"}, dir)
+	require.NoError(t, err)
+	require.NoError(t, client.RunTurn(context.Background(), cfg, threadID, "do it", dir))
+
+	// After the final turn nobody drains c.lines; wait until the post-turn
+	// notifications have filled the buffer so readLoop parks on its send.
+	require.Eventually(t, func() bool {
+		return len(client.lines) == cap(client.lines)
+	}, 2*time.Second, 10*time.Millisecond, "post-turn notifications never filled the lines buffer")
+
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- client.Close() }()
+
+	select {
+	case err := <-closeErr:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "Close did not return promptly while readLoop was parked on a full lines channel")
+	}
+
+	select {
+	case <-client.readDone:
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "readLoop goroutine did not exit after Close")
+	}
+}
+
 func TestParseCommandNotification_DecodesCommandExecOutputDelta(t *testing.T) {
 	t.Parallel()
 

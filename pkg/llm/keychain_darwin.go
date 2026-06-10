@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/shell"
@@ -131,24 +132,89 @@ func (p *claudeCodeKeychainPersister) persist(ctx context.Context, accessToken, 
 		return fmt.Errorf("keychain credentials marshal: %w", err)
 	}
 
-	args := []string{"add-generic-password", "-U", "-s", keychainService, "-w", string(updated)}
-	if p.account != "" {
-		args = append(args, "-a", p.account)
+	args, stdin, err := buildKeychainWritebackCommand(p.account, string(updated))
+	if err != nil {
+		return fmt.Errorf("keychain update command: %w", err)
 	}
 
-	if out, err := runSecurityCommand(ctx, args, []string{string(updated)}, shell.OutputSensitive); err != nil {
+	if out, err := runSecurityCommandStdin(ctx, args, stdin, []string{string(updated)}, shell.OutputSensitive); err != nil {
 		return fmt.Errorf("keychain update failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
 	return nil
 }
 
+// buildKeychainWritebackCommand builds the security(1) argv and stdin payload
+// for updating the keychain entry without exposing the credential JSON in the
+// process argument list (argv is visible to every local process via ps for
+// the lifetime of the command). It uses interactive mode: argv is just
+// ["-i"], and the full add-generic-password command — including the -w
+// secret — travels on stdin instead.
+func buildKeychainWritebackCommand(account, secret string) (args []string, stdin string, err error) {
+	tokens := []string{"add-generic-password", "-U", "-s", keychainService, "-w", secret}
+	if account != "" {
+		tokens = append(tokens, "-a", account)
+	}
+
+	quoted := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		q, qErr := quoteSecurityInteractiveToken(token)
+		if qErr != nil {
+			return nil, "", qErr
+		}
+
+		quoted = append(quoted, q)
+	}
+
+	return []string{"-i"}, strings.Join(quoted, " ") + "\n", nil
+}
+
+// quoteSecurityInteractiveToken quotes one token for security(1)'s
+// interactive-mode tokenizer, which splits on whitespace and supports
+// double-quoted tokens with backslash escapes for `\` and `"` (verified
+// against the macOS security tool by round-tripping JSON payloads). Line
+// breaks are rejected: they would terminate the command and inject another.
+func quoteSecurityInteractiveToken(token string) (string, error) {
+	if strings.ContainsAny(token, "\n\r") {
+		return "", errSecurityTokenLineBreak
+	}
+
+	var b strings.Builder
+
+	b.WriteByte('"')
+
+	for i := range len(token) {
+		c := token[i]
+		if c == '\\' || c == '"' {
+			b.WriteByte('\\')
+		}
+
+		b.WriteByte(c)
+	}
+
+	b.WriteByte('"')
+
+	return b.String(), nil
+}
+
+var errSecurityTokenLineBreak = errors.New("security interactive token contains a line break")
+
 func runSecurityCommand(ctx context.Context, args, secretArgs []string, capture shell.OutputCapture) ([]byte, error) {
+	return runSecurityCommandStdin(ctx, args, "", secretArgs, capture)
+}
+
+func runSecurityCommandStdin(ctx context.Context, args []string, stdin string, secretArgs []string, capture shell.OutputCapture) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
+
+	var stdinReader io.Reader
+	if stdin != "" {
+		stdinReader = strings.NewReader(stdin)
+	}
 
 	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
 		Program:      "security",
 		Args:         args,
+		Stdin:        stdinReader,
 		Stdout:       &stdout,
 		Stderr:       &stderr,
 		Mode:         shell.ModeCaptured,

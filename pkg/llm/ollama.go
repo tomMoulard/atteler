@@ -31,6 +31,7 @@ const (
 //
 //nolint:govet // Field order groups provider lifecycle state for readability.
 type OllamaProvider struct {
+	mu              sync.Mutex // guards client and startAttempted
 	client          *http.Client
 	baseURL         string
 	sessionID       string
@@ -133,11 +134,14 @@ var (
 )
 
 func (o *OllamaProvider) startDaemonAndWait(ctx context.Context) error {
-	if o.startAttempted {
+	o.mu.Lock()
+	alreadyAttempted := o.startAttempted
+	o.startAttempted = true
+	o.mu.Unlock()
+
+	if alreadyAttempted {
 		return errors.New("ollama: daemon start already attempted")
 	}
-
-	o.startAttempted = true
 
 	start, err := callOllamaServeStarter(ctx, ollamaStartRequest{
 		BaseURL:       o.baseURL,
@@ -209,7 +213,7 @@ func startOllamaServeProcess(ctx context.Context, req ollamaStartRequest) (*olla
 	}
 
 	ownership := OllamaDaemonOwnership{
-		Owner:           "atteler",
+		Owner:           ollamaOwnershipOwner,
 		PID:             cmd.Process.Pid,
 		AttelerPID:      os.Getpid(),
 		ParentPID:       os.Getppid(),
@@ -361,6 +365,19 @@ func isOllamaDaemonUnavailable(err error) bool {
 	return errors.As(err, &netErr)
 }
 
+// httpClient returns the provider HTTP client, lazily initializing it for
+// zero-value providers. It is safe for concurrent use.
+func (o *OllamaProvider) httpClient() *http.Client {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.client == nil {
+		o.client = providerHTTPClient(ProviderConfig{})
+	}
+
+	return o.client
+}
+
 // Name returns the provider name.
 func (o *OllamaProvider) Name() string { return providerOllama }
 
@@ -391,16 +408,12 @@ func (o *OllamaProvider) FetchModels(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	if o.client == nil {
-		o.client = providerHTTPClient(ProviderConfig{})
-	}
-
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/api/tags", http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("ollama: new models request: %w", err)
 	}
 
-	resp, err := o.client.Do(httpReq)
+	resp, err := o.httpClient().Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("ollama: models request: %w", err)
 	}
@@ -511,10 +524,6 @@ func (o *OllamaProvider) Complete(ctx context.Context, params CompleteParams) (*
 }
 
 func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*Response, error) {
-	if o.client == nil {
-		o.client = providerHTTPClient(ProviderConfig{})
-	}
-
 	body, err := buildOllamaChatRequestBody(params, false)
 	if err != nil {
 		return nil, err
@@ -527,7 +536,7 @@ func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := o.client.Do(httpReq)
+	resp, err := o.httpClient().Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("ollama: request: %w", err)
 	}
@@ -577,10 +586,6 @@ func (o *OllamaProvider) Embed(ctx context.Context, params EmbeddingParams) (*Em
 }
 
 func (o *OllamaProvider) sendEmbeddingRequest(ctx context.Context, params EmbeddingParams) ([]byte, error) {
-	if o.client == nil {
-		o.client = providerHTTPClient(ProviderConfig{})
-	}
-
 	body, err := json.Marshal(ollamaEmbedRequest{
 		Model: params.Model,
 		Input: append([]string(nil), params.Input...),
@@ -596,7 +601,7 @@ func (o *OllamaProvider) sendEmbeddingRequest(ctx context.Context, params Embedd
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := o.client.Do(httpReq)
+	resp, err := o.httpClient().Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("ollama: embeddings request: %w", err)
 	}
@@ -762,10 +767,6 @@ func (o *OllamaProvider) CompleteStream(ctx context.Context, params CompletePara
 		return nil, err
 	}
 
-	if o.client == nil {
-		o.client = providerHTTPClient(ProviderConfig{})
-	}
-
 	body, err := buildOllamaChatRequestBody(params, true)
 	if err != nil {
 		return nil, err
@@ -778,7 +779,7 @@ func (o *OllamaProvider) CompleteStream(ctx context.Context, params CompletePara
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := o.client.Do(httpReq) //nolint:bodyclose // Successful streaming responses are closed by the goroutine below.
+	resp, err := o.httpClient().Do(httpReq) //nolint:bodyclose // Successful streaming responses are closed by the goroutine below.
 	if err != nil {
 		return nil, fmt.Errorf("ollama: request: %w", err)
 	}

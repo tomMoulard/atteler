@@ -3,6 +3,7 @@ package symphony
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -73,6 +74,24 @@ func (t *policyCheckTracker) FetchPullRequestChecksWithPolicy(_ context.Context,
 	return t.checks, nil
 }
 
+type terminalStatesTracker struct {
+	noopTracker
+	issues []Issue
+}
+
+func (t terminalStatesTracker) FetchIssueStatesByIDs(context.Context, []string) ([]Issue, error) {
+	return t.issues, nil
+}
+
+type fakeWorkspaceRemover struct {
+	removed []Issue
+}
+
+func (f *fakeWorkspaceRemover) Remove(_ context.Context, _ Config, issue Issue) error {
+	f.removed = append(f.removed, issue)
+	return nil
+}
+
 type captureRunner struct {
 	requests chan RunRequest
 }
@@ -128,7 +147,7 @@ func TestHandleWorkerExit_PublishedPRSchedulesMonitorAndReleasesClaim(t *testing
 		},
 	}
 
-	orchestrator.handleWorkerExit(workerExitEvent{
+	orchestrator.handleWorkerExit(t.Context(), workerExitEvent{
 		issueID: issue.ID,
 		result: RunResult{
 			Status: AttemptSucceeded,
@@ -709,6 +728,153 @@ func TestHandlePullRequestCheckDue_DoesNotRepeatFailedBranchUpdateWhileReworkQue
 	orchestrator.wg.Wait()
 }
 
+func TestHandlePullRequestCheckDue_DefersBranchUpdateWhileIssueWorkerRunning(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind: trackerKindGitHub,
+		},
+		Publish: PublishConfig{
+			Enabled:                true,
+			MonitorChecks:          true,
+			CheckInterval:          time.Hour,
+			MaxCheckReworkAttempts: 3,
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 2,
+		},
+	}
+
+	updateCalls := 0
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker: checkTracker{checks: PullRequestCheckSnapshot{
+			CheckedAt:          time.Now().UTC(),
+			PullRequestURL:     "https://github.com/owner/repo/pull/31",
+			HeadRef:            "symphony/GH-2",
+			HeadSHA:            "abc123",
+			Summary:            "all reported checks have passed",
+			State:              PullRequestChecksPassed,
+			NeedsBranchUpdate:  true,
+			BranchUpdateReason: "pull request branch is behind main",
+		}},
+		logger: slog.Default(),
+		events: make(chan orchestratorEvent, 4),
+		updatePullRequestBranch: func(context.Context, Config, Issue, string, *slog.Logger) (string, error) {
+			updateCalls++
+			return "def456", nil
+		},
+		state: runtimeState{
+			Running: map[string]*runningEntry{
+				issue.ID: {
+					Issue:     issue,
+					StartedAt: time.Now().Add(-time.Second),
+					State:     issue.State,
+				},
+			},
+			Claimed:       map[string]struct{}{issue.ID: {}},
+			RetryAttempts: map[string]*RetryEntry{},
+			PullRequests: map[int]*pullRequestMonitorEntry{
+				31: {
+					Issue:          issue,
+					Branch:         "symphony/GH-2",
+					PullRequestURL: "https://github.com/owner/repo/pull/31",
+					Number:         31,
+				},
+			},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.handlePullRequestCheckDue(t.Context(), 31)
+
+	assert.Zero(t, updateCalls, "branch update must not run while the issue worker is running")
+	require.Contains(t, orchestrator.state.PullRequests, 31)
+	monitor := orchestrator.state.PullRequests[31]
+	assert.Contains(t, monitor.LastError, "branch update deferred")
+	assert.False(t, monitor.NextCheckAt.IsZero())
+	require.NotNil(t, monitor.Timer)
+	monitor.Timer.Stop()
+}
+
+func TestHandlePullRequestCheckDue_BranchUpdateSkipDoesNotDispatchRework(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind: trackerKindGitHub,
+		},
+		Publish: PublishConfig{
+			Enabled:                true,
+			MonitorChecks:          true,
+			CheckInterval:          time.Hour,
+			MaxCheckReworkAttempts: 3,
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 2,
+		},
+	}
+
+	runner := captureRunner{requests: make(chan RunRequest, 1)}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker: checkTracker{checks: PullRequestCheckSnapshot{
+			CheckedAt:          time.Now().UTC(),
+			PullRequestURL:     "https://github.com/owner/repo/pull/31",
+			HeadRef:            "symphony/GH-2",
+			HeadSHA:            "abc123",
+			Summary:            "all reported checks have passed",
+			State:              PullRequestChecksPassed,
+			NeedsBranchUpdate:  true,
+			BranchUpdateReason: "pull request branch is behind main",
+		}},
+		runner: runner,
+		logger: slog.Default(),
+		events: make(chan orchestratorEvent, 4),
+		updatePullRequestBranch: func(context.Context, Config, Issue, string, *slog.Logger) (string, error) {
+			return "", fmt.Errorf("branch symphony/GH-2 has local commits not on origin/symphony/GH-2: %w", errPullRequestBranchUpdateSkipped)
+		},
+		state: runtimeState{
+			Running:       map[string]*runningEntry{},
+			Claimed:       map[string]struct{}{},
+			RetryAttempts: map[string]*RetryEntry{},
+			PullRequests: map[int]*pullRequestMonitorEntry{
+				31: {
+					Issue:          issue,
+					Branch:         "symphony/GH-2",
+					PullRequestURL: "https://github.com/owner/repo/pull/31",
+					Number:         31,
+				},
+			},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.handlePullRequestCheckDue(t.Context(), 31)
+
+	assert.Empty(t, runner.requests, "a skipped branch update must not dispatch a rework worker")
+	require.Contains(t, orchestrator.state.PullRequests, 31)
+	monitor := orchestrator.state.PullRequests[31]
+	assert.Nil(t, monitor.PendingRework)
+	assert.Zero(t, monitor.ReworkAttempts)
+	assert.Contains(t, monitor.LastError, "local commits")
+	require.NotNil(t, monitor.Timer)
+	monitor.Timer.Stop()
+}
+
 func TestHandleWorkerExit_CanceledPullRequestReworkSchedulesFinalCheck(t *testing.T) {
 	t.Parallel()
 
@@ -758,7 +924,7 @@ func TestHandleWorkerExit_CanceledPullRequestReworkSchedulesFinalCheck(t *testin
 		},
 	}
 
-	orchestrator.handleWorkerExit(workerExitEvent{issueID: issue.ID})
+	orchestrator.handleWorkerExit(t.Context(), workerExitEvent{issueID: issue.ID})
 
 	_, claimed := orchestrator.state.Claimed[issue.ID]
 	assert.False(t, claimed)
@@ -770,6 +936,95 @@ func TestHandleWorkerExit_CanceledPullRequestReworkSchedulesFinalCheck(t *testin
 	assert.False(t, monitor.NextCheckAt.IsZero())
 	require.NotNil(t, monitor.Timer)
 	monitor.Timer.Stop()
+}
+
+func TestReconcile_DefersWorkspaceRemovalUntilWorkerExit(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "OPEN"}
+	terminal := issue
+	terminal.State = "DONE"
+	cfg := Config{
+		Tracker: TrackerConfig{
+			ActiveStates:   []string{"OPEN"},
+			TerminalStates: []string{"DONE"},
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents: 2,
+		},
+	}
+
+	workspaces := &fakeWorkspaceRemover{}
+	canceled := false
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: cfg},
+			loaded:  true,
+		},
+		tracker:    terminalStatesTracker{issues: []Issue{terminal}},
+		workspaces: workspaces,
+		logger:     slog.Default(),
+		events:     make(chan orchestratorEvent, 4),
+		state: runtimeState{
+			Running: map[string]*runningEntry{
+				issue.ID: {
+					Issue:     issue,
+					Cancel:    func() { canceled = true },
+					StartedAt: time.Now().Add(-time.Second),
+					State:     issue.State,
+				},
+			},
+			Claimed:               map[string]struct{}{issue.ID: {}},
+			RetryAttempts:         map[string]*RetryEntry{},
+			PullRequests:          map[int]*pullRequestMonitorEntry{},
+			Completed:             map[string]struct{}{},
+			CompletedPullRequests: map[int]struct{}{},
+			StartedAt:             time.Now(),
+		},
+	}
+
+	orchestrator.reconcile(t.Context(), cfg)
+
+	assert.True(t, canceled, "the worker must be canceled when its issue goes terminal")
+	assert.Empty(t, workspaces.removed, "workspace must not be removed while the canceled worker is still running")
+	assert.Contains(t, orchestrator.state.PendingWorkspaceRemovals, issue.ID)
+	assert.Equal(t, cancelTerminal, orchestrator.state.Running[issue.ID].CancelReason)
+
+	orchestrator.handleWorkerExit(t.Context(), workerExitEvent{issueID: issue.ID})
+
+	require.Len(t, workspaces.removed, 1)
+	assert.Equal(t, terminal.ID, workspaces.removed[0].ID)
+	assert.Empty(t, orchestrator.state.PendingWorkspaceRemovals)
+	assert.NotContains(t, orchestrator.state.Running, issue.ID)
+}
+
+func TestHandleWorkerExit_CompletesPendingRemovalForUntrackedIssue(t *testing.T) {
+	t.Parallel()
+
+	issue := Issue{ID: "issue-node", Identifier: "GH-2", Title: "Fix CI", State: "DONE"}
+	workspaces := &fakeWorkspaceRemover{}
+	orchestrator := &Orchestrator{
+		manager: &WorkflowManager{
+			current: WorkflowSnapshot{Config: Config{}},
+			loaded:  true,
+		},
+		workspaces: workspaces,
+		logger:     slog.Default(),
+		events:     make(chan orchestratorEvent, 4),
+		state: runtimeState{
+			Running: map[string]*runningEntry{},
+			PendingWorkspaceRemovals: map[string]pendingWorkspaceRemoval{
+				issue.ID: {Issue: issue, Config: Config{}},
+			},
+			StartedAt: time.Now(),
+		},
+	}
+
+	orchestrator.handleWorkerExit(t.Context(), workerExitEvent{issueID: issue.ID})
+
+	require.Len(t, workspaces.removed, 1)
+	assert.Equal(t, issue.ID, workspaces.removed[0].ID)
+	assert.Empty(t, orchestrator.state.PendingWorkspaceRemovals)
 }
 
 func TestRecoverPullRequestMonitorTimersRearmsStaleMonitor(t *testing.T) {

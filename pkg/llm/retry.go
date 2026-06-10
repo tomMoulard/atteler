@@ -415,51 +415,108 @@ func retryDecisionForError(err error) retryDecision {
 }
 
 // legacyRetryDecision is a degraded fallback for older adapters that still
-// return formatted HTTP errors instead of ProviderError. New adapters should
-// return ProviderError so retry decisions do not depend on message text.
+// return formatted text errors instead of ProviderError. Only the first
+// anchored, adapter-shaped status token in the message is honored ("HTTP 503:
+// body", "HTTP 429 (request_id=...): body", "status=503"); statuses merely
+// quoted inside response bodies ("... see HTTP 503 documentation ...") are not
+// anchored and never consulted. New adapters should return ProviderError so
+// retry decisions do not depend on message text.
 func legacyRetryDecision(err error) retryDecision {
-	msg := err.Error()
+	code, ok := legacyStatusCode(err.Error())
+	if !ok || !isRetryableStatus(code) {
+		return retryDecision{class: RetryabilityUnknown}
+	}
 
-	for {
-		idx := strings.Index(msg, "HTTP ")
-		if idx < 0 {
-			return retryDecision{class: RetryabilityUnknown}
-		}
-
-		rest := msg[idx+len("HTTP "):]
-
-		digits := leadingDigits(rest)
-		if digits == "" {
-			msg = rest
-			continue
-		}
-
-		code, err := strconv.Atoi(digits)
-
-		remaining := rest[len(digits):]
-		if err == nil && isRetryableStatus(code) && legacyStatusTerminated(remaining) {
-			return retryDecision{
-				class:       RetryabilityRetryable,
-				statusCode:  code,
-				retryable:   true,
-				legacyMatch: true,
-			}
-		}
-
-		msg = remaining
+	return retryDecision{
+		class:       RetryabilityRetryable,
+		statusCode:  code,
+		retryable:   true,
+		legacyMatch: true,
 	}
 }
 
+// legacyStatusPrefixes are the status-token shapes plain-text adapter errors
+// emit, e.g. "ollama: embeddings HTTP 503: body" or "request failed:
+// status=503".
+var legacyStatusPrefixes = []string{"HTTP ", "status=", "status "}
+
+// legacyStatusCode returns the HTTP status carried by the first anchored
+// status token in msg. Error wrapping prepends context ("context: %w"), so the
+// first anchored token belongs to the adapter itself; any later tokens sit in
+// quoted body text and are ignored.
+func legacyStatusCode(msg string) (int, bool) {
+	for msg != "" {
+		idx, prefixLen := legacyNextStatusToken(msg)
+		if idx < 0 {
+			return 0, false
+		}
+
+		rest := msg[idx+prefixLen:]
+		digits := leadingDigits(rest)
+
+		if code, ok := legacyAnchoredStatus(digits, rest[len(digits):]); ok {
+			return code, true
+		}
+
+		msg = rest
+	}
+
+	return 0, false
+}
+
+// legacyNextStatusToken locates the earliest status-token prefix in msg and
+// returns its index together with the matched prefix length.
+func legacyNextStatusToken(msg string) (idx, prefixLen int) {
+	idx = -1
+
+	for _, prefix := range legacyStatusPrefixes {
+		i := strings.Index(msg, prefix)
+		if i < 0 {
+			continue
+		}
+
+		if idx < 0 || i < idx {
+			idx, prefixLen = i, len(prefix)
+		}
+	}
+
+	return idx, prefixLen
+}
+
+// legacyAnchoredStatus reports whether digits form an HTTP status code that
+// terminates the way adapter-formatted errors do.
+func legacyAnchoredStatus(digits, remaining string) (int, bool) {
+	if len(digits) != 3 {
+		return 0, false
+	}
+
+	code, err := strconv.Atoi(digits)
+	if err != nil || code < 100 || code > 599 {
+		return 0, false
+	}
+
+	if !legacyStatusTerminated(remaining) {
+		return 0, false
+	}
+
+	return code, true
+}
+
+// legacyStatusTerminated reports whether the text following a status code
+// matches an adapter-emitted shape: end of message, a colon before the body,
+// list punctuation, or a parenthesized metadata block. A bare space followed
+// by prose ("HTTP 503 documentation") is not a terminator.
 func legacyStatusTerminated(value string) bool {
 	if value == "" {
 		return true
 	}
 
-	b := value[0]
+	switch value[0] {
+	case ':', ')', ',', ';':
+		return true
+	}
 
-	return (b < '0' || b > '9') &&
-		(b < 'A' || b > 'Z') &&
-		(b < 'a' || b > 'z')
+	return strings.HasPrefix(value, " (")
 }
 
 func leadingDigits(value string) string {

@@ -1089,17 +1089,12 @@ func (c *GitHubClient) FetchPullRequestChecksWithPolicy(ctx context.Context, num
 		return snapshot, nil
 	}
 
-	var checks githubCheckRunsResponse
-	if err := c.get(ctx, fmt.Sprintf(
-		"/repos/%s/%s/commits/%s/check-runs",
-		url.PathEscape(c.cfg.Owner),
-		url.PathEscape(c.cfg.Repo),
-		url.PathEscape(pr.Head.SHA),
-	), &checks); err != nil {
+	checkRuns, err := c.fetchCheckRuns(ctx, pr.Head.SHA)
+	if err != nil {
 		return PullRequestCheckSnapshot{}, err
 	}
 
-	for _, run := range checks.CheckRuns {
+	for _, run := range checkRuns {
 		snapshot.CheckRuns = append(snapshot.CheckRuns, PullRequestCheckRun{
 			Name:       run.Name,
 			Status:     run.Status,
@@ -1109,17 +1104,12 @@ func (c *GitHubClient) FetchPullRequestChecksWithPolicy(ctx context.Context, num
 		})
 	}
 
-	var statuses githubStatusesResponse
-	if err := c.get(ctx, fmt.Sprintf(
-		"/repos/%s/%s/commits/%s/status",
-		url.PathEscape(c.cfg.Owner),
-		url.PathEscape(c.cfg.Repo),
-		url.PathEscape(pr.Head.SHA),
-	), &statuses); err != nil {
+	statuses, err := c.fetchCommitStatuses(ctx, pr.Head.SHA)
+	if err != nil {
 		return PullRequestCheckSnapshot{}, err
 	}
 
-	for _, status := range statuses.Statuses {
+	for _, status := range statuses {
 		snapshot.StatusContexts = append(snapshot.StatusContexts, PullRequestStatus{
 			Context:     status.Context,
 			State:       status.State,
@@ -1142,6 +1132,70 @@ func (c *GitHubClient) FetchPullRequestChecksWithPolicy(ctx context.Context, num
 
 	classifyPullRequestChecks(&snapshot, policy)
 	return snapshot, nil
+}
+
+// fetchCheckRuns pages through every check run reported for a commit. GitHub
+// defaults to 30 results per page, so a single unpaginated GET would hide any
+// check runs beyond the first page from the pass/fail classification.
+func (c *GitHubClient) fetchCheckRuns(ctx context.Context, sha string) ([]githubCheckRun, error) {
+	var runs []githubCheckRun
+	for page := 1; ; page++ {
+		values := url.Values{}
+		values.Set("per_page", "100")
+		values.Set("page", strconv.Itoa(page))
+
+		var payload githubCheckRunsResponse
+		path := fmt.Sprintf(
+			"/repos/%s/%s/commits/%s/check-runs?%s",
+			url.PathEscape(c.cfg.Owner),
+			url.PathEscape(c.cfg.Repo),
+			url.PathEscape(sha),
+			values.Encode(),
+		)
+		if err := c.get(ctx, path, &payload); err != nil {
+			return nil, err
+		}
+
+		runs = append(runs, payload.CheckRuns...)
+
+		if len(payload.CheckRuns) < 100 || len(runs) >= payload.TotalCount {
+			break
+		}
+	}
+
+	return runs, nil
+}
+
+// fetchCommitStatuses pages through every legacy status context reported for a
+// commit; the combined-status endpoint paginates its statuses array exactly
+// like the check-runs endpoint.
+func (c *GitHubClient) fetchCommitStatuses(ctx context.Context, sha string) ([]githubStatusContext, error) {
+	var statuses []githubStatusContext
+	for page := 1; ; page++ {
+		values := url.Values{}
+		values.Set("per_page", "100")
+		values.Set("page", strconv.Itoa(page))
+
+		var payload githubStatusesResponse
+		path := fmt.Sprintf(
+			"/repos/%s/%s/commits/%s/status?%s",
+			url.PathEscape(c.cfg.Owner),
+			url.PathEscape(c.cfg.Repo),
+			url.PathEscape(sha),
+			values.Encode(),
+		)
+		if err := c.get(ctx, path, &payload); err != nil {
+			return nil, err
+		}
+
+		statuses = append(statuses, payload.Statuses...)
+
+		if len(payload.Statuses) < 100 || len(statuses) >= payload.TotalCount {
+			break
+		}
+	}
+
+	return statuses, nil
 }
 
 func classifyPullRequestChecks(snapshot *PullRequestCheckSnapshot, policy PullRequestCheckPolicy) {
@@ -1757,7 +1811,8 @@ type githubPullRequestBase struct {
 }
 
 type githubCheckRunsResponse struct {
-	CheckRuns []githubCheckRun `json:"check_runs"`
+	CheckRuns  []githubCheckRun `json:"check_runs"`
+	TotalCount int              `json:"total_count"`
 }
 
 type githubCheckRun struct {
@@ -1769,8 +1824,9 @@ type githubCheckRun struct {
 }
 
 type githubStatusesResponse struct {
-	State    string                `json:"state"`
-	Statuses []githubStatusContext `json:"statuses"`
+	State      string                `json:"state"`
+	Statuses   []githubStatusContext `json:"statuses"`
+	TotalCount int                   `json:"total_count"`
 }
 
 type githubStatusContext struct {

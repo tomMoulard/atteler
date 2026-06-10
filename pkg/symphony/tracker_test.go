@@ -957,6 +957,112 @@ func TestGitHubClient_FetchPullRequestChecksPaginatesRulesetRequiredChecks(t *te
 	assert.Equal(t, []string{"late-required"}, checks.RequiredFailedCheckNames)
 }
 
+func TestGitHubClient_FetchPullRequestChecksPaginatesCheckRuns(t *testing.T) {
+	t.Parallel()
+
+	checkRunRequests := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			checkRunRequests++
+
+			assert.Equal(t, "100", r.URL.Query().Get("per_page"))
+
+			switch r.URL.Query().Get("page") {
+			case "", "1":
+				writeTestResponse(t, w, testGitHubCheckRunsPage(130, 1, 100, "run-130"))
+			case "2":
+				writeTestResponse(t, w, testGitHubCheckRunsPage(130, 101, 30, "run-130"))
+			default:
+				assert.Failf(t, "unexpected check-runs page", "query: %s", r.URL.RawQuery)
+				http.NotFound(w, r)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			writeTestResponse(t, w, `{"state":"success","total_count":0,"statuses":[]}`)
+		default:
+			assert.Failf(t, "unexpected GitHub request", "%s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		TreatAllReportedAsRequired: true,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, checkRunRequests)
+	assert.Len(t, checks.CheckRuns, 130)
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, []string{"run-130"}, checks.RequiredFailedCheckNames)
+	assert.Equal(t, []string{"run-130"}, checks.FailedCheckNames)
+}
+
+func TestGitHubClient_FetchPullRequestChecksPaginatesCommitStatuses(t *testing.T) {
+	t.Parallel()
+
+	statusRequests := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubPullRequestPath:
+			writeTestResponse(t, w, `{"number":31,"html_url":"https://github.com/owner/repo/pull/31","state":"open","head":{"ref":"symphony/GH-2","sha":"abc123"},"base":{"ref":"main","sha":"base123"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCheckRunsPath:
+			writeTestResponse(t, w, `{"total_count":0,"check_runs":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == testGitHubCommitStatusPath:
+			statusRequests++
+
+			assert.Equal(t, "100", r.URL.Query().Get("per_page"))
+
+			switch r.URL.Query().Get("page") {
+			case "", "1":
+				writeTestResponse(t, w, testGitHubCommitStatusPage(130, 1, 100, "status-130"))
+			case "2":
+				writeTestResponse(t, w, testGitHubCommitStatusPage(130, 101, 30, "status-130"))
+			default:
+				assert.Failf(t, "unexpected commit-status page", "query: %s", r.URL.RawQuery)
+				http.NotFound(w, r)
+			}
+		default:
+			assert.Failf(t, "unexpected GitHub request", "%s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token",
+		Owner:    "owner",
+		Repo:     "repo",
+	})
+
+	checks, err := client.FetchPullRequestChecksWithPolicy(t.Context(), 31, PullRequestCheckPolicy{
+		TreatAllReportedAsRequired: true,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, statusRequests)
+	assert.Len(t, checks.StatusContexts, 130)
+	assert.Equal(t, PullRequestChecksFailed, checks.State)
+	assert.Equal(t, []string{"status-130"}, checks.RequiredFailedCheckNames)
+	assert.Equal(t, []string{"status-130"}, checks.FailedCheckNames)
+}
+
 func TestGitHubClient_FetchPullRequestChecksReportsBranchProtectionLookupErrors(t *testing.T) {
 	t.Parallel()
 
@@ -1414,6 +1520,43 @@ func writeGitHubIssue(t *testing.T, w http.ResponseWriter, body string) {
 	t.Helper()
 
 	writeGitHubIssueWithState(t, w, body, "open")
+}
+
+const (
+	testGitHubCheckStateSuccess = "success"
+	testGitHubCheckStateFailure = "failure"
+)
+
+func testGitHubCheckRunsPage(total, start, count int, failingName string) string {
+	runs := make([]string, 0, count)
+	for i := range count {
+		name := fmt.Sprintf("run-%03d", start+i)
+
+		conclusion := testGitHubCheckStateSuccess
+		if name == failingName {
+			conclusion = testGitHubCheckStateFailure
+		}
+
+		runs = append(runs, fmt.Sprintf(`{"name":%q,"status":"completed","conclusion":%q}`, name, conclusion))
+	}
+
+	return fmt.Sprintf(`{"total_count":%d,"check_runs":[%s]}`, total, strings.Join(runs, ","))
+}
+
+func testGitHubCommitStatusPage(total, start, count int, failingContext string) string {
+	statuses := make([]string, 0, count)
+	for i := range count {
+		statusContext := fmt.Sprintf("status-%03d", start+i)
+
+		state := testGitHubCheckStateSuccess
+		if statusContext == failingContext {
+			state = testGitHubCheckStateFailure
+		}
+
+		statuses = append(statuses, fmt.Sprintf(`{"context":%q,"state":%q}`, statusContext, state))
+	}
+
+	return fmt.Sprintf(`{"state":"pending","total_count":%d,"statuses":[%s]}`, total, strings.Join(statuses, ","))
 }
 
 func testGitHubRulesPayload(count int, ruleType, checkContext string) string {

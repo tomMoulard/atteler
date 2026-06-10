@@ -26,10 +26,13 @@ type AppServerClient struct {
 	lines        chan appServerMessage
 	done         chan error
 	waitDone     chan struct{}
+	quit         chan struct{}
+	readDone     chan struct{}
 	stderr       <-chan string
 	commandLinks map[string]commandLink
 	mu           sync.Mutex
 	commandMu    sync.Mutex
+	quitOnce     sync.Once
 	nextID       int64
 	pid          string
 }
@@ -133,6 +136,8 @@ func startAppServer(ctx context.Context, cfg CodexConfig, workspacePath string, 
 		lines:        make(chan appServerMessage, 64),
 		done:         make(chan error, 1),
 		waitDone:     make(chan struct{}),
+		quit:         make(chan struct{}),
+		readDone:     make(chan struct{}),
 		stderr:       readString(stderr),
 		commandLinks: make(map[string]commandLink),
 		nextID:       1,
@@ -183,10 +188,15 @@ func finishAppServerSetupError(invocation *shell.Invocation, err error) error {
 	return err
 }
 
-// Close stops the app-server subprocess.
+// Close stops the app-server subprocess and releases the read loop, even when
+// it is parked on a send into the full lines buffer.
 func (c *AppServerClient) Close() error {
 	if c == nil {
 		return nil
+	}
+
+	if c.quit != nil {
+		c.quitOnce.Do(func() { close(c.quit) })
 	}
 
 	_ = c.stdin.Close()
@@ -199,6 +209,14 @@ func (c *AppServerClient) Close() error {
 		case <-c.waitDone:
 		case <-time.After(defaultCodexReadTimeout):
 			return errors.New("codex app-server: close timeout")
+		}
+	}
+
+	if c.readDone != nil {
+		select {
+		case <-c.readDone:
+		case <-time.After(defaultCodexReadTimeout):
+			return errors.New("codex app-server: read loop did not exit")
 		}
 	}
 
@@ -707,6 +725,7 @@ func (c *AppServerClient) write(msg appServerMessage) error {
 }
 
 func (c *AppServerClient) readLoop(stdout io.Reader) {
+	defer close(c.readDone)
 	defer close(c.lines)
 
 	scanner := bufio.NewScanner(stdout)
@@ -724,7 +743,11 @@ func (c *AppServerClient) readLoop(stdout io.Reader) {
 		}
 
 		msg.raw = append([]byte(nil), line...)
-		c.lines <- msg
+		select {
+		case c.lines <- msg:
+		case <-c.quit:
+			return
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
