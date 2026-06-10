@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+const (
+	// RateLimitScopeProvider marks a rate limit as affecting the whole provider.
+	RateLimitScopeProvider = "provider"
+	// RateLimitScopeModel marks a rate limit as affecting only the observed model.
+	RateLimitScopeModel = "model"
+)
+
 // ActualUsage captures provider-reported usage and locally observed timing for
 // a completed model call.
 type ActualUsage struct {
@@ -21,42 +28,47 @@ type ActualUsage struct {
 //
 //nolint:govet // Field order keeps timing/error facts grouped for callers.
 type Failure struct {
-	RetryAfter  time.Duration
-	Error       string
-	Retryable   bool
-	RateLimited bool
+	RetryAfter     time.Duration
+	Error          string
+	Kind           string
+	RateLimitScope string
+	Retryable      bool
+	RateLimited    bool
 }
 
 // Observation is the aggregate telemetry retained for one provider/model.
 //
 //nolint:govet // Field order matches the external JSON telemetry artifact shape.
 type Observation struct {
-	UpdatedAt              time.Time `json:"updated_at"`
-	LastFailureAt          time.Time `json:"last_failure_at,omitzero"`
-	Provider               string    `json:"provider"`
-	Model                  string    `json:"model"`
-	ModelID                string    `json:"model_id"`
-	Count                  int       `json:"count"`
-	FailureCount           int       `json:"failure_count,omitempty"`
-	RateLimitCount         int       `json:"rate_limit_count,omitempty"`
-	TokenUsageCount        int       `json:"token_usage_count,omitempty"`
-	LatencySamples         int       `json:"latency_samples,omitempty"`
-	TTFTSamples            int       `json:"ttft_samples,omitempty"`
-	InputTokens            int       `json:"input_tokens"`
-	CachedInputTokens      int       `json:"cached_input_tokens"`
-	CacheWriteTokens       int       `json:"cache_write_tokens"`
-	OutputTokens           int       `json:"output_tokens"`
-	LastLatencyMS          int       `json:"last_latency_ms"`
-	AvgLatencyMS           int       `json:"avg_latency_ms"`
-	LastTTFTMS             int       `json:"last_ttft_ms,omitempty"`
-	AvgTTFTMS              int       `json:"avg_ttft_ms,omitempty"`
-	LastCost               float64   `json:"last_cost"`
-	TotalCost              float64   `json:"total_cost"`
-	LastEstimatedDeltaUSD  float64   `json:"last_estimated_delta_usd,omitempty"`
-	LastError              string    `json:"last_error,omitempty"`
-	LastRetryAfterMS       int       `json:"last_retry_after_ms,omitempty"`
-	LastFailureRetryable   bool      `json:"last_failure_retryable,omitempty"`
-	LastFailureRateLimited bool      `json:"last_failure_rate_limited,omitempty"`
+	UpdatedAt                 time.Time `json:"updated_at"`
+	LastFailureAt             time.Time `json:"last_failure_at,omitzero"`
+	LastSuccessAt             time.Time `json:"last_success_at,omitzero"`
+	Provider                  string    `json:"provider"`
+	Model                     string    `json:"model"`
+	ModelID                   string    `json:"model_id"`
+	Count                     int       `json:"count"`
+	FailureCount              int       `json:"failure_count,omitempty"`
+	RateLimitCount            int       `json:"rate_limit_count,omitempty"`
+	TokenUsageCount           int       `json:"token_usage_count,omitempty"`
+	LatencySamples            int       `json:"latency_samples,omitempty"`
+	TTFTSamples               int       `json:"ttft_samples,omitempty"`
+	InputTokens               int       `json:"input_tokens"`
+	CachedInputTokens         int       `json:"cached_input_tokens"`
+	CacheWriteTokens          int       `json:"cache_write_tokens"`
+	OutputTokens              int       `json:"output_tokens"`
+	LastLatencyMS             int       `json:"last_latency_ms"`
+	AvgLatencyMS              int       `json:"avg_latency_ms"`
+	LastTTFTMS                int       `json:"last_ttft_ms,omitempty"`
+	AvgTTFTMS                 int       `json:"avg_ttft_ms,omitempty"`
+	LastCost                  float64   `json:"last_cost"`
+	TotalCost                 float64   `json:"total_cost"`
+	LastEstimatedDeltaUSD     float64   `json:"last_estimated_delta_usd,omitempty"`
+	LastError                 string    `json:"last_error,omitempty"`
+	LastFailureKind           string    `json:"last_failure_kind,omitempty"`
+	LastFailureRateLimitScope string    `json:"last_failure_rate_limit_scope,omitempty"`
+	LastRetryAfterMS          int       `json:"last_retry_after_ms,omitempty"`
+	LastFailureRetryable      bool      `json:"last_failure_retryable,omitempty"`
+	LastFailureRateLimited    bool      `json:"last_failure_rate_limited,omitempty"`
 }
 
 // Telemetry stores in-memory route observations. It is safe for concurrent use.
@@ -100,6 +112,7 @@ func (t *Telemetry) Record(candidate Candidate, usage ActualUsage, observedAt ti
 	obs.Model = candidate.Name
 	obs.ModelID = id
 	obs.UpdatedAt = observedAt
+	obs.LastSuccessAt = observedAt
 	obs.Count++
 
 	if usageHasTokenCounts(usage) {
@@ -130,6 +143,8 @@ func (t *Telemetry) Record(candidate Candidate, usage ActualUsage, observedAt ti
 	}
 
 	obs.LastError = ""
+	obs.LastFailureKind = ""
+	obs.LastFailureRateLimitScope = ""
 	obs.LastRetryAfterMS = 0
 	obs.LastFailureRetryable = false
 	obs.LastFailureRateLimited = false
@@ -169,12 +184,15 @@ func (t *Telemetry) RecordFailure(candidate Candidate, failure Failure, observed
 	obs.LastFailureAt = observedAt
 	obs.FailureCount++
 	obs.LastError = failure.Error
+	obs.LastFailureKind = failure.Kind
 	obs.LastFailureRetryable = failure.Retryable
 	obs.LastFailureRateLimited = failure.RateLimited
+	obs.LastFailureRateLimitScope = ""
 	obs.LastRetryAfterMS = durationMS(failure.RetryAfter)
 
 	if failure.RateLimited {
 		obs.RateLimitCount++
+		obs.LastFailureRateLimitScope = normalizeRateLimitScope(failure.RateLimitScope)
 	}
 
 	t.observations[id] = obs
@@ -194,6 +212,50 @@ func (t *Telemetry) Snapshot(id string) (Observation, bool) {
 	obs, ok := t.observations[id]
 
 	return obs, ok
+}
+
+// ProviderRateLimitObservation returns the active rate-limit observation for a
+// provider, if any. When multiple models from the same provider are limited, it
+// returns the observation with the furthest cooldown deadline.
+func (t *Telemetry) ProviderRateLimitObservation(provider string, now time.Time) (Observation, bool) {
+	if t == nil || provider == "" {
+		return Observation{}, false
+	}
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	var latestProviderSuccess time.Time
+
+	for id := range t.observations {
+		obs := t.observations[id]
+		if obs.Provider != provider {
+			continue
+		}
+
+		if obs.LastSuccessAt.After(latestProviderSuccess) {
+			latestProviderSuccess = obs.LastSuccessAt
+		}
+	}
+
+	var selected Observation
+
+	for id := range t.observations {
+		obs := t.observations[id]
+		if obs.Provider != provider || !obs.providerRateLimitActive(now) {
+			continue
+		}
+
+		if !latestProviderSuccess.IsZero() && !obs.LastFailureAt.After(latestProviderSuccess) {
+			continue
+		}
+
+		if selected.RateLimitUntil().Before(obs.RateLimitUntil()) {
+			selected = obs
+		}
+	}
+
+	return selected, !selected.RateLimitUntil().IsZero()
 }
 
 // Snapshots returns a copy of all observations keyed by provider/model id.
@@ -318,4 +380,28 @@ func (o Observation) RateLimitActive(now time.Time) bool {
 	}
 
 	return now.Before(until)
+}
+
+func (o Observation) providerRateLimitActive(now time.Time) bool {
+	return o.RateLimitActive(now) && o.rateLimitScope() == RateLimitScopeProvider
+}
+
+func (o Observation) rateLimitScope() string {
+	if !o.LastFailureRateLimited {
+		return ""
+	}
+
+	if o.LastFailureRateLimitScope == RateLimitScopeModel {
+		return RateLimitScopeModel
+	}
+
+	return RateLimitScopeProvider
+}
+
+func normalizeRateLimitScope(scope string) string {
+	if scope == RateLimitScopeModel {
+		return RateLimitScopeModel
+	}
+
+	return RateLimitScopeProvider
 }

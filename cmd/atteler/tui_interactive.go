@@ -144,6 +144,7 @@ func runInteractive(ctx context.Context, state appState) error {
 			Agent:       state.selectedAgent,
 			Model:       state.selectedModel,
 			Error:       err.Error(),
+			Metadata:    llm.ProviderFailureMetadata(err),
 		})
 
 		return fmt.Errorf("run TUI: %w", err)
@@ -241,7 +242,7 @@ func startupProviderReadinessSummary(report llm.ProviderReadinessReport) string 
 		case llm.ProviderStatusFailed, llm.ProviderStatusFailedHealthCheck:
 			reason := provider.Name + " " + string(provider.Status)
 			if provider.Error != nil {
-				reason += ": " + truncateStartupReadinessError(provider.Error.Error())
+				reason += ": " + truncateStartupReadinessError(llm.ProviderFailureSummary(provider.Error))
 			}
 
 			unavailable = append(unavailable, reason)

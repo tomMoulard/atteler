@@ -65,10 +65,13 @@ const (
 )
 
 // AgentLoopStopCondition is a durable, structured explanation for loop exit.
+//
+//nolint:govet // Field order follows JSON/audit readability rather than fieldalignment.
 type AgentLoopStopCondition struct {
 	Kind        AgentLoopStopKind `json:"kind"`
 	Reason      string            `json:"reason"`
 	MatchedRule string            `json:"matched_rule,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // AgentLoopModelRequestSummary records the request shape without copying the
@@ -86,19 +89,20 @@ type AgentLoopModelRequestSummary struct {
 // AgentLoopModelResponseSummary records enough of a model response to audit or
 // replay a tool-use turn.
 type AgentLoopModelResponseSummary struct {
-	StopReason          StopReason `json:"stop_reason"`
-	Provider            string     `json:"provider,omitempty"`
-	Model               string     `json:"model"`
-	Content             string     `json:"content,omitempty"`
-	ToolCalls           []ToolCall `json:"tool_calls,omitempty"`
-	EstimatedCostMicros int64      `json:"estimated_cost_micros,omitempty"`
-	ContentBytes        int        `json:"content_bytes"`
-	LatencyMS           int        `json:"latency_ms,omitempty"`
-	FirstTokenLatencyMS int        `json:"first_token_latency_ms,omitempty"`
-	InputTokens         int        `json:"input_tokens"`
-	CachedInputTokens   int        `json:"cached_input_tokens"`
-	CacheWriteTokens    int        `json:"cache_write_tokens,omitempty"`
-	OutputTokens        int        `json:"output_tokens"`
+	Metadata            map[string]string `json:"metadata,omitempty"`
+	StopReason          StopReason        `json:"stop_reason"`
+	Provider            string            `json:"provider,omitempty"`
+	Model               string            `json:"model"`
+	Content             string            `json:"content,omitempty"`
+	ToolCalls           []ToolCall        `json:"tool_calls,omitempty"`
+	EstimatedCostMicros int64             `json:"estimated_cost_micros,omitempty"`
+	ContentBytes        int               `json:"content_bytes"`
+	LatencyMS           int               `json:"latency_ms,omitempty"`
+	FirstTokenLatencyMS int               `json:"first_token_latency_ms,omitempty"`
+	InputTokens         int               `json:"input_tokens"`
+	CachedInputTokens   int               `json:"cached_input_tokens"`
+	CacheWriteTokens    int               `json:"cache_write_tokens,omitempty"`
+	OutputTokens        int               `json:"output_tokens"`
 }
 
 // AgentLoopStep is one durable checkpoint record in the tool loop ledger.

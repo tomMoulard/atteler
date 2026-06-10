@@ -41,14 +41,7 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 		cmds = append(
 			cmds,
 			tea.Println(errStyle.Render(errorLine)),
-			emitHook(m.ctx, m.hookRunner, events.Event{
-				Type:        events.Error,
-				SessionID:   m.sessionState.ID,
-				SessionPath: m.sessionPath,
-				Agent:       m.sessionState.DefaultAgent,
-				Model:       m.sessionState.DefaultModel,
-				Error:       msg.err.Error(),
-			}),
+			emitHook(m.ctx, m.hookRunner, m.llmErrorEvent(msg.err)),
 		)
 
 		return m.continueWithQueuedPrompt(tea.Sequence(cmds...))
@@ -84,21 +77,42 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 		cmds,
 		tea.Println(header+"\n"+msg.content),
 		saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner),
-		emitHook(m.ctx, m.hookRunner, events.Event{
-			Type:        events.AssistantMessage,
-			SessionID:   m.sessionState.ID,
-			SessionPath: m.sessionPath,
-			Agent:       m.sessionState.DefaultAgent,
-			Model:       msg.model,
-			Role:        string(llm.RoleAssistant),
-			Content:     msg.content,
-		}),
+		emitHook(m.ctx, m.hookRunner, m.assistantMessageEvent(msg)),
 	)
 	if event, ok := routeDecisionEvent(m.sessionState.ID, m.sessionPath, m.sessionState.DefaultAgent, routeResponseModelID(msg.provider, msg.model), msg.routeDecision); ok {
 		cmds = append(cmds, emitHook(m.ctx, m.hookRunner, event))
 	}
 
 	return m.continueWithQueuedPrompt(tea.Sequence(cmds...))
+}
+
+func (m model) assistantMessageEvent(msg llmResponseMsg) events.Event {
+	return events.Event{
+		Type:        events.AssistantMessage,
+		SessionID:   m.sessionState.ID,
+		SessionPath: m.sessionPath,
+		Agent:       m.sessionState.DefaultAgent,
+		Model:       msg.model,
+		Role:        string(llm.RoleAssistant),
+		Content:     msg.content,
+		Metadata:    cloneStringMap(msg.providerFailureMetadata),
+	}
+}
+
+func (m model) llmErrorEvent(err error) events.Event {
+	event := events.Event{
+		Type:        events.Error,
+		SessionID:   m.sessionState.ID,
+		SessionPath: m.sessionPath,
+		Agent:       m.sessionState.DefaultAgent,
+		Model:       m.sessionState.DefaultModel,
+		Metadata:    llm.ProviderFailureMetadata(err),
+	}
+	if err != nil {
+		event.Error = err.Error()
+	}
+
+	return event
 }
 
 func llmToolLogCommands(toolLog []string, liveEvents bool) []tea.Cmd {

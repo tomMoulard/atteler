@@ -120,7 +120,7 @@ func (r *Registry) completeStreamResolved(ctx context.Context, params CompletePa
 
 	sp, ok := p.(StreamProvider)
 	if !ok || !capabilities.SupportsStreaming {
-		resp, completeErr := r.completeResolved(ctx, params)
+		resp, completeErr := r.completeResolved(ctx, params, r.fallbackRetryConfig(false))
 		if completeErr != nil {
 			return nil, completeErr
 		}

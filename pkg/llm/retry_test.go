@@ -252,6 +252,65 @@ func TestRegistry_ApplyProviderRetryConfigPreservesBaseRuntimeHooks(t *testing.T
 	assert.Equal(t, time.Millisecond, info.InitialBackoff)
 }
 
+func TestCompleteWithRetry_RetriesRateLimitErrorType(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	resp, err := completeWithRetry(
+		context.Background(),
+		retryConfig{
+			MaxAttempts:    1,
+			InitialBackoff: time.Millisecond,
+			sleep:          captureSleep(nil),
+		},
+		retryMetadata{provider: providerClaudeCode, model: "claude-opus-4-7"},
+		func(_ context.Context) (*Response, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, errors.New(`claude code: {"error":{"type":"rate_limit_error","message":"Error"}}`)
+			}
+
+			return &Response{Content: "ok"}, nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	assert.Equal(t, 2, attempts)
+}
+
+func TestCompleteWithRetry_SkipsRetryAfterAboveLimit(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	_, err := completeWithRetry(
+		context.Background(),
+		retryConfig{
+			MaxAttempts:    2,
+			InitialBackoff: time.Millisecond,
+			MaxRetryAfter:  10 * time.Millisecond,
+			sleep:          captureSleep(nil),
+		},
+		retryMetadata{provider: providerOpenAI, model: "gpt-test"},
+		func(_ context.Context) (*Response, error) {
+			attempts++
+
+			return nil, &ProviderError{
+				Provider:     providerOpenAI,
+				StatusCode:   http.StatusTooManyRequests,
+				RetryAfter:   60 * time.Second,
+				Message:      "rate limited",
+				Retryability: RetryabilityRetryable,
+			}
+		},
+	)
+	require.Error(t, err)
+	assert.Equal(t, 1, attempts)
+
+	var retryErr *RetryError
+	require.ErrorAs(t, err, &retryErr)
+	assert.Equal(t, retryOutcomeBudgetExhausted, retryErr.Outcome)
+}
+
 func TestCompleteWithRetry_MaxBackoffCapsExponentialDelay(t *testing.T) {
 	t.Parallel()
 

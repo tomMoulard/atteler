@@ -25,6 +25,7 @@ type RetryPolicy struct {
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
 	MaxElapsedTime time.Duration
+	MaxRetryAfter  time.Duration
 	JitterFraction float64
 	MaxAttempts    int
 }
@@ -51,6 +52,7 @@ type RetryPolicyInfo struct {
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
 	MaxElapsedTime time.Duration
+	MaxRetryAfter  time.Duration
 	JitterFraction float64
 	MaxAttempts    int
 }
@@ -174,6 +176,10 @@ func (c retryConfig) normalized() retryConfig {
 		c.MaxElapsedTime = 0
 	}
 
+	if c.MaxRetryAfter < 0 {
+		c.MaxRetryAfter = 0
+	}
+
 	if c.JitterFraction < 0 {
 		c.JitterFraction = 0
 	}
@@ -205,6 +211,7 @@ func (c retryConfig) info() RetryPolicyInfo {
 		InitialBackoff: c.InitialBackoff,
 		MaxBackoff:     c.MaxBackoff,
 		MaxElapsedTime: c.MaxElapsedTime,
+		MaxRetryAfter:  c.MaxRetryAfter,
 		JitterFraction: c.JitterFraction,
 	}
 }
@@ -251,6 +258,42 @@ type retryDecision struct {
 	legacyMatch bool
 }
 
+// isRetryable exposes the retry decision for fallback classification and tests.
+func isRetryable(err error) (time.Duration, bool) {
+	decision := retryDecisionForError(err)
+
+	return decision.retryAfter, decision.retryable
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var providerErr *ProviderError
+	if errors.As(err, &providerErr) {
+		if providerErr.StatusCode == http.StatusTooManyRequests {
+			return true
+		}
+
+		if providerErr.Retryability == RetryabilityRetryable && rateLimitText(providerErr.Message) {
+			return true
+		}
+	}
+
+	return rateLimitText(err.Error())
+}
+
+func rateLimitText(value string) bool {
+	normalized := strings.ToLower(value)
+	underscoreNormalized := strings.NewReplacer("-", "_", " ", "_").Replace(normalized)
+
+	return strings.Contains(normalized, "http 429") ||
+		strings.Contains(normalized, "status 429") ||
+		strings.Contains(underscoreNormalized, "rate_limit") ||
+		strings.Contains(underscoreNormalized, "too_many_requests")
+}
+
 const (
 	retryOutcomeBudgetExhausted = "budget_exhausted"
 	retryOutcomeCanceled        = "canceled"
@@ -262,7 +305,10 @@ const (
 
 // completeWithRetry calls fn up to cfg.MaxAttempts additional times on
 // transient failures. It uses exponential backoff, positive jitter, Retry-After
-// hints, a total elapsed retry budget, and emits retry lifecycle events.
+// hints, a total elapsed retry budget, and emits retry lifecycle events. When
+// MaxRetryAfter is positive, larger provider-requested waits are treated as an
+// exhausted attempt so callers with alternate routes can move on instead of
+// sleeping behind a known cooldown.
 func completeWithRetry(
 	ctx context.Context,
 	cfg retryConfig,
@@ -326,6 +372,14 @@ func withRetry[T any](
 			emitRetryFinal(ctx, meta, decision, attempts, cfg.MaxAttempts, start, cfg, outcome)
 
 			return zero, newRetryError(meta, retryCanceledError(lastErr, ctxErr), decision, attempts, start, cfg, outcome)
+		}
+
+		if retryAfterLimitExceeded(cfg, decision.retryAfter) {
+			outcome := retryOutcomeBudgetExhausted
+
+			emitRetryBudgetExhausted(ctx, meta, decision, attempts, cfg.MaxAttempts, start, cfg, decision.retryAfter)
+
+			return zero, newRetryError(meta, lastErr, decision, attempts, start, cfg, outcome)
 		}
 
 		delay := retryDelay(cfg, retryIndex, decision.retryAfter)
@@ -408,6 +462,15 @@ func retryDecisionForError(err error) retryDecision {
 			class:      providerErr.retryability(),
 			statusCode: providerErr.StatusCode,
 			retryable:  providerErr.IsRetryable(),
+		}
+	}
+
+	if isRateLimitError(err) {
+		return retryDecision{
+			class:       RetryabilityRetryable,
+			statusCode:  http.StatusTooManyRequests,
+			retryable:   true,
+			legacyMatch: true,
 		}
 	}
 
@@ -587,6 +650,10 @@ func retryBudgetExceeded(cfg retryConfig, start time.Time, delay time.Duration) 
 	elapsed := cfg.now().Sub(start)
 
 	return elapsed+delay > cfg.MaxElapsedTime
+}
+
+func retryAfterLimitExceeded(cfg retryConfig, retryAfter time.Duration) bool {
+	return cfg.MaxRetryAfter > 0 && retryAfter > cfg.MaxRetryAfter
 }
 
 func newRetryError(

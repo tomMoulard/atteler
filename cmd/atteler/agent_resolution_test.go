@@ -500,6 +500,7 @@ func TestRequestModelAndFallbacks_UsesTelemetryWithoutExplicitRoutingPolicy(t *t
 	telemetry.RecordFailure(primary, modelroute.Failure{
 		RetryAfter:  time.Hour,
 		Error:       "openai: HTTP 429: rate limited",
+		Kind:        "transient_rate_limit",
 		Retryable:   true,
 		RateLimited: true,
 	}, observedAt)
@@ -508,16 +509,50 @@ func TestRequestModelAndFallbacks_UsesTelemetryWithoutExplicitRoutingPolicy(t *t
 		ok: true,
 		agent: agent.Agent{
 			Model:          "openai/gpt-4.1-mini",
-			FallbackModels: []string{"openai/gpt-4.1-nano"},
+			FallbackModels: []string{"openai/gpt-4.1-nano", "anthropic/claude-sonnet-4-20250514"},
 		},
 	}, modelroute.RequestProfile{}, telemetry)
 
 	require.NoError(t, err)
 	require.NotNil(t, routeDecision)
-	assert.Equal(t, "openai/gpt-4.1-nano", requestModel)
+	assert.Equal(t, "anthropic/claude-sonnet-4-20250514", requestModel)
 	assert.Empty(t, fallbackModels)
 	assert.Contains(t, routeDecision.Constraints, modelroute.ConstraintObservedTelemetry)
 	assertRejectionContainsCommand(t, *routeDecision, "openai/gpt-4.1-mini", modelroute.ReasonRateLimited)
+	assertRejectionContainsCommand(t, *routeDecision, "openai/gpt-4.1-nano", modelroute.ReasonRateLimited)
+}
+
+func TestRequestModelAndFallbacks_UsesProviderRateLimitTelemetryForSibling(t *testing.T) {
+	t.Parallel()
+
+	catalog := modelroute.BuiltinCatalog()
+	observedSibling, ok := catalog.Candidate("openai/gpt-4.1-mini")
+	require.True(t, ok)
+
+	telemetry := modelroute.NewTelemetry()
+	observedAt := time.Now().UTC()
+	telemetry.RecordFailure(observedSibling, modelroute.Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        "transient_rate_limit",
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+
+	requestModel, fallbackModels, routeDecision, err := requestModelAndFallbacks("", false, nil, agentSelection{
+		ok: true,
+		agent: agent.Agent{
+			Model:          "openai/gpt-4.1-nano",
+			FallbackModels: []string{"anthropic/claude-sonnet-4-20250514"},
+		},
+	}, modelroute.RequestProfile{}, telemetry)
+
+	require.NoError(t, err)
+	require.NotNil(t, routeDecision)
+	assert.Equal(t, "anthropic/claude-sonnet-4-20250514", requestModel)
+	assert.Empty(t, fallbackModels)
+	assert.Contains(t, routeDecision.Constraints, modelroute.ConstraintObservedTelemetry)
+	assertRejectionContainsCommand(t, *routeDecision, "openai/gpt-4.1-nano", modelroute.ReasonRateLimited)
 }
 
 func TestRequestModelAndFallbacks_UsesPassiveTelemetryWithoutExplicitRoutingPolicy(t *testing.T) {

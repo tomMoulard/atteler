@@ -1945,6 +1945,12 @@ func appendCandidateEvidence(parts []string, candidate modelroute.CandidateDecis
 		parts = append(parts, "capabilities="+strings.Join(candidate.Candidate.Capabilities, ","))
 	}
 
+	parts = appendCandidateLatencyEvidence(parts, candidate)
+
+	return appendCandidateFailureEvidence(parts, candidate)
+}
+
+func appendCandidateLatencyEvidence(parts []string, candidate modelroute.CandidateDecision) []string {
 	if candidate.ExpectedLatencyMS > 0 {
 		parts = append(parts, "expected_latency_ms="+strconv.Itoa(candidate.ExpectedLatencyMS))
 	}
@@ -1961,12 +1967,24 @@ func appendCandidateEvidence(parts []string, candidate modelroute.CandidateDecis
 		parts = append(parts, "observed_ttft_ms="+strconv.Itoa(candidate.ObservedTTFTMS))
 	}
 
+	return parts
+}
+
+func appendCandidateFailureEvidence(parts []string, candidate modelroute.CandidateDecision) []string {
 	if candidate.TelemetryCount > 0 || candidate.FailureCount > 0 {
 		parts = append(parts, "telemetry_count="+strconv.Itoa(candidate.TelemetryCount))
 	}
 
 	if candidate.FailureCount > 0 {
 		parts = append(parts, "failure_count="+strconv.Itoa(candidate.FailureCount))
+	}
+
+	if candidate.LastFailureKind != "" {
+		parts = append(parts, "last_failure_kind="+candidate.LastFailureKind)
+	}
+
+	if candidate.LastFailureRateLimitScope != "" {
+		parts = append(parts, "last_failure_rate_limit_scope="+candidate.LastFailureRateLimitScope)
 	}
 
 	if candidate.RateLimitCount > 0 {

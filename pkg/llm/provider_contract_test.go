@@ -1489,6 +1489,10 @@ func structFieldNames[T any]() []string {
 
 	fields := make([]string, 0, typeOfParams.NumField())
 	for field := range typeOfParams.Fields() {
+		if !field.IsExported() {
+			continue
+		}
+
 		fields = append(fields, field.Name)
 	}
 

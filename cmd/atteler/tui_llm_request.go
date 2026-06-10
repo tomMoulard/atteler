@@ -77,13 +77,14 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 		usage.addResponse(resp)
 
 		return finishLLMResponse(request.liveCh, llmResponseMsg{
-			completedAt:   time.Now(),
-			content:       resp.Content,
-			provider:      resp.Provider,
-			model:         resp.Model,
-			eventLines:    eventLines.Lines(),
-			routeDecision: routeDecisionWithResponse(request.routeDecision, resp, routeTelemetryFromRegistry(reg)),
-			tokenUsage:    usage,
+			completedAt:             time.Now(),
+			content:                 resp.Content,
+			provider:                resp.Provider,
+			model:                   resp.Model,
+			eventLines:              eventLines.Lines(),
+			providerFailureMetadata: resp.ProviderFailureMetadata(),
+			routeDecision:           routeDecisionWithResponse(request.routeDecision, resp, routeTelemetryFromRegistry(reg)),
+			tokenUsage:              usage,
 		})
 	}
 }
@@ -312,15 +313,16 @@ func callLLMWithTools(
 	usage.addResponse(resp)
 
 	return llmResponseMsg{
-		completedAt:   time.Now(),
-		content:       resp.Content,
-		provider:      resp.Provider,
-		model:         resp.Model,
-		eventLines:    eventLines.Lines(),
-		routeDecision: routeDecisionWithResponse(request.routeDecision, resp, routeTelemetryFromRegistry(reg)),
-		toolLog:       toolLog,
-		tokenUsage:    usage,
-		liveEvents:    request.liveCh != nil,
+		completedAt:             time.Now(),
+		content:                 resp.Content,
+		provider:                resp.Provider,
+		model:                   resp.Model,
+		eventLines:              eventLines.Lines(),
+		providerFailureMetadata: resp.ProviderFailureMetadata(),
+		routeDecision:           routeDecisionWithResponse(request.routeDecision, resp, routeTelemetryFromRegistry(reg)),
+		toolLog:                 toolLog,
+		tokenUsage:              usage,
+		liveEvents:              request.liveCh != nil,
 	}
 }
 

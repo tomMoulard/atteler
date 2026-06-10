@@ -932,12 +932,14 @@ func TestTelemetry_RecordFailureRejectsRecentRateLimit(t *testing.T) {
 	obs := telemetry.RecordFailure(primary, Failure{
 		RetryAfter:  2 * time.Second,
 		Error:       "openai: HTTP 429: rate limited",
+		Kind:        "transient_rate_limit",
 		Retryable:   true,
 		RateLimited: true,
 	}, observedAt)
 
 	assert.Equal(t, 1, obs.FailureCount)
 	assert.Equal(t, 1, obs.RateLimitCount)
+	assert.Equal(t, "transient_rate_limit", obs.LastFailureKind)
 	assert.True(t, obs.LastFailureRateLimited)
 	assert.Equal(t, 2000, obs.LastRetryAfterMS)
 	assert.Equal(t, observedAt.Add(2*time.Second), obs.RateLimitUntil())
@@ -968,6 +970,222 @@ func TestTelemetry_RecordFailureRejectsRecentRateLimit(t *testing.T) {
 	}, telemetry, observedAt.Add(time.Minute))
 
 	assert.Equal(t, "openai/primary", recovered.Selected)
+}
+
+func TestTelemetry_RateLimitRejectsSameProviderSiblings(t *testing.T) {
+	t.Parallel()
+
+	primary := Candidate{Name: "primary", Provider: "openai", InputTokenCost: 0.000001}
+	sibling := Candidate{Name: "sibling", Provider: "openai", InputTokenCost: 0.000001}
+	fallback := Candidate{Name: "fallback", Provider: "anthropic", InputTokenCost: 0.000002}
+	telemetry := NewTelemetry()
+	observedAt := time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC)
+
+	telemetry.RecordFailure(primary, Failure{
+		RetryAfter:  2 * time.Second,
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        "transient_rate_limit",
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+
+	decision := DecideAt(
+		[]Candidate{primary, sibling, fallback},
+		RequestProfile{EstimatedInputTokens: 100},
+		Policy{PreferredProviders: []string{"openai"}},
+		telemetry,
+		observedAt.Add(time.Second),
+	)
+
+	assert.Equal(t, "anthropic/fallback", decision.Selected)
+	assertRejectionContains(t, decision, "openai/primary", ReasonRateLimited)
+	assertRejectionContains(t, decision, "openai/sibling", ReasonRateLimited)
+
+	siblingDecision := findCandidateDecision(t, decision, "openai/sibling")
+	assert.Equal(t, "transient_rate_limit", siblingDecision.LastFailureKind)
+	assert.Equal(t, RateLimitScopeProvider, siblingDecision.LastFailureRateLimitScope)
+	assert.Contains(t, siblingDecision.LastError, "HTTP 429")
+	assert.Equal(t, observedAt.Add(2*time.Second).Format(time.RFC3339), siblingDecision.RateLimitUntil)
+}
+
+func TestTelemetry_RateLimitUsesLongestProviderCooldown(t *testing.T) {
+	t.Parallel()
+
+	primary := Candidate{Name: "primary", Provider: "openai", InputTokenCost: 0.000001}
+	sibling := Candidate{Name: "sibling", Provider: "openai", InputTokenCost: 0.000001}
+	fallback := Candidate{Name: "fallback", Provider: "anthropic", InputTokenCost: 0.000002}
+	telemetry := NewTelemetry()
+	observedAt := time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC)
+
+	telemetry.RecordFailure(primary, Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        "transient_rate_limit",
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+	telemetry.RecordFailure(sibling, Failure{
+		Error:       "provider openai temporarily rate limited",
+		Kind:        "transient_rate_limit",
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt.Add(time.Second))
+
+	decision := DecideAt(
+		[]Candidate{primary, sibling, fallback},
+		RequestProfile{EstimatedInputTokens: 100},
+		Policy{PreferredProviders: []string{"openai"}},
+		telemetry,
+		observedAt.Add(2*time.Second),
+	)
+
+	siblingDecision := findCandidateDecision(t, decision, "openai/sibling")
+	assert.Equal(t, observedAt.Add(time.Hour).Format(time.RFC3339), siblingDecision.RateLimitUntil)
+	assert.Contains(t, siblingDecision.LastError, "HTTP 429")
+}
+
+func TestTelemetry_ProviderRateLimitClearedByLaterProviderSuccess(t *testing.T) {
+	t.Parallel()
+
+	primary := Candidate{Name: "primary", Provider: "openai", InputTokenCost: 0.000001}
+	sibling := Candidate{Name: "sibling", Provider: "openai", InputTokenCost: 0.000001}
+	fallback := Candidate{Name: "fallback", Provider: "anthropic", InputTokenCost: 0.000002}
+	telemetry := NewTelemetry()
+	observedAt := time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC)
+
+	telemetry.RecordFailure(primary, Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        "transient_rate_limit",
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+	telemetry.Record(sibling, ActualUsage{InputTokens: 10}, observedAt.Add(time.Second))
+
+	_, ok := telemetry.ProviderRateLimitObservation("openai", observedAt.Add(2*time.Second))
+	require.False(t, ok)
+
+	decision := DecideAt(
+		[]Candidate{primary, sibling, fallback},
+		RequestProfile{EstimatedInputTokens: 100},
+		Policy{PreferredProviders: []string{"openai"}},
+		telemetry,
+		observedAt.Add(2*time.Second),
+	)
+
+	assert.Equal(t, "openai/sibling", decision.Selected)
+	assertRejectionContains(t, decision, "openai/primary", ReasonRateLimited)
+	primaryDecision := findCandidateDecision(t, decision, "openai/primary")
+	assert.Equal(t, RateLimitScopeProvider, primaryDecision.LastFailureRateLimitScope)
+	siblingDecision := findCandidateDecision(t, decision, "openai/sibling")
+	assert.NotContains(t, strings.Join(siblingDecision.Rejected, "; "), ReasonRateLimited)
+}
+
+func TestTelemetry_ModelScopedRateLimitDoesNotRejectProviderSiblings(t *testing.T) {
+	t.Parallel()
+
+	primary := Candidate{Name: "primary", Provider: "openai", InputTokenCost: 0.000001}
+	sibling := Candidate{Name: "sibling", Provider: "openai", InputTokenCost: 0.000001}
+	fallback := Candidate{Name: "fallback", Provider: "anthropic", InputTokenCost: 0.000002}
+	telemetry := NewTelemetry()
+	observedAt := time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC)
+
+	obs := telemetry.RecordFailure(primary, Failure{
+		RetryAfter:     time.Hour,
+		Error:          "openai: HTTP 429: rate limited",
+		Kind:           "transient_rate_limit",
+		RateLimitScope: RateLimitScopeModel,
+		Retryable:      true,
+		RateLimited:    true,
+	}, observedAt)
+
+	assert.Equal(t, RateLimitScopeModel, obs.LastFailureRateLimitScope)
+
+	_, providerLimited := telemetry.ProviderRateLimitObservation("openai", observedAt.Add(time.Second))
+	require.False(t, providerLimited)
+
+	decision := DecideAt(
+		[]Candidate{primary, sibling, fallback},
+		RequestProfile{EstimatedInputTokens: 100},
+		Policy{PreferredProviders: []string{"openai"}},
+		telemetry,
+		observedAt.Add(time.Second),
+	)
+
+	assert.Equal(t, "openai/sibling", decision.Selected)
+	assertRejectionContains(t, decision, "openai/primary", ReasonRateLimited)
+	primaryDecision := findCandidateDecision(t, decision, "openai/primary")
+	assert.Equal(t, RateLimitScopeModel, primaryDecision.LastFailureRateLimitScope)
+	siblingDecision := findCandidateDecision(t, decision, "openai/sibling")
+	assert.NotContains(t, strings.Join(siblingDecision.Rejected, "; "), ReasonRateLimited)
+}
+
+func TestTelemetry_ProviderRateLimitUsesPostRecoveryFailure(t *testing.T) {
+	t.Parallel()
+
+	older := Candidate{Name: "older", Provider: "openai"}
+	recovered := Candidate{Name: "recovered", Provider: "openai"}
+	newer := Candidate{Name: "newer", Provider: "openai"}
+	telemetry := NewTelemetry()
+	observedAt := time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC)
+
+	telemetry.RecordFailure(older, Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: older limit",
+		Kind:        "transient_rate_limit",
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+	telemetry.Record(recovered, ActualUsage{InputTokens: 10}, observedAt.Add(time.Second))
+	telemetry.RecordFailure(newer, Failure{
+		RetryAfter:  10 * time.Minute,
+		Error:       "openai: HTTP 429: newer limit",
+		Kind:        "transient_rate_limit",
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt.Add(2*time.Second))
+
+	obs, ok := telemetry.ProviderRateLimitObservation("openai", observedAt.Add(3*time.Second))
+	require.True(t, ok)
+	assert.Equal(t, "openai/newer", obs.ModelID)
+	assert.Equal(t, observedAt.Add(2*time.Second+10*time.Minute), obs.RateLimitUntil())
+	assert.Contains(t, obs.LastError, "newer limit")
+}
+
+func TestTelemetry_ProviderRateLimitUsesFailureAfterSameModelSuccess(t *testing.T) {
+	t.Parallel()
+
+	primary := Candidate{Name: "primary", Provider: "openai", InputTokenCost: 0.000001}
+	sibling := Candidate{Name: "sibling", Provider: "openai", InputTokenCost: 0.000001}
+	fallback := Candidate{Name: "fallback", Provider: "anthropic", InputTokenCost: 0.000002}
+	telemetry := NewTelemetry()
+	observedAt := time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC)
+
+	telemetry.Record(primary, ActualUsage{InputTokens: 10}, observedAt)
+	telemetry.RecordFailure(primary, Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: later limit",
+		Kind:        "transient_rate_limit",
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt.Add(time.Second))
+
+	obs, ok := telemetry.ProviderRateLimitObservation("openai", observedAt.Add(2*time.Second))
+	require.True(t, ok)
+	assert.Equal(t, "openai/primary", obs.ModelID)
+	assert.Contains(t, obs.LastError, "later limit")
+
+	decision := DecideAt(
+		[]Candidate{primary, sibling, fallback},
+		RequestProfile{EstimatedInputTokens: 100},
+		Policy{PreferredProviders: []string{"openai"}},
+		telemetry,
+		observedAt.Add(2*time.Second),
+	)
+
+	assert.Equal(t, "anthropic/fallback", decision.Selected)
+	assertRejectionContains(t, decision, "openai/primary", ReasonRateLimited)
+	assertRejectionContains(t, decision, "openai/sibling", ReasonRateLimited)
 }
 
 func TestDecisionWithActualUsageAnnotatesSelectedCandidate(t *testing.T) {
@@ -1012,6 +1230,7 @@ func TestDecisionWithTelemetryRefreshesCandidateEvidenceWithoutReranking(t *test
 	telemetry := NewTelemetry()
 	telemetry.RecordFailure(candidates[0], Failure{
 		Error:       "openai: HTTP 429: rate limited",
+		Kind:        "transient_rate_limit",
 		RetryAfter:  2 * time.Second,
 		Retryable:   true,
 		RateLimited: true,
@@ -1033,12 +1252,49 @@ func TestDecisionWithTelemetryRefreshesCandidateEvidenceWithoutReranking(t *test
 	assert.Equal(t, StatusSelected, primary.Status)
 	assert.Equal(t, 1, primary.FailureCount)
 	assert.Equal(t, 1, primary.RateLimitCount)
+	assert.Equal(t, "transient_rate_limit", primary.LastFailureKind)
+	assert.Equal(t, RateLimitScopeProvider, primary.LastFailureRateLimitScope)
 	assert.Contains(t, primary.LastError, "HTTP 429")
 	assert.Equal(t, "2026-05-22T12:00:02Z", primary.RateLimitUntil)
 	fallback := findCandidateDecision(t, annotated, "anthropic/fallback")
 	assert.Equal(t, StatusFallback, fallback.Status)
 	assert.Equal(t, 25, fallback.ObservedLatencyMS)
 	assert.Equal(t, 5, fallback.ObservedTTFTMS)
+}
+
+func TestDecisionWithTelemetryAnnotatesProviderRateLimitSiblings(t *testing.T) {
+	t.Parallel()
+
+	candidates := []Candidate{
+		{Name: "primary", Provider: "openai", InputTokenCost: 0.000001},
+		{Name: "sibling", Provider: "openai", InputTokenCost: 0.000001},
+		{Name: "fallback", Provider: "anthropic", InputTokenCost: 0.000002},
+	}
+	decision := Decide(candidates, RequestProfile{EstimatedInputTokens: 100}, Policy{}, nil)
+
+	telemetry := NewTelemetry()
+	observedAt := time.Now().UTC()
+	telemetry.RecordFailure(candidates[0], Failure{
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        "transient_rate_limit",
+		RetryAfter:  time.Hour,
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+
+	annotated := DecisionWithTelemetry(decision, telemetry)
+
+	assert.Equal(t, "openai/primary", annotated.Selected)
+	assert.Equal(t, []string{"openai/primary", "openai/sibling", "anthropic/fallback"}, annotated.FallbackOrder)
+	assert.Contains(t, annotated.Constraints, ConstraintObservedTelemetry)
+
+	sibling := findCandidateDecision(t, annotated, "openai/sibling")
+	assert.Equal(t, StatusFallback, sibling.Status)
+	assert.Equal(t, "transient_rate_limit", sibling.LastFailureKind)
+	assert.Equal(t, RateLimitScopeProvider, sibling.LastFailureRateLimitScope)
+	assert.Contains(t, sibling.LastError, "HTTP 429")
+	assert.Equal(t, 1, sibling.RateLimitCount)
+	assert.NotEmpty(t, sibling.RateLimitUntil)
 }
 
 func TestDecisionAnnotatorsDoNotMutateInputDecision(t *testing.T) {

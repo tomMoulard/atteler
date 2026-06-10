@@ -156,7 +156,7 @@ func (r *Registry) completeBatchResolved(ctx context.Context, params BatchComple
 		next := params.Requests[i]
 		next.Model = params.Model
 
-		resp, err := r.completeResolved(ctx, next)
+		resp, err := r.completeResolved(ctx, next, r.fallbackRetryConfig(false))
 		if err != nil {
 			return nil, fmt.Errorf("batch request %d: %w", i, err)
 		}

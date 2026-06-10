@@ -370,6 +370,53 @@ func TestOpenAIProvider_ErrorPayloadPrefersSpecificCode(t *testing.T) {
 	assert.Equal(t, "server_error: try again", providerErr.Message)
 }
 
+func TestOpenAIProvider_RegionalHostnameErrorIncludesRemediation(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+
+		if _, err := w.Write([]byte(`{"error":{"message":"Attempted to access resource with incorrect regional hostname. Please make your request to us.api.openai.com","type":"invalid_request_error"}}`)); err != nil {
+			return
+		}
+	}))
+	defer srv.Close()
+
+	p := &OpenAIProvider{apiKey: "k", baseURL: srv.URL, client: srv.Client()}
+
+	_, err := p.FetchModels(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OpenAI regional hostname mismatch")
+	assert.Contains(t, err.Error(), "OPENAI_BASE_URL")
+	assert.Contains(t, err.Error(), "providers.openai.base_url")
+	assert.Contains(t, err.Error(), "https://us.api.openai.com")
+}
+
+func TestOpenAIProvider_RegionalHostnameCompletionErrorIncludesRemediation(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+
+		if _, err := w.Write([]byte(`{"error":{"message":"Attempted to access resource with incorrect regional hostname. Please make your request to eu.api.openai.com","type":"invalid_request_error"}}`)); err != nil {
+			return
+		}
+	}))
+	defer srv.Close()
+
+	p := &OpenAIProvider{apiKey: "k", baseURL: srv.URL, client: srv.Client()}
+
+	_, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "gpt-4.1",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OpenAI regional hostname mismatch")
+	assert.Contains(t, err.Error(), "OPENAI_BASE_URL")
+	assert.Contains(t, err.Error(), "providers.openai.base_url")
+	assert.Contains(t, err.Error(), "https://eu.api.openai.com")
+}
+
 func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {
 	t.Parallel()
 

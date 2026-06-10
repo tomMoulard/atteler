@@ -199,6 +199,7 @@ func AgentLoop(
 				Kind:        AgentLoopStopModelError,
 				Reason:      fmt.Sprintf("model call failed on iteration %d: %v", state.usage.Iterations, err),
 				MatchedRule: "model.complete",
+				Metadata:    fallbackFailureMetadata(err),
 			}
 			if recordErr := state.recordStop(ctx, cfg.CheckpointSink, cond); recordErr != nil {
 				return nil, state.messages, recordErr
@@ -593,6 +594,7 @@ func (s *agentLoopState) recordModelResponse(
 		Budget:       s.budget,
 		ModelRequest: &request,
 		ModelResponse: &AgentLoopModelResponseSummary{
+			Metadata:            cloneStringMap(resp.metadata),
 			Model:               resp.Model,
 			Provider:            resp.Provider,
 			StopReason:          resp.StopReason,

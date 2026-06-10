@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1636,7 +1637,7 @@ func TestRegistry_CompleteWithFallbackRecordsRateLimitTelemetry(t *testing.T) {
 	telemetry := modelroute.NewTelemetry()
 	r.SetRouteTelemetry(telemetry)
 	r.Register(&fakeProvider{
-		err:    &ProviderError{Provider: providerOpenAI, StatusCode: 429, RetryAfter: 2 * time.Second, Message: "rate limited"},
+		err:    &ProviderError{Provider: providerOpenAI, StatusCode: 429, RetryAfter: 60 * time.Second, Message: "rate limited"},
 		name:   providerOpenAI,
 		models: []string{"gpt-4.1-mini"},
 		resp:   &Response{},
@@ -1657,14 +1658,836 @@ func TestRegistry_CompleteWithFallbackRecordsRateLimitTelemetry(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, 1, openAIObs.FailureCount)
 	assert.Equal(t, 1, openAIObs.RateLimitCount)
+	assert.Equal(t, string(providerFailureRateLimit), openAIObs.LastFailureKind)
+	assert.Equal(t, modelroute.RateLimitScopeProvider, openAIObs.LastFailureRateLimitScope)
 	assert.True(t, openAIObs.LastFailureRetryable)
 	assert.True(t, openAIObs.LastFailureRateLimited)
-	assert.Equal(t, 2000, openAIObs.LastRetryAfterMS)
+	assert.Equal(t, 60000, openAIObs.LastRetryAfterMS)
 	assert.Contains(t, openAIObs.LastError, "HTTP 429")
+
+	providerObs, providerRateLimited := telemetry.ProviderRateLimitObservation(providerOpenAI, time.Now().UTC())
+	require.True(t, providerRateLimited)
+	assert.Equal(t, "gpt-4.1-mini", providerObs.Model)
 
 	anthropicObs, ok := telemetry.Snapshot("anthropic/claude-sonnet-4-20250514")
 	require.True(t, ok)
 	assert.Equal(t, 1, anthropicObs.Count)
+}
+
+func TestRegistry_CompleteWithFallbackRetriesRateLimitBeforeFallback(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{
+		MaxAttempts:    1,
+		InitialBackoff: time.Millisecond,
+	})
+
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+
+	attempts := 0
+	primary := &retryFakeProvider{
+		fakeProvider: fakeProvider{
+			name:   providerClaudeCode,
+			models: []string{"claude-opus-4-7"},
+			resp:   &Response{Content: "primary recovered"},
+		},
+		failCount: 1,
+		failErr:   errors.New(`claude code: {"error":{"type":"rate_limit_error","message":"Error"}}`),
+		attempts:  &attempts,
+	}
+	fallback := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "fallback"},
+	}
+
+	r.Register(primary)
+	r.Register(fallback)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "claude-code/claude-opus-4-7",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, err)
+	assert.Equal(t, "primary recovered", resp.Content)
+	assert.Equal(t, 2, attempts, "rate-limited primary should be retried before routing away")
+	require.Empty(t, fallback.calls, "fallback should not be used after retry recovery")
+
+	obs, ok := telemetry.Snapshot("claude-code/claude-opus-4-7")
+	require.True(t, ok)
+	assert.Equal(t, 1, obs.RateLimitCount)
+	assert.False(t, obs.LastFailureRateLimited)
+
+	_, providerLimited := telemetry.ProviderRateLimitObservation(providerClaudeCode, time.Now().UTC())
+	assert.False(t, providerLimited)
+}
+
+func TestRegistry_CompleteWithFallbackRoutesAroundLongRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{
+		MaxAttempts:    2,
+		InitialBackoff: time.Millisecond,
+	})
+
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+
+	attempts := 0
+	primary := &retryFakeProvider{
+		fakeProvider: fakeProvider{
+			name:   providerClaudeCode,
+			models: []string{"claude-opus-4-7"},
+			resp:   &Response{Content: "primary"},
+		},
+		failCount: 3,
+		failErr: &ProviderError{
+			Provider:     providerClaudeCode,
+			StatusCode:   http.StatusTooManyRequests,
+			RetryAfter:   60 * time.Second,
+			Message:      "rate limited",
+			Retryability: RetryabilityRetryable,
+		},
+		attempts: &attempts,
+	}
+	fallback := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "fallback"},
+	}
+
+	r.Register(primary)
+	r.Register(fallback)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "claude-code/claude-opus-4-7",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, err)
+	assert.Equal(t, "fallback", resp.Content)
+	assert.Equal(t, 1, attempts, "long Retry-After should mark cooldown and try another provider without sleeping through retries")
+	require.Len(t, fallback.calls, 1)
+
+	obs, ok := telemetry.Snapshot("claude-code/claude-opus-4-7")
+	require.True(t, ok)
+	assert.Equal(t, 1, obs.RateLimitCount)
+	assert.Equal(t, 60000, obs.LastRetryAfterMS)
+	assert.Equal(t, modelroute.RateLimitScopeProvider, obs.LastFailureRateLimitScope)
+	assert.True(t, obs.LastFailureRateLimited)
+}
+
+func TestRegistry_CompleteWithFallbackSkipsRateLimitedProviderSiblings(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+
+	claudeCode := &fakeProvider{
+		err:    errors.New(`claude code: HTTP 429: {"type":"error","error":{"type":"rate_limit_error","message":"Error"}}`),
+		name:   providerClaudeCode,
+		models: []string{"claude-opus-4-7", "claude-sonnet-4-5"},
+		resp:   &Response{},
+	}
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "ok"},
+	}
+
+	r.Register(claudeCode)
+	r.Register(anthropic)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "claude-code/claude-opus-4-7",
+	}, []string{
+		"claude-code/claude-sonnet-4-5",
+		"anthropic/claude-sonnet-4-20250514",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	require.NotEmpty(t, resp.metadata)
+	assert.Contains(t, resp.metadata["fallback_failure_classifications"], "claude-code="+string(providerFailureRateLimit))
+	assert.Contains(t, resp.metadata["fallback_attempts"], "claude-code/claude-opus-4-7")
+	assert.Contains(t, resp.metadata["fallback_attempts"], "claude-code/claude-sonnet-4-5")
+	assert.Contains(t, resp.metadata["fallback_rate_limit_scopes"], "="+modelroute.RateLimitScopeProvider)
+	assert.Equal(t, providerClaudeCode, resp.metadata["rate_limited_providers"])
+
+	responseMetadata := resp.ProviderFailureMetadata()
+	require.NotEmpty(t, responseMetadata)
+	assert.Contains(t, responseMetadata["fallback_failure_classifications"], "claude-code="+string(providerFailureRateLimit))
+	responseMetadata["fallback_failure_classifications"] = "mutated"
+
+	clonedMetadata := resp.ProviderFailureMetadata()
+	assert.Contains(t, clonedMetadata["fallback_failure_classifications"], "claude-code="+string(providerFailureRateLimit))
+
+	require.Len(t, claudeCode.calls, 1, "second claude-code route should be skipped after provider rate limit")
+	require.Len(t, anthropic.calls, 1, "fallback should continue to another provider")
+
+	skippedObs, ok := telemetry.Snapshot("claude-code/claude-sonnet-4-5")
+	require.True(t, ok)
+	assert.Equal(t, string(providerFailureRateLimit), skippedObs.LastFailureKind)
+	assert.True(t, skippedObs.LastFailureRateLimited)
+	assert.Contains(t, skippedObs.LastError, "temporarily rate limited")
+}
+
+func TestRegistry_CompleteWithFallbackReportsUnresolvedRouteDespiteProviderCooldown(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	telemetry := modelroute.NewTelemetry()
+	observedAt := time.Now().UTC()
+	telemetry.RecordFailure(modelroute.Candidate{
+		Name:     "gpt-4.1-mini",
+		Provider: providerOpenAI,
+	}, modelroute.Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        string(providerFailureRateLimit),
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+	r.SetRouteTelemetry(telemetry)
+
+	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-mini",
+	}, nil)
+	require.Error(t, err)
+
+	msg := err.Error()
+	assert.Contains(t, msg, "openai: "+string(providerFailureRouteExhausted))
+	assert.Contains(t, msg, string(providerFailureRouteExhausted))
+	assert.Contains(t, msg, "openai/gpt-4.1-mini via openai/gpt-4.1-mini unresolved")
+	assert.NotContains(t, msg, "skipped route during cooldown")
+
+	metadata := ProviderFailureMetadata(err)
+	require.NotEmpty(t, metadata)
+	assert.Contains(t, metadata["fallback_failure_classifications"], "openai="+string(providerFailureRouteExhausted))
+}
+
+func TestRegistry_CompleteWithFallbackUsesProviderCooldownTelemetry(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	telemetry := modelroute.NewTelemetry()
+	observedAt := time.Now().UTC()
+	cooldownUntil := observedAt.Add(time.Hour)
+	telemetry.RecordFailure(modelroute.Candidate{
+		Name:     "gpt-4.1-mini",
+		Provider: providerOpenAI,
+	}, modelroute.Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        string(providerFailureRateLimit),
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+	r.SetRouteTelemetry(telemetry)
+
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini", "gpt-4.1-nano"},
+		resp:   &Response{Content: "should not be used"},
+	}
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "ok"},
+	}
+
+	r.Register(openAI)
+	r.Register(anthropic)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-nano",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	require.Empty(t, openAI.calls, "openai sibling route should be skipped during provider cooldown")
+	require.Len(t, anthropic.calls, 1)
+
+	skippedObs, ok := telemetry.Snapshot("openai/gpt-4.1-nano")
+	require.True(t, ok)
+	assert.Equal(t, string(providerFailureRateLimit), skippedObs.LastFailureKind)
+	assert.True(t, skippedObs.LastFailureRateLimited)
+	assert.Equal(t, modelroute.RateLimitScopeProvider, skippedObs.LastFailureRateLimitScope)
+	assert.Positive(t, skippedObs.LastRetryAfterMS)
+	assert.WithinDuration(t, cooldownUntil, skippedObs.RateLimitUntil(), 2*time.Second)
+	assert.Contains(t, skippedObs.LastError, "provider openai temporarily rate limited")
+}
+
+func TestRegistry_CompleteWithFallbackUsesLongestCooldownScopeForTarget(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	telemetry := modelroute.NewTelemetry()
+	observedAt := time.Now().UTC()
+	modelCooldownUntil := observedAt.Add(time.Hour)
+	telemetry.RecordFailure(modelroute.Candidate{
+		Name:     "gpt-4.1-mini",
+		Provider: providerOpenAI,
+	}, modelroute.Failure{
+		RetryAfter:     time.Hour,
+		Error:          "openai: HTTP 429: model rate limited",
+		Kind:           string(providerFailureRateLimit),
+		RateLimitScope: modelroute.RateLimitScopeModel,
+		Retryable:      true,
+		RateLimited:    true,
+	}, observedAt)
+	telemetry.RecordFailure(modelroute.Candidate{
+		Name:     "gpt-4.1-nano",
+		Provider: providerOpenAI,
+	}, modelroute.Failure{
+		RetryAfter:  time.Minute,
+		Error:       "openai: HTTP 429: provider rate limited",
+		Kind:        string(providerFailureRateLimit),
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt.Add(time.Second))
+	r.SetRouteTelemetry(telemetry)
+
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini", "gpt-4.1-nano"},
+		resp:   &Response{Content: "should not be used"},
+	}
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "ok"},
+	}
+
+	r.Register(openAI)
+	r.Register(anthropic)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-mini",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	require.Empty(t, openAI.calls, "longer model cooldown should skip target without downgrading to provider cooldown")
+	require.Len(t, anthropic.calls, 1)
+
+	obs, ok := telemetry.Snapshot("openai/gpt-4.1-mini")
+	require.True(t, ok)
+	assert.Equal(t, string(providerFailureRateLimit), obs.LastFailureKind)
+	assert.True(t, obs.LastFailureRateLimited)
+	assert.Equal(t, modelroute.RateLimitScopeModel, obs.LastFailureRateLimitScope)
+	assert.WithinDuration(t, modelCooldownUntil, obs.RateLimitUntil(), 2*time.Second)
+	assert.Contains(t, obs.LastError, "model openai/gpt-4.1-mini temporarily rate limited")
+}
+
+func TestRegistry_CompleteWithFallbackIgnoresProviderCooldownAfterLaterProviderSuccess(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	telemetry := modelroute.NewTelemetry()
+	observedAt := time.Now().UTC()
+	telemetry.RecordFailure(modelroute.Candidate{
+		Name:     "gpt-4.1-mini",
+		Provider: providerOpenAI,
+	}, modelroute.Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        string(providerFailureRateLimit),
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+	telemetry.Record(modelroute.Candidate{
+		Name:     "gpt-4.1-nano",
+		Provider: providerOpenAI,
+	}, modelroute.ActualUsage{InputTokens: 10}, observedAt.Add(time.Second))
+	r.SetRouteTelemetry(telemetry)
+
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini", "gpt-4.1-nano"},
+		resp:   &Response{Content: "ok"},
+	}
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "fallback"},
+	}
+
+	r.Register(openAI)
+	r.Register(anthropic)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-nano",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	require.Len(t, openAI.calls, 1, "later provider success should clear provider-wide cooldown")
+	require.Empty(t, anthropic.calls)
+}
+
+func TestRegistry_CompleteWithFallbackUsesModelCooldownAfterLaterProviderSuccess(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	telemetry := modelroute.NewTelemetry()
+	observedAt := time.Now().UTC()
+	telemetry.RecordFailure(modelroute.Candidate{
+		Name:     "gpt-4.1-mini",
+		Provider: providerOpenAI,
+	}, modelroute.Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        string(providerFailureRateLimit),
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+	telemetry.Record(modelroute.Candidate{
+		Name:     "gpt-4.1-nano",
+		Provider: providerOpenAI,
+	}, modelroute.ActualUsage{InputTokens: 10}, observedAt.Add(time.Second))
+	r.SetRouteTelemetry(telemetry)
+
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini", "gpt-4.1-nano"},
+		resp:   &Response{Content: "should not be used"},
+	}
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "ok"},
+	}
+
+	r.Register(openAI)
+	r.Register(anthropic)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-mini",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	require.Empty(t, openAI.calls, "same-model cooldown should survive later sibling success")
+	require.Len(t, anthropic.calls, 1)
+
+	obs, ok := telemetry.Snapshot("openai/gpt-4.1-mini")
+	require.True(t, ok)
+	assert.Equal(t, string(providerFailureRateLimit), obs.LastFailureKind)
+	assert.True(t, obs.LastFailureRateLimited)
+	assert.Equal(t, modelroute.RateLimitScopeModel, obs.LastFailureRateLimitScope)
+	assert.Contains(t, obs.LastError, "model openai/gpt-4.1-mini temporarily rate limited")
+}
+
+func TestRegistry_CompleteWithFallbackUsesResolvedModelCooldownForAlias(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	telemetry := modelroute.NewTelemetry()
+	observedAt := time.Now().UTC()
+	telemetry.RecordFailure(modelroute.Candidate{
+		Name:     "gpt-4.1-mini",
+		Provider: providerOpenAI,
+	}, modelroute.Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        string(providerFailureRateLimit),
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+	telemetry.Record(modelroute.Candidate{
+		Name:     "gpt-4.1-nano",
+		Provider: providerOpenAI,
+	}, modelroute.ActualUsage{InputTokens: 10}, observedAt.Add(time.Second))
+	r.SetRouteTelemetry(telemetry)
+
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini", "gpt-4.1-nano"},
+		resp:   &Response{Content: "sibling ok"},
+	}
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "ok"},
+	}
+
+	r.Register(openAI)
+	r.Register(anthropic)
+	require.NoError(t, r.SetModelAlias("fast", providerOpenAI, "gpt-4.1-mini"))
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "fast",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	require.Empty(t, openAI.calls, "resolved alias should honor provider-model cooldown")
+	require.Len(t, anthropic.calls, 1)
+
+	aliasObs, ok := telemetry.Snapshot("openai/gpt-4.1-mini")
+	require.True(t, ok)
+	assert.Equal(t, modelroute.RateLimitScopeModel, aliasObs.LastFailureRateLimitScope)
+	assert.Contains(t, aliasObs.LastError, "model openai/gpt-4.1-mini temporarily rate limited")
+
+	siblingResp, siblingErr := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-nano",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, siblingErr)
+	assert.Equal(t, "sibling ok", siblingResp.Content)
+	require.Len(t, openAI.calls, 1, "model-scoped cooldown skip should not recreate provider-wide cooldown")
+	require.Len(t, anthropic.calls, 1)
+}
+
+func TestRegistry_CompleteWithFallbackUsesProviderCooldownAfterSameModelSuccessThenLimit(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	telemetry := modelroute.NewTelemetry()
+	observedAt := time.Now().UTC()
+	telemetry.Record(modelroute.Candidate{
+		Name:     "gpt-4.1-mini",
+		Provider: providerOpenAI,
+	}, modelroute.ActualUsage{InputTokens: 10}, observedAt)
+	telemetry.RecordFailure(modelroute.Candidate{
+		Name:     "gpt-4.1-mini",
+		Provider: providerOpenAI,
+	}, modelroute.Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: later limit",
+		Kind:        string(providerFailureRateLimit),
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt.Add(time.Second))
+	r.SetRouteTelemetry(telemetry)
+
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini", "gpt-4.1-nano"},
+		resp:   &Response{Content: "should not be used"},
+	}
+	anthropic := &fakeProvider{
+		name:   providerAnthropic,
+		models: []string{"claude-sonnet-4-20250514"},
+		resp:   &Response{Content: "ok"},
+	}
+
+	r.Register(openAI)
+	r.Register(anthropic)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-nano",
+	}, []string{"anthropic/claude-sonnet-4-20250514"})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	require.Empty(t, openAI.calls, "later provider rate limit should still skip siblings even after earlier success")
+	require.Len(t, anthropic.calls, 1)
+}
+
+func TestRegistry_CompleteWithFallbackAllSkippedByProviderCooldown(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	telemetry := modelroute.NewTelemetry()
+	observedAt := time.Now().UTC()
+	telemetry.RecordFailure(modelroute.Candidate{
+		Name:     "gpt-4.1-mini",
+		Provider: providerOpenAI,
+	}, modelroute.Failure{
+		RetryAfter:  time.Hour,
+		Error:       "openai: HTTP 429: rate limited",
+		Kind:        string(providerFailureRateLimit),
+		Retryable:   true,
+		RateLimited: true,
+	}, observedAt)
+	r.SetRouteTelemetry(telemetry)
+
+	openAI := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "should not be used"},
+	}
+	r.Register(openAI)
+
+	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-mini",
+	}, nil)
+	require.Error(t, err)
+	require.Empty(t, openAI.calls, "cooldown should skip provider call")
+
+	msg := err.Error()
+	assert.Contains(t, msg, "openai: "+string(providerFailureRateLimit))
+	assert.Contains(t, msg, "skipped route during cooldown")
+	assert.NotContains(t, msg, "HTTP 429")
+
+	metadata := ProviderFailureMetadata(err)
+	require.NotEmpty(t, metadata)
+	assert.Equal(t, providerOpenAI, metadata["rate_limited_providers"])
+	assert.Contains(t, metadata["fallback_attempts"], "openai/gpt-4.1-mini")
+	assert.Contains(t, metadata["fallback_attempts"], string(providerFailureRateLimit)+":skipped")
+	assert.Contains(t, metadata["fallback_rate_limit_scopes"], "openai/gpt-4.1-mini")
+	assert.Contains(t, metadata["fallback_rate_limit_scopes"], "="+modelroute.RateLimitScopeProvider)
+}
+
+func TestRegistry_CompleteWithFallbackAllowsNilRouteTelemetry(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRouteTelemetry(nil)
+
+	provider := &fakeProvider{
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{Content: "ok"},
+	}
+	r.Register(provider)
+
+	resp, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-mini",
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	require.Len(t, provider.calls, 1)
+}
+
+func TestRegistry_CompleteWithFallbackGroupedErrorSurfacesRegionalReadiness(t *testing.T) {
+	t.Parallel()
+
+	regionalErr := wrapOpenAIRegionalHostnameError(errors.New(`openai: models HTTP 401: {"error":{"message":"Attempted to access resource with incorrect regional hostname. Please make your request to us.api.openai.com","type":"invalid_request_error"}}`))
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+	r.Register(&fakeProvider{
+		err:    errors.New(`claude code: HTTP 429: {"type":"error","error":{"type":"rate_limit_error","message":"Error"}}`),
+		name:   providerClaudeCode,
+		models: []string{"claude-opus-4-7"},
+		resp:   &Response{},
+	})
+	r.Register(&fakeProvider{
+		err:    regionalErr,
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{},
+	})
+
+	r.mu.Lock()
+	r.upsertReadinessProviderLocked(ProviderReadiness{
+		ModelFetchError:    regionalErr,
+		Name:               providerOpenAI,
+		Status:             ProviderStatusRegistered,
+		ModelCatalogSource: ModelCatalogSourceStatic,
+		Models:             []string{"gpt-4.1-mini"},
+		StaticModels:       []string{"gpt-4.1-mini"},
+		Registered:         true,
+		Configured:         true,
+		ModelsStale:        true,
+	})
+	r.upsertReadinessProviderLocked(ProviderReadiness{
+		Error:              errors.New("no alpha credentials found"),
+		Name:               alphaProvider,
+		Status:             ProviderStatusMissingCredential,
+		ModelCatalogSource: ModelCatalogSourceStatic,
+		Models:             []string{"a-1"},
+		StaticModels:       []string{"a-1"},
+	})
+	r.mu.Unlock()
+
+	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "claude-code/claude-opus-4-7",
+	}, []string{"openai/gpt-4.1-mini"})
+	require.Error(t, err)
+
+	msg := err.Error()
+	assert.Contains(t, msg, "claude-code: transient_rate_limit")
+	assert.Contains(t, msg, "openai: configuration_error")
+	assert.Contains(t, msg, "OpenAI regional hostname mismatch")
+	assert.Contains(t, msg, "OPENAI_BASE_URL")
+	assert.Contains(t, msg, "https://us.api.openai.com")
+	assert.Contains(t, msg, "provider readiness issues")
+	assert.Contains(t, msg, "stale=true")
+	assert.NotContains(t, msg, "HTTP 429")
+	assert.NotContains(t, msg, "models HTTP 401")
+	assert.NotContains(t, msg, "invalid_request_error")
+	assert.NotContains(t, msg, "alpha=missing_credentials")
+	assert.NotContains(t, msg, "no alpha credentials")
+
+	metadata := ProviderFailureMetadata(err)
+	require.NotEmpty(t, metadata)
+	assert.Contains(t, metadata["fallback_failure_classifications"], "claude-code="+string(providerFailureRateLimit))
+	assert.Contains(t, metadata["fallback_failure_classifications"], "openai="+string(providerFailureConfiguration))
+	assert.Contains(t, metadata["fallback_attempts"], "claude-code/claude-opus-4-7")
+	assert.Contains(t, metadata["fallback_attempts"], "openai/gpt-4.1-mini")
+	assert.Contains(t, metadata["fallback_rate_limit_scopes"], "claude-code/claude-opus-4-7")
+	assert.Contains(t, metadata["fallback_rate_limit_scopes"], "="+modelroute.RateLimitScopeProvider)
+	assert.Equal(t, providerClaudeCode, metadata["rate_limited_providers"])
+	assert.Equal(t, providerOpenAI, metadata["configuration_error_providers"])
+}
+
+func TestRegistry_CompleteWithFallbackClassifiesMissingCredentials(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+	r.Register(&fakeProvider{
+		err:    errors.New("no OpenAI credentials found: set OPENAI_API_KEY"),
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{},
+	})
+
+	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-mini",
+	}, nil)
+	require.Error(t, err)
+
+	msg := err.Error()
+	assert.Contains(t, msg, "openai: "+string(providerFailureAuthentication))
+	assert.Contains(t, msg, "provider authentication/configuration error")
+
+	metadata := ProviderFailureMetadata(err)
+	require.NotEmpty(t, metadata)
+	assert.Contains(t, metadata["fallback_failure_classifications"], "openai="+string(providerFailureAuthentication))
+	assert.Equal(t, providerOpenAI, metadata["authentication_error_providers"])
+}
+
+func TestRegistry_CompleteWithFallbackClassifiesTransientErrors(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+	r.Register(&fakeProvider{
+		err:    errors.New("openai: HTTP 503: service unavailable"),
+		name:   providerOpenAI,
+		models: []string{"gpt-4.1-mini"},
+		resp:   &Response{},
+	})
+
+	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-4.1-mini",
+	}, nil)
+	require.Error(t, err)
+
+	msg := err.Error()
+	assert.Contains(t, msg, "openai: "+string(providerFailureTransient))
+	assert.Contains(t, msg, "transient provider error")
+	assert.NotContains(t, msg, string(providerFailureRateLimit))
+
+	metadata := ProviderFailureMetadata(err)
+	require.NotEmpty(t, metadata)
+	assert.Contains(t, metadata["fallback_failure_classifications"], "openai="+string(providerFailureTransient))
+	assert.NotContains(t, metadata, "rate_limited_providers")
+	assert.Equal(t, providerOpenAI, metadata["transient_error_providers"])
+}
+
+func TestRegistry_CompleteWithFallbackSurfacesSkippedRegionalReadiness(t *testing.T) {
+	t.Parallel()
+
+	regionalErr := wrapOpenAIRegionalHostnameError(errors.New(`openai: models HTTP 401: {"error":{"message":"Attempted to access resource with incorrect regional hostname. Please make your request to us.api.openai.com","type":"invalid_request_error"}}`))
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+	r.Register(&fakeProvider{
+		err:    errors.New(`claude code: HTTP 429: {"type":"error","error":{"type":"rate_limit_error","message":"Error"}}`),
+		name:   providerClaudeCode,
+		models: []string{"claude-opus-4-7"},
+		resp:   &Response{},
+	})
+
+	r.mu.Lock()
+	r.upsertReadinessProviderLocked(ProviderReadiness{
+		ModelFetchError:    regionalErr,
+		Name:               providerOpenAI,
+		Status:             ProviderStatusRegistered,
+		ModelCatalogSource: ModelCatalogSourceStatic,
+		Models:             []string{"gpt-4.1-mini"},
+		StaticModels:       []string{"gpt-4.1-mini"},
+		Registered:         true,
+		Configured:         true,
+		ModelsStale:        true,
+	})
+	r.upsertReadinessProviderLocked(ProviderReadiness{
+		Error:              errors.New("no alpha credentials found"),
+		Name:               alphaProvider,
+		Status:             ProviderStatusMissingCredential,
+		ModelCatalogSource: ModelCatalogSourceStatic,
+		Models:             []string{"a-1"},
+		StaticModels:       []string{"a-1"},
+	})
+	r.mu.Unlock()
+
+	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "claude-code/claude-opus-4-7",
+	}, nil)
+	require.Error(t, err)
+
+	msg := err.Error()
+	assert.Contains(t, msg, "claude-code: "+string(providerFailureRateLimit))
+	assert.Contains(t, msg, "openai=registered")
+	assert.Contains(t, msg, "classification="+string(providerFailureConfiguration))
+	assert.Contains(t, msg, "https://us.api.openai.com")
+	assert.NotContains(t, msg, "alpha=missing_credentials")
+	assert.NotContains(t, msg, "no alpha credentials")
+
+	metadata := ProviderFailureMetadata(err)
+	require.NotEmpty(t, metadata)
+	assert.Contains(t, metadata["fallback_failure_classifications"], "openai="+string(providerFailureConfiguration))
+	assert.Equal(t, providerOpenAI, metadata["configuration_error_providers"])
+	assert.Contains(t, metadata["provider_readiness"], "openai=registered")
+	assert.Contains(t, metadata["provider_readiness"], string(providerFailureConfiguration))
+	assert.NotContains(t, metadata["provider_readiness"], "alpha=missing_credentials")
+}
+
+func TestRegistry_CompleteWithFallbackSurfacesStaleReadinessClassification(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+	r.Register(&fakeProvider{
+		err:    errors.New("provider unavailable"),
+		name:   alphaProvider,
+		models: []string{"a-1"},
+		resp:   &Response{},
+	})
+
+	r.mu.Lock()
+	r.upsertReadinessProviderLocked(ProviderReadiness{
+		Name:               alphaProvider,
+		Status:             ProviderStatusRegistered,
+		ModelCatalogSource: ModelCatalogSourceStatic,
+		Models:             []string{"a-1"},
+		StaticModels:       []string{"a-1"},
+		Registered:         true,
+		ModelsStale:        true,
+	})
+	r.mu.Unlock()
+
+	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{
+		Model: "a-1",
+	}, nil)
+	require.Error(t, err)
+
+	msg := err.Error()
+	assert.Contains(t, msg, "provider readiness issues")
+	assert.Contains(t, msg, "stale=true")
+	assert.Contains(t, msg, "classification="+string(providerFailureNotReady))
+
+	metadata := ProviderFailureMetadata(err)
+	require.NotEmpty(t, metadata)
+	assert.Contains(t, metadata["provider_readiness"], "classification="+string(providerFailureNotReady))
+	assert.Equal(t, alphaProvider, metadata["provider_not_ready_providers"])
 }
 
 func TestRegistry_CompleteWithModelRoleRoutesByCapabilitiesAndBudget(t *testing.T) {
@@ -4076,8 +4899,19 @@ func TestRegistry_CompleteWithFallbackAllFail(t *testing.T) {
 
 	_, err := r.CompleteWithFallback(context.Background(), CompleteParams{Model: "a-1"}, []string{"missing"})
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "alpha: "+string(providerFailurePermanent))
+	assert.Contains(t, err.Error(), "unresolved: "+string(providerFailureRouteExhausted))
 	assert.Contains(t, err.Error(), "a-1 via alpha/a-1")
 	assert.Contains(t, err.Error(), "missing via missing unresolved")
+
+	metadata := ProviderFailureMetadata(err)
+	require.NotEmpty(t, metadata)
+	assert.Contains(t, metadata["fallback_failure_classifications"], "alpha="+string(providerFailurePermanent))
+	assert.Contains(t, metadata["fallback_failure_classifications"], "unresolved="+string(providerFailureRouteExhausted))
+	assert.Equal(t, alphaProvider, metadata["permanent_error_providers"])
+	assert.Equal(t, "unresolved", metadata["exhausted_fallback_route_providers"])
+	assert.Contains(t, metadata["provider_readiness"], "alpha=registered")
+	assert.Contains(t, metadata["provider_readiness"], "models=static")
 }
 
 func TestRegistry_CompleteFallsBackToDefault(t *testing.T) {
@@ -4479,6 +5313,27 @@ func TestProviderReadinessSummaryMarksStaleModelCatalog(t *testing.T) {
 
 	assert.Contains(t, summary, "models=static")
 	assert.Contains(t, summary, "stale=true")
+	assert.Contains(t, summary, "classification="+string(providerFailureNotReady))
+}
+
+func TestProviderReadinessSummaryClassifiesModelFetchRegionalHostname(t *testing.T) {
+	t.Parallel()
+
+	regionalErr := wrapOpenAIRegionalHostnameError(errors.New(`openai: models HTTP 401: {"error":{"message":"Attempted to access resource with incorrect regional hostname. Please make your request to us.api.openai.com"}}`))
+
+	summary := providerReadinessSummary(&ProviderReadiness{
+		ModelFetchError:    regionalErr,
+		Name:               providerOpenAI,
+		Status:             ProviderStatusRegistered,
+		ModelCatalogSource: ModelCatalogSourceStatic,
+		ModelsStale:        true,
+	})
+
+	assert.Contains(t, summary, "openai=registered")
+	assert.Contains(t, summary, "classification="+string(providerFailureConfiguration))
+	assert.Contains(t, summary, "OpenAI regional hostname mismatch")
+	assert.Contains(t, summary, "OPENAI_BASE_URL")
+	assert.Contains(t, summary, "https://us.api.openai.com")
 }
 
 func TestRegistry_ProviderModelCatalogClearsStaleFetchFailure(t *testing.T) {

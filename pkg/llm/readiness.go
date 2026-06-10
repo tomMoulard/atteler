@@ -2,7 +2,6 @@ package llm
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"sort"
@@ -818,11 +817,50 @@ func providerReadinessSummary(entry *ProviderReadiness) string {
 		parts = append(parts, "stale=true")
 	}
 
-	if entry.Error != nil {
-		parts = append(parts, "error="+shortError(entry.Error))
+	if classification, ok := providerReadinessClassification(*entry); ok {
+		parts = append(parts, "classification="+string(classification.Kind))
+		if err := providerReadinessError(*entry); err != nil {
+			parts = append(parts, "error="+classifiedProviderError(err))
+		}
 	}
 
 	return strings.Join(parts, " ")
+}
+
+func providerReadinessError(entry ProviderReadiness) error {
+	switch {
+	case entry.Error != nil:
+		return entry.Error
+	case entry.HealthError != nil:
+		return entry.HealthError
+	case entry.ModelFetchError != nil:
+		return entry.ModelFetchError
+	default:
+		return nil
+	}
+}
+
+func providerReadinessClassification(entry ProviderReadiness) (providerFailureClassification, bool) {
+	if err := providerReadinessError(entry); err != nil {
+		return classifyProviderFailure(err), true
+	}
+
+	switch {
+	case entry.Status == ProviderStatusMissingCredential:
+		return providerFailureClassification{
+			Kind:    providerFailureAuthentication,
+			Summary: "provider authentication/configuration error",
+		}, true
+	case entry.ModelsStale ||
+		entry.Status == ProviderStatusFailed ||
+		entry.Status == ProviderStatusFailedHealthCheck:
+		return providerFailureClassification{
+			Kind:    providerFailureNotReady,
+			Summary: "provider readiness is stale or unavailable",
+		}, true
+	default:
+		return providerFailureClassification{}, false
+	}
 }
 
 func defaultSelectionReadinessSummary(report DefaultSelectionReport) string {
@@ -894,28 +932,31 @@ func (r *Registry) resolutionErrorForModelLocked(err error, model string) error 
 	return fmt.Errorf("%w (%s)", err, readiness)
 }
 
-func (r *Registry) withReadinessContext(err error) error {
-	if err == nil || strings.Contains(err.Error(), "provider readiness:") {
-		return err
-	}
-
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	return r.resolutionErrorLocked(err)
-}
-
-func (r *Registry) modelResolutionLabel(model string) string {
+func (r *Registry) fallbackAttemptTarget(model string) fallbackAttemptTarget {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	diagnostic := r.explainModelResolutionLocked(model)
 	if diagnostic.Error != nil {
-		if strings.TrimSpace(model) == "" {
-			return "unresolved"
+		providerName := ""
+
+		if explicitProvider, _, ok := splitProviderModel(model); ok {
+			providerName = explicitProvider
 		}
 
-		return strings.TrimSpace(model) + " unresolved"
+		if strings.TrimSpace(model) == "" {
+			return fallbackAttemptTarget{
+				label:        "unresolved",
+				providerName: providerName,
+				resolved:     false,
+			}
+		}
+
+		return fallbackAttemptTarget{
+			label:        strings.TrimSpace(model) + " unresolved",
+			providerName: providerName,
+			resolved:     false,
+		}
 	}
 
 	label := diagnostic.ProviderName + "/" + diagnostic.ProviderModel
@@ -923,13 +964,10 @@ func (r *Registry) modelResolutionLabel(model string) string {
 		label += " (" + string(diagnostic.Provenance) + ")"
 	}
 
-	return label
-}
-
-func joinFallbackFailures(failures []error) error {
-	if len(failures) == 0 {
-		return errors.New("no fallback attempts were made")
+	return fallbackAttemptTarget{
+		label:         label,
+		providerName:  diagnostic.ProviderName,
+		providerModel: diagnostic.ProviderModel,
+		resolved:      true,
 	}
-
-	return errors.Join(failures...)
 }

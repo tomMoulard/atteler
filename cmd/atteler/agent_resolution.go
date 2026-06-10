@@ -420,6 +420,10 @@ func routeTelemetryRelevant(telemetry *modelroute.Telemetry, chain []string, now
 		if observation, ok := telemetry.Snapshot(candidate.ID()); ok && routeObservationRelevant(observation, now) {
 			return true
 		}
+
+		if _, ok := telemetry.ProviderRateLimitObservation(candidate.Provider, now); ok {
+			return true
+		}
 	}
 
 	return false

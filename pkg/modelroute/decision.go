@@ -123,29 +123,31 @@ type Decision struct {
 //
 //nolint:govet // Field order matches the external JSON artifact shape.
 type CandidateDecision struct {
-	Candidate           Candidate `json:"candidate,omitzero"`
-	ID                  string    `json:"id"`
-	Status              string    `json:"status"`
-	Rejected            []string  `json:"rejected,omitempty"`
-	EstimatedCost       float64   `json:"estimated_cost"`
-	ActualUsageRecorded bool      `json:"actual_usage_recorded,omitempty"`
-	ActualCost          float64   `json:"actual_cost,omitempty"`
-	ActualCostDelta     float64   `json:"actual_cost_delta,omitempty"`
-	ActualInputTokens   int       `json:"actual_input_tokens,omitempty"`
-	ActualCachedTokens  int       `json:"actual_cached_input_tokens,omitempty"`
-	ActualCacheWrites   int       `json:"actual_cache_write_tokens,omitempty"`
-	ActualOutputTokens  int       `json:"actual_output_tokens,omitempty"`
-	ExpectedLatencyMS   int       `json:"expected_latency_ms,omitempty"`
-	ExpectedTTFTMS      int       `json:"expected_ttft_ms,omitempty"`
-	ObservedLatencyMS   int       `json:"observed_latency_ms,omitempty"`
-	ObservedTTFTMS      int       `json:"observed_ttft_ms,omitempty"`
-	TelemetryCount      int       `json:"telemetry_count,omitempty"`
-	FailureCount        int       `json:"failure_count,omitempty"`
-	RateLimitCount      int       `json:"rate_limit_count,omitempty"`
-	LastRetryAfterMS    int       `json:"last_retry_after_ms,omitempty"`
-	RateLimitUntil      string    `json:"rate_limit_until,omitempty"`
-	LastError           string    `json:"last_error,omitempty"`
-	Rank                int       `json:"rank,omitempty"`
+	Candidate                 Candidate `json:"candidate,omitzero"`
+	ID                        string    `json:"id"`
+	Status                    string    `json:"status"`
+	Rejected                  []string  `json:"rejected,omitempty"`
+	EstimatedCost             float64   `json:"estimated_cost"`
+	ActualUsageRecorded       bool      `json:"actual_usage_recorded,omitempty"`
+	ActualCost                float64   `json:"actual_cost,omitempty"`
+	ActualCostDelta           float64   `json:"actual_cost_delta,omitempty"`
+	ActualInputTokens         int       `json:"actual_input_tokens,omitempty"`
+	ActualCachedTokens        int       `json:"actual_cached_input_tokens,omitempty"`
+	ActualCacheWrites         int       `json:"actual_cache_write_tokens,omitempty"`
+	ActualOutputTokens        int       `json:"actual_output_tokens,omitempty"`
+	ExpectedLatencyMS         int       `json:"expected_latency_ms,omitempty"`
+	ExpectedTTFTMS            int       `json:"expected_ttft_ms,omitempty"`
+	ObservedLatencyMS         int       `json:"observed_latency_ms,omitempty"`
+	ObservedTTFTMS            int       `json:"observed_ttft_ms,omitempty"`
+	TelemetryCount            int       `json:"telemetry_count,omitempty"`
+	FailureCount              int       `json:"failure_count,omitempty"`
+	RateLimitCount            int       `json:"rate_limit_count,omitempty"`
+	LastRetryAfterMS          int       `json:"last_retry_after_ms,omitempty"`
+	RateLimitUntil            string    `json:"rate_limit_until,omitempty"`
+	LastError                 string    `json:"last_error,omitempty"`
+	LastFailureKind           string    `json:"last_failure_kind,omitempty"`
+	LastFailureRateLimitScope string    `json:"last_failure_rate_limit_scope,omitempty"`
+	Rank                      int       `json:"rank,omitempty"`
 }
 
 // Availability records runtime provider/model evidence used to reject candidates
@@ -246,6 +248,7 @@ type evaluatedCandidate struct {
 
 func evaluateCandidate(candidate Candidate, profile RequestProfile, policy Policy, telemetry *Telemetry, now time.Time) evaluatedCandidate {
 	obs, observed := telemetry.Snapshot(candidate.ID())
+	providerRateLimitObs, providerRateLimited := telemetry.ProviderRateLimitObservation(candidate.Provider, now)
 	cd := CandidateDecision{
 		Candidate:         candidate,
 		ID:                candidate.ID(),
@@ -266,9 +269,13 @@ func evaluateCandidate(candidate Candidate, profile RequestProfile, policy Polic
 	}
 
 	cd.Rejected = rejectionReasons(candidate, profile, policy)
-	if observed && obs.RateLimitActive(now) {
-		cd.RateLimitUntil = obs.RateLimitUntil().Format(time.RFC3339)
-		cd.Rejected = append(cd.Rejected, rateLimitReason(obs))
+
+	if rateLimitObs, rateLimited := activeRateLimitObservation(obs, observed, providerRateLimitObs, providerRateLimited, now); rateLimited {
+		observed = true
+
+		applyFailureObservation(&cd, rateLimitObs)
+		cd.RateLimitUntil = rateLimitObs.RateLimitUntil().Format(time.RFC3339)
+		cd.Rejected = append(cd.Rejected, rateLimitReason(rateLimitObs))
 	}
 
 	return evaluatedCandidate{
@@ -278,6 +285,34 @@ func evaluateCandidate(candidate Candidate, profile RequestProfile, policy Polic
 		latencyEvidence: latencyEvidence,
 		ttftEvidence:    ttftEvidence,
 	}
+}
+
+func activeRateLimitObservation(
+	modelObs Observation,
+	modelObserved bool,
+	providerObs Observation,
+	providerObserved bool,
+	now time.Time,
+) (Observation, bool) {
+	var selected Observation
+	if modelObserved && modelObs.RateLimitActive(now) {
+		selected = modelObs
+	}
+
+	if providerObserved && providerObs.RateLimitActive(now) && selected.RateLimitUntil().Before(providerObs.RateLimitUntil()) {
+		selected = providerObs
+	}
+
+	return selected, !selected.RateLimitUntil().IsZero()
+}
+
+func applyFailureObservation(candidate *CandidateDecision, obs Observation) {
+	candidate.FailureCount = obs.FailureCount
+	candidate.RateLimitCount = obs.RateLimitCount
+	candidate.LastRetryAfterMS = obs.LastRetryAfterMS
+	candidate.LastError = obs.LastError
+	candidate.LastFailureKind = obs.LastFailureKind
+	candidate.LastFailureRateLimitScope = obs.LastFailureRateLimitScope
 }
 
 func applyObservation(candidate *CandidateDecision, obs Observation) {
@@ -294,10 +329,7 @@ func applyObservation(candidate *CandidateDecision, obs Observation) {
 	candidate.ObservedLatencyMS = obs.AvgLatencyMS
 	candidate.ObservedTTFTMS = obs.AvgTTFTMS
 	candidate.TelemetryCount = obs.Count
-	candidate.FailureCount = obs.FailureCount
-	candidate.RateLimitCount = obs.RateLimitCount
-	candidate.LastRetryAfterMS = obs.LastRetryAfterMS
-	candidate.LastError = obs.LastError
+	applyFailureObservation(candidate, obs)
 
 	if rateLimitUntil := obs.RateLimitUntil(); !rateLimitUntil.IsZero() {
 		candidate.RateLimitUntil = rateLimitUntil.Format(time.RFC3339)
@@ -482,6 +514,7 @@ func DecisionWithTelemetry(decision Decision, telemetry *Telemetry) Decision {
 		return decision
 	}
 
+	now := time.Now().UTC()
 	observedAny := false
 	latencyEvidence := false
 	ttftEvidence := false
@@ -490,15 +523,22 @@ func DecisionWithTelemetry(decision Decision, telemetry *Telemetry) Decision {
 		candidate := &decision.Candidates[i]
 
 		obs, ok := telemetry.Snapshot(candidate.ID)
-		if !ok {
-			continue
+		providerObs, providerOK := telemetry.ProviderRateLimitObservation(candidate.Candidate.Provider, now)
+
+		if ok {
+			observedAny = true
+			latencyEvidence = latencyEvidence || obs.AvgLatencyMS > 0
+			ttftEvidence = ttftEvidence || obs.AvgTTFTMS > 0
+
+			applyObservation(candidate, obs)
 		}
 
-		observedAny = true
-		latencyEvidence = latencyEvidence || obs.AvgLatencyMS > 0
-		ttftEvidence = ttftEvidence || obs.AvgTTFTMS > 0
+		if rateLimitObs, rateLimited := activeRateLimitObservation(obs, ok, providerObs, providerOK, now); rateLimited {
+			observedAny = true
 
-		applyObservation(candidate, obs)
+			applyFailureObservation(candidate, rateLimitObs)
+			candidate.RateLimitUntil = rateLimitObs.RateLimitUntil().Format(time.RFC3339)
+		}
 	}
 
 	decision.Constraints = appendEvidenceConstraints(decision.Constraints, decision.Profile, observedAny, latencyEvidence, ttftEvidence)
