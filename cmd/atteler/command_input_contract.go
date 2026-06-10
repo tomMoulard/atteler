@@ -228,6 +228,17 @@ type initRTKPluginCommandInput struct {
 	Dir string
 }
 
+type issueImplementCommandInput struct {
+	IssueRef        string
+	WorkflowPath    string
+	BaseBranch      string
+	OpenPR          bool
+	RunTests        bool
+	RunLint         bool
+	UpdateDocs      bool
+	UpdateChangelog bool
+}
+
 type headlessCommandInput struct {
 	StatusID string
 	CancelID string
@@ -483,6 +494,7 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"headlessCommandInput":                func(opts cliOptions) any { return headlessCommandInputFromOptions(opts) },
 		"initConfigCommandInput":              func(opts cliOptions) any { return initConfigCommandInputFromOptions(opts) },
 		"initRTKPluginCommandInput":           func(opts cliOptions) any { return initRTKPluginCommandInputFromOptions(opts) },
+		"issueImplementCommandInput":          func(opts cliOptions) any { return issueImplementCommandInputFromOptions(opts) },
 		"listAgentsCommandInput":              func(opts cliOptions) any { return listAgentsCommandInputFromOptions(opts) },
 		"listConfigPathsCommandInput":         func(opts cliOptions) any { return listConfigPathsCommandInputFromOptions(opts) },
 		"listHookEventsCommandInput":          func(opts cliOptions) any { return listHookEventsCommandInputFromOptions(opts) },
@@ -784,6 +796,19 @@ func initConfigCommandInputFromOptions(opts cliOptions) initConfigCommandInput {
 
 func initRTKPluginCommandInputFromOptions(opts cliOptions) initRTKPluginCommandInput {
 	return initRTKPluginCommandInput{Dir: opts.initRTKPluginDir}
+}
+
+func issueImplementCommandInputFromOptions(opts cliOptions) issueImplementCommandInput {
+	return issueImplementCommandInput{
+		IssueRef:        opts.issueImplementRef,
+		WorkflowPath:    opts.issueWorkflowPath,
+		BaseBranch:      opts.issueBaseBranch,
+		OpenPR:          opts.issueOpenPR,
+		RunTests:        opts.issueRunTests,
+		RunLint:         opts.issueRunLint,
+		UpdateDocs:      opts.issueUpdateDocs,
+		UpdateChangelog: opts.issueUpdateChangelog,
+	}
 }
 
 func listAgentsCommandInputFromOptions(_ cliOptions) listAgentsCommandInput {

@@ -1,4 +1,4 @@
-//nolint:gocritic,govet,wsl_v5,modernize,misspell // Tracker adapters mirror third-party payloads and state names.
+//nolint:gocritic,govet,wsl_v5,misspell // Tracker adapters mirror third-party payloads and state names.
 package symphony
 
 import (
@@ -201,6 +201,27 @@ query SymphonyIssueStates($ids: [ID!]!) {
   }
 }`
 
+const githubConvertPullRequestToDraftMutation = `
+mutation SymphonyConvertPullRequestToDraft($pullRequestId: ID!) {
+  convertPullRequestToDraft(input: { pullRequestId: $pullRequestId }) {
+    pullRequest { id isDraft }
+  }
+}`
+
+const githubMarkPullRequestReadyForReviewMutation = `
+mutation SymphonyMarkPullRequestReadyForReview($pullRequestId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
+    pullRequest { id isDraft }
+  }
+}`
+
+const (
+	// GitHub rejects made-up REST API version headers with HTTP 400, so keep
+	// this pinned to a documented supported version.
+	githubAPIVersion  = "2022-11-28"
+	githubGraphQLPath = "/graphql"
+)
+
 type linearIssuesResponse struct {
 	Data struct {
 		Issues struct {
@@ -328,18 +349,23 @@ func (c *GitHubClient) FetchIssueStatesByIDs(ctx context.Context, ids []string) 
 
 	want := make(map[string]struct{}, len(ids))
 	numbers := make([]int, 0, len(ids))
+	seenNumbers := make(map[int]struct{}, len(ids))
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue
 		}
 
-		want[id] = struct{}{}
-		if strings.HasPrefix(id, "GH-") {
-			if number, err := strconv.Atoi(strings.TrimPrefix(id, "GH-")); err == nil {
+		if number, ok := githubIssueNumberReference(id); ok {
+			if _, seen := seenNumbers[number]; !seen {
 				numbers = append(numbers, number)
+				seenNumbers[number] = struct{}{}
 			}
+
+			continue
 		}
+
+		want[id] = struct{}{}
 	}
 
 	var issues []Issue
@@ -367,6 +393,42 @@ func (c *GitHubClient) FetchIssueStatesByIDs(ctx context.Context, ids []string) 
 	}
 
 	return issues, nil
+}
+
+func githubIssueNumberReference(ref string) (int, bool) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return 0, false
+	}
+
+	if parsedURL, err := url.Parse(ref); err == nil && parsedURL.Scheme != "" && parsedURL.Host != "" {
+		parts := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
+		for i := 0; i+1 < len(parts); i++ {
+			if !strings.EqualFold(parts[i], "issues") {
+				continue
+			}
+
+			parsed, err := strconv.Atoi(parts[i+1])
+			if err == nil && parsed > 0 {
+				return parsed, true
+			}
+		}
+
+		return 0, false
+	}
+
+	if number, ok := strings.CutPrefix(ref, "#"); ok {
+		ref = number
+	} else if number, ok := strings.CutPrefix(strings.ToUpper(ref), "GH-"); ok {
+		ref = number
+	}
+
+	parsed, err := strconv.Atoi(ref)
+	if err != nil || parsed <= 0 {
+		return 0, false
+	}
+
+	return parsed, true
 }
 
 func (c *GitHubClient) fetchByStates(ctx context.Context, states []string) ([]Issue, error) {
@@ -436,6 +498,9 @@ func (c *GitHubClient) fetchOne(ctx context.Context, number int) (Issue, error) 
 	if err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/issues/%d", url.PathEscape(c.cfg.Owner), url.PathEscape(c.cfg.Repo), number), &payload); err != nil {
 		return Issue{}, err
 	}
+	if payload.PullRequest != nil {
+		return Issue{}, fmt.Errorf("github issue %d is a pull request, not an issue", number)
+	}
 
 	return c.normalizeGitHubIssueWithComments(ctx, payload)
 }
@@ -498,6 +563,102 @@ func (c *GitHubClient) patch(ctx context.Context, path string, in any, out any) 
 	return c.do(ctx, http.MethodPatch, path, in, out)
 }
 
+func (c *GitHubClient) graphql(ctx context.Context, query string, variables map[string]any, out any) error {
+	if err := requireTrackerContext(ctx); err != nil {
+		return err
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"query":     query,
+		"variables": variables,
+	})
+	if err != nil {
+		return fmt.Errorf("github_graphql_request: marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, githubGraphQLEndpoint(c.cfg.Endpoint), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("github_graphql_request: build request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("github_graphql_request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
+	if err != nil {
+		return fmt.Errorf("github_graphql_request: read response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &githubAPIStatusError{
+			StatusCode: resp.StatusCode,
+			Body:       strings.TrimSpace(string(data)),
+		}
+	}
+
+	var envelope struct {
+		Errors []map[string]any `json:"errors"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return fmt.Errorf("github_graphql_unknown_payload: %w", err)
+	}
+
+	if len(envelope.Errors) > 0 {
+		return fmt.Errorf("github_graphql_errors: %s", strings.TrimSpace(string(data)))
+	}
+
+	if out == nil || len(data) == 0 {
+		return nil
+	}
+
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("github_graphql_unknown_payload: %w", err)
+	}
+
+	return nil
+}
+
+func githubGraphQLEndpoint(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		endpoint = defaultGitHubEndpoint
+	}
+
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimRight(endpoint, "/") + "/graphql"
+	}
+
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+
+	path := strings.TrimRight(parsed.Path, "/")
+	switch {
+	case path == githubGraphQLPath ||
+		strings.HasSuffix(path, "/api/graphql") ||
+		strings.HasSuffix(path, githubGraphQLPath):
+		parsed.Path = path
+	case parsed.Host == "api.github.com" && path == "":
+		parsed.Path = githubGraphQLPath
+	case strings.HasSuffix(path, "/api/v3"):
+		parsed.Path = strings.TrimSuffix(path, "/api/v3") + "/api/graphql"
+	case path == "":
+		parsed.Path = githubGraphQLPath
+	default:
+		parsed.Path = path + githubGraphQLPath
+	}
+
+	return parsed.String()
+}
+
 func (c *GitHubClient) delete(ctx context.Context, path string, out any) error {
 	return c.do(ctx, http.MethodDelete, path, nil, out)
 }
@@ -525,7 +686,7 @@ func (c *GitHubClient) do(ctx context.Context, method, path string, in any, out 
 
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
-	req.Header.Set("X-GitHub-Api-Version", "2026-03-10")
+	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -666,6 +827,89 @@ func (c *GitHubClient) CreatePullRequest(ctx context.Context, branch, base, titl
 	}
 
 	return payload, nil
+}
+
+// UpdatePullRequest refreshes the title/body report for an existing PR.
+func (c *GitHubClient) UpdatePullRequest(ctx context.Context, number int, title, body string) (GitHubPullRequest, error) {
+	if number <= 0 {
+		return GitHubPullRequest{}, errors.New("github pull request number is required")
+	}
+
+	var payload GitHubPullRequest
+	err := c.patch(ctx, fmt.Sprintf(
+		"/repos/%s/%s/pulls/%d",
+		url.PathEscape(c.cfg.Owner),
+		url.PathEscape(c.cfg.Repo),
+		number,
+	), map[string]any{
+		"title": title,
+		"body":  body,
+	}, &payload)
+	if err != nil {
+		return GitHubPullRequest{}, err
+	}
+
+	return payload, nil
+}
+
+// ConvertPullRequestToDraft marks an existing PR as draft. GitHub exposes this
+// transition through GraphQL, so callers need the REST node_id from the pull
+// request payload.
+func (c *GitHubClient) ConvertPullRequestToDraft(ctx context.Context, nodeID string) error {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return errors.New("github pull request node_id is required")
+	}
+
+	var response struct {
+		Data struct {
+			ConvertPullRequestToDraft struct {
+				PullRequest struct {
+					ID      string `json:"id"`
+					IsDraft bool   `json:"isDraft"`
+				} `json:"pullRequest"`
+			} `json:"convertPullRequestToDraft"`
+		} `json:"data"`
+	}
+
+	if err := c.graphql(ctx, githubConvertPullRequestToDraftMutation, map[string]any{"pullRequestId": nodeID}, &response); err != nil {
+		return err
+	}
+	if !response.Data.ConvertPullRequestToDraft.PullRequest.IsDraft {
+		return errors.New("github pull request was not converted to draft")
+	}
+
+	return nil
+}
+
+// MarkPullRequestReadyForReview marks an existing draft PR ready for review.
+// GitHub exposes this transition through GraphQL, so callers need the REST
+// node_id from the pull request payload.
+func (c *GitHubClient) MarkPullRequestReadyForReview(ctx context.Context, nodeID string) error {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return errors.New("github pull request node_id is required")
+	}
+
+	var response struct {
+		Data struct {
+			MarkPullRequestReadyForReview struct {
+				PullRequest struct {
+					ID      string `json:"id"`
+					IsDraft bool   `json:"isDraft"`
+				} `json:"pullRequest"`
+			} `json:"markPullRequestReadyForReview"`
+		} `json:"data"`
+	}
+
+	if err := c.graphql(ctx, githubMarkPullRequestReadyForReviewMutation, map[string]any{"pullRequestId": nodeID}, &response); err != nil {
+		return err
+	}
+	if response.Data.MarkPullRequestReadyForReview.PullRequest.IsDraft {
+		return errors.New("github pull request was not marked ready for review")
+	}
+
+	return nil
 }
 
 // RemoveIssueLabel removes a label from an issue. Missing labels are already
@@ -1467,9 +1711,39 @@ type GitHubPullRequest struct {
 	Head           githubPullRequestHead `json:"head"`
 	HTMLURL        string                `json:"html_url"`
 	MergeableState string                `json:"mergeable_state,omitempty"`
+	NodeID         string                `json:"node_id,omitempty"`
 	State          string                `json:"state"`
 	Title          string                `json:"title,omitempty"`
 	Number         int                   `json:"number"`
+	Draft          bool                  `json:"draft,omitempty"`
+	DraftKnown     bool                  `json:"-"`
+}
+
+// UnmarshalJSON records whether GitHub included the draft field so merge logic
+// can distinguish an explicit false value from an omitted field.
+func (pr *GitHubPullRequest) UnmarshalJSON(data []byte) error {
+	type alias GitHubPullRequest
+
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return fmt.Errorf("github pull request: %w", err)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("github pull request fields: %w", err)
+	}
+
+	*pr = GitHubPullRequest(decoded)
+	pr.DraftKnown = false
+	if rawDraft, ok := fields["draft"]; ok {
+		pr.DraftKnown = true
+		if err := json.Unmarshal(rawDraft, &pr.Draft); err != nil {
+			return fmt.Errorf("github pull request draft: %w", err)
+		}
+	}
+
+	return nil
 }
 
 type githubPullRequestHead struct {

@@ -13,6 +13,14 @@ publish:
   base_branch: main
   branch_prefix: symphony
   draft: false
+  draft_on_failed_validation: true
+  verification_gates:
+    - name: go_test
+      command: go test ./...
+      required: true
+      timeout_ms: 600000
+  verification_allow_commands: [go]
+  verification_output_max_bytes: 32768
   remove_labels: [symphony]
   monitor_checks: true
   required_checks: []
@@ -29,10 +37,14 @@ debug:
 hooks:
   before_run: |
     repo_root="$(cd ../../.. && pwd)"
+    base_branch="${SYMPHONY_BASE_BRANCH:-main}"
     if [ ! -d .git ]; then
       git clone --shared "$repo_root" .
     fi
-    git checkout -B "symphony/${SYMPHONY_WORKSPACE_KEY}"
+    git fetch origin "$base_branch"
+    git checkout --detach FETCH_HEAD
+    git branch -f "$base_branch" FETCH_HEAD
+    git checkout -B "symphony/${SYMPHONY_WORKSPACE_KEY}" "$base_branch"
 polling:
   interval_ms: 30000
 agent:

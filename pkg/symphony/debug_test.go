@@ -88,3 +88,40 @@ func TestDebugServerStatusAndEvents(t *testing.T) {
 	require.Len(t, events.RecentEvents, 1)
 	assert.Equal(t, "issue_dispatched", events.RecentEvents[0].Kind)
 }
+
+func TestDebugConfigSnapshotIncludesPublishVerificationControls(t *testing.T) {
+	t.Parallel()
+
+	got := debugConfigSnapshot(Config{
+		Publish: PublishConfig{
+			Enabled:                 true,
+			BaseBranch:              "main",
+			BranchPrefix:            "symphony",
+			Draft:                   true,
+			DraftOnFailedValidation: false,
+			VerificationGates: []VerificationGateConfig{{
+				Name:     "gate_token=secret-value",
+				Command:  "printf api_key=super-secret",
+				Timeout:  2 * time.Second,
+				Required: true,
+			}},
+			VerificationAllowCommands:  []string{"printf"},
+			VerificationDenyCommands:   []string{"curl"},
+			VerificationOutputMaxBytes: 128,
+		},
+	})
+
+	assert.True(t, got.PublishEnabled)
+	assert.True(t, got.PublishDraft)
+	assert.False(t, got.PublishDraftOnFailedValidation)
+	assert.Equal(t, int64(128), got.PublishVerificationOutputMaxBytes)
+	assert.Equal(t, []string{"printf"}, got.PublishVerificationAllowCommands)
+	assert.Equal(t, []string{"curl"}, got.PublishVerificationDenyCommands)
+	require.Len(t, got.PublishVerificationGates, 1)
+	assert.True(t, got.PublishVerificationGates[0].Required)
+	assert.Equal(t, int64(2000), got.PublishVerificationGates[0].TimeoutMS)
+	assert.Contains(t, got.PublishVerificationGates[0].Name, "[REDACTED]")
+	assert.Contains(t, got.PublishVerificationGates[0].Command, "[REDACTED]")
+	assert.NotContains(t, got.PublishVerificationGates[0].Name, "secret-value")
+	assert.NotContains(t, got.PublishVerificationGates[0].Command, "super-secret")
+}

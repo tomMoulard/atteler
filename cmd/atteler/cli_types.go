@@ -186,6 +186,10 @@ type cliOptions struct {
 	initConfigPath                     string
 	explainConfigPath                  string
 	configPaths                        string
+	issueImplementRef                  string
+	issueWorkflowPath                  string
+	issueBaseBranch                    string
+	issueImplementRequested            bool
 	contextPackPath                    string
 	model                              string
 	explainModelResolution             string
@@ -519,6 +523,11 @@ type cliOptions struct {
 	configMigrate                      bool
 	configReport                       bool
 	validateConfig                     bool
+	issueOpenPR                        bool
+	issueRunTests                      bool
+	issueRunLint                       bool
+	issueUpdateDocs                    bool
+	issueUpdateChangelog               bool
 	explainConfig                      bool
 	memoryCompact                      bool
 	memoryIncludeSessionMessages       bool

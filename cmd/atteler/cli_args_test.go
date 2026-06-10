@@ -127,6 +127,36 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			args: []string{"chat", "once", "--stdin"},
 			want: []string{"--stdin"},
 		},
+		{
+			name: "issue implement command",
+			args: []string{"issue", "implement", "GH-218", "--open-pr", "--base", "main", "--run-tests", "--run-lint"},
+			want: []string{"--issue-implement", "GH-218", "--open-pr", "--base", "main", "--run-tests", "--run-lint"},
+		},
+		{
+			name: "issue implement alias",
+			args: []string{"issues", "implement", "#218", "--open-pr"},
+			want: []string{"--issue-implement", "#218", "--open-pr"},
+		},
+		{
+			name: "issue implement url reference",
+			args: []string{"issue", "implement", "https://github.com/owner/repo/issues/218", "--open-pr"},
+			want: []string{"--issue-implement", "https://github.com/owner/repo/issues/218", "--open-pr"},
+		},
+		{
+			name: "issue implement keeps flags before issue reference",
+			args: []string{"issue", "implement", "--open-pr", "--base", "main", "GH-218"},
+			want: []string{"--issue-implement", "GH-218", "--open-pr", "--base", "main"},
+		},
+		{
+			name: "issue implement keeps domain scoped flags before command",
+			args: []string{"issue", "--open-pr", "--base", "main", "implement", "GH-218"},
+			want: []string{"--open-pr", "--base", "main", "--issue-implement", "GH-218"},
+		},
+		{
+			name: "issue implement docs changelog and workflow flags",
+			args: []string{"issue", "implement", "GH-218", "--issue-workflow", "custom/WORKFLOW.md", "--update-docs", "--update-changelog"},
+			want: []string{"--issue-implement", "GH-218", "--issue-workflow", "custom/WORKFLOW.md", "--update-docs", "--update-changelog"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1192,6 +1222,11 @@ func TestTranslateCLIArgs_RequiredCommandArgsDoNotConsumeTrailingFlags(t *testin
 			want: "code-intel symbol requires <name>",
 		},
 		{
+			name: "issue implement with only flags",
+			args: []string{"issue", "implement", "--open-pr"},
+			want: "issue implement requires <issue-ref>",
+		},
+		{
 			name: "opaque shell command with no command",
 			args: []string{"agents", "bash"},
 			want: "agents bash requires <command>",
@@ -1229,6 +1264,8 @@ func TestTranslateCLIArgs_RequiredCommandArgsDoNotConsumeTrailingFlags(t *testin
 			fs.String("export-format", "markdown", "")
 			fs.String("code-symbol", "", "")
 			fs.Bool("json", false, "")
+			fs.String("issue-implement", "", "")
+			fs.Bool("open-pr", false, "")
 			fs.String("bash", "", "")
 			fs.String("eval-output", "", "")
 

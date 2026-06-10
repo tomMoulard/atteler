@@ -3,7 +3,7 @@
 Atteler is a Go CLI for running LLM-assisted development workflows from a local
 repository. It combines chat, provider routing, local context references,
 session history, review/watch scans, agent planning, worktree isolation, and the
-standalone Symphony issue scheduler.
+Symphony issue scheduler with verified one-shot issue-to-PR publishing.
 
 The README is the stable user-facing guide. Active and aspirational work belongs
 in [GitHub Issues](https://github.com/tomMoulard/atteler/issues) or linked
@@ -16,7 +16,7 @@ project items, not in checked-off markdown roadmaps.
 | `README.md` | Product overview, quickstart, stable commands, and evidence-backed feature map. |
 | [GitHub Issues](https://github.com/tomMoulard/atteler/issues) / linked project items | Active roadmap, future work, owners, and prioritization. |
 | `NOTES.md` | Historical documentation notes only; it is not a feature list or roadmap. |
-| [`docs/symphony.md`](docs/symphony.md) | Detailed Symphony scheduler configuration and runtime behavior. |
+| [`docs/symphony.md`](docs/symphony.md) | Detailed Symphony scheduler and one-shot issue-to-PR configuration/runtime behavior. |
 
 `TODO.md` is intentionally not kept as a local task ledger. Use GitHub Issues or
 linked project items for live work so each item has an owner, discussion, and
@@ -75,6 +75,7 @@ from the same descriptors that route the commands.
 | `config` | `atteler config paths`, `atteler config validate`, `atteler config migrate`, `atteler config report` |
 | `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models`, `atteler providers resolve gpt-5.5`, `atteler providers ollama-status`, `atteler providers ollama-stop` |
 | `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
+| `issue` | `atteler issue implement GH-218 --open-pr`, `atteler issue implement https://github.com/owner/repo/issues/218 --open-pr`, `atteler issue implement GH-218 --open-pr --base main --run-tests --run-lint` |
 | `memory` / `retrieval` | `atteler memory search "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm" --retrieval-source vector`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"`, `atteler memory vector-index docs/research.md` |
 | `code-intel` | `atteler code-intel summary`, `atteler code-intel summary --json`, `atteler code-intel query definitions:Run`, `atteler code-intel symbol NewRegistry`, `atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/` |
 | `incident` | `atteler incident diagnose --sentry ISSUE-912`, `atteler incident diagnose --incident-file redacted-sentry-event.json`, `atteler incident diagnose --sentry ISSUE-912 --incident-apply-fix --incident-validation-command "go test ./pkg/auth"` |
@@ -1686,8 +1687,8 @@ contract.
 
 ## Symphony
 
-Symphony is a standalone service command, not part of the main interactive
-`atteler` CLI surface:
+Symphony can run as a standalone scheduler service for repository-owned issue
+queues:
 
 ```sh
 go run ./cmd/symphony --validate
@@ -1698,9 +1699,21 @@ make build-symphony
 
 It loads a repository-owned `WORKFLOW.md`, polls Linear or GitHub Issues,
 creates per-issue workspaces, and runs Codex app-server turns with bounded
-concurrency and retry/reconciliation logic. See
-[`docs/symphony.md`](docs/symphony.md) for tracker configuration, publishing,
-debug endpoints, hooks, and sandbox posture.
+concurrency and retry/reconciliation logic.
+
+The main CLI also exposes a providerless one-shot issue-to-PR path for the same
+workflow configuration:
+
+```sh
+atteler issue implement GH-218 --open-pr --run-tests --run-lint
+```
+
+The one-shot command accepts GitHub-style references such as `GH-218`, `#218`,
+`218`, or the issue URL, fetches the issue, drives the worker once, runs
+configured verification gates before publication, and writes a PR report with
+validation results, risk notes, reviewer guidance, and a link back to the source
+issue. See [`docs/symphony.md`](docs/symphony.md) for tracker configuration,
+publishing, debug endpoints, hooks, and sandbox posture.
 
 ## Go package context migration notes
 
@@ -1780,7 +1793,7 @@ linked from the row.
 | Background repository scanning, baseline/gate comparisons, suppressions, issue upserts, and review-scan formatting | [`pkg/watch/watch.go`](pkg/watch/watch.go), [`pkg/watch/baseline.go`](pkg/watch/baseline.go), [`pkg/watch/issues.go`](pkg/watch/issues.go), [`pkg/watch/watch_test.go`](pkg/watch/watch_test.go), [`pkg/symphony/tracker.go`](pkg/symphony/tracker.go), [`cmd/atteler/cli_speculate_watch_history_commands.go`](cmd/atteler/cli_speculate_watch_history_commands.go), [`cmd/atteler/cli_review_async_task_commands.go`](cmd/atteler/cli_review_async_task_commands.go) |
 | Event hook privacy, metadata, and local hook execution | [`pkg/events/events.go`](pkg/events/events.go), [`pkg/events/events_test.go`](pkg/events/events_test.go), [`pkg/events/privacy.go`](pkg/events/privacy.go), [`pkg/events/privacy_test.go`](pkg/events/privacy_test.go), [`pkg/events/logger.go`](pkg/events/logger.go), [`pkg/events/discoverability_test.go`](pkg/events/discoverability_test.go) |
 | Automatic worktree isolation | [`pkg/worktree/worktree.go`](pkg/worktree/worktree.go), [`pkg/worktree/worktree_test.go`](pkg/worktree/worktree_test.go), [`cmd/atteler/cli_worktree_commands.go`](cmd/atteler/cli_worktree_commands.go) |
-| Symphony issue scheduler | [`cmd/symphony/main.go`](cmd/symphony/main.go), [`pkg/symphony/workflow.go`](pkg/symphony/workflow.go), [`pkg/symphony/workflow_test.go`](pkg/symphony/workflow_test.go), [`pkg/symphony/orchestrator.go`](pkg/symphony/orchestrator.go), [`pkg/symphony/orchestrator_test.go`](pkg/symphony/orchestrator_test.go), [`docs/symphony.md`](docs/symphony.md), [`WORKFLOW.md`](WORKFLOW.md) |
+| Symphony issue scheduler and autonomous verified issue-to-PR publishing | [`cmd/symphony/main.go`](cmd/symphony/main.go), [`cmd/atteler/cli_issue_commands.go`](cmd/atteler/cli_issue_commands.go), [`cmd/atteler/cli_issue_commands_test.go`](cmd/atteler/cli_issue_commands_test.go), [`pkg/symphony/issue_implement.go`](pkg/symphony/issue_implement.go), [`pkg/symphony/issue_implement_test.go`](pkg/symphony/issue_implement_test.go), [`pkg/symphony/verification.go`](pkg/symphony/verification.go), [`pkg/symphony/verification_test.go`](pkg/symphony/verification_test.go), [`pkg/symphony/publisher.go`](pkg/symphony/publisher.go), [`pkg/symphony/publisher_test.go`](pkg/symphony/publisher_test.go), [`pkg/symphony/workflow.go`](pkg/symphony/workflow.go), [`pkg/symphony/workflow_test.go`](pkg/symphony/workflow_test.go), [`pkg/symphony/debug.go`](pkg/symphony/debug.go), [`pkg/symphony/debug_test.go`](pkg/symphony/debug_test.go), [`pkg/symphony/orchestrator.go`](pkg/symphony/orchestrator.go), [`pkg/symphony/orchestrator_test.go`](pkg/symphony/orchestrator_test.go), [`docs/symphony.md`](docs/symphony.md), [`WORKFLOW.md`](WORKFLOW.md) |
 | Build, CI, and release packaging | [`Makefile`](Makefile), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/release.yml`](.github/workflows/release.yml), [`.goreleaser.yaml`](.goreleaser.yaml) |
 
 ## Explicit non-claims

@@ -82,7 +82,180 @@ func TestResolveConfig_PublishDefaultsRemoveTrackerLabels(t *testing.T) {
 	assert.Equal(t, "Atteler Symphony", cfg.Publish.GitUserName)
 	assert.Equal(t, "symphony@users.noreply.github.com", cfg.Publish.GitUserEmail)
 	assert.Equal(t, PullRequestNoChecksPass, cfg.Publish.NoChecksPolicy)
+	assert.True(t, cfg.Publish.DraftOnFailedValidation)
+	assert.Equal(t, int64(defaultPRGateOutputBytes), cfg.Publish.VerificationOutputMaxBytes)
 	assert.True(t, cfg.Publish.DiscoverRequiredChecks)
+}
+
+func TestResolveConfig_PublishRequiresRemoveLabelsForScheduler(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	_, err := ResolveConfig(t.Context(), map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+		},
+		"publish": map[string]any{
+			"enabled": true,
+		},
+	}, path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "publish.remove_labels is required")
+}
+
+func TestResolveConfig_PublishVerificationGates(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	cfg, err := ResolveConfig(t.Context(), map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+			"labels":     []any{"symphony"},
+		},
+		"publish": map[string]any{
+			"enabled":                       true,
+			"draft_on_failed_validation":    false,
+			"verification_output_max_bytes": 4096,
+			"verification_allow_commands":   []any{"go", "test"},
+			"verification_deny_commands":    []any{"curl"},
+			"verification_gates": []any{
+				"go_test",
+				map[string]any{
+					"name":       "docs",
+					"command":    "test -f README.md",
+					"required":   false,
+					"timeout_ms": 1234,
+				},
+				map[string]any{
+					"name":       "golangci-lint",
+					"required":   false,
+					"timeout_ms": 5678,
+				},
+			},
+		},
+	}, path)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Publish.VerificationGates, 3)
+	assert.Equal(t, VerificationGateConfig{
+		Name:     "go_test",
+		Command:  "go test ./...",
+		Timeout:  defaultPRGateTimeout,
+		Required: true,
+	}, cfg.Publish.VerificationGates[0])
+	assert.Equal(t, VerificationGateConfig{
+		Name:     "docs",
+		Command:  "test -f README.md",
+		Timeout:  1234 * time.Millisecond,
+		Required: false,
+	}, cfg.Publish.VerificationGates[1])
+	assert.Equal(t, VerificationGateConfig{
+		Name:     "golangci_lint",
+		Command:  "make lint",
+		Timeout:  5678 * time.Millisecond,
+		Required: false,
+	}, cfg.Publish.VerificationGates[2])
+	assert.False(t, cfg.Publish.DraftOnFailedValidation)
+	assert.Equal(t, int64(4096), cfg.Publish.VerificationOutputMaxBytes)
+	assert.Equal(t, []string{"go", "test"}, cfg.Publish.VerificationAllowCommands)
+	assert.Equal(t, []string{"curl"}, cfg.Publish.VerificationDenyCommands)
+}
+
+func TestResolveConfig_RejectsUnsupportedPublishVerificationPreset(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	_, err := ResolveConfig(t.Context(), map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+			"labels":     []any{"symphony"},
+		},
+		"publish": map[string]any{
+			"enabled":            true,
+			"verification_gates": []any{"security_scan"},
+		},
+	}, path)
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), `publish.verification_gates "security_scan" requires command or a supported preset name`)
+}
+
+func TestResolveConfig_RejectsInvalidPublishVerificationGateEntry(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	_, err := ResolveConfig(t.Context(), map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+			"labels":     []any{"symphony"},
+		},
+		"publish": map[string]any{
+			"enabled":            true,
+			"verification_gates": []any{123},
+		},
+	}, path)
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "publish.verification_gates entries require name or command")
+}
+
+func TestResolveConfig_RejectsInvalidPublishVerificationGateTimeout(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	_, err := ResolveConfig(t.Context(), map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+			"labels":     []any{"symphony"},
+		},
+		"publish": map[string]any{
+			"enabled": true,
+			"verification_gates": []any{
+				map[string]any{
+					"name":       "unit",
+					"command":    "go test ./...",
+					"timeout_ms": 0,
+				},
+			},
+		},
+	}, path)
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), `publish.verification_gates "unit" timeout_ms must be > 0`)
+}
+
+func TestResolveConfig_RejectsCaseInsensitiveDuplicateVerificationGateNames(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	_, err := ResolveConfig(t.Context(), map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+			"labels":     []any{"symphony"},
+		},
+		"publish": map[string]any{
+			"enabled": true,
+			"verification_gates": []any{
+				map[string]any{"name": "unit", "command": "go test ./..."},
+				map[string]any{"name": "UNIT", "command": "go test ./..."},
+			},
+		},
+	}, path)
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), `publish.verification_gates contains duplicate gate "UNIT"`)
 }
 
 func TestResolveConfig_PublishCheckMonitorConfig(t *testing.T) {

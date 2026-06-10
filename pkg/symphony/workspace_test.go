@@ -72,12 +72,33 @@ func TestRunHookDerivesMissingWorkspaceKeyFromIssueIdentifier(t *testing.T) {
 	}
 	issue := Issue{ID: "issue-node", Identifier: "GH-61", Title: "Fix", State: "OPEN"}
 
-	err := RunHook(context.Background(), cfg, issue, Workspace{Path: workspacePath}, "before_run", cfg.Hooks.BeforeRun)
+	err := RunHook(t.Context(), cfg, issue, Workspace{Path: workspacePath}, "before_run", cfg.Hooks.BeforeRun)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(marker)
 	require.NoError(t, err)
 	assert.Equal(t, "GH-61", string(data))
+}
+
+func TestRunHookExposesPublishBaseBranch(t *testing.T) {
+	t.Parallel()
+
+	workspacePath := t.TempDir()
+	cfg := Config{
+		Publish: PublishConfig{BaseBranch: "release/next"},
+		Hooks: HooksConfig{
+			BeforeRun: "printf '%s' \"$SYMPHONY_BASE_BRANCH\" > base-branch.txt",
+			Timeout:   time.Second,
+		},
+	}
+	issue := Issue{ID: "issue-node", Identifier: "GH-61", Title: "Fix", State: "OPEN"}
+
+	err := RunHook(t.Context(), cfg, issue, Workspace{Path: workspacePath}, "before_run", cfg.Hooks.BeforeRun)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(workspacePath, "base-branch.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "release/next", string(data))
 }
 
 func TestRunHookRejectsEmptyWorkspaceKeyBeforeExecutingScript(t *testing.T) {

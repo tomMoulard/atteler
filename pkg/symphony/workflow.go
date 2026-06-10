@@ -343,23 +343,28 @@ type rawWorkspaceConfig struct {
 }
 
 type rawPublishConfig struct {
-	Enabled                *bool    `yaml:"enabled"`
-	Remote                 *string  `yaml:"remote"`
-	RemoteURL              *string  `yaml:"remote_url"`
-	BaseBranch             *string  `yaml:"base_branch"`
-	BranchPrefix           *string  `yaml:"branch_prefix"`
-	Draft                  *bool    `yaml:"draft"`
-	MonitorChecks          *bool    `yaml:"monitor_checks"`
-	RemoveLabels           []string `yaml:"remove_labels"`
-	RequiredCheckNames     []string `yaml:"required_checks"`
-	RequiredCheckPatterns  []string `yaml:"required_check_patterns"`
-	NoChecksPolicy         *string  `yaml:"no_checks_policy"`
-	DiscoverRequiredChecks *bool    `yaml:"discover_required_checks"`
-	ReworkOptionalChecks   *bool    `yaml:"rework_optional_checks"`
-	GitUserName            *string  `yaml:"git_user_name"`
-	GitUserEmail           *string  `yaml:"git_user_email"`
-	CheckIntervalMS        *int     `yaml:"check_interval_ms"`
-	MaxCheckReworkAttempts *int     `yaml:"max_check_rework_attempts"`
+	Enabled                    *bool    `yaml:"enabled"`
+	Remote                     *string  `yaml:"remote"`
+	RemoteURL                  *string  `yaml:"remote_url"`
+	BaseBranch                 *string  `yaml:"base_branch"`
+	BranchPrefix               *string  `yaml:"branch_prefix"`
+	Draft                      *bool    `yaml:"draft"`
+	DraftOnFailedValidation    *bool    `yaml:"draft_on_failed_validation"`
+	MonitorChecks              *bool    `yaml:"monitor_checks"`
+	VerificationGates          []any    `yaml:"verification_gates"`
+	VerificationAllowCommands  []string `yaml:"verification_allow_commands"`
+	VerificationDenyCommands   []string `yaml:"verification_deny_commands"`
+	RemoveLabels               []string `yaml:"remove_labels"`
+	RequiredCheckNames         []string `yaml:"required_checks"`
+	RequiredCheckPatterns      []string `yaml:"required_check_patterns"`
+	NoChecksPolicy             *string  `yaml:"no_checks_policy"`
+	DiscoverRequiredChecks     *bool    `yaml:"discover_required_checks"`
+	ReworkOptionalChecks       *bool    `yaml:"rework_optional_checks"`
+	GitUserName                *string  `yaml:"git_user_name"`
+	GitUserEmail               *string  `yaml:"git_user_email"`
+	CheckIntervalMS            *int     `yaml:"check_interval_ms"`
+	MaxCheckReworkAttempts     *int     `yaml:"max_check_rework_attempts"`
+	VerificationOutputMaxBytes *int64   `yaml:"verification_output_max_bytes"`
 }
 
 type rawDebugConfig struct {
@@ -431,13 +436,15 @@ func ResolveConfig(ctx context.Context, config map[string]any, workflowPath stri
 			Root: filepath.Join(os.TempDir(), "symphony_workspaces"),
 		},
 		Publish: PublishConfig{
-			Remote:                 "origin",
-			BaseBranch:             "main",
-			BranchPrefix:           "symphony",
-			GitUserName:            "Atteler Symphony",
-			GitUserEmail:           "symphony@users.noreply.github.com",
-			NoChecksPolicy:         defaultNoChecksPolicy,
-			DiscoverRequiredChecks: true,
+			Remote:                     "origin",
+			BaseBranch:                 "main",
+			BranchPrefix:               "symphony",
+			GitUserName:                "Atteler Symphony",
+			GitUserEmail:               "symphony@users.noreply.github.com",
+			NoChecksPolicy:             defaultNoChecksPolicy,
+			VerificationOutputMaxBytes: defaultPRGateOutputBytes,
+			DraftOnFailedValidation:    true,
+			DiscoverRequiredChecks:     true,
 		},
 		Debug: DebugConfig{
 			Address:    defaultDebugAddress,
@@ -544,8 +551,24 @@ func applyRawConfig(cfg *Config, raw rawConfig) {
 		cfg.Publish.Draft = *raw.Publish.Draft
 	}
 
+	if raw.Publish.DraftOnFailedValidation != nil {
+		cfg.Publish.DraftOnFailedValidation = *raw.Publish.DraftOnFailedValidation
+	}
+
 	if raw.Publish.MonitorChecks != nil {
 		cfg.Publish.MonitorChecks = *raw.Publish.MonitorChecks
+	}
+
+	if len(raw.Publish.VerificationGates) > 0 {
+		cfg.Publish.VerificationGates = parseVerificationGateConfigs(raw.Publish.VerificationGates)
+	}
+
+	if len(raw.Publish.VerificationAllowCommands) > 0 {
+		cfg.Publish.VerificationAllowCommands = trimNonEmptyStrings(raw.Publish.VerificationAllowCommands)
+	}
+
+	if len(raw.Publish.VerificationDenyCommands) > 0 {
+		cfg.Publish.VerificationDenyCommands = trimNonEmptyStrings(raw.Publish.VerificationDenyCommands)
 	}
 
 	if len(raw.Publish.RemoveLabels) > 0 {
@@ -586,6 +609,10 @@ func applyRawConfig(cfg *Config, raw rawConfig) {
 
 	if raw.Publish.MaxCheckReworkAttempts != nil {
 		cfg.Publish.MaxCheckReworkAttempts = *raw.Publish.MaxCheckReworkAttempts
+	}
+
+	if raw.Publish.VerificationOutputMaxBytes != nil {
+		cfg.Publish.VerificationOutputMaxBytes = *raw.Publish.VerificationOutputMaxBytes
 	}
 
 	if raw.Debug.Enabled != nil {
@@ -831,6 +858,10 @@ func resolvePublishDefaults(cfg *Config) {
 		cfg.Publish.NoChecksPolicy = defaultNoChecksPolicy
 	}
 
+	if cfg.Publish.VerificationOutputMaxBytes <= 0 {
+		cfg.Publish.VerificationOutputMaxBytes = defaultPRGateOutputBytes
+	}
+
 	if cfg.Publish.CheckInterval <= 0 {
 		cfg.Publish.CheckInterval = defaultPRCheckInterval
 	}
@@ -842,6 +873,114 @@ func resolvePublishDefaults(cfg *Config) {
 	if len(cfg.Publish.RemoveLabels) == 0 {
 		cfg.Publish.RemoveLabels = append([]string(nil), cfg.Tracker.Labels...)
 	}
+}
+
+func parseVerificationGateConfigs(raw []any) []VerificationGateConfig {
+	gates := make([]VerificationGateConfig, 0, len(raw))
+	for _, item := range raw {
+		switch value := normalizeYAMLValue(item).(type) {
+		case string:
+			gates = append(gates, verificationGateFromString(value))
+		case map[string]any:
+			gates = append(gates, verificationGateFromMap(value))
+		default:
+			gates = append(gates, VerificationGateConfig{})
+		}
+	}
+
+	return gates
+}
+
+func verificationGateFromString(value string) VerificationGateConfig {
+	value = strings.TrimSpace(value)
+	if preset, ok := verificationGatePreset(value); ok {
+		return preset
+	}
+
+	return VerificationGateConfig{Name: value, Required: true, Timeout: defaultPRGateTimeout}
+}
+
+func verificationGateFromMap(raw map[string]any) VerificationGateConfig {
+	gate := VerificationGateConfig{
+		Required: true,
+		Timeout:  defaultPRGateTimeout,
+	}
+
+	if name, ok := raw["name"].(string); ok {
+		gate.Name = strings.TrimSpace(name)
+	}
+
+	if command, ok := raw["command"].(string); ok {
+		gate.Command = strings.TrimSpace(command)
+	}
+
+	if required, ok := raw["required"].(bool); ok {
+		gate.Required = required
+	}
+
+	if rawTimeout, exists := raw["timeout_ms"]; exists {
+		if timeout, ok := positiveInt(rawTimeout); ok {
+			gate.Timeout = durationFromMS(timeout)
+		} else {
+			gate.Timeout = 0
+		}
+	}
+
+	if gate.Command == "" && gate.Name != "" {
+		if preset, ok := verificationGatePreset(gate.Name); ok {
+			gate.Name = preset.Name
+			gate.Command = preset.Command
+		}
+	}
+
+	if gate.Name == "" {
+		gate.Name = verificationGateNameFromCommand(gate.Command)
+	}
+
+	return gate
+}
+
+func verificationGatePreset(name string) (VerificationGateConfig, bool) {
+	key := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), "-", "_"))
+	command, ok := map[string]string{
+		"go_test":       "go test ./...",
+		"go_build":      "go build ./...",
+		"make_test":     "make test",
+		"make_lint":     "make lint",
+		"golangci_lint": "make lint",
+	}[key]
+	if !ok {
+		return VerificationGateConfig{}, false
+	}
+
+	return VerificationGateConfig{
+		Name:     key,
+		Command:  command,
+		Timeout:  defaultPRGateTimeout,
+		Required: true,
+	}, true
+}
+
+func verificationGateNameFromCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+
+	replacer := strings.NewReplacer(
+		" ", "-",
+		"\t", "-",
+		"/", "-",
+		"\\", "-",
+		".", "-",
+		":", "-",
+	)
+	name := strings.Trim(replacer.Replace(command), "-")
+	if name == "" {
+		return "verification-gate"
+	}
+
+	return name
 }
 
 func resolveDebugDefaults(cfg *Config) {
@@ -924,6 +1063,14 @@ func (cfg Config) ValidatePreflight() error {
 }
 
 func (cfg Config) validatePublishConfig() error {
+	return cfg.validatePublishConfigWithOptions(true)
+}
+
+func (cfg Config) validateIssueImplementPublishConfig() error {
+	return cfg.validatePublishConfigWithOptions(false)
+}
+
+func (cfg Config) validatePublishConfigWithOptions(requireRemoveLabels bool) error {
 	if !cfg.Publish.Enabled {
 		return nil
 	}
@@ -944,8 +1091,16 @@ func (cfg Config) validatePublishConfig() error {
 		return errors.New("publish.branch_prefix is required")
 	}
 
-	if len(trimNonEmptyStrings(cfg.Publish.RemoveLabels)) == 0 {
+	if requireRemoveLabels && len(trimNonEmptyStrings(cfg.Publish.RemoveLabels)) == 0 {
 		return errors.New("publish.remove_labels is required to stop redispatching")
+	}
+
+	if cfg.Publish.VerificationOutputMaxBytes <= 0 {
+		return errors.New("publish.verification_output_max_bytes must be > 0")
+	}
+
+	if err := validateVerificationGates(cfg.Publish.VerificationGates); err != nil {
+		return err
 	}
 
 	if cfg.Publish.MonitorChecks {
@@ -961,6 +1116,32 @@ func (cfg Config) validatePublishConfig() error {
 		case PullRequestNoChecksPass, PullRequestNoChecksPending, PullRequestNoChecksFail:
 		default:
 			return fmt.Errorf("publish.no_checks_policy must be one of pass, pending, fail when publish.monitor_checks is true: %s", cfg.Publish.NoChecksPolicy)
+		}
+	}
+
+	return nil
+}
+
+func validateVerificationGates(gates []VerificationGateConfig) error {
+	seen := make(map[string]struct{}, len(gates))
+	for _, gate := range gates {
+		name := strings.TrimSpace(gate.Name)
+		if name == "" {
+			return errors.New("publish.verification_gates entries require name or command")
+		}
+
+		seenKey := strings.ToLower(name)
+		if _, exists := seen[seenKey]; exists {
+			return fmt.Errorf("publish.verification_gates contains duplicate gate %q", name)
+		}
+		seen[seenKey] = struct{}{}
+
+		if strings.TrimSpace(gate.Command) == "" {
+			return fmt.Errorf("publish.verification_gates %q requires command or a supported preset name", name)
+		}
+
+		if gate.Timeout <= 0 {
+			return fmt.Errorf("publish.verification_gates %q timeout_ms must be > 0", name)
 		}
 	}
 

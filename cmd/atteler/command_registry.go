@@ -76,6 +76,7 @@ func buildCommandRegistry() []command {
 	groups := [][]command{
 		providerlessSessionCommands(),
 		providerlessFileCommands(),
+		providerlessIssueCommands(),
 		providerlessPlanningCommands(),
 		providerlessConfigAgentPluginCommands(),
 		providerlessConfigCodeIntelCommands(),

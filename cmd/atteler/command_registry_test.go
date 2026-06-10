@@ -430,6 +430,21 @@ func TestCommandSurface_RepresentativeSideEffectsAndOutputsAreStable(t *testing.
 			outputModes: []string{commandOutputText},
 		},
 		{
+			name: "issue-implement",
+			sideEffects: []string{
+				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectFilesystemWrite,
+				commandEffectGitRead,
+				commandEffectGitWrite,
+				commandEffectNetwork,
+				commandEffectProcessExecute,
+				commandEffectWorktreeWrite,
+				commandEffectUserOutput,
+			},
+			outputModes: []string{commandOutputText},
+		},
+		{
 			name: "doctor-offline",
 			sideEffects: []string{
 				commandEffectConfigRead,
@@ -1753,6 +1768,12 @@ func TestCommandRegistry_GroupedCommandsWithSupplementalFlagsReachExpectedHandle
 			wantName: "speculate-run",
 			wantTier: tierStateful,
 		},
+		{
+			name:     "issue implement routes providerless with publication flags",
+			args:     []string{"issue", "implement", "GH-218", "--open-pr", "--run-tests", "--run-lint"},
+			wantName: "issue-implement",
+			wantTier: tierProviderless,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1935,8 +1956,10 @@ func knownSideEffectsForTest() map[string]bool {
 		commandEffectFilesystemRead:  true,
 		commandEffectFilesystemWrite: true,
 		commandEffectGitRead:         true,
+		commandEffectGitWrite:        true,
 		commandEffectLLMProviderRead: true,
 		commandEffectNetworkRead:     true,
+		commandEffectNetwork:         true,
 		commandEffectProcessExecute:  true,
 		commandEffectSessionRead:     true,
 		commandEffectSessionWrite:    true,

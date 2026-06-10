@@ -124,13 +124,13 @@ func (r *DefaultAgentRunner) Run(ctx context.Context, req RunRequest, emit func(
 	}
 
 	publishResult, err := PublishWorkspace(ctx, req.Config, issue, workspace, r.logger)
+	result.Publish = publishResult
 	if err != nil {
 		result.CompletedAt = time.Now().UTC()
 		result.Error = err.Error()
 		return result, err
 	}
 
-	result.Publish = publishResult
 	result.CompletedAt = time.Now().UTC()
 	result.Status = AttemptSucceeded
 	afterRunNeeded = true

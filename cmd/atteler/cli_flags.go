@@ -32,6 +32,14 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.BoolVar(&opts.jsonOutput, "json", false, "emit JSON for commands with structured output, such as code-intel or config doctor-offline")
 	fs.StringVar(&opts.searchQuery, "search-sessions", "", "search saved session transcripts and exit")
 	fs.StringVar(&opts.oncePrompt, "once", "", "send one prompt and exit")
+	fs.Var(issueImplementRefFlag{opts: opts}, "issue-implement", "implement one tracker issue through Symphony and exit")
+	fs.StringVar(&opts.issueWorkflowPath, "issue-workflow", "", "WORKFLOW.md path for --issue-implement; defaults to ./WORKFLOW.md")
+	fs.StringVar(&opts.issueBaseBranch, "base", "", "base branch override for --issue-implement")
+	fs.BoolVar(&opts.issueOpenPR, "open-pr", false, "enable PR publication for --issue-implement")
+	fs.BoolVar(&opts.issueRunTests, "run-tests", false, "append the go_test verification gate for --issue-implement")
+	fs.BoolVar(&opts.issueRunLint, "run-lint", false, "append the golangci_lint verification gate for --issue-implement")
+	fs.BoolVar(&opts.issueUpdateDocs, "update-docs", false, "tell the issue implementation worker to update docs when relevant")
+	fs.BoolVar(&opts.issueUpdateChangelog, "update-changelog", false, "tell the issue implementation worker to update the changelog when relevant")
 	fs.StringVar(&opts.model, "model", "", "model ID to use")
 	fs.StringVar(&opts.agentName, "agent", "", "agent name to use for prompts")
 	fs.StringVar(&opts.describeAgentName, "describe-agent", "", "print a configured agent as YAML and exit")
@@ -394,4 +402,27 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.BoolVar(&opts.noAutoMerge, "no-auto-merge", false, "keep worktree alive on exit (default; overrides configured auto-merge)")
 	fs.StringVar(&opts.mergeWorktreeRef, "merge-worktree", "", "merge a session worktree back into its base branch and exit")
 	fs.BoolVar(&opts.mergeWorktreeAllowBaseMismatch, "merge-worktree-allow-base-mismatch", false, "allow manual worktree merge when current branch differs from recorded base")
+}
+
+type issueImplementRefFlag struct {
+	opts *cliOptions
+}
+
+func (f issueImplementRefFlag) String() string {
+	if f.opts == nil {
+		return ""
+	}
+
+	return f.opts.issueImplementRef
+}
+
+func (f issueImplementRefFlag) Set(value string) error {
+	if f.opts == nil {
+		return nil
+	}
+
+	f.opts.issueImplementRequested = true
+	f.opts.issueImplementRef = value
+
+	return nil
 }

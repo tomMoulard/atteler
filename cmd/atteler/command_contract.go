@@ -27,8 +27,10 @@ const (
 	commandEffectFilesystemRead  = "filesystem-read"
 	commandEffectFilesystemWrite = "filesystem-write"
 	commandEffectGitRead         = "git-read"
+	commandEffectGitWrite        = "git-write"
 	commandEffectLLMProviderRead = "llm-provider-read"
 	commandEffectNetworkRead     = "network-read"
+	commandEffectNetwork         = "network"
 	commandEffectProcessExecute  = "process-execute"
 	commandEffectSessionRead     = "session-store-read"
 	commandEffectSessionWrite    = "session-store-write"
@@ -459,8 +461,10 @@ func isKnownCommandSideEffect(value string) bool {
 		commandEffectFilesystemRead,
 		commandEffectFilesystemWrite,
 		commandEffectGitRead,
+		commandEffectGitWrite,
 		commandEffectLLMProviderRead,
 		commandEffectNetworkRead,
+		commandEffectNetwork,
 		commandEffectProcessExecute,
 		commandEffectSessionRead,
 		commandEffectSessionWrite,
