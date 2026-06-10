@@ -27,8 +27,9 @@ const (
 	// redacted output captures.
 	EnvAuditDir = "ATTELER_COMMAND_AUDIT_DIR"
 
-	auditDecisionDenied = "denied"
-	ledgerFileName      = "commands.jsonl"
+	ledgerFileName       = "commands.jsonl"
+	auditDecisionDenied  = "denied"
+	auditDecisionAllowed = "allowed"
 )
 
 // EnvMode controls which ambient environment variables are visible to a child
@@ -149,54 +150,68 @@ type EnvChange struct {
 //
 //nolint:govet // JSON field order follows audit-reading order.
 type AuditRecord struct {
-	StartedAt       time.Time   `json:"started_at,omitzero"`
-	EndedAt         time.Time   `json:"ended_at,omitzero"`
-	EnvDiff         []EnvChange `json:"env_diff,omitempty"`
-	Args            []string    `json:"args,omitempty"`
-	OperationKinds  []string    `json:"operation_kinds,omitempty"`
-	ID              string      `json:"id"`
-	Phase           string      `json:"phase"`
-	Program         string      `json:"program"`
-	Command         string      `json:"command"`
-	CWD             string      `json:"cwd,omitempty"`
-	Caller          string      `json:"caller,omitempty"`
-	SessionID       string      `json:"session_id,omitempty"`
-	SessionPath     string      `json:"session_path,omitempty"`
-	IssueID         string      `json:"issue_id,omitempty"`
-	IssueIdentifier string      `json:"issue_identifier,omitempty"`
-	Autonomy        string      `json:"autonomy,omitempty"`
-	Mode            string      `json:"mode"`
-	Decision        string      `json:"decision"`
-	DecisionReason  string      `json:"decision_reason,omitempty"`
-	DecisionRule    string      `json:"decision_rule,omitempty"`
-	OutputCapture   string      `json:"output_capture,omitempty"`
-	OutputPath      string      `json:"output_path,omitempty"`
-	OutputNote      string      `json:"output_note,omitempty"`
-	Error           string      `json:"error,omitempty"`
-	ExitStatus      *int        `json:"exit_status,omitempty"`
-	DurationMillis  int64       `json:"duration_ms,omitempty"`
+	StartedAt        time.Time   `json:"started_at,omitzero"`
+	EndedAt          time.Time   `json:"ended_at,omitzero"`
+	EnvDiff          []EnvChange `json:"env_diff,omitempty"`
+	Args             []string    `json:"args,omitempty"`
+	OperationKinds   []string    `json:"operation_kinds,omitempty"`
+	ID               string      `json:"id"`
+	Phase            string      `json:"phase"`
+	Program          string      `json:"program"`
+	Command          string      `json:"command"`
+	CWD              string      `json:"cwd,omitempty"`
+	Caller           string      `json:"caller,omitempty"`
+	SessionID        string      `json:"session_id,omitempty"`
+	SessionPath      string      `json:"session_path,omitempty"`
+	IssueID          string      `json:"issue_id,omitempty"`
+	IssueIdentifier  string      `json:"issue_identifier,omitempty"`
+	Autonomy         string      `json:"autonomy,omitempty"`
+	Mode             string      `json:"mode"`
+	Decision         string      `json:"decision"`
+	DecisionReason   string      `json:"decision_reason,omitempty"`
+	DecisionRule     string      `json:"decision_rule,omitempty"`
+	PermissionPolicy string      `json:"permission_policy,omitempty"`
+	PermissionRule   string      `json:"permission_rule,omitempty"`
+	PermissionReason string      `json:"permission_reason,omitempty"`
+	OutputCapture    string      `json:"output_capture,omitempty"`
+	OutputPath       string      `json:"output_path,omitempty"`
+	OutputNote       string      `json:"output_note,omitempty"`
+	Error            string      `json:"error,omitempty"`
+	ExitStatus       *int        `json:"exit_status,omitempty"`
+	DurationMillis   int64       `json:"duration_ms,omitempty"`
 }
 
 // CommandOptions describes one process launch through the policy/audit gate.
 //
 //nolint:govet // Field order keeps execution inputs before metadata.
 type CommandOptions struct {
-	Stdin                io.Reader
-	Stdout               io.Writer
-	Stderr               io.Writer
-	Policy               *Policy
-	Permission           *permission.Policy
-	Env                  map[string]string
-	Audit                AuditContext
-	Mode                 ExecutionMode
-	EnvMode              EnvMode
-	Program              string
-	Command              string
-	Dir                  string
-	Args                 []string
-	EnvList              []string
+	Stdin      io.Reader
+	Stdout     io.Writer
+	Stderr     io.Writer
+	Policy     *Policy
+	Permission *permission.Policy
+	Env        map[string]string
+	Audit      AuditContext
+	Mode       ExecutionMode
+	EnvMode    EnvMode
+	// Detach prevents context cancellation from killing the process after it is
+	// authorized. Use only for intentionally long-lived local daemons; policy
+	// evaluation and pre-start cancellation still use the supplied context.
+	Detach       bool
+	Program      string
+	Command      string
+	Dir          string
+	Args         []string
+	EnvList      []string
+	SecretValues []string
+	// PermissionOperations adds caller-known side effects that are not visible
+	// from the process argv alone, such as plugin manifest-declared network or
+	// filesystem-write capabilities.
 	PermissionOperations []permission.Operation
-	SecretValues         []string
+	// StartCallback runs after command authorization/audit succeeds and before
+	// the local process is returned to the caller for start/run. Use it for
+	// lifecycle notifications that must not fire for policy-denied commands.
+	StartCallback func()
 }
 
 // FinishOptions records the result of an already-authorized command.
@@ -240,10 +255,7 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 
 	opts.Dir = cwd
 
-	policy := effectivePolicy(opts.Policy)
-	if strings.TrimSpace(opts.Audit.AuditDir) != "" {
-		policy.AuditDir = opts.Audit.AuditDir
-	}
+	policy := commandPolicyWithAuditDir(ctx, effectivePolicy(opts.Policy), opts.Audit)
 
 	env, diff, secrets := buildCommandEnvironment(opts, policy)
 	secrets = appendCommandSecrets(secrets, opts.SecretValues)
@@ -256,11 +268,9 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 	command := redactText(displayCommand(program, auditArgs, opts.Command), secrets)
 	permissionOps := append([]permission.Operation(nil), opts.PermissionOperations...)
 	commandOps := permission.CommandOperations(program, opts.Args, opts.Command, cwd, opts.Audit.Caller)
-	for i := range commandOps {
-		commandOps[i].Action = command
-	}
-
-	permissionOps = append(permissionOps, commandOps...)
+	permissionOps = append(permissionOps, permissionOperationsWithAction(commandOps, command)...)
+	permissionOps = append(permissionOps, credentialEnvironmentPermissionOperations(env, command, opts.Audit.Caller)...)
+	permissionOps = permissionOperationsWithAuditContext(permissionOps, opts.Audit)
 	mode := opts.Mode
 	if mode == "" {
 		mode = ModeCaptured
@@ -288,12 +298,18 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 		},
 	}
 
-	permissionDecision := permission.Evaluate(ctx, opts.Permission, permission.Request{
+	permissionCtx := permission.ContextWithAuditDir(ctx, inv.auditDir)
+	permissionDecision := permission.Evaluate(permissionCtx, opts.Permission, permission.Request{
 		Operations: permissionOps,
 		Action:     command,
 		Source:     strings.TrimSpace(opts.Audit.Caller),
 		Target:     cwd,
 	})
+	inv.record.OperationKinds = permissionOperationKindStrings(permissionDecision.Operations)
+	applyPermissionDecisionAuditMetadata(&inv.record, permissionDecision.Operations)
+	inv.record.PermissionPolicy = permissionDecision.Policy
+	inv.record.PermissionRule = permissionDecision.Rule
+	inv.record.PermissionReason = permissionDecision.Reason
 	if !permissionDecision.Allowed {
 		inv.record.Phase = auditDecisionDenied
 		inv.record.Decision = auditDecisionDenied
@@ -332,15 +348,25 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 	}
 
 	inv.record.Phase = "start"
-	inv.record.Decision = "allowed"
-	inv.record.DecisionReason = decisionReason
+	inv.record.Decision = auditDecisionAllowed
+	inv.record.DecisionReason = decision.reason
 	inv.record.DecisionRule = decision.rule
 	inv.record.StartedAt = inv.startTime
 	if err := inv.appendRecord(inv.record); err != nil {
 		return nil, nil, err
 	}
 
-	cmd := exec.CommandContext(ctx, program, opts.Args...)
+	if opts.StartCallback != nil {
+		opts.StartCallback()
+	}
+
+	var cmd *exec.Cmd
+	if opts.Detach {
+		cmd = exec.Command(program, opts.Args...) //nolint:noctx // Detach is an explicit long-lived-daemon opt-in; callers still authorize with ctx before process start.
+	} else {
+		cmd = exec.CommandContext(ctx, program, opts.Args...)
+	}
+
 	cmd.Dir = cwd
 	cmd.Env = env
 	cmd.Stdin = opts.Stdin
@@ -348,6 +374,36 @@ func CommandContext(ctx context.Context, opts CommandOptions) (*exec.Cmd, *Invoc
 	cmd.Stderr = opts.Stderr
 
 	return cmd, inv, nil
+}
+
+func credentialEnvironmentPermissionOperations(env []string, action, source string) []permission.Operation {
+	if len(env) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0)
+	for _, pair := range env {
+		key, value, ok := strings.Cut(pair, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" || value == "" || !credentialEnv(key) {
+			continue
+		}
+
+		names = append(names, key)
+	}
+
+	if len(names) == 0 {
+		return nil
+	}
+
+	slices.Sort(names)
+
+	return []permission.Operation{{
+		Kind:   permission.OperationCredentialAccess,
+		Action: action,
+		Target: strings.Join(names, ","),
+		Source: strings.TrimSpace(source),
+	}}
 }
 
 func commandCWD(dir string) (string, error) {
@@ -378,8 +434,8 @@ func permissionOperationKindStrings(ops []permission.Operation) []string {
 		return nil
 	}
 
-	out := make([]string, 0, len(ops))
-	seen := make(map[permission.OperationKind]bool, len(ops))
+	seen := make(map[permission.OperationKind]bool)
+	out := make([]string, 0, len(permission.KnownOperationKinds()))
 	for _, op := range ops {
 		if op.Kind != "" && !seen[op.Kind] {
 			seen[op.Kind] = true
@@ -388,6 +444,103 @@ func permissionOperationKindStrings(ops []permission.Operation) []string {
 	}
 
 	return out
+}
+
+func permissionOperationsWithAction(ops []permission.Operation, action string) []permission.Operation {
+	if len(ops) == 0 {
+		return ops
+	}
+
+	out := make([]permission.Operation, 0, len(ops))
+	for _, op := range ops {
+		op.Action = action
+		out = append(out, op)
+	}
+
+	return out
+}
+
+func permissionOperationsWithAuditContext(ops []permission.Operation, audit AuditContext) []permission.Operation {
+	metadata := map[string]string{
+		"session_id":       strings.TrimSpace(audit.SessionID),
+		"session_path":     strings.TrimSpace(audit.SessionPath),
+		"issue_id":         strings.TrimSpace(audit.IssueID),
+		"issue_identifier": strings.TrimSpace(audit.IssueIdentifier),
+	}
+
+	for key, value := range metadata {
+		if value == "" {
+			delete(metadata, key)
+		}
+	}
+
+	if len(metadata) == 0 || len(ops) == 0 {
+		return ops
+	}
+
+	out := make([]permission.Operation, 0, len(ops))
+	for _, op := range ops {
+		op.Metadata = mergePermissionMetadata(op.Metadata, metadata)
+		out = append(out, op)
+	}
+
+	return out
+}
+
+func applyPermissionDecisionAuditMetadata(record *AuditRecord, ops []permission.Operation) {
+	if record == nil || len(ops) == 0 {
+		return
+	}
+
+	fill := func(field *string, key string) {
+		if strings.TrimSpace(*field) != "" {
+			return
+		}
+
+		*field = permissionOperationMetadata(ops, key)
+	}
+
+	fill(&record.Caller, "caller")
+	fill(&record.SessionID, "session_id")
+	fill(&record.SessionPath, "session_path")
+	fill(&record.IssueID, "issue_id")
+	fill(&record.IssueIdentifier, "issue_identifier")
+}
+
+func permissionOperationMetadata(ops []permission.Operation, key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+
+	for _, op := range ops {
+		if value := strings.TrimSpace(op.Metadata[key]); value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func mergePermissionMetadata(existing, defaults map[string]string) map[string]string {
+	merged := make(map[string]string, len(existing)+len(defaults))
+	for key, value := range defaults {
+		if strings.TrimSpace(key) != "" && strings.TrimSpace(value) != "" {
+			merged[key] = value
+		}
+	}
+
+	for key, value := range existing {
+		if strings.TrimSpace(key) != "" && strings.TrimSpace(value) != "" {
+			merged[key] = value
+		}
+	}
+
+	if len(merged) == 0 {
+		return nil
+	}
+
+	return merged
 }
 
 // RunCommand runs a command with captured stdout/stderr through the policy gate.
@@ -439,7 +592,7 @@ func (i *Invocation) Finish(opts FinishOptions) error {
 	i.finishOnce.Do(func() {
 		record := i.record
 		record.Phase = "finish"
-		record.Decision = "allowed"
+		record.Decision = auditDecisionAllowed
 		record.StartedAt = i.startTime
 		record.EndedAt = time.Now().UTC()
 		record.DurationMillis = record.EndedAt.Sub(i.startTime).Milliseconds()
@@ -564,6 +717,22 @@ func effectivePolicy(policy *Policy) Policy {
 	}
 
 	return *policy
+}
+
+func commandPolicyWithAuditDir(ctx context.Context, policy Policy, audit AuditContext) Policy {
+	switch {
+	case strings.TrimSpace(audit.AuditDir) != "":
+		policy.AuditDir = audit.AuditDir
+	case strings.TrimSpace(policy.AuditDir) == "" &&
+		strings.TrimSpace(os.Getenv(EnvAuditDir)) == "" &&
+		strings.TrimSpace(audit.SessionPath) != "":
+		policy.AuditDir = usableSessionAuditDirFromPath(audit.SessionPath, audit.SessionID)
+	case strings.TrimSpace(policy.AuditDir) == "" &&
+		strings.TrimSpace(os.Getenv(EnvAuditDir)) == "":
+		policy.AuditDir = permission.AuditDirFromContext(ctx)
+	}
+
+	return policy
 }
 
 //nolint:gocognit // Environment sanitization is easier to audit when the diff and secret tracking stay together.
@@ -1763,29 +1932,160 @@ func shellWrapperOptionTakesValue(wrapper, option string) bool {
 
 var networkCommandNames = map[string]struct{}{
 	"curl": {}, "wget": {}, "nc": {}, "ncat": {}, "netcat": {}, "ssh": {}, "scp": {}, "sftp": {},
-	"ftp": {}, "rsync": {}, "telnet": {}, "gh": {},
+	"ftp": {}, "rsync": {}, "telnet": {}, "dig": {}, "nslookup": {}, "ping": {},
+	"gh": {}, "glab": {}, "hub": {}, "kubectl": {}, "aws": {}, "gcloud": {}, "az": {},
 }
 
 func isNetworkCommand(program string, args []string, command string) bool {
-	base := filepath.Base(strings.TrimSpace(program))
+	base := strings.TrimSuffix(strings.ToLower(filepath.Base(strings.TrimSpace(program))), ".exe")
 	if _, ok := networkCommandNames[base]; ok {
 		return true
 	}
 
+	if dependencyCommandUsesNetwork(base, args) {
+		return true
+	}
+
 	if base == "git" {
-		return gitNetworkSubcommand(gitSubcommand(args))
+		return gitCommandUsesNetwork(args)
 	}
 
 	return shellHasNetworkCommand(command)
 }
 
-func gitNetworkSubcommand(subcommand string) bool {
-	switch strings.TrimSpace(subcommand) {
+func gitCommandUsesNetwork(args []string) bool {
+	subcommand, subcommandArgs := gitSubcommandAndArgs(args)
+	switch strings.ToLower(strings.Trim(subcommand, `"'`)) {
 	case "clone", "fetch", "pull", "push", "ls-remote":
+		return true
+	case "remote":
+		return len(subcommandArgs) > 0 && strings.ToLower(strings.Trim(subcommandArgs[0], `"'`)) == "show"
+	case "submodule":
+		return gitSubmoduleUsesNetwork(subcommandArgs)
+	default:
+		return false
+	}
+}
+
+func gitSubmoduleUsesNetwork(args []string) bool {
+	switch gitSubmoduleSubcommand(args) {
+	case "add", "update":
 		return true
 	default:
 		return false
 	}
+}
+
+func gitSubmoduleSubcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := strings.ToLower(strings.Trim(strings.TrimSpace(args[i]), `"'`))
+		if arg == "" || arg == "--" {
+			continue
+		}
+
+		if gitSubmoduleOptionWithValue(arg) {
+			if !strings.Contains(arg, "=") {
+				i++
+			}
+
+			continue
+		}
+
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+
+		return arg
+	}
+
+	return ""
+}
+
+func gitSubmoduleOptionWithValue(arg string) bool {
+	switch {
+	case arg == "--jobs", arg == "-j":
+		return true
+	case strings.HasPrefix(arg, "--jobs="):
+		return true
+	default:
+		return false
+	}
+}
+
+func dependencyCommandUsesNetwork(name string, args []string) bool {
+	action, rest := dependencyActionAndRest(args)
+
+	switch name {
+	case "go":
+		if action == "get" || action == "install" {
+			return true
+		}
+
+		if action == "mod" {
+			next, _ := dependencyActionAndRest(rest)
+
+			return next == "download" || next == "tidy"
+		}
+	case "npm", "pnpm":
+		return dependencyActionIn(action, "install", "i", "add", "update", "up", "ci")
+	case "yarn":
+		return dependencyActionIn(action, "install", "add", "upgrade", "up")
+	case "pip", "pip3":
+		return dependencyActionIn(action, "install", "download", "wheel")
+	case "poetry":
+		return dependencyActionIn(action, "add", "install", "update")
+	case "cargo":
+		return dependencyActionIn(action, "install", "add", "update", "fetch")
+	case "brew":
+		return dependencyActionIn(action, "install", "update", "upgrade", "tap")
+	default:
+		return false
+	}
+
+	return false
+}
+
+func dependencyActionAndRest(args []string) (action string, rest []string) {
+	for i := 0; i < len(args); i++ {
+		arg := strings.ToLower(strings.Trim(strings.TrimSpace(args[i]), `"'`))
+		if arg == "" || arg == "--" {
+			continue
+		}
+
+		if dependencyOptionWithValue(arg) {
+			if !strings.Contains(arg, "=") {
+				i++
+			}
+
+			continue
+		}
+
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+
+		return arg, args[i+1:]
+	}
+
+	return "", nil
+}
+
+func dependencyOptionWithValue(arg string) bool {
+	switch {
+	case arg == "-c", arg == "-m", arg == "--cwd", arg == "--prefix", arg == "--cache", arg == "--directory":
+		return true
+	case strings.HasPrefix(arg, "--cwd="),
+		strings.HasPrefix(arg, "--prefix="),
+		strings.HasPrefix(arg, "--cache="),
+		strings.HasPrefix(arg, "--directory="):
+		return true
+	default:
+		return false
+	}
+}
+
+func dependencyActionIn(action string, candidates ...string) bool {
+	return slices.Contains(candidates, action)
 }
 
 func shellHasNetworkCommand(command string) bool {
@@ -1838,7 +2138,11 @@ func shellTokensHaveNetworkCommand(tokens []shellToken, depth int) bool {
 			return true
 		}
 
-		if name == "git" && gitNetworkSubcommand(gitSubcommand(shellArgsFromTokens(tokens[i+1:]))) {
+		if dependencyCommandUsesNetwork(name, shellArgsFromTokens(tokens[i+1:])) {
+			return true
+		}
+
+		if name == "git" && gitCommandUsesNetwork(shellArgsFromTokens(tokens[i+1:])) {
 			return true
 		}
 
@@ -1892,7 +2196,7 @@ func shellArgsFromTokens(tokens []shellToken) []string {
 	return args
 }
 
-func gitSubcommand(args []string) string {
+func gitSubcommandAndArgs(args []string) (subcommand string, subcommandArgs []string) {
 	for i := 0; i < len(args); i++ {
 		arg := strings.TrimSpace(args[i])
 		if arg == "" {
@@ -1916,13 +2220,13 @@ func gitSubcommand(args []string) string {
 		}
 
 		if commandValue, ok := shellWordBeforeRedirection(arg); ok {
-			return commandValue
+			return strings.ToLower(strings.Trim(commandValue, `"'`)), args[i+1:]
 		}
 
-		return arg
+		return strings.ToLower(strings.Trim(arg, `"'`)), args[i+1:]
 	}
 
-	return ""
+	return "", nil
 }
 
 func gitGlobalFlagWithValue(arg string) bool {
@@ -2157,6 +2461,33 @@ func auditDir(policy Policy) string {
 	// in sandboxed runs where a home cache directory may not be writable. Users
 	// that need a long-lived ledger can set ATTELER_COMMAND_AUDIT_DIR.
 	return filepath.Join(os.TempDir(), "atteler", "audit")
+}
+
+func sessionAuditDirFromPath(sessionPath, sessionID string) string {
+	sessionPath = strings.TrimSpace(sessionPath)
+	if sessionPath == "" {
+		return ""
+	}
+
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return filepath.Join(filepath.Dir(sessionPath), "audit")
+	}
+
+	return filepath.Join(filepath.Dir(sessionPath), "audit", sessionID)
+}
+
+func usableSessionAuditDirFromPath(sessionPath, sessionID string) string {
+	sessionPath = strings.TrimSpace(sessionPath)
+	if sessionPath == "" {
+		return ""
+	}
+
+	if err := os.MkdirAll(filepath.Dir(sessionPath), 0o700); err != nil {
+		return ""
+	}
+
+	return sessionAuditDirFromPath(sessionPath, sessionID)
 }
 
 func (i *Invocation) appendRecord(record AuditRecord) error {

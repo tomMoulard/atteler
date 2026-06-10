@@ -10,7 +10,8 @@ import (
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
-	attshell "github.com/tommoulard/atteler/pkg/shell"
+	"github.com/tommoulard/atteler/pkg/permission"
+	"github.com/tommoulard/atteler/pkg/shell"
 	attskill "github.com/tommoulard/atteler/pkg/skill"
 )
 
@@ -54,18 +55,22 @@ func runSkillLearningCommandWithAutonomy(ctx context.Context, input skillLearnin
 
 	switch {
 	case input.List:
-		return listSkillLearning(store, input.EffectiveEnabled)
+		return listSkillLearning(ctx, store, input.EffectiveEnabled)
 	case input.Show != "":
-		return showSkillLearning(store, input.Show, input.SkillDir)
+		return showSkillLearning(ctx, store, input.Show, input.SkillDir)
 	case input.Edit != "":
 		return editSkillLearning(ctx, store, input.Edit, input.SkillDir, input.Editor, level)
 	case input.Enable != "":
-		return setGeneratedSkillStatus(store, input.Enable, attskill.LearningSkillStatusActive, input.SkillDir)
+		return setGeneratedSkillStatus(ctx, store, input.Enable, attskill.LearningSkillStatusActive, input.SkillDir)
 	case input.Disable != "":
-		return setGeneratedSkillStatus(store, input.Disable, attskill.LearningSkillStatusDisabled, input.SkillDir)
+		return setGeneratedSkillStatus(ctx, store, input.Disable, attskill.LearningSkillStatusDisabled, input.SkillDir)
 	case input.Delete != "":
-		return deleteGeneratedSkill(store, input.Delete, input.SkillDir)
+		return deleteGeneratedSkill(ctx, store, input.Delete, input.SkillDir)
 	case input.EnableAll:
+		if err := authorizeSkillLearningPermission(ctx, "enable skill learning", store.StatePath(), permission.OperationRead, permission.OperationWrite); err != nil {
+			return fmt.Errorf("skill learning: enable: %w", err)
+		}
+
 		if err := store.SetEnabled(true); err != nil {
 			return fmt.Errorf("skill learning: enable: %w", err)
 		}
@@ -74,6 +79,10 @@ func runSkillLearningCommandWithAutonomy(ctx context.Context, input skillLearnin
 
 		return nil
 	case input.DisableAll:
+		if err := authorizeSkillLearningPermission(ctx, "disable skill learning", store.StatePath(), permission.OperationRead, permission.OperationWrite); err != nil {
+			return fmt.Errorf("skill learning: disable: %w", err)
+		}
+
 		if err := store.SetEnabled(false); err != nil {
 			return fmt.Errorf("skill learning: disable: %w", err)
 		}
@@ -134,7 +143,11 @@ func skillLearningManagementOperationCount(input skillLearningCommandInput) int 
 	return count
 }
 
-func listSkillLearning(store *attskill.LearningStore, configurationEnabled *bool) error {
+func listSkillLearning(ctx context.Context, store *attskill.LearningStore, configurationEnabled *bool) error {
+	if err := authorizeSkillLearningPermission(ctx, "read skill learning state", store.StatePath(), permission.OperationRead); err != nil {
+		return fmt.Errorf("skill learning: list: %w", err)
+	}
+
 	state, err := store.Load()
 	if err != nil {
 		return fmt.Errorf("skill learning: list: %w", err)
@@ -163,13 +176,17 @@ func listSkillLearning(store *attskill.LearningStore, configurationEnabled *bool
 	return nil
 }
 
-func showSkillLearning(store *attskill.LearningStore, slug, skillDir string) error {
-	skill, err := findGeneratedSkill(store, slug)
+func showSkillLearning(ctx context.Context, store *attskill.LearningStore, slug, skillDir string) error {
+	skill, err := findGeneratedSkill(ctx, store, slug)
 	if err != nil {
 		return err
 	}
 	if pathErr := attskill.ValidateGeneratedSkillPath(skill, skillDir); pathErr != nil {
 		return fmt.Errorf("skill learning: show %s: %w", slug, pathErr)
+	}
+
+	if authErr := authorizeSkillLearningPermission(ctx, "read generated skill", skill.SkillPath, permission.OperationRead); authErr != nil {
+		return fmt.Errorf("skill learning: show %s: %w", slug, authErr)
 	}
 
 	data, err := os.ReadFile(skill.SkillPath)
@@ -187,12 +204,15 @@ func showSkillLearning(store *attskill.LearningStore, slug, skillDir string) err
 }
 
 func editSkillLearning(ctx context.Context, store *attskill.LearningStore, slug, skillDir, editor string, level autonomy.Level) error {
-	skill, err := findGeneratedSkill(store, slug)
+	skill, err := findGeneratedSkill(ctx, store, slug)
 	if err != nil {
 		return err
 	}
 	if pathErr := attskill.ValidateGeneratedSkillPath(skill, skillDir); pathErr != nil {
 		return fmt.Errorf("skill learning: edit %s: %w", slug, pathErr)
+	}
+	if authErr := authorizeSkillLearningPermission(ctx, "inspect generated skill before edit", skill.SkillPath, permission.OperationRead); authErr != nil {
+		return fmt.Errorf("skill learning: edit %s: %w", slug, authErr)
 	}
 	if pathErr := requireGeneratedSkillFile(skill.SkillPath); pathErr != nil {
 		return fmt.Errorf("skill learning: edit %s: %w", slug, pathErr)
@@ -204,25 +224,35 @@ func editSkillLearning(ctx context.Context, store *attskill.LearningStore, slug,
 		return err
 	}
 
-	cmd, invocation, err := attshell.CommandContext(ctx, attshell.CommandOptions{
+	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
 		Program: name,
 		Args:    args,
-		Stdin:   os.Stdin,
-		Stdout:  os.Stdout,
-		Stderr:  os.Stderr,
-		Mode:    attshell.ModeInteractive,
-		Audit:   skillLearningEditorAuditContext(level),
+		Mode:    shell.ModeInteractive,
+		PermissionOperations: []permission.Operation{{
+			Kind:   permission.OperationWrite,
+			Action: "edit generated skill",
+			Target: skill.SkillPath,
+			Source: "atteler.skill_learning.edit",
+		}},
+		Audit: shell.AuditContext{
+			Caller:   "atteler.skill_learning.editor",
+			Autonomy: autonomy.Normalize(level).String(),
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("skill learning: authorize edit %s with %q: %w", slug, name, err)
 	}
 
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
 	runErr := cmd.Run()
-	if finishErr := invocation.Finish(attshell.FinishOptions{
+	if finishErr := invocation.Finish(shell.FinishOptions{
 		Error:         runErr,
-		OutputCapture: attshell.OutputNotCaptured,
-		OutputNote:    "interactive editor output was not captured",
-	}); finishErr != nil {
+		OutputCapture: shell.OutputNotCaptured,
+		OutputNote:    "interactive editor; stdout/stderr not captured",
+	}); finishErr != nil && runErr == nil {
 		return fmt.Errorf("skill learning: audit edit %s with %q: %w", slug, name, finishErr)
 	}
 
@@ -236,25 +266,29 @@ func editSkillLearning(ctx context.Context, store *attskill.LearningStore, slug,
 	return nil
 }
 
-func skillLearningEditorAuditContext(level autonomy.Level) attshell.AuditContext {
-	return attshell.AuditContext{
-		Caller:   "atteler.skill_learning.editor",
-		Autonomy: autonomy.Normalize(level).String(),
-	}
-}
-
-func setGeneratedSkillStatus(store *attskill.LearningStore, slug, status, skillDir string) error {
+func setGeneratedSkillStatus(ctx context.Context, store *attskill.LearningStore, slug, status, skillDir string) error {
 	if status == attskill.LearningSkillStatusActive {
-		skill, err := findGeneratedSkill(store, slug)
+		skill, err := findGeneratedSkill(ctx, store, slug)
 		if err != nil {
 			return err
 		}
 		if pathErr := attskill.ValidateGeneratedSkillPath(skill, skillDir); pathErr != nil {
 			return fmt.Errorf("skill learning: enable %s: %w", slug, pathErr)
 		}
+		if authErr := authorizeSkillLearningPermission(ctx, "inspect generated skill before enable", skill.SkillPath, permission.OperationRead); authErr != nil {
+			return fmt.Errorf("skill learning: enable %s: %w", slug, authErr)
+		}
 		if pathErr := requireGeneratedSkillFile(skill.SkillPath); pathErr != nil {
 			return fmt.Errorf("skill learning: enable %s: %w", slug, pathErr)
 		}
+	}
+
+	if err := authorizeSkillLearningPermission(ctx, "read skill learning state", store.StatePath(), permission.OperationRead); err != nil {
+		return fmt.Errorf("skill learning: set %s: %w", slug, err)
+	}
+
+	if err := authorizeSkillLearningPermission(ctx, "set generated skill status", store.StatePath(), permission.OperationWrite); err != nil {
+		return fmt.Errorf("skill learning: set %s: %w", slug, err)
 	}
 
 	skill, err := store.SetSkillStatus(slug, status)
@@ -268,13 +302,17 @@ func setGeneratedSkillStatus(store *attskill.LearningStore, slug, status, skillD
 	return nil
 }
 
-func deleteGeneratedSkill(store *attskill.LearningStore, slug, skillDir string) error {
-	skill, err := findGeneratedSkill(store, slug)
+func deleteGeneratedSkill(ctx context.Context, store *attskill.LearningStore, slug, skillDir string) error {
+	skill, err := findGeneratedSkill(ctx, store, slug)
 	if err != nil {
 		return err
 	}
 
 	if err := attskill.ValidateGeneratedSkillPath(skill, skillDir); err != nil {
+		if authErr := authorizeSkillLearningPermission(ctx, "delete generated skill record", store.StatePath(), permission.OperationWrite); authErr != nil {
+			return fmt.Errorf("skill learning: delete unsafe record %s: %w", slug, authErr)
+		}
+
 		if deleteErr := store.DeleteSkillInDir(slug, false, skillDir); deleteErr != nil {
 			return fmt.Errorf("skill learning: delete unsafe record %s: %w", slug, deleteErr)
 		}
@@ -283,6 +321,15 @@ func deleteGeneratedSkill(store *attskill.LearningStore, slug, skillDir string) 
 		fmt.Fprintln(os.Stderr, "skill learning: skipped generated skill file removal: "+err.Error())
 
 		return nil
+	}
+
+	deleteTarget := filepath.Dir(skill.SkillPath)
+	if strings.TrimSpace(deleteTarget) == "" || deleteTarget == "." {
+		deleteTarget = skill.SkillPath
+	}
+
+	if err := authorizeSkillLearningPermission(ctx, "delete generated skill", deleteTarget, permission.OperationWrite, permission.OperationMergeDelete); err != nil {
+		return fmt.Errorf("skill learning: delete %s: %w", slug, err)
 	}
 
 	if err := store.DeleteSkillInDir(slug, true, skillDir); err != nil {
@@ -297,10 +344,42 @@ func deleteGeneratedSkill(store *attskill.LearningStore, slug, skillDir string) 
 	return nil
 }
 
-func findGeneratedSkill(store *attskill.LearningStore, slug string) (attskill.GeneratedSkill, error) {
+func authorizeSkillLearningPermission(ctx context.Context, action, target string, kinds ...permission.OperationKind) error {
+	if len(kinds) == 0 {
+		kinds = []permission.OperationKind{permission.OperationWrite}
+	}
+
+	operations := make([]permission.Operation, 0, len(kinds))
+	for _, kind := range kinds {
+		operations = append(operations, permission.Operation{
+			Kind:   kind,
+			Action: action,
+			Target: target,
+			Source: "atteler.skill_learning",
+		})
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action:     action,
+		Source:     "atteler.skill_learning",
+		Target:     target,
+		Operations: operations,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
+}
+
+func findGeneratedSkill(ctx context.Context, store *attskill.LearningStore, slug string) (attskill.GeneratedSkill, error) {
 	slug = strings.TrimSpace(slug)
 	if slug == "" {
 		return attskill.GeneratedSkill{}, errors.New("skill learning: slug is required")
+	}
+
+	if err := authorizeSkillLearningPermission(ctx, "read skill learning state", store.StatePath(), permission.OperationRead); err != nil {
+		return attskill.GeneratedSkill{}, fmt.Errorf("skill learning: read state: %w", err)
 	}
 
 	state, err := store.Load()

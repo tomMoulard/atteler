@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	llmevents "github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 func TestCodexProvider_Complete(t *testing.T) {
@@ -194,6 +195,102 @@ func TestCodexProvider_CompleteOmitsPortableUnsupportedOptions(t *testing.T) {
 		"stream": true,
 		"store": false
 	}`, string(gotBody))
+}
+
+func TestCodexProvider_CompletePermissionDeniesNetworkBeforeActivity(t *testing.T) {
+	t.Parallel()
+
+	var requestCount atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p := &CodexProvider{
+		client:  srv.Client(),
+		auth:    newTestCodexAuth(t),
+		baseURL: srv.URL,
+		models:  []string{"gpt-5.5"},
+	}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+
+	var log bytes.Buffer
+
+	ctx := llmevents.WithEmitter(context.Background(), llmevents.NewRunnerWithLogger(nil, &log), llmevents.Event{})
+	ctx = permission.ContextWithPolicy(ctx, &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := p.Complete(ctx, CompleteParams{
+		Model:    "gpt-5.5",
+		Messages: []Message{{Role: RoleUser, Content: "say ok"}},
+	})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.network.deny")
+	assert.Equal(t, int32(0), requestCount.Load())
+	assert.NotContains(t, log.String(), "event:command_execute")
+	assert.NotContains(t, log.String(), "codex.responses")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.network.deny")
+}
+
+func TestCodexProvider_HealthCheckPermissionDeniesCredentialBeforeActivity(t *testing.T) {
+	t.Parallel()
+
+	p := &CodexProvider{auth: newTestCodexAuth(t)}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+
+	var log bytes.Buffer
+
+	ctx := llmevents.WithEmitter(context.Background(), llmevents.NewRunnerWithLogger(nil, &log), llmevents.Event{})
+	ctx = permission.ContextWithPolicy(ctx, &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := p.HealthCheck(ctx)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.credential_access.deny")
+	assert.NotContains(t, log.String(), "event:command_execute")
+	assert.NotContains(t, log.String(), "codex.auth.check")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.credential_access.deny")
+}
+
+func TestLoadCodexChatGPTAuthPermissionPolicyDeniesAuthFileRead(t *testing.T) {
+	t.Parallel()
+
+	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := loadCodexChatGPTAuthContext(ctx, filepath.Dir(authPath))
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "load Codex ChatGPT credentials")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestCodexProvider_CompleteStream_Success(t *testing.T) {
@@ -906,7 +1003,36 @@ func TestPersistRefreshedCodexAuth_RequiresActiveContext(t *testing.T) {
 	assert.Equal(t, "acct-9", accountID)
 }
 
-func TestCodexConfiguredModel(t *testing.T) {
+func TestPersistRefreshedCodexAuth_PermissionPolicyDeniesWrite(t *testing.T) {
+	t.Parallel()
+
+	authPath := writeCodexAuthFile(t, "old-access", "old-refresh", "acct-9")
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := persistRefreshedCodexAuth(ctx, authPath, "new-access", "new-refresh", "new-id")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+
+	auth, loadErr := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	require.NoError(t, loadErr)
+
+	access, accountID := auth.snapshot()
+	assert.Equal(t, "old-access", access)
+	assert.Equal(t, "acct-9", accountID)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.write.deny")
+}
+
+func TestCodexConfiguredModelContext(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("CODEX_HOME", "")
@@ -919,14 +1045,61 @@ func TestCodexConfiguredModel(t *testing.T) {
 model = "gpt-test-codex"
 `), 0o600))
 
-	if got := codexConfiguredModel(); got != "gpt-test-codex" {
-		require.Failf(t, "unexpected failure", "codexConfiguredModel = %q, want gpt-test-codex", got)
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(t.Context(), auditDir)
+
+	if got, err := codexConfiguredModelContext(ctx); err != nil || got != "gpt-test-codex" {
+		require.Failf(t, "unexpected failure", "codexConfiguredModelContext = %q, %v; want gpt-test-codex", got, err)
 	}
 
-	models := codexModels()
+	models, err := codexModelsContext(ctx)
+	require.NoError(t, err)
+
 	if len(models) == 0 || models[0] != "gpt-test-codex" {
-		require.Failf(t, "unexpected failure", "codexModels = %v, want configured model first", models)
+		require.Failf(t, "unexpected failure", "codexModelsContext = %v, want configured model first", models)
 	}
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read Codex config")
+	assert.Contains(t, string(auditData), "permission.allow")
+}
+
+func TestNewCodexProviderPermissionPolicyDeniesAuthFileRead(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("CODEX_HOME", "")
+
+	codexDir := filepath.Join(dir, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(
+		`{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"access_token":"access-1","refresh_token":"refresh-1","account_id":"acct-42"}}`,
+	), 0o600))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	_, err := NewCodexProviderWithConfigContext(ctx, ProviderConfig{})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+}
+
+func TestKnownProvidersContextPermissionPolicyDeniesCodexConfigRead(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	_, err := KnownProvidersContext(ctx)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
 }
 
 func TestCodexProvider_ModelMetadataAndContextFallback(t *testing.T) {

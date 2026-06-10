@@ -56,12 +56,15 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string, policy cliWo
 		return fmt.Errorf("merge worktree: %w", err)
 	}
 
-	ctx = worktree.WithAuditContext(ctx, worktreeShellAuditContext(session.Session{}, level))
+	store := session.NewStore("")
+
+	if authErr := authorizeSessionStoreRead(ctx, store, sessionRef, "load session for worktree merge"); authErr != nil {
+		return fmt.Errorf("merge worktree: %w", authErr)
+	}
+
 	if !worktree.IsGitRepoContext(ctx, cwd) {
 		return errors.New("merge worktree: not inside a git repository")
 	}
-
-	store := session.NewStore("")
 
 	sess, err := store.Load(sessionRef)
 	if err != nil {
@@ -72,6 +75,8 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string, policy cliWo
 		return fmt.Errorf("merge worktree: session %s has no worktree", sess.ID)
 	}
 
+	ctx = contextWithPermissionAuditMetadata(ctx, store, sess, "", "")
+
 	info := &worktree.Info{
 		Path:       sess.WorktreePath,
 		Branch:     sess.WorktreeBranch,
@@ -81,7 +86,9 @@ func mergeWorktreeBySession(ctx context.Context, sessionRef string, policy cliWo
 
 	fmt.Fprintf(os.Stderr, "worktree: merging %s into %s...\n", info.Branch, info.BaseBranch)
 
-	ctx = worktree.WithAuditContext(ctx, worktreeShellAuditContext(sess, level))
+	if authErr := authorizeSessionStoreWrite(ctx, store, sess, "update session after worktree merge"); authErr != nil {
+		return fmt.Errorf("merge worktree: %w", authErr)
+	}
 
 	result, err := worktree.MergeWithResultContext(ctx, cwd, info, worktree.MergeOptions{
 		AutoMerge:               true,

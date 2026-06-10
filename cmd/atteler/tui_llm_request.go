@@ -14,6 +14,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -23,12 +24,17 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 			defer close(request.liveCh)
 		}
 
+		if request.confirmRequestCh != nil {
+			defer close(request.confirmRequestCh)
+		}
+
 		eventLines := newEventLineBuffer(request.liveCh)
 		ctx = events.WithEmitter(
 			ctx,
 			request.hookRunner.WithLogger(eventLines),
 			request.eventBase,
 		)
+		ctx = contextWithPermissionPolicyPrompt(ctx, request)
 
 		params := llm.CompleteParams{
 			Model:    request.model,
@@ -179,7 +185,7 @@ func callLLMWithTools(
 			}
 		}
 
-		emitFromContextWarning(ctx, events.Event{
+		commandEvent := events.Event{
 			Type:    events.CommandExecute,
 			Content: command,
 			Metadata: map[string]string{
@@ -190,7 +196,7 @@ func callLLMWithTools(
 				"tool_call_id": call.ID,
 				"autonomy":     request.autonomy.String(),
 			},
-		})
+		}
 
 		result, err := attshell.RunBash(ctx, attshell.Options{
 			Command:        command,
@@ -202,6 +208,10 @@ func callLLMWithTools(
 				SessionID:   request.eventBase.SessionID,
 				SessionPath: request.eventBase.SessionPath,
 				Autonomy:    request.autonomy.String(),
+			},
+			Permission: request.permissionPolicy,
+			StartCallback: func() {
+				emitFromContextWarning(ctx, commandEvent)
 			},
 			OutputCallback: func(chunk attshell.OutputChunk) {
 				sendLiveLLMToolOutput(request.liveCh, command, chunk)
@@ -314,6 +324,10 @@ func callLLMWithTools(
 	}
 }
 
+func contextWithPermissionPolicyPrompt(ctx context.Context, request llmRequest) context.Context {
+	return contextWithTUIPermissionPrompt(ctx, request.permissionPolicy, request.confirmRequestCh, request.confirmResponseCh)
+}
+
 func sendLiveLLMToolOutput(liveCh chan<- tea.Msg, command string, chunk attshell.OutputChunk) {
 	if liveCh == nil {
 		return
@@ -384,6 +398,30 @@ func agentLoopToolConfirmPrompt(call llm.ToolCall, decision llm.ToolPolicyDecisi
 		decision.Reason,
 		command,
 	)
+}
+
+func permissionConfirmPrompt(request permission.Request, decision permission.Decision) string {
+	action := strings.TrimSpace(request.Action)
+	if action == "" {
+		action = strings.TrimSpace(decision.Reason)
+	}
+
+	return fmt.Sprintf(
+		"Permission policy requires confirmation (%s, policy: %s): %s\n%s\nAllow? [y/N] ",
+		decision.Rule,
+		permissionPromptPolicy(decision),
+		decision.Reason,
+		action,
+	)
+}
+
+func permissionPromptPolicy(decision permission.Decision) string {
+	policy := strings.TrimSpace(decision.Policy)
+	if policy == "" {
+		return unknownLabel
+	}
+
+	return policy
 }
 
 // prependReferenceContext injects pre-rendered reference content as a system

@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 func TestDefaultAgentRunner_AfterRunHonorsCanceledContext(t *testing.T) {
@@ -58,7 +60,7 @@ func TestShouldRunBeforeRunHookSkipsExistingGitCheckoutForPullRequestRework(t *t
 		},
 	}
 
-	assert.False(t, shouldRunBeforeRunHook(req, Workspace{Path: workspacePath}))
+	assert.False(t, shouldRunBeforeRunHook(context.Background(), req, Workspace{Path: workspacePath}))
 }
 
 func TestShouldRunBeforeRunHookStillRunsForFreshPullRequestReworkWorkspace(t *testing.T) {
@@ -74,5 +76,32 @@ func TestShouldRunBeforeRunHookStillRunsForFreshPullRequestReworkWorkspace(t *te
 		},
 	}
 
-	assert.True(t, shouldRunBeforeRunHook(req, Workspace{Path: t.TempDir()}))
+	assert.True(t, shouldRunBeforeRunHook(context.Background(), req, Workspace{Path: t.TempDir()}))
+}
+
+func TestShouldRunBeforeRunHookReadDeniedFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	req := RunRequest{
+		Config: Config{
+			Hooks: HooksConfig{BeforeRun: "echo prepare"},
+		},
+		Context: &RunContext{
+			Kind:        RunKindPullRequestRework,
+			PullRequest: &PullRequestReworkContext{Branch: "symphony/GH-2"},
+		},
+	}
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	assert.True(t, shouldRunBeforeRunHook(ctx, req, Workspace{Path: t.TempDir()}))
+
+	auditData, err := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, err)
+	assert.Contains(t, string(auditData), "inspect git checkout")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }

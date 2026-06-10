@@ -10,18 +10,24 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 const (
 	envOllamaOwnershipPath = "ATTELER_OLLAMA_OWNERSHIP_PATH"
 	envAttelerStatePath    = "ATTELER_STATE"
 
-	ollamaOwnershipFilename = "ollama-daemon.json"
-	ollamaOwnershipOwner    = "atteler"
-	ollamaStartupLogBytes   = 16 * 1024
+	ollamaOwnershipStatusError = "error"
+	ollamaOwnershipFilename    = "ollama-daemon.json"
+	ollamaOwnershipOwner       = "atteler"
+	ollamaStartupLogBytes      = 16 * 1024
+
+	ollamaProcessInspectionAction = "inspect Ollama process ownership"
 )
 
 // OllamaStatusState is the user-facing lifecycle state for a configured
@@ -161,20 +167,34 @@ func CheckOllamaStatus(ctx context.Context, cfg ProviderConfig) OllamaStatus {
 	}
 
 	status.Local = isLocalOllamaParsedURL(parsed)
-
-	ownership, ownershipErr := readOllamaOwnership(status.OwnershipPath)
-	if ownershipErr == nil {
-		status.Ownership = ownership
-		status.OwnershipStatus = ollamaOwnershipStatus(baseURL, ownership)
-	} else if !errors.Is(ownershipErr, os.ErrNotExist) {
-		status.OwnershipStatus = "error"
-		status.Error = ownershipErr.Error()
-	}
-
 	if !status.Local {
 		status.State = OllamaStatusRemote
 
 		return status
+	}
+
+	if err := authorizeOllamaOwnershipReadPermission(ctx, status.OwnershipPath); err != nil {
+		status.OwnershipStatus = ollamaOwnershipStatusError
+		status.Error = err.Error()
+
+		return status
+	}
+
+	ownership, ownershipErr := readOllamaOwnership(status.OwnershipPath)
+	if ownershipErr == nil {
+		status.Ownership = ownership
+		ownershipStatus, statusErr := ollamaOwnershipStatusContext(ctx, baseURL, ownership)
+		status.OwnershipStatus = ownershipStatus
+
+		if statusErr != nil {
+			status.OwnershipStatus = ollamaOwnershipStatusError
+			status.Error = statusErr.Error()
+
+			return status
+		}
+	} else if !errors.Is(ownershipErr, os.ErrNotExist) {
+		status.OwnershipStatus = ollamaOwnershipStatusError
+		status.Error = ownershipErr.Error()
 	}
 
 	provider := &OllamaProvider{
@@ -217,14 +237,8 @@ func StopOwnedOllamaDaemon(ctx context.Context, ownershipPath string) (OllamaSto
 		return result, err
 	}
 
-	ownership, err := readOllamaOwnership(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			result.Message = "no Atteler-owned Ollama daemon record found"
-
-			return result, nil
-		}
-
+	ownership, result, err := readOllamaOwnershipForStop(ctx, path, result)
+	if err != nil || ownership == nil {
 		return result, err
 	}
 
@@ -233,23 +247,42 @@ func StopOwnedOllamaDaemon(ctx context.Context, ownershipPath string) (OllamaSto
 		return result, fmt.Errorf("ollama: ownership record %s is owned by %q, not atteler", path, ownership.Owner)
 	}
 
-	if ownership.PID <= 0 || !ollamaPIDAlive(ownership.PID) {
-		if err := removeOllamaOwnership(path); err != nil {
-			return result, err
-		}
-
-		result.Cleaned = true
-		result.Message = "removed stale Atteler Ollama ownership record"
-
-		return result, nil
+	if ownership.PID <= 0 {
+		return cleanStaleOllamaOwnership(ctx, path, ownership, result)
 	}
 
+	alive, aliveErr := ollamaPIDAliveContext(ctx, ownership)
+	if aliveErr != nil {
+		return result, aliveErr
+	}
+
+	if !alive {
+		return cleanStaleOllamaOwnership(ctx, path, ownership, result)
+	}
+
+	return stopRunningOllamaDaemonAfterInspection(ctx, path, ownership, result)
+}
+
+func stopRunningOllamaDaemonAfterInspection(
+	ctx context.Context,
+	path string,
+	ownership *OllamaDaemonOwnership,
+	result OllamaStopResult,
+) (OllamaStopResult, error) {
 	if err := validateOllamaOwnershipForStop(path, ownership); err != nil {
 		return result, err
 	}
 
-	if !ollamaPIDMatchesOwnership(ownership) {
+	// StopOwnedOllamaDaemon already authorized process inspection before the
+	// liveness probe. Reuse that approval for the ownership match so an
+	// interactive policy does not prompt twice for the same PID inspection.
+	matchesOwnership := ollamaPIDMatchesOwnership(ownership)
+	if !matchesOwnership {
 		return result, fmt.Errorf("ollama: PID %d no longer matches Atteler Ollama ownership record %s; refusing to stop", ownership.PID, path)
+	}
+
+	if err := authorizeOllamaStopPermission(ctx, "stop Atteler-owned Ollama daemon", path, ownership, true); err != nil {
+		return result, err
 	}
 
 	if err := ollamaTerminatePID(ownership.PID); err != nil {
@@ -275,6 +308,127 @@ func StopOwnedOllamaDaemon(ctx context.Context, ownershipPath string) (OllamaSto
 	result.Message = "stopped Atteler-owned Ollama daemon"
 
 	return result, nil
+}
+
+func readOllamaOwnershipForStop(ctx context.Context, path string, result OllamaStopResult) (*OllamaDaemonOwnership, OllamaStopResult, error) {
+	if err := authorizeOllamaOwnershipReadPermission(ctx, path); err != nil {
+		return nil, result, err
+	}
+
+	ownership, err := readOllamaOwnership(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			result.Message = "no Atteler-owned Ollama daemon record found"
+
+			return nil, result, nil
+		}
+
+		return nil, result, err
+	}
+
+	return ownership, result, nil
+}
+
+func cleanStaleOllamaOwnership(
+	ctx context.Context,
+	path string,
+	ownership *OllamaDaemonOwnership,
+	result OllamaStopResult,
+) (OllamaStopResult, error) {
+	if err := authorizeOllamaStopPermission(ctx, "clean stale Ollama ownership record", path, ownership, false); err != nil {
+		return result, err
+	}
+
+	if err := removeOllamaOwnership(path); err != nil {
+		return result, err
+	}
+
+	result.Cleaned = true
+	result.Message = "removed stale Atteler Ollama ownership record"
+
+	return result, nil
+}
+
+func authorizeOllamaOwnershipReadPermission(ctx context.Context, ownershipPath string) error {
+	return authorizeProviderPermission(ctx, providerOllama, "read Ollama ownership state", ownershipPath, permission.OperationRead)
+}
+
+func authorizeOllamaStateWritePermission(ctx context.Context, action, path string) error {
+	return authorizeProviderPermission(ctx, providerOllama, action, path, permission.OperationWrite)
+}
+
+func authorizeOllamaStateDeletePermission(ctx context.Context, action, path string) error {
+	return authorizeProviderPermission(
+		ctx,
+		providerOllama,
+		action,
+		path,
+		permission.OperationWrite,
+		permission.OperationMergeDelete,
+	)
+}
+
+func authorizeOllamaProcessInspectionPermission(ctx context.Context, ownership *OllamaDaemonOwnership) error {
+	if ownership == nil || ownership.PID <= 0 {
+		return nil
+	}
+
+	target := fmt.Sprintf("pid=%d", ownership.PID)
+	if runtime.GOOS == "linux" {
+		target = fmt.Sprintf("/proc/%d/cmdline", ownership.PID)
+	}
+
+	return authorizeProviderPermission(ctx, providerOllama, ollamaProcessInspectionAction, target, permission.OperationRead)
+}
+
+func authorizeOllamaStopPermission(ctx context.Context, action, ownershipPath string, ownership *OllamaDaemonOwnership, stopsProcess bool) error {
+	kinds := []permission.OperationKind{
+		permission.OperationWrite,
+		permission.OperationMergeDelete,
+	}
+	if stopsProcess {
+		kinds = append([]permission.OperationKind{permission.OperationExecute}, kinds...)
+	}
+
+	target := ownershipPath
+	metadata := map[string]string{}
+
+	if ownership != nil {
+		if ownership.PID > 0 {
+			target = fmt.Sprintf("%s pid=%d", ownershipPath, ownership.PID)
+		}
+
+		if ownership.SessionID != "" {
+			metadata["session_id"] = ownership.SessionID
+		}
+	}
+
+	ops := make([]permission.Operation, 0, len(kinds))
+	for _, kind := range kinds {
+		op := permission.Operation{
+			Kind:   kind,
+			Action: action,
+			Target: target,
+			Source: "atteler.provider.ollama",
+		}
+		if len(metadata) > 0 {
+			op.Metadata = metadata
+		}
+
+		ops = append(ops, op)
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Operations: ops,
+		Action:     action,
+		Source:     "atteler.provider.ollama",
+		Target:     target,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return fmt.Errorf("ollama: %s: %w", action, &permission.Error{Decision: decision})
 }
 
 func validateOllamaOwnershipForStop(path string, ownership *OllamaDaemonOwnership) error {
@@ -326,6 +480,18 @@ func ollamaPIDAlive(pid int) bool {
 	ollamaProcessHooksMu.Unlock()
 
 	return alive(pid)
+}
+
+func ollamaPIDAliveContext(ctx context.Context, ownership *OllamaDaemonOwnership) (bool, error) {
+	if err := authorizeOllamaProcessInspectionPermission(ctx, ownership); err != nil {
+		return false, err
+	}
+
+	if ownership == nil {
+		return false, nil
+	}
+
+	return ollamaPIDAlive(ownership.PID), nil
 }
 
 func ollamaTerminatePID(pid int) error {
@@ -391,24 +557,31 @@ func isLocalOllamaHost(host string) bool {
 	return ip.IsLoopback()
 }
 
-func ollamaOwnershipStatus(baseURL string, ownership *OllamaDaemonOwnership) string {
+func ollamaOwnershipStatusContext(ctx context.Context, baseURL string, ownership *OllamaDaemonOwnership) (string, error) {
 	switch {
 	case ownership == nil:
-		return "none"
-	case ownership.Owner != ollamaOwnershipOwner:
-		return "recorded-untrusted-owner"
+		return "none", nil
+	case ownership.Owner != "atteler":
+		return "recorded-untrusted-owner", nil
 	case !ollamaServeCommandRecorded(ownership.Command):
-		return "recorded-invalid-command"
+		return "recorded-invalid-command", nil
 	case ownership.BaseURL != baseURL:
-		return "recorded-for-different-base-url"
-	case ollamaPIDAlive(ownership.PID):
-		if !ollamaPIDMatchesOwnership(ownership) {
-			return "owned-pid-mismatch"
+		return "recorded-for-different-base-url", nil
+	default:
+		alive, err := ollamaPIDAliveContext(ctx, ownership)
+		if err != nil {
+			return ollamaOwnershipStatusError, err
 		}
 
-		return "owned-running"
-	default:
-		return "owned-stale"
+		if !alive {
+			return "owned-stale", nil
+		}
+
+		if !ollamaPIDMatchesOwnership(ownership) {
+			return "owned-pid-mismatch", nil
+		}
+
+		return "owned-running", nil
 	}
 }
 
@@ -484,6 +657,14 @@ func recordOllamaOwnership(path string, ownership OllamaDaemonOwnership) error {
 	}
 
 	return nil
+}
+
+func recordOllamaOwnershipContext(ctx context.Context, path string, ownership OllamaDaemonOwnership) error {
+	if err := authorizeOllamaStateWritePermission(ctx, "write Ollama ownership state", path); err != nil {
+		return err
+	}
+
+	return recordOllamaOwnership(path, ownership)
 }
 
 func removeOllamaOwnership(path string) error {

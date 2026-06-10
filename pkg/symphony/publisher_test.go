@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -1841,6 +1842,233 @@ func TestGitHubPublisher_RebasesAndForcePushesPullRequestBranch(t *testing.T) {
 	assert.Contains(t, fetchEnv, "GITHUB_TOKEN=token")
 	assert.Contains(t, pushEnv, "GIT_TERMINAL_PROMPT=0")
 	assert.Contains(t, pushEnv, "GITHUB_TOKEN=token")
+}
+
+func TestGitHubPublisher_GitWithAuthPermissionPolicyDeniesAskPassWriteBeforeGit(t *testing.T) {
+	t.Parallel()
+
+	var ranGit bool
+	publisher := &githubPublisher{
+		cfg: Config{
+			Tracker: TrackerConfig{APIKey: "token"},
+		},
+		runGit: func(context.Context, string, []string, shell.AuditContext, ...string) ([]byte, error) {
+			ranGit = true
+
+			return nil, nil
+		},
+		logger: loggerOrDefault(nil),
+	}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := publisher.gitWithAuth(ctx, t.TempDir(), "push", "-u", "origin", "symphony/GH-12")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	assert.False(t, ranGit, "denied askpass write must block before invoking git")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.write.deny")
+	assert.Contains(t, string(auditData), "write temporary git askpass helper")
+}
+
+func TestGitHubPublisher_GitWithAuthPermissionPolicyDeniesNetworkBeforeAskPassWrite(t *testing.T) {
+	t.Parallel()
+
+	var ranGit bool
+	publisher := &githubPublisher{
+		cfg: Config{
+			Tracker: TrackerConfig{APIKey: "token"},
+		},
+		runGit: func(context.Context, string, []string, shell.AuditContext, ...string) ([]byte, error) {
+			ranGit = true
+
+			return nil, nil
+		},
+		logger: loggerOrDefault(nil),
+	}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := publisher.gitWithAuth(ctx, t.TempDir(), "push", "-u", "origin", "symphony/GH-12")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.network.deny")
+	assert.False(t, ranGit, "denied network must block before preparing authenticated git")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.network.deny")
+	assert.Contains(t, string(auditData), "run authenticated git network command")
+}
+
+func TestGitHubPublisher_GitWithAuthPermissionPolicyDeniesAskPassDeleteBeforeGit(t *testing.T) {
+	t.Parallel()
+
+	var ranGit bool
+	publisher := &githubPublisher{
+		cfg: Config{
+			Tracker: TrackerConfig{APIKey: "token"},
+		},
+		runGit: func(context.Context, string, []string, shell.AuditContext, ...string) ([]byte, error) {
+			ranGit = true
+
+			return nil, nil
+		},
+		logger: loggerOrDefault(nil),
+	}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationMergeDelete, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := publisher.gitWithAuth(ctx, t.TempDir(), "push", "-u", "origin", "symphony/GH-12")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.merge_delete.deny")
+	assert.False(t, ranGit, "denied askpass cleanup must block before invoking git")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.merge_delete.deny")
+	assert.Contains(t, string(auditData), "remove temporary git askpass helper")
+}
+
+func TestGitHubPublisher_CommitPermissionPolicyDeniesTempMessageWrite(t *testing.T) {
+	t.Parallel()
+
+	var commands []string
+	var ranCommit bool
+	publisher := &githubPublisher{
+		cfg: Config{Publish: PublishConfig{
+			GitUserName:  "Atteler Symphony",
+			GitUserEmail: "symphony@users.noreply.github.com",
+		}},
+		runGit: func(_ context.Context, _ string, _ []string, _ shell.AuditContext, args ...string) ([]byte, error) {
+			joined := strings.Join(args, " ")
+			commands = append(commands, joined)
+			if strings.HasPrefix(joined, "commit -F ") {
+				ranCommit = true
+			}
+
+			return nil, nil
+		},
+		logger: loggerOrDefault(nil),
+	}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := publisher.commit(ctx, t.TempDir(), Issue{
+		ID:         "node",
+		Identifier: "GH-12",
+		Title:      "Make the CLI smaller",
+	})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	assert.False(t, ranCommit, "denied commit message write must block before invoking git commit")
+	assert.Contains(t, commands, "add -A")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "prepare temporary git commit message")
+	assert.Contains(t, string(auditData), "permission.write.deny")
+}
+
+func TestGitHubPublisher_CommitPermissionPolicyDeniesTempMessageDelete(t *testing.T) {
+	t.Parallel()
+
+	var commands []string
+	var ranCommit bool
+	publisher := &githubPublisher{
+		cfg: Config{Publish: PublishConfig{
+			GitUserName:  "Atteler Symphony",
+			GitUserEmail: "symphony@users.noreply.github.com",
+		}},
+		runGit: func(_ context.Context, _ string, _ []string, _ shell.AuditContext, args ...string) ([]byte, error) {
+			joined := strings.Join(args, " ")
+			commands = append(commands, joined)
+			if strings.HasPrefix(joined, "commit -F ") {
+				ranCommit = true
+			}
+
+			return nil, nil
+		},
+		logger: loggerOrDefault(nil),
+	}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationMergeDelete, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := publisher.commit(ctx, t.TempDir(), Issue{
+		ID:         "node",
+		Identifier: "GH-12",
+		Title:      "Make the CLI smaller",
+	})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.merge_delete.deny")
+	assert.False(t, ranCommit, "denied commit message cleanup must block before invoking git commit")
+	assert.Contains(t, commands, "add -A")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "prepare temporary git commit message")
+	assert.Contains(t, string(auditData), "permission.merge_delete.deny")
+}
+
+func TestPreparePullRequestReworkWorkspacePermissionPolicyDeniesGitCheckoutRead(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Tracker: TrackerConfig{Kind: trackerKindGitHub},
+	}
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := PreparePullRequestReworkWorkspace(
+		ctx,
+		cfg,
+		&PullRequestReworkContext{Branch: "symphony/GH-12"},
+		Workspace{Path: t.TempDir()},
+		loggerOrDefault(nil),
+	)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "inspect git checkout")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestGitHubPublisher_PreparesReworkWorkspaceAndLeavesRebaseConflict(t *testing.T) {

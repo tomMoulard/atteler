@@ -85,7 +85,7 @@ func loadIssueImplementWorkflow(ctx context.Context, opts IssueImplementOptions)
 		return WorkflowSnapshot{}, err
 	}
 
-	data, info, err := readWorkflowFile(manager.Path())
+	data, info, err := readWorkflowFile(ctx, manager.Path())
 	if err != nil {
 		return WorkflowSnapshot{}, err
 	}

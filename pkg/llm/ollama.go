@@ -17,6 +17,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/permission"
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
 const (
@@ -169,45 +172,113 @@ func callOllamaServeStarter(ctx context.Context, req ollamaStartRequest) (*ollam
 	return starter(ctx, req)
 }
 
+//nolint:cyclop,gocognit // Ollama startup has a linear authorize/start/record/cleanup lifecycle that is easier to audit in one place.
 func startOllamaServeProcess(ctx context.Context, req ollamaStartRequest) (*ollamaDaemonStart, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, fmt.Errorf("ollama: start daemon: %w", err)
 	}
 
-	stateDir := ollamaStateDir(req.OwnershipPath)
-	if err := os.MkdirAll(stateDir, 0o750); err != nil {
-		return nil, fmt.Errorf("ollama: prepare daemon state dir: %w", err)
-	}
-
-	logFile, err := os.CreateTemp(stateDir, "ollama-startup-*.log")
-	if err != nil {
-		return nil, fmt.Errorf("ollama: create startup log: %w", err)
-	}
-
-	logPath := logFile.Name()
 	logs := newBoundedLogBuffer(ollamaStartupLogBytes)
-	logWriter := &lockedWriter{writer: io.MultiWriter(newCappedLogFileWriter(logFile, ollamaStartupLogBytes), logs)}
-
-	cmd := exec.Command(ollamaServeCommand, "serve") //nolint:noctx // Ollama is intentionally started as a reversible long-lived daemon after the caller context is checked.
-	cmd.Stdout = logWriter
-	cmd.Stderr = logWriter
 
 	if err := ctx.Err(); err != nil {
-		_ = logFile.Close()
-		_ = os.Remove(logPath)
-
 		return nil, fmt.Errorf("ollama: start daemon: %w", err)
 	}
 
 	environment := map[string]string{}
 	if host := ollamaHostForBaseURL(req.BaseURL); host != "" {
 		environment["OLLAMA_HOST"] = host
-		cmd.Env = append(os.Environ(), "OLLAMA_HOST="+host)
 	}
+
+	cmd, invocation, err := attshell.CommandContext(ctx, attshell.CommandOptions{
+		Program:              ollamaServeCommand,
+		Args:                 []string{"serve"},
+		Env:                  environment,
+		Mode:                 attshell.ModeStreaming,
+		Detach:               true,
+		Stdout:               logs,
+		Stderr:               logs,
+		PermissionOperations: ollamaServePermissionOperations(req),
+		Audit: attshell.AuditContext{
+			Caller:    "atteler.provider.ollama",
+			SessionID: req.SessionID,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ollama: start daemon: %w", err)
+	}
+
+	stateDir := ollamaStateDir(req.OwnershipPath)
+	if permissionErr := authorizeOllamaStateWritePermission(ctx, "prepare Ollama daemon state directory", stateDir); permissionErr != nil {
+		if finishErr := invocation.Finish(attshell.FinishOptions{
+			Error:         permissionErr,
+			OutputCapture: attshell.OutputNotCaptured,
+			OutputNote:    "ollama daemon did not start; state directory preparation was denied by policy",
+		}); finishErr != nil {
+			permissionErr = errors.Join(permissionErr, finishErr)
+		}
+
+		return nil, fmt.Errorf("ollama: prepare daemon state dir: %w", permissionErr)
+	}
+
+	if mkdirErr := os.MkdirAll(stateDir, 0o750); mkdirErr != nil {
+		if finishErr := invocation.Finish(attshell.FinishOptions{
+			Error:         mkdirErr,
+			OutputCapture: attshell.OutputNotCaptured,
+			OutputNote:    "ollama daemon did not start; state directory preparation failed",
+		}); finishErr != nil {
+			mkdirErr = errors.Join(mkdirErr, finishErr)
+		}
+
+		return nil, fmt.Errorf("ollama: prepare daemon state dir: %w", mkdirErr)
+	}
+
+	if permissionErr := authorizeOllamaStateWritePermission(ctx, "write Ollama startup log", stateDir); permissionErr != nil {
+		if finishErr := invocation.Finish(attshell.FinishOptions{
+			Error:         permissionErr,
+			OutputCapture: attshell.OutputNotCaptured,
+			OutputNote:    "ollama daemon did not start; startup log creation was denied by policy",
+		}); finishErr != nil {
+			permissionErr = errors.Join(permissionErr, finishErr)
+		}
+
+		return nil, fmt.Errorf("ollama: create startup log: %w", permissionErr)
+	}
+
+	logFile, logErr := os.CreateTemp(stateDir, "ollama-startup-*.log")
+	if logErr != nil {
+		if finishErr := invocation.Finish(attshell.FinishOptions{
+			Error:         logErr,
+			OutputCapture: attshell.OutputNotCaptured,
+			OutputNote:    "ollama daemon did not start; startup log creation failed",
+		}); finishErr != nil {
+			logErr = errors.Join(logErr, finishErr)
+		}
+
+		return nil, fmt.Errorf("ollama: create startup log: %w", logErr)
+	}
+
+	logPath := logFile.Name()
+	logWriter := &lockedWriter{writer: io.MultiWriter(newCappedLogFileWriter(logFile, ollamaStartupLogBytes), logs)}
+	cmd.Stdout = logWriter
+	cmd.Stderr = logWriter
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
-		_ = os.Remove(logPath)
+
+		if permissionErr := authorizeOllamaStateDeletePermission(ctx, "delete failed Ollama startup log", logPath); permissionErr != nil {
+			err = errors.Join(err, permissionErr)
+		} else if removeErr := os.Remove(logPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = errors.Join(err, removeErr)
+		}
+
+		if finishErr := invocation.Finish(attshell.FinishOptions{
+			Stderr:        logs.String(),
+			Error:         err,
+			OutputCapture: attshell.OutputCaptured,
+			OutputNote:    "ollama daemon failed before startup completed",
+		}); finishErr != nil {
+			err = errors.Join(err, finishErr)
+		}
 
 		return nil, fmt.Errorf("ollama: start daemon: %w", err)
 	}
@@ -228,15 +299,16 @@ func startOllamaServeProcess(ctx context.Context, req ollamaStartRequest) (*olla
 	}
 
 	ownershipPath := ollamaOwnershipPath(req.OwnershipPath)
-	if err := recordOllamaOwnership(ownershipPath, ownership); err != nil {
-		if killErr := cmd.Process.Kill(); killErr != nil {
-			slog.Warn("ollama daemon cleanup after ownership failure failed", "pid", cmd.Process.Pid, "error", killErr)
-		}
+	if err := recordOllamaOwnershipContext(ctx, ownershipPath, ownership); err != nil {
+		err = cleanupUntrackedOllamaDaemonAfterOwnershipFailure(ctx, cmd, ownershipPath, ownership, err)
 
-		// Reap the child after the forced cleanup so a failed ownership write
-		// does not leave a short-lived zombie process behind.
-		if waitErr := cmd.Wait(); waitErr != nil {
-			slog.Debug("ollama daemon cleanup wait completed", "pid", cmd.Process.Pid, "error", waitErr)
+		if finishErr := invocation.Finish(attshell.FinishOptions{
+			Stderr:        logs.String(),
+			Error:         err,
+			OutputCapture: attshell.OutputCaptured,
+			OutputNote:    "ollama daemon stopped after ownership write failure",
+		}); finishErr != nil {
+			slog.Warn("ollama daemon audit after ownership failure failed", "pid", cmd.Process.Pid, "error", finishErr)
 		}
 
 		_ = logFile.Close()
@@ -260,12 +332,78 @@ func startOllamaServeProcess(ctx context.Context, req ollamaStartRequest) (*olla
 			}
 		}()
 
-		if err := cmd.Wait(); err != nil {
-			slog.Warn("ollama daemon exited", "pid", cmd.Process.Pid, "log_path", logPath, "error", err)
+		waitErr := cmd.Wait()
+		if finishErr := invocation.Finish(attshell.FinishOptions{
+			Stderr:        logs.String(),
+			Error:         waitErr,
+			OutputCapture: attshell.OutputCaptured,
+			OutputNote:    "ollama daemon startup log snapshot",
+		}); finishErr != nil {
+			slog.Warn("ollama daemon audit failed", "pid", cmd.Process.Pid, "log_path", logPath, "error", finishErr)
+		}
+
+		if waitErr != nil {
+			slog.Warn("ollama daemon exited", "pid", cmd.Process.Pid, "log_path", logPath, "error", waitErr)
 		}
 	}()
 
 	return &ollamaDaemonStart{ownership: ownership, ownershipPath: ownershipPath, logs: logs}, nil
+}
+
+func cleanupUntrackedOllamaDaemonAfterOwnershipFailure(
+	ctx context.Context,
+	cmd *exec.Cmd,
+	ownershipPath string,
+	ownership OllamaDaemonOwnership,
+	err error,
+) error {
+	cleanupErr := authorizeOllamaStopPermission(
+		ctx,
+		"stop untracked Ollama daemon after ownership write failure",
+		ownershipPath,
+		&ownership,
+		true,
+	)
+	if cleanupErr != nil {
+		slog.Warn("ollama daemon left running after ownership failure cleanup was denied", "pid", cmd.Process.Pid, "error", cleanupErr)
+
+		return errors.Join(err, cleanupErr)
+	}
+
+	if killErr := cmd.Process.Kill(); killErr != nil {
+		slog.Warn("ollama daemon cleanup after ownership failure failed", "pid", cmd.Process.Pid, "error", killErr)
+	}
+
+	// Reap the child after the forced cleanup so a failed ownership write does
+	// not leave a short-lived zombie process behind.
+	if waitErr := cmd.Wait(); waitErr != nil {
+		slog.Debug("ollama daemon cleanup wait completed", "pid", cmd.Process.Pid, "error", waitErr)
+	}
+
+	return err
+}
+
+func ollamaServePermissionOperations(req ollamaStartRequest) []permission.Operation {
+	return []permission.Operation{
+		{
+			Kind:   permission.OperationExecute,
+			Action: "ollama serve",
+			Target: req.BaseURL,
+			Source: "atteler.provider.ollama",
+		},
+		{
+			Kind:   permission.OperationWrite,
+			Action: "ollama daemon state",
+			Target: ollamaStateDir(req.OwnershipPath),
+			Source: "atteler.provider.ollama",
+		},
+		{
+			Kind:   permission.OperationNetwork,
+			Action: "ollama serve listener",
+			Target: req.BaseURL,
+			Source: "atteler.provider.ollama",
+		},
+	}
 }
 
 func ollamaCommandLine(commandLine []string) []string {
@@ -408,6 +546,10 @@ func (o *OllamaProvider) FetchModels(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
+	if policyErr := authorizeProviderPermission(ctx, providerOllama, "fetch Ollama models", o.baseURL+"/api/tags", permission.OperationNetwork); policyErr != nil {
+		return nil, policyErr
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/api/tags", http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("ollama: new models request: %w", err)
@@ -527,6 +669,10 @@ func (o *OllamaProvider) complete(ctx context.Context, params CompleteParams) (*
 	body, err := buildOllamaChatRequestBody(params, false)
 	if err != nil {
 		return nil, err
+	}
+
+	if policyErr := authorizeProviderPermission(ctx, providerOllama, "call Ollama chat", o.baseURL+"/api/chat", permission.OperationNetwork); policyErr != nil {
+		return nil, policyErr
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/chat", bytes.NewReader(body))
@@ -770,6 +916,10 @@ func (o *OllamaProvider) CompleteStream(ctx context.Context, params CompletePara
 	body, err := buildOllamaChatRequestBody(params, true)
 	if err != nil {
 		return nil, err
+	}
+
+	if policyErr := authorizeProviderPermission(ctx, providerOllama, "call Ollama chat stream", o.baseURL+"/api/chat", permission.OperationNetwork); policyErr != nil {
+		return nil, policyErr
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/chat", bytes.NewReader(body))

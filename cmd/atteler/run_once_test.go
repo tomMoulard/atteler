@@ -74,7 +74,7 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	dir := t.TempDir()
 
 	replayPath := filepath.Join(dir, "response.json")
-	if err := saveRecordedResponse(
+	if err := saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
@@ -136,7 +136,7 @@ func TestSaveRecordedResponse_IncludesResponseFormat(t *testing.T) {
 	dir := t.TempDir()
 	recordPath := filepath.Join(dir, "response.json")
 
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		recordPath,
 		llm.CompleteParams{
 			Model: "gpt-test",
@@ -196,6 +196,8 @@ func TestRunOnceComplete_CostBudgetFailsClosedWithoutPricing(t *testing.T) {
 		llm.AgentLoopBudget{MaxCostMicros: 1},
 		0,
 		responseRecordOptions{},
+		nil,
+		false,
 		"",
 		nil,
 		attshell.AuditContext{},
@@ -231,6 +233,8 @@ func TestRunOnceComplete_CostBudgetPassesWithCatalogPricing(t *testing.T) {
 		llm.AgentLoopBudget{MaxCostMicros: 10},
 		0,
 		responseRecordOptions{},
+		nil,
+		false,
 		"",
 		nil,
 		attshell.AuditContext{},
@@ -406,7 +410,7 @@ func TestRunOnceComplete_ReplayCostBudgetFailsClosedWithoutPricing(t *testing.T)
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
@@ -427,6 +431,8 @@ func TestRunOnceComplete_ReplayCostBudgetFailsClosedWithoutPricing(t *testing.T)
 		llm.AgentLoopBudget{MaxCostMicros: 10},
 		0,
 		responseRecordOptions{ReplayPath: replayPath},
+		nil,
+		false,
 		"",
 		nil,
 		attshell.AuditContext{},
@@ -440,7 +446,7 @@ func TestRunOnceComplete_ReplayCostBudgetPassesWithCatalogPricing(t *testing.T) 
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
@@ -461,6 +467,8 @@ func TestRunOnceComplete_ReplayCostBudgetPassesWithCatalogPricing(t *testing.T) 
 		llm.AgentLoopBudget{MaxCostMicros: 10},
 		0,
 		responseRecordOptions{ReplayPath: replayPath},
+		nil,
+		false,
 		"",
 		nil,
 		attshell.AuditContext{},
@@ -474,7 +482,7 @@ func TestRunOnceComplete_ReplayTokenBudgetsAreEnforced(t *testing.T) {
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
@@ -495,6 +503,8 @@ func TestRunOnceComplete_ReplayTokenBudgetsAreEnforced(t *testing.T) {
 		llm.AgentLoopBudget{MaxInputTokens: 6},
 		0,
 		responseRecordOptions{ReplayPath: replayPath},
+		nil,
+		false,
 		"",
 		nil,
 		attshell.AuditContext{},
@@ -509,7 +519,7 @@ func TestRunOnceComplete_ReplayTokenBudgetFailsClosedWithoutUsageMetadata(t *tes
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
@@ -528,6 +538,8 @@ func TestRunOnceComplete_ReplayTokenBudgetFailsClosedWithoutUsageMetadata(t *tes
 		llm.AgentLoopBudget{MaxOutputTokens: 100},
 		0,
 		responseRecordOptions{ReplayPath: replayPath},
+		nil,
+		false,
 		"",
 		nil,
 		attshell.AuditContext{},
@@ -537,7 +549,7 @@ func TestRunOnceComplete_ReplayTokenBudgetFailsClosedWithoutUsageMetadata(t *tes
 	assert.Contains(t, err.Error(), "token budget could not be enforced")
 
 	partialReplayPath := filepath.Join(dir, "partial-response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		partialReplayPath,
 		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
@@ -557,6 +569,8 @@ func TestRunOnceComplete_ReplayTokenBudgetFailsClosedWithoutUsageMetadata(t *tes
 		llm.AgentLoopBudget{MaxInputTokens: 100},
 		0,
 		responseRecordOptions{ReplayPath: partialReplayPath},
+		nil,
+		false,
 		"",
 		nil,
 		attshell.AuditContext{},
@@ -566,7 +580,7 @@ func TestRunOnceComplete_ReplayTokenBudgetFailsClosedWithoutUsageMetadata(t *tes
 	assert.Contains(t, err.Error(), "input token usage unavailable")
 
 	combinedReplayPath := filepath.Join(dir, "combined-response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		combinedReplayPath,
 		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
@@ -586,6 +600,8 @@ func TestRunOnceComplete_ReplayTokenBudgetFailsClosedWithoutUsageMetadata(t *tes
 		llm.AgentLoopBudget{MaxInputTokens: 100, MaxOutputTokens: 100},
 		0,
 		responseRecordOptions{ReplayPath: combinedReplayPath},
+		nil,
+		false,
 		"",
 		nil,
 		attshell.AuditContext{},
@@ -639,7 +655,7 @@ func TestRunOnceWithOptions_EmitsEstimatedAndActualRouteDecisionEvents(t *testin
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "review this"}}},
 		nil,
@@ -724,7 +740,7 @@ func TestRunOnceWithOptions_EmitsRouteDecisionForModelRole(t *testing.T) {
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "plan this"}}},
 		nil,
@@ -802,7 +818,7 @@ func TestRunOnceWithOptions_ModelRoleInfersToolCapabilityFromOneShotRequest(t *t
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "toolbox/small", Messages: []llm.Message{{Role: llm.RoleUser, Content: "fix this"}}},
 		nil,
@@ -879,7 +895,7 @@ func TestRunOnceWithOptions_AgentModelRoleBypassesAgentCatalogRoute(t *testing.T
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "plan this"}}},
 		nil,
@@ -957,7 +973,7 @@ func TestRunOnceWithOptions_AppendsWorkspaceVectorContext(t *testing.T) {
 	replayPath := filepath.Join(dir, "response.json")
 	recordPath := filepath.Join(dir, "recorded-request.json")
 
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "Where are OAuth retry notes?"}}},
 		nil,
@@ -1140,7 +1156,7 @@ func TestRunOnceWithOptions_DoesNotIndexWorkspaceVectorContextWhenDisabled(t *te
 	replayPath := filepath.Join(dir, "response.json")
 	recordPath := filepath.Join(dir, "recorded-request.json")
 
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "Where are OAuth retry notes?"}}},
 		nil,
@@ -1199,7 +1215,7 @@ func TestRunOnceWithOptions_HeadlessManifestIncludesWorkspaceVectorContext(t *te
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "docs", "auth.md"), []byte("OAuth callback state validation and token exchange retry notes."), 0o600))
 
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "Where are OAuth retry notes?"}}},
 		nil,
@@ -1610,7 +1626,7 @@ func TestBashExecutorStreamsOutputBeforeCompletion(t *testing.T) {
 	done := make(chan llm.ToolResult, 1)
 
 	go func() {
-		done <- newBashExecutor(t.TempDir(), logw, attshell.AuditContext{})(context.Background(), llm.ToolCall{
+		done <- newBashExecutor(t.TempDir(), logw, attshell.AuditContext{}, nil)(context.Background(), llm.ToolCall{
 			ID:    "call-1",
 			Name:  "bash",
 			Input: map[string]any{"command": `printf '\154ive\n'; sleep 0.4; printf '\144one\n'`},
@@ -1643,7 +1659,7 @@ func TestBashExecutorDefaultsAuditAutonomy(t *testing.T) {
 	auditDir := filepath.Join(t.TempDir(), "audit")
 	result := newBashExecutor(t.TempDir(), nil, attshell.AuditContext{
 		AuditDir: auditDir,
-	})(context.Background(), llm.ToolCall{
+	}, nil)(context.Background(), llm.ToolCall{
 		ID:    "call-1",
 		Name:  "bash",
 		Input: map[string]any{"command": "printf ok"},
@@ -1666,7 +1682,7 @@ func TestBashExecutorStreamsStderrBeforeCompletion(t *testing.T) {
 	done := make(chan llm.ToolResult, 1)
 
 	go func() {
-		done <- newBashExecutor(t.TempDir(), logw, attshell.AuditContext{})(context.Background(), llm.ToolCall{
+		done <- newBashExecutor(t.TempDir(), logw, attshell.AuditContext{}, nil)(context.Background(), llm.ToolCall{
 			ID:    "call-1",
 			Name:  "bash",
 			Input: map[string]any{"command": `printf '\167arn\n' >&2; sleep 0.4; printf '\144one\n' >&2`},
@@ -1745,7 +1761,7 @@ func TestRunOnceWithOptions_HeadlessReplayCreatesMetadata(t *testing.T) {
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "openai/gpt-4.1-mini", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
@@ -1916,6 +1932,7 @@ func TestStartHeadlessRunRejectsWhitespacePaddedExplicitID(t *testing.T) {
 
 	store := session.NewStore(t.TempDir())
 	run, err := startHeadlessRun(
+		t.Context(),
 		store,
 		runOnceExecutionOptions{Headless: true, HeadlessID: " headless-id "},
 		session.New("gpt-test", nil),
@@ -1934,6 +1951,7 @@ func TestStartHeadlessRunRejectsWhitespacePaddedParentID(t *testing.T) {
 	t.Setenv(headlessParentRunIDEnv, " parent-headless ")
 
 	run, err := startHeadlessRun(
+		t.Context(),
 		store,
 		runOnceExecutionOptions{Headless: true, HeadlessID: "child-headless"},
 		session.New("gpt-test", nil),
@@ -1960,6 +1978,7 @@ func TestStartHeadlessRunRecordsParentRunRelationship(t *testing.T) {
 	t.Setenv(headlessParentRunIDEnv, "parent-headless")
 
 	child, err := startHeadlessRun(
+		t.Context(),
 		store,
 		runOnceExecutionOptions{
 			HeadlessID: "child-headless",
@@ -2000,6 +2019,7 @@ func TestStartHeadlessRunRejectsExistingExplicitID(t *testing.T) {
 	}))
 
 	run, err := startHeadlessRun(
+		t.Context(),
 		store,
 		runOnceExecutionOptions{
 			HeadlessID: "duplicate-headless",
@@ -2139,7 +2159,7 @@ func TestRunOnceWithOptions_HeadlessManifestIncludesInlineReferenceAudit(t *test
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "docs", "guide.md"), []byte(referenceContent), 0o600))
 
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "fallback/tiny", Messages: []llm.Message{{Role: llm.RoleUser, Content: "summarize @docs/guide.md"}}},
 		nil,
@@ -2213,7 +2233,7 @@ func TestRunOnceWithOptions_HeadlessPrivateLogKeepsPrompt(t *testing.T) {
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,
@@ -2272,7 +2292,7 @@ func TestRunOnceWithOptions_HeadlessRedactsPromptByDefault(t *testing.T) {
 
 	dir := t.TempDir()
 	replayPath := filepath.Join(dir, "response.json")
-	require.NoError(t, saveRecordedResponse(
+	require.NoError(t, saveRecordedResponse(t.Context(),
 		replayPath,
 		llm.CompleteParams{Model: "gpt-test", Messages: []llm.Message{{Role: llm.RoleUser, Content: "hello"}}},
 		nil,

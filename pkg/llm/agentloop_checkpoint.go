@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 // AgentLoopStepKind identifies what a checkpoint record describes.
@@ -197,6 +198,10 @@ func (c *AgentLoopJSONLCheckpoint) SaveAgentLoopStep(ctx context.Context, step A
 		return errors.New("llm: agent loop checkpoint path is required")
 	}
 
+	if err := authorizeAgentLoopCheckpointWrite(ctx, c.path); err != nil {
+		return err
+	}
+
 	dir := filepath.Dir(c.path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("llm: create checkpoint dir: %w", err)
@@ -214,6 +219,27 @@ func (c *AgentLoopJSONLCheckpoint) SaveAgentLoopStep(ctx context.Context, step A
 	}
 
 	return nil
+}
+
+func authorizeAgentLoopCheckpointWrite(ctx context.Context, path string) error {
+	action := "write agent loop checkpoint"
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: action,
+		Source: "atteler.agent_loop.checkpoint",
+		Target: path,
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationWrite,
+			Action: action,
+			Source: "atteler.agent_loop.checkpoint",
+			Target: path,
+		}},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return fmt.Errorf("llm: save checkpoint: %w", &permission.Error{Decision: decision})
 }
 
 // LoadAgentLoopLedger reads a JSONL checkpoint file produced by

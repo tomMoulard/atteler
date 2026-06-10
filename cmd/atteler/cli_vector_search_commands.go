@@ -58,7 +58,7 @@ func runVectorSearchWithAutonomy(ctx context.Context, cwd string, cfg appconfig.
 			workspaceDisplayEmbeddingEndpoint(settings.BaseURL),
 		)
 
-		fallbackPaths := vectorSearchFallbackPaths(opts.vectorIndexFiles, settings.IndexPath)
+		fallbackPaths := vectorSearchFallbackPaths(ctx, opts.vectorIndexFiles, settings.IndexPath)
 		settings = lexicalVectorFallbackSettings(settings)
 
 		return runVectorSearchOnceWithAutonomy(ctx, settings, opts.vectorSearch, fallbackPaths, level)
@@ -77,8 +77,10 @@ func runVectorSearchWithAutonomy(ctx context.Context, cwd string, cfg appconfig.
 
 	fmt.Fprintln(os.Stderr, "warning: embedding vector search failed; falling back to lexical hashed token-frequency retrieval: "+err.Error())
 
-	fallbackPaths := vectorSearchFallbackPaths(opts.vectorIndexFiles, settings.IndexPath)
-	settings = lexicalVectorFallbackSettings(settings)
+	fallbackPaths := append([]string(nil), opts.vectorIndexFiles...)
+	if len(fallbackPaths) == 0 {
+		fallbackPaths = vectorIndexSourcePaths(ctx, settings.IndexPath)
+	}
 
 	return runVectorSearchOnceWithAutonomy(ctx, settings, opts.vectorSearch, fallbackPaths, level)
 }
@@ -102,6 +104,16 @@ func runVectorSearchOnce(ctx context.Context, settings vectorSearchSettings, que
 	idx, rebuilt, err := loadOrBuildVectorIndex(ctx, settings, paths, vectorizer, metadata)
 	if err != nil {
 		return err
+	}
+
+	if rebuilt {
+		if authErr := authorizeWritePermission(ctx, "write vector search index", "atteler.vector_search", settings.IndexPath); authErr != nil {
+			return fmt.Errorf("vector search: authorize index save: %w", authErr)
+		}
+
+		if saveErr := idx.Save(settings.IndexPath); saveErr != nil {
+			return fmt.Errorf("vector search: save index: %w", saveErr)
+		}
 	}
 
 	if query == "" {
@@ -171,7 +183,7 @@ func prepareVectorSearchQuery(
 	}
 
 	if len(paths) == 0 {
-		if validateErr := validateReusableVectorIndexForQuery(settings, metadata); validateErr != nil {
+		if validateErr := validateReusableVectorIndexForQuery(ctx, settings, metadata); validateErr != nil {
 			return nil, metadata, validateErr
 		}
 	}
@@ -186,7 +198,11 @@ func prepareVectorSearchQuery(
 	return queryVector, metadata, nil
 }
 
-func validateReusableVectorIndexForQuery(settings vectorSearchSettings, metadata vector.VectorizerMetadata) error {
+func validateReusableVectorIndexForQuery(ctx context.Context, settings vectorSearchSettings, metadata vector.VectorizerMetadata) error {
+	if err := authorizeReadPermission(ctx, "read vector search index", "atteler.vector_search", settings.IndexPath); err != nil {
+		return fmt.Errorf("vector search: authorize index read: %w", err)
+	}
+
 	idx, err := vector.LoadIndex(settings.IndexPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -196,7 +212,7 @@ func validateReusableVectorIndexForQuery(settings vectorSearchSettings, metadata
 		return fmt.Errorf("vector search: load index: %w", err)
 	}
 
-	_, _, err = reusableVectorIndex(idx, metadata, settings.Chunk, settings.IndexPath, nil)
+	_, _, err = reusableVectorIndex(ctx, idx, metadata, settings.Chunk, settings.IndexPath, nil)
 	if err != nil {
 		return err
 	}
@@ -345,6 +361,10 @@ func loadOrBuildVectorIndex(
 	vectorizer vector.Vectorizer,
 	metadata vector.VectorizerMetadata,
 ) (*vector.Index, bool, error) {
+	if err := authorizeReadPermission(ctx, "read vector search index", "atteler.vector_search", settings.IndexPath); err != nil {
+		return nil, false, fmt.Errorf("vector search: authorize index read: %w", err)
+	}
+
 	idx, loadErr := vector.LoadIndex(settings.IndexPath)
 	if loadErr == nil {
 		loaded, err := reuseOrRefreshLoadedVectorIndex(ctx, idx, settings, paths, vectorizer, metadata)
@@ -381,7 +401,7 @@ func reuseOrRefreshLoadedVectorIndex(
 	vectorizer vector.Vectorizer,
 	metadata vector.VectorizerMetadata,
 ) (vectorIndexLoadResult, error) {
-	reuse, rebuildPaths, err := reusableVectorIndex(idx, metadata, settings.Chunk, settings.IndexPath, paths)
+	reuse, rebuildPaths, err := reusableVectorIndex(ctx, idx, metadata, settings.Chunk, settings.IndexPath, paths)
 	if err != nil {
 		return vectorIndexLoadResult{handled: true}, err
 	}
@@ -409,7 +429,11 @@ func refreshFileVectorIndex(
 	vectorizer vector.Vectorizer,
 	metadata vector.VectorizerMetadata,
 ) (*vector.Index, error) {
-	sources, err := vectorSourcesFromFiles(paths)
+	if err := authorizeWritePermission(ctx, "write vector search index", "atteler.vector_search", settings.IndexPath); err != nil {
+		return nil, fmt.Errorf("vector search: authorize index write: %w", err)
+	}
+
+	sources, err := vectorSourcesFromFiles(ctx, paths)
 	if err != nil {
 		return nil, err
 	}
@@ -433,6 +457,7 @@ func refreshFileVectorIndex(
 }
 
 func reusableVectorIndex(
+	ctx context.Context,
 	idx *vector.Index,
 	metadata vector.VectorizerMetadata,
 	chunk vector.ChunkOptions,
@@ -441,7 +466,7 @@ func reusableVectorIndex(
 ) (reuse bool, rebuildPaths []string, err error) {
 	currentPaths := mergeVectorSourcePaths(indexSourcePaths(idx), paths)
 
-	currentSources, presentPaths, sourceErr := vectorSourceMetadataForReusableIndex(currentPaths, paths)
+	currentSources, presentPaths, sourceErr := vectorSourceMetadataForReusableIndex(ctx, currentPaths, paths)
 	if sourceErr != nil {
 		if len(paths) == 0 {
 			return false, nil, fmt.Errorf("vector search: validate index sources: %w", sourceErr)
@@ -462,9 +487,13 @@ func reusableVectorIndex(
 	return false, presentPaths, nil
 }
 
-func vectorSourcesFromFiles(paths []string) ([]vector.Source, error) {
+func vectorSourcesFromFiles(ctx context.Context, paths []string) ([]vector.Source, error) {
 	sources := make([]vector.Source, 0, len(paths))
 	for _, path := range paths {
+		if err := authorizeReadPermission(ctx, "read vector search source", "atteler.vector_search", path); err != nil {
+			return nil, fmt.Errorf("vector search: authorize source read: %w", err)
+		}
+
 		source, err := vector.SourceFromFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("vector search: read %s: %w", path, err)
@@ -477,6 +506,7 @@ func vectorSourcesFromFiles(paths []string) ([]vector.Source, error) {
 }
 
 func vectorSourceMetadataForReusableIndex(
+	ctx context.Context,
 	currentPaths []string,
 	requestedPaths []string,
 ) ([]vector.SourceMetadata, []string, error) {
@@ -485,6 +515,10 @@ func vectorSourceMetadataForReusableIndex(
 	presentPaths := make([]string, 0, len(currentPaths))
 
 	for _, path := range currentPaths {
+		if err := authorizeReadPermission(ctx, "read vector source metadata", "atteler.vector_search", path); err != nil {
+			return nil, nil, fmt.Errorf("vector source metadata %s: authorize read: %w", path, err)
+		}
+
 		source, err := vector.SourceMetadataFromFile(path)
 		if err != nil {
 			clean := filepath.Clean(strings.TrimSpace(path))
@@ -614,7 +648,11 @@ func mergeVectorSourcePaths(existing, requested []string) []string {
 	return paths
 }
 
-func vectorIndexSourcePaths(indexPath string) []string {
+func vectorIndexSourcePaths(ctx context.Context, indexPath string) []string {
+	if err := authorizeReadPermission(ctx, "read vector search fallback index", "atteler.vector_search", indexPath); err != nil {
+		return nil
+	}
+
 	idx, err := vector.LoadIndex(indexPath)
 	if err != nil {
 		return nil
@@ -623,8 +661,8 @@ func vectorIndexSourcePaths(indexPath string) []string {
 	return indexSourcePaths(idx)
 }
 
-func vectorSearchFallbackPaths(paths []string, indexPath string) []string {
-	return presentVectorSearchFallbackPaths(vectorIndexSourcePaths(indexPath), paths)
+func vectorSearchFallbackPaths(ctx context.Context, paths []string, indexPath string) []string {
+	return presentVectorSearchFallbackPaths(vectorIndexSourcePaths(ctx, indexPath), paths)
 }
 
 func presentVectorSearchFallbackPaths(existing, requested []string) []string {

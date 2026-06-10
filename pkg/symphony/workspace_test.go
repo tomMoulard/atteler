@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -43,60 +44,148 @@ func TestWorkspaceManager_EnsureSanitizesAndRunsCreateHookOnce(t *testing.T) {
 	assert.Equal(t, "created", string(data))
 }
 
-func TestWorkspaceManager_EnsureLowAutonomyDoesNotCreateWorkspace(t *testing.T) {
+func TestWorkspaceManager_EnsurePermissionPolicyDeniesWriteBeforeCreate(t *testing.T) {
 	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
 
 	root := filepath.Join(t.TempDir(), "workspaces")
-	cfg := Config{
-		Autonomy:  autonomy.Low,
-		Workspace: WorkspaceConfig{Root: root},
-	}
-	issue := Issue{ID: "issue-node", Identifier: "GH-185", Title: "Fix", State: "OPEN"}
+	cfg := Config{Workspace: WorkspaceConfig{Root: root}}
+	issue := Issue{ID: "1", Identifier: "GH-8", Title: "Policy", State: "OPEN"}
 
-	_, err := NewWorkspaceManager(nil).Ensure(context.Background(), cfg, issue)
+	manager := NewWorkspaceManager(nil)
+	workspace, err := manager.Ensure(ctx, cfg, issue)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
-	assert.Contains(t, err.Error(), "workspace creation")
-	assert.NoDirExists(t, root)
+	require.True(t, permission.ErrDenied(err))
+	assert.Empty(t, workspace.Path)
+	assert.Contains(t, err.Error(), "permission.write.deny")
+
+	_, statErr := os.Stat(root)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "create Symphony workspace root")
+	assert.Contains(t, string(auditData), "permission.write.deny")
 }
 
-func TestWorkspaceManager_EnsureLowAutonomyCanReuseExistingWorkspace(t *testing.T) {
+func TestWorkspaceManager_EnsurePermissionPolicyDeniesReadBeforeIssueStat(t *testing.T) {
 	t.Parallel()
 
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
 	root := t.TempDir()
-	workspacePath := filepath.Join(root, "GH-185")
-	require.NoError(t, os.Mkdir(workspacePath, 0o750))
+	cfg := Config{Workspace: WorkspaceConfig{Root: root}}
+	issue := Issue{ID: "1", Identifier: "GH-8", Title: "Policy", State: "OPEN"}
 
-	cfg := Config{
-		Autonomy:  autonomy.Low,
-		Workspace: WorkspaceConfig{Root: root},
-	}
-	issue := Issue{ID: "issue-node", Identifier: "GH-185", Title: "Fix", State: "OPEN"}
+	manager := NewWorkspaceManager(nil)
+	workspace, err := manager.Ensure(ctx, cfg, issue)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Empty(t, workspace.Path)
+	assert.Contains(t, err.Error(), "permission.read.deny")
 
-	workspace, err := NewWorkspaceManager(nil).Ensure(context.Background(), cfg, issue)
-	require.NoError(t, err)
-	assert.False(t, workspace.CreatedNow)
-	assert.Equal(t, workspacePath, workspace.Path)
+	_, statErr := os.Stat(filepath.Join(root, "GH-8"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "inspect Symphony issue workspace")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
-func TestWorkspaceManager_RemoveLowAutonomyDoesNotDeleteWorkspace(t *testing.T) {
+func TestWorkspaceManager_RemovePermissionPolicyDeniesMergeDeleteBeforeCleanup(t *testing.T) {
 	t.Parallel()
 
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationMergeDelete, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
 	root := t.TempDir()
-	workspacePath := filepath.Join(root, "GH-185")
-	require.NoError(t, os.Mkdir(workspacePath, 0o750))
+	workspacePath := filepath.Join(root, "GH-8")
+	require.NoError(t, os.Mkdir(workspacePath, workspaceDirPermissions))
 
 	cfg := Config{
-		Autonomy:  autonomy.Low,
 		Workspace: WorkspaceConfig{Root: root},
+		Hooks: HooksConfig{
+			BeforeRemove: "printf removed > hook-ran",
+			Timeout:      time.Second,
+		},
 	}
-	issue := Issue{ID: "issue-node", Identifier: "GH-185", Title: "Fix", State: "OPEN"}
+	issue := Issue{ID: "1", Identifier: "GH-8", Title: "Policy", State: "OPEN"}
 
-	err := NewWorkspaceManager(nil).Remove(context.Background(), cfg, issue)
+	manager := NewWorkspaceManager(nil)
+	err := manager.Remove(ctx, cfg, issue)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
-	assert.Contains(t, err.Error(), "workspace removal")
-	assert.DirExists(t, workspacePath)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.merge_delete.deny")
+
+	info, statErr := os.Stat(workspacePath)
+	require.NoError(t, statErr)
+	assert.True(t, info.IsDir())
+
+	_, hookStatErr := os.Stat(filepath.Join(workspacePath, "hook-ran"))
+	require.ErrorIs(t, hookStatErr, os.ErrNotExist)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "remove Symphony workspace")
+	assert.Contains(t, string(auditData), "permission.merge_delete.deny")
+}
+
+func TestWorkspaceManager_RemovePermissionPolicyDeniesReadBeforeStat(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	root := t.TempDir()
+	workspacePath := filepath.Join(root, "GH-8")
+	require.NoError(t, os.Mkdir(workspacePath, workspaceDirPermissions))
+
+	cfg := Config{
+		Workspace: WorkspaceConfig{Root: root},
+		Hooks: HooksConfig{
+			BeforeRemove: "printf removed > hook-ran",
+			Timeout:      time.Second,
+		},
+	}
+	issue := Issue{ID: "1", Identifier: "GH-8", Title: "Policy", State: "OPEN"}
+
+	manager := NewWorkspaceManager(nil)
+	err := manager.Remove(ctx, cfg, issue)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	info, statErr := os.Stat(workspacePath)
+	require.NoError(t, statErr)
+	assert.True(t, info.IsDir())
+
+	_, hookStatErr := os.Stat(filepath.Join(workspacePath, "hook-ran"))
+	require.ErrorIs(t, hookStatErr, os.ErrNotExist)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "inspect Symphony workspace before removal")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestRunHookRequiresActiveContext(t *testing.T) {

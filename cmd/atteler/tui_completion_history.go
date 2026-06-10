@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,14 +14,12 @@ import (
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
-func completionCandidates(input string, agents *agent.Registry, root string, limit int) ([]completionCandidate, bool) {
+const defaultCompletionCandidateLimit = 8
+
+func completionCandidates(ctx context.Context, input string, agents *agent.Registry, root string) ([]completionCandidate, bool) {
 	_, prefix, ok := activeAtToken(input)
 	if !ok {
 		return nil, false
-	}
-
-	if limit <= 0 {
-		limit = 8
 	}
 
 	var out []completionCandidate
@@ -34,14 +33,14 @@ func completionCandidates(input string, agents *agent.Registry, root string, lim
 					label: "@" + name,
 					value: "@" + name + " ",
 				})
-				if len(out) >= limit {
+				if len(out) >= defaultCompletionCandidateLimit {
 					return out, true
 				}
 			}
 		}
 	}
 
-	fileCandidates := pathCompletionCandidates(root, prefix, limit-len(out))
+	fileCandidates := pathCompletionCandidates(ctx, root, prefix, defaultCompletionCandidateLimit-len(out))
 	out = append(out, fileCandidates...)
 
 	return out, true
@@ -87,7 +86,7 @@ func lastRune(value string) (r rune, size int) {
 	return r, size
 }
 
-func pathCompletionCandidates(root, prefix string, limit int) []completionCandidate {
+func pathCompletionCandidates(ctx context.Context, root, prefix string, limit int) []completionCandidate {
 	if limit <= 0 || filepath.IsAbs(prefix) {
 		return nil
 	}
@@ -108,6 +107,10 @@ func pathCompletionCandidates(root, prefix string, limit int) []completionCandid
 		return nil
 	}
 
+	if err := authorizeReadPermission(ctx, "complete file path candidates", "atteler.completion.path", dir); err != nil {
+		return nil
+	}
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -117,36 +120,45 @@ func pathCompletionCandidates(root, prefix string, limit int) []completionCandid
 
 	out := make([]completionCandidate, 0, min(limit, len(entries)))
 	for _, entry := range entries {
-		name := entry.Name()
-		if strings.HasPrefix(name, ".") && !strings.HasPrefix(base, ".") {
+		candidate, ok := pathCompletionCandidateForEntry(entry, dirPart, base)
+		if !ok {
 			continue
 		}
 
-		if base != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base)) {
-			continue
-		}
-
-		rel := name
-		if dirPart != "." {
-			rel = filepath.Join(dirPart, name)
-		}
-
-		value := "@" + filepath.ToSlash(rel)
-		if entry.IsDir() {
-			value += "/"
-		}
-
-		out = append(out, completionCandidate{
-			kind:  "path",
-			label: value,
-			value: value,
-		})
+		out = append(out, candidate)
 		if len(out) >= limit {
 			break
 		}
 	}
 
 	return out
+}
+
+func pathCompletionCandidateForEntry(entry os.DirEntry, dirPart, base string) (completionCandidate, bool) {
+	name := entry.Name()
+	if strings.HasPrefix(name, ".") && !strings.HasPrefix(base, ".") {
+		return completionCandidate{}, false
+	}
+
+	if base != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base)) {
+		return completionCandidate{}, false
+	}
+
+	rel := name
+	if dirPart != "." {
+		rel = filepath.Join(dirPart, name)
+	}
+
+	value := "@" + filepath.ToSlash(rel)
+	if entry.IsDir() {
+		value += "/"
+	}
+
+	return completionCandidate{
+		kind:  "path",
+		label: value,
+		value: value,
+	}, true
 }
 
 func pathCompletionParts(prefix string) (dirPart, base string) {
@@ -203,7 +215,7 @@ func applyPromptSuggestion(input string, suggestion promptcomplete.Suggestion) s
 	return input[:suggestion.ReplacementStart] + suggestion.Text + input[suggestion.ReplacementEnd:]
 }
 
-func promptHistoryFromStore(store *session.Store, current session.Session, limit int) []string {
+func promptHistoryFromStore(ctx context.Context, store *session.Store, current session.Session, limit int) []string {
 	if limit <= 0 {
 		return nil
 	}
@@ -212,6 +224,10 @@ func promptHistoryFromStore(store *session.Store, current session.Session, limit
 
 	out := appendUserPromptsNewestFirst(nil, seen, current.Messages, limit)
 	if len(out) >= limit || store == nil {
+		return out
+	}
+
+	if err := authorizeReadPermission(ctx, "load prompt history", "atteler.prompt_history", store.Dir()); err != nil {
 		return out
 	}
 

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -236,6 +237,14 @@ func CreateContext(ctx context.Context, repoDir, sessionID string) (*Info, error
 		return nil, err
 	}
 
+	if err := authorizeWorktreePermission(ctx, "create worktree", repoDir, sessionID, []permission.OperationKind{
+		permission.OperationExecute,
+		permission.OperationWrite,
+		permission.OperationGitMutation,
+	}); err != nil {
+		return nil, err
+	}
+
 	plan, err := planCreateWorktree(ctx, repoDir, sessionID)
 	if err != nil {
 		return nil, err
@@ -398,6 +407,20 @@ func MergeWithOptionsContext(ctx context.Context, repoDir string, info *Info, op
 // and returns the review summary needed for user-facing merge output.
 func MergeWithResultContext(ctx context.Context, repoDir string, info *Info, opts MergeOptions) (MergeResult, error) {
 	if err := requireCommandContext(ctx); err != nil {
+		return MergeResult{}, err
+	}
+
+	sessionID := ""
+	if info != nil {
+		sessionID = info.SessionID
+	}
+
+	if err := authorizeWorktreePermission(ctx, "merge worktree", repoDir, sessionID, []permission.OperationKind{
+		permission.OperationExecute,
+		permission.OperationWrite,
+		permission.OperationGitMutation,
+		permission.OperationMergeDelete,
+	}); err != nil {
 		return MergeResult{}, err
 	}
 
@@ -567,6 +590,20 @@ func RemoveContext(ctx context.Context, repoDir string, info *Info) error {
 // destructive-cleanup policy.
 func RemoveWithOptionsContext(ctx context.Context, repoDir string, info *Info, opts RemoveOptions) error {
 	if err := requireCommandContext(ctx); err != nil {
+		return err
+	}
+
+	sessionID := ""
+	if info != nil {
+		sessionID = info.SessionID
+	}
+
+	if err := authorizeWorktreePermission(ctx, "remove worktree", repoDir, sessionID, []permission.OperationKind{
+		permission.OperationExecute,
+		permission.OperationWrite,
+		permission.OperationGitMutation,
+		permission.OperationMergeDelete,
+	}); err != nil {
 		return err
 	}
 
@@ -1700,8 +1737,9 @@ func statusRelativePath(repoRoot, path string) (string, bool) {
 }
 
 type transactionLog struct {
-	path     string
-	repoRoot string
+	authorizeWrite func() error
+	path           string
+	repoRoot       string
 }
 
 func newTransactionLog(ctx context.Context, repoRoot, sessionID string) (*transactionLog, error) {
@@ -1710,12 +1748,21 @@ func newTransactionLog(ctx context.Context, repoRoot, sessionID string) (*transa
 		return nil, err
 	}
 
+	name := fmt.Sprintf("%s-%s.log", sessionID, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	path := filepath.Join(dir, name)
+	authorizeWrite := func() error {
+		return authorizeWorktreePermission(ctx, "write worktree merge transaction log", path, sessionID, []permission.OperationKind{
+			permission.OperationWrite,
+		})
+	}
+
+	if permissionErr := authorizeWrite(); permissionErr != nil {
+		return nil, permissionErr
+	}
+
 	if mkdirErr := os.MkdirAll(dir, 0o700); mkdirErr != nil {
 		return nil, fmt.Errorf("create transaction log dir %s: %w", dir, mkdirErr)
 	}
-
-	name := fmt.Sprintf("%s-%s.log", sessionID, time.Now().UTC().Format("20060102T150405.000000000Z"))
-	path := filepath.Join(dir, name)
 
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -1727,12 +1774,18 @@ func newTransactionLog(ctx context.Context, repoRoot, sessionID string) (*transa
 		return nil, fmt.Errorf("write transaction log header %s: %w", path, err)
 	}
 
-	return &transactionLog{path: path, repoRoot: repoRoot}, nil
+	return &transactionLog{authorizeWrite: authorizeWrite, path: path, repoRoot: repoRoot}, nil
 }
 
 func (l *transactionLog) append(step, detail string) error {
 	if l == nil {
 		return nil
+	}
+
+	if l.authorizeWrite != nil {
+		if err := l.authorizeWrite(); err != nil {
+			return err
+		}
 	}
 
 	file, err := os.OpenFile(l.path, os.O_WRONLY|os.O_APPEND, 0o600)
@@ -2067,6 +2120,41 @@ func printable(value string) string {
 	}
 
 	return value
+}
+
+func authorizeWorktreePermission(ctx context.Context, action, target, sessionID string, kinds []permission.OperationKind) error {
+	ops := make([]permission.Operation, 0, len(kinds))
+
+	metadata := map[string]string{}
+	if sessionID != "" {
+		metadata["session_id"] = sessionID
+	}
+
+	for _, kind := range kinds {
+		op := permission.Operation{
+			Kind:   kind,
+			Action: action,
+			Target: target,
+			Source: "atteler.worktree",
+		}
+		if len(metadata) > 0 {
+			op.Metadata = metadata
+		}
+
+		ops = append(ops, op)
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Operations: ops,
+		Action:     action,
+		Source:     "atteler.worktree",
+		Target:     target,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return fmt.Errorf("worktree: %s: %w", action, &permission.Error{Decision: decision})
 }
 
 // gitRun executes a git command in dir and returns any error.

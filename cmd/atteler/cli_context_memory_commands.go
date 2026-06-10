@@ -28,7 +28,6 @@ import (
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
-	"github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/vector"
 )
 
@@ -122,18 +121,15 @@ func authorizeLSPCommandWithAutonomy(ctx context.Context, spec lsp.CommandSpec, 
 	}
 }
 
-func lspCommandAuditContext(level autonomy.Level) shell.AuditContext {
-	return shell.AuditContext{
-		Caller:   "atteler.lsp",
-		Autonomy: autonomy.Normalize(level).String(),
+func runContextPack(ctx context.Context, path string, maxTokens int, model string) error {
+	return runContextPackWithWriters(ctx, os.Stdout, os.Stderr, path, maxTokens, model)
+}
+
+func runContextPackWithWriters(ctx context.Context, stdout, stderr io.Writer, path string, maxTokens int, model string) error {
+	if err := authorizeReadPermission(ctx, "read context pack input", "atteler.context_pack", path); err != nil {
+		return err
 	}
-}
 
-func runContextPack(path string, maxTokens int, model string) error {
-	return runContextPackWithWriters(os.Stdout, os.Stderr, path, maxTokens, model)
-}
-
-func runContextPackWithWriters(stdout, stderr io.Writer, path string, maxTokens int, model string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("context pack: read %s: %w", path, err)
@@ -416,7 +412,11 @@ type agentMemoryVectorizerRuntime struct {
 	configured bool
 }
 
-func runAgentMemoryCommand(
+func runAgentMemoryCommand(ctx context.Context, root, selectedAgent string, input agentMemoryCommandInput) error {
+	return runAgentMemoryCommandWithConfig(ctx, root, selectedAgent, appconfig.VectorConfig{}, input)
+}
+
+func runAgentMemoryCommandWithConfig(
 	ctx context.Context,
 	root,
 	selectedAgent string,
@@ -448,6 +448,9 @@ func runAgentMemoryCommandWithAutonomy(
 	}
 
 	storePath := agentMemoryStorePath(root, agentName, input.StorePath, cfg)
+	if err := authorizeAgentMemoryStoreAccess(ctx, input, storePath); err != nil {
+		return err
+	}
 
 	runtime, err := agentMemoryRuntimeForCommand(cfg, agentName, input)
 	if err != nil {
@@ -500,6 +503,20 @@ func runAgentMemoryCommandWithAutonomy(
 	return nil
 }
 
+func authorizeAgentMemoryStoreAccess(ctx context.Context, input agentMemoryCommandInput, storePath string) error {
+	if agentMemoryCommandMutatesStore(input) {
+		if err := authorizeWritePermission(ctx, "mutate agent memory store", "atteler.agent_memory", storePath); err != nil {
+			return fmt.Errorf("agent memory: authorize store write: %w", err)
+		}
+	}
+
+	if err := authorizeReadPermission(ctx, "read agent memory store", "atteler.agent_memory", storePath); err != nil {
+		return fmt.Errorf("agent memory: authorize store read: %w", err)
+	}
+
+	return nil
+}
+
 func agentMemoryRuntimeForCommand(
 	cfg appconfig.VectorConfig,
 	agentName string,
@@ -544,6 +561,10 @@ func agentMemoryCommandNeedsVectorizer(input agentMemoryCommandInput) bool {
 	return strings.TrimSpace(input.Search) != "" ||
 		len(input.IndexFiles) > 0 ||
 		input.Migrate
+}
+
+func agentMemoryCommandMutatesStore(input agentMemoryCommandInput) bool {
+	return input.Migrate || input.Compact || strings.TrimSpace(input.DeleteID) != "" || len(input.IndexFiles) > 0
 }
 
 func mutateAgentMemoryStore(
@@ -632,6 +653,10 @@ func indexAgentMemoryFiles(
 ) (string, error) {
 	opts := agentMemoryIndexOptions(ttlSeconds)
 	for _, path := range paths {
+		if err := authorizeReadPermission(ctx, "read agent memory index file", "atteler.agent_memory", path); err != nil {
+			return "", fmt.Errorf("agent memory: authorize index file read: %w", err)
+		}
+
 		if addErr := store.AddFileWithOptionsContext(ctx, agentName, path, opts...); addErr != nil {
 			return "", fmt.Errorf("agent memory: index %s: %w", path, addErr)
 		}
@@ -912,7 +937,7 @@ func runRetrievalCommand(ctx context.Context, state appState, input retrievalCom
 		limit = 5
 	}
 
-	sources, err := selectedRetrievalSourcesForState(state, input)
+	sources, err := selectedRetrievalSourcesForState(ctx, state, input)
 	if err != nil {
 		return err
 	}
@@ -1018,9 +1043,9 @@ func selectedRetrievalSources(input retrievalCommandInput, includeVectorSource b
 	return out, nil
 }
 
-func selectedRetrievalSourcesForState(state appState, input retrievalCommandInput) ([]retrieval.SourceType, error) {
+func selectedRetrievalSourcesForState(ctx context.Context, state appState, input retrievalCommandInput) ([]retrieval.SourceType, error) {
 	includeVector := workspaceVectorEnabled(state.vectorConfig) ||
-		retrievalReusableFileVectorIndexExists(state.cwd, state.vectorConfig, input)
+		retrievalReusableFileVectorIndexExists(ctx, state.cwd, state.vectorConfig, input)
 
 	sources, err := selectedRetrievalSources(input, includeVector)
 	if err != nil {
@@ -1042,7 +1067,7 @@ func appendRetrievalSourceIfMissing(sources []retrieval.SourceType, source retri
 	return append(sources, source)
 }
 
-func retrievalReusableFileVectorIndexExists(root string, cfg appconfig.VectorConfig, input retrievalCommandInput) bool {
+func retrievalReusableFileVectorIndexExists(ctx context.Context, root string, cfg appconfig.VectorConfig, input retrievalCommandInput) bool {
 	if retrievalExplicitFileVectorIndexRequested(input) {
 		return true
 	}
@@ -1075,7 +1100,7 @@ func retrievalReusableFileVectorIndexExists(root string, cfg appconfig.VectorCon
 		return false
 	}
 
-	reuse, _, err := reusableVectorIndex(idx, metadata, settings.Chunk, settings.IndexPath, nil)
+	reuse, _, err := reusableVectorIndex(ctx, idx, metadata, settings.Chunk, settings.IndexPath, nil)
 
 	return err == nil && reuse
 }
@@ -1144,7 +1169,7 @@ func retrievalSearchers(
 
 	sourceSet := retrievalSourceSet(sources)
 	if sourceSet[retrieval.SourceMemory] || sourceSet[retrieval.SourceFile] {
-		searcher, err := buildRetrievalMemoryStore(state.sessionStore, input, !sourceSet[retrieval.SourceSession])
+		searcher, err := buildRetrievalMemoryStore(ctx, state.sessionStore, input, !sourceSet[retrieval.SourceSession])
 		if err != nil {
 			return nil, err
 		}
@@ -1290,6 +1315,10 @@ func retrievalSearcher(ctx context.Context, state appState, input retrievalComma
 
 		if requested {
 			return buildSessionVectorRetrievalSearcher(ctx, state)
+		}
+
+		if err := authorizeReadPermission(ctx, "search session retrieval source", "atteler.retrieval.session", sessionReadTarget(state.sessionStore, "")); err != nil {
+			return nil, err
 		}
 
 		return state.sessionStore, nil
@@ -2065,19 +2094,23 @@ func sourceVectorIndexURI(root, indexPath string) string {
 	return filepath.ToSlash(privacy.RedactIdentifier(indexPath))
 }
 
-func buildRetrievalMemoryStore(store *session.Store, input retrievalCommandInput, includeSessions bool) (*memory.Store, error) {
-	mem, err := loadMemoryStore(input.MemoryStorePath)
+func buildRetrievalMemoryStore(ctx context.Context, store *session.Store, input retrievalCommandInput, includeSessions bool) (*memory.Store, error) {
+	mem, err := loadMemoryStore(ctx, input.MemoryStorePath)
 	if err != nil {
 		return nil, err
 	}
 
 	if len(input.MemoryIndexFiles) > 0 {
-		if err := mem.AddFiles(input.MemoryIndexFiles...); err != nil {
+		if err := addMemoryIndexFiles(ctx, mem, input.MemoryIndexFiles); err != nil {
 			return nil, fmt.Errorf("retrieval: index memory files: %w", err)
 		}
 	}
 
 	if includeSessions && strings.TrimSpace(input.MemoryStorePath) == "" && len(input.MemoryIndexFiles) == 0 {
+		if err := authorizeReadPermission(ctx, "index sessions for retrieval memory", "atteler.retrieval.memory", sessionReadTarget(store, "")); err != nil {
+			return nil, err
+		}
+
 		if err := addRetrievalSessionMemory(mem, store); err != nil {
 			return nil, err
 		}
@@ -2315,6 +2348,9 @@ func buildAgentMemoryRetrievalSearcher(
 	}
 
 	storePath := agentMemoryStorePath(root, agentName, input.AgentMemoryStorePath, cfg)
+	if err := authorizeReadPermission(ctx, "read agent memory retrieval source", "atteler.retrieval.agent_memory", storePath); err != nil {
+		return nil, err
+	}
 
 	runtime, err := agentMemoryVectorizerRuntimeFromConfig(cfg, agentName)
 	if err != nil {
@@ -2511,12 +2547,12 @@ func addRetrievalSessionMemory(mem *memory.Store, store *session.Store) error {
 	return nil
 }
 
-func runMemoryCommand(store *session.Store, opts cliOptions) (err error) {
-	return runMemoryCommandWithAutonomy(store, opts, autonomy.DefaultLevel)
+func runMemoryCommand(ctx context.Context, store *session.Store, opts cliOptions) (err error) {
+	return runMemoryCommandWithAutonomy(ctx, store, opts, autonomy.DefaultLevel)
 }
 
 //nolint:cyclop,gocognit,nestif // Coordinates purge, rebuild, list, index, retention, and search modes in CLI precedence order.
-func runMemoryCommandWithAutonomy(store *session.Store, opts cliOptions, level autonomy.Level) (err error) {
+func runMemoryCommandWithAutonomy(ctx context.Context, store *session.Store, opts cliOptions, level autonomy.Level) (err error) {
 	redactor, err := memory.NewRedactor(opts.memoryRedactRules...)
 	if err != nil {
 		fallbackRedactor, fallbackErr := memory.NewRedactor()
@@ -2543,18 +2579,22 @@ func runMemoryCommandWithAutonomy(store *session.Store, opts cliOptions, level a
 		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionFileWrite, memoryCommandAutonomyContext(opts)))
 	}
 
+	if authErr := authorizeMemoryCommandAccess(ctx, opts); authErr != nil {
+		return authErr
+	}
+
 	if strings.TrimSpace(opts.memoryPurgeSpec) != "" {
 		if strings.TrimSpace(opts.memoryStorePath) == "" {
 			return errors.New("memory: --memory-store is required for --memory-purge")
 		}
 
-		mem, purgeErr := loadMemoryStore(opts.memoryStorePath)
+		mem, purgeErr := loadMemoryStore(ctx, opts.memoryStorePath)
 		if purgeErr != nil {
 			return purgeErr
 		}
 		mem.SetRedactor(redactor)
 
-		filter, parseErr := parseMemoryPurgeSpec(opts.memoryPurgeSpec)
+		filter, parseErr := parseMemoryPurgeSpec(ctx, opts.memoryPurgeSpec)
 		if parseErr != nil {
 			return parseErr
 		}
@@ -2576,7 +2616,7 @@ func runMemoryCommandWithAutonomy(store *session.Store, opts cliOptions, level a
 			return errors.New("memory: --memory-store is required for --memory-rebuild")
 		}
 
-		mem, err = buildMemoryStoreWithRedactor(store, opts, redactor, true)
+		mem, err = buildMemoryStoreWithRedactor(ctx, store, opts, redactor, true)
 		if err != nil {
 			return err
 		}
@@ -2593,7 +2633,7 @@ func runMemoryCommandWithAutonomy(store *session.Store, opts cliOptions, level a
 	}
 
 	if mem == nil {
-		mem, err = buildMemoryStoreWithRedactor(store, opts, redactor, false)
+		mem, err = buildMemoryStoreWithRedactor(ctx, store, opts, redactor, false)
 		if err != nil {
 			return err
 		}
@@ -2601,7 +2641,7 @@ func runMemoryCommandWithAutonomy(store *session.Store, opts cliOptions, level a
 
 	var maintenanceMem *memory.Store
 	if opts.memoryStorePath != "" && opts.memoryRetentionDays.value > 0 && !opts.memoryRebuild {
-		maintenanceMem, err = buildMemoryMaintenanceStore(opts, redactor)
+		maintenanceMem, err = buildMemoryMaintenanceStore(ctx, opts, redactor)
 		if err != nil {
 			return err
 		}
@@ -2617,7 +2657,7 @@ func runMemoryCommandWithAutonomy(store *session.Store, opts cliOptions, level a
 
 	if opts.memoryStorePath != "" && len(opts.memoryIndexFiles) > 0 && !opts.memoryRebuild {
 		if maintenanceMem == nil {
-			maintenanceMem, err = buildMemoryMaintenanceStore(opts, redactor)
+			maintenanceMem, err = buildMemoryMaintenanceStore(ctx, opts, redactor)
 			if err != nil {
 				return err
 			}
@@ -2643,7 +2683,7 @@ func runMemoryCommandWithAutonomy(store *session.Store, opts cliOptions, level a
 		return errors.New("memory: --memory-search is required unless indexing, purging, rebuilding, retaining, or listing corpus")
 	}
 
-	searchMem, err := memorySearchStore(mem, opts, redactor)
+	searchMem, err := memorySearchStore(ctx, mem, opts, redactor)
 	if err != nil {
 		return err
 	}
@@ -2694,20 +2734,39 @@ func memoryCommandAutonomyContext(opts cliOptions) string {
 	}
 }
 
-func buildMemoryMaintenanceStore(opts cliOptions, redactor *memory.Redactor) (*memory.Store, error) {
-	mem, err := loadMemoryStore(opts.memoryStorePath)
+func authorizeMemoryCommandAccess(ctx context.Context, opts cliOptions) error {
+	storePath := strings.TrimSpace(opts.memoryStorePath)
+	if storePath == "" {
+		return nil
+	}
+
+	if err := authorizeReadPermission(ctx, "read memory store", "atteler.memory", storePath); err != nil {
+		return err
+	}
+
+	if memoryCommandWritesFiles(opts) {
+		if err := authorizeWritePermission(ctx, "write memory store", "atteler.memory", storePath); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func buildMemoryMaintenanceStore(ctx context.Context, opts cliOptions, redactor *memory.Redactor) (*memory.Store, error) {
+	mem, err := loadMemoryStore(ctx, opts.memoryStorePath)
 	if err != nil {
 		return nil, err
 	}
 	mem.SetRedactor(redactor)
 
-	plan, err := memoryPlan(opts)
+	plan, err := memoryPlan(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 
 	applyMemoryRetentionPolicy(mem, plan)
-	if err := addMemoryIndexFiles(mem, opts.memoryIndexFiles); err != nil {
+	if err := addMemoryIndexFiles(ctx, mem, opts.memoryIndexFiles); err != nil {
 		return nil, err
 	}
 	applyMemoryRetentionPolicy(mem, plan)
@@ -2718,8 +2777,8 @@ func buildMemoryMaintenanceStore(opts cliOptions, redactor *memory.Redactor) (*m
 	return mem, nil
 }
 
-func memorySearchStore(mem *memory.Store, opts cliOptions, redactor *memory.Redactor) (*memory.Store, error) {
-	plan, err := memoryPlan(opts)
+func memorySearchStore(ctx context.Context, mem *memory.Store, opts cliOptions, redactor *memory.Redactor) (*memory.Store, error) {
+	plan, err := memoryPlan(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -2878,29 +2937,29 @@ func (e redactedMemoryCommandError) Unwrap() error {
 	return e.cause
 }
 
-func buildMemoryStore(store *session.Store, opts cliOptions) (*memory.Store, error) {
+func buildMemoryStore(ctx context.Context, store *session.Store, opts cliOptions) (*memory.Store, error) {
 	redactor, err := memory.NewRedactor(opts.memoryRedactRules...)
 	if err != nil {
 		return nil, fmt.Errorf("memory: configure redaction: %w", err)
 	}
 
-	return buildMemoryStoreWithRedactor(store, opts, redactor, false)
+	return buildMemoryStoreWithRedactor(ctx, store, opts, redactor, false)
 }
 
-func buildMemoryStoreWithRedactor(store *session.Store, opts cliOptions, redactor *memory.Redactor, rebuild bool) (*memory.Store, error) {
+func buildMemoryStoreWithRedactor(ctx context.Context, store *session.Store, opts cliOptions, redactor *memory.Redactor, rebuild bool) (*memory.Store, error) {
 	var mem *memory.Store
 	if rebuild {
 		mem = memory.NewStore()
 	} else {
 		var err error
-		mem, err = loadMemoryStore(opts.memoryStorePath)
+		mem, err = loadMemoryStore(ctx, opts.memoryStorePath)
 		if err != nil {
 			return nil, err
 		}
 	}
 	mem.SetRedactor(redactor)
 
-	plan, err := memoryPlan(opts)
+	plan, err := memoryPlan(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -2909,7 +2968,7 @@ func buildMemoryStoreWithRedactor(store *session.Store, opts cliOptions, redacto
 	}
 	applyMemoryRetentionPolicy(mem, plan)
 
-	if addErr := addMemoryIndexFiles(mem, opts.memoryIndexFiles); addErr != nil {
+	if addErr := addMemoryIndexFiles(ctx, mem, opts.memoryIndexFiles); addErr != nil {
 		return nil, addErr
 	}
 	var indexedFileSource *memory.Store
@@ -2952,9 +3011,15 @@ func validateMemoryBuildRequest(opts cliOptions, plan memoryCorpusPlan, rebuild 
 	return nil
 }
 
-func addMemoryIndexFiles(mem *memory.Store, paths []string) error {
+func addMemoryIndexFiles(ctx context.Context, mem *memory.Store, paths []string) error {
 	if len(paths) == 0 {
 		return nil
+	}
+
+	for _, path := range paths {
+		if err := authorizeReadPermission(ctx, "read memory index file", "atteler.memory", path); err != nil {
+			return err
+		}
 	}
 
 	if err := mem.AddFiles(paths...); err != nil {
@@ -3022,9 +3087,13 @@ func memorySessionIDFromRef(ref string) string {
 	return strings.TrimSpace(base)
 }
 
-func loadMemoryStore(path string) (*memory.Store, error) {
+func loadMemoryStore(ctx context.Context, path string) (*memory.Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return memory.NewStore(), nil
+	}
+
+	if err := authorizeReadPermission(ctx, "read memory store", "atteler.memory", path); err != nil {
+		return nil, err
 	}
 
 	if _, err := os.Stat(path); err != nil {
@@ -3386,7 +3455,8 @@ func memoryPlanHasSecondaryFilters(plan memoryCorpusPlan) bool {
 		plan.hasUntil
 }
 
-func memoryPlan(opts cliOptions) (memoryCorpusPlan, error) {
+//nolint:cyclop,gocognit // Memory scope inference intentionally keeps date, repo, agent, and retention rules in one place.
+func memoryPlan(ctx context.Context, opts cliOptions) (memoryCorpusPlan, error) {
 	scope := normalizeMemoryScope(opts.memoryScope)
 	plan := memoryCorpusPlan{
 		scope:         scope,
@@ -3412,12 +3482,18 @@ func memoryPlan(opts cliOptions) (memoryCorpusPlan, error) {
 
 	if plan.repoPath != "" {
 		plan.repoPath = normalizeExplicitMemoryRepoPath(plan.repoPath)
+		if err := authorizeReadPermission(ctx, "memory: authorize repo scope read", "atteler.memory", plan.repoPath); err != nil {
+			return memoryCorpusPlan{}, err
+		}
 	} else if plan.scope == memory.ScopeRepo {
 		repoPath, err := defaultMemoryRepoPath()
 		if err != nil {
 			return memoryCorpusPlan{}, fmt.Errorf("memory: resolve cwd for repo scope: %w", err)
 		}
 		plan.repoPath = repoPath
+		if err := authorizeReadPermission(ctx, "memory: authorize repo scope read", "atteler.memory", plan.repoPath); err != nil {
+			return memoryCorpusPlan{}, err
+		}
 	}
 
 	var err error
@@ -4219,7 +4295,7 @@ func memoryCorpusDescription(corpus memory.CorpusMetadata) string {
 	return strings.Join(parts, " ")
 }
 
-func parseMemoryPurgeSpec(raw string) (memory.PurgeFilter, error) {
+func parseMemoryPurgeSpec(ctx context.Context, raw string) (memory.PurgeFilter, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return memory.PurgeFilter{}, errors.New("memory: --memory-purge requires all, session:<id>, tag:<tag>, or repo:<path>")
@@ -4242,7 +4318,12 @@ func parseMemoryPurgeSpec(raw string) (memory.PurgeFilter, error) {
 	case "tag":
 		return memory.PurgeFilter{Tag: strings.TrimSpace(value)}, nil
 	case "repo", "repository", "worktree":
-		return memory.PurgeFilter{RepoPath: normalizeExplicitMemoryRepoPath(value)}, nil
+		repoPath := normalizeExplicitMemoryRepoPath(value)
+		if err := authorizeReadPermission(ctx, "memory: authorize purge repo read", "atteler.memory", repoPath); err != nil {
+			return memory.PurgeFilter{}, err
+		}
+
+		return memory.PurgeFilter{RepoPath: repoPath}, nil
 	default:
 		return memory.PurgeFilter{}, fmt.Errorf("memory: unsupported purge selector %q; use all, session:<id>, tag:<tag>, or repo:<path>", key)
 	}

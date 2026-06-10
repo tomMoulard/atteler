@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/modelroute"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -1574,6 +1577,7 @@ func TestResolveSelection_ExportSkipsUnknownSavedAgent(t *testing.T) {
 	}
 
 	selection, err := resolveSelection(
+		t.Context(),
 		cliOptions{exportRef: saved.ID},
 		config.Config{},
 		"",
@@ -1603,6 +1607,7 @@ func TestResolveSelection_ShowSkipsUnknownSavedAgent(t *testing.T) {
 	}
 
 	selection, err := resolveSelection(
+		t.Context(),
 		cliOptions{showSessionRef: saved.ID},
 		config.Config{},
 		"",
@@ -1616,6 +1621,38 @@ func TestResolveSelection_ShowSkipsUnknownSavedAgent(t *testing.T) {
 	if selection.sessionState.DefaultAgent != removedAgent {
 		require.Failf(t, "unexpected failure", "DefaultAgent = %q, want saved agent", selection.sessionState.DefaultAgent)
 	}
+}
+
+func TestResolveSelectionPermissionPolicyDeniesSessionRead(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	saved := session.New("gpt-test", nil)
+	require.NoError(t, store.Save(saved))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := resolveSelection(
+		ctx,
+		cliOptions{showSessionRef: saved.ID},
+		config.Config{},
+		"",
+		agent.NewRegistry(nil),
+		store,
+	)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "load requested session")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestResolveSelection_SessionUtilitiesSkipUnknownSavedAgent(t *testing.T) {
@@ -1672,6 +1709,7 @@ func TestResolveSelection_SessionUtilitiesSkipUnknownSavedAgent(t *testing.T) {
 			require.NoError(t, err)
 
 			selection, err := resolveSelection(
+				t.Context(),
 				optsForID(saved.ID),
 				config.Config{},
 				"",
@@ -1693,6 +1731,7 @@ func TestResolveSelection_ExplicitUnknownAgentStillErrorsForSessionUtilities(t *
 	require.NoError(t, err)
 
 	_, err = resolveSelection(
+		t.Context(),
 		cliOptions{sessionRef: saved.ID, listMessages: true, agentName: "missing"},
 		config.Config{},
 		"",
@@ -1707,6 +1746,7 @@ func TestResolveSelection_UsesPersistedModelBeforeConfigDefault(t *testing.T) {
 	t.Parallel()
 
 	selection, err := resolveSelection(
+		t.Context(),
 		cliOptions{},
 		config.Config{DefaultModel: "config-model"},
 		testCodexModel,
@@ -1732,6 +1772,7 @@ func TestResolveSelection_LoadedSessionWinsOverPersistedModel(t *testing.T) {
 	}
 
 	selection, err := resolveSelection(
+		t.Context(),
 		cliOptions{sessionRef: saved.ID},
 		config.Config{DefaultModel: "config-model"},
 		"persisted-model",

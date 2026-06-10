@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tommoulard/atteler/internal/atomicfile"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 )
@@ -1369,6 +1370,9 @@ func (v *EmbeddingVectorizer) VectorizeContext(ctx context.Context, text string)
 	}
 
 	endpoint := strings.TrimRight(baseURL, "/") + "/api/embed"
+	if policyErr := authorizeEmbeddingNetwork(ctx, endpoint, v.Provider()); policyErr != nil {
+		return nil, policyErr
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -1401,6 +1405,30 @@ func (v *EmbeddingVectorizer) VectorizeContext(ctx context.Context, text string)
 	}
 
 	return Vector(result.Embeddings[0]), nil
+}
+
+func authorizeEmbeddingNetwork(ctx context.Context, endpoint, provider string) error {
+	source := "atteler.vector.embedding"
+	if provider = strings.TrimSpace(provider); provider != "" {
+		source += "." + provider
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: "embedding vectorization",
+		Source: source,
+		Target: endpoint,
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationNetwork,
+			Action: "embedding vectorization",
+			Source: source,
+			Target: endpoint,
+		}},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return fmt.Errorf("embedding: %w", &permission.Error{Decision: decision})
 }
 
 // Spec returns the stable identity for this embedding endpoint/model. The

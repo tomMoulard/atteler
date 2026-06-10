@@ -193,7 +193,7 @@ func TestInitConfigWritesTemplateWithoutOverwrite(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "nested", "config.yaml")
 
-	if err := initConfig(path); err != nil {
+	if err := initConfig(t.Context(), path); err != nil {
 		require.NoError(t, err)
 	}
 
@@ -206,7 +206,7 @@ func TestInitConfigWritesTemplateWithoutOverwrite(t *testing.T) {
 		require.Failf(t, "unexpected failure", "config template mismatch")
 	}
 
-	if err := initConfig(path); err == nil {
+	if err := initConfig(t.Context(), path); err == nil {
 		require.FailNow(t, "expected existing config error")
 	}
 }
@@ -225,7 +225,7 @@ func TestRunInlineConfigCommandTemplateMatchesConfigTemplate(t *testing.T) {
 		_ = writer.Close()
 	}()
 
-	handled, runErr := runInlineConfigCommand(cliOptions{printConfigTemplate: true})
+	handled, runErr := runInlineConfigCommand(t.Context(), cliOptions{printConfigTemplate: true})
 	require.NoError(t, runErr)
 	assert.True(t, handled)
 	require.NoError(t, writer.Close())
@@ -439,11 +439,11 @@ func TestRecordedResponseRoundTrip(t *testing.T) {
 		OutputTokens:          3,
 	}
 
-	if err := saveRecordedResponse(path, params, []string{"backup"}, resp); err != nil {
+	if err := saveRecordedResponse(t.Context(), path, params, []string{"backup"}, resp); err != nil {
 		require.NoError(t, err)
 	}
 
-	got, err := loadRecordedResponse(path)
+	got, err := loadRecordedResponse(t.Context(), path)
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -596,8 +596,8 @@ func TestEvalOutput_PassAndFail(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, evalOutput(actual, "brave world", "", atteval.ModeContains))
-	require.Error(t, evalOutput(actual, "missing", "", atteval.ModeContains))
+	require.NoError(t, evalOutput(t.Context(), actual, "brave world", "", atteval.ModeContains))
+	require.Error(t, evalOutput(t.Context(), actual, "missing", "", atteval.ModeContains))
 }
 
 func TestEvalOutputCommand_StructuredAssertionsReport(t *testing.T) {
@@ -621,7 +621,7 @@ assertions:
     value: api_key=supersecret
 `), 0o600))
 
-	err := evalOutputCommand(cliOptions{
+	err := evalOutputCommand(t.Context(), cliOptions{
 		evalOutputPath:     actual,
 		evalAssertionsPath: suite,
 		evalReportPath:     report,
@@ -649,7 +649,7 @@ version: 1
 exit_code: 5
 `), 0o600))
 
-	err := evalOutputCommand(cliOptions{
+	err := evalOutputCommand(t.Context(), cliOptions{
 		evalAssertionsPath: suite,
 		evalReportPath:     report,
 		evalExitCode:       nonNegativeIntFlag{value: 5, set: true},
@@ -667,13 +667,13 @@ exit_code: 5
 func TestEvalOutputCommand_RejectsEvalReportWithoutTarget(t *testing.T) {
 	t.Parallel()
 
-	require.ErrorContains(t, evalOutputCommand(cliOptions{evalJSON: true}), "--eval-output")
+	require.ErrorContains(t, evalOutputCommand(t.Context(), cliOptions{evalJSON: true}), "--eval-output")
 }
 
 func TestExpectedEvalText_RejectsAmbiguousInput(t *testing.T) {
 	t.Parallel()
 
-	_, err := expectedEvalText("inline", "file.txt")
+	_, err := expectedEvalText(t.Context(), "inline", "file.txt")
 	require.Error(t, err)
 }
 
@@ -825,12 +825,12 @@ printf executed > executed
 	//nolint:gosec // Test fixture intentionally creates an executable plugin script.
 	require.NoError(t, os.Chmod(scriptPath, 0o700))
 
-	err := runPluginEntrypoint(t.Context(), []string{root}, nil, "runner/run", "", false, 5, autonomy.DefaultLevel)
+	err := runPluginEntrypoint(t.Context(), []string{root}, nil, nil, "runner/run", "", false, 5, autonomy.DefaultLevel)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "plugins.policy must accept requested permissions")
 	require.NoFileExists(t, marker)
 
-	err = runPluginEntrypoint(t.Context(), []string{root}, nil, "runner/run", "", true, 5, autonomy.DefaultLevel)
+	err = runPluginEntrypoint(t.Context(), []string{root}, nil, nil, "runner/run", "", true, 5, autonomy.DefaultLevel)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "plugins.policy must accept requested permissions")
 	require.NoFileExists(t, marker)
@@ -929,7 +929,7 @@ func TestBuildMemoryStore_IndexesSessionsAndFiles(t *testing.T) {
 	sessionState.WorktreePath = dir
 	require.NoError(t, store.Save(sessionState))
 
-	mem, err := buildMemoryStore(store, cliOptions{memoryIndexFiles: stringListFlag{filePath}, memoryRepoPath: dir})
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{memoryIndexFiles: stringListFlag{filePath}, memoryRepoPath: dir})
 	require.NoError(t, err)
 	results, err := mem.Search("oauth", 10)
 	require.NoError(t, err)
@@ -1291,7 +1291,7 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	err := recordEvaluation(store, sessionState, "reviewer", "pass", "solid", "eval.md", 9)
+	err := recordEvaluation(t.Context(), store, sessionState, "reviewer", "pass", "solid", "eval.md", 9)
 	if err != nil {
 		require.NoError(t, err)
 	}
@@ -1305,7 +1305,7 @@ func TestRecordEvaluationAndArtifactCommands(t *testing.T) {
 	assert.Equal(t, "reviewer", loaded.Evaluations[0].Agent)
 	assert.Equal(t, 9, loaded.Evaluations[0].Score)
 
-	err = recordEvaluationDetails(store, loaded, session.AgentEvaluation{
+	err = recordEvaluationDetails(t.Context(), store, loaded, session.AgentEvaluation{
 		Agent:          "planner",
 		Outcome:        "pass",
 		Source:         session.EvaluationSourceCI,
@@ -1477,7 +1477,7 @@ func TestInitRTKPluginWritesManifestAndScripts(t *testing.T) {
 	t.Parallel()
 
 	dir := filepath.Join(t.TempDir(), "rtk")
-	require.NoError(t, initRTKPlugin(dir))
+	require.NoError(t, initRTKPlugin(t.Context(), dir))
 
 	manifest, err := attelerplugin.LoadDir(dir)
 	require.NoError(t, err)

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 var defaultPool = NewServerPool(PoolOptions{})
@@ -108,7 +110,7 @@ type documentRequest struct {
 	Content    string
 }
 
-func resolveDocumentRequest(opts Options) (documentRequest, error) {
+func resolveDocumentRequest(ctx context.Context, opts Options) (documentRequest, error) {
 	if err := validateOptions(opts); err != nil {
 		return documentRequest{}, err
 	}
@@ -116,6 +118,10 @@ func resolveDocumentRequest(opts Options) (documentRequest, error) {
 	filePath, err := filepath.Abs(strings.TrimSpace(opts.FilePath))
 	if err != nil {
 		return documentRequest{}, fmt.Errorf("resolve file path: %w", err)
+	}
+
+	if policyErr := authorizeLSPReadPermission(ctx, "read LSP document", filePath); policyErr != nil {
+		return documentRequest{}, policyErr
 	}
 
 	content, err := os.ReadFile(filePath)
@@ -146,7 +152,20 @@ func resolveDocumentRequest(opts Options) (documentRequest, error) {
 	}, nil
 }
 
-func resolveWorkspaceRequest(opts Options) (rootPath, languageID string, err error) {
+func resolveWorkspaceRequest(ctx context.Context, opts Options) (rootPath, languageID string, err error) {
+	rootPath, languageID, err = workspaceRequestParts(opts)
+	if err != nil {
+		return "", "", err
+	}
+
+	if policyErr := authorizeLSPReadPermission(ctx, "read LSP workspace", rootPath); policyErr != nil {
+		return "", "", policyErr
+	}
+
+	return rootPath, languageID, nil
+}
+
+func workspaceRequestParts(opts Options) (rootPath, languageID string, err error) {
 	if validationErr := validateWorkspaceOptions(opts); validationErr != nil {
 		return "", "", validationErr
 	}
@@ -165,4 +184,23 @@ func resolveWorkspaceRequest(opts Options) (rootPath, languageID string, err err
 	}
 
 	return rootPath, strings.TrimSpace(opts.LanguageID), nil
+}
+
+func authorizeLSPReadPermission(ctx context.Context, action, target string) error {
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: action,
+		Source: "atteler.lsp",
+		Target: target,
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationRead,
+			Action: action,
+			Source: "atteler.lsp",
+			Target: target,
+		}},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }

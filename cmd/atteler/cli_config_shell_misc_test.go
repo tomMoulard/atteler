@@ -23,6 +23,7 @@ import (
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
@@ -64,7 +65,7 @@ func TestRecordFailure_SavesNegativeKnowledge(t *testing.T) {
 	store := session.NewStore(t.TempDir())
 	sessionState := session.New("gpt-test", nil)
 
-	if err := recordFailure(store, sessionState, "try cache bust", "broke auth", "abc123", "reviewer"); err != nil {
+	if err := recordFailure(t.Context(), store, sessionState, "try cache bust", "broke auth", "abc123", "reviewer"); err != nil {
 		require.NoError(t, err)
 	}
 
@@ -89,7 +90,7 @@ func TestRecordFailureDetails_SavesCategorizedNegativeKnowledge(t *testing.T) {
 	store := session.NewStore(t.TempDir())
 	sessionState := session.New("gpt-test", nil)
 
-	err := recordFailureDetails(store, sessionState, session.NegativeKnowledge{
+	err := recordFailureDetails(t.Context(), store, sessionState, session.NegativeKnowledge{
 		Approach: "skip tests",
 		Reason:   "missed regression",
 		Agent:    "reviewer",
@@ -105,16 +106,38 @@ func TestRecordFailureDetails_SavesCategorizedNegativeKnowledge(t *testing.T) {
 	assert.Equal(t, "high", loaded.NegativeKnowledge[0].Severity)
 }
 
+func TestRecordFailureDetailsPermissionPolicyDeniesSessionWrite(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	sessionState := session.New("gpt-test", nil)
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, t.TempDir())
+	err := recordFailureDetails(ctx, store, sessionState, session.NegativeKnowledge{
+		Approach: "skip tests",
+		Reason:   "missed regression",
+		Agent:    "reviewer",
+	})
+
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	assert.NoFileExists(t, store.Path(sessionState.ID))
+}
+
 func TestPathStatus(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	if got := pathStatus(dir); got != "ok" {
+	if got := pathStatus(t.Context(), dir); got != "ok" {
 		require.Failf(t, "unexpected failure", "pathStatus(dir) = %q, want ok", got)
 	}
 
 	missing := filepath.Join(dir, "missing")
-	if got := pathStatus(missing); got != "will be created on first save" {
+	if got := pathStatus(t.Context(), missing); got != "will be created on first save" {
 		require.Failf(t, "unexpected failure", "pathStatus(missing) = %q", got)
 	}
 }
@@ -224,7 +247,7 @@ providers:
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
 
 	out := captureStdoutForConfigTest(t, func() {
-		require.NoError(t, doctorOffline(cliOptions{sessionDir: filepath.Join(dir, "sessions")}))
+		require.NoError(t, doctorOffline(t.Context(), cliOptions{sessionDir: filepath.Join(dir, "sessions")}))
 	})
 
 	assert.Contains(t, out, "provider_retries:")
@@ -281,6 +304,26 @@ func captureStdoutForConfigTest(t *testing.T, fn func()) string {
 	require.NoError(t, err)
 
 	return string(out)
+}
+
+func TestPathStatusPermissionPolicyDeniesRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	auditDir := filepath.Join(dir, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	got := pathStatus(ctx, dir)
+	assert.Contains(t, got, "permission.read.deny")
+
+	auditData, err := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, err)
+	assert.Contains(t, string(auditData), "inspect session path status")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestFormatAgentDescription(t *testing.T) {
@@ -545,7 +588,7 @@ func TestRunShellCommandCmd_StreamsOutputBeforeCompletion(t *testing.T) {
 	done := make(chan any, 1)
 
 	go func() {
-		done <- runShellCommandCmd(context.Background(), `printf first; sleep 0.4; printf second`, "", outputCh, attshell.AuditContext{})()
+		done <- runShellCommandCmd(context.Background(), `printf first; sleep 0.4; printf second`, "", outputCh, attshell.AuditContext{}, nil, nil)()
 	}()
 
 	chunk := requireShellOutputBefore(t, outputCh, liveOutputTimeout)
@@ -583,7 +626,7 @@ func TestRunShellCommandCmd_StreamsStderrBeforeCompletion(t *testing.T) {
 	done := make(chan any, 1)
 
 	go func() {
-		done <- runShellCommandCmd(context.Background(), `printf warn >&2; sleep 0.4; printf done >&2`, "", outputCh, attshell.AuditContext{})()
+		done <- runShellCommandCmd(context.Background(), `printf warn >&2; sleep 0.4; printf done >&2`, "", outputCh, attshell.AuditContext{}, nil, nil)()
 	}()
 
 	chunk := requireShellOutputBefore(t, outputCh, liveOutputTimeout)
@@ -702,19 +745,115 @@ func TestRunBashCommand_EmitsCommandEventTimeline(t *testing.T) {
 	assertLineOrder(t, lines, "event:command_execute", "partial=true", "partial=false")
 }
 
-func TestRunBashCommand_BlocksConfirmationOnlyCommands(t *testing.T) {
+func TestRunBashCommand_PermissionPolicyDeniesWritesBeforeProcessStart(t *testing.T) {
 	t.Parallel()
 
+	cwd := t.TempDir()
+	recorder := newEventLogRecorder()
+	policy := permission.ReadOnlyPolicy()
 	err := runBashCommand(context.Background(), appState{
-		autonomy:     autonomy.Full,
-		cwd:          t.TempDir(),
-		sessionStore: session.NewStore(t.TempDir()),
-		sessionState: session.New("gpt-test", nil),
-	}, bashCommandInput{Command: "sudo true"})
+		cwd:              cwd,
+		hookRunner:       events.NewRunnerWithLogger(nil, recorder),
+		sessionStore:     session.NewStore(t.TempDir()),
+		sessionState:     session.New("gpt-test", nil),
+		permissionPolicy: &policy,
+	}, bashCommandInput{
+		Command:        "touch denied-by-policy",
+		TimeoutSeconds: 2,
+	})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "requires confirmation")
-	assert.Contains(t, err.Error(), "--bash")
+	assert.True(t, permission.ErrDenied(err))
+	assert.NoFileExists(t, filepath.Join(cwd, "denied-by-policy"))
+	assert.NotContains(t, strings.Join(recorder.Lines(), "\n"), "event:command_execute")
+}
+
+func TestRunBashCommand_PermissionAllowFlagsPermitExplicitHeadlessWrite(t *testing.T) {
+	t.Parallel()
+
+	var opts cliOptions
+
+	opts.permissionMode = "read-only"
+	opts.headless = true
+	require.NoError(t, opts.allowOperations.Set("execute,write"))
+
+	policy, err := permissionPolicyFromOptions(opts)
+	require.NoError(t, err)
+
+	cwd := t.TempDir()
+	err = runBashCommand(contextWithPermissionPolicyForOptions(context.Background(), opts, policy), appState{
+		cwd:              cwd,
+		sessionStore:     session.NewStore(t.TempDir()),
+		sessionState:     session.New("gpt-test", nil),
+		permissionPolicy: policy,
+	}, bashCommandInput{
+		Command:        "printf allowed > allowed-by-policy",
+		TimeoutSeconds: 2,
+	})
+
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(cwd, "allowed-by-policy"))
+}
+
+func TestRunSpawnAgents_PermissionPolicyDeniesExecutionBeforeCommandEvent(t *testing.T) {
+	t.Parallel()
+
+	cwd := t.TempDir()
+	recorder := newEventLogRecorder()
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+	err := runSpawnAgents(ctx, appState{
+		cwd:              cwd,
+		hookRunner:       events.NewRunnerWithLogger(nil, recorder),
+		sessionStore:     session.NewStore(t.TempDir()),
+		sessionState:     session.New("gpt-test", nil),
+		permissionPolicy: &policy,
+	}, spawnAgentsCommandInput{
+		Specs:  []string{"worker|inspect the repository"},
+		Binary: filepath.Join(cwd, "missing-atteler-binary"),
+	})
+
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.NoDirExists(t, filepath.Join(cwd, ".atteler"))
+	assert.NotContains(t, strings.Join(recorder.Lines(), "\n"), "event:command_execute")
+}
+
+func TestRunSpawnAgents_PermissionPolicyDeniesLedgerWriteBeforeLedgerCreation(t *testing.T) {
+	t.Parallel()
+
+	cwd := t.TempDir()
+	auditDir := t.TempDir()
+	ledgerPath := filepath.Join(t.TempDir(), "runs", "ledger.json")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+	err := runSpawnAgents(ctx, appState{
+		cwd:              cwd,
+		sessionStore:     session.NewStore(t.TempDir()),
+		sessionState:     session.New("gpt-test", nil),
+		permissionPolicy: &policy,
+	}, spawnAgentsCommandInput{
+		Specs:  []string{"worker|inspect the repository"},
+		Binary: filepath.Join(cwd, "missing-atteler-binary"),
+		Execution: childExecutionCommandInput{
+			LedgerPath: ledgerPath,
+		},
+	})
+
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	assert.NoFileExists(t, ledgerPath)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), `"decision":"denied"`)
+	assert.Contains(t, string(auditData), `"write"`)
 }
 
 type eventLogRecorder struct {
@@ -847,7 +986,7 @@ func TestRunShellCommandCmd_DeliversFinalResultWhenContextCanceled(t *testing.T)
 	cancel()
 
 	outputCh := make(chan tea.Msg, 1)
-	raw := runShellCommandCmd(ctx, `printf never`, "", outputCh, attshell.AuditContext{})()
+	raw := runShellCommandCmd(ctx, `printf never`, "", outputCh, attshell.AuditContext{}, nil, nil)()
 	assert.Nil(t, raw)
 
 	select {
@@ -935,6 +1074,29 @@ func nextShellResult(t *testing.T, outputCh <-chan tea.Msg) <-chan shellResultMs
 	return resultCh
 }
 
+func readCommandAuditRecords(t *testing.T, auditDir string) []attshell.AuditRecord {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	records := make([]attshell.AuditRecord, 0, len(lines))
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record attshell.AuditRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+
+		records = append(records, record)
+	}
+
+	return records
+}
+
 func TestPruneToPinned_ReindexesPinnedMessages(t *testing.T) {
 	t.Parallel()
 
@@ -999,6 +1161,7 @@ func TestApplyPatch_BlocksLowAutonomy(t *testing.T) {
 
 func TestRunGitApplyPatchCmd_InvokesGitDirectlyWithPatchOnStdin(t *testing.T) {
 	dir := t.TempDir()
+	auditDir := filepath.Join(dir, "audit")
 	logPath := filepath.Join(dir, "git.log")
 	stdinPath := filepath.Join(dir, "stdin.log")
 	fakeGit := filepath.Join(dir, "git")
@@ -1012,17 +1175,20 @@ func TestRunGitApplyPatchCmd_InvokesGitDirectlyWithPatchOnStdin(t *testing.T) {
 	t.Setenv("ATTELER_FAKE_GIT_STDIN", stdinPath)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	auditDir := filepath.Join(dir, "audit")
+	startedApply := false
 	cmd := runGitApplyPatchCmd(context.Background(), testUnifiedDiffPatch, "", attshell.AuditContext{
 		AuditDir: auditDir,
-		Autonomy: "medium",
 		Caller:   "atteler.test.git_apply",
+		Autonomy: autonomy.Medium.String(),
+	}, func() {
+		startedApply = true
 	})
 
 	msg, ok := cmd().(shellResultMsg)
 	require.True(t, ok)
 	require.NoError(t, msg.err)
-	assert.Equal(t, gitApplyPatchDisplayCommand, msg.command)
+	assert.Equal(t, "git apply --check - && git apply -", msg.command)
+	assert.True(t, startedApply)
 
 	log, err := os.ReadFile(logPath)
 	require.NoError(t, err)
@@ -1080,9 +1246,7 @@ func TestRunGitApplyPatchCmd_StopsWhenCheckFails(t *testing.T) {
 	t.Setenv("ATTELER_FAKE_GIT_LOG", logPath)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cmd := runGitApplyPatchCmd(context.Background(), testUnifiedDiffPatch, "", attshell.AuditContext{
-		AuditDir: filepath.Join(dir, "audit"),
-	})
+	cmd := runGitApplyPatchCmd(context.Background(), testUnifiedDiffPatch, "", nil)
 
 	msg, ok := cmd().(shellResultMsg)
 	require.True(t, ok)
@@ -1095,27 +1259,33 @@ func TestRunGitApplyPatchCmd_StopsWhenCheckFails(t *testing.T) {
 	assert.Equal(t, "apply --check -\n", string(log))
 }
 
-func readCommandAuditRecords(t *testing.T, auditDir string) []attshell.AuditRecord {
-	t.Helper()
+func TestRunGitApplyPatchCmd_PermissionPolicyDeniesWriteApply(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "git.log")
+	fakeGit := filepath.Join(dir, "git")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$ATTELER_FAKE_GIT_LOG\"\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o600))
+	require.NoError(t, os.Chmod(fakeGit, 0o700)) //nolint:gosec // the test creates an executable fake git shim in a private temp directory.
+	t.Setenv("ATTELER_FAKE_GIT_LOG", logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+	startedApply := false
+	cmd := runGitApplyPatchCmd(ctx, testUnifiedDiffPatch, "", func() {
+		startedApply = true
+	})
+
+	msg, ok := cmd().(shellResultMsg)
+	require.True(t, ok)
+	require.Error(t, msg.err)
+	assert.Contains(t, msg.err.Error(), "permission.git_mutation.deny")
+	assert.False(t, startedApply)
+
+	log, err := os.ReadFile(logPath)
 	require.NoError(t, err)
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	records := make([]attshell.AuditRecord, 0, len(lines))
-
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-
-		var record attshell.AuditRecord
-		require.NoError(t, json.Unmarshal([]byte(line), &record))
-
-		records = append(records, record)
-	}
-
-	return records
+	assert.Equal(t, "apply --check -\n", string(log))
 }
 
 func TestShellQuote_HandlesSingleQuotes(t *testing.T) {

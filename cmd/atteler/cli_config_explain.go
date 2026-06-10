@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,7 +12,11 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
-func explainConfig(opts cliOptions) error {
+func explainConfig(ctx context.Context, opts cliOptions) error {
+	if err := authorizeConfigStackRead(ctx, "explain config", "atteler.config.explain"); err != nil {
+		return fmt.Errorf("explain config: %w", err)
+	}
+
 	cfg, loaded, origins, diagnostics, err := appconfig.LoadWithDiagnostics()
 	if err != nil {
 		printDiagnostics(os.Stdout, diagnostics)
@@ -20,6 +25,10 @@ func explainConfig(opts cliOptions) error {
 	}
 
 	stateStore := appconfig.NewStateStore("")
+
+	if err := authorizeStateFileRead(ctx, "load persisted state for config explanation", "atteler.config.explain", stateStore.Path()); err != nil {
+		return fmt.Errorf("explain config: %w", err)
+	}
 
 	persistedState, stateErr := stateStore.Load()
 	if stateErr != nil {

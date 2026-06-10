@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 const defaultTimeout = 30 * time.Second
@@ -21,6 +23,7 @@ const defaultTimeout = 30 * time.Second
 //nolint:govet // Public field order groups command controls before callbacks.
 type Options struct {
 	Policy         *Policy
+	Permission     *permission.Policy
 	Env            map[string]string
 	Audit          AuditContext
 	Command        string
@@ -28,6 +31,10 @@ type Options struct {
 	Timeout        time.Duration
 	MaxOutputBytes int64
 	OutputCallback OutputCallback
+	// StartCallback runs after command authorization/audit succeeds and before
+	// the local process starts. Use it for lifecycle notifications that must
+	// not fire for policy-denied commands.
+	StartCallback func()
 }
 
 // Result captures stdout, stderr, and timing for a command run.
@@ -100,16 +107,18 @@ func RunBash(ctx context.Context, opts Options) (Result, error) {
 	stdout, stderr, outputLimit := commandOutputWriters(opts.MaxOutputBytes, opts.OutputCallback)
 
 	cmd, invocation, err := CommandContext(runCtx, CommandOptions{
-		Program: bin,
-		Args:    args,
-		Command: command,
-		Dir:     opts.Dir,
-		Env:     opts.Env,
-		Policy:  opts.Policy,
-		Audit:   opts.Audit,
-		Mode:    ModeCaptured,
-		Stdout:  stdout,
-		Stderr:  stderr,
+		Program:       bin,
+		Args:          args,
+		Command:       command,
+		Dir:           opts.Dir,
+		Env:           opts.Env,
+		Policy:        opts.Policy,
+		Permission:    opts.Permission,
+		Audit:         opts.Audit,
+		Mode:          ModeCaptured,
+		Stdout:        stdout,
+		Stderr:        stderr,
+		StartCallback: opts.StartCallback,
 	})
 	if err != nil {
 		return Result{}, err
@@ -276,17 +285,18 @@ func RunInteractive(ctx context.Context, opts Options) (Result, error) {
 	started := time.Now().UTC()
 
 	cmd, invocation, err := CommandContext(ctx, CommandOptions{
-		Program: bin,
-		Args:    args,
-		Command: command,
-		Dir:     opts.Dir,
-		Env:     opts.Env,
-		Policy:  opts.Policy,
-		Audit:   opts.Audit,
-		Mode:    ModeInteractive,
-		Stdin:   os.Stdin,
-		Stdout:  os.Stdout,
-		Stderr:  os.Stderr,
+		Program:    bin,
+		Args:       args,
+		Command:    command,
+		Dir:        opts.Dir,
+		Env:        opts.Env,
+		Policy:     opts.Policy,
+		Permission: opts.Permission,
+		Audit:      opts.Audit,
+		Mode:       ModeInteractive,
+		Stdin:      os.Stdin,
+		Stdout:     os.Stdout,
+		Stderr:     os.Stderr,
 	})
 	if err != nil {
 		return Result{}, err

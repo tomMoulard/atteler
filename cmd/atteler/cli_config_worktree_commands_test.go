@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,9 +17,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/agent"
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -41,7 +44,7 @@ agent_loop:
 
 	stderr := captureStderr(t, func() {
 		stdout = captureStdoutForStateDiagnostics(t, func() {
-			err = doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
+			err = doctorOffline(t.Context(), cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
 		})
 	})
 
@@ -77,7 +80,7 @@ func TestDoctorOfflineFailsClosedForInvalidProjectConfig(t *testing.T) { //nolin
 
 	stderr := captureStderr(t, func() {
 		stdout = captureStdoutForStateDiagnostics(t, func() {
-			err = doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
+			err = doctorOffline(t.Context(), cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
 		})
 	})
 
@@ -107,7 +110,7 @@ func TestDoctorOfflineFailsClosedForConfigSchemaDiagnostics(t *testing.T) {
 
 	stderr := captureStderr(t, func() {
 		stdout = captureStdoutForStateDiagnostics(t, func() {
-			err = doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
+			err = doctorOffline(t.Context(), cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
 		})
 	})
 
@@ -129,7 +132,7 @@ func TestDoctorOfflineTreatsMissingOptionalConfigAsNonFatal(t *testing.T) { //no
 	var err error
 
 	stdout := captureStdoutForStateDiagnostics(t, func() {
-		err = doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
+		err = doctorOffline(t.Context(), cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
 	})
 
 	require.NoError(t, err)
@@ -155,7 +158,7 @@ trusted_project_roots = ["/repo"]
 	var err error
 
 	stdout := captureStdoutForStateDiagnostics(t, func() {
-		err = doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
+		err = doctorOffline(t.Context(), cliOptions{sessionDir: filepath.Join(tempDir, "sessions")})
 	})
 
 	require.NoError(t, err)
@@ -167,7 +170,7 @@ trusted_project_roots = ["/repo"]
 	assert.NotContains(t, stdout, "\nfatal:\n")
 
 	stdout = captureStdoutForStateDiagnostics(t, func() {
-		err = doctorOffline(cliOptions{
+		err = doctorOffline(t.Context(), cliOptions{
 			sessionDir:   filepath.Join(tempDir, "sessions"),
 			outputFormat: outputFormatJSON,
 		})
@@ -197,7 +200,7 @@ func TestDoctorOfflineJSONReportsFatalConfigStatus(t *testing.T) {
 	var err error
 
 	stdout := captureStdoutForStateDiagnostics(t, func() {
-		err = doctorOffline(cliOptions{
+		err = doctorOffline(t.Context(), cliOptions{
 			sessionDir: filepath.Join(tempDir, "sessions"),
 			jsonOutput: true,
 		})
@@ -242,7 +245,7 @@ func TestDoctorOfflineJSONReportsStrictParseFatalPath(t *testing.T) {
 	var err error
 
 	stdout := captureStdoutForStateDiagnostics(t, func() {
-		err = doctorOffline(cliOptions{
+		err = doctorOffline(t.Context(), cliOptions{
 			sessionDir:   filepath.Join(tempDir, "sessions"),
 			outputFormat: outputFormatJSON,
 		})
@@ -269,7 +272,7 @@ func TestDoctorOfflineJSONReportsOKForMissingOptionalConfig(t *testing.T) { //no
 	var err error
 
 	stdout := captureStdoutForStateDiagnostics(t, func() {
-		err = doctorOffline(cliOptions{
+		err = doctorOffline(t.Context(), cliOptions{
 			sessionDir:   filepath.Join(tempDir, "sessions"),
 			outputFormat: outputFormatJSON,
 		})
@@ -310,7 +313,7 @@ func TestDoctorOfflineJSONReportsFatalSchemaDiagnostics(t *testing.T) {
 	var err error
 
 	stdout := captureStdoutForStateDiagnostics(t, func() {
-		err = doctorOffline(cliOptions{
+		err = doctorOffline(t.Context(), cliOptions{
 			sessionDir:   filepath.Join(tempDir, "sessions"),
 			outputFormat: outputFormatJSON,
 		})
@@ -354,7 +357,7 @@ func TestValidateConfigFailsClosedForConfigSchemaDiagnostics(t *testing.T) {
 `), 0o600))
 	t.Setenv(appconfig.EnvPath, configPath)
 
-	err := validateConfig()
+	err := validateConfig(t.Context())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "validate config:")
 	assert.Contains(t, err.Error(), "model_aliases.fast")
@@ -864,7 +867,7 @@ func TestDoctorOfflineIncludesProviderCompatibilityMatrix(t *testing.T) {
 	t.Setenv(appconfig.EnvPath, "")
 
 	stdout := captureStdoutForStateDiagnostics(t, func() {
-		require.NoError(t, doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")}))
+		require.NoError(t, doctorOffline(context.Background(), cliOptions{sessionDir: filepath.Join(tempDir, "sessions")}))
 	})
 
 	assert.Contains(t, stdout, "Atteler offline doctor")
@@ -900,7 +903,7 @@ func TestDoctorAndOfflineDoctorReportSameProviderCompatibilityMatrix(t *testing.
 		require.NoError(t, doctor(t.Context(), state))
 	})
 	offlineOut := captureStdoutForStateDiagnostics(t, func() {
-		require.NoError(t, doctorOffline(cliOptions{sessionDir: filepath.Join(tempDir, "sessions")}))
+		require.NoError(t, doctorOffline(context.Background(), cliOptions{sessionDir: filepath.Join(tempDir, "sessions")}))
 	})
 
 	doctorBlock := providerCompatibilityMatrixBlock(t, doctorOut)
@@ -1225,11 +1228,11 @@ func TestValidateWorktreeAutoMergePolicy_RejectsUngatedAutoMerge(t *testing.T) {
 	require.NoError(t, validateWorktreeAutoMergePolicy(cliWorktreeMergePolicy{
 		AutoMerge:            true,
 		VerificationCommands: []string{"go test ./..."},
-	}))
+	}, autonomy.High))
 	require.NoError(t, validateWorktreeAutoMergePolicy(cliWorktreeMergePolicy{
 		AutoMerge:            true,
 		OverrideVerification: true,
-	}))
+	}, autonomy.High))
 }
 
 func TestWorktreeManualMergePolicyFromOptions_UsesManualOverrideWhenNoCommands(t *testing.T) {
@@ -1314,6 +1317,52 @@ func TestDoctorForcesFreshProviderReadiness(t *testing.T) { //nolint:paralleltes
 	assert.Contains(t, out, "[ok] alpha")
 	assert.NotContains(t, out, "cached")
 	assert.Equal(t, 2, provider.healthCalls)
+}
+
+func TestMergeWorktreeBySessionPermissionDenialAuditsSession(t *testing.T) {
+	t.Setenv(session.EnvDir, t.TempDir())
+	t.Setenv(permission.EnvAuditDir, "")
+
+	repo := t.TempDir()
+	cmd := exec.CommandContext(t.Context(), "git", "init")
+	cmd.Dir = repo
+	require.NoError(t, cmd.Run())
+	t.Chdir(repo)
+
+	store := session.NewStore("")
+	sess := session.New("gpt-test", nil)
+	sess.WorktreePath = filepath.Join(repo, "not-created-because-policy-denies")
+	sess.WorktreeBranch = "atteler/" + sess.ID
+	sess.WorktreeBase = "main"
+	require.NoError(t, store.Save(sess))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationMergeDelete, permission.ModeDeny)
+	err := mergeWorktreeBySession(permission.ContextWithPolicy(context.Background(), &policy), sess.ID, cliWorktreeMergePolicy{}, autonomy.High)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.merge_delete.deny")
+
+	auditPath := filepath.Join(permissionAuditDirForSessionPath(store.Path(sess.ID), sess.ID), "side_effects.jsonl")
+	data, readErr := os.ReadFile(auditPath)
+	require.NoError(t, readErr)
+	assert.Contains(t, string(data), `"session_id":"`+sess.ID+`"`)
+	assert.Contains(t, string(data), `"rule":"permission.merge_delete.deny"`)
+}
+
+func TestMergeWorktreeBySessionPermissionPolicyDeniesSessionRead(t *testing.T) {
+	t.Setenv(session.EnvDir, t.TempDir())
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	err := mergeWorktreeBySession(permission.ContextWithPolicy(t.Context(), &policy), "demo-session", cliWorktreeMergePolicy{}, autonomy.High)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.Contains(t, err.Error(), "load session for worktree merge")
 }
 
 func captureStderr(t *testing.T, fn func()) string {

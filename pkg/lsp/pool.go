@@ -123,7 +123,7 @@ func (p *ServerPool) DocumentSymbols(ctx context.Context, opts Options) ([]Symbo
 		return nil, errors.New("lsp symbols: nil context")
 	}
 
-	req, err := resolveDocumentRequest(opts)
+	req, err := resolveDocumentRequest(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func (p *ServerPool) WorkspaceSymbols(ctx context.Context, opts Options, query s
 		return nil, errors.New("lsp workspace symbols: nil context")
 	}
 
-	rootPath, languageID, err := resolveWorkspaceRequest(opts)
+	rootPath, languageID, err := resolveWorkspaceRequest(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func (p *ServerPool) Definitions(ctx context.Context, opts Options, pos Position
 		return nil, errors.New("lsp definitions: nil context")
 	}
 
-	req, err := resolveDocumentRequest(opts)
+	req, err := resolveDocumentRequest(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +186,7 @@ func (p *ServerPool) References(ctx context.Context, opts Options, pos Position,
 		return nil, errors.New("lsp references: nil context")
 	}
 
-	req, err := resolveDocumentRequest(opts)
+	req, err := resolveDocumentRequest(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ func (p *ServerPool) Diagnostics(opts Options) ([]Diagnostic, error) {
 
 func keyPartsForOptions(opts Options) (rootPath, languageID string, err error) {
 	if strings.TrimSpace(opts.FilePath) == "" {
-		return resolveWorkspaceRequest(opts)
+		return workspaceRequestParts(opts)
 	}
 
 	if validationErr := validateOptions(opts); validationErr != nil {
@@ -415,6 +415,10 @@ func (p *ServerPool) withLocationSession(
 func (p *ServerPool) getSession(ctx context.Context, opts Options, rootPath, languageID string) (*serverSession, error) {
 	if p == nil {
 		return nil, errors.New("lsp server pool is nil")
+	}
+
+	if err := authorizeLSPReadPermission(ctx, "inspect LSP workspace", rootPath); err != nil {
+		return nil, err
 	}
 
 	spec := commandSpecFromOptions(opts, rootPath, languageID)

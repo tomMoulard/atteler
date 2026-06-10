@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -27,11 +28,141 @@ func TestRunHeadlessCommandRejectsMultipleLifecycleActions(t *testing.T) {
 	require.ErrorContains(t, err, "choose only one")
 }
 
+func TestRunHeadlessCommandPermissionPolicyDeniesCancelBeforeStateMutation(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	require.NoError(t, store.SaveHeadlessRun(session.HeadlessRun{
+		ID:              "run-cancel-denied",
+		LastHeartbeatAt: time.Now().UTC(),
+		Hostname:        "foreign-host",
+		PID:             os.Getpid(),
+		Status:          session.HeadlessStatusRunning,
+	}))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, t.TempDir())
+
+	err := runHeadlessCommand(ctx, cliOptions{cancelHeadlessID: "run-cancel-denied"}, store)
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.execute.deny")
+
+	loaded, loadErr := store.LoadHeadlessRun("run-cancel-denied")
+	require.NoError(t, loadErr)
+	assert.Equal(t, session.HeadlessStatusRunning, loaded.Status)
+	assert.Empty(t, loaded.CancellationReason)
+}
+
+func TestRunHeadlessCommandPermissionPolicyDeniesRecoverBeforeStateMutation(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	require.NoError(t, store.SaveHeadlessRun(session.HeadlessRun{
+		ID:              "run-recover-denied",
+		LastHeartbeatAt: time.Now().UTC(),
+		Hostname:        "foreign-host",
+		PID:             1 << 30,
+		Status:          session.HeadlessStatusRunning,
+	}))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, t.TempDir())
+
+	err := runHeadlessCommand(ctx, cliOptions{recoverHeadless: true}, store)
+	require.Error(t, err)
+	assert.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+
+	loaded, loadErr := store.LoadHeadlessRun("run-recover-denied")
+	require.NoError(t, loadErr)
+	assert.Equal(t, session.HeadlessStatusRunning, loaded.Status)
+	assert.Empty(t, loaded.StaleReason)
+}
+
+func TestListSessionsPermissionPolicyDeniesRead(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	require.NoError(t, store.Save(session.New("gpt-test", nil)))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := listSessions(ctx, store, "")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "list sessions")
+	assert.Contains(t, string(auditData), "permission.read.deny")
+}
+
+func TestSearchSessionsPermissionPolicyDeniesIndexWrite(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	saved := session.New("gpt-test", nil)
+	require.NoError(t, store.Save(saved))
+	require.NoError(t, os.Remove(filepath.Join(store.Dir(), ".session-search-index")))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := searchSessions(ctx, store, "OAuth")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+
+	_, statErr := os.Stat(filepath.Join(store.Dir(), ".session-search-index"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "update session search index")
+	assert.Contains(t, string(auditData), "permission.write.deny")
+}
+
+func TestStatusHeadlessRunPermissionPolicyDeniesRead(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	require.NoError(t, store.SaveHeadlessRun(session.HeadlessRun{
+		ID:     "run-status-denied",
+		Status: session.HeadlessStatusRunning,
+	}))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, t.TempDir())
+
+	err := statusHeadlessRun(ctx, store, "run-status-denied")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+}
+
 func TestStatusHeadlessRunRejectsWhitespacePaddedID(t *testing.T) {
 	t.Parallel()
 
 	store := session.NewStore(t.TempDir())
-	err := statusHeadlessRun(store, " run-123 ")
+	err := statusHeadlessRun(t.Context(), store, " run-123 ")
 
 	require.ErrorContains(t, err, "headless id must not have leading or trailing whitespace")
 }
@@ -54,7 +185,7 @@ func TestReconcileHeadlessRunsAtStartupMarksStaleRuns(t *testing.T) {
 		Status:          session.HeadlessStatusRunning,
 	}))
 
-	reconcileHeadlessRunsAtStartup(store)
+	reconcileHeadlessRunsAtStartup(t.Context(), cliOptions{}, store)
 
 	loaded, err := store.LoadHeadlessRun("run-startup-stale")
 	require.NoError(t, err)
@@ -77,7 +208,7 @@ func TestReconcileHeadlessRunsAtStartupMarksDeadLocalPIDStale(t *testing.T) {
 		Status:          session.HeadlessStatusRunning,
 	}))
 
-	reconcileHeadlessRunsAtStartup(store)
+	reconcileHeadlessRunsAtStartup(t.Context(), cliOptions{}, store)
 
 	loaded, err := store.LoadHeadlessRun("run-startup-dead-pid")
 	require.NoError(t, err)
@@ -86,6 +217,43 @@ func TestReconcileHeadlessRunsAtStartupMarksDeadLocalPIDStale(t *testing.T) {
 	assert.NotNil(t, loaded.CompletedAt)
 	require.NotNil(t, loaded.ExitCode)
 	assert.Equal(t, 1, *loaded.ExitCode)
+}
+
+func TestReconcileHeadlessRunsAtStartupPermissionPolicyDeniesWrite(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewStore(t.TempDir())
+	staleAt := time.Now().Add(-time.Hour).UTC()
+	hostname, err := os.Hostname()
+	require.NoError(t, err)
+
+	require.NoError(t, store.SaveHeadlessRun(session.HeadlessRun{
+		ID:              "run-startup-denied",
+		StartedAt:       staleAt,
+		UpdatedAt:       staleAt,
+		LastHeartbeatAt: staleAt,
+		Hostname:        hostname,
+		PID:             os.Getpid(),
+		Status:          session.HeadlessStatusRunning,
+	}))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	reconcileHeadlessRunsAtStartup(ctx, cliOptions{}, store)
+
+	loaded, err := store.LoadHeadlessRun("run-startup-denied")
+	require.NoError(t, err)
+	assert.Equal(t, session.HeadlessStatusRunning, loaded.Status)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "reconcile headless runs at startup")
+	assert.Contains(t, string(auditData), "permission.write.deny")
 }
 
 func TestRun_HeadlessRecordsLoadStateFailure(t *testing.T) { //nolint:paralleltest // mutates process-global os.Args and flag.CommandLine.
@@ -229,7 +397,7 @@ func TestStatusHeadlessRunPrintsReconciledOrphanedStatus(t *testing.T) { //nolin
 	}))
 
 	out := captureSessionCommandStdout(t, func() {
-		require.NoError(t, statusHeadlessRun(store, "run-status"))
+		require.NoError(t, statusHeadlessRun(t.Context(), store, "run-status"))
 	})
 
 	assert.Contains(t, out, "run-status")
@@ -243,7 +411,7 @@ func TestStatusHeadlessRunPrintsCorruptMetadata(t *testing.T) { //nolint:paralle
 	require.NoError(t, os.WriteFile(filepath.Join(store.Dir(), "headless", "run-corrupt.json"), []byte("{not-json"), 0o600))
 
 	out := captureSessionCommandStdout(t, func() {
-		require.NoError(t, statusHeadlessRun(store, "run-corrupt"))
+		require.NoError(t, statusHeadlessRun(t.Context(), store, "run-corrupt"))
 	})
 
 	assert.Contains(t, out, "run-corrupt")
@@ -269,7 +437,7 @@ func TestListHeadlessRunsPrintsOrphanedAndCorruptRuns(t *testing.T) { //nolint:p
 	require.NoError(t, os.WriteFile(filepath.Join(store.Dir(), "headless", "run-corrupt.json"), []byte("{not-json"), 0o600))
 
 	out := captureSessionCommandStdout(t, func() {
-		require.NoError(t, listHeadlessRuns(store))
+		require.NoError(t, listHeadlessRuns(t.Context(), store))
 	})
 
 	assert.Contains(t, out, "run-orphaned")
@@ -291,7 +459,7 @@ func TestCancelHeadlessRunPrintsAndPersistsCanceledStatus(t *testing.T) { //noli
 	}))
 
 	out := captureSessionCommandStdout(t, func() {
-		require.NoError(t, cancelHeadlessRun(store, "run-cancel-command"))
+		require.NoError(t, cancelHeadlessRun(t.Context(), store, "run-cancel-command"))
 	})
 
 	assert.Contains(t, out, "run-cancel-command")
@@ -311,7 +479,7 @@ func TestCancelHeadlessRunReturnsErrorForCorruptMetadata(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(store.Dir(), "headless"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(store.Dir(), "headless", "run-corrupt-cancel.json"), []byte("{not-json"), 0o600))
 
-	err := cancelHeadlessRun(store, "run-corrupt-cancel")
+	err := cancelHeadlessRun(t.Context(), store, "run-corrupt-cancel")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parse headless")
 }

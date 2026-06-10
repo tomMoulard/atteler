@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 // ---------------------------------------------------------------------------
@@ -214,6 +216,112 @@ func TestResolveAnthropicKeyWithConfig_APIKeyWorksWhenBorrowedCredentialsDisable
 
 	assert.Equal(t, "api-key", key)
 	assert.False(t, bearer)
+}
+
+func TestResolveOpenAIKeyContext_PermissionPolicyDeniesCredentialAccess(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	_, _, err := ResolveOpenAIKeyContext(ctx)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.credential_access.deny")
+}
+
+func TestResolveOpenAIKeyContext_PermissionPolicyDeniesAuthFileRead(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+
+	codexDir := filepath.Join(root, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(`{"OPENAI_API_KEY":"sk-file"}`), 0o600))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := filepath.Join(root, "audit")
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, _, err := ResolveOpenAIKeyContext(ctx)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read OpenAI auth.json")
+	assert.Contains(t, string(auditData), "permission.read.deny")
+}
+
+func TestResolveAnthropicKeyContext_PermissionPolicyDeniesForgeCredentialFileRead(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+
+	forgeDir := filepath.Join(root, "forge")
+	require.NoError(t, os.MkdirAll(forgeDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(forgeDir, ".credentials.json"), []byte(`[
+		{"id":"anthropic","auth_details":{"api_key":"sk-forge"}}
+	]`), 0o600))
+	t.Setenv("FORGE_CONFIG", forgeDir)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := filepath.Join(root, "audit")
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, _, err := ResolveAnthropicKeyContext(ctx)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.NotContains(t, err.Error(), "no Anthropic credentials found")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read ForgeCode credentials file")
+	assert.Contains(t, string(auditData), "permission.read.deny")
+}
+
+func TestLoadClaudeCodeAuthPermissionPolicyDeniesCredentialFileRead(t *testing.T) {
+	t.Setenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN", "1")
+
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+
+	claudeDir := filepath.Join(root, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, ".credentials.json"), []byte(
+		`{"claudeAiOauth":{"accessToken":"access","refreshToken":"refresh","expiresAt":9999999999999}}`,
+	), 0o600))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := filepath.Join(root, "audit")
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	auth, err := loadClaudeCodeAuth(ctx)
+	require.Error(t, err)
+	require.Nil(t, auth)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read Claude Code credentials file")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestResolveAnthropicKeyWithConfig_AuthTokenWorksWhenBorrowedCredentialsDisabled(t *testing.T) {

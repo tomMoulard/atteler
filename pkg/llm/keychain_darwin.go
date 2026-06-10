@@ -10,6 +10,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -38,7 +39,7 @@ func readClaudeCodeKeychain(ctx context.Context) (string, error) {
 // readClaudeCodeKeychainPassword runs `security find-generic-password -w` and
 // returns the raw password blob (the JSON the claude CLI stored).
 func readClaudeCodeKeychainPassword(ctx context.Context) (string, error) {
-	out, err := runSecurityCommand(ctx, []string{"find-generic-password", "-s", keychainService, "-w"}, nil, shell.OutputSensitive)
+	out, err := runSecurityCommand(ctx, []string{"find-generic-password", "-s", keychainService, "-w"}, nil)
 	if err != nil {
 		return "", fmt.Errorf("keychain lookup failed: %w", err)
 	}
@@ -55,7 +56,7 @@ func readClaudeCodeKeychainPassword(ctx context.Context) (string, error) {
 // returns the account name ("acct") so callers can update the entry under the
 // same account on write.
 func readClaudeCodeKeychainAccount(ctx context.Context) (string, error) {
-	out, err := runSecurityCommand(ctx, []string{"find-generic-password", "-s", keychainService}, nil, shell.OutputSensitive)
+	out, err := runSecurityCommand(ctx, []string{"find-generic-password", "-s", keychainService}, nil)
 	if err != nil {
 		return "", fmt.Errorf("keychain metadata lookup failed: %w", err)
 	}
@@ -199,8 +200,8 @@ func quoteSecurityInteractiveToken(token string) (string, error) {
 
 var errSecurityTokenLineBreak = errors.New("security interactive token contains a line break")
 
-func runSecurityCommand(ctx context.Context, args, secretArgs []string, capture shell.OutputCapture) ([]byte, error) {
-	return runSecurityCommandStdin(ctx, args, "", secretArgs, capture)
+func runSecurityCommand(ctx context.Context, args, secretArgs []string) ([]byte, error) {
+	return runSecurityCommandStdin(ctx, args, "", secretArgs, shell.OutputSensitive)
 }
 
 func runSecurityCommandStdin(ctx context.Context, args []string, stdin string, secretArgs []string, capture shell.OutputCapture) ([]byte, error) {
@@ -212,14 +213,15 @@ func runSecurityCommandStdin(ctx context.Context, args []string, stdin string, s
 	}
 
 	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
-		Program:      "security",
-		Args:         args,
-		Stdin:        stdinReader,
-		Stdout:       &stdout,
-		Stderr:       &stderr,
-		Mode:         shell.ModeCaptured,
-		SecretValues: secretArgs,
-		Audit:        shell.AuditContext{Caller: "atteler.keychain.security"},
+		Program:              "security",
+		Args:                 args,
+		Stdin:                stdinReader,
+		Stdout:               &stdout,
+		Stderr:               &stderr,
+		Mode:                 shell.ModeCaptured,
+		SecretValues:         secretArgs,
+		PermissionOperations: securityCommandPermissionOperations(args),
+		Audit:                shell.AuditContext{Caller: "atteler.keychain.security"},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("authorize security command: %w", err)
@@ -241,4 +243,30 @@ func runSecurityCommandStdin(ctx context.Context, args []string, stdin string, s
 	}
 
 	return stdout.Bytes(), nil
+}
+
+func securityCommandPermissionOperations(args []string) []permission.Operation {
+	if len(args) == 0 {
+		return nil
+	}
+
+	action := "security " + strings.TrimSpace(args[0])
+	ops := []permission.Operation{{
+		Kind:   permission.OperationCredentialAccess,
+		Action: action,
+		Target: keychainService,
+		Source: "atteler.keychain.security",
+	}}
+
+	switch strings.TrimSpace(args[0]) {
+	case "add-generic-password", "delete-generic-password", "set-generic-password-partition-list", "-i":
+		ops = append(ops, permission.Operation{
+			Kind:   permission.OperationWrite,
+			Action: action,
+			Target: keychainService,
+			Source: "atteler.keychain.security",
+		})
+	}
+
+	return ops
 }

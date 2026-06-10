@@ -14,17 +14,22 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/permission"
 	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
 )
 
-func listPlugins(paths []string) error {
+func listPlugins(ctx context.Context, paths []string) error {
 	if len(paths) == 0 {
 		fmt.Println("No plugins configured.")
 		return nil
 	}
 
+	if err := authorizePluginManifestReads(ctx, "list plugin manifests", paths); err != nil {
+		return err
+	}
+
 	for _, path := range paths {
-		manifest, err := attelerplugin.Load(path)
+		manifest, err := attelerplugin.LoadContext(ctx, path)
 		if err != nil {
 			return fmt.Errorf("list plugins: %w", err)
 		}
@@ -63,8 +68,12 @@ type pluginDescription struct {
 	ManifestPath          string                                      `yaml:"manifest_path"`
 }
 
-func describePlugin(paths []string, name string) error {
-	registry, err := attelerplugin.NewRegistry(paths)
+func describePlugin(ctx context.Context, paths []string, name string) error {
+	if err := authorizePluginManifestReads(ctx, "describe plugin manifest", paths); err != nil {
+		return err
+	}
+
+	registry, err := attelerplugin.NewRegistryContext(ctx, paths)
 	if err != nil {
 		return fmt.Errorf("describe plugin: %w", err)
 	}
@@ -110,10 +119,18 @@ func formatPluginDescription(plugin attelerplugin.Plugin) (string, error) {
 	return string(out), nil
 }
 
-func initRTKPlugin(dir string) error {
+func initRTKPlugin(ctx context.Context, dir string) error {
+	if ctx == nil {
+		return errors.New("init rtk plugin: context is required")
+	}
+
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return errors.New("init rtk plugin: directory is required")
+	}
+
+	if err := authorizeInitRTKPlugin(ctx, dir); err != nil {
+		return err
 	}
 
 	files := map[string]rtkPluginFile{
@@ -202,7 +219,7 @@ provenance:
 
 	for name, file := range files {
 		path := filepath.Join(dir, name)
-		if err := writeRTKPluginFile(path, file.content, file.mode); err != nil {
+		if err := writeRTKPluginFile(ctx, path, file.content, file.mode); err != nil {
 			return err
 		}
 	}
@@ -213,6 +230,25 @@ provenance:
 	fmt.Println("Then run: atteler --run-plugin rtk/version")
 
 	return nil
+}
+
+func authorizeInitRTKPlugin(ctx context.Context, dir string) error {
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: "initialize RTK plugin scaffold",
+		Source: "atteler.plugins.init_rtk",
+		Target: dir,
+		Operations: []permission.Operation{{
+			Kind:   permission.OperationWrite,
+			Action: "initialize RTK plugin scaffold",
+			Source: "atteler.plugins.init_rtk",
+			Target: dir,
+		}},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }
 
 func rtkPluginConfigSnippet(dir string) string {
@@ -246,14 +282,18 @@ type rtkPluginFile struct {
 	mode    os.FileMode
 }
 
-func writeRTKPluginFile(path, content string, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("init rtk plugin: create dir: %w", err)
+func writeRTKPluginFile(ctx context.Context, path, content string, mode os.FileMode) error {
+	if err := authorizeReadPermission(ctx, "inspect RTK plugin scaffold file", "atteler.plugins.init_rtk", path); err != nil {
+		return fmt.Errorf("init rtk plugin: authorize file inspection: %w", err)
 	}
 
 	if existing, err := os.ReadFile(path); err == nil {
 		if string(existing) != content {
 			return fmt.Errorf("init rtk plugin: refusing to overwrite modified file %s", path)
+		}
+
+		if authErr := authorizeWritePermission(ctx, "update RTK plugin scaffold file mode", "atteler.plugins.init_rtk", path); authErr != nil {
+			return fmt.Errorf("init rtk plugin: authorize file mode update: %w", authErr)
 		}
 
 		if chmodErr := os.Chmod(path, mode); chmodErr != nil {
@@ -265,6 +305,14 @@ func writeRTKPluginFile(path, content string, mode os.FileMode) error {
 		return fmt.Errorf("init rtk plugin: read %s: %w", path, err)
 	}
 
+	if err := authorizeWritePermission(ctx, "write RTK plugin scaffold file", "atteler.plugins.init_rtk", path); err != nil {
+		return fmt.Errorf("init rtk plugin: authorize file write: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("init rtk plugin: create dir: %w", err)
+	}
+
 	if err := os.WriteFile(path, []byte(content), mode); err != nil {
 		return fmt.Errorf("init rtk plugin: write %s: %w", path, err)
 	}
@@ -272,10 +320,12 @@ func writeRTKPluginFile(path, content string, mode os.FileMode) error {
 	return nil
 }
 
+//nolint:cyclop // CLI plugin execution coordinates dry-run, policy, autonomy, and output paths.
 func runPluginEntrypoint(
 	ctx context.Context,
 	paths []string,
 	policy *attelerplugin.Policy,
+	permissionPolicy *permission.Policy,
 	target, entrypointName string,
 	dryRun bool,
 	timeoutSeconds int,
@@ -286,7 +336,11 @@ func runPluginEntrypoint(
 		return err
 	}
 
-	registry, err := attelerplugin.NewRegistry(paths)
+	if authErr := authorizePluginManifestReads(ctx, "run plugin manifest lookup", paths); authErr != nil {
+		return authErr
+	}
+
+	registry, err := attelerplugin.NewRegistryContext(ctx, paths)
 	if err != nil {
 		return fmt.Errorf("run plugin: %w", err)
 	}
@@ -309,6 +363,7 @@ func runPluginEntrypoint(
 
 		preview, previewErr := registry.DryRunEntrypointWithOptions(ctx, pluginName, entrypointName, attelerplugin.DryRunOptions{
 			Policy:                acceptedPolicy,
+			Permission:            permissionPolicy,
 			AttelerVersion:        version,
 			RequireAcceptedPolicy: true,
 		})
@@ -341,6 +396,7 @@ func runPluginEntrypoint(
 
 	result, err := attelerplugin.RunEntrypointWithOptions(ctx, plugin.Root, plugin.Manifest, entrypointName, attelerplugin.RunOptions{
 		Policy:         acceptedPolicy,
+		Permission:     permissionPolicy,
 		Timeout:        timeout,
 		AttelerVersion: version,
 		Autonomy:       autonomy.Normalize(level).String(),
@@ -360,14 +416,29 @@ func runPluginEntrypoint(
 	return nil
 }
 
+func authorizePluginManifestReads(ctx context.Context, action string, paths []string) error {
+	for _, path := range paths {
+		if err := authorizeReadPermission(ctx, action, "atteler.plugins", path); err != nil {
+			return fmt.Errorf("%s: %w", strings.TrimSpace(action), err)
+		}
+	}
+
+	return nil
+}
+
 func authorizePluginRunAutonomy(level autonomy.Level, manifest attelerplugin.Manifest) error {
 	level = autonomy.Normalize(level)
 	if !level.Allows(autonomy.ActionMutatingShell) {
 		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionMutatingShell, "--run-plugin"))
 	}
 
-	if manifest.Permissions != nil && manifest.Permissions.Network.Allow && !level.Allows(autonomy.ActionRemoteMutation) {
-		return fmt.Errorf("%s", autonomy.DenialMessage(level, autonomy.ActionRemoteMutation, "--run-plugin network permissions"))
+	if manifest.Permissions != nil &&
+		manifest.Permissions.Network.Allow &&
+		!level.Allows(autonomy.ActionRemoteMutation) {
+		return fmt.Errorf(
+			"%s",
+			autonomy.DenialMessage(level, autonomy.ActionRemoteMutation, "--run-plugin network permissions"),
+		)
 	}
 
 	return nil

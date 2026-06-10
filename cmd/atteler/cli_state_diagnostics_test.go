@@ -14,6 +14,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/agent"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -44,7 +45,7 @@ func TestPrintStateDiagnostics_PrintsPathRevisionAndResolvedSources(t *testing.T
 	var printErr error
 
 	out := captureStdoutForStateDiagnostics(t, func() {
-		printErr = printStateDiagnostics(cliOptions{}, app)
+		printErr = printStateDiagnostics(t.Context(), cliOptions{}, app)
 	})
 	require.NoError(t, printErr)
 
@@ -66,6 +67,20 @@ func TestPrintStateDiagnostics_PrintsPathRevisionAndResolvedSources(t *testing.T
 	assert.Equal(t, "fast", report.ModelMode.Selected)
 	assert.Equal(t, "state.folder", report.ModelMode.Source)
 	assert.Equal(t, "folder", report.ModelMode.Scope)
+}
+
+func TestPrintStateDiagnosticsPermissionPolicyDeniesStateRead(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+
+	err := printStateDiagnostics(ctx, cliOptions{}, stateDiagnosticsTestApp(appconfig.Config{}))
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
 }
 
 func TestStateDiagnostics_PreferenceSources(t *testing.T) {

@@ -4917,7 +4917,7 @@ func TestPrivateAdapterDiagnosticsReportsCodexConfiguredModelWithoutCredentials(
 	require.NotEmpty(t, results[0].Models)
 	assert.Equal(t, "gpt-test-codex", results[0].Models[0])
 
-	metadata, ok := (&CodexProvider{}).ModelMetadata("gpt-test-codex")
+	metadata, ok := (&CodexProvider{models: results[0].Models}).ModelMetadata("gpt-test-codex")
 	require.True(t, ok)
 	assert.Zero(t, metadata.ContextWindow)
 	assert.Contains(t, metadata.Provenance, "config.toml")

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -105,6 +106,139 @@ func mergeOptions() MergeOptions {
 		OverrideVerification: true,
 		Strategy:             MergeStrategyMerge,
 	}
+}
+
+func TestCreateContext_ReadOnlyPolicyDeniesBeforeManifestWrite(t *testing.T) {
+	t.Parallel()
+
+	repo := initTestRepo(t)
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	_, err := CreateContext(ctx, repo, "denied-session")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.git_mutation.deny")
+
+	manifestPath, pathErr := worktreeManifestPath(context.Background(), repo, "denied-session")
+	require.NoError(t, pathErr)
+	require.NoFileExists(t, manifestPath)
+	assert.NotContains(t, gitTestOutput(t, repo, "branch", "--list", "atteler/denied-session"), "atteler/denied-session")
+}
+
+func TestCreateContext_PermissionPolicyDeniesManifestWriteBeforeBranchCreate(t *testing.T) {
+	t.Parallel()
+
+	repo := initTestRepo(t)
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeAsk)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+	ctx = permission.ContextWithConfirmer(ctx, func(_ context.Context, req permission.Request, _ permission.Decision) bool {
+		return req.Action != "write worktree ownership manifest"
+	})
+
+	_, err := CreateContext(ctx, repo, "denied-write")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.ask")
+
+	manifestPath, pathErr := worktreeManifestPath(context.Background(), repo, "denied-write")
+	require.NoError(t, pathErr)
+	require.NoFileExists(t, manifestPath)
+	assert.NotContains(t, gitTestOutput(t, repo, "branch", "--list", "atteler/denied-write"), "atteler/denied-write")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "write worktree ownership manifest")
+	assert.Contains(t, string(auditData), "permission.write.ask")
+	assert.Contains(t, string(auditData), "confirmation declined")
+}
+
+func TestCreateContext_PermissionPolicyDeniesManifestReadBeforeBranchCreate(t *testing.T) {
+	t.Parallel()
+
+	repo := initTestRepo(t)
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeAsk)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+	ctx = permission.ContextWithConfirmer(ctx, func(_ context.Context, req permission.Request, _ permission.Decision) bool {
+		return req.Action != "read worktree ownership manifest"
+	})
+
+	_, err := CreateContext(ctx, repo, "denied-read")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.ask")
+
+	manifestPath, pathErr := worktreeManifestPath(context.Background(), repo, "denied-read")
+	require.NoError(t, pathErr)
+	require.NoFileExists(t, manifestPath)
+	assert.NotContains(t, gitTestOutput(t, repo, "branch", "--list", "atteler/denied-read"), "atteler/denied-read")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read worktree ownership manifest")
+	assert.Contains(t, string(auditData), "permission.read.ask")
+	assert.Contains(t, string(auditData), "confirmation declined")
+}
+
+func TestAppendWorktreeLedger_PermissionPolicyDeniesBeforeFileCreate(t *testing.T) {
+	t.Parallel()
+
+	repo := initTestRepo(t)
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := appendWorktreeLedger(ctx, repo, "denied-ledger", "test", "blocked")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+
+	ledgerPath, pathErr := worktreeLedgerPath(context.Background(), repo, "denied-ledger")
+	require.NoError(t, pathErr)
+	require.NoFileExists(t, ledgerPath)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "write worktree ownership ledger")
+	assert.Contains(t, string(auditData), "permission.write.deny")
+}
+
+func TestNewTransactionLog_PermissionPolicyDeniesBeforeFileCreate(t *testing.T) {
+	t.Parallel()
+
+	repo := initTestRepo(t)
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	log, err := newTransactionLog(ctx, repo, "denied-transaction")
+	require.Error(t, err)
+	require.Nil(t, log)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+
+	matches, globErr := filepath.Glob(filepath.Join(repo, ".git", "atteler", "worktree-transactions", "denied-transaction-*.log"))
+	require.NoError(t, globErr)
+	require.Empty(t, matches)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "write worktree merge transaction log")
+	assert.Contains(t, string(auditData), "permission.write.deny")
 }
 
 func reviewedAutoCommitMergeOptions() MergeOptions {

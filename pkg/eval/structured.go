@@ -125,17 +125,19 @@ type Assertion struct {
 
 // RunOptions controls structured eval execution.
 type RunOptions struct {
-	ActualText          string
-	UseActualText       bool
-	ActualPath          string
-	ExitCode            *int
-	ArtifactRoot        string
-	SuitePath           string
-	Metrics             ReportMetrics
-	Workflow            WorkflowTrace
-	Now                 time.Time
-	UpdateGolden        bool
-	ApproveGoldenUpdate bool
+	ActualText           string
+	UseActualText        bool
+	ActualPath           string
+	ExitCode             *int
+	ArtifactRoot         string
+	SuitePath            string
+	Metrics              ReportMetrics
+	Workflow             WorkflowTrace
+	Now                  time.Time
+	UpdateGolden         bool
+	ApproveGoldenUpdate  bool
+	AuthorizeRead        func(path string) error
+	AuthorizeGoldenWrite func(path string) error
 }
 
 // Report is the stable machine-readable outcome of a structured eval run.
@@ -343,6 +345,12 @@ func DiscoverSuiteFiles(dir string) ([]string, error) {
 
 // RunSuiteFile loads and evaluates one structured eval suite file.
 func RunSuiteFile(path string, opts RunOptions) (Report, error) {
+	if opts.AuthorizeRead != nil {
+		if err := opts.AuthorizeRead(path); err != nil {
+			return Report{}, fmt.Errorf("authorize eval suite read %s: %w", path, err)
+		}
+	}
+
 	suite, err := LoadSuiteFile(path)
 	if err != nil {
 		return Report{}, err
@@ -452,6 +460,11 @@ func RunSuite(suite Suite, opts RunOptions) (Report, error) {
 			if !opts.ApproveGoldenUpdate {
 				return Report{}, errors.New("eval golden update requires explicit review approval")
 			}
+			if opts.AuthorizeGoldenWrite != nil {
+				if err := opts.AuthorizeGoldenWrite(goldenPath); err != nil {
+					return Report{}, fmt.Errorf("authorize golden update %s: %w", goldenPath, err)
+				}
+			}
 			if err := os.MkdirAll(filepath.Dir(goldenPath), 0o750); err != nil {
 				return Report{}, fmt.Errorf("prepare golden directory: %w", err)
 			}
@@ -464,6 +477,12 @@ func RunSuite(suite Suite, opts RunOptions) (Report, error) {
 				Severity: SeverityWarning,
 			}, opts, "updated golden file; review the diff before committing"))
 		} else {
+			if opts.AuthorizeRead != nil {
+				if err := opts.AuthorizeRead(goldenPath); err != nil {
+					return Report{}, fmt.Errorf("authorize golden read %s: %w", goldenPath, err)
+				}
+			}
+
 			golden, err := os.ReadFile(goldenPath)
 			if err != nil {
 				return Report{}, fmt.Errorf("read golden %s: %w", goldenPath, err)
@@ -643,6 +662,12 @@ func workflowTraceForSuite(suite Suite, opts RunOptions) (WorkflowTrace, error) 
 	}
 
 	path := resolveSuitePath(opts.ArtifactRoot, suite.WorkflowPath)
+	if opts.AuthorizeRead != nil {
+		if err := opts.AuthorizeRead(path); err != nil {
+			return WorkflowTrace{}, fmt.Errorf("authorize workflow trace read %s: %w", path, err)
+		}
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return WorkflowTrace{}, fmt.Errorf("read workflow trace %s: %w", path, err)
@@ -755,6 +780,12 @@ func actualTextForSuite(suite Suite, opts RunOptions) (string, string, error) {
 	}
 
 	if strings.TrimSpace(opts.ActualPath) != "" {
+		if opts.AuthorizeRead != nil {
+			if err := opts.AuthorizeRead(opts.ActualPath); err != nil {
+				return "", "", fmt.Errorf("authorize actual read %s: %w", opts.ActualPath, err)
+			}
+		}
+
 		data, err := os.ReadFile(opts.ActualPath)
 		if err != nil {
 			return "", "", fmt.Errorf("eval output: read actual %s: %w", opts.ActualPath, err)
@@ -764,6 +795,12 @@ func actualTextForSuite(suite Suite, opts RunOptions) (string, string, error) {
 
 	if strings.TrimSpace(suite.ActualPath) != "" {
 		path := resolveSuitePath(opts.ArtifactRoot, suite.ActualPath)
+		if opts.AuthorizeRead != nil {
+			if err := opts.AuthorizeRead(path); err != nil {
+				return "", "", fmt.Errorf("authorize actual read %s: %w", path, err)
+			}
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return "", "", fmt.Errorf("eval output: read actual %s: %w", path, err)
@@ -1216,6 +1253,12 @@ func assertionSchema(assertion Assertion, opts RunOptions) (map[string]any, erro
 	}
 
 	path := resolveSuitePath(opts.ArtifactRoot, assertion.SchemaPath)
+	if opts.AuthorizeRead != nil {
+		if err := opts.AuthorizeRead(path); err != nil {
+			return nil, fmt.Errorf("authorize schema read %s: %w", path, err)
+		}
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read schema file %s: %w", path, err)

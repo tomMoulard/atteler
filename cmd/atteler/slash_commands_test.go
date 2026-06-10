@@ -14,6 +14,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 )
 
@@ -32,29 +33,36 @@ func TestCopyToClipboard_RequiresActiveContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-func TestSlashCommandAuditContextIncludesAutonomy(t *testing.T) {
-	t.Parallel()
+//nolint:paralleltest // Mutates package-level execLookPath.
+func TestCopyToClipboardPermissionPolicyDeniesCommandLookupRead(t *testing.T) {
+	dir := t.TempDir()
 
-	got := slashCommandAuditContext(model{
-		sessionState: session.Session{ID: "session-id"},
-		sessionPath:  "/tmp/session.json",
-		autonomy:     autonomy.High,
-	}, "atteler.clipboard")
+	originalLookPath := execLookPath
+	lookPathCalled := false
+	execLookPath = func(string) (string, error) {
+		lookPathCalled = true
 
-	assert.Equal(t, "atteler.clipboard", got.Caller)
-	assert.Equal(t, "session-id", got.SessionID)
-	assert.Equal(t, "/tmp/session.json", got.SessionPath)
-	assert.Equal(t, "high", got.Autonomy)
-}
+		return "", os.ErrNotExist
+	}
 
-func TestCopyToClipboardBlocksLowAutonomyBeforeShellExecution(t *testing.T) {
-	t.Parallel()
+	t.Cleanup(func() {
+		execLookPath = originalLookPath
+	})
 
-	err := copyToClipboardWithAudit(context.Background(), "text", slashCommandAuditContext(model{autonomy: autonomy.Low}, "atteler.clipboard"))
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, filepath.Join(dir, "audit"))
 
+	err := copyToClipboard(ctx, "text")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "autonomy low is advisory-only")
-	assert.Contains(t, err.Error(), "--autonomy medium")
+	assert.True(t, permission.ErrDenied(err))
+	assert.False(t, lookPathCalled, "clipboard executable lookup should not run after read denial")
+
+	auditData, err := os.ReadFile(filepath.Join(dir, "audit", "side_effects.jsonl"))
+	require.NoError(t, err)
+	assert.Contains(t, string(auditData), "permission.read.deny")
+	assert.Contains(t, string(auditData), "atteler.clipboard")
 }
 
 func TestSlashHelp_Golden(t *testing.T) {
@@ -1093,219 +1101,121 @@ func TestSaveCodeSlashCommand_WritesSelectedCodeBlock(t *testing.T) {
 	_, cmd, handled := runSaveCodeSlashCommand(m, slashSaveCodeInput{Block: 2, Path: path})
 	require.True(t, handled)
 	require.NotNil(t, cmd)
+	cmd()
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "two", string(data))
 }
 
-func TestExportSlashCommand_BlocksLowAutonomyFilesystemWrite(t *testing.T) {
-	t.Parallel()
-
-	path := filepath.Join(t.TempDir(), "session.md")
-	m := model{
-		autonomy:     autonomy.Low,
-		sessionState: session.New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "hello"}}),
-	}
-
-	next, cmd, handled := runExportSlashCommand(m, slashOptionalValueInput{Value: path})
-	require.True(t, handled)
-	require.NotNil(t, cmd)
-	assert.Equal(t, autonomy.Low, next.autonomy)
-	assert.Contains(t, stripANSI(toStringMsg(cmd())), "autonomy low blocks file writes")
-
-	_, err := os.Stat(path)
-	require.ErrorIs(t, err, os.ErrNotExist)
-}
-
-func TestSaveCodeSlashCommand_BlocksLowAutonomy(t *testing.T) {
+func TestSaveCodeSlashCommand_PermissionPolicyDeniesWrite(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "out.go")
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithAuditDir(t.Context(), t.TempDir())
 	m := model{
-		autonomy: autonomy.Low,
+		ctx:              ctx,
+		permissionPolicy: &policy,
 		history: []llm.Message{
-			{Role: llm.RoleAssistant, Content: "```go\nfmt.Println(\"one\")\n```"},
+			{Role: llm.RoleAssistant, Content: "```go\nfmt.Println(\"blocked\")\n```"},
 		},
 	}
 
-	next, cmd, handled := runSaveCodeSlashCommand(m, slashSaveCodeInput{Block: 1, Path: path})
+	_, cmd, handled := runSaveCodeSlashCommand(m, slashSaveCodeInput{Block: 1, Path: path})
 	require.True(t, handled)
 	require.NotNil(t, cmd)
-	assert.Equal(t, autonomy.Low, next.autonomy)
+	cmd()
 
-	_, err := os.Stat(path)
-	require.ErrorIs(t, err, os.ErrNotExist)
+	require.NoFileExists(t, path)
 }
 
-func TestCopySlashCommands_BlockLowAutonomyClipboardWrites(t *testing.T) {
+func TestExportSlashCommand_PermissionPolicyDeniesWrite(t *testing.T) {
 	t.Parallel()
 
+	path := filepath.Join(t.TempDir(), "session.md")
+	policy := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithAuditDir(t.Context(), t.TempDir())
 	m := model{
-		autonomy: autonomy.Low,
-		history: []llm.Message{
-			{Role: llm.RoleAssistant, Content: "answer\n```go\nfmt.Println(\"one\")\n```"},
-		},
+		ctx:              ctx,
+		permissionPolicy: &policy,
+		sessionState:     session.New("gpt-test", nil),
 	}
 
-	next, cmd, handled := runCopySlashCommand(m, slashCopyInput{Target: "last"})
+	_, cmd, handled := runExportSlashCommand(m, slashOptionalValueInput{Value: path})
 	require.True(t, handled)
 	require.NotNil(t, cmd)
-	assert.Equal(t, autonomy.Low, next.autonomy)
-	assert.Contains(t, stripANSI(toStringMsg(cmd())), "autonomy low blocks mutating shell commands")
+	cmd()
 
-	next, cmd, handled = runCopyCodeSlashCommand(m, slashCopyCodeInput{Block: 1})
-	require.True(t, handled)
-	require.NotNil(t, cmd)
-	assert.Equal(t, autonomy.Low, next.autonomy)
-	assert.Contains(t, stripANSI(toStringMsg(cmd())), "autonomy low blocks mutating shell commands")
+	require.NoFileExists(t, path)
 }
 
-func TestMutatingSlashCommands_BlockLowAutonomySessionWrites(t *testing.T) {
-	t.Parallel()
+func TestCopyCodeSlashCommand_PermissionPolicyDeniesClipboardExecution(t *testing.T) {
+	dir := t.TempDir()
+	fakeClipboard := filepath.Join(dir, "pbcopy")
+	logPath := filepath.Join(dir, "clipboard.log")
+	script := "#!/bin/sh\ncat > \"$ATTELER_FAKE_CLIPBOARD_LOG\"\n"
+	require.NoError(t, os.WriteFile(fakeClipboard, []byte(script), 0o600))
+	require.NoError(t, os.Chmod(fakeClipboard, 0o700)) //nolint:gosec // test fixture creates an executable clipboard shim in a private temp directory.
+	t.Setenv("ATTELER_FAKE_CLIPBOARD_LOG", logPath)
+	t.Setenv("PATH", dir)
 
-	baseMessages := []llm.Message{
-		{Role: llm.RoleUser, Content: "hello"},
-		{Role: llm.RoleAssistant, Content: "plan"},
-	}
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
 
-	tests := []struct {
-		run    func(model) (model, tea.Cmd, bool)
-		check  func(*testing.T, model)
-		name   string
-		detail string
-	}{
-		{
-			name:   "clear",
-			detail: "/clear",
-			run: func(m model) (model, tea.Cmd, bool) {
-				return runClearSlashCommand(m, slashNoArgsInput{})
-			},
-			check: func(t *testing.T, next model) {
-				t.Helper()
-				assert.Len(t, next.history, 2)
-				assert.Len(t, next.sessionState.Messages, 2)
-			},
-		},
-		{
-			name:   "model",
-			detail: "/model",
-			run: func(m model) (model, tea.Cmd, bool) {
-				return runModelSlashCommand(m, slashOptionalValueInput{Value: "new-model"})
-			},
-			check: func(t *testing.T, next model) {
-				t.Helper()
-				assert.Equal(t, "old-model", next.selectedModel)
-				assert.False(t, next.modelLocked)
-				assert.Equal(t, "old-model", next.sessionState.DefaultModel)
-			},
-		},
-		{
-			name:   "profile",
-			detail: "/profile",
-			run: func(m model) (model, tea.Cmd, bool) {
-				return runProfileSlashCommand(m, slashOptionalValueInput{Value: "new-agent"})
-			},
-			check: func(t *testing.T, next model) {
-				t.Helper()
-				assert.Equal(t, "old-agent", next.selectedAgent)
-				assert.Equal(t, "old-agent", next.sessionState.DefaultAgent)
-			},
-		},
-		{
-			name:   "save",
-			detail: "/save",
-			run: func(m model) (model, tea.Cmd, bool) {
-				return runSaveSlashCommand(m, slashNoArgsInput{})
-			},
-		},
-		{
-			name:   "pin",
-			detail: "/pin",
-			run: func(m model) (model, tea.Cmd, bool) {
-				return runPinSlashCommand(m, slashMessageNumberInput{Number: 2})
-			},
-			check: func(t *testing.T, next model) {
-				t.Helper()
-				assert.False(t, next.pinnedMessages[1])
-			},
-		},
-		{
-			name:   "context prune",
-			detail: "/context prune",
-			run: func(m model) (model, tea.Cmd, bool) {
-				return runContextSlashCommand(m, slashContextInput{Prune: true})
-			},
-			check: func(t *testing.T, next model) {
-				t.Helper()
-				assert.Len(t, next.history, 2)
-				assert.Len(t, next.sessionState.Messages, 2)
-			},
-		},
-		{
-			name:   "suggestions",
-			detail: "/suggestions",
-			run: func(m model) (model, tea.Cmd, bool) {
-				return runSuggestionsSlashCommand(m, slashSuggestionsInput{Mode: string(promptSuggestionConsentSession)})
-			},
-			check: func(t *testing.T, next model) {
-				t.Helper()
-				assert.Empty(t, next.promptSuggestionConsent)
-				assert.Empty(t, next.sessionState.PromptSuggestions)
-			},
-		},
-		{
-			name:   "retry",
-			detail: "/retry",
-			run: func(m model) (model, tea.Cmd, bool) {
-				return runRetrySlashCommand(m, slashNoArgsInput{})
-			},
-		},
-		{
-			name:   "edit",
-			detail: "/edit",
-			run: func(m model) (model, tea.Cmd, bool) {
-				return runEditSlashCommand(m, slashNoArgsInput{})
-			},
-		},
-		{
-			name:   "fork",
-			detail: "/fork",
-			run: func(m model) (model, tea.Cmd, bool) {
-				return runForkSlashCommand(m, slashForkInput{})
-			},
+	ctx := permission.ContextWithAuditDir(t.Context(), filepath.Join(dir, "audit"))
+	m := model{
+		ctx:              ctx,
+		permissionPolicy: &policy,
+		history: []llm.Message{
+			{Role: llm.RoleAssistant, Content: "```go\nfmt.Println(\"blocked\")\n```"},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	_, cmd, handled := runCopyCodeSlashCommand(m, slashCopyCodeInput{Block: 1})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	cmd()
 
-			sessionState := session.New("old-model", append([]llm.Message(nil), baseMessages...))
-			sessionState.DefaultAgent = "old-agent"
-			m := model{
-				autonomy:       autonomy.Low,
-				history:        append([]llm.Message(nil), baseMessages...),
-				modelLocked:    false,
-				pinnedMessages: map[int]bool{0: true},
-				selectedAgent:  "old-agent",
-				selectedModel:  "old-model",
-				sessionState:   sessionState,
-			}
+	require.NoFileExists(t, logPath)
 
-			next, cmd, handled := tt.run(m)
-			require.True(t, handled)
-			require.NotNil(t, cmd)
+	auditData, err := os.ReadFile(filepath.Join(dir, "audit", "side_effects.jsonl"))
+	require.NoError(t, err)
+	assert.Contains(t, string(auditData), "permission.execute.deny")
+}
 
-			output := stripANSI(toStringMsg(cmd()))
-			assert.Contains(t, output, "autonomy low blocks file writes")
-			assert.Contains(t, output, tt.detail)
+func TestCopyCodeSlashCommand_PermissionPolicyDeniesClipboardWrite(t *testing.T) {
+	dir := t.TempDir()
+	fakeClipboard := filepath.Join(dir, "pbcopy")
+	logPath := filepath.Join(dir, "clipboard.log")
+	script := "#!/bin/sh\ncat > \"$ATTELER_FAKE_CLIPBOARD_LOG\"\n"
+	require.NoError(t, os.WriteFile(fakeClipboard, []byte(script), 0o600))
+	require.NoError(t, os.Chmod(fakeClipboard, 0o700)) //nolint:gosec // test fixture creates an executable clipboard shim in a private temp directory.
+	t.Setenv("ATTELER_FAKE_CLIPBOARD_LOG", logPath)
+	t.Setenv("PATH", dir)
 
-			if tt.check != nil {
-				tt.check(t, next)
-			}
-		})
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithAuditDir(t.Context(), filepath.Join(dir, "audit"))
+	m := model{
+		ctx:              ctx,
+		permissionPolicy: &policy,
+		history: []llm.Message{
+			{Role: llm.RoleAssistant, Content: "```go\nfmt.Println(\"blocked\")\n```"},
+		},
 	}
+
+	_, cmd, handled := runCopyCodeSlashCommand(m, slashCopyCodeInput{Block: 1})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	cmd()
+
+	require.NoFileExists(t, logPath)
+
+	auditData, err := os.ReadFile(filepath.Join(dir, "audit", "side_effects.jsonl"))
+	require.NoError(t, err)
+	assert.Contains(t, string(auditData), "permission.write.deny")
 }
 
 func TestCountEvalCases_CountsOnlyTopLevelJSONFiles(t *testing.T) {
@@ -1333,9 +1243,11 @@ func TestEvalSlashCommand_AddWritesCaseAndRunCountsCases(t *testing.T) {
 		sessionState: sessionState,
 	}
 
-	next, _, handled := runEvalSlashCommand(m, slashEvalInput{Action: "add"})
+	next, cmd, handled := runEvalSlashCommand(m, slashEvalInput{Action: "add"})
 	require.True(t, handled)
 	assert.Equal(t, m.sessionState, next.sessionState)
+	require.NotNil(t, cmd)
+	cmd()
 
 	path := filepath.Join(dir, ".atteler", "evals", sessionState.ID+".json")
 	data, err := os.ReadFile(path)
@@ -1385,6 +1297,37 @@ func TestEvalSlashCommand_RunCountsCasesWithoutShellTask(t *testing.T) {
 	require.True(t, handled)
 	require.NotNil(t, cmd)
 	assert.False(t, next.waiting, "/eval run should count cases directly instead of starting a shell task")
+}
+
+func TestEvalSlashCommand_RunDeniedReadBlocksCount(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	casesDir := filepath.Join(dir, ".atteler", "evals")
+	require.NoError(t, os.MkdirAll(casesDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(casesDir, "one.json"), []byte("{}"), 0o600))
+
+	auditDir := filepath.Join(dir, "audit")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithAuditDir(t.Context(), auditDir)
+	m := model{
+		ctx:              ctx,
+		cwd:              dir,
+		permissionPolicy: &policy,
+	}
+
+	next, cmd, handled := runEvalSlashCommand(m, slashEvalInput{Action: "run"})
+	require.True(t, handled)
+	require.NotNil(t, cmd)
+	assert.False(t, next.waiting, "/eval run should remain a local count action")
+	cmd()
+
+	auditData, err := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, err)
+	assert.Contains(t, string(auditData), "count eval cases")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 func TestCommandSurface_IncludesSlashCommandDescriptors(t *testing.T) {

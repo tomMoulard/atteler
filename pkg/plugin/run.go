@@ -58,6 +58,8 @@ func RunEntrypoint(
 // against policy, builds a scrubbed allowlisted environment, validates
 // positional args against the entrypoint schema, and runs the entrypoint with
 // root as the working directory.
+//
+//nolint:cyclop // Plugin execution validates policy, permissions, process setup, and bounded output together.
 func RunEntrypointWithOptions(
 	ctx context.Context,
 	root string,
@@ -95,6 +97,31 @@ func RunEntrypointWithOptions(
 		return RunResult{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, err)
 	}
 
+	rootAbs, targetAbs, err := authorizeAndResolveEntrypoint(ctx, options.Permission, root, manifest, entrypoint)
+	if err != nil {
+		if permission.ErrDenied(err) {
+			return RunResult{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, err)
+		}
+
+		return RunResult{}, fmt.Errorf("plugin: resolve entrypoint %q: %w", entrypointName, err)
+	}
+
+	if permissionErr := authorizePluginEntrypointHeaderRead(ctx, options.Permission, targetAbs, manifest); permissionErr != nil {
+		return RunResult{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, permissionErr)
+	}
+
+	if shapeErr := authorizeEntrypointRuntimeShape(targetAbs, manifest); shapeErr != nil {
+		return RunResult{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, shapeErr)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, options.Timeout)
+	defer cancel()
+
+	credentialPreauthorized, err := authorizePluginCredentialAccess(runCtx, options.Permission, rootAbs, targetAbs, manifest)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, err)
+	}
+
 	env, secrets, err := buildPluginEnvironment(manifest, options.Env)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, err)
@@ -105,37 +132,26 @@ func RunEntrypointWithOptions(
 		env = append(env, "ATTELER_AUTONOMY="+autonomyLevel)
 	}
 
-	rootAbs, targetAbs, err := resolveEntrypoint(root, entrypoint)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("plugin: resolve entrypoint %q: %w", entrypointName, err)
+	permissionPolicy := options.Permission
+	if credentialPreauthorized {
+		permissionPolicy = permissionPolicyWithCredentialAllowed(runCtx, permissionPolicy)
 	}
-
-	if shapeErr := authorizeEntrypointRuntimeShape(targetAbs, manifest); shapeErr != nil {
-		return RunResult{}, fmt.Errorf("plugin: authorize entrypoint %q: %w", entrypointName, shapeErr)
-	}
-
-	runCtx, cancel := context.WithTimeout(ctx, options.Timeout)
-	defer cancel()
 
 	stdout := newBoundedBuffer(manifest.Output.StdoutMaxBytes)
 	stderr := newBoundedBuffer(manifest.Output.StderrMaxBytes)
 
 	cmd, invocation, err := attshell.CommandContext(runCtx, attshell.CommandOptions{
-		Program:    targetAbs,
-		Args:       args,
-		Dir:        rootAbs,
-		EnvList:    env,
-		EnvMode:    attshell.EnvModeExplicitOnly,
-		Mode:       attshell.ModeCaptured,
-		Stdout:     stdout,
-		Stderr:     stderr,
-		Permission: options.Permission,
-		PermissionOperations: pluginPermissionOperations(
-			manifest,
-			entrypointName,
-			targetAbs,
-		),
-		Policy: shellPolicyForPlugin(targetAbs, manifest, secrets),
+		Program:              targetAbs,
+		Args:                 args,
+		Dir:                  rootAbs,
+		EnvList:              env,
+		EnvMode:              attshell.EnvModeExplicitOnly,
+		Mode:                 attshell.ModeCaptured,
+		Stdout:               stdout,
+		Stderr:               stderr,
+		Permission:           permissionPolicy,
+		PermissionOperations: manifestPermissionOperations(rootAbs, targetAbs, manifest, entrypointName),
+		Policy:               shellPolicyForPlugin(targetAbs, manifest, secrets),
 		Audit: attshell.AuditContext{
 			Caller:   "atteler.plugin." + entrypointName,
 			Autonomy: autonomyLevel,
@@ -207,10 +223,15 @@ func finishPluginRun(
 }
 
 func shellPolicyForPlugin(targetAbs string, manifest Manifest, secrets []secretValue) *attshell.Policy {
+	denyNetwork := true
+	if manifest.Permissions != nil {
+		denyNetwork = !manifest.Permissions.Network.Allow
+	}
+
 	return &attshell.Policy{
 		AllowCommands:      []string{targetAbs},
 		AllowCredentialEnv: secretNames(secrets),
-		DenyNetwork:        !manifest.Permissions.Network.Allow,
+		DenyNetwork:        denyNetwork,
 	}
 }
 
@@ -220,11 +241,153 @@ func authorizeEntrypointRuntimeShape(targetAbs string, manifest Manifest) error 
 		return err
 	}
 
-	if usesShell && !manifest.Permissions.Shell.Allow {
+	if usesShell && (manifest.Permissions == nil || !manifest.Permissions.Shell.Allow) {
 		return errors.New("shell access must be declared in permissions")
 	}
 
 	return nil
+}
+
+func authorizePluginEntrypointInspection(ctx context.Context, policy *permission.Policy, target string, manifest Manifest) error {
+	return authorizePluginEntrypointRead(ctx, policy, "inspect "+pluginPermissionAction(manifest.Name, ""), target, manifest)
+}
+
+func authorizePluginEntrypointHeaderRead(ctx context.Context, policy *permission.Policy, target string, manifest Manifest) error {
+	return authorizePluginEntrypointRead(ctx, policy, "read "+pluginPermissionAction(manifest.Name, "")+" header", target, manifest)
+}
+
+func authorizePluginEntrypointRead(ctx context.Context, policy *permission.Policy, action, target string, manifest Manifest) error {
+	source := pluginPermissionSource(manifest.Name, "")
+
+	op := permission.Operation{
+		Kind:     permission.OperationRead,
+		Action:   action,
+		Target:   target,
+		Source:   source,
+		Metadata: pluginPermissionMetadata(manifest.Name, ""),
+	}
+
+	decision := permission.Evaluate(ctx, policy, permission.Request{
+		Operations: []permission.Operation{op},
+		Action:     action,
+		Source:     source,
+		Target:     target,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
+}
+
+func authorizeAndResolveEntrypoint(
+	ctx context.Context,
+	policy *permission.Policy,
+	root string,
+	manifest Manifest,
+	entrypoint string,
+) (rootAbs, targetAbs string, err error) {
+	_, requestedTargetAbs, candidateErr := entrypointCandidate(root, entrypoint)
+	if candidateErr != nil {
+		return "", "", candidateErr
+	}
+
+	inspectionErr := authorizePluginEntrypointInspection(ctx, policy, requestedTargetAbs, manifest)
+	if inspectionErr != nil {
+		return "", "", inspectionErr
+	}
+
+	rootAbs, targetAbs, resolveErr := resolveEntrypoint(root, entrypoint)
+	if resolveErr != nil {
+		return "", "", resolveErr
+	}
+
+	if targetAbs == requestedTargetAbs {
+		return rootAbs, targetAbs, nil
+	}
+
+	inspectionErr = authorizePluginEntrypointInspection(ctx, policy, targetAbs, manifest)
+	if inspectionErr != nil {
+		return "", "", inspectionErr
+	}
+
+	return rootAbs, targetAbs, nil
+}
+
+func authorizePluginCredentialAccess(ctx context.Context, policy *permission.Policy, root, target string, manifest Manifest) (bool, error) {
+	if manifest.Permissions == nil || len(manifest.Permissions.Secrets) == 0 {
+		return false, nil
+	}
+
+	ops := manifestPermissionOperations(root, target, manifest, "")
+	credentialOps := make([]permission.Operation, 0, 1)
+
+	for _, op := range ops {
+		if op.Kind == permission.OperationCredentialAccess {
+			credentialOps = append(credentialOps, op)
+		}
+	}
+
+	if len(credentialOps) == 0 {
+		return false, nil
+	}
+
+	decision := permission.Evaluate(ctx, policy, permission.Request{
+		Operations: credentialOps,
+		Action:     credentialOps[0].Action,
+		Source:     credentialOps[0].Source,
+		Target:     credentialOps[0].Target,
+	})
+	if decision.Allowed {
+		return true, nil
+	}
+
+	return false, &permission.Error{Decision: decision}
+}
+
+func permissionPolicyWithCredentialAllowed(ctx context.Context, policy *permission.Policy) *permission.Policy {
+	if policy == nil {
+		policy = permission.PolicyFromContext(ctx)
+	}
+
+	if policy == nil {
+		return nil
+	}
+
+	clone := *policy
+	if len(policy.Modes) > 0 {
+		clone.Modes = maps.Clone(policy.Modes)
+	}
+
+	clone.SetMode(permission.OperationCredentialAccess, permission.ModeAllow)
+
+	return &clone
+}
+
+func manifestPermissionOperations(root, target string, manifest Manifest, entrypointName string) []permission.Operation {
+	ops := pluginPermissionOperations(manifest, entrypointName, target)
+	if manifest.Permissions == nil {
+		return ops
+	}
+
+	action := pluginPermissionAction(manifest.Name, entrypointName)
+	source := pluginPermissionSource(manifest.Name, entrypointName)
+	metadata := pluginPermissionMetadata(manifest.Name, entrypointName)
+
+	for i := range ops {
+		switch ops[i].Kind {
+		case permission.OperationRead, permission.OperationWrite:
+			if strings.TrimSpace(ops[i].Target) == "" {
+				ops[i].Target = root
+			}
+		}
+	}
+
+	if manifest.Permissions.Shell.Allow {
+		ops = append(ops, pluginPermissionOperation(permission.OperationExecute, action+" shell", target, source, metadata))
+	}
+
+	return ops
 }
 
 func pluginPermissionOperations(
@@ -295,12 +458,12 @@ func pluginPermissionAction(pluginName, entrypointName string) string {
 		return "plugin entrypoint " + pluginName + "/" + entrypointName
 	}
 
-	if entrypointName != "" {
-		return "plugin entrypoint " + entrypointName
+	if pluginName != "" {
+		return "plugin entrypoint " + pluginName
 	}
 
-	if pluginName != "" {
-		return "plugin " + pluginName
+	if entrypointName != "" {
+		return "plugin entrypoint " + entrypointName
 	}
 
 	return "plugin entrypoint"
@@ -548,14 +711,19 @@ func secretNames(secrets []secretValue) []string {
 
 func buildPluginEnvironment(manifest Manifest, explicit map[string]string) ([]string, []secretValue, error) {
 	allowed := make(map[string]struct{}, len(manifest.Permissions.Env)+len(manifest.Permissions.Secrets))
-	for _, name := range manifest.Permissions.Env {
-		allowed[name] = struct{}{}
-	}
-
 	secretNames := make(map[string]struct{}, len(manifest.Permissions.Secrets))
+
 	for _, name := range manifest.Permissions.Secrets {
 		allowed[name] = struct{}{}
 		secretNames[name] = struct{}{}
+	}
+
+	if err := validatePlainEnvDoesNotDeclareCredentials(manifest.Permissions.Env, manifest.Permissions.Secrets); err != nil {
+		return nil, nil, err
+	}
+
+	for _, name := range manifest.Permissions.Env {
+		allowed[name] = struct{}{}
 	}
 
 	for name := range explicit {
@@ -688,23 +856,14 @@ func isShellName(name string) bool {
 }
 
 func resolveEntrypoint(root, entrypoint string) (resolvedRoot, resolvedTarget string, err error) {
-	if validateErr := validateEntrypoint(root, entrypoint); validateErr != nil {
-		return "", "", validateErr
-	}
-
-	rootAbs, err := filepath.Abs(root)
+	rootAbs, targetAbs, err := entrypointCandidate(root, entrypoint)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve plugin root: %w", err)
+		return "", "", err
 	}
 
 	rootResolved, err := filepath.EvalSymlinks(rootAbs)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve plugin root symlinks: %w", err)
-	}
-
-	targetAbs, err := filepath.Abs(filepath.Join(rootAbs, strings.TrimSpace(entrypoint)))
-	if err != nil {
-		return "", "", fmt.Errorf("resolve path: %w", err)
 	}
 
 	targetResolved, err := filepath.EvalSymlinks(targetAbs)
@@ -722,4 +881,22 @@ func resolveEntrypoint(root, entrypoint string) (resolvedRoot, resolvedTarget st
 	}
 
 	return rootAbs, targetResolved, nil
+}
+
+func entrypointCandidate(root, entrypoint string) (rootAbs, targetAbs string, err error) {
+	if validateErr := validateEntrypoint(root, entrypoint); validateErr != nil {
+		return "", "", validateErr
+	}
+
+	rootAbs, err = filepath.Abs(root)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve plugin root: %w", err)
+	}
+
+	targetAbs, err = filepath.Abs(filepath.Join(rootAbs, strings.TrimSpace(entrypoint)))
+	if err != nil {
+		return "", "", fmt.Errorf("resolve path: %w", err)
+	}
+
+	return rootAbs, targetAbs, nil
 }

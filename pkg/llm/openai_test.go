@@ -916,8 +916,8 @@ func TestAutoRegisterWithConfigContext_ModelRoleRoutesBareCatalogNameToPreferred
 			providerAnthropic:  {Disabled: true},
 			providerClaudeCode: {Disabled: true},
 			providerCodex:      {Disabled: true},
-			providerOpenAI:     {Disabled: true},
 			providerOllama:     {Disabled: true},
+			providerOpenAI:     {Disabled: true},
 			"groq": {
 				Type:    "groq",
 				BaseURL: srv.URL,

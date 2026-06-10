@@ -14,6 +14,9 @@ import (
 )
 
 func runInteractive(ctx context.Context, state appState) error {
+	ctx = contextWithPermissionAuditMetadata(ctx, state.sessionStore, state.sessionState, state.selectedAgent, state.selectedModel)
+	ctx = contextWithTUIDefaultPermissionBlock(ctx, state.permissionPolicy)
+
 	restoreShiftEnterReporting := enableTerminalShiftEnterReporting(os.Stdout)
 
 	restoreTerminalKeyboard := func() {
@@ -32,13 +35,8 @@ func runInteractive(ctx context.Context, state appState) error {
 		fmt.Println(dimStyle.Render("  Config: " + strings.Join(state.loadedConfigPaths, ", ")))
 	}
 
-	fmt.Println(dimStyle.Render("  Session: " + formatSessionLocation(
-		state.sessionState.ID,
-		state.sessionStore.Path(state.sessionState.ID),
-		sessionPersistenceAllowed(state.sessionState),
-		state.autonomy.String(),
-	)))
-	fmt.Println(dimStyle.Render("  Autonomy: ") + pickerSelectedStyle.Render(state.autonomy.String()))
+	fmt.Println(dimStyle.Render("  Session: " + state.sessionState.ID + " (" + state.sessionStore.Path(state.sessionState.ID) + ")"))
+	fmt.Println(dimStyle.Render("  Permission policy: ") + pickerSelectedStyle.Render(permissionPolicySummary(state.permissionPolicy)))
 
 	if state.sessionState.Title != "" {
 		fmt.Println(dimStyle.Render("  Title: ") + pickerSelectedStyle.Render(state.sessionState.Title))
@@ -129,6 +127,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		state.idleSuggestionBudget,
 		state.worktreeInfo,
 		state.promptContextCache,
+		state.permissionPolicy,
 	))
 
 	restoreTerminalKeyboard()
@@ -157,7 +156,10 @@ func runInteractive(ctx context.Context, state appState) error {
 		finalSession = m.sessionState
 	}
 
-	persistInteractiveSessionOnExit(ctx, state, finalSession)
+	if state.sessionStore != nil && finalSession.ID != "" {
+		saveFinalInteractiveSession(ctx, state, finalSession)
+		printSessionReuseHint(os.Stderr, resolveSpawnBinary(""), state.sessionStore, finalSession.ID)
+	}
 
 	emitHookWarning(ctx, state.hookRunner, events.Event{
 		Type:        events.SessionEnd,
@@ -173,7 +175,7 @@ func runInteractive(ctx context.Context, state appState) error {
 		),
 	})
 
-	return finalizeWorktree(ctx, &state)
+	return finalizeWorktree(contextWithPostTUIPermissionPrompt(ctx, state.permissionPolicy), &state)
 }
 
 func appStateSessionGeneration(state appState) generationSettings {
@@ -188,26 +190,20 @@ func appStateSessionGeneration(state appState) generationSettings {
 	return generationForRequest(state.generationDefaults, state.generationOverrides, activeAgent)
 }
 
-func hookRunnerWithLogger(state appState, logWriter io.Writer) *events.Runner {
-	if state.hookRunner == nil {
-		return events.NewRunnerWithLoggerAndObservers(state.hookConfig, logWriter, state.eventObservers...)
-	}
+func saveFinalInteractiveSession(ctx context.Context, state appState, finalSession session.Session) {
+	if err := authorizeSessionStoreWrite(ctx, state.sessionStore, finalSession, "save final TUI session"); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: could not save session on exit: "+err.Error())
 
-	return state.hookRunner.WithLoggerAndObservers(logWriter, state.eventObservers...)
-}
-
-func persistInteractiveSessionOnExit(ctx context.Context, state appState, finalSession session.Session) {
-	if state.sessionStore == nil || finalSession.ID == "" || !sessionPersistenceAllowed(finalSession) {
 		return
 	}
 
 	if err := state.sessionStore.Save(finalSession); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: could not save session on exit: "+err.Error())
-	} else {
-		emitFileWriteWarning(ctx, state.hookRunner, finalSession, state.sessionStore.Path(finalSession.ID), finalSession.DefaultAgent, "session")
+
+		return
 	}
 
-	printSessionReuseHint(os.Stderr, resolveSpawnBinary(""), state.sessionStore, finalSession.ID)
+	emitFileWriteWarning(ctx, state.hookRunner, finalSession, state.sessionStore.Path(finalSession.ID), finalSession.DefaultAgent, "session")
 }
 
 func printStartupPromptSuggestionStatus(state appState) {
@@ -296,6 +292,14 @@ func truncateStartupReadinessError(msg string) string {
 	}
 
 	return msg[:maxLen] + "…"
+}
+
+func hookRunnerWithLogger(state appState, logWriter io.Writer) *events.Runner {
+	if state.hookRunner == nil {
+		return events.NewRunnerWithLoggerAndObservers(state.hookConfig, logWriter, state.eventObservers...)
+	}
+
+	return state.hookRunner.WithLoggerAndObservers(logWriter, state.eventObservers...)
 }
 
 func printSessionReuseHint(w io.Writer, binary string, store *session.Store, sessionID string) {

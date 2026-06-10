@@ -19,6 +19,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/permission"
+	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
 func TestOllamaProvider_Complete(t *testing.T) {
@@ -545,6 +548,220 @@ func TestOllamaProvider_AutoStartReturnsStarterError(t *testing.T) {
 	assert.Contains(t, err.Error(), "ollama: start daemon: binary not found")
 }
 
+func TestOllamaServeProcess_PermissionPolicyDeniesLocalProviderExecution(t *testing.T) {
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	t.Setenv(attshell.EnvAuditDir, auditDir)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationExecute, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	_, err := startOllamaServeProcess(ctx, ollamaStartRequest{
+		BaseURL:       defaultOllamaBase,
+		OwnershipPath: filepath.Join(t.TempDir(), "ownership.json"),
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "execute operation")
+
+	records := readOllamaAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	assert.Equal(t, "denied", records[0]["decision"])
+	assert.Equal(t, "permission.execute.deny", records[0]["permission_rule"])
+	assert.Equal(t, "atteler.provider.ollama", records[0]["caller"])
+}
+
+func TestOllamaServeProcess_PermissionPolicyDeniesLocalProviderNetworkListener(t *testing.T) {
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	t.Setenv(attshell.EnvAuditDir, auditDir)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	_, err := startOllamaServeProcess(ctx, ollamaStartRequest{
+		BaseURL:       defaultOllamaBase,
+		OwnershipPath: filepath.Join(t.TempDir(), "ownership.json"),
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "network operation")
+
+	records := readOllamaAuditRecords(t, auditDir)
+	require.Len(t, records, 1)
+	assert.Equal(t, "denied", records[0]["decision"])
+	assert.Equal(t, "permission.network.deny", records[0]["permission_rule"])
+	assert.Contains(t, records[0]["operation_kinds"], string(permission.OperationNetwork))
+}
+
+func TestOllamaServeProcess_PermissionPolicyDeniesStateDirectoryWriteBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	ownershipPath := filepath.Join(t.TempDir(), "ownership.json")
+	auditDir := t.TempDir()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeAsk)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+	ctx = permission.ContextWithConfirmer(ctx, func(_ context.Context, req permission.Request, _ permission.Decision) bool {
+		return req.Action != "prepare Ollama daemon state directory"
+	})
+
+	_, err := startOllamaServeProcess(ctx, ollamaStartRequest{
+		BaseURL:       defaultOllamaBase,
+		OwnershipPath: ownershipPath,
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.ask")
+	assert.NoFileExists(t, ownershipPath)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "prepare Ollama daemon state directory")
+	assert.Contains(t, string(auditData), "permission.write.ask")
+	assert.Contains(t, string(auditData), "confirmation declined")
+}
+
+func TestOllamaServeProcess_PermissionPolicyDeniesStartupLogDeleteAfterStartFailure(t *testing.T) {
+	binDir := t.TempDir()
+	t.Setenv("PATH", binDir)
+
+	ownershipPath := filepath.Join(t.TempDir(), "ownership.json")
+	stateDir := ollamaStateDir(ownershipPath)
+	auditDir := t.TempDir()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationMergeDelete, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := startOllamaServeProcess(ctx, ollamaStartRequest{
+		BaseURL:       defaultOllamaBase,
+		OwnershipPath: ownershipPath,
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.merge_delete.deny")
+	assert.NoFileExists(t, ownershipPath)
+
+	logs, globErr := filepath.Glob(filepath.Join(stateDir, "ollama-startup-*.log"))
+	require.NoError(t, globErr)
+	require.NotEmpty(t, logs)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "delete failed Ollama startup log")
+	assert.Contains(t, string(auditData), "permission.merge_delete.deny")
+}
+
+func TestOllamaServeProcess_PermissionPolicyDeniesOwnershipWriteAfterStart(t *testing.T) {
+	binDir := t.TempDir()
+	fakeOllama := filepath.Join(binDir, ollamaServeCommand)
+	require.NoError(t, os.WriteFile(fakeOllama, []byte("#!/bin/sh\nwhile :; do :; done\n"), 0o600))
+	//nolint:gosec // Test fixture intentionally creates an executable fake ollama binary.
+	require.NoError(t, os.Chmod(fakeOllama, 0o700))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ownershipPath := filepath.Join(t.TempDir(), "ownership.json")
+	auditDir := t.TempDir()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeAsk)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	ctx = permission.ContextWithPolicy(ctx, &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+	ctx = permission.ContextWithConfirmer(ctx, func(_ context.Context, req permission.Request, _ permission.Decision) bool {
+		return req.Action != "write Ollama ownership state"
+	})
+
+	_, err := startOllamaServeProcess(ctx, ollamaStartRequest{
+		BaseURL:       defaultOllamaBase,
+		OwnershipPath: ownershipPath,
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.ask")
+	assert.NoFileExists(t, ownershipPath)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "write Ollama ownership state")
+	assert.Contains(t, string(auditData), "permission.write.ask")
+	assert.Contains(t, string(auditData), "confirmation declined")
+
+	records := readOllamaSideEffectAuditRecords(t, auditDir)
+	foundCleanupStop := false
+
+	for _, record := range records {
+		if record.Action != "stop untracked Ollama daemon after ownership write failure" {
+			continue
+		}
+
+		foundCleanupStop = true
+
+		assert.Equal(t, "allowed", record.Decision)
+		assert.Contains(t, record.OperationKinds, string(permission.OperationExecute))
+		assert.Contains(t, record.OperationKinds, string(permission.OperationWrite))
+		assert.Contains(t, record.OperationKinds, string(permission.OperationMergeDelete))
+	}
+
+	assert.True(t, foundCleanupStop)
+}
+
+func readOllamaAuditRecords(t *testing.T, auditDir string) []map[string]any {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, err)
+
+	var records []map[string]any
+
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+
+	return records
+}
+
+func readOllamaSideEffectAuditRecords(t *testing.T, auditDir string) []permission.AuditRecord {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, err)
+
+	var records []permission.AuditRecord
+
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var record permission.AuditRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		records = append(records, record)
+	}
+
+	return records
+}
+
 func TestOllamaProvider_AutoStartSkipsRemoteAndDisabled(t *testing.T) {
 	t.Setenv("OLLAMA_BASE_URL", "")
 	t.Setenv(envOllamaAutoStart, "false")
@@ -723,6 +940,72 @@ func TestCheckOllamaStatus_DistinguishesLocalRemoteMisconfiguredAndOwned(t *test
 	assert.Contains(t, misconfigured.Error, "scheme")
 }
 
+func TestCheckOllamaStatusPermissionPolicyDeniesOwnershipRead(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	status := CheckOllamaStatus(ctx, ProviderConfig{BaseURL: defaultOllamaBase, OwnershipPath: filepath.Join(t.TempDir(), "ollama-daemon.json")})
+
+	assert.Equal(t, OllamaStatusUnavailable, status.State)
+	assert.Equal(t, ollamaOwnershipStatusError, status.OwnershipStatus)
+	assert.Contains(t, status.Error, "permission.read.deny")
+}
+
+func TestCheckOllamaStatusPermissionPolicyDeniesProcessInspection(t *testing.T) { //nolint:paralleltest // Mutates global Ollama process hooks.
+	ownershipPath := filepath.Join(t.TempDir(), "ollama-daemon.json")
+	ownership := OllamaDaemonOwnership{
+		Owner:     "atteler",
+		PID:       4242,
+		Command:   []string{"ollama", "serve"},
+		StartedAt: time.Now().UTC(),
+		BaseURL:   defaultOllamaBase,
+	}
+	require.NoError(t, recordOllamaOwnership(ownershipPath, ownership))
+
+	withOllamaProcessHooks(t,
+		func(int) bool {
+			require.FailNow(t, "unexpected liveness probe before process-inspection permission")
+
+			return false
+		},
+		func(int) error {
+			require.FailNow(t, "unexpected terminate call")
+
+			return nil
+		},
+		func(int) error {
+			require.FailNow(t, "unexpected kill call")
+
+			return nil
+		},
+	)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeAsk)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+	ctx = permission.ContextWithConfirmer(ctx, func(_ context.Context, req permission.Request, _ permission.Decision) bool {
+		return req.Action != ollamaProcessInspectionAction
+	})
+
+	status := CheckOllamaStatus(ctx, ProviderConfig{BaseURL: defaultOllamaBase, OwnershipPath: ownershipPath})
+
+	assert.Equal(t, OllamaStatusUnavailable, status.State)
+	assert.Equal(t, ollamaOwnershipStatusError, status.OwnershipStatus)
+	assert.Contains(t, status.Error, "permission.read.ask")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "inspect Ollama process ownership")
+	assert.Contains(t, string(auditData), "permission.read.ask")
+	assert.Contains(t, string(auditData), "confirmation declined")
+}
+
 func TestCheckOllamaStatus_DoesNotTrustNonAttelerOwnershipRecord(t *testing.T) {
 	t.Setenv("OLLAMA_BASE_URL", "")
 	unsetOllamaAutoStartEnvForTest(t)
@@ -811,12 +1094,98 @@ func TestOllamaOwnershipMetadataRoundTripAndStopCleanup(t *testing.T) {
 		},
 	)
 
-	result, err := StopOwnedOllamaDaemon(context.Background(), ownershipPath)
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(t.Context(), auditDir)
+
+	result, err := StopOwnedOllamaDaemon(ctx, ownershipPath)
 	require.NoError(t, err)
 	assert.True(t, result.Stopped)
 	assert.True(t, result.Cleaned)
 	assert.True(t, terminated)
 	assert.NoFileExists(t, ownershipPath)
+
+	records := readOllamaSideEffectAuditRecords(t, auditDir)
+	inspectDecisions := 0
+
+	for _, record := range records {
+		if record.Action == ollamaProcessInspectionAction {
+			inspectDecisions++
+		}
+	}
+
+	assert.Equal(t, 1, inspectDecisions)
+}
+
+func TestStopOwnedOllamaDaemonPermissionPolicyDeniesOwnershipRead(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	ownershipPath := filepath.Join(t.TempDir(), "ollama-daemon.json")
+	result, err := StopOwnedOllamaDaemon(ctx, ownershipPath)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.False(t, result.Stopped)
+	assert.False(t, result.Cleaned)
+}
+
+func TestStopOwnedOllamaDaemonPermissionPolicyDeniesProcessInspection(t *testing.T) { //nolint:paralleltest // Mutates global Ollama process hooks.
+	ownershipPath := filepath.Join(t.TempDir(), "ollama-daemon.json")
+	ownership := OllamaDaemonOwnership{
+		Owner:     "atteler",
+		PID:       4242,
+		Command:   []string{"ollama", "serve"},
+		StartedAt: time.Now().UTC(),
+		BaseURL:   defaultOllamaBase,
+	}
+	require.NoError(t, recordOllamaOwnership(ownershipPath, ownership))
+
+	withOllamaProcessHooks(t,
+		func(int) bool {
+			require.FailNow(t, "unexpected liveness probe before process-inspection permission")
+
+			return false
+		},
+		func(int) error {
+			require.FailNow(t, "unexpected terminate call")
+
+			return nil
+		},
+		func(int) error {
+			require.FailNow(t, "unexpected kill call")
+
+			return nil
+		},
+	)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeAsk)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+	ctx = permission.ContextWithConfirmer(ctx, func(_ context.Context, req permission.Request, _ permission.Decision) bool {
+		return req.Action != ollamaProcessInspectionAction
+	})
+
+	result, err := StopOwnedOllamaDaemon(ctx, ownershipPath)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.ask")
+	assert.False(t, result.Stopped)
+	assert.False(t, result.Cleaned)
+	assert.FileExists(t, ownershipPath)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "inspect Ollama process ownership")
+	assert.Contains(t, string(auditData), "permission.read.ask")
+	assert.Contains(t, string(auditData), "confirmation declined")
 }
 
 func TestStopOwnedOllamaDaemonRejectsUnexpectedOwnershipCommand(t *testing.T) { //nolint:paralleltest // Mutates global Ollama process hooks.
@@ -876,7 +1245,9 @@ func TestStopOwnedOllamaDaemonRejectsMissingOwner(t *testing.T) { //nolint:paral
 		},
 	)
 
-	assert.Equal(t, "recorded-untrusted-owner", ollamaOwnershipStatus(defaultOllamaBase, &ownership))
+	ownershipStatus, statusErr := ollamaOwnershipStatusContext(t.Context(), defaultOllamaBase, &ownership)
+	require.NoError(t, statusErr)
+	assert.Equal(t, "recorded-untrusted-owner", ownershipStatus)
 
 	result, err := StopOwnedOllamaDaemon(context.Background(), ownershipPath)
 	require.Error(t, err)
@@ -919,6 +1290,45 @@ func TestStopOwnedOllamaDaemonCleansStaleMalformedRecord(t *testing.T) { //nolin
 	assert.NoFileExists(t, ownershipPath)
 }
 
+func TestStopOwnedOllamaDaemonPermissionPolicyDeniesStaleCleanup(t *testing.T) { //nolint:paralleltest // Mutates global Ollama process hooks.
+	ownershipPath := filepath.Join(t.TempDir(), "ollama-daemon.json")
+	ownership := OllamaDaemonOwnership{
+		Owner:     "atteler",
+		PID:       4242,
+		Command:   []string{"not-ollama"},
+		StartedAt: time.Now().UTC(),
+		BaseURL:   defaultOllamaBase,
+		SessionID: "session-denied",
+	}
+	require.NoError(t, recordOllamaOwnership(ownershipPath, ownership))
+
+	withOllamaProcessHooks(t,
+		func(int) bool { return false },
+		func(int) error {
+			require.FailNow(t, "unexpected terminate call")
+
+			return nil
+		},
+		func(int) error {
+			require.FailNow(t, "unexpected kill call")
+
+			return nil
+		},
+	)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationMergeDelete, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	result, err := StopOwnedOllamaDaemon(ctx, ownershipPath)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.merge_delete.deny")
+	assert.False(t, result.Stopped)
+	assert.False(t, result.Cleaned)
+	assert.FileExists(t, ownershipPath)
+}
+
 func TestStopOwnedOllamaDaemonRefusesPIDMismatch(t *testing.T) { //nolint:paralleltest // Mutates global Ollama process hooks.
 	ownershipPath := filepath.Join(t.TempDir(), "ollama-daemon.json")
 	ownership := OllamaDaemonOwnership{
@@ -945,7 +1355,9 @@ func TestStopOwnedOllamaDaemonRefusesPIDMismatch(t *testing.T) { //nolint:parall
 	)
 	withOllamaProcessMatchHook(t, func(*OllamaDaemonOwnership) bool { return false })
 
-	assert.Equal(t, "owned-pid-mismatch", ollamaOwnershipStatus(defaultOllamaBase, &ownership))
+	ownershipStatus, statusErr := ollamaOwnershipStatusContext(t.Context(), defaultOllamaBase, &ownership)
+	require.NoError(t, statusErr)
+	assert.Equal(t, "owned-pid-mismatch", ownershipStatus)
 
 	result, err := StopOwnedOllamaDaemon(context.Background(), ownershipPath)
 	require.Error(t, err)

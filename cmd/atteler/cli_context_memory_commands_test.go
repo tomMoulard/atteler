@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,9 +21,9 @@ import (
 	"github.com/tommoulard/atteler/pkg/agentmemory"
 	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
-	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/memory"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/vector"
@@ -47,7 +46,7 @@ func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {
 
 	storePath := filepath.Join(dir, "agent-memory.json")
 
-	err := runAgentMemoryCommand(context.TODO(), dir, testReviewerName, appconfig.VectorConfig{}, agentMemoryCommandInputFromOptions(cliOptions{
+	err := runAgentMemoryCommand(t.Context(), dir, testReviewerName, agentMemoryCommandInputFromOptions(cliOptions{
 		agentMemoryStorePath:  storePath,
 		agentMemorySearch:     "callback retry",
 		agentMemoryIndexFiles: stringListFlag{note},
@@ -63,1553 +62,7 @@ func TestRunAgentMemoryCommandIndexesAndSearchesSelectedAgent(t *testing.T) {
 	assert.Equal(t, filepath.Clean(note), results[0].Document.ID)
 }
 
-func TestRunAgentMemoryCommandUsesScopedEmbeddingVectorizerConfig(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	note := filepath.Join(dir, "semantic.txt")
-	require.NoError(t, os.WriteFile(note, []byte("Semantic retrieval memory for local RAG"), 0o600))
-
-	server := newAgentMemoryEmbeddingTestServer()
-	defer server.Close()
-
-	storePath := filepath.Join(dir, "configured-agent-memory.json")
-	cfg := appconfig.VectorConfig{
-		Stores: map[string]appconfig.VectorizerConfig{
-			"agent_memory": {
-				Vectorizer: vector.VectorizerKindLexical,
-				IndexPath:  storePath,
-			},
-		},
-		Agents: map[string]appconfig.VectorizerConfig{
-			testReviewerName: {
-				Vectorizer: vector.VectorizerKindEmbedding,
-				Model:      "agent-memory-test-embed",
-				BaseURL:    server.URL,
-			},
-		},
-		Sources: map[string]appconfig.VectorizerConfig{
-			vector.SourceKindFile: {
-				Vectorizer: vector.VectorizerKindLexical,
-			},
-		},
-	}
-
-	err := runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
-		agentMemoryIndexFiles: stringListFlag{note},
-	}))
-	require.NoError(t, err)
-
-	loaded, err := agentmemory.Load(storePath)
-	require.NoError(t, err)
-	assert.Equal(t, "ollama-compatible-embedding", loaded.Vectorizer.ID)
-	assert.Equal(t, "agent-memory-test-embed", loaded.Vectorizer.Model)
-	assert.Equal(t, 2, loaded.Dimensions)
-
-	_, err = loaded.SearchContext(context.TODO(), testReviewerName, "semantic retrieval", 1)
-	require.ErrorIs(t, err, vector.ErrVectorizerMismatch)
-
-	err = runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
-		agentMemorySearch: "semantic retrieval",
-		agentMemoryLimit:  positiveIntFlag{value: 1, set: true},
-	}))
-	require.NoError(t, err)
-}
-
-func TestRunAgentMemoryCommandRejectsRemoteEmbeddingWithoutConsent(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	note := filepath.Join(dir, "semantic.txt")
-	require.NoError(t, os.WriteFile(note, []byte("Semantic retrieval memory for local RAG"), 0o600))
-
-	storePath := filepath.Join(dir, "remote-agent-memory.json")
-	cfg := appconfig.VectorConfig{
-		Stores: map[string]appconfig.VectorizerConfig{
-			agentMemoryVectorStore: {
-				Vectorizer: vector.VectorizerKindEmbedding,
-				BaseURL:    privateRemoteEmbeddingEndpoint(),
-				IndexPath:  storePath,
-			},
-		},
-	}
-
-	err := runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
-		agentMemoryIndexFiles: stringListFlag{note},
-	}))
-
-	require.Error(t, err)
-	require.ErrorContains(t, err, "agent memory: remote embedding endpoint")
-	require.ErrorContains(t, err, "vector.workspace_allow_remote_embeddings")
-	assert.NoFileExists(t, storePath)
-}
-
-func TestRunAgentMemoryCommandAllowsDeleteWithRemoteEmbeddingConfigWithoutConsent(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	storePath := filepath.Join(dir, "remote-agent-memory.json")
-
-	store, err := agentmemory.NewStore(16)
-	require.NoError(t, err)
-	require.NoError(t, store.AddText(testReviewerName, "stale-note", "Semantic retrieval memory for local RAG"))
-	require.NoError(t, store.Save(storePath))
-
-	cfg := appconfig.VectorConfig{
-		Stores: map[string]appconfig.VectorizerConfig{
-			agentMemoryVectorStore: {
-				Vectorizer: vector.VectorizerKindEmbedding,
-				BaseURL:    privateRemoteEmbeddingEndpoint(),
-				IndexPath:  storePath,
-			},
-		},
-	}
-
-	err = runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
-		agentMemoryDelete: "stale-note",
-	}))
-	require.NoError(t, err)
-
-	loaded, err := agentmemory.Load(storePath)
-	require.NoError(t, err)
-	assert.Empty(t, loaded.Documents(testReviewerName))
-}
-
-//nolint:paralleltest // Captures process-wide stdout.
-func TestRunAgentMemoryCommandAllowsCompactWithRemoteEmbeddingConfigWithoutConsent(t *testing.T) {
-	dir := t.TempDir()
-	storePath := filepath.Join(dir, "remote-agent-memory.json")
-
-	vectorizer := staticAgentMemoryEmbeddingVectorizer{}
-	spec := vectorizer.Spec(2)
-	store, err := agentmemory.NewStoreWithVectorizer(spec, vectorizer)
-	require.NoError(t, err)
-	require.NoError(t, store.AddTextWithOptionsContext(
-		context.TODO(),
-		testReviewerName,
-		"expired-note",
-		"Semantic retrieval memory for local RAG",
-		agentmemory.WithExpiresAt(time.Unix(1, 0).UTC()),
-	))
-	data, err := json.MarshalIndent(store, "", "  ")
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(storePath, append(data, '\n'), 0o600))
-
-	cfg := appconfig.VectorConfig{
-		Stores: map[string]appconfig.VectorizerConfig{
-			agentMemoryVectorStore: {
-				Vectorizer: vector.VectorizerKindEmbedding,
-				BaseURL:    privateRemoteEmbeddingEndpoint(),
-				IndexPath:  storePath,
-			},
-		},
-	}
-
-	output := captureMemoryStdout(t, func() error {
-		return runAgentMemoryCommand(context.TODO(), dir, testReviewerName, cfg, agentMemoryCommandInputFromOptions(cliOptions{
-			agentMemoryCompact: true,
-		}))
-	})
-	assert.Contains(t, output, "Compacted 1 expired agent memory document(s)")
-
-	loaded, err := agentmemory.Load(storePath)
-	require.NoError(t, err)
-	assert.Empty(t, loaded.Documents(testReviewerName))
-}
-
-func TestBuildAgentMemoryRetrievalSearcherRejectsRemoteEmbeddingWithoutConsent(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	storePath := filepath.Join(dir, "remote-agent-memory.json")
-	cfg := appconfig.VectorConfig{
-		Stores: map[string]appconfig.VectorizerConfig{
-			agentMemoryVectorStore: {
-				Vectorizer: vector.VectorizerKindEmbedding,
-				BaseURL:    privateRemoteEmbeddingEndpoint(),
-				IndexPath:  storePath,
-			},
-		},
-	}
-
-	_, err := buildAgentMemoryRetrievalSearcher(context.TODO(), dir, testReviewerName, cfg, retrievalCommandInput{
-		Search: "semantic retrieval",
-	})
-
-	require.Error(t, err)
-	require.ErrorContains(t, err, "agent memory: remote embedding endpoint")
-	require.ErrorContains(t, err, "vector.workspace_allow_remote_embeddings")
-	assert.NoFileExists(t, storePath)
-}
-
-func TestRunAgentMemoryCommandMigratesLexicalStoreToScopedEmbeddingVectorizer(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	storePath := filepath.Join(dir, "agent-memory.json")
-
-	store, err := agentmemory.NewStore(16)
-	require.NoError(t, err)
-	require.NoError(t, store.AddText(testReviewerName, "rag", "Semantic retrieval memory for local RAG"))
-	require.NoError(t, store.Save(storePath))
-
-	server := newAgentMemoryEmbeddingTestServer()
-	defer server.Close()
-
-	cfg := appconfig.VectorConfig{
-		Stores: map[string]appconfig.VectorizerConfig{
-			agentMemoryVectorStore: {
-				Vectorizer: vector.VectorizerKindEmbedding,
-				Model:      "migrated-agent-memory-embed",
-				BaseURL:    server.URL,
-				IndexPath:  storePath,
-			},
-		},
-	}
-
-	err = runAgentMemoryCommand(context.TODO(), dir, "", cfg, agentMemoryCommandInputFromOptions(cliOptions{
-		agentMemoryMigrate: true,
-	}))
-	require.NoError(t, err)
-
-	loaded, err := agentmemory.Load(storePath)
-	require.NoError(t, err)
-	assert.Equal(t, "ollama-compatible-embedding", loaded.Vectorizer.ID)
-	assert.Equal(t, "migrated-agent-memory-embed", loaded.Vectorizer.Model)
-	assert.Equal(t, 2, loaded.Dimensions)
-}
-
-func TestAgentMemoryStorePathResolvesRelativeIndexPathAgainstRoot(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	cfg := appconfig.VectorConfig{
-		Stores: map[string]appconfig.VectorizerConfig{
-			agentMemoryVectorStore: {
-				IndexPath: "./configured-agent-memory.json",
-			},
-		},
-	}
-
-	assert.Equal(t,
-		filepath.Join(root, "configured-agent-memory.json"),
-		agentMemoryStorePath(root, testReviewerName, "", cfg),
-	)
-
-	agentCfg := cfg
-	agentCfg.Agents = map[string]appconfig.VectorizerConfig{
-		testReviewerName: {
-			IndexPath: "./reviewer-agent-memory.json",
-		},
-	}
-	assert.Equal(t,
-		filepath.Join(root, "reviewer-agent-memory.json"),
-		agentMemoryStorePath(root, testReviewerName, "", agentCfg),
-	)
-
-	globalCfg := appconfig.VectorConfig{
-		IndexPath: "./shared-vector-index.json",
-	}
-	assert.Equal(t,
-		filepath.Join(root, ".atteler", "agent-memory.json"),
-		agentMemoryStorePath(root, testReviewerName, "", globalCfg),
-	)
-
-	assert.Equal(t,
-		filepath.Join(root, "cli-agent-memory.json"),
-		agentMemoryStorePath(root, testReviewerName, "./cli-agent-memory.json", appconfig.VectorConfig{}),
-	)
-}
-
-func TestFormatRetrievalResultIncludesScorerDetailsWhenExplaining(t *testing.T) {
-	t.Parallel()
-
-	result := retrieval.Result{
-		Source:     retrieval.Source{Type: retrieval.SourceVector, Name: "workspace"},
-		DocumentID: "docs/local-rag.md#chunk=0000",
-		Score:      0.875,
-		Safety:     retrieval.Safety{InjectAllowed: true},
-		Scorer: retrieval.Scorer{
-			Name: "embedding-file-vector-index",
-			Details: map[string]float64{
-				"ann_min_candidates": 64,
-				"ann_exact_scan":     0,
-				"ann_documents":      65,
-				"cosine.similarity":  0.875,
-			},
-			Explanation: []string{"ranked by ANN candidate search"},
-		},
-	}
-
-	got := formatRetrievalResult(result, true)
-
-	assert.Contains(t, got, "detail_ann_documents=65")
-	assert.Contains(t, got, "detail_ann_exact_scan=false")
-	assert.Contains(t, got, "detail_ann_min_candidates=64")
-	assert.Contains(t, got, "detail_cosine_similarity=0.875")
-	assert.Contains(t, got, "why=ranked by ANN candidate search")
-	assert.Less(t, strings.Index(got, "detail_ann_documents=65"), strings.Index(got, "detail_ann_exact_scan=false"))
-	assert.Less(t, strings.Index(got, "detail_ann_exact_scan=false"), strings.Index(got, "detail_ann_min_candidates=64"))
-}
-
-func TestFormatRetrievalResultOmitsScorerDetailsWithoutExplain(t *testing.T) {
-	t.Parallel()
-
-	result := retrieval.Result{
-		Source:     retrieval.Source{Type: retrieval.SourceVector},
-		DocumentID: "docs/local-rag.md#chunk=0000",
-		Score:      0.875,
-		Safety:     retrieval.Safety{InjectAllowed: true},
-		Scorer: retrieval.Scorer{
-			Name:    "embedding-file-vector-index",
-			Details: map[string]float64{"ann_documents": 65},
-		},
-	}
-
-	got := formatRetrievalResult(result, false)
-
-	assert.NotContains(t, got, "detail_ann_documents")
-}
-
-func TestBuildVectorRetrievalSearcherUsesScopedEmbeddingVectorizerConfig(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	semanticPath := filepath.Join(dir, "semantic.md")
-	shellPath := filepath.Join(dir, "shell.md")
-	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
-	require.NoError(t, os.WriteFile(shellPath, []byte("Shell output capture and command timeout notes"), 0o600))
-
-	server := newAgentMemoryEmbeddingTestServer()
-	defer server.Close()
-
-	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Stores: map[string]appconfig.VectorizerConfig{
-				vectorSearchVectorStore: {
-					Vectorizer: vector.VectorizerKindEmbedding,
-					Model:      "retrieval-file-embed",
-					BaseURL:    server.URL,
-				},
-			},
-		},
-	}, retrievalCommandInput{
-		Search:           "semantic retrieval",
-		VectorIndexFiles: []string{semanticPath, shellPath},
-	})
-	require.NoError(t, err)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Contains(t, filepath.ToSlash(results[0].Metadata["path"]), "semantic.md")
-	assert.Equal(t, "embedding-file-vector-index", results[0].Scorer.Name)
-}
-
-func TestBuildVectorRetrievalSearcherUsesVectorCLIOverrides(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	semanticPath := filepath.Join(dir, "semantic.md")
-	shellPath := filepath.Join(dir, "shell.md")
-	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
-	require.NoError(t, os.WriteFile(shellPath, []byte("Shell output capture and command timeout notes"), 0o600))
-
-	server := newAgentMemoryEmbeddingTestServer()
-	defer server.Close()
-
-	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Stores: map[string]appconfig.VectorizerConfig{
-				vectorSearchVectorStore: {
-					Vectorizer: vector.VectorizerKindLexical,
-					IndexPath:  ".atteler/configured-file-index.json",
-				},
-			},
-		},
-	}, retrievalCommandInput{
-		Search: "semantic retrieval",
-		Vector: retrievalVectorCommandInput{
-			Vectorizer:        vector.VectorizerKindEmbedding,
-			Model:             "cli-retrieval-embed",
-			BaseURL:           server.URL,
-			StorePath:         "./cli-retrieval-vector-index.json",
-			ChunkMaxRunes:     600,
-			ChunkOverlapRunes: 60,
-			ChunkMaxSet:       true,
-			ChunkOverlapSet:   true,
-		},
-		VectorIndexFiles: []string{semanticPath, shellPath},
-	})
-	require.NoError(t, err)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "embedding-file-vector-index", results[0].Scorer.Name)
-
-	loaded, err := vector.LoadIndex(filepath.Join(dir, "cli-retrieval-vector-index.json"))
-	require.NoError(t, err)
-	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
-	assert.Equal(t, "cli-retrieval-embed", loaded.Vectorizer.Model)
-	assert.Equal(t, 600, loaded.Chunk.MaxRunes)
-	assert.Equal(t, 60, loaded.Chunk.OverlapRunes)
-	assert.NoFileExists(t, filepath.Join(dir, ".atteler", "configured-file-index.json"))
-}
-
-func TestRetrievalCommandInputFromOptionsCarriesVectorOverrides(t *testing.T) {
-	t.Parallel()
-
-	input := retrievalCommandInputFromOptions(cliOptions{
-		vectorizer:              vector.VectorizerKindEmbedding,
-		vectorProvider:          "ollama",
-		vectorModel:             "cli-embed",
-		vectorBaseURL:           "http://127.0.0.1:11434",
-		vectorFallbackPolicy:    vector.VectorizerKindLexical,
-		vectorStorePath:         "./cli-vector-index.json",
-		vectorTimeout:           positiveIntFlag{value: 9, set: true},
-		vectorChunkMaxRunes:     positiveIntFlag{value: 700, set: true},
-		vectorChunkOverlapRunes: positiveIntFlag{value: 70, set: true},
-	})
-
-	assert.Equal(t, vector.VectorizerKindEmbedding, input.Vector.Vectorizer)
-	assert.Equal(t, "ollama", input.Vector.Provider)
-	assert.Equal(t, "cli-embed", input.Vector.Model)
-	assert.Equal(t, "http://127.0.0.1:11434", input.Vector.BaseURL)
-	assert.Equal(t, vector.VectorizerKindLexical, input.Vector.FallbackPolicy)
-	assert.Equal(t, "./cli-vector-index.json", input.Vector.StorePath)
-	assert.Equal(t, 9, input.Vector.TimeoutSeconds)
-	assert.Equal(t, 700, input.Vector.ChunkMaxRunes)
-	assert.Equal(t, 70, input.Vector.ChunkOverlapRunes)
-	assert.True(t, input.Vector.TimeoutSet)
-	assert.True(t, input.Vector.ChunkMaxSet)
-	assert.True(t, input.Vector.ChunkOverlapSet)
-}
-
-func TestBuildVectorRetrievalSearcherPersistsConfiguredFileIndex(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	semanticPath := filepath.Join(dir, "semantic.md")
-	shellPath := filepath.Join(dir, "shell.md")
-	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
-	require.NoError(t, os.WriteFile(shellPath, []byte("Shell output capture and command timeout notes"), 0o600))
-
-	indexPath := filepath.Join(dir, "configured-file-vector-index.json")
-	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Stores: map[string]appconfig.VectorizerConfig{
-				vectorSearchVectorStore: {
-					Vectorizer: vector.VectorizerKindLexical,
-					IndexPath:  indexPath,
-				},
-			},
-		},
-	}, retrievalCommandInput{
-		Search:           "semantic retrieval",
-		VectorIndexFiles: []string{semanticPath, shellPath},
-	})
-	require.NoError(t, err)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Contains(t, filepath.ToSlash(results[0].Metadata["path"]), "semantic.md")
-	assert.Equal(t, "configured-file-vector-index.json", results[0].Source.URI)
-	assert.NotContains(t, results[0].Source.URI, dir)
-
-	loaded, err := vector.LoadIndex(indexPath)
-	require.NoError(t, err)
-	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
-	assert.ElementsMatch(t, []string{vector.SourceKindFile, vector.SourceKindFile}, sourceMetadataKinds(loaded.Sources))
-}
-
-func TestBuildVectorRetrievalSearcherSearchesExplicitReusableFileIndex(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	semanticPath := filepath.Join(dir, "semantic.md")
-	shellPath := filepath.Join(dir, "shell.md")
-	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
-	require.NoError(t, os.WriteFile(shellPath, []byte("Shell output capture and command timeout notes"), 0o600))
-
-	indexPath := filepath.Join(dir, "configured-file-vector-index.json")
-	_, err := buildVectorRetrievalSearcher(context.TODO(), appState{cwd: dir}, retrievalCommandInput{
-		Search:           "semantic retrieval",
-		VectorIndexFiles: []string{semanticPath, shellPath},
-		Vector: retrievalVectorCommandInput{
-			StorePath: indexPath,
-		},
-	})
-	require.NoError(t, err)
-	require.FileExists(t, indexPath)
-
-	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{cwd: dir}, retrievalCommandInput{
-		Search: "semantic retrieval",
-		Vector: retrievalVectorCommandInput{
-			StorePath: indexPath,
-		},
-	})
-	require.NoError(t, err)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "lexical-file-vector-index", results[0].Scorer.Name)
-	assert.Contains(t, filepath.ToSlash(results[0].Metadata["path"]), "semantic.md")
-	assert.Equal(t, filepath.Base(indexPath), results[0].Source.URI)
-}
-
-func TestBuildVectorRetrievalSearcherSearchesDefaultFileIndexWhenWorkspaceDisabled(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	semanticPath := filepath.Join(dir, "semantic.md")
-	shellPath := filepath.Join(dir, "shell.md")
-	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
-	require.NoError(t, os.WriteFile(shellPath, []byte("Shell output capture and command timeout notes"), 0o600))
-
-	_, err := buildVectorRetrievalSearcher(context.TODO(), appState{cwd: dir}, retrievalCommandInput{
-		Search:           "semantic retrieval",
-		VectorIndexFiles: []string{semanticPath, shellPath},
-	})
-	require.NoError(t, err)
-	require.FileExists(t, filepath.Join(dir, ".atteler", "vector-index.json"))
-
-	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{cwd: dir}, retrievalCommandInput{
-		Search: "semantic retrieval",
-	})
-	require.NoError(t, err)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "lexical-file-vector-index", results[0].Scorer.Name)
-	assert.Contains(t, filepath.ToSlash(results[0].Metadata["path"]), "semantic.md")
-	assert.Equal(t, ".atteler/vector-index.json", results[0].Source.URI)
-}
-
-func TestBuildVectorRetrievalSearcherFallsBackToSeparateLexicalFileIndex(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	semanticPath := filepath.Join(dir, "semantic.md")
-	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "embedding endpoint unavailable", http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	indexPath := filepath.Join(dir, "embedding-file-vector-index.json")
-	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Stores: map[string]appconfig.VectorizerConfig{
-				vectorSearchVectorStore: {
-					Vectorizer:     vector.VectorizerKindEmbedding,
-					Model:          "retrieval-file-embed",
-					BaseURL:        server.URL,
-					FallbackPolicy: vector.VectorizerKindLexical,
-					IndexPath:      indexPath,
-				},
-			},
-		},
-	}, retrievalCommandInput{
-		Search:           "semantic retrieval",
-		VectorIndexFiles: []string{semanticPath},
-	})
-	require.NoError(t, err)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "lexical-file-vector-index", results[0].Scorer.Name)
-	assert.NoFileExists(t, indexPath)
-	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
-}
-
-func TestBuildVectorRetrievalSearcherRejectsRemoteFileEmbeddingWithoutConsent(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	semanticPath := filepath.Join(dir, "semantic.md")
-	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
-
-	indexPath := filepath.Join(dir, "embedding-file-vector-index.json")
-	_, err := buildVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Stores: map[string]appconfig.VectorizerConfig{
-				vectorSearchVectorStore: {
-					Vectorizer: vector.VectorizerKindEmbedding,
-					BaseURL:    privateRemoteEmbeddingEndpoint(),
-					IndexPath:  indexPath,
-				},
-			},
-		},
-	}, retrievalCommandInput{
-		Search:           "semantic retrieval",
-		VectorIndexFiles: []string{semanticPath},
-	})
-
-	require.Error(t, err)
-	require.ErrorContains(t, err, "remote file embedding endpoint")
-	require.ErrorContains(t, err, "vector.workspace_allow_remote_embeddings")
-	assert.NoFileExists(t, indexPath)
-	assert.NoFileExists(t, lexicalFallbackIndexPath(indexPath))
-}
-
-func TestBuildVectorRetrievalSearcherUsesLexicalFallbackForRemoteFileEmbeddingWithoutConsent(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	semanticPath := filepath.Join(dir, "semantic.md")
-	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
-
-	indexPath := filepath.Join(dir, "embedding-file-vector-index.json")
-	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Stores: map[string]appconfig.VectorizerConfig{
-				vectorSearchVectorStore: {
-					Vectorizer:     vector.VectorizerKindEmbedding,
-					BaseURL:        privateRemoteEmbeddingEndpoint(),
-					FallbackPolicy: vector.VectorizerKindLexical,
-					IndexPath:      indexPath,
-				},
-			},
-		},
-	}, retrievalCommandInput{
-		Search:           "semantic retrieval",
-		VectorIndexFiles: []string{semanticPath},
-	})
-	require.NoError(t, err)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "lexical-file-vector-index", results[0].Scorer.Name)
-	assert.NoFileExists(t, indexPath)
-	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
-}
-
-func TestBuildVectorRetrievalSearcherFallsBackWhenReusableEmbeddingIndexCannotVectorizeQuery(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	semanticPath := filepath.Join(dir, "semantic.md")
-	require.NoError(t, os.WriteFile(semanticPath, []byte("Semantic retrieval memory for local RAG"), 0o600))
-
-	server := newAgentMemoryEmbeddingTestServer()
-	indexPath := filepath.Join(dir, "embedding-file-vector-index.json")
-	cfg := appconfig.VectorConfig{
-		Stores: map[string]appconfig.VectorizerConfig{
-			vectorSearchVectorStore: {
-				Vectorizer:     vector.VectorizerKindEmbedding,
-				Model:          "retrieval-file-embed",
-				BaseURL:        server.URL,
-				FallbackPolicy: vector.VectorizerKindLexical,
-				IndexPath:      indexPath,
-			},
-		},
-	}
-
-	_, err := buildVectorRetrievalSearcher(context.TODO(), appState{
-		cwd:          dir,
-		vectorConfig: cfg,
-	}, retrievalCommandInput{
-		Search:           "semantic retrieval",
-		VectorIndexFiles: []string{semanticPath},
-	})
-	require.NoError(t, err)
-	require.FileExists(t, indexPath)
-
-	server.Close()
-
-	searcher, err := buildVectorRetrievalSearcher(context.TODO(), appState{
-		cwd:          dir,
-		vectorConfig: cfg,
-	}, retrievalCommandInput{
-		Search:           "semantic retrieval",
-		VectorIndexFiles: []string{semanticPath},
-	})
-	require.NoError(t, err)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "lexical-file-vector-index", results[0].Scorer.Name)
-	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
-}
-
-func TestSourceVectorSettingsResolvesRelativeIndexPathAgainstRoot(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	settings, err := sourceVectorSettings(root, appconfig.VectorConfig{
-		Sources: map[string]appconfig.VectorizerConfig{
-			vector.SourceKindSession: {
-				Vectorizer: vector.VectorizerKindLexical,
-				IndexPath:  "./session-vector-index.json",
-			},
-		},
-	}, vector.SourceKindSession, sourceVectorSessionIndex)
-	require.NoError(t, err)
-
-	assert.Equal(t, filepath.Join(root, "session-vector-index.json"), settings.IndexPath)
-}
-
-func TestSourceVectorIndexRequestedUsesExplicitLexicalSourceConfig(t *testing.T) {
-	t.Parallel()
-
-	requested, err := sourceVectorIndexRequested(appconfig.VectorConfig{}, vector.SourceKindGitHistory)
-	require.NoError(t, err)
-	assert.False(t, requested)
-
-	requested, err = sourceVectorIndexRequested(appconfig.VectorConfig{
-		Sources: map[string]appconfig.VectorizerConfig{
-			"git-history": {
-				Vectorizer: vector.VectorizerKindLexical,
-			},
-		},
-	}, vector.SourceKindGitHistory)
-	require.NoError(t, err)
-	assert.True(t, requested)
-
-	requested, err = sourceVectorIndexRequested(appconfig.VectorConfig{
-		Vectorizer: vector.VectorizerKindEmbedding,
-	}, vector.SourceKindSession)
-	require.NoError(t, err)
-	assert.True(t, requested)
-
-	requested, err = sourceVectorIndexRequested(appconfig.VectorConfig{
-		Vectorizer: vector.VectorizerKindLexical,
-	}, vector.SourceKindSession)
-	require.NoError(t, err)
-	assert.True(t, requested)
-}
-
-func TestSourceVectorIndexRequestedIgnoresGlobalIndexPathWithoutSourceConfig(t *testing.T) {
-	t.Parallel()
-
-	requested, err := sourceVectorIndexRequested(appconfig.VectorConfig{
-		IndexPath: ".atteler/shared-vector-index.json",
-	}, vector.SourceKindSession)
-	require.NoError(t, err)
-	assert.False(t, requested)
-
-	root := t.TempDir()
-	settings, err := sourceVectorSettings(root, appconfig.VectorConfig{
-		IndexPath: ".atteler/shared-vector-index.json",
-	}, vector.SourceKindSession, sourceVectorSessionIndex)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(root, sourceVectorSessionIndex), settings.IndexPath)
-}
-
-func TestSourceVectorIndexRequestedUsesExplicitSourceIndexPath(t *testing.T) {
-	t.Parallel()
-
-	cfg := appconfig.VectorConfig{
-		Sources: map[string]appconfig.VectorizerConfig{
-			"git-history": {
-				IndexPath: ".atteler/custom-git-history-vector-index.json",
-			},
-		},
-	}
-
-	requested, err := sourceVectorIndexRequested(cfg, vector.SourceKindGitHistory)
-	require.NoError(t, err)
-	assert.True(t, requested)
-
-	root := t.TempDir()
-	settings, err := sourceVectorSettings(root, cfg, vector.SourceKindGitHistory, sourceVectorGitHistoryIndex)
-	require.NoError(t, err)
-	assert.Equal(t, vector.VectorizerKindLexical, settings.Vectorizer)
-	assert.Equal(t, filepath.Join(root, ".atteler", "custom-git-history-vector-index.json"), settings.IndexPath)
-}
-
-func TestRetrievalSearcherUsesPersistedSessionVectorSourceConfig(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	store := session.NewStore(filepath.Join(dir, "sessions"))
-	saved := session.New("test-model", []llm.Message{
-		{Role: llm.RoleUser, Content: "Semantic retrieval session memory for local RAG"},
-		{Role: llm.RoleAssistant, Content: "Use persisted embeddings for session recall."},
-	})
-	saved.ID = "session-vector-test"
-	saved.Title = "Session vector test"
-	saved.DefaultAgent = testReviewerName
-	require.NoError(t, store.Save(saved))
-
-	server := newAgentMemoryEmbeddingTestServer()
-	defer server.Close()
-
-	indexPath := filepath.Join(dir, "session-vector-index.json")
-	searcher, err := retrievalSearcher(context.TODO(), appState{
-		cwd:          dir,
-		sessionStore: store,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindSession: {
-					Vectorizer: vector.VectorizerKindEmbedding,
-					Model:      "session-test-embed",
-					BaseURL:    server.URL,
-					IndexPath:  indexPath,
-				},
-			},
-		},
-	}, retrievalCommandInput{}, retrieval.SourceSession)
-	require.NoError(t, err)
-	require.NotNil(t, searcher)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, retrieval.SourceSession, results[0].Source.Type)
-	assert.Contains(t, results[0].DocumentID, "sessions/session-vector-test")
-	assert.Equal(t, "embedding-session-ann", results[0].Scorer.Name)
-	assert.NotZero(t, results[0].Freshness.SourceUpdatedAt)
-
-	loaded, err := vector.LoadIndex(indexPath)
-	require.NoError(t, err)
-	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
-	assert.ElementsMatch(t, []string{vector.SourceKindSession}, sourceMetadataKinds(loaded.Sources))
-	assert.NotEmpty(t, loaded.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
-}
-
-func TestRetrievalSearcherUsesGlobalLexicalVectorizerForSessionIndex(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	store := session.NewStore(filepath.Join(dir, "sessions"))
-	saved := session.New("test-model", []llm.Message{
-		{Role: llm.RoleUser, Content: "Semantic retrieval session memory for local RAG"},
-		{Role: llm.RoleAssistant, Content: "Persist lexical session indexes from global vectorizer config."},
-	})
-	saved.ID = "global-lexical-session-test"
-	saved.Title = "Global lexical session vector test"
-	require.NoError(t, store.Save(saved))
-
-	searcher, err := retrievalSearcher(context.TODO(), appState{
-		cwd:          dir,
-		sessionStore: store,
-		vectorConfig: appconfig.VectorConfig{Vectorizer: vector.VectorizerKindLexical},
-	}, retrievalCommandInput{}, retrieval.SourceSession)
-	require.NoError(t, err)
-	require.NotNil(t, searcher)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, retrieval.SourceSession, results[0].Source.Type)
-	assert.Equal(t, "lexical-session-ann", results[0].Scorer.Name)
-
-	indexPath := filepath.Join(dir, sourceVectorSessionIndex)
-	loaded, err := vector.LoadIndex(indexPath)
-	require.NoError(t, err)
-	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
-	assert.ElementsMatch(t, []string{vector.SourceKindSession}, sourceMetadataKinds(loaded.Sources))
-}
-
-func TestRetrievalSearcherUsesGlobalLexicalVectorizerForGitHistoryIndex(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	initGitHistoryRetrievalRepo(t, dir)
-
-	searcher, err := retrievalSearcher(context.TODO(), appState{
-		cwd:          dir,
-		vectorConfig: appconfig.VectorConfig{Vectorizer: vector.VectorizerKindLexical},
-	}, retrievalCommandInput{}, retrieval.SourceGitHistory)
-	require.NoError(t, err)
-	require.NotNil(t, searcher)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, retrieval.SourceGitHistory, results[0].Source.Type)
-	assert.Equal(t, "lexical-git-history-ann", results[0].Scorer.Name)
-
-	indexPath := filepath.Join(dir, sourceVectorGitHistoryIndex)
-	loaded, err := vector.LoadIndex(indexPath)
-	require.NoError(t, err)
-	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
-	assert.ElementsMatch(t, []string{vector.SourceKindGitHistory}, sourceMetadataKinds(loaded.Sources))
-}
-
-func initGitHistoryRetrievalRepo(t *testing.T, dir string) {
-	t.Helper()
-
-	runGitHistoryRetrievalRepoCommand(t, dir, "init")
-	runGitHistoryRetrievalRepoCommand(t, dir, "config", "user.name", "Atteler Test")
-	runGitHistoryRetrievalRepoCommand(t, dir, "config", "user.email", "atteler@example.com")
-	runGitHistoryRetrievalRepoCommand(t, dir, "config", "commit.gpgsign", "false")
-
-	path := filepath.Join(dir, "docs", "retrieval.md")
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
-	require.NoError(t, os.WriteFile(path, []byte("Semantic retrieval git history for local RAG."), 0o600))
-
-	runGitHistoryRetrievalRepoCommand(t, dir, "add", "docs/retrieval.md")
-	runGitHistoryRetrievalRepoCommand(t, dir, "commit", "-m", "Semantic git history for local RAG")
-}
-
-func runGitHistoryRetrievalRepoCommand(t *testing.T, dir string, args ...string) {
-	t.Helper()
-
-	cmdArgs := append([]string{"-C", dir}, args...)
-	cmd := exec.CommandContext(t.Context(), "git", cmdArgs...)
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
-		"GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
-	)
-
-	output, err := cmd.CombinedOutput()
-	require.NoErrorf(t, err, "git %s: %s", strings.Join(cmdArgs, " "), string(output))
-}
-
-func TestBuildSessionVectorRetrievalSearcherFallbackPersistsLexicalIndex(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	store := session.NewStore(filepath.Join(dir, "sessions"))
-	saved := session.New("test-model", []llm.Message{
-		{Role: llm.RoleUser, Content: "Semantic retrieval session memory for local RAG"},
-		{Role: llm.RoleAssistant, Content: "Persist fallback indexes for local session recall."},
-	})
-	saved.ID = "session-vector-fallback-test"
-	saved.Title = "Session vector fallback test"
-	require.NoError(t, store.Save(saved))
-
-	indexPath := filepath.Join(dir, "session-vector-index.json")
-	searcher, err := buildSessionVectorRetrievalSearcher(context.TODO(), appState{
-		cwd:          dir,
-		sessionStore: store,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindSession: {
-					Vectorizer:     vector.VectorizerKindEmbedding,
-					BaseURL:        privateRemoteEmbeddingEndpoint(),
-					FallbackPolicy: vector.VectorizerKindLexical,
-					IndexPath:      indexPath,
-				},
-			},
-		},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, searcher)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, retrieval.SourceSession, results[0].Source.Type)
-	assert.Equal(t, "lexical-session-ann", results[0].Scorer.Name)
-	assert.Equal(t, "session-vector-index.lexical.json", results[0].Source.URI)
-	assert.NoFileExists(t, indexPath)
-	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
-
-	loaded, err := vector.LoadIndex(lexicalFallbackIndexPath(indexPath))
-	require.NoError(t, err)
-	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
-	assert.ElementsMatch(t, []string{vector.SourceKindSession}, sourceMetadataKinds(loaded.Sources))
-}
-
-func TestBuildGitHistoryVectorRetrievalSearcherUsesPersistedSourceConfig(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	server := newAgentMemoryEmbeddingTestServer()
-	defer server.Close()
-
-	indexPath := filepath.Join(dir, "git-history-vector-index.json")
-	commits := []githistory.Commit{
-		{
-			Hash:       "abc123",
-			AuthorName: "Dev",
-			Date:       time.Unix(10, 0).UTC(),
-			Subject:    "Semantic git history for local RAG",
-			Body:       "Persist embeddings for commit retrieval.",
-			Files:      []string{"pkg/vector/source_index.go"},
-		},
-		{
-			Hash:    "def456",
-			Subject: "Shell timeout cleanup",
-			Files:   []string{"pkg/shell/shell.go"},
-		},
-	}
-
-	searcher, err := buildGitHistoryVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindGitHistory: {
-					Vectorizer: vector.VectorizerKindEmbedding,
-					Model:      "git-history-test-embed",
-					BaseURL:    server.URL,
-					IndexPath:  indexPath,
-				},
-			},
-		},
-	}, commits)
-	require.NoError(t, err)
-	require.NotNil(t, searcher)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:  "semantic retrieval",
-		Limit: 1,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, retrieval.SourceGitHistory, results[0].Source.Type)
-	assert.Contains(t, results[0].DocumentID, "git/abc123")
-	assert.Equal(t, "embedding-git-history-ann", results[0].Scorer.Name)
-	assert.Equal(t, commits[0].Date, results[0].Freshness.SourceUpdatedAt)
-
-	loaded, err := vector.LoadIndex(indexPath)
-	require.NoError(t, err)
-	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
-	assert.NotEmpty(t, loaded.Sources)
-	for _, kind := range sourceMetadataKinds(loaded.Sources) {
-		assert.Equal(t, vector.SourceKindGitHistory, kind)
-	}
-}
-
-func TestBuildGitHistoryVectorRetrievalSearcherFallbackPersistsLexicalIndex(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	indexPath := filepath.Join(dir, "git-history-vector-index.json")
-	commits := []githistory.Commit{
-		{
-			Hash:    "abc123",
-			Subject: "Semantic git history for local RAG",
-			Body:    "Persist lexical fallback indexes for commit retrieval.",
-			Files:   []string{"pkg/vector/source_index.go"},
-		},
-		{
-			Hash:    "def456",
-			Subject: "Shell timeout cleanup",
-			Files:   []string{"pkg/shell/shell.go"},
-		},
-	}
-
-	searcher, err := buildGitHistoryVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindGitHistory: {
-					Vectorizer:     vector.VectorizerKindEmbedding,
-					BaseURL:        privateRemoteEmbeddingEndpoint(),
-					FallbackPolicy: vector.VectorizerKindLexical,
-					IndexPath:      indexPath,
-				},
-			},
-		},
-	}, commits)
-	require.NoError(t, err)
-	require.NotNil(t, searcher)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, retrieval.SourceGitHistory, results[0].Source.Type)
-	assert.Equal(t, "lexical-git-history-ann", results[0].Scorer.Name)
-	assert.Equal(t, "git-history-vector-index.lexical.json", results[0].Source.URI)
-	assert.NoFileExists(t, indexPath)
-	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
-
-	loaded, err := vector.LoadIndex(lexicalFallbackIndexPath(indexPath))
-	require.NoError(t, err)
-	assert.Equal(t, vector.VectorizerKindLexical, loaded.Vectorizer.Kind)
-	assert.ElementsMatch(t, []string{vector.SourceKindGitHistory, vector.SourceKindGitHistory}, sourceMetadataKinds(loaded.Sources))
-}
-
-func TestBuildADRVectorRetrievalSearcherUsesPersistedSourceConfig(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	adrDir := filepath.Join(dir, "docs", "adr")
-	require.NoError(t, os.MkdirAll(adrDir, 0o750))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(adrDir, "0001-local-rag.md"),
-		[]byte("# 0001 Local RAG\n\nSemantic retrieval ADR keeps embeddings local."),
-		0o600,
-	))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(adrDir, "0002-shell-timeouts.md"),
-		[]byte("# 0002 Shell timeouts\n\nCommand timeout policy for local execution."),
-		0o600,
-	))
-
-	server := newAgentMemoryEmbeddingTestServer()
-	defer server.Close()
-
-	indexPath := filepath.Join(dir, "adr-vector-index.json")
-	searcher, err := buildADRVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindADR: {
-					Vectorizer: vector.VectorizerKindEmbedding,
-					Model:      "adr-test-embed",
-					BaseURL:    server.URL,
-					IndexPath:  indexPath,
-				},
-			},
-		},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, searcher)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:          "semantic retrieval",
-		Limit:         1,
-		IncludeUnsafe: true,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, retrieval.SourceADR, results[0].Source.Type)
-	assert.Contains(t, filepath.ToSlash(results[0].DocumentID), "docs/adr/0001-local-rag.md")
-	assert.Equal(t, "embedding-adr-ann", results[0].Scorer.Name)
-	assert.Equal(t, "0001-local-rag", results[0].Metadata["adr_id"])
-	assert.NotZero(t, results[0].Freshness.SourceUpdatedAt)
-
-	loaded, err := vector.LoadIndex(indexPath)
-	require.NoError(t, err)
-	assert.Equal(t, vector.VectorizerKindEmbedding, loaded.Vectorizer.Kind)
-	assert.ElementsMatch(t, []string{vector.SourceKindADR, vector.SourceKindADR}, sourceMetadataKinds(loaded.Sources))
-	assert.NotEmpty(t, loaded.Documents[0].Metadata[retrieval.MetadataSourceUpdatedAt])
-}
-
-func TestBuildADRVectorRetrievalSearcherFallbackUsesLexicalIndexURI(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	adrDir := filepath.Join(dir, "docs", "adr")
-	require.NoError(t, os.MkdirAll(adrDir, 0o750))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(adrDir, "0001-local-rag.md"),
-		[]byte("# 0001 Local RAG\n\nSemantic retrieval ADR keeps embeddings local."),
-		0o600,
-	))
-
-	indexPath := filepath.Join(dir, "adr-vector-index.json")
-	searcher, err := buildADRVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindADR: {
-					Vectorizer:        vector.VectorizerKindEmbedding,
-					BaseURL:           privateRemoteEmbeddingEndpoint(),
-					FallbackPolicy:    vector.VectorizerKindLexical,
-					IndexPath:         indexPath,
-					ChunkMaxRunes:     400,
-					ChunkOverlapRunes: 40,
-				},
-			},
-		},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, searcher)
-
-	results, err := retrieval.Search(context.TODO(), retrieval.Query{
-		Text:  "semantic retrieval",
-		Limit: 1,
-	}, searcher)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "lexical-adr-ann", results[0].Scorer.Name)
-	assert.Equal(t, "adr-vector-index.lexical.json", results[0].Source.URI)
-	assert.NoFileExists(t, indexPath)
-	assert.FileExists(t, lexicalFallbackIndexPath(indexPath))
-}
-
-func TestBuildADRVectorRetrievalSearcherClearsIndexWhenADRsDeleted(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	indexPath := filepath.Join(dir, "adr-vector-index.json")
-	writeSourceVectorIndex(t, indexPath, []vector.Source{{
-		Kind: vector.SourceKindADR,
-		Path: "docs/adr/0001-deleted.md",
-		Text: "Deleted ADR should be removed from persisted local RAG index.",
-	}})
-
-	searcher, err := buildADRVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindADR: {
-					Vectorizer: vector.VectorizerKindLexical,
-					IndexPath:  indexPath,
-				},
-			},
-		},
-	})
-	require.NoError(t, err)
-	assert.Nil(t, searcher)
-	assert.NoFileExists(t, indexPath)
-}
-
-func TestBuildADRVectorRetrievalSearcherClearsFallbackIndexWhenADRsDeleted(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	indexPath := filepath.Join(dir, "adr-vector-index.json")
-	staleSources := []vector.Source{{
-		Kind: vector.SourceKindADR,
-		Path: "docs/adr/0001-deleted.md",
-		Text: "Deleted ADR should be removed from embedding and fallback local RAG indexes.",
-	}}
-	writeSourceVectorIndex(t, indexPath, staleSources)
-	writeSourceVectorIndex(t, lexicalFallbackIndexPath(indexPath), staleSources)
-
-	searcher, err := buildADRVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindADR: {
-					Vectorizer:     vector.VectorizerKindEmbedding,
-					BaseURL:        privateRemoteEmbeddingEndpoint(),
-					FallbackPolicy: vector.VectorizerKindLexical,
-					IndexPath:      indexPath,
-				},
-			},
-		},
-	})
-	require.NoError(t, err)
-	assert.Nil(t, searcher)
-	assert.NoFileExists(t, indexPath)
-	assert.NoFileExists(t, lexicalFallbackIndexPath(indexPath))
-}
-
-func TestADRVectorSourcesSkipsSymlinkFiles(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	adrDir := filepath.Join(dir, "docs", "adr")
-	require.NoError(t, os.MkdirAll(adrDir, 0o750))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(adrDir, "0001-real.md"),
-		[]byte("# 0001 Real ADR\n\nKeep local RAG indexes persistent."),
-		0o600,
-	))
-	outside := filepath.Join(dir, "outside.md")
-	require.NoError(t, os.WriteFile(outside, []byte("# Outside\n\nDo not follow symlinked ADR files."), 0o600))
-	if err := os.Symlink(outside, filepath.Join(adrDir, "0002-linked.md")); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-
-	sources, err := adrVectorSources(context.TODO(), dir)
-	require.NoError(t, err)
-
-	require.Len(t, sources, 1)
-	assert.Equal(t, vector.SourceKindADR, sources[0].Kind)
-	assert.Equal(t, "docs/adr/0001-real.md", sources[0].Path)
-	assert.NotContains(t, sources[0].Text, "Do not follow symlinked ADR files")
-}
-
-func TestBuildSessionVectorRetrievalSearcherClearsIndexWhenSessionsDeleted(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	indexPath := filepath.Join(dir, "session-vector-index.json")
-	writeSourceVectorIndex(t, indexPath, []vector.Source{{
-		Kind: vector.SourceKindSession,
-		Path: "sessions/deleted-session",
-		Text: "Deleted session should be removed from persisted local RAG index.",
-	}})
-
-	searcher, err := buildSessionVectorRetrievalSearcher(context.TODO(), appState{
-		cwd:          dir,
-		sessionStore: session.NewStore(filepath.Join(dir, "sessions")),
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindSession: {
-					Vectorizer: vector.VectorizerKindLexical,
-					IndexPath:  indexPath,
-				},
-			},
-		},
-	})
-	require.NoError(t, err)
-	assert.Nil(t, searcher)
-	assert.NoFileExists(t, indexPath)
-}
-
-func TestBuildSessionVectorRetrievalSearcherClearsFallbackIndexWhenSessionsDeleted(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	indexPath := filepath.Join(dir, "session-vector-index.json")
-	staleSources := []vector.Source{{
-		Kind: vector.SourceKindSession,
-		Path: "sessions/deleted-session",
-		Text: "Deleted session should be removed from embedding and fallback local RAG indexes.",
-	}}
-	writeSourceVectorIndex(t, indexPath, staleSources)
-	writeSourceVectorIndex(t, lexicalFallbackIndexPath(indexPath), staleSources)
-
-	searcher, err := buildSessionVectorRetrievalSearcher(context.TODO(), appState{
-		cwd:          dir,
-		sessionStore: session.NewStore(filepath.Join(dir, "sessions")),
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindSession: {
-					Vectorizer:     vector.VectorizerKindEmbedding,
-					BaseURL:        privateRemoteEmbeddingEndpoint(),
-					FallbackPolicy: vector.VectorizerKindLexical,
-					IndexPath:      indexPath,
-				},
-			},
-		},
-	})
-	require.NoError(t, err)
-	assert.Nil(t, searcher)
-	assert.NoFileExists(t, indexPath)
-	assert.NoFileExists(t, lexicalFallbackIndexPath(indexPath))
-}
-
-func TestBuildSessionVectorRetrievalSearcherRefusesToClearDifferentSourceIndex(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	indexPath := filepath.Join(dir, "shared-vector-index.json")
-	writeSourceVectorIndex(t, indexPath, []vector.Source{{
-		Kind: vector.SourceKindFile,
-		Path: "docs/auth.md",
-		Text: "OAuth token rotation notes for file retrieval.",
-	}})
-
-	searcher, err := buildSessionVectorRetrievalSearcher(context.TODO(), appState{
-		cwd:          dir,
-		sessionStore: session.NewStore(filepath.Join(dir, "sessions")),
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindSession: {
-					Vectorizer: vector.VectorizerKindLexical,
-					IndexPath:  indexPath,
-				},
-			},
-		},
-	})
-	require.Error(t, err)
-	assert.Nil(t, searcher)
-	assert.Contains(t, err.Error(), "refusing to clear session vector index")
-	assert.FileExists(t, indexPath)
-}
-
-func TestBuildSessionVectorRetrievalSearcherRefusesToRefreshDifferentSourceIndex(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	indexPath := filepath.Join(dir, "shared-vector-index.json")
-	writeSourceVectorIndex(t, indexPath, []vector.Source{{
-		Kind: vector.SourceKindFile,
-		Path: "docs/auth.md",
-		Text: "OAuth token rotation notes for file retrieval.",
-	}})
-
-	store := session.NewStore(filepath.Join(dir, "sessions"))
-	saved := session.New("test-model", []llm.Message{
-		{Role: llm.RoleUser, Content: "Session source should not clobber a file vector index."},
-		{Role: llm.RoleAssistant, Content: "Persist source metadata by family before refreshing."},
-	})
-	saved.ID = "active-session"
-	require.NoError(t, store.Save(saved))
-
-	searcher, err := buildSessionVectorRetrievalSearcher(context.TODO(), appState{
-		cwd:          dir,
-		sessionStore: store,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindSession: {
-					Vectorizer: vector.VectorizerKindLexical,
-					IndexPath:  indexPath,
-				},
-			},
-		},
-	})
-	require.Error(t, err)
-	assert.Nil(t, searcher)
-	assert.Contains(t, err.Error(), "refusing to refresh session vector index")
-
-	loaded, loadErr := vector.LoadIndex(indexPath)
-	require.NoError(t, loadErr)
-	assert.ElementsMatch(t, []string{vector.SourceKindFile}, sourceMetadataKinds(loaded.Sources))
-}
-
-func TestBuildGitHistoryVectorRetrievalSearcherClearsIndexWhenCommitsDeleted(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	indexPath := filepath.Join(dir, "git-history-vector-index.json")
-	writeSourceVectorIndex(t, indexPath, []vector.Source{{
-		Kind: vector.SourceKindGitHistory,
-		Path: "git/deletedcommit",
-		Text: "Deleted commit should be removed from persisted local RAG index.",
-	}})
-
-	searcher, err := buildGitHistoryVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindGitHistory: {
-					Vectorizer: vector.VectorizerKindLexical,
-					IndexPath:  indexPath,
-				},
-			},
-		},
-	}, nil)
-	require.NoError(t, err)
-	assert.Nil(t, searcher)
-	assert.NoFileExists(t, indexPath)
-}
-
-func TestBuildGitHistoryVectorRetrievalSearcherClearsFallbackIndexWhenCommitsDeleted(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	indexPath := filepath.Join(dir, "git-history-vector-index.json")
-	staleSources := []vector.Source{{
-		Kind: vector.SourceKindGitHistory,
-		Path: "git/deletedcommit",
-		Text: "Deleted commit should be removed from embedding and fallback local RAG indexes.",
-	}}
-	writeSourceVectorIndex(t, indexPath, staleSources)
-	writeSourceVectorIndex(t, lexicalFallbackIndexPath(indexPath), staleSources)
-
-	searcher, err := buildGitHistoryVectorRetrievalSearcher(context.TODO(), appState{
-		cwd: dir,
-		vectorConfig: appconfig.VectorConfig{
-			Sources: map[string]appconfig.VectorizerConfig{
-				vector.SourceKindGitHistory: {
-					Vectorizer:     vector.VectorizerKindEmbedding,
-					BaseURL:        privateRemoteEmbeddingEndpoint(),
-					FallbackPolicy: vector.VectorizerKindLexical,
-					IndexPath:      indexPath,
-				},
-			},
-		},
-	}, nil)
-	require.NoError(t, err)
-	assert.Nil(t, searcher)
-	assert.NoFileExists(t, indexPath)
-	assert.NoFileExists(t, lexicalFallbackIndexPath(indexPath))
-}
-
-func writeSourceVectorIndex(t *testing.T, indexPath string, sources []vector.Source) {
-	t.Helper()
-
-	vectorizer, err := vector.NewTextVectorizer(16)
-	require.NoError(t, err)
-
-	refresh, err := vector.RefreshSourceIndex(context.TODO(), vector.SourceIndexOptions{
-		IndexPath:          indexPath,
-		Sources:            sources,
-		Vectorizer:         vectorizer,
-		VectorizerMetadata: vectorizer.Metadata(),
-		Chunk:              vector.ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, refresh.Index)
-	require.FileExists(t, indexPath)
-}
-
-func sourceMetadataKinds(sources []vector.SourceMetadata) []string {
-	out := make([]string, 0, len(sources))
-	for _, source := range sources {
-		out = append(out, source.Kind)
-	}
-
-	return out
-}
-
-func newAgentMemoryEmbeddingTestServer() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Input any    `json:"input"`
-			Model string `json:"model"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-
-			return
-		}
-
-		text := strings.ToLower(fmt.Sprint(req.Input))
-		embedding := []float64{0, 1}
-		if strings.Contains(text, "semantic") || strings.Contains(text, "retrieval") || strings.Contains(text, "rag") {
-			embedding = []float64{1, 0}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]any{
-			"embeddings": [][]float64{embedding},
-		}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-	}))
-}
-
-func TestRunAgentMemoryCommandLowAutonomyBlocksIndexWrites(t *testing.T) {
+func TestRunAgentMemoryCommandPermissionPolicyDeniesStoreWrite(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1617,30 +70,104 @@ func TestRunAgentMemoryCommandLowAutonomyBlocksIndexWrites(t *testing.T) {
 	require.NoError(t, os.WriteFile(note, []byte("OAuth callback retry memory"), 0o600))
 
 	storePath := filepath.Join(dir, "agent-memory.json")
-	err := runAgentMemoryCommandWithAutonomy(
-		context.Background(),
-		dir,
-		testReviewerName,
-		appconfig.VectorConfig{},
-		agentMemoryCommandInputFromOptions(cliOptions{
-			agentMemoryStorePath:  storePath,
-			agentMemoryIndexFiles: stringListFlag{note},
-		}),
-		autonomy.Low,
-	)
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	err := runAgentMemoryCommand(ctx, dir, testReviewerName, agentMemoryCommandInputFromOptions(cliOptions{
+		agentMemoryStorePath:  storePath,
+		agentMemoryIndexFiles: stringListFlag{note},
+	}))
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "autonomy low blocks file writes")
-	assert.Contains(t, err.Error(), "--agent-memory-index")
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
 	assert.NoFileExists(t, storePath)
 }
 
-func TestLSPCommandAuditContextIncludesAutonomy(t *testing.T) {
+func TestRunAgentMemoryCommandPermissionPolicyDeniesStoreRead(t *testing.T) {
 	t.Parallel()
 
-	got := lspCommandAuditContext(autonomy.Full)
-	assert.Equal(t, "atteler.lsp", got.Caller)
-	assert.Equal(t, "full", got.Autonomy)
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "agent-memory.json")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	err := runAgentMemoryCommand(ctx, dir, testReviewerName, agentMemoryCommandInputFromOptions(cliOptions{
+		agentMemoryStorePath: storePath,
+		agentMemorySearch:    "callback",
+	}))
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+}
+
+func TestRunMemoryCommandPermissionPolicyDeniesStoreWrite(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	note := filepath.Join(dir, "note.txt")
+	require.NoError(t, os.WriteFile(note, []byte("OAuth callback retry memory"), 0o600))
+
+	storePath := filepath.Join(dir, "memory.json")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	err := runMemoryCommand(ctx, session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		memoryStorePath:  storePath,
+		memoryIndexFiles: stringListFlag{note},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+	assert.NoFileExists(t, storePath)
+}
+
+func TestRunMemoryCommandPermissionPolicyDeniesStoreRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "memory.json")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	err := runMemoryCommand(ctx, session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		memoryStorePath: storePath,
+		memorySearch:    "callback",
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+}
+
+func TestRunMemoryCommandPermissionPolicyDeniesIndexFileRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	note := filepath.Join(dir, "note.txt")
+	require.NoError(t, os.WriteFile(note, []byte("OAuth callback retry memory"), 0o600))
+
+	storePath := filepath.Join(dir, "memory.json")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	err := runMemoryCommand(ctx, session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		memoryStorePath:  storePath,
+		memoryRebuild:    true,
+		memoryIndexFiles: stringListFlag{note},
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.NoFileExists(t, storePath)
 }
 
 func TestFormatAgentMemoryResult(t *testing.T) {
@@ -1661,6 +188,103 @@ func TestFormatAgentMemoryResult(t *testing.T) {
 	}
 }
 
+func TestBuildVectorRetrievalSearcherPermissionPolicyDeniesFileRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	note := filepath.Join(dir, "vector-note.md")
+	require.NoError(t, os.WriteFile(note, []byte("OAuth callback retry vector notes"), 0o600))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	_, err := buildVectorRetrievalSearcher(ctx, appState{}, retrievalCommandInput{VectorIndexFiles: []string{note}})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+}
+
+func TestRetrievalSearcherPermissionPolicyDeniesSessionRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	require.NoError(t, store.Save(session.New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "session retrieval note"}})))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := filepath.Join(dir, "audit")
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := retrievalSearcher(ctx, appState{sessionStore: store}, retrievalCommandInput{}, retrieval.SourceSession)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "search session retrieval source")
+	assert.Contains(t, string(auditData), "permission.read.deny")
+}
+
+func TestBuildRetrievalMemoryStorePermissionPolicyDeniesSessionRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := session.NewStore(filepath.Join(dir, "sessions"))
+	require.NoError(t, store.Save(session.New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "session memory note"}})))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := filepath.Join(dir, "audit")
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := buildRetrievalMemoryStore(ctx, store, retrievalCommandInput{}, true)
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "index sessions for retrieval memory")
+	assert.Contains(t, string(auditData), "permission.read.deny")
+}
+
+func TestBuildAgentMemoryRetrievalSearcherPermissionPolicyDeniesStoreRead(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "agent-memory.json")
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := filepath.Join(dir, "audit")
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := buildAgentMemoryRetrievalSearcher(ctx, dir, testReviewerName, appconfig.VectorConfig{}, retrievalCommandInput{
+		AgentMemoryAgent:     testReviewerName,
+		AgentMemoryStorePath: storePath,
+	})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read agent memory retrieval source")
+	assert.Contains(t, string(auditData), "permission.read.deny")
+}
+
 func TestFormatMemoryResultRedactsLineAndSnippet(t *testing.T) {
 	t.Parallel()
 
@@ -1678,6 +302,30 @@ func TestFormatMemoryResultRedactsLineAndSnippet(t *testing.T) {
 
 	assert.NotContains(t, got, secret)
 	assert.Contains(t, got, "[REDACTED:")
+}
+
+func TestRunContextPackPermissionPolicyDeniesRead(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "context.txt")
+	require.NoError(t, os.WriteFile(path, []byte("system: keep rules\nuser: inspect this\n"), 0o600))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := runContextPackWithWriters(ctx, io.Discard, io.Discard, path, 100, "openai/gpt-4.1")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "read context pack input")
+	assert.Contains(t, string(auditData), "permission.read.deny")
 }
 
 //nolint:paralleltest // Uses t.Chdir to exercise default repo-scope resolution.
@@ -1700,7 +348,7 @@ func TestBuildMemoryStore_DefaultRepoScopeDoesNotIndexAllSessions(t *testing.T) 
 	legacyNoRepo.ID = "legacy-no-repo"
 	require.NoError(t, store.Save(legacyNoRepo))
 
-	mem, err := buildMemoryStore(store, cliOptions{memorySearch: "oauth"})
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{memorySearch: "oauth"})
 	require.NoError(t, err)
 	assert.Equal(t, memory.ScopeRepo, mem.Corpus.Scope)
 	assert.Equal(t, []string{"legacy-no-repo", localMemorySessionID}, mem.Corpus.SessionIDs)
@@ -1712,7 +360,7 @@ func TestBuildMemoryStore_DefaultRepoScopeDoesNotIndexAllSessions(t *testing.T) 
 		assert.NotEqual(t, "session/other/message/0", result.Document.ID)
 	}
 
-	global, err := buildMemoryStore(store, cliOptions{memorySearch: "oauth", memoryGlobal: true})
+	global, err := buildMemoryStore(t.Context(), store, cliOptions{memorySearch: "oauth", memoryGlobal: true})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"legacy-no-repo", localMemorySessionID, otherMemoryName}, global.Corpus.SessionIDs)
 }
@@ -1741,7 +389,7 @@ func TestBuildMemoryStore_DefaultRepoScopeSkipsOutOfScopeBeforeFullLoad(t *testi
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(store.Path("malformed-other"), append(malformedOther, '\n'), 0o600))
 
-	mem, err := buildMemoryStore(store, cliOptions{memorySearch: "oauth"})
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{memorySearch: "oauth"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{localMemorySessionID}, mem.Corpus.SessionIDs)
 }
@@ -1766,7 +414,7 @@ func TestBuildMemoryStore_DefaultRepoScopeUsesGitRootFromSubdir(t *testing.T) {
 	other.WorktreePath = filepath.Join(t.TempDir(), "other-repo")
 	require.NoError(t, store.Save(other))
 
-	mem, err := buildMemoryStore(store, cliOptions{memorySearch: "oauth"})
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{memorySearch: "oauth"})
 	require.NoError(t, err)
 	assert.Equal(t, memory.ScopeRepo, mem.Corpus.Scope)
 	assert.Equal(t, cleanMemoryPath(dir), mem.Corpus.RepoPath)
@@ -1793,7 +441,7 @@ func TestBuildMemoryStore_ExplicitRepoPathUsesGitRootFromSubdir(t *testing.T) {
 	other.WorktreePath = filepath.Join(t.TempDir(), "other-repo")
 	require.NoError(t, store.Save(other))
 
-	mem, err := buildMemoryStore(store, cliOptions{memorySearch: "oauth", memoryRepoPath: subdir})
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{memorySearch: "oauth", memoryRepoPath: subdir})
 	require.NoError(t, err)
 	assert.Equal(t, memory.ScopeRepo, mem.Corpus.Scope)
 	assert.Equal(t, cleanMemoryPath(dir), mem.Corpus.RepoPath)
@@ -1811,7 +459,7 @@ func TestBuildMemoryStore_RepoScopePersistsInferredRepoForLegacySession(t *testi
 	legacy.ID = "legacy-local"
 	writeMemorySessionFixture(t, store, legacy)
 
-	mem, err := buildMemoryStore(store, cliOptions{memoryRepoPath: dir, memorySearch: "oauth"})
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{memoryRepoPath: dir, memorySearch: "oauth"})
 	require.NoError(t, err)
 	require.Len(t, mem.Documents, 2)
 	for _, doc := range mem.Documents {
@@ -1820,7 +468,7 @@ func TestBuildMemoryStore_RepoScopePersistsInferredRepoForLegacySession(t *testi
 	}
 	require.NoError(t, mem.Save(storePath))
 
-	reloaded, err := buildMemoryStore(session.NewStore(filepath.Join(t.TempDir(), "missing-sessions")), cliOptions{
+	reloaded, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(t.TempDir(), "missing-sessions")), cliOptions{
 		memoryStorePath: storePath,
 		memoryRepoPath:  dir,
 		memorySearch:    "oauth",
@@ -1844,7 +492,7 @@ func TestBuildMemoryStore_DefaultRepoScopeExcludesLegacySessionsOutsideRepo(t *t
 	legacyNoRepo.ID = "legacy-no-repo"
 	require.NoError(t, store.Save(legacyNoRepo))
 
-	mem, err := buildMemoryStore(store, cliOptions{memorySearch: "oauth"})
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{memorySearch: "oauth"})
 	require.NoError(t, err)
 	assert.Equal(t, memory.ScopeRepo, mem.Corpus.Scope)
 	assert.Empty(t, mem.Corpus.SessionIDs)
@@ -1865,7 +513,7 @@ func TestBuildMemoryStore_StorePathDoesNotImplicitlyIndexSessions(t *testing.T) 
 	saved.WorktreePath = dir
 	require.NoError(t, store.Save(saved))
 
-	mem, err := buildMemoryStore(store, cliOptions{
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{
 		memoryStorePath: storePath,
 		memorySearch:    "oauth",
 	})
@@ -1890,7 +538,7 @@ func TestBuildMemoryStore_EmptyStorePathDoesNotImplicitlyIndexSessions(t *testin
 	saved.WorktreePath = dir
 	require.NoError(t, store.Save(saved))
 
-	mem, err := buildMemoryStore(store, cliOptions{
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{
 		memoryStorePath: storePath,
 		memorySearch:    "oauth",
 	})
@@ -1923,7 +571,7 @@ func TestBuildMemoryStore_DefaultStoreSearchConstrainsLoadedStoreToRepo(t *testi
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(nil, cliOptions{
+	built, err := buildMemoryStore(t.Context(), nil, cliOptions{
 		memoryStorePath: storePath,
 		memorySearch:    "oauth",
 	})
@@ -1961,7 +609,7 @@ func TestBuildMemoryStore_ExplicitStoreScopeSearchesWholeStore(t *testing.T) {
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(nil, cliOptions{
+	built, err := buildMemoryStore(t.Context(), nil, cliOptions{
 		memoryStorePath: storePath,
 		memoryScope:     memoryScopeStore,
 		memorySearch:    "oauth",
@@ -1978,7 +626,7 @@ func TestBuildMemoryStore_ExplicitStoreScopeSearchesWholeStore(t *testing.T) {
 func TestBuildMemoryStore_StoreScopeRequiresStorePath(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildMemoryStore(session.NewStore(filepath.Join(t.TempDir(), "sessions")), cliOptions{
+	_, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(t.TempDir(), "sessions")), cliOptions{
 		memoryScope:  memoryScopeStore,
 		memorySearch: "oauth",
 	})
@@ -1993,6 +641,7 @@ func TestBuildMemoryStore_RebuildRejectsStoreScope(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = buildMemoryStoreWithRedactor(
+		t.Context(),
 		session.NewStore(filepath.Join(t.TempDir(), "sessions")),
 		cliOptions{memoryStorePath: filepath.Join(t.TempDir(), "memory.json"), memoryScope: memoryScopeStore},
 		redactor,
@@ -2021,6 +670,7 @@ func TestBuildMemoryStore_RebuildDoesNotLoadExistingStore(t *testing.T) {
 	require.NoError(t, err)
 
 	mem, err := buildMemoryStoreWithRedactor(
+		t.Context(),
 		store,
 		cliOptions{memoryStorePath: storePath, memoryRepoPath: dir},
 		redactor,
@@ -2099,7 +749,7 @@ func TestBuildMemoryStore_ExplicitSessionTagAgentAndGlobalScopes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			mem, err := buildMemoryStore(store, tc.opts)
+			mem, err := buildMemoryStore(t.Context(), store, tc.opts)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantScope, mem.Corpus.Scope)
 			if tc.wantScope == memory.ScopeGlobal {
@@ -2134,7 +784,7 @@ func TestBuildMemoryStore_AgentScopeSkipsNonMatchingBeforeFullLoad(t *testing.T)
 	require.NoError(t, os.MkdirAll(store.Dir(), 0o750))
 	require.NoError(t, os.WriteFile(store.Path("writer-malformed"), append(malformedWriter, '\n'), 0o600))
 
-	mem, err := buildMemoryStore(store, cliOptions{memorySearch: "oauth", memoryAgent: testReviewerName})
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{memorySearch: "oauth", memoryAgent: testReviewerName})
 	require.NoError(t, err)
 	assert.Equal(t, memory.ScopeAgent, mem.Corpus.Scope)
 	assert.Equal(t, []string{"reviewer-session"}, mem.Corpus.SessionIDs)
@@ -2157,7 +807,7 @@ func TestBuildMemoryStore_AgentScopeCanUseSummaryOnlyArtifactAgent(t *testing.T)
 	}}
 	require.NoError(t, store.Save(saved))
 
-	mem, err := buildMemoryStore(store, cliOptions{memorySearch: "oauth", memoryAgent: testReviewerName})
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{memorySearch: "oauth", memoryAgent: testReviewerName})
 	require.NoError(t, err)
 	assert.Equal(t, memory.ScopeAgent, mem.Corpus.Scope)
 	assert.Equal(t, []string{"artifact-session"}, mem.Corpus.SessionIDs)
@@ -2188,7 +838,7 @@ func TestBuildMemoryStore_GlobalScopeReportsStoredAndIndexedSessions(t *testing.
 	saved.ID = "saved"
 	require.NoError(t, sessions.Save(saved))
 
-	built, err := buildMemoryStore(sessions, cliOptions{
+	built, err := buildMemoryStore(t.Context(), sessions, cliOptions{
 		memoryStorePath: storePath,
 		memoryGlobal:    true,
 		memorySearch:    "oauth",
@@ -2224,7 +874,7 @@ func TestBuildMemoryStore_DateRangeScopeFiltersSessions(t *testing.T) {
 		Messages:  []llm.Message{{Role: llm.RoleUser, Content: "OAuth recent note"}},
 	})
 
-	mem, err := buildMemoryStore(store, cliOptions{
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{
 		memorySearch: "oauth",
 		memorySince:  "2026-05-05",
 		memoryUntil:  "2026-05-12",
@@ -2259,7 +909,7 @@ func TestBuildMemoryStore_TagScopeHonorsExplicitRepoPath(t *testing.T) {
 	other.WorktreePath = otherDir
 	require.NoError(t, store.Save(other))
 
-	mem, err := buildMemoryStore(store, cliOptions{
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{
 		memorySearch:   "oauth",
 		memoryRepoPath: dir,
 		memoryTags:     stringListFlag{"auth"},
@@ -2292,7 +942,7 @@ func TestBuildMemoryStore_ExplicitScopeConstrainsLoadedMemoryStore(t *testing.T)
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+	built, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 		memoryStorePath: storePath,
 		memoryRepoPath:  dir,
 		memorySearch:    "oauth",
@@ -2328,7 +978,7 @@ func TestBuildMemoryStore_ListCorpusSessionScopeConstrainsLoadedStore(t *testing
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+	built, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 		memoryStorePath:  storePath,
 		memoryListCorpus: true,
 		memorySessionRef: localMemorySessionID,
@@ -2366,7 +1016,7 @@ func TestBuildMemoryStore_ExplicitScopeFiltersLegacyStoreBeforeCustomRedaction(t
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+	built, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 		memoryStorePath:   storePath,
 		memoryRepoPath:    localRepo,
 		memorySearch:      "oauth",
@@ -2405,7 +1055,7 @@ func TestBuildMemoryStore_ConstrainedStoreCombinesTagAndRepoSelectors(t *testing
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+	built, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 		memoryStorePath: storePath,
 		memoryRepoPath:  dir,
 		memoryTags:      stringListFlag{"auth"},
@@ -2442,7 +1092,7 @@ func TestBuildMemoryStore_StoreScopeCanStillUseSecondaryFilters(t *testing.T) {
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+	built, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 		memoryStorePath: storePath,
 		memoryScope:     memoryScopeStore,
 		memoryTags:      stringListFlag{"auth"},
@@ -2479,7 +1129,7 @@ func TestBuildMemoryStore_StoreScopeCanFilterBySessionRef(t *testing.T) {
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+	built, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 		memoryStorePath:  storePath,
 		memoryScope:      memoryScopeStore,
 		memorySessionRef: "auth-review",
@@ -2518,7 +1168,7 @@ func TestRunMemoryCommandStoreScopeSurvivesSaveBeforeSearch(t *testing.T) {
 	require.NoError(t, mem.Save(storePath))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath:     storePath,
 			memoryScope:         memoryScopeStore,
 			memorySearch:        "OAuth",
@@ -2561,7 +1211,7 @@ func TestRunMemoryCommandStoreSearchWithRetentionUsesRepoScopedSearchView(t *tes
 	require.NoError(t, mem.Save(storePath))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath:     storePath,
 			memoryRepoPath:      dir,
 			memorySearch:        "OAuth",
@@ -2598,7 +1248,7 @@ func TestBuildMemoryStore_RepoScopeExcludesStoreSessionsWithoutRepoProvenance(t 
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+	built, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 		memoryStorePath: storePath,
 		memoryRepoPath:  dir,
 		memorySearch:    "oauth",
@@ -2633,7 +1283,7 @@ func TestBuildMemoryStore_SessionScopeCanFilterStoreWithoutSavedSession(t *testi
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(session.NewStore(filepath.Join(dir, "missing-sessions")), cliOptions{
+	built, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(dir, "missing-sessions")), cliOptions{
 		memoryStorePath:  storePath,
 		memorySessionRef: localMemorySessionID,
 		memorySearch:     "oauth",
@@ -2665,7 +1315,7 @@ func TestBuildMemoryStore_SessionScopeFiltersRedactedStoredSessionID(t *testing.
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(session.NewStore(filepath.Join(dir, "missing-sessions")), cliOptions{
+	built, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(dir, "missing-sessions")), cliOptions{
 		memoryStorePath:  storePath,
 		memorySessionRef: secretSessionID,
 		memorySearch:     "oauth",
@@ -2702,7 +1352,7 @@ func TestBuildMemoryStore_LegacySessionRefFiltersStoredMemory(t *testing.T) {
 	}))
 	require.NoError(t, mem.Save(storePath))
 
-	built, err := buildMemoryStore(session.NewStore(filepath.Join(dir, "missing-sessions")), cliOptions{
+	built, err := buildMemoryStore(t.Context(), session.NewStore(filepath.Join(dir, "missing-sessions")), cliOptions{
 		memoryStorePath: storePath,
 		sessionRef:      localMemorySessionID,
 		memorySearch:    "oauth",
@@ -2766,7 +1416,7 @@ func TestFormatMemoryCorpusStatementRedactsStoreAndSelectors(t *testing.T) {
 func TestMemoryPlan_DateRangeScope(t *testing.T) {
 	t.Parallel()
 
-	plan, err := memoryPlan(cliOptions{memorySearch: "note", memorySince: "2026-05-01", memoryUntil: "2026-05-02"})
+	plan, err := memoryPlan(t.Context(), cliOptions{memorySearch: "note", memorySince: "2026-05-01", memoryUntil: "2026-05-02"})
 	require.NoError(t, err)
 	assert.Equal(t, memory.ScopeDateRange, plan.scope)
 	assert.True(t, plan.hasSince)
@@ -2778,7 +1428,7 @@ func TestMemoryPlan_DateRangeScope(t *testing.T) {
 func TestMemoryPlan_AgentScopeDefaultsToSelectedAgent(t *testing.T) {
 	t.Parallel()
 
-	plan, err := memoryPlan(cliOptions{memorySearch: "note", memoryScope: "agent", agentName: testReviewerName})
+	plan, err := memoryPlan(t.Context(), cliOptions{memorySearch: "note", memoryScope: "agent", agentName: testReviewerName})
 	require.NoError(t, err)
 	assert.Equal(t, memory.ScopeAgent, plan.scope)
 	assert.Equal(t, testReviewerName, plan.agent)
@@ -2787,9 +1437,54 @@ func TestMemoryPlan_AgentScopeDefaultsToSelectedAgent(t *testing.T) {
 func TestMemoryPlan_AgentScopeErrorMentionsSelectedAgentFallback(t *testing.T) {
 	t.Parallel()
 
-	_, err := memoryPlan(cliOptions{memorySearch: "note", memoryScope: "agent"})
+	_, err := memoryPlan(t.Context(), cliOptions{memorySearch: "note", memoryScope: "agent"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--memory-agent or --agent")
+}
+
+func TestMemoryPlanPermissionPolicyDeniesRepoScopeInspection(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+
+	_, err := memoryPlan(ctx, cliOptions{memorySearch: "note", memoryScope: "repo"})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.Contains(t, err.Error(), "memory: authorize repo scope read")
+}
+
+func TestMemoryPlanPermissionPolicyDeniesExplicitRepoScopeInspection(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+
+	_, err := memoryPlan(ctx, cliOptions{memorySearch: "note", memoryRepoPath: t.TempDir()})
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.Contains(t, err.Error(), "memory: authorize repo scope read")
+}
+
+func TestParseMemoryPurgeSpecPermissionPolicyDeniesRepoSelectorInspection(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+
+	_, err := parseMemoryPurgeSpec(ctx, "repo:"+t.TempDir())
+
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.read.deny")
+	assert.Contains(t, err.Error(), "memory: authorize purge repo read")
 }
 
 func TestNormalizeMemoryScope_AcceptsIssueVocabularyAliases(t *testing.T) {
@@ -2818,7 +1513,7 @@ func TestMemoryPlan_RejectsIncompleteExplicitScopes(t *testing.T) {
 		{memoryScope: "unknown"},
 	}
 	for _, opts := range tests {
-		_, err := memoryPlan(opts)
+		_, err := memoryPlan(t.Context(), opts)
 		require.Error(t, err)
 	}
 }
@@ -2826,7 +1521,7 @@ func TestMemoryPlan_RejectsIncompleteExplicitScopes(t *testing.T) {
 func TestMemoryPlan_RejectsInvertedDateRange(t *testing.T) {
 	t.Parallel()
 
-	_, err := memoryPlan(cliOptions{
+	_, err := memoryPlan(t.Context(), cliOptions{
 		memorySearch: "note",
 		memorySince:  "2026-05-03",
 		memoryUntil:  "2026-05-01",
@@ -2850,7 +1545,7 @@ func TestRunMemoryCommandReportsCorpusAndRedactsSnippet(t *testing.T) {
 	require.NoError(t, store.Save(saved))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(store, cliOptions{memorySearch: "rotate oauth", memoryRepoPath: dir})
+		return runMemoryCommand(t.Context(), store, cliOptions{memorySearch: "rotate oauth", memoryRepoPath: dir})
 	})
 
 	assert.Contains(t, output, "Searched corpus:")
@@ -2869,7 +1564,7 @@ func TestRunMemoryCommandReportsSessionIDInCorpus(t *testing.T) {
 	require.NoError(t, store.Save(saved))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(store, cliOptions{memorySearch: "oauth", memorySessionRef: "demo-session"})
+		return runMemoryCommand(t.Context(), store, cliOptions{memorySearch: "oauth", memorySessionRef: "demo-session"})
 	})
 
 	assert.Contains(t, output, "Searched corpus:")
@@ -2892,7 +1587,7 @@ func TestRunMemoryCommandReportsSelectedSessionForEmptyStoredScope(t *testing.T)
 	require.NoError(t, mem.Save(storePath))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "missing-sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "missing-sessions")), cliOptions{
 			memoryStorePath:  storePath,
 			memorySessionRef: "missing",
 			memorySearch:     "oauth",
@@ -2918,7 +1613,7 @@ func TestRunMemoryCommandRedactsLegacyStoreBeforePrinting(t *testing.T) {
 }`), 0o600))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath: storePath,
 			memoryScope:     memoryScopeStore,
 			memorySearch:    "legacy raw token",
@@ -2946,7 +1641,7 @@ func TestRunMemoryCommandAppliesCustomRedactionBeforePrinting(t *testing.T) {
 }`), 0o600))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath:   storePath,
 			memoryScope:       memoryScopeStore,
 			memorySearch:      "customer hidden",
@@ -2981,7 +1676,7 @@ func TestRunMemoryCommandListCorpusRedactsCorpusMetadata(t *testing.T) {
 	require.NoError(t, mem.Save(storePath))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath:   storePath,
 			memoryListCorpus:  true,
 			memoryRedactRules: rawStringListFlag{`ACME-[0-9]+`},
@@ -3022,7 +1717,7 @@ func TestRunMemoryCommandListCorpusWithScopeDoesNotLoadSessions(t *testing.T) {
 	require.NoError(t, os.WriteFile(store.Path("malformed-local"), append(malformed, '\n'), 0o600))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(store, cliOptions{
+		return runMemoryCommand(t.Context(), store, cliOptions{
 			memoryStorePath:  storePath,
 			memoryListCorpus: true,
 			memoryRepoPath:   dir,
@@ -3043,7 +1738,7 @@ func TestRunMemoryCommandRedactsStatusStorePath(t *testing.T) {
 
 	storePath := filepath.Join(dir, secret, "memory.json")
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath:   storePath,
 			memoryIndexFiles:  stringListFlag{notePath},
 			memoryRedactRules: rawStringListFlag{`ACME-[0-9]+`},
@@ -3070,7 +1765,7 @@ func TestRunMemoryCommandIndexWithoutSearchRequiresStoreBeforeSessionLoad(t *tes
 		{memoryIndexFiles: stringListFlag{notePath}},
 		{memoryIndexFiles: stringListFlag{notePath}, memoryListCorpus: true},
 	} {
-		err := runMemoryCommand(store, opts)
+		err := runMemoryCommand(t.Context(), store, opts)
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "--memory-store is required")
@@ -3087,7 +1782,7 @@ func TestRunMemoryCommandLowAutonomyBlocksStoreWrites(t *testing.T) {
 	require.NoError(t, os.WriteFile(notePath, []byte("OAuth callback notes\n"), 0o600))
 
 	storePath := filepath.Join(dir, "memory.json")
-	err := runMemoryCommandWithAutonomy(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+	err := runMemoryCommandWithAutonomy(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 		memoryStorePath:  storePath,
 		memoryIndexFiles: stringListFlag{notePath},
 	}, autonomy.Low)
@@ -3120,7 +1815,7 @@ func TestRunMemoryCommandIndexOnlyWithScopeDoesNotLoadSessions(t *testing.T) {
 	require.NoError(t, os.WriteFile(store.Path("malformed-local"), append(malformed, '\n'), 0o600))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(store, cliOptions{
+		return runMemoryCommand(t.Context(), store, cliOptions{
 			memoryStorePath:  storePath,
 			memoryIndexFiles: stringListFlag{notePath},
 			memoryRepoPath:   dir,
@@ -3149,7 +1844,7 @@ func TestRunMemoryCommandIndexOnlyReportsNewIndexCount(t *testing.T) {
 	require.NoError(t, mem.Save(storePath))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath:  storePath,
 			memoryIndexFiles: stringListFlag{notePath},
 		})
@@ -3184,7 +1879,7 @@ func TestRunMemoryCommandSearchIncludesExplicitIndexFilesWithStore(t *testing.T)
 	require.NoError(t, mem.Save(storePath))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(repoDir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(repoDir, "sessions")), cliOptions{
 			memoryStorePath:  storePath,
 			memoryIndexFiles: stringListFlag{notePath},
 			memoryRepoPath:   repoDir,
@@ -3212,7 +1907,7 @@ func TestRunMemoryCommandRedactsErrorMessages(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(storePath), 0o750))
 	require.NoError(t, os.WriteFile(storePath, []byte("{not-json"), 0o600))
 
-	err := runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+	err := runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 		memoryStorePath:   storePath,
 		memorySearch:      "oauth",
 		memoryRedactRules: rawStringListFlag{`ACME-[0-9]+`},
@@ -3228,7 +1923,7 @@ func TestRunMemoryCommandRedactsInvalidRedactionRuleErrors(t *testing.T) {
 
 	const secret = "sk-1234567890abcdefSECRET"
 
-	err := runMemoryCommand(session.NewStore(filepath.Join(t.TempDir(), "sessions")), cliOptions{
+	err := runMemoryCommand(t.Context(), session.NewStore(filepath.Join(t.TempDir(), "sessions")), cliOptions{
 		memorySearch:      "oauth",
 		memoryRedactRules: rawStringListFlag{"(" + secret},
 	})
@@ -3271,7 +1966,7 @@ func TestRunMemoryCommandRebuildListCorpusAndPurge(t *testing.T) {
 	require.NoError(t, store.Save(saved))
 
 	rebuildOutput := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(store, cliOptions{
+		return runMemoryCommand(t.Context(), store, cliOptions{
 			memoryStorePath: storePath,
 			memoryRebuild:   true,
 			memoryRepoPath:  dir,
@@ -3291,14 +1986,14 @@ func TestRunMemoryCommandRebuildListCorpusAndPurge(t *testing.T) {
 	require.NotEmpty(t, loaded.Documents)
 
 	listOutput := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(store, cliOptions{memoryStorePath: storePath, memoryListCorpus: true})
+		return runMemoryCommand(t.Context(), store, cliOptions{memoryStorePath: storePath, memoryListCorpus: true})
 	})
 	assert.Contains(t, listOutput, "Memory corpus:")
 	assert.Contains(t, listOutput, "scope=repo")
 	assert.Contains(t, listOutput, "created_from=sessions")
 
 	purgeOutput := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(store, cliOptions{memoryStorePath: storePath, memoryPurgeSpec: "session:demo"})
+		return runMemoryCommand(t.Context(), store, cliOptions{memoryStorePath: storePath, memoryPurgeSpec: "session:demo"})
 	})
 	assert.Contains(t, purgeOutput, "Purged")
 
@@ -3314,7 +2009,7 @@ func TestRunMemoryCommandRebuildPersistsEmptySelectedCorpus(t *testing.T) {
 	storePath := filepath.Join(dir, "memory.json")
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath: storePath,
 			memoryRebuild:   true,
 			memoryRepoPath:  dir,
@@ -3368,7 +2063,7 @@ func TestRunMemoryCommandPurgeTagRepoAndAllSelectors(t *testing.T) {
 	require.NoError(t, mem.Save(storePath))
 
 	tagOutput := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath: storePath,
 			memoryPurgeSpec: "tag:auth",
 		})
@@ -3381,7 +2076,7 @@ func TestRunMemoryCommandPurgeTagRepoAndAllSelectors(t *testing.T) {
 	assert.NotContains(t, loaded.Corpus.SessionIDs, "auth")
 
 	repoOutput := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath: storePath,
 			memoryPurgeSpec: "repo:" + repoDocs,
 		})
@@ -3394,7 +2089,7 @@ func TestRunMemoryCommandPurgeTagRepoAndAllSelectors(t *testing.T) {
 	assert.Equal(t, []string{"misc"}, loaded.Corpus.SessionIDs)
 
 	allOutput := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath: storePath,
 			memoryPurgeSpec: "all",
 		})
@@ -3424,7 +2119,7 @@ func TestRunMemoryCommandPurgeRepoNormalizesSubdirToGitRoot(t *testing.T) {
 	require.NoError(t, mem.Save(storePath))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath: storePath,
 			memoryPurgeSpec: "repo:" + subdir,
 		})
@@ -3455,7 +2150,7 @@ func TestRunMemoryCommandPurgeRepoMatchesLegacyFileIDPath(t *testing.T) {
 	require.NoError(t, os.WriteFile(storePath, append(legacyStore, '\n'), 0o600))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath: storePath,
 			memoryPurgeSpec: "repo:" + dir,
 		})
@@ -3470,7 +2165,7 @@ func TestRunMemoryCommandPurgeRepoMatchesLegacyFileIDPath(t *testing.T) {
 func TestRunMemoryCommandRejectsPurgeWithRebuild(t *testing.T) {
 	t.Parallel()
 
-	err := runMemoryCommand(session.NewStore(filepath.Join(t.TempDir(), "sessions")), cliOptions{
+	err := runMemoryCommand(t.Context(), session.NewStore(filepath.Join(t.TempDir(), "sessions")), cliOptions{
 		memoryStorePath: filepath.Join(t.TempDir(), "memory.json"),
 		memoryPurgeSpec: "session:demo",
 		memoryRebuild:   true,
@@ -3509,7 +2204,7 @@ func TestRunMemoryCommandAppliesRetentionToPersistedStore(t *testing.T) {
 	require.NoError(t, mem.Save(storePath))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath:     storePath,
 			memoryRetentionDays: positiveIntFlag{value: 30, set: true},
 		})
@@ -3544,7 +2239,7 @@ func TestRunMemoryCommandRetentionPersistsEmptyCorpusPolicy(t *testing.T) {
 	require.NoError(t, mem.Save(storePath))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath:     storePath,
 			memoryRetentionDays: positiveIntFlag{value: 30, set: true},
 		})
@@ -3589,7 +2284,7 @@ func TestRunMemoryCommandCombinesPurgeAndRetention(t *testing.T) {
 	require.NoError(t, mem.Save(storePath))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
 			memoryStorePath:     storePath,
 			memoryPurgeSpec:     "tag:auth",
 			memoryRetentionDays: positiveIntFlag{value: 30, set: true},
@@ -3626,7 +2321,7 @@ func TestRunMemoryCommandPurgeWithExplicitScopeDoesNotReindexSession(t *testing.
 	require.NoError(t, store.Save(saved))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(store, cliOptions{
+		return runMemoryCommand(t.Context(), store, cliOptions{
 			memoryStorePath:     storePath,
 			memoryPurgeSpec:     "session:local",
 			memorySessionRef:    localMemorySessionID,
@@ -3679,7 +2374,7 @@ func TestRunMemoryCommandRetentionOnlyDoesNotIndexOrConstrainSessions(t *testing
 	require.NoError(t, store.Save(local))
 
 	output := captureMemoryStdout(t, func() error {
-		return runMemoryCommand(store, cliOptions{
+		return runMemoryCommand(t.Context(), store, cliOptions{
 			memoryStorePath:     storePath,
 			memoryRepoPath:      dir,
 			memoryRetentionDays: positiveIntFlag{value: 30, set: true},
@@ -3709,7 +2404,7 @@ func TestBuildMemoryStore_RetentionAppliesAfterSessionIndexing(t *testing.T) {
 	}
 	writeMemorySessionFixture(t, store, old)
 
-	mem, err := buildMemoryStore(store, cliOptions{
+	mem, err := buildMemoryStore(t.Context(), store, cliOptions{
 		memorySessionRef:    "old-session",
 		memoryRetentionDays: positiveIntFlag{value: 30, set: true},
 	})
@@ -3728,32 +2423,6 @@ func writeMemorySessionFixture(t *testing.T, store *session.Store, saved session
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(store.Dir(), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(store.Dir(), saved.ID+".json"), data, 0o600))
-}
-
-type staticAgentMemoryEmbeddingVectorizer struct{}
-
-func (staticAgentMemoryEmbeddingVectorizer) Vectorize(text string) (vector.Vector, error) {
-	lower := strings.ToLower(text)
-	if strings.Contains(lower, "semantic") || strings.Contains(lower, "retrieval") || strings.Contains(lower, "rag") {
-		return vector.Vector{1, 0}, nil
-	}
-
-	return vector.Vector{0, 1}, nil
-}
-
-func (staticAgentMemoryEmbeddingVectorizer) Spec(dimensions int) vector.VectorizerSpec {
-	if dimensions <= 0 {
-		dimensions = 2
-	}
-
-	return vector.VectorizerSpec{
-		ID:            "test-agent-memory-embedding",
-		Provider:      "test",
-		Model:         "agent-memory-test-embed",
-		Normalization: "test-normalization-v1",
-		Version:       "test-version-v1",
-		Dimensions:    dimensions,
-	}
 }
 
 func findMemoryDocumentByPath(store *memory.Store, path string) *memory.Document {
@@ -3787,4 +2456,58 @@ func captureMemoryStdout(t *testing.T, fn func() error) string {
 	require.NoError(t, runErr)
 
 	return strings.TrimSpace(string(out))
+}
+
+func writeSourceVectorIndex(t *testing.T, indexPath string, sources []vector.Source) {
+	t.Helper()
+
+	vectorizer, err := vector.NewTextVectorizer(16)
+	require.NoError(t, err)
+
+	refresh, err := vector.RefreshSourceIndex(context.TODO(), vector.SourceIndexOptions{
+		IndexPath:          indexPath,
+		Sources:            sources,
+		Vectorizer:         vectorizer,
+		VectorizerMetadata: vectorizer.Metadata(),
+		Chunk:              vector.ChunkOptions{MaxRunes: 200, OverlapRunes: 20},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, refresh.Index)
+	require.FileExists(t, indexPath)
+}
+
+func sourceMetadataKinds(sources []vector.SourceMetadata) []string {
+	out := make([]string, 0, len(sources))
+	for _, source := range sources {
+		out = append(out, source.Kind)
+	}
+
+	return out
+}
+
+func newAgentMemoryEmbeddingTestServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Input any    `json:"input"`
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+
+			return
+		}
+
+		text := strings.ToLower(fmt.Sprint(req.Input))
+		embedding := []float64{0, 1}
+		if strings.Contains(text, "semantic") || strings.Contains(text, "retrieval") || strings.Contains(text, "rag") {
+			embedding = []float64{1, 0}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"embeddings": [][]float64{embedding},
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}))
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -61,6 +62,9 @@ sleep 2
 	assert.Equal(t, "symphony.codex_app_server", records[0].Caller)
 	assert.Equal(t, issue.ID, records[0].IssueID)
 	assert.Equal(t, issue.Identifier, records[0].IssueIdentifier)
+	assert.Contains(t, records[0].OperationKinds, string(permission.OperationWrite))
+	assert.Contains(t, records[0].OperationKinds, string(permission.OperationNetwork))
+	assert.Contains(t, records[0].OperationKinds, string(permission.OperationCredentialAccess))
 
 	threadID, err := client.StartThread(context.Background(), cfg, issue, dir)
 	require.NoError(t, err)
@@ -75,7 +79,124 @@ sleep 2
 	assert.Contains(t, eventNames(events), "notification")
 }
 
-func TestAppServerClient_MediumAutonomyDeniesPublishCommandApproval(t *testing.T) {
+func TestStartAppServer_PermissionPolicyDeniesWorkspaceWrite(t *testing.T) {
+	dir := t.TempDir()
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	t.Setenv(shell.EnvAuditDir, auditDir)
+
+	marker := filepath.Join(dir, "started")
+	script := filepath.Join(dir, "fake-app-server.sh")
+	require.NoError(t, os.WriteFile(script, []byte(`#!/usr/bin/env bash
+printf started > started
+sleep 2
+`), 0o700))
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	client, err := StartAppServer(ctx, CodexConfig{Command: script}, dir, nil)
+	require.Error(t, err)
+	require.Nil(t, client)
+	require.True(t, permission.ErrDenied(err))
+	require.Contains(t, err.Error(), "permission.write.deny")
+	require.NoFileExists(t, marker)
+
+	records := readAppServerAuditRecords(t, auditDir)
+	require.NotEmpty(t, records)
+	assert.Equal(t, "denied", records[0].Decision)
+	assert.Equal(t, "permission.write.deny", records[0].PermissionRule)
+	assert.Contains(t, records[0].OperationKinds, string(permission.OperationWrite))
+}
+
+func TestAppServerClient_ApprovalRequestsUsePermissionPolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		method string
+		params string
+		deny   permission.OperationKind
+		rule   string
+	}{
+		{
+			name:   "command network",
+			method: "item/commandExecution/requestApproval",
+			params: `{"item":{"command":"curl https://example.invalid > out"}}`,
+			deny:   permission.OperationNetwork,
+			rule:   "permission.network.deny",
+		},
+		{
+			name:   "file change write",
+			method: "applyPatchApproval",
+			params: `{"changes":[{"path":"file.txt","kind":"modify"}]}`,
+			deny:   permission.OperationWrite,
+			rule:   "permission.write.deny",
+		},
+		{
+			name:   "file change delete",
+			method: "applyPatchApproval",
+			params: `{"changes":[{"path":"file.txt","kind":"delete"}]}`,
+			deny:   permission.OperationMergeDelete,
+			rule:   "permission.merge_delete.deny",
+		},
+		{
+			name:   "session network permission",
+			method: "item/permissions/requestApproval",
+			params: `{"permissions":{"network":{"enabled":true}}}`,
+			deny:   permission.OperationNetwork,
+			rule:   "permission.network.deny",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			policy := permission.DefaultPolicy()
+			policy.SetMode(tt.deny, permission.ModeDeny)
+
+			auditDir := t.TempDir()
+			ctx := permission.ContextWithPolicy(t.Context(), &policy)
+			ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+			stdin := &appServerTestStdin{}
+			var events []CodexEvent
+			client := &AppServerClient{
+				stdin:         stdin,
+				workspacePath: t.TempDir(),
+				emit: func(event CodexEvent) {
+					events = append(events, event)
+				},
+			}
+
+			err := client.handleServerRequest(ctx, appServerMessage{
+				ID:     1,
+				Method: tt.method,
+				Params: rawTestJSON(tt.params),
+			})
+
+			require.Error(t, err)
+			require.True(t, permission.ErrDenied(err))
+			assert.Contains(t, err.Error(), tt.rule)
+			require.Len(t, events, 1)
+			assert.Equal(t, "approval_denied", events[0].Event)
+			assert.Contains(t, events[0].Message, tt.rule)
+
+			var response map[string]any
+			require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(stdin.String())), &response))
+			require.Contains(t, response, "error")
+			assert.Contains(t, stdin.String(), tt.rule)
+
+			auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+			require.NoError(t, readErr)
+			assert.Contains(t, string(auditData), tt.rule)
+			assert.Contains(t, string(auditData), "symphony.codex_app_server")
+		})
+	}
+}
+
+func TestAppServerClient_MediumAutonomyDeniesGitPushApproval(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -673,6 +794,14 @@ func TestAppServerClient_RequiresActiveContext(t *testing.T) {
 
 func rawTestJSON(value string) json.RawMessage {
 	return json.RawMessage(value)
+}
+
+type appServerTestStdin struct {
+	strings.Builder
+}
+
+func (w *appServerTestStdin) Close() error {
+	return nil
 }
 
 func TestAppServerClient_RejectsCanceledContextBeforeProtocolWrite(t *testing.T) {

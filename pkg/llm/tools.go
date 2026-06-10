@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 // BashTool returns the standard tool definition that lets an LLM execute
@@ -140,7 +141,7 @@ const (
 // allows ordinary read/build/test commands, denies obvious system-destructive
 // commands, and requires confirmation for privileged or dependency-changing
 // commands.
-func BashToolPolicy(_ context.Context, call ToolCall, _ AgentLoopBudgetSnapshot) ToolPolicyDecision {
+func BashToolPolicy(ctx context.Context, call ToolCall, _ AgentLoopBudgetSnapshot) ToolPolicyDecision {
 	if call.Name != bashToolName {
 		return ToolPolicyDecision{
 			Verdict:     ToolPolicyDeny,
@@ -164,6 +165,10 @@ func BashToolPolicy(_ context.Context, call ToolCall, _ AgentLoopBudgetSnapshot)
 			Reason:      "bash command contains a NUL byte",
 			MatchedRule: "bash.deny.nul_byte",
 		}
+	}
+
+	if decision, ok := bashToolPermissionPolicyDecision(ctx, command); ok {
+		return decision
 	}
 
 	if reason, rule := deniedBashCommand(command); rule != "" {
@@ -1565,6 +1570,61 @@ func classifyGitSwitchAction(args []string) (bashAutonomyFinding, bool) {
 	}
 
 	return bashAutonomyFinding{action: autonomy.ActionMutatingShell, rule: "autonomy.deny.mutating_shell", detail: "git switch"}, true
+}
+
+func bashToolPermissionPolicyDecision(ctx context.Context, command string) (ToolPolicyDecision, bool) {
+	policy := permission.PolicyFromContext(ctx)
+	if policy == nil {
+		return ToolPolicyDecision{}, false
+	}
+
+	ops := permission.CommandOperations("bash", []string{"-lc", command}, command, "", "llm.bash_tool")
+	if !bashToolNeedsPermissionPrecheck(ctx, policy, ops) {
+		return ToolPolicyDecision{}, false
+	}
+
+	decision := permission.Evaluate(ctx, policy, permission.Request{
+		Action:     command,
+		Source:     "llm.bash_tool",
+		Target:     "bash",
+		Operations: ops,
+	})
+	if decision.Allowed {
+		return ToolPolicyDecision{}, false
+	}
+
+	return ToolPolicyDecision{
+		Verdict:     ToolPolicyDeny,
+		Reason:      decision.Reason,
+		MatchedRule: decision.Rule,
+	}, true
+}
+
+func bashToolNeedsPermissionPrecheck(ctx context.Context, policy *permission.Policy, ops []permission.Operation) bool {
+	if policy == nil {
+		return false
+	}
+
+	for _, op := range ops {
+		switch policy.ModeFor(op.Kind) {
+		case permission.ModeDeny:
+			if bashToolReadOnlyExecutionAllowed(policy, ops, op.Kind) {
+				continue
+			}
+
+			return true
+		case permission.ModeAsk:
+			if permission.ConfirmerFromContext(ctx) == nil {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func bashToolReadOnlyExecutionAllowed(policy *permission.Policy, ops []permission.Operation, denied permission.OperationKind) bool {
+	return denied == permission.OperationExecute && permission.AllowsReadOnlyExecution(*policy, ops)
 }
 
 func deniedBashCommand(command string) (reason, rule string) {

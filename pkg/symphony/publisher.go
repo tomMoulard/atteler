@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/shell"
 )
@@ -149,16 +150,16 @@ func PreparePullRequestReworkWorkspace(ctx context.Context, cfg Config, pullRequ
 	if normalizeState(cfg.Tracker.Kind) != trackerKindGitHub {
 		return nil
 	}
-	if err := requireAutonomyForPublish(cfg.Autonomy); err != nil {
-		return err
-	}
-
-	hasGit, err := workspaceHasGitCheckout(workspace)
+	hasGit, err := workspaceHasGitCheckout(ctx, workspace)
 	if err != nil {
 		return err
 	}
 	if !hasGit {
 		return fmt.Errorf("publish: workspace %s is not a git checkout", workspace.Path)
+	}
+
+	if err := requireAutonomyForPublish(cfg.Autonomy); err != nil {
+		return err
 	}
 
 	publisher := &githubPublisher{
@@ -172,7 +173,7 @@ func PreparePullRequestReworkWorkspace(ctx context.Context, cfg Config, pullRequ
 }
 
 func ensureGitWorkspaceForBranchUpdate(ctx context.Context, cfg Config, issue Issue, workspace Workspace) error {
-	hasGit, err := workspaceHasGitCheckout(workspace)
+	hasGit, err := workspaceHasGitCheckout(ctx, workspace)
 	if err == nil && hasGit {
 		return nil
 	}
@@ -188,7 +189,7 @@ func ensureGitWorkspaceForBranchUpdate(ctx context.Context, cfg Config, issue Is
 		return fmt.Errorf("publish: before_run hook failed before branch update: %w", hookErr)
 	}
 
-	hasGit, err = workspaceHasGitCheckout(workspace)
+	hasGit, err = workspaceHasGitCheckout(ctx, workspace)
 	if err != nil {
 		return err
 	}
@@ -199,8 +200,12 @@ func ensureGitWorkspaceForBranchUpdate(ctx context.Context, cfg Config, issue Is
 	return nil
 }
 
-func workspaceHasGitCheckout(workspace Workspace) (bool, error) {
+func workspaceHasGitCheckout(ctx context.Context, workspace Workspace) (bool, error) {
 	gitPath := filepath.Join(workspace.Path, ".git")
+	if err := authorizePublishPermission(ctx, "inspect git checkout", gitPath, Issue{}, permission.OperationRead); err != nil {
+		return false, err
+	}
+
 	_, err := os.Stat(gitPath)
 	if err == nil {
 		return true, nil
@@ -628,6 +633,17 @@ func (p *githubPublisher) commitWithMessage(ctx context.Context, dir, message st
 		return "", addErr
 	}
 
+	if err := authorizePublishPermission(
+		ctx,
+		"prepare temporary git commit message",
+		"temporary git commit message file",
+		Issue{},
+		permission.OperationWrite,
+		permission.OperationMergeDelete,
+	); err != nil {
+		return "", err
+	}
+
 	messageFile, err := os.CreateTemp("", "symphony-commit-*.txt")
 	if err != nil {
 		return "", fmt.Errorf("publish: create commit message file: %w", err)
@@ -899,6 +915,10 @@ func (p *githubPublisher) rebaseInProgress(ctx context.Context, dir string) (boo
 			path = filepath.Join(dir, path)
 		}
 
+		if err := authorizePublishPermission(ctx, "inspect rebase state", path, Issue{}, permission.OperationRead); err != nil {
+			return false, err
+		}
+
 		if _, statErr := os.Stat(path); statErr == nil {
 			return true, nil
 		} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -924,6 +944,10 @@ func (p *githubPublisher) pushForceWithLease(ctx context.Context, dir, branch st
 }
 
 func (p *githubPublisher) gitWithAuth(ctx context.Context, dir string, args ...string) error {
+	if err := authorizeGitWithAuthPermission(ctx, args); err != nil {
+		return err
+	}
+
 	askPassDir, err := os.MkdirTemp("", "symphony-git-askpass-*")
 	if err != nil {
 		return fmt.Errorf("publish: create git askpass directory: %w", err)
@@ -951,6 +975,88 @@ esac
 	}
 	_, err = p.git(ctx, dir, env, args...)
 	return err
+}
+
+func authorizeGitWithAuthPermission(ctx context.Context, args []string) error {
+	action := "prepare GitHub git authentication"
+	target := strings.TrimSpace("git " + strings.Join(args, " "))
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: action,
+		Source: "symphony.git.auth",
+		Target: target,
+		Operations: []permission.Operation{
+			{
+				Kind:   permission.OperationWrite,
+				Action: "write temporary git askpass helper",
+				Source: "symphony.git.auth",
+				Target: "temporary git askpass helper",
+			},
+			{
+				Kind:   permission.OperationCredentialAccess,
+				Action: action,
+				Source: "symphony.git.auth",
+				Target: "GITHUB_TOKEN",
+			},
+			{
+				Kind:   permission.OperationNetwork,
+				Action: "run authenticated git network command",
+				Source: "symphony.git.auth",
+				Target: target,
+			},
+			{
+				Kind:   permission.OperationMergeDelete,
+				Action: "remove temporary git askpass helper",
+				Source: "symphony.git.auth",
+				Target: "temporary git askpass helper",
+			},
+		},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
+}
+
+func authorizePublishPermission(
+	ctx context.Context,
+	action, target string,
+	issue Issue,
+	kinds ...permission.OperationKind,
+) error {
+	ops := make([]permission.Operation, 0, len(kinds))
+	for _, kind := range kinds {
+		if kind == "" {
+			continue
+		}
+
+		op := permission.Operation{
+			Kind:   kind,
+			Action: action,
+			Source: "symphony.publish",
+			Target: target,
+		}
+		if issue.ID != "" || issue.Identifier != "" {
+			op.Metadata = map[string]string{
+				"issue_id":         issue.ID,
+				"issue_identifier": issue.Identifier,
+			}
+		}
+
+		ops = append(ops, op)
+	}
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Operations: ops,
+		Action:     action,
+		Source:     "symphony.publish",
+		Target:     target,
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
 }
 
 func (p *githubPublisher) createPullRequest(ctx context.Context, issue Issue, branch string, report VerificationReport, draftDueToFailedValidation bool, changedFiles []string) (GitHubPullRequest, bool, error) {

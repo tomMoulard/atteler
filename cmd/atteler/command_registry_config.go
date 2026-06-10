@@ -14,12 +14,10 @@ func providerlessConfigAgentPluginCommands() []command {
 		// Tier: providerless config -- agents, plugins, prompt-complete
 		// ---------------------------------------------------------------
 		{
-			name:  "state-diagnostics",
-			tier:  tierProviderlessConfig,
-			match: func(o cliOptions) bool { return o.stateDiagnostics },
-			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
-				return printStateDiagnostics(o, s)
-			},
+			name:                  "state-diagnostics",
+			tier:                  tierProviderlessConfig,
+			match:                 func(o cliOptions) bool { return o.stateDiagnostics },
+			runProviderlessConfig: printStateDiagnostics,
 		},
 		{
 			name:  "list-agents",
@@ -58,6 +56,10 @@ func providerlessConfigAgentPluginCommands() []command {
 			match: func(o cliOptions) bool { return o.promptCompleteInput != "" },
 			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
 				if o.sessionRef != "" {
+					if err := authorizeSessionStoreRead(ctx, s.sessionStore, o.sessionRef, "load session for prompt completion"); err != nil {
+						return fmt.Errorf("load session for prompt completion: %w", err)
+					}
+
 					saved, err := s.sessionStore.Load(o.sessionRef)
 					if err != nil {
 						return fmt.Errorf("load session for prompt completion: %w", err)
@@ -80,12 +82,13 @@ func providerlessConfigAgentPluginCommands() []command {
 			name:  "feedback-rollback",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.feedbackRollbackConfig != "" },
-			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
-				if !autonomy.Normalize(s.autonomy).Allows(autonomy.ActionFileWrite) {
-					return fmt.Errorf("%s", autonomy.DenialMessage(s.autonomy, autonomy.ActionFileWrite, "--feedback-rollback"))
+			runProviderlessConfig: func(ctx context.Context, o cliOptions, state appState) error {
+				if !autonomy.Normalize(state.autonomy).Allows(autonomy.ActionFileWrite) {
+					return fmt.Errorf("%s", autonomy.DenialMessage(state.autonomy, autonomy.ActionFileWrite, "--feedback-rollback"))
 				}
 
 				return rollbackFeedbackGuidance(
+					ctx,
 					o.feedbackRollbackConfig,
 					o.feedbackHistoryPath,
 					o.feedbackRollbackAgent,
@@ -98,12 +101,13 @@ func providerlessConfigAgentPluginCommands() []command {
 			name:  "feedback-approve",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.feedbackApproveConfig != "" },
-			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
-				if !autonomy.Normalize(s.autonomy).Allows(autonomy.ActionFileWrite) {
-					return fmt.Errorf("%s", autonomy.DenialMessage(s.autonomy, autonomy.ActionFileWrite, "--feedback-approve"))
+			runProviderlessConfig: func(ctx context.Context, o cliOptions, state appState) error {
+				if !autonomy.Normalize(state.autonomy).Allows(autonomy.ActionFileWrite) {
+					return fmt.Errorf("%s", autonomy.DenialMessage(state.autonomy, autonomy.ActionFileWrite, "--feedback-approve"))
 				}
 
 				return approveFeedbackGuidance(
+					ctx,
 					o.feedbackApproveConfig,
 					o.feedbackHistoryPath,
 					o.feedbackApproveAgent,
@@ -115,16 +119,16 @@ func providerlessConfigAgentPluginCommands() []command {
 			name:  "list-plugins",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.listPlugins },
-			runProviderlessConfig: func(_ context.Context, _ cliOptions, s appState) error {
-				return listPlugins(s.pluginPaths)
+			runProviderlessConfig: func(ctx context.Context, _ cliOptions, s appState) error {
+				return listPlugins(ctx, s.pluginPaths)
 			},
 		},
 		{
 			name:  "describe-plugin",
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.describePluginName != "" },
-			runProviderlessConfig: func(_ context.Context, o cliOptions, s appState) error {
-				return describePlugin(s.pluginPaths, o.describePluginName)
+			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
+				return describePlugin(ctx, s.pluginPaths, o.describePluginName)
 			},
 		},
 		{
@@ -140,6 +144,7 @@ func providerlessConfigAgentPluginCommands() []command {
 					ctx,
 					s.pluginPaths,
 					s.pluginPolicy,
+					s.permissionPolicy,
 					o.runPluginTarget,
 					o.pluginEntrypoint,
 					o.pluginDryRun,

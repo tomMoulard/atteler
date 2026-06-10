@@ -16,11 +16,13 @@ import (
 	"github.com/tommoulard/atteler/pkg/autonomy"
 	atteval "github.com/tommoulard/atteler/pkg/eval"
 	"github.com/tommoulard/atteler/pkg/llm"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/watch"
 )
 
 func recordFailure(
+	ctx context.Context,
 	store *session.Store,
 	sessionState session.Session,
 	approach string,
@@ -28,7 +30,7 @@ func recordFailure(
 	commit string,
 	agentName string,
 ) error {
-	return recordFailureDetails(store, sessionState, session.NegativeKnowledge{
+	return recordFailureDetails(ctx, store, sessionState, session.NegativeKnowledge{
 		Approach: approach,
 		Reason:   reason,
 		Commit:   commit,
@@ -37,12 +39,17 @@ func recordFailure(
 }
 
 func recordFailureDetails(
+	ctx context.Context,
 	store *session.Store,
 	sessionState session.Session,
 	failure session.NegativeKnowledge,
 ) error {
 	if !sessionState.RecordNegativeKnowledgeDetails(failure) {
 		return errors.New("record failure: approach and reason are required, or this failure is already recorded")
+	}
+
+	if err := authorizeSessionStoreWrite(ctx, store, sessionState, "record session failure"); err != nil {
+		return fmt.Errorf("record failure: %w", err)
 	}
 
 	if err := store.Save(sessionState); err != nil {
@@ -55,6 +62,7 @@ func recordFailureDetails(
 }
 
 func recordEvaluation(
+	ctx context.Context,
 	store *session.Store,
 	sessionState session.Session,
 	agentName string,
@@ -63,7 +71,7 @@ func recordEvaluation(
 	reference string,
 	score int,
 ) error {
-	return recordEvaluationDetails(store, sessionState, session.AgentEvaluation{
+	return recordEvaluationDetails(ctx, store, sessionState, session.AgentEvaluation{
 		Agent:     agentName,
 		Outcome:   outcome,
 		Notes:     notes,
@@ -73,6 +81,7 @@ func recordEvaluation(
 }
 
 func recordEvaluationDetails(
+	ctx context.Context,
 	store *session.Store,
 	sessionState session.Session,
 	evaluation session.AgentEvaluation,
@@ -83,6 +92,10 @@ func recordEvaluationDetails(
 
 	if !sessionState.RecordEvaluationDetails(evaluation) {
 		return errors.New("record evaluation: agent, outcome, and valid evaluation metadata are required")
+	}
+
+	if err := authorizeSessionStoreWrite(ctx, store, sessionState, "record session evaluation"); err != nil {
+		return fmt.Errorf("record evaluation: %w", err)
 	}
 
 	if err := store.Save(sessionState); err != nil {
@@ -527,6 +540,10 @@ func mergeArtifacts(ctx context.Context, state appState, outputPath, outputForma
 		maxBytes = int(watch.DefaultLargeFileBytes)
 	}
 
+	if err := authorizeReadPermission(ctx, "read merged artifacts", "atteler.artifacts.merge", state.cwd); err != nil {
+		return fmt.Errorf("merge artifacts: %w", err)
+	}
+
 	result, err := artifactmerge.Merge(state.cwd, state.sessionState.Artifacts, int64(maxBytes))
 	if err != nil {
 		return fmt.Errorf("merge artifacts: %w", err)
@@ -546,13 +563,17 @@ func mergeArtifacts(ctx context.Context, state appState, outputPath, outputForma
 	}
 
 	if strings.TrimSpace(outputPath) == "-" {
-		if err := persistMergedArtifactConsumption(state.sessionStore, &state.sessionState, result.Entries, consumedAt); err != nil {
+		if err := persistMergedArtifactConsumption(ctx, state.sessionStore, &state.sessionState, result.Entries, consumedAt); err != nil {
 			return err
 		}
 
 		fmt.Print(string(data))
 
 		return nil
+	}
+
+	if err := authorizeWritePermission(ctx, "write merged artifacts", "atteler.artifacts.merge", outputPath); err != nil {
+		return fmt.Errorf("merge artifacts: %w", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o750); err != nil {
@@ -565,7 +586,7 @@ func mergeArtifacts(ctx context.Context, state appState, outputPath, outputForma
 
 	emitFileWriteWarning(ctx, state.hookRunner, state.sessionState, outputPath, state.selectedAgent, "merged-artifacts")
 
-	if err := persistMergedArtifactConsumption(state.sessionStore, &state.sessionState, result.Entries, consumedAt); err != nil {
+	if err := persistMergedArtifactConsumption(ctx, state.sessionStore, &state.sessionState, result.Entries, consumedAt); err != nil {
 		return err
 	}
 
@@ -574,9 +595,19 @@ func mergeArtifacts(ctx context.Context, state appState, outputPath, outputForma
 	return nil
 }
 
-func persistMergedArtifactConsumption(store *session.Store, sessionState *session.Session, entries []artifactmerge.Entry, consumedAt time.Time) error {
+func persistMergedArtifactConsumption(
+	ctx context.Context,
+	store *session.Store,
+	sessionState *session.Session,
+	entries []artifactmerge.Entry,
+	consumedAt time.Time,
+) error {
 	if store == nil || sessionState == nil || len(entries) == 0 {
 		return nil
+	}
+
+	if err := authorizeSessionStoreWrite(ctx, store, *sessionState, "mark merged artifacts consumed"); err != nil {
+		return fmt.Errorf("merge artifacts: save consumed artifacts: %w", err)
 	}
 
 	paths := make([]string, 0, len(entries))
@@ -611,6 +642,73 @@ func renderMergedArtifactOutput(result artifactmerge.Result, outputFormat string
 	}
 }
 
+func authorizeSessionStoreWrite(ctx context.Context, store *session.Store, sessionState session.Session, action string) error {
+	return authorizeWritePermission(ctx, action, "atteler.session", sessionWriteTarget(store, sessionState))
+}
+
+func authorizeSessionStoreRead(ctx context.Context, store *session.Store, ref, action string) error {
+	return authorizeReadPermission(ctx, action, "atteler.session", sessionReadTarget(store, ref))
+}
+
+func sessionReadTarget(store *session.Store, ref string) string {
+	ref = strings.TrimSpace(ref)
+	if store != nil {
+		if ref != "" {
+			return store.Path(ref)
+		}
+
+		return store.Dir()
+	}
+
+	if ref != "" {
+		return ref
+	}
+
+	return "session store"
+}
+
+func sessionWriteTarget(store *session.Store, sessionState session.Session) string {
+	if store != nil && strings.TrimSpace(sessionState.ID) != "" {
+		return store.Path(sessionState.ID)
+	}
+
+	if strings.TrimSpace(sessionState.ID) != "" {
+		return sessionState.ID
+	}
+
+	return "session store"
+}
+
+func authorizeRecordArtifactSideEffects(ctx context.Context, store *session.Store, sessionState session.Session, artifactPath string) error {
+	writeTarget := sessionWriteTarget(store, sessionState)
+	action := "record session artifact"
+
+	decision := permission.Evaluate(ctx, nil, permission.Request{
+		Action: action,
+		Source: "atteler.artifacts.record",
+		Target: artifactPath,
+		Operations: []permission.Operation{
+			{
+				Kind:   permission.OperationRead,
+				Action: "read session artifact",
+				Source: "atteler.artifacts.record",
+				Target: artifactPath,
+			},
+			{
+				Kind:   permission.OperationWrite,
+				Action: action,
+				Source: "atteler.session",
+				Target: writeTarget,
+			},
+		},
+	})
+	if decision.Allowed {
+		return nil
+	}
+
+	return &permission.Error{Decision: decision}
+}
+
 func recordArtifact(
 	ctx context.Context,
 	store *session.Store,
@@ -624,6 +722,10 @@ func recordArtifact(
 	sourceAgent string,
 	level autonomy.Level,
 ) error {
+	if err := authorizeRecordArtifactSideEffects(ctx, store, sessionState, path); err != nil {
+		return fmt.Errorf("record artifact: %w", err)
+	}
+
 	artifact, err := artifactmerge.CaptureArtifact(ctx, cwd, sessionState, path, kind, summary, sourceAgent, artifactmerge.CaptureOptions{
 		MaxBytes:      watch.DefaultLargeFileBytes,
 		LogicalPath:   logicalPath,

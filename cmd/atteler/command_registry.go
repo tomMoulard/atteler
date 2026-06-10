@@ -117,6 +117,13 @@ func dispatchProviderless(ctx context.Context, opts cliOptions, store *session.S
 		return false, nil
 	}
 
+	permissionPolicy, err := permissionPolicyFromOptions(opts)
+	if err != nil {
+		return true, err
+	}
+
+	ctx = contextWithPermissionPolicyForOptions(ctx, opts, permissionPolicy)
+
 	return true, cmd.runProviderless(ctx, opts, store)
 }
 
@@ -132,6 +139,9 @@ func dispatchProviderlessConfig(ctx context.Context, opts cliOptions, state appS
 	if !handled {
 		return false, nil
 	}
+
+	ctx = contextWithPermissionPolicyForOptions(ctx, opts, state.permissionPolicy)
+	ctx = contextWithPermissionAuditMetadata(ctx, state.sessionStore, state.sessionState, state.selectedAgent, state.selectedModel)
 
 	return true, cmd.runProviderlessConfig(ctx, opts, state)
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	llmevents "github.com/tommoulard/atteler/pkg/events"
+	"github.com/tommoulard/atteler/pkg/permission"
 )
 
 func TestClaudeCodeProvider_Complete(t *testing.T) {
@@ -176,6 +177,81 @@ func TestClaudeCodeProvider_CompleteCoercesThinkingTemperature(t *testing.T) {
 		],
 		"max_tokens": 4096
 	}`, string(gotBody))
+}
+
+func TestClaudeCodeProvider_CompletePermissionDeniesNetworkBeforeActivity(t *testing.T) {
+	t.Parallel()
+
+	var requestCount atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p := &ClaudeCodeProvider{
+		client:  srv.Client(),
+		auth:    newTestClaudeCodeAuth(t, "access-1", "refresh-1", futureExpiry()),
+		baseURL: srv.URL,
+		models:  []string{"claude-opus-4-7"},
+	}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+
+	var log bytes.Buffer
+
+	ctx := llmevents.WithEmitter(context.Background(), llmevents.NewRunnerWithLogger(nil, &log), llmevents.Event{})
+	ctx = permission.ContextWithPolicy(ctx, &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	_, err := p.Complete(ctx, CompleteParams{
+		Model:    "claude-opus-4-7",
+		Messages: []Message{{Role: RoleUser, Content: "say ok"}},
+	})
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.network.deny")
+	assert.Equal(t, int32(0), requestCount.Load())
+	assert.NotContains(t, log.String(), "event:command_execute")
+	assert.NotContains(t, log.String(), "claude_code.messages")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.network.deny")
+}
+
+func TestClaudeCodeProvider_HealthCheckPermissionDeniesCredentialBeforeActivity(t *testing.T) {
+	t.Parallel()
+
+	p := &ClaudeCodeProvider{
+		auth: newTestClaudeCodeAuth(t, "access-1", "refresh-1", futureExpiry()),
+	}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+
+	var log bytes.Buffer
+
+	ctx := llmevents.WithEmitter(context.Background(), llmevents.NewRunnerWithLogger(nil, &log), llmevents.Event{})
+	ctx = permission.ContextWithPolicy(ctx, &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := p.HealthCheck(ctx)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.credential_access.deny")
+	assert.NotContains(t, log.String(), "event:command_execute")
+	assert.NotContains(t, log.String(), "claude_code.auth.check")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.credential_access.deny")
 }
 
 func TestClaudeCodeProvider_RefreshOn401(t *testing.T) {
@@ -569,6 +645,33 @@ func TestPersistRefreshedClaudeCodeFile_RequiresActiveContext(t *testing.T) {
 	auth, err := loadClaudeCodeAuthFromFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "old-access", auth.snapshot())
+}
+
+func TestPersistRefreshedClaudeCodeFile_PermissionPolicyDeniesWrite(t *testing.T) {
+	t.Parallel()
+
+	path := writeClaudeCodeCredentialsFile(t, "old-access", "old-refresh", futureExpiry())
+	persister := &claudeCodeFilePersister{path: path}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationWrite, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := persister.persist(ctx, "new-access", "new-refresh", 9999999999999)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.write.deny")
+
+	auth, loadErr := loadClaudeCodeAuthFromFile(path)
+	require.NoError(t, loadErr)
+	assert.Equal(t, "old-access", auth.snapshot())
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "permission.write.deny")
 }
 
 func TestLoadClaudeCodeAuth_FilePath(t *testing.T) {

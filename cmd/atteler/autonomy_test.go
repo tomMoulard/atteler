@@ -73,7 +73,7 @@ func TestProviderlessStateUsesCLIAutonomyOverride(t *testing.T) {
 
 	var opts cliOptions
 	require.NoError(t, opts.autonomy.Set("low"))
-	state, err := providerlessState(session.NewStore(filepath.Join(t.TempDir(), "sessions")), opts)
+	state, err := providerlessState(context.Background(), session.NewStore(filepath.Join(t.TempDir(), "sessions")), opts)
 
 	require.NoError(t, err)
 	assert.Equal(t, autonomy.Low, state.autonomy)
@@ -84,7 +84,7 @@ func TestProviderlessStateRejectsInvalidAutonomyConfig(t *testing.T) {
 	require.NoError(t, os.WriteFile(configPath, []byte("autonomy: unsafe\n"), 0o600))
 	t.Setenv(appconfig.EnvPath, configPath)
 
-	_, err := providerlessState(session.NewStore(filepath.Join(t.TempDir(), "sessions")), cliOptions{})
+	_, err := providerlessState(context.Background(), session.NewStore(filepath.Join(t.TempDir(), "sessions")), cliOptions{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported autonomy")
@@ -263,7 +263,7 @@ func TestInlineCommandsBlockLowAutonomyWrites(t *testing.T) {
 	require.NoError(t, low.autonomy.Set("low"))
 
 	initPath := filepath.Join(t.TempDir(), "atteler.yaml")
-	handled, err := runInlineConfigCommand(cliOptions{
+	handled, err := runInlineConfigCommand(context.Background(), cliOptions{
 		autonomy:       low.autonomy,
 		initConfigPath: initPath,
 	})
@@ -273,7 +273,7 @@ func TestInlineCommandsBlockLowAutonomyWrites(t *testing.T) {
 	assert.Contains(t, err.Error(), "--init-config")
 	assert.NoFileExists(t, initPath)
 
-	handled, err = runInlineConfigCommand(cliOptions{
+	handled, err = runInlineConfigCommand(context.Background(), cliOptions{
 		autonomy:      low.autonomy,
 		configMigrate: true,
 	})
@@ -312,7 +312,7 @@ func TestRecordHeadlessLoadStateFailureRespectsConfigAutonomy(t *testing.T) {
 	t.Setenv(appconfig.EnvPath, configPath)
 
 	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
-	recordHeadlessLoadStateFailure(store, cliOptions{headless: true, headlessID: "load-failed"}, errors.New("load failed"))
+	recordHeadlessLoadStateFailure(context.Background(), store, cliOptions{headless: true, headlessID: "load-failed"}, errors.New("load failed"))
 
 	assert.NoDirExists(t, filepath.Join(store.Dir(), "headless"))
 }
