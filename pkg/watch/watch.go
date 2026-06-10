@@ -163,7 +163,7 @@ func (s *scanState) visit(filePath string, entry fs.DirEntry, err error) error {
 	}
 
 	if entry.IsDir() {
-		if shouldSkipDir(entry.Name()) && filePath != s.root {
+		if (shouldSkipDir(entry.Name()) || isNestedGitCheckout(filePath)) && filePath != s.root {
 			return filepath.SkipDir
 		}
 
@@ -544,11 +544,21 @@ func (s *scanState) addMissingTests() {
 
 func shouldSkipDir(name string) bool {
 	switch name {
-	case ".atteler", ".cache", ".codex", ".generated", ".git", ".idea", ".omx", ".vscode", "build", "dist", "generated", "node_modules", "vendor":
+	case ".atteler", ".cache", ".claude", ".codex", ".generated", ".git", ".idea", ".omx", ".vscode", "build", "dist", "generated", "node_modules", "vendor":
 		return true
 	default:
 		return false
 	}
+}
+
+// isNestedGitCheckout reports whether dir is itself a git repository or a
+// linked worktree (it contains a .git entry). Files under such directories
+// belong to another checkout and must not be scanned as this repository's
+// code — e.g. agent worktrees created under the repo root.
+func isNestedGitCheckout(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+
+	return err == nil
 }
 
 func relative(root, path string) (string, error) {

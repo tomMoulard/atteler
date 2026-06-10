@@ -700,3 +700,30 @@ func writeFile(t *testing.T, root, path, content string) {
 		t.Fatalf("WriteFile(%q) error = %v", fullPath, err)
 	}
 }
+
+func TestScan_SkipsNestedGitCheckoutsAndClaudeStateDirs(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	offending := "package main\n\nimport \"context\"\n\nvar background = context.Background()\n"
+
+	writeFile(t, root, "tools/checkout/.git", "gitdir: /elsewhere\n")
+	writeFile(t, root, "tools/checkout/cmd/atteler/main.go", offending)
+	writeFile(t, root, ".claude/worktrees/agent-x/cmd/atteler/main.go", offending)
+	writeFile(t, root, "pkg/real/real.go", offending)
+
+	findings, err := Scan(root)
+	require.NoError(t, err)
+
+	var paths []string
+	for _, finding := range findings {
+		paths = append(paths, finding.Path)
+	}
+
+	assert.Contains(t, paths, "pkg/real/real.go")
+
+	for _, path := range paths {
+		assert.NotContains(t, path, "tools/checkout")
+		assert.NotContains(t, path, ".claude")
+	}
+}
