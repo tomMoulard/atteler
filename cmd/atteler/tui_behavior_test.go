@@ -460,6 +460,52 @@ func TestCallLLMWithToolsStreamsCommandStderrBeforeCompletion(t *testing.T) {
 	}
 }
 
+func TestCallLLM_ClosesConfirmRequestChannelOnceWithTools(t *testing.T) {
+	t.Parallel()
+
+	provider := &runOnceCostProvider{
+		name:   "openai",
+		models: []string{"gpt-4.1-mini"},
+		response: &llm.Response{
+			Content:    "done",
+			Provider:   "openai",
+			Model:      "gpt-4.1-mini",
+			StopReason: llm.StopEndTurn,
+		},
+	}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	confirmRequestCh := make(chan agentLoopConfirmRequest, 1)
+	confirmResponseCh := make(chan bool, 1)
+
+	raw := callLLM(context.Background(), registry, llmRequest{
+		eventBase:  events.Event{SessionID: "session-1"},
+		hookRunner: events.NewRunner(nil),
+		model:      "openai/gpt-4.1-mini",
+		messages: []llm.Message{{
+			Role:    llm.RoleUser,
+			Content: "use tools",
+		}},
+		useTools:          true,
+		workingDir:        t.TempDir(),
+		confirmRequestCh:  confirmRequestCh,
+		confirmResponseCh: confirmResponseCh,
+	})()
+
+	msg, ok := raw.(llmResponseMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.err)
+	assert.Equal(t, "done", msg.content)
+
+	select {
+	case _, open := <-confirmRequestCh:
+		assert.False(t, open, "confirm request channel should be closed exactly once")
+	case <-time.After(time.Second):
+		require.FailNow(t, "confirm request channel was not closed")
+	}
+}
+
 func TestFinishLLMResponseDeliversFinalMessage(t *testing.T) {
 	t.Parallel()
 

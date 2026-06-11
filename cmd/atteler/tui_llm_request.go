@@ -130,10 +130,8 @@ func callLLMWithTools(
 	request llmRequest,
 	eventLines *eventLineBuffer,
 ) llmResponseMsg {
-	if request.confirmRequestCh != nil {
-		defer close(request.confirmRequestCh)
-	}
-
+	// request.confirmRequestCh is closed by callLLM's deferred close; closing
+	// it here too would double-close and panic.
 	tools := defaultToolsForAgent(agentSelection{agent: request.agent, ok: request.hasAgent})
 
 	params.Tools = tools
