@@ -172,6 +172,41 @@ func PreparePullRequestReworkWorkspace(ctx context.Context, cfg Config, pullRequ
 	return publisher.preparePullRequestReworkWorkspace(ctx, workspace.Path, pullRequest.Branch)
 }
 
+// PrepareIssueWorkspaceBase moves a fresh issue workspace onto the latest
+// configured base branch before Codex starts editing. Existing dirty workspaces
+// or workspaces with local commits are preserved for continuation attempts.
+func PrepareIssueWorkspaceBase(ctx context.Context, cfg Config, issue Issue, workspace Workspace, logger *slog.Logger) error {
+	if !cfg.Publish.Enabled {
+		return nil
+	}
+
+	if ctx == nil {
+		return errors.New("publish: context is required")
+	}
+
+	if normalizeState(cfg.Tracker.Kind) != trackerKindGitHub {
+		return nil
+	}
+
+	hasGit, err := workspaceHasGitCheckout(ctx, workspace)
+	if err != nil {
+		return err
+	}
+	if !hasGit {
+		return nil
+	}
+
+	publisher := &githubPublisher{
+		cfg:    cfg,
+		client: NewGitHubClient(cfg.Tracker),
+		runGit: defaultGitCommandRunner,
+		logger: loggerOrDefault(logger),
+		audit:  symphonyIssueAudit("symphony.git", issue, cfg.Autonomy),
+	}
+
+	return publisher.prepareIssueWorkspaceBase(ctx, workspace.Path, issue)
+}
+
 func ensureGitWorkspaceForBranchUpdate(ctx context.Context, cfg Config, issue Issue, workspace Workspace) error {
 	hasGit, err := workspaceHasGitCheckout(ctx, workspace)
 	if err == nil && hasGit {
@@ -599,6 +634,11 @@ func parseGitNameOnlyFiles(output string) []string {
 
 func (p *githubPublisher) hasCommitsAhead(ctx context.Context, dir string) (bool, error) {
 	base := strings.TrimSpace(p.cfg.Publish.BaseBranch)
+	return p.hasCommitsAheadOfRef(ctx, dir, base)
+}
+
+func (p *githubPublisher) hasCommitsAheadOfRef(ctx context.Context, dir, base string) (bool, error) {
+	base = strings.TrimSpace(base)
 	output, err := p.git(ctx, dir, nil, "rev-list", "--count", base+"..HEAD")
 	if err != nil {
 		return false, err
@@ -900,6 +940,57 @@ func (p *githubPublisher) preparePullRequestReworkWorkspace(ctx context.Context,
 	return nil
 }
 
+func (p *githubPublisher) prepareIssueWorkspaceBase(ctx context.Context, dir string, issue Issue) error {
+	branch := publishBranchName(p.cfg.Publish, issue)
+	base := strings.TrimSpace(p.cfg.Publish.BaseBranch)
+	remote := strings.TrimSpace(p.cfg.Publish.Remote)
+	if branch == "" || base == "" || remote == "" {
+		return nil
+	}
+
+	inRebase, err := p.rebaseInProgress(ctx, dir)
+	if err != nil {
+		return err
+	}
+	if inRebase {
+		p.logger.Info("symphony issue workspace already has a rebase in progress; preserving workspace", "branch", branch)
+		return nil
+	}
+
+	dirty, err := p.hasChanges(ctx, dir)
+	if err != nil {
+		return err
+	}
+	if dirty {
+		p.logger.Info("symphony issue workspace has local changes; preserving workspace", "branch", branch)
+		return nil
+	}
+
+	if err := p.setRemote(ctx, dir); err != nil {
+		return err
+	}
+
+	if err := p.fetchBaseBranch(ctx, dir, remote, base); err != nil {
+		return err
+	}
+
+	baseRemote := remote + "/" + base
+	hasLocalCommits, err := p.hasCommitsAheadOfRef(ctx, dir, baseRemote)
+	if err != nil {
+		return err
+	}
+	if hasLocalCommits {
+		p.logger.Info("symphony issue workspace has local commits; preserving workspace", "branch", branch, "base", baseRemote)
+		return nil
+	}
+
+	if _, err := p.git(ctx, dir, nil, "checkout", "-B", branch, baseRemote); err != nil {
+		return fmt.Errorf("publish: checkout issue branch %s from %s: %w", branch, baseRemote, err)
+	}
+
+	return nil
+}
+
 func (p *githubPublisher) rebaseInProgress(ctx context.Context, dir string) (bool, error) {
 	for _, name := range []string{"rebase-merge", "rebase-apply"} {
 		output, err := p.git(ctx, dir, nil, "rev-parse", "--git-path", name)
@@ -933,6 +1024,11 @@ func (p *githubPublisher) fetchBranchUpdateRefs(ctx context.Context, dir, remote
 	baseSpec := "+refs/heads/" + base + ":refs/remotes/" + remote + "/" + base
 	branchSpec := "+refs/heads/" + branch + ":refs/remotes/" + remote + "/" + branch
 	return p.gitWithAuth(ctx, dir, "fetch", remote, baseSpec, branchSpec)
+}
+
+func (p *githubPublisher) fetchBaseBranch(ctx context.Context, dir, remote, base string) error {
+	baseSpec := "+refs/heads/" + base + ":refs/remotes/" + remote + "/" + base
+	return p.gitWithAuth(ctx, dir, "fetch", remote, baseSpec)
 }
 
 func (p *githubPublisher) push(ctx context.Context, dir, branch string) error {

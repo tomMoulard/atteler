@@ -1767,6 +1767,123 @@ func TestPublishWorkspaceFullAutonomyRequiresCheckMonitoring(t *testing.T) {
 	assert.Contains(t, err.Error(), "use autonomy high")
 }
 
+func TestGitHubPublisher_PrepareIssueWorkspaceBaseFetchesLatestBase(t *testing.T) {
+	t.Parallel()
+
+	var commands []string
+	var fetchEnv []string
+	runner := func(_ context.Context, _ string, env []string, _ shell.AuditContext, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		commands = append(commands, joined)
+		switch joined {
+		case "rev-parse --git-path rebase-merge":
+			return []byte(".git/rebase-merge\n"), nil
+		case "rev-parse --git-path rebase-apply":
+			return []byte(".git/rebase-apply\n"), nil
+		case gitStatusPorcelain:
+			return nil, nil
+		case gitRemoteGetOrigin:
+			return []byte("/local/origin\n"), nil
+		case "remote set-url origin https://github.com/owner/repo.git":
+			return nil, nil
+		case "fetch origin +refs/heads/main:refs/remotes/origin/main":
+			fetchEnv = append([]string(nil), env...)
+			return nil, nil
+		case "rev-list --count origin/main..HEAD":
+			return []byte("0\n"), nil
+		case "checkout -B symphony/GH-12 origin/main":
+			return nil, nil
+		default:
+			t.Fatalf("unexpected git command: %s", joined)
+			return nil, nil
+		}
+	}
+
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind:   trackerKindGitHub,
+			APIKey: "token",
+			Owner:  "owner",
+			Repo:   "repo",
+		},
+		Publish: PublishConfig{
+			Enabled:      true,
+			Remote:       "origin",
+			BaseBranch:   "main",
+			BranchPrefix: "symphony",
+		},
+	}
+	publisher := &githubPublisher{
+		cfg:    cfg,
+		runGit: runner,
+		logger: loggerOrDefault(nil),
+		audit:  symphonyIssueAudit("symphony.git", Issue{ID: "node-12", Identifier: "GH-12"}, cfg.Autonomy),
+	}
+
+	err := publisher.prepareIssueWorkspaceBase(t.Context(), t.TempDir(), Issue{ID: "node-12", Identifier: "GH-12"})
+	require.NoError(t, err)
+
+	assert.Contains(t, commands, "fetch origin +refs/heads/main:refs/remotes/origin/main")
+	assert.Contains(t, commands, "checkout -B symphony/GH-12 origin/main")
+	assert.Contains(t, fetchEnv, "GIT_TERMINAL_PROMPT=0")
+	assert.Contains(t, fetchEnv, "GITHUB_TOKEN=token")
+}
+
+func TestGitHubPublisher_PrepareIssueWorkspaceBasePreservesLocalCommits(t *testing.T) {
+	t.Parallel()
+
+	var commands []string
+	runner := func(_ context.Context, _ string, _ []string, _ shell.AuditContext, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		commands = append(commands, joined)
+		switch joined {
+		case "rev-parse --git-path rebase-merge":
+			return []byte(".git/rebase-merge\n"), nil
+		case "rev-parse --git-path rebase-apply":
+			return []byte(".git/rebase-apply\n"), nil
+		case gitStatusPorcelain:
+			return nil, nil
+		case gitRemoteGetOrigin:
+			return []byte("/local/origin\n"), nil
+		case "remote set-url origin https://github.com/owner/repo.git":
+			return nil, nil
+		case "fetch origin +refs/heads/main:refs/remotes/origin/main":
+			return nil, nil
+		case "rev-list --count origin/main..HEAD":
+			return []byte("2\n"), nil
+		default:
+			t.Fatalf("unexpected git command: %s", joined)
+			return nil, nil
+		}
+	}
+
+	cfg := Config{
+		Tracker: TrackerConfig{
+			Kind:   trackerKindGitHub,
+			APIKey: "token",
+			Owner:  "owner",
+			Repo:   "repo",
+		},
+		Publish: PublishConfig{
+			Enabled:      true,
+			Remote:       "origin",
+			BaseBranch:   "main",
+			BranchPrefix: "symphony",
+		},
+	}
+	publisher := &githubPublisher{
+		cfg:    cfg,
+		runGit: runner,
+		logger: loggerOrDefault(nil),
+		audit:  symphonyIssueAudit("symphony.git", Issue{ID: "node-12", Identifier: "GH-12"}, cfg.Autonomy),
+	}
+
+	err := publisher.prepareIssueWorkspaceBase(t.Context(), t.TempDir(), Issue{ID: "node-12", Identifier: "GH-12"})
+	require.NoError(t, err)
+
+	assert.NotContains(t, commands, "checkout -B symphony/GH-12 origin/main")
+}
+
 func TestGitHubPublisher_RebasesAndForcePushesPullRequestBranch(t *testing.T) {
 	t.Parallel()
 
