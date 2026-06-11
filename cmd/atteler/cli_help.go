@@ -337,7 +337,9 @@ func lookupFlagDomain(name string) (string, bool) {
 	case name == "once" || name == "stdin" || name == "output" || name == "autonomy" || name == "headless" ||
 		name == "list-headless" || name == "stream-headless" ||
 		name == "status-headless" || name == "cancel-headless" || name == "recover-headless" ||
+		name == "retry-headless" || name == "retry-headless-id" || name == "cleanup-headless" ||
 		name == "headless-id" || name == "headless-private-log" ||
+		name == "headless-status" || name == "headless-max-age" ||
 		name == helpSelectorSession || name == "session-id" || name == "session-dir" ||
 		name == "session-title" || name == "session-tag" ||
 		name == "permission-mode" || name == "allow-operation" || name == "deny-operation" ||

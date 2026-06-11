@@ -766,8 +766,10 @@ atteler chat once "Summarize @README.md" --headless --headless-id docs-summary -
 atteler session headless
 atteler session status-headless <headless-id>
 atteler session cancel-headless <headless-id>
+atteler session retry-headless <headless-id>
 atteler session recover-headless
 atteler session stream-headless <headless-id>
+atteler session cleanup-headless --headless-max-age 168h
 ```
 
 Use the chat `autonomy` flag (`low|medium|high|full`) or top-level config
@@ -782,22 +784,34 @@ Worktree isolation and worktree merge operations create/merge branches, so they
 require `high` or `full`.
 
 Headless metadata, event summaries, and logs are redacted by default; reserve
-`--headless-private-log` for local private runs that intentionally keep raw
+the headless private-log flag for local private runs that intentionally keep raw
 prompts, errors, event summaries, and log text.
-Each headless run records PID, process group, command arguments, cwd, host,
-start time, last heartbeat, optional parent/child run IDs, terminal reason, and
-a separate `<id>.events.jsonl` lifecycle summary with `started`,
-`user_message`, `assistant_message`, and terminal events. Lifecycle statuses
+Each headless run records PID, process group, executable, Atteler version,
+command arguments, cwd, host, start time, last heartbeat, optional parent/child
+or retry run IDs, terminal reason, lease expiry, and a separate
+`<id>.events.jsonl` lifecycle summary with `started`, `user_message`,
+`assistant_message`, retry, recovery, and terminal events. Lifecycle statuses
 distinguish `running`, `completed`, `failed`, `canceled`, `timed_out`,
-`stale`, `orphaned`, `superseded`, and `corrupt` metadata. Running one-shot
-headless runs refresh their heartbeat every 15 seconds; records with no
-heartbeat for 30 minutes are reconciled as `stale` or `orphaned`, while missing
-or dead local PIDs reconcile immediately.
+`expired`, `stale`, `orphaned`, `retried`, `superseded`, and `corrupt`
+metadata. Running one-shot headless runs refresh their heartbeat every 15
+seconds; records with no heartbeat for 30 minutes are reconciled as `stale` or
+`orphaned`, records whose explicit lease expires first reconcile as `expired`,
+and missing or dead local PIDs reconcile immediately.
 Atteler reconciles stale running records at startup and when listing or checking
 status, so crashed local PIDs do not stay `running` forever.
 `atteler session cancel-headless <id>` records a durable `canceled` status
 before signaling the recorded local PID or process group; on Unix-like hosts it
 escalates to a kill signal if the process ignores cancellation briefly.
+`atteler session retry-headless <id>` starts a new one-shot headless process
+from the recorded command when it can be reused safely, marks the terminal
+parent run `retried`, and records parent/retry links on both records. Use the
+retry-headless-id flag when automation needs a stable retry handle. When default
+redaction replaced sensitive command arguments, retry falls back to the stored
+prompt, model, agent, and session directory instead of executing `[REDACTED]`
+placeholders; keep required credentials in the current environment or config.
+`atteler session headless` lists all retained runs by default; add status and
+age filters to narrow the output. Cleanup removes terminal metadata, events,
+logs, and per-run artifacts older than the retention window.
 Set a stable headless ID when launching a one-shot headless run if another
 process needs a handle for `status-headless`, `cancel-headless`, or
 `stream-headless`; explicit IDs must be portable file names (no leading or

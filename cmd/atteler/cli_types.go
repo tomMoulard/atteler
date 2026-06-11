@@ -209,6 +209,10 @@ type cliOptions struct {
 	streamHeadlessID                   string
 	statusHeadlessID                   string
 	cancelHeadlessID                   string
+	retryHeadlessID                    string
+	retryHeadlessNewID                 string
+	headlessStatusFilter               string
+	headlessMaxAge                     string
 	searchQuery                        string
 	initConfigPath                     string
 	explainConfigPath                  string
@@ -518,6 +522,7 @@ type cliOptions struct {
 	listSessions                       bool
 	listHeadless                       bool
 	recoverHeadless                    bool
+	cleanupHeadless                    bool
 	listSessionTags                    bool
 	agentPerformanceSummary            bool
 	listArtifacts                      bool

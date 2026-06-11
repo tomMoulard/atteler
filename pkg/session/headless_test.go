@@ -1,6 +1,8 @@
 package session
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +21,40 @@ import (
 )
 
 const testWindowsGOOS = "windows"
+
+func TestParseHeadlessStatusNormalizesCaseAndWhitespace(t *testing.T) {
+	t.Parallel()
+
+	status, err := ParseHeadlessStatus(" Failed ")
+	require.NoError(t, err)
+	assert.Equal(t, HeadlessStatusFailed, status)
+}
+
+func TestParseHeadlessStatusAcceptsAllKnownStatuses(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range []HeadlessStatus{
+		HeadlessStatusRunning,
+		HeadlessStatusCompleted,
+		HeadlessStatusFailed,
+		HeadlessStatusCanceled,
+		HeadlessStatusTimedOut,
+		HeadlessStatusExpired,
+		HeadlessStatusStale,
+		HeadlessStatusOrphaned,
+		HeadlessStatusRetried,
+		HeadlessStatusSuperseded,
+		HeadlessStatusCorrupt,
+	} {
+		t.Run(string(want), func(t *testing.T) {
+			t.Parallel()
+
+			got, err := ParseHeadlessStatus(" " + strings.ToUpper(string(want)) + " ")
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+		})
+	}
+}
 
 func TestStore_SaveLoadListHeadlessRuns(t *testing.T) {
 	t.Parallel()
@@ -75,6 +111,8 @@ func TestStore_SaveLoadListHeadlessRuns(t *testing.T) {
 	assert.False(t, loaded.StartedAt.IsZero())
 	assert.False(t, loaded.UpdatedAt.IsZero())
 	assert.False(t, loaded.LastHeartbeatAt.IsZero())
+	assert.False(t, loaded.LeaseExpiresAt.IsZero())
+	assert.True(t, loaded.LeaseExpiresAt.After(loaded.LastHeartbeatAt))
 
 	runs, err := store.ListHeadlessRuns()
 	require.NoError(t, err)
@@ -84,6 +122,29 @@ func TestStore_SaveLoadListHeadlessRuns(t *testing.T) {
 	assert.Equal(t, HeadlessStatusRunning, runs[1].Status)
 	require.NotNil(t, runs[0].CompletedAt)
 	assert.True(t, completedAt.Equal(*runs[0].CompletedAt))
+}
+
+func TestStore_LoadHeadlessRunBackfillsStorageDefaultsForLegacyMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	require.NoError(t, os.MkdirAll(store.headlessDir(), 0o750))
+	require.NoError(t, os.WriteFile(
+		store.headlessJSONPath("run-legacy-metadata"),
+		[]byte(`{"id":"run-legacy-metadata","status":"completed"}`),
+		0o600,
+	))
+
+	loaded, err := store.LoadHeadlessRun("run-legacy-metadata")
+	require.NoError(t, err)
+	assert.Equal(t, store.headlessLogPath("run-legacy-metadata"), loaded.LogPath)
+	assert.Equal(t, store.headlessEventsPath("run-legacy-metadata"), loaded.EventsPath)
+	assert.Equal(t, store.headlessArtifactDir("run-legacy-metadata"), loaded.ArtifactDir)
+	assert.Equal(t, defaultHeadlessLogMaxChunkBytes, loaded.LogMaxChunkBytes)
+	assert.Equal(t, defaultHeadlessLogMaxChunks, loaded.LogMaxChunks)
+
+	_, err = os.Stat(loaded.ArtifactDir)
+	require.ErrorIs(t, err, os.ErrNotExist, "loading legacy metadata should not create artifact directories")
 }
 
 func TestStore_SaveHeadlessRunDoesNotInventLocalParentForRecordedPID(t *testing.T) {
@@ -524,6 +585,40 @@ func TestStore_HeadlessLogTailReportsTruncatedOffset(t *testing.T) {
 	assert.True(t, tail.Truncated)
 }
 
+func TestStore_HeadlessLogTailClampsFutureOffset(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	policy := HeadlessLogPolicy{MaxChunkBytes: 64, MaxChunks: 2}
+
+	require.NoError(t, store.AppendHeadlessLogWithOptions("run-tail-future-offset", "hello", HeadlessLogWriteOptions{
+		Policy:  policy,
+		Private: true,
+	}))
+
+	tail, err := store.TailHeadlessLog("run-tail-future-offset", HeadlessLogTailOptions{
+		Offset:   HeadlessLogOffset{Chunk: 99, Byte: 1024},
+		MaxBytes: 64,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, tail.Text)
+	assert.Equal(t, HeadlessLogOffset{Chunk: 1, Byte: 5}, tail.NextOffset)
+	assert.True(t, tail.Truncated)
+
+	require.NoError(t, store.AppendHeadlessLogWithOptions("run-tail-future-offset", " world", HeadlessLogWriteOptions{
+		Policy:  policy,
+		Private: true,
+	}))
+
+	next, err := store.TailHeadlessLog("run-tail-future-offset", HeadlessLogTailOptions{
+		Offset:   tail.NextOffset,
+		MaxBytes: 64,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, " world", next.Text)
+	assert.Equal(t, HeadlessLogOffset{Chunk: 1, Byte: 11}, next.NextOffset)
+}
+
 func TestStore_TailHeadlessLogMigratesLegacyLog(t *testing.T) {
 	t.Parallel()
 
@@ -768,6 +863,93 @@ func TestStore_CleanupHeadlessLogsMigratesLegacyLog(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, log, secret)
 	assert.Contains(t, log, headlessLogRedactedValue)
+}
+
+func TestStore_CleanupHeadlessRunsRemovesOldTerminalArtifacts(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	oldCompletedAt := time.Now().Add(-48 * time.Hour).UTC()
+	recentCompletedAt := time.Now().UTC()
+
+	require.NoError(t, store.SaveHeadlessRun(HeadlessRun{
+		ID:          "run-cleanup-old",
+		CompletedAt: &oldCompletedAt,
+		Status:      HeadlessStatusCompleted,
+	}))
+	require.NoError(t, store.AppendHeadlessLog("run-cleanup-old", "old log\n"))
+	require.NoError(t, store.AppendHeadlessEvent("run-cleanup-old", HeadlessEvent{
+		Type:   HeadlessEventCompleted,
+		Status: HeadlessStatusCompleted,
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(store.headlessArtifactDir("run-cleanup-old"), "artifact.txt"), []byte("artifact"), 0o600))
+
+	require.NoError(t, store.SaveHeadlessRun(HeadlessRun{
+		ID:          "run-cleanup-recent",
+		CompletedAt: &recentCompletedAt,
+		Status:      HeadlessStatusCompleted,
+	}))
+	require.NoError(t, store.SaveHeadlessRun(HeadlessRun{
+		ID:     "run-cleanup-running",
+		Status: HeadlessStatusRunning,
+	}))
+
+	removed, err := store.CleanupHeadlessRuns(HeadlessRetentionPolicy{MaxAge: 24 * time.Hour})
+	require.NoError(t, err)
+	require.Len(t, removed, 1)
+	assert.Equal(t, "run-cleanup-old", removed[0].ID)
+	assert.Equal(t, HeadlessStatusExpired, removed[0].Status)
+	require.NotNil(t, removed[0].ExpiredAt)
+	assert.Equal(t, "expired by headless retention cleanup", removed[0].TerminalReason)
+
+	_, err = os.Stat(store.headlessLockPath("run-cleanup-old"))
+	require.NoError(t, err, "cleanup should leave the coordination lock path reusable")
+	_, err = store.LoadHeadlessRun("run-cleanup-old")
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(store.headlessEventsPath("run-cleanup-old"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	assert.Empty(t, headlessLogChunkFiles(t, store, "run-cleanup-old"))
+	_, err = os.Stat(store.headlessArtifactDir("run-cleanup-old"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	require.NoError(t, store.SaveNewHeadlessRun(HeadlessRun{
+		ID:     "run-cleanup-old",
+		Status: HeadlessStatusRunning,
+	}), "retention cleanup should leave the removed run ID reusable")
+	reused, err := store.LoadHeadlessRun("run-cleanup-old")
+	require.NoError(t, err)
+	assert.Equal(t, HeadlessStatusRunning, reused.Status)
+
+	_, err = store.LoadHeadlessRun("run-cleanup-recent")
+	require.NoError(t, err)
+	_, err = store.LoadHeadlessRun("run-cleanup-running")
+	require.NoError(t, err)
+}
+
+func TestStore_CleanupHeadlessRunsRemovesOldCorruptMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	require.NoError(t, os.MkdirAll(store.headlessDir(), 0o750))
+
+	id := "run-cleanup-corrupt"
+	path := store.headlessJSONPath(id)
+	require.NoError(t, os.WriteFile(path, []byte("{not-json\n"), 0o600))
+	require.NoError(t, os.WriteFile(store.headlessLogChunkPath(id, 1), []byte("corrupt log\n"), 0o600))
+
+	old := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, os.Chtimes(path, old, old))
+
+	removed, err := store.CleanupHeadlessRuns(HeadlessRetentionPolicy{MaxAge: 24 * time.Hour})
+	require.NoError(t, err)
+	require.Len(t, removed, 1)
+	assert.Equal(t, id, removed[0].ID)
+	assert.Equal(t, HeadlessStatusExpired, removed[0].Status)
+	assert.Contains(t, removed[0].Error, "corrupt headless metadata")
+
+	_, err = os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	assert.Empty(t, headlessLogChunkFiles(t, store, id))
 }
 
 func TestStore_HeadlessRedactsByDefaultAndAllowsPrivateLogs(t *testing.T) {
@@ -1075,6 +1257,43 @@ func TestStore_RecoverStaleHeadlessRuns(t *testing.T) {
 	assert.Contains(t, events[0].TerminalReason, "no heartbeat")
 }
 
+func TestStore_RecoverStaleHeadlessRunsReconcilesExpiredLease(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	now := time.Now().UTC()
+	run := HeadlessRun{
+		ID:              "run-recover-expired-lease",
+		StartedAt:       now.Add(-time.Minute),
+		UpdatedAt:       now,
+		LastHeartbeatAt: now,
+		LeaseExpiresAt:  now.Add(-time.Second),
+		Status:          HeadlessStatusRunning,
+	}
+
+	require.NoError(t, os.MkdirAll(store.headlessDir(), 0o750))
+
+	data, err := json.Marshal(run)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(store.headlessJSONPath(run.ID), append(data, '\n'), 0o600))
+
+	recovered, err := store.RecoverStaleHeadlessRuns(time.Hour)
+	require.NoError(t, err)
+	require.Len(t, recovered, 1)
+	assert.Equal(t, HeadlessStatusExpired, recovered[0].Status)
+	assert.Contains(t, recovered[0].TerminalReason, "lease expired at")
+	require.NotNil(t, recovered[0].ExpiredAt)
+
+	events, err := store.ReadHeadlessEvents(run.ID)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, HeadlessEventExpired, events[0].Type)
+
+	second, err := store.RecoverStaleHeadlessRuns(time.Hour)
+	require.NoError(t, err)
+	assert.Empty(t, second)
+}
+
 func TestStore_RecoverStaleHeadlessRunsIsIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -1182,6 +1401,97 @@ func TestStore_HeadlessRunStatusReconcilesStaleRun(t *testing.T) {
 	assert.Equal(t, HeadlessEventStale, events[0].Type)
 }
 
+func TestStore_HeadlessRunStatusReconcilesExpiredLease(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	now := time.Now().UTC()
+	run := HeadlessRun{
+		ID:              "run-expired-lease",
+		StartedAt:       now.Add(-time.Minute),
+		UpdatedAt:       now,
+		LastHeartbeatAt: now,
+		LeaseExpiresAt:  now.Add(-time.Second),
+		Hostname:        "foreign-host",
+		PID:             os.Getpid(),
+		Status:          HeadlessStatusRunning,
+	}
+
+	require.NoError(t, os.MkdirAll(store.headlessDir(), 0o750))
+
+	data, err := json.Marshal(run)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(store.headlessJSONPath(run.ID), append(data, '\n'), 0o600))
+
+	status, err := store.HeadlessRunStatus(run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, HeadlessStatusExpired, status.Status)
+	assert.Contains(t, status.TerminalReason, "lease expired at")
+	assert.Empty(t, status.StaleReason)
+	require.NotNil(t, status.ExpiredAt)
+
+	events, err := store.ReadHeadlessEvents(run.ID)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, HeadlessEventExpired, events[0].Type)
+	assert.Contains(t, events[0].TerminalReason, "lease expired at")
+}
+
+func TestStore_HeadlessRunStatusExpiredLeasePrecedesMissingLocalPID(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	now := time.Now().UTC()
+	run := HeadlessRun{
+		ID:              "run-expired-lease-missing-pid",
+		StartedAt:       now.Add(-time.Minute),
+		UpdatedAt:       now,
+		LastHeartbeatAt: now,
+		LeaseExpiresAt:  now.Add(-time.Second),
+		Status:          HeadlessStatusRunning,
+	}
+
+	require.NoError(t, os.MkdirAll(store.headlessDir(), 0o750))
+
+	data, err := json.Marshal(run)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(store.headlessJSONPath(run.ID), append(data, '\n'), 0o600))
+
+	status, err := store.HeadlessRunStatus(run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, HeadlessStatusExpired, status.Status)
+	assert.Contains(t, status.TerminalReason, "lease expired at")
+	assert.NotContains(t, status.TerminalReason, "no process pid recorded")
+
+	events, err := store.ReadHeadlessEvents(run.ID)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, HeadlessEventExpired, events[0].Type)
+}
+
+func TestStore_HeadlessRunStatusDoesNotMarkFreshForeignHostWithoutPIDStale(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	require.NoError(t, store.SaveHeadlessRun(HeadlessRun{
+		ID:              "run-foreign-host-no-pid",
+		Hostname:        "foreign-host",
+		LastHeartbeatAt: time.Now().UTC(),
+		Status:          HeadlessStatusRunning,
+	}))
+
+	status, err := store.HeadlessRunStatus("run-foreign-host-no-pid")
+	require.NoError(t, err)
+	assert.Equal(t, HeadlessStatusRunning, status.Status)
+	assert.Zero(t, status.PID)
+	assert.False(t, status.Stale)
+	assert.Empty(t, status.StaleReason)
+
+	events, err := store.ReadHeadlessEvents("run-foreign-host-no-pid")
+	require.NoError(t, err)
+	assert.Empty(t, events)
+}
+
 func TestStore_HeadlessRunStatusDoesNotReconcileTerminalRuns(t *testing.T) {
 	t.Parallel()
 
@@ -1201,6 +1511,8 @@ func TestStore_HeadlessRunStatusDoesNotReconcileTerminalRuns(t *testing.T) {
 		{name: "failed", status: HeadlessStatusFailed},
 		{name: "canceled", status: HeadlessStatusCanceled},
 		{name: "timed_out", status: HeadlessStatusTimedOut},
+		{name: "expired", status: HeadlessStatusExpired},
+		{name: "retried", status: HeadlessStatusRetried},
 		{name: "superseded", status: HeadlessStatusSuperseded},
 	}
 
@@ -1350,6 +1662,7 @@ func TestStore_HeartbeatHeadlessRunUpdatesRunningRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, HeadlessStatusRunning, loaded.Status)
 	assert.True(t, loaded.LastHeartbeatAt.After(oldHeartbeat))
+	assert.True(t, loaded.LeaseExpiresAt.After(loaded.LastHeartbeatAt))
 }
 
 func TestStore_HeartbeatHeadlessRunDoesNotUpdateTerminalRun(t *testing.T) {
@@ -1460,6 +1773,7 @@ func TestStore_HeartbeatHeadlessRunRevivesOrphanedRun(t *testing.T) {
 	assert.False(t, loaded.Stale)
 	assert.Empty(t, loaded.OrphanedReason)
 	assert.True(t, loaded.LastHeartbeatAt.After(oldHeartbeat))
+	assert.True(t, loaded.LeaseExpiresAt.After(loaded.LastHeartbeatAt))
 }
 
 func TestStore_ListHeadlessRunsMarksDeadOrphanedPIDStale(t *testing.T) {
@@ -1625,6 +1939,141 @@ func TestStore_SaveFinishedHeadlessRunRejectsNonTerminalStatus(t *testing.T) {
 
 	_, err = store.LoadHeadlessRun("run-finish-non-terminal")
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestStore_MarkHeadlessRunRetriedRejectsNonRetryableStatuses(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+
+	tests := []struct {
+		status HeadlessStatus
+		name   string
+	}{
+		{name: "running", status: HeadlessStatusRunning},
+		{name: "orphaned", status: HeadlessStatusOrphaned},
+		{name: "retried", status: HeadlessStatusRetried},
+		{name: "superseded", status: HeadlessStatusSuperseded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			id := "run-mark-retry-reject-" + tt.name
+			require.NoError(t, store.SaveHeadlessRun(HeadlessRun{
+				ID:              id,
+				Status:          tt.status,
+				LastHeartbeatAt: time.Now().UTC(),
+				Hostname:        "foreign-host",
+				PID:             os.Getpid(),
+			}))
+
+			_, err := store.MarkHeadlessRunRetried(id, id+"-child", "retry requested")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "only completed, failed, canceled, timed_out, stale, or expired runs can be retried")
+
+			loaded, loadErr := store.LoadHeadlessRun(id)
+			require.NoError(t, loadErr)
+			assert.Equal(t, tt.status, loaded.Status)
+			assert.Empty(t, loaded.ChildRunIDs)
+			assert.Empty(t, loaded.SupersededByRunID)
+		})
+	}
+}
+
+func TestStore_MarkHeadlessRunRetriedReconcilesStaleRunningRun(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	oldHeartbeat := time.Now().Add(-2 * defaultHeadlessStaleAfter).UTC()
+	require.NoError(t, store.SaveHeadlessRun(HeadlessRun{
+		ID:              "run-retry-reconcile-stale",
+		StartedAt:       oldHeartbeat,
+		LastHeartbeatAt: oldHeartbeat,
+		Hostname:        "foreign-host",
+		Status:          HeadlessStatusRunning,
+	}))
+
+	retried, err := store.MarkHeadlessRunRetried(
+		"run-retry-reconcile-stale",
+		"run-retry-reconcile-stale-child",
+		"retry stale run",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, HeadlessStatusRetried, retried.Status)
+	assert.Equal(t, "run-retry-reconcile-stale-child", retried.SupersededByRunID)
+	assert.Equal(t, []string{"run-retry-reconcile-stale-child"}, retried.ChildRunIDs)
+
+	events, eventsErr := store.ReadHeadlessEvents("run-retry-reconcile-stale")
+	require.NoError(t, eventsErr)
+	require.Len(t, events, 2)
+	assert.Equal(t, HeadlessEventStale, events[0].Type)
+	assert.Contains(t, events[0].StaleReason, "no heartbeat since")
+	assert.Equal(t, HeadlessEventRetried, events[1].Type)
+}
+
+func TestStore_MarkHeadlessRunRetriedAllowsExpiredRun(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	expiredAt := time.Now().UTC()
+	exitCode := 1
+	require.NoError(t, store.SaveHeadlessRun(HeadlessRun{
+		ID:         "run-retry-expired",
+		ExpiredAt:  &expiredAt,
+		Prompt:     "retry expired prompt",
+		Status:     HeadlessStatusExpired,
+		ExitCode:   &exitCode,
+		RetryCount: 1,
+	}))
+
+	retried, err := store.MarkHeadlessRunRetried("run-retry-expired", "run-retry-expired-child", "retry expired")
+	require.NoError(t, err)
+	assert.Equal(t, HeadlessStatusRetried, retried.Status)
+	assert.Equal(t, "run-retry-expired-child", retried.SupersededByRunID)
+	assert.Equal(t, []string{"run-retry-expired-child"}, retried.ChildRunIDs)
+	assert.NotNil(t, retried.RetriedAt)
+}
+
+func TestStore_MarkHeadlessRunRetriedAfterStartLeavesParentUnchangedWhenStartFails(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	completedAt := time.Now().UTC()
+	require.NoError(t, store.SaveHeadlessRun(HeadlessRun{
+		ID:          "run-retry-start-fails",
+		CompletedAt: &completedAt,
+		Prompt:      "retry prompt",
+		Status:      HeadlessStatusFailed,
+		Error:       "provider failed",
+	}))
+
+	startErr := errors.New("process launcher failed")
+	_, err := store.MarkHeadlessRunRetriedAfterStart(
+		"run-retry-start-fails",
+		"run-retry-start-fails-child",
+		"retry requested",
+		func(parent HeadlessRun) error {
+			assert.Equal(t, HeadlessStatusFailed, parent.Status)
+			assert.Equal(t, "retry prompt", parent.Prompt)
+
+			return startErr
+		},
+	)
+	require.ErrorIs(t, err, startErr)
+
+	loaded, loadErr := store.LoadHeadlessRun("run-retry-start-fails")
+	require.NoError(t, loadErr)
+	assert.Equal(t, HeadlessStatusFailed, loaded.Status)
+	assert.Empty(t, loaded.ChildRunIDs)
+	assert.Empty(t, loaded.SupersededByRunID)
+	assert.Nil(t, loaded.RetriedAt)
+	assert.Equal(t, "provider failed", loaded.Error)
+
+	events, eventsErr := store.ReadHeadlessEvents("run-retry-start-fails")
+	require.NoError(t, eventsErr)
+	assert.Empty(t, events)
 }
 
 func TestStore_SaveFinishedHeadlessRunIgnoresDifferentExecution(t *testing.T) {
@@ -1796,6 +2245,8 @@ func TestStore_CancelHeadlessRunLeavesTerminalStatusesUnchanged(t *testing.T) {
 		{name: "failed", status: HeadlessStatusFailed},
 		{name: "canceled", status: HeadlessStatusCanceled, cancellationReason: "already canceled"},
 		{name: "timed_out", status: HeadlessStatusTimedOut},
+		{name: "expired", status: HeadlessStatusExpired},
+		{name: "retried", status: HeadlessStatusRetried},
 		{name: "superseded", status: HeadlessStatusSuperseded},
 	}
 

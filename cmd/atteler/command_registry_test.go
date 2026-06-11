@@ -599,6 +599,23 @@ func TestCommandRegistry_IncidentSupplementalFlagsRequireDiagnose(t *testing.T) 
 	require.NoError(t, err)
 }
 
+func TestCommandRegistry_HeadlessFilterFlagsRequireHeadlessListOrCleanup(t *testing.T) {
+	t.Parallel()
+
+	err := validateCLICommandSelection(cliOptions{retryHeadlessNewID: "retry-id"})
+	require.ErrorContains(t, err, "--retry-headless-id requires --retry-headless")
+
+	err = validateCLICommandSelection(cliOptions{headlessStatusFilter: "failed"})
+	require.ErrorContains(t, err, "--headless-status requires --list-headless")
+
+	err = validateCLICommandSelection(cliOptions{headlessMaxAge: "24h"})
+	require.ErrorContains(t, err, "--headless-max-age requires --list-headless or --cleanup-headless")
+
+	require.NoError(t, validateCLICommandSelection(cliOptions{listHeadless: true, headlessStatusFilter: "failed", headlessMaxAge: "24h"}))
+	require.NoError(t, validateCLICommandSelection(cliOptions{cleanupHeadless: true, headlessMaxAge: "24h"}))
+	require.NoError(t, validateCLICommandSelection(cliOptions{retryHeadlessID: "run-id", retryHeadlessNewID: "retry-id"}))
+}
+
 func TestCommandRegistry_InlineAmbiguityFailsHelpfulError(t *testing.T) {
 	t.Parallel()
 
@@ -860,6 +877,8 @@ func TestCommandSurface_JSONDumpIncludesDispatchContract(t *testing.T) {
 	assert.Equal(t, "spawnAgentsCommandInput", commands["spawn-agents"].InputType)
 	assert.Contains(t, commands["list-sessions"].InputFields, "Tag")
 	assert.Contains(t, commands["headless-command"].InputFields, "CancelID")
+	assert.Contains(t, commands["headless-command"].InputFields, "RetryID")
+	assert.Contains(t, commands["headless-command"].InputFields, "Cleanup")
 	assert.Contains(t, commands["headless-command"].InputFields, "Recover")
 	assert.Contains(t, commands["route-models-providerless"].InputFields, "Candidates")
 	assert.Contains(t, commands["bash-command"].InputFields, "Command")
@@ -915,6 +934,11 @@ func TestCommandSurface_DomainCommandsLinkToDispatchContract(t *testing.T) {
 	assert.Equal(t, []string{"headless-command"}, headlessCancel.DispatchCommands)
 	assert.Contains(t, headlessCancel.SideEffects, commandEffectProcessExecute)
 	assert.Contains(t, headlessCancel.SideEffects, commandEffectSessionWrite)
+
+	headlessRetry := requireDomainCommand(t, surface, "chat/session", "retry-headless")
+	assert.Equal(t, []string{"headless-command"}, headlessRetry.DispatchCommands)
+	assert.Contains(t, headlessRetry.SideEffects, commandEffectProcessExecute)
+	assert.Contains(t, headlessRetry.SideEffects, commandEffectSessionWrite)
 
 	mcpManifest := requireDomainCommand(t, surface, "plugins", "mcp-manifest")
 	assert.Equal(t, []string{"mcp-manifest"}, mcpManifest.DispatchCommands)
@@ -1000,12 +1024,13 @@ func TestCommandSurface_MarkdownDocsRenderFromSurface(t *testing.T) {
 	assert.Contains(t, docs, "`exclusive-command` with `*`")
 	assert.Contains(t, docs, "- Side effects: `session-store-read`, `stdout`")
 	assert.Contains(t, docs, "- Outputs: `text`")
-	assert.Contains(t, docs, "`headless`: list active headless runs (dispatch: `headless-command`)")
+	assert.Contains(t, docs, "`headless`: list headless runs; filter with --headless-status/--headless-max-age (dispatch: `headless-command`)")
 	assert.Contains(t, docs, "`cancel-headless <id>`: cancel one live headless run (dispatch: `headless-command`)")
+	assert.Contains(t, docs, "`retry-headless <id>`: retry one terminal headless run (dispatch: `headless-command`)")
 	assert.Contains(t, docs, "`headless-command` (providerless)")
 	assert.Contains(t, docs, "- Input: `headlessCommandInput`")
-	assert.Contains(t, docs, "- Input fields: `StatusID`, `CancelID`, `StreamID`, `Recover`, `List`")
-	assert.Contains(t, docs, "- Flags: `--list-headless`, `--recover-headless`, `--status-headless`, `--cancel-headless`, `--stream-headless`")
+	assert.Contains(t, docs, "- Input fields: `StatusID`, `CancelID`, `RetryID`, `RetryNewID`, `StreamID`, `StatusFilter`, `MaxAge`, `Recover`, `List`, `Cleanup`")
+	assert.Contains(t, docs, "- Flags: `--list-headless`, `--recover-headless`, `--status-headless`, `--cancel-headless`, `--retry-headless`, `--retry-headless-id`, `--stream-headless`, `--cleanup-headless`, `--headless-status`, `--headless-max-age`")
 	assert.Contains(t, docs, "- Side effects: `session-store-read`, `session-store-write`, `stdout`, `process-execute`")
 	assert.Contains(t, docs, "- Fixtures:")
 	assert.Contains(t, docs, "`legacy-flag`: `atteler --list-sessions` -> `list-sessions`")
@@ -1115,8 +1140,20 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			wantTier: tierProviderless,
 		},
 		{
+			name:     "session retry-headless routes providerless lifecycle command",
+			args:     []string{"session", "retry-headless", "run-123"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
 			name:     "session recover-headless routes providerless lifecycle command",
 			args:     []string{"session", "recover-headless"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "session cleanup-headless routes providerless lifecycle command",
+			args:     []string{"session", "cleanup-headless", "--headless-max-age", "168h"},
 			wantName: "headless-command",
 			wantTier: tierProviderless,
 		},
@@ -1145,8 +1182,20 @@ func TestCommandRegistry_GroupedCommandsReachExpectedHandlers(t *testing.T) {
 			wantTier: tierProviderless,
 		},
 		{
+			name:     "legacy retry-headless flag routes providerless lifecycle command",
+			args:     []string{"--retry-headless", "run-123"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
 			name:     "legacy recover-headless flag routes providerless lifecycle command",
 			args:     []string{"--recover-headless"},
+			wantName: "headless-command",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "legacy cleanup-headless flag routes providerless lifecycle command",
+			args:     []string{"--cleanup-headless", "--headless-max-age", "168h"},
 			wantName: "headless-command",
 			wantTier: tierProviderless,
 		},

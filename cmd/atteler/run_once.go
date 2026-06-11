@@ -29,6 +29,8 @@ import (
 const (
 	headlessHeartbeatInterval = 15 * time.Second
 	headlessParentRunIDEnv    = "ATTELER_HEADLESS_PARENT_ID"
+	headlessRetryOfRunIDEnv   = "ATTELER_HEADLESS_RETRY_OF_ID"
+	headlessRetryCountEnv     = "ATTELER_HEADLESS_RETRY_COUNT"
 
 	agentLoopConfigFieldMaxInputTokens  = "agent_loop.max_input_tokens"  // #nosec G101 -- config field path, not a credential.
 	agentLoopConfigFieldMaxOutputTokens = "agent_loop.max_output_tokens" // #nosec G101 -- config field path, not a credential.
@@ -1099,30 +1101,35 @@ func recordHeadlessAssistantMessage(
 	}
 
 	event := session.HeadlessEvent{
-		Type:            session.HeadlessEventAssistantMessage,
-		Status:          session.HeadlessStatusRunning,
-		Role:            string(llm.RoleAssistant),
-		ParentRunID:     run.ParentRunID,
-		SessionID:       run.SessionID,
-		SessionPath:     run.SessionPath,
-		Agent:           run.Agent,
-		Model:           run.Model,
-		Autonomy:        run.Autonomy,
-		AgentLoopBudget: run.AgentLoopBudget,
-		CWD:             run.CWD,
-		Hostname:        run.Hostname,
-		StartedCommand:  run.StartedCommand,
-		StartMethod:     run.StartMethod,
-		TerminalReason:  run.TerminalReason,
-		CancelReason:    run.CancellationReason,
-		StaleReason:     run.StaleReason,
-		OrphanedReason:  run.OrphanedReason,
-		CommandArgs:     append([]string(nil), run.CommandArgs...),
-		ChildRunIDs:     append([]string(nil), run.ChildRunIDs...),
-		PID:             run.PID,
-		ParentPID:       run.ParentPID,
-		ProcessGroupID:  run.ProcessGroupID,
-		Metadata:        headlessAssistantMetadata(contentBytes, providerFailureMetadata...),
+		Type:              session.HeadlessEventAssistantMessage,
+		Status:            session.HeadlessStatusRunning,
+		Role:              string(llm.RoleAssistant),
+		ParentRunID:       run.ParentRunID,
+		RetryOfRunID:      run.RetryOfRunID,
+		SupersededByRunID: run.SupersededByRunID,
+		SessionID:         run.SessionID,
+		SessionPath:       run.SessionPath,
+		Agent:             run.Agent,
+		Model:             run.Model,
+		Autonomy:          run.Autonomy,
+		AgentLoopBudget:   run.AgentLoopBudget,
+		CWD:               run.CWD,
+		Executable:        run.Executable,
+		Version:           run.Version,
+		Hostname:          run.Hostname,
+		StartedCommand:    run.StartedCommand,
+		StartMethod:       run.StartMethod,
+		TerminalReason:    run.TerminalReason,
+		CancelReason:      run.CancellationReason,
+		StaleReason:       run.StaleReason,
+		OrphanedReason:    run.OrphanedReason,
+		CommandArgs:       append([]string(nil), run.CommandArgs...),
+		ChildRunIDs:       append([]string(nil), run.ChildRunIDs...),
+		PID:               run.PID,
+		ParentPID:         run.ParentPID,
+		ProcessGroupID:    run.ProcessGroupID,
+		RetryCount:        run.RetryCount,
+		Metadata:          headlessAssistantMetadata(contentBytes, providerFailureMetadata...),
 	}
 	if err := store.AppendHeadlessEvent(run.ID, event); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
@@ -1158,7 +1165,9 @@ func headlessRunRecordingIsTerminal(status session.HeadlessStatus) bool {
 		session.HeadlessStatusFailed,
 		session.HeadlessStatusCanceled,
 		session.HeadlessStatusTimedOut,
+		session.HeadlessStatusExpired,
 		session.HeadlessStatusStale,
+		session.HeadlessStatusRetried,
 		session.HeadlessStatusSuperseded,
 		session.HeadlessStatusCorrupt:
 		return true
@@ -1235,6 +1244,7 @@ func startHeadlessRun(
 	run := session.HeadlessRun{
 		ID:              id,
 		ParentRunID:     os.Getenv(headlessParentRunIDEnv),
+		RetryOfRunID:    os.Getenv(headlessRetryOfRunIDEnv),
 		SessionID:       sessionState.ID,
 		SessionPath:     store.Path(sessionState.ID),
 		Prompt:          strings.TrimSpace(prompt),
@@ -1243,8 +1253,11 @@ func startHeadlessRun(
 		Autonomy:        autonomy.Normalize(options.Autonomy).String(),
 		AgentLoopBudget: options.AgentLoopBudget,
 		Agent:           agentName,
+		Executable:      currentExecutablePath(),
+		Version:         versionString(),
 		StartedCommand:  strings.Join(os.Args, " "),
 		StartMethod:     "headless",
+		RetryCount:      headlessRetryCountFromEnv(),
 		Status:          session.HeadlessStatusRunning,
 		PrivateLogs:     options.HeadlessPrivateLog,
 	}
@@ -1269,27 +1282,32 @@ func startHeadlessRun(
 	}
 
 	if err := store.AppendHeadlessEvent(id, session.HeadlessEvent{
-		Type:            session.HeadlessEventStarted,
-		Status:          saved.Status,
-		ParentRunID:     saved.ParentRunID,
-		SessionID:       saved.SessionID,
-		SessionPath:     saved.SessionPath,
-		Agent:           saved.Agent,
-		Model:           saved.Model,
-		Autonomy:        saved.Autonomy,
-		AgentLoopBudget: saved.AgentLoopBudget,
-		CWD:             saved.CWD,
-		Hostname:        saved.Hostname,
-		StartedCommand:  saved.StartedCommand,
-		StartMethod:     saved.StartMethod,
-		TerminalReason:  saved.TerminalReason,
-		CancelReason:    saved.CancellationReason,
-		StaleReason:     saved.StaleReason,
-		OrphanedReason:  saved.OrphanedReason,
-		CommandArgs:     append([]string(nil), saved.CommandArgs...),
-		PID:             saved.PID,
-		ParentPID:       saved.ParentPID,
-		ProcessGroupID:  saved.ProcessGroupID,
+		Type:              session.HeadlessEventStarted,
+		Status:            saved.Status,
+		ParentRunID:       saved.ParentRunID,
+		RetryOfRunID:      saved.RetryOfRunID,
+		SupersededByRunID: saved.SupersededByRunID,
+		SessionID:         saved.SessionID,
+		SessionPath:       saved.SessionPath,
+		Agent:             saved.Agent,
+		Model:             saved.Model,
+		Autonomy:          saved.Autonomy,
+		AgentLoopBudget:   saved.AgentLoopBudget,
+		CWD:               saved.CWD,
+		Executable:        saved.Executable,
+		Version:           saved.Version,
+		Hostname:          saved.Hostname,
+		StartedCommand:    saved.StartedCommand,
+		StartMethod:       saved.StartMethod,
+		TerminalReason:    saved.TerminalReason,
+		CancelReason:      saved.CancellationReason,
+		StaleReason:       saved.StaleReason,
+		OrphanedReason:    saved.OrphanedReason,
+		CommandArgs:       append([]string(nil), saved.CommandArgs...),
+		PID:               saved.PID,
+		ParentPID:         saved.ParentPID,
+		ProcessGroupID:    saved.ProcessGroupID,
+		RetryCount:        saved.RetryCount,
 	}); err != nil {
 		eventErr := fmt.Errorf("write headless start event: %w", err)
 		failStartedHeadlessRun(store, &saved, eventErr)
@@ -1316,10 +1334,35 @@ func startHeadlessRun(
 	}
 
 	if err := appendHeadlessContextManifestLog(store, &saved, manifestJSON); err != nil {
+		failStartedHeadlessRun(store, &saved, err)
+
 		return nil, err
 	}
 
 	return &saved, nil
+}
+
+func currentExecutablePath() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+
+	return executable
+}
+
+func headlessRetryCountFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv(headlessRetryCountEnv))
+	if raw == "" {
+		return 0
+	}
+
+	count, err := strconv.Atoi(raw)
+	if err != nil || count < 0 {
+		return 0
+	}
+
+	return count
 }
 
 func appendHeadlessUserMessageEvent(store *session.Store, id string, run session.HeadlessRun) error {
@@ -1328,25 +1371,30 @@ func appendHeadlessUserMessageEvent(store *session.Store, id string, run session
 	}
 
 	if err := store.AppendHeadlessEvent(id, session.HeadlessEvent{
-		Type:            session.HeadlessEventUserMessage,
-		Status:          run.Status,
-		Role:            string(llm.RoleUser),
-		Message:         run.Prompt,
-		ParentRunID:     run.ParentRunID,
-		SessionID:       run.SessionID,
-		SessionPath:     run.SessionPath,
-		Agent:           run.Agent,
-		Model:           run.Model,
-		Autonomy:        run.Autonomy,
-		AgentLoopBudget: run.AgentLoopBudget,
-		CWD:             run.CWD,
-		Hostname:        run.Hostname,
-		StartedCommand:  run.StartedCommand,
-		StartMethod:     run.StartMethod,
-		CommandArgs:     append([]string(nil), run.CommandArgs...),
-		PID:             run.PID,
-		ParentPID:       run.ParentPID,
-		ProcessGroupID:  run.ProcessGroupID,
+		Type:              session.HeadlessEventUserMessage,
+		Status:            run.Status,
+		Role:              string(llm.RoleUser),
+		Message:           run.Prompt,
+		ParentRunID:       run.ParentRunID,
+		RetryOfRunID:      run.RetryOfRunID,
+		SupersededByRunID: run.SupersededByRunID,
+		SessionID:         run.SessionID,
+		SessionPath:       run.SessionPath,
+		Agent:             run.Agent,
+		Model:             run.Model,
+		Autonomy:          run.Autonomy,
+		AgentLoopBudget:   run.AgentLoopBudget,
+		CWD:               run.CWD,
+		Executable:        run.Executable,
+		Version:           run.Version,
+		Hostname:          run.Hostname,
+		StartedCommand:    run.StartedCommand,
+		StartMethod:       run.StartMethod,
+		CommandArgs:       append([]string(nil), run.CommandArgs...),
+		PID:               run.PID,
+		ParentPID:         run.ParentPID,
+		ProcessGroupID:    run.ProcessGroupID,
+		RetryCount:        run.RetryCount,
 		Metadata: map[string]string{
 			"bytes": strconv.Itoa(len(run.Prompt)),
 		},
@@ -1492,32 +1540,37 @@ func appendFinishedHeadlessEvent(store *session.Store, run *session.HeadlessRun,
 	}
 
 	if err := store.AppendHeadlessEvent(run.ID, session.HeadlessEvent{
-		Type:            eventType,
-		Status:          run.Status,
-		ParentRunID:     run.ParentRunID,
-		SessionID:       run.SessionID,
-		SessionPath:     run.SessionPath,
-		Message:         run.TerminalReason,
-		Error:           run.Error,
-		Agent:           run.Agent,
-		Model:           run.Model,
-		Autonomy:        run.Autonomy,
-		AgentLoopBudget: run.AgentLoopBudget,
-		CWD:             run.CWD,
-		Hostname:        run.Hostname,
-		StartedCommand:  run.StartedCommand,
-		StartMethod:     run.StartMethod,
-		TerminalReason:  run.TerminalReason,
-		CancelReason:    run.CancellationReason,
-		StaleReason:     run.StaleReason,
-		OrphanedReason:  run.OrphanedReason,
-		CommandArgs:     append([]string(nil), run.CommandArgs...),
-		ChildRunIDs:     append([]string(nil), run.ChildRunIDs...),
-		ExitCode:        run.ExitCode,
-		PID:             run.PID,
-		ParentPID:       run.ParentPID,
-		ProcessGroupID:  run.ProcessGroupID,
-		Metadata:        metadata,
+		Type:              eventType,
+		Status:            run.Status,
+		ParentRunID:       run.ParentRunID,
+		RetryOfRunID:      run.RetryOfRunID,
+		SupersededByRunID: run.SupersededByRunID,
+		SessionID:         run.SessionID,
+		SessionPath:       run.SessionPath,
+		Message:           run.TerminalReason,
+		Error:             run.Error,
+		Agent:             run.Agent,
+		Model:             run.Model,
+		Autonomy:          run.Autonomy,
+		AgentLoopBudget:   run.AgentLoopBudget,
+		CWD:               run.CWD,
+		Executable:        run.Executable,
+		Version:           run.Version,
+		Hostname:          run.Hostname,
+		StartedCommand:    run.StartedCommand,
+		StartMethod:       run.StartMethod,
+		TerminalReason:    run.TerminalReason,
+		CancelReason:      run.CancellationReason,
+		StaleReason:       run.StaleReason,
+		OrphanedReason:    run.OrphanedReason,
+		CommandArgs:       append([]string(nil), run.CommandArgs...),
+		ChildRunIDs:       append([]string(nil), run.ChildRunIDs...),
+		ExitCode:          run.ExitCode,
+		PID:               run.PID,
+		ParentPID:         run.ParentPID,
+		ProcessGroupID:    run.ProcessGroupID,
+		RetryCount:        run.RetryCount,
+		Metadata:          metadata,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: "+err.Error())
 	}
