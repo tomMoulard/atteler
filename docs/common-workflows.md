@@ -121,6 +121,32 @@ atteler session replay-run speculation
 atteler session resume-run latest
 ```
 
+## Auto mode (self-fork orchestration)
+
+`--auto` turns the main model into an orchestrator that forks atteler into
+worker sub-agents through the bash tool: it can spawn an `explorer` to map the
+code, a `planner`, several `implementer`s on different models, and a `reviewer`,
+then synthesize the result. Pick a playbook with `--auto=<mode>` (`auto`, the
+default, or `bug-hunt`).
+
+```sh
+atteler --auto --once "implement structured logging across pkg/llm"
+atteler --auto=bug-hunt --once "the registry drops providers under load — find why"
+```
+
+Recursion is bounded by `--auto-max-depth` (default 2): once the depth budget is
+exhausted, auto mode gracefully downgrades to a single agent. Because forking
+needs the bash tool, `--auto` raises the autonomy floor to `medium`.
+
+To default interactive (TUI) sessions into auto mode, set `auto` in config (see
+[Configuration](configuration.md#auto-mode)); headless one-shots stay opt-in via
+the flag, and a CLI `--auto` always overrides the config value.
+
+Forked children authenticate with borrowed file credentials (Claude Code,
+Codex) because the bash sandbox redacts credential environment variables — so
+auto mode works with atteler's primary auth model, not with bare
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` environment keys.
+
 ## Continuous watch and incidents
 
 Scan the working tree for quality debt on demand, as JSON, or in a loop. Watch
