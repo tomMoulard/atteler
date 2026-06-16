@@ -12,12 +12,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/tommoulard/atteler/pkg/agent"
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/autopilot"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
@@ -1240,16 +1242,125 @@ func runOnceExecutionOptionsFromOptions(opts cliOptions) runOnceExecutionOptions
 }
 
 func autonomyFromConfigOptions(cfg appconfig.Config, opts cliOptions) (autonomy.Level, error) {
-	if opts.autonomy.set {
-		return opts.autonomy.value, nil
+	level := opts.autonomy.value
+	if !opts.autonomy.set {
+		resolved, err := autonomy.FromConfig(cfg.Autonomy)
+		if err != nil {
+			return "", fmt.Errorf("resolve autonomy: %w", err)
+		}
+
+		level = resolved
 	}
 
-	level, err := autonomy.FromConfig(cfg.Autonomy)
-	if err != nil {
-		return "", fmt.Errorf("resolve autonomy: %w", err)
+	// Auto mode needs the bash tool to fork worker children, so raise the floor
+	// to the tool-allowing default when the resolved level is advisory-only.
+	if opts.auto.set && !level.AllowsAgentTools() {
+		level = autonomy.Medium
 	}
 
 	return level, nil
+}
+
+// autoModePlan captures how --auto should be applied for a run.
+type autoModePlan struct {
+	mode         autopilot.Mode
+	active       bool
+	downgraded   bool
+	currentDepth int
+	maxDepth     int
+}
+
+// resolveAutoModePlan validates the --auto flag and reads the current recursion
+// depth. When the depth budget is exhausted the plan is marked downgraded so the
+// run proceeds as an ordinary single agent instead of forking further.
+func resolveAutoModePlan(opts cliOptions) (autoModePlan, error) {
+	if !opts.auto.set {
+		return autoModePlan{}, nil
+	}
+
+	mode, ok := autopilot.ModeByName(opts.auto.value)
+	if !ok {
+		return autoModePlan{}, fmt.Errorf("unknown auto mode %q (known: %s)", opts.auto.value, strings.Join(autopilot.ModeNames(), ", "))
+	}
+
+	maxDepth := max(opts.autoMaxDepth, 0)
+	current := autoDepthFromEnv()
+	plan := autoModePlan{mode: mode, currentDepth: current, maxDepth: maxDepth}
+
+	if current >= maxDepth {
+		plan.downgraded = true
+
+		return plan, nil
+	}
+
+	plan.active = true
+
+	return plan, nil
+}
+
+// registerAutopilotWorkers makes the built-in worker personas available to
+// every run (including child processes spawned as `atteler --agent explorer`,
+// which do not pass --auto). Config-defined agents of the same name win.
+func registerAutopilotWorkers(agentRegistry *agent.Registry) {
+	workers := autopilot.WorkerAgents()
+	for i := range workers {
+		if _, exists := agentRegistry.Get(workers[i].Name); !exists {
+			agentRegistry.Upsert(workers[i])
+		}
+	}
+}
+
+func autoDepthFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("ATTELER_AUTO_DEPTH"))
+	if raw == "" {
+		return 0
+	}
+
+	depth, err := strconv.Atoi(raw)
+	if err != nil || depth < 0 {
+		return 0
+	}
+
+	return depth
+}
+
+// applyAutoMode renders the orchestrator self-fork manual, merges the
+// orchestrator and worker personas into the registry, force-selects the
+// orchestrator, and propagates the incremented recursion depth to children
+// spawned via the bash tool.
+func applyAutoMode(plan autoModePlan, agentRegistry *agent.Registry, reg *llm.Registry, selection *selectionState, autonomyLevel autonomy.Level) error {
+	if !plan.active {
+		return nil
+	}
+
+	binary, execErr := os.Executable()
+	if execErr != nil || strings.TrimSpace(binary) == "" {
+		binary = attelerCommandName
+	}
+
+	models := reg.ListModels()
+	sort.Strings(models)
+
+	manual := autopilot.RenderSystemPrompt(plan.mode, autopilot.ManualInput{
+		BinaryPath:   binary,
+		Autonomy:     autonomyLevel.String(),
+		WorkerAgents: autopilot.WorkerAgentNames(),
+		Models:       models,
+		CurrentDepth: plan.currentDepth,
+		MaxDepth:     plan.maxDepth,
+	})
+
+	agentRegistry.Upsert(autopilot.OrchestratorAgent(manual))
+	registerAutopilotWorkers(agentRegistry)
+
+	selection.selectedAgent = autopilot.OrchestratorAgentName
+	selection.sessionState.DefaultAgent = autopilot.OrchestratorAgentName
+
+	if err := os.Setenv("ATTELER_AUTO_DEPTH", strconv.Itoa(plan.currentDepth+1)); err != nil {
+		return fmt.Errorf("set auto depth: %w", err)
+	}
+
+	return nil
 }
 
 func autonomyForEarlyCommand(opts cliOptions) (autonomy.Level, error) {
@@ -1310,7 +1421,19 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	cfg, loadedConfigPaths, configFatalErr := loadConfigForAppState(opts)
 	agentRegistry := agent.NewRegistry(cfg.Agents)
+	registerAutopilotWorkers(agentRegistry)
+
 	store := session.NewStore(opts.sessionDir)
+
+	autoPlan, err := resolveAutoModePlan(opts)
+	if err != nil {
+		return appState{}, err
+	}
+
+	if autoPlan.downgraded {
+		fmt.Fprintf(os.Stderr, "warning: --auto suppressed at recursion depth %d (limit %d); running a single agent\n", autoPlan.currentDepth, autoPlan.maxDepth)
+	}
+
 	stateStore := appconfig.NewStateStore("")
 	cwd := currentWorkingDirectoryOrEmpty()
 
@@ -1387,6 +1510,11 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 		selection.sessionState.ID,
 		autonomyLevel,
 	)
+
+	if autoErr := applyAutoMode(autoPlan, agentRegistry, reg, &selection, autonomyLevel); autoErr != nil {
+		return appState{}, autoErr
+	}
+
 	contextOptions := contextOptionsFromConfig(cfg)
 	contextOptions = contextOptionsForRequestModels(contextOptions, reg, selection.selectedModel, selection.fallbackModels)
 	generationDefaults := generationFromConfig(cfg)

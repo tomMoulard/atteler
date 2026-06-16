@@ -373,6 +373,14 @@ func TestChildEnv_OverridesParentAndExtraIdentity(t *testing.T) {
 	assert.Equal(t, []string{"value"}, envValuesForKey(env, "CUSTOM"))
 }
 
+func TestChildEnv_PropagatesAutoDepth(t *testing.T) {
+	t.Setenv("ATTELER_AUTO_DEPTH", "1")
+
+	env := childEnv(nil, Request{ID: "child", Agent: "explorer"}, "medium")
+
+	assert.Equal(t, []string{"1"}, envValuesForKey(env, "ATTELER_AUTO_DEPTH"))
+}
+
 func TestAttelerCommand_ReturnsOutputAndWrappedCommandError(t *testing.T) {
 	t.Parallel()
 

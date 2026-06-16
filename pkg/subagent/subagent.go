@@ -1268,6 +1268,7 @@ func childEnv(extra map[string]string, request Request, autonomy string) []strin
 	addEnvIfSet(envValues, "ATTELER_CHILD_MODEL", request.Model)
 	addEnvIfSet(envValues, "ATTELER_CHILD_PROVIDER", request.Provider)
 	addEnvIfSet(envValues, "ATTELER_AUTONOMY", autonomy)
+	addEnvIfSet(envValues, "ATTELER_AUTO_DEPTH", os.Getenv("ATTELER_AUTO_DEPTH"))
 
 	if len(envValues) == 0 {
 		return nil

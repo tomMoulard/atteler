@@ -179,6 +179,37 @@ func (f *autonomyFlag) String() string {
 	return f.value.String()
 }
 
+// autoFlag backs the --auto flag. It behaves as a boolean flag (bare --auto
+// selects the default mode) but also accepts a mode name via --auto=<mode>.
+type autoFlag struct {
+	value string
+	set   bool
+}
+
+func (f *autoFlag) Set(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.EqualFold(raw, "true") {
+		raw = "auto"
+	}
+
+	f.value = raw
+	f.set = true
+
+	return nil
+}
+
+func (f *autoFlag) String() string {
+	if f == nil || !f.set {
+		return ""
+	}
+
+	return f.value
+}
+
+// IsBoolFlag lets `--auto` be used without a value while still accepting
+// `--auto=<mode>`.
+func (f *autoFlag) IsBoolFlag() bool { return true }
+
 type generationSettings struct {
 	Temperature    *float64
 	TopP           *float64
@@ -482,6 +513,8 @@ type cliOptions struct {
 	seed                               nonNegativeIntFlag
 	modelMode                          string
 	autonomy                           autonomyFlag
+	auto                               autoFlag
+	autoMaxDepth                       int
 	reasoningLevel                     string
 	temperature                        floatFlag
 	evaluationCost                     floatFlag

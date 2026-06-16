@@ -15,6 +15,38 @@ import (
 
 const reviewerAgentName = "reviewer"
 
+func TestRegistry_UpsertOverridesExisting(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(map[string]config.AgentConfig{
+		"writer": {Model: "claude-sonnet-4-20250514"},
+	})
+
+	// Insert a new agent.
+	registry.Upsert(Agent{Name: "explorer", SystemPrompt: "explore"})
+	explorer, ok := registry.Get("explorer")
+	require.True(t, ok)
+	assert.Equal(t, "explore", explorer.SystemPrompt)
+
+	// Replace an existing agent.
+	registry.Upsert(Agent{Name: "writer", SystemPrompt: "rewritten"})
+	writer, ok := registry.Get("writer")
+	require.True(t, ok)
+	assert.Equal(t, "rewritten", writer.SystemPrompt)
+
+	// A blank name is ignored.
+	registry.Upsert(Agent{Name: "   ", SystemPrompt: "ignored"})
+	assert.Equal(t, []string{"explorer", "writer"}, registry.List())
+}
+
+func TestRegistry_UpsertNilReceiver(t *testing.T) {
+	t.Parallel()
+
+	var registry *Registry
+
+	assert.NotPanics(t, func() { registry.Upsert(Agent{Name: "x"}) })
+}
+
 func TestRegistry_GetAndList(t *testing.T) {
 	t.Parallel()
 

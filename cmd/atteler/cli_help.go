@@ -16,6 +16,7 @@ const (
 	helpSelectorSession       = "session"
 	configDomainName          = "config"
 	outputFlagName            = "output"
+	autoFlagName              = "auto"
 	noLegacyDeprecationNotice = "No legacy flag is deprecated in this release."
 )
 
@@ -335,6 +336,7 @@ func lookupFlagDomain(name string) (string, bool) {
 
 	switch {
 	case name == "once" || name == "stdin" || name == "output" || name == "autonomy" || name == "headless" ||
+		name == autoFlagName || name == "auto-max-depth" ||
 		name == "list-headless" || name == "stream-headless" ||
 		name == "status-headless" || name == "cancel-headless" || name == "recover-headless" ||
 		name == "retry-headless" || name == "retry-headless-id" || name == "cleanup-headless" ||

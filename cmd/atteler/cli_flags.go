@@ -400,6 +400,8 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.BoolVar(&opts.doctorOffline, "doctor-offline", false, "print offline readiness diagnostics without provider health checks and exit")
 	fs.BoolVar(&opts.readStdin, "stdin", false, "append stdin to a one-shot prompt")
 	fs.BoolVar(&opts.headless, "headless", false, "run one-shot prompt without TUI output while recording headless metadata and logs")
+	fs.Var(&opts.auto, autoFlagName, "orchestrator auto mode: the model forks atteler into worker sub-agents (bare --auto uses the default mode; --auto=<mode> selects one, e.g. --auto=bug-hunt)")
+	fs.IntVar(&opts.autoMaxDepth, "auto-max-depth", 2, "maximum recursion depth for --auto self-forking before auto mode is suppressed")
 	fs.StringVar(&opts.headlessID, "headless-id", "", "set the file-name run ID for a --headless one-shot run so automation can monitor or cancel it")
 	fs.BoolVar(&opts.headlessPrivateLog, "headless-private-log", false, "store unredacted headless prompts, errors, event summaries, and logs; use only for local private runs")
 	fs.BoolVar(&opts.showVersion, "version", false, "print version and exit")

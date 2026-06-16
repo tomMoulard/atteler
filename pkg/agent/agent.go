@@ -153,6 +153,26 @@ func (a Agent) FilterTools(tools []llm.ToolDefinition) []llm.ToolDefinition {
 	return filtered
 }
 
+// Upsert inserts or replaces an agent by name. It is used to merge built-in
+// personas (such as the auto-mode orchestrator and its workers) into a registry
+// loaded from config. A trimmed-empty name is ignored.
+func (r *Registry) Upsert(a Agent) {
+	if r == nil {
+		return
+	}
+
+	a.Name = strings.TrimSpace(a.Name)
+	if a.Name == "" {
+		return
+	}
+
+	if r.agents == nil {
+		r.agents = make(map[string]Agent, 1)
+	}
+
+	r.agents[a.Name] = a
+}
+
 // Get returns a named agent.
 func (r *Registry) Get(name string) (Agent, bool) {
 	if r == nil {
