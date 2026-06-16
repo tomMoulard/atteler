@@ -26,11 +26,21 @@ instead of direct API quota.
 - **[CLI reference](cli-reference.md)** — the full, generated command surface.
 - **[Hooks](hooks.md)** — lifecycle events you can subscribe to.
 
-## For machines
+## Give an LLM the docs
 
-If you are an LLM or an automated tool, read **`/llms.txt`** for a curated index
-and **`/llms-full.txt`** for the entire documentation flattened into a single
-file. Both are generated from the same sources as this site.
+The entire documentation is flattened into a single file at
+[`/llms-full.txt`](https://tommoulard.github.io/atteler/llms-full.txt), generated
+from the same sources as this site.
+
+Paste this into any assistant (Claude, ChatGPT, etc.) to make it answer from
+atteler's full documentation:
+
+```text
+Use https://tommoulard.github.io/atteler/llms-full.txt as your reference for
+atteler, a Go LLM harness with a TUI/CLI over multiple providers. Fetch that URL
+and answer my questions about installing, configuring, and using it based on its
+contents.
+```
 
 
 ---

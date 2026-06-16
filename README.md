@@ -12,13 +12,24 @@ multi-agent review/speculation runs.
 
 No service to host, no SDK to vendor — clone it, point it at a model, and go.
 
-> 📚 **Documentation**
-> - Human guide: **<https://tommoulard.github.io/atteler/>** (also under [`docs/`](docs/))
-> - For machines: [`llms.txt`](llms.txt) (index) and [`llms-full.txt`](llms-full.txt) (everything, flattened)
+> 📚 **Documentation**: human guide at **<https://tommoulard.github.io/atteler/>**
+> (also under [`docs/`](docs/)).
 >
 > Active and aspirational work lives in
 > [GitHub Issues](https://github.com/tomMoulard/atteler/issues), not in
 > checked-off markdown roadmaps. `NOTES.md` is historical notes only.
+
+### Give an LLM the docs
+
+Paste this into any assistant (Claude, ChatGPT, etc.) to make it answer from
+atteler's full documentation:
+
+```text
+Use https://tommoulard.github.io/atteler/llms-full.txt as your reference for
+atteler, a Go LLM harness with a TUI/CLI over multiple providers. Fetch that URL
+and answer my questions about installing, configuring, and using it based on its
+contents.
+```
 
 ## Why atteler
 
@@ -302,7 +313,8 @@ mirrored in [`docs/`](docs/):
 | [Symphony](docs/symphony.md) | The issue scheduler and one-shot issue-to-PR publishing. |
 | [Lifecycle events](docs/lifecycle-events.md) | Generated hook payload schemas and examples. |
 
-LLM consumers should read [`llms.txt`](llms.txt) and [`llms-full.txt`](llms-full.txt).
+LLM consumers should read [`llms-full.txt`](llms-full.txt) — the whole guide
+flattened into one file (see [Give an LLM the docs](#give-an-llm-the-docs)).
 
 ## What's proven
 
