@@ -30,6 +30,8 @@ publish:
   rework_optional_checks: false
   check_interval_ms: 30000
   max_check_rework_attempts: 3
+  git_user_name: tommoulard
+  git_user_email: tom@moulard.org
 debug:
   enabled: true
   address: 127.0.0.1:34000
@@ -48,8 +50,8 @@ hooks:
 polling:
   interval_ms: 30000
 agent:
-  max_concurrent_agents: 2
-  max_turns: 8
+  max_concurrent_agents: 1
+  max_turns: 12
   max_retry_backoff_ms: 300000
 codex:
   command: codex app-server
