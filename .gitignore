@@ -11,3 +11,6 @@
 **/.atteler/codeintel-index*.json
 /.symphony/workspaces/
 cmd/atteler/.atteler/
+
+# MkDocs build output
+/site/

@@ -1,0 +1,57 @@
+site_name: Atteler
+site_description: A Go-only LLM harness — TUI/CLI over multiple providers.
+site_url: https://tommoulard.github.io/atteler/
+repo_url: https://github.com/tomMoulard/atteler
+repo_name: tomMoulard/atteler
+docs_dir: docs
+
+# Generated fragments are included into pages via pymdownx.snippets; they must
+# not also be built as standalone pages.
+exclude_docs: |
+  generated/
+  requirements.txt
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Common workflows: common-workflows.md
+  - Configuration: configuration.md
+  - Providers: providers.md
+  - Hooks: hooks.md
+  - CLI reference: cli-reference.md
+  - Architecture: architecture.md
+  - Reference:
+      - Lifecycle events: lifecycle-events.md
+      - Symphony: symphony.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path:
+        - docs
+      check_paths: true
+
+plugins:
+  - search
