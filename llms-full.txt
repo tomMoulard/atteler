@@ -429,6 +429,9 @@ default_model: gpt-4.1-mini
 fallback_models: ["gpt-4.1", "gpt-4.1-nano"]
 autonomy: medium
 
+# auto: true        # default interactive sessions into orchestrator mode
+                    # (true => "auto" playbook; or name one, e.g. auto: bug-hunt)
+
 model_aliases:
   fast: openai/gpt-4.1-mini
 
@@ -447,6 +450,17 @@ Bare model names resolve only by exact provider-catalog claim, a `model_aliases`
 entry, or a `models.<role>` entry. If two providers claim the same bare name,
 Atteler reports the collision unless `default_provider`/`default_model` or a role
 routing policy makes the choice deterministic.
+
+### Auto mode
+
+`auto` defaults **interactive** sessions into orchestrator ("auto") mode, in
+which the main model forks atteler into worker sub-agents through the bash tool.
+Accepts a boolean (`auto: true` behaves exactly like passing `--auto`, selecting
+the default `auto` playbook) or a mode name (`auto: bug-hunt`). It applies to the
+TUI only — headless one-shots stay opt-in via `--auto`, and a `--auto`/`--auto=<mode>`
+flag always overrides the config value. Because forking needs the bash tool,
+auto mode raises the autonomy floor to `medium`. See `--auto-max-depth` for the
+recursion cap.
 
 ### Providers
 

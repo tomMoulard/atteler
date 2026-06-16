@@ -496,7 +496,7 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 			diagnostics = append(diagnostics, inspectModelRoles(path, value)...)
 		case "autonomy":
 			diagnostics = append(diagnostics, inspectAutonomy(path, value)...)
-		case "default_provider", fieldDefaultModel, "event_ledger_path", "fallback_models":
+		case "default_provider", fieldDefaultModel, "event_ledger_path", "fallback_models", "auto":
 			return
 		default:
 			diagnostics = append(diagnostics, unknownDiagnostic(path, key))

@@ -78,6 +78,32 @@ func TestE2EAutoModeRejectsUnknownMode(t *testing.T) {
 	assertContains(t, result.stderr, "unknown auto mode")
 }
 
+// TestE2EAutoConfigDefaultIgnoredInHeadless verifies that the `auto:` config
+// default applies to interactive runs only: a headless one-shot must stay an
+// ordinary single agent unless --auto is passed explicitly.
+func TestE2EAutoConfigDefaultIgnoredInHeadless(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	configPath := filepath.Join(workDir, "atteler.yaml")
+	writeFile(t, configPath, "auto: auto\n")
+	replayPath := writeReplayResponse(t, workDir)
+
+	result := runOK(t, runSpec{dir: workDir},
+		"--config", configPath,
+		"--headless", "--autonomy", "high",
+		"--replay-response", replayPath,
+		"--output", "json",
+		"--once", "implement the feature",
+	)
+
+	var report struct {
+		Agent string `json:"agent"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.stdout), &report))
+	require.NotEqual(t, "auto", report.Agent, "config auto default must not activate headless runs")
+}
+
 // TestE2EAutoModeForksChildViaBash is the end-to-end eval for the self-fork
 // feature. A scripted mock Anthropic endpoint makes the orchestrator issue a
 // bash tool call that spawns a real child atteler process (running the explorer

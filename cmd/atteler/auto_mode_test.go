@@ -41,7 +41,7 @@ func TestAutonomyFromConfigOptions_AutoLeavesToolLevelUntouched(t *testing.T) {
 func TestResolveAutoModePlan_InactiveWhenUnset(t *testing.T) {
 	t.Parallel()
 
-	plan, err := resolveAutoModePlan(cliOptions{})
+	plan, err := resolveAutoModePlan(cliOptions{}, appconfig.Config{})
 	require.NoError(t, err)
 	assert.False(t, plan.active)
 	assert.False(t, plan.downgraded)
@@ -52,7 +52,7 @@ func TestResolveAutoModePlan_ActiveForValidMode(t *testing.T) {
 
 	opts := cliOptions{autoMaxDepth: 2, auto: autoFlag{value: "bug-hunt", set: true}}
 
-	plan, err := resolveAutoModePlan(opts)
+	plan, err := resolveAutoModePlan(opts, appconfig.Config{})
 	require.NoError(t, err)
 	assert.True(t, plan.active)
 	assert.Equal(t, "bug-hunt", plan.mode.Name)
@@ -64,7 +64,7 @@ func TestResolveAutoModePlan_UnknownModeErrors(t *testing.T) {
 
 	opts := cliOptions{autoMaxDepth: 2, auto: autoFlag{value: "nope", set: true}}
 
-	_, err := resolveAutoModePlan(opts)
+	_, err := resolveAutoModePlan(opts, appconfig.Config{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown auto mode")
 }
@@ -74,11 +74,52 @@ func TestResolveAutoModePlan_DowngradesAtDepthCap(t *testing.T) {
 
 	opts := cliOptions{autoMaxDepth: 2, auto: autoFlag{value: "auto", set: true}}
 
-	plan, err := resolveAutoModePlan(opts)
+	plan, err := resolveAutoModePlan(opts, appconfig.Config{})
 	require.NoError(t, err)
 	assert.False(t, plan.active)
 	assert.True(t, plan.downgraded)
 	assert.Equal(t, 2, plan.currentDepth)
+}
+
+func TestAutoModeRequest_FlagWinsOverConfig(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{auto: autoFlag{value: "bug-hunt", set: true}}
+	mode, requested := autoModeRequest(opts, appconfig.Config{Auto: "auto"})
+	require.True(t, requested)
+	assert.Equal(t, "bug-hunt", mode)
+}
+
+func TestAutoModeRequest_ConfigDefaultInteractiveOnly(t *testing.T) {
+	t.Parallel()
+
+	cfg := appconfig.Config{Auto: "auto"}
+
+	// Interactive run: config default applies.
+	mode, requested := autoModeRequest(cliOptions{}, cfg)
+	require.True(t, requested)
+	assert.Equal(t, "auto", mode)
+
+	// Headless run: config default does NOT apply (stays opt-in via --auto).
+	_, requested = autoModeRequest(cliOptions{headless: true}, cfg)
+	assert.False(t, requested)
+}
+
+func TestResolveAutoModePlan_ConfigDefaultActivatesInteractive(t *testing.T) {
+	t.Setenv("ATTELER_AUTO_DEPTH", "")
+
+	plan, err := resolveAutoModePlan(cliOptions{autoMaxDepth: 2}, appconfig.Config{Auto: "bug-hunt"})
+	require.NoError(t, err)
+	assert.True(t, plan.active)
+	assert.Equal(t, "bug-hunt", plan.mode.Name)
+}
+
+func TestResolveAutoModePlan_ConfigDefaultIgnoredInHeadless(t *testing.T) {
+	t.Setenv("ATTELER_AUTO_DEPTH", "")
+
+	plan, err := resolveAutoModePlan(cliOptions{autoMaxDepth: 2, headless: true}, appconfig.Config{Auto: "auto"})
+	require.NoError(t, err)
+	assert.False(t, plan.active)
 }
 
 func TestApplyAutoMode_RegistersOrchestratorSelectsAndSetsDepth(t *testing.T) {

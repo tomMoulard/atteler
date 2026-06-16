@@ -3,6 +3,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,7 @@ type Config struct {
 	Generation      GenerationConfig           `json:"generation" yaml:"generation"`
 	AgentLoop       AgentLoopConfig            `json:"agent_loop" yaml:"agent_loop"`
 	Autonomy        string                     `json:"autonomy,omitempty" yaml:"autonomy,omitempty"`
+	Auto            string                     `json:"auto,omitempty" yaml:"auto,omitempty"`
 	DefaultProvider string                     `json:"default_provider,omitempty" yaml:"default_provider,omitempty"`
 	DefaultModel    string                     `json:"default_model,omitempty" yaml:"default_model,omitempty"`
 	EventLedgerPath string                     `json:"event_ledger_path,omitempty" yaml:"event_ledger_path,omitempty"`
@@ -447,6 +449,76 @@ func (w WorktreeConfig) MarshalYAML() (any, error) {
 	return out, nil
 }
 
+// defaultAutoModeName is the orchestration mode selected when `auto` is enabled
+// via a boolean/truthy value. It mirrors autopilot.DefaultMode, duplicated here
+// to avoid a config -> autopilot -> agent -> config import cycle.
+const defaultAutoModeName = "auto"
+
+// AutoMode is the configured default orchestration mode for interactive runs.
+// It accepts either a YAML/JSON boolean (true => the default "auto" mode) or a
+// mode-name string ("auto", "bug-hunt"); falsey values disable it. The mode
+// name is validated at run time, not here.
+type AutoMode string
+
+// UnmarshalYAML accepts a boolean or a string scalar.
+func (a *AutoMode) UnmarshalYAML(value *yaml.Node) error {
+	var asBool bool
+	if err := value.Decode(&asBool); err == nil {
+		*a = autoModeFromBool(asBool)
+
+		return nil
+	}
+
+	var asString string
+	if err := value.Decode(&asString); err != nil {
+		return fmt.Errorf("auto: expected a boolean or mode name: %w", err)
+	}
+
+	*a = AutoMode(normalizeAutoMode(asString))
+
+	return nil
+}
+
+// UnmarshalJSON accepts a boolean or a string.
+func (a *AutoMode) UnmarshalJSON(data []byte) error {
+	var asBool bool
+	if err := json.Unmarshal(data, &asBool); err == nil {
+		*a = autoModeFromBool(asBool)
+
+		return nil
+	}
+
+	var asString string
+	if err := json.Unmarshal(data, &asString); err != nil {
+		return fmt.Errorf("auto: expected a boolean or mode name: %w", err)
+	}
+
+	*a = AutoMode(normalizeAutoMode(asString))
+
+	return nil
+}
+
+func autoModeFromBool(enabled bool) AutoMode {
+	if enabled {
+		return AutoMode(defaultAutoModeName)
+	}
+
+	return ""
+}
+
+// normalizeAutoMode maps truthy/falsey words to the default mode or off, and
+// passes any other value through as a mode name.
+func normalizeAutoMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "off", "false", "no", "disabled":
+		return ""
+	case "on", "true", "yes", "enabled", "default":
+		return defaultAutoModeName
+	default:
+		return strings.TrimSpace(raw)
+	}
+}
+
 //nolint:govet // fieldalignment: field order follows config-file grouping; deprecated aliases stay last.
 type fileConfig struct {
 	Version         *int                           `json:"version" yaml:"version"`
@@ -458,6 +530,7 @@ type fileConfig struct {
 	Vector          fileVectorConfig               `json:"vector" yaml:"vector"`
 	Worktree        fileWorktreeConfig             `json:"worktree" yaml:"worktree"`
 	Autonomy        *string                        `json:"autonomy" yaml:"autonomy"`
+	Auto            *AutoMode                      `json:"auto" yaml:"auto"`
 	DefaultProvider *string                        `json:"default_provider" yaml:"default_provider"`
 	DefaultModel    *string                        `json:"default_model" yaml:"default_model"`
 	EventLedgerPath *string                        `json:"event_ledger_path" yaml:"event_ledger_path"`
@@ -941,6 +1014,11 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 	if src.Autonomy != nil {
 		dst.Autonomy = strings.TrimSpace(*src.Autonomy)
 		rec.set("autonomy", source, dst.Autonomy)
+	}
+
+	if src.Auto != nil {
+		dst.Auto = string(*src.Auto)
+		rec.set("auto", source, dst.Auto)
 	}
 
 	if src.FallbackModels != nil {

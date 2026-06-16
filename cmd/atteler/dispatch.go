@@ -1254,7 +1254,7 @@ func autonomyFromConfigOptions(cfg appconfig.Config, opts cliOptions) (autonomy.
 
 	// Auto mode needs the bash tool to fork worker children, so raise the floor
 	// to the tool-allowing default when the resolved level is advisory-only.
-	if opts.auto.set && !level.AllowsAgentTools() {
+	if _, autoRequested := autoModeRequest(opts, cfg); autoRequested && !level.AllowsAgentTools() {
 		level = autonomy.Medium
 	}
 
@@ -1270,17 +1270,37 @@ type autoModePlan struct {
 	maxDepth     int
 }
 
-// resolveAutoModePlan validates the --auto flag and reads the current recursion
-// depth. When the depth budget is exhausted the plan is marked downgraded so the
-// run proceeds as an ordinary single agent instead of forking further.
-func resolveAutoModePlan(opts cliOptions) (autoModePlan, error) {
-	if !opts.auto.set {
+// autoModeRequest reports the requested orchestration mode and whether auto
+// mode was asked for. The --auto flag wins; otherwise the config `auto:` default
+// applies to interactive (non-headless) runs only, so headless one-shots stay
+// strictly opt-in.
+func autoModeRequest(opts cliOptions, cfg appconfig.Config) (string, bool) {
+	if opts.auto.set {
+		return opts.auto.value, true
+	}
+
+	if !opts.headless {
+		if mode := strings.TrimSpace(cfg.Auto); mode != "" {
+			return mode, true
+		}
+	}
+
+	return "", false
+}
+
+// resolveAutoModePlan resolves the requested auto mode (from --auto or the
+// interactive config default) and reads the current recursion depth. When the
+// depth budget is exhausted the plan is marked downgraded so the run proceeds as
+// an ordinary single agent instead of forking further.
+func resolveAutoModePlan(opts cliOptions, cfg appconfig.Config) (autoModePlan, error) {
+	modeName, requested := autoModeRequest(opts, cfg)
+	if !requested {
 		return autoModePlan{}, nil
 	}
 
-	mode, ok := autopilot.ModeByName(opts.auto.value)
+	mode, ok := autopilot.ModeByName(modeName)
 	if !ok {
-		return autoModePlan{}, fmt.Errorf("unknown auto mode %q (known: %s)", opts.auto.value, strings.Join(autopilot.ModeNames(), ", "))
+		return autoModePlan{}, fmt.Errorf("unknown auto mode %q (known: %s)", modeName, strings.Join(autopilot.ModeNames(), ", "))
 	}
 
 	maxDepth := max(opts.autoMaxDepth, 0)
@@ -1425,7 +1445,7 @@ func loadAppState(ctx context.Context, opts cliOptions) (appState, error) {
 
 	store := session.NewStore(opts.sessionDir)
 
-	autoPlan, err := resolveAutoModePlan(opts)
+	autoPlan, err := resolveAutoModePlan(opts, cfg)
 	if err != nil {
 		return appState{}, err
 	}
