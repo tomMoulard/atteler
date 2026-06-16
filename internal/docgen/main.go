@@ -144,7 +144,17 @@ func generateFragments(ctx context.Context, root string) error {
 		return err
 	}
 
-	return writeFragment(filepath.Join(genDir, "hook-events.md"), rendered)
+	err = writeFragment(filepath.Join(genDir, "hook-events.md"), rendered)
+	if err != nil {
+		return err
+	}
+
+	options, err := renderCLIOptions(root)
+	if err != nil {
+		return err
+	}
+
+	return writeFragment(filepath.Join(genDir, "cli-options.md"), options)
 }
 
 // writeFragment prepends the DO NOT EDIT header (unless the body already starts

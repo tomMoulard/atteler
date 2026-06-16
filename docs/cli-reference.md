@@ -14,3 +14,11 @@ atteler --command-surface-json    # machine-readable JSON
 ```
 
 --8<-- "generated/cli-surface.md"
+
+## Options (flags)
+
+Every CLI option below has its own section with its type, default, and an
+example. This list is generated from the actual flag registrations, so it always
+matches the binary.
+
+--8<-- "generated/cli-options.md"
