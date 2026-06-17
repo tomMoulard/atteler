@@ -1,3 +1,4 @@
 # Pinned toolchain for building the documentation site (MkDocs Material).
 # Used by .github/workflows/docs.yml and for local `mkdocs serve`.
 mkdocs-material==9.6.20
+mike==2.2.0

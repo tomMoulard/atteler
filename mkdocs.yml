@@ -9,6 +9,7 @@ docs_dir: docs
 # not also be built as standalone pages.
 exclude_docs: |
   generated/
+  mkdocs_hooks.py
   requirements.txt
 
 theme:
@@ -61,10 +62,17 @@ extra_css:
   - stylesheets/extra.css
 
 extra:
+  version:
+    provider: mike
+    default: main
+    alias: true
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/tomMoulard/atteler
       name: Atteler on GitHub
+
+hooks:
+  - docs/mkdocs_hooks.py
 
 nav:
   - Home: index.md

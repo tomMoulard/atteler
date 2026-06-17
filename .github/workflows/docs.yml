@@ -4,28 +4,32 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "*"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  group: docs-pages
+  cancel-in-progress: false
 
 jobs:
   build:
-    name: Build MkDocs site
+    name: Build versioned MkDocs site
     runs-on: ubuntu-latest
     # pages: write lets configure-pages enable GitHub Pages via the API, so no
     # manual Settings → Pages toggle is required to bootstrap the site.
     permissions:
-      contents: read
+      contents: write
       pages: write
       id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Configure GitHub Pages (enable if needed)
         uses: actions/configure-pages@v5
@@ -41,11 +45,58 @@ jobs:
       - name: Install MkDocs Material
         run: pip install -r docs/requirements.txt
 
-      - name: Build site
+      - name: Build site smoke test
         run: mkdocs build --strict
 
-      - name: Publish LLM docs at site root
-        run: cp llms.txt llms-full.txt site/
+      - name: Configure docs git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config commit.gpgsign false
+
+      - name: Fetch existing versioned docs
+        run: git fetch origin gh-pages --depth=1 || true
+
+      - name: Publish versioned docs
+        run: |
+          set -euo pipefail
+          trap 'git worktree remove --force gh-pages-worktree 2>/dev/null || true' EXIT
+
+          version="main"
+          aliases=()
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            aliases=("latest")
+          fi
+
+          mike deploy --branch gh-pages --alias-type redirect --update-aliases "${version}" "${aliases[@]}"
+
+          if [[ "${version}" == "main" ]]; then
+            mike set-default --branch gh-pages main
+          fi
+
+          rm -rf gh-pages-worktree
+          git worktree add gh-pages-worktree gh-pages
+
+          if [[ -d gh-pages-worktree/main ]]; then
+            python scripts/docs-legacy-redirects.py gh-pages-worktree main
+            git -C gh-pages-worktree add .
+            if ! git -C gh-pages-worktree diff --cached --quiet; then
+              git -C gh-pages-worktree commit -m "Update legacy documentation redirects"
+            fi
+          else
+            echo "Skipping legacy redirects because /main has not been deployed yet"
+          fi
+
+          git push origin gh-pages
+
+      - name: Stage Pages artifact
+        run: |
+          rm -rf site
+          mkdir -p site
+          git archive gh-pages | tar -x -C site
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

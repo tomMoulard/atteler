@@ -12,8 +12,10 @@ multi-agent review/speculation runs.
 
 No service to host, no SDK to vendor — clone it, point it at a model, and go.
 
-> 📚 **Documentation**: human guide at **<https://tommoulard.github.io/atteler/>**
-> (also under [`docs/`](docs/)).
+> 📚 **Documentation**: human guide at **<https://tommoulard.github.io/atteler/main/>**
+> with release snapshots under versioned URLs such as
+> **<https://tommoulard.github.io/atteler/v0.0.7/>** (sources live under
+> [`docs/`](docs/)).
 >
 > Active and aspirational work lives in
 > [GitHub Issues](https://github.com/tomMoulard/atteler/issues), not in
@@ -25,7 +27,7 @@ Paste this into any assistant (Claude, ChatGPT, etc.) to make it answer from
 atteler's full documentation:
 
 ```text
-Use https://tommoulard.github.io/atteler/llms-full.txt as your reference for
+Use https://tommoulard.github.io/atteler/main/llms-full.txt as your reference for
 atteler, a Go LLM harness with a TUI/CLI over multiple providers. Fetch that URL
 and answer my questions about installing, configuring, and using it based on its
 contents.
@@ -298,8 +300,13 @@ The max-output column is catalog metadata about model limits; request-level `Com
 
 ## Documentation
 
-The full guide is published at **<https://tommoulard.github.io/atteler/>** and
-mirrored in [`docs/`](docs/):
+The full guide is published at **<https://tommoulard.github.io/atteler/main/>**,
+with immutable release snapshots under URLs such as
+**<https://tommoulard.github.io/atteler/v0.0.7/>**. The source pages are mirrored
+in [`docs/`](docs/):
+
+Existing unversioned page URLs redirect to `main` for compatibility; use the
+versioned URLs when linking to behavior for a specific Atteler release.
 
 | Page | What's inside |
 | --- | --- |
@@ -313,8 +320,10 @@ mirrored in [`docs/`](docs/):
 | [Symphony](docs/symphony.md) | The issue scheduler and one-shot issue-to-PR publishing. |
 | [Lifecycle events](docs/lifecycle-events.md) | Generated hook payload schemas and examples. |
 
-LLM consumers should read [`llms-full.txt`](llms-full.txt) — the whole guide
-flattened into one file (see [Give an LLM the docs](#give-an-llm-the-docs)).
+LLM consumers should read the version-specific `llms-full.txt`, for example
+<https://tommoulard.github.io/atteler/main/llms-full.txt> for current `main`, or
+[`llms-full.txt`](llms-full.txt) locally — the whole guide flattened into one
+file (see [Give an LLM the docs](#give-an-llm-the-docs)).
 
 ## What's proven
 
@@ -353,8 +362,9 @@ Local development uses the Makefile as the main build surface:
 - `make release-check` validates `.goreleaser.yaml`.
 
 GitHub Actions runs CI on pull requests and branch pushes, builds and deploys the
-documentation site to GitHub Pages on pushes to `main`, and packages a release
-via GoReleaser when a semantic version tag such as `v0.1.0` is pushed.
+versioned documentation site to GitHub Pages under `/main/` on pushes to `main`
+and under `/vX.Y.Z/` on release tags, and packages a release via GoReleaser when
+a semantic version tag such as `v0.1.0` is pushed.
 
 ## License
 

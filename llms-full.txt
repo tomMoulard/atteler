@@ -26,17 +26,33 @@ instead of direct API quota.
 - **[CLI reference](cli-reference.md)** — the full, generated command surface.
 - **[Hooks](hooks.md)** — lifecycle events you can subscribe to.
 
+## Versioned documentation
+
+Documentation is published per version so links can stay stable even when
+configuration options, commands, or provider behavior change later:
+
+- **[`/main/`](https://tommoulard.github.io/atteler/main/)** is rebuilt from
+  the `main` branch on every push.
+- **`/vX.Y.Z/`** snapshots, such as
+  [`/v0.0.7/`](https://tommoulard.github.io/atteler/v0.0.7/), are published
+  from release tags and remain available for users on older releases.
+
+Use the version selector in the header to switch between the same page in
+another published version when it exists. Existing unversioned page links
+redirect to `main` for compatibility, but new references should use a versioned
+URL such as `/main/configuration/#local` or `/v0.0.7/configuration/#local`.
+
 ## Give an LLM the docs
 
-The entire documentation is flattened into a single file at
-[`/llms-full.txt`](https://tommoulard.github.io/atteler/llms-full.txt), generated
-from the same sources as this site.
+Each documentation version includes a flattened LLM reference generated from the
+same sources as that version of the site. For the current `main` docs, use
+[`/main/llms-full.txt`](https://tommoulard.github.io/atteler/main/llms-full.txt).
 
 Paste this into any assistant (Claude, ChatGPT, etc.) to make it answer from
-atteler's full documentation:
+atteler's current `main` documentation:
 
 ```text
-Use https://tommoulard.github.io/atteler/llms-full.txt as your reference for
+Use https://tommoulard.github.io/atteler/main/llms-full.txt as your reference for
 atteler, a Go LLM harness with a TUI/CLI over multiple providers. Fetch that URL
 and answer my questions about installing, configuring, and using it based on its
 contents.
