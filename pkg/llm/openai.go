@@ -12,6 +12,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/permission"
@@ -35,7 +36,6 @@ const (
 type OpenAIProvider struct {
 	client         *http.Client
 	apiKey         string
-	baseURL        string
 	providerName   string
 	authHeader     string
 	authScheme     string
@@ -43,10 +43,15 @@ type OpenAIProvider struct {
 	embeddingsPath string
 	modelsPath     string
 	apiVersion     string
-	staticModels   []string
-	capabilities   []string
-	bearer         bool
-	local          bool
+	// baseURL can be rewritten at runtime when OpenAI reports a regional
+	// hostname mismatch (see applyRegionalHostnameCorrection); access it through
+	// currentBaseURL so reads and writes are serialized by mu.
+	baseURL      string
+	staticModels []string
+	capabilities []string
+	mu           sync.RWMutex
+	bearer       bool
+	local        bool
 }
 
 // NewOpenAIProvider is kept for source compatibility only.
@@ -347,12 +352,26 @@ type openaiModelsResponse struct {
 	} `json:"data"`
 }
 
-// FetchModels queries GET /v1/models to discover available models.
+// FetchModels queries GET /v1/models to discover available models. When OpenAI
+// reports a regional hostname mismatch it rewrites the base URL and retries.
 func (o *OpenAIProvider) FetchModels(ctx context.Context) ([]string, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, err
 	}
 
+	var models []string
+
+	err := o.withRegionalRetry(func() error {
+		out, fetchErr := o.fetchModels(ctx)
+		models = out
+
+		return fetchErr
+	})
+
+	return models, err
+}
+
+func (o *OpenAIProvider) fetchModels(ctx context.Context) ([]string, error) {
 	endpoint, err := o.endpointURL(o.effectiveModelsPath(), "")
 	if err != nil {
 		return nil, err
@@ -518,12 +537,23 @@ type openaiEmbeddingData struct {
 }
 
 // Complete performs a chat completion using the OpenAI Chat Completions API.
+// When OpenAI reports a regional hostname mismatch it rewrites the base URL and
+// retries.
 func (o *OpenAIProvider) Complete(ctx context.Context, params CompleteParams) (*Response, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, err
 	}
 
-	return o.complete(ctx, params)
+	var resp *Response
+
+	err := o.withRegionalRetry(func() error {
+		out, completeErr := o.complete(ctx, params)
+		resp = out
+
+		return completeErr
+	})
+
+	return resp, err
 }
 
 func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*Response, error) {
@@ -609,7 +639,14 @@ func (o *OpenAIProvider) Embed(ctx context.Context, params EmbeddingParams) (*Em
 		return nil, errors.New("openai: embedding input cannot be empty")
 	}
 
-	respBody, err := o.sendEmbeddingRequest(ctx, params)
+	var respBody []byte
+
+	err := o.withRegionalRetry(func() error {
+		out, sendErr := o.sendEmbeddingRequest(ctx, params)
+		respBody = out
+
+		return sendErr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -793,6 +830,82 @@ func (o *OpenAIProvider) effectiveEmbeddingsPath() string {
 	return defaultOpenAIEmbeddingsPath
 }
 
+// currentBaseURL returns the provider base URL under a read lock so concurrent
+// requests observe a consistent value even while applyRegionalHostnameCorrection
+// rewrites it.
+func (o *OpenAIProvider) currentBaseURL() string {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	return o.baseURL
+}
+
+// withRegionalRetry runs attempt and, when OpenAI rejects the request because it
+// reached the wrong regional API host, rewrites the base URL to the host OpenAI
+// asked for and retries exactly once. Non-regional errors are returned as-is.
+func (o *OpenAIProvider) withRegionalRetry(attempt func() error) error {
+	err := attempt()
+	if err == nil || !o.applyRegionalHostnameCorrection(err) {
+		return err
+	}
+
+	return attempt()
+}
+
+// applyRegionalHostnameCorrection rewrites the provider base URL to the regional
+// host named in err when err is an OpenAI regional hostname mismatch and the
+// current base URL is an api.openai.com host. It reports whether the base URL
+// changed so callers know a retry is worthwhile. Custom or proxy base URLs are
+// left untouched: only OpenAI itself emits this error, and a third-party host
+// reporting it should be surfaced rather than silently repointed at OpenAI.
+func (o *OpenAIProvider) applyRegionalHostnameCorrection(err error) bool {
+	if !isOpenAIRegionalHostnameError(err) {
+		return false
+	}
+
+	host := openAIRegionalHostname(err.Error())
+	if host == "" {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	corrected, ok := rebaseURLHost(o.baseURL, host)
+	if !ok || corrected == o.baseURL {
+		return false
+	}
+
+	o.baseURL = corrected
+
+	return true
+}
+
+// rebaseURLHost returns rawURL with its host replaced by host, preserving the
+// scheme and any path. It reports false when rawURL cannot be parsed, has no
+// host, or does not point at an api.openai.com host.
+func rebaseURLHost(rawURL, host string) (string, bool) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return "", false
+	}
+
+	if !isOpenAIAPIHost(parsed.Hostname()) {
+		return "", false
+	}
+
+	parsed.Host = host
+
+	return parsed.String(), true
+}
+
+// isOpenAIAPIHost reports whether host is openai.com or a subdomain of it.
+func isOpenAIAPIHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+
+	return host == "openai.com" || strings.HasSuffix(host, ".openai.com")
+}
+
 func (o *OpenAIProvider) endpointURL(pathTemplate, model string) (string, error) {
 	pathTemplate = strings.TrimSpace(pathTemplate)
 	if pathTemplate == "" {
@@ -803,9 +916,10 @@ func (o *OpenAIProvider) endpointURL(pathTemplate, model string) (string, error)
 		return "", fmt.Errorf("%s: endpoint path %q must start with /", o.Name(), pathTemplate)
 	}
 
+	base := o.currentBaseURL()
 	path := strings.ReplaceAll(pathTemplate, "{model}", url.PathEscape(model))
-	path = o.endpointPath(path)
-	endpoint := o.baseURL + path
+	path = endpointPath(base, path)
+	endpoint := base + path
 
 	apiVersion := strings.TrimSpace(o.apiVersion)
 	if apiVersion == "" {
@@ -820,9 +934,9 @@ func (o *OpenAIProvider) endpointURL(pathTemplate, model string) (string, error)
 	return endpoint + separator + "api-version=" + url.QueryEscape(apiVersion), nil
 }
 
-func (o *OpenAIProvider) endpointPath(path string) string {
+func endpointPath(base, path string) string {
 	basePath := ""
-	if parsed, err := url.Parse(o.baseURL); err == nil {
+	if parsed, err := url.Parse(base); err == nil {
 		basePath = strings.TrimRight(parsed.EscapedPath(), "/")
 	}
 

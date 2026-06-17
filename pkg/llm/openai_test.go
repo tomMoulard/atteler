@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -415,6 +416,167 @@ func TestOpenAIProvider_RegionalHostnameCompletionErrorIncludesRemediation(t *te
 	assert.Contains(t, err.Error(), "OPENAI_BASE_URL")
 	assert.Contains(t, err.Error(), "providers.openai.base_url")
 	assert.Contains(t, err.Error(), "https://eu.api.openai.com")
+}
+
+// hostRoutingTransport records the host of every request and lets a test return
+// a different status/body per host, so regional-hostname retries can be
+// exercised without real network access.
+type hostRoutingTransport struct {
+	handler func(host string) (int, string)
+	hosts   []string
+}
+
+func (h *hostRoutingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	h.hosts = append(h.hosts, req.URL.Host)
+	status, body := h.handler(req.URL.Host)
+
+	return &http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+const regionalHostnameBody = `{"error":{"message":"Attempted to access resource with incorrect regional hostname. Please make your request to us.api.openai.com","type":"invalid_request_error"}}`
+
+func TestOpenAIProvider_RegionalHostnameFetchModelsAutoCorrects(t *testing.T) {
+	t.Parallel()
+
+	rt := &hostRoutingTransport{handler: func(host string) (int, string) {
+		switch host {
+		case "api.openai.com":
+			return http.StatusUnauthorized, regionalHostnameBody
+		case "us.api.openai.com":
+			return http.StatusOK, `{"data":[{"id":"gpt-4.1"}]}`
+		default:
+			return http.StatusNotFound, `{"error":{"message":"unexpected host ` + host + `"}}`
+		}
+	}}
+
+	p := &OpenAIProvider{
+		apiKey:       "k",
+		baseURL:      defaultOpenAIBase,
+		providerName: providerOpenAI,
+		modelsPath:   defaultOpenAIModelsPath,
+		client:       &http.Client{Transport: rt},
+	}
+
+	models, err := p.FetchModels(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gpt-4.1"}, models)
+
+	// The base URL was rewritten to the regional host OpenAI asked for, and the
+	// request was retried there.
+	assert.Equal(t, "https://us.api.openai.com", p.currentBaseURL())
+	assert.Equal(t, []string{"api.openai.com", "us.api.openai.com"}, rt.hosts)
+}
+
+func TestOpenAIProvider_RegionalHostnameCompletionAutoCorrects(t *testing.T) {
+	t.Parallel()
+
+	rt := &hostRoutingTransport{handler: func(host string) (int, string) {
+		switch host {
+		case "api.openai.com":
+			return http.StatusUnauthorized, regionalHostnameBody
+		case "us.api.openai.com":
+			return http.StatusOK, `{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}`
+		default:
+			return http.StatusNotFound, `{"error":{"message":"unexpected host ` + host + `"}}`
+		}
+	}}
+
+	p := &OpenAIProvider{
+		apiKey:       "k",
+		baseURL:      defaultOpenAIBase,
+		providerName: providerOpenAI,
+		chatPath:     defaultOpenAIChatPath,
+		client:       &http.Client{Transport: rt},
+	}
+
+	resp, err := p.Complete(context.Background(), CompleteParams{
+		Model:    "gpt-4.1",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "hi", resp.Content)
+
+	assert.Equal(t, "https://us.api.openai.com", p.currentBaseURL())
+	assert.Equal(t, []string{"api.openai.com", "us.api.openai.com"}, rt.hosts)
+}
+
+func TestOpenAIProvider_RegionalHostnameRetriesOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	// OpenAI keeps reporting a mismatch even after the correction. The provider
+	// must retry exactly once and then surface the error rather than loop.
+	rt := &hostRoutingTransport{handler: func(string) (int, string) {
+		return http.StatusUnauthorized, regionalHostnameBody
+	}}
+
+	p := &OpenAIProvider{
+		apiKey:       "k",
+		baseURL:      defaultOpenAIBase,
+		providerName: providerOpenAI,
+		modelsPath:   defaultOpenAIModelsPath,
+		client:       &http.Client{Transport: rt},
+	}
+
+	_, err := p.FetchModels(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OpenAI regional hostname mismatch")
+	assert.Equal(t, []string{"api.openai.com", "us.api.openai.com"}, rt.hosts)
+}
+
+func TestOpenAIProvider_RegionalHostnameLeavesCustomBaseURLUntouched(t *testing.T) {
+	t.Parallel()
+
+	// A non-OpenAI host (proxy, gateway) that echoes the regional error must not
+	// be silently repointed at OpenAI; the error is surfaced with remediation.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+
+		if _, err := w.Write([]byte(regionalHostnameBody)); err != nil {
+			return
+		}
+	}))
+	defer srv.Close()
+
+	p := &OpenAIProvider{apiKey: "k", baseURL: srv.URL, providerName: providerOpenAI, client: srv.Client()}
+
+	_, err := p.FetchModels(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OpenAI regional hostname mismatch")
+	assert.Equal(t, srv.URL, p.currentBaseURL())
+}
+
+func TestRebaseURLHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		rawURL string
+		host   string
+		want   string
+		wantOK bool
+	}{
+		{"openai default", "https://api.openai.com", "us.api.openai.com", "https://us.api.openai.com", true},
+		{"openai with path", "https://api.openai.com/v1", "eu.api.openai.com", "https://eu.api.openai.com/v1", true},
+		{"non-openai host", "https://proxy.example.com", "us.api.openai.com", "", false},
+		{"localhost", "http://127.0.0.1:8080", "us.api.openai.com", "", false},
+		{"unparseable", "://nope", "us.api.openai.com", "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := rebaseURLHost(tc.rawURL, tc.host)
+			assert.Equal(t, tc.wantOK, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func TestOpenAIProvider_OmitsZeroMaxTokens(t *testing.T) {
