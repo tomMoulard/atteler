@@ -1,0 +1,18 @@
+# atteler
+
+> Go-only LLM harness: a TUI/CLI over multiple providers (anthropic, claude-code,
+> codex, openai, ollama) with sessions, agents, hooks, worktrees, and multi-agent runs.
+
+This file is generated. `llms-full.txt` contains the full flattened documentation.
+
+## Documentation
+- [Atteler](docs/index.md): A Go-only LLM harness: a Bubble Tea TUI and a large CLI over multiple providers, with sessions, agents, lifecycle hooks, git-worktree isolation, and multi-agent speculative/review runs.
+- [Getting started](docs/getting-started.md): Build atteler, run it from a clone, and explore the command surface offline.
+- [Common workflows](docs/common-workflows.md): Task-oriented recipes for everyday Atteler runs, from one-shot chat to multi-agent review.
+- [Configuration](docs/configuration.md): Layered YAML/JSON configuration, generation knobs, and the routing/agent schema.
+- [Providers](docs/providers.md): The built-in LLM providers and how authentication resolves.
+- [Hooks](docs/hooks.md): Lifecycle events you can subscribe to from YAML.
+- [CLI reference](docs/cli-reference.md): The complete, generated command surface.
+- [Architecture](docs/architecture.md): An orientation map of how Atteler is put together: a Go-only LLM harness with a thin CLI/TUI shell over reusable, stateless library packages.
+- [Lifecycle hook events](docs/lifecycle-events.md): Lifecycle hook payloads use `schema_version: 1` and are filtered through the selected `payload` policy before local hooks receive them.
+- [Symphony](docs/symphony.md): Atteler includes a standalone `symphony` command that implements the Symphony service contract from OpenAI's draft specification.
