@@ -73,6 +73,7 @@ func parseOptions() cliOptions {
 	applyPositionalOptions(&opts, flag.Args())
 
 	applyDebugEnvOptions(&opts, os.Getenv)
+	applyAutoresearchShortcutOptions(&opts)
 
 	return opts
 }

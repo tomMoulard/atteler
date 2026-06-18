@@ -23,6 +23,11 @@ func TestModeByName_DefaultsAndUnknown(t *testing.T) {
 	bug, ok := autopilot.ModeByName("bug-hunt")
 	require.True(t, ok)
 	assert.Equal(t, "bug-hunt", bug.Name)
+
+	research, ok := autopilot.ModeByName("autoresearch")
+	require.True(t, ok)
+	assert.Contains(t, research.Playbook, "results.tsv")
+	assert.Contains(t, research.Playbook, "KEEP")
 }
 
 func TestRenderSystemPrompt_IncludesBinaryWorkersAndModels(t *testing.T) {

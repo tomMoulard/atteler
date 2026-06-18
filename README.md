@@ -76,6 +76,32 @@ make lint
 make build
 ```
 
+Live provider e2e checks are opt-in; set ATTELER_E2E_LIVE=1 to run live LLM e2e tests.
+
+| Test | Required credential/config | Skip message | Model override | Default model |
+|------|----------------------------|--------------|----------------|---------------|
+| `TestLiveOpenAIOneShot` | `OPENAI_API_KEY` | `OPENAI_API_KEY is required for this live e2e test` | `ATTELER_E2E_OPENAI_MODEL` | `gpt-4.1-mini` |
+| `TestLiveAnthropicOneShot` | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY is required for this live e2e test` | `ATTELER_E2E_ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` |
+| `TestLiveForgeClaudeOneShot` | `ATTELER_E2E_FORGE_CONFIG` | `ATTELER_E2E_FORGE_CONFIG is required for this live ForgeCode test`; `ForgeCode credentials not available in <dir>` | `ATTELER_E2E_FORGE_ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` |
+| `TestLiveClaudeCodeOneShot` | Claude Code login | `Claude Code login is required for this live test` | `ATTELER_E2E_CLAUDE_CODE_MODEL` | `claude-haiku-4-5-20251001` |
+| `TestLiveCodexOneShot` | Codex `auth.json` | `Codex credentials not available in <dir>` | `ATTELER_E2E_CODEX_MODEL` | `gpt-5.5` |
+
+Agent-loop budgets are optional; zero means no cap for that dimension:
+
+```yaml
+agent_loop:
+  max_output_bytes: 0
+  max_cost_micros: 0
+  max_input_tokens: 0
+  max_output_tokens: 0
+  max_total_tokens: 0
+  max_iterations: 0
+  max_model_calls: 0
+  max_tool_calls: 0
+  max_wall_time: ""
+  checkpoint_interval: 0
+```
+
 New here? Start with **[Getting started](docs/getting-started.md)**,
 **[Common workflows](docs/common-workflows.md)**, and
 **[Configuration](docs/configuration.md)**.
@@ -105,6 +131,7 @@ from the same descriptors that route the commands.
 | `config` | `atteler config paths`, `atteler config validate`, `atteler config migrate`, `atteler config report` |
 | `providers` | `atteler providers list`, `atteler providers known-models`, `atteler providers models`, `atteler providers resolve gpt-5.5`, `atteler providers ollama-status`, `atteler providers ollama-stop` |
 | `agents` | `atteler agents list`, `atteler agents plan "review auth changes"`, `atteler agents task-list` |
+| `autoresearch` | `atteler autoresearch run "Improve agent-loop recovery; keep only changes that pass make test"`, `atteler autoresearch "Reduce prompt-context cache misses and validate with go test ./cmd/atteler"`, `atteler session headless` |
 | `issue` | `atteler issue implement GH-218 --open-pr`, `atteler issue implement https://github.com/owner/repo/issues/218 --open-pr`, `atteler issue implement GH-218 --open-pr --base main --run-tests --run-lint` |
 | `memory` / `retrieval` | `atteler memory search "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm" --retrieval-source vector`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"`, `atteler memory vector-index docs/research.md` |
 | `code-intel` | `atteler code-intel summary`, `atteler code-intel summary --json`, `atteler code-intel query definitions:Run`, `atteler code-intel symbol NewRegistry`, `atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/` |

@@ -162,6 +162,26 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			args: []string{"issue", "implement", "GH-218", "--issue-workflow", "custom/WORKFLOW.md", "--update-docs", "--update-changelog"},
 			want: []string{"--issue-implement", "GH-218", "--issue-workflow", "custom/WORKFLOW.md", "--update-docs", "--update-changelog"},
 		},
+		{
+			name: "autoresearch run helper",
+			args: []string{"autoresearch", "run", "improve", "agent", "flow"},
+			want: []string{"--autoresearch", "improve agent flow"},
+		},
+		{
+			name: "autoresearch bare helper",
+			args: []string{"autoresearch", "improve", "agent", "flow"},
+			want: []string{"--autoresearch", "improve agent flow"},
+		},
+		{
+			name: "autoresearch bare helper keeps scoped flags",
+			args: []string{"autoresearch", "--model", "openai/gpt-5.4", "improve", "agent", "flow"},
+			want: []string{"--model", "openai/gpt-5.4", "--autoresearch", "improve agent flow"},
+		},
+		{
+			name: "autoresearch stdin helper keeps scoped flags",
+			args: []string{"autoresearch", "--model", "openai/gpt-5.4", "--stdin"},
+			want: []string{"--model", "openai/gpt-5.4", "--stdin", "--autoresearch"},
+		},
 	}
 
 	for _, tt := range tests {

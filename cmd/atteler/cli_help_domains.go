@@ -7,13 +7,14 @@ import (
 )
 
 const (
-	bashCommandName    = "bash"
-	helpCommandName    = "help"
-	issueCommandName   = "issue"
-	sessionCommandName = "session"
-	helpLongFlag       = "--help"
-	helpGoFlag         = "-help"
-	helpShortFlag      = "-h"
+	bashCommandName        = "bash"
+	autoresearchDomainName = "autoresearch"
+	helpCommandName        = "help"
+	issueCommandName       = "issue"
+	sessionCommandName     = "session"
+	helpLongFlag           = "--help"
+	helpGoFlag             = "-help"
+	helpShortFlag          = "-h"
 
 	agentMemoryIndexFlag   = "--agent-memory-index"
 	agentMemoryDeleteFlag  = "--agent-memory-delete"
@@ -192,6 +193,25 @@ var cliHelpDomains = []cliHelpDomain{
 			`atteler agents list`,
 			`atteler agents plan "review auth changes"`,
 			`atteler agents task-list`,
+		},
+	},
+	{
+		Name:    autoresearchDomainName,
+		Title:   "Autoresearch",
+		Summary: "Run a headless worktree loop that proposes code experiments, validates them, and keeps only improvements.",
+		Commands: []cliCommandAlias{
+			{
+				Name:     "run",
+				Args:     "<mission>",
+				Summary:  "start an autonomous code experiment loop for a hard or long task",
+				Legacy:   []string{"--autoresearch"},
+				JoinArgs: true,
+			},
+		},
+		Examples: []string{
+			`atteler autoresearch run "Improve agent-loop recovery; keep only changes that pass make test"`,
+			`atteler autoresearch "Reduce prompt-context cache misses and validate with go test ./cmd/atteler"`,
+			`atteler session headless`,
 		},
 	},
 	{

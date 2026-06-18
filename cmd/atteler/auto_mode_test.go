@@ -38,6 +38,55 @@ func TestAutonomyFromConfigOptions_AutoLeavesToolLevelUntouched(t *testing.T) {
 	assert.Equal(t, autonomy.High, level)
 }
 
+func TestApplyAutoresearchShortcutOptions_ConfiguresHeadlessWorktreeAutoMode(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{autoresearch: true, oncePrompt: "improve agent flow"}
+
+	applyAutoresearchShortcutOptions(&opts)
+
+	require.True(t, opts.auto.set)
+	assert.Equal(t, "autoresearch", opts.auto.value)
+	require.True(t, opts.autonomy.set)
+	assert.Equal(t, autonomy.High, opts.autonomy.value)
+	assert.True(t, opts.headless)
+	assert.True(t, opts.useWorktree)
+}
+
+func TestApplyAutoresearchShortcutOptions_PreservesExplicitAutonomy(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{autoresearch: true}
+	require.NoError(t, opts.autonomy.Set("medium"))
+
+	applyAutoresearchShortcutOptions(&opts)
+
+	require.True(t, opts.autonomy.set)
+	assert.Equal(t, autonomy.Medium, opts.autonomy.value)
+}
+
+func TestValidateAutoresearchCommandSelection_RequiresMission(t *testing.T) {
+	t.Parallel()
+
+	err := validateAutoresearchCommandSelection(cliOptions{autoresearch: true})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires a mission prompt")
+}
+
+func TestValidateAutoresearchCommandSelection_RejectsDifferentAutoMode(t *testing.T) {
+	t.Parallel()
+
+	err := validateAutoresearchCommandSelection(cliOptions{
+		autoresearch: true,
+		oncePrompt:   "improve agent flow",
+		auto:         autoFlag{value: "bug-hunt", set: true},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "different --auto mode")
+}
+
 func TestResolveAutoModePlan_InactiveWhenUnset(t *testing.T) {
 	t.Parallel()
 

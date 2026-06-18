@@ -33,6 +33,8 @@ const (
 	gitStatusPorcelain      = "status --porcelain"
 	gitRemoteGetOrigin      = "remote get-url origin"
 	gitRevParseHead         = "rev-parse HEAD"
+	gitRevParseRebaseMerge  = "rev-parse --git-path rebase-merge"
+	gitRevParseRebaseApply  = "rev-parse --git-path rebase-apply"
 	gitRevListMainHead      = "rev-list --count main..HEAD"
 	gitDiffMainHead         = "diff --name-only --diff-filter=ACDMRT main..HEAD"
 	gitPushBranch           = "push -u origin symphony/GH-12"
@@ -1776,9 +1778,9 @@ func TestGitHubPublisher_PrepareIssueWorkspaceBaseFetchesLatestBase(t *testing.T
 		joined := strings.Join(args, " ")
 		commands = append(commands, joined)
 		switch joined {
-		case "rev-parse --git-path rebase-merge":
+		case gitRevParseRebaseMerge:
 			return []byte(".git/rebase-merge\n"), nil
-		case "rev-parse --git-path rebase-apply":
+		case gitRevParseRebaseApply:
 			return []byte(".git/rebase-apply\n"), nil
 		case gitStatusPorcelain:
 			return nil, nil
@@ -1837,9 +1839,9 @@ func TestGitHubPublisher_PrepareIssueWorkspaceBasePreservesLocalCommits(t *testi
 		joined := strings.Join(args, " ")
 		commands = append(commands, joined)
 		switch joined {
-		case "rev-parse --git-path rebase-merge":
+		case gitRevParseRebaseMerge:
 			return []byte(".git/rebase-merge\n"), nil
-		case "rev-parse --git-path rebase-apply":
+		case gitRevParseRebaseApply:
 			return []byte(".git/rebase-apply\n"), nil
 		case gitStatusPorcelain:
 			return nil, nil
@@ -2196,9 +2198,9 @@ func TestGitHubPublisher_PreparesReworkWorkspaceAndLeavesRebaseConflict(t *testi
 		joined := strings.Join(args, " ")
 		commands = append(commands, joined)
 		switch joined {
-		case "rev-parse --git-path rebase-merge":
+		case gitRevParseRebaseMerge:
 			return []byte(".git/rebase-merge\n"), nil
-		case "rev-parse --git-path rebase-apply":
+		case gitRevParseRebaseApply:
 			return []byte(".git/rebase-apply\n"), nil
 		case gitStatusPorcelain:
 			return nil, nil

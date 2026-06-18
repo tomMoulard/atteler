@@ -966,11 +966,13 @@ func (p *githubPublisher) prepareIssueWorkspaceBase(ctx context.Context, dir str
 		return nil
 	}
 
-	if err := p.setRemote(ctx, dir); err != nil {
+	err = p.setRemote(ctx, dir)
+	if err != nil {
 		return err
 	}
 
-	if err := p.fetchBaseBranch(ctx, dir, remote, base); err != nil {
+	err = p.fetchBaseBranch(ctx, dir, remote, base)
+	if err != nil {
 		return err
 	}
 

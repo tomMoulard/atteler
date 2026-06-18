@@ -130,6 +130,18 @@ Examples:
 - `atteler agents plan "review auth changes"`
 - `atteler agents task-list`
 
+## Autoresearch
+
+Run a headless worktree loop that proposes code experiments, validates them, and keeps only improvements.
+
+Commands:
+- `run <mission>`: start an autonomous code experiment loop for a hard or long task
+
+Examples:
+- `atteler autoresearch run "Improve agent-loop recovery; keep only changes that pass make test"`
+- `atteler autoresearch "Reduce prompt-context cache misses and validate with go test ./cmd/atteler"`
+- `atteler session headless`
+
 ## Issue implementation
 
 Run the autonomous Symphony issue-to-PR agent with explicit verification gates.

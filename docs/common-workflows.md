@@ -127,7 +127,7 @@ atteler session resume-run latest
 worker sub-agents through the bash tool: it can spawn an `explorer` to map the
 code, a `planner`, several `implementer`s on different models, and a `reviewer`,
 then synthesize the result. Pick a playbook with `--auto=<mode>` (`auto`, the
-default, or `bug-hunt`).
+default, `bug-hunt`, or `autoresearch`).
 
 ```sh
 atteler --auto --once "implement structured logging across pkg/llm"
@@ -146,6 +146,28 @@ Forked children authenticate with borrowed file credentials (Claude Code,
 Codex) because the bash sandbox redacts credential environment variables — so
 auto mode works with atteler's primary auth model, not with bare
 `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` environment keys.
+
+## Autoresearch loops
+
+Use autoresearch when the right answer is likely to need many small
+change-and-validate attempts. The shortcut below starts a headless run in an
+isolated worktree with `--auto=autoresearch`, `--headless`, and `--autonomy=high`
+so the agent can commit kept candidates and reset discarded ones:
+
+```sh
+atteler autoresearch run "Improve agent-loop recovery; keep only changes that pass make test"
+atteler autoresearch "Reduce prompt-context cache misses and validate with go test ./cmd/atteler"
+atteler session headless
+atteler session stream-headless <run-id>
+atteler worktrees list
+```
+
+The playbook establishes a baseline evaluator, writes ignored ledgers under
+`.atteler/runs/autoresearch/<run-id>/`, commits each candidate before
+validation, keeps improvements, and resets regressions. If your mission has a
+specific metric or command, put it in the prompt; otherwise the agent chooses the
+smallest meaningful repo-local gate first and broadens verification before
+claiming success.
 
 ## Continuous watch and incidents
 

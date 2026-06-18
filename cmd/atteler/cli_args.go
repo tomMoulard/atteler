@@ -87,6 +87,10 @@ func translateDomainCommandArgs(prefix []string, domain cliHelpDomain, rest []st
 
 	command, ok := lookupDomainCommand(domain, rest[1])
 	if !ok {
+		if domain.Name == autoresearchDomainName {
+			return translateDomainCommandArgs(prefix, domain, append([]string{rest[0], "run"}, rest[1:]...), fs)
+		}
+
 		// Domain words such as "review", "watch", "session", and "code" are
 		// also natural prompt starters.  Only claim grouped routing when the
 		// command token is known; otherwise keep the legacy positional prompt
@@ -168,6 +172,10 @@ func translateDomainFlagPrefixArgs(prefix []string, domain cliHelpDomain, rest [
 
 	scopedPrefix, commandRest := splitLeadingFlagArgs(rest[1:], fs)
 	if len(commandRest) == 0 {
+		if domain.Name == autoresearchDomainName {
+			return cliArgPlan{Args: appendCLIArgs(appendCLIArgs(prefix, scopedPrefix...), "--autoresearch")}
+		}
+
 		if strictUnknownDomainCommand(domain, rest[0]) && !codeIntelFlagPrefixSelectsCommand(scopedPrefix, fs) {
 			return cliArgPlan{Err: missingDomainCommandError(domain, rest[0])}
 		}
@@ -176,6 +184,10 @@ func translateDomainFlagPrefixArgs(prefix []string, domain cliHelpDomain, rest [
 	}
 
 	if _, ok := lookupDomainCommand(domain, commandRest[0]); !ok {
+		if domain.Name == autoresearchDomainName {
+			return translateDomainCommandArgs(appendCLIArgs(prefix, scopedPrefix...), domain, append([]string{rest[0], "run"}, commandRest...), fs)
+		}
+
 		if strictUnknownDomainCommand(domain, rest[0]) {
 			return cliArgPlan{Err: unknownDomainCommandError(domain, rest[0], commandRest[0])}
 		}

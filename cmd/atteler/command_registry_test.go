@@ -18,6 +18,7 @@ import (
 
 const (
 	testDomainChatSession    = "chat/session"
+	testDomainAutoresearch   = "autoresearch"
 	testDomainConfig         = "config"
 	testDomainProviders      = "providers"
 	testDomainPlugins        = "plugins"
@@ -2426,6 +2427,8 @@ func isDocumentedPromptCommandForTest(domain cliHelpDomain, command cliCommandAl
 		case testCommandRun, "once":
 			return true
 		}
+	case testDomainAutoresearch:
+		return command.Name == testCommandRun
 	case testDomainWorktrees:
 		return command.Name == testCommandRun
 	case testDomainEval:

@@ -50,7 +50,8 @@ fallback_models: ["gpt-4.1", "gpt-4.1-nano"]
 autonomy: medium
 
 # auto: true        # default interactive sessions into orchestrator mode
-                    # (true => "auto" playbook; or name one, e.g. auto: bug-hunt)
+                    # (true => "auto"; or name a playbook such as
+                    # bug-hunt or autoresearch)
 
 model_aliases:
   fast: openai/gpt-4.1-mini
@@ -76,11 +77,13 @@ routing policy makes the choice deterministic.
 `auto` defaults **interactive** sessions into orchestrator ("auto") mode, in
 which the main model forks atteler into worker sub-agents through the bash tool.
 Accepts a boolean (`auto: true` behaves exactly like passing `--auto`, selecting
-the default `auto` playbook) or a mode name (`auto: bug-hunt`). It applies to the
-TUI only — headless one-shots stay opt-in via `--auto`, and a `--auto`/`--auto=<mode>`
-flag always overrides the config value. Because forking needs the bash tool,
-auto mode raises the autonomy floor to `medium`. See `--auto-max-depth` for the
-recursion cap.
+the default `auto` playbook) or a mode name (`auto: bug-hunt` or
+`auto: autoresearch`). It applies to the TUI only — headless one-shots stay
+opt-in via `--auto`, and a `--auto`/`--auto=<mode>` flag always overrides the
+config value. Because forking needs the bash tool, auto mode raises the autonomy
+floor to `medium`. Autoresearch runs that create branches/commits need
+`--autonomy high` or the `atteler autoresearch` helper, which sets that floor for
+the isolated run. See `--auto-max-depth` for the recursion cap.
 
 ### Providers
 

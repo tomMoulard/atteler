@@ -614,6 +614,7 @@ type cliOptions struct {
 	promptLocalOnly                    bool
 	headless                           bool
 	headlessPrivateLog                 bool
+	autoresearch                       bool
 	showVersion                        bool
 	useWorktree                        bool
 	worktreeAutoMerge                  bool

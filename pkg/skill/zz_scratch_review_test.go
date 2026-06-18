@@ -26,13 +26,14 @@ func TestScratch_DuplicateStepSuggestionWedgesLearning(t *testing.T) {
 
 	// User reruns the same command repeatedly (very common: flaky test loop).
 	var lastErr error
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		lastErr = learner.ObserveEvent(t.Context(), events.Event{
 			Type:      events.CommandExecute,
 			Timestamp: time.Now().UTC(),
 			Metadata:  map[string]string{"command": "go build ./..."},
 		})
 	}
+
 	fmt.Println("last observe err:", lastErr)
 
 	// Now a genuine multi-step workflow repeats; can it still become a skill?
@@ -55,6 +56,7 @@ func TestScratch_DuplicateStepSuggestionWedgesLearning(t *testing.T) {
 	state, err := store.Load()
 	require.NoError(t, err)
 	fmt.Println("skills recorded:", len(state.Skills))
+
 	for _, s := range state.Skills {
 		fmt.Println(" -", s.Slug, s.Steps)
 	}

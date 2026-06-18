@@ -77,6 +77,66 @@ repeat steps as the work demands.
 4. REPORT: present the root cause and proposed fix. Do NOT apply the fix unless
    the user asked you to.`,
 	},
+	{
+		Name:        "autoresearch",
+		Description: "Run an autonomous experiment loop that keeps only validated code improvements.",
+		Playbook: `Autoresearch flow for hard, complex, or long-running coding tasks. This is
+inspired by research loops that change one code surface, run a fixed evaluator,
+keep improvements, discard regressions, and repeat without asking for human
+permission mid-loop.
+
+Operate like a careful autonomous researcher:
+
+1. SETUP:
+   - Treat the user's prompt as the research mission.
+   - Prefer an existing atteler worktree/branch when --worktree launched you
+     there. If you are not isolated, create a dedicated branch named
+     autoresearch/<short-slug> before mutating code.
+   - Create an ignored run ledger under .atteler/runs/autoresearch/<run-id>/ with
+     at least results.tsv and experiments.jsonl. Do not commit these logs.
+   - Define the evaluator before the first edit. Use explicit user-provided
+     validation commands when present; otherwise choose the smallest meaningful
+     repo-local gate first (for this repo, usually focused go test, then broader
+     make test/make build when the change is shared). Record the command(s).
+
+2. BASELINE:
+   - Run the evaluator on the current code before changing behavior.
+   - Record baseline status, metric if any, duration, and relevant failing tests
+     or gaps in results.tsv/experiments.jsonl.
+
+3. LOOP:
+   - Form one hypothesis for improving the mission outcome.
+   - Make the smallest focused code change for that hypothesis. Prefer deletion,
+     reuse, and simpler boundaries over new abstractions or dependencies.
+   - Commit the candidate with a clear experimental message before running the
+     evaluator, so a good result has a durable checkpoint.
+   - Run the evaluator with output redirected to that experiment's log file to
+     avoid flooding context; inspect summaries/tails only as needed.
+   - Decide keep/discard from evidence:
+       * KEEP if the evaluator passes and the mission metric improves, or if the
+         result is equal but meaningfully simpler.
+       * DISCARD if the evaluator regresses, crashes, times out, or adds
+         complexity without enough improvement. Reset back to the previous kept
+         commit, while preserving the uncommitted run ledger.
+   - Append a TSV row: commit, status keep|discard|crash, metric/result,
+     validation command, short hypothesis, and evidence path.
+   - Continue with the next hypothesis until hard budgets stop you or the user
+     interrupts. Do not pause to ask whether to continue.
+
+4. SAFETY:
+   - Stay inside the repository and task scope.
+   - Do not install dependencies unless the user explicitly requested that.
+   - Do not touch credentials, publish branches, open PRs, merge, or push unless
+     the prompt explicitly says to and autonomy permits it.
+   - When no objective numeric metric exists, use a strict pass/fail evaluator
+     plus a written complexity/evidence judgment; never call an unverified guess
+     an improvement.
+
+5. REPORT:
+   - End only when stopped by budget, cancellation, or a clearly achieved mission.
+   - Summarize the best kept commit, discarded experiments, validation evidence,
+     ledger path, remaining risks, and exact commands to inspect or continue.`,
+	},
 }
 
 // Worker personas are registered hidden so they are available to spawned child
