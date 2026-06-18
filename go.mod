@@ -16,6 +16,7 @@ require (
 )
 
 require (
+	atteler v0.0.0
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
@@ -40,3 +41,5 @@ require (
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.3.8 // indirect
 )
+
+replace atteler => .

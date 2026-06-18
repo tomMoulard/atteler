@@ -191,6 +191,13 @@ func TestApplyAutoMode_RegistersOrchestratorSelectsAndSetsDepth(t *testing.T) {
 	orchestrator, ok := registry.Get(autopilot.OrchestratorAgentName)
 	require.True(t, ok)
 	assert.Contains(t, orchestrator.SystemPrompt, "Self-Fork Orchestration")
+	assert.Contains(t, orchestrator.SystemPrompt, "## Atteler CLI args and commands")
+	assert.Contains(t, orchestrator.SystemPrompt, "--once: send one prompt and exit")
+	assert.Contains(t, orchestrator.SystemPrompt, "atteler chat/session once")
+	assert.Contains(t, orchestrator.SystemPrompt, "## Runtime tools")
+	assert.Contains(t, orchestrator.SystemPrompt, "bash: Execute a bash command")
+	assert.Contains(t, orchestrator.SystemPrompt, "--output json")
+	assert.NotContains(t, orchestrator.SystemPrompt, "--output-format")
 
 	for _, name := range autopilot.WorkerAgentNames() {
 		_, ok := registry.Get(name)

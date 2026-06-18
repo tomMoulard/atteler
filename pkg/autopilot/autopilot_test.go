@@ -37,21 +37,34 @@ func TestRenderSystemPrompt_IncludesBinaryWorkersAndModels(t *testing.T) {
 	require.True(t, ok)
 
 	prompt := autopilot.RenderSystemPrompt(mode, autopilot.ManualInput{
-		BinaryPath:   "/usr/local/bin/atteler",
-		Autonomy:     "high",
-		WorkerAgents: []string{"explorer", "reviewer"},
-		Models:       []string{"claude-opus-4-8", "gpt-5"},
-		CurrentDepth: 0,
-		MaxDepth:     2,
+		BinaryPath:    "/usr/local/bin/atteler",
+		Autonomy:      "high",
+		WorkerAgents:  []string{"explorer", "reviewer"},
+		Models:        []string{"claude-opus-4-8", "gpt-5"},
+		CLIFlags:      []string{"--once: send one prompt and exit", "--output: output format"},
+		CLICommands:   []string{"atteler code-intel summary: print compact code index", "atteler help legacy: flag catalog"},
+		SlashCommands: []string{"/model <id>: switch model"},
+		Tools:         []string{"bash: execute commands"},
+		CurrentDepth:  0,
+		MaxDepth:      2,
 	})
 
 	assert.Contains(t, prompt, "/usr/local/bin/atteler --headless --once")
-	assert.Contains(t, prompt, "--output-format json")
+	assert.Contains(t, prompt, "--output json")
+	assert.NotContains(t, prompt, "--output-format")
 	assert.Contains(t, prompt, "--autonomy high")
 	assert.Contains(t, prompt, "- explorer")
 	assert.Contains(t, prompt, "- reviewer")
 	assert.Contains(t, prompt, "- claude-opus-4-8")
 	assert.Contains(t, prompt, "- gpt-5")
+	assert.Contains(t, prompt, "## Runtime tools")
+	assert.Contains(t, prompt, "- bash: execute commands")
+	assert.Contains(t, prompt, "## Atteler CLI args and commands")
+	assert.Contains(t, prompt, "--command-surface-json")
+	assert.Contains(t, prompt, "help legacy")
+	assert.Contains(t, prompt, "- --once: send one prompt and exit")
+	assert.Contains(t, prompt, "- atteler code-intel summary: print compact code index")
+	assert.Contains(t, prompt, "- /model <id>: switch model")
 }
 
 func TestRenderSystemPrompt_AppendsModePlaybook(t *testing.T) {
