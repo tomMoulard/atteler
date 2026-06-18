@@ -541,41 +541,23 @@ func (s *agentLoopState) budgetSnapshot() AgentLoopBudgetSnapshot {
 		Budget:                s.budget,
 		Used:                  s.usage,
 		RemainingWallTime:     remainingDuration,
-		RemainingOutputBytes:  remainingInt64(s.budget.MaxOutputBytes, s.usage.OutputBytes),
-		RemainingCostMicros:   remainingInt64(s.budget.MaxCostMicros, s.usage.EstimatedCostMicros),
-		RemainingIterations:   remainingInt(s.budget.MaxIterations, s.usage.Iterations),
-		RemainingModelCalls:   remainingInt(s.budget.MaxModelCalls, s.usage.ModelCalls),
-		RemainingToolCalls:    remainingInt(s.budget.MaxToolCalls, s.usage.ToolCalls),
-		RemainingInputTokens:  remainingInt(s.budget.MaxInputTokens, s.usage.InputTokens),
-		RemainingOutputTokens: remainingInt(s.budget.MaxOutputTokens, s.usage.OutputTokens),
-		RemainingTotalTokens:  remainingInt(s.budget.MaxTotalTokens, s.usage.TotalTokens),
+		RemainingOutputBytes:  remaining(s.budget.MaxOutputBytes, s.usage.OutputBytes),
+		RemainingCostMicros:   remaining(s.budget.MaxCostMicros, s.usage.EstimatedCostMicros),
+		RemainingIterations:   remaining(s.budget.MaxIterations, s.usage.Iterations),
+		RemainingModelCalls:   remaining(s.budget.MaxModelCalls, s.usage.ModelCalls),
+		RemainingToolCalls:    remaining(s.budget.MaxToolCalls, s.usage.ToolCalls),
+		RemainingInputTokens:  remaining(s.budget.MaxInputTokens, s.usage.InputTokens),
+		RemainingOutputTokens: remaining(s.budget.MaxOutputTokens, s.usage.OutputTokens),
+		RemainingTotalTokens:  remaining(s.budget.MaxTotalTokens, s.usage.TotalTokens),
 	}
 }
 
-func remainingInt(limit, used int) int {
+func remaining[T ~int | ~int64](limit, used T) T {
 	if limit <= 0 {
 		return 0
 	}
 
-	remaining := limit - used
-	if remaining < 0 {
-		return 0
-	}
-
-	return remaining
-}
-
-func remainingInt64(limit, used int64) int64 {
-	if limit <= 0 {
-		return 0
-	}
-
-	remaining := limit - used
-	if remaining < 0 {
-		return 0
-	}
-
-	return remaining
+	return max(limit-used, 0)
 }
 
 func (s *agentLoopState) recordModelResponse(
