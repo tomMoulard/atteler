@@ -545,7 +545,7 @@ func (s *agentLoopState) wallTimeStopAfterModelCall(
 	modelCtxErr error,
 	wallTimeLimited bool,
 ) *AgentLoopStopCondition {
-	if !wallTimeLimited || modelCtxErr == nil || parentCtx.Err() != nil {
+	if !wallTimeLimited || !errors.Is(modelCtxErr, context.DeadlineExceeded) || parentCtx.Err() != nil {
 		return nil
 	}
 

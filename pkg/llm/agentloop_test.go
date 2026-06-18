@@ -684,6 +684,26 @@ func TestAgentLoop_WallTimeBudgetCancelsModelCall(t *testing.T) {
 	assert.Equal(t, "budget.max_wall_time", ledger.Steps[0].StopCondition.MatchedRule)
 }
 
+func TestAgentLoop_WallTimeModelErrorAttributionRequiresDeadline(t *testing.T) {
+	t.Parallel()
+
+	state := newAgentLoopState(nil, AgentLoopConfig{Budget: AgentLoopBudget{MaxWallTime: time.Second}})
+
+	assert.Nil(t, state.wallTimeStopAfterModelCall(context.Background(), errors.New("provider failed"), true))
+	assert.Nil(t, state.wallTimeStopAfterModelCall(context.Background(), context.Canceled, true))
+	assert.Nil(t, state.wallTimeStopAfterModelCall(context.Background(), context.DeadlineExceeded, false))
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.Nil(t, state.wallTimeStopAfterModelCall(parentCtx, context.DeadlineExceeded, true))
+
+	state.startedAt = time.Now().Add(-2 * time.Second)
+	cond := state.wallTimeStopAfterModelCall(context.Background(), context.DeadlineExceeded, true)
+	require.NotNil(t, cond)
+	assert.Equal(t, AgentLoopStopWallTime, cond.Kind)
+	assert.Equal(t, "budget.max_wall_time", cond.MatchedRule)
+}
+
 func TestAgentLoop_ModelCallBudgetStopsBeforeNextModelCall(t *testing.T) {
 	t.Parallel()
 
