@@ -382,10 +382,10 @@ func (s *agentLoopState) executeToolCall(
 ) (*AgentLoopStopCondition, error) {
 	s.refreshElapsed()
 	budget := s.budgetSnapshot()
-	decision := normalizeToolPolicyDecision(call, policy(ctx, call, budget))
 
 	if cond := s.preToolStopCondition(); cond != nil {
-		decision = budgetDenyPolicy(cond.Reason, cond.MatchedRule)
+		budget = s.budgetSnapshot()
+		decision := budgetDenyPolicy(cond.Reason, cond.MatchedRule)
 		result := ToolResult{
 			ToolCallID: call.ID,
 			Content:    "tool call denied: " + cond.Reason,
@@ -399,6 +399,8 @@ func (s *agentLoopState) executeToolCall(
 
 		return cond, nil
 	}
+
+	decision := normalizeToolPolicyDecision(call, policy(ctx, call, budget))
 
 	s.usage.ToolCalls++
 

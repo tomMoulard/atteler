@@ -682,6 +682,57 @@ func TestAgentLoop_ToolCallBudgetRecordsDeniedCallWithoutExecution(t *testing.T)
 	assert.Equal(t, AgentLoopStopMaxToolCalls, ledger.Steps[3].StopCondition.Kind)
 }
 
+func TestAgentLoop_PreToolBudgetStopSkipsPolicy(t *testing.T) {
+	t.Parallel()
+
+	ledger := &AgentLoopLedger{}
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{
+				Model:      "test-model",
+				StopReason: StopToolUse,
+				ToolCalls: []ToolCall{
+					{ID: "call_1", Name: "bash", Input: map[string]any{"command": "echo first"}},
+					{ID: "call_2", Name: "bash", Input: map[string]any{"command": "echo second"}},
+				},
+			},
+		},
+	})
+
+	policyCalls := 0
+	executed := 0
+
+	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "run two"}},
+		Tools:    DefaultTools(),
+	}, nil, func(_ context.Context, call ToolCall) ToolResult {
+		executed++
+
+		return ToolResult{ToolCallID: call.ID, Content: "ok"}
+	}, AgentLoopConfig{
+		Budget:         AgentLoopBudget{MaxToolCalls: 1},
+		CheckpointSink: ledger,
+		Policy: func(_ context.Context, call ToolCall, _ AgentLoopBudgetSnapshot) ToolPolicyDecision {
+			policyCalls++
+
+			return ToolPolicyDecision{
+				Verdict:     ToolPolicyAllow,
+				Reason:      "allow " + call.ID,
+				MatchedRule: "test.allow",
+			}
+		},
+	})
+	require.ErrorContains(t, err, "tool call budget exhausted")
+	assert.Equal(t, 1, policyCalls, "budget-denied tool call should not invoke custom policy")
+	assert.Equal(t, 1, executed)
+	require.Len(t, ledger.Steps, 4)
+	require.NotNil(t, ledger.Steps[2].Policy)
+	assert.Equal(t, ToolPolicyDeny, ledger.Steps[2].Policy.Verdict)
+	assert.Equal(t, "budget.max_tool_calls", ledger.Steps[2].Policy.MatchedRule)
+}
+
 func TestAgentLoop_TokenBudgetStopIsCheckpointed(t *testing.T) {
 	t.Parallel()
 
