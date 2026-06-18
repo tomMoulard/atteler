@@ -4,7 +4,7 @@
 // In auto mode the main model is given a single tool, bash, and a system prompt
 // that documents how to spawn fresh, one-shot atteler instances
 // (`atteler --headless --once ... --agent <worker> --model <model>
-// --output-format json`). The orchestrator coordinates worker children and
+// --output json`). The orchestrator coordinates worker children and
 // reports every step back to the user. The package is intentionally pure (no
 // context, no I/O) so the prompt is trivial to test.
 package autopilot
@@ -34,15 +34,20 @@ type Mode struct {
 }
 
 // ManualInput carries the run-specific values interpolated into the self-fork
-// manual: the binary to spawn, the worker personas and models available, and the
-// recursion budget.
+// manual: the binary to spawn, the worker personas and models available,
+// the CLI surface the orchestrator can invoke through that binary, the runtime
+// tools wired into this process, and the recursion budget.
 type ManualInput struct {
-	BinaryPath   string
-	Autonomy     string
-	WorkerAgents []string
-	Models       []string
-	CurrentDepth int
-	MaxDepth     int
+	BinaryPath    string
+	Autonomy      string
+	WorkerAgents  []string
+	Models        []string
+	CLIFlags      []string
+	CLICommands   []string
+	SlashCommands []string
+	Tools         []string
+	CurrentDepth  int
+	MaxDepth      int
 }
 
 var builtinModes = []Mode{
@@ -264,9 +269,9 @@ results into the final answer.
 ## How to spawn a child
 Run, via the bash tool:
 
-  %s --headless --once "<task prompt>" --agent <worker> --model <model> --output-format json --autonomy %s
+  %s --headless --once "<task prompt>" --agent <worker> --model <model> --output json --autonomy %s
 
-- Always pass --headless --once and --output-format json so the child prints a
+- Always pass --headless --once and --output json so the child prints a
   single parseable JSON object (its answer is the "content" field).
 - Always pass --agent with a WORKER persona below — NEVER spawn a child with
   --auto (that is reserved for you, and is capped by depth).
@@ -277,6 +282,27 @@ Run, via the bash tool:
 %s
 
 ## Available models
+%s
+
+## Runtime tools
+%s
+
+## Atteler CLI args and commands
+You may invoke this same atteler binary through the bash tool. Prefer the
+documented domain commands when they match the task, and use flags for the
+legacy-compatible one-shot surface. For complete machine-readable details you
+can run:
+
+  %s --command-surface-json
+  %s help legacy
+
+### Registered flags
+%s
+
+### Domain commands
+%s
+
+### Interactive slash commands
 %s
 
 ## Parallel vs sequential
@@ -304,6 +330,12 @@ synthesized conclusion. Be explicit and auditable.`,
 		autonomyLevel,
 		renderBulletList(in.WorkerAgents),
 		renderBulletList(in.Models),
+		renderBulletList(in.Tools),
+		binary,
+		binary,
+		renderBulletList(in.CLIFlags),
+		renderBulletList(in.CLICommands),
+		renderBulletList(in.SlashCommands),
 		in.CurrentDepth,
 		in.MaxDepth,
 	)

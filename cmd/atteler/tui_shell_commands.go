@@ -222,7 +222,7 @@ func prependToolReminder(params *llm.CompleteParams, tools []llm.ToolDefinition)
 	}
 
 	reminder := llm.Message{
-		Role: "system",
+		Role: llm.RoleSystem,
 		Content: "You have the following tools available and MUST use them " +
 			"when the task requires running commands or inspecting files: " +
 			strings.Join(names, ", ") + ". " +

@@ -1363,12 +1363,16 @@ func applyAutoMode(plan autoModePlan, agentRegistry *agent.Registry, reg *llm.Re
 	sort.Strings(models)
 
 	manual := autopilot.RenderSystemPrompt(plan.mode, autopilot.ManualInput{
-		BinaryPath:   binary,
-		Autonomy:     autonomyLevel.String(),
-		WorkerAgents: autopilot.WorkerAgentNames(),
-		Models:       models,
-		CurrentDepth: plan.currentDepth,
-		MaxDepth:     plan.maxDepth,
+		BinaryPath:    binary,
+		Autonomy:      autonomyLevel.String(),
+		WorkerAgents:  autopilot.WorkerAgentNames(),
+		Models:        models,
+		CLIFlags:      registeredCLIFlagSummaries(),
+		CLICommands:   commandSurfaceSummaries(buildCommandSurface(commandRegistry).Domains),
+		SlashCommands: slashCommandSurfaceSummaries(commandSurfaceSlashCommands()),
+		Tools:         toolDefinitionSummaries(llm.DefaultTools()),
+		CurrentDepth:  plan.currentDepth,
+		MaxDepth:      plan.maxDepth,
 	})
 
 	agentRegistry.Upsert(autopilot.OrchestratorAgent(manual))
