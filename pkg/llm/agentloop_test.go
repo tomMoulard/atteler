@@ -506,6 +506,42 @@ func TestAgentLoop_ContextCancellationDoesNotCheckpointAfterCallerCanceled(t *te
 	assert.Empty(t, ledger.Steps)
 }
 
+func TestAgentLoop_StopToolUseWithoutCallsStopsAsModelError(t *testing.T) {
+	t.Parallel()
+
+	ledger := &AgentLoopLedger{}
+	provider := &agentTestProvider{
+		responses: []*Response{
+			{Content: "I need a tool", Model: "test-model", StopReason: StopToolUse},
+			{Content: "should not be called", Model: "test-model", StopReason: StopEndTurn},
+		},
+	}
+	reg := NewRegistry()
+	reg.Register(provider)
+
+	executed := false
+
+	_, history, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "run something"}},
+		Tools:    DefaultTools(),
+	}, nil, func(_ context.Context, call ToolCall) ToolResult {
+		executed = true
+
+		return ToolResult{ToolCallID: call.ID, Content: "should not run"}
+	}, AgentLoopConfig{
+		CheckpointSink: ledger,
+	})
+	require.ErrorContains(t, err, "model.tool_calls")
+	assert.False(t, executed)
+	assert.Equal(t, 1, provider.calls)
+	assert.Len(t, history, 1)
+	require.Len(t, ledger.Steps, 2)
+	require.NotNil(t, ledger.Steps[1].StopCondition)
+	assert.Equal(t, AgentLoopStopModelError, ledger.Steps[1].StopCondition.Kind)
+	assert.Equal(t, "model.tool_calls", ledger.Steps[1].StopCondition.MatchedRule)
+}
+
 func TestAgentLoop_MultipleToolCalls(t *testing.T) {
 	t.Parallel()
 

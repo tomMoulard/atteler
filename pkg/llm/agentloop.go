@@ -253,6 +253,19 @@ func AgentLoop(
 			return nil, state.messages, stopConditionError(*cond)
 		}
 
+		if resp.WantsToolUse() && len(resp.ToolCalls) == 0 {
+			cond := AgentLoopStopCondition{
+				Kind:        AgentLoopStopModelError,
+				Reason:      "model requested tool use without any tool calls",
+				MatchedRule: "model.tool_calls",
+			}
+			if err := state.recordStop(ctx, cfg.CheckpointSink, cond); err != nil {
+				return nil, state.messages, err
+			}
+
+			return nil, state.messages, stopConditionError(cond)
+		}
+
 		if !resp.WantsToolUse() {
 			resp.InputTokens = state.usage.InputTokens
 			resp.CachedInputTokens = state.usage.CachedInputTokens
