@@ -591,6 +591,63 @@ func TestAgentLoop_ExplicitModelCallBudgetStopsHighMaxIterationsToolLoop(t *test
 	assert.Equal(t, modelCallBudget, executions)
 }
 
+type blockingAgentProvider struct {
+	calls int
+}
+
+func (p *blockingAgentProvider) Complete(ctx context.Context, _ CompleteParams) (*Response, error) {
+	p.calls++
+
+	<-ctx.Done()
+
+	return nil, ctx.Err()
+}
+
+func (p *blockingAgentProvider) Models() []string {
+	return []string{"test-model"}
+}
+
+func (p *blockingAgentProvider) HealthCheck(_ context.Context) error {
+	return nil
+}
+
+func (p *blockingAgentProvider) FetchModels(_ context.Context) ([]string, error) {
+	return []string{"test-model"}, nil
+}
+
+func (p *blockingAgentProvider) ModelContextWindow(_ string) int {
+	return 128_000
+}
+
+func (p *blockingAgentProvider) Name() string {
+	return "blocking"
+}
+
+func TestAgentLoop_WallTimeBudgetCancelsModelCall(t *testing.T) {
+	t.Parallel()
+
+	ledger := &AgentLoopLedger{}
+	provider := &blockingAgentProvider{}
+	reg := NewRegistry()
+	reg.Register(provider)
+
+	started := time.Now()
+	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "wait"}},
+	}, nil, nil, AgentLoopConfig{
+		Budget:         AgentLoopBudget{MaxWallTime: 20 * time.Millisecond},
+		CheckpointSink: ledger,
+	})
+	require.ErrorContains(t, err, "wall-clock budget exhausted")
+	assert.Less(t, time.Since(started), time.Second, "model call should be bounded by remaining wall time")
+	assert.Equal(t, 1, provider.calls)
+	require.Len(t, ledger.Steps, 1)
+	require.NotNil(t, ledger.Steps[0].StopCondition)
+	assert.Equal(t, AgentLoopStopWallTime, ledger.Steps[0].StopCondition.Kind)
+	assert.Equal(t, "budget.max_wall_time", ledger.Steps[0].StopCondition.MatchedRule)
+}
+
 func TestAgentLoop_ModelCallBudgetStopsBeforeNextModelCall(t *testing.T) {
 	t.Parallel()
 

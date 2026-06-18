@@ -192,9 +192,24 @@ func AgentLoop(
 		}
 
 		requestSummary := summarizeModelRequest(iterParams, fallbackModels)
+		modelCtx, cancelModelCall, wallTimeLimited := state.modelCallContext(ctx)
 
-		resp, err := reg.CompleteWithFallback(ctx, iterParams, fallbackModels)
+		resp, err := reg.CompleteWithFallback(modelCtx, iterParams, fallbackModels)
+		modelCtxErr := modelCtx.Err()
+
+		if cancelModelCall != nil {
+			cancelModelCall()
+		}
+
 		if err != nil {
+			if cond := state.wallTimeStopAfterModelCall(ctx, modelCtxErr, wallTimeLimited); cond != nil {
+				if recordErr := state.recordStop(ctx, cfg.CheckpointSink, *cond); recordErr != nil {
+					return nil, state.messages, recordErr
+				}
+
+				return nil, state.messages, stopConditionError(*cond)
+			}
+
 			cond := AgentLoopStopCondition{
 				Kind:        AgentLoopStopModelError,
 				Reason:      fmt.Sprintf("model call failed on iteration %d: %v", state.usage.Iterations, err),
@@ -499,6 +514,39 @@ func (s *agentLoopState) executeToolCall(
 	}
 
 	return nil, nil
+}
+
+func (s *agentLoopState) modelCallContext(ctx context.Context) (context.Context, context.CancelFunc, bool) {
+	remaining := s.budgetSnapshot().RemainingWallTime
+	if remaining <= 0 {
+		return ctx, nil, false
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, remaining)
+
+	return callCtx, cancel, true
+}
+
+func (s *agentLoopState) wallTimeStopAfterModelCall(
+	parentCtx context.Context,
+	modelCtxErr error,
+	wallTimeLimited bool,
+) *AgentLoopStopCondition {
+	if !wallTimeLimited || modelCtxErr == nil || parentCtx.Err() != nil {
+		return nil
+	}
+
+	s.refreshElapsed()
+
+	if cond := budgetExhaustedStop(s.budget, s.usage); cond != nil && cond.Kind == AgentLoopStopWallTime {
+		return cond
+	}
+
+	return &AgentLoopStopCondition{
+		Kind:        AgentLoopStopWallTime,
+		Reason:      fmt.Sprintf("wall-clock budget exhausted: elapsed %s of %s", s.usage.Elapsed, s.budget.MaxWallTime),
+		MatchedRule: "budget.max_wall_time",
+	}
 }
 
 func (s *agentLoopState) preToolStopCondition() *AgentLoopStopCondition {
