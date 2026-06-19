@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -459,13 +460,284 @@ type rawAgentConfig struct {
 }
 
 type rawCodexConfig struct {
-	ApprovalPolicy    any     `yaml:"approval_policy"`
-	ThreadSandbox     any     `yaml:"thread_sandbox"`
-	TurnSandboxPolicy any     `yaml:"turn_sandbox_policy"`
-	Command           *string `yaml:"command"`
-	TurnTimeoutMS     *int    `yaml:"turn_timeout_ms"`
-	ReadTimeoutMS     *int    `yaml:"read_timeout_ms"`
-	StallTimeoutMS    *int    `yaml:"stall_timeout_ms"`
+	ApprovalPolicy    any            `yaml:"approval_policy"`
+	ThreadSandbox     any            `yaml:"thread_sandbox"`
+	TurnSandboxPolicy any            `yaml:"turn_sandbox_policy"`
+	Config            map[string]any `yaml:"config"`
+	Command           *string        `yaml:"command"`
+	TurnTimeoutMS     *int           `yaml:"turn_timeout_ms"`
+	ReadTimeoutMS     *int           `yaml:"read_timeout_ms"`
+	StallTimeoutMS    *int           `yaml:"stall_timeout_ms"`
+}
+
+type workflowConfigSchema struct {
+	Fields               map[string]workflowConfigSchema
+	Items                *workflowConfigSchema
+	AdditionalProperties bool
+}
+
+type unknownWorkflowField struct {
+	Path       string
+	Suggestion string
+}
+
+type unknownWorkflowFieldError []unknownWorkflowField
+
+func (e *unknownWorkflowFieldError) Error() string {
+	if e == nil || len(*e) == 0 {
+		return "unknown workflow config field"
+	}
+
+	parts := make([]string, 0, len(*e))
+	for _, field := range *e {
+		message := fmt.Sprintf("unknown workflow config field %q", field.Path)
+		if field.Suggestion != "" {
+			message += fmt.Sprintf(" (did you mean %q?)", field.Suggestion)
+		}
+
+		parts = append(parts, message)
+	}
+
+	return strings.Join(parts, "; ")
+}
+
+func validateWorkflowConfigKeys(config map[string]any) error {
+	normalized, ok := normalizeYAMLValue(config).(map[string]any)
+	if !ok || len(normalized) == 0 {
+		return nil
+	}
+
+	var unknowns unknownWorkflowFieldError
+	validateWorkflowConfigValue(normalized, workflowRootConfigSchema(), "", &unknowns)
+	if len(unknowns) == 0 {
+		return nil
+	}
+
+	return &ClassedError{Class: ErrWorkflowParse, Err: &unknowns}
+}
+
+func validateWorkflowConfigValue(value any, schema workflowConfigSchema, path string, unknowns *unknownWorkflowFieldError) {
+	if schema.AdditionalProperties {
+		return
+	}
+
+	if schema.Items != nil {
+		items, ok := value.([]any)
+		if !ok {
+			return
+		}
+
+		for index, item := range items {
+			validateWorkflowConfigValue(item, *schema.Items, fmt.Sprintf("%s[%d]", path, index), unknowns)
+		}
+
+		return
+	}
+
+	if len(schema.Fields) == 0 {
+		return
+	}
+
+	fields, ok := normalizeYAMLValue(value).(map[string]any)
+	if !ok {
+		return
+	}
+
+	for _, key := range sortedWorkflowFieldNames(fields) {
+		childValue := fields[key]
+		if isWorkflowExtensionKey(key) {
+			continue
+		}
+
+		childSchema, exists := schema.Fields[key]
+		if !exists {
+			unknowns.add(fieldPath(path, key), closestWorkflowFieldPath(path, key, schema))
+			continue
+		}
+
+		validateWorkflowConfigValue(childValue, childSchema, fieldPath(path, key), unknowns)
+	}
+}
+
+func (e *unknownWorkflowFieldError) add(path, suggestion string) {
+	if e == nil {
+		return
+	}
+
+	*e = append(*e, unknownWorkflowField{Path: path, Suggestion: suggestion})
+}
+
+func workflowRootConfigSchema() workflowConfigSchema {
+	schema := workflowSchemaFromType(reflect.TypeOf(rawConfig{}))
+	if publish, ok := schema.Fields["publish"]; ok {
+		publish.Fields["verification_gates"] = workflowConfigSchema{Items: &workflowConfigSchema{
+			Fields: map[string]workflowConfigSchema{
+				"name":       {},
+				"command":    {},
+				"required":   {},
+				"timeout_ms": {},
+			},
+		}}
+		schema.Fields["publish"] = publish
+	}
+
+	return schema
+}
+
+func workflowSchemaFromType(fieldType reflect.Type) workflowConfigSchema {
+	for fieldType.Kind() == reflect.Pointer {
+		fieldType = fieldType.Elem()
+	}
+
+	switch fieldType.Kind() {
+	case reflect.Struct:
+		fields := make(map[string]workflowConfigSchema, fieldType.NumField())
+		for i := range fieldType.NumField() {
+			field := fieldType.Field(i)
+			if field.PkgPath != "" {
+				continue
+			}
+
+			name := yamlFieldName(field)
+			if name == "" || name == "-" {
+				continue
+			}
+
+			fields[name] = workflowSchemaFromType(field.Type)
+		}
+
+		return workflowConfigSchema{Fields: fields}
+	case reflect.Slice, reflect.Array:
+		itemSchema := workflowSchemaFromType(fieldType.Elem())
+		return workflowConfigSchema{Items: &itemSchema}
+	case reflect.Interface, reflect.Map:
+		return workflowConfigSchema{AdditionalProperties: true}
+	default:
+		return workflowConfigSchema{}
+	}
+}
+
+func yamlFieldName(field reflect.StructField) string {
+	tag := field.Tag.Get("yaml")
+	if tag == "" {
+		return field.Name
+	}
+
+	name, _, _ := strings.Cut(tag, ",")
+	return name
+}
+
+func isWorkflowExtensionKey(key string) bool {
+	return key == "extensions" || strings.HasPrefix(key, "x_")
+}
+
+func fieldPath(parent, key string) string {
+	if parent == "" {
+		return key
+	}
+
+	return parent + "." + key
+}
+
+func closestWorkflowFieldPath(parent, key string, schema workflowConfigSchema) string {
+	closest := closestWorkflowField(key, schema)
+	if closest == "" {
+		return ""
+	}
+
+	return fieldPath(parent, closest)
+}
+
+func closestWorkflowField(key string, schema workflowConfigSchema) string {
+	bestDistance := 0
+	best := ""
+	for _, candidate := range sortedWorkflowSchemaFieldNames(schema.Fields) {
+		distance := levenshteinDistance(key, candidate)
+		if best == "" || distance < bestDistance {
+			best = candidate
+			bestDistance = distance
+		}
+	}
+
+	if best == "" || bestDistance > maxWorkflowSuggestionDistance(key, best) {
+		return ""
+	}
+
+	return best
+}
+
+func maxWorkflowSuggestionDistance(key, candidate string) int {
+	longest := max(len(key), len(candidate))
+	switch {
+	case longest <= 4:
+		return 1
+	case longest <= 10:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func levenshteinDistance(a, b string) int {
+	if a == b {
+		return 0
+	}
+
+	if a == "" {
+		return len(b)
+	}
+
+	if b == "" {
+		return len(a)
+	}
+
+	previous := make([]int, len(b)+1)
+	for j := range previous {
+		previous[j] = j
+	}
+
+	current := make([]int, len(b)+1)
+	for i := 1; i <= len(a); i++ {
+		current[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 0
+			if a[i-1] != b[j-1] {
+				cost = 1
+			}
+
+			current[j] = min(
+				current[j-1]+1,
+				previous[j]+1,
+				previous[j-1]+cost,
+			)
+		}
+
+		previous, current = current, previous
+	}
+
+	return previous[len(b)]
+}
+
+func sortedWorkflowFieldNames(fields map[string]any) []string {
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+func sortedWorkflowSchemaFieldNames(fields map[string]workflowConfigSchema) []string {
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
 }
 
 // ResolveConfig applies defaults, environment indirection, path normalization,
@@ -483,6 +755,10 @@ func ResolveConfig(ctx context.Context, config map[string]any, workflowPath stri
 	workflowDir := filepath.Dir(workflowPath)
 	var raw rawConfig
 	if len(config) > 0 {
+		if err := validateWorkflowConfigKeys(config); err != nil {
+			return Config{}, err
+		}
+
 		data, err := yaml.Marshal(config)
 		if err != nil {
 			return Config{}, fmt.Errorf("marshal workflow config: %w", err)
@@ -1363,21 +1639,17 @@ func codexExtraConfig(config map[string]any) map[string]any {
 		return nil
 	}
 
-	extra := make(map[string]any, len(raw))
-	for key, value := range raw {
-		switch key {
-		case "command", "approval_policy", "thread_sandbox", "turn_sandbox_policy", "turn_timeout_ms", "read_timeout_ms", "stall_timeout_ms":
-			continue
-		default:
-			extra[key] = normalizeYAMLValue(value)
-		}
-	}
-
-	if len(extra) == 0 {
+	extra, ok := normalizeYAMLValue(raw["config"]).(map[string]any)
+	if !ok || len(extra) == 0 {
 		return nil
 	}
 
-	return extra
+	out := make(map[string]any, len(extra))
+	for key, value := range extra {
+		out[key] = normalizeYAMLValue(value)
+	}
+
+	return out
 }
 
 func trimNonEmptyStrings(values []string) []string {

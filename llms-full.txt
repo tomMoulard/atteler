@@ -8695,6 +8695,54 @@ Work on {{ issue.identifier }}: {{ issue.title }}.
 Labels:{% for label in issue.labels %} {{ label }}{% endfor %}
 ```
 
+`symphony --validate` is strict about workflow front matter. Unknown keys fail
+validation before Symphony starts polling, opening workspaces, publishing PRs,
+or removing labels. Error messages use dotted paths such as
+`publish.monitor_checks` and include a closest-key hint when the typo is clear.
+
+Supported top-level sections are:
+
+- `autonomy`
+- `tracker`
+- `workspace`
+- `publish`
+- `debug`
+- `hooks`
+- `polling`
+- `agent`
+- `codex`
+
+Supported nested keys are:
+
+- `tracker`: `kind`, `endpoint`, `api_key`, `project_slug`, `repository`,
+  `owner`, `repo`, `active_states`, `terminal_states`, `labels`
+- `workspace`: `root`
+- `publish`: `enabled`, `remote`, `remote_url`, `base_branch`,
+  `branch_prefix`, `draft`, `draft_on_failed_validation`, `monitor_checks`,
+  `verification_gates`, `verification_allow_commands`,
+  `verification_deny_commands`, `verification_output_max_bytes`,
+  `remove_labels`, `required_checks`, `required_check_patterns`,
+  `discover_required_checks`, `no_checks_policy`, `rework_optional_checks`,
+  `check_interval_ms`, `max_check_rework_attempts`, `git_user_name`,
+  `git_user_email`
+- `publish.verification_gates` map entries: `name`, `command`, `required`,
+  `timeout_ms`
+- `debug`: `enabled`, `address`, `event_limit`
+- `hooks`: `after_create`, `before_run`, `after_run`, `before_remove`,
+  `timeout_ms`
+- `polling`: `interval_ms`
+- `agent`: `max_concurrent_agents`, `max_turns`, `max_retry_backoff_ms`,
+  `max_concurrent_agents_by_state`
+- `codex`: `command`, `approval_policy`, `thread_sandbox`,
+  `turn_sandbox_policy`, `turn_timeout_ms`, `read_timeout_ms`,
+  `stall_timeout_ms`, `config`
+
+If local tooling needs metadata that Symphony itself should ignore, place it
+under an `extensions` map or prefix the key with `x_` at the relevant mapping
+level. Arbitrary Codex app-server config belongs under `codex.config`; keys
+there are passed through as the app-server thread `config` payload instead of
+being interpreted as Symphony settings.
+
 The prompt renderer is strict: unknown variables and unknown filters fail the
 affected run attempt. It supports `{{ issue.title }}`, `{{ attempt }}`,
 `{% if attempt %}...{% else %}...{% endif %}`, and
@@ -8945,6 +8993,9 @@ Implementation-defined safety posture:
   `turn_sandbox_policy`, Symphony accepts the same friendly strings
   (`read-only`, `workspace-write`, `danger-full-access`) and sends the
   app-server's typed policy object.
+- `codex.config` is an explicit pass-through map for Codex app-server thread
+  config. Put arbitrary app-server options there; misspelled Symphony config
+  keys under `codex` are rejected by workflow validation.
 
 ## Runtime Behavior
 

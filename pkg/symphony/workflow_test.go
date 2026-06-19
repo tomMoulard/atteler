@@ -37,6 +37,97 @@ func TestParseWorkflow_FrontMatterMustBeMap(t *testing.T) {
 	assert.Equal(t, ErrWorkflowFrontMatterNotMap, classed.Class)
 }
 
+func TestValidateWorkflow_AcceptsValidFrontMatter(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir, path := writeTestWorkflow(t, `tracker:
+  kind: github
+  repository: openai/symphony
+workspace:
+  root: ./workspaces
+polling:
+  interval_ms: 30000
+agent:
+  max_concurrent_agents: 1
+  max_turns: 1
+  max_retry_backoff_ms: 1000
+codex:
+  command: codex app-server
+  turn_timeout_ms: 1000
+  read_timeout_ms: 1000
+  stall_timeout_ms: 1000
+`)
+
+	cfg, err := ValidateWorkflow(t.Context(), dir, path)
+	require.NoError(t, err)
+	assert.Equal(t, "github", cfg.Tracker.Kind)
+}
+
+func TestValidateWorkflow_RejectsUnknownTopLevelFrontMatterKey(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+
+	badKey := "publ" + "sih"
+	dir, path := writeTestWorkflow(t, `tracker:
+  kind: github
+  repository: openai/symphony
+`+badKey+`:
+  enabled: true
+`)
+
+	_, err := ValidateWorkflow(t.Context(), dir, path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown workflow config field "`+badKey+`"`)
+	assert.Contains(t, err.Error(), `did you mean "publish"`)
+}
+
+func TestValidateWorkflow_RejectsUnknownNestedFrontMatterKey(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir, path := writeTestWorkflow(t, `tracker:
+  kind: github
+  repository: openai/symphony
+publish:
+  monitr_checks: true
+`)
+
+	_, err := ValidateWorkflow(t.Context(), dir, path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown workflow config field "publish.monitr_checks"`)
+	assert.Contains(t, err.Error(), `did you mean "publish.monitor_checks"`)
+}
+
+func TestValidateWorkflow_RejectsUnknownVerificationGateKey(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir, path := writeTestWorkflow(t, `tracker:
+  kind: github
+  repository: openai/symphony
+publish:
+  verification_gates:
+    - name: unit
+      command: go test ./...
+      timeout_mss: 1000
+`)
+
+	_, err := ValidateWorkflow(t.Context(), dir, path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown workflow config field "publish.verification_gates[0].timeout_mss"`)
+	assert.Contains(t, err.Error(), `did you mean "publish.verification_gates[0].timeout_ms"`)
+}
+
+func TestValidateWorkflow_AllowsExtensionNamespaces(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir, path := writeTestWorkflow(t, `tracker:
+  kind: github
+  repository: openai/symphony
+extensions:
+  operator_note:
+    owner: platform
+publish:
+  x_operator_note: keep for local tooling
+`)
+
+	_, err := ValidateWorkflow(t.Context(), dir, path)
+	require.NoError(t, err)
+}
+
 func TestWorkflowManagerLoadPermissionPolicyDeniesWorkflowRead(t *testing.T) {
 	t.Parallel()
 
@@ -547,6 +638,54 @@ func TestResolveConfig_NormalizesTurnSandboxScalar(t *testing.T) {
 	assert.Equal(t, map[string]any{"type": "workspaceWrite"}, cfg.Codex.TurnSandboxPolicy)
 }
 
+func TestResolveConfig_CodexConfigPassThrough(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	cfg, err := ResolveConfig(t.Context(), map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+		},
+		"codex": map[string]any{
+			"config": map[string]any{
+				"model": "gpt-5.5",
+				"experimental": map[string]any{
+					"reasoning": "high",
+				},
+			},
+		},
+	}, path)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]any{
+		"model": "gpt-5.5",
+		"experimental": map[string]any{
+			"reasoning": "high",
+		},
+	}, cfg.Codex.ExtraConfig)
+}
+
+func TestResolveConfig_RejectsArbitraryCodexKeysOutsideConfig(t *testing.T) {
+	t.Setenv(githubTokenEnv, "token")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+
+	_, err := ResolveConfig(t.Context(), map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "openai/symphony",
+		},
+		"codex": map[string]any{
+			"model": "gpt-5.5",
+		},
+	}, path)
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), `unknown workflow config field "codex.model"`)
+}
+
 func TestResolveConfig_GitHubTokenFallsBackToGHCLI(t *testing.T) {
 	t.Setenv(githubTokenEnv, "")
 	t.Setenv(githubCLITokenEnv, "")
@@ -655,4 +794,14 @@ func TestWorkflowManager_ReloadKeepsLastGoodConfigOnInvalidChange(t *testing.T) 
 	require.Error(t, err)
 	assert.False(t, changed)
 	assert.Equal(t, first.Config.Tracker.Kind, next.Config.Tracker.Kind)
+}
+
+func writeTestWorkflow(t *testing.T, frontMatter string) (dir, path string) {
+	t.Helper()
+
+	dir = t.TempDir()
+	path = filepath.Join(dir, "WORKFLOW.md")
+	require.NoError(t, os.WriteFile(path, []byte("---\n"+frontMatter+"---\nPrompt\n"), 0o600))
+
+	return dir, path
 }

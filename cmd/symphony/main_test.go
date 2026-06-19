@@ -26,6 +26,35 @@ func TestRunValidateAutonomyFlagOverridesWorkflow(t *testing.T) {
 	assert.Contains(t, stdout, "autonomy=full")
 }
 
+func TestRunValidateRejectsUnknownWorkflowConfigField(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+	badKey := "publ" + "sih"
+	require.NoError(t, os.WriteFile(path, []byte("---\ntracker:\n  kind: github\n  repository: openai/symphony\n"+badKey+":\n  enabled: true\n---\nDo the issue.\n"), 0o600))
+
+	err := run(t.Context(), []string{"--validate", "--workflow", path})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown workflow config field "`+badKey+`"`)
+	assert.Contains(t, err.Error(), `did you mean "publish"`)
+}
+
+func TestRunValidateRejectsUnknownNestedWorkflowConfigField(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+	require.NoError(t, os.WriteFile(path, []byte("---\ntracker:\n  kind: github\n  repository: openai/symphony\npublish:\n  monitr_checks: true\n---\nDo the issue.\n"), 0o600))
+
+	err := run(t.Context(), []string{"--validate", "--workflow", path})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown workflow config field "publish.monitr_checks"`)
+	assert.Contains(t, err.Error(), `did you mean "publish.monitor_checks"`)
+}
+
 func TestRunRejectsInvalidAutonomyFlag(t *testing.T) { //nolint:paralleltest // flag package writes usage to process-global stderr.
 	err := run(t.Context(), []string{"--validate", "--autonomy", "unsafe"})
 	require.Error(t, err)
