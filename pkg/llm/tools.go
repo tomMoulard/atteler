@@ -16,7 +16,7 @@ import (
 // conventions with a single required "command" parameter.
 func BashTool() ToolDefinition {
 	return ToolDefinition{
-		Name:        bashToolName,
+		Name:        ToolNameBash,
 		Description: "Execute a bash command and return stdout, stderr, and the exit status. Use this to run shell commands, inspect files, run tests, etc.",
 		Parameters: map[string]any{
 			"type": "object",
@@ -32,9 +32,196 @@ func BashTool() ToolDefinition {
 	}
 }
 
+// ReadTool returns the standard tool definition for reading a workspace file
+// without shelling out.
+func ReadTool() ToolDefinition {
+	return ToolDefinition{
+		Name:        ToolNameRead,
+		Description: "Read a UTF-8 text file from the workspace without running a shell command. Use offset and limit for large files.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "File path to read, relative to the current working directory unless absolute.",
+				},
+				"offset": map[string]any{
+					"type":        "integer",
+					"minimum":     1,
+					"description": "Optional 1-based line number to start reading from.",
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"minimum":     1,
+					"description": "Optional maximum number of lines to return.",
+				},
+			},
+			"required":             []string{"path"},
+			"additionalProperties": false,
+		},
+	}
+}
+
+// WriteTool returns the standard tool definition for overwriting a workspace
+// file without shelling out.
+func WriteTool() ToolDefinition {
+	return ToolDefinition{
+		Name:        ToolNameWrite,
+		Description: "Create or overwrite a UTF-8 text file in the workspace without running a shell command.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "File path to create or overwrite, relative to the current working directory unless absolute.",
+				},
+				"content": map[string]any{
+					"type":        "string",
+					"description": "Full file contents to write.",
+				},
+				"create_parent_dirs": map[string]any{
+					"type":        "boolean",
+					"description": "Create missing parent directories before writing. Defaults to false.",
+				},
+			},
+			"required":             []string{"path", "content"},
+			"additionalProperties": false,
+		},
+	}
+}
+
+// EditTool returns the standard tool definition for replacing text in a
+// workspace file without shelling out.
+func EditTool() ToolDefinition {
+	return ToolDefinition{
+		Name:        ToolNameEdit,
+		Description: "Replace text in a UTF-8 workspace file without running a shell command. By default old_string must match exactly once.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "File path to edit, relative to the current working directory unless absolute.",
+				},
+				"old_string": map[string]any{
+					"type":        "string",
+					"description": "Exact text to replace.",
+				},
+				"new_string": map[string]any{
+					"type":        "string",
+					"description": "Replacement text.",
+				},
+				"replace_all": map[string]any{
+					"type":        "boolean",
+					"description": "Replace every occurrence instead of requiring exactly one match. Defaults to false.",
+				},
+			},
+			"required":             []string{"path", "old_string", "new_string"},
+			"additionalProperties": false,
+		},
+	}
+}
+
+// GlobTool returns the standard tool definition for listing workspace files
+// matching a glob pattern without shelling out.
+func GlobTool() ToolDefinition {
+	return ToolDefinition{
+		Name:        ToolNameGlob,
+		Description: "List workspace files matching a glob pattern without running a shell command. Supports ** path segments for recursive matches.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"pattern": map[string]any{
+					"type":        "string",
+					"description": "Glob pattern to match, relative to path. Example: **/*.go",
+				},
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Directory to search from. Defaults to the current working directory.",
+				},
+				"max_results": map[string]any{
+					"type":        "integer",
+					"minimum":     1,
+					"maximum":     FileToolMaxResults,
+					"description": fmt.Sprintf("Maximum number of matches to return. Defaults to 200 and cannot exceed %d.", FileToolMaxResults),
+				},
+			},
+			"required":             []string{"pattern"},
+			"additionalProperties": false,
+		},
+	}
+}
+
+// GrepTool returns the standard tool definition for searching workspace files
+// with a regular expression without shelling out.
+func GrepTool() ToolDefinition {
+	return ToolDefinition{
+		Name:        ToolNameGrep,
+		Description: "Search UTF-8 workspace files with a regular expression without running a shell command.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"pattern": map[string]any{
+					"type":        "string",
+					"description": "Go regular expression to search for.",
+				},
+				"path": map[string]any{
+					"type":        "string",
+					"description": "File or directory to search. Defaults to the current working directory.",
+				},
+				"include": map[string]any{
+					"type":        "string",
+					"description": "Optional glob for files to include relative to the search directory, such as **/*.go.",
+				},
+				"case_sensitive": map[string]any{
+					"type":        "boolean",
+					"description": "Whether matching is case-sensitive. Defaults to true.",
+				},
+				"max_results": map[string]any{
+					"type":        "integer",
+					"minimum":     1,
+					"maximum":     FileToolMaxResults,
+					"description": fmt.Sprintf("Maximum number of matching lines to return. Defaults to 100 and cannot exceed %d.", FileToolMaxResults),
+				},
+			},
+			"required":             []string{"pattern"},
+			"additionalProperties": false,
+		},
+	}
+}
+
 // DefaultTools returns the standard set of tools available to agents.
 func DefaultTools() []ToolDefinition {
-	return []ToolDefinition{BashTool()}
+	return []ToolDefinition{
+		ReadTool(),
+		WriteTool(),
+		EditTool(),
+		GlobTool(),
+		GrepTool(),
+		BashTool(),
+	}
+}
+
+// IsFileToolName reports whether name is one of Atteler's built-in in-process
+// file tools.
+func IsFileToolName(name string) bool {
+	switch strings.TrimSpace(name) {
+	case ToolNameRead, ToolNameWrite, ToolNameEdit, ToolNameGlob, ToolNameGrep:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsWriteFileToolName reports whether name is a built-in file tool that can
+// mutate the filesystem.
+func IsWriteFileToolName(name string) bool {
+	switch strings.TrimSpace(name) {
+	case ToolNameWrite, ToolNameEdit:
+		return true
+	default:
+		return false
+	}
 }
 
 var (
@@ -82,7 +269,24 @@ var (
 )
 
 const (
-	bashToolName = "bash"
+	// ToolNameBash is the built-in shell execution tool name.
+	ToolNameBash = "bash"
+	// ToolNameRead is the built-in file read tool name.
+	ToolNameRead = "read"
+	// ToolNameWrite is the built-in file write tool name.
+	ToolNameWrite = "write"
+	// ToolNameEdit is the built-in file edit tool name.
+	ToolNameEdit = "edit"
+	// ToolNameGlob is the built-in file glob tool name.
+	ToolNameGlob = "glob"
+	// ToolNameGrep is the built-in file grep tool name.
+	ToolNameGrep = "grep"
+
+	// FileToolMaxResults is the maximum max_results value accepted by the
+	// built-in glob and grep file tools.
+	FileToolMaxResults = 1000
+
+	bashToolName = ToolNameBash
 
 	dependencyActionAdd     = "add"
 	dependencyActionInstall = "install"
@@ -194,6 +398,48 @@ func BashToolPolicy(ctx context.Context, call ToolCall, _ AgentLoopBudgetSnapsho
 	}
 }
 
+// DefaultToolPolicy returns a conservative policy for Atteler's built-in tools.
+// It preserves the bash safety policy and adds first-class read/write/edit/glob
+// and grep policy checks for the in-process file tools.
+func DefaultToolPolicy(ctx context.Context, call ToolCall, budget AgentLoopBudgetSnapshot) ToolPolicyDecision {
+	switch strings.TrimSpace(call.Name) {
+	case ToolNameBash:
+		return BashToolPolicy(ctx, call, budget)
+	case ToolNameRead, ToolNameWrite, ToolNameEdit, ToolNameGlob, ToolNameGrep:
+		return FileToolPolicy(ctx, call, budget)
+	default:
+		return ToolPolicyDecision{
+			Verdict:     ToolPolicyDeny,
+			Reason:      fmt.Sprintf("unknown tool %q", call.Name),
+			MatchedRule: "tool.deny.unknown_tool",
+		}
+	}
+}
+
+// FileToolPolicy returns a policy decision for Atteler's built-in in-process
+// file tools. Filesystem writes are capability-gated by autonomy in
+// FileToolPolicyForAutonomy; this base policy validates the tool name and
+// applies configured permission-policy prechecks.
+func FileToolPolicy(ctx context.Context, call ToolCall, _ AgentLoopBudgetSnapshot) ToolPolicyDecision {
+	if !IsFileToolName(call.Name) {
+		return ToolPolicyDecision{
+			Verdict:     ToolPolicyDeny,
+			Reason:      fmt.Sprintf("unknown file tool %q", call.Name),
+			MatchedRule: "file_tool.deny.unknown_tool",
+		}
+	}
+
+	if decision, ok := fileToolPermissionPolicyDecision(ctx, call); ok {
+		return decision
+	}
+
+	return ToolPolicyDecision{
+		Verdict:     ToolPolicyAllow,
+		Reason:      fmt.Sprintf("file tool %q passed built-in policy checks", strings.TrimSpace(call.Name)),
+		MatchedRule: "file_tool.allow.default",
+	}
+}
+
 // BashToolPolicyForAutonomy returns the built-in bash policy with additional
 // hard capability boundaries for the selected autonomy level.
 func BashToolPolicyForAutonomy(level autonomy.Level) ToolPolicy {
@@ -221,6 +467,46 @@ func BashToolPolicyForAutonomy(level autonomy.Level) ToolPolicy {
 		}
 
 		return base
+	}
+}
+
+// DefaultToolPolicyForAutonomy returns the built-in policy for all default
+// tools with hard autonomy boundaries applied.
+func DefaultToolPolicyForAutonomy(level autonomy.Level) ToolPolicy {
+	level = autonomy.Normalize(level)
+
+	return func(ctx context.Context, call ToolCall, budget AgentLoopBudgetSnapshot) ToolPolicyDecision {
+		if strings.TrimSpace(call.Name) == ToolNameBash {
+			return BashToolPolicyForAutonomy(level)(ctx, call, budget)
+		}
+
+		if IsWriteFileToolName(call.Name) && !level.Allows(autonomy.ActionFileWrite) {
+			return ToolPolicyDecision{
+				Verdict:     ToolPolicyDeny,
+				Reason:      autonomy.DenialMessage(level, autonomy.ActionFileWrite, strings.TrimSpace(call.Name)+" tool"),
+				MatchedRule: "autonomy.deny.file_write",
+			}
+		}
+
+		return DefaultToolPolicy(ctx, call, budget)
+	}
+}
+
+// FileToolPolicyForAutonomy returns the policy for in-process file tools with
+// hard autonomy boundaries applied.
+func FileToolPolicyForAutonomy(level autonomy.Level) ToolPolicy {
+	level = autonomy.Normalize(level)
+
+	return func(ctx context.Context, call ToolCall, budget AgentLoopBudgetSnapshot) ToolPolicyDecision {
+		if IsWriteFileToolName(call.Name) && !level.Allows(autonomy.ActionFileWrite) {
+			return ToolPolicyDecision{
+				Verdict:     ToolPolicyDeny,
+				Reason:      autonomy.DenialMessage(level, autonomy.ActionFileWrite, strings.TrimSpace(call.Name)+" tool"),
+				MatchedRule: "autonomy.deny.file_write",
+			}
+		}
+
+		return FileToolPolicy(ctx, call, budget)
 	}
 }
 
@@ -1598,6 +1884,128 @@ func bashToolPermissionPolicyDecision(ctx context.Context, command string) (Tool
 		Reason:      decision.Reason,
 		MatchedRule: decision.Rule,
 	}, true
+}
+
+func fileToolPermissionPolicyDecision(ctx context.Context, call ToolCall) (ToolPolicyDecision, bool) {
+	policy := permission.PolicyFromContext(ctx)
+	if policy == nil {
+		return ToolPolicyDecision{}, false
+	}
+
+	ops, ok := fileToolPermissionOperations(call)
+	if !ok {
+		return ToolPolicyDecision{}, false
+	}
+
+	if !fileToolNeedsPermissionPrecheck(ctx, policy, ops) {
+		return ToolPolicyDecision{}, false
+	}
+
+	request := permission.Request{
+		Action:     ops[0].Action,
+		Source:     ops[0].Source,
+		Target:     ops[0].Target,
+		Operations: ops,
+	}
+
+	decision := permission.Evaluate(ctx, policy, request)
+	if decision.Allowed {
+		return ToolPolicyDecision{}, false
+	}
+
+	return ToolPolicyDecision{
+		Verdict:     ToolPolicyDeny,
+		Reason:      decision.Reason,
+		MatchedRule: decision.Rule,
+	}, true
+}
+
+func fileToolPermissionOperations(call ToolCall) ([]permission.Operation, bool) {
+	toolName := strings.TrimSpace(call.Name)
+	if !IsFileToolName(toolName) {
+		return nil, false
+	}
+
+	kinds := []permission.OperationKind{permission.OperationRead}
+
+	switch toolName {
+	case ToolNameWrite:
+		kinds = []permission.OperationKind{permission.OperationWrite}
+	case ToolNameEdit:
+		kinds = []permission.OperationKind{permission.OperationRead, permission.OperationWrite}
+	}
+
+	target := fileToolPermissionTarget(call)
+
+	action := toolName + " file tool"
+	if target != "" {
+		action += " " + target
+	}
+
+	ops := make([]permission.Operation, 0, len(kinds))
+	for _, kind := range kinds {
+		ops = append(ops, permission.Operation{
+			Kind:   kind,
+			Action: action,
+			Source: "llm." + toolName + "_tool",
+			Target: target,
+		})
+	}
+
+	return ops, true
+}
+
+func fileToolPermissionTarget(call ToolCall) string {
+	switch strings.TrimSpace(call.Name) {
+	case ToolNameGlob:
+		return stringInput(call.Input, "pattern")
+	case ToolNameGrep:
+		target := stringInput(call.Input, "path")
+		if target == "" {
+			target = "."
+		}
+
+		pattern := stringInput(call.Input, "pattern")
+		if pattern != "" {
+			return target + " pattern=" + pattern
+		}
+
+		return target
+	default:
+		return stringInput(call.Input, "path")
+	}
+}
+
+func stringInput(input map[string]any, key string) string {
+	if input == nil {
+		return ""
+	}
+
+	value, ok := input[key].(string)
+	if !ok {
+		return ""
+	}
+
+	return strings.TrimSpace(value)
+}
+
+func fileToolNeedsPermissionPrecheck(ctx context.Context, policy *permission.Policy, ops []permission.Operation) bool {
+	if policy == nil {
+		return false
+	}
+
+	for _, op := range ops {
+		switch policy.ModeFor(op.Kind) {
+		case permission.ModeDeny:
+			return true
+		case permission.ModeAsk:
+			if permission.ConfirmerFromContext(ctx) == nil {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func bashToolNeedsPermissionPrecheck(ctx context.Context, policy *permission.Policy, ops []permission.Operation) bool {

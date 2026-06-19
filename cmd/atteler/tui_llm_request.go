@@ -122,7 +122,7 @@ func listenForLLMLiveMessage(liveCh <-chan tea.Msg) tea.Cmd {
 	}
 }
 
-// callLLMWithTools runs an agent loop where the LLM can execute bash commands.
+// callLLMWithTools runs an agent loop where the LLM can execute built-in tools.
 func callLLMWithTools(
 	ctx context.Context,
 	reg *llm.Registry,
@@ -167,7 +167,17 @@ func callLLMWithTools(
 	var toolLog []string
 
 	executor := func(ctx context.Context, call llm.ToolCall) llm.ToolResult {
-		if call.Name != "bash" {
+		if llm.IsFileToolName(call.Name) {
+			result := executeFileTool(ctx, call, fileToolExecutorOptions{
+				WorkingDir: request.workingDir,
+				Autonomy:   request.autonomy,
+			})
+			toolLog = append(toolLog, result.Content)
+
+			return result
+		}
+
+		if call.Name != llm.ToolNameBash {
 			return llm.ToolResult{
 				ToolCallID: call.ID,
 				Content:    "unknown tool: " + call.Name,
@@ -294,7 +304,7 @@ func callLLMWithTools(
 		Autonomy:           request.autonomy,
 		EstimateCostMicros: costEstimator,
 		CheckpointInterval: request.agentLoopCheckpointInterval,
-		Policy:             llm.BashToolPolicyForAutonomy(request.autonomy),
+		Policy:             llm.DefaultToolPolicyForAutonomy(request.autonomy),
 		CheckpointSink:     agentLoopCheckpointSink(request.agentLoopCheckpointPath),
 	})
 	if err != nil {

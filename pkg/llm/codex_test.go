@@ -1344,9 +1344,20 @@ func TestCodexProvider_Complete_WithToolUse(t *testing.T) {
 	require.NoError(t, err)
 
 	// Tools should be sent in the request.
-	require.Len(t, gotReq.Tools, 1)
-	assert.Equal(t, "function", gotReq.Tools[0].Type)
-	assert.Equal(t, "bash", gotReq.Tools[0].Name)
+	require.Len(t, gotReq.Tools, len(DefaultTools()))
+	toolNames := make([]string, 0, len(gotReq.Tools))
+
+	for _, tool := range gotReq.Tools {
+		assert.Equal(t, "function", tool.Type)
+		toolNames = append(toolNames, tool.Name)
+	}
+
+	assert.Contains(t, toolNames, "bash")
+	assert.Contains(t, toolNames, "read")
+	assert.Contains(t, toolNames, "write")
+	assert.Contains(t, toolNames, "edit")
+	assert.Contains(t, toolNames, "glob")
+	assert.Contains(t, toolNames, "grep")
 
 	// Response should contain tool calls.
 	assert.Equal(t, StopToolUse, resp.StopReason)

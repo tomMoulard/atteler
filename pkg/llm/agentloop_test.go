@@ -1430,6 +1430,7 @@ func TestAgentLoop_ExactUsageBudgetStopsBeforeFollowUpToolWork(t *testing.T) {
 			_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
 				Model:    "test-model",
 				Messages: []Message{{Role: RoleUser, Content: "hi"}},
+				Tools:    []ToolDefinition{BashTool()},
 			}, nil, executor, AgentLoopConfig{
 				Budget:             tc.budget,
 				EstimateCostMicros: tc.costEstimator,
@@ -1478,6 +1479,7 @@ func TestAgentLoop_ExactOutputByteBudgetStopsBeforeNextModelCall(t *testing.T) {
 	_, _, err := AgentLoop(context.Background(), reg, CompleteParams{
 		Model:    "test-model",
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		Tools:    []ToolDefinition{BashTool()},
 	}, nil, executor, AgentLoopConfig{
 		Budget:         AgentLoopBudget{MaxOutputBytes: 4},
 		CheckpointSink: ledger,
@@ -1885,6 +1887,51 @@ func TestAgentLoop_PolicyDenialStopsBeforeExecution(t *testing.T) {
 	assert.Equal(t, 0, toolStep.ToolBudget.Budget.MaxToolCalls)
 	require.NotNil(t, ledger.Steps[2].StopCondition)
 	assert.Equal(t, AgentLoopStopPolicyDenied, ledger.Steps[2].StopCondition.Kind)
+}
+
+func TestAgentLoop_DeniesUnadvertisedToolBeforeExecution(t *testing.T) {
+	t.Parallel()
+
+	ledger := &AgentLoopLedger{}
+	reg := NewRegistry()
+	reg.Register(&agentTestProvider{
+		responses: []*Response{
+			{
+				Model:      "test-model",
+				StopReason: StopToolUse,
+				ToolCalls: []ToolCall{{
+					ID:   "call_1",
+					Name: ToolNameWrite,
+					Input: map[string]any{
+						"path":    "README.md",
+						"content": "unexpected",
+					},
+				}},
+			},
+		},
+	})
+
+	executed := false
+	executor := func(_ context.Context, call ToolCall) ToolResult {
+		executed = true
+
+		return ToolResult{ToolCallID: call.ID, Content: "should not run"}
+	}
+
+	_, history, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "write"}},
+		Tools:    []ToolDefinition{ReadTool()},
+	}, nil, executor, AgentLoopConfig{CheckpointSink: ledger})
+	require.ErrorContains(t, err, "tool call denied by policy")
+	assert.False(t, executed)
+	require.Len(t, history, 3)
+	assert.True(t, history[2].ToolResult.IsError)
+	assert.Contains(t, history[2].ToolResult.Content, "not advertised")
+	require.Len(t, ledger.Steps, 3)
+	require.NotNil(t, ledger.Steps[1].Policy)
+	assert.Equal(t, ToolPolicyDeny, ledger.Steps[1].Policy.Verdict)
+	assert.Equal(t, "tool.deny.unadvertised", ledger.Steps[1].Policy.MatchedRule)
 }
 
 func TestAgentLoop_RequireConfirmWithoutCallbackStopsBeforeExecution(t *testing.T) {
