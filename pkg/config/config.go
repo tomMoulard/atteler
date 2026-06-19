@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
+	"github.com/tommoulard/atteler/pkg/sourcepolicy"
 )
 
 // EnvPath names one or more configuration files that should override the
@@ -37,6 +38,7 @@ type Config struct {
 	Agents          map[string]AgentConfig     `json:"agents,omitempty" yaml:"agents,omitempty"`
 	Hooks           map[string][]HookConfig    `json:"hooks,omitempty" yaml:"hooks,omitempty"`
 	Generation      GenerationConfig           `json:"generation" yaml:"generation"`
+	Research        ResearchConfig             `json:"research" yaml:"research"`
 	AgentLoop       AgentLoopConfig            `json:"agent_loop" yaml:"agent_loop"`
 	Autonomy        string                     `json:"autonomy,omitempty" yaml:"autonomy,omitempty"`
 	Auto            string                     `json:"auto,omitempty" yaml:"auto,omitempty"`
@@ -194,6 +196,11 @@ type GenerationConfig struct {
 	ModelMode      string   `json:"model_mode,omitempty" yaml:"model_mode,omitempty"`
 	ReasoningLevel string   `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
 	MaxTokens      int      `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+}
+
+// ResearchConfig configures research, scout, and knowledge-oriented workflows.
+type ResearchConfig struct {
+	SourcePolicy sourcepolicy.Policy `json:"source_policy" yaml:"source_policy"`
 }
 
 // AgentLoopConfig configures the multi-turn tool execution loop.
@@ -523,6 +530,7 @@ func normalizeAutoMode(raw string) string {
 type fileConfig struct {
 	Version         *int                           `json:"version" yaml:"version"`
 	Generation      fileGenerationConfig           `json:"generation" yaml:"generation"`
+	Research        fileResearchConfig             `json:"research" yaml:"research"`
 	AgentLoop       fileAgentLoopConfig            `json:"agent_loop" yaml:"agent_loop"`
 	Context         fileContextConfig              `json:"context" yaml:"context"`
 	Plugins         filePluginConfig               `json:"plugins" yaml:"plugins"`
@@ -653,6 +661,20 @@ type fileGenerationConfig struct {
 	MaxTokens      *int     `json:"max_tokens" yaml:"max_tokens"`
 
 	DeprecatedReasoning *string `json:"reasoning" yaml:"reasoning"`
+}
+
+type fileResearchConfig struct {
+	SourcePolicy fileSourcePolicyConfig `json:"source_policy" yaml:"source_policy"`
+}
+
+//nolint:govet // Field order mirrors the public research.source_policy config shape.
+type fileSourcePolicyConfig struct {
+	TrustedDomains                     []string `json:"trusted_domains" yaml:"trusted_domains"`
+	DeniedDomains                      []string `json:"denied_domains" yaml:"denied_domains"`
+	PreferSourceTypes                  []string `json:"prefer_source_types" yaml:"prefer_source_types"`
+	AllowLowTrustSources               *bool    `json:"allow_low_trust_sources" yaml:"allow_low_trust_sources"`
+	WarnOnLowTrustSources              *bool    `json:"warn_on_low_trust_sources" yaml:"warn_on_low_trust_sources"`
+	RequireEvidenceForHighImpactClaims *bool    `json:"require_evidence_for_high_impact_claims" yaml:"require_evidence_for_high_impact_claims"`
 }
 
 type fileAgentLoopConfig struct {
@@ -1032,6 +1054,7 @@ func mergeFileConfigWithOrigins(dst *Config, src fileConfig, rec *originRecorder
 	mergeAgents(dst, src.Agents, rec, source)
 	mergeHooks(dst, src.Hooks, rec, source)
 	mergeGeneration(dst, src.Generation, rec, source)
+	mergeResearch(dst, src.Research, rec, source)
 	mergeAgentLoop(dst, src.AgentLoop, rec, source)
 	mergeContext(dst, src.Context, rec, source)
 	mergePlugins(dst, src.Plugins, rec, source)
@@ -1608,6 +1631,46 @@ func mergeGeneration(dst *Config, generation fileGenerationConfig, rec *originRe
 	}
 }
 
+func mergeResearch(dst *Config, research fileResearchConfig, rec *originRecorder, source originSource) {
+	mergeSourcePolicy(&dst.Research.SourcePolicy, research.SourcePolicy, rec, source)
+}
+
+func mergeSourcePolicy(dst *sourcepolicy.Policy, policy fileSourcePolicyConfig, rec *originRecorder, source originSource) {
+	if policy.TrustedDomains != nil {
+		dst.TrustedDomains = sourcepolicy.NormalizeDomains(policy.TrustedDomains)
+		rec.replace(sourcePolicyFieldPath("trusted_domains"), source, dst.TrustedDomains, "replaces the entire trusted source domain list")
+	}
+
+	if policy.DeniedDomains != nil {
+		dst.DeniedDomains = sourcepolicy.NormalizeDomains(policy.DeniedDomains)
+		rec.replace(sourcePolicyFieldPath("denied_domains"), source, dst.DeniedDomains, "replaces the entire denied source domain list")
+	}
+
+	if policy.PreferSourceTypes != nil {
+		dst.PreferSourceTypes = sourcepolicy.NormalizeSourceTypes(policy.PreferSourceTypes)
+		rec.replace(sourcePolicyFieldPath("prefer_source_types"), source, dst.PreferSourceTypes, "replaces the entire preferred source type list")
+	}
+
+	if policy.AllowLowTrustSources != nil {
+		dst.AllowLowTrustSources = cloneBoolPointer(policy.AllowLowTrustSources)
+		rec.set(sourcePolicyFieldPath("allow_low_trust_sources"), source, *policy.AllowLowTrustSources)
+	}
+
+	if policy.WarnOnLowTrustSources != nil {
+		dst.WarnOnLowTrustSources = cloneBoolPointer(policy.WarnOnLowTrustSources)
+		rec.set(sourcePolicyFieldPath("warn_on_low_trust_sources"), source, *policy.WarnOnLowTrustSources)
+	}
+
+	if policy.RequireEvidenceForHighImpactClaims != nil {
+		dst.RequireEvidenceForHighImpactClaims = cloneBoolPointer(policy.RequireEvidenceForHighImpactClaims)
+		rec.set(sourcePolicyFieldPath("require_evidence_for_high_impact_claims"), source, *policy.RequireEvidenceForHighImpactClaims)
+	}
+}
+
+func sourcePolicyFieldPath(field string) string {
+	return "research.source_policy." + field
+}
+
 func mergeAgentLoop(dst *Config, agentLoop fileAgentLoopConfig, rec *originRecorder, source originSource) {
 	if agentLoop.MaxOutputBytes != nil {
 		value := *agentLoop.MaxOutputBytes
@@ -1879,6 +1942,7 @@ func mergeConfigFromSource(dst *Config, src Config, rec *originRecorder, source 
 	mergeConfigAgents(dst, src.Agents, rec, source)
 	mergeConfigHooks(dst, src.Hooks, rec, source)
 	mergeConfigGeneration(dst, src.Generation, rec, source)
+	mergeConfigResearch(dst, src.Research, rec, source)
 	mergeConfigAgentLoop(dst, src.AgentLoop, rec, source)
 	mergeConfigContext(dst, src.Context, rec, source)
 	mergeConfigPlugins(dst, src.Plugins, rec, source)
@@ -2405,6 +2469,42 @@ func mergeConfigGeneration(dst *Config, generation GenerationConfig, rec *origin
 	}
 }
 
+func mergeConfigResearch(dst *Config, research ResearchConfig, rec *originRecorder, source originSource) {
+	mergeConfigSourcePolicy(&dst.Research.SourcePolicy, research.SourcePolicy, rec, source)
+}
+
+func mergeConfigSourcePolicy(dst *sourcepolicy.Policy, policy sourcepolicy.Policy, rec *originRecorder, source originSource) {
+	if policy.TrustedDomains != nil {
+		dst.TrustedDomains = sourcepolicy.NormalizeDomains(policy.TrustedDomains)
+		rec.replace(sourcePolicyFieldPath("trusted_domains"), source, dst.TrustedDomains, "replaces the entire trusted source domain list")
+	}
+
+	if policy.DeniedDomains != nil {
+		dst.DeniedDomains = sourcepolicy.NormalizeDomains(policy.DeniedDomains)
+		rec.replace(sourcePolicyFieldPath("denied_domains"), source, dst.DeniedDomains, "replaces the entire denied source domain list")
+	}
+
+	if policy.PreferSourceTypes != nil {
+		dst.PreferSourceTypes = sourcepolicy.NormalizeSourceTypes(policy.PreferSourceTypes)
+		rec.replace(sourcePolicyFieldPath("prefer_source_types"), source, dst.PreferSourceTypes, "replaces the entire preferred source type list")
+	}
+
+	if policy.AllowLowTrustSources != nil {
+		dst.AllowLowTrustSources = cloneBoolPointer(policy.AllowLowTrustSources)
+		rec.set(sourcePolicyFieldPath("allow_low_trust_sources"), source, *policy.AllowLowTrustSources)
+	}
+
+	if policy.WarnOnLowTrustSources != nil {
+		dst.WarnOnLowTrustSources = cloneBoolPointer(policy.WarnOnLowTrustSources)
+		rec.set(sourcePolicyFieldPath("warn_on_low_trust_sources"), source, *policy.WarnOnLowTrustSources)
+	}
+
+	if policy.RequireEvidenceForHighImpactClaims != nil {
+		dst.RequireEvidenceForHighImpactClaims = cloneBoolPointer(policy.RequireEvidenceForHighImpactClaims)
+		rec.set(sourcePolicyFieldPath("require_evidence_for_high_impact_claims"), source, *policy.RequireEvidenceForHighImpactClaims)
+	}
+}
+
 func mergeConfigAgentLoop(dst *Config, agentLoop AgentLoopConfig, rec *originRecorder, source originSource) {
 	if agentLoop.MaxOutputBytes != nil {
 		value := *agentLoop.MaxOutputBytes
@@ -2557,6 +2657,7 @@ func mergeConfigFromOrigins(dst *Config, src Config, dstOrigins, srcOrigins Orig
 	mergeConfigAgentsFromOrigins(dst, src.Agents, dstOrigins, srcOrigins)
 	mergeConfigHooksFromOrigins(dst, src.Hooks, dstOrigins, srcOrigins)
 	mergeConfigGenerationFromOrigins(dst, src.Generation, dstOrigins, srcOrigins)
+	mergeConfigResearchFromOrigins(dst, src.Research, dstOrigins, srcOrigins)
 	mergeConfigAgentLoopFromOrigins(dst, src.AgentLoop, dstOrigins, srcOrigins)
 	mergeConfigContextFromOrigins(dst, src.Context, dstOrigins, srcOrigins)
 	mergeConfigPluginsFromOrigins(dst, src.Plugins, dstOrigins, srcOrigins)
@@ -3174,6 +3275,48 @@ func mergeConfigGenerationFromOrigins(dst *Config, generation GenerationConfig, 
 
 		appendOriginChain(dstOrigins, "generation.max_tokens", srcOrigins, false)
 	}
+}
+
+func mergeConfigResearchFromOrigins(dst *Config, research ResearchConfig, dstOrigins, srcOrigins OriginMap) {
+	mergeConfigSourcePolicyFromOrigins(&dst.Research.SourcePolicy, research.SourcePolicy, dstOrigins, srcOrigins)
+}
+
+func mergeConfigSourcePolicyFromOrigins(dst *sourcepolicy.Policy, policy sourcepolicy.Policy, dstOrigins, srcOrigins OriginMap) {
+	mergeSourcePolicyStringListFromOrigins(&dst.TrustedDomains, policy.TrustedDomains, "trusted_domains", dstOrigins, srcOrigins)
+	mergeSourcePolicyStringListFromOrigins(&dst.DeniedDomains, policy.DeniedDomains, "denied_domains", dstOrigins, srcOrigins)
+	mergeSourcePolicyStringListFromOrigins(&dst.PreferSourceTypes, policy.PreferSourceTypes, "prefer_source_types", dstOrigins, srcOrigins)
+	mergeSourcePolicyBoolFromOrigins(&dst.AllowLowTrustSources, policy.AllowLowTrustSources, "allow_low_trust_sources", dstOrigins, srcOrigins)
+	mergeSourcePolicyBoolFromOrigins(&dst.WarnOnLowTrustSources, policy.WarnOnLowTrustSources, "warn_on_low_trust_sources", dstOrigins, srcOrigins)
+	mergeSourcePolicyBoolFromOrigins(&dst.RequireEvidenceForHighImpactClaims, policy.RequireEvidenceForHighImpactClaims, "require_evidence_for_high_impact_claims", dstOrigins, srcOrigins)
+}
+
+func mergeSourcePolicyStringListFromOrigins(dst *[]string, policy []string, field string, dstOrigins, srcOrigins OriginMap) {
+	path := sourcePolicyFieldPath(field)
+	if policy == nil && !originPresent(srcOrigins, path) {
+		return
+	}
+
+	switch field {
+	case "trusted_domains", "denied_domains":
+		*dst = sourcepolicy.NormalizeDomains(policy)
+	case "prefer_source_types":
+		*dst = sourcepolicy.NormalizeSourceTypes(policy)
+	default:
+		*dst = cloneSlicePreserveEmpty(policy)
+	}
+
+	appendOriginChain(dstOrigins, path, srcOrigins, true)
+}
+
+func mergeSourcePolicyBoolFromOrigins(dst **bool, policy *bool, field string, dstOrigins, srcOrigins OriginMap) {
+	path := sourcePolicyFieldPath(field)
+	if policy == nil && !originPresent(srcOrigins, path) {
+		return
+	}
+
+	*dst = cloneBoolPointer(policy)
+
+	appendOriginChain(dstOrigins, path, srcOrigins, false)
 }
 
 func mergeConfigAgentLoopFromOrigins(dst *Config, agentLoop AgentLoopConfig, dstOrigins, srcOrigins OriginMap) {
@@ -3930,6 +4073,16 @@ func cloneSlicePreserveEmpty[T any](in []T) []T {
 	copy(out, in)
 
 	return out
+}
+
+func cloneBoolPointer(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+
+	out := *in
+
+	return &out
 }
 
 func cloneFeedbackGuidance(records []FeedbackGuidance) []FeedbackGuidance {

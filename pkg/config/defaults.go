@@ -79,6 +79,36 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Message: "no config-level completion token cap is sent unless config, agent config, or CLI flags set one",
 		},
 		{
+			Field:   "research.source_policy.trusted_domains",
+			Value:   "[]",
+			Message: "research and retrieval do not trust specific domains unless project config, harness guidance, or CLI flags add them",
+		},
+		{
+			Field:   "research.source_policy.denied_domains",
+			Value:   "[]",
+			Message: "source policy denies no domains unless project config, harness guidance, or CLI flags add them",
+		},
+		{
+			Field:   "research.source_policy.prefer_source_types",
+			Value:   "[official_docs, source_code, standard_or_spec]",
+			Message: "source scoring prefers official documentation, source code, and standards/specifications unless config sets a different list",
+		},
+		{
+			Field:   "research.source_policy.allow_low_trust_sources",
+			Value:   "true",
+			Message: "low-trust sources are allowed by default and marked for audit instead of being blocked",
+		},
+		{
+			Field:   "research.source_policy.warn_on_low_trust_sources",
+			Value:   "true",
+			Message: "reports warn when included sources are weak evidence unless config disables the warning",
+		},
+		{
+			Field:   "research.source_policy.require_evidence_for_high_impact_claims",
+			Value:   "false",
+			Message: "evidence is recommended for high-impact claims but not mandatory unless policy or harness guidance requires it",
+		},
+		{
 			Field:   "agent_loop.max_output_bytes",
 			Value:   "unset/0",
 			Message: "agent-loop tool output is unlimited unless this field is set to a positive byte limit",

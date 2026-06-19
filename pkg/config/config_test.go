@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
+	"github.com/tommoulard/atteler/pkg/sourcepolicy"
 )
 
 const (
@@ -42,6 +43,14 @@ providers:
     base_url: https://openai.global
   codex:
     disable_private_adapter: true
+research:
+  source_policy:
+    trusted_domains: [go.dev]
+    denied_domains: [content-farm.global]
+    prefer_source_types: [official_docs, source_code]
+    allow_low_trust_sources: true
+    warn_on_low_trust_sources: true
+    require_evidence_for_high_impact_claims: true
 `)
 	local := writeConfig(t, dir, "local.yml", `
 default_model: gpt-local
@@ -106,6 +115,14 @@ generation:
   model_mode: fast
   reasoning_level: medium
   max_tokens: 900
+research:
+  source_policy:
+    trusted_domains: [docs.github.com, https://go.dev/doc/]
+    denied_domains: [example-content-farm.com]
+    prefer_source_types: [standards, issue_discussion]
+    allow_low_trust_sources: false
+    warn_on_low_trust_sources: true
+    require_evidence_for_high_impact_claims: false
 agent_loop:
   max_output_bytes: 0
   max_cost_micros: 0
@@ -314,6 +331,16 @@ worktree:
 		assert.Failf(t, "assertion failed", "generation max_tokens = %d, want 900", cfg.Generation.MaxTokens)
 	}
 
+	assert.Equal(t, []string{"docs.github.com", "go.dev"}, cfg.Research.SourcePolicy.TrustedDomains)
+	assert.Equal(t, []string{"example-content-farm.com"}, cfg.Research.SourcePolicy.DeniedDomains)
+	assert.Equal(t, []string{sourcepolicy.SourceTypeIssueDiscussion, sourcepolicy.SourceTypeStandardOrSpec}, cfg.Research.SourcePolicy.PreferSourceTypes)
+	require.NotNil(t, cfg.Research.SourcePolicy.AllowLowTrustSources)
+	assert.False(t, *cfg.Research.SourcePolicy.AllowLowTrustSources)
+	require.NotNil(t, cfg.Research.SourcePolicy.WarnOnLowTrustSources)
+	assert.True(t, *cfg.Research.SourcePolicy.WarnOnLowTrustSources)
+	require.NotNil(t, cfg.Research.SourcePolicy.RequireEvidenceForHighImpactClaims)
+	assert.False(t, *cfg.Research.SourcePolicy.RequireEvidenceForHighImpactClaims)
+
 	if cfg.AgentLoop.MaxOutputBytes == nil || *cfg.AgentLoop.MaxOutputBytes != 0 {
 		assert.Failf(t, "assertion failed", "agent_loop.max_output_bytes = %v, want 0", cfg.AgentLoop.MaxOutputBytes)
 	}
@@ -416,6 +443,16 @@ func TestMergeConfigFromSource_ModelRolesAndProviderLocal(t *testing.T) {
 				Local:   true,
 			},
 		},
+		Research: ResearchConfig{
+			SourcePolicy: sourcepolicy.Policy{
+				TrustedDomains:                     []string{"https://Go.dev/doc/"},
+				DeniedDomains:                      []string{"example-content-farm.com"},
+				PreferSourceTypes:                  []string{"standards"},
+				AllowLowTrustSources:               sourcepolicy.Bool(false),
+				WarnOnLowTrustSources:              sourcepolicy.Bool(true),
+				RequireEvidenceForHighImpactClaims: sourcepolicy.Bool(true),
+			},
+		},
 	}, newOriginRecorder(origins), originSource{
 		kind:   OriginHarnessImport,
 		source: "test",
@@ -430,6 +467,13 @@ func TestMergeConfigFromSource_ModelRolesAndProviderLocal(t *testing.T) {
 	assert.Equal(t, 900, planner.MaxTTFTMS)
 	assert.True(t, planner.PreferLocal)
 	assert.True(t, cfg.Providers["vllm"].Local)
+	assert.Equal(t, []string{"go.dev"}, cfg.Research.SourcePolicy.TrustedDomains)
+	assert.Equal(t, []string{"example-content-farm.com"}, cfg.Research.SourcePolicy.DeniedDomains)
+	assert.Equal(t, []string{sourcepolicy.SourceTypeStandardOrSpec}, cfg.Research.SourcePolicy.PreferSourceTypes)
+	require.NotNil(t, cfg.Research.SourcePolicy.AllowLowTrustSources)
+	assert.False(t, *cfg.Research.SourcePolicy.AllowLowTrustSources)
+	require.NotNil(t, cfg.Research.SourcePolicy.RequireEvidenceForHighImpactClaims)
+	assert.True(t, *cfg.Research.SourcePolicy.RequireEvidenceForHighImpactClaims)
 
 	roleOrigin, ok := origins.Final("models.planner.prefer_local")
 	require.True(t, ok)
@@ -440,6 +484,11 @@ func TestMergeConfigFromSource_ModelRolesAndProviderLocal(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, OriginSet, origin.Operation)
 	assert.Equal(t, "true", origin.Value)
+
+	policyOrigin, ok := origins.Final("research.source_policy.allow_low_trust_sources")
+	require.True(t, ok)
+	assert.Equal(t, OriginSet, policyOrigin.Operation)
+	assert.Equal(t, "false", policyOrigin.Value)
 }
 
 func TestLoadFiles_ModelRoleFallbackAliases(t *testing.T) {

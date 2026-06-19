@@ -12,6 +12,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/memory"
 	"github.com/tommoulard/atteler/pkg/retrieval"
+	"github.com/tommoulard/atteler/pkg/sourcepolicy"
 	"github.com/tommoulard/atteler/pkg/vector"
 )
 
@@ -263,6 +264,170 @@ func TestSearch_AppliesContractFiltersBeforeLimit(t *testing.T) {
 	assert.Equal(t, 0, searcher.seenLimit, "backend limit should be disabled before contract filtering")
 }
 
+func TestSearch_AppliesSourcePolicyAndQualityMetadata(t *testing.T) {
+	t.Parallel()
+
+	searcher := observingSearcher{results: []retrieval.Result{
+		{
+			Source:     retrieval.Source{Type: retrieval.SourceFile, Name: "docs", URI: "https://example-content-farm.com/oauth"},
+			Quality:    retrieval.SourceQuality{SourceType: sourcepolicy.SourceTypeVendorBlog},
+			DocumentID: "denied",
+			Chunk:      retrieval.Chunk{ID: "denied#1"},
+			Score:      0.99,
+			Safety:     retrieval.Safety{InjectAllowed: true},
+		},
+		{
+			Source:     retrieval.Source{Type: retrieval.SourceFile, Name: "docs", URI: "https://docs.github.com/en/apps"},
+			DocumentID: "trusted",
+			Chunk:      retrieval.Chunk{ID: "trusted#1"},
+			Score:      0.5,
+			Safety:     retrieval.Safety{InjectAllowed: true},
+		},
+	}}
+
+	results, err := retrieval.Search(context.Background(), retrieval.Query{
+		Text:  "oauth",
+		Limit: 1,
+		SourcePolicy: sourcepolicy.Policy{
+			TrustedDomains: []string{"docs.github.com"},
+			DeniedDomains:  []string{"example-content-farm.com"},
+		},
+	}, &searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "trusted", results[0].DocumentID)
+	assert.Equal(t, "docs.github.com", results[0].Quality.Domain)
+	assert.Equal(t, sourcepolicy.TrustLevelHigh, results[0].Quality.TrustLevel)
+	assert.Equal(t, sourcepolicy.PolicyMatchTrustedDomain, results[0].Quality.PolicyMatch)
+	assert.Equal(t, sourcepolicy.SourceTypeOfficialDocs, results[0].Metadata[retrieval.MetadataSourceQualityType])
+	assert.Equal(t, "0.950", results[0].Metadata[retrieval.MetadataSourceQualityTrustScore])
+	assert.Equal(t, 0, searcher.seenLimit, "backend limit should be disabled before source policy filtering")
+}
+
+func TestSearch_UsesSourceQualityAsTieBreaker(t *testing.T) {
+	t.Parallel()
+
+	results, err := retrieval.Search(context.Background(), retrieval.Query{
+		Text: "oauth",
+		SourcePolicy: sourcepolicy.Policy{
+			TrustedDomains: []string{"docs.github.com"},
+		},
+	}, staticSearcher{results: []retrieval.Result{
+		{
+			Source:     retrieval.Source{Type: retrieval.SourceFile, Name: "a-low", URI: "https://random.example/post"},
+			DocumentID: "low",
+			Chunk:      retrieval.Chunk{ID: "low#1"},
+			Score:      0.7,
+			Safety:     retrieval.Safety{InjectAllowed: true},
+		},
+		{
+			Source:     retrieval.Source{Type: retrieval.SourceFile, Name: "z-trusted", URI: "https://docs.github.com/en/apps"},
+			DocumentID: "trusted",
+			Chunk:      retrieval.Chunk{ID: "trusted#1"},
+			Score:      0.7,
+			Safety:     retrieval.Safety{InjectAllowed: true},
+		},
+	}})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	assert.Equal(t, "trusted", results[0].DocumentID)
+	assert.Equal(t, sourcepolicy.PolicyMatchTrustedDomain, results[0].Quality.PolicyMatch)
+}
+
+func TestSearch_AppliesLimitAfterSourceQualityRanking(t *testing.T) {
+	t.Parallel()
+
+	searcher := observingSearcher{results: []retrieval.Result{
+		{
+			Source:     retrieval.Source{Type: retrieval.SourceFile, Name: "a-low", URI: "https://random.example/post"},
+			DocumentID: "low",
+			Chunk:      retrieval.Chunk{ID: "low#1"},
+			Score:      0.7,
+			Safety:     retrieval.Safety{InjectAllowed: true},
+		},
+		{
+			Source:     retrieval.Source{Type: retrieval.SourceFile, Name: "z-trusted", URI: "https://docs.github.com/en/apps"},
+			DocumentID: "trusted",
+			Chunk:      retrieval.Chunk{ID: "trusted#1"},
+			Score:      0.7,
+			Safety:     retrieval.Safety{InjectAllowed: true},
+		},
+	}}
+
+	results, err := retrieval.Search(context.Background(), retrieval.Query{
+		Text:          "oauth",
+		Limit:         1,
+		IncludeUnsafe: true,
+		SourcePolicy: sourcepolicy.Policy{
+			TrustedDomains: []string{"docs.github.com"},
+		},
+	}, &searcher)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "trusted", results[0].DocumentID)
+	assert.Equal(t, 0, searcher.seenLimit, "backend limit should be disabled before source-quality ranking")
+}
+
+func TestNormalizeResult_PreservesAssessedSourceQuality(t *testing.T) {
+	t.Parallel()
+
+	normalized := retrieval.NormalizeResultWithSourcePolicy(retrieval.Result{
+		Source:     retrieval.Source{Type: retrieval.SourceFile, URI: "https://docs.github.com/en/apps"},
+		DocumentID: "trusted",
+		Chunk:      retrieval.Chunk{ID: "trusted#1"},
+		Score:      0.7,
+	}, sourcepolicy.Policy{
+		TrustedDomains: []string{"docs.github.com"},
+	})
+	require.Equal(t, sourcepolicy.PolicyMatchTrustedDomain, normalized.Quality.PolicyMatch)
+
+	renormalized := retrieval.NormalizeResult(normalized)
+
+	assert.Equal(t, sourcepolicy.PolicyMatchTrustedDomain, renormalized.Quality.PolicyMatch)
+	assert.InEpsilon(t, 0.95, renormalized.Quality.TrustScore, 0.001)
+	assert.Equal(t, sourcepolicy.TrustLevelHigh, renormalized.Quality.TrustLevel)
+}
+
+func TestSearch_BlocksLowTrustWhenPolicyDisallowsIt(t *testing.T) {
+	t.Parallel()
+
+	results, err := retrieval.Search(context.Background(), retrieval.Query{
+		Text: "forum",
+		SourcePolicy: sourcepolicy.Policy{
+			AllowLowTrustSources: sourcepolicy.Bool(false),
+		},
+	}, staticSearcher{results: []retrieval.Result{{
+		Source:     retrieval.Source{Type: retrieval.SourceFile, URI: "https://stackoverflow.com/questions/1"},
+		DocumentID: "forum",
+		Chunk:      retrieval.Chunk{ID: "forum#1"},
+		Score:      0.7,
+		Safety:     retrieval.Safety{InjectAllowed: true},
+	}}})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestSearch_RecordsLowTrustWarningsWhenPolicyWarns(t *testing.T) {
+	t.Parallel()
+
+	results, err := retrieval.Search(context.Background(), retrieval.Query{
+		Text: "forum",
+		SourcePolicy: sourcepolicy.Policy{
+			WarnOnLowTrustSources: sourcepolicy.Bool(true),
+		},
+	}, staticSearcher{results: []retrieval.Result{{
+		Source:     retrieval.Source{Type: retrieval.SourceFile, URI: "https://stackoverflow.com/questions/1"},
+		DocumentID: "forum",
+		Chunk:      retrieval.Chunk{ID: "forum#1"},
+		Score:      0.7,
+		Safety:     retrieval.Safety{InjectAllowed: true},
+	}}})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, sourcepolicy.TrustLevelLow, results[0].Quality.TrustLevel)
+	assert.Contains(t, results[0].Metadata[retrieval.MetadataSourceQualityWarnings], "low-trust source")
+}
+
 func TestSearch_BackfillsStableMetadataBeforeFiltering(t *testing.T) {
 	t.Parallel()
 
@@ -305,6 +470,20 @@ func TestNormalizeResult_BackfillsStableMetadataAndClampsScore(t *testing.T) {
 	assert.Equal(t, retrieval.StableDocumentID(source, "doc"), result.Metadata[retrieval.MetadataStableID])
 	assert.Equal(t, retrieval.TextHash("OAuth callback notes"), result.Metadata[retrieval.MetadataContentHash])
 	assert.Equal(t, result.Metadata[retrieval.MetadataContentHash], result.Chunk.ContentHash)
+}
+
+func TestNormalizeResult_DoesNotTreatMemoryDocumentIDAsSourceCodePath(t *testing.T) {
+	t.Parallel()
+
+	result := retrieval.NormalizeResult(retrieval.Result{
+		Source:     retrieval.Source{Type: retrieval.SourceMemory, Name: "notes"},
+		DocumentID: "memory-note",
+		Chunk:      retrieval.Chunk{ID: "memory-note#chunk"},
+		Score:      0.5,
+	})
+
+	assert.Equal(t, sourcepolicy.SourceTypeUnknown, result.Quality.SourceType)
+	assert.Equal(t, sourcepolicy.TrustLevelLow, result.Quality.TrustLevel)
 }
 
 func TestNormalizeResultDoesNotMutateInputMetadata(t *testing.T) {

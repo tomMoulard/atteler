@@ -559,7 +559,7 @@ func commandContractsByName() map[string]commandContract {
 		),
 		"research-run": commandContractFor(
 			"create local-first cited research run artifacts",
-			[]string{"--research-run", "--research-output", "--trusted-source", "--research-source", "--output", "--generate-tasks"},
+			[]string{"--research-run", "--research-output", "--trusted-source", "--deny-source", "--research-source", "--warn-low-trust", "--output", "--generate-tasks"},
 			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectUserOutput},
 			[]string{commandOutputMarkdown, commandOutputJSON, commandOutputYAML, commandOutputFilesystem, commandOutputText},
 			withInputType("researchCommandInput"),
@@ -743,6 +743,9 @@ func retrievalSearchInputFlags() []string {
 		"--retrieval-limit",
 		"--retrieval-explain",
 		"--retrieval-include-unsafe",
+		"--trusted-source",
+		"--deny-source",
+		"--warn-low-trust",
 		"--memory-store",
 		"--memory-index",
 		"--vector-index",

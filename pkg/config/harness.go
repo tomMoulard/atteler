@@ -1693,7 +1693,13 @@ func (c Config) empty() bool {
 		c.DefaultModel == "" &&
 		len(c.Providers) == 0 &&
 		len(c.Agents) == 0 &&
-		len(c.Hooks) == 0
+		len(c.Hooks) == 0 &&
+		len(c.Research.SourcePolicy.TrustedDomains) == 0 &&
+		len(c.Research.SourcePolicy.DeniedDomains) == 0 &&
+		len(c.Research.SourcePolicy.PreferSourceTypes) == 0 &&
+		c.Research.SourcePolicy.AllowLowTrustSources == nil &&
+		c.Research.SourcePolicy.WarnOnLowTrustSources == nil &&
+		c.Research.SourcePolicy.RequireEvidenceForHighImpactClaims == nil
 }
 
 func readOptional(path string) ([]byte, bool) {

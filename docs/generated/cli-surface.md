@@ -139,7 +139,7 @@ Commands:
 
 Examples:
 - `atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`
-- `atteler research run --trusted-source go.dev --trusted-source github.com "Research best practices for safe agent worktrees"`
+- `atteler research run --trusted-source go.dev --trusted-source github.com --deny-source example-content-farm.com --warn-low-trust "Research best practices for safe agent worktrees"`
 - `atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`
 
 ## Autoresearch
@@ -862,8 +862,8 @@ Commands:
     - `legacy-flag`: `atteler --search-sessions value` -> `search-sessions`
 - `research-run` (providerless): create local-first cited research run artifacts
   - Input: `researchCommandInput`
-  - Input fields: `Question`, `OutputDir`, `TrustedSources`, `Sources`, `GenerateTasks`
-  - Flags: `--research-run`, `--research-output`, `--trusted-source`, `--research-source`, `--output`, `--generate-tasks`
+  - Input fields: `Question`, `OutputDir`, `TrustedSources`, `DeniedSources`, `Sources`, `WarnLowTrust`, `GenerateTasks`
+  - Flags: `--research-run`, `--research-output`, `--trusted-source`, `--deny-source`, `--research-source`, `--warn-low-trust`, `--output`, `--generate-tasks`
   - Examples: `atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`, `atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`
   - Conflicts:
     - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
@@ -1496,8 +1496,8 @@ Commands:
     - `legacy-flag`: `atteler --git-history-search value` -> `git-history-search-providerless`
 - `retrieval-search` (providerless-config): search selected retrieval sources with the shared result contract
   - Input: `retrievalCommandInput`
-  - Input fields: `Search`, `AgentName`, `AgentMemoryAgent`, `AgentMemoryStorePath`, `MemoryStorePath`, `Filters`, `MemoryIndexFiles`, `Sources`, `VectorIndexFiles`, `Vector`, `Limit`, `Explain`, `IncludeUnsafe`
-  - Flags: `--retrieval-search`, `--retrieval-source`, `--retrieval-filter`, `--retrieval-limit`, `--retrieval-explain`, `--retrieval-include-unsafe`, `--memory-store`, `--memory-index`, `--vector-index`, `--agent-memory-store`, `--agent-memory-agent`, `--agent`, `--vector-store`, `--vectorizer`, `--vector-provider`, `--vector-model`, `--vector-base-url`, `--vector-fallback`, `--vector-timeout-seconds`, `--vector-chunk-max-runes`, `--vector-chunk-overlap-runes`
+  - Input fields: `Search`, `AgentName`, `AgentMemoryAgent`, `AgentMemoryStorePath`, `MemoryStorePath`, `Filters`, `MemoryIndexFiles`, `Sources`, `TrustedSources`, `DeniedSources`, `VectorIndexFiles`, `Vector`, `Limit`, `Explain`, `IncludeUnsafe`, `WarnLowTrust`
+  - Flags: `--retrieval-search`, `--retrieval-source`, `--retrieval-filter`, `--retrieval-limit`, `--retrieval-explain`, `--retrieval-include-unsafe`, `--trusted-source`, `--deny-source`, `--warn-low-trust`, `--memory-store`, `--memory-index`, `--vector-index`, `--agent-memory-store`, `--agent-memory-agent`, `--agent`, `--vector-store`, `--vectorizer`, `--vector-provider`, `--vector-model`, `--vector-base-url`, `--vector-fallback`, `--vector-timeout-seconds`, `--vector-chunk-max-runes`, `--vector-chunk-overlap-runes`
   - Examples: `atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain`
   - Conflicts:
     - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise

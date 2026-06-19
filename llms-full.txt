@@ -348,6 +348,8 @@ atteler research run "Compare approaches for plugin sandboxing in Go CLIs"
 atteler research run \
   --trusted-source go.dev \
   --trusted-source github.com \
+  --deny-source example-content-farm.com \
+  --warn-low-trust \
   "Research best practices for safe agent worktrees"
 atteler research run \
   --output .atteler/research/plugin-sandboxing \
@@ -362,7 +364,8 @@ writes:
 - `research.md` — human-readable summary, findings, tradeoffs,
   recommendations, risks, claims, and citations.
 - `sources.jsonl` — structured source records for discovered project guidance
-  and supplied `--research-source` files/URLs.
+  and supplied `--research-source` files/URLs, including source type, domain,
+  trust level, trust score, policy match, and low-trust warnings.
 - `claims.jsonl` — important claims mapped to evidence where available.
 - `run.json` — run metadata and artifact paths.
 - `tasks.generated.yaml` — optional follow-up task stubs when
@@ -371,7 +374,28 @@ writes:
 Before writing recommendations, the command inspects project/harness guidance
 files when present, including `AGENTS.md`, `CLAUDE.md`, `.cursor/rules/*`, and
 similar agent instruction files. The discovered guidance is included as source
-context and cited in the report.
+context and cited in the report. Source-related guidance in those files, such
+as preferred official docs, denied domains, citation requirements, or low-trust
+warnings, is folded into the effective source policy below Atteler config and
+explicit CLI flags.
+
+Project config can define source policy defaults:
+
+```yaml
+research:
+  source_policy:
+    trusted_domains: [go.dev, github.com, docs.anthropic.com, openai.com]
+    denied_domains: [example-content-farm.com]
+    prefer_source_types: [official_docs, source_code, standard_or_spec, issue_discussion]
+    allow_low_trust_sources: true
+    warn_on_low_trust_sources: true
+    require_evidence_for_high_impact_claims: false
+```
+
+`--trusted-source` and `--deny-source` extend the effective policy for a single
+run. Denied sources are omitted from `sources.jsonl` and listed in `run.json`;
+low-trust sources remain allowed by default but are marked in artifacts and
+warned about when policy asks for warnings.
 
 Atteler research reports should include evidence for important claims whenever
 possible. Evidence can include URLs, documentation links, repository files,
@@ -410,6 +434,7 @@ semantic); embedding mode uses an Ollama-compatible endpoint.
 ```sh
 atteler memory search "OAuth retry storm"
 atteler memory retrieve "OAuth retry storm" --retrieval-explain
+atteler memory retrieve "OAuth retry storm" --trusted-source docs.github.com --deny-source example-content-farm.com
 atteler memory vector-search "redirect risks" --vector-index docs/research.md --vectorizer lexical
 atteler memory migrate
 atteler code-intel summary --json
@@ -420,6 +445,11 @@ atteler code-intel query definitions:NewRegistry
 Run `atteler memory migrate` / `agent-migrate` after changing a store schema,
 redaction policy, or vectorizer. Vectorizer settings are scoped per store,
 agent, and source — see [Configuration](configuration.md).
+Retrieval results carry source-quality metadata from harness guidance,
+`research.source_policy`, and per-run source flags; denied sources are filtered
+and equally relevant results prefer higher-trust sources before the stable
+source/name tie-breakers. When low-trust warnings are enabled, retrieval output
+includes a `source_warning` field for weak evidence.
 
 ## Use plugins, MCP, and LSP
 
@@ -550,12 +580,46 @@ models:
     required_capabilities: ["tools", "json_schema"]
     max_cost_usd: 0.25
     max_latency_ms: 2500
+
+research:
+  source_policy:
+    trusted_domains: [go.dev, github.com, docs.github.com]
+    denied_domains: [example-content-farm.com]
+    prefer_source_types: [official_docs, source_code, standard_or_spec]
+    allow_low_trust_sources: true
+    warn_on_low_trust_sources: true
+    require_evidence_for_high_impact_claims: false
 ```
 
 Bare model names resolve only by exact provider-catalog claim, a `model_aliases`
 entry, or a `models.<role>` entry. If two providers claim the same bare name,
 Atteler reports the collision unless `default_provider`/`default_model` or a role
 routing policy makes the choice deterministic.
+
+### Research source policy
+
+`research.source_policy` controls source-quality metadata for local-first
+research runs and retrieval results. It can prefer trusted domains/source types,
+exclude known-bad domains, warn when weak evidence is included, and use source
+quality as a retrieval tie-breaker for equally relevant results.
+
+- `trusted_domains` marks matching domains and subdomains as high trust.
+- `denied_domains` excludes matching URL sources from research artifacts and
+  retrieval results.
+- `prefer_source_types` boosts source types such as `official_docs`,
+  `source_code`, `standard_or_spec`, `academic`, `issue_discussion`, `forum`,
+  `news`, or `unknown`.
+- `allow_low_trust_sources` defaults to `true`, so brainstorming and early
+  exploration remain usable.
+- `warn_on_low_trust_sources` defaults to `true`, so weak evidence is visible.
+- `require_evidence_for_high_impact_claims` defaults to `false`; evidence-first
+  is a recommendation unless a project explicitly requires it.
+
+Harness guidance files (`AGENTS.md`, `CLAUDE.md`, `.cursor/rules/*`, and
+similar instruction files) are also scanned for simple source restrictions,
+preferred source types, and citation requirements. Explicit CLI flags for a run
+have the highest precedence, followed by Atteler config, harness guidance,
+global config, and built-in defaults.
 
 ### Auto mode
 
@@ -1415,7 +1479,7 @@ Commands:
 
 Examples:
 - `atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`
-- `atteler research run --trusted-source go.dev --trusted-source github.com "Research best practices for safe agent worktrees"`
+- `atteler research run --trusted-source go.dev --trusted-source github.com --deny-source example-content-farm.com --warn-low-trust "Research best practices for safe agent worktrees"`
 - `atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`
 
 ## Autoresearch
@@ -2138,8 +2202,8 @@ Commands:
     - `legacy-flag`: `atteler --search-sessions value` -> `search-sessions`
 - `research-run` (providerless): create local-first cited research run artifacts
   - Input: `researchCommandInput`
-  - Input fields: `Question`, `OutputDir`, `TrustedSources`, `Sources`, `GenerateTasks`
-  - Flags: `--research-run`, `--research-output`, `--trusted-source`, `--research-source`, `--output`, `--generate-tasks`
+  - Input fields: `Question`, `OutputDir`, `TrustedSources`, `DeniedSources`, `Sources`, `WarnLowTrust`, `GenerateTasks`
+  - Flags: `--research-run`, `--research-output`, `--trusted-source`, `--deny-source`, `--research-source`, `--warn-low-trust`, `--output`, `--generate-tasks`
   - Examples: `atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`, `atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`
   - Conflicts:
     - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
@@ -2772,8 +2836,8 @@ Commands:
     - `legacy-flag`: `atteler --git-history-search value` -> `git-history-search-providerless`
 - `retrieval-search` (providerless-config): search selected retrieval sources with the shared result contract
   - Input: `retrievalCommandInput`
-  - Input fields: `Search`, `AgentName`, `AgentMemoryAgent`, `AgentMemoryStorePath`, `MemoryStorePath`, `Filters`, `MemoryIndexFiles`, `Sources`, `VectorIndexFiles`, `Vector`, `Limit`, `Explain`, `IncludeUnsafe`
-  - Flags: `--retrieval-search`, `--retrieval-source`, `--retrieval-filter`, `--retrieval-limit`, `--retrieval-explain`, `--retrieval-include-unsafe`, `--memory-store`, `--memory-index`, `--vector-index`, `--agent-memory-store`, `--agent-memory-agent`, `--agent`, `--vector-store`, `--vectorizer`, `--vector-provider`, `--vector-model`, `--vector-base-url`, `--vector-fallback`, `--vector-timeout-seconds`, `--vector-chunk-max-runes`, `--vector-chunk-overlap-runes`
+  - Input fields: `Search`, `AgentName`, `AgentMemoryAgent`, `AgentMemoryStorePath`, `MemoryStorePath`, `Filters`, `MemoryIndexFiles`, `Sources`, `TrustedSources`, `DeniedSources`, `VectorIndexFiles`, `Vector`, `Limit`, `Explain`, `IncludeUnsafe`, `WarnLowTrust`
+  - Flags: `--retrieval-search`, `--retrieval-source`, `--retrieval-filter`, `--retrieval-limit`, `--retrieval-explain`, `--retrieval-include-unsafe`, `--trusted-source`, `--deny-source`, `--warn-low-trust`, `--memory-store`, `--memory-index`, `--vector-index`, `--agent-memory-store`, `--agent-memory-agent`, `--agent`, `--vector-store`, `--vectorizer`, `--vector-provider`, `--vector-model`, `--vector-base-url`, `--vector-fallback`, `--vector-timeout-seconds`, `--vector-chunk-max-runes`, `--vector-chunk-overlap-runes`
   - Examples: `atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain`
   - Conflicts:
     - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
@@ -3150,7 +3214,7 @@ matches the binary.
 
 <!-- Code generated by `go generate ./internal/docgen`; DO NOT EDIT. -->
 
-Every CLI option, one section each. There are 406 options. Flags combine with
+Every CLI option, one section each. There are 408 options. Flags combine with
 the grouped domain commands (before or after the subcommand). Boolean flags
 default to off unless noted; omitted values are not sent to providers.
 
@@ -4230,6 +4294,16 @@ Permission operation to deny (repeatable/comma-separated): read, write, execute,
 
 ```sh
 atteler --deny-operation <value>
+```
+
+### `--deny-source`
+
+Denied source host or domain for research/retrieval policy (repeatable or comma-separated)
+
+- **Type:** value
+
+```sh
+atteler --deny-source <value>
 ```
 
 ### `--describe-agent`
@@ -7121,7 +7195,7 @@ atteler --top-p <value>
 
 ### `--trusted-source`
 
-Trusted source host or domain for research (repeatable or comma-separated)
+Trusted source host or domain for research/retrieval policy (repeatable or comma-separated)
 
 - **Type:** value
 
@@ -7298,6 +7372,17 @@ Print version and exit
 
 ```sh
 atteler --version
+```
+
+### `--warn-low-trust`
+
+Warn when research or retrieval includes low-trust sources
+
+- **Type:** bool
+- **Default:** `false`
+
+```sh
+atteler --warn-low-trust
 ```
 
 ### `--watch-baseline`

@@ -2,7 +2,11 @@
 // backends.
 package retrieval
 
-import "time"
+import (
+	"time"
+
+	"github.com/tommoulard/atteler/pkg/sourcepolicy"
+)
 
 const (
 	// SourceMemory identifies the lexical memory store.
@@ -82,12 +86,16 @@ type Safety struct {
 	Sensitive     bool     `json:"sensitive,omitempty"`
 }
 
+// SourceQuality describes source trust metadata attached to a retrieval result.
+type SourceQuality = sourcepolicy.Quality
+
 // Result is the common retrieval contract returned by all search backends.
 //
 //nolint:govet // Layout prioritizes JSON/API readability over pointer-byte packing.
 type Result struct {
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	Source     Source            `json:"source"`
+	Quality    SourceQuality     `json:"source_quality,omitzero"`
 	Chunk      Chunk             `json:"chunk"`
 	Scorer     Scorer            `json:"scorer"`
 	Freshness  Freshness         `json:"freshness,omitzero"`
@@ -101,11 +109,12 @@ type Result struct {
 //
 //nolint:govet // Layout prioritizes JSON/API readability over pointer-byte packing.
 type Query struct {
-	Now           time.Time         `json:"now,omitzero"`
-	Filters       map[string]string `json:"filters,omitempty"`
-	Sources       []SourceType      `json:"sources,omitempty"`
-	Text          string            `json:"text"`
-	Limit         int               `json:"limit,omitempty"`
-	Explain       bool              `json:"explain,omitempty"`
-	IncludeUnsafe bool              `json:"include_unsafe,omitempty"`
+	Now           time.Time           `json:"now,omitzero"`
+	Filters       map[string]string   `json:"filters,omitempty"`
+	SourcePolicy  sourcepolicy.Policy `json:"source_policy,omitzero"`
+	Sources       []SourceType        `json:"sources,omitempty"`
+	Text          string              `json:"text"`
+	Limit         int                 `json:"limit,omitempty"`
+	Explain       bool                `json:"explain,omitempty"`
+	IncludeUnsafe bool                `json:"include_unsafe,omitempty"`
 }

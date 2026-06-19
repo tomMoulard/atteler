@@ -25,6 +25,18 @@ const (
 	MetadataStableID = "retrieval.stable_id"
 	// MetadataSourceUpdatedAt stores the source modification timestamp in RFC3339 format.
 	MetadataSourceUpdatedAt = "retrieval.source_updated_at"
+	// MetadataSourceQualityDomain stores the normalized source domain used by source policy.
+	MetadataSourceQualityDomain = "source_quality.domain"
+	// MetadataSourceQualityType stores the classified source type used by source policy.
+	MetadataSourceQualityType = "source_quality.source_type"
+	// MetadataSourceQualityTrustLevel stores the source trust level used by source policy.
+	MetadataSourceQualityTrustLevel = "source_quality.trust_level"
+	// MetadataSourceQualityTrustScore stores the numeric source trust score used by source policy.
+	MetadataSourceQualityTrustScore = "source_quality.trust_score"
+	// MetadataSourceQualityPolicyMatch stores the source policy rule/classifier match.
+	MetadataSourceQualityPolicyMatch = "source_quality.policy_match"
+	// MetadataSourceQualityWarnings stores source policy warnings joined by semicolon.
+	MetadataSourceQualityWarnings = "source_quality.warnings"
 )
 
 // PolicyContext gives the sanitizer source hints such as path and source type.

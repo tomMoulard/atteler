@@ -13,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tommoulard/atteler/pkg/sourcepolicy"
 )
 
 func TestRun_CreatesArtifactsAndReadsGuidance(t *testing.T) {
@@ -55,7 +57,10 @@ func TestRun_CreatesArtifactsAndReadsGuidance(t *testing.T) {
 	assert.Contains(t, sourcePaths(sources), ".cursor/rules/style.mdc")
 	assert.Contains(t, sourcePaths(sources), "notes.md")
 	assert.Contains(t, sourceURLs(sources), "https://go.dev/doc/")
+	assert.Equal(t, sourcepolicy.SourceTypeSourceCode, sourceByPath(t, sources, "notes.md").SourceType)
 	assert.Equal(t, "official_docs", sourceByURL(t, sources, "https://go.dev/doc/").SourceType)
+	assert.Equal(t, "high", sourceByURL(t, sources, "https://go.dev/doc/").TrustLevel)
+	assert.Equal(t, "trusted_domain", sourceByURL(t, sources, "https://go.dev/doc/").PolicyMatch)
 	assert.InEpsilon(t, trustedURLTrustScore, sourceByURL(t, sources, "https://go.dev/doc/").TrustScore, 0.001)
 
 	claims := readClaims(t, filepath.Join(result.Dir, claimsFile))
@@ -73,6 +78,9 @@ func TestRun_CreatesArtifactsAndReadsGuidance(t *testing.T) {
 	assert.Equal(t, "Compare plugin sandboxing approaches", record.Question)
 	assert.True(t, record.GenerateTasks)
 	assert.Contains(t, record.TrustedSources, "go.dev")
+	assert.Contains(t, record.SourcePolicy.TrustedDomains, "go.dev")
+	assert.Contains(t, record.SourcePolicy.TrustedDomains, "github.com")
+	assert.True(t, record.SourcePolicy.RequireEvidenceForHighImpactClaims)
 }
 
 func TestRun_DefaultOutputDirUsesResearchRunsRoot(t *testing.T) {
@@ -97,6 +105,48 @@ func TestRun_RequiresQuestion(t *testing.T) {
 	_, err := Run(context.Background(), RunRequest{Root: t.TempDir()})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "question is required")
+}
+
+func TestRun_SourcePolicyExcludesDeniedAndWarnsLowTrust(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	result, err := Run(context.Background(), RunRequest{
+		Question: "Compare OAuth callback advice",
+		Root:     root,
+		Sources: []string{
+			"https://example-content-farm.com/oauth",
+			"https://stackoverflow.com/questions/1",
+			"https://docs.github.com/en/apps",
+		},
+		SourcePolicy: sourcepolicy.Policy{
+			TrustedDomains:        []string{"docs.github.com"},
+			DeniedDomains:         []string{"example-content-farm.com"},
+			WarnOnLowTrustSources: sourcepolicy.Bool(true),
+		},
+		Now: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	sources := readSources(t, filepath.Join(result.Dir, sourcesFile))
+	assert.NotContains(t, sourceURLs(sources), "https://example-content-farm.com/oauth")
+	assert.Contains(t, sourceURLs(sources), "https://stackoverflow.com/questions/1")
+	lowTrust := sourceByURL(t, sources, "https://stackoverflow.com/questions/1")
+	assert.Equal(t, "low", lowTrust.TrustLevel)
+	assert.NotEmpty(t, lowTrust.Warnings)
+	trusted := sourceByURL(t, sources, "https://docs.github.com/en/apps")
+	assert.Equal(t, "trusted_domain", trusted.PolicyMatch)
+
+	var record runRecord
+	require.NoError(t, json.Unmarshal([]byte(readFile(t, filepath.Join(result.Dir, runFile))), &record))
+	require.Len(t, record.Excluded, 1)
+	assert.Equal(t, "example-content-farm.com", record.Excluded[0].Domain)
+	assert.Equal(t, "denied_domain", record.Excluded[0].PolicyMatch)
+
+	report := readFile(t, filepath.Join(result.Dir, researchReportFile))
+	assert.Contains(t, report, "## Source quality")
+	assert.Contains(t, report, "low-trust")
+	assert.Contains(t, report, "Excluded source inputs: 1")
 }
 
 func readFile(t *testing.T, path string) string {
@@ -178,6 +228,19 @@ func sourceByURL(t *testing.T, sources []Source, target string) Source {
 	}
 
 	require.Fail(t, "source URL not found", target)
+	return Source{}
+}
+
+func sourceByPath(t *testing.T, sources []Source, target string) Source {
+	t.Helper()
+
+	for i := range sources {
+		if sources[i].Path == target {
+			return sources[i]
+		}
+	}
+
+	require.Fail(t, "source path not found", target)
 	return Source{}
 }
 

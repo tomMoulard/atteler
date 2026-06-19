@@ -211,7 +211,7 @@ var cliHelpDomains = []cliHelpDomain{
 		},
 		Examples: []string{
 			`atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`,
-			`atteler research run --trusted-source go.dev --trusted-source github.com "Research best practices for safe agent worktrees"`,
+			`atteler research run --trusted-source go.dev --trusted-source github.com --deny-source example-content-farm.com --warn-low-trust "Research best practices for safe agent worktrees"`,
 			`atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`,
 		},
 	},

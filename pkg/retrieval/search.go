@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Search normalization keeps related policy/safety checks compact.
 package retrieval
 
 import (
@@ -9,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/tommoulard/atteler/pkg/sourcepolicy"
 )
 
 // Searcher is implemented by retrieval backends that can return the shared
@@ -37,10 +40,11 @@ func Search(ctx context.Context, query Query, searchers ...Searcher) ([]Result, 
 			return nil, fmt.Errorf("retrieval searcher: %w", err)
 		}
 
-		merged = appendSelectedResults(merged, results, selected, query.Filters)
+		merged = appendSelectedResults(merged, results, selected, query.Filters, query.SourcePolicy)
 	}
 
 	merged = Deduplicate(merged)
+	merged = filterDeniedSourceResults(merged)
 	if !query.IncludeUnsafe {
 		merged = filterUnsafeResults(merged)
 	}
@@ -55,7 +59,7 @@ func Search(ctx context.Context, query Query, searchers ...Searcher) ([]Result, 
 }
 
 func backendQueryFor(query Query, selected map[SourceType]struct{}) Query {
-	if query.Limit <= 0 || (len(selected) == 0 && query.IncludeUnsafe && len(query.Filters) == 0) {
+	if query.Limit <= 0 || (len(selected) == 0 && query.IncludeUnsafe && len(query.Filters) == 0 && !sourcePolicyMayAffectResults(query.SourcePolicy)) {
 		return query
 	}
 
@@ -66,9 +70,22 @@ func backendQueryFor(query Query, selected map[SourceType]struct{}) Query {
 	return query
 }
 
-func appendSelectedResults(out, results []Result, selected map[SourceType]struct{}, filters map[string]string) []Result {
+func sourcePolicyMayFilter(policy sourcepolicy.Policy) bool {
+	if len(policy.DeniedDomains) > 0 {
+		return true
+	}
+	return policy.AllowLowTrustSources != nil && !*policy.AllowLowTrustSources
+}
+
+func sourcePolicyMayAffectResults(policy sourcepolicy.Policy) bool {
+	return sourcePolicyMayFilter(policy) ||
+		len(policy.TrustedDomains) > 0 ||
+		len(policy.PreferSourceTypes) > 0
+}
+
+func appendSelectedResults(out, results []Result, selected map[SourceType]struct{}, filters map[string]string, policy sourcepolicy.Policy) []Result {
 	for i := range results {
-		result := NormalizeResult(results[i])
+		result := NormalizeResultWithSourcePolicy(results[i], policy)
 		if !sourceSelected(result.Source.Type, selected) {
 			continue
 		}
@@ -87,6 +104,12 @@ func appendSelectedResults(out, results []Result, selected map[SourceType]struct
 // score. Backends may call it before returning direct SearchRetrieval results;
 // Search also applies it defensively before cross-source filtering/ranking.
 func NormalizeResult(result Result) Result {
+	return NormalizeResultWithSourcePolicy(result, sourcepolicy.Policy{})
+}
+
+// NormalizeResultWithSourcePolicy fills derived contract metadata, source
+// quality, and clamps the comparable score.
+func NormalizeResultWithSourcePolicy(result Result, policy sourcepolicy.Policy) Result {
 	if result.Metadata == nil {
 		result.Metadata = make(map[string]string)
 	} else {
@@ -115,9 +138,112 @@ func NormalizeResult(result Result) Result {
 		result.Metadata[MetadataContentHash] = result.Chunk.ContentHash
 	}
 
+	evaluation := sourceEvaluationForResult(result, policy)
+	result.Quality = evaluation.Quality
+	result.Metadata = MergeSourceQualityMetadata(result.Metadata, result.Quality)
+	if len(evaluation.Warnings) > 0 {
+		result.Metadata[MetadataSourceQualityWarnings] = strings.Join(evaluation.Warnings, ";")
+	}
 	result.Score = ClampScore(result.Score)
 
 	return result
+}
+
+// MergeSourceQualityMetadata stores source-quality fields in result metadata.
+func MergeSourceQualityMetadata(metadata map[string]string, quality SourceQuality) map[string]string {
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+
+	if quality.Domain != "" {
+		metadata[MetadataSourceQualityDomain] = quality.Domain
+	}
+	if quality.SourceType != "" {
+		metadata[MetadataSourceQualityType] = quality.SourceType
+	}
+	if quality.TrustLevel != "" {
+		metadata[MetadataSourceQualityTrustLevel] = quality.TrustLevel
+	}
+	if quality.TrustScore != 0 {
+		metadata[MetadataSourceQualityTrustScore] = strconv.FormatFloat(quality.TrustScore, 'f', 3, 64)
+	}
+	if quality.PolicyMatch != "" {
+		metadata[MetadataSourceQualityPolicyMatch] = quality.PolicyMatch
+	}
+
+	return metadata
+}
+
+func sourceEvaluationForResult(result Result, policy sourcepolicy.Policy) sourcepolicy.Evaluation {
+	if sourcePolicyEmpty(policy) && sourceQualityAssessed(result.Quality) {
+		return sourcepolicy.Evaluation{Quality: result.Quality, Allowed: true}
+	}
+
+	sourceURI := ""
+	if strings.HasPrefix(result.Source.URI, "http://") || strings.HasPrefix(result.Source.URI, "https://") {
+		sourceURI = result.Source.URI
+	}
+	if sourceURI == "" && result.Quality.Domain != "" {
+		sourceURI = "https://" + sourcepolicy.NormalizeDomain(result.Quality.Domain)
+	}
+
+	source := sourcepolicy.Source{
+		URL:        sourceURI,
+		Path:       retrievalResultPath(result),
+		Title:      result.DocumentID,
+		SourceType: retrievalSourcePolicyType(result),
+	}
+	if result.Quality.SourceType != "" {
+		source.SourceType = result.Quality.SourceType
+	}
+	evaluation := sourcepolicy.Evaluate(source, policy)
+
+	return evaluation
+}
+
+func sourcePolicyEmpty(policy sourcepolicy.Policy) bool {
+	return len(policy.TrustedDomains) == 0 &&
+		len(policy.DeniedDomains) == 0 &&
+		len(policy.PreferSourceTypes) == 0 &&
+		policy.AllowLowTrustSources == nil &&
+		policy.WarnOnLowTrustSources == nil &&
+		policy.RequireEvidenceForHighImpactClaims == nil
+}
+
+func sourceQualityAssessed(quality SourceQuality) bool {
+	return quality.TrustLevel != "" || quality.TrustScore != 0 || quality.PolicyMatch != ""
+}
+
+func retrievalResultPath(result Result) string {
+	for _, key := range []string{"path", "file", "filename"} {
+		if value := strings.TrimSpace(result.Metadata[key]); value != "" {
+			return value
+		}
+	}
+
+	if result.Source.URI != "" && !strings.HasPrefix(result.Source.URI, "http://") && !strings.HasPrefix(result.Source.URI, "https://") {
+		return result.Source.URI
+	}
+
+	switch result.Source.Type {
+	case SourceFile, SourceVector, SourceADR, SourceGitHistory:
+		return result.DocumentID
+	default:
+		return ""
+	}
+}
+
+func retrievalSourcePolicyType(result Result) string {
+	if strings.HasPrefix(result.Source.URI, "http://") || strings.HasPrefix(result.Source.URI, "https://") {
+		return sourcepolicy.SourceTypeUnknown
+	}
+
+	switch result.Source.Type {
+	case SourceFile, SourceVector, SourceADR, SourceGitHistory:
+		return sourcepolicy.SourceTypeSourceCode
+	default:
+		return sourcepolicy.SourceTypeUnknown
+	}
 }
 
 func matchesFilters(result Result, filters map[string]string) bool {
@@ -158,6 +284,22 @@ func filterUnsafeResults(results []Result) []Result {
 		if result.Safety.InjectAllowed {
 			filtered = append(filtered, result)
 		}
+	}
+
+	return filtered
+}
+
+func filterDeniedSourceResults(results []Result) []Result {
+	filtered := results[:0]
+	for i := range results {
+		result := results[i]
+		if result.Quality.TrustLevel == sourcepolicy.TrustLevelDenied {
+			continue
+		}
+		if result.Quality.PolicyMatch == sourcepolicy.PolicyMatchLowTrustDisallowed {
+			continue
+		}
+		filtered = append(filtered, result)
 	}
 
 	return filtered
@@ -205,6 +347,7 @@ func mergeDuplicate(existing, candidate Result) Result {
 	winnerSafety := winner.Safety
 	winner.Scorer.Explanation = mergeExplanations(existing.Scorer.Explanation, candidate.Scorer.Explanation)
 	winner.Safety = MergeSafety(existing.Safety, candidate.Safety)
+	winner.Quality = stricterSourceQuality(existing.Quality, candidate.Quality)
 
 	if shouldPreferSaferPayload(loser, Result{Safety: winnerSafety}) {
 		winner.Snippet = loser.Snippet
@@ -216,8 +359,35 @@ func mergeDuplicate(existing, candidate Result) Result {
 	if !IsDefaultSafety(winner.Safety) {
 		winner.Metadata = MergeSafetyMetadata(winner.Metadata, winner.Safety)
 	}
+	winner.Metadata = MergeSourceQualityMetadata(winner.Metadata, winner.Quality)
 
 	return winner
+}
+
+func stricterSourceQuality(left, right SourceQuality) SourceQuality {
+	if sourceTrustRank(right.TrustLevel) > sourceTrustRank(left.TrustLevel) {
+		return right
+	}
+	if sourceTrustRank(right.TrustLevel) == sourceTrustRank(left.TrustLevel) && right.TrustScore < left.TrustScore {
+		return right
+	}
+
+	return left
+}
+
+func sourceTrustRank(level string) int {
+	switch level {
+	case sourcepolicy.TrustLevelDenied:
+		return 4
+	case sourcepolicy.TrustLevelLow:
+		return 3
+	case sourcepolicy.TrustLevelUnknown:
+		return 2
+	case sourcepolicy.TrustLevelMedium:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // SortResults applies the shared ranking tie-breakers.
@@ -226,6 +396,10 @@ func SortResults(results []Result) {
 		left, right := results[i], results[j]
 		if left.Score != right.Score {
 			return left.Score > right.Score
+		}
+
+		if leftQuality, rightQuality := sourceQualitySortScore(left.Quality), sourceQualitySortScore(right.Quality); leftQuality != rightQuality {
+			return leftQuality > rightQuality
 		}
 
 		if left.Source.Type != right.Source.Type {
@@ -242,6 +416,23 @@ func SortResults(results []Result) {
 
 		return left.Chunk.ID < right.Chunk.ID
 	})
+}
+
+func sourceQualitySortScore(quality SourceQuality) float64 {
+	if quality.TrustScore > 0 {
+		return quality.TrustScore
+	}
+
+	switch quality.TrustLevel {
+	case sourcepolicy.TrustLevelHigh:
+		return 0.80
+	case sourcepolicy.TrustLevelMedium:
+		return 0.60
+	case sourcepolicy.TrustLevelLow:
+		return 0.40
+	default:
+		return 0
+	}
 }
 
 // NormalizeRawScore converts an unbounded positive backend score to [0,1).
