@@ -706,6 +706,10 @@ func completeParamsRequiredCapabilities(params CompleteParams) []string {
 		capabilities = appendUniqueString(capabilities, modelroute.CapabilityChat)
 	}
 
+	if messagesContainImageContent(params.Messages) {
+		capabilities = appendUniqueString(capabilities, modelroute.CapabilityVision)
+	}
+
 	if len(params.Tools) > 0 {
 		capabilities = appendUniqueString(capabilities, modelroute.CapabilityTools)
 	}

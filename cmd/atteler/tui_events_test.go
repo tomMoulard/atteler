@@ -12,6 +12,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
+	"github.com/tommoulard/atteler/pkg/contextref"
 	"github.com/tommoulard/atteler/pkg/events"
 )
 
@@ -28,6 +29,19 @@ func TestEmitHookLineIncludesRunnerDefaultAutonomy(t *testing.T) {
 	require.True(t, ok)
 	require.NoError(t, hook.err)
 	assert.Contains(t, hook.line, "autonomy=high")
+}
+
+func TestReferenceEventMetadataIncludesMediaType(t *testing.T) {
+	t.Parallel()
+
+	metadata := referenceEventMetadata(contextref.Reference{
+		Path:      "screen.png",
+		Kind:      "image",
+		MediaType: "image/png",
+		Bytes:     42,
+	})
+
+	assert.Equal(t, "image/png", metadata["media_type"])
 }
 
 //nolint:paralleltest // Mutates the process-global slog default.

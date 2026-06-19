@@ -95,6 +95,37 @@ func TestRequestContextManifestIncludesInlineAndConfiguredReferences(t *testing.
 	assert.Equal(t, strings.Repeat("a", 64), manifest.InlineReferences[0].DigestSHA256)
 }
 
+func TestRequestContextManifestPreservesInlineReferenceMediaType(t *testing.T) {
+	t.Parallel()
+
+	manifest := newRequestContextManifest(
+		"openai",
+		"gpt-4.1",
+		[]llm.Message{{Role: llm.RoleUser, Content: "describe"}},
+		0,
+		0,
+		[]contextref.Reference{
+			{
+				Path:      "screen.png",
+				Kind:      "image",
+				MediaType: "image/png",
+				Bytes:     42,
+			},
+		},
+		contextref.ReferenceManifest{},
+	)
+
+	require.Len(t, manifest.InlineReferences, 1)
+	assert.Equal(t, "image/png", manifest.InlineReferences[0].MediaType)
+
+	event := requestContextManifestEvent(manifest)
+
+	var decoded requestContextManifest
+	require.NoError(t, json.Unmarshal([]byte(event.Metadata["context_manifest"]), &decoded))
+	require.Len(t, decoded.InlineReferences, 1)
+	assert.Equal(t, "image/png", decoded.InlineReferences[0].MediaType)
+}
+
 func TestRequestContextManifestEventCarriesJSONAndSummaryCounts(t *testing.T) {
 	t.Parallel()
 

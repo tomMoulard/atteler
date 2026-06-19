@@ -473,9 +473,19 @@ type openaiToolFunction struct {
 
 type openaiMessage struct {
 	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
+	Content    any              `json:"content,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	ToolCalls  []openaiToolCall `json:"tool_calls,omitempty"`
+}
+
+type openaiContentPart struct {
+	ImageURL *openaiImageURL `json:"image_url,omitempty"`
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+}
+
+type openaiImageURL struct {
+	URL string `json:"url"`
 }
 
 type openaiToolCall struct {
@@ -1083,7 +1093,10 @@ func buildOpenAIMessages(messages []Message) []openaiMessage {
 	msgs := make([]openaiMessage, 0, len(messages))
 
 	for _, m := range messages {
-		omsg := openaiMessage{Role: string(m.Role), Content: m.Content}
+		omsg := openaiMessage{Role: string(m.Role)}
+		if content := openAIMessageContent(m); !openAIContentEmpty(content) {
+			omsg.Content = content
+		}
 
 		// Marshal assistant messages with tool calls.
 		if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
@@ -1107,13 +1120,65 @@ func buildOpenAIMessages(messages []Message) []openaiMessage {
 		// Marshal tool result messages.
 		if m.Role == RoleTool && m.ToolResult != nil {
 			omsg.ToolCallID = m.ToolResult.ToolCallID
-			omsg.Content = m.ToolResult.Content
+			if m.ToolResult.Content != "" {
+				omsg.Content = m.ToolResult.Content
+			}
 		}
 
 		msgs = append(msgs, omsg)
 	}
 
 	return msgs
+}
+
+func openAIContentEmpty(content any) bool {
+	switch typed := content.(type) {
+	case nil:
+		return true
+	case string:
+		return typed == ""
+	case []openaiContentPart:
+		return len(typed) == 0
+	default:
+		return false
+	}
+}
+
+func openAIMessageContent(m Message) any {
+	if len(m.ContentParts) == 0 {
+		return m.Content
+	}
+
+	parts := make([]openaiContentPart, 0, len(m.ContentParts))
+	for _, part := range m.ContentParts {
+		switch part.Type {
+		case MessageContentPartText:
+			if part.Text != "" {
+				parts = append(parts, openaiContentPart{Type: "text", Text: part.Text})
+			}
+		case MessageContentPartImage:
+			if part.Image != nil {
+				parts = append(parts, openaiContentPart{
+					Type:     "image_url",
+					ImageURL: &openaiImageURL{URL: imageDataURL(part.Image)},
+				})
+			}
+		}
+	}
+
+	if len(parts) == 0 {
+		return m.Content
+	}
+
+	return parts
+}
+
+func imageDataURL(image *ImageSource) string {
+	if image == nil {
+		return ""
+	}
+
+	return "data:" + normalizeImageMediaType(image.MediaType) + ";base64," + image.DataBase64
 }
 
 func parseOpenAIToolCalls(calls []openaiToolCall) []ToolCall {

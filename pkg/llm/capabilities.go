@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -365,6 +366,10 @@ func validateCompleteParamsAgainstCapabilities(
 		return err
 	}
 
+	if messagesContainImageContent(params.Messages) && !capabilities.SupportsMultimodalInput {
+		return fmt.Errorf("%s: image content requires provider multimodal input capability", providerName)
+	}
+
 	if err := validateModelMode(params.ModelMode); err != nil {
 		return fmt.Errorf("%s: %w", providerName, err)
 	}
@@ -595,6 +600,12 @@ func validateCompleteParamsWireSafe(providerName string, params CompleteParams) 
 	}
 
 	for i, message := range params.Messages {
+		for j, part := range message.ContentParts {
+			if err := validateMessageContentPart(providerName, i, j, message.Role, part); err != nil {
+				return err
+			}
+		}
+
 		for j, toolCall := range message.ToolCalls {
 			if _, err := json.Marshal(toolCall.Input); err != nil {
 				return fmt.Errorf(
@@ -609,6 +620,49 @@ func validateCompleteParamsWireSafe(providerName string, params CompleteParams) 
 	}
 
 	return nil
+}
+
+func validateMessageContentPart(providerName string, messageIndex, partIndex int, role Role, part MessageContentPart) error {
+	prefix := fmt.Sprintf("%s: CompleteParams.Messages[%d].ContentParts[%d]", providerName, messageIndex, partIndex)
+
+	switch part.Type {
+	case MessageContentPartText:
+		return nil
+	case MessageContentPartImage:
+		if role != RoleUser {
+			return fmt.Errorf("%s image parts are only supported on user messages", prefix)
+		}
+
+		if part.Image == nil {
+			return fmt.Errorf("%s.Image is required for image parts", prefix)
+		}
+
+		mediaType := normalizeImageMediaType(part.Image.MediaType)
+		if !supportedInlineImageMediaType(mediaType) {
+			return fmt.Errorf("%s.Image.MediaType %q is unsupported", prefix, part.Image.MediaType)
+		}
+
+		if strings.TrimSpace(part.Image.DataBase64) == "" {
+			return fmt.Errorf("%s.Image.DataBase64 is required", prefix)
+		}
+
+		if _, err := base64.StdEncoding.DecodeString(part.Image.DataBase64); err != nil {
+			return fmt.Errorf("%s.Image.DataBase64 must be standard base64: %w", prefix, err)
+		}
+
+		return nil
+	default:
+		return fmt.Errorf("%s.Type %q is unsupported", prefix, part.Type)
+	}
+}
+
+func supportedInlineImageMediaType(mediaType string) bool {
+	switch normalizeImageMediaType(mediaType) {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
 }
 
 func responseFormatRequested(format *ResponseFormat) bool {

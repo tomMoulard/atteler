@@ -300,6 +300,10 @@ func referenceEventMetadata(ref contextref.Reference) map[string]string {
 		metadata["token_estimator"] = ref.TokenEstimator
 	}
 
+	if ref.MediaType != "" {
+		metadata["media_type"] = ref.MediaType
+	}
+
 	if ref.DigestSHA256 != "" {
 		metadata["digest_sha256"] = ref.DigestSHA256
 	}

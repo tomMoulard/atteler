@@ -491,7 +491,25 @@ func TestProviderProtocolFixtures_CoverPublicLLMSchema(t *testing.T) {
 				"ToolResult",
 				"Role",
 				"Content",
+				"ContentParts",
 				"ToolCalls",
+			},
+		},
+		{
+			name: "MessageContentPart",
+			got:  structFieldNames[MessageContentPart](),
+			want: []string{
+				"Image",
+				"Type",
+				"Text",
+			},
+		},
+		{
+			name: "ImageSource",
+			got:  structFieldNames[ImageSource](),
+			want: []string{
+				"MediaType",
+				"DataBase64",
 			},
 		},
 		{

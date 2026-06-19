@@ -21,6 +21,7 @@ const (
 	CompatibilityCompletion      ProviderCompatibilityDimension = "completion"
 	CompatibilityStreaming       ProviderCompatibilityDimension = "streaming"
 	CompatibilityToolUse         ProviderCompatibilityDimension = "tool_use"
+	CompatibilityMultimodalInput ProviderCompatibilityDimension = "multimodal_input"
 	CompatibilityShellAccess     ProviderCompatibilityDimension = "shell_access"
 	CompatibilityReasoning       ProviderCompatibilityDimension = "reasoning_effort"
 	CompatibilitySeed            ProviderCompatibilityDimension = "seed"
@@ -60,6 +61,7 @@ type ProviderCompatibilityRow struct {
 	Completion      ProviderCompatibilityCell    `json:"completion"`
 	Streaming       ProviderCompatibilityCell    `json:"streaming"`
 	ToolUse         ProviderCompatibilityCell    `json:"tool_use"`
+	MultimodalInput ProviderCompatibilityCell    `json:"multimodal_input"`
 	ShellAccess     ProviderCompatibilityCell    `json:"shell_access"`
 	Reasoning       ProviderCompatibilityCell    `json:"reasoning_effort"`
 	Seed            ProviderCompatibilityCell    `json:"seed"`
@@ -80,6 +82,7 @@ func ProviderCompatibilityDimensions() []ProviderCompatibilityDimension {
 		CompatibilityCompletion,
 		CompatibilityStreaming,
 		CompatibilityToolUse,
+		CompatibilityMultimodalInput,
 		CompatibilityShellAccess,
 		CompatibilityReasoning,
 		CompatibilitySeed,
@@ -128,6 +131,7 @@ func ProviderCompatibilityFor(providerName string) (ProviderCompatibilityRow, bo
 		Provider:        providerName,
 		Streaming:       boolCompatibilityCell(capabilities.SupportsStreaming, "llm.StreamProvider implementation", "no caller-facing streaming provider"),
 		ToolUse:         completeParamCompatibilityCell(capabilities.CompleteParams["Tools"]),
+		MultimodalInput: multimodalInputCompatibilityCell(capabilities),
 		Reasoning:       completeParamCompatibilityCell(capabilities.CompleteParams["ReasoningLevel"]),
 		Seed:            completeParamCompatibilityCell(capabilities.CompleteParams["Seed"]),
 		TemperatureTopP: temperatureTopPCompatibilityCell(capabilities),
@@ -240,6 +244,20 @@ func boolCompatibilityCell(ok bool, supportedDetail, unsupportedDetail string) P
 
 func completeParamCompatibilityCell(support CompleteParamSupport) ProviderCompatibilityCell {
 	return compatibilityCell(string(support.Status), support.Note)
+}
+
+func multimodalInputCompatibilityCell(capabilities ProviderCapabilities) ProviderCompatibilityCell {
+	if capabilities.SupportsMultimodalInput {
+		return compatibilityCell(
+			string(CompleteParamSupported),
+			"accepts typed image content parts and inline image `@path` references for JPEG, PNG, GIF, and WebP inputs",
+		)
+	}
+
+	return compatibilityCell(
+		string(CompleteParamUnsupported),
+		"image content parts are rejected before provider requests are sent",
+	)
 }
 
 func temperatureTopPCompatibilityCell(capabilities ProviderCapabilities) ProviderCompatibilityCell {
@@ -363,6 +381,7 @@ func (r *ProviderCompatibilityRow) compatibilityCell(dimension ProviderCompatibi
 		CompatibilityCompletion:      r.Completion,
 		CompatibilityStreaming:       r.Streaming,
 		CompatibilityToolUse:         r.ToolUse,
+		CompatibilityMultimodalInput: r.MultimodalInput,
 		CompatibilityShellAccess:     r.ShellAccess,
 		CompatibilityReasoning:       r.Reasoning,
 		CompatibilitySeed:            r.Seed,

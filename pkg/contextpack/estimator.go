@@ -118,7 +118,13 @@ func (e calibratedEstimator) EstimateMessages(messages []llm.Message) TokenEstim
 
 func (e calibratedEstimator) EstimateMessage(msg llm.Message) TokenEstimate {
 	profile := e.profile
-	base := profile.MessageOverheadTokens + estimateTextTokensWithProfile(string(msg.Role), profile) + estimateTextTokensWithProfile(msg.Content, profile)
+	base := profile.MessageOverheadTokens + estimateTextTokensWithProfile(string(msg.Role), profile) + estimateMessageTextTokens(msg, profile)
+
+	for _, part := range msg.ContentParts {
+		if part.Type == llm.MessageContentPartImage && part.Image != nil {
+			base += estimateImageTokens(part.Image)
+		}
+	}
 
 	if len(msg.ToolCalls) > 0 {
 		base += estimateJSONTokens(msg.ToolCalls, profile)
@@ -139,6 +145,37 @@ func (e calibratedEstimator) EstimateMessage(msg llm.Message) TokenEstimate {
 		ErrorBoundTokens: errorBound,
 		UpperBoundTokens: base + errorBound,
 	}
+}
+
+func estimateMessageTextTokens(msg llm.Message, profile EstimatorProfile) int {
+	if len(msg.ContentParts) == 0 {
+		return estimateTextTokensWithProfile(msg.Content, profile)
+	}
+
+	total := 0
+
+	for _, part := range msg.ContentParts {
+		if part.Type == llm.MessageContentPartText {
+			total += estimateTextTokensWithProfile(part.Text, profile)
+		}
+	}
+
+	if total == 0 {
+		return estimateTextTokensWithProfile(msg.Content, profile)
+	}
+
+	return total
+}
+
+func estimateImageTokens(image *llm.ImageSource) int {
+	if image == nil {
+		return 0
+	}
+
+	// Model-specific image token accounting varies by provider. Use a fixed
+	// conservative placeholder so multimodal requests are visible to budget
+	// checks without treating base64 bytes as text tokens.
+	return 1000
 }
 
 // EstimateMessages returns a lightweight point token estimate for a message

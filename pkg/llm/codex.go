@@ -318,8 +318,9 @@ type codexInputItem struct {
 }
 
 type codexInputContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
 }
 
 // Complete runs an OpenAI Responses API request against the chatgpt codex
@@ -1154,8 +1155,10 @@ func codexInstructions(messages []Message) string {
 	var system []string
 
 	for _, msg := range messages {
-		if msg.Role == RoleSystem && msg.Content != "" {
-			system = append(system, msg.Content)
+		if msg.Role == RoleSystem {
+			if text := messageTextContent(msg); text != "" {
+				system = append(system, text)
+			}
 		}
 	}
 
@@ -1192,13 +1195,13 @@ func codexBuildInput(messages []Message) []codexInputItem {
 // appendCodexToolCallItems appends the assistant text (if any) and each tool
 // call as separate Responses API items.
 func appendCodexToolCallItems(out []codexInputItem, msg Message) []codexInputItem {
-	if msg.Content != "" {
+	if text := messageTextContent(msg); text != "" {
 		out = append(out, codexInputItem{
 			Type: "message",
 			Role: string(RoleAssistant),
 			Content: []codexInputContent{{
 				Type: "output_text",
-				Text: msg.Content,
+				Text: text,
 			}},
 		})
 	}
@@ -1228,13 +1231,30 @@ func appendCodexMessageItem(out []codexInputItem, msg Message) []codexInputItem 
 	}
 
 	return append(out, codexInputItem{
-		Type: "message",
-		Role: string(msg.Role),
-		Content: []codexInputContent{{
-			Type: contentType,
-			Text: msg.Content,
-		}},
+		Type:    "message",
+		Role:    string(msg.Role),
+		Content: codexMessageContent(msg, contentType),
 	})
+}
+
+func codexMessageContent(msg Message, textType string) []codexInputContent {
+	parts := effectiveMessageContentParts(msg)
+	out := make([]codexInputContent, 0, len(parts))
+
+	for _, part := range parts {
+		switch part.Type {
+		case MessageContentPartText:
+			if part.Text != "" {
+				out = append(out, codexInputContent{Type: textType, Text: part.Text})
+			}
+		case MessageContentPartImage:
+			if part.Image != nil {
+				out = append(out, codexInputContent{Type: "input_image", ImageURL: imageDataURL(part.Image)})
+			}
+		}
+	}
+
+	return out
 }
 
 // codexBuildTools converts internal tool definitions to the Responses API

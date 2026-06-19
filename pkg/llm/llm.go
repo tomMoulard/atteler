@@ -90,12 +90,112 @@ type ToolResult struct {
 	IsError    bool   `json:"is_error,omitempty"`
 }
 
+// MessageContentPartType identifies the kind of a typed message content part.
+type MessageContentPartType string
+
+// Supported typed message content part kinds.
+const (
+	MessageContentPartText  MessageContentPartType = "text"
+	MessageContentPartImage MessageContentPartType = "image"
+)
+
+// ImageSource is a provider-agnostic inline image payload. DataBase64 contains
+// the raw image bytes encoded with standard base64 and MediaType is the MIME
+// type, such as "image/png" or "image/jpeg".
+type ImageSource struct {
+	MediaType  string `json:"media_type,omitempty"`
+	DataBase64 string `json:"data_base64,omitempty"`
+}
+
+// MessageContentPart is one typed part of a message. Text parts use Text;
+// image parts use Image. When Message.ContentParts is set, providers use these
+// parts as the request payload and Message.Content remains a plain-text
+// fallback/summary for callers that do not understand typed content yet.
+type MessageContentPart struct {
+	Image *ImageSource           `json:"image,omitempty"`
+	Type  MessageContentPartType `json:"type"`
+	Text  string                 `json:"text,omitempty"`
+}
+
+// TextContentPart returns a typed text message part.
+func TextContentPart(text string) MessageContentPart {
+	return MessageContentPart{Type: MessageContentPartText, Text: text}
+}
+
+// ImageContentPart returns a typed inline image message part.
+func ImageContentPart(mediaType, dataBase64 string) MessageContentPart {
+	return MessageContentPart{
+		Type: MessageContentPartImage,
+		Image: &ImageSource{
+			MediaType:  normalizeImageMediaType(mediaType),
+			DataBase64: dataBase64,
+		},
+	}
+}
+
+func normalizeImageMediaType(mediaType string) string {
+	return strings.ToLower(strings.TrimSpace(mediaType))
+}
+
 // Message is a single turn in a conversation.
 type Message struct {
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 	Role       Role        `json:"role"`
 	Content    string      `json:"content"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	// ContentParts carries typed multimodal content. Leave empty for legacy
+	// text-only messages; providers will then use Content as the only text part.
+	ContentParts []MessageContentPart `json:"content_parts,omitempty"`
+	ToolCalls    []ToolCall           `json:"tool_calls,omitempty"`
+}
+
+func effectiveMessageContentParts(message Message) []MessageContentPart {
+	if len(message.ContentParts) > 0 {
+		return message.ContentParts
+	}
+
+	if message.Content == "" {
+		return nil
+	}
+
+	return []MessageContentPart{TextContentPart(message.Content)}
+}
+
+func messageTextContent(message Message) string {
+	if len(message.ContentParts) == 0 {
+		return message.Content
+	}
+
+	var b strings.Builder
+
+	for _, part := range message.ContentParts {
+		if part.Type != MessageContentPartText || part.Text == "" {
+			continue
+		}
+
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+
+		b.WriteString(part.Text)
+	}
+
+	if b.Len() == 0 {
+		return message.Content
+	}
+
+	return b.String()
+}
+
+func messagesContainImageContent(messages []Message) bool {
+	for _, message := range messages {
+		for _, part := range message.ContentParts {
+			if part.Type == MessageContentPartImage {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // CompleteParams groups the knobs for a completion call.
@@ -2140,7 +2240,13 @@ func EstimateTokens(messages []Message) int {
 		msg := messages[i]
 		base := legacyEstimateMessageOverheadTokens +
 			estimateLegacyTextTokens(string(msg.Role)) +
-			estimateLegacyTextTokens(msg.Content)
+			estimateLegacyTextTokens(messageTextContent(msg))
+
+		for _, part := range msg.ContentParts {
+			if part.Type == MessageContentPartImage && part.Image != nil {
+				base += legacyEstimateImageTokens(part.Image)
+			}
+		}
 
 		if len(msg.ToolCalls) > 0 {
 			base += estimateLegacyTextTokens(fmt.Sprint(msg.ToolCalls))
@@ -2155,6 +2261,17 @@ func EstimateTokens(messages []Message) int {
 	}
 
 	return total
+}
+
+func legacyEstimateImageTokens(image *ImageSource) int {
+	if image == nil {
+		return 0
+	}
+
+	// Provider image accounting depends on model-specific tiling, resizing, and
+	// detail settings. Use a fixed conservative placeholder so request-budget
+	// checks notice multimodal payloads without charging base64 bytes as text.
+	return 1000
 }
 
 func estimateLegacyTextTokens(text string) int {

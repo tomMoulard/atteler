@@ -153,6 +153,7 @@ type ReferenceProvenance struct {
 	Scope            string                    `json:"scope,omitempty"`
 	Location         string                    `json:"location,omitempty"`
 	ResolvedSource   string                    `json:"resolved_source,omitempty"`
+	MediaType        string                    `json:"media_type,omitempty"`
 	TokenEstimator   string                    `json:"token_estimator,omitempty"`
 	Size             int                       `json:"size,omitempty"`
 	Truncated        bool                      `json:"truncated,omitempty"`
@@ -175,6 +176,7 @@ type ReferenceEvent struct {
 	Kind             string                    `json:"kind,omitempty"`
 	Scope            string                    `json:"scope,omitempty"`
 	Location         string                    `json:"location,omitempty"`
+	MediaType        string                    `json:"media_type,omitempty"`
 	TokenEstimator   string                    `json:"token_estimator,omitempty"`
 	Bytes            int                       `json:"bytes,omitempty"`
 	Truncated        bool                      `json:"truncated,omitempty"`
@@ -2947,6 +2949,7 @@ func provenanceFromEvent(event ReferenceEvent) ReferenceProvenance {
 		Scope:            event.Scope,
 		Location:         event.Location,
 		ResolvedSource:   event.ResolvedSource,
+		MediaType:        event.MediaType,
 		TokenEstimator:   event.TokenEstimator,
 		Size:             event.Bytes,
 		Truncated:        event.Truncated,
@@ -3325,6 +3328,7 @@ func sanitizeReferenceEvent(event ReferenceEvent) ReferenceEvent {
 	event.Kind = sanitizeReferenceDiagnostic(event.Kind)
 	event.Scope = sanitizeReferenceDiagnostic(event.Scope)
 	event.Location = sanitizeReferenceDiagnostic(event.Location)
+	event.MediaType = sanitizeReferenceDiagnostic(event.MediaType)
 	event.TokenEstimator = sanitizeReferenceDiagnostic(event.TokenEstimator)
 	event.DigestSHA256 = sanitizeReferenceDiagnostic(event.DigestSHA256)
 	event.PolicyDecision = sanitizeReferenceDiagnostic(event.PolicyDecision)

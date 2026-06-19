@@ -156,6 +156,22 @@ func TestEstimatorProfileRecordsCalibrationAndErrorBound(t *testing.T) {
 	assert.Contains(t, result.Stats.Estimator, "calibration=provider-message-overhead-v1")
 }
 
+func TestEstimatorCountsImagePartAsPlaceholderNotBase64Text(t *testing.T) {
+	t.Parallel()
+
+	largeBase64Payload := strings.Repeat("AAAA", 10_000)
+	estimate := DefaultEstimator().EstimateMessage(llm.Message{
+		Role: llm.RoleUser,
+		ContentParts: []llm.MessageContentPart{
+			llm.TextContentPart("Describe this image."),
+			llm.ImageContentPart("image/png", largeBase64Payload),
+		},
+	})
+
+	assert.GreaterOrEqual(t, estimate.Tokens, 1000)
+	assert.Less(t, estimate.UpperBoundTokens, 2000)
+}
+
 func TestCompact_HardFailsWhenPinnedEvidenceAndManifestCannotFit(t *testing.T) {
 	t.Parallel()
 
