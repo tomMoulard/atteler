@@ -11,9 +11,12 @@ import (
 )
 
 type agentSelection struct {
-	name  string
-	agent agent.Agent
-	ok    bool
+	name string
+	// notice carries a non-fatal disambiguation message when the planner
+	// proceeded with a deterministic winner despite an ambiguous match.
+	notice string
+	agent  agent.Agent
+	ok     bool
 }
 
 func (m model) resolveAgent(input string) (agentSelection, string, error) {

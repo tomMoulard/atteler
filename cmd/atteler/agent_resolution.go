@@ -929,13 +929,6 @@ func resolvePromptAgent(agents *agent.Registry, prompt string, recentAgentNames 
 		return agentSelection{}, fmt.Errorf("plan agent selection: %w", err)
 	}
 
-	if plan.Ambiguous() {
-		return agentSelection{}, fmt.Errorf(
-			"ambiguous agent match; use @agent or --agent to override: %s",
-			formatAgentAmbiguityOverrideHint(plan.Ambiguities),
-		)
-	}
-
 	if len(plan.Participants) == 0 && plan.Composition.StopReason == "no_eligible_candidates" {
 		if hint := formatAgentIneligibleOverrideHint(plan.Candidates); hint != "" {
 			return agentSelection{}, fmt.Errorf(
@@ -950,8 +943,20 @@ func resolvePromptAgent(agents *agent.Registry, prompt string, recentAgentNames 
 	}
 
 	matchedAgent := plan.Participants[0].Agent
+	selection := agentSelection{name: matchedAgent.Name, agent: matchedAgent, ok: true}
 
-	return agentSelection{name: matchedAgent.Name, agent: matchedAgent, ok: true}, nil
+	// An ambiguous match is no longer fatal: the planner has already chosen a
+	// deterministic winner, so proceed with it and surface a one-line notice
+	// telling the user which agent ran and how to override.
+	if plan.Ambiguous() {
+		selection.notice = fmt.Sprintf(
+			"ambiguous agent match; using %q (override with @agent or --agent): %s",
+			matchedAgent.Name,
+			formatAgentAmbiguityOverrideHint(plan.Ambiguities),
+		)
+	}
+
+	return selection, nil
 }
 
 func formatAgentAmbiguityOverrideHint(ambiguities []agent.Ambiguity) string {

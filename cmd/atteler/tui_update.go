@@ -990,6 +990,10 @@ func (m model) submitPromptRequestCommand(
 	cmds := []tea.Cmd{
 		tea.Println(line),
 	}
+	if activeAgent.notice != "" {
+		cmds = append(cmds, tea.Println(warnStyle.Render("warning: "+activeAgent.notice)))
+	}
+
 	if len(refs) > 0 {
 		cmds = append(cmds, tea.Println(dimStyle.Render("Context: "+referenceSummary(refs))))
 	}

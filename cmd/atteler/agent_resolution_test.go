@@ -93,7 +93,7 @@ func TestResolveAgent_Unknown(t *testing.T) {
 	}
 }
 
-func TestResolveAgent_AmbiguousPromptRequiresOverride(t *testing.T) {
+func TestResolveAgent_AmbiguousPromptProceedsWithWinner(t *testing.T) {
 	t.Parallel()
 
 	registry := agent.NewRegistry(map[string]config.AgentConfig{
@@ -101,15 +101,22 @@ func TestResolveAgent_AmbiguousPromptRequiresOverride(t *testing.T) {
 		"auth-b": {Triggers: []string{"auth"}},
 	})
 
-	_, prompt, err := resolveAgent(registry, "", "review auth permissions")
-	require.Error(t, err)
+	selected, prompt, err := resolveAgent(registry, "", "review auth permissions")
+	require.NoError(t, err)
 
 	assert.Equal(t, "review auth permissions", prompt)
-	require.ErrorContains(t, err, "ambiguous agent match")
-	require.ErrorContains(t, err, "use @agent or --agent to override")
-	require.ErrorContains(t, err, "auth-a")
-	require.ErrorContains(t, err, "auth-b")
-	require.ErrorContains(t, err, "scores tied")
+	// The planner picks a deterministic winner rather than erroring; either
+	// tied candidate is acceptable so long as one is selected.
+	assert.True(t, selected.ok)
+	assert.Contains(t, []string{"auth-a", "auth-b"}, selected.name)
+
+	// A non-fatal notice records the ambiguity and the override path.
+	assert.NotEmpty(t, selected.notice)
+	assert.Contains(t, selected.notice, "ambiguous agent match")
+	assert.Contains(t, selected.notice, "override with @agent or --agent")
+	assert.Contains(t, selected.notice, selected.name)
+	assert.Contains(t, selected.notice, "auth-a")
+	assert.Contains(t, selected.notice, "auth-b")
 }
 
 func TestResolveAgent_ExplicitOverrideBypassesAmbiguousPrompt(t *testing.T) {

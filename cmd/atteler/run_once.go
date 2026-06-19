@@ -827,6 +827,10 @@ func prepareRunOnceRequest(
 		return runOncePrepared{}, err
 	}
 
+	if activeAgent.notice != "" {
+		fmt.Fprintln(os.Stderr, "warning: "+activeAgent.notice)
+	}
+
 	requestModel := selectedModel
 
 	selectedFallbackModels := append([]string(nil), fallbackModels...)
