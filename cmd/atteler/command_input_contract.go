@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 type agentPerformanceSummaryCommandInput struct{}
 
 type agentMemoryCommandInput struct {
@@ -355,6 +357,14 @@ type planAgentsCommandInput struct {
 	MaxAgents  int
 }
 
+type researchCommandInput struct {
+	Question       string
+	OutputDir      string
+	TrustedSources []string
+	Sources        []string
+	GenerateTasks  bool
+}
+
 type printConfigTemplateCommandInput struct{}
 
 type promptCompleteCommandInput struct {
@@ -522,6 +532,7 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"planAgentsCommandInput":              func(opts cliOptions) any { return planAgentsCommandInputFromOptions(opts) },
 		"printConfigTemplateCommandInput":     func(opts cliOptions) any { return printConfigTemplateCommandInputFromOptions(opts) },
 		"promptCompleteCommandInput":          func(opts cliOptions) any { return promptCompleteCommandInputFromOptions(opts) },
+		"researchCommandInput":                func(opts cliOptions) any { return researchCommandInputFromOptions(opts) },
 		"reviewPlanCommandInput":              func(opts cliOptions) any { return reviewPlanCommandInputFromOptions(opts) },
 		"reviewRunCommandInput":               func(opts cliOptions) any { return reviewRunCommandInputFromOptions(opts) },
 		"reviewScanCommandInput":              func(opts cliOptions) any { return reviewScanCommandInputFromOptions(opts) },
@@ -960,6 +971,30 @@ func planAgentsCommandInputFromOptions(opts cliOptions) planAgentsCommandInput {
 		AgentNames: append([]string(nil), opts.planAgentNames...),
 		MaxAgents:  opts.planMaxAgents.value,
 	}
+}
+
+func researchCommandInputFromOptions(opts cliOptions) researchCommandInput {
+	outputDir := opts.researchOutputDir
+	if strings.TrimSpace(outputDir) == "" && researchOutputFlagLooksLikePath(opts.outputFormat) {
+		outputDir = opts.outputFormat
+	}
+
+	return researchCommandInput{
+		Question:       opts.researchRunQuestion,
+		OutputDir:      outputDir,
+		TrustedSources: append([]string(nil), opts.trustedSources...),
+		Sources:        append([]string(nil), opts.researchSources...),
+		GenerateTasks:  opts.researchGenerateTasks,
+	}
+}
+
+func researchOutputFlagLooksLikePath(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || value == outputFormatText || value == outputFormatJSON {
+		return false
+	}
+
+	return true
 }
 
 func printConfigTemplateCommandInputFromOptions(_ cliOptions) printConfigTemplateCommandInput {

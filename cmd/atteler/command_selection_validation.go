@@ -7,16 +7,36 @@ func validateCLICommandSelection(opts cliOptions) error {
 		return err
 	}
 
+	if err := validateResearchCommandSelection(opts); err != nil {
+		return err
+	}
+
+	if err := validateIncidentCommandSelection(opts); err != nil {
+		return err
+	}
+
+	if err := validateHeadlessCommandSelection(opts); err != nil {
+		return err
+	}
+
+	matches := matchingRegistryCommands(commandRegistry, tierAny, opts)
+	inlineCommands := buildInlineCommandRegistry()
+
+	matches = append(matches, matchingRegistryCommands(inlineCommands, tierInline, opts)...)
+	if _, err := resolveCommandAmbiguity(matches); err != nil {
+		return err
+	}
+
+	return validateGroupedCommandSelection(opts)
+}
+
+func validateHeadlessCommandSelection(opts cliOptions) error {
 	if opts.headlessID != "" && !opts.headless {
 		return errors.New("--headless-id requires --headless")
 	}
 
 	if opts.headlessPrivateLog && !opts.headless {
 		return errors.New("--headless-private-log requires --headless")
-	}
-
-	if err := validateIncidentCommandSelection(opts); err != nil {
-		return err
 	}
 
 	if opts.retryHeadlessNewID != "" && opts.retryHeadlessID == "" {
@@ -31,15 +51,15 @@ func validateCLICommandSelection(opts cliOptions) error {
 		return errors.New("--headless-max-age requires --list-headless or --cleanup-headless")
 	}
 
-	matches := matchingRegistryCommands(commandRegistry, tierAny, opts)
-	inlineCommands := buildInlineCommandRegistry()
+	return nil
+}
 
-	matches = append(matches, matchingRegistryCommands(inlineCommands, tierInline, opts)...)
-	if _, err := resolveCommandAmbiguity(matches); err != nil {
-		return err
+func validateResearchCommandSelection(opts cliOptions) error {
+	if researchAdjunctOptionsRequested(opts) && !researchCommandRequested(opts) {
+		return errors.New("--trusted-source, --research-source, --research-output, and --generate-tasks require --research-run")
 	}
 
-	return validateGroupedCommandSelection(opts)
+	return nil
 }
 
 func validateGroupedCommandSelection(opts cliOptions) error {

@@ -329,6 +329,8 @@ type cliOptions struct {
 	evaluationAgentVersion             string
 	evaluationReportPath               string
 	planAgentsPrompt                   string
+	researchRunQuestion                string
+	researchOutputDir                  string
 	evalOutputPath                     string
 	evalAssertionsPath                 string
 	evalFixtureDir                     string
@@ -451,6 +453,8 @@ type cliOptions struct {
 	incidentValidationCommands         rawStringListFlag
 	memoryTags                         stringListFlag
 	planAgentNames                     stringListFlag
+	trustedSources                     stringListFlag
+	researchSources                    stringListFlag
 	retrievalFilters                   stringListFlag
 	retrievalSources                   stringListFlag
 	suggestSkillSteps                  stringListFlag
@@ -615,6 +619,7 @@ type cliOptions struct {
 	headless                           bool
 	headlessPrivateLog                 bool
 	autoresearch                       bool
+	researchGenerateTasks              bool
 	showVersion                        bool
 	useWorktree                        bool
 	worktreeAutoMerge                  bool

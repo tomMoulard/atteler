@@ -169,6 +169,47 @@ specific metric or command, put it in the prompt; otherwise the agent chooses th
 smallest meaningful repo-local gate first and broadens verification before
 claiming success.
 
+## Research runs
+
+Use `atteler research run` when you need an auditable technical research packet
+before implementation, architecture, dependency, security, or planning work:
+
+```sh
+atteler research run "Compare approaches for plugin sandboxing in Go CLIs"
+atteler research run \
+  --trusted-source go.dev \
+  --trusted-source github.com \
+  "Research best practices for safe agent worktrees"
+atteler research run \
+  --output .atteler/research/plugin-sandboxing \
+  --generate-tasks \
+  "Find viable implementation approaches for sandboxing Atteler plugins"
+```
+
+The MVP is local-first. It creates `.atteler/runs/research/<run-id>/` by
+default (or the directory passed with `--output` / `--research-output`) and
+writes:
+
+- `research.md` — human-readable summary, findings, tradeoffs,
+  recommendations, risks, claims, and citations.
+- `sources.jsonl` — structured source records for discovered project guidance
+  and supplied `--research-source` files/URLs.
+- `claims.jsonl` — important claims mapped to evidence where available.
+- `run.json` — run metadata and artifact paths.
+- `tasks.generated.yaml` — optional follow-up task stubs when
+  `--generate-tasks` is set.
+
+Before writing recommendations, the command inspects project/harness guidance
+files when present, including `AGENTS.md`, `CLAUDE.md`, `.cursor/rules/*`, and
+similar agent instruction files. The discovered guidance is included as source
+context and cited in the report.
+
+Atteler research reports should include evidence for important claims whenever
+possible. Evidence can include URLs, documentation links, repository files,
+command output, tests, logs, or prior session artifacts. This improves
+reliability and makes research easier to audit, but evidence is not mandatory
+for every statement.
+
 ## Continuous watch and incidents
 
 Scan the working tree for quality debt on demand, as JSON, or in a loop. Watch

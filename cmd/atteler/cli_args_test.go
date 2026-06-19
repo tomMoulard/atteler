@@ -182,6 +182,11 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			args: []string{"autoresearch", "--model", "openai/gpt-5.4", "--stdin"},
 			want: []string{"--model", "openai/gpt-5.4", "--stdin", "--autoresearch"},
 		},
+		{
+			name: "research run helper keeps source and output flags",
+			args: []string{"research", "run", "--trusted-source", "go.dev", "--output", ".atteler/research/plugin-sandboxing", "--generate-tasks", "Compare", "plugin", "sandboxing"},
+			want: []string{"--research-run", "Compare plugin sandboxing", "--trusted-source", "go.dev", "--output", ".atteler/research/plugin-sandboxing", "--generate-tasks"},
+		},
 	}
 
 	for _, tt := range tests {
