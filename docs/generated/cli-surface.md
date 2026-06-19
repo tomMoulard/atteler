@@ -130,6 +130,18 @@ Examples:
 - `atteler agents plan "review auth changes"`
 - `atteler agents task-list`
 
+## Research
+
+Create local-first cited research run artifacts for technical decisions, architecture exploration, dependency evaluation, and planning.
+
+Commands:
+- `run <question>`: gather project guidance and supplied sources into a cited research report (dispatch: `research-run`)
+
+Examples:
+- `atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`
+- `atteler research run --trusted-source go.dev --trusted-source github.com "Research best practices for safe agent worktrees"`
+- `atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`
+
 ## Autoresearch
 
 Run a headless worktree loop that proposes code experiments, validates them, and keeps only improvements.
@@ -848,6 +860,17 @@ Commands:
   - Outputs: `text`
   - Fixtures:
     - `legacy-flag`: `atteler --search-sessions value` -> `search-sessions`
+- `research-run` (providerless): create local-first cited research run artifacts
+  - Input: `researchCommandInput`
+  - Input fields: `Question`, `OutputDir`, `TrustedSources`, `Sources`, `GenerateTasks`
+  - Flags: `--research-run`, `--research-output`, `--trusted-source`, `--research-source`, `--output`, `--generate-tasks`
+  - Examples: `atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`, `atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`
+  - Conflicts:
+    - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
+  - Side effects: `filesystem-read`, `filesystem-write`, `stdout`
+  - Outputs: `markdown`, `json`, `yaml`, `filesystem`, `text`
+  - Fixtures:
+    - `legacy-flag`: `atteler --research-run value` -> `research-run`
 - `task-command` (providerless): read or mutate persistent agent tasks
   - Input: `taskCommandInput`
   - Input fields: `FilePath`, `AddTitle`, `AddID`, `Agent`, `AssignSpec`, `CompleteID`, `List`

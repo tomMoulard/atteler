@@ -11,6 +11,7 @@ const (
 	autoresearchDomainName = "autoresearch"
 	helpCommandName        = "help"
 	issueCommandName       = "issue"
+	researchDomainName     = "research"
 	sessionCommandName     = "session"
 	helpLongFlag           = "--help"
 	helpGoFlag             = "-help"
@@ -193,6 +194,25 @@ var cliHelpDomains = []cliHelpDomain{
 			`atteler agents list`,
 			`atteler agents plan "review auth changes"`,
 			`atteler agents task-list`,
+		},
+	},
+	{
+		Name:    researchDomainName,
+		Title:   "Research",
+		Summary: "Create local-first cited research run artifacts for technical decisions, architecture exploration, dependency evaluation, and planning.",
+		Commands: []cliCommandAlias{
+			{
+				Name:     "run",
+				Args:     "<question>",
+				Summary:  "gather project guidance and supplied sources into a cited research report",
+				Legacy:   []string{"--research-run"},
+				JoinArgs: true,
+			},
+		},
+		Examples: []string{
+			`atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`,
+			`atteler research run --trusted-source go.dev --trusted-source github.com "Research best practices for safe agent worktrees"`,
+			`atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`,
 		},
 	},
 	{

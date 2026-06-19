@@ -287,6 +287,8 @@ func flagBelongsToDomain(flagName, domainName string) bool {
 	switch domainName {
 	case codeIntelDomainName, configDomainName:
 		return flagName == outputFlagName || flagName == commandOutputJSON
+	case researchDomainName:
+		return flagName == outputFlagName
 	default:
 		return false
 	}
@@ -335,6 +337,9 @@ func lookupFlagDomain(name string) (string, bool) {
 	name = normalizeHelpName(name)
 
 	switch {
+	case name == "research-run" || name == "research-output" ||
+		name == "trusted-source" || name == "research-source" || name == "generate-tasks":
+		return researchDomainName, true
 	case name == autoresearchDomainName:
 		return autoresearchDomainName, true
 	case name == "once" || name == "stdin" || name == "output" || name == "autonomy" || name == "headless" ||

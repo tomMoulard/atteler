@@ -557,6 +557,17 @@ func commandContractsByName() map[string]commandContract {
 			withInputType("retrievalCommandInput"),
 			withExamples(`atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain`),
 		),
+		"research-run": commandContractFor(
+			"create local-first cited research run artifacts",
+			[]string{"--research-run", "--research-output", "--trusted-source", "--research-source", "--output", "--generate-tasks"},
+			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectUserOutput},
+			[]string{commandOutputMarkdown, commandOutputJSON, commandOutputYAML, commandOutputFilesystem, commandOutputText},
+			withInputType("researchCommandInput"),
+			withExamples(
+				`atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`,
+				`atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`,
+			),
+		),
 		"session-read": commandContractFor(
 			"read selected session details, transcripts, summaries, and records",
 			[]string{"--show-session", "--session-summary", "--replay", "--export-session", "--export-format", "--show-run", "--export-run", "--replay-run", "--resume-run", "--list-artifacts", "--list-evaluations", "--list-failures", "--list-messages", "--list-runs"},

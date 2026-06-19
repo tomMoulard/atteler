@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
@@ -77,6 +78,24 @@ func providerlessFileCommands() []command {
 		// ---------------------------------------------------------------
 		// Tier: providerless -- file utilities
 		// ---------------------------------------------------------------
+		{
+			name:  "research-run",
+			tier:  tierProviderless,
+			match: researchCommandRequested,
+			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
+				level, err := autonomyForEarlyCommand(o)
+				if err != nil {
+					return err
+				}
+
+				cwd, err := os.Getwd()
+				if err != nil {
+					return fmt.Errorf("locate working directory: %w", err)
+				}
+
+				return runResearchCommandWithAutonomy(ctx, cwd, researchCommandInputFromOptions(o), level)
+			},
+		},
 		{
 			name:  "task-command",
 			tier:  tierProviderless,

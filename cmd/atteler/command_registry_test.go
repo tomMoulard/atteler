@@ -85,7 +85,7 @@ func TestCommandRegistry_TopLevelRegistryStaysSmall(t *testing.T) {
 	t.Parallel()
 
 	registry := buildCommandRegistry()
-	assert.LessOrEqual(t, len(registry), 52, "top-level command registry should stay grouped by domain instead of one entry per flag")
+	assert.LessOrEqual(t, len(registry), 53, "top-level command registry should stay grouped by domain instead of one entry per flag")
 }
 
 func TestCommandRegistry_ContractsAreWellFormed(t *testing.T) {
