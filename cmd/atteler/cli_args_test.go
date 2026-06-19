@@ -183,9 +183,19 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			want: []string{"--model", "openai/gpt-5.4", "--stdin", "--autoresearch"},
 		},
 		{
+			name: "autoresearch run helper keeps tournament flags",
+			args: []string{"autoresearch", "run", "--tournament", "--variants", "4", "improve", "agent", "flow"},
+			want: []string{"--autoresearch", "--tournament", "--variants", "4", "improve agent flow"},
+		},
+		{
 			name: "research run helper keeps source and output flags",
 			args: []string{"research", "run", "--trusted-source", "go.dev", "--output", ".atteler/research/plugin-sandboxing", "--generate-tasks", "Compare", "plugin", "sandboxing"},
 			want: []string{"--research-run", "Compare plugin sandboxing", "--trusted-source", "go.dev", "--output", ".atteler/research/plugin-sandboxing", "--generate-tasks"},
+		},
+		{
+			name: "scout run helper keeps tournament and task flags",
+			args: []string{"scout", "run", "--competitors", "cursor,codex", "--variants", "5", "--tournament", "--generate-tasks", "Find", "features"},
+			want: []string{"--scout-run", "Find features", "--competitors", "cursor,codex", "--variants", "5", "--tournament", "--generate-tasks"},
 		},
 	}
 

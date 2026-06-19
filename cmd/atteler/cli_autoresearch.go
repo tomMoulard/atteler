@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/tournament"
 )
 
 func applyAutoresearchShortcutOptions(opts *cliOptions) {
@@ -22,6 +23,11 @@ func applyAutoresearchShortcutOptions(opts *cliOptions) {
 
 	opts.headless = true
 	opts.useWorktree = true
+
+	if tournamentOptionsRequested(*opts) && (strings.TrimSpace(opts.oncePrompt) != "" || opts.readStdin) {
+		options := tournament.Normalize(opts.tournament, opts.variants.value)
+		opts.oncePrompt = strings.TrimSpace(opts.oncePrompt + tournament.AutoresearchInstruction(options))
+	}
 }
 
 func validateAutoresearchCommandSelection(opts cliOptions) error {

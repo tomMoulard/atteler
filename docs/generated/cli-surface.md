@@ -142,6 +142,18 @@ Examples:
 - `atteler research run --trusted-source go.dev --trusted-source github.com "Research best practices for safe agent worktrees"`
 - `atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`
 
+## Scout
+
+Create local-first product discovery, competitor inspiration, ranked roadmap, and optional task artifacts.
+
+Commands:
+- `run <prompt>`: inspect the project and write a ranked feature/roadmap report (dispatch: `scout-run`)
+
+Examples:
+- `atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"`
+- `atteler scout run --competitors cursor,codex,openhands,aider,jules --generate-tasks "Identify features Atteler should add next"`
+- `atteler scout run --variants 5 --tournament "Generate competing roadmap proposals for Atteler"`
+
 ## Autoresearch
 
 Run a headless worktree loop that proposes code experiments, validates them, and keeps only improvements.
@@ -871,6 +883,17 @@ Commands:
   - Outputs: `markdown`, `json`, `yaml`, `filesystem`, `text`
   - Fixtures:
     - `legacy-flag`: `atteler --research-run value` -> `research-run`
+- `scout-run` (providerless): create local-first product discovery and roadmap artifacts
+  - Input: `scoutCommandInput`
+  - Input fields: `Prompt`, `OutputDir`, `Area`, `Competitors`, `Sources`, `Variants`, `GenerateTasks`, `Tournament`
+  - Flags: `--scout-run`, `--scout-output`, `--competitors`, `--area`, `--scout-source`, `--output`, `--generate-tasks`, `--tournament`, `--variants`
+  - Examples: `atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"`, `atteler scout run --competitors cursor,codex,openhands,aider,jules --generate-tasks "Identify features Atteler should add next"`, `atteler scout run --variants 5 --tournament "Generate competing roadmap proposals for Atteler"`
+  - Conflicts:
+    - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
+  - Side effects: `filesystem-read`, `filesystem-write`, `stdout`
+  - Outputs: `markdown`, `json`, `yaml`, `filesystem`, `text`
+  - Fixtures:
+    - `legacy-flag`: `atteler --scout-run value` -> `scout-run`
 - `task-command` (providerless): read or mutate persistent agent tasks
   - Input: `taskCommandInput`
   - Input fields: `FilePath`, `AddTitle`, `AddID`, `Agent`, `AssignSpec`, `CompleteID`, `List`

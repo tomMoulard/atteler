@@ -11,6 +11,10 @@ func validateCLICommandSelection(opts cliOptions) error {
 		return err
 	}
 
+	if err := validateScoutCommandSelection(opts); err != nil {
+		return err
+	}
+
 	if err := validateIncidentCommandSelection(opts); err != nil {
 		return err
 	}
@@ -56,7 +60,23 @@ func validateHeadlessCommandSelection(opts cliOptions) error {
 
 func validateResearchCommandSelection(opts cliOptions) error {
 	if researchAdjunctOptionsRequested(opts) && !researchCommandRequested(opts) {
-		return errors.New("--trusted-source, --research-source, --research-output, and --generate-tasks require --research-run")
+		return errors.New("--trusted-source, --research-source, and --research-output require --research-run")
+	}
+
+	if opts.researchGenerateTasks && !researchCommandRequested(opts) && !scoutCommandRequested(opts) {
+		return errors.New("--generate-tasks requires --research-run or --scout-run")
+	}
+
+	return nil
+}
+
+func validateScoutCommandSelection(opts cliOptions) error {
+	if scoutAdjunctOptionsRequested(opts) && !scoutCommandRequested(opts) {
+		return errors.New("--competitors, --area, --scout-source, and --scout-output require --scout-run")
+	}
+
+	if tournamentOptionsRequested(opts) && !scoutCommandRequested(opts) && !opts.autoresearch {
+		return errors.New("--tournament and --variants require --scout-run or --autoresearch")
 	}
 
 	return nil

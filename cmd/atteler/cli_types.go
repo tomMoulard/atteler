@@ -331,6 +331,9 @@ type cliOptions struct {
 	planAgentsPrompt                   string
 	researchRunQuestion                string
 	researchOutputDir                  string
+	scoutRunPrompt                     string
+	scoutOutputDir                     string
+	scoutArea                          string
 	evalOutputPath                     string
 	evalAssertionsPath                 string
 	evalFixtureDir                     string
@@ -453,6 +456,8 @@ type cliOptions struct {
 	incidentValidationCommands         rawStringListFlag
 	memoryTags                         stringListFlag
 	planAgentNames                     stringListFlag
+	scoutCompetitors                   stringListFlag
+	scoutSources                       stringListFlag
 	trustedSources                     stringListFlag
 	researchSources                    stringListFlag
 	retrievalFilters                   stringListFlag
@@ -487,6 +492,7 @@ type cliOptions struct {
 	routeInputTokens                   positiveIntFlag
 	routeOutputTokens                  positiveIntFlag
 	routeCacheWriteTokens              positiveIntFlag
+	variants                           positiveIntFlag
 	gitHistoryLimit                    positiveIntFlag
 	incidentTimeout                    positiveIntFlag
 	pluginTimeout                      positiveIntFlag
@@ -620,6 +626,7 @@ type cliOptions struct {
 	headlessPrivateLog                 bool
 	autoresearch                       bool
 	researchGenerateTasks              bool
+	tournament                         bool
 	showVersion                        bool
 	useWorktree                        bool
 	worktreeAutoMerge                  bool

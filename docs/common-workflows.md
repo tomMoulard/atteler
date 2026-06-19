@@ -210,6 +210,56 @@ command output, tests, logs, or prior session artifacts. This improves
 reliability and makes research easier to audit, but evidence is not mandatory
 for every statement.
 
+## Scout roadmap discovery
+
+Use `atteler scout run` when you need product discovery before deciding what to
+implement:
+
+```sh
+atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"
+atteler scout run \
+  --competitors cursor,codex,openhands,aider,jules \
+  --generate-tasks \
+  "Identify features Atteler should add next"
+atteler scout run \
+  --variants 5 \
+  --tournament \
+  "Generate competing roadmap proposals for Atteler"
+```
+
+Scout creates `.atteler/runs/scout/<run-id>/` by default (or the directory
+passed with `--output` / `--scout-output`) and writes:
+
+- `scout.md` — project understanding, inspiration sources, ranked ideas,
+  rationale, MVP shape, complexity, risks, tournament comparison when enabled,
+  and suggested implementation order.
+- `ideas.jsonl` — structured feature ideas with fit, complexity, risk,
+  related files/areas, evidence when available, and speculation labels.
+- `competitors.jsonl` — supplied competitor names or URLs for audit and
+  follow-up; the MVP records them without mandatory web access.
+- `run.json` — run metadata, guidance files, artifact map, and shared
+  tournament options.
+- `tasks.generated.yaml` — optional task stubs when `--generate-tasks` is set.
+
+Before recommending a roadmap, scout reads harness guidance files such as
+`AGENTS.md`, `CLAUDE.md`, `.cursor/rules/*`, project-local `.codex/` or
+`.claude/` guidance, Windsurf rules, and similar agent configuration so
+generated implementation tasks can inherit constraints like required tests or
+reviewable diffs.
+
+Scout recommendations should cite evidence where available — competitor docs,
+public product pages, repository files, existing Atteler docs, prior sessions,
+command output, or issue history. Evidence is recommended rather than mandatory;
+speculative ideas are allowed, but they are labeled so users can validate them
+before committing roadmap capacity. Use `--scout-source <file-or-url>` to add
+explicit local files, directories, or URLs to that evidence pool.
+
+Tournament mode is a shared capability used by scout and autoresearch. In scout
+it generates multiple roadmap variants and a comparison table before merging a
+final recommendation; in autoresearch, `--tournament --variants N` asks the loop
+to compare independent implementation or research hypotheses under the same
+evaluator before keeping a candidate.
+
 ## Continuous watch and incidents
 
 Scan the working tree for quality debt on demand, as JSON, or in a loop. Watch

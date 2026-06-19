@@ -12,6 +12,7 @@ const (
 	helpCommandName        = "help"
 	issueCommandName       = "issue"
 	researchDomainName     = "research"
+	scoutDomainName        = "scout"
 	sessionCommandName     = "session"
 	helpLongFlag           = "--help"
 	helpGoFlag             = "-help"
@@ -213,6 +214,25 @@ var cliHelpDomains = []cliHelpDomain{
 			`atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`,
 			`atteler research run --trusted-source go.dev --trusted-source github.com "Research best practices for safe agent worktrees"`,
 			`atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`,
+		},
+	},
+	{
+		Name:    scoutDomainName,
+		Title:   "Scout",
+		Summary: "Create local-first product discovery, competitor inspiration, ranked roadmap, and optional task artifacts.",
+		Commands: []cliCommandAlias{
+			{
+				Name:     "run",
+				Args:     "<prompt>",
+				Summary:  "inspect the project and write a ranked feature/roadmap report",
+				Legacy:   []string{"--scout-run"},
+				JoinArgs: true,
+			},
+		},
+		Examples: []string{
+			`atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"`,
+			`atteler scout run --competitors cursor,codex,openhands,aider,jules --generate-tasks "Identify features Atteler should add next"`,
+			`atteler scout run --variants 5 --tournament "Generate competing roadmap proposals for Atteler"`,
 		},
 	},
 	{

@@ -365,6 +365,17 @@ type researchCommandInput struct {
 	GenerateTasks  bool
 }
 
+type scoutCommandInput struct {
+	Prompt        string
+	OutputDir     string
+	Area          string
+	Competitors   []string
+	Sources       []string
+	Variants      int
+	GenerateTasks bool
+	Tournament    bool
+}
+
 type printConfigTemplateCommandInput struct{}
 
 type promptCompleteCommandInput struct {
@@ -533,6 +544,7 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"printConfigTemplateCommandInput":     func(opts cliOptions) any { return printConfigTemplateCommandInputFromOptions(opts) },
 		"promptCompleteCommandInput":          func(opts cliOptions) any { return promptCompleteCommandInputFromOptions(opts) },
 		"researchCommandInput":                func(opts cliOptions) any { return researchCommandInputFromOptions(opts) },
+		"scoutCommandInput":                   func(opts cliOptions) any { return scoutCommandInputFromOptions(opts) },
 		"reviewPlanCommandInput":              func(opts cliOptions) any { return reviewPlanCommandInputFromOptions(opts) },
 		"reviewRunCommandInput":               func(opts cliOptions) any { return reviewRunCommandInputFromOptions(opts) },
 		"reviewScanCommandInput":              func(opts cliOptions) any { return reviewScanCommandInputFromOptions(opts) },
@@ -995,6 +1007,24 @@ func researchOutputFlagLooksLikePath(value string) bool {
 	}
 
 	return true
+}
+
+func scoutCommandInputFromOptions(opts cliOptions) scoutCommandInput {
+	outputDir := opts.scoutOutputDir
+	if strings.TrimSpace(outputDir) == "" && researchOutputFlagLooksLikePath(opts.outputFormat) {
+		outputDir = opts.outputFormat
+	}
+
+	return scoutCommandInput{
+		Prompt:        opts.scoutRunPrompt,
+		OutputDir:     outputDir,
+		Area:          opts.scoutArea,
+		Competitors:   append([]string(nil), opts.scoutCompetitors...),
+		Sources:       append([]string(nil), opts.scoutSources...),
+		Variants:      opts.variants.value,
+		GenerateTasks: opts.researchGenerateTasks,
+		Tournament:    opts.tournament || (opts.variants.set && opts.variants.value > 1),
+	}
 }
 
 func printConfigTemplateCommandInputFromOptions(_ cliOptions) printConfigTemplateCommandInput {

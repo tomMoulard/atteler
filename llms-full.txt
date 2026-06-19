@@ -379,6 +379,55 @@ command output, tests, logs, or prior session artifacts. This improves
 reliability and makes research easier to audit, but evidence is not mandatory
 for every statement.
 
+## Scout roadmap discovery
+
+Use `atteler scout run` when you need product discovery before deciding what to
+implement:
+
+```sh
+atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"
+atteler scout run \
+  --competitors cursor,codex,openhands,aider,jules \
+  --generate-tasks \
+  "Identify features Atteler should add next"
+atteler scout run \
+  --variants 5 \
+  --tournament \
+  "Generate competing roadmap proposals for Atteler"
+```
+
+Scout creates `.atteler/runs/scout/<run-id>/` by default (or the directory
+passed with `--output` / `--scout-output`) and writes:
+
+- `scout.md` — project understanding, inspiration sources, ranked ideas,
+  rationale, MVP shape, complexity, risks, tournament comparison when enabled,
+  and suggested implementation order.
+- `ideas.jsonl` — structured feature ideas with fit, complexity, risk,
+  related files/areas, evidence when available, and speculation labels.
+- `competitors.jsonl` — supplied competitor names or URLs for audit and
+  follow-up; the MVP records them without mandatory web access.
+- `run.json` — run metadata, guidance files, artifact map, and shared
+  tournament options.
+- `tasks.generated.yaml` — optional task stubs when `--generate-tasks` is set.
+
+Before recommending a roadmap, scout reads harness guidance files such as
+`AGENTS.md`, `CLAUDE.md`, `.cursor/rules/*`, and similar agent configuration so
+generated implementation tasks can inherit constraints like required tests or
+reviewable diffs.
+
+Scout recommendations should cite evidence where available — competitor docs,
+public product pages, repository files, existing Atteler docs, prior sessions,
+command output, or issue history. Evidence is recommended rather than mandatory;
+speculative ideas are allowed, but they are labeled so users can validate them
+before committing roadmap capacity. Use `--scout-source <file-or-url>` to add
+explicit local files, directories, or URLs to that evidence pool.
+
+Tournament mode is a shared capability used by scout and autoresearch. In scout
+it generates multiple roadmap variants and a comparison table before merging a
+final recommendation; in autoresearch, `--tournament --variants N` asks the loop
+to compare independent implementation or research hypotheses under the same
+evaluator before keeping a candidate.
+
 ## Continuous watch and incidents
 
 Scan the working tree for quality debt on demand, as JSON, or in a loop. Watch
@@ -1418,6 +1467,18 @@ Examples:
 - `atteler research run --trusted-source go.dev --trusted-source github.com "Research best practices for safe agent worktrees"`
 - `atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`
 
+## Scout
+
+Create local-first product discovery, competitor inspiration, ranked roadmap, and optional task artifacts.
+
+Commands:
+- `run <prompt>`: inspect the project and write a ranked feature/roadmap report (dispatch: `scout-run`)
+
+Examples:
+- `atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"`
+- `atteler scout run --competitors cursor,codex,openhands,aider,jules --generate-tasks "Identify features Atteler should add next"`
+- `atteler scout run --variants 5 --tournament "Generate competing roadmap proposals for Atteler"`
+
 ## Autoresearch
 
 Run a headless worktree loop that proposes code experiments, validates them, and keeps only improvements.
@@ -2147,6 +2208,17 @@ Commands:
   - Outputs: `markdown`, `json`, `yaml`, `filesystem`, `text`
   - Fixtures:
     - `legacy-flag`: `atteler --research-run value` -> `research-run`
+- `scout-run` (providerless): create local-first product discovery and roadmap artifacts
+  - Input: `scoutCommandInput`
+  - Input fields: `Prompt`, `OutputDir`, `Area`, `Competitors`, `Sources`, `Variants`, `GenerateTasks`, `Tournament`
+  - Flags: `--scout-run`, `--scout-output`, `--competitors`, `--area`, `--scout-source`, `--output`, `--generate-tasks`, `--tournament`, `--variants`
+  - Examples: `atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"`, `atteler scout run --competitors cursor,codex,openhands,aider,jules --generate-tasks "Identify features Atteler should add next"`, `atteler scout run --variants 5 --tournament "Generate competing roadmap proposals for Atteler"`
+  - Conflicts:
+    - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
+  - Side effects: `filesystem-read`, `filesystem-write`, `stdout`
+  - Outputs: `markdown`, `json`, `yaml`, `filesystem`, `text`
+  - Fixtures:
+    - `legacy-flag`: `atteler --scout-run value` -> `scout-run`
 - `task-command` (providerless): read or mutate persistent agent tasks
   - Input: `taskCommandInput`
   - Input fields: `FilePath`, `AddTitle`, `AddID`, `Agent`, `AssignSpec`, `CompleteID`, `List`
@@ -3150,7 +3222,7 @@ matches the binary.
 
 <!-- Code generated by `go generate ./internal/docgen`; DO NOT EDIT. -->
 
-Every CLI option, one section each. There are 406 options. Flags combine with
+Every CLI option, one section each. There are 413 options. Flags combine with
 the grouped domain commands (before or after the subcommand). Boolean flags
 default to off unless noted; omitted values are not sent to providers.
 
@@ -3280,6 +3352,17 @@ Permission operation to allow (repeatable/comma-separated): read, write, execute
 
 ```sh
 atteler --allow-operation <value>
+```
+
+### `--area`
+
+Focus area or subsystem for --scout-run recommendations
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --area <value>
 ```
 
 ### `--artifact-kind`
@@ -4168,6 +4251,16 @@ Dump the inspectable CLI command surface as JSON and exit
 atteler --command-surface-json
 ```
 
+### `--competitors`
+
+Competitor or inspiration names/URLs for --scout-run (repeatable or comma-separated)
+
+- **Type:** value
+
+```sh
+atteler --competitors <value>
+```
+
 ### `--config`
 
 Additional YAML/JSON config file path(s); same format as ATTELER_CONFIG
@@ -4862,7 +4955,7 @@ atteler --feedback-rollback-reason <value>
 
 ### `--generate-tasks`
 
-Write tasks.generated.yaml for --research-run follow-up work
+Write tasks.generated.yaml for research or scout follow-up work
 
 - **Type:** bool
 - **Default:** `false`
@@ -6499,6 +6592,38 @@ Append the go_test verification gate for --issue-implement
 atteler --run-tests
 ```
 
+### `--scout-output`
+
+Directory for --scout-run artifacts; defaults to .atteler/runs/scout/<run-id>
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --scout-output <value>
+```
+
+### `--scout-run`
+
+Create a local-first product discovery roadmap for this prompt and exit
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --scout-run <value>
+```
+
+### `--scout-source`
+
+Local file/dir or URL to include in --scout-run context (repeatable or comma-separated)
+
+- **Type:** value
+
+```sh
+atteler --scout-source <value>
+```
+
 ### `--search-sessions`
 
 Search saved session transcripts and exit
@@ -7119,6 +7244,17 @@ Override request nucleus sampling value (0..1)
 atteler --top-p <value>
 ```
 
+### `--tournament`
+
+Compare multiple independent scout roadmaps or autoresearch hypotheses
+
+- **Type:** bool
+- **Default:** `false`
+
+```sh
+atteler --tournament
+```
+
 ### `--trusted-source`
 
 Trusted source host or domain for research (repeatable or comma-separated)
@@ -7160,6 +7296,16 @@ Validate merged YAML/JSON config and importer warnings, then exit
 
 ```sh
 atteler --validate-config
+```
+
+### `--variants`
+
+Number of independent variants for --tournament-capable workflows
+
+- **Type:** value
+
+```sh
+atteler --variants <value>
 ```
 
 ### `--vector-base-url`

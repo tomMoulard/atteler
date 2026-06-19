@@ -338,8 +338,12 @@ func lookupFlagDomain(name string) (string, bool) {
 
 	switch {
 	case name == "research-run" || name == "research-output" ||
-		name == "trusted-source" || name == "research-source" || name == "generate-tasks":
+		name == "trusted-source" || name == "research-source":
 		return researchDomainName, true
+	case name == "scout-run" || name == "scout-output" || name == "competitors" ||
+		name == "area" || name == "scout-source" || name == "generate-tasks" ||
+		name == "tournament" || name == "variants":
+		return scoutDomainName, true
 	case name == autoresearchDomainName:
 		return autoresearchDomainName, true
 	case name == "once" || name == "stdin" || name == "output" || name == "autonomy" || name == "headless" ||

@@ -106,6 +106,7 @@ func initCLIFlagValues(opts *cliOptions) {
 	opts.routeInputTokens = positiveIntFlag{name: "route-input-tokens"}
 	opts.routeOutputTokens = positiveIntFlag{name: "route-output-tokens"}
 	opts.routeCacheWriteTokens = positiveIntFlag{name: "route-cache-write-tokens"}
+	opts.variants = positiveIntFlag{name: "variants"}
 	opts.gitHistoryLimit = positiveIntFlag{name: "git-history-limit"}
 	opts.incidentTimeout = positiveIntFlag{name: "incident-timeout-seconds"}
 	opts.pluginTimeout = positiveIntFlag{name: "plugin-timeout-seconds"}

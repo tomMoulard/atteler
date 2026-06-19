@@ -568,6 +568,18 @@ func commandContractsByName() map[string]commandContract {
 				`atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`,
 			),
 		),
+		"scout-run": commandContractFor(
+			"create local-first product discovery and roadmap artifacts",
+			[]string{"--scout-run", "--scout-output", "--competitors", "--area", "--scout-source", "--output", "--generate-tasks", "--tournament", "--variants"},
+			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectUserOutput},
+			[]string{commandOutputMarkdown, commandOutputJSON, commandOutputYAML, commandOutputFilesystem, commandOutputText},
+			withInputType("scoutCommandInput"),
+			withExamples(
+				`atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"`,
+				`atteler scout run --competitors cursor,codex,openhands,aider,jules --generate-tasks "Identify features Atteler should add next"`,
+				`atteler scout run --variants 5 --tournament "Generate competing roadmap proposals for Atteler"`,
+			),
+		),
 		"session-read": commandContractFor(
 			"read selected session details, transcripts, summaries, and records",
 			[]string{"--show-session", "--session-summary", "--replay", "--export-session", "--export-format", "--show-run", "--export-run", "--replay-run", "--resume-run", "--list-artifacts", "--list-evaluations", "--list-failures", "--list-messages", "--list-runs"},

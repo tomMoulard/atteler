@@ -97,6 +97,24 @@ func providerlessFileCommands() []command {
 			},
 		},
 		{
+			name:  "scout-run",
+			tier:  tierProviderless,
+			match: scoutCommandRequested,
+			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
+				level, err := autonomyForEarlyCommand(o)
+				if err != nil {
+					return err
+				}
+
+				cwd, err := os.Getwd()
+				if err != nil {
+					return fmt.Errorf("locate working directory: %w", err)
+				}
+
+				return runScoutCommandWithAutonomy(ctx, cwd, scoutCommandInputFromOptions(o), level)
+			},
+		},
+		{
 			name:  "task-command",
 			tier:  tierProviderless,
 			match: taskCommandRequested,

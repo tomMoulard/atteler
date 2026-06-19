@@ -65,6 +65,23 @@ func TestApplyAutoresearchShortcutOptions_PreservesExplicitAutonomy(t *testing.T
 	assert.Equal(t, autonomy.Medium, opts.autonomy.value)
 }
 
+func TestApplyAutoresearchShortcutOptions_AppendsTournamentInstruction(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{
+		autoresearch: true,
+		oncePrompt:   "improve agent flow",
+		tournament:   true,
+		variants:     positiveIntFlag{value: 4, set: true},
+	}
+
+	applyAutoresearchShortcutOptions(&opts)
+
+	assert.Contains(t, opts.oncePrompt, "improve agent flow")
+	assert.Contains(t, opts.oncePrompt, "Tournament mode requested")
+	assert.Contains(t, opts.oncePrompt, "4 independent")
+}
+
 func TestValidateAutoresearchCommandSelection_RequiresMission(t *testing.T) {
 	t.Parallel()
 
