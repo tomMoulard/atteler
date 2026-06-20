@@ -60,6 +60,7 @@ type Observation struct {
 	AvgLatencyMS              int       `json:"avg_latency_ms"`
 	LastTTFTMS                int       `json:"last_ttft_ms,omitempty"`
 	AvgTTFTMS                 int       `json:"avg_ttft_ms,omitempty"`
+	LastCacheHitRate          float64   `json:"last_cache_hit_rate"`
 	LastCost                  float64   `json:"last_cost"`
 	TotalCost                 float64   `json:"total_cost"`
 	LastEstimatedDeltaUSD     float64   `json:"last_estimated_delta_usd,omitempty"`
@@ -125,6 +126,7 @@ func (t *Telemetry) Record(candidate Candidate, usage ActualUsage, observedAt ti
 		obs.OutputTokens = usage.OutputTokens
 		obs.LastCost = actualCost
 		obs.TotalCost += actualCost
+		obs.LastCacheHitRate = cacheHitRate(usage)
 
 		estimatedCost := EstimateCost(candidate, profileFromActualUsage(usage))
 		obs.LastEstimatedDeltaUSD = actualCost - estimatedCost
@@ -328,6 +330,17 @@ func profileFromActualUsage(usage ActualUsage) RequestProfile {
 	}
 
 	return profile
+}
+
+func cacheHitRate(usage ActualUsage) float64 {
+	inputTokens := nonNegative(usage.InputTokens)
+	if inputTokens == 0 {
+		return 0
+	}
+
+	cachedTokens := min(nonNegative(usage.CachedInputTokens), inputTokens)
+
+	return float64(cachedTokens) / float64(inputTokens)
 }
 
 func durationMS(d time.Duration) int {

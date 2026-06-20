@@ -900,9 +900,10 @@ func TestFormatRouteDecisionIncludesLatencyEvidence(t *testing.T) {
 	}
 	telemetry := modelroute.NewTelemetry()
 	telemetry.Record(candidate, modelroute.ActualUsage{
-		Latency:     40 * time.Millisecond,
-		TTFT:        10 * time.Millisecond,
-		InputTokens: 100,
+		Latency:           40 * time.Millisecond,
+		TTFT:              10 * time.Millisecond,
+		InputTokens:       100,
+		CachedInputTokens: 25,
 	}, time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC))
 
 	decision := modelroute.Decide(
@@ -918,6 +919,7 @@ func TestFormatRouteDecisionIncludesLatencyEvidence(t *testing.T) {
 	assert.Contains(t, got, "expected_ttft_ms=30")
 	assert.Contains(t, got, "observed_latency_ms=40")
 	assert.Contains(t, got, "observed_ttft_ms=10")
+	assert.Contains(t, got, "actual_cache_hit_rate=0.2500")
 }
 
 func TestFormatRouteDecisionIncludesProfileModeEvidence(t *testing.T) {
@@ -959,6 +961,7 @@ func TestFormatRouteDecisionIncludesActualCostDelta(t *testing.T) {
 	assert.Contains(t, got, "actual_cost=0.000140")
 	assert.Contains(t, got, "actual_cost_delta=0.000040")
 	assert.Contains(t, got, "actual_input_tokens=100")
+	assert.Contains(t, got, "actual_cache_hit_rate=0.0000")
 	assert.Contains(t, got, "actual_output_tokens=10")
 }
 

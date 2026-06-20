@@ -88,16 +88,23 @@ func TestClaudeCodeProvider_Complete(t *testing.T) {
 	assert.Equal(t, "/v1/messages", gotPath)
 	assert.JSONEq(t, `{
 		"model": "claude-opus-4-7",
-		"system": "be brief",
+		"system": [
+			{"type": "text", "text": "be brief", "cache_control": {"type": "ephemeral"}}
+		],
 		"messages": [
-			{"role": "user", "content": "say ok"}
+			{"role": "user", "content": [
+				{"type": "text", "text": "say ok", "cache_control": {"type": "ephemeral"}}
+			]}
 		],
 		"max_tokens": 4096
 	}`, string(gotBody))
-	assert.Equal(t, "be brief", gotReq.System)
+	require.Len(t, gotReq.System, 1)
+	assert.Equal(t, "be brief", gotReq.System[0].Text)
+	require.NotNil(t, gotReq.System[0].CacheControl)
+	assert.Equal(t, "ephemeral", gotReq.System[0].CacheControl.Type)
 	require.Len(t, gotReq.Messages, 1)
 	assert.Equal(t, "user", gotReq.Messages[0].Role)
-	assert.JSONEq(t, `"say ok"`, string(gotReq.Messages[0].Content))
+	assert.JSONEq(t, `[{"type":"text","text":"say ok","cache_control":{"type":"ephemeral"}}]`, string(gotReq.Messages[0].Content))
 	assert.Equal(t, "claude-opus-4-7", gotReq.Model)
 
 	assert.Equal(t, "Bearer access-1", gotHeaders.Get("Authorization"))
@@ -173,7 +180,9 @@ func TestClaudeCodeProvider_CompleteCoercesThinkingTemperature(t *testing.T) {
 		"model": "claude-opus-4-7",
 		"thinking": {"type": "enabled", "budget_tokens": 2048},
 		"messages": [
-			{"role": "user", "content": "think"}
+			{"role": "user", "content": [
+				{"type": "text", "text": "think", "cache_control": {"type": "ephemeral"}}
+			]}
 		],
 		"max_tokens": 4096
 	}`, string(gotBody))

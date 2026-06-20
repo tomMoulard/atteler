@@ -134,6 +134,7 @@ type CandidateDecision struct {
 	ActualInputTokens         int       `json:"actual_input_tokens,omitempty"`
 	ActualCachedTokens        int       `json:"actual_cached_input_tokens,omitempty"`
 	ActualCacheWrites         int       `json:"actual_cache_write_tokens,omitempty"`
+	ActualCacheHitRate        float64   `json:"actual_cache_hit_rate,omitempty"`
 	ActualOutputTokens        int       `json:"actual_output_tokens,omitempty"`
 	ExpectedLatencyMS         int       `json:"expected_latency_ms,omitempty"`
 	ExpectedTTFTMS            int       `json:"expected_ttft_ms,omitempty"`
@@ -322,6 +323,7 @@ func applyObservation(candidate *CandidateDecision, obs Observation) {
 		candidate.ActualInputTokens = obs.InputTokens
 		candidate.ActualCachedTokens = obs.CachedInputTokens
 		candidate.ActualCacheWrites = obs.CacheWriteTokens
+		candidate.ActualCacheHitRate = obs.LastCacheHitRate
 		candidate.ActualOutputTokens = obs.OutputTokens
 	}
 
@@ -601,6 +603,7 @@ func annotateActualUsage(decision *Decision, candidate *CandidateDecision, usage
 		candidate.ActualInputTokens = usage.InputTokens
 		candidate.ActualCachedTokens = usage.CachedInputTokens
 		candidate.ActualCacheWrites = usage.CacheWriteTokens
+		candidate.ActualCacheHitRate = cacheHitRate(usage)
 		candidate.ActualOutputTokens = usage.OutputTokens
 	}
 

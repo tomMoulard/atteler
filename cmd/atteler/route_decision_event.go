@@ -143,6 +143,7 @@ func addRouteActualMetadata(metadata map[string]string, actual modelroute.Candid
 	metadata["actual_cost_delta"] = fmt.Sprintf("%.6f", actual.ActualCostDelta)
 	metadata["actual_input_tokens"] = strconv.Itoa(actual.ActualInputTokens)
 	metadata["actual_output_tokens"] = strconv.Itoa(actual.ActualOutputTokens)
+	metadata["actual_cache_hit_rate"] = fmt.Sprintf("%.4f", actual.ActualCacheHitRate)
 
 	if actual.ActualCachedTokens > 0 {
 		metadata["actual_cached_input_tokens"] = strconv.Itoa(actual.ActualCachedTokens)

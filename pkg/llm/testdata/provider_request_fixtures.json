@@ -29,7 +29,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Hello"
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hello",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -43,7 +51,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Hello"
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hello",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -116,11 +132,27 @@
           "status": "rendered",
           "body": {
             "model": "contract-model",
-            "system": "Be terse.",
+            "system": [
+              {
+                "type": "text",
+                "text": "Be terse.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ],
             "messages": [
               {
                 "role": "user",
-                "content": "Hello"
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hello",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -131,11 +163,27 @@
           "status": "rendered",
           "body": {
             "model": "contract-model",
-            "system": "Be terse.",
+            "system": [
+              {
+                "type": "text",
+                "text": "Be terse.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ],
             "messages": [
               {
                 "role": "user",
-                "content": "Hello"
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Hello",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -232,7 +280,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Use a tool if needed."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a tool if needed.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "tools": [
@@ -250,7 +306,10 @@
                   "type": "object"
                 },
                 "name": "lookup",
-                "description": "Look up a value."
+                "description": "Look up a value.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
               }
             ],
             "max_tokens": 4096
@@ -264,7 +323,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Use a tool if needed."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Use a tool if needed.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "tools": [
@@ -282,7 +349,10 @@
                   "type": "object"
                 },
                 "name": "lookup",
-                "description": "Look up a value."
+                "description": "Look up a value.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
               }
             ],
             "max_tokens": 4096
@@ -423,6 +493,9 @@
                     "name": "lookup",
                     "input": {
                       "query": "go"
+                    },
+                    "cache_control": {
+                      "type": "ephemeral"
                     }
                   }
                 ]
@@ -454,6 +527,9 @@
                     "name": "lookup",
                     "input": {
                       "query": "go"
+                    },
+                    "cache_control": {
+                      "type": "ephemeral"
                     }
                   }
                 ]
@@ -564,7 +640,10 @@
                     "type": "tool_result",
                     "tool_use_id": "call-1",
                     "content": "result",
-                    "is_error": true
+                    "is_error": true,
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
                   }
                 ]
               }
@@ -585,7 +664,10 @@
                     "type": "tool_result",
                     "tool_use_id": "call-1",
                     "content": "result",
-                    "is_error": true
+                    "is_error": true,
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
                   }
                 ]
               }
@@ -659,7 +741,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Think."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Think.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -677,7 +767,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Think."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Think.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -754,7 +852,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Answer directly."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Answer directly.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -768,7 +874,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Answer directly."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Answer directly.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -1023,7 +1137,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Limit."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Limit.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 123
@@ -1037,7 +1159,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Limit."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Limit.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 123
@@ -1114,7 +1244,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Stop."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Stop.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "stop_sequences": [
@@ -1131,7 +1269,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Stop."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Stop.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "stop_sequences": [
@@ -1249,7 +1395,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Sample."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sample.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -1264,7 +1418,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Sample."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sample.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -1340,7 +1502,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Sample."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sample.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
@@ -1355,7 +1525,15 @@
             "messages": [
               {
                 "role": "user",
-                "content": "Sample."
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Sample.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
               }
             ],
             "max_tokens": 4096
