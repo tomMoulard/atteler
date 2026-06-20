@@ -1128,10 +1128,11 @@ instead of Linear.</p>
 <li><code>tracker.api_key</code>, including <code>$ENV_VAR</code> indirection</li>
 <li><code>GITHUB_TOKEN</code></li>
 <li><code>GH_TOKEN</code></li>
-<li><code>gh auth token</code></li>
-<li><code>gh auth status --show-token</code> as a compatibility fallback for keyring-backed
-  GitHub CLI sessions</li>
+<li><code>gh auth token</code> when autonomy permits local CLI credential access</li>
 </ul>
+<p>If <code>gh auth token</code> cannot return a token, configure one of the explicit token
+sources above. Symphony does not use broader GitHub CLI token-dump commands as
+a compatibility fallback.</p>
 <p>Defaults:</p>
 <ul>
 <li><code>tracker.endpoint: https://api.github.com</code></li>
