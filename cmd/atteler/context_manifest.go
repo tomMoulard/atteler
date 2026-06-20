@@ -190,6 +190,7 @@ func inlineReferenceEvents(refs []contextref.Reference) []contextref.ReferenceEv
 			Kind:             ref.Kind,
 			Scope:            contextref.ReferenceScopeInline,
 			Location:         "local",
+			MediaType:        ref.MediaType,
 			TokenEstimator:   ref.TokenEstimator,
 			DigestSHA256:     ref.DigestSHA256,
 			Bytes:            ref.Bytes,

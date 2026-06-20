@@ -184,6 +184,14 @@ git diff | atteler chat once "Review this diff" --stdin
 atteler chat once "Summarize @README.md and @pkg/llm/llm.go"
 ```
 
+For vision-capable models, `@path` can also attach local JPEG, PNG, GIF, or
+WebP images. Image bytes are sent as typed multimodal content while the visible
+prompt only records an `<image ... attached="true">` placeholder:
+
+```sh
+atteler chat once "Explain the error dialog in @screenshots/failure.png"
+```
+
 Use the `autonomy` flag (`low|medium|high|full`) to set action boundaries:
 `low` is advisory-only and disables tools, `medium` allows local edits but
 blocks branches/commits/pushes/PRs, and `high`/`full` can prepare or publish a

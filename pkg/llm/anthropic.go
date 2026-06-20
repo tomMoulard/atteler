@@ -191,14 +191,21 @@ type anthropicMessage struct {
 
 // anthropicContentBlock is a single block in an Anthropic message content array.
 type anthropicContentBlock struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text,omitempty"`
-	ID        string         `json:"id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Input     map[string]any `json:"input,omitempty"`
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	IsError   bool           `json:"is_error,omitempty"`
+	Type      string                `json:"type"`
+	Source    *anthropicImageSource `json:"source,omitempty"`
+	Text      string                `json:"text,omitempty"`
+	ID        string                `json:"id,omitempty"`
+	Name      string                `json:"name,omitempty"`
+	Input     map[string]any        `json:"input,omitempty"`
+	ToolUseID string                `json:"tool_use_id,omitempty"`
+	Content   string                `json:"content,omitempty"`
+	IsError   bool                  `json:"is_error,omitempty"`
+}
+
+type anthropicImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
 }
 
 type anthropicResponse struct {
@@ -361,7 +368,7 @@ func buildAnthropicRequestForProvider(providerName string, params CompleteParams
 	msgs := make([]anthropicMessage, 0, len(params.Messages))
 	for _, m := range params.Messages {
 		if m.Role == RoleSystem {
-			system = m.Content
+			system = messageTextContent(m)
 			continue
 		}
 
@@ -410,10 +417,7 @@ func buildAnthropicRequestForProvider(providerName string, params CompleteParams
 func buildAnthropicMessage(m Message) anthropicMessage {
 	// Assistant message with tool calls -> content block array.
 	if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
-		var blocks []anthropicContentBlock
-		if m.Content != "" {
-			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
-		}
+		blocks := anthropicContentParts(m, "text")
 
 		for _, tc := range m.ToolCalls {
 			blocks = append(blocks, anthropicContentBlock{
@@ -450,10 +454,46 @@ func buildAnthropicMessage(m Message) anthropicMessage {
 		return anthropicMessage{Role: "user", Content: content}
 	}
 
+	if len(m.ContentParts) > 0 {
+		content, err := json.Marshal(anthropicContentParts(m, "text"))
+		if err != nil {
+			content, _ = json.Marshal(messageTextContent(m)) //nolint:errcheck,errchkjson // string marshal cannot fail.
+		}
+
+		return anthropicMessage{Role: string(m.Role), Content: content}
+	}
+
 	// Plain text message.
 	content, _ := json.Marshal(m.Content) //nolint:errcheck,errchkjson // string marshal cannot fail.
 
 	return anthropicMessage{Role: string(m.Role), Content: content}
+}
+
+func anthropicContentParts(m Message, textType string) []anthropicContentBlock {
+	parts := effectiveMessageContentParts(m)
+	blocks := make([]anthropicContentBlock, 0, len(parts))
+
+	for _, part := range parts {
+		switch part.Type {
+		case MessageContentPartText:
+			if part.Text != "" {
+				blocks = append(blocks, anthropicContentBlock{Type: textType, Text: part.Text})
+			}
+		case MessageContentPartImage:
+			if part.Image != nil {
+				blocks = append(blocks, anthropicContentBlock{
+					Type: "image",
+					Source: &anthropicImageSource{
+						Type:      "base64",
+						MediaType: normalizeImageMediaType(part.Image.MediaType),
+						Data:      part.Image.DataBase64,
+					},
+				})
+			}
+		}
+	}
+
+	return blocks
 }
 
 func (a *AnthropicProvider) setAuthHeaders(httpReq *http.Request) {

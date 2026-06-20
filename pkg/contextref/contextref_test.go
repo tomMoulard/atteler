@@ -1,6 +1,7 @@
 package contextref
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,113 @@ func TestExpand_AppendsReferencedFile(t *testing.T) {
 	if !strings.Contains(result.Prompt, "hello\n") {
 		require.Failf(t, "unexpected failure", "prompt missing content:\n%s", result.Prompt)
 	}
+}
+
+func TestExpand_AttachesInlineImageReference(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeImageFile(t, dir, "screenshot.png")
+
+	result, events, err := ExpandWithReport("describe @screenshot.png", Options{Root: dir})
+	require.NoError(t, err)
+
+	require.Len(t, result.References, 1)
+	assert.Equal(t, "screenshot.png", result.References[0].Path)
+	assert.Equal(t, "image", result.References[0].Kind)
+	assert.Equal(t, "image/png", result.References[0].MediaType)
+	assert.NotEmpty(t, result.References[0].DigestSHA256)
+
+	require.Len(t, result.Images, 1)
+	assert.Equal(t, "screenshot.png", result.Images[0].Path)
+	assert.Equal(t, "image/png", result.Images[0].MediaType)
+	assert.Equal(t, testPNGBase64, result.Images[0].DataBase64)
+	assert.NotEmpty(t, result.Images[0].DigestSHA256)
+
+	assert.Contains(t, result.Prompt, `<image path="screenshot.png"`)
+	assert.Contains(t, result.Prompt, `media_type="image/png"`)
+	assert.Contains(t, result.Prompt, `attached="true"`)
+	assert.NotContains(t, result.Prompt, testPNGBase64)
+
+	require.Len(t, events, 1)
+	assert.Equal(t, "image", events[0].Kind)
+	assert.Equal(t, "image/png", events[0].MediaType)
+	assert.Equal(t, ReferenceDecisionLoaded, events[0].PolicyDecision)
+}
+
+func TestExpand_AttachesMultipleInlineImageReferences(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeImageFile(t, dir, "before.png")
+	writeImageFile(t, dir, "after.png")
+
+	result, events, err := ExpandWithReport("compare @before.png and @after.png", Options{Root: dir})
+	require.NoError(t, err)
+
+	require.Len(t, result.References, 2)
+	require.Len(t, result.Images, 2)
+	require.Len(t, events, 2)
+	assert.Equal(t, "before.png", result.Images[0].Path)
+	assert.Equal(t, "after.png", result.Images[1].Path)
+	assert.Equal(t, []string{"image", "image"}, []string{events[0].Kind, events[1].Kind})
+	assert.Equal(t, 2, strings.Count(result.Prompt, `<image path="`))
+	assert.NotContains(t, result.Prompt, testPNGBase64)
+}
+
+func TestExpand_ImageBytesDoNotConsumeTextTotalBudget(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeImageFile(t, dir, "screenshot.png")
+	writeFile(t, dir, "note.txt", "abc")
+
+	result, err := Expand("describe @screenshot.png and @note.txt", Options{
+		Root:          dir,
+		MaxFileBytes:  3,
+		MaxTotalBytes: 3,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, result.Images, 1)
+	require.Len(t, result.References, 2)
+	assert.Equal(t, "image", result.References[0].Kind)
+	assert.Equal(t, "file", result.References[1].Kind)
+	assert.Contains(t, result.Prompt, `<file path="note.txt"`)
+	assert.Contains(t, result.Prompt, "abc")
+}
+
+func TestExpand_RejectsOversizedInlineImage(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeImageFile(t, dir, "screenshot.png")
+
+	_, events, err := ExpandWithReport("describe @screenshot.png", Options{
+		Root:          dir,
+		MaxImageBytes: 1,
+	})
+	require.Error(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "image", events[0].Kind)
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Contains(t, events[0].PolicyReason, "max_image_bytes")
+	assert.NotContains(t, events[0].PolicyReason, dir)
+}
+
+func TestExpand_RejectsInvalidInlineImageContent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "screenshot.png"), []byte("not an image"), 0o600))
+
+	_, events, err := ExpandWithReport("describe @screenshot.png", Options{Root: dir})
+	require.Error(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "image", events[0].Kind)
+	assert.Equal(t, ReferenceDecisionRejected, events[0].PolicyDecision)
+	assert.Contains(t, events[0].PolicyReason, "unsupported image data")
+	assert.NotContains(t, events[0].PolicyReason, dir)
 }
 
 func TestExpand_TruncatesByLimit(t *testing.T) {
@@ -277,4 +385,17 @@ func writeFile(t *testing.T, dir, name, content string) string {
 	}
 
 	return path
+}
+
+const testPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+
+func writeImageFile(t *testing.T, dir, name string) {
+	t.Helper()
+
+	data, err := base64.StdEncoding.DecodeString(testPNGBase64)
+	require.NoError(t, err)
+
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	require.NoError(t, os.WriteFile(path, data, 0o600))
 }

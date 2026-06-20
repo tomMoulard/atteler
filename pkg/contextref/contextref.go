@@ -2,10 +2,13 @@
 package contextref
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,10 +23,14 @@ const (
 	DefaultMaxFileBytes = 64 * 1024
 	// DefaultMaxTotalBytes is the default aggregate reference cap.
 	DefaultMaxTotalBytes = 256 * 1024
+	// DefaultMaxImageBytes is the default cap for one inline image reference.
+	DefaultMaxImageBytes = 5 * 1024 * 1024
 	maxDirectoryEntries  = 200
 
 	// kindFile is the reference kind for regular files.
 	kindFile = "file"
+	// kindImage is the reference kind for inline image attachments.
+	kindImage = "image"
 )
 
 var errDirectoryLimit = errors.New("directory reference limit reached")
@@ -35,6 +42,7 @@ type Options struct {
 	Root          string
 	MaxFileBytes  int
 	MaxTotalBytes int
+	MaxImageBytes int
 	// TokenEstimator records provider/model-calibrated token estimates for
 	// reference manifests. If nil, a conservative provider-agnostic estimator is
 	// used.
@@ -47,10 +55,11 @@ type Options struct {
 	ReferenceScope string
 }
 
-// Reference describes one expanded local file or directory tree.
+// Reference describes one expanded local file, directory tree, or inline image.
 type Reference struct {
 	Path           string
 	Kind           string
+	MediaType      string
 	TokenEstimator string
 	DigestSHA256   string
 	Bytes          int
@@ -62,11 +71,23 @@ type Reference struct {
 type Result struct {
 	Prompt     string
 	References []Reference
+	Images     []ImageReference
 	Events     []ReferenceEvent
 }
 
-// Expand appends referenced local file contents or directory trees to prompt.
-// References are written as @path tokens and must resolve under Options.Root.
+// ImageReference is an inline image attachment resolved from an @path token.
+// DataBase64 contains the full image bytes encoded with standard base64.
+type ImageReference struct {
+	Path         string
+	MediaType    string
+	DataBase64   string
+	DigestSHA256 string
+	Bytes        int
+}
+
+// Expand appends referenced local file contents or directory trees to prompt
+// and resolves image @path tokens as inline image attachments. References are
+// written as @path tokens and must resolve under Options.Root.
 func Expand(prompt string, opts Options) (Result, error) {
 	result, _, err := ExpandWithReport(prompt, opts)
 	return result, err
@@ -115,6 +136,7 @@ func ExpandWithReport(prompt string, opts Options) (Result, []ReferenceEvent, er
 	result := Result{
 		Prompt:     appendReferences(prompt, refs),
 		References: references(refs),
+		Images:     imageReferences(refs),
 		Events:     events,
 	}
 
@@ -122,26 +144,43 @@ func ExpandWithReport(prompt string, opts Options) (Result, []ReferenceEvent, er
 }
 
 type expandedReference struct {
-	content        string
-	Path           string
-	Kind           string
-	TokenEstimator string
-	DigestSHA256   string
-	Bytes          int
-	Truncated      bool
-	TokenEstimate  contextpack.TokenEstimate
+	content         string
+	Path            string
+	Kind            string
+	MediaType       string
+	ImageDataBase64 string
+	TokenEstimator  string
+	DigestSHA256    string
+	Bytes           int
+	Truncated       bool
+	TokenEstimate   contextpack.TokenEstimate
 }
 
 func (r expandedReference) Reference() Reference {
 	return Reference{
 		Path:           r.Path,
 		Kind:           r.Kind,
+		MediaType:      r.MediaType,
 		TokenEstimator: r.TokenEstimator,
 		DigestSHA256:   r.DigestSHA256,
 		Bytes:          r.Bytes,
 		Truncated:      r.Truncated,
 		TokenEstimate:  r.TokenEstimate,
 	}
+}
+
+func (r expandedReference) ImageReference() (ImageReference, bool) {
+	if r.Kind != kindImage || r.ImageDataBase64 == "" {
+		return ImageReference{}, false
+	}
+
+	return ImageReference{
+		Path:         r.Path,
+		MediaType:    r.MediaType,
+		DataBase64:   r.ImageDataBase64,
+		DigestSHA256: r.DigestSHA256,
+		Bytes:        r.Bytes,
+	}, true
 }
 
 func normalizeOptions(opts Options) Options {
@@ -157,6 +196,10 @@ func normalizeOptions(opts Options) Options {
 
 	if opts.MaxTotalBytes <= 0 {
 		opts.MaxTotalBytes = DefaultMaxTotalBytes
+	}
+
+	if opts.MaxImageBytes <= 0 {
+		opts.MaxImageBytes = DefaultMaxImageBytes
 	}
 
 	if opts.TokenEstimator == nil {
@@ -281,6 +324,26 @@ func expandCandidate(
 
 	if !info.Mode().IsRegular() {
 		return expandedReference{}, total, false, fmt.Errorf("context: @%s is not a regular file", candidate)
+	}
+
+	return expandFileCandidate(candidate, resolved, displayPath, info, opts, total)
+}
+
+func expandFileCandidate(
+	candidate string,
+	resolved string,
+	displayPath string,
+	info fs.FileInfo,
+	opts Options,
+	total int,
+) (ref expandedReference, nextTotal int, ok bool, err error) {
+	if mediaType, ok := imageMediaTypeFromExtension(resolved); ok {
+		ref, imageErr := readImageReference(resolved, displayPath, info.Size(), mediaType, opts)
+		if imageErr != nil {
+			return expandedReference{}, total, false, fmt.Errorf("context: read image @%s: %s", candidate, safePathErrorMessage(imageErr))
+		}
+
+		return ref, total, true, nil
 	}
 
 	remaining := opts.MaxTotalBytes - total
@@ -448,6 +511,86 @@ func readLimited(path string, limit int) (data []byte, truncated bool, err error
 	return data, false, nil
 }
 
+func readImageReference(path, displayPath string, size int64, mediaType string, opts Options) (expandedReference, error) {
+	limit := opts.MaxImageBytes
+	if limit <= 0 {
+		limit = DefaultMaxImageBytes
+	}
+
+	if size > int64(limit) {
+		return expandedReference{}, fmt.Errorf("image exceeds max_image_bytes (%d > %d)", size, limit)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return expandedReference{}, fmt.Errorf("read image file: %w", err)
+	}
+
+	if len(data) > limit {
+		return expandedReference{}, fmt.Errorf("image exceeds max_image_bytes (%d > %d)", len(data), limit)
+	}
+
+	sniffedMediaType := imageMediaTypeFromData(data)
+	if sniffedMediaType == "" {
+		return expandedReference{}, fmt.Errorf("unsupported image data for media type %q", mediaType)
+	}
+
+	mediaType = sniffedMediaType
+
+	return expandedReference{
+		Path:            displayPath,
+		Kind:            kindImage,
+		MediaType:       mediaType,
+		ImageDataBase64: base64.StdEncoding.EncodeToString(data),
+		DigestSHA256:    digestHex(data),
+		Bytes:           len(data),
+	}, nil
+}
+
+func imageMediaTypeFromExtension(path string) (string, bool) {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".png":
+		return "image/png", true
+	case ".gif":
+		return "image/gif", true
+	case ".webp":
+		return "image/webp", true
+	}
+
+	mediaType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if mediaType == "" {
+		return "", false
+	}
+
+	mediaType, _, _ = strings.Cut(mediaType, ";")
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+
+	return mediaType, supportedImageMediaType(mediaType)
+}
+
+func imageMediaTypeFromData(data []byte) string {
+	mediaType := http.DetectContentType(data)
+	mediaType, _, _ = strings.Cut(mediaType, ";")
+
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if supportedImageMediaType(mediaType) {
+		return mediaType
+	}
+
+	return ""
+}
+
+func supportedImageMediaType(mediaType string) bool {
+	switch strings.ToLower(strings.TrimSpace(mediaType)) {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
 func safePathErrorMessage(err error) string {
 	if err == nil {
 		return ""
@@ -471,8 +614,10 @@ func appendReferences(prompt string, refs []expandedReference) string {
 	b.WriteString(prompt)
 	b.WriteString("\n\n<context_references>\n")
 
-	for _, ref := range refs {
+	for i := range refs {
+		ref := &refs[i]
 		tag := ref.Kind
+
 		if tag == "" {
 			tag = kindFile
 		}
@@ -485,6 +630,11 @@ func appendReferences(prompt string, refs []expandedReference) string {
 		b.WriteString(strconv.FormatBool(ref.Truncated))
 		b.WriteString(`" bytes="`)
 		b.WriteString(strconv.Itoa(ref.Bytes))
+
+		if ref.MediaType != "" {
+			b.WriteString(`" media_type="`)
+			b.WriteString(escapeAttr(ref.MediaType))
+		}
 
 		if ref.TokenEstimate.Tokens > 0 || ref.TokenEstimate.UpperBoundTokens > 0 {
 			b.WriteString(`" estimated_tokens="`)
@@ -503,6 +653,15 @@ func appendReferences(prompt string, refs []expandedReference) string {
 		if ref.DigestSHA256 != "" {
 			b.WriteString(`" digest_sha256="`)
 			b.WriteString(escapeAttr(ref.DigestSHA256))
+		}
+
+		if ref.Kind == kindImage {
+			b.WriteString(`" attached="true">`)
+			b.WriteString("\n</")
+			b.WriteString(tag)
+			b.WriteString(">\n")
+
+			continue
 		}
 
 		b.WriteString("\">\n")
@@ -536,8 +695,21 @@ func escapeAttr(value string) string {
 
 func references(refs []expandedReference) []Reference {
 	out := make([]Reference, 0, len(refs))
-	for _, ref := range refs {
-		out = append(out, ref.Reference())
+	for i := range refs {
+		out = append(out, refs[i].Reference())
+	}
+
+	return out
+}
+
+func imageReferences(refs []expandedReference) []ImageReference {
+	var out []ImageReference
+
+	for i := range refs {
+		image, ok := refs[i].ImageReference()
+		if ok {
+			out = append(out, image)
+		}
 	}
 
 	return out
@@ -555,6 +727,7 @@ func inlineReferenceEvent(ref Reference) ReferenceEvent {
 	return ReferenceEvent{
 		Source:           ref.Path,
 		Kind:             ref.Kind,
+		MediaType:        ref.MediaType,
 		Scope:            ReferenceScopeInline,
 		Location:         referenceLocationLocal,
 		TokenEstimator:   ref.TokenEstimator,
@@ -571,5 +744,10 @@ func inlineReferenceEvent(ref Reference) ReferenceEvent {
 func rejectedInlineReferenceEvent(candidate string, opts Options, err error) ReferenceEvent {
 	opts.ReferenceScope = ReferenceScopeInline
 
-	return newReferenceEvent(candidate, kindFile, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error())
+	kind := kindFile
+	if _, ok := imageMediaTypeFromExtension(candidate); ok {
+		kind = kindImage
+	}
+
+	return newReferenceEvent(candidate, kind, referenceLocationLocal, opts, ReferenceDecisionRejected, err.Error())
 }

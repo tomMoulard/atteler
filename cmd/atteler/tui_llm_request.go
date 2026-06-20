@@ -715,11 +715,27 @@ func expandReferences(messages []llm.Message, opts contextref.Options) ([]llm.Me
 		}
 
 		out[i].Content = result.Prompt
+		if len(result.Images) > 0 {
+			out[i].ContentParts = contentPartsForExpandedReferences(result.Prompt, result.Images)
+		}
 
 		return out, result.References, inlineEvents, nil
 	}
 
 	return out, nil, nil, nil
+}
+
+func contentPartsForExpandedReferences(prompt string, images []contextref.ImageReference) []llm.MessageContentPart {
+	parts := make([]llm.MessageContentPart, 0, 1+len(images))
+	if prompt != "" {
+		parts = append(parts, llm.TextContentPart(prompt))
+	}
+
+	for _, image := range images {
+		parts = append(parts, llm.ImageContentPart(image.MediaType, image.DataBase64))
+	}
+
+	return parts
 }
 
 func referenceSummary(refs []contextref.Reference) string {

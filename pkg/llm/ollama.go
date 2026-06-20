@@ -623,6 +623,7 @@ type ollamaToolFunction struct {
 type ollamaMessage struct {
 	Role      string           `json:"role"`
 	Content   string           `json:"content"`
+	Images    []string         `json:"images,omitempty"`
 	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
 }
 
@@ -1084,7 +1085,12 @@ func buildOllamaMessages(messages []Message) []ollamaMessage {
 	msgs := make([]ollamaMessage, 0, len(messages))
 
 	for _, m := range messages {
-		omsg := ollamaMessage{Role: string(m.Role), Content: m.Content}
+		omsg := ollamaMessage{Role: string(m.Role), Content: messageTextContent(m)}
+		for _, part := range m.ContentParts {
+			if part.Type == MessageContentPartImage && part.Image != nil {
+				omsg.Images = append(omsg.Images, part.Image.DataBase64)
+			}
+		}
 
 		// Marshal assistant messages with tool calls.
 		if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {

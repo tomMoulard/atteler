@@ -105,6 +105,7 @@ func TestProviderCompatibilityMatrix_UsesRequiredDimensions(t *testing.T) {
 		CompatibilityCompletion,
 		CompatibilityStreaming,
 		CompatibilityToolUse,
+		CompatibilityMultimodalInput,
 		CompatibilityShellAccess,
 		CompatibilityReasoning,
 		CompatibilitySeed,
@@ -131,6 +132,7 @@ func TestProviderCompatibilityMatrix_AlignsWithProviderCapabilities(t *testing.T
 
 			assert.Equal(t, boolStatus(capabilities.SupportsStreaming), row.Streaming.Status)
 			assert.Equal(t, string(capabilities.CompleteParams["Tools"].Status), row.ToolUse.Status)
+			assert.Equal(t, boolStatus(capabilities.SupportsMultimodalInput), row.MultimodalInput.Status)
 			assert.Equal(t, string(capabilities.CompleteParams["ReasoningLevel"].Status), row.Reasoning.Status)
 			assert.Equal(t, string(capabilities.CompleteParams["Seed"].Status), row.Seed.Status)
 			assert.Equal(t, string(capabilities.CompleteParams["MaxTokens"].Status), row.MaxTokens.Status)
@@ -214,6 +216,7 @@ func TestProviderCompatibilityMatrix_StatusContract(t *testing.T) {
 			CompatibilityCompletion:      "messages-api",
 			CompatibilityStreaming:       "unsupported",
 			CompatibilityToolUse:         "supported",
+			CompatibilityMultimodalInput: "supported",
 			CompatibilityShellAccess:     "none",
 			CompatibilityReasoning:       "lossy",
 			CompatibilitySeed:            "unsupported",
@@ -230,6 +233,7 @@ func TestProviderCompatibilityMatrix_StatusContract(t *testing.T) {
 			CompatibilityCompletion:      "messages-api",
 			CompatibilityStreaming:       "unsupported",
 			CompatibilityToolUse:         "supported",
+			CompatibilityMultimodalInput: "supported",
 			CompatibilityShellAccess:     "none",
 			CompatibilityReasoning:       "lossy",
 			CompatibilitySeed:            "unsupported",
@@ -246,6 +250,7 @@ func TestProviderCompatibilityMatrix_StatusContract(t *testing.T) {
 			CompatibilityCompletion:      "responses-api",
 			CompatibilityStreaming:       "supported",
 			CompatibilityToolUse:         "supported",
+			CompatibilityMultimodalInput: "supported",
 			CompatibilityShellAccess:     "none",
 			CompatibilityReasoning:       "supported",
 			CompatibilitySeed:            "unsupported",
@@ -262,6 +267,7 @@ func TestProviderCompatibilityMatrix_StatusContract(t *testing.T) {
 			CompatibilityCompletion:      "ollama-chat",
 			CompatibilityStreaming:       "supported",
 			CompatibilityToolUse:         "supported",
+			CompatibilityMultimodalInput: "supported",
 			CompatibilityShellAccess:     "daemon-autostart",
 			CompatibilityReasoning:       "lossy",
 			CompatibilitySeed:            "supported",
@@ -278,6 +284,7 @@ func TestProviderCompatibilityMatrix_StatusContract(t *testing.T) {
 			CompatibilityCompletion:      "chat-completions",
 			CompatibilityStreaming:       "unsupported",
 			CompatibilityToolUse:         "supported",
+			CompatibilityMultimodalInput: "supported",
 			CompatibilityShellAccess:     "none",
 			CompatibilityReasoning:       "supported",
 			CompatibilitySeed:            "supported",
