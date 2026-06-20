@@ -1556,6 +1556,35 @@ context:
 	assert.Equal(t, []string{"./docs/guide.md", "https://example.com/api-docs"}, cfg.Context.References)
 }
 
+func TestLoadFiles_ContextProjectInstructions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "project-instructions.yaml", `
+context:
+  project_instructions:
+    enabled: false
+    max_tokens: 2048
+`)
+
+	cfg, loaded, origins, err := LoadFilesWithOrigins([]string{path})
+	require.NoError(t, err)
+	require.Equal(t, []string{path}, loaded)
+	require.NotNil(t, cfg.Context.ProjectInstructions.Enabled)
+	assert.False(t, *cfg.Context.ProjectInstructions.Enabled)
+	assert.False(t, cfg.Context.ProjectInstructions.EffectiveEnabled())
+	assert.Equal(t, 2048, cfg.Context.ProjectInstructions.EffectiveMaxTokens())
+
+	enabledOrigin, ok := origins.Final("context.project_instructions.enabled")
+	require.True(t, ok)
+	assert.Equal(t, OriginExplicitFile, enabledOrigin.Kind)
+	assert.Equal(t, "false", enabledOrigin.Value)
+
+	maxTokensOrigin, ok := origins.Final("context.project_instructions.max_tokens")
+	require.True(t, ok)
+	assert.Equal(t, "2048", maxTokensOrigin.Value)
+}
+
 func TestLoadFiles_ContextReferencesOverride(t *testing.T) {
 	t.Parallel()
 

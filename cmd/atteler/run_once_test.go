@@ -354,6 +354,55 @@ func TestRunOnceWithOptions_LowAutonomyDoesNotPersistSession(t *testing.T) {
 	assertRunOnceRequestContains(t, *provider.params, "Autonomy: low")
 }
 
+func TestRunOnceWithOptions_AutoLoadsProjectInstructions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("Always run make test.\n"), 0o600))
+
+	provider := &runOnceCostProvider{
+		name:   "openai",
+		models: []string{"gpt-4.1-mini"},
+		response: &llm.Response{
+			Content:    "answer",
+			Provider:   "openai",
+			Model:      "gpt-4.1-mini",
+			StopReason: llm.StopEndTurn,
+		},
+	}
+	reg := llm.NewRegistry()
+	reg.Register(provider)
+
+	err := runOnceWithOptions(
+		context.Background(),
+		reg,
+		agent.NewRegistry(nil),
+		nil,
+		session.NewStore(filepath.Join(dir, "sessions")),
+		session.New("openai/gpt-4.1-mini", nil),
+		contextref.Options{Root: dir},
+		"",
+		contextref.ReferenceManifest{},
+		"",
+		nil,
+		"openai/gpt-4.1-mini",
+		"",
+		nil,
+		generationSettings{},
+		generationSettings{},
+		0,
+		runOnceExecutionOptions{Autonomy: autonomy.Low},
+		true,
+		"implement the change",
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, provider.params)
+	assertRunOnceRequestContains(t, *provider.params, "<project_instructions")
+	assertRunOnceRequestContains(t, *provider.params, "Always run make test.")
+}
+
 func TestRunOnceWithOptions_LowAutonomyBlocksHeadlessMetadataWrites(t *testing.T) {
 	t.Parallel()
 

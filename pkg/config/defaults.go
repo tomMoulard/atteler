@@ -134,6 +134,16 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Message: "no configured references are loaded unless this list is set",
 		},
 		{
+			Field:   "context.project_instructions.enabled",
+			Value:   "true",
+			Message: "AGENTS.md files, or CLAUDE.md fallback files, are auto-loaded from the repository root down to the working directory unless disabled",
+		},
+		{
+			Field:   "context.project_instructions.max_tokens",
+			Value:   strconv.Itoa(DefaultProjectInstructionsMaxTokens),
+			Message: "auto-loaded project instructions are compressed with contextpack to this token budget before being pinned into requests",
+		},
+		{
 			Field:   "context.max_file_bytes",
 			Value:   "0",
 			Message: "the context loader applies no config-level per-file byte cap unless this is positive",

@@ -45,6 +45,12 @@ type Options struct {
 	// ReferenceScope records where configured references came from, for example
 	// "global" or "agent:reviewer".
 	ReferenceScope string
+	// ProjectInstructionsDisabled opts out of automatic AGENTS.md/CLAUDE.md
+	// discovery when application request builders add project instructions.
+	ProjectInstructionsDisabled bool
+	// ProjectInstructionsMaxTokens caps auto-discovered project instruction
+	// context before request builders pin it as system context.
+	ProjectInstructionsMaxTokens int
 }
 
 // Reference describes one expanded local file or directory tree.

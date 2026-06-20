@@ -1387,9 +1387,11 @@ func mergeTags(existing, next []string) []string {
 
 func contextOptionsFromConfig(cfg appconfig.Config) contextref.Options {
 	opts := contextref.Options{
-		MaxFileBytes:    cfg.Context.MaxFileBytes,
-		MaxTotalBytes:   cfg.Context.MaxTotalBytes,
-		ReferencePolicy: referencePolicyFromConfig(cfg.Context.ReferencePolicy),
+		MaxFileBytes:                 cfg.Context.MaxFileBytes,
+		MaxTotalBytes:                cfg.Context.MaxTotalBytes,
+		ReferencePolicy:              referencePolicyFromConfig(cfg.Context.ReferencePolicy),
+		ProjectInstructionsDisabled:  !cfg.Context.ProjectInstructions.EffectiveEnabled(),
+		ProjectInstructionsMaxTokens: cfg.Context.ProjectInstructions.EffectiveMaxTokens(),
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		opts.Root = cwd
@@ -1654,6 +1656,8 @@ func appendReferenceReasonFields(parts []string, event contextref.ReferenceEvent
 }
 
 func buildReferenceContextWithManifest(ctx context.Context, globalRefCtx configuredReferenceContext, activeAgent agentSelection, opts contextref.Options) configuredReferenceContext {
+	globalRefCtx = appendProjectInstructionContext(ctx, globalRefCtx, opts)
+
 	if !activeAgent.ok || len(activeAgent.agent.References) == 0 {
 		return globalRefCtx
 	}

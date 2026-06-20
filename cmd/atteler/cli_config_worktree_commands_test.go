@@ -548,6 +548,23 @@ func TestContextOptionsFromConfig_PreservesExplicitEmptyDefaultLists(t *testing.
 	assert.Empty(t, opts.ReferencePolicy.ContentTypes)
 }
 
+func TestContextOptionsFromConfig_MapsProjectInstructions(t *testing.T) {
+	t.Parallel()
+
+	enabled := false
+	opts := contextOptionsFromConfig(appconfig.Config{
+		Context: appconfig.ContextConfig{
+			ProjectInstructions: appconfig.ProjectInstructionsConfig{
+				Enabled:   &enabled,
+				MaxTokens: 2048,
+			},
+		},
+	})
+
+	assert.True(t, opts.ProjectInstructionsDisabled)
+	assert.Equal(t, 2048, opts.ProjectInstructionsMaxTokens)
+}
+
 func TestFormatReferenceEventIncludesPolicyReasonAndProvenance(t *testing.T) {
 	t.Parallel()
 

@@ -113,6 +113,63 @@ func TestAddRuntimeConfigOrigins_UsesProviderQualifiedModelPrefix(t *testing.T) 
 	assert.Contains(t, final.Note, "provider-qualified")
 }
 
+func TestAddRuntimeConfigOrigins_ReportsProjectInstructionProvenance(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("root rules\n"), 0o600))
+	sub := filepath.Join(root, "pkg")
+	require.NoError(t, os.MkdirAll(sub, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(sub, "CLAUDE.md"), []byte("pkg rules\n"), 0o600))
+
+	origins := appconfig.OriginMap{}
+	addRuntimeConfigOrigins(origins, appconfig.Config{}, cliOptions{}, appconfig.State{}, sub, "state.yaml")
+
+	sources, ok := origins.Final("runtime.project_instructions.sources")
+	require.True(t, ok)
+	assert.Equal(t, `["AGENTS.md","pkg/CLAUDE.md"]`, sources.Value)
+	assert.Contains(t, sources.Note, "files selected")
+
+	enabled, ok := origins.Final("runtime.project_instructions.enabled")
+	require.True(t, ok)
+	assert.Equal(t, "true", enabled.Value)
+
+	maxTokens, ok := origins.Final("runtime.project_instructions.max_tokens")
+	require.True(t, ok)
+	assert.Equal(t, "8192", maxTokens.Value)
+}
+
+func TestAddRuntimeConfigOrigins_ReportsProjectInstructionOptOut(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("root rules\n"), 0o600))
+
+	enabled := false
+
+	origins := appconfig.OriginMap{}
+	addRuntimeConfigOrigins(origins, appconfig.Config{
+		Context: appconfig.ContextConfig{
+			ProjectInstructions: appconfig.ProjectInstructionsConfig{Enabled: &enabled},
+		},
+	}, cliOptions{}, appconfig.State{}, root, "state.yaml")
+
+	finalEnabled, ok := origins.Final("runtime.project_instructions.enabled")
+	require.True(t, ok)
+	assert.Equal(t, "false", finalEnabled.Value)
+	assert.Contains(t, finalEnabled.Note, "disabled")
+
+	sources, ok := origins.Final("runtime.project_instructions.sources")
+	require.True(t, ok)
+	assert.Equal(t, "[]", sources.Value)
+	assert.Contains(t, sources.Note, "disabled")
+
+	_, ok = origins.Final("runtime.project_instructions.repo_root")
+	assert.False(t, ok)
+}
+
 func TestWriteConfigExplanation_FiltersFieldPrefixes(t *testing.T) {
 	t.Parallel()
 

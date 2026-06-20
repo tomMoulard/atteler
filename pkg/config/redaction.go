@@ -86,6 +86,7 @@ func RedactedConfig(cfg Config) Config {
 	out.ModelAliases = maps.Clone(cfg.ModelAliases)
 	out.ModelRoles = redactedModelRoles(cfg.ModelRoles)
 	out.Context.References = redactStringSlice("references", cfg.Context.References)
+	out.Context.ProjectInstructions.Enabled = clonePtr(cfg.Context.ProjectInstructions.Enabled)
 	out.Context.ReferencePolicy = redactedReferencePolicyConfig(cfg.Context.ReferencePolicy)
 
 	out.Plugins.Paths = append([]string(nil), cfg.Plugins.Paths...)
@@ -242,6 +243,8 @@ func RedactOriginValue(path, value string) string {
 		return redactSerializedHooks(value)
 	case path == "context.references" || strings.HasSuffix(path, ".references"):
 		return redactSerializedStringSlice("references", value)
+	case path == "runtime.project_instructions.sources":
+		return redactSerializedStringSlice("runtime.project_instructions.sources", value)
 	case path == "worktree.verification_commands":
 		return redactSerializedStringSlice("worktree.verification_commands", value)
 	case path == "vector.workspace_include" || path == "vector.workspace_exclude":
