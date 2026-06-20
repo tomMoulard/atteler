@@ -1127,7 +1127,7 @@ func (cfg Config) ValidatePreflight() error {
 		}
 	case trackerKindGitHub:
 		if strings.TrimSpace(cfg.Tracker.APIKey) == "" {
-			return errors.New("missing_github_token")
+			return missingGitHubTokenError(cfg.Autonomy)
 		}
 
 		if strings.TrimSpace(cfg.Tracker.Owner) == "" || strings.TrimSpace(cfg.Tracker.Repo) == "" {
@@ -1287,23 +1287,20 @@ func (cfg Config) validateDebugConfig() error {
 }
 
 func githubTokenFromCLI(ctx context.Context) string {
-	if token := runGitHubCLI(ctx, "auth", "token"); token != "" {
-		return token
-	}
-
-	return parseGitHubAuthStatusToken(runGitHubCLI(ctx, "auth", "status", "--show-token"))
+	return runGitHubCLI(ctx, "auth", "token")
 }
 
 func runGitHubCLI(ctx context.Context, args ...string) string {
 	cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	var output bytes.Buffer
+	var stderr bytes.Buffer
+	var stdout bytes.Buffer
 	cmd, invocation, err := shell.CommandContext(cmdCtx, shell.CommandOptions{
 		Program:              "gh",
 		Args:                 args,
-		Stdout:               &output,
-		Stderr:               &output,
+		Stdout:               &stdout,
+		Stderr:               &stderr,
 		Mode:                 shell.ModeCaptured,
 		PermissionOperations: githubCLITokenPermissionOperations(args),
 		Audit:                shell.AuditContext{Caller: "symphony.gh_token"},
@@ -1324,26 +1321,7 @@ func runGitHubCLI(ctx context.Context, args ...string) string {
 		return ""
 	}
 
-	return strings.TrimSpace(output.String())
-}
-
-func parseGitHubAuthStatusToken(output string) string {
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		line = strings.TrimPrefix(line, "- ")
-		if !strings.HasPrefix(line, "Token:") {
-			continue
-		}
-
-		token := strings.TrimSpace(strings.TrimPrefix(line, "Token:"))
-		if token == "" || strings.Contains(token, "*") {
-			return ""
-		}
-
-		return token
-	}
-
-	return ""
+	return strings.TrimSpace(stdout.String())
 }
 
 func githubCLITokenPermissionOperations(args []string) []permission.Operation {
@@ -1355,6 +1333,15 @@ func githubCLITokenPermissionOperations(args []string) []permission.Operation {
 		Source: "symphony.gh_token",
 		Target: "GitHub CLI auth",
 	}}
+}
+
+func missingGitHubTokenError(level autonomy.Level) error {
+	sources := []string{"tracker.api_key", githubTokenEnv, githubCLITokenEnv}
+	if autonomy.Normalize(level) != autonomy.Low {
+		sources = append(sources, "gh auth token")
+	}
+
+	return fmt.Errorf("missing_github_token: no token resolved from %s", strings.Join(sources, ", "))
 }
 
 func codexExtraConfig(config map[string]any) map[string]any {

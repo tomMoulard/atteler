@@ -8836,9 +8836,11 @@ Authentication is resolved in this order:
 - `tracker.api_key`, including `$ENV_VAR` indirection
 - `GITHUB_TOKEN`
 - `GH_TOKEN`
-- `gh auth token`
-- `gh auth status --show-token` as a compatibility fallback for keyring-backed
-  GitHub CLI sessions
+- `gh auth token` when autonomy permits local CLI credential access
+
+If `gh auth token` cannot return a token, configure one of the explicit token
+sources above. Symphony does not use broader GitHub CLI token-dump commands as
+a compatibility fallback.
 
 Defaults:
 
