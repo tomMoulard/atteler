@@ -993,6 +993,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#context-and-project-instructions" class="md-nav__link">
+    <span class="md-ellipsis">
+      Context and project instructions
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#imported-sibling-harness-defaults" class="md-nav__link">
     <span class="md-ellipsis">
       Imported sibling-harness defaults
@@ -1658,6 +1667,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#context-and-project-instructions" class="md-nav__link">
+    <span class="md-ellipsis">
+      Context and project instructions
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#imported-sibling-harness-defaults" class="md-nav__link">
     <span class="md-ellipsis">
       Imported sibling-harness defaults
@@ -2247,6 +2265,22 @@ unmetered models when set.</p>
 </span><span id="__span-37-7"><a id="__codelineno-37-7" name="__codelineno-37-7" href="#__codelineno-37-7"></a><span class="w">  </span><span class="nt">max_output_tokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
 </span><span id="__span-37-8"><a id="__codelineno-37-8" name="__codelineno-37-8" href="#__codelineno-37-8"></a><span class="w">  </span><span class="nt">max_wall_time</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;0&quot;</span><span class="w">      </span><span class="c1"># Go duration, e.g. &quot;30m&quot;</span>
 </span><span id="__span-37-9"><a id="__codelineno-37-9" name="__codelineno-37-9" href="#__codelineno-37-9"></a><span class="w">  </span><span class="nt">checkpoint_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span><span class="w">  </span><span class="c1"># prompt to continue every N iterations</span>
+</span></code></pre></div>
+<h2 id="context-and-project-instructions">Context and project instructions<a class="headerlink" href="#context-and-project-instructions" title="Permanent link">&para;</a></h2>
+<p>Atteler automatically loads project instruction files into a pinned system
+context block. For each directory from the Git repository root down to the
+working directory, it selects <code>AGENTS.md</code> when present, otherwise <code>CLAUDE.md</code>.
+The block is compressed with contextpack before each request and appears in
+<code>atteler config explain</code> under <code>runtime.project_instructions.*</code>.
+Discovery is separate from <code>context.reference_policy</code> glob allow/deny rules so
+repository memory is not accidentally suppressed; set <code>enabled: false</code> to opt
+out.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-38-1"><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a><span class="nt">context</span><span class="p">:</span>
+</span><span id="__span-38-2"><a id="__codelineno-38-2" name="__codelineno-38-2" href="#__codelineno-38-2"></a><span class="w">  </span><span class="nt">project_instructions</span><span class="p">:</span>
+</span><span id="__span-38-3"><a id="__codelineno-38-3" name="__codelineno-38-3" href="#__codelineno-38-3"></a><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">      </span><span class="c1"># set false to opt out</span>
+</span><span id="__span-38-4"><a id="__codelineno-38-4" name="__codelineno-38-4" href="#__codelineno-38-4"></a><span class="w">    </span><span class="nt">max_tokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">8192</span><span class="w">   </span><span class="c1"># token budget before the block is pinned into requests</span>
+</span><span id="__span-38-5"><a id="__codelineno-38-5" name="__codelineno-38-5" href="#__codelineno-38-5"></a><span class="w">  </span><span class="nt">references</span><span class="p">:</span>
+</span><span id="__span-38-6"><a id="__codelineno-38-6" name="__codelineno-38-6" href="#__codelineno-38-6"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">docs/architecture.md</span>
 </span></code></pre></div>
 <h2 id="imported-sibling-harness-defaults">Imported sibling-harness defaults<a class="headerlink" href="#imported-sibling-harness-defaults" title="Permanent link">&para;</a></h2>
 <p>When present, Atteler imports defaults from <code>~/.codex/config.toml</code>,
