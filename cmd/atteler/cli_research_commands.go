@@ -8,19 +8,26 @@ import (
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/research"
+	"github.com/tommoulard/atteler/pkg/sourcepolicy"
 )
 
 func researchCommandRequested(opts cliOptions) bool {
 	return strings.TrimSpace(opts.researchRunQuestion) != ""
 }
 
-func researchAdjunctOptionsRequested(opts cliOptions) bool {
+func researchOnlyAdjunctOptionsRequested(opts cliOptions) bool {
 	return strings.TrimSpace(opts.researchOutputDir) != "" ||
-		len(opts.trustedSources) > 0 ||
 		len(opts.researchSources) > 0 ||
 		opts.researchGenerateTasks
+}
+
+func sourcePolicyAdjunctOptionsRequested(opts cliOptions) bool {
+	return len(opts.trustedSources) > 0 ||
+		len(opts.deniedSources) > 0 ||
+		opts.warnLowTrustSources
 }
 
 func runResearchCommandWithAutonomy(ctx context.Context, cwd string, input researchCommandInput, level autonomy.Level) error {
@@ -41,11 +48,23 @@ func runResearchCommandWithAutonomy(ctx context.Context, cwd string, input resea
 		return fmt.Errorf("research run: %w", err)
 	}
 
+	cfg, _, err := loadConfigWithPermission(
+		ctx,
+		"load research source policy config",
+		"atteler.research",
+		"load research config",
+	)
+	if err != nil {
+		return err
+	}
+
 	result, err := research.Run(ctx, research.RunRequest{
 		Question:       input.Question,
 		Root:           cwd,
 		OutputDir:      input.OutputDir,
 		TrustedSources: input.TrustedSources,
+		DeniedSources:  input.DeniedSources,
+		SourcePolicy:   researchSourcePolicyFromInput(cfg, input),
 		Sources:        input.Sources,
 		GenerateTasks:  input.GenerateTasks,
 	})
@@ -60,6 +79,37 @@ func runResearchCommandWithAutonomy(ctx context.Context, cwd string, input resea
 	}
 
 	return nil
+}
+
+func researchSourcePolicyFromInput(cfg appconfig.Config, input researchCommandInput) sourcepolicy.Policy {
+	return sourcePolicyFromFlagInputs(
+		cfg.Research.SourcePolicy,
+		input.TrustedSources,
+		input.DeniedSources,
+		input.WarnLowTrust,
+	)
+}
+
+func sourcePolicyFromFlagInputs(base sourcepolicy.Policy, trusted, denied []string, warnLowTrust bool) sourcepolicy.Policy {
+	policy := sourcepolicy.Clone(base)
+
+	trustedSources := sourcepolicy.NormalizeDomains(trusted)
+	if len(trustedSources) > 0 {
+		policy.DeniedDomains = sourcepolicy.RemoveDomains(policy.DeniedDomains, trustedSources)
+		policy = sourcepolicy.Extend(policy, sourcepolicy.Policy{TrustedDomains: trustedSources})
+	}
+
+	deniedSources := sourcepolicy.NormalizeDomains(denied)
+	if len(deniedSources) > 0 {
+		policy.TrustedDomains = sourcepolicy.RemoveDomains(policy.TrustedDomains, deniedSources)
+		policy = sourcepolicy.Extend(policy, sourcepolicy.Policy{DeniedDomains: deniedSources})
+	}
+
+	if warnLowTrust {
+		policy = sourcepolicy.Extend(policy, sourcepolicy.Policy{WarnOnLowTrustSources: sourcepolicy.Bool(true)})
+	}
+
+	return policy
 }
 
 func researchWriteTarget(cwd, outputDir string) string {

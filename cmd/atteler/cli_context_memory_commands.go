@@ -28,6 +28,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/session"
+	"github.com/tommoulard/atteler/pkg/sourcepolicy"
 	"github.com/tommoulard/atteler/pkg/vector"
 )
 
@@ -964,10 +965,16 @@ func runRetrievalCommand(ctx context.Context, state appState, input retrievalCom
 		return errors.New("retrieval: no searchable sources selected")
 	}
 
+	sourcePolicy, err := retrievalSourcePolicyForState(state, input)
+	if err != nil {
+		return err
+	}
+
 	results, err := retrieval.Search(ctx, retrieval.Query{
 		Text:          query,
 		Limit:         limit,
 		Filters:       filters,
+		SourcePolicy:  sourcePolicy,
 		Sources:       sources,
 		Explain:       input.Explain,
 		IncludeUnsafe: input.IncludeUnsafe,
@@ -986,6 +993,21 @@ func runRetrievalCommand(ctx context.Context, state appState, input retrievalCom
 	}
 
 	return nil
+}
+
+func retrievalSourcePolicyForState(state appState, input retrievalCommandInput) (sourcepolicy.Policy, error) {
+	harnessPolicy, _, err := sourcepolicy.PolicyFromHarnessFiles(state.cwd)
+	if err != nil {
+		return sourcepolicy.Policy{}, fmt.Errorf("retrieval: source policy: %w", err)
+	}
+
+	base := sourcepolicy.Merge(harnessPolicy, state.config.Research.SourcePolicy)
+
+	return retrievalSourcePolicyFromInput(base, input), nil
+}
+
+func retrievalSourcePolicyFromInput(base sourcepolicy.Policy, input retrievalCommandInput) sourcepolicy.Policy {
+	return sourcePolicyFromFlagInputs(base, input.TrustedSources, input.DeniedSources, input.WarnLowTrust)
 }
 
 func retrievalFilters(rawFilters []string) (map[string]string, error) {
@@ -2380,6 +2402,10 @@ func formatRetrievalResult(result retrieval.Result, explain bool) string {
 	}
 
 	parts = appendRetrievalSourceParts(parts, result.Source)
+	parts = appendRetrievalSourceQualityParts(parts, result.Quality)
+	if warning := result.Metadata[retrieval.MetadataSourceQualityWarnings]; warning != "" {
+		parts = append(parts, "source_warning="+warning)
+	}
 
 	if result.Chunk.ID != "" {
 		parts = append(parts, "chunk="+result.Chunk.ID)
@@ -2425,6 +2451,26 @@ func formatRetrievalResult(result retrieval.Result, explain bool) string {
 	parts = appendRetrievalContentParts(parts, result, explain)
 
 	return strings.Join(parts, "\t")
+}
+
+func appendRetrievalSourceQualityParts(parts []string, quality retrieval.SourceQuality) []string {
+	if quality.SourceType != "" {
+		parts = append(parts, "source_type="+quality.SourceType)
+	}
+	if quality.TrustLevel != "" {
+		parts = append(parts, "trust_level="+quality.TrustLevel)
+	}
+	if quality.TrustScore != 0 {
+		parts = append(parts, fmt.Sprintf("trust_score=%.3f", quality.TrustScore))
+	}
+	if quality.Domain != "" {
+		parts = append(parts, "domain="+quality.Domain)
+	}
+	if quality.PolicyMatch != "" {
+		parts = append(parts, "policy_match="+quality.PolicyMatch)
+	}
+
+	return parts
 }
 
 func appendRetrievalContentParts(parts []string, result retrieval.Result, explain bool) []string {

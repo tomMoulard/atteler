@@ -454,6 +454,7 @@ type cliOptions struct {
 	memoryTags                         stringListFlag
 	planAgentNames                     stringListFlag
 	trustedSources                     stringListFlag
+	deniedSources                      stringListFlag
 	researchSources                    stringListFlag
 	retrievalFilters                   stringListFlag
 	retrievalSources                   stringListFlag
@@ -620,6 +621,7 @@ type cliOptions struct {
 	headlessPrivateLog                 bool
 	autoresearch                       bool
 	researchGenerateTasks              bool
+	warnLowTrustSources                bool
 	showVersion                        bool
 	useWorktree                        bool
 	worktreeAutoMerge                  bool

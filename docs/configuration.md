@@ -65,12 +65,46 @@ models:
     required_capabilities: ["tools", "json_schema"]
     max_cost_usd: 0.25
     max_latency_ms: 2500
+
+research:
+  source_policy:
+    trusted_domains: [go.dev, github.com, docs.github.com]
+    denied_domains: [example-content-farm.com]
+    prefer_source_types: [official_docs, source_code, standard_or_spec]
+    allow_low_trust_sources: true
+    warn_on_low_trust_sources: true
+    require_evidence_for_high_impact_claims: false
 ```
 
 Bare model names resolve only by exact provider-catalog claim, a `model_aliases`
 entry, or a `models.<role>` entry. If two providers claim the same bare name,
 Atteler reports the collision unless `default_provider`/`default_model` or a role
 routing policy makes the choice deterministic.
+
+### Research source policy
+
+`research.source_policy` controls source-quality metadata for local-first
+research runs and retrieval results. It can prefer trusted domains/source types,
+exclude known-bad domains, warn when weak evidence is included, and use source
+quality as a retrieval tie-breaker for equally relevant results.
+
+- `trusted_domains` marks matching domains and subdomains as high trust.
+- `denied_domains` excludes matching URL sources from research artifacts and
+  retrieval results.
+- `prefer_source_types` boosts source types such as `official_docs`,
+  `source_code`, `standard_or_spec`, `academic`, `issue_discussion`, `forum`,
+  `news`, or `unknown`.
+- `allow_low_trust_sources` defaults to `true`, so brainstorming and early
+  exploration remain usable.
+- `warn_on_low_trust_sources` defaults to `true`, so weak evidence is visible.
+- `require_evidence_for_high_impact_claims` defaults to `false`; evidence-first
+  is a recommendation unless a project explicitly requires it.
+
+Harness guidance files (`AGENTS.md`, `CLAUDE.md`, `.cursor/rules/*`, and
+similar instruction files) are also scanned for simple source restrictions,
+preferred source types, and citation requirements. Explicit CLI flags for a run
+have the highest precedence, followed by Atteler config, harness guidance,
+global config, and built-in defaults.
 
 ### Auto mode
 

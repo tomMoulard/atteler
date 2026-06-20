@@ -316,11 +316,14 @@ type retrievalCommandInput struct {
 	Filters              []string
 	MemoryIndexFiles     []string
 	Sources              []string
+	TrustedSources       []string
+	DeniedSources        []string
 	VectorIndexFiles     []string
 	Vector               retrievalVectorCommandInput
 	Limit                int
 	Explain              bool
 	IncludeUnsafe        bool
+	WarnLowTrust         bool
 }
 
 type retrievalVectorCommandInput struct {
@@ -361,7 +364,9 @@ type researchCommandInput struct {
 	Question       string
 	OutputDir      string
 	TrustedSources []string
+	DeniedSources  []string
 	Sources        []string
+	WarnLowTrust   bool
 	GenerateTasks  bool
 }
 
@@ -924,10 +929,13 @@ func retrievalCommandInputFromOptions(opts cliOptions) retrievalCommandInput {
 		Filters:              append([]string(nil), opts.retrievalFilters...),
 		MemoryIndexFiles:     append([]string(nil), opts.memoryIndexFiles...),
 		Sources:              append([]string(nil), opts.retrievalSources...),
+		TrustedSources:       append([]string(nil), opts.trustedSources...),
+		DeniedSources:        append([]string(nil), opts.deniedSources...),
 		VectorIndexFiles:     append([]string(nil), opts.vectorIndexFiles...),
 		Limit:                opts.retrievalLimit.value,
 		Explain:              opts.retrievalExplain,
 		IncludeUnsafe:        opts.retrievalIncludeUnsafe,
+		WarnLowTrust:         opts.warnLowTrustSources,
 	}
 }
 
@@ -983,7 +991,9 @@ func researchCommandInputFromOptions(opts cliOptions) researchCommandInput {
 		Question:       opts.researchRunQuestion,
 		OutputDir:      outputDir,
 		TrustedSources: append([]string(nil), opts.trustedSources...),
+		DeniedSources:  append([]string(nil), opts.deniedSources...),
 		Sources:        append([]string(nil), opts.researchSources...),
+		WarnLowTrust:   opts.warnLowTrustSources,
 		GenerateTasks:  opts.researchGenerateTasks,
 	}
 }

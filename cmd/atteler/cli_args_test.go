@@ -184,8 +184,13 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 		},
 		{
 			name: "research run helper keeps source and output flags",
-			args: []string{"research", "run", "--trusted-source", "go.dev", "--output", ".atteler/research/plugin-sandboxing", "--generate-tasks", "Compare", "plugin", "sandboxing"},
-			want: []string{"--research-run", "Compare plugin sandboxing", "--trusted-source", "go.dev", "--output", ".atteler/research/plugin-sandboxing", "--generate-tasks"},
+			args: []string{"research", "run", "--trusted-source", "go.dev", "--deny-source", "example-content-farm.com", "--warn-low-trust", "--output", ".atteler/research/plugin-sandboxing", "--generate-tasks", "Compare", "plugin", "sandboxing"},
+			want: []string{"--research-run", "Compare plugin sandboxing", "--trusted-source", "go.dev", "--deny-source", "example-content-farm.com", "--warn-low-trust", "--output", ".atteler/research/plugin-sandboxing", "--generate-tasks"},
+		},
+		{
+			name: "memory retrieve helper keeps source policy flags",
+			args: []string{"memory", "retrieve", "--trusted-source", "docs.github.com", "--deny-source", "example-content-farm.com", "--warn-low-trust", "OAuth", "retry"},
+			want: []string{"--retrieval-search", "OAuth retry", "--trusted-source", "docs.github.com", "--deny-source", "example-content-farm.com", "--warn-low-trust"},
 		},
 	}
 

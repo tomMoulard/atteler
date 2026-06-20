@@ -1,6 +1,9 @@
 package main
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
 
 func validateCLICommandSelection(opts cliOptions) error {
 	if err := validateAutoresearchCommandSelection(opts); err != nil {
@@ -55,8 +58,12 @@ func validateHeadlessCommandSelection(opts cliOptions) error {
 }
 
 func validateResearchCommandSelection(opts cliOptions) error {
-	if researchAdjunctOptionsRequested(opts) && !researchCommandRequested(opts) {
-		return errors.New("--trusted-source, --research-source, --research-output, and --generate-tasks require --research-run")
+	if researchOnlyAdjunctOptionsRequested(opts) && !researchCommandRequested(opts) {
+		return errors.New("--research-source, --research-output, and --generate-tasks require --research-run")
+	}
+
+	if sourcePolicyAdjunctOptionsRequested(opts) && !researchCommandRequested(opts) && strings.TrimSpace(opts.retrievalSearch) == "" {
+		return errors.New("--trusted-source, --deny-source, and --warn-low-trust require --research-run or --retrieval-search")
 	}
 
 	return nil

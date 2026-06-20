@@ -472,6 +472,8 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 			diagnostics = append(diagnostics, deprecatedDiagnostic(path, "model", fieldDefaultModel))
 		case "generation":
 			diagnostics = append(diagnostics, inspectNamedFields(path, "generation", value, knownGenerationFields(), deprecatedGenerationFields())...)
+		case "research":
+			diagnostics = append(diagnostics, inspectResearchFields(path, value)...)
 		case "agent_loop":
 			diagnostics = append(diagnostics, inspectNamedFields(path, "agent_loop", value, knownAgentLoopFields(), nil)...)
 		case "context":
@@ -663,6 +665,15 @@ func inspectContextFields(path string, value *yaml.Node) []Diagnostic {
 	diagnostics := inspectNamedFields(path, "context", value, knownContextFields(), nil)
 	if policy := mappingValue(value, "reference_policy"); policy != nil {
 		diagnostics = append(diagnostics, inspectNamedFields(path, "context.reference_policy", policy, knownReferencePolicyFields(), nil)...)
+	}
+
+	return diagnostics
+}
+
+func inspectResearchFields(path string, value *yaml.Node) []Diagnostic {
+	diagnostics := inspectNamedFields(path, "research", value, knownResearchFields(), nil)
+	if policy := mappingValue(value, "source_policy"); policy != nil {
+		diagnostics = append(diagnostics, inspectNamedFields(path, "research.source_policy", policy, knownSourcePolicyFields(), nil)...)
 	}
 
 	return diagnostics
@@ -1097,6 +1108,23 @@ func knownGenerationFields() map[string]bool {
 
 func deprecatedGenerationFields() map[string]string {
 	return map[string]string{"reasoning": "reasoning_level"}
+}
+
+func knownResearchFields() map[string]bool {
+	return map[string]bool{
+		"source_policy": true,
+	}
+}
+
+func knownSourcePolicyFields() map[string]bool {
+	return map[string]bool{
+		"trusted_domains":                         true,
+		"denied_domains":                          true,
+		"prefer_source_types":                     true,
+		"allow_low_trust_sources":                 true,
+		"warn_on_low_trust_sources":               true,
+		"require_evidence_for_high_impact_claims": true,
+	}
 }
 
 func knownAgentLoopFields() map[string]bool {

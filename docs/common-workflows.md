@@ -179,6 +179,8 @@ atteler research run "Compare approaches for plugin sandboxing in Go CLIs"
 atteler research run \
   --trusted-source go.dev \
   --trusted-source github.com \
+  --deny-source example-content-farm.com \
+  --warn-low-trust \
   "Research best practices for safe agent worktrees"
 atteler research run \
   --output .atteler/research/plugin-sandboxing \
@@ -193,7 +195,8 @@ writes:
 - `research.md` — human-readable summary, findings, tradeoffs,
   recommendations, risks, claims, and citations.
 - `sources.jsonl` — structured source records for discovered project guidance
-  and supplied `--research-source` files/URLs.
+  and supplied `--research-source` files/URLs, including source type, domain,
+  trust level, trust score, policy match, and low-trust warnings.
 - `claims.jsonl` — important claims mapped to evidence where available.
 - `run.json` — run metadata and artifact paths.
 - `tasks.generated.yaml` — optional follow-up task stubs when
@@ -202,7 +205,28 @@ writes:
 Before writing recommendations, the command inspects project/harness guidance
 files when present, including `AGENTS.md`, `CLAUDE.md`, `.cursor/rules/*`, and
 similar agent instruction files. The discovered guidance is included as source
-context and cited in the report.
+context and cited in the report. Source-related guidance in those files, such
+as preferred official docs, denied domains, citation requirements, or low-trust
+warnings, is folded into the effective source policy below Atteler config and
+explicit CLI flags.
+
+Project config can define source policy defaults:
+
+```yaml
+research:
+  source_policy:
+    trusted_domains: [go.dev, github.com, docs.anthropic.com, openai.com]
+    denied_domains: [example-content-farm.com]
+    prefer_source_types: [official_docs, source_code, standard_or_spec, issue_discussion]
+    allow_low_trust_sources: true
+    warn_on_low_trust_sources: true
+    require_evidence_for_high_impact_claims: false
+```
+
+`--trusted-source` and `--deny-source` extend the effective policy for a single
+run. Denied sources are omitted from `sources.jsonl` and listed in `run.json`;
+low-trust sources remain allowed by default but are marked in artifacts and
+warned about when policy asks for warnings.
 
 Atteler research reports should include evidence for important claims whenever
 possible. Evidence can include URLs, documentation links, repository files,
@@ -241,6 +265,7 @@ semantic); embedding mode uses an Ollama-compatible endpoint.
 ```sh
 atteler memory search "OAuth retry storm"
 atteler memory retrieve "OAuth retry storm" --retrieval-explain
+atteler memory retrieve "OAuth retry storm" --trusted-source docs.github.com --deny-source example-content-farm.com
 atteler memory vector-search "redirect risks" --vector-index docs/research.md --vectorizer lexical
 atteler memory migrate
 atteler code-intel summary --json
@@ -251,6 +276,11 @@ atteler code-intel query definitions:NewRegistry
 Run `atteler memory migrate` / `agent-migrate` after changing a store schema,
 redaction policy, or vectorizer. Vectorizer settings are scoped per store,
 agent, and source — see [Configuration](configuration.md).
+Retrieval results carry source-quality metadata from harness guidance,
+`research.source_policy`, and per-run source flags; denied sources are filtered
+and equally relevant results prefer higher-trust sources before the stable
+source/name tie-breakers. When low-trust warnings are enabled, retrieval output
+includes a `source_warning` field for weak evidence.
 
 ## Use plugins, MCP, and LSP
 

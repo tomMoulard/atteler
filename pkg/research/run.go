@@ -1,6 +1,6 @@
 // Package research creates local-first research run artifacts.
 //
-//nolint:wsl_v5,nilerr // Artifact assembly uses compact sequential builders; discovery intentionally skips unreadable optional guidance files.
+//nolint:wsl_v5,nilerr // Artifact assembly uses compact sequential builders; source discovery intentionally skips unreadable optional files.
 package research
 
 import (
@@ -23,6 +23,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/tommoulard/atteler/pkg/sourcepolicy"
 )
 
 const (
@@ -36,18 +38,15 @@ const (
 	runFile            = "run.json"
 
 	defaultSourceTrustScore = 0.70
-	guidanceTrustScore      = 0.90
 	repositoryTrustScore    = 0.80
 	trustedURLTrustScore    = 0.95
-	untrustedURLTrustScore  = 0.50
 
-	maxGuidanceFiles       = 64
 	maxResearchSourceFiles = 64
 	maxSourceBytes         = 64 * 1024
 	maxReportLineRunes     = 180
 
-	sourceTypeProjectGuidance = "project_guidance"
-	sourceTypeRepositoryFile  = "repository_file"
+	sourceTypeProjectGuidance = sourcepolicy.SourceTypeProjectGuidance
+	sourceTypeRepositoryFile  = sourcepolicy.SourceTypeSourceCode
 )
 
 // EvidenceBestPractice is the recommended reliability posture for research reports.
@@ -66,6 +65,8 @@ type RunRequest struct {
 	OutputDir      string
 	RunID          string
 	TrustedSources []string
+	DeniedSources  []string
+	SourcePolicy   sourcepolicy.Policy
 	Sources        []string
 	GenerateTasks  bool
 }
@@ -90,9 +91,13 @@ type Source struct {
 	TrustScore  float64   `json:"trust_score"`
 	ID          string    `json:"id"`
 	URL         string    `json:"url,omitempty"`
+	Domain      string    `json:"domain,omitempty"`
 	Path        string    `json:"path,omitempty"`
 	Title       string    `json:"title"`
 	SourceType  string    `json:"source_type"`
+	TrustLevel  string    `json:"trust_level"`
+	PolicyMatch string    `json:"policy_match,omitempty"`
+	Warnings    []string  `json:"warnings,omitempty"`
 	Notes       string    `json:"notes,omitempty"`
 }
 
@@ -116,20 +121,32 @@ type Claim struct {
 
 //nolint:govet // JSON field order favors stable, human-readable run metadata.
 type runRecord struct {
-	CreatedAt      time.Time         `json:"created_at"`
-	Artifacts      map[string]string `json:"artifacts"`
-	TrustedSources []string          `json:"trusted_sources,omitempty"`
-	GuidanceFiles  []string          `json:"guidance_files,omitempty"`
-	SourceInputs   []string          `json:"source_inputs,omitempty"`
-	Notes          []string          `json:"notes,omitempty"`
-	Schema         string            `json:"schema"`
-	RunID          string            `json:"run_id"`
-	Question       string            `json:"question"`
-	Root           string            `json:"root"`
-	OutputDir      string            `json:"output_dir"`
-	SourceCount    int               `json:"source_count"`
-	ClaimCount     int               `json:"claim_count"`
-	GenerateTasks  bool              `json:"generate_tasks"`
+	CreatedAt      time.Time                    `json:"created_at"`
+	Artifacts      map[string]string            `json:"artifacts"`
+	TrustedSources []string                     `json:"trusted_sources,omitempty"`
+	SourcePolicy   sourcepolicy.EffectivePolicy `json:"source_policy"`
+	Excluded       []ExcludedSource             `json:"excluded_sources,omitempty"`
+	GuidanceFiles  []string                     `json:"guidance_files,omitempty"`
+	SourceInputs   []string                     `json:"source_inputs,omitempty"`
+	Notes          []string                     `json:"notes,omitempty"`
+	Schema         string                       `json:"schema"`
+	RunID          string                       `json:"run_id"`
+	Question       string                       `json:"question"`
+	Root           string                       `json:"root"`
+	OutputDir      string                       `json:"output_dir"`
+	SourceCount    int                          `json:"source_count"`
+	ClaimCount     int                          `json:"claim_count"`
+	GenerateTasks  bool                         `json:"generate_tasks"`
+}
+
+// ExcludedSource records a source skipped by the effective source policy.
+type ExcludedSource struct {
+	Input       string `json:"input,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Domain      string `json:"domain,omitempty"`
+	Reason      string `json:"reason"`
+	PolicyMatch string `json:"policy_match,omitempty"`
 }
 
 type sourceDocument struct {
@@ -175,7 +192,8 @@ func Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("research: create run dir %s: %w", runDir, mkErr)
 	}
 
-	trustedSources := normalizeTrustedSources(req.TrustedSources)
+	trustedSources := sourcepolicy.NormalizeDomains(req.TrustedSources)
+	deniedSources := sourcepolicy.NormalizeDomains(req.DeniedSources)
 	sourceInputs := researchSourceInputs(req)
 
 	guidance, err := discoverGuidance(root)
@@ -183,7 +201,14 @@ func Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, err
 	}
 
-	docs, err := buildSourceDocuments(ctx, root, req.Question, guidance, sourceInputs, trustedSources, createdAt)
+	policy := sourcepolicy.Merge(sourcePolicyFromGuidance(guidance), req.SourcePolicy)
+	policy.DeniedDomains = sourcepolicy.RemoveDomains(policy.DeniedDomains, trustedSources)
+	policy = sourcepolicy.Extend(policy, sourcepolicy.Policy{TrustedDomains: trustedSources})
+	policy.TrustedDomains = sourcepolicy.RemoveDomains(policy.TrustedDomains, deniedSources)
+	policy = sourcepolicy.Extend(policy, sourcepolicy.Policy{DeniedDomains: deniedSources})
+	effectivePolicy := sourcepolicy.Effective(policy)
+
+	docs, excluded, err := buildSourceDocuments(ctx, root, req.Question, guidance, sourceInputs, policy, createdAt)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -198,6 +223,8 @@ func Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		OutputDir:      runDir,
 		Artifacts:      artifacts,
 		TrustedSources: trustedSources,
+		SourcePolicy:   effectivePolicy,
+		Excluded:       excluded,
 		SourceInputs:   sourceInputs,
 		GuidanceFiles:  guidancePaths(guidance),
 		SourceCount:    len(docs),
@@ -208,7 +235,7 @@ func Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		},
 	}
 
-	claims := buildClaims(req.Question, docs, trustedSources, record)
+	claims := buildClaims(req.Question, docs, effectivePolicy, record)
 	record.ClaimCount = len(claims)
 
 	if err := writeSourcesJSONL(filepath.Join(runDir, sourcesFile), docs); err != nil {
@@ -219,7 +246,7 @@ func Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, err
 	}
 
-	report := renderReport(req.Question, docs, claims, trustedSources, record)
+	report := renderReport(req.Question, docs, claims, record)
 	if err := writeTextFile(filepath.Join(runDir, researchReportFile), report); err != nil {
 		return RunResult{}, err
 	}
@@ -384,125 +411,31 @@ func uniqueTrimmed(values []string) []string {
 	return out
 }
 
-func normalizeTrustedSources(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := make(map[string]bool, len(values))
-
-	for _, value := range values {
-		normalized := normalizeTrustedSource(value)
-		if normalized == "" || seen[normalized] {
-			continue
-		}
-
-		seen[normalized] = true
-		out = append(out, normalized)
-	}
-
-	sort.Strings(out)
-
-	return out
-}
-
-func normalizeTrustedSource(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" {
-		return ""
-	}
-
-	if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
-		value = parsed.Host
-	}
-
-	value = strings.TrimPrefix(value, "www.")
-	value = strings.Trim(value, "/")
-	if host, _, ok := strings.Cut(value, "/"); ok {
-		value = host
-	}
-
-	return value
-}
-
 func discoverGuidance(root string) ([]guidanceFile, error) {
-	var guidance []guidanceFile
-
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-
-		if path != root && entry.IsDir() && shouldSkipGuidanceDir(entry.Name()) {
-			return filepath.SkipDir
-		}
-
-		if entry.IsDir() || len(guidance) >= maxGuidanceFiles {
-			return nil
-		}
-
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return nil
-		}
-
-		kind, ok := guidanceKind(rel)
-		if !ok {
-			return nil
-		}
-
-		content, err := readTextFile(path, maxSourceBytes)
-		if err != nil {
-			return nil
-		}
-
-		guidance = append(guidance, guidanceFile{Path: filepath.ToSlash(rel), Kind: kind, Content: content})
-
-		return nil
-	})
+	files, err := sourcepolicy.DiscoverHarnessFiles(root)
 	if err != nil {
 		return nil, fmt.Errorf("research: discover guidance: %w", err)
 	}
 
-	sort.Slice(guidance, func(i, j int) bool {
-		return guidance[i].Path < guidance[j].Path
-	})
+	guidance := make([]guidanceFile, 0, len(files))
+	for _, file := range files {
+		guidance = append(guidance, guidanceFile{
+			Path:    file.Path,
+			Kind:    file.Kind,
+			Content: file.Content,
+		})
+	}
 
 	return guidance, nil
 }
 
-func shouldSkipGuidanceDir(name string) bool {
+func shouldSkipResearchDir(name string) bool {
 	switch name {
 	case ".git", ".atteler", ".symphony", ".codex", "node_modules", "vendor", "dist", "site", "tmp", "build":
 		return true
 	default:
 		return false
 	}
-}
-
-func guidanceKind(rel string) (string, bool) {
-	slash := filepath.ToSlash(rel)
-	base := filepath.Base(slash)
-
-	switch base {
-	case "AGENTS.md":
-		return "agents_instructions", true
-	case "CLAUDE.md":
-		return "claude_instructions", true
-	case "GEMINI.md":
-		return "gemini_instructions", true
-	case "CODEX.md":
-		return "codex_instructions", true
-	case ".cursorrules":
-		return "cursor_rules", true
-	}
-
-	if strings.HasPrefix(slash, ".cursor/rules/") {
-		return "cursor_rules", true
-	}
-
-	if slash == ".github/copilot-instructions.md" {
-		return "copilot_instructions", true
-	}
-
-	return "", false
 }
 
 func readTextFile(path string, maxBytes int64) (string, error) {
@@ -549,63 +482,93 @@ func readAtMost(file *os.File, maxBytes int64) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+//nolint:gocognit // Source assembly keeps guidance, URL, local file, and exclusion branches auditable together.
 func buildSourceDocuments(
 	ctx context.Context,
 	root string,
 	question string,
 	guidance []guidanceFile,
 	inputs []string,
-	trustedSources []string,
+	policy sourcepolicy.Policy,
 	retrievedAt time.Time,
-) ([]sourceDocument, error) {
+) ([]sourceDocument, []ExcludedSource, error) {
 	if err := requireContext(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	docs := make([]sourceDocument, 0, len(guidance)+len(inputs))
+	excluded := make([]ExcludedSource, 0)
 	seen := make(map[string]bool)
 
 	for _, file := range guidance {
+		evaluation := sourcepolicy.Evaluate(sourcepolicy.Source{
+			Path:       file.Path,
+			Title:      sourceTitle(file.Path, file.Content),
+			SourceType: sourcepolicy.SourceTypeProjectGuidance,
+		}, policy)
 		source := Source{
 			ID:          sourceID(len(docs) + 1),
 			Path:        file.Path,
 			Title:       sourceTitle(file.Path, file.Content),
 			SourceType:  sourceTypeProjectGuidance,
 			RetrievedAt: retrievedAt,
-			TrustScore:  guidanceTrustScore,
 			Notes:       file.Kind,
 		}
+		source = sourceWithQuality(source, evaluation)
 		docs = appendSourceDocument(docs, seen, source, file.Content, nil)
 	}
 
 	keywords := keywordsForQuestion(question)
 	for _, input := range inputs {
 		if err := requireContext(ctx); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		if isURL(input) {
-			source := urlSource(input, trustedSources, retrievedAt)
+			source, evaluation := urlSource(input, policy, retrievedAt)
+			if !evaluation.Allowed {
+				excluded = append(excluded, excludedSourceForInput(input, source, evaluation))
+				continue
+			}
 			docs = appendSourceDocument(docs, seen, source, "", keywords)
 			continue
 		}
 
 		loaded, err := loadLocalSource(root, input, retrievedAt)
 		if err != nil {
+			evaluation := sourcepolicy.Evaluate(sourcepolicy.Source{
+				Path:       filepath.ToSlash(input),
+				Title:      filepath.Base(input),
+				SourceType: sourcepolicy.SourceTypeSourceCode,
+			}, policy)
+			if !evaluation.Allowed {
+				excluded = append(excluded, excludedSourceForInput(input, Source{Path: filepath.ToSlash(input), Title: filepath.Base(input)}, evaluation))
+				continue
+			}
 			source := Source{
 				ID:          sourceID(len(docs) + 1),
 				Path:        filepath.ToSlash(input),
 				Title:       filepath.Base(input),
 				SourceType:  sourceTypeRepositoryFile,
 				RetrievedAt: retrievedAt,
-				TrustScore:  repositoryTrustScore,
 				Notes:       "source could not be loaded: " + err.Error(),
 			}
+			source = sourceWithQuality(source, evaluation)
 			docs = appendSourceDocument(docs, seen, source, "", keywords)
 			continue
 		}
 
 		for i := range loaded {
+			evaluation := sourcepolicy.Evaluate(sourcepolicy.Source{
+				Path:       loaded[i].Path,
+				Title:      loaded[i].Title,
+				SourceType: sourcepolicy.SourceTypeSourceCode,
+			}, policy)
+			if !evaluation.Allowed {
+				excluded = append(excluded, excludedSourceForInput(input, loaded[i].Source, evaluation))
+				continue
+			}
+			loaded[i].Source = sourceWithQuality(loaded[i].Source, evaluation)
 			docs = appendSourceDocument(docs, seen, loaded[i].Source, loaded[i].Content, keywords)
 		}
 	}
@@ -614,7 +577,7 @@ func buildSourceDocuments(
 		docs[i].ID = sourceID(i + 1)
 	}
 
-	return docs, nil
+	return docs, excluded, nil
 }
 
 func appendSourceDocument(docs []sourceDocument, seen map[string]bool, source Source, content string, keywords []string) []sourceDocument {
@@ -626,6 +589,12 @@ func appendSourceDocument(docs []sourceDocument, seen map[string]bool, source So
 
 	if source.TrustScore == 0 {
 		source.TrustScore = defaultSourceTrustScore
+	}
+	if source.TrustLevel == "" {
+		source.TrustLevel = sourcepolicy.TrustLevelMedium
+	}
+	if source.PolicyMatch == "" {
+		source.PolicyMatch = sourcepolicy.PolicyMatchNone
 	}
 
 	doc := sourceDocument{
@@ -647,61 +616,26 @@ func isURL(raw string) bool {
 	return err == nil && parsed.Scheme != "" && parsed.Host != ""
 }
 
-func urlSource(raw string, trustedSources []string, retrievedAt time.Time) Source {
+func urlSource(raw string, policy sourcepolicy.Policy, retrievedAt time.Time) (Source, sourcepolicy.Evaluation) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		parsed = &url.URL{Path: raw}
 	}
 
 	host := strings.ToLower(parsed.Hostname())
-	trusted := hostTrusted(host, trustedSources)
+	evaluation := sourcepolicy.Evaluate(sourcepolicy.Source{URL: raw, Title: urlTitle(parsed)}, policy)
 
-	trust := untrustedURLTrustScore
-	sourceType := "url"
-	if trusted {
-		trust = trustedURLTrustScore
-		sourceType = "trusted_url"
-	}
-	if officialDocsHost(host) {
-		sourceType = "official_docs"
-		if trusted {
-			trust = trustedURLTrustScore
-		}
-	}
-
-	return Source{
+	source := Source{
 		URL:         raw,
+		Domain:      host,
 		Title:       urlTitle(parsed),
-		SourceType:  sourceType,
+		SourceType:  evaluation.Quality.SourceType,
 		RetrievedAt: retrievedAt,
-		TrustScore:  trust,
 		Notes:       "URL recorded for research audit; autonomous web fetching/search is outside the MVP.",
 	}
-}
+	source = sourceWithQuality(source, evaluation)
 
-func hostTrusted(host string, trustedSources []string) bool {
-	host = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(host)), "www.")
-	for _, trusted := range trustedSources {
-		trusted = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(trusted)), "www.")
-		if trusted == "" {
-			continue
-		}
-
-		if host == trusted || strings.HasSuffix(host, "."+trusted) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func officialDocsHost(host string) bool {
-	switch strings.TrimPrefix(strings.ToLower(host), "www.") {
-	case "go.dev", "pkg.go.dev", "docs.github.com", "github.com", "developer.mozilla.org":
-		return true
-	default:
-		return false
-	}
+	return source, evaluation
 }
 
 func urlTitle(parsed *url.URL) string {
@@ -715,6 +649,46 @@ func urlTitle(parsed *url.URL) string {
 	}
 
 	return parsed.Host + "/" + path
+}
+
+func sourceWithQuality(source Source, evaluation sourcepolicy.Evaluation) Source {
+	source.Domain = evaluation.Quality.Domain
+	if source.Domain == "" && source.URL != "" {
+		if parsed, err := url.Parse(source.URL); err == nil {
+			source.Domain = sourcepolicy.NormalizeDomain(parsed.Hostname())
+		}
+	}
+	if evaluation.Quality.SourceType != "" {
+		switch source.SourceType {
+		case "", "url", "trusted_url", sourcepolicy.SourceTypeUnknown:
+			source.SourceType = evaluation.Quality.SourceType
+		}
+	}
+	if source.SourceType == "" {
+		source.SourceType = sourcepolicy.SourceTypeUnknown
+	}
+	source.TrustScore = evaluation.Quality.TrustScore
+	source.TrustLevel = evaluation.Quality.TrustLevel
+	source.PolicyMatch = evaluation.Quality.PolicyMatch
+	source.Warnings = append([]string(nil), evaluation.Warnings...)
+
+	return source
+}
+
+func excludedSourceForInput(input string, source Source, evaluation sourcepolicy.Evaluation) ExcludedSource {
+	reason := "source excluded by source policy"
+	if len(evaluation.Warnings) > 0 {
+		reason = strings.Join(evaluation.Warnings, "; ")
+	}
+
+	return ExcludedSource{
+		Input:       input,
+		URL:         source.URL,
+		Path:        source.Path,
+		Domain:      evaluation.Quality.Domain,
+		Reason:      reason,
+		PolicyMatch: evaluation.Quality.PolicyMatch,
+	}
 }
 
 func loadLocalSource(root, input string, retrievedAt time.Time) ([]sourceDocument, error) {
@@ -746,7 +720,7 @@ func loadLocalSource(root, input string, retrievedAt time.Time) ([]sourceDocumen
 			return nil
 		}
 
-		if child != path && entry.IsDir() && shouldSkipGuidanceDir(entry.Name()) {
+		if child != path && entry.IsDir() && shouldSkipResearchDir(entry.Name()) {
 			return filepath.SkipDir
 		}
 
@@ -924,7 +898,16 @@ func guidancePaths(guidance []guidanceFile) []string {
 	return out
 }
 
-func buildClaims(question string, docs []sourceDocument, trustedSources []string, record runRecord) []Claim {
+func sourcePolicyFromGuidance(guidance []guidanceFile) sourcepolicy.Policy {
+	var policy sourcepolicy.Policy
+	for _, file := range guidance {
+		policy = sourcepolicy.Extend(policy, sourcepolicy.PolicyFromGuidance(file.Path, file.Content))
+	}
+
+	return policy
+}
+
+func buildClaims(question string, docs []sourceDocument, policy sourcepolicy.EffectivePolicy, record runRecord) []Claim {
 	claims := []Claim{
 		{
 			Claim:      fmt.Sprintf("This research run created auditable artifacts for %q.", question),
@@ -949,10 +932,10 @@ func buildClaims(question string, docs []sourceDocument, trustedSources []string
 		})
 	}
 
-	if len(trustedSources) > 0 {
+	if len(policy.TrustedDomains) > 0 || len(policy.DeniedDomains) > 0 || len(policy.PreferSourceTypes) > 0 {
 		claims = append(claims, Claim{
-			Claim:      "Trusted-source preferences were recorded for source selection and follow-up verification.",
-			Evidence:   []Evidence{{Kind: "artifact", Path: runFile, Excerpt: strings.Join(trustedSources, ", ")}},
+			Claim:      "Source trust and quality policy was applied to source selection and source metadata.",
+			Evidence:   []Evidence{{Kind: "artifact", Path: runFile, Excerpt: sourcePolicySummary(policy)}},
 			Confidence: "high",
 		})
 	}
@@ -1076,7 +1059,7 @@ func writeRunJSON(path string, record runRecord) error {
 	return nil
 }
 
-func renderReport(question string, docs []sourceDocument, claims []Claim, trustedSources []string, record runRecord) string {
+func renderReport(question string, docs []sourceDocument, claims []Claim, record runRecord) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# Research: %s\n\n", question)
@@ -1102,12 +1085,22 @@ func renderReport(question string, docs []sourceDocument, claims []Claim, truste
 		fmt.Fprintln(&b, "- No explicit research sources were supplied; this run is primarily a scaffold plus discovered project guidance.")
 	}
 
-	if len(trustedSources) > 0 {
-		fmt.Fprintf(&b, "- Trusted-source preferences are recorded for future source gathering: `%s`.\n", strings.Join(trustedSources, "`, `"))
+	if len(record.SourcePolicy.TrustedDomains) > 0 {
+		fmt.Fprintf(&b, "- Trusted-source preferences are recorded for future source gathering: `%s`.\n", strings.Join(record.SourcePolicy.TrustedDomains, "`, `"))
+	}
+
+	if len(record.SourcePolicy.DeniedDomains) > 0 {
+		fmt.Fprintf(&b, "- Denied sources are excluded before reports are written: `%s`.\n", strings.Join(record.SourcePolicy.DeniedDomains, "`, `"))
+	}
+
+	if len(record.Excluded) > 0 {
+		fmt.Fprintf(&b, "- Source policy excluded %d source input(s); see run.json for the audit list.\n", len(record.Excluded))
 	}
 
 	fmt.Fprintln(&b, "- Autonomous web search is intentionally out of scope for this MVP; add source URLs/files with `--research-source` or rerun later when a search provider is configured.")
 	fmt.Fprintln(&b)
+
+	renderSourceQualitySection(&b, docs, record)
 
 	fmt.Fprintln(&b, "## Source notes")
 	if len(docs) == 0 {
@@ -1115,7 +1108,10 @@ func renderReport(question string, docs []sourceDocument, claims []Claim, truste
 	} else {
 		for i := range docs {
 			doc := &docs[i]
-			fmt.Fprintf(&b, "- [%s] **%s** (`%s`): %s\n", doc.ID, doc.Title, doc.SourceType, doc.Summary)
+			fmt.Fprintf(&b, "- [%s] **%s** (`%s`, trust `%s`, score %.2f, policy `%s`): %s\n", doc.ID, doc.Title, doc.SourceType, doc.TrustLevel, doc.TrustScore, doc.PolicyMatch, doc.Summary)
+			for _, warning := range doc.Warnings {
+				fmt.Fprintf(&b, "  - Source quality warning: %s\n", warning)
+			}
 			for _, line := range doc.RelevantLines {
 				fmt.Fprintf(&b, "  - Relevant excerpt: %s\n", line)
 			}
@@ -1179,6 +1175,32 @@ func countDocsByType(docs []sourceDocument, sourceType string) int {
 	return count
 }
 
+func renderSourceQualitySection(b *strings.Builder, docs []sourceDocument, record runRecord) {
+	fmt.Fprintln(b, "## Source quality")
+	fmt.Fprintf(b, "- Effective policy: trusted domains `%s`; denied domains `%s`; preferred source types `%s`; allow low-trust sources `%t`; warn on low-trust sources `%t`; require evidence for high-impact claims `%t`.\n",
+		joinOrNone(record.SourcePolicy.TrustedDomains),
+		joinOrNone(record.SourcePolicy.DeniedDomains),
+		joinOrNone(record.SourcePolicy.PreferSourceTypes),
+		record.SourcePolicy.AllowLowTrustSources,
+		record.SourcePolicy.WarnOnLowTrustSources,
+		record.SourcePolicy.RequireEvidenceForHighImpactClaims,
+	)
+
+	lowTrust := countDocsByTrustLevel(docs, sourcepolicy.TrustLevelLow)
+	if lowTrust > 0 && record.SourcePolicy.WarnOnLowTrustSources {
+		fmt.Fprintf(b, "- Warning: %d included source(s) are low-trust and should be corroborated before high-impact conclusions rely on them.\n", lowTrust)
+	}
+	if len(record.Excluded) > 0 {
+		fmt.Fprintf(b, "- Excluded source inputs: %d denied or disallowed source(s) were omitted from sources.jsonl.\n", len(record.Excluded))
+	}
+	if record.SourcePolicy.RequireEvidenceForHighImpactClaims {
+		fmt.Fprintln(b, "- Policy requires evidence for high-impact claims when practical; unresolved claims should be marked as weak or speculative.")
+	} else {
+		fmt.Fprintln(b, "- Evidence is recommended for high-impact claims, but the policy does not mandate evidence for every answer.")
+	}
+	fmt.Fprintln(b)
+}
+
 func countDocsExceptType(docs []sourceDocument, sourceType string) int {
 	count := 0
 	for i := range docs {
@@ -1188,6 +1210,25 @@ func countDocsExceptType(docs []sourceDocument, sourceType string) int {
 	}
 
 	return count
+}
+
+func countDocsByTrustLevel(docs []sourceDocument, level string) int {
+	count := 0
+	for i := range docs {
+		if docs[i].TrustLevel == level {
+			count++
+		}
+	}
+
+	return count
+}
+
+func joinOrNone(values []string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+
+	return strings.Join(values, "`, `")
 }
 
 func citationList(docs []sourceDocument, keep func(*sourceDocument) bool) string {
@@ -1221,6 +1262,19 @@ func evidenceSummary(evidence []Evidence) string {
 	}
 
 	return strings.Join(parts, ", ")
+}
+
+func sourcePolicySummary(policy sourcepolicy.EffectivePolicy) string {
+	parts := []string{
+		"trusted=" + strings.Join(policy.TrustedDomains, ","),
+		"denied=" + strings.Join(policy.DeniedDomains, ","),
+		"preferred_types=" + strings.Join(policy.PreferSourceTypes, ","),
+		fmt.Sprintf("allow_low_trust=%t", policy.AllowLowTrustSources),
+		fmt.Sprintf("warn_low_trust=%t", policy.WarnOnLowTrustSources),
+		fmt.Sprintf("require_high_impact_evidence=%t", policy.RequireEvidenceForHighImpactClaims),
+	}
+
+	return strings.Join(parts, "; ")
 }
 
 func citationTarget(source Source) string {

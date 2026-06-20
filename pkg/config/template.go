@@ -8,6 +8,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
 	attelerplugin "github.com/tommoulard/atteler/pkg/plugin"
+	"github.com/tommoulard/atteler/pkg/sourcepolicy"
 )
 
 const (
@@ -37,6 +38,9 @@ func starterTemplateConfig() Config {
 	skillLearningEnabled := true
 	workspaceVectorEnabled := false
 	workspaceAllowRemoteEmbeddings := false
+	allowLowTrustSources := true
+	warnOnLowTrustSources := true
+	requireEvidenceForHighImpactClaims := false
 	retryMaxAttempts := 2
 	retryInitialBackoffMS := 1000
 	retryMaxBackoffMS := 10000
@@ -78,6 +82,26 @@ func starterTemplateConfig() Config {
 			ModelMode:      "default",
 			ReasoningLevel: "medium",
 			MaxTokens:      2048,
+		},
+		Research: ResearchConfig{
+			SourcePolicy: sourcepolicy.Policy{
+				TrustedDomains: []string{
+					"github.com",
+					"go.dev",
+				},
+				DeniedDomains: []string{
+					"example-content-farm.com",
+				},
+				PreferSourceTypes: []string{
+					sourcepolicy.SourceTypeIssueDiscussion,
+					sourcepolicy.SourceTypeOfficialDocs,
+					sourcepolicy.SourceTypeSourceCode,
+					sourcepolicy.SourceTypeStandardOrSpec,
+				},
+				AllowLowTrustSources:               &allowLowTrustSources,
+				WarnOnLowTrustSources:              &warnOnLowTrustSources,
+				RequireEvidenceForHighImpactClaims: &requireEvidenceForHighImpactClaims,
+			},
 		},
 		AgentLoop: AgentLoopConfig{
 			MaxOutputBytes:     &agentLoopMaxOutputBytes,
@@ -217,6 +241,8 @@ func templateYAML() string {
 	out.WriteString("# Explicit env values are passed verbatim to the hook process; avoid putting credentials there unless needed.\n")
 	out.WriteString("# Event ATTELER_* variables are reserved and generated from sanitized event data.\n")
 	out.WriteString("# Set event_ledger_path to persist a redacted append-only lifecycle JSONL ledger.\n")
+	out.WriteString("# Research source policy is evidence-first, not evidence-only: it prefers and labels strong sources,\n")
+	out.WriteString("# excludes denied domains, and warns on weak evidence without making citations mandatory by default.\n")
 	out.WriteString("# Configured references cross a trust boundary before every model request.\n")
 	out.WriteString("# Remote URLs are rejected unless both scheme and host are allowed below.\n\n")
 	out.WriteString("# Local paths are limited to the working directory plus explicit local_roots; absolute paths require allow_absolute_paths.\n")
