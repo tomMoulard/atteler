@@ -168,6 +168,11 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			want: []string{"--autoresearch", "improve agent flow"},
 		},
 		{
+			name: "autoresearch run helper keeps tournament flags",
+			args: []string{"autoresearch", "run", "--tournament", "--variants", "5", "compare", "hypotheses"},
+			want: []string{"--autoresearch", "--tournament", "--variants", "5", "compare hypotheses"},
+		},
+		{
 			name: "autoresearch bare helper",
 			args: []string{"autoresearch", "improve", "agent", "flow"},
 			want: []string{"--autoresearch", "improve agent flow"},
@@ -186,6 +191,16 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			name: "research run helper keeps source and output flags",
 			args: []string{"research", "run", "--trusted-source", "go.dev", "--output", ".atteler/research/plugin-sandboxing", "--generate-tasks", "Compare", "plugin", "sandboxing"},
 			want: []string{"--research-run", "Compare plugin sandboxing", "--trusted-source", "go.dev", "--output", ".atteler/research/plugin-sandboxing", "--generate-tasks"},
+		},
+		{
+			name: "scout run helper keeps tournament flags",
+			args: []string{"scout", "run", "--competitors", "cursor,codex", "--tournament", "--variants", "5", "--generate-tasks", "Find", "features"},
+			want: []string{"--scout-run", "Find features", "--competitors", "cursor,codex", "--tournament", "--variants", "5", "--generate-tasks"},
+		},
+		{
+			name: "scout run helper keeps domain scoped flags before command",
+			args: []string{"scout", "--competitors", "cursor,codex", "--area", "autoresearch", "run", "Find", "features"},
+			want: []string{"--competitors", "cursor,codex", "--area", "autoresearch", "--scout-run", "Find features"},
 		},
 	}
 
@@ -1112,6 +1127,16 @@ func TestTranslateCLIArgs_DomainHelpAndUnknownCommand(t *testing.T) {
 	require.NoError(t, delimitedCodeIntelDashValue.Err)
 	assert.False(t, delimitedCodeIntelDashValue.Help)
 	assert.Equal(t, []string{"--code-symbol", "--generated-name"}, delimitedCodeIntelDashValue.Args)
+
+	unknownScout := translateCLIArgs([]string{"scout", "wat"})
+	require.EqualError(t, unknownScout.Err, "unknown scout command \"wat\"; run `atteler help scout`")
+	assert.False(t, unknownScout.Help)
+	assert.Empty(t, unknownScout.Args)
+
+	unknownScoutFlag := translateCLIArgsWithFlagSet([]string{"scout", "run", "--wat", "ideas"}, registeredFlags)
+	require.EqualError(t, unknownScoutFlag.Err, "unknown scout flag \"--wat\"; run `atteler help scout`")
+	assert.False(t, unknownScoutFlag.Help)
+	assert.Empty(t, unknownScoutFlag.Args)
 
 	unknownCodePromptFlag := translateCLIArgsWithFlagSet([]string{"code", "--wat", "summary"}, registeredFlags)
 	require.NoError(t, unknownCodePromptFlag.Err)

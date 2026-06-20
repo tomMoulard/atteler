@@ -55,11 +55,19 @@ func TestResearchCommandInputUsesOutputFlagAsPath(t *testing.T) {
 	t.Parallel()
 
 	input := researchCommandInputFromOptions(cliOptions{
-		researchRunQuestion:   "Research safe worktrees",
-		outputFormat:          ".atteler/research/worktrees",
-		researchGenerateTasks: true,
+		researchRunQuestion: "Research safe worktrees",
+		outputFormat:        ".atteler/research/worktrees",
+		generateTasks:       true,
 	})
 
 	assert.Equal(t, ".atteler/research/worktrees", input.OutputDir)
 	assert.True(t, input.GenerateTasks)
+}
+
+func TestOutputFlagLooksLikePathTreatsFormatsCaseInsensitively(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, outputFlagLooksLikePath("JSON"))
+	assert.False(t, outputFlagLooksLikePath(" text "))
+	assert.True(t, outputFlagLooksLikePath(".atteler/research/worktrees"))
 }

@@ -331,6 +331,9 @@ type cliOptions struct {
 	planAgentsPrompt                   string
 	researchRunQuestion                string
 	researchOutputDir                  string
+	scoutRunPrompt                     string
+	scoutOutputDir                     string
+	scoutArea                          string
 	evalOutputPath                     string
 	evalAssertionsPath                 string
 	evalFixtureDir                     string
@@ -455,6 +458,8 @@ type cliOptions struct {
 	planAgentNames                     stringListFlag
 	trustedSources                     stringListFlag
 	researchSources                    stringListFlag
+	scoutCompetitors                   stringListFlag
+	scoutSources                       stringListFlag
 	retrievalFilters                   stringListFlag
 	retrievalSources                   stringListFlag
 	suggestSkillSteps                  stringListFlag
@@ -504,6 +509,7 @@ type cliOptions struct {
 	watchIntervalSeconds               positiveIntFlag
 	watchMaxIterations                 positiveIntFlag
 	skillMaxSteps                      positiveIntFlag
+	variants                           positiveIntFlag
 	skillMinOccurrences                positiveIntFlag
 	evaluationScore                    nonNegativeIntFlag
 	evalExitCode                       nonNegativeIntFlag
@@ -619,7 +625,8 @@ type cliOptions struct {
 	headless                           bool
 	headlessPrivateLog                 bool
 	autoresearch                       bool
-	researchGenerateTasks              bool
+	generateTasks                      bool
+	tournament                         bool
 	showVersion                        bool
 	useWorktree                        bool
 	worktreeAutoMerge                  bool
