@@ -57,6 +57,8 @@ func TestTemplateYAML(t *testing.T) {
 		"routing_policy:",
 		"hooks:",
 		"context:",
+		"project_instructions:",
+		"max_tokens: 8192",
 		"plugins:",
 		"policy:",
 		"trusted_install_sources:",
@@ -127,6 +129,30 @@ func TestTemplateYAMLAgentLoopSchemaMatchesDiagnostics(t *testing.T) {
 	for field := range knownAgentLoopFields() {
 		assert.Truef(t, defaultFields["agent_loop."+field], "DefaultDiagnostics missing agent_loop.%s", field)
 	}
+}
+
+func TestTemplateYAMLProjectInstructionsSchemaMatchesDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, yamlFieldsForType[ProjectInstructionsConfig](), knownProjectInstructionFields())
+	assert.Equal(t, yamlFieldsForType[fileProjectInstructionsConfig](), knownProjectInstructionFields())
+
+	var root yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(TemplateYAML()), &root))
+	require.NotEmpty(t, root.Content)
+
+	contextNode := templateMappingValue(root.Content[0], "context")
+	require.NotNil(t, contextNode, "template should contain context")
+
+	projectInstructions := templateMappingValue(contextNode, "project_instructions")
+	require.NotNil(t, projectInstructions, "template should contain context.project_instructions")
+
+	templateFields := make(map[string]bool)
+	for i := 0; i+1 < len(projectInstructions.Content); i += 2 {
+		templateFields[projectInstructions.Content[i].Value] = true
+	}
+
+	assert.Equal(t, knownProjectInstructionFields(), templateFields)
 }
 
 func TestStarterTemplateConfigAgentLoopPointersAreIndependent(t *testing.T) {

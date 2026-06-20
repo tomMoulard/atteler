@@ -418,6 +418,9 @@ func TestInspectPathSources_AcceptsReferencePolicyFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 context:
+  project_instructions:
+    enabled: false
+    max_tokens: 2048
   reference_policy:
     allowed_schemes: [https]
     denied_schemes: [http]
@@ -439,6 +442,8 @@ context:
 	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
 	require.Len(t, reports, 1)
 	assert.Equal(t, "present", reports[0].Status)
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.project_instructions.enabled")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "context.project_instructions.max_tokens")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.allowed_schemes")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.denied_schemes")
 	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.allowed_hosts")
@@ -687,6 +692,8 @@ func TestDefaultDiagnostics_ReferencePolicySafetyDefaults(t *testing.T) {
 
 	defaults := DefaultDiagnostics()
 
+	assertDefaultDiagnosticValue(t, defaults, "context.project_instructions.enabled", "true")
+	assertDefaultDiagnosticValue(t, defaults, "context.project_instructions.max_tokens", "8192")
 	assertDefaultDiagnosticValue(t, defaults, "context.reference_policy.allowed_schemes", "[https]")
 	assertDefaultDiagnosticValue(t, defaults, "context.reference_policy.allow_absolute_paths", "false")
 	assertDefaultDiagnosticValue(t, defaults, "context.reference_policy.max_redirects", "0")

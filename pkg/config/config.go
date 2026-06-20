@@ -253,11 +253,42 @@ type AgentLoopConfig struct {
 //
 //nolint:govet // field order follows config-file grouping.
 type ContextConfig struct {
-	References      []string              `json:"references,omitempty" yaml:"references,omitempty"`
-	MaxFileBytes    int                   `json:"max_file_bytes,omitempty" yaml:"max_file_bytes,omitempty"`
-	MaxTotalBytes   int                   `json:"max_total_bytes,omitempty" yaml:"max_total_bytes,omitempty"`
-	MaxInputTokens  int                   `json:"max_input_tokens,omitempty" yaml:"max_input_tokens,omitempty"`
-	ReferencePolicy ReferencePolicyConfig `json:"reference_policy" yaml:"reference_policy"`
+	References          []string                  `json:"references,omitempty" yaml:"references,omitempty"`
+	ProjectInstructions ProjectInstructionsConfig `json:"project_instructions" yaml:"project_instructions"`
+	MaxFileBytes        int                       `json:"max_file_bytes,omitempty" yaml:"max_file_bytes,omitempty"`
+	MaxTotalBytes       int                       `json:"max_total_bytes,omitempty" yaml:"max_total_bytes,omitempty"`
+	MaxInputTokens      int                       `json:"max_input_tokens,omitempty" yaml:"max_input_tokens,omitempty"`
+	ReferencePolicy     ReferencePolicyConfig     `json:"reference_policy" yaml:"reference_policy"`
+}
+
+// DefaultProjectInstructionsMaxTokens caps automatically discovered project
+// instruction context before it is pinned into each request.
+const DefaultProjectInstructionsMaxTokens = 8192
+
+// ProjectInstructionsConfig controls automatic loading of AGENTS.md/CLAUDE.md
+// files from the repository root down to the current working directory.
+type ProjectInstructionsConfig struct {
+	// Enabled defaults to true. Set to false to opt out of automatic project
+	// instruction loading.
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// MaxTokens defaults to DefaultProjectInstructionsMaxTokens when unset.
+	MaxTokens int `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+}
+
+// EffectiveEnabled returns the effective enabled state. The feature
+// is opt-out, so nil means enabled.
+func (c ProjectInstructionsConfig) EffectiveEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// EffectiveMaxTokens returns the token cap used for automatic project
+// instruction context.
+func (c ProjectInstructionsConfig) EffectiveMaxTokens() int {
+	if c.MaxTokens > 0 {
+		return c.MaxTokens
+	}
+
+	return DefaultProjectInstructionsMaxTokens
 }
 
 // ReferencePolicyConfig controls which configured references may be ingested.
@@ -626,11 +657,17 @@ type fileAgentConfig struct {
 
 //nolint:govet // field order follows config-file grouping.
 type fileContextConfig struct {
-	MaxFileBytes    *int                      `json:"max_file_bytes" yaml:"max_file_bytes"`
-	MaxTotalBytes   *int                      `json:"max_total_bytes" yaml:"max_total_bytes"`
-	MaxInputTokens  *int                      `json:"max_input_tokens" yaml:"max_input_tokens"`
-	References      []string                  `json:"references" yaml:"references"`
-	ReferencePolicy fileReferencePolicyConfig `json:"reference_policy" yaml:"reference_policy"`
+	MaxFileBytes        *int                          `json:"max_file_bytes" yaml:"max_file_bytes"`
+	MaxTotalBytes       *int                          `json:"max_total_bytes" yaml:"max_total_bytes"`
+	MaxInputTokens      *int                          `json:"max_input_tokens" yaml:"max_input_tokens"`
+	References          []string                      `json:"references" yaml:"references"`
+	ProjectInstructions fileProjectInstructionsConfig `json:"project_instructions" yaml:"project_instructions"`
+	ReferencePolicy     fileReferencePolicyConfig     `json:"reference_policy" yaml:"reference_policy"`
+}
+
+type fileProjectInstructionsConfig struct {
+	Enabled   *bool `json:"enabled" yaml:"enabled"`
+	MaxTokens *int  `json:"max_tokens" yaml:"max_tokens"`
 }
 
 //nolint:govet // field order follows config-file grouping.
@@ -1508,7 +1545,20 @@ func mergeContext(dst *Config, contextConfig fileContextConfig, rec *originRecor
 		rec.replace("context.references", source, dst.Context.References, "replaces the entire configured reference list")
 	}
 
+	mergeProjectInstructions(&dst.Context.ProjectInstructions, contextConfig.ProjectInstructions, rec, source)
 	mergeReferencePolicy(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy, rec, source)
+}
+
+func mergeProjectInstructions(dst *ProjectInstructionsConfig, cfg fileProjectInstructionsConfig, rec *originRecorder, source originSource) {
+	if cfg.Enabled != nil {
+		dst.Enabled = clonePtr(cfg.Enabled)
+		rec.set("context.project_instructions.enabled", source, *cfg.Enabled)
+	}
+
+	if cfg.MaxTokens != nil {
+		dst.MaxTokens = *cfg.MaxTokens
+		rec.set("context.project_instructions.max_tokens", source, *cfg.MaxTokens)
+	}
 }
 
 func mergeReferencePolicy(dst *ReferencePolicyConfig, policy fileReferencePolicyConfig, rec *originRecorder, source originSource) {
@@ -2348,7 +2398,20 @@ func mergeConfigContext(dst *Config, contextConfig ContextConfig, rec *originRec
 		rec.replace("context.references", source, dst.Context.References, "replaces the entire configured reference list")
 	}
 
+	mergeConfigProjectInstructions(&dst.Context.ProjectInstructions, contextConfig.ProjectInstructions, rec, source)
 	mergeConfigReferencePolicy(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy, rec, source)
+}
+
+func mergeConfigProjectInstructions(dst *ProjectInstructionsConfig, cfg ProjectInstructionsConfig, rec *originRecorder, source originSource) {
+	if cfg.Enabled != nil {
+		dst.Enabled = clonePtr(cfg.Enabled)
+		rec.set("context.project_instructions.enabled", source, *cfg.Enabled)
+	}
+
+	if cfg.MaxTokens > 0 {
+		dst.MaxTokens = cfg.MaxTokens
+		rec.set("context.project_instructions.max_tokens", source, cfg.MaxTokens)
+	}
 }
 
 func mergeConfigReferencePolicy(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, rec *originRecorder, source originSource) {
@@ -3170,7 +3233,22 @@ func mergeConfigContextFromOrigins(dst *Config, contextConfig ContextConfig, dst
 		appendOriginChain(dstOrigins, "context.references", srcOrigins, true)
 	}
 
+	mergeConfigProjectInstructionsFromOrigins(&dst.Context.ProjectInstructions, contextConfig.ProjectInstructions, dstOrigins, srcOrigins)
 	mergeConfigReferencePolicyFromOrigins(&dst.Context.ReferencePolicy, contextConfig.ReferencePolicy, dstOrigins, srcOrigins)
+}
+
+func mergeConfigProjectInstructionsFromOrigins(dst *ProjectInstructionsConfig, cfg ProjectInstructionsConfig, dstOrigins, srcOrigins OriginMap) {
+	if cfg.Enabled != nil {
+		dst.Enabled = clonePtr(cfg.Enabled)
+
+		appendOriginChain(dstOrigins, "context.project_instructions.enabled", srcOrigins, false)
+	}
+
+	if cfg.MaxTokens > 0 {
+		dst.MaxTokens = cfg.MaxTokens
+
+		appendOriginChain(dstOrigins, "context.project_instructions.max_tokens", srcOrigins, false)
+	}
 }
 
 func mergeConfigReferencePolicyFromOrigins(dst *ReferencePolicyConfig, policy ReferencePolicyConfig, dstOrigins, srcOrigins OriginMap) {

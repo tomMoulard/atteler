@@ -36,6 +36,7 @@ func starterTemplateConfig() Config {
 	agentLoopWallTime := "0"
 	agentLoopCheckpointInterval := 0
 	skillLearningEnabled := true
+	projectInstructionsEnabled := true
 	workspaceVectorEnabled := false
 	workspaceAllowRemoteEmbeddings := false
 	allowLowTrustSources := true
@@ -166,6 +167,10 @@ func starterTemplateConfig() Config {
 			MaxFileBytes:   32768,
 			MaxTotalBytes:  131072,
 			MaxInputTokens: 120000,
+			ProjectInstructions: ProjectInstructionsConfig{
+				Enabled:   &projectInstructionsEnabled,
+				MaxTokens: DefaultProjectInstructionsMaxTokens,
+			},
 			ReferencePolicy: ReferencePolicyConfig{
 				AllowedSchemes: []string{"https"},
 				AllowedHosts:   []string{"docs.example.com"},

@@ -29,6 +29,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	maxWallTime := "1m"
 	checkpointInterval := 2
 	enabled := true
+	projectInstructionsEnabled := true
 	workspaceEnabled := true
 
 	cfg := Config{
@@ -91,6 +92,9 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 			}},
 		},
 		Context: ContextConfig{
+			ProjectInstructions: ProjectInstructionsConfig{
+				Enabled: &projectInstructionsEnabled,
+			},
 			ReferencePolicy: ReferencePolicyConfig{
 				AllowedSchemes:   []string{"https"},
 				DeniedSchemes:    []string{"http"},
@@ -174,6 +178,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	redacted.Context.ReferencePolicy.AllowedGlobs[0] = "changed/**/*.md"
 	redacted.Context.ReferencePolicy.DeniedGlobs[0] = "**/*.key"
 	redacted.Context.ReferencePolicy.ContentTypes[0] = "application/json"
+	*redacted.Context.ProjectInstructions.Enabled = false
 	*redacted.SkillLearning.Enabled = false
 	*redacted.Vector.WorkspaceEnabled = false
 	storeVector := redacted.Vector.Stores["agent-memory"]
@@ -222,6 +227,7 @@ func TestRedactedConfig_ReturnsIndependentCopy(t *testing.T) {
 	assert.Equal(t, []string{"docs/**/*.md"}, cfg.Context.ReferencePolicy.AllowedGlobs)
 	assert.Equal(t, []string{"**/*.pem"}, cfg.Context.ReferencePolicy.DeniedGlobs)
 	assert.Equal(t, []string{"text/*"}, cfg.Context.ReferencePolicy.ContentTypes)
+	assert.True(t, *cfg.Context.ProjectInstructions.Enabled)
 	assert.True(t, *cfg.SkillLearning.Enabled)
 	assert.True(t, *cfg.Vector.WorkspaceEnabled)
 	assert.Equal(t, "store-api_key=secret-token", cfg.Vector.Stores["agent-memory"].Model)
@@ -289,6 +295,26 @@ func TestRedactedOriginMap_RedactsWorkspaceVectorPatternLists(t *testing.T) {
 	require.Len(t, excludePatterns, 2)
 	assert.Equal(t, "vendor/", excludePatterns[0])
 	assert.NotContains(t, excludePatterns[1], "secret-token")
+}
+
+func TestRedactedOriginMap_PreservesProjectInstructionSourceJSON(t *testing.T) {
+	t.Parallel()
+
+	origins := OriginMap{
+		"runtime.project_instructions.sources": {Chain: []OriginEvent{{
+			Kind:      OriginRuntimeSelection,
+			Operation: OriginSet,
+			Source:    "project instruction discovery",
+			Value:     `["AGENTS.md","pkg/CLAUDE.md"]`,
+		}}},
+	}
+
+	redacted := RedactedOriginMap(origins)
+	value := redacted["runtime.project_instructions.sources"].Chain[0].Value
+
+	var sources []string
+	require.NoError(t, json.Unmarshal([]byte(value), &sources))
+	assert.Equal(t, []string{"AGENTS.md", "pkg/CLAUDE.md"}, sources)
 }
 
 func TestRedactedOriginMap_RedactsHookPayloadsAndCommandDetails(t *testing.T) {

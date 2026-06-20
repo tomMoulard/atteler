@@ -362,6 +362,7 @@ func TestReviewCompleterEmitsContextManifestBeforeBudgetFailure(t *testing.T) {
 		agents:            agent.NewRegistry(nil),
 		hookRunner:        events.NewRunnerWithLogger(nil, &eventLog),
 		selectedModel:     "gpt-test",
+		contextOptions:    contextref.Options{ProjectInstructionsDisabled: true},
 		referenceManifest: referenceManifest,
 		maxInputTokens:    1,
 	}
@@ -424,6 +425,46 @@ func TestReviewCompleterIncludesAgentReferencesInPromptAndManifest(t *testing.T)
 	assert.Contains(t, log, "rubric.md")
 }
 
+func TestReviewCompleterAutoLoadsProjectInstructions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("Reviewers must cite risks.\n"), 0o600))
+
+	provider := &capturingIdleSuggestionProvider{model: "gpt-test", response: "ok"}
+	registry := llm.NewRegistry()
+	registry.Register(provider)
+
+	var eventLog bytes.Buffer
+
+	completer := reviewCompleter{
+		registry:       registry,
+		agents:         agent.NewRegistry(nil),
+		hookRunner:     events.NewRunnerWithLogger(nil, &eventLog),
+		contextOptions: contextref.Options{Root: dir},
+		selectedModel:  "gpt-test",
+		maxInputTokens: 10_000,
+	}
+
+	_, err := completer.Complete(
+		t.Context(),
+		"quality-reviewer",
+		"system",
+		"Review context:\nprimary review surface",
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, provider.params)
+	assertRunOnceRequestContains(t, *provider.params, "<project_instructions")
+	assertRunOnceRequestContains(t, *provider.params, "Reviewers must cite risks.")
+
+	log := eventLog.String()
+	assert.Contains(t, log, "context_manifest")
+	assert.Contains(t, log, "configured_reference_entry_count=1")
+	assert.Contains(t, log, "AGENTS.md")
+}
+
 func TestReviewCompleterEmitsRouteDecisionForModelRole(t *testing.T) {
 	t.Parallel()
 
@@ -445,6 +486,7 @@ func TestReviewCompleterEmitsRouteDecisionForModelRole(t *testing.T) {
 		agents:         agent.NewRegistry(nil),
 		hookRunner:     events.NewRunnerWithLogger(nil, &eventLog),
 		selectedModel:  "planner",
+		contextOptions: contextref.Options{ProjectInstructionsDisabled: true},
 		maxInputTokens: 10_000,
 	}
 
@@ -475,6 +517,7 @@ func TestReviewCompleterPrependsAutonomyInstructions(t *testing.T) {
 		registry:       registry,
 		agents:         agent.NewRegistry(nil),
 		selectedModel:  "gpt-test",
+		contextOptions: contextref.Options{ProjectInstructionsDisabled: true},
 		maxInputTokens: 10_000,
 		autonomy:       autonomy.Low,
 	}

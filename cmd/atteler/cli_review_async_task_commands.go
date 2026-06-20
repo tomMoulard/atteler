@@ -362,7 +362,17 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 		requestModel, fallbackModels = effectiveAgentModelSelection(rc.selectedModel, rc.fallbackModels, activeAgent)
 	}
 
-	budgetMessages := requestMessagesForBudget(requestModel, messages, activeAgent, generation, "", false)
+	manifest := contextref.ReferenceManifest{}
+	if reviewPromptIncludesReferenceContext(userPrompt) {
+		manifest = rc.referenceManifest
+	}
+
+	routeContextOptions := contextOptionsForRequestModels(rc.contextOptions, rc.registry, requestModel, fallbackModels)
+	routeReferenceContext := buildReferenceContextWithManifest(ctx, configuredReferenceContext{
+		Manifest:  manifest,
+		Estimator: estimatorSummaryForContextOptions(routeContextOptions),
+	}, activeAgent, routeContextOptions)
+	budgetMessages := requestMessagesForBudget(requestModel, messages, activeAgent, generation, routeReferenceContext.Content, false)
 
 	requestModel, fallbackModels, routeDecision, err := requestModelRoutingAndFallbacks(
 		ctx,
@@ -394,21 +404,14 @@ func (rc *reviewCompleter) Complete(ctx context.Context, reviewer, systemPrompt,
 
 	applyGenerationParams(&params, generation)
 
-	manifest := contextref.ReferenceManifest{}
-	if reviewPromptIncludesReferenceContext(userPrompt) {
-		manifest = rc.referenceManifest
-	}
+	contextOptions := contextOptionsForRequestModels(rc.contextOptions, rc.registry, params.Model, fallbackModels)
+	referenceContext := buildReferenceContextWithManifest(ctx, configuredReferenceContext{
+		Manifest:  manifest,
+		Estimator: estimatorSummaryForContextOptions(contextOptions),
+	}, activeAgent, contextOptions)
 
-	if activeAgent.ok && len(activeAgent.agent.References) > 0 {
-		contextOptions := contextOptionsForRequestModels(rc.contextOptions, rc.registry, params.Model, fallbackModels)
-		referenceContext := buildReferenceContextWithManifest(ctx, configuredReferenceContext{
-			Manifest:  manifest,
-			Estimator: estimatorSummaryForContextOptions(contextOptions),
-		}, activeAgent, contextOptions)
-
-		prependReferenceContext(&params, referenceContext.Content)
-		manifest = referenceContext.Manifest
-	}
+	prependReferenceContext(&params, referenceContext.Content)
+	manifest = referenceContext.Manifest
 
 	prependAutonomyInstructions(&params, rc.autonomy)
 

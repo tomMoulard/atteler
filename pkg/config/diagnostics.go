@@ -663,6 +663,10 @@ func diagnosedConfigVersion(root *yaml.Node) int {
 
 func inspectContextFields(path string, value *yaml.Node) []Diagnostic {
 	diagnostics := inspectNamedFields(path, "context", value, knownContextFields(), nil)
+	if projectInstructions := mappingValue(value, "project_instructions"); projectInstructions != nil {
+		diagnostics = append(diagnostics, inspectNamedFields(path, "context.project_instructions", projectInstructions, knownProjectInstructionFields(), nil)...)
+	}
+
 	if policy := mappingValue(value, "reference_policy"); policy != nil {
 		diagnostics = append(diagnostics, inspectNamedFields(path, "context.reference_policy", policy, knownReferencePolicyFields(), nil)...)
 	}
@@ -1144,11 +1148,19 @@ func knownAgentLoopFields() map[string]bool {
 
 func knownContextFields() map[string]bool {
 	return map[string]bool{
-		"references":       true,
-		"max_file_bytes":   true,
-		"max_total_bytes":  true,
-		"max_input_tokens": true,
-		"reference_policy": true,
+		"references":           true,
+		"project_instructions": true,
+		"max_file_bytes":       true,
+		"max_total_bytes":      true,
+		"max_input_tokens":     true,
+		"reference_policy":     true,
+	}
+}
+
+func knownProjectInstructionFields() map[string]bool {
+	return map[string]bool{
+		"enabled":    true,
+		"max_tokens": true,
 	}
 }
 

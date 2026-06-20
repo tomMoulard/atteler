@@ -216,6 +216,7 @@ func addRuntimeConfigOrigins(
 	}
 
 	addSelectedProviderOrigin(origins, cfg, selectedModel)
+	addProjectInstructionOrigins(origins, cfg, cwd)
 
 	if opts.agentName != "" {
 		appendDiagnosticOrigin(origins, "runtime.selected_agent", appconfig.OriginEvent{
@@ -226,6 +227,48 @@ func addRuntimeConfigOrigins(
 	}
 
 	addRuntimeGenerationOrigins(origins, cfg, opts, persistedState, cwd, statePath)
+}
+
+func addProjectInstructionOrigins(origins appconfig.OriginMap, cfg appconfig.Config, cwd string) {
+	copyOriginChain(origins, "runtime.project_instructions.enabled", "context.project_instructions.enabled")
+
+	enabled, repoRoot, sources, note := projectInstructionRuntimeSummary(cwd, cfg.Context.ProjectInstructions)
+	appendDiagnosticOrigin(origins, "runtime.project_instructions.enabled", appconfig.OriginEvent{
+		Kind:   appconfig.OriginRuntimeSelection,
+		Source: "project instruction discovery",
+		Value:  strconv.FormatBool(enabled),
+		Note:   note,
+	})
+
+	copyOriginChain(origins, "runtime.project_instructions.max_tokens", "context.project_instructions.max_tokens")
+	appendDiagnosticOrigin(origins, "runtime.project_instructions.max_tokens", appconfig.OriginEvent{
+		Kind:   appconfig.OriginRuntimeSelection,
+		Source: "context.project_instructions.max_tokens",
+		Value:  strconv.Itoa(cfg.Context.ProjectInstructions.EffectiveMaxTokens()),
+		Note:   "contextpack token budget for the pinned project instruction block",
+	})
+
+	if repoRoot != "" {
+		appendDiagnosticOrigin(origins, "runtime.project_instructions.repo_root", appconfig.OriginEvent{
+			Kind:   appconfig.OriginRuntimeSelection,
+			Source: "project instruction discovery",
+			Value:  repoRoot,
+		})
+	}
+
+	sourceNote := "files selected from repository root to cwd"
+	if !enabled {
+		sourceNote = "discovery skipped because project instructions are disabled"
+	} else if len(sources) == 0 {
+		sourceNote = note
+	}
+
+	appendDiagnosticOrigin(origins, "runtime.project_instructions.sources", appconfig.OriginEvent{
+		Kind:   appconfig.OriginRuntimeSelection,
+		Source: "project instruction discovery",
+		Value:  projectInstructionRuntimeSourceValue(sources),
+		Note:   sourceNote,
+	})
 }
 
 func addSelectedModelOrigins(
