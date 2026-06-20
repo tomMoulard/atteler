@@ -11,8 +11,119 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/permission"
 )
+
+func TestDefaultToolsIncludesStructuredFileTools(t *testing.T) {
+	t.Parallel()
+
+	tools := DefaultTools()
+	names := make([]string, 0, len(tools))
+
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+		assert.Equal(t, "object", tool.Parameters["type"], tool.Name)
+		additionalProperties, ok := tool.Parameters["additionalProperties"].(bool)
+		require.True(t, ok, tool.Name)
+		assert.False(t, additionalProperties, tool.Name)
+		assert.NotEmpty(t, tool.Description, tool.Name)
+
+		if tool.Name == ToolNameGlob || tool.Name == ToolNameGrep {
+			properties, ok := tool.Parameters["properties"].(map[string]any)
+			require.True(t, ok, tool.Name)
+			maxResults, ok := properties["max_results"].(map[string]any)
+			require.True(t, ok, tool.Name)
+			assert.Equal(t, FileToolMaxResults, maxResults["maximum"], tool.Name)
+		}
+	}
+
+	assert.Equal(t, []string{
+		ToolNameRead,
+		ToolNameWrite,
+		ToolNameEdit,
+		ToolNameGlob,
+		ToolNameGrep,
+		ToolNameBash,
+	}, names)
+}
+
+func TestDefaultToolPolicyForAutonomy(t *testing.T) {
+	t.Parallel()
+
+	policy := DefaultToolPolicyForAutonomy(autonomy.Low)
+
+	readDecision := policy(context.Background(), ToolCall{
+		Name:  ToolNameRead,
+		Input: map[string]any{"path": "README.md"},
+	}, AgentLoopBudgetSnapshot{})
+	require.Equal(t, ToolPolicyAllow, readDecision.Verdict)
+	assert.Equal(t, "file_tool.allow.default", readDecision.MatchedRule)
+
+	writeDecision := policy(context.Background(), ToolCall{
+		Name: ToolNameWrite,
+		Input: map[string]any{
+			"path":    "README.md",
+			"content": "updated",
+		},
+	}, AgentLoopBudgetSnapshot{})
+	require.Equal(t, ToolPolicyDeny, writeDecision.Verdict)
+	assert.Equal(t, "autonomy.deny.file_write", writeDecision.MatchedRule)
+
+	bashDecision := policy(context.Background(), ToolCall{
+		Name:  ToolNameBash,
+		Input: map[string]any{"command": "go test ./pkg/llm"},
+	}, AgentLoopBudgetSnapshot{})
+	require.Equal(t, ToolPolicyAllow, bashDecision.Verdict)
+	assert.Equal(t, "bash.allow.default", bashDecision.MatchedRule)
+
+	unknownDecision := policy(context.Background(), ToolCall{
+		Name:  "unknown",
+		Input: map[string]any{},
+	}, AgentLoopBudgetSnapshot{})
+	require.Equal(t, ToolPolicyDeny, unknownDecision.Verdict)
+	assert.Equal(t, "tool.deny.unknown_tool", unknownDecision.MatchedRule)
+}
+
+func TestFileToolPolicyPermissionReadOnlyDeniesWrite(t *testing.T) {
+	t.Parallel()
+
+	readOnly := permission.ReadOnlyPolicy()
+	ctx := permission.ContextWithPolicy(context.Background(), &readOnly)
+
+	decision := FileToolPolicy(ctx, ToolCall{
+		Name: ToolNameWrite,
+		Input: map[string]any{
+			"path":    "README.md",
+			"content": "updated",
+		},
+	}, AgentLoopBudgetSnapshot{})
+
+	require.Equal(t, ToolPolicyDeny, decision.Verdict)
+	assert.Equal(t, "permission.write.deny", decision.MatchedRule)
+	assert.Contains(t, decision.Reason, "denied by permission policy")
+}
+
+func TestFileToolPolicyPermissionEditChecksReadAndWrite(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationRead, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+
+	decision := FileToolPolicy(ctx, ToolCall{
+		Name: ToolNameEdit,
+		Input: map[string]any{
+			"path":       "README.md",
+			"old_string": "old",
+			"new_string": "new",
+		},
+	}, AgentLoopBudgetSnapshot{})
+
+	require.Equal(t, ToolPolicyDeny, decision.Verdict)
+	assert.Equal(t, "permission.read.deny", decision.MatchedRule)
+	assert.Contains(t, decision.Reason, "denied by permission policy")
+}
 
 func TestBashToolPolicy(t *testing.T) {
 	t.Parallel()

@@ -472,7 +472,7 @@ func runOnceWithOptions(
 
 	applyGenerationParams(&params, prepared.generation)
 
-	// Enable tool use for one-shot calls: the LLM can invoke bash commands.
+	// Enable tool use for one-shot calls: the LLM can invoke built-in tools.
 	// Apply agent-level tool filtering when an agent is active.
 	var tools []llm.ToolDefinition
 	if executionOptions.Autonomy.AllowsAgentTools() {
@@ -1861,7 +1861,7 @@ func runOnceCompleteWithAutonomy(
 		Autonomy:           autonomyLevel,
 		EstimateCostMicros: costEstimator,
 		CheckpointInterval: agentLoopCheckpointInterval,
-		Policy:             llm.BashToolPolicyForAutonomy(autonomyLevel),
+		Policy:             llm.DefaultToolPolicyForAutonomy(autonomyLevel),
 		CheckpointSink:     agentLoopCheckpointSink(checkpointPath),
 	})
 	if err != nil {
@@ -2133,103 +2133,158 @@ func confirmPermissionStdin(_ context.Context, request permission.Request, decis
 	return answer == "y" || answer == affirmativeYes
 }
 
-// newBashExecutor creates a ToolExecutor that runs bash commands in the given
-// working directory, logging output to the provided writer.
+// newBashExecutor creates a ToolExecutor for built-in file and bash tools in
+// the given working directory, logging human-readable tool output to writer.
 func newBashExecutor(cwd string, logw io.Writer, audit attshell.AuditContext, permissionPolicy *permission.Policy) llm.ToolExecutor {
 	if strings.TrimSpace(audit.Autonomy) == "" {
 		audit.Autonomy = autonomy.DefaultLevel.String()
 	}
 
 	return func(ctx context.Context, call llm.ToolCall) llm.ToolResult {
-		if call.Name != "bash" {
-			return llm.ToolResult{
-				ToolCallID: call.ID,
-				Content:    "unknown tool: " + call.Name,
-				IsError:    true,
-			}
+		if permissionPolicy != nil && permission.PolicyFromContext(ctx) == nil {
+			ctx = permission.ContextWithPolicy(ctx, permissionPolicy)
 		}
 
-		command, ok := call.Input["command"].(string)
-		if !ok || command == "" {
-			return llm.ToolResult{
-				ToolCallID: call.ID,
-				Content:    "error: empty command",
-				IsError:    true,
-			}
+		if llm.IsFileToolName(call.Name) {
+			result := executeFileTool(ctx, call, fileToolExecutorOptions{
+				WorkingDir: cwd,
+				Autonomy:   autonomy.Level(audit.Autonomy),
+			})
+			logFileToolResult(logw, call.Name, result)
+
+			return result
 		}
 
-		commandEvent := events.Event{
-			Type:    events.CommandExecute,
-			Content: command,
-			Metadata: map[string]string{
-				"command":      command,
-				"cwd":          cwd,
-				"input":        command,
-				"source":       "llm_tool",
-				"tool_call_id": call.ID,
-				"autonomy":     audit.Autonomy,
-			},
-		}
-
-		if logw != nil {
-			fmt.Fprintln(logw, dimStyle.Render("  $ "+command))
-		}
-
-		result, shellErr := attshell.RunBash(ctx, attshell.Options{
-			Command:        command,
-			Dir:            cwd,
-			Timeout:        5 * time.Minute,
-			MaxOutputBytes: agentLoopToolOutputLimit(ctx),
-			Audit:          audit,
-			Permission:     permissionPolicy,
-			StartCallback: func() {
-				emitFromContextWarning(ctx, commandEvent)
-			},
-			OutputCallback: func(chunk attshell.OutputChunk) {
-				if logw != nil {
-					fmt.Fprint(logw, dimStyle.Render(string(chunk.Data)))
-				}
-
-				emitFromContextWarning(ctx, events.Event{
-					Type:    events.CommandOutput,
-					Content: string(chunk.Data),
-					Metadata: map[string]string{
-						"command":      command,
-						"cwd":          cwd,
-						"partial":      "true",
-						"sequence":     strconv.FormatInt(chunk.Sequence, 10),
-						"source":       "llm_tool",
-						"stream":       string(chunk.Stream),
-						"tool_call_id": call.ID,
-						"autonomy":     audit.Autonomy,
-					},
-				})
-			},
-		})
-
-		output := formatShellContext(shellResultMsg{
-			command: command,
-			stdout:  result.Stdout,
-			stderr:  result.Stderr,
-			err:     shellErr,
-		})
-		if shellErr != nil && logw != nil {
-			fmt.Fprintln(logw, dimStyle.Render("[error] "+shellErr.Error()))
-		}
-
-		emitFromContextWarning(ctx, commandOutputEvent(
-			"", "", "", "", cwd, command, output, shellErr,
-			map[string]string{
-				"source":       "llm_tool",
-				"tool_call_id": call.ID,
-				"autonomy":     audit.Autonomy,
-			},
-		))
-
-		if shellErr != nil {
-			return llm.ToolResult{ToolCallID: call.ID, Content: output, IsError: true}
-		}
-
-		return llm.ToolResult{ToolCallID: call.ID, Content: output}
+		return executeRunOnceBashTool(ctx, call, cwd, logw, audit, permissionPolicy)
 	}
+}
+
+func logFileToolResult(logw io.Writer, name string, result llm.ToolResult) {
+	if logw == nil {
+		return
+	}
+
+	line := result.Content
+	if result.IsError {
+		line = "[error] " + line
+	}
+
+	fmt.Fprintln(logw, dimStyle.Render("  "+name+" tool: "+line))
+}
+
+func executeRunOnceBashTool(
+	ctx context.Context,
+	call llm.ToolCall,
+	cwd string,
+	logw io.Writer,
+	audit attshell.AuditContext,
+	permissionPolicy *permission.Policy,
+) llm.ToolResult {
+	if call.Name != llm.ToolNameBash {
+		return llm.ToolResult{
+			ToolCallID: call.ID,
+			Content:    "unknown tool: " + call.Name,
+			IsError:    true,
+		}
+	}
+
+	command, ok := call.Input["command"].(string)
+	if !ok || command == "" {
+		return llm.ToolResult{
+			ToolCallID: call.ID,
+			Content:    "error: empty command",
+			IsError:    true,
+		}
+	}
+
+	if logw != nil {
+		fmt.Fprintln(logw, dimStyle.Render("  $ "+command))
+	}
+
+	result, shellErr := runOnceBashCommand(ctx, cwd, command, logw, audit, permissionPolicy, call.ID)
+
+	output := formatShellContext(shellResultMsg{
+		command: command,
+		stdout:  result.Stdout,
+		stderr:  result.Stderr,
+		err:     shellErr,
+	})
+	if shellErr != nil && logw != nil {
+		fmt.Fprintln(logw, dimStyle.Render("[error] "+shellErr.Error()))
+	}
+
+	emitFromContextWarning(ctx, commandOutputEvent(
+		"", "", "", "", cwd, command, output, shellErr,
+		map[string]string{
+			"source":       "llm_tool",
+			"tool_call_id": call.ID,
+			"autonomy":     audit.Autonomy,
+		},
+	))
+
+	if shellErr != nil {
+		return llm.ToolResult{ToolCallID: call.ID, Content: output, IsError: true}
+	}
+
+	return llm.ToolResult{ToolCallID: call.ID, Content: output}
+}
+
+func runOnceBashCommand(
+	ctx context.Context,
+	cwd string,
+	command string,
+	logw io.Writer,
+	audit attshell.AuditContext,
+	permissionPolicy *permission.Policy,
+	toolCallID string,
+) (attshell.Result, error) {
+	commandEvent := events.Event{
+		Type:    events.CommandExecute,
+		Content: command,
+		Metadata: map[string]string{
+			"command":      command,
+			"cwd":          cwd,
+			"input":        command,
+			"source":       "llm_tool",
+			"tool_call_id": toolCallID,
+			"autonomy":     audit.Autonomy,
+		},
+	}
+
+	result, err := attshell.RunBash(ctx, attshell.Options{
+		Command:        command,
+		Dir:            cwd,
+		Timeout:        5 * time.Minute,
+		MaxOutputBytes: agentLoopToolOutputLimit(ctx),
+		Audit:          audit,
+		Permission:     permissionPolicy,
+		StartCallback: func() {
+			emitFromContextWarning(ctx, commandEvent)
+		},
+		OutputCallback: func(chunk attshell.OutputChunk) {
+			if logw != nil {
+				fmt.Fprint(logw, dimStyle.Render(string(chunk.Data)))
+			}
+
+			emitFromContextWarning(ctx, events.Event{
+				Type:    events.CommandOutput,
+				Content: string(chunk.Data),
+				Metadata: map[string]string{
+					"command":      command,
+					"cwd":          cwd,
+					"partial":      "true",
+					"sequence":     strconv.FormatInt(chunk.Sequence, 10),
+					"source":       "llm_tool",
+					"stream":       string(chunk.Stream),
+					"tool_call_id": toolCallID,
+					"autonomy":     audit.Autonomy,
+				},
+			})
+		},
+	})
+	if err != nil {
+		return result, fmt.Errorf("run bash tool: %w", err)
+	}
+
+	return result, nil
 }

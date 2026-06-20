@@ -132,6 +132,8 @@ func AgentLoop(
 		policy = defaultToolPolicy
 	}
 
+	policy = advertisedToolPolicy(params.Tools, policy)
+
 	historyToolLimit := cfg.MaxHistoryToolResultBytes
 	if historyToolLimit <= 0 {
 		historyToolLimit = defaultMaxHistoryToolBytes

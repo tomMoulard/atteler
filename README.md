@@ -194,7 +194,7 @@ health check, or model inventory with
 - Credential source: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, ForgeCode credential files (`$FORGE_CONFIG/.credentials.json`, `~/forge/.credentials.json`, `~/.forge/.credentials.json`), then Claude Code keychain or `~/.claude/.credentials.json`.
 - Token refresh: ForgeCode OAuth credentials may refresh during credential resolution; the Anthropic adapter itself does not refresh on 401.
 - Network endpoint: `ANTHROPIC_BASE_URL` or provider config, default `https://api.anthropic.com`; `POST /v1/messages` for completions and `GET /v1/models` for model/health checks.
-- Sandbox and tools: No subprocess or workspace sandbox. Atteler sends tool definitions in the Messages request; any tool execution happens in Atteler's agent loop.
+- Sandbox and tools: No subprocess or workspace sandbox. Atteler sends configured bash/read/write/edit/glob/grep tool definitions in the Messages request; tool execution happens in Atteler's agent loop.
 - Model inventory: Known-model listing prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.
 - Health check: Network check: calls `GET /v1/models` through `FetchModels`.
 
@@ -204,7 +204,7 @@ health check, or model inventory with
 - Credential source: Claude Code OAuth from macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json`.
 - Token refresh: On 401, exchanges the stored refresh token at `https://platform.claude.com/v1/oauth/token` and persists refreshed tokens back to the same Claude Code credential store.
 - Network endpoint: `ANTHROPIC_BASE_URL`, default `https://api.anthropic.com`; `POST /v1/messages` for completions. Model listing is static for this provider.
-- Sandbox and tools: No Claude Code subprocess, file/search/edit tool sandbox, or workspace sandbox. Atteler only forwards configured request tools.
+- Sandbox and tools: No Claude Code subprocess or Claude Code workspace sandbox. Atteler can send configured bash/read/write/edit/glob/grep tool definitions; tool execution happens in Atteler's agent loop.
 - Model inventory: Known-model listing and `FetchModels` both return the static Claude Code model/alias catalog; no model-list network call is made.
 - Health check: Local credential check only: verifies an OAuth access token is loaded; no network call.
 
@@ -214,7 +214,7 @@ health check, or model inventory with
 - Credential source: `$CODEX_HOME/auth.json` or `~/.codex/auth.json` in `auth_mode=chatgpt` with ChatGPT access and refresh tokens.
 - Token refresh: On 401, exchanges the stored refresh token at `https://auth.openai.com/oauth/token` and atomically updates `auth.json`.
 - Network endpoint: `CODEX_BASE_URL`, default `https://chatgpt.com/backend-api/codex`; `POST /responses` for completions. Model listing is static plus any model from Codex config.
-- Sandbox and tools: No Codex subprocess, file/search/edit tool sandbox, or workspace sandbox. Atteler sends Responses API function-tool definitions only.
+- Sandbox and tools: No Codex subprocess or Codex CLI workspace sandbox. Atteler can send configured bash/read/write/edit/glob/grep function-tool definitions; tool execution happens in Atteler's agent loop.
 - Model inventory: Known-model listing prints the static Codex catalog; registered providers prepend any model configured in Codex config and `FetchModels` stays local.
 - Health check: Local credential check only: verifies parsed ChatGPT-mode auth has an access token; no network call.
 
@@ -224,7 +224,7 @@ health check, or model inventory with
 - Credential source: No API credential is used by the built-in adapter.
 - Token refresh: None.
 - Network endpoint: `OLLAMA_BASE_URL` or provider config, default `http://127.0.0.1:11434`; `POST /api/chat` for completions and `GET /api/tags` for model/health checks.
-- Sandbox and tools: No workspace sandbox. Local model execution and any model tool behavior are governed by the Ollama daemon; Atteler serializes configured tool definitions.
+- Sandbox and tools: No Ollama workspace sandbox. Atteler serializes configured bash/read/write/edit/glob/grep tool definitions and executes returned tool calls in Atteler's agent loop.
 - Model inventory: Known-model listing prints useful static defaults without contacting Ollama; registered providers call `GET /api/tags` for live local model names.
 - Health check: Network/local daemon check: calls `GET /api/tags` and may first auto-start `ollama serve` during provider creation.
 
@@ -234,7 +234,7 @@ health check, or model inventory with
 - Credential source: `OPENAI_API_KEY`, then the `OPENAI_API_KEY` field in `~/.codex/auth.json`.
 - Token refresh: None; the API key is sent as a bearer token and is not refreshed.
 - Network endpoint: `OPENAI_BASE_URL` or provider config, default `https://api.openai.com`; `POST /v1/chat/completions` for completions and `GET /v1/models` for model/health checks.
-- Sandbox and tools: No subprocess or workspace sandbox. Atteler sends function-tool definitions in the chat request; any tool execution happens in Atteler's agent loop.
+- Sandbox and tools: No subprocess or workspace sandbox. Atteler sends configured bash/read/write/edit/glob/grep function-tool definitions in the chat request; tool execution happens in Atteler's agent loop.
 - Model inventory: Known-model listing prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.
 - Health check: Network check: calls `GET /v1/models` through `FetchModels`.
 <!-- END GENERATED PROVIDER RUNTIME DOCS -->
@@ -255,7 +255,7 @@ and checked by `go test ./pkg/llm`. It is credential-free and should match what
 | `completion` | messages-api — `POST /v1/messages` direct HTTPS | messages-api — `POST /v1/messages` direct HTTPS using Claude Code OAuth | responses-api — `POST /responses` direct HTTPS to the ChatGPT Codex backend | ollama-chat — `POST /api/chat` against a local or configured Ollama daemon | chat-completions — `POST /v1/chat/completions` direct HTTPS |
 | `streaming` | unsupported — no caller-facing streaming provider | unsupported — no caller-facing streaming provider | supported — llm.StreamProvider implementation | supported — llm.StreamProvider implementation | unsupported — no caller-facing streaming provider |
 | `tool_use` | supported — maps to tools input_schema | supported — maps to tools input_schema | supported — maps to Responses function tools | supported — maps to function tools | supported — maps to function tools |
-| `shell_access` | none — no subprocess, CLI, or workspace shell/tool sandbox | none — does not run the Claude Code CLI or expose its file/search/edit tools | none — does not run `codex exec` or expose Codex CLI workspace tools | daemon-autostart — no shell/tool access; may start `ollama serve` only when auto-start is explicitly enabled | none — no subprocess, CLI, or workspace shell/tool sandbox |
+| `shell_access` | atteler-loop — no provider subprocess or CLI; configured tool calls execute in Atteler's agent loop | atteler-loop — does not run the Claude Code CLI; configured tool calls execute in Atteler's agent loop | atteler-loop — does not run `codex exec`; configured tool calls execute in Atteler's agent loop | atteler-loop+daemon — configured tool calls execute in Atteler's agent loop; may start `ollama serve` only when auto-start is explicitly enabled | atteler-loop — no provider subprocess or CLI; configured tool calls execute in Atteler's agent loop |
 | `reasoning_effort` | lossy — maps Atteler levels to Anthropic thinking token budgets | lossy — maps Atteler levels to Anthropic thinking token budgets | supported — maps to responses reasoning.effort | lossy — maps Atteler levels to Ollama think false/low/medium/high | supported — maps to reasoning_effort |
 | `seed` | unsupported — Anthropic Messages has no seed parameter | unsupported — Claude Code OAuth path uses Anthropic Messages, which has no seed parameter | unsupported — Codex ChatGPT responses endpoint does not expose seed in this adapter | supported — maps to options.seed | supported — maps to chat.completions seed |
 | `temperature_top_p` | supported — temperature and top_p are sent directly unless provider-specific constraints apply | supported — temperature and top_p are sent directly unless provider-specific constraints apply | partial — temperature=omitted (Codex ChatGPT responses endpoint does not expose temperature in this adapter); top_p=unsupported (Codex ChatGPT responses endpoint does not expose top_p in this adapter) | supported — temperature and top_p are sent directly unless provider-specific constraints apply | supported — temperature and top_p are sent directly unless provider-specific constraints apply |

@@ -224,10 +224,10 @@ func prependToolReminder(params *llm.CompleteParams, tools []llm.ToolDefinition)
 	reminder := llm.Message{
 		Role: llm.RoleSystem,
 		Content: "You have the following tools available and MUST use them " +
-			"when the task requires running commands or inspecting files: " +
+			"when the task requires running commands, inspecting files, or editing files: " +
 			strings.Join(names, ", ") + ". " +
 			"Do NOT say you are unable to run commands. " +
-			"Use the bash tool to execute shell commands.",
+			"Use read/glob/grep for file inspection, write/edit for file changes, and bash for shell commands.",
 	}
 
 	// Prepend so the reminder sits right before the conversation history.

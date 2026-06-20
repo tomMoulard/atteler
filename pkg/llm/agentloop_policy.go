@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // ToolPolicyVerdict is the action a policy selected for a requested tool call.
@@ -38,6 +39,31 @@ func defaultToolPolicy(_ context.Context, call ToolCall, _ AgentLoopBudgetSnapsh
 		Verdict:     ToolPolicyAllow,
 		Reason:      fmt.Sprintf("default allow for tool %q", call.Name),
 		MatchedRule: "policy.default_allow",
+	}
+}
+
+func advertisedToolPolicy(tools []ToolDefinition, next ToolPolicy) ToolPolicy {
+	allowed := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+
+		allowed[name] = struct{}{}
+	}
+
+	return func(ctx context.Context, call ToolCall, budget AgentLoopBudgetSnapshot) ToolPolicyDecision {
+		name := strings.TrimSpace(call.Name)
+		if _, ok := allowed[name]; !ok {
+			return ToolPolicyDecision{
+				Verdict:     ToolPolicyDeny,
+				Reason:      fmt.Sprintf("tool %q was not advertised in this request", call.Name),
+				MatchedRule: "tool.deny.unadvertised",
+			}
+		}
+
+		return next(ctx, call, budget)
 	}
 }
 

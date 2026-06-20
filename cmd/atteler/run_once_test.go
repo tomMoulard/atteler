@@ -23,6 +23,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/modelroute"
+	"github.com/tommoulard/atteler/pkg/permission"
 	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 	"github.com/tommoulard/atteler/pkg/vector"
@@ -761,7 +762,7 @@ func TestRunOnceWithOptions_EmitsRouteDecisionForModelRole(t *testing.T) {
 		Preferred:            "openai/gpt-4.1",
 		FallbackModels:       []string{"openai/gpt-4.1-mini"},
 		RequiredCapabilities: []string{modelroute.CapabilityJSONSchema},
-		MaxCostUSD:           0.00005,
+		MaxCostUSD:           0.00008,
 	}))
 
 	var eventLog bytes.Buffer
@@ -914,7 +915,7 @@ func TestRunOnceWithOptions_AgentModelRoleBypassesAgentCatalogRoute(t *testing.T
 		Preferred:            "openai/gpt-4.1",
 		FallbackModels:       []string{"openai/gpt-4.1-mini"},
 		RequiredCapabilities: []string{modelroute.CapabilityJSONSchema},
-		MaxCostUSD:           0.00005,
+		MaxCostUSD:           0.00008,
 	}))
 
 	var eventLog bytes.Buffer
@@ -1673,6 +1674,26 @@ func TestBashExecutorDefaultsAuditAutonomy(t *testing.T) {
 	for _, record := range records {
 		assert.Equal(t, autonomy.DefaultLevel.String(), record.Autonomy)
 	}
+}
+
+func TestBashExecutorAppliesPermissionPolicyToFileTools(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	readOnly := permission.ReadOnlyPolicy()
+
+	result := newBashExecutor(root, nil, attshell.AuditContext{}, &readOnly)(context.Background(), llm.ToolCall{
+		ID:   "write-1",
+		Name: llm.ToolNameWrite,
+		Input: map[string]any{
+			"path":    "blocked.txt",
+			"content": "nope",
+		},
+	})
+
+	require.True(t, result.IsError)
+	assert.Contains(t, result.Content, "denied by permission policy")
+	assert.NoFileExists(t, filepath.Join(root, "blocked.txt"))
 }
 
 func TestBashExecutorStreamsStderrBeforeCompletion(t *testing.T) {
