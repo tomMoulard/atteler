@@ -12,6 +12,7 @@ const (
 	helpCommandName        = "help"
 	issueCommandName       = "issue"
 	researchDomainName     = "research"
+	scoutDomainName        = "scout"
 	sessionCommandName     = "session"
 	helpLongFlag           = "--help"
 	helpGoFlag             = "-help"
@@ -216,6 +217,25 @@ var cliHelpDomains = []cliHelpDomain{
 		},
 	},
 	{
+		Name:    scoutDomainName,
+		Title:   "Scout",
+		Summary: "Generate local-first product discovery, competitor inspiration, ranked roadmap ideas, and optional implementation tasks.",
+		Commands: []cliCommandAlias{
+			{
+				Name:     "run",
+				Args:     "<prompt>",
+				Summary:  "inspect repository guidance and generate ranked feature or roadmap recommendations",
+				Legacy:   []string{"--scout-run"},
+				JoinArgs: true,
+			},
+		},
+		Examples: []string{
+			`atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"`,
+			`atteler scout run --competitors cursor,codex,openhands,aider,jules --generate-tasks "Identify features Atteler should add next"`,
+			`atteler scout run --area autoresearch --tournament --variants 5 "Find improvements to Atteler's autoresearch workflow"`,
+		},
+	},
+	{
 		Name:    autoresearchDomainName,
 		Title:   "Autoresearch",
 		Summary: "Run a headless worktree loop that proposes code experiments, validates them, and keeps only improvements.",
@@ -230,6 +250,7 @@ var cliHelpDomains = []cliHelpDomain{
 		},
 		Examples: []string{
 			`atteler autoresearch run "Improve agent-loop recovery; keep only changes that pass make test"`,
+			`atteler autoresearch run --tournament --variants 5 "Compare hypotheses for reducing prompt-context cache misses"`,
 			`atteler autoresearch "Reduce prompt-context cache misses and validate with go test ./cmd/atteler"`,
 			`atteler session headless`,
 		},

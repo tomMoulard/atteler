@@ -19,8 +19,7 @@ func researchCommandRequested(opts cliOptions) bool {
 func researchAdjunctOptionsRequested(opts cliOptions) bool {
 	return strings.TrimSpace(opts.researchOutputDir) != "" ||
 		len(opts.trustedSources) > 0 ||
-		len(opts.researchSources) > 0 ||
-		opts.researchGenerateTasks
+		len(opts.researchSources) > 0
 }
 
 func runResearchCommandWithAutonomy(ctx context.Context, cwd string, input researchCommandInput, level autonomy.Level) error {

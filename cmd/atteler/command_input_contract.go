@@ -365,6 +365,16 @@ type researchCommandInput struct {
 	GenerateTasks  bool
 }
 
+type scoutCommandInput struct {
+	Prompt        string
+	OutputDir     string
+	Area          string
+	Competitors   []string
+	GenerateTasks bool
+	Tournament    bool
+	Variants      int
+}
+
 type printConfigTemplateCommandInput struct{}
 
 type promptCompleteCommandInput struct {
@@ -533,6 +543,7 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"printConfigTemplateCommandInput":     func(opts cliOptions) any { return printConfigTemplateCommandInputFromOptions(opts) },
 		"promptCompleteCommandInput":          func(opts cliOptions) any { return promptCompleteCommandInputFromOptions(opts) },
 		"researchCommandInput":                func(opts cliOptions) any { return researchCommandInputFromOptions(opts) },
+		"scoutCommandInput":                   func(opts cliOptions) any { return scoutCommandInputFromOptions(opts) },
 		"reviewPlanCommandInput":              func(opts cliOptions) any { return reviewPlanCommandInputFromOptions(opts) },
 		"reviewRunCommandInput":               func(opts cliOptions) any { return reviewRunCommandInputFromOptions(opts) },
 		"reviewScanCommandInput":              func(opts cliOptions) any { return reviewScanCommandInputFromOptions(opts) },
@@ -975,7 +986,7 @@ func planAgentsCommandInputFromOptions(opts cliOptions) planAgentsCommandInput {
 
 func researchCommandInputFromOptions(opts cliOptions) researchCommandInput {
 	outputDir := opts.researchOutputDir
-	if strings.TrimSpace(outputDir) == "" && researchOutputFlagLooksLikePath(opts.outputFormat) {
+	if strings.TrimSpace(outputDir) == "" && outputFlagLooksLikePath(opts.outputFormat) {
 		outputDir = opts.outputFormat
 	}
 
@@ -984,17 +995,34 @@ func researchCommandInputFromOptions(opts cliOptions) researchCommandInput {
 		OutputDir:      outputDir,
 		TrustedSources: append([]string(nil), opts.trustedSources...),
 		Sources:        append([]string(nil), opts.researchSources...),
-		GenerateTasks:  opts.researchGenerateTasks,
+		GenerateTasks:  opts.generateTasks,
 	}
 }
 
-func researchOutputFlagLooksLikePath(value string) bool {
-	value = strings.TrimSpace(value)
+func outputFlagLooksLikePath(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" || value == outputFormatText || value == outputFormatJSON {
 		return false
 	}
 
 	return true
+}
+
+func scoutCommandInputFromOptions(opts cliOptions) scoutCommandInput {
+	outputDir := opts.scoutOutputDir
+	if strings.TrimSpace(outputDir) == "" && outputFlagLooksLikePath(opts.outputFormat) {
+		outputDir = opts.outputFormat
+	}
+
+	return scoutCommandInput{
+		Prompt:        opts.scoutRunPrompt,
+		OutputDir:     outputDir,
+		Area:          opts.scoutArea,
+		Competitors:   append([]string(nil), opts.scoutCompetitors...),
+		GenerateTasks: opts.generateTasks,
+		Tournament:    opts.tournament || opts.variants.set,
+		Variants:      opts.variants.value,
+	}
 }
 
 func printConfigTemplateCommandInputFromOptions(_ cliOptions) printConfigTemplateCommandInput {

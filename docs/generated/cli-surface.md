@@ -142,6 +142,18 @@ Examples:
 - `atteler research run --trusted-source go.dev --trusted-source github.com "Research best practices for safe agent worktrees"`
 - `atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"`
 
+## Scout
+
+Generate local-first product discovery, competitor inspiration, ranked roadmap ideas, and optional implementation tasks.
+
+Commands:
+- `run <prompt>`: inspect repository guidance and generate ranked feature or roadmap recommendations (dispatch: `scout-run`)
+
+Examples:
+- `atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"`
+- `atteler scout run --competitors cursor,codex,openhands,aider,jules --generate-tasks "Identify features Atteler should add next"`
+- `atteler scout run --area autoresearch --tournament --variants 5 "Find improvements to Atteler's autoresearch workflow"`
+
 ## Autoresearch
 
 Run a headless worktree loop that proposes code experiments, validates them, and keeps only improvements.
@@ -151,6 +163,7 @@ Commands:
 
 Examples:
 - `atteler autoresearch run "Improve agent-loop recovery; keep only changes that pass make test"`
+- `atteler autoresearch run --tournament --variants 5 "Compare hypotheses for reducing prompt-context cache misses"`
 - `atteler autoresearch "Reduce prompt-context cache misses and validate with go test ./cmd/atteler"`
 - `atteler session headless`
 
@@ -871,6 +884,17 @@ Commands:
   - Outputs: `markdown`, `json`, `yaml`, `filesystem`, `text`
   - Fixtures:
     - `legacy-flag`: `atteler --research-run value` -> `research-run`
+- `scout-run` (providerless): create local-first feature discovery and roadmap artifacts
+  - Input: `scoutCommandInput`
+  - Input fields: `Prompt`, `OutputDir`, `Area`, `Competitors`, `GenerateTasks`, `Tournament`, `Variants`
+  - Flags: `--scout-run`, `--scout-output`, `--competitors`, `--competitor`, `--area`, `--tournament`, `--variants`, `--output`, `--generate-tasks`
+  - Examples: `atteler scout run "Find 10 feature ideas for Atteler"`, `atteler scout run --competitors cursor,codex --tournament --variants 5 --generate-tasks "Find features to add to Atteler"`
+  - Conflicts:
+    - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
+  - Side effects: `filesystem-read`, `filesystem-write`, `stdout`
+  - Outputs: `markdown`, `json`, `yaml`, `filesystem`, `text`
+  - Fixtures:
+    - `legacy-flag`: `atteler --scout-run value` -> `scout-run`
 - `task-command` (providerless): read or mutate persistent agent tasks
   - Input: `taskCommandInput`
   - Input fields: `FilePath`, `AddTitle`, `AddID`, `Agent`, `AssignSpec`, `CompleteID`, `List`

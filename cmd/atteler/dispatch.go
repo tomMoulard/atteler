@@ -124,6 +124,7 @@ func initCLIFlagValues(opts *cliOptions) {
 	opts.watchMaxIterations = positiveIntFlag{name: "watch-max-iterations"}
 	opts.skillMaxSteps = positiveIntFlag{name: "skill-max-steps"}
 	opts.skillMinOccurrences = positiveIntFlag{name: "skill-min-occurrences"}
+	opts.variants = positiveIntFlag{name: "variants"}
 	opts.codeOffset = nonNegativeIntFlag{name: "code-offset"}
 	opts.spawnRetries = nonNegativeIntFlag{name: "spawn-retries"}
 	opts.seed = nonNegativeIntFlag{name: "seed"}
@@ -1191,6 +1192,8 @@ func runWithState(ctx context.Context, opts cliOptions, state appState) error {
 
 		return err
 	}
+
+	prompt = autoresearchPromptWithTournament(prompt, opts)
 
 	runErr := runOnceWithOptions(
 		ctx,

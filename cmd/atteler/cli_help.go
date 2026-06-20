@@ -287,8 +287,10 @@ func flagBelongsToDomain(flagName, domainName string) bool {
 	switch domainName {
 	case codeIntelDomainName, configDomainName:
 		return flagName == outputFlagName || flagName == commandOutputJSON
-	case researchDomainName:
-		return flagName == outputFlagName
+	case researchDomainName, scoutDomainName:
+		return flagName == outputFlagName || flagName == "generate-tasks"
+	case autoresearchDomainName:
+		return flagName == "tournament" || flagName == "variants"
 	default:
 		return false
 	}
@@ -340,6 +342,9 @@ func lookupFlagDomain(name string) (string, bool) {
 	case name == "research-run" || name == "research-output" ||
 		name == "trusted-source" || name == "research-source" || name == "generate-tasks":
 		return researchDomainName, true
+	case name == "scout-run" || name == "scout-output" || name == "competitors" ||
+		name == "competitor" || name == "area" || name == "tournament" || name == "variants":
+		return scoutDomainName, true
 	case name == autoresearchDomainName:
 		return autoresearchDomainName, true
 	case name == "once" || name == "stdin" || name == "output" || name == "autonomy" || name == "headless" ||

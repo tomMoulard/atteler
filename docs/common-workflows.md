@@ -157,6 +157,7 @@ so the agent can commit kept candidates and reset discarded ones:
 ```sh
 atteler autoresearch run "Improve agent-loop recovery; keep only changes that pass make test"
 atteler autoresearch "Reduce prompt-context cache misses and validate with go test ./cmd/atteler"
+atteler autoresearch run --tournament --variants 5 "Compare hypotheses for reducing prompt-context cache misses"
 atteler session headless
 atteler session stream-headless <run-id>
 atteler worktrees list
@@ -168,6 +169,61 @@ validation, keeps improvements, and resets regressions. If your mission has a
 specific metric or command, put it in the prompt; otherwise the agent chooses the
 smallest meaningful repo-local gate first and broadens verification before
 claiming success.
+
+`--tournament` / `--variants <n>` adds a tournament instruction to
+autoresearch: generate multiple independent implementation or research
+hypotheses, evaluate them under the same validation criteria, and record why the
+kept hypothesis beat discarded alternatives.
+
+## Scout runs
+
+Use `atteler scout run` when you need product-discovery output before deciding
+what to implement. Scout reads repository metadata and project/harness guidance,
+records supplied competitor inspiration, ranks roadmap ideas, and can produce
+task stubs for follow-up implementation:
+
+```sh
+atteler scout run "Find 10 feature ideas for Atteler based on current AI coding tools"
+atteler scout run \
+  --competitors cursor,codex,openhands,aider,jules \
+  --generate-tasks \
+  "Identify features Atteler should add next"
+atteler scout run \
+  --area autoresearch \
+  --tournament \
+  --variants 5 \
+  "Find improvements to Atteler's autoresearch workflow"
+```
+
+The MVP is local-first and does not require web access. It creates
+`.atteler/runs/scout/<run-id>/` by default (or the directory passed with
+`--output` / `--scout-output`) and writes:
+
+- `scout.md` — human-readable project understanding, inspiration sources,
+  ranked ideas, MVP shape, complexity, risks, and suggested implementation
+  order.
+- `ideas.jsonl` — structured ranked feature ideas with fit, complexity, risk,
+  related files/areas, evidence, and speculative labels.
+- `competitors.jsonl` — supplied competitor names or URLs recorded for later
+  verification.
+- `run.json` — run metadata, artifact paths, guidance files, and tournament
+  settings.
+- `roadmaps.jsonl` — tournament variant roadmaps when `--tournament` or
+  `--variants` is used.
+- `tasks.generated.yaml` — optional follow-up task stubs when
+  `--generate-tasks` is set, including stable task IDs, pending status,
+  suggested executor ownership, priority, metadata, related files, and
+  validation hints.
+
+Scout guidance discovery covers `AGENTS.md`, `CLAUDE.md`, Cursor rules,
+GitHub Copilot instructions, Windsurf/Cline/Roo-style rule files,
+project-local `.agents/*.md` files, and selected `.codex/...` instruction
+surfaces before ranking or generating follow-up tasks.
+
+Scout recommendations should cite evidence where available: competitor docs,
+public product pages, repository files, project guidance, prior sessions,
+command output, issue history, or tests. Evidence is recommended, not mandatory;
+speculative ideas are allowed when they are clearly labeled.
 
 ## Research runs
 

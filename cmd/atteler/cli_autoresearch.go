@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/autonomy"
@@ -38,4 +39,36 @@ func validateAutoresearchCommandSelection(opts cliOptions) error {
 	}
 
 	return nil
+}
+
+func autoresearchPromptWithTournament(prompt string, opts cliOptions) string {
+	if !opts.autoresearch || (!opts.tournament && !opts.variants.set) {
+		return prompt
+	}
+
+	variants := opts.variants.value
+	if variants <= 0 {
+		variants = 3
+	}
+
+	instruction := fmt.Sprintf(
+		"Autoresearch tournament mode: before committing to one edit path, generate %d independent implementation or research %s, evaluate them under the same validation criteria, compare them with the shared pkg/tournament-style ranking primitive, and record why the kept hypothesis won and why alternatives were discarded.",
+		variants,
+		hypothesisNoun(variants),
+	)
+
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return instruction
+	}
+
+	return prompt + "\n\n" + instruction
+}
+
+func hypothesisNoun(count int) string {
+	if count == 1 {
+		return "hypothesis"
+	}
+
+	return "hypotheses"
 }

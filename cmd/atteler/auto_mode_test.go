@@ -87,6 +87,37 @@ func TestValidateAutoresearchCommandSelection_RejectsDifferentAutoMode(t *testin
 	assert.Contains(t, err.Error(), "different --auto mode")
 }
 
+func TestAutoresearchPromptWithTournament_AppendsSharedTournamentInstruction(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{
+		autoresearch: true,
+		tournament:   true,
+		variants:     positiveIntFlag{value: 5, set: true},
+	}
+
+	got := autoresearchPromptWithTournament("Improve cache behavior", opts)
+
+	assert.Contains(t, got, "Improve cache behavior")
+	assert.Contains(t, got, "Autoresearch tournament mode")
+	assert.Contains(t, got, "5 independent implementation or research hypotheses")
+	assert.Contains(t, got, "pkg/tournament-style ranking primitive")
+}
+
+func TestAutoresearchPromptWithTournament_VariantsFlagEnablesInstruction(t *testing.T) {
+	t.Parallel()
+
+	opts := cliOptions{
+		autoresearch: true,
+		variants:     positiveIntFlag{value: 1, set: true},
+	}
+
+	got := autoresearchPromptWithTournament("Improve cache behavior", opts)
+
+	assert.Contains(t, got, "Autoresearch tournament mode")
+	assert.Contains(t, got, "1 independent implementation or research hypothesis")
+}
+
 func TestResolveAutoModePlan_InactiveWhenUnset(t *testing.T) {
 	t.Parallel()
 

@@ -97,6 +97,14 @@ func providerlessFileCommands() []command {
 			},
 		},
 		{
+			name:  "scout-run",
+			tier:  tierProviderless,
+			match: scoutCommandRequested,
+			runProviderless: func(ctx context.Context, o cliOptions, _ *session.Store) error {
+				return runScoutCommandFromOptions(ctx, o)
+			},
+		},
+		{
 			name:  "task-command",
 			tier:  tierProviderless,
 			match: taskCommandRequested,
