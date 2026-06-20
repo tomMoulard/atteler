@@ -103,6 +103,7 @@ func TestScoutGroupedCommandParsesScopedFlags(t *testing.T) {
 		"--area", "autoresearch",
 		"--scout-output", ".atteler/scout/autoresearch",
 		"--competitors", "cursor,codex",
+		"--scout-source", "docs/notes.md",
 		"--tournament",
 		"--variants", "5",
 		"--generate-tasks",
@@ -117,6 +118,7 @@ func TestScoutGroupedCommandParsesScopedFlags(t *testing.T) {
 	assert.Equal(t, "autoresearch", opts.scoutArea)
 	assert.Equal(t, ".atteler/scout/autoresearch", opts.scoutOutputDir)
 	assert.Equal(t, stringListFlag{"cursor", "codex"}, opts.scoutCompetitors)
+	assert.Equal(t, stringListFlag{"docs/notes.md"}, opts.scoutSources)
 	assert.True(t, opts.tournament)
 	require.True(t, opts.variants.set)
 	assert.Equal(t, 5, opts.variants.value)
@@ -146,7 +148,7 @@ func TestValidateScoutCommandSelection_RejectsScoutAdjunctsWithoutScoutRun(t *te
 	t.Parallel()
 
 	err := validateScoutCommandSelection(cliOptions{
-		scoutCompetitors: stringListFlag{"cursor"},
+		scoutSources: stringListFlag{"docs/notes.md"},
 	})
 
 	require.Error(t, err)

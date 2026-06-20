@@ -128,6 +128,7 @@ func registerCLIFlagsWithFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.StringVar(&opts.scoutArea, "area", "", "focus area for --scout-run recommendations")
 	fs.Var(&opts.scoutCompetitors, "competitors", "competitor names or URLs for --scout-run inspiration (repeatable or comma-separated)")
 	fs.Var(&opts.scoutCompetitors, "competitor", "alias for --competitors")
+	fs.Var(&opts.scoutSources, "scout-source", "local file/dir or URL to include in --scout-run context (repeatable or comma-separated)")
 	fs.Var(&opts.variants, "variants", "number of tournament variants for scout or autoresearch")
 	fs.BoolVar(&opts.tournament, "tournament", false, "enable shared tournament/variant comparison for scout or autoresearch")
 	fs.BoolVar(&opts.generateTasks, "generate-tasks", false, "write tasks.generated.yaml for research/scout follow-up work")

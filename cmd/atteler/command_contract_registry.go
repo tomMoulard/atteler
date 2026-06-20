@@ -570,7 +570,7 @@ func commandContractsByName() map[string]commandContract {
 		),
 		"scout-run": commandContractFor(
 			"create local-first feature discovery and roadmap artifacts",
-			[]string{"--scout-run", "--scout-output", "--competitors", "--competitor", "--area", "--tournament", "--variants", "--output", "--generate-tasks"},
+			[]string{"--scout-run", "--scout-output", "--competitors", "--competitor", "--area", "--scout-source", "--tournament", "--variants", "--output", "--generate-tasks"},
 			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectUserOutput},
 			[]string{commandOutputMarkdown, commandOutputJSON, commandOutputYAML, commandOutputFilesystem, commandOutputText},
 			withInputType("scoutCommandInput"),

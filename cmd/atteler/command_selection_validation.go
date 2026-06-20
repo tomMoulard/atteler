@@ -72,7 +72,7 @@ func validateResearchCommandSelection(opts cliOptions) error {
 
 func validateScoutCommandSelection(opts cliOptions) error {
 	if scoutSpecificAdjunctOptionsRequested(opts) && !scoutCommandRequested(opts) {
-		return errors.New("--competitors, --area, and --scout-output require --scout-run")
+		return errors.New("--competitors, --area, --scout-source, and --scout-output require --scout-run")
 	}
 
 	if tournamentOptionsRequested(opts) && !scoutCommandRequested(opts) && !opts.autoresearch {

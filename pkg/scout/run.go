@@ -26,6 +26,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/tommoulard/atteler/pkg/privacy"
 	"github.com/tommoulard/atteler/pkg/tournament"
 )
 
@@ -70,6 +71,7 @@ type RunRequest struct {
 	RunID         string
 	Area          string
 	Competitors   []string
+	Sources       []string
 	GenerateTasks bool
 	Tournament    bool
 	VariantCount  int
@@ -127,6 +129,7 @@ type runRecord struct {
 	GuidanceFiles   []string            `json:"guidance_files,omitempty"`
 	RepositoryFiles []string            `json:"repository_files,omitempty"`
 	Competitors     []string            `json:"competitors,omitempty"`
+	Sources         []string            `json:"sources,omitempty"`
 	Notes           []string            `json:"notes,omitempty"`
 	Schema          string              `json:"schema"`
 	RunID           string              `json:"run_id"`
@@ -165,6 +168,7 @@ type projectContext struct {
 	CommandFiles   []string
 	Capabilities   []string
 	ValidationHint []string
+	SourceEvidence []Evidence
 }
 
 //nolint:govet // JSON field order mirrors the roadmap artifact users read.
@@ -222,6 +226,7 @@ func Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
+	project.SourceEvidence = buildSourceEvidence(ctx, root, req.Sources)
 
 	competitors := normalizeCompetitors(req.Competitors, createdAt)
 	ideas, roadmaps, tournamentDecisions, tournamentRecord, err := buildRecommendations(req, project, competitors)
@@ -242,6 +247,7 @@ func Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		GuidanceFiles:   guidancePaths(project.Guidance),
 		RepositoryFiles: repositoryPaths(project.Files),
 		Competitors:     competitorNames(competitors),
+		Sources:         redactedInputs(req.Sources),
 		IdeaCount:       len(ideas),
 		CompetitorCount: len(competitors),
 		GenerateTasks:   req.GenerateTasks,
@@ -951,6 +957,138 @@ func fileContents(files []repositoryFile) []string {
 	return out
 }
 
+func buildSourceEvidence(ctx context.Context, root string, inputs []string) []Evidence {
+	inputs = uniqueTrimmed(inputs)
+	out := make([]Evidence, 0, len(inputs))
+	for _, input := range inputs {
+		if ctx.Err() != nil {
+			return out
+		}
+		if isURL(input) {
+			out = append(out, Evidence{
+				Kind:    "scout_source_url",
+				URL:     privacy.RedactIdentifier(input),
+				Source:  "scout_source",
+				Excerpt: "URL recorded as scout context; autonomous web fetching is outside the MVP.",
+			})
+			continue
+		}
+
+		out = append(out, localSourceEvidence(ctx, root, input)...)
+	}
+
+	return out
+}
+
+func uniqueTrimmed(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if seen[key] {
+			continue
+		}
+
+		seen[key] = true
+		out = append(out, value)
+	}
+
+	return out
+}
+
+func isURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+
+	return err == nil && parsed.Scheme != "" && parsed.Host != ""
+}
+
+func localSourceEvidence(ctx context.Context, root, input string) []Evidence {
+	path := strings.TrimSpace(input)
+	if path == "" {
+		return nil
+	}
+
+	displayPath := privacy.RedactIdentifier(filepath.ToSlash(path))
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return []Evidence{sourceLoadErrorEvidence(displayPath, "source could not be loaded: "+err.Error())}
+	}
+
+	if !info.IsDir() {
+		return []Evidence{localFileEvidence(root, path)}
+	}
+
+	var evidence []Evidence
+	err = filepath.WalkDir(path, func(child string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("scout: context canceled while loading scout source: %w", ctxErr)
+		}
+		if child != path && entry.IsDir() && shouldSkipDir(entry.Name()) {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() || len(evidence) >= maxSourceFiles {
+			return nil
+		}
+
+		evidence = append(evidence, localFileEvidence(root, child))
+
+		return nil
+	})
+	if err != nil {
+		return []Evidence{sourceLoadErrorEvidence(displayPath, "source directory could not be walked: "+err.Error())}
+	}
+	if len(evidence) == 0 {
+		return []Evidence{{
+			Kind:    "scout_source_directory",
+			Path:    displayPath,
+			Source:  "scout_source",
+			Excerpt: "directory source did not contain readable text files within scout limits.",
+		}}
+	}
+
+	return evidence
+}
+
+func localFileEvidence(root, path string) Evidence {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		rel = path
+	}
+	rel = privacy.RedactIdentifier(filepath.ToSlash(rel))
+
+	content, err := readTextFile(path, maxSourceBytes)
+	if err != nil {
+		return sourceLoadErrorEvidence(rel, "source could not be loaded: "+err.Error())
+	}
+
+	return Evidence{
+		Kind:    "scout_source_file",
+		Path:    rel,
+		Source:  "scout_source",
+		Excerpt: privacy.RedactText(sourceSummary(content)),
+	}
+}
+
+func sourceLoadErrorEvidence(path, message string) Evidence {
+	return Evidence{
+		Kind:    "scout_source",
+		Path:    privacy.RedactIdentifier(path),
+		Source:  "scout_source",
+		Excerpt: privacy.RedactText(message),
+	}
+}
+
 func normalizeCompetitors(values []string, recordedAt time.Time) []Competitor {
 	seen := make(map[string]bool, len(values))
 	competitors := make([]Competitor, 0, len(values))
@@ -1051,7 +1189,7 @@ func requestedIdeaCount(prompt string) int {
 
 func generateIdeas(req RunRequest, project projectContext, competitors []Competitor) []Idea {
 	area := strings.ToLower(strings.TrimSpace(req.Area + " " + req.Prompt))
-	evidence := baselineEvidence(project)
+	evidence := appendEvidence(baselineEvidence(project), project.SourceEvidence...)
 	guidanceEvidence := guidanceEvidence(project)
 
 	ideas := []Idea{
@@ -1124,8 +1262,8 @@ func generateIdeas(req RunRequest, project projectContext, competitors []Competi
 			Risk:                labelMedium,
 			SuggestedMVP:        "Record supplied competitor names/URLs in competitors.jsonl and render a follow-up checklist for fresh verification.",
 			RelatedFilesOrAreas: relatedAreas("pkg/scout", "competitors.jsonl", "docs"),
-			Evidence:            competitorEvidence(competitors),
-			Speculative:         len(competitors) == 0,
+			Evidence:            appendEvidence(competitorEvidence(competitors), project.SourceEvidence...),
+			Speculative:         len(competitors) == 0 && len(project.SourceEvidence) == 0,
 		},
 		{
 			Title:               "Memory-backed opportunity discovery",
@@ -1685,6 +1823,12 @@ func renderReport(
 			fmt.Fprintf(&b, "- %s (verify current public docs before implementation decisions).\n", target)
 		}
 	}
+	if len(project.SourceEvidence) > 0 {
+		fmt.Fprintln(&b, "- Additional scout sources loaded or recorded:")
+		for i := range project.SourceEvidence {
+			fmt.Fprintf(&b, "  - %s\n", evidenceSummary([]Evidence{project.SourceEvidence[i]}))
+		}
+	}
 	for _, file := range project.Files {
 		fmt.Fprintf(&b, "- `%s`: %s\n", file.Path, file.Summary)
 	}
@@ -1953,6 +2097,15 @@ func competitorNames(competitors []Competitor) []string {
 	out := make([]string, 0, len(competitors))
 	for _, competitor := range competitors {
 		out = append(out, competitor.Name)
+	}
+
+	return out
+}
+
+func redactedInputs(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range uniqueTrimmed(values) {
+		out = append(out, privacy.RedactIdentifier(value))
 	}
 
 	return out

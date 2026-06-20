@@ -459,6 +459,7 @@ type cliOptions struct {
 	trustedSources                     stringListFlag
 	researchSources                    stringListFlag
 	scoutCompetitors                   stringListFlag
+	scoutSources                       stringListFlag
 	retrievalFilters                   stringListFlag
 	retrievalSources                   stringListFlag
 	suggestSkillSteps                  stringListFlag

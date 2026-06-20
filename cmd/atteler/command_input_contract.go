@@ -370,6 +370,7 @@ type scoutCommandInput struct {
 	OutputDir     string
 	Area          string
 	Competitors   []string
+	Sources       []string
 	GenerateTasks bool
 	Tournament    bool
 	Variants      int
@@ -1019,6 +1020,7 @@ func scoutCommandInputFromOptions(opts cliOptions) scoutCommandInput {
 		OutputDir:     outputDir,
 		Area:          opts.scoutArea,
 		Competitors:   append([]string(nil), opts.scoutCompetitors...),
+		Sources:       append([]string(nil), opts.scoutSources...),
 		GenerateTasks: opts.generateTasks,
 		Tournament:    opts.tournament || opts.variants.set,
 		Variants:      opts.variants.value,

@@ -25,6 +25,7 @@ func TestRun_CreatesArtifactsReadsGuidanceAndGeneratesTasks(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "docs"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "README.md"), []byte("# Demo CLI\nAtteler supports research and autoresearch workflows.\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "docs", "common-workflows.md"), []byte("# Workflows\nResearch and review workflows cite evidence.\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "docs", "source.md"), []byte("# Source note\nAuthorization: Bearer secret-token-value\nExplicit scout source context.\n"), 0o600))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "cmd", "atteler"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "cmd", "atteler", "cli_research_commands.go"), []byte("package main\n"), 0o600))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "pkg", "memory"), 0o750))
@@ -35,6 +36,7 @@ func TestRun_CreatesArtifactsReadsGuidanceAndGeneratesTasks(t *testing.T) {
 		Root:          root,
 		OutputDir:     "scout/out",
 		Competitors:   []string{"cursor", "https://github.com/All-Hands-AI/OpenHands"},
+		Sources:       []string{"docs/source.md", "https://docs.cursor.com/context/rules"},
 		GenerateTasks: true,
 		Now:           time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
 	})
@@ -49,9 +51,11 @@ func TestRun_CreatesArtifactsReadsGuidanceAndGeneratesTasks(t *testing.T) {
 	report := readFile(t, filepath.Join(result.Dir, scoutReportFile))
 	assert.Contains(t, report, "## Project understanding")
 	assert.Contains(t, report, "## Ranked feature ideas")
+	assert.Contains(t, report, "Additional scout sources loaded or recorded")
 	assert.Contains(t, report, "Scout recommendations should cite evidence")
 	assert.Contains(t, report, "- Rationale:")
 	assert.Contains(t, report, "AGENTS.md")
+	assert.NotContains(t, report, "secret-token-value")
 
 	ideas := readIdeas(t, filepath.Join(result.Dir, ideasFile))
 	require.Len(t, ideas, 5)
@@ -90,6 +94,7 @@ func TestRun_CreatesArtifactsReadsGuidanceAndGeneratesTasks(t *testing.T) {
 	assert.Contains(t, record.GuidanceFiles, ".cursor/rules/style.mdc")
 	assert.Equal(t, 5, record.IdeaCount)
 	assert.True(t, record.GenerateTasks)
+	assert.Contains(t, record.Sources, "docs/source.md")
 }
 
 type generatedTasksYAML struct {

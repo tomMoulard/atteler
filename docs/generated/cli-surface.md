@@ -886,8 +886,8 @@ Commands:
     - `legacy-flag`: `atteler --research-run value` -> `research-run`
 - `scout-run` (providerless): create local-first feature discovery and roadmap artifacts
   - Input: `scoutCommandInput`
-  - Input fields: `Prompt`, `OutputDir`, `Area`, `Competitors`, `GenerateTasks`, `Tournament`, `Variants`
-  - Flags: `--scout-run`, `--scout-output`, `--competitors`, `--competitor`, `--area`, `--tournament`, `--variants`, `--output`, `--generate-tasks`
+  - Input fields: `Prompt`, `OutputDir`, `Area`, `Competitors`, `Sources`, `GenerateTasks`, `Tournament`, `Variants`
+  - Flags: `--scout-run`, `--scout-output`, `--competitors`, `--competitor`, `--area`, `--scout-source`, `--tournament`, `--variants`, `--output`, `--generate-tasks`
   - Examples: `atteler scout run "Find 10 feature ideas for Atteler"`, `atteler scout run --competitors cursor,codex --tournament --variants 5 --generate-tasks "Find features to add to Atteler"`
   - Conflicts:
     - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise

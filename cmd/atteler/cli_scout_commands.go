@@ -20,7 +20,8 @@ func scoutCommandRequested(opts cliOptions) bool {
 func scoutSpecificAdjunctOptionsRequested(opts cliOptions) bool {
 	return strings.TrimSpace(opts.scoutOutputDir) != "" ||
 		strings.TrimSpace(opts.scoutArea) != "" ||
-		len(opts.scoutCompetitors) > 0
+		len(opts.scoutCompetitors) > 0 ||
+		len(opts.scoutSources) > 0
 }
 
 func tournamentOptionsRequested(opts cliOptions) bool {
@@ -51,6 +52,7 @@ func runScoutCommandWithAutonomy(ctx context.Context, cwd string, input scoutCom
 		OutputDir:     input.OutputDir,
 		Area:          input.Area,
 		Competitors:   input.Competitors,
+		Sources:       input.Sources,
 		GenerateTasks: input.GenerateTasks,
 		Tournament:    input.Tournament,
 		VariantCount:  input.Variants,

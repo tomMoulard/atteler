@@ -193,6 +193,10 @@ atteler scout run \
   --tournament \
   --variants 5 \
   "Find improvements to Atteler's autoresearch workflow"
+atteler scout run \
+  --scout-source docs/product-notes.md \
+  --scout-source https://docs.example.com/competitor-feature \
+  "Find source-backed roadmap ideas"
 ```
 
 The MVP is local-first and does not require web access. It creates
@@ -206,6 +210,9 @@ The MVP is local-first and does not require web access. It creates
   related files/areas, evidence, and speculative labels.
 - `competitors.jsonl` — supplied competitor names or URLs recorded for later
   verification.
+- `--scout-source` inputs — local files/directories are summarized as evidence;
+  URLs are recorded for audit and follow-up verification without mandatory
+  fetching.
 - `run.json` — run metadata, artifact paths, guidance files, and tournament
   settings.
 - `roadmaps.jsonl` — tournament variant roadmaps when `--tournament` or

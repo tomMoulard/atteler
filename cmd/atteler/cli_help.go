@@ -343,7 +343,8 @@ func lookupFlagDomain(name string) (string, bool) {
 		name == "trusted-source" || name == "research-source" || name == "generate-tasks":
 		return researchDomainName, true
 	case name == "scout-run" || name == "scout-output" || name == "competitors" ||
-		name == "competitor" || name == "area" || name == "tournament" || name == "variants":
+		name == "competitor" || name == "area" || name == "scout-source" ||
+		name == "tournament" || name == "variants":
 		return scoutDomainName, true
 	case name == autoresearchDomainName:
 		return autoresearchDomainName, true
