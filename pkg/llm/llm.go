@@ -805,6 +805,17 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
+func cloneAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string]any, len(in))
+	maps.Copy(out, in)
+
+	return out
+}
+
 func (r *Registry) fallbackRetryConfig(hasAlternateRoute bool) retryConfig {
 	r.mu.RLock()
 	cfg := r.retry

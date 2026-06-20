@@ -1,13 +1,16 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/permission"
@@ -173,6 +176,7 @@ type anthropicRequest struct {
 	Stop        []string                `json:"stop_sequences,omitempty"`
 	Tools       []anthropicTool         `json:"tools,omitempty"`
 	MaxTokens   int                     `json:"max_tokens"`
+	Stream      bool                    `json:"stream,omitempty"`
 }
 
 type anthropicThinking struct {
@@ -303,6 +307,89 @@ func (a *AnthropicProvider) Complete(ctx context.Context, params CompleteParams)
 	return result, nil
 }
 
+// CompleteStream performs a streaming completion using Anthropic's Messages
+// SSE protocol. Setup failures are returned directly; once a channel is
+// returned, read/provider failures are delivered as terminal error chunks.
+func (a *AnthropicProvider) CompleteStream(ctx context.Context, params CompleteParams) (<-chan Chunk, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	params, adjustments, err := prepareCompleteParamsForProvider(providerAnthropic, params)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := buildAnthropicRequestForProvider(providerAnthropic, params)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Stream = true
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: marshal stream: %w", err)
+	}
+
+	if policyErr := authorizeProviderPermission(ctx, providerAnthropic, "call Anthropic messages stream", a.baseURL+"/v1/messages", permission.OperationNetwork, permission.OperationCredentialAccess); policyErr != nil {
+		return nil, policyErr
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: new stream request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("anthropic-version", defaultAnthropicVersion)
+	a.setAuthHeaders(httpReq)
+
+	if len(adjustments) > 0 {
+		emitActivity(ctx, events.Event{
+			Type:     events.CommandExecute,
+			Model:    params.Model,
+			Metadata: anthropicCommandMetadata(adjustments),
+		})
+	}
+
+	startedAt := time.Now()
+
+	resp, err := a.client.Do(httpReq) //nolint:bodyclose // Successful streaming responses are closed by the goroutine below.
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: stream request: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("anthropic: read stream error body: %w", readErr)
+		}
+
+		return nil, newProviderHTTPError(providerAnthropic, resp, respBody)
+	}
+
+	ch := make(chan Chunk, DefaultStreamBuffer)
+
+	go func() {
+		defer close(ch)
+		defer resp.Body.Close()
+
+		streamAnthropicMessages(ctx, resp.Body, ch, anthropicStreamConfig{
+			providerName:   providerAnthropic,
+			requestedModel: params.Model,
+			header:         resp.Header,
+			startedAt:      startedAt,
+			now:            time.Now,
+		})
+	}()
+
+	return ch, nil
+}
+
 func anthropicCommandMetadata(adjustments []completeParamAdjustment) map[string]string {
 	metadata := map[string]string{
 		"command":  "anthropic.messages",
@@ -355,6 +442,372 @@ func anthropicStopReason(reason string) StopReason {
 		return StopMaxToks
 	default:
 		return StopUnknown
+	}
+}
+
+type anthropicStreamConfig struct {
+	header         http.Header
+	now            func() time.Time
+	startedAt      time.Time
+	providerName   string
+	requestedModel string
+}
+
+type anthropicStreamState struct {
+	toolBlocks         map[int]*anthropicStreamToolBlock
+	now                func() time.Time
+	startedAt          time.Time
+	out                Response
+	firstTokenRecorded bool
+	finished           bool
+	sawContent         bool
+}
+
+type anthropicStreamToolBlock struct {
+	id        string
+	name      string
+	input     map[string]any
+	inputJSON strings.Builder
+	seen      bool
+}
+
+type anthropicStreamEvent struct {
+	Message      *anthropicStreamMessage      `json:"message,omitempty"`
+	ContentBlock *anthropicContentBlock       `json:"content_block,omitempty"`
+	Delta        *anthropicStreamDelta        `json:"delta,omitempty"`
+	Error        *anthropicStreamErrorPayload `json:"error,omitempty"`
+	Usage        *anthropicStreamUsage        `json:"usage,omitempty"`
+	Type         string                       `json:"type"`
+	Index        int                          `json:"index,omitempty"`
+}
+
+type anthropicStreamMessage struct {
+	Model string               `json:"model"`
+	Usage anthropicStreamUsage `json:"usage"`
+}
+
+type anthropicStreamDelta struct {
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
+	StopReason  string `json:"stop_reason,omitempty"`
+}
+
+type anthropicStreamErrorPayload struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+type anthropicStreamUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+}
+
+//nolint:govet // Transient parser action; field order keeps the emitted chunk first for readability.
+type anthropicStreamAction struct {
+	chunk    Chunk
+	err      error
+	emit     bool
+	terminal bool
+}
+
+func (s *anthropicStreamState) handlePayload(
+	payload string,
+	providerName string,
+	header http.Header,
+) anthropicStreamAction {
+	var event anthropicStreamEvent
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		return anthropicStreamAction{err: fmt.Errorf("%s: stream unmarshal: %w", providerName, err)}
+	}
+
+	switch event.Type {
+	case "message_start":
+		s.recordMessageStart(event.Message)
+	case "content_block_start":
+		s.recordContentBlockStart(event.Index, event.ContentBlock)
+	case "content_block_delta":
+		return s.handleContentBlockDelta(event.Index, event.Delta)
+	case "content_block_stop":
+		s.finishToolBlock(event.Index)
+	case "message_delta":
+		s.recordMessageDelta(event.Delta, event.Usage)
+	case "message_stop":
+		s.finished = true
+
+		return anthropicStreamAction{chunk: s.finalChunk(), emit: true, terminal: true}
+	case "error":
+		return anthropicStreamError(providerName, header, event.Error)
+	}
+
+	return anthropicStreamAction{}
+}
+
+func (s *anthropicStreamState) recordMessageStart(message *anthropicStreamMessage) {
+	if message == nil {
+		return
+	}
+
+	if message.Model != "" {
+		s.out.Model = message.Model
+	}
+
+	s.applyUsage(message.Usage)
+}
+
+func (s *anthropicStreamState) handleContentBlockDelta(index int, delta *anthropicStreamDelta) anthropicStreamAction {
+	if delta == nil {
+		return anthropicStreamAction{}
+	}
+
+	switch delta.Type {
+	case "text_delta":
+		return s.textDeltaChunk(delta.Text)
+	case "input_json_delta":
+		s.recordToolInputDelta(index, delta.PartialJSON)
+	}
+
+	return anthropicStreamAction{}
+}
+
+func (s *anthropicStreamState) textDeltaChunk(text string) anthropicStreamAction {
+	if text == "" {
+		return anthropicStreamAction{}
+	}
+
+	s.recordFirstToken()
+	s.sawContent = true
+
+	return anthropicStreamAction{
+		chunk: Chunk{
+			Content:           text,
+			Provider:          s.out.Provider,
+			Model:             s.out.Model,
+			FirstTokenLatency: s.out.FirstTokenLatency,
+		},
+		emit: true,
+	}
+}
+
+func (s *anthropicStreamState) recordMessageDelta(delta *anthropicStreamDelta, usage *anthropicStreamUsage) {
+	if delta != nil && delta.StopReason != "" {
+		s.out.StopReason = anthropicStopReason(delta.StopReason)
+	}
+
+	if usage != nil {
+		s.applyUsage(*usage)
+	}
+}
+
+func anthropicStreamError(providerName string, header http.Header, payload *anthropicStreamErrorPayload) anthropicStreamAction {
+	if payload == nil {
+		return anthropicStreamAction{err: fmt.Errorf("%s: stream error", providerName)}
+	}
+
+	return anthropicStreamAction{
+		err: newProviderPayloadError(providerName, http.StatusOK, header, payload.Type, payload.Message),
+	}
+}
+
+func streamAnthropicMessages(ctx context.Context, r io.Reader, ch chan<- Chunk, cfg anthropicStreamConfig) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	state := &anthropicStreamState{
+		startedAt: cfg.startedAt,
+		now:       cfg.now,
+		out: Response{
+			Provider: cfg.providerName,
+			Model:    cfg.requestedModel,
+		},
+	}
+
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			sendStreamTerminalError(ctx, ch, fmt.Errorf("%s: stream canceled: %w", cfg.providerName, err))
+
+			return
+		}
+
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			continue
+		}
+
+		action := state.handlePayload(payload, cfg.providerName, cfg.header)
+		if action.err != nil {
+			sendStreamTerminalError(ctx, ch, action.err)
+
+			return
+		}
+
+		if action.emit && !sendStreamChunk(ctx, ch, action.chunk) {
+			return
+		}
+
+		if action.terminal {
+			return
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			sendStreamTerminalError(ctx, ch, fmt.Errorf("%s: stream canceled: %w", cfg.providerName, ctxErr))
+
+			return
+		}
+
+		sendStreamTerminalError(ctx, ch, fmt.Errorf("%s: stream read: %w", cfg.providerName, err))
+
+		return
+	}
+
+	if err := ctx.Err(); err != nil {
+		sendStreamTerminalError(ctx, ch, fmt.Errorf("%s: stream canceled: %w", cfg.providerName, err))
+
+		return
+	}
+
+	if state.finished {
+		sendStreamChunk(ctx, ch, state.finalChunk())
+
+		return
+	}
+
+	sendStreamTerminalError(ctx, ch, fmt.Errorf("%s: stream incomplete: %w", cfg.providerName, ErrStreamIncomplete))
+}
+
+func (s *anthropicStreamState) recordContentBlockStart(index int, block *anthropicContentBlock) {
+	if block == nil || block.Type != string(StopToolUse) {
+		return
+	}
+
+	if s.toolBlocks == nil {
+		s.toolBlocks = make(map[int]*anthropicStreamToolBlock)
+	}
+
+	s.toolBlocks[index] = &anthropicStreamToolBlock{
+		id:    block.ID,
+		name:  block.Name,
+		input: cloneAnyMap(block.Input),
+		seen:  true,
+	}
+}
+
+func (s *anthropicStreamState) recordToolInputDelta(index int, partial string) {
+	if partial == "" {
+		return
+	}
+
+	if s.toolBlocks == nil {
+		s.toolBlocks = make(map[int]*anthropicStreamToolBlock)
+	}
+
+	block := s.toolBlocks[index]
+	if block == nil {
+		block = &anthropicStreamToolBlock{seen: true}
+		s.toolBlocks[index] = block
+	}
+
+	block.inputJSON.WriteString(partial)
+}
+
+func (s *anthropicStreamState) finishToolBlock(index int) {
+	if s.toolBlocks == nil {
+		return
+	}
+
+	block := s.toolBlocks[index]
+	if block == nil || block.inputJSON.Len() == 0 {
+		return
+	}
+
+	var input map[string]any
+	if err := json.Unmarshal([]byte(block.inputJSON.String()), &input); err != nil {
+		input = map[string]any{"raw": block.inputJSON.String()}
+	}
+
+	block.input = input
+}
+
+func (s *anthropicStreamState) finalChunk() Chunk {
+	toolCalls := s.finalToolCalls()
+	if len(toolCalls) > 0 {
+		s.out.ToolCalls = toolCalls
+		s.out.StopReason = StopToolUse
+	} else if s.out.StopReason == StopUnknown && s.sawContent {
+		s.out.StopReason = StopEndTurn
+	}
+
+	return Chunk{
+		Provider:              s.out.Provider,
+		Model:                 s.out.Model,
+		Done:                  true,
+		StopReason:            s.out.StopReason,
+		ToolCalls:             append([]ToolCall(nil), s.out.ToolCalls...),
+		FirstTokenLatency:     s.out.FirstTokenLatency,
+		InputTokens:           s.out.InputTokens,
+		CachedInputTokens:     s.out.CachedInputTokens,
+		CacheWriteInputTokens: s.out.CacheWriteInputTokens,
+		OutputTokens:          s.out.OutputTokens,
+	}
+}
+
+func (s *anthropicStreamState) finalToolCalls() []ToolCall {
+	if len(s.toolBlocks) == 0 {
+		return nil
+	}
+
+	indexes := make([]int, 0, len(s.toolBlocks))
+	for index, block := range s.toolBlocks {
+		if block != nil && block.seen {
+			indexes = append(indexes, index)
+		}
+	}
+
+	slices.Sort(indexes)
+
+	out := make([]ToolCall, 0, len(indexes))
+	for _, index := range indexes {
+		block := s.toolBlocks[index]
+		out = append(out, ToolCall{
+			ID:    block.id,
+			Name:  block.name,
+			Input: cloneAnyMap(block.input),
+		})
+	}
+
+	return out
+}
+
+func (s *anthropicStreamState) applyUsage(usage anthropicStreamUsage) {
+	if usage.InputTokens != 0 || usage.CacheCreationInputTokens != 0 || usage.CacheReadInputTokens != 0 {
+		s.out.InputTokens = usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+		s.out.CacheWriteInputTokens = usage.CacheCreationInputTokens
+		s.out.CachedInputTokens = usage.CacheReadInputTokens
+	}
+
+	if usage.OutputTokens != 0 {
+		s.out.OutputTokens = usage.OutputTokens
+	}
+}
+
+func (s *anthropicStreamState) recordFirstToken() {
+	if s.firstTokenRecorded || s.startedAt.IsZero() || s.now == nil {
+		return
+	}
+
+	s.firstTokenRecorded = true
+
+	if d := s.now().Sub(s.startedAt); d > 0 {
+		s.out.FirstTokenLatency = d
 	}
 }
 

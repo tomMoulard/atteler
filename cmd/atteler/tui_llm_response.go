@@ -41,6 +41,10 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 			errorLine += " (ran for " + formatTaskDuration(elapsed) + ")"
 		}
 
+		if msg.streamedContent {
+			cmds = append(cmds, tea.Println(""))
+		}
+
 		cmds = append(
 			cmds,
 			tea.Println(errStyle.Render(errorLine)),
@@ -78,9 +82,14 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 
 	cmds = append(cmds, llmToolLogCommands(msg.toolLog, msg.liveEvents)...)
 
+	if msg.streamedContent {
+		cmds = append(cmds, tea.Println(""))
+	} else {
+		cmds = append(cmds, tea.Println(header+"\n"+msg.content))
+	}
+
 	cmds = append(
 		cmds,
-		tea.Println(header+"\n"+msg.content),
 		saveSession(m.ctx, m.sessionStore, m.sessionState, m.hookRunner),
 		emitHook(m.ctx, m.hookRunner, m.assistantMessageEvent(msg)),
 	)

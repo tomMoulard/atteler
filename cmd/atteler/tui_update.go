@@ -58,7 +58,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m.updateChat(msg)
 
-	case llmResponseMsg, llmEventLineMsg, llmToolOutputMsg:
+	case llmResponseMsg, llmEventLineMsg, llmStreamStartMsg, llmStreamDeltaMsg, llmToolOutputMsg:
 		return m.updateLLMMessage(msg)
 
 	case shellResultMsg, shellOutputMsg, interactiveShellReadyMsg:
@@ -92,7 +92,7 @@ func (m model) updateLLMMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case llmResponseMsg:
 		return m.updateLLMResponse(msg)
-	case llmEventLineMsg, llmToolOutputMsg:
+	case llmEventLineMsg, llmStreamStartMsg, llmStreamDeltaMsg, llmToolOutputMsg:
 		return m.updateLLMLiveMessage(msg)
 	default:
 		return m, nil
@@ -104,6 +104,19 @@ func (m model) updateLLMLiveMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case llmEventLineMsg:
 		return m, tea.Sequence(
 			tea.Println(dimStyle.Render(msg.line)),
+			listenForLLMLiveMessage(msg.liveCh),
+		)
+	case llmStreamStartMsg:
+		header := assistantLabel.Render("Assistant") + " " +
+			dimStyle.Render("("+msg.model+")")
+
+		return m, tea.Sequence(
+			tea.Println(header),
+			listenForLLMLiveMessage(msg.liveCh),
+		)
+	case llmStreamDeltaMsg:
+		return m, tea.Sequence(
+			tea.Printf("%s", msg.content),
 			listenForLLMLiveMessage(msg.liveCh),
 		)
 	case llmToolOutputMsg:

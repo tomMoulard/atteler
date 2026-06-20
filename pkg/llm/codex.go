@@ -671,7 +671,7 @@ func parseCodexSSEWithClockAndHeader(ctx context.Context, r io.Reader, startedAt
 		}
 
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
+		if payload == "" || payload == sseDonePayload {
 			continue
 		}
 
@@ -735,7 +735,7 @@ func streamCodexSSEWithClock(ctx context.Context, r io.Reader, ch chan<- Chunk, 
 		}
 
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
+		if payload == "" || payload == sseDonePayload {
 			continue
 		}
 

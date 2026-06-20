@@ -113,6 +113,85 @@ func TestClaudeCodeProvider_Complete(t *testing.T) {
 	assert.Equal(t, anthropicOAuthBetas, gotHeaders.Get("anthropic-beta"))
 }
 
+func TestClaudeCodeProvider_CompleteStream(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotReq     anthropicRequest
+		gotHeaders http.Header
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, err = io.WriteString(w, `event: message_start
+data: {"type":"message_start","message":{"model":"claude-opus-4-7","usage":{"input_tokens":4,"cache_read_input_tokens":1}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"stre"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"amed"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`)
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	auth := newTestClaudeCodeAuth(t, "access-1", "refresh-1", futureExpiry())
+	p := &ClaudeCodeProvider{
+		client:  srv.Client(),
+		auth:    auth,
+		baseURL: srv.URL,
+		models:  []string{"claude-opus-4-7"},
+	}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "claude-opus-4-7",
+		Messages: []Message{{Role: RoleUser, Content: "say ok"}},
+	})
+	require.NoError(t, err)
+
+	chunks := drainChunks(ch)
+	require.Len(t, chunks, 3)
+	assert.Equal(t, "stre", chunks[0].Content)
+	assert.False(t, chunks[0].Done)
+	assert.Equal(t, "amed", chunks[1].Content)
+	assert.False(t, chunks[1].Done)
+	assert.True(t, chunks[2].Done)
+
+	resp, err := CollectStream(chunksToStream(chunks))
+	require.NoError(t, err)
+
+	assert.True(t, gotReq.Stream)
+	assert.Equal(t, "Bearer access-1", gotHeaders.Get("Authorization"))
+	assert.Equal(t, "text/event-stream", gotHeaders.Get("Accept"))
+	assert.Equal(t, anthropicOAuthBetas, gotHeaders.Get("anthropic-beta"))
+	assert.Equal(t, "streamed", resp.Content)
+	assert.Equal(t, providerClaudeCode, resp.Provider)
+	assert.Equal(t, "claude-opus-4-7", resp.Model)
+	assert.Equal(t, StopEndTurn, resp.StopReason)
+	assert.Equal(t, 5, resp.InputTokens)
+	assert.Equal(t, 1, resp.CachedInputTokens)
+	assert.Equal(t, 2, resp.OutputTokens)
+}
+
 func TestClaudeCodeProvider_CompleteCoercesThinkingTemperature(t *testing.T) {
 	t.Parallel()
 

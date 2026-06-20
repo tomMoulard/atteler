@@ -131,6 +131,84 @@ func (p activityLoggingProvider) Complete(ctx context.Context, params llm.Comple
 
 func (p activityLoggingProvider) ModelContextWindow(string) int { return 0 }
 
+type streamingTUIProvider struct{}
+
+func (p streamingTUIProvider) Name() string { return "stream" }
+
+func (p streamingTUIProvider) Models() []string { return []string{"model"} }
+
+func (p streamingTUIProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p streamingTUIProvider) HealthCheck(context.Context) error { return nil }
+
+func (p streamingTUIProvider) Complete(context.Context, llm.CompleteParams) (*llm.Response, error) {
+	return nil, errors.New("buffered completion should not be used")
+}
+
+func (p streamingTUIProvider) CompleteStream(ctx context.Context, params llm.CompleteParams) (<-chan llm.Chunk, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	ch := make(chan llm.Chunk, llm.DefaultStreamBuffer)
+
+	go func() {
+		defer close(ch)
+
+		for _, content := range []string{"hel", "lo"} {
+			select {
+			case ch <- llm.Chunk{Content: content, Model: params.Model}:
+			case <-ctx.Done():
+				ch <- llm.Chunk{Err: ctx.Err()}
+
+				return
+			}
+		}
+
+		ch <- llm.Chunk{Done: true, Model: params.Model, StopReason: llm.StopEndTurn, InputTokens: 1, OutputTokens: 2}
+	}()
+
+	return ch, nil
+}
+
+func (p streamingTUIProvider) Capabilities() llm.ProviderCapabilities {
+	return llm.ProviderCapabilities{
+		SupportsChatCompletions: true,
+		SupportsStreaming:       true,
+	}
+}
+
+func (p streamingTUIProvider) ModelContextWindow(string) int { return 0 }
+
+type bufferedTUIProvider struct{}
+
+func (p bufferedTUIProvider) Name() string { return "buffered" }
+
+func (p bufferedTUIProvider) Models() []string { return []string{"model"} }
+
+func (p bufferedTUIProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p bufferedTUIProvider) HealthCheck(context.Context) error { return nil }
+
+func (p bufferedTUIProvider) Complete(_ context.Context, params llm.CompleteParams) (*llm.Response, error) {
+	return &llm.Response{
+		Content:      "buffered reply",
+		Model:        params.Model,
+		StopReason:   llm.StopEndTurn,
+		OutputTokens: 3,
+	}, nil
+}
+
+func (p bufferedTUIProvider) Capabilities() llm.ProviderCapabilities {
+	return llm.ProviderCapabilities{SupportsChatCompletions: true}
+}
+
+func (p bufferedTUIProvider) ModelContextWindow(string) int { return 0 }
+
 type toolCallingProvider struct {
 	command string
 	calls   int
@@ -168,7 +246,122 @@ func (p *toolCallingProvider) Complete(_ context.Context, params llm.CompletePar
 	return &llm.Response{Content: "finished", Model: params.Model, StopReason: llm.StopEndTurn}, nil
 }
 
+func (p *toolCallingProvider) CompleteStream(ctx context.Context, params llm.CompleteParams) (<-chan llm.Chunk, error) {
+	resp, err := p.Complete(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+
+	ch := make(chan llm.Chunk, llm.DefaultStreamBuffer)
+
+	go func() {
+		defer close(ch)
+
+		if resp.Content != "" {
+			for _, content := range []string{"fin", "ished"} {
+				select {
+				case ch <- llm.Chunk{Content: content, Model: resp.Model}:
+				case <-ctx.Done():
+					ch <- llm.Chunk{Err: ctx.Err()}
+
+					return
+				}
+			}
+		}
+
+		select {
+		case ch <- llm.Chunk{
+			Done:       true,
+			Model:      resp.Model,
+			StopReason: resp.StopReason,
+			ToolCalls:  resp.ToolCalls,
+		}:
+		case <-ctx.Done():
+			ch <- llm.Chunk{Err: ctx.Err()}
+		}
+	}()
+
+	return ch, nil
+}
+
+func (p *toolCallingProvider) Capabilities() llm.ProviderCapabilities {
+	return llm.ProviderCapabilities{
+		SupportsChatCompletions: true,
+		SupportsTools:           true,
+		SupportsStreaming:       true,
+	}
+}
+
 func (p *toolCallingProvider) ModelContextWindow(string) int { return 0 }
+
+type toolThenBufferedProvider struct {
+	streamCalls int
+	calls       int
+}
+
+func (p *toolThenBufferedProvider) Name() string { return "mixed" }
+
+func (p *toolThenBufferedProvider) Models() []string { return []string{"model"} }
+
+func (p *toolThenBufferedProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p *toolThenBufferedProvider) HealthCheck(context.Context) error { return nil }
+
+func (p *toolThenBufferedProvider) Complete(context.Context, llm.CompleteParams) (*llm.Response, error) {
+	p.calls++
+
+	return &llm.Response{Content: "final buffered", Model: "model", StopReason: llm.StopEndTurn}, nil
+}
+
+func (p *toolThenBufferedProvider) CompleteStream(ctx context.Context, params llm.CompleteParams) (<-chan llm.Chunk, error) {
+	p.streamCalls++
+	if p.streamCalls > 1 {
+		return nil, errors.New("stream unavailable for final turn")
+	}
+
+	ch := make(chan llm.Chunk, llm.DefaultStreamBuffer)
+
+	go func() {
+		defer close(ch)
+
+		select {
+		case ch <- llm.Chunk{Content: "checking", Model: params.Model}:
+		case <-ctx.Done():
+			ch <- llm.Chunk{Err: ctx.Err()}
+
+			return
+		}
+
+		select {
+		case ch <- llm.Chunk{
+			Done:       true,
+			Model:      params.Model,
+			StopReason: llm.StopToolUse,
+			ToolCalls: []llm.ToolCall{{
+				ID:    "call-1",
+				Name:  "bash",
+				Input: map[string]any{"command": `printf 'tool\n'`},
+			}},
+		}:
+		case <-ctx.Done():
+			ch <- llm.Chunk{Err: ctx.Err()}
+		}
+	}()
+
+	return ch, nil
+}
+
+func (p *toolThenBufferedProvider) Capabilities() llm.ProviderCapabilities {
+	return llm.ProviderCapabilities{
+		SupportsChatCompletions: true,
+		SupportsTools:           true,
+		SupportsStreaming:       true,
+	}
+}
+
+func (p *toolThenBufferedProvider) ModelContextWindow(string) int { return 0 }
 
 type idleSuggestionProvider struct {
 	response     string
@@ -357,6 +550,99 @@ func TestCallLLMBuffersProviderActivityEvents(t *testing.T) {
 	assert.Contains(t, lines, "session=session-1")
 }
 
+func TestCallLLMStreamsAssistantDeltasBeforeCompletion(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(streamingTUIProvider{})
+
+	liveCh := make(chan tea.Msg, 16)
+	done := make(chan tea.Msg, 1)
+
+	go func() {
+		done <- callLLM(context.Background(), registry, llmRequest{
+			eventBase: events.Event{
+				SessionID: "session-1",
+				Model:     "stream/model",
+			},
+			hookRunner: events.NewRunner(nil),
+			model:      "stream/model",
+			messages: []llm.Message{{
+				Role:    llm.RoleUser,
+				Content: "hello",
+			}},
+			liveCh: liveCh,
+		})()
+	}()
+
+	start := requireLiveStreamStartBefore(t, liveCh, liveLLMResponseTimeout)
+	assert.Equal(t, "model", start.model)
+
+	first := requireLiveStreamDeltaBefore(t, liveCh)
+	assert.Equal(t, "hel", first.content)
+	second := requireLiveStreamDeltaBefore(t, liveCh)
+	assert.Equal(t, "lo", second.content)
+
+	msg := requireLiveLLMResponseBefore(t, liveCh)
+	require.NoError(t, msg.err)
+	assert.Equal(t, "hello", msg.content)
+	assert.Equal(t, "stream", msg.provider)
+	assert.Equal(t, "model", msg.model)
+	assert.True(t, msg.streamedContent)
+	assert.Equal(t, 2, msg.tokenUsage.OutputTokens)
+
+	select {
+	case raw := <-done:
+		assert.Nil(t, raw)
+	case <-time.After(liveLLMResponseTimeout):
+		require.FailNow(t, "timed out waiting for callLLM command return")
+	}
+}
+
+func TestCallLLMFallsBackToBufferedWhenRoleLacksStreaming(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(bufferedTUIProvider{})
+	require.NoError(t, registry.SetModelRole("writer", llm.ModelRole{
+		Preferred: "buffered/model",
+	}))
+
+	liveCh := make(chan tea.Msg, 16)
+	done := make(chan tea.Msg, 1)
+
+	go func() {
+		done <- callLLM(context.Background(), registry, llmRequest{
+			eventBase: events.Event{
+				SessionID: "session-1",
+				Model:     "writer",
+			},
+			hookRunner: events.NewRunner(nil),
+			model:      "writer",
+			messages: []llm.Message{{
+				Role:    llm.RoleUser,
+				Content: "hello",
+			}},
+			liveCh: liveCh,
+		})()
+	}()
+
+	msg := requireLiveLLMResponseBefore(t, liveCh)
+	require.NoError(t, msg.err)
+	assert.Equal(t, "buffered reply", msg.content)
+	assert.Equal(t, "buffered", msg.provider)
+	assert.Equal(t, "model", msg.model)
+	assert.False(t, msg.streamedContent)
+	assert.Equal(t, 3, msg.tokenUsage.OutputTokens)
+
+	select {
+	case raw := <-done:
+		assert.Nil(t, raw)
+	case <-time.After(liveLLMResponseTimeout):
+		require.FailNow(t, "timed out waiting for callLLM command return")
+	}
+}
+
 func TestCallLLMWithToolsStreamsCommandOutputBeforeCompletion(t *testing.T) {
 	t.Parallel()
 
@@ -396,10 +682,19 @@ func TestCallLLMWithToolsStreamsCommandOutputBeforeCompletion(t *testing.T) {
 	default:
 	}
 
-	msg := requireLiveLLMResponseBefore(t, liveCh, liveLLMResponseTimeout)
+	start := requireLiveStreamStartBefore(t, liveCh, liveLLMResponseTimeout)
+	assert.Equal(t, "tool-model", start.model)
+
+	first := requireLiveStreamDeltaBefore(t, liveCh)
+	assert.Equal(t, "fin", first.content)
+	second := requireLiveStreamDeltaBefore(t, liveCh)
+	assert.Equal(t, "ished", second.content)
+
+	msg := requireLiveLLMResponseBefore(t, liveCh)
 	require.NoError(t, msg.err)
 	assert.Equal(t, "finished", msg.content)
 	assert.True(t, msg.liveEvents)
+	assert.True(t, msg.streamedContent)
 
 	select {
 	case raw := <-done:
@@ -448,7 +743,7 @@ func TestCallLLMWithToolsStreamsCommandStderrBeforeCompletion(t *testing.T) {
 	default:
 	}
 
-	msg := requireLiveLLMResponseBefore(t, liveCh, liveLLMResponseTimeout)
+	msg := requireLiveLLMResponseBefore(t, liveCh)
 	require.NoError(t, msg.err)
 	assert.Equal(t, "finished", msg.content)
 
@@ -456,6 +751,55 @@ func TestCallLLMWithToolsStreamsCommandStderrBeforeCompletion(t *testing.T) {
 	case raw := <-done:
 		assert.Nil(t, raw)
 	case <-time.After(liveToolCompletionTimeout):
+		require.FailNow(t, "timed out waiting for callLLM command return")
+	}
+}
+
+func TestCallLLMWithToolsPrintsBufferedFinalAfterIntermediateStream(t *testing.T) {
+	t.Parallel()
+
+	registry := llm.NewRegistry()
+	registry.Register(&toolThenBufferedProvider{})
+
+	liveCh := make(chan tea.Msg, 16)
+	done := make(chan tea.Msg, 1)
+
+	go func() {
+		done <- callLLM(context.Background(), registry, llmRequest{
+			eventBase: events.Event{
+				SessionID: "session-1",
+				Model:     "mixed/model",
+			},
+			hookRunner: events.NewRunner(nil),
+			model:      "mixed/model",
+			messages: []llm.Message{{
+				Role:    llm.RoleUser,
+				Content: "run tool",
+			}},
+			useTools:   true,
+			workingDir: t.TempDir(),
+			liveCh:     liveCh,
+		})()
+	}()
+
+	start := requireLiveStreamStartBefore(t, liveCh, liveLLMResponseTimeout)
+	assert.Equal(t, "model", start.model)
+
+	delta := requireLiveStreamDeltaBefore(t, liveCh)
+	assert.Equal(t, "checking", delta.content)
+
+	output := requireLiveToolOutputBefore(t, liveCh, liveLLMResponseTimeout)
+	assert.Equal(t, "tool\n", output.data)
+
+	msg := requireLiveLLMResponseBefore(t, liveCh)
+	require.NoError(t, msg.err)
+	assert.Equal(t, "final buffered", msg.content)
+	assert.False(t, msg.streamedContent)
+
+	select {
+	case raw := <-done:
+		assert.Nil(t, raw)
+	case <-time.After(liveLLMResponseTimeout):
 		require.FailNow(t, "timed out waiting for callLLM command return")
 	}
 }
@@ -609,10 +953,44 @@ func requireLiveToolOutputBefore(t *testing.T, liveCh <-chan tea.Msg, timeout ti
 	}
 }
 
-func requireLiveLLMResponseBefore(t *testing.T, liveCh <-chan tea.Msg, timeout time.Duration) llmResponseMsg {
+func requireLiveStreamStartBefore(t *testing.T, liveCh <-chan tea.Msg, timeout time.Duration) llmStreamStartMsg {
 	t.Helper()
 
 	deadline := time.After(timeout)
+
+	for {
+		select {
+		case raw := <-liveCh:
+			if msg, ok := raw.(llmStreamStartMsg); ok {
+				return msg
+			}
+		case <-deadline:
+			require.FailNow(t, "timed out waiting for live stream start")
+		}
+	}
+}
+
+func requireLiveStreamDeltaBefore(t *testing.T, liveCh <-chan tea.Msg) llmStreamDeltaMsg {
+	t.Helper()
+
+	deadline := time.After(liveLLMResponseTimeout)
+
+	for {
+		select {
+		case raw := <-liveCh:
+			if msg, ok := raw.(llmStreamDeltaMsg); ok {
+				return msg
+			}
+		case <-deadline:
+			require.FailNow(t, "timed out waiting for live stream delta")
+		}
+	}
+}
+
+func requireLiveLLMResponseBefore(t *testing.T, liveCh <-chan tea.Msg) llmResponseMsg {
+	t.Helper()
+
+	deadline := time.After(liveLLMResponseTimeout)
 
 	for {
 		select {

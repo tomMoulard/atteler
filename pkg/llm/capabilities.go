@@ -119,13 +119,6 @@ func (o *OpenAIProvider) Capabilities() ProviderCapabilities {
 		capabilities = providerCapabilitiesForRouteCapabilities(capabilities, o.capabilities)
 	}
 
-	// The current OpenAI-compatible adapter exposes buffered chat and embedding
-	// calls only. A custom endpoint may support streaming on the wire, but routing
-	// must advertise caller-facing streaming only once this provider implements
-	// StreamProvider; otherwise a role requiring streaming could silently receive
-	// a buffered response.
-	capabilities.SupportsStreaming = false
-
 	if o.Name() != providerOpenAI && strings.TrimSpace(o.effectiveModelsPath()) == "" {
 		capabilities.SupportsNetworkModelDiscovery = false
 	}
@@ -153,7 +146,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 		SupportsBatch:                 true,
 		SupportsPromptCaching:         true,
 		SupportsCacheAccounting:       true,
-		SupportsStreaming:             false,
+		SupportsStreaming:             true,
 		SupportsNetworkModelDiscovery: true,
 		SupportsRateLimitMetadata:     true,
 		SupportsRetries:               true,
@@ -186,7 +179,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 		SupportsBatch:                 true,
 		SupportsPromptCaching:         true,
 		SupportsCacheAccounting:       true,
-		SupportsStreaming:             false,
+		SupportsStreaming:             true,
 		SupportsNetworkModelDiscovery: true,
 		SupportsRateLimitMetadata:     true,
 		SupportsRetries:               true,
@@ -219,7 +212,7 @@ var builtInProviderCapabilities = map[string]ProviderCapabilities{
 		SupportsBatch:                 false,
 		SupportsPromptCaching:         true,
 		SupportsCacheAccounting:       true,
-		SupportsStreaming:             false,
+		SupportsStreaming:             true,
 		SupportsNetworkModelDiscovery: false,
 		SupportsRateLimitMetadata:     true,
 		SupportsRetries:               true,

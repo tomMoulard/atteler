@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/permission"
@@ -267,6 +268,49 @@ func (c *ClaudeCodeProvider) Complete(ctx context.Context, params CompleteParams
 	return resp, nil
 }
 
+// CompleteStream performs a streaming completion through the Claude Code OAuth
+// Messages path, refreshing the OAuth access token once on setup-time 401.
+func (c *ClaudeCodeProvider) CompleteStream(ctx context.Context, params CompleteParams) (<-chan Chunk, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	model := params.Model
+	if model == "" {
+		models := c.Models()
+		if len(models) == 0 {
+			return nil, errors.New("claude code model not configured")
+		}
+
+		model = models[0]
+	}
+
+	params.Model = model
+
+	params, adjustments, err := prepareCompleteParamsForProvider(providerClaudeCode, params)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := buildAnthropicRequestForProvider(providerClaudeCode, params)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Stream = true
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("claude code: marshal stream: %w", err)
+	}
+
+	return c.doMessagesStream(ctx, body, model, commandActivityOnce(ctx, events.Event{
+		Type:     events.CommandExecute,
+		Model:    model,
+		Metadata: claudeCodeCommandMetadata(adjustments),
+	}))
+}
+
 func claudeCodeCommandMetadata(adjustments []completeParamAdjustment) map[string]string {
 	metadata := map[string]string{
 		"command":  "claude_code.messages",
@@ -299,6 +343,36 @@ func (c *ClaudeCodeProvider) doMessagesRequest(ctx context.Context, body []byte,
 	access = c.auth.snapshot()
 
 	return c.sendMessages(ctx, body, access, startCallback)
+}
+
+func (c *ClaudeCodeProvider) doMessagesStream(ctx context.Context, body []byte, model string, startCallback func()) (<-chan Chunk, error) {
+	access := c.auth.snapshot()
+
+	startedAt := time.Now()
+
+	bodyStream, header, err := c.sendMessagesStream(ctx, body, access, startCallback)
+	if err == nil {
+		return streamClaudeCodeMessagesBody(ctx, bodyStream, header, model, startedAt), nil
+	}
+
+	var unauthorized *claudeCodeUnauthorizedError
+	if !errors.As(err, &unauthorized) {
+		return nil, err
+	}
+
+	if refreshErr := c.auth.refresh(ctx, access); refreshErr != nil {
+		return nil, fmt.Errorf("claude code refresh after 401: %w", refreshErr)
+	}
+
+	access = c.auth.snapshot()
+	startedAt = time.Now()
+
+	bodyStream, header, err = c.sendMessagesStream(ctx, body, access, startCallback)
+	if err != nil {
+		return nil, err
+	}
+
+	return streamClaudeCodeMessagesBody(ctx, bodyStream, header, model, startedAt), nil
 }
 
 type claudeCodeUnauthorizedError struct {
@@ -365,6 +439,69 @@ func (c *ClaudeCodeProvider) sendMessages(ctx context.Context, body []byte, acce
 	result.Provider = providerClaudeCode
 
 	return result, nil
+}
+
+func (c *ClaudeCodeProvider) sendMessagesStream(ctx context.Context, body []byte, access string, startCallback func()) (io.ReadCloser, http.Header, error) {
+	if err := authorizeProviderPermission(ctx, providerClaudeCode, "call Claude Code messages stream", c.baseURL+"/v1/messages", permission.OperationNetwork, permission.OperationCredentialAccess); err != nil {
+		return nil, nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, fmt.Errorf("claude code: new stream request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("anthropic-version", defaultAnthropicVersion)
+	httpReq.Header.Set("anthropic-beta", anthropicOAuthBetas)
+	httpReq.Header.Set("Authorization", "Bearer "+access)
+
+	if startCallback != nil {
+		startCallback()
+	}
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("claude code: stream request: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		defer resp.Body.Close()
+
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes)) //nolint:errcheck // best-effort body capture for the error message
+
+		return nil, nil, &claudeCodeUnauthorizedError{err: newProviderHTTPError(providerClaudeCode, resp, raw)}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes)) //nolint:errcheck // best-effort body capture for the error message
+
+		return nil, nil, newProviderHTTPError(providerClaudeCode, resp, raw)
+	}
+
+	return resp.Body, resp.Header.Clone(), nil
+}
+
+func streamClaudeCodeMessagesBody(ctx context.Context, body io.ReadCloser, header http.Header, model string, startedAt time.Time) <-chan Chunk {
+	ch := make(chan Chunk, DefaultStreamBuffer)
+
+	go func() {
+		defer close(ch)
+		defer body.Close()
+
+		streamAnthropicMessages(ctx, body, ch, anthropicStreamConfig{
+			providerName:   providerClaudeCode,
+			requestedModel: model,
+			header:         header,
+			startedAt:      startedAt,
+			now:            time.Now,
+		})
+	}()
+
+	return ch
 }
 
 func defaultClaudeCodeModels() []string {

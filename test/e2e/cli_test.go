@@ -1616,9 +1616,27 @@ func startFakeOpenAIChatCompletions(t *testing.T, texts []string) *httptest.Serv
 			return
 		}
 
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode OpenAI chat request: %v", err)
+
+			return
+		}
+
 		index := int(calls.Add(1)) - 1
 		if index >= len(texts) {
 			index = len(texts) - 1
+		}
+
+		if req.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: {\"model\":\"gpt-4.1\",\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", texts[index])
+			fmt.Fprint(w, "data: {\"model\":\"gpt-4.1\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1696,6 +1714,25 @@ func startFakeAnthropicMessages(t *testing.T, text, model string) *httptest.Serv
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/messages") {
 			http.NotFound(w, r)
+			return
+		}
+
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode Anthropic messages request: %v", err)
+
+			return
+		}
+
+		if req.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":%q,\"usage\":{\"input_tokens\":1}}}\n\n", model)
+			fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%q}}\n\n", text)
+			fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n")
+			fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+
 			return
 		}
 

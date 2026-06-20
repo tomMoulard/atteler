@@ -24,6 +24,10 @@ type AgentLoopConfig struct {
 	OnToolCall   func(call ToolCall)
 	OnToolResult func(call ToolCall, result ToolResult)
 	OnContent    func(content string)
+	// OnStreamChunk is called as model stream chunks arrive. It is optional and
+	// intended for interactive callers that need token-level progress; when nil
+	// the loop preserves the buffered completion path.
+	OnStreamChunk func(chunk Chunk)
 
 	// BeforeModelCall is invoked immediately before each model call with the
 	// exact request that will be sent. Returning an error stops the loop before
@@ -196,7 +200,7 @@ func AgentLoop(
 		requestSummary := summarizeModelRequest(iterParams, fallbackModels)
 		modelCtx, cancelModelCall, wallTimeLimited := state.modelCallContext(ctx)
 
-		resp, err := reg.CompleteWithFallback(modelCtx, iterParams, fallbackModels)
+		resp, err := completeAgentLoopModelCall(modelCtx, reg, iterParams, fallbackModels, cfg.OnStreamChunk)
 		modelCtxErr := modelCtx.Err()
 
 		if cancelModelCall != nil {
@@ -332,6 +336,38 @@ func AgentLoop(
 
 		state.usage.Iterations++
 	}
+}
+
+func completeAgentLoopModelCall(
+	ctx context.Context,
+	reg *Registry,
+	params CompleteParams,
+	fallbackModels []string,
+	onStreamChunk func(Chunk),
+) (*Response, error) {
+	if onStreamChunk == nil {
+		return reg.CompleteWithFallback(ctx, params, fallbackModels)
+	}
+
+	ch, err := reg.CompleteStreamWithFallback(ctx, params, fallbackModels)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, err
+		}
+
+		// Streaming is preferred for interactive callers, but the agent loop
+		// must not make streaming a hard routing requirement for configured
+		// model roles/providers that can still complete successfully through
+		// the buffered contract.
+		return reg.CompleteWithFallback(ctx, params, fallbackModels)
+	}
+
+	resp, err := collectStream(ch, onStreamChunk)
+	if err != nil {
+		return resp, err
+	}
+
+	return resp, nil
 }
 
 func usageErrorStopCondition(err error, budget AgentLoopBudget) AgentLoopStopCondition {

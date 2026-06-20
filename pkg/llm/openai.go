@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tommoulard/atteler/pkg/modelroute"
 	"github.com/tommoulard/atteler/pkg/permission"
@@ -440,6 +442,7 @@ type openaiRequest struct {
 	TopP            *float64              `json:"top_p,omitempty"`
 	Seed            *int                  `json:"seed,omitempty"`
 	ResponseFormat  *openaiResponseFormat `json:"response_format,omitempty"`
+	StreamOptions   *openaiStreamOptions  `json:"stream_options,omitempty"`
 	Model           string                `json:"model,omitempty"`
 	ServiceTier     string                `json:"service_tier,omitempty"`
 	ReasoningEffort string                `json:"reasoning_effort,omitempty"`
@@ -447,11 +450,16 @@ type openaiRequest struct {
 	Stop            []string              `json:"stop,omitempty"`
 	Tools           []openaiTool          `json:"tools,omitempty"`
 	MaxTokens       int                   `json:"max_tokens,omitempty"`
+	Stream          bool                  `json:"stream,omitempty"`
 }
 
 type openaiResponseFormat struct {
 	JSONSchema *openaiJSONSchema `json:"json_schema,omitempty"`
 	Type       string            `json:"type"`
+}
+
+type openaiStreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 type openaiJSONSchema struct {
@@ -622,6 +630,104 @@ func (o *OpenAIProvider) complete(ctx context.Context, params CompleteParams) (*
 	result.Provider = o.Name()
 
 	return result, nil
+}
+
+// CompleteStream performs a streaming chat completion using the OpenAI Chat
+// Completions SSE protocol. Setup failures are returned directly; once a
+// channel is returned, read/provider failures are delivered as terminal error
+// chunks.
+func (o *OpenAIProvider) CompleteStream(ctx context.Context, params CompleteParams) (<-chan Chunk, error) {
+	if err := requireCredentialContext(ctx); err != nil {
+		return nil, err
+	}
+
+	var ch <-chan Chunk
+
+	err := o.withRegionalRetry(func() error {
+		out, completeErr := o.completeStream(ctx, params)
+		ch = out
+
+		return completeErr
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return ch, nil
+}
+
+func (o *OpenAIProvider) completeStream(ctx context.Context, params CompleteParams) (<-chan Chunk, error) {
+	req, err := o.buildRequest(params)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Stream = true
+	if o.Name() == providerOpenAI {
+		req.StreamOptions = &openaiStreamOptions{IncludeUsage: true}
+	}
+
+	if o.omitModelInChatBody() {
+		req.Model = ""
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s: marshal stream: %w", o.Name(), err)
+	}
+
+	endpoint, err := o.endpointURL(o.effectiveChatPath(), params.Model)
+	if err != nil {
+		return nil, err
+	}
+
+	if policyErr := authorizeProviderPermission(ctx, o.Name(), "call OpenAI chat completions stream", endpoint, permission.OperationNetwork, permission.OperationCredentialAccess); policyErr != nil {
+		return nil, policyErr
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("%s: new stream request: %w", o.Name(), err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	o.setAuthHeader(httpReq)
+
+	startedAt := time.Now()
+
+	resp, err := o.client.Do(httpReq) //nolint:bodyclose // Successful streaming responses are closed by the goroutine below.
+	if err != nil {
+		return nil, fmt.Errorf("%s: stream request: %w", o.Name(), err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("%s: read stream error body: %w", o.Name(), readErr)
+		}
+
+		return nil, wrapOpenAIRegionalHostnameError(newProviderHTTPError(o.Name(), resp, respBody))
+	}
+
+	ch := make(chan Chunk, DefaultStreamBuffer)
+
+	go func() {
+		defer close(ch)
+		defer resp.Body.Close()
+
+		streamOpenAIChatCompletions(ctx, resp.Body, ch, openAIStreamConfig{
+			providerName:   o.Name(),
+			requestedModel: params.Model,
+			header:         resp.Header,
+			startedAt:      startedAt,
+			now:            time.Now,
+		})
+	}()
+
+	return ch, nil
 }
 
 // Embed performs a vector embedding request using OpenAI's embeddings wire
@@ -1077,6 +1183,309 @@ func parseOpenAIResponse(or openaiResponse) *Response {
 	}
 
 	return result
+}
+
+type openAIStreamConfig struct {
+	header         http.Header
+	now            func() time.Time
+	startedAt      time.Time
+	providerName   string
+	requestedModel string
+}
+
+type openAIStreamState struct {
+	toolCalls          map[int]*openAIStreamToolAccumulator
+	now                func() time.Time
+	startedAt          time.Time
+	out                Response
+	firstTokenRecorded bool
+	finished           bool
+	sawContent         bool
+}
+
+type openAIStreamToolAccumulator struct {
+	id        string
+	typ       string
+	name      string
+	arguments strings.Builder
+	seen      bool
+}
+
+type openAIStreamResponse struct {
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	} `json:"error,omitempty"`
+	Usage *struct {
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		PromptTokensDetails struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+	} `json:"usage,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Choices []struct {
+		FinishReason string `json:"finish_reason"`
+		Delta        struct {
+			Content   string                 `json:"content"`
+			ToolCalls []openAIStreamToolCall `json:"tool_calls,omitempty"`
+		} `json:"delta"`
+	} `json:"choices,omitempty"`
+}
+
+type openAIStreamToolCall struct {
+	Function openaiToolCallFunction `json:"function"`
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Index    int                    `json:"index"`
+}
+
+func streamOpenAIChatCompletions(ctx context.Context, r io.Reader, ch chan<- Chunk, cfg openAIStreamConfig) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	state := &openAIStreamState{
+		startedAt: cfg.startedAt,
+		now:       cfg.now,
+		out: Response{
+			Provider: cfg.providerName,
+			Model:    cfg.requestedModel,
+		},
+	}
+
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			sendStreamTerminalError(ctx, ch, fmt.Errorf("%s: stream canceled: %w", cfg.providerName, err))
+
+			return
+		}
+
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			continue
+		}
+
+		if payload == sseDonePayload {
+			if !sendStreamChunk(ctx, ch, state.finalChunk()) {
+				return
+			}
+
+			return
+		}
+
+		chunk, emit, err := state.handlePayload(payload, cfg.providerName, cfg.header)
+		if err != nil {
+			sendStreamTerminalError(ctx, ch, err)
+
+			return
+		}
+
+		if emit && !sendStreamChunk(ctx, ch, chunk) {
+			return
+		}
+	}
+
+	finishOpenAIStreamScan(ctx, scanner.Err(), ch, cfg.providerName, state)
+}
+
+func finishOpenAIStreamScan(
+	ctx context.Context,
+	scanErr error,
+	ch chan<- Chunk,
+	providerName string,
+	state *openAIStreamState,
+) {
+	if scanErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			sendStreamTerminalError(ctx, ch, fmt.Errorf("%s: stream canceled: %w", providerName, ctxErr))
+
+			return
+		}
+
+		sendStreamTerminalError(ctx, ch, fmt.Errorf("%s: stream read: %w", providerName, scanErr))
+
+		return
+	}
+
+	if err := ctx.Err(); err != nil {
+		sendStreamTerminalError(ctx, ch, fmt.Errorf("%s: stream canceled: %w", providerName, err))
+
+		return
+	}
+
+	if state.finished {
+		sendStreamChunk(ctx, ch, state.finalChunk())
+
+		return
+	}
+
+	sendStreamTerminalError(ctx, ch, fmt.Errorf("%s: stream incomplete: %w", providerName, ErrStreamIncomplete))
+}
+
+func (s *openAIStreamState) handlePayload(
+	payload string,
+	providerName string,
+	header http.Header,
+) (Chunk, bool, error) {
+	var event openAIStreamResponse
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		return Chunk{}, false, fmt.Errorf("%s: stream unmarshal: %w", providerName, err)
+	}
+
+	if event.Error != nil {
+		return Chunk{}, false, newProviderPayloadError(
+			providerName,
+			http.StatusOK,
+			header,
+			firstNonEmptyString(event.Error.Code, event.Error.Type),
+			event.Error.Message,
+		)
+	}
+
+	if event.Model != "" {
+		s.out.Model = event.Model
+	}
+
+	if event.Usage != nil {
+		s.out.InputTokens = event.Usage.PromptTokens
+		s.out.CachedInputTokens = event.Usage.PromptTokensDetails.CachedTokens
+		s.out.OutputTokens = event.Usage.CompletionTokens
+	}
+
+	var content strings.Builder
+
+	for _, choice := range event.Choices {
+		if choice.Delta.Content != "" {
+			s.recordFirstToken()
+			s.sawContent = true
+
+			content.WriteString(choice.Delta.Content)
+		}
+
+		for _, toolCall := range choice.Delta.ToolCalls {
+			s.recordToolCallDelta(toolCall)
+		}
+
+		if choice.FinishReason != "" {
+			s.finished = true
+			s.out.StopReason = openaiStopReason(choice.FinishReason)
+		}
+	}
+
+	if content.Len() == 0 {
+		return Chunk{}, false, nil
+	}
+
+	return Chunk{
+		Content:           content.String(),
+		Provider:          s.out.Provider,
+		Model:             s.out.Model,
+		FirstTokenLatency: s.out.FirstTokenLatency,
+	}, true, nil
+}
+
+func (s *openAIStreamState) recordToolCallDelta(delta openAIStreamToolCall) {
+	if s.toolCalls == nil {
+		s.toolCalls = make(map[int]*openAIStreamToolAccumulator)
+	}
+
+	acc := s.toolCalls[delta.Index]
+	if acc == nil {
+		acc = &openAIStreamToolAccumulator{}
+		s.toolCalls[delta.Index] = acc
+	}
+
+	acc.seen = true
+
+	if delta.ID != "" {
+		acc.id = delta.ID
+	}
+
+	if delta.Type != "" {
+		acc.typ = delta.Type
+	}
+
+	if delta.Function.Name != "" {
+		acc.name = delta.Function.Name
+	}
+
+	if delta.Function.Arguments != "" {
+		acc.arguments.WriteString(delta.Function.Arguments)
+	}
+}
+
+func (s *openAIStreamState) finalChunk() Chunk {
+	if len(s.toolCalls) > 0 {
+		s.out.ToolCalls = s.finalToolCalls()
+		s.out.StopReason = StopToolUse
+	} else if s.out.StopReason == StopUnknown && s.sawContent {
+		s.out.StopReason = StopEndTurn
+	}
+
+	return Chunk{
+		Provider:              s.out.Provider,
+		Model:                 s.out.Model,
+		Done:                  true,
+		StopReason:            s.out.StopReason,
+		ToolCalls:             append([]ToolCall(nil), s.out.ToolCalls...),
+		FirstTokenLatency:     s.out.FirstTokenLatency,
+		InputTokens:           s.out.InputTokens,
+		CachedInputTokens:     s.out.CachedInputTokens,
+		CacheWriteInputTokens: s.out.CacheWriteInputTokens,
+		OutputTokens:          s.out.OutputTokens,
+	}
+}
+
+func (s *openAIStreamState) finalToolCalls() []ToolCall {
+	if len(s.toolCalls) == 0 {
+		return nil
+	}
+
+	indexes := make([]int, 0, len(s.toolCalls))
+	for index, acc := range s.toolCalls {
+		if acc != nil && acc.seen {
+			indexes = append(indexes, index)
+		}
+	}
+
+	slices.Sort(indexes)
+
+	out := make([]ToolCall, 0, len(indexes))
+	for _, index := range indexes {
+		acc := s.toolCalls[index]
+		rawArgs := acc.arguments.String()
+
+		var input map[string]any
+		if err := json.Unmarshal([]byte(rawArgs), &input); err != nil {
+			input = map[string]any{"raw": rawArgs}
+		}
+
+		out = append(out, ToolCall{
+			ID:    acc.id,
+			Name:  acc.name,
+			Input: input,
+		})
+	}
+
+	return out
+}
+
+func (s *openAIStreamState) recordFirstToken() {
+	if s.firstTokenRecorded || s.startedAt.IsZero() || s.now == nil {
+		return
+	}
+
+	s.firstTokenRecorded = true
+
+	if d := s.now().Sub(s.startedAt); d > 0 {
+		s.out.FirstTokenLatency = d
+	}
 }
 
 func buildOpenAIMessages(messages []Message) []openaiMessage {
