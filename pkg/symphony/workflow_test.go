@@ -151,6 +151,7 @@ func TestWorkflowManager_AutonomyOverrideAppliesBeforeGitHubCLIFallback(t *testi
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing_github_token")
+	assert.NotContains(t, err.Error(), "gh auth token")
 	assert.NoFileExists(t, filepath.Join(auditDir, "commands.jsonl"))
 }
 
@@ -547,7 +548,7 @@ func TestResolveConfig_NormalizesTurnSandboxScalar(t *testing.T) {
 	assert.Equal(t, map[string]any{"type": "workspaceWrite"}, cfg.Codex.TurnSandboxPolicy)
 }
 
-func TestResolveConfig_GitHubTokenFallsBackToGHCLI(t *testing.T) {
+func TestResolveConfig_GitHubTokenFallsBackToGHAuthToken(t *testing.T) {
 	t.Setenv(githubTokenEnv, "")
 	t.Setenv(githubCLITokenEnv, "")
 
@@ -555,6 +556,7 @@ func TestResolveConfig_GitHubTokenFallsBackToGHCLI(t *testing.T) {
 	ghPath := filepath.Join(binDir, "gh")
 	require.NoError(t, os.WriteFile(ghPath, []byte(`#!/usr/bin/env sh
 if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+  printf '%s\n' 'ignored warning from stderr' >&2
   printf '%s\n' 'cli-token'
   exit 0
 fi
@@ -576,37 +578,63 @@ exit 1
 	assert.Equal(t, "cli-token", cfg.Tracker.APIKey)
 }
 
-func TestResolveConfig_GitHubTokenFallsBackToGHAuthStatus(t *testing.T) {
+func TestResolveConfig_GitHubTokenDoesNotRunTokenDumpingStatusFallback(t *testing.T) {
 	t.Setenv(githubTokenEnv, "")
 	t.Setenv(githubCLITokenEnv, "")
 
+	auditDir := filepath.Join(t.TempDir(), "audit")
+	t.Setenv(shell.EnvAuditDir, auditDir)
+
 	binDir := t.TempDir()
+	statusMarkerPath := filepath.Join(t.TempDir(), "status-fallback-ran")
+	argsPath := filepath.Join(t.TempDir(), "gh-args")
 	ghPath := filepath.Join(binDir, "gh")
-	require.NoError(t, os.WriteFile(ghPath, []byte(`#!/usr/bin/env sh
+	script := "#!/usr/bin/env sh\n" +
+		"printf '%s\\n' \"$*\" >> " + strconv.Quote(argsPath) + "\n" +
+		`
 if [ "$1" = "auth" ] && [ "$2" = "token" ]; then
+  printf '%s\n' 'secret-from-gh-stderr' >&2
   exit 1
 fi
-if [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$3" = "--show-token" ]; then
-  printf '%s\n' 'github.com'
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  printf ran > ` + strconv.Quote(statusMarkerPath) + `
   printf '%s\n' '  - Token: status-token'
   exit 0
 fi
 exit 1
-`), 0o700))
+`
+	require.NoError(t, os.WriteFile(ghPath, []byte(script), 0o700))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "WORKFLOW.md")
 
-	cfg, err := ResolveConfig(t.Context(), map[string]any{
+	_, err := ResolveConfig(t.Context(), map[string]any{
 		"tracker": map[string]any{
 			"kind":       "github",
 			"repository": "openai/symphony",
 		},
 	}, path)
-	require.NoError(t, err)
+	require.Error(t, err)
 
-	assert.Equal(t, "status-token", cfg.Tracker.APIKey)
+	assert.Contains(t, err.Error(), "missing_github_token")
+	assert.Contains(t, err.Error(), "tracker.api_key")
+	assert.Contains(t, err.Error(), githubTokenEnv)
+	assert.Contains(t, err.Error(), githubCLITokenEnv)
+	assert.Contains(t, err.Error(), "gh auth token")
+	assert.NotContains(t, err.Error(), "secret-from-gh-stderr")
+	assert.NoFileExists(t, statusMarkerPath)
+
+	argsData, readErr := os.ReadFile(argsPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "auth token\n", string(argsData))
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "commands.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), "gh auth token")
+	assert.Contains(t, string(auditData), string(shell.OutputSensitive))
+	assert.NotContains(t, string(auditData), "secret-from-gh-stderr")
+	assert.NotContains(t, string(auditData), "status-token")
 }
 
 func TestRunGitHubCLI_PermissionPolicyDeniesCredentialAccessBeforeExecution(t *testing.T) {
