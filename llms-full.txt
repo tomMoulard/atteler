@@ -1117,6 +1117,26 @@ agent_loop:
   checkpoint_interval: 0  # prompt to continue every N iterations
 ```
 
+## Context and project instructions
+
+Atteler automatically loads project instruction files into a pinned system
+context block. For each directory from the Git repository root down to the
+working directory, it selects `AGENTS.md` when present, otherwise `CLAUDE.md`.
+The block is compressed with contextpack before each request and appears in
+`atteler config explain` under `runtime.project_instructions.*`.
+Discovery is separate from `context.reference_policy` glob allow/deny rules so
+repository memory is not accidentally suppressed; set `enabled: false` to opt
+out.
+
+```yaml
+context:
+  project_instructions:
+    enabled: true      # set false to opt out
+    max_tokens: 8192   # token budget before the block is pinned into requests
+  references:
+    - docs/architecture.md
+```
+
 ## Imported sibling-harness defaults
 
 When present, Atteler imports defaults from `~/.codex/config.toml`,
