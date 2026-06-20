@@ -395,6 +395,26 @@ func TestExecuteFileToolReportsTruncationOnlyWhenResultsExceedLimit(t *testing.T
 	assert.Contains(t, grepTruncated.Content, "truncated at 2")
 }
 
+func TestExecuteFileToolGrepHandlesOverlongTextLines(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "long.txt"), []byte("needle "+strings.Repeat("x", 1024*1024+10)+"\n"), 0o600))
+
+	result := executeFileTool(context.Background(), llm.ToolCall{
+		ID:   "grep-long",
+		Name: llm.ToolNameGrep,
+		Input: map[string]any{
+			"pattern": "needle",
+			"include": "*.txt",
+		},
+	}, fileToolExecutorOptions{WorkingDir: root, Autonomy: autonomy.Medium})
+
+	require.False(t, result.IsError, result.Content)
+	assert.Contains(t, result.Content, "long.txt:1:")
+	assert.Contains(t, result.Content, "needle")
+}
+
 func TestExecuteFileToolWriteDeniedByPermissionPolicy(t *testing.T) {
 	t.Parallel()
 

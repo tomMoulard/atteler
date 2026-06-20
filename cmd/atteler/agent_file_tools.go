@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -873,35 +872,28 @@ func grepFile(ctx context.Context, path, displayPath string, re *regexp.Regexp, 
 		return nil, true, false, nil
 	}
 
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lines := strings.Split(string(data), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
 
-	lineNo := 0
-
-	for scanner.Scan() {
+	for lineNo, line := range lines {
 		contextErr = fileToolContextError(ctx, "grep canceled")
 		if contextErr != nil {
 			return nil, false, false, contextErr
 		}
 
-		lineNo++
-
-		line := scanner.Text()
 		if !re.MatchString(line) {
 			continue
 		}
 
-		matches = append(matches, fmt.Sprintf("%s:%d:%s", displayPath, lineNo, line))
+		matches = append(matches, fmt.Sprintf("%s:%d:%s", displayPath, lineNo+1, line))
 		if len(matches) > maxResults {
 			truncated = true
 			matches = matches[:maxResults]
 
 			break
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, false, false, fmt.Errorf("scan %s: %w", displayPath, err)
 	}
 
 	return matches, false, truncated, nil
