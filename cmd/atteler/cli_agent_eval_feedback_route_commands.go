@@ -1921,6 +1921,10 @@ func appendActualUsage(parts []string, candidate modelroute.CandidateDecision) [
 		parts = append(parts, "actual_cache_write_tokens="+strconv.Itoa(candidate.ActualCacheWrites))
 	}
 
+	if candidate.ActualUsageRecorded {
+		parts = append(parts, fmt.Sprintf("actual_cache_hit_rate=%.4f", candidate.ActualCacheHitRate))
+	}
+
 	if candidate.ActualOutputTokens > 0 {
 		parts = append(parts, "actual_output_tokens="+strconv.Itoa(candidate.ActualOutputTokens))
 	}

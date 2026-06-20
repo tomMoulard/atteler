@@ -4227,6 +4227,7 @@ func TestRegistry_CompleteRecordsRouteTelemetry(t *testing.T) {
 	assert.Equal(t, 1000, obs.InputTokens)
 	assert.Equal(t, 200, obs.CachedInputTokens)
 	assert.Equal(t, 100, obs.CacheWriteTokens)
+	assert.InDelta(t, 0.2, obs.LastCacheHitRate, 0.000000001)
 	assert.Equal(t, 50, obs.OutputTokens)
 	assert.Positive(t, obs.LastLatencyMS)
 	assert.Equal(t, 12, obs.AvgTTFTMS)

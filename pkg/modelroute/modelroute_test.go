@@ -855,6 +855,7 @@ func TestTelemetry_RecordUpdatesActualCostAndDecisionArtifact(t *testing.T) {
 	assert.Equal(t, 25, obs.AvgLatencyMS)
 	assert.Equal(t, 5, obs.AvgTTFTMS)
 	assert.Equal(t, 100, obs.CacheWriteTokens)
+	assert.InDelta(t, 0.2, obs.LastCacheHitRate, 0.000000001)
 	assert.InDelta(t, 0.001045, obs.LastCost, 0.000000001)
 	assert.InDelta(t, 0, obs.LastEstimatedDeltaUSD, 0.000000001)
 
@@ -865,6 +866,7 @@ func TestTelemetry_RecordUpdatesActualCostAndDecisionArtifact(t *testing.T) {
 	assert.Equal(t, 1000, cd.ActualInputTokens)
 	assert.Equal(t, 200, cd.ActualCachedTokens)
 	assert.Equal(t, 100, cd.ActualCacheWrites)
+	assert.InDelta(t, 0.2, cd.ActualCacheHitRate, 0.000000001)
 	assert.Equal(t, 50, cd.ActualOutputTokens)
 	assert.Equal(t, 25, cd.ObservedLatencyMS)
 	assert.InDelta(t, obs.LastCost, cd.ActualCost, 0.000000001)
@@ -892,6 +894,7 @@ func TestTelemetry_ProfileFromActualUsageClampsCacheReads(t *testing.T) {
 	}, time.Date(2026, time.May, 22, 12, 0, 0, 0, time.UTC))
 
 	assert.InDelta(t, 0, obs.LastEstimatedDeltaUSD, 0.000000001)
+	assert.InDelta(t, 1, obs.LastCacheHitRate, 0.000000001)
 	assert.InDelta(t, EstimateActualCost(candidate, ActualUsage{
 		InputTokens:       100,
 		CachedInputTokens: 150,

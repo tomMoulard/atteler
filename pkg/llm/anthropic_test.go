@@ -22,6 +22,7 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 
 	var (
 		gotReq     anthropicRequest
+		gotBody    []byte
 		gotHeaders http.Header
 	)
 
@@ -32,6 +33,8 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 		if !assert.NoError(t, err) {
 			return
 		}
+
+		gotBody = body
 
 		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
 			return
@@ -95,13 +98,29 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 		assert.Failf(t, "assertion failed", "model = %q", gotReq.Model)
 	}
 
-	if gotReq.System != "you are helpful" {
-		assert.Failf(t, "assertion failed", "system = %q", gotReq.System)
-	}
+	assert.JSONEq(t, `{
+		"temperature": 1,
+		"model": "claude-sonnet-4-20250514",
+		"system": [
+			{"type": "text", "text": "you are helpful", "cache_control": {"type": "ephemeral"}}
+		],
+		"thinking": {"type": "enabled", "budget_tokens": 2048},
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}
+			]}
+		],
+		"max_tokens": 4096
+	}`, string(gotBody))
 
 	if len(gotReq.Messages) != 1 || gotReq.Messages[0].Role != "user" {
 		assert.Failf(t, "assertion failed", "messages = %+v", gotReq.Messages)
 	}
+
+	require.Len(t, gotReq.System, 1)
+	assert.Equal(t, "you are helpful", gotReq.System[0].Text)
+	require.NotNil(t, gotReq.System[0].CacheControl)
+	assert.Equal(t, "ephemeral", gotReq.System[0].CacheControl.Type)
 
 	if gotReq.MaxTokens != 4096 {
 		assert.Failf(t, "assertion failed", "max_tokens = %d", gotReq.MaxTokens)
@@ -337,6 +356,49 @@ func TestAnthropicProvider_DefaultMaxTokens(t *testing.T) {
 	if gotReq.Thinking != nil {
 		assert.Failf(t, "assertion failed", "thinking = %+v, want omitted", gotReq.Thinking)
 	}
+}
+
+func TestBuildAnthropicRequest_AddsPromptCacheBreakpoints(t *testing.T) {
+	t.Parallel()
+
+	req, err := buildAnthropicRequestForProvider(providerAnthropic, CompleteParams{
+		Model: "claude-sonnet-4-20250514",
+		Messages: []Message{
+			{Role: RoleSystem, Content: "stable system"},
+			{Role: RoleUser, Content: "first turn"},
+			{
+				Role:    RoleAssistant,
+				Content: "checking",
+				ToolCalls: []ToolCall{{
+					ID:    "call-1",
+					Name:  "lookup",
+					Input: map[string]any{"query": "go"},
+				}},
+			},
+		},
+		Tools: []ToolDefinition{
+			{Name: "first", Description: "First tool", Parameters: map[string]any{"type": "object"}},
+			{Name: "lookup", Description: "Look up a value", Parameters: map[string]any{"type": "object"}},
+		},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, req.System, 1)
+	assert.Equal(t, "stable system", req.System[0].Text)
+	require.NotNil(t, req.System[0].CacheControl)
+	assert.Equal(t, "ephemeral", req.System[0].CacheControl.Type)
+
+	require.Len(t, req.Tools, 2)
+	assert.Nil(t, req.Tools[0].CacheControl)
+	require.NotNil(t, req.Tools[1].CacheControl)
+	assert.Equal(t, "ephemeral", req.Tools[1].CacheControl.Type)
+
+	require.Len(t, req.Messages, 2)
+	assert.JSONEq(t, `"first turn"`, string(req.Messages[0].Content))
+	assert.JSONEq(t, `[
+		{"type": "text", "text": "checking"},
+		{"type": "tool_use", "id": "call-1", "name": "lookup", "input": {"query": "go"}, "cache_control": {"type": "ephemeral"}}
+	]`, string(req.Messages[1].Content))
 }
 
 func TestAnthropicProvider_ReasoningRequiresThinkingBudgetRoom(t *testing.T) {

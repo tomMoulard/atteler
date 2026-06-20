@@ -157,6 +157,7 @@ var eventSchemas = map[string]eventSchema{
 		Content: true,
 		Metadata: map[string]metadataPolicy{
 			"actual_cached_input_tokens":      metadataSafe,
+			"actual_cache_hit_rate":           metadataSafe,
 			"actual_cache_write_tokens":       metadataSafe,
 			"actual_cost":                     metadataSafe,
 			"actual_cost_delta":               metadataSafe,

@@ -1310,7 +1310,7 @@ func TestRouteDecisionWithResponseAnnotatesActualCost(t *testing.T) {
 
 	decision := modelroute.Decide(
 		[]modelroute.Candidate{
-			{Name: "gpt-test", Provider: "openai", InputTokenCost: 0.000001, OutputTokenCost: 0.000004},
+			{Name: "gpt-test", Provider: "openai", InputTokenCost: 0.000001, CachedInputTokenCost: 0.000001, OutputTokenCost: 0.000004},
 			{Name: "fallback", Provider: "openai", InputTokenCost: 0.000002, OutputTokenCost: 0.000004},
 		},
 		modelroute.RequestProfile{EstimatedInputTokens: 100},
@@ -1323,6 +1323,7 @@ func TestRouteDecisionWithResponseAnnotatesActualCost(t *testing.T) {
 		Model:             "gpt-test",
 		FirstTokenLatency: 9 * time.Millisecond,
 		InputTokens:       100,
+		CachedInputTokens: 25,
 		OutputTokens:      10,
 	})
 	event, ok := routeDecisionEvent("session-1", "/tmp/session.json", "reviewer", "gpt-test", annotated)
@@ -1333,6 +1334,8 @@ func TestRouteDecisionWithResponseAnnotatesActualCost(t *testing.T) {
 	assert.Equal(t, "0.000140", event.Metadata["actual_cost"])
 	assert.Equal(t, "0.000040", event.Metadata["actual_cost_delta"])
 	assert.Equal(t, "100", event.Metadata["actual_input_tokens"])
+	assert.Equal(t, "25", event.Metadata["actual_cached_input_tokens"])
+	assert.Equal(t, "0.2500", event.Metadata["actual_cache_hit_rate"])
 	assert.Equal(t, "10", event.Metadata["actual_output_tokens"])
 	assert.Equal(t, "31", event.Metadata["actual_latency_ms"])
 	assert.Equal(t, "9", event.Metadata["actual_ttft_ms"])
@@ -1342,6 +1345,8 @@ func TestRouteDecisionWithResponseAnnotatesActualCost(t *testing.T) {
 	selected := findCommandCandidateDecision(t, artifact, "openai/gpt-test")
 	assert.True(t, selected.ActualUsageRecorded)
 	assert.Equal(t, 100, selected.ActualInputTokens)
+	assert.Equal(t, 25, selected.ActualCachedTokens)
+	assert.InDelta(t, 0.25, selected.ActualCacheHitRate, 0.000000001)
 	assert.Equal(t, 10, selected.ActualOutputTokens)
 	assert.InDelta(t, 0.00014, selected.ActualCost, 0.000000001)
 	assert.InDelta(t, 0.00004, selected.ActualCostDelta, 0.000000001)

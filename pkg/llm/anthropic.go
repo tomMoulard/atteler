@@ -17,6 +17,11 @@ const (
 	defaultAnthropicBase    = "https://api.anthropic.com"
 	defaultAnthropicVersion = "2023-06-01"
 	anthropicOAuthBetas     = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,structured-outputs-2025-11-13"
+
+	anthropicCacheControlTypeEphemeral = "ephemeral"
+	anthropicContentTypeText           = "text"
+	anthropicContentTypeToolResult     = "tool_result"
+	anthropicContentTypeToolUse        = "tool_use"
 )
 
 // AnthropicProvider calls the Anthropic Messages API.
@@ -159,15 +164,15 @@ func (a *AnthropicProvider) HealthCheck(ctx context.Context) error {
 }
 
 type anthropicRequest struct {
-	Temperature *float64           `json:"temperature,omitempty"`
-	TopP        *float64           `json:"top_p,omitempty"`
-	Model       string             `json:"model"`
-	System      string             `json:"system,omitempty"`
-	Thinking    *anthropicThinking `json:"thinking,omitempty"`
-	Messages    []anthropicMessage `json:"messages"`
-	Stop        []string           `json:"stop_sequences,omitempty"`
-	Tools       []anthropicTool    `json:"tools,omitempty"`
-	MaxTokens   int                `json:"max_tokens"`
+	Temperature *float64                `json:"temperature,omitempty"`
+	TopP        *float64                `json:"top_p,omitempty"`
+	Model       string                  `json:"model"`
+	System      []anthropicContentBlock `json:"system,omitempty"`
+	Thinking    *anthropicThinking      `json:"thinking,omitempty"`
+	Messages    []anthropicMessage      `json:"messages"`
+	Stop        []string                `json:"stop_sequences,omitempty"`
+	Tools       []anthropicTool         `json:"tools,omitempty"`
+	MaxTokens   int                     `json:"max_tokens"`
 }
 
 type anthropicThinking struct {
@@ -175,10 +180,16 @@ type anthropicThinking struct {
 	BudgetTokens int    `json:"budget_tokens"`
 }
 
+//nolint:govet // Field order keeps Anthropic wire JSON readable in fixtures.
 type anthropicTool struct {
-	InputSchema map[string]any `json:"input_schema"`
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
+	InputSchema  map[string]any         `json:"input_schema"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
+
+type anthropicCacheControl struct {
+	Type string `json:"type"`
 }
 
 // anthropicMessage uses json.RawMessage for Content so it can be either
@@ -190,15 +201,18 @@ type anthropicMessage struct {
 }
 
 // anthropicContentBlock is a single block in an Anthropic message content array.
+//
+//nolint:govet // Field order keeps Anthropic wire JSON readable in fixtures.
 type anthropicContentBlock struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text,omitempty"`
-	ID        string         `json:"id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Input     map[string]any `json:"input,omitempty"`
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	IsError   bool           `json:"is_error,omitempty"`
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text,omitempty"`
+	ID           string                 `json:"id,omitempty"`
+	Name         string                 `json:"name,omitempty"`
+	Input        map[string]any         `json:"input,omitempty"`
+	ToolUseID    string                 `json:"tool_use_id,omitempty"`
+	Content      string                 `json:"content,omitempty"`
+	IsError      bool                   `json:"is_error,omitempty"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicResponse struct {
@@ -315,9 +329,9 @@ func parseAnthropicResponse(ar anthropicResponse) *Response {
 
 	for _, block := range ar.Content {
 		switch block.Type {
-		case "text":
+		case anthropicContentTypeText:
 			textParts.WriteString(block.Text)
-		case "tool_use":
+		case anthropicContentTypeToolUse:
 			result.ToolCalls = append(result.ToolCalls, ToolCall{
 				ID:    block.ID,
 				Name:  block.Name,
@@ -335,7 +349,7 @@ func anthropicStopReason(reason string) StopReason {
 	switch reason {
 	case "end_turn", "stop_sequence":
 		return StopEndTurn
-	case "tool_use":
+	case anthropicContentTypeToolUse:
 		return StopToolUse
 	case "max_tokens":
 		return StopMaxToks
@@ -377,10 +391,16 @@ func buildAnthropicRequestForProvider(providerName string, params CompleteParams
 		Model:       params.Model,
 		MaxTokens:   maxTok,
 		Messages:    msgs,
-		System:      system,
 		Stop:        params.Stop,
 		Temperature: params.Temperature,
 		TopP:        params.TopP,
+	}
+	if system != "" {
+		req.System = []anthropicContentBlock{{
+			Type:         anthropicContentTypeText,
+			Text:         system,
+			CacheControl: anthropicEphemeralCacheControl(),
+		}}
 	}
 
 	// Add tool definitions.
@@ -391,6 +411,8 @@ func buildAnthropicRequestForProvider(providerName string, params CompleteParams
 			InputSchema: tool.Parameters,
 		})
 	}
+
+	applyAnthropicPromptCacheBreakpoints(&req)
 
 	budget, ok, err := anthropicThinkingBudget(params.ReasoningLevel, maxTok)
 	if err != nil {
@@ -404,20 +426,107 @@ func buildAnthropicRequestForProvider(providerName string, params CompleteParams
 	return req, nil
 }
 
+func anthropicEphemeralCacheControl() *anthropicCacheControl {
+	return &anthropicCacheControl{Type: anthropicCacheControlTypeEphemeral}
+}
+
+func applyAnthropicPromptCacheBreakpoints(req *anthropicRequest) {
+	if req == nil {
+		return
+	}
+
+	if len(req.Tools) > 0 {
+		req.Tools[len(req.Tools)-1].CacheControl = anthropicEphemeralCacheControl()
+	}
+
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		content, ok := anthropicContentWithTailCacheControl(req.Messages[i].Content)
+		if !ok {
+			continue
+		}
+
+		req.Messages[i].Content = content
+
+		return
+	}
+}
+
+func anthropicContentWithTailCacheControl(content json.RawMessage) (json.RawMessage, bool) {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 {
+		return nil, false
+	}
+
+	if trimmed[0] == '"' {
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil || text == "" {
+			return nil, false
+		}
+
+		return marshalAnthropicCachedContentBlocks([]anthropicContentBlock{{
+			Type:         anthropicContentTypeText,
+			Text:         text,
+			CacheControl: anthropicEphemeralCacheControl(),
+		}})
+	}
+
+	if trimmed[0] != '[' {
+		return nil, false
+	}
+
+	var blocks []anthropicContentBlock
+	if err := json.Unmarshal(trimmed, &blocks); err != nil {
+		return nil, false
+	}
+
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if !anthropicContentBlockCacheable(blocks[i]) {
+			continue
+		}
+
+		blocks[i].CacheControl = anthropicEphemeralCacheControl()
+
+		return marshalAnthropicCachedContentBlocks(blocks)
+	}
+
+	return nil, false
+}
+
+func marshalAnthropicCachedContentBlocks(blocks []anthropicContentBlock) (json.RawMessage, bool) {
+	content, err := json.Marshal(blocks)
+	if err != nil {
+		return nil, false
+	}
+
+	return content, true
+}
+
+func anthropicContentBlockCacheable(block anthropicContentBlock) bool {
+	switch block.Type {
+	case anthropicContentTypeText:
+		return block.Text != ""
+	case anthropicContentTypeToolResult, anthropicContentTypeToolUse:
+		return true
+	default:
+		return false
+	}
+}
+
 // buildAnthropicMessage converts an llm.Message to the Anthropic wire format.
-// Plain user/assistant text is sent as a JSON string; tool-use and tool-result
-// messages use the content-block array format.
+// Plain user/assistant text starts as a JSON string; prompt caching may later
+// promote the tail message to a text content-block array so it can carry
+// cache_control. Tool-use and tool-result messages use content-block arrays.
 func buildAnthropicMessage(m Message) anthropicMessage {
 	// Assistant message with tool calls -> content block array.
 	if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
 		var blocks []anthropicContentBlock
 		if m.Content != "" {
-			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
+			blocks = append(blocks, anthropicContentBlock{Type: anthropicContentTypeText, Text: m.Content})
 		}
 
 		for _, tc := range m.ToolCalls {
 			blocks = append(blocks, anthropicContentBlock{
-				Type:  "tool_use",
+				Type:  anthropicContentTypeToolUse,
 				ID:    tc.ID,
 				Name:  tc.Name,
 				Input: tc.Input,
@@ -436,7 +545,7 @@ func buildAnthropicMessage(m Message) anthropicMessage {
 	// Tool result message -> user role with tool_result content blocks.
 	if m.Role == RoleTool && m.ToolResult != nil {
 		blocks := []anthropicContentBlock{{
-			Type:      "tool_result",
+			Type:      anthropicContentTypeToolResult,
 			ToolUseID: m.ToolResult.ToolCallID,
 			Content:   m.ToolResult.Content,
 			IsError:   m.ToolResult.IsError,
