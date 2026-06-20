@@ -601,6 +601,15 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#research-source-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      Research source policy
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#auto-mode" class="md-nav__link">
     <span class="md-ellipsis">
       Auto mode
@@ -1257,6 +1266,15 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#research-source-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      Research source policy
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#auto-mode" class="md-nav__link">
     <span class="md-ellipsis">
       Auto mode
@@ -1752,11 +1770,43 @@ version.</p>
 </span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a><span class="w">    </span><span class="nt">required_capabilities</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;tools&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;json_schema&quot;</span><span class="p p-Indicator">]</span>
 </span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a><span class="w">    </span><span class="nt">max_cost_usd</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.25</span>
 </span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a><span class="w">    </span><span class="nt">max_latency_ms</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2500</span>
+</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a>
+</span><span id="__span-1-25"><a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a><span class="nt">research</span><span class="p">:</span>
+</span><span id="__span-1-26"><a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a><span class="w">  </span><span class="nt">source_policy</span><span class="p">:</span>
+</span><span id="__span-1-27"><a id="__codelineno-1-27" name="__codelineno-1-27" href="#__codelineno-1-27"></a><span class="w">    </span><span class="nt">trusted_domains</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">go.dev</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">github.com</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">docs.github.com</span><span class="p p-Indicator">]</span>
+</span><span id="__span-1-28"><a id="__codelineno-1-28" name="__codelineno-1-28" href="#__codelineno-1-28"></a><span class="w">    </span><span class="nt">denied_domains</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">example-content-farm.com</span><span class="p p-Indicator">]</span>
+</span><span id="__span-1-29"><a id="__codelineno-1-29" name="__codelineno-1-29" href="#__codelineno-1-29"></a><span class="w">    </span><span class="nt">prefer_source_types</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">official_docs</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">source_code</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">standard_or_spec</span><span class="p p-Indicator">]</span>
+</span><span id="__span-1-30"><a id="__codelineno-1-30" name="__codelineno-1-30" href="#__codelineno-1-30"></a><span class="w">    </span><span class="nt">allow_low_trust_sources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-1-31"><a id="__codelineno-1-31" name="__codelineno-1-31" href="#__codelineno-1-31"></a><span class="w">    </span><span class="nt">warn_on_low_trust_sources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-1-32"><a id="__codelineno-1-32" name="__codelineno-1-32" href="#__codelineno-1-32"></a><span class="w">    </span><span class="nt">require_evidence_for_high_impact_claims</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
 </span></code></pre></div>
 <p>Bare model names resolve only by exact provider-catalog claim, a <code>model_aliases</code>
 entry, or a <code>models.&lt;role&gt;</code> entry. If two providers claim the same bare name,
 Atteler reports the collision unless <code>default_provider</code>/<code>default_model</code> or a role
 routing policy makes the choice deterministic.</p>
+<h3 id="research-source-policy">Research source policy<a class="headerlink" href="#research-source-policy" title="Permanent link">&para;</a></h3>
+<p><code>research.source_policy</code> controls source-quality metadata for local-first
+research runs and retrieval results. It can prefer trusted domains/source types,
+exclude known-bad domains, warn when weak evidence is included, and use source
+quality as a retrieval tie-breaker for equally relevant results.</p>
+<ul>
+<li><code>trusted_domains</code> marks matching domains and subdomains as high trust.</li>
+<li><code>denied_domains</code> excludes matching URL sources from research artifacts and
+  retrieval results.</li>
+<li><code>prefer_source_types</code> boosts source types such as <code>official_docs</code>,
+  <code>source_code</code>, <code>standard_or_spec</code>, <code>academic</code>, <code>issue_discussion</code>, <code>forum</code>,
+  <code>news</code>, or <code>unknown</code>.</li>
+<li><code>allow_low_trust_sources</code> defaults to <code>true</code>, so brainstorming and early
+  exploration remain usable.</li>
+<li><code>warn_on_low_trust_sources</code> defaults to <code>true</code>, so weak evidence is visible.</li>
+<li><code>require_evidence_for_high_impact_claims</code> defaults to <code>false</code>; evidence-first
+  is a recommendation unless a project explicitly requires it.</li>
+</ul>
+<p>Harness guidance files (<code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>.cursor/rules/*</code>, and
+similar instruction files) are also scanned for simple source restrictions,
+preferred source types, and citation requirements. Explicit CLI flags for a run
+have the highest precedence, followed by Atteler config, harness guidance,
+global config, and built-in defaults.</p>
 <h3 id="auto-mode">Auto mode<a class="headerlink" href="#auto-mode" title="Permanent link">&para;</a></h3>
 <p><code>auto</code> defaults <strong>interactive</strong> sessions into orchestrator ("auto") mode, in
 which the main model forks atteler into worker sub-agents through the bash tool.

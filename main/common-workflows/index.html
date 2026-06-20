@@ -1223,11 +1223,13 @@ before implementation, architecture, dependency, security, or planning work:</p>
 </span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>atteler<span class="w"> </span>research<span class="w"> </span>run<span class="w"> </span><span class="se">\</span>
 </span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span>--trusted-source<span class="w"> </span>go.dev<span class="w"> </span><span class="se">\</span>
 </span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">  </span>--trusted-source<span class="w"> </span>github.com<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">  </span><span class="s2">&quot;Research best practices for safe agent worktrees&quot;</span>
-</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>atteler<span class="w"> </span>research<span class="w"> </span>run<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="w">  </span>--output<span class="w"> </span>.atteler/research/plugin-sandboxing<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="w">  </span>--generate-tasks<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a><span class="w">  </span><span class="s2">&quot;Find viable implementation approaches for sandboxing Atteler plugins&quot;</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">  </span>--deny-source<span class="w"> </span>example-content-farm.com<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="w">  </span>--warn-low-trust<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="w">  </span><span class="s2">&quot;Research best practices for safe agent worktrees&quot;</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>atteler<span class="w"> </span>research<span class="w"> </span>run<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a><span class="w">  </span>--output<span class="w"> </span>.atteler/research/plugin-sandboxing<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-10"><a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a><span class="w">  </span>--generate-tasks<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-11"><a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a><span class="w">  </span><span class="s2">&quot;Find viable implementation approaches for sandboxing Atteler plugins&quot;</span>
 </span></code></pre></div>
 <p>The MVP is local-first. It creates <code>.atteler/runs/research/&lt;run-id&gt;/</code> by
 default (or the directory passed with <code>--output</code> / <code>--research-output</code>) and
@@ -1236,7 +1238,8 @@ writes:</p>
 <li><code>research.md</code> — human-readable summary, findings, tradeoffs,
   recommendations, risks, claims, and citations.</li>
 <li><code>sources.jsonl</code> — structured source records for discovered project guidance
-  and supplied <code>--research-source</code> files/URLs.</li>
+  and supplied <code>--research-source</code> files/URLs, including source type, domain,
+  trust level, trust score, policy match, and low-trust warnings.</li>
 <li><code>claims.jsonl</code> — important claims mapped to evidence where available.</li>
 <li><code>run.json</code> — run metadata and artifact paths.</li>
 <li><code>tasks.generated.yaml</code> — optional follow-up task stubs when
@@ -1245,7 +1248,24 @@ writes:</p>
 <p>Before writing recommendations, the command inspects project/harness guidance
 files when present, including <code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>.cursor/rules/*</code>, and
 similar agent instruction files. The discovered guidance is included as source
-context and cited in the report.</p>
+context and cited in the report. Source-related guidance in those files, such
+as preferred official docs, denied domains, citation requirements, or low-trust
+warnings, is folded into the effective source policy below Atteler config and
+explicit CLI flags.</p>
+<p>Project config can define source policy defaults:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nt">research</span><span class="p">:</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span><span class="nt">source_policy</span><span class="p">:</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">    </span><span class="nt">trusted_domains</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">go.dev</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">github.com</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">docs.anthropic.com</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">openai.com</span><span class="p p-Indicator">]</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="w">    </span><span class="nt">denied_domains</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">example-content-farm.com</span><span class="p p-Indicator">]</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">    </span><span class="nt">prefer_source_types</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">official_docs</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">source_code</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">standard_or_spec</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">issue_discussion</span><span class="p p-Indicator">]</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="w">    </span><span class="nt">allow_low_trust_sources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="w">    </span><span class="nt">warn_on_low_trust_sources</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="w">    </span><span class="nt">require_evidence_for_high_impact_claims</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</span></code></pre></div>
+<p><code>--trusted-source</code> and <code>--deny-source</code> extend the effective policy for a single
+run. Denied sources are omitted from <code>sources.jsonl</code> and listed in <code>run.json</code>;
+low-trust sources remain allowed by default but are marked in artifacts and
+warned about when policy asks for warnings.</p>
 <p>Atteler research reports should include evidence for important claims whenever
 possible. Evidence can include URLs, documentation links, repository files,
 command output, tests, logs, or prior session artifacts. This improves
@@ -1255,15 +1275,15 @@ for every statement.</p>
 <p>Scan the working tree for quality debt on demand, as JSON, or in a loop. Watch
 findings can upsert deduplicated GitHub issues. <code>incident diagnose</code> normalizes
 incident context from Sentry, a redacted JSON fixture, or an MCP connector.</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>atteler<span class="w"> </span>watch<span class="w"> </span>scan
-</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>atteler<span class="w"> </span>watch<span class="w"> </span>json
-</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>atteler<span class="w"> </span>watch<span class="w"> </span>loop
-</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--sentry<span class="w"> </span>ISSUE-912
-</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--incident-file<span class="w"> </span>redacted-sentry-event.json
-</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--sentry<span class="w"> </span>ISSUE-912<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="w">  </span>--incident-apply-fix<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="w">  </span>--incident-validation-command<span class="w"> </span><span class="s2">&quot;go test ./pkg/auth&quot;</span><span class="w"> </span><span class="se">\</span>
-</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="w">  </span>--incident-open-pr
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>atteler<span class="w"> </span>watch<span class="w"> </span>scan
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>atteler<span class="w"> </span>watch<span class="w"> </span>json
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>atteler<span class="w"> </span>watch<span class="w"> </span>loop
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--sentry<span class="w"> </span>ISSUE-912
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--incident-file<span class="w"> </span>redacted-sentry-event.json
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--sentry<span class="w"> </span>ISSUE-912<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="w">  </span>--incident-apply-fix<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="w">  </span>--incident-validation-command<span class="w"> </span><span class="s2">&quot;go test ./pkg/auth&quot;</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a><span class="w">  </span>--incident-open-pr
 </span></code></pre></div>
 <p>The <code>--incident-apply-fix</code> switch is an explicit approval gate for the
 credentialed repair loop; PR creation requires it plus at least one captured
@@ -1272,29 +1292,35 @@ validation command.</p>
 <p>Search lexical memory or vector indexes, and query the language-neutral
 workspace code index. Lexical vector mode is a deterministic fallback (not
 semantic); embedding mode uses an Ollama-compatible endpoint.</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>atteler<span class="w"> </span>memory<span class="w"> </span>search<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span>
-</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>atteler<span class="w"> </span>memory<span class="w"> </span>retrieve<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span><span class="w"> </span>--retrieval-explain
-</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>atteler<span class="w"> </span>memory<span class="w"> </span>vector-search<span class="w"> </span><span class="s2">&quot;redirect risks&quot;</span><span class="w"> </span>--vector-index<span class="w"> </span>docs/research.md<span class="w"> </span>--vectorizer<span class="w"> </span>lexical
-</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>atteler<span class="w"> </span>memory<span class="w"> </span>migrate
-</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>summary<span class="w"> </span>--json
-</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>symbol<span class="w"> </span>NewRegistry
-</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>query<span class="w"> </span>definitions:NewRegistry
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>atteler<span class="w"> </span>memory<span class="w"> </span>search<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>atteler<span class="w"> </span>memory<span class="w"> </span>retrieve<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span><span class="w"> </span>--retrieval-explain
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>atteler<span class="w"> </span>memory<span class="w"> </span>retrieve<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span><span class="w"> </span>--trusted-source<span class="w"> </span>docs.github.com<span class="w"> </span>--deny-source<span class="w"> </span>example-content-farm.com
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>atteler<span class="w"> </span>memory<span class="w"> </span>vector-search<span class="w"> </span><span class="s2">&quot;redirect risks&quot;</span><span class="w"> </span>--vector-index<span class="w"> </span>docs/research.md<span class="w"> </span>--vectorizer<span class="w"> </span>lexical
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>atteler<span class="w"> </span>memory<span class="w"> </span>migrate
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>summary<span class="w"> </span>--json
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>symbol<span class="w"> </span>NewRegistry
+</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>query<span class="w"> </span>definitions:NewRegistry
 </span></code></pre></div>
 <p>Run <code>atteler memory migrate</code> / <code>agent-migrate</code> after changing a store schema,
 redaction policy, or vectorizer. Vectorizer settings are scoped per store,
-agent, and source — see <a href="../configuration/">Configuration</a>.</p>
+agent, and source — see <a href="../configuration/">Configuration</a>.
+Retrieval results carry source-quality metadata from harness guidance,
+<code>research.source_policy</code>, and per-run source flags; denied sources are filtered
+and equally relevant results prefer higher-trust sources before the stable
+source/name tie-breakers. When low-trust warnings are enabled, retrieval output
+includes a <code>source_warning</code> field for weak evidence.</p>
 <h2 id="use-plugins-mcp-and-lsp">Use plugins, MCP, and LSP<a class="headerlink" href="#use-plugins-mcp-and-lsp" title="Permanent link">&para;</a></h2>
 <p>Configured <code>plugins.paths</code> entries point at local plugin directories or
 manifests. Inspect and run entrypoints, using <code>--plugin-dry-run</code> to check the
 policy envelope before execution. MCP servers are referenced through manifests
 (for example by <code>incident diagnose</code>).</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>list
-</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>describe<span class="w"> </span>reviewer
-</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>run<span class="w"> </span>reviewer/check<span class="w"> </span>--plugin-dry-run
-</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--incident-ref<span class="w"> </span>alert-42<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="w">  </span>--incident-mcp-manifest<span class="w"> </span>.atteler/mcp.yaml<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="w">  </span>--incident-mcp-server<span class="w"> </span>grafana<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="w">  </span>--incident-mcp-tool<span class="w"> </span>get_incident
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>list
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>describe<span class="w"> </span>reviewer
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>run<span class="w"> </span>reviewer/check<span class="w"> </span>--plugin-dry-run
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--incident-ref<span class="w"> </span>alert-42<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="w">  </span>--incident-mcp-manifest<span class="w"> </span>.atteler/mcp.yaml<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="w">  </span>--incident-mcp-server<span class="w"> </span>grafana<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="w">  </span>--incident-mcp-tool<span class="w"> </span>get_incident
 </span></code></pre></div>
 <p>Plugin runs require an accepted local policy that acts as an upper bound;
 manifests requesting anything outside it fail before execution.</p>
@@ -1302,19 +1328,19 @@ manifests requesting anything outside it fail before execution.</p>
 <p>Suggest a skill from repeated steps, then review the generated diff before
 saving. Automatic skill learning records redacted workflow observations and
 writes generated skills under <code>.atteler/skills/generated/</code>.</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-suggest<span class="w"> </span>plan<span class="w"> </span>--skill-step<span class="w"> </span>code<span class="w"> </span>--skill-step<span class="w"> </span><span class="nb">test</span>
-</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-list
-</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-show<span class="w"> </span>k8s-investigation
-</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-disable<span class="w"> </span>k8s-investigation
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-suggest<span class="w"> </span>plan<span class="w"> </span>--skill-step<span class="w"> </span>code<span class="w"> </span>--skill-step<span class="w"> </span><span class="nb">test</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-list
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-show<span class="w"> </span>k8s-investigation
+</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-disable<span class="w"> </span>k8s-investigation
 </span></code></pre></div>
 <p>Use <code>--skill-review-only</code> to inspect the diff without writing files. Disable
 learning with <code>skill_learning.enabled: false</code> or <code>ATTELER_SKILL_LEARNING=false</code>.</p>
 <h2 id="export-and-share-sessions">Export and share sessions<a class="headerlink" href="#export-and-share-sessions" title="Permanent link">&para;</a></h2>
 <p>Exports default to the redacted shareable profile; credential patterns and
 local absolute paths are scrubbed and a provenance manifest is included.</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>markdown
-</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>issue
-</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>private-markdown
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>markdown
+</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>issue
+</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>private-markdown
 </span></code></pre></div>
 <p>Use <code>private-markdown</code> or <code>private-json</code> only when recipients may see the full
 raw session.</p>
