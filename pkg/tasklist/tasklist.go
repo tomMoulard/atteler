@@ -1,4 +1,4 @@
-// Package tasklist provides a small JSON-backed TODO list for agents.
+// Package tasklist provides a JSON-backed coordination task list for agents.
 package tasklist
 
 import (
@@ -21,12 +21,24 @@ import (
 type Status string
 
 const (
-	// StatusPending means the task has not been started and is ready to claim.
+	// StatusReady means the task can be claimed by a worker.
+	StatusReady Status = "ready"
+	// StatusPending is the legacy ready state accepted from older task files.
 	StatusPending Status = "pending"
-	// StatusBlocked means the task has incomplete dependencies and cannot be assigned.
+	// StatusBlocked means dependencies or an explicit blocker prevent work.
 	StatusBlocked Status = "blocked"
-	// StatusAssigned means the task has an owner and an active or expired lease.
+	// StatusInProgress means the task has an owner and an active or expired lease.
+	StatusInProgress Status = "in_progress"
+	// StatusAssigned is the legacy in-progress state accepted from older task files.
 	StatusAssigned Status = "assigned"
+	// StatusReview means implementation is complete enough for review.
+	StatusReview Status = "review"
+	// StatusFailed means work stopped unsuccessfully and may need a retry.
+	StatusFailed Status = "failed"
+	// StatusCanceled means work was intentionally stopped.
+	StatusCanceled Status = "canceled"
+	// StatusReopened means a completed, failed, canceled, or review task was reopened.
+	StatusReopened Status = "reopened"
 	// StatusCompleted means the task has been checked off.
 	StatusCompleted Status = "completed"
 )
@@ -61,6 +73,16 @@ const (
 	HistoryReconciled HistoryAction = "reconciled"
 	// HistoryCompleted means a task was checked off.
 	HistoryCompleted HistoryAction = "completed"
+	// HistoryReviewRequested means a task moved to review.
+	HistoryReviewRequested HistoryAction = "review_requested"
+	// HistoryFailed means a task was marked failed.
+	HistoryFailed HistoryAction = "failed"
+	// HistoryCanceled means a task was canceled.
+	HistoryCanceled HistoryAction = "canceled"
+	// HistoryReopened means a task was reopened for another pass.
+	HistoryReopened HistoryAction = "reopened"
+	// HistoryRepaired means a corrupt or conflicted task file was repaired.
+	HistoryRepaired HistoryAction = "repaired"
 )
 
 const (
@@ -74,6 +96,10 @@ var (
 	ErrTaskNotFound = errors.New("tasklist: task not found")
 	// ErrTaskCompleted is returned when an operation cannot modify a completed task.
 	ErrTaskCompleted = errors.New("tasklist: task is completed")
+	// ErrTaskCanceled is returned when an operation cannot modify a canceled task.
+	ErrTaskCanceled = errors.New("tasklist: task is canceled")
+	// ErrTaskFailed is returned when a failed task must be reopened before more work.
+	ErrTaskFailed = errors.New("tasklist: task is failed")
 	// ErrTaskBlocked is returned when dependencies prevent a task from being assigned or completed.
 	ErrTaskBlocked = errors.New("tasklist: task is blocked")
 	// ErrTaskLeased is returned when another owner still has a non-expired task lease.
@@ -109,10 +135,13 @@ type Task struct {
 	Revision      int64             `json:"revision,omitempty"`
 	Priority      int               `json:"priority,omitempty"`
 	AttemptCount  int               `json:"attempt_count,omitempty"`
+	RetryCount    int               `json:"retry_count,omitempty"`
 	ID            string            `json:"id"`
 	Title         string            `json:"title"`
 	Status        Status            `json:"status"`
 	Agent         string            `json:"agent,omitempty"`
+	Risk          string            `json:"risk,omitempty"`
+	BlockerReason string            `json:"blocker_reason,omitempty"`
 	FailureReason string            `json:"failure_reason,omitempty"`
 	ReviewStatus  ReviewStatus      `json:"review_status,omitempty"`
 }
@@ -143,9 +172,12 @@ type AddRequest struct {
 	Actor         string
 	SessionID     string
 	RunID         string
+	Message       string
 	Metadata      map[string]string
 	Dependencies  []string
 	Priority      int
+	Risk          string
+	BlockerReason string
 	ReviewStatus  ReviewStatus
 	LeaseDuration time.Duration
 }
@@ -175,10 +207,62 @@ type HeartbeatRequest struct {
 	ExpectedRevision int64
 }
 
+// CompleteRequest contains fields for completing a task with conflict checks and audit context.
+type CompleteRequest struct {
+	Agent            string
+	Actor            string
+	SessionID        string
+	RunID            string
+	Message          string
+	ExpectedRevision int64
+}
+
+// ReviewRequest contains fields for moving a task into review.
+type ReviewRequest struct {
+	Agent            string
+	Actor            string
+	SessionID        string
+	RunID            string
+	Message          string
+	ExpectedRevision int64
+}
+
+// FailRequest contains fields for marking a task failed.
+type FailRequest struct {
+	Agent            string
+	Actor            string
+	SessionID        string
+	RunID            string
+	Reason           string
+	Message          string
+	ExpectedRevision int64
+}
+
+// CancelRequest contains fields for canceling a task.
+type CancelRequest struct {
+	Agent            string
+	Actor            string
+	SessionID        string
+	RunID            string
+	Reason           string
+	Message          string
+	ExpectedRevision int64
+}
+
+// ReopenRequest contains fields for reopening terminal or review work.
+type ReopenRequest struct {
+	Agent              string
+	Actor              string
+	Message            string
+	ClearFailureReason bool
+	ClearBlockerReason bool
+	ExpectedRevision   int64
+}
+
 // UpdateRequest contains mutable task fields. Empty values leave fields unchanged.
 //
-// Use ReplaceDependencies, SetPriority, ClearFailureReason, or ExpectedRevision
-// when an empty value carries meaning.
+// Use ReplaceDependencies, SetPriority, ClearRisk, ClearBlockerReason,
+// ClearFailureReason, or ExpectedRevision when an empty value carries meaning.
 //
 //nolint:govet // Field order keeps older fields first for compatibility.
 type UpdateRequest struct {
@@ -191,11 +275,31 @@ type UpdateRequest struct {
 	Metadata            map[string]string
 	Dependencies        []string
 	Message             string
+	Risk                string
+	BlockerReason       string
 	Priority            int
 	SetPriority         bool
+	ClearRisk           bool
+	ClearBlockerReason  bool
 	ReplaceDependencies bool
 	ClearFailureReason  bool
 	ExpectedRevision    int64
+}
+
+// RepairRequest identifies the actor repairing an unreadable or conflicted task file.
+type RepairRequest struct {
+	Actor   string
+	Message string
+}
+
+// RepairResult summarizes recoverable file repair work.
+type RepairResult struct {
+	BackupPath     string
+	StateRevision  int64
+	TasksRecovered int
+	TasksDropped   int
+	HistoryEntries int
+	Repaired       bool
 }
 
 // ReconcileRequest identifies the actor repairing derived task state.
@@ -280,6 +384,7 @@ func (s *Store) Add(ctx context.Context, req AddRequest) (Task, error) {
 			taskID:        created.ID,
 			agent:         created.Agent,
 			actor:         actorIdentity(req.Actor, created.Agent),
+			message:       req.Message,
 			stateRevision: state.Revision,
 			after:         &created,
 		})
@@ -317,37 +422,45 @@ func newTaskFromAddRequest(state State, req AddRequest, title string, now time.T
 	}
 
 	var (
-		agent        = strings.TrimSpace(req.Agent)
-		lease        *Lease
-		status       = StatusPending
-		attemptCount int
+		agent         = strings.TrimSpace(req.Agent)
+		lease         *Lease
+		status        = StatusReady
+		attemptCount  int
+		blockerReason = strings.TrimSpace(req.BlockerReason)
 	)
 
-	if len(unmetDependencies(state, dependencies)) > 0 {
+	unmet := unmetDependencies(state, dependencies)
+	if blockerReason == "" {
+		blockerReason = dependencyBlockerReason(unmet)
+	}
+
+	if len(unmet) > 0 || blockerReason != "" {
 		if agent != "" {
 			return Task{}, fmt.Errorf("%w: dependencies are not completed", ErrTaskBlocked)
 		}
 
 		status = StatusBlocked
 	} else if agent != "" {
-		status = StatusAssigned
+		status = StatusInProgress
 		attemptCount = 1
 		lease = newLease(agent, req.SessionID, req.RunID, now, req.LeaseDuration)
 	}
 
 	task := Task{
-		ID:           id,
-		Title:        title,
-		Status:       status,
-		Agent:        agent,
-		Lease:        lease,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		Metadata:     copyMetadata(req.Metadata),
-		Dependencies: dependencies,
-		Priority:     req.Priority,
-		AttemptCount: attemptCount,
-		ReviewStatus: req.ReviewStatus,
+		ID:            id,
+		Title:         title,
+		Status:        status,
+		Agent:         agent,
+		Lease:         lease,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		Metadata:      copyMetadata(req.Metadata),
+		Dependencies:  dependencies,
+		Priority:      req.Priority,
+		Risk:          strings.TrimSpace(req.Risk),
+		BlockerReason: blockerReason,
+		AttemptCount:  attemptCount,
+		ReviewStatus:  req.ReviewStatus,
 	}
 
 	if dependencyCycleForTask(stateWithTask(state, task), task.ID) {
@@ -436,7 +549,11 @@ func (s *Store) Heartbeat(ctx context.Context, id string, req HeartbeatRequest) 
 			return "", "", ErrTaskCompleted
 		}
 
-		if task.Status != StatusAssigned || task.Lease == nil {
+		if task.Status == StatusCanceled {
+			return "", "", ErrTaskCanceled
+		}
+
+		if !isInProgressStatus(task.Status) || task.Lease == nil {
 			return "", "", ErrTaskLeaseExpired
 		}
 
@@ -450,6 +567,7 @@ func (s *Store) Heartbeat(ctx context.Context, id string, req HeartbeatRequest) 
 
 		task.Lease.LastHeartbeatAt = now
 		task.Lease.ExpiresAt = now.Add(leaseDuration(req.LeaseDuration))
+		task.Status = StatusInProgress
 		task.UpdatedAt = now
 
 		return HistoryHeartbeat, strings.TrimSpace(req.Message), nil
@@ -458,26 +576,189 @@ func (s *Store) Heartbeat(ctx context.Context, id string, req HeartbeatRequest) 
 
 // Complete checks off a task and records the completing agent when provided.
 func (s *Store) Complete(ctx context.Context, id, agent string) (Task, error) {
-	return s.updateTask(ctx, id, 0, agent, func(state *State, task *Task, now time.Time) (HistoryAction, string, error) {
+	return s.CompleteWithOptions(ctx, id, CompleteRequest{Agent: agent})
+}
+
+// CompleteWithOptions checks off a task with conflict detection and audit metadata.
+func (s *Store) CompleteWithOptions(ctx context.Context, id string, req CompleteRequest) (Task, error) {
+	return s.updateTask(ctx, id, req.ExpectedRevision, req.Actor, func(state *State, task *Task, now time.Time) (HistoryAction, string, error) {
 		if task.Status == StatusCompleted {
 			return "", "", ErrTaskCompleted
 		}
 
-		if len(unmetDependencies(*state, task.Dependencies)) > 0 {
+		if task.Status == StatusCanceled {
+			return "", "", ErrTaskCanceled
+		}
+
+		if task.Status == StatusFailed {
+			return "", "", ErrTaskFailed
+		}
+
+		if taskIsBlocked(*state, *task) {
 			return "", "", fmt.Errorf("%w: dependencies are not completed", ErrTaskBlocked)
 		}
 
-		agent = strings.TrimSpace(agent)
+		agent := strings.TrimSpace(req.Agent)
+		if taskLeaseHeldByAnotherOwner(task, agent, req.SessionID, req.RunID, now) {
+			return "", "", ErrTaskLeased
+		}
+
 		if agent != "" {
 			task.Agent = agent
 		}
 
 		task.Status = StatusCompleted
 		task.Lease = nil
+		task.BlockerReason = ""
+		task.ReviewStatus = ReviewStatusNone
 		task.UpdatedAt = now
 		task.CompletedAt = &now
 
-		return HistoryCompleted, "", nil
+		return HistoryCompleted, strings.TrimSpace(req.Message), nil
+	})
+}
+
+func taskLeaseHeldByAnotherOwner(task *Task, agent, sessionID, runID string, now time.Time) bool {
+	return task.Lease != nil &&
+		!leaseIsExpired(task.Lease, now) &&
+		(agent == "" || !sameLeaseOwner(task.Lease, agent, sessionID, runID))
+}
+
+// RequestReview marks a task as waiting for review and releases its active lease.
+func (s *Store) RequestReview(ctx context.Context, id string, req ReviewRequest) (Task, error) {
+	return s.updateTask(ctx, id, req.ExpectedRevision, req.Actor, func(state *State, task *Task, now time.Time) (HistoryAction, string, error) {
+		if task.Status == StatusCompleted {
+			return "", "", ErrTaskCompleted
+		}
+
+		if task.Status == StatusCanceled {
+			return "", "", ErrTaskCanceled
+		}
+
+		if task.Status == StatusFailed {
+			return "", "", ErrTaskFailed
+		}
+
+		if taskIsBlocked(*state, *task) {
+			return "", "", fmt.Errorf("%w: dependencies are not completed", ErrTaskBlocked)
+		}
+
+		agent := strings.TrimSpace(req.Agent)
+		if taskLeaseHeldByAnotherOwner(task, agent, req.SessionID, req.RunID, now) {
+			return "", "", ErrTaskLeased
+		}
+
+		if agent != "" {
+			task.Agent = agent
+		}
+
+		task.Status = StatusReview
+		task.Lease = nil
+		task.ReviewStatus = ReviewStatusPending
+		task.UpdatedAt = now
+
+		return HistoryReviewRequested, strings.TrimSpace(req.Message), nil
+	})
+}
+
+// Fail marks a task as failed, records the reason, and releases its active lease.
+func (s *Store) Fail(ctx context.Context, id string, req FailRequest) (Task, error) {
+	return s.updateTask(ctx, id, req.ExpectedRevision, req.Actor, func(_ *State, task *Task, now time.Time) (HistoryAction, string, error) {
+		if task.Status == StatusCompleted {
+			return "", "", ErrTaskCompleted
+		}
+
+		if task.Status == StatusCanceled {
+			return "", "", ErrTaskCanceled
+		}
+
+		agent := strings.TrimSpace(req.Agent)
+		if taskLeaseHeldByAnotherOwner(task, agent, req.SessionID, req.RunID, now) {
+			return "", "", ErrTaskLeased
+		}
+
+		if agent != "" {
+			task.Agent = agent
+		}
+
+		task.Status = StatusFailed
+		task.Lease = nil
+		task.ReviewStatus = ReviewStatusNone
+		task.FailureReason = strings.TrimSpace(req.Reason)
+		task.UpdatedAt = now
+
+		return HistoryFailed, strings.TrimSpace(req.Message), nil
+	})
+}
+
+// Cancel marks a task as canceled and releases its active lease.
+func (s *Store) Cancel(ctx context.Context, id string, req CancelRequest) (Task, error) {
+	return s.updateTask(ctx, id, req.ExpectedRevision, req.Actor, func(_ *State, task *Task, now time.Time) (HistoryAction, string, error) {
+		if task.Status == StatusCompleted {
+			return "", "", ErrTaskCompleted
+		}
+
+		if task.Status == StatusCanceled {
+			return "", "", ErrTaskCanceled
+		}
+
+		agent := strings.TrimSpace(req.Agent)
+		if taskLeaseHeldByAnotherOwner(task, agent, req.SessionID, req.RunID, now) {
+			return "", "", ErrTaskLeased
+		}
+
+		if agent != "" {
+			task.Agent = agent
+		}
+
+		task.Status = StatusCanceled
+		task.Lease = nil
+		task.ReviewStatus = ReviewStatusNone
+
+		if reason := strings.TrimSpace(req.Reason); reason != "" {
+			task.FailureReason = reason
+		}
+
+		task.UpdatedAt = now
+
+		return HistoryCanceled, strings.TrimSpace(req.Message), nil
+	})
+}
+
+// Reopen moves a completed, failed, canceled, or review task back into active planning.
+func (s *Store) Reopen(ctx context.Context, id string, req ReopenRequest) (Task, error) {
+	return s.updateTask(ctx, id, req.ExpectedRevision, req.Actor, func(state *State, task *Task, now time.Time) (HistoryAction, string, error) {
+		if !canReopenStatus(task.Status) {
+			return "", "", fmt.Errorf("tasklist: cannot reopen task with status %q", task.Status)
+		}
+
+		if task.Status != StatusReopened {
+			task.RetryCount++
+		}
+
+		if agent := strings.TrimSpace(req.Agent); agent != "" {
+			task.Agent = agent
+		} else {
+			task.Agent = ""
+		}
+
+		task.Status = StatusReopened
+		task.Lease = nil
+		task.ReviewStatus = ReviewStatusNone
+		task.CompletedAt = nil
+
+		if req.ClearFailureReason || task.FailureReason != "" {
+			task.FailureReason = ""
+		}
+
+		if req.ClearBlockerReason {
+			task.BlockerReason = ""
+		}
+
+		task.UpdatedAt = now
+		applyDependencyStatus(state, task)
+
+		return HistoryReopened, strings.TrimSpace(req.Message), nil
 	})
 }
 
@@ -499,6 +780,10 @@ func (s *Store) Update(ctx context.Context, id string, req UpdateRequest) (Task,
 }
 
 func applyUpdateRequest(state *State, task *Task, req UpdateRequest, now time.Time) error {
+	if err := validateUpdateWorkflowRequest(*task, req); err != nil {
+		return err
+	}
+
 	if title := strings.TrimSpace(req.Title); title != "" {
 		task.Title = title
 	}
@@ -519,6 +804,9 @@ func applyUpdateRequest(state *State, task *Task, req UpdateRequest, now time.Ti
 		task.Priority = req.Priority
 	}
 
+	applyUpdateRisk(task, req)
+	applyUpdateBlockerReason(task, req)
+
 	if err := applyUpdateReviewStatus(task, req); err != nil {
 		return err
 	}
@@ -538,22 +826,45 @@ func applyUpdateRequest(state *State, task *Task, req UpdateRequest, now time.Ti
 	return ensureAssignedLease(task, now)
 }
 
+func validateUpdateWorkflowRequest(task Task, req UpdateRequest) error {
+	if req.Status != "" {
+		requested := canonicalStatusForWrite(req.Status)
+		if requested == StatusReview || requested == StatusFailed || requested == StatusCanceled {
+			return fmt.Errorf("tasklist: use dedicated workflow method for status %q", requested)
+		}
+	}
+
+	if workflowStatusRequiresReopen(task.Status) && updateRequestsAssignment(req) {
+		return fmt.Errorf("tasklist: task status %q requires Reopen before assignment", task.Status)
+	}
+
+	if workflowStatusRequiresReopen(task.Status) && req.Status != "" && canonicalStatusForWrite(req.Status) != task.Status {
+		return fmt.Errorf("tasklist: task status %q requires Reopen before transition", task.Status)
+	}
+
+	return nil
+}
+
+func workflowStatusRequiresReopen(status Status) bool {
+	switch status {
+	case StatusReview, StatusFailed, StatusCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
 func updateRequestsAssignment(req UpdateRequest) bool {
-	return strings.TrimSpace(req.Agent) != "" || req.Status == StatusAssigned
+	return strings.TrimSpace(req.Agent) != "" || isInProgressStatus(req.Status)
 }
 
 func applyUpdateOwner(task *Task, req UpdateRequest, now time.Time) error {
 	agent := strings.TrimSpace(req.Agent)
-	if req.Status != "" {
-		if err := validateIncompleteStatus(req.Status); err != nil {
+	statusRequested := req.Status != ""
+
+	if statusRequested {
+		if err := applyRequestedOwnerStatus(task, req.Status); err != nil {
 			return err
-		}
-
-		task.Status = req.Status
-		if req.Status != StatusAssigned {
-			clearTaskOwner(task)
-
-			return nil
 		}
 	}
 
@@ -561,12 +872,45 @@ func applyUpdateOwner(task *Task, req UpdateRequest, now time.Time) error {
 		return nil
 	}
 
-	task.Agent = agent
-	task.Status = StatusAssigned
-	task.AttemptCount++
-	task.Lease = newLease(agent, "", "", now, 0)
+	if statusRequested && !isInProgressStatus(req.Status) {
+		applyNonProgressAgent(task, agent)
+
+		return nil
+	}
+
+	assignTaskOwner(task, agent, now)
 
 	return nil
+}
+
+func applyRequestedOwnerStatus(task *Task, status Status) error {
+	if err := validateIncompleteStatus(status); err != nil {
+		return err
+	}
+
+	task.Status = canonicalStatusForWrite(status)
+	switch {
+	case isInProgressStatus(task.Status):
+	case task.Status == StatusReview || task.Status == StatusFailed || task.Status == StatusCanceled:
+		task.Lease = nil
+	default:
+		clearTaskOwner(task)
+	}
+
+	return nil
+}
+
+func applyNonProgressAgent(task *Task, agent string) {
+	if task.Status == StatusReview || task.Status == StatusFailed || task.Status == StatusCanceled {
+		task.Agent = agent
+	}
+}
+
+func assignTaskOwner(task *Task, agent string, now time.Time) {
+	task.Agent = agent
+	task.Status = StatusInProgress
+	task.AttemptCount++
+	task.Lease = newLease(agent, "", "", now, 0)
 }
 
 func applyUpdateDependencies(task *Task, req UpdateRequest) error {
@@ -598,6 +942,30 @@ func applyUpdateReviewStatus(task *Task, req UpdateRequest) error {
 	return nil
 }
 
+func applyUpdateRisk(task *Task, req UpdateRequest) {
+	if req.ClearRisk {
+		task.Risk = ""
+		return
+	}
+
+	if risk := strings.TrimSpace(req.Risk); risk != "" {
+		task.Risk = risk
+	}
+}
+
+func applyUpdateBlockerReason(task *Task, req UpdateRequest) {
+	if req.ClearBlockerReason {
+		task.BlockerReason = ""
+		return
+	}
+
+	if blockerReason := strings.TrimSpace(req.BlockerReason); blockerReason != "" {
+		task.BlockerReason = blockerReason
+		task.Status = StatusBlocked
+		clearTaskOwner(task)
+	}
+}
+
 func applyUpdateFailureReason(task *Task, req UpdateRequest) {
 	if req.ClearFailureReason {
 		task.FailureReason = ""
@@ -610,21 +978,27 @@ func applyUpdateFailureReason(task *Task, req UpdateRequest) {
 }
 
 func applyDependencyStatus(state *State, task *Task) {
-	if len(unmetDependencies(*state, task.Dependencies)) > 0 {
+	unmet := unmetDependencies(*state, task.Dependencies)
+	if len(unmet) > 0 {
 		task.Status = StatusBlocked
+		task.BlockerReason = dependencyBlockerReason(unmet)
 		clearTaskOwner(task)
 
 		return
 	}
 
-	if task.Status == StatusBlocked {
-		task.Status = StatusPending
+	if isDependencyBlockerReason(task.BlockerReason) {
+		task.BlockerReason = ""
+	}
+
+	if task.Status == StatusBlocked && strings.TrimSpace(task.BlockerReason) == "" {
+		task.Status = StatusReady
 		clearTaskOwner(task)
 	}
 }
 
 func ensureAssignedLease(task *Task, now time.Time) error {
-	if task.Status != StatusAssigned || task.Lease != nil {
+	if !isInProgressStatus(task.Status) || task.Lease != nil {
 		return nil
 	}
 
@@ -633,6 +1007,7 @@ func ensureAssignedLease(task *Task, now time.Time) error {
 	}
 
 	task.AttemptCount++
+	task.Status = StatusInProgress
 	task.Lease = newLease(task.Agent, "", "", now, 0)
 
 	return nil
@@ -681,6 +1056,409 @@ func (s *Store) Reconcile(ctx context.Context, req ReconcileRequest) (ReconcileR
 	result.Tasks = cloneTasks(result.Tasks)
 
 	return result, nil
+}
+
+// Repair backs up and rewrites an unreadable or internally conflicted task file.
+//
+// Repair is intentionally conservative: it only rewrites when the current file
+// cannot be loaded as valid state or when parseable JSON contains conflicts
+// that can be normalized without inventing task content. The original bytes are
+// copied to BackupPath before the repaired state replaces the task file.
+func (s *Store) Repair(ctx context.Context, req RepairRequest) (RepairResult, error) {
+	if err := ctxErr(ctx); err != nil {
+		return RepairResult{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var result RepairResult
+
+	err := s.withFileLock(ctx, func() error {
+		repairResult, err := s.repairLocked(ctx, req)
+		if err != nil {
+			return err
+		}
+
+		result = repairResult
+
+		return nil
+	})
+	if err != nil {
+		return RepairResult{}, err
+	}
+
+	return result, nil
+}
+
+func (s *Store) repairLocked(ctx context.Context, req RepairRequest) (RepairResult, error) {
+	// #nosec G703 -- task list paths are explicit user/session configuration.
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return RepairResult{}, nil
+		}
+
+		return RepairResult{}, fmt.Errorf("tasklist: read %s: %w", s.path, err)
+	}
+
+	now := s.now().UTC()
+	actor := actorIdentity(req.Actor, "")
+	message := strings.TrimSpace(req.Message)
+
+	var state State
+
+	parseErr := json.Unmarshal(raw, &state)
+	if parseErr != nil {
+		return s.repairMalformedState(ctx, raw, now, actor, message, parseErr)
+	}
+
+	return s.repairParsedState(ctx, raw, state, now, actor, message)
+}
+
+func (s *Store) repairMalformedState(ctx context.Context, raw []byte, now time.Time, actor, message string, parseErr error) (RepairResult, error) {
+	backupPath, err := s.backupFile(raw, now)
+	if err != nil {
+		return RepairResult{}, err
+	}
+
+	state := State{}
+	appendRepairHistory(&state, now, actor, repairMessage(message, fmt.Sprintf("malformed JSON: %v", parseErr)))
+
+	if saveErr := s.saveFile(ctx, state); saveErr != nil {
+		return RepairResult{}, saveErr
+	}
+
+	return RepairResult{
+		BackupPath:     backupPath,
+		StateRevision:  state.Revision,
+		HistoryEntries: 1,
+		Repaired:       true,
+	}, nil
+}
+
+func (s *Store) repairParsedState(ctx context.Context, raw []byte, state State, now time.Time, actor, message string) (RepairResult, error) {
+	loadedErr := validateState(state)
+	repaired, recovered, dropped := repairLoadedState(&state, now)
+
+	if loadedErr == nil && !repaired {
+		return RepairResult{
+			StateRevision:  state.Revision,
+			TasksRecovered: len(state.Tasks),
+		}, nil
+	}
+
+	backupPath, err := s.backupFile(raw, now)
+	if err != nil {
+		return RepairResult{}, err
+	}
+
+	reason := "normalized conflicted task state"
+	if loadedErr != nil {
+		reason = loadedErr.Error()
+	}
+
+	appendRepairHistory(&state, now, actor, repairMessage(message, reason))
+
+	if saveErr := s.saveFile(ctx, state); saveErr != nil {
+		return RepairResult{}, saveErr
+	}
+
+	return RepairResult{
+		BackupPath:     backupPath,
+		StateRevision:  state.Revision,
+		TasksRecovered: recovered,
+		TasksDropped:   dropped,
+		HistoryEntries: 1,
+		Repaired:       true,
+	}, nil
+}
+
+func (s *Store) backupFile(raw []byte, now time.Time) (string, error) {
+	backupPath := fmt.Sprintf("%s.repair-%s.bak", s.path, now.Format("20060102T150405.000000000Z"))
+	// #nosec G306,G703 -- backup path is derived from the explicit task-list path.
+	if err := os.WriteFile(backupPath, raw, 0o600); err != nil {
+		return "", fmt.Errorf("tasklist: backup %s: %w", backupPath, err)
+	}
+
+	return backupPath, nil
+}
+
+func appendRepairHistory(state *State, now time.Time, actor, message string) {
+	state.Revision = nextStateRevision(*state)
+	state.History = appendHistory(state.History, historyRecord{
+		at:            now,
+		action:        HistoryRepaired,
+		taskID:        "__state__",
+		actor:         actor,
+		message:       message,
+		stateRevision: state.Revision,
+	})
+}
+
+func repairMessage(message, reason string) string {
+	message = strings.TrimSpace(message)
+
+	reason = strings.TrimSpace(reason)
+
+	if message == "" {
+		return reason
+	}
+
+	if reason == "" {
+		return message
+	}
+
+	return message + ": " + reason
+}
+
+func repairLoadedState(state *State, now time.Time) (repaired bool, recovered, dropped int) {
+	repaired = repairHistory(state, now) || repaired
+
+	seen := make(map[string]struct{}, len(state.Tasks))
+
+	tasks := make([]Task, 0, len(state.Tasks))
+	for i := range state.Tasks {
+		task, changed, ok := repairTask(state.Tasks[i], now)
+		if !ok {
+			dropped++
+			repaired = true
+
+			continue
+		}
+
+		if _, exists := seen[task.ID]; exists {
+			dropped++
+			repaired = true
+
+			continue
+		}
+
+		seen[task.ID] = struct{}{}
+		tasks = append(tasks, task)
+		recovered++
+		repaired = changed || repaired
+	}
+
+	state.Tasks = tasks
+	for i := range state.Tasks {
+		before := cloneTask(state.Tasks[i])
+		applyDependencyStatus(state, &state.Tasks[i])
+
+		if !tasksEquivalentForRepair(before, state.Tasks[i]) {
+			repaired = true
+		}
+	}
+
+	return repaired, recovered, dropped
+}
+
+//nolint:gocognit,cyclop // Repair normalization intentionally handles independent corrupt field cases.
+func repairTask(task Task, now time.Time) (Task, bool, bool) {
+	changed := false
+
+	trimmedID := strings.TrimSpace(task.ID)
+
+	trimmedTitle := strings.TrimSpace(task.Title)
+	if trimmedID == "" || trimmedTitle == "" {
+		return Task{}, true, false
+	}
+
+	if task.ID != trimmedID {
+		task.ID = trimmedID
+		changed = true
+	}
+
+	if task.Title != trimmedTitle {
+		task.Title = trimmedTitle
+		changed = true
+	}
+
+	if task.CreatedAt.IsZero() {
+		task.CreatedAt = now
+		changed = true
+	}
+
+	if task.UpdatedAt.IsZero() {
+		task.UpdatedAt = task.CreatedAt
+		changed = true
+	}
+
+	status, statusChanged := repairStatus(task.Status)
+	task.Status = status
+	changed = statusChanged || changed
+
+	dependencies, depsChanged := repairDependencies(task.Dependencies, task.ID)
+	task.Dependencies = dependencies
+	changed = depsChanged || changed
+
+	task.Metadata = copyMetadata(task.Metadata)
+
+	if risk := strings.TrimSpace(task.Risk); risk != task.Risk {
+		task.Risk = risk
+		changed = true
+	}
+
+	if blockerReason := strings.TrimSpace(task.BlockerReason); blockerReason != task.BlockerReason {
+		task.BlockerReason = blockerReason
+		changed = true
+	}
+
+	if failureReason := strings.TrimSpace(task.FailureReason); failureReason != task.FailureReason {
+		task.FailureReason = failureReason
+		changed = true
+	}
+
+	if task.AttemptCount < 0 {
+		task.AttemptCount = 0
+		changed = true
+	}
+
+	if task.RetryCount < 0 {
+		task.RetryCount = 0
+		changed = true
+	}
+
+	if task.Status == StatusCompleted && task.CompletedAt == nil {
+		completedAt := task.UpdatedAt
+		task.CompletedAt = &completedAt
+		changed = true
+	}
+
+	if task.Status != StatusCompleted && task.CompletedAt != nil {
+		task.CompletedAt = nil
+		changed = true
+	}
+
+	if task.Lease != nil && !validLease(*task.Lease) {
+		task.Lease = nil
+		changed = true
+	}
+
+	if task.Lease != nil && !isInProgressStatus(task.Status) {
+		task.Lease = nil
+		if !statusRetainsHistoricalAgent(task.Status) && task.Agent != "" {
+			task.Agent = ""
+		}
+
+		changed = true
+	}
+
+	if task.Lease == nil && isInProgressStatus(task.Status) {
+		task.Status = StatusReady
+		task.Agent = ""
+		changed = true
+	}
+
+	if task.Lease != nil && task.Agent != task.Lease.Owner {
+		task.Agent = task.Lease.Owner
+		changed = true
+	}
+
+	return task, changed, true
+}
+
+func repairStatus(status Status) (Status, bool) {
+	switch status {
+	case StatusReady, StatusBlocked, StatusInProgress, StatusReview, StatusFailed, StatusCanceled, StatusReopened, StatusCompleted:
+		return status, false
+	case StatusPending:
+		return StatusReady, true
+	case StatusAssigned:
+		return StatusInProgress, true
+	default:
+		return StatusFailed, true
+	}
+}
+
+func repairDependencies(dependencies []string, selfID string) ([]string, bool) {
+	repaired, err := sanitizeDependencies(dependencies, selfID)
+	if err == nil {
+		return repaired, !stringSlicesEqual(repaired, dependencies)
+	}
+
+	out := make([]string, 0, len(dependencies))
+
+	seen := make(map[string]struct{}, len(dependencies))
+	for _, dependency := range dependencies {
+		dependency = strings.TrimSpace(dependency)
+		if dependency == "" || dependency == strings.TrimSpace(selfID) {
+			continue
+		}
+
+		if _, ok := seen[dependency]; ok {
+			continue
+		}
+
+		seen[dependency] = struct{}{}
+		out = append(out, dependency)
+	}
+
+	sort.Strings(out)
+
+	return out, true
+}
+
+func repairHistory(state *State, now time.Time) bool {
+	repaired := false
+
+	history := make([]HistoryEntry, 0, len(state.History))
+	seenSeq := make(map[int64]struct{}, len(state.History))
+	nextSeq := int64(1)
+
+	for i := range state.History {
+		entry := state.History[i]
+		if strings.TrimSpace(entry.TaskID) == "" || !isValidHistoryAction(entry.Action) {
+			repaired = true
+			continue
+		}
+
+		entry.Actor = actorIdentity(entry.Actor, "")
+		entry.Agent = strings.TrimSpace(entry.Agent)
+		entry.Message = strings.TrimSpace(entry.Message)
+
+		if entry.At.IsZero() {
+			entry.At = now
+			repaired = true
+		}
+
+		if entry.Seq <= 0 {
+			entry.Seq = nextSeq
+			repaired = true
+		}
+
+		if _, exists := seenSeq[entry.Seq]; exists {
+			entry.Seq = nextSeq
+			repaired = true
+		}
+
+		seenSeq[entry.Seq] = struct{}{}
+		if entry.Seq >= nextSeq {
+			nextSeq = entry.Seq + 1
+		}
+
+		history = append(history, entry)
+	}
+
+	state.History = history
+
+	return repaired
+}
+
+func validLease(lease Lease) bool {
+	return strings.TrimSpace(lease.Owner) != "" &&
+		!lease.AcquiredAt.IsZero() &&
+		!lease.LastHeartbeatAt.IsZero() &&
+		!lease.ExpiresAt.IsZero()
+}
+
+func tasksEquivalentForRepair(a, b Task) bool {
+	return a.ID == b.ID &&
+		a.Title == b.Title &&
+		a.Status == b.Status &&
+		a.Agent == b.Agent &&
+		a.BlockerReason == b.BlockerReason &&
+		stringSlicesEqual(a.Dependencies, b.Dependencies)
 }
 
 func reconcileState(state *State, now time.Time, actor, message string) ReconcileResult {
@@ -751,39 +1529,94 @@ func reconcileTaskState(state State, task *Task, now time.Time) (reconcileChange
 
 	change := reconcileChange{before: cloneTask(*task)}
 	changed := repairAssignedLease(task, now, &change)
-	blocked := len(unmetDependencies(state, task.Dependencies)) > 0
+	unmet := unmetDependencies(state, task.Dependencies)
 
-	switch {
-	case blocked && task.Status != StatusBlocked:
-		task.Status = StatusBlocked
-		clearTaskOwner(task)
+	if reconcileDependencyBlock(task, unmet) {
+		return change, true
+	}
 
-		changed = true
-	case !blocked && task.Status == StatusBlocked:
-		task.Status = StatusPending
-		clearTaskOwner(task)
+	if reconcileManualBlock(task, len(unmet) > 0) {
+		return change, true
+	}
 
-		changed = true
-	case task.Status != StatusAssigned && hasTaskOwner(task):
-		clearTaskOwner(task)
-
+	if clearReconcileStaleOwner(task) {
 		changed = true
 	}
 
 	return change, changed
 }
 
-func repairAssignedLease(task *Task, now time.Time, change *reconcileChange) bool {
-	if task.Status != StatusAssigned {
+func reconcileDependencyBlock(task *Task, unmet []string) bool {
+	if len(unmet) == 0 || isDependencyBlockerReason(task.BlockerReason) {
 		return false
 	}
 
+	task.BlockerReason = dependencyBlockerReason(unmet)
+	task.Status = StatusBlocked
+	clearTaskOwner(task)
+
+	return true
+}
+
+func reconcileManualBlock(task *Task, dependencyBlocked bool) bool {
+	blocked := dependencyBlocked || hasManualBlocker(task.BlockerReason, dependencyBlocked)
+	switch {
+	case blocked && task.Status != StatusBlocked:
+		task.Status = StatusBlocked
+		clearTaskOwner(task)
+
+		return true
+	case !blocked && isDependencyBlockerReason(task.BlockerReason):
+		task.BlockerReason = ""
+		if task.Status == StatusBlocked {
+			task.Status = StatusReady
+			clearTaskOwner(task)
+		}
+
+		return true
+	case !blocked && task.Status == StatusBlocked:
+		task.Status = StatusReady
+		clearTaskOwner(task)
+
+		return true
+	default:
+		return false
+	}
+}
+
+func hasManualBlocker(reason string, dependencyBlocked bool) bool {
+	reason = strings.TrimSpace(reason)
+
+	return reason != "" && (!isDependencyBlockerReason(reason) || dependencyBlocked)
+}
+
+func clearReconcileStaleOwner(task *Task) bool {
+	if isInProgressStatus(task.Status) || !hasTaskOwner(task) || statusRetainsHistoricalAgent(task.Status) {
+		return false
+	}
+
+	clearTaskOwner(task)
+
+	return true
+}
+
+func repairAssignedLease(task *Task, now time.Time, change *reconcileChange) bool {
+	if !isInProgressStatus(task.Status) {
+		return false
+	}
+
+	legacyAssigned := task.Status == StatusAssigned
+
 	if leaseIsExpired(task.Lease, now) {
 		clearTaskOwner(task)
-		task.Status = StatusPending
+		task.Status = StatusReady
 		change.expiredLease = true
 
 		return true
+	}
+
+	if task.Status == StatusAssigned {
+		task.Status = StatusInProgress
 	}
 
 	if task.Agent != task.Lease.Owner {
@@ -792,7 +1625,7 @@ func repairAssignedLease(task *Task, now time.Time, change *reconcileChange) boo
 		return true
 	}
 
-	return false
+	return legacyAssigned
 }
 
 func clearTaskOwner(task *Task) {
@@ -802,6 +1635,15 @@ func clearTaskOwner(task *Task) {
 
 func hasTaskOwner(task *Task) bool {
 	return strings.TrimSpace(task.Agent) != "" || task.Lease != nil
+}
+
+func statusRetainsHistoricalAgent(status Status) bool {
+	switch status {
+	case StatusCompleted, StatusReview, StatusFailed, StatusCanceled:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) assign(ctx context.Context, id string, req AssignRequest, replaceLiveLease bool) (Task, error) {
@@ -815,11 +1657,23 @@ func (s *Store) assign(ctx context.Context, id string, req AssignRequest, replac
 			return "", "", ErrTaskCompleted
 		}
 
-		if len(unmetDependencies(*state, task.Dependencies)) > 0 {
+		if task.Status == StatusCanceled {
+			return "", "", ErrTaskCanceled
+		}
+
+		if task.Status == StatusFailed {
+			return "", "", ErrTaskFailed
+		}
+
+		if task.Status == StatusReview {
+			return "", "", errors.New("tasklist: task is in review")
+		}
+
+		if taskIsBlocked(*state, *task) {
 			return "", "", fmt.Errorf("%w: dependencies are not completed", ErrTaskBlocked)
 		}
 
-		if !replaceLiveLease && task.Status == StatusAssigned && !leaseIsExpired(task.Lease, now) && !sameLeaseOwner(task.Lease, agent, req.SessionID, req.RunID) {
+		if !replaceLiveLease && isInProgressStatus(task.Status) && !leaseIsExpired(task.Lease, now) && !sameLeaseOwner(task.Lease, agent, req.SessionID, req.RunID) {
 			return "", "", ErrTaskLeased
 		}
 
@@ -828,7 +1682,7 @@ func (s *Store) assign(ctx context.Context, id string, req AssignRequest, replac
 		}
 
 		task.Agent = agent
-		task.Status = StatusAssigned
+		task.Status = StatusInProgress
 		task.Lease = newLease(agent, req.SessionID, req.RunID, now, req.LeaseDuration)
 		task.UpdatedAt = now
 
@@ -837,7 +1691,7 @@ func (s *Store) assign(ctx context.Context, id string, req AssignRequest, replac
 }
 
 func shouldCountAssignmentAttempt(task *Task, agent, sessionID, runID string, now time.Time) bool {
-	return task.Status != StatusAssigned || leaseIsExpired(task.Lease, now) || !sameLeaseOwner(task.Lease, agent, sessionID, runID)
+	return !isInProgressStatus(task.Status) || leaseIsExpired(task.Lease, now) || !sameLeaseOwner(task.Lease, agent, sessionID, runID)
 }
 
 func (s *Store) updateTask(ctx context.Context, id string, expectedRevision int64, actor string, mutate func(*State, *Task, time.Time) (HistoryAction, string, error)) (Task, error) {
@@ -1126,13 +1980,34 @@ func validateState(state State) error {
 	}
 
 	for i := range state.History {
+		if state.History[i].Seq <= 0 {
+			return errors.New("tasklist: history seq is required")
+		}
+
+		if state.History[i].At.IsZero() {
+			return errors.New("tasklist: history at is required")
+		}
+
 		if strings.TrimSpace(state.History[i].TaskID) == "" {
 			return errors.New("tasklist: history task id is required")
 		}
 
-		if state.History[i].Action == "" {
-			return errors.New("tasklist: history action is required")
+		if !isValidHistoryAction(state.History[i].Action) {
+			return fmt.Errorf("tasklist: invalid history action %q", state.History[i].Action)
 		}
+
+		if strings.TrimSpace(state.History[i].Actor) == "" {
+			return errors.New("tasklist: history actor is required")
+		}
+	}
+
+	seenHistorySeq := make(map[int64]struct{}, len(state.History))
+	for i := range state.History {
+		if _, ok := seenHistorySeq[state.History[i].Seq]; ok {
+			return fmt.Errorf("tasklist: duplicate history seq %d", state.History[i].Seq)
+		}
+
+		seenHistorySeq[state.History[i].Seq] = struct{}{}
 	}
 
 	return nil
@@ -1145,6 +2020,7 @@ func validateTask(task Task) error {
 		validateTaskCompletion,
 		validateTaskLease,
 		validateTaskDependencies,
+		validateTaskCounters,
 	} {
 		if err := validate(task); err != nil {
 			return err
@@ -1199,12 +2075,14 @@ func validateTaskCompletion(task Task) error {
 }
 
 func validateTaskLease(task Task) error {
-	if task.Status == StatusCompleted && task.Lease != nil {
-		return errors.New("tasklist: lease is not valid for completed tasks")
-	}
-
 	if task.Lease == nil {
 		return nil
+	}
+
+	// Blocked tasks may carry stale leases from manual edits; keep them loadable
+	// so Reconcile can clear the lease before the task becomes claimable.
+	if task.Status != StatusBlocked && !isInProgressStatus(task.Status) {
+		return errors.New("tasklist: lease is only valid for in-progress tasks")
 	}
 
 	if strings.TrimSpace(task.Lease.Owner) == "" {
@@ -1234,12 +2112,43 @@ func validateTaskDependencies(task Task) error {
 	return nil
 }
 
+func validateTaskCounters(task Task) error {
+	if task.AttemptCount < 0 {
+		return errors.New("tasklist: attempt_count cannot be negative")
+	}
+
+	if task.RetryCount < 0 {
+		return errors.New("tasklist: retry_count cannot be negative")
+	}
+
+	return nil
+}
+
 func validateStatus(status Status) error {
 	switch status {
-	case StatusPending, StatusBlocked, StatusAssigned, StatusCompleted:
+	case StatusReady, StatusPending, StatusBlocked, StatusInProgress, StatusAssigned, StatusReview, StatusFailed, StatusCanceled, StatusReopened, StatusCompleted:
 		return nil
 	default:
 		return fmt.Errorf("tasklist: invalid status %q", status)
+	}
+}
+
+func isValidHistoryAction(action HistoryAction) bool {
+	switch action {
+	case HistoryAdded,
+		HistoryAssigned,
+		HistoryUpdated,
+		HistoryHeartbeat,
+		HistoryReconciled,
+		HistoryCompleted,
+		HistoryReviewRequested,
+		HistoryFailed,
+		HistoryCanceled,
+		HistoryReopened,
+		HistoryRepaired:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1249,6 +2158,30 @@ func validateIncompleteStatus(status Status) error {
 	}
 
 	return validateStatus(status)
+}
+
+func canonicalStatusForWrite(status Status) Status {
+	switch status {
+	case StatusPending:
+		return StatusReady
+	case StatusAssigned:
+		return StatusInProgress
+	default:
+		return status
+	}
+}
+
+func isInProgressStatus(status Status) bool {
+	return status == StatusInProgress || status == StatusAssigned
+}
+
+func canReopenStatus(status Status) bool {
+	switch status {
+	case StatusCompleted, StatusReview, StatusFailed, StatusCanceled, StatusReopened:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateReviewStatus(status ReviewStatus) error {
@@ -1350,6 +2283,20 @@ func sanitizeDependencies(dependencies []string, selfID string) ([]string, error
 	return out, nil
 }
 
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
 func unmetDependencies(state State, dependencies []string) []string {
 	if len(dependencies) == 0 {
 		return nil
@@ -1364,6 +2311,27 @@ func unmetDependencies(state State, dependencies []string) []string {
 	}
 
 	return unmet
+}
+
+const dependencyBlockerPrefix = "waiting on dependencies: "
+
+func taskIsBlocked(state State, task Task) bool {
+	return len(unmetDependencies(state, task.Dependencies)) > 0 || strings.TrimSpace(task.BlockerReason) != "" || task.Status == StatusBlocked
+}
+
+func dependencyBlockerReason(dependencies []string) string {
+	if len(dependencies) == 0 {
+		return ""
+	}
+
+	dependencies = append([]string(nil), dependencies...)
+	sort.Strings(dependencies)
+
+	return dependencyBlockerPrefix + strings.Join(dependencies, ",")
+}
+
+func isDependencyBlockerReason(reason string) bool {
+	return strings.HasPrefix(strings.TrimSpace(reason), dependencyBlockerPrefix)
 }
 
 func stateWithTask(state State, task Task) State {

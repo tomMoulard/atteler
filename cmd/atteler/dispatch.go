@@ -87,6 +87,9 @@ func initCLIFlagValues(opts *cliOptions) {
 	opts.evaluationConfidence = floatFlag{name: "evaluation-confidence", min: 0, max: 1, hasMax: true}
 	opts.evaluationPassRate = floatFlag{name: "evaluation-pass-rate", min: 0, max: 1, hasMax: true}
 	opts.evaluationScore = nonNegativeIntFlag{name: "evaluation-score"}
+	opts.taskExpectedRevision = positiveIntFlag{name: "task-expected-revision"}
+	opts.taskLeaseSeconds = positiveIntFlag{name: "task-lease-seconds"}
+	opts.taskPriority = nonNegativeIntFlag{name: "task-priority"}
 	opts.maxTokens = positiveIntFlag{name: "max-tokens"}
 	opts.maxInputTokens = positiveIntFlag{name: "max-input-tokens"}
 	opts.contextPackTokens = positiveIntFlag{name: "context-pack-tokens"}
