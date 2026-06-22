@@ -553,6 +553,25 @@ func TestStore_LoadEventLogRejectsTamperedHashChain(t *testing.T) {
 	assert.ErrorIs(t, err, ErrCorruptEventLog)
 }
 
+func TestStore_LoadEventLogRejectsMixedSessionIDs(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	sessionState := New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "safe prefix"}})
+	require.NoError(t, store.Save(sessionState))
+
+	events := readEventLogTestEvents(t, store.EventLogPath(sessionState.ID))
+	require.GreaterOrEqual(t, len(events), 2)
+
+	events[len(events)-1].SessionID = "other-session"
+	rewriteEventLogTestEvents(t, store.EventLogPath(sessionState.ID), events)
+
+	_, err := store.Load(sessionState.ID)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCorruptEventLog)
+	assert.Contains(t, err.Error(), "session_id")
+}
+
 func TestStore_SaveRepairsValidEventLogMissingTrailingNewlineBeforeAppend(t *testing.T) {
 	t.Parallel()
 
@@ -679,4 +698,50 @@ func stableSessionExportJSON(t *testing.T, sessionState Session, options ExportO
 	require.NoError(t, err)
 
 	return string(data)
+}
+
+func readEventLogTestEvents(t *testing.T, path string) []Event {
+	t.Helper()
+
+	lines := strings.Split(strings.TrimSpace(readSessionTestFile(t, path)), "\n")
+	events := make([]Event, 0, len(lines))
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		var event Event
+		require.NoError(t, json.Unmarshal([]byte(line), &event))
+
+		events = append(events, event)
+	}
+
+	return events
+}
+
+func rewriteEventLogTestEvents(t *testing.T, path string, events []Event) {
+	t.Helper()
+
+	lines := make([]string, 0, len(events))
+	prevHash := ""
+
+	for index := range events {
+		events[index].Sequence = int64(index + 1)
+		events[index].PrevHash = prevHash
+		events[index].Hash = ""
+
+		hash, err := eventDigest(events[index])
+		require.NoError(t, err)
+
+		events[index].Hash = hash
+		prevHash = hash
+
+		data, err := json.Marshal(events[index])
+		require.NoError(t, err)
+
+		lines = append(lines, string(data))
+	}
+
+	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
 }

@@ -660,6 +660,14 @@ func replayEvents(events []Event) (Session, error) {
 		event := &events[index]
 		if event.SessionID != "" && sessionState.ID == "" {
 			sessionState.ID = event.SessionID
+		} else if event.SessionID != "" && sessionState.ID != "" && event.SessionID != sessionState.ID {
+			return Session{}, fmt.Errorf(
+				"%w: event %d session_id %q does not match %q",
+				ErrCorruptEventLog,
+				event.Sequence,
+				event.SessionID,
+				sessionState.ID,
+			)
 		}
 
 		if event.At.After(sessionState.UpdatedAt) {
@@ -671,6 +679,26 @@ func replayEvents(events []Event) (Session, error) {
 			var metadata sessionMetadataEvent
 			if err := unmarshalEventPayload(event, &metadata); err != nil {
 				return Session{}, err
+			}
+
+			if metadata.ID != "" && event.SessionID != "" && metadata.ID != event.SessionID {
+				return Session{}, fmt.Errorf(
+					"%w: event %d metadata id %q does not match session_id %q",
+					ErrCorruptEventLog,
+					event.Sequence,
+					metadata.ID,
+					event.SessionID,
+				)
+			}
+
+			if metadata.ID != "" && sessionState.ID != "" && metadata.ID != sessionState.ID {
+				return Session{}, fmt.Errorf(
+					"%w: event %d metadata id %q does not match %q",
+					ErrCorruptEventLog,
+					event.Sequence,
+					metadata.ID,
+					sessionState.ID,
+				)
 			}
 
 			applyMetadataEvent(&sessionState, metadata)
