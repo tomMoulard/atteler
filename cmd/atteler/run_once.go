@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,22 +190,28 @@ func cloneResponseFormat(format *llm.ResponseFormat) *llm.ResponseFormat {
 }
 
 func loadRecordedResponse(ctx context.Context, path string) (*llm.Response, error) {
+	resp, _, err := loadRecordedResponseWithProvenance(ctx, path)
+
+	return resp, err
+}
+
+func loadRecordedResponseWithProvenance(ctx context.Context, path string) (*llm.Response, session.FileReference, error) {
 	if err := authorizeReadPermission(ctx, "replay one-shot response", "atteler.eval.replay_response", path); err != nil {
-		return nil, fmt.Errorf("replay response: %w", err)
+		return nil, session.FileReference{}, fmt.Errorf("replay response: %w", err)
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("replay response: read %s: %w", path, err)
+		return nil, session.FileReference{}, fmt.Errorf("replay response: read %s: %w", path, err)
 	}
 
 	var record responseRecordFile
 	if err := json.Unmarshal(data, &record); err != nil {
-		return nil, fmt.Errorf("replay response: parse %s: %w", path, err)
+		return nil, session.FileReference{}, fmt.Errorf("replay response: parse %s: %w", path, err)
 	}
 
 	if strings.TrimSpace(record.Response.Content) == "" {
-		return nil, fmt.Errorf("replay response: %s has empty response content", path)
+		return nil, session.FileReference{}, fmt.Errorf("replay response: %s has empty response content", path)
 	}
 
 	return &llm.Response{
@@ -216,7 +224,7 @@ func loadRecordedResponse(ctx context.Context, path string) (*llm.Response, erro
 		CachedInputTokens:     record.Response.CachedInputTokens,
 		CacheWriteInputTokens: record.Response.CacheWriteInputTokens,
 		OutputTokens:          record.Response.OutputTokens,
-	}, nil
+	}, replayResponseFileReference(path, data), nil
 }
 
 func responseRecordDurationMS(duration time.Duration) int {
@@ -556,7 +564,7 @@ func runOnceWithOptions(
 
 	agentLoopPreflight := runOnceAgentLoopManifestPreflight(ctx, hooks, reg, store, headlessRun, store.Path(sessionState.ID), sessionState.ID, prepared.activeAgent.name, prepared.fallbackModels, prepared.inlineReferenceEvents, refCtx.Manifest, maxInputTokens)
 
-	resp, providerRequestMessages, err := runOnceCompleteWithAutonomyTranscript(
+	resp, providerRequestMessages, replayResponseReferences, err := runOnceCompleteWithAutonomyTranscript(
 		ctx,
 		reg,
 		params,
@@ -612,6 +620,7 @@ func runOnceWithOptions(
 		prepared.fallbackModels,
 		providerRequestMessages,
 		providerReferenceManifest,
+		replayResponseReferences,
 		resp,
 		checkpointPath,
 		outputFormat,
@@ -633,6 +642,7 @@ func finishRunOnceSuccess(
 	fallbackModels []string,
 	providerRequestMessages []llm.Message,
 	referenceManifest contextref.ReferenceManifest,
+	replayResponseReferences []session.FileReference,
 	resp *llm.Response,
 	checkpointPath string,
 	outputFormat string,
@@ -656,7 +666,7 @@ func finishRunOnceSuccess(
 		Params:          providerParams,
 		Response:        resp,
 		FallbackModels:  fallbackModels,
-		ReferencedFiles: sessionFileReferencesFromManifest(referenceManifest, agentName),
+		ReferencedFiles: providerCallFileReferences(referenceManifest, agentName, replayResponseReferences),
 	})
 
 	if err := saveRunOnceAssistantResponse(ctx, hooks, store, sessionState, agentName, resp, providerCall); err != nil {
@@ -872,6 +882,40 @@ func sessionFileReferencesFromManifest(manifest contextref.ReferenceManifest, ag
 	}
 
 	return refs
+}
+
+func providerCallFileReferences(manifest contextref.ReferenceManifest, agentName string, extraReferences []session.FileReference) []session.FileReference {
+	refs := sessionFileReferencesFromManifest(manifest, agentName)
+
+	if len(extraReferences) == 0 {
+		return refs
+	}
+
+	sourceAgent := strings.TrimSpace(agentName)
+
+	for index := range extraReferences {
+		ref := extraReferences[index]
+		if ref.SourceAgent == "" {
+			ref.SourceAgent = sourceAgent
+		}
+
+		refs = append(refs, ref)
+	}
+
+	return refs
+}
+
+func replayResponseFileReference(path string, data []byte) session.FileReference {
+	sum := sha256.Sum256(data)
+
+	return session.FileReference{
+		Path:        strings.TrimSpace(path),
+		LogicalPath: filepath.Base(strings.TrimSpace(path)),
+		Kind:        "response_fixture",
+		Source:      "replay_response",
+		SHA256:      hex.EncodeToString(sum[:]),
+		SizeBytes:   int64(len(data)),
+	}
 }
 
 func prepareRunOnceRequest(
@@ -1887,7 +1931,7 @@ func runOnceCompleteWithAutonomy(
 	beforeModelCall func(iteration int, params llm.CompleteParams) error,
 	audit attshell.AuditContext,
 ) (*llm.Response, error) {
-	resp, _, err := runOnceCompleteWithAutonomyTranscript(
+	resp, _, _, err := runOnceCompleteWithAutonomyTranscript(
 		ctx,
 		reg,
 		params,
@@ -1920,7 +1964,7 @@ func runOnceCompleteWithAutonomyTranscript(
 	checkpointPath string,
 	beforeModelCall func(iteration int, params llm.CompleteParams) error,
 	audit attshell.AuditContext,
-) (*llm.Response, []llm.Message, error) {
+) (*llm.Response, []llm.Message, []session.FileReference, error) {
 	autonomyLevel = autonomy.Normalize(autonomyLevel)
 
 	ctx = permission.ContextWithPolicy(ctx, permissionPolicy)
@@ -1929,32 +1973,32 @@ func runOnceCompleteWithAutonomyTranscript(
 	}
 
 	if responseOptions.ReplayPath != "" {
-		resp, err := loadRecordedResponse(ctx, responseOptions.ReplayPath)
+		resp, replayReference, err := loadRecordedResponseWithProvenance(ctx, responseOptions.ReplayPath)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		if err := enforceReplayAgentLoopBudget(reg, params.Model, fallbackModels, agentLoopBudget, resp); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		if err := saveRecordedResponse(ctx, responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
-		return resp, append([]llm.Message(nil), params.Messages...), nil
+		return resp, append([]llm.Message(nil), params.Messages...), []session.FileReference{replayReference}, nil
 	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, nil, fmt.Errorf("get working directory: %w", err)
+		return nil, nil, nil, fmt.Errorf("get working directory: %w", err)
 	}
 
 	executor := newBashExecutor(cwd, os.Stderr, audit, permissionPolicy)
 
 	costEstimator, err := agentLoopCostEstimatorForBudget(reg, params.Model, fallbackModels, agentLoopBudget)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	resp, messages, err := llm.AgentLoop(ctx, reg, params, fallbackModels, executor, llm.AgentLoopConfig{
@@ -1969,14 +2013,14 @@ func runOnceCompleteWithAutonomyTranscript(
 		CheckpointSink:     agentLoopCheckpointSink(checkpointPath),
 	})
 	if err != nil {
-		return nil, messages, agentLoopError(err, checkpointPath)
+		return nil, messages, nil, agentLoopError(err, checkpointPath)
 	}
 
 	if err := saveRecordedResponse(ctx, responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
-		return nil, messages, err
+		return nil, messages, nil, err
 	}
 
-	return resp, messages, nil
+	return resp, messages, nil, nil
 }
 
 func enforceReplayAgentLoopBudget(

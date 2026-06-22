@@ -130,7 +130,7 @@ func TestRunOnceCompleteWithAutonomyTranscriptReturnsToolMessages(t *testing.T) 
 	reg := llm.NewRegistry()
 	reg.Register(provider)
 
-	resp, messages, err := runOnceCompleteWithAutonomyTranscript(
+	resp, messages, replayReferences, err := runOnceCompleteWithAutonomyTranscript(
 		context.Background(),
 		reg,
 		llm.CompleteParams{
@@ -152,6 +152,7 @@ func TestRunOnceCompleteWithAutonomyTranscriptReturnsToolMessages(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, "done", resp.Content)
+	assert.Empty(t, replayReferences)
 	require.Len(t, provider.requests, 2)
 	require.NotEmpty(t, messages)
 
@@ -227,6 +228,16 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	if len(loaded.Messages) != 2 || loaded.Messages[1].Content != "recorded answer" {
 		require.Failf(t, "unexpected replayed session", "messages = %+v", loaded.Messages)
 	}
+
+	require.Len(t, loaded.ProviderCalls, 1)
+	require.Len(t, loaded.ProviderCalls[0].ReferencedFiles, 1)
+	replayRef := loaded.ProviderCalls[0].ReferencedFiles[0]
+	assert.Equal(t, replayPath, replayRef.Path)
+	assert.Equal(t, filepath.Base(replayPath), replayRef.LogicalPath)
+	assert.Equal(t, "response_fixture", replayRef.Kind)
+	assert.Equal(t, "replay_response", replayRef.Source)
+	assert.NotEmpty(t, replayRef.SHA256)
+	assert.Positive(t, replayRef.SizeBytes)
 }
 
 func TestSaveRecordedResponse_IncludesResponseFormat(t *testing.T) {
