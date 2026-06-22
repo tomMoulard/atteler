@@ -1696,18 +1696,7 @@ func writeProvenance(b *strings.Builder, provenance ExportProvenance) {
 	writeMetadataString(b, "Providers", strings.Join(provenance.Providers, ", "))
 	writeMetadataString(b, "Models", strings.Join(provenance.Models, ", "))
 
-	if provenance.EventLog != nil {
-		writeMetadataString(b, "Event log", provenance.EventLog.Path)
-		writeMetadataString(b, "Event log hash", provenance.EventLog.LastHash)
-
-		if provenance.EventLog.EventCount > 0 {
-			fmt.Fprintf(b, "- **Event count:** %d\n", provenance.EventLog.EventCount)
-		}
-
-		if provenance.EventLog.TruncatedTail {
-			b.WriteString("- **Event log warning:** truncated tail ignored during replay\n")
-		}
-	}
+	writeProvenanceEventLog(b, provenance.EventLog)
 
 	writeProvenanceTokenUsage(b, provenance.TokenUsage)
 	writeProvenanceProviderCalls(b, provenance.ProviderCalls)
@@ -1759,6 +1748,31 @@ func writeProvenance(b *strings.Builder, provenance ExportProvenance) {
 
 			fmt.Fprintf(b, "  - %s\n", strings.Join(parts, " "))
 		}
+	}
+}
+
+func writeProvenanceEventLog(b *strings.Builder, eventLog *ExportEventLogProvenance) {
+	if eventLog == nil {
+		return
+	}
+
+	writeMetadataString(b, "Event log", eventLog.Path)
+	writeMetadataString(b, "Event log hash", eventLog.LastHash)
+
+	if eventLog.SchemaVersion > 0 {
+		fmt.Fprintf(b, "- **Event schema:** %d\n", eventLog.SchemaVersion)
+	}
+
+	if eventLog.EventCount > 0 {
+		fmt.Fprintf(b, "- **Event count:** %d\n", eventLog.EventCount)
+	}
+
+	if eventLog.LastSequence > 0 {
+		fmt.Fprintf(b, "- **Event last sequence:** %d\n", eventLog.LastSequence)
+	}
+
+	if eventLog.TruncatedTail {
+		b.WriteString("- **Event log warning:** truncated tail ignored during replay\n")
 	}
 }
 

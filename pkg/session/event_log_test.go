@@ -757,6 +757,8 @@ func TestBuildMachineReadableExport_IncludesReplayProvenance(t *testing.T) {
 	assert.Contains(t, markdown, "## Provenance")
 	assert.Contains(t, markdown, "- **Config hash:** sha256:")
 	assert.Contains(t, markdown, "- **Event log hash:** sha256:last")
+	assert.Contains(t, markdown, "- **Event schema:** 1")
+	assert.Contains(t, markdown, "- **Event last sequence:** 4")
 	assert.Contains(t, markdown, "reports/replay.md")
 	assert.Contains(t, markdown, "tests status=pass")
 }
