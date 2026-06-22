@@ -845,13 +845,22 @@ func (s *Store) EventLogPath(ref string) string {
 }
 
 // Migrate converts a legacy JSON session projection into the append-only event
-// log format and refreshes the JSON projection with the current schema. It is a
-// no-op for sessions that already have an event log.
+// log format and refreshes the JSON projection with the current schema. Sessions
+// that already have an event log are validated and reprojected so migration can
+// repair missing/stale JSON projections without mutating the append-only record.
 func (s *Store) Migrate(ref string) error {
-	if _, err := os.Stat(s.eventLogPath(ref)); err == nil {
-		return nil
+	eventPath := s.eventLogPath(ref)
+	if _, err := os.Stat(eventPath); err == nil {
+		return s.withSessionLock(idFromEventLogPath(eventPath), func() error {
+			sessionState, loadErr := s.loadEventLogSession(eventPath)
+			if loadErr != nil {
+				return loadErr
+			}
+
+			return s.writeSessionProjectionLocked(sessionState)
+		})
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("session: stat event log %s: %w", s.eventLogPath(ref), err)
+		return fmt.Errorf("session: stat event log %s: %w", eventPath, err)
 	}
 
 	path := s.path(ref)

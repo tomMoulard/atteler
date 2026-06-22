@@ -14,6 +14,8 @@ import (
 	"github.com/tommoulard/atteler/pkg/llm"
 )
 
+const eventLogTestWorktreePath = "/repo/atteler"
+
 func TestStore_SaveWritesAppendOnlyEventLogAndLoadsWithoutProjection(t *testing.T) {
 	t.Parallel()
 
@@ -37,7 +39,7 @@ func TestStore_SaveWritesAppendOnlyEventLogAndLoadsWithoutProjection(t *testing.
 			Content:    "ok",
 		},
 	}})
-	sessionState.WorktreePath = "/repo/atteler"
+	sessionState.WorktreePath = eventLogTestWorktreePath
 	sessionState.WorktreeBranch = "feature/audit-log"
 	sessionState.WorktreeBase = "main"
 	require.True(t, sessionState.RecordNegativeKnowledge("rewrite log", "lost provenance", "abc123", "critic"))
@@ -143,6 +145,97 @@ func TestStore_MigrateLegacyJSONSessionCreatesVersionedEventLog(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(lines[0]), &first))
 	assert.Equal(t, SessionEventSchemaVersion, first.SchemaVersion)
 	assert.Equal(t, int64(1), first.Sequence)
+}
+
+func TestStore_LoadLegacyJSONSessionWithoutEventLogPreservesBackwardCompatibility(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	require.NoError(t, os.WriteFile(
+		store.Path("legacy-json"),
+		[]byte(`{
+  "title":"Legacy JSON transcript",
+  "default_model":"openai/gpt-legacy",
+  "messages":[{"role":"user","content":"legacy hi"}],
+  "negative_knowledge":[{"approach":"rewrite everything","reason":"lost audit trail","agent":"critic"}],
+  "evaluations":[{"agent":"verifier","outcome":"pass","reference":"eval/legacy.json"}],
+  "artifacts":[{"path":"notes/legacy.md","kind":"note","summary":"legacy artifact"}]
+}`),
+		0o600,
+	))
+
+	loaded, err := store.Load("legacy-json")
+	require.NoError(t, err)
+
+	assert.Equal(t, "legacy-json", loaded.ID)
+	assert.Equal(t, 1, loaded.SchemaVersion)
+	assert.Nil(t, loaded.EventLog)
+	assert.Equal(t, "openai/gpt-legacy", loaded.DefaultModel)
+	require.Len(t, loaded.Messages, 1)
+	assert.Equal(t, "legacy hi", loaded.Messages[0].Content)
+	require.Len(t, loaded.NegativeKnowledge, 1)
+	require.Len(t, loaded.Evaluations, 1)
+	require.Len(t, loaded.Artifacts, 1)
+
+	_, err = os.Stat(store.EventLogPath("legacy-json"))
+	require.ErrorIs(t, err, os.ErrNotExist, "loading legacy JSON should not require or create an event log")
+
+	loaded.Append(llm.RoleAssistant, "legacy response")
+	require.NoError(t, store.Save(loaded))
+
+	replayed, err := store.Load("legacy-json")
+	require.NoError(t, err)
+	require.NotNil(t, replayed.EventLog)
+	assert.Equal(t, SessionSchemaVersion, replayed.SchemaVersion)
+	require.Len(t, replayed.Messages, 2)
+	assert.Equal(t, "legacy response", replayed.Messages[1].Content)
+	assert.Len(t, replayed.NegativeKnowledge, 1)
+	assert.Len(t, replayed.Evaluations, 1)
+	assert.Len(t, replayed.Artifacts, 1)
+
+	data := readSessionTestFile(t, store.EventLogPath("legacy-json"))
+	assert.Contains(t, data, string(EventMessageRecorded))
+	assert.Contains(t, data, string(EventFailureRecorded))
+	assert.Contains(t, data, string(EventEvaluationRecorded))
+	assert.Contains(t, data, string(EventArtifactRecorded))
+}
+
+func TestStore_MigrateExistingEventLogValidatesAndRefreshesProjection(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	sessionState := New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "event-only migration"}})
+	sessionState.ID = "event-only"
+	require.NoError(t, store.Save(sessionState))
+	require.NoError(t, os.Remove(store.Path(sessionState.ID)))
+
+	require.NoError(t, store.Migrate(sessionState.ID))
+
+	projection, err := readLegacyJSONSession(store.Path(sessionState.ID))
+	require.NoError(t, err)
+	require.NotNil(t, projection.EventLog)
+	assert.Equal(t, sessionState.ID, projection.ID)
+	assert.Equal(t, SessionSchemaVersion, projection.SchemaVersion)
+	require.Len(t, projection.Messages, 1)
+	assert.Equal(t, "event-only migration", projection.Messages[0].Content)
+}
+
+func TestStore_MigrateExistingCorruptEventLogReturnsError(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	sessionState := New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "safe prefix"}})
+	require.NoError(t, store.Save(sessionState))
+
+	file, err := os.OpenFile(store.EventLogPath(sessionState.ID), os.O_WRONLY|os.O_APPEND, 0)
+	require.NoError(t, err)
+	_, err = file.WriteString("{not-json}\n")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	err = store.Migrate(sessionState.ID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCorruptEventLog)
 }
 
 func TestStore_ConcurrentSavesMergeMessagesThroughEventLog(t *testing.T) {
@@ -280,6 +373,94 @@ func TestStore_SaveRecordsOrdinaryProviderCallProvenance(t *testing.T) {
 	assert.Contains(t, referencedPaths, "README.md")
 }
 
+func TestStore_ReplayFromEventLogIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	sessionState := New("openai/gpt-test", []llm.Message{
+		{Role: llm.RoleUser, Content: "summarize @README.md"},
+		{Role: llm.RoleAssistant, Content: "summary"},
+	})
+	sessionState.ID = "deterministic"
+	sessionState.WorktreePath = eventLogTestWorktreePath
+	sessionState.WorktreeBranch = "feature/audit-log"
+	sessionState.WorktreeBase = "main"
+	require.True(t, sessionState.RecordProviderCall(NewProviderCall(ProviderCallRecord{
+		CompletedAt: time.Date(2026, 5, 1, 14, 0, 0, 0, time.UTC),
+		Source:      "run_once",
+		Params: llm.CompleteParams{
+			Model:          "openai/gpt-test",
+			ModelMode:      "fast",
+			ReasoningLevel: "high",
+			Messages: []llm.Message{
+				{Role: llm.RoleSystem, Content: "reference context"},
+				{Role: llm.RoleUser, Content: "summarize README"},
+				{
+					Role:    llm.RoleAssistant,
+					Content: "reading file",
+					ToolCalls: []llm.ToolCall{{
+						ID:    "tool-1",
+						Name:  "read_file",
+						Input: map[string]any{"path": "README.md"},
+					}},
+				},
+				{
+					Role:    llm.RoleTool,
+					Content: "README contents",
+					ToolResult: &llm.ToolResult{
+						ToolCallID: "tool-1",
+						Content:    "README contents",
+					},
+				},
+			},
+			MaxTokens: 256,
+		},
+		Response: &llm.Response{
+			Content:      "summary",
+			Provider:     "openai",
+			Model:        "openai/gpt-test",
+			InputTokens:  8,
+			OutputTokens: 4,
+			StopReason:   llm.StopEndTurn,
+		},
+		FallbackModels: []string{"openai/gpt-backup"},
+		ReferencedFiles: []FileReference{{
+			Path:      "README.md",
+			Kind:      "file",
+			Source:    "context_reference",
+			SHA256:    "abc123",
+			SizeBytes: 512,
+		}},
+	})))
+
+	run := NewMultiAgentRun(MultiAgentRunKindReview, "audit", "openai/gpt-test", nil, MultiAgentRunBudget{})
+	run.ID = "run-1"
+	run.Status = MultiAgentRunStatusCompleted
+	run.Usage = MultiAgentRunUsage{ModelCalls: 1, InputTokens: 10, OutputTokens: 5, TotalTokens: 15}
+	run.Gates = []MultiAgentRunGate{{Name: "tests", Phase: "verify", Agent: "verifier", Passed: true}}
+	require.True(t, sessionState.UpsertMultiAgentRun(run))
+
+	require.NoError(t, store.Save(sessionState))
+
+	projection, err := readLegacyJSONSession(store.Path(sessionState.ID))
+	require.NoError(t, err)
+	firstReplay, err := store.Load(sessionState.ID)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(store.Path(sessionState.ID)))
+	secondReplay, err := store.Load(sessionState.ID)
+	require.NoError(t, err)
+
+	options := ExportOptions{Profile: ExportProfilePrivate, ExportedAt: fixedExportedAt}
+	assert.Equal(t, stableSessionExportJSON(t, projection, options), stableSessionExportJSON(t, firstReplay, options))
+	assert.Equal(t, stableSessionExportJSON(t, firstReplay, options), stableSessionExportJSON(t, secondReplay, options))
+	require.NotNil(t, firstReplay.EventLog)
+	require.NotNil(t, secondReplay.EventLog)
+	assert.Equal(t, firstReplay.EventLog.LastHash, secondReplay.EventLog.LastHash)
+	require.Len(t, firstReplay.ProviderCalls, 1)
+	require.Len(t, secondReplay.ProviderCalls, 1)
+	assert.Equal(t, firstReplay.ProviderCalls[0].RequestMessages, secondReplay.ProviderCalls[0].RequestMessages)
+}
+
 func TestStore_LoadEventLogIgnoresTrailingPartialLine(t *testing.T) {
 	t.Parallel()
 
@@ -400,7 +581,7 @@ func TestBuildMachineReadableExport_IncludesReplayProvenance(t *testing.T) {
 		EventCount:    4,
 		LastSequence:  4,
 	}
-	sessionState.WorktreePath = "/repo/atteler"
+	sessionState.WorktreePath = eventLogTestWorktreePath
 	require.True(t, sessionState.AddArtifact(Artifact{
 		Path:      "reports/replay.md",
 		Kind:      "report",
@@ -460,6 +641,15 @@ func readSessionTestFile(t *testing.T, path string) string {
 	t.Helper()
 
 	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	return string(data)
+}
+
+func stableSessionExportJSON(t *testing.T, sessionState Session, options ExportOptions) string {
+	t.Helper()
+
+	data, err := JSONWithOptions(sessionState, options)
 	require.NoError(t, err)
 
 	return string(data)
