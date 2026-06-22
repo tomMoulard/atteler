@@ -38,15 +38,36 @@ debug:
   event_limit: 200
 hooks:
   before_run: |
+    set -euo pipefail
     repo_root="$(cd ../../.. && pwd)"
     base_branch="${SYMPHONY_BASE_BRANCH:-main}"
+    worker_branch="symphony/${SYMPHONY_WORKSPACE_KEY}"
     if [ ! -d .git ]; then
       git clone --shared "$repo_root" .
     fi
-    git fetch origin "$base_branch"
-    git checkout --detach FETCH_HEAD
-    git branch -f "$base_branch" FETCH_HEAD
-    git checkout -B "symphony/${SYMPHONY_WORKSPACE_KEY}" "$base_branch"
+    git config user.name "tommoulard"
+    git config user.email "tom@moulard.org"
+    if [ -n "$(git status --porcelain)" ]; then
+      git add -A
+      if ! git diff --cached --quiet; then
+        git commit --no-verify -m "chore: preserve Symphony WIP for ${SYMPHONY_WORKSPACE_KEY}"
+      fi
+    fi
+    git fetch origin "+refs/heads/${base_branch}:refs/remotes/origin/${base_branch}"
+    base_ref="origin/${base_branch}"
+    if git rev-parse --verify --quiet "refs/heads/${worker_branch}" >/dev/null; then
+      ahead="$(git rev-list --count "${base_ref}..${worker_branch}" 2>/dev/null || printf '0')"
+      if [ "$ahead" != "0" ]; then
+        git checkout "$worker_branch"
+        exit 0
+      fi
+    fi
+    ahead_head="$(git rev-list --count "${base_ref}..HEAD" 2>/dev/null || printf '0')"
+    if [ "$ahead_head" != "0" ]; then
+      git checkout -B "$worker_branch"
+      exit 0
+    fi
+    git checkout -B "$worker_branch" "$base_ref"
 polling:
   interval_ms: 30000
 agent:
@@ -59,7 +80,7 @@ codex:
   thread_sandbox: workspace-write
   turn_sandbox_policy: workspace-write
   turn_timeout_ms: 3600000
-  read_timeout_ms: 5000
+  read_timeout_ms: 30000
   stall_timeout_ms: 300000
 ---
 
