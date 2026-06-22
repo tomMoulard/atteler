@@ -3146,6 +3146,17 @@ Timeout in seconds for --run-plugin
 atteler --plugin-timeout-seconds <value>
 ```
 
+### `--pr`
+
+GitHub PR number for `atteler review fix` (reserved for future support)
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --pr <value>
+```
+
 ### `--print-config-template`
 
 Print a starter YAML config and exit
@@ -3424,6 +3435,49 @@ Reviewer name for --review-plan/--review-run (repeatable or comma-separated)
 
 ```sh
 atteler --review-agent <value>
+```
+
+### `--review-fix`
+
+Turn review findings into a local patch with artifacts and validation
+
+- **Type:** bool
+- **Default:** `false`
+
+```sh
+atteler --review-fix
+```
+
+### `--review-fix-from`
+
+Review findings JSON input for --review-fix
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --review-fix-from <value>
+```
+
+### `--review-fix-pr`
+
+GitHub PR number for --review-fix (reserved for future support)
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --review-fix-pr <value>
+```
+
+### `--review-fix-validate`
+
+Validation command for --review-fix (repeatable)
+
+- **Type:** value
+
+```sh
+atteler --review-fix-validate <value>
 ```
 
 ### `--review-gate`
@@ -4503,6 +4557,16 @@ Tell the issue implementation worker to update docs when relevant
 
 ```sh
 atteler --update-docs
+```
+
+### `--validate`
+
+Validation command for `atteler review fix` (repeatable)
+
+- **Type:** value
+
+```sh
+atteler --validate <value>
 ```
 
 ### `--validate-config`

@@ -422,6 +422,13 @@ type reviewRunCommandInput struct {
 	Gates  []string
 }
 
+type reviewFixCommandInput struct {
+	From               string
+	PR                 string
+	ValidationCommands []string
+	Worktree           bool
+}
+
 type reviewScanCommandInput struct {
 	LargeFileBytes int
 }
@@ -571,6 +578,7 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"researchCommandInput":                func(opts cliOptions) any { return researchCommandInputFromOptions(opts) },
 		"reviewPlanCommandInput":              func(opts cliOptions) any { return reviewPlanCommandInputFromOptions(opts) },
 		"reviewRunCommandInput":               func(opts cliOptions) any { return reviewRunCommandInputFromOptions(opts) },
+		"reviewFixCommandInput":               func(opts cliOptions) any { return reviewFixCommandInputFromOptions(opts) },
 		"reviewScanCommandInput":              func(opts cliOptions) any { return reviewScanCommandInputFromOptions(opts) },
 		"routeModelsCommandInput":             func(opts cliOptions) any { return routeModelsCommandInputFromOptions(opts) },
 		"runPluginCommandInput":               func(opts cliOptions) any { return runPluginCommandInputFromOptions(opts) },
@@ -1097,6 +1105,15 @@ func reviewRunCommandInputFromOptions(opts cliOptions) reviewRunCommandInput {
 		Agents: append([]string(nil), opts.reviewAgents...),
 		Paths:  append([]string(nil), opts.reviewPaths...),
 		Gates:  append([]string(nil), opts.reviewGates...),
+	}
+}
+
+func reviewFixCommandInputFromOptions(opts cliOptions) reviewFixCommandInput {
+	return reviewFixCommandInput{
+		From:               opts.reviewFixFrom,
+		PR:                 opts.reviewFixPR,
+		ValidationCommands: append([]string(nil), opts.reviewFixValidationCommands...),
+		Worktree:           opts.useWorktree,
 	}
 }
 

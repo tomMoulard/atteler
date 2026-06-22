@@ -1307,6 +1307,7 @@ func flagRequiresFixtureValue(flag string) bool {
 		"recover-headless",
 		"review-plan",
 		"review-run",
+		"review-fix",
 		"review-scan",
 		"route-interactive",
 		"speculate-plan",

@@ -614,6 +614,25 @@ func TestCommandRegistry_IncidentSupplementalFlagsRequireDiagnose(t *testing.T) 
 	require.NoError(t, err)
 }
 
+func TestCommandRegistry_ReviewFixSupplementalFlagsRequireFix(t *testing.T) {
+	t.Parallel()
+
+	err := validateCLICommandSelection(cliOptions{reviewFixFrom: "review.json"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "review fix flags require --review-fix")
+
+	err = validateCLICommandSelection(cliOptions{reviewFix: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "review fix requires --from")
+
+	err = validateCLICommandSelection(cliOptions{reviewFix: true, reviewFixFrom: "review.json", reviewFixPR: "123"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "choose --from or --pr")
+
+	err = validateCLICommandSelection(cliOptions{reviewFix: true, reviewFixFrom: "review.json"})
+	require.NoError(t, err)
+}
+
 func TestCommandRegistry_HeadlessFilterFlagsRequireHeadlessListOrCleanup(t *testing.T) {
 	t.Parallel()
 
@@ -1959,6 +1978,12 @@ func TestCommandRegistry_GroupedCommandsWithSupplementalFlagsReachExpectedHandle
 			name:     "review run routes stateful when executed",
 			args:     []string{"review", "run"},
 			wantName: "review-run",
+			wantTier: tierStateful,
+		},
+		{
+			name:     "review fix routes stateful with findings input",
+			args:     []string{"review", "fix", "--from", "review.json"},
+			wantName: "review-fix",
 			wantTier: tierStateful,
 		},
 		{

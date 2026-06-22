@@ -556,11 +556,13 @@ Commands:
 - `scan`: scan the current repository and print a structured review report (dispatch: `review-scan-providerless`)
 - `plan`: print speculative review-agent plan (dispatch: `review-plan`)
 - `run`: execute the review-agent three-round pipeline (dispatch: `review-run`)
+- `fix`: turn review findings into a local patch with artifacts and validation (dispatch: `review-fix`)
 
 Examples:
 - `atteler review scan`
 - `atteler review plan`
 - `atteler review run`
+- `atteler review fix --from review.json --validate "go test ./..."`
 
 ## Watch
 
@@ -1613,6 +1615,17 @@ Commands:
   - Outputs: `text`
   - Fixtures:
     - `legacy-flag`: `atteler --review-run` -> `review-run`
+- `review-fix` (stateful): turn review findings into a local patch with artifacts and validation
+  - Input: `reviewFixCommandInput`
+  - Input fields: `From`, `PR`, `ValidationCommands`, `Worktree`
+  - Flags: `--review-fix`, `--from`, `--review-fix-from`, `--pr`, `--review-fix-pr`, `--validate`, `--review-fix-validate`
+  - Examples: `atteler review fix --from review.json`, `atteler review fix --from .atteler/reviews/latest/findings.json --validate "go test ./..."`
+  - Conflicts:
+    - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
+  - Side effects: `filesystem-read`, `filesystem-write`, `git-read`, `llm-provider-read`, `process-execute`, `session-store-write`, `stdout`, `worktree-write`
+  - Outputs: `text`, `filesystem`, `process`
+  - Fixtures:
+    - `from`: `atteler --review-fix --from review.json` -> `review-fix`
 - `async-run` (stateful): execute dependency-aware async tasks by spawning Atteler sub-agents
   - Input: `asyncRunCommandInput`
   - Input fields: `SpawnBinary`, `TaskSpecs`, `Execution`, `TimeoutSeconds`

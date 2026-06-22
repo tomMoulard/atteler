@@ -358,11 +358,13 @@ var cliHelpDomains = []cliHelpDomain{
 			{Name: "scan", Summary: "scan the current repository and print a structured review report", Legacy: []string{"--review-scan"}},
 			{Name: "plan", Summary: "print speculative review-agent plan", Legacy: []string{"--review-plan"}},
 			{Name: runCommandName, Summary: "execute the review-agent three-round pipeline", Legacy: []string{"--review-run"}},
+			{Name: "fix", Summary: "turn review findings into a local patch with artifacts and validation", Legacy: []string{"--review-fix"}},
 		},
 		Examples: []string{
 			`atteler review scan`,
 			`atteler review plan`,
 			`atteler review run`,
+			`atteler review fix --from review.json --validate "go test ./..."`,
 		},
 	},
 	{

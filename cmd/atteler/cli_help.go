@@ -400,7 +400,7 @@ func lookupFlagDomain(name string) (string, bool) {
 		return codeIntelDomainName, true
 	case name == "sentry" || strings.HasPrefix(name, "incident-"):
 		return "incident", true
-	case strings.HasPrefix(name, "review-"):
+	case strings.HasPrefix(name, "review-") || name == "from" || name == "pr" || name == reviewFixValidateFlagName:
 		return "review", true
 	case strings.HasPrefix(name, "watch-"):
 		return "watch", true

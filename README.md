@@ -144,7 +144,7 @@ from the same descriptors that route the commands.
 | `memory` / `retrieval` | `atteler memory search "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm" --retrieval-source vector`, `atteler memory git-history "memory regression" --git-history-path pkg/memory --git-history-range v1.0..HEAD`, `atteler memory vector-search "redirect risks"`, `atteler memory vector-index docs/research.md` |
 | `code-intel` | `atteler code-intel summary`, `atteler code-intel summary --json`, `atteler code-intel query definitions:Run`, `atteler code-intel symbol NewRegistry`, `atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/` |
 | `incident` | `atteler incident diagnose --sentry ISSUE-912`, `atteler incident diagnose --incident-file redacted-sentry-event.json`, `atteler incident diagnose --sentry ISSUE-912 --incident-apply-fix --incident-validation-command "go test ./pkg/auth"` |
-| `review` | `atteler review scan`, `atteler review plan`, `atteler review run` |
+| `review` | `atteler review scan`, `atteler review plan`, `atteler review run`, `atteler review fix --from review.json --validate "go test ./..."` |
 | `watch` | `atteler watch scan`, `atteler watch json`, `atteler watch loop` |
 | `plugins` | `atteler plugins list`, `atteler plugins run reviewer/check`, `atteler plugins manifest .atteler/mcp.yaml` |
 | `worktrees` | `atteler worktrees run "Add unit tests for auth"`, `atteler worktrees list`, `atteler worktrees merge 20260430-120000-deadbeef` |

@@ -434,6 +434,8 @@ type cliOptions struct {
 	promptCompleteInput                string
 	speculatePrompt                    string
 	reviewPrompt                       string
+	reviewFixFrom                      string
+	reviewFixPR                        string
 	skillSaveDir                       string
 	skillLearningDir                   string
 	skillLearningSkillDir              string
@@ -446,6 +448,7 @@ type cliOptions struct {
 	reviewAgents                       stringListFlag
 	reviewPaths                        stringListFlag
 	reviewGates                        stringListFlag
+	reviewFixValidationCommands        rawStringListFlag
 	vectorSearch                       string
 	vectorizer                         string
 	vectorProvider                     string
@@ -585,6 +588,7 @@ type cliOptions struct {
 	skillLearningDisableAll            bool
 	reviewPlan                         bool
 	reviewRun                          bool
+	reviewFix                          bool
 	routeInteractive                   bool
 	routeBatch                         bool
 	listAgents                         bool

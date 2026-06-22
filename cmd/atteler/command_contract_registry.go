@@ -530,6 +530,18 @@ func commandContractsByName() map[string]commandContract {
 			withInputType("reviewRunCommandInput"),
 			withExamples("atteler review run"),
 		),
+		"review-fix": commandContractFor(
+			"turn review findings into a local patch with artifacts and validation",
+			[]string{"--review-fix", "--from", "--review-fix-from", "--pr", "--review-fix-pr", "--validate", "--review-fix-validate"},
+			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectGitRead, commandEffectLLMProviderRead, commandEffectProcessExecute, commandEffectSessionWrite, commandEffectUserOutput, commandEffectWorktreeWrite},
+			[]string{commandOutputText, commandOutputFilesystem, commandOutputProcess},
+			withInputType("reviewFixCommandInput"),
+			withFixtures(commandFixture{Name: "from", Args: []string{"--review-fix", "--from", "review.json"}}),
+			withExamples(
+				"atteler review fix --from review.json",
+				"atteler review fix --from .atteler/reviews/latest/findings.json --validate \"go test ./...\"",
+			),
+		),
 		"review-scan-providerless": commandContractFor(
 			"scan the current repository and print a structured review report",
 			[]string{"--review-scan", "--watch-large-file-bytes"},

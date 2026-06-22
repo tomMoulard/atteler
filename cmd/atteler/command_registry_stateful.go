@@ -281,6 +281,14 @@ func statefulExecutionCommands() []command {
 			},
 		},
 		{
+			name:  "review-fix",
+			tier:  tierStateful,
+			match: func(o cliOptions) bool { return o.reviewFix },
+			runStateful: func(ctx context.Context, o cliOptions, s appState) error {
+				return runReviewFixStateful(ctx, s, reviewFixCommandInputFromOptions(o))
+			},
+		},
+		{
 			name:  "async-run",
 			tier:  tierStateful,
 			match: func(o cliOptions) bool { return o.asyncRun },
