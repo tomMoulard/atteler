@@ -2445,6 +2445,7 @@ func TestRunOnceWithOptions_HeadlessManifestIncludesInlineReferenceAudit(t *test
 
 	store := session.NewStore(filepath.Join(dir, "sessions"))
 	headlessID := "test-headless-inline-manifest"
+	sessionState := session.New("", nil)
 
 	var eventLog bytes.Buffer
 
@@ -2454,7 +2455,7 @@ func TestRunOnceWithOptions_HeadlessManifestIncludesInlineReferenceAudit(t *test
 		agent.NewRegistry(nil),
 		events.NewRunnerWithLogger(nil, &eventLog),
 		store,
-		session.New("", nil),
+		sessionState,
 		contextref.Options{Root: dir},
 		"",
 		contextref.ReferenceManifest{},
@@ -2500,6 +2501,13 @@ func TestRunOnceWithOptions_HeadlessManifestIncludesInlineReferenceAudit(t *test
 	assert.Positive(t, manifest.InlineReferences[0].TokenEstimate.UpperBoundTokens)
 	assert.Contains(t, manifest.InlineReferences[0].TokenEstimator, "provider=fallback")
 	assert.Contains(t, manifest.InlineReferences[0].TokenEstimator, "model=tiny")
+
+	saved, err := store.Load(sessionState.ID)
+	require.NoError(t, err)
+	require.Len(t, saved.ProviderCalls, 1)
+	require.NotEmpty(t, saved.ProviderCalls[0].ReferencedFiles)
+	assert.Equal(t, "docs/guide.md", saved.ProviderCalls[0].ReferencedFiles[0].LogicalPath)
+	assert.Contains(t, saved.ProviderCalls[0].ReferencedFiles[0].Path, filepath.Join("docs", "guide.md"))
 }
 
 func TestRunOnceWithOptions_HeadlessPrivateLogKeepsPrompt(t *testing.T) {

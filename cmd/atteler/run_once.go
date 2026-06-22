@@ -593,6 +593,14 @@ func runOnceWithOptions(
 		return fmt.Errorf("one-shot complete: %w", err)
 	}
 
+	providerReferenceManifest := refCtx.Manifest
+	if len(prepared.inlineReferenceEvents) > 0 {
+		providerReferenceManifest = mergeReferenceManifests(
+			refCtx.Manifest,
+			contextref.BuildReferenceManifest(prepared.inlineReferenceEvents),
+		)
+	}
+
 	return finishRunOnceSuccess(
 		ctx,
 		hooks,
@@ -603,7 +611,7 @@ func runOnceWithOptions(
 		params,
 		prepared.fallbackModels,
 		providerRequestMessages,
-		refCtx.Manifest,
+		providerReferenceManifest,
 		resp,
 		checkpointPath,
 		outputFormat,
