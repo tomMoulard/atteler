@@ -224,6 +224,10 @@ func exportSession(sessionState session.Session, format string) error {
 }
 
 func printTranscript(sessionState session.Session) {
+	if line := formatTranscriptProvenance(sessionState); line != "" {
+		fmt.Println(line)
+	}
+
 	for _, msg := range sessionState.Messages {
 		switch msg.Role {
 		case llm.RoleUser:
@@ -234,4 +238,33 @@ func printTranscript(sessionState session.Session) {
 			fmt.Println(dimStyle.Render(string(msg.Role)) + " " + msg.Content)
 		}
 	}
+}
+
+func formatTranscriptProvenance(sessionState session.Session) string {
+	provenance := session.BuildMachineReadableExport(sessionState, session.ExportOptions{
+		Profile: session.ExportProfileIssue,
+	}).Provenance
+
+	parts := []string{"Provenance", "config_hash=" + provenance.ConfigHash}
+	if len(provenance.Providers) > 0 {
+		parts = append(parts, "providers="+strings.Join(provenance.Providers, ","))
+	}
+
+	if len(provenance.Models) > 0 {
+		parts = append(parts, "models="+strings.Join(provenance.Models, ","))
+	}
+
+	if provenance.TokenUsage.TotalTokens > 0 {
+		parts = append(parts, "total_tokens="+strconv.Itoa(provenance.TokenUsage.TotalTokens))
+	}
+
+	if len(provenance.ReferencedFiles) > 0 {
+		parts = append(parts, "files="+strconv.Itoa(len(provenance.ReferencedFiles)))
+	}
+
+	if len(provenance.VerificationGates) > 0 {
+		parts = append(parts, "gates="+strconv.Itoa(len(provenance.VerificationGates)))
+	}
+
+	return strings.Join(parts, "\t")
 }

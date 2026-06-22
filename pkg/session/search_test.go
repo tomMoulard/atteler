@@ -297,6 +297,7 @@ func TestStore_SearchRebuildsIndexWhenSessionFilesChangeWithoutSave(t *testing.T
 	assert.Equal(t, "manual", results[0].Summary.ID)
 
 	require.NoError(t, os.Remove(store.Path(session.ID)))
+	require.NoError(t, os.Remove(store.EventLogPath(session.ID)))
 
 	results, err = store.Search("original indexed needle")
 	require.NoError(t, err)

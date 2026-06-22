@@ -23,6 +23,12 @@ const (
 
 	sessionFileExt = ".json"
 
+	// SessionSchemaVersion is the current projected JSON session schema.
+	SessionSchemaVersion = 2
+
+	// SessionEventSchemaVersion is the current append-only event schema.
+	SessionEventSchemaVersion = 1
+
 	// AgentEvaluationSchemaVersion is the current persisted evaluation metadata schema.
 	AgentEvaluationSchemaVersion = 2
 
@@ -45,6 +51,7 @@ const (
 type Session struct {
 	CreatedAt             time.Time           `json:"created_at"`
 	UpdatedAt             time.Time           `json:"updated_at"`
+	EventLog              *EventLogMetadata   `json:"event_log,omitempty" yaml:"event_log,omitempty"`
 	ID                    string              `json:"id"`
 	Title                 string              `json:"title,omitempty"`
 	DefaultModel          string              `json:"default_model,omitempty"`
@@ -67,6 +74,19 @@ type Session struct {
 	Artifacts             []Artifact                 `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
 	MultiAgentRuns        []MultiAgentRun            `json:"multi_agent_runs,omitempty" yaml:"multi_agent_runs,omitempty"`
 	BackgroundSuggestions *BackgroundSuggestionUsage `json:"background_suggestions,omitempty" yaml:"background_suggestions,omitempty"`
+	SchemaVersion         int                        `json:"schema_version,omitempty" yaml:"schema_version,omitempty"`
+}
+
+// EventLogMetadata describes the append-only audit log used to reconstruct a
+// session. It is included in JSON projections as a pointer back to the primary
+// record, not as the source of truth itself.
+type EventLogMetadata struct {
+	Path          string `json:"path,omitempty" yaml:"path,omitempty"`
+	LastHash      string `json:"last_hash,omitempty" yaml:"last_hash,omitempty"`
+	SchemaVersion int    `json:"schema_version,omitempty" yaml:"schema_version,omitempty"`
+	EventCount    int    `json:"event_count,omitempty" yaml:"event_count,omitempty"`
+	LastSequence  int64  `json:"last_sequence,omitempty" yaml:"last_sequence,omitempty"`
+	TruncatedTail bool   `json:"truncated_tail,omitempty" yaml:"truncated_tail,omitempty"`
 }
 
 // BackgroundSuggestionUsage stores usage for background prompt suggestion calls
@@ -506,36 +526,42 @@ func New(defaultModel string, messages []llm.Message) Session {
 	copied := append([]llm.Message(nil), messages...)
 
 	return Session{
-		ID:           newID(now),
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		DefaultModel: defaultModel,
-		Messages:     copied,
+		ID:            newID(now),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		DefaultModel:  defaultModel,
+		Messages:      copied,
+		SchemaVersion: SessionSchemaVersion,
 	}
 }
 
 // Load reads a session by ID or path.
 func (s *Store) Load(ref string) (Session, error) {
+	eventPath := s.eventLogPath(ref)
+	if eventPath != "" {
+		if _, err := os.Stat(eventPath); err == nil {
+			session, loadErr := s.loadEventLogSession(eventPath)
+			if loadErr != nil {
+				return Session{}, loadErr
+			}
+
+			return session, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return Session{}, fmt.Errorf("session: stat event log %s: %w", eventPath, err)
+		}
+	}
+
 	path := s.path(ref)
 
-	data, err := os.ReadFile(path)
+	session, err := readLegacyJSONSession(path)
 	if err != nil {
-		return Session{}, fmt.Errorf("session: read %s: %w", path, err)
-	}
-
-	var session Session
-	if err := json.Unmarshal(data, &session); err != nil {
-		return Session{}, fmt.Errorf("session: parse %s: %w", path, err)
-	}
-
-	if session.ID == "" {
-		session.ID = idFromPath(path)
+		return Session{}, err
 	}
 
 	return session, nil
 }
 
-// Save writes a session atomically enough for local CLI use.
+// Save appends audit events for a session and refreshes the JSON projection.
 func (s *Store) Save(session Session) error {
 	if session.ID == "" {
 		return errors.New("session: id is required")
@@ -547,40 +573,41 @@ func (s *Store) Save(session Session) error {
 	}
 
 	session.UpdatedAt = now
+	session.SchemaVersion = SessionSchemaVersion
 
 	if err := os.MkdirAll(s.dir, 0o750); err != nil {
 		return fmt.Errorf("session: create dir: %w", err)
 	}
 
-	data, err := json.MarshalIndent(session, "", "  ")
-	if err != nil {
-		return fmt.Errorf("session: marshal: %w", err)
-	}
+	var projection Session
 
-	data = append(data, '\n')
+	if err := s.withSessionLock(session.ID, func() error {
+		if err := s.appendSnapshotEventsLocked(session); err != nil {
+			return err
+		}
+
+		replayed, err := s.loadEventLogSession(s.eventLogPath(session.ID))
+		if err != nil {
+			return err
+		}
+
+		if replayed.CreatedAt.IsZero() {
+			replayed.CreatedAt = session.CreatedAt
+		}
+
+		if replayed.UpdatedAt.Before(session.UpdatedAt) {
+			replayed.UpdatedAt = session.UpdatedAt
+		}
+
+		replayed.SchemaVersion = SessionSchemaVersion
+		projection = replayed
+
+		return s.writeSessionProjectionLocked(projection)
+	}); err != nil {
+		return err
+	}
 
 	path := s.path(session.ID)
-
-	tmp, err := os.CreateTemp(s.dir, ".session-*.json")
-	if err != nil {
-		return fmt.Errorf("session: create temp: %w", err)
-	}
-
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("session: write temp: %w", err)
-	}
-
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("session: close temp: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("session: replace %s: %w", path, err)
-	}
 
 	if err := s.indexSavedSession(path); err != nil {
 		return fmt.Errorf("session: update search index: %w", err)
@@ -590,6 +617,8 @@ func (s *Store) Save(session Session) error {
 }
 
 // List returns saved sessions sorted by most recently updated first.
+//
+//nolint:gocognit // List must merge legacy projections and event-log-primary sessions.
 func (s *Store) List() ([]Summary, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -601,12 +630,29 @@ func (s *Store) List() ([]Summary, error) {
 	}
 
 	summaries := make([]Summary, 0, len(entries))
+	seenJSON := make(map[string]struct{}, len(entries))
+
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != sessionFileExt {
 			continue
 		}
 
 		path := filepath.Join(s.dir, entry.Name())
+		sessionID := idFromPath(path)
+		seenJSON[sessionID] = struct{}{}
+
+		if _, err := os.Stat(s.eventLogPath(path)); err == nil {
+			sessionState, loadErr := s.loadEventLogSession(s.eventLogPath(path))
+			if loadErr != nil {
+				return nil, loadErr
+			}
+
+			summaries = append(summaries, summarizeSession(path, sessionState))
+
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("session: stat event log %s: %w", s.eventLogPath(path), err)
+		}
 
 		summary, err := readSummary(path)
 		if err != nil {
@@ -614,6 +660,24 @@ func (s *Store) List() ([]Summary, error) {
 		}
 
 		summaries = append(summaries, summary)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !isSessionEventLogFileName(entry.Name()) {
+			continue
+		}
+
+		eventID := idFromEventLogPath(entry.Name())
+		if _, ok := seenJSON[eventID]; ok {
+			continue
+		}
+
+		sessionState, err := s.loadEventLogSession(filepath.Join(s.dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+
+		summaries = append(summaries, summarizeSession(s.eventProjectionPathForID(eventID), sessionState))
 	}
 
 	sort.Slice(summaries, func(i, j int) bool {
@@ -707,6 +771,31 @@ func normalizeTagKey(tag string) string {
 // Path returns the path for a session reference.
 func (s *Store) Path(ref string) string {
 	return s.path(ref)
+}
+
+// EventLogPath returns the append-only audit log path for a session reference.
+func (s *Store) EventLogPath(ref string) string {
+	return s.eventLogPath(ref)
+}
+
+// Migrate converts a legacy JSON session projection into the append-only event
+// log format and refreshes the JSON projection with the current schema. It is a
+// no-op for sessions that already have an event log.
+func (s *Store) Migrate(ref string) error {
+	if _, err := os.Stat(s.eventLogPath(ref)); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("session: stat event log %s: %w", s.eventLogPath(ref), err)
+	}
+
+	path := s.path(ref)
+
+	sessionState, err := readLegacyJSONSession(path)
+	if err != nil {
+		return err
+	}
+
+	return s.Save(sessionState)
 }
 
 // Append adds a message to the session.

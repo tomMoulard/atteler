@@ -21,7 +21,7 @@ const (
 	searchIndexLockFileName  = ".session-search-index.lock"
 	searchIndexVersion       = 2
 	searchIndexSchemaVersion = 12
-	sessionSchemaVersion     = 1
+	sessionSchemaVersion     = SessionSchemaVersion
 
 	defaultTranscriptRetention = 180 * 24 * time.Hour
 )
@@ -334,9 +334,16 @@ func currentSessionFiles(dir string) ([]indexedSessionFile, error) {
 		return nil, fmt.Errorf("session: list indexed session files %s: %w", dir, err)
 	}
 
+	names := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			names[entry.Name()] = struct{}{}
+		}
+	}
+
 	files := make([]indexedSessionFile, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || !isDurableSessionFileName(entry.Name()) {
+		if entry.IsDir() || !isDurableSessionFileName(entry.Name(), names) {
 			continue
 		}
 
@@ -373,8 +380,18 @@ func indexedSessionFilesForPolicy(files []indexedSessionFile, policy normalizedS
 	return files
 }
 
-func isDurableSessionFileName(name string) bool {
-	return filepath.Ext(name) == sessionFileExt && !strings.HasPrefix(name, ".session-")
+func isDurableSessionFileName(name string, names map[string]struct{}) bool {
+	if filepath.Ext(name) == sessionFileExt && !strings.HasPrefix(name, ".session-") {
+		return true
+	}
+
+	if !isSessionEventLogFileName(name) {
+		return false
+	}
+
+	_, projectionExists := names[idFromEventLogPath(name)+sessionFileExt]
+
+	return !projectionExists
 }
 
 func sameSessionFiles(left, right []indexedSessionFile) bool {

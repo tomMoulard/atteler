@@ -101,6 +101,35 @@ func TestWriteSessionExportPermissionPolicyDeniesWriteBeforeCreatingDir(t *testi
 	assert.NoDirExists(t, filepath.Dir(path))
 }
 
+func TestFormatTranscriptProvenanceIncludesReplayInputs(t *testing.T) {
+	t.Parallel()
+
+	sessionState := session.New("openai/gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
+	require.True(t, sessionState.AddArtifact(session.Artifact{
+		Path:      "reports/replay.md",
+		Kind:      "report",
+		CreatedAt: sessionState.CreatedAt,
+	}))
+	require.True(t, sessionState.UpsertMultiAgentRun(session.MultiAgentRun{
+		ID:     "run-1",
+		Kind:   session.MultiAgentRunKindReview,
+		Status: session.MultiAgentRunStatusCompleted,
+		Model:  "openai/gpt-test",
+		Usage:  session.MultiAgentRunUsage{ModelCalls: 1, InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		Gates:  []session.MultiAgentRunGate{{Name: "tests", Passed: true}},
+	}))
+
+	line := formatTranscriptProvenance(sessionState)
+
+	assert.Contains(t, line, "Provenance\t")
+	assert.Contains(t, line, "config_hash=sha256:")
+	assert.Contains(t, line, "providers=openai")
+	assert.Contains(t, line, "models=openai/gpt-test")
+	assert.Contains(t, line, "total_tokens=15")
+	assert.Contains(t, line, "files=1")
+	assert.Contains(t, line, "gates=1")
+}
+
 func captureStdoutForExport(t *testing.T, fn func()) string {
 	t.Helper()
 
