@@ -40,7 +40,7 @@ func TestMakeE2ETargetsForwardTestFlags(t *testing.T) {
 	t.Parallel()
 
 	got := makeDryRunCommand(t, "e2e", "TESTFLAGS=-run TestCLIHelp")
-	require.Equal(t, "go test -count=1 -run TestCLIHelp ./test/e2e", got)
+	require.Equal(t, "ATTELER_E2E_LIVE= go test -count=1 -run TestCLIHelp ./test/e2e", got)
 
 	got = makeDryRunCommand(t, "e2e-live", "TESTFLAGS=-v")
 	require.Equal(t, "ATTELER_E2E_LIVE=1 go test -count=1 -run TestLive -timeout=10m -v ./test/e2e", got)

@@ -75,13 +75,15 @@ Useful local verification commands:
 
 ```sh
 make test
+make e2e
 make test TESTPACKAGE=./pkg/llm
 make test TESTFLAGS='-run TestName -count=1' TESTPACKAGE=./pkg/llm
 make lint
 make build
 ```
 
-Live provider e2e checks are opt-in; set ATTELER_E2E_LIVE=1 to run live LLM e2e tests.
+Black-box CLI e2e checks are part of the pull-request and release gates via `make e2e`.
+Live provider e2e checks stay opt-in for local runs; set ATTELER_E2E_LIVE=1 to run live LLM e2e tests. Maintainers can also use the scheduled/manual **Live E2E** GitHub Actions workflow, which reads provider credentials from repository secrets and uploads logs on failure.
 
 | Test | Required credential/config | Skip message | Model override | Default model |
 |------|----------------------------|--------------|----------------|---------------|

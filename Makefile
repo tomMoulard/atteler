@@ -37,9 +37,9 @@ TESTPACKAGE ?= ./...
 test:
 	go test -race -count=1 $(value TESTFLAGS) $(TESTPACKAGE)
 
-## e2e: run black-box CLI end-to-end tests
+## e2e: run black-box CLI end-to-end tests without live-provider calls
 e2e:
-	go test -count=1 $(value TESTFLAGS) ./test/e2e
+	ATTELER_E2E_LIVE= go test -count=1 $(value TESTFLAGS) ./test/e2e
 
 ## e2e-live: run opt-in live LLM CLI tests (requires ATTELER_E2E_LIVE=1 and provider API keys)
 e2e-live:
