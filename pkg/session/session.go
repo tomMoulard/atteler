@@ -1118,8 +1118,8 @@ func normalizeProviderCall(call ProviderCall) ProviderCall {
 	call.MaxOutputTokens = max(call.MaxOutputTokens, 0)
 	call.RequestToolCount = max(call.RequestToolCount, 0)
 	call.ResponseToolCallCount = max(call.ResponseToolCallCount, 0)
-	call.DurationMillis = maxInt64(call.DurationMillis, 0)
-	call.FirstTokenLatencyMillis = maxInt64(call.FirstTokenLatencyMillis, 0)
+	call.DurationMillis = nonNegativeInt64(call.DurationMillis)
+	call.FirstTokenLatencyMillis = nonNegativeInt64(call.FirstTokenLatencyMillis)
 
 	return call
 }
@@ -1183,12 +1183,12 @@ func normalizeFileReference(ref FileReference) FileReference {
 	return ref
 }
 
-func maxInt64(left, right int64) int64 {
-	if left > right {
-		return left
+func nonNegativeInt64(value int64) int64 {
+	if value < 0 {
+		return 0
 	}
 
-	return right
+	return value
 }
 
 // RecordBackgroundSuggestionUsage records one background suggestion attempt

@@ -364,6 +364,32 @@ func TestStore_SaveRecordsOrdinaryProviderCallProvenance(t *testing.T) {
 	assert.Contains(t, export.Provenance.Models, "openai/gpt-backup")
 	assert.Equal(t, 1, export.Provenance.TokenUsage.ModelCalls)
 	assert.Equal(t, 12, export.Provenance.TokenUsage.TotalTokens)
+	require.Len(t, export.Provenance.ProviderCalls, 1)
+	exportedCall := export.Provenance.ProviderCalls[0]
+	assert.Equal(t, call.PromptHash, exportedCall.PromptHash)
+	assert.Equal(t, call.ConfigHash, exportedCall.ConfigHash)
+	assert.Equal(t, "openai/gpt-test", exportedCall.RequestedModel)
+	assert.Equal(t, "openai/gpt-test", exportedCall.ResponseModel)
+	require.Len(t, exportedCall.FallbackModels, 1)
+	assert.Equal(t, "openai/gpt-backup", exportedCall.FallbackModels[0])
+	assert.Equal(t, 12, exportedCall.TotalTokens)
+	assert.Equal(t, 1, exportedCall.RequestToolCallCount)
+	assert.Equal(t, 1, exportedCall.RequestToolResultCount)
+	require.Len(t, exportedCall.RequestMessages, 4)
+	require.NotNil(t, exportedCall.RequestMessages[3].ToolResult)
+	assert.Equal(t, "README contents", exportedCall.RequestMessages[3].ToolResult.Content)
+	require.Len(t, exportedCall.ReferencedFiles, 1)
+	assert.Equal(t, "README.md", exportedCall.ReferencedFiles[0].Path)
+
+	shareableExport := BuildMachineReadableExport(loaded, ExportOptions{Profile: ExportProfileShareable})
+	require.Len(t, shareableExport.Provenance.ProviderCalls, 1)
+	assert.Empty(t, shareableExport.Provenance.ProviderCalls[0].RequestMessages)
+	assert.Equal(t, call.PromptHash, shareableExport.Provenance.ProviderCalls[0].PromptHash)
+
+	markdown := MarkdownWithOptions(loaded, ExportOptions{Profile: ExportProfilePrivate, ExportedAt: fixedExportedAt})
+	assert.Contains(t, markdown, "- **Provider calls:**")
+	assert.Contains(t, markdown, "prompt_hash="+call.PromptHash)
+	assert.Contains(t, markdown, "config_hash="+call.ConfigHash)
 
 	var referencedPaths []string
 	for _, file := range export.Provenance.ReferencedFiles {
