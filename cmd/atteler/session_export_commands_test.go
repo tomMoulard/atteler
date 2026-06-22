@@ -106,8 +106,11 @@ func TestFormatTranscriptProvenanceIncludesReplayInputs(t *testing.T) {
 
 	sessionState := session.New("openai/gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
 	sessionState.EventLog = &session.EventLogMetadata{
-		LastHash:   "sha256:event-log",
-		EventCount: 12,
+		LastHash:      "sha256:event-log",
+		SchemaVersion: session.SessionEventSchemaVersion,
+		EventCount:    12,
+		LastSequence:  12,
+		TruncatedTail: true,
 	}
 	sessionState.ProviderCalls = []session.ProviderCall{{
 		ID:             "call-1",
@@ -151,8 +154,11 @@ func TestFormatTranscriptProvenanceIncludesReplayInputs(t *testing.T) {
 	assert.Contains(t, line, "config_hash=sha256:")
 	assert.Contains(t, line, "providers=openai")
 	assert.Contains(t, line, "models=openai/gpt-test")
+	assert.Contains(t, line, "event_schema=1")
 	assert.Contains(t, line, "event_hash=sha256:event-log")
 	assert.Contains(t, line, "events=12")
+	assert.Contains(t, line, "event_sequence=12")
+	assert.Contains(t, line, "event_truncated_tail=true")
 	assert.Contains(t, line, "provider_calls=1")
 	assert.Contains(t, line, "prompt_hash=sha256:prompt")
 	assert.Contains(t, line, "call_config_hash=sha256:call-config")

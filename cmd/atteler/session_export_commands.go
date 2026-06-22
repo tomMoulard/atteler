@@ -254,15 +254,7 @@ func formatTranscriptProvenance(sessionState session.Session) string {
 		parts = append(parts, "models="+strings.Join(provenance.Models, ","))
 	}
 
-	if provenance.EventLog != nil {
-		if provenance.EventLog.LastHash != "" {
-			parts = append(parts, "event_hash="+provenance.EventLog.LastHash)
-		}
-
-		if provenance.EventLog.EventCount > 0 {
-			parts = append(parts, "events="+strconv.Itoa(provenance.EventLog.EventCount))
-		}
-	}
+	appendEventLogTranscriptProvenance(&parts, provenance.EventLog)
 
 	if provenance.TokenUsage.TotalTokens > 0 {
 		parts = append(parts, "total_tokens="+strconv.Itoa(provenance.TokenUsage.TotalTokens))
@@ -285,6 +277,32 @@ func formatTranscriptProvenance(sessionState session.Session) string {
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func appendEventLogTranscriptProvenance(parts *[]string, eventLog *session.ExportEventLogProvenance) {
+	if eventLog == nil {
+		return
+	}
+
+	if eventLog.SchemaVersion > 0 {
+		*parts = append(*parts, "event_schema="+strconv.Itoa(eventLog.SchemaVersion))
+	}
+
+	if eventLog.LastHash != "" {
+		*parts = append(*parts, "event_hash="+eventLog.LastHash)
+	}
+
+	if eventLog.EventCount > 0 {
+		*parts = append(*parts, "events="+strconv.Itoa(eventLog.EventCount))
+	}
+
+	if eventLog.LastSequence > 0 {
+		*parts = append(*parts, "event_sequence="+strconv.FormatInt(eventLog.LastSequence, 10))
+	}
+
+	if eventLog.TruncatedTail {
+		*parts = append(*parts, "event_truncated_tail=true")
+	}
 }
 
 func formatTranscriptFileReferences(files []session.ExportFileReference) string {
