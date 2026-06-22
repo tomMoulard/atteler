@@ -160,7 +160,9 @@ func TestFormatTranscriptProvenanceIncludesReplayInputs(t *testing.T) {
 	assert.Contains(t, line, "tool_results=1")
 	assert.Contains(t, line, "total_tokens=15")
 	assert.Contains(t, line, "files=1")
+	assert.Contains(t, line, "file_refs=report:reports/replay.md")
 	assert.Contains(t, line, "gates=1")
+	assert.Contains(t, line, "gate_checks=run-1/tests:pass")
 }
 
 func captureStdoutForExport(t *testing.T, fn func()) string {

@@ -272,13 +272,101 @@ func formatTranscriptProvenance(sessionState session.Session) string {
 
 	if len(provenance.ReferencedFiles) > 0 {
 		parts = append(parts, "files="+strconv.Itoa(len(provenance.ReferencedFiles)))
+		if refs := formatTranscriptFileReferences(provenance.ReferencedFiles); refs != "" {
+			parts = append(parts, "file_refs="+refs)
+		}
 	}
 
 	if len(provenance.VerificationGates) > 0 {
 		parts = append(parts, "gates="+strconv.Itoa(len(provenance.VerificationGates)))
+		if gates := formatTranscriptVerificationGates(provenance.VerificationGates); gates != "" {
+			parts = append(parts, "gate_checks="+gates)
+		}
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func formatTranscriptFileReferences(files []session.ExportFileReference) string {
+	if len(files) == 0 {
+		return ""
+	}
+
+	refs := make([]string, 0, len(files))
+	for index := range files {
+		file := files[index]
+
+		label := strings.TrimSpace(file.LogicalPath)
+		if label == "" {
+			label = strings.TrimSpace(file.Path)
+		}
+
+		if label == "" {
+			continue
+		}
+
+		if kind := strings.TrimSpace(file.Kind); kind != "" {
+			label = kind + ":" + label
+		}
+
+		if hash := strings.TrimSpace(file.SHA256); hash != "" {
+			label += "@" + hash
+		}
+
+		refs = append(refs, transcriptProvenanceToken(label))
+	}
+
+	return strings.Join(refs, ",")
+}
+
+func formatTranscriptVerificationGates(gates []session.ExportVerificationGate) string {
+	if len(gates) == 0 {
+		return ""
+	}
+
+	refs := make([]string, 0, len(gates))
+	for index := range gates {
+		gate := gates[index]
+
+		label := strings.TrimSpace(gate.Name)
+		if label == "" {
+			continue
+		}
+
+		if phase := strings.TrimSpace(gate.Phase); phase != "" {
+			label = phase + "/" + label
+		}
+
+		if runID := strings.TrimSpace(gate.RunID); runID != "" {
+			label = runID + "/" + label
+		}
+
+		if agent := strings.TrimSpace(gate.Agent); agent != "" {
+			label += "@" + agent
+		}
+
+		status := strings.ToLower(gateStatusFail)
+		if gate.Passed {
+			status = strings.ToLower(gateStatusPass)
+		}
+
+		refs = append(refs, transcriptProvenanceToken(label+":"+status))
+	}
+
+	return strings.Join(refs, ",")
+}
+
+func transcriptProvenanceToken(value string) string {
+	value = strings.TrimSpace(strings.Join(strings.Fields(value), " "))
+	if value == "" {
+		return ""
+	}
+
+	if strings.ContainsAny(value, "\t\n\r ,") {
+		return strconv.Quote(value)
+	}
+
+	return value
 }
 
 func appendProviderCallTranscriptProvenance(parts *[]string, calls []session.ExportProviderCall) {
