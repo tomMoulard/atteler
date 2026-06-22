@@ -38,6 +38,7 @@ var docPages = []string{
 	"configuration.md",
 	"providers.md",
 	"hooks.md",
+	"sdk.md",
 	"cli-reference.md",
 	"architecture.md",
 	"lifecycle-events.md",

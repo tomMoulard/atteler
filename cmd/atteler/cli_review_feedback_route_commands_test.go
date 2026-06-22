@@ -193,7 +193,7 @@ func TestFormatReviewReport(t *testing.T) {
 		GateChecks: []review.GateCheck{{Name: "tests pass", Passed: false, Notes: "unit evidence missing"}},
 	}
 
-	got := formatReviewReport(report)
+	got := review.FormatReport(report)
 	for _, want := range []string{
 		"reviewer: watch-scan\n",
 		"summary: critical=0 high=0 medium=1 low=0 info=1 total=2\n",
@@ -221,7 +221,7 @@ func TestFormatReviewReportIncludesGateChecks(t *testing.T) {
 		}},
 	}
 
-	got := formatReviewReport(report)
+	got := review.FormatReport(report)
 
 	assert.Contains(t, got, "gate_checks:\n")
 	assert.Contains(t, got, "name=watch-quality-gate\tpassed=false\tnotes=new findings meet or exceed high severity (blocking_findings=1)")

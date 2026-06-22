@@ -24,6 +24,7 @@ instead of direct API quota.
 - **[Configuration](configuration.md)** — the layered YAML config and generation knobs.
 - **[Providers](providers.md)** — the built-in providers and how auth resolves.
 - **[CLI reference](cli-reference.md)** — the full, generated command surface.
+- **[Go SDK](sdk.md)** — the stable package surface, examples, and compatibility policy.
 - **[Hooks](hooks.md)** — lifecycle events you can subscribe to.
 
 ## Versioned documentation
@@ -1337,6 +1338,128 @@ Hook payloads are filtered through a `payload` policy (`metadata`, `summary`, or
 `full`) before local hooks receive them. For the full schema and example
 payloads for every event under each policy, see
 **[Lifecycle events](lifecycle-events.md)**.
+
+
+---
+
+<!-- source: docs/sdk.md -->
+
+# Go SDK surface
+
+Atteler is SDK-first: the CLI and TUI are interfaces over reusable Go packages.
+Starting with the `v0.1.0` SDK contract, external callers should build against
+this documented surface instead of importing `cmd/atteler` internals.
+
+## Install
+
+```sh
+go get github.com/tommoulard/atteler@latest
+```
+
+Use version tags for production integrations. For source checkouts, run the
+package examples with:
+
+```sh
+go test ./pkg/sdk ./pkg/review ./examples/...
+```
+
+## Compatibility policy
+
+The public SDK is intentionally narrower than `pkg/*` as a whole.
+
+- **Stable packages** preserve exported source compatibility across patch
+  releases and avoid breaking changes across minor releases without a documented
+  deprecation window and migration note.
+- Within stable packages, exported identifiers are covered by that source
+  compatibility policy unless they are explicitly deprecated. The table below
+  calls out the primary types and functions external integrations should prefer.
+- **Experimental packages** are usable, tested library code, but their exported
+  APIs may change between releases while the workflow is still settling.
+- **`cmd/atteler` is not an SDK surface.** Treat it as CLI/TUI wiring only.
+- Security or correctness fixes may change behavior when preserving old behavior
+  would keep a bug, credential leak, or unsafe side effect.
+- Before a future `v1.0.0`, compatibility is still best-effort under Go module
+  `v0` semantics, but changes to stable packages should be called out in release
+  notes with a migration path.
+
+The machine-readable source of the compatibility table is
+`pkg/sdk.APIContract()` and its policy text is exported as
+`pkg/sdk.CompatibilityPolicy`. The JSON envelope uses `schema_version`,
+`compatibility_policy`, and `packages`. Each package row uses stable snake-case
+fields: `import_path`, `stability`, `since`, and `summary`.
+
+## Stable packages and primary types
+
+| Package | Stable types/functions | Use for |
+| --- | --- | --- |
+| `pkg/sdk` | `RunOneShotChat`, `NewProviderRegistry`, `BuildMemoryIndex`, `NewReviewRun`, `RunPlugin`, `NewSession`, `AttachNewWorktree`, `APIContract`, `CompatibilityPolicy`, `Contract`, `PackageContract`, `Stability`, `PackageContracts`, `PackagesByStability` | Facade for common SDK workflows and compatibility metadata. |
+| `pkg/llm` | `Provider`, `Registry`, `CompleteParams`, `Response`, `Message`, `ToolDefinition`, `ResponseFormat`, streaming and embedding contracts | Provider-agnostic model calls and provider registration. |
+| `pkg/session` | `Session`, `Store`, `New`, `NewStore`, `ExportOptions`, `HeadlessRun`, `MultiAgentRun` | Durable transcripts, exports, search/list metadata, and run receipts. |
+| `pkg/memory` | `Store`, `Document`, `Result`, `NewStore`, `Add`, `AddFile`, `Search`, `Save`, `Load` | Local text indexing/search for retrieval workflows. |
+| `pkg/retrieval` | `Query`, `Result`, chunking helpers | Shared retrieval contracts across memory/vector callers. |
+| `pkg/review` | `Reviewer`, `Plan`, `RunPlanOptions`, `NewRunPlan`, `Report`, `Finding`, `GateCheck`, `ValidateReport`, `FormatPlan`, `FormatReport` | Review plans, report contracts, gate validation, and deterministic text rendering. |
+| `pkg/plugin` | `Manifest`, `PermissionSet`, `Policy`, `AcceptManifestPolicy`, `Registry`, `RunOptions`, `RunEntrypointWithOptions`, `RunResult` | Governed plugin discovery, contracts, dry runs, and bounded execution. |
+| `pkg/worktree` | `Info`, `CreateContext`, `MergeWithResultContext`, `MergeOptions`, `RemoveContext`, `WithAuditContext` | Session-scoped git worktrees and reviewed merge-back transactions. |
+| `pkg/permission` | `Policy`, `Request`, `Operation`, `Decision`, context helpers | Central side-effect policy gates and audit metadata. |
+| `pkg/events` | `Event`, `Runner`, hook payload contracts | Lifecycle event subscriptions and hook dispatch. |
+
+## Experimental packages
+
+These packages are useful for advanced integrations but are not yet covered by
+the stable compatibility promise: `pkg/agent`, `pkg/agentmemory`,
+`pkg/artifactmerge`, `pkg/async`, `pkg/autonomy`, `pkg/autopilot`,
+`pkg/codegraph`, `pkg/codeintel`, `pkg/config`, `pkg/contextpack`,
+`pkg/contextref`, `pkg/eval`, `pkg/feedback`, `pkg/githistory`,
+`pkg/incident`, `pkg/lsp`, `pkg/mcp`, `pkg/modelroute`, `pkg/privacy`,
+`pkg/promptcomplete`, `pkg/research`, `pkg/shell`, `pkg/skill`,
+`pkg/sourcepolicy`, `pkg/speculate`, `pkg/subagent`, `pkg/symphony`,
+`pkg/tasklist`, `pkg/vector`, and `pkg/watch`.
+
+If an integration needs one of these to become stable, open an issue describing
+which exported types need a compatibility contract and which behavior should be
+covered by examples/tests.
+
+## Runnable examples
+
+The `examples/` directory contains credential-free examples for the common SDK
+workflows requested by external callers:
+
+| Workflow | Directory |
+| --- | --- |
+| One-shot chat | `examples/one-shot-chat` |
+| Provider registry | `examples/provider-registry` |
+| Review run | `examples/review-run` |
+| Memory indexing/search | `examples/memory-search` |
+| Plugin execution | `examples/plugin-execution` |
+| Worktree/session usage | `examples/worktree-session` |
+
+Each directory is a small `main` package and is compiled by `go test
+./examples/...`. The package-level examples in `pkg/sdk` also run under
+`go test ./pkg/sdk` and avoid live provider credentials by using a local fake
+provider.
+
+## Minimal one-shot chat
+
+```go
+registry, err := sdk.NewProviderRegistry(myProvider)
+if err != nil {
+    return err
+}
+
+result, err := sdk.RunOneShotChat(ctx, sdk.OneShotChatOptions{
+    Registry: registry,
+    Model:    "my-model",
+    Prompt:   "Summarize this repository",
+})
+if err != nil {
+    return err
+}
+
+fmt.Println(result.Response.Content)
+```
+
+For lower-level control, build `llm.CompleteParams` directly and call
+`(*llm.Registry).Complete` or `CompleteWithFallback`.
 
 
 ---
@@ -7719,7 +7842,7 @@ details live in [Configuration](configuration.md).
 
 The code-intelligence support uses Go package loading plus a lightweight Python
 scanner in the shared incremental index, with optional managed LSP lookups.
-Atteler does not promise a separately versioned public SDK contract.
+The stable public SDK boundary is documented in [Go SDK](sdk.md); packages outside that table remain experimental even when they live under `pkg/`.
 
 ## Streaming completion contract
 

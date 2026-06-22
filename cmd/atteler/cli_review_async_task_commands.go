@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/tommoulard/atteler/pkg/agent"
@@ -19,91 +18,18 @@ import (
 )
 
 func runReviewPlan(input reviewPlanCommandInput) error {
-	plan, err := review.NewPlan(reviewPlanReviewers(input.Agents), reviewPlanPaths(input.Paths), input.Gates)
+	plan, err := review.NewRunPlan(review.RunPlanOptions{
+		Reviewers:     review.ReviewersFromNames(input.Agents),
+		Paths:         input.Paths,
+		RequiredGates: input.Gates,
+	})
 	if err != nil {
 		return fmt.Errorf("review plan: %w", err)
 	}
 
-	fmt.Print(formatReviewPlan(plan))
+	fmt.Print(review.FormatPlan(plan))
 
 	return nil
-}
-
-func reviewPlanReviewers(names []string) []review.Reviewer {
-	if len(names) == 0 {
-		return []review.Reviewer{
-			{Name: "quality-reviewer", Categories: []review.Category{review.CategoryCorrectness, review.CategoryMaintainability}},
-			{Name: "test-engineer", Categories: []review.Category{review.CategoryTests}},
-		}
-	}
-
-	reviewers := make([]review.Reviewer, 0, len(names))
-	for _, name := range names {
-		reviewers = append(reviewers, review.Reviewer{Name: strings.TrimSpace(name)})
-	}
-
-	return reviewers
-}
-
-func reviewPlanPaths(paths []string) []string {
-	if len(paths) == 0 {
-		return []string{"."}
-	}
-
-	return append([]string(nil), paths...)
-}
-
-func formatReviewPlan(plan review.Plan) string {
-	var b strings.Builder
-	b.WriteString("reviewers:\n")
-
-	for _, reviewer := range plan.Reviewers() {
-		fmt.Fprintf(&b, "  - %s\n", formatReviewPlanReviewer(reviewer))
-	}
-
-	b.WriteString("paths:\n")
-
-	for _, path := range plan.Paths() {
-		fmt.Fprintf(&b, "  - %s\n", path)
-	}
-
-	b.WriteString("rounds:\n")
-
-	rounds := plan.Rounds()
-	for i := range rounds {
-		round := rounds[i]
-		fmt.Fprintf(&b, "  - %d\t%s\t%s\treviewers=%s\n", round.Number, round.Kind, round.Name, strings.Join(round.Reviewers, ","))
-	}
-
-	if crossReviews := plan.CrossReviews(); len(crossReviews) > 0 {
-		b.WriteString("cross_reviews:\n")
-
-		for _, crossReview := range crossReviews {
-			fmt.Fprintf(&b, "  - %s -> %s\n", crossReview.Reviewer, crossReview.ReviewedReviewer)
-		}
-	}
-
-	b.WriteString("gates:\n")
-
-	for _, gate := range plan.RequiredGates() {
-		fmt.Fprintf(&b, "  - %s\n", gate)
-	}
-
-	return b.String()
-}
-
-func formatReviewPlanReviewer(reviewer review.Reviewer) string {
-	parts := []string{reviewer.Name}
-	if len(reviewer.Categories) > 0 {
-		categories := make([]string, 0, len(reviewer.Categories))
-		for _, category := range reviewer.Categories {
-			categories = append(categories, string(category))
-		}
-
-		parts = append(parts, "categories="+strings.Join(categories, ","))
-	}
-
-	return strings.Join(parts, "\t")
 }
 
 func runReviewScan(ctx context.Context, root string, options watchCLIOptions) error {
@@ -123,7 +49,7 @@ func runReviewScan(ctx context.Context, root string, options watchCLIOptions) er
 		Findings:   actionableWatchFindingsToReview(output),
 		GateChecks: watchGateChecksToReview(output.Gate),
 	}
-	fmt.Print(formatReviewReport(report))
+	fmt.Print(review.FormatReport(report))
 
 	return watchGateError(output.Gate)
 }
@@ -198,131 +124,6 @@ func reviewCategory(kind string) review.Category {
 	default:
 		return review.CategoryMaintainability
 	}
-}
-
-func formatReviewReport(report review.Report) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "reviewer: %s\n", report.Reviewer)
-	summary := report.SeveritySummary()
-	fmt.Fprintf(&b, "summary: critical=%d high=%d medium=%d low=%d info=%d total=%d\n", summary.Critical, summary.High, summary.Medium, summary.Low, summary.Info, summary.Total())
-
-	if len(report.GateChecks) > 0 {
-		b.WriteString("gate_checks:\n")
-
-		for i := range report.GateChecks {
-			fmt.Fprintf(&b, "  - %s\n", formatReviewGateCheck(report.GateChecks[i]))
-		}
-	}
-
-	findings := report.SortedFindings()
-	if len(findings) == 0 {
-		b.WriteString("findings: none\n")
-	} else {
-		b.WriteString("findings:\n")
-
-		for i := range findings {
-			fmt.Fprintf(&b, "  - %s\n", formatReviewFinding(findings[i]))
-		}
-	}
-
-	if len(report.GateChecks) > 0 {
-		b.WriteString("gates:\n")
-
-		for _, gate := range report.GateChecks {
-			status := gateStatusFail
-			if gate.Passed {
-				status = gateStatusPass
-			}
-
-			fmt.Fprintf(&b, "  - %s: %s %s\n", gate.Name, status, gate.Notes)
-		}
-	}
-
-	return b.String()
-}
-
-func formatReviewGateCheck(check review.GateCheck) string {
-	parts := []string{
-		"name=" + check.Name,
-		"passed=" + strconv.FormatBool(check.Passed),
-	}
-
-	if check.Notes != "" {
-		parts = append(parts, "notes="+check.Notes)
-	}
-
-	if check.Proof != "" {
-		parts = append(parts, "proof="+check.Proof)
-	}
-
-	if check.NotRunReason != "" {
-		parts = append(parts, "not_run_reason="+check.NotRunReason)
-	}
-
-	if len(check.Provenance) > 0 {
-		parts = append(parts, "provenance="+formatReviewEvidenceSources(check.Provenance))
-	}
-
-	return strings.Join(parts, "\t")
-}
-
-func formatReviewFinding(finding review.Finding) string {
-	parts := []string{
-		"severity=" + string(finding.Severity),
-		"category=" + string(finding.Category),
-		"path=" + finding.Path,
-	}
-	if finding.Line > 0 {
-		line := strconv.Itoa(finding.Line)
-		if finding.EndLine > finding.Line {
-			line += "-" + strconv.Itoa(finding.EndLine)
-		}
-
-		parts = append(parts, "line="+line)
-	}
-
-	if finding.Message != "" {
-		parts = append(parts, "message="+finding.Message)
-	}
-
-	if finding.Evidence != "" {
-		parts = append(parts, "evidence="+finding.Evidence)
-	}
-
-	if finding.SeverityRationale != "" {
-		parts = append(parts, "severity_rationale="+finding.SeverityRationale)
-	}
-
-	if finding.Suggestion != "" {
-		parts = append(parts, "suggestion="+finding.Suggestion)
-	}
-
-	if finding.SuggestedVerification != "" {
-		parts = append(parts, "suggested_verification="+finding.SuggestedVerification)
-	}
-
-	if finding.Confidence != "" {
-		parts = append(parts, "confidence="+finding.Confidence)
-	}
-
-	if len(finding.Provenance) > 0 {
-		parts = append(parts, "provenance="+formatReviewEvidenceSources(finding.Provenance))
-	}
-
-	if len(finding.Dissent) > 0 {
-		parts = append(parts, "dissent="+formatReviewEvidenceSources(finding.Dissent))
-	}
-
-	return strings.Join(parts, "\t")
-}
-
-func formatReviewEvidenceSources(sources []review.EvidenceSource) string {
-	parts := make([]string, 0, len(sources))
-	for _, source := range sources {
-		parts = append(parts, string(source.Type)+":"+source.Source+":"+source.Summary)
-	}
-
-	return strings.Join(parts, ";")
 }
 
 //nolint:govet // Field order groups review routing, context, and autonomy settings for readability.
@@ -472,7 +273,11 @@ func reviewCallInfo(reviewer, systemPrompt string) multiAgentCallInfo {
 }
 
 func runReviewExecution(ctx context.Context, state appState, input reviewRunCommandInput) error {
-	plan, err := review.NewPlan(reviewPlanReviewers(input.Agents), reviewPlanPaths(input.Paths), input.Gates)
+	plan, err := review.NewRunPlan(review.RunPlanOptions{
+		Reviewers:     review.ReviewersFromNames(input.Agents),
+		Paths:         input.Paths,
+		RequiredGates: input.Gates,
+	})
 	if err != nil {
 		return fmt.Errorf("review-run: %w", err)
 	}
@@ -680,7 +485,7 @@ func formatReviewRunResult(result review.Result) string {
 
 	if report.Reviewer != "" {
 		b.WriteString("aggregate_report:\n")
-		b.WriteString(formatReviewReport(report))
+		b.WriteString(review.FormatReport(report))
 	}
 
 	return b.String()
