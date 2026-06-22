@@ -579,6 +579,59 @@ func TestStore_LoadEventLogRejectsValidJSONCorruptFinalLineWithoutNewline(t *tes
 	assert.ErrorIs(t, err, ErrCorruptEventLog)
 }
 
+func TestStore_LoadEventLogRejectsInvalidEventEnvelope(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		mutate func(*Event)
+		name   string
+		want   string
+	}{
+		{
+			name: "missing session id",
+			want: "session_id",
+			mutate: func(event *Event) {
+				event.SessionID = ""
+			},
+		},
+		{
+			name: "unknown event type",
+			want: "unknown type",
+			mutate: func(event *Event) {
+				event.Type = EventType("message.rewritten")
+			},
+		},
+		{
+			name: "missing event timestamp",
+			want: "timestamp",
+			mutate: func(event *Event) {
+				event.At = time.Time{}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := NewStore(t.TempDir())
+			sessionState := New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "safe prefix"}})
+			require.NoError(t, store.Save(sessionState))
+
+			events := readEventLogTestEvents(t, store.EventLogPath(sessionState.ID))
+			require.NotEmpty(t, events)
+
+			test.mutate(&events[len(events)-1])
+			rewriteEventLogTestEvents(t, store.EventLogPath(sessionState.ID), events)
+
+			_, err := store.Load(sessionState.ID)
+			require.Error(t, err)
+			require.ErrorIs(t, err, ErrCorruptEventLog)
+			assert.Contains(t, err.Error(), test.want)
+		})
+	}
+}
+
 func TestStore_LoadEventLogRejectsMixedSessionIDs(t *testing.T) {
 	t.Parallel()
 

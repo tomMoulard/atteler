@@ -953,6 +953,18 @@ func parseEventLogLine(line []byte, path string, lineNumber int, prevHash string
 		)
 	}
 
+	if event.At.IsZero() {
+		return Event{}, fmt.Errorf("%w: %s line %d missing event timestamp", ErrCorruptEventLog, path, lineNumber)
+	}
+
+	if strings.TrimSpace(event.SessionID) == "" {
+		return Event{}, fmt.Errorf("%w: %s line %d missing session_id", ErrCorruptEventLog, path, lineNumber)
+	}
+
+	if !knownSessionEventType(event.Type) {
+		return Event{}, fmt.Errorf("%w: %s line %d has unknown type %q", ErrCorruptEventLog, path, lineNumber, event.Type)
+	}
+
 	if event.Sequence != expectedSequence {
 		return Event{}, fmt.Errorf(
 			"%w: %s line %d sequence %d after %d",
@@ -980,6 +992,28 @@ func parseEventLogLine(line []byte, path string, lineNumber int, prevHash string
 	event.Payload = compactJSON(event.Payload)
 
 	return event, nil
+}
+
+func knownSessionEventType(typ EventType) bool {
+	switch typ {
+	case EventSessionCreated,
+		EventSessionMetadataUpdated,
+		EventMessageRecorded,
+		EventProviderCallRecorded,
+		EventToolCallRecorded,
+		EventToolResultRecorded,
+		EventFileReferenceRecorded,
+		EventArtifactRecorded,
+		EventFailureRecorded,
+		EventEvaluationRecorded,
+		EventWorktreeActionRecorded,
+		EventVerificationGateRecorded,
+		EventMultiAgentRunRecorded,
+		EventBackgroundUsageRecorded:
+		return true
+	default:
+		return false
+	}
 }
 
 func eventDigest(event Event) (string, error) {
