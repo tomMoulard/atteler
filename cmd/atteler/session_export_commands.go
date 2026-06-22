@@ -254,9 +254,21 @@ func formatTranscriptProvenance(sessionState session.Session) string {
 		parts = append(parts, "models="+strings.Join(provenance.Models, ","))
 	}
 
+	if provenance.EventLog != nil {
+		if provenance.EventLog.LastHash != "" {
+			parts = append(parts, "event_hash="+provenance.EventLog.LastHash)
+		}
+
+		if provenance.EventLog.EventCount > 0 {
+			parts = append(parts, "events="+strconv.Itoa(provenance.EventLog.EventCount))
+		}
+	}
+
 	if provenance.TokenUsage.TotalTokens > 0 {
 		parts = append(parts, "total_tokens="+strconv.Itoa(provenance.TokenUsage.TotalTokens))
 	}
+
+	appendProviderCallTranscriptProvenance(&parts, provenance.ProviderCalls)
 
 	if len(provenance.ReferencedFiles) > 0 {
 		parts = append(parts, "files="+strconv.Itoa(len(provenance.ReferencedFiles)))
@@ -267,4 +279,73 @@ func formatTranscriptProvenance(sessionState session.Session) string {
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func appendProviderCallTranscriptProvenance(parts *[]string, calls []session.ExportProviderCall) {
+	if len(calls) == 0 {
+		return
+	}
+
+	*parts = append(*parts, "provider_calls="+strconv.Itoa(len(calls)))
+
+	promptHashes := providerCallHashes(calls, func(call session.ExportProviderCall) string {
+		return call.PromptHash
+	})
+	appendHashList(parts, "prompt_hash", "prompt_hashes", promptHashes)
+
+	configHashes := providerCallHashes(calls, func(call session.ExportProviderCall) string {
+		return call.ConfigHash
+	})
+	appendHashList(parts, "call_config_hash", "call_config_hashes", configHashes)
+
+	toolCalls := 0
+	toolResults := 0
+
+	for index := range calls {
+		toolCalls += calls[index].RequestToolCallCount
+		toolResults += calls[index].RequestToolResultCount
+	}
+
+	if toolCalls > 0 {
+		*parts = append(*parts, "tool_calls="+strconv.Itoa(toolCalls))
+	}
+
+	if toolResults > 0 {
+		*parts = append(*parts, "tool_results="+strconv.Itoa(toolResults))
+	}
+}
+
+func providerCallHashes(
+	calls []session.ExportProviderCall,
+	selectHash func(session.ExportProviderCall) string,
+) []string {
+	seen := make(map[string]struct{}, len(calls))
+	hashes := make([]string, 0, len(calls))
+
+	for index := range calls {
+		hash := strings.TrimSpace(selectHash(calls[index]))
+		if hash == "" {
+			continue
+		}
+
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+
+		seen[hash] = struct{}{}
+		hashes = append(hashes, hash)
+	}
+
+	return hashes
+}
+
+func appendHashList(parts *[]string, singular, plural string, hashes []string) {
+	switch len(hashes) {
+	case 0:
+		return
+	case 1:
+		*parts = append(*parts, singular+"="+hashes[0])
+	default:
+		*parts = append(*parts, plural+"="+strings.Join(hashes, ","))
+	}
 }

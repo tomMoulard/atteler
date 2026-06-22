@@ -105,6 +105,32 @@ func TestFormatTranscriptProvenanceIncludesReplayInputs(t *testing.T) {
 	t.Parallel()
 
 	sessionState := session.New("openai/gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
+	sessionState.EventLog = &session.EventLogMetadata{
+		LastHash:   "sha256:event-log",
+		EventCount: 12,
+	}
+	sessionState.ProviderCalls = []session.ProviderCall{{
+		ID:             "call-1",
+		Source:         "run_once",
+		Provider:       "openai",
+		RequestedModel: "openai/gpt-test",
+		ResponseModel:  "openai/gpt-test",
+		PromptHash:     "sha256:prompt",
+		ConfigHash:     "sha256:call-config",
+		RequestMessages: []llm.Message{{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				ID:   "tool-1",
+				Name: "read_file",
+			}},
+		}, {
+			Role: llm.RoleTool,
+			ToolResult: &llm.ToolResult{
+				ToolCallID: "tool-1",
+				Content:    "ok",
+			},
+		}},
+	}}
 	require.True(t, sessionState.AddArtifact(session.Artifact{
 		Path:      "reports/replay.md",
 		Kind:      "report",
@@ -125,6 +151,13 @@ func TestFormatTranscriptProvenanceIncludesReplayInputs(t *testing.T) {
 	assert.Contains(t, line, "config_hash=sha256:")
 	assert.Contains(t, line, "providers=openai")
 	assert.Contains(t, line, "models=openai/gpt-test")
+	assert.Contains(t, line, "event_hash=sha256:event-log")
+	assert.Contains(t, line, "events=12")
+	assert.Contains(t, line, "provider_calls=1")
+	assert.Contains(t, line, "prompt_hash=sha256:prompt")
+	assert.Contains(t, line, "call_config_hash=sha256:call-config")
+	assert.Contains(t, line, "tool_calls=1")
+	assert.Contains(t, line, "tool_results=1")
 	assert.Contains(t, line, "total_tokens=15")
 	assert.Contains(t, line, "files=1")
 	assert.Contains(t, line, "gates=1")
