@@ -553,6 +553,32 @@ func TestStore_LoadEventLogRejectsTamperedHashChain(t *testing.T) {
 	assert.ErrorIs(t, err, ErrCorruptEventLog)
 }
 
+func TestStore_LoadEventLogRejectsValidJSONCorruptFinalLineWithoutNewline(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	sessionState := New("gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "safe prefix"}})
+	require.NoError(t, store.Save(sessionState))
+
+	lines := strings.Split(strings.TrimSpace(readSessionTestFile(t, store.EventLogPath(sessionState.ID))), "\n")
+	require.NotEmpty(t, lines)
+
+	var event Event
+	require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &event))
+	event.Payload = json.RawMessage(`{"index":999,"message":{"role":"user","content":"tampered final event"}}`)
+
+	tampered, err := json.Marshal(event)
+	require.NoError(t, err)
+
+	lines[len(lines)-1] = string(tampered)
+
+	require.NoError(t, os.WriteFile(store.EventLogPath(sessionState.ID), []byte(strings.Join(lines, "\n")), 0o600))
+
+	_, err = store.Load(sessionState.ID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCorruptEventLog)
+}
+
 func TestStore_LoadEventLogRejectsMixedSessionIDs(t *testing.T) {
 	t.Parallel()
 

@@ -904,7 +904,7 @@ func readEventLog(path string) (eventLogReadResult, error) {
 
 		event, parseErr := parseEventLogLine(line, path, lineNumber, prevHash, expectedSequence)
 		if parseErr != nil {
-			if !completeLine && errors.Is(readErr, io.EOF) {
+			if !completeLine && errors.Is(readErr, io.EOF) && incompleteJSONLine(line) {
 				result.truncated = true
 				break
 			}
@@ -926,6 +926,15 @@ func readEventLog(path string) (eventLogReadResult, error) {
 	}
 
 	return result, nil
+}
+
+func incompleteJSONLine(line []byte) bool {
+	var raw json.RawMessage
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return strings.Contains(err.Error(), "unexpected end of JSON input")
+	}
+
+	return false
 }
 
 func parseEventLogLine(line []byte, path string, lineNumber int, prevHash string, expectedSequence int64) (Event, error) {
