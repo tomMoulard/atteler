@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,8 +39,8 @@ func TestStore_AddListAndPersistTasksDeterministically(t *testing.T) {
 
 	assert.Equal(t, "second task", second.Title)
 	assert.Equal(t, map[string]string{"priority": "high"}, second.Metadata)
-	assert.Equal(t, StatusPending, second.Status)
-	assert.Equal(t, StatusAssigned, first.Status)
+	assert.Equal(t, StatusReady, second.Status)
+	assert.Equal(t, StatusInProgress, first.Status)
 	assert.Equal(t, "agent-1", first.Agent)
 
 	listed, err := store.List(ctx)
@@ -71,14 +72,14 @@ func TestStore_AssignUpdateAndCompleteRecordHistory(t *testing.T) {
 	clock := newTestClock(time.Date(2026, 5, 5, 13, 0, 0, 0, time.UTC))
 	store.now = clock.now
 
-	task, err := store.Add(ctx, AddRequest{ID: "todo-1", Title: "draft SDK"})
+	task, err := store.Add(ctx, AddRequest{ID: "todo-1", Title: "draft SDK", Message: "initial package task"})
 	require.NoError(t, err)
 
 	clock.advanceMinute()
 
 	assigned, err := store.Assign(ctx, task.ID, "agent-a")
 	require.NoError(t, err)
-	assert.Equal(t, StatusAssigned, assigned.Status)
+	assert.Equal(t, StatusInProgress, assigned.Status)
 	assert.Equal(t, "agent-a", assigned.Agent)
 	require.NotNil(t, assigned.Lease)
 	assert.Equal(t, "agent-a", assigned.Lease.Owner)
@@ -101,10 +102,10 @@ func TestStore_AssignUpdateAndCompleteRecordHistory(t *testing.T) {
 
 	clock.advanceMinute()
 
-	completed, err := store.Complete(ctx, task.ID, "agent-b")
+	completed, err := store.Complete(ctx, task.ID, "agent-a")
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, completed.Status)
-	assert.Equal(t, "agent-b", completed.Agent)
+	assert.Equal(t, "agent-a", completed.Agent)
 	require.NotNil(t, completed.CompletedAt)
 	assert.Equal(t, completed.UpdatedAt, *completed.CompletedAt)
 
@@ -114,13 +115,14 @@ func TestStore_AssignUpdateAndCompleteRecordHistory(t *testing.T) {
 	assert.Equal(t, []HistoryAction{HistoryAdded, HistoryAssigned, HistoryUpdated, HistoryCompleted}, historyActions(history))
 	assert.Equal(t, []int64{1, 2, 3, 4}, historySeqs(history))
 	assert.Equal(t, []int64{1, 2, 3, 4}, historyStateRevisions(history))
+	assert.Equal(t, "initial package task", history[0].Message)
 	assert.Equal(t, "agent-a", history[1].Actor)
 	require.NotNil(t, history[2].Before)
 	require.NotNil(t, history[2].After)
 	assert.Equal(t, "draft SDK", history[2].Before.Title)
 	assert.Equal(t, "draft package SDK", history[2].After.Title)
 	assert.Equal(t, "clarified scope", history[2].Message)
-	assert.Equal(t, "agent-b", history[3].Agent)
+	assert.Equal(t, "agent-a", history[3].Agent)
 }
 
 func TestStore_ConcurrentStoresSerializeFileMutations(t *testing.T) {
@@ -285,6 +287,138 @@ func TestStore_SubprocessAddHelper(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestStore_ConcurrentStoresClaimAndCompleteSeparateTasks(t *testing.T) {
+	t.Parallel()
+
+	const workers = 12
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	seed := NewStore(path)
+
+	for i := range workers {
+		_, err := seed.Add(ctx, AddRequest{
+			ID:    fmt.Sprintf("work-%02d", i),
+			Title: fmt.Sprintf("work %02d", i),
+			Actor: "planner",
+		})
+		require.NoError(t, err)
+	}
+
+	start := make(chan struct{})
+	errCh := make(chan error, workers)
+
+	var wg sync.WaitGroup
+
+	for i := range workers {
+		wg.Add(1)
+
+		go func(i int) {
+			defer wg.Done()
+
+			<-start
+
+			store := NewStore(path)
+			id := fmt.Sprintf("work-%02d", i)
+			agent := fmt.Sprintf("agent-%02d", i)
+
+			claimed, err := store.Claim(ctx, id, AssignRequest{Agent: agent, Actor: agent})
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			_, err = store.CompleteWithOptions(ctx, id, CompleteRequest{
+				Agent:            agent,
+				Actor:            agent,
+				Message:          "done",
+				ExpectedRevision: claimed.Revision,
+			})
+			errCh <- err
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+
+	state, err := NewStore(path).Load(ctx)
+	require.NoError(t, err)
+	require.Len(t, state.Tasks, workers)
+	assert.Len(t, state.History, workers*3)
+
+	for i := range state.Tasks {
+		assert.Equal(t, StatusCompleted, state.Tasks[i].Status)
+		assert.Nil(t, state.Tasks[i].Lease)
+		assert.NotNil(t, state.Tasks[i].CompletedAt)
+	}
+}
+
+func TestStore_ConcurrentClaimsAllowOnlyOneLiveOwner(t *testing.T) {
+	t.Parallel()
+
+	const contenders = 8
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	_, err := NewStore(path).Add(ctx, AddRequest{ID: "shared", Title: "shared work"})
+	require.NoError(t, err)
+
+	start := make(chan struct{})
+	results := make(chan error, contenders)
+
+	var wg sync.WaitGroup
+
+	for i := range contenders {
+		wg.Add(1)
+
+		go func(i int) {
+			defer wg.Done()
+
+			<-start
+
+			_, claimErr := NewStore(path).Claim(ctx, "shared", AssignRequest{
+				Agent:         fmt.Sprintf("agent-%02d", i),
+				SessionID:     fmt.Sprintf("session-%02d", i),
+				LeaseDuration: time.Hour,
+			})
+			results <- claimErr
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	leased := 0
+
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrTaskLeased):
+			leased++
+		default:
+			require.NoError(t, err)
+		}
+	}
+
+	assert.Equal(t, 1, successes)
+	assert.Equal(t, contenders-1, leased)
+
+	state, err := NewStore(path).Load(ctx)
+	require.NoError(t, err)
+	require.Len(t, state.Tasks, 1)
+	assert.Equal(t, StatusInProgress, state.Tasks[0].Status)
+	assert.NotNil(t, state.Tasks[0].Lease)
+	assert.Len(t, state.History, 2)
+}
+
 func TestStore_ClaimHeartbeatAndReconcileLeases(t *testing.T) {
 	t.Parallel()
 
@@ -305,7 +439,7 @@ func TestStore_ClaimHeartbeatAndReconcileLeases(t *testing.T) {
 		LeaseDuration: time.Minute,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, StatusAssigned, claimed.Status)
+	assert.Equal(t, StatusInProgress, claimed.Status)
 	assert.Equal(t, "agent-a", claimed.Agent)
 	require.NotNil(t, claimed.Lease)
 	assert.Equal(t, "agent-a", claimed.Lease.Owner)
@@ -343,7 +477,7 @@ func TestStore_ClaimHeartbeatAndReconcileLeases(t *testing.T) {
 	assert.Equal(t, 1, result.ExpiredLeases)
 	assert.Equal(t, 1, result.HistoryEntries)
 	require.Len(t, result.Tasks, 1)
-	assert.Equal(t, StatusPending, result.Tasks[0].Status)
+	assert.Equal(t, StatusReady, result.Tasks[0].Status)
 	assert.Nil(t, result.Tasks[0].Lease)
 
 	reclaimed, err := otherStore.Claim(ctx, task.ID, AssignRequest{Agent: "agent-b", LeaseDuration: time.Minute})
@@ -422,6 +556,106 @@ func TestStore_LeaseScopeMustMatchForHeartbeatOrClaim(t *testing.T) {
 	assert.Equal(t, "run-2", adminReassigned.Lease.RunID)
 }
 
+func TestStore_CompleteRequiresLiveLeaseOwner(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	clock := newTestClock(time.Date(2026, 5, 6, 10, 40, 0, 0, time.UTC))
+	store := NewStore(path)
+	store.now = clock.now
+
+	task, err := store.Add(ctx, AddRequest{ID: "owned", Title: "owned task"})
+	require.NoError(t, err)
+
+	claimed, err := store.Claim(ctx, task.ID, AssignRequest{
+		Agent:         "agent-a",
+		SessionID:     "session-a",
+		RunID:         "run-a",
+		LeaseDuration: time.Minute,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, claimed.Lease)
+
+	_, err = store.CompleteWithOptions(ctx, task.ID, CompleteRequest{
+		Agent:     "agent-b",
+		SessionID: "session-b",
+		RunID:     "run-b",
+	})
+	require.ErrorIs(t, err, ErrTaskLeased)
+
+	_, err = store.CompleteWithOptions(ctx, task.ID, CompleteRequest{Agent: "agent-a"})
+	require.ErrorIs(t, err, ErrTaskLeased)
+
+	completed, err := store.CompleteWithOptions(ctx, task.ID, CompleteRequest{
+		Agent:     "agent-a",
+		SessionID: "session-a",
+		RunID:     "run-a",
+		Message:   "owner finished",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, completed.Status)
+	assert.Equal(t, "agent-a", completed.Agent)
+
+	history, err := store.History(ctx)
+	require.NoError(t, err)
+	require.Len(t, history, 3)
+	assert.Equal(t, HistoryCompleted, history[2].Action)
+	assert.Equal(t, "owner finished", history[2].Message)
+}
+
+func TestStore_ReviewFailCancelRequireLiveLeaseOwner(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	store := NewStore(path)
+
+	task, err := store.Add(ctx, AddRequest{ID: "owned", Title: "owned task"})
+	require.NoError(t, err)
+
+	_, err = store.Claim(ctx, task.ID, AssignRequest{
+		Agent:         "agent-a",
+		SessionID:     "session-a",
+		RunID:         "run-a",
+		LeaseDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	_, err = store.RequestReview(ctx, task.ID, ReviewRequest{
+		Agent:     "agent-b",
+		SessionID: "session-b",
+		RunID:     "run-b",
+	})
+	require.ErrorIs(t, err, ErrTaskLeased)
+
+	_, err = store.Fail(ctx, task.ID, FailRequest{
+		Agent:     "agent-b",
+		SessionID: "session-b",
+		RunID:     "run-b",
+		Reason:    "cannot finish",
+	})
+	require.ErrorIs(t, err, ErrTaskLeased)
+
+	_, err = store.Cancel(ctx, task.ID, CancelRequest{
+		Agent:     "agent-b",
+		SessionID: "session-b",
+		RunID:     "run-b",
+		Reason:    "superseded",
+	})
+	require.ErrorIs(t, err, ErrTaskLeased)
+
+	review, err := store.RequestReview(ctx, task.ID, ReviewRequest{
+		Agent:     "agent-a",
+		SessionID: "session-a",
+		RunID:     "run-a",
+		Message:   "owner ready for review",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReview, review.Status)
+	assert.Nil(t, review.Lease)
+}
+
 func TestStore_UpdateToPendingClearsOwnerAndLease(t *testing.T) {
 	t.Parallel()
 
@@ -442,12 +676,12 @@ func TestStore_UpdateToPendingClearsOwnerAndLease(t *testing.T) {
 
 	reset, err := store.Update(ctx, task.ID, UpdateRequest{
 		Agent:   "ignored-agent",
-		Status:  StatusPending,
+		Status:  StatusReady,
 		Actor:   "scheduler",
 		Message: "release task",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, StatusPending, reset.Status)
+	assert.Equal(t, StatusReady, reset.Status)
 	assert.Empty(t, reset.Agent)
 	assert.Nil(t, reset.Lease)
 	assert.Equal(t, claimed.AttemptCount, reset.AttemptCount)
@@ -457,8 +691,8 @@ func TestStore_UpdateToPendingClearsOwnerAndLease(t *testing.T) {
 	require.Len(t, history, 3)
 	require.NotNil(t, history[2].Before)
 	require.NotNil(t, history[2].After)
-	assert.Equal(t, StatusAssigned, history[2].Before.Status)
-	assert.Equal(t, StatusPending, history[2].After.Status)
+	assert.Equal(t, StatusInProgress, history[2].Before.Status)
+	assert.Equal(t, StatusReady, history[2].After.Status)
 	assert.Equal(t, "scheduler", history[2].Actor)
 	assert.Equal(t, "release task", history[2].Message)
 }
@@ -498,11 +732,11 @@ func TestStore_DependenciesBlockAssignmentUntilCompleted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Unblocked)
 	require.Len(t, result.Tasks, 1)
-	assert.Equal(t, StatusPending, result.Tasks[0].Status)
+	assert.Equal(t, StatusReady, result.Tasks[0].Status)
 
 	claimed, err := store.Claim(ctx, dependent.ID, AssignRequest{Agent: "agent-b"})
 	require.NoError(t, err)
-	assert.Equal(t, StatusAssigned, claimed.Status)
+	assert.Equal(t, StatusInProgress, claimed.Status)
 	assert.Equal(t, "agent-b", claimed.Agent)
 }
 
@@ -595,6 +829,178 @@ func TestStore_UpdatePersistsCoordinationMetadata(t *testing.T) {
 	assert.Equal(t, "record review findings", history[1].Message)
 }
 
+func TestStore_WorkflowStatesRiskBlockersAndRetries(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	clock := newTestClock(time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC))
+	store := NewStore(path)
+	store.now = clock.now
+
+	blocked, err := store.Add(ctx, AddRequest{
+		ID:            "workflow",
+		Title:         "coordinate workflow",
+		Priority:      7,
+		Risk:          "high",
+		BlockerReason: "waiting on design sign-off",
+		Actor:         "planner",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusBlocked, blocked.Status)
+	assert.Equal(t, 7, blocked.Priority)
+	assert.Equal(t, "high", blocked.Risk)
+	assert.Equal(t, "waiting on design sign-off", blocked.BlockerReason)
+
+	_, err = store.Reopen(ctx, blocked.ID, ReopenRequest{Actor: "scheduler"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `cannot reopen task with status "blocked"`)
+
+	_, err = store.Claim(ctx, blocked.ID, AssignRequest{Agent: "agent-a"})
+	require.ErrorIs(t, err, ErrTaskBlocked)
+
+	clock.advanceMinute()
+
+	ready, err := store.Update(ctx, blocked.ID, UpdateRequest{
+		ClearBlockerReason: true,
+		Risk:               "medium",
+		Actor:              "planner",
+		Message:            "design approved",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReady, ready.Status)
+	assert.Empty(t, ready.BlockerReason)
+	assert.Equal(t, "medium", ready.Risk)
+
+	_, err = store.Update(ctx, blocked.ID, UpdateRequest{Status: StatusFailed})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "use dedicated workflow method")
+
+	clock.advanceMinute()
+
+	claimed, err := store.Claim(ctx, blocked.ID, AssignRequest{Agent: "agent-a", Actor: "agent-a"})
+	require.NoError(t, err)
+	assert.Equal(t, StatusInProgress, claimed.Status)
+	require.NotNil(t, claimed.Lease)
+
+	clock.advanceMinute()
+
+	review, err := store.RequestReview(ctx, blocked.ID, ReviewRequest{
+		Agent:   "agent-a",
+		Actor:   "agent-a",
+		Message: "ready for review",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReview, review.Status)
+	assert.Equal(t, ReviewStatusPending, review.ReviewStatus)
+	assert.Nil(t, review.Lease)
+
+	_, err = store.Update(ctx, blocked.ID, UpdateRequest{Status: StatusReady})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires Reopen")
+
+	_, err = store.Update(ctx, blocked.ID, UpdateRequest{Agent: "agent-b"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires Reopen")
+
+	_, err = store.Claim(ctx, blocked.ID, AssignRequest{Agent: "agent-b"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "task is in review")
+
+	clock.advanceMinute()
+
+	reopenedFromReview, err := store.Reopen(ctx, blocked.ID, ReopenRequest{
+		Actor:   "reviewer",
+		Message: "changes requested",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReopened, reopenedFromReview.Status)
+	assert.Equal(t, 1, reopenedFromReview.RetryCount)
+	assert.Empty(t, reopenedFromReview.Agent)
+
+	clock.advanceMinute()
+
+	reclaimed, err := store.Claim(ctx, blocked.ID, AssignRequest{Agent: "agent-b", Actor: "agent-b"})
+	require.NoError(t, err)
+	assert.Equal(t, StatusInProgress, reclaimed.Status)
+	assert.Equal(t, 2, reclaimed.AttemptCount)
+
+	clock.advanceMinute()
+
+	failed, err := store.Fail(ctx, blocked.ID, FailRequest{
+		Agent:   "agent-b",
+		Actor:   "agent-b",
+		Reason:  "tests failed",
+		Message: "implementation broke tests",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusFailed, failed.Status)
+	assert.Equal(t, "tests failed", failed.FailureReason)
+	assert.Nil(t, failed.Lease)
+
+	_, err = store.Claim(ctx, blocked.ID, AssignRequest{Agent: "agent-c"})
+	require.ErrorIs(t, err, ErrTaskFailed)
+
+	_, err = store.Complete(ctx, blocked.ID, "agent-c")
+	require.ErrorIs(t, err, ErrTaskFailed)
+
+	_, err = store.Update(ctx, blocked.ID, UpdateRequest{Status: StatusReady})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires Reopen")
+
+	clock.advanceMinute()
+
+	reopenedFromFailure, err := store.Reopen(ctx, blocked.ID, ReopenRequest{
+		Actor:   "scheduler",
+		Message: "retry failed work",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReopened, reopenedFromFailure.Status)
+	assert.Equal(t, 2, reopenedFromFailure.RetryCount)
+	assert.Empty(t, reopenedFromFailure.FailureReason)
+
+	clock.advanceMinute()
+
+	canceled, err := store.Cancel(ctx, blocked.ID, CancelRequest{
+		Actor:   "scheduler",
+		Reason:  "superseded",
+		Message: "cancel obsolete work",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusCanceled, canceled.Status)
+	assert.Equal(t, "superseded", canceled.FailureReason)
+
+	clock.advanceMinute()
+
+	reopenedFromCancel, err := store.Reopen(ctx, blocked.ID, ReopenRequest{
+		Actor:   "scheduler",
+		Message: "bring back into plan",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReopened, reopenedFromCancel.Status)
+	assert.Equal(t, 3, reopenedFromCancel.RetryCount)
+
+	history, err := store.History(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []HistoryAction{
+		HistoryAdded,
+		HistoryUpdated,
+		HistoryAssigned,
+		HistoryReviewRequested,
+		HistoryReopened,
+		HistoryAssigned,
+		HistoryFailed,
+		HistoryReopened,
+		HistoryCanceled,
+		HistoryReopened,
+	}, historyActions(history))
+	require.NotNil(t, history[6].Before)
+	require.NotNil(t, history[6].After)
+	assert.Equal(t, StatusInProgress, history[6].Before.Status)
+	assert.Equal(t, StatusFailed, history[6].After.Status)
+	assert.Equal(t, "implementation broke tests", history[6].Message)
+}
+
 func TestStore_ReconcileRepairsManualAssignedTaskWithoutLease(t *testing.T) {
 	t.Parallel()
 
@@ -607,7 +1013,7 @@ func TestStore_ReconcileRepairsManualAssignedTaskWithoutLease(t *testing.T) {
 			{
 				ID:        "manual",
 				Title:     "manually edited assigned task",
-				Status:    StatusAssigned,
+				Status:    StatusInProgress,
 				Agent:     "stale-agent",
 				CreatedAt: now.Add(-time.Hour),
 				UpdatedAt: now.Add(-time.Hour),
@@ -625,7 +1031,7 @@ func TestStore_ReconcileRepairsManualAssignedTaskWithoutLease(t *testing.T) {
 	assert.Equal(t, 1, result.HistoryEntries)
 	assert.Equal(t, int64(8), result.StateRevision)
 	require.Len(t, result.Tasks, 1)
-	assert.Equal(t, StatusPending, result.Tasks[0].Status)
+	assert.Equal(t, StatusReady, result.Tasks[0].Status)
 	assert.Empty(t, result.Tasks[0].Agent)
 	assert.Nil(t, result.Tasks[0].Lease)
 
@@ -637,12 +1043,12 @@ func TestStore_ReconcileRepairsManualAssignedTaskWithoutLease(t *testing.T) {
 	assert.Equal(t, "repair manual edit", history[0].Message)
 	require.NotNil(t, history[0].Before)
 	require.NotNil(t, history[0].After)
-	assert.Equal(t, StatusAssigned, history[0].Before.Status)
-	assert.Equal(t, StatusPending, history[0].After.Status)
+	assert.Equal(t, StatusInProgress, history[0].Before.Status)
+	assert.Equal(t, StatusReady, history[0].After.Status)
 
 	claimed, err := store.Claim(ctx, "manual", AssignRequest{Agent: "fresh-agent"})
 	require.NoError(t, err)
-	assert.Equal(t, StatusAssigned, claimed.Status)
+	assert.Equal(t, StatusInProgress, claimed.Status)
 	assert.Equal(t, "fresh-agent", claimed.Agent)
 	require.NotNil(t, claimed.Lease)
 }
@@ -659,7 +1065,7 @@ func TestStore_ReconcileRepairsManualLeaseOwnerMismatch(t *testing.T) {
 			{
 				ID:        "mismatch",
 				Title:     "manually mismatched lease owner",
-				Status:    StatusAssigned,
+				Status:    StatusInProgress,
 				Agent:     "stale-agent",
 				CreatedAt: now.Add(-time.Hour),
 				UpdatedAt: now.Add(-time.Minute),
@@ -685,7 +1091,7 @@ func TestStore_ReconcileRepairsManualLeaseOwnerMismatch(t *testing.T) {
 	assert.Equal(t, 1, result.HistoryEntries)
 	assert.Equal(t, int64(12), result.StateRevision)
 	require.Len(t, result.Tasks, 1)
-	assert.Equal(t, StatusAssigned, result.Tasks[0].Status)
+	assert.Equal(t, StatusInProgress, result.Tasks[0].Status)
 	assert.Equal(t, "lease-agent", result.Tasks[0].Agent)
 	require.NotNil(t, result.Tasks[0].Lease)
 	assert.Equal(t, "lease-agent", result.Tasks[0].Lease.Owner)
@@ -738,7 +1144,7 @@ func TestStore_ReconcileClearsOwnerWhenUnblockingManualBlockedTask(t *testing.T)
 	assert.Equal(t, 1, result.Unblocked)
 	assert.Equal(t, 1, result.HistoryEntries)
 	require.Len(t, result.Tasks, 1)
-	assert.Equal(t, StatusPending, result.Tasks[0].Status)
+	assert.Equal(t, StatusReady, result.Tasks[0].Status)
 	assert.Empty(t, result.Tasks[0].Agent)
 	assert.Nil(t, result.Tasks[0].Lease)
 }
@@ -755,7 +1161,7 @@ func TestStore_ReconcileClearsOwnerOnStillBlockedManualTask(t *testing.T) {
 			{
 				ID:        "dependency",
 				Title:     "dependency",
-				Status:    StatusPending,
+				Status:    StatusReady,
 				CreatedAt: now.Add(-2 * time.Hour),
 				UpdatedAt: now.Add(-2 * time.Hour),
 				Revision:  1,
@@ -876,12 +1282,12 @@ func TestStore_LoadSortsExistingFileAndRejectsCorruptState(t *testing.T) {
 	now := time.Date(2026, 5, 5, 15, 0, 0, 0, time.UTC)
 	state := State{
 		Tasks: []Task{
-			{ID: "later", Title: "later", Status: StatusPending, CreatedAt: now.Add(time.Hour), UpdatedAt: now.Add(time.Hour)},
-			{ID: "earlier", Title: "earlier", Status: StatusPending, CreatedAt: now, UpdatedAt: now},
+			{ID: "later", Title: "later", Status: StatusReady, CreatedAt: now.Add(time.Hour), UpdatedAt: now.Add(time.Hour)},
+			{ID: "earlier", Title: "earlier", Status: StatusReady, CreatedAt: now, UpdatedAt: now},
 		},
 		History: []HistoryEntry{
-			{Seq: 2, At: now.Add(time.Minute), Action: HistoryUpdated, TaskID: "later"},
-			{Seq: 1, At: now, Action: HistoryAdded, TaskID: "earlier"},
+			{Seq: 2, At: now.Add(time.Minute), Action: HistoryUpdated, TaskID: "later", Actor: "editor"},
+			{Seq: 1, At: now, Action: HistoryAdded, TaskID: "earlier", Actor: "planner"},
 		},
 	}
 	writeState(t, path, state)
@@ -897,11 +1303,269 @@ func TestStore_LoadSortsExistingFileAndRejectsCorruptState(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "title is required")
 
+	badHistoryPath := filepath.Join(dir, "bad-history.json")
+	writeState(t, badHistoryPath, State{
+		Tasks: []Task{
+			{ID: "task", Title: "task", Status: StatusReady, CreatedAt: now, UpdatedAt: now},
+		},
+		History: []HistoryEntry{
+			{Seq: 1, At: now, Action: HistoryAction("unknown"), TaskID: "task", Actor: "planner"},
+		},
+	})
+	_, err = NewStore(badHistoryPath).Load(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid history action")
+
+	badHistoryActorPath := filepath.Join(dir, "bad-history-actor.json")
+	writeState(t, badHistoryActorPath, State{
+		Tasks: []Task{
+			{ID: "task", Title: "task", Status: StatusReady, CreatedAt: now, UpdatedAt: now},
+		},
+		History: []HistoryEntry{
+			{Seq: 1, At: now, Action: HistoryAdded, TaskID: "task"},
+		},
+	})
+	_, err = NewStore(badHistoryActorPath).Load(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "history actor")
+
+	badLeasePath := filepath.Join(dir, "bad-lease.json")
+	writeState(t, badLeasePath, State{
+		Tasks: []Task{
+			{
+				ID:        "task",
+				Title:     "task",
+				Status:    StatusReady,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Lease: &Lease{
+					Owner:           "agent",
+					AcquiredAt:      now,
+					LastHeartbeatAt: now,
+					ExpiresAt:       now.Add(time.Minute),
+				},
+			},
+		},
+	})
+	_, err = NewStore(badLeasePath).Load(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lease is only valid")
+
 	invalidPath := filepath.Join(dir, "invalid.json")
 	require.NoError(t, os.WriteFile(invalidPath, []byte(`not json`), 0o600))
 	_, err = NewStore(invalidPath).Load(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parse")
+}
+
+func TestStore_RepairBacksUpMalformedTaskFile(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	require.NoError(t, os.WriteFile(path, []byte(`not json`), 0o600))
+
+	store := NewStore(path)
+	store.now = newTestClock(time.Date(2026, 5, 7, 9, 0, 0, 0, time.UTC)).now
+
+	_, err := store.Load(ctx)
+	require.Error(t, err)
+
+	result, err := store.Repair(ctx, RepairRequest{Actor: "repairer", Message: "recover corrupt file"})
+	require.NoError(t, err)
+	assert.True(t, result.Repaired)
+	assert.Equal(t, int64(1), result.StateRevision)
+	assert.Equal(t, 1, result.HistoryEntries)
+	assert.NotEmpty(t, result.BackupPath)
+
+	backup, err := os.ReadFile(result.BackupPath)
+	require.NoError(t, err)
+	assert.Equal(t, "not json", string(backup))
+
+	state, err := store.Load(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, state.Tasks)
+	require.Len(t, state.History, 1)
+	assert.Equal(t, HistoryRepaired, state.History[0].Action)
+	assert.Equal(t, "__state__", state.History[0].TaskID)
+	assert.Equal(t, "repairer", state.History[0].Actor)
+	assert.Contains(t, state.History[0].Message, "recover corrupt file")
+	assert.Contains(t, state.History[0].Message, "malformed JSON")
+}
+
+func TestStore_RepairNormalizesConflictedTaskFile(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	now := time.Date(2026, 5, 7, 9, 30, 0, 0, time.UTC)
+	completedAt := now.Add(-90 * time.Minute)
+	writeState(t, path, State{
+		Revision: 4,
+		Tasks: []Task{
+			{
+				ID:           "dup",
+				Title:        " keep ",
+				Status:       StatusPending,
+				CreatedAt:    now.Add(-time.Hour),
+				UpdatedAt:    now.Add(-time.Hour),
+				Dependencies: []string{"dep", "dep"},
+				Revision:     2,
+			},
+			{
+				ID:        "dup",
+				Title:     "drop duplicate",
+				Status:    StatusReady,
+				CreatedAt: now.Add(-time.Minute),
+				UpdatedAt: now.Add(-time.Minute),
+				Revision:  3,
+			},
+			{
+				ID:          "dep",
+				Title:       "dependency",
+				Status:      StatusCompleted,
+				CreatedAt:   now.Add(-2 * time.Hour),
+				UpdatedAt:   completedAt,
+				CompletedAt: &completedAt,
+				Revision:    1,
+			},
+		},
+		History: []HistoryEntry{
+			{Seq: 1, At: now, Action: HistoryAdded, TaskID: "dup", Actor: "planner"},
+			{Seq: 2, At: now, Action: "", TaskID: "", Actor: "broken"},
+		},
+	})
+
+	store := NewStore(path)
+	store.now = newTestClock(now).now
+
+	_, err := store.Load(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate task id")
+
+	result, err := store.Repair(ctx, RepairRequest{Actor: "repairer", Message: "dedupe"})
+	require.NoError(t, err)
+	assert.True(t, result.Repaired)
+	assert.Equal(t, 2, result.TasksRecovered)
+	assert.Equal(t, 1, result.TasksDropped)
+	assert.Equal(t, 1, result.HistoryEntries)
+	assert.FileExists(t, result.BackupPath)
+
+	state, err := store.Load(ctx)
+	require.NoError(t, err)
+	require.Len(t, state.Tasks, 2)
+
+	dupIdx := findTask(state.Tasks, "dup")
+	require.NotEqual(t, -1, dupIdx)
+	assert.Equal(t, "keep", state.Tasks[dupIdx].Title)
+	assert.Equal(t, StatusReady, state.Tasks[dupIdx].Status)
+	assert.Equal(t, []string{"dep"}, state.Tasks[dupIdx].Dependencies)
+
+	require.Len(t, state.History, 2)
+	assert.Equal(t, HistoryRepaired, state.History[1].Action)
+	assert.Equal(t, "repairer", state.History[1].Actor)
+	assert.Contains(t, state.History[1].Message, "dedupe")
+}
+
+func TestStore_RepairNormalizesCorruptHistoryEvidence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	now := time.Date(2026, 5, 7, 9, 45, 0, 0, time.UTC)
+	writeState(t, path, State{
+		Revision: 2,
+		Tasks: []Task{
+			{
+				ID:        "task",
+				Title:     "task",
+				Status:    StatusReady,
+				CreatedAt: now.Add(-time.Hour),
+				UpdatedAt: now.Add(-time.Hour),
+				Revision:  1,
+			},
+		},
+		History: []HistoryEntry{
+			{Seq: 0, Action: HistoryAdded, TaskID: "task"},
+			{Seq: 1, At: now.Add(-time.Minute), Action: HistoryUpdated, TaskID: "task"},
+			{Seq: 3, At: now.Add(-time.Minute), Action: HistoryAction("unknown"), TaskID: "task"},
+		},
+	})
+
+	store := NewStore(path)
+	store.now = newTestClock(now).now
+
+	_, err := store.Load(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "history seq")
+
+	result, err := store.Repair(ctx, RepairRequest{Actor: "repairer", Message: "restore history evidence"})
+	require.NoError(t, err)
+	assert.True(t, result.Repaired)
+	assert.Equal(t, 1, result.TasksRecovered)
+	assert.Equal(t, 1, result.HistoryEntries)
+	assert.FileExists(t, result.BackupPath)
+
+	state, err := store.Load(ctx)
+	require.NoError(t, err)
+	require.Len(t, state.History, 3)
+	assert.Equal(t, []int64{1, 2, 3}, historySeqs(state.History))
+	assert.Equal(t, "system", state.History[0].Actor)
+	assert.Equal(t, now, state.History[0].At)
+	assert.Equal(t, HistoryRepaired, state.History[2].Action)
+	assert.Contains(t, state.History[2].Message, "restore history evidence")
+}
+
+func TestStore_RepairClearsLeaseFromNonProgressTask(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	now := time.Date(2026, 5, 7, 10, 0, 0, 0, time.UTC)
+	writeState(t, path, State{
+		Revision: 3,
+		Tasks: []Task{
+			{
+				ID:        "ready",
+				Title:     "ready but leased",
+				Status:    StatusReady,
+				Agent:     "stale-agent",
+				CreatedAt: now.Add(-time.Hour),
+				UpdatedAt: now.Add(-time.Minute),
+				Revision:  3,
+				Lease: &Lease{
+					Owner:           "stale-agent",
+					AcquiredAt:      now.Add(-time.Minute),
+					LastHeartbeatAt: now.Add(-time.Minute),
+					ExpiresAt:       now.Add(time.Hour),
+				},
+			},
+		},
+	})
+
+	store := NewStore(path)
+	store.now = newTestClock(now).now
+
+	_, err := store.Load(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lease is only valid")
+
+	result, err := store.Repair(ctx, RepairRequest{Actor: "repairer", Message: "remove stale lease"})
+	require.NoError(t, err)
+	assert.True(t, result.Repaired)
+	assert.Equal(t, 1, result.TasksRecovered)
+	assert.Equal(t, 1, result.HistoryEntries)
+	assert.FileExists(t, result.BackupPath)
+
+	state, err := store.Load(ctx)
+	require.NoError(t, err)
+	require.Len(t, state.Tasks, 1)
+	assert.Nil(t, state.Tasks[0].Lease)
+	assert.Equal(t, StatusReady, state.Tasks[0].Status)
+	assert.Empty(t, state.Tasks[0].Agent)
+	require.Len(t, state.History, 1)
+	assert.Equal(t, HistoryRepaired, state.History[0].Action)
+	assert.Contains(t, state.History[0].Message, "remove stale lease")
 }
 
 func TestStore_UsesAtomicFileReplacementAndNoTempLeftovers(t *testing.T) {

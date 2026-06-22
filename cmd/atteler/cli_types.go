@@ -365,6 +365,20 @@ type cliOptions struct {
 	taskAgent                          string
 	taskAssignSpec                     string
 	taskCompleteID                     string
+	taskHeartbeatID                    string
+	taskUpdateID                       string
+	taskReviewID                       string
+	taskFailID                         string
+	taskCancelID                       string
+	taskReopenID                       string
+	taskTitle                          string
+	taskMessage                        string
+	taskReason                         string
+	taskSessionID                      string
+	taskRunID                          string
+	taskRisk                           string
+	taskBlockerReason                  string
+	taskDependencies                   stringListFlag
 	feedbackApproveAgent               string
 	feedbackApproveConfig              string
 	feedbackApproveID                  string
@@ -525,6 +539,9 @@ type cliOptions struct {
 	evaluationCost                     floatFlag
 	evaluationConfidence               floatFlag
 	evaluationPassRate                 floatFlag
+	taskExpectedRevision               positiveIntFlag
+	taskLeaseSeconds                   positiveIntFlag
+	taskPriority                       nonNegativeIntFlag
 	routeBudget                        floatFlag
 	routeCacheReuse                    floatFlag
 	topP                               floatFlag
@@ -534,6 +551,11 @@ type cliOptions struct {
 	ollamaStatus                       bool
 	ollamaStop                         bool
 	taskList                           bool
+	taskReconcile                      bool
+	taskRepair                         bool
+	taskClearBlocker                   bool
+	taskClearDependencies              bool
+	taskClearRisk                      bool
 	speculatePlan                      bool
 	speculateRun                       bool
 	skillReviewOnly                    bool

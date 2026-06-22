@@ -1064,21 +1064,65 @@ func TestTaskListHelpers(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, taskCommandInput{
-		FilePath:   "tasks.json",
-		AddTitle:   "write contract tests",
-		AddID:      "todo-1",
-		Agent:      "planner",
-		AssignSpec: "todo-1:executor",
-		CompleteID: "todo-1",
-		List:       true,
+		FilePath:          "tasks.json",
+		AddTitle:          "write contract tests",
+		AddID:             "todo-1",
+		Agent:             "planner",
+		AssignSpec:        "todo-1:executor",
+		CompleteID:        "todo-1",
+		HeartbeatID:       "todo-1",
+		UpdateID:          "todo-1",
+		ReviewID:          "todo-1",
+		FailID:            "todo-1",
+		CancelID:          "todo-1",
+		ReopenID:          "todo-1",
+		Title:             "renamed",
+		Message:           "audit note",
+		Reason:            "tests failed",
+		SessionID:         "session-1",
+		RunID:             "run-1",
+		Dependencies:      []string{"setup", "test"},
+		Risk:              "high",
+		BlockerReason:     "waiting on setup",
+		ExpectedRevision:  7,
+		LeaseDuration:     30 * time.Second,
+		Priority:          nonNegativeIntFlag{value: 3, set: true},
+		List:              true,
+		Reconcile:         true,
+		Repair:            true,
+		ClearBlocker:      true,
+		ClearDependencies: true,
+		ClearRisk:         true,
 	}, taskCommandInputFromOptions(cliOptions{
-		taskFilePath:   "tasks.json",
-		taskAddTitle:   "write contract tests",
-		taskAddID:      "todo-1",
-		taskAgent:      "planner",
-		taskAssignSpec: "todo-1:executor",
-		taskCompleteID: "todo-1",
-		taskList:       true,
+		taskFilePath:          "tasks.json",
+		taskAddTitle:          "write contract tests",
+		taskAddID:             "todo-1",
+		taskAgent:             "planner",
+		taskAssignSpec:        "todo-1:executor",
+		taskCompleteID:        "todo-1",
+		taskHeartbeatID:       "todo-1",
+		taskUpdateID:          "todo-1",
+		taskReviewID:          "todo-1",
+		taskFailID:            "todo-1",
+		taskCancelID:          "todo-1",
+		taskReopenID:          "todo-1",
+		taskTitle:             "renamed",
+		taskMessage:           "audit note",
+		taskReason:            "tests failed",
+		taskSessionID:         "session-1",
+		taskRunID:             "run-1",
+		taskDependencies:      stringListFlag{"setup", "test"},
+		taskRisk:              "high",
+		taskBlockerReason:     "waiting on setup",
+		taskExpectedRevision:  positiveIntFlag{value: 7, set: true},
+		taskLeaseSeconds:      positiveIntFlag{value: 30, set: true},
+		taskPriority:          nonNegativeIntFlag{value: 3, set: true},
+		taskList:              true,
+		taskReconcile:         true,
+		taskRepair:            true,
+		taskClearBlocker:      true,
+		taskClearDependencies: true,
+		taskClearRisk:         true,
 	}))
 
 	id, agentName, err := parseTaskAssignmentSpec("todo-1:reviewer")
@@ -1096,6 +1140,9 @@ func TestTaskListHelpers(t *testing.T) {
 		Title:       "wire CLI",
 		Status:      tasklist.StatusCompleted,
 		Agent:       "reviewer",
+		Revision:    12,
+		Priority:    9,
+		Risk:        "high",
 		CreatedAt:   completedAt.Add(-time.Hour),
 		UpdatedAt:   completedAt,
 		CompletedAt: &completedAt,
@@ -1106,13 +1153,53 @@ func TestTaskListHelpers(t *testing.T) {
 		"id=todo-1",
 		"status=completed",
 		"title=wire CLI",
+		"revision=12",
 		"agent=reviewer",
+		"priority=9",
+		"risk=high",
 		"created_at=2026-05-05T11:30:00Z",
 		"updated_at=2026-05-05T12:30:00Z",
 		"completed_at=2026-05-05T12:30:00Z",
 		"metadata=priority:high,scope:cmd",
 	} {
 		assert.Contains(t, got, want)
+	}
+
+	reconcileGot := formatTaskReconcileResult(tasklist.ReconcileResult{
+		ExpiredLeases:  1,
+		Blocked:        2,
+		Unblocked:      3,
+		StateRevision:  10,
+		HistoryEntries: 4,
+	})
+	for _, want := range []string{
+		"reconciled=true",
+		"expired_leases=1",
+		"blocked=2",
+		"unblocked=3",
+		"state_revision=10",
+		"history_entries=4",
+	} {
+		assert.Contains(t, reconcileGot, want)
+	}
+
+	repairGot := formatTaskRepairResult(tasklist.RepairResult{
+		BackupPath:     "tasks.json.repair.bak",
+		StateRevision:  11,
+		TasksRecovered: 5,
+		TasksDropped:   6,
+		HistoryEntries: 7,
+		Repaired:       true,
+	})
+	for _, want := range []string{
+		"repaired=true",
+		"backup_path=tasks.json.repair.bak",
+		"state_revision=11",
+		"tasks_recovered=5",
+		"tasks_dropped=6",
+		"history_entries=7",
+	} {
+		assert.Contains(t, repairGot, want)
 	}
 }
 
@@ -1127,20 +1214,25 @@ func TestRunTaskListCommandPersistsTaskLifecycle(t *testing.T) {
 		FilePath: taskFile,
 		AddID:    "todo-1",
 		AddTitle: "draft task package",
-		Agent:    "planner",
 	})
 	require.NoError(t, err)
 
 	err = runTaskListCommand(ctx, store, taskCommandInput{
-		FilePath:   taskFile,
-		AssignSpec: "todo-1:executor",
+		FilePath:      taskFile,
+		AssignSpec:    "todo-1:executor",
+		Agent:         "planner",
+		SessionID:     "session-1",
+		RunID:         "run-1",
+		LeaseDuration: time.Minute,
 	})
 	require.NoError(t, err)
 
 	err = runTaskListCommand(ctx, store, taskCommandInput{
 		FilePath:   taskFile,
 		CompleteID: "todo-1",
-		Agent:      "verifier",
+		Agent:      "executor",
+		SessionID:  "session-1",
+		RunID:      "run-1",
 	})
 	require.NoError(t, err)
 
@@ -1148,15 +1240,326 @@ func TestRunTaskListCommandPersistsTaskLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, tasklist.StatusCompleted, tasks[0].Status)
-	assert.Equal(t, "verifier", tasks[0].Agent)
+	assert.Equal(t, "executor", tasks[0].Agent)
 
 	history, err := tasklist.NewStore(taskFile).History(ctx)
 	require.NoError(t, err)
 	assert.Len(t, history, 3)
+	assert.Equal(t, "planner", history[1].Actor)
+	assert.Equal(t, "executor", history[1].Agent)
 
 	err = runTaskListCommand(ctx, store, taskCommandInput{FilePath: taskFile, AddTitle: "new", List: true})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "choose only one")
+}
+
+func TestRunTaskListCommandSupportsWorkflowStateTransitions(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	taskFile := filepath.Join(t.TempDir(), "tasks.json")
+	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
+
+	err := runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		AddID:    "workflow",
+		AddTitle: "coordinate workflow",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:      taskFile,
+		AssignSpec:    "workflow:executor",
+		SessionID:     "session-1",
+		RunID:         "run-1",
+		LeaseDuration: time.Minute,
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:  taskFile,
+		ReviewID:  "workflow",
+		Agent:     "executor",
+		SessionID: "session-1",
+		RunID:     "run-1",
+		Message:   "ready for review",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		ReopenID: "workflow",
+		Agent:    "planner",
+		Message:  "changes requested",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:   taskFile,
+		AssignSpec: "workflow:executor-2",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		FailID:   "workflow",
+		Agent:    "executor-2",
+		Reason:   "tests failed",
+		Message:  "implementation failed verification",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		ReopenID: "workflow",
+		Agent:    "planner",
+		Message:  "retry failed implementation",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		CancelID: "workflow",
+		Agent:    "planner",
+		Reason:   "superseded",
+		Message:  "cancel old approach",
+	})
+	require.NoError(t, err)
+
+	tasks, err := tasklist.NewStore(taskFile).List(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, tasklist.StatusCanceled, tasks[0].Status)
+	assert.Equal(t, "superseded", tasks[0].FailureReason)
+	assert.Equal(t, 2, tasks[0].RetryCount)
+
+	history, err := tasklist.NewStore(taskFile).History(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []tasklist.HistoryAction{
+		tasklist.HistoryAdded,
+		tasklist.HistoryAssigned,
+		tasklist.HistoryReviewRequested,
+		tasklist.HistoryReopened,
+		tasklist.HistoryAssigned,
+		tasklist.HistoryFailed,
+		tasklist.HistoryReopened,
+		tasklist.HistoryCanceled,
+	}, taskHistoryActionsForCLITest(history))
+}
+
+func TestRunTaskListCommandAddsAndUpdatesCoordinationFields(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	taskFile := filepath.Join(t.TempDir(), "tasks.json")
+	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
+
+	err := runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		AddID:    "setup",
+		AddTitle: "prepare workspace",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:      taskFile,
+		AddID:         "implement",
+		AddTitle:      "implement feature",
+		Dependencies:  []string{"setup"},
+		Priority:      nonNegativeIntFlag{value: 9, set: true},
+		Risk:          "high",
+		BlockerReason: "waiting for design",
+	})
+	require.NoError(t, err)
+
+	loaded, err := tasklist.NewStore(taskFile).Load(ctx)
+	require.NoError(t, err)
+
+	implementIdx := findTaskForCLITest(loaded.Tasks, "implement")
+	require.NotEqual(t, -1, implementIdx)
+	implement := loaded.Tasks[implementIdx]
+	assert.Equal(t, tasklist.StatusBlocked, implement.Status)
+	assert.Equal(t, []string{"setup"}, implement.Dependencies)
+	assert.Equal(t, 9, implement.Priority)
+	assert.Equal(t, "high", implement.Risk)
+	assert.Equal(t, "waiting for design", implement.BlockerReason)
+
+	_, err = tasklist.NewStore(taskFile).Complete(ctx, "setup", "planner")
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:          taskFile,
+		UpdateID:          "implement",
+		Title:             "implement feature safely",
+		Agent:             "planner",
+		Message:           "clear blockers after design",
+		Priority:          nonNegativeIntFlag{value: 4, set: true},
+		Risk:              "medium",
+		ClearBlocker:      true,
+		ClearDependencies: true,
+		ExpectedRevision:  implement.Revision,
+	})
+	require.NoError(t, err)
+
+	updated, err := tasklist.NewStore(taskFile).Load(ctx)
+	require.NoError(t, err)
+
+	updatedIdx := findTaskForCLITest(updated.Tasks, "implement")
+	require.NotEqual(t, -1, updatedIdx)
+	implement = updated.Tasks[updatedIdx]
+	assert.Equal(t, "implement feature safely", implement.Title)
+	assert.Equal(t, tasklist.StatusReady, implement.Status)
+	assert.Empty(t, implement.Dependencies)
+	assert.Equal(t, 4, implement.Priority)
+	assert.Equal(t, "medium", implement.Risk)
+	assert.Empty(t, implement.BlockerReason)
+
+	require.NotEmpty(t, updated.History)
+	lastHistory := updated.History[len(updated.History)-1]
+	assert.Equal(t, tasklist.HistoryUpdated, lastHistory.Action)
+	assert.Equal(t, "planner", lastHistory.Actor)
+	assert.Equal(t, "clear blockers after design", lastHistory.Message)
+}
+
+func TestRunTaskListCommandClaimsAndHeartbeatsLeases(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	taskFile := filepath.Join(t.TempDir(), "tasks.json")
+	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
+
+	err := runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		AddID:    "lease-1",
+		AddTitle: "lease task",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:      taskFile,
+		AssignSpec:    "lease-1:agent-a",
+		SessionID:     "session-a",
+		RunID:         "run-a",
+		LeaseDuration: time.Minute,
+		Message:       "claim work",
+	})
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:   taskFile,
+		AssignSpec: "lease-1:agent-b",
+		SessionID:  "session-b",
+		RunID:      "run-b",
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, tasklist.ErrTaskLeased)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:      taskFile,
+		HeartbeatID:   "lease-1",
+		Agent:         "agent-a",
+		SessionID:     "session-a",
+		RunID:         "run-a",
+		LeaseDuration: 2 * time.Minute,
+		Message:       "still working",
+	})
+	require.NoError(t, err)
+
+	loaded, err := tasklist.NewStore(taskFile).Load(ctx)
+	require.NoError(t, err)
+	require.Len(t, loaded.Tasks, 1)
+	assert.Equal(t, tasklist.StatusInProgress, loaded.Tasks[0].Status)
+	require.NotNil(t, loaded.Tasks[0].Lease)
+	assert.Equal(t, "agent-a", loaded.Tasks[0].Lease.Owner)
+	assert.Equal(t, "session-a", loaded.Tasks[0].Lease.SessionID)
+	assert.Equal(t, "run-a", loaded.Tasks[0].Lease.RunID)
+	assert.Equal(t, []tasklist.HistoryAction{
+		tasklist.HistoryAdded,
+		tasklist.HistoryAssigned,
+		tasklist.HistoryHeartbeat,
+	}, taskHistoryActionsForCLITest(loaded.History))
+	assert.Equal(t, "claim work", loaded.History[1].Message)
+	assert.Equal(t, "still working", loaded.History[2].Message)
+}
+
+func TestRunTaskListCommandReconcilesAndRepairsTaskFile(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	taskFile := filepath.Join(t.TempDir(), "tasks.json")
+	store := session.NewStore(filepath.Join(t.TempDir(), "sessions"))
+	taskStore := tasklist.NewStore(taskFile)
+
+	dependency, err := taskStore.Add(ctx, tasklist.AddRequest{ID: "setup", Title: "set up"})
+	require.NoError(t, err)
+	blocked, err := taskStore.Add(ctx, tasklist.AddRequest{
+		ID:           "implement",
+		Title:        "implement",
+		Dependencies: []string{dependency.ID},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, tasklist.StatusBlocked, blocked.Status)
+
+	_, err = taskStore.Complete(ctx, dependency.ID, "agent-a")
+	require.NoError(t, err)
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath:  taskFile,
+		Agent:     "scheduler",
+		Message:   "unblock ready work",
+		Reconcile: true,
+	})
+	require.NoError(t, err)
+
+	reconciled, err := taskStore.Load(ctx)
+	require.NoError(t, err)
+
+	implementIdx := findTaskForCLITest(reconciled.Tasks, "implement")
+	require.NotEqual(t, -1, implementIdx)
+	assert.Equal(t, tasklist.StatusReady, reconciled.Tasks[implementIdx].Status)
+	assert.Empty(t, reconciled.Tasks[implementIdx].BlockerReason)
+	require.NotEmpty(t, reconciled.History)
+	lastHistory := reconciled.History[len(reconciled.History)-1]
+	assert.Equal(t, tasklist.HistoryReconciled, lastHistory.Action)
+	assert.Equal(t, "scheduler", lastHistory.Actor)
+	assert.Equal(t, "unblock ready work", lastHistory.Message)
+
+	require.NoError(t, os.WriteFile(taskFile, []byte(`not json`), 0o600))
+
+	err = runTaskListCommand(ctx, store, taskCommandInput{
+		FilePath: taskFile,
+		Agent:    "repairer",
+		Message:  "recover cli task file",
+		Repair:   true,
+	})
+	require.NoError(t, err)
+
+	repaired, err := taskStore.Load(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, repaired.Tasks)
+	require.Len(t, repaired.History, 1)
+	assert.Equal(t, tasklist.HistoryRepaired, repaired.History[0].Action)
+	assert.Equal(t, "repairer", repaired.History[0].Actor)
+	assert.Contains(t, repaired.History[0].Message, "recover cli task file")
+}
+
+func findTaskForCLITest(tasks []tasklist.Task, id string) int {
+	for i := range tasks {
+		if tasks[i].ID == id {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func taskHistoryActionsForCLITest(history []tasklist.HistoryEntry) []tasklist.HistoryAction {
+	actions := make([]tasklist.HistoryAction, len(history))
+	for i := range history {
+		actions[i] = history[i].Action
+	}
+
+	return actions
 }
 
 func TestRunTaskListCommandPermissionPolicyDeniesWriteBeforeFileCreate(t *testing.T) {

@@ -103,8 +103,16 @@ Commands:
 - `prompt-complete <input>`: preview local prompt completions with context freshness (dispatch: `prompt-complete-providerless`)
 - `task-list`: list persistent agent tasks (dispatch: `task-command`)
 - `task-add <title>`: add a persistent agent task (dispatch: `task-command`)
-- `task-assign <id:agent>`: assign a persistent task (dispatch: `task-command`)
+- `task-assign <id:agent>`: claim a persistent task with a lease (dispatch: `task-command`)
 - `task-complete <id>`: mark a persistent task complete (dispatch: `task-command`)
+- `task-heartbeat <id>`: renew a persistent task lease (dispatch: `task-command`)
+- `task-update <id>`: update persistent task coordination fields (dispatch: `task-command`)
+- `task-review <id>`: move a persistent task into review (dispatch: `task-command`)
+- `task-fail <id>`: mark a persistent task failed (dispatch: `task-command`)
+- `task-cancel <id>`: cancel a persistent task (dispatch: `task-command`)
+- `task-reopen <id>`: reopen a persistent task for retry (dispatch: `task-command`)
+- `task-reconcile`: repair stale leases and dependency-derived task state (dispatch: `task-command`)
+- `task-repair`: backup and repair a corrupt or conflicted task file (dispatch: `task-command`)
 - `async-plan`: print dependency-aware async task batches (dispatch: `async-plan`)
 - `async-run`: execute dependency-aware async tasks (dispatch: `async-run`)
 - `spawn <agent|prompt>`: spawn sub-agent one-shot prompts (dispatch: `spawn-agents`)
@@ -873,12 +881,12 @@ Commands:
     - `legacy-flag`: `atteler --research-run value` -> `research-run`
 - `task-command` (providerless): read or mutate persistent agent tasks
   - Input: `taskCommandInput`
-  - Input fields: `FilePath`, `AddTitle`, `AddID`, `Agent`, `AssignSpec`, `CompleteID`, `List`
-  - Flags: `--task-list`, `--task-add`, `--task-id`, `--task-agent`, `--task-assign`, `--task-complete`, `--task-file`
+  - Input fields: `FilePath`, `AddTitle`, `AddID`, `Agent`, `AssignSpec`, `CompleteID`, `HeartbeatID`, `UpdateID`, `ReviewID`, `FailID`, `CancelID`, `ReopenID`, `Title`, `Message`, `Reason`, `SessionID`, `RunID`, `Dependencies`, `Risk`, `BlockerReason`, `ExpectedRevision`, `LeaseDuration`, `Priority`, `List`, `Reconcile`, `Repair`, `ClearBlocker`, `ClearDependencies`, `ClearRisk`
+  - Flags: `--task-list`, `--task-add`, `--task-id`, `--task-agent`, `--task-assign`, `--task-complete`, `--task-heartbeat`, `--task-update`, `--task-review`, `--task-fail`, `--task-cancel`, `--task-reopen`, `--task-file`, `--task-title`, `--task-message`, `--task-reason`, `--task-session`, `--task-run-id`, `--task-expected-revision`, `--task-lease-seconds`, `--task-dependency`, `--task-priority`, `--task-risk`, `--task-blocker`, `--task-clear-blocker`, `--task-clear-dependencies`, `--task-clear-risk`, `--task-reconcile`, `--task-repair`
   - Examples: `atteler agents task-list`
   - Conflicts:
     - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
-    - `one-of-flags` with `--task-list`, `--task-add`, `--task-assign`, `--task-complete`: task command validates exactly one task operation
+    - `one-of-flags` with `--task-list`, `--task-add`, `--task-assign`, `--task-complete`, `--task-heartbeat`, `--task-update`, `--task-review`, `--task-fail`, `--task-cancel`, `--task-reopen`, `--task-reconcile`, `--task-repair`: task command validates exactly one task operation
   - Side effects: `filesystem-read`, `task-store-write`, `stdout`
   - Outputs: `text`
   - Fixtures:

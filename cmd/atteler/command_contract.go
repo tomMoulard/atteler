@@ -1313,6 +1313,8 @@ func flagRequiresFixtureValue(flag string) bool {
 		"speculate-run",
 		"state-diagnostics",
 		"task-list",
+		"task-reconcile",
+		"task-repair",
 		"validate-config",
 		"version",
 		"watch-loop",

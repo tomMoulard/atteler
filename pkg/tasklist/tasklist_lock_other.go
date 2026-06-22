@@ -4,11 +4,16 @@ package tasklist
 
 import (
 	"context"
+	"errors"
 	"os"
 )
 
 func lockTaskFile(ctx context.Context, _ *os.File) error {
-	return ctxErr(ctx)
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+
+	return errors.New("tasklist: interprocess file locking is not supported on this platform")
 }
 
 func unlockTaskFile(_ *os.File) error {
